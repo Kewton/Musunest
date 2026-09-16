@@ -98,26 +98,29 @@ sdk・spec-engine・app-do・connector → appspec-schema
 - 宛先は alias から解決する（`commandmate instances musubi --json`）。**instance-id を推測で渡さない**
 - profile は `.commandmate/profiles/musubi.json`（branch `feat/{number}-{slug}`、
   worktree `../{repo}-issue-{number}`、baseline に `link-env.sh`）。
-  **worktree を作るのは `cmate-worktree-setup`** であって dispatch ではない
+  **worktree を作るのは `cmate-worktree-setup`** であって dispatch ではない。
+  **ワーカーの CLI は worktree の既定（`cliToolId`）で決まるので、roster を `command-code` だけにする**
+  （`docs/parallel-development.md` §6.1。provider をリポジトリに持つ作業は #118）
 
 | | やること |
 |---|---|
 | **窓口**（人・main の Claude） | Issue を切る（`cmate-issue-authoring`）／依存と粒度を決める／依頼文を組んで人に見せてから送る／`.commandmate/` 配下・`.tf`・`.gitignore`・ディレクトリの移動／**運用文書（`workspace/`・`CLAUDE.md`）を含む PR は人が読んで merge**／auto-yes で応答されない停止（rate limit・自由記述の質問）の回収／管理の報告を人へ伝える |
 | **管理**（main の Command Code） | `cmate-orchestrate` の plan → dispatch とワーカーの監督（`cmate-orchestrate-monitor`）／**ワーカーが出した PR を確認して squash merge する**／機械で判定できる受入は uat（`cmate-acceptance-test`）まで／**全部の merge が終わったら窓口へ報告する** |
-| **ワーカー**（feat/<issue> の Command Code） | `cmate-worker-development` に従って 1 Issue を実装し、`cmate-verify` で検証する。**緑になったら push して PR を作り、管理へ報告する**（タイトルは Conventional Commits、本文に `Closes #N` と検証の証跡）。**merge はしない** |
+| **ワーカー**（feat/<issue> のセッション。**CLI は Command Code に固定する**） | `cmate-worker-development` に従って 1 Issue を実装し、`cmate-verify` で検証する。**緑になったら push して PR を作り、管理へ報告する**（タイトルは Conventional Commits、本文に `Closes #N` と検証の証跡）。**merge はしない** |
 
 ### 流れ
 
 1. **窓口**が Issue を切り、`cmate-delegate` で**管理**へ依頼する（依頼文は送る前に人へ見せる）
 2. **管理**が plan（依存と file 衝突）を作り、人の承認を得てから worktree を用意して dispatch する
 3. **ワーカー**が実装し、`cmate-verify` が緑になったら **push して PR を作り、管理へ報告する**
+   （**push と PR は実行契約に書けない**。検証が緑になった時点で、管理が追加のメッセージで指示する。`docs/parallel-development.md` §6.2）
 4. **管理**が PR を確認し（検証の証跡・CI green・scope の内側）、**squash merge する**。
    運用文書（`workspace/`・`CLAUDE.md`）・`.commandmate/` 配下・`.tf` を含む PR だけは**人が読んで merge** する
 5. 全部の merge が終わったら、**管理が窓口へ報告**する。窓口が人へ伝える
 
-- **ワーカーに push と PR 作成を許すのは、実行契約で明示したときだけ。** `cmate-worker-development` の
-  既定は「PR を作らない・push しない」なので、契約の Rules に「**検証が緑になったら push して PR を作る**」と書く
-  （広げる方向は契約が正本。同 skill 第1節）
+- **ワーカーの push と PR は、管理が追加のメッセージで指示する。** `cmate-worker-development` の既定は
+  「PR を作らない・push しない」で、**dispatch の実行契約に書き足す口は無い**（2026-09-16 の実測）。
+  だから「検証が緑になったら push して PR を作る」は、**dispatch のあとに管理が送る**（`docs/parallel-development.md` §6.2）
 - **merge runner に PR を作らせない**（`merge.mjs --merge-prs` は PR 作成を含み、ワーカーの PR と二重になる）。
   管理は、ワーカーが作った PR を CI green の確認のうえ `gh pr merge --squash` で merge する
 - **スマホでのデモと振り返りは人が行う**（🧑 の Issue。マイルストーンごと。`workspace/mvp/roadmap.md` §1）。
