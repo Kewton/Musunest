@@ -1,0 +1,263 @@
+// 正規化（宣言 → 正規化した JSON）の unit テスト（Issue #98 の受入条件のうち、正規化に閉じる分）。
+//
+// ここで固定したいのは 4 つ。
+//   1. 同じ原本からは同じ**バイト列**になる（現在時刻・乱数・実行回数を混ぜない。Q12）
+//   2. `sourceSha256` は**原本そのもの**（改行とコメントを含む UTF-8 のバイト列）の SHA-256 である
+//   3. 項目・検査・計算の**宣言順**を並べ替えない（並びは意味を持つ。docs/semantics.md）
+//   4. 検査に通らない原本（#97 の負例 24 件）は**正規化しない**（成果物を返さない）
+//
+// 原本と負例は appspec-schema から読む（このリポジトリの正本）。ここに写すと、見本を直したときに
+// 片方だけが古くなる。SHA-256 の突き合わせは、この実装とは別に node:crypto で計算する
+// （同じ関数で計算すると、どちらも間違っているときに緑になる）。
+import { describe, expect, it, vi } from "vitest";
+import { APPSPEC_SCHEMA_VERSION, readNegativeIndex } from "@musunest/appspec-schema";
+import { negativeIndexFile, negativeSpecFile, sampleSpecFile } from "@musunest/appspec-schema/files";
+import { checkSpec } from "./check.js";
+import {
+  NORMALIZED_JSON_INDENT,
+  normalizeSpec,
+  serializeNormalizedAppSpec,
+  sha256Hex,
+} from "./normalize.js";
+
+// tsconfig の types は workers-types と node の両方を読み、グローバルの URL の型が食い違う
+// （workers-types の URL を node:fs に渡せない）。このファイルは Node（vitest）で動くので、
+// 使う関数の形だけをここで宣言する（check.test.ts と同じやり方）。
+interface NodeFileSystem {
+  readFileSync(path: URL, encoding: "utf8"): string;
+  readFileSync(path: URL): Uint8Array;
+}
+interface Sha256Hash {
+  update(data: Uint8Array): Sha256Hash;
+  digest(encoding: "hex"): string;
+}
+interface NodeCrypto {
+  createHash(algorithm: string): Sha256Hash;
+}
+const importUntyped = (specifier: string) => import(/* @vite-ignore */ specifier);
+const fs = (await importUntyped("node:fs")) as NodeFileSystem;
+const nodeCrypto = (await importUntyped("node:crypto")) as NodeCrypto;
+
+const readBytes = (url: URL): Uint8Array => fs.readFileSync(url);
+const readText = (url: URL): string => fs.readFileSync(url, "utf8");
+
+/** この実装を通さない、独立した SHA-256（原本のバイト列から直接） */
+const independentSha256 = (bytes: Uint8Array): string =>
+  nodeCrypto.createHash("sha256").update(bytes).digest("hex");
+
+const sampleBytes = readBytes(sampleSpecFile("expense-log"));
+const sampleText = readText(sampleSpecFile("expense-log"));
+const negativeIndex = readNegativeIndex(JSON.parse(readText(negativeIndexFile())));
+const negativeTexts = new Map(
+  negativeIndex.negatives.map((negative) => [negative.name, readText(negativeSpecFile(negative.name))]),
+);
+
+/** 検査を通ることを先に固定してから、正規化した成果物を読む */
+const normalized = async (source: string) => {
+  const result = await normalizeSpec(source);
+  if (!result.ok) throw new Error(`正規化できない: ${result.diagnostics.map((d) => d.code).join(" / ")}`);
+  return result;
+};
+
+const utf8 = (text: string): number[] => [...new TextEncoder().encode(text)];
+
+// ── 見本（正例） ────────────────────────────────────────────────
+
+const sample = await normalized(sampleText);
+
+describe("見本 expense-log の正規化", () => {
+  const result = sample;
+
+  it("版・SHA-256・spec の 3 つを、この順に持つ", () => {
+    expect(result.diagnostics).toEqual([]);
+    expect(Object.keys(result.app)).toEqual(["schemaVersion", "sourceSha256", "spec"]);
+    expect(result.app.schemaVersion).toBe(APPSPEC_SCHEMA_VERSION);
+    expect(result.app.sourceSha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("sourceSha256 は、原本のバイト列の独立した計算と一致する", async () => {
+    expect(result.app.sourceSha256).toBe(independentSha256(sampleBytes));
+    // 文字列から計算しても同じになる（原本の読み取りで符号化が変わっていない）
+    expect(result.app.sourceSha256).toBe(await sha256Hex(sampleText));
+  });
+
+  it("原本にコメントを足すと SHA は変わる（コメントと改行も原本である）", async () => {
+    const withComment = `${sampleText}# あとから足した説明\n`;
+    const other = await normalized(withComment);
+    expect(other.app.sourceSha256).not.toBe(result.app.sourceSha256);
+    // 検査が読む宣言は変わらない。変わるのはハッシュだけである
+    expect(other.app.spec).toEqual(result.app.spec);
+  });
+
+  it("空白やコメントを書き換えても、宣言の意味が同じなら spec は同じである", async () => {
+    const withBlankLine = sampleText.replace("entities:", "\nentities:");
+    const other = await normalized(withBlankLine);
+    expect(other.app.spec).toEqual(result.app.spec);
+    expect(other.app.sourceSha256).not.toBe(result.app.sourceSha256);
+  });
+
+  it("JSON から元の宣言に戻せる（検査が返す AppSpec と同じ）", () => {
+    const checked = checkSpec(sampleText);
+    if (!checked.ok) throw new Error("検査で診断が出ている");
+    expect(JSON.parse(result.json).spec).toEqual(checked.spec);
+    expect(serializeNormalizedAppSpec(result.app)).toBe(result.json);
+  });
+});
+
+// ── 決定的であること（同じバイト列） ──────────────────────────────
+
+describe("同じ原本からは同じバイト列になる", () => {
+  it("何度正規化しても、JSON のバイト列が一致する", async () => {
+    const first = await normalized(sampleText);
+    const bytes = utf8(first.json);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const again = await normalized(sampleText);
+      expect(utf8(again.json)).toEqual(bytes);
+      expect(again.app.sourceSha256).toBe(first.app.sourceSha256);
+    }
+  });
+
+  it("現在時刻と乱数を変えても、バイト列は変わらない", async () => {
+    const first = await normalized(sampleText);
+    const now = vi.spyOn(Date, "now").mockReturnValue(0);
+    const random = vi.spyOn(Math, "random").mockReturnValue(0.123456789);
+    try {
+      const again = await normalized(sampleText);
+      expect(utf8(again.json)).toEqual(utf8(first.json));
+    } finally {
+      now.mockRestore();
+      random.mockRestore();
+    }
+  });
+});
+
+// ── 宣言の順（並べ替えない） ────────────────────────────────────
+
+describe("宣言の順を並べ替えない", () => {
+  it("項目・計算・検査の順が、原本の順のまま JSON に出る", async () => {
+    const parsed = JSON.parse((await normalized(sampleText)).json) as {
+      spec: {
+        entities: readonly { fields: Readonly<Record<string, string>> }[];
+        computed: readonly { name: string }[];
+        validations: readonly { name: string }[];
+      };
+    };
+    // 項目の順は一覧の列の順になる（docs/semantics.md「entity」）
+    expect(Object.keys(parsed.spec.entities[0]?.fields ?? {})).toEqual([
+      "description",
+      "amount",
+      "discount",
+      "payer",
+      "participants",
+    ]);
+    expect(parsed.spec.computed.map((entry) => entry.name)).toEqual([
+      "paidAmount",
+      "headcount",
+      "shareAmount",
+    ]);
+    expect(parsed.spec.validations.map((entry) => entry.name)).toEqual([
+      "positiveAmount",
+      "nonNegativeDiscount",
+    ]);
+  });
+
+  it("計算を逆向きに宣言した原本でも、その順のままにする（無条件の並べ替えをしない）", async () => {
+    const text = [
+      "entities:",
+      "  - name: expense",
+      "    fields:",
+      "      amount: number",
+      "      participants: list",
+      "views: []",
+      "actions: []",
+      "validations:",
+      "  - name: hasPeople",
+      "    entity: expense",
+      "    expression: headcount > 0",
+      "computed:",
+      "  - name: headcount",
+      "    entity: expense",
+      "    expression: len(participants)",
+      "    type: number",
+      "  - name: doubled",
+      "    entity: expense",
+      "    expression: headcount * 2",
+      "    type: number",
+      "permissions: []",
+      "minIdentity:",
+      "  mode: anonymous",
+      "",
+    ].join("\n");
+    const parsed = JSON.parse((await normalized(text)).json) as {
+      spec: { computed: readonly { name: string }[]; validations: readonly { name: string }[] };
+    };
+    // 依存の順（headcount → doubled）と、宣言の順が同じであることを確かめてから並びを見る
+    expect(parsed.spec.computed.map((entry) => entry.name)).toEqual(["headcount", "doubled"]);
+    expect(parsed.spec.validations.map((entry) => entry.name)).toEqual(["hasPeople"]);
+    const { json } = await normalized(text);
+    expect(json.indexOf('"headcount"')).toBeLessThan(json.indexOf('"doubled"'));
+    expect(json.indexOf('"hasPeople"')).toBeLessThan(json.indexOf('"headcount"'));
+  });
+});
+
+// ── 出力の規約 ─────────────────────────────────────────────────
+
+describe("正規化した JSON の出力の規約", () => {
+  it("字下げは 2 文字で、改行は LF、末尾に改行 1 つである", async () => {
+    const { json } = await normalized(sampleText);
+    expect(NORMALIZED_JSON_INDENT).toBe(2);
+    expect(json).not.toContain("\r");
+    expect(json.endsWith("\n")).toBe(true);
+    expect(json.endsWith("\n\n")).toBe(false);
+    for (const line of json.split("\n").slice(0, -1)) {
+      const indent = line.length - line.trimStart().length;
+      expect(indent % NORMALIZED_JSON_INDENT, line).toBe(0);
+    }
+  });
+
+  it("キーの並べ替えをしない（3 つが書いた順に出る）", async () => {
+    const { json } = await normalized(sampleText);
+    expect(json.startsWith("{\n")).toBe(true);
+    expect(json.indexOf('"schemaVersion"')).toBeLessThan(json.indexOf('"sourceSha256"'));
+    expect(json.indexOf('"sourceSha256"')).toBeLessThan(json.indexOf('"spec"'));
+  });
+});
+
+// ── 負例（検査に通らない原本は正規化しない） ──────────────────────
+
+describe("検査に通らない原本は正規化しない（#97 の負例）", () => {
+  const cases = negativeIndex.negatives.map(
+    (negative) => [negative.name, negative] as const,
+  );
+
+  it.each(cases)("負例 %s は成果物を返さず、#97 と同じ診断になる", async (name, negative) => {
+    const text = negativeTexts.get(name) ?? "";
+    const result = await normalizeSpec(text);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // 返るコードの集合が、負例の一覧（正本）とちょうど一致する
+    expect(new Set(result.diagnostics.map((diagnostic) => diagnostic.code))).toEqual(
+      new Set(negative.codes),
+    );
+    // 成果物の欄そのものを持たない（受け取った側が中身を読めない）
+    expect(Object.hasOwn(result, "app")).toBe(false);
+    expect(Object.hasOwn(result, "json")).toBe(false);
+  });
+
+  it("診断の 3 つ組（コード・説明・位置）は、検査の結果のままである", async () => {
+    const first = negativeIndex.negatives[0];
+    if (first === undefined) throw new Error("負例が空");
+    const text = negativeTexts.get(first.name) ?? "";
+    const result = await normalizeSpec(text);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.diagnostics).toEqual(checkSpec(text).diagnostics);
+  });
+
+  it("空の原本も、成果物を返さない", async () => {
+    const result = await normalizeSpec("");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain("SHAPE_YAML_INVALID");
+  });
+});
