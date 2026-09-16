@@ -10,10 +10,14 @@
 // HTTP から叩けるようにすること。src/index.test.ts がこの入口を使う。
 import { AppInstanceDO } from "./index";
 import type { AppDoEnv } from "./index";
+import type { RecordData, RecordStamp } from "./contract";
 
 export { AppInstanceDO };
 
 const DEFAULT_INSTANCE = "m0";
+
+/** 宣言の entity のレコードの入口（Issue #99）。 */
+const RECORDS_PREFIX = "/records/";
 
 function stubFor(env: AppDoEnv, url: URL): DurableObjectStub<AppInstanceDO> {
   const name = url.searchParams.get("app") ?? DEFAULT_INSTANCE;
@@ -25,6 +29,65 @@ function json(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
   });
+}
+
+/**
+ * テストが時計と ID 生成器を固定するための query（`?now=…&id=…`）。
+ *
+ * **これはテスト用の入口である。** 公開 API ではない——公開の経路で時計を差し替える口を
+ * 作らないという決定（`workspace/mvp/m1/00-open-questions.md` Q17）は data-api の話であって、
+ * ここは workerd の上で本物の SQLite を確かめるためのハーネスである（この file の冒頭を参照）。
+ */
+function recordStamp(url: URL): RecordStamp {
+  const now = url.searchParams.get("now");
+  const id = url.searchParams.get("id");
+  return {
+    ...(now === null ? {} : { now }),
+    ...(id === null ? {} : { id }),
+  };
+}
+
+async function recordData(request: Request): Promise<RecordData> {
+  return (await request.json()) as RecordData;
+}
+
+/** `/records/<entity>` と `/records/<entity>/<id>` を、DO の RPC へそのまま橋渡しする。 */
+async function records(
+  request: Request,
+  url: URL,
+  stub: DurableObjectStub<AppInstanceDO>,
+): Promise<Response> {
+  const [entity, id, ...rest] = url.pathname.slice(RECORDS_PREFIX.length).split("/");
+  if (entity === undefined || entity === "" || rest.length > 0) {
+    return json({ error: "not found", pathname: url.pathname }, 404);
+  }
+  const entityName = decodeURIComponent(entity);
+  const stamp = recordStamp(url);
+
+  if (id === undefined) {
+    switch (request.method) {
+      case "GET":
+        return json(await stub.listRecords(entityName));
+      case "POST":
+        return json(await stub.createRecord(entityName, await recordData(request), stamp));
+      default:
+        return json({ error: "method not allowed" }, 405);
+    }
+  }
+
+  const recordId = decodeURIComponent(id);
+  switch (request.method) {
+    case "GET":
+      return json(await stub.getRecord(entityName, recordId));
+    case "PUT":
+      return json(
+        await stub.updateRecord(entityName, recordId, await recordData(request), stamp),
+      );
+    case "DELETE":
+      return json(await stub.deleteRecord(entityName, recordId));
+    default:
+      return json({ error: "method not allowed" }, 405);
+  }
 }
 
 export default {
@@ -43,6 +106,10 @@ export default {
 
     if (url.pathname === "/kv") {
       return json(await stub.list());
+    }
+
+    if (url.pathname.startsWith(RECORDS_PREFIX)) {
+      return records(request, url, stub);
     }
 
     if (url.pathname.startsWith("/kv/")) {
