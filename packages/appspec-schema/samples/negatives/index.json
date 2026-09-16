@@ -1,0 +1,173 @@
+{
+  "$comment": "負例の一覧。各負例は、正しい宣言の 1 か所だけをわざと間違えたもの（本体は <name>.app.spec.yaml）。codes は静的チェックがその負例で出す誤りコード（草案。体系は spec-engine の静的チェック #97 で確定する）。どの語彙の負例かは vocabulary.yaml の negatives にある。形は src/samples.ts の NegativeIndex。",
+  "negatives": [
+    {
+      "name": "action-unknown-entity",
+      "codes": [
+        "LOGIC_ENTITY_NOT_FOUND"
+      ],
+      "why": "操作 addExpense の entity expence が無い"
+    },
+    {
+      "name": "action-with-kind",
+      "codes": [
+        "SHAPE_KEY_UNKNOWN"
+      ],
+      "why": "操作に kind を書いている（操作の種類は M1.2 の語彙で、M1.1 には無い）"
+    },
+    {
+      "name": "computed-cycle",
+      "codes": [
+        "LOGIC_COMPUTED_CYCLE"
+      ],
+      "why": "計算 first と second が互いを参照している"
+    },
+    {
+      "name": "computed-name-conflict",
+      "codes": [
+        "LOGIC_COMPUTED_NAME_CONFLICT"
+      ],
+      "why": "計算の名前 amount が、同じ entity の項目の名前と重なる"
+    },
+    {
+      "name": "computed-other-entity",
+      "codes": [
+        "LOGIC_REFERENCE_OUT_OF_ENTITY"
+      ],
+      "why": "expense の計算が、別の entity budget の項目を参照している（M1.1 は同じ entity の中だけ）"
+    },
+    {
+      "name": "computed-type-mismatch",
+      "codes": [
+        "LOGIC_COMPUTED_TYPE_MISMATCH"
+      ],
+      "why": "計算 isPositive の type は number なのに、式が真偽になる"
+    },
+    {
+      "name": "computed-unknown-function",
+      "codes": [
+        "LOGIC_FUNCTION_NOT_ALLOWED"
+      ],
+      "why": "店頭が用意していない関数 round を使っている（M1.1 は min・max・len だけ）"
+    },
+    {
+      "name": "entity-duplicate-name",
+      "codes": [
+        "DATA_ENTITY_DUPLICATE_NAME"
+      ],
+      "why": "entity の名前 expense が 2 つある"
+    },
+    {
+      "name": "entity-invalid-name",
+      "codes": [
+        "SHAPE_NAME_INVALID"
+      ],
+      "why": "entity の名前が英字で始まる英数字ではない（支出）"
+    },
+    {
+      "name": "entity-without-fields",
+      "codes": [
+        "SHAPE_KEY_MISSING"
+      ],
+      "why": "entity member に fields が無い"
+    },
+    {
+      "name": "field-reserved-name",
+      "codes": [
+        "DATA_FIELD_NAME_RESERVED"
+      ],
+      "why": "店頭が付ける値の名前 createdAt を項目名に使っている"
+    },
+    {
+      "name": "field-unknown-type",
+      "codes": [
+        "DATA_FIELD_TYPE_UNKNOWN"
+      ],
+      "why": "項目 amount の型 integer は M1.1 の型（string / number / list）に無い"
+    },
+    {
+      "name": "identity-unknown-mode",
+      "codes": [
+        "PERMISSION_IDENTITY_MODE_NOT_ALLOWED"
+      ],
+      "why": "minIdentity の mode google は M1 に無い（M1 はログインが無いので anonymous だけ）"
+    },
+    {
+      "name": "list-in-comparison",
+      "codes": [
+        "LOGIC_OPERAND_TYPE_MISMATCH"
+      ],
+      "why": "list の項目 participants を数と比べている"
+    },
+    {
+      "name": "max-list-argument",
+      "codes": [
+        "LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH"
+      ],
+      "why": "max に list の項目 participants を渡している（max は数を 2 つ）"
+    },
+    {
+      "name": "min-wrong-arity",
+      "codes": [
+        "LOGIC_FUNCTION_ARITY_MISMATCH"
+      ],
+      "why": "min に引数を 1 つしか渡していない（min は 2 つ）"
+    },
+    {
+      "name": "number-in-len",
+      "codes": [
+        "LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH"
+      ],
+      "why": "len に数の項目 amount を渡している（len は list だけを受け取る）"
+    },
+    {
+      "name": "permission-unknown-name",
+      "codes": [
+        "PERMISSION_NAME_NOT_ALLOWED"
+      ],
+      "why": "権限の名前 admin は M1.1 の権限（read / write）に無い"
+    },
+    {
+      "name": "permission-unknown-subject",
+      "codes": [
+        "PERMISSION_SUBJECT_NOT_ALLOWED"
+      ],
+      "why": "権限 write の subject owner は M1.1 の subject（minIdentity）に無い"
+    },
+    {
+      "name": "string-in-arithmetic",
+      "codes": [
+        "LOGIC_OPERAND_TYPE_MISMATCH"
+      ],
+      "why": "文字列の項目 payer を掛け算に使っている"
+    },
+    {
+      "name": "validation-not-boolean",
+      "codes": [
+        "LOGIC_VALIDATION_NOT_BOOLEAN"
+      ],
+      "why": "検査 positiveAmount の式が真偽ではなく数になる"
+    },
+    {
+      "name": "validation-unknown-field",
+      "codes": [
+        "LOGIC_REFERENCE_NOT_FOUND"
+      ],
+      "why": "検査の式が、expense に無い名前 ammount を参照している"
+    },
+    {
+      "name": "view-unknown-entity",
+      "codes": [
+        "UI_ENTITY_NOT_FOUND"
+      ],
+      "why": "一覧 expenseList の entity expence が無い"
+    },
+    {
+      "name": "view-with-type",
+      "codes": [
+        "SHAPE_KEY_UNKNOWN"
+      ],
+      "why": "一覧に type を書いている（画面の種類は M1.2 以降の語彙で、M1.1 には無い）"
+    }
+  ]
+}

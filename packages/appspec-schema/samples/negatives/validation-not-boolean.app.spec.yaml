@@ -1,0 +1,33 @@
+# 負例：検査 positiveAmount の式が真偽ではなく数になる。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: expense
+    fields:
+      amount: number
+      payer: string
+      participants: list
+
+views:
+  - name: expenseList
+    entity: expense
+
+actions:
+  - name: addExpense
+    entity: expense
+
+validations:
+  - name: positiveAmount
+    entity: expense
+    expression: amount
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

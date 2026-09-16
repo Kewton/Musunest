@@ -1,0 +1,33 @@
+# 負例：entity の名前が英字で始まる英数字ではない（支出）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: expense
+    fields:
+      amount: number
+      payer: string
+      participants: list
+  - name: 支出
+    fields:
+      amount: number
+
+views:
+  - name: expenseList
+    entity: expense
+
+actions:
+  - name: addExpense
+    entity: expense
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

@@ -1,0 +1,34 @@
+# 負例：店頭が用意していない関数 round を使っている（M1.1 は min・max・len だけ）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: expense
+    fields:
+      amount: number
+      payer: string
+      participants: list
+
+views:
+  - name: expenseList
+    entity: expense
+
+actions:
+  - name: addExpense
+    entity: expense
+
+validations: []
+
+computed:
+  - name: rounded
+    entity: expense
+    expression: round(amount)
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous
