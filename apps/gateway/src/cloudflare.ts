@@ -1,9 +1,11 @@
 // Cloudflare の adapter。Service Binding（Fetcher）と Workers 固有の API を叩くのはこのファイルだけ。
 //
-// binding の型と、healthz が data-api を呼ぶ実体、X-Musunest-Probe を時間一定で照合する実体を置く。
-// 判定と応答の形は src/healthz.ts が持つ。
+// binding の型と、healthz が data-api を呼ぶ実体、/api/* を data-api へ中継する実体、
+// X-Musunest-Probe を時間一定で照合する実体を置く。
+// 判定と応答の形は src/healthz.ts と src/api.ts が持つ。
 // **D1 / R2 / DO の binding をここに足さない**（CLAUDE.md 不変条件。src/.oxlintrc.json が型と import で落とす）。
 import { HEALTHZ_PATH as DATA_API_HEALTHZ_PATH } from "@musunest/data-api";
+import type { DataApiRelay } from "./api";
 import type { DataApiHealthz, ProbeVerifier } from "./healthz";
 
 /** wrangler.jsonc の env.<env> が与える binding と vars、wrangler secret。名前は src/contract.ts の定数と一致させる。 */
@@ -26,6 +28,19 @@ const DATA_API_ORIGIN = "https://data-api.internal";
 
 export function cloudflareDataApi(env: GatewayEnv): DataApiHealthz {
   return () => env.DATA_API.fetch(new URL(DATA_API_HEALTHZ_PATH, DATA_API_ORIGIN));
+}
+
+/**
+ * /api/* のリクエストを data-api へ1回中継する。**宛先は binding と固定の内部 origin が決める**——
+ * 利用者の URL の origin は捨て、path と query だけを保つ（利用者の query やヘッダに外部 URL を
+ * 選ばせない）。method・ヘッダ・body は元の Request のまま運び、応答はそのまま返す
+ * （status・content-type・body を data-api のものに保つ）。
+ */
+export function cloudflareDataApiRelay(env: GatewayEnv): DataApiRelay {
+  return (request) => {
+    const url = new URL(request.url);
+    return env.DATA_API.fetch(new Request(new URL(url.pathname + url.search, DATA_API_ORIGIN), request));
+  };
 }
 
 /**

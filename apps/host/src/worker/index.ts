@@ -5,9 +5,13 @@
 // React / TanStack Start をここから import しない（src/.oxlintrc.json が落とす。バンドルに入らないことは src/worker/index.test.ts が見る）。
 //
 // 持つ binding は gateway への Service Binding（GATEWAY）だけで、D1 / R2 / DO を直接触らない（CLAUDE.md 不変条件）。
-// M0 で応答するのは GET /healthz だけ（03 §5 の貫通スモーク）。gateway の healthz を中継し、自分の結果を足す。
+// 応答するのは GET /healthz と /api/* の中継である（Issue #103）。healthz は gateway の healthz を中継して
+// 自分の結果を足す。**/api/* は dev / staging のときだけ gateway へ中継し、production・ENVIRONMENT の未設定・
+// 未知の値では下流を一度も呼ばずに 404 にする**（00 Q5。判定と作法は src/worker/api.ts、binding は src/worker/cloudflare.ts）。
+// この 404 は JSON で、SPA シェルの HTML ではない（/api/* を Worker が先に受ける理由の1つ）。
 // production（vars.HEALTHZ_DETAIL が probe）では、X-Musunest-Probe が secret と一致しない限り詳細を隠す（03 §5「セキュリティ上の注意」）。
-import { cloudflareGateway, cloudflareProbe } from "./cloudflare";
+import { handleApi, isApiPath } from "./api";
+import { cloudflareGateway, cloudflareGatewayRelay, cloudflareProbe } from "./cloudflare";
 import type { HostEnv } from "./cloudflare";
 import { HEALTHZ_PATH, PROBE_HEADER } from "./contract";
 import { disclose, readHealthzDetail, runHealthz } from "./healthz";
@@ -19,7 +23,9 @@ function json(body: unknown, status: number, headers?: Record<string, string>): 
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
-    // /api/* は M2 で gateway へ中継する。それまでは 404（SPAシェルの HTML を API の応答にしない）。
+    // /api/* の判定は healthz より先に置く。**下流を呼ぶのは dev / staging のときだけ**である
+    if (isApiPath(url.pathname)) return handleApi(request, env, cloudflareGatewayRelay(env));
+
     if (url.pathname !== HEALTHZ_PATH) return json({ error: "not found" }, 404);
     if (request.method !== "GET") return json({ error: "method not allowed" }, 405, { allow: "GET" });
 
