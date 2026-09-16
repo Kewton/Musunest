@@ -108,7 +108,9 @@ sdk・spec-engine・app-do・connector → appspec-schema
   - auto-yes が効くのは**ワーカーのプロンプトだけ**である。**merge は別のゲート**で、`--approve` が無ければ PR 作成も merge もしない
   - 止めたい run は `--no-auto-yes` を付ける（production に触る変更・`.tf`・`.commandmate/` を含むときなど）。`--unattended` と auto-yes は併用できない（`invalid_input`）
 - 実行契約（`.commandmate/tasks/*.yaml`）の goal は **8000 文字まで**。対象のソースが概ね 30 本を超える Issue、
-  `.tf`・`.gitignore`・ディレクトリの移動を含む Issue は **dispatch できない**。分割するか、監督側が手で行う
+  `.tf`・`.gitignore`・ディレクトリの移動を含む Issue は **dispatch できない**
+  - **原則は Issue を分割する。** 1 Issue = 1 パッケージ前後・語彙 1〜2 個まで落とせば、たいていは dispatch できる形になる
+  - **どうしても分けられないときだけ、人に判断を委ねる**（監督側が手で行うか、別の切り方にするか）。窓口が勝手に手で進めない
 - **ワーカーは `.commandmate/verify.yaml` を直さない**（下の検証ゲートの節）。ゲートを足す必要に気づいたら、止めて人に返す
 
 ## コマンド
