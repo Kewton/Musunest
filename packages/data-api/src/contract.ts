@@ -7,7 +7,7 @@
 
 export const PACKAGE_NAME = "@musunest/data-api" as const;
 
-/** 貫通スモーク（03 §5）が叩くパス。data-api が応答するのはこれだけ。 */
+/** 貫通スモーク（03 §5）が叩くパス。アプリの 3 経路は下の「公開する HTTP の契約」にある。 */
 export const HEALTHZ_PATH = "/healthz" as const;
 
 /**
@@ -39,3 +39,44 @@ export interface HealthzBody {
   /** wall clock。CPU 時間の近似で、10ms 枠に対する異常の早期検知用（03 §5）。正は Workers Analytics */
   readonly elapsed_ms: number;
 }
+
+// ── 公開する HTTP の契約（Issue #102） ─────────────────────────────
+//
+// パス・応答の形・誤りコードの正本は **appspec-schema の src/api.ts** である（data-api と sdk が
+// そこから読む）。ここはそれを**再輸出するだけ**——gateway（Service Binding で data-api を呼ぶ側）
+// が `@musunest/data-api` ひとつで契約を参照できるようにするためである。
+//
+// **再輸出に留めるのが要である。** 応答の型をこの file で書き直すと、data-api の実装と契約の写しが
+// 2 か所になり、片方だけ直したときに画面とサーバが静かにずれる。また、ここに Worker 本体
+// （src/index.ts・src/cloudflare.ts・app-do）を import すると、契約を参照するだけで Worker を
+// 巻き込む（src/index.test.ts が走査して確かめる）。
+export {
+  API_ACTIONS_SEGMENT,
+  API_CREATED_STATUS,
+  API_ERROR_CODES,
+  API_ERROR_STATUS,
+  API_PREFIX,
+  API_READ_STATUS,
+  API_SPEC_SEGMENT,
+  API_VIEWS_SEGMENT,
+  apiActionPath,
+  apiErrorBody,
+  apiRouteMethod,
+  apiSpecPath,
+  apiViewPath,
+  readApiRoute,
+} from "@musunest/appspec-schema";
+export type {
+  ApiActionRef,
+  ApiCreatedBody,
+  ApiErrorBody,
+  ApiErrorCode,
+  ApiFailureBody,
+  ApiPermissions,
+  ApiRejectedBody,
+  ApiRoute,
+  ApiRow,
+  ApiSpecBody,
+  ApiValue,
+  ApiViewBody,
+} from "@musunest/appspec-schema";

@@ -23,6 +23,7 @@
     "@musunest/appspec-schema": "workspace:*",
     "@musunest/sdk": "workspace:*",
     "@musunest/spec-engine": "workspace:*",
-    "@musunest/app-do": "workspace:*"
+    "@musunest/app-do": "workspace:*",
+    "@musunest/control-plane": "workspace:*"
   }
 }

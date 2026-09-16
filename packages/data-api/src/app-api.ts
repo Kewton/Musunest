@@ -1,0 +1,298 @@
+// アプリケーション関数（Issue #102）。**data-api が唯一の権限強制点である**という不変条件
+// （CLAUDE.md）を、この file の 3 つの関数が引き受ける。
+//
+//   getSpec           … 登録から正規化した JSON を引いて返す（`read` の宣言が要る）
+//   getView           … 一覧の行に計算値を足して返す（`read` の宣言が要る）
+//   createFromAction  … 1 件追加する（`write` の宣言が要る）
+//
+// 依存は**引数で受け取る**（I/O の実体をここに置かない）:
+//   - 登録（D1）は control-plane の関数を adapter が包んで渡す（InstanceRegistry）
+//   - 正規化した JSON（R2）は adapter が読んで渡す（NormalizedSpecStore）
+//   - レコード（DO）は adapter が包んで渡す（RecordStore）
+//   - 時計は引数（Clock）。**HTTP から書き換える入口は作らない**（Q17）
+//
+// **Cloudflare にもストレージにも触れない。** ここが受け取る型に Worker 本体（env の binding・
+// DO のクラス）は出てこない——画面（host）が受け取る型に混ざらないようにするためである
+// （src/index.test.ts が走査して確かめる）。
+//
+// 決めたこと:
+//   - 登録が無い → 404。R2 のオブジェクトが無い・壊れた JSON・欄が欠けている・SHA 不一致・
+//     版違い → 503。**成功応答にも書込にもならない**
+//   - 宣言した action だけを実行する。任意の entity への汎用の書込口は作らない
+//   - 入力の検査は input.ts（項目の型 → computed → validation の順）
+//   - 計算の値は保存しない。一覧と追加の応答でその都度求める（docs/semantics.md「computed」）
+
+import type {
+  ApiActionRef,
+  ApiCreatedBody,
+  ApiErrorCode,
+  ApiPermissions,
+  ApiRow,
+  ApiSpecBody,
+  ApiViewBody,
+  AppSpec,
+  NormalizedAppSpec,
+} from "@musunest/appspec-schema";
+import {
+  API_CREATED_STATUS,
+  API_READ_STATUS,
+  APPSPEC_SCHEMA_VERSION_PATTERN,
+} from "@musunest/appspec-schema";
+import type { RecordData, RecordStamp, StoredRecord } from "@musunest/app-do";
+import type { AppRecord } from "@musunest/control-plane";
+import type { Clock } from "@musunest/spec-engine";
+import { evaluateRecord } from "@musunest/spec-engine";
+import { checkInput } from "./input.js";
+
+// ── 依存（I/O の実体は adapter が渡す） ──────────────────────────────
+
+/** インスタンスが参照する宣言の登録。control-plane の `resolveInstanceApp` が実体 */
+export interface InstanceRegistry {
+  /** 未登録は `null`（例外にしない） */
+  resolve(instanceId: string): Promise<AppRecord | null>;
+}
+
+/** 正規化した JSON の置き場（R2）。無いキーは `null` */
+export interface NormalizedSpecStore {
+  read(key: string): Promise<string | null>;
+}
+
+/** アプリのレコードの置き場（1 インスタンス 1 DO）。判定は持たない */
+export interface RecordStore {
+  create(entity: string, data: RecordData, stamp: RecordStamp): Promise<StoredRecord>;
+  list(entity: string): Promise<StoredRecord[]>;
+}
+
+export interface DataApiDeps {
+  readonly registry: InstanceRegistry;
+  readonly specs: NormalizedSpecStore;
+  readonly records: RecordStore;
+  /** 保存する日時と評価に使う時計。テストは fixedClock を差し込む（Q17） */
+  readonly clock: Clock;
+}
+
+// ── 結果の形 ────────────────────────────────────────────────────
+
+/** 成功の HTTP ステータス（読取 200 / 追加 201） */
+export type ApiStatus = typeof API_READ_STATUS | typeof API_CREATED_STATUS;
+
+export interface ApiSuccess<Body> {
+  readonly ok: true;
+  readonly status: ApiStatus;
+  readonly body: Body;
+}
+
+/** 断った結果。`fields` と `validations` は `INPUT_REJECTED` のときだけ中身を持つ */
+export interface ApiFailure {
+  readonly error: ApiErrorCode;
+  readonly fields: readonly string[];
+  readonly validations: readonly string[];
+}
+
+export interface ApiFailureResult {
+  readonly ok: false;
+  readonly failure: ApiFailure;
+}
+
+export type ApiResult<Body> = ApiSuccess<Body> | ApiFailureResult;
+
+const ok = <Body>(status: ApiStatus, body: Body): ApiSuccess<Body> => ({ ok: true, status, body });
+
+const fail = (
+  error: ApiErrorCode,
+  fields: readonly string[] = [],
+  validations: readonly string[] = [],
+): ApiFailureResult => ({ ok: false, failure: { error, fields, validations } });
+
+// ── 宣言の読み込み（登録 → R2 → 整合性） ─────────────────────────────
+
+type SpecLoad =
+  | { readonly ok: true; readonly app: NormalizedAppSpec }
+  | { readonly ok: false; readonly error: "NOT_FOUND" | "SPEC_UNAVAILABLE" };
+
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** 写像が、名前の付いた文字列の欄をすべて持つか */
+const hasStrings = (value: unknown, keys: readonly string[]): boolean =>
+  isRecord(value) && keys.every((key) => typeof value[key] === "string");
+
+/** 宣言の 7 欄が、期待する形で揃っているか（**欄そのものが欠けていたら断る**） */
+function isSpecShape(spec: unknown): spec is AppSpec {
+  if (!isRecord(spec)) return false;
+  const { entities, views, actions, validations, computed, permissions, minIdentity } = spec;
+  if (!Array.isArray(entities)) return false;
+  for (const entity of entities) {
+    if (!hasStrings(entity, ["name"])) return false;
+    if (!isRecord(entity) || !isRecord(entity["fields"])) return false;
+  }
+  if (!Array.isArray(views) || !views.every((view) => hasStrings(view, ["name", "entity"]))) return false;
+  if (!Array.isArray(actions) || !actions.every((action) => hasStrings(action, ["name", "entity"]))) return false;
+  if (!Array.isArray(validations)) return false;
+  for (const validation of validations) {
+    if (!hasStrings(validation, ["name", "entity", "expression"])) return false;
+  }
+  if (!Array.isArray(computed)) return false;
+  for (const entry of computed) {
+    if (!hasStrings(entry, ["name", "entity", "expression", "type"])) return false;
+  }
+  if (!Array.isArray(permissions) || !permissions.every((entry) => hasStrings(entry, ["name", "subject"]))) {
+    return false;
+  }
+  return hasStrings(minIdentity, ["mode"]);
+}
+
+/**
+ * 正規化した JSON（Issue #98）を読む。読めない・欄が欠けている・版の形が違うものは `null`。
+ * **壊れた JSON を成功値に読み替えない。**
+ */
+export function readNormalizedApp(text: string): NormalizedAppSpec | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isRecord(value)) return null;
+  const { schemaVersion, sourceSha256, spec } = value;
+  if (typeof schemaVersion !== "string" || !APPSPEC_SCHEMA_VERSION_PATTERN.test(schemaVersion)) return null;
+  if (typeof sourceSha256 !== "string" || !SHA256_PATTERN.test(sourceSha256)) return null;
+  if (!isSpecShape(spec)) return null;
+  return { schemaVersion, sourceSha256, spec };
+}
+
+/**
+ * インスタンスの宣言を読む。**登録と R2 のオブジェクトを突き合わせてから返す。**
+ * 版と原本の SHA-256 が登録と食い違えば、読み書きを進めない（どちらも 503）。
+ */
+async function loadSpec(deps: DataApiDeps, instanceId: string): Promise<SpecLoad> {
+  const registration = await deps.registry.resolve(instanceId);
+  if (registration === null) return { ok: false, error: "NOT_FOUND" };
+  const text = await deps.specs.read(registration.normalizedKey);
+  if (text === null) return { ok: false, error: "SPEC_UNAVAILABLE" };
+  const app = readNormalizedApp(text);
+  if (app === null) return { ok: false, error: "SPEC_UNAVAILABLE" };
+  if (app.sourceSha256 !== registration.sourceSha256) return { ok: false, error: "SPEC_UNAVAILABLE" };
+  if (app.schemaVersion !== registration.schemaVersion) return { ok: false, error: "SPEC_UNAVAILABLE" };
+  return { ok: true, app };
+}
+
+// ── 宣言から引く ────────────────────────────────────────────────
+
+/** 宣言していない権限は誰にも与えない（docs/semantics.md「permission」） */
+const permissionsOf = (app: NormalizedAppSpec): ApiPermissions => ({
+  read: app.spec.permissions.some((permission) => permission.name === "read"),
+  write: app.spec.permissions.some((permission) => permission.name === "write"),
+});
+
+/** 宣言した操作（宣言の順）。M1.1 の操作はレコードの内容による条件を持たない */
+const actionsOf = (app: NormalizedAppSpec): readonly ApiActionRef[] =>
+  app.spec.actions.map((action) => ({ name: action.name, entity: action.entity }));
+
+const computedNamesOf = (app: NormalizedAppSpec, entity: string): readonly string[] =>
+  app.spec.computed.filter((entry) => entry.entity === entity).map((entry) => entry.name);
+
+/** 1 行を API の形にする。**計算の値は保存された値からその都度求める** */
+function toApiRow(
+  app: NormalizedAppSpec,
+  entity: string,
+  record: StoredRecord,
+  clock: Clock,
+): ApiRow {
+  const { computed } = evaluateRecord({ app, entity, record: record.data, clock });
+  return {
+    id: record.id,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    fields: record.data,
+    computed,
+  };
+}
+
+// ── 公開の 3 操作 ───────────────────────────────────────────────
+
+/** `GET /api/instances/:instanceId/spec`。`read` の宣言が無ければ 403 */
+export async function getSpec(
+  deps: DataApiDeps,
+  instanceId: string,
+): Promise<ApiResult<ApiSpecBody>> {
+  const loaded = await loadSpec(deps, instanceId);
+  if (!loaded.ok) return fail(loaded.error);
+  const { app } = loaded;
+  const permissions = permissionsOf(app);
+  if (!permissions.read) return fail("PERMISSION_DENIED");
+  return ok(API_READ_STATUS, {
+    instanceId,
+    schemaVersion: app.schemaVersion,
+    sourceSha256: app.sourceSha256,
+    spec: app.spec,
+    permissions,
+    actions: actionsOf(app),
+  });
+}
+
+/**
+ * `GET /api/instances/:instanceId/views/:viewName`。
+ * 行・宣言順の表示に必要な情報（`fields`・`computed`）・操作の可否を返す。`read` が無ければ 403。
+ */
+export async function getView(
+  deps: DataApiDeps,
+  instanceId: string,
+  viewName: string,
+): Promise<ApiResult<ApiViewBody>> {
+  const loaded = await loadSpec(deps, instanceId);
+  if (!loaded.ok) return fail(loaded.error);
+  const { app } = loaded;
+  const view = app.spec.views.find((candidate) => candidate.name === viewName);
+  if (view === undefined) return fail("NOT_FOUND");
+  const permissions = permissionsOf(app);
+  if (!permissions.read) return fail("PERMISSION_DENIED");
+  const entity = app.spec.entities.find((candidate) => candidate.name === view.entity);
+  // 宣言の不整合（静的チェックが防ぐ）。読めない宣言として断る
+  if (entity === undefined) return fail("SPEC_UNAVAILABLE");
+
+  const stored = await deps.records.list(entity.name);
+  return ok(API_READ_STATUS, {
+    instanceId,
+    view: view.name,
+    entity: entity.name,
+    fields: Object.keys(entity.fields),
+    computed: computedNamesOf(app, entity.name),
+    permissions,
+    actions: actionsOf(app).filter((action) => action.entity === entity.name),
+    rows: stored.map((record) => toApiRow(app, entity.name, record, deps.clock)),
+  });
+}
+
+/**
+ * `POST /api/instances/:instanceId/actions/:actionName`。`write` の宣言が無ければ 403。
+ * 入力の検査に通れば 1 件保存し、**作成した行（計算値つき）** を返す。断った入力は保存しない。
+ */
+export async function createFromAction(
+  deps: DataApiDeps,
+  instanceId: string,
+  actionName: string,
+  input: Readonly<Record<string, unknown>>,
+): Promise<ApiResult<ApiCreatedBody>> {
+  const loaded = await loadSpec(deps, instanceId);
+  if (!loaded.ok) return fail(loaded.error);
+  const { app } = loaded;
+  const action = app.spec.actions.find((candidate) => candidate.name === actionName);
+  if (action === undefined) return fail("NOT_FOUND");
+  if (!permissionsOf(app).write) return fail("PERMISSION_DENIED");
+  const entity = app.spec.entities.find((candidate) => candidate.name === action.entity);
+  if (entity === undefined) return fail("SPEC_UNAVAILABLE");
+
+  const decided = checkInput({ app, entity, input, clock: deps.clock });
+  if (!decided.ok) return fail("INPUT_REJECTED", decided.fields, decided.validations);
+
+  // 日時と ID は店頭（呼ぶ側の時計）が付ける。入力の値では決まらない
+  const stamp: RecordStamp = {
+    now: new Date(deps.clock.now()).toISOString(),
+    id: crypto.randomUUID(),
+  };
+  const record = await deps.records.create(entity.name, decided.data, stamp);
+  return ok(API_CREATED_STATUS, toApiRow(app, entity.name, record, deps.clock));
+}

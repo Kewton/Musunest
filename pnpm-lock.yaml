@@ -112,6 +112,9 @@ importers:
       '@musunest/appspec-schema':
         specifier: workspace:*
         version: link:../appspec-schema
+      '@musunest/control-plane':
+        specifier: workspace:*
+        version: link:../control-plane
       '@musunest/sdk':
         specifier: workspace:*
         version: link:../sdk
