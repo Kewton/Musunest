@@ -10,6 +10,9 @@
   "references": [
     {
       "path": "../../packages/appspec-schema"
+    },
+    {
+      "path": "../../packages/spec-engine"
     }
   ]
 }
