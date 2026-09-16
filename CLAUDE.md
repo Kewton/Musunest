@@ -91,6 +91,7 @@ sdk・spec-engine・app-do・connector → appspec-schema
 
 - 並列開発は、窓口の Claude が **`cmate-delegate`** で main の **Command Code** へ依頼して始める。
   依頼の中身は「**`cmate-orchestrate` で Issue ドリブンの並列開発をする**」
+- **手順の正本は [`docs/parallel-development.md`](docs/parallel-development.md)**（依頼文の 6 欄・送り方・exit code・報告の形・段取り・partial の直し方）
 - 宛先は alias から解決する（`commandmate instances musubi --json`）。**instance-id を推測で渡さない**
 - profile は `.commandmate/profiles/musubi.json`（branch `feat/{number}-{slug}`、
   worktree `../{repo}-issue-{number}`、baseline に `link-env.sh`）。
@@ -126,6 +127,19 @@ sdk・spec-engine・app-do・connector → appspec-schema
   - **原則は Issue を分割する。** 1 Issue = 1 パッケージ前後・語彙 1〜2 個まで落とせば、たいていは dispatch できる形になる
   - **どうしても分けられないときだけ、人に判断を委ねる**（監督側が手で行うか、別の切り方にするか）。窓口が勝手に手で進めない
 - **ワーカーは `.commandmate/verify.yaml` を直さない**（下の検証ゲートの節）。ゲートを足す必要に気づいたら、止めて人に返す
+
+### Issue の書き方（planner が読める形）
+
+**plan は Issue 本文だけを読む。本文がそのまま `scope.allow` と依存になる**（2026-09-16 の実測。#115）。
+
+- **`## 対象ファイル` に、書いてよいパスだけを列挙する**（glob 可）。この見出しが無い Issue は
+  `no_suspected_files` で **dispatch できない**。地の文や `## 参照` に書いた glob は落ちる
+- **`## 依存` には素の `#番号` だけを書く。** 「#96 のあと（#97 と並列に進められる）」の括弧書きは
+  **依存として読まれる**。並列の注記は別の節へ書く
+- **地の文にパスを書かない。** 「このファイルは変えない」と書いたパスまで `scope.allow` に入り、
+  推論された依存が宣言依存と閉路を作って plan 自体が出なくなる
+- **`## 完了条件`**（機械で判定できる受入条件）を必ず書く
+- 人がやる Issue には `human-only` ラベルを付け、**dispatch の対象から外す**
 
 ## コマンド
 
