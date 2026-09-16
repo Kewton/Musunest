@@ -86,7 +86,7 @@ commandmate ask musubi --instance command-code "$(cat <依頼文のファイル>
 | `10` | プロンプト待ち | **答えない。** 本文と選択肢をそのまま人へ見せて止まる（§5） |
 | `21` | 相手が起動していない | `send` を実際に打ったか確認する |
 | `99` | 送信できなかった | 下の実測を見る |
-| `124` | 時間内に返らなかった | `capture` して状況を人に見せる。**再送しない**（2 つ動く） |
+| `124` | 時間内に返らなかった | **再送しない**（2 つ動く）。相手は走り続けているので、`capture` で状況を人に見せ、**`wait` を張り直す**（W2 では 30 分窓を 3 回張り直した） |
 
 > **2026-09-16 の実測**：停止中のセッションへ送ると
 > `Failed to send message … prompt not ready: timed out waiting for the composer before sending` で **exit 99** になった。
@@ -112,6 +112,8 @@ commandmate ask musubi --instance command-code "$(cat <依頼文のファイル>
 
 - 本文と選択肢を**そのまま**人へ見せる。要約しない。番号の並びも変えない
 - **相手の auto-yes は触らない**（`--auto-yes` を付けない、`commandmate auto-yes` を打たない）。有効にするのは**人が CommandMate の UI で**行う
+- **auto-yes は、相手のセッションが再起動すると off に戻る**（2026-09-16 に 2 回。CLI の自動更新で再起動が起きた）。
+  長い依頼の途中で急に prompt で止まったら、まず `commandmate instances <wt> --json` の `autoYes` を見る。off なら人に入れ直してもらう
 - 人が「答えていい」と言ったときだけ `commandmate respond musubi "<番号>" --instance command-code`。**`yes` は番号に解決されない**
 
 ---
@@ -125,7 +127,7 @@ commandmate ask musubi --instance command-code "$(cat <依頼文のファイル>
 | 3 | 人 | Wave plan・blocking・limitation を見て、dispatch を承認する |
 | 4 | 窓口 → 管理 | dispatch を依頼する（契約に push / PR を明示、`--merge-prs` を使わない） |
 | 5 | ワーカー | 実装 → `cmate-verify` 緑 → push → PR（`Closes #N`）→ 管理へ報告 |
-| 6 | 管理 | PR を確認して squash merge。例外（運用文書・`.commandmate/`・`.tf`）は人へ回す |
+| 6 | 管理 | PR を確認して squash merge。**2 本目以降は BEHIND になる**ので §6.3 の往復を先に見込む。例外（運用文書・`.commandmate/`・`.tf`）は人へ回す |
 | 7 | 管理 → 窓口 → 人 | 全部の merge が終わったら報告。そのあと 🧑 の Issue でデモと振り返り |
 
 ### 6.1 worktree の用意と、ワーカーの CLI（2026-09-16 の実測）
@@ -157,6 +159,19 @@ commandmate ls --json   # cliToolId が command-code になっていることを
 3. ワーカーが PR を作る。管理が CI green と scope を確認して `gh pr merge --squash`
 
 この 2 段を**依頼文に明記する**。書かないと、ワーカーは commit で止まったまま終わる。
+
+### 6.3 BEHIND の往復（`main` が保護されているため毎回起きる）
+
+`main` は「base に対して最新であること」を要求する。**先に 1 本 merge した時点で、残りの PR は BEHIND になる。**
+
+1. PR を作らせたら**すぐ** `gh pr view <n> --json mergeStateStatus` を見る
+2. `BEHIND` なら、**ワーカーに `git merge origin/main` させて push**（窓口や管理が相手の branch を直さない）
+3. CI が回り直して `CLEAN` になってから `gh pr merge <n> --squash`
+
+- 実測：W2（3 本）は 2 本目以降が必ず BEHIND で、ワーカーと 2 往復した。W3（1 本）は 0 往復
+- **窓口の文書 PR でも同じことが起きる**（PR #120 が「out-of-date with the base branch」で止まった）。
+  対処は自分の worktree で `git merge origin/main` → `pnpm install --frozen-lockfile` → `pnpm check` → push → `CLEAN` を待つ。
+  **文書 PR を長く開いたままにしない**（開いているあいだに実装 PR が入るほど当たりやすい）
 
 ---
 
@@ -205,6 +220,16 @@ M1.1 の 9 件を最初に plan したときに起きたこと。
 
 所要は、送信から merge まで約 1 時間（ワーカーの実装が大半）。**窓口の `ask` は 30 分で切れる**ので、
 `wait` を張り直して受け取った（§3 の 124）。
+
+### 8.1 W2（#97・#99・#100 の 3 本並列）と W3（#98）の記録
+
+| 回 | 結果 |
+|---|---|
+| W2 | plan は `--issues 97,99,100 --no-infer` で status=partial・**blocking 0**（`external_dependency` は merge 済みの #96 を指す warning）。worktree 3 本の baseline pass、**roster を `command-code` だけにしてワーカーの CLI を固定**。3 本とも 9 ゲート pass → PR #123 / #121 / #122 を squash merge。**BEHIND の往復が 2 回** |
+| W3 | `--issues 98 --no-infer`。PR #124 を一発で merge（**BEHIND 0 回**。head が main と同じだった） |
+
+- **`external_dependency` の partial は止める理由にならない。** 集合外の依存が merge 済みなら進めてよい（依頼文にそう書いておくと、管理が無駄に止まらない）
+- 3 本並列でも、scope が重ならなければ file conflict は 0 だった。**lockfile を触る Issue は 1 本だけにする**と往復が減る
 
 ---
 
