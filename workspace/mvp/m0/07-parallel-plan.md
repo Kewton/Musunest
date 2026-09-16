@@ -213,7 +213,7 @@ W10                                         🧑🤖 #18
 | 合格の定義 | [`.commandmate/verify.yaml`](../../../.commandmate/verify.yaml) — deps / lint / typecheck / unit |
 | worktree | `./infra/scripts/link-env.sh` を**最初に実行**（`.env` は追跡していないので worktree に無い） |
 | ブランチ | `feat/{number}-{slug}` |
-| 承認 | `auto_yes: false`。**production に触る系は人が見ている時だけ** |
+| 承認 | `auto_yes: false`。**production に触る系は人が見ている時だけ**（M0 時点の宣言。2026-09-16 に auto-yes を基本へ変えた。`CLAUDE.md`「開発の進め方」） |
 
 **#32 だけは成果物の置き場が違う。** 商標・名称の情報は公開リポジトリに書かず、
 非公開リポジトリ `Kewton/Musubi-workspace` の `legal/` へ置く。

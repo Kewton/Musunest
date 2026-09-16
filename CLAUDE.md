@@ -78,8 +78,18 @@ sdk・spec-engine・app-do・connector → appspec-schema
 ## 開発の進め方（Issue ごとの並列開発。2026-09-16 所有者が決定）
 
 - **1 Issue = 1 worker。Issue ごとに並列で進める。**
-- 並列開発は、監督セッション（この checkout の `claude`）が **`cmate-delegate`** で
-  **Command Code**（worktree `musubi` / instance `command-code`）へ依頼して始める。
+- 体制は次の 4 層である。**窓口は main の Claude、ワーカーの管理は main の Command Code** と分ける。
+
+```
+人
+└─ main の Claude（worktree musubi / instance claude）      ← 窓口。開発を推進する
+   └─ main の Command Code（worktree musubi / instance command-code）  ← ワーカーの管理（cmate-orchestrate）
+      ├─ feat/<issue> の Command Code   ← ワーカー（1 Issue に 1 人）
+      ├─ feat/<issue> の Command Code
+      └─ …（Issue の数だけ）
+```
+
+- 並列開発は、窓口の Claude が **`cmate-delegate`** で main の **Command Code** へ依頼して始める。
   依頼の中身は「**`cmate-orchestrate` で Issue ドリブンの並列開発をする**」
 - 宛先は alias から解決する（`commandmate instances musubi --json`）。**instance-id を推測で渡さない**
 - profile は `.commandmate/profiles/musubi.json`（branch `feat/{number}-{slug}`、
@@ -88,13 +98,15 @@ sdk・spec-engine・app-do・connector → appspec-schema
 
 | | やること |
 |---|---|
-| **監督側**（人・監督セッション） | Issue を切る（`cmate-issue-authoring`）／依存と粒度を決める／`.commandmate/` 配下・`.tf`・`.gitignore`・ディレクトリの移動／**運用文書（`workspace/`・`CLAUDE.md`）を含む PR は人が読んで merge**／プロンプト待ちの回収 |
-| **Command Code** | `cmate-orchestrate` の 4 段（plan → dispatch → merge → uat）。**実装の Issue は、検証 pass と CI pass を条件に guarded merge まで。** 機械で判定できる受入は uat（`cmate-acceptance-test`）まで |
-| **ワーカー** | `cmate-worker-development` に従って 1 Issue を実装し、`cmate-verify` で検証する。**push・PR 作成・merge はしない** |
+| **窓口**（人・main の Claude） | Issue を切る（`cmate-issue-authoring`）／依存と粒度を決める／依頼文を組んで人に見せてから送る／`.commandmate/` 配下・`.tf`・`.gitignore`・ディレクトリの移動／**運用文書（`workspace/`・`CLAUDE.md`）を含む PR は人が読んで merge**／auto-yes で応答されない停止（rate limit・自由記述の質問）の回収 |
+| **管理**（main の Command Code） | `cmate-orchestrate` の 4 段（plan → dispatch → merge → uat）とワーカーの監督（`cmate-orchestrate-monitor`）。**実装の Issue は、検証 pass と CI pass を条件に guarded merge まで。** 機械で判定できる受入は uat（`cmate-acceptance-test`）まで |
+| **ワーカー**（feat/<issue> の Command Code） | `cmate-worker-development` に従って 1 Issue を実装し、`cmate-verify` で検証する。**push・PR 作成・merge はしない** |
 
 - **スマホでのデモと振り返りは人が行う**（🧑 の Issue。マイルストーンごと。`workspace/mvp/roadmap.md` §1）。
   uat が見るのは機械で判定できる分だけである
-- **dispatch で auto-yes を使わない**（`dispatch_defaults.auto_yes: false`）。プロンプトで止まったら人へ返す
+- **dispatch は auto-yes を基本にする**（`dispatch_defaults.auto_yes: true`）。ワーカーの yes/no と選択のプロンプトは自動で応答し、run を止めない
+  - auto-yes が効くのは**ワーカーのプロンプトだけ**である。**merge は別のゲート**で、`--approve` が無ければ PR 作成も merge もしない
+  - 止めたい run は `--no-auto-yes` を付ける（production に触る変更・`.tf`・`.commandmate/` を含むときなど）。`--unattended` と auto-yes は併用できない（`invalid_input`）
 - 実行契約（`.commandmate/tasks/*.yaml`）の goal は **8000 文字まで**。対象のソースが概ね 30 本を超える Issue、
   `.tf`・`.gitignore`・ディレクトリの移動を含む Issue は **dispatch できない**。分割するか、監督側が手で行う
 - **ワーカーは `.commandmate/verify.yaml` を直さない**（下の検証ゲートの節）。ゲートを足す必要に気づいたら、止めて人に返す
