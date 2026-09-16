@@ -16,7 +16,8 @@
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty",
     "lint": "oxlint src",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "spec:check": "tsx src/cli.ts"
   },
   "dependencies": {
     "@musunest/appspec-schema": "workspace:*"
