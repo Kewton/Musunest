@@ -92,6 +92,9 @@ sdk・spec-engine・app-do・connector → appspec-schema
 - 並列開発は、窓口の Claude が **`cmate-delegate`** で main の **Command Code** へ依頼して始める。
   依頼の中身は「**`cmate-orchestrate` で Issue ドリブンの並列開発をする**」
 - **手順の正本は [`docs/parallel-development.md`](docs/parallel-development.md)**（依頼文の 6 欄・送り方・exit code・報告の形・段取り・partial の直し方）
+- **plan は `--no-infer` で回す。** 依存は Issue に宣言する。推論は日本語の語（スキーマ・契約・参照…）から
+  誤った edge を作り、閉路で plan が出せなくなる（2026-09-16 に 2 回発生）
+- **長い依頼を投げる前に、main の checkout を `main` に戻す。** 管理は窓口と同じ checkout で動く
 - 宛先は alias から解決する（`commandmate instances musubi --json`）。**instance-id を推測で渡さない**
 - profile は `.commandmate/profiles/musubi.json`（branch `feat/{number}-{slug}`、
   worktree `../{repo}-issue-{number}`、baseline に `link-env.sh`）。
@@ -133,7 +136,8 @@ sdk・spec-engine・app-do・connector → appspec-schema
 **plan は Issue 本文だけを読む。本文がそのまま `scope.allow` と依存になる**（2026-09-16 の実測。#115）。
 
 - **`## 対象ファイル` に、書いてよいパスだけを列挙する**（glob 可）。この見出しが無い Issue は
-  `no_suspected_files` で **dispatch できない**。地の文や `## 参照` に書いた glob は落ちる
+  `no_suspected_files` で **dispatch できない**。地の文や `## 参照` に書いた glob は落ちる。
+  **テストのファイルも具体名で入れる**（glob だけだとテストの path が導出されず止まる）
 - **`## 依存` には素の `#番号` だけを書く。** 「#96 のあと（#97 と並列に進められる）」の括弧書きは
   **依存として読まれる**。並列の注記は別の節へ書く
 - **地の文にパスを書かない。** 「このファイルは変えない」と書いたパスまで `scope.allow` に入り、

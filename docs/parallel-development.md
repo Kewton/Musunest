@@ -46,6 +46,21 @@ commandmate instances musubi --json        # 宛先の候補（instanceId / alia
 
 ---
 
+## 1.5 このリポジトリの plan は `--no-infer` で回す
+
+**依存は Issue の `## 依存` に宣言する。planner の推論は使わない。**
+
+- 推論は日本語の語から生産者・消費者を判定する（`PRODUCER_RE` に「スキーマ」「契約」「型定義」、
+  `CONSUMER_RE` に「参照」「利用」「使用」「適用」）。このリポジトリの Issue はほぼ全部が
+  契約とスキーマの話なので、**推論 edge が宣言依存と閉路（`cycle_detected`）を作り、plan 自体が出せない**
+  （2026-09-16 に 2 回とも発生。1 回目 `#100→#104→#102`、2 回目 `#103↔#104`）
+- だから依頼文に「**`--no-infer` で plan してください**」と書く
+- **profile の `dispatch_defaults.no_infer` は今の planner が消費しない**（宣言しても
+  `dispatch_defaults_no_infer_not_applied` の warning が出るだけ）。flag で渡すしかない
+- 推論を切るぶん、**依存の宣言漏れは誰も拾わない。** Issue を切るときに `## 依存` を必ず埋める
+
+---
+
 ## 2. 送る
 
 ```bash
@@ -56,6 +71,10 @@ commandmate ask musubi --instance command-code "$(cat <依頼文のファイル>
 - **1 ターンが 10 分を超えることがある。** バックグラウンドで実行し、終了通知で回収する
 - 返答が次の判断の入力なら**待つ**。並走させたい手渡しなら `--async` / `--reply-to`（`cmate-delegate` §8）
 - 依頼文は**ファイルに残す**。再送・再現・引き継ぎのときに、同じ文字列を使えるようにする
+- **送る前に、main の checkout を `main` に戻しておく。** 管理（Command Code）は**窓口と同じ checkout**
+  （`worktree musubi`）で動く。窓口が自分の PR 用にブランチを切ったままだと、管理はそのブランチの作業ツリーを見る
+  （2026-09-16 の実測。管理から「cwd が `feat/115-…` で main ではない」と報告された）。
+  窓口の文書 PR も、長い依頼を投げる前に merge するか、別の worktree で作る
 
 ---
 
@@ -117,7 +136,7 @@ commandmate ask musubi --instance command-code "$(cat <依頼文のファイル>
 
 | 見出し | 書くこと | 書かないと / 書き方を誤ると |
 |---|---|---|
-| `## 対象ファイル` | **書いてよいパスだけ**を列挙する（glob 可。例：`packages/spec-engine/**`） | 無いと `no_suspected_files` で **dispatch 拒否**。glob を地の文に書いても `scope_pattern_dropped` で落ちる |
+| `## 対象ファイル` | **書いてよいパスだけ**を列挙する（glob 可。例：`packages/spec-engine/**`）。**テストのファイルも具体名で必ず入れる** | 無いと `no_suspected_files` で **dispatch 拒否**。glob だけだとテストの path が導出されず、受入条件がテストを求める Issue は `acceptance_requires_tests_but_scope_has_none` で止まる。glob を地の文に書いても `scope_pattern_dropped` で落ちる |
 | `## 依存` | **素の `#番号` だけ** | 「#96 のあと（#97 と並列に進められる）」の括弧書きは**依存として読まれる**。並列の注記は別の節へ |
 | `## 完了条件` | 機械で判定できる受入条件 | 空だと `no_acceptance_criteria`（merge runner の `--merge-prs` を使うときは停止する） |
 | `## 参照` | 読むだけのファイル | — |
@@ -134,6 +153,10 @@ M1.1 の 9 件を最初に plan したときに起きたこと。
 - 既定の呼び出し … 地の文の `dep-graph.mjs` から推論 edge が生まれ、宣言依存と**閉路**（`cycle_detected`）。plan 自体が出せなかった
 - #96 … 「変えない」と書いた `pins/commandagent.json` が `scope.allow` に入り、**本命の `packages/appspec-schema` が入らなかった**
 - #99・#100 … 括弧書きの「（#97 と並列に進められる）」が依存として読まれ、別 Wave に落ちた
+- 直したあとの 2 回目 … `no_suspected_files` 3 件と scope の取り違えは解消。残ったのは
+  **推論による別の閉路**（`#103↔#104`。§1.5 の `--no-infer` で回避する）と、
+  **`/**` だけの scope がテスト path を導出しない** `acceptance_requires_tests_but_scope_has_none` 2 件
+  （テストのファイル名を `## 対象ファイル` に足して解消）
 
 ---
 
