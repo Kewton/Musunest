@@ -8,5 +8,7 @@
 | `d1-migration.md` | D1 マイグレーションの前方互換規律 | M0-4 |
 | `local-dev.md` | `wrangler dev` で host・gateway・data-api を並べる手順と、ローカルで再現できない3点 | M0-4（`03` §6） |
 
+> 並列開発の手順（Command Code への依頼・Issue の書き方）は障害対応ではないので、ここではなく [`../parallel-development.md`](../parallel-development.md) にある。
+
 M0 の DoD は「文書化」だけでなく**実演まで**を含む。
 production を1つ前のバージョンへ戻して復帰させた記録を残すこと（`rollback.md` §4。🧑 所有者の立ち会いで行い、埋まるまで DoD は未達）。

@@ -91,29 +91,36 @@ sdk・spec-engine・app-do・connector → appspec-schema
 
 - 並列開発は、窓口の Claude が **`cmate-delegate`** で main の **Command Code** へ依頼して始める。
   依頼の中身は「**`cmate-orchestrate` で Issue ドリブンの並列開発をする**」
+- **手順の正本は [`docs/parallel-development.md`](docs/parallel-development.md)**（依頼文の 6 欄・送り方・exit code・報告の形・段取り・partial の直し方）
+- **plan は `--no-infer` で回す。** 依存は Issue に宣言する。推論は日本語の語（スキーマ・契約・参照…）から
+  誤った edge を作り、閉路で plan が出せなくなる（2026-09-16 に 2 回発生）
+- **長い依頼を投げる前に、main の checkout を `main` に戻す。** 管理は窓口と同じ checkout で動く
 - 宛先は alias から解決する（`commandmate instances musubi --json`）。**instance-id を推測で渡さない**
 - profile は `.commandmate/profiles/musubi.json`（branch `feat/{number}-{slug}`、
   worktree `../{repo}-issue-{number}`、baseline に `link-env.sh`）。
-  **worktree を作るのは `cmate-worktree-setup`** であって dispatch ではない
+  **worktree を作るのは `cmate-worktree-setup`** であって dispatch ではない。
+  **ワーカーの CLI は worktree の既定（`cliToolId`）で決まるので、roster を `command-code` だけにする**
+  （`docs/parallel-development.md` §6.1。provider をリポジトリに持つ作業は #118）
 
 | | やること |
 |---|---|
 | **窓口**（人・main の Claude） | Issue を切る（`cmate-issue-authoring`）／依存と粒度を決める／依頼文を組んで人に見せてから送る／`.commandmate/` 配下・`.tf`・`.gitignore`・ディレクトリの移動／**運用文書（`workspace/`・`CLAUDE.md`）を含む PR は人が読んで merge**／auto-yes で応答されない停止（rate limit・自由記述の質問）の回収／管理の報告を人へ伝える |
 | **管理**（main の Command Code） | `cmate-orchestrate` の plan → dispatch とワーカーの監督（`cmate-orchestrate-monitor`）／**ワーカーが出した PR を確認して squash merge する**／機械で判定できる受入は uat（`cmate-acceptance-test`）まで／**全部の merge が終わったら窓口へ報告する** |
-| **ワーカー**（feat/<issue> の Command Code） | `cmate-worker-development` に従って 1 Issue を実装し、`cmate-verify` で検証する。**緑になったら push して PR を作り、管理へ報告する**（タイトルは Conventional Commits、本文に `Closes #N` と検証の証跡）。**merge はしない** |
+| **ワーカー**（feat/<issue> のセッション。**CLI は Command Code に固定する**） | `cmate-worker-development` に従って 1 Issue を実装し、`cmate-verify` で検証する。**緑になったら push して PR を作り、管理へ報告する**（タイトルは Conventional Commits、本文に `Closes #N` と検証の証跡）。**merge はしない** |
 
 ### 流れ
 
 1. **窓口**が Issue を切り、`cmate-delegate` で**管理**へ依頼する（依頼文は送る前に人へ見せる）
 2. **管理**が plan（依存と file 衝突）を作り、人の承認を得てから worktree を用意して dispatch する
 3. **ワーカー**が実装し、`cmate-verify` が緑になったら **push して PR を作り、管理へ報告する**
+   （**push と PR は実行契約に書けない**。検証が緑になった時点で、管理が追加のメッセージで指示する。`docs/parallel-development.md` §6.2）
 4. **管理**が PR を確認し（検証の証跡・CI green・scope の内側）、**squash merge する**。
    運用文書（`workspace/`・`CLAUDE.md`）・`.commandmate/` 配下・`.tf` を含む PR だけは**人が読んで merge** する
 5. 全部の merge が終わったら、**管理が窓口へ報告**する。窓口が人へ伝える
 
-- **ワーカーに push と PR 作成を許すのは、実行契約で明示したときだけ。** `cmate-worker-development` の
-  既定は「PR を作らない・push しない」なので、契約の Rules に「**検証が緑になったら push して PR を作る**」と書く
-  （広げる方向は契約が正本。同 skill 第1節）
+- **ワーカーの push と PR は、管理が追加のメッセージで指示する。** `cmate-worker-development` の既定は
+  「PR を作らない・push しない」で、**dispatch の実行契約に書き足す口は無い**（2026-09-16 の実測）。
+  だから「検証が緑になったら push して PR を作る」は、**dispatch のあとに管理が送る**（`docs/parallel-development.md` §6.2）
 - **merge runner に PR を作らせない**（`merge.mjs --merge-prs` は PR 作成を含み、ワーカーの PR と二重になる）。
   管理は、ワーカーが作った PR を CI green の確認のうえ `gh pr merge --squash` で merge する
 - **スマホでのデモと振り返りは人が行う**（🧑 の Issue。マイルストーンごと。`workspace/mvp/roadmap.md` §1）。
@@ -126,6 +133,20 @@ sdk・spec-engine・app-do・connector → appspec-schema
   - **原則は Issue を分割する。** 1 Issue = 1 パッケージ前後・語彙 1〜2 個まで落とせば、たいていは dispatch できる形になる
   - **どうしても分けられないときだけ、人に判断を委ねる**（監督側が手で行うか、別の切り方にするか）。窓口が勝手に手で進めない
 - **ワーカーは `.commandmate/verify.yaml` を直さない**（下の検証ゲートの節）。ゲートを足す必要に気づいたら、止めて人に返す
+
+### Issue の書き方（planner が読める形）
+
+**plan は Issue 本文だけを読む。本文がそのまま `scope.allow` と依存になる**（2026-09-16 の実測。#115）。
+
+- **`## 対象ファイル` に、書いてよいパスだけを列挙する**（glob 可）。この見出しが無い Issue は
+  `no_suspected_files` で **dispatch できない**。地の文や `## 参照` に書いた glob は落ちる。
+  **テストのファイルも具体名で入れる**（glob だけだとテストの path が導出されず止まる）
+- **`## 依存` には素の `#番号` だけを書く。** 「#96 のあと（#97 と並列に進められる）」の括弧書きは
+  **依存として読まれる**。並列の注記は別の節へ書く
+- **地の文にパスを書かない。** 「このファイルは変えない」と書いたパスまで `scope.allow` に入り、
+  推論された依存が宣言依存と閉路を作って plan 自体が出なくなる
+- **`## 完了条件`**（機械で判定できる受入条件）を必ず書く
+- 人がやる Issue には `human-only` ラベルを付け、**dispatch の対象から外す**
 
 ## コマンド
 
