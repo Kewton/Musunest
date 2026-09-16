@@ -88,6 +88,26 @@ commandmate ask musubi --instance command-code "$(cat <依頼文のファイル>
 | `99` | 送信できなかった | 下の実測を見る |
 | `124` | 時間内に返らなかった | **再送しない**（2 つ動く）。相手は走り続けているので、`capture` で状況を人に見せ、**`wait` を張り直す**（W2 では 30 分窓を 3 回張り直した） |
 
+### 3.1 30 分ごとに進みを測る
+
+`wait` が 124 で切れたら、**まず自分で測る**。次の 5 つは相手に訊かずに分かる。
+
+```bash
+ls -d ../Musunest-issue-*                      # worktree ができているか
+git -C ../Musunest-issue-<n> status --porcelain | wc -l   # ワーカーが書いているか
+git -C ../Musunest-issue-<n> log --oneline -1  # commit まで行ったか
+gh pr list --state open                        # PR が出たか
+commandmate capture musubi --instance command-code --pane --tail 20   # 段と経過時間
+```
+
+- **前回の確認から 30 分たっても段が進んでいなければ、状況確認を送る**（2026-09-17 所有者の指示）。
+  依頼文には ①窓口から見えている事実、②懸念を 3〜5 個に絞って 1 行ずつ答えさせる形、
+  ③「**進行中の作業を止めない・新しい dispatch をしない**」を必ず書く
+- **相手が生成中は状況確認を送れない**（`exit 99`「prompt not ready … before sending」。未送信なので二重送信にはならない）。
+  そのときは**外側から測った結果を人へ報告し**、`wait` が返った直後に送り直す
+- pane を読めば「止まっているように見える」の大半は説明できる（W4 の「#101 が始まらない」は、
+  管理が BEHIND を避けるために逐次で組んでいたためだった）
+
 > **2026-09-16 の実測**：停止中のセッションへ送ると
 > `Failed to send message … prompt not ready: timed out waiting for the composer before sending` で **exit 99** になった。
 > このメッセージは「**送信前に落ちた**」と言っているので、二重送信にはならない。
@@ -111,9 +131,17 @@ commandmate ask musubi --instance command-code "$(cat <依頼文のファイル>
 ## 5. プロンプトで止まったとき
 
 - 本文と選択肢を**そのまま**人へ見せる。要約しない。番号の並びも変えない
-- **相手の auto-yes は触らない**（`--auto-yes` を付けない、`commandmate auto-yes` を打たない）。有効にするのは**人が CommandMate の UI で**行う
-- **auto-yes は、相手のセッションが再起動すると off に戻る**（2026-09-16 に 2 回。CLI の自動更新で再起動が起きた）。
-  長い依頼の途中で急に prompt で止まったら、まず `commandmate instances <wt> --json` の `autoYes` を見る。off なら人に入れ直してもらう
+- **このリポジトリでは、窓口が auto-yes を有効にしてよい**（2026-09-17 所有者が決定。`cmate-delegate` §6「相手の auto-yes は触らない」を、このリポジトリに限って上書きする）。
+  **auto-yes は相手のセッションの再起動で off に戻る**（2026-09-16〜17 に 3 回。CLI の自動更新で再起動が起きる）ので、**依頼を送る前に確認して、off なら有効にする**。
+
+  ```bash
+  commandmate instances musubi --json   # autoYes を見る
+  commandmate auto-yes musubi --enable  # off なら有効にしてから送る
+  ```
+
+  - 対象は**このリポジトリのセッション**（管理とワーカー）だけ。ほかのリポジトリのセッションには打たない
+  - **有効にしても、プロンプトに自分で答えることはしない。** auto-yes が拾わない種類（自由記述の質問・rate limit・破壊的な操作の確認）は、従来どおり本文を人へ見せて止まる
+  - 無効化（`--disable`）は人の操作である。窓口からは戻さない
 - 人が「答えていい」と言ったときだけ `commandmate respond musubi "<番号>" --instance command-code`。**`yes` は番号に解決されない**
 
 ---
@@ -148,6 +176,10 @@ commandmate instances <worktree-id> remove antigravity
 commandmate ls --json   # cliToolId が command-code になっていることを確かめる
 ```
 
+- **`commandmate sync` は、この固定を戻す**（`cliToolId` が既定の `claude` に戻る。2026-09-17 の実測）。
+  sync は worktree を消したあとの registry の掃除で打つので、**走っているワーカーがいる間は打たない**。
+  打ってしまったら固定し直すか、送るときに `--instance command-code` を明示する
+
 ### 6.2 ワーカーに push と PR を作らせる方法
 
 **実行契約の `## Rules` に書き足す口は無い**（dispatch runner 内の固定配列で、`## Method` は
@@ -169,6 +201,11 @@ commandmate ls --json   # cliToolId が command-code になっていることを
 3. CI が回り直して `CLEAN` になってから `gh pr merge <n> --squash`
 
 - 実測：W2（3 本）は 2 本目以降が必ず BEHIND で、ワーカーと 2 往復した。W3（1 本）は 0 往復
+- **並列か逐次かは、依頼文で指定する。** 指定しないと planner と管理の判断に委ねられる（W4 では
+  planner が `[[102],[101]]` に割り、管理は 1 本目を merge してから 2 本目の worktree を作って BEHIND を避けた）
+  - **逐次**：BEHIND が出ない。ただし 2 本目は 1 本目の merge を待つので遅い
+  - **並列**：速い。ただし 2 本目以降は必ず BEHIND の往復が要る
+  - 目安は「**実装が長い 2 本なら並列、短い 2 本なら逐次**」
 - **窓口の文書 PR でも同じことが起きる**（PR #120 が「out-of-date with the base branch」で止まった）。
   対処は自分の worktree で `git merge origin/main` → `pnpm install --frozen-lockfile` → `pnpm check` → push → `CLEAN` を待つ。
   **文書 PR を長く開いたままにしない**（開いているあいだに実装 PR が入るほど当たりやすい）
@@ -187,6 +224,10 @@ commandmate ls --json   # cliToolId が command-code になっていることを
 | `## 参照` | 読むだけのファイル | — |
 | 地の文 | **パスを書かない。** 「`pins/commandagent.json` は変えない」も書かない | 変えないはずのファイルが `scope.allow` に入り、変えるべきファイルが入らない |
 
+- **`## 対象ファイル` を Issue 間で重ねない。** とくに `pnpm-lock.yaml` は、同じ回に出す Issue のうち
+  **1 本だけ**が持つようにする（W4 では #101 と #102 が共有し、planner が file_conflict の edge を作った）
+- **`## 対象ファイル` の直下に書く注記にも、Issue 番号を書かない。** 節の中の一文でも依存として読まれる
+  （W4 の `#101 → #102` の edge はこれが一因）。番号を書いてよいのは `## 依存` と `## 参照` だけ
 - `human-only` ラベルの Issue（人がスマホでデモする等）は、**dispatch の対象から外す**
 - 1 Issue = 1 パッケージ前後・語彙 1〜2 個。契約の goal は 8000 文字まで（`CLAUDE.md`）
 
