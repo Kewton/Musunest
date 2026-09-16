@@ -128,6 +128,36 @@ commandmate ask musubi --instance command-code "$(cat <依頼文のファイル>
 | 6 | 管理 | PR を確認して squash merge。例外（運用文書・`.commandmate/`・`.tf`）は人へ回す |
 | 7 | 管理 → 窓口 → 人 | 全部の merge が終わったら報告。そのあと 🧑 の Issue でデモと振り返り |
 
+### 6.1 worktree の用意と、ワーカーの CLI（2026-09-16 の実測）
+
+- **dispatch は worktree を作らない。** `--prepare-worktrees --worktree-setup <ランチャー>` で
+  provider に作らせる形だが、**`cmate-worktree-setup` は手順であって runner を持たない**。
+  リポジトリに provider の実体を置く作業は **#118**。それまでは、**管理が `cmate-worktree-setup` の手順で
+  worktree を作ってから、`--prepare-worktrees` 無しで dispatch する**
+- **ワーカーの CLI は、worktree の既定（`commandmate ls --json` の `cliToolId`）で決まる。**
+  dispatch の `send` は instance を指定しないためである（#96 ではワーカーが Claude になった）
+- **Command Code に固定するには、worktree の roster から他の CLI を外す**（外した順に既定が次へ移り、
+  1 つだけ残すとそれが `cliToolId` になる）
+
+```bash
+commandmate instances <worktree-id> remove claude --kill
+commandmate instances <worktree-id> remove codex
+commandmate instances <worktree-id> remove antigravity
+commandmate ls --json   # cliToolId が command-code になっていることを確かめる
+```
+
+### 6.2 ワーカーに push と PR を作らせる方法
+
+**実行契約の `## Rules` に書き足す口は無い**（dispatch runner 内の固定配列で、`## Method` は
+むしろ「push も PR も許可しない」と書く）。だから運用はこうする。
+
+1. dispatch で実装させ、**検証ゲートが緑**になるまで待つ
+2. **管理が、そのワーカーへ追加のメッセージを送る**（`commandmate send <worktree-id> "…"`）。
+   中身は「push して `gh pr create`。タイトルは Conventional Commits、本文に `Closes #N` と検証の証跡。merge はしない」
+3. ワーカーが PR を作る。管理が CI green と scope を確認して `gh pr merge --squash`
+
+この 2 段を**依頼文に明記する**。書かないと、ワーカーは commit で止まったまま終わる。
+
 ---
 
 ## 7. planner が読める Issue の書き方
@@ -160,7 +190,25 @@ M1.1 の 9 件を最初に plan したときに起きたこと。
 
 ---
 
-## 8. partial で返ってきたら
+## 8. 一周が回った記録（2026-09-16・#96）
+
+最初の 1 本（#96）は、次のとおり一周した。**次のセッションは、この形を基準にしてよい。**
+
+| 段 | 結果 |
+|---|---|
+| plan | `--issues 96 --no-infer` で 1 件の plan（status=success・blocking 0） |
+| worktree | `cmate-worktree-setup` が `feat/96-…` を `../Musunest-issue-96` に作成。baseline 5 段 pass |
+| dispatch | worker=completed / verify=pass（work-evidence・scope ＋ verify.yaml の 7 段＝9 ゲート） |
+| push・PR | 契約には書けないので、**管理が追加メッセージで指示**して PR #117 をワーカーが作成 |
+| merge | 管理が CI green と scope 内を確認して squash merge（`bbbd1ec`）。`Closes #96` で Issue も閉じた |
+| 後始末 | 窓口が worktree と branch を削除し、`commandmate sync` で registry を戻した |
+
+所要は、送信から merge まで約 1 時間（ワーカーの実装が大半）。**窓口の `ask` は 30 分で切れる**ので、
+`wait` を張り直して受け取った（§3 の 124）。
+
+---
+
+## 9. partial で返ってきたら
 
 1. run directory（`.commandmate/orchestrate/runs/<run-id>/`）の `plan.json` の `warnings` と `result.json` の `status` を**自分で読む**。相手の要約だけで判断しない
 2. **Issue を直すのは窓口である。** 管理やワーカーに本文を書き換えさせない
