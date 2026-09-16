@@ -19,6 +19,9 @@
     },
     {
       "path": "../../packages/app-do"
+    },
+    {
+      "path": "../../packages/control-plane"
     }
   ]
 }
