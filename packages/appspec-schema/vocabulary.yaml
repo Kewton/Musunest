@@ -1,0 +1,156 @@
+# 語彙の台帳（workspace/mvp/m1/04-spec-evolution.md §6.2）
+#
+# 1 行に 1 つの語彙を置き、語彙が「一周」を置き去りにしていないかを機械で確かめる。
+# **欄が 1 つでも欠けた行があれば、unit テスト（src/index.test.ts）で落ちる。**
+# この台帳は、工場（CommandAgent）へ渡す「この版で使える語彙の一覧」にもなる。
+#
+#   name         語彙の名前。src/spec.ts の VOCABULARY と 1 対 1 に対応する
+#   layer        層（integration / data / logic / permission / ui / ux）
+#   since        入った版とマイルストーン
+#   samples      使っている見本（samples/<name>/）
+#   negatives    落ちることを確かめる負例（samples/negatives/<name>.app.spec.yaml）
+#   check_rules  静的チェックの誤りコード。この行の負例が出すコードと、ちょうど同じ集まりにする
+#   semantics    意味の文書の節（docs/semantics.md の「### <節>」）
+#   runtime      動かす場所（packages/ か apps/ の下のパッケージ）。M1.1 の各 Issue で実装する
+#   factory      工場が扱えるか。草案の間は「未対応」（M1.6 で工場が対応したら埋める）
+#
+# 書き方は src/ledger-yaml.ts が読める形に限る（「- 欄: 値」と、2 文字下げた「欄: 値」。並びは 1 行の [a, b]）。
+# 誤りコードは草案で、体系は spec-engine の静的チェック（#97）で確定する。
+
+# ── データ層 ─────────────────────────────────────────────────────
+
+- name: entity
+  layer: data
+  since: v0.2-draft（M1.1）
+  samples: [expense-log]
+  negatives: [entity-duplicate-name, entity-invalid-name, entity-without-fields, field-reserved-name, field-unknown-type]
+  check_rules: [DATA_ENTITY_DUPLICATE_NAME, SHAPE_NAME_INVALID, SHAPE_KEY_MISSING, DATA_FIELD_NAME_RESERVED, DATA_FIELD_TYPE_UNKNOWN]
+  semantics: docs/semantics.md#entity
+  runtime: [spec-engine, data-api, app-do, host]
+  factory: 未対応
+
+- name: string
+  layer: data
+  since: v0.2-draft（M1.1）
+  samples: [expense-log]
+  negatives: [string-in-arithmetic]
+  check_rules: [LOGIC_OPERAND_TYPE_MISMATCH]
+  semantics: docs/semantics.md#string
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+- name: number
+  layer: data
+  since: v0.2-draft（M1.1）
+  samples: [expense-log]
+  negatives: [number-in-len]
+  check_rules: [LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH]
+  semantics: docs/semantics.md#number
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+- name: list
+  layer: data
+  since: v0.2-draft（M1.1）
+  samples: [expense-log]
+  negatives: [list-in-comparison]
+  check_rules: [LOGIC_OPERAND_TYPE_MISMATCH]
+  semantics: docs/semantics.md#list
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+# ── ロジック層 ───────────────────────────────────────────────────
+
+- name: validation
+  layer: logic
+  since: v0.2-draft（M1.1）
+  samples: [expense-log]
+  negatives: [validation-not-boolean, validation-unknown-field]
+  check_rules: [LOGIC_VALIDATION_NOT_BOOLEAN, LOGIC_REFERENCE_NOT_FOUND]
+  semantics: docs/semantics.md#validation
+  runtime: [spec-engine, data-api]
+  factory: 未対応
+
+- name: computed
+  layer: logic
+  since: v0.2-draft（M1.1）
+  samples: [expense-log]
+  negatives: [computed-cycle, computed-name-conflict, computed-other-entity, computed-type-mismatch, computed-unknown-function]
+  check_rules: [LOGIC_COMPUTED_CYCLE, LOGIC_COMPUTED_NAME_CONFLICT, LOGIC_REFERENCE_OUT_OF_ENTITY, LOGIC_COMPUTED_TYPE_MISMATCH, LOGIC_FUNCTION_NOT_ALLOWED]
+  semantics: docs/semantics.md#computed
+  runtime: [spec-engine, data-api]
+  factory: 未対応
+
+- name: min
+  layer: logic
+  since: v0.2-draft（M1.1）
+  samples: [expense-log]
+  negatives: [min-wrong-arity]
+  check_rules: [LOGIC_FUNCTION_ARITY_MISMATCH]
+  semantics: docs/semantics.md#min
+  runtime: [spec-engine, data-api]
+  factory: 未対応
+
+- name: max
+  layer: logic
+  since: v0.2-draft（M1.1）
+  samples: [expense-log]
+  negatives: [max-list-argument]
+  check_rules: [LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH]
+  semantics: docs/semantics.md#max
+  runtime: [spec-engine, data-api]
+  factory: 未対応
+
+- name: len
+  layer: logic
+  since: v0.2-draft（M1.1）
+  samples: [expense-log]
+  negatives: [number-in-len]
+  check_rules: [LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH]
+  semantics: docs/semantics.md#len
+  runtime: [spec-engine, data-api]
+  factory: 未対応
+
+- name: action
+  layer: logic
+  since: v0.2-draft（M1.1）
+  samples: [expense-log]
+  negatives: [action-unknown-entity, action-with-kind]
+  check_rules: [LOGIC_ENTITY_NOT_FOUND, SHAPE_KEY_UNKNOWN]
+  semantics: docs/semantics.md#action
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+# ── UI 層 ───────────────────────────────────────────────────────
+
+- name: view
+  layer: ui
+  since: v0.2-draft（M1.1）
+  samples: [expense-log]
+  negatives: [view-unknown-entity, view-with-type]
+  check_rules: [UI_ENTITY_NOT_FOUND, SHAPE_KEY_UNKNOWN]
+  semantics: docs/semantics.md#view
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+# ── 権限 ────────────────────────────────────────────────────────
+
+- name: permission
+  layer: permission
+  since: v0.2-draft（M1.1）
+  samples: [expense-log]
+  negatives: [permission-unknown-name, permission-unknown-subject]
+  check_rules: [PERMISSION_NAME_NOT_ALLOWED, PERMISSION_SUBJECT_NOT_ALLOWED]
+  semantics: docs/semantics.md#permission
+  runtime: [spec-engine, data-api]
+  factory: 未対応
+
+- name: anonymous
+  layer: permission
+  since: v0.2-draft（M1.1）
+  samples: [expense-log]
+  negatives: [identity-unknown-mode]
+  check_rules: [PERMISSION_IDENTITY_MODE_NOT_ALLOWED]
+  semantics: docs/semantics.md#anonymous
+  runtime: [spec-engine, data-api]
+  factory: 未対応

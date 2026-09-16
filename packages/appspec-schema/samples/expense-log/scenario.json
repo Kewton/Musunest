@@ -1,0 +1,129 @@
+{
+  "$comment": "見本「支出の記録」の採点のシナリオ。steps を先頭から順に行い、各操作の結果と、最後の一覧を期待値と比べる。形は src/samples.ts の ScoringScenario、意味は docs/semantics.md。1e400 は JSON.parse で有限でない数（Infinity）になる入力としてわざと置いてある。",
+  "sample": "expense-log",
+  "clock": "2026-09-16T12:00:00+09:00",
+  "steps": [
+    {
+      "name": "夕食を入れる（クーポン 600 円）",
+      "action": "addExpense",
+      "input": { "description": "夕食", "amount": 6600, "discount": 600, "payer": "A", "participants": ["A", "B", "C"] },
+      "expect": { "accepted": true }
+    },
+    {
+      "name": "タクシーを入れる",
+      "action": "addExpense",
+      "input": { "description": "タクシー", "amount": 3000, "discount": 0, "payer": "B", "participants": ["A", "B", "C"] },
+      "expect": { "accepted": true }
+    },
+    {
+      "name": "金額が 0 なら断る",
+      "action": "addExpense",
+      "input": { "description": "返品", "amount": 0, "discount": 0, "payer": "A", "participants": ["A"] },
+      "expect": { "rejected": { "fields": [], "validations": ["positiveAmount"] } }
+    },
+    {
+      "name": "通らない検査が 2 つなら、宣言の順に 2 つとも返す",
+      "action": "addExpense",
+      "input": { "description": "返品", "amount": 0, "discount": -100, "payer": "A", "participants": ["A"] },
+      "expect": { "rejected": { "fields": [], "validations": ["positiveAmount", "nonNegativeDiscount"] } }
+    },
+    {
+      "name": "割引が負なら断る",
+      "action": "addExpense",
+      "input": { "description": "お土産", "amount": 1000, "discount": -1, "payer": "C", "participants": ["C"] },
+      "expect": { "rejected": { "fields": [], "validations": ["nonNegativeDiscount"] } }
+    },
+    {
+      "name": "割引が金額を超えても保存し、払った額は 0 にする",
+      "action": "addExpense",
+      "input": { "description": "コーヒー", "amount": 400, "discount": 500, "payer": "C", "participants": ["C"] },
+      "expect": { "accepted": true }
+    },
+    {
+      "name": "割る人が空なら断る",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 3000, "discount": 0, "payer": "A", "participants": [] },
+      "expect": { "rejected": { "fields": ["participants"], "validations": [] } }
+    },
+    {
+      "name": "割る人が重なっていたら断る",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 3000, "discount": 0, "payer": "A", "participants": ["A", "A"] },
+      "expect": { "rejected": { "fields": ["participants"], "validations": [] } }
+    },
+    {
+      "name": "割る人に文字列でないものがあれば断る",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 3000, "discount": 0, "payer": "A", "participants": ["A", 1] },
+      "expect": { "rejected": { "fields": ["participants"], "validations": [] } }
+    },
+    {
+      "name": "金額が文字列なら断る",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": "3000", "discount": 0, "payer": "A", "participants": ["A"] },
+      "expect": { "rejected": { "fields": ["amount"], "validations": [] } }
+    },
+    {
+      "name": "金額が有限の数でなければ断る",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 1e400, "discount": 0, "payer": "A", "participants": ["A"] },
+      "expect": { "rejected": { "fields": ["amount"], "validations": [] } }
+    },
+    {
+      "name": "割引が null なら断る（M1.1 の項目はすべて必須）",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 3000, "discount": null, "payer": "A", "participants": ["A"] },
+      "expect": { "rejected": { "fields": ["discount"], "validations": [] } }
+    },
+    {
+      "name": "項目が足りなければ断る",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 3000, "payer": "A", "participants": ["A"] },
+      "expect": { "rejected": { "fields": ["discount"], "validations": [] } }
+    },
+    {
+      "name": "知らない項目があれば断る",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 3000, "discount": 0, "payer": "A", "participants": ["A"], "memo": "駅前" },
+      "expect": { "rejected": { "fields": ["memo"], "validations": [] } }
+    },
+    {
+      "name": "計算値を入力に含めたら断る",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 3000, "discount": 0, "payer": "A", "participants": ["A"], "shareAmount": 3000 },
+      "expect": { "rejected": { "fields": ["shareAmount"], "validations": [] } }
+    },
+    {
+      "name": "店頭が付ける値を入力に含めたら断る",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 3000, "discount": 0, "payer": "A", "participants": ["A"], "createdAt": "2026-09-16T12:00:00+09:00" },
+      "expect": { "rejected": { "fields": ["createdAt"], "validations": [] } }
+    },
+    {
+      "name": "型の違う項目が 2 つなら、2 つとも返す（順は問わない）",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": "x", "discount": 0, "payer": "A", "participants": [] },
+      "expect": { "rejected": { "fields": ["amount", "participants"], "validations": [] } }
+    },
+    {
+      "name": "型の検査で断ったら、検査の式は評価しない",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": "0", "discount": -1, "payer": "A", "participants": ["A"] },
+      "expect": { "rejected": { "fields": ["amount"], "validations": [] } }
+    },
+    {
+      "name": "内容が空の文字列でも保存する（M1.1 に必須の指定は無い）",
+      "action": "addExpense",
+      "input": { "description": "", "amount": 900, "discount": 0, "payer": "B", "participants": ["B", "C"] },
+      "expect": { "accepted": true }
+    }
+  ],
+  "views": {
+    "expenseList": [
+      { "description": "夕食", "amount": 6600, "discount": 600, "payer": "A", "participants": ["A", "B", "C"], "paidAmount": 6000, "headcount": 3, "shareAmount": 2000 },
+      { "description": "タクシー", "amount": 3000, "discount": 0, "payer": "B", "participants": ["A", "B", "C"], "paidAmount": 3000, "headcount": 3, "shareAmount": 1000 },
+      { "description": "コーヒー", "amount": 400, "discount": 500, "payer": "C", "participants": ["C"], "paidAmount": 0, "headcount": 1, "shareAmount": 0 },
+      { "description": "", "amount": 900, "discount": 0, "payer": "B", "participants": ["B", "C"], "paidAmount": 900, "headcount": 2, "shareAmount": 450 }
+    ]
+  }
+}

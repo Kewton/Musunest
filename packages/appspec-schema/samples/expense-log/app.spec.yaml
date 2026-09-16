@@ -1,0 +1,56 @@
+# 見本「支出の記録」（M1.1。community.app-spec/v0.2-draft）
+#
+# 語彙は v0.1 と同じ（entity と項目・追加の操作・入力の検査・同じ entity の中の計算・一覧・anonymous）。
+# デモ：支出を 2 件入れると一覧に出て、1 人あたりの額が出る（workspace/mvp/roadmap.md §4）。
+# 採点のシナリオは同じディレクトリの scenario.json、意味は ../../docs/semantics.md にある。
+
+entities:
+  - name: expense
+    fields:
+      description: string   # 内容
+      amount: number        # 金額（円。割引の前）
+      discount: number      # 割引（円）。無ければ 0
+      payer: string         # 払った人
+      participants: list    # 割る人
+
+views:
+  - name: expenseList
+    entity: expense
+
+actions:
+  - name: addExpense
+    entity: expense
+
+validations:
+  - name: positiveAmount
+    entity: expense
+    expression: amount > 0
+  - name: nonNegativeDiscount
+    entity: expense
+    expression: discount >= 0
+
+computed:
+  # 実際に払った額。割引は金額を超えて引かない（1,000 円の券で 800 円の買い物をしたら 0 円）
+  - name: paidAmount
+    entity: expense
+    expression: amount - min(discount, amount)
+    type: number
+  # 割る人数
+  - name: headcount
+    entity: expense
+    expression: len(participants)
+    type: number
+  # 1 人あたりの額。max は 0 で割らないための守り（list は空を許さないので、M1.1 では headcount のまま）
+  - name: shareAmount
+    entity: expense
+    expression: paidAmount / max(1, headcount)
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous
