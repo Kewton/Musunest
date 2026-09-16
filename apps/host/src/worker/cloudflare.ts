@@ -1,8 +1,10 @@
 // Cloudflare の adapter。Service Binding（Fetcher）と Workers 固有の API を叩くのはこのファイルだけ。
 //
-// binding の型と、healthz が gateway を呼ぶ実体、X-Musunest-Probe を時間一定で照合する実体を置く。
-// 判定と応答の形は src/worker/healthz.ts が持つ（apps/gateway/src/cloudflare.ts と同じ形）。
+// binding の型と、healthz が gateway を呼ぶ実体、/api/* を gateway へ中継する実体、
+// X-Musunest-Probe を時間一定で照合する実体を置く。
+// 判定と応答の形は src/worker/healthz.ts と src/worker/api.ts が持つ（apps/gateway/src/cloudflare.ts と同じ形）。
 // **D1 / R2 / DO の binding をここに足さない**（CLAUDE.md 不変条件。src/.oxlintrc.json が型と import で落とす）。
+import type { GatewayRelay } from "./api";
 import { GATEWAY_HEALTHZ_PATH, PROBE_HEADER } from "./contract";
 import type { GatewayHealthz, ProbeVerifier } from "./healthz";
 
@@ -33,6 +35,20 @@ export function cloudflareGateway(env: HostEnv): GatewayHealthz {
   const secret = env.MUSUNEST_PROBE_TOKEN;
   const headers: Record<string, string> = secret === undefined || secret === "" ? {} : { [PROBE_HEADER]: secret };
   return () => env.GATEWAY.fetch(new URL(GATEWAY_HEALTHZ_PATH, GATEWAY_ORIGIN), { headers });
+}
+
+/**
+ * /api/* のリクエストを gateway へ1回中継する。**宛先は binding と固定の内部 origin が決める**——
+ * 利用者の URL の origin は捨て、path と query だけを保つ（利用者の query やヘッダに外部 URL を
+ * 選ばせない）。method・ヘッダ・body は元の Request のまま運び、応答はそのまま返す
+ * （status・content-type・body を gateway のものに保つ）。
+ * X-Musunest-Probe は載せない——あれは healthz の詳細を求める合言葉で、API を開く鍵ではない（src/worker/api.ts）。
+ */
+export function cloudflareGatewayRelay(env: HostEnv): GatewayRelay {
+  return (request) => {
+    const url = new URL(request.url);
+    return env.GATEWAY.fetch(new Request(new URL(url.pathname + url.search, GATEWAY_ORIGIN), request));
+  };
 }
 
 /**

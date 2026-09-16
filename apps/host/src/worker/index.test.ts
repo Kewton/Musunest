@@ -1,4 +1,4 @@
-// host の受入試験（Issue #9）。
+// host の受入試験（Issue #9・#103）。
 //
 //   1. wrangler.jsonc（env ごと）：持つ binding は同じ env の gateway への Service Binding だけで、D1 / R2 / DO（と infra:sync が
 //      扱う KV・Queue・dispatch）を持たない。ページは Static Assets が返し、Worker が先に受けるのは /api/* と /healthz だけ
@@ -7,13 +7,17 @@
 //      - 配る Worker のバンドルに React / TanStack Start の描画が入っていない（入っているのはビルド時の prerender Worker だけ）
 //   3. その出力を本物の workerd の上で gateway・data-api と並べて起動し、
 //      - / と深いリンクが同じ SPAシェルを返し、/healthz が Service Binding 越しに gateway → data-api → {D1, R2, DO} まで届く
+//      - /api/* は gateway → data-api まで中継され、data-api の応答（404 の本文・405 の allow）がそのまま返る（Issue #103）
 //   4. Worker を「呼ばれたら目印を返す」罠に差し替えても、ページロードは SPAシェルが返る＝**Static Assets が Worker を起動せずに返している**。
 //      罠に掛かるのは run_worker_first の2つだけ
 //   5. production のビルドの出力では、/healthz の詳細を X-Musunest-Probe が secret と一致したときだけ返す（Issue #55）。
 //      ヘッダ無し・誤った値・正しい値の3通りと、host と gateway の secret が食い違う・secret を置いていない production を workerd 上で確かめる
+//   6. production では /api/* が **gateway を一度も呼ばずに** 404 になる（Issue #103）。呼ばれないことは、宛先を
+//      「呼ばれたら 418 を返す罠」に差し替えて確かめる（下の describe）
 //
 // モックにしないのは gateway と同じ理由：Service Binding が結線されていること、Static Assets の経路が設定どおりであることの
 // 証明は、vite-plugin が wrangler.jsonc を解決した出力を、wrangler が実際に動かすことでしか得られない。
+// 中継の判定そのもの（method・query・body の保持と、422 の行列）は src/worker/api.test.ts が unit で見る。
 //
 // ビルドは一時ディレクトリに写した host で行う。本物の dist/ と .wrangler/deploy/ を書き換えると、手元で作った配備物を
 // テストが黙って別の env のものに差し替えてしまう。wrangler / vitest はルートの package.json に集約してある（gateway と同じ）。
@@ -57,6 +61,35 @@ const DETAIL: Readonly<Record<Env, HealthzDetail>> = { dev: "public", staging: "
  * workerd の上では secret も vars も同じ env の文字列なので、harness の vars で渡す。
  */
 const PROBE_TOKEN = "test-probe-token-0123456789abcdef";
+
+/** /api/* に送ってみる method（Issue #103 の受入条件）。production では全部 404 になる */
+const API_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
+
+/**
+ * data-api の契約に無い /api/* の経路。**登録も D1 も触らない**ので、data-api は必ず 404 を返す
+ * （この試験の harness はマイグレーションも登録も当てていない。契約の経路を叩くと storage の結果に依存する）。
+ * 返る本文が契約の形（{"error":"NOT_FOUND"}）であることが、host → gateway → data-api の3 Worker を通った証明になる
+ * （host 自身の 404 は {"error":"not found"} で、別の文言である）。
+ */
+const API_PATH = "/api/communities";
+
+/** 罠の Worker が返す本文。中継が下流を呼べば、この本文が応答に出る（workerd も gateway も返さない文字列） */
+const RELAY_TRIPWIRE = "gateway was relayed to";
+
+/**
+ * Service Binding の宛先を「呼ばれたら分かる」Worker に差し替えるための設定を書く。
+ * **宛先の無い Service Binding では workerd が起動しない**ので、本物の代わりに罠を置く。
+ */
+function trapGateway(env: string): { readonly configPath: string; readonly dir: string } {
+  const dir = mkdtempSync(join(tmpdir(), `host-trap-${env}-`));
+  writeFileSync(join(dir, "index.js"), `export default { fetch() { return new Response(${JSON.stringify(RELAY_TRIPWIRE)}, { status: 418 }); } };\n`);
+  writeFileSync(
+    join(dir, "wrangler.json"),
+    // 名前は wrangler.jsonc の services[].service（宛先）と同じでなければ、harness は binding を解決できない
+    JSON.stringify({ name: `musunest-${env}-gateway`, main: "index.js", compatibility_date: "2026-09-11" }),
+  );
+  return { configPath: join(dir, "wrangler.json"), dir };
+}
 
 const readConfig = (path: string, env?: string) =>
   unstable_readConfig({ config: path, ...(env === undefined ? {} : { env }) }, { hideWarnings: true });
@@ -289,16 +322,76 @@ describe.each(ENVS)("host → gateway → data-api（env.%s・workerd 上の実�
     expect(Object.keys(body.checks)).toEqual([...HOST_HEALTHZ_CHECKS]);
   });
 
-  it("/api/* は Worker が受け、SPAシェルではなく JSON の 404 を返す", async () => {
-    const res = await server.fetch("/api/communities", { headers: { accept: "application/json" } });
+  it("/api/* は Worker が受け、SPAシェルではなく JSON を返す（dev / staging は data-api の応答が届く・Issue #103）", async () => {
+    const res = await server.fetch(API_PATH, { headers: { accept: "application/json" } });
+
     expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: "not found" });
+    expect(res.headers.get("content-type")).toMatch(/^application\/json/);
+    expect(res.headers.get("content-type")).not.toMatch(/text\/html/);
+    // dev / staging の本文は data-api の契約のもの（host → gateway → data-api の3 Worker を通って届いた）。
+    // production の本文は host 自身のもの——下流（gateway）を呼んでいない
+    expect(await res.json()).toEqual(probe ? { error: "not found" } : { error: "NOT_FOUND" });
+  });
+
+  it("method と経路の判定は data-api が行う：GET を action の経路へ送ると 405 と allow がそのまま返る（dev / staging）", async () => {
+    // data-api は経路の解析と method の検査を storage より先に行うので、登録の無い harness でも結果が決まる。
+    // host も gateway も /api/* で 405 を返さない。allow: POST が返るのは data-api まで届いた証拠である
+    const res = await server.fetch("/api/instances/unknown/actions/addExpense", { headers: { accept: "application/json" } });
+
+    if (probe) {
+      expect(res.status).toBe(404);
+      expect(res.headers.get("allow")).toBeNull();
+    } else {
+      expect(res.status).toBe(405);
+      expect(res.headers.get("allow")).toBe("POST");
+      expect(await res.json()).toEqual({ error: "METHOD_NOT_ALLOWED" });
+    }
   });
 
   it("GET 以外の /healthz は 405", async () => {
     const res = await server.fetch(HEALTHZ_PATH, { method: "POST" });
     expect(res.status).toBe(405);
     expect(res.headers.get("allow")).toBe("GET");
+  });
+});
+
+describe("production の /api/* は gateway を一度も呼ばずに 404（workerd 上の実機・Issue #103 の受入試験）", () => {
+  // 宛先を罠に差し替える。中継が下流を呼べば 418 と RELAY_TRIPWIRE が返るので、「一度も呼ばれない」が応答で読める
+  // （workerd は宛先の無い Service Binding では起動しないので、binding を外す形では確かめられない）。
+  // production のビルドの出力（vars.ENVIRONMENT=production・Static Assets・run_worker_first）はそのまま使う。
+  const trap = trapGateway("production");
+  let server: TestHarness;
+
+  beforeAll(async () => {
+    server = createTestHarness({
+      workers: [
+        { configPath: buildOf("production").workerConfigPath, vars: { GIT_SHA: "test-sha" } },
+        { configPath: trap.configPath },
+      ],
+    });
+    await server.listen();
+  }, BOOT_TIMEOUT_MS);
+
+  afterAll(async () => {
+    await server?.close();
+    rmSync(trap.dir, { recursive: true, force: true });
+  }, BOOT_TIMEOUT_MS);
+
+  it.each(API_METHODS)("%s：404 の JSON を返し、gateway を呼ばない", async (method) => {
+    const res = await server.fetch(API_PATH, { method, headers: { accept: "application/json" } });
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("content-type")).toMatch(/^application\/json/);
+    const text = await res.text();
+    expect(text).not.toContain(RELAY_TRIPWIRE);
+    expect(JSON.parse(text)).toEqual({ error: "not found" });
+  });
+
+  it.each(API_METHODS)("%s：X-Musunest-Probe を付けても 404 のまま（合言葉で API を開けない）", async (method) => {
+    const res = await server.fetch(API_PATH, { method, headers: { [PROBE_HEADER]: PROBE_TOKEN } });
+
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain(RELAY_TRIPWIRE);
   });
 });
 
