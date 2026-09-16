@@ -19,6 +19,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@musunest/appspec-schema": "workspace:*"
+    "@musunest/appspec-schema": "workspace:*",
+    "@musunest/spec-engine": "workspace:*"
   }
 }

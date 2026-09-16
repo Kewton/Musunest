@@ -103,6 +103,9 @@ importers:
       '@musunest/appspec-schema':
         specifier: workspace:*
         version: link:../appspec-schema
+      '@musunest/spec-engine':
+        specifier: workspace:*
+        version: link:../spec-engine
 
   packages/data-api:
     dependencies:
