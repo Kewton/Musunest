@@ -10,7 +10,14 @@
 // wrangler.jsonc（このパッケージの local-dev ハーネス）と data-api 側の wrangler.jsonc は、
 // どちらも下の APP_INSTANCE_DO_* を正本として同じ class_name / tag を書く。
 import { DurableObject } from "cloudflare:workers";
-import type { HealthzResult, StoredEntry } from "./contract";
+import type {
+  HealthzResult,
+  RecordData,
+  RecordStamp,
+  StoredEntry,
+  StoredRecord,
+} from "./contract";
+import * as records from "./records";
 
 export * from "./contract";
 
@@ -42,6 +49,8 @@ export class AppInstanceDO extends DurableObject<AppDoEnv> {
          updated_at TEXT NOT NULL
        )`,
     );
+    // 宣言の entity のレコードの表（Issue #99）。kv と healthz はそのまま残す。
+    records.ensureRecordsTable(ctx.storage.sql);
   }
 
   /** 03 §4 の最小実装。SQLite に1行書いて数え直す＝読み書きの往復を1回で見せる。 */
@@ -97,6 +106,66 @@ export class AppInstanceDO extends DurableObject<AppDoEnv> {
   /** DO ストレージのバイト数。無償枠は 1オブジェクト 1GB（06 §2）なので M1 以降で監視する。 */
   async storageSize(): Promise<number> {
     return this.ctx.storage.sql.databaseSize;
+  }
+
+  // ── 宣言の entity のレコード（Issue #99） ────────────────────────────
+  //
+  // M1.1 の公開操作は「1 件の追加」と「一覧」だけである（workspace/mvp/m1/README.md §10.2）。
+  // 1 件取得・更新・削除は保存の部品として今から出す——#102 は追加と一覧だけを使い、
+  // 更新・削除は M1.2 の語彙（直す・消す）が来たときに使う。
+  //
+  // **受け取るのは判定済みのデータだけである。** 入力の検査・権限・参照先の判断は data-api が行い、
+  // DO は保存だけを受け持つ（contract.ts「宣言の entity のレコード」）。
+
+  /**
+   * entity に 1 件追加し、書いた行を返す。
+   * `stamp` を渡すと ID と日時を固定できる（呼ぶ側の時計を使う。#102）。
+   */
+  async createRecord(
+    entity: string,
+    data: RecordData,
+    stamp?: RecordStamp,
+  ): Promise<StoredRecord> {
+    return records.insertRecord(
+      this.ctx.storage.sql,
+      entity,
+      data,
+      records.recordBoundary(stamp),
+    );
+  }
+
+  /** entity のすべての行を登録順（古いものが先）に返す。1 件も無ければ `[]`。 */
+  async listRecords(entity: string): Promise<StoredRecord[]> {
+    return records.selectRecords(this.ctx.storage.sql, entity);
+  }
+
+  /** entity の 1 行を ID で引く。無ければ `null`。別 entity の ID では引けない。 */
+  async getRecord(entity: string, id: string): Promise<StoredRecord | null> {
+    return records.selectRecord(this.ctx.storage.sql, entity, id);
+  }
+
+  /**
+   * entity の 1 行を書き換える。ID・作成日時・登録順は変えず、更新日時だけを進める。
+   * 無い行では `null`（別 entity の ID を指定した場合も同じ）。
+   */
+  async updateRecord(
+    entity: string,
+    id: string,
+    data: RecordData,
+    stamp?: RecordStamp,
+  ): Promise<StoredRecord | null> {
+    return records.updateRecord(
+      this.ctx.storage.sql,
+      entity,
+      id,
+      data,
+      records.recordBoundary(stamp),
+    );
+  }
+
+  /** entity の 1 行を消す。消せたかどうかを返す（無い行では `false`）。 */
+  async deleteRecord(entity: string, id: string): Promise<boolean> {
+    return records.deleteRecord(this.ctx.storage.sql, entity, id);
   }
 
   /**
