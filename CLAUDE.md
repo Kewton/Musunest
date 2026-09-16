@@ -75,6 +75,30 @@ sdk・spec-engine・app-do・connector → appspec-schema
 - PR は **squash merge のみ**。squash のコミットメッセージ = PRタイトル
 - `main` は保護。直接 push しない。緊急時の管理者バイパスは可能だが、**使ったら Issue に理由を残す**
 
+## 開発の進め方（Issue ごとの並列開発。2026-09-16 所有者が決定）
+
+- **1 Issue = 1 worker。Issue ごとに並列で進める。**
+- 並列開発は、監督セッション（この checkout の `claude`）が **`cmate-delegate`** で
+  **Command Code**（worktree `musubi` / instance `command-code`）へ依頼して始める。
+  依頼の中身は「**`cmate-orchestrate` で Issue ドリブンの並列開発をする**」
+- 宛先は alias から解決する（`commandmate instances musubi --json`）。**instance-id を推測で渡さない**
+- profile は `.commandmate/profiles/musubi.json`（branch `feat/{number}-{slug}`、
+  worktree `../{repo}-issue-{number}`、baseline に `link-env.sh`）。
+  **worktree を作るのは `cmate-worktree-setup`** であって dispatch ではない
+
+| | やること |
+|---|---|
+| **監督側**（人・監督セッション） | Issue を切る（`cmate-issue-authoring`）／依存と粒度を決める／`.commandmate/` 配下・`.tf`・`.gitignore`・ディレクトリの移動／**運用文書（`workspace/`・`CLAUDE.md`）を含む PR は人が読んで merge**／プロンプト待ちの回収 |
+| **Command Code** | `cmate-orchestrate` の 4 段（plan → dispatch → merge → uat）。**実装の Issue は、検証 pass と CI pass を条件に guarded merge まで。** 機械で判定できる受入は uat（`cmate-acceptance-test`）まで |
+| **ワーカー** | `cmate-worker-development` に従って 1 Issue を実装し、`cmate-verify` で検証する。**push・PR 作成・merge はしない** |
+
+- **スマホでのデモと振り返りは人が行う**（🧑 の Issue。マイルストーンごと。`workspace/mvp/roadmap.md` §1）。
+  uat が見るのは機械で判定できる分だけである
+- **dispatch で auto-yes を使わない**（`dispatch_defaults.auto_yes: false`）。プロンプトで止まったら人へ返す
+- 実行契約（`.commandmate/tasks/*.yaml`）の goal は **8000 文字まで**。対象のソースが概ね 30 本を超える Issue、
+  `.tf`・`.gitignore`・ディレクトリの移動を含む Issue は **dispatch できない**。分割するか、監督側が手で行う
+- **ワーカーは `.commandmate/verify.yaml` を直さない**（下の検証ゲートの節）。ゲートを足す必要に気づいたら、止めて人に返す
+
 ## コマンド
 
 ```bash
