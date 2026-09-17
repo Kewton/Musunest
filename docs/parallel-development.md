@@ -88,6 +88,26 @@ commandmate ask musubi --instance command-code "$(cat <依頼文のファイル>
 | `99` | 送信できなかった | 下の実測を見る |
 | `124` | 時間内に返らなかった | **再送しない**（2 つ動く）。相手は走り続けているので、`capture` で状況を人に見せ、**`wait` を張り直す**（W2 では 30 分窓を 3 回張り直した） |
 
+### 3.0 相手のセッションが落ちたとき
+
+**管理やワーカーのセッションは、未処理の例外で落ちることがある**（2026-09-17 に発生。シェルの許可判定で
+`Bad substitution: ${}`。[CommandCodeAI/command-code#873](https://github.com/CommandCodeAI/command-code/issues/873) で報告済み）。
+`wait` は `10` で返ることもあり、画面にはシェルのプロンプトだけが残る。
+
+**落ちても作業は消えない。** 次の順で確かめて、続きだけを頼む。
+
+```bash
+commandmate instances musubi --json                 # 管理の生死と autoYes
+commandmate instances <worktree-id> --json          # ワーカーの生死
+git -C ../<worktree> log --oneline -1               # commit まで行っていたか
+git -C ../<worktree> status --porcelain | wc -l     # 未コミットが残っていないか
+ls -t .commandmate/orchestrate/runs | head -3       # run dir
+```
+
+- **再 dispatch も再実装もさせない。** `dispatch.mjs --reverify <out dir>` は **`send` を 1 回も呼ばずに裁定だけ取り直す**
+- 依頼文には「**何が起きたか（相手は覚えていない）／いまの状態／続きだけをやる**」を必ず書く
+- **`${}` を含むシェルコマンドを組み立てない**ことも書き添える（同じ落ち方を繰り返さないため）
+
 ### 3.1 30 分ごとに進みを測る
 
 `wait` が 124 で切れたら、**まず自分で測る**。次の 5 つは相手に訊かずに分かる。
@@ -135,9 +155,15 @@ commandmate capture musubi --instance command-code --pane --tail 20   # 段と�
   **auto-yes は相手のセッションの再起動で off に戻る**（2026-09-16〜17 に 3 回。CLI の自動更新で再起動が起きる）ので、**依頼を送る前に確認して、off なら有効にする**。
 
   ```bash
-  commandmate instances musubi --json   # autoYes を見る
-  commandmate auto-yes musubi --enable  # off なら有効にしてから送る
+  commandmate instances musubi --json                            # autoYes を見る
+  commandmate auto-yes musubi --instance command-code --enable   # off なら有効にしてから送る
   ```
+
+  - **`--instance` を必ず付ける。** 付けないと **worktree の既定インスタンス**（`cliToolId`）に効く。
+    2026-09-17 に `commandmate auto-yes musubi --enable` を打ったところ、`Auto-yes enabled for musubi (claude)` と返り、
+    **窓口自身のセッション**に効いてしまった
+  - **送る前の確認だけでは足りない。** auto-yes は**送ったあとにも off に戻る**（同日 4 回）。
+    依頼の途中で急に prompt で止まったら、まず `autoYes` を見て、off なら入れ直してから `wait` を張り直す
 
   - 対象は**このリポジトリのセッション**（管理とワーカー）だけ。ほかのリポジトリのセッションには打たない
   - **有効にしても、プロンプトに自分で答えることはしない。** auto-yes が拾わない種類（自由記述の質問・rate limit・破壊的な操作の確認）は、従来どおり本文を人へ見せて止まる
@@ -228,6 +254,14 @@ commandmate ls --json   # cliToolId が command-code になっていることを
   **1 本だけ**が持つようにする（W4 では #101 と #102 が共有し、planner が file_conflict の edge を作った）
 - **`## 対象ファイル` の直下に書く注記にも、Issue 番号を書かない。** 節の中の一文でも依存として読まれる
   （W4 の `#101 → #102` の edge はこれが一因）。番号を書いてよいのは `## 依存` と `## 参照` だけ
+- **scope ゲートの失敗は、ワーカーの失敗ではなく Issue の不足である。** `scope.allow` は **send 時の snapshot** なので、
+  ワーカー側では直せない。**窓口が `## 対象ファイル` を直し、re-plan して contract を作り直す**のが唯一の回復である
+  （2026-09-17 の #106。7 ゲートは全部緑で、落ちたのは scope だけだった）
+- **テストと本体を対で載せる。** #106 で落ちた 3 つは、どれも**テストだけ載って本体が無かった**。
+  とくに見落としやすいのは次の 3 種類である。
+  - **型の正本**（誤りコードの表など。`spec-engine/src/diagnostics.ts`）— ここに登録しないと typecheck が通らない
+  - **再 export**（`appspec-schema/src/index.ts`）
+  - **クライアント本体**（`sdk/src/client.ts`。`client.test.ts` だけ載せがち）
 - **注記にファイル名を書くときは、必ずフルパスで書く。** 裸のファイル名（`contract.ts`）は、リストの項目と
   「同じファイルの別の綴り」と読まれて **`ambiguous_file_candidate` の question が立ち、dispatch が 1 人も送られずに止まる**
   （2026-09-17 の #104 の実測。リポジトリ内の同名ファイルまで scope 候補に 12 件入っていた）。
@@ -274,6 +308,17 @@ M1.1 の 9 件を最初に plan したときに起きたこと。
 | W3 | `--issues 98 --no-infer`。PR #124 を一発で merge（**BEHIND 0 回**。head が main と同じだった） |
 
 - **`external_dependency` の partial は止める理由にならない。** 集合外の依存が merge 済みなら進めてよい（依頼文にそう書いておくと、管理が無駄に止まらない）
+
+### 8.2 M1.2 の #106・#107 の記録
+
+| 回 | 結果 |
+|---|---|
+| #106（`ref`・`message`） | 1 度目は **scope ゲートだけ fail**（テストだけ載せて本体を載せ忘れた 3 path）。窓口が Issue を直して re-plan → 再 dispatch で **9 ゲート pass**。**実装は作り直されず**、commit の tree は byte 同一のままだった。途中で管理のセッションが 1 度落ちたが、worktree の commit は無事で run dir から続けられた |
+| #107（集計 `sum`・`count`） | 送る前に窓口が `## 対象ファイル` を点検し、**テストと本体が対になるよう 6 path を足した**。9 ゲート pass・BEHIND 0 往復で merge |
+
+- **CI が一過性に落ちることがある。** #107 の 1 回目は `MISSING_EXPORT` で赤くなったが、再実行で緑。
+  窓口が `turbo run build --force` / `test --force`（キャッシュ無効）で再現しないことを確認した。
+  **同じ形で落ちたら、まず再実行して「コードの不具合」と「キャッシュ絡みの揺れ」を切り分ける**
 - 3 本並列でも、scope が重ならなければ file conflict は 0 だった。**lockfile を触る Issue は 1 本だけにする**と往復が減る
 
 ---
