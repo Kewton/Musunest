@@ -2,9 +2,16 @@
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "lib": ["ES2023"],
+    "types": ["@cloudflare/workers-types", "node"]
   },
   "include": [
     "src/**/*"
+  ],
+  "references": [
+    {
+      "path": "../packages/sdk"
+    }
   ]
 }
