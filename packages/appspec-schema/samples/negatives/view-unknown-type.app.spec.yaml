@@ -1,4 +1,4 @@
-# 負例：一覧に type を書いている（画面の種類は M1.2 以降の語彙で、M1.1 には無い）。
+# 負例：一覧に、M1.2 の語彙に無い種類 board を書いている（表は table、精算の表示は settlement である）。
 # 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
 
 entities:
@@ -11,7 +11,7 @@ entities:
 views:
   - name: expenseList
     entity: expense
-    type: table
+    type: board
 
 actions:
   - name: addExpense

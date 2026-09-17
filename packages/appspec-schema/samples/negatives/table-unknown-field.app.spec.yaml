@@ -1,0 +1,32 @@
+# 負例：表（type: table）の show に、entity に無い名前 ammount を書いている。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: expense
+    fields:
+      amount: number
+      payer: string
+      participants: list
+
+views:
+  - name: expenseList
+    entity: expense
+    type: table
+    show: [amount, ammount]
+
+actions:
+  - name: addExpense
+    entity: expense
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

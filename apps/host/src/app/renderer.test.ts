@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InstantRenderer } from "./renderer";
-import type { ApiRow, ApiSpecBody, ApiValue, ApiViewBody, ClientErrorCode, ClientResult, MusunestClient } from "@musunest/sdk";
+import type { ApiRow, ApiSpecBody, ApiTransfer, ApiValue, ApiViewBody, ClientErrorCode, ClientResult, MusunestClient } from "@musunest/sdk";
 
 const okResult = <T,>(value: T): ClientResult<T> => ({ ok: true, value });
 const errResult = (code: ClientErrorCode, status: number | null): ClientResult<never> => ({
@@ -640,6 +640,232 @@ describe("集計の表示（member の一覧。M1.2）", () => {
       ["B", "3000", "3000", "0"],
       ["C", "—", "3000", "—"],
     ]);
+  });
+});
+
+// ── 表の show と精算の表示（M1.2。Issue #142） ──────────────────────
+//
+// 見本 warikan の M1.2 の形（`views` に `type: table` と `type: settlement` があり、`expenseList` は
+// `show` を持つ）。**画面は宣言をそのまま使う**——`show` の順に列を並べ、精算は API が返した並びを
+// 見せるだけである（画面は計算しない。03-spec-layers-and-checker.md §2.3）。
+
+const M12_SPEC: ApiSpecBody = {
+  ...WARIKAN_SPEC,
+  spec: {
+    ...WARIKAN_SPEC.spec,
+    views: [
+      // `show` を書かない表は、項目（宣言の順）に続いて計算（宣言の順）である
+      { name: "memberList", entity: "member", type: "table" },
+      // `show` を書けば、その順で列が出る（計算の shareAmount を項目の間に置ける）
+      {
+        name: "expenseList",
+        entity: "expense",
+        type: "table",
+        show: ["description", "shareAmount", "amount", "payer"],
+      },
+      // 精算の表示は列の並びを持たない
+      { name: "settlement", entity: "member", type: "settlement" },
+    ],
+  },
+};
+
+const M12_MEMBERS: readonly ApiRow[] = [
+  makeRow("m1", { name: "A" }, { paid: 6000, owed: 3000, balance: 3000 }),
+  makeRow("m2", { name: "B" }, { paid: 3000, owed: 3000, balance: 0 }),
+  makeRow("m3", { name: "C" }, { paid: 0, owed: 3000, balance: -3000 }),
+];
+
+const M12_EXPENSE_VIEW: ApiViewBody = {
+  instanceId: "inst-1",
+  view: "expenseList",
+  entity: "expense",
+  fields: ["description", "amount", "payer", "participants"],
+  computed: ["headcount", "shareAmount"],
+  permissions: { read: true, write: true },
+  actions: [{ name: "addExpense", entity: "expense" }],
+  rows: [
+    makeRow(
+      "e1",
+      { description: "夕食", amount: 6000, payer: "m1", participants: ["m1", "m2", "m3"] },
+      { headcount: 3, shareAmount: 2000 },
+    ),
+    makeRow(
+      "e2",
+      { description: "タクシー", amount: 3000, payer: "m2", participants: ["m1", "m2", "m3"] },
+      { headcount: 3, shareAmount: 1000 },
+    ),
+  ],
+};
+
+/** M1.2 の見本の形で答える client。`settlement` を差し替えて、空・読めなかったも作れる */
+function makeM12Client(parts: { readonly settlement?: readonly ApiTransfer[] | null } = {}): MusunestClient {
+  const settlement: readonly ApiTransfer[] | null =
+    parts.settlement === undefined ? [{ from: "m3", to: "m1", amount: 3000 }] : parts.settlement;
+  const memberView = (view: string): ApiViewBody => ({
+    instanceId: "inst-1",
+    view,
+    entity: "member",
+    fields: ["name"],
+    computed: ["paid", "owed", "balance"],
+    permissions: { read: true, write: true },
+    actions: [{ name: "addMember", entity: "member" }],
+    rows: M12_MEMBERS,
+    settlement,
+  });
+  return makeClient({
+    spec: () => Promise.resolve(okResult(M12_SPEC)),
+    view: (_instanceId, name) =>
+      Promise.resolve(okResult(name === "expenseList" ? M12_EXPENSE_VIEW : memberView(name))),
+  });
+}
+
+/** 一覧の切替のボタンで、見る一覧を選ぶ */
+function showTable(name: string): void {
+  fireEvent.click(screen.getByRole("button", { name }));
+}
+
+describe("表の列の順（M1.2）", () => {
+  it("show を書かない表は、項目（宣言の順）に続いて計算（宣言の順）である（受入条件）", async () => {
+    const { container } = await renderScreen(makeM12Client());
+
+    expect(await screen.findByText("A")).toBeDefined();
+    // メンバーの表は name・paid・owed・balance の順に出る
+    expect(Array.from(container.querySelectorAll("thead th")).map((th) => th.textContent)).toEqual([
+      "name",
+      "paid",
+      "owed",
+      "balance",
+    ]);
+    expect(rowTexts(container)).toEqual([
+      ["A", "6000", "3000", "3000"],
+      ["B", "3000", "3000", "0"],
+      ["C", "0", "3000", "-3000"],
+    ]);
+  });
+
+  it("show を書いた表は、その順で列が出る（計算を項目の間にも置ける。受入条件）", async () => {
+    const { container } = await renderScreen(makeM12Client());
+    expect(await screen.findByText("A")).toBeDefined();
+
+    showTable("expenseList");
+    expect(await screen.findByText("夕食")).toBeDefined();
+
+    expect(Array.from(container.querySelectorAll("thead th")).map((th) => th.textContent)).toEqual([
+      "description",
+      "shareAmount",
+      "amount",
+      "payer",
+    ]);
+    // 列の順に、値も並ぶ（payer は ID ではなく名前で見せる）
+    expect(rowTexts(container)).toEqual([
+      ["夕食", "2000", "6000", "A"],
+      ["タクシー", "1000", "3000", "B"],
+    ]);
+  });
+});
+
+describe("精算の表示（M1.2）", () => {
+  it("送金元・送金先の ID を名前に写し、「C さん → A さん 3,000 円」の 1 件として見せる（受入条件）", async () => {
+    const { container } = await renderScreen(makeM12Client());
+    expect(await screen.findByText("A")).toBeDefined();
+
+    showTable("settlement");
+    const list = await screen.findByRole("list", { name: "精算" });
+
+    const items = container.querySelectorAll(".settlement li");
+    expect(items).toHaveLength(1);
+    expect(items[0]?.textContent).toBe("C さん → A さん 3,000 円");
+    expect(list.textContent).not.toContain("m3");
+    // 精算の表示は表ではない（一覧の部品を `type` で選ぶ）
+    expect(container.querySelector(".instant-table")).toBeNull();
+  });
+
+  it("精算が空なら「送金は要りません」の状態を出す（受入条件）", async () => {
+    const { container } = await renderScreen(makeM12Client({ settlement: [] }));
+    expect(await screen.findByText("A")).toBeDefined();
+
+    showTable("settlement");
+
+    expect(await screen.findByText("送金は要りません")).toBeDefined();
+    expect(container.querySelector('[data-state="settlementEmpty"]')).not.toBeNull();
+    expect(container.querySelectorAll(".settlement li")).toHaveLength(0);
+  });
+
+  it("精算を読めなかった（null）なら、空の並びに読み替えずエラーを出す", async () => {
+    const { container } = await renderScreen(makeM12Client({ settlement: null }));
+    expect(await screen.findByText("A")).toBeDefined();
+
+    showTable("settlement");
+
+    expect(await screen.findByText("精算の結果を表示できません")).toBeDefined();
+    expect(container.querySelector('[data-state="settlementUnavailable"]')).not.toBeNull();
+    expect(screen.queryByText("送金は要りません")).toBeNull();
+  });
+
+  it("行が多いときも全部を縦に並べ、360 CSS px の幅は CSS の規則で崩さない（受入条件）", async () => {
+    // 実際の精算では、組（送金元・送金先）は互いに異なる（docs/semantics.md「settle」）
+    const many: readonly ApiTransfer[] = Array.from({ length: 30 }, (_item, index) => ({
+      from: `m${index + 2}`,
+      to: "m1",
+      amount: (index + 1) * 1000,
+    }));
+    const { container } = await renderScreen(makeM12Client({ settlement: many }));
+    expect(await screen.findByText("A")).toBeDefined();
+
+    showTable("settlement");
+    await screen.findByRole("list", { name: "精算" });
+
+    expect(container.querySelectorAll(".settlement li")).toHaveLength(30);
+    expect(container.querySelector(".settlement")?.textContent).toContain("30,000 円");
+
+    // jsdom は layout を持たないので、幅は CSS の規則で確かめる（04 §7.2「機械で測れる分」）
+    const css = readFileSync(resolvePath(process.cwd(), "src/app/renderer.css"), "utf8");
+    expect(css).toMatch(/\.settlement\s*\{[^}]*max-width:\s*100%/);
+    expect(css).toMatch(/\.settlement-transfer\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  });
+});
+
+describe("失敗したときのエラーの位置（04 §7.2。M1.2）", () => {
+  it("エラーは、失敗した項目の入力欄と同じフォームの中に出す（項目のそば）", async () => {
+    // **jsdom は layout を持たない**（04 §7.2）。機械で確かめられるのは「どのフォームの、どの項目の話か」
+    // までである——実機での見え方は人のデモで見る。ここでは、エラーをページの外（別の入れ物）へ出さず、
+    // 入力欄と同じフォームの中に置き、**エラー自身が通らなかった項目を名指しする**ことを固定する。
+    const addRecord = vi.fn(() =>
+      Promise.resolve({
+        ok: false as const,
+        error: {
+          status: 422,
+          code: "INPUT_REJECTED" as const,
+          fields: ["participants", "amount"],
+          validations: ["positiveAmount"],
+        },
+      }),
+    );
+    const { container } = await renderScreen(
+      makeClient({ view: () => Promise.resolve(okResult(viewWith({ rows: [] }))), add: addRecord }),
+    );
+
+    await screen.findByText("まだ記録がありません");
+    const form = container.querySelector("form");
+    if (form === null) throw new Error("追加のフォームが無い");
+    fill("description", "昼食");
+    fill("amount", "0");
+    fill("participants", "A");
+    submit();
+
+    const alert = await screen.findByRole("alert");
+    // エラーは、失敗した項目の入力欄と同じフォームの中にある
+    expect(alert.closest("form")).toBe(form);
+    for (const name of ["participants", "amount"]) {
+      const field = form.querySelector(`[data-field="${name}"]`);
+      expect(field, name).not.toBeNull();
+      expect(field?.closest("form"), name).toBe(form);
+    }
+    // どの項目が通らなかったかを、エラーそのものが名指しする
+    expect(alert.textContent).toContain("participants");
+    expect(alert.textContent).toContain("amount");
+    // 打ち直させない（入力値は残る）
+    expect((screen.getByLabelText("amount") as HTMLInputElement).value).toBe("0");
   });
 });
 

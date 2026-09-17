@@ -23,6 +23,7 @@ export type {
   ApiRejectedBody,
   ApiRow,
   ApiSpecBody,
+  ApiTransfer,
   ApiValue,
   ApiViewBody,
   AppSpec,
@@ -37,4 +38,5 @@ export type {
   RefListFieldDeclaration,
   Validation,
   View,
+  ViewType,
 } from "@musunest/appspec-schema";

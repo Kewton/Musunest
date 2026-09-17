@@ -168,6 +168,74 @@ describe("POST /api/instances/:instanceId/actions/:actionName", () => {
   });
 });
 
+// ── 一覧の種類（type・show）と精算（settlement）（M1.2。Issue #142） ──────────
+//
+// 画面（host）が判断に使う値なので、**契約と違う形は成功にしない**。精算は「欄が無い」（宣言が無い）と
+// 「null」（読めなかった）を区別したまま渡す——空の並びに読み替えると、送金が要らない状態と混ざる。
+
+describe("一覧の宣言（type・show）と精算（settlement）", () => {
+  it("一覧の type と show を、型付きで受け取る（種類は table・settlement だけ）", async () => {
+    const spec = {
+      ...SPEC,
+      spec: {
+        ...SPEC.spec,
+        views: [
+          { name: "expenseList", entity: "expense", type: "table", show: ["description", "shareAmount"] },
+          { name: "settlement", entity: "member", type: "settlement" },
+        ],
+      },
+    };
+    const stub = recordingFetch(() => json(200, spec));
+
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: spec });
+  });
+
+  it("知らない type や、type なしの show は INVALID_RESPONSE（キャストしない）", async () => {
+    const cases: unknown[] = [
+      [{ name: "expenseList", entity: "expense", type: "board" }],
+      [{ name: "expenseList", entity: "expense", show: ["description"] }],
+      [{ name: "expenseList", entity: "expense", type: "table", show: "description" }],
+    ];
+    for (const views of cases) {
+      const stub = recordingFetch(() => json(200, { ...SPEC, spec: { ...SPEC.spec, views } }));
+      expect(await clientWith(stub.fetch).getSpec("inst-1")).toMatchObject({
+        ok: false,
+        error: { status: 200, code: INVALID_RESPONSE },
+      });
+    }
+  });
+
+  it("精算の並びをそのまま渡し、null（読めなかった）と欄が無い（宣言が無い）を区別する", async () => {
+    const settlement = [{ from: "m3", to: "m1", amount: 3000 }];
+
+    const withSettlement = recordingFetch(() => json(200, { ...VIEW, settlement }));
+    expect(await clientWith(withSettlement.fetch).getView("inst-1", "expenseList")).toEqual({
+      ok: true,
+      value: { ...VIEW, settlement },
+    });
+
+    const unavailable = recordingFetch(() => json(200, { ...VIEW, settlement: null }));
+    expect(await clientWith(unavailable.fetch).getView("inst-1", "expenseList")).toEqual({
+      ok: true,
+      value: { ...VIEW, settlement: null },
+    });
+
+    const none = recordingFetch(() => json(200, VIEW));
+    expect(await clientWith(none.fetch).getView("inst-1", "expenseList")).toEqual({ ok: true, value: VIEW });
+  });
+
+  it("契約と違う形の精算は INVALID_RESPONSE", async () => {
+    const stub = recordingFetch(() =>
+      json(200, { ...VIEW, settlement: [{ from: "m3", to: "m1", amount: "3000" }] }),
+    );
+
+    expect(await clientWith(stub.fetch).getView("inst-1", "expenseList")).toMatchObject({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE },
+    });
+  });
+});
+
 describe("失敗を成功にしない", () => {
   it("ネットワークの例外は NETWORK_FAILURE（status は null）", async () => {
     const result = await clientWith(throwingFetch()).getSpec("inst-1");

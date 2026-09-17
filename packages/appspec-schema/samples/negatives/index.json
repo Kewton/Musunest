@@ -198,6 +198,13 @@
       "why": "文字列の項目 payer を掛け算に使っている"
     },
     {
+      "name": "table-unknown-field",
+      "codes": [
+        "UI_FIELD_NOT_FOUND"
+      ],
+      "why": "表（type: table）の show に、entity に無い名前 ammount を書いている（M1.2）"
+    },
+    {
       "name": "validation-message-not-string",
       "codes": [
         "SHAPE_VALIDATION_MESSAGE_INVALID"
@@ -226,11 +233,11 @@
       "why": "一覧 expenseList の entity expence が無い"
     },
     {
-      "name": "view-with-type",
+      "name": "view-unknown-type",
       "codes": [
         "SHAPE_KEY_UNKNOWN"
       ],
-      "why": "一覧に type を書いている（画面の種類は M1.2 以降の語彙で、M1.1 には無い）"
+      "why": "一覧に、M1.2 の語彙に無い種類 board を書いている（表は table、精算の表示は settlement。M1.2）"
     }
   ]
 }

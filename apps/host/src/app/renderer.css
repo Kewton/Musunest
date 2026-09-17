@@ -78,6 +78,18 @@
   background: #f2f2f2;
 }
 
+/* 精算の表示（M1.2）。縦に伸びるので横に流さない。**幅 360 CSS px でも崩れない**——
+   長い名前や額は折り返し、`max-width: 100%` でページ全体を押し広げない。行が多いときは縦に伸びる。 */
+.settlement {
+  max-width: 100%;
+  margin: 0 0 16px;
+  padding-left: 1.25em;
+}
+
+.settlement-transfer {
+  overflow-wrap: anywhere;
+}
+
 .add {
   max-width: 100%;
   margin-top: 20px;

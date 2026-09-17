@@ -257,10 +257,34 @@ export const COMPARISON_OPERATORS = [">", ">=", "<", "<=", "==", "!="] as const;
 
 // ── UI 層 ───────────────────────────────────────────────────────
 
-/** 種類の指定の無い一覧。M1.1 では、その entity のすべてのレコードを登録順に並べる。 */
+/**
+ * 一覧の種類（M1.2。04 §7.3）。`views` の `type` に書ける語彙は**この 2 つだけ**である。
+ *   `table`      … 表。項目と計算を列に並べる（`show` で列と順を選べる）
+ *   `settlement` … 精算の表示。API が返した送金の並び（送金元・送金先の ID と額）を、
+ *                  メンバーの名前に対応づけて見せる。**画面は計算しない**（`03` §2.3）
+ */
+export const VIEW_TYPES = ["table", "settlement"] as const;
+export type ViewType = (typeof VIEW_TYPES)[number];
+
+/**
+ * 一覧。種類の指定の無い一覧（M1.1）は、その entity のすべてのレコードを登録順に並べる。
+ *
+ * M1.2 で `type` と `show` を足した。**書ける欄は `type` が決める**（語彙は閉じている）。
+ *   `type` なし（M1.1 と同じ）… `name`・`entity` だけ
+ *   `type: table`            … 上に `type`・`show`
+ *   `type: settlement`       … 上に `type`。`show` は書けない（列の並びを持たない）
+ */
 export interface View {
   readonly name: string;
   readonly entity: string;
+  /** 一覧の種類（M1.2）。書かなければ種類の指定の無い一覧である */
+  readonly type?: ViewType;
+  /**
+   * 表に出す、同じ entity の項目と計算（行ごとの値になる計算）の名前。
+   * **書いた順が列の順**になる。書かなければ、項目（宣言の順）に続いて計算（宣言の順）である。
+   * 実在しない名前は静的チェックが `UI_FIELD_NOT_FOUND` で断る。`type: table` のときだけ書ける。
+   */
+  readonly show?: readonly string[];
 }
 
 // ── 権限 ────────────────────────────────────────────────────────
@@ -341,6 +365,8 @@ export const VOCABULARY = {
   len: "logic",
   action: "logic",
   view: "ui",
+  table: "ui",
+  settlement: "ui",
   permission: "permission",
   anonymous: "permission",
 } as const satisfies Record<string, Layer>;

@@ -27,7 +27,7 @@ export const DIAGNOSTIC_CODES = [
   "SHAPE_YAML_INVALID",
   /** 必須のキー・欄が無い */
   "SHAPE_KEY_MISSING",
-  /** その版の語彙に無いキー・欄（`label`・`kind`・`type` など、まだ入っていない語彙） */
+  /** その版の語彙に無いキー・欄（`label`・`kind`・`required` など、まだ入っていない語彙。M1.2 では一覧の `type` の値もここで断る） */
   "SHAPE_KEY_UNKNOWN",
   /** 同じキーが 2 回ある */
   "SHAPE_KEY_DUPLICATE",
@@ -111,6 +111,8 @@ export const DIAGNOSTIC_CODES = [
   "UI_ENTITY_NOT_FOUND",
   /** 一覧の名前が重なっている */
   "UI_VIEW_DUPLICATE_NAME",
+  /** 表（`type: table`）の `show` に書いた名前が、その entity の項目にも計算にも無い（M1.2） */
+  "UI_FIELD_NOT_FOUND",
 
   // ── 権限（PERMISSION） ──────────────────────────────────────
   /** M1.1 の権限の名前（`read`・`write`）に無い */

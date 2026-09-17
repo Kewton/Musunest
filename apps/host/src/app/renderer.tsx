@@ -1,11 +1,14 @@
-// Instant Renderer — 宣言から、一覧と追加フォームをその場で描く画面（Issue #104。参照と文言は #106）。
+// Instant Renderer — 宣言から、一覧と追加フォームをその場で描く画面（Issue #104。参照と文言は #106、
+// 表（`type: table`）と精算の表示（`type: settlement`）は #142）。
 //
 // **画面は式を評価しない。** 計算値も「操作してよいか」も data-api が返したものをそのまま見せる
-// （workspace/mvp/m1/README.md §4「計算はサーバ側」）。だからこの画面が決めるのは、次の4つだけである。
+// （workspace/mvp/m1/README.md §4「計算はサーバ側」）。だからこの画面が決めるのは、次の5つだけである。
 //   1. どの状態を描くか — 読込中・空一覧・未存在（404）・権限不足（403）・通信失敗を区別する
-//   2. 一覧の並べ方 — 項目を宣言の順、続いて計算を宣言の順。行は API が返した順（登録順）のまま
-//   3. 追加フォームを出すか — view が返した `permissions.write` と、その entity の action の有無だけで決める
-//   4. 参照（`ref`・参照 list）の見せ方 — **候補は参照先の一覧から取り、送るのは ID、見せるのは名前**である
+//   2. 一覧の並べ方 — 項目を宣言の順、続いて計算を宣言の順。表が `show` を持てば、**その順**である
+//      （M1.2。docs/semantics.md「table」）。行は API が返した順（登録順）のまま
+//   3. どの部品で描くか — 宣言の `type` が `settlement` なら精算の表示、ほかは表（M1.2）
+//   4. 追加フォームを出すか — view が返した `permissions.write` と、その entity の action の有無だけで決める
+//   5. 参照（`ref`・参照 list）の見せ方 — **候補は参照先の一覧から取り、送るのは ID、見せるのは名前**である
 //
 // **参照の候補は、参照先の entity の一覧（view）から取る。** 宣言が参照先の一覧を持たなければ候補は 0 件で、
 // 画面は架空の ID を作らない（フォームは「先に登録してください」と出す。守りはサーバ側）。
@@ -30,6 +33,7 @@ import type {
 import { fieldKind, fieldTarget } from "@musunest/sdk";
 import { AddForm } from "./form";
 import type { AddFormResult, FormField, FormOption } from "./form";
+import { SettlementList } from "./settlement";
 import "./renderer.css";
 
 /** 読めなかった理由。**状態を1つに潰さない**（未存在・権限不足・通信失敗を区別して描く） */
@@ -108,6 +112,9 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
 
   const { spec, view, references } = state;
   const action = view === null ? undefined : addActionOf(spec, view);
+  // 一覧の種類（`type`）と、表に出す名前の順（`show`）は**宣言**にある。API の応答には行だけがある
+  const declaration = view === null ? undefined : spec.spec.views.find((item) => item.name === view.view);
+  const entity = view === null ? undefined : spec.spec.entities.find((item) => item.name === view.entity);
 
   /** 一覧の切替。読めなければ同じ理由の画面に落とす（読めなかったことは隠さない） */
   async function showView(name: string): Promise<void> {
@@ -154,16 +161,20 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
         <p className="state" data-state="noview">
           表示できる一覧がありません
         </p>
+      ) : declaration?.type === "settlement" ? (
+        // 精算の表示（M1.2）。**画面は計算しない**——API が返した送金の並びを、名前に対応づけて見せる。
+        // `settlement` が無い（宣言が無い）ときも `null` として渡し、空の並びに読み替えない
+        <SettlementList
+          transfers={view.settlement ?? null}
+          rows={view.rows}
+          labelField={entity === undefined ? null : labelFieldOf(entity)}
+        />
       ) : view.rows.length === 0 ? (
         <p className="state empty" data-state="empty">
           まだ記録がありません
         </p>
       ) : (
-        <RowTable
-          view={view}
-          entity={spec.spec.entities.find((item) => item.name === view.entity)}
-          references={references}
-        />
+        <RowTable view={view} entity={entity} references={references} show={declaration?.show} />
       )}
       {view !== null && action !== undefined && view.permissions.write && (
         <section className="add" aria-label="追加">
@@ -179,29 +190,55 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
   );
 }
 
-/** 一覧の表。列は項目（宣言の順）→ 計算（宣言の順）。行は API が返した順のまま */
+/** 表の 1 列。名前と、その値を項目から読むか計算から読むか */
+interface Column {
+  readonly name: string;
+  readonly computed: boolean;
+}
+
+/**
+ * 表の列。**`show` を書いた順**、書かなければ項目（宣言の順）に続いて計算（宣言の順）である
+ * （docs/semantics.md「table」）。`show` は項目と計算を同じ並びに置ける。
+ */
+function columnsOf(view: ApiViewBody, show: readonly string[] | undefined): readonly Column[] {
+  if (show === undefined) {
+    return [
+      ...view.fields.map((name) => ({ name, computed: false })),
+      ...view.computed.map((name) => ({ name, computed: true })),
+    ];
+  }
+  return show.map((name) => {
+    // 項目と計算の名前は重ならない（静的チェックが断る）ので、応答の項目に無ければ計算である
+    const isField = view.fields.includes(name);
+    return { name, computed: !isField };
+  });
+}
+
+/**
+ * 一覧の表。列は `show` の順（書かなければ項目 → 計算の宣言の順）。行は API が返した順のまま。
+ * 横に長くなるのはこの表だけなので、入れ物（`.table-scroll`）の中でだけ横に流す（360 CSS px のため）。
+ */
 function RowTable({
   view,
   entity,
   references,
+  show,
 }: {
   readonly view: ApiViewBody;
   readonly entity: Entity | undefined;
   readonly references: readonly ReferenceData[];
+  /** 表に出す名前の順（宣言の `show`）。書いていなければ `undefined` */
+  readonly show: readonly string[] | undefined;
 }) {
+  const columns = columnsOf(view, show);
   return (
     <div className="table-scroll">
       <table className="instant-table">
         <thead>
           <tr>
-            {view.fields.map((name) => (
-              <th key={name} scope="col">
-                {name}
-              </th>
-            ))}
-            {view.computed.map((name) => (
-              <th key={name} scope="col">
-                {name}
+            {columns.map((column) => (
+              <th key={column.name} scope="col">
+                {column.name}
               </th>
             ))}
           </tr>
@@ -209,11 +246,12 @@ function RowTable({
         <tbody>
           {view.rows.map((row) => (
             <tr key={row.id}>
-              {view.fields.map((name) => (
-                <td key={name}>{displayOf(entity, references, name, row.fields[name])}</td>
-              ))}
-              {view.computed.map((name) => (
-                <td key={name}>{computedText(row.computed[name])}</td>
+              {columns.map((column) => (
+                <td key={column.name}>
+                  {column.computed
+                    ? computedText(row.computed[column.name])
+                    : displayOf(entity, references, column.name, row.fields[column.name])}
+                </td>
               ))}
             </tr>
           ))}
