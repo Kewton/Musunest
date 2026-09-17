@@ -18,6 +18,7 @@ import {
   PERMISSION_NAMES,
   PERMISSION_SUBJECTS,
   RESERVED_NAMES,
+  VIEW_TYPES,
   expressionTypeOf,
   fieldKind,
   fieldTarget,
@@ -30,6 +31,7 @@ import {
   type FieldDeclaration,
   type FieldKind,
   type FieldType,
+  type ViewType,
 } from "@musunest/appspec-schema";
 import {
   compareDiagnostics,
@@ -760,7 +762,7 @@ function readEntities(items: readonly YamlNode[], report: Report): readonly Enti
   return entities;
 }
 
-/** `name` と `entity` を持つ欄（views・actions）を読む。entity の実在はここでは見ない */
+/** `name` と `entity` を持つ欄（actions）を読む。entity の実在はここでは見ない */
 function readEntityReferences(
   items: readonly YamlNode[],
   section: string,
@@ -779,6 +781,104 @@ function readEntityReferences(
     });
   }
   return references;
+}
+
+/** 表（`type: table`）の `show` の 1 つ。実在は、entity と計算を読んだあとで見る（`UI_FIELD_NOT_FOUND`） */
+interface ShowFieldDraft {
+  readonly name: string;
+  readonly node: YamlNode;
+}
+
+/** 一覧（`views`）。M1.2 で `type`（種類）と `show`（表に出す名前の順）を足した */
+interface ViewDraft extends EntityReferenceDraft {
+  /** 一覧の種類。書いていなければ `null`（種類の指定の無い一覧。M1.1 と同じ） */
+  readonly type: ViewType | null;
+  /** 表に出す名前（宣言の順）。`show` を書いていなければ `null` */
+  readonly show: readonly ShowFieldDraft[] | null;
+}
+
+/**
+ * 一覧の `type` を読む（M1.2）。**語彙は閉じている**——書けるのは表（`table`）と精算の表示
+ * （`settlement`）だけで、知らない種類は `SHAPE_KEY_UNKNOWN` である（`04` §7.3・§7.7）。
+ */
+function readViewType(member: MemberReader, report: Report): ViewType | null {
+  const entry = entryOf(member.map, "type");
+  if (entry === undefined) return null;
+  if (entry.value.kind !== "scalar" || entry.value.text === "") {
+    report(
+      "SHAPE_VALUE_INVALID",
+      `view の type は種類の名前（${VIEW_TYPES.join("・")}）で書く`,
+      positionOf(entry.value),
+    );
+    return null;
+  }
+  const written = entry.value.text;
+  if (!isOneOf(VIEW_TYPES, written)) {
+    report(
+      "SHAPE_KEY_UNKNOWN",
+      `view の type ${written} は書けない（M1.2 の一覧の種類は ${VIEW_TYPES.join("・")} である）`,
+      positionOf(entry.value),
+    );
+    return null;
+  }
+  return written as ViewType;
+}
+
+/** 表の `show`（出す項目と計算の名前。宣言の順）を読む。実在は、entity と計算を読んだあとで見る */
+function readViewShow(member: MemberReader, report: Report): readonly ShowFieldDraft[] | null {
+  const entry = entryOf(member.map, "show");
+  if (entry === undefined) return null;
+  if (entry.value.kind !== "seq") {
+    report("SHAPE_VALUE_INVALID", "view の show は、出す名前を並べた [a, b] で書く", positionOf(entry.value));
+    return null;
+  }
+  const fields: ShowFieldDraft[] = [];
+  for (const item of entry.value.items) {
+    if (item.kind !== "scalar" || item.text === "") {
+      report("SHAPE_VALUE_INVALID", "view の show には、項目か計算の名前を書く", positionOf(item));
+      continue;
+    }
+    fields.push({ name: item.text, node: item });
+  }
+  return fields;
+}
+
+/**
+ * 一覧（`views`）を読む。**書ける欄は `type` が決める**（語彙は閉じている。src/spec.ts の `View`）。
+ *   `type` なし … `name`・`entity`            （M1.1 と同じ。`show` は持たない）
+ *   `table`     … 上に `type`・`show`
+ *   `settlement`… 上に `type`                 （列の並びを持たないので `show` は書けない）
+ */
+function readViews(items: readonly YamlNode[], report: Report): readonly ViewDraft[] {
+  const views: ViewDraft[] = [];
+  items.forEach((item, index) => {
+    if (item.kind !== "map") {
+      report("SHAPE_VALUE_INVALID", `views の ${index + 1} 番目は「欄: 値」を並べた写像で書く`, positionOf(item));
+      return;
+    }
+    const member = new MemberReader(item, `views[${index + 1}]`, report);
+    const type = readViewType(member, report);
+    member.only(type === "table" ? ["name", "entity", "type", "show"] : ["name", "entity", "type"]);
+
+    const name = member.text("name");
+    if (name !== null) checkName(name.text, "view", positionOf(name.node), report);
+    const entity = member.text("entity");
+    views.push({
+      name: name?.text ?? "",
+      nameNode: name?.node ?? null,
+      entity: entity?.text ?? "",
+      entityNode: entity?.node ?? { kind: "null", line: 0, column: 0 },
+      type,
+      show: type === "table" ? readViewShow(member, report) : null,
+    });
+  });
+  checkDuplicates(
+    views.map((view) => ({ name: view.name, nameNode: view.nameNode })),
+    "UI_VIEW_DUPLICATE_NAME",
+    "view",
+    report,
+  );
+  return views;
 }
 
 /**
@@ -1575,7 +1675,13 @@ function buildSpec(drafts: Drafts): AppSpec | null {
   }
   return {
     entities: built,
-    views: views.map((draft) => ({ name: draft.name, entity: draft.entity })),
+    // 種類（`type`）と表に出す名前（`show`）は、書いてあるときだけ入れる（M1.1 の宣言に欄を足さない）
+    views: views.map((draft) => ({
+      name: draft.name,
+      entity: draft.entity,
+      ...(draft.type === null ? {} : { type: draft.type }),
+      ...(draft.show === null ? {} : { show: draft.show.map((field) => field.name) }),
+    })),
     actions: actions.map((draft) => ({ name: draft.name, entity: draft.entity })),
     validations: validations.map((draft) => ({
       name: draft.name,
@@ -1601,7 +1707,7 @@ function buildSpec(drafts: Drafts): AppSpec | null {
  */
 interface Drafts {
   readonly entities: readonly EntityDraft[];
-  readonly views: readonly EntityReferenceDraft[];
+  readonly views: readonly ViewDraft[];
   readonly actions: readonly EntityReferenceDraft[];
   readonly validations: readonly ValidationDraft[];
   readonly computed: readonly ComputedDraft[];
@@ -1655,7 +1761,7 @@ function inspect(source: string, report: Report): Drafts | null {
   }
 
   const entities = readEntities(collectItems(root, "entities", report), report);
-  const views = readEntityReferences(collectItems(root, "views", report), "views", report);
+  const views = readViews(collectItems(root, "views", report), report);
   const actions = readEntityReferences(collectItems(root, "actions", report), "actions", report);
   const validations = readValidations(collectItems(root, "validations", report), report);
   const computed = readComputed(collectItems(root, "computed", report), report);
@@ -1675,20 +1781,32 @@ function inspect(source: string, report: Report): Drafts | null {
     }
   }
   for (const view of views) {
-    if (!index.has(view.entity)) {
+    const entity = index.get(view.entity);
+    if (entity === undefined) {
       report(
         "UI_ENTITY_NOT_FOUND",
         `view ${view.name} の entity ${view.entity} が宣言に無い`,
         positionOf(view.entityNode),
       );
+      // entity が無ければ、表に出す名前も見られない（誤りを重ねない）
+      continue;
+    }
+    // 表に出す名前は、その entity の項目か、**行ごとの値になる**計算でなければならない（M1.2）。
+    // 精算（settle）は送金の並びを返すので列に無い（data-api の computedNamesOf と同じ扱いである）
+    for (const field of view.show ?? []) {
+      const isField = entity.fields.some((candidate) => candidate.name === field.name);
+      const isComputed = computed.some(
+        (entry) => entry.entity === entity.name && entry.name === field.name && entry.settle === null,
+      );
+      if (!isField && !isComputed) {
+        report(
+          "UI_FIELD_NOT_FOUND",
+          `view ${view.name} の show の ${field.name} が、entity ${entity.name} の項目にも計算にも無い`,
+          positionOf(field.node),
+        );
+      }
     }
   }
-  checkDuplicates(
-    views.map((view) => ({ name: view.name, nameNode: view.nameNode })),
-    "UI_VIEW_DUPLICATE_NAME",
-    "view",
-    report,
-  );
   for (const action of actions) {
     if (!index.has(action.entity)) {
       report(

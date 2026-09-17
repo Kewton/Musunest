@@ -187,9 +187,29 @@
   layer: ui
   since: v0.2-draft（M1.1）
   samples: [expense-log, warikan]
-  negatives: [view-unknown-entity, view-with-type]
+  negatives: [view-unknown-entity, view-unknown-type]
   check_rules: [UI_ENTITY_NOT_FOUND, SHAPE_KEY_UNKNOWN]
   semantics: docs/semantics.md#view
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+- name: table
+  layer: ui
+  since: v0.2-draft（M1.2）
+  samples: [warikan]
+  negatives: [table-unknown-field]
+  check_rules: [UI_FIELD_NOT_FOUND]
+  semantics: docs/semantics.md#table
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+- name: settlement
+  layer: ui
+  since: v0.2-draft（M1.2）
+  samples: [warikan]
+  negatives: [view-unknown-type]
+  check_rules: [SHAPE_KEY_UNKNOWN]
+  semantics: docs/semantics.md#settlement
   runtime: [spec-engine, data-api, host]
   factory: 未対応
 

@@ -6,8 +6,10 @@
 #
 # デモ：メンバー A・B・C を登録し、夕食 6000 円（A が払う）とタクシー 3000 円（B が払う）を入れると、
 # 一覧に 1 人あたり 2000 円と 1000 円が出て、メンバーの一覧に払った額（`paid`）・負担する額（`owed`）・
-# 差し引き（`balance`）が出る。採点のシナリオは同じディレクトリの scenario.json、
-# 意味は ../../docs/semantics.md（「ref」「list」「message」「aggregate」「sum」「count」）にある。
+# 差し引き（`balance`）が出る。精算の一覧には **「C さん → A さん 3,000 円」の 1 件**が出る
+# （C の差し引きが −3000、A が +3000 である）。
+# 採点のシナリオは同じディレクトリの scenario.json、
+# 意味は ../../docs/semantics.md（「ref」「list」「message」「aggregate」「sum」「count」「table」「settlement」）にある。
 
 entities:
   - name: member
@@ -26,10 +28,21 @@ entities:
         of: member
 
 views:
+  # 表（M1.2）。`show` を書かなければ、項目（宣言の順）に続いて計算（宣言の順）である——
+  # この一覧は name・paid・owed・balance の順に出る
   - name: memberList
     entity: member
+    type: table
+  # `show` を書くと、**その順**で列が出る（計算の shareAmount を、項目の間にも置ける）
   - name: expenseList
     entity: expense
+    type: table
+    show: [description, shareAmount, amount, payer]
+  # 精算の表示（M1.2）。API が返した送金の並び（member のレコードの ID）を、名前に対応づけて見せる。
+  # **画面は計算しない**——`settle` の結果をそのまま出す（03 §2.3）
+  - name: settlement
+    entity: member
+    type: settlement
 
 actions:
   - name: addMember

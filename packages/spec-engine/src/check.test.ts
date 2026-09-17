@@ -1,7 +1,7 @@
 // 静的チェックの unit テスト（Issue #97 の受入条件を、ここで固定する）。
 //
 //   1. 見本（expense-log・warikan）の診断が空で、7 欄を持つ AppSpec を返す
-//   2. 負例 31 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
+//   2. 負例 34 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
 //   3. 診断は空でない日本語の説明と、該当する YAML の行・列を持つ
 //   4. 不正 YAML・未知キー・未知参照・循環を拒否し、上限はちょうどが通り 1 超過で診断になる
 //   5. 検査は式を実行せず、ストレージにも触れない
@@ -285,6 +285,25 @@ describe("見本（appspec-schema の samples/）", () => {
     expect(settle !== undefined && "type" in settle).toBe(false);
   });
 
+  it("warikan の一覧は、種類と show を宣言のまま写している（M1.2）", () => {
+    const result = checkSpec(read(sampleSpecFile("warikan")));
+    if (!result.ok) throw new Error("warikan が静的チェックに通らない");
+    expect(result.spec.views).toEqual([
+      // `show` を書かなければ、項目（宣言の順）に続いて計算（宣言の順）である
+      // ——メンバーの表は name・paid・owed・balance の順に出る（受入条件）
+      { name: "memberList", entity: "member", type: "table" },
+      // `show` を書けば、その順で列が出る（計算の shareAmount を項目の間に置ける。受入条件）
+      {
+        name: "expenseList",
+        entity: "expense",
+        type: "table",
+        show: ["description", "shareAmount", "amount", "payer"],
+      },
+      // 精算の表示は、列の並びを持たない
+      { name: "settlement", entity: "member", type: "settlement" },
+    ]);
+  });
+
   it("warikan の検査の文言は、宣言した順のまま残る（M1.2）", () => {
     const result = checkSpec(read(sampleSpecFile("warikan")));
     if (!result.ok) throw new Error("warikan が静的チェックに通らない");
@@ -305,11 +324,11 @@ describe("見本（appspec-schema の samples/）", () => {
   });
 });
 
-// ── 2. 負例 33 件 ──────────────────────────────────────────────
+// ── 2. 負例 34 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 33 件である（0 件なら以降のテストが空振りする）", () => {
-    expect(negativeIndex.negatives).toHaveLength(33);
+  it("負例の一覧は 34 件である（0 件なら以降のテストが空振りする）", () => {
+    expect(negativeIndex.negatives).toHaveLength(34);
   });
 
   it.each(negativeCases)(
@@ -344,7 +363,8 @@ describe("負例（appspec-schema の samples/negatives）", () => {
     ["validation-not-boolean", "LOGIC_VALIDATION_NOT_BOOLEAN"],
     ["number-in-len", "LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH"],
     ["action-with-kind", "SHAPE_KEY_UNKNOWN"],
-    ["view-with-type", "SHAPE_KEY_UNKNOWN"],
+    ["view-unknown-type", "SHAPE_KEY_UNKNOWN"],
+    ["table-unknown-field", "UI_FIELD_NOT_FOUND"],
     ["string-in-arithmetic", "LOGIC_OPERAND_TYPE_MISMATCH"],
     ["list-in-comparison", "LOGIC_OPERAND_TYPE_MISMATCH"],
     ["min-wrong-arity", "LOGIC_FUNCTION_ARITY_MISMATCH"],
@@ -403,7 +423,7 @@ describe("形の検査", () => {
   it.each([
     ["宣言の直下", `${declaration()}\nintegrations: []`, "integrations"],
     ["entity の要素", declaration({ entities: `${BASE_PARTS.entities}\n    label: 金額` }), "label"],
-    ["view の要素", declaration({ views: `${BASE_PARTS.views}\n    type: table` }), "type"],
+    ["view の要素", declaration({ views: `${BASE_PARTS.views}\n    label: 支出` }), "label"],
     ["minIdentity", `${declaration()}\n  google: true`, "google"],
   ] as const)("%s に語彙の無いキー %s を書くと断る", (_where, text, key) => {
     const result = failure(checkSpec(text));
@@ -455,6 +475,67 @@ describe("形の検査", () => {
   it("同じ欄を 2 回書けば断る", () => {
     const result = failure(checkSpec(`${declaration()}\nviews: []`));
     expect(codesOf(result)).toContain("SHAPE_KEY_DUPLICATE");
+  });
+});
+
+// ── 3b. 一覧の種類と、表に出す名前（M1.2。Issue #142） ──────────────
+//
+// `views` の `type` と `show` は M1.2 で入った語彙である。**導入で正例になった `view-with-type`**
+// （`type: table` を書いた一覧）を、負例から正例へ移した。**書ける欄は `type` が決める**（語彙は閉じている）。
+
+describe("一覧の種類と、表に出す名前（M1.2）", () => {
+  it("type: table を書ける（負例 view-with-type の正例。受入条件）", () => {
+    const result = checkSpec(declaration({ views: `${BASE_PARTS.views}\n    type: table` }));
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.spec.views).toEqual([{ name: "expenseList", entity: "expense", type: "table" }]);
+    }
+  });
+
+  it("type: settlement を書ける（精算の表示は列の並びを持たない）", () => {
+    const result = checkSpec(declaration({ views: `${BASE_PARTS.views}\n    type: settlement` }));
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.spec.views).toEqual([{ name: "expenseList", entity: "expense", type: "settlement" }]);
+    }
+  });
+
+  it("show は、実在する項目と計算の名前なら通り、書いた順のまま残る", () => {
+    const result = checkSpec(
+      declaration({ views: `${BASE_PARTS.views}\n    type: table\n    show: [payer, headcount, amount]` }),
+    );
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.spec.views[0]?.show).toEqual(["payer", "headcount", "amount"]);
+  });
+
+  it("知らない種類は SHAPE_KEY_UNKNOWN（負例 view-unknown-type。受入条件）", () => {
+    const result = failure(checkSpec(declaration({ views: `${BASE_PARTS.views}\n    type: board` })));
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
+    expect(messagesOf(result, "SHAPE_KEY_UNKNOWN")).toContain("board");
+  });
+
+  it("show に entity の項目にも計算にも無い名前を書けば UI_FIELD_NOT_FOUND（位置はその名前を指す）", () => {
+    const text = declaration({ views: `${BASE_PARTS.views}\n    type: table\n    show: [amount, ammount]` });
+    const result = failure(checkSpec(text));
+    expect(codesOf(result)).toEqual(["UI_FIELD_NOT_FOUND"]);
+    expect(messagesOf(result, "UI_FIELD_NOT_FOUND")).toContain("ammount");
+    expect(result.diagnostics[0]).toMatchObject(locate(text, "ammount"));
+  });
+
+  it("show は type: table のときだけ書ける（種類が、書ける欄を決める）", () => {
+    // 種類を書かない一覧（M1.1）は show を知らない
+    expect(codesOf(failure(checkSpec(declaration({ views: `${BASE_PARTS.views}\n    show: [amount]` }))))).toEqual([
+      "SHAPE_KEY_UNKNOWN",
+    ]);
+    // 精算の表示は列の並びを持たない
+    expect(
+      codesOf(
+        failure(checkSpec(declaration({ views: `${BASE_PARTS.views}\n    type: settlement\n    show: [amount]` }))),
+      ),
+    ).toEqual(["SHAPE_KEY_UNKNOWN"]);
   });
 });
 

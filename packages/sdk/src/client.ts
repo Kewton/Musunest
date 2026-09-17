@@ -8,7 +8,7 @@
 // fetch と base URL は差し込める。host の画面は同じ origin の /api/* を叩くので `baseUrl: ""` でよい
 // （相対 URL のまま fetch する）。e2e のように別の origin を指す場合は絶対 URL を渡す。
 
-import { API_ERROR_CODES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
+import { API_ERROR_CODES, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
 import type { ApiErrorCode, ApiRow, ApiSpecBody, ApiValue, ApiViewBody } from "@musunest/appspec-schema";
 
 /** fetch の差し替え口。Workers・ブラウザ・Node のどれでも同じ形で呼べる範囲だけを要求する */
@@ -248,13 +248,46 @@ function isComputedDeclaration(value: unknown): boolean {
   return isAggregate(value.aggregate);
 }
 
+/**
+ * 一覧の宣言。M1.2 で `type`（種類。語彙は `VIEW_TYPES` の 2 つだけ）と `show`（表に出す名前の順）を
+ * 足した。**`show` は `type: table` のときだけ**である（書ける欄は `type` が決める）。
+ */
+function isView(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.name !== "string" || typeof value.entity !== "string") return false;
+  if (value.type !== undefined) {
+    if (typeof value.type !== "string" || !(VIEW_TYPES as readonly string[]).includes(value.type)) {
+      return false;
+    }
+  }
+  if (value.show === undefined) return true;
+  return value.type === "table" && isStringArray(value.show);
+}
+
+/** 精算の 1 件（M1.2）。送金元・送金先はレコードの ID、額は正の数である */
+function isTransfer(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.from === "string" &&
+    typeof value.to === "string" &&
+    typeof value.amount === "number"
+  );
+}
+
+/**
+ * 一覧の応答の精算（M1.2）。**欄が無い**（その entity に `settle` の宣言が無い）か、`null`
+ * （読めなかった）か、送金の並びである。`null` を空の並びに読み替えない（契約のとおりに渡す）。
+ */
+function isSettlement(value: unknown): boolean {
+  return value === null || (Array.isArray(value) && value.every(isTransfer));
+}
+
 function isAppSpec(value: unknown): boolean {
   return (
     isRecord(value) &&
     Array.isArray(value.entities) &&
     value.entities.every(isEntity) &&
     Array.isArray(value.views) &&
-    value.views.every((view) => isRecord(view) && typeof view.name === "string" && typeof view.entity === "string") &&
+    value.views.every(isView) &&
     Array.isArray(value.actions) &&
     value.actions.every(isActionRef) &&
     Array.isArray(value.validations) &&
@@ -303,6 +336,8 @@ function isViewBody(value: unknown): value is ApiViewBody {
     Array.isArray(value.actions) &&
     value.actions.every(isActionRef) &&
     Array.isArray(value.rows) &&
-    value.rows.every(isRow)
+    value.rows.every(isRow) &&
+    // 精算（M1.2）。**欄が無い**（宣言が無い）ときと `null`（読めなかった）ときを区別したまま渡す
+    (value.settlement === undefined || isSettlement(value.settlement))
   );
 }
