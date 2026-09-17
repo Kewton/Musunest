@@ -16,6 +16,34 @@
       "why": "操作に kind を書いている（操作の種類は M1.2 の語彙で、M1.1 には無い）"
     },
     {
+      "name": "aggregate-cycle",
+      "codes": [
+        "LOGIC_COMPUTED_CYCLE"
+      ],
+      "why": "計算 totalFromBeta と totalFromAlpha が、集計をまたいで互いを参照している"
+    },
+    {
+      "name": "aggregate-sum-of-string",
+      "codes": [
+        "LOGIC_AGGREGATE_TARGET_NOT_NUMBER"
+      ],
+      "why": "集計の対象 expense.description が数ではなく文字列である"
+    },
+    {
+      "name": "aggregate-unknown-target",
+      "codes": [
+        "LOGIC_AGGREGATE_TARGET_NOT_FOUND"
+      ],
+      "why": "集計の対象 entity expence が宣言に無い（正しくは expense）"
+    },
+    {
+      "name": "aggregate-where-type-mismatch",
+      "codes": [
+        "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH"
+      ],
+      "why": "集計の where の項目 amount は数であって、this を指す参照ではない"
+    },
+    {
       "name": "computed-cycle",
       "codes": [
         "LOGIC_COMPUTED_CYCLE"

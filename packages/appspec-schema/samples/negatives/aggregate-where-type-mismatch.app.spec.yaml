@@ -1,0 +1,42 @@
+# 負例：集計の where の項目 amount は数であって、this（出力先のレコードの ID）を指す参照ではない。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: member
+    fields:
+      name: string
+  - name: expense
+    fields:
+      description: string
+      amount: number
+      payer:
+        type: ref
+        to: member
+
+views:
+  - name: memberList
+    entity: member
+
+actions:
+  - name: addMember
+    entity: member
+
+validations: []
+
+computed:
+  - name: totalPaid
+    entity: member
+    aggregate:
+      sum: expense.amount
+      where:
+        amount: this
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

@@ -634,10 +634,11 @@ describe("warikan の採点のシナリオ（参照と文言。M1.2）", () => {
 
     const members = await getView(run.deps, WARIKAN_INSTANCE, "memberList");
     if (!members.ok) throw new Error("memberList を読めなかった");
-    const names = (WARIKAN_SCENARIO.views["memberList"] ?? []).map((row) =>
+    const expectedMembers = (WARIKAN_SCENARIO.views["memberList"] ?? []).map((row) =>
       resolveScenarioIds(row, run.ids),
     );
-    expect(members.body.rows.map((row) => row.fields)).toEqual(names);
+    // 項目と計算値（集計）を合わせて比べる（memberList は name と paid/owed/balance を持つ。M1.2）
+    expect(members.body.rows.map((row) => ({ ...row.fields, ...row.computed }))).toEqual(expectedMembers);
   });
 
   it.each(WARIKAN_SCENARIO.steps.map((step, index) => [step.name, index] as const))(
@@ -743,5 +744,85 @@ describe("warikan の採点のシナリオ（参照と文言。M1.2）", () => {
     expect(result.failure.validations).toEqual(["positiveAmount"]);
     // 欄そのものを持たない（#102 の応答を変えない）
     expect(Object.hasOwn(result.failure, "validationMessages")).toBe(false);
+  });
+});
+
+// ── warikan の集計（entity をまたぐ sum・count。Issue #107） ──────────────
+//
+// 評価の単位（spec-engine の aggregate.test.ts）と**同じ数字**を、API（getView）の値でも確かめる。
+// 集計は同じインスタンスの DO のレコードだけを見る（別インスタンスの支出は混ざらない）。
+
+/** メンバーの一覧を読んで、名前 → 計算値 の対応を返す */
+async function memberComputed(
+  run: WarikanRun,
+): Promise<ReadonlyMap<unknown, Readonly<Record<string, number | null>>>> {
+  const members = await getView(run.deps, WARIKAN_INSTANCE, "memberList");
+  if (!members.ok) throw new Error("memberList を読めなかった");
+  return new Map(members.body.rows.map((row) => [row.fields["name"], row.computed]));
+}
+
+describe("warikan の集計（entity をまたぐ sum・count。M1.2）", () => {
+  it("member 一覧の paid/owed/balance が、受入条件の値になる", async () => {
+    const run = await runWarikan();
+    const members = await getView(run.deps, WARIKAN_INSTANCE, "memberList");
+    if (!members.ok) throw new Error("memberList を読めなかった");
+    expect(members.body.computed).toEqual(["paid", "owed", "balance"]);
+
+    const byName = await memberComputed(run);
+    expect(byName.get("A")).toEqual({ paid: 6000, owed: 3000, balance: 3000 });
+    expect(byName.get("B")).toEqual({ paid: 3000, owed: 3000, balance: 0 });
+    expect(byName.get("C")).toEqual({ paid: 0, owed: 3000, balance: -3000 });
+  });
+
+  it("expense 一覧の shareAmount は、夕食 2000・タクシー 1000 である", async () => {
+    const run = await runWarikan();
+    const list = await getView(run.deps, WARIKAN_INSTANCE, "expenseList");
+    if (!list.ok) throw new Error("expenseList を読めなかった");
+    expect(list.body.rows.map((row) => row.computed["shareAmount"])).toEqual([2000, 1000]);
+  });
+
+  it("支出が 1 件も無いメンバーの計算値は 0 である（null ではない）", async () => {
+    const run = await runWarikan();
+    const added = await createFromAction(run.deps, WARIKAN_INSTANCE, "addMember", { name: "D" });
+    expect(added.ok).toBe(true);
+    if (added.ok) expect(added.body.computed).toEqual({ paid: 0, owed: 0, balance: 0 });
+
+    const byName = await memberComputed(run);
+    expect(byName.get("D")).toEqual({ paid: 0, owed: 0, balance: 0 });
+  });
+
+  it("集計元に null が 1 つでもあれば、その集計値も null になる（空集合の 0 と区別する）", async () => {
+    const run = await runWarikan();
+    // 有限でない amount は入力の型検査が断るので、**保存された行**として直接置く
+    // （評価は「型検査を通った行」だけを受け取る建前だが、壊れた成果物でも 0 に読み替えないことを見る）
+    run.records.rows.push({
+      entity: "expense",
+      id: "broken",
+      data: {
+        description: "壊れた",
+        amount: Number.POSITIVE_INFINITY,
+        payer: run.ids["A"] ?? "",
+        participants: [run.ids["A"] ?? ""],
+      },
+      createdAt: "2026-09-16T03:00:00.000Z",
+      updatedAt: "2026-09-16T03:00:00.000Z",
+      order: run.records.rows.length + 1,
+    });
+
+    const byName = await memberComputed(run);
+    // 支出ごとの shareAmount が null になり、それを足す owed も null。paid（amount を足す）も同じ
+    expect(byName.get("A")).toEqual({ paid: null, owed: null, balance: null });
+    // 壊れた行の影響を受けないメンバーは、0 のままである（空集合の 0 と null を混ぜない）
+    expect(byName.get("B")).toEqual({ paid: 3000, owed: 3000, balance: 0 });
+  });
+
+  it("集計値と計算値は保存されない（保存された行は入力の項目だけである）", async () => {
+    const run = await runWarikan();
+    for (const record of run.records.rows) {
+      const keys = Object.keys(record.data);
+      for (const name of ["paid", "owed", "balance", "headcount", "shareAmount"]) {
+        expect(keys, `${record.entity}: ${name}`).not.toContain(name);
+      }
+    }
   });
 });

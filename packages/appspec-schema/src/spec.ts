@@ -136,13 +136,55 @@ export interface Validation {
 export const COMPUTED_TYPES = ["number"] as const;
 export type ComputedType = (typeof COMPUTED_TYPES)[number];
 
-/** 同じ entity の中の計算。v0.1 の computed_contract の entry_fields と同じ 4 つのキーを持つ。 */
-export interface Computed {
+/**
+ * 集計の対象を絞る条件（where。M1.2）。集計元の項目の名前 → 比べ方である。
+ * 比べる相手は常に `this`（出力先の entity の、今のレコードの ID）である。
+ *   `equals`   … 参照（`ref`）の一致（`{payer: this}`）
+ *   `contains` … 参照の並び（`list of`）の包含（`{participants: {contains: this}}`）
+ */
+export const AGGREGATE_WHERE_OPS = ["equals", "contains"] as const;
+export type AggregateWhereOp = (typeof AGGREGATE_WHERE_OPS)[number];
+
+/** 集計の条件。空なら全行が対象である。意味は docs/semantics.md「aggregate」にある */
+export type AggregateWhere = Readonly<Record<string, AggregateWhereOp>>;
+
+/**
+ * entity をまたぐ集計（M1.2）。`sum: <entity>.<項目か計算>` か `count: <entity>` の**どちらか一方**である。
+ * 集計は**同じインスタンス**のレコードだけを見る（別インスタンスの ID は存在しない）。
+ */
+export interface Aggregate {
+  /** `sum` は合計、`count` は該当する行数 */
+  readonly kind: "sum" | "count";
+  /** 集計元の entity の名前 */
+  readonly entity: string;
+  /** `sum` のときの、合計する項目か計算の名前。`count` では `null` である */
+  readonly name: string | null;
+  /** 対象を絞る条件。空なら全行である */
+  readonly where: AggregateWhere;
+}
+
+/** 式で求める計算（v0.1 からの形）。v0.1 の computed_contract の entry_fields と同じ 4 つのキーを持つ。 */
+export interface ComputedExpression {
   readonly name: string;
   readonly entity: string;
   readonly expression: string;
   readonly type: ComputedType;
 }
+
+/** 集計で求める計算（M1.2）。`expression` と `aggregate` は択一である */
+export interface ComputedAggregate {
+  readonly name: string;
+  readonly entity: string;
+  readonly aggregate: Aggregate;
+  readonly type: ComputedType;
+}
+
+/** 同じ entity の中の計算（式か集計）。計算の値は保存しない。 */
+export type Computed = ComputedExpression | ComputedAggregate;
+
+/** 式で求める計算か（`aggregate` の側と区別する） */
+export const isComputedExpression = (computed: Computed): computed is ComputedExpression =>
+  "expression" in computed;
 
 /** 種類の指定の無い操作。M1.1 では、その entity への 1 件の追加を意味する。 */
 export interface Action {
@@ -246,6 +288,9 @@ export const VOCABULARY = {
   validation: "logic",
   message: "logic",
   computed: "logic",
+  aggregate: "logic",
+  sum: "logic",
+  count: "logic",
   min: "logic",
   max: "logic",
   len: "logic",

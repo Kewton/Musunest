@@ -220,6 +220,34 @@ function isExpression(value: unknown): boolean {
   return value.message === undefined || typeof value.message === "string";
 }
 
+/**
+ * 集計（`aggregate`）の形（M1.2）。`sum` は対象の名前を持ち、`count` は持たない。
+ * どちらも `where`（項目 → `equals` / `contains`）を持つ。
+ */
+function isAggregate(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const kind = value.kind;
+  if (kind !== "sum" && kind !== "count") return false;
+  if (typeof value.entity !== "string") return false;
+  if (kind === "sum" ? typeof value.name !== "string" : value.name !== null) return false;
+  if (!isRecord(value.where)) return false;
+  return Object.values(value.where).every((op) => op === "equals" || op === "contains");
+}
+
+/** computed の 1 件は、式（`expression`）か集計（`aggregate`）の**どちらか一方**である（M1.2） */
+function isComputedDeclaration(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    typeof value.name !== "string" ||
+    typeof value.entity !== "string" ||
+    value.type !== "number"
+  ) {
+    return false;
+  }
+  if (typeof value.expression === "string") return value.aggregate === undefined;
+  return isAggregate(value.aggregate);
+}
+
 function isAppSpec(value: unknown): boolean {
   return (
     isRecord(value) &&
@@ -232,7 +260,7 @@ function isAppSpec(value: unknown): boolean {
     Array.isArray(value.validations) &&
     value.validations.every(isExpression) &&
     Array.isArray(value.computed) &&
-    value.computed.every((computed) => isExpression(computed) && computed.type === "number") &&
+    value.computed.every(isComputedDeclaration) &&
     Array.isArray(value.permissions) &&
     value.permissions.every((permission) => isRecord(permission) && typeof permission.name === "string") &&
     isRecord(value.minIdentity) &&

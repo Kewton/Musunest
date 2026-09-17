@@ -71,6 +71,14 @@ export const DIAGNOSTIC_CODES = [
   "LOGIC_COMPUTED_TYPE_MISMATCH",
   /** 計算の `type` が M1.1 の型（`number`）に無い */
   "LOGIC_COMPUTED_TYPE_UNKNOWN",
+  /** computed の式と集計（`aggregate`）の形が不正である（両方ある・どちらも無い・`sum` と `count` の同時指定など。M1.2） */
+  "LOGIC_AGGREGATE_FORM_INVALID",
+  /** 集計の対象（entity・項目・計算）が宣言に無い（M1.2） */
+  "LOGIC_AGGREGATE_TARGET_NOT_FOUND",
+  /** 集計の対象（`sum`）が数ではない（M1.2） */
+  "LOGIC_AGGREGATE_TARGET_NOT_NUMBER",
+  /** 集計の `where` が、集計元の項目と `this` の参照型に合わない（M1.2） */
+  "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
   /** 検査の式が真偽にならない */
   "LOGIC_VALIDATION_NOT_BOOLEAN",
   /** 検査の名前が重なっている */

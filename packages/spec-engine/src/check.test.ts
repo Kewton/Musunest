@@ -1,7 +1,7 @@
 // 静的チェックの unit テスト（Issue #97 の受入条件を、ここで固定する）。
 //
 //   1. 見本（expense-log・warikan）の診断が空で、7 欄を持つ AppSpec を返す
-//   2. 負例 27 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
+//   2. 負例 31 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
 //   3. 診断は空でない日本語の説明と、該当する YAML の行・列を持つ
 //   4. 不正 YAML・未知キー・未知参照・循環を拒否し、上限はちょうどが通り 1 超過で診断になる
 //   5. 検査は式を実行せず、ストレージにも触れない
@@ -14,6 +14,7 @@ import {
   ERROR_CODE_PATTERN,
   readNegativeIndex,
   type AppSpecSection,
+  type Computed,
   type NegativeSample,
 } from "@musunest/appspec-schema";
 import {
@@ -75,6 +76,10 @@ const failure = (result: CheckResult): CheckResult => {
   expect(result.ok).toBe(false);
   return result;
 };
+
+/** 式で求める計算の式だけを取り出す（集計は式を持たない。M1.2） */
+const expressionsOf = (computed: readonly Computed[]): string[] =>
+  computed.flatMap((entry) => ("expression" in entry ? [entry.expression] : []));
 
 /** 原文の中の文字列が、何行目の何列目から始まるか（診断の位置と突き合わせる） */
 const locate = (text: string, needle: string): { line: number; column: number } => {
@@ -206,7 +211,7 @@ describe("見本 expense-log", () => {
     if (!result.ok) throw new Error("診断が出ている");
     const expressions = [
       ...result.spec.validations.map((validation) => validation.expression),
-      ...result.spec.computed.map((entry) => entry.expression),
+      ...expressionsOf(result.spec.computed),
     ];
     expect(expressions).toHaveLength(5);
     for (const expression of expressions) {
@@ -237,10 +242,33 @@ describe("見本（appspec-schema の samples/）", () => {
     expect(expense?.fields["payer"]).toEqual({ type: "ref", to: "member" });
     expect(expense?.fields["participants"]).toEqual({ type: "list", of: "member" });
     // 参照の項目は、式の中では ID の文字列として読む（数ではない）
-    expect(result.spec.computed.map((entry) => entry.expression)).toEqual([
+    expect(expressionsOf(result.spec.computed)).toEqual([
       "len(participants)",
       "amount / max(1, headcount)",
+      "paid - owed",
     ]);
+  });
+
+  it("warikan の集計は、sum と where を宣言のまま写している（M1.2）", () => {
+    const result = checkSpec(read(sampleSpecFile("warikan")));
+    if (!result.ok) throw new Error("warikan が静的チェックに通らない");
+    expect(result.spec.computed).toContainEqual({
+      name: "paid",
+      entity: "member",
+      aggregate: { kind: "sum", entity: "expense", name: "amount", where: { payer: "equals" } },
+      type: "number",
+    });
+    expect(result.spec.computed).toContainEqual({
+      name: "owed",
+      entity: "member",
+      aggregate: {
+        kind: "sum",
+        entity: "expense",
+        name: "shareAmount",
+        where: { participants: "contains" },
+      },
+      type: "number",
+    });
   });
 
   it("warikan の検査の文言は、宣言した順のまま残る（M1.2）", () => {
@@ -263,11 +291,11 @@ describe("見本（appspec-schema の samples/）", () => {
   });
 });
 
-// ── 2. 負例 27 件 ──────────────────────────────────────────────
+// ── 2. 負例 31 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 27 件である（0 件なら以降のテストが空振りする）", () => {
-    expect(negativeIndex.negatives).toHaveLength(27);
+  it("負例の一覧は 31 件である（0 件なら以降のテストが空振りする）", () => {
+    expect(negativeIndex.negatives).toHaveLength(31);
   });
 
   it.each(negativeCases)(
@@ -682,6 +710,159 @@ describe("計算の循環", () => {
       }),
     );
     expect(result.ok, messagesOf(result, "LOGIC_COMPUTED_CYCLE")).toBe(true);
+  });
+});
+
+// ── 4b. 集計（aggregate。M1.2） ──────────────────────────────────
+//
+// 見本 warikan が使う形（`sum: expense.amount` と `count: expense`、`where` の `this`）を土台に、
+// 受入条件が名指しした「sum/count 併記・未知 where 項目・不正な contains 対象」も固定する。
+
+describe("集計（aggregate。M1.2）", () => {
+  const MEMBER = "  - name: member\n    fields:\n      name: string";
+  const EXPENSE = [
+    "  - name: expense",
+    "    fields:",
+    "      amount: number",
+    "      payer:",
+    "        type: ref",
+    "        to: member",
+    "      participants:",
+    "        type: list",
+    "        of: member",
+  ].join("\n");
+  const entities = (): string => entitiess(MEMBER, EXPENSE);
+
+  /** member の集計を 1 つ作る。`body` は aggregate の中身（`sum` / `count` / `where`） */
+  const aggregateBlock = (name: string, body: readonly string[]): string =>
+    [
+      `  - name: ${name}`,
+      "    entity: member",
+      "    aggregate:",
+      ...body.map((line) => `      ${line}`),
+      "    type: number",
+    ].join("\n");
+
+  const withAggregate = (body: readonly string[]): string =>
+    declaration({ entities: entities(), validations: "[]", computed: aggregateBlock("total", body) });
+
+  it("sum の対象が数の項目なら通り、宣言に集計の形で残る", () => {
+    const result = checkSpec(withAggregate(["sum: expense.amount", "where:", "  payer: this"]));
+    expect(result.diagnostics, messagesOf(result, "LOGIC_AGGREGATE_TARGET_NOT_FOUND")).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spec.computed).toEqual([
+      {
+        name: "total",
+        entity: "member",
+        aggregate: { kind: "sum", entity: "expense", name: "amount", where: { payer: "equals" } },
+        type: "number",
+      },
+    ]);
+  });
+
+  it("count と、参照の並びの contains が通る", () => {
+    const result = checkSpec(
+      withAggregate(["count: expense", "where:", "  participants:", "    contains: this"]),
+    );
+    expect(result.ok, messagesOf(result, "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH")).toBe(true);
+    if (!result.ok) return;
+    expect(result.spec.computed[0]).toMatchObject({
+      name: "total",
+      entity: "member",
+      aggregate: {
+        kind: "count",
+        entity: "expense",
+        name: null,
+        where: { participants: "contains" },
+      },
+    });
+  });
+
+  it("sum の対象が別 entity の計算でも通る（集計を参照する式も通る）", () => {
+    const result = checkSpec(
+      declaration({
+        entities: entities(),
+        validations: "[]",
+        computed: entitiess(
+          computed("share", "amount - 1"),
+          aggregateBlock("total", ["sum: expense.share"]),
+        ),
+      }),
+    );
+    expect(result.ok, messagesOf(result, "LOGIC_AGGREGATE_TARGET_NOT_FOUND")).toBe(true);
+  });
+
+  it("sum と count を同時に書けば LOGIC_AGGREGATE_FORM_INVALID", () => {
+    const result = failure(checkSpec(withAggregate(["sum: expense.amount", "count: expense"])));
+    expect(codesOf(result)).toEqual(["LOGIC_AGGREGATE_FORM_INVALID"]);
+  });
+
+  it("式と集計の併記、どちらも無い計算は LOGIC_AGGREGATE_FORM_INVALID", () => {
+    const both = declaration({
+      entities: entities(),
+      validations: "[]",
+      computed: [
+        "  - name: total",
+        "    entity: member",
+        "    expression: 1",
+        "    aggregate:",
+        "      count: expense",
+        "    type: number",
+      ].join("\n"),
+    });
+    expect(codesOf(failure(checkSpec(both)))).toEqual(["LOGIC_AGGREGATE_FORM_INVALID"]);
+
+    const neither = declaration({
+      entities: entities(),
+      validations: "[]",
+      computed: ["  - name: total", "    entity: member", "    type: number"].join("\n"),
+    });
+    expect(codesOf(failure(checkSpec(neither)))).toEqual(["LOGIC_AGGREGATE_FORM_INVALID"]);
+  });
+
+  it("未知の where 項目と、比べ方の取り違えは LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH", () => {
+    // 集計元に無い項目
+    expect(codesOf(failure(checkSpec(withAggregate(["count: expense", "where:", "  ammount: this"]))))).toEqual([
+      "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
+    ]);
+    // 参照（ref）に contains（参照の並びでなければ contains できない）
+    expect(
+      codesOf(failure(checkSpec(withAggregate(["count: expense", "where:", "  payer:", "    contains: this"])))),
+    ).toEqual(["LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH"]);
+    // 参照の並び（list of）に equals（一致では判定できない）
+    expect(codesOf(failure(checkSpec(withAggregate(["count: expense", "where:", "  participants: this"]))))).toEqual([
+      "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
+    ]);
+    // 数に equals（this はレコードの ID であり、数ではない）
+    expect(codesOf(failure(checkSpec(withAggregate(["count: expense", "where:", "  amount: this"]))))).toEqual([
+      "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
+    ]);
+  });
+
+  it("集計の対象は、entity・項目・計算の実在と、数であることを見る", () => {
+    expect(codesOf(failure(checkSpec(withAggregate(["count: expence"]))))).toEqual([
+      "LOGIC_AGGREGATE_TARGET_NOT_FOUND",
+    ]);
+    expect(codesOf(failure(checkSpec(withAggregate(["sum: expense.ammount"]))))).toEqual([
+      "LOGIC_AGGREGATE_TARGET_NOT_FOUND",
+    ]);
+    expect(codesOf(failure(checkSpec(withAggregate(["sum: expense.payer"]))))).toEqual([
+      "LOGIC_AGGREGATE_TARGET_NOT_NUMBER",
+    ]);
+    // `entity.名前` の形でない sum
+    expect(codesOf(failure(checkSpec(withAggregate(["sum: expense"]))))).toEqual([
+      "LOGIC_AGGREGATE_FORM_INVALID",
+    ]);
+  });
+
+  it("自分自身を集計する計算は、循環として断る", () => {
+    const self = declaration({
+      entities: entities(),
+      validations: "[]",
+      computed: aggregateBlock("total", ["sum: member.total"]),
+    });
+    expect(codesOf(failure(checkSpec(self)))).toEqual(["LOGIC_COMPUTED_CYCLE"]);
   });
 });
 
