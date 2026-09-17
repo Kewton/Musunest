@@ -11,7 +11,7 @@
 > | [`01-integration-strategy.md`](./01-integration-strategy.md) | 進め方（見本 → 契約 → 工場 → 結合 → 自動化）と、**M1a・M1b のゲートの正本**（§5.3） |
 > | [`02-l2-spec-examples.md`](./02-l2-spec-examples.md) | 見本 3 つの宣言の具体例と、採点のシナリオ（期待値） |
 > | [`03-spec-layers-and-checker.md`](./03-spec-layers-and-checker.md) | 宣言の層構造と、静的チェックツールの方向性 |
-> | [`04-spec-evolution.md`](./04-spec-evolution.md) | L2 の宣言の育て方（語彙の足し方・版の運用・磨く材料・語彙の台帳） |
+> | [`04-spec-evolution.md`](./04-spec-evolution.md) | L2 の宣言の育て方（語彙の足し方・版の運用・磨く材料・語彙の台帳）と、**UI と操作性の育て方**（§7） |
 > | [`05-architecture.md`](./05-architecture.md) | **M1.1 のアーキテクチャ（実装済みの姿）**。配置・依存・publish・経路・層と実装の対応 |
 
 ---
