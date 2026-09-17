@@ -38,7 +38,14 @@ function json(body: unknown, status: number, headers?: Record<string, string>): 
   return Response.json(body, { status, ...(headers === undefined ? {} : { headers }) });
 }
 
-/** 断った結果を HTTP の応答にする。**例外の文言も資格情報も載せない** */
+/**
+ * 断った結果を HTTP の応答にする。**例外の文言も資格情報も載せない。**
+ *
+ * ステータスは `API_ERROR_STATUS`（HTTP 契約の正本。`@musunest/appspec-schema` の `src/api.ts`）から引く。
+ * **ここに 2 つ目の表を作らない**——data-api と gateway・host は同じ契約を別々に書き写すと必ずずれる
+ * （`src/api.ts` の冒頭を参照）。コードを足すときは、正本の一覧と、それを固定しているテスト
+ * （`src/index.test.ts` と appspec-schema の `src/api.test.ts`）を同じ PR で直す。
+ */
 function failureResponse(failure: ApiFailure, allow?: string): Response {
   const body = apiErrorBody(failure.error, failure);
   return json(

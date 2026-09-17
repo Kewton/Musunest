@@ -362,7 +362,7 @@ describe("負例（appspec-schema の samples/negatives）", () => {
     ["computed-other-entity", "LOGIC_REFERENCE_OUT_OF_ENTITY"],
     ["validation-not-boolean", "LOGIC_VALIDATION_NOT_BOOLEAN"],
     ["number-in-len", "LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH"],
-    ["action-with-kind", "SHAPE_KEY_UNKNOWN"],
+    ["action-unknown-kind", "LOGIC_ACTION_KIND_NOT_ALLOWED"],
     ["view-unknown-type", "SHAPE_KEY_UNKNOWN"],
     ["table-unknown-field", "UI_FIELD_NOT_FOUND"],
     ["string-in-arithmetic", "LOGIC_OPERAND_TYPE_MISMATCH"],
@@ -402,6 +402,58 @@ describe("負例（appspec-schema の samples/negatives）", () => {
     const result = failure(checkSpec(broken));
     const diagnostic = result.diagnostics.find((entry) => entry.code === "LOGIC_REFERENCE_NOT_FOUND");
     expect(diagnostic).toMatchObject(locate(broken, "ammount > 0"));
+  });
+});
+
+// ── 2b. 操作の種類（kind。M1.2。Issue #109） ────────────────────
+//
+// `kind` は M1.2 で入った語彙である。**語彙は閉じている**——書けるのは create・update・delete だけで、
+// 省略は create（M1.1 の宣言の意味を変えない）である。**導入で正例になった `action-with-kind`**
+// （`kind: create` を書いた操作）を、負例から正例へ移した。
+
+describe("操作の種類（kind。M1.2）", () => {
+  const action = (body: string): string =>
+    declaration({ actions: `  - name: addExpense\n    entity: expense\n${body}` });
+
+  it("kind: create を書ける（負例 action-with-kind の正例。受入条件）", () => {
+    const result = checkSpec(action("    kind: create"));
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.spec.actions).toEqual([{ name: "addExpense", entity: "expense", kind: "create" }]);
+    }
+  });
+
+  it.each(["create", "update", "delete"] as const)("kind: %s を書ける（3 つだけである）", (kind) => {
+    const result = checkSpec(action(`    kind: ${kind}`));
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.spec.actions).toEqual([{ name: "addExpense", entity: "expense", kind }]);
+  });
+
+  it("kind を省略すると、欄そのものが無い（＝ create。M1.1 の宣言を変えない）", () => {
+    const result = checkSpec(declaration());
+    expect(result.diagnostics).toEqual([]);
+    if (result.ok) expect(result.spec.actions).toEqual([{ name: "addExpense", entity: "expense" }]);
+  });
+
+  it("未知の kind は LOGIC_ACTION_KIND_NOT_ALLOWED（負例 action-unknown-kind。受入条件）", () => {
+    const text = action("    kind: patch");
+    const result = failure(checkSpec(text));
+    expect(codesOf(result)).toEqual(["LOGIC_ACTION_KIND_NOT_ALLOWED"]);
+    // **正本の一覧（diagnostics.ts の DIAGNOSTIC_CODES）にある**——実装側だけで定義しない
+    expect(isDiagnosticCode("LOGIC_ACTION_KIND_NOT_ALLOWED")).toBe(true);
+    expect(messagesOf(result, "LOGIC_ACTION_KIND_NOT_ALLOWED")).toContain("patch");
+    // 位置は、書いた語を指す
+    expect(result.diagnostics[0]).toMatchObject(locate(text, "patch"));
+  });
+
+  it("kind が空なら SHAPE_VALUE_INVALID（語彙の照合の前に、形で断る）", () => {
+    expect(codesOf(failure(checkSpec(action("    kind:"))))).toEqual(["SHAPE_VALUE_INVALID"]);
+  });
+
+  it("kind 以外の欄は書けない（語彙は閉じている）", () => {
+    expect(codesOf(failure(checkSpec(action("    when: true"))))).toEqual(["SHAPE_KEY_UNKNOWN"]);
   });
 });
 

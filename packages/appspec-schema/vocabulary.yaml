@@ -175,9 +175,39 @@
   layer: logic
   since: v0.2-draft（M1.1）
   samples: [expense-log, warikan]
-  negatives: [action-unknown-entity, action-with-kind]
-  check_rules: [LOGIC_ENTITY_NOT_FOUND, SHAPE_KEY_UNKNOWN]
+  negatives: [action-unknown-entity, action-unknown-kind]
+  check_rules: [LOGIC_ENTITY_NOT_FOUND, LOGIC_ACTION_KIND_NOT_ALLOWED]
   semantics: docs/semantics.md#action
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+- name: create
+  layer: logic
+  since: v0.2-draft（M1.2）
+  samples: [warikan]
+  negatives: [action-unknown-kind]
+  check_rules: [LOGIC_ACTION_KIND_NOT_ALLOWED]
+  semantics: docs/semantics.md#create
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+- name: update
+  layer: logic
+  since: v0.2-draft（M1.2）
+  samples: [warikan]
+  negatives: [action-unknown-kind]
+  check_rules: [LOGIC_ACTION_KIND_NOT_ALLOWED]
+  semantics: docs/semantics.md#update
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+- name: delete
+  layer: logic
+  since: v0.2-draft（M1.2）
+  samples: [warikan]
+  negatives: [action-unknown-kind]
+  check_rules: [LOGIC_ACTION_KIND_NOT_ALLOWED]
+  semantics: docs/semantics.md#delete
   runtime: [spec-engine, data-api, host]
   factory: 未対応
 

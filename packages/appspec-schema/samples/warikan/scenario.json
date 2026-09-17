@@ -31,7 +31,7 @@
       "name": "タクシー 3000 円（B が払い、A・B・C で割る）",
       "action": "addExpense",
       "input": { "description": "タクシー", "amount": 3000, "payer": "$B", "participants": ["$A", "$B", "$C"] },
-      "expect": { "accepted": true }
+      "expect": { "accepted": true, "bind": "taxi" }
     },
     {
       "name": "金額が 0 なら文言つきで断る",

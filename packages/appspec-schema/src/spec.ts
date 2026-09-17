@@ -230,11 +230,29 @@ export const isComputedSettle = (computed: Computed): computed is ComputedSettle
 export const isRowComputed = (computed: Computed): computed is RowComputed =>
   !isComputedSettle(computed);
 
-/** 種類の指定の無い操作。M1.1 では、その entity への 1 件の追加を意味する。 */
+/**
+ * 操作の種類（M1.2。`kind`）。**語彙は閉じている**——書けるのはこの 3 つだけである。
+ *   `create` … その entity に 1 件を追加する（従来の操作）
+ *   `update` … 対象のレコード 1 件を、渡した項目で**置き換える**（`id` を取る）
+ *   `delete` … 対象のレコード 1 件を消す（`id` を取る。参照されているものは消せない）
+ * 意味は docs/semantics.md「action」「create」「update」「delete」にある。
+ */
+export const ACTION_KINDS = ["create", "update", "delete"] as const;
+export type ActionKind = (typeof ACTION_KINDS)[number];
+
+/**
+ * 操作。**`kind` を省略すると `create`** である（M1.1 の宣言をそのまま読めるようにする）。
+ * `update` と `delete` は、入力を「項目名: 値」ではなく**対象のレコードの ID**で指す（M1.2）。
+ */
 export interface Action {
   readonly name: string;
   readonly entity: string;
+  /** 操作の種類（M1.2）。書かなければ `create` である */
+  readonly kind?: ActionKind;
 }
+
+/** 操作の種類。省略は `create` として読む（M1.1 の宣言の意味を変えない） */
+export const actionKind = (action: Action): ActionKind => action.kind ?? "create";
 
 /** 式の値の型。`boolean` は比べた結果にだけ現れる（項目の型にも computed の型にも無い）。 */
 export type ExpressionType = "number" | "string" | "list" | "boolean";
@@ -364,6 +382,9 @@ export const VOCABULARY = {
   max: "logic",
   len: "logic",
   action: "logic",
+  create: "logic",
+  update: "logic",
+  delete: "logic",
   view: "ui",
   table: "ui",
   settlement: "ui",

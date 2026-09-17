@@ -12,7 +12,14 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestHarness } from "wrangler";
 import { APP_INSTANCE_DO_CLASS_NAME } from "./contract.js";
-import type { RecordData, StoredRecord } from "./contract.js";
+import type {
+  GuardedCreate,
+  GuardedDelete,
+  RecordData,
+  ReferenceExpectation,
+  ReferenceGuard,
+  StoredRecord,
+} from "./contract.js";
 
 // tsconfig の lib は ES2022 ＋ workers-types だけなので ImportMeta.url が型に無い。
 // このファイルは workerd ではなく Node（vitest）の側で動くので、ここだけ局所的に補う。
@@ -34,9 +41,40 @@ function path(
   entity: string,
   id?: string,
   stamp: Readonly<Record<string, string>> = {},
+  /** 参照の期待・参照の確認（M1.2）。付けると、参照を同じ呼出の中で確かめる版になる */
+  guard?: unknown,
 ): string {
   const params = new URLSearchParams({ app, ...stamp });
+  if (guard !== undefined) params.set("guard", JSON.stringify(guard));
   return `/records/${entity}${id === undefined ? "" : `/${id}`}?${params}`;
+}
+
+/** 参照の期待つきの追加（M1.2）。**確かめることと書くことが 1 つの呼出**である */
+async function createdGuarded(
+  app: string,
+  entity: string,
+  data: RecordData,
+  expectations: readonly ReferenceExpectation[],
+  stamp?: Readonly<Record<string, string>>,
+): Promise<GuardedCreate> {
+  const res = await server.fetch(path(app, entity, undefined, stamp, expectations), {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  expect(res.status).toBe(200);
+  return (await res.json()) as GuardedCreate;
+}
+
+/** 参照の確認つきの削除（M1.2）。**数えることと消すことが 1 つの呼出**である */
+async function removedGuarded(
+  app: string,
+  entity: string,
+  id: string,
+  guards: readonly ReferenceGuard[],
+): Promise<GuardedDelete> {
+  const res = await server.fetch(path(app, entity, id, {}, guards), { method: "DELETE" });
+  expect(res.status).toBe(200);
+  return (await res.json()) as GuardedDelete;
 }
 
 async function created(app: string, entity: string, data: RecordData, stamp?: Readonly<Record<string, string>>): Promise<StoredRecord> {
@@ -293,5 +331,165 @@ describe("宣言の entity のレコード（workerd 上の実機）", () => {
     // 入力の id では引けない（入力の値は行の ID を決めない）
     expect(await read("stamp-wins", "expense", "input")).toBeNull();
     expect(await read("stamp-wins", "expense", "boundary")).toEqual(row);
+  });
+
+  // ── 参照されている行は消せない（M1.2。Issue #109） ──────────────────
+  //
+  // 消せるかどうかは**保存済みの行**に依るので、静的チェックには判定できない（03 §5.1）。
+  // ここで確かめるのは、**確かめることと書くことが 1 つの呼出の中で行われる**ことである——
+  // 「一覧を読んでから消す」の 2 回の呼出だと、その間に参照が足されて孤立した参照が残る。
+
+  /** 見本 warikan の参照（`expense.payer` は `ref`、`expense.participants` は参照 list） */
+  const memberGuards: readonly ReferenceGuard[] = [
+    { entity: "expense", field: "payer", list: false },
+    { entity: "expense", field: "participants", list: true },
+  ];
+
+  /** 追加するときの参照の期待（書くのと同じ呼出で見る） */
+  const memberExpectations: readonly ReferenceExpectation[] = [
+    { field: "payer", to: "member", list: false },
+    { field: "participants", to: "member", list: true },
+  ];
+
+  it("参照先が実在すれば書け、実在しなければ書かずに項目名を返す", async () => {
+    const a = await createdGuarded(
+      "guarded-create",
+      "member",
+      { name: "A" },
+      [],
+      { now: T1, id: "m1" },
+    );
+    expect(a).toMatchObject({ ok: true });
+
+    const ok = await createdGuarded(
+      "guarded-create",
+      "expense",
+      { amount: 1000, payer: "m1", participants: ["m1"] },
+      memberExpectations,
+      { now: T1, id: "e1" },
+    );
+    expect(ok.ok).toBe(true);
+
+    // 存在しない ID は、書かずに通らなかった項目の名前を返す（宣言の順）
+    const missing = await createdGuarded(
+      "guarded-create",
+      "expense",
+      { amount: 2000, payer: "m-nobody", participants: ["m1", "m-nobody"] },
+      memberExpectations,
+      { now: T1, id: "e2" },
+    );
+    expect(missing).toEqual({
+      ok: false,
+      reason: "REFERENCE_NOT_FOUND",
+      fields: ["payer", "participants"],
+    });
+    // 書いていない（孤立した参照を残さない）
+    expect(await listed("guarded-create", "expense")).toHaveLength(1);
+  });
+
+  it("参照が無ければ消せて、行が 1 つ減る", async () => {
+    const member = await created("guarded-free", "member", { name: "A" }, { now: T1, id: "m1" });
+    const result = await removedGuarded("guarded-free", "member", "m1", memberGuards);
+    expect(result).toEqual({ ok: true, record: member });
+    expect(await listed("guarded-free", "member")).toEqual([]);
+  });
+
+  it("payer だけで参照されていても、participants だけで参照されていても、消せない（参照元と件数つき）", async () => {
+    await created("guarded-payer", "member", { name: "A" }, { now: T1, id: "m1" });
+    await created("guarded-payer", "member", { name: "B" }, { now: T1, id: "m2" });
+    await created(
+      "guarded-payer",
+      "expense",
+      { amount: 6000, payer: "m1", participants: ["m1", "m2"] },
+      { now: T1, id: "e1" },
+    );
+
+    const result = await removedGuarded("guarded-payer", "member", "m1", memberGuards);
+    expect(result).toEqual({
+      ok: false,
+      reason: "REFERENCE_IN_USE",
+      references: [
+        { entity: "expense", field: "payer", list: false, count: 1 },
+        { entity: "expense", field: "participants", list: true, count: 1 },
+      ],
+    });
+    // 元の行は変わらない（消えていない）
+    expect(await listed("guarded-payer", "member")).toHaveLength(2);
+
+    // 参照元を消せば、消せるようになる
+    expect(await removed("guarded-payer", "expense", "e1")).toBe(true);
+    const after = await removedGuarded("guarded-payer", "member", "m1", memberGuards);
+    expect(after.ok).toBe(true);
+  });
+
+  it("participants にだけ使われている行も消せない（外すと消せる）", async () => {
+    await created("guarded-list", "member", { name: "C" }, { now: T1, id: "m3" });
+    await created("guarded-list", "member", { name: "D" }, { now: T1, id: "m4" });
+    // payer は D、participants にだけ C が入っている（payer からの参照は無い）
+    await created(
+      "guarded-list",
+      "expense",
+      { amount: 3000, payer: "m4", participants: ["m3", "m4"] },
+      { now: T1, id: "e1" },
+    );
+
+    expect(await removedGuarded("guarded-list", "member", "m3", memberGuards)).toEqual({
+      ok: false,
+      reason: "REFERENCE_IN_USE",
+      references: [{ entity: "expense", field: "participants", list: true, count: 1 }],
+    });
+
+    // participants から外す（直す）と、消せるようになる
+    expect(
+      await changed("guarded-list", "expense", "e1", {
+        amount: 3000,
+        payer: "m4",
+        participants: ["m4"],
+      }),
+    ).not.toBeNull();
+    expect((await removedGuarded("guarded-list", "member", "m3", memberGuards)).ok).toBe(true);
+    expect((await listed("guarded-list", "member")).map((row) => row.id)).toEqual(["m4"]);
+  });
+
+  it("無い行の削除は NOT_FOUND（ほかの行は変えない）", async () => {
+    await created("guarded-absent", "member", { name: "A" }, { now: T1, id: "m1" });
+    expect(await removedGuarded("guarded-absent", "member", "nope", memberGuards)).toEqual({
+      ok: false,
+      reason: "NOT_FOUND",
+    });
+    expect(await listed("guarded-absent", "member")).toHaveLength(1);
+  });
+
+  it("参照の追加と削除を同時に送っても、孤立した参照を残さない", async () => {
+    // メンバーを 1 人作り、そのメンバーを指す支出の追加と、メンバーの削除を**同時に**送る。
+    // DO は要求を直列に処理し、どちらも「確かめてから書く」ので、
+    //   支出が先に着けば削除は断られ（参照が 1 件ある）、
+    //   削除が先に着けば支出は参照先が無いので断られる。
+    // **どちらの順でも、payer が存在しない行は残らない。**
+    for (let round = 0; round < 5; round += 1) {
+      const app = `guarded-race-${round}`;
+      await created(app, "member", { name: "A" }, { now: T1, id: "m1" });
+
+      const [, deleted] = await Promise.all([
+        createdGuarded(
+          app,
+          "expense",
+          { amount: 1000, payer: "m1", participants: ["m1"] },
+          memberExpectations,
+          { now: T1, id: "e1" },
+        ),
+        removedGuarded(app, "member", "m1", memberGuards),
+      ]);
+
+      const members = new Set((await listed(app, "member")).map((row) => row.id));
+      const expenses = await listed(app, "expense");
+      // 孤立した参照が無い（支出が指す payer の行が、必ず残っている）
+      for (const expense of expenses) {
+        expect(members.has(String(expense.data["payer"])), expense.id).toBe(true);
+      }
+      // どちらかは通っている（両方断られることはない。先に着いたほうが勝つ）
+      if (deleted.ok) expect(expenses).toHaveLength(0);
+      else expect(expenses).toHaveLength(1);
+    }
   });
 });

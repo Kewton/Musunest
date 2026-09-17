@@ -108,7 +108,11 @@ describe("誤りコードと HTTP ステータス（Issue #102 の案）", () =>
       NOT_FOUND: 404,
       METHOD_NOT_ALLOWED: 405,
       SPEC_UNAVAILABLE: 503,
+      // 参照されているレコードの削除（M1.2）。**列挙する欄である**（隠さない）
+      REFERENCE_IN_USE: 409,
     });
+    // コードの一覧とステータスの一覧がずれない（足し忘れをここで止める）
+    expect(new Set(Object.keys(API_ERROR_STATUS))).toEqual(new Set(API_ERROR_CODES));
   });
 
   it("成功のステータスは 200 と 201（**成功に見せかけた空の応答を作らない**）", () => {
@@ -140,6 +144,22 @@ describe("誤りコードと HTTP ステータス（Issue #102 の案）", () =>
       expect(apiErrorBody(code)).toEqual({ error: code });
       expect(Object.keys(apiErrorBody(code))).toEqual(["error"]);
     }
+  });
+
+  it("REFERENCE_IN_USE だけが参照元と件数を載せる（M1.2）", () => {
+    const references = [
+      { entity: "expense", field: "payer", count: 1 },
+      { entity: "expense", field: "participants", count: 2 },
+    ];
+    expect(apiErrorBody("REFERENCE_IN_USE", { references })).toEqual({
+      error: "REFERENCE_IN_USE",
+      references,
+    });
+    // 参照元が無ければ欄を載せない（空の並びで「参照元が無い」と言わない。そのときは 409 にならない）
+    expect(apiErrorBody("REFERENCE_IN_USE")).toEqual({ error: "REFERENCE_IN_USE" });
+    expect(apiErrorBody("REFERENCE_IN_USE", { references: [] })).toEqual({ error: "REFERENCE_IN_USE" });
+    // ほかの誤りには載らない
+    expect(apiErrorBody("NOT_FOUND", { references })).toEqual({ error: "NOT_FOUND" });
   });
 });
 

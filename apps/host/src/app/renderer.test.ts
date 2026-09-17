@@ -106,11 +106,13 @@ function makeClient(parts: {
   readonly spec?: MusunestClient["getSpec"];
   readonly view?: MusunestClient["getView"];
   readonly add?: MusunestClient["addRecord"];
+  readonly remove?: MusunestClient["deleteRecord"];
 }): MusunestClient {
   return {
     getSpec: parts.spec ?? (() => Promise.resolve(okResult(SPEC))),
     getView: parts.view ?? (() => Promise.resolve(okResult(VIEW))),
     addRecord: parts.add ?? (() => Promise.resolve(errResult("SPEC_UNAVAILABLE", 503))),
+    deleteRecord: parts.remove ?? (() => Promise.resolve(errResult("SPEC_UNAVAILABLE", 503))),
   };
 }
 
@@ -874,3 +876,107 @@ function rowTexts(container: HTMLElement): string[][] {
     Array.from(tr.querySelectorAll("td")).map((td) => td.textContent ?? ""),
   );
 }
+
+// ── 消す（M1.2。Issue #109） ──────────────────────────────────────────
+//
+// 「参照されているものは消せない」を**画面の非表示で守ろうとしない**（03 §2.2）。
+// 画面は data-api が返した `references` を見て、**消せる行にだけボタンを出し、消せない行には理由を出す**。
+// 断るのは data-api（唯一の権限強制点）であって、ここはその答えの見せ方である。
+
+const DELETE_ACTIONS = [
+  { name: "addExpense", entity: "expense", kind: "create" },
+  { name: "deleteExpense", entity: "expense", kind: "delete" },
+] as const;
+
+const DELETE_SPEC: ApiSpecBody = {
+  ...SPEC,
+  spec: { ...SPEC.spec, actions: [...DELETE_ACTIONS] },
+  actions: [...DELETE_ACTIONS],
+};
+
+const FREE = { ...DINNER, id: "r1", references: [] };
+const REFERENCED = {
+  ...TAXI,
+  id: "r2",
+  references: [{ entity: "expense", field: "payer", count: 2 }],
+};
+
+const DELETE_VIEW: ApiViewBody = {
+  ...VIEW,
+  actions: [...DELETE_ACTIONS],
+  rows: [FREE, REFERENCED],
+};
+
+const deleteClient = (parts: {
+  readonly remove?: MusunestClient["deleteRecord"];
+} = {}): MusunestClient =>
+  makeClient({
+    spec: () => Promise.resolve(okResult(DELETE_SPEC)),
+    view: () => Promise.resolve(okResult(DELETE_VIEW)),
+    remove: parts.remove ?? (() => Promise.resolve(errResult("SPEC_UNAVAILABLE", 503))),
+  });
+
+describe("消す（M1.2）", () => {
+  it("delete を宣言していなければ、削除の列そのものを出さない", async () => {
+    await renderScreen(makeClient({}));
+    // M1.1 の一覧は、見出しも操作の欄も持たない
+    expect(screen.queryByRole("columnheader", { name: "操作" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "削除" })).toBeNull();
+  });
+
+  it("参照の無い行には削除ボタンが出て、押すと id を渡して一覧を読み直す", async () => {
+    const remove = vi.fn<MusunestClient["deleteRecord"]>(() =>
+      Promise.resolve(okResult({ entity: "expense", id: "r1", deleted: true })),
+    );
+    const view = vi.fn<MusunestClient["getView"]>(() => Promise.resolve(okResult(DELETE_VIEW)));
+    await renderScreen({ ...deleteClient({ remove }), getView: view });
+
+    // 参照が無い行（r1）にだけボタンが出る
+    const buttons = screen.getAllByRole("button", { name: "削除" });
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]?.getAttribute("data-delete")).toBe("r1");
+
+    await act(async () => {
+      fireEvent.click(buttons[0] as HTMLElement);
+    });
+    expect(remove).toHaveBeenCalledWith("inst-1", "deleteExpense", "r1");
+    // 成功したら**一覧を読み直す**（返ってきた行を勝手に足さない）。初回と合わせて 2 回
+    expect(view).toHaveBeenCalledTimes(2);
+  });
+
+  it("参照されている行には削除ボタンを出さず、参照元と件数を理由として出す", async () => {
+    await renderScreen(deleteClient());
+
+    // ボタンは 1 つだけ（参照されている r2 には無い）
+    expect(screen.getAllByRole("button", { name: "削除" })).toHaveLength(1);
+    // 理由は、サーバが返した参照元と件数をそのまま見せる
+    const blocked = screen.getByText(/他の記録から参照されています/);
+    expect(blocked.textContent).toContain("expense.payer 2 件");
+  });
+
+  it("サーバが断った理由（409 REFERENCE_IN_USE）を、その場に出す", async () => {
+    // 一覧の `references` は古くなっていることがある（別の操作が参照を足した）。
+    // そのときは**サーバの答え**を出す——画面の判断だけを守りにしない
+    const remove = vi.fn<MusunestClient["deleteRecord"]>(() =>
+      Promise.resolve({
+        ok: false,
+        error: {
+          status: 409,
+          code: "REFERENCE_IN_USE",
+          fields: [],
+          validations: [],
+          references: [{ entity: "expense", field: "participants", count: 1 }],
+        },
+      }),
+    );
+    const client = deleteClient({ remove });
+    await renderScreen(client);
+
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button", { name: "削除" })[0] as HTMLElement);
+    });
+    const failure = screen.getByRole("alert");
+    expect(failure.getAttribute("data-state")).toBe("delete-failed");
+    expect(failure.textContent).toContain("expense.participants 1 件");
+  });
+});

@@ -11,9 +11,14 @@
 // どちらも下の APP_INSTANCE_DO_* を正本として同じ class_name / tag を書く。
 import { DurableObject } from "cloudflare:workers";
 import type {
+  GuardedCreate,
+  GuardedDelete,
+  GuardedUpdate,
   HealthzResult,
   RecordData,
   RecordStamp,
+  ReferenceExpectation,
+  ReferenceGuard,
   StoredEntry,
   StoredRecord,
 } from "./contract";
@@ -139,6 +144,28 @@ export class AppInstanceDO extends DurableObject<AppDoEnv> {
     return records.selectRecords(this.ctx.storage.sql, entity);
   }
 
+  /**
+   * 参照先の実在を確かめてから 1 件追加する（M1.2。Issue #109）。
+   *
+   * **data-api が別の呼出で参照を確かめてから書くと、その間に参照先が消えて孤立した参照が残る。**
+   * だから「どの項目がどの entity を指すか」（`expectations`）を渡してもらい、ここで書く前に見る。
+   * `records.insertRecordGuarded` の中に `await` が無いので、見ることと書くことは 1 つの処理になる。
+   */
+  async createRecordGuarded(
+    entity: string,
+    data: RecordData,
+    stamp: RecordStamp,
+    expectations: readonly ReferenceExpectation[],
+  ): Promise<GuardedCreate> {
+    return records.insertRecordGuarded(
+      this.ctx.storage.sql,
+      entity,
+      data,
+      records.recordBoundary(stamp),
+      expectations,
+    );
+  }
+
   /** entity の 1 行を ID で引く。無ければ `null`。別 entity の ID では引けない。 */
   async getRecord(entity: string, id: string): Promise<StoredRecord | null> {
     return records.selectRecord(this.ctx.storage.sql, entity, id);
@@ -166,6 +193,43 @@ export class AppInstanceDO extends DurableObject<AppDoEnv> {
   /** entity の 1 行を消す。消せたかどうかを返す（無い行では `false`）。 */
   async deleteRecord(entity: string, id: string): Promise<boolean> {
     return records.deleteRecord(this.ctx.storage.sql, entity, id);
+  }
+
+  /**
+   * 参照先の実在を確かめてから 1 行を書き換える（M1.2。Issue #109）。
+   * `createRecordGuarded` と同じく、見ることと書くことが 1 つの処理である。
+   */
+  async updateRecordGuarded(
+    entity: string,
+    id: string,
+    data: RecordData,
+    stamp: RecordStamp,
+    expectations: readonly ReferenceExpectation[],
+  ): Promise<GuardedUpdate> {
+    return records.updateRecordGuarded(
+      this.ctx.storage.sql,
+      entity,
+      id,
+      data,
+      records.recordBoundary(stamp),
+      expectations,
+    );
+  }
+
+  /**
+   * 参照を確かめてから 1 行を消す（M1.2。Issue #109）。
+   *
+   * **確認と削除は同じ呼出の中で行う。** data-api が「どの entity のどの項目が対象を指すか」
+   * （`guards`）を組み立てて渡し、ここが数えて消す。独立した RPC（一覧 → 削除）を順に `await`
+   * する形にしない——その間に別の操作が参照を足すと、孤立した参照が残るためである
+   * （`records.deleteRecordGuarded` の中に `await` が無い）。
+   */
+  async deleteRecordGuarded(
+    entity: string,
+    id: string,
+    guards: readonly ReferenceGuard[],
+  ): Promise<GuardedDelete> {
+    return records.deleteRecordGuarded(this.ctx.storage.sql, entity, id, guards);
   }
 
   /**

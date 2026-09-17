@@ -302,3 +302,112 @@ describe("base URL", () => {
     expect(relative.calls[0]?.url).toBe("/api/instances/inst-1/spec");
   });
 });
+
+// ── 消す（kind: delete）と、消せない理由（M1.2。Issue #109） ──────────────
+//
+// 画面（host）が消せるかどうかを出す材料なので、**契約と違う形は成功にしない**。
+// `REFERENCE_IN_USE`（409）は参照元と件数を保って渡す——空の並びに読み替えると、
+// 消せない理由が消える（`settlement` の `null` と同じ約束である）。
+
+describe("消す（M1.2）", () => {
+  const DELETED = { entity: "member", id: "m1", deleted: true } as const;
+
+  it("method は POST、body は id だけ、消したことが返る", async () => {
+    const stub = recordingFetch(() => json(200, DELETED));
+    const result = await clientWith(stub.fetch).deleteRecord("inst-1", "deleteMember", "m1");
+
+    expect(stub.calls[0]?.url).toBe(`${BASE}/api/instances/inst-1/actions/deleteMember`);
+    expect(stub.calls[0]?.init.method).toBe("POST");
+    expect(stub.calls[0]?.init.headers).toEqual({ "content-type": "application/json" });
+    expect(JSON.parse(String(stub.calls[0]?.init.body))).toEqual({ id: "m1" });
+    expect(result).toEqual({ ok: true, value: DELETED });
+  });
+
+  it("行ではない応答（deleted が true でない）は INVALID_RESPONSE", async () => {
+    const stub = recordingFetch(() => json(200, { entity: "member", id: "m1" }));
+    expect(await clientWith(stub.fetch).deleteRecord("inst-1", "deleteMember", "m1")).toMatchObject({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE },
+    });
+  });
+
+  it("409 REFERENCE_IN_USE は、参照元と件数を保つ（消せない理由を落とさない）", async () => {
+    const references = [
+      { entity: "expense", field: "payer", count: 1 },
+      { entity: "expense", field: "participants", count: 2 },
+    ];
+    const stub = recordingFetch(() => json(409, { error: "REFERENCE_IN_USE", references }));
+
+    expect(await clientWith(stub.fetch).deleteRecord("inst-1", "deleteMember", "m1")).toEqual({
+      ok: false,
+      error: { status: 409, code: "REFERENCE_IN_USE", fields: [], validations: [], references },
+    });
+  });
+
+  it("参照元が載っていなければ、欄を作らない（空の並びに読み替えない）", async () => {
+    const stub = recordingFetch(() => json(409, { error: "REFERENCE_IN_USE" }));
+    const result = await clientWith(stub.fetch).deleteRecord("inst-1", "deleteMember", "m1");
+
+    expect(result).toEqual({
+      ok: false,
+      error: { status: 409, code: "REFERENCE_IN_USE", fields: [], validations: [] },
+    });
+    // 欄そのものが無い
+    expect(result.ok === false && Object.hasOwn(result.error, "references")).toBe(false);
+  });
+
+  it("参照元の形が契約と違えば INVALID_RESPONSE（でっち上げない）", async () => {
+    const stub = recordingFetch(() =>
+      json(409, { error: "REFERENCE_IN_USE", references: [{ entity: "expense", field: "payer" }] }),
+    );
+    expect(await clientWith(stub.fetch).deleteRecord("inst-1", "deleteMember", "m1")).toEqual({
+      ok: false,
+      error: { status: 409, code: INVALID_RESPONSE, fields: [], validations: [] },
+    });
+  });
+});
+
+describe("操作の種類（kind）と、行の参照元（M1.2）", () => {
+  it("操作の kind を型付きで受け取る（create・update・delete だけ）", async () => {
+    const spec = {
+      ...SPEC,
+      spec: {
+        ...SPEC.spec,
+        actions: [
+          { name: "addExpense", entity: "expense", kind: "create" },
+          { name: "editExpense", entity: "expense", kind: "update" },
+          { name: "deleteExpense", entity: "expense", kind: "delete" },
+        ],
+      },
+    };
+    const stub = recordingFetch(() => json(200, spec));
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: spec });
+  });
+
+  it("知らない kind は INVALID_RESPONSE（キャストしない）", async () => {
+    const stub = recordingFetch(() =>
+      json(200, { ...SPEC, spec: { ...SPEC.spec, actions: [{ name: "a", entity: "expense", kind: "patch" }] } }),
+    );
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toMatchObject({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE },
+    });
+  });
+
+  it("行の references をそのまま渡し、契約と違う形は INVALID_RESPONSE", async () => {
+    const references = [{ entity: "expense", field: "payer", count: 1 }];
+    const withReferences = recordingFetch(() => json(200, { ...VIEW, rows: [{ ...ROW, references }] }));
+    expect(await clientWith(withReferences.fetch).getView("inst-1", "expenseList")).toEqual({
+      ok: true,
+      value: { ...VIEW, rows: [{ ...ROW, references }] },
+    });
+
+    const broken = recordingFetch(() =>
+      json(200, { ...VIEW, rows: [{ ...ROW, references: [{ entity: "expense", count: 0 }] }] }),
+    );
+    expect(await clientWith(broken.fetch).getView("inst-1", "expenseList")).toMatchObject({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE },
+    });
+  });
+});
