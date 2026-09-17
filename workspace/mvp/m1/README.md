@@ -12,6 +12,7 @@
 > | [`02-l2-spec-examples.md`](./02-l2-spec-examples.md) | 見本 3 つの宣言の具体例と、採点のシナリオ（期待値） |
 > | [`03-spec-layers-and-checker.md`](./03-spec-layers-and-checker.md) | 宣言の層構造と、静的チェックツールの方向性 |
 > | [`04-spec-evolution.md`](./04-spec-evolution.md) | L2 の宣言の育て方（語彙の足し方・版の運用・磨く材料・語彙の台帳） |
+> | [`05-architecture.md`](./05-architecture.md) | **M1.1 のアーキテクチャ（実装済みの姿）**。配置・依存・publish・経路・層と実装の対応 |
 
 ---
 
@@ -230,6 +231,8 @@ flowchart LR
   PHONE["所有者のスマホ"] --> HOST
   E2E -. staging を確かめる .-> HOST
 ```
+
+> **実装が入ったあとの姿は [`05-architecture.md`](./05-architecture.md) にある**（M1.1 の #96〜#104 が merge された時点の、経路・表・キー・層と実装の対応）。
 
 ### 3.1 M1a で通す道
 
