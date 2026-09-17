@@ -296,18 +296,33 @@ function isAggregate(value: unknown): boolean {
   return Object.values(value.where).every((op) => op === "equals" || op === "contains");
 }
 
-/** computed の 1 件は、式（`expression`）か集計（`aggregate`）の**どちらか一方**である（M1.2） */
+/**
+ * 精算（`settle`）の宣言（M1.2）。支出の entity と、その 3 つの項目（額・払った人・割る人）の名前を、
+ * **いずれも文字列で**持つ（docs/semantics.md「settle」）。**`type` を持たない**——値は数ではなく、
+ * 送金の並び（送金元・送金先・正の送金額）だからである。
+ */
+function isSettleDeclaration(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return ["expense", "amount", "payer", "shares"].every((key) => typeof value[key] === "string");
+}
+
+/**
+ * computed の 1 件は、式（`expression`）・集計（`aggregate`）・精算（`settle`）の**どれか 1 つ**である
+ * （M1.2。同時には書けない）。精算だけが `type` を持たない（値は数ではなく送金の並びである）。
+ */
 function isComputedDeclaration(value: unknown): boolean {
-  if (
-    !isRecord(value) ||
-    typeof value.name !== "string" ||
-    typeof value.entity !== "string" ||
-    value.type !== "number"
-  ) {
+  if (!isRecord(value) || typeof value.name !== "string" || typeof value.entity !== "string") {
     return false;
   }
-  if (typeof value.expression === "string") return value.aggregate === undefined;
-  return isAggregate(value.aggregate);
+  const forms = [
+    typeof value.expression === "string",
+    value.aggregate !== undefined,
+    value.settle !== undefined,
+  ].filter(Boolean).length;
+  if (forms !== 1) return false;
+  if (typeof value.expression === "string") return value.type === "number";
+  if (value.aggregate !== undefined) return value.type === "number" && isAggregate(value.aggregate);
+  return isSettleDeclaration(value.settle);
 }
 
 /**
