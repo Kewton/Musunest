@@ -198,13 +198,22 @@ export const API_ERROR_STATUS = {
   SPEC_UNAVAILABLE: 503,
 } as const satisfies Record<ApiErrorCode, number>;
 
-/** 型の検査で通らなかった項目と、通らなかった検査の名前。**どちらも宣言順の材料を持つ** */
+/**
+ * 型の検査で通らなかった項目と、通らなかった検査の名前。**どちらも宣言順の材料を持つ**。
+ * 検査が文言（`message`）を宣言していれば、名前と文言の対応も載せる（M1.2。Issue #106）。
+ */
 export interface ApiRejectedBody {
   readonly error: "INPUT_REJECTED";
-  /** 型の検査で通らなかった項目（順不同）。ここが空でなければ、検査の式は評価していない */
+  /** 型・参照の検査で通らなかった項目（宣言の順のあとに、未知の項目を入力の順で続ける） */
   readonly fields: readonly string[];
   /** 通らなかった検査の名前（宣言の順） */
   readonly validations: readonly string[];
+  /**
+   * 通らなかった検査の文言（`validations` と**同じ並び**。文言の無い検査は `null`）。
+   * **文言を 1 つも宣言していない宣言では、この欄を載せない**——M1.1 の応答（検査名だけ）を
+   * 変えないためである。読む側は、無ければ検査の名前で識別する（#102 の約束を保つ）。
+   */
+  readonly validationMessages?: readonly (string | null)[];
 }
 
 /** それ以外の誤り。**例外の内部情報も資格情報も載せない**（応答は外へ出る。data-api の README） */
@@ -217,13 +226,22 @@ export type ApiErrorBody = ApiRejectedBody | ApiFailureBody;
 /**
  * 誤りの本文を組む。`INPUT_REJECTED` のときだけ `fields` と `validations` を載せる
  * （ほかのコードでは項目名も検査名も無いので、空の配列を載せない）。
+ * `validationMessages` は、**文言が 1 つでもあるとき**だけ `validations` と同じ並びで載せる。
  */
 export function apiErrorBody(
   error: ApiErrorCode,
-  rejected?: { readonly fields: readonly string[]; readonly validations: readonly string[] },
+  rejected?: {
+    readonly fields: readonly string[];
+    readonly validations: readonly string[];
+    readonly validationMessages?: readonly (string | null)[];
+  },
 ): ApiErrorBody {
   if (error === "INPUT_REJECTED") {
-    return { error, fields: rejected?.fields ?? [], validations: rejected?.validations ?? [] };
+    const fields = rejected?.fields ?? [];
+    const validations = rejected?.validations ?? [];
+    const messages = rejected?.validationMessages;
+    if (messages === undefined || messages.length === 0) return { error, fields, validations };
+    return { error, fields, validations, validationMessages: messages };
   }
   return { error };
 }

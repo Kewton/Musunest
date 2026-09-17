@@ -1,0 +1,68 @@
+# 見本「旅行の割り勘」（M1.2。community.app-spec/v0.2-draft）
+#
+# M1.1 の見本「支出の記録」に、参照（`ref`）と参照の並び（`list of`）を足したものである。
+# 払った人（`payer`）は member のレコード 1 件を、割る人（`participants`）は member の並びを指す。
+# **値は member のレコード ID である**（同じ名前のメンバーが 2 人いても ID で区別できる）。
+#
+# デモ：メンバー A・B・C を登録し、夕食 6000 円（A が払う）とタクシー 3000 円（B が払う）を入れると、
+# 一覧に 1 人あたり 2000 円と 1000 円が出る。採点のシナリオは同じディレクトリの scenario.json、
+# 意味は ../../docs/semantics.md（「ref」「list」「message」）にある。
+
+entities:
+  - name: member
+    fields:
+      name: string          # 名前（画面に出すのはこの項目である）
+
+  - name: expense
+    fields:
+      description: string   # 内容
+      amount: number        # 金額（円）
+      payer:                # 払った人（member のレコード 1 件を ID で指す）
+        type: ref
+        to: member
+      participants:         # 割る人（member のレコードの並びを ID で指す）
+        type: list
+        of: member
+
+views:
+  - name: memberList
+    entity: member
+  - name: expenseList
+    entity: expense
+
+actions:
+  - name: addMember
+    entity: member
+  - name: addExpense
+    entity: expense
+
+validations:
+  - name: positiveAmount
+    entity: expense
+    expression: amount > 0
+    message: 金額は 1 円以上にしてください
+  - name: someoneShares
+    entity: expense
+    expression: len(participants) > 0
+    message: 割る人を 1 人以上選んでください
+
+computed:
+  # 割る人数。参照の並びでも `len` は使える（`list` と同じ扱いである）
+  - name: headcount
+    entity: expense
+    expression: len(participants)
+    type: number
+  # 1 人あたりの額。max は 0 で割らないための守り（参照の並びは空を許さない）
+  - name: shareAmount
+    entity: expense
+    expression: amount / max(1, headcount)
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

@@ -13,10 +13,17 @@
 //
 // ここは Cloudflare にもストレージにも触れない（呼ぶ側が渡す値だけで決まる）。
 
-import type { Entity, FieldType, NormalizedAppSpec } from "@musunest/appspec-schema";
+import type { Entity, FieldDeclaration, NormalizedAppSpec } from "@musunest/appspec-schema";
+import { fieldKind } from "@musunest/appspec-schema";
 import type { RecordData, RecordValue } from "@musunest/app-do";
 import type { Clock } from "@musunest/spec-engine";
 import { evaluateRecord } from "@musunest/spec-engine";
+
+// 参照（`ref`・参照 list）の検査は references.ts にある。**入力の検査の一部**（型 → 参照）なので、
+// 呼ぶ側（app-api.ts）が入力の検査だけを読めば済むように、この入口からも読めるようにする
+// （app-api.ts が相対で読むのはこの file だけである。src/index.test.ts が字面で確かめる）。
+export { checkReferences } from "./references.js";
+export type { ReferenceCheck, ReferenceCheckRequest, ReferenceSource } from "./references.js";
 
 /** 型の検査を通った入力。**宣言した項目だけ**を持ち、宣言の順に並ぶ */
 export interface AcceptedInput {
@@ -60,15 +67,21 @@ const isFiniteNumber = (value: unknown): value is number =>
 
 /**
  * 1 つの項目の値を読む。型に合わなければ `null`（この関数の戻り値で `null` は「合わない」の意味しか
- * 持たない——`string` も `number` も `list` も `null` を作らない）。
+ * 持たない——`string` も `number` も `list` も `ref` も `null` を作らない）。
+ *
+ * **`ref` は空でない文字列（参照先の ID）だけを受け取る。** その ID が同じインスタンスの
+ * 参照先のレコードに実在するかは、型を通ったあとに references.ts が見る（二段構え。M1.2）。
  */
-function readValue(type: FieldType, value: unknown): RecordValue | null {
-  switch (type) {
+function readValue(field: FieldDeclaration, value: unknown): RecordValue | null {
+  switch (fieldKind(field)) {
     case "string":
       // 空の文字列も 1 つの値として受け取る（docs/semantics.md「string」）
       return typeof value === "string" ? value : null;
     case "number":
       return isFiniteNumber(value) ? value : null;
+    case "ref":
+      // 参照の値は、参照先のレコードの ID である（空文字は ID にならない）
+      return typeof value === "string" && value !== "" ? value : null;
     case "list": {
       if (!Array.isArray(value) || value.length === 0) return null;
       if (!value.every((item): item is string => typeof item === "string")) return null;
@@ -76,8 +89,6 @@ function readValue(type: FieldType, value: unknown): RecordValue | null {
       if (new Set<string>(value).size !== value.length) return null;
       return [...value];
     }
-    default:
-      return null;
   }
 }
 
@@ -92,13 +103,13 @@ export function checkInputTypes(
   const fields: string[] = [];
   const data: Record<string, RecordValue> = {};
 
-  for (const [name, type] of Object.entries(entity.fields)) {
+  for (const [name, field] of Object.entries(entity.fields)) {
     if (!Object.hasOwn(input, name)) {
       // 足りない項目（M1.1 の項目はすべて必須。docs/semantics.md「entity」）
       fields.push(name);
       continue;
     }
-    const value = readValue(type, input[name]);
+    const value = readValue(field, input[name]);
     if (value === null) {
       fields.push(name);
       continue;

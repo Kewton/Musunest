@@ -17,6 +17,9 @@ export {
 export {
   readNegativeIndex,
   readScoringScenario,
+  resolveScenarioIds,
+  scenarioIds,
+  SCENARIO_ID_PREFIX,
   type NegativeIndex,
   type NegativeSample,
   type ScenarioStep,

@@ -8,6 +8,10 @@ export const PACKAGE_NAME = "@musunest/sdk" as const;
 
 export * from "./client.js";
 
+// **宣言の読み取り（項目の種類と参照先）も、ここから出す。** 画面（host）が workspace で参照できるのは
+// このパッケージだけなので（CLAUDE.md「依存の向き」）、画面が使う関数を appspec-schema から再輸出する。
+export { fieldKind, fieldTarget } from "@musunest/appspec-schema";
+
 export type {
   Action,
   ApiActionRef,
@@ -24,9 +28,13 @@ export type {
   AppSpec,
   Computed,
   Entity,
+  FieldDeclaration,
+  FieldKind,
   FieldType,
   NormalizedAppSpec,
   Permission,
+  RefFieldDeclaration,
+  RefListFieldDeclaration,
   Validation,
   View,
 } from "@musunest/appspec-schema";

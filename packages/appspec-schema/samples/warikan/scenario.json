@@ -1,0 +1,80 @@
+{
+  "$comment": "見本「旅行の割り勘」の採点のシナリオ。steps を先頭から順に行い、各操作の結果と、最後の一覧を期待値と比べる。受理した手順の bind は、登録して得た ID に付ける名前である。入力と期待値の中の $名前 は、その ID に置き換えて使う（動的に割り当てられる ID を A・B・C と対応づける書き方。src/samples.ts の scenarioIds・resolveScenarioIds）。形は src/samples.ts の ScoringScenario、意味は docs/semantics.md。",
+  "sample": "warikan",
+  "clock": "2026-09-16T12:00:00+09:00",
+  "steps": [
+    {
+      "name": "メンバー A を登録する",
+      "action": "addMember",
+      "input": { "name": "A" },
+      "expect": { "accepted": true, "bind": "A" }
+    },
+    {
+      "name": "メンバー B を登録する",
+      "action": "addMember",
+      "input": { "name": "B" },
+      "expect": { "accepted": true, "bind": "B" }
+    },
+    {
+      "name": "メンバー C を登録する",
+      "action": "addMember",
+      "input": { "name": "C" },
+      "expect": { "accepted": true, "bind": "C" }
+    },
+    {
+      "name": "夕食 6000 円（A が払い、A・B・C で割る）",
+      "action": "addExpense",
+      "input": { "description": "夕食", "amount": 6000, "payer": "$A", "participants": ["$A", "$B", "$C"] },
+      "expect": { "accepted": true, "bind": "dinner" }
+    },
+    {
+      "name": "タクシー 3000 円（B が払い、A・B・C で割る）",
+      "action": "addExpense",
+      "input": { "description": "タクシー", "amount": 3000, "payer": "$B", "participants": ["$A", "$B", "$C"] },
+      "expect": { "accepted": true }
+    },
+    {
+      "name": "金額が 0 なら文言つきで断る",
+      "action": "addExpense",
+      "input": { "description": "返品", "amount": 0, "payer": "$A", "participants": ["$A"] },
+      "expect": { "rejected": { "fields": [], "validations": ["positiveAmount"] } }
+    },
+    {
+      "name": "割る人が空なら断る",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 3000, "payer": "$A", "participants": [] },
+      "expect": { "rejected": { "fields": ["participants"], "validations": [] } }
+    },
+    {
+      "name": "割る人が重なっていたら断る",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 3000, "payer": "$A", "participants": ["$A", "$A"] },
+      "expect": { "rejected": { "fields": ["participants"], "validations": [] } }
+    },
+    {
+      "name": "存在しない ID を参照すると断る",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 3000, "payer": "member-does-not-exist", "participants": ["$A"] },
+      "expect": { "rejected": { "fields": ["payer"], "validations": [] } }
+    },
+    {
+      "name": "別 entity の ID を参照すると断る（夕食の ID を member の参照に渡す）",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 3000, "payer": "$dinner", "participants": ["$A"] },
+      "expect": { "rejected": { "fields": ["payer"], "validations": [] } }
+    },
+    {
+      "name": "参照 list に存在しない ID があれば断る",
+      "action": "addExpense",
+      "input": { "description": "昼食", "amount": 3000, "payer": "$A", "participants": ["$A", "member-does-not-exist"] },
+      "expect": { "rejected": { "fields": ["participants"], "validations": [] } }
+    }
+  ],
+  "views": {
+    "memberList": [{ "name": "A" }, { "name": "B" }, { "name": "C" }],
+    "expenseList": [
+      { "description": "夕食", "amount": 6000, "payer": "$A", "participants": ["$A", "$B", "$C"], "headcount": 3, "shareAmount": 2000 },
+      { "description": "タクシー", "amount": 3000, "payer": "$B", "participants": ["$A", "$B", "$C"], "headcount": 3, "shareAmount": 1000 }
+    ]
+  }
+}

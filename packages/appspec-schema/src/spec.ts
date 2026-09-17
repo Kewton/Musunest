@@ -56,14 +56,66 @@ export const RESERVED_NAMES = ["id", "createdAt", "updatedAt"] as const;
 
 // ── データ層 ─────────────────────────────────────────────────────
 
-/** 項目の型（M1.1）。意味は docs/semantics.md。 */
+/** 項目の型（文字列の 1 語で書けるもの。M1.1）。意味は docs/semantics.md。 */
 export const FIELD_TYPES = ["string", "number", "list"] as const;
 export type FieldType = (typeof FIELD_TYPES)[number];
 
+/**
+ * 参照の項目（M1.2）。ほかの entity のレコード 1 件を、その ID で指す。
+ * 宣言では `{type: ref, to: <entity>}` と書く（docs/semantics.md「ref」）。
+ */
+export interface RefFieldDeclaration {
+  readonly type: "ref";
+  /** 参照先の entity の名前 */
+  readonly to: string;
+}
+
+/**
+ * 参照の並び（M1.2）。ほかの entity のレコードの ID の並び。宣言では `{type: list, of: <entity>}` と書く。
+ * `of` の無い `list`（文字列の並び）は `"list"` の 1 語で書く。
+ */
+export interface RefListFieldDeclaration {
+  readonly type: "list";
+  readonly of: string;
+}
+
+/**
+ * 項目の宣言。**文字列の 1 語（`string`・`number`・`list`）と、参照の写像の両方を受け取る**
+ * （既存の見本はこの 1 語で書いてある）。
+ */
+export type FieldDeclaration = FieldType | RefFieldDeclaration | RefListFieldDeclaration;
+
+/** 画面と入力の検査が使う項目の種類。`ref` は別の entity のレコード 1 件を指す（M1.2） */
+export type FieldKind = FieldType | "ref";
+
+/** 項目の種類を返す。`{type: list, of: ...}` は `"list"` である */
+export function fieldKind(field: FieldDeclaration): FieldKind {
+  if (typeof field === "string") return field;
+  return field.type === "ref" ? "ref" : "list";
+}
+
+/** 参照先の entity の名前（`ref` と `list of`）。参照でなければ `null` */
+export function fieldTarget(field: FieldDeclaration): string | null {
+  if (typeof field === "string") return null;
+  return field.type === "ref" ? field.to : field.of;
+}
+
+/**
+ * 式が読む型。**`ref` の値は ID の文字列である**（数ではないので、計算には使えない）。
+ * `list` は文字列の並びと同じく `len` に渡せる。
+ */
+export function expressionTypeOf(field: FieldDeclaration): ExpressionType {
+  const kind = fieldKind(field);
+  return kind === "ref" ? "string" : kind;
+}
+
 export interface Entity {
   readonly name: string;
-  /** 項目名 → 型。M1.1 の項目はすべて必須。書いた順が一覧の列の順になる。 */
-  readonly fields: Readonly<Record<string, FieldType>>;
+  /**
+   * 項目名 → 宣言。M1.1 の項目はすべて必須。**書いた順が一覧の列の順になる。**
+   * 参照（`ref`・参照 list）の値は、参照先のレコードの ID である（M1.2）。
+   */
+  readonly fields: Readonly<Record<string, FieldDeclaration>>;
 }
 
 // ── ロジック層 ───────────────────────────────────────────────────
@@ -73,6 +125,11 @@ export interface Validation {
   readonly name: string;
   readonly entity: string;
   readonly expression: string;
+  /**
+   * 保存できない理由の文言（任意。M1.2）。付いていなければ、画面と応答は**検査の名前**で識別する
+   * （M1.1 の `expense-log` は文言を持たない）。docs/semantics.md「message」。
+   */
+  readonly message?: string;
 }
 
 /** computed の型（M1.1 は数だけ）。 */
@@ -185,7 +242,9 @@ export const VOCABULARY = {
   string: "data",
   number: "data",
   list: "data",
+  ref: "data",
   validation: "logic",
+  message: "logic",
   computed: "logic",
   min: "logic",
   max: "logic",

@@ -301,10 +301,15 @@ describe("見本・負例・採点のシナリオ（samples/）", () => {
         .map((line) => /^ {2}- name: ([A-Za-z0-9]+)$/.exec(line)?.[1])
         .filter((found): found is string => found !== undefined),
     );
+    // 項目の名前は「名前: 値」の行と、参照（ref・参照 list）の「名前:」で始まる入れ子の写像の行にある
     const fieldAndComputed = new Set(
       readText(sampleSpecFile(name))
         .split("\n")
-        .map((line) => /^ {6}([A-Za-z0-9]+): /.exec(line)?.[1] ?? /^ {2}- name: ([A-Za-z0-9]+)$/.exec(line)?.[1])
+        .map(
+          (line) =>
+            /^ {6}([A-Za-z0-9]+):(?: |$)/.exec(line)?.[1] ??
+            /^ {2}- name: ([A-Za-z0-9]+)$/.exec(line)?.[1],
+        )
         .filter((found): found is string => found !== undefined),
     );
     const scenario = readScoringScenario(readJson(sampleScenarioFile(name)));

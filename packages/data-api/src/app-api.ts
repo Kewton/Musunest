@@ -37,12 +37,13 @@ import {
   API_CREATED_STATUS,
   API_READ_STATUS,
   APPSPEC_SCHEMA_VERSION_PATTERN,
+  FIELD_TYPES,
 } from "@musunest/appspec-schema";
 import type { RecordData, RecordStamp, StoredRecord } from "@musunest/app-do";
 import type { AppRecord } from "@musunest/control-plane";
 import type { Clock } from "@musunest/spec-engine";
 import { evaluateRecord } from "@musunest/spec-engine";
-import { checkInput } from "./input.js";
+import { checkInput, checkReferences } from "./input.js";
 
 // ── 依存（I/O の実体は adapter が渡す） ──────────────────────────────
 
@@ -87,6 +88,11 @@ export interface ApiFailure {
   readonly error: ApiErrorCode;
   readonly fields: readonly string[];
   readonly validations: readonly string[];
+  /**
+   * 通らなかった検査の文言（`validations` と同じ並び。文言の無い検査は `null`）。
+   * **文言を 1 つも宣言していない宣言では持たない**（M1.1 の応答を変えない。Issue #106）。
+   */
+  readonly validationMessages?: readonly (string | null)[];
 }
 
 export interface ApiFailureResult {
@@ -102,7 +108,31 @@ const fail = (
   error: ApiErrorCode,
   fields: readonly string[] = [],
   validations: readonly string[] = [],
-): ApiFailureResult => ({ ok: false, failure: { error, fields, validations } });
+  validationMessages?: readonly (string | null)[],
+): ApiFailureResult => ({
+  ok: false,
+  failure: {
+    error,
+    fields,
+    validations,
+    ...(validationMessages === undefined ? {} : { validationMessages }),
+  },
+});
+
+/**
+ * 通らなかった検査の文言（`validations` と同じ並び）。文言を 1 つも宣言していなければ `undefined`
+ * （＝応答に欄を載せない。読む側は検査の名前で識別する）。
+ */
+function messagesOf(
+  app: NormalizedAppSpec,
+  validations: readonly string[],
+): readonly (string | null)[] | undefined {
+  if (validations.length === 0) return undefined;
+  const messages = validations.map(
+    (name) => app.spec.validations.find((validation) => validation.name === name)?.message ?? null,
+  );
+  return messages.some((message) => message !== null) ? messages : undefined;
+}
 
 // ── 宣言の読み込み（登録 → R2 → 整合性） ─────────────────────────────
 
@@ -119,6 +149,22 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const hasStrings = (value: unknown, keys: readonly string[]): boolean =>
   isRecord(value) && keys.every((key) => typeof value[key] === "string");
 
+/** 任意の欄。無いか、文字列であること（検査の文言 `message`。M1.2） */
+const hasOptionalString = (value: unknown, key: string): boolean =>
+  isRecord(value) && (value[key] === undefined || typeof value[key] === "string");
+
+/**
+ * 項目の宣言。**文字列の 1 語（`string`・`number`・`list`）と、参照の写像**
+ * （`{type: ref, to}`・`{type: list, of}`）の両方を受け取る（M1.2）。
+ */
+function isFieldDeclaration(value: unknown): boolean {
+  if (typeof value === "string") return (FIELD_TYPES as readonly string[]).includes(value);
+  if (!isRecord(value)) return false;
+  if (value["type"] === "ref") return typeof value["to"] === "string";
+  if (value["type"] === "list") return typeof value["of"] === "string";
+  return false;
+}
+
 /** 宣言の 7 欄が、期待する形で揃っているか（**欄そのものが欠けていたら断る**） */
 function isSpecShape(spec: unknown): spec is AppSpec {
   if (!isRecord(spec)) return false;
@@ -127,12 +173,14 @@ function isSpecShape(spec: unknown): spec is AppSpec {
   for (const entity of entities) {
     if (!hasStrings(entity, ["name"])) return false;
     if (!isRecord(entity) || !isRecord(entity["fields"])) return false;
+    if (!Object.values(entity["fields"]).every(isFieldDeclaration)) return false;
   }
   if (!Array.isArray(views) || !views.every((view) => hasStrings(view, ["name", "entity"]))) return false;
   if (!Array.isArray(actions) || !actions.every((action) => hasStrings(action, ["name", "entity"]))) return false;
   if (!Array.isArray(validations)) return false;
   for (const validation of validations) {
     if (!hasStrings(validation, ["name", "entity", "expression"])) return false;
+    if (!hasOptionalString(validation, "message")) return false;
   }
   if (!Array.isArray(computed)) return false;
   for (const entry of computed) {
@@ -286,7 +334,14 @@ export async function createFromAction(
   if (entity === undefined) return fail("SPEC_UNAVAILABLE");
 
   const decided = checkInput({ app, entity, input, clock: deps.clock });
-  if (!decided.ok) return fail("INPUT_REJECTED", decided.fields, decided.validations);
+  if (!decided.ok) {
+    return fail("INPUT_REJECTED", decided.fields, decided.validations, messagesOf(app, decided.validations));
+  }
+
+  // 参照（`ref`・参照 list）の値が、**このインスタンスの参照先のレコード**を指しているか（M1.2）。
+  // 型を通ったあとに見る——存在しない ID・別 entity の ID・別インスタンスの ID はここで断る
+  const referenced = await checkReferences({ entity, data: decided.data, records: deps.records });
+  if (!referenced.ok) return fail("INPUT_REJECTED", referenced.fields);
 
   // 日時と ID は店頭（呼ぶ側の時計）が付ける。入力の値では決まらない
   const stamp: RecordStamp = {

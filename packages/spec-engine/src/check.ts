@@ -18,10 +18,12 @@ import {
   PERMISSION_NAMES,
   PERMISSION_SUBJECTS,
   RESERVED_NAMES,
+  expressionTypeOf,
   type AppSpec,
   type Computed,
   type ComputedType,
   type Entity,
+  type FieldDeclaration,
   type FieldType,
 } from "@musunest/appspec-schema";
 import {
@@ -393,8 +395,13 @@ interface EntityDraft extends NamedDraft {
 
 interface FieldDraft {
   readonly name: string;
-  readonly type: FieldType | null;
+  /** 読めた宣言。読めなかったときは `null`（診断は既に出ている） */
+  readonly declaration: FieldDeclaration | null;
   readonly node: YamlNode;
+  /** 参照先の entity の名前（`ref`・`list of`）。参照でなければ `null` */
+  readonly target: string | null;
+  /** 参照先を書いた位置。診断の位置に使う */
+  readonly targetNode: YamlNode | null;
 }
 
 interface EntityReferenceDraft extends NamedDraft {
@@ -402,12 +409,17 @@ interface EntityReferenceDraft extends NamedDraft {
   readonly entityNode: YamlNode;
 }
 
-interface ValidationDraft extends EntityReferenceDraft {
+interface ExpressionDraft extends EntityReferenceDraft {
   readonly expression: string;
   readonly expressionNode: YamlNode;
 }
 
-interface ComputedDraft extends ValidationDraft {
+interface ValidationDraft extends ExpressionDraft {
+  /** 保存できない理由の文言（M1.2）。書いていなければ `null` */
+  readonly message: string | null;
+}
+
+interface ComputedDraft extends ExpressionDraft {
   readonly type: string;
   /** 式が参照した名前（計算どうしの循環を組み立てるのに使う） */
   references: readonly string[];
@@ -566,6 +578,101 @@ function collectItems(root: YamlMap, section: string, report: Report): readonly 
   return items;
 }
 
+/** 参照の写像（`{type: ref, to: member}`・`{type: list, of: member}`）に書ける欄 */
+const REF_DECLARATION_KEYS = ["type", "to", "of"] as const;
+
+/**
+ * 項目の宣言を読む。**文字列の 1 語（`string`・`number`・`list`）と、参照の写像の両方**を受け取る（#106）。
+ * 参照先の entity が実在するかは、すべての entity を読んだあとで見る（`DATA_REF_TARGET_NOT_FOUND`）。
+ */
+function readFieldDeclaration(
+  name: string,
+  value: YamlNode,
+  report: Report,
+): { declaration: FieldDeclaration | null; target: string | null; targetNode: YamlNode | null } {
+  const unknownType = (
+    type: string,
+    at: YamlNode,
+  ): { declaration: null; target: null; targetNode: null } => {
+    report(
+      "DATA_FIELD_TYPE_UNKNOWN",
+      `項目 ${name} の型 ${type} は M1 の型（${FIELD_TYPES.join("・")}・ref）に無い`,
+      positionOf(at),
+    );
+    return { declaration: null, target: null, targetNode: null };
+  };
+  if (value.kind === "scalar") {
+    if (isOneOf(FIELD_TYPES, value.text)) {
+      return { declaration: value.text as FieldType, target: null, targetNode: null };
+    }
+    return unknownType(value.text, value);
+  }
+  if (value.kind !== "map") {
+    report("SHAPE_VALUE_INVALID", `項目 ${name} の型は型の名前か、参照の写像で書く`, positionOf(value));
+    return { declaration: null, target: null, targetNode: null };
+  }
+
+  for (const entry of value.entries) {
+    if (!isOneOf(REF_DECLARATION_KEYS, entry.key)) {
+      report("SHAPE_KEY_UNKNOWN", `項目 ${name} の参照に欄 ${entry.key} は書けない（type と to / of だけ）`, {
+        line: entry.keyLine,
+        column: entry.keyColumn,
+      });
+    }
+  }
+
+  const typeEntry = entryOf(value, "type");
+  if (typeEntry === undefined) {
+    report("SHAPE_KEY_MISSING", `項目 ${name} の参照に type が無い`, positionOf(value));
+    return { declaration: null, target: null, targetNode: null };
+  }
+  if (typeEntry.value.kind !== "scalar" || typeEntry.value.text === "") {
+    report("SHAPE_VALUE_INVALID", `項目 ${name} の type は型の名前で書く`, positionOf(typeEntry.value));
+    return { declaration: null, target: null, targetNode: null };
+  }
+  const type = typeEntry.value.text;
+
+  // 参照先の欄は、`ref` なら `to`、`list` なら `of` である。もう一方が書いてあれば断る
+  const targetKey = type === "ref" ? "to" : type === "list" ? "of" : null;
+  for (const key of ["to", "of"] as const) {
+    const stray = entryOf(value, key);
+    if (stray !== undefined && key !== targetKey) {
+      report("SHAPE_KEY_UNKNOWN", `項目 ${name} の ${type} に ${key} は書けない`, {
+        line: stray.keyLine,
+        column: stray.keyColumn,
+      });
+    }
+  }
+
+  const targetEntry = targetKey === null ? undefined : entryOf(value, targetKey);
+  if (targetEntry === undefined) {
+    // `of` の無い `{type: list}` は、文字列の並び（既存の `list`）として読む
+    if (type === "list") return { declaration: "list", target: null, targetNode: null };
+    if (type === "ref") {
+      report("SHAPE_KEY_MISSING", `項目 ${name} の ref に to が無い（参照先の entity を書く）`, positionOf(value));
+      return { declaration: null, target: null, targetNode: null };
+    }
+    if (isOneOf(FIELD_TYPES, type)) {
+      return { declaration: type as FieldType, target: null, targetNode: null };
+    }
+    return unknownType(type, typeEntry.value);
+  }
+  if (targetEntry.value.kind !== "scalar" || targetEntry.value.text === "") {
+    report(
+      "SHAPE_VALUE_INVALID",
+      `項目 ${name} の ${targetKey} は、参照先の entity の名前で書く`,
+      positionOf(targetEntry.value),
+    );
+    return { declaration: null, target: null, targetNode: null };
+  }
+  const target = targetEntry.value.text;
+  return {
+    declaration: type === "ref" ? { type: "ref", to: target } : { type: "list", of: target },
+    target,
+    targetNode: targetEntry.value,
+  };
+}
+
 function readEntities(items: readonly YamlNode[], report: Report): readonly EntityDraft[] {
   const entities: EntityDraft[] = [];
   for (const member of readMembers(items, "entities", ["name", "fields"], report)) {
@@ -591,19 +698,8 @@ function readEntities(items: readonly YamlNode[], report: Report): readonly Enti
           });
         }
         seen.add(entry.key);
-        let type: FieldType | null = null;
-        if (entry.value.kind !== "scalar") {
-          report("SHAPE_VALUE_INVALID", `項目 ${entry.key} の型は型の名前で書く`, positionOf(entry.value));
-        } else if (isOneOf(FIELD_TYPES, entry.value.text)) {
-          type = entry.value.text as FieldType;
-        } else {
-          report(
-            "DATA_FIELD_TYPE_UNKNOWN",
-            `項目 ${entry.key} の型 ${entry.value.text} は M1.1 の型（${FIELD_TYPES.join("・")}）に無い`,
-            positionOf(entry.value),
-          );
-        }
-        fields.push({ name: entry.key, type, node: entry.value });
+        const read = readFieldDeclaration(entry.key, entry.value, report);
+        fields.push({ name: entry.key, node: entry.value, ...read });
       }
     }
     entities.push({ name: name?.text ?? "", nameNode: name?.node ?? null, fields, node: member.map });
@@ -633,9 +729,32 @@ function readEntityReferences(
   return references;
 }
 
+/**
+ * 検査の文言（任意。M1.2）。書いてあれば、**空でない文字列**でなければならない
+ * （並び・写像・空は `SHAPE_VALIDATION_MESSAGE_INVALID`。docs/semantics.md「message」）。
+ */
+function readValidationMessage(member: MemberReader, report: Report): string | null {
+  const entry = entryOf(member.map, "message");
+  if (entry === undefined) return null;
+  if (entry.value.kind !== "scalar" || entry.value.text === "") {
+    report(
+      "SHAPE_VALIDATION_MESSAGE_INVALID",
+      "validation の message は空でない文字列で書く（並びや写像では書けない）",
+      positionOf(entry.value),
+    );
+    return null;
+  }
+  return entry.value.text;
+}
+
 function readValidations(items: readonly YamlNode[], report: Report): readonly ValidationDraft[] {
   const validations: ValidationDraft[] = [];
-  for (const member of readMembers(items, "validations", ["name", "entity", "expression"], report)) {
+  for (const member of readMembers(
+    items,
+    "validations",
+    ["name", "entity", "expression", "message"],
+    report,
+  )) {
     const name = member.text("name");
     if (name !== null) checkName(name.text, "validation", positionOf(name.node), report);
     const entity = member.text("entity");
@@ -647,6 +766,7 @@ function readValidations(items: readonly YamlNode[], report: Report): readonly V
       entityNode: entity?.node ?? { kind: "null", line: 0, column: 0 },
       expression: expression?.text ?? "",
       expressionNode: expression?.node ?? { kind: "null", line: 0, column: 0 },
+      message: readValidationMessage(member, report),
     });
   }
   checkDuplicates(validations, "LOGIC_VALIDATION_DUPLICATE_NAME", "validation", report);
@@ -753,14 +873,20 @@ function scopeFor(
   computed: readonly ComputedDraft[],
   index: ReadonlyMap<string, EntityDraft>,
 ): ExpressionScope {
-  const fields = new Map(entity.fields.map((field) => [field.name, field.type]));
+  const fields = new Map<string, SpecType>(
+    entity.fields.map((field) => [
+      field.name,
+      field.declaration === null ? "unknown" : expressionTypeOf(field.declaration),
+    ]),
+  );
   const computedTypes = new Map(
     computed.filter((draft) => draft.entity === entity.name).map((draft) => [draft.name, draft.type]),
   );
   return {
     resolveName: (name: string): SpecType | null => {
       // 項目を先に見る（計算の名前が項目と重なっているとき、自分自身の参照に化けないため）
-      if (fields.has(name)) return (fields.get(name) ?? null) ?? "unknown";
+      const field = fields.get(name);
+      if (field !== undefined) return field;
       const type = computedTypes.get(name);
       if (type !== undefined) return isOneOf(COMPUTED_TYPES, type) ? (type as ComputedType) : "unknown";
       return null;
@@ -960,10 +1086,10 @@ function buildSpec(drafts: Drafts): AppSpec | null {
   const { entities, views, actions, validations, computed, permissions, identityMode } = drafts;
   const built: Entity[] = [];
   for (const entity of entities) {
-    const fields: Record<string, FieldType> = {};
+    const fields: Record<string, FieldDeclaration> = {};
     for (const field of entity.fields) {
-      if (field.type === null) return null;
-      fields[field.name] = field.type;
+      if (field.declaration === null) return null;
+      fields[field.name] = field.declaration;
     }
     built.push({ name: entity.name, fields });
   }
@@ -985,6 +1111,8 @@ function buildSpec(drafts: Drafts): AppSpec | null {
       name: draft.name,
       entity: draft.entity,
       expression: draft.expression,
+      // 文言は書いてあるときだけ入れる（M1.1 の宣言に欄を足さない）
+      ...(draft.message === null ? {} : { message: draft.message }),
     })),
     computed: builtComputed,
     permissions: permissions.map((draft) => ({
@@ -1065,6 +1193,17 @@ function inspect(source: string, report: Report): Drafts | null {
   checkMinIdentity(entryOf(root, "minIdentity"), report);
 
   const index = entityIndex(entities);
+  // 参照（`ref`・参照 list）の参照先の entity が、宣言の中に実在するか（M1.2）
+  for (const entity of entities) {
+    for (const field of entity.fields) {
+      if (field.target === null || index.has(field.target)) continue;
+      report(
+        "DATA_REF_TARGET_NOT_FOUND",
+        `entity ${entity.name} の項目 ${field.name} の参照先 entity ${field.target} が宣言に無い`,
+        positionOf(field.targetNode ?? entity.node),
+      );
+    }
+  }
   for (const view of views) {
     if (!index.has(view.entity)) {
       report(

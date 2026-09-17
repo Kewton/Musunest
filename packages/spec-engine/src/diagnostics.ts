@@ -35,6 +35,8 @@ export const DIAGNOSTIC_CODES = [
   "SHAPE_NAME_INVALID",
   /** 値の形が違う（欄に並びを書くべきところに写像、`name` が空、など） */
   "SHAPE_VALUE_INVALID",
+  /** 検査の文言（`message`）が、空でない文字列になっていない（M1.2） */
+  "SHAPE_VALIDATION_MESSAGE_INVALID",
   /** 検査の途中で予期しない例外が出た（外へ投げない。位置は当てにできないので 1 行 1 列） */
   "SHAPE_CHECK_FAILED",
 
@@ -47,6 +49,8 @@ export const DIAGNOSTIC_CODES = [
   "DATA_FIELD_NAME_RESERVED",
   /** M1.1 の項目の型（`string`・`number`・`list`）に無い型 */
   "DATA_FIELD_TYPE_UNKNOWN",
+  /** 参照（`ref`）と参照の並び（`list of`）の、参照先の entity が宣言に無い（M1.2） */
+  "DATA_REF_TARGET_NOT_FOUND",
 
   // ── ロジック層（LOGIC） ──────────────────────────────────────
   /** action・validation・computed の entity が宣言に無い */
