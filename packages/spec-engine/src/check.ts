@@ -28,6 +28,7 @@ import {
   type ComputedType,
   type Entity,
   type FieldDeclaration,
+  type FieldKind,
   type FieldType,
 } from "@musunest/appspec-schema";
 import {
@@ -448,11 +449,29 @@ interface ComputedRef {
   readonly name: string;
 }
 
+/**
+ * 精算（`settle`。M1.2）の宣言。**支出の entity と、そのうちの 3 つの項目**を指す。
+ * 実在と型は、すべての entity を読んだあとで見る（`LOGIC_ENTITY_NOT_FOUND`・
+ * `LOGIC_SETTLE_AMOUNT_NOT_NUMBER`・`LOGIC_SETTLE_REFERENCE_TYPE_MISMATCH`）。
+ */
+interface SettleDraft {
+  readonly expense: string;
+  readonly expenseNode: YamlNode;
+  readonly amount: string;
+  readonly amountNode: YamlNode;
+  readonly payer: string;
+  readonly payerNode: YamlNode;
+  readonly shares: string;
+  readonly sharesNode: YamlNode;
+}
+
 interface ComputedDraft extends ExpressionDraft {
   readonly type: string;
-  /** 集計（`aggregate`。M1.2）。式なら `null` */
+  /** 集計（`aggregate`。M1.2）。式でも精算でもなければ `null` */
   readonly aggregate: AggregateDraft | null;
-  /** 読み取りの時点で断った（式と集計の両方・どちらも無い、など）。意味の検査を重ねない */
+  /** 精算（`settle`。M1.2）。式でも集計でもなければ `null` */
+  readonly settle: SettleDraft | null;
+  /** 読み取りの時点で断った（式・集計・精算の重複や不足、など）。意味の検査を重ねない */
   readonly malformed: boolean;
   /** 依存する計算（循環の検査に使う）。式の参照と、集計の対象の計算を入れる */
   dependencies: ComputedRef[];
@@ -931,29 +950,56 @@ function readAggregateDraft(value: YamlNode, report: Report): AggregateDraft | n
   return { kind: "count", entity: value_.text, entityNode: value_, name: null, nameNode: null, where };
 }
 
+/**
+ * 精算（`settle`。M1.2）を読む。`expense`（割り勘の支出の entity）と、その entity の項目の名前を
+ * 3 つ——`amount`（額）・`payer`（払った人）・`shares`（割る人）——を読む。
+ * 実在と型は組み立てのあとで見る（entity をすべて読むまで分からない）。
+ */
+function readSettleDraft(value: YamlNode, report: Report): SettleDraft | null {
+  if (value.kind !== "map") {
+    report(
+      "SHAPE_VALUE_INVALID",
+      "computed の settle は「expense / amount / payer / shares」を並べた写像で書く",
+      positionOf(value),
+    );
+    return null;
+  }
+  const member = new MemberReader(value, "computed の settle", report);
+  member.only(["expense", "amount", "payer", "shares"]);
+  const expense = member.text("expense");
+  const amount = member.text("amount");
+  const payer = member.text("payer");
+  const shares = member.text("shares");
+  if (expense === null || amount === null || payer === null || shares === null) return null;
+  return {
+    expense: expense.text,
+    expenseNode: expense.node,
+    amount: amount.text,
+    amountNode: amount.node,
+    payer: payer.text,
+    payerNode: payer.node,
+    shares: shares.text,
+    sharesNode: shares.node,
+  };
+}
+
 function readComputed(items: readonly YamlNode[], report: Report): readonly ComputedDraft[] {
   const computed: ComputedDraft[] = [];
   for (const member of readMembers(
     items,
     "computed",
-    ["name", "entity", "expression", "aggregate", "type"],
+    ["name", "entity", "expression", "aggregate", "settle", "type"],
     report,
   )) {
     const name = member.text("name");
     if (name !== null) checkName(name.text, "computed", positionOf(name.node), report);
     const entity = member.text("entity");
-    const type = member.text("type");
-    if (type !== null && !isOneOf(COMPUTED_TYPES, type.text)) {
-      report(
-        "LOGIC_COMPUTED_TYPE_UNKNOWN",
-        `computed の type ${type.text} は M1.1 の型（${COMPUTED_TYPES.join("・")}）に無い`,
-        positionOf(type.node),
-      );
-    }
 
-    // 計算は、式（expression）と集計（aggregate）の**どちらか一方**である（docs/semantics.md「computed」）
+    // 計算は、式（expression）・集計（aggregate）・精算（settle）の**どれか 1 つ**である
+    // （docs/semantics.md「computed」「settle」）
     const expressionEntry = entryOf(member.map, "expression");
     const aggregateEntry = entryOf(member.map, "aggregate");
+    const settleEntry = entryOf(member.map, "settle");
     let expression: { readonly text: string; readonly node: YamlNode } | null = null;
     if (expressionEntry !== undefined) {
       if (expressionEntry.value.kind === "scalar" && expressionEntry.value.text !== "") {
@@ -963,18 +1009,46 @@ function readComputed(items: readonly YamlNode[], report: Report): readonly Comp
       }
     }
     const aggregate = aggregateEntry === undefined ? null : readAggregateDraft(aggregateEntry.value, report);
-    if (expressionEntry === undefined && aggregateEntry === undefined) {
+    const settle = settleEntry === undefined ? null : readSettleDraft(settleEntry.value, report);
+
+    const forms = [expressionEntry, aggregateEntry, settleEntry].filter(
+      (entry) => entry !== undefined,
+    ).length;
+    const label = `computed ${name?.text ?? ""}`;
+    if (forms === 0) {
       report(
         "LOGIC_AGGREGATE_FORM_INVALID",
-        `computed ${name?.text ?? ""} には、expression（式）か aggregate（集計）のどちらか一方を書く`,
+        `${label} には、expression（式）か aggregate（集計）か settle（精算）のどれか 1 つを書く`,
         positionOf(member.map),
       );
-    } else if (expressionEntry !== undefined && aggregateEntry !== undefined) {
+    } else if (forms > 1) {
       report(
         "LOGIC_AGGREGATE_FORM_INVALID",
-        `computed ${name?.text ?? ""} に expression と aggregate を同時に書けない（どちらか一方である）`,
-        positionOf(aggregateEntry.value),
+        `${label} に expression・aggregate・settle を同時に書けない（どれか 1 つである）`,
+        positionOf((settleEntry ?? aggregateEntry ?? expressionEntry)?.value ?? member.map),
       );
+    }
+
+    // 精算の値は数ではなく送金の並びなので、`type` を持たない。式と集計の `type` は必須である
+    let type: { readonly text: string; readonly node: YamlNode } | null = null;
+    if (settleEntry === undefined) {
+      type = member.text("type");
+      if (type !== null && !isOneOf(COMPUTED_TYPES, type.text)) {
+        report(
+          "LOGIC_COMPUTED_TYPE_UNKNOWN",
+          `computed の type ${type.text} は M1.1 の型（${COMPUTED_TYPES.join("・")}）に無い`,
+          positionOf(type.node),
+        );
+      }
+    } else {
+      const written = entryOf(member.map, "type");
+      if (written !== undefined) {
+        report(
+          "SHAPE_KEY_UNKNOWN",
+          `${label} は settle である（結果は送金の並びなので、type は書かない）`,
+          { line: written.keyLine, column: written.keyColumn },
+        );
+      }
     }
 
     computed.push({
@@ -986,7 +1060,8 @@ function readComputed(items: readonly YamlNode[], report: Report): readonly Comp
       expressionNode: expression?.node ?? { kind: "null", line: 0, column: 0 },
       type: type?.text ?? "",
       aggregate,
-      malformed: (expression !== null) === (aggregate !== null),
+      settle,
+      malformed: forms !== 1 || (settleEntry !== undefined && settle === null),
       dependencies: [],
     });
   }
@@ -1071,7 +1146,10 @@ function scopeFor(
     ]),
   );
   const computedTypes = new Map(
-    computed.filter((draft) => draft.entity === entity.name).map((draft) => [draft.name, draft.type]),
+    computed
+      // 精算は行ごとの値ではないので、式から参照できない（名前としても型としても出さない）
+      .filter((draft) => draft.entity === entity.name && draft.settle === null)
+      .map((draft) => [draft.name, draft.type]),
   );
   return {
     resolveName: (name: string): SpecType | null => {
@@ -1214,6 +1292,82 @@ function checkAggregate(
   }
 }
 
+/**
+ * 精算（`settle`。M1.2）の意味を検査する。支出の entity が実在すること、額の項目が数であること、
+ * 払った人と割る人が**精算する entity を指す参照**であることを見る。
+ *
+ * **余りの配賦は見ない**——それは語彙ではなく店頭の内部規約（Q18-5。src/allocation.ts）である。
+ */
+function checkSettle(
+  draft: ComputedDraft,
+  settle: SettleDraft,
+  members: EntityDraft,
+  index: ReadonlyMap<string, EntityDraft>,
+  report: Report,
+): void {
+  const label = `computed ${draft.name}`;
+  const source = index.get(settle.expense);
+  if (source === undefined) {
+    report(
+      "LOGIC_ENTITY_NOT_FOUND",
+      `${label} の精算の支出の entity ${settle.expense} が宣言に無い`,
+      positionOf(settle.expenseNode),
+    );
+    // 支出の entity が無ければ、その項目も見られない（誤りを重ねない）
+    return;
+  }
+
+  const declaredType = (name: string): FieldDeclaration | null => {
+    const field = source.fields.find((candidate) => candidate.name === name);
+    return field === undefined ? null : field.declaration;
+  };
+  const pointsToMembers = (declaration: FieldDeclaration | null, kind: FieldKind): boolean =>
+    declaration !== null && fieldKind(declaration) === kind && fieldTarget(declaration) === members.name;
+
+  const amount = declaredType(settle.amount);
+  if (amount === null || fieldKind(amount) !== "number") {
+    report(
+      "LOGIC_SETTLE_AMOUNT_NOT_NUMBER",
+      `${label} の精算の額 ${settle.expense}.${settle.amount} は、支出の entity の数の項目でなければならない`,
+      positionOf(settle.amountNode),
+    );
+  }
+  if (!pointsToMembers(declaredType(settle.payer), "ref")) {
+    report(
+      "LOGIC_SETTLE_REFERENCE_TYPE_MISMATCH",
+      `${label} の精算の払った人 ${settle.expense}.${settle.payer} は、${members.name} を指す参照（ref）でなければならない`,
+      positionOf(settle.payerNode),
+    );
+  }
+  if (!pointsToMembers(declaredType(settle.shares), "list")) {
+    report(
+      "LOGIC_SETTLE_REFERENCE_TYPE_MISMATCH",
+      `${label} の精算の割る人 ${settle.expense}.${settle.shares} は、${members.name} を指す参照の並び（list of）でなければならない`,
+      positionOf(settle.sharesNode),
+    );
+  }
+}
+
+/**
+ * 精算（`settle`）は、**entity に 1 つだけ**書ける。応答の精算の欄は 1 つであり、2 つ書かれても
+ * 2 つ目は読まれない——**黙って捨てずに断る**（読めない行を捨てると、書いた宣言が無かったことになる）。
+ */
+function checkSettleSlots(computed: readonly ComputedDraft[], report: Report): void {
+  const declared = new Set<string>();
+  for (const draft of computed) {
+    if (draft.settle === null || draft.entity === "") continue;
+    if (declared.has(draft.entity)) {
+      report(
+        "LOGIC_COMPUTED_DUPLICATE_NAME",
+        `entity ${draft.entity} に精算（settle）が 2 つある（精算は entity に 1 つだけ書ける）`,
+        positionOf(draft.nameNode ?? { line: 1, column: 1 }),
+      );
+      continue;
+    }
+    declared.add(draft.entity);
+  }
+}
+
 function checkComputed(
   computed: readonly ComputedDraft[],
   index: ReadonlyMap<string, EntityDraft>,
@@ -1246,8 +1400,12 @@ function checkComputed(
       );
       continue;
     }
-    // 読み取りの時点で断った（式と集計の両方・どちらも無い）ものは、意味の検査を重ねない
+    // 読み取りの時点で断った（式・集計・精算の重複や不足）ものは、意味の検査を重ねない
     if (draft.malformed) continue;
+    if (draft.settle !== null) {
+      checkSettle(draft, draft.settle, entity, index, report);
+      continue;
+    }
     if (draft.aggregate !== null) {
       checkAggregate(draft, draft.aggregate, entity, index, computed, report);
       continue;
@@ -1383,7 +1541,22 @@ function buildSpec(drafts: Drafts): AppSpec | null {
   }
   const builtComputed: Computed[] = [];
   for (const draft of computed) {
-    if (!isOneOf(COMPUTED_TYPES, draft.type) || draft.malformed) return null;
+    if (draft.malformed) return null;
+    if (draft.settle !== null) {
+      // 精算は数ではなく送金の並びを返すので、`type` を持たない（docs/semantics.md「settle」）
+      builtComputed.push({
+        name: draft.name,
+        entity: draft.entity,
+        settle: {
+          expense: draft.settle.expense,
+          amount: draft.settle.amount,
+          payer: draft.settle.payer,
+          shares: draft.settle.shares,
+        },
+      });
+      continue;
+    }
+    if (!isOneOf(COMPUTED_TYPES, draft.type)) return null;
     if (draft.aggregate === null) {
       builtComputed.push({
         name: draft.name,
@@ -1534,6 +1707,7 @@ function inspect(source: string, report: Report): Drafts | null {
 
   checkValidations(validations, computed, index, report);
   checkComputed(computed, index, report);
+  checkSettleSlots(computed, report);
   checkCycles(computed, report);
 
   return { entities, views, actions, validations, computed, permissions, identityMode: readIdentityMode(root) };

@@ -83,6 +83,18 @@ computed:
     expression: paid - owed
     type: number
 
+  # 精算（M1.2）。メンバーの差し引きから、送金の組（誰が誰へいくら）を出す。
+  # **余りの負担はここでは宣言しない**（Q18-5）——`owed` は基準額の集計のままであり、
+  # 1 円未満を切り捨てた余りを誰が持つかは、店頭の内部規約（Q13）が決める。
+  # `amount` は支出の額なので、**整数円**でなければならない（Q18-6）。
+  - name: settlement
+    entity: member
+    settle:
+      expense: expense
+      amount: amount
+      payer: payer
+      shares: participants
+
 permissions:
   - name: read
     subject: minIdentity

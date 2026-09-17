@@ -26,7 +26,9 @@
 
 import {
   BUILTIN_FUNCTIONS,
+  isComputedAggregate,
   isComputedExpression,
+  isRowComputed,
   type Aggregate,
   type ComputedExpression,
   type Entity,
@@ -46,6 +48,11 @@ import { isComparisonOperator, readExpression, type AstNode } from "./expression
 // データを読む側（data-api）が「どの entity のレコードを渡せばよいか」を知れるように、ここから再輸出する
 // （パッケージの根は index.ts が `./evaluate.js` を出している）。
 export * from "./aggregate.js";
+
+// 精算（`settle`。M1.2）の道具も同じ理由でここから再輸出する。**精算は行ごとの値ではない**ので、
+// この file の評価（`evaluateRecord`）は精算の計算を解かない——呼ぶ側（data-api）が一覧を組むときに、
+// `settleEntity` を別に呼ぶ（docs/semantics.md「settle」）。
+export * from "./settle.js";
 
 /** computed の値。求められなかった計算は `null`（画面では空。docs/semantics.md「computed」） */
 export type ComputedValue = number | null;
@@ -276,7 +283,7 @@ function evaluateEntity(request: EvaluationRequest, state: EvaluationState): Eva
     (candidate) => candidate.name === entityName,
   );
   if (entity === undefined) return { computed: {}, validations: [] };
-  const declared = forEntity(app.spec.computed, entityName);
+  const declared = forEntity(app.spec.computed, entityName).filter(isRowComputed);
   const validations = forEntity(app.spec.validations, entityName);
 
   const values = new Map<string, ComputedValue>();
@@ -303,7 +310,9 @@ function evaluateEntity(request: EvaluationRequest, state: EvaluationState): Eva
     state.visiting.add(key);
     const value = isComputedExpression(entry)
       ? computedValueOf(entry, scope)
-      : aggregateValueOf(entry.aggregate, request, state);
+      : isComputedAggregate(entry)
+        ? aggregateValueOf(entry.aggregate, request, state)
+        : null;
     state.visiting.delete(key);
     values.set(name, value);
     return value;

@@ -124,6 +124,17 @@ export interface ApiActionRef {
   readonly entity: string;
 }
 
+/**
+ * 精算の 1 件（M1.2）。**送金元と送金先はメンバーのレコードの ID**、額は**正の数**である。
+ * 差し引きが 0 の人と、自分の送金は現れない。並びは「金額の大きい順（同額は登録順）」で組んだ順である
+ * （docs/semantics.md「settle」）。画面は計算し直さず、この並びをそのまま見せる。
+ */
+export interface ApiTransfer {
+  readonly from: string;
+  readonly to: string;
+  readonly amount: number;
+}
+
 /** このインスタンスで今できること。宣言していない権限は誰にも与えない（./docs/semantics.md「permission」） */
 export interface ApiPermissions {
   readonly read: boolean;
@@ -161,6 +172,13 @@ export interface ApiViewBody {
   readonly actions: readonly ApiActionRef[];
   /** すべての行（登録した順。古いものが先） */
   readonly rows: readonly ApiRow[];
+  /**
+   * 精算（M1.2）。その entity に `settle` の計算を宣言していれば、店頭が組んだ送金の並びを返す。
+   * **宣言が無ければこの欄を載せない**（M1.1 の応答を変えない。`validationMessages` と同じ扱い）。
+   * 読めなかった（支出のレコードが壊れている）ときは **`null`** である——空の並び（送金が要らない）と
+   * 区別し、**空の並びに読み替えない**（`computed` の `null` と同じ約束である）
+   */
+  readonly settlement?: readonly ApiTransfer[] | null;
 }
 
 /** `POST /api/instances/:instanceId/actions/:actionName` の本文。**書いた行**（計算値つき）を返す */

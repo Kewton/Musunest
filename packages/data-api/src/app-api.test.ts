@@ -16,7 +16,7 @@ import {
   readScoringScenario,
   resolveScenarioIds,
 } from "@musunest/appspec-schema";
-import type { ApiViewBody, NormalizedAppSpec } from "@musunest/appspec-schema";
+import type { ApiTransfer, ApiViewBody, NormalizedAppSpec } from "@musunest/appspec-schema";
 import { sampleScenarioFile, sampleSpecFile } from "@musunest/appspec-schema/files";
 import type { AppRecord } from "@musunest/control-plane";
 import type { RecordData, RecordStamp, StoredRecord } from "@musunest/app-do";
@@ -603,7 +603,8 @@ describe("warikan の採点のシナリオ（参照と文言。M1.2）", () => {
     const run = await runWarikan();
     const accepted = run.results.filter((result) => result.ok).length;
     expect(accepted).toBe(5); // メンバー 3 人 + 支出 2 件
-    expect(run.results.length - accepted).toBe(6);
+    // 拒否は 7 件（金額 0・**金額が小数**・割る人が空・重複・存在しない ID・別 entity の ID・参照 list の不明な ID）
+    expect(run.results.length - accepted).toBe(7);
     expect(run.records.rows.filter((row) => row.entity === "member")).toHaveLength(3);
     expect(warikanExpenses(run)).toHaveLength(2);
   });
@@ -824,5 +825,175 @@ describe("warikan の集計（entity をまたぐ sum・count。M1.2）", () => 
         expect(keys, `${record.entity}: ${name}`).not.toContain(name);
       }
     }
+  });
+});
+
+// ── warikan の精算（`settle`。Issue #108） ────────────────────────────
+//
+// 精算の値は **API が返す**（`GET .../views/memberList` の `settlement`）。画面は計算し直さない
+// （表示は別の Issue）。ここでは 4 つを確かめる。
+//   1. 見本 warikan の精算が、受入条件の 1 件（C → A 3000）になる
+//   2. 割り切れない額でも、端数（Q13）が API の値に出る
+//   3. 精算を宣言していない entity・宣言そのものが無い見本では、欄を載せない（M1.1 の応答を変えない）
+//   4. 金額が小数の支出は、入力の検査で断る（Q18-6。保存もしない）
+
+/** メンバーの一覧の精算。**宣言していないときは `undefined`** である */
+async function settlementOf(run: WarikanRun): Promise<readonly ApiTransfer[] | null | undefined> {
+  const members = await getView(run.deps, WARIKAN_INSTANCE, "memberList");
+  if (!members.ok) throw new Error("memberList を読めなかった");
+  return members.body.settlement;
+}
+
+/**
+ * warikan の宣言で、メンバーだけを登録順に作ったインスタンス（受入条件の数字を、見本の 2 支出に
+ * 混ぜずに確かめる）。返す `ids` は**登録順**である。
+ */
+async function warikanWithMembers(
+  names: readonly string[],
+): Promise<{ readonly deps: DataApiDeps; readonly records: FakeRecordStore; readonly ids: readonly string[] }> {
+  const records = new FakeRecordStore();
+  const deps: DataApiDeps = {
+    registry: { resolve: async () => WARIKAN_REGISTRATION },
+    specs: { read: async () => WARIKAN_JSON },
+    records,
+    clock: CLOCK,
+  };
+  const ids: string[] = [];
+  for (const name of names) {
+    const created = await createFromAction(deps, WARIKAN_INSTANCE, "addMember", { name });
+    if (!created.ok) throw new Error(`メンバー ${name} を登録できなかった`);
+    ids.push(created.body.id);
+  }
+  return { deps, records, ids };
+}
+
+const viewOf = async (
+  deps: DataApiDeps,
+): Promise<ApiViewBody> => {
+  const members = await getView(deps, WARIKAN_INSTANCE, "memberList");
+  if (!members.ok) throw new Error("memberList を読めなかった");
+  return members.body;
+};
+
+describe("warikan の精算（settle。M1.2）", () => {
+  it("memberList が、店頭が組んだ送金の並びを返す（C → A 3000 の 1 件だけ）", async () => {
+    const run = await runWarikan();
+    const members = await getView(run.deps, WARIKAN_INSTANCE, "memberList");
+    if (!members.ok) throw new Error("memberList を読めなかった");
+    expect(members.body.settlement).toEqual([
+      { from: run.ids["C"] ?? "", to: run.ids["A"] ?? "", amount: 3000 },
+    ]);
+    // **精算は行ごとの値ではない**ので、計算の列には出さない
+    expect(members.body.computed).toEqual(["paid", "owed", "balance"]);
+    for (const row of members.body.rows) expect(Object.keys(row.computed)).toEqual(members.body.computed);
+  });
+
+  it("1000 円を A が払い A/B/C で割ると、精算は B→A 333・C→A 333 の順になる（端数は settle の中で解く）", async () => {
+    const run = await warikanWithMembers(["A", "B", "C"]);
+    const [a = "", b = "", c = ""] = run.ids;
+    const added = await createFromAction(run.deps, WARIKAN_INSTANCE, "addExpense", {
+      description: "昼食",
+      amount: 1000,
+      payer: a,
+      participants: [a, b, c],
+    });
+    expect(added.ok).toBe(true);
+    const body = await viewOf(run.deps);
+
+    // **余りの配賦は宣言に足さない**（Q18-5）。`owed` は基準額（`amount / 人数`）の集計のままである
+    expect(body.rows.map((row) => row.computed["paid"])).toEqual([1000, 0, 0]);
+    expect(body.rows.map((row) => row.computed["owed"])).toEqual([1000 / 3, 1000 / 3, 1000 / 3]);
+    // 端数（A が 1 円多く負担する）は、精算の値にだけ現れる
+    expect(body.settlement).toEqual([
+      { from: b, to: a, amount: 333 },
+      { from: c, to: a, amount: 333 },
+    ]);
+  });
+
+  it("登録順 A/B/C/D で D が払い参加者を C/B/A にしても、精算は A→D 334・B→D 333・C→D 333 の順になる", async () => {
+    const run = await warikanWithMembers(["A", "B", "C", "D"]);
+    const [a = "", b = "", c = "", d = ""] = run.ids;
+    const added = await createFromAction(run.deps, WARIKAN_INSTANCE, "addExpense", {
+      description: "昼食",
+      amount: 1000,
+      payer: d,
+      participants: [c, b, a],
+    });
+    expect(added.ok).toBe(true);
+    // 余りは払った人 D ではなく、**登録が最も早い参加者 A** が持つ（入力の並び順では決めない）
+    expect((await viewOf(run.deps)).settlement).toEqual([
+      { from: a, to: d, amount: 334 },
+      { from: b, to: d, amount: 333 },
+      { from: c, to: d, amount: 333 },
+    ]);
+  });
+
+  it("払った人と負担した人が同じ支出（差し引き 0）は、送金に現れない", async () => {
+    const run = await runWarikan();
+    const added = await createFromAction(run.deps, WARIKAN_INSTANCE, "addMember", { name: "D" });
+    expect(added.ok).toBe(true);
+    const id = added.ok ? added.body.id : "";
+    const only = await createFromAction(run.deps, WARIKAN_INSTANCE, "addExpense", {
+      description: "自分の分",
+      amount: 1000,
+      payer: id,
+      participants: [id],
+    });
+    expect(only.ok).toBe(true);
+    // D は払って負担したので差し引き 0。ほかの 3 人の送金は変わらない
+    expect(await settlementOf(run)).toEqual([
+      { from: run.ids["C"] ?? "", to: run.ids["A"] ?? "", amount: 3000 },
+    ]);
+  });
+
+  it("精算を宣言していない一覧には、欄そのものを載せない", async () => {
+    const run = await runWarikan();
+    const expenses = await getView(run.deps, WARIKAN_INSTANCE, "expenseList");
+    if (!expenses.ok) throw new Error("expenseList を読めなかった");
+    expect(Object.hasOwn(expenses.body, "settlement")).toBe(false);
+  });
+
+  it("M1.1 の見本（settle を宣言していない）の一覧にも、欄そのものを載せない", async () => {
+    const h = harness();
+    await runSteps(h);
+    const body = await listOf(h);
+    expect(Object.hasOwn(body, "settlement")).toBe(false);
+  });
+
+  it("金額が小数の支出は、入力の検査で断る（Q18-6。保存もしない）", async () => {
+    const run = await runWarikan();
+    const before = JSON.stringify(run.records.rows);
+    const result = await createFromAction(run.deps, WARIKAN_INSTANCE, "addExpense", {
+      description: "端数",
+      amount: 333.5,
+      payer: run.ids["A"] ?? "",
+      participants: [run.ids["A"] ?? "", run.ids["B"] ?? ""],
+    });
+    expect(result).toEqual({
+      ok: false,
+      failure: { error: "INPUT_REJECTED", fields: ["amount"], validations: [] },
+    });
+    expect(JSON.stringify(run.records.rows)).toBe(before);
+    expect(warikanExpenses(run)).toHaveLength(2);
+  });
+
+  it("支出の行が読めなければ、精算は null になる（空の並びに読み替えない）", async () => {
+    const run = await runWarikan();
+    // 有限でない額は入力の検査が断るので、**保存された行**として直接置く（壊れた成果物でも緑にしない）
+    run.records.rows.push({
+      entity: "expense",
+      id: "broken",
+      data: {
+        description: "壊れた",
+        amount: Number.POSITIVE_INFINITY,
+        payer: run.ids["A"] ?? "",
+        participants: [run.ids["A"] ?? ""],
+      },
+      createdAt: "2026-09-16T03:00:00.000Z",
+      updatedAt: "2026-09-16T03:00:00.000Z",
+      order: run.records.rows.length + 1,
+    });
+    // 集計（`computed`）と同じ約束である——読めなかった値は `null`。空の並び（送金が要らない）とは区別する
+    expect(await settlementOf(run)).toBeNull();
   });
 });

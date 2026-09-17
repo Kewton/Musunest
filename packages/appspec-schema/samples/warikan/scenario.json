@@ -40,6 +40,12 @@
       "expect": { "rejected": { "fields": [], "validations": ["positiveAmount"] } }
     },
     {
+      "name": "金額が小数なら断る（精算は整数円だけを扱う。Q18-6）",
+      "action": "addExpense",
+      "input": { "description": "端数", "amount": 333.5, "payer": "$A", "participants": ["$A"] },
+      "expect": { "rejected": { "fields": ["amount"], "validations": [] } }
+    },
+    {
       "name": "割る人が空なら断る",
       "action": "addExpense",
       "input": { "description": "昼食", "amount": 3000, "payer": "$A", "participants": [] },

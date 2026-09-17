@@ -177,6 +177,20 @@
       "why": "参照 payer の参照先 entity menber が宣言に無い（M1.2）"
     },
     {
+      "name": "settle-amount-not-number",
+      "codes": [
+        "LOGIC_SETTLE_AMOUNT_NOT_NUMBER"
+      ],
+      "why": "精算（settle）の額が、支出の entity の数の項目ではなく、文字列の項目 description を指している（M1.2）"
+    },
+    {
+      "name": "settle-unknown-entity",
+      "codes": [
+        "LOGIC_ENTITY_NOT_FOUND"
+      ],
+      "why": "精算（settle）が指す支出の entity expence が宣言に無い（正しくは expense。M1.2）"
+    },
+    {
       "name": "string-in-arithmetic",
       "codes": [
         "LOGIC_OPERAND_TYPE_MISMATCH"

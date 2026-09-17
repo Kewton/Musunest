@@ -79,6 +79,10 @@ export const DIAGNOSTIC_CODES = [
   "LOGIC_AGGREGATE_TARGET_NOT_NUMBER",
   /** 集計の `where` が、集計元の項目と `this` の参照型に合わない（M1.2） */
   "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
+  /** 精算（`settle`）の額の項目が、支出の entity の数の項目でない（M1.2） */
+  "LOGIC_SETTLE_AMOUNT_NOT_NUMBER",
+  /** 精算（`settle`）の払った人・割る人が、精算する entity を指す参照（ref・list of）でない（M1.2） */
+  "LOGIC_SETTLE_REFERENCE_TYPE_MISMATCH",
   /** 検査の式が真偽にならない */
   "LOGIC_VALIDATION_NOT_BOOLEAN",
   /** 検査の名前が重なっている */
