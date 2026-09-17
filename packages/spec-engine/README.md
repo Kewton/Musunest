@@ -101,32 +101,42 @@ evaluation.validations; // 通らなかった検査の名前（宣言の順）�
 コードの形式は `<種類>_<対象>_<問題>`（`ERROR_CODE_PATTERN`）。正本は
 [`src/diagnostics.ts`](./src/diagnostics.ts) の `DIAGNOSTIC_CODES` で、unit テストが
 「一覧にあること」と「形に合っていること」を確かめる。**既に台帳・負例にあるコードの別名は作らない。**
+**新しい診断は、実装側（`check.ts`）に定義せず、この一覧に足す。**
 
 | コード | いつ出るか |
 |---|---|
 | `SHAPE_YAML_INVALID` | YAML として読めない（この検査が読める形の範囲外も含む。§7） |
 | `SHAPE_KEY_MISSING` | 必須の欄・キーが無い（7 欄すべてを書く。中身が無ければ `[]`） |
-| `SHAPE_KEY_UNKNOWN` | その版の語彙に無い欄・キー（`label`・`kind`・`type` など、まだ入っていない語彙） |
+| `SHAPE_KEY_UNKNOWN` | その版の語彙に無い欄・キー（`label`・`required` など、まだ入っていない語彙。一覧の `type` の値と操作の `kind` の値もここではなく下表で断る） |
 | `SHAPE_KEY_DUPLICATE` | 同じ欄を 2 回書いている |
 | `SHAPE_NAME_INVALID` | 名前が英字で始まる英数字ではない |
 | `SHAPE_VALUE_INVALID` | 値の形が違う（欄が並びでない、`name` が空、写像でない、など） |
+| `SHAPE_VALIDATION_MESSAGE_INVALID` | 検査の文言（`message`）が、空でない文字列になっていない（M1.2） |
 | `SHAPE_CHECK_FAILED` | 検査の途中で予期しない例外が出た（外へ投げずにこれを返す） |
 | `DATA_ENTITY_DUPLICATE_NAME` | entity の名前が重なっている |
 | `DATA_FIELD_DUPLICATE_NAME` | 同じ entity の中で項目の名前が重なっている |
 | `DATA_FIELD_NAME_RESERVED` | `id`・`createdAt`・`updatedAt` を項目名に使っている |
 | `DATA_FIELD_TYPE_UNKNOWN` | M1.1 の型（`string`・`number`・`list`）に無い型 |
+| `DATA_REF_TARGET_NOT_FOUND` | 参照（`ref`・参照 list）の参照先の entity が宣言に無い（M1.2） |
 | `LOGIC_ENTITY_NOT_FOUND` | action・validation・computed の `entity` が宣言に無い |
 | `LOGIC_REFERENCE_NOT_FOUND` | 式が参照する名前が、同じ entity の項目にも計算にも無い |
 | `LOGIC_REFERENCE_OUT_OF_ENTITY` | 別の（または同じ）entity の名前を `.` で参照している（M1.1 は書けない） |
-| `LOGIC_COMPUTED_CYCLE` | 計算どうしの参照が循環している（自分自身を含む） |
+| `LOGIC_COMPUTED_CYCLE` | 計算どうしの参照が循環している（自分自身を含む。集計をまたぐ循環も同じ） |
 | `LOGIC_COMPUTED_NAME_CONFLICT` | 計算の名前が、同じ entity の項目の名前と重なっている |
 | `LOGIC_COMPUTED_NAME_RESERVED` | 計算の名前に `id`・`createdAt`・`updatedAt` を使っている |
-| `LOGIC_COMPUTED_DUPLICATE_NAME` | 計算の名前が重なっている |
+| `LOGIC_COMPUTED_DUPLICATE_NAME` | 計算の名前が重なっている（entity に 2 つ目の精算を書いたときも同じ） |
 | `LOGIC_COMPUTED_TYPE_MISMATCH` | 計算の式の型が `type` と食い違う |
 | `LOGIC_COMPUTED_TYPE_UNKNOWN` | 計算の `type` が M1.1 の型（`number`）に無い |
+| `LOGIC_AGGREGATE_FORM_INVALID` | 集計の形が不正（`sum` と `count` の同時指定、どちらも無い、対象の書き方。M1.2） |
+| `LOGIC_AGGREGATE_TARGET_NOT_FOUND` | 集計の対象（entity・項目・計算）が宣言に無い（M1.2） |
+| `LOGIC_AGGREGATE_TARGET_NOT_NUMBER` | 集計の対象（`sum`）が数ではない（M1.2） |
+| `LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH` | 集計の `where` が、集計元の項目と `this` の参照型に合わない（M1.2） |
+| `LOGIC_SETTLE_AMOUNT_NOT_NUMBER` | 精算（`settle`）の額の項目が、支出の entity の数の項目でない（M1.2） |
+| `LOGIC_SETTLE_REFERENCE_TYPE_MISMATCH` | 精算の払った人・割る人が、精算する entity を指す参照でない（M1.2） |
 | `LOGIC_VALIDATION_NOT_BOOLEAN` | 検査の式が真偽にならない |
 | `LOGIC_VALIDATION_DUPLICATE_NAME` | 検査の名前が重なっている |
 | `LOGIC_ACTION_DUPLICATE_NAME` | 操作の名前が重なっている |
+| `LOGIC_ACTION_KIND_NOT_ALLOWED` | 操作の `kind`（種類）が M1.2 の語彙（`create`・`update`・`delete`）に無い（M1.2） |
 | `LOGIC_FUNCTION_NOT_ALLOWED` | 店頭が用意していない関数を使っている（M1.1 は `min`・`max`・`len`） |
 | `LOGIC_FUNCTION_ARITY_MISMATCH` | 関数に渡す引数の数が合わない |
 | `LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH` | 関数に渡す引数の型が合わない |
@@ -137,13 +147,14 @@ evaluation.validations; // 通らなかった検査の名前（宣言の順）�
 | `LOGIC_EXPRESSION_NODES_EXCEEDED` | 式のノード数が上限（64）を超えている |
 | `UI_ENTITY_NOT_FOUND` | 一覧の `entity` が宣言に無い |
 | `UI_VIEW_DUPLICATE_NAME` | 一覧の名前が重なっている |
+| `UI_FIELD_NOT_FOUND` | 表（`type: table`）の `show` に書いた名前が、項目にも計算にも無い（M1.2） |
 | `PERMISSION_NAME_NOT_ALLOWED` | 権限の名前が M1.1（`read`・`write`）に無い |
 | `PERMISSION_SUBJECT_NOT_ALLOWED` | `subject` が M1.1（`minIdentity`）に無い |
 | `PERMISSION_IDENTITY_MODE_NOT_ALLOWED` | `minIdentity.mode` が M1（`anonymous`）に無い |
 | `PERMISSION_DUPLICATE_NAME` | 権限の名前が重なっている |
 
 - 台帳（`vocabulary.yaml` の `check_rules`）と負例（`samples/negatives/index.json` の `codes`）に書いたコードは、
-  **この検査が実装する期待値**である。負例 24 件については、返るコードの集合が一覧と**ちょうど一致**することを
+  **この検査が実装する期待値**である。負例 34 件については、返るコードの集合が一覧と**ちょうど一致**することを
   unit テストで固定している
 - 誤りの内側の型は決められないものとして扱う（`unknown`）。だから 1 つの誤りが 2 つ以上のコードに化けない
   （例：`max(participants, 1)` は `LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH` だけを返し、計算の `type` の
@@ -244,7 +255,7 @@ pnpm check                                  # verify-parity → lint → typeche
 |---|---|
 | 見本 `expense-log` の診断が空で、7 欄を持つ AppSpec を返す | `src/check.test.ts`「見本 expense-log」 |
 | チェック中に式の実行やストレージ操作を行わない | `src/check.test.ts`「検査は式を実行しない・ストレージに触れない」（`eval`・`Function`・`fetch` を禁じた状態で検査し、ライブラリのソースも走査する） |
-| 負例 24 件の誤りコードの集合が一覧の `codes` と一致する | `src/check.test.ts`「負例」の `it.each`（`it.each` は負例の一覧から作る） |
+| 負例 34 件の誤りコードの集合が一覧の `codes` と一致する | `src/check.test.ts`「負例」の `it.each`（`it.each` は負例の一覧から作る） |
 | 診断の説明が空でなく、位置が該当する YAML の行・列を指す | 同上（全件）＋「位置は、該当する式の始まるところを指す」 |
 | 不正 YAML・未知キー・未知参照・自己循環・複数要素の循環を拒否する | 「不正な YAML は断る」「形の検査」「計算の循環」 |
 | 深さ 8・ノード 64・200 文字ちょうどは通り、1 超過は上限の診断になる | `src/expression.test.ts`「式の上限」と `src/check.test.ts`「式の上限」（両側を実測） |
@@ -263,11 +274,20 @@ pnpm check                                  # verify-parity → lint → typeche
 | `1/0` とオーバーフローの computed は `null`、それを使う検査は不合格 | 同「有限の数でなくなった計算」＋「不正な計算値を 0 に読み替えない」 |
 | `max(1, headcount)` の正例は数値を返す | 同「max(1, headcount) は数値を返す（0 で割らないための守り）」 |
 | 元の入力オブジェクトに計算値が書き込まれない | 同「計算値は戻り値にだけ入る」（入れ子まで凍らせたレコードを渡す） |
-| #97 の負例は正規化されない | `src/normalize.test.ts`「検査に通らない原本は正規化しない」（負例 24 件を `it.each` で回す） |
+| #97 の負例は正規化されない | `src/normalize.test.ts`「検査に通らない原本は正規化しない」（負例 34 件を `it.each` で回す） |
 | 評価側も同じ上限の直前・ちょうど・1 超過を検証し、超過を成功値にしない | `src/evaluate.test.ts`「式の上限」（文字数・深さ・ノードを 1 つずつ両側で実測。成果物を手で作った場合も測る） |
 | 差し込む時計を変えても M1.1 の計算値は変わらない | 同「差し込む時計を変えても、M1.1 の計算値は変わらない」（4 つの時計で実測） |
 | 時計は引数で受け取り、オフセットの無い時刻を読まない | `src/clock.test.ts` |
 | 入口が根から読め、未検査の YAML を評価へ渡す口が無い | `src/index.test.ts`「公開する面」（宣言 → 正規化 → 評価の通し） |
+
+| 受入条件（Issue #109。操作の種類） | 担保するテスト |
+|---|---|
+| 操作の `kind` に `create`・`update`・`delete` を書ける（語彙は閉じている） | `src/check.test.ts`「操作の種類（kind。M1.2）」（3 つを `it.each` で実測） |
+| `kind` の省略は `create` として読み、宣言に欄を足さない（M1.1 の意味を変えない） | 同「kind を省略すると、欄そのものが無い」 |
+| 未知の `kind` は `LOGIC_ACTION_KIND_NOT_ALLOWED` で落ち、位置は書いた語を指す | 同「未知の kind は …」／負例 `action-unknown-kind` |
+| 導入で正例になった `action-with-kind`（`kind: create`）が通り、負例の一覧から外れている | 同「kind: create を書ける（負例 action-with-kind の正例）」 |
+| 新しい見本（warikan の edit/delete）が静的チェックに通る | 「見本（appspec-schema の samples/）」の `it.each`（`warikan` を含む） |
+| 台帳の `check_rules` と負例・意味の節が同期する | `@musunest/appspec-schema` の `src/index.test.ts`「語彙の台帳」 |
 
 - 実測した終了コードと実行コマンドは、PR の証跡に転記する（この README はコマンドと対応表までを持つ）
 - **実環境での確認は、ユニットテストとは別に証跡を残す**（staging の e2e は時計に依存しない値と SHA の照合だけ。Q16・Q17）
@@ -279,7 +299,7 @@ pnpm check                                  # verify-parity → lint → typeche
 - `src/evaluate.ts` … 同じ entity の中の computed と validation の評価
 - `src/clock.ts` … 評価に差し込む時計（Q17）
 - `src/expression.ts` … 式の字句・解析（AST）・型の検査・位置の写し
-- `src/diagnostics.ts` … 診断の型と誤りコードの一覧（正本）
+- `src/diagnostics.ts` … 診断の型と誤りコードの一覧（正本。**新しいコードはここに足す**。§4）
 - `src/limits.ts` … 式の上限定数（検査と評価で共有）
 - `src/cli.ts` … 入口。原本を読み、`checkSpec` の結果を終了コードにする
 - `src/index.ts` … 公開する面（依存の向きは appspec-schema だけ）

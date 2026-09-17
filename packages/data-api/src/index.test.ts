@@ -844,6 +844,8 @@ describe("境界（公開する型に Worker 本体を含めない）", () => {
     for (const name of ["readApiRoute", "apiSpecPath", "apiActionPath", "apiErrorBody"]) {
       expect(typeof contracts[name], name).toBe("function");
     }
+    // **一覧は列挙して固定する。** コードとステータスを足すときは、このテストも同じ PR で直す
+    // （一覧の外にステータスを隠すと、応答を組む側とこのテストが別々の表を読むことになる）
     expect(contracts["API_ERROR_STATUS"]).toEqual({
       INVALID_JSON: 400,
       INPUT_REJECTED: 422,
@@ -851,6 +853,8 @@ describe("境界（公開する型に Worker 本体を含めない）", () => {
       NOT_FOUND: 404,
       METHOD_NOT_ALLOWED: 405,
       SPEC_UNAVAILABLE: 503,
+      // 参照されているレコードの削除（M1.2）。data-api の failureResponse がここから 409 を引く
+      REFERENCE_IN_USE: 409,
     });
     expect(contracts["HEALTHZ_PATH"]).toBe("/healthz");
   });

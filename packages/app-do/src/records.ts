@@ -7,7 +7,17 @@
 // DO のクラス（src/index.ts）から呼ばれる部品で、判定は持たない——
 // 入力の型の検査・validation・権限・参照先の判断と computed の計算は data-api の責任である
 // （contract.ts「宣言の entity のレコード」）。
-import type { RecordData, RecordStamp, StoredRecord } from "./contract";
+import type {
+  GuardedCreate,
+  GuardedDelete,
+  GuardedUpdate,
+  RecordData,
+  RecordStamp,
+  ReferenceCount,
+  ReferenceExpectation,
+  ReferenceGuard,
+  StoredRecord,
+} from "./contract";
 
 /** SQLite から読んだ 1 行。列名は表の定義と同じ。 */
 interface RecordRow extends Record<string, SqlStorageValue> {
@@ -171,6 +181,123 @@ export function deleteRecord(sql: SqlStorage, entity: string, id: string): boole
     )
     .toArray();
   return deleted.length > 0;
+}
+
+// ── 参照されている行は消せない（Issue #109。M1.2） ──────────────────
+//
+// **判定はここに置かない。** どの項目が参照なのかは宣言が決めるので、data-api が
+// `ReferenceGuard` / `ReferenceExpectation` の並び（entity・項目・並びかどうか）を組み立てて渡す。
+// ここは「渡された項目が対象の ID を指している行を数える」「参照先が実在するかを見る」ことと、
+// **数える・見ることと書くことを同じ呼出の中で行う**ことだけを受け持つ。
+
+/** 1 つの参照の値が、対象の ID を指しているか（`ref` は一致、参照 list は包含） */
+function pointsAt(data: RecordData, guard: ReferenceGuard, id: string): boolean {
+  const value = data[guard.field];
+  if (guard.list) return Array.isArray(value) && value.includes(id);
+  return value === id;
+}
+
+/**
+ * 対象を指している保存済みの行を、参照の項目ごとに数える（1 件以上あるものだけを返す）。
+ * 順は渡された `guards` の順である（data-api が宣言の順に組み立てる）。
+ */
+export function countReferences(
+  sql: SqlStorage,
+  target: string,
+  guards: readonly ReferenceGuard[],
+): ReferenceCount[] {
+  const references: ReferenceCount[] = [];
+  for (const guard of guards) {
+    const count = selectRecords(sql, guard.entity).filter((row) =>
+      pointsAt(row.data, guard, target),
+    ).length;
+    if (count > 0) references.push({ ...guard, count });
+  }
+  return references;
+}
+
+/**
+ * 書こうとしている行の参照先が、**このインスタンス**に実在するかを見る。
+ * 通らなかった項目の名前を返す（宣言の順。空なら通った）。
+ */
+function missingReferences(
+  sql: SqlStorage,
+  data: RecordData,
+  expectations: readonly ReferenceExpectation[],
+): string[] {
+  const fields: string[] = [];
+  for (const expectation of expectations) {
+    const value = data[expectation.field];
+    const ids = expectation.list
+      ? Array.isArray(value)
+        ? value
+        : []
+      : typeof value === "string" && value !== ""
+        ? [value]
+        : [];
+    // 1 件も指していない（型の検査が先に断る値である）か、1 つでも実在しなければ通らない
+    if (ids.length === 0 || ids.some((id) => selectRecord(sql, expectation.to, id) === null)) {
+      fields.push(expectation.field);
+    }
+  }
+  return fields;
+}
+
+/**
+ * 参照先の実在を確かめてから 1 行を追加する（M1.2）。**この関数の中に `await` が無い。**
+ * data-api が別の呼出で確かめてから書くと、その間に参照先が消えて孤立した参照が残りうる。
+ * DO は 1 つの要求を直列に処理するので、見ることと書くことの間に別の操作は割り込まない。
+ */
+export function insertRecordGuarded(
+  sql: SqlStorage,
+  entity: string,
+  data: RecordData,
+  boundary: RecordBoundary,
+  expectations: readonly ReferenceExpectation[] = [],
+): GuardedCreate {
+  const fields = missingReferences(sql, data, expectations);
+  if (fields.length > 0) return { ok: false, reason: "REFERENCE_NOT_FOUND", fields };
+  return { ok: true, record: insertRecord(sql, entity, data, boundary) };
+}
+
+/**
+ * 参照先の実在を確かめてから 1 行を書き換える（M1.2）。対象の行が無ければ `NOT_FOUND`、
+ * 参照先が実在しなければ `REFERENCE_NOT_FOUND`（**どちらも書かない**）。`insertRecordGuarded` と同じく、
+ * 見ることと書くことの間に `await` が無い。
+ */
+export function updateRecordGuarded(
+  sql: SqlStorage,
+  entity: string,
+  id: string,
+  data: RecordData,
+  boundary: RecordBoundary,
+  expectations: readonly ReferenceExpectation[] = [],
+): GuardedUpdate {
+  if (selectRecord(sql, entity, id) === null) return { ok: false, reason: "NOT_FOUND" };
+  const fields = missingReferences(sql, data, expectations);
+  if (fields.length > 0) return { ok: false, reason: "REFERENCE_NOT_FOUND", fields };
+  const record = updateRecord(sql, entity, id, data, boundary);
+  if (record === null) return { ok: false, reason: "NOT_FOUND" };
+  return { ok: true, record };
+}
+
+/**
+ * 参照を確かめてから 1 行を消す（M1.2）。**この関数の中に `await` が無い。**
+ * DO は 1 つの要求を直列に処理するので、数えることと消すことの間に別の書込は割り込まない
+ * ——参照の確認と削除の間に参照が足されて、孤立した参照が残ることはない。
+ */
+export function deleteRecordGuarded(
+  sql: SqlStorage,
+  entity: string,
+  id: string,
+  guards: readonly ReferenceGuard[],
+): GuardedDelete {
+  const record = selectRecord(sql, entity, id);
+  if (record === null) return { ok: false, reason: "NOT_FOUND" };
+  const references = countReferences(sql, id, guards);
+  if (references.length > 0) return { ok: false, reason: "REFERENCE_IN_USE", references };
+  deleteRecord(sql, entity, id);
+  return { ok: true, record };
 }
 
 /** 次の登録順。行が無ければ 1。 */

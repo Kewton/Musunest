@@ -12,7 +12,7 @@
 // 経路・応答・誤りコードの意味は packages/data-api/README.md、宣言の意味は
 // ./docs/semantics.md にある。M1.1 の `message` はまだ無いので、拒否の内容は項目名と検査名で返す。
 
-import type { AppSpec } from "./spec.js";
+import type { ActionKind, AppSpec } from "./spec.js";
 
 // ── 経路 ────────────────────────────────────────────────────────
 //
@@ -96,10 +96,23 @@ function decodeSegment(segment: string | undefined): string | null {
 
 // ── 応答：成功 ────────────────────────────────────────────────
 
-/** 読取の成功（spec・一覧） */
+/** 読取の成功（spec・一覧）と、直す・消すの成功（M1.2） */
 export const API_READ_STATUS = 200 as const;
 /** 追加の成功 */
 export const API_CREATED_STATUS = 201 as const;
+
+/**
+ * 対象を参照している保存済みの行（M1.2）。消せない理由を、**参照元の entity と項目、件数**で返す。
+ * 消せないことの判断は data-api（唯一の権限強制点）が行い、画面はこの値をそのまま見せる。
+ */
+export interface ApiReference {
+  /** 参照している行の entity */
+  readonly entity: string;
+  /** 参照している項目（`ref` か参照 list） */
+  readonly field: string;
+  /** その entity と項目で、対象を指している保存済みの行の数（1 以上） */
+  readonly count: number;
+}
 
 /**
  * レコードの値。今の語彙（`string`・`number`・`list`）が作る値だけを使う
@@ -116,12 +129,35 @@ export interface ApiRow {
   readonly fields: Readonly<Record<string, ApiValue>>;
   /** 計算の値。求められなかった計算は `null`（画面では空。計算の値は保存しない） */
   readonly computed: Readonly<Record<string, number | null>>;
+  /**
+   * この行を**参照している**保存済みの行（M1.2）。消せるかどうかを画面が判断するために載せる
+   * （消せないことの判断は data-api が行い、画面はボタンを出さないだけで守りではない。`03` §2.2）。
+   *
+   * **その entity に `delete` の操作を宣言しているときだけ載せる**——宣言が無ければ
+   * 削除ボタンも出ないので、M1.1 の応答を変えない。空の並びは「参照されていない（消せる）」である。
+   * `null` へ読み替えない（`settlement` と同じ約束である）。
+   */
+  readonly references?: readonly ApiReference[];
 }
 
-/** 操作の 1 つ。画面はこれを見てボタンを出す（M1.1 の操作はいつでも押せる。条件 `when` は M1.3） */
+/** 消した結果（M1.2）。消せたときだけ返す（消せないときは 409 `REFERENCE_IN_USE` である） */
+export interface ApiDeletedBody {
+  readonly entity: string;
+  /** 消した行の ID */
+  readonly id: string;
+  readonly deleted: true;
+}
+
+/**
+ * 操作の 1 つ。画面はこれを見て、追加のフォームと削除のボタンを出す。
+ * `kind` は M1.2 で足した**操作の種類**である（`create`・`update`・`delete`）。
+ * **宣言で省略したときは欄そのものを載せない**（M1.1 の応答を変えない。省略の意味は `create` である）。
+ */
 export interface ApiActionRef {
   readonly name: string;
   readonly entity: string;
+  /** 操作の種類（宣言にあるときだけ）。無ければ `create` として読む */
+  readonly kind?: ActionKind;
 }
 
 /**
@@ -163,7 +199,11 @@ export interface ApiViewBody {
   readonly instanceId: string;
   readonly view: string;
   readonly entity: string;
-  /** 項目の名前（宣言の順）。一覧の列の順はこれで決まる */
+  /**
+   * 項目の名前（宣言の順）。**表（`type: table`）の列の順ではない**——列の順は宣言の `show` が
+   * あればそちらが決め、無ければ「この並び（項目の宣言の順）に続いて `computed` の並び」である
+   * （declaration 側の `View.show` と ./docs/semantics.md「table」）。行の値はこの並びで読める。
+   */
   readonly fields: readonly string[];
   /** 計算の名前（宣言の順） */
   readonly computed: readonly string[];
@@ -203,10 +243,18 @@ export const API_ERROR_CODES = [
   "METHOD_NOT_ALLOWED",
   /** 登録・R2 のオブジェクト・宣言の整合性（版・SHA）が不良 */
   "SPEC_UNAVAILABLE",
+  /** 参照されているレコードを消そうとした（M1.2。`references` を返す。docs/semantics.md「delete」） */
+  "REFERENCE_IN_USE",
 ] as const;
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
 
-/** 誤りコードと HTTP ステータス。コードが先で、ステータスはそこから決まる */
+/**
+ * 誤りコードと HTTP ステータス。コードが先で、ステータスはそこから決まる。
+ *
+ * **コードを足すときは、この一覧と、それを固定しているテスト（`packages/data-api/src/index.test.ts` と
+ * `src/api.test.ts`）を同じ PR で直す。** 一覧の外にステータスを隠す（列挙しない欄にする）ことはしない——
+ * 隠すと、応答を組む側（data-api の `src/index.ts`）とテストが、同じ表を別々に読むことになる。
+ */
 export const API_ERROR_STATUS = {
   INVALID_JSON: 400,
   INPUT_REJECTED: 422,
@@ -214,6 +262,8 @@ export const API_ERROR_STATUS = {
   NOT_FOUND: 404,
   METHOD_NOT_ALLOWED: 405,
   SPEC_UNAVAILABLE: 503,
+  /** 参照されているレコードを消そうとした（M1.2）。`references` を返す */
+  REFERENCE_IN_USE: 409,
 } as const satisfies Record<ApiErrorCode, number>;
 
 /**
@@ -239,27 +289,44 @@ export interface ApiFailureBody {
   readonly error: Exclude<ApiErrorCode, "INPUT_REJECTED">;
 }
 
-export type ApiErrorBody = ApiRejectedBody | ApiFailureBody;
+/**
+ * 参照されているレコードを消そうとしたときの本文（M1.2。409 `REFERENCE_IN_USE`）。
+ * **参照元の entity と項目、件数を載せる**——画面が「なぜ消せないか」をそのまま見せられるようにする。
+ * 件数が 0 のときは欄を載せない（そのときは 409 にならない）。
+ */
+export interface ApiReferenceInUseBody {
+  readonly error: "REFERENCE_IN_USE";
+  readonly references?: readonly ApiReference[];
+}
+
+export type ApiErrorBody = ApiRejectedBody | ApiReferenceInUseBody | ApiFailureBody;
 
 /**
- * 誤りの本文を組む。`INPUT_REJECTED` のときだけ `fields` と `validations` を載せる
- * （ほかのコードでは項目名も検査名も無いので、空の配列を載せない）。
- * `validationMessages` は、**文言が 1 つでもあるとき**だけ `validations` と同じ並びで載せる。
+ * 誤りの本文を組む。`INPUT_REJECTED` のときだけ `fields` と `validations` を載せ
+ * （ほかのコードでは項目名も検査名も無いので、空の配列を載せない）、`REFERENCE_IN_USE` のときだけ
+ * `references` を載せる。`validationMessages` は、**文言が 1 つでもあるとき**だけ
+ * `validations` と同じ並びで載せる。
  */
 export function apiErrorBody(
   error: ApiErrorCode,
-  rejected?: {
-    readonly fields: readonly string[];
-    readonly validations: readonly string[];
+  details?: {
+    readonly fields?: readonly string[];
+    readonly validations?: readonly string[];
     readonly validationMessages?: readonly (string | null)[];
+    readonly references?: readonly ApiReference[];
   },
 ): ApiErrorBody {
   if (error === "INPUT_REJECTED") {
-    const fields = rejected?.fields ?? [];
-    const validations = rejected?.validations ?? [];
-    const messages = rejected?.validationMessages;
+    const fields = details?.fields ?? [];
+    const validations = details?.validations ?? [];
+    const messages = details?.validationMessages;
     if (messages === undefined || messages.length === 0) return { error, fields, validations };
     return { error, fields, validations, validationMessages: messages };
+  }
+  if (error === "REFERENCE_IN_USE") {
+    const references = details?.references;
+    if (references === undefined || references.length === 0) return { error };
+    return { error, references };
   }
   return { error };
 }

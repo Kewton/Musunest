@@ -8,8 +8,16 @@
 // fetch と base URL は差し込める。host の画面は同じ origin の /api/* を叩くので `baseUrl: ""` でよい
 // （相対 URL のまま fetch する）。e2e のように別の origin を指す場合は絶対 URL を渡す。
 
-import { API_ERROR_CODES, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
-import type { ApiErrorCode, ApiRow, ApiSpecBody, ApiValue, ApiViewBody } from "@musunest/appspec-schema";
+import { API_ERROR_CODES, ACTION_KINDS, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
+import type {
+  ApiDeletedBody,
+  ApiErrorCode,
+  ApiReference,
+  ApiRow,
+  ApiSpecBody,
+  ApiValue,
+  ApiViewBody,
+} from "@musunest/appspec-schema";
 
 /** fetch の差し替え口。Workers・ブラウザ・Node のどれでも同じ形で呼べる範囲だけを要求する */
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
@@ -35,6 +43,11 @@ export interface ClientError {
    * **宣言が文言を持たないときは無い**——画面は `validations` の名前で識別する（M1.1 と同じ）。
    */
   readonly validationMessages?: readonly (string | null)[];
+  /**
+   * 参照されているレコードを消そうとしたときの参照元（`REFERENCE_IN_USE` のときだけ。M1.2）。
+   * **参照元の entity と項目、件数**である。画面はこれをそのまま見せる（消せない理由）。
+   */
+  readonly references?: readonly ApiReference[];
 }
 
 export type ClientResult<T> =
@@ -46,12 +59,27 @@ export interface MusunestClient {
   getSpec(instanceId: string): Promise<ClientResult<ApiSpecBody>>;
   /** `GET /api/instances/:instanceId/views/:viewName`。宣言順の列と、登録順の行 */
   getView(instanceId: string, viewName: string): Promise<ClientResult<ApiViewBody>>;
-  /** `POST /api/instances/:instanceId/actions/:actionName`。書いた行（計算値つき）が返る */
+  /**
+   * `POST /api/instances/:instanceId/actions/:actionName`。**宣言した `kind` で何をするかが決まる**（M1.2）。
+   *   `create` … `input` は「項目名: 値」。201 と、書いた行が返る
+   *   `update` … `input` は「`id` ＋ 項目の全部」。200 と、書き換えた行が返る
+   * 消す（`delete`）は `deleteRecord` を使う（入力は `id` だけで、返るのは行ではない）。
+   */
   addRecord(
     instanceId: string,
     actionName: string,
     input: Readonly<Record<string, ApiValue>>,
   ): Promise<ClientResult<ApiRow>>;
+  /**
+   * `kind: delete` の操作を実行する（M1.2）。`id` は消すレコードである。
+   * **参照されている行は消せない**——`error.code` が `REFERENCE_IN_USE`（409）になり、
+   * `error.references` に参照元の entity と項目、件数が入る（空の並びへ読み替えない）。
+   */
+  deleteRecord(
+    instanceId: string,
+    actionName: string,
+    id: string,
+  ): Promise<ClientResult<ApiDeletedBody>>;
 }
 
 export interface MusunestClientOptions {
@@ -73,6 +101,11 @@ export function createMusunestClient(options: MusunestClientOptions): MusunestCl
       decode(await send(request, base, apiViewPath(instanceId, viewName), "GET"), isViewBody),
     addRecord: async (instanceId, actionName, input) =>
       decode(await send(request, base, apiActionPath(instanceId, actionName), "POST", input), isRow),
+    deleteRecord: async (instanceId, actionName, id) =>
+      decode(
+        await send(request, base, apiActionPath(instanceId, actionName), "POST", { id }),
+        isDeletedBody,
+      ),
   };
 }
 
@@ -132,6 +165,12 @@ function errorOf(status: number, body: unknown): ClientError {
     (API_ERROR_CODES as readonly string[]).includes(body.error)
   ) {
     const code = body.error as ApiErrorCode;
+    if (code === "REFERENCE_IN_USE") {
+      // 消せない理由（参照元と件数）。**載っていなければ欄ごと落とす**（空の並びに読み替えない）
+      if (body.references === undefined) return failure(status, code);
+      if (!isReferences(body.references)) return failure(status, INVALID_RESPONSE);
+      return { status, code, fields: [], validations: [], references: body.references };
+    }
     if (code !== "INPUT_REJECTED") return failure(status, code);
     // 拒否の内容（項目名と検査名）が契約の形のときだけ、その2つを載せる
     if (!isStringArray(body.fields) || !isStringArray(body.validations)) {
@@ -187,7 +226,30 @@ function isPermissions(value: unknown): boolean {
 }
 
 function isActionRef(value: unknown): boolean {
-  return isRecord(value) && typeof value.name === "string" && typeof value.entity === "string";
+  if (!isRecord(value) || typeof value.name !== "string" || typeof value.entity !== "string") {
+    return false;
+  }
+  // 操作の種類（M1.2）は任意。載っているときだけ、語彙（create・update・delete）に合うことを要求する
+  return (
+    value.kind === undefined ||
+    (typeof value.kind === "string" && (ACTION_KINDS as readonly string[]).includes(value.kind))
+  );
+}
+
+/** 消せない理由の 1 件（M1.2）。参照元の entity と項目、件数（1 以上） */
+function isReference(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.entity === "string" &&
+    typeof value.field === "string" &&
+    typeof value.count === "number" &&
+    Number.isInteger(value.count) &&
+    value.count >= 1
+  );
+}
+
+function isReferences(value: unknown): value is readonly ApiReference[] {
+  return Array.isArray(value) && value.every(isReference);
 }
 
 /**
@@ -308,7 +370,22 @@ function isRow(value: unknown): value is ApiRow {
   }
   if (!isRecord(value.fields) || !Object.values(value.fields).every(isApiValue)) return false;
   if (!isRecord(value.computed)) return false;
-  return Object.values(value.computed).every((item) => item === null || typeof item === "number");
+  if (!Object.values(value.computed).every((item) => item === null || typeof item === "number")) {
+    return false;
+  }
+  // 参照されている行（M1.2）は任意。**載っているときだけ**契約の形を要求する
+  // （`delete` を宣言している entity だけが載せる。空の並びは「参照されていない」である）
+  return value.references === undefined || isReferences(value.references);
+}
+
+/** 消した結果（M1.2。`kind: delete` の応答）。行ではなく、消せたことを表す */
+function isDeletedBody(value: unknown): value is ApiDeletedBody {
+  return (
+    isRecord(value) &&
+    typeof value.entity === "string" &&
+    typeof value.id === "string" &&
+    value.deleted === true
+  );
 }
 
 function isSpecBody(value: unknown): value is ApiSpecBody {

@@ -10,7 +10,12 @@
 // HTTP から叩けるようにすること。src/index.test.ts がこの入口を使う。
 import { AppInstanceDO } from "./index";
 import type { AppDoEnv } from "./index";
-import type { RecordData, RecordStamp } from "./contract";
+import type {
+  RecordData,
+  RecordStamp,
+  ReferenceExpectation,
+  ReferenceGuard,
+} from "./contract";
 
 export { AppInstanceDO };
 
@@ -18,6 +23,11 @@ const DEFAULT_INSTANCE = "m0";
 
 /** 宣言の entity のレコードの入口（Issue #99）。 */
 const RECORDS_PREFIX = "/records/";
+
+/** `?guard=<JSON>` を読む（M1.2）。参照の期待・参照の確認を、宣言を知らないハーネスへ渡す口である */
+function parseGuard<T>(text: string): readonly T[] {
+  return JSON.parse(text) as readonly T[];
+}
 
 function stubFor(env: AppDoEnv, url: URL): DurableObjectStub<AppInstanceDO> {
   const name = url.searchParams.get("app") ?? DEFAULT_INSTANCE;
@@ -51,7 +61,13 @@ async function recordData(request: Request): Promise<RecordData> {
   return (await request.json()) as RecordData;
 }
 
-/** `/records/<entity>` と `/records/<entity>/<id>` を、DO の RPC へそのまま橋渡しする。 */
+/**
+ * `/records/<entity>` と `/records/<entity>/<id>` を DO の RPC へそのまま橋渡しする。
+ *
+ * **`?guard=<JSON>` を付けると、参照を同じ呼出の中で確かめる版**（M1.2）になる——追加・更新は
+ * `ReferenceExpectation`（どの項目がどの entity を指すか）の並び、削除は `ReferenceGuard` の並びを渡す。
+ * 付けなければ、参照を見ない素の書込・削除である（#99 の受入試験が使う）。
+ */
 async function records(
   request: Request,
   url: URL,
@@ -63,13 +79,19 @@ async function records(
   }
   const entityName = decodeURIComponent(entity);
   const stamp = recordStamp(url);
+  const guard = url.searchParams.get("guard");
 
   if (id === undefined) {
     switch (request.method) {
       case "GET":
         return json(await stub.listRecords(entityName));
-      case "POST":
-        return json(await stub.createRecord(entityName, await recordData(request), stamp));
+      case "POST": {
+        const data = await recordData(request);
+        if (guard === null) return json(await stub.createRecord(entityName, data, stamp));
+        return json(
+          await stub.createRecordGuarded(entityName, data, stamp, parseGuard<ReferenceExpectation>(guard)),
+        );
+      }
       default:
         return json({ error: "method not allowed" }, 405);
     }
@@ -79,12 +101,26 @@ async function records(
   switch (request.method) {
     case "GET":
       return json(await stub.getRecord(entityName, recordId));
-    case "PUT":
+    case "PUT": {
+      const data = await recordData(request);
+      if (guard === null) {
+        return json(await stub.updateRecord(entityName, recordId, data, stamp));
+      }
       return json(
-        await stub.updateRecord(entityName, recordId, await recordData(request), stamp),
+        await stub.updateRecordGuarded(
+          entityName,
+          recordId,
+          data,
+          stamp,
+          parseGuard<ReferenceExpectation>(guard),
+        ),
       );
+    }
     case "DELETE":
-      return json(await stub.deleteRecord(entityName, recordId));
+      if (guard === null) return json(await stub.deleteRecord(entityName, recordId));
+      return json(
+        await stub.deleteRecordGuarded(entityName, recordId, parseGuard<ReferenceGuard>(guard)),
+      );
     default:
       return json({ error: "method not allowed" }, 405);
   }

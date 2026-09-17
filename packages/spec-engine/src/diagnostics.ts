@@ -89,6 +89,8 @@ export const DIAGNOSTIC_CODES = [
   "LOGIC_VALIDATION_DUPLICATE_NAME",
   /** 操作の名前が重なっている */
   "LOGIC_ACTION_DUPLICATE_NAME",
+  /** 操作の `kind`（種類）が M1.2 の語彙（`create`・`update`・`delete`）に無い（M1.2） */
+  "LOGIC_ACTION_KIND_NOT_ALLOWED",
   /** 店頭が用意していない関数を使っている（M1.1 は `min`・`max`・`len` だけ） */
   "LOGIC_FUNCTION_NOT_ALLOWED",
   /** 関数に渡す引数の数が合わない */

@@ -8,8 +8,15 @@
 # 一覧に 1 人あたり 2000 円と 1000 円が出て、メンバーの一覧に払った額（`paid`）・負担する額（`owed`）・
 # 差し引き（`balance`）が出る。精算の一覧には **「C さん → A さん 3,000 円」の 1 件**が出る
 # （C の差し引きが −3000、A が +3000 である）。
+#
+# 直す・消す（M1.2。Issue #109）：
+# 夕食を 6000→3000 に直すと A/B が `3000/2000/1000`、C が `0/2000/-2000` になり、精算は C→A 1000・C→B 1000。
+# 続けてタクシーを消すと A が `3000/1000/2000`、B/C が `0/1000/-1000` になり、精算は B→A 1000・C→A 1000。
+# **参照されているメンバーは消せない**（payer に使われていても、participants にだけ使われていても断る）。
+#
 # 採点のシナリオは同じディレクトリの scenario.json、
-# 意味は ../../docs/semantics.md（「ref」「list」「message」「aggregate」「sum」「count」「table」「settlement」）にある。
+# 意味は ../../docs/semantics.md（「ref」「list」「message」「aggregate」「sum」「count」「table」「settlement」
+# 「action」「create」「update」「delete」）にある。
 
 entities:
   - name: member
@@ -45,10 +52,25 @@ views:
     type: settlement
 
 actions:
+  # 操作の種類（`kind`。M1.2）。**省略すると create** である（M1.1 の宣言の意味を変えない）
   - name: addMember
     entity: member
+  # 明示の create（省略と同じ意味である。docs/semantics.md「create」）
   - name: addExpense
     entity: expense
+    kind: create
+  # 直す（全項目の置換）。対象のレコードの ID を取る（docs/semantics.md「update」）
+  - name: editExpense
+    entity: expense
+    kind: update
+  # 消す。参照されている行は消せない（docs/semantics.md「delete」）
+  - name: deleteExpense
+    entity: expense
+    kind: delete
+  # メンバーを消す。payer に使われている・participants にだけ使われている、のどちらでも断られる
+  - name: deleteMember
+    entity: member
+    kind: delete
 
 validations:
   - name: positiveAmount

@@ -70,6 +70,8 @@ const FAILURE_MESSAGES: Readonly<Record<FailureReason, string>> = {
 
 export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
   const [state, setState] = useState<ScreenState>({ kind: "loading" });
+  /** 消せなかった理由（M1.2）。**画面の非表示だけに頼らず、サーバの答えを出す** */
+  const [deleteFailure, setDeleteFailure] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -112,6 +114,8 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
 
   const { spec, view, references } = state;
   const action = view === null ? undefined : addActionOf(spec, view);
+  // 消す操作（`kind: delete`。M1.2）。宣言が無ければ削除ボタンも出さない
+  const deleteAction = view === null ? undefined : deleteActionOf(spec, view);
   // 一覧の種類（`type`）と、表に出す名前の順（`show`）は**宣言**にある。API の応答には行だけがある
   const declaration = view === null ? undefined : spec.spec.views.find((item) => item.name === view.view);
   const entity = view === null ? undefined : spec.spec.entities.find((item) => item.name === view.entity);
@@ -138,6 +142,21 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
     const refreshed = await loadView(client, instanceId, spec, view.view);
     setState(refreshed);
     return { ok: true };
+  }
+
+  /**
+   * 消す（M1.2）。成功したら**一覧を読み直す**。断られた理由（参照されている・権限・通信）は
+   * その場に出す——**画面の非表示は守りではない**ので、サーバの答えをそのまま見せる（`03` §2.2）。
+   */
+  async function removeRecord(actionName: string, id: string): Promise<void> {
+    if (view === null) return;
+    setDeleteFailure(null);
+    const deleted = await client.deleteRecord(instanceId, actionName, id);
+    if (!deleted.ok) {
+      setDeleteFailure(reasonOfFailure(deleted.error));
+      return;
+    }
+    setState(await loadView(client, instanceId, spec, view.view));
   }
 
   return (
@@ -174,7 +193,19 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           まだ記録がありません
         </p>
       ) : (
-        <RowTable view={view} entity={entity} references={references} show={declaration?.show} />
+        <RowTable
+          view={view}
+          entity={entity}
+          references={references}
+          show={declaration?.show}
+          deleteAction={deleteAction}
+          onDelete={(id) => void removeRecord(deleteAction?.name ?? "", id)}
+        />
+      )}
+      {deleteFailure !== null && (
+        <p className="state failure" data-state="delete-failed" role="alert">
+          {deleteFailure}
+        </p>
       )}
       {view !== null && action !== undefined && view.permissions.write && (
         <section className="add" aria-label="追加">
@@ -217,18 +248,27 @@ function columnsOf(view: ApiViewBody, show: readonly string[] | undefined): read
 /**
  * 一覧の表。列は `show` の順（書かなければ項目 → 計算の宣言の順）。行は API が返した順のまま。
  * 横に長くなるのはこの表だけなので、入れ物（`.table-scroll`）の中でだけ横に流す（360 CSS px のため）。
+ *
+ * **消す操作（`kind: delete`）を宣言していれば、行ごとに削除の列を足す**（M1.2）。
+ * 参照されている行（`row.references` が空でない）には**ボタンを出さず、理由を出す**——
+ * ただしこれは見せ方であって守りではなく、実際に断るのは data-api である（`03` §2.2）。
  */
 function RowTable({
   view,
   entity,
   references,
   show,
+  deleteAction,
+  onDelete,
 }: {
   readonly view: ApiViewBody;
   readonly entity: Entity | undefined;
   readonly references: readonly ReferenceData[];
   /** 表に出す名前の順（宣言の `show`）。書いていなければ `undefined` */
   readonly show: readonly string[] | undefined;
+  /** その entity の消す操作（`kind: delete`）。宣言が無ければ `undefined`（列も出さない） */
+  readonly deleteAction: ApiActionRef | undefined;
+  readonly onDelete: (id: string) => void;
 }) {
   const columns = columnsOf(view, show);
   return (
@@ -241,6 +281,11 @@ function RowTable({
                 {column.name}
               </th>
             ))}
+            {deleteAction !== undefined && (
+              <th scope="col" className="actions">
+                操作
+              </th>
+            )}
           </tr>
         </thead>
         <tbody>
@@ -253,12 +298,41 @@ function RowTable({
                     : displayOf(entity, references, column.name, row.fields[column.name])}
                 </td>
               ))}
+              {deleteAction !== undefined && (
+                <td className="actions">
+                  {isDeletable(row) ? (
+                    <button
+                      type="button"
+                      className="delete"
+                      data-delete={row.id}
+                      onClick={() => onDelete(row.id)}
+                    >
+                      削除
+                    </button>
+                  ) : (
+                    // **参照されている行にはボタンを出さない。** 代わりに、消せない理由をその場に出す
+                    <span className="delete-blocked" data-blocked="true">
+                      {blockedReason(row.references ?? [])}
+                    </span>
+                  )}
+                </td>
+              )}
             </tr>
           ))}
         </tbody>
       </table>
     </div>
   );
+}
+
+/** その行を消せるか。**応答に `references` が無い**（宣言が無い）ときは `false` にしない（列も出ない） */
+const isDeletable = (row: ApiRow): boolean =>
+  row.references === undefined || row.references.length === 0;
+
+/** 消せない理由。**参照元の entity と項目、件数**をそのまま見せる（サーバが返した値を読み替えない） */
+function blockedReason(references: NonNullable<ApiRow["references"]>): string {
+  const detail = references.map((reference) => `${reference.entity}.${reference.field} ${reference.count} 件`);
+  return `他の記録から参照されています（${detail.join("、")}）`;
 }
 
 const isList = (value: ApiValue | undefined): value is readonly string[] => Array.isArray(value);
@@ -370,12 +444,44 @@ function labelOf(data: ReferenceData | undefined, id: string): string {
   return typeof label === "string" && label !== "" ? label : id;
 }
 
-/** その entity の追加の操作。view が返したもの（宣言の順）を先に探す */
+/** 操作の種類（M1.2）。**書いていなければ `create`** である（宣言の省略の意味を画面でも同じに読む） */
+const kindOf = (action: ApiActionRef): string => action.kind ?? "create";
+
+/**
+ * その entity の**追加**の操作（`kind: create`、または種類の指定が無いもの）。
+ * view が返したもの（宣言の順）を先に探す。
+ */
 function addActionOf(spec: ApiSpecBody, view: ApiViewBody): ApiActionRef | undefined {
   return (
-    view.actions.find((action) => action.entity === view.entity) ??
-    spec.actions.find((action) => action.entity === view.entity)
+    view.actions.find((action) => action.entity === view.entity && kindOf(action) === "create") ??
+    spec.actions.find((action) => action.entity === view.entity && kindOf(action) === "create")
   );
+}
+
+/** その entity の**消す**操作（`kind: delete`）。宣言が無ければ `undefined`（削除ボタンを出さない） */
+function deleteActionOf(spec: ApiSpecBody, view: ApiViewBody): ApiActionRef | undefined {
+  return (
+    view.actions.find((action) => action.entity === view.entity && kindOf(action) === "delete") ??
+    spec.actions.find((action) => action.entity === view.entity && kindOf(action) === "delete")
+  );
+}
+
+/**
+ * 消せなかった理由（M1.2）。**サーバが返した参照元と件数をそのまま見せる**——
+ * `REFERENCE_IN_USE` に空の並びを読み替えない（`references` が無ければ、コードだけを見せる）。
+ */
+function reasonOfFailure(error: ClientError): string {
+  if (error.code === "REFERENCE_IN_USE") {
+    if (error.references === undefined || error.references.length === 0) {
+      return "他の記録から参照されているため削除できません。";
+    }
+    return `他の記録から参照されているため削除できません（${error.references
+      .map((reference) => `${reference.entity}.${reference.field} ${reference.count} 件`)
+      .join("、")}）。`;
+  }
+  if (error.code === "NOT_FOUND") return "この記録は既にありません。";
+  if (error.code === "PERMISSION_DENIED") return "削除する権限がありません。";
+  return "削除できませんでした。";
 }
 
 /**

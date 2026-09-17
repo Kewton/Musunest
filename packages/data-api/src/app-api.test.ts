@@ -16,14 +16,38 @@ import {
   readScoringScenario,
   resolveScenarioIds,
 } from "@musunest/appspec-schema";
-import type { ApiTransfer, ApiViewBody, NormalizedAppSpec } from "@musunest/appspec-schema";
+import type { ApiRow, ApiTransfer, ApiViewBody, NormalizedAppSpec } from "@musunest/appspec-schema";
 import { sampleScenarioFile, sampleSpecFile } from "@musunest/appspec-schema/files";
 import type { AppRecord } from "@musunest/control-plane";
-import type { RecordData, RecordStamp, StoredRecord } from "@musunest/app-do";
+import type {
+  GuardedCreate,
+  GuardedDelete,
+  GuardedUpdate,
+  RecordData,
+  RecordStamp,
+  ReferenceExpectation,
+  ReferenceGuard,
+  StoredRecord,
+} from "@musunest/app-do";
 import type { Clock } from "@musunest/spec-engine";
 import { fixedClock, normalizeSpec } from "@musunest/spec-engine";
-import type { DataApiDeps, InstanceRegistry, NormalizedSpecStore, RecordStore } from "./app-api.js";
+import type {
+  ApiActionBody,
+  DataApiDeps,
+  InstanceRegistry,
+  NormalizedSpecStore,
+  RecordStore,
+} from "./app-api.js";
 import { createFromAction, getSpec, getView, readNormalizedApp } from "./app-api.js";
+
+/**
+ * 操作の応答から**行**を取り出す（`create`・`update` の応答）。
+ * `delete` の応答は行ではなく `{deleted: true}` なので、そこで呼べば失敗させる。
+ */
+const rowOf = (body: ApiActionBody): ApiRow => {
+  if ("deleted" in body) throw new Error("行ではない応答である（delete の応答）");
+  return body;
+};
 
 interface NodeFs {
   readFileSync(path: URL, encoding: "utf8"): string;
@@ -84,10 +108,51 @@ class FakeSpecStore implements NormalizedSpecStore {
   }
 }
 
+/** 1 つの参照の値が、対象の ID を指しているか（`ref` は一致、参照 list は包含。app-do と同じ規則） */
+function pointsAt(data: RecordData, guard: ReferenceGuard, id: string): boolean {
+  const value = data[guard.field];
+  if (guard.list) return Array.isArray(value) && value.includes(id);
+  return value === id;
+}
+
+/** 書こうとしている行の参照先が実在するか（app-do の records.ts と同じ規則） */
+function missingReferences(
+  rows: readonly StoredRecord[],
+  data: RecordData,
+  expectations: readonly ReferenceExpectation[],
+): string[] {
+  return expectations
+    .filter((expectation) => {
+      const value = data[expectation.field];
+      const ids = expectation.list
+        ? Array.isArray(value)
+          ? value
+          : []
+        : typeof value === "string" && value !== ""
+          ? [value]
+          : [];
+      return (
+        ids.length === 0 ||
+        ids.some(
+          (id) => rows.find((row) => row.entity === expectation.to && row.id === id) === undefined,
+        )
+      );
+    })
+    .map((expectation) => expectation.field);
+}
+
 /** DO の代わり。**保存だけ**を受け持ち、判定は持たない（app-do と同じ分担） */
 class FakeRecordStore implements RecordStore {
   readonly rows: StoredRecord[] = [];
-  async create(entity: string, data: RecordData, stamp: RecordStamp): Promise<StoredRecord> {
+  async create(
+    entity: string,
+    data: RecordData,
+    stamp: RecordStamp,
+    expectations: readonly ReferenceExpectation[],
+  ): Promise<GuardedCreate> {
+    // **確かめることと書くことを 1 つの呼出で行う**（実機の DO と同じ約束）
+    const fields = missingReferences(this.rows, data, expectations);
+    if (fields.length > 0) return { ok: false, reason: "REFERENCE_NOT_FOUND", fields };
     const now = stamp.now ?? "1970-01-01T00:00:00.000Z";
     const record: StoredRecord = {
       entity,
@@ -98,10 +163,53 @@ class FakeRecordStore implements RecordStore {
       order: this.rows.length + 1,
     };
     this.rows.push(record);
-    return record;
+    return { ok: true, record };
   }
   async list(entity: string): Promise<StoredRecord[]> {
     return this.rows.filter((record) => record.entity === entity);
+  }
+  async get(entity: string, id: string): Promise<StoredRecord | null> {
+    return this.rows.find((record) => record.entity === entity && record.id === id) ?? null;
+  }
+  /** ID・作成日時・登録順は保ち、更新日時だけを進める（実機の SQL と同じ） */
+  async update(
+    entity: string,
+    id: string,
+    data: RecordData,
+    stamp: RecordStamp,
+    expectations: readonly ReferenceExpectation[],
+  ): Promise<GuardedUpdate> {
+    const index = this.rows.findIndex((record) => record.entity === entity && record.id === id);
+    const before = this.rows[index];
+    if (before === undefined) return { ok: false, reason: "NOT_FOUND" };
+    const fields = missingReferences(this.rows, data, expectations);
+    if (fields.length > 0) return { ok: false, reason: "REFERENCE_NOT_FOUND", fields };
+    const after: StoredRecord = { ...before, data, updatedAt: stamp.now ?? before.updatedAt };
+    this.rows[index] = after;
+    return { ok: true, record: after };
+  }
+  /**
+   * 参照を確かめてから消す（M1.2）。**確認と削除を 1 つの呼出の中で行う**（実機の DO と同じ約束）。
+   * 判定の中身は app-do の records.ts が正本で、ここは同じ規則を写したもの——実機での原子性は
+   * `@musunest/app-do` の受入試験が本物の workerd で確かめる。
+   */
+  async deleteGuarded(
+    entity: string,
+    id: string,
+    guards: readonly ReferenceGuard[],
+  ): Promise<GuardedDelete> {
+    const index = this.rows.findIndex((record) => record.entity === entity && record.id === id);
+    if (index < 0) return { ok: false, reason: "NOT_FOUND" };
+    const references = guards.flatMap((guard) => {
+      const count = this.rows.filter(
+        (record) => record.entity === guard.entity && pointsAt(record.data, guard, id),
+      ).length;
+      return count > 0 ? [{ ...guard, count }] : [];
+    });
+    if (references.length > 0) return { ok: false, reason: "REFERENCE_IN_USE", references };
+    const [record] = this.rows.splice(index, 1);
+    if (record === undefined) return { ok: false, reason: "NOT_FOUND" };
+    return { ok: true, record };
   }
 }
 
@@ -297,8 +405,8 @@ describe("時計（Q17）", () => {
     const result = await createFromAction(h.deps, INSTANCE, "addExpense", STEPS[0]?.input ?? {});
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.body.createdAt).toBe("2026-09-16T03:00:00.000Z");
-    expect(result.body.updatedAt).toBe("2026-09-16T03:00:00.000Z");
+    expect(rowOf(result.body).createdAt).toBe("2026-09-16T03:00:00.000Z");
+    expect(rowOf(result.body).updatedAt).toBe("2026-09-16T03:00:00.000Z");
     expect(h.records.rows[0]?.createdAt).toBe("2026-09-16T03:00:00.000Z");
   });
 
@@ -306,7 +414,7 @@ describe("時計（Q17）", () => {
     const h = harness(fixedClock("2000-01-02T00:00:00Z"));
     const result = await createFromAction(h.deps, INSTANCE, "addExpense", STEPS[0]?.input ?? {});
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.body.createdAt).toBe("2000-01-02T00:00:00.000Z");
+    if (result.ok) expect(rowOf(result.body).createdAt).toBe("2000-01-02T00:00:00.000Z");
   });
 
   it("ID は入力の値では決まらない（店頭が付ける）", async () => {
@@ -786,7 +894,7 @@ describe("warikan の集計（entity をまたぐ sum・count。M1.2）", () => 
     const run = await runWarikan();
     const added = await createFromAction(run.deps, WARIKAN_INSTANCE, "addMember", { name: "D" });
     expect(added.ok).toBe(true);
-    if (added.ok) expect(added.body.computed).toEqual({ paid: 0, owed: 0, balance: 0 });
+    if (added.ok) expect(rowOf(added.body).computed).toEqual({ paid: 0, owed: 0, balance: 0 });
 
     const byName = await memberComputed(run);
     expect(byName.get("D")).toEqual({ paid: 0, owed: 0, balance: 0 });
@@ -995,5 +1103,294 @@ describe("warikan の精算（settle。M1.2）", () => {
     });
     // 集計（`computed`）と同じ約束である——読めなかった値は `null`。空の並び（送金が要らない）とは区別する
     expect(await settlementOf(run)).toBeNull();
+  });
+});
+
+// ── 直す・消す（M1.2。Issue #109） ──────────────────────────────────────
+//
+// 受入条件の数字をそのまま確かめる。**夕食を 6000→3000 に直し**、続けて**タクシーを消す**。
+// 参照されているメンバーは消せない（409 `REFERENCE_IN_USE`）——**画面ではなく API への直接送信**で
+// 断られることを見る（画面の非表示は守りではない。03 §2.2）。
+
+/** 精算の並びを、見本の期待値と同じ「C→A 1000」の形にする（画面が見せる形である） */
+async function settlementLines(run: WarikanRun): Promise<string[]> {
+  const view = await getView(run.deps, WARIKAN_INSTANCE, "settlement");
+  if (!view.ok) throw new Error("settlement を読めなかった");
+  const transfers = view.body.settlement ?? [];
+  const names = new Map(
+    run.records.rows
+      .filter((row) => row.entity === "member")
+      .map((row) => [row.id, String(row.data["name"])]),
+  );
+  return transfers.map(
+    (transfer) => `${names.get(transfer.from) ?? transfer.from}→${names.get(transfer.to) ?? transfer.to} ${transfer.amount}`,
+  );
+}
+
+describe("夕食を直し、タクシーを消す（M1.2。受入条件の数字）", () => {
+  it("夕食を 6000→3000 に直すと、A=3000/2000/1000・B=3000/2000/1000・C=0/2000/-2000、精算は C→A 1000・C→B 1000", async () => {
+    const run = await runWarikan();
+    const updated = await createFromAction(run.deps, WARIKAN_INSTANCE, "editExpense", {
+      id: run.ids["dinner"] ?? "",
+      description: "夕食",
+      amount: 3000,
+      payer: run.ids["A"] ?? "",
+      participants: [run.ids["A"] ?? "", run.ids["B"] ?? "", run.ids["C"] ?? ""],
+    });
+    expect(updated.ok).toBe(true);
+    if (!updated.ok) return;
+    // 直した行が返る（計算値も、直した値から求める）
+    const row = rowOf(updated.body);
+    expect(row.fields["amount"]).toBe(3000);
+    expect(row.computed["shareAmount"]).toBe(1000);
+    // ID と作成日時は変わらない（店頭が付けた値のままである）
+    expect(row.id).toBe(run.ids["dinner"]);
+    expect(row.createdAt).toBe("2026-09-16T03:00:00.000Z");
+    expect(row.updatedAt).toBe("2026-09-16T03:00:00.000Z");
+
+    const byName = await memberComputed(run);
+    expect(byName.get("A")).toEqual({ paid: 3000, owed: 2000, balance: 1000 });
+    expect(byName.get("B")).toEqual({ paid: 3000, owed: 2000, balance: 1000 });
+    expect(byName.get("C")).toEqual({ paid: 0, owed: 2000, balance: -2000 });
+    expect(await settlementLines(run)).toEqual(["C→A 1000", "C→B 1000"]);
+  });
+
+  it("続けてタクシーを消すと、A=3000/1000/2000・B/C=0/1000/-1000、精算は B→A 1000・C→A 1000", async () => {
+    const run = await runWarikan();
+    await createFromAction(run.deps, WARIKAN_INSTANCE, "editExpense", {
+      id: run.ids["dinner"] ?? "",
+      description: "夕食",
+      amount: 3000,
+      payer: run.ids["A"] ?? "",
+      participants: [run.ids["A"] ?? "", run.ids["B"] ?? "", run.ids["C"] ?? ""],
+    });
+    const deleted = await createFromAction(run.deps, WARIKAN_INSTANCE, "deleteExpense", {
+      id: run.ids["taxi"] ?? "",
+    });
+    expect(deleted.ok).toBe(true);
+    if (deleted.ok) expect(deleted.body).toEqual({ entity: "expense", id: run.ids["taxi"], deleted: true });
+
+    // 消した行は一覧から消え、集計と精算は残った行から読み直される
+    expect(warikanExpenses(run).map((row) => row.data["description"])).toEqual(["夕食"]);
+    const byName = await memberComputed(run);
+    expect(byName.get("A")).toEqual({ paid: 3000, owed: 1000, balance: 2000 });
+    expect(byName.get("B")).toEqual({ paid: 0, owed: 1000, balance: -1000 });
+    expect(byName.get("C")).toEqual({ paid: 0, owed: 1000, balance: -1000 });
+    expect(await settlementLines(run)).toEqual(["B→A 1000", "C→A 1000"]);
+  });
+});
+
+/** 直す入力の土台（夕食を 3000 円に直す形。`patch` で差し替えて、わざと間違えた入力を組む） */
+const dinnerInput = (run: WarikanRun, patch: Readonly<Record<string, unknown>> = {}) => ({
+  id: run.ids["dinner"] ?? "",
+  description: "夕食",
+  amount: 3000,
+  payer: run.ids["A"] ?? "",
+  participants: [run.ids["A"] ?? "", run.ids["B"] ?? "", run.ids["C"] ?? ""],
+  ...patch,
+});
+
+describe("直す（M1.2）", () => {
+  it("不明なレコードは 404、write が無ければ 403（操作そのものが無ければ 404）", async () => {
+    const run = await runWarikan();
+    expect(
+      await createFromAction(run.deps, WARIKAN_INSTANCE, "editExpense", {
+        ...dinnerInput(run),
+        id: "expense-does-not-exist",
+      }),
+    ).toEqual({ ok: false, failure: { error: "NOT_FOUND", fields: [], validations: [] } });
+    expect(await createFromAction(run.deps, WARIKAN_INSTANCE, "deleteExpense", { id: "nope" })).toEqual({
+      ok: false,
+      failure: { error: "NOT_FOUND", fields: [], validations: [] },
+    });
+  });
+
+  it("不正な金額・未知参照・ID や作成日時の書換えは拒否され、元の行と保存日時が変わらない", async () => {
+    const run = await runWarikan();
+    const before = JSON.stringify(run.records.rows);
+
+    // 負の額（検査の式）
+    const negative = await createFromAction(run.deps, WARIKAN_INSTANCE, "editExpense", dinnerInput(run, { amount: 0 }));
+    expect(negative.ok).toBe(false);
+    if (!negative.ok) expect(negative.failure.validations).toEqual(["positiveAmount"]);
+
+    // 小数（精算は整数円だけを扱う。Q18-6）
+    const fraction = await createFromAction(run.deps, WARIKAN_INSTANCE, "editExpense", dinnerInput(run, { amount: 333.5 }));
+    expect(fraction.ok).toBe(false);
+    if (!fraction.ok) expect(fraction.failure.fields).toEqual(["amount"]);
+
+    // 未知参照
+    const unknownRef = await createFromAction(
+      run.deps,
+      WARIKAN_INSTANCE,
+      "editExpense",
+      dinnerInput(run, { payer: "member-does-not-exist" }),
+    );
+    expect(unknownRef.ok).toBe(false);
+    if (!unknownRef.ok) expect(unknownRef.failure.fields).toEqual(["payer"]);
+
+    // 作成日時の書換え（宣言の項目に無い名前である）
+    const createdAt = await createFromAction(
+      run.deps,
+      WARIKAN_INSTANCE,
+      "editExpense",
+      dinnerInput(run, { createdAt: "1999-01-01T00:00:00.000Z" }),
+    );
+    expect(createdAt.ok).toBe(false);
+    if (!createdAt.ok) expect(createdAt.failure.fields).toEqual(["createdAt"]);
+
+    // 項目が欠けていれば、未入力として断る（部分更新ではない）
+    const partial = await createFromAction(run.deps, WARIKAN_INSTANCE, "editExpense", {
+      id: run.ids["dinner"] ?? "",
+      amount: 3000,
+    });
+    expect(partial.ok).toBe(false);
+    if (!partial.ok) expect(partial.failure.fields).toEqual(["description", "payer", "participants"]);
+
+    // **元の行も保存日時も変わらない**
+    expect(JSON.stringify(run.records.rows)).toBe(before);
+    const byName = await memberComputed(run);
+    expect(byName.get("A")).toEqual({ paid: 6000, owed: 3000, balance: 3000 });
+  });
+
+  it("固定時計で成功した更新だけ updatedAt が進む", async () => {
+    const run = await runWarikan();
+    const later = fixedClock("2026-09-17T09:00:00+09:00");
+    const deps: DataApiDeps = { ...run.deps, clock: later };
+    const updated = await createFromAction(deps, WARIKAN_INSTANCE, "editExpense", dinnerInput(run, { amount: 3000 }));
+    expect(updated.ok).toBe(true);
+    if (!updated.ok) return;
+    const row = rowOf(updated.body);
+    expect(row.createdAt).toBe("2026-09-16T03:00:00.000Z");
+    expect(row.updatedAt).toBe("2026-09-17T00:00:00.000Z");
+  });
+});
+
+describe("消す（M1.2）", () => {
+  it("参照の無いメンバーは消せる", async () => {
+    const run = await runWarikan();
+    const added = await createFromAction(run.deps, WARIKAN_INSTANCE, "addMember", { name: "D" });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    const id = rowOf(added.body).id;
+
+    expect(await createFromAction(run.deps, WARIKAN_INSTANCE, "deleteMember", { id })).toEqual({
+      ok: true,
+      status: API_READ_STATUS,
+      body: { entity: "member", id, deleted: true },
+    });
+    expect(run.records.rows.filter((row) => row.entity === "member")).toHaveLength(3);
+  });
+
+  it("payer に使われるメンバーも、participants にだけ使われるメンバーも、直接 API へ送ると 409 REFERENCE_IN_USE", async () => {
+    const run = await runWarikan();
+    // A は payer（夕食）に使われている。C は payer には使われていないが participants にだけ使われている
+    for (const name of ["A", "C"] as const) {
+      const result = await createFromAction(run.deps, WARIKAN_INSTANCE, "deleteMember", {
+        id: run.ids[name] ?? "",
+      });
+      expect(result.ok, name).toBe(false);
+      if (result.ok) continue;
+      expect(result.failure.error, name).toBe("REFERENCE_IN_USE");
+      expect(result.failure.references ?? [], name).not.toHaveLength(0);
+      expect(result.failure.references?.every((reference) => reference.entity === "expense")).toBe(true);
+      expect(result.failure.references?.every((reference) => reference.count >= 1)).toBe(true);
+    }
+    // **元の行も参照元も件数も変わらない**
+    expect(run.records.rows.filter((row) => row.entity === "member")).toHaveLength(3);
+    expect(warikanExpenses(run)).toHaveLength(2);
+    expect(run.records.rows.filter((row) => row.entity === "member").map((row) => row.id)).toEqual([
+      run.ids["A"],
+      run.ids["B"],
+      run.ids["C"],
+    ]);
+  });
+
+  it("参照元をすべて消せば、消せるようになる", async () => {
+    const run = await runWarikan();
+    // 夕食とタクシーの両方が A を参照している（payer・participants）
+    for (const expense of warikanExpenses(run)) {
+      expect(await createFromAction(run.deps, WARIKAN_INSTANCE, "deleteExpense", { id: expense.id })).toMatchObject(
+        { ok: true },
+      );
+    }
+    expect(
+      await createFromAction(run.deps, WARIKAN_INSTANCE, "deleteMember", { id: run.ids["A"] ?? "" }),
+    ).toMatchObject({ ok: true });
+    expect(run.records.rows.filter((row) => row.entity === "member")).toHaveLength(2);
+  });
+
+  it("別インスタンスのレコードは削除を妨げない", async () => {
+    // 同じ宣言を使う別のインスタンスに、同じ名前のメンバーと、そのメンバーを指す支出を作る
+    const other = await runWarikan();
+    const run = await runWarikan();
+    expect(other.ids["A"]).not.toBe(run.ids["A"]);
+
+    // このインスタンスの A は自分の支出からしか参照されない（別インスタンスの支出は見えない）
+    const deleted = await createFromAction(run.deps, WARIKAN_INSTANCE, "deleteExpense", {
+      id: run.ids["taxi"] ?? "",
+    });
+    expect(deleted.ok).toBe(true);
+    const blocked = await createFromAction(run.deps, WARIKAN_INSTANCE, "deleteMember", {
+      id: run.ids["A"] ?? "",
+    });
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) {
+      // 参照元は、このインスタンスに残っている夕食 1 件だけである
+      expect(blocked.failure.references).toEqual([
+        { entity: "expense", field: "payer", count: 1 },
+        { entity: "expense", field: "participants", count: 1 },
+      ]);
+    }
+  });
+
+  it("一覧の行は、消せるかの材料（参照元）を載せる（delete を宣言している entity だけ）", async () => {
+    const run = await runWarikan();
+    const members = await getView(run.deps, WARIKAN_INSTANCE, "memberList");
+    if (!members.ok) throw new Error("memberList を読めなかった");
+    // A は payer と participants の両方から、B は payer（タクシー）と participants から参照されている
+    for (const row of members.body.rows) {
+      expect(row.references, String(row.fields["name"])).not.toHaveLength(0);
+    }
+    // 参照の無いメンバーを足すと、空の並び（＝消せる）になる
+    const added = await createFromAction(run.deps, WARIKAN_INSTANCE, "addMember", { name: "D" });
+    if (!added.ok) throw new Error("追加できなかった");
+    expect(rowOf(added.body).references).toEqual([]);
+
+    // expense も delete を宣言している（まだ誰も参照していないので空である）
+    const expenses = await getView(run.deps, WARIKAN_INSTANCE, "expenseList");
+    if (!expenses.ok) throw new Error("expenseList を読めなかった");
+    for (const row of expenses.body.rows) expect(row.references).toEqual([]);
+  });
+
+  it("参照追加と削除を同時に送っても、孤立した参照を残さない", async () => {
+    const run = await runWarikan();
+    const added = await createFromAction(run.deps, WARIKAN_INSTANCE, "addMember", { name: "D" });
+    if (!added.ok) throw new Error("追加できなかった");
+    const id = rowOf(added.body).id;
+
+    // **同時に**、そのメンバーを指す支出の追加と、メンバーの削除を送る
+    const [expense, deleted] = await Promise.all([
+      createFromAction(run.deps, WARIKAN_INSTANCE, "addExpense", {
+        description: "おやつ",
+        amount: 900,
+        payer: id,
+        participants: [id],
+      }),
+      createFromAction(run.deps, WARIKAN_INSTANCE, "deleteMember", { id }),
+    ]);
+
+    // どちらかが通り、通ったほうと矛盾しない状態だけが残る（**孤立した参照を残さない**）
+    const memberIds = new Set(
+      run.records.rows.filter((row) => row.entity === "member").map((row) => row.id),
+    );
+    for (const row of warikanExpenses(run)) {
+      expect(memberIds.has(String(row.data["payer"])), row.id).toBe(true);
+      for (const participant of row.data["participants"] as readonly string[]) {
+        expect(memberIds.has(participant), row.id).toBe(true);
+      }
+    }
+    if (deleted.ok) expect(expense.ok).toBe(false);
+    else expect(expense.ok).toBe(true);
   });
 });

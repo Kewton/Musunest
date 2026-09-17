@@ -4,7 +4,15 @@
 // アプリの経路（Issue #102）では、判定は src/app-api.ts が持ち、**ここは I/O の実体だけ**を渡す——
 // D1 の登録（control-plane の RegistryExecutor）、R2 の正規化した JSON、DO のレコード。
 import type { AppInstanceDO } from "@musunest/app-do";
-import type { RecordData, RecordStamp, StoredRecord } from "@musunest/app-do";
+import type {
+  GuardedCreate,
+  GuardedUpdate,
+  RecordData,
+  RecordStamp,
+  ReferenceExpectation,
+  ReferenceGuard,
+  StoredRecord,
+} from "@musunest/app-do";
 import type { RegistryExecutor, SqlResult, SqlRow, SqlStatement } from "@musunest/control-plane";
 import { resolveInstanceApp } from "@musunest/control-plane";
 import type { Clock } from "@musunest/spec-engine";
@@ -108,9 +116,24 @@ export function cloudflareSpecStore(env: DataApiEnv): NormalizedSpecStore {
 export function cloudflareRecords(env: DataApiEnv, instanceId: string): RecordStore {
   const stub = env.APP_DO.get(env.APP_DO.idFromName(instanceId));
   return {
-    create: (entity: string, data: RecordData, stamp: RecordStamp): Promise<StoredRecord> =>
-      stub.createRecord(entity, data, stamp),
+    // 追加・更新・削除は、**参照を確かめる版**（M1.2）を呼ぶ。1 回の RPC で確かめて書く（M1.2）
+    create: (
+      entity: string,
+      data: RecordData,
+      stamp: RecordStamp,
+      expectations: readonly ReferenceExpectation[],
+    ): Promise<GuardedCreate> => stub.createRecordGuarded(entity, data, stamp, expectations),
     list: (entity: string): Promise<StoredRecord[]> => stub.listRecords(entity),
+    get: (entity: string, id: string): Promise<StoredRecord | null> => stub.getRecord(entity, id),
+    update: (
+      entity: string,
+      id: string,
+      data: RecordData,
+      stamp: RecordStamp,
+      expectations: readonly ReferenceExpectation[],
+    ): Promise<GuardedUpdate> => stub.updateRecordGuarded(entity, id, data, stamp, expectations),
+    deleteGuarded: (entity: string, id: string, guards: readonly ReferenceGuard[]) =>
+      stub.deleteRecordGuarded(entity, id, guards),
   };
 }
 

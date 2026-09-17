@@ -18,6 +18,7 @@ import {
   vocabularyFile,
 } from "./files.js";
 import {
+  ACTION_KINDS,
   APPSPEC_SCHEMA_VERSION,
   APPSPEC_SCHEMA_VERSION_PATTERN,
   APPSPEC_SECTIONS,
@@ -187,9 +188,14 @@ describe("語彙の台帳（vocabulary.yaml）", () => {
     expect(fromLedger).toEqual(VOCABULARY);
   });
 
-  it("項目の型・関数・本人確認の種類は、すべて台帳にある", () => {
+  it("項目の型・関数・本人確認の種類・操作の種類は、すべて台帳にある", () => {
     const names = Object.keys(VOCABULARY);
-    for (const name of [...FIELD_TYPES, ...Object.keys(BUILTIN_FUNCTIONS), ...IDENTITY_MODES]) {
+    for (const name of [
+      ...FIELD_TYPES,
+      ...Object.keys(BUILTIN_FUNCTIONS),
+      ...IDENTITY_MODES,
+      ...ACTION_KINDS,
+    ]) {
       expect(names).toContain(name);
     }
   });

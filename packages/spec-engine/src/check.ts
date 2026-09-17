@@ -10,6 +10,7 @@
 // 読み取りに使うのは、この file と expression.ts と diagnostics.ts だけである（unit テストが走査して確かめる）。
 
 import {
+  ACTION_KINDS,
   APPSPEC_SECTIONS,
   COMPUTED_TYPES,
   FIELD_TYPES,
@@ -22,6 +23,7 @@ import {
   expressionTypeOf,
   fieldKind,
   fieldTarget,
+  type ActionKind,
   type Aggregate,
   type AggregateWhereOp,
   type AppSpec,
@@ -762,25 +764,55 @@ function readEntities(items: readonly YamlNode[], report: Report): readonly Enti
   return entities;
 }
 
-/** `name` と `entity` を持つ欄（actions）を読む。entity の実在はここでは見ない */
-function readEntityReferences(
-  items: readonly YamlNode[],
-  section: string,
-  report: Report,
-): readonly EntityReferenceDraft[] {
-  const references: EntityReferenceDraft[] = [];
-  for (const member of readMembers(items, section, ["name", "entity"], report)) {
+/** 操作（`actions`。M1.2 で種類 `kind` を足した）。**書ける欄は name・entity・kind の 3 つだけ**である */
+interface ActionDraft extends EntityReferenceDraft {
+  /** 操作の種類（M1.2）。書いていなければ `null`（＝ `create`。M1.1 の宣言の意味を変えない） */
+  readonly kind: ActionKind | null;
+}
+
+/**
+ * 操作の種類（`kind`。M1.2）を読む。**語彙は閉じている**——書けるのは `create`・`update`・`delete`
+ * だけで、ほかの語は `LOGIC_ACTION_KIND_NOT_ALLOWED` である。省略は `null`（＝ `create`）にする。
+ */
+function readActionKind(member: MemberReader, report: Report): ActionKind | null {
+  const entry = entryOf(member.map, "kind");
+  if (entry === undefined) return null;
+  if (entry.value.kind !== "scalar" || entry.value.text === "") {
+    report(
+      "SHAPE_VALUE_INVALID",
+      `action の kind は種類の名前（${ACTION_KINDS.join("・")}）で書く`,
+      positionOf(entry.value),
+    );
+    return null;
+  }
+  const written = entry.value.text;
+  if (!isOneOf(ACTION_KINDS, written)) {
+    report(
+      "LOGIC_ACTION_KIND_NOT_ALLOWED",
+      `action の kind ${written} は書けない（M1.2 の操作の種類は ${ACTION_KINDS.join("・")} である）`,
+      positionOf(entry.value),
+    );
+    return null;
+  }
+  return written as ActionKind;
+}
+
+/** `name` と `entity` と `kind` を持つ欄（actions）を読む。entity の実在はここでは見ない */
+function readActions(items: readonly YamlNode[], report: Report): readonly ActionDraft[] {
+  const actions: ActionDraft[] = [];
+  for (const member of readMembers(items, "actions", ["name", "entity", "kind"], report)) {
     const name = member.text("name");
-    if (name !== null) checkName(name.text, section, positionOf(name.node), report);
+    if (name !== null) checkName(name.text, "actions", positionOf(name.node), report);
     const entity = member.text("entity");
-    references.push({
+    actions.push({
       name: name?.text ?? "",
       nameNode: name?.node ?? null,
       entity: entity?.text ?? "",
       entityNode: entity?.node ?? { kind: "null", line: 0, column: 0 },
+      kind: readActionKind(member, report),
     });
   }
-  return references;
+  return actions;
 }
 
 /** 表（`type: table`）の `show` の 1 つ。実在は、entity と計算を読んだあとで見る（`UI_FIELD_NOT_FOUND`） */
@@ -1682,7 +1714,12 @@ function buildSpec(drafts: Drafts): AppSpec | null {
       ...(draft.type === null ? {} : { type: draft.type }),
       ...(draft.show === null ? {} : { show: draft.show.map((field) => field.name) }),
     })),
-    actions: actions.map((draft) => ({ name: draft.name, entity: draft.entity })),
+    // 種類（`kind`）は書いてあるときだけ入れる（M1.1 の宣言に欄を足さない。省略は create である）
+    actions: actions.map((draft) => ({
+      name: draft.name,
+      entity: draft.entity,
+      ...(draft.kind === null ? {} : { kind: draft.kind }),
+    })),
     validations: validations.map((draft) => ({
       name: draft.name,
       entity: draft.entity,
@@ -1708,7 +1745,7 @@ function buildSpec(drafts: Drafts): AppSpec | null {
 interface Drafts {
   readonly entities: readonly EntityDraft[];
   readonly views: readonly ViewDraft[];
-  readonly actions: readonly EntityReferenceDraft[];
+  readonly actions: readonly ActionDraft[];
   readonly validations: readonly ValidationDraft[];
   readonly computed: readonly ComputedDraft[];
   readonly permissions: readonly PermissionDraft[];
@@ -1762,7 +1799,7 @@ function inspect(source: string, report: Report): Drafts | null {
 
   const entities = readEntities(collectItems(root, "entities", report), report);
   const views = readViews(collectItems(root, "views", report), report);
-  const actions = readEntityReferences(collectItems(root, "actions", report), "actions", report);
+  const actions = readActions(collectItems(root, "actions", report), report);
   const validations = readValidations(collectItems(root, "validations", report), report);
   const computed = readComputed(collectItems(root, "computed", report), report);
   const permissions = readPermissions(collectItems(root, "permissions", report), report);

@@ -24,9 +24,10 @@
 
 import type {
   ApiActionRef,
-  ApiCreatedBody,
+  ApiDeletedBody,
   ApiErrorCode,
   ApiPermissions,
+  ApiReference,
   ApiRow,
   ApiSpecBody,
   ApiTransfer,
@@ -40,10 +41,22 @@ import {
   API_READ_STATUS,
   APPSPEC_SCHEMA_VERSION_PATTERN,
   FIELD_TYPES,
+  actionKind,
+  fieldKind,
+  fieldTarget,
   isComputedSettle,
   isRowComputed,
 } from "@musunest/appspec-schema";
-import type { RecordData, RecordStamp, StoredRecord } from "@musunest/app-do";
+import type {
+  GuardedCreate,
+  GuardedDelete,
+  GuardedUpdate,
+  RecordData,
+  RecordStamp,
+  ReferenceExpectation,
+  ReferenceGuard,
+  StoredRecord,
+} from "@musunest/app-do";
 import type { AppRecord } from "@musunest/control-plane";
 import type { Clock, SettleResult, SourceRecord, SourceRecords } from "@musunest/spec-engine";
 import {
@@ -70,8 +83,41 @@ export interface NormalizedSpecStore {
 
 /** アプリのレコードの置き場（1 インスタンス 1 DO）。判定は持たない */
 export interface RecordStore {
-  create(entity: string, data: RecordData, stamp: RecordStamp): Promise<StoredRecord>;
+  /**
+   * 1 件追加する。**参照先の実在を、書くのと同じ呼出の中で確かめる**（M1.2）——
+   * 「別の呼出で確かめる → 書く」にすると、その間に参照先が消えて孤立した参照が残る。
+   * `expectations` が空なら、参照を見ない素の追加である。
+   */
+  create(
+    entity: string,
+    data: RecordData,
+    stamp: RecordStamp,
+    expectations: readonly ReferenceExpectation[],
+  ): Promise<GuardedCreate>;
   list(entity: string): Promise<StoredRecord[]>;
+  /** entity の 1 行を ID で引く。無ければ `null`（別 entity の ID でも `null`） */
+  get(entity: string, id: string): Promise<StoredRecord | null>;
+  /**
+   * 1 行を書き換える。**ID・作成日時・登録順は保つ**（更新日時だけを進める）。
+   * 無い行は `NOT_FOUND`。参照先の実在は、追加と同じく同じ呼出の中で確かめる（M1.2）。
+   */
+  update(
+    entity: string,
+    id: string,
+    data: RecordData,
+    stamp: RecordStamp,
+    expectations: readonly ReferenceExpectation[],
+  ): Promise<GuardedUpdate>;
+  /**
+   * 参照を確かめてから 1 行を消す（M1.2）。**確認と削除は 1 つの呼出の中で行う**——
+   * 「一覧を読む → 消す」の 2 回の呼出にしない（その間に別の操作が参照を足すと、孤立した参照が残る）。
+   * どの項目が参照なのか（`guards`）は、宣言から data-api が組み立てて渡す。
+   */
+  deleteGuarded(
+    entity: string,
+    id: string,
+    guards: readonly ReferenceGuard[],
+  ): Promise<GuardedDelete>;
 }
 
 export interface DataApiDeps {
@@ -103,12 +149,25 @@ export interface ApiFailure {
    * **文言を 1 つも宣言していない宣言では持たない**（M1.1 の応答を変えない。Issue #106）。
    */
   readonly validationMessages?: readonly (string | null)[];
+  /**
+   * 参照されているレコードを消そうとしたときの参照元（`REFERENCE_IN_USE` のときだけ。M1.2）。
+   * **参照元の entity と項目、件数**を載せる（画面が理由を出せるようにする）。
+   */
+  readonly references?: readonly ApiReference[];
 }
 
 export interface ApiFailureResult {
   readonly ok: false;
   readonly failure: ApiFailure;
 }
+
+/**
+ * 操作（`POST /actions/:name`）の応答。宣言した `kind` で決まる（M1.2）。
+ *   `create` … 201 と、**書いた行**
+ *   `update` … 200 と、**書き換えた行**
+ *   `delete` … 200 と、**消したこと**（消せないときは 409 `REFERENCE_IN_USE`）
+ */
+export type ApiActionBody = ApiRow | ApiDeletedBody;
 
 export type ApiResult<Body> = ApiSuccess<Body> | ApiFailureResult;
 
@@ -119,6 +178,7 @@ const fail = (
   fields: readonly string[] = [],
   validations: readonly string[] = [],
   validationMessages?: readonly (string | null)[],
+  references?: readonly ApiReference[],
 ): ApiFailureResult => ({
   ok: false,
   failure: {
@@ -126,6 +186,7 @@ const fail = (
     fields,
     validations,
     ...(validationMessages === undefined ? {} : { validationMessages }),
+    ...(references === undefined ? {} : { references }),
   },
 });
 
@@ -281,9 +342,16 @@ const permissionsOf = (app: NormalizedAppSpec): ApiPermissions => ({
   write: app.spec.permissions.some((permission) => permission.name === "write"),
 });
 
-/** 宣言した操作（宣言の順）。M1.1 の操作はレコードの内容による条件を持たない */
+/**
+ * 宣言した操作（宣言の順）。`kind`（種類。M1.2）は**書いてあるときだけ載せる**——
+ * 省略は `create` であり、載せると M1.1 の応答が変わってしまう（画面は無ければ create として読む）。
+ */
 const actionsOf = (app: NormalizedAppSpec): readonly ApiActionRef[] =>
-  app.spec.actions.map((action) => ({ name: action.name, entity: action.entity }));
+  app.spec.actions.map((action) => ({
+    name: action.name,
+    entity: action.entity,
+    ...(action.kind === undefined ? {} : { kind: action.kind }),
+  }));
 
 const computedNamesOf = (app: NormalizedAppSpec, entity: string): readonly string[] =>
   app.spec.computed
@@ -302,6 +370,8 @@ function toApiRow(
   record: StoredRecord,
   clock: Clock,
   sources: SourceRecords,
+  /** この行を参照している保存済みの行（M1.2）。`delete` を宣言していない entity では `undefined` */
+  references?: readonly ApiReference[],
 ): ApiRow {
   const { computed } = evaluateRecord({
     app,
@@ -317,7 +387,103 @@ function toApiRow(
     updatedAt: record.updatedAt,
     fields: record.data,
     computed,
+    ...(references === undefined ? {} : { references }),
   };
+}
+
+// ── 参照されている行は消せない（M1.2。Issue #109） ────────────────────
+//
+// 消せるかどうかは**保存済みの行**に依るので、静的チェックには判定できない（03 §5.1）。
+// data-api（唯一の権限強制点）が、宣言から「どの項目が参照か」を組み立てる。消すときは
+// **その並びを DO へ渡し、同じ呼出の中で数えて消してもらう**（確認と削除の間に参照が足されない）。
+// 一覧の行にも「参照している行」を載せ、画面が消せる行にだけボタンを出す（守りはサーバ側）。
+
+/** 対象を指す参照の項目（`ref` か参照 list） */
+interface ReferenceField {
+  readonly entity: string;
+  readonly field: string;
+  readonly list: boolean;
+}
+
+/** 宣言の中で `target` の entity を指す参照の項目を**すべて**集める（entity と項目の宣言の順） */
+function referenceFieldsTo(spec: AppSpec, target: string): readonly ReferenceField[] {
+  const fields: ReferenceField[] = [];
+  for (const entity of spec.entities) {
+    for (const [name, declaration] of Object.entries(entity.fields)) {
+      if (fieldTarget(declaration) !== target) continue;
+      fields.push({ entity: entity.name, field: name, list: fieldKind(declaration) === "list" });
+    }
+  }
+  return fields;
+}
+
+/** 1 つの参照の値が、対象の ID を指しているか（`ref` は一致、参照 list は包含） */
+function refersTo(value: unknown, field: ReferenceField, id: string): boolean {
+  if (field.list) return Array.isArray(value) && value.includes(id);
+  return value === id;
+}
+
+/**
+ * これから書く行が指す参照（`ref`・参照 list）を、**保存の境界（DO）へ渡す形**にする。
+ * 参照先の実在を、書き込むのと同じ呼出の中で見てもらうためである——data-api が別の呼出で
+ * 確かめてから書くと、その間に参照先が消えて孤立した参照が残る（`id`・`createdAt` を境界が
+ * 付け直すのと同じ考え方で、境界が規則をもう一度当てる）。
+ */
+function referenceExpectationsFor(entity: Entity): readonly ReferenceExpectation[] {
+  const expectations: ReferenceExpectation[] = [];
+  for (const [field, declaration] of Object.entries(entity.fields)) {
+    const to = fieldTarget(declaration);
+    if (to === null) continue;
+    expectations.push({ field, to, list: fieldKind(declaration) === "list" });
+  }
+  return expectations;
+}
+
+/** その entity に `delete` の操作を宣言しているか（していなければ、応答に `references` を載せない） */
+const declaresDelete = (spec: AppSpec, entity: string): boolean =>
+  spec.actions.some((action) => action.entity === entity && actionKind(action) === "delete");
+
+/**
+ * 一覧の行ごとに、**その行を参照している保存済みの行**を数える（M1.2）。
+ * `delete` の操作を宣言していない entity では `null`（＝応答に `references` を載せない）。参照の項目が
+ * 1 つも無ければ、レコードを読まずに「どの行も参照されていない」を返す。
+ */
+async function referencesByRow(
+  deps: DataApiDeps,
+  app: NormalizedAppSpec,
+  entity: Entity,
+  rows: readonly StoredRecord[],
+): Promise<ReadonlyMap<string, readonly ApiReference[]> | null> {
+  if (!declaresDelete(app.spec, entity.name)) return null;
+  const ids = rows.map((row) => row.id);
+  const found = new Map<string, ApiReference[]>(ids.map((id) => [id, []]));
+  const rowsByEntity = new Map<string, readonly StoredRecord[]>();
+  for (const field of referenceFieldsTo(app.spec, entity.name)) {
+    let sources = rowsByEntity.get(field.entity);
+    if (sources === undefined) {
+      sources = await deps.records.list(field.entity);
+      rowsByEntity.set(field.entity, sources);
+    }
+    const counts = new Map<string, number>();
+    for (const source of sources) {
+      for (const id of ids) {
+        if (refersTo(source.data[field.field], field, id)) counts.set(id, (counts.get(id) ?? 0) + 1);
+      }
+    }
+    // 宣言の順に積む（件数が 0 の項目は理由にしない）
+    for (const [id, count] of counts) {
+      found.get(id)?.push({ entity: field.entity, field: field.field, count });
+    }
+  }
+  return found;
+}
+
+/** 行の `references`。`null`（宣言が無い）のときは `undefined` にして、欄そのものを載せない */
+function referencesOf(
+  index: ReadonlyMap<string, readonly ApiReference[]> | null,
+  id: string,
+): readonly ApiReference[] | undefined {
+  return index === null ? undefined : (index.get(id) ?? []);
 }
 
 /**
@@ -420,6 +586,8 @@ export async function getView(
 
   const stored = await deps.records.list(entity.name);
   const sources = await loadSources(deps, app, entity.name);
+  // 参照されている行（M1.2）。`delete` を宣言している entity にだけ、消せるかの材料を載せる
+  const referenceIndex = await referencesByRow(deps, app, entity, stored);
   // 精算（M1.2）。宣言していれば、店頭が組んだ送金の並びを返す（読めなければ `null`。空の並びに読み替えない）
   const settlement = settlementOf(app, entity.name, stored, sources);
   return ok(API_READ_STATUS, {
@@ -430,21 +598,33 @@ export async function getView(
     computed: computedNamesOf(app, entity.name),
     permissions,
     actions: actionsOf(app).filter((action) => action.entity === entity.name),
-    rows: stored.map((record) => toApiRow(app, entity.name, record, deps.clock, sources)),
+    rows: stored.map((record) =>
+      toApiRow(
+        app,
+        entity.name,
+        record,
+        deps.clock,
+        sources,
+        referencesOf(referenceIndex, record.id),
+      ),
+    ),
     ...(settlement === undefined ? {} : { settlement }),
   });
 }
 
 /**
  * `POST /api/instances/:instanceId/actions/:actionName`。`write` の宣言が無ければ 403。
- * 入力の検査に通れば 1 件保存し、**作成した行（計算値つき）** を返す。断った入力は保存しない。
+ *
+ * **何をするかは宣言した `kind`（種類）が決める**（M1.2。docs/semantics.md「action」「create」
+ * 「update」「delete」）。入口の名前が `createFromAction` のままなのは、HTTP の経路（操作の実行）が
+ * 1 つだからである（`src/index.ts` がこの 1 つを呼ぶ）。省略した `kind` は `create` として読む。
  */
 export async function createFromAction(
   deps: DataApiDeps,
   instanceId: string,
   actionName: string,
   input: Readonly<Record<string, unknown>>,
-): Promise<ApiResult<ApiCreatedBody>> {
+): Promise<ApiResult<ApiActionBody>> {
   const loaded = await loadSpec(deps, instanceId);
   if (!loaded.ok) return fail(loaded.error);
   const { app } = loaded;
@@ -454,6 +634,23 @@ export async function createFromAction(
   const entity = app.spec.entities.find((candidate) => candidate.name === action.entity);
   if (entity === undefined) return fail("SPEC_UNAVAILABLE");
 
+  switch (actionKind(action)) {
+    case "update":
+      return updateFromAction(deps, app, entity, input);
+    case "delete":
+      return deleteFromAction(deps, app, entity, input);
+    default:
+      return createFromActionInput(deps, app, entity, input);
+  }
+}
+
+/** `kind` の省略と `create`。1 件を追加し、**書いた行（計算値つき）** を返す（201） */
+async function createFromActionInput(
+  deps: DataApiDeps,
+  app: NormalizedAppSpec,
+  entity: Entity,
+  input: Readonly<Record<string, unknown>>,
+): Promise<ApiResult<ApiActionBody>> {
   // 精算の対象の額は**整数円**である（Q18-6）。型の検査より先に、項目の名前を返して断る
   const whole = checkWholeYen(app, entity, input);
   if (!whole.ok) return fail("INPUT_REJECTED", whole.fields);
@@ -473,8 +670,114 @@ export async function createFromAction(
     now: new Date(deps.clock.now()).toISOString(),
     id: crypto.randomUUID(),
   };
-  const record = await deps.records.create(entity.name, decided.data, stamp);
-  // 集計（`aggregate`）は、**このインスタンスの**ほかの entity のレコードを見る（M1.2）
+  // 参照先の実在は、**書くのと同じ呼出**でもう一度見る（確かめたあとに参照先が消えた場合の守り）
+  const created = await deps.records.create(
+    entity.name,
+    decided.data,
+    stamp,
+    referenceExpectationsFor(entity),
+  );
+  if (!created.ok) return fail("INPUT_REJECTED", created.fields);
+  return ok(API_CREATED_STATUS, await rowWithReferences(deps, app, entity, created.record));
+}
+
+/**
+ * `kind: update`。対象のレコード 1 件を、**渡した項目で置き換える**（全項目の置換。部分更新ではない）。
+ * `id` は対象を指すために取り、保存する値には入らない。**`id` と `createdAt` は変えられない**
+ * （入力に混ぜれば、宣言の項目に無い名前として断る）。成功したら **200 と、書き換えた行** を返す。
+ */
+async function updateFromAction(
+  deps: DataApiDeps,
+  app: NormalizedAppSpec,
+  entity: Entity,
+  input: Readonly<Record<string, unknown>>,
+): Promise<ApiResult<ApiActionBody>> {
+  const target = readTargetId(input);
+  if (!target.ok) return fail("INPUT_REJECTED", ["id"]);
+  // 対象のレコードが無ければ 404（`write` の宣言は先に見ている）
+  const current = await deps.records.get(entity.name, target.id);
+  if (current === null) return fail("NOT_FOUND");
+
+  // 置換する**レコード全体**に、型 → 計算 → 検査の式（input.ts）と、参照の検査（#106）を適用する
+  const whole = checkWholeYen(app, entity, target.data);
+  if (!whole.ok) return fail("INPUT_REJECTED", whole.fields);
+  const decided = checkInput({ app, entity, input: target.data, clock: deps.clock });
+  if (!decided.ok) {
+    return fail("INPUT_REJECTED", decided.fields, decided.validations, messagesOf(app, decided.validations));
+  }
+  const referenced = await checkReferences({ entity, data: decided.data, records: deps.records });
+  if (!referenced.ok) return fail("INPUT_REJECTED", referenced.fields);
+
+  // ID と作成日時は境界（DO）が保つ。ここが渡すのは新しい値と、進める日時だけである。
+  // 参照先の実在は、追加と同じく**書くのと同じ呼出**でもう一度見る（同時に参照先が消えた場合の守り）
+  const stamp: RecordStamp = { now: new Date(deps.clock.now()).toISOString() };
+  const updated = await deps.records.update(
+    entity.name,
+    target.id,
+    decided.data,
+    stamp,
+    referenceExpectationsFor(entity),
+  );
+  if (!updated.ok) {
+    // 直前まで在った行が消えている（同時の削除）か、参照先が消えている。**成功に見せない**
+    return updated.reason === "NOT_FOUND"
+      ? fail("NOT_FOUND")
+      : fail("INPUT_REJECTED", updated.fields);
+  }
+  return ok(API_READ_STATUS, await rowWithReferences(deps, app, entity, updated.record));
+}
+
+/**
+ * `kind: delete`。対象のレコード 1 件を消す。**参照されている行は消せない**（M1.2）。
+ * どの項目が参照かは宣言から組み立て、**DO の同じ呼出の中で数えて消す**（孤立した参照を残さない）。
+ * 消せないときは 409 `REFERENCE_IN_USE` と、**参照元の entity と項目、件数**を返す。
+ */
+async function deleteFromAction(
+  deps: DataApiDeps,
+  app: NormalizedAppSpec,
+  entity: Entity,
+  input: Readonly<Record<string, unknown>>,
+): Promise<ApiResult<ApiActionBody>> {
+  const target = readTargetId(input);
+  if (!target.ok) return fail("INPUT_REJECTED", ["id"]);
+  // 消す入力は `id` だけである（項目の値を渡しても、黙って捨てない）
+  const extra = Object.keys(target.data);
+  if (extra.length > 0) return fail("INPUT_REJECTED", extra);
+
+  const guards: readonly ReferenceGuard[] = referenceFieldsTo(app.spec, entity.name);
+  const result: GuardedDelete = await deps.records.deleteGuarded(entity.name, target.id, guards);
+  if (result.ok) {
+    return ok(API_READ_STATUS, { entity: entity.name, id: result.record.id, deleted: true });
+  }
+  if (result.reason === "NOT_FOUND") return fail("NOT_FOUND");
+  // 応答に載せるのは契約の 3 つ（参照元の entity と項目、件数）だけである。
+  // 保存の境界が使う `list`（参照の並びか）は、外へ出す形ではない
+  const references: readonly ApiReference[] = result.references.map((reference) => ({
+    entity: reference.entity,
+    field: reference.field,
+    count: reference.count,
+  }));
+  return fail("REFERENCE_IN_USE", [], [], undefined, references);
+}
+
+/** 直す・消すの入力から、対象のレコードの ID を取る（`ref` と同じく、空でない文字列だけを ID とする） */
+function readTargetId(
+  input: Readonly<Record<string, unknown>>,
+): { readonly ok: true; readonly id: string; readonly data: Readonly<Record<string, unknown>> } | { readonly ok: false } {
+  const id = input["id"];
+  if (typeof id !== "string" || id === "") return { ok: false };
+  const data = Object.fromEntries(Object.entries(input).filter(([name]) => name !== "id"));
+  return { ok: true, id, data };
+}
+
+/** 1 行を、**消せるかの材料（`references`）つき**で返す（`delete` を宣言している entity だけ） */
+async function rowWithReferences(
+  deps: DataApiDeps,
+  app: NormalizedAppSpec,
+  entity: Entity,
+  record: StoredRecord,
+): Promise<ApiRow> {
   const sources = await loadSources(deps, app, entity.name);
-  return ok(API_CREATED_STATUS, toApiRow(app, entity.name, record, deps.clock, sources));
+  const index = await referencesByRow(deps, app, entity, [record]);
+  return toApiRow(app, entity.name, record, deps.clock, sources, referencesOf(index, record.id));
 }

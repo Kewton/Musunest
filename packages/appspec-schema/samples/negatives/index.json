@@ -9,11 +9,11 @@
       "why": "操作 addExpense の entity expence が無い"
     },
     {
-      "name": "action-with-kind",
+      "name": "action-unknown-kind",
       "codes": [
-        "SHAPE_KEY_UNKNOWN"
+        "LOGIC_ACTION_KIND_NOT_ALLOWED"
       ],
-      "why": "操作に kind を書いている（操作の種類は M1.2 の語彙で、M1.1 には無い）"
+      "why": "操作 addExpense の kind patch は、M1.2 の操作の種類（create / update / delete）に無い"
     },
     {
       "name": "aggregate-cycle",

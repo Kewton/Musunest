@@ -1,4 +1,4 @@
-# 負例：操作に kind を書いている（操作の種類は M1.2 の語彙で、M1.1 には無い）。
+# 負例：操作の種類（kind）が、M1.2 の語彙（create / update / delete）に無い。
 # 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
 
 entities:
@@ -15,7 +15,7 @@ views:
 actions:
   - name: addExpense
     entity: expense
-    kind: create
+    kind: patch
 
 validations: []
 
