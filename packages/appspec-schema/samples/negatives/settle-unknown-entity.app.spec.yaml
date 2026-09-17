@@ -1,0 +1,88 @@
+# 負例：精算が指す支出の entity が宣言に無い（`LOGIC_ENTITY_NOT_FOUND`）
+#
+# 見本 warikan の 1 か所だけをわざと間違えたものである。精算（`settle`）の `expense` は
+# 割り勘の支出の entity を指さなければならないが、ここでは綴りを間違えて `expence` と書いている。
+# 宣言の 7 欄と、ほかの計算・検査は見本のままである。
+
+entities:
+  - name: member
+    fields:
+      name: string
+
+  - name: expense
+    fields:
+      description: string
+      amount: number
+      payer:
+        type: ref
+        to: member
+      participants:
+        type: list
+        of: member
+
+views:
+  - name: memberList
+    entity: member
+  - name: expenseList
+    entity: expense
+
+actions:
+  - name: addMember
+    entity: member
+  - name: addExpense
+    entity: expense
+
+validations:
+  - name: positiveAmount
+    entity: expense
+    expression: amount > 0
+    message: 金額は 1 円以上にしてください
+  - name: someoneShares
+    entity: expense
+    expression: len(participants) > 0
+    message: 割る人を 1 人以上選んでください
+
+computed:
+  - name: headcount
+    entity: expense
+    expression: len(participants)
+    type: number
+  - name: shareAmount
+    entity: expense
+    expression: amount / max(1, headcount)
+    type: number
+  - name: paid
+    entity: member
+    aggregate:
+      sum: expense.amount
+      where:
+        payer: this
+    type: number
+  - name: owed
+    entity: member
+    aggregate:
+      sum: expense.shareAmount
+      where:
+        participants:
+          contains: this
+    type: number
+  - name: balance
+    entity: member
+    expression: paid - owed
+    type: number
+  - name: settlement
+    entity: member
+    settle:
+      expense: expence
+      amount: amount
+      payer: payer
+      shares: participants
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

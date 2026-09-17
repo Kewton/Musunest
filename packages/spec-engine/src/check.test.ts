@@ -271,6 +271,20 @@ describe("見本（appspec-schema の samples/）", () => {
     });
   });
 
+  it("warikan の精算は、支出の entity と 3 つの項目を宣言のまま写している（M1.2）", () => {
+    const result = checkSpec(read(sampleSpecFile("warikan")));
+    if (!result.ok) throw new Error("warikan が静的チェックに通らない");
+    expect(result.spec.computed).toContainEqual({
+      name: "settlement",
+      entity: "member",
+      settle: { expense: "expense", amount: "amount", payer: "payer", shares: "participants" },
+    });
+    // 精算の値は数ではなく送金の並びなので、`type` を持たない
+    const settle = result.spec.computed.find((entry) => entry.name === "settlement");
+    expect(settle).toBeDefined();
+    expect(settle !== undefined && "type" in settle).toBe(false);
+  });
+
   it("warikan の検査の文言は、宣言した順のまま残る（M1.2）", () => {
     const result = checkSpec(read(sampleSpecFile("warikan")));
     if (!result.ok) throw new Error("warikan が静的チェックに通らない");
@@ -291,11 +305,11 @@ describe("見本（appspec-schema の samples/）", () => {
   });
 });
 
-// ── 2. 負例 31 件 ──────────────────────────────────────────────
+// ── 2. 負例 33 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 31 件である（0 件なら以降のテストが空振りする）", () => {
-    expect(negativeIndex.negatives).toHaveLength(31);
+  it("負例の一覧は 33 件である（0 件なら以降のテストが空振りする）", () => {
+    expect(negativeIndex.negatives).toHaveLength(33);
   });
 
   it.each(negativeCases)(
@@ -863,6 +877,110 @@ describe("集計（aggregate。M1.2）", () => {
       computed: aggregateBlock("total", ["sum: member.total"]),
     });
     expect(codesOf(failure(checkSpec(self)))).toEqual(["LOGIC_COMPUTED_CYCLE"]);
+  });
+});
+
+// ── 4c. 精算（settle。M1.2） ─────────────────────────────────────
+//
+// 見本 warikan が使う形（支出の entity と、その額・払った人・割る人）を土台に、
+// 新しい誤りコード（数の項目でない額・精算する entity を指さない参照）と、
+// 式・集計との択一（`type` を持たないこと）を固定する。
+
+describe("精算（settle。M1.2）", () => {
+  const MEMBER = "  - name: member\n    fields:\n      name: string";
+  const EXPENSE = [
+    "  - name: expense",
+    "    fields:",
+    "      description: string",
+    "      amount: number",
+    "      payer:",
+    "        type: ref",
+    "        to: member",
+    "      participants:",
+    "        type: list",
+    "        of: member",
+  ].join("\n");
+  const entities = (): string => entitiess(MEMBER, EXPENSE);
+
+  /** 支出の entity と 3 つの項目を指す、正しい精算の中身 */
+  const SETTLE = ["expense: expense", "amount: amount", "payer: payer", "shares: participants"];
+
+  /** member の精算を 1 つ作る。`body` は settle の中身、`extra` は computed の欄を足すのに使う */
+  const settleBlock = (body: readonly string[], extra: readonly string[] = []): string =>
+    [
+      "  - name: settlement",
+      "    entity: member",
+      "    settle:",
+      ...body.map((line) => `      ${line}`),
+      ...extra,
+    ].join("\n");
+
+  const withSettle = (body: readonly string[], extra: readonly string[] = []): string =>
+    declaration({ entities: entities(), validations: "[]", computed: settleBlock(body, extra) });
+
+  it("支出の entity と 3 つの項目を指す精算は通り、宣言に settle の形で残る（type を持たない）", () => {
+    const result = checkSpec(withSettle(SETTLE));
+    expect(result.diagnostics, messagesOf(result, "LOGIC_ENTITY_NOT_FOUND")).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spec.computed).toEqual([
+      {
+        name: "settlement",
+        entity: "member",
+        settle: { expense: "expense", amount: "amount", payer: "payer", shares: "participants" },
+      },
+    ]);
+  });
+
+  it("式と精算の併記は LOGIC_AGGREGATE_FORM_INVALID、精算に type を書けば SHAPE_KEY_UNKNOWN", () => {
+    const both = declaration({
+      entities: entities(),
+      validations: "[]",
+      computed: settleBlock(SETTLE, ["    expression: 1"]),
+    });
+    expect(codesOf(failure(checkSpec(both)))).toEqual(["LOGIC_AGGREGATE_FORM_INVALID"]);
+
+    // 精算の値は数ではなく送金の並びなので、`type` は書かない
+    expect(codesOf(failure(checkSpec(withSettle(SETTLE, ["    type: number"]))))).toEqual([
+      "SHAPE_KEY_UNKNOWN",
+    ]);
+  });
+
+  it("精算の額が、支出の entity の数の項目でなければ LOGIC_SETTLE_AMOUNT_NOT_NUMBER", () => {
+    // 文字列の項目
+    expect(codesOf(failure(checkSpec(withSettle(["expense: expense", "amount: description", "payer: payer", "shares: participants"])))))
+      .toEqual(["LOGIC_SETTLE_AMOUNT_NOT_NUMBER"]);
+    // 参照（ref）の項目
+    expect(codesOf(failure(checkSpec(withSettle(["expense: expense", "amount: payer", "payer: payer", "shares: participants"])))))
+      .toEqual(["LOGIC_SETTLE_AMOUNT_NOT_NUMBER"]);
+    // 支出の entity に無い項目
+    expect(codesOf(failure(checkSpec(withSettle(["expense: expense", "amount: ammount", "payer: payer", "shares: participants"])))))
+      .toEqual(["LOGIC_SETTLE_AMOUNT_NOT_NUMBER"]);
+  });
+
+  it("精算の払った人・割る人が、精算する entity を指す参照でなければ LOGIC_SETTLE_REFERENCE_TYPE_MISMATCH", () => {
+    // 払った人が参照（ref）でない
+    expect(codesOf(failure(checkSpec(withSettle(["expense: expense", "amount: amount", "payer: amount", "shares: participants"])))))
+      .toEqual(["LOGIC_SETTLE_REFERENCE_TYPE_MISMATCH"]);
+    // 割る人が参照の並び（list of）でない
+    expect(codesOf(failure(checkSpec(withSettle(["expense: expense", "amount: amount", "payer: payer", "shares: payer"])))))
+      .toEqual(["LOGIC_SETTLE_REFERENCE_TYPE_MISMATCH"]);
+  });
+
+  it("支出の entity が宣言に無ければ LOGIC_ENTITY_NOT_FOUND、欄が足りなければ SHAPE_KEY_MISSING", () => {
+    expect(codesOf(failure(checkSpec(withSettle(["expense: expence", "amount: amount", "payer: payer", "shares: participants"])))))
+      .toEqual(["LOGIC_ENTITY_NOT_FOUND"]);
+    expect(codesOf(failure(checkSpec(withSettle(["expense: expense", "amount: amount", "payer: payer"])))))
+      .toEqual(["SHAPE_KEY_MISSING"]);
+  });
+
+  it("同じ entity に精算を 2 つ書けば断る（2 つ目を黙って捨てない）", () => {
+    const twice = declaration({
+      entities: entities(),
+      validations: "[]",
+      computed: entitiess(settleBlock(SETTLE), settleBlock(SETTLE).replace("name: settlement", "name: settlement2")),
+    });
+    expect(codesOf(failure(checkSpec(twice)))).toEqual(["LOGIC_COMPUTED_DUPLICATE_NAME"]);
   });
 });
 

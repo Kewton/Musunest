@@ -179,12 +179,56 @@ export interface ComputedAggregate {
   readonly type: ComputedType;
 }
 
-/** 同じ entity の中の計算（式か集計）。計算の値は保存しない。 */
-export type Computed = ComputedExpression | ComputedAggregate;
+/**
+ * 精算の宣言（M1.2）。**メンバーの差し引き額から、送金の組を出す**（Q18-4。`settle`）。
+ * 宣言では「どの支出をどう割ったか」だけを指し、送金の組み方は店頭の関数が決める（`03` §2.3）。
+ *
+ *   expense … 割り勘の支出の entity（`entity` と同じインスタンスのレコード）
+ *   amount  … その支出の額の項目（数。**整数円**である。Q18-6）
+ *   payer   … 払った人（`entity` への参照）
+ *   shares  … 割る人（`entity` への参照の並び）
+ *
+ * **余りの配賦の語彙は足さない**（Q18-5）。基準額（1 人あたりの切り捨てた額）は宣言の `owed` が持ち、
+ * 余りを誰が負担するかは `settle` の内部規約（Q13）が決める（docs/semantics.md「settle」）。
+ */
+export interface SettleDeclaration {
+  readonly expense: string;
+  readonly amount: string;
+  readonly payer: string;
+  readonly shares: string;
+}
 
-/** 式で求める計算か（`aggregate` の側と区別する） */
+/**
+ * 精算で求める計算（M1.2）。`expression`・`aggregate` と**択一**である。
+ * **`type` を持たない**——値は数ではなく、送金（送金元・送金先・正の送金額）の並びである。
+ */
+export interface ComputedSettle {
+  readonly name: string;
+  readonly entity: string;
+  readonly settle: SettleDeclaration;
+}
+
+/** 計算（式・集計・精算のどれか）。計算の値は保存しない。 */
+export type Computed = ComputedExpression | ComputedAggregate | ComputedSettle;
+
+/** 行ごとの値になる計算（式か集計）。精算は行ではなく組の並びを返すので含まない */
+export type RowComputed = ComputedExpression | ComputedAggregate;
+
+/** 式で求める計算か（`aggregate`・`settle` の側と区別する） */
 export const isComputedExpression = (computed: Computed): computed is ComputedExpression =>
   "expression" in computed;
+
+/** 集計で求める計算か（`expression`・`settle` の側と区別する） */
+export const isComputedAggregate = (computed: Computed): computed is ComputedAggregate =>
+  "aggregate" in computed;
+
+/** 精算の計算か（行ごとの値を持たない唯一の計算である） */
+export const isComputedSettle = (computed: Computed): computed is ComputedSettle =>
+  "settle" in computed;
+
+/** 行ごとの値になる計算か（精算だけが `false`） */
+export const isRowComputed = (computed: Computed): computed is RowComputed =>
+  !isComputedSettle(computed);
 
 /** 種類の指定の無い操作。M1.1 では、その entity への 1 件の追加を意味する。 */
 export interface Action {
@@ -291,6 +335,7 @@ export const VOCABULARY = {
   aggregate: "logic",
   sum: "logic",
   count: "logic",
+  settle: "logic",
   min: "logic",
   max: "logic",
   len: "logic",

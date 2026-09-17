@@ -29,8 +29,10 @@ import type {
   ApiPermissions,
   ApiRow,
   ApiSpecBody,
+  ApiTransfer,
   ApiViewBody,
   AppSpec,
+  Entity,
   NormalizedAppSpec,
 } from "@musunest/appspec-schema";
 import {
@@ -38,11 +40,19 @@ import {
   API_READ_STATUS,
   APPSPEC_SCHEMA_VERSION_PATTERN,
   FIELD_TYPES,
+  isComputedSettle,
+  isRowComputed,
 } from "@musunest/appspec-schema";
 import type { RecordData, RecordStamp, StoredRecord } from "@musunest/app-do";
 import type { AppRecord } from "@musunest/control-plane";
-import type { Clock, SourceRecord, SourceRecords } from "@musunest/spec-engine";
-import { aggregateSourceEntities, evaluateRecord } from "@musunest/spec-engine";
+import type { Clock, SettleResult, SourceRecord, SourceRecords } from "@musunest/spec-engine";
+import {
+  aggregateSourceEntities,
+  evaluateRecord,
+  settleEntity,
+  settleSourceEntities,
+  wholeYenFields,
+} from "@musunest/spec-engine";
 import { checkInput, checkReferences } from "./input.js";
 
 // ── 依存（I/O の実体は adapter が渡す） ──────────────────────────────
@@ -177,13 +187,24 @@ function isAggregateShape(value: unknown): boolean {
   return Object.values(where).every((op) => op === "equals" || op === "contains");
 }
 
-/** computed の 1 件は、式（`expression`）か集計（`aggregate`）の**どちらか一方**である（M1.2） */
+/** 精算（`settle`）の宣言の形（M1.2）。支出の entity と、その 3 つの項目の名前を持つ */
+function isSettleShape(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return ["expense", "amount", "payer", "shares"].every((key) => typeof value[key] === "string");
+}
+
+/**
+ * computed の 1 件は、式（`expression`）か集計（`aggregate`）か精算（`settle`）の**どれか 1 つ**である（M1.2）。
+ * 精算だけが `type` を持たない（値は数ではなく送金の並びである）。
+ */
 function isComputedShape(entry: unknown): boolean {
   if (!isRecord(entry)) return false;
   const hasExpression = typeof entry["expression"] === "string";
   const hasAggregate = entry["aggregate"] !== undefined;
-  if (hasExpression === hasAggregate) return false;
-  return hasExpression || isAggregateShape(entry["aggregate"]);
+  const hasSettle = entry["settle"] !== undefined;
+  if ([hasExpression, hasAggregate, hasSettle].filter(Boolean).length !== 1) return false;
+  if (hasExpression) return true;
+  return hasAggregate ? isAggregateShape(entry["aggregate"]) : isSettleShape(entry["settle"]);
 }
 
 /** 宣言の 7 欄が、期待する形で揃っているか（**欄そのものが欠けていたら断る**） */
@@ -205,8 +226,10 @@ function isSpecShape(spec: unknown): spec is AppSpec {
   }
   if (!Array.isArray(computed)) return false;
   for (const entry of computed) {
-    if (!hasStrings(entry, ["name", "entity", "type"])) return false;
-    // 式か集計のどちらか一方である（M1.2）
+    // 精算（`settle`）は数ではなく送金の並びを返すので、`type` を持たない（M1.2）
+    const settles = isRecord(entry) && entry["settle"] !== undefined;
+    if (!hasStrings(entry, settles ? ["name", "entity"] : ["name", "entity", "type"])) return false;
+    // 式・集計・精算のどれか 1 つである（M1.2）
     if (!isComputedShape(entry)) return false;
   }
   if (!Array.isArray(permissions) || !permissions.every((entry) => hasStrings(entry, ["name", "subject"]))) {
@@ -263,7 +286,14 @@ const actionsOf = (app: NormalizedAppSpec): readonly ApiActionRef[] =>
   app.spec.actions.map((action) => ({ name: action.name, entity: action.entity }));
 
 const computedNamesOf = (app: NormalizedAppSpec, entity: string): readonly string[] =>
-  app.spec.computed.filter((entry) => entry.entity === entity).map((entry) => entry.name);
+  app.spec.computed
+    // 精算（`settle`）は行ごとの値ではないので、一覧の列に出さない（M1.2）
+    .filter((entry) => entry.entity === entity && isRowComputed(entry))
+    .map((entry) => entry.name);
+
+/** その entity に精算（`settle`）を宣言しているか。宣言が無ければ、応答に `settlement` を載せない */
+const declaresSettle = (app: NormalizedAppSpec, entity: string): boolean =>
+  app.spec.computed.some((entry) => entry.entity === entity && isComputedSettle(entry));
 
 /** 1 行を API の形にする。**計算の値は保存された値からその都度求める** */
 function toApiRow(
@@ -291,8 +321,9 @@ function toApiRow(
 }
 
 /**
- * 集計（`aggregate`）に要る、ほかの entity のレコードを読む（M1.2）。**同じインスタンスの DO から読む**ので、
- * 別インスタンスのレコードは混ざらない。集計を使わない宣言では 1 つも読まない。
+ * 集計（`aggregate`）と精算（`settle`）に要る、ほかの entity のレコードを読む（M1.2）。
+ * **同じインスタンスの DO から読む**ので、別インスタンスのレコードは混ざらない。
+ * どちらも使わない宣言では 1 つも読まない。
  */
 async function loadSources(
   deps: DataApiDeps,
@@ -300,11 +331,49 @@ async function loadSources(
   entity: string,
 ): Promise<SourceRecords> {
   const sources: Record<string, readonly SourceRecord[]> = {};
-  for (const name of aggregateSourceEntities(app, entity)) {
+  const names = new Set([...aggregateSourceEntities(app, entity), ...settleSourceEntities(app, entity)]);
+  for (const name of names) {
     const rows = await deps.records.list(name);
     sources[name] = rows.map((row) => ({ id: row.id, data: row.data }));
   }
   return sources;
+}
+
+/**
+ * その entity の精算（誰が誰へいくら）を求める。**宣言していなければ `undefined`**（応答に欄を載せない）。
+ * 読めなかった支出の行があれば `null` にする——**空の並び（送金が要らない）に読み替えない**
+ * （`computed` の `null` と同じ約束である）。
+ */
+function settlementOf(
+  app: NormalizedAppSpec,
+  entity: string,
+  stored: readonly StoredRecord[],
+  sources: SourceRecords,
+): readonly ApiTransfer[] | null | undefined {
+  if (!declaresSettle(app, entity)) return undefined;
+  const result: SettleResult = settleEntity({
+    app,
+    entity,
+    records: stored.map((record) => ({ id: record.id, data: record.data })),
+    sources,
+  });
+  return result.ok ? result.transfers : null;
+}
+
+/**
+ * 精算の対象の額は**整数円**である（Q18-6）。小数・数でない値は、入力の検査で断る
+ * （型の検査と同じく、**保存もしないし、検査の式も評価しない**）。
+ */
+function checkWholeYen(
+  app: NormalizedAppSpec,
+  entity: Entity,
+  input: Readonly<Record<string, unknown>>,
+): { readonly ok: true } | { readonly ok: false; readonly fields: readonly string[] } {
+  const fields = wholeYenFields(app, entity.name).filter((name) => {
+    const value = input[name];
+    return value !== undefined && (typeof value !== "number" || !Number.isInteger(value));
+  });
+  return fields.length === 0 ? { ok: true } : { ok: false, fields };
 }
 
 // ── 公開の 3 操作 ───────────────────────────────────────────────
@@ -351,6 +420,8 @@ export async function getView(
 
   const stored = await deps.records.list(entity.name);
   const sources = await loadSources(deps, app, entity.name);
+  // 精算（M1.2）。宣言していれば、店頭が組んだ送金の並びを返す（読めなければ `null`。空の並びに読み替えない）
+  const settlement = settlementOf(app, entity.name, stored, sources);
   return ok(API_READ_STATUS, {
     instanceId,
     view: view.name,
@@ -360,6 +431,7 @@ export async function getView(
     permissions,
     actions: actionsOf(app).filter((action) => action.entity === entity.name),
     rows: stored.map((record) => toApiRow(app, entity.name, record, deps.clock, sources)),
+    ...(settlement === undefined ? {} : { settlement }),
   });
 }
 
@@ -381,6 +453,10 @@ export async function createFromAction(
   if (!permissionsOf(app).write) return fail("PERMISSION_DENIED");
   const entity = app.spec.entities.find((candidate) => candidate.name === action.entity);
   if (entity === undefined) return fail("SPEC_UNAVAILABLE");
+
+  // 精算の対象の額は**整数円**である（Q18-6）。型の検査より先に、項目の名前を返して断る
+  const whole = checkWholeYen(app, entity, input);
+  if (!whole.ok) return fail("INPUT_REJECTED", whole.fields);
 
   const decided = checkInput({ app, entity, input, clock: deps.clock });
   if (!decided.ok) {

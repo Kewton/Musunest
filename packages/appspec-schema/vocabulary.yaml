@@ -131,6 +131,16 @@
   runtime: [spec-engine, data-api]
   factory: 未対応
 
+- name: settle
+  layer: logic
+  since: v0.2-draft（M1.2）
+  samples: [warikan]
+  negatives: [settle-amount-not-number, settle-unknown-entity]
+  check_rules: [LOGIC_SETTLE_AMOUNT_NOT_NUMBER, LOGIC_ENTITY_NOT_FOUND]
+  semantics: docs/semantics.md#settle
+  runtime: [spec-engine, data-api]
+  factory: 未対応
+
 - name: min
   layer: logic
   since: v0.2-draft（M1.1）
