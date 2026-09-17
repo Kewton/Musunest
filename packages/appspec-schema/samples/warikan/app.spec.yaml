@@ -5,8 +5,9 @@
 # **値は member のレコード ID である**（同じ名前のメンバーが 2 人いても ID で区別できる）。
 #
 # デモ：メンバー A・B・C を登録し、夕食 6000 円（A が払う）とタクシー 3000 円（B が払う）を入れると、
-# 一覧に 1 人あたり 2000 円と 1000 円が出る。採点のシナリオは同じディレクトリの scenario.json、
-# 意味は ../../docs/semantics.md（「ref」「list」「message」）にある。
+# 一覧に 1 人あたり 2000 円と 1000 円が出て、メンバーの一覧に払った額（`paid`）・負担する額（`owed`）・
+# 差し引き（`balance`）が出る。採点のシナリオは同じディレクトリの scenario.json、
+# 意味は ../../docs/semantics.md（「ref」「list」「message」「aggregate」「sum」「count」）にある。
 
 entities:
   - name: member
@@ -56,6 +57,30 @@ computed:
   - name: shareAmount
     entity: expense
     expression: amount / max(1, headcount)
+    type: number
+
+  # メンバーごと（entity をまたぐ集計。M1.2）。`this` はこのメンバーのレコードの ID である
+  # 払った合計。`payer` がこのメンバーを指す支出の `amount` を足す
+  - name: paid
+    entity: member
+    aggregate:
+      sum: expense.amount
+      where:
+        payer: this
+    type: number
+  # 負担する合計。`participants` がこのメンバーを含む支出の `shareAmount` を足す
+  - name: owed
+    entity: member
+    aggregate:
+      sum: expense.shareAmount
+      where:
+        participants:
+          contains: this
+    type: number
+  # 差し引き（プラスなら受け取る）。集計を参照する式である
+  - name: balance
+    entity: member
+    expression: paid - owed
     type: number
 
 permissions:

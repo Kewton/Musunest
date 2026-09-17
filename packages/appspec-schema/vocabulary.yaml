@@ -101,6 +101,36 @@
   runtime: [spec-engine, data-api]
   factory: 未対応
 
+- name: aggregate
+  layer: logic
+  since: v0.2-draft（M1.2）
+  samples: [warikan]
+  negatives: [aggregate-unknown-target, aggregate-where-type-mismatch, aggregate-cycle]
+  check_rules: [LOGIC_AGGREGATE_TARGET_NOT_FOUND, LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH, LOGIC_COMPUTED_CYCLE]
+  semantics: docs/semantics.md#aggregate
+  runtime: [spec-engine, data-api]
+  factory: 未対応
+
+- name: sum
+  layer: logic
+  since: v0.2-draft（M1.2）
+  samples: [warikan]
+  negatives: [aggregate-sum-of-string]
+  check_rules: [LOGIC_AGGREGATE_TARGET_NOT_NUMBER]
+  semantics: docs/semantics.md#sum
+  runtime: [spec-engine, data-api]
+  factory: 未対応
+
+- name: count
+  layer: logic
+  since: v0.2-draft（M1.2）
+  samples: [warikan]
+  negatives: [aggregate-unknown-target]
+  check_rules: [LOGIC_AGGREGATE_TARGET_NOT_FOUND]
+  semantics: docs/semantics.md#count
+  runtime: [spec-engine, data-api]
+  factory: 未対応
+
 - name: min
   layer: logic
   since: v0.2-draft（M1.1）

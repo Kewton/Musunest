@@ -71,7 +71,11 @@
     }
   ],
   "views": {
-    "memberList": [{ "name": "A" }, { "name": "B" }, { "name": "C" }],
+    "memberList": [
+      { "name": "A", "paid": 6000, "owed": 3000, "balance": 3000 },
+      { "name": "B", "paid": 3000, "owed": 3000, "balance": 0 },
+      { "name": "C", "paid": 0, "owed": 3000, "balance": -3000 }
+    ],
     "expenseList": [
       { "description": "夕食", "amount": 6000, "payer": "$A", "participants": ["$A", "$B", "$C"], "headcount": 3, "shareAmount": 2000 },
       { "description": "タクシー", "amount": 3000, "payer": "$B", "participants": ["$A", "$B", "$C"], "headcount": 3, "shareAmount": 1000 }

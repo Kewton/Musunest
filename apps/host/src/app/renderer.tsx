@@ -250,9 +250,12 @@ function displayOf(
   return typeof value === "string" ? labelOf(data, value) : "";
 }
 
-/** 計算の値。**返ってきた値をそのまま見せる**（求められなかった計算の `null` は空欄） */
+/**
+ * 計算の値。**返ってきた値をそのまま見せる**（画面は式も集計も評価しない）。
+ * 求められなかった計算の `null` は「—」で見せ、**0 と区別する**（M1.2。docs/semantics.md「aggregate」）。
+ */
 function computedText(value: number | null | undefined): string {
-  return value === null || value === undefined ? "" : String(value);
+  return value === null ? "—" : value === undefined ? "" : String(value);
 }
 
 function failed(error: ClientError): ScreenState {

@@ -201,7 +201,7 @@ describe("一覧の並べ方", () => {
     ]);
   });
 
-  it("API が返した sentinel の計算値をそのまま出し、null は空欄にする", async () => {
+  it("API が返した sentinel の計算値をそのまま出し、null は「—」で見せる", async () => {
     const sentinel = viewWith({
       rows: [
         makeRow(
@@ -214,7 +214,8 @@ describe("一覧の並べ方", () => {
     const { container } = await renderScreen(makeClient({ view: () => Promise.resolve(okResult(sentinel)) }));
 
     await screen.findByText("コーヒー");
-    expect(rowTexts(container)).toEqual([["コーヒー", "400", "500", "C", "C", "", "1", "777777"]]);
+    // 求められなかった計算は「—」である（M1.2。空欄にも 0 にも読み替えない）
+    expect(rowTexts(container)).toEqual([["コーヒー", "400", "500", "C", "C", "—", "1", "777777"]]);
   });
 
   it("利用者の入力を HTML として挿入しない", async () => {
@@ -598,6 +599,47 @@ describe("参照の表示（warikan の形）", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("<b>金額</b>は 1 円以上にしてください");
     expect(container.querySelector("b")).toBeNull();
+  });
+});
+
+// ── 集計の表示（member の一覧。Issue #107） ─────────────────────────
+//
+// API が返す member の計算値（`paid`・`owed`・`balance`。entity をまたぐ集計）を、画面は**そのまま**見せる。
+// 画面は式も集計も評価しない（`03-spec-layers-and-checker.md` §2.3）。求められなかった集計の `null` は「—」である。
+
+const MEMBER_VIEW_WITH_AGGREGATES: ApiViewBody = {
+  ...MEMBER_VIEW,
+  computed: ["paid", "owed", "balance"],
+  rows: [
+    makeRow("m1", { name: "A" }, { paid: 6000, owed: 3000, balance: 3000 }),
+    makeRow("m2", { name: "B" }, { paid: 3000, owed: 3000, balance: 0 }),
+    makeRow("m3", { name: "C" }, { paid: null, owed: 3000, balance: null }),
+  ],
+};
+
+describe("集計の表示（member の一覧。M1.2）", () => {
+  it("API の member 一覧の計算値をそのまま出し、null は「—」で見せる（0 と区別する）", async () => {
+    const getView = (_instanceId: string, name: string) =>
+      Promise.resolve(okResult(name === "memberList" ? MEMBER_VIEW_WITH_AGGREGATES : WARIKAN_EXPENSE_VIEW));
+    const client = makeClient({ spec: () => Promise.resolve(okResult(WARIKAN_SPEC)), view: getView });
+    const { container } = await renderScreen(client);
+
+    await screen.findByText("夕食");
+    fireEvent.click(screen.getByRole("button", { name: "memberList" }));
+    await screen.findByText("paid");
+
+    // 列は項目（宣言の順）→ 計算（宣言の順）。集計の値は API が返したものをそのまま出す
+    expect(Array.from(container.querySelectorAll("thead th")).map((th) => th.textContent)).toEqual([
+      "name",
+      "paid",
+      "owed",
+      "balance",
+    ]);
+    expect(rowTexts(container)).toEqual([
+      ["A", "6000", "3000", "3000"],
+      ["B", "3000", "3000", "0"],
+      ["C", "—", "3000", "—"],
+    ]);
   });
 });
 

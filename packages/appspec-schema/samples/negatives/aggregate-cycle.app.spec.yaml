@@ -1,0 +1,37 @@
+# 負例：計算 totalFromBeta と totalFromAlpha が、集計をまたいで互いを参照している。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: alpha
+    fields:
+      amount: number
+  - name: beta
+    fields:
+      amount: number
+
+views: []
+
+actions: []
+
+validations: []
+
+computed:
+  - name: totalFromBeta
+    entity: alpha
+    aggregate:
+      sum: beta.totalFromAlpha
+    type: number
+  - name: totalFromAlpha
+    entity: beta
+    aggregate:
+      sum: alpha.totalFromBeta
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

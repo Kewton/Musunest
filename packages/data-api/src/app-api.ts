@@ -41,8 +41,8 @@ import {
 } from "@musunest/appspec-schema";
 import type { RecordData, RecordStamp, StoredRecord } from "@musunest/app-do";
 import type { AppRecord } from "@musunest/control-plane";
-import type { Clock } from "@musunest/spec-engine";
-import { evaluateRecord } from "@musunest/spec-engine";
+import type { Clock, SourceRecord, SourceRecords } from "@musunest/spec-engine";
+import { aggregateSourceEntities, evaluateRecord } from "@musunest/spec-engine";
 import { checkInput, checkReferences } from "./input.js";
 
 // ── 依存（I/O の実体は adapter が渡す） ──────────────────────────────
@@ -165,6 +165,27 @@ function isFieldDeclaration(value: unknown): boolean {
   return false;
 }
 
+/** 集計（`aggregate`）の形（M1.2）。`sum` は対象の名前を持ち、`count` は持たない */
+function isAggregateShape(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const kind = value["kind"];
+  if (kind !== "sum" && kind !== "count") return false;
+  if (typeof value["entity"] !== "string") return false;
+  if (kind === "sum" ? typeof value["name"] !== "string" : value["name"] !== null) return false;
+  const where = value["where"];
+  if (!isRecord(where)) return false;
+  return Object.values(where).every((op) => op === "equals" || op === "contains");
+}
+
+/** computed の 1 件は、式（`expression`）か集計（`aggregate`）の**どちらか一方**である（M1.2） */
+function isComputedShape(entry: unknown): boolean {
+  if (!isRecord(entry)) return false;
+  const hasExpression = typeof entry["expression"] === "string";
+  const hasAggregate = entry["aggregate"] !== undefined;
+  if (hasExpression === hasAggregate) return false;
+  return hasExpression || isAggregateShape(entry["aggregate"]);
+}
+
 /** 宣言の 7 欄が、期待する形で揃っているか（**欄そのものが欠けていたら断る**） */
 function isSpecShape(spec: unknown): spec is AppSpec {
   if (!isRecord(spec)) return false;
@@ -184,7 +205,9 @@ function isSpecShape(spec: unknown): spec is AppSpec {
   }
   if (!Array.isArray(computed)) return false;
   for (const entry of computed) {
-    if (!hasStrings(entry, ["name", "entity", "expression", "type"])) return false;
+    if (!hasStrings(entry, ["name", "entity", "type"])) return false;
+    // 式か集計のどちらか一方である（M1.2）
+    if (!isComputedShape(entry)) return false;
   }
   if (!Array.isArray(permissions) || !permissions.every((entry) => hasStrings(entry, ["name", "subject"]))) {
     return false;
@@ -248,8 +271,16 @@ function toApiRow(
   entity: string,
   record: StoredRecord,
   clock: Clock,
+  sources: SourceRecords,
 ): ApiRow {
-  const { computed } = evaluateRecord({ app, entity, record: record.data, clock });
+  const { computed } = evaluateRecord({
+    app,
+    entity,
+    record: record.data,
+    clock,
+    recordId: record.id,
+    sources,
+  });
   return {
     id: record.id,
     createdAt: record.createdAt,
@@ -257,6 +288,23 @@ function toApiRow(
     fields: record.data,
     computed,
   };
+}
+
+/**
+ * 集計（`aggregate`）に要る、ほかの entity のレコードを読む（M1.2）。**同じインスタンスの DO から読む**ので、
+ * 別インスタンスのレコードは混ざらない。集計を使わない宣言では 1 つも読まない。
+ */
+async function loadSources(
+  deps: DataApiDeps,
+  app: NormalizedAppSpec,
+  entity: string,
+): Promise<SourceRecords> {
+  const sources: Record<string, readonly SourceRecord[]> = {};
+  for (const name of aggregateSourceEntities(app, entity)) {
+    const rows = await deps.records.list(name);
+    sources[name] = rows.map((row) => ({ id: row.id, data: row.data }));
+  }
+  return sources;
 }
 
 // ── 公開の 3 操作 ───────────────────────────────────────────────
@@ -302,6 +350,7 @@ export async function getView(
   if (entity === undefined) return fail("SPEC_UNAVAILABLE");
 
   const stored = await deps.records.list(entity.name);
+  const sources = await loadSources(deps, app, entity.name);
   return ok(API_READ_STATUS, {
     instanceId,
     view: view.name,
@@ -310,7 +359,7 @@ export async function getView(
     computed: computedNamesOf(app, entity.name),
     permissions,
     actions: actionsOf(app).filter((action) => action.entity === entity.name),
-    rows: stored.map((record) => toApiRow(app, entity.name, record, deps.clock)),
+    rows: stored.map((record) => toApiRow(app, entity.name, record, deps.clock, sources)),
   });
 }
 
@@ -349,5 +398,7 @@ export async function createFromAction(
     id: crypto.randomUUID(),
   };
   const record = await deps.records.create(entity.name, decided.data, stamp);
-  return ok(API_CREATED_STATUS, toApiRow(app, entity.name, record, deps.clock));
+  // 集計（`aggregate`）は、**このインスタンスの**ほかの entity のレコードを見る（M1.2）
+  const sources = await loadSources(deps, app, entity.name);
+  return ok(API_CREATED_STATUS, toApiRow(app, entity.name, record, deps.clock, sources));
 }
