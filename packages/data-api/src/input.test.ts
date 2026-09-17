@@ -225,3 +225,78 @@ describe("型 → 計算 → 検査の順（checkInput）", () => {
     expect(other).toEqual(base);
   });
 });
+
+// ── 参照（ref）と参照 list（M1.2。Issue #106） ──────────────────────
+//
+// 型の検査が見るのは「空でない文字列（ID）の並びか」までである。**その ID が実在するかは
+// references.ts が見る**（二段構え）。ここでは、空・重複・非文字列を型の検査で断ることを確かめる。
+
+/** 見本 warikan の宣言（参照と参照 list を持つ） */
+function warikanApp(): NormalizedAppSpec {
+  const checked = checkSpec(fs.readFileSync(sampleSpecFile("warikan"), "utf8"));
+  if (!checked.ok) throw new Error("warikan が静的チェックに通らない");
+  return { schemaVersion: APPSPEC_SCHEMA_VERSION, sourceSha256: "b".repeat(64), spec: checked.spec };
+}
+
+const WARIKAN_EXPENSE_ENTITY = warikanApp().spec.entities.find((entry) => entry.name === "expense");
+if (WARIKAN_EXPENSE_ENTITY === undefined) throw new Error("warikan に expense が無い");
+const REF_EXPENSE = WARIKAN_EXPENSE_ENTITY;
+
+const VALID_REF: Readonly<Record<string, unknown>> = {
+  description: "夕食",
+  amount: 6000,
+  payer: "m1",
+  participants: ["m1", "m2"],
+};
+
+const refFieldsOf = (input: Readonly<Record<string, unknown>>): readonly string[] => {
+  const result = checkInputTypes(REF_EXPENSE, input);
+  return result.ok ? [] : result.fields;
+};
+
+describe("参照（ref）と参照 list（checkInputTypes）", () => {
+  it("ID の文字列と、その並びは通る（実在の確認は references.ts が行う）", () => {
+    const result = checkInputTypes(REF_EXPENSE, VALID_REF);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data).toEqual(VALID_REF);
+  });
+
+  it("ref が空文字なら断る（空文字は ID にならない）", () => {
+    expect(refFieldsOf({ ...VALID_REF, payer: "" })).toEqual(["payer"]);
+  });
+
+  it("ref が文字列でなければ断る", () => {
+    expect(refFieldsOf({ ...VALID_REF, payer: 1 })).toEqual(["payer"]);
+    expect(refFieldsOf({ ...VALID_REF, payer: ["m1"] })).toEqual(["payer"]);
+    expect(refFieldsOf({ ...VALID_REF, payer: null })).toEqual(["payer"]);
+  });
+
+  it("参照 list は空の並びを断る（Q18-2 を参照の並びでも保つ）", () => {
+    expect(refFieldsOf({ ...VALID_REF, participants: [] })).toEqual(["participants"]);
+  });
+
+  it("参照 list は同じ ID が 2 回ある並びを断る", () => {
+    expect(refFieldsOf({ ...VALID_REF, participants: ["m1", "m1"] })).toEqual(["participants"]);
+  });
+
+  it("参照 list の要素が文字列でなければ断る", () => {
+    expect(refFieldsOf({ ...VALID_REF, participants: ["m1", 1] })).toEqual(["participants"]);
+    expect(refFieldsOf({ ...VALID_REF, participants: [null] })).toEqual(["participants"]);
+  });
+
+  it("参照 list の順は入力の順のまま保存する", () => {
+    const result = checkInputTypes(REF_EXPENSE, { ...VALID_REF, participants: ["m3", "m1"] });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data["participants"]).toEqual(["m3", "m1"]);
+  });
+
+  it("型で断ったら、参照の検査に進む値を作らない（checkInput は型で止まる）", () => {
+    const decided = checkInput({
+      app: warikanApp(),
+      entity: REF_EXPENSE,
+      input: { ...VALID_REF, participants: [] },
+      clock: CLOCK,
+    });
+    expect(decided).toEqual({ ok: false, fields: ["participants"], validations: [] });
+  });
+});

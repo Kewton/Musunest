@@ -22,7 +22,7 @@
 - name: entity
   layer: data
   since: v0.2-draft（M1.1）
-  samples: [expense-log]
+  samples: [expense-log, warikan]
   negatives: [entity-duplicate-name, entity-invalid-name, entity-without-fields, field-reserved-name, field-unknown-type]
   check_rules: [DATA_ENTITY_DUPLICATE_NAME, SHAPE_NAME_INVALID, SHAPE_KEY_MISSING, DATA_FIELD_NAME_RESERVED, DATA_FIELD_TYPE_UNKNOWN]
   semantics: docs/semantics.md#entity
@@ -32,7 +32,7 @@
 - name: string
   layer: data
   since: v0.2-draft（M1.1）
-  samples: [expense-log]
+  samples: [expense-log, warikan]
   negatives: [string-in-arithmetic]
   check_rules: [LOGIC_OPERAND_TYPE_MISMATCH]
   semantics: docs/semantics.md#string
@@ -42,7 +42,7 @@
 - name: number
   layer: data
   since: v0.2-draft（M1.1）
-  samples: [expense-log]
+  samples: [expense-log, warikan]
   negatives: [number-in-len]
   check_rules: [LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH]
   semantics: docs/semantics.md#number
@@ -52,10 +52,20 @@
 - name: list
   layer: data
   since: v0.2-draft（M1.1）
-  samples: [expense-log]
+  samples: [expense-log, warikan]
   negatives: [list-in-comparison]
   check_rules: [LOGIC_OPERAND_TYPE_MISMATCH]
   semantics: docs/semantics.md#list
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+- name: ref
+  layer: data
+  since: v0.2-draft（M1.2）
+  samples: [warikan]
+  negatives: [ref-unknown-entity, list-ref-unknown-entity]
+  check_rules: [DATA_REF_TARGET_NOT_FOUND]
+  semantics: docs/semantics.md#ref
   runtime: [spec-engine, data-api, host]
   factory: 未対応
 
@@ -64,17 +74,27 @@
 - name: validation
   layer: logic
   since: v0.2-draft（M1.1）
-  samples: [expense-log]
+  samples: [expense-log, warikan]
   negatives: [validation-not-boolean, validation-unknown-field]
   check_rules: [LOGIC_VALIDATION_NOT_BOOLEAN, LOGIC_REFERENCE_NOT_FOUND]
   semantics: docs/semantics.md#validation
   runtime: [spec-engine, data-api]
   factory: 未対応
 
+- name: message
+  layer: logic
+  since: v0.2-draft（M1.2）
+  samples: [warikan]
+  negatives: [validation-message-not-string]
+  check_rules: [SHAPE_VALIDATION_MESSAGE_INVALID]
+  semantics: docs/semantics.md#message
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
 - name: computed
   layer: logic
   since: v0.2-draft（M1.1）
-  samples: [expense-log]
+  samples: [expense-log, warikan]
   negatives: [computed-cycle, computed-name-conflict, computed-other-entity, computed-type-mismatch, computed-unknown-function]
   check_rules: [LOGIC_COMPUTED_CYCLE, LOGIC_COMPUTED_NAME_CONFLICT, LOGIC_REFERENCE_OUT_OF_ENTITY, LOGIC_COMPUTED_TYPE_MISMATCH, LOGIC_FUNCTION_NOT_ALLOWED]
   semantics: docs/semantics.md#computed
@@ -94,7 +114,7 @@
 - name: max
   layer: logic
   since: v0.2-draft（M1.1）
-  samples: [expense-log]
+  samples: [expense-log, warikan]
   negatives: [max-list-argument]
   check_rules: [LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH]
   semantics: docs/semantics.md#max
@@ -104,7 +124,7 @@
 - name: len
   layer: logic
   since: v0.2-draft（M1.1）
-  samples: [expense-log]
+  samples: [expense-log, warikan]
   negatives: [number-in-len]
   check_rules: [LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH]
   semantics: docs/semantics.md#len
@@ -114,7 +134,7 @@
 - name: action
   layer: logic
   since: v0.2-draft（M1.1）
-  samples: [expense-log]
+  samples: [expense-log, warikan]
   negatives: [action-unknown-entity, action-with-kind]
   check_rules: [LOGIC_ENTITY_NOT_FOUND, SHAPE_KEY_UNKNOWN]
   semantics: docs/semantics.md#action
@@ -126,7 +146,7 @@
 - name: view
   layer: ui
   since: v0.2-draft（M1.1）
-  samples: [expense-log]
+  samples: [expense-log, warikan]
   negatives: [view-unknown-entity, view-with-type]
   check_rules: [UI_ENTITY_NOT_FOUND, SHAPE_KEY_UNKNOWN]
   semantics: docs/semantics.md#view
@@ -138,7 +158,7 @@
 - name: permission
   layer: permission
   since: v0.2-draft（M1.1）
-  samples: [expense-log]
+  samples: [expense-log, warikan]
   negatives: [permission-unknown-name, permission-unknown-subject]
   check_rules: [PERMISSION_NAME_NOT_ALLOWED, PERMISSION_SUBJECT_NOT_ALLOWED]
   semantics: docs/semantics.md#permission
@@ -148,7 +168,7 @@
 - name: anonymous
   layer: permission
   since: v0.2-draft（M1.1）
-  samples: [expense-log]
+  samples: [expense-log, warikan]
   negatives: [identity-unknown-mode]
   check_rules: [PERMISSION_IDENTITY_MODE_NOT_ALLOWED]
   semantics: docs/semantics.md#anonymous

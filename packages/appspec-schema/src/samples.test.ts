@@ -1,6 +1,11 @@
 // 採点のシナリオと負例の一覧の読み取り。形が違えば例外になることを見る（黙って読み飛ばすと、採点しなかったことが緑に化ける）。
 import { describe, expect, it } from "vitest";
-import { readNegativeIndex, readScoringScenario } from "./samples.js";
+import {
+  readNegativeIndex,
+  readScoringScenario,
+  resolveScenarioIds,
+  scenarioIds,
+} from "./samples.js";
 
 const step = (overrides: Record<string, unknown> = {}) => ({
   name: "夕食を入れる",
@@ -78,6 +83,66 @@ const negative = (overrides: Record<string, unknown> = {}) => ({
   codes: ["LOGIC_COMPUTED_CYCLE"],
   why: "計算が互いを参照している",
   ...overrides,
+});
+
+// ── 動的に割り当てた ID（`bind` と `$名前`。M1.2） ────────────────────────
+//
+// 登録して得た ID は実行するまで決まらない。シナリオは「覚えた ID に名前を付ける（`bind`）」と
+// 「その名前を指す（`$名前`）」の 2 つだけを書き、**実際の ID への置き換えは採点する側が行う**。
+
+describe("bind と $名前（動的に割り当てた ID）", () => {
+  const bound = (name: string, input: Record<string, unknown> = { name: "A" }) =>
+    step({ action: "addMember", input, expect: { accepted: true, bind: name } });
+
+  it("受理した手順の bind を読み、scenarioIds が宣言の順に返す", () => {
+    const read = readScoringScenario(
+      scenario({
+        sample: "warikan",
+        steps: [bound("A"), bound("B"), step({ input: { payer: "$A" } })],
+      }),
+    );
+    expect(read.steps[0]?.expect).toEqual({ accepted: true, bind: "A" });
+    expect(read.steps[2]?.expect).toEqual({ accepted: true });
+    expect(scenarioIds(read)).toEqual(["A", "B"]);
+  });
+
+  it("bind の名前が 2 回あれば例外にする", () => {
+    expect(() =>
+      readScoringScenario(scenario({ steps: [bound("A"), bound("A")] })),
+    ).toThrow("A が 2 回ある");
+  });
+
+  it("bind されていない $名前 を書けば例外にする（打ち間違いを黙って通さない）", () => {
+    expect(() =>
+      readScoringScenario(scenario({ steps: [bound("A"), step({ input: { payer: "$AA" } })] })),
+    ).toThrow("$AA を指す手順が無い");
+  });
+
+  it("一覧の期待値の中の $名前 も、bind された名前でなければ例外にする", () => {
+    expect(() =>
+      readScoringScenario(
+        scenario({ steps: [bound("A")], views: { expenseList: [{ payer: "$missing" }] } }),
+      ),
+    ).toThrow("$missing を指す手順が無い");
+  });
+
+  it("resolveScenarioIds は、入力と期待値の $名前 を実際の ID に置き換える", () => {
+    const ids = { A: "id-a", B: "id-b" };
+    // `$` で始まらない文字列と、数はそのまま残す（**名前は文字列全体が一致するときだけ**指す）
+    expect(
+      resolveScenarioIds({ payer: "$A", participants: ["$A", "$B"], amount: 6000, memo: "A" }, ids),
+    ).toEqual({ payer: "id-a", participants: ["id-a", "id-b"], amount: 6000, memo: "A" });
+  });
+
+  it("まだ登録していない名前を置き換えようとすれば例外にする（ID をでっち上げない）", () => {
+    expect(() => resolveScenarioIds("$B", { A: "id-a" })).toThrow("$B の ID がまだ登録されていない");
+  });
+
+  it("bind を書かないシナリオ（expense-log）も、そのまま読める", () => {
+    const scenarioWithoutBind = readScoringScenario(scenario());
+    expect(scenarioIds(scenarioWithoutBind)).toEqual([]);
+    expect(scenarioWithoutBind.steps[0]?.expect).toEqual({ accepted: true });
+  });
 });
 
 describe("readNegativeIndex", () => {

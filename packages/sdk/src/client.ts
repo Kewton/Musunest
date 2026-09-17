@@ -30,6 +30,11 @@ export interface ClientError {
   readonly fields: readonly string[];
   /** `INPUT_REJECTED` のとき、通らなかった検査の名前（宣言の順。ほかのコードでは空） */
   readonly validations: readonly string[];
+  /**
+   * 通らなかった検査の文言（`validations` と同じ並び。文言の無い検査は `null`）。
+   * **宣言が文言を持たないときは無い**——画面は `validations` の名前で識別する（M1.1 と同じ）。
+   */
+  readonly validationMessages?: readonly (string | null)[];
 }
 
 export type ClientResult<T> =
@@ -132,7 +137,21 @@ function errorOf(status: number, body: unknown): ClientError {
     if (!isStringArray(body.fields) || !isStringArray(body.validations)) {
       return failure(status, INVALID_RESPONSE);
     }
-    return { status, code, fields: body.fields, validations: body.validations };
+    // 文言は、載っているときだけ契約の形（`validations` と同じ長さの「文字列か null」の並び）を要求する
+    let messages: readonly (string | null)[] | undefined;
+    if (body.validationMessages !== undefined) {
+      if (!isMessageArray(body.validationMessages, body.validations.length)) {
+        return failure(status, INVALID_RESPONSE);
+      }
+      messages = body.validationMessages;
+    }
+    return {
+      status,
+      code,
+      fields: body.fields,
+      validations: body.validations,
+      ...(messages === undefined ? {} : { validationMessages: messages }),
+    };
   }
   return failure(status, INVALID_RESPONSE);
 }
@@ -152,6 +171,12 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isStringArray = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((item) => typeof item === "string");
 
+/** 検査の文言の並び（`validations` と同じ長さで、要素は文字列か null） */
+const isMessageArray = (value: unknown, length: number): value is (string | null)[] =>
+  Array.isArray(value) &&
+  value.length === length &&
+  value.every((item) => item === null || typeof item === "string");
+
 const isApiValue = (value: unknown): boolean =>
   typeof value === "string" ||
   typeof value === "number" ||
@@ -165,20 +190,34 @@ function isActionRef(value: unknown): boolean {
   return isRecord(value) && typeof value.name === "string" && typeof value.entity === "string";
 }
 
+/**
+ * 項目の宣言。**文字列の 1 語（`string`・`number`・`list`）と、参照の写像**
+ * （`{type: ref, to}`・`{type: list, of}`）の両方（M1.2）。
+ */
+function isFieldDeclaration(value: unknown): boolean {
+  if (typeof value === "string") return value === "string" || value === "number" || value === "list";
+  if (!isRecord(value)) return false;
+  if (value.type === "ref") return typeof value.to === "string";
+  if (value.type === "list") return typeof value.of === "string";
+  return false;
+}
+
 function isEntity(value: unknown): boolean {
   if (!isRecord(value) || typeof value.name !== "string" || !isRecord(value.fields)) return false;
-  return Object.values(value.fields).every(
-    (type) => type === "string" || type === "number" || type === "list",
-  );
+  return Object.values(value.fields).every(isFieldDeclaration);
 }
 
 function isExpression(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    typeof value.name === "string" &&
-    typeof value.entity === "string" &&
-    typeof value.expression === "string"
-  );
+  if (
+    !isRecord(value) ||
+    typeof value.name !== "string" ||
+    typeof value.entity !== "string" ||
+    typeof value.expression !== "string"
+  ) {
+    return false;
+  }
+  // 検査の文言（`message`）は任意。載っているときだけ文字列であることを要求する（M1.2）
+  return value.message === undefined || typeof value.message === "string";
 }
 
 function isAppSpec(value: unknown): boolean {

@@ -168,3 +168,184 @@ describe("送信中の二重押下", () => {
     await waitFor(() => expect((screen.getByRole("button") as HTMLButtonElement).disabled).toBe(false));
   });
 });
+
+// ── 参照（ref・参照 list）と検査の文言（M1.2。Issue #106） ────────────────
+//
+// 画面が決めるのは「どの入力欄を出すか」と「ID を送ること」までである。
+// 実在の確認も保存の可否も data-api が行う（画面の判定は守りではない）。
+
+const MEMBER_OPTIONS = [
+  { value: "m1", label: "A" },
+  { value: "m2", label: "B" },
+  { value: "m3", label: "C" },
+] as const;
+
+const REF_FIELDS: readonly FormField[] = [
+  { name: "description", type: "string" },
+  { name: "amount", type: "number" },
+  { name: "payer", type: "ref", to: "member", options: MEMBER_OPTIONS },
+  { name: "participants", type: "list", to: "member", options: MEMBER_OPTIONS },
+];
+
+const renderRefForm = (
+  onSubmit: (values: Readonly<Record<string, ApiValue>>) => Promise<AddFormResult>,
+  fields: readonly FormField[] = REF_FIELDS,
+) => render(createElement(AddForm, { action: "addExpense", fields, onSubmit }));
+
+describe("参照の入力", () => {
+  it("ref は単一選択である（選べるのは候補だけ）", () => {
+    renderRefForm(() => Promise.resolve(accepted));
+    const select = screen.getByLabelText("payer") as HTMLSelectElement;
+
+    expect(select.tagName).toBe("SELECT");
+    expect(Array.from(select.options).map((option) => option.textContent)).toEqual([
+      "（選んでください）",
+      "A",
+      "B",
+      "C",
+    ]);
+  });
+
+  it("参照 list は複数選択である（候補ごとにチェックを出す）", () => {
+    renderRefForm(() => Promise.resolve(accepted));
+    const boxes = MEMBER_OPTIONS.map(
+      (option) => screen.getByRole("checkbox", { name: option.label }) as HTMLInputElement,
+    );
+
+    expect(boxes.map((box) => box.value)).toEqual(["m1", "m2", "m3"]);
+    for (const box of boxes) expect(box.type).toBe("checkbox");
+  });
+
+  it("送るのは ID で、名前ではない（参照 list は候補の順に並べる）", async () => {
+    const onSubmit = submitSpy(() => Promise.resolve(accepted));
+    renderRefForm(onSubmit);
+
+    fill("description", "夕食");
+    fill("amount", "6000");
+    fireEvent.change(screen.getByLabelText("payer"), { target: { value: "m2" } });
+    // C → A の順に押しても、送る並びは候補の順（A・B・C）になる
+    fireEvent.click(screen.getByRole("checkbox", { name: "C" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "A" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0]?.[0]).toEqual({
+      description: "夕食",
+      amount: 6000,
+      payer: "m2",
+      participants: ["m1", "m3"],
+    });
+  });
+
+  it("候補が 0 件でも架空の ID を作らず、先に登録するよう案内する", async () => {
+    const onSubmit = submitSpy(() => Promise.resolve(accepted));
+    renderRefForm(onSubmit, [
+      { name: "payer", type: "ref", to: "member", options: [] },
+      { name: "participants", type: "list", to: "member", options: [] },
+    ]);
+
+    expect(screen.getAllByText("選べる候補がありません。先に登録してください。")).toHaveLength(2);
+    expect(screen.queryByRole("checkbox")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    // 空文字と空の並びを送る（data-api が断る。**もっともらしい ID をでっち上げない**）
+    expect(onSubmit.mock.calls[0]?.[0]).toEqual({ payer: "", participants: [] });
+  });
+});
+
+describe("検査の文言", () => {
+  it("文言があれば文言を、無ければ検査の名前を出す", async () => {
+    const onSubmit = submitSpy(() =>
+      Promise.resolve({
+        ok: false,
+        fields: ["amount"],
+        validations: ["positiveAmount", "someoneShares"],
+        validationMessages: ["金額は 1 円以上にしてください", null],
+      }),
+    );
+    renderForm(onSubmit);
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("金額は 1 円以上にしてください");
+    // 文言の無い検査は、従来どおり検査の名前で識別する
+    expect(alert.textContent).toContain("someoneShares");
+  });
+
+  it("複数の失敗は、宣言の順に出す", async () => {
+    const onSubmit = submitSpy(() =>
+      Promise.resolve({
+        ok: false,
+        fields: [],
+        validations: ["first", "second"],
+        validationMessages: ["1 つ目", "2 つ目"],
+      }),
+    );
+    renderForm(onSubmit);
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("1 つ目");
+    expect(alert.textContent?.indexOf("1 つ目")).toBeLessThan(
+      alert.textContent.indexOf("2 つ目"),
+    );
+  });
+
+  it("文言に HTML が入っていても、テキストとして出す", async () => {
+    const onSubmit = submitSpy(() =>
+      Promise.resolve({
+        ok: false,
+        fields: [],
+        validations: ["positiveAmount"],
+        validationMessages: ["<b>金額</b>は 1 円以上にしてください"],
+      }),
+    );
+    const { container } = renderForm(onSubmit);
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("<b>金額</b>は 1 円以上にしてください");
+    expect(container.querySelector("b")).toBeNull();
+  });
+});
+
+// ── 送信の前に出す文言（入力補助。M1.2） ──────────────────────────────
+//
+// 画面は式を評価しないので、「いつその文言が出るか」は決めない。**宣言した文言そのもの**を
+// 送信の前に見せるだけである（守りは data-api 側にある。03-spec-layers-and-checker.md §2.2）。
+
+describe("送信の前に出す文言", () => {
+  const renderWithGuidance = (guidance: readonly string[]) =>
+    render(
+      createElement(AddForm, {
+        action: "addExpense",
+        fields: FIELDS,
+        guidance,
+        onSubmit: () => Promise.resolve(accepted),
+      }),
+    );
+
+  it("宣言の文言を、送信の前に出す", () => {
+    renderWithGuidance(["金額は 1 円以上にしてください", "割る人を 1 人以上選んでください"]);
+    const guidance = screen.getByRole("list", { name: "保存する条件" });
+
+    expect(guidance.textContent).toContain("金額は 1 円以上にしてください");
+    expect(guidance.textContent).toContain("割る人を 1 人以上選んでください");
+    // まだ送信していない（入力補助である）
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("文言が無ければ出さない（M1.1 のフォームのまま）", () => {
+    renderForm(() => Promise.resolve(accepted));
+    expect(screen.queryByRole("list", { name: "保存する条件" })).toBeNull();
+  });
+
+  it("文言の HTML も、テキストとして出す", () => {
+    const { container } = renderWithGuidance(["<b>金額</b>は 1 円以上にしてください"]);
+    expect(screen.getByRole("list", { name: "保存する条件" }).textContent).toContain(
+      "<b>金額</b>は 1 円以上にしてください",
+    );
+    expect(container.querySelector("b")).toBeNull();
+  });
+});

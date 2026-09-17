@@ -21,9 +21,12 @@ export interface NegativeIndex {
 
 // ── 採点のシナリオ（samples/<name>/scenario.json） ─────────────────────
 
-/** 操作を 1 回行った結果。`rejected` のとき、その入力は保存されない。 */
+/**
+ * 操作を 1 回行った結果。`rejected` のとき、その入力は保存されない。
+ * 受理した手順は `bind` で**書いた行の ID に名前を付ける**（M1.2。後ろの手順と期待値が `$名前` で指す）。
+ */
 export type StepExpectation =
-  | { readonly accepted: true }
+  | { readonly accepted: true; readonly bind?: string }
   | {
       readonly rejected: {
         /** 型の検査で通らなかった項目（順不同）。ここが空でなければ、検査の式は評価しない */
@@ -32,6 +35,12 @@ export type StepExpectation =
         readonly validations: readonly string[];
       };
     };
+
+/**
+ * 手順の入力と期待値の中で、**その時点までに登録したレコードの ID** を指す書き方（`"$A"`）。
+ * 動的に割り当てられる ID を、シナリオの A・B・C と対応づけるための表現である（M1.2）。
+ */
+export const SCENARIO_ID_PREFIX = "$" as const;
 
 export interface ScenarioStep {
   readonly name: string;
@@ -65,11 +74,21 @@ function fail(path: string, message: string): never {
   throw new Error(`${path}: ${message}`);
 }
 
-/** 決まったキーだけを持つことを確かめる。`$comment` は人向けの注記として許す。 */
-function expectKeys(value: unknown, path: string, keys: readonly string[]): Record<string, unknown> {
+/**
+ * 決まったキーだけを持つことを確かめる。`$comment` は人向けの注記として許す。
+ * `optional` に挙げたキーは、あっても無くてもよい（`bind` は受理した手順だけが持つ）。
+ */
+function expectKeys(
+  value: unknown,
+  path: string,
+  keys: readonly string[],
+  optional: readonly string[] = [],
+): Record<string, unknown> {
   if (!isRecord(value)) fail(path, "オブジェクトではない");
   for (const key of Object.keys(value)) {
-    if (key !== "$comment" && !keys.includes(key)) fail(path, `知らないキー ${key}`);
+    if (key !== "$comment" && !keys.includes(key) && !optional.includes(key)) {
+      fail(path, `知らないキー ${key}`);
+    }
   }
   for (const key of keys) {
     if (!Object.hasOwn(value, key)) fail(path, `キー ${key} が無い`);
@@ -120,9 +139,10 @@ export function readNegativeIndex(value: unknown): NegativeIndex {
 
 function readExpectation(value: unknown, path: string): StepExpectation {
   if (isRecord(value) && Object.hasOwn(value, "accepted")) {
-    const record = expectKeys(value, path, ["accepted"]);
+    const record = expectKeys(value, path, ["accepted"], ["bind"]);
     if (record.accepted !== true) fail(`${path}.accepted`, "true ではない");
-    return { accepted: true };
+    if (record.bind === undefined) return { accepted: true };
+    return { accepted: true, bind: expectString(record.bind, `${path}.bind`, NAME_PATTERN) };
   }
   const record = expectKeys(value, path, ["rejected"]);
   const rejected = expectKeys(record.rejected, `${path}.rejected`, ["fields", "validations"]);
@@ -179,5 +199,84 @@ export function readScoringScenario(value: unknown): ScoringScenario {
       return row;
     });
   }
+  checkScenarioIds(steps, views);
   return { sample, clock, steps, views };
+}
+
+// ── 動的に割り当てた ID（`bind` と `$名前`） ────────────────────────────
+
+/** `$A` が指す名前を集める（入力と、一覧の期待値の両方から） */
+function collectScenarioRefs(value: unknown, found: Set<string>): void {
+  if (typeof value === "string") {
+    if (value.startsWith(SCENARIO_ID_PREFIX)) found.add(value.slice(SCENARIO_ID_PREFIX.length));
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectScenarioRefs(item, found);
+    return;
+  }
+  if (isRecord(value)) {
+    for (const item of Object.values(value)) collectScenarioRefs(item, found);
+  }
+}
+
+/**
+ * `bind` の名前が重ならないことと、`$名前` がすべて `bind` された名前を指すことを確かめる。
+ * **打ち間違いを黙って通さない**（存在しない ID を期待値に書いたことに気づけなくなる）。
+ */
+function checkScenarioIds(
+  steps: readonly ScenarioStep[],
+  views: Readonly<Record<string, readonly unknown[]>>,
+): void {
+  const bound = new Set<string>();
+  steps.forEach((step, index) => {
+    if ("accepted" in step.expect && step.expect.bind !== undefined) {
+      if (bound.has(step.expect.bind)) {
+        fail(`scenario.steps[${index}].bind`, `${step.expect.bind} が 2 回ある`);
+      }
+      bound.add(step.expect.bind);
+    }
+  });
+
+  const used = new Set<string>();
+  for (const step of steps) collectScenarioRefs(step.input, used);
+  collectScenarioRefs(views, used);
+  for (const name of used) {
+    if (!bound.has(name)) {
+      fail("scenario", `${SCENARIO_ID_PREFIX}${name} を指す手順が無い（bind された名前ではない）`);
+    }
+  }
+}
+
+/** `bind` した名前を、宣言の順に返す（`$名前` を実際の ID に置き換えるときに使う） */
+export function scenarioIds(scenario: ScoringScenario): readonly string[] {
+  const names: string[] = [];
+  for (const step of scenario.steps) {
+    if ("accepted" in step.expect && step.expect.bind !== undefined) names.push(step.expect.bind);
+  }
+  return names;
+}
+
+/**
+ * 入力と期待値の中の `$名前` を、**実際に登録して得た ID** に置き換える。
+ * 名前が無ければ例外にする（ID をでっち上げない。呼ぶ順は登録した順である）。
+ */
+export function resolveScenarioIds(
+  value: unknown,
+  ids: Readonly<Record<string, string>>,
+): unknown {
+  if (typeof value === "string") {
+    if (!value.startsWith(SCENARIO_ID_PREFIX)) return value;
+    const name = value.slice(SCENARIO_ID_PREFIX.length);
+    const id = ids[name];
+    if (id === undefined) fail("scenario", `${value} の ID がまだ登録されていない`);
+    return id;
+  }
+  if (Array.isArray(value)) return value.map((item) => resolveScenarioIds(item, ids));
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, resolveScenarioIds(item, ids)]),
+    );
+  }
+  return value;
 }

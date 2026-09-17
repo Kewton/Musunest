@@ -1,7 +1,7 @@
 // 静的チェックの unit テスト（Issue #97 の受入条件を、ここで固定する）。
 //
-//   1. 見本 expense-log の診断が空で、7 欄を持つ AppSpec を返す
-//   2. 負例 24 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
+//   1. 見本（expense-log・warikan）の診断が空で、7 欄を持つ AppSpec を返す
+//   2. 負例 27 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
 //   3. 診断は空でない日本語の説明と、該当する YAML の行・列を持つ
 //   4. 不正 YAML・未知キー・未知参照・循環を拒否し、上限はちょうどが通り 1 超過で診断になる
 //   5. 検査は式を実行せず、ストレージにも触れない
@@ -16,7 +16,13 @@ import {
   type AppSpecSection,
   type NegativeSample,
 } from "@musunest/appspec-schema";
-import { negativeIndexFile, negativeSpecFile, sampleSpecFile } from "@musunest/appspec-schema/files";
+import {
+  negativeIndexFile,
+  negativeSpecFile,
+  NEGATIVES_DIR_NAME,
+  sampleSpecFile,
+  samplesDir,
+} from "@musunest/appspec-schema/files";
 import { checkSpec, type CheckResult } from "./check.js";
 import {
   DIAGNOSTIC_CODES,
@@ -30,12 +36,24 @@ import { EXPRESSION_LIMITS } from "./limits.js";
 // tsconfig の types は workers-types と node の両方を読み、**グローバルの URL の型が食い違う**
 // （workers-types の URL を node:fs に渡せない）。このファイルは Node（vitest）で動くので、
 // 使う関数の形だけをここで宣言する（appspec-schema・data-api のテストと同じやり方）。
+interface DirEntry {
+  readonly name: string;
+  isDirectory(): boolean;
+  isFile(): boolean;
+}
 interface NodeFileSystem {
   readFileSync(path: URL, encoding: "utf8"): string;
+  readdirSync(path: URL, options: { withFileTypes: true }): DirEntry[];
 }
 const importUntyped = (specifier: string) => import(/* @vite-ignore */ specifier);
 const fs = (await importUntyped("node:fs")) as NodeFileSystem;
 const read = (url: URL): string => fs.readFileSync(url, "utf8");
+
+/** samples/ の下の見本（負例のディレクトリは数えない） */
+const sampleNames = fs
+  .readdirSync(samplesDir(), { withFileTypes: true })
+  .filter((entry) => entry.isDirectory() && entry.name !== NEGATIVES_DIR_NAME)
+  .map((entry) => entry.name);
 
 const sampleText = read(sampleSpecFile("expense-log"));
 const negativeIndex = readNegativeIndex(JSON.parse(read(negativeIndexFile())));
@@ -199,11 +217,57 @@ describe("見本 expense-log", () => {
   });
 });
 
-// ── 2. 負例 24 件 ──────────────────────────────────────────────
+// ── 1b. 見本（すべて静的チェックに通る） ──────────────────────────
+
+describe("見本（appspec-schema の samples/）", () => {
+  it("見本は 2 つ以上ある（1 つだけなら、以降のテストが 1 つの見本に依存する）", () => {
+    expect(sampleNames.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it.each(sampleNames)("見本 %s は静的チェックに通り、診断が空である", (name) => {
+    const result = checkSpec(read(sampleSpecFile(name)));
+    expect(result.diagnostics, name).toEqual([]);
+    expect(result.ok, name).toBe(true);
+  });
+
+  it("warikan の参照は、参照先の entity 名を宣言から写している（M1.2）", () => {
+    const result = checkSpec(read(sampleSpecFile("warikan")));
+    if (!result.ok) throw new Error("warikan が静的チェックに通らない");
+    const expense = result.spec.entities.find((entity) => entity.name === "expense");
+    expect(expense?.fields["payer"]).toEqual({ type: "ref", to: "member" });
+    expect(expense?.fields["participants"]).toEqual({ type: "list", of: "member" });
+    // 参照の項目は、式の中では ID の文字列として読む（数ではない）
+    expect(result.spec.computed.map((entry) => entry.expression)).toEqual([
+      "len(participants)",
+      "amount / max(1, headcount)",
+    ]);
+  });
+
+  it("warikan の検査の文言は、宣言した順のまま残る（M1.2）", () => {
+    const result = checkSpec(read(sampleSpecFile("warikan")));
+    if (!result.ok) throw new Error("warikan が静的チェックに通らない");
+    expect(result.spec.validations).toEqual([
+      {
+        name: "positiveAmount",
+        entity: "expense",
+        expression: "amount > 0",
+        message: "金額は 1 円以上にしてください",
+      },
+      {
+        name: "someoneShares",
+        entity: "expense",
+        expression: "len(participants) > 0",
+        message: "割る人を 1 人以上選んでください",
+      },
+    ]);
+  });
+});
+
+// ── 2. 負例 27 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 24 件である（0 件なら以降のテストが空振りする）", () => {
-    expect(negativeIndex.negatives).toHaveLength(24);
+  it("負例の一覧は 27 件である（0 件なら以降のテストが空振りする）", () => {
+    expect(negativeIndex.negatives).toHaveLength(27);
   });
 
   it.each(negativeCases)(
@@ -245,6 +309,17 @@ describe("負例（appspec-schema の samples/negatives）", () => {
   ] as const)("%s は %s を返す（受入条件に名指しされた組）", (name, code) => {
     const result = failure(checkSpec(negativeTexts.get(name) ?? ""));
     expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain(code);
+  });
+
+  it.each([
+    ["ref-unknown-entity", "DATA_REF_TARGET_NOT_FOUND", "payer"],
+    ["list-ref-unknown-entity", "DATA_REF_TARGET_NOT_FOUND", "participants"],
+    ["validation-message-not-string", "SHAPE_VALIDATION_MESSAGE_INVALID", "message"],
+  ] as const)("%s は %s を返す（M1.2 の受入条件）", (name, code, where) => {
+    const result = failure(checkSpec(negativeTexts.get(name) ?? ""));
+    // 参照先が無いこと／文言が文字列でないこと**だけ**を返す（ほかの誤りに化けない）
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([code]);
+    expect(messagesOf(result, code)).toContain(where);
   });
 
   it.each([
@@ -451,6 +526,115 @@ describe("データ層・ロジック層・UI・権限の検査", () => {
   });
 });
 
+describe("参照（ref）と検査の文言（message）（M1.2）", () => {
+  const MEMBER = "  - name: member\n    fields:\n      name: string";
+  const expenseWithFields = (...fields: readonly string[]): string =>
+    declaration({
+      entities: entitiess(MEMBER, `  - name: expense\n    fields:\n${fields.join("\n")}`),
+      validations: "[]",
+      computed: "[]",
+    });
+  const expenseOf = (result: CheckResult): Readonly<Record<string, unknown>> | undefined => {
+    if (!result.ok) return undefined;
+    return result.spec.entities.find((entity) => entity.name === "expense")?.fields;
+  };
+
+  it("参照先の entity があれば通り、宣言は参照の写像として残る", () => {
+    const result = checkSpec(
+      expenseWithFields(
+        "      payer:",
+        "        type: ref",
+        "        to: member",
+        "      participants:",
+        "        type: list",
+        "        of: member",
+      ),
+    );
+    expect(result.diagnostics).toEqual([]);
+    expect(expenseOf(result)).toEqual({
+      payer: { type: "ref", to: "member" },
+      participants: { type: "list", of: "member" },
+    });
+  });
+
+  it("ref の参照先の entity が無ければ DATA_REF_TARGET_NOT_FOUND", () => {
+    const result = failure(
+      checkSpec(expenseWithFields("      payer:", "        type: ref", "        to: menber", "      participants: list")),
+    );
+    expect(codesOf(result)).toEqual(["DATA_REF_TARGET_NOT_FOUND"]);
+    expect(messagesOf(result, "DATA_REF_TARGET_NOT_FOUND")).toContain("menber");
+  });
+
+  it("参照の並び（list of）の参照先が無ければ DATA_REF_TARGET_NOT_FOUND", () => {
+    const result = failure(
+      checkSpec(
+        expenseWithFields(
+          "      payer: string",
+          "      participants:",
+          "        type: list",
+          "        of: menber",
+        ),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["DATA_REF_TARGET_NOT_FOUND"]);
+    expect(messagesOf(result, "DATA_REF_TARGET_NOT_FOUND")).toContain("participants");
+  });
+
+  it("ref に to が無ければ、欠けていることを断る", () => {
+    const result = failure(checkSpec(expenseWithFields("      payer:", "        type: ref", "      participants: list")));
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_MISSING"]);
+    expect(messagesOf(result, "SHAPE_KEY_MISSING")).toContain("to");
+  });
+
+  it("ref に of を書けば断る（参照先の欄は to だけ）", () => {
+    const result = failure(
+      checkSpec(expenseWithFields("      payer:", "        type: ref", "        of: member", "      participants: list")),
+    );
+    expect(codesOf(result)).toContain("SHAPE_KEY_UNKNOWN");
+  });
+
+  it("of の無い list の写像は、文字列の並びとして読む（既存の list と同じ）", () => {
+    const result = checkSpec(expenseWithFields("      payer: string", "      participants:", "        type: list"));
+    expect(result.ok).toBe(true);
+    expect(expenseOf(result)?.["participants"]).toBe("list");
+  });
+
+  it("検査の文言は、文字列なら通り、宣言にそのまま残る", () => {
+    const result = checkSpec(
+      declaration({
+        validations:
+          "  - name: positiveAmount\n    entity: expense\n    expression: amount > 0\n    message: 金額は 1 円以上にしてください",
+      }),
+    );
+    expect(result.diagnostics).toEqual([]);
+    if (result.ok) expect(result.spec.validations[0]?.message).toBe("金額は 1 円以上にしてください");
+  });
+
+  it("文言が空なら SHAPE_VALIDATION_MESSAGE_INVALID", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          validations: "  - name: positiveAmount\n    entity: expense\n    expression: amount > 0\n    message:",
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_VALIDATION_MESSAGE_INVALID"]);
+  });
+
+  it("文言の HTML も、文字列としてそのまま残る（画面がテキストとして出す）", () => {
+    const result = checkSpec(
+      declaration({
+        validations:
+          "  - name: positiveAmount\n    entity: expense\n    expression: amount > 0\n    message: <b>金額</b>は 1 円以上にしてください",
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.spec.validations[0]?.message).toBe("<b>金額</b>は 1 円以上にしてください");
+    }
+  });
+});
+
 describe("計算の循環", () => {
   it("自分自身を参照する計算を断る", () => {
     const result = failure(checkSpec(declaration({ computed: computed("first", "first + 1") })));
@@ -590,7 +774,7 @@ describe("式の上限", () => {
 // ── 7. 式を実行しない・ストレージに触れない ──────────────────────
 
 describe("検査は式を実行しない・ストレージに触れない", () => {
-  it("eval / Function / fetch を禁じた状態でも、見本と負例 24 件を検査できる", () => {
+  it("eval / Function / fetch を禁じた状態でも、見本と負例を検査できる", () => {
     // 実行していれば、ここで仕込んだ入り口を必ず踏む（踏まないことを実測する）。
     // `eval` は識別子そのものが lint（eslint/no-eval）で禁じられているので、名前を文字列で扱う
     const globalScope = globalThis as unknown as Record<string, unknown>;

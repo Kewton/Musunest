@@ -258,6 +258,13 @@ describe("一覧の並べ方", () => {
     expect(screen.queryByLabelText("amount")).toBeNull();
     expect(container.querySelectorAll("tbody tr")).toHaveLength(2);
   });
+
+  it("検査が文言を宣言していなければ、送信の前の文言は出さない（M1.1 のフォームのまま）", async () => {
+    await renderScreen(makeClient({}));
+
+    await screen.findByText("夕食");
+    expect(screen.queryByRole("list", { name: "保存する条件" })).toBeNull();
+  });
 });
 
 describe("追加フォーム", () => {
@@ -378,6 +385,219 @@ describe("幅 360 CSS px の表示（機械で見られる範囲）", () => {
     expect(css).toMatch(/\.table-scroll\s*\{[^}]*overflow-x:\s*auto/);
     expect(css).toMatch(/\.instant-renderer\s*\{[^}]*max-width:\s*100%/);
     expect(css).toMatch(/\.field \.field-input\s*\{[^}]*width:\s*100%/);
+  });
+});
+
+// ── 参照（ref・参照 list）と検査の文言（M1.2。Issue #106） ────────────────
+//
+// 見本 warikan の形（member と expense、payer は ref、participants は list of）を宣言と応答として与える。
+// 画面が決めるのは「候補をどこから取るか」と「送るのは ID、見せるのは名前」までである。
+
+const WARIKAN_SPEC: ApiSpecBody = {
+  instanceId: "inst-1",
+  schemaVersion: "community.app-spec/v0.2-draft",
+  sourceSha256: "b".repeat(64),
+  spec: {
+    entities: [
+      { name: "member", fields: { name: "string" } },
+      {
+        name: "expense",
+        fields: {
+          description: "string",
+          amount: "number",
+          payer: { type: "ref", to: "member" },
+          participants: { type: "list", of: "member" },
+        },
+      },
+    ],
+    views: [
+      { name: "expenseList", entity: "expense" },
+      { name: "memberList", entity: "member" },
+    ],
+    actions: [
+      { name: "addMember", entity: "member" },
+      { name: "addExpense", entity: "expense" },
+    ],
+    validations: [
+      {
+        name: "positiveAmount",
+        entity: "expense",
+        expression: "amount > 0",
+        message: "金額は 1 円以上にしてください",
+      },
+      {
+        name: "someoneShares",
+        entity: "expense",
+        expression: "len(participants) > 0",
+        message: "割る人を 1 人以上選んでください",
+      },
+    ],
+    computed: [{ name: "headcount", entity: "expense", expression: "len(participants)", type: "number" }],
+    permissions: [
+      { name: "read", subject: "minIdentity" },
+      { name: "write", subject: "minIdentity" },
+    ],
+    minIdentity: { mode: "anonymous" },
+  },
+  permissions: { read: true, write: true },
+  actions: [
+    { name: "addMember", entity: "member" },
+    { name: "addExpense", entity: "expense" },
+  ],
+};
+
+const MEMBER_A = makeRow("m1", { name: "A" }, {});
+const MEMBER_B = makeRow("m2", { name: "B" }, {});
+const MEMBER_C = makeRow("m3", { name: "C" }, {});
+
+const MEMBER_VIEW: ApiViewBody = {
+  instanceId: "inst-1",
+  view: "memberList",
+  entity: "member",
+  fields: ["name"],
+  computed: [],
+  permissions: { read: true, write: true },
+  actions: [{ name: "addMember", entity: "member" }],
+  rows: [MEMBER_A, MEMBER_B, MEMBER_C],
+};
+
+const WARIKAN_EXPENSE_VIEW: ApiViewBody = {
+  instanceId: "inst-1",
+  view: "expenseList",
+  entity: "expense",
+  fields: ["description", "amount", "payer", "participants"],
+  computed: ["headcount"],
+  permissions: { read: true, write: true },
+  actions: [{ name: "addExpense", entity: "expense" }],
+  rows: [
+    makeRow(
+      "e1",
+      { description: "夕食", amount: 6000, payer: "m1", participants: ["m1", "m2", "m3"] },
+      { headcount: 3 },
+    ),
+  ],
+};
+
+/** warikan の応答を返す client（一覧は名前で切り替える） */
+function makeWarikanClient(parts: {
+  readonly members?: ApiViewBody;
+  readonly add?: MusunestClient["addRecord"];
+} = {}): MusunestClient {
+  const members = parts.members ?? MEMBER_VIEW;
+  const getView = (instanceId: string, name: string): Promise<ClientResult<ApiViewBody>> =>
+    Promise.resolve(okResult(name === "memberList" ? members : WARIKAN_EXPENSE_VIEW));
+  return makeClient({
+    spec: () => Promise.resolve(okResult(WARIKAN_SPEC)),
+    view: getView,
+    ...(parts.add === undefined ? {} : { add: parts.add }),
+  });
+}
+
+describe("参照の表示（warikan の形）", () => {
+  it("一覧は、ID ではなく名前で見せる", async () => {
+    const { container } = await renderScreen(makeWarikanClient());
+
+    await screen.findByText("夕食");
+    // payer は A、participants は A・B・C（ID は画面に出さない）
+    expect(rowTexts(container)).toEqual([["夕食", "6000", "A", "A, B, C", "3"]]);
+    expect(container.textContent).not.toContain("m1");
+  });
+
+  it("候補は参照先の一覧から取る（参照の項目が無ければ読まない）", async () => {
+    const getView = vi.fn((_instanceId: string, name: string) =>
+      Promise.resolve(okResult(name === "memberList" ? MEMBER_VIEW : WARIKAN_EXPENSE_VIEW)),
+    );
+    const client = makeClient({
+      spec: () => Promise.resolve(okResult(WARIKAN_SPEC)),
+      view: getView,
+    });
+    await renderScreen(client);
+
+    await screen.findByText("夕食");
+    expect(getView.mock.calls.map((call) => call[1])).toEqual(["expenseList", "memberList"]);
+  });
+
+  it("フォームは ref を単一選択、参照 list を複数選択にする", async () => {
+    await renderScreen(makeWarikanClient());
+
+    await screen.findByText("夕食");
+    const payer = screen.getByLabelText("payer") as HTMLSelectElement;
+    expect(payer.tagName).toBe("SELECT");
+    expect(Array.from(payer.options).map((option) => option.textContent)).toEqual([
+      "（選んでください）",
+      "A",
+      "B",
+      "C",
+    ]);
+    for (const name of ["A", "B", "C"]) {
+      expect(screen.getByRole("checkbox", { name })).toBeDefined();
+    }
+  });
+
+  it("送るのは ID である（名前ではない）", async () => {
+    const addRecord = vi.fn(() => Promise.resolve(okResult(WARIKAN_EXPENSE_VIEW.rows[0] as ApiRow)));
+    await renderScreen(makeWarikanClient({ add: addRecord }));
+
+    await screen.findByText("夕食");
+    fill("description", "タクシー");
+    fill("amount", "3000");
+    fireEvent.change(screen.getByLabelText("payer"), { target: { value: "m2" } });
+    for (const name of ["A", "B", "C"]) fireEvent.click(screen.getByRole("checkbox", { name }));
+    submit();
+
+    await waitFor(() => expect(addRecord).toHaveBeenCalledTimes(1));
+    expect(addRecord).toHaveBeenCalledWith("inst-1", "addExpense", {
+      description: "タクシー",
+      amount: 3000,
+      payer: "m2",
+      participants: ["m1", "m2", "m3"],
+    });
+  });
+
+  it("候補が 0 件なら、架空の ID を作らず、先に登録するよう案内する", async () => {
+    const { container } = await renderScreen(makeWarikanClient({ members: { ...MEMBER_VIEW, rows: [] } }));
+
+    await screen.findByText("夕食");
+    expect(screen.getAllByText("選べる候補がありません。先に登録してください。")).toHaveLength(2);
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    // 名前を引けないので、分かる範囲（ID）をそのまま出す（**分からないものを消さない**）
+    expect(rowTexts(container)).toEqual([["夕食", "6000", "m1", "m1, m2, m3", "3"]]);
+  });
+
+  it("送信の前に、宣言した文言を出す（入力補助であって、守りではない）", async () => {
+    const { container } = await renderScreen(makeWarikanClient());
+
+    await screen.findByText("夕食");
+    const guidance = screen.getByRole("list", { name: "保存する条件" });
+    expect(guidance.textContent).toContain("金額は 1 円以上にしてください");
+    expect(guidance.textContent).toContain("割る人を 1 人以上選んでください");
+    // まだ送信していない（入力補助である）
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(container.querySelectorAll("b")).toHaveLength(0);
+  });
+
+  it("検査の文言を、テキストとして出す（HTML として解釈しない）", async () => {
+    const addRecord = vi.fn(() =>
+      Promise.resolve({
+        ok: false as const,
+        error: {
+          status: 422,
+          code: "INPUT_REJECTED" as const,
+          fields: [],
+          validations: ["positiveAmount"],
+          validationMessages: ["<b>金額</b>は 1 円以上にしてください"],
+        },
+      }),
+    );
+    const { container } = await renderScreen(makeWarikanClient({ add: addRecord }));
+
+    await screen.findByText("夕食");
+    fill("amount", "0");
+    submit();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("<b>金額</b>は 1 円以上にしてください");
+    expect(container.querySelector("b")).toBeNull();
   });
 });
 

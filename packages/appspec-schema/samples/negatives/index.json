@@ -100,6 +100,13 @@
       "why": "list の項目 participants を数と比べている"
     },
     {
+      "name": "list-ref-unknown-entity",
+      "codes": [
+        "DATA_REF_TARGET_NOT_FOUND"
+      ],
+      "why": "参照の並び participants の参照先 entity menber が宣言に無い（M1.2）"
+    },
+    {
       "name": "max-list-argument",
       "codes": [
         "LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH"
@@ -135,11 +142,25 @@
       "why": "権限 write の subject owner は M1.1 の subject（minIdentity）に無い"
     },
     {
+      "name": "ref-unknown-entity",
+      "codes": [
+        "DATA_REF_TARGET_NOT_FOUND"
+      ],
+      "why": "参照 payer の参照先 entity menber が宣言に無い（M1.2）"
+    },
+    {
       "name": "string-in-arithmetic",
       "codes": [
         "LOGIC_OPERAND_TYPE_MISMATCH"
       ],
       "why": "文字列の項目 payer を掛け算に使っている"
+    },
+    {
+      "name": "validation-message-not-string",
+      "codes": [
+        "SHAPE_VALIDATION_MESSAGE_INVALID"
+      ],
+      "why": "検査の文言 message が文字列ではなく、並びになっている（M1.2）"
     },
     {
       "name": "validation-not-boolean",

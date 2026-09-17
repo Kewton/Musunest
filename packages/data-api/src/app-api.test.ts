@@ -9,7 +9,13 @@
 //
 // 時計は差し込む（Q17）。**HTTP からは差し替えられない**（src/index.test.ts が確かめる）。
 import { describe, expect, it } from "vitest";
-import { API_CREATED_STATUS, API_READ_STATUS, APPSPEC_SCHEMA_VERSION } from "@musunest/appspec-schema";
+import {
+  API_CREATED_STATUS,
+  API_READ_STATUS,
+  APPSPEC_SCHEMA_VERSION,
+  readScoringScenario,
+  resolveScenarioIds,
+} from "@musunest/appspec-schema";
 import type { ApiViewBody, NormalizedAppSpec } from "@musunest/appspec-schema";
 import { sampleScenarioFile, sampleSpecFile } from "@musunest/appspec-schema/files";
 import type { AppRecord } from "@musunest/control-plane";
@@ -531,5 +537,211 @@ describe("readNormalizedApp（正規化した JSON の読み取り）", () => {
     ],
   ])("%s ものは null（成功値に読み替えない）", (_label, text) => {
     expect(readNormalizedApp(text)).toBeNull();
+  });
+});
+
+// ── warikan の採点のシナリオ（参照と文言。Issue #106） ────────────────────
+//
+// 見本 warikan のシナリオをそのまま流す。**動的に割り当てた ID は、シナリオの `bind` と `$名前` で
+// 対応づける**（readScoringScenario が読み、resolveScenarioIds が実際の ID に置き換える）。
+// 確かめるのは 3 つである。
+//   1. A・B・C を登録して得た ID を使う 2 支出が保存され、payer と participants は ID のまま往復する
+//   2. 存在しない ID・別 entity の ID は 422 INPUT_REJECTED になり、対象の項目名を返し、保存件数が変わらない
+//   3. 文言を持つ検査は名前と文言を返し、文言を持たない検査（expense-log）は名前だけを返す
+
+const WARIKAN_INSTANCE = "inst-warikan";
+const WARIKAN = await normalizeSpec(fs.readFileSync(sampleSpecFile("warikan"), "utf8"));
+if (!WARIKAN.ok) throw new Error("warikan が静的チェックに通らない");
+const WARIKAN_JSON = WARIKAN.json;
+const WARIKAN_APP = WARIKAN.app;
+
+const WARIKAN_REGISTRATION: AppRecord = {
+  sourceSha256: WARIKAN_APP.sourceSha256,
+  schemaVersion: WARIKAN_APP.schemaVersion,
+  sourceKey: `specs/${WARIKAN_APP.sourceSha256}/app.spec.yaml`,
+  normalizedKey: `specs/${WARIKAN_APP.sourceSha256}/normalized.json`,
+  createdAt: "2026-09-16T00:00:00.000Z",
+};
+
+const WARIKAN_SCENARIO = readScoringScenario(
+  JSON.parse(fs.readFileSync(sampleScenarioFile("warikan"), "utf8")),
+);
+
+interface WarikanRun {
+  readonly deps: DataApiDeps;
+  readonly records: FakeRecordStore;
+  readonly ids: Readonly<Record<string, string>>;
+  readonly results: readonly Awaited<ReturnType<typeof createFromAction>>[];
+}
+
+/** シナリオの手順を先頭から流し、`bind` の名前を実際に登録して得た ID に結びつける */
+async function runWarikan(clock: Clock = CLOCK): Promise<WarikanRun> {
+  const records = new FakeRecordStore();
+  const deps: DataApiDeps = {
+    registry: { resolve: async () => WARIKAN_REGISTRATION },
+    specs: { read: async () => WARIKAN_JSON },
+    records,
+    clock,
+  };
+  const ids: Record<string, string> = {};
+  const results: Awaited<ReturnType<typeof createFromAction>>[] = [];
+  for (const step of WARIKAN_SCENARIO.steps) {
+    const input = resolveScenarioIds(step.input, ids) as Readonly<Record<string, unknown>>;
+    const result = await createFromAction(deps, WARIKAN_INSTANCE, step.action, input);
+    results.push(result);
+    if (result.ok && "accepted" in step.expect && step.expect.bind !== undefined) {
+      ids[step.expect.bind] = result.body.id;
+    }
+  }
+  return { deps, records, ids, results };
+}
+
+const warikanExpenses = (run: WarikanRun) => run.records.rows.filter((row) => row.entity === "expense");
+
+describe("warikan の採点のシナリオ（参照と文言。M1.2）", () => {
+  it("A・B・C を登録し、2 支出が受理される（拒否した入力は保存しない）", async () => {
+    const run = await runWarikan();
+    const accepted = run.results.filter((result) => result.ok).length;
+    expect(accepted).toBe(5); // メンバー 3 人 + 支出 2 件
+    expect(run.results.length - accepted).toBe(6);
+    expect(run.records.rows.filter((row) => row.entity === "member")).toHaveLength(3);
+    expect(warikanExpenses(run)).toHaveLength(2);
+  });
+
+  it("payer と participants は ID のまま往復する", async () => {
+    const run = await runWarikan();
+    const expenses = warikanExpenses(run);
+    expect(expenses[0]?.data).toEqual({
+      description: "夕食",
+      amount: 6000,
+      payer: run.ids["A"],
+      participants: [run.ids["A"], run.ids["B"], run.ids["C"]],
+    });
+    expect(expenses[1]?.data["payer"]).toBe(run.ids["B"]);
+    // 名前を保存していない（ID と名前は別の値である）
+    expect(JSON.stringify(run.records.rows)).not.toContain('"payer":"A"');
+  });
+
+  it("最後の一覧が、シナリオの期待値と一致する（ID を名前ではなく ID のまま比べる）", async () => {
+    const run = await runWarikan();
+    const expected = (WARIKAN_SCENARIO.views["expenseList"] ?? []).map((row) =>
+      resolveScenarioIds(row, run.ids),
+    );
+    const body = await getView(run.deps, WARIKAN_INSTANCE, "expenseList");
+    expect(body.ok).toBe(true);
+    if (!body.ok) return;
+    expect(body.body.rows.map((row) => ({ ...row.fields, ...row.computed }))).toEqual(expected);
+
+    const members = await getView(run.deps, WARIKAN_INSTANCE, "memberList");
+    if (!members.ok) throw new Error("memberList を読めなかった");
+    const names = (WARIKAN_SCENARIO.views["memberList"] ?? []).map((row) =>
+      resolveScenarioIds(row, run.ids),
+    );
+    expect(members.body.rows.map((row) => row.fields)).toEqual(names);
+  });
+
+  it.each(WARIKAN_SCENARIO.steps.map((step, index) => [step.name, index] as const))(
+    "%s の期待どおりに受理・拒否する",
+    async (_name, index) => {
+      const step = WARIKAN_SCENARIO.steps[index];
+      if (step === undefined) throw new Error("手順が無い");
+      const run = await runWarikan();
+      const result = run.results[index];
+      if (result === undefined) throw new Error("結果が無い");
+      if ("accepted" in step.expect) {
+        expect(result.ok).toBe(true);
+        return;
+      }
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.failure.error).toBe("INPUT_REJECTED");
+      expect(namesOf(result.failure.fields)).toEqual(namesOf(step.expect.rejected.fields));
+      expect(result.failure.validations).toEqual(step.expect.rejected.validations);
+    },
+  );
+
+  it("拒否した操作の前後で、保存件数が変わらない", async () => {
+    const run = await runWarikan();
+    const before = JSON.stringify(run.records.rows);
+    for (const step of WARIKAN_SCENARIO.steps) {
+      if ("accepted" in step.expect) continue;
+      const input = resolveScenarioIds(step.input, run.ids) as Readonly<Record<string, unknown>>;
+      const result = await createFromAction(run.deps, WARIKAN_INSTANCE, step.action, input);
+      expect(result.ok, step.name).toBe(false);
+      expect(JSON.stringify(run.records.rows), step.name).toBe(before);
+    }
+    expect(warikanExpenses(run)).toHaveLength(2);
+  });
+
+  it("存在しない ID・別 entity の ID は、対象の項目名を返して断る", async () => {
+    const run = await runWarikan();
+    const member = run.ids["A"] ?? "";
+
+    const missing = await createFromAction(run.deps, WARIKAN_INSTANCE, "addExpense", {
+      description: "昼食",
+      amount: 3000,
+      payer: "member-does-not-exist",
+      participants: [member],
+    });
+    expect(missing).toEqual({
+      ok: false,
+      failure: { error: "INPUT_REJECTED", fields: ["payer"], validations: [] },
+    });
+
+    // 夕食の ID（expense のレコード）を member の参照に渡す＝別 entity の ID
+    const otherEntity = await createFromAction(run.deps, WARIKAN_INSTANCE, "addExpense", {
+      description: "昼食",
+      amount: 3000,
+      payer: warikanExpenses(run)[0]?.id ?? "",
+      participants: [member],
+    });
+    expect(otherEntity.ok).toBe(false);
+    if (!otherEntity.ok) expect(otherEntity.failure.fields).toEqual(["payer"]);
+
+    expect(warikanExpenses(run)).toHaveLength(2);
+  });
+
+  it("別インスタンスの ID も、この DO に無いので断る", async () => {
+    // 同じ宣言を使う別のインスタンスの ID は、このインスタンスの一覧には無い
+    const other = await runWarikan();
+    const run = await runWarikan();
+    const result = await createFromAction(run.deps, WARIKAN_INSTANCE, "addExpense", {
+      description: "昼食",
+      amount: 3000,
+      payer: other.ids["A"] ?? "",
+      participants: [run.ids["A"] ?? ""],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.failure.fields).toEqual(["payer"]);
+  });
+
+  it("文言を持つ検査は、名前と文言を同じ並びで返す", async () => {
+    const run = await runWarikan();
+    const result = await createFromAction(run.deps, WARIKAN_INSTANCE, "addExpense", {
+      description: "返品",
+      amount: 0,
+      payer: run.ids["A"] ?? "",
+      participants: [run.ids["A"] ?? ""],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.validations).toEqual(["positiveAmount"]);
+    expect(result.failure.validationMessages).toEqual(["金額は 1 円以上にしてください"]);
+  });
+
+  it("文言を持たない expense-log は、従来どおり検査の名前だけを返す", async () => {
+    const h = harness();
+    const result = await createFromAction(h.deps, INSTANCE, "addExpense", {
+      description: "返品",
+      amount: 0,
+      discount: 0,
+      payer: "A",
+      participants: ["A"],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.validations).toEqual(["positiveAmount"]);
+    // 欄そのものを持たない（#102 の応答を変えない）
+    expect(Object.hasOwn(result.failure, "validationMessages")).toBe(false);
   });
 });
