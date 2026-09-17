@@ -14,7 +14,8 @@ export const HEALTHZ_PATH = "/healthz" as const;
 /**
  * wrangler.jsonc の assets.run_worker_first。**Worker が起動するのはこのパスだけ**で、
  * それ以外（ページロード・JS / CSS）は Static Assets が Worker を通さずに返す（03 §2・06 §4.1）。
- * /api/* は M2 で gateway へ中継する。M0 の Worker は 404 を返すが、SPAシェルに落ちないよう先に取っておく。
+ * /api/* は今、gateway へ中継する（dev / staging。**production では下流を呼ばずに 404**——00 Q5。
+ * 判定は src/worker/api.ts、中継の中身は src/worker/index.ts）。SPAシェルに落ちないよう先に受けている。
  */
 export const WORKER_ROUTES = ["/api/*", HEALTHZ_PATH] as const;
 
