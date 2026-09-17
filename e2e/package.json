@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Form A 統合スモーク（M1）。M0 は貫通スモークのみ",
+  "description": "Form A 統合スモーク（M1）と、staging に置いた見本の採点（Issue #110）",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,6 +16,10 @@
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty",
     "lint": "oxlint src",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "test:staging": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@musunest/sdk": "workspace:*"
   }
 }

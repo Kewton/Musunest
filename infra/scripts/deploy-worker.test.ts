@@ -810,7 +810,7 @@ describe("deploy-staging.yml", () => {
     expect(code(yaml)).not.toMatch(/^\s+url:/m);
   });
 
-  it("乖離チェック → build → migration → deploy（data-api → gateway → host）→ smoke → 所要時間 の順に1回ずつ呼ぶ", () => {
+  it("乖離チェック → build → migration → deploy（data-api → gateway → host）→ smoke → 所要時間 → e2e の見本 → e2e の順に1回ずつ呼ぶ", () => {
     const order = [
       indexOf(/refs\/heads\/main/),
       indexOf(/pnpm install --frozen-lockfile/),
@@ -823,6 +823,8 @@ describe("deploy-staging.yml", () => {
       indexOf(/deploy-worker\.ts --env staging --target host --sha "\$GIT_SHA"$/m),
       indexOf(/pnpm smoke --env staging --expect-sha "\$GIT_SHA"$/m),
       indexOf(/repository\.pushed_at/),
+      indexOf(/infra\/scripts\/publish\.ts --env staging --instance m12-e2e-warikan --spec packages\/appspec-schema\/samples\/warikan\/app\.spec\.yaml$/m),
+      indexOf(/pnpm --filter @musunest\/e2e test:staging/),
     ];
     expect(order).toEqual(order.toSorted((a, b) => a - b));
     expect(steps.filter((step) => /deploy-worker\.ts/.test(step.body))).toHaveLength(TARGETS.length);
@@ -845,11 +847,12 @@ describe("deploy-staging.yml", () => {
     }
   });
 
-  it("Cloudflare のトークンと Account ID は、wrangler を動かすステップ（deploy-worker）にだけ渡す", () => {
+  it("Cloudflare のトークンと Account ID は、Cloudflare を書くステップ（deploy-worker・publish）にだけ渡す", () => {
     for (const step of steps) {
-      const usesWrangler = /deploy-worker\.ts/.test(step.body);
-      expect(passes(step, "CLOUDFLARE_API_TOKEN"), step.body).toBe(usesWrangler);
-      expect(passes(step, "CLOUDFLARE_ACCOUNT_ID"), step.body).toBe(usesWrangler);
+      // 配る（deploy-worker）と、e2e の見本を置く（publish）だけが Cloudflare を書く
+      const writesCloudflare = /deploy-worker\.ts/.test(step.body) || /infra\/scripts\/publish\.ts/.test(step.body);
+      expect(passes(step, "CLOUDFLARE_API_TOKEN"), step.body).toBe(writesCloudflare);
+      expect(passes(step, "CLOUDFLARE_ACCOUNT_ID"), step.body).toBe(writesCloudflare);
     }
   });
 
@@ -863,9 +866,61 @@ describe("deploy-staging.yml", () => {
     expect(steps[indexOf(/pnpm infra:sync/)]?.body).toMatch(/terraform -chdir=infra\/terraform\/envs\/staging init .*> \/dev\/null 2>&1/);
   });
 
-  it("SMOKE_BASE_URL は smoke のステップにだけ渡す", () => {
+  it("SMOKE_BASE_URL は、宛先を使うステップ（smoke・e2e）にだけ渡す", () => {
     for (const step of steps) {
-      expect(passes(step, "SMOKE_BASE_URL"), step.body).toBe(/pnpm smoke/.test(step.body));
+      const needsDestination = /pnpm smoke/.test(step.body) || /test:staging/.test(step.body);
+      expect(passes(step, "SMOKE_BASE_URL"), step.body).toBe(needsDestination);
+    }
+  });
+
+  // ── e2e（Issue #110）──────────────────────────────────────────────────────
+  //
+  // 見本を置く（publish）→ 採点する（e2e）の順、必要なステップだけへの資格情報、URL を引数にしないこと、
+  // e2e の所要時間と成否を smoke の線と別に記録することを固定する。
+
+  it("e2e の見本は publish で専用インスタンス（固定 ID）へ置き、デモのインスタンスを指さない", () => {
+    const publish = steps[indexOf(/infra\/scripts\/publish\.ts/)];
+    expect(publish?.body).toContain("--env staging --instance m12-e2e-warikan");
+    expect(publish?.body).toContain("--spec packages/appspec-schema/samples/warikan/app.spec.yaml");
+    expect(publish?.body).not.toMatch(/m11-demo-expense-log|m12-demo-warikan/);
+  });
+
+  it("e2e の宛先は環境変数で渡す（引数に URL を渡さない）。インスタンス ID は明示の環境変数にだけ入れる", () => {
+    const e2e = steps[indexOf(/pnpm --filter @musunest\/e2e test:staging/)] ?? { body: "" };
+    // 宛先は環境変数（Secret の値）。run に式（${{ … }}）や URL を埋め込まない
+    expect(passesAs(e2e, "SMOKE_BASE_URL", "SMOKE_BASE_URL")).toBe(true);
+    expect(e2e.body).toContain("E2E_INSTANCE_ID: m12-e2e-warikan");
+    expect(runScript(e2e)).not.toMatch(/https?:\/\//);
+    expect(runScript(e2e)).not.toContain("${{");
+    expect(e2e.body).not.toContain("--base-url");
+  });
+
+  it("e2e に Cloudflare の資格情報を渡さない（host の API だけを使う）", () => {
+    const e2e = steps[indexOf(/pnpm --filter @musunest\/e2e test:staging/)] ?? { body: "" };
+    expect(passes(e2e, "CLOUDFLARE_API_TOKEN")).toBe(false);
+    expect(passes(e2e, "CLOUDFLARE_ACCOUNT_ID")).toBe(false);
+    expect(e2e.body).not.toContain("MUSUNEST_PROBE_TOKEN");
+  });
+
+  it("e2e の所要時間と成否を、smoke の線（④）とは別に記録する", () => {
+    const script = runScript(steps[indexOf(/pnpm --filter @musunest\/e2e test:staging/)] ?? { body: "" });
+    expect(script).toContain("started=$(date +%s)");
+    expect(script).toContain("test:staging || code=$?");
+    expect(script).toMatch(/elapsed=\$\(\( \$\(date \+%s\) - started \)\)/);
+    expect(script).toContain('>> "$GITHUB_STEP_SUMMARY"');
+    expect(script).toContain('exit "$code"');
+    // smoke の線（④）の記録は、e2e の時間を足さない（push から smoke green まで）
+    const timing = steps[indexOf(/repository\.pushed_at/)] ?? { body: "" };
+    expect(timing.body).toContain("push から smoke green まで");
+    expect(timing.body).not.toContain("e2e");
+  });
+
+  it("smoke が失敗したら e2e を起動しない（並びと、continue-on-error が無いこと）", () => {
+    expect(indexOf(/pnpm smoke --env staging/)).toBeLessThan(indexOf(/pnpm --filter @musunest\/e2e test:staging/));
+    for (const step of steps) {
+      // 失敗しても続けるステップを作らない（既定の fail-fast で、smoke が落ちれば e2e へ来ない）
+      expect(step.body).not.toContain("continue-on-error");
+      expect(step.body).not.toMatch(/\bif:\s*(?:always\(\)|failure\(\)|\$\{\{\s*failure)/);
     }
   });
 
