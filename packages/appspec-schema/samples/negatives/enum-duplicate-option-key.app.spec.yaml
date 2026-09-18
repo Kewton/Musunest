@@ -1,0 +1,35 @@
+# 負例：選択肢の項目 status の options に、同じキー todo が 2 回ある（保存される値が重なる）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: task
+    fields:
+      title: string
+      status:
+        type: enum
+        options:
+          todo: 未着手
+          todo: 進行中
+          done: 完了
+        default: todo
+
+views:
+  - name: taskList
+    entity: task
+
+actions:
+  - name: addTask
+    entity: task
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

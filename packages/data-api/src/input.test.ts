@@ -300,3 +300,124 @@ describe("参照（ref）と参照 list（checkInputTypes）", () => {
     expect(decided).toEqual({ ok: false, fields: ["participants"], validations: [] });
   });
 });
+
+// ── 選択肢（enum）と既定値（default）（M1.3。Issue #154） ──────────────
+//
+// **宣言に無い値を断るのは data-api だけである**（画面が選択肢を絞るのは守りではない。
+// `CLAUDE.md` の不変条件）。既定値は**保存の時点で**入る——画面が項目を送ってこなくても入る
+// （docs/semantics.md「enum」「default」）。
+//
+// 見本 `samples/task-board/` は #159 が置く。ここでは、その見本と同じ形の最小の宣言を組み立てる
+// （選択肢の項目 status には既定値があり、既定値の無い項目 memo を 1 つ持つ）。
+
+const TASK_SOURCE = [
+  "entities:",
+  "  - name: task",
+  "    fields:",
+  "      title: string",
+  "      status:",
+  "        type: enum",
+  "        options:",
+  "          todo: 未着手",
+  "          doing: 進行中",
+  "          done: 完了",
+  "        default: todo",
+  "      memo: string",
+  "views:",
+  "  - name: taskList",
+  "    entity: task",
+  "actions:",
+  "  - name: addTask",
+  "    entity: task",
+  "validations: []",
+  "computed: []",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+function taskApp(): NormalizedAppSpec {
+  const checked = checkSpec(TASK_SOURCE);
+  if (!checked.ok) throw new Error("選択肢の宣言が静的チェックに通らない");
+  return { schemaVersion: APPSPEC_SCHEMA_VERSION, sourceSha256: "c".repeat(64), spec: checked.spec };
+}
+
+const TASK_ENTITY = taskApp().spec.entities.find((entry) => entry.name === "task");
+if (TASK_ENTITY === undefined) throw new Error("選択肢の宣言に task が無い");
+
+/** 通る入力の土台（status は省略できる。既定値があるためである） */
+const TASK_VALID: Readonly<Record<string, unknown>> = { title: "宿の予約", memo: "" };
+
+describe("選択肢（enum）と既定値（default）（checkInputTypes・M1.3）", () => {
+  const taskFieldsOf = (input: Readonly<Record<string, unknown>>): readonly string[] => {
+    const result = checkInputTypes(TASK_ENTITY, input);
+    return result.ok ? [] : result.fields;
+  };
+
+  it("options のキーは通る。保存されるのは表示名ではなくキーである（受入条件）", () => {
+    const result = checkInputTypes(TASK_ENTITY, { ...TASK_VALID, status: "doing" });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data).toEqual({ title: "宿の予約", status: "doing", memo: "" });
+  });
+
+  it("options に無い値は断る（data-api が唯一の権限強制点である。受入条件）", () => {
+    expect(taskFieldsOf({ ...TASK_VALID, status: "archived" })).toEqual(["status"]);
+    // 表示名は保存される値ではない（見せる言葉と、保存する値を混同しない）
+    expect(taskFieldsOf({ ...TASK_VALID, status: "未着手" })).toEqual(["status"]);
+    expect(taskFieldsOf({ ...TASK_VALID, status: "" })).toEqual(["status"]);
+    expect(taskFieldsOf({ ...TASK_VALID, status: 1 })).toEqual(["status"]);
+    expect(taskFieldsOf({ ...TASK_VALID, status: ["todo"] })).toEqual(["status"]);
+    expect(taskFieldsOf({ ...TASK_VALID, status: null })).toEqual(["status"]);
+  });
+
+  it("未入力なら既定値が入る（画面が送ってこなくても入る。受入条件）", () => {
+    const result = checkInputTypes(TASK_ENTITY, TASK_VALID);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data["status"]).toBe("todo");
+  });
+
+  it("既定値の無い項目は未入力のままである（M1.1 のとおり断る。受入条件）", () => {
+    const result = checkInputTypes(TASK_ENTITY, { title: "宿の予約", status: "todo" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.fields).toEqual(["memo"]);
+  });
+
+  it("送られた値がキーでなければ、既定値に読み替えない（黙って別の値にしない）", () => {
+    // status は「送られている」ので、既定値 todo に読み替えずに断る
+    const result = checkInputTypes(TASK_ENTITY, { ...TASK_VALID, status: "" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.fields).toEqual(["status"]);
+  });
+
+  it("入力のオブジェクトを書き換えない（既定値を入れても）", () => {
+    const input: Record<string, unknown> = { title: "宿の予約", memo: "" };
+    const before = JSON.stringify(input);
+    checkInputTypes(TASK_ENTITY, input);
+    expect(JSON.stringify(input)).toBe(before);
+  });
+
+  it("checkInput は、キーでない値なら型の検査で止まる（検査の式を評価しない）", () => {
+    const decided = checkInput({
+      app: taskApp(),
+      entity: TASK_ENTITY,
+      input: { ...TASK_VALID, status: "archived" },
+      clock: CLOCK,
+    });
+    expect(decided).toEqual({ ok: false, fields: ["status"], validations: [] });
+  });
+
+  it("checkInput は、未入力の選択肢に既定値を入れて通す", () => {
+    const decided = checkInput({
+      app: taskApp(),
+      entity: TASK_ENTITY,
+      input: TASK_VALID,
+      clock: CLOCK,
+    });
+    expect(decided.ok).toBe(true);
+    if (decided.ok) expect(decided.data["status"]).toBe("todo");
+  });
+});

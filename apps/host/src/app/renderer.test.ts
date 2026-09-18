@@ -980,3 +980,113 @@ describe("消す（M1.2）", () => {
     expect(failure.textContent).toContain("expense.participants 1 件");
   });
 });
+
+// ── 選択肢（enum）と既定値（default）の入力欄（M1.3。Issue #154） ────────
+//
+// `formFields` が**宣言を入力欄へ写す**ことを見る。`form.test.ts` は入力欄の部品だけを見ていて、
+// 宣言からの写像を見ていない。ここが抜けると、部品が正しくても実画面に選択肢が出ない——
+// #145（9 ゲート緑でも画面が真っ白）と同じ形の穴である。
+
+const TASK_SPEC: ApiSpecBody = {
+  ...SPEC,
+  spec: {
+    ...SPEC.spec,
+    entities: [
+      {
+        name: "task",
+        fields: {
+          title: "string",
+          status: {
+            type: "enum",
+            options: { todo: "未着手", doing: "進行中", done: "完了" },
+            default: "todo",
+          },
+          memo: "string",
+        },
+      },
+    ],
+    views: [{ name: "taskList", entity: "task" }],
+    validations: [],
+    computed: [],
+  },
+  actions: [{ name: "addTask", entity: "task" }],
+};
+
+const TASK_VIEW: ApiViewBody = {
+  instanceId: "inst-1",
+  view: "taskList",
+  entity: "task",
+  fields: ["title", "status", "memo"],
+  computed: [],
+  permissions: { read: true, write: true },
+  actions: [{ name: "addTask", entity: "task" }],
+  rows: [],
+};
+
+/** 選択肢を含む宣言を返す client（一覧は空。フォームは出る） */
+function taskClient(parts: Parameters<typeof makeClient>[0] = {}): MusunestClient {
+  return makeClient({
+    spec: () => Promise.resolve(okResult(TASK_SPEC)),
+    view: () => Promise.resolve(okResult(TASK_VIEW)),
+    ...parts,
+  });
+}
+
+describe("選択肢（enum）の入力欄", () => {
+  it("宣言の選択肢が、表示名つきの単一選択として出る（受入条件）", async () => {
+    await renderScreen(taskClient());
+
+    const select = (await screen.findByLabelText("status")) as HTMLSelectElement;
+    expect(select.tagName).toBe("SELECT");
+    // 見せるのは表示名である
+    expect(Array.from(select.options).map((option) => option.textContent)).toEqual([
+      "（選んでください）",
+      "未着手",
+      "進行中",
+      "完了",
+    ]);
+    // 送るのはキーである（**表示名ではない**）
+    expect(Array.from(select.options).map((option) => option.value)).toEqual([
+      "",
+      "todo",
+      "doing",
+      "done",
+    ]);
+    // 既定値は、宣言から写して最初から選ばれている
+    expect(select.value).toBe("todo");
+  });
+
+  it("選んだキーが、そのまま送信の入力になる（宣言 → 入力欄 → 送信）", async () => {
+    const addRecord = vi.fn<MusunestClient["addRecord"]>(() =>
+      Promise.resolve(okResult(makeRow("t1", { title: "宿の予約", status: "doing", memo: "" }, {}))),
+    );
+    await renderScreen(taskClient({ add: addRecord }));
+
+    await screen.findByLabelText("status");
+    fill("title", "宿の予約");
+    fireEvent.change(screen.getByLabelText("status"), { target: { value: "doing" } });
+    submit();
+
+    await waitFor(() =>
+      expect(addRecord).toHaveBeenCalledWith("inst-1", "addTask", {
+        title: "宿の予約",
+        status: "doing",
+        memo: "",
+      }),
+    );
+  });
+
+  it("既定値を触らなければ、既定値のキーが送られる", async () => {
+    const addRecord = vi.fn<MusunestClient["addRecord"]>(() =>
+      Promise.resolve(okResult(makeRow("t2", { title: "宿の予約", status: "todo", memo: "" }, {}))),
+    );
+    await renderScreen(taskClient({ add: addRecord }));
+
+    await screen.findByLabelText("status");
+    fill("title", "宿の予約");
+    submit();
+
+    await waitFor(() => expect(addRecord).toHaveBeenCalledTimes(1));
+    expect(addRecord.mock.calls[0]?.[2]).toEqual({ title: "宿の予約", status: "todo", memo: "" });
+  });
+});

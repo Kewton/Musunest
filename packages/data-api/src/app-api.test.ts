@@ -460,6 +460,124 @@ describe("GET spec", () => {
   });
 });
 
+// ── 選択肢（enum）と既定値（default）を含む宣言の配信（M1.3。Issue #154） ──
+//
+// **配信側が読めること**を確かめる。静的チェック（spec-engine）が通っても、data-api の
+// `isFieldDeclaration` が新しい型を知らなければ、正規化した JSON は読み取りで落ちて
+// `getSpec` / `getView` が **503（SPEC_UNAVAILABLE）** になる。**9 ゲートが緑のまま実経路が
+// 動かない**という #145 と同じ穴なので、宣言 → publish → 配信までを通しで見る。
+//
+// 見本 `samples/task-board/` は #159 が置く。ここでは、その見本と同じ形の最小の宣言を組み立てる。
+
+const ENUM_SOURCE = [
+  "entities:",
+  "  - name: task",
+  "    fields:",
+  "      title: string",
+  "      status:",
+  "        type: enum",
+  "        options:",
+  "          todo: 未着手",
+  "          doing: 進行中",
+  "          done: 完了",
+  "        default: todo",
+  "views:",
+  "  - name: taskList",
+  "    entity: task",
+  "actions:",
+  "  - name: addTask",
+  "    entity: task",
+  "validations: []",
+  "computed: []",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+const enumNormalized = await normalizeSpec(ENUM_SOURCE);
+if (!enumNormalized.ok) throw new Error("選択肢の宣言が静的チェックに通らない");
+
+const ENUM_APP: NormalizedAppSpec = enumNormalized.app;
+/** publish が R2 に置く本文（`getSpec` に渡すのと同じ形） */
+const ENUM_JSON = enumNormalized.json;
+
+/** 選択肢を含む宣言を R2 に置き、登録（D1）も同じ宣言を指すようにする */
+function withEnumDeclaration(h: Harness): void {
+  h.registry.registration = {
+    sourceSha256: ENUM_APP.sourceSha256,
+    schemaVersion: ENUM_APP.schemaVersion,
+    sourceKey: `specs/${ENUM_APP.sourceSha256}/app.spec.yaml`,
+    normalizedKey: `specs/${ENUM_APP.sourceSha256}/normalized.json`,
+    createdAt: "2026-09-19T00:00:00.000Z",
+  };
+  h.specs.text = ENUM_JSON;
+}
+
+/** 正規化した JSON の task の項目 status を差し替える（ほかはそのまま） */
+function withStatus(h: Harness, status: unknown): void {
+  h.specs.text = JSON.stringify({
+    ...ENUM_APP,
+    spec: { ...ENUM_APP.spec, entities: [{ name: "task", fields: { title: "string", status } }] },
+  });
+}
+
+describe("選択肢（enum）を含む宣言の配信", () => {
+  it("getSpec が ok で返し、options と default を保つ（受入条件）", async () => {
+    const h = harness();
+    withEnumDeclaration(h);
+
+    const result = await getSpec(h.deps, INSTANCE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.status).toBe(API_READ_STATUS);
+    expect(result.body.sourceSha256).toBe(ENUM_APP.sourceSha256);
+    const task = result.body.spec.entities.find((entity) => entity.name === "task");
+    expect(task?.fields["status"]).toEqual({
+      type: "enum",
+      options: { todo: "未着手", doing: "進行中", done: "完了" },
+      default: "todo",
+    });
+  });
+
+  it("getView も ok で返し、選択肢の項目を列に持つ", async () => {
+    const h = harness();
+    withEnumDeclaration(h);
+
+    const result = await getView(h.deps, INSTANCE, "taskList");
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.body.fields).toEqual(["title", "status"]);
+  });
+
+  it("readNormalizedApp が、選択肢を含む正規化 JSON を読む（受入条件）", () => {
+    expect(readNormalizedApp(ENUM_JSON)).toEqual(ENUM_APP);
+  });
+
+  it.each([
+    ["options が空", { type: "enum", options: {} }],
+    ["default が options のキーに無い", { type: "enum", options: { todo: "未着手" }, default: "doing" }],
+    ["表示名が文字列でない", { type: "enum", options: { todo: 1 } }],
+    ["表示名が空である", { type: "enum", options: { todo: "" } }],
+    ["default が文字列でない", { type: "enum", options: { todo: "未着手" }, default: 1 }],
+    ["enum が写像でない", "enum"],
+  ] as readonly (readonly [string, unknown])[])(
+    "%s は読めない（SPEC_UNAVAILABLE。成功に読み替えない）",
+    async (_label, status) => {
+      const h = harness();
+      withEnumDeclaration(h);
+      withStatus(h, status);
+
+      expect(await getSpec(h.deps, INSTANCE)).toEqual({
+        ok: false,
+        failure: { error: "SPEC_UNAVAILABLE", fields: [], validations: [] },
+      });
+    },
+  );
+});
+
 // ── 権限（唯一の権限強制点） ────────────────────────────────────
 
 /** `permissions` を差し替えた宣言を R2 に置く（版と SHA は登録と一致させたまま） */

@@ -49,6 +49,12 @@ export const DIAGNOSTIC_CODES = [
   "DATA_FIELD_NAME_RESERVED",
   /** M1.1 の項目の型（`string`・`number`・`list`）に無い型 */
   "DATA_FIELD_TYPE_UNKNOWN",
+  /** 選択肢の項目（`type: enum`）の `options` が空である（M1.3）。キーを 1 つ以上書く */
+  "DATA_FIELD_ENUM_OPTIONS_EMPTY",
+  /** 選択肢の項目の `options` に、同じキーが 2 回ある（M1.3）。キーは保存される値なので重複させない */
+  "DATA_FIELD_ENUM_OPTION_KEY_DUPLICATE",
+  /** 選択肢の項目の `default` が、`options` のキーのどれでもない（M1.3） */
+  "DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS",
   /** 参照（`ref`）と参照の並び（`list of`）の、参照先の entity が宣言に無い（M1.2） */
   "DATA_REF_TARGET_NOT_FOUND",
 

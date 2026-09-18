@@ -261,3 +261,62 @@ describe("検査に通らない原本は正規化しない（#97 の負例）", 
     expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain("SHAPE_YAML_INVALID");
   });
 });
+
+// ── 選択肢（enum）と既定値（default）（M1.3。Issue #154） ─────────────
+//
+// 選択肢は「保存される値（キー）→ 表示名」の写像である。**書いた順が意味を持つ**ので
+// （M1.3 のボードはこの順に列を並べる）、正規化した JSON でも順を並べ替えない（規約 3）。
+
+const ENUM_SOURCE = [
+  "entities:",
+  "  - name: task",
+  "    fields:",
+  "      title: string",
+  "      status:",
+  "        type: enum",
+  "        options:",
+  "          todo: 未着手",
+  "          doing: 進行中",
+  "          done: 完了",
+  "        default: todo",
+  "views:",
+  "  - name: taskList",
+  "    entity: task",
+  "actions:",
+  "  - name: addTask",
+  "    entity: task",
+  "validations: []",
+  "computed: []",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+describe("選択肢（enum）と既定値（default）の正規化（M1.3）", () => {
+  it("options と default が、書いた順のまま JSON に残る（受入条件）", async () => {
+    const result = await normalized(ENUM_SOURCE);
+    const task = result.app.spec.entities.find((entity) => entity.name === "task");
+    expect(task?.fields["status"]).toEqual({
+      type: "enum",
+      options: { todo: "未着手", doing: "進行中", done: "完了" },
+      default: "todo",
+    });
+    // キーの並べ替えをしない（書いた順が、画面に出す選択肢の順である）
+    const json = result.json;
+    expect(json.indexOf('"todo"')).toBeLessThan(json.indexOf('"doing"'));
+    expect(json.indexOf('"doing"')).toBeLessThan(json.indexOf('"done"'));
+  });
+
+  it("default を書かなければ、欄そのものが無い", async () => {
+    const result = await normalized(ENUM_SOURCE.replace("        default: todo\n", ""));
+    const task = result.app.spec.entities.find((entity) => entity.name === "task");
+    expect(task?.fields["status"]).toEqual({
+      type: "enum",
+      options: { todo: "未着手", doing: "進行中", done: "完了" },
+    });
+  });
+});

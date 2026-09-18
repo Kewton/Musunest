@@ -1,13 +1,18 @@
-// 種類の指定の無い action から作る追加フォーム（Issue #104。参照と文言は #106）。
+// 種類の指定の無い action から作る追加フォーム（Issue #104。参照と文言は #106、選択肢と既定値は #154）。
 //
 // **画面は宣言をそのまま入力欄にする。** 項目を宣言の順に並べ、種類ごとに次の形で送る
-// （packages/appspec-schema/docs/semantics.md「string」「number」「list」「ref」「action」）。
+// （packages/appspec-schema/docs/semantics.md「string」「number」「list」「ref」「enum」「action」）。
 //   string → 文字列（空文字も 1 つの値としてそのまま送る）
 //   number → JSON の数（有限の数にならない入力は、勝手に 0 や NaN にせず文字列のまま送る。
 //            型の検査は data-api が行い、通らなかった項目の名前が返る）
 //   list   → 文字列の並び（1 行に 1 つ。空行も重複も順序も、入力補助で勝手に削らない）
 //   ref    → 参照先のレコード 1 件の選択（単一選択）。**送るのは ID で、見せるのは名前である**
 //   list of → 参照先のレコードの複数選択（チェック）。候補の順に、選んだ ID を送る
+//   enum   → 選択肢の単一選択（M1.3）。**見せるのは表示名で、送るのはキーである。**
+//            既定値があれば最初から選んでおく（未入力を空文字で送ると、既定値が入らないため）
+//
+// **enum の選択肢を絞ることは守りではない。** 宣言に無い値を断るのは data-api だけである
+// （`03-spec-layers-and-checker.md` §2.2。`CLAUDE.md` の不変条件）。
 //
 // **computed・id・日時は入力欄にしない。** 入力欄になるのは entity の `fields` だけで、
 // 呼ぶ側（renderer.tsx）がそれを宣言の順に渡す。画面では式も権限条件も評価しない——
@@ -32,8 +37,13 @@ export interface FormField {
   readonly type: FieldKind;
   /** 参照先の entity の名前（`ref`・参照 list）。参照でなければ `null` */
   readonly to?: string | null;
-  /** 参照の候補（`ref`・参照 list）。参照でなければ無い */
+  /**
+   * 選択肢。参照（`ref`・参照 list）は参照先の候補（送るのは ID、見せるのは名前）で、
+   * 選択肢の項目（`enum`）は宣言の `options`（送るのはキー、見せるのは表示名）である（M1.3）
+   */
   readonly options?: readonly FormOption[];
+  /** 選択肢の項目で、最初から選んでおくキー（宣言の `default`）。無ければ `null`（M1.3） */
+  readonly default?: string | null;
 }
 
 /** 送信の結果。失敗のときは、data-api が返した項目名・検査名・文言をそのまま載せる */
@@ -173,7 +183,24 @@ function FieldInput({
   return (
     <div className="field" data-field={field.name}>
       <label htmlFor={inputId(field.name)}>{field.name}</label>
-      {field.type === "ref" ? (
+      {field.type === "enum" ? (
+        // 選択肢（M1.3）。**見せるのは表示名で、送るのはキーである。** 選ばれていなければ空文字を送り、
+        // 断るのは data-api である（既定値は呼ぶ側が最初から選んでおく）
+        <select
+          id={inputId(field.name)}
+          name={field.name}
+          className="field-input"
+          value={text}
+          onChange={onChange}
+        >
+          <option value="">（選んでください）</option>
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      ) : field.type === "ref" ? (
         <>
           <select
             id={inputId(field.name)}
@@ -248,8 +275,18 @@ const inputId = (name: string): string => `field-${name}`;
 
 function emptyState(fields: readonly FormField[]): FormText {
   const text: Record<string, string | readonly string[]> = {};
-  for (const field of fields) text[field.name] = isRefList(field) ? [] : "";
+  for (const field of fields) text[field.name] = initialText(field);
   return text;
+}
+
+/**
+ * 入力欄の初期値。参照 list は空の並び、**選択肢（enum）は宣言の既定値を最初から選んでおく**
+ * （未入力を空文字で送ると、既定値が入らない。M1.3）。ほかは空文字である。
+ */
+function initialText(field: FormField): string | readonly string[] {
+  if (isRefList(field)) return [];
+  if (field.type === "enum") return field.default ?? "";
+  return "";
 }
 
 /** 入力欄の値を、宣言の種類の値にして送る */
@@ -261,6 +298,9 @@ function toValues(fields: readonly FormField[], text: FormText): Record<string, 
       // 候補の順に送る（入力の順ではなく、宣言から決まる順）
       const chosen = new Set(Array.isArray(raw) ? raw : []);
       values[field.name] = (field.options ?? []).map((option) => option.value).filter((id) => chosen.has(id));
+    } else if (field.type === "enum") {
+      // **送るのはキーである**（表示名ではない）。選ばれていなければ空文字を送り、断るのは data-api
+      values[field.name] = typeof raw === "string" ? raw : "";
     } else if (field.type === "ref") {
       // 選ばれていなければ空文字を送る。**ID をでっち上げない**（data-api が断る）
       values[field.name] = typeof raw === "string" ? raw : "";
