@@ -8,11 +8,14 @@
 - リクエスト経路は **TypeScript のみ**
 - Cloudflare 固有APIは adapter 層に閉じ込める（`packages/app-do` を除く）
 - Builder Plane（CommandAgent）のコードをこのリポジトリに持ち込まない。接点は headless契約 と `pins/` のみ
-- **Cloudflare Free 前提（M0〜M2前半）**：host は SSR にしない（CPU 10ms ／ SPAシェル＋Static Assets）。
+- **小さく保つ（M0〜M2前半）**：host は SSR にしない（SPAシェル＋Static Assets）。
   Workers for Platforms を使わない。Logpush を使わない（`observability.enabled` で代替）。
   `schedule:` トリガのワークフローを作らない。
-  ただし **アーキテクチャを課金プランに売らない** — 枠が足りなければ層を潰すのではなく $5 払う
+  **アーキテクチャを課金プランに売らない** — 枠が足りなければ層を潰すのではなく払う
   （昇格トリガーは `workspace/mvp/m0/06-plan-and-limits.md` §5。触れたら議論せず即上げる）
+  - **プラン（2026-09-18 現在）**：アカウント①（dev + staging）は **Workers Paid（$5/月＋従量）**。
+    P-7 に抵触して上げた（staging の `/api` で data-api 単体 60.60 ms。`06` §5）。
+    **アカウント②（production）は Free のまま**。上の 4 つの「使わない」は**プランに関係なく維持する**
 
 ## 依存の向き
 

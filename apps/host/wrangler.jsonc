@@ -1,5 +1,5 @@
 {
-  // PWA Host Shell。**SSR にしない**（CLAUDE.md「Cloudflare Free 前提」・03 §2・06 §4.1）。
+  // PWA Host Shell。**SSR にしない**（CLAUDE.md「小さく保つ」・03 §2・06 §4.1）。
   //   ページは Static Assets（SPAシェル）が返し、Worker を起動しない。Worker が見るのは run_worker_first の2つだけ。
   //   持つ binding は gateway への Service Binding（GATEWAY）だけ。**D1 / R2 / DO を直接触らない**（CLAUDE.md 不変条件）。
   //

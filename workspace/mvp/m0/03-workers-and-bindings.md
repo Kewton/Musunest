@@ -4,6 +4,8 @@
 > 前提：`02` の dev 資源が apply 済み
 > 担当：🤖
 > **プラン前提：Cloudflare Free** — CPU **10ms/リクエスト**・100k req/日。これが host の設計を決める（→ [`06-plan-and-limits.md`](./06-plan-and-limits.md) §4.1）
+>
+> **🔴 2026-09-18 追記：アカウント①（dev + staging）は Workers Paid になった**（`06` §5）。**host を SSR にしない結論は変わらない**——SSR を避ける根拠は CPU の上限だけでなく「招待制で SEO が要らない」ことにもあるため（§4.1）。以下は当時のまま残す。
 
 ---
 
