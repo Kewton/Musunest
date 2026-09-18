@@ -1,7 +1,7 @@
 // 静的チェックの unit テスト（Issue #97 の受入条件を、ここで固定する）。
 //
 //   1. 見本（expense-log・warikan）の診断が空で、7 欄を持つ AppSpec を返す
-//   2. 負例 37 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
+//   2. 負例 39 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
 //   3. 診断は空でない日本語の説明と、該当する YAML の行・列を持つ
 //   4. 不正 YAML・未知キー・未知参照・循環を拒否し、上限はちょうどが通り 1 超過で診断になる
 //   5. 検査は式を実行せず、ストレージにも触れない
@@ -473,11 +473,75 @@ describe("選択肢（enum）と既定値（default）（M1.3）", () => {
   });
 });
 
-// ── 2. 負例 37 件 ──────────────────────────────────────────────
+// ── 1c. 日付（date）と「今日」（today()）（M1.3。Issue #155） ───────
+//
+// `date` は 1 語で書く型である（`ref` のような写像ではない）。式では**日付どうしでだけ**比べられ、
+// `today()` は引数を取らない。落とすときの 2 つのコードは**別である**（受入条件）。
+
+describe("日付（date）と「今日」（today()）（M1.3）", () => {
+  /** 土台の entity に日付の項目を足したもの（ほかの欄は BASE_PARTS のまま。誤りを重ねない） */
+  const dateEntity = `${BASE_PARTS.entities}\n      due: date`;
+
+  /** 日付の項目を使う検査の式を 1 つ持つ宣言（`entities` は差し替えられる） */
+  const dateDeclaration = (expression: string, entities: string = dateEntity): string =>
+    declaration({
+      entities,
+      validations: [
+        "  - name: dueBeforeToday",
+        "    entity: expense",
+        `    expression: ${expression}`,
+      ].join("\n"),
+    });
+
+  it("due: date を書ける（宣言に date として残る。受入条件）", () => {
+    const result = checkSpec(dateDeclaration("due < today()"));
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spec.entities[0]?.fields["due"]).toBe("date");
+  });
+
+  it("日付どうしの比較は通り、today() も書ける（受入条件）", () => {
+    expect(codesOf(checkSpec(dateDeclaration("due < today()")))).toEqual([]);
+    expect(codesOf(checkSpec(dateDeclaration("due == today()")))).toEqual([]);
+    expect(codesOf(checkSpec(dateDeclaration("today() <= due")))).toEqual([]);
+  });
+
+  it("日付の項目は 1 語で書く（知らない型は今までどおり断る）", () => {
+    const text = declaration({ entities: `${BASE_PARTS.entities}\n      due: datetime` });
+    expect(codesOf(failure(checkSpec(text)))).toEqual(["DATA_FIELD_TYPE_UNKNOWN"]);
+  });
+
+  it("日付は数の計算に使えない", () => {
+    expect(codesOf(failure(checkSpec(dateDeclaration("due + amount > 0"))))).toEqual([
+      "LOGIC_OPERAND_TYPE_MISMATCH",
+    ]);
+  });
+
+  it("日付と数の比較は LOGIC_OPERAND_TYPE_MISMATCH で落ちる（受入条件。負例と同じ形）", () => {
+    const result = failure(checkSpec(dateDeclaration("due < 1")));
+    expect(codesOf(result)).toEqual(["LOGIC_OPERAND_TYPE_MISMATCH"]);
+  });
+
+  it("today に引数を渡すと LOGIC_FUNCTION_ARITY_MISMATCH で落ちる（受入条件。負例と同じ形）", () => {
+    const result = failure(checkSpec(dateDeclaration("due < today(1)")));
+    expect(codesOf(result)).toEqual(["LOGIC_FUNCTION_ARITY_MISMATCH"]);
+  });
+
+  it("2 つの誤りコードは別である（受入条件）", () => {
+    const compared = codesOf(failure(checkSpec(dateDeclaration("due < 1"))));
+    const called = codesOf(failure(checkSpec(dateDeclaration("due < today(1)"))));
+    expect(compared).toEqual(["LOGIC_OPERAND_TYPE_MISMATCH"]);
+    expect(called).toEqual(["LOGIC_FUNCTION_ARITY_MISMATCH"]);
+    expect(compared).not.toEqual(called);
+  });
+});
+
+// ── 2. 負例 39 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 37 件である（0 件なら以降のテストが空振りする）", () => {
-    expect(negativeIndex.negatives).toHaveLength(37);
+  it("負例の一覧は 39 件である（0 件なら以降のテストが空振りする）", () => {
+    expect(negativeIndex.negatives).toHaveLength(39);
   });
 
   it.each(negativeCases)(
@@ -517,6 +581,8 @@ describe("負例（appspec-schema の samples/negatives）", () => {
     ["string-in-arithmetic", "LOGIC_OPERAND_TYPE_MISMATCH"],
     ["list-in-comparison", "LOGIC_OPERAND_TYPE_MISMATCH"],
     ["min-wrong-arity", "LOGIC_FUNCTION_ARITY_MISMATCH"],
+    ["date-compared-with-number", "LOGIC_OPERAND_TYPE_MISMATCH"],
+    ["today-with-argument", "LOGIC_FUNCTION_ARITY_MISMATCH"],
   ] as const)("%s は %s を返す（受入条件に名指しされた組）", (name, code) => {
     const result = failure(checkSpec(negativeTexts.get(name) ?? ""));
     expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toContain(code);

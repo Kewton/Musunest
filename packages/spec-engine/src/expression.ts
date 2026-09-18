@@ -10,7 +10,7 @@ import {
   ARITHMETIC_OPERATORS,
   BUILTIN_FUNCTIONS,
   COMPARISON_OPERATORS,
-  type BuiltinFunctionName,
+  DATE_FUNCTIONS,
   type ExpressionType,
 } from "@musunest/appspec-schema";
 import type { Diagnostic, DiagnosticCode, DiagnosticPosition } from "./diagnostics.js";
@@ -476,6 +476,7 @@ const TYPE_NAMES: Readonly<Record<SpecType, string>> = {
   string: "文字列",
   list: "文字列の並び",
   boolean: "真偽",
+  date: "日付",
   unknown: "決められない",
 };
 
@@ -485,7 +486,27 @@ export function typeName(type: SpecType): string {
 
 const isNumberCompatible = (type: SpecType): boolean => type === "number" || type === "unknown";
 
-const isBuiltinFunction = (name: string): name is BuiltinFunctionName => Object.hasOwn(BUILTIN_FUNCTIONS, name);
+/**
+ * 比較の左右の型。**数どうし（従来）か、日付どうしだけ**を比べられる（M1.3。docs/semantics.md「date」）。
+ * 片方が日付なら、もう片方も日付でなければならない——`due < 1` は `LOGIC_OPERAND_TYPE_MISMATCH` になる。
+ */
+const comparisonOperand = (left: SpecType, right: SpecType): SpecType =>
+  left === "date" || right === "date" ? "date" : "number";
+
+const isOperandCompatible = (type: SpecType, expected: SpecType): boolean =>
+  type === "unknown" || type === expected;
+
+/**
+ * 式に書ける関数の定義。**正本は appspec-schema の 2 つの表を合わせたもの**である——
+ * `min`・`max`・`len`（M1.1）と `today`（M1.3）。表が分かれているのは、M1.1 の関数の一覧
+ * （`BUILTIN_FUNCTIONS`）を読む側の意味を変えないためである（appspec-schema の DATE_FUNCTIONS の注記）。
+ */
+const EXPRESSION_FUNCTIONS = { ...BUILTIN_FUNCTIONS, ...DATE_FUNCTIONS };
+
+type ExpressionFunctionName = keyof typeof EXPRESSION_FUNCTIONS;
+
+const isBuiltinFunction = (name: string): name is ExpressionFunctionName =>
+  Object.hasOwn(EXPRESSION_FUNCTIONS, name);
 
 /** 式の型を、宣言の名前解決の上で求める。**式は評価しない**（値を求めない） */
 export function analyzeExpression(ast: AstNode, scope: ExpressionScope): ExpressionAnalysis {
@@ -537,21 +558,25 @@ export function analyzeExpression(ast: AstNode, scope: ExpressionScope): Express
         const left = visit(node.left);
         const right = visit(node.right);
         const comparison = isComparisonOperator(node.operator);
+        // 計算は数どうしだけである。比較は、数どうし（従来）か日付どうしだけを許す（M1.3）
+        const expected = comparison ? comparisonOperand(left, right) : "number";
+        const phrase =
+          expected === "date" ? "日付どうしを比べる" : comparison ? "数どうしを比べる" : "数どうしの計算";
         let mismatch = false;
-        if (!isNumberCompatible(left)) {
+        if (!isOperandCompatible(left, expected)) {
           mismatch = true;
           problems.push({
             offset: node.left.start,
             code: "LOGIC_OPERAND_TYPE_MISMATCH",
-            message: `${node.operator} は数どうし${comparison ? "を比べる" : "の計算"}に使う（左が${typeName(left)}）`,
+            message: `${node.operator} は${phrase}に使う（左が${typeName(left)}）`,
           });
         }
-        if (!isNumberCompatible(right)) {
+        if (!isOperandCompatible(right, expected)) {
           mismatch = true;
           problems.push({
             offset: node.right.start,
             code: "LOGIC_OPERAND_TYPE_MISMATCH",
-            message: `${node.operator} は数どうし${comparison ? "を比べる" : "の計算"}に使う（右が${typeName(right)}）`,
+            message: `${node.operator} は${phrase}に使う（右が${typeName(right)}）`,
           });
         }
         if (mismatch) return "unknown";
@@ -563,11 +588,11 @@ export function analyzeExpression(ast: AstNode, scope: ExpressionScope): Express
           problems.push({
             offset: node.start,
             code: "LOGIC_FUNCTION_NOT_ALLOWED",
-            message: `${node.name} は店頭が用意していない（M1.1 は ${Object.keys(BUILTIN_FUNCTIONS).join("・")} だけ）`,
+            message: `${node.name} は店頭が用意していない（${Object.keys(EXPRESSION_FUNCTIONS).join("・")} だけ）`,
           });
           return "unknown";
         }
-        const signature = BUILTIN_FUNCTIONS[node.name];
+        const signature = EXPRESSION_FUNCTIONS[node.name];
         if (args.length !== signature.params.length) {
           problems.push({
             offset: node.start,

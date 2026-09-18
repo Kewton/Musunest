@@ -8,7 +8,7 @@
 // fetch と base URL は差し込める。host の画面は同じ origin の /api/* を叩くので `baseUrl: ""` でよい
 // （相対 URL のまま fetch する）。e2e のように別の origin を指す場合は絶対 URL を渡す。
 
-import { API_ERROR_CODES, ACTION_KINDS, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
+import { API_ERROR_CODES, ACTION_KINDS, FIELD_TYPES, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
 import type {
   ApiDeletedBody,
   ApiErrorCode,
@@ -266,12 +266,13 @@ function isEnumDeclaration(value: Record<string, unknown>): boolean {
 }
 
 /**
- * 項目の宣言。**文字列の 1 語（`string`・`number`・`list`）と、写像**
+ * 項目の宣言。**文字列の 1 語（`string`・`number`・`list`・`date`）と、写像**
  * （参照の `{type: ref, to}`・`{type: list, of}`、選択肢の `{type: enum, options, default}`）の両方
- * （M1.2・M1.3）。
+ * （M1.2・M1.3）。**1 語の型は `FIELD_TYPES` を正本にする**——ここで型の名前を写すと、語彙が増えたときに
+ * 配信側だけが古いまま残り、`getSpec` が失敗して画面が動かなくなる（#145・#154 と同じ穴）。
  */
 function isFieldDeclaration(value: unknown): boolean {
-  if (typeof value === "string") return value === "string" || value === "number" || value === "list";
+  if (typeof value === "string") return (FIELD_TYPES as readonly string[]).includes(value);
   if (!isRecord(value)) return false;
   if (value.type === "ref") return typeof value.to === "string";
   if (value.type === "list") return typeof value.of === "string";

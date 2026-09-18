@@ -456,3 +456,41 @@ describe("選択肢（enum）と既定値（default）の宣言", () => {
     }
   });
 });
+
+// ── 項目の型（1 語の語彙。M1.3。Issue #155） ─────────────────────────
+//
+// 1 語の型は `FIELD_TYPES`（appspec-schema の正本）で判定する。**ここに型の名前を写すと、語彙が
+// 増えたときに配信側だけが古いまま残り、正しい宣言でも `getSpec` が失敗して画面が動かなくなる**
+// （#145・#154 と同じ穴。データが配られても画面が出ない、という形で効く）。
+
+describe("項目の型（1 語の語彙）", () => {
+  /** 1 語の型を 1 つ持つ task の宣言 */
+  const withType = (type: string): unknown => ({
+    ...SPEC,
+    spec: {
+      ...SPEC.spec,
+      entities: [{ name: "task", fields: { title: type } }],
+    },
+  });
+
+  it.each(["string", "number", "list", "date"] as const)(
+    "%s を型として受け取る（日付は M1.3 で入った。受入条件）",
+    async (type) => {
+      const stub = recordingFetch(() => json(200, withType(type)));
+
+      expect(await clientWith(stub.fetch).getSpec("inst-1")).toMatchObject({ ok: true });
+    },
+  );
+
+  it.each(["datetime", "boolean", "ref"])(
+    "知らない 1 語の型 %s は INVALID_RESPONSE（キャストしない）",
+    async (type) => {
+      const stub = recordingFetch(() => json(200, withType(type)));
+
+      expect(await clientWith(stub.fetch).getSpec("inst-1")).toMatchObject({
+        ok: false,
+        error: { status: 200, code: INVALID_RESPONSE },
+      });
+    },
+  );
+});

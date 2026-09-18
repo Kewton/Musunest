@@ -1,0 +1,32 @@
+# 負例：日付の項目 due を数と比べている（日付は日付どうしでだけ比べられる。M1.3）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: task
+    fields:
+      title: string
+      due: date
+
+views:
+  - name: taskList
+    entity: task
+
+actions:
+  - name: addTask
+    entity: task
+
+validations:
+  - name: dueBeforeOne
+    entity: task
+    expression: due < 1
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

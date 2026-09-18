@@ -16,22 +16,28 @@
 //   3. validation は**宣言の順にすべて**評価し、真にならなかった名前を宣言の順に返す
 //   4. 式の上限（文字数 200・深さ 8・ノード 64）は静的チェックと同じ EXPRESSION_LIMITS を使う
 //   5. 計算値は戻り値にだけ入れる（渡されたレコードを書き換えない）
-//   6. 時計は引数で受け取る（M1.1 の値は時計に依存しない。境界は src/clock.ts）
+//   6. 時計は引数で受け取る。値が時計に依存するのは `today()`（日本時間の「今日」）だけである（M1.3。Q13）
 //   7. entity をまたぐ集計（`aggregate`）は、**同じインスタンスのレコード**だけを、渡された `sources` から見る
 //      （M1.2。別インスタンスの ID は存在しない）。合う行が 0 件なら 0、対象の値に `null` が 1 つでもあれば
 //      `null` にする（**空集合の 0 と区別し、黙って 0 に読み替えない**）
+//   8. 日付（`date`）の値は `YYYY-MM-DD` の文字列として扱い、**日付どうしでだけ比べる**（M1.3）。
+//      形の合わない値は `null` にして、真偽にも数にもしない（`date` と `number` の比較は静的チェックが断る）
 //
 // **式を実行しない**（`eval` / `Function` を使わない。03 §5.3・CLAUDE.md の不変条件）。
 // AST を歩いて値を求める。AST は readExpression の上限の内側でしか作らないので、歩く深さも有界である。
 
 import {
   BUILTIN_FUNCTIONS,
+  DATE_FUNCTIONS,
+  DATE_VALUE_PATTERN,
+  fieldKind,
   isComputedAggregate,
   isComputedExpression,
   isRowComputed,
   type Aggregate,
   type ComputedExpression,
   type Entity,
+  type FieldKind,
   type NormalizedAppSpec,
 } from "@musunest/appspec-schema";
 import {
@@ -41,7 +47,7 @@ import {
   type SourceRecord,
   type SourceRecords,
 } from "./aggregate.js";
-import type { Clock } from "./clock.js";
+import { todayInTokyo, type Clock } from "./clock.js";
 import { isComparisonOperator, readExpression, type AstNode } from "./expression.js";
 
 // 集計の評価に使う道具（`where` の判定・要るレコードの集め方・合計の畳み方）は src/aggregate.ts にある。
@@ -57,8 +63,8 @@ export * from "./settle.js";
 /** computed の値。求められなかった計算は `null`（画面では空。docs/semantics.md「computed」） */
 export type ComputedValue = number | null;
 
-/** 式の値。求められなかった値は `null`（**0 に読み替えない**） */
-type EvaluatedValue = number | boolean | readonly unknown[] | null;
+/** 式の値。求められなかった値は `null`（**0 に読み替えない**）。日付は `YYYY-MM-DD` の文字列である */
+type EvaluatedValue = number | boolean | string | readonly unknown[] | null;
 
 /** 評価の結果。computed の値（宣言の順）と、通らなかった検査の名前（宣言の順） */
 export interface Evaluation {
@@ -93,7 +99,7 @@ export interface EvaluationRequest {
 
 /**
  * 式を評価する環境。名前に値を結びつける関数と、差し込まれた時計を持つ。
- * `clock` は M1.3 の日付関数が読む席である——M1.1 の式は日付を読まないので、値は時計に依らない。
+ * `clock` は `today()`（日本時間の「今日」）が読む——**評価の中で現在時刻を直接読まない**（Q17）。
  */
 interface EvaluationScope {
   /** 名前（項目か計算）を値にする。宣言に無い名前は `null` */
@@ -106,11 +112,17 @@ const isFiniteNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 
 /**
- * レコードの値を、式が使える値にする。式に書けるのは数と（`len` の引数の）文字列の並びだけである
- * （docs/semantics.md「computed」）。それ以外は `null` にする——0 にも空の並びにも読み替えない。
+ * レコードの値を、式が使える値にする。式に書けるのは数・日付（`YYYY-MM-DD` の文字列）・
+ * （`len` の引数の）文字列の並びだけである（docs/semantics.md「computed」「date」）。
+ * それ以外は `null` にする——0 にも空の並びにも読み替えない。
  */
-const asExpressionValue = (value: unknown): EvaluatedValue =>
-  typeof value === "number" || Array.isArray(value) ? value : null;
+const asExpressionValue = (value: unknown, kind: FieldKind): EvaluatedValue => {
+  // 日付の項目は `YYYY-MM-DD` の文字列として式に渡す（形が違う値は式の値にしない）
+  if (kind === "date") {
+    return typeof value === "string" && DATE_VALUE_PATTERN.test(value) ? value : null;
+  }
+  return typeof value === "number" || Array.isArray(value) ? value : null;
+};
 
 /** 数どうしの計算。**有限の数でなくなったら `null`**（0 で割る・桁あふれ。ADR の決定 2） */
 function arithmetic(operator: string, left: number, right: number): EvaluatedValue {
@@ -128,7 +140,7 @@ function arithmetic(operator: string, left: number, right: number): EvaluatedVal
 }
 
 /** 数どうしの比較。両方が有限の数でなければ `null`（不合格にも真偽にもしない） */
-function compare(operator: string, left: number, right: number): EvaluatedValue {
+function compareNumbers(operator: string, left: number, right: number): EvaluatedValue {
   switch (operator) {
     case ">":
       return left > right;
@@ -147,8 +159,48 @@ function compare(operator: string, left: number, right: number): EvaluatedValue 
   }
 }
 
-/** 店頭が用意した関数（正本は appspec-schema の BUILTIN_FUNCTIONS）。用意されていない関数は `null` */
-function callValue(name: string, args: readonly EvaluatedValue[]): EvaluatedValue {
+/**
+ * 日付（`YYYY-MM-DD`）どうしの比較（M1.3）。**桁数が揃った文字列なので、辞書の順が暦の順と一致する。**
+ */
+function compareDates(operator: string, left: string, right: string): EvaluatedValue {
+  switch (operator) {
+    case ">":
+      return left > right;
+    case ">=":
+      return left >= right;
+    case "<":
+      return left < right;
+    case "<=":
+      return left <= right;
+    case "==":
+      return left === right;
+    case "!=":
+      return left !== right;
+    default:
+      return null;
+  }
+}
+
+/**
+ * 比較。**数どうし、または日付どうしのときだけ**真偽を返す——型の食い違い（`date` と `number`）は
+ * 静的チェックが断るが、評価も真偽にしない（`null` にして、検査は通らないものとして扱う）。
+ */
+function compare(operator: string, left: EvaluatedValue, right: EvaluatedValue): EvaluatedValue {
+  if (isFiniteNumber(left) && isFiniteNumber(right)) return compareNumbers(operator, left, right);
+  if (typeof left === "string" && typeof right === "string") return compareDates(operator, left, right);
+  return null;
+}
+
+/**
+ * 店頭が用意した関数の値を求める（正本は appspec-schema の `BUILTIN_FUNCTIONS` と `DATE_FUNCTIONS`）。
+ * 用意されていない関数は `null`。
+ */
+function callValue(name: string, args: readonly EvaluatedValue[], clock: Clock): EvaluatedValue {
+  // 日付の関数（M1.3）。いまは `today` だけである。**時計は引数で受け取る**
+  // （Q17。評価の中で現在時刻を直接読まない）
+  if (Object.hasOwn(DATE_FUNCTIONS, name)) {
+    return name === "today" && args.length === 0 ? todayInTokyo(clock) : null;
+  }
   if (!Object.hasOwn(BUILTIN_FUNCTIONS, name)) return null;
   if (name === "len") {
     const [only] = args;
@@ -178,15 +230,16 @@ function evaluateNode(node: AstNode, scope: EvaluationScope): EvaluatedValue {
     case "binary": {
       const left = evaluateNode(node.left, scope);
       const right = evaluateNode(node.right, scope);
+      // 比較は数どうしと日付どうし（ほかは `null`）。計算は有限の数どうしだけである
+      if (isComparisonOperator(node.operator)) return compare(node.operator, left, right);
       if (!isFiniteNumber(left) || !isFiniteNumber(right)) return null;
-      return isComparisonOperator(node.operator)
-        ? compare(node.operator, left, right)
-        : arithmetic(node.operator, left, right);
+      return arithmetic(node.operator, left, right);
     }
     case "call":
       return callValue(
         node.name,
         node.args.map((argument) => evaluateNode(argument, scope)),
+        scope.clock,
       );
   }
 }
@@ -293,7 +346,8 @@ function evaluateEntity(request: EvaluationRequest, state: EvaluationState): Eva
     clock,
     resolve: (name) => {
       // 項目を先に見る（名前は重ならないが、検査と同じ優先の付け方にしておく）
-      if (Object.hasOwn(entity.fields, name)) return asExpressionValue(record[name]);
+      const declaration = entity.fields[name];
+      if (declaration !== undefined) return asExpressionValue(record[name], fieldKind(declaration));
       return resolveComputed(name);
     },
   };

@@ -578,6 +578,142 @@ describe("選択肢（enum）を含む宣言の配信", () => {
   );
 });
 
+// ── 日付（date）を含む宣言の配信と保存（M1.3。Issue #155） ──────────
+//
+// **配信側が読めること**と、**`YYYY-MM-DD` でない値を data-api が断ること**を確かめる。
+// 静的チェック（spec-engine）が通っても、`isFieldDeclaration` が新しい型を知らなければ
+// 正規化した JSON は読み取りで落ちて `getSpec` が **503（SPEC_UNAVAILABLE）** になる
+// （#145・#154 と同じ穴）。保存の判定は data-api（唯一の権限強制点）にある。
+//
+// 見本 `samples/task-board/` は #159 が置く。ここでは、その見本と同じ形の最小の宣言を組み立てる。
+
+const DATE_SOURCE = [
+  "entities:",
+  "  - name: task",
+  "    fields:",
+  "      title: string",
+  "      due: date",
+  "views:",
+  "  - name: taskList",
+  "    entity: task",
+  "actions:",
+  "  - name: addTask",
+  "    entity: task",
+  "validations:",
+  "  - name: dueBeforeToday",
+  "    entity: task",
+  "    expression: due < today()",
+  "computed: []",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+const dateNormalized = await normalizeSpec(DATE_SOURCE);
+if (!dateNormalized.ok) throw new Error("日付の宣言が静的チェックに通らない");
+
+const DATE_APP: NormalizedAppSpec = dateNormalized.app;
+/** publish が R2 に置く本文（`getSpec` に渡すのと同じ形） */
+const DATE_JSON = dateNormalized.json;
+
+/** 日付を含む宣言を R2 に置き、登録（D1）も同じ宣言を指すようにする */
+function withDateDeclaration(h: Harness): void {
+  h.registry.registration = {
+    sourceSha256: DATE_APP.sourceSha256,
+    schemaVersion: DATE_APP.schemaVersion,
+    sourceKey: `specs/${DATE_APP.sourceSha256}/app.spec.yaml`,
+    normalizedKey: `specs/${DATE_APP.sourceSha256}/normalized.json`,
+    createdAt: "2026-09-19T00:00:00.000Z",
+  };
+  h.specs.text = DATE_JSON;
+}
+
+describe("日付（date）を含む宣言の配信と保存", () => {
+  it("getSpec が ok で返し、date の項目を保つ（受入条件）", async () => {
+    const h = harness();
+    withDateDeclaration(h);
+
+    const result = await getSpec(h.deps, INSTANCE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.status).toBe(API_READ_STATUS);
+    expect(result.body.sourceSha256).toBe(DATE_APP.sourceSha256);
+    const task = result.body.spec.entities.find((entity) => entity.name === "task");
+    expect(task?.fields["due"]).toBe("date");
+  });
+
+  it("readNormalizedApp が、日付を含む正規化 JSON を読む（受入条件）", () => {
+    expect(readNormalizedApp(DATE_JSON)).toEqual(DATE_APP);
+  });
+
+  it("YYYY-MM-DD の値は保存され、書いた行が返る", async () => {
+    const h = harness();
+    withDateDeclaration(h);
+
+    const result = await createFromAction(h.deps, INSTANCE, "addTask", {
+      title: "宿の予約",
+      due: "2026-09-15",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.status).toBe(API_CREATED_STATUS);
+    expect(rowOf(result.body).fields).toEqual({ title: "宿の予約", due: "2026-09-15" });
+    expect(h.records.rows).toHaveLength(1);
+  });
+
+  it.each([
+    ["スラッシュ区切り", "2026/09/15"],
+    ["0 を詰めていない", "2026-9-5"],
+    ["時刻が付いている", "2026-09-15T00:00:00Z"],
+    ["空文字（未入力のまま送った）", ""],
+    ["数", 20260915],
+    ["null", null],
+    ["並び", ["2026-09-15"]],
+  ] as const)("YYYY-MM-DD でない値（%s）は保存されない（受入条件）", async (_label, due) => {
+    const h = harness();
+    withDateDeclaration(h);
+
+    const result = await createFromAction(h.deps, INSTANCE, "addTask", { title: "宿の予約", due });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.error).toBe("INPUT_REJECTED");
+    // 通らなかった項目の名前を返し、**保存しない**
+    expect(result.failure.fields).toEqual(["due"]);
+    expect(h.records.rows).toEqual([]);
+  });
+
+  it("差し込んだ時計（due < today()）が保存の可否を決める（受入条件）", async () => {
+    const h = harness();
+    withDateDeclaration(h);
+    // 差し込んだ時計（採点のシナリオ）は日本時間の 2026-09-16 である
+    const today = await createFromAction(h.deps, INSTANCE, "addTask", { title: "今日", due: "2026-09-16" });
+    expect(today.ok).toBe(false);
+    if (!today.ok) expect(today.failure.validations).toEqual(["dueBeforeToday"]);
+    expect(h.records.rows).toEqual([]);
+
+    const yesterday = await createFromAction(h.deps, INSTANCE, "addTask", {
+      title: "昨日",
+      due: "2026-09-15",
+    });
+    expect(yesterday.ok).toBe(true);
+    expect(h.records.rows).toHaveLength(1);
+  });
+
+  it("getView も ok で返し、date の項目を列に持つ", async () => {
+    const h = harness();
+    withDateDeclaration(h);
+
+    const result = await getView(h.deps, INSTANCE, "taskList");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.body.fields).toEqual(["title", "due"]);
+  });
+});
+
 // ── 権限（唯一の権限強制点） ────────────────────────────────────
 
 /** `permissions` を差し替えた宣言を R2 に置く（版と SHA は登録と一致させたまま） */

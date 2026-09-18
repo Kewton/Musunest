@@ -421,3 +421,36 @@ describe("選択肢（enum）と既定値（default）（checkInputTypes・M1.3�
     if (decided.ok) expect(decided.data["status"]).toBe("todo");
   });
 });
+
+// ── 日付（date）の型の検査（M1.3。Issue #155） ──────────────────────
+//
+// **保存する形は `YYYY-MM-DD` の文字列**である。形を断るのは data-api（唯一の権限強制点）だけで、
+// 画面の入力欄やブラウザが形を整えることは守りではない。
+
+describe("日付（date）の型の検査", () => {
+  const TASK: Entity = { name: "task", fields: { title: "string", due: "date" } };
+
+  /** 断られた項目の名前（通った場合は空） */
+  const fieldsOf = (due: unknown): readonly string[] => {
+    const result = checkInputTypes(TASK, { title: "宿の予約", due });
+    return result.ok ? [] : result.fields;
+  };
+
+  it("YYYY-MM-DD の形の文字列は通る（受入条件）", () => {
+    expect(fieldsOf("2026-09-15")).toEqual([]);
+    expect(fieldsOf("1999-12-31")).toEqual([]);
+  });
+
+  it.each([
+    ["スラッシュ区切り", "2026/09/15"],
+    ["0 を詰めていない", "2026-9-5"],
+    ["時刻が付いている", "2026-09-15T00:00:00Z"],
+    ["区切りが違う", "20260915"],
+    ["空文字（未入力のまま送った）", ""],
+    ["数", 20260915],
+    ["null", null],
+    ["並び", ["2026-09-15"]],
+  ] as const)("YYYY-MM-DD でない値（%s）は断る（受入条件）", (_label, due) => {
+    expect(fieldsOf(due)).toEqual(["due"]);
+  });
+});

@@ -1,0 +1,32 @@
+# 負例：today() に引数を渡している（today は引数を取らない。M1.3）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: task
+    fields:
+      title: string
+      due: date
+
+views:
+  - name: taskList
+    entity: task
+
+actions:
+  - name: addTask
+    entity: task
+
+validations:
+  - name: dueBeforeToday
+    entity: task
+    expression: due < today(1)
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

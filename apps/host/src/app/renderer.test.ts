@@ -1090,3 +1090,98 @@ describe("選択肢（enum）の入力欄", () => {
     expect(addRecord.mock.calls[0]?.[2]).toEqual({ title: "宿の予約", status: "todo", memo: "" });
   });
 });
+
+// ── 日付（date）の入力欄（M1.3。Issue #155） ─────────────────────────
+//
+// `formFields` が**宣言を入力欄へ写す**ことを見る。`form.test.ts` は入力欄の部品だけを見ていて、
+// 宣言からの写像を見ていない。ここが抜けると、部品が正しくても実画面に日付の欄が出ない——
+// #145（9 ゲート緑でも画面が真っ白）と同じ形の穴である。
+
+const DUE_SPEC: ApiSpecBody = {
+  ...SPEC,
+  spec: {
+    ...SPEC.spec,
+    entities: [
+      {
+        name: "task",
+        fields: {
+          title: "string",
+          due: "date",
+          memo: "string",
+        },
+      },
+    ],
+    views: [{ name: "taskList", entity: "task" }],
+    validations: [],
+    computed: [],
+  },
+  actions: [{ name: "addTask", entity: "task" }],
+};
+
+const DUE_VIEW: ApiViewBody = {
+  instanceId: "inst-1",
+  view: "taskList",
+  entity: "task",
+  fields: ["title", "due", "memo"],
+  computed: [],
+  permissions: { read: true, write: true },
+  actions: [{ name: "addTask", entity: "task" }],
+  rows: [],
+};
+
+/** 日付の項目を含む宣言を返す client（一覧は空。フォームは出る） */
+function dueClient(parts: Parameters<typeof makeClient>[0] = {}): MusunestClient {
+  return makeClient({
+    spec: () => Promise.resolve(okResult(DUE_SPEC)),
+    view: () => Promise.resolve(okResult(DUE_VIEW)),
+    ...parts,
+  });
+}
+
+describe("日付（date）の入力欄", () => {
+  it("宣言の日付の項目が、日付の入力欄として出る（受入条件）", async () => {
+    const { container } = await renderScreen(dueClient());
+
+    const due = (await screen.findByLabelText("due")) as HTMLInputElement;
+    expect(due.tagName).toBe("INPUT");
+    // ブラウザの日付の入力欄は、`YYYY-MM-DD` の値を扱う（保存する形と同じ）
+    expect(due.getAttribute("type")).toBe("date");
+    // 入力欄になるのは entity の項目だけで、宣言の順に並ぶ
+    expect(
+      Array.from(container.querySelectorAll("input, textarea")).map((control) =>
+        control.getAttribute("name"),
+      ),
+    ).toEqual(["title", "due", "memo"]);
+  });
+
+  it("未入力を空のまま送れる（今日を勝手に入れない。受入条件）", async () => {
+    const addRecord = vi.fn<MusunestClient["addRecord"]>(() =>
+      Promise.resolve(okResult(makeRow("t1", { title: "宿の予約", due: "", memo: "" }, {}))),
+    );
+    await renderScreen(dueClient({ add: addRecord }));
+
+    await screen.findByLabelText("due");
+    expect((screen.getByLabelText("due") as HTMLInputElement).value).toBe("");
+    fill("title", "宿の予約");
+    submit();
+
+    await waitFor(() => expect(addRecord).toHaveBeenCalledTimes(1));
+    // 空文字をそのまま送る。断るかどうかは data-api が決める（画面は守りではない）
+    expect(addRecord.mock.calls[0]?.[2]).toEqual({ title: "宿の予約", due: "", memo: "" });
+  });
+
+  it("選んだ日付が、そのまま `YYYY-MM-DD` の文字列として送られる", async () => {
+    const addRecord = vi.fn<MusunestClient["addRecord"]>(() =>
+      Promise.resolve(okResult(makeRow("t2", { title: "宿の予約", due: "2026-09-20", memo: "" }, {}))),
+    );
+    await renderScreen(dueClient({ add: addRecord }));
+
+    await screen.findByLabelText("due");
+    fill("title", "宿の予約");
+    fill("due", "2026-09-20");
+    submit();
+
+    await waitFor(() => expect(addRecord).toHaveBeenCalledTimes(1));
+    expect(addRecord.mock.calls[0]?.[2]).toEqual({ title: "宿の予約", due: "2026-09-20", memo: "" });
+  });
+});

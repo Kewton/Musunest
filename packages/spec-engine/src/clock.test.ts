@@ -1,11 +1,19 @@
-// 時計（評価に差し込む境界）の unit テスト（Issue #98。Q17）。
+// 時計（評価に差し込む境界）の unit テスト（Issue #98。Q17。日本時間の「今日」は #155）。
 //
-// ここで固定したいのは 3 つ。
+// ここで固定したいのは 4 つ。
 //   1. 採点のシナリオの時刻（オフセット付き）を、その瞬間として読む
 //   2. **オフセットの無い時刻を読まない**——実行する環境の時間帯で意味が変わり、採点が決定的でなくなる
 //   3. 実際の時計（systemClock）は現在時刻を返す。テストは固定した時計を使う
+//   4. **「今日」（todayInTokyo）は日本時間（UTC+9）で数える**——端末の時間帯でも UTC でもない（Q13）
 import { describe, expect, it } from "vitest";
-import { CLOCK_INSTANT_PATTERN, fixedClock, isClockInstant, systemClock } from "./clock.js";
+import {
+  CLOCK_INSTANT_PATTERN,
+  TOKYO_OFFSET_MINUTES,
+  fixedClock,
+  isClockInstant,
+  systemClock,
+  todayInTokyo,
+} from "./clock.js";
 
 /** 見本 expense-log の採点のシナリオの時計（appspec-schema の samples。ここでは値だけを使う） */
 const SCENARIO_CLOCK = "2026-09-16T12:00:00+09:00";
@@ -59,5 +67,59 @@ describe("実際の時計", () => {
     const after = Date.now();
     expect(now).toBeGreaterThanOrEqual(before);
     expect(now).toBeLessThanOrEqual(after);
+  });
+});
+
+// ── 日本時間の「今日」（today()。#155。Q13） ─────────────────────────
+//
+// 「今日」は**店頭の時計で日本時間（UTC+9）**に数える。端末の時間帯でも、UTC でもない。
+// 境界は 2 つある——UTC の日付が変わる時刻（日本時間 09:00）と、日本時間の日付が変わる時刻（UTC 15:00）。
+
+describe("日本時間の「今日」", () => {
+  it("日本時間のずれは +9 時間である（日本には夏時間が無い）", () => {
+    expect(TOKYO_OFFSET_MINUTES).toBe(9 * 60);
+  });
+
+  it("採点のシナリオの時計（日本時間の 12:00）では、その日の日付になる", () => {
+    expect(todayInTokyo(fixedClock(SCENARIO_CLOCK))).toBe("2026-09-16");
+    // 日本時間の 12:00 は UTC の 03:00 である（同じ瞬間）
+    expect(todayInTokyo(fixedClock("2026-09-16T03:00:00Z"))).toBe("2026-09-16");
+  });
+
+  it("UTC の日付が変わっても（日本時間 09:00 の前後でも）、日本時間の日付は変わらない（受入条件）", () => {
+    // 日本時間の 08:59 は UTC の前日 23:59 である。UTC で数えれば「昨日」になる
+    expect(todayInTokyo(fixedClock("2026-09-16T08:59:59+09:00"))).toBe("2026-09-16");
+    // 日本時間の 09:00 に UTC の日付が変わるが、日本時間の日付は同じである
+    expect(todayInTokyo(fixedClock("2026-09-16T09:00:00+09:00"))).toBe("2026-09-16");
+    expect(todayInTokyo(fixedClock("2026-09-15T23:59:00Z"))).toBe("2026-09-16");
+    expect(todayInTokyo(fixedClock("2026-09-16T00:00:00Z"))).toBe("2026-09-16");
+  });
+
+  it("日本時間の 00:00（UTC の 15:00）で日付が変わる", () => {
+    expect(todayInTokyo(fixedClock("2026-09-16T14:59:59Z"))).toBe("2026-09-16");
+    expect(todayInTokyo(fixedClock("2026-09-16T15:00:00Z"))).toBe("2026-09-17");
+  });
+
+  it("UTC の日付では数えない（両者が食い違う瞬間で確かめる）", () => {
+    const clock = fixedClock("2026-09-15T15:30:00Z"); // 日本時間の 2026-09-16 00:30
+    expect(new Date(clock.now()).toISOString().slice(0, 10)).toBe("2026-09-15");
+    expect(todayInTokyo(clock)).toBe("2026-09-16");
+  });
+
+  it("差し込んだ時計だけを読む（時計を替えれば「今日」も変わる）", () => {
+    expect(todayInTokyo(fixedClock("2026-09-16T12:00:00+09:00"))).toBe("2026-09-16");
+    expect(todayInTokyo(fixedClock("2026-09-17T12:00:00+09:00"))).toBe("2026-09-17");
+    expect(todayInTokyo(fixedClock("2026-12-31T12:00:00+09:00"))).toBe("2026-12-31");
+  });
+
+  it("月と年をまたぐ境界でも、日本時間で数える", () => {
+    // 日本時間の 2026-10-01 00:00（UTC の 2026-09-30 15:00）
+    expect(todayInTokyo(fixedClock("2026-09-30T15:00:00Z"))).toBe("2026-10-01");
+    // 日本時間の 2027-01-01 00:00（UTC の 2026-12-31 15:00）
+    expect(todayInTokyo(fixedClock("2026-12-31T15:00:00Z"))).toBe("2027-01-01");
+  });
+
+  it("返すのは YYYY-MM-DD の形である（保存する形と同じ）", () => {
+    expect(todayInTokyo(fixedClock(SCENARIO_CLOCK))).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });
