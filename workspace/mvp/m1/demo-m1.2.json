@@ -1,0 +1,130 @@
+{
+  "$comment": "M1.2 のデモの証跡。人が読むのは demos.md。URL・サブドメイン・資格情報はここに書かない（CLAUDE.md「このリポジトリは public である」）。",
+  "milestone": "M1.2",
+  "title": "割り勘の精算が出る",
+  "verifiedAt": "2026-09-18T00:00:00Z",
+  "verifiedAtNote": "ブラウザからの確認は 2026-09-18（UTC）。所有者のスマートフォンでの確認も同日。",
+  "verifiedBy": [
+    { "who": "所有者（Kewton）", "how": "スマートフォンの実機", "device": "Android", "browser": "Chrome", "versionsRecorded": false },
+    { "who": "窓口（main の Claude）", "how": "PC のブラウザと、手元からの HTTP 読み取り", "device": "macOS", "browser": "Chrome", "versionsRecorded": false }
+  ],
+  "commit": "c7258b6",
+  "instanceId": "m12-demo-warikan",
+  "environment": "staging",
+  "sample": {
+    "path": "packages/appspec-schema/samples/warikan/app.spec.yaml",
+    "schemaVersion": "community.app-spec/v0.2-draft",
+    "sourceSha256": "68131ce144dfa21eb98b0e968ab5de71c9d12c8aef9a0e765d9d7b7705f364e1"
+  },
+  "inputs": {
+    "members": ["A", "B", "C"],
+    "membersNote": "登録順。A→B→C",
+    "expenses": [
+      { "description": "夕食", "amount": 6000, "payer": "A", "participants": ["A", "B", "C"] },
+      { "description": "タクシー", "amount": 3000, "payer": "B", "participants": ["A", "B", "C"] }
+    ],
+    "enteredAt": "2026-09-17T12:41:30Z",
+    "enteredAtNote": "データは 2026-09-17 に入れたもの。2026-09-18 の観測は、その後の 6 回の配備（#146〜#153）を挟んで残っていることの確認でもある。"
+  },
+  "expected": {
+    "expenseCount": 2,
+    "shareAmount": { "夕食": 2000, "タクシー": 1000 },
+    "members": {
+      "A": { "paid": 6000, "owed": 3000, "balance": 3000 },
+      "B": { "paid": 3000, "owed": 3000, "balance": 0 },
+      "C": { "paid": 0, "owed": 3000, "balance": -3000 }
+    },
+    "settlement": [{ "from": "C", "to": "A", "amount": 3000 }]
+  },
+  "observations": [
+    {
+      "stage": "初回",
+      "by": "窓口",
+      "client": "PC のブラウザ（/apps/m12-demo-warikan）",
+      "expenseCount": 2,
+      "shareAmount": { "夕食": 2000, "タクシー": 1000 },
+      "members": {
+        "A": { "paid": 6000, "owed": 3000, "balance": 3000 },
+        "B": { "paid": 3000, "owed": 3000, "balance": 0 },
+        "C": { "paid": 0, "owed": 3000, "balance": -3000 }
+      },
+      "settlement": [{ "from": "C", "to": "A", "amount": 3000 }],
+      "settlementText": "C さん → A さん 3,000 円",
+      "matchesExpected": true
+    },
+    {
+      "stage": "再読込",
+      "by": "窓口",
+      "client": "同じ PC のブラウザで再読み込み",
+      "expenseCount": 2,
+      "shareAmount": { "夕食": 2000, "タクシー": 1000 },
+      "members": {
+        "A": { "paid": 6000, "owed": 3000, "balance": 3000 },
+        "B": { "paid": 3000, "owed": 3000, "balance": 0 },
+        "C": { "paid": 0, "owed": 3000, "balance": -3000 }
+      },
+      "settlement": [{ "from": "C", "to": "A", "amount": 3000 }],
+      "settlementText": "C さん → A さん 3,000 円",
+      "matchesExpected": true
+    },
+    {
+      "stage": "別端末",
+      "by": "所有者",
+      "client": "Android / Chrome（スマートフォンの実機）",
+      "expenseCount": 2,
+      "shareAmount": { "夕食": 2000, "タクシー": 1000 },
+      "members": {
+        "A": { "paid": 6000, "owed": 3000, "balance": 3000 },
+        "B": { "paid": 3000, "owed": 3000, "balance": 0 },
+        "C": { "paid": 0, "owed": 3000, "balance": -3000 }
+      },
+      "settlement": [{ "from": "C", "to": "A", "amount": 3000 }],
+      "settlementText": "C さん → A さん 3,000 円",
+      "matchesExpected": true,
+      "note": "所有者の確認は「期待通り」。画面の崩れも指摘なし。OS とブラウザの版は記録していない。"
+    },
+    {
+      "stage": "別クライアント（補助）",
+      "by": "窓口",
+      "client": "手元のプロセスから /api を直接読む（ブラウザを介さない）",
+      "expenseCount": 2,
+      "matchesExpected": true,
+      "note": "3 観測の要件には数えない。ブラウザの状態に依らないことの補助の証跡である。"
+    }
+  ],
+  "references": {
+    "e2eScoring": {
+      "issue": 110,
+      "pr": 148,
+      "what": "deploy-staging の貫通スモークのあとに、staging の見本を採点のシナリオで採点する",
+      "result": "成功"
+    },
+    "cpuMeasurement": {
+      "issue": 111,
+      "pr": 149,
+      "document": "workspace/mvp/m1/measurements.md",
+      "p7": "触れた",
+      "p1": "触れていない",
+      "dataApiMaxCpuMs": 60.6
+    },
+    "planPromotion": {
+      "issue": 150,
+      "pr": 151,
+      "what": "P-7 に抵触したので、アカウント①（dev + staging）を Workers Paid（$5/月＋従量）へ上げた",
+      "decidedAt": "2026-09-18",
+      "decidedBy": "所有者（Kewton）",
+      "productionAccount": "Free のまま（P-8：/api を出す前に無条件で上げる）"
+    },
+    "cpuWallFollowUp": {
+      "issue": 152,
+      "pr": 153,
+      "document": "workspace/mvp/m1/measurements-cpu-limit.md",
+      "result": "確定しなかった（10 ms を超えても exceededResources は 0 件）"
+    }
+  },
+  "gate": {
+    "m1aFinalGate": false,
+    "m1aFinalGateNote": "M1.2 の完了は M1a の最終ゲートではない。M1a は M1.5 の終わり（01-integration-strategy.md §5.3）。スキーマの正式版もピンの確定も、M1.2 の実績として記録しない。"
+  },
+  "completedOn": "2026-09-18"
+}
