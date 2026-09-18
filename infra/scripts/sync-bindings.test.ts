@@ -117,6 +117,15 @@ const DATA_API_STAGING_SYNCED = DATA_API.replace('"staging-old-name"', `"${STAGI
   .replace('"staging-old-uploads"', `"${STAGING.r2_uploads_name}"`)
   .replace('"staging-old-queue"', `"${STAGING.queue_build_name}"`);
 
+// Issue #152：`limits` は Terraform 由来の欄でも binding でもない（人が書く欄である）。infra:sync は値のトークンだけを
+// 差し替えるので **知らない欄は消えない**。ここが壊れると、dev の実験で入れた limits が同期のたびに消え、`--check` も誤検知する。
+/** `env.dev` に limits を足したテキスト（data-api の name はトップレベルにもあるので、`env.dev` のブロックで切る）。 */
+const addDevLimits = (text: string): string =>
+  text.replace(
+    '    "dev": {\n      "name": "musunest-dev-data-api",',
+    '    "dev": {\n      "name": "musunest-dev-data-api",\n      "limits": { "cpu_ms": 10 },',
+  );
+
 // gateway の形（03 §2）。Terraform 由来の欄を持たない。
 const GATEWAY = `{
   "name": "musunest-dev-gateway",
@@ -255,6 +264,21 @@ describe("syncBindings", () => {
 
   it("Terraform 由来の欄を持たない Worker（gateway）は変えない", () => {
     expect(syncBindings(STAGING, GATEWAY, { env: "staging" })).toEqual({ text: GATEWAY, changed: false, updated: [] });
+  });
+
+  it("env.dev の limits を消さず、同期のあとに差分を出さない（Issue #152）", () => {
+    const bindings = { ...STAGING, env: "dev" as const };
+    const result = syncBindings(bindings, addDevLimits(DATA_API), { env: "dev" });
+
+    expect(result.changed).toBe(true);
+    expect(result.updated).toEqual([
+      "env.dev.d1_databases[CONTROL_DB].database_id",
+      "env.dev.d1_databases[CONTROL_DB].database_name",
+    ]);
+    // limits は値のトークンではない（Terraform 由来でも binding でもない）ので、置換の前後でそのまま残る
+    expect(parse(result.text).env.dev.limits).toEqual({ cpu_ms: 10 });
+    // 同期のあとにもう一度回しても、limits を理由に差分は出ない（--check の誤検知を作らない）
+    expect(syncBindings(bindings, result.text, { env: "dev" })).toEqual({ text: result.text, changed: false, updated: [] });
   });
 
   it("wfp_namespace_name / turnstile_sitekey が null でも、参照が無ければ失敗しない", () => {
@@ -477,6 +501,28 @@ describe("runCli", () => {
     expect(runCli(["--env", "staging", "--check"], io)).toBe(EXIT_OK);
     expect(out).toEqual(["OK  3 ファイルが terraform output（env=staging）と一致"]);
     for (const t of findTargets(root)) expect(untouched(t)).toBe(true);
+  });
+
+  it("--check：Terraform 由来でない欄（limits）を乖離と見なさない（Issue #152）", () => {
+    write("packages/data-api/wrangler.jsonc", addDevLimits(DATA_API_STAGING_SYNCED));
+    expect(runCli(["--env", "staging", "--check"], io)).toBe(EXIT_OK);
+    expect(out).toEqual(["OK  3 ファイルが terraform output（env=staging）と一致"]);
+    for (const t of findTargets(root)) expect(untouched(t)).toBe(true);
+  });
+
+  it("書き戻しても env.dev の limits を消さない（Issue #152）", () => {
+    write("packages/data-api/wrangler.jsonc", addDevLimits(DATA_API));
+    write("bindings-dev.json", JSON.stringify({ ...STAGING, env: "dev" }));
+    expect(runCli(["--env", "dev", "--bindings", join(root, "bindings-dev.json")], io)).toBe(EXIT_OK);
+
+    const synced = parse(read("packages/data-api/wrangler.jsonc"));
+    expect(synced.env.dev.limits).toEqual({ cpu_ms: 10 });
+    expect(synced.env.dev.d1_databases[0]).toEqual({
+      binding: "CONTROL_DB",
+      database_name: STAGING.d1_control_name,
+      database_id: STAGING.d1_control_id,
+    });
+    expectNoValues(printed());
   });
 
   it("--bindings - で stdin から読む", () => {
