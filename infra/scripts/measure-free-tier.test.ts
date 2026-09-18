@@ -26,6 +26,7 @@ import {
   DEFAULT_PLAN,
   EXIT_NG,
   EXIT_OK,
+  EXIT_TOUCHED,
   EXIT_UNDETERMINED,
   FREE_CPU_LIMIT_MS,
   judgeAssets,
@@ -40,11 +41,13 @@ import {
   readCredentials,
   requestCount,
   ROOT_PATH,
+  runApiMeasurement,
   runCli,
   sanitize,
   scriptName,
   TARGET_ENV,
   UNKNOWN_SCRIPT,
+  WINDOW_PAD_MS,
   windowOf,
   WORKERS,
   type CliIo,
@@ -54,6 +57,7 @@ import {
   type MeasurePolicy,
   type Worker,
 } from "./measure-free-tier.ts";
+import { API_WORKERS, type ApiWorker, type ExceededReading } from "./api-measure-fixture.ts";
 import { HEALTHZ_PATH } from "./smoke.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -745,5 +749,581 @@ describe("nodeGet：host への GET", () => {
       await (await fetch(new URL(DEEP_LINK_PATH, origin), { headers: NAVIGATION_HEADERS })).text();
       expect(received[0]?.["sec-fetch-mode"]).toBe("cors");
     });
+  });
+});
+
+// ── 6. /api の経路の計測（Issue #111。--api）────────────────────────────────────
+//
+// **実環境には一切届かない。** 時計・sleep・HTTP（Cloudflare の API と staging の host）・Analytics・
+// 期間レポートを fake に差し替える。確かめるのは次の6つである。
+//   1. 各経路・各規模を 5 回温め → 60 秒空けて → 20 回測る（温めと本測定の窓が分かれる）
+//   2. 規模 2/20/200 件の準備（メンバー → 支出）と片付け（支出 → メンバー）の順
+//   3. API の応答が失敗したら、その場で止める（片付けは必ず行う）
+//   4. Analytics 不足・名前不明・反映待ち切れ・混入・読取権限不足では**非抵触にせず判断不能**
+//   5. P-7 は 7.001 ms で抵触、7.000 ms と和 7.5 ms では非抵触（判定に和を使わない）
+//   6. P-1 は過去 7 日の 1 件で抵触。読めなければ判断不能
+
+const API_INSTANCE = "m12-cpu-warikan";
+
+/** 試験用の待ち方。待ち時間は fake の時計が進むだけなので、現実の待ちは無い */
+const API_FAST = {
+  warmup: 5,
+  measured: 20,
+  gapMs: 60_000,
+  firstReadDelayMs: 12_000,
+  pollIntervalMs: 4_000,
+  maxWaitMs: 60_000,
+  requestTimeoutMs: 1_000,
+} as const;
+
+interface ApiCall {
+  readonly method: string;
+  readonly url: string;
+  /** actions の経路の最後の段。GET の spec / views では空 */
+  readonly action: string;
+  /** この呼出のときの fake の時計（ミリ秒） */
+  readonly at: number;
+}
+
+interface ApiFakeOptions {
+  /** 本測定の窓の Worker ごとの max.cpuTime（µs）。既定は host 1000・gateway 800・data-api 5000 */
+  readonly cpuMaxUs?: Partial<Record<ApiWorker, number>>;
+  /** 窓の Worker ごとの回数（既定 20 = 送った数と同じ） */
+  readonly requests?: number;
+  /** Worker の行を落とす（反映不足を作る） */
+  readonly dropWorker?: ApiWorker;
+  /** 名前が __unknown__ の起動を足す */
+  readonly unknownRequests?: number;
+  /** 反映待ちを終わらせない（読むたびに値が変わる） */
+  readonly neverSettles?: boolean;
+  /** Date ヘッダを固定する（温めと本測定の窓を重ねる） */
+  readonly fixedDate?: boolean;
+  /** 行の並びを読みごとに入れ替える（Analytics が並びを保証しないことを模す） */
+  readonly reverseOrder?: boolean;
+  /** この番号の窓だけ行を返さない（反映が 1 つの窓だけ遅れる） */
+  readonly badWindowIndex?: number;
+  /** この経路の index 回目の GET を失敗させる（index は宣言の読み込みを 1 とする） */
+  readonly failGet?: { readonly routeId: string; readonly index: number; readonly status: number };
+}
+
+interface ApiFake {
+  readonly fetch: typeof fetch;
+  readonly calls: readonly ApiCall[];
+  /** host への GET のパス（それ以外は含まない） */
+  hostGets(): readonly ApiCall[];
+  actions(): readonly string[];
+  sleeps(): readonly number[];
+  queries(): readonly string[];
+}
+
+/** 一覧の行（fake の応答） */
+const apiRow = (id: string, fields: Record<string, unknown>, computed: Record<string, number>): unknown => ({
+  id,
+  createdAt: "2026-09-17T03:00:00.000Z",
+  updatedAt: "2026-09-17T03:00:00.000Z",
+  fields,
+  computed,
+});
+
+/** 経路の名前（/api/instances/<id>/spec と /views/<name> から引く） */
+const apiRouteIdOf = (path: string): string => {
+  if (path.endsWith("/spec")) return "spec";
+  const match = /\/views\/([^/]+)$/.exec(path);
+  return match?.[1] ?? path;
+};
+
+function createApiFake(options: ApiFakeOptions = {}, now: () => number = () => Date.now()): ApiFake {
+  const members: { id: string; name: string }[] = [];
+  const expenses: { id: string; description: string; amount: number; payer: string; participants: string[] }[] = [];
+  const calls: ApiCall[] = [];
+  const sleeps: number[] = [];
+  const queries: string[] = [];
+  const counts = new Map<string, number>();
+  let counter = 0;
+  let reads = 0;
+  const nextId = (prefix: string): string => `${prefix}-${String(++counter).padStart(4, "0")}`;
+
+  const dateHeader = (): string => (options.fixedDate === true ? "Thu, 17 Sep 2026 03:00:00 GMT" : new Date(now()).toUTCString());
+  const json = (body: unknown, status = 200): Response =>
+    Response.json(body, { status, headers: { date: dateHeader() } });
+
+  const specActions = [
+    { name: "addMember", entity: "member" },
+    { name: "addExpense", entity: "expense", kind: "create" },
+    { name: "editExpense", entity: "expense", kind: "update" },
+    { name: "deleteExpense", entity: "expense", kind: "delete" },
+    { name: "deleteMember", entity: "member", kind: "delete" },
+  ];
+
+  const handleGet = (url: URL): Response => {
+    const routeId = apiRouteIdOf(url.pathname);
+    const index = (counts.get(routeId) ?? 0) + 1;
+    counts.set(routeId, index);
+    if (options.failGet !== undefined && options.failGet.routeId === routeId && options.failGet.index === index) {
+      return json({ error: "SPEC_UNAVAILABLE" }, options.failGet.status);
+    }
+    const instanceId = decodeURIComponent(url.pathname.split("/")[3] ?? "");
+    if (routeId === "spec") {
+      return json({
+        instanceId,
+        schemaVersion: "community.app-spec/v0.2-draft",
+        sourceSha256: "0".repeat(64),
+        spec: {
+          entities: [{ name: "member", fields: { name: "string" } }],
+          views: [],
+          actions: specActions,
+          validations: [],
+          computed: [],
+          permissions: [{ name: "read" }],
+          minIdentity: { mode: "anonymous" },
+        },
+        permissions: { read: true, write: true },
+        actions: specActions,
+      });
+    }
+    if (routeId === "expenseList") {
+      return json({
+        instanceId,
+        view: "expenseList",
+        entity: "expense",
+        fields: ["description", "amount", "payer", "participants"],
+        computed: ["headcount", "shareAmount"],
+        permissions: { read: true, write: true },
+        actions: specActions.filter((action) => action.entity === "expense"),
+        rows: expenses.map((expense) =>
+          apiRow(
+            expense.id,
+            { description: expense.description, amount: expense.amount, payer: expense.payer, participants: expense.participants },
+            { headcount: expense.participants.length, shareAmount: Math.floor(expense.amount / Math.max(1, expense.participants.length)) },
+          ),
+        ),
+      });
+    }
+    if (routeId === "memberList" || routeId === "settlement") {
+      return json({
+        instanceId,
+        view: routeId,
+        entity: "member",
+        fields: ["name"],
+        computed: ["paid", "owed", "balance"],
+        permissions: { read: true, write: true },
+        actions: specActions.filter((action) => action.entity === "member"),
+        rows: members.map((member) => apiRow(member.id, { name: member.name }, { paid: 0, owed: 0, balance: 0 })),
+        ...(routeId === "settlement" ? { settlement: [] } : {}),
+      });
+    }
+    return json({ error: "NOT_FOUND" }, 404);
+  };
+
+  const handleAction = (name: string, input: Record<string, unknown>): Response => {
+    if (name === "addMember") {
+      const member = { id: nextId("member"), name: String(input["name"] ?? "") };
+      members.push(member);
+      return json(apiRow(member.id, { name: member.name }, {}), 201);
+    }
+    if (name === "addExpense") {
+      const expense = {
+        id: nextId("expense"),
+        description: String(input["description"] ?? ""),
+        amount: Number(input["amount"] ?? 0),
+        payer: String(input["payer"] ?? ""),
+        participants: Array.isArray(input["participants"]) ? (input["participants"] as string[]) : [],
+      };
+      expenses.push(expense);
+      return json(apiRow(expense.id, { description: expense.description, amount: expense.amount }, {}), 201);
+    }
+    if (name === "deleteExpense" || name === "deleteMember") {
+      const entity = name === "deleteExpense" ? "expense" : "member";
+      const id = String(input["id"] ?? "");
+      if (entity === "expense") {
+        const at = expenses.findIndex((expense) => expense.id === id);
+        if (at < 0) return json({ error: "NOT_FOUND" }, 404);
+        expenses.splice(at, 1);
+      } else {
+        const referenced = expenses.some((expense) => expense.payer === id || expense.participants.includes(id));
+        // #109：参照されているメンバーは消せない（支出を先に消さないと 409 で残る）
+        if (referenced) return json({ error: "REFERENCE_IN_USE", references: [{ entity: "expense", field: "payer", count: 1 }] }, 409);
+        const at = members.findIndex((member) => member.id === id);
+        if (at < 0) return json({ error: "NOT_FOUND" }, 404);
+        members.splice(at, 1);
+      }
+      return json({ entity, id, deleted: true });
+    }
+    return json({ error: "NOT_FOUND" }, 404);
+  };
+
+  /** 本測定の窓の行（Worker ごと1行）。窓の数は問い合わせの別名（w0・w1…）から数える */
+  const analytics = (query: string): unknown => {
+    reads++;
+    const count = query.match(/w\d+: workersInvocationsAdaptive/g)?.length ?? 0;
+    const accounts: Record<string, unknown> = {};
+    for (let index = 0; index < count; index++) {
+      if (options.badWindowIndex === index) {
+        accounts[`w${index}`] = [];
+        continue;
+      }
+      const rows: unknown[] = [];
+      for (const worker of API_WORKERS) {
+        if (worker === options.dropWorker) continue;
+        const maxUs = (options.cpuMaxUs?.[worker] ?? { host: 1000, gateway: 800, "data-api": 5000 }[worker]) + (options.neverSettles === true ? reads * 100 : 0);
+        const requests = options.requests ?? 20;
+        rows.push({
+          dimensions: { scriptName: scriptName(worker) },
+          sum: { requests, errors: 0, cpuTimeUs: maxUs * requests },
+          max: { cpuTime: maxUs },
+          quantiles: { cpuTimeP50: maxUs, cpuTimeP99: maxUs },
+          avg: { sampleInterval: 1 },
+        });
+      }
+      if (options.unknownRequests !== undefined && options.unknownRequests > 0) {
+        rows.push({
+          dimensions: { scriptName: UNKNOWN_SCRIPT },
+          sum: { requests: options.unknownRequests, errors: 0, cpuTimeUs: 1000 },
+          max: { cpuTime: 1000 },
+          quantiles: { cpuTimeP50: 1000, cpuTimeP99: 1000 },
+          avg: { sampleInterval: 1 },
+        });
+      }
+      if (options.reverseOrder === true && reads % 2 === 0) rows.reverse();
+      accounts[`w${index}`] = rows;
+    }
+    return { data: { viewer: { accounts: [accounts] } }, errors: null };
+  };
+
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    const path = url.pathname;
+    const action = /\/actions\/([^/]+)$/.exec(path)?.[1] ?? "";
+    calls.push({ method, url: `${url.host}${path}`, action: decodeURIComponent(action), at: now() });
+    if (url.host === "api.cloudflare.com") {
+      if (path.endsWith("/workers/subdomain")) {
+        return json({ success: true, errors: [], result: { subdomain: "fake-sub-7f3a" } });
+      }
+      if (path.endsWith("/graphql")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { query: string };
+        queries.push(body.query);
+        return json(analytics(body.query));
+      }
+      return json({ success: false }, 404);
+    }
+    if (method === "GET") return handleGet(url);
+    const input2 = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    return handleAction(action, input2);
+  };
+
+  return {
+    fetch: fetchImpl,
+    calls,
+    hostGets: () => calls.filter((call) => call.method === "GET" && !call.url.startsWith("api.cloudflare.com")),
+    actions: () => calls.filter((call) => call.action !== "").map((call) => call.action),
+    sleeps: () => sleeps,
+    queries: () => queries,
+  };
+}
+
+/** 計測モードの argv と fake の io を組む */
+interface ApiRunOptions {
+  readonly sizes?: string;
+  readonly routes?: string;
+  readonly warm?: string;
+  readonly count?: string;
+  readonly fake?: ApiFakeOptions;
+  readonly p1?: ExceededReading | undefined;
+  readonly p1Throws?: boolean;
+  readonly instance?: string;
+  readonly extraArgv?: readonly string[];
+  readonly policy?: typeof API_FAST;
+}
+
+async function runApiMode(options: ApiRunOptions = {}) {
+  let clock = Date.parse("2026-09-17T03:00:00.000Z");
+  const fake = createApiFake(options.fake ?? {}, () => clock);
+  const out: string[] = [];
+  const err: string[] = [];
+  const sleeps: number[] = [];
+  const io = {
+    env: { CLOUDFLARE_API_TOKEN: TOKEN, CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID },
+    out: (line: string) => out.push(line),
+    err: (line: string) => err.push(line),
+    fetch: fake.fetch,
+    now: () => clock,
+    sleep: async (ms: number) => {
+      sleeps.push(ms);
+      clock += ms;
+    },
+    policy: options.policy ?? API_FAST,
+    readExceeded: async (): Promise<ExceededReading | undefined> => {
+      if (options.p1Throws === true) throw new MeasureError("Analytics を読む権限が足りない");
+      return options.p1 ?? { musunest: 0, unknown: 0, since: "2026-09-11", until: "2026-09-17" };
+    },
+  };
+  const argv = [
+    "--instance",
+    options.instance ?? API_INSTANCE,
+    ...(options.sizes === undefined ? [] : ["--sizes", options.sizes]),
+    ...(options.routes === undefined ? [] : ["--routes", options.routes]),
+    ...(options.warm === undefined ? [] : ["--warm", options.warm]),
+    ...(options.count === undefined ? [] : ["--count", options.count]),
+    ...(options.extraArgv ?? []),
+  ];
+  const code = await runApiMeasurement(argv, io);
+  return { code, out, err, all: [...out, ...err].join("\n"), fake, sleeps, io };
+}
+
+describe("API の計測：5 回温め → 60 秒空けて → 20 回測る", () => {
+  it("spec の経路を、宣言の読み込み 1 回 + 温め 5 回 + 本測定 20 回 送り、温めと本測定の間を 60 秒空ける", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec" });
+    expect(run.code).toBe(EXIT_OK);
+    const specGets = run.fake.hostGets().filter((call) => call.url.endsWith("/spec"));
+    expect(specGets).toHaveLength(26);
+    const warmLast = specGets[5];
+    const measuredFirst = specGets[6];
+    expect(warmLast).toBeDefined();
+    expect(measuredFirst).toBeDefined();
+    expect((measuredFirst?.at ?? 0) - (warmLast?.at ?? 0)).toBeGreaterThanOrEqual(API_FAST.gapMs);
+    expect(run.sleeps).toContain(API_FAST.gapMs);
+    // Analytics は、本測定の窓だけを読む（w0 が 1 つ）。2 回続けて同じ値になるまで読む
+    expect(run.fake.queries().length).toBeGreaterThanOrEqual(2);
+    for (const query of run.fake.queries()) {
+      expect(query.match(/w\d+: workersInvocationsAdaptive/g)).toHaveLength(1);
+    }
+    expect(run.all).toContain("本測定 20 回");
+  });
+
+  it("温めと本測定の窓が重なったら（同じ秒に収まったら）判定せずに止める", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec", fake: { fixedDate: true } });
+    expect(run.code).toBe(EXIT_NG);
+    expect(run.all).toContain("温めの窓と本測定の窓が重なる");
+    expect(run.fake.queries()).toHaveLength(0);
+  });
+});
+
+describe("API の計測：規模 2/20/200 件の準備と片付けの順", () => {
+  it("規模ごとに メンバー3 → 支出N → （計測）→ 支出N削除 → メンバー3削除 の順で、支出が先に消える", async () => {
+    const run = await runApiMode({ sizes: "basic,20,200", routes: "spec" });
+    expect(run.code).toBe(EXIT_OK);
+    const actions = run.fake.actions();
+    expect(actions.filter((name) => name === "addMember")).toHaveLength(9);
+    expect(actions.filter((name) => name === "addExpense")).toHaveLength(222);
+    expect(actions.filter((name) => name === "deleteExpense")).toHaveLength(222);
+    expect(actions.filter((name) => name === "deleteMember")).toHaveLength(9);
+    // 支出の削除が、メンバーの削除より先（参照されているメンバーを先に消すと 409 で残る）
+    expect(actions.indexOf("deleteExpense")).toBeLessThan(actions.indexOf("deleteMember"));
+    // 先頭の規模（基本）は メンバー 3 → 支出 2 → 支出 2 削除 → メンバー 3 削除
+    expect(actions.slice(0, 10)).toEqual([
+      "addMember", "addMember", "addMember", "addExpense", "addExpense",
+      "deleteExpense", "deleteExpense", "deleteMember", "deleteMember", "deleteMember",
+    ]);
+    expect(run.out.join("\n")).toContain("メンバー 3・支出 200");
+  });
+
+  it("準備と片付けは計測の窓の外（片付けの GET は本測定の窓の後）", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec" });
+    const specGets = run.fake.hostGets().filter((call) => call.url.endsWith("/spec"));
+    // 宣言 1 + 温め 5 + 本測定 20 = 26。最後の 1 つが本測定の最後
+    const lastMeasured = specGets[25];
+    expect(lastMeasured).toBeDefined();
+    // そのあとの最初の一覧の GET（片付け）は、窓の余白（WINDOW_PAD_MS）より後ろにある
+    const after = run.fake
+      .hostGets()
+      .filter((call) => call.url.includes("/views/") && call.at > (lastMeasured?.at ?? 0));
+    expect(after.length).toBeGreaterThan(0);
+    expect((after[0]?.at ?? 0) - (lastMeasured?.at ?? 0)).toBeGreaterThanOrEqual(WINDOW_PAD_MS);
+    expect(run.code).toBe(EXIT_OK);
+  });
+});
+
+describe("API の計測：応答が失敗したらその場で止める", () => {
+  it("本測定の 3 回目が 503 なら、そこで止めて片付けだけを行う（exit 1）", async () => {
+    const run = await runApiMode({
+      sizes: "basic",
+      routes: "spec",
+      fake: { failGet: { routeId: "spec", index: 9, status: 503 } },
+    });
+    // 宣言 1 + 温め 5 + 本測定 3（3 回目で失敗）
+    expect(run.code).toBe(EXIT_NG);
+    expect(run.all).toContain("HTTP 503");
+    expect(run.fake.hostGets().filter((call) => call.url.endsWith("/spec"))).toHaveLength(9);
+    expect(run.fake.queries()).toHaveLength(0);
+    // 片付け（支出 → メンバー）は行う
+    expect(run.fake.actions().filter((name) => name.startsWith("delete"))).toContain("deleteExpense");
+  });
+
+  it("宣言（spec）の応答が失敗しても、そこで止める", async () => {
+    const run = await runApiMode({
+      sizes: "basic",
+      routes: "spec",
+      fake: { failGet: { routeId: "spec", index: 1, status: 503 } },
+    });
+    expect(run.code).toBe(EXIT_NG);
+    expect(run.all).toContain("HTTP 503");
+    expect(run.fake.actions()).toHaveLength(0);
+  });
+});
+
+describe("API の計測：判断不能（非抵触と報告しない）", () => {
+  it("Worker の行が欠けていれば判断不能（exit 2）", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec", fake: { dropWorker: "gateway" } });
+    expect(run.code).toBe(EXIT_UNDETERMINED);
+    expect(run.all).toContain("判断不能");
+    expect(run.all).toContain("gateway");
+  });
+
+  it("名前が __unknown__ の起動があれば判断不能", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec", fake: { unknownRequests: 3 } });
+    expect(run.code).toBe(EXIT_UNDETERMINED);
+    expect(run.all).toContain(UNKNOWN_SCRIPT);
+  });
+
+  it("窓の回数が送った数より多ければ（他の通信の混入）判断不能", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec", fake: { requests: 100 } });
+    expect(run.code).toBe(EXIT_UNDETERMINED);
+    expect(run.all).toContain("合わない");
+  });
+
+  it("窓の回数が足りなければ（反映不足）判断不能", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec", fake: { requests: 2 } });
+    expect(run.code).toBe(EXIT_UNDETERMINED);
+    expect(run.all).toContain("反映を待ちきれなかった");
+  });
+
+  it("反映を待ちきれなければ判断不能", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec", fake: { neverSettles: true } });
+    expect(run.code).toBe(EXIT_UNDETERMINED);
+    expect(run.all).toContain("反映を待ちきれなかった");
+  });
+
+  it("行の並びが読みごとに変わっても、値が同じなら落ち着いたと見なす", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec", fake: { reverseOrder: true } });
+    expect(run.code).toBe(EXIT_OK);
+    expect(run.all).toContain("触れていない");
+  });
+
+  it("1 つの窓が落ち着かなくても、ほかの窓は判定する（巻き込まない）", async () => {
+    const run = await runApiMode({
+      sizes: "basic",
+      routes: "spec,expenseList",
+      fake: { badWindowIndex: 1 },
+    });
+    expect(run.code).toBe(EXIT_UNDETERMINED);
+    // 1 つ目の窓（spec）は判定できている（Worker ごとの max が出る）
+    expect(run.all).toContain("basic / spec: host 1.00 ms");
+    expect(run.all).toContain("data-api 5.00 ms");
+    // 2 つ目の窓（expenseList）だけが判断不能（max を出さない）
+    expect(run.all).toContain("basic / expenseList: —");
+    expect(run.all).toContain("判断不能");
+  });
+
+  it("過去 7 日の期間レポートを読めなければ P-1 は判断不能（P-7 が非抵触でも exit 2）", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec", p1Throws: true });
+    expect(run.code).toBe(EXIT_UNDETERMINED);
+    expect(run.all).toContain("P-1: 判断不能");
+    expect(run.all).toContain("非抵触と報告しない");
+  });
+});
+
+describe("API の計測：P-7 と P-1 の判定", () => {
+  it("単体の最大が 7.000 ms 以下で和が 7 ms を超えても非抵触（exit 0）", async () => {
+    const run = await runApiMode({
+      sizes: "basic",
+      routes: "spec",
+      fake: { cpuMaxUs: { host: 3000, gateway: 2500, "data-api": 2000 } },
+    });
+    expect(run.code).toBe(EXIT_OK);
+    expect(run.all).toContain("触れていない");
+    expect(run.all).toContain("和 7.50 ms");
+    expect(run.all).toContain("判定に使わない");
+  });
+
+  it("単体の最大が 7.001 ms なら P-7 に触れる（exit 3）", async () => {
+    const run = await runApiMode({
+      sizes: "basic",
+      routes: "spec",
+      fake: { cpuMaxUs: { host: 1000, gateway: 800, "data-api": 7001 } },
+    });
+    expect(run.code).toBe(EXIT_TOUCHED);
+    expect(run.all).toContain("P-7");
+    expect(run.all).toContain("触れた");
+    expect(run.all).toContain("管理を通じて窓口へ返す");
+  });
+
+  it("7.000 ms ちょうどなら P-7 に触れない（exit 0）", async () => {
+    const run = await runApiMode({
+      sizes: "basic",
+      routes: "spec",
+      fake: { cpuMaxUs: { host: 7000, gateway: 7000, "data-api": 7000 } },
+    });
+    expect(run.code).toBe(EXIT_OK);
+    expect(run.all).toContain("触れていない");
+  });
+
+  it("過去 7 日に上限超過が 1 件あれば P-1 に触れる（P-7 が非抵触でも exit 3）", async () => {
+    const run = await runApiMode({
+      sizes: "basic",
+      routes: "spec",
+      p1: { musunest: 1, unknown: 0, since: "2026-09-11", until: "2026-09-17" },
+    });
+    expect(run.code).toBe(EXIT_TOUCHED);
+    expect(run.all).toContain("P-1: 触れた");
+  });
+});
+
+describe("API の計測：上限と境界", () => {
+  it("経路を合算して上限を緩めない（4 経路 × 25 回でも、1 経路ずつは 50 回以内）", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec,expenseList,memberList,settlement" });
+    expect(run.code).toBe(EXIT_OK);
+    // 4 経路 × (温め 5 + 本測定 20) = 100 回を送っている（合算して上限を緩めていない）
+    expect(run.fake.hostGets().length).toBeGreaterThan(100);
+  });
+
+  it("温め + 本測定が 50 回を超える指定は、1 回も送らずに exit 1", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec", warm: "30", count: "21" });
+    expect(run.code).toBe(EXIT_NG);
+    expect(run.fake.calls).toHaveLength(0);
+    expect(run.all).toContain("合算して上限を緩めない");
+  });
+
+  it("demo を含むインスタンス ID は触らない（exit 1・1 回も送らない）", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec", instance: "m12-demo-warikan" });
+    expect(run.code).toBe(EXIT_NG);
+    expect(run.fake.calls).toHaveLength(0);
+  });
+
+  it("--instance が無ければ exit 1・1 回も送らない", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec", instance: "" });
+    expect(run.code).toBe(EXIT_NG);
+    expect(run.fake.calls).toHaveLength(0);
+  });
+
+  it("--api --help は使い方を出して exit 0", async () => {
+    const run = await runApiMode({ extraArgv: ["--help"] });
+    expect(run.code).toBe(EXIT_OK);
+    expect(run.out.join("\n")).toContain("--instance");
+  });
+});
+
+describe("API の計測：CLI への結線", () => {
+  it("runCli が --api を API の計測へ回す（既存の計測コマンドに API 用のモードを足す）", async () => {
+    let clock = Date.parse("2026-09-17T03:00:00.000Z");
+    const fake = createApiFake({}, () => clock);
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await runCli(["--api", "--instance", API_INSTANCE, "--sizes", "basic", "--routes", "spec"], {
+      env: { CLOUDFLARE_API_TOKEN: TOKEN, CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID },
+      out: (line) => out.push(line),
+      err: (line) => err.push(line),
+      fetch: fake.fetch,
+      get: async () => ({ status: 200, contentType: "text/html", date: null, text: "" }),
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      policy: { requestTimeoutMs: 1_000, phaseGapMs: 8_000, firstReadDelayMs: 60_000, pollIntervalMs: 30_000, maxWaitMs: 300_000 },
+      apiPolicy: API_FAST,
+      readExceeded: async () => ({ musunest: 0, unknown: 0, since: "2026-09-11", until: "2026-09-17" }),
+    });
+    expect(code).toBe(EXIT_OK);
+    expect(out.join("\n")).toContain("api-measure");
   });
 });

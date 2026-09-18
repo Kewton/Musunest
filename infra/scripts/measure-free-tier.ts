@@ -76,6 +76,33 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { HEALTHZ_PATH, judge as judgeHealthz } from "./smoke.ts";
 import type { Env } from "./sync-bindings.ts";
+// /api の経路の計測（Issue #111）の測定条件と判定の正本。ここから値は読むだけで、書き戻さない。
+import {
+  actionPath,
+  API_GAP_MS,
+  API_MEASURED_REQUESTS,
+  API_MEMBER_NAMES,
+  API_ROUTES,
+  API_SIZES,
+  API_WARMUP_REQUESTS,
+  API_WORKERS,
+  expensePlans,
+  judgeP1,
+  judgeP7,
+  routeById,
+  routePath,
+  sizeById,
+  type ApiRoute,
+  type ApiRouteId,
+  type ApiSize,
+  type ApiSizeId,
+  type ApiWorker,
+  type ExceededReading,
+  type P1Finding,
+  type P7Finding,
+  type Verdict,
+  type Verdicts,
+} from "./api-measure-fixture.ts";
 
 /** 測る環境。production は別アカウントで、詳細を隠す healthz なので測らない。dev は常設していない。 */
 export const TARGET_ENV = "staging" as const satisfies Env;
@@ -148,6 +175,8 @@ export const WINDOW_PAD_MS = 2_000;
 export const EXIT_OK = 0;
 export const EXIT_NG = 1;
 export const EXIT_UNDETERMINED = 2;
+/** `--api` の計測で P-7 か P-1 に触れた（**管理を通じて窓口へ返す**。課金の操作は人が行う。Issue #111）。 */
+export const EXIT_TOUCHED = 3;
 
 /** 値を含まない、そのまま利用者へ見せてよい失敗。 */
 export class MeasureError extends Error {
@@ -667,6 +696,745 @@ export function judgeCpu(invocations: readonly InvocationRow[], sent: number, li
   return { ...base, outcome: "within", reason: `合算しても上限（${limitMs} ms）に収まる` };
 }
 
+// ── /api の経路の計測（Issue #111。--api）────────────────────────────────────────
+//
+// 測る条件（経路・規模・温め方・P-7/P-1 の線）は api-measure-fixture.ts が正本である。ここが持つのは
+// **送る・待つ・読む**である。時計・sleep・HTTP・Analytics・期間レポートは io から受け取る（unit は fake を渡す）。
+//
+//   pnpm exec tsx --env-file=.env infra/scripts/measure-free-tier.ts --api --instance <計測用の ID>
+//
+// ── 手順 ──────────────────────────────────────────────────────────────────────
+//   1. 宣言（spec の経路）を読み、action の名前を引く（**計測の窓の外**）
+//   2. P-1：過去 7 日の上限超過を、既存の期間レポート（free-tier-report.ts）を **別に読んで**判定する
+//      （20 回の窓で 0 件という理由だけで非抵触にしない）
+//   3. 規模ごとに：前の残りを片付ける → 準備する（**計測の窓の外**）→ 経路ごとに **5 回温め → 60 秒空けて →
+//      20 回測る** → 片付ける（支出 → メンバーの順。#109 の delete）
+//   4. 本測定の窓だけを Analytics から読み（2 回続けて同じ値になり、送った分が出揃うまで待つ）、P-7 を判定する
+//
+// ── 終了コード ────────────────────────────────────────────────────────────────
+//   0 … すべて判定できて、P-7・P-1 のどちらにも触れていない
+//   1 … 引数・資格情報・HTTP・API の失敗（**応答が失敗したらその場で止める**。片付けは必ず行う）
+//   2 … 判定できない（Analytics 不足・名前不明・反映待ち切れ・混入・読取権限不足）
+//   3 … P-7 か P-1 に触れた（**管理を通じて窓口へ返す**。Workers Paid への変更は人が行う）
+
+/** 計測用インスタンスの ID の形（publish の検査と同じ）。値はエラーに出さない */
+const API_INSTANCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** デモ・窓口のインスタンスを触らないための目印（専用の計測インスタンスの ID に demo を含めない） */
+const API_DEMO_INSTANCE = /demo/i;
+
+export const API_FLAG = "--api";
+
+/** `--api` の待ち方。既定は「5 回温め → 60 秒空けて → 20 回測る」（Q15・06 §8 の再測と同じ）。 */
+export interface ApiMeasurePolicy {
+  /** 本測定の前に送る回数（温め） */
+  readonly warmup: number;
+  /** 1 経路・1 規模ごとに測る回数 */
+  readonly measured: number;
+  /** 温めと本測定の間。**窓を分ける**ために空ける */
+  readonly gapMs: number;
+  readonly firstReadDelayMs: number;
+  readonly pollIntervalMs: number;
+  readonly maxWaitMs: number;
+  readonly requestTimeoutMs: number;
+}
+
+export const API_MEASURE_POLICY: ApiMeasurePolicy = {
+  warmup: API_WARMUP_REQUESTS,
+  measured: API_MEASURED_REQUESTS,
+  gapMs: API_GAP_MS,
+  firstReadDelayMs: 60_000,
+  pollIntervalMs: 30_000,
+  maxWaitMs: 15 * 60_000,
+  requestTimeoutMs: 10_000,
+};
+
+/** 過去 7 日の上限超過を読む口（P-1）。既定は free-tier-report.ts を動的に読む（値は出力に出さない）。 */
+export type ExceededReader = (
+  io: ApiMeasureIo,
+  credentials: Credentials,
+  secrets: readonly string[],
+) => Promise<ExceededReading | undefined>;
+
+/** `--api` が使う口。時計・sleep・HTTP・Analytics・期間レポートを差し替えられる。 */
+export interface ApiMeasureIo {
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly out: (line: string) => void;
+  readonly err: (line: string) => void;
+  /** Cloudflare の API（サブドメイン・GraphQL）と staging の専用インスタンス（/api/*）を呼ぶ */
+  readonly fetch: typeof fetch;
+  readonly now: () => number;
+  readonly sleep: (ms: number) => Promise<void>;
+  readonly policy: ApiMeasurePolicy;
+  /** P-1。読めなければ undefined を返す（例外でもよい。呼ぶ側が判断不能にする） */
+  readonly readExceeded: ExceededReader;
+}
+
+/** 本測定の窓のあとに空ける時間。**片付けと次の温めを窓の外へ出す**（窓の前後の余白より長く）。 */
+export const API_OUTSIDE_WINDOW_MS = WINDOW_PAD_MS + 1_000;
+
+interface MeasureWindow {
+  readonly size: ApiSize;
+  readonly route: ApiRoute;
+  /** 温めの窓。**記録用**（判定には使わない） */
+  readonly warm: Window;
+  /** 本測定の窓。判定に使う */
+  readonly measured: Window;
+  readonly sent: number;
+}
+
+interface WindowReading {
+  readonly window: MeasureWindow;
+  readonly rows: readonly InvocationRow[];
+  /** 読めなかった理由（全窓共通）。読めていれば undefined */
+  readonly error: string | undefined;
+  /** 反映済み（回数が送った数くらい）で、2 回続けて同じ値になった */
+  readonly settled: boolean;
+}
+
+interface WindowFinding {
+  readonly window: MeasureWindow;
+  readonly verdict: Verdict;
+  readonly p7: P7Finding | undefined;
+  readonly requests: Verdicts;
+  readonly errors: number;
+  readonly sampled: boolean;
+  readonly reason: string;
+}
+
+const API_INVOCATION_FIELDS = `
+        sum { requests errors cpuTimeUs }
+        avg { sampleInterval }
+        max { cpuTime }
+        quantiles { cpuTimeP50 cpuTimeP99 }
+        dimensions { scriptName }`;
+
+/** 本測定の窓を、1 回の GraphQL でまとめて読む（窓ごとに別名を付ける）。 */
+export function apiAnalyticsQuery(windows: readonly Window[]): string {
+  const aliases = windows
+    .map(
+      (window, index) =>
+        `      w${index}: workersInvocationsAdaptive(limit: 100, filter: { datetime_geq: "${window.since}", datetime_leq: "${window.until}", scriptName_in: $scripts }) {${API_INVOCATION_FIELDS}
+      }`,
+    )
+    .join("\n");
+  return `query ApiMeasure($accountTag: string!, $scripts: [string!]!) {
+  viewer {
+    accounts(filter: { accountTag: $accountTag }) {
+${aliases}
+    }
+  }
+}`;
+}
+
+/** GraphQL の応答を、窓ごとの行に分ける。 */
+export function parseApiAnalytics(
+  body: unknown,
+  count: number,
+  secrets: readonly string[],
+): readonly (readonly InvocationRow[])[] {
+  if (!isRecord(body)) throw new MeasureError("Analytics の応答が JSON オブジェクトでない");
+  const errors = body.errors;
+  if (Array.isArray(errors) && errors.length > 0) {
+    const messages = errors.map((e) => (isRecord(e) && typeof e.message === "string" ? e.message : ""));
+    if (messages.some((m) => AUTHZ_ERROR.test(m))) throw permissionError("Analytics（GraphQL）を読む");
+    throw new MeasureError(`Analytics がエラーを返した: ${messages.map((m) => sanitize(m, secrets)).join(", ")}`);
+  }
+  const data = body.data;
+  const viewer = isRecord(data) ? data.viewer : undefined;
+  const accounts = isRecord(viewer) ? viewer.accounts : undefined;
+  const account = Array.isArray(accounts) ? accounts[0] : undefined;
+  if (!isRecord(account)) {
+    throw new MeasureError("Analytics の応答にアカウントが無い（CLOUDFLARE_ACCOUNT_ID とトークンの対象アカウントを確かめる）");
+  }
+  return Array.from({ length: count }, (_, index) => readInvocations(account[`w${index}`]));
+}
+
+const workerRows = (rows: readonly InvocationRow[], worker: ApiWorker): readonly InvocationRow[] =>
+  rows.filter((row) => row.scriptName === scriptName(worker));
+
+const requestsOf = (rows: readonly InvocationRow[], worker: ApiWorker): number => totalRequests(workerRows(rows, worker));
+
+const requestsByWorker = (rows: readonly InvocationRow[]): Verdicts => ({
+  host: requestsOf(rows, "host"),
+  gateway: requestsOf(rows, "gateway"),
+  "data-api": requestsOf(rows, "data-api"),
+});
+
+interface ApiResponse {
+  readonly status: number;
+  /** Date ヘッダ（Cloudflare の時計）。読めなければ undefined */
+  readonly dateMs: number | undefined;
+  readonly body: Record<string, unknown>;
+}
+
+/** 応答の本文から誤りコードだけを読む（**その他の値は出さない**）。 */
+function apiErrorCode(text: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    const code = isRecord(parsed) ? parsed["error"] : undefined;
+    return typeof code === "string" && /^[A-Z_]+$/.test(code) ? code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `/api/*` へ GET を1回送る。**失敗したらその場で止める**（例外にする）。 */
+async function apiFetch(
+  io: ApiMeasureIo,
+  url: URL,
+  label: string,
+  instanceId?: string,
+): Promise<ApiResponse> {
+  let res: Response;
+  try {
+    res = await io.fetch(url.toString(), {
+      method: "GET",
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(io.policy.requestTimeoutMs),
+    });
+  } catch (e) {
+    throw new MeasureError(`${label}が届かない（${describeGetError(e)}）。ここで止める`);
+  }
+  const dateHeader = res.headers.get("date");
+  const served = dateHeader === null ? Number.NaN : Date.parse(dateHeader);
+  const text = await res.text();
+  if (!res.ok) {
+    const code = apiErrorCode(text);
+    throw new MeasureError(`${label}が HTTP ${res.status}${code === undefined ? "" : `（${code}）`}。API の失敗なのでここで止める`);
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new MeasureError(`${label}の応答が JSON でない（画面や data-api の層が崩れている疑い）。ここで止める`);
+  }
+  if (!isRecord(body)) throw new MeasureError(`${label}の応答がオブジェクトでない。ここで止める`);
+  if (instanceId !== undefined && body["instanceId"] !== instanceId) {
+    throw new MeasureError(`${label}の応答の instanceId が違う（別のインスタンスへ届いている疑い）。ここで止める`);
+  }
+  return { status: res.status, dateMs: Number.isNaN(served) ? undefined : served, body };
+}
+
+/** `/api/*` へ POST（操作）を1回送る。**失敗したらその場で止める**。 */
+async function apiPost(
+  io: ApiMeasureIo,
+  url: URL,
+  input: Readonly<Record<string, unknown>>,
+  label: string,
+): Promise<Record<string, unknown>> {
+  let res: Response;
+  try {
+    res = await io.fetch(url.toString(), {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(input),
+      signal: AbortSignal.timeout(io.policy.requestTimeoutMs),
+    });
+  } catch (e) {
+    throw new MeasureError(`${label}が届かない（${describeGetError(e)}）。ここで止める`);
+  }
+  const text = await res.text();
+  if (!res.ok) {
+    const code = apiErrorCode(text);
+    throw new MeasureError(`${label}が HTTP ${res.status}${code === undefined ? "" : `（${code}）`}。ここで止める`);
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new MeasureError(`${label}の応答が JSON でない。ここで止める`);
+  }
+  if (!isRecord(body)) throw new MeasureError(`${label}の応答がオブジェクトでない。ここで止める`);
+  return body;
+}
+
+interface ApiActions {
+  readonly addMember: string;
+  readonly addExpense: string;
+  readonly deleteExpense: string;
+  readonly deleteMember: string;
+}
+
+/** 宣言（spec 応答）から、準備と片付けに要る action の名前を引く（宣言が変われば追随する）。 */
+function apiActionNames(spec: Record<string, unknown>): ApiActions {
+  const actions = Array.isArray(spec["actions"]) ? spec["actions"].filter(isRecord) : [];
+  const pick = (entity: string, kind: "create" | "delete"): string | undefined => {
+    const found = actions.find(
+      (action) => action["entity"] === entity && (typeof action["kind"] === "string" ? action["kind"] : "create") === kind,
+    );
+    const name = found?.["name"];
+    return typeof name === "string" ? name : undefined;
+  };
+  const addMember = pick("member", "create");
+  const addExpense = pick("expense", "create");
+  const deleteExpense = pick("expense", "delete");
+  const deleteMember = pick("member", "delete");
+  if (addMember === undefined || addExpense === undefined || deleteExpense === undefined || deleteMember === undefined) {
+    throw new MeasureError("宣言に、準備と片付けに要る action が無い（member・expense の create と delete）");
+  }
+  return { addMember, addExpense, deleteExpense, deleteMember };
+}
+
+/** 一覧の行を読む（準備の片付けに使う）。 */
+async function apiViewRows(
+  io: ApiMeasureIo,
+  origin: string,
+  instanceId: string,
+  route: ApiRoute,
+  label: string,
+): Promise<readonly Record<string, unknown>[]> {
+  const res = await apiFetch(io, new URL(routePath(instanceId, route), origin), label, instanceId);
+  const rows = res.body["rows"];
+  if (!Array.isArray(rows) || !rows.every(isRecord)) {
+    throw new MeasureError(`一覧 ${route.id} の応答の形が違う（rows が行の配列でない）。ここで止める`);
+  }
+  return rows;
+}
+
+const rowId = (row: Record<string, unknown>, label: string): string => {
+  const id = row["id"];
+  if (typeof id !== "string" || id === "") throw new MeasureError(`${label} の行に id が無い。ここで止める`);
+  return id;
+};
+
+/** 規模のデータを作る（**計測の窓の外**）。メンバー → 支出の順。 */
+async function apiPrepare(
+  io: ApiMeasureIo,
+  origin: string,
+  instanceId: string,
+  actions: ApiActions,
+  size: ApiSize,
+): Promise<{ readonly members: number; readonly expenses: number }> {
+  const memberIds: string[] = [];
+  for (const name of API_MEMBER_NAMES) {
+    const created = await apiPost(io, new URL(actionPath(instanceId, actions.addMember), origin), { name }, `操作 ${actions.addMember}`);
+    memberIds.push(rowId(created, `操作 ${actions.addMember}`));
+  }
+  const plans = expensePlans(size);
+  for (const plan of plans) {
+    const payer = memberIds[plan.payerIndex];
+    const participants = plan.participantIndexes.map((index) => memberIds[index]);
+    if (payer === undefined || participants.some((id) => id === undefined)) {
+      throw new MeasureError(`${size.id} の支出（${plan.description}）の参照先が決まらない。ここで止める`);
+    }
+    await apiPost(
+      io,
+      new URL(actionPath(instanceId, actions.addExpense), origin),
+      { description: plan.description, amount: plan.amount, payer, participants },
+      `操作 ${actions.addExpense}`,
+    );
+  }
+  return { members: memberIds.length, expenses: plans.length };
+}
+
+/**
+ * 専用インスタンスのデータを片付ける（**計測の窓の外**。Issue #111「#109 の操作で片付ける」）。
+ * **支出 → メンバー**の順に消す——逆にすると、支出から参照されているメンバーは消せず（409）、データが残る。
+ */
+async function apiCleanUp(
+  io: ApiMeasureIo,
+  origin: string,
+  instanceId: string,
+  actions: ApiActions,
+): Promise<number> {
+  let deleted = 0;
+  for (const routeId of ["expenseList", "memberList"] as const) {
+    const route = routeById(routeId);
+    const action = routeId === "expenseList" ? actions.deleteExpense : actions.deleteMember;
+    const rows = await apiViewRows(io, origin, instanceId, route, `一覧 ${routeId}`);
+    for (const row of rows) {
+      await apiPost(io, new URL(actionPath(instanceId, action), origin), { id: rowId(row, `一覧 ${routeId}`) }, `操作 ${action}`);
+      deleted++;
+    }
+  }
+  return deleted;
+}
+
+/** 1 つの段（温め／本測定）を順に送る。1 回でも失敗したらその場で止める。 */
+async function apiSendPhase(
+  io: ApiMeasureIo,
+  origin: string,
+  instanceId: string,
+  route: ApiRoute,
+  count: number,
+): Promise<PhaseRecord> {
+  const path = routePath(instanceId, route);
+  let first = Number.POSITIVE_INFINITY;
+  let last = Number.NEGATIVE_INFINITY;
+  for (let index = 1; index <= count; index++) {
+    const startedAt = io.now();
+    const res = await apiFetch(io, new URL(path, origin), `${route.id} の ${index} 回目`, instanceId);
+    const served = res.dateMs;
+    first = Math.min(first, served === undefined ? startedAt : served);
+    last = Math.max(last, served === undefined ? io.now() : served);
+  }
+  return { window: windowOf(first, last), sent: count };
+}
+
+/** 温めの窓と本測定の窓が重ならないこと（窓を分ける）。 */
+function assertWindowSeparated(window: MeasureWindow, gapMs: number): void {
+  if (Date.parse(window.warm.until) >= Date.parse(window.measured.since)) {
+    throw new MeasureError(
+      `${window.size.id} / ${window.route.id}: 温めの窓と本測定の窓が重なる（${gapMs} ms 空けているのに重なった）。判定できないので止める`,
+    );
+  }
+}
+
+/** 本測定の窓どうしが重ならないこと（混ざった窓で判定しない）。 */
+function assertNoOverlap(existing: readonly MeasureWindow[], candidate: MeasureWindow): void {
+  for (const window of existing) {
+    const [a, b] =
+      Date.parse(window.measured.since) <= Date.parse(candidate.measured.since)
+        ? [window.measured, candidate.measured]
+        : [candidate.measured, window.measured];
+    if (Date.parse(a.until) >= Date.parse(b.since)) {
+      throw new MeasureError(
+        `${window.size.id} / ${window.route.id} と ${candidate.size.id} / ${candidate.route.id} の本測定の窓が重なる。混ざった窓で判定しない`,
+      );
+    }
+  }
+}
+
+/** 窓の起動が、送った数くらい出揃っているか（Worker ごと）。 */
+const apiReflected = (rows: readonly InvocationRow[], sent: number): boolean =>
+  API_WORKERS.every((worker) => requestsOf(rows, worker) >= sent / 2);
+
+/**
+ * 窓の値を比べるための正規の鍵。**行の並びは Analytics が保証しない**ので、並べ替えてから比べる
+ * （並びだけで「変わった」と見なすと、いつまでも落ち着かない）。
+ */
+const apiWindowKey = (rows: readonly InvocationRow[]): string =>
+  rows.map((row) => JSON.stringify(row)).toSorted().join("\n");
+
+/**
+ * 本測定の窓を読む。**窓ごとに**「回数が送った数くらい（反映済み）」で「2 回続けて同じ値」に
+ * なったら、その窓は判定できる。**1 つの窓が落ち着かないだけで、ほかの窓を判断不能にしない。**
+ * 上限まで待って落ち着かなかった窓は、判断不能のまま返す（非抵触とも 0 とも報告しない）。
+ */
+async function apiReadWindows(
+  io: ApiMeasureIo,
+  credentials: Credentials,
+  secrets: readonly string[],
+  windows: readonly MeasureWindow[],
+): Promise<readonly WindowReading[]> {
+  if (windows.length === 0) return [];
+  io.out(
+    `api-measure: ${io.policy.firstReadDelayMs / 1000} 秒待ってから Analytics を読む` +
+      `（${io.policy.pollIntervalMs / 1000} 秒ごと・最大 ${io.policy.maxWaitMs / 60_000} 分）`,
+  );
+  await io.sleep(io.policy.firstReadDelayMs);
+  const query = apiAnalyticsQuery(windows.map((window) => window.measured));
+  const startedAt = io.now();
+  const previous: (string | undefined)[] = windows.map(() => undefined);
+  const settled: boolean[] = windows.map(() => false);
+  let last: readonly (readonly InvocationRow[])[] = windows.map(() => []);
+  for (let attempt = 1; ; attempt++) {
+    let body: unknown;
+    try {
+      body = await callApi(io, credentials, "/graphql", {
+        method: "POST",
+        body: JSON.stringify({
+          query,
+          variables: { accountTag: credentials.accountId, scripts: [...API_WORKERS.map(scriptName), UNKNOWN_SCRIPT] },
+        }),
+      });
+    } catch (e) {
+      const reason = e instanceof MeasureError ? e.message : `Analytics を読めない（${e instanceof Error ? e.name : typeof e}）`;
+      io.out(`api-measure: Analytics を読めなかった（${reason}）。判断不能にする`);
+      return windows.map((window) => ({ window, rows: [], error: reason, settled: false }));
+    }
+    last = parseApiAnalytics(body, windows.length, secrets);
+    let allSettled = true;
+    windows.forEach((window, index) => {
+      const rows = last[index] ?? [];
+      const key = apiWindowKey(rows);
+      if (!settled[index] && apiReflected(rows, window.sent) && previous[index] === key) settled[index] = true;
+      previous[index] = key;
+      if (!settled[index]) allSettled = false;
+    });
+    if (allSettled) {
+      io.out(`api-measure: 反映を確かめた（全 ${windows.length} 窓が 2 回続けて同じ値。読んだ回数 ${attempt}）`);
+      break;
+    }
+    if (io.now() - startedAt + io.policy.pollIntervalMs > io.policy.maxWaitMs) {
+      io.out(`api-measure: 反映を待ちきれなかった（読んだ回数 ${attempt}）。落ち着かなかった窓は判断不能にする`);
+      break;
+    }
+    await io.sleep(io.policy.pollIntervalMs);
+  }
+  return windows.map((window, index) => ({
+    window,
+    rows: last[index] ?? [],
+    error: undefined,
+    settled: settled[index] ?? false,
+  }));
+}
+
+/** 1 つの窓を判定する。**未測定・不足・混入・名前不明は非抵触にせず判断不能**にする。 */
+function apiJudgeWindow(reading: WindowReading): WindowFinding {
+  const base: {
+    window: MeasureWindow;
+    requests: Verdicts;
+    errors: number;
+    sampled: boolean;
+  } = {
+    window: reading.window,
+    requests: requestsByWorker(reading.rows),
+    errors: reading.rows.reduce((total, row) => total + row.errors, 0),
+    sampled: reading.rows.some((row) => row.sampleInterval !== 1),
+  };
+  const undetermined = (reason: string): WindowFinding => ({ ...base, verdict: "undetermined", p7: undefined, reason });
+  if (reading.error !== undefined) return undetermined(reading.error);
+  if (!reading.settled) return undetermined("反映を待ちきれなかった（2 回続けて同じ値にならなかったか、回数が送った数と合わなかった）");
+  if (reading.rows.length === 0) return undetermined("Analytics にこの窓の行が無い（反映待ち）");
+  const unknown = totalRequests(reading.rows.filter((row) => row.scriptName === UNKNOWN_SCRIPT));
+  if (unknown > 0) return undetermined(unknownReason(unknown));
+  for (const worker of API_WORKERS) {
+    const rows = workerRows(reading.rows, worker);
+    if (rows.length !== 1) return undetermined(`${worker} の行が 1 つでない（${rows.length} 行。反映待ちか、記録の粒度が違う）`);
+    const requests = requestsOf(reading.rows, worker);
+    if (!aboutSent(requests, reading.window.sent)) {
+      return undetermined(`${worker} の回数（${requests}）が送った数（${reading.window.sent}）と合わない（反映待ちか、他の通信の混入）`);
+    }
+  }
+  const p7 = judgeP7({
+    host: maxOf(reading.rows, "host"),
+    gateway: maxOf(reading.rows, "gateway"),
+    "data-api": maxOf(reading.rows, "data-api"),
+  });
+  return { ...base, verdict: p7.verdict, p7, reason: p7.reason };
+}
+
+const maxOf = (rows: readonly InvocationRow[], worker: ApiWorker): number =>
+  workerRows(rows, worker).reduce((max, row) => Math.max(max, row.cpuMaxUs), 0);
+
+/** P-1：過去 7 日の上限超過を、既存の期間レポート（free-tier-report.ts）を**別に読んで**判定する。 */
+async function apiReadP1(io: ApiMeasureIo, credentials: Credentials, secrets: readonly string[]): Promise<P1Finding> {
+  try {
+    const reading = await io.readExceeded(io, credentials, secrets);
+    if (reading === undefined) return judgeP1(undefined, "期間レポートが空を返した");
+    return judgeP1(reading, undefined);
+  } catch (e) {
+    const reason = e instanceof MeasureError ? e.message : `期間レポートを読めない（${e instanceof Error ? e.name : typeof e}）`;
+    return judgeP1(undefined, reason);
+  }
+}
+
+/**
+ * 既定の P-1 の読取。**既存の期間レポート（free-tier-report.ts）の Query と集計をそのまま使う。**
+ * 動的 import にしてあるのは、この file が free-tier-report を静的に読むと循環になるため
+ * （free-tier-report → この file）。値は出力に出さず、件数と日付だけを返す。
+ */
+const realReadExceeded: ExceededReader = async (io, credentials, secrets) => {
+  const { REPORT_QUERY, parsePeriod, parseReport, reportVariables, summarizeExceeded } = await import("./free-tier-report.ts");
+  const period = parsePeriod({}, io.now());
+  const body = await callApi(io, credentials, "/graphql", {
+    method: "POST",
+    body: JSON.stringify({ query: REPORT_QUERY, variables: reportVariables(credentials.accountId, period) }),
+  });
+  const data = parseReport(body, "アカウント①", secrets);
+  const exceeded = summarizeExceeded(data.invocations);
+  return { musunest: exceeded.musunest, unknown: exceeded.unknown, since: period.since, until: period.until };
+};
+
+/** 計測に入る前の確認。引数から規模と経路を決める。 */
+function apiParseArgs(argv: readonly string[]) {
+  try {
+    return parseArgs({
+      args: [...argv],
+      options: {
+        instance: { type: "string" },
+        sizes: { type: "string" },
+        routes: { type: "string" },
+        warm: { type: "string" },
+        count: { type: "string" },
+        help: { type: "boolean", short: "h" },
+      },
+      strict: true,
+      allowPositionals: false,
+    }).values;
+  } catch {
+    throw new MeasureError(`引数が不正（値は表示しない）\n${API_USAGE}`);
+  }
+}
+
+const isSizeId = (value: string): value is ApiSizeId => API_SIZES.some((size) => size.id === value);
+const isRouteId = (value: string): value is ApiRouteId => API_ROUTES.some((route) => route.id === value);
+
+const parseIds = <T extends string>(
+  raw: string | undefined,
+  allowed: readonly T[],
+  option: string,
+): readonly T[] => {
+  if (raw === undefined || raw === "") return allowed;
+  const chosen = raw.split(",").map((part) => part.trim()).filter((part) => part !== "");
+  const unknown = chosen.filter((part) => !(allowed as readonly string[]).includes(part));
+  if (unknown.length > 0 || chosen.length === 0) throw new MeasureError(`${option} は ${allowed.join("|")} から選ぶ（値は表示しない）`);
+  return allowed.filter((value) => chosen.includes(value));
+};
+
+export async function runApiMeasurement(argv: readonly string[], io: ApiMeasureIo): Promise<number> {
+  try {
+    return await apiRun(argv, io);
+  } catch (e) {
+    if (e instanceof MeasureError) io.err(`api-measure: ${e.message}`);
+    else io.err(`api-measure: 予期しない失敗（${e instanceof Error ? e.name : typeof e}）`);
+    return EXIT_NG;
+  }
+}
+
+async function apiRun(argv: readonly string[], io: ApiMeasureIo): Promise<number> {
+  const values = apiParseArgs(argv);
+  if (values.help === true) {
+    io.out(API_USAGE);
+    return EXIT_OK;
+  }
+  const instanceId = values.instance;
+  if (instanceId === undefined || instanceId === "") throw new MeasureError(`--instance が無い（計測用インスタンスの ID）\n${API_USAGE}`);
+  if (!API_INSTANCE_PATTERN.test(instanceId)) throw new MeasureError("--instance は英字で始まる英数字と . _ - で書く（値は表示しない）");
+  if (API_DEMO_INSTANCE.test(instanceId)) {
+    throw new MeasureError("--instance に demo を含む ID は使わない（デモ・窓口のインスタンスを触らない。専用の計測インスタンスを明示する）");
+  }
+  const sizes = parseIds(values.sizes, API_SIZES.map((size) => size.id).filter(isSizeId), "--sizes").map(sizeById);
+  const routes = parseIds(values.routes, API_ROUTES.map((route) => route.id).filter(isRouteId), "--routes").map(routeById);
+  const warmup = positiveInteger(values.warm, "--warm", io.policy.warmup);
+  const measured = positiveInteger(values.count, "--count", io.policy.measured);
+  if (warmup + measured > MAX_REQUESTS) {
+    throw new MeasureError(
+      `温め ${warmup} + 本測定 ${measured} が ${MAX_REQUESTS} を超える。**経路を合算して上限を緩めない**（1 経路・1 規模ごとに ${MAX_REQUESTS} 以内）。1 回も送らずに止める`,
+    );
+  }
+
+  const credentials = readCredentials(io.env);
+  const subdomain = await readSubdomain(io, credentials);
+  const hostname = hostHostname(subdomain);
+  const origin = `https://${hostname}`;
+  const secrets = [credentials.token, credentials.accountId, subdomain, hostname];
+
+  // 1. 宣言を読み、action の名前を引く（読み取りだけ。計測の窓の外）
+  const spec = await apiFetch(io, new URL(routePath(instanceId, routeById("spec")), origin), "spec（宣言）", instanceId);
+  const actions = apiActionNames(spec.body);
+
+  // 2. P-1（過去 7 日。窓の外。既存の期間レポートを別に読む）
+  const p1 = await apiReadP1(io, credentials, secrets);
+
+  io.out(`api-measure: env=${TARGET_ENV} の計測用インスタンス（${instanceId}）で測る`);
+  io.out(`api-measure: 経路 ${routes.map((route) => route.id).join("・")} / 規模 ${sizes.map((size) => size.id).join("・")}`);
+  io.out(
+    `api-measure: 各経路・各規模を ${warmup} 回温め → ${io.policy.gapMs / 1000} 秒空けて → ${measured} 回測る` +
+      `（合計 ${warmup + measured} 回 ≤ ${MAX_REQUESTS}/窓。全経路を合算しない）`,
+  );
+
+  // 3. 規模ごとに：片付け → 準備 → 計測 → 片付け（準備と片付けは窓の外）
+  const windows: MeasureWindow[] = [];
+  try {
+    for (const size of sizes) {
+      await apiCleanUp(io, origin, instanceId, actions);
+      const created = await apiPrepare(io, origin, instanceId, actions, size);
+      io.out(`api-measure: ${size.id} を準備した（メンバー ${created.members}・支出 ${created.expenses}。計測の窓の外）`);
+      for (const route of routes) {
+        const warm = await apiSendPhase(io, origin, instanceId, route, warmup);
+        await io.sleep(io.policy.gapMs);
+        const measuredPhase = await apiSendPhase(io, origin, instanceId, route, measured);
+        const window: MeasureWindow = { size, route, warm: warm.window, measured: measuredPhase.window, sent: measured };
+        assertWindowSeparated(window, io.policy.gapMs);
+        assertNoOverlap(windows, window);
+        windows.push(window);
+        io.out(
+          `api-measure: ${size.id} / ${route.id} を送った（温め ${warm.sent} 回 → ${io.policy.gapMs / 1000} 秒 → ` +
+            `本測定 ${measuredPhase.sent} 回。本測定の窓 ${measuredPhase.window.since}〜${measuredPhase.window.until}）`,
+        );
+        // 片付けと次の温めを、本測定の窓の外へ出す（窓の余白より長く空ける）
+        await io.sleep(API_OUTSIDE_WINDOW_MS);
+      }
+      await apiCleanUp(io, origin, instanceId, actions);
+      io.out(`api-measure: ${size.id} を片付けた（支出 → メンバーの順）`);
+    }
+  } finally {
+    // 途中で失敗しても、専用インスタンスのデータは片付ける（残すと次の計測や e2e に混ざる）
+    try {
+      const removed = await apiCleanUp(io, origin, instanceId, actions);
+      if (removed > 0) io.out(`api-measure: 残りを片付けた（${removed} 行）`);
+    } catch {
+      io.err("api-measure: 片付けに失敗した（専用インスタンスにデータが残っている可能性がある）");
+    }
+  }
+
+  // 4. Analytics を読み（本測定の窓だけ）、P-7 を判定する
+  const readings = await apiReadWindows(io, credentials, secrets, windows);
+  const findings = readings.map((reading) => apiJudgeWindow(reading));
+
+  io.out("");
+  io.out("══ 結果（本測定の窓。Worker ごとの max.cpuTime）");
+  for (const finding of findings) {
+    const p7 = finding.p7;
+    const max = p7 === undefined ? "—" : API_WORKERS.map((worker) => `${worker} ${fmtMs(p7.maxMs[worker])}`).join("・");
+    const requests = API_WORKERS.map((worker) => `${worker} ${finding.requests[worker]}`).join("・");
+    const sum = p7 === undefined ? "—" : `記録: 和 ${fmtMs(p7.sumMs)}（判定に使わない）`;
+    io.out(
+      `  ${finding.window.size.id} / ${finding.window.route.id}: ${max}  ${sum}  ` +
+        `回数 ${requests}  errors ${finding.errors}  窓 ${finding.window.measured.since}〜${finding.window.measured.until}` +
+        (finding.sampled ? "  注: サンプリングあり（max は取りこぼし得る）" : ""),
+    );
+    io.out(`    判定: ${verdictLabel(finding.verdict)} — ${finding.reason}`);
+  }
+  io.out("");
+  io.out("══ P-1（過去 7 日の上限超過。既存の期間レポートを別に読む）");
+  io.out(`  判定: ${verdictLabel(p1.verdict)} — ${p1.reason}`);
+  io.out("");
+  io.out("══ 判定");
+  io.out(`  P-7: ${verdictLabel(apiOverall(findings, "touched"))} — ${apiOverallReason(findings)}`);
+  io.out(`  P-1: ${verdictLabel(p1.verdict)} — ${p1.reason}`);
+
+  if (findings.some((finding) => finding.verdict === "touched") || p1.verdict === "touched") {
+    io.out("api-measure: 触れた 管理を通じて窓口へ返す（Workers Paid への変更は人が行う。構成は崩さない）");
+    return EXIT_TOUCHED;
+  }
+  if (findings.some((finding) => finding.verdict === "undetermined") || p1.verdict === "undetermined") {
+    io.out("api-measure: 判断不能 未測定を 0 や成功として記録しない。時間を空けて測り直す");
+    return EXIT_UNDETERMINED;
+  }
+  io.out("api-measure: OK 判定できた（結果は workspace/mvp/m1/measurements.md に記録する）");
+  return EXIT_OK;
+}
+
+const verdictLabel = (verdict: Verdict): string =>
+  verdict === "touched" ? "触れた" : verdict === "undetermined" ? "判断不能" : "触れていない";
+
+const apiOverall = (findings: readonly WindowFinding[], verdict: Verdict): Verdict =>
+  findings.some((finding) => finding.verdict === verdict) ? verdict : "clear";
+
+function apiOverallReason(findings: readonly WindowFinding[]): string {
+  const touched = findings.filter((finding) => finding.verdict === "touched");
+  if (touched.length > 0) {
+    return touched
+      .map((finding) => `${finding.window.size.id} / ${finding.window.route.id} で ${finding.reason}`)
+      .join(" / ");
+  }
+  const undetermined = findings.filter((finding) => finding.verdict === "undetermined");
+  if (undetermined.length > 0) {
+    return undetermined
+      .map((finding) => `${finding.window.size.id} / ${finding.window.route.id} が判断不能（${finding.reason}）`)
+      .join(" / ");
+  }
+  return `測った ${findings.length} 窓のすべてで、どの Worker の最大も単体で 7 ms を超えていない`;
+}
+
+export const API_USAGE = `usage: pnpm exec tsx --env-file=.env infra/scripts/measure-free-tier.ts --api --instance <id> [--sizes basic,20,200] [--routes spec,expenseList,memberList,settlement] [--warm <n>] [--count <n>]
+
+  --api                   /api の経路（#102 の spec・支出一覧・member の集計一覧・#108 の精算結果）の CPU 時間を測る
+  --instance <id>         計測用インスタンスの ID（**必須**。demo を含む ID は使わない）
+  --sizes <a,b>           規模（既定は全部。basic・20・200）。basic = A/B/C と 2 支出
+  --routes <a,b>          経路（既定は全部）。spec・expenseList・memberList・settlement
+  --warm <n>              温めの回数（既定 ${API_WARMUP_REQUESTS}）／ --count <n> 本測定の回数（既定 ${API_MEASURED_REQUESTS}）
+                          温め + 本測定 は ${MAX_REQUESTS} 以下（**経路を合算しない**）
+
+各経路・各規模を ${API_WARMUP_REQUESTS} 回温め → ${API_GAP_MS / 1000} 秒空けて → ${API_MEASURED_REQUESTS} 回測る。
+準備と片付けは計測の窓の外（#109 の delete で片付ける）。CPU 時間は Workers Analytics の worker 別 cpuTime の max。
+資格情報は環境変数 CLOUDFLARE_API_TOKEN・CLOUDFLARE_ACCOUNT_ID（手元の .env。アカウント①）。
+出すのは回数・ミリ秒・判定・窓の時刻だけ。URL・ホスト名・Account ID・トークンを出さない。
+exit ${EXIT_OK}: 判定できて非抵触／${EXIT_NG}: 失敗／${EXIT_UNDETERMINED}: 判断不能／${EXIT_TOUCHED}: P-7 か P-1 に触れた`;
+
 // ── 出力 ──────────────────────────────────────────────────────────────────────
 
 const fmtMs = (value: number): string => `${value.toFixed(2)} ms`;
@@ -732,6 +1500,10 @@ export interface CliIo {
   now: () => number;
   sleep: (ms: number) => Promise<void>;
   policy: MeasurePolicy;
+  /** `--api` の待ち方。既定は API_MEASURE_POLICY（5 回温め → 60 秒 → 20 回） */
+  readonly apiPolicy?: ApiMeasurePolicy;
+  /** `--api` の P-1。既定は free-tier-report.ts を動的に読む */
+  readonly readExceeded?: ExceededReader;
 }
 
 const CLOUDFLARE_API = "https://api.cloudflare.com/client/v4";
@@ -744,6 +1516,7 @@ const USAGE = `usage: pnpm exec tsx --env-file=.env infra/scripts/measure-free-t
   --cpu-limit-ms <ms>     CPU 時間の上限（既定 ${FREE_CPU_LIMIT_MS}。一次情報が変わったら与える）
   --pages-window, --healthz-window
                           GET を送らず、前に送った窓を Analytics から読み直す（1つ目の形が出力する値をそのまま渡す）
+  --api                   /api の経路の CPU 時間を測るモード（--instance が要る。上の形とは別。--api --help を参照）
 
 宛先は ${TARGET_ENV} の host（Worker 名 ${scriptName("host")}）。URL は Cloudflare の API から組み立て、表示しない。
 資格情報は環境変数 CLOUDFLARE_API_TOKEN・CLOUDFLARE_ACCOUNT_ID（アカウント①の CI 用トークン）。
@@ -791,7 +1564,13 @@ function positiveInteger(raw: string | undefined, option: string, fallback: numb
   return Number(raw);
 }
 
-async function callApi(io: CliIo, credentials: Credentials, path: string, init?: RequestInit): Promise<unknown> {
+/** Cloudflare の API を呼ぶのに要る最小の口（measure・`--api`・期間レポートの読取で共有する）。 */
+export interface ApiCaller {
+  readonly fetch: typeof fetch;
+  readonly policy: { readonly requestTimeoutMs: number };
+}
+
+async function callApi(io: ApiCaller, credentials: Credentials, path: string, init?: RequestInit): Promise<unknown> {
   let res: Response;
   try {
     res = await io.fetch(`${CLOUDFLARE_API}${path}`, {
@@ -813,7 +1592,7 @@ async function callApi(io: CliIo, credentials: Credentials, path: string, init?:
   }
 }
 
-async function readSubdomain(io: CliIo, credentials: Credentials): Promise<string> {
+async function readSubdomain(io: ApiCaller, credentials: Credentials): Promise<string> {
   const body = await callApi(io, credentials, `/accounts/${credentials.accountId}/workers/subdomain`);
   const result = isRecord(body) ? body.result : undefined;
   const subdomain = isRecord(result) ? result.subdomain : undefined;
@@ -893,6 +1672,13 @@ async function readUntilSettled(read: () => Promise<Snapshot>, record: DriveReco
 }
 
 async function run(argv: readonly string[], io: CliIo): Promise<number> {
+  // `--api` は引数の形が別である（--instance が要る）。ここで分ける。
+  if (argv.includes(API_FLAG)) {
+    return runApiMeasurement(
+      argv.filter((arg) => arg !== API_FLAG),
+      apiIoOf(io),
+    );
+  }
   const values = parseCliArgs(argv);
   if (values.help === true) {
     io.out(USAGE);
@@ -989,6 +1775,20 @@ const defaultIo: CliIo = {
   sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
   policy: MEASURE_POLICY,
 };
+
+/** `--api` の io を、CLI の io から組む。unit は apiPolicy と readExceeded を差し替える。 */
+function apiIoOf(io: CliIo): ApiMeasureIo {
+  return {
+    env: io.env,
+    out: io.out,
+    err: io.err,
+    fetch: io.fetch,
+    now: io.now,
+    sleep: io.sleep,
+    policy: io.apiPolicy ?? API_MEASURE_POLICY,
+    readExceeded: io.readExceeded ?? realReadExceeded,
+  };
+}
 
 function isMain(): boolean {
   const entry = process.argv[1];
