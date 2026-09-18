@@ -267,7 +267,7 @@ M0はほぼトラフィックゼロだが、**CI が枠を食う**。以下を�
 
 | # | 項目 | 確定方法 | 期限 | 結果 |
 |---|---|---|---|---|
-| 1 | **Service Bindings で CPU時間は各Worker独立か合算か** | 計測スクリプトで Workers Analytics の cpuTime を読む（§7.1） | M0 | **2026-09-14 実測・/healthz 20 回 × 2**。Analytics の cpuTime は **Worker ごとに別に記録**される（host の1回あたり 0.67・0.64 ms は gateway＋data-api の 3.02・3.07 ms より小さい＝下流を含まない）。上限の判定単位は一次情報に記載なし（未確定）。**合算の上界（max の和）6.51 ms・5.28 ms、余裕 3.49 ms・4.72 ms**。合算でも収まるので M0 では決めなくてよい。**→ 期間の最大では覆った（§7.2）**：production の data-api が単体で 11.30 ms（エラーなし）。独立でも余裕 3 ms を割るので、判定単位によらず人の判断が要る |
+| 1 | **Service Bindings で CPU時間は各Worker独立か合算か** | 計測スクリプトで Workers Analytics の cpuTime を読む（§7.1） | M0 | **2026-09-14 実測・/healthz 20 回 × 2**。Analytics の cpuTime は **Worker ごとに別に記録**される（host の1回あたり 0.67・0.64 ms は gateway＋data-api の 3.02・3.07 ms より小さい＝下流を含まない）。上限の判定単位は一次情報に記載なし（未確定）。**合算の上界（max の和）6.51 ms・5.28 ms、余裕 3.49 ms・4.72 ms**。合算でも収まるので M0 では決めなくてよい。**→ 期間の最大では覆った（§7.2）**：production の data-api が単体で 11.30 ms（エラーなし）。独立でも余裕 3 ms を割るので、判定単位によらず人の判断が要る。**→ 2026-09-18：dev に `limits.cpu_ms: 10` を明示して測った（#152）が、20 回でも 200 回でも `exceededResources` は 0 件だった（判定単位は未確定のまま。[`../m1/measurements-cpu-limit.md`](../m1/measurements-cpu-limit.md)）** |
 | 2 | **Service Binding 呼び出しは課金リクエストとして別カウントされるか** | Analytics のリクエスト数と実呼び出し数を突き合わせ（§7.1） | M0 | **2026-09-14 実測・/healthz 20 回 × 2**。Analytics の requests は host 27・20、gateway 20・26、data-api 20・17（サンプリングの推定値）＝**Analytics 上は別カウント**（host への 1 回が 3 requests）。請求は Standard では1回（一次情報）。Free の 100k/日 の数え方は一次情報に記載なし → **別カウントで見積もる**（§4.2） |
 | 3 | 1ログインで複数 Cloudflare アカウントを保持できるか | ダッシュボードで実際に作ってみる | 🧑 H-14 | — |
 | 4 | Workers Static Assets へのリクエストが 100k/日 を消費しないこと | Analytics で確認（§7.1） | M0 | **2026-09-14 実測・ページ 20 回 × 2**（`/` 10 回＋深いリンク 10 回）。**Worker の起動 0 回・0 回**、Static Assets の requests は 22・11 回と記録 → **消費しない**（確定。一次情報とも一致） |
@@ -465,6 +465,11 @@ pnpm exec tsx --env-file=.env infra/scripts/free-tier-report.ts --account 1     
 
 - **F-1（Worker ごとに判定するか合算するか）は、これで解けたわけではない。** 10 ms を大きく超えているのに
   `exceededResources` が 0 件である理由は説明できていない。**Paid へ上げたので、もう Free の上限では測れない。**
-  この宿題は「Free の壁で測る」以外の方法が要る（別 Issue の候補）
+- **2026-09-18：Issue #152 が、dev に `limits.cpu_ms: 10` を明示して Free の壁を再現し、確かめた。結論は「確定しなかった（否定されてもいない）」。**
+  20 回を 1 窓・200 回を間隔を空けずに 1 窓の**どちらでも**、`exceededResources` は **0 件**、応答は**全回 2xx**だった
+  （data-api の `max.cpuTime` は 36.03・33.55 ms。上限は 10 ms）。**「継続して超えたときだけ効く」という仮説の形（片方だけ落ちる）にはならなかった。**
+  10 ms の下限は wrangler が受け付けた（回避策は要らなかった）。実験のための `limits` は外して配備し直してある（`src/index.test.ts` が「どの環境にも無い」ことを確かめる）。
+  測り方と残る不確かさは [`../m1/measurements-cpu-limit.md`](../m1/measurements-cpu-limit.md)。
+  **だから F-1 の「合算か独立か」も、10 ms を超えたときに何が起きるかも、まだ確定していない。**
 - **設計は 1 つも変えていない。** 60.60 ms を「速くするために層を潰す」ことはしなかった
   （`CLAUDE.md`「アーキテクチャを課金プランに売らない」）。速さそのものは §5 の後継の線で別に扱う

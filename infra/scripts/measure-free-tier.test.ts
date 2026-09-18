@@ -59,6 +59,7 @@ import {
 } from "./measure-free-tier.ts";
 import { API_WORKERS, type ApiWorker, type ExceededReading } from "./api-measure-fixture.ts";
 import { HEALTHZ_PATH } from "./smoke.ts";
+import type { Env } from "./sync-bindings.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -790,6 +791,8 @@ interface ApiFakeOptions {
   readonly cpuMaxUs?: Partial<Record<ApiWorker, number>>;
   /** 窓の Worker ごとの回数（既定 20 = 送った数と同じ） */
   readonly requests?: number;
+  /** Analytics の行が名乗る Worker 名の env（既定 staging。--env dev のときに dev を渡す） */
+  readonly env?: Env;
   /** Worker の行を落とす（反映不足を作る） */
   readonly dropWorker?: ApiWorker;
   /** 名前が __unknown__ の起動を足す */
@@ -968,7 +971,7 @@ function createApiFake(options: ApiFakeOptions = {}, now: () => number = () => D
         const maxUs = (options.cpuMaxUs?.[worker] ?? { host: 1000, gateway: 800, "data-api": 5000 }[worker]) + (options.neverSettles === true ? reads * 100 : 0);
         const requests = options.requests ?? 20;
         rows.push({
-          dimensions: { scriptName: scriptName(worker) },
+          dimensions: { scriptName: scriptName(worker, options.env) },
           sum: { requests, errors: 0, cpuTimeUs: maxUs * requests },
           max: { cpuTime: maxUs },
           quantiles: { cpuTimeP50: maxUs, cpuTimeP99: maxUs },
@@ -1028,6 +1031,8 @@ interface ApiRunOptions {
   readonly routes?: string;
   readonly warm?: string;
   readonly count?: string;
+  readonly env?: string;
+  readonly maxRequests?: string;
   readonly fake?: ApiFakeOptions;
   readonly p1?: ExceededReading | undefined;
   readonly p1Throws?: boolean;
@@ -1063,8 +1068,10 @@ async function runApiMode(options: ApiRunOptions = {}) {
     options.instance ?? API_INSTANCE,
     ...(options.sizes === undefined ? [] : ["--sizes", options.sizes]),
     ...(options.routes === undefined ? [] : ["--routes", options.routes]),
+    ...(options.env === undefined ? [] : ["--env", options.env]),
     ...(options.warm === undefined ? [] : ["--warm", options.warm]),
     ...(options.count === undefined ? [] : ["--count", options.count]),
+    ...(options.maxRequests === undefined ? [] : ["--max-requests", options.maxRequests]),
     ...(options.extraArgv ?? []),
   ];
   const code = await runApiMeasurement(argv, io);
@@ -1300,6 +1307,48 @@ describe("API の計測：上限と境界", () => {
     const run = await runApiMode({ extraArgv: ["--help"] });
     expect(run.code).toBe(EXIT_OK);
     expect(run.out.join("\n")).toContain("--instance");
+  });
+});
+
+describe("API の計測：env と回数の上限（Issue #152）", () => {
+  it("--env dev は dev の Worker 名を読む（既定は staging のまま）", async () => {
+    const dev = await runApiMode({ sizes: "basic", routes: "spec", env: "dev", fake: { env: "dev" } });
+    expect(dev.code).toBe(EXIT_OK);
+    expect(dev.all).toContain("env=dev");
+
+    // 同じ dev の行でも、--env を渡さなければ staging の名前を探すので判定できない（env が効いていることの裏取り）
+    const staged = await runApiMode({ sizes: "basic", routes: "spec", fake: { env: "dev" } });
+    expect(staged.code).toBe(EXIT_UNDETERMINED);
+  });
+
+  it("--env production は測らない（exit 1・1 回も送らない）", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec", env: "production" });
+    expect(run.code).toBe(EXIT_NG);
+    expect(run.fake.calls).toHaveLength(0);
+    expect(run.all).toContain("別アカウント");
+  });
+
+  it("--max-requests を明示すると、温め 5 + 本測定 200 を 1 窓で送れる（既定の 50 は動かさない）", async () => {
+    const run = await runApiMode({
+      sizes: "basic",
+      routes: "spec",
+      warm: "5",
+      count: "200",
+      maxRequests: "205",
+      fake: { requests: 200 },
+    });
+    expect(run.code).toBe(EXIT_OK);
+    // 宣言 1 + 温め 5 + 本測定 200
+    expect(run.fake.hostGets().filter((call) => call.url.endsWith("/spec"))).toHaveLength(206);
+    expect(run.all).toContain("205");
+    expect(run.fake.queries().length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("--max-requests の既定は 50 のまま（200 回は明示しないと送れない）", async () => {
+    const run = await runApiMode({ sizes: "basic", routes: "spec", warm: "5", count: "200", fake: { requests: 200 } });
+    expect(run.code).toBe(EXIT_NG);
+    expect(run.fake.calls).toHaveLength(0);
+    expect(run.all).toContain("50");
   });
 });
 

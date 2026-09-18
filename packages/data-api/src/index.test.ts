@@ -115,6 +115,13 @@ describe.each(ENVS)("wrangler.jsonc（env.%s）", (env) => {
     expect(config.kv_namespaces).toEqual([]);
     expect(config.queues.consumers ?? []).toEqual([]);
   });
+
+  it("limits はどの環境にも無い（Issue #152 の実験で dev にだけ一時的に入れたのを、手順 6 で外した）", () => {
+    // Issue #152 は、Free の 10 ms の壁をアカウント①の中で再現するために `env.dev` へ `limits: { cpu_ms: 10 }` を
+    // 一時的に入れた。実験が終わったので外してある。**どの環境にも残っていないこと**を、ここで固定する。
+    // （staging・production には初めから入れていない。Free の上限はアカウント単位で、②は Free のままである。）
+    expect(config.limits).toBeUndefined();
+  });
 });
 
 describe.each(ENVS)("data-api Worker（env.%s・workerd 上の実機）", (env) => {

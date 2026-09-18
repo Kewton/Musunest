@@ -111,8 +111,8 @@ export const TARGET_ENV = "staging" as const satisfies Env;
 export const WORKERS = ["host", "gateway", "data-api"] as const;
 export type Worker = (typeof WORKERS)[number];
 
-/** Worker 名。正本は各 wrangler.jsonc の env.staging.name（食い違えば measure-free-tier.test.ts が落とす）。 */
-export const scriptName = (worker: Worker): string => `musunest-${TARGET_ENV}-${worker}`;
+/** Worker 名。正本は各 wrangler.jsonc の env.<env>.name（食い違えば measure-free-tier.test.ts が落とす）。 */
+export const scriptName = (worker: Worker, env: Env = TARGET_ENV): string => `musunest-${env}-${worker}`;
 
 /** Analytics が Worker の名前を決められないときの値。 */
 export const UNKNOWN_SCRIPT = "__unknown__";
@@ -219,7 +219,8 @@ const isSubdomain = (value: unknown): value is string =>
   typeof value === "string" && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(value);
 
 /** host のホスト名。表示しない。 */
-export const hostHostname = (subdomain: string): string => `${scriptName("host")}.${subdomain}.workers.dev`;
+export const hostHostname = (subdomain: string, env: Env = TARGET_ENV): string =>
+  `${scriptName("host", env)}.${subdomain}.workers.dev`;
 
 // ── 出力を伏せる ───────────────────────────────────────────────────────────────
 
@@ -410,7 +411,7 @@ export const ANALYTICS_QUERY = `query MeasureFreeTier($accountTag: string!, $scr
 export function analyticsVariables(accountId: string, hostname: string, record: DriveRecord): Record<string, unknown> {
   return {
     accountTag: accountId,
-    scripts: [...WORKERS.map(scriptName), UNKNOWN_SCRIPT],
+    scripts: [...WORKERS.map((worker) => scriptName(worker)), UNKNOWN_SCRIPT],
     hostname,
     pagesSince: record.pages.window.since,
     pagesUntil: record.pages.window.until,
@@ -701,7 +702,7 @@ export function judgeCpu(invocations: readonly InvocationRow[], sent: number, li
 // 測る条件（経路・規模・温め方・P-7/P-1 の線）は api-measure-fixture.ts が正本である。ここが持つのは
 // **送る・待つ・読む**である。時計・sleep・HTTP・Analytics・期間レポートは io から受け取る（unit は fake を渡す）。
 //
-//   pnpm exec tsx --env-file=.env infra/scripts/measure-free-tier.ts --api --instance <計測用の ID>
+//   pnpm exec tsx --env-file=.env infra/scripts/measure-free-tier.ts --api --instance <計測用の ID> [--env dev|staging]
 //
 // ── 手順 ──────────────────────────────────────────────────────────────────────
 //   1. 宣言（spec の経路）を読み、action の名前を引く（**計測の窓の外**）
@@ -710,6 +711,10 @@ export function judgeCpu(invocations: readonly InvocationRow[], sent: number, li
 //   3. 規模ごとに：前の残りを片付ける → 準備する（**計測の窓の外**）→ 経路ごとに **5 回温め → 60 秒空けて →
 //      20 回測る** → 片付ける（支出 → メンバーの順。#109 の delete）
 //   4. 本測定の窓だけを Analytics から読み（2 回続けて同じ値になり、送った分が出揃うまで待つ）、P-7 を判定する
+//
+// 既定の宛先は staging（#111 と同じ）。`--env dev` は、`limits.cpu_ms` を自分で設定して Free の壁を
+// アカウント①の中で再現するときに使う（Issue #152）。回数の上限は `--max-requests` で明示的に広げられる
+// （既定 50。経路を合算して緩めるのとは別）。
 //
 // ── 終了コード ────────────────────────────────────────────────────────────────
 //   0 … すべて判定できて、P-7・P-1 のどちらにも触れていない
@@ -723,6 +728,12 @@ const API_INSTANCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const API_DEMO_INSTANCE = /demo/i;
 
 export const API_FLAG = "--api";
+
+/**
+ * `--api` を向けてよい env。production は別アカウントで `/api/*` が 404 なので測らない（README §7.3・Q5）。
+ * 既定は staging（#111 の実測と同じ）。dev は、上限を自分で設定して Free の壁を再現するときに使う（Issue #152）。
+ */
+export const API_ENVS: readonly Env[] = ["dev", "staging"];
 
 /** `--api` の待ち方。既定は「5 回温め → 60 秒空けて → 20 回測る」（Q15・06 §8 の再測と同じ）。 */
 export interface ApiMeasurePolicy {
@@ -849,15 +860,19 @@ export function parseApiAnalytics(
   return Array.from({ length: count }, (_, index) => readInvocations(account[`w${index}`]));
 }
 
-const workerRows = (rows: readonly InvocationRow[], worker: ApiWorker): readonly InvocationRow[] =>
-  rows.filter((row) => row.scriptName === scriptName(worker));
+const workerRows = (
+  rows: readonly InvocationRow[],
+  worker: ApiWorker,
+  env: Env = TARGET_ENV,
+): readonly InvocationRow[] => rows.filter((row) => row.scriptName === scriptName(worker, env));
 
-const requestsOf = (rows: readonly InvocationRow[], worker: ApiWorker): number => totalRequests(workerRows(rows, worker));
+const requestsOf = (rows: readonly InvocationRow[], worker: ApiWorker, env: Env = TARGET_ENV): number =>
+  totalRequests(workerRows(rows, worker, env));
 
-const requestsByWorker = (rows: readonly InvocationRow[]): Verdicts => ({
-  host: requestsOf(rows, "host"),
-  gateway: requestsOf(rows, "gateway"),
-  "data-api": requestsOf(rows, "data-api"),
+const requestsByWorker = (rows: readonly InvocationRow[], env: Env = TARGET_ENV): Verdicts => ({
+  host: requestsOf(rows, "host", env),
+  gateway: requestsOf(rows, "gateway", env),
+  "data-api": requestsOf(rows, "data-api", env),
 });
 
 interface ApiResponse {
@@ -1096,8 +1111,8 @@ function assertNoOverlap(existing: readonly MeasureWindow[], candidate: MeasureW
 }
 
 /** 窓の起動が、送った数くらい出揃っているか（Worker ごと）。 */
-const apiReflected = (rows: readonly InvocationRow[], sent: number): boolean =>
-  API_WORKERS.every((worker) => requestsOf(rows, worker) >= sent / 2);
+const apiReflected = (rows: readonly InvocationRow[], sent: number, env: Env = TARGET_ENV): boolean =>
+  API_WORKERS.every((worker) => requestsOf(rows, worker, env) >= sent / 2);
 
 /**
  * 窓の値を比べるための正規の鍵。**行の並びは Analytics が保証しない**ので、並べ替えてから比べる
@@ -1116,6 +1131,7 @@ async function apiReadWindows(
   credentials: Credentials,
   secrets: readonly string[],
   windows: readonly MeasureWindow[],
+  env: Env,
 ): Promise<readonly WindowReading[]> {
   if (windows.length === 0) return [];
   io.out(
@@ -1135,7 +1151,7 @@ async function apiReadWindows(
         method: "POST",
         body: JSON.stringify({
           query,
-          variables: { accountTag: credentials.accountId, scripts: [...API_WORKERS.map(scriptName), UNKNOWN_SCRIPT] },
+          variables: { accountTag: credentials.accountId, scripts: [...API_WORKERS.map((worker) => scriptName(worker, env)), UNKNOWN_SCRIPT] },
         }),
       });
     } catch (e) {
@@ -1148,7 +1164,7 @@ async function apiReadWindows(
     windows.forEach((window, index) => {
       const rows = last[index] ?? [];
       const key = apiWindowKey(rows);
-      if (!settled[index] && apiReflected(rows, window.sent) && previous[index] === key) settled[index] = true;
+      if (!settled[index] && apiReflected(rows, window.sent, env) && previous[index] === key) settled[index] = true;
       previous[index] = key;
       if (!settled[index]) allSettled = false;
     });
@@ -1171,7 +1187,7 @@ async function apiReadWindows(
 }
 
 /** 1 つの窓を判定する。**未測定・不足・混入・名前不明は非抵触にせず判断不能**にする。 */
-function apiJudgeWindow(reading: WindowReading): WindowFinding {
+function apiJudgeWindow(reading: WindowReading, env: Env): WindowFinding {
   const base: {
     window: MeasureWindow;
     requests: Verdicts;
@@ -1179,7 +1195,7 @@ function apiJudgeWindow(reading: WindowReading): WindowFinding {
     sampled: boolean;
   } = {
     window: reading.window,
-    requests: requestsByWorker(reading.rows),
+    requests: requestsByWorker(reading.rows, env),
     errors: reading.rows.reduce((total, row) => total + row.errors, 0),
     sampled: reading.rows.some((row) => row.sampleInterval !== 1),
   };
@@ -1190,23 +1206,23 @@ function apiJudgeWindow(reading: WindowReading): WindowFinding {
   const unknown = totalRequests(reading.rows.filter((row) => row.scriptName === UNKNOWN_SCRIPT));
   if (unknown > 0) return undetermined(unknownReason(unknown));
   for (const worker of API_WORKERS) {
-    const rows = workerRows(reading.rows, worker);
+    const rows = workerRows(reading.rows, worker, env);
     if (rows.length !== 1) return undetermined(`${worker} の行が 1 つでない（${rows.length} 行。反映待ちか、記録の粒度が違う）`);
-    const requests = requestsOf(reading.rows, worker);
+    const requests = requestsOf(reading.rows, worker, env);
     if (!aboutSent(requests, reading.window.sent)) {
       return undetermined(`${worker} の回数（${requests}）が送った数（${reading.window.sent}）と合わない（反映待ちか、他の通信の混入）`);
     }
   }
   const p7 = judgeP7({
-    host: maxOf(reading.rows, "host"),
-    gateway: maxOf(reading.rows, "gateway"),
-    "data-api": maxOf(reading.rows, "data-api"),
+    host: maxOf(reading.rows, "host", env),
+    gateway: maxOf(reading.rows, "gateway", env),
+    "data-api": maxOf(reading.rows, "data-api", env),
   });
   return { ...base, verdict: p7.verdict, p7, reason: p7.reason };
 }
 
-const maxOf = (rows: readonly InvocationRow[], worker: ApiWorker): number =>
-  workerRows(rows, worker).reduce((max, row) => Math.max(max, row.cpuMaxUs), 0);
+const maxOf = (rows: readonly InvocationRow[], worker: ApiWorker, env: Env = TARGET_ENV): number =>
+  workerRows(rows, worker, env).reduce((max, row) => Math.max(max, row.cpuMaxUs), 0);
 
 /** P-1：過去 7 日の上限超過を、既存の期間レポート（free-tier-report.ts）を**別に読んで**判定する。 */
 async function apiReadP1(io: ApiMeasureIo, credentials: Credentials, secrets: readonly string[]): Promise<P1Finding> {
@@ -1244,10 +1260,12 @@ function apiParseArgs(argv: readonly string[]) {
       args: [...argv],
       options: {
         instance: { type: "string" },
+        env: { type: "string" },
         sizes: { type: "string" },
         routes: { type: "string" },
         warm: { type: "string" },
         count: { type: "string" },
+        "max-requests": { type: "string" },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
@@ -1295,19 +1313,30 @@ async function apiRun(argv: readonly string[], io: ApiMeasureIo): Promise<number
   if (API_DEMO_INSTANCE.test(instanceId)) {
     throw new MeasureError("--instance に demo を含む ID は使わない（デモ・窓口のインスタンスを触らない。専用の計測インスタンスを明示する）");
   }
+  const envRaw = values.env;
+  if (envRaw !== undefined && !(API_ENVS as readonly string[]).includes(envRaw)) {
+    throw new MeasureError(
+      `--env ${JSON.stringify(envRaw)} は測らない（${API_ENVS.join(" / ")} だけ）。` +
+        "production は別アカウントで /api/* が 404 なので測らない。1 回も送らずに止める",
+    );
+  }
+  const env: Env = envRaw === undefined ? TARGET_ENV : (envRaw as Env);
   const sizes = parseIds(values.sizes, API_SIZES.map((size) => size.id).filter(isSizeId), "--sizes").map(sizeById);
   const routes = parseIds(values.routes, API_ROUTES.map((route) => route.id).filter(isRouteId), "--routes").map(routeById);
   const warmup = positiveInteger(values.warm, "--warm", io.policy.warmup);
   const measured = positiveInteger(values.count, "--count", io.policy.measured);
-  if (warmup + measured > MAX_REQUESTS) {
+  // 1 経路・1 規模あたりに送る回数の上限。既定は Issue #25 で承認された枠（50）。
+  // Issue #152 の「継続して 200 回」の実測では、**明示的に**上げる（--max-requests 205。経路を合算して緩めるのとは別）。
+  const maxRequests = positiveInteger(values["max-requests"], "--max-requests", MAX_REQUESTS);
+  if (warmup + measured > maxRequests) {
     throw new MeasureError(
-      `温め ${warmup} + 本測定 ${measured} が ${MAX_REQUESTS} を超える。**経路を合算して上限を緩めない**（1 経路・1 規模ごとに ${MAX_REQUESTS} 以内）。1 回も送らずに止める`,
+      `温め ${warmup} + 本測定 ${measured} が ${maxRequests} を超える。**経路を合算して上限を緩めない**（1 経路・1 規模ごとに ${maxRequests} 以内）。1 回も送らずに止める`,
     );
   }
 
   const credentials = readCredentials(io.env);
   const subdomain = await readSubdomain(io, credentials);
-  const hostname = hostHostname(subdomain);
+  const hostname = hostHostname(subdomain, env);
   const origin = `https://${hostname}`;
   const secrets = [credentials.token, credentials.accountId, subdomain, hostname];
 
@@ -1318,11 +1347,11 @@ async function apiRun(argv: readonly string[], io: ApiMeasureIo): Promise<number
   // 2. P-1（過去 7 日。窓の外。既存の期間レポートを別に読む）
   const p1 = await apiReadP1(io, credentials, secrets);
 
-  io.out(`api-measure: env=${TARGET_ENV} の計測用インスタンス（${instanceId}）で測る`);
+  io.out(`api-measure: env=${env} の計測用インスタンス（${instanceId}）で測る`);
   io.out(`api-measure: 経路 ${routes.map((route) => route.id).join("・")} / 規模 ${sizes.map((size) => size.id).join("・")}`);
   io.out(
     `api-measure: 各経路・各規模を ${warmup} 回温め → ${io.policy.gapMs / 1000} 秒空けて → ${measured} 回測る` +
-      `（合計 ${warmup + measured} 回 ≤ ${MAX_REQUESTS}/窓。全経路を合算しない）`,
+      `（合計 ${warmup + measured} 回 ≤ ${maxRequests}/窓。全経路を合算しない）`,
   );
 
   // 3. 規模ごとに：片付け → 準備 → 計測 → 片付け（準備と片付けは窓の外）
@@ -1361,8 +1390,8 @@ async function apiRun(argv: readonly string[], io: ApiMeasureIo): Promise<number
   }
 
   // 4. Analytics を読み（本測定の窓だけ）、P-7 を判定する
-  const readings = await apiReadWindows(io, credentials, secrets, windows);
-  const findings = readings.map((reading) => apiJudgeWindow(reading));
+  const readings = await apiReadWindows(io, credentials, secrets, windows, env);
+  const findings = readings.map((reading) => apiJudgeWindow(reading, env));
 
   io.out("");
   io.out("══ 結果（本測定の窓。Worker ごとの max.cpuTime）");
@@ -1420,14 +1449,17 @@ function apiOverallReason(findings: readonly WindowFinding[]): string {
   return `測った ${findings.length} 窓のすべてで、どの Worker の最大も単体で 7 ms を超えていない`;
 }
 
-export const API_USAGE = `usage: pnpm exec tsx --env-file=.env infra/scripts/measure-free-tier.ts --api --instance <id> [--sizes basic,20,200] [--routes spec,expenseList,memberList,settlement] [--warm <n>] [--count <n>]
+export const API_USAGE = `usage: pnpm exec tsx --env-file=.env infra/scripts/measure-free-tier.ts --api --instance <id> [--env <${API_ENVS.join("|")}>] [--sizes basic,20,200] [--routes spec,expenseList,memberList,settlement] [--warm <n>] [--count <n>] [--max-requests <n>]
 
   --api                   /api の経路（#102 の spec・支出一覧・member の集計一覧・#108 の精算結果）の CPU 時間を測る
   --instance <id>         計測用インスタンスの ID（**必須**。demo を含む ID は使わない）
+  --env <env>             測る環境（既定 ${TARGET_ENV}）。${API_ENVS.join(" / ")} だけ。production は別アカウントで /api/* が 404 なので測らない
+                          dev は、上限を自分で設定して Free の壁を再現するときに使う（Issue #152）
   --sizes <a,b>           規模（既定は全部。basic・20・200）。basic = A/B/C と 2 支出
   --routes <a,b>          経路（既定は全部）。spec・expenseList・memberList・settlement
   --warm <n>              温めの回数（既定 ${API_WARMUP_REQUESTS}）／ --count <n> 本測定の回数（既定 ${API_MEASURED_REQUESTS}）
-                          温め + 本測定 は ${MAX_REQUESTS} 以下（**経路を合算しない**）
+  --max-requests <n>      1 経路・1 規模あたりに送る回数の上限（既定 ${MAX_REQUESTS}）。温め + 本測定 はこれ以下
+                          （**経路を合算しない**）。既定を上げるのは、枠を明示的に広げるときだけ（Issue #152 の 200 回）
 
 各経路・各規模を ${API_WARMUP_REQUESTS} 回温め → ${API_GAP_MS / 1000} 秒空けて → ${API_MEASURED_REQUESTS} 回測る。
 準備と片付けは計測の窓の外（#109 の delete で片付ける）。CPU 時間は Workers Analytics の worker 別 cpuTime の max。
