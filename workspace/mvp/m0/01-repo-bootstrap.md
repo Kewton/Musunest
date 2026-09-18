@@ -312,10 +312,11 @@ gh label create "blocked"       --color B60205 --repo $REPO
 - リクエスト経路は TypeScript のみ
 - Cloudflare 固有APIは adapter 層に閉じ込める（app-do を除く）
 - Builder Plane（CommandAgent）のコードをこのリポジトリに持ち込まない。接点は headless契約 と pins/ のみ
-- **Cloudflare Free 前提（M0〜M2前半）**：host は SSR にしない（CPU 10ms／SPAシェル＋Static Assets）。
+- **小さく保つ（M0〜M2前半）**：host は SSR にしない（SPAシェル＋Static Assets）。
   Workers for Platforms を使わない。Logpush を使わない（observability.enabled で代替）。
   `schedule:` トリガのワークフローを作らない。
-  ただし**アーキテクチャを課金プランに売らない**——枠が足りなければ層を潰すのではなく $5 払う
+  **アーキテクチャを課金プランに売らない**——枠が足りなければ層を潰すのではなく払う
+  （2026-09-18 に CLAUDE.md で改題。アカウント①は Workers Paid になったが、この 4 つは維持する。`06` §5）
 
 ## 手順
 - 作業は必ず Issue から。ブランチは feat/<issue番号>-<slug>
