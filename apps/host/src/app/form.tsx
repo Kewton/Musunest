@@ -10,6 +10,8 @@
 //   list of → 参照先のレコードの複数選択（チェック）。候補の順に、選んだ ID を送る
 //   enum   → 選択肢の単一選択（M1.3）。**見せるのは表示名で、送るのはキーである。**
 //            既定値があれば最初から選んでおく（未入力を空文字で送ると、既定値が入らないため）
+//   date   → 日付の入力欄（M1.3）。**送るのは `YYYY-MM-DD` の文字列である。** 未入力は空のまま送る
+//            （今日を勝手に入れない。断るのは data-api である）
 //
 // **enum の選択肢を絞ることは守りではない。** 宣言に無い値を断るのは data-api だけである
 // （`03-spec-layers-and-checker.md` §2.2。`CLAUDE.md` の不変条件）。
@@ -224,6 +226,17 @@ function FieldInput({
           name={field.name}
           className="field-input"
           rows={3}
+          value={text}
+          onChange={onChange}
+        />
+      ) : field.type === "date" ? (
+        // 日付（M1.3）。**未入力は空のまま送る**（今日を勝手に入れない。守りは data-api 側にある）。
+        // ブラウザの日付の入力欄が送る値は `YYYY-MM-DD` である（保存する形と同じ。docs/semantics.md「date」）
+        <input
+          id={inputId(field.name)}
+          name={field.name}
+          className="field-input"
+          type="date"
           value={text}
           onChange={onChange}
         />

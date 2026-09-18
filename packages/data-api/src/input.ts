@@ -14,7 +14,7 @@
 // ここは Cloudflare にもストレージにも触れない（呼ぶ側が渡す値だけで決まる）。
 
 import type { Entity, FieldDeclaration, NormalizedAppSpec } from "@musunest/appspec-schema";
-import { enumDefault, fieldKind, isEnumField } from "@musunest/appspec-schema";
+import { DATE_VALUE_PATTERN, enumDefault, fieldKind, isEnumField } from "@musunest/appspec-schema";
 import type { RecordData, RecordValue } from "@musunest/app-do";
 import type { Clock } from "@musunest/spec-engine";
 import { evaluateRecord } from "@musunest/spec-engine";
@@ -67,13 +67,16 @@ const isFiniteNumber = (value: unknown): value is number =>
 
 /**
  * 1 つの項目の値を読む。型に合わなければ `null`（この関数の戻り値で `null` は「合わない」の意味しか
- * 持たない——`string` も `number` も `list` も `ref` も `enum` も `null` を作らない）。
+ * 持たない——`string` も `number` も `list` も `ref` も `enum` も `date` も `null` を作らない）。
  *
  * **`ref` は空でない文字列（参照先の ID）だけを受け取る。** その ID が同じインスタンスの
  * 参照先のレコードに実在するかは、型を通ったあとに references.ts が見る（二段構え。M1.2）。
  *
  * **`enum` は `options` のキーだけを受け取る**（M1.3）。画面が選択肢を絞るのは親切であって守り
  * ではない——**宣言に無い値を断るのはここ（Data API）だけである**（`CLAUDE.md` の不変条件）。
+ *
+ * **`date` は `YYYY-MM-DD` の形の文字列だけを受け取る**（M1.3）。画面の入力欄が形を整えるのも
+ * 同じく守りではない——**形を断るのはここだけである**（docs/semantics.md「date」）。
  */
 function readValue(field: FieldDeclaration, value: unknown): RecordValue | null {
   switch (fieldKind(field)) {
@@ -82,6 +85,9 @@ function readValue(field: FieldDeclaration, value: unknown): RecordValue | null 
       return typeof value === "string" ? value : null;
     case "number":
       return isFiniteNumber(value) ? value : null;
+    case "date":
+      // 保存する形は `YYYY-MM-DD` の文字列である。空文字・別の形・数は受け取らない（M1.3）
+      return typeof value === "string" && DATE_VALUE_PATTERN.test(value) ? value : null;
     case "ref":
       // 参照の値は、参照先のレコードの ID である（空文字は ID にならない）
       return typeof value === "string" && value !== "" ? value : null;

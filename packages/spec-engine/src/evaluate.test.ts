@@ -1,12 +1,13 @@
 // 評価（同じ entity の中の計算と検査）の unit テスト（Issue #98 の受入条件のうち、評価に閉じる分）。
 //
-// ここで固定したいのは 6 つ。
+// ここで固定したいのは 7 つ。
 //   1. 見本 expense-log の計算値が、採点のシナリオ（正本）の期待値と一致する（時計を差し込む）
 //   2. computed を参照する computed が、宣言の並びによらず依存の順に評価される
 //   3. validation は宣言の順に**すべて**評価し、失敗名をその順で返す
 //   4. 0 で割る・桁あふれの計算値は null で、それを使う検査は不合格（**0 に読み替えない**）
 //   5. 計算値は戻り値にだけ入り、渡したレコードを書き換えない
 //   6. 評価側も式の上限（文字数 200・深さ 8・ノード 64）を適用し、1 超過を成功値にしない
+//   7. 日付（`date`）と「今日」（`today()`）を、差し込んだ時計で評価する（M1.3。値は時計にだけ依存する）
 //
 // 値の期待値は、見本の隣の採点のシナリオ（appspec-schema の正本）から読む。ここに写すと、
 // 見本やシナリオを直したときに片方だけが古くなる。窓口が受入条件に書いた 4 件の数字は、
@@ -691,5 +692,115 @@ describe("式に書けるもの（正本の一覧をすべて評価する）", (
       headcount: 1,
       shareAmount: null,
     });
+  });
+});
+
+// ── 7. 日付（date）と「今日」（today()）（M1.3。Issue #155） ──────────
+//
+// 採点は**時計を差し込んで**行う（Q17）。値が時計に依存するのは `today()` だけである。
+// **評価のどこにも `Date.now()` の直接の呼び出しが無い**ことを、走査でも確かめる（受入条件）。
+
+/** 日付の項目を使う検査の式を 1 つ持つ宣言（entity は土台の expense） */
+const dueDeclaration = (expression: string): string =>
+  declaration({
+    fields: ["amount: number", "due: date"],
+    validations: [validationBlock("dueBeforeToday", expression)],
+  });
+
+describe("日付（date）と「今日」（today()）（M1.3）", () => {
+  /** 採点のシナリオと同じ、日本時間の 12:00（2026-09-16）に固定した時計 */
+  const clock = fixedClock("2026-09-16T12:00:00+09:00");
+
+  const failuresOf = async (
+    expression: string,
+    record: Readonly<Record<string, unknown>>,
+    at: Clock = clock,
+  ): Promise<readonly string[]> => {
+    const app = await appOf(dueDeclaration(expression));
+    return evaluateRecord({ app, entity: "expense", record, clock: at }).validations;
+  };
+
+  it("due < today() を評価する（昨日は真・今日は偽・明日は偽・未入力は偽。受入条件）", async () => {
+    expect(await failuresOf("due < today()", { amount: 1, due: "2026-09-15" }), "昨日は真").toEqual([]);
+    expect(await failuresOf("due < today()", { amount: 1, due: "2026-09-16" }), "今日は偽").toEqual([
+      "dueBeforeToday",
+    ]);
+    expect(await failuresOf("due < today()", { amount: 1, due: "2026-09-17" }), "明日は偽").toEqual([
+      "dueBeforeToday",
+    ]);
+    // 未入力は真偽にならない（`null`）ので通らない。**0 にも空の並びにも読み替えない**
+    expect(await failuresOf("due < today()", { amount: 1 }), "未入力は偽").toEqual(["dueBeforeToday"]);
+    expect(await failuresOf("due < today()", { amount: 1, due: "" }), "空文字は偽").toEqual([
+      "dueBeforeToday",
+    ]);
+  });
+
+  it("時計を差し替えると、同じレコードでも結果が変わる（時計が効いていることの確認）", async () => {
+    const record = { amount: 1, due: "2026-09-16" };
+    expect(await failuresOf("due < today()", record, clock)).toEqual(["dueBeforeToday"]);
+    expect(await failuresOf("due < today()", record, fixedClock("2026-09-17T12:00:00+09:00"))).toEqual([]);
+  });
+
+  it("「今日」は日本時間で数える（UTC ではまだ前日である瞬間でも、日本時間では当日）", async () => {
+    // 日本時間の 2026-09-16 08:59（UTC では 2026-09-15 23:59）と、
+    // 日本時間の 2026-09-16 09:00（UTC の日付が変わった直後）
+    for (const at of [fixedClock("2026-09-15T23:59:00Z"), fixedClock("2026-09-16T00:00:00Z")]) {
+      expect(
+        await failuresOf("due == today()", { amount: 1, due: "2026-09-16" }, at),
+        String(at.now()),
+      ).toEqual([]);
+    }
+  });
+
+  it.each([
+    ["<", "2026-09-15", true],
+    ["<", "2026-09-16", false],
+    ["<=", "2026-09-16", true],
+    [">", "2026-09-17", true],
+    [">", "2026-09-16", false],
+    [">=", "2026-09-16", true],
+    ["==", "2026-09-16", true],
+    ["!=", "2026-09-17", true],
+  ] as const)("due %s today() は due が %s のとき %s である", async (operator, due, holds) => {
+    const validations = await failuresOf(`due ${operator} today()`, { amount: 1, due });
+    expect(validations).toEqual(holds ? [] : ["dueBeforeToday"]);
+  });
+
+  it("日付と数の比較は、評価でも真偽にしない（静的チェックが断る式を手で渡した場合）", () => {
+    // 検査を通っていない成果物（手で作ったもの）を渡す経路。日付と数は型が食い違うので、
+    // 評価も真偽を返さない（`null` にして、検査は通らないものとして扱う）
+    const app: NormalizedAppSpec = {
+      schemaVersion: APPSPEC_SCHEMA_VERSION,
+      sourceSha256: "0".repeat(64),
+      spec: {
+        entities: [{ name: "expense", fields: { due: "date" } }],
+        views: [],
+        actions: [],
+        validations: [
+          { name: "dateAndNumber", entity: "expense", expression: "due < 1" },
+          { name: "dateAndDate", entity: "expense", expression: "due < today()" },
+        ],
+        computed: [],
+        permissions: [],
+        minIdentity: { mode: "anonymous" },
+      },
+    };
+    const validations = evaluateRecord({
+      app,
+      entity: "expense",
+      record: { due: "2026-09-15" },
+      clock,
+    }).validations;
+    // 日付どうしの比較だけが通り、日付と数の比較は通らない
+    expect(validations).toEqual(["dateAndNumber"]);
+  });
+
+  it("評価のどこにも Date.now() の直接の呼び出しが無い（受入条件）", () => {
+    // 現在時刻を読むのは、時計の境界（clock.ts）だけである
+    for (const file of ["evaluate.ts", "expression.ts"]) {
+      const source = readText(new URL(`./${file}`, import.meta.url));
+      expect(source.includes("Date.now"), `${file} に Date.now がある`).toBe(false);
+    }
+    expect(readText(new URL("./clock.ts", import.meta.url))).toContain("Date.now()");
   });
 });

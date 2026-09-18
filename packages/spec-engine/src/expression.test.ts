@@ -5,7 +5,7 @@
 //   2. 決められない型（`unknown`）が**後続の診断に化けない**——1 つの誤りが 1 つの誤りコードになる
 //   3. 上限（文字数 200・深さ 8・ノード 64）は**ちょうどは通り、1 超過で診断になる**
 import { describe, expect, it } from "vitest";
-import { BUILTIN_FUNCTIONS } from "@musunest/appspec-schema";
+import { BUILTIN_FUNCTIONS, DATE_FUNCTIONS } from "@musunest/appspec-schema";
 import {
   analyzeExpression,
   countNodes,
@@ -187,15 +187,18 @@ describe("式の上限（文字数 200・深さ 8・ノード 64）", () => {
 
 const noNames: ExpressionScope = { resolveName: () => null, entityName: () => null };
 
+/** 型の検査に渡す、名前 → 型（`date` は M1.3 で入った。#155） */
+type FieldTypes = Readonly<Record<string, "number" | "string" | "list" | "date">>;
+
 /** 見本の expense に近い名前の環境。`ammount` のような綴りの間違いは解決しない */
-const expense = (fields: Readonly<Record<string, "number" | "string" | "list">>): ExpressionScope => ({
+const expense = (fields: FieldTypes): ExpressionScope => ({
   resolveName: (name) => Object.hasOwn(fields, name) ? (fields[name] ?? null) : null,
   entityName: (name) => (name === "budget" ? "budget" : null),
 });
 
 const analyze = (
   text: string,
-  fields: Readonly<Record<string, "number" | "string" | "list">> = {},
+  fields: FieldTypes = {},
 ): { type: string; codes: readonly string[] } => {
   const status = readExpression(text);
   if (!status.ok) throw new Error(`${text}: ${status.problems.map((p) => p.message).join(" / ")}`);
@@ -285,6 +288,82 @@ describe("式の型（実行しない）", () => {
 
   it("店頭が用意した関数の定義は、appspec-schema が正本である", () => {
     expect(Object.keys(BUILTIN_FUNCTIONS)).toEqual(["min", "max", "len"]);
+    // 日付の関数（M1.3）は別の表である。**M1.1 の関数の一覧に混ぜない**（混ぜると、その一覧を
+    // 読む側の意味が変わる。appspec-schema の DATE_FUNCTIONS の注記）
+    expect(Object.keys(DATE_FUNCTIONS)).toEqual(["today"]);
+  });
+});
+
+// ── 日付（date）と「今日」（today()）（M1.3。#155） ──────────────────
+//
+// 比べられるのは**数どうし**（従来）と**日付どうし**だけである。日付と数を混ぜると
+// `LOGIC_OPERAND_TYPE_MISMATCH`、`today()` に引数を渡すと `LOGIC_FUNCTION_ARITY_MISMATCH` になる
+// （**別の誤りコードである**。受入条件）。
+
+describe("日付と「今日」の型（M1.3）", () => {
+  const due: FieldTypes = {
+    amount: "number",
+    discount: "number",
+    payer: "string",
+    participants: "list",
+    due: "date",
+  };
+
+  it.each(["<", "<=", ">", ">=", "==", "!="] as const)(
+    "日付どうしは %s で比べられ、結果は真偽になる（受入条件）",
+    (operator) => {
+      expect(analyze(`due ${operator} today()`, due)).toEqual({ type: "boolean", codes: [] });
+      expect(analyze(`due ${operator} due`, due)).toEqual({ type: "boolean", codes: [] });
+    },
+  );
+
+  it("日付と数の比較は、演算の型が食い違う（受入条件）", () => {
+    expect(analyze("due < 1", due)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_OPERAND_TYPE_MISMATCH"],
+    });
+    expect(analyze("amount < today()", due)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_OPERAND_TYPE_MISMATCH"],
+    });
+    expect(analyze("today() > amount", due)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_OPERAND_TYPE_MISMATCH"],
+    });
+  });
+
+  it("日付は数の計算に使えない", () => {
+    expect(analyze("due + 1", due)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_OPERAND_TYPE_MISMATCH"],
+    });
+    expect(analyze("-due", due)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_OPERAND_TYPE_MISMATCH"],
+    });
+  });
+
+  it("today に引数を渡すと、引数の数が食い違う（受入条件）", () => {
+    expect(analyze("today(1)", due)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_FUNCTION_ARITY_MISMATCH"],
+    });
+    expect(analyze("today()", due)).toEqual({ type: "date", codes: [] });
+  });
+
+  it("2 つの誤りコードは別である（日付と数の比較・today の引数。受入条件）", () => {
+    const compared = analyze("due < 1", due).codes;
+    const called = analyze("today(1)", due).codes;
+    expect(compared).toEqual(["LOGIC_OPERAND_TYPE_MISMATCH"]);
+    expect(called).toEqual(["LOGIC_FUNCTION_ARITY_MISMATCH"]);
+    expect(compared).not.toEqual(called);
+  });
+
+  it("日付の名前を綴り間違えれば、参照が無いことを断る（1 つの誤りは 1 つのコード）", () => {
+    expect(analyze("duo < today()", due)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_REFERENCE_NOT_FOUND"],
+    });
   });
 });
 

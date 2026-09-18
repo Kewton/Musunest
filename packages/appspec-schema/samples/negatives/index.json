@@ -79,6 +79,13 @@
       "why": "店頭が用意していない関数 round を使っている（M1.1 は min・max・len だけ）"
     },
     {
+      "name": "date-compared-with-number",
+      "codes": [
+        "LOGIC_OPERAND_TYPE_MISMATCH"
+      ],
+      "why": "日付の項目 due を数と比べている（日付は日付どうしでだけ比べられる。M1.3）"
+    },
+    {
       "name": "entity-duplicate-name",
       "codes": [
         "DATA_ENTITY_DUPLICATE_NAME"
@@ -224,6 +231,13 @@
         "UI_FIELD_NOT_FOUND"
       ],
       "why": "表（type: table）の show に、entity に無い名前 ammount を書いている（M1.2）"
+    },
+    {
+      "name": "today-with-argument",
+      "codes": [
+        "LOGIC_FUNCTION_ARITY_MISMATCH"
+      ],
+      "why": "today に引数を渡している（today は引数を取らない。M1.3）"
     },
     {
       "name": "validation-message-not-string",

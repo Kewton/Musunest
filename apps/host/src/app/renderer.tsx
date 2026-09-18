@@ -488,7 +488,8 @@ function reasonOfFailure(error: ClientError): string {
 /**
  * 入力欄になる項目。**entity の `fields` だけ**を宣言の順に取る（computed・id・日時は入らない）。
  * 参照の項目には、参照先の候補（ID と名前）を付ける。選択肢の項目（`enum`。M1.3）には、
- * **宣言の `options`（キー → 表示名）と `default`** をそのまま付ける。
+ * **宣言の `options`（キー → 表示名）と `default`** をそのまま付ける。日付（`date`。M1.3）は
+ * 種類をそのまま渡すだけで、入力欄（日付の欄）にするのは form.tsx である。
  *
  * **選択肢を絞ることは守りではない。** 宣言に無い値を断るのは data-api だけである（`03` §2.2）。
  */

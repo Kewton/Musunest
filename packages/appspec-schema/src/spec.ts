@@ -56,9 +56,17 @@ export const RESERVED_NAMES = ["id", "createdAt", "updatedAt"] as const;
 
 // ── データ層 ─────────────────────────────────────────────────────
 
-/** 項目の型（文字列の 1 語で書けるもの。M1.1）。意味は docs/semantics.md。 */
-export const FIELD_TYPES = ["string", "number", "list"] as const;
+/** 項目の型（文字列の 1 語で書けるもの。M1.1。`date` は M1.3）。意味は docs/semantics.md。 */
+export const FIELD_TYPES = ["string", "number", "list", "date"] as const;
 export type FieldType = (typeof FIELD_TYPES)[number];
+
+/**
+ * 日付の値の形（M1.3。docs/semantics.md「date」）。**保存する形は `YYYY-MM-DD` の文字列**である。
+ * 日付どうしの比較は、この形の文字列をそのまま比べる（同じ桁数なので辞書の順が暦の順と一致する）。
+ *
+ * **Data API が唯一の権限強制点である**——この形でない値は、入力の型の検査（data-api）で断る。
+ */
+export const DATE_VALUE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
  * 参照の項目（M1.2）。ほかの entity のレコード 1 件を、その ID で指す。
@@ -298,8 +306,12 @@ export interface Action {
 /** 操作の種類。省略は `create` として読む（M1.1 の宣言の意味を変えない） */
 export const actionKind = (action: Action): ActionKind => action.kind ?? "create";
 
-/** 式の値の型。`boolean` は比べた結果にだけ現れる（項目の型にも computed の型にも無い）。 */
-export type ExpressionType = "number" | "string" | "list" | "boolean";
+/**
+ * 式の値の型。`boolean` は比べた結果にだけ現れる（項目の型にも computed の型にも無い）。
+ * `date` は日付の項目と `today()` だけが作る（M1.3）。**ほかの型とは比べられない**
+ * （`date` と `number` の比較は静的チェックが断る。docs/semantics.md「date」）。
+ */
+export type ExpressionType = "number" | "string" | "list" | "boolean" | "date";
 
 /** 店頭が用意する関数（M1.1）。引数の数は固定。 */
 export const BUILTIN_FUNCTIONS = {
@@ -311,6 +323,25 @@ export const BUILTIN_FUNCTIONS = {
   { readonly params: readonly ExpressionType[]; readonly returns: ExpressionType }
 >;
 export type BuiltinFunctionName = keyof typeof BUILTIN_FUNCTIONS;
+
+/**
+ * 店頭が用意する**日付の関数**（M1.3）。引数の数は固定で、いまは `today()` だけである。
+ *
+ * **`BUILTIN_FUNCTIONS` に混ぜない。** あちらは M1.1 の関数（数と並び）の一覧であり、
+ * 「この版で使える関数は何か」をその一覧そのもので見る実装とテストがある——日付を混ぜると、
+ * M1.1 の宣言を読む側の意味が変わる。**式が見る関数は 2 つの表の合わせ技**である
+ * （呼ぶ側がまとめる。spec-engine の expression.ts）。
+ *
+ * `returns` が `date` であることに意味がある——日付の値は数でも文字列でもなく、
+ * **日付どうしでだけ比べられる**（docs/semantics.md「date」）。
+ */
+export const DATE_FUNCTIONS = {
+  /** 日本時間（Asia/Tokyo）の「今日」（`YYYY-MM-DD`）。**引数を取らない**（Q13） */
+  today: { params: [], returns: "date" },
+} as const satisfies Record<
+  string,
+  { readonly params: readonly ExpressionType[]; readonly returns: ExpressionType }
+>;
 
 /** 数どうしの計算。結果は数。 */
 export const ARITHMETIC_OPERATORS = ["+", "-", "*", "/"] as const;
@@ -417,6 +448,7 @@ export const VOCABULARY = {
   ref: "data",
   enum: "data",
   default: "data",
+  date: "data",
   validation: "logic",
   message: "logic",
   computed: "logic",
@@ -427,6 +459,7 @@ export const VOCABULARY = {
   min: "logic",
   max: "logic",
   len: "logic",
+  today: "logic",
   action: "logic",
   create: "logic",
   update: "logic",

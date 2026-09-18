@@ -23,6 +23,7 @@ import {
   APPSPEC_SCHEMA_VERSION_PATTERN,
   APPSPEC_SECTIONS,
   BUILTIN_FUNCTIONS,
+  DATE_FUNCTIONS,
   FIELD_TYPES,
   IDENTITY_MODES,
   LEDGER_FIELDS,
@@ -193,6 +194,7 @@ describe("語彙の台帳（vocabulary.yaml）", () => {
     for (const name of [
       ...FIELD_TYPES,
       ...Object.keys(BUILTIN_FUNCTIONS),
+      ...Object.keys(DATE_FUNCTIONS),
       ...IDENTITY_MODES,
       ...ACTION_KINDS,
     ]) {
