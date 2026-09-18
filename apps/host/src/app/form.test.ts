@@ -349,3 +349,85 @@ describe("送信の前に出す文言", () => {
     expect(container.querySelector("b")).toBeNull();
   });
 });
+
+// ── 選択肢（enum）と既定値（default）（M1.3。Issue #154） ──────────────
+//
+// 画面が決めるのは「選択肢を出すこと」と「キーを送ること」までである。**宣言に無い値を断るのは
+// data-api だけである**（画面の選択肢は守りではない。03-spec-layers-and-checker.md §2.2）。
+
+const STATUS_OPTIONS = [
+  { value: "todo", label: "未着手" },
+  { value: "doing", label: "進行中" },
+  { value: "done", label: "完了" },
+] as const;
+
+const ENUM_FIELDS: readonly FormField[] = [
+  { name: "title", type: "string" },
+  { name: "status", type: "enum", options: STATUS_OPTIONS, default: "todo" },
+];
+
+const renderEnumForm = (
+  onSubmit: (values: Readonly<Record<string, ApiValue>>) => Promise<AddFormResult>,
+  fields: readonly FormField[] = ENUM_FIELDS,
+) => render(createElement(AddForm, { action: "addTask", fields, onSubmit }));
+
+describe("選択肢（enum）と既定値（default）", () => {
+  it("選択肢を単一選択で出し、見せるのは表示名である（受入条件）", () => {
+    renderEnumForm(() => Promise.resolve(accepted));
+    const select = screen.getByLabelText("status") as HTMLSelectElement;
+
+    expect(select.tagName).toBe("SELECT");
+    // 見せるのは表示名である
+    expect(Array.from(select.options).map((option) => option.textContent)).toEqual([
+      "（選んでください）",
+      "未着手",
+      "進行中",
+      "完了",
+    ]);
+    // 値はキーである（**表示名ではない**。受入条件）
+    expect(Array.from(select.options).map((option) => option.value)).toEqual([
+      "",
+      "todo",
+      "doing",
+      "done",
+    ]);
+  });
+
+  it("送るのはキーである（表示名ではない。受入条件）", async () => {
+    const onSubmit = submitSpy(() => Promise.resolve(accepted));
+    renderEnumForm(onSubmit);
+
+    fill("title", "宿の予約");
+    fireEvent.change(screen.getByLabelText("status"), { target: { value: "doing" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0]?.[0]).toEqual({ title: "宿の予約", status: "doing" });
+  });
+
+  it("既定値があれば、最初から選ばれている（未入力を空文字で送らない）", async () => {
+    const onSubmit = submitSpy(() => Promise.resolve(accepted));
+    renderEnumForm(onSubmit);
+
+    expect((screen.getByLabelText("status") as HTMLSelectElement).value).toBe("todo");
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    // 既定値は**保存の時点で**入る（data-api の仕事）が、画面も選んでおく（未入力を空文字で送らない）
+    expect(onSubmit.mock.calls[0]?.[0]).toEqual({ title: "", status: "todo" });
+  });
+
+  it("既定値が無ければ、空文字を送る（断るのは data-api である）", async () => {
+    const onSubmit = submitSpy(() => Promise.resolve(accepted));
+    renderEnumForm(onSubmit, [
+      { name: "title", type: "string" },
+      { name: "status", type: "enum", options: STATUS_OPTIONS },
+    ]);
+
+    expect((screen.getByLabelText("status") as HTMLSelectElement).value).toBe("");
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0]?.[0]).toEqual({ title: "", status: "" });
+  });
+});

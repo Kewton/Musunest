@@ -637,9 +637,13 @@ function collectItems(root: YamlMap, section: string, report: Report): readonly 
 /** 参照の写像（`{type: ref, to: member}`・`{type: list, of: member}`）に書ける欄 */
 const REF_DECLARATION_KEYS = ["type", "to", "of"] as const;
 
+/** 選択肢の写像（`{type: enum, options: {...}, default: ...}`）に書ける欄（M1.3） */
+const ENUM_DECLARATION_KEYS = ["type", "options", "default"] as const;
+
 /**
- * 項目の宣言を読む。**文字列の 1 語（`string`・`number`・`list`）と、参照の写像の両方**を受け取る（#106）。
- * 参照先の entity が実在するかは、すべての entity を読んだあとで見る（`DATA_REF_TARGET_NOT_FOUND`）。
+ * 項目の宣言を読む。**文字列の 1 語（`string`・`number`・`list`）と、写像（参照・選択肢）の両方**を
+ * 受け取る（#106・#154）。参照先の entity が実在するかは、すべての entity を読んだあとで見る
+ * （`DATA_REF_TARGET_NOT_FOUND`）。
  */
 function readFieldDeclaration(
   name: string,
@@ -661,6 +665,15 @@ function readFieldDeclaration(
     if (isOneOf(FIELD_TYPES, value.text)) {
       return { declaration: value.text as FieldType, target: null, targetNode: null };
     }
+    // `enum` は型の名前だが 1 語では書けない——`options` と `default` を並べた写像で書く（M1.3）
+    if (value.text === "enum") {
+      report(
+        "SHAPE_VALUE_INVALID",
+        `項目 ${name} の enum は 1 語で書けない（type: enum と、options と default を並べた写像で書く）`,
+        positionOf(value),
+      );
+      return { declaration: null, target: null, targetNode: null };
+    }
     return unknownType(value.text, value);
   }
   if (value.kind !== "map") {
@@ -669,11 +682,17 @@ function readFieldDeclaration(
   }
 
   for (const entry of value.entries) {
-    if (!isOneOf(REF_DECLARATION_KEYS, entry.key)) {
-      report("SHAPE_KEY_UNKNOWN", `項目 ${name} の参照に欄 ${entry.key} は書けない（type と to / of だけ）`, {
-        line: entry.keyLine,
-        column: entry.keyColumn,
-      });
+    // 書ける欄は `type` が決める（語彙は閉じている）。`enum` は options と default を持つ（M1.3）
+    const writtenType = entryOf(value, "type")?.value;
+    const isEnum = writtenType?.kind === "scalar" && writtenType.text === "enum";
+    if (!isOneOf(isEnum ? ENUM_DECLARATION_KEYS : REF_DECLARATION_KEYS, entry.key)) {
+      report(
+        "SHAPE_KEY_UNKNOWN",
+        isEnum
+          ? `項目 ${name} の enum に欄 ${entry.key} は書けない（type と options と default だけ）`
+          : `項目 ${name} の参照に欄 ${entry.key} は書けない（type と to / of だけ）`,
+        { line: entry.keyLine, column: entry.keyColumn },
+      );
     }
   }
 
@@ -687,6 +706,9 @@ function readFieldDeclaration(
     return { declaration: null, target: null, targetNode: null };
   }
   const type = typeEntry.value.text;
+
+  // 選択肢（`type: enum`。M1.3）は、参照とは別の読み取りである（options と default を持つ）
+  if (type === "enum") return readEnumFieldDeclaration(name, value, report);
 
   // 参照先の欄は、`ref` なら `to`、`list` なら `of` である。もう一方が書いてあれば断る
   const targetKey = type === "ref" ? "to" : type === "list" ? "of" : null;
@@ -726,6 +748,110 @@ function readFieldDeclaration(
     declaration: type === "ref" ? { type: "ref", to: target } : { type: "list", of: target },
     target,
     targetNode: targetEntry.value,
+  };
+}
+
+/**
+ * 選択肢の項目（`type: enum`。M1.3）を読む。**キー（保存される値）と表示名の対**（`options`）と、
+ * 未入力のときに入れるキー（`default`）を読む。
+ *
+ * 落とすのは 3 つである（docs/semantics.md「enum」「default」）。
+ *   - `options` が空 → `DATA_FIELD_ENUM_OPTIONS_EMPTY`
+ *   - `options` のキーが重複 → `DATA_FIELD_ENUM_OPTION_KEY_DUPLICATE`
+ *     （**写像の重複キーを読む汎用の `SHAPE_KEY_DUPLICATE` とは別のコードにする**。保存される値が
+ *     重なることは、欄の書き方の誤りではなく、宣言の意味の誤りである）
+ *   - `default` が `options` のキーに無い → `DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS`
+ *
+ * `options` を読めなかったときは、`default` の照合を重ねない（誤りを 2 つ出さない）。
+ */
+function readEnumFieldDeclaration(
+  name: string,
+  value: YamlMap,
+  report: Report,
+): { declaration: FieldDeclaration | null; target: null; targetNode: null } {
+  const nothing = { declaration: null, target: null, targetNode: null } as const;
+  const optionsEntry = entryOf(value, "options");
+  if (optionsEntry === undefined) {
+    report(
+      "SHAPE_KEY_MISSING",
+      `項目 ${name} の enum に options が無い（保存される値と表示名の対を書く）`,
+      positionOf(value),
+    );
+    return nothing;
+  }
+
+  const optionsNode = optionsEntry.value;
+  if (optionsNode.kind !== "map") {
+    // `options:` の直後が空（null）か、空の並び（`[]`）は「1 つも無い」である
+    const empty =
+      optionsNode.kind === "null" || (optionsNode.kind === "seq" && optionsNode.items.length === 0);
+    if (empty) {
+      report(
+        "DATA_FIELD_ENUM_OPTIONS_EMPTY",
+        `項目 ${name} の enum の options が空である（キーを 1 つ以上書く）`,
+        positionOf(optionsNode),
+      );
+      return nothing;
+    }
+    report(
+      "SHAPE_VALUE_INVALID",
+      `項目 ${name} の enum の options は「キー: 表示名」を並べた写像で書く`,
+      positionOf(optionsNode),
+    );
+    return nothing;
+  }
+
+  const options: Record<string, string> = {};
+  const keys: string[] = [];
+  for (const entry of optionsNode.entries) {
+    if (entry.value.kind !== "scalar" || entry.value.text === "") {
+      report(
+        "SHAPE_VALUE_INVALID",
+        `項目 ${name} の enum の options の ${entry.key} の表示名は、空でない文字列で書く`,
+        positionOf(entry.value),
+      );
+      continue;
+    }
+    if (Object.hasOwn(options, entry.key)) {
+      report(
+        "DATA_FIELD_ENUM_OPTION_KEY_DUPLICATE",
+        `項目 ${name} の enum の options のキー ${entry.key} が 2 回ある（保存される値は重複させない）`,
+        { line: entry.keyLine, column: entry.keyColumn },
+      );
+      continue;
+    }
+    options[entry.key] = entry.value.text;
+    keys.push(entry.key);
+  }
+  if (keys.length === 0) {
+    // 表示名がすべて読めなかった（`SHAPE_VALUE_INVALID` を既に出している）。誤りを重ねない
+    return nothing;
+  }
+
+  const defaultEntry = entryOf(value, "default");
+  let fallback: string | null = null;
+  if (defaultEntry !== undefined) {
+    if (defaultEntry.value.kind !== "scalar" || defaultEntry.value.text === "") {
+      report(
+        "SHAPE_VALUE_INVALID",
+        `項目 ${name} の enum の default は、options のキーで書く`,
+        positionOf(defaultEntry.value),
+      );
+    } else if (!Object.hasOwn(options, defaultEntry.value.text)) {
+      report(
+        "DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS",
+        `項目 ${name} の enum の default ${defaultEntry.value.text} は、options のキーに無い（${keys.join("・")}）`,
+        positionOf(defaultEntry.value),
+      );
+    } else {
+      fallback = defaultEntry.value.text;
+    }
+  }
+
+  return {
+    declaration: { type: "enum", options, ...(fallback === null ? {} : { default: fallback }) },
+    target: null,
+    targetNode: null,
   };
 }
 

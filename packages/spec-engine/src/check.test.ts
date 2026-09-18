@@ -1,7 +1,7 @@
 // 静的チェックの unit テスト（Issue #97 の受入条件を、ここで固定する）。
 //
 //   1. 見本（expense-log・warikan）の診断が空で、7 欄を持つ AppSpec を返す
-//   2. 負例 34 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
+//   2. 負例 37 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
 //   3. 診断は空でない日本語の説明と、該当する YAML の行・列を持つ
 //   4. 不正 YAML・未知キー・未知参照・循環を拒否し、上限はちょうどが通り 1 超過で診断になる
 //   5. 検査は式を実行せず、ストレージにも触れない
@@ -12,9 +12,11 @@ import { describe, expect, it } from "vitest";
 import {
   APPSPEC_SECTIONS,
   ERROR_CODE_PATTERN,
+  enumKeys,
   readNegativeIndex,
   type AppSpecSection,
   type Computed,
+  type FieldDeclaration,
   type NegativeSample,
 } from "@musunest/appspec-schema";
 import {
@@ -324,11 +326,158 @@ describe("見本（appspec-schema の samples/）", () => {
   });
 });
 
-// ── 2. 負例 34 件 ──────────────────────────────────────────────
+// ── 1c. 選択肢（enum）と既定値（default）（M1.3。Issue #154） ──────────
+//
+// 選択肢は「保存される値（キー）と、画面に出す表示名の対」である。既定値（`default`）は
+// `options` のキーのどれかでなければならない。**誤りのコードはそれぞれ別である**——
+// 負例 3 本（samples/negatives の enum-*）が、同じことを外から確かめる。
+
+/** 選択肢の項目 status を持つ expense の宣言。`status` を差し替えて誤りを作る */
+const enumEntity = (status: readonly string[]): string =>
+  [
+    "  - name: expense",
+    "    fields:",
+    "      amount: number",
+    "      payer: string",
+    "      participants: list",
+    ...status,
+  ].join("\n");
+
+/** 検査に通った宣言から、選択肢の項目 status を取り出す */
+const enumStatusOf = (result: CheckResult): FieldDeclaration | undefined => {
+  if (!result.ok) throw new Error("検査に通っていない");
+  return result.spec.entities.find((entry) => entry.name === "expense")?.fields["status"];
+};
+
+describe("選択肢（enum）と既定値（default）（M1.3）", () => {
+  const ENUM_STATUS: readonly string[] = [
+    "      status:",
+    "        type: enum",
+    "        options:",
+    "          todo: 未着手",
+    "          doing: 進行中",
+    "          done: 完了",
+    "        default: todo",
+  ];
+
+  const withStatus = (status: readonly string[] = ENUM_STATUS): string =>
+    declaration({ entities: enumEntity(status) });
+
+  it("options と default を、書いた順のまま写す（受入条件）", () => {
+    const result = checkSpec(withStatus());
+    expect(result.diagnostics).toEqual([]);
+    expect(enumStatusOf(result)).toEqual({
+      type: "enum",
+      options: { todo: "未着手", doing: "進行中", done: "完了" },
+      default: "todo",
+    });
+    // キーの順は書いた順のままである（M1.3 のボードは、この順に列を並べる）
+    expect(enumKeys(enumStatusOf(result) ?? "string")).toEqual(["todo", "doing", "done"]);
+  });
+
+  it("default は書かなくてよい（欄そのものが無い。未入力のまま型の検査に掛かる）", () => {
+    const result = checkSpec(withStatus(ENUM_STATUS.slice(0, 6)));
+    expect(result.diagnostics).toEqual([]);
+    expect(enumStatusOf(result)).toEqual({
+      type: "enum",
+      options: { todo: "未着手", doing: "進行中", done: "完了" },
+    });
+  });
+
+  it("3 つの誤りのコードは、それぞれ別である（受入条件）", () => {
+    const cases: readonly (readonly string[])[] = [
+      // options が空である
+      ["      status:", "        type: enum", "        options:"],
+      // default が options のキーのどれでもない
+      ["      status:", "        type: enum", "        options:", "          todo: 未着手", "        default: doing"],
+      // options のキーが重複している
+      [
+        "      status:",
+        "        type: enum",
+        "        options:",
+        "          todo: 未着手",
+        "          todo: 進行中",
+      ],
+    ];
+    const codes = cases.map((status) => codesOf(failure(checkSpec(withStatus(status)))));
+    expect(codes).toEqual([
+      ["DATA_FIELD_ENUM_OPTIONS_EMPTY"],
+      ["DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS"],
+      ["DATA_FIELD_ENUM_OPTION_KEY_DUPLICATE"],
+    ]);
+    // 3 つとも、正本の一覧（diagnostics.ts）にある
+    for (const code of codes.flat()) expect(isDiagnosticCode(code)).toBe(true);
+  });
+
+  it("キーの重複は、写像の重複キーのコード（SHAPE_KEY_DUPLICATE）に化けない", () => {
+    const text = withStatus([
+      "      status:",
+      "        type: enum",
+      "        options:",
+      "          todo: 未着手",
+      "          todo: 進行中",
+    ]);
+    const result = failure(checkSpec(text));
+    expect(codesOf(result)).toEqual(["DATA_FIELD_ENUM_OPTION_KEY_DUPLICATE"]);
+    expect(messagesOf(result, "DATA_FIELD_ENUM_OPTION_KEY_DUPLICATE")).toContain("todo");
+    // 位置は、2 回目に書いたキーを指す
+    expect(result.diagnostics[0]).toMatchObject(locate(text, "todo: 進行中"));
+  });
+
+  it("default がキーに無いときの位置は、書いた値を指す", () => {
+    const text = withStatus([
+      "      status:",
+      "        type: enum",
+      "        options:",
+      "          todo: 未着手",
+      "        default: doing",
+    ]);
+    const result = failure(checkSpec(text));
+    expect(codesOf(result)).toEqual(["DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS"]);
+    expect(messagesOf(result, "DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS")).toContain("doing");
+    expect(result.diagnostics[0]).toMatchObject(locate(text, "doing"));
+  });
+
+  it.each([
+    ["enum を 1 語で書く", ["      status: enum"], "SHAPE_VALUE_INVALID"],
+    ["options が無い", ["      status:", "        type: enum"], "SHAPE_KEY_MISSING"],
+    [
+      "options が写像でない",
+      ["      status:", "        type: enum", "        options: [todo, doing]"],
+      "SHAPE_VALUE_INVALID",
+    ],
+    [
+      "options の表示名が空である",
+      ["      status:", "        type: enum", "        options:", "          todo:"],
+      "SHAPE_VALUE_INVALID",
+    ],
+    [
+      "default が文字列でない",
+      [
+        "      status:",
+        "        type: enum",
+        "        options:",
+        "          todo: 未着手",
+        "        default:",
+      ],
+      "SHAPE_VALUE_INVALID",
+    ],
+    ["enum に知らない欄を書く", [...ENUM_STATUS, "        label: 状態"], "SHAPE_KEY_UNKNOWN"],
+    [
+      "参照の欄（to）を enum に書く",
+      [...ENUM_STATUS, "        to: member"],
+      "SHAPE_KEY_UNKNOWN",
+    ],
+  ] as const)("%s は %s で断る", (_label, status, code) => {
+    expect(codesOf(failure(checkSpec(withStatus(status))))).toEqual([code]);
+  });
+});
+
+// ── 2. 負例 37 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 34 件である（0 件なら以降のテストが空振りする）", () => {
-    expect(negativeIndex.negatives).toHaveLength(34);
+  it("負例の一覧は 37 件である（0 件なら以降のテストが空振りする）", () => {
+    expect(negativeIndex.negatives).toHaveLength(37);
   });
 
   it.each(negativeCases)(

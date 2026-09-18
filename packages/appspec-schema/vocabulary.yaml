@@ -69,6 +69,29 @@
   runtime: [spec-engine, data-api, host]
   factory: 未対応
 
+# enum と default の「見本」は、いま warikan を指している。**warikan は enum を使っていない**——
+# M1.3 のタスク管理の見本（samples/task-board/）は #159 が置くので、そのときに張り替える。
+# （#159 の対象ファイルに vocabulary.yaml は無いので、ここから先に task-board を指すことはできない）
+- name: enum
+  layer: data
+  since: v0.2-draft（M1.3）
+  samples: [warikan]
+  negatives: [enum-options-empty, enum-duplicate-option-key]
+  check_rules: [DATA_FIELD_ENUM_OPTIONS_EMPTY, DATA_FIELD_ENUM_OPTION_KEY_DUPLICATE]
+  semantics: docs/semantics.md#enum
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+- name: default
+  layer: data
+  since: v0.2-draft（M1.3）
+  samples: [warikan]
+  negatives: [enum-default-not-in-options]
+  check_rules: [DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS]
+  semantics: docs/semantics.md#default
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
 # ── ロジック層 ───────────────────────────────────────────────────
 
 - name: validation

@@ -1,0 +1,35 @@
+# 負例：選択肢の項目 status の default が、options のキーのどれでもない（archived）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: task
+    fields:
+      title: string
+      status:
+        type: enum
+        options:
+          todo: 未着手
+          doing: 進行中
+          done: 完了
+        default: archived
+
+views:
+  - name: taskList
+    entity: task
+
+actions:
+  - name: addTask
+    entity: task
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

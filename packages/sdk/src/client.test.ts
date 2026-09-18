@@ -411,3 +411,48 @@ describe("操作の種類（kind）と、行の参照元（M1.2）", () => {
     });
   });
 });
+
+// ── 選択肢（enum）と既定値（default）（M1.3。Issue #154） ──────────────
+//
+// 画面（host）は**選択肢と既定値**を宣言から読む。だから契約と違う形は成功にしない（キャストしない）。
+
+describe("選択肢（enum）と既定値（default）の宣言", () => {
+  const enumSpec = (status: unknown) => ({
+    ...SPEC,
+    spec: { ...SPEC.spec, entities: [{ name: "task", fields: { title: "string", status } }] },
+  });
+
+  it("options と default を、型付きで受け取る（受入条件）", async () => {
+    const spec = enumSpec({
+      type: "enum",
+      options: { todo: "未着手", doing: "進行中", done: "完了" },
+      default: "todo",
+    });
+    const stub = recordingFetch(() => json(200, spec));
+
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: spec });
+  });
+
+  it("default は書かなくてよい（欄そのものが無い）", async () => {
+    const spec = enumSpec({ type: "enum", options: { todo: "未着手" } });
+    const stub = recordingFetch(() => json(200, spec));
+
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: spec });
+  });
+
+  it("契約と違う形は INVALID_RESPONSE（options が空・default がキーに無い・表示名が空）", async () => {
+    const cases: unknown[] = [
+      { type: "enum", options: {} },
+      { type: "enum", options: { todo: "未着手" }, default: "doing" },
+      { type: "enum", options: { todo: "" } },
+      { type: "enum" },
+    ];
+    for (const status of cases) {
+      const stub = recordingFetch(() => json(200, enumSpec(status)));
+      expect(await clientWith(stub.fetch).getSpec("inst-1"), JSON.stringify(status)).toMatchObject({
+        ok: false,
+        error: { status: 200, code: INVALID_RESPONSE },
+      });
+    }
+  });
+});

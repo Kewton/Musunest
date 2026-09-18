@@ -80,33 +80,77 @@ export interface RefListFieldDeclaration {
 }
 
 /**
- * 項目の宣言。**文字列の 1 語（`string`・`number`・`list`）と、参照の写像の両方を受け取る**
- * （既存の見本はこの 1 語で書いてある）。
+ * 選択肢の項目（M1.3）。**保存される値（キー）と、画面に出す表示名の対**を持つ。
+ *
+ * ```yaml
+ * status:
+ *   type: enum
+ *   options:
+ *     todo: 未着手
+ *     doing: 進行中
+ *   default: todo
+ * ```
+ *
+ * - キー（`options` の左側）は**保存される値**である。重複させない。1 つ以上書く
+ * - 表示名（右側）は画面に出す。**保存するのは表示名ではなくキーである**
+ * - `default` は任意で、**`options` のキーのどれか**である。未入力のとき、保存の時点で入れる
+ * - キーを書いた順は、画面に出す選択肢の順になる（M1.3 のボードの列はこの順に並ぶ）
+ *
+ * 意味は docs/semantics.md「enum」「default」にある。
  */
-export type FieldDeclaration = FieldType | RefFieldDeclaration | RefListFieldDeclaration;
-
-/** 画面と入力の検査が使う項目の種類。`ref` は別の entity のレコード 1 件を指す（M1.2） */
-export type FieldKind = FieldType | "ref";
-
-/** 項目の種類を返す。`{type: list, of: ...}` は `"list"` である */
-export function fieldKind(field: FieldDeclaration): FieldKind {
-  if (typeof field === "string") return field;
-  return field.type === "ref" ? "ref" : "list";
-}
-
-/** 参照先の entity の名前（`ref` と `list of`）。参照でなければ `null` */
-export function fieldTarget(field: FieldDeclaration): string | null {
-  if (typeof field === "string") return null;
-  return field.type === "ref" ? field.to : field.of;
+export interface EnumFieldDeclaration {
+  readonly type: "enum";
+  /** 保存される値（キー）→ 画面に出す表示名。キーは重複させない。1 つ以上 */
+  readonly options: Readonly<Record<string, string>>;
+  /** 未入力のときに保存の時点で入れるキー。`options` のキーのどれかである */
+  readonly default?: string;
 }
 
 /**
- * 式が読む型。**`ref` の値は ID の文字列である**（数ではないので、計算には使えない）。
- * `list` は文字列の並びと同じく `len` に渡せる。
+ * 項目の宣言。**文字列の 1 語（`string`・`number`・`list`）と、写像（参照・選択肢）の両方**を受け取る
+ * （既存の見本は 1 語で書いてある）。
+ */
+export type FieldDeclaration =
+  | FieldType
+  | RefFieldDeclaration
+  | RefListFieldDeclaration
+  | EnumFieldDeclaration;
+
+/** 画面と入力の検査が使う項目の種類。`ref` は別の entity のレコード 1 件を指す（M1.2） */
+export type FieldKind = FieldType | "ref" | "enum";
+
+/** 項目の種類を返す。`{type: list, of: ...}` は `"list"`、`{type: enum, ...}` は `"enum"` である */
+export function fieldKind(field: FieldDeclaration): FieldKind {
+  if (typeof field === "string") return field;
+  return field.type;
+}
+
+/** 参照先の entity の名前（`ref` と `list of`）。参照でなければ `null`（選択肢の項目も `null`） */
+export function fieldTarget(field: FieldDeclaration): string | null {
+  if (typeof field === "string") return null;
+  if (field.type === "ref") return field.to;
+  return field.type === "list" ? field.of : null;
+}
+
+/** 選択肢の項目か（`options` と `default` を持つ写像） */
+export const isEnumField = (field: FieldDeclaration): field is EnumFieldDeclaration =>
+  typeof field !== "string" && field.type === "enum";
+
+/** 選択肢のキーの並び（宣言の順）。選択肢の項目でなければ空である */
+export const enumKeys = (field: FieldDeclaration): readonly string[] =>
+  isEnumField(field) ? Object.keys(field.options) : [];
+
+/** 未入力のときに入れるキー。無ければ（選択肢の項目でなければ）`null` である */
+export const enumDefault = (field: FieldDeclaration): string | null =>
+  isEnumField(field) ? (field.default ?? null) : null;
+
+/**
+ * 式が読む型。**`ref` の値は ID の文字列、`enum` の値はキーの文字列である**（数ではないので、
+ * 計算には使えない。M1.1 の式に文字列の定数はまだ無い）。`list` は文字列の並びと同じく `len` に渡せる。
  */
 export function expressionTypeOf(field: FieldDeclaration): ExpressionType {
   const kind = fieldKind(field);
-  return kind === "ref" ? "string" : kind;
+  return kind === "ref" || kind === "enum" ? "string" : kind;
 }
 
 export interface Entity {
@@ -371,6 +415,8 @@ export const VOCABULARY = {
   number: "data",
   list: "data",
   ref: "data",
+  enum: "data",
+  default: "data",
   validation: "logic",
   message: "logic",
   computed: "logic",

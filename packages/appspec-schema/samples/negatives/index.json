@@ -100,6 +100,27 @@
       "why": "entity member に fields が無い"
     },
     {
+      "name": "enum-default-not-in-options",
+      "codes": [
+        "DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS"
+      ],
+      "why": "選択肢の項目 status の default archived が、options のキーのどれでもない（M1.3）"
+    },
+    {
+      "name": "enum-duplicate-option-key",
+      "codes": [
+        "DATA_FIELD_ENUM_OPTION_KEY_DUPLICATE"
+      ],
+      "why": "選択肢の項目 status の options に、同じキー todo が 2 回ある（M1.3）"
+    },
+    {
+      "name": "enum-options-empty",
+      "codes": [
+        "DATA_FIELD_ENUM_OPTIONS_EMPTY"
+      ],
+      "why": "選択肢の項目 status の options が空である（キーを 1 つも書いていない。M1.3）"
+    },
+    {
       "name": "field-reserved-name",
       "codes": [
         "DATA_FIELD_NAME_RESERVED"

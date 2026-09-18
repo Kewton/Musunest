@@ -253,14 +253,29 @@ function isReferences(value: unknown): value is readonly ApiReference[] {
 }
 
 /**
- * 項目の宣言。**文字列の 1 語（`string`・`number`・`list`）と、参照の写像**
- * （`{type: ref, to}`・`{type: list, of}`）の両方（M1.2）。
+ * 選択肢の項目（M1.3。`{type: enum, options, default}`）。`options` は「保存される値（キー）→
+ * 画面に出す表示名」で、キーが 1 つ以上ある。`default` は書いてあるときだけ、`options` のキーで
+ * なければならない（docs/semantics.md「enum」「default」）。
+ */
+function isEnumDeclaration(value: Record<string, unknown>): boolean {
+  const options = value.options;
+  if (!isRecord(options) || Object.keys(options).length === 0) return false;
+  if (!Object.values(options).every((label) => typeof label === "string" && label !== "")) return false;
+  const fallback = value.default;
+  return fallback === undefined || (typeof fallback === "string" && Object.hasOwn(options, fallback));
+}
+
+/**
+ * 項目の宣言。**文字列の 1 語（`string`・`number`・`list`）と、写像**
+ * （参照の `{type: ref, to}`・`{type: list, of}`、選択肢の `{type: enum, options, default}`）の両方
+ * （M1.2・M1.3）。
  */
 function isFieldDeclaration(value: unknown): boolean {
   if (typeof value === "string") return value === "string" || value === "number" || value === "list";
   if (!isRecord(value)) return false;
   if (value.type === "ref") return typeof value.to === "string";
   if (value.type === "list") return typeof value.of === "string";
+  if (value.type === "enum") return isEnumDeclaration(value);
   return false;
 }
 

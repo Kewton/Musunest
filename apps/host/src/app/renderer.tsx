@@ -9,6 +9,7 @@
 //   3. どの部品で描くか — 宣言の `type` が `settlement` なら精算の表示、ほかは表（M1.2）
 //   4. 追加フォームを出すか — view が返した `permissions.write` と、その entity の action の有無だけで決める
 //   5. 参照（`ref`・参照 list）の見せ方 — **候補は参照先の一覧から取り、送るのは ID、見せるのは名前**である
+//   6. 選択肢（`enum`）の見せ方 — **宣言の `options` をそのまま選択肢にし、送るのはキー、見せるのは表示名**である（M1.3）
 //
 // **参照の候補は、参照先の entity の一覧（view）から取る。** 宣言が参照先の一覧を持たなければ候補は 0 件で、
 // 画面は架空の ID を作らない（フォームは「先に登録してください」と出す。守りはサーバ側）。
@@ -486,7 +487,10 @@ function reasonOfFailure(error: ClientError): string {
 
 /**
  * 入力欄になる項目。**entity の `fields` だけ**を宣言の順に取る（computed・id・日時は入らない）。
- * 参照の項目には、参照先の候補（ID と名前）を付ける。
+ * 参照の項目には、参照先の候補（ID と名前）を付ける。選択肢の項目（`enum`。M1.3）には、
+ * **宣言の `options`（キー → 表示名）と `default`** をそのまま付ける。
+ *
+ * **選択肢を絞ることは守りではない。** 宣言に無い値を断るのは data-api だけである（`03` §2.2）。
  */
 export function formFields(
   spec: AppSpec,
@@ -496,6 +500,16 @@ export function formFields(
   const entity = spec.entities.find((item) => item.name === entityName);
   if (entity === undefined) return [];
   return Object.entries(entity.fields).map(([name, declaration]) => {
+    // 選択肢（M1.3）。**送るのはキーで、見せるのは表示名である。** キーの順が選択肢の順である
+    if (typeof declaration !== "string" && declaration.type === "enum") {
+      return {
+        name,
+        type: fieldKind(declaration),
+        to: null,
+        options: Object.entries(declaration.options).map(([value, label]) => ({ value, label })),
+        default: declaration.default ?? null,
+      };
+    }
     const target = fieldTarget(declaration);
     return {
       name,
