@@ -69,10 +69,34 @@ export type FieldType = (typeof FIELD_TYPES)[number];
 export const DATE_VALUE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * 表示名（`label`。M1.3。Issue #176）。**画面に出すためだけ**に使い、式からは読めない
+ * （式が読むのは識別子だけである。混ぜると名前解決が 2 通りになる）。
+ *
+ * - **任意**である。書かなければ識別子（項目名・計算の名前）をそのまま出す
+ * - **空でない文字列**である。空文字は静的チェックが `SHAPE_LABEL_EMPTY` で断る
+ * - **付けられるのは項目（`fields`）と計算（`computed`）の 2 つだけ**である
+ *   （entity・一覧・操作には付けない。書けば `SHAPE_KEY_UNKNOWN` で断る）
+ * - **保存される値は変わらない。** 宣言の中だけの飾りである
+ * - **`label` は式の中の名前としては読めない**（`label` を参照する式は `LOGIC_REFERENCE_NOT_FOUND`）
+ */
+export interface LabeledDeclaration {
+  /** 画面に出す名前。書かなければ識別子のまま */
+  readonly label?: string;
+}
+
+/**
+ * 1 語の型を写像で書いたもの（M1.3。Issue #176）。`label` を付けるには写像の形が要る
+ * （`{type: string, label: やること}`）。`{type: list}` は `of` の無い文字列の並びである。
+ */
+export interface SimpleFieldDeclaration extends LabeledDeclaration {
+  readonly type: FieldType;
+}
+
+/**
  * 参照の項目（M1.2）。ほかの entity のレコード 1 件を、その ID で指す。
  * 宣言では `{type: ref, to: <entity>}` と書く（docs/semantics.md「ref」）。
  */
-export interface RefFieldDeclaration {
+export interface RefFieldDeclaration extends LabeledDeclaration {
   readonly type: "ref";
   /** 参照先の entity の名前 */
   readonly to: string;
@@ -82,7 +106,7 @@ export interface RefFieldDeclaration {
  * 参照の並び（M1.2）。ほかの entity のレコードの ID の並び。宣言では `{type: list, of: <entity>}` と書く。
  * `of` の無い `list`（文字列の並び）は `"list"` の 1 語で書く。
  */
-export interface RefListFieldDeclaration {
+export interface RefListFieldDeclaration extends LabeledDeclaration {
   readonly type: "list";
   readonly of: string;
 }
@@ -106,7 +130,7 @@ export interface RefListFieldDeclaration {
  *
  * 意味は docs/semantics.md「enum」「default」にある。
  */
-export interface EnumFieldDeclaration {
+export interface EnumFieldDeclaration extends LabeledDeclaration {
   readonly type: "enum";
   /** 保存される値（キー）→ 画面に出す表示名。キーは重複させない。1 つ以上 */
   readonly options: Readonly<Record<string, string>>;
@@ -115,14 +139,19 @@ export interface EnumFieldDeclaration {
 }
 
 /**
- * 項目の宣言。**文字列の 1 語（`string`・`number`・`list`）と、写像（参照・選択肢）の両方**を受け取る
- * （既存の見本は 1 語で書いてある）。
+ * 項目の宣言。**文字列の 1 語（`string`・`number`・`list`）と、写像（1 語の型・参照・選択肢）の両方**を
+ * 受け取る（既存の見本は 1 語で書いてある）。**`label` を付けるときは写像で書く**（M1.3。Issue #176）。
  */
 export type FieldDeclaration =
   | FieldType
+  | SimpleFieldDeclaration
   | RefFieldDeclaration
   | RefListFieldDeclaration
   | EnumFieldDeclaration;
+
+/** 項目の宣言に書かれた表示名（`label`）。書いていなければ `null`（画面は識別子をそのまま出す） */
+export const fieldLabel = (declaration: FieldDeclaration): string | null =>
+  typeof declaration === "string" ? null : (declaration.label ?? null);
 
 /** 画面と入力の検査が使う項目の種類。`ref` は別の entity のレコード 1 件を指す（M1.2） */
 export type FieldKind = FieldType | "ref" | "enum";
@@ -137,7 +166,8 @@ export function fieldKind(field: FieldDeclaration): FieldKind {
 export function fieldTarget(field: FieldDeclaration): string | null {
   if (typeof field === "string") return null;
   if (field.type === "ref") return field.to;
-  return field.type === "list" ? field.of : null;
+  // `of` を持つのは参照の並び（`{type: list, of}`）だけである（`{type: list}` は文字列の並び）
+  return "of" in field ? field.of : null;
 }
 
 /** 選択肢の項目か（`options` と `default` を持つ写像） */
@@ -264,7 +294,7 @@ interface AppScopeNoEntity {
  * アプリ全体で 1 つの値になる、式の計算（M1.4。Issue #177）。
  * **`entity` を持たない**——どのレコードにも属さない。参照できるのは、ほかのアプリ全体の計算だけである。
  */
-export interface ComputedAppExpression extends AppScopeNoEntity {
+export interface ComputedAppExpression extends AppScopeNoEntity, LabeledDeclaration {
   readonly name: string;
   readonly scope: ComputedScope;
   readonly expression: string;
@@ -275,7 +305,7 @@ export interface ComputedAppExpression extends AppScopeNoEntity {
  * アプリ全体で 1 つの値になる、集計の計算（M1.4。Issue #177）。
  * **`entity` を持たない**——どのレコードにも属さない。`where` は `this` を持てない（`Aggregate` の注記）。
  */
-export interface ComputedAppAggregate extends AppScopeNoEntity {
+export interface ComputedAppAggregate extends AppScopeNoEntity, LabeledDeclaration {
   readonly name: string;
   readonly scope: ComputedScope;
   readonly aggregate: Aggregate;
@@ -283,7 +313,7 @@ export interface ComputedAppAggregate extends AppScopeNoEntity {
 }
 
 /** 式で求める計算（v0.1 からの形）。v0.1 の computed_contract の entry_fields と同じ 4 つのキーを持つ。 */
-export interface ComputedExpression {
+export interface ComputedExpression extends LabeledDeclaration {
   readonly name: string;
   readonly entity: string;
   readonly expression: string;
@@ -291,7 +321,7 @@ export interface ComputedExpression {
 }
 
 /** 集計で求める計算（M1.2）。`expression` と `aggregate` は択一である */
-export interface ComputedAggregate {
+export interface ComputedAggregate extends LabeledDeclaration {
   readonly name: string;
   readonly entity: string;
   readonly aggregate: Aggregate;
@@ -321,7 +351,7 @@ export interface SettleDeclaration {
  * 精算で求める計算（M1.2）。`expression`・`aggregate` と**択一**である。
  * **`type` を持たない**——値は数ではなく、送金（送金元・送金先・正の送金額）の並びである。
  */
-export interface ComputedSettle {
+export interface ComputedSettle extends LabeledDeclaration {
   readonly name: string;
   readonly entity: string;
   readonly settle: SettleDeclaration;
@@ -631,6 +661,7 @@ export const VOCABULARY = {
   table: "ui",
   settlement: "ui",
   board: "ui",
+  label: "ui",
   filters: "ux",
   permission: "permission",
   anonymous: "permission",

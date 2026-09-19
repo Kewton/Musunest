@@ -1,0 +1,35 @@
+# 負例：計算 overdue の表示名（label）が、文字列ではなく並びである。
+# `label` は**文字列**で書かなければならない（並びや写像では書けない。M1.3。Issue #176）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: task
+    fields:
+      title: string
+      due: date
+
+views:
+  - name: taskList
+    entity: task
+
+actions:
+  - name: addTask
+    entity: task
+
+validations: []
+
+computed:
+  - name: overdue
+    entity: task
+    type: boolean
+    label: [期限切れ]
+    expression: due < today()
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

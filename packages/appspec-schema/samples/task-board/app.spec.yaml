@@ -5,7 +5,8 @@
 # 画面の種類 `board` と強調（`highlight`）、`list` と絞り込み（`filters`）。
 #
 # `samples/task-board/app.spec.yaml` の元は workspace/mvp/m1/02-l2-spec-examples.md §3.2（叩き台）。
-# **動かすために、いまの語彙に無い書き方だけを落としてある**（`app`・`label`・`required`・`sort`・`card`）。
+# **動かすために、いまの語彙に無い書き方だけを落としてある**（`app`・`required`・`sort`・`card`）。
+# **表示名（`label`）は M1.3 の語彙になった**（#176）ので、識別子ではなく画面に出す名前を書いてある。
 # 意味のうち表現できない 2 点（`overdue` の「完了は除く」と、`openTasks` の「状態で絞る」）は、
 # M1.3 の語彙が式の論理（`and`）と集計の条件（`not`）を持たないため、いまの形に落としてある。
 #
@@ -20,9 +21,12 @@ entities:
 
   - name: task
     fields:
-      title: string         # やること
+      title:                # やること
+        type: string
+        label: やること
       status:               # 状態（未入力なら todo が入る）
         type: enum
+        label: 状態
         options:
           todo: 未着手
           doing: 進行中
@@ -31,8 +35,11 @@ entities:
       assignee:             # 担当（member のレコード 1 件を ID で指す）
         type: ref
         to: member
-      due: date             # 期限（YYYY-MM-DD）
-      memo: string          # メモ
+        label: 担当
+      due: date             # 期限（YYYY-MM-DD）。`label` を書かないので、識別子 due のまま出る
+      memo:                 # メモ
+        type: string
+        label: メモ
 
 computed:
   # 期限切れ（今日の日付で変わる）。**Data API が解き、結果を行に載せる**（画面は式を評価しない）
@@ -41,6 +48,7 @@ computed:
   - name: overdue
     entity: task
     type: boolean
+    label: 期限切れ
     expression: due < today()
   # 担当しているタスクの数。`this` はこのメンバーのレコードの ID である
   # §3.2 は `status: { not: done }` で未完了だけを数えるが、集計の `where` は `this` との一致と
@@ -48,6 +56,7 @@ computed:
   - name: openTasks
     entity: member
     type: number
+    label: 担当タスク
     aggregate:
       count: task
       where:

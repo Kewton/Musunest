@@ -27,8 +27,12 @@ export const DIAGNOSTIC_CODES = [
   "SHAPE_YAML_INVALID",
   /** 必須のキー・欄が無い */
   "SHAPE_KEY_MISSING",
-  /** その版の語彙に無いキー・欄（`label`・`kind`・`required` など、まだ入っていない語彙。M1.2 では一覧の `type` の値もここで断る） */
+  /** その版の語彙に無いキー・欄（`required` など、まだ入っていない語彙。M1.2 では一覧の `type` の値もここで断る）。**`label` を entity・一覧・操作に書いたときもここで断る**（M1.3。付けられるのは項目と計算だけ） */
   "SHAPE_KEY_UNKNOWN",
+  /** 表示名（`label`）が空文字である（M1.3。空文字は表示名にならない） */
+  "SHAPE_LABEL_EMPTY",
+  /** 表示名（`label`）が文字列でない（並び・写像で書いている。M1.3） */
+  "SHAPE_LABEL_INVALID",
   /** 同じキーが 2 回ある */
   "SHAPE_KEY_DUPLICATE",
   /** 名前の書式違反（英字で始まる英数字ではない） */

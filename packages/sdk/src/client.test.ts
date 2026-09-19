@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { ApiRow, ApiSpecBody, ApiViewBody } from "@musunest/appspec-schema";
-import { INVALID_RESPONSE, NETWORK_FAILURE, createMusunestClient } from "./client.js";
+import { INVALID_RESPONSE, NETWORK_FAILURE, createMusunestClient, displayNameOf } from "./client.js";
 import type { FetchLike } from "./client.js";
 
 const BASE = "https://api.example";
@@ -607,6 +607,94 @@ describe("選択肢（enum）と既定値（default）の宣言", () => {
         error: { status: 200, code: INVALID_RESPONSE },
       });
     }
+  });
+});
+
+// ── 表示名（label）（M1.3。Issue #176） ──────────────────────────────
+//
+// 画面（host）は**表示名を宣言から読む**。SDK は契約の形（`label`・`labels`）を受け取り、
+// 契約と違う形は成功にしない。**`displayNameOf` は SDK から再輸出し、画面と読み方を共有する**。
+
+describe("表示名（label）の宣言と応答", () => {
+  const labeledSpec = () => ({
+    ...SPEC,
+    spec: {
+      ...SPEC.spec,
+      entities: [
+        { name: "task", fields: { title: { type: "string", label: "やること" }, due: "date" } },
+      ],
+      computed: [
+        {
+          name: "overdue",
+          entity: "task",
+          type: "boolean",
+          label: "期限切れ",
+          expression: "due < today()",
+        },
+      ],
+    },
+  });
+
+  it("項目と計算の label を、型付きで受け取る（受入条件）", async () => {
+    const spec = labeledSpec();
+    const stub = recordingFetch(() => json(200, spec));
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: spec });
+  });
+
+  it("一覧の応答の labels を、そのまま渡す（受入条件）", async () => {
+    const view = { ...VIEW, labels: { description: "内容", shareAmount: "1 人あたり" } };
+    const stub = recordingFetch(() => json(200, view));
+    expect(await clientWith(stub.fetch).getView("inst-1", "expenseList")).toEqual({
+      ok: true,
+      value: view,
+    });
+  });
+
+  it("契約と違う形は INVALID_RESPONSE（成功にしない）", async () => {
+    const badFields: unknown[] = [
+      { type: "string", label: "" },
+      { type: "string", label: 1 },
+      { type: "string", label: ["やること"] },
+    ];
+    for (const title of badFields) {
+      const spec = { ...SPEC, spec: { ...SPEC.spec, entities: [{ name: "task", fields: { title } }] } };
+      const stub = recordingFetch(() => json(200, spec));
+      expect(await clientWith(stub.fetch).getSpec("inst-1"), JSON.stringify(title)).toMatchObject({
+        ok: false,
+        error: { status: 200, code: INVALID_RESPONSE },
+      });
+    }
+    // 計算の label も同じである
+    const badComputed = {
+      ...SPEC,
+      spec: {
+        ...SPEC.spec,
+        computed: [
+          { name: "overdue", entity: "expense", type: "boolean", label: 1, expression: "amount > 0" },
+        ],
+      },
+    };
+    const stub = recordingFetch(() => json(200, badComputed));
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toMatchObject({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE },
+    });
+  });
+
+  it("labels の形が契約と違えば INVALID_RESPONSE（でっち上げない）", async () => {
+    for (const labels of [{ description: "" }, { description: 1 }, ["a"]]) {
+      const stub = recordingFetch(() => json(200, { ...VIEW, labels }));
+      expect(await clientWith(stub.fetch).getView("inst-1", "expenseList"), JSON.stringify(labels)).toMatchObject({
+        ok: false,
+        error: { status: 200, code: INVALID_RESPONSE },
+      });
+    }
+  });
+
+  it("displayNameOf を SDK から再輸出している（画面と読み方を共有する）", () => {
+    expect(displayNameOf({ title: "やること" }, "title")).toBe("やること");
+    // label を書かなければ識別子のまま
+    expect(displayNameOf(undefined, "title")).toBe("title");
   });
 });
 

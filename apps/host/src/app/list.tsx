@@ -34,6 +34,8 @@ export interface ListScreenProps {
   readonly show: readonly string[] | undefined;
   /** 画面で選んで絞り込む項目（宣言の `filters` の順）。無ければ絞り込みを出さない */
   readonly filters: readonly FilterField[];
+  /** 項目の名前を画面に出す文字列へ写す（`label` があればそれ、無ければ識別子。API の `labels` を見る） */
+  readonly displayName: (name: string) => string;
   /** 項目の値を画面に出す文字列へ写す（参照は名前へ。呼ぶ側が渡す） */
   readonly labelOf: (field: string, value: ApiValue | undefined) => string;
   /** その entity の決まった値への書き換え（`set` を持つ操作。M1.3）。宣言の順 */
@@ -107,7 +109,7 @@ const computedText = (value: number | boolean | null | undefined): string =>
 const isAllowed = (row: ApiRow, actionName: string): boolean =>
   row.allowedActions === undefined || row.allowedActions.includes(actionName);
 
-export function ListScreen({ view, show, filters, labelOf, setActions, onRunAction }: ListScreenProps) {
+export function ListScreen({ view, show, filters, displayName, labelOf, setActions, onRunAction }: ListScreenProps) {
   // 絞り込みの選択。**初期状態は「すべて」**である。この状態だけが持ち、持ち回さない（再読み込みで消えてよい）
   const [chosen, setChosen] = useState<Readonly<Record<string, string>>>({});
   const columns = columnsOf(view, show);
@@ -158,7 +160,7 @@ export function ListScreen({ view, show, filters, labelOf, setActions, onRunActi
               <dl className="list-fields" style={FIELDS_STYLE}>
                 {columns.map((column) => (
                   <div className="list-field" data-field={column.name} key={column.name} style={FIELD_STYLE}>
-                    <dt style={TERM_STYLE}>{column.name}</dt>
+                    <dt style={TERM_STYLE}>{displayName(column.name)}</dt>
                     <dd style={VALUE_STYLE}>
                       {column.computed
                         ? computedText(row.computed[column.name])

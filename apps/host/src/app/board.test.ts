@@ -210,6 +210,70 @@ describe("ボードの 4 つの状態（04 §7.3）", () => {
   });
 });
 
+// ── 強調の色と印（M1.3。Issue #176） ──────────────────────────────────
+//
+// 「色だけに頼らない」は「色を使わない」ではない（`04` §7.2）。**色 ＋ もう 1 つの手がかり**である。
+// だから強調された行には、**色**と、**色以外の印（二重の枠線と記号）**の両方が付く。
+// jsdom は layout を持たないので、色と枠線は inline style で確かめる（機械で測れる分。`04` §7.2）。
+
+describe("強調の色と印（M1.3）", () => {
+  it("強調された行に、色と、色以外の印（二重の枠線と記号）の両方が付く（受入条件）", async () => {
+    const { container } = await renderScreen(boardClient());
+
+    await screen.findByText("タスク t2");
+    const marked = container.querySelector('[data-card="t2"]') as HTMLElement | null;
+    const plain = container.querySelector('[data-card="t1"]') as HTMLElement | null;
+    expect(marked).not.toBeNull();
+    expect(plain).not.toBeNull();
+
+    // **色**（背景）
+    expect(marked?.style.backgroundColor).not.toBe("");
+    // **色以外の印**（二重の枠線）
+    expect(marked?.style.borderStyle).toBe("double");
+    // **色以外の印**（記号）
+    expect(container.querySelector('[data-card="t2"] .highlight-mark')?.textContent).toContain("▲");
+
+    // 強調されていない行には、色も二重の枠線も付かない（**色だけに頼っていないことの裏返し**）
+    expect(plain?.style.backgroundColor).toBe("");
+    expect(plain?.style.borderStyle).toBe("solid");
+  });
+
+  it("強調の印の文字は、highlight が指す計算の label である（無ければ識別子のまま。受入条件）", async () => {
+    const spec: ApiSpecBody = {
+      ...BOARD_SPEC,
+      spec: {
+        ...BOARD_SPEC.spec,
+        computed: [
+          {
+            name: "overdue",
+            entity: "task",
+            type: "boolean",
+            label: "期限切れ",
+            expression: "due < today()",
+          },
+        ],
+      },
+    };
+    const view: ApiViewBody = { ...BOARD_VIEW, labels: { title: "やること", overdue: "期限切れ" } };
+    const { container } = await renderScreen(
+      boardClient({
+        spec: () => Promise.resolve(okResult(spec)),
+        view: () => Promise.resolve(okResult(view)),
+      }),
+    );
+
+    await screen.findByText("タスク t2");
+    // 印の文字は計算の label である（**識別子 overdue ではない**）
+    const mark = container.querySelector('[data-card="t2"] .highlight-mark');
+    expect(mark?.textContent).toContain("期限切れ");
+    expect(mark?.textContent).not.toContain("overdue");
+    // カードの項目も label で出る
+    expect(container.querySelector('[data-field="title"] dt')?.textContent).toBe("やること");
+    // label を書いていない項目は、識別子のままである
+    expect(container.querySelector('[data-field="due"] dt')?.textContent).toBe("due");
+  });
+});
+
 describe("幅 360 CSS px（機械で見られる範囲。04 §7.2）", () => {
   it("列は折り返し、横には流さない（ページ全体を押し広げない。受入条件）", async () => {
     const { container } = await renderScreen(boardClient());

@@ -23,8 +23,10 @@ import {
   apiRouteMethod,
   apiSpecPath,
   apiViewPath,
+  displayNameOf,
   readApiRoute,
   type ApiErrorCode,
+  type ApiLabels,
 } from "./api.js";
 
 interface NodeFs {
@@ -186,6 +188,17 @@ describe("操作の条件（when）の断り（M1.3。Issue #156）", () => {
     expect(API_ERROR_CODES).toContain("ACTION_NOT_ALLOWED");
     expect(API_ERROR_STATUS.ACTION_NOT_ALLOWED).toBe(409);
     expect(API_ERROR_STATUS.ACTION_NOT_ALLOWED).not.toBe(API_ERROR_STATUS.INPUT_REJECTED);
+  });
+});
+
+describe("表示名（label）の読み方（M1.3。Issue #176）", () => {
+  it("label があればそれを、無ければ識別子をそのまま返す（SDK と画面が同じ読み方をする）", () => {
+    const labels: ApiLabels = { title: "やること", amount: "金額" };
+    expect(displayNameOf(labels, "title")).toBe("やること");
+    // label を書いていないものは、識別子のままである
+    expect(displayNameOf(labels, "due")).toBe("due");
+    // 欄そのものが無い（label を 1 つも書いていない応答）でも、識別子に落ちる
+    expect(displayNameOf(undefined, "title")).toBe("title");
   });
 });
 

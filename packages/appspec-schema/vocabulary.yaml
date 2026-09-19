@@ -340,6 +340,21 @@
   runtime: [spec-engine, data-api, host]
   factory: 未対応
 
+# 表示名（label）。**画面に出すためだけ**の語彙である（M1.3。Issue #176）。
+# 付けられるのは**項目（fields）と計算（computed）だけ**で、**無ければ識別子をそのまま出す**。
+# 式からは読めない（式が読むのは識別子だけである）。**保存される値は変わらない**。
+# 「見本」は task-board と warikan である（**両方とも、識別子のまま出る例を 1 つ残してある**——
+# task-board の `due`、warikan の `member.name`）。
+- name: label
+  layer: ui
+  since: v0.2-draft（M1.3）
+  samples: [task-board, warikan]
+  negatives: [label-empty, label-not-string]
+  check_rules: [SHAPE_LABEL_EMPTY, SHAPE_LABEL_INVALID]
+  semantics: docs/semantics.md#label
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
 # 絞り込み（filters）。**画面が選んで絞り込む** UX 層の語彙である（M1.3。`03` §1・`04` §7.1）。
 #
 # **画面の種類 `list` は、この台帳に行を分けていない。** `list` はデータ層の項目の型（文字列の並び）と

@@ -120,6 +120,18 @@ export interface ApiReference {
  */
 export type ApiValue = string | number | readonly string[];
 
+/**
+ * 画面に出す名前（`label`。M1.3。Issue #176）。**名前 → 表示名**である（空でない文字列だけ）。
+ * **`label` を書いていないものは入らない**——読む側は `displayNameOf` で識別子に落とす。
+ * data-api と画面が**同じ読み方**をするように、形はここ（HTTP の契約）で決める。
+ */
+export type ApiLabels = Readonly<Record<string, string>>;
+
+/** 表示名（`label`）があればそれを、無ければ識別子（名前）をそのまま返す */
+export function displayNameOf(labels: ApiLabels | undefined, name: string): string {
+  return labels?.[name] ?? name;
+}
+
 /** 一覧の 1 行。**項目と計算値を分けて返す**ので、画面は式を評価しなくてよい */
 export interface ApiRow {
   readonly id: string;
@@ -234,6 +246,14 @@ export interface ApiViewBody {
   readonly fields: readonly string[];
   /** 計算の名前（宣言の順） */
   readonly computed: readonly string[];
+  /**
+   * **項目と計算の表示名（`label`。M1.3。Issue #176）**。名前 → 画面に出す名前である。
+   * **`label` が 1 つも無ければ、この欄そのものを載せない**（M1.1〜M1.3 の応答を変えない）。
+   * 読む側は `displayNameOf` で、無ければ識別子をそのまま出す。
+   *
+   * **列に出さない計算（真偽の `boolean`。強調が指す）の `label` も載る**——強調の印の文字に使う。
+   */
+  readonly labels?: ApiLabels;
   readonly permissions: ApiPermissions;
   /** その entity への操作（宣言の順） */
   readonly actions: readonly ApiActionRef[];

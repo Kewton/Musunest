@@ -36,6 +36,11 @@ export interface FormOption {
 /** 入力欄にする項目（名前と種類）。参照の項目は、参照先と候補も持つ。宣言の順で渡す */
 export interface FormField {
   readonly name: string;
+  /**
+   * 画面に出す名前（`label`。M1.3。Issue #176）。書かなければ識別子（`name`）をそのまま出す。
+   * **送る値は変わらない**——入力欄の名前（`name`）は識別子のままである。
+   */
+  readonly label?: string;
   readonly type: FieldKind;
   /** 参照先の entity の名前（`ref`・参照 list）。参照でなければ `null` */
   readonly to?: string | null;
@@ -160,7 +165,7 @@ function FieldInput({
     const chosen = Array.isArray(value) ? value : [];
     return (
       <fieldset className="field" data-field={field.name}>
-        <legend>{field.name}</legend>
+        <legend>{field.label ?? field.name}</legend>
         {options.length === 0 ? (
           <EmptyCandidates />
         ) : (
@@ -184,7 +189,7 @@ function FieldInput({
   const text = typeof value === "string" ? value : "";
   return (
     <div className="field" data-field={field.name}>
-      <label htmlFor={inputId(field.name)}>{field.name}</label>
+      <label htmlFor={inputId(field.name)}>{field.label ?? field.name}</label>
       {field.type === "enum" ? (
         // 選択肢（M1.3）。**見せるのは表示名で、送るのはキーである。** 選ばれていなければ空文字を送り、
         // 断るのは data-api である（既定値は呼ぶ側が最初から選んでおく）

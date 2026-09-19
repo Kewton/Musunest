@@ -19,6 +19,13 @@ import type {
   ApiViewBody,
 } from "@musunest/appspec-schema";
 
+// 表示名（`label`。M1.3。Issue #176）の読み方も、画面（host）と共有する。host が workspace で
+// 参照できるのはこのパッケージだけなので（CLAUDE.md「依存の向き」）、契約（api.ts）の読み取り
+// 関数をここから再輸出する。**`label` が無ければ識別子をそのまま返す**という 1 つの決めごとを、
+// SDK と画面が同じ実装で読む（JSON の形は api.ts が正本である）。
+export { displayNameOf } from "@musunest/appspec-schema";
+export type { ApiLabels } from "@musunest/appspec-schema";
+
 /** fetch の差し替え口。Workers・ブラウザ・Node のどれでも同じ形で呼べる範囲だけを要求する */
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -323,10 +330,25 @@ function isEnumDeclaration(value: Record<string, unknown>): boolean {
 function isFieldDeclaration(value: unknown): boolean {
   if (typeof value === "string") return (FIELD_TYPES as readonly string[]).includes(value);
   if (!isRecord(value)) return false;
-  if (value.type === "ref") return typeof value.to === "string";
-  if (value.type === "list") return typeof value.of === "string";
-  if (value.type === "enum") return isEnumDeclaration(value);
-  return false;
+  if (!isOptionalLabel(value)) return false;
+  const type = value.type;
+  if (type === "ref") return typeof value.to === "string";
+  // `of` の無い `{type: list}` は、文字列の並び（`label` を付けるときの写像の形）である（M1.3）
+  if (type === "list") return value.of === undefined || typeof value.of === "string";
+  if (type === "enum") return isEnumDeclaration(value);
+  // 1 語の型を写像で書いたもの（`label` を付けるときの形。Issue #176）
+  return typeof type === "string" && (FIELD_TYPES as readonly string[]).includes(type);
+}
+
+/** 表示名（`label`。M1.3。Issue #176）は任意である。載っているときだけ、空でない文字列を要求する */
+function isOptionalLabel(value: Record<string, unknown>): boolean {
+  const label = value.label;
+  return label === undefined || (typeof label === "string" && label !== "");
+}
+
+/** 一覧の応答の表示名（`labels`）。名前 → 空でない文字列である */
+function isLabels(value: unknown): boolean {
+  return isRecord(value) && Object.values(value).every((label) => typeof label === "string" && label !== "");
 }
 
 function isEntity(value: unknown): boolean {
@@ -380,6 +402,8 @@ function isSettleDeclaration(value: unknown): boolean {
  */
 function isComputedDeclaration(value: unknown): boolean {
   if (!isRecord(value) || typeof value.name !== "string") return false;
+  // 表示名（`label`。Issue #176）は任意である。載っているときだけ、空でない文字列を要求する
+  if (!isOptionalLabel(value)) return false;
   const appScoped = value.scope === "app";
   if (value.scope !== undefined && !appScoped) return false;
   if (appScoped ? value.entity !== undefined : typeof value.entity !== "string") return false;
@@ -538,6 +562,9 @@ function isViewBody(value: unknown): value is ApiViewBody {
     typeof value.entity === "string" &&
     isStringArray(value.fields) &&
     isStringArray(value.computed) &&
+    // 表示名（`label`。Issue #176）。**欄が無い**（宣言に label が 1 つも無い）ときと、
+    // 名前 → 表示名の写像であるときを区別したまま渡す
+    (value.labels === undefined || isLabels(value.labels)) &&
     isPermissions(value.permissions) &&
     Array.isArray(value.actions) &&
     value.actions.every(isActionRef) &&

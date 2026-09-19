@@ -191,6 +191,20 @@
       "why": "minIdentity の mode google は M1 に無い（M1 はログインが無いので anonymous だけ）"
     },
     {
+      "name": "label-empty",
+      "codes": [
+        "SHAPE_LABEL_EMPTY"
+      ],
+      "why": "項目 title の表示名（label）が空である（空文字は表示名にならない。M1.3。Issue #176）"
+    },
+    {
+      "name": "label-not-string",
+      "codes": [
+        "SHAPE_LABEL_INVALID"
+      ],
+      "why": "計算 overdue の表示名（label）が、文字列ではなく並びである（M1.3。Issue #176）"
+    },
+    {
       "name": "list-in-comparison",
       "codes": [
         "LOGIC_OPERAND_TYPE_MISMATCH"
