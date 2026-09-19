@@ -3,6 +3,8 @@
 > 状態：**叩き台**（2026-09-15 作成）。D1「サンプルアプリの形」（[`01-integration-strategy.md`](./01-integration-strategy.md) §6）を決めるための具体例として書いた。所有者はこれを見て、**L2 の宣言を手で書く形に決めた**。
 > 見本を 3 つ（割り勘・タスク管理・ダッシュボード）にするのも所有者の決定（同 D2・D3）。
 > **YAML の書き方は、イメージを掴むための叩き台である。** 正式な形は段階 2（契約を固める）で、見本を実際に動かしながら決める。
+> **2026-09-19 追記：正本は `packages/appspec-schema/samples/` にある動く見本である。**
+> §3（タスク管理）は、実際に動く見本に合わせて書き直した（#169）。**§2（割り勘）と §4（ダッシュボード）の YAML は叩き台のままで、いまの語彙では書けない書き方を含む**——それぞれの節に差分の表を置いた。
 > **この叩き台は、層構造（[`03-spec-layers-and-checker.md`](./03-spec-layers-and-checker.md)）で見直す点がある**：操作の条件（`when`）はロジック層の守りとして扱う（`03` §2.2）。精算は「計算する関数」と「見せる部品」に分ける（`03` §2.3）。
 
 ---
@@ -44,6 +46,18 @@ M1a では、左端の「指示 → YAML」を人が手で書く。M1b で、そ
 ---
 
 ## 2. 見本 1：割り勘
+
+> **2026-09-19 追記（#169）：この YAML は叩き台のままである。** 動く正本は
+> [`packages/appspec-schema/samples/warikan/app.spec.yaml`](../../../packages/appspec-schema/samples/warikan/app.spec.yaml) にある。
+> **書き直していないのは、割り勘の見本が M1.2 で動いており、この節の役目（なぜこの形にしたか）は果たしているから**である。
+> 下の 4 つは**いまの語彙に無い**ので、そのまま書くと静的チェックで落ちる。
+>
+> | 叩き台の書き方 | いまの語彙 |
+> |---|---|
+> | `app: { name: ... }` | **無い**（トップレベルは 7 欄で固定） |
+> | `label:` | **無い**（画面には識別子がそのまま出る） |
+> | `required: true` | **無い**（いまは全項目が必須） |
+> | `sort: { by: createdAt, order: desc }` | **無い**（行は登録した順） |
 
 README §0.1 のユーザーシナリオと同じアプリである。
 
@@ -206,63 +220,67 @@ minIdentity:
 
 ### 3.2 宣言
 
-```yaml
-app:
-  name: 旅行の準備
+> **2026-09-19：実際に動く見本に合わせて書き直した（#169）。**
+> 正本は [`packages/appspec-schema/samples/task-board/app.spec.yaml`](../../../packages/appspec-schema/samples/task-board/app.spec.yaml) である。
+> 叩き台が使おうとして**書けなかった書き方**は §3.5 の表に残した。
 
+```yaml
 entities:
   - name: member
-    label: メンバー
     fields:
-      name: { type: string, label: 名前, required: true }
+      name: string
 
   - name: task
-    label: タスク
     fields:
-      title:    { type: string, label: やること, required: true }
-      status:   { type: enum, label: 状態, options: { todo: 未着手, doing: 進行中, done: 完了 }, default: todo }
-      assignee: { type: ref, to: member, label: 担当 }
-      due:      { type: date, label: 期限 }
-      memo:     { type: string, label: メモ }
+      title: string
+      status:
+        type: enum
+        options: { todo: 未着手, doing: 進行中, done: 完了 }
+        default: todo
+      assignee: { type: ref, to: member }
+      due: date
+      memo: string
 
 computed:
-  - name: overdue              # 期限切れ（今日の日付で変わる）
+  # 期限切れ。**Data API が解いて結果を行に載せる**（画面は式を評価しない）
+  - name: overdue
     entity: task
     type: boolean
-    expression: due != null and due < today() and status != "done"
-  - name: openTasks            # 担当していて、終わっていないタスクの数
+    expression: due < today()
+  # 担当しているタスクの数。`this` はこのメンバーのレコードの ID である
+  - name: openTasks
     entity: member
     type: number
-    aggregate: { count: task, where: { assignee: this, status: { not: done } } }
+    aggregate: { count: task, where: { assignee: this } }
 
 views:
+  # `columns` が指す選択肢のキーの順に列を作り、`highlight` が指す真偽の計算が真の行に印を付ける
   - name: board
-    type: board                # 状態ごとの列にカードを並べる、店頭の部品
-    label: ボード
+    type: board
     entity: task
     columns: status
-    card: [title, assignee, due]
     highlight: overdue
   - name: list
     type: list
-    label: 一覧
     entity: task
     show: [title, status, assignee, due]
-    filters: [assignee, status]  # 画面で「担当」「状態」で絞り込める
-    sort: { by: due, order: asc }
+    filters: [assignee, status]
   - name: members
     type: table
-    label: メンバー
     entity: member
     show: [name, openTasks]
 
 actions:
-  - { name: addTask,    entity: task,   kind: create, label: タスクを足す }
-  - { name: editTask,   entity: task,   kind: update, label: 直す }
-  - { name: start,      entity: task,   kind: update, label: 始める,     set: { status: doing }, when: status == "todo" }
-  - { name: finish,     entity: task,   kind: update, label: 完了にする, set: { status: done },  when: status != "done" }
-  - { name: deleteTask, entity: task,   kind: delete, label: 消す }
-  - { name: addMember,  entity: member, kind: create, label: メンバーを足す }
+  - { name: addTask,    entity: task,   kind: create }
+  - { name: editTask,   entity: task,   kind: update }
+  # 始める（未着手のときだけ）。入力は対象の ID だけである（書く値は `set` が持つ）
+  - { name: start,      entity: task,   kind: update, set: { status: doing }, when: status == "todo" }
+  # **条件は守りである**——偽の行への操作は Data API が断る（`ACTION_NOT_ALLOWED`）
+  - { name: finish,     entity: task,   kind: update, set: { status: done },  when: status != "done" }
+  - { name: deleteTask, entity: task,   kind: delete }
+  - { name: addMember,  entity: member, kind: create }
+
+validations: []
 
 permissions:
   - { name: read,  subject: minIdentity }
@@ -277,39 +295,74 @@ M1 は `filters` で担当者を選んで絞り込む。M2 でゲスト参加（
 
 ### 3.3 採点のシナリオ（期待値）
 
-時計を **2026-09-15（日本時間）に固定**する。入力：メンバー A・B・C。
+> **2026-09-19：実際の採点のシナリオに合わせて書き直した（#169）。**
+> 正本は [`packages/appspec-schema/samples/task-board/scenario.json`](../../../packages/appspec-schema/samples/task-board/scenario.json) である。
+
+時計を **2026-09-15 12:00（日本時間）に固定**する。入力：メンバー A・B・C。
 
 | タスク | 担当 | 期限 | 状態 |
 |---|---|---|---|
-| 宿の予約 | A | 9/20 | 進行中 |
-| しおり作り | B | 9/10 | 未着手 |
-| レンタカー | C | 9/25 | 完了 |
+| 宿の予約 | A | 2026-09-20 | 進行中（`doing`） |
+| しおり作り | B | 2026-09-10 | 未着手（`todo`） |
+| レンタカー | C | 2026-09-25 | 完了（`done`） |
+
+**断ることも採点する**（3 件。いずれも保存されない）。
+
+| 送るもの | 断る理由 |
+|---|---|
+| `status: wip` | **選択肢に無い値**。その項目名を返す |
+| `due` が `YYYY-MM-DD` でない | 日付の形でない |
+| 存在しない担当の ID | 参照先が無い |
 
 | 確かめるもの | 期待値 |
 |---|---|
 | ボードの列 | 未着手：しおり作り ／ 進行中：宿の予約 ／ 完了：レンタカー |
-| `overdue` | しおり作り だけ true |
-| `openTasks` | A 1 ／ B 1 ／ C 0 |
+| `overdue` | **しおり作り だけ true** |
+| `openTasks` | **A 1 ／ B 1 ／ C 1** |
 
-続けて、しおり作りの「完了にする」を押す。
+> **`openTasks` は「担当しているタスクの数」であって「未完了の数」ではない。**
+> 集計の `where` は `this` との一致と包含しか書けないので、状態で絞れない（§3.5）。
+> だから完了済みのレンタカーを持つ C も 1 である。
 
-| 確かめるもの | 期待値 |
-|---|---|
-| ボードの列 | 未着手：なし ／ 進行中：宿の予約 ／ 完了：しおり作り・レンタカー |
-| `overdue` | すべて false |
-| `openTasks` | A 1 ／ B 0 ／ C 0 |
-| ボタン | 完了のカードには「始める」「完了にする」が出ない |
+**「完了にする」を押したあとの状態は、時計を差し込んだ単体テストで見る**（`scenario.json` は初期状態までを見る）。
+押すと、しおり作りが「完了」の列へ移り、そのカードから「始める」「完了にする」が消える。
 
 ### 3.4 割り勘に無かった書き方
 
 - 選択肢（`enum`）と既定値（`default`）
 - 日付（`date`）と、今日の日付（`today()`）
+- **真偽を返す計算**（`type: boolean`）と、**式の中の文字列の定数**（`status == "todo"`）
 - 決まった値に書き換える操作（`set`）と、ボタンを出す条件（`when`）
-- 画面の種類 `board`、絞り込み（`filters`）
+- 画面の種類 `board`（`columns`・`highlight`）と `list`、絞り込み（`filters`）
+
+### 3.5 叩き台が使おうとして、書けなかった書き方
+
+**2026-09-19 に #159 で見本を起こしたときに分かった。** 叩き台は 2026-09-15 に、**語彙が 1 つも存在しない時点**で書かれている。
+
+| 叩き台の書き方 | いまの語彙 | どうしたか |
+|---|---|---|
+| `app: { name: 旅行の準備 }` | **無い**（トップレベルは 7 欄で固定） | 落とした |
+| `label:`（entity・項目・一覧・操作） | **無い** | 落とした。**画面には識別子（`title`・`overdue` など）がそのまま出る** |
+| `required: true` | **無い** | 落とした。**いまは全項目が必須**なので、表せないのは「任意の項目」のほうである |
+| `sort: { by: due, order: asc }` | **無い** | 落とした。行は登録した順である |
+| `card: [title, assignee, due]` | **無い** | 落とした。カードは項目を全部出す |
+| `due != null and due < today() and status != "done"` | **`and` も `null` も無い** | `due < today()` にした。**完了済みでも期限を過ぎていれば強調される** |
+| `where: { status: { not: done } }` | **集計の `where` は `equals` と `contains` だけ** | 「担当している数」にした |
+
+**この表は消さない。** 語彙を足すかどうかの判断材料である（[`04-spec-evolution.md`](./04-spec-evolution.md) §6.1「見本が必要としていて、今の語彙では書けないときだけ足す」）。
+2026-09-19 のデモ（[`demos.md`](./demos.md)）で、**`label` が無いために強調の印が `▲ overdue` と出る**ことが実物で確かめられた。
 
 ---
 
 ## 4. 見本 3：ダッシュボード
+
+> **2026-09-19 追記（#169）：この節はまだ実装されていない。** ダッシュボードは **M1.4** である。
+> 下は**いまの語彙に無い**。§2 と共通の 4 つ（`app`・`label`・`required`・`sort`）に加えて、
+> **ダッシュボードの語彙がまるごと未実装**である——`scope: app`・`groupBy`・`groups` 型・
+> 期間の条件（`within: this_month`）・画面の種類 `dashboard` とその部品（`number`・`bar`・`pie`・`ranking`）・`unit`・`limit`。
+>
+> **M1.4 の Issue を切るときに、この節を「決める材料」として使い、決まった形で書き直す**（§3 と同じ手順）。
+> あわせて、2026-09-19 のデモで見つかった **`label`（日本語の名前）** と **強調の色** も M1.4 に入れる（[`demos.md`](./demos.md)）。
 
 ### 4.1 前提：何を集計するか
 
