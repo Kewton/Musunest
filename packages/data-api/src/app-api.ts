@@ -49,6 +49,7 @@ import {
   actionKind,
   fieldKind,
   fieldTarget,
+  isAppComputed,
   isComputedExpression,
   isComputedSettle,
   isRowComputed,
@@ -69,7 +70,9 @@ import type { Clock, SettleResult, SourceRecord, SourceRecords } from "@musunest
 import {
   aggregateSourceEntities,
   allowsAction,
+  appAggregateSourceEntities,
   evaluateRecord,
+  evaluateScope,
   holdsExpression,
   settleEntity,
   settleSourceEntities,
@@ -310,13 +313,16 @@ function isActionShape(action: unknown): boolean {
   return action["when"] === undefined || typeof action["when"] === "string";
 }
 
-/** 集計（`aggregate`）の形（M1.2）。`sum` は対象の名前を持ち、`count` は持たない */
+/**
+ * 集計（`aggregate`）の形（M1.2・M1.4）。`sum`・`avg` は対象の名前を持ち、`count` は持たない。
+ * どちらも `where`（項目 → `equals` / `contains`）を持つ。
+ */
 function isAggregateShape(value: unknown): boolean {
   if (!isRecord(value)) return false;
   const kind = value["kind"];
-  if (kind !== "sum" && kind !== "count") return false;
+  if (kind !== "sum" && kind !== "count" && kind !== "avg") return false;
   if (typeof value["entity"] !== "string") return false;
-  if (kind === "sum" ? typeof value["name"] !== "string" : value["name"] !== null) return false;
+  if (kind === "count" ? value["name"] !== null : typeof value["name"] !== "string") return false;
   const where = value["where"];
   if (!isRecord(where)) return false;
   return Object.values(where).every((op) => op === "equals" || op === "contains");
@@ -363,7 +369,11 @@ function isSpecShape(spec: unknown): spec is AppSpec {
   for (const entry of computed) {
     // 精算（`settle`）は数ではなく送金の並びを返すので、`type` を持たない（M1.2）
     const settles = isRecord(entry) && entry["settle"] !== undefined;
-    if (!hasStrings(entry, settles ? ["name", "entity"] : ["name", "entity", "type"])) return false;
+    // **アプリ全体の計算（`scope: app`。M1.4）は `entity` を持たない**——どのレコードにも属さない
+    const appScoped = isRecord(entry) && entry["scope"] === "app";
+    const strings = settles ? ["name", "entity"] : appScoped ? ["name", "type"] : ["name", "entity", "type"];
+    if (!hasStrings(entry, strings)) return false;
+    if (appScoped && entry["entity"] !== undefined) return false;
     // 式・集計・精算のどれか 1 つである（M1.2）
     if (!isComputedShape(entry)) return false;
   }
@@ -431,8 +441,9 @@ const computedNamesOf = (app: NormalizedAppSpec, entity: string): readonly strin
   app.spec.computed
     // 精算（`settle`）は行ごとの値ではないので、一覧の列に出さない（M1.2）。
     // **真偽（`boolean`）の計算も列に出さない**（M1.3）——強調（`highlight`）が指すためだけに使い、
-    // 値は行の `computed` に載せるが、列の並び（この応答の `computed`）には入れない
-    .filter((entry) => entry.entity === entity && isRowComputed(entry) && entry.type !== "boolean")
+    // 値は行の `computed` に載せるが、列の並び（この応答の `computed`）には入れない。
+    // **アプリ全体の計算（`scope: app`。M1.4）も列に出さない**——行ではなく、1 つの値だからである
+    .filter((entry) => isRowComputed(entry) && entry.entity === entity && entry.type !== "boolean")
     .map((entry) => entry.name);
 
 /**
@@ -452,7 +463,7 @@ function highlightOf(app: NormalizedAppSpec, view: View, entity: string): Highli
   const name = view.highlight;
   if (name === undefined) return undefined;
   const entry = app.spec.computed.find(
-    (candidate) => candidate.entity === entity && candidate.name === name,
+    (candidate) => isRowComputed(candidate) && candidate.entity === entity && candidate.name === name,
   );
   if (entry === undefined || !isComputedExpression(entry)) return undefined;
   return { name, expression: entry.expression };
@@ -460,7 +471,28 @@ function highlightOf(app: NormalizedAppSpec, view: View, entity: string): Highli
 
 /** その entity に精算（`settle`）を宣言しているか。宣言が無ければ、応答に `settlement` を載せない */
 const declaresSettle = (app: NormalizedAppSpec, entity: string): boolean =>
-  app.spec.computed.some((entry) => entry.entity === entity && isComputedSettle(entry));
+  app.spec.computed.some((entry) => isComputedSettle(entry) && entry.entity === entity);
+
+/**
+ * **アプリ全体の集計（`scope: app`。M1.4。Issue #177）の値**を、宣言の順に求める。
+ * アプリ全体の計算が 1 つも宣言されていなければ `undefined`（＝応答に欄を載せない。
+ * `settlement` と同じ約束である）。**行ごとの値ではない**——レコードの数に関わらず 1 つ返る。
+ *
+ * **1 回の取得でまとめて返す**（部品ごとに取りに行かない）。値が求められなかった計算は `null`
+ * である（0 に読み替えない）。
+ */
+function scopeValuesOf(
+  app: NormalizedAppSpec,
+  clock: Clock,
+  sources: SourceRecords,
+): Readonly<Record<string, number | null>> | undefined {
+  const declared = app.spec.computed.filter(isAppComputed);
+  if (declared.length === 0) return undefined;
+  const values = evaluateScope({ app, clock, sources });
+  const scope: Record<string, number | null> = {};
+  for (const entry of declared) scope[entry.name] = values[entry.name] ?? null;
+  return scope;
+}
 
 // ── その行で操作してよいか（M1.3。Issue #156） ────────────────────────
 //
@@ -648,16 +680,26 @@ function referencesOf(
  * 集計（`aggregate`）と精算（`settle`）に要る、ほかの entity のレコードを読む（M1.2）。
  * **同じインスタンスの DO から読む**ので、別インスタンスのレコードは混ざらない。
  * どちらも使わない宣言では 1 つも読まない。
+ *
+ * `extra` は**アプリ全体の集計（`scope: app`。M1.4）が要る entity** の名前である
+ * （`appAggregateSourceEntities`）。`known` は**既に読んである行**——一覧の entity をアプリ全体の
+ * 集計が指すとき、同じ行を 2 度読まないためである（D-1 の線。Issue #177 追記 3）。
  */
 async function loadSources(
   deps: DataApiDeps,
   app: NormalizedAppSpec,
   entity: string,
+  extra: readonly string[] = [],
+  known: Readonly<Record<string, readonly StoredRecord[]>> = {},
 ): Promise<SourceRecords> {
   const sources: Record<string, readonly SourceRecord[]> = {};
-  const names = new Set([...aggregateSourceEntities(app, entity), ...settleSourceEntities(app, entity)]);
+  const names = new Set([
+    ...aggregateSourceEntities(app, entity),
+    ...settleSourceEntities(app, entity),
+    ...extra,
+  ]);
   for (const name of names) {
-    const rows = await deps.records.list(name);
+    const rows = known[name] ?? (await deps.records.list(name));
     sources[name] = rows.map((row) => ({ id: row.id, data: row.data }));
   }
   return sources;
@@ -743,13 +785,19 @@ export async function getView(
   if (entity === undefined) return fail("SPEC_UNAVAILABLE");
 
   const stored = await deps.records.list(entity.name);
-  const sources = await loadSources(deps, app, entity.name);
+  // 集計の元を読む。**アプリ全体の集計（`scope: app`。M1.4）が指す entity も足す**——
+  // 一覧の entity を指していれば、いま読んだ行を使い回す（同じ行を 2 度読まない。D-1）
+  const sources = await loadSources(deps, app, entity.name, appAggregateSourceEntities(app), {
+    [entity.name]: stored,
+  });
   // 参照されている行（M1.2）。`delete` を宣言している entity にだけ、消せるかの材料を載せる
   const referenceIndex = await referencesByRow(deps, app, entity, stored);
   // 精算（M1.2）。宣言していれば、店頭が組んだ送金の並びを返す（読めなければ `null`。空の並びに読み替えない）
   const settlement = settlementOf(app, entity.name, stored, sources);
   // 強調（`highlight`。M1.3）。ボードの宣言があれば、真偽の計算を行ごとに解いて行に載せる
   const highlight = highlightOf(app, view, entity.name);
+  // アプリ全体の集計（M1.4）。**宣言が無ければ欄そのものを載せない**
+  const scope = scopeValuesOf(app, deps.clock, sources);
   return ok(API_READ_STATUS, {
     instanceId,
     view: view.name,
@@ -770,6 +818,7 @@ export async function getView(
       ),
     ),
     ...(settlement === undefined ? {} : { settlement }),
+    ...(scope === undefined ? {} : { scope }),
   });
 }
 

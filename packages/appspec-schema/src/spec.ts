@@ -212,18 +212,74 @@ export type AggregateWhereOp = (typeof AGGREGATE_WHERE_OPS)[number];
 export type AggregateWhere = Readonly<Record<string, AggregateWhereOp>>;
 
 /**
- * entity をまたぐ集計（M1.2）。`sum: <entity>.<項目か計算>` か `count: <entity>` の**どちらか一方**である。
+ * 集計の種類（M1.2・M1.4）。**語彙は閉じている**——書けるのはこの 3 つだけである。
+ *   `sum`   … 合う行の、対象の値を足す
+ *   `count` … 合う行の数を数える
+ *   `avg`   … 合う行の、対象の値の平均（M1.4。Issue #177）。**値の無い行は数えない**
+ */
+export const AGGREGATE_KINDS = ["sum", "count", "avg"] as const;
+export type AggregateKind = (typeof AGGREGATE_KINDS)[number];
+
+/**
+ * entity をまたぐ集計（M1.2）。`sum: <entity>.<項目か計算>`・`count: <entity>`・
+ * `avg: <entity>.<項目か計算>` の**どれか 1 つ**である。
  * 集計は**同じインスタンス**のレコードだけを見る（別インスタンスの ID は存在しない）。
  */
 export interface Aggregate {
-  /** `sum` は合計、`count` は該当する行数 */
-  readonly kind: "sum" | "count";
+  /** `sum` は合計、`count` は該当する行数、`avg` は平均（M1.4） */
+  readonly kind: AggregateKind;
   /** 集計元の entity の名前 */
   readonly entity: string;
-  /** `sum` のときの、合計する項目か計算の名前。`count` では `null` である */
+  /** `sum`・`avg` のときの、対象の項目か計算の名前。`count` では `null` である */
   readonly name: string | null;
   /** 対象を絞る条件。空なら全行である */
   readonly where: AggregateWhere;
+}
+
+/**
+ * 計算の範囲（M1.4。Issue #177）。**書かなければ、従来どおり 1 つの entity の行ごとの値**である。
+ *   `app` … アプリ全体で 1 つの値。**どのレコードにも属さない**（`entity` を持たない）
+ *
+ * アプリ全体の集計は、`where` の `this`（出力先のレコードの ID）を持たない——出力先のレコードが
+ * 無いからである。`where` に `this` を書けば静的チェックが `LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH` で断る
+ * （期間の条件は M1.4 の #178 で足す）。
+ */
+export const COMPUTED_SCOPES = ["app"] as const;
+export type ComputedScope = (typeof COMPUTED_SCOPES)[number];
+
+/**
+ * アプリ全体の計算が `entity` を持たないことを、型の上で表す。
+ *
+ * **アプリ全体の計算はどのレコードにも属さないので `entity` を書けない。** 正規化した JSON にも
+ * `entity` は現れない。ここで `undefined` として宣言しておくのは、**`entity` を読む既存のコード
+ * （精算など）をそのまま型検査に通す**ためである——アプリ全体の計算を扱う側は、`entity` を読む前に
+ * `isAppComputed` で分ける（`scope` を持つかどうかで見る）。
+ */
+interface AppScopeNoEntity {
+  /** アプリ全体の計算は `entity` を持たない（型の上だけの欄である） */
+  readonly entity?: undefined;
+}
+
+/**
+ * アプリ全体で 1 つの値になる、式の計算（M1.4。Issue #177）。
+ * **`entity` を持たない**——どのレコードにも属さない。参照できるのは、ほかのアプリ全体の計算だけである。
+ */
+export interface ComputedAppExpression extends AppScopeNoEntity {
+  readonly name: string;
+  readonly scope: ComputedScope;
+  readonly expression: string;
+  readonly type: ComputedType;
+}
+
+/**
+ * アプリ全体で 1 つの値になる、集計の計算（M1.4。Issue #177）。
+ * **`entity` を持たない**——どのレコードにも属さない。`where` は `this` を持てない（`Aggregate` の注記）。
+ */
+export interface ComputedAppAggregate extends AppScopeNoEntity {
+  readonly name: string;
+  readonly scope: ComputedScope;
+  readonly aggregate: Aggregate;
+  readonly type: ComputedType;
 }
 
 /** 式で求める計算（v0.1 からの形）。v0.1 の computed_contract の entry_fields と同じ 4 つのキーを持つ。 */
@@ -272,26 +328,49 @@ export interface ComputedSettle {
 }
 
 /** 計算（式・集計・精算のどれか）。計算の値は保存しない。 */
-export type Computed = ComputedExpression | ComputedAggregate | ComputedSettle;
+export type Computed =
+  | ComputedExpression
+  | ComputedAggregate
+  | ComputedSettle
+  | ComputedAppExpression
+  | ComputedAppAggregate;
+
+/**
+ * アプリ全体で 1 つの値になる計算（M1.4。Issue #177）。**`entity` を持たない**ので、
+ * 行ごとの値（`RowComputed`）とは別のものである。
+ */
+export type AppComputed = ComputedAppExpression | ComputedAppAggregate;
 
 /** 行ごとの値になる計算（式か集計）。精算は行ではなく組の並びを返すので含まない */
 export type RowComputed = ComputedExpression | ComputedAggregate;
 
-/** 式で求める計算か（`aggregate`・`settle` の側と区別する） */
-export const isComputedExpression = (computed: Computed): computed is ComputedExpression =>
-  "expression" in computed;
+/** 式で求める計算か（`aggregate`・`settle` の側と区別する）。アプリ全体の式も `true` である */
+export const isComputedExpression = (
+  computed: Computed,
+): computed is ComputedExpression | ComputedAppExpression => "expression" in computed;
 
-/** 集計で求める計算か（`expression`・`settle` の側と区別する） */
-export const isComputedAggregate = (computed: Computed): computed is ComputedAggregate =>
-  "aggregate" in computed;
+/** 集計で求める計算か（`expression`・`settle` の側と区別する）。アプリ全体の集計も `true` である */
+export const isComputedAggregate = (
+  computed: Computed,
+): computed is ComputedAggregate | ComputedAppAggregate => "aggregate" in computed;
+
+/**
+ * アプリ全体の計算か（M1.4。Issue #177）。**`scope` を持つかどうか**で見る——
+ * `entity` を持つかどうかで見ないのは、アプリ全体の計算が `entity` を「持たない」ことを
+ * 型で表しているからである（`entity` を読む前に、必ずこれで分ける）。
+ */
+export const isAppComputed = (computed: Computed): computed is AppComputed => "scope" in computed;
 
 /** 精算の計算か（行ごとの値を持たない唯一の計算である） */
 export const isComputedSettle = (computed: Computed): computed is ComputedSettle =>
   "settle" in computed;
 
-/** 行ごとの値になる計算か（精算だけが `false`） */
+/**
+ * 行ごとの値になる計算か。**精算と、アプリ全体の計算が `false`** である
+ * （どちらも「1 つの行の値」ではない。`RowComputed` の注記を見ること）。
+ */
 export const isRowComputed = (computed: Computed): computed is RowComputed =>
-  !isComputedSettle(computed);
+  !isComputedSettle(computed) && !isAppComputed(computed);
 
 /**
  * 操作の種類（M1.2。`kind`）。**語彙は閉じている**——書けるのはこの 3 つだけである。
@@ -533,8 +612,10 @@ export const VOCABULARY = {
   message: "logic",
   computed: "logic",
   aggregate: "logic",
+  scope: "logic",
   sum: "logic",
   count: "logic",
+  avg: "logic",
   settle: "logic",
   min: "logic",
   max: "logic",

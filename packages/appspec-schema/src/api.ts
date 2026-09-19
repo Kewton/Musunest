@@ -198,6 +198,12 @@ export interface ApiPermissions {
   readonly write: boolean;
 }
 
+/**
+ * アプリ全体の集計（`scope: app`。M1.4。Issue #177）の値。**求められなかった値は `null`** である
+ * ——0 にも空の並びにも読み替えない（`computed` と同じ約束である。./docs/semantics.md「computed」「avg」）。
+ */
+export type ApiScopeValue = number | null;
+
 /** `GET /api/instances/:instanceId/spec` の本文（正規化した JSON。Issue #98） */
 export interface ApiSpecBody {
   readonly instanceId: string;
@@ -240,6 +246,16 @@ export interface ApiViewBody {
    * 区別し、**空の並びに読み替えない**（`computed` の `null` と同じ約束である）
    */
   readonly settlement?: readonly ApiTransfer[] | null;
+  /**
+   * **アプリ全体の集計（`scope: app`。M1.4。Issue #177）の値**。計算の名前 → その値である
+   * （宣言の順）。求められなかった値は `null` で、**0 に読み替えない**。
+   *
+   * **宣言が無ければこの欄を載せない**（`settlement` と同じ約束である）。行ごとの値（`rows`）とは
+   * 別の欄である——アプリ全体の集計は、どのレコードにも属さない（`scope: app`）。
+   * **1 回の取得でまとめて返す**（部品ごとに取りに行かない）。値は data-api が求める
+   * ——**画面は式も集計も評価しない**（`CLAUDE.md` の不変条件）。
+   */
+  readonly scope?: Readonly<Record<string, ApiScopeValue>>;
 }
 
 /** `POST /api/instances/:instanceId/actions/:actionName` の本文。**書いた行**（計算値つき）を返す */

@@ -1418,3 +1418,82 @@ describe("ボード（board）と強調（highlight）（M1.3）", () => {
     expect(container.querySelector('[data-card="t2"]')?.getAttribute("data-highlighted")).toBe("false");
   });
 });
+
+// ── アプリ全体の集計（`scope: app`）と平均（`avg`）を画面へ写す（M1.4。Issue #177） ──
+//
+// **宣言からの写像**を見る（`form.test.ts` は入力欄の部品しか見ていない）。アプリ全体の値は
+// **API が返した `scope` をそのまま出す**（画面は式も集計も評価しない）。`null` は「—」で見せて
+// 0 と区別する。割り算の表示は**小数第 1 位まで（四捨五入）**である（値そのものは丸めない）。
+
+const SCOPE_SPEC: ApiSpecBody = {
+  ...SPEC,
+  spec: {
+    ...SPEC.spec,
+    computed: [
+      ...SPEC.spec.computed,
+      {
+        name: "activityCount",
+        scope: "app",
+        aggregate: { kind: "count", entity: "expense", name: null, where: {} },
+        type: "number",
+      },
+      {
+        name: "averageAttendees",
+        scope: "app",
+        aggregate: { kind: "avg", entity: "expense", name: "amount", where: {} },
+        type: "number",
+      },
+    ],
+  },
+};
+
+/** `scope` を差し替えて答える client（宣言にもアプリ全体の計算がある） */
+const scopeClient = (scope: NonNullable<ApiViewBody["scope"]>): MusunestClient =>
+  makeClient({
+    spec: () => Promise.resolve(okResult(SCOPE_SPEC)),
+    view: () => Promise.resolve(okResult({ ...VIEW, scope })),
+  });
+
+/** `data-scope-name` の部品が出している値（`dd` の中身） */
+const scopeValueOf = (container: HTMLElement, name: string): string =>
+  container.querySelector(`[data-scope-name="${name}"] dd`)?.textContent ?? "";
+
+describe("アプリ全体の集計（scope: app）と平均（avg）を画面へ写す（M1.4）", () => {
+  it("API が返した scope の値をそのまま出し、null は「—」で見せる（0 と区別する）", async () => {
+    const { container } = await renderScreen(scopeClient({ activityCount: 3, averageAttendees: null }));
+
+    expect(container.querySelector('[data-scope="true"]')).not.toBeNull();
+    expect(scopeValueOf(container, "activityCount")).toBe("3");
+    expect(scopeValueOf(container, "averageAttendees")).toBe("—");
+  });
+
+  it("**宣言が無ければ scope を描かない**（M1.1〜M1.3 の画面を変えない）", async () => {
+    // VIEW は `scope` を持たない（宣言にもアプリ全体の計算が無い）
+    const { container } = await renderScreen(makeClient({}));
+    expect(container.querySelector('[data-scope="true"]')).toBeNull();
+  });
+
+  it("**割り算の表示は小数第 1 位まで（四捨五入）**。整数はそのままである", async () => {
+    const { container } = await renderScreen(
+      scopeClient({ activityCount: 2000, averageAttendees: 2.666_666_6 }),
+    );
+
+    // 値そのものは丸めない——**見せ方だけ**が小数第 1 位である
+    expect(scopeValueOf(container, "averageAttendees")).toBe("2.7");
+    // 整数はそのまま見せる（`2000.0` にしない）
+    expect(scopeValueOf(container, "activityCount")).toBe("2000");
+  });
+
+  it("行の計算値にも同じ見せ方を使う（3.3333… は 3.3）", async () => {
+    const row = makeRow(
+      "r9",
+      { description: "コーヒー", amount: 1000, discount: 0, payer: "C", participants: ["A", "B", "C"] },
+      { paidAmount: 1000, headcount: 3, shareAmount: 1000 / 3 },
+    );
+    const { container } = await renderScreen(makeClient({ view: () => Promise.resolve(okResult({ ...VIEW, rows: [row] })) }));
+
+    expect(rowTexts(container)).toEqual([
+      ["コーヒー", "1000", "0", "C", "A, B, C", "1000", "3", "333.3"],
+    ]);
+  });
+});

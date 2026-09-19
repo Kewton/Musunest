@@ -1,7 +1,7 @@
 // 静的チェックの unit テスト（Issue #97 の受入条件を、ここで固定する）。
 //
 //   1. 見本（expense-log・warikan）の診断が空で、7 欄を持つ AppSpec を返す
-//   2. 負例 46 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
+//   2. 負例 48 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
 //   3. 診断は空でない日本語の説明と、該当する YAML の行・列を持つ
 //   4. 不正 YAML・未知キー・未知参照・循環を拒否し、上限はちょうどが通り 1 超過で診断になる
 //   5. 検査は式を実行せず、ストレージにも触れない
@@ -735,11 +735,11 @@ describe("決まった値への書き換え（set）とボタンを出す条件�
   });
 });
 
-// ── 2. 負例 46 件 ──────────────────────────────────────────────
+// ── 2. 負例 48 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 46 件である（0 件なら以降のテストが空振りする）", () => {
-    expect(negativeIndex.negatives).toHaveLength(46);
+  it("負例の一覧は 48 件である（0 件なら以降のテストが空振りする）", () => {
+    expect(negativeIndex.negatives).toHaveLength(48);
   });
 
   it.each(negativeCases)(
@@ -2031,5 +2031,185 @@ describe("診断の一覧", () => {
       }
     }
     expect(seen.size).toBeGreaterThan(10);
+  });
+});
+
+// ── アプリ全体の集計（`scope: app`）と平均（`avg`）（M1.4。Issue #177） ──
+//
+// **アプリ全体の計算は `entity` を持たない**（どのレコードにも属さない）。参照できるのは
+// ほかのアプリ全体の計算だけで、集計の `where` に `this` は書けない。負例 2 本
+// （aggregate-app-scope-uses-this・avg-target-not-number）が、同じことを外から確かめる。
+
+/** アプリ全体の計算 1 つ（`scope: app`）。`body` は aggregate の中身か expression の行 */
+const appComputed = (name: string, body: readonly string[], type = "number"): string =>
+  [`  - name: ${name}`, "    scope: app", ...body.map((line) => `    ${line}`), `    type: ${type}`].join("\n");
+
+const APP_COUNT = appComputed("activityCount", ["aggregate:", "  count: expense"]);
+const APP_AVG = appComputed("averageAmount", ["aggregate:", "  avg: expense.amount"]);
+const APP_SUM = appComputed("totalAmount", ["aggregate:", "  sum: expense.amount"]);
+
+describe("アプリ全体の集計（scope: app）と平均（avg）（M1.4）", () => {
+  it("見本 dashboard は静的チェックに通り、scope: app と avg を宣言のまま写す", () => {
+    const result = checkSpec(read(sampleSpecFile("dashboard")));
+    expect(result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("dashboard が静的チェックに通らない");
+    // **アプリ全体の計算は entity を持たない**（写しても足さない）
+    expect(result.spec.computed).toContainEqual({
+      name: "activityCount",
+      scope: "app",
+      aggregate: { kind: "count", entity: "activity", name: null, where: {} },
+      type: "number",
+    });
+    expect(result.spec.computed).toContainEqual({
+      name: "averageCost",
+      scope: "app",
+      aggregate: { kind: "avg", entity: "activity", name: "cost", where: {} },
+      type: "number",
+    });
+    // 行ごとの計算（attendeeCount）は従来どおり entity を持つ
+    expect(result.spec.computed).toContainEqual({
+      name: "attendeeCount",
+      entity: "activity",
+      expression: "len(attendees)",
+      type: "number",
+    });
+  });
+
+  it("count・sum・avg を、アプリ全体の集計として読める", () => {
+    const result = checkSpec(declaration({ computed: [APP_COUNT, APP_SUM, APP_AVG].join("\n") }));
+    expect(result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("アプリ全体の集計が通らない");
+    expect(result.spec.computed.map((entry) => entry.name)).toEqual([
+      "activityCount",
+      "totalAmount",
+      "averageAmount",
+    ]);
+  });
+
+  it("アプリ全体の式は、ほかのアプリ全体の計算を参照できる", () => {
+    const result = checkSpec(
+      declaration({
+        computed: [APP_SUM, appComputed("doubled", ["expression: totalAmount * 2"])].join("\n"),
+      }),
+    );
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("アプリ全体の集計の where に this を書けば LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH（負例と同じ形）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          computed: [appComputed("paid", ["aggregate:", "  sum: expense.amount", "  where:", "    payer: this"])].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH"]);
+    expect(messagesOf(result, "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH")).toContain("this");
+  });
+
+  it("avg の対象が数でなければ LOGIC_AGGREGATE_TARGET_NOT_NUMBER（負例と同じ形）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          computed: [appComputed("averagePayer", ["aggregate:", "  avg: expense.payer"])].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["LOGIC_AGGREGATE_TARGET_NOT_NUMBER"]);
+    // 2 本の負例は、それぞれ別の誤りコードで落ちる（1 つの誤りを 2 つに数えない）
+    const usesThis = failure(
+      checkSpec(
+        declaration({
+          computed: [appComputed("paid", ["aggregate:", "  sum: expense.amount", "  where:", "    payer: this"])].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).not.toEqual(codesOf(usesThis));
+  });
+
+  it("scope: app に entity を書けば SHAPE_KEY_UNKNOWN（どのレコードにも属さない）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          computed: [
+            ["  - name: activityCount", "    scope: app", "    entity: expense", "    aggregate:", "      count: expense", "    type: number"].join("\n"),
+          ].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
+  });
+
+  it("scope に app 以外を書けば SHAPE_VALUE_INVALID（語彙は閉じている）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          computed: [
+            [
+              "  - name: activityCount",
+              "    scope: user",
+              "    entity: expense",
+              "    aggregate:",
+              "      count: expense",
+              "    type: number",
+            ].join("\n"),
+          ].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_VALUE_INVALID"]);
+  });
+
+  it("アプリ全体の計算に settle を書けば SHAPE_KEY_UNKNOWN（精算する entity が要る）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          computed: [
+            [
+              "  - name: settlement",
+              "    scope: app",
+              "    settle:",
+              "      expense: expense",
+              "      amount: amount",
+              "      payer: payer",
+              "      shares: participants",
+            ].join("\n"),
+          ].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
+  });
+
+  it("アプリ全体の式が entity の項目を参照すれば LOGIC_REFERENCE_NOT_FOUND", () => {
+    const result = failure(
+      checkSpec(declaration({ computed: [appComputed("bad", ["expression: amount + 1"])].join("\n") })),
+    );
+    expect(codesOf(result)).toEqual(["LOGIC_REFERENCE_NOT_FOUND"]);
+  });
+
+  it("アプリ全体の値は数である（真偽の計算は書けない）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          computed: [appComputed("flag", ["aggregate:", "  count: expense"], "boolean")].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["LOGIC_COMPUTED_TYPE_MISMATCH"]);
+  });
+
+  it("アプリ全体の計算でも、参照の循環は断る", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          computed: [
+            appComputed("first", ["expression: second + 1"]),
+            appComputed("second", ["expression: first + 1"]),
+          ].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["LOGIC_COMPUTED_CYCLE"]);
   });
 });

@@ -348,15 +348,15 @@ function isExpression(value: unknown): boolean {
 }
 
 /**
- * 集計（`aggregate`）の形（M1.2）。`sum` は対象の名前を持ち、`count` は持たない。
+ * 集計（`aggregate`）の形（M1.2・M1.4）。`sum`・`avg` は対象の名前を持ち、`count` は持たない。
  * どちらも `where`（項目 → `equals` / `contains`）を持つ。
  */
 function isAggregate(value: unknown): boolean {
   if (!isRecord(value)) return false;
   const kind = value.kind;
-  if (kind !== "sum" && kind !== "count") return false;
+  if (kind !== "sum" && kind !== "count" && kind !== "avg") return false;
   if (typeof value.entity !== "string") return false;
-  if (kind === "sum" ? typeof value.name !== "string" : value.name !== null) return false;
+  if (kind === "count" ? value.name !== null : typeof value.name !== "string") return false;
   if (!isRecord(value.where)) return false;
   return Object.values(value.where).every((op) => op === "equals" || op === "contains");
 }
@@ -374,17 +374,28 @@ function isSettleDeclaration(value: unknown): boolean {
 /**
  * computed の 1 件は、式（`expression`）・集計（`aggregate`）・精算（`settle`）の**どれか 1 つ**である
  * （M1.2。同時には書けない）。精算だけが `type` を持たない（値は数ではなく送金の並びである）。
+ *
+ * **アプリ全体の計算（`scope: app`。M1.4）は `entity` を持たない**——どのレコードにも属さない。
+ * `scope` が載っているときは、`app` だけを認め、`entity` と `settle` を認めない。
  */
 function isComputedDeclaration(value: unknown): boolean {
-  if (!isRecord(value) || typeof value.name !== "string" || typeof value.entity !== "string") {
-    return false;
-  }
+  if (!isRecord(value) || typeof value.name !== "string") return false;
+  const appScoped = value.scope === "app";
+  if (value.scope !== undefined && !appScoped) return false;
+  if (appScoped ? value.entity !== undefined : typeof value.entity !== "string") return false;
   const forms = [
     typeof value.expression === "string",
     value.aggregate !== undefined,
     value.settle !== undefined,
   ].filter(Boolean).length;
   if (forms !== 1) return false;
+  // 精算は entity を持つ（アプリ全体の計算には書けない）
+  if (value.settle !== undefined) return !appScoped && isSettleDeclaration(value.settle);
+  // アプリ全体の値は数である（`boolean` は行ごとの強調が指すためだけに使う。M1.3・M1.4）
+  if (appScoped) {
+    if (value.type !== "number") return false;
+    return typeof value.expression === "string" || isAggregate(value.aggregate);
+  }
   // 式の計算の型は `COMPUTED_TYPES`（正本）で見る（`number` と、M1.3 の `boolean`）。
   // 集計は数を返すので `number` だけである
   if (typeof value.expression === "string") {
@@ -440,6 +451,17 @@ function isTransfer(value: unknown): boolean {
  */
 function isSettlement(value: unknown): boolean {
   return value === null || (Array.isArray(value) && value.every(isTransfer));
+}
+
+/**
+ * アプリ全体の集計（`scope: app`。M1.4。Issue #177）の値。計算の名前 → 数か `null` である。
+ * **欄が無い**（宣言が無い）ことと、値が `null`（求められなかった）ことを区別したまま渡す。
+ */
+function isScopeValues(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    Object.values(value).every((item) => item === null || typeof item === "number")
+  );
 }
 
 function isAppSpec(value: unknown): boolean {
@@ -522,6 +544,8 @@ function isViewBody(value: unknown): value is ApiViewBody {
     Array.isArray(value.rows) &&
     value.rows.every(isRow) &&
     // 精算（M1.2）。**欄が無い**（宣言が無い）ときと `null`（読めなかった）ときを区別したまま渡す
-    (value.settlement === undefined || isSettlement(value.settlement))
+    (value.settlement === undefined || isSettlement(value.settlement)) &&
+    // アプリ全体の集計（M1.4）。**欄が無い**（宣言が無い）ときと、値の `null` を区別したまま渡す
+    (value.scope === undefined || isScopeValues(value.scope))
   );
 }

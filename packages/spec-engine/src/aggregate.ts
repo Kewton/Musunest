@@ -6,7 +6,7 @@
 //
 // **同じインスタンスのレコードしか見ない。** 別インスタンスのレコードは、渡された `sources` に現れない。
 
-import type { AggregateWhere, NormalizedAppSpec } from "@musunest/appspec-schema";
+import { isAppComputed, type AggregateWhere, type NormalizedAppSpec } from "@musunest/appspec-schema";
 
 /** 集計の元になる 1 件。`id` は `this`（出力先のレコードの ID）と比べる値である */
 export interface SourceRecord {
@@ -64,6 +64,9 @@ export function sumValues(values: readonly (number | null)[]): number | null {
  * その entity を評価するのに要る、**ほかの entity のレコード**（集計の集計元）を推移的に集める。
  * 集計の対象が計算（`sum: expense.shareAmount`）なら、その計算を解くために集計元の集計元も要る。
  * 自分自身は含めない（自分を集計する宣言は、検査が循環として断る）。
+ *
+ * **アプリ全体（`scope: app`）の集計は見ない。** あちらは出力先の entity を持たないので、
+ * `appAggregateSourceEntities` が別に集める。
  */
 export function aggregateSourceEntities(
   app: NormalizedAppSpec,
@@ -76,7 +79,9 @@ export function aggregateSourceEntities(
     const current = queue.shift();
     if (current === undefined) break;
     for (const computed of app.spec.computed) {
-      if (computed.entity !== current || !("aggregate" in computed)) continue;
+      if (isAppComputed(computed) || computed.entity !== current || !("aggregate" in computed)) {
+        continue;
+      }
       const target = computed.aggregate.entity;
       if (target === entity) continue;
       sources.add(target);
@@ -87,4 +92,49 @@ export function aggregateSourceEntities(
     }
   }
   return [...sources];
+}
+
+/**
+ * **アプリ全体の集計（`scope: app`。M1.4。Issue #177）を解くのに要る**、集計元の entity のレコードを
+ * 推移的に集める。集計の対象が計算なら、その計算を解くために要る集計元（`aggregateSourceEntities`）も
+ * 足す——**どの entity の計算を解くにも、同じ `sources` を渡す**ためである（決定 7）。
+ */
+export function appAggregateSourceEntities(app: NormalizedAppSpec): readonly string[] {
+  const sources = new Set<string>();
+  const queue: string[] = [];
+  for (const computed of app.spec.computed) {
+    if (isAppComputed(computed) && "aggregate" in computed) queue.push(computed.aggregate.entity);
+  }
+  const seen = new Set<string>();
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === undefined || seen.has(current)) continue;
+    seen.add(current);
+    for (const name of aggregateSourceEntities(app, current)) {
+      if (!sources.has(name)) {
+        sources.add(name);
+        queue.push(name);
+      }
+    }
+    sources.add(current);
+  }
+  return [...sources];
+}
+
+/**
+ * 平均（`avg`。M1.4。Issue #177）。**値の無い行（`null`・空・不正な値）は数えない**
+ * ——1 行の欠損で画面全体が「—」になるのを避ける（窓口の決定 2026-09-19）。
+ *
+ * 数える行が 1 つも無ければ **`null`** である（0 に読み替えない）。
+ * `sum` が「`null` が 1 つでもあれば `null`」であるのとは**別の決めごと**である——
+ * 合計は 1 行でも読めなければ確定できないが、平均は読めた行だけで求められる。
+ */
+export function avgValues(values: readonly (number | null)[]): number | null {
+  const valid = values.filter((value): value is number => value !== null);
+  if (valid.length === 0) return null;
+  const total = sumValues(valid);
+  if (total === null) return null;
+  const average = total / valid.length;
+  // 割り切れても有限である。桁あふれは `sumValues` と同じく `null` にする
+  return Number.isFinite(average) ? average : null;
 }

@@ -143,6 +143,18 @@
   runtime: [spec-engine, data-api]
   factory: 未対応
 
+# アプリ全体の集計（`scope: app`）。**どのレコードにも属さない 1 つの値**である（M1.4。Issue #177）。
+# 見本は dashboard（`scope: app` の計算を持つ）。
+- name: scope
+  layer: logic
+  since: v0.2-draft（M1.4）
+  samples: [dashboard]
+  negatives: [aggregate-app-scope-uses-this]
+  check_rules: [LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH]
+  semantics: docs/semantics.md#scope
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
 - name: sum
   layer: logic
   since: v0.2-draft（M1.2）
@@ -160,6 +172,17 @@
   negatives: [aggregate-unknown-target]
   check_rules: [LOGIC_AGGREGATE_TARGET_NOT_FOUND]
   semantics: docs/semantics.md#count
+  runtime: [spec-engine, data-api]
+  factory: 未対応
+
+# 平均（`avg`）。**値の無い行は数えない**（M1.4。Issue #177）。見本は dashboard。
+- name: avg
+  layer: logic
+  since: v0.2-draft（M1.4）
+  samples: [dashboard]
+  negatives: [avg-target-not-number]
+  check_rules: [LOGIC_AGGREGATE_TARGET_NOT_NUMBER]
+  semantics: docs/semantics.md#avg
   runtime: [spec-engine, data-api]
   factory: 未対応
 

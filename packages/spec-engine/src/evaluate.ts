@@ -33,10 +33,12 @@ import {
   DATE_FUNCTIONS,
   DATE_VALUE_PATTERN,
   fieldKind,
+  isAppComputed,
   isComputedAggregate,
   isComputedExpression,
   isRowComputed,
   type Aggregate,
+  type AppComputed,
   type ComputedExpression,
   type Entity,
   type FieldKind,
@@ -44,6 +46,7 @@ import {
   type RowComputed,
 } from "@musunest/appspec-schema";
 import {
+  avgValues,
   hasConditions,
   matchesWhere,
   sumValues,
@@ -318,7 +321,9 @@ function aggregateValueOf(
   );
   if (target === undefined) return null;
   const name = aggregate.name;
-  return sumValues(matched.map((row) => sourceValueOf(target, name, row, request, state)));
+  const values = matched.map((row) => sourceValueOf(target, name, row, request, state));
+  // `avg`（M1.4）は、値の無い行を数えない（`avgValues` の注記）。`sum` は 1 つでも欠ければ `null`
+  return aggregate.kind === "sum" ? sumValues(values) : avgValues(values);
 }
 
 /**
@@ -369,9 +374,10 @@ function prepareRecord(request: EvaluationRequest, state: EvaluationState): Prep
   // **真偽（`boolean`）の計算は、行の `computed` に入れない**（M1.3）。強調（`highlight`）が指すためだけに
   // 使い、値は data-api が `holdsExpression` で解いて行に載せる（Issue #157）。ここが数だけを返すので、
   // 一覧の応答の `computed` に真偽が混ざらない（列にも出さない）
-  const declared = forEntity(app.spec.computed, entityName)
-    .filter(isRowComputed)
-    .filter((entry) => entry.type !== "boolean");
+  const declared = forEntity(
+    app.spec.computed.filter(isRowComputed),
+    entityName,
+  ).filter((entry) => entry.type !== "boolean");
 
   const values = new Map<string, ComputedValue>();
   const declaredByName = new Map(declared.map((entry) => [entry.name, entry]));
@@ -436,6 +442,108 @@ function evaluateEntity(request: EvaluationRequest, state: EvaluationState): Eva
 export function evaluateRecord(request: EvaluationRequest): Evaluation {
   return evaluateEntity(request, { visiting: new Set<string>() });
 }
+
+// ── アプリ全体の集計（`scope: app`。M1.4。Issue #177） ──────────────────
+//
+// **行ではなく、アプリ全体で 1 つの値**を求める。出力先のレコードが無いので `this` も無く、
+// 集計の `where` も持てない（`this` を書けば静的チェックが断る。期間の条件は #178 で足す）。
+// 参照できるのは**ほかのアプリ全体の計算だけ**である（entity の項目や行ごとの計算は見えない）。
+// 行ごとの値と同じく、**値は保存しない**——一覧を返すたびにここで求める。
+
+/** アプリ全体の値を求めるのに渡すもの。**集計の元のレコードは `sources` から見る** */
+export interface ScopeEvaluationRequest {
+  readonly app: NormalizedAppSpec;
+  readonly clock: Clock;
+  /** 集計の元になる、**同じインスタンス**のレコード（entity の名前 → そのレコードの並び） */
+  readonly sources: SourceRecords;
+}
+
+/** アプリ全体の計算を解くときの、循環を止めるための目印（名前は宣言の中で一意である） */
+interface ScopeState {
+  readonly visiting: Set<string>;
+}
+
+/**
+ * アプリ全体の集計の値を求める。**`where` を持てない**——出力先のレコードが無く、`this` を
+ * 比べる相手が居ないからである。持っていれば（手で作った成果物でも）`null` にして、
+ * 条件を黙って無視しない。
+ */
+function appAggregateValueOf(
+  aggregate: Aggregate,
+  request: ScopeEvaluationRequest,
+  state: ScopeState,
+): ComputedValue {
+  const { app, sources } = request;
+  // 「まだ読んでいない」（キーが無い）は 0 ではなく null にする。読めて 0 件（空の並び）だけが 0 である
+  const rows = sources[aggregate.entity];
+  if (rows === undefined) return null;
+  if (hasConditions(aggregate.where)) return null;
+  if (aggregate.kind === "count") return rows.length;
+  if (aggregate.name === null) return null;
+  const target = app.spec.entities.find((candidate) => candidate.name === aggregate.entity);
+  if (target === undefined) return null;
+  const name = aggregate.name;
+  const rowRequest: EvaluationRequest = {
+    app,
+    clock: request.clock,
+    entity: aggregate.entity,
+    record: {},
+    sources,
+  };
+  const values = rows.map((row) => sourceValueOf(target, name, row, rowRequest, state));
+  return aggregate.kind === "sum" ? sumValues(values) : avgValues(values);
+}
+
+/**
+ * アプリ全体の計算の値を、**宣言の順**に求める。依存（ほかのアプリ全体の計算）は再帰で解き、
+ * 循環は `null` にする（検査が断るが、手で作った成果物でも止まらない）。
+ * 求める値は数だけである——アプリ全体の計算の `type` は `number` だからである。
+ */
+function evaluateScopeValues(
+  request: ScopeEvaluationRequest,
+  state: ScopeState,
+): Readonly<Record<string, ComputedValue>> {
+  const declared: readonly AppComputed[] = request.app.spec.computed.filter(isAppComputed);
+  const byName = new Map(declared.map((entry) => [entry.name, entry]));
+  const values = new Map<string, ComputedValue>();
+
+  const scope: EvaluationScope = { clock: request.clock, resolve: (name) => resolve(name) };
+
+  /** 依存の順に求める。同じ名前は 1 回だけ解く（返す並びは宣言の順である） */
+  function resolve(name: string): ComputedValue {
+    const known = values.get(name);
+    if (known !== undefined) return known;
+    const entry = byName.get(name);
+    if (entry === undefined) return null;
+    if (state.visiting.has(name)) return null;
+    state.visiting.add(name);
+    const value =
+      "expression" in entry
+        ? numberOrNull(valueOfExpression(entry.expression, scope))
+        : appAggregateValueOf(entry.aggregate, request, state);
+    state.visiting.delete(name);
+    values.set(name, value);
+    return value;
+  }
+
+  const result: Record<string, ComputedValue> = {};
+  for (const entry of declared) result[entry.name] = resolve(entry.name);
+  return result;
+}
+
+/**
+ * **アプリ全体の計算（`scope: app`）の値を、宣言の順に求める**（M1.4。Issue #177）。
+ * アプリ全体の計算が 1 つも無ければ空である（呼ぶ側は、空なら応答に欄を載せない）。
+ *
+ * 集計は `sources` のレコードだけを見る（`sources` にキーが無ければ `null`）。
+ * **これは行ごとの値ではなく、アプリ全体で 1 つだけの値である**——レコードの数に関わらず 1 つ返る。
+ */
+export function evaluateScope(request: ScopeEvaluationRequest): Readonly<Record<string, ComputedValue>> {
+  return evaluateScopeValues(request, { visiting: new Set<string>() });
+}
+
+/** 値を計算の値（数か `null`）にする。有限の数でなければ `null`（0 に読み替えない） */
+const numberOrNull = (value: EvaluatedValue): ComputedValue => (isFiniteNumber(value) ? value : null);
 
 /**
  * 操作の条件（`when`。M1.3）が、この 1 件で成り立つかを求める。**真になったときだけ `true`** である

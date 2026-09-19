@@ -1,0 +1,40 @@
+# 負例：平均（avg）の対象 expense.description が数ではなく文字列である。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: member
+    fields:
+      name: string
+  - name: expense
+    fields:
+      description: string
+      amount: number
+      payer:
+        type: ref
+        to: member
+
+views:
+  - name: memberList
+    entity: member
+
+actions:
+  - name: addMember
+    entity: member
+
+validations: []
+
+computed:
+  - name: averageDescription
+    scope: app
+    aggregate:
+      avg: expense.description
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

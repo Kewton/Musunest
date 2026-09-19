@@ -26,7 +26,7 @@ import {
 import { sampleScenarioFile, sampleSpecFile } from "@musunest/appspec-schema/files";
 import { checkSpec } from "./check.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { allowsAction, evaluateRecord, type Evaluation } from "./evaluate.js";
+import { allowsAction, evaluateRecord, evaluateScope, type Evaluation } from "./evaluate.js";
 import { countNodes, depthOf, parseExpression, readExpression } from "./expression.js";
 import { EXPRESSION_LIMITS } from "./limits.js";
 import { normalizeSpec } from "./normalize.js";
@@ -912,5 +912,158 @@ describe("操作の条件（when）の評価（M1.3）", () => {
       evaluateRecord({ app, entity: "task", record, clock: whenClock }).validations;
     expect(evaluateTask({ title: "t", status: "doing" })).toEqual([]);
     expect(evaluateTask({ title: "t", status: "done" })).toEqual(["notDone"]);
+  });
+});
+
+// ── アプリ全体の集計（`scope: app`）と平均（`avg`）（M1.4。Issue #177） ──
+//
+// **行ではなく、アプリ全体で 1 つの値**を求める（`evaluateScope`）。出力先のレコードが無いので
+// `this` も無く、集計の `where` も持てない。参照できるのは、ほかのアプリ全体の計算だけである。
+// 見本 dashboard をそのまま使う（語彙と評価が一致していることを、見本で確かめる）。
+
+const DASHBOARD = await normalized(readText(sampleSpecFile("dashboard")));
+
+const activityRow = (
+  id: string,
+  attendees: readonly string[],
+  cost: number,
+): { readonly id: string; readonly data: Readonly<Record<string, unknown>> } => ({
+  id,
+  data: { kind: "practice", attendees, cost },
+});
+
+const ACTIVITIES = [activityRow("a1", ["m1", "m2", "m3"], 3000), activityRow("a2", ["m1"], 7000)];
+
+describe("アプリ全体の集計（scope: app）（M1.4）", () => {
+  it("レコードの数に関わらず 1 つの値を返す（count・sum・avg）", () => {
+    const values = evaluateScope({
+      app: DASHBOARD,
+      clock: scoringClock,
+      sources: { activity: ACTIVITIES, member: [] },
+    });
+    // 活動 2 件・のべ 4 人・1 回あたり 2 人・費用の平均 5000 円。**宣言の順**に返る
+    expect(values).toEqual({
+      activityCount: 2,
+      attendeeTotal: 4,
+      averageAttendees: 2,
+      averageCost: 5000,
+    });
+    // 行ごとの計算（activity の attendeeCount）は、ここには出ない（アプリ全体の値ではない）
+    expect(Object.keys(values)).toEqual([
+      "activityCount",
+      "attendeeTotal",
+      "averageAttendees",
+      "averageCost",
+    ]);
+  });
+
+  it("レコードを増やしても、アプリ全体の値は 1 つずつである", () => {
+    const many = [...ACTIVITIES, activityRow("a3", ["m1", "m2"], 5000)];
+    const values = evaluateScope({
+      app: DASHBOARD,
+      clock: scoringClock,
+      sources: { activity: many, member: [] },
+    });
+    expect(values["activityCount"]).toBe(3);
+    expect(values["averageAttendees"]).toBe(2);
+    expect(values["averageCost"]).toBe(5000);
+  });
+
+  it("**対象が 0 件なら、count は 0、sum は 0、avg は null** である（決めたとおり。0 に読み替えない）", () => {
+    expect(
+      evaluateScope({ app: DASHBOARD, clock: scoringClock, sources: { activity: [], member: [] } }),
+    ).toEqual({
+      activityCount: 0,
+      attendeeTotal: 0,
+      averageAttendees: null,
+      averageCost: null,
+    });
+  });
+
+  it("集計元を読めなければ（キーが無ければ）値を null にする（0 に読み替えない）", () => {
+    expect(
+      evaluateScope({ app: DASHBOARD, clock: scoringClock, sources: {} }),
+    ).toEqual({
+      activityCount: null,
+      attendeeTotal: null,
+      averageAttendees: null,
+      averageCost: null,
+    });
+  });
+
+  it("アプリ全体の計算が無い宣言では空である", () => {
+    expect(evaluateScope({ app: sampleApp, clock: scoringClock, sources: {} })).toEqual({});
+  });
+
+  it("`avg` は、値の無い行を数えず、読めた行だけで平均を求める（`sum` と別の決めごと）", async () => {
+    // 3 件のうち 1 件は cost に null がある。sum は null、avg は読めた 2 行の平均である
+    const app = await normalized(
+      [
+        "entities:",
+        "  - name: expense",
+        "    fields:",
+        "      amount: number",
+        "views: []",
+        "actions: []",
+        "validations: []",
+        "computed:",
+        "  - name: total",
+        "    scope: app",
+        "    aggregate:",
+        "      sum: expense.amount",
+        "    type: number",
+        "  - name: average",
+        "    scope: app",
+        "    aggregate:",
+        "      avg: expense.amount",
+        "    type: number",
+        "permissions: []",
+        "minIdentity:",
+        "  mode: anonymous",
+        "",
+      ].join("\n"),
+    );
+    const rows = [
+      { id: "e1", data: { amount: 100 } },
+      { id: "e2", data: { amount: null } },
+      { id: "e3", data: { amount: 300 } },
+    ];
+    expect(evaluateScope({ app, clock: scoringClock, sources: { expense: rows } })).toEqual({
+      total: null,
+      average: 200,
+    });
+  });
+
+  it("アプリ全体の式は、ほかのアプリ全体の計算だけを参照できる（行の項目は見えない）", async () => {
+    const app = await normalized(
+      [
+        "entities:",
+        "  - name: expense",
+        "    fields:",
+        "      amount: number",
+        "views: []",
+        "actions: []",
+        "validations: []",
+        "computed:",
+        "  - name: total",
+        "    scope: app",
+        "    aggregate:",
+        "      sum: expense.amount",
+        "    type: number",
+        "  - name: doubled",
+        "    scope: app",
+        "    expression: total * 2",
+        "    type: number",
+        "permissions: []",
+        "minIdentity:",
+        "  mode: anonymous",
+        "",
+      ].join("\n"),
+    );
+    const rows = [{ id: "e1", data: { amount: 21 } }];
+    expect(evaluateScope({ app, clock: scoringClock, sources: { expense: rows } })).toEqual({
+      total: 21,
+      doubled: 42,
+    });
   });
 });

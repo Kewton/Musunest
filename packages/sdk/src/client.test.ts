@@ -268,6 +268,83 @@ describe("一覧の宣言（type・show）と精算（settlement）", () => {
   });
 });
 
+// ── アプリ全体の集計（`scope: app`）と平均（`avg`）（M1.4。Issue #177） ──
+//
+// 値は一覧の応答の `scope`（計算の名前 → 数か `null`）に載る。**欄が無い**（宣言が無い）ことと、
+// 値が `null`（求められなかった）ことを区別したまま渡す。宣言の側は `scope: app` と `avg` を受ける
+// ——受けないと `getSpec` が失敗し、画面が開かない（#145・#154 と同じ穴）。
+
+describe("アプリ全体の集計（scope）と平均（avg）", () => {
+  it("計算の値として受け取り、欄が無いときと null を区別する", async () => {
+    const scope = { activityCount: 3, averageAttendees: 2, averageCost: null };
+
+    const withScope = recordingFetch(() => json(200, { ...VIEW, scope }));
+    expect(await clientWith(withScope.fetch).getView("inst-1", "expenseList")).toEqual({
+      ok: true,
+      value: { ...VIEW, scope },
+    });
+
+    // **欄そのものが無い**（宣言が無い）のは、値が null のときとは別の事実である
+    const none = recordingFetch(() => json(200, VIEW));
+    expect(await clientWith(none.fetch).getView("inst-1", "expenseList")).toEqual({ ok: true, value: VIEW });
+  });
+
+  it("数でも null でもない値は INVALID_RESPONSE", async () => {
+    const stub = recordingFetch(() => json(200, { ...VIEW, scope: { averageCost: "5000" } }));
+
+    expect(await clientWith(stub.fetch).getView("inst-1", "expenseList")).toMatchObject({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE },
+    });
+  });
+
+  it("scope: app と avg の宣言（正規化 JSON）を受け取る", async () => {
+    const withScope: ApiSpecBody = {
+      ...SPEC,
+      spec: {
+        ...SPEC.spec,
+        computed: [
+          ...SPEC.spec.computed,
+          {
+            name: "averageAmount",
+            scope: "app",
+            aggregate: { kind: "avg", entity: "expense", name: "amount", where: {} },
+            type: "number",
+          },
+        ],
+      },
+    };
+    const stub = recordingFetch(() => json(200, withScope));
+
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: withScope });
+  });
+
+  it("scope: app に entity を書いた宣言は INVALID_RESPONSE（成功にしない）", async () => {
+    const broken = {
+      ...SPEC,
+      spec: {
+        ...SPEC.spec,
+        computed: [
+          ...SPEC.spec.computed,
+          {
+            name: "bad",
+            scope: "app",
+            entity: "expense",
+            aggregate: { kind: "count", entity: "expense", name: null, where: {} },
+            type: "number",
+          },
+        ],
+      },
+    };
+    const stub = recordingFetch(() => json(200, broken));
+
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toMatchObject({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE },
+    });
+  });
+});
+
 // ── 一覧（list）と絞り込み（filters）（M1.3。Issue #158） ──────────────
 //
 // 画面（host）が絞り込みの候補を宣言から読むので、**契約と違う形は成功にしない**。
