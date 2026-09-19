@@ -154,7 +154,11 @@ export const enumDefault = (field: FieldDeclaration): string | null =>
 
 /**
  * 式が読む型。**`ref` の値は ID の文字列、`enum` の値はキーの文字列である**（数ではないので、
- * 計算には使えない。M1.1 の式に文字列の定数はまだ無い）。`list` は文字列の並びと同じく `len` に渡せる。
+ * 計算には使えない）。`list` は文字列の並びと同じく `len` に渡せる。
+ *
+ * **M1.3 で式に文字列の定数（`"done"`）が入った**（`==`・`!=` の比較だけ）。だから
+ * `status == "done"` が書ける——ただし `enum` の項目と比べる定数は、静的チェックが
+ * `options` のキーであることを確かめる（docs/semantics.md「enum」「when」）。
  */
 export function expressionTypeOf(field: FieldDeclaration): ExpressionType {
   const kind = fieldKind(field);
@@ -293,18 +297,50 @@ export const ACTION_KINDS = ["create", "update", "delete"] as const;
 export type ActionKind = (typeof ACTION_KINDS)[number];
 
 /**
+ * 決まった値（`set` の右側。M1.3）。**式は書けない**ので、値は定数だけである
+ * （数の項目は数、ほかの項目は文字列。`list` と `ref` の項目には書けない。docs/semantics.md「set」）。
+ */
+export type ActionSetValue = string | number;
+
+/**
+ * 決まった値への書き換え（`set`。M1.3）。項目名 → その項目に書く決まった値である。
+ * **`kind: update` の操作にだけ書ける**（書き換える対象の行がある操作だけが持てる）。
+ */
+export type ActionSet = Readonly<Record<string, ActionSetValue>>;
+
+/**
  * 操作。**`kind` を省略すると `create`** である（M1.1 の宣言をそのまま読めるようにする）。
  * `update` と `delete` は、入力を「項目名: 値」ではなく**対象のレコードの ID**で指す（M1.2）。
+ *
+ * M1.3 で `set`（決まった値への書き換え）と `when`（その行で操作してよい条件）を足した。
+ * **どちらも書ける欄は `kind` が決める**（語彙は閉じている。docs/semantics.md「set」「when」）。
+ *   `kind: update` … `set` と `when` を書ける
+ *   `kind: delete` … `when` を書ける（書き換える値は無い）
+ *   `create`（省略を含む）… どちらも書けない（対象の行が無い）
  */
 export interface Action {
   readonly name: string;
   readonly entity: string;
   /** 操作の種類（M1.2）。書かなければ `create` である */
   readonly kind?: ActionKind;
+  /**
+   * 決まった値への書き換え（M1.3）。書いてあれば、この操作は**対象のレコードの ID だけ**を取り、
+   * ここに書いた項目だけを書き換える（ほかの項目は変わらない）。`kind: update` にだけ書ける
+   */
+  readonly set?: ActionSet;
+  /**
+   * その行で操作してよい条件（M1.3）。**その entity の 1 件について評価する真偽の式**である。
+   * **これはロジック層の守りであって画面の飾りではない**——偽の行への操作は Data API が断り、
+   * 画面はボタンを出さないだけである（`workspace/mvp/m1/03-spec-layers-and-checker.md` §2.2）
+   */
+  readonly when?: string;
 }
 
 /** 操作の種類。省略は `create` として読む（M1.1 の宣言の意味を変えない） */
 export const actionKind = (action: Action): ActionKind => action.kind ?? "create";
+
+/** 対象の行 1 件を取る操作か（`update`・`delete`）。`when` を書けるのはこの 2 つだけである（M1.3） */
+export const takesRow = (action: Action): boolean => actionKind(action) !== "create";
 
 /**
  * 式の値の型。`boolean` は比べた結果にだけ現れる（項目の型にも computed の型にも無い）。
@@ -464,6 +500,8 @@ export const VOCABULARY = {
   create: "logic",
   update: "logic",
   delete: "logic",
+  set: "logic",
+  when: "logic",
   view: "ui",
   table: "ui",
   settlement: "ui",

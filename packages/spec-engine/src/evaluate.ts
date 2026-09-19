@@ -22,6 +22,8 @@
 //      `null` にする（**空集合の 0 と区別し、黙って 0 に読み替えない**）
 //   8. 日付（`date`）の値は `YYYY-MM-DD` の文字列として扱い、**日付どうしでだけ比べる**（M1.3）。
 //      形の合わない値は `null` にして、真偽にも数にもしない（`date` と `number` の比較は静的チェックが断る）
+//   9. 操作の条件（`when`。M1.3）は、検査の式と**同じ環境**で解く（`allowsAction`）。**真になったときだけ通す**
+//      ——偽と「値が求まらない」を区別せず、どちらも通さない（決定 3 と同じ扱いである）
 //
 // **式を実行しない**（`eval` / `Function` を使わない。03 §5.3・CLAUDE.md の不変条件）。
 // AST を歩いて値を求める。AST は readExpression の上限の内側でしか作らないので、歩く深さも有界である。
@@ -39,6 +41,7 @@ import {
   type Entity,
   type FieldKind,
   type NormalizedAppSpec,
+  type RowComputed,
 } from "@musunest/appspec-schema";
 import {
   hasConditions,
@@ -121,6 +124,10 @@ const asExpressionValue = (value: unknown, kind: FieldKind): EvaluatedValue => {
   if (kind === "date") {
     return typeof value === "string" && DATE_VALUE_PATTERN.test(value) ? value : null;
   }
+  // 文字列・選択肢のキー・参照の ID は、文字列の定数と比べられる（M1.3。docs/semantics.md「string」）
+  if (kind === "string" || kind === "enum" || kind === "ref") {
+    return typeof value === "string" ? value : null;
+  }
   return typeof value === "number" || Array.isArray(value) ? value : null;
 };
 
@@ -160,9 +167,13 @@ function compareNumbers(operator: string, left: number, right: number): Evaluate
 }
 
 /**
- * 日付（`YYYY-MM-DD`）どうしの比較（M1.3）。**桁数が揃った文字列なので、辞書の順が暦の順と一致する。**
+ * 文字列どうしの比較。日付（`YYYY-MM-DD`）は**桁数が揃った文字列なので、辞書の順が暦の順と一致する**（M1.3）。
+ *
+ * 文字列の定数（M1.3）と `enum` のキー・`ref` の ID も同じ文字列なので、ここが受け持つ。
+ * **大小の比較を書けるのは日付だけ**で、ただの文字列は `==`・`!=` しか書けない——それを断るのは
+ * 静的チェックである（評価は、通った式だけを解く）。
  */
-function compareDates(operator: string, left: string, right: string): EvaluatedValue {
+function compareTexts(operator: string, left: string, right: string): EvaluatedValue {
   switch (operator) {
     case ">":
       return left > right;
@@ -182,12 +193,13 @@ function compareDates(operator: string, left: string, right: string): EvaluatedV
 }
 
 /**
- * 比較。**数どうし、または日付どうしのときだけ**真偽を返す——型の食い違い（`date` と `number`）は
- * 静的チェックが断るが、評価も真偽にしない（`null` にして、検査は通らないものとして扱う）。
+ * 比較。**数どうし、または文字列どうし（日付を含む）のときだけ**真偽を返す——型の食い違い
+ * （`date` と `number`）は静的チェックが断るが、評価も真偽にしない
+ * （`null` にして、検査は通らないものとして扱う）。
  */
 function compare(operator: string, left: EvaluatedValue, right: EvaluatedValue): EvaluatedValue {
   if (isFiniteNumber(left) && isFiniteNumber(right)) return compareNumbers(operator, left, right);
-  if (typeof left === "string" && typeof right === "string") return compareDates(operator, left, right);
+  if (typeof left === "string" && typeof right === "string") return compareTexts(operator, left, right);
   return null;
 }
 
@@ -215,6 +227,9 @@ function callValue(name: string, args: readonly EvaluatedValue[], clock: Clock):
 function evaluateNode(node: AstNode, scope: EvaluationScope): EvaluatedValue {
   switch (node.kind) {
     case "number":
+      return node.value;
+    case "string":
+      // 文字列の定数（M1.3）。引用符を外した中身をそのまま値にする
       return node.value;
     case "name":
       return scope.resolve(node.name);
@@ -330,14 +345,28 @@ function sourceValueOf(
 }
 
 /** 1 件のレコードを評価する。集計の元の行を解くときは、同じ state を渡して再帰する */
-function evaluateEntity(request: EvaluationRequest, state: EvaluationState): Evaluation {
+/** 1 件のレコードのための、式を解く材料（環境と、行ごとの計算） */
+interface PreparedRecord {
+  readonly scope: EvaluationScope;
+  /** その entity の、行ごとの値になる計算（宣言の順） */
+  readonly declared: readonly RowComputed[];
+  /** 計算を依存の順に求める（同じレコードの中では 1 回だけ解く） */
+  readonly resolveComputed: (name: string) => ComputedValue;
+}
+
+/**
+ * 1 件のレコードの式を解く材料を組む。宣言に無い entity は `null`（呼ぶ側が空として扱う）。
+ *
+ * **検査の式（`validation`）も操作の条件（`when`。M1.3）も、ここで組んだ同じ環境で解く**——
+ * 「保存してよいか」と「この行で操作してよいか」が、別々の名前解決を持つと食い違う。
+ */
+function prepareRecord(request: EvaluationRequest, state: EvaluationState): PreparedRecord | null {
   const { app, entity: entityName, record, clock } = request;
   const entity: Entity | undefined = app.spec.entities.find(
     (candidate) => candidate.name === entityName,
   );
-  if (entity === undefined) return { computed: {}, validations: [] };
+  if (entity === undefined) return null;
   const declared = forEntity(app.spec.computed, entityName).filter(isRowComputed);
-  const validations = forEntity(app.spec.validations, entityName);
 
   const values = new Map<string, ComputedValue>();
   const declaredByName = new Map(declared.map((entry) => [entry.name, entry]));
@@ -372,12 +401,19 @@ function evaluateEntity(request: EvaluationRequest, state: EvaluationState): Eva
     return value;
   }
 
+  return { scope, declared, resolveComputed };
+}
+
+function evaluateEntity(request: EvaluationRequest, state: EvaluationState): Evaluation {
+  const prepared = prepareRecord(request, state);
+  if (prepared === null) return { computed: {}, validations: [] };
+
   const computed: Record<string, ComputedValue> = {};
-  for (const entry of declared) computed[entry.name] = resolveComputed(entry.name);
+  for (const entry of prepared.declared) computed[entry.name] = prepared.resolveComputed(entry.name);
 
   // 宣言の順にすべて評価する（決定 3。途中で打ち切らない）
-  const failed = validations
-    .filter((validation) => !holds(validation.expression, scope))
+  const failed = forEntity(request.app.spec.validations, request.entity)
+    .filter((validation) => !holds(validation.expression, prepared.scope))
     .map((validation) => validation.name);
 
   return { computed, validations: failed };
@@ -394,4 +430,18 @@ function evaluateEntity(request: EvaluationRequest, state: EvaluationState): Eva
  */
 export function evaluateRecord(request: EvaluationRequest): Evaluation {
   return evaluateEntity(request, { visiting: new Set<string>() });
+}
+
+/**
+ * 操作の条件（`when`。M1.3）が、この 1 件で成り立つかを求める。**真になったときだけ `true`** である
+ * （偽も、値が求まらなかった（`null`）も、どちらも `false`。検査の式と同じ扱いである）。
+ *
+ * **これはロジック層の守りの材料である**——呼ぶ側（data-api）が、この値で操作を断る。
+ * 画面がボタンを隠すのは親切であって守りではない（`03-spec-layers-and-checker.md` §2.2）。
+ *
+ * 宣言に無い entity は `false`（呼ぶ側が先に entity の実在を見る。成功に読み替えない）。
+ */
+export function allowsAction(request: EvaluationRequest, when: string): boolean {
+  const prepared = prepareRecord(request, { visiting: new Set<string>() });
+  return prepared === null ? false : holds(when, prepared.scope);
 }

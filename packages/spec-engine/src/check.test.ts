@@ -1,7 +1,7 @@
 // 静的チェックの unit テスト（Issue #97 の受入条件を、ここで固定する）。
 //
 //   1. 見本（expense-log・warikan）の診断が空で、7 欄を持つ AppSpec を返す
-//   2. 負例 39 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
+//   2. 負例 42 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
 //   3. 診断は空でない日本語の説明と、該当する YAML の行・列を持つ
 //   4. 不正 YAML・未知キー・未知参照・循環を拒否し、上限はちょうどが通り 1 超過で診断になる
 //   5. 検査は式を実行せず、ストレージにも触れない
@@ -537,11 +537,209 @@ describe("日付（date）と「今日」（today()）（M1.3）", () => {
   });
 });
 
-// ── 2. 負例 39 件 ──────────────────────────────────────────────
+// ── 1e. 決まった値への書き換え（set）とボタンを出す条件（when）（M1.3。Issue #156） ──
+//
+// **`when` はロジック層の守りである**（`03-spec-layers-and-checker.md` §2.2）。ここで確かめるのは
+// 宣言の側だけ——**式は評価しない**。断るのは data-api で、それは app-api.test.ts が見る。
+//
+// 書ける欄は `kind` が決める（語彙は閉じている）。`set` に書けるのは**決まった値だけ**で、
+// 値はその項目の型に合っていなければならない。負例 3 本（set-type-mismatch・set-with-expression・
+// when-not-boolean）が、同じことを外から確かめる。
+
+describe("決まった値への書き換え（set）とボタンを出す条件（when）（M1.3）", () => {
+  const STATUS: readonly string[] = [
+    "      status:",
+    "        type: enum",
+    "        options:",
+    "          todo: 未着手",
+    "          doing: 進行中",
+    "          done: 完了",
+    "        default: todo",
+  ];
+
+  /** 選択肢の項目 status を持つ expense に、操作を差し替えた宣言 */
+  const withActions = (...lines: readonly string[]): string =>
+    declaration({ entities: enumEntity(STATUS), actions: ["  - name: addExpense", "    entity: expense", ...lines].join("\n") });
+
+  /** `kind: update` の操作 finish（`set` と `when` を持つ）を足す */
+  const finish = (...lines: readonly string[]): string =>
+    withActions("  - name: finish", "    entity: expense", "    kind: update", ...lines);
+
+  it("set と when を持つ操作が通り、宣言にそのまま残る（受入条件）", () => {
+    const text = finish("    set:", "      status: done", '    when: status != "done"');
+    const result = checkSpec(text);
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spec.actions).toEqual([
+      { name: "addExpense", entity: "expense" },
+      {
+        name: "finish",
+        entity: "expense",
+        kind: "update",
+        set: { status: "done" },
+        when: 'status != "done"',
+      },
+    ]);
+  });
+
+  it("数の項目の set は、数として残る（YAML の字面を数へ読み直す）", () => {
+    const result = checkSpec(finish("    set:", "      amount: 0"));
+    expect(result.diagnostics).toEqual([]);
+    if (!result.ok) return;
+    expect(result.spec.actions[1]).toEqual({
+      name: "finish",
+      entity: "expense",
+      kind: "update",
+      set: { amount: 0 },
+    });
+  });
+
+  it("when は kind: delete にも書ける（set は書けない。書き換える値が無い）", () => {
+    const remove = (...lines: readonly string[]): string =>
+      withActions("  - name: dropExpense", "    entity: expense", "    kind: delete", ...lines);
+    const ok = checkSpec(remove('    when: status == "done"'));
+    expect(ok.diagnostics).toEqual([]);
+    if (ok.ok) {
+      expect(ok.spec.actions[1]).toEqual({
+        name: "dropExpense",
+        entity: "expense",
+        kind: "delete",
+        when: 'status == "done"',
+      });
+    }
+    expect(codesOf(failure(checkSpec(remove("    set:", "      status: done"))))).toEqual([
+      "SHAPE_KEY_UNKNOWN",
+    ]);
+  });
+
+  it("create（kind の省略を含む）には set も when も書けない（語彙は閉じている）", () => {
+    for (const kind of ["", "    kind: create"]) {
+      const lines = kind === "" ? [] : [kind];
+      expect(
+        codesOf(failure(checkSpec(withActions("  - name: other", "    entity: expense", ...lines, '    when: status == "done"')))),
+        kind,
+      ).toEqual(["SHAPE_KEY_UNKNOWN"]);
+      expect(
+        codesOf(failure(checkSpec(withActions("  - name: other", "    entity: expense", ...lines, "    set:", "      status: done")))),
+        kind,
+      ).toEqual(["SHAPE_KEY_UNKNOWN"]);
+    }
+  });
+
+  it("3 つの誤りのコードは、それぞれ別である（受入条件）", () => {
+    const codes = [
+      // set の値が、その項目の型に合わない（enum のキーに無い）
+      codesOf(failure(checkSpec(finish("    set:", "      status: finished")))),
+      // set に式を書いている
+      codesOf(failure(checkSpec(finish("    set:", "      amount: amount + 1")))),
+      // when が真偽にならない
+      codesOf(failure(checkSpec(finish("    set:", "      status: done", "    when: payer")))),
+    ];
+    expect(codes).toEqual([
+      ["LOGIC_ACTION_SET_TYPE_MISMATCH"],
+      ["LOGIC_ACTION_SET_NOT_CONSTANT"],
+      ["LOGIC_ACTION_WHEN_NOT_BOOLEAN"],
+    ]);
+    expect(new Set(codes.flat()).size).toBe(3);
+  });
+
+  it.each([
+    ["set-type-mismatch", "LOGIC_ACTION_SET_TYPE_MISMATCH", "finished"],
+    ["set-with-expression", "LOGIC_ACTION_SET_NOT_CONSTANT", "estimate"],
+    ["when-not-boolean", "LOGIC_ACTION_WHEN_NOT_BOOLEAN", "finish"],
+  ] as const)("負例 %s は %s **だけ**を返す（受入条件）", (name, code, where) => {
+    const result = failure(checkSpec(negativeTexts.get(name) ?? ""));
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([code]);
+    expect(messagesOf(result, code)).toContain(where);
+  });
+
+  it("set の項目が entity に無ければ断る（黙って捨てない）", () => {
+    const result = failure(checkSpec(finish("    set:", "      ammount: 1")));
+    expect(codesOf(result)).toEqual(["LOGIC_ACTION_SET_FIELD_NOT_FOUND"]);
+    expect(messagesOf(result, "LOGIC_ACTION_SET_FIELD_NOT_FOUND")).toContain("ammount");
+  });
+
+  it("並びと参照の項目には、決まった値を書けない", () => {
+    const result = failure(checkSpec(finish("    set:", "      participants: A")));
+    expect(codesOf(result)).toEqual(["LOGIC_ACTION_SET_TYPE_MISMATCH"]);
+    expect(messagesOf(result, "LOGIC_ACTION_SET_TYPE_MISMATCH")).toContain("participants");
+  });
+
+  it("set の値に式を書けば、型の食い違いではなく「定数ではない」で断る", () => {
+    for (const value of ["amount + 1", "today()", "len(participants)", "-amount"]) {
+      expect(codesOf(failure(checkSpec(finish("    set:", `      amount: ${value}`)))), value).toEqual([
+        "LOGIC_ACTION_SET_NOT_CONSTANT",
+      ]);
+    }
+    // 名前 1 つは「式」ではなく「決まった値の書き間違い」である（enum のキーに無い）
+    expect(codesOf(failure(checkSpec(finish("    set:", "      status: doingg"))))).toEqual([
+      "LOGIC_ACTION_SET_TYPE_MISMATCH",
+    ]);
+  });
+
+  it("set の形が違えば、値の検査の前に形で断る", () => {
+    expect(codesOf(failure(checkSpec(finish("    set: done"))))).toEqual(["SHAPE_VALUE_INVALID"]);
+    expect(codesOf(failure(checkSpec(finish("    set:", "      status:"))))).toEqual(["SHAPE_VALUE_INVALID"]);
+    expect(codesOf(failure(checkSpec(finish("    set:", "      status: done", "    when:"))))).toEqual([
+      "SHAPE_VALUE_INVALID",
+    ]);
+  });
+
+  it("when の式は、同じ entity の項目と計算だけを参照できる（検査の式と同じ扱い）", () => {
+    expect(codesOf(failure(checkSpec(finish("    when: headcount > 0 == 1"))))).toEqual([
+      "LOGIC_EXPRESSION_INVALID",
+    ]);
+    expect(codesOf(failure(checkSpec(finish("    when: ammount > 0"))))).toEqual([
+      "LOGIC_REFERENCE_NOT_FOUND",
+    ]);
+    expect(codesOf(failure(checkSpec(finish("    when: budget.limit > 0"))))).toEqual([
+      "LOGIC_REFERENCE_NOT_FOUND",
+    ]);
+    // 計算（computed）は参照できる
+    expect(checkSpec(finish("    when: headcount > 0")).diagnostics).toEqual([]);
+  });
+
+  it("enum の項目を options に無いキーと比べたら落ちる（受入条件）", () => {
+    const result = failure(checkSpec(finish('    when: status == "todu"')));
+    expect(codesOf(result)).toEqual(["LOGIC_ENUM_KEY_NOT_FOUND"]);
+    const message = messagesOf(result, "LOGIC_ENUM_KEY_NOT_FOUND");
+    expect(message).toContain("todu");
+    // 正しいキーの一覧を、人が読める形で添える
+    expect(message).toContain("todo");
+    // 位置は、比べている文字列の定数を指す
+    const text = finish('    when: status == "todu"');
+    expect(result.diagnostics[0]).toMatchObject(locate(text, '"todu"'));
+  });
+
+  it.each(["==", "!="] as const)("options のキーと %s で比べる式は通る", (operator) => {
+    for (const key of ["todo", "doing", "done"]) {
+      const result = checkSpec(finish(`    when: status ${operator} "${key}"`));
+      expect(result.diagnostics, `${operator} ${key}`).toEqual([]);
+    }
+  });
+
+  it("検査の式と計算の式でも、enum のキーの照合は効く（同じ経路で解く）", () => {
+    const validation = declaration({
+      entities: enumEntity(STATUS),
+      validations: ["  - name: notArchived", "    entity: expense", '    expression: status != "archived"'].join("\n"),
+    });
+    expect(codesOf(failure(checkSpec(validation)))).toEqual(["LOGIC_ENUM_KEY_NOT_FOUND"]);
+  });
+
+  it("型の誤りがある式には、キーの照合を重ねない（1 つの誤りは 1 つのコード）", () => {
+    // 綴りの間違い（参照が無い）だけを返す
+    expect(codesOf(failure(checkSpec(finish('    when: statuss == "todu"'))))).toEqual([
+      "LOGIC_REFERENCE_NOT_FOUND",
+    ]);
+  });
+});
+
+// ── 2. 負例 42 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 39 件である（0 件なら以降のテストが空振りする）", () => {
-    expect(negativeIndex.negatives).toHaveLength(39);
+  it("負例の一覧は 42 件である（0 件なら以降のテストが空振りする）", () => {
+    expect(negativeIndex.negatives).toHaveLength(42);
   });
 
   it.each(negativeCases)(

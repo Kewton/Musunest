@@ -862,6 +862,8 @@ describe("境界（公開する型に Worker 本体を含めない）", () => {
       SPEC_UNAVAILABLE: 503,
       // 参照されているレコードの削除（M1.2）。data-api の failureResponse がここから 409 を引く
       REFERENCE_IN_USE: 409,
+      // 操作の条件（when）が成り立たない行への操作（M1.3）。**INPUT_REJECTED を使い回さない**
+      ACTION_NOT_ALLOWED: 409,
     });
     expect(contracts["HEALTHZ_PATH"]).toBe("/healthz");
   });

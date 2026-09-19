@@ -1,0 +1,42 @@
+# 負例：決まった値への書き換え（set）の値が、その項目の型に合わない。
+# 選択肢（enum）の項目 status に、options のキーに無い finished を書いている。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: task
+    fields:
+      title: string
+      estimate: number
+      status:
+        type: enum
+        options:
+          todo: 未着手
+          doing: 進行中
+          done: 完了
+        default: todo
+
+views:
+  - name: taskList
+    entity: task
+
+actions:
+  - name: addTask
+    entity: task
+  - name: finish
+    entity: task
+    kind: update
+    set:
+      status: finished
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

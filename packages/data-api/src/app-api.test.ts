@@ -1648,3 +1648,286 @@ describe("消す（M1.2）", () => {
     else expect(expense.ok).toBe(true);
   });
 });
+
+// ── 決まった値への書き換え（set）とボタンを出す条件（when）（M1.3。Issue #156） ──
+//
+// **`when` はロジック層の守りである**（`03` §2.2）。ここで確かめるのは 3 つ。
+//   1. **配信側が読める**（`getSpec` が ok で返し、`set` と `when` を保つ）。読めなければ 503 で
+//      画面が動かない（#145・#154 と同じ穴）
+//   2. **`when` が偽の行への操作を断る**（409 `ACTION_NOT_ALLOWED`。**`INPUT_REJECTED` ではない**）。
+//      応答には**どの操作のどの条件か**が載る
+//   3. **`when` が真の行では通り、`set` の値だけが書き換わる**（ほかの項目は変わらない）
+//
+// 見本 `samples/task-board/` は #159 が置く。ここでは、その見本と同じ形の最小の宣言を組み立てる。
+
+const BOARD_SOURCE = [
+  "entities:",
+  "  - name: task",
+  "    fields:",
+  "      title: string",
+  "      estimate: number",
+  "      status:",
+  "        type: enum",
+  "        options:",
+  "          todo: 未着手",
+  "          doing: 進行中",
+  "          done: 完了",
+  "        default: todo",
+  "views:",
+  "  - name: taskList",
+  "    entity: task",
+  "actions:",
+  "  - name: addTask",
+  "    entity: task",
+  "  - name: start",
+  "    entity: task",
+  "    kind: update",
+  "    set:",
+  "      status: doing",
+  '    when: status == "todo"',
+  "  - name: finish",
+  "    entity: task",
+  "    kind: update",
+  "    set:",
+  "      status: done",
+  '    when: status != "done"',
+  "  - name: editTask",
+  "    entity: task",
+  "    kind: update",
+  "  - name: dropTask",
+  "    entity: task",
+  "    kind: delete",
+  '    when: status == "done"',
+  "validations: []",
+  "computed: []",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+const boardNormalized = await normalizeSpec(BOARD_SOURCE);
+if (!boardNormalized.ok) throw new Error("set と when の宣言が静的チェックに通らない");
+
+const BOARD_APP: NormalizedAppSpec = boardNormalized.app;
+const BOARD_JSON = boardNormalized.json;
+
+/** ボードの宣言を R2 に置き、登録（D1）も同じ宣言を指すようにする */
+function withBoardDeclaration(h: Harness): void {
+  h.registry.registration = {
+    sourceSha256: BOARD_APP.sourceSha256,
+    schemaVersion: BOARD_APP.schemaVersion,
+    sourceKey: `specs/${BOARD_APP.sourceSha256}/app.spec.yaml`,
+    normalizedKey: `specs/${BOARD_APP.sourceSha256}/normalized.json`,
+    createdAt: "2026-09-19T00:00:00.000Z",
+  };
+  h.specs.text = BOARD_JSON;
+}
+
+/** 1 件足して、その行の ID を返す */
+async function addTask(h: Harness, title: string, status?: string): Promise<string> {
+  const result = await createFromAction(h.deps, INSTANCE, "addTask", {
+    title,
+    estimate: 1,
+    ...(status === undefined ? {} : { status }),
+  });
+  if (!result.ok) throw new Error(`足せなかった: ${JSON.stringify(result.failure)}`);
+  return rowOf(result.body).id;
+}
+
+const boardRows = async (h: Harness): Promise<readonly ApiRow[]> => {
+  const result = await getView(h.deps, INSTANCE, "taskList");
+  if (!result.ok) throw new Error(`一覧を読めなかった: ${result.failure.error}`);
+  return result.body.rows;
+};
+
+/** 見本 expense-log（条件を 1 つも宣言していない）の一覧の行 */
+const expenseRows = async (h: Harness): Promise<readonly ApiRow[]> => (await listOf(h)).rows;
+
+describe("set と when（M1.3）", () => {
+  it("getSpec が ok で返し、set と when を保つ（受入条件）", async () => {
+    const h = harness();
+    withBoardDeclaration(h);
+
+    const result = await getSpec(h.deps, INSTANCE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.status).toBe(API_READ_STATUS);
+    expect(result.body.sourceSha256).toBe(BOARD_APP.sourceSha256);
+    expect(result.body.spec.actions).toEqual([
+      { name: "addTask", entity: "task" },
+      {
+        name: "start",
+        entity: "task",
+        kind: "update",
+        set: { status: "doing" },
+        when: 'status == "todo"',
+      },
+      {
+        name: "finish",
+        entity: "task",
+        kind: "update",
+        set: { status: "done" },
+        when: 'status != "done"',
+      },
+      { name: "editTask", entity: "task", kind: "update" },
+      { name: "dropTask", entity: "task", kind: "delete", when: 'status == "done"' },
+    ]);
+  });
+
+  it("readNormalizedApp が、set と when を含む正規化 JSON を読む（受入条件）", () => {
+    expect(readNormalizedApp(BOARD_JSON)).toEqual(BOARD_APP);
+  });
+
+  it("when が真の行では操作が通り、set の値だけが書き換わる（受入条件）", async () => {
+    const h = harness();
+    withBoardDeclaration(h);
+    const id = await addTask(h, "宿の予約");
+
+    const before = h.records.rows[0];
+    const result = await createFromAction(h.deps, INSTANCE, "start", { id });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.status).toBe(API_READ_STATUS);
+    // **set に書いた項目だけが変わる。** ほかの項目は保存された値のままである
+    expect(rowOf(result.body).fields).toEqual({ title: "宿の予約", estimate: 1, status: "doing" });
+    expect(h.records.rows[0]?.data).toEqual({ title: "宿の予約", estimate: 1, status: "doing" });
+    // ID と作成日時は保つ（更新日時だけが進む）
+    expect(h.records.rows[0]?.id).toBe(id);
+    expect(h.records.rows[0]?.createdAt).toBe(before?.createdAt);
+  });
+
+  it("when が偽の行に対する操作は断られ、INPUT_REJECTED ではない誤りコードが返る（受入条件）", async () => {
+    const h = harness();
+    withBoardDeclaration(h);
+    const id = await addTask(h, "宿の予約", "done");
+
+    const result = await createFromAction(h.deps, INSTANCE, "finish", { id });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // **「入力が悪い」と「いまその操作はできない」は別物である**
+    expect(result.failure.error).toBe("ACTION_NOT_ALLOWED");
+    expect(result.failure.error).not.toBe("INPUT_REJECTED");
+    // 断りの応答に、**どの操作のどの条件か**が載る（受入条件）
+    expect(result.failure.action).toBe("finish");
+    expect(result.failure.when).toBe('status != "done"');
+    // 断ったら**書き換えない**
+    expect(h.records.rows[0]?.data).toEqual({ title: "宿の予約", estimate: 1, status: "done" });
+  });
+
+  it("画面が送ってきても断る（一覧のボタンを隠すことは守りではない）", async () => {
+    const h = harness();
+    withBoardDeclaration(h);
+    const id = await addTask(h, "宿の予約", "doing");
+
+    // 進行中の行に「始める」（when: status == "todo"）を送る
+    const started = await createFromAction(h.deps, INSTANCE, "start", { id });
+    expect(started.ok).toBe(false);
+    if (!started.ok) expect(started.failure.action).toBe("start");
+    // 「完了にする」（when: status != "done"）は通る
+    const finished = await createFromAction(h.deps, INSTANCE, "finish", { id });
+    expect(finished.ok).toBe(true);
+    expect(h.records.rows[0]?.data["status"]).toBe("done");
+  });
+
+  it("set を宣言した操作の入力は id だけである（ほかの項目は黙って捨てずに断る）", async () => {
+    const h = harness();
+    withBoardDeclaration(h);
+    const id = await addTask(h, "宿の予約");
+
+    const result = await createFromAction(h.deps, INSTANCE, "start", { id, title: "書き換え" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.error).toBe("INPUT_REJECTED");
+    expect(result.failure.fields).toEqual(["title"]);
+    expect(h.records.rows[0]?.data["title"]).toBe("宿の予約");
+  });
+
+  it("set の無い update は、従来どおり全項目の置換である（M1.2 の意味を変えない）", async () => {
+    const h = harness();
+    withBoardDeclaration(h);
+    const id = await addTask(h, "宿の予約");
+
+    const result = await createFromAction(h.deps, INSTANCE, "editTask", {
+      id,
+      title: "宿の予約（変更）",
+      estimate: 2,
+      status: "doing",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(rowOf(result.body).fields).toEqual({
+      title: "宿の予約（変更）",
+      estimate: 2,
+      status: "doing",
+    });
+  });
+
+  it("消す操作の when も守る（条件が偽なら消さない）", async () => {
+    const h = harness();
+    withBoardDeclaration(h);
+    const id = await addTask(h, "宿の予約");
+
+    const blocked = await createFromAction(h.deps, INSTANCE, "dropTask", { id });
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) {
+      expect(blocked.failure.error).toBe("ACTION_NOT_ALLOWED");
+      expect(blocked.failure.action).toBe("dropTask");
+      expect(blocked.failure.when).toBe('status == "done"');
+    }
+    expect(h.records.rows).toHaveLength(1);
+
+    // 完了にすれば消せる
+    await createFromAction(h.deps, INSTANCE, "finish", { id });
+    const dropped = await createFromAction(h.deps, INSTANCE, "dropTask", { id });
+    expect(dropped.ok).toBe(true);
+    expect(h.records.rows).toEqual([]);
+  });
+
+  it("対象の行が無ければ 404（条件の判定より先に、対象の実在を見る）", async () => {
+    const h = harness();
+    withBoardDeclaration(h);
+
+    const result = await createFromAction(h.deps, INSTANCE, "finish", { id: "missing" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.failure.error).toBe("NOT_FOUND");
+  });
+
+  it("一覧の行に、いま実行してよい操作の名前を載せる（画面は式を評価しない）", async () => {
+    const h = harness();
+    withBoardDeclaration(h);
+    await addTask(h, "未着手");
+    await addTask(h, "進行中", "doing");
+    await addTask(h, "完了", "done");
+
+    const rows = await boardRows(h);
+    // `when` を持たない `editTask` はいつでも実行できるので、常に入る（宣言の順）
+    expect(rows.map((row) => row.allowedActions)).toEqual([
+      ["start", "finish", "editTask"],
+      ["finish", "editTask"],
+      ["editTask", "dropTask"],
+    ]);
+  });
+
+  it("条件を 1 つも宣言していない entity では、欄そのものを載せない（M1.2 の応答を変えない）", async () => {
+    const h = harness();
+    await runSteps(h);
+    const rows = await expenseRows(h);
+    for (const row of rows) expect(Object.hasOwn(row, "allowedActions")).toBe(false);
+  });
+
+  it("操作の応答の行にも、いま実行してよい操作の名前が載る", async () => {
+    const h = harness();
+    withBoardDeclaration(h);
+    const id = await addTask(h, "宿の予約");
+
+    const result = await createFromAction(h.deps, INSTANCE, "start", { id });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 進行中になったので、「始める」は出なくなる
+    expect(rowOf(result.body).allowedActions).toEqual(["finish", "editTask"]);
+  });
+});

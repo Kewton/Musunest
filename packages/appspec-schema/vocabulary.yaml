@@ -256,6 +256,28 @@
   runtime: [spec-engine, data-api, host]
   factory: 未対応
 
+# set と when の「見本」も、いま warikan を指している。**warikan は set も when も使っていない**——
+# M1.3 のタスク管理の見本（samples/task-board/）は #159 が置くので、そのときに張り替える。
+- name: set
+  layer: logic
+  since: v0.2-draft（M1.3）
+  samples: [warikan]
+  negatives: [set-type-mismatch, set-with-expression]
+  check_rules: [LOGIC_ACTION_SET_TYPE_MISMATCH, LOGIC_ACTION_SET_NOT_CONSTANT]
+  semantics: docs/semantics.md#set
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+- name: when
+  layer: logic
+  since: v0.2-draft（M1.3）
+  samples: [warikan]
+  negatives: [when-not-boolean]
+  check_rules: [LOGIC_ACTION_WHEN_NOT_BOOLEAN]
+  semantics: docs/semantics.md#when
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
 # ── UI 層 ───────────────────────────────────────────────────────
 
 - name: view

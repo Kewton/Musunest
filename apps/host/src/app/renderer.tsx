@@ -10,6 +10,8 @@
 //   4. 追加フォームを出すか — view が返した `permissions.write` と、その entity の action の有無だけで決める
 //   5. 参照（`ref`・参照 list）の見せ方 — **候補は参照先の一覧から取り、送るのは ID、見せるのは名前**である
 //   6. 選択肢（`enum`）の見せ方 — **宣言の `options` をそのまま選択肢にし、送るのはキー、見せるのは表示名**である（M1.3）
+//   7. 行ごとのボタンを出すか — **API が返した `row.allowedActions` をそのまま見る**（M1.3）。
+//      **画面は `when` の式を評価しない**し、隠すことは守りでもない——断るのは data-api である（`03` §2.2）
 //
 // **参照の候補は、参照先の entity の一覧（view）から取る。** 宣言が参照先の一覧を持たなければ候補は 0 件で、
 // 画面は架空の ID を作らない（フォームは「先に登録してください」と出す。守りはサーバ側）。
@@ -20,6 +22,7 @@
 
 import { useEffect, useState } from "react";
 import type {
+  Action,
   ApiActionRef,
   ApiRow,
   ApiSpecBody,
@@ -71,8 +74,14 @@ const FAILURE_MESSAGES: Readonly<Record<FailureReason, string>> = {
 
 export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
   const [state, setState] = useState<ScreenState>({ kind: "loading" });
-  /** 消せなかった理由（M1.2）。**画面の非表示だけに頼らず、サーバの答えを出す** */
-  const [deleteFailure, setDeleteFailure] = useState<string | null>(null);
+  /**
+   * 操作が断られた理由（消す（M1.2）と、決まった値への書き換え（M1.3））。
+   * **画面の非表示だけに頼らず、サーバの答えを出す**（`data-state` で 2 つを区別する）。
+   */
+  const [actionFailure, setActionFailure] = useState<{
+    readonly state: string;
+    readonly message: string;
+  } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -117,6 +126,8 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
   const action = view === null ? undefined : addActionOf(spec, view);
   // 消す操作（`kind: delete`。M1.2）。宣言が無ければ削除ボタンも出さない
   const deleteAction = view === null ? undefined : deleteActionOf(spec, view);
+  // 決まった値への書き換え（`set` を持つ `kind: update`。M1.3）。宣言の順に、行ごとのボタンにする
+  const setActions = view === null ? [] : setActionsOf(spec, view);
   // 一覧の種類（`type`）と、表に出す名前の順（`show`）は**宣言**にある。API の応答には行だけがある
   const declaration = view === null ? undefined : spec.spec.views.find((item) => item.name === view.view);
   const entity = view === null ? undefined : spec.spec.entities.find((item) => item.name === view.entity);
@@ -151,10 +162,29 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
    */
   async function removeRecord(actionName: string, id: string): Promise<void> {
     if (view === null) return;
-    setDeleteFailure(null);
+    setActionFailure(null);
     const deleted = await client.deleteRecord(instanceId, actionName, id);
     if (!deleted.ok) {
-      setDeleteFailure(reasonOfFailure(deleted.error));
+      setActionFailure({ state: "delete-failed", message: reasonOfFailure(deleted.error) });
+      return;
+    }
+    setState(await loadView(client, instanceId, spec, view.view));
+  }
+
+  /**
+   * 決まった値への書き換え（M1.3）。送るのは**対象の行の ID だけ**である（何を書くかは宣言が持つ）。
+   * 成功したら**一覧を読み直す**。断られた理由（条件が成り立たない・権限・通信）はその場に出す
+   * ——**画面がボタンを隠すのは親切であって守りではない**ので、サーバの答えをそのまま見せる。
+   */
+  async function runSetAction(actionName: string, id: string): Promise<void> {
+    if (view === null) return;
+    setActionFailure(null);
+    const applied = await client.setRecord(instanceId, actionName, id);
+    if (!applied.ok) {
+      setActionFailure({
+        state: "action-failed",
+        message: reasonOfActionFailure(applied.error, actionName),
+      });
       return;
     }
     setState(await loadView(client, instanceId, spec, view.view));
@@ -200,12 +230,14 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           references={references}
           show={declaration?.show}
           deleteAction={deleteAction}
+          setActions={setActions}
           onDelete={(id) => void removeRecord(deleteAction?.name ?? "", id)}
+          onRunAction={(actionName, id) => void runSetAction(actionName, id)}
         />
       )}
-      {deleteFailure !== null && (
-        <p className="state failure" data-state="delete-failed" role="alert">
-          {deleteFailure}
+      {actionFailure !== null && (
+        <p className="state failure" data-state={actionFailure.state} role="alert">
+          {actionFailure.message}
         </p>
       )}
       {view !== null && action !== undefined && view.permissions.write && (
@@ -260,7 +292,9 @@ function RowTable({
   references,
   show,
   deleteAction,
+  setActions,
   onDelete,
+  onRunAction,
 }: {
   readonly view: ApiViewBody;
   readonly entity: Entity | undefined;
@@ -269,9 +303,14 @@ function RowTable({
   readonly show: readonly string[] | undefined;
   /** その entity の消す操作（`kind: delete`）。宣言が無ければ `undefined`（列も出さない） */
   readonly deleteAction: ApiActionRef | undefined;
+  /** その entity の決まった値への書き換え（`set` を持つ操作。M1.3）。宣言の順 */
+  readonly setActions: readonly Action[];
   readonly onDelete: (id: string) => void;
+  readonly onRunAction: (actionName: string, id: string) => void;
 }) {
   const columns = columnsOf(view, show);
+  // 操作の列は、消す操作か、決まった値への書き換えを宣言しているときだけ出す
+  const hasActions = deleteAction !== undefined || setActions.length > 0;
   return (
     <div className="table-scroll">
       <table className="instant-table">
@@ -282,7 +321,7 @@ function RowTable({
                 {column.name}
               </th>
             ))}
-            {deleteAction !== undefined && (
+            {hasActions && (
               <th scope="col" className="actions">
                 操作
               </th>
@@ -299,23 +338,42 @@ function RowTable({
                     : displayOf(entity, references, column.name, row.fields[column.name])}
                 </td>
               ))}
-              {deleteAction !== undefined && (
+              {hasActions && (
                 <td className="actions">
-                  {isDeletable(row) ? (
-                    <button
-                      type="button"
-                      className="delete"
-                      data-delete={row.id}
-                      onClick={() => onDelete(row.id)}
-                    >
-                      削除
-                    </button>
-                  ) : (
-                    // **参照されている行にはボタンを出さない。** 代わりに、消せない理由をその場に出す
-                    <span className="delete-blocked" data-blocked="true">
-                      {blockedReason(row.references ?? [])}
-                    </span>
-                  )}
+                  {/*
+                    決まった値への書き換え（M1.3）。**`when` が偽の行ではボタンを出さない**——
+                    判定するのは data-api で、画面は返ってきた `allowedActions` を見るだけである
+                  */}
+                  {setActions
+                    .filter((candidate) => isActionAllowed(row, candidate.name))
+                    .map((candidate) => (
+                      <button
+                        key={candidate.name}
+                        type="button"
+                        className="run-action"
+                        data-action={candidate.name}
+                        data-row={row.id}
+                        onClick={() => onRunAction(candidate.name, row.id)}
+                      >
+                        {candidate.name}
+                      </button>
+                    ))}
+                  {deleteAction !== undefined &&
+                    (isDeletable(row) && isActionAllowed(row, deleteAction.name) ? (
+                      <button
+                        type="button"
+                        className="delete"
+                        data-delete={row.id}
+                        onClick={() => onDelete(row.id)}
+                      >
+                        削除
+                      </button>
+                    ) : isDeletable(row) ? null : (
+                      // **参照されている行にはボタンを出さない。** 代わりに、消せない理由をその場に出す
+                      <span className="delete-blocked" data-blocked="true">
+                        {blockedReason(row.references ?? [])}
+                      </span>
+                    ))}
                 </td>
               )}
             </tr>
@@ -329,6 +387,16 @@ function RowTable({
 /** その行を消せるか。**応答に `references` が無い**（宣言が無い）ときは `false` にしない（列も出ない） */
 const isDeletable = (row: ApiRow): boolean =>
   row.references === undefined || row.references.length === 0;
+
+/**
+ * その行で、その操作を実行してよいか（M1.3）。**API が返した `allowedActions` をそのまま見る**——
+ * 画面は `when` の式を評価しない（`CLAUDE.md` の不変条件）。
+ *
+ * 欄そのものが無いときは「条件が宣言されていない」であって「何もできない」ではないので `true` にする
+ * （M1.2 の応答を変えない）。空の並びは「いまはどの操作もできない」である（読み替えない）。
+ */
+const isActionAllowed = (row: ApiRow, actionName: string): boolean =>
+  row.allowedActions === undefined || row.allowedActions.includes(actionName);
 
 /** 消せない理由。**参照元の entity と項目、件数**をそのまま見せる（サーバが返した値を読み替えない） */
 function blockedReason(references: NonNullable<ApiRow["references"]>): string {
@@ -459,6 +527,17 @@ function addActionOf(spec: ApiSpecBody, view: ApiViewBody): ApiActionRef | undef
   );
 }
 
+/**
+ * その entity の**決まった値への書き換え**の操作（`set` を持つ `kind: update`。M1.3）。宣言の順。
+ * **正本は宣言（`spec.spec.actions`）である**——一覧の応答（`ApiActionRef`）は `set` を持たない。
+ */
+function setActionsOf(spec: ApiSpecBody, view: ApiViewBody): readonly Action[] {
+  return spec.spec.actions.filter(
+    (candidate) =>
+      candidate.entity === view.entity && candidate.kind === "update" && candidate.set !== undefined,
+  );
+}
+
 /** その entity の**消す**操作（`kind: delete`）。宣言が無ければ `undefined`（削除ボタンを出さない） */
 function deleteActionOf(spec: ApiSpecBody, view: ApiViewBody): ApiActionRef | undefined {
   return (
@@ -472,6 +551,7 @@ function deleteActionOf(spec: ApiSpecBody, view: ApiViewBody): ApiActionRef | un
  * `REFERENCE_IN_USE` に空の並びを読み替えない（`references` が無ければ、コードだけを見せる）。
  */
 function reasonOfFailure(error: ClientError): string {
+  if (error.code === "ACTION_NOT_ALLOWED") return actionNotAllowedReason(error);
   if (error.code === "REFERENCE_IN_USE") {
     if (error.references === undefined || error.references.length === 0) {
       return "他の記録から参照されているため削除できません。";
@@ -483,6 +563,27 @@ function reasonOfFailure(error: ClientError): string {
   if (error.code === "NOT_FOUND") return "この記録は既にありません。";
   if (error.code === "PERMISSION_DENIED") return "削除する権限がありません。";
   return "削除できませんでした。";
+}
+
+/**
+ * 条件が成り立たないと断られた理由（M1.3。409 `ACTION_NOT_ALLOWED`）。
+ * **サーバが返した操作の名前と条件をそのまま見せる**（画面が言い換えない）。
+ */
+function actionNotAllowedReason(error: ClientError): string {
+  const name = error.action ?? "この操作";
+  if (error.when === undefined) return `${name} はいま実行できません。`;
+  return `${name} はいま実行できません（条件 ${error.when}）。`;
+}
+
+/**
+ * 決まった値への書き換えが断られた理由（M1.3）。**画面の非表示だけに頼らない**ので、
+ * サーバの答えをそのまま出す（一覧の `allowedActions` は古くなっていることがある）。
+ */
+function reasonOfActionFailure(error: ClientError, actionName: string): string {
+  if (error.code === "ACTION_NOT_ALLOWED") return actionNotAllowedReason(error);
+  if (error.code === "NOT_FOUND") return "この記録は既にありません。";
+  if (error.code === "PERMISSION_DENIED") return "操作する権限がありません。";
+  return `${actionName} を実行できませんでした。`;
 }
 
 /**

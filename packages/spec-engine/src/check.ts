@@ -13,6 +13,7 @@ import {
   ACTION_KINDS,
   APPSPEC_SECTIONS,
   COMPUTED_TYPES,
+  DATE_VALUE_PATTERN,
   FIELD_TYPES,
   IDENTITY_MODES,
   NAME_PATTERN,
@@ -20,10 +21,14 @@ import {
   PERMISSION_SUBJECTS,
   RESERVED_NAMES,
   VIEW_TYPES,
+  enumKeys,
   expressionTypeOf,
   fieldKind,
   fieldTarget,
+  isEnumField,
   type ActionKind,
+  type ActionSet,
+  type ActionSetValue,
   type Aggregate,
   type AggregateWhereOp,
   type AppSpec,
@@ -44,10 +49,12 @@ import {
 } from "./diagnostics.js";
 import {
   analyzeExpression,
-  expressionDiagnostics,
+  isComparisonOperator,
+  parseExpression,
   positionAt,
   readExpression,
   typeName,
+  type AstNode,
   type ExpressionScope,
   type SpecType,
 } from "./expression.js";
@@ -890,10 +897,27 @@ function readEntities(items: readonly YamlNode[], report: Report): readonly Enti
   return entities;
 }
 
-/** 操作（`actions`。M1.2 で種類 `kind` を足した）。**書ける欄は name・entity・kind の 3 つだけ**である */
+/** 決まった値への書き換え（`set`）の 1 つ（M1.3）。値の型と定数かどうかは、entity を読んだあとで見る */
+interface ActionSetDraft {
+  readonly field: string;
+  readonly fieldNode: YamlNode;
+  /** 書かれた値の字面（YAML はすべて文字列として読む。型に合わせて読み直すのは意味の検査） */
+  readonly text: string;
+  readonly node: YamlNode;
+}
+
+/**
+ * 操作（`actions`）。M1.2 で種類 `kind` を、M1.3 で `set`（決まった値への書き換え）と
+ * `when`（その行で操作してよい条件）を足した。**書ける欄は `kind` が決める**（語彙は閉じている）。
+ */
 interface ActionDraft extends EntityReferenceDraft {
   /** 操作の種類（M1.2）。書いていなければ `null`（＝ `create`。M1.1 の宣言の意味を変えない） */
   readonly kind: ActionKind | null;
+  /** 決まった値への書き換え（M1.3）。書いていなければ `null` */
+  readonly set: readonly ActionSetDraft[] | null;
+  /** その行で操作してよい条件（M1.3）。書いていなければ `null` */
+  readonly when: string | null;
+  readonly whenNode: YamlNode | null;
 }
 
 /**
@@ -923,21 +947,108 @@ function readActionKind(member: MemberReader, report: Report): ActionKind | null
   return written as ActionKind;
 }
 
-/** `name` と `entity` と `kind` を持つ欄（actions）を読む。entity の実在はここでは見ない */
+/**
+ * 操作に書ける欄（M1.3）。**`kind` が決める**（一覧の `show` と同じ考え方。語彙は閉じている）。
+ *   `update` … 決まった値への書き換え（`set`）と、その行で操作してよい条件（`when`）
+ *   `delete` … `when` だけ（書き換える値が無い）
+ *   `create`（省略を含む）… どちらも書けない（対象の行が無いので、行ごとの条件も書き換えも無い）
+ */
+function actionKeys(kind: ActionKind | null): readonly string[] {
+  const base = ["name", "entity", "kind"];
+  if (kind === "update") return [...base, "set", "when"];
+  if (kind === "delete") return [...base, "when"];
+  return base;
+}
+
+/**
+ * 決まった値への書き換え（`set`。M1.3）を読む。「項目名: 決まった値」を並べた写像である。
+ * **値が型に合うか・定数かは、entity を読んだあとで見る**（`checkActions`）。
+ */
+function readActionSet(member: MemberReader, report: Report): readonly ActionSetDraft[] | null {
+  const entry = entryOf(member.map, "set");
+  if (entry === undefined) return null;
+  if (entry.value.kind !== "map") {
+    report(
+      "SHAPE_VALUE_INVALID",
+      "action の set は「項目: 決まった値」を並べた写像で書く",
+      positionOf(entry.value),
+    );
+    return null;
+  }
+  reportDuplicateKeys(entry.value, "action の set", report);
+  const values: ActionSetDraft[] = [];
+  for (const assignment of entry.value.entries) {
+    if (assignment.value.kind !== "scalar" || assignment.value.text === "") {
+      report(
+        "SHAPE_VALUE_INVALID",
+        `action の set の ${assignment.key} は、空でない決まった値で書く`,
+        positionOf(assignment.value),
+      );
+      continue;
+    }
+    values.push({
+      field: assignment.key,
+      fieldNode: {
+        kind: "scalar",
+        line: assignment.keyLine,
+        column: assignment.keyColumn,
+        text: assignment.key,
+      },
+      text: assignment.value.text,
+      node: assignment.value,
+    });
+  }
+  return values.length === 0 ? null : values;
+}
+
+/** その行で操作してよい条件（`when`。M1.3）を読む。真偽になるかは、entity を読んだあとで見る */
+function readActionWhen(
+  member: MemberReader,
+  report: Report,
+): { readonly text: string; readonly node: YamlNode } | null {
+  const entry = entryOf(member.map, "when");
+  if (entry === undefined) return null;
+  if (entry.value.kind !== "scalar" || entry.value.text === "") {
+    report(
+      "SHAPE_VALUE_INVALID",
+      "action の when は、空でない真偽の式で書く",
+      positionOf(entry.value),
+    );
+    return null;
+  }
+  return { text: entry.value.text, node: entry.value };
+}
+
+/**
+ * 操作（`actions`）を読む。**書ける欄は `kind` が決める**ので、`kind` を先に読んでから
+ * 知らない欄を断る（`readViews` と同じ形である）。entity の実在はここでは見ない。
+ */
 function readActions(items: readonly YamlNode[], report: Report): readonly ActionDraft[] {
   const actions: ActionDraft[] = [];
-  for (const member of readMembers(items, "actions", ["name", "entity", "kind"], report)) {
+  items.forEach((item, index) => {
+    if (item.kind !== "map") {
+      report("SHAPE_VALUE_INVALID", `actions の ${index + 1} 番目は「欄: 値」を並べた写像で書く`, positionOf(item));
+      return;
+    }
+    const member = new MemberReader(item, `actions[${index + 1}]`, report);
+    const kind = readActionKind(member, report);
+    member.only(actionKeys(kind));
+
     const name = member.text("name");
     if (name !== null) checkName(name.text, "actions", positionOf(name.node), report);
     const entity = member.text("entity");
+    const when = kind === null || kind === "create" ? null : readActionWhen(member, report);
     actions.push({
       name: name?.text ?? "",
       nameNode: name?.node ?? null,
       entity: entity?.text ?? "",
       entityNode: entity?.node ?? { kind: "null", line: 0, column: 0 },
-      kind: readActionKind(member, report),
+      kind,
+      set: kind === "update" ? readActionSet(member, report) : null,
+      when: when?.text ?? null,
+      whenNode: when?.node ?? null,
     });
-  }
+  });
   return actions;
 }
 
@@ -1422,6 +1533,102 @@ function scopeFor(
   };
 }
 
+/** 式を読んで型を求めた結果。読めなかった（診断を出した）ときは `null` を返す */
+interface ExpressionCheck {
+  readonly type: SpecType;
+  /** 式が参照した名前（計算どうしの循環を見るのに使う） */
+  readonly names: readonly string[];
+}
+
+/** AST の子を、書いた順に返す（式の中を歩くため） */
+function childrenOf(node: AstNode): readonly AstNode[] {
+  switch (node.kind) {
+    case "number":
+    case "string":
+    case "name":
+    case "member":
+      return [];
+    case "unary":
+      return [node.operand];
+    case "binary":
+      return [node.left, node.right];
+    case "call":
+      return node.args;
+  }
+}
+
+/**
+ * 選択肢（`enum`）の項目を、`options` に無いキーと比べていないか（M1.3）。
+ *
+ * 型だけを見る `analyzeExpression` には、`enum` のキーの並びが見えない（`enum` の値の型は
+ * ただの文字列である）。**打ち間違い（`status == "todu"`）は動かす前に止めたい**ので、
+ * 宣言を持っているこちら側で、比較の左右を突き合わせる（docs/semantics.md「enum」「when」）。
+ */
+function checkEnumComparisons(
+  ast: AstNode,
+  entity: EntityDraft,
+  label: string,
+  text: string,
+  base: DiagnosticPosition,
+  report: Report,
+): void {
+  const keysOf = (name: string): readonly string[] | null => {
+    const field = entity.fields.find((candidate) => candidate.name === name);
+    if (field === undefined || field.declaration === null) return null;
+    return isEnumField(field.declaration) ? enumKeys(field.declaration) : null;
+  };
+  const compare = (name: AstNode, literal: AstNode): void => {
+    if (name.kind !== "name" || literal.kind !== "string") return;
+    const keys = keysOf(name.name);
+    if (keys === null || keys.includes(literal.value)) return;
+    report(
+      "LOGIC_ENUM_KEY_NOT_FOUND",
+      `${label}: ${name.name} と比べている "${literal.value}" は、選択肢のキーに無い（${keys.join("・")}）`,
+      positionAt(text, literal.start, base),
+    );
+  };
+  const walk = (node: AstNode): void => {
+    if (node.kind === "binary" && isComparisonOperator(node.operator)) {
+      compare(node.left, node.right);
+      compare(node.right, node.left);
+    }
+    for (const child of childrenOf(node)) walk(child);
+  };
+  walk(ast);
+}
+
+/**
+ * 1 つの式を、その entity の宣言に突き合わせて検査する（検査の式・計算の式・操作の条件で共通）。
+ * **式は評価しない。** 診断は `label` を頭に付けて報告し、位置は原文の中の位置へ写す。
+ */
+function checkExpression(
+  text: string,
+  node: YamlNode,
+  label: string,
+  entity: EntityDraft,
+  computed: readonly ComputedDraft[],
+  index: ReadonlyMap<string, EntityDraft>,
+  report: Report,
+): ExpressionCheck | null {
+  const base = positionOf(node);
+  const status = readExpression(text);
+  if (!status.ok) {
+    for (const problem of status.problems) {
+      report(problem.code, `${label}: ${problem.message}`, positionAt(text, problem.offset, base));
+    }
+    return null;
+  }
+  const analysis = analyzeExpression(status.ast, scopeFor(entity, computed, index));
+  for (const problem of analysis.problems) {
+    report(problem.code, `${label}: ${problem.message}`, positionAt(text, problem.offset, base));
+  }
+  // 型の誤りが出ている式に、選択肢のキーの照合を重ねない（1 つの誤りを 2 つ以上のコードにしない）
+  if (analysis.problems.length === 0) {
+    checkEnumComparisons(status.ast, entity, label, text, base, report);
+  }
+  return { type: analysis.type, names: analysis.names };
+}
+
 function checkValidations(
   validations: readonly ValidationDraft[],
   computed: readonly ComputedDraft[],
@@ -1439,31 +1646,153 @@ function checkValidations(
       continue;
     }
     if (validation.expression === "") continue;
-    const status = readExpression(validation.expression);
-    if (!status.ok) {
-      for (const problem of status.problems) {
-        report(
-          problem.code,
-          `validation ${validation.name}: ${problem.message}`,
-          positionAt(validation.expression, problem.offset, positionOf(validation.expressionNode)),
-        );
-      }
-      continue;
-    }
-    const scope = scopeFor(entity, computed, index);
-    const analysis = analyzeExpression(status.ast, scope);
-    for (const found of expressionDiagnostics(
-      analysis.problems,
+    const checked = checkExpression(
       validation.expression,
-      positionOf(validation.expressionNode),
-    )) {
-      report(found.code, `validation ${validation.name}: ${found.message}`, found);
-    }
-    if (analysis.type !== "unknown" && analysis.type !== "boolean") {
+      validation.expressionNode,
+      `validation ${validation.name}`,
+      entity,
+      computed,
+      index,
+      report,
+    );
+    if (checked === null) continue;
+    if (checked.type !== "unknown" && checked.type !== "boolean") {
       report(
         "LOGIC_VALIDATION_NOT_BOOLEAN",
-        `validation ${validation.name} の式は真偽にならなければならない（${typeName(analysis.type)}になる）`,
+        `validation ${validation.name} の式は真偽にならなければならない（${typeName(checked.type)}になる）`,
         positionOf(validation.expressionNode),
+      );
+    }
+  }
+}
+
+/** 数の定数（`set` に書ける形）。符号つきの整数と小数だけである */
+const NUMBER_CONSTANT = /^-?\d+(?:\.\d+)?$/;
+
+/**
+ * 書かれた字面が**式**か（`set` の値が決まった値でないときに、理由を分けるために見る）。
+ * 名前 1 つ（`doing`）と定数は式と数えない——それは「決まった値の書き間違い」だからである。
+ */
+function looksLikeExpression(text: string): boolean {
+  const parsed = parseExpression(text);
+  if (!parsed.ok) return false;
+  const { kind } = parsed.ast;
+  return kind === "binary" || kind === "unary" || kind === "call" || kind === "member";
+}
+
+/**
+ * 決まった値への書き換え（`set`。M1.3）の 1 つを検査する。
+ *
+ * **書けるのは決まった値だけである**（式は書けない。式を許すと計算と操作の境目が消える）。
+ * 値は**その項目の型に合っていなければならない**——`enum` なら `options` のキーのどれかである
+ * （docs/semantics.md「set」）。
+ */
+function checkActionSet(
+  action: ActionDraft,
+  assignment: ActionSetDraft,
+  entity: EntityDraft,
+  report: Report,
+): void {
+  const label = `action ${action.name} の set`;
+  const field = entity.fields.find((candidate) => candidate.name === assignment.field);
+  if (field === undefined) {
+    report(
+      "LOGIC_ACTION_SET_FIELD_NOT_FOUND",
+      `${label} の項目 ${assignment.field} が、entity ${entity.name} に無い`,
+      positionOf(assignment.fieldNode),
+    );
+    return;
+  }
+  // 項目の型そのものが読めていない（診断は既に出ている）。誤りを重ねない
+  if (field.declaration === null) return;
+
+  /** 式を書いている（決まった値ではない）。**型の食い違いとは別のコードで断る** */
+  const rejectExpression = (): void => {
+    report(
+      "LOGIC_ACTION_SET_NOT_CONSTANT",
+      `${label} の ${assignment.field} には決まった値だけを書ける（式は書けない）`,
+      positionOf(assignment.node),
+    );
+  };
+
+  /** 決まった値として読めなかったときに、式なのか書き間違いなのかを分けて断る */
+  const reject = (expected: string): void => {
+    if (looksLikeExpression(assignment.text)) {
+      rejectExpression();
+      return;
+    }
+    report(
+      "LOGIC_ACTION_SET_TYPE_MISMATCH",
+      `${label} の ${assignment.field} の値 ${assignment.text} は、${expected}`,
+      positionOf(assignment.node),
+    );
+  };
+
+  switch (fieldKind(field.declaration)) {
+    case "number":
+      if (!NUMBER_CONSTANT.test(assignment.text)) reject("数の定数で書く");
+      return;
+    case "date":
+      if (!DATE_VALUE_PATTERN.test(assignment.text)) reject("日付（YYYY-MM-DD）で書く");
+      return;
+    case "enum": {
+      const keys = enumKeys(field.declaration);
+      if (!keys.includes(assignment.text)) reject(`選択肢のキーに無い（${keys.join("・")}）`);
+      return;
+    }
+    case "string":
+      // 文字列は何でも書けるが、式の字面は決まった値にしない（計算と操作の境目を消さない）
+      if (looksLikeExpression(assignment.text)) rejectExpression();
+      return;
+    default:
+      // `list` と `ref`。並びと参照先の ID は、宣言に埋め込む決まった値ではない
+      report(
+        "LOGIC_ACTION_SET_TYPE_MISMATCH",
+        `${label} の ${assignment.field} には決まった値を書けない（並びと参照の項目は set で書けない）`,
+        positionOf(assignment.node),
+      );
+  }
+}
+
+/**
+ * 操作（`actions`）の意味を検査する。entity の実在と、M1.3 で足した `set`・`when` を見る。
+ *
+ * **`when` は検査の式と同じ扱いである**——その entity の 1 件について評価する真偽の式で、
+ * 参照できるのは同じ entity の項目と計算だけである（docs/semantics.md「when」）。
+ */
+function checkActions(
+  actions: readonly ActionDraft[],
+  computed: readonly ComputedDraft[],
+  index: ReadonlyMap<string, EntityDraft>,
+  report: Report,
+): void {
+  for (const action of actions) {
+    const entity = index.get(action.entity);
+    if (entity === undefined) {
+      report(
+        "LOGIC_ENTITY_NOT_FOUND",
+        `action ${action.name} の entity ${action.entity} が宣言に無い`,
+        positionOf(action.entityNode),
+      );
+      continue;
+    }
+    for (const assignment of action.set ?? []) checkActionSet(action, assignment, entity, report);
+    if (action.when === null || action.whenNode === null) continue;
+    const checked = checkExpression(
+      action.when,
+      action.whenNode,
+      `action ${action.name} の when`,
+      entity,
+      computed,
+      index,
+      report,
+    );
+    if (checked === null) continue;
+    if (checked.type !== "unknown" && checked.type !== "boolean") {
+      report(
+        "LOGIC_ACTION_WHEN_NOT_BOOLEAN",
+        `action ${action.name} の when は真偽にならなければならない（${typeName(checked.type)}になる）`,
+        positionOf(action.whenNode),
       );
     }
   }
@@ -1669,32 +1998,23 @@ function checkComputed(
       continue;
     }
     if (draft.expression === "") continue;
-    const status = readExpression(draft.expression);
-    if (!status.ok) {
-      for (const problem of status.problems) {
-        report(
-          problem.code,
-          `computed ${draft.name}: ${problem.message}`,
-          positionAt(draft.expression, problem.offset, positionOf(draft.expressionNode)),
-        );
-      }
-      continue;
-    }
-    const analysis = analyzeExpression(status.ast, scopeFor(entity, computed, index));
-    for (const problem of analysis.problems) {
-      report(
-        problem.code,
-        `computed ${draft.name}: ${problem.message}`,
-        positionAt(draft.expression, problem.offset, positionOf(draft.expressionNode)),
-      );
-    }
+    const checked = checkExpression(
+      draft.expression,
+      draft.expressionNode,
+      `computed ${draft.name}`,
+      entity,
+      computed,
+      index,
+      report,
+    );
+    if (checked === null) continue;
     // 自分自身の名前も残す（`a` が `a` を参照する自己循環を、循環の検査で見つけるため）
-    draft.dependencies = analysis.names.map((name) => ({ entity: draft.entity, name }));
+    draft.dependencies = checked.names.map((name) => ({ entity: draft.entity, name }));
     const declared = isOneOf(COMPUTED_TYPES, draft.type) ? (draft.type as ComputedType) : null;
-    if (declared !== null && analysis.type !== "unknown" && analysis.type !== declared) {
+    if (declared !== null && checked.type !== "unknown" && checked.type !== declared) {
       report(
         "LOGIC_COMPUTED_TYPE_MISMATCH",
-        `computed ${draft.name} の type は ${declared} だが、式は${typeName(analysis.type)}になる`,
+        `computed ${draft.name} の type は ${declared} だが、式は${typeName(checked.type)}になる`,
         positionOf(draft.expressionNode),
       );
     }
@@ -1779,6 +2099,20 @@ function checkCycles(computed: readonly ComputedDraft[], report: Report): void {
 
 // ── 4. 宣言を組み立てる ────────────────────────────────────────
 
+/**
+ * 読み取った `set` を、宣言の形（`ActionSet`）にする（M1.3）。**数の項目だけ数にする**——
+ * YAML はすべて文字列として読むので、ここで型に合わせて読み直す（検査はもう通っている）。
+ */
+function buildActionSet(values: readonly ActionSetDraft[]): ActionSet {
+  const set: Record<string, ActionSetValue> = {};
+  for (const assignment of values) {
+    set[assignment.field] = NUMBER_CONSTANT.test(assignment.text)
+      ? Number(assignment.text)
+      : assignment.text;
+  }
+  return set;
+}
+
 /** 読み取った集計を、宣言の形（`Aggregate`）にする。`where` は項目 → 比べ方の写像にする */
 function buildAggregate(draft: AggregateDraft): Aggregate {
   const where: Record<string, AggregateWhereOp> = {};
@@ -1840,11 +2174,14 @@ function buildSpec(drafts: Drafts): AppSpec | null {
       ...(draft.type === null ? {} : { type: draft.type }),
       ...(draft.show === null ? {} : { show: draft.show.map((field) => field.name) }),
     })),
-    // 種類（`kind`）は書いてあるときだけ入れる（M1.1 の宣言に欄を足さない。省略は create である）
+    // 種類（`kind`）と、M1.3 の `set`・`when` は**書いてあるときだけ**入れる
+    // （M1.1・M1.2 の宣言に欄を足さない。`kind` の省略は create である）
     actions: actions.map((draft) => ({
       name: draft.name,
       entity: draft.entity,
       ...(draft.kind === null ? {} : { kind: draft.kind }),
+      ...(draft.set === null ? {} : { set: buildActionSet(draft.set) }),
+      ...(draft.when === null ? {} : { when: draft.when }),
     })),
     validations: validations.map((draft) => ({
       name: draft.name,
@@ -1970,15 +2307,6 @@ function inspect(source: string, report: Report): Drafts | null {
       }
     }
   }
-  for (const action of actions) {
-    if (!index.has(action.entity)) {
-      report(
-        "LOGIC_ENTITY_NOT_FOUND",
-        `action ${action.name} の entity ${action.entity} が宣言に無い`,
-        positionOf(action.entityNode),
-      );
-    }
-  }
   checkDuplicates(
     actions.map((action) => ({ name: action.name, nameNode: action.nameNode })),
     "LOGIC_ACTION_DUPLICATE_NAME",
@@ -1986,6 +2314,7 @@ function inspect(source: string, report: Report): Drafts | null {
     report,
   );
 
+  checkActions(actions, computed, index, report);
   checkValidations(validations, computed, index, report);
   checkComputed(computed, index, report);
   checkSettleSlots(computed, report);

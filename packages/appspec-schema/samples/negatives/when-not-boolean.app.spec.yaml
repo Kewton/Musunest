@@ -1,0 +1,43 @@
+# 負例：ボタンを出す条件（when）の式が、真偽にならない（文字列の項目 title をそのまま書いている）。
+# when は、その entity の 1 件について評価する真偽の式である。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: task
+    fields:
+      title: string
+      estimate: number
+      status:
+        type: enum
+        options:
+          todo: 未着手
+          doing: 進行中
+          done: 完了
+        default: todo
+
+views:
+  - name: taskList
+    entity: task
+
+actions:
+  - name: addTask
+    entity: task
+  - name: finish
+    entity: task
+    kind: update
+    set:
+      status: done
+    when: title
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

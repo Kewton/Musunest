@@ -48,6 +48,13 @@ export interface ClientError {
    * **参照元の entity と項目、件数**である。画面はこれをそのまま見せる（消せない理由）。
    */
   readonly references?: readonly ApiReference[];
+  /**
+   * 断られた操作の名前と、その条件（`ACTION_NOT_ALLOWED` のときだけ。M1.3）。
+   * **どの操作のどの条件で断られたか**を、画面がそのまま見せられるようにする。
+   * **両方揃っているときだけ載せる**（片方だけでは理由にならない）。
+   */
+  readonly action?: string;
+  readonly when?: string;
 }
 
 export type ClientResult<T> =
@@ -80,6 +87,19 @@ export interface MusunestClient {
     actionName: string,
     id: string,
   ): Promise<ClientResult<ApiDeletedBody>>;
+  /**
+   * **決まった値への書き換え**（`set` を宣言した `kind: update` の操作。M1.3）を、対象の行に対して
+   * 実行する。入力は `id` だけで、書き換わるのは宣言の `set` に書いた項目だけである。
+   *
+   * **その行で条件（`when`）が成り立たなければ断られる**——`error.code` が `ACTION_NOT_ALLOWED`
+   * （409）になり、`error.action` と `error.when` に**どの操作のどの条件か**が入る。
+   * 成功したら 200 と、書き換えた行（`ApiRow`）が返る。
+   */
+  setRecord(
+    instanceId: string,
+    actionName: string,
+    id: string,
+  ): Promise<ClientResult<ApiRow>>;
 }
 
 export interface MusunestClientOptions {
@@ -106,6 +126,8 @@ export function createMusunestClient(options: MusunestClientOptions): MusunestCl
         await send(request, base, apiActionPath(instanceId, actionName), "POST", { id }),
         isDeletedBody,
       ),
+    setRecord: async (instanceId, actionName, id) =>
+      decode(await send(request, base, apiActionPath(instanceId, actionName), "POST", { id }), isRow),
   };
 }
 
@@ -171,6 +193,15 @@ function errorOf(status: number, body: unknown): ClientError {
       if (!isReferences(body.references)) return failure(status, INVALID_RESPONSE);
       return { status, code, fields: [], validations: [], references: body.references };
     }
+    if (code === "ACTION_NOT_ALLOWED") {
+      // 断られた理由（どの操作のどの条件か）。**両方揃っているときだけ載せる**
+      // （片方だけの応答をでっち上げない。`references` と同じ約束である）
+      if (body.action === undefined && body.when === undefined) return failure(status, code);
+      if (typeof body.action !== "string" || typeof body.when !== "string") {
+        return failure(status, INVALID_RESPONSE);
+      }
+      return { status, code, fields: [], validations: [], action: body.action, when: body.when };
+    }
     if (code !== "INPUT_REJECTED") return failure(status, code);
     // 拒否の内容（項目名と検査名）が契約の形のときだけ、その2つを載せる
     if (!isStringArray(body.fields) || !isStringArray(body.validations)) {
@@ -234,6 +265,24 @@ function isActionRef(value: unknown): boolean {
     value.kind === undefined ||
     (typeof value.kind === "string" && (ACTION_KINDS as readonly string[]).includes(value.kind))
   );
+}
+
+/**
+ * 宣言の操作（`AppSpec.actions`）。`ApiActionRef` に加えて、M1.3 の `set`（決まった値への書き換え）と
+ * `when`（その行で操作してよい条件）を、**載っているときだけ**確かめる。
+ *
+ * **1 語の型と同じく、知らない形を成功にしない**——ただし語彙が増えたときに配信側だけが古いまま
+ * 残ると、`getSpec` が失敗して画面が動かなくなる（#145・#154 と同じ穴）ので、ここは M1.3 の
+ * 語彙をそのまま受け取る形にしてある。
+ */
+function isActionDeclaration(value: unknown): boolean {
+  if (!isActionRef(value) || !isRecord(value)) return false;
+  if (value.set !== undefined) {
+    if (!isRecord(value.set) || Object.keys(value.set).length === 0) return false;
+    const values = Object.values(value.set);
+    if (!values.every((entry) => typeof entry === "string" || typeof entry === "number")) return false;
+  }
+  return value.when === undefined || typeof value.when === "string";
 }
 
 /** 消せない理由の 1 件（M1.2）。参照元の entity と項目、件数（1 以上） */
@@ -382,7 +431,7 @@ function isAppSpec(value: unknown): boolean {
     Array.isArray(value.views) &&
     value.views.every(isView) &&
     Array.isArray(value.actions) &&
-    value.actions.every(isActionRef) &&
+    value.actions.every(isActionDeclaration) &&
     Array.isArray(value.validations) &&
     value.validations.every(isExpression) &&
     Array.isArray(value.computed) &&
@@ -406,7 +455,10 @@ function isRow(value: unknown): value is ApiRow {
   }
   // 参照されている行（M1.2）は任意。**載っているときだけ**契約の形を要求する
   // （`delete` を宣言している entity だけが載せる。空の並びは「参照されていない」である）
-  return value.references === undefined || isReferences(value.references);
+  if (value.references !== undefined && !isReferences(value.references)) return false;
+  // その行で実行してよい操作（M1.3）も任意である。**空の並びは「いまはどれもできない」**であって、
+  // 「条件が宣言されていない」（欄そのものが無い）とは別の意味である。読み替えない
+  return value.allowedActions === undefined || isStringArray(value.allowedActions);
 }
 
 /** 消した結果（M1.2。`kind: delete` の応答）。行ではなく、消せたことを表す */

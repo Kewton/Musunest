@@ -97,6 +97,16 @@ export const DIAGNOSTIC_CODES = [
   "LOGIC_ACTION_DUPLICATE_NAME",
   /** 操作の `kind`（種類）が M1.2 の語彙（`create`・`update`・`delete`）に無い（M1.2） */
   "LOGIC_ACTION_KIND_NOT_ALLOWED",
+  /** 決まった値への書き換え（`set`）の項目が、その操作の entity に無い（M1.3） */
+  "LOGIC_ACTION_SET_FIELD_NOT_FOUND",
+  /** 決まった値への書き換え（`set`）の値が、その項目の型に合わない（`enum` なら `options` のキーでない。M1.3） */
+  "LOGIC_ACTION_SET_TYPE_MISMATCH",
+  /** 決まった値への書き換え（`set`）に、決まった値ではなく式を書いている（M1.3。式は書けない） */
+  "LOGIC_ACTION_SET_NOT_CONSTANT",
+  /** 操作の条件（`when`）の式が真偽にならない（M1.3） */
+  "LOGIC_ACTION_WHEN_NOT_BOOLEAN",
+  /** 選択肢（`enum`）の項目を、`options` に無いキーの文字列と比べている（M1.3） */
+  "LOGIC_ENUM_KEY_NOT_FOUND",
   /** 店頭が用意していない関数を使っている（M1.1 は `min`・`max`・`len`、M1.3 で `today` が入った） */
   "LOGIC_FUNCTION_NOT_ALLOWED",
   /** 関数に渡す引数の数が合わない */

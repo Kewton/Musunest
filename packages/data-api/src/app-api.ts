@@ -21,8 +21,12 @@
 //   - 宣言した action だけを実行する。任意の entity への汎用の書込口は作らない
 //   - 入力の検査は input.ts（項目の型 → computed → validation の順）
 //   - 計算の値は保存しない。一覧と追加の応答でその都度求める（docs/semantics.md「computed」）
+//   - **操作の条件（`when`。M1.3）が偽の行に対する操作は断る**（409 `ACTION_NOT_ALLOWED`）。
+//     判定は**保存された行の値**で行い、一覧の行にも結果（`allowedActions`）を載せる——
+//     **画面がボタンを隠すのは親切であって守りではない**（`03` §2.2）
 
 import type {
+  Action,
   ApiActionRef,
   ApiDeletedBody,
   ApiErrorCode,
@@ -46,6 +50,7 @@ import {
   fieldTarget,
   isComputedSettle,
   isRowComputed,
+  takesRow,
 } from "@musunest/appspec-schema";
 import type {
   GuardedCreate,
@@ -61,6 +66,7 @@ import type { AppRecord } from "@musunest/control-plane";
 import type { Clock, SettleResult, SourceRecord, SourceRecords } from "@musunest/spec-engine";
 import {
   aggregateSourceEntities,
+  allowsAction,
   evaluateRecord,
   settleEntity,
   settleSourceEntities,
@@ -154,6 +160,10 @@ export interface ApiFailure {
    * **参照元の entity と項目、件数**を載せる（画面が理由を出せるようにする）。
    */
   readonly references?: readonly ApiReference[];
+  /** 断った操作の名前（`ACTION_NOT_ALLOWED` のときだけ。M1.3） */
+  readonly action?: string;
+  /** その操作の条件（宣言の `when` の式。`ACTION_NOT_ALLOWED` のときだけ。M1.3） */
+  readonly when?: string;
 }
 
 export interface ApiFailureResult {
@@ -187,6 +197,22 @@ const fail = (
     validations,
     ...(validationMessages === undefined ? {} : { validationMessages }),
     ...(references === undefined ? {} : { references }),
+  },
+});
+
+/**
+ * 操作の条件（`when`）が成り立たない行への操作を断る（M1.3。409 `ACTION_NOT_ALLOWED`）。
+ * **どの操作のどの条件で断ったかを載せる**——画面がそのまま見せられるようにする。
+ * **`INPUT_REJECTED` を使い回さない**（「入力が悪い」と「いまその操作はできない」は別物である）。
+ */
+const notAllowed = (action: Action): ApiFailureResult => ({
+  ok: false,
+  failure: {
+    error: "ACTION_NOT_ALLOWED",
+    fields: [],
+    validations: [],
+    action: action.name,
+    when: action.when ?? "",
   },
 });
 
@@ -256,6 +282,31 @@ function isFieldDeclaration(value: unknown): boolean {
   return false;
 }
 
+/**
+ * 決まった値への書き換え（`set`。M1.3）の形。**項目名 → 文字列か数**である（式は書けないので、
+ * 宣言に残るのは定数だけである）。空の写像は「書いていない」と区別が付かないので受け取らない。
+ */
+function isActionSetShape(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const entries = Object.values(value);
+  if (entries.length === 0) return false;
+  return entries.every((entry) => typeof entry === "string" || typeof entry === "number");
+}
+
+/**
+ * 操作の形（M1.3）。`name`・`entity` に加えて、`set`（決まった値への書き換え）と
+ * `when`（その行で操作してよい条件）を**載っているときだけ**確かめる。
+ *
+ * **配信された正規化 JSON を読めなくしない**のがここの仕事である——読めないと `getSpec` /
+ * `getView` が 503 になり、静的チェックが通っていても画面が動かない（#145・#154 と同じ穴）。
+ */
+function isActionShape(action: unknown): boolean {
+  if (!hasStrings(action, ["name", "entity"])) return false;
+  if (!isRecord(action)) return false;
+  if (action["set"] !== undefined && !isActionSetShape(action["set"])) return false;
+  return action["when"] === undefined || typeof action["when"] === "string";
+}
+
 /** 集計（`aggregate`）の形（M1.2）。`sum` は対象の名前を持ち、`count` は持たない */
 function isAggregateShape(value: unknown): boolean {
   if (!isRecord(value)) return false;
@@ -299,7 +350,7 @@ function isSpecShape(spec: unknown): spec is AppSpec {
     if (!Object.values(entity["fields"]).every(isFieldDeclaration)) return false;
   }
   if (!Array.isArray(views) || !views.every((view) => hasStrings(view, ["name", "entity"]))) return false;
-  if (!Array.isArray(actions) || !actions.every((action) => hasStrings(action, ["name", "entity"]))) return false;
+  if (!Array.isArray(actions) || !actions.every(isActionShape)) return false;
   if (!Array.isArray(validations)) return false;
   for (const validation of validations) {
     if (!hasStrings(validation, ["name", "entity", "expression"])) return false;
@@ -383,6 +434,47 @@ const computedNamesOf = (app: NormalizedAppSpec, entity: string): readonly strin
 const declaresSettle = (app: NormalizedAppSpec, entity: string): boolean =>
   app.spec.computed.some((entry) => entry.entity === entity && isComputedSettle(entry));
 
+// ── その行で操作してよいか（M1.3。Issue #156） ────────────────────────
+//
+// **`when` はロジック層の守りである**（`03` §2.2）。判定するのはここ（唯一の権限強制点）で、
+// 画面はその答えを見てボタンを出し分けるだけである。一覧の行に判定の結果を載せるのは、
+// **画面が式を評価しなくてよいようにする**ためである（CLAUDE.md の不変条件）。
+
+/** 対象の行 1 件を取る操作（`update`・`delete`）。宣言の順のまま */
+const rowActionsOf = (app: NormalizedAppSpec, entity: string): readonly Action[] =>
+  app.spec.actions.filter((action) => action.entity === entity && takesRow(action));
+
+/**
+ * その entity の操作が 1 つでも条件（`when`）を持つか。持たなければ、応答に `allowedActions` を
+ * 載せない（判定そのものが無いので、M1.2 の応答を変えない）。
+ */
+const declaresWhen = (app: NormalizedAppSpec, entity: string): boolean =>
+  rowActionsOf(app, entity).some((action) => action.when !== undefined);
+
+/**
+ * **この行に対して、いま実行してよい操作の名前**（宣言の順）。条件を宣言していない entity では
+ * `undefined`（＝応答に欄を載せない）。`when` を持たない操作はいつでも実行できるので、常に入る。
+ */
+function allowedActionsOf(
+  app: NormalizedAppSpec,
+  entity: string,
+  record: StoredRecord,
+  clock: Clock,
+  sources: SourceRecords,
+): readonly string[] | undefined {
+  if (!declaresWhen(app, entity)) return undefined;
+  return rowActionsOf(app, entity)
+    .filter(
+      (action) =>
+        action.when === undefined ||
+        allowsAction(
+          { app, entity, record: record.data, clock, recordId: record.id, sources },
+          action.when,
+        ),
+    )
+    .map((action) => action.name);
+}
+
 /** 1 行を API の形にする。**計算の値は保存された値からその都度求める** */
 function toApiRow(
   app: NormalizedAppSpec,
@@ -401,6 +493,8 @@ function toApiRow(
     recordId: record.id,
     sources,
   });
+  // 操作の条件（M1.3）。条件を宣言していない entity では欄そのものを載せない
+  const allowedActions = allowedActionsOf(app, entity, record, clock, sources);
   return {
     id: record.id,
     createdAt: record.createdAt,
@@ -408,6 +502,7 @@ function toApiRow(
     fields: record.data,
     computed,
     ...(references === undefined ? {} : { references }),
+    ...(allowedActions === undefined ? {} : { allowedActions }),
   };
 }
 
@@ -638,6 +733,9 @@ export async function getView(
  * **何をするかは宣言した `kind`（種類）が決める**（M1.2。docs/semantics.md「action」「create」
  * 「update」「delete」）。入口の名前が `createFromAction` のままなのは、HTTP の経路（操作の実行）が
  * 1 つだからである（`src/index.ts` がこの 1 つを呼ぶ）。省略した `kind` は `create` として読む。
+ *
+ * **`when` を宣言した操作は、条件が成り立つ行にだけ通す**（M1.3）。成り立たなければ
+ * 409 `ACTION_NOT_ALLOWED` で断り、**どの操作のどの条件か**を返す（docs/semantics.md「when」）。
  */
 export async function createFromAction(
   deps: DataApiDeps,
@@ -656,12 +754,42 @@ export async function createFromAction(
 
   switch (actionKind(action)) {
     case "update":
-      return updateFromAction(deps, app, entity, input);
+      return updateFromAction(deps, app, action, entity, input);
     case "delete":
-      return deleteFromAction(deps, app, entity, input);
+      return deleteFromAction(deps, app, action, entity, input);
     default:
       return createFromActionInput(deps, app, entity, input);
   }
+}
+
+/**
+ * 操作の条件（`when`。M1.3）を、**保存された行の値**で判定する。成り立てば `null`、
+ * 成り立たなければ断った結果を返す。
+ *
+ * **画面が送ってきても断る**（唯一の権限強制点）。画面がボタンを隠すのは親切であって守りではない
+ * ——一覧の `allowedActions` は古くなっていることがあるので、実行のたびにここで測り直す。
+ */
+async function guardWhen(
+  deps: DataApiDeps,
+  app: NormalizedAppSpec,
+  action: Action,
+  entity: Entity,
+  record: StoredRecord,
+): Promise<ApiFailureResult | null> {
+  if (action.when === undefined) return null;
+  const sources = await loadSources(deps, app, entity.name);
+  const allowed = allowsAction(
+    {
+      app,
+      entity: entity.name,
+      record: record.data,
+      clock: deps.clock,
+      recordId: record.id,
+      sources,
+    },
+    action.when,
+  );
+  return allowed ? null : notAllowed(action);
 }
 
 /** `kind` の省略と `create`。1 件を追加し、**書いた行（計算値つき）** を返す（201） */
@@ -703,12 +831,15 @@ async function createFromActionInput(
 
 /**
  * `kind: update`。対象のレコード 1 件を、**渡した項目で置き換える**（全項目の置換。部分更新ではない）。
+ * **`set` を宣言した操作だけは別である**（M1.3）——入力は `id` だけで、`set` に書いた項目だけが
+ * 書き換わる（ほかの項目は保存された値のまま。docs/semantics.md「set」）。
  * `id` は対象を指すために取り、保存する値には入らない。**`id` と `createdAt` は変えられない**
  * （入力に混ぜれば、宣言の項目に無い名前として断る）。成功したら **200 と、書き換えた行** を返す。
  */
 async function updateFromAction(
   deps: DataApiDeps,
   app: NormalizedAppSpec,
+  action: Action,
   entity: Entity,
   input: Readonly<Record<string, unknown>>,
 ): Promise<ApiResult<ApiActionBody>> {
@@ -718,10 +849,19 @@ async function updateFromAction(
   const current = await deps.records.get(entity.name, target.id);
   if (current === null) return fail("NOT_FOUND");
 
+  // 操作の条件（M1.3）。**保存された行の値**で判定し、成り立たなければ書き換えない
+  const blocked = await guardWhen(deps, app, action, entity, current);
+  if (blocked !== null) return blocked;
+
+  // 決まった値への書き換え（`set`。M1.3）は、**入力が `id` だけ**で、書き換わるのは書いた項目だけである
+  // （ほかの項目は保存された値のまま）。`set` の無い `update` は、従来どおり全項目の置換である
+  const next = valuesToWrite(action, current, target.data);
+  if (!next.ok) return fail("INPUT_REJECTED", next.fields);
+
   // 置換する**レコード全体**に、型 → 計算 → 検査の式（input.ts）と、参照の検査（#106）を適用する
-  const whole = checkWholeYen(app, entity, target.data);
+  const whole = checkWholeYen(app, entity, next.data);
   if (!whole.ok) return fail("INPUT_REJECTED", whole.fields);
-  const decided = checkInput({ app, entity, input: target.data, clock: deps.clock });
+  const decided = checkInput({ app, entity, input: next.data, clock: deps.clock });
   if (!decided.ok) {
     return fail("INPUT_REJECTED", decided.fields, decided.validations, messagesOf(app, decided.validations));
   }
@@ -755,6 +895,7 @@ async function updateFromAction(
 async function deleteFromAction(
   deps: DataApiDeps,
   app: NormalizedAppSpec,
+  action: Action,
   entity: Entity,
   input: Readonly<Record<string, unknown>>,
 ): Promise<ApiResult<ApiActionBody>> {
@@ -763,6 +904,14 @@ async function deleteFromAction(
   // 消す入力は `id` だけである（項目の値を渡しても、黙って捨てない）
   const extra = Object.keys(target.data);
   if (extra.length > 0) return fail("INPUT_REJECTED", extra);
+
+  // 操作の条件（M1.3）。条件を宣言している消す操作は、**保存された行の値**で判定してから消す
+  if (action.when !== undefined) {
+    const current = await deps.records.get(entity.name, target.id);
+    if (current === null) return fail("NOT_FOUND");
+    const blocked = await guardWhen(deps, app, action, entity, current);
+    if (blocked !== null) return blocked;
+  }
 
   const guards: readonly ReferenceGuard[] = referenceFieldsTo(app.spec, entity.name);
   const result: GuardedDelete = await deps.records.deleteGuarded(entity.name, target.id, guards);
@@ -778,6 +927,26 @@ async function deleteFromAction(
     count: reference.count,
   }));
   return fail("REFERENCE_IN_USE", [], [], undefined, references);
+}
+
+/**
+ * 書き換えたあとのレコード全体を組む（M1.3）。
+ *
+ *   `set` が無い … 入力の項目そのもの（従来の `update`。全項目の置換である）
+ *   `set` がある … **保存された値に、決まった値を重ねたもの**。入力は `id` だけで、
+ *                  ほかの項目を送ってきたら**黙って捨てずに断る**（余分な入力である）
+ */
+function valuesToWrite(
+  action: Action,
+  current: StoredRecord,
+  input: Readonly<Record<string, unknown>>,
+):
+  | { readonly ok: true; readonly data: Readonly<Record<string, unknown>> }
+  | { readonly ok: false; readonly fields: readonly string[] } {
+  if (action.set === undefined) return { ok: true, data: input };
+  const extra = Object.keys(input);
+  if (extra.length > 0) return { ok: false, fields: extra };
+  return { ok: true, data: { ...current.data, ...action.set } };
 }
 
 /** 直す・消すの入力から、対象のレコードの ID を取る（`ref` と同じく、空でない文字列だけを ID とする） */
