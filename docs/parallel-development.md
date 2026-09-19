@@ -236,6 +236,27 @@ commandmate ls --json   # cliToolId が command-code になっていることを
   対処は自分の worktree で `git merge origin/main` → `pnpm install --frozen-lockfile` → `pnpm check` → push → `CLEAN` を待つ。
   **文書 PR を長く開いたままにしない**（開いているあいだに実装 PR が入るほど当たりやすい）
 
+
+### 6.4 nudge（「完遂せよ」）は、「差分を進めてよい許可」と読まれる
+
+**2026-09-19 の #159 で実際に起きた。** 管理の記録：
+
+> dispatch の監督の nudge（「完遂せよ」）を worker が**「差分を進めてよい許可」と読んだ**。
+> **止めるべき案件が nudge で押し切られた形**である
+
+そのときワーカーが直面していたのは「Issue の指示どおりに書けない」という状況だった（見本の設計書が、
+いまの語彙では書けない書き方を含んでいた）。ワーカーは**落とす・変える・期待値を書き換える**で完遂し、
+**そのうえで差分を自己申告した**。申告があったから管理が気づけたが、**申告が無ければ通っていた。**
+
+- **nudge は「止まるな」と読まれる。** 監督が「進み具合を測る」つもりで送った一言が、
+  ワーカーには**判断の承認**として届く
+- **だから nudge に、止まってよい条件を必ず添える。**
+  「**指示どおりに書けないと分かったら、進めずに止めて報告してください**」の 1 行を入れる
+- ワーカーが**推測で読み替えた**なら、それは**完遂ではなく partial** である（§9）。
+  9 ゲートが緑でも、**受入条件を読み替えて満たしたものは緑ではない**
+- **止まったワーカーを褒める。** #154 と #156 と #157 は、ワーカーか管理が止めたおかげで
+  「緑なのに動かない」を人が捕まえられた。**止めるコストより、通してしまうコストのほうが高い**
+
 ---
 
 ## 7. planner が読める Issue の書き方
@@ -268,6 +289,58 @@ commandmate ls --json   # cliToolId が command-code になっていることを
   **そもそも `## 対象ファイル` の節に散文を足さないのが安全**である
 - `human-only` ラベルの Issue（人がスマホでデモする等）は、**dispatch の対象から外す**
 - 1 Issue = 1 パッケージ前後・語彙 1〜2 個。契約の goal は 8000 文字まで（`CLAUDE.md`）
+- **語彙を足す Issue は §7.1〜§7.3 を必ず通す**（2026-09-19 に 4 回止まった。原因はすべて窓口の書き漏れ）
+
+
+### 7.1 語彙を足す Issue で、必ず `## 対象ファイル` に入れる場所
+
+**2026-09-19 に、語彙を足す Issue が 4 回止まった**（#154・#156 ×2・#157）。
+**4 回とも原因は同じで、「静的チェックは通るのに、配信側か画面側が対応していない」形**である。
+**4 回とも窓口の書き漏れで、ワーカーの落ち度は 1 件も無かった。**
+
+| 層 | パス | 見落とすと |
+|---|---|---|
+| 宣言の型 | `packages/appspec-schema/src/spec.ts` ＋ `src/index.test.ts` | 型が無い |
+| 静的チェック | `packages/spec-engine/src/check.ts`・`normalize.ts`・`diagnostics.ts` ＋各テスト | 落ちない |
+| 式を使う語彙なら | `packages/spec-engine/src/expression.ts`・`evaluate.ts` ＋各テスト | **式に書けない**（#156 はこれで変更ゼロ停止） |
+| **配信の契約** | `packages/appspec-schema/src/api.ts` ＋ `src/api.test.ts` | **行ごとの値や新しい誤りコードを載せる先が無い**（#156） |
+| **配信の読み取り** | `packages/data-api/src/app-api.ts` ＋ `src/app-api.test.ts` | **`getSpec` が 503 になる**（#154。`isFieldDeclaration`・`isSpecShape`） |
+| HTTP の作法 | `packages/data-api/src/index.ts` ＋ `src/index.test.ts` | 誤りコードが HTTP に対応しない |
+| SDK | `packages/sdk/src/client.ts` ＋ `src/client.test.ts` | 画面まで届かない（#145） |
+| **画面の写像** | `apps/host/src/app/renderer.tsx` ＋ `src/app/renderer.test.ts` | **入力欄に出ない**（#154。`formFields`） |
+| **負例** | `packages/appspec-schema/samples/negatives/*.yaml` と `index.json` | **既存の負例が「未知の語」として今回足す語を使っていると、負例が正例に変わって落ちる**（#157 はこれ 1 本で停止） |
+| 台帳と意味 | `packages/appspec-schema/vocabulary.yaml`・`packages/appspec-schema/docs/semantics.md` | 単体テストが落ちる |
+
+**太字の 4 つが、2026-09-19 に実際に抜けた場所である。**
+
+- **画面の種類（view type）を足すときは、`packages/data-api/src/app-api.ts` の本体は無変更で済むことが多い**
+  （`isSpecShape` が名前しか見ていない）。**ただし「確かめずに対象から外さない」**——対象に入れておき、
+  **テストだけ足して本体が無変更**で構わない、と Issue に書く
+- **負例の確認は機械では出ない。** 「未知の語」として使われている語が実在の語になる瞬間に落ちる。
+  **語を足すときは `packages/appspec-schema/samples/negatives/` を目で見る**
+- 差し替える語を選ぶときは、**あとで実在の語になる予定の語を避ける**（#157 は `board` → `button` にした。`list` は #158 で実在の語になるので使えなかった）
+
+### 7.2 語彙を足す Issue には、その語彙を使う見本を含める
+
+`packages/data-api/src/sdk-spec.test.ts` は `packages/appspec-schema/samples/` を**ディスクから列挙して、
+本物の `getSpec` に通す**。**その語彙を使う見本が 1 つでもあれば、#154 の 503 は自動で捕まっていた。**
+
+捕まらなかったのは、**見本を最後の Issue（#159）にまとめて置いたから**である。
+**見本を後回しにする順番そのものが穴である。**
+
+- **語彙と見本を同じ Issue に入れる。** 新しい仕組みは要らない——**既にある回帰が効き始めるだけ**である
+- 実証：#159 で見本 `task-board` を置いたとき、**`sdk-spec.test.ts` を 1 行も変えずに**テストが 2 件増えて緑になった
+- 分けざるを得ないときは、**見本を置く Issue を最後ではなく最初の語彙の直後に置く**
+
+### 7.3 語彙を足す Issue の `## 完了条件` に必ず書く 2 つ
+
+**9 ゲートが緑でも実経路が死んでいることがある**（#145・#154）。次の 2 つは機械で確かめられる。
+
+- **`packages/data-api/src/app-api.test.ts`** に、**その語彙を含む正規化 JSON を `getSpec`（画面の種類なら `getView` も）が `ok` で返す**テスト
+- **`apps/host/src/app/renderer.test.ts`** に、**その語彙が画面へ写る**テスト
+  （`apps/host/src/app/form.test.ts` は入力欄の**部品**しか見ていない。**宣言からの写像を見ていない**）
+
+**#154 以降、この 2 つを完了条件に入れた Issue は、実経路の欠落を 1 件も出していない。**
 
 ### 2026-09-16 の実測（#115 の背景）
 
