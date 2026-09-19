@@ -19,6 +19,7 @@ import {
   FIELD_TYPES,
   IDENTITY_MODES,
   NAME_PATTERN,
+  PERIODS,
   PERMISSION_NAMES,
   PERMISSION_SUBJECTS,
   RESERVED_NAMES,
@@ -33,7 +34,7 @@ import {
   type ActionSetValue,
   type Aggregate,
   type AggregateKind,
-  type AggregateWhereOp,
+  type AggregateWhereCondition,
   type AppSpec,
   type Computed,
   type ComputedScope,
@@ -42,6 +43,7 @@ import {
   type FieldDeclaration,
   type FieldKind,
   type FieldType,
+  type Period,
   type ViewType,
 } from "@musunest/appspec-schema";
 import {
@@ -439,11 +441,12 @@ interface ValidationDraft extends ExpressionDraft {
   readonly message: string | null;
 }
 
-/** 集計の `where` の 1 つの条件（集計元の項目と、`this` との比べ方） */
+/** 集計の `where` の 1 つの条件（集計元の項目と、比べ方） */
 interface AggregateWhereDraft {
   readonly field: string;
   readonly fieldNode: YamlNode;
-  readonly op: AggregateWhereOp;
+  /** 正規化後の比べ方（M1.2・M1.4）。`within` のときは期間の名前を持つ */
+  readonly condition: AggregateWhereCondition;
 }
 
 /** computed の集計（M1.2・M1.4）。読み取った形で、意味の検査は組み立てのあとに行う */
@@ -1343,7 +1346,16 @@ function readAggregateTarget(
   return { entity, node: value, name };
 }
 
-/** 集計の `where` を読む。`{項目: this}` と `{項目: {contains: this}}` だけを扱う */
+/**
+ * 集計の `where` を読む。**正規化のあとは、条件を「`op` を持つオブジェクト」に揃える**（窓口の決定
+ * 2026-09-20）。書く側の形は 3 つである（M1.2・M1.4）。
+ *   `{項目: this}`                    → `{ op: "equals" }`
+ *   `{項目: {contains: this}}`        → `{ op: "contains" }`
+ *   `{項目: {within: this_month}}`    → `{ op: "within", period: "this_month" }`
+ *
+ * 期間の名前はここで見る（語彙は閉じている）。**指せる項目の種類（`date` だけ）は、集計元の entity を
+ * 読んだあとで見る**（`checkAggregate`）。
+ */
 function readWhereDraft(entry: YamlEntry | undefined, report: Report): readonly AggregateWhereDraft[] {
   if (entry === undefined) return [];
   if (entry.value.kind !== "map") {
@@ -1365,7 +1377,7 @@ function readWhereDraft(entry: YamlEntry | undefined, report: Report): readonly 
     };
     const value = condition.value;
     if (value.kind === "scalar" && value.text === "this") {
-      conditions.push({ field: condition.key, fieldNode, op: "equals" });
+      conditions.push({ field: condition.key, fieldNode, condition: { op: "equals" } });
       continue;
     }
     const contains = value.kind === "map" ? entryOf(value, "contains") : undefined;
@@ -1376,12 +1388,39 @@ function readWhereDraft(entry: YamlEntry | undefined, report: Report): readonly 
       contains.value.kind === "scalar" &&
       contains.value.text === "this"
     ) {
-      conditions.push({ field: condition.key, fieldNode, op: "contains" });
+      conditions.push({ field: condition.key, fieldNode, condition: { op: "contains" } });
+      continue;
+    }
+    // 期間の条件（`within`。M1.4）。比べる相手は**期間の名前**である（`this` ではない）
+    const within = value.kind === "map" ? entryOf(value, "within") : undefined;
+    if (value.kind === "map" && within !== undefined && value.entries.length === 1) {
+      const period = within.value;
+      if (period.kind !== "scalar" || period.text === "") {
+        report(
+          "SHAPE_VALUE_INVALID",
+          `集計の where の ${condition.key} の within は、期間の名前（${PERIODS.join("・")}）で書く`,
+          positionOf(period),
+        );
+        continue;
+      }
+      if (!isOneOf(PERIODS, period.text)) {
+        report(
+          "LOGIC_AGGREGATE_WHERE_PERIOD_NOT_ALLOWED",
+          `集計の where の ${condition.key} の期間 ${period.text} は書けない（M1.4 の期間は ${PERIODS.join("・")} である）`,
+          positionOf(period),
+        );
+        continue;
+      }
+      conditions.push({
+        field: condition.key,
+        fieldNode,
+        condition: { op: "within", period: period.text as Period },
+      });
       continue;
     }
     report(
       "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
-      `集計の where の ${condition.key} は、this（参照の一致）か「contains: this」（参照の並びの包含）で書く`,
+      `集計の where の ${condition.key} は、this（参照の一致）か「contains: this」（参照の並びの包含）か「within: <期間>」（期間の条件）で書く`,
       positionOf(value),
     );
   }
@@ -2080,27 +2119,39 @@ function checkAggregate(
     }
   }
 
-  for (const condition of aggregate.where) {
-    // アプリ全体の集計は出力先のレコードを持たないので、`this` を比べる相手が居ない（M1.4）
-    if (outputEntity === null) {
-      report(
-        "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
-        `computed ${draft.name} は scope: app である（集計の where に this は書けない。出力先のレコードが無い）`,
-        positionOf(condition.fieldNode),
-      );
-      continue;
-    }
-    const field = source.fields.find((candidate) => candidate.name === condition.field);
+  for (const { field: name, fieldNode, condition } of aggregate.where) {
+    const field = source.fields.find((candidate) => candidate.name === name);
     if (field === undefined) {
       report(
         "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
-        `computed ${draft.name} の集計の where の項目 ${condition.field} が、集計元 entity ${aggregate.entity} に無い`,
-        positionOf(condition.fieldNode),
+        `computed ${draft.name} の集計の where の項目 ${name} が、集計元 entity ${aggregate.entity} に無い`,
+        positionOf(fieldNode),
       );
       continue;
     }
     const declaration = field.declaration;
     const kind = declaration === null ? null : fieldKind(declaration);
+    // 期間の条件（`within`。M1.4）は、**集計元の `date` の項目だけ**を指せる。
+    // 出力先のレコードを持たないアプリ全体の集計（`scope: app`）でも書ける（`this` を要らない）
+    if (condition.op === "within") {
+      if (kind !== "date") {
+        report(
+          "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
+          `computed ${draft.name} の集計の where の ${name} は、${aggregate.entity} の日付（date）の項目でなければならない（期間で絞れるのは日付だけである）`,
+          positionOf(fieldNode),
+        );
+      }
+      continue;
+    }
+    // `this`（出力先のレコードの ID）と比べる条件は、出力先のレコードが要る（M1.4）
+    if (outputEntity === null) {
+      report(
+        "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
+        `computed ${draft.name} は scope: app である（集計の where に this は書けない。出力先のレコードが無い）`,
+        positionOf(fieldNode),
+      );
+      continue;
+    }
     const target = declaration === null ? null : fieldTarget(declaration);
     const pointsToOutput = target === outputEntity.name;
     const ok =
@@ -2111,8 +2162,8 @@ function checkAggregate(
       const expected = condition.op === "equals" ? "参照（ref）" : "参照の並び（list of）";
       report(
         "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
-        `computed ${draft.name} の集計の where の ${condition.field} は、${outputEntity.name} を指す${expected}でなければならない`,
-        positionOf(condition.fieldNode),
+        `computed ${draft.name} の集計の where の ${name} は、${outputEntity.name} を指す${expected}でなければならない`,
+        positionOf(fieldNode),
       );
     }
   }
@@ -2429,10 +2480,10 @@ function buildActionSet(values: readonly ActionSetDraft[]): ActionSet {
   return set;
 }
 
-/** 読み取った集計を、宣言の形（`Aggregate`）にする。`where` は項目 → 比べ方の写像にする */
+/** 読み取った集計を、宣言の形（`Aggregate`）にする。`where` は項目 → 比べ方（`op` を持つオブジェクト）にする */
 function buildAggregate(draft: AggregateDraft): Aggregate {
-  const where: Record<string, AggregateWhereOp> = {};
-  for (const condition of draft.where) where[condition.field] = condition.op;
+  const where: Record<string, AggregateWhereCondition> = {};
+  for (const condition of draft.where) where[condition.field] = condition.condition;
   return { kind: draft.kind, entity: draft.entity, name: draft.name, where };
 }
 

@@ -350,6 +350,20 @@
         "LOGIC_ACTION_WHEN_NOT_BOOLEAN"
       ],
       "why": "ボタンを出す条件（when）の式 title が真偽にならない（文字列になる。M1.3）"
+    },
+    {
+      "name": "within-field-not-date",
+      "codes": [
+        "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH"
+      ],
+      "why": "期間の条件（within）が、date ではなく数の項目 amount を指している（期間で絞れるのは日付の項目だけである。M1.4）"
+    },
+    {
+      "name": "within-unknown-period",
+      "codes": [
+        "LOGIC_AGGREGATE_WHERE_PERIOD_NOT_ALLOWED"
+      ],
+      "why": "期間の条件（within）に、知らない期間の名前 last_week を書いている（この版の期間は this_month だけである。M1.4）"
     }
   ]
 }

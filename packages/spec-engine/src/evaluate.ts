@@ -47,8 +47,8 @@ import {
 } from "@musunest/appspec-schema";
 import {
   avgValues,
-  hasConditions,
   matchesWhere,
+  needsThis,
   sumValues,
   type SourceRecord,
   type SourceRecords,
@@ -310,10 +310,11 @@ function aggregateValueOf(
   if (sources === undefined) return null;
   const rows = sources[aggregate.entity];
   if (rows === undefined) return null;
-  // `where` は `this`（このレコードの ID）と比べる。ID が無ければ判定できないので、0 にせず null にする
-  if (hasConditions(aggregate.where) && recordId === undefined) return null;
+  // `this`（このレコードの ID）と比べる条件があるのに ID が無ければ、判定できないので 0 にせず null にする。
+  // **期間の条件（`within`）は `this` を要らない**ので、ID が無くても行を絞れる（M1.4）
+  if (needsThis(aggregate.where) && recordId === undefined) return null;
   const thisId = recordId ?? "";
-  const matched = rows.filter((row) => matchesWhere(aggregate.where, row.data, thisId));
+  const matched = rows.filter((row) => matchesWhere(aggregate.where, row.data, thisId, request.clock));
   if (aggregate.kind === "count") return matched.length;
   if (aggregate.name === null) return null;
   const target: Entity | undefined = app.spec.entities.find(
@@ -464,9 +465,11 @@ interface ScopeState {
 }
 
 /**
- * アプリ全体の集計の値を求める。**`where` を持てない**——出力先のレコードが無く、`this` を
- * 比べる相手が居ないからである。持っていれば（手で作った成果物でも）`null` にして、
- * 条件を黙って無視しない。
+ * アプリ全体の集計の値を求める。**`this`（出力先のレコードの ID）を持つ条件は書けない**——出力先の
+ * レコードが無く、比べる相手が居ないからである。持っていれば（手で作った成果物でも）`null` にして、
+ * 条件を黙って無視しない。**期間の条件（`within`。M1.4）は書ける**——比べる相手が期間の名前だからである。
+ *
+ * **時計は引数で受け取る**（`request.clock`）。「今月」はここで、差し込んだ時計からだけ決める（Q17）。
  */
 function appAggregateValueOf(
   aggregate: Aggregate,
@@ -477,8 +480,9 @@ function appAggregateValueOf(
   // 「まだ読んでいない」（キーが無い）は 0 ではなく null にする。読めて 0 件（空の並び）だけが 0 である
   const rows = sources[aggregate.entity];
   if (rows === undefined) return null;
-  if (hasConditions(aggregate.where)) return null;
-  if (aggregate.kind === "count") return rows.length;
+  if (needsThis(aggregate.where)) return null;
+  const matched = rows.filter((row) => matchesWhere(aggregate.where, row.data, "", request.clock));
+  if (aggregate.kind === "count") return matched.length;
   if (aggregate.name === null) return null;
   const target = app.spec.entities.find((candidate) => candidate.name === aggregate.entity);
   if (target === undefined) return null;
@@ -490,7 +494,7 @@ function appAggregateValueOf(
     record: {},
     sources,
   };
-  const values = rows.map((row) => sourceValueOf(target, name, row, rowRequest, state));
+  const values = matched.map((row) => sourceValueOf(target, name, row, rowRequest, state));
   return aggregate.kind === "sum" ? sumValues(values) : avgValues(values);
 }
 

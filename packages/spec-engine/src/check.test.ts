@@ -261,7 +261,7 @@ describe("見本（appspec-schema の samples/）", () => {
     expect(result.spec.computed).toContainEqual({
       name: "paid",
       entity: "member",
-      aggregate: { kind: "sum", entity: "expense", name: "amount", where: { payer: "equals" } },
+      aggregate: { kind: "sum", entity: "expense", name: "amount", where: { payer: { op: "equals" } } },
       type: "number",
       label: "払った額",
     });
@@ -272,7 +272,7 @@ describe("見本（appspec-schema の samples/）", () => {
         kind: "sum",
         entity: "expense",
         name: "shareAmount",
-        where: { participants: "contains" },
+        where: { participants: { op: "contains" } },
       },
       type: "number",
       label: "負担額",
@@ -889,11 +889,11 @@ describe("表示名（label）（M1.3）", () => {
   });
 });
 
-// ── 2. 負例 50 件 ──────────────────────────────────────────────
+// ── 2. 負例 52 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 50 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本足した）", () => {
-    expect(negativeIndex.negatives).toHaveLength(50);
+  it("負例の一覧は 52 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本、M1.4 の #178 で 2 本足した）", () => {
+    expect(negativeIndex.negatives).toHaveLength(52);
   });
 
   it.each(negativeCases)(
@@ -1779,7 +1779,7 @@ describe("集計（aggregate。M1.2）", () => {
       {
         name: "total",
         entity: "member",
-        aggregate: { kind: "sum", entity: "expense", name: "amount", where: { payer: "equals" } },
+        aggregate: { kind: "sum", entity: "expense", name: "amount", where: { payer: { op: "equals" } } },
         type: "number",
       },
     ]);
@@ -1798,7 +1798,7 @@ describe("集計（aggregate。M1.2）", () => {
         kind: "count",
         entity: "expense",
         name: null,
-        where: { participants: "contains" },
+        where: { participants: { op: "contains" } },
       },
     });
   });
@@ -1862,6 +1862,85 @@ describe("集計（aggregate。M1.2）", () => {
     expect(codesOf(failure(checkSpec(withAggregate(["count: expense", "where:", "  amount: this"]))))).toEqual([
       "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
     ]);
+  });
+
+  // ── 期間の条件（within）と「今月」（M1.4。Issue #178） ────────────────
+
+  /** `date` の項目を持つ支出（`within` の正例に使う） */
+  const EXPENSE_WITH_DATE = [
+    "  - name: expense",
+    "    fields:",
+    "      amount: number",
+    "      paidOn: date",
+  ].join("\n");
+  const withDateAggregate = (body: readonly string[]): string =>
+    declaration({
+      entities: entitiess(MEMBER, EXPENSE_WITH_DATE),
+      validations: "[]",
+      computed: aggregateBlock("total", body),
+    });
+
+  it("期間の条件（within）は、集計元の date の項目を指せば通り、op と period を持つ条件として残る", () => {
+    const result = checkSpec(
+      withDateAggregate(["sum: expense.amount", "where:", "  paidOn:", "    within: this_month"]),
+    );
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spec.computed).toMatchObject([
+      {
+        name: "total",
+        entity: "member",
+        aggregate: {
+          kind: "sum",
+          entity: "expense",
+          name: "amount",
+          where: { paidOn: { op: "within", period: "this_month" } },
+        },
+      },
+    ]);
+  });
+
+  it("期間の条件（within）が date でない項目を指せば LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH（負例と同じ形）", () => {
+    expect(
+      codesOf(
+        failure(
+          checkSpec(withDateAggregate(["sum: expense.amount", "where:", "  amount:", "    within: this_month"])),
+        ),
+      ),
+    ).toEqual(["LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH"]);
+  });
+
+  it("知らない期間の名前を書けば LOGIC_AGGREGATE_WHERE_PERIOD_NOT_ALLOWED（負例と同じ形）", () => {
+    const result = failure(
+      checkSpec(withDateAggregate(["sum: expense.amount", "where:", "  paidOn:", "    within: last_week"])),
+    );
+    expect(codesOf(result)).toEqual(["LOGIC_AGGREGATE_WHERE_PERIOD_NOT_ALLOWED"]);
+    // 期間の名前の誤りは、指す項目の誤り（別のコード）と取り違えない
+    expect(codesOf(result)).not.toContain("LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH");
+  });
+
+  it("within は、アプリ全体の集計（scope: app）でも通る（this を要らない。M1.4）", () => {
+    const result = checkSpec(
+      declaration({
+        entities: entitiess(MEMBER, EXPENSE_WITH_DATE),
+        validations: "[]",
+        computed: [
+          [
+            "  - name: thisMonthTotal",
+            "    scope: app",
+            "    aggregate:",
+            "      sum: expense.amount",
+            "      where:",
+            "        paidOn:",
+            "          within: this_month",
+            "    type: number",
+          ].join("\n"),
+        ].join("\n"),
+      }),
+    );
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
   });
 
   it("集計の対象は、entity・項目・計算の実在と、数であることを見る", () => {
@@ -2211,13 +2290,23 @@ describe("アプリ全体の集計（scope: app）と平均（avg）（M1.4）",
     expect(result.spec.computed).toContainEqual({
       name: "activityCount",
       scope: "app",
-      aggregate: { kind: "count", entity: "activity", name: null, where: {} },
+      aggregate: {
+        kind: "count",
+        entity: "activity",
+        name: null,
+        where: { date: { op: "within", period: "this_month" } },
+      },
       type: "number",
     });
     expect(result.spec.computed).toContainEqual({
       name: "averageCost",
       scope: "app",
-      aggregate: { kind: "avg", entity: "activity", name: "cost", where: {} },
+      aggregate: {
+        kind: "avg",
+        entity: "activity",
+        name: "cost",
+        where: { date: { op: "within", period: "this_month" } },
+      },
       type: "number",
     });
     // 行ごとの計算（attendeeCount）は従来どおり entity を持つ

@@ -1498,6 +1498,58 @@ describe("アプリ全体の集計（scope: app）と平均（avg）を画面へ
   });
 });
 
+// ── 期間の条件（`within`）を画面へ写す（M1.4。Issue #178） ──────────────
+//
+// **宣言からの写像**を見る（`form.test.ts` は入力欄の部品しか見ていない。`docs/parallel-development.md` §7.3）。
+// `within` は見せ方を変えない——**API が求めた今月の値をそのまま出す**（画面は式も集計も評価しない）。
+// ここで確かめるのは「この Issue で足す語彙（`where` の `within`）を含む宣言を画面がそのまま読めること」と、
+// 「その値が画面に出ること」である。`null` は「—」で見せて 0 と区別する。
+
+/** `where` に `within`（今月）を持つアプリ全体の集計を足した宣言 */
+const WITHIN_SPEC: ApiSpecBody = {
+  ...SPEC,
+  spec: {
+    ...SPEC.spec,
+    computed: [
+      ...SPEC.spec.computed,
+      {
+        name: "activityThisMonth",
+        scope: "app",
+        aggregate: {
+          kind: "count",
+          entity: "expense",
+          name: null,
+          where: { date: { op: "within", period: "this_month" } },
+        },
+        type: "number",
+      },
+    ],
+  },
+};
+
+describe("期間の条件（within）を画面へ写す（M1.4）", () => {
+  it("within を含む正規化 JSON を読み、API が返した今月の値をそのまま出す", async () => {
+    const client = makeClient({
+      spec: () => Promise.resolve(okResult(WITHIN_SPEC)),
+      view: () => Promise.resolve(okResult({ ...VIEW, scope: { activityThisMonth: 3 } })),
+    });
+    const { container } = await renderScreen(client);
+
+    expect(container.querySelector('[data-scope="true"]')).not.toBeNull();
+    expect(scopeValueOf(container, "activityThisMonth")).toBe("3");
+  });
+
+  it("今月の活動が 0 件のときは「—」で見せる（0 と区別する）", async () => {
+    const client = makeClient({
+      spec: () => Promise.resolve(okResult(WITHIN_SPEC)),
+      view: () => Promise.resolve(okResult({ ...VIEW, scope: { activityThisMonth: null } })),
+    });
+    const { container } = await renderScreen(client);
+
+    expect(scopeValueOf(container, "activityThisMonth")).toBe("—");
+  });
+});
+
 // ── 表示名（label）を画面へ写す（M1.3。Issue #176） ─────────────────────
 //
 // **宣言からの写像**を見る（`form.test.ts` は入力欄の部品しか見ていない。`04` §7.2・`docs/parallel-development.md` §7.3）。

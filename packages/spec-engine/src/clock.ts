@@ -64,3 +64,40 @@ export function todayInTokyo(clock: Clock): string {
   const shifted = new Date(clock.now() + TOKYO_OFFSET_MINUTES * 60 * 1000);
   return shifted.toISOString().slice(0, 10);
 }
+
+/** 期間の名前（`within` の比べる相手。正本は appspec-schema の `PERIODS`） */
+export type PeriodName = "this_month";
+
+/** 期間の半開区間。`from` は含み、`to` は含まない（どちらも `YYYY-MM-DD`） */
+export interface DateRange {
+  readonly from: string;
+  readonly to: string;
+}
+
+/**
+ * 日本時間（Asia/Tokyo）の**今月**の範囲を、`YYYY-MM-DD` の半開区間 `[from, to)` で返す
+ * （M1.4。Issue #178。`workspace/mvp/m1/00-open-questions.md` Q17）。
+ *
+ *   `from` … 月初の 00:00:00 の日（その日を含む）
+ *   `to`   … 翌月初の 00:00:00 の日（**その日は含まない**）
+ *
+ * **現在時刻は時計からだけ読む**（`clock.now()`）。「今日」と同じく、端末の時間帯でも UTC でもなく、
+ * **日本時間**で数える。日付の値は `YYYY-MM-DD` の文字列なので、**辞書の順が暦の順と一致する**
+ * ——`from <= date < to` で比べられる（docs/semantics.md「within」）。
+ */
+export function thisMonthRangeInTokyo(clock: Clock): DateRange {
+  const today = todayInTokyo(clock);
+  const year = Number(today.slice(0, 4));
+  const month = Number(today.slice(5, 7));
+  const nextYear = month === 12 ? year + 1 : year;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  return {
+    from: `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-01`,
+    to: `${String(nextYear).padStart(4, "0")}-${String(nextMonth).padStart(2, "0")}-01`,
+  };
+}
+
+/** 期間の名前から、その半開区間を求める。知らない名前は `null`（静的チェックが先に断る） */
+export function periodRange(period: PeriodName, clock: Clock): DateRange | null {
+  return period === "this_month" ? thisMonthRangeInTokyo(clock) : null;
+}

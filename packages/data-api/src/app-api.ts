@@ -46,6 +46,7 @@ import {
   API_READ_STATUS,
   APPSPEC_SCHEMA_VERSION_PATTERN,
   FIELD_TYPES,
+  PERIODS,
   actionKind,
   fieldKind,
   fieldLabel,
@@ -328,8 +329,22 @@ function isActionShape(action: unknown): boolean {
 }
 
 /**
+ * 集計の `where` の 1 つの条件（M1.2・M1.4）。**正規化のあとは、どれも `op` を持つオブジェクト**である
+ * （窓口の決定 2026-09-20）。`within`（期間の条件）は、この版の期間の名前（`PERIODS`）を持つ。
+ */
+function isWhereCondition(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value["op"] === "equals" || value["op"] === "contains") return true;
+  return (
+    value["op"] === "within" &&
+    typeof value["period"] === "string" &&
+    (PERIODS as readonly string[]).includes(value["period"])
+  );
+}
+
+/**
  * 集計（`aggregate`）の形（M1.2・M1.4）。`sum`・`avg` は対象の名前を持ち、`count` は持たない。
- * どちらも `where`（項目 → `equals` / `contains`）を持つ。
+ * どちらも `where`（項目 → `op` を持つオブジェクト）を持つ。
  */
 function isAggregateShape(value: unknown): boolean {
   if (!isRecord(value)) return false;
@@ -339,7 +354,7 @@ function isAggregateShape(value: unknown): boolean {
   if (kind === "count" ? value["name"] !== null : typeof value["name"] !== "string") return false;
   const where = value["where"];
   if (!isRecord(where)) return false;
-  return Object.values(where).every((op) => op === "equals" || op === "contains");
+  return Object.values(where).every(isWhereCondition);
 }
 
 /** 精算（`settle`）の宣言の形（M1.2）。支出の entity と、その 3 つの項目の名前を持つ */

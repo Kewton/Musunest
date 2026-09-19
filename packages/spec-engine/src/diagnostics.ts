@@ -89,6 +89,8 @@ export const DIAGNOSTIC_CODES = [
   "LOGIC_AGGREGATE_TARGET_NOT_NUMBER",
   /** 集計の `where` が、集計元の項目と `this` の参照型に合わない（M1.2） */
   "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
+  /** 期間の条件（`within`）の期間の名前が、この版の語彙（`this_month`）に無い（M1.4。Issue #178） */
+  "LOGIC_AGGREGATE_WHERE_PERIOD_NOT_ALLOWED",
   /** 精算（`settle`）の額の項目が、支出の entity の数の項目でない（M1.2） */
   "LOGIC_SETTLE_AMOUNT_NOT_NUMBER",
   /** 精算（`settle`）の払った人・割る人が、精算する entity を指す参照（ref・list of）でない（M1.2） */

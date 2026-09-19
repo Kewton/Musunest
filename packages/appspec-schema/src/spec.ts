@@ -230,16 +230,35 @@ export const COMPUTED_TYPES = ["number", "boolean"] as const;
 export type ComputedType = (typeof COMPUTED_TYPES)[number];
 
 /**
- * 集計の対象を絞る条件（where。M1.2）。集計元の項目の名前 → 比べ方である。
- * 比べる相手は常に `this`（出力先の entity の、今のレコードの ID）である。
- *   `equals`   … 参照（`ref`）の一致（`{payer: this}`）
- *   `contains` … 参照の並び（`list of`）の包含（`{participants: {contains: this}}`）
+ * 期間の名前（`within` の比べる相手。M1.4。Issue #178）。**語彙は閉じている**——いま書けるのは
+ * `this_month`（日本時間の今月）だけである。意味は docs/semantics.md「within」にある。
  */
-export const AGGREGATE_WHERE_OPS = ["equals", "contains"] as const;
+export const PERIODS = ["this_month"] as const;
+export type Period = (typeof PERIODS)[number];
+
+/**
+ * 集計の対象を絞る条件の、1 つの比べ方（where の右側。M1.2・M1.4）。
+ * **正規化のあとは、どれも `op` を持つオブジェクトに揃える**（窓口の決定 2026-09-20）——
+ * 読む側が値ごとに型を見分けなくてよくするためである。
+ *
+ *   `{ op: "equals" }`                       … 参照（`ref`）の一致（書く側は `{payer: this}`）
+ *   `{ op: "contains" }`                     … 参照の並び（`list of`）の包含（書く側は `{participants: {contains: this}}`）
+ *   `{ op: "within", period: this_month }`   … 期間の絞り込み（書く側は `{date: {within: this_month}}`。M1.4）
+ *
+ * `equals`・`contains` の比べる相手は常に `this`（出力先の entity の、今のレコードの ID）である。
+ * `within` の比べる相手は**期間の名前**である。**指せるのは `date` の項目だけ**である（M1.4）。
+ */
+export type AggregateWhereCondition =
+  | { readonly op: "equals" }
+  | { readonly op: "contains" }
+  | { readonly op: "within"; readonly period: Period };
+
+/** 条件の種類（`op`）に書ける名前。意味は docs/semantics.md「aggregate」「within」にある */
+export const AGGREGATE_WHERE_OPS = ["equals", "contains", "within"] as const;
 export type AggregateWhereOp = (typeof AGGREGATE_WHERE_OPS)[number];
 
-/** 集計の条件。空なら全行が対象である。意味は docs/semantics.md「aggregate」にある */
-export type AggregateWhere = Readonly<Record<string, AggregateWhereOp>>;
+/** 集計の条件。空なら全行が対象である。意味は docs/semantics.md「aggregate」「within」にある */
+export type AggregateWhere = Readonly<Record<string, AggregateWhereCondition>>;
 
 /**
  * 集計の種類（M1.2・M1.4）。**語彙は閉じている**——書けるのはこの 3 つだけである。
@@ -262,7 +281,10 @@ export interface Aggregate {
   readonly entity: string;
   /** `sum`・`avg` のときの、対象の項目か計算の名前。`count` では `null` である */
   readonly name: string | null;
-  /** 対象を絞る条件。空なら全行である */
+  /**
+   * 対象を絞る条件。空なら全行である。**条件はどれも `op` を持つオブジェクトである**
+   * （`AggregateWhereCondition`）。`within`（期間の条件）は **`date` の項目だけ**を指せる（M1.4）
+   */
   readonly where: AggregateWhere;
 }
 
@@ -271,8 +293,9 @@ export interface Aggregate {
  *   `app` … アプリ全体で 1 つの値。**どのレコードにも属さない**（`entity` を持たない）
  *
  * アプリ全体の集計は、`where` の `this`（出力先のレコードの ID）を持たない——出力先のレコードが
- * 無いからである。`where` に `this` を書けば静的チェックが `LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH` で断る
- * （期間の条件は M1.4 の #178 で足す）。
+ * 無いからである。`where` に `this`（`equals`・`contains`）を書けば静的チェックが
+ * `LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH` で断る。**期間の条件（`within`）は書ける**（M1.4。Issue #178）
+ * ——比べる相手が時刻ではなく期間の名前だからである。
  */
 export const COMPUTED_SCOPES = ["app"] as const;
 export type ComputedScope = (typeof COMPUTED_SCOPES)[number];
@@ -304,6 +327,7 @@ export interface ComputedAppExpression extends AppScopeNoEntity, LabeledDeclarat
 /**
  * アプリ全体で 1 つの値になる、集計の計算（M1.4。Issue #177）。
  * **`entity` を持たない**——どのレコードにも属さない。`where` は `this` を持てない（`Aggregate` の注記）。
+ * **期間の条件（`within`）は書ける**——比べる相手が時刻ではなく期間の名前だからである（M1.4）
  */
 export interface ComputedAppAggregate extends AppScopeNoEntity, LabeledDeclaration {
   readonly name: string;
@@ -646,6 +670,7 @@ export const VOCABULARY = {
   sum: "logic",
   count: "logic",
   avg: "logic",
+  within: "logic",
   settle: "logic",
   min: "logic",
   max: "logic",
