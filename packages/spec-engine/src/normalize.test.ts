@@ -412,3 +412,71 @@ describe("set と when の正規化（M1.3）", () => {
     expect(utf8(first.json)).toEqual(utf8(second.json));
   });
 });
+
+// ── 一覧（list）と絞り込み（filters）の正規化（M1.3。Issue #158） ──
+//
+// **publish で通り、正規化した JSON に残ること**が受入条件である。data-api と画面はこの JSON だけを
+// 読むので、ここで落ちれば「静的チェックは通るのに画面が動かない」になる（#145 と同じ穴）。
+
+const LIST_SOURCE = [
+  "entities:",
+  "  - name: member",
+  "    fields:",
+  "      name: string",
+  "  - name: task",
+  "    fields:",
+  "      title: string",
+  "      status:",
+  "        type: enum",
+  "        options:",
+  "          todo: 未着手",
+  "          doing: 進行中",
+  "          done: 完了",
+  "        default: todo",
+  "      assignee:",
+  "        type: ref",
+  "        to: member",
+  "views:",
+  "  - name: taskList",
+  "    entity: task",
+  "    type: list",
+  "    show: [title, status, assignee]",
+  "    filters: [assignee, status]",
+  "actions:",
+  "  - name: addTask",
+  "    entity: task",
+  "validations: []",
+  "computed: []",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+describe("一覧（list）と絞り込み（filters）の正規化（M1.3）", () => {
+  it("type: list・show・filters が、書いた順のまま JSON に残る（受入条件）", async () => {
+    const result = await normalized(LIST_SOURCE);
+    // 並びは配列の順で比べる（show は画面の項目の順、filters は選択肢の順になる）
+    expect(result.app.spec.views).toEqual([
+      {
+        name: "taskList",
+        entity: "task",
+        type: "list",
+        show: ["title", "status", "assignee"],
+        filters: ["assignee", "status"],
+      },
+    ]);
+  });
+
+  it("show と filters を書かなければ、欄そのものが無い（M1.1・M1.2 の宣言に欄を足さない）", async () => {
+    const source = LIST_SOURCE.replace("    show: [title, status, assignee]\n", "").replace(
+      "    filters: [assignee, status]\n",
+      "",
+    );
+    const result = await normalized(source);
+    expect(result.app.spec.views[0]).toEqual({ name: "taskList", entity: "task", type: "list" });
+  });
+});

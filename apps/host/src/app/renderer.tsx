@@ -39,6 +39,8 @@ import { AddForm } from "./form";
 import type { AddFormResult, FormField, FormOption } from "./form";
 import { SettlementList } from "./settlement";
 import { Board } from "./board";
+import { ListScreen } from "./list";
+import type { FilterField } from "./list";
 import "./renderer.css";
 
 /** 読めなかった理由。**状態を1つに潰さない**（未存在・権限不足・通信失敗を区別して描く） */
@@ -228,6 +230,17 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           entity={entity}
           columns={declaration.columns}
           highlight={declaration.highlight}
+          labelOf={(field, value) => displayOf(entity, references, field, value)}
+          setActions={setActions}
+          onRunAction={(actionName, id) => void runSetAction(actionName, id)}
+        />
+      ) : declaration?.type === "list" ? (
+        // 一覧（M1.3）。`show` の順に縦へ積み、`filters` で**画面の中だけ**で絞り込む。
+        // **空・0 件の見せ方は部品が持つ**——行が無いときと、絞り込んだ結果が 0 件のときで文言を分ける
+        <ListScreen
+          view={view}
+          show={declaration.show}
+          filters={filterFields(declaration.filters, entity, references)}
           labelOf={(field, value) => displayOf(entity, references, field, value)}
           setActions={setActions}
           onRunAction={(actionName, id) => void runSetAction(actionName, id)}
@@ -640,6 +653,39 @@ function optionsOf(references: readonly ReferenceData[], target: string): readon
   const data = references.find((item) => item.entity === target);
   if (data === undefined) return [];
   return data.rows.map((row) => ({ value: row.id, label: labelOf(data, row.id) }));
+}
+
+/**
+ * 絞り込みの候補（宣言の `filters` の順。M1.3）。**`enum` か `ref` の項目だけ**を返す——
+ * 値の候補を宣言から機械で出せるのが、この 2 つの型だけだからである（docs/semantics.md「filters」）。
+ * `enum` は宣言の `options`（**送るのはキー、見せるのは表示名**）を、`ref` は参照先の一覧の行
+ * （**送るのは ID、見せるのは名前**）を候補にする。
+ *
+ * 読めない名前は落とす（**画面は候補をでっち上げない**。正しい宣言では、静的チェックが
+ * `UI_FILTER_FIELD_NOT_SHOWN`・`UI_FILTER_FIELD_NOT_FILTERABLE` で先に断る）。
+ */
+export function filterFields(
+  names: readonly string[] | undefined,
+  entity: Entity | undefined,
+  references: readonly ReferenceData[] = [],
+): FilterField[] {
+  if (names === undefined || entity === undefined) return [];
+  const fields: FilterField[] = [];
+  for (const name of names) {
+    const declaration = entity.fields[name];
+    if (declaration === undefined || typeof declaration === "string") continue;
+    if (declaration.type === "enum") {
+      fields.push({
+        name,
+        options: Object.entries(declaration.options).map(([value, label]) => ({ value, label })),
+      });
+      continue;
+    }
+    const target = fieldTarget(declaration);
+    if (target === null) continue;
+    fields.push({ name, options: optionsOf(references, target) });
+  }
+  return fields;
 }
 
 /**

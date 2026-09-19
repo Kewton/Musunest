@@ -394,25 +394,32 @@ export const COMPARISON_OPERATORS = [">", ">=", "<", "<=", "==", "!="] as const;
 // ── UI 層 ───────────────────────────────────────────────────────
 
 /**
- * 一覧の種類（M1.2・M1.3。04 §7.3）。`views` の `type` に書ける語彙は**この 3 つだけ**である。
+ * 一覧の種類（M1.2・M1.3。04 §7.3）。`views` の `type` に書ける語彙は**この 4 つだけ**である。
  *   `table`      … 表。項目と計算を列に並べる（`show` で列と順を選べる）
  *   `settlement` … 精算の表示。API が返した送金の並び（送金元・送金先の ID と額）を、
  *                  メンバーの名前に対応づけて見せる。**画面は計算しない**（`03` §2.3）
  *   `board`      … ボード（M1.3）。`columns` が指す選択肢（`enum`）の**キーの順**に列を作り、
  *                  その値ごとにカードを並べる。`highlight` が指す真偽の計算が真の行に印を付ける
+ *   `list`       … 一覧（M1.3）。**縦に積む**見せ方で、狭い画面に向く。`show` の扱いは `table` と
+ *                  揃え、`filters` で画面の中を絞り込める（docs/semantics.md「view」「filters」）
+ *
+ * **`list` は、データ層の項目の型 `list`（文字列の並び）と同じ語である**——1 つの語が 2 つの層に
+ * 現れるのは、この語だけである（語彙の台帳は 1 行 1 語彙なので、画面の種類の側は台帳に行を分けず、
+ * 「view」の節で扱う。`vocabulary.yaml` の注記も見ること）。
  */
-export const VIEW_TYPES = ["table", "settlement", "board"] as const;
+export const VIEW_TYPES = ["table", "settlement", "board", "list"] as const;
 export type ViewType = (typeof VIEW_TYPES)[number];
 
 /**
  * 一覧。種類の指定の無い一覧（M1.1）は、その entity のすべてのレコードを登録順に並べる。
  *
- * M1.2 で `type` と `show` を足し、M1.3 でボード（`board`）の `columns`・`highlight` を足した。
- * **書ける欄は `type` が決める**（語彙は閉じている）。
+ * M1.2 で `type` と `show` を足し、M1.3 でボード（`board`）の `columns`・`highlight` と、
+ * 一覧（`list`）の `filters` を足した。**書ける欄は `type` が決める**（語彙は閉じている）。
  *   `type` なし（M1.1 と同じ）… `name`・`entity` だけ
  *   `type: table`            … 上に `type`・`show`
  *   `type: settlement`       … 上に `type`。`show` は書けない（列の並びを持たない）
  *   `type: board`            … 上に `type`・`columns`（必須）・`highlight`（任意）
+ *   `type: list`             … 上に `type`・`show`（任意。扱いは `table` と同じ）・`filters`（任意）
  */
 export interface View {
   readonly name: string;
@@ -422,7 +429,7 @@ export interface View {
   /**
    * 表に出す、同じ entity の項目と計算（行ごとの値になる計算）の名前。
    * **書いた順が列の順**になる。書かなければ、項目（宣言の順）に続いて計算（宣言の順）である。
-   * 実在しない名前は静的チェックが `UI_FIELD_NOT_FOUND` で断る。`type: table` のときだけ書ける。
+   * 実在しない名前は静的チェックが `UI_FIELD_NOT_FOUND` で断る。`type: table` と `type: list` で書ける。
    */
   readonly show?: readonly string[];
   /**
@@ -438,6 +445,19 @@ export interface View {
    * 真偽を返す計算でなければ、静的チェックが `UI_HIGHLIGHT_NOT_BOOLEAN` で断る。
    */
   readonly highlight?: string;
+  /**
+   * 一覧（`type: list`）で、**画面が選んで絞り込む**項目の名前（M1.3。UX 層。`04` §7.1）。
+   * `show` に並べた名前のうち、**選択肢（`enum`）か参照（`ref`）の項目だけ**を指せる——
+   * 値の候補を宣言から機械で出せるのが、この 2 つだけだからである（docs/semantics.md「filters」）。
+   *
+   * - 実在しない、または `show` に無い名前は静的チェックが `UI_FILTER_FIELD_NOT_SHOWN` で断る
+   * - `enum` でも `ref` でもない項目は `UI_FILTER_FIELD_NOT_FILTERABLE` で断る
+   *
+   * **絞り込みは画面の中で行う。** Data API には絞り込みの引数を足さない（M1.3 は読むのは全件のまま。
+   * 上限は M1.5）。選んだ値は**再読み込みで消えてよい**（持ち回さない）。
+   * `type: list` のときだけ書ける（ほかの種類は列の並びを持たない）。
+   */
+  readonly filters?: readonly string[];
 }
 
 // ── 権限 ────────────────────────────────────────────────────────
@@ -530,6 +550,7 @@ export const VOCABULARY = {
   table: "ui",
   settlement: "ui",
   board: "ui",
+  filters: "ux",
   permission: "permission",
   anonymous: "permission",
 } as const satisfies Record<string, Layer>;

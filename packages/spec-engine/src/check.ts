@@ -1052,13 +1052,13 @@ function readActions(items: readonly YamlNode[], report: Report): readonly Actio
   return actions;
 }
 
-/** 表（`type: table`）の `show` の 1 つ。実在は、entity と計算を読んだあとで見る（`UI_FIELD_NOT_FOUND`） */
+/** 表（`type: table`）と一覧（`type: list`）の `show` / `filters` の 1 つ。実在を見るのは、entity と計算を読んだあと */
 interface ShowFieldDraft {
   readonly name: string;
   readonly node: YamlNode;
 }
 
-/** 一覧（`views`）。M1.2 で `type`（種類）と `show`（表に出す名前の順）、M1.3 でボードの `columns`・`highlight` を足した */
+/** 一覧（`views`）。M1.2 で `type`（種類）と `show`（表に出す名前の順）、M1.3 でボードの `columns`・`highlight` と、一覧の `filters` を足した */
 interface ViewDraft extends EntityReferenceDraft {
   /** 一覧の種類。書いていなければ `null`（種類の指定の無い一覧。M1.1 と同じ） */
   readonly type: ViewType | null;
@@ -1068,6 +1068,8 @@ interface ViewDraft extends EntityReferenceDraft {
   readonly columns: ShowFieldDraft | null;
   /** ボードで強調する行を選ぶ計算の名前。`highlight` を書いていなければ `null`（M1.3） */
   readonly highlight: ShowFieldDraft | null;
+  /** 画面で絞り込む項目の名前（宣言の順）。`filters` を書いていなければ `null`（M1.3） */
+  readonly filters: readonly ShowFieldDraft[] | null;
 }
 
 /**
@@ -1097,18 +1099,36 @@ function readViewType(member: MemberReader, report: Report): ViewType | null {
   return written as ViewType;
 }
 
-/** 表の `show`（出す項目と計算の名前。宣言の順）を読む。実在は、entity と計算を読んだあとで見る */
-function readViewShow(member: MemberReader, report: Report): readonly ShowFieldDraft[] | null {
-  const entry = entryOf(member.map, "show");
+/**
+ * 一覧の、名前を並べる欄（表と一覧の `show`、一覧の `filters`。M1.3）を読む。
+ * **実在と種類は、entity と計算を読んだあとで見る**（`UI_FIELD_NOT_FOUND`・
+ * `UI_FILTER_FIELD_NOT_SHOWN`・`UI_FILTER_FIELD_NOT_FILTERABLE`）。
+ */
+function readViewNames(
+  member: MemberReader,
+  key: "show" | "filters",
+  report: Report,
+): readonly ShowFieldDraft[] | null {
+  const entry = entryOf(member.map, key);
   if (entry === undefined) return null;
   if (entry.value.kind !== "seq") {
-    report("SHAPE_VALUE_INVALID", "view の show は、出す名前を並べた [a, b] で書く", positionOf(entry.value));
+    report(
+      "SHAPE_VALUE_INVALID",
+      key === "show"
+        ? "view の show は、出す名前を並べた [a, b] で書く"
+        : "view の filters は、絞り込む項目の名前を並べた [a, b] で書く",
+      positionOf(entry.value),
+    );
     return null;
   }
   const fields: ShowFieldDraft[] = [];
   for (const item of entry.value.items) {
     if (item.kind !== "scalar" || item.text === "") {
-      report("SHAPE_VALUE_INVALID", "view の show には、項目か計算の名前を書く", positionOf(item));
+      report(
+        "SHAPE_VALUE_INVALID",
+        key === "show" ? "view の show には、項目か計算の名前を書く" : "view の filters には、項目の名前を書く",
+        positionOf(item),
+      );
       continue;
     }
     fields.push({ name: item.text, node: item });
@@ -1149,6 +1169,8 @@ const VIEW_KEYS: Readonly<Record<ViewType, readonly string[]>> = {
   settlement: ["name", "entity", "type"],
   // ボード（M1.3）。列にする選択肢の項目（`columns`）と、強調する計算（`highlight`）
   board: ["name", "entity", "type", "columns", "highlight"],
+  // 一覧（M1.3）。`show` の扱いは `table` と揃え、画面で絞り込む項目（`filters`）を持てる
+  list: ["name", "entity", "type", "show", "filters"],
 };
 
 /**
@@ -1157,6 +1179,7 @@ const VIEW_KEYS: Readonly<Record<ViewType, readonly string[]>> = {
  *   `table`     … 上に `type`・`show`
  *   `settlement`… 上に `type`                 （列の並びを持たないので `show` は書けない）
  *   `board`     … 上に `type`・`columns`（必須）・`highlight`（任意。M1.3）
+ *   `list`      … 上に `type`・`show`・`filters`（M1.3）
  */
 function readViews(items: readonly YamlNode[], report: Report): readonly ViewDraft[] {
   const views: ViewDraft[] = [];
@@ -1172,16 +1195,19 @@ function readViews(items: readonly YamlNode[], report: Report): readonly ViewDra
     const name = member.text("name");
     if (name !== null) checkName(name.text, "view", positionOf(name.node), report);
     const entity = member.text("entity");
+    const hasShow = type === "table" || type === "list";
     views.push({
       name: name?.text ?? "",
       nameNode: name?.node ?? null,
       entity: entity?.text ?? "",
       entityNode: entity?.node ?? { kind: "null", line: 0, column: 0 },
       type,
-      show: type === "table" ? readViewShow(member, report) : null,
+      show: hasShow ? readViewNames(member, "show", report) : null,
       // ボードの `columns` は必須である（列が無ければボードにならない）。`highlight` は任意である
       columns: type === "board" ? readViewName(member, "columns", true, report) : null,
       highlight: type === "board" ? readViewName(member, "highlight", false, report) : null,
+      // 絞り込み（`filters`）は一覧（`type: list`）でだけ書ける（M1.3）
+      filters: type === "list" ? readViewNames(member, "filters", report) : null,
     });
   });
   checkDuplicates(
@@ -2224,7 +2250,7 @@ function buildSpec(drafts: Drafts): AppSpec | null {
   }
   return {
     entities: built,
-    // 種類（`type`）と、種類ごとの欄（`show`・`columns`・`highlight`）は、書いてあるときだけ入れる
+    // 種類（`type`）と、種類ごとの欄（`show`・`columns`・`highlight`・`filters`）は、書いてあるときだけ入れる
     // （M1.1 の宣言に欄を足さない）
     views: views.map((draft) => ({
       name: draft.name,
@@ -2233,6 +2259,7 @@ function buildSpec(drafts: Drafts): AppSpec | null {
       ...(draft.show === null ? {} : { show: draft.show.map((field) => field.name) }),
       ...(draft.columns === null ? {} : { columns: draft.columns.name }),
       ...(draft.highlight === null ? {} : { highlight: draft.highlight.name }),
+      ...(draft.filters === null ? {} : { filters: draft.filters.map((field) => field.name) }),
     })),
     // 種類（`kind`）と、M1.3 の `set`・`when` は**書いてあるときだけ**入れる
     // （M1.1・M1.2 の宣言に欄を足さない。`kind` の省略は create である）
@@ -2402,6 +2429,36 @@ function inspect(source: string, report: Report): Drafts | null {
           `view ${view.name} の highlight の ${highlightName} が、entity ${entity.name} の真偽を返す計算でない`,
           positionOf(view.highlight.node),
         );
+      }
+    }
+    // 絞り込み（`filters`。M1.3）は、**`show` に並べた名前のうち、選択肢（`enum`）か参照（`ref`）の
+    // 項目だけ**を指さなければならない——値の候補を宣言から機械で出せるのが、この 2 つの型だけだから
+    // である（docs/semantics.md「filters」）。`show` を書いていなければ、項目（宣言の順）が並ぶ
+    if (view.filters !== null) {
+      const shown =
+        view.show === null ? entity.fields.map((field) => field.name) : view.show.map((field) => field.name);
+      for (const filter of view.filters) {
+        if (!shown.includes(filter.name)) {
+          report(
+            "UI_FILTER_FIELD_NOT_SHOWN",
+            `view ${view.name} の filters の ${filter.name} が、show に無い`,
+            positionOf(filter.node),
+          );
+          // `show` に無い名前は、種類を見るまでもない（1 つの誤りを 2 つのコードにしない）
+          continue;
+        }
+        const field = entity.fields.find((candidate) => candidate.name === filter.name);
+        const filterable =
+          field !== undefined &&
+          field.declaration !== null &&
+          (isEnumField(field.declaration) || fieldKind(field.declaration) === "ref");
+        if (!filterable) {
+          report(
+            "UI_FILTER_FIELD_NOT_FILTERABLE",
+            `view ${view.name} の filters の ${filter.name} が、entity ${entity.name} の選択肢（enum）でも参照（ref）でもない`,
+            positionOf(filter.node),
+          );
+        }
       }
     }
   }

@@ -149,6 +149,20 @@
       "why": "項目 amount の型 integer は M1.1 の型（string / number / list）に無い"
     },
     {
+      "name": "filters-field-not-shown",
+      "codes": [
+        "UI_FILTER_FIELD_NOT_SHOWN"
+      ],
+      "why": "一覧（type: list）の filters の status が、show（title だけ）に無い（M1.3）"
+    },
+    {
+      "name": "filters-unsupported-field",
+      "codes": [
+        "UI_FILTER_FIELD_NOT_FILTERABLE"
+      ],
+      "why": "一覧（type: list）の filters が、選択肢（enum）でも参照（ref）でもない数の項目 estimate を指している（M1.3）"
+    },
+    {
       "name": "highlight-not-boolean",
       "codes": [
         "UI_HIGHLIGHT_NOT_BOOLEAN"
