@@ -13,6 +13,7 @@ import {
   getInstance,
   registerApp,
   registerInstance,
+  replaceInstance,
   resolveInstanceApp,
 } from "./index.js";
 
@@ -26,13 +27,13 @@ describe("control-plane パッケージ", () => {
   });
 
   it("アプリ・インスタンスの登録、取得、解決を公開する", () => {
-    for (const fn of [registerApp, getApp, registerInstance, getInstance, resolveInstanceApp]) {
+    for (const fn of [registerApp, getApp, registerInstance, getInstance, resolveInstanceApp, replaceInstance]) {
       expect(typeof fn).toBe("function");
     }
   });
 
   it("失敗はコードで分ける（呼ぶ側が例外の文言に依存しない）", () => {
-    expect(REGISTRY_ERROR_CODES).toEqual(["app_conflict", "instance_conflict", "app_not_found"]);
+    expect(REGISTRY_ERROR_CODES).toEqual(["app_conflict", "instance_conflict", "app_not_found", "replacement_conflict"]);
 
     const error = new RegistryError("app_not_found", "未登録のアプリを指すインスタンスは登録できない");
     expect(error).toBeInstanceOf(Error);

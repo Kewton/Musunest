@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 import { readNegativeIndex } from "@musunest/appspec-schema";
 import { negativeIndexFile, negativeSpecFile, sampleSpecFile } from "@musunest/appspec-schema/files";
+import type { AppSpec } from "@musunest/appspec-schema";
 import { checkSpec, normalizeSpec } from "@musunest/spec-engine";
 import {
   APP_INSTANCES_TABLE,
@@ -27,9 +28,11 @@ import {
 import { getApp, getInstance, resolveInstanceApp } from "./registry.js";
 import {
   publishSpec,
+  isReplaceableDeclaration,
   normalizedObjectKey,
   sourceObjectKey,
   type PublishResult,
+  type SpecReader,
   type SpecWriter,
 } from "./publish.js";
 
@@ -125,9 +128,11 @@ class FlakyExecutor implements RegistryExecutor {
   }
 }
 
-/** R2 の偽物。書けたものを記録し、n 回目の呼び出しだけ失敗させられる。 */
-class RecordingSpecWriter implements SpecWriter {
+/** R2 の偽物。書けたものを記録し、n 回目の書き込みだけ失敗させられる。読み（#175 の差し替え）もできる。 */
+class RecordingSpecWriter implements SpecWriter, SpecReader {
   readonly writes: { key: string; body: string }[] = [];
+  /** 置いてあるオブジェクト（キー → 本文）。`read` はここから返す（R2 の GET の代わり） */
+  readonly objects = new Map<string, string>();
   #calls = 0;
 
   constructor(private readonly failAt = 0) {}
@@ -136,6 +141,13 @@ class RecordingSpecWriter implements SpecWriter {
     this.#calls += 1;
     if (this.#calls === this.failAt) throw new Error("R2 unavailable（値は出さない）");
     this.writes.push({ key, body });
+    this.objects.set(key, body);
+  }
+
+  async read(key: string): Promise<unknown> {
+    const body = this.objects.get(key);
+    if (body === undefined) throw new Error("R2 に無い（値は出さない）");
+    return JSON.parse(body) as unknown;
   }
 }
 
@@ -383,5 +395,207 @@ describe("各段の失敗は成功を返さず、後ろの段を行わない。�
     expect(await resolveInstanceApp(executor, INSTANCE)).toEqual(retried.app);
     // R2 には 2 個（同じキーへの上書きなので、キーは 2 つだけ）
     expect(new Set(specs.writes.map((w) => w.key)).size).toBe(2);
+  });
+});
+
+// ── 5. はっきり差し替える（--replace・#175）──────────────────────────
+//
+//   1. 差し替えてよい宣言（項目を足す）なら通り、登録簿の行が新しい原本の SHA-256 を指す
+//   2. 差し替えてよい宣言でなければ replacement_conflict で断り、**登録簿の行も R2 も変えない**
+//   3. 差し替えない（`replace` なし）既定の挙動は instance_conflict のまま（上の describe が見る）
+//   4. 前の原本の正規化した JSON を読めなければ断る
+
+/** 差し替えの試験に使う、entity が 1 つの最小の宣言（検査に通る） */
+const BASE_DECLARATION = [
+  "entities:",
+  "  - name: task",
+  "    fields:",
+  "      title: string",
+  "      done: string",
+  "views: []",
+  "actions: []",
+  "validations: []",
+  "computed: []",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+/** 項目を足した宣言（差し替えてよい） */
+const ADDED_FIELD = BASE_DECLARATION.replace("      done: string\n", "      done: string\n      memo: string\n");
+/** 一覧（UI 層）を足した宣言（データ層が変わらないので、差し替えてよい） */
+const ADDED_VIEW = BASE_DECLARATION.replace(
+  "views: []",
+  ["views:", "  - name: taskList", "    entity: task", "    type: table", "    show: [title, done]"].join("\n"),
+);
+/** 項目を消した宣言（差し替えてはならない） */
+const REMOVED_FIELD = BASE_DECLARATION.replace("      done: string\n", "");
+/** 型を変えた宣言（差し替えてはならない） */
+const RETYPED_FIELD = BASE_DECLARATION.replace("      done: string", "      done: number");
+/** entity の名前を変えた宣言（差し替えてはならない） */
+const RENAMED_ENTITY = BASE_DECLARATION.replace("  - name: task", "  - name: todo");
+
+describe("はっきり差し替える（--replace・#175）", () => {
+  it("項目を足す差し替えは通り、登録簿の行が新しい原本の SHA-256 を指す", async () => {
+    const { executor } = newRegistry();
+    const specs = new RecordingSpecWriter();
+
+    const first = await publishSpec({ specs, registry: executor }, { source: BASE_DECLARATION, instanceId: INSTANCE });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const replaced = await publishSpec(
+      { specs, registry: executor, readSpec: specs },
+      { source: ADDED_FIELD, instanceId: INSTANCE, replace: true },
+    );
+    expect(replaced.ok, JSON.stringify(replaced)).toBe(true);
+    if (!replaced.ok) return;
+
+    // 登録簿の行は新しい原本を指し、前の原本の SHA-256 が結果に残る（受入条件）
+    expect(replaced.app.sourceSha256).not.toBe(first.app.sourceSha256);
+    expect(replaced.replacedSourceSha256).toBe(first.app.sourceSha256);
+    expect(replaced.instance).toEqual({ instanceId: INSTANCE, sourceSha256: replaced.app.sourceSha256, createdAt: first.instance.createdAt });
+    expect(await getInstance(executor, INSTANCE)).toEqual(replaced.instance);
+    expect(await resolveInstanceApp(executor, INSTANCE)).toEqual(replaced.app);
+    // 前のアプリの行は残る（巻き戻すときの材料）
+    expect(await getApp(executor, first.app.sourceSha256)).toEqual(first.app);
+    expect(await countRows(executor, APPS_TABLE)).toBe(2);
+    expect(await countRows(executor, APP_INSTANCES_TABLE)).toBe(1);
+
+    // 差し替えたあとに同じ原本をもう一度置いても落ちない（2 回目は差し替えではない）
+    const again = await publishSpec(
+      { specs, registry: executor, readSpec: specs },
+      { source: ADDED_FIELD, instanceId: INSTANCE, replace: true },
+    );
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+    expect(again.replacedSourceSha256).toBeNull();
+    expect(again.instance).toEqual(replaced.instance);
+    expect(await countRows(executor, APP_INSTANCES_TABLE)).toBe(1);
+  });
+
+  it("データ層が変わらない差し替え（一覧を足す）も通る", async () => {
+    const { executor } = newRegistry();
+    const specs = new RecordingSpecWriter();
+    const first = await publishSpec({ specs, registry: executor }, { source: BASE_DECLARATION, instanceId: INSTANCE });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const replaced = await publishSpec(
+      { specs, registry: executor, readSpec: specs },
+      { source: ADDED_VIEW, instanceId: INSTANCE, replace: true },
+    );
+    expect(replaced.ok, JSON.stringify(replaced)).toBe(true);
+    if (!replaced.ok) return;
+    expect(replaced.replacedSourceSha256).toBe(first.app.sourceSha256);
+  });
+
+  it.each([
+    ["項目を消す", REMOVED_FIELD],
+    ["型を変える", RETYPED_FIELD],
+    ["entity の名前を変える", RENAMED_ENTITY],
+  ])("%s 差し替えは replacement_conflict で断り、登録簿の行も R2 も変えない", async (_, source) => {
+    const { executor } = newRegistry();
+    const specs = new RecordingSpecWriter();
+    const first = await publishSpec({ specs, registry: executor }, { source: BASE_DECLARATION, instanceId: INSTANCE });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const writesBefore = specs.writes.length;
+
+    const refused = expectRejected(
+      await publishSpec({ specs, registry: executor, readSpec: specs }, { source, instanceId: INSTANCE, replace: true }),
+    );
+
+    expect(refused.failure.stage).toBe("instance");
+    expect(refused.failure.code).toBe("replacement_conflict");
+    // 断ると分かった時点で止める（R2 へも D1 へも書かない）
+    expect(specs.writes.length).toBe(writesBefore);
+    expect(await getInstance(executor, INSTANCE)).toEqual(first.instance);
+    expect(await resolveInstanceApp(executor, INSTANCE)).toEqual(first.app);
+    expect(await countRows(executor, APPS_TABLE)).toBe(1);
+    expect(await countRows(executor, APP_INSTANCES_TABLE)).toBe(1);
+  });
+
+  it("前の原本を読む口が無ければ断る（R2 にも D1 にも書かない）", async () => {
+    const { executor } = newRegistry();
+    const specs = new RecordingSpecWriter();
+    const first = await publishSpec({ specs, registry: executor }, { source: BASE_DECLARATION, instanceId: INSTANCE });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const writesBefore = specs.writes.length;
+
+    const refused = expectRejected(
+      await publishSpec({ specs, registry: executor }, { source: ADDED_FIELD, instanceId: INSTANCE, replace: true }),
+    );
+
+    expect(refused.failure.stage).toBe("instance");
+    expect(refused.failure.code).toBe("replacement_conflict");
+    expect(specs.writes.length).toBe(writesBefore);
+    expect(await getInstance(executor, INSTANCE)).toEqual(first.instance);
+  });
+
+  it("前の原本の正規化した JSON を読めなければ断る（R2 の応答を信用しない）", async () => {
+    const { executor } = newRegistry();
+    const specs = new RecordingSpecWriter();
+    const first = await publishSpec({ specs, registry: executor }, { source: BASE_DECLARATION, instanceId: INSTANCE });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    // 前の原本の正規化した JSON が読めない（R2 の GET が落ちた形）
+    const broken: SpecReader = {
+      read: async () => {
+        throw new Error("R2 unavailable（値は出さない）");
+      },
+    };
+    const refused = expectRejected(
+      await publishSpec({ specs, registry: executor, readSpec: broken }, { source: ADDED_FIELD, instanceId: INSTANCE, replace: true }),
+    );
+
+    expect(refused.failure.code).toBe("replacement_conflict");
+    expect(await getInstance(executor, INSTANCE)).toEqual(first.instance);
+    expect(await resolveInstanceApp(executor, INSTANCE)).toEqual(first.app);
+  });
+
+  it("まだ無いインスタンスへ --replace しても、新規として置ける（差し替えではない）", async () => {
+    const { executor } = newRegistry();
+    const specs = new RecordingSpecWriter();
+
+    const created = await publishSpec(
+      { specs, registry: executor, readSpec: specs },
+      { source: BASE_DECLARATION, instanceId: INSTANCE, replace: true },
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    expect(created.replacedSourceSha256).toBeNull();
+    expect(await countRows(executor, APP_INSTANCES_TABLE)).toBe(1);
+  });
+});
+
+describe("isReplaceableDeclaration：差し替えてよい宣言か（純粋関数・#175）", () => {
+  /** 宣言（YAML）を検査して、正規化した成果物にする */
+  const normalized = async (source: string): Promise<{ spec: AppSpec }> => {
+    const result = await normalizeSpec(source);
+    if (!result.ok) throw new Error("検査に通らない宣言（試験の作りが悪い）");
+    return result.app;
+  };
+
+  it.each([
+    ["項目を足す", ADDED_FIELD, true],
+    ["一覧を足す", ADDED_VIEW, true],
+    ["項目を消す", REMOVED_FIELD, false],
+    ["型を変える", RETYPED_FIELD, false],
+    ["entity の名前を変える", RENAMED_ENTITY, false],
+  ])("%s：%s", async (_, source, expected) => {
+    const before = await normalized(BASE_DECLARATION);
+    const after = await normalized(source);
+    expect(isReplaceableDeclaration(before, after.spec)).toBe(expected);
+  });
+
+  it("前の正規化した JSON の形が読めなければ、差し替えない（false）", async () => {
+    const after = await normalized(ADDED_FIELD);
+    for (const previous of [undefined, null, "x", 1, {}, { spec: {} }, { spec: { entities: "x" } }, { spec: { entities: [{}] } }]) {
+      expect(isReplaceableDeclaration(previous, after.spec), JSON.stringify(previous)).toBe(false);
+    }
   });
 });

@@ -82,14 +82,21 @@ export interface AppInstanceRegistration {
   readonly sourceSha256: string;
 }
 
-export const REGISTRY_ERROR_CODES = ["app_conflict", "instance_conflict", "app_not_found"] as const;
+export const REGISTRY_ERROR_CODES = [
+  "app_conflict",
+  "instance_conflict",
+  "app_not_found",
+  "replacement_conflict",
+] as const;
 export type RegistryErrorCode = (typeof REGISTRY_ERROR_CODES)[number];
 
 /**
  * 登録の失敗。原因はコードで分ける（呼ぶ側が例外の文言に依存しないように）。
- *   app_conflict      … 同じ SHA-256 に内容の違う宣言を登録しようとした
- *   instance_conflict … 既存インスタンスの宣言を暗黙に差し替えようとした
- *   app_not_found     … 未登録のアプリを指すインスタンスを登録しようとした
+ *   app_conflict         … 同じ SHA-256 に内容の違う宣言を登録しようとした
+ *   instance_conflict    … 既存インスタンスの宣言を暗黙に差し替えようとした（または差し替えの途中で別の書き込みが入った）
+ *   app_not_found        … 未登録のアプリを指すインスタンスを登録しようとした
+ *   replacement_conflict … はっきり差し替えようとしたが、差し替えてよい宣言ではない（#175）。
+ *                          保存済みのレコードの読み方を変える差し替え（項目を消す・型を変える・entity の名前を変える）を断る
  */
 export class RegistryError extends Error {
   readonly code: RegistryErrorCode;

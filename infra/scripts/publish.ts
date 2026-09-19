@@ -16,6 +16,18 @@
 //     （想定外の例外は種別だけ）。Cloudflare の API のエラー本文も出さない
 //   - 原本のパスは引数。読めなければ API を呼ばずに止める
 //
+// ── 「はっきり差し替える」（--replace・#175）────────────────────────────────
+//
+//   宣言の語彙を足す Issue は、その語彙を使う見本を同じ Issue で書き換える（docs/parallel-development.md
+//   §7.2）。**見本の原本 SHA-256 が変わる**ので、既定の publish（暗黙に差し替えない）では
+//   `instance_conflict` で止まる。`--replace` を付けると、**はっきり差し替える**。
+//
+//   - **既定（--replace 無し）の挙動は変えない。** 参照先が違う SHA-256 なら `instance_conflict` で断る
+//   - 差し替えてよい宣言かの判定は @musunest/control-plane が持つ（ここに判定を複製しない）。
+//     ここが足すのは、**前の原本を読む口**（R2 の GET）と、**前後の SHA-256 の表示**だけである
+//   - 差し替えたときは、前の原本の SHA-256 と、後の原本の SHA-256 を出す。**ホスト名・オリジン・
+//     バケット名・Account ID は出さない**（CLAUDE.md。SHA-256 は原本のバイト列の digest である）
+//
 // ── なぜ Cloudflare の API を直接叩くか（wrangler を使わないか）────────────────────
 //
 // D1 の登録は**束縛引数**で値を渡す（registry.ts の規律。値を SQL へ埋め込むと、引用符を含む ID で
@@ -32,6 +44,7 @@ import {
   publishSpec,
   type PublishResult,
   type RegistryExecutor,
+  type SpecReader,
   type SpecWriter,
   type SqlResult,
   type SqlRow,
@@ -185,10 +198,15 @@ const USAGE = `usage: pnpm exec tsx infra/scripts/publish.ts --env <${PUBLISHABL
   --env <env>        ${PUBLISHABLE_ENVS.join(" / ")} だけ。${ENVS.filter((e) => !PUBLISHABLE_ENVS.includes(e)).join(" / ")} は書き込みの前に断る
   --instance <id>    宣言を使うインスタンスの ID（${INSTANCE_PATTERN.source}）
   --spec <path>      原本（app.spec.yaml）のパス。リポジトリの直下からの相対、または絶対
+  --replace          既存インスタンスの宣言を、**はっきり差し替える**（既定は差し替えない）。
+                     差し替えてよい宣言でなければ replacement_conflict で断る（R2 にも D1 にも書かない）
 
 検査 → 正規化 → R2（原本と正規化した JSON の 2 個）→ D1（アプリ → インスタンス）の順に置く。
 検査に通らない宣言は R2 にも D1 にも書かない。R2 のどちらかで失敗したら登録せず、D1 で失敗したら成功と報告しない。
 同じ入力の再実行で復旧できる。${DATA_API_CONFIG} の env.<env> の ${CONTROL_DB_BINDING} と ${BUNDLES_BINDING} を使う。
+--replace のときは、**R2 へ書く前に**、前の原本の正規化した JSON を読んで、差し替えてよい宣言かを確かめる
+（データ層が広がる差し替えだけを通す。packages/appspec-schema/docs/semantics.md「宣言の差し替え」）。
+差し替えたときは、前の原本の SHA-256 と、後の原本の SHA-256 を出す。
 資格情報は環境変数 CLOUDFLARE_API_TOKEN（D1 Write・Workers R2 Storage: Edit）と CLOUDFLARE_ACCOUNT_ID（アカウント①）。
 成功は exit ${EXIT_OK}、失敗は exit ${EXIT_NG}。トークン・Account ID・バケット名・R2 のキー・URL は出さない。`;
 
@@ -216,6 +234,7 @@ function parseCliArgs(argv: readonly string[]) {
         env: { type: "string" },
         instance: { type: "string" },
         spec: { type: "string" },
+        replace: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
       strict: true,
@@ -257,20 +276,27 @@ async function run(argv: readonly string[], io: CliIo): Promise<number> {
   }
   const specPath = values.spec;
   if (specPath === undefined || specPath === "") throw new PublishError(`--spec が無い（原本 app.spec.yaml のパス）\n${USAGE}`);
+  // 差し替えは既定で off。**指定が無いときの挙動を変えない**（既存インスタンスの宣言は暗黙に差し替えない）
+  const replace = values.replace === true;
 
   // 原本を先に読む（読めなければ、資格情報も設定も要らない）
   const source = readSource(io, specPath);
   const target = readPublishTarget(readConfig(io), env);
   const credentials = readCredentials(io.env);
 
-  io.out(`publish: env=${env} の R2（${BUNDLES_BINDING}）と D1（${CONTROL_DB_BINDING}）へ、検査済みの宣言を置く`);
+  io.out(
+    `publish: env=${env} の R2（${BUNDLES_BINDING}）と D1（${CONTROL_DB_BINDING}）へ、検査済みの宣言を置く` +
+      (replace ? "（--replace: 既存インスタンスの宣言を差し替える）" : ""),
+  );
 
   const result = await publishSpec(
     {
       specs: cloudflareSpecWriter(io, credentials, target.bucketName),
       registry: cloudflareRegistryExecutor(io, credentials, target.databaseId),
+      // 差し替えのときだけ、前の原本を読む口を渡す（差し替えない経路に R2 の読み取りを足さない）
+      ...(replace ? { readSpec: cloudflareSpecReader(io, credentials, target.bucketName) } : {}),
     },
-    { source, instanceId },
+    { source, instanceId, replace },
   );
   return report(io, env, specPath, result);
 }
@@ -299,6 +325,13 @@ function report(io: CliIo, env: Env, specPath: string, result: PublishResult): n
     io.out(
       `publish: OK  env=${env}: 版 ${result.app.schemaVersion} / 原本 SHA ${result.app.sourceSha256} / インスタンス ${result.instance.instanceId}`,
     );
+    // 差し替えたときだけ、何から何へ変えたかを残す（#175）。値は SHA-256 とインスタンス ID だけである
+    if (result.replacedSourceSha256 !== null) {
+      io.out(
+        `publish: 差し替え  env=${env}: 前の原本 SHA ${result.replacedSourceSha256} → 後の原本 SHA ${result.app.sourceSha256}` +
+          `（インスタンス ${result.instance.instanceId}）`,
+      );
+    }
     return EXIT_OK;
   }
   const { failure } = result;
@@ -422,6 +455,22 @@ export function cloudflareSpecWriter(io: CliIo, credentials: Credentials, bucket
       const path = r2ObjectPath(credentials.accountId, bucketName, key);
       const res = await callApi(io, credentials, { method: "PUT", path, body, contentType: "application/octet-stream" }, "R2 へ置く");
       ensureOk(res, "R2 へ置く");
+    },
+  };
+}
+
+/**
+ * R2 を SpecReader の形で包む（#175。差し替えのときだけ使う）。
+ * `GET /accounts/<id>/r2/buckets/<bucket>/objects/<key>`。中身を JSON として読んで返す
+ * （読めなければ `undefined`）。**応答の本文はそのまま出さない**——判定は呼ぶ側が行う。
+ */
+export function cloudflareSpecReader(io: CliIo, credentials: Credentials, bucketName: string): SpecReader {
+  return {
+    read: async (key) => {
+      const path = r2ObjectPath(credentials.accountId, bucketName, key);
+      const res = await callApi(io, credentials, { method: "GET", path }, "R2 から読む");
+      ensureOk(res, "R2 から読む");
+      return res.body;
     },
   };
 }
