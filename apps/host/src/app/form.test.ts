@@ -56,6 +56,35 @@ describe("項目の並び", () => {
   });
 });
 
+// ── 表示名（label）（M1.3。Issue #176） ────────────────────────────────
+
+describe("表示名（label）", () => {
+  it("label があればそれを、無ければ識別子をラベルに出す（送る値は識別子のまま。受入条件）", async () => {
+    const onSubmit = submitSpy(() => Promise.resolve(accepted));
+    render(
+      createElement(AddForm, {
+        action: "addTask",
+        fields: [
+          { name: "title", label: "やること", type: "string" },
+          { name: "memo", type: "string" },
+        ],
+        onSubmit,
+      }),
+    );
+
+    // 見えるのは label で、入力欄の名前（送る値の手がかり）は識別子のままである
+    expect((screen.getByLabelText("やること") as HTMLInputElement).getAttribute("name")).toBe("title");
+    // label を書いていない項目は、識別子のままである
+    expect((screen.getByLabelText("memo") as HTMLInputElement).getAttribute("name")).toBe("memo");
+
+    fill("やること", "宿の予約");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0]?.[0]).toEqual({ title: "宿の予約", memo: "" });
+  });
+});
+
 describe("送る値", () => {
   it("string は文字列、number は JSON の数、list は入力順の文字列配列", async () => {
     const onSubmit = submitSpy(() => Promise.resolve(accepted));

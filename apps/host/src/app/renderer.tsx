@@ -34,7 +34,7 @@ import type {
   Entity,
   MusunestClient,
 } from "@musunest/sdk";
-import { fieldKind, fieldTarget } from "@musunest/sdk";
+import { displayNameOf, fieldKind, fieldTarget } from "@musunest/sdk";
 import { AddForm } from "./form";
 import type { AddFormResult, FormField, FormOption } from "./form";
 import { SettlementList } from "./settlement";
@@ -242,6 +242,7 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           entity={entity}
           columns={declaration.columns}
           highlight={declaration.highlight}
+          displayName={(name) => displayNameOf(view.labels, name)}
           labelOf={(field, value) => displayOf(entity, references, field, value)}
           setActions={setActions}
           onRunAction={(actionName, id) => void runSetAction(actionName, id)}
@@ -253,6 +254,7 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           view={view}
           show={declaration.show}
           filters={filterFields(declaration.filters, entity, references)}
+          displayName={(name) => displayNameOf(view.labels, name)}
           labelOf={(field, value) => displayOf(entity, references, field, value)}
           setActions={setActions}
           onRunAction={(actionName, id) => void runSetAction(actionName, id)}
@@ -355,8 +357,9 @@ function RowTable({
         <thead>
           <tr>
             {columns.map((column) => (
+              // 見出しは**表示名**（`label`）で出す。無ければ識別子のまま（API が返した `labels` を見る）
               <th key={column.name} scope="col">
-                {column.name}
+                {displayNameOf(view.labels, column.name)}
               </th>
             ))}
             {hasActions && (
@@ -653,10 +656,15 @@ export function formFields(
   const entity = spec.entities.find((item) => item.name === entityName);
   if (entity === undefined) return [];
   return Object.entries(entity.fields).map(([name, declaration]) => {
+    // 表示名（`label`。M1.3。Issue #176）。**無ければ入力欄の名前（識別子）をそのまま出す**。
+    // 送る値は変わらない（`name` は識別子のままである）
+    const label = typeof declaration === "string" ? undefined : declaration.label;
+    const shown = label === undefined ? {} : { label };
     // 選択肢（M1.3）。**送るのはキーで、見せるのは表示名である。** キーの順が選択肢の順である
     if (typeof declaration !== "string" && declaration.type === "enum") {
       return {
         name,
+        ...shown,
         type: fieldKind(declaration),
         to: null,
         options: Object.entries(declaration.options).map(([value, label]) => ({ value, label })),
@@ -666,6 +674,7 @@ export function formFields(
     const target = fieldTarget(declaration);
     return {
       name,
+      ...shown,
       type: fieldKind(declaration),
       to: target,
       ...(target === null ? {} : { options: optionsOf(references, target) }),

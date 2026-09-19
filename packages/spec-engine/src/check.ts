@@ -482,6 +482,8 @@ interface SettleDraft {
 
 interface ComputedDraft extends ExpressionDraft {
   readonly type: string;
+  /** 表示名（`label`。M1.3。Issue #176）。無ければ `null`（画面は識別子をそのまま出す） */
+  readonly label: string | null;
   /**
    * 計算の範囲（M1.4。Issue #177）。`app` ならアプリ全体で 1 つの値である。
    * **`null` なら従来どおり、`entity` の行ごとの値**である。
@@ -650,11 +652,43 @@ function collectItems(root: YamlMap, section: string, report: Report): readonly 
   return items;
 }
 
-/** 参照の写像（`{type: ref, to: member}`・`{type: list, of: member}`）に書ける欄 */
-const REF_DECLARATION_KEYS = ["type", "to", "of"] as const;
+/** 参照の写像（`{type: ref, to: member}`・`{type: list, of: member}`）に書ける欄。`label` は M1.3 */
+const REF_DECLARATION_KEYS = ["type", "to", "of", "label"] as const;
 
-/** 選択肢の写像（`{type: enum, options: {...}, default: ...}`）に書ける欄（M1.3） */
-const ENUM_DECLARATION_KEYS = ["type", "options", "default"] as const;
+/** 選択肢の写像（`{type: enum, options: {...}, default: ..., label: ...}`）に書ける欄（M1.3） */
+const ENUM_DECLARATION_KEYS = ["type", "options", "default", "label"] as const;
+
+/**
+ * 表示名（`label`。M1.3。Issue #176）を読む。**空でない文字列**でなければならない。
+ * 書いていなければ `null`。読めなかったときは `invalid` を立てる（意味の検査を重ねない）。
+ *
+ *   `label:`（値が無い）・空文字 → `SHAPE_LABEL_EMPTY`
+ *   並び・写像                      → `SHAPE_LABEL_INVALID`
+ */
+function readLabel(
+  value: YamlMap,
+  what: string,
+  report: Report,
+): { readonly label: string | null; readonly invalid: boolean } {
+  const entry = entryOf(value, "label");
+  if (entry === undefined) return { label: null, invalid: false };
+  const node = entry.value;
+  if (node.kind === "null" || (node.kind === "scalar" && node.text === "")) {
+    report("SHAPE_LABEL_EMPTY", `${what} の label は空でない文字列で書く（空文字は表示名にならない）`, positionOf(node));
+    return { label: null, invalid: true };
+  }
+  if (node.kind !== "scalar") {
+    report("SHAPE_LABEL_INVALID", `${what} の label は文字列で書く（並びや写像では書けない）`, positionOf(node));
+    return { label: null, invalid: true };
+  }
+  return { label: node.text, invalid: false };
+}
+
+/** 読み取った宣言に、表示名（`label`）を重ねる。1 語の型は写像の形にする */
+function withLabel(declaration: FieldDeclaration, label: string | null): FieldDeclaration {
+  if (label === null) return declaration;
+  return typeof declaration === "string" ? { type: declaration, label } : { ...declaration, label };
+}
 
 /**
  * 項目の宣言を読む。**文字列の 1 語（`string`・`number`・`list`）と、写像（参照・選択肢）の両方**を
@@ -723,11 +757,22 @@ function readFieldDeclaration(
   }
   const type = typeEntry.value.text;
 
-  // 選択肢（`type: enum`。M1.3）は、参照とは別の読み取りである（options と default を持つ）
+  // 選択肢（`type: enum`。M1.3）は、参照とは別の読み取りである（options と default、label を持つ）
   if (type === "enum") return readEnumFieldDeclaration(name, value, report);
 
+  // **知らない型は、ここで断る**（`label` の検査を重ねない。1 つの誤りを 2 つのコードにしない）
+  const isRef = type === "ref";
+  const isList = type === "list";
+  if (!isRef && !isList && !isOneOf(FIELD_TYPES, type)) return unknownType(type, typeEntry.value);
+
+  const nothing = { declaration: null, target: null, targetNode: null } as const;
+
+  // 表示名（`label`。M1.3）。書いてあれば写像の形にして重ねる
+  const label = readLabel(value, `項目 ${name}`, report);
+  if (label.invalid) return nothing;
+
   // 参照先の欄は、`ref` なら `to`、`list` なら `of` である。もう一方が書いてあれば断る
-  const targetKey = type === "ref" ? "to" : type === "list" ? "of" : null;
+  const targetKey = isRef ? "to" : isList ? "of" : null;
   for (const key of ["to", "of"] as const) {
     const stray = entryOf(value, key);
     if (stray !== undefined && key !== targetKey) {
@@ -741,15 +786,12 @@ function readFieldDeclaration(
   const targetEntry = targetKey === null ? undefined : entryOf(value, targetKey);
   if (targetEntry === undefined) {
     // `of` の無い `{type: list}` は、文字列の並び（既存の `list`）として読む
-    if (type === "list") return { declaration: "list", target: null, targetNode: null };
-    if (type === "ref") {
+    if (isList) return { declaration: withLabel("list", label.label), target: null, targetNode: null };
+    if (isRef) {
       report("SHAPE_KEY_MISSING", `項目 ${name} の ref に to が無い（参照先の entity を書く）`, positionOf(value));
-      return { declaration: null, target: null, targetNode: null };
+      return nothing;
     }
-    if (isOneOf(FIELD_TYPES, type)) {
-      return { declaration: type as FieldType, target: null, targetNode: null };
-    }
-    return unknownType(type, typeEntry.value);
+    return { declaration: withLabel(type as FieldType, label.label), target: null, targetNode: null };
   }
   if (targetEntry.value.kind !== "scalar" || targetEntry.value.text === "") {
     report(
@@ -757,11 +799,11 @@ function readFieldDeclaration(
       `項目 ${name} の ${targetKey} は、参照先の entity の名前で書く`,
       positionOf(targetEntry.value),
     );
-    return { declaration: null, target: null, targetNode: null };
+    return nothing;
   }
   const target = targetEntry.value.text;
   return {
-    declaration: type === "ref" ? { type: "ref", to: target } : { type: "list", of: target },
+    declaration: withLabel(isRef ? { type: "ref", to: target } : { type: "list", of: target }, label.label),
     target,
     targetNode: targetEntry.value,
   };
@@ -786,6 +828,8 @@ function readEnumFieldDeclaration(
   report: Report,
 ): { declaration: FieldDeclaration | null; target: null; targetNode: null } {
   const nothing = { declaration: null, target: null, targetNode: null } as const;
+  // 表示名（`label`。M1.3）も、選択肢の写像に書ける欄である。読めなければ組み立てない
+  const label = readLabel(value, `項目 ${name}`, report);
   const optionsEntry = entryOf(value, "options");
   if (optionsEntry === undefined) {
     report(
@@ -864,8 +908,12 @@ function readEnumFieldDeclaration(
     }
   }
 
+  if (label.invalid) return nothing;
   return {
-    declaration: { type: "enum", options, ...(fallback === null ? {} : { default: fallback }) },
+    declaration: withLabel(
+      { type: "enum", options, ...(fallback === null ? {} : { default: fallback }) },
+      label.label,
+    ),
     target: null,
     targetNode: null,
   };
@@ -1440,12 +1488,14 @@ function readComputed(items: readonly YamlNode[], report: Report): readonly Comp
   for (const member of readMembers(
     items,
     "computed",
-    ["name", "scope", "entity", "expression", "aggregate", "settle", "type"],
+    ["name", "scope", "entity", "expression", "aggregate", "settle", "type", "label"],
     report,
   )) {
     const name = member.text("name");
     if (name !== null) checkName(name.text, "computed", positionOf(name.node), report);
     const label = `computed ${name?.text ?? ""}`;
+    // 表示名（`label`。M1.3。Issue #176）。項目と同じく、空でない文字列で書く
+    const display = readLabel(member.map, label, report);
 
     // 計算の範囲（M1.4。Issue #177）。`scope: app` なら**どのレコードにも属さない**——
     // `entity` を持たず、`settle`（精算）も書けない。意味の検査は組み立てのあとに行う
@@ -1543,6 +1593,7 @@ function readComputed(items: readonly YamlNode[], report: Report): readonly Comp
     computed.push({
       name: name?.text ?? "",
       nameNode: name?.node ?? null,
+      label: display.label,
       entity: entity?.text ?? "",
       entityNode: entity?.node ?? { kind: "null", line: 0, column: 0 },
       expression: expression?.text ?? "",
@@ -2399,11 +2450,14 @@ function buildSpec(drafts: Drafts): AppSpec | null {
   const builtComputed: Computed[] = [];
   for (const draft of computed) {
     if (draft.malformed) return null;
+    // 表示名（`label`。M1.3。Issue #176）は、書いてあるときだけ入れる（無ければ識別子のまま）
+    const label = draft.label === null ? {} : { label: draft.label };
     if (draft.settle !== null) {
       // 精算は数ではなく送金の並びを返すので、`type` を持たない（docs/semantics.md「settle」）
       builtComputed.push({
         name: draft.name,
         entity: draft.entity,
+        ...label,
         settle: {
           expense: draft.settle.expense,
           amount: draft.settle.amount,
@@ -2420,12 +2474,14 @@ function buildSpec(drafts: Drafts): AppSpec | null {
         draft.aggregate === null
           ? {
               name: draft.name,
+              ...label,
               scope: draft.scope,
               expression: draft.expression,
               type: draft.type as ComputedType,
             }
           : {
               name: draft.name,
+              ...label,
               scope: draft.scope,
               aggregate: buildAggregate(draft.aggregate),
               type: draft.type as ComputedType,
@@ -2437,6 +2493,7 @@ function buildSpec(drafts: Drafts): AppSpec | null {
       builtComputed.push({
         name: draft.name,
         entity: draft.entity,
+        ...label,
         expression: draft.expression,
         type: draft.type as ComputedType,
       });
@@ -2444,6 +2501,7 @@ function buildSpec(drafts: Drafts): AppSpec | null {
       builtComputed.push({
         name: draft.name,
         entity: draft.entity,
+        ...label,
         aggregate: buildAggregate(draft.aggregate),
         type: draft.type as ComputedType,
       });

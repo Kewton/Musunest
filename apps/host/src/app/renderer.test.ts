@@ -1497,3 +1497,112 @@ describe("アプリ全体の集計（scope: app）と平均（avg）を画面へ
     ]);
   });
 });
+
+// ── 表示名（label）を画面へ写す（M1.3。Issue #176） ─────────────────────
+//
+// **宣言からの写像**を見る（`form.test.ts` は入力欄の部品しか見ていない。`04` §7.2・`docs/parallel-development.md` §7.3）。
+// 表示名は API が一覧の応答の `labels` に載せ、画面は `displayNameOf` で読む——**無ければ識別子のまま**である。
+// 強調の印の文字は、`highlight` が指す計算の `label` である（無ければ識別子）。
+
+/** 表示名つきの expense。description にだけ label を書く（ほかは識別子のまま） */
+const LABELED_EXPENSE_SPEC: ApiSpecBody = {
+  ...SPEC,
+  spec: {
+    ...SPEC.spec,
+    entities: [
+      {
+        name: "expense",
+        fields: {
+          description: { type: "string", label: "内容" },
+          amount: "number",
+          discount: "number",
+          payer: "string",
+          participants: "list",
+        },
+      },
+    ],
+  },
+};
+
+const LABELED_EXPENSE_VIEW: ApiViewBody = { ...VIEW, labels: { description: "内容" } };
+
+const labeledExpenseClient = (parts: Parameters<typeof makeClient>[0] = {}): MusunestClient =>
+  makeClient({
+    spec: () => Promise.resolve(okResult(LABELED_EXPENSE_SPEC)),
+    view: () => Promise.resolve(okResult(LABELED_EXPENSE_VIEW)),
+    ...parts,
+  });
+
+describe("表示名（label）を画面へ写す（M1.3）", () => {
+  it("表の見出しは label で出て、label の無いものは識別子のままである（受入条件）", async () => {
+    const { container } = await renderScreen(labeledExpenseClient());
+
+    await screen.findByText("夕食");
+    expect(Array.from(container.querySelectorAll("thead th")).map((th) => th.textContent)).toEqual([
+      // description だけが label を持つ。ほかは識別子のままである（**混ざらない**）
+      "内容",
+      "amount",
+      "discount",
+      "payer",
+      "participants",
+      "paidAmount",
+      "headcount",
+      "shareAmount",
+    ]);
+  });
+
+  it("追加フォームの入力欄の見出しも label で出る（送る値は識別子のまま）", async () => {
+    const { container } = await renderScreen(labeledExpenseClient());
+
+    await screen.findByLabelText("内容");
+    // 見えるのは label である
+    const input = screen.getByLabelText("内容") as HTMLInputElement;
+    expect(input.getAttribute("name")).toBe("description");
+    // 入力欄の名前（送る値の手がかり）は識別子のままである
+    expect(container.querySelector('[data-field="description"] label')?.textContent).toBe("内容");
+  });
+
+  it("ボードの項目と、強調の印は label で出る（受入条件）", async () => {
+    const spec: ApiSpecBody = {
+      ...BOARD_LAYOUT_SPEC,
+      spec: {
+        ...BOARD_LAYOUT_SPEC.spec,
+        entities: [
+          {
+            name: "task",
+            fields: {
+              title: { type: "string", label: "やること" },
+              due: "date",
+              status: {
+                type: "enum",
+                label: "状態",
+                options: { todo: "未着手", doing: "進行中", done: "完了" },
+                default: "todo",
+              },
+            },
+          },
+        ],
+        computed: [
+          { name: "overdue", entity: "task", type: "boolean", label: "期限切れ", expression: "due < today()" },
+        ],
+      },
+    };
+    const view: ApiViewBody = { ...BOARD_LAYOUT_VIEW, labels: { title: "やること", status: "状態", overdue: "期限切れ" } };
+    const { container } = await renderScreen(
+      makeClient({ spec: () => Promise.resolve(okResult(spec)), view: () => Promise.resolve(okResult(view)) }),
+    );
+
+    await screen.findByText("タスク t1");
+    const termOf = (field: string): string =>
+      container.querySelector(`[data-field="${field}"] dt`)?.textContent ?? "";
+    // 項目は宣言の label で出る（**識別子ではない**）
+    expect(termOf("title")).toBe("やること");
+    expect(termOf("status")).toBe("状態");
+    // label を書かなければ、識別子のままである
+    expect(termOf("due")).toBe("due");
+    // **強調の印の文字は、highlight が指す計算の label** である（無ければ識別子）
+    const mark = container.querySelector('[data-card="t1"] .highlight-mark');
+    expect(mark?.textContent).toContain("期限切れ");
+    expect(mark?.textContent).not.toContain("overdue");
+  });
+});

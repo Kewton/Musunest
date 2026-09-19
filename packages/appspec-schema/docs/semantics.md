@@ -2,7 +2,7 @@
 
 > 宣言の形だけでは 1 つに決まらない振る舞いを、この語彙について決める（`workspace/mvp/m1/04-spec-evolution.md` §1.1、`00-open-questions.md` Q3）。
 > **M1.1 の語彙は v0.1 と同じ**で、**M1.2 で参照（`ref`）・検査の文言（`message`）・entity をまたぐ集計（`aggregate` の `sum`・`count`）・精算（`settle`）・一覧の種類（`table`・`settlement`）を足した**（印を付けてある）。
-> **M1.3 で選択肢（`enum`）・既定値（`default`）、日付（`date`）・「今日」（`today()`）、決まった値への書き換え（`set`）とボタンを出す条件（`when`）、ボード（`board`）と強調（`highlight`）、一覧（`list`）と絞り込み（`filters`）を足した**（印を付けてある）。
+> **M1.3 で選択肢（`enum`）・既定値（`default`）、日付（`date`）・「今日」（`today()`）、決まった値への書き換え（`set`）とボタンを出す条件（`when`）、ボード（`board`）と強調（`highlight`）、一覧（`list`）と絞り込み（`filters`）、**表示名（`label`）**を足した**（印を付けてある）。
 > **M1.4 でアプリ全体の集計（`scope`）と平均（`avg`）を足した**（#177。印を付けてある）。**まだ足していないのは、期間の条件（`within`。M1.4 の #178）と見出しごとの集計（`groupBy`・`groups`。#179）である。**
 > **ここに無い振る舞いは、まだ決めていない**（末尾の「まだ決めていないこと」）。
 > 語彙の一覧は [`../vocabulary.yaml`](../vocabulary.yaml)、型は [`../src/spec.ts`](../src/spec.ts) にある。見本は [`../samples/expense-log/`](../samples/expense-log/)、[`../samples/warikan/`](../samples/warikan/)、[`../samples/task-board/`](../samples/task-board/)、[`../samples/dashboard/`](../samples/dashboard/)。
@@ -11,7 +11,7 @@
 ## 宣言の全体
 
 - 欄は v0.1 と同じ 7 つ（`entities`・`views`・`actions`・`validations`・`computed`・`permissions`・`minIdentity`）を横に並べる。**7 つとも書く。** 中身が無ければ `[]` と書く
-- 知らない欄・知らないキーは書けない（語彙は閉じている）。`label`・`required` など、まだ入っていない語彙は書けない（`kind`・`type` は M1.2 で入った。下表のとおり）
+- 知らない欄・知らないキーは書けない（語彙は閉じている）。`required` など、まだ入っていない語彙は書けない（`kind`・`type` は M1.2 で、`label` は M1.3 で入った。「label」の節）
 - 名前（entity・項目・検査・計算・一覧・操作）は、英字で始まる英数字（`^[A-Za-z][A-Za-z0-9]*$`）。式の中でそのまま名前として読むため
 - 名前の重なり：entity の名前は宣言の中で 1 つずつ。項目と計算の名前は、同じ entity の中で重ならない。検査・一覧・操作の名前は、それぞれの欄の中で 1 つずつ
 - `id`・`createdAt`・`updatedAt` は店頭が付ける値なので、項目と計算の名前に使えない（`02-l2-spec-examples.md` §1）
@@ -445,6 +445,43 @@
   - **エラー**：一覧を読めなかった理由（未存在・権限不足・通信失敗）をその場に出す
   - **権限なし**：`read` が無ければ API が 403 を返す。画面は「このアプリを表示する権限がありません」を出す
     （**どの一覧を出せるかは data-api が決める。画面の出し分けは守りではない**。`03` §2.2）
+
+### label
+
+- **画面に出す名前**（M1.3。Issue #176）。項目の名前は `^[A-Za-z][A-Za-z0-9]*$` に限られている
+  （式の中で名前として読むため）ので、**識別子とは別に、画面に出す名前を宣言できるようにする**。
+  **付けられるのは項目（`fields`）と計算（`computed`）の 2 つだけ**である
+  - entity・一覧（`views`）・操作（`actions`）には付けない。書けば静的チェックが `SHAPE_KEY_UNKNOWN` で断る
+  - **任意**である。書かなければ識別子（項目名・計算の名前）をそのまま出す
+  - **空でない文字列**で書く。空文字は `SHAPE_LABEL_EMPTY`、文字列でなければ（並び・写像）`SHAPE_LABEL_INVALID`
+- **1 語の型（`string`・`number`・`list`・`date`）に付けるときは、写像の形で書く**。`label` は欄なので、
+  1 語のスカラ（`title: string`）には書けない
+
+  ```yaml
+  entities:
+    - name: task
+      fields:
+        title:
+          type: string
+          label: やること
+        due: date            # label を書かなければ、識別子 due のまま画面に出る
+  computed:
+    - name: overdue
+      entity: task
+      type: boolean
+      label: 期限切れ        # 強調の印の文字になる
+      expression: due < today()
+  ```
+
+- **画面に出すためだけに使う。式からは読めない。** 式が読むのは識別子だけである（混ぜると名前解決が
+  2 通りになる）。`label` を名前として参照する式は `LOGIC_REFERENCE_NOT_FOUND` で断る
+- **保存される値は変わらない。** `label` は宣言の中だけの飾りである（レコードにも、正規化した JSON の
+  値にも現れない。表示名は**一覧の応答の `labels`** に「名前 → 表示名」として載る）
+- **Data API が応答に載せ、画面がそれを読む。** `packages/appspec-schema/src/api.ts` が形を決め、
+  `displayNameOf`（無ければ識別子）を SDK と画面が共有する。**同じ読み方をする**（`json の形は 1 か所で決める`）
+- **強調（`highlight`）の印の文字は、`highlight` が指す計算の `label`**である（無ければ識別子のまま。「board」の節）
+- 追加フォームの入力欄の見出しにも使う。ただし**送る値は識別子のまま**である（宣言の名前が変わらない。
+  「entity」の節）
 
 ### filters
 

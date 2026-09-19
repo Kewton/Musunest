@@ -4,6 +4,10 @@
 # 払った人（`payer`）は member のレコード 1 件を、割る人（`participants`）は member の並びを指す。
 # **値は member のレコード ID である**（同じ名前のメンバーが 2 人いても ID で区別できる）。
 #
+# **表示名（`label`。M1.3。Issue #176）** を項目と計算に書いてある——画面に識別子（`description`・
+# `shareAmount` など）ではなく、日本語の見出しを出すためである。`member.name` には**あえて書かない**
+# （`label` を書かなければ識別子のまま出る、という例を 1 つ残す）。**式は識別子だけを読む。**
+#
 # デモ：メンバー A・B・C を登録し、夕食 6000 円（A が払う）とタクシー 3000 円（B が払う）を入れると、
 # 一覧に 1 人あたり 2000 円と 1000 円が出て、メンバーの一覧に払った額（`paid`）・負担する額（`owed`）・
 # 差し引き（`balance`）が出る。精算の一覧には **「C さん → A さん 3,000 円」の 1 件**が出る
@@ -21,18 +25,24 @@
 entities:
   - name: member
     fields:
-      name: string          # 名前（画面に出すのはこの項目である）
+      name: string          # 名前（`label` を書かないので、画面には識別子 name のまま出る）
 
   - name: expense
     fields:
-      description: string   # 内容
-      amount: number        # 金額（円）
+      description:          # 内容
+        type: string
+        label: 内容
+      amount:               # 金額（円）
+        type: number
+        label: 金額
       payer:                # 払った人（member のレコード 1 件を ID で指す）
         type: ref
         to: member
+        label: 払った人
       participants:         # 割る人（member のレコードの並びを ID で指す）
         type: list
         of: member
+        label: 割る人
 
 views:
   # 表（M1.2）。`show` を書かなければ、項目（宣言の順）に続いて計算（宣言の順）である——
@@ -88,11 +98,13 @@ computed:
     entity: expense
     expression: len(participants)
     type: number
+    label: 人数
   # 1 人あたりの額。max は 0 で割らないための守り（参照の並びは空を許さない）
   - name: shareAmount
     entity: expense
     expression: amount / max(1, headcount)
     type: number
+    label: 1 人あたり
 
   # メンバーごと（entity をまたぐ集計。M1.2）。`this` はこのメンバーのレコードの ID である
   # 払った合計。`payer` がこのメンバーを指す支出の `amount` を足す
@@ -103,6 +115,7 @@ computed:
       where:
         payer: this
     type: number
+    label: 払った額
   # 負担する合計。`participants` がこのメンバーを含む支出の `shareAmount` を足す
   - name: owed
     entity: member
@@ -112,11 +125,13 @@ computed:
         participants:
           contains: this
     type: number
+    label: 負担額
   # 差し引き（プラスなら受け取る）。集計を参照する式である
   - name: balance
     entity: member
     expression: paid - owed
     type: number
+    label: 差し引き
 
   # 精算（M1.2）。メンバーの差し引きから、送金の組（誰が誰へいくら）を出す。
   # **余りの負担はここでは宣言しない**（Q18-5）——`owed` は基準額の集計のままであり、
@@ -129,6 +144,7 @@ computed:
       amount: amount
       payer: payer
       shares: participants
+    label: 精算
 
 permissions:
   - name: read

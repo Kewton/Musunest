@@ -1,0 +1,31 @@
+# 負例：項目 title の表示名（label）が空である（`label:` の後ろに何も書いていない）。
+# `label` は**空でない文字列**でなければならない（空文字は表示名にならない。M1.3。Issue #176）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: task
+    fields:
+      title:
+        type: string
+        label:
+
+views:
+  - name: taskList
+    entity: task
+
+actions:
+  - name: addTask
+    entity: task
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

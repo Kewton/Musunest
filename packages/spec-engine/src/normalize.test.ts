@@ -480,3 +480,74 @@ describe("一覧（list）と絞り込み（filters）の正規化（M1.3）", (
     expect(result.app.spec.views[0]).toEqual({ name: "taskList", entity: "task", type: "list" });
   });
 });
+
+// ── 表示名（label）の正規化（M1.3。Issue #176） ───────────────────────
+//
+// **publish で通り、正規化した JSON に残ること**が受入条件である。data-api と画面はこの JSON だけを
+// 読むので、ここで落ちれば「静的チェックは通るのに画面が動かない」になる（#145 と同じ穴）。
+// `label` を書かないものには欄そのものを足さない（M1.1・M1.2 の宣言を変えない）。
+
+const LABEL_SOURCE = [
+  "entities:",
+  "  - name: task",
+  "    fields:",
+  "      title:",
+  "        type: string",
+  "        label: やること",
+  "      due: date",
+  "views:",
+  "  - name: taskList",
+  "    entity: task",
+  "actions:",
+  "  - name: addTask",
+  "    entity: task",
+  "validations: []",
+  "computed:",
+  "  - name: overdue",
+  "    entity: task",
+  "    type: boolean",
+  "    label: 期限切れ",
+  "    expression: due < today()",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+describe("表示名（label）の正規化（M1.3）", () => {
+  it("項目と計算の label が、正規化した JSON に残る（受入条件）", async () => {
+    const result = await normalized(LABEL_SOURCE);
+    const task = result.app.spec.entities.find((entity) => entity.name === "task");
+    expect(task?.fields["title"]).toEqual({ type: "string", label: "やること" });
+    // `label` を書かない項目は、識別子のまま（1 語のスカラ）
+    expect(task?.fields["due"]).toBe("date");
+    expect(result.app.spec.computed[0]).toEqual({
+      name: "overdue",
+      entity: "task",
+      type: "boolean",
+      label: "期限切れ",
+      expression: "due < today()",
+    });
+    // 文字列の定数と同じく、表示名も JSON にそのまま残る
+    expect(result.json).toContain("やること");
+    expect(result.json).toContain("期限切れ");
+  });
+
+  it("label を書かなければ、欄そのものが無い（M1.1・M1.2 の宣言に欄を足さない）", async () => {
+    const source = LABEL_SOURCE.replace("        label: やること\n", "").replace(
+      "    label: 期限切れ\n",
+      "",
+    );
+    const result = await normalized(source);
+    expect(result.app.spec.entities[0]?.fields["title"]).toBe("string");
+    expect(Object.keys(result.app.spec.computed[0] ?? {}).sort()).toEqual([
+      "entity",
+      "expression",
+      "name",
+      "type",
+    ]);
+  });
+});

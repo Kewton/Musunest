@@ -48,6 +48,7 @@ import {
   FIELD_TYPES,
   actionKind,
   fieldKind,
+  fieldLabel,
   fieldTarget,
   isAppComputed,
   isComputedExpression,
@@ -275,17 +276,30 @@ function isEnumDeclaration(value: Record<string, unknown>): boolean {
 }
 
 /**
+ * 表示名（`label`。M1.3。Issue #176）は任意である。**載っているときだけ**、空でない文字列で
+ * あることを要求する（空文字は表示名にならない。静的チェックも `SHAPE_LABEL_EMPTY` で断る）。
+ */
+function isOptionalLabel(value: Record<string, unknown>): boolean {
+  const label = value["label"];
+  return label === undefined || (typeof label === "string" && label !== "");
+}
+
+/**
  * 項目の宣言。**文字列の 1 語（`string`・`number`・`list`）と、写像**
- * （参照の `{type: ref, to}`・`{type: list, of}`、選択肢の `{type: enum, options, default}`）の両方
- * を受け取る（M1.2・M1.3）。
+ * （1 語の型を写像で書いた `{type: string, label}`・参照の `{type: ref, to}`・参照の並びの
+ * `{type: list, of}`・選択肢の `{type: enum, options, default}`）の両方を受け取る（M1.2・M1.3）。
  */
 function isFieldDeclaration(value: unknown): boolean {
   if (typeof value === "string") return (FIELD_TYPES as readonly string[]).includes(value);
   if (!isRecord(value)) return false;
-  if (value["type"] === "ref") return typeof value["to"] === "string";
-  if (value["type"] === "list") return typeof value["of"] === "string";
-  if (value["type"] === "enum") return isEnumDeclaration(value);
-  return false;
+  if (!isOptionalLabel(value)) return false;
+  const type = value["type"];
+  if (type === "ref") return typeof value["to"] === "string";
+  // `of` の無い `{type: list}` は、文字列の並び（`label` を付けるときの写像の形）である
+  if (type === "list") return value["of"] === undefined || typeof value["of"] === "string";
+  if (type === "enum") return isEnumDeclaration(value);
+  // 1 語の型を写像で書いたもの（`label` を付けるときの形。M1.3）
+  return typeof type === "string" && (FIELD_TYPES as readonly string[]).includes(type);
 }
 
 /**
@@ -340,6 +354,7 @@ function isSettleShape(value: unknown): boolean {
  */
 function isComputedShape(entry: unknown): boolean {
   if (!isRecord(entry)) return false;
+  if (!isOptionalLabel(entry)) return false;
   const hasExpression = typeof entry["expression"] === "string";
   const hasAggregate = entry["aggregate"] !== undefined;
   const hasSettle = entry["settle"] !== undefined;
@@ -445,6 +460,27 @@ const computedNamesOf = (app: NormalizedAppSpec, entity: string): readonly strin
     // **アプリ全体の計算（`scope: app`。M1.4）も列に出さない**——行ではなく、1 つの値だからである
     .filter((entry) => isRowComputed(entry) && entry.entity === entity && entry.type !== "boolean")
     .map((entry) => entry.name);
+
+/**
+ * **画面に出す名前（`label`。M1.3。Issue #176）**。項目と計算の両方を集める（名前 → 表示名）。
+ * **`label` を書いていないものは入らない**——画面は、無ければ識別子をそのまま出す。
+ *
+ * **列に出さない計算（真偽の `boolean`。強調が指す）の `label` も入れる**——強調の印の文字に使う。
+ * `label` が 1 つも無ければ `undefined`（＝応答に欄を載せない。M1.1〜M1.3 の応答を変えない）。
+ */
+function labelsOf(app: NormalizedAppSpec, entity: Entity): Readonly<Record<string, string>> | undefined {
+  const labels: Record<string, string> = {};
+  for (const [name, declaration] of Object.entries(entity.fields)) {
+    const label = fieldLabel(declaration);
+    if (label !== null) labels[name] = label;
+  }
+  for (const entry of app.spec.computed) {
+    // アプリ全体の計算は entity を持たない（この一覧の entity のものではない）
+    if (isAppComputed(entry) || entry.entity !== entity.name) continue;
+    if (entry.label !== undefined) labels[entry.name] = entry.label;
+  }
+  return Object.keys(labels).length === 0 ? undefined : labels;
+}
 
 /**
  * ボードの強調（`highlight`。M1.3）が指す計算。名前と、行ごとに解く式である。
@@ -798,12 +834,15 @@ export async function getView(
   const highlight = highlightOf(app, view, entity.name);
   // アプリ全体の集計（M1.4）。**宣言が無ければ欄そのものを載せない**
   const scope = scopeValuesOf(app, deps.clock, sources);
+  // 表示名（`label`。M1.3）。**1 つも無ければ欄そのものを載せない**（M1.1〜M1.3 の応答を変えない）
+  const labels = labelsOf(app, entity);
   return ok(API_READ_STATUS, {
     instanceId,
     view: view.name,
     entity: entity.name,
     fields: Object.keys(entity.fields),
     computed: computedNamesOf(app, entity.name),
+    ...(labels === undefined ? {} : { labels }),
     permissions,
     actions: actionsOf(app).filter((action) => action.entity === entity.name),
     rows: stored.map((record) =>

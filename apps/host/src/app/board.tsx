@@ -33,6 +33,8 @@ export interface BoardProps {
   readonly columns: string;
   /** 強調する行を選ぶ真偽の計算の名前（宣言の `highlight`）。無ければ強調しない */
   readonly highlight: string | undefined;
+  /** 項目の名前を画面に出す文字列へ写す（`label` があればそれ、無ければ識別子。API の `labels` を見る） */
+  readonly displayName: (name: string) => string;
   /** 項目の値を画面に出す文字列へ写す（参照は名前へ。呼ぶ側が渡す） */
   readonly labelOf: (field: string, value: ApiValue | undefined) => string;
   /** その entity の決まった値への書き換え（`set` を持つ操作。M1.3）。宣言の順 */
@@ -52,11 +54,20 @@ const TERM_STYLE: CSSProperties = { fontWeight: "normal", color: "#4a4a4a" };
 const VALUE_STYLE: CSSProperties = { margin: 0, overflowWrap: "anywhere" };
 const MARK_STYLE: CSSProperties = { margin: "0 0 4px", fontWeight: "bold" };
 
-/** カード。**強調は色だけに頼らない**——線の太さ（と、記号と文字の印）でも見分けられる（`04` §7.2） */
+/**
+ * 強調の色（M1.3。Issue #176）。**色だけに頼らない**——線は二重にし、記号と文字の印も添える
+ * （`04` §7.2「色 ＋ もう 1 つの手がかり」）。色が分からない人にも、色を使えない環境でも分かる。
+ */
+const HIGHLIGHT_BORDER_COLOR = "#b45309";
+const HIGHLIGHT_BACKGROUND_COLOR = "#fef3c7";
+
+/** カード。強調された行は**色と、色以外の印**の両方を持つ（`04` §7.2） */
 function cardStyle(marked: boolean): CSSProperties {
   return {
-    border: `${marked ? 2 : 1}px solid #c9c9c9`,
+    border: `${marked ? 2 : 1}px solid ${marked ? HIGHLIGHT_BORDER_COLOR : "#c9c9c9"}`,
     borderStyle: marked ? "double" : "solid",
+    // 色（背景）。**強調されていないカードには色を付けない**
+    ...(marked ? { backgroundColor: HIGHLIGHT_BACKGROUND_COLOR } : {}),
     borderRadius: 4,
     padding: 8,
     marginBottom: 8,
@@ -96,10 +107,13 @@ export function Board({
   entity,
   columns,
   highlight,
+  displayName,
   labelOf,
   setActions,
   onRunAction,
 }: BoardProps) {
+  /** 強調の印の文字。`highlight` が指す計算の表示名（無ければ識別子）である（M1.3。Issue #176） */
+  const highlightLabel = displayName(highlight ?? "");
   const boardColumns = boardColumnsOf(entity, columns);
   const fields = entity === undefined ? [] : Object.keys(entity.fields);
   const empty = view.rows.length === 0;
@@ -123,20 +137,21 @@ export function Board({
                   style={cardStyle(isHighlighted(row, highlight))}
                 >
                   {isHighlighted(row, highlight) && (
-                    // **色だけに頼らない印**（記号と、強調の名前）。色覚に依らずに分かる（`04` §7.2）
+                    // **色だけに頼らない印**（記号と、強調の計算の表示名。M1.3。Issue #176）。
+                    // 色（`cardStyle`）と、この印の**両方**が付く（`04` §7.2）
                     <p
                       className="highlight-mark"
                       role="img"
-                      aria-label={`強調: ${highlight ?? ""}`}
+                      aria-label={`強調: ${highlightLabel}`}
                       style={MARK_STYLE}
                     >
-                      <span aria-hidden="true">▲</span> {highlight}
+                      <span aria-hidden="true">▲</span> {highlightLabel}
                     </p>
                   )}
                   <dl className="board-fields" style={FIELDS_STYLE}>
                     {fields.map((name) => (
                       <div className="board-field" data-field={name} key={name} style={FIELD_STYLE}>
-                        <dt style={TERM_STYLE}>{name}</dt>
+                        <dt style={TERM_STYLE}>{displayName(name)}</dt>
                         <dd style={VALUE_STYLE}>{labelOf(name, row.fields[name])}</dd>
                       </div>
                     ))}

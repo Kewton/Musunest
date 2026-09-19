@@ -241,8 +241,12 @@ describe("見本（appspec-schema の samples/）", () => {
     const result = checkSpec(read(sampleSpecFile("warikan")));
     if (!result.ok) throw new Error("warikan が静的チェックに通らない");
     const expense = result.spec.entities.find((entity) => entity.name === "expense");
-    expect(expense?.fields["payer"]).toEqual({ type: "ref", to: "member" });
-    expect(expense?.fields["participants"]).toEqual({ type: "list", of: "member" });
+    // 表示名（`label`。M1.3。Issue #176）も、宣言のまま写す
+    expect(expense?.fields["payer"]).toEqual({ type: "ref", to: "member", label: "払った人" });
+    expect(expense?.fields["participants"]).toEqual({ type: "list", of: "member", label: "割る人" });
+    // **`label` を書かない項目は、識別子のまま（1 語のスカラ）**——warikan は `member.name` で示す
+    const member = result.spec.entities.find((entity) => entity.name === "member");
+    expect(member?.fields["name"]).toBe("string");
     // 参照の項目は、式の中では ID の文字列として読む（数ではない）
     expect(expressionsOf(result.spec.computed)).toEqual([
       "len(participants)",
@@ -259,6 +263,7 @@ describe("見本（appspec-schema の samples/）", () => {
       entity: "member",
       aggregate: { kind: "sum", entity: "expense", name: "amount", where: { payer: "equals" } },
       type: "number",
+      label: "払った額",
     });
     expect(result.spec.computed).toContainEqual({
       name: "owed",
@@ -270,6 +275,7 @@ describe("見本（appspec-schema の samples/）", () => {
         where: { participants: "contains" },
       },
       type: "number",
+      label: "負担額",
     });
   });
 
@@ -280,6 +286,7 @@ describe("見本（appspec-schema の samples/）", () => {
       name: "settlement",
       entity: "member",
       settle: { expense: "expense", amount: "amount", payer: "payer", shares: "participants" },
+      label: "精算",
     });
     // 精算の値は数ではなく送金の並びなので、`type` を持たない
     const settle = result.spec.computed.find((entry) => entry.name === "settlement");
@@ -462,7 +469,8 @@ describe("選択肢（enum）と既定値（default）（M1.3）", () => {
       ],
       "SHAPE_VALUE_INVALID",
     ],
-    ["enum に知らない欄を書く", [...ENUM_STATUS, "        label: 状態"], "SHAPE_KEY_UNKNOWN"],
+    // `label` は M1.3 で実在の欄になったので、知らない欄は別の語で確かめる（#176。追記 4）
+    ["enum に知らない欄を書く", [...ENUM_STATUS, "        unknownField: 状態"], "SHAPE_KEY_UNKNOWN"],
     [
       "参照の欄（to）を enum に書く",
       [...ENUM_STATUS, "        to: member"],
@@ -735,11 +743,157 @@ describe("決まった値への書き換え（set）とボタンを出す条件�
   });
 });
 
-// ── 2. 負例 48 件 ──────────────────────────────────────────────
+// ── 1f. 表示名（label）（M1.3。Issue #176） ─────────────────────────
+//
+// `label` は**画面に出すためだけ**の語彙である。付けられるのは**項目（`fields`）と計算（`computed`）
+// の 2 つだけ**で（追記 2）、**式からは読めない**（式が読むのは識別子だけである）。無ければ識別子を
+// そのまま出す。落とすときの 2 つのコードは**別である**——負例 2 本（label-empty・label-not-string）が、
+// 同じことを外から確かめる。
+
+describe("表示名（label）（M1.3）", () => {
+  /** 項目と計算に `label` を付けた宣言（ほかの欄は土台のまま） */
+  const labeled = (): string =>
+    declaration({
+      entities: [
+        "  - name: member",
+        "    fields:",
+        "      name: string",
+        "  - name: expense",
+        "    fields:",
+        "      amount:",
+        "        type: number",
+        "        label: 金額",
+        "      payer: string",
+        "      participants:",
+        "        type: list",
+        "        of: member",
+        "        label: 割る人",
+      ].join("\n"),
+      computed: [
+        "  - name: headcount",
+        "    entity: expense",
+        "    expression: len(participants)",
+        "    type: number",
+        "    label: 人数",
+      ].join("\n"),
+    });
+
+  it("項目と計算の label が、宣言のまま残る（受入条件）", () => {
+    const result = checkSpec(labeled());
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const expense = result.spec.entities.find((entity) => entity.name === "expense");
+    // 写像で書いた 1 語の型は、`label` つきの写像として残る
+    expect(expense?.fields["amount"]).toEqual({ type: "number", label: "金額" });
+    // `label` を書かない項目は、識別子のまま（1 語のスカラ）
+    expect(expense?.fields["payer"]).toBe("string");
+    // 参照の並び（`list of`）にも `label` を書ける
+    expect(expense?.fields["participants"]).toEqual({ type: "list", of: "member", label: "割る人" });
+    expect(result.spec.computed[0]).toEqual({
+      name: "headcount",
+      entity: "expense",
+      expression: "len(participants)",
+      type: "number",
+      label: "人数",
+    });
+  });
+
+  it("label を書かなければ、計算の欄そのものが無い（識別子のまま出す）", () => {
+    const result = checkSpec(declaration());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(Object.keys(result.spec.computed[0] ?? {}).sort()).toEqual([
+      "entity",
+      "expression",
+      "name",
+      "type",
+    ]);
+  });
+
+  it.each([
+    ["entity", declaration({ entities: `${BASE_PARTS.entities}\n    label: 金額` })],
+    ["一覧（view）", declaration({ views: `${BASE_PARTS.views}\n    label: 支出` })],
+    ["操作（action）", declaration({ actions: `${BASE_PARTS.actions}\n    label: 追加` })],
+  ] as const)(
+    "%s に label を書けば SHAPE_KEY_UNKNOWN（追記 2 で絞った範囲の外。受入条件）",
+    (_where, text) => {
+      const result = failure(checkSpec(text));
+      expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
+      expect(messagesOf(result, "SHAPE_KEY_UNKNOWN")).toContain("label");
+    },
+  );
+
+  it("式の中から label を参照すれば LOGIC_REFERENCE_NOT_FOUND（受入条件）", () => {
+    const text = declaration({
+      entities: [
+        "  - name: expense",
+        "    fields:",
+        "      amount:",
+        "        type: number",
+        "        label: 金額",
+        "      participants: list",
+      ].join("\n"),
+      validations: ["  - name: positiveAmount", "    entity: expense", "    expression: label > 0"].join("\n"),
+    });
+    const result = failure(checkSpec(text));
+    expect(codesOf(result)).toEqual(["LOGIC_REFERENCE_NOT_FOUND"]);
+    expect(messagesOf(result, "LOGIC_REFERENCE_NOT_FOUND")).toContain("label");
+  });
+
+  it("空と、文字列でない label は、それぞれ別のコードで落ちる（受入条件）", () => {
+    const empty = codesOf(
+      failure(
+        checkSpec(
+          declaration({
+            entities: [
+              "  - name: expense",
+              "    fields:",
+              "      amount:",
+              "        type: number",
+              "        label:",
+              "      participants: list",
+            ].join("\n"),
+          }),
+        ),
+      ),
+    );
+    const notString = codesOf(
+      failure(
+        checkSpec(
+          declaration({
+            computed: [
+              "  - name: headcount",
+              "    entity: expense",
+              "    expression: len(participants)",
+              "    type: number",
+              "    label: [人数]",
+            ].join("\n"),
+          }),
+        ),
+      ),
+    );
+    expect(empty).toEqual(["SHAPE_LABEL_EMPTY"]);
+    expect(notString).toEqual(["SHAPE_LABEL_INVALID"]);
+    expect(empty).not.toEqual(notString);
+    for (const code of [...empty, ...notString]) expect(isDiagnosticCode(code), code).toBe(true);
+  });
+
+  it.each([
+    ["label-empty", "SHAPE_LABEL_EMPTY", "title"],
+    ["label-not-string", "SHAPE_LABEL_INVALID", "overdue"],
+  ] as const)("負例 %s は %s **だけ**を返す（受入条件）", (name, code, where) => {
+    const result = failure(checkSpec(negativeTexts.get(name) ?? ""));
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([code]);
+    expect(messagesOf(result, code)).toContain(where);
+  });
+});
+
+// ── 2. 負例 50 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 48 件である（0 件なら以降のテストが空振りする）", () => {
-    expect(negativeIndex.negatives).toHaveLength(48);
+  it("負例の一覧は 50 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本足した）", () => {
+    expect(negativeIndex.negatives).toHaveLength(50);
   });
 
   it.each(negativeCases)(

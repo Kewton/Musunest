@@ -714,6 +714,143 @@ describe("日付（date）を含む宣言の配信と保存", () => {
   });
 });
 
+// ── 表示名（label）を含む宣言の配信（M1.3。Issue #176） ───────────────
+//
+// **配信側が読めること**と、**一覧の応答に表示名（`labels`）が載ること**を確かめる。静的チェックが
+// 通っても、`isFieldDeclaration`・`isComputedShape` が `label` を知らなければ `getSpec` が
+// **503（SPEC_UNAVAILABLE）** になる（#145・#154 と同じ穴）。見本 task-board と同じ形の最小の宣言を組み立てる。
+
+const LABEL_SOURCE = [
+  "entities:",
+  "  - name: task",
+  "    fields:",
+  "      title:",
+  "        type: string",
+  "        label: やること",
+  "      due: date",
+  "views:",
+  "  - name: taskList",
+  "    entity: task",
+  "    type: table",
+  "    show: [title]",
+  "actions:",
+  "  - name: addTask",
+  "    entity: task",
+  "validations: []",
+  "computed:",
+  "  - name: overdue",
+  "    entity: task",
+  "    type: boolean",
+  "    label: 期限切れ",
+  "    expression: due < today()",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+const labelNormalized = await normalizeSpec(LABEL_SOURCE);
+if (!labelNormalized.ok) throw new Error("表示名の宣言が静的チェックに通らない");
+
+const LABEL_APP: NormalizedAppSpec = labelNormalized.app;
+/** publish が R2 に置く本文（`getSpec` に渡すのと同じ形） */
+const LABEL_JSON = labelNormalized.json;
+
+/** 表示名を含む宣言を R2 に置き、登録（D1）も同じ宣言を指すようにする */
+function withLabelDeclaration(h: Harness): void {
+  h.registry.registration = {
+    sourceSha256: LABEL_APP.sourceSha256,
+    schemaVersion: LABEL_APP.schemaVersion,
+    sourceKey: `specs/${LABEL_APP.sourceSha256}/app.spec.yaml`,
+    normalizedKey: `specs/${LABEL_APP.sourceSha256}/normalized.json`,
+    createdAt: "2026-09-19T00:00:00.000Z",
+  };
+  h.specs.text = LABEL_JSON;
+}
+
+/** 正規化した JSON の task の項目を差し替える（ほかはそのまま） */
+function withTaskFields(h: Harness, fields: unknown): void {
+  h.specs.text = JSON.stringify({
+    ...LABEL_APP,
+    spec: { ...LABEL_APP.spec, entities: [{ name: "task", fields }] },
+  });
+}
+
+/** 正規化した JSON の計算を差し替える */
+function withFirstComputed(h: Harness, computed: unknown): void {
+  h.specs.text = JSON.stringify({ ...LABEL_APP, spec: { ...LABEL_APP.spec, computed: [computed] } });
+}
+
+describe("表示名（label）を含む宣言の配信", () => {
+  it("getSpec が ok で返し、項目と計算の label を保つ（受入条件）", async () => {
+    const h = harness();
+    withLabelDeclaration(h);
+
+    const result = await getSpec(h.deps, INSTANCE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.status).toBe(API_READ_STATUS);
+    const task = result.body.spec.entities.find((entity) => entity.name === "task");
+    expect(task?.fields["title"]).toEqual({ type: "string", label: "やること" });
+    // label を書かない項目は、識別子のまま（1 語のスカラ）
+    expect(task?.fields["due"]).toBe("date");
+    expect(result.body.spec.computed[0]).toEqual({
+      name: "overdue",
+      entity: "task",
+      type: "boolean",
+      label: "期限切れ",
+      expression: "due < today()",
+    });
+  });
+
+  it("getView が ok で返し、名前 → 表示名の labels を載せる（受入条件）", async () => {
+    const h = harness();
+    withLabelDeclaration(h);
+
+    const result = await getView(h.deps, INSTANCE, "taskList");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.body.fields).toEqual(["title", "due"]);
+    // **列に出さない計算（真偽。強調が指す）の label も載る**——強調の印の文字に使う
+    expect(result.body.labels).toEqual({ title: "やること", overdue: "期限切れ" });
+  });
+
+  it("label を書かない一覧には、labels の欄そのものを載せない（M1.1〜M1.3 の応答を変えない）", async () => {
+    const h = harness();
+    // expense-log は label を 1 つも書いていない
+    const result = await getView(h.deps, INSTANCE, "expenseList");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.body.labels).toBeUndefined();
+  });
+
+  it("readNormalizedApp が、表示名を含む正規化 JSON を読む（受入条件）", () => {
+    expect(readNormalizedApp(LABEL_JSON)).toEqual(LABEL_APP);
+  });
+
+  it.each([
+    ["項目の label が空", { taskFields: { title: { type: "string", label: "" }, due: "date" } }],
+    ["項目の label が文字列でない", { taskFields: { title: { type: "string", label: 1 }, due: "date" } }],
+    [
+      "計算の label が文字列でない",
+      { computed: { name: "overdue", entity: "task", type: "boolean", label: 1, expression: "due < today()" } },
+    ],
+  ] as const)("%s は読めない（SPEC_UNAVAILABLE。成功に読み替えない）", async (_label, patch) => {
+    const h = harness();
+    withLabelDeclaration(h);
+    if ("taskFields" in patch) withTaskFields(h, patch.taskFields);
+    else withFirstComputed(h, patch.computed);
+
+    expect(await getSpec(h.deps, INSTANCE)).toEqual({
+      ok: false,
+      failure: { error: "SPEC_UNAVAILABLE", fields: [], validations: [] },
+    });
+  });
+});
+
 // ── 権限（唯一の権限強制点） ────────────────────────────────────
 
 /** `permissions` を差し替えた宣言を R2 に置く（版と SHA は登録と一致させたまま） */
