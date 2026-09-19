@@ -1,0 +1,40 @@
+# 負例：ボード（type: board）の highlight が、真偽を返す計算ではなく数の項目 estimate を指している。
+# highlight は、その entity の真偽を返す計算を指さなければならない（真の行に印を付ける。M1.3）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: task
+    fields:
+      title: string
+      estimate: number
+      status:
+        type: enum
+        options:
+          todo: 未着手
+          doing: 進行中
+          done: 完了
+        default: todo
+
+views:
+  - name: taskBoard
+    entity: task
+    type: board
+    columns: status
+    highlight: estimate
+
+actions:
+  - name: addTask
+    entity: task
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

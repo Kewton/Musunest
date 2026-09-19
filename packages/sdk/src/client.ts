@@ -8,7 +8,7 @@
 // fetch と base URL は差し込める。host の画面は同じ origin の /api/* を叩くので `baseUrl: ""` でよい
 // （相対 URL のまま fetch する）。e2e のように別の origin を指す場合は絶対 URL を渡す。
 
-import { API_ERROR_CODES, ACTION_KINDS, FIELD_TYPES, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
+import { API_ERROR_CODES, ACTION_KINDS, COMPUTED_TYPES, FIELD_TYPES, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
 import type {
   ApiDeletedBody,
   ApiErrorCode,
@@ -385,14 +385,19 @@ function isComputedDeclaration(value: unknown): boolean {
     value.settle !== undefined,
   ].filter(Boolean).length;
   if (forms !== 1) return false;
-  if (typeof value.expression === "string") return value.type === "number";
+  // 式の計算の型は `COMPUTED_TYPES`（正本）で見る（`number` と、M1.3 の `boolean`）。
+  // 集計は数を返すので `number` だけである
+  if (typeof value.expression === "string") {
+    return typeof value.type === "string" && (COMPUTED_TYPES as readonly string[]).includes(value.type);
+  }
   if (value.aggregate !== undefined) return value.type === "number" && isAggregate(value.aggregate);
   return isSettleDeclaration(value.settle);
 }
 
 /**
- * 一覧の宣言。M1.2 で `type`（種類。語彙は `VIEW_TYPES` の 2 つだけ）と `show`（表に出す名前の順）を
- * 足した。**`show` は `type: table` のときだけ**である（書ける欄は `type` が決める）。
+ * 一覧の宣言。M1.2 で `type`（種類。語彙は `VIEW_TYPES`：`table`・`settlement`・`board`）と
+ * `show`（表に出す名前の順）を、M1.3 でボードの `columns`（必須）・`highlight`（任意）を足した。
+ * **書ける欄は `type` が決める**（語彙は閉じている）。
  */
 function isView(value: unknown): boolean {
   if (!isRecord(value) || typeof value.name !== "string" || typeof value.entity !== "string") return false;
@@ -401,8 +406,16 @@ function isView(value: unknown): boolean {
       return false;
     }
   }
-  if (value.show === undefined) return true;
-  return value.type === "table" && isStringArray(value.show);
+  // `show` は `type: table` のときだけ（ほかの種類は列の並びを持たない）
+  if (value.show !== undefined && !(value.type === "table" && isStringArray(value.show))) return false;
+  // ボードの `columns`・`highlight` は `type: board` のときだけ。どちらも名前 1 つである
+  if (value.columns !== undefined) {
+    if (value.type !== "board" || typeof value.columns !== "string") return false;
+  }
+  if (value.highlight !== undefined) {
+    if (value.type !== "board" || typeof value.highlight !== "string") return false;
+  }
+  return true;
 }
 
 /** 精算の 1 件（M1.2）。送金元・送金先はレコードの ID、額は正の数である */
@@ -450,7 +463,12 @@ function isRow(value: unknown): value is ApiRow {
   }
   if (!isRecord(value.fields) || !Object.values(value.fields).every(isApiValue)) return false;
   if (!isRecord(value.computed)) return false;
-  if (!Object.values(value.computed).every((item) => item === null || typeof item === "number")) {
+  // 計算の値は数か `null`。**M1.3 で真偽（`boolean`）も載る**（強調（`highlight`）の判定の結果。Issue #157）
+  if (
+    !Object.values(value.computed).every(
+      (item) => item === null || typeof item === "number" || typeof item === "boolean",
+    )
+  ) {
     return false;
   }
   // 参照されている行（M1.2）は任意。**載っているときだけ**契約の形を要求する

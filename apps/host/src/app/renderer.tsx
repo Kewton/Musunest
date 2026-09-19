@@ -38,6 +38,7 @@ import { fieldKind, fieldTarget } from "@musunest/sdk";
 import { AddForm } from "./form";
 import type { AddFormResult, FormField, FormOption } from "./form";
 import { SettlementList } from "./settlement";
+import { Board } from "./board";
 import "./renderer.css";
 
 /** 読めなかった理由。**状態を1つに潰さない**（未存在・権限不足・通信失敗を区別して描く） */
@@ -218,6 +219,18 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           transfers={view.settlement ?? null}
           rows={view.rows}
           labelField={entity === undefined ? null : labelFieldOf(entity)}
+        />
+      ) : declaration?.type === "board" && declaration.columns !== undefined ? (
+        // ボード（M1.3）。列は `options` に書いた順、強調は API が行に載せた真偽の値をそのまま見る。
+        // **空でも列を描く**（空の列も出す）ので、行が 0 件でもボードへ渡す
+        <Board
+          view={view}
+          entity={entity}
+          columns={declaration.columns}
+          highlight={declaration.highlight}
+          labelOf={(field, value) => displayOf(entity, references, field, value)}
+          setActions={setActions}
+          onRunAction={(actionName, id) => void runSetAction(actionName, id)}
         />
       ) : view.rows.length === 0 ? (
         <p className="state empty" data-state="empty">
@@ -435,7 +448,7 @@ function displayOf(
  * 計算の値。**返ってきた値をそのまま見せる**（画面は式も集計も評価しない）。
  * 求められなかった計算の `null` は「—」で見せ、**0 と区別する**（M1.2。docs/semantics.md「aggregate」）。
  */
-function computedText(value: number | null | undefined): string {
+function computedText(value: number | boolean | null | undefined): string {
   return value === null ? "—" : value === undefined ? "" : String(value);
 }
 

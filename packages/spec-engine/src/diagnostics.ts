@@ -131,6 +131,10 @@ export const DIAGNOSTIC_CODES = [
   "UI_VIEW_DUPLICATE_NAME",
   /** 表（`type: table`）の `show` に書いた名前が、その entity の項目にも計算にも無い（M1.2） */
   "UI_FIELD_NOT_FOUND",
+  /** ボード（`type: board`）の `columns` が、その entity の選択肢（`enum`）の項目を指していない（M1.3） */
+  "UI_BOARD_COLUMNS_NOT_ENUM",
+  /** ボードの `highlight` が、その entity の真偽を返す計算を指していない（M1.3） */
+  "UI_HIGHLIGHT_NOT_BOOLEAN",
 
   // ── 権限（PERMISSION） ──────────────────────────────────────
   /** M1.1 の権限の名前（`read`・`write`）に無い */

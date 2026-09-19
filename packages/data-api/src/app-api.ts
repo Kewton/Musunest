@@ -39,6 +39,7 @@ import type {
   AppSpec,
   Entity,
   NormalizedAppSpec,
+  View,
 } from "@musunest/appspec-schema";
 import {
   API_CREATED_STATUS,
@@ -48,6 +49,7 @@ import {
   actionKind,
   fieldKind,
   fieldTarget,
+  isComputedExpression,
   isComputedSettle,
   isRowComputed,
   takesRow,
@@ -68,6 +70,7 @@ import {
   aggregateSourceEntities,
   allowsAction,
   evaluateRecord,
+  holdsExpression,
   settleEntity,
   settleSourceEntities,
   wholeYenFields,
@@ -426,9 +429,34 @@ const actionsOf = (app: NormalizedAppSpec): readonly ApiActionRef[] =>
 
 const computedNamesOf = (app: NormalizedAppSpec, entity: string): readonly string[] =>
   app.spec.computed
-    // 精算（`settle`）は行ごとの値ではないので、一覧の列に出さない（M1.2）
-    .filter((entry) => entry.entity === entity && isRowComputed(entry))
+    // 精算（`settle`）は行ごとの値ではないので、一覧の列に出さない（M1.2）。
+    // **真偽（`boolean`）の計算も列に出さない**（M1.3）——強調（`highlight`）が指すためだけに使い、
+    // 値は行の `computed` に載せるが、列の並び（この応答の `computed`）には入れない
+    .filter((entry) => entry.entity === entity && isRowComputed(entry) && entry.type !== "boolean")
     .map((entry) => entry.name);
+
+/**
+ * ボードの強調（`highlight`。M1.3）が指す計算。名前と、行ごとに解く式である。
+ * **式で求める真偽の計算だけ**を対象にする——集計と精算は数を返すので強調に使えない（静的チェックが断る）。
+ */
+interface Highlight {
+  readonly name: string;
+  readonly expression: string;
+}
+
+/**
+ * 一覧の宣言から、強調に使う計算を引く。`highlight` を書いていなければ `undefined`
+ * （応答の行に真偽の値を載せない）。**画面は式を評価しない**ので、解くのはここ（Data API）である。
+ */
+function highlightOf(app: NormalizedAppSpec, view: View, entity: string): Highlight | undefined {
+  const name = view.highlight;
+  if (name === undefined) return undefined;
+  const entry = app.spec.computed.find(
+    (candidate) => candidate.entity === entity && candidate.name === name,
+  );
+  if (entry === undefined || !isComputedExpression(entry)) return undefined;
+  return { name, expression: entry.expression };
+}
 
 /** その entity に精算（`settle`）を宣言しているか。宣言が無ければ、応答に `settlement` を載せない */
 const declaresSettle = (app: NormalizedAppSpec, entity: string): boolean =>
@@ -484,6 +512,8 @@ function toApiRow(
   sources: SourceRecords,
   /** この行を参照している保存済みの行（M1.2）。`delete` を宣言していない entity では `undefined` */
   references?: readonly ApiReference[],
+  /** ボードの強調（`highlight`。M1.3）。無ければ真偽の値を載せない */
+  highlight?: Highlight,
 ): ApiRow {
   const { computed } = evaluateRecord({
     app,
@@ -493,6 +523,19 @@ function toApiRow(
     recordId: record.id,
     sources,
   });
+  // 強調（`highlight`）の判定は**ここ（Data API）で行う**（M1.3）。画面は式を評価しない——
+  // 真偽の計算の値を行の `computed` に載せ、画面はそれをそのまま見て印を付けるだけである。
+  // **この名前は列の並び（`computedNamesOf`）には入らない**ので、一覧の列にはならない
+  const values: Record<string, number | boolean | null> =
+    highlight === undefined
+      ? computed
+      : {
+          ...computed,
+          [highlight.name]: holdsExpression(
+            { app, entity, record: record.data, clock, recordId: record.id, sources },
+            highlight.expression,
+          ),
+        };
   // 操作の条件（M1.3）。条件を宣言していない entity では欄そのものを載せない
   const allowedActions = allowedActionsOf(app, entity, record, clock, sources);
   return {
@@ -500,7 +543,7 @@ function toApiRow(
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     fields: record.data,
-    computed,
+    computed: values,
     ...(references === undefined ? {} : { references }),
     ...(allowedActions === undefined ? {} : { allowedActions }),
   };
@@ -705,6 +748,8 @@ export async function getView(
   const referenceIndex = await referencesByRow(deps, app, entity, stored);
   // 精算（M1.2）。宣言していれば、店頭が組んだ送金の並びを返す（読めなければ `null`。空の並びに読み替えない）
   const settlement = settlementOf(app, entity.name, stored, sources);
+  // 強調（`highlight`。M1.3）。ボードの宣言があれば、真偽の計算を行ごとに解いて行に載せる
+  const highlight = highlightOf(app, view, entity.name);
   return ok(API_READ_STATUS, {
     instanceId,
     view: view.name,
@@ -721,6 +766,7 @@ export async function getView(
         deps.clock,
         sources,
         referencesOf(referenceIndex, record.id),
+        highlight,
       ),
     ),
     ...(settlement === undefined ? {} : { settlement }),

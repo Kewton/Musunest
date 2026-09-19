@@ -366,7 +366,12 @@ function prepareRecord(request: EvaluationRequest, state: EvaluationState): Prep
     (candidate) => candidate.name === entityName,
   );
   if (entity === undefined) return null;
-  const declared = forEntity(app.spec.computed, entityName).filter(isRowComputed);
+  // **真偽（`boolean`）の計算は、行の `computed` に入れない**（M1.3）。強調（`highlight`）が指すためだけに
+  // 使い、値は data-api が `holdsExpression` で解いて行に載せる（Issue #157）。ここが数だけを返すので、
+  // 一覧の応答の `computed` に真偽が混ざらない（列にも出さない）
+  const declared = forEntity(app.spec.computed, entityName)
+    .filter(isRowComputed)
+    .filter((entry) => entry.type !== "boolean");
 
   const values = new Map<string, ComputedValue>();
   const declaredByName = new Map(declared.map((entry) => [entry.name, entry]));
@@ -442,6 +447,20 @@ export function evaluateRecord(request: EvaluationRequest): Evaluation {
  * 宣言に無い entity は `false`（呼ぶ側が先に entity の実在を見る。成功に読み替えない）。
  */
 export function allowsAction(request: EvaluationRequest, when: string): boolean {
+  return holdsExpression(request, when);
+}
+
+/**
+ * その式が、この 1 件で真になるか（M1.3）。**真になったときだけ `true`** である
+ * （偽も、値が求まらなかった（`null`）も `false`。`when` と同じ扱いである）。
+ *
+ * **ボードの強調（`highlight`）の判定が使う**——`highlight` が指す真偽の計算の式を、その行で解く。
+ * 判定するのは Data API（唯一の権限強制点）で、結果を行の `computed` に載せる。
+ * 画面は式を評価しない（`CLAUDE.md` の不変条件）。
+ *
+ * 宣言に無い entity は `false`（呼ぶ側が先に entity の実在を見る。成功に読み替えない）。
+ */
+export function holdsExpression(request: EvaluationRequest, expression: string): boolean {
   const prepared = prepareRecord(request, { visiting: new Set<string>() });
-  return prepared === null ? false : holds(when, prepared.scope);
+  return prepared === null ? false : holds(expression, prepared.scope);
 }

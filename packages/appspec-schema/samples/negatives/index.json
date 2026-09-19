@@ -44,6 +44,13 @@
       "why": "集計の where の項目 amount は数であって、this を指す参照ではない"
     },
     {
+      "name": "board-columns-not-enum",
+      "codes": [
+        "UI_BOARD_COLUMNS_NOT_ENUM"
+      ],
+      "why": "ボード（type: board）の columns が、選択肢（enum）の項目ではなく数の項目 estimate を指している（M1.3）"
+    },
+    {
       "name": "computed-cycle",
       "codes": [
         "LOGIC_COMPUTED_CYCLE"
@@ -140,6 +147,13 @@
         "DATA_FIELD_TYPE_UNKNOWN"
       ],
       "why": "項目 amount の型 integer は M1.1 の型（string / number / list）に無い"
+    },
+    {
+      "name": "highlight-not-boolean",
+      "codes": [
+        "UI_HIGHLIGHT_NOT_BOOLEAN"
+      ],
+      "why": "ボード（type: board）の highlight が、真偽を返す計算ではなく数の項目 estimate を指している（M1.3）"
     },
     {
       "name": "identity-unknown-mode",
@@ -286,7 +300,7 @@
       "codes": [
         "SHAPE_KEY_UNKNOWN"
       ],
-      "why": "一覧に、M1.2 の語彙に無い種類 board を書いている（表は table、精算の表示は settlement。M1.2）"
+      "why": "一覧に、語彙に無い種類 button を書いている（表は table、精算の表示は settlement、ボードは board。画面の種類ではない語である）"
     },
     {
       "name": "when-not-boolean",
