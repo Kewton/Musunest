@@ -494,3 +494,119 @@ describe("項目の型（1 語の語彙）", () => {
     },
   );
 });
+
+// ── 決まった値への書き換え（set）と、条件が成り立たない断り（M1.3。Issue #156） ──
+//
+// **失敗を成功にしない**のはここでも同じである。409 `ACTION_NOT_ALLOWED` は
+// **どの操作のどの条件か**を保って渡す（画面がそのまま見せる）。片方だけの応答は成功にしない。
+
+describe("決まった値への書き換え（M1.3）", () => {
+  const SET_ROW: ApiRow = { ...ROW, allowedActions: ["finish"] };
+
+  it("method は POST、body は id だけ、書き換えた行が返る", async () => {
+    const stub = recordingFetch(() => json(200, SET_ROW));
+    const result = await clientWith(stub.fetch).setRecord("inst-1", "finish", "t1");
+
+    expect(stub.calls[0]?.url).toBe(`${BASE}/api/instances/inst-1/actions/finish`);
+    expect(stub.calls[0]?.init.method).toBe("POST");
+    expect(JSON.parse(String(stub.calls[0]?.init.body))).toEqual({ id: "t1" });
+    expect(result).toEqual({ ok: true, value: SET_ROW });
+  });
+
+  it("行に allowedActions が載っていれば保つ（空の並びも意味を持つ）", async () => {
+    const empty = { ...ROW, allowedActions: [] };
+    const stub = recordingFetch(() => json(200, empty));
+    expect(await clientWith(stub.fetch).setRecord("inst-1", "finish", "t1")).toEqual({
+      ok: true,
+      value: empty,
+    });
+  });
+
+  it("allowedActions の形が契約と違えば INVALID_RESPONSE（でっち上げない）", async () => {
+    const stub = recordingFetch(() => json(200, { ...ROW, allowedActions: [1, 2] }));
+    expect(await clientWith(stub.fetch).setRecord("inst-1", "finish", "t1")).toMatchObject({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE },
+    });
+  });
+
+  it("409 ACTION_NOT_ALLOWED は、操作の名前と条件を保つ（断りの理由を落とさない）", async () => {
+    const stub = recordingFetch(() =>
+      json(409, { error: "ACTION_NOT_ALLOWED", action: "finish", when: 'status != "done"' }),
+    );
+    expect(await clientWith(stub.fetch).setRecord("inst-1", "finish", "t1")).toEqual({
+      ok: false,
+      error: {
+        status: 409,
+        code: "ACTION_NOT_ALLOWED",
+        fields: [],
+        validations: [],
+        action: "finish",
+        when: 'status != "done"',
+      },
+    });
+  });
+
+  it("理由が載っていなければ、欄を作らない（読み替えない）", async () => {
+    const stub = recordingFetch(() => json(409, { error: "ACTION_NOT_ALLOWED" }));
+    const result = await clientWith(stub.fetch).setRecord("inst-1", "finish", "t1");
+
+    expect(result).toEqual({
+      ok: false,
+      error: { status: 409, code: "ACTION_NOT_ALLOWED", fields: [], validations: [] },
+    });
+    expect(result.ok === false && Object.hasOwn(result.error, "action")).toBe(false);
+  });
+
+  it("理由の形が契約と違えば INVALID_RESPONSE（片方だけは理由にならない）", async () => {
+    for (const body of [
+      { error: "ACTION_NOT_ALLOWED", action: "finish" },
+      { error: "ACTION_NOT_ALLOWED", when: 'status != "done"' },
+      { error: "ACTION_NOT_ALLOWED", action: 1, when: 2 },
+    ]) {
+      const stub = recordingFetch(() => json(409, body));
+      expect(await clientWith(stub.fetch).setRecord("inst-1", "finish", "t1")).toEqual({
+        ok: false,
+        error: { status: 409, code: INVALID_RESPONSE, fields: [], validations: [] },
+      });
+    }
+  });
+
+  it("宣言の set と when を持つ spec を読める（配信側が新しい語彙で落ちない）", async () => {
+    const spec: ApiSpecBody = {
+      ...SPEC,
+      spec: {
+        ...SPEC.spec,
+        actions: [
+          { name: "addExpense", entity: "expense" },
+          {
+            name: "finish",
+            entity: "expense",
+            kind: "update",
+            set: { description: "done", amount: 0 },
+            when: 'description != "done"',
+          },
+        ],
+      },
+    };
+    const stub = recordingFetch(() => json(200, spec));
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: spec });
+  });
+
+  it("set の形が契約と違う spec は成功にしない", async () => {
+    for (const set of [{}, { status: null }, "done"]) {
+      const spec = {
+        ...SPEC,
+        spec: {
+          ...SPEC.spec,
+          actions: [{ name: "finish", entity: "expense", kind: "update", set }],
+        },
+      };
+      const stub = recordingFetch(() => json(200, spec));
+      expect(await clientWith(stub.fetch).getSpec("inst-1")).toMatchObject({
+        ok: false,
+        error: { code: INVALID_RESPONSE },
+      });
+    }
+  });
+});

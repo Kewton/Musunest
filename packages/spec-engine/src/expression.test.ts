@@ -83,7 +83,8 @@ describe("式の解析（AST）", () => {
     ["引数の区切りが違う", "min(1 2)"],
     ["`.` の後ろが名前でない", "budget.1"],
     ["比較の連鎖", "1 < 2 < 3"],
-    ["式に書けない文字（文字列の定数）", '"done"'],
+    ["文字列の定数が閉じていない", '"done'],
+    ["文字列のエスケープ（M1.3 は書けない）", '"a\\"b"'],
     ["式に書けない文字（and）", "a && b"],
     ["式に書けない文字（指数）", "1e3"],
     ["数の後に余分がある", "1 2"],
@@ -364,6 +365,84 @@ describe("日付と「今日」の型（M1.3）", () => {
       type: "unknown",
       codes: ["LOGIC_REFERENCE_NOT_FOUND"],
     });
+  });
+});
+
+// ── 文字列の定数（M1.3。#156） ─────────────────────────────────────
+//
+// 小さく保つための線引き（2026-09-19 所有者）は 3 つである。
+//   1. **二重引用符だけ。エスケープは無い**（`"` を含む文字列は書けない）
+//   2. **使えるのは `==` と `!=` の比較だけ**（大小は比べない）
+//   3. **`+` で繋げない**（文字列の演算を足すと、「決まった値を比べる」以上のことができてしまう）
+
+describe("文字列の定数（M1.3）", () => {
+  const texts: FieldTypes = {
+    amount: "number",
+    payer: "string",
+    participants: "list",
+    due: "date",
+  };
+
+  it("文字列の定数を読む（引用符を外した中身が値になる）", () => {
+    expect(parsed('"done"')).toEqual({ kind: "string", value: "done", start: 0, end: 6 });
+    // 中身が空の文字列も書ける（葉として 1 ノードである）
+    expect(parsed('""')).toMatchObject({ kind: "string", value: "" });
+    expect(countNodes(parsed('"done"'))).toBe(1);
+    expect(depthOf(parsed('"done"'))).toBe(1);
+  });
+
+  it.each(["==", "!="] as const)("文字列は %s で比べられ、結果は真偽になる（受入条件）", (operator) => {
+    expect(analyze(`payer ${operator} "A"`, texts)).toEqual({ type: "boolean", codes: [] });
+    expect(analyze(`"A" ${operator} payer`, texts)).toEqual({ type: "boolean", codes: [] });
+    expect(analyze(`"A" ${operator} "B"`, texts)).toEqual({ type: "boolean", codes: [] });
+  });
+
+  it.each(["<", "<=", ">", ">="] as const)(
+    "文字列の大小（%s）は書けない（== と != だけ。受入条件）",
+    (operator) => {
+      expect(analyze(`payer ${operator} "A"`, texts)).toEqual({
+        type: "unknown",
+        codes: ["LOGIC_OPERAND_TYPE_MISMATCH"],
+      });
+    },
+  );
+
+  it("エスケープは書けない（`\\\"` を含む式は読めない。受入条件）", () => {
+    // 二重引用符だけで、`\` は文字として扱う。`"` を含む文字列は書けない
+    for (const text of ['"a\\"b"', '"done', 'payer == "A']) {
+      const result = parseExpression(text);
+      expect(result.ok, text).toBe(false);
+      if (result.ok) continue;
+      expect(result.errors[0]?.message, text).not.toBe("");
+    }
+    // 読めない式は LOGIC_EXPRESSION_INVALID になる（診断の経路も確かめる）
+    const read = readExpression('payer == "A');
+    expect(read.ok).toBe(false);
+    if (read.ok) return;
+    expect(read.problems.map((problem) => problem.code)).toEqual(["LOGIC_EXPRESSION_INVALID"]);
+  });
+
+  it("`+` で繋げない（文字列は計算に使えない。受入条件）", () => {
+    // 左右の両方が数でなければ、両方が食い違いとして返る（既存の binary の扱いと同じ）
+    expect(analyze('payer + "A"', texts)).toEqual({
+      type: "unknown",
+      codes: ["LOGIC_OPERAND_TYPE_MISMATCH", "LOGIC_OPERAND_TYPE_MISMATCH"],
+    });
+    expect(analyze('"A" + "B"', texts).type).toBe("unknown");
+    expect(new Set(analyze('"A" + "B"', texts).codes)).toEqual(new Set(["LOGIC_OPERAND_TYPE_MISMATCH"]));
+    // 引き算・掛け算・符号も同じである
+    expect(analyze('"A" * 2', texts).codes).toEqual(["LOGIC_OPERAND_TYPE_MISMATCH"]);
+    expect(analyze('-"A"', texts).codes).toEqual(["LOGIC_OPERAND_TYPE_MISMATCH"]);
+  });
+
+  it("文字列と、数・日付・並びは比べられない（型が食い違う）", () => {
+    expect(analyze('amount == "A"', texts).codes).toEqual(["LOGIC_OPERAND_TYPE_MISMATCH"]);
+    expect(analyze('due == "2026-09-15"', texts).codes).toEqual(["LOGIC_OPERAND_TYPE_MISMATCH"]);
+    expect(analyze('participants == "A"', texts).codes).toEqual(["LOGIC_OPERAND_TYPE_MISMATCH"]);
+  });
+
+  it("文字列の定数は `len` にも渡せない（引数の型が食い違う）", () => {
+    expect(analyze('len("done")', texts).codes).toEqual(["LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH"]);
   });
 });
 

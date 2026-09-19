@@ -1,0 +1,42 @@
+# 負例：決まった値への書き換え（set）に、決まった値ではなく式を書いている。
+# set に書けるのは定数だけである（式を許すと、計算と操作の境目が消える）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: task
+    fields:
+      title: string
+      estimate: number
+      status:
+        type: enum
+        options:
+          todo: 未着手
+          doing: 進行中
+          done: 完了
+        default: todo
+
+views:
+  - name: taskList
+    entity: task
+
+actions:
+  - name: addTask
+    entity: task
+  - name: bump
+    entity: task
+    kind: update
+    set:
+      estimate: estimate + 1
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

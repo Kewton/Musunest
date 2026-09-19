@@ -26,7 +26,7 @@ import {
 import { sampleScenarioFile, sampleSpecFile } from "@musunest/appspec-schema/files";
 import { checkSpec } from "./check.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { evaluateRecord, type Evaluation } from "./evaluate.js";
+import { allowsAction, evaluateRecord, type Evaluation } from "./evaluate.js";
 import { countNodes, depthOf, parseExpression, readExpression } from "./expression.js";
 import { EXPRESSION_LIMITS } from "./limits.js";
 import { normalizeSpec } from "./normalize.js";
@@ -802,5 +802,115 @@ describe("日付（date）と「今日」（today()）（M1.3）", () => {
       expect(source.includes("Date.now"), `${file} に Date.now がある`).toBe(false);
     }
     expect(readText(new URL("./clock.ts", import.meta.url))).toContain("Date.now()");
+  });
+});
+
+// ── 操作の条件（when）と文字列の比較（M1.3。Issue #156） ─────────────────
+//
+// **`when` はロジック層の守りである**（`03-spec-layers-and-checker.md` §2.2）。ここが返す真偽で
+// data-api が操作を断る。**真になったときだけ通す**——偽と「値が求まらない」を区別しない
+// （検査の式と同じ扱いである）。
+
+const WHEN_SOURCE = [
+  "entities:",
+  "  - name: task",
+  "    fields:",
+  "      title: string",
+  "      status:",
+  "        type: enum",
+  "        options:",
+  "          todo: 未着手",
+  "          doing: 進行中",
+  "          done: 完了",
+  "        default: todo",
+  "views:",
+  "  - name: taskList",
+  "    entity: task",
+  "actions:",
+  "  - name: addTask",
+  "    entity: task",
+  "  - name: start",
+  "    entity: task",
+  "    kind: update",
+  "    set:",
+  "      status: doing",
+  '    when: status == "todo"',
+  "  - name: finish",
+  "    entity: task",
+  "    kind: update",
+  "    set:",
+  "      status: done",
+  '    when: status != "done"',
+  "validations: []",
+  "computed: []",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+describe("操作の条件（when）の評価（M1.3）", () => {
+  const whenClock = fixedClock("2026-09-16T12:00:00+09:00");
+
+  const allows = async (actionName: string, record: Readonly<Record<string, unknown>>) => {
+    const app = await normalized(WHEN_SOURCE);
+    const action = app.spec.actions.find((candidate) => candidate.name === actionName);
+    if (action?.when === undefined) throw new Error(`${actionName} に when が無い`);
+    return allowsAction({ app, entity: "task", record, clock: whenClock }, action.when);
+  };
+
+  it.each([
+    ["todo", true, true],
+    ["doing", false, true],
+    ["done", false, false],
+  ] as const)("status が %s のとき、start は %s・finish は %s である", async (status, start, finish) => {
+    expect(await allows("start", { title: "宿の予約", status })).toBe(start);
+    expect(await allows("finish", { title: "宿の予約", status })).toBe(finish);
+  });
+
+  it("値が求まらない行は、どの操作も通さない（偽と同じ扱いにする）", async () => {
+    // 項目そのものが無い・型が違う値は `null` になり、比較は真偽にならない
+    expect(await allows("start", { title: "宿の予約" })).toBe(false);
+    expect(await allows("start", { title: "宿の予約", status: 1 })).toBe(false);
+    expect(await allows("finish", { title: "宿の予約", status: null })).toBe(false);
+  });
+
+  it("宣言に無い entity は通さない（成功に読み替えない）", async () => {
+    const app = await normalized(WHEN_SOURCE);
+    expect(allowsAction({ app, entity: "member", record: {}, clock: whenClock }, "1 == 1")).toBe(false);
+  });
+
+  it("読めない式は通さない（上限を超えた式も同じ）", async () => {
+    const app = await normalized(WHEN_SOURCE);
+    const request = { app, entity: "task", record: { title: "t", status: "todo" }, clock: whenClock };
+    expect(allowsAction(request, 'status == "todo')).toBe(false);
+    expect(allowsAction(request, `1 == ${"(".repeat(EXPRESSION_LIMITS.maxLength)}1`)).toBe(false);
+    // 真になる式だけが通る
+    expect(allowsAction(request, 'status == "todo"')).toBe(true);
+  });
+
+  it("文字列の定数は、項目の値とそのまま比べる（`enum` のキー・`ref` の ID・`string`）", async () => {
+    const app = await normalized(WHEN_SOURCE);
+    const of = (record: Readonly<Record<string, unknown>>, when: string): boolean =>
+      allowsAction({ app, entity: "task", record, clock: whenClock }, when);
+    expect(of({ title: "宿の予約", status: "todo" }, 'title == "宿の予約"')).toBe(true);
+    expect(of({ title: "宿の予約", status: "todo" }, 'title != "宿の予約"')).toBe(false);
+    // 空の文字列も 1 つの値である（0 にも「無い」にも読み替えない）
+    expect(of({ title: "", status: "todo" }, 'title == ""')).toBe(true);
+  });
+
+  it("検査の式でも文字列の比較が効く（同じ環境で解く）", async () => {
+    const source = WHEN_SOURCE.replace(
+      "validations: []",
+      ["validations:", "  - name: notDone", "    entity: task", '    expression: status != "done"'].join("\n"),
+    );
+    const app = await normalized(source);
+    const evaluateTask = (record: Readonly<Record<string, unknown>>) =>
+      evaluateRecord({ app, entity: "task", record, clock: whenClock }).validations;
+    expect(evaluateTask({ title: "t", status: "doing" })).toEqual([]);
+    expect(evaluateTask({ title: "t", status: "done" })).toEqual(["notDone"]);
   });
 });

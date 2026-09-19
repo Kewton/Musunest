@@ -320,3 +320,95 @@ describe("選択肢（enum）と既定値（default）の正規化（M1.3）", (
     });
   });
 });
+
+// ── 決まった値への書き換え（set）とボタンを出す条件（when）の正規化（M1.3。Issue #156） ──
+//
+// **publish で通り、正規化した JSON に残ること**が受入条件である。data-api と画面はこの JSON
+// だけを読むので、ここで落ちれば「静的チェックは通るのに画面が動かない」になる（#145 と同じ穴）。
+
+const SET_WHEN_SOURCE = [
+  "entities:",
+  "  - name: task",
+  "    fields:",
+  "      title: string",
+  "      status:",
+  "        type: enum",
+  "        options:",
+  "          todo: 未着手",
+  "          doing: 進行中",
+  "          done: 完了",
+  "        default: todo",
+  "views:",
+  "  - name: taskList",
+  "    entity: task",
+  "actions:",
+  "  - name: addTask",
+  "    entity: task",
+  "  - name: start",
+  "    entity: task",
+  "    kind: update",
+  "    set:",
+  "      status: doing",
+  '    when: status == "todo"',
+  "  - name: finish",
+  "    entity: task",
+  "    kind: update",
+  "    set:",
+  "      status: done",
+  '    when: status != "done"',
+  "validations: []",
+  "computed: []",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+describe("set と when の正規化（M1.3）", () => {
+  it("set と when を持つ操作が publish でき、正規化した JSON に残る（受入条件）", async () => {
+    const result = await normalized(SET_WHEN_SOURCE);
+    expect(result.app.spec.actions).toEqual([
+      { name: "addTask", entity: "task" },
+      {
+        name: "start",
+        entity: "task",
+        kind: "update",
+        set: { status: "doing" },
+        when: 'status == "todo"',
+      },
+      {
+        name: "finish",
+        entity: "task",
+        kind: "update",
+        set: { status: "done" },
+        when: 'status != "done"',
+      },
+    ]);
+    // 文字列の定数は、引用符ごと JSON に残る（式の字面を書き換えない）
+    expect(result.json).toContain('status == \\"todo\\"');
+  });
+
+  it("set も when も持たない操作には、欄そのものが無い（M1.1・M1.2 の応答を変えない）", async () => {
+    const result = await normalized(SET_WHEN_SOURCE);
+    expect(Object.keys(result.app.spec.actions[0] ?? {})).toEqual(["name", "entity"]);
+  });
+
+  it("宣言の順は並べ替えない（操作の順が、画面のボタンの順になる）", async () => {
+    const result = await normalized(SET_WHEN_SOURCE);
+    expect(result.app.spec.actions.map((action) => action.name)).toEqual([
+      "addTask",
+      "start",
+      "finish",
+    ]);
+    expect(result.json.indexOf('"start"')).toBeLessThan(result.json.indexOf('"finish"'));
+  });
+
+  it("同じ原本からは同じバイト列になる（set と when を足しても変わらない約束）", async () => {
+    const first = await normalized(SET_WHEN_SOURCE);
+    const second = await normalized(SET_WHEN_SOURCE);
+    expect(utf8(first.json)).toEqual(utf8(second.json));
+  });
+});

@@ -53,6 +53,21 @@ export interface NumberLiteralNode {
   readonly value: number;
 }
 
+/**
+ * 文字列の定数（M1.3。`"done"`）。**二重引用符だけで、エスケープは無い**
+ * （`"` を含む文字列は書けない。docs/semantics.md「string」）。
+ *
+ * 使えるのは `==` と `!=` の比較だけである（`+` で繋げない）——文字列の演算を足すと、
+ * 「決まった値を比べる」以上のことが式でできてしまう（小さく保つための線引き。2026-09-19 所有者）。
+ */
+export interface StringLiteralNode {
+  readonly kind: "string";
+  readonly start: number;
+  readonly end: number;
+  /** 引用符を外した中身 */
+  readonly value: string;
+}
+
 /** 同じ entity の項目か計算の名前 */
 export interface NameNode {
   readonly kind: "name";
@@ -95,7 +110,14 @@ export interface CallNode {
   readonly args: readonly AstNode[];
 }
 
-export type AstNode = NumberLiteralNode | NameNode | MemberNode | UnaryNode | BinaryNode | CallNode;
+export type AstNode =
+  | NumberLiteralNode
+  | StringLiteralNode
+  | NameNode
+  | MemberNode
+  | UnaryNode
+  | BinaryNode
+  | CallNode;
 
 export const isArithmeticOperator = (operator: string): boolean =>
   (ARITHMETIC_OPERATORS as readonly string[]).includes(operator);
@@ -105,7 +127,7 @@ export const isComparisonOperator = (operator: string): boolean =>
 
 // ── 字句 ───────────────────────────────────────────────────────
 
-type TokenKind = "number" | "name" | "operator" | "open" | "close" | "comma" | "dot";
+type TokenKind = "number" | "string" | "name" | "operator" | "open" | "close" | "comma" | "dot";
 
 interface Token {
   readonly kind: TokenKind;
@@ -146,6 +168,28 @@ function tokenize(text: string): { tokens: Token[]; error: ExpressionError | nul
       index += 1;
       continue;
     }
+    // 文字列の定数（M1.3）。**二重引用符だけ。エスケープは無い**ので、次の `"` までが中身である
+    // （`\` は文字として扱う）。閉じていなければ、その位置で止める
+    if (character === '"') {
+      const closing = text.indexOf('"', index + 1);
+      if (closing < 0) {
+        return {
+          tokens,
+          error: {
+            offset: index,
+            message: '文字列の定数が " で閉じていない（エスケープは書けない）',
+          },
+        };
+      }
+      tokens.push({
+        kind: "string",
+        text: text.slice(index + 1, closing),
+        start: index,
+        end: closing + 1,
+      });
+      index = closing + 1;
+      continue;
+    }
     const number = NUMBER_TEXT.exec(rest);
     if (number) {
       tokens.push({ kind: "number", text: number[0], start: index, end: index + number[0].length });
@@ -174,7 +218,7 @@ function tokenize(text: string): { tokens: Token[]; error: ExpressionError | nul
       tokens,
       error: {
         offset: index,
-        message: `${character} は式に書けない（数の定数・項目と計算の名前・+ - * / > >= < <= == != ・min max len・かっこ だけを書ける）`,
+        message: `${character} は式に書けない（数と文字列の定数・項目と計算の名前・+ - * / > >= < <= == != ・min max len today・かっこ だけを書ける）`,
       },
     };
   }
@@ -286,6 +330,9 @@ class Parser {
     if (token.kind === "number") {
       return { kind: "number", value: Number(token.text), start: token.start, end: token.end };
     }
+    if (token.kind === "string") {
+      return { kind: "string", value: token.text, start: token.start, end: token.end };
+    }
     if (token.kind === "name") {
       const following = this.#peek();
       if (following !== undefined && following.kind === "dot") {
@@ -355,6 +402,7 @@ export function parseExpression(text: string): ParseResult {
 export function countNodes(node: AstNode): number {
   switch (node.kind) {
     case "number":
+    case "string":
     case "name":
     case "member":
       return 1;
@@ -371,6 +419,7 @@ export function countNodes(node: AstNode): number {
 export function depthOf(node: AstNode): number {
   switch (node.kind) {
     case "number":
+    case "string":
     case "name":
     case "member":
       return 1;
@@ -487,11 +536,20 @@ export function typeName(type: SpecType): string {
 const isNumberCompatible = (type: SpecType): boolean => type === "number" || type === "unknown";
 
 /**
- * 比較の左右の型。**数どうし（従来）か、日付どうしだけ**を比べられる（M1.3。docs/semantics.md「date」）。
+ * 比較の左右の型。**同じ型どうしだけ**を比べられる（M1.3。docs/semantics.md「date」「string」）。
  * 片方が日付なら、もう片方も日付でなければならない——`due < 1` は `LOGIC_OPERAND_TYPE_MISMATCH` になる。
+ * 片方が文字列なら、もう片方も文字列である（`==`・`!=` だけ。下の `isOrderedComparison`）。
  */
 const comparisonOperand = (left: SpecType, right: SpecType): SpecType =>
-  left === "date" || right === "date" ? "date" : "number";
+  left === "date" || right === "date"
+    ? "date"
+    : left === "string" || right === "string"
+      ? "string"
+      : "number";
+
+/** 大小の比較（`==`・`!=` 以外）。文字列には使えない（M1.3。「決まった値を比べる」だけを許す） */
+const isOrderedComparison = (operator: string): boolean =>
+  isComparisonOperator(operator) && operator !== "==" && operator !== "!=";
 
 const isOperandCompatible = (type: SpecType, expected: SpecType): boolean =>
   type === "unknown" || type === expected;
@@ -517,6 +575,8 @@ export function analyzeExpression(ast: AstNode, scope: ExpressionScope): Express
     switch (node.kind) {
       case "number":
         return "number";
+      case "string":
+        return "string";
       case "name": {
         names.push(node.name);
         const resolved = scope.resolveName(node.name);
@@ -558,10 +618,16 @@ export function analyzeExpression(ast: AstNode, scope: ExpressionScope): Express
         const left = visit(node.left);
         const right = visit(node.right);
         const comparison = isComparisonOperator(node.operator);
-        // 計算は数どうしだけである。比較は、数どうし（従来）か日付どうしだけを許す（M1.3）
+        // 計算は数どうしだけである。比較は、同じ型どうし（数・日付・文字列）だけを許す（M1.3）
         const expected = comparison ? comparisonOperand(left, right) : "number";
         const phrase =
-          expected === "date" ? "日付どうしを比べる" : comparison ? "数どうしを比べる" : "数どうしの計算";
+          expected === "date"
+            ? "日付どうしを比べる"
+            : expected === "string"
+              ? "文字列どうしを比べる"
+              : comparison
+                ? "数どうしを比べる"
+                : "数どうしの計算";
         let mismatch = false;
         if (!isOperandCompatible(left, expected)) {
           mismatch = true;
@@ -580,6 +646,16 @@ export function analyzeExpression(ast: AstNode, scope: ExpressionScope): Express
           });
         }
         if (mismatch) return "unknown";
+        // 文字列は「同じか違うか」だけを比べられる（大小は比べない。docs/semantics.md「string」）。
+        // 左右の型が揃っていることを先に見てから断る（1 つの誤りを 2 つにしない）
+        if (expected === "string" && isOrderedComparison(node.operator)) {
+          problems.push({
+            offset: node.start,
+            code: "LOGIC_OPERAND_TYPE_MISMATCH",
+            message: `${node.operator} は文字列に使えない（文字列は == と != だけで比べられる）`,
+          });
+          return "unknown";
+        }
         return comparison ? "boolean" : "number";
       }
       case "call": {

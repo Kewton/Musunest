@@ -205,6 +205,20 @@
       "why": "参照 payer の参照先 entity menber が宣言に無い（M1.2）"
     },
     {
+      "name": "set-type-mismatch",
+      "codes": [
+        "LOGIC_ACTION_SET_TYPE_MISMATCH"
+      ],
+      "why": "決まった値への書き換え（set）の値 finished が、選択肢の項目 status の options のキーに無い（M1.3）"
+    },
+    {
+      "name": "set-with-expression",
+      "codes": [
+        "LOGIC_ACTION_SET_NOT_CONSTANT"
+      ],
+      "why": "決まった値への書き換え（set）に、決まった値ではなく式 estimate + 1 を書いている（M1.3）"
+    },
+    {
       "name": "settle-amount-not-number",
       "codes": [
         "LOGIC_SETTLE_AMOUNT_NOT_NUMBER"
@@ -273,6 +287,13 @@
         "SHAPE_KEY_UNKNOWN"
       ],
       "why": "一覧に、M1.2 の語彙に無い種類 board を書いている（表は table、精算の表示は settlement。M1.2）"
+    },
+    {
+      "name": "when-not-boolean",
+      "codes": [
+        "LOGIC_ACTION_WHEN_NOT_BOOLEAN"
+      ],
+      "why": "ボタンを出す条件（when）の式 title が真偽にならない（文字列になる。M1.3）"
     }
   ]
 }

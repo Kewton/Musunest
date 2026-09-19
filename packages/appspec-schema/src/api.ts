@@ -138,6 +138,20 @@ export interface ApiRow {
    * `null` へ読み替えない（`settlement` と同じ約束である）。
    */
   readonly references?: readonly ApiReference[];
+  /**
+   * **この行に対して、いま実行してよい操作の名前**（M1.3）。対象の行 1 件を取る操作
+   * （`kind: update`・`kind: delete`）のうち、`when` が真のものを**宣言の順**で並べる。
+   * `when` を持たない操作はいつでも実行できるので、常に入る。
+   *
+   * **その entity の操作が 1 つでも `when` を持つときだけ載せる**——持たなければ判定そのものが
+   * 無いので、M1.2 の応答を変えない。`undefined` は「条件が宣言されていない」であって
+   * 「何もできない」ではない。空の並びは「どの操作もいまはできない」である（`references` と同じ約束）。
+   *
+   * **判定するのは Data API である**（唯一の権限強制点）。画面はこの並びを見てボタンを出し分けるが、
+   * それは親切であって守りではない——条件を満たさない操作は Data API が
+   * `ACTION_NOT_ALLOWED` で断る（`03` §2.2）。
+   */
+  readonly allowedActions?: readonly string[];
 }
 
 /** 消した結果（M1.2）。消せたときだけ返す（消せないときは 409 `REFERENCE_IN_USE` である） */
@@ -245,6 +259,12 @@ export const API_ERROR_CODES = [
   "SPEC_UNAVAILABLE",
   /** 参照されているレコードを消そうとした（M1.2。`references` を返す。docs/semantics.md「delete」） */
   "REFERENCE_IN_USE",
+  /**
+   * 操作の条件（`when`）が、その行で成り立たない（M1.3。`action` と `when` を返す）。
+   * **`INPUT_REJECTED` を使い回さない**——「入力が悪い」と「いまその操作はできない」は別物で、
+   * 画面の出し方も変わる（打ち直させるのではなく、その行ではできないことを伝える）。
+   */
+  "ACTION_NOT_ALLOWED",
 ] as const;
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
 
@@ -264,6 +284,8 @@ export const API_ERROR_STATUS = {
   SPEC_UNAVAILABLE: 503,
   /** 参照されているレコードを消そうとした（M1.2）。`references` を返す */
   REFERENCE_IN_USE: 409,
+  /** 操作の条件（`when`）が成り立たない（M1.3）。`action` と `when` を返す */
+  ACTION_NOT_ALLOWED: 409,
 } as const satisfies Record<ApiErrorCode, number>;
 
 /**
@@ -299,13 +321,30 @@ export interface ApiReferenceInUseBody {
   readonly references?: readonly ApiReference[];
 }
 
-export type ApiErrorBody = ApiRejectedBody | ApiReferenceInUseBody | ApiFailureBody;
+/**
+ * 操作の条件（`when`）が成り立たない行に操作を送ったときの本文（M1.3。409 `ACTION_NOT_ALLOWED`）。
+ * **どの操作のどの条件で断ったかを載せる**——画面がそのまま見せられるようにする。
+ * 条件は**宣言に書いてある式そのもの**である（評価の途中経過も、行の値も載せない）。
+ */
+export interface ApiActionNotAllowedBody {
+  readonly error: "ACTION_NOT_ALLOWED";
+  /** 断った操作の名前（宣言の `actions` の `name`） */
+  readonly action: string;
+  /** その操作の条件（宣言の `when` の式） */
+  readonly when: string;
+}
+
+export type ApiErrorBody =
+  | ApiRejectedBody
+  | ApiReferenceInUseBody
+  | ApiActionNotAllowedBody
+  | ApiFailureBody;
 
 /**
  * 誤りの本文を組む。`INPUT_REJECTED` のときだけ `fields` と `validations` を載せ
  * （ほかのコードでは項目名も検査名も無いので、空の配列を載せない）、`REFERENCE_IN_USE` のときだけ
- * `references` を載せる。`validationMessages` は、**文言が 1 つでもあるとき**だけ
- * `validations` と同じ並びで載せる。
+ * `references` を、`ACTION_NOT_ALLOWED` のときだけ `action` と `when` を載せる。
+ * `validationMessages` は、**文言が 1 つでもあるとき**だけ `validations` と同じ並びで載せる。
  */
 export function apiErrorBody(
   error: ApiErrorCode,
@@ -314,6 +353,8 @@ export function apiErrorBody(
     readonly validations?: readonly string[];
     readonly validationMessages?: readonly (string | null)[];
     readonly references?: readonly ApiReference[];
+    readonly action?: string;
+    readonly when?: string;
   },
 ): ApiErrorBody {
   if (error === "INPUT_REJECTED") {
@@ -327,6 +368,13 @@ export function apiErrorBody(
     const references = details?.references;
     if (references === undefined || references.length === 0) return { error };
     return { error, references };
+  }
+  if (error === "ACTION_NOT_ALLOWED") {
+    // **どちらも揃っているときだけ載せる。** 片方だけでは「どの操作のどの条件か」にならない
+    const action = details?.action;
+    const when = details?.when;
+    if (action === undefined || when === undefined) return { error };
+    return { error, action, when };
   }
   return { error };
 }

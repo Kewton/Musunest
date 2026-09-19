@@ -110,6 +110,8 @@ describe("誤りコードと HTTP ステータス（Issue #102 の案）", () =>
       SPEC_UNAVAILABLE: 503,
       // 参照されているレコードの削除（M1.2）。**列挙する欄である**（隠さない）
       REFERENCE_IN_USE: 409,
+      // 操作の条件（when）が成り立たない行への操作（M1.3）。**INPUT_REJECTED を使い回さない**
+      ACTION_NOT_ALLOWED: 409,
     });
     // コードの一覧とステータスの一覧がずれない（足し忘れをここで止める）
     expect(new Set(Object.keys(API_ERROR_STATUS))).toEqual(new Set(API_ERROR_CODES));
@@ -160,6 +162,30 @@ describe("誤りコードと HTTP ステータス（Issue #102 の案）", () =>
     expect(apiErrorBody("REFERENCE_IN_USE", { references: [] })).toEqual({ error: "REFERENCE_IN_USE" });
     // ほかの誤りには載らない
     expect(apiErrorBody("NOT_FOUND", { references })).toEqual({ error: "NOT_FOUND" });
+  });
+});
+
+describe("操作の条件（when）の断り（M1.3。Issue #156）", () => {
+  it("ACTION_NOT_ALLOWED だけが、どの操作のどの条件かを載せる", () => {
+    expect(apiErrorBody("ACTION_NOT_ALLOWED", { action: "finish", when: 'status != "done"' })).toEqual({
+      error: "ACTION_NOT_ALLOWED",
+      action: "finish",
+      when: 'status != "done"',
+    });
+    // **両方揃っているときだけ載せる**（片方だけでは「どの操作のどの条件か」にならない）
+    expect(apiErrorBody("ACTION_NOT_ALLOWED", { action: "finish" })).toEqual({
+      error: "ACTION_NOT_ALLOWED",
+    });
+    expect(apiErrorBody("ACTION_NOT_ALLOWED", { when: "x" })).toEqual({ error: "ACTION_NOT_ALLOWED" });
+    expect(apiErrorBody("ACTION_NOT_ALLOWED")).toEqual({ error: "ACTION_NOT_ALLOWED" });
+    // ほかの誤りには載らない
+    expect(apiErrorBody("NOT_FOUND", { action: "finish", when: "x" })).toEqual({ error: "NOT_FOUND" });
+  });
+
+  it("INPUT_REJECTED とは別のコードである（画面の出し方が変わる）", () => {
+    expect(API_ERROR_CODES).toContain("ACTION_NOT_ALLOWED");
+    expect(API_ERROR_STATUS.ACTION_NOT_ALLOWED).toBe(409);
+    expect(API_ERROR_STATUS.ACTION_NOT_ALLOWED).not.toBe(API_ERROR_STATUS.INPUT_REJECTED);
   });
 });
 

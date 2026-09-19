@@ -107,12 +107,14 @@ function makeClient(parts: {
   readonly view?: MusunestClient["getView"];
   readonly add?: MusunestClient["addRecord"];
   readonly remove?: MusunestClient["deleteRecord"];
+  readonly apply?: MusunestClient["setRecord"];
 }): MusunestClient {
   return {
     getSpec: parts.spec ?? (() => Promise.resolve(okResult(SPEC))),
     getView: parts.view ?? (() => Promise.resolve(okResult(VIEW))),
     addRecord: parts.add ?? (() => Promise.resolve(errResult("SPEC_UNAVAILABLE", 503))),
     deleteRecord: parts.remove ?? (() => Promise.resolve(errResult("SPEC_UNAVAILABLE", 503))),
+    setRecord: parts.apply ?? (() => Promise.resolve(errResult("SPEC_UNAVAILABLE", 503))),
   };
 }
 
@@ -1183,5 +1185,163 @@ describe("日付（date）の入力欄", () => {
 
     await waitFor(() => expect(addRecord).toHaveBeenCalledTimes(1));
     expect(addRecord.mock.calls[0]?.[2]).toEqual({ title: "宿の予約", due: "2026-09-20", memo: "" });
+  });
+});
+
+// ── 決まった値への書き換え（set）とボタンを出す条件（when）（M1.3。Issue #156） ──
+//
+// **画面は `when` の式を評価しない。** API が返した `row.allowedActions` をそのまま見て、
+// ボタンを出し分けるだけである（`CLAUDE.md` の不変条件）。ボタンを隠すのは**親切**であって
+// 守りではない——条件を満たさない操作を断るのは data-api である（`03` §2.2）。
+// だから、サーバが 409 `ACTION_NOT_ALLOWED` を返したときは、その理由をその場に出す。
+
+const BOARD_ACTIONS = [
+  { name: "addTask", entity: "task", kind: "create" as const },
+  { name: "start", entity: "task", kind: "update" as const, set: { status: "doing" }, when: 'status == "todo"' },
+  { name: "finish", entity: "task", kind: "update" as const, set: { status: "done" }, when: 'status != "done"' },
+];
+
+const BOARD_SPEC: ApiSpecBody = {
+  ...SPEC,
+  spec: {
+    ...SPEC.spec,
+    entities: [
+      {
+        name: "task",
+        fields: {
+          title: "string",
+          status: {
+            type: "enum",
+            options: { todo: "未着手", doing: "進行中", done: "完了" },
+            default: "todo",
+          },
+        },
+      },
+    ],
+    views: [{ name: "taskList", entity: "task" }],
+    actions: BOARD_ACTIONS,
+    validations: [],
+    computed: [],
+  },
+  actions: BOARD_ACTIONS.map(({ name, entity, kind }) => ({ name, entity, kind })),
+};
+
+/** `allowedActions` は **data-api が判定した結果**である（画面は式を評価しない） */
+const boardRow = (id: string, status: string, allowedActions: readonly string[]): ApiRow => ({
+  ...makeRow(id, { title: `タスク ${id}`, status }, {}),
+  allowedActions,
+});
+
+const TODO_ROW = boardRow("t1", "todo", ["start", "finish"]);
+const DONE_ROW = boardRow("t2", "done", []);
+
+const BOARD_VIEW: ApiViewBody = {
+  instanceId: "inst-1",
+  view: "taskList",
+  entity: "task",
+  fields: ["title", "status"],
+  computed: [],
+  permissions: { read: true, write: true },
+  actions: BOARD_SPEC.actions.filter((item) => item.entity === "task"),
+  rows: [TODO_ROW, DONE_ROW],
+};
+
+function boardClient(parts: Parameters<typeof makeClient>[0] = {}): MusunestClient {
+  return makeClient({
+    spec: () => Promise.resolve(okResult(BOARD_SPEC)),
+    view: () => Promise.resolve(okResult(BOARD_VIEW)),
+    ...parts,
+  });
+}
+
+describe("決まった値への書き換え（set）と条件（when）（M1.3）", () => {
+  it("when が偽の行では、そのボタンを出さない（受入条件）", async () => {
+    await renderScreen(boardClient());
+
+    // 未着手の行（t1）には「始める」「完了にする」の両方が出る
+    const todoButtons = Array.from(document.querySelectorAll('[data-row="t1"]')).map((node) =>
+      node.getAttribute("data-action"),
+    );
+    expect(todoButtons).toEqual(["start", "finish"]);
+
+    // 完了の行（t2）には、**どちらのボタンも出ない**（allowedActions が空である）
+    expect(document.querySelectorAll('[data-row="t2"]')).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "start" })).not.toBeNull();
+    expect(screen.getAllByRole("button", { name: "start" })).toHaveLength(1);
+  });
+
+  it("allowedActions が一部だけのときは、その操作のボタンだけを出す", async () => {
+    const rows = [boardRow("t3", "doing", ["finish"])];
+    const client = boardClient({ view: () => Promise.resolve(okResult({ ...BOARD_VIEW, rows })) });
+    await renderScreen(client);
+
+    const actions = Array.from(document.querySelectorAll('[data-row="t3"]')).map((node) =>
+      node.getAttribute("data-action"),
+    );
+    // 「始める」は出ない（進行中の行では when が偽である）
+    expect(actions).toEqual(["finish"]);
+  });
+
+  it("押すと id だけを渡して実行し、成功したら一覧を読み直す", async () => {
+    const apply = vi.fn<MusunestClient["setRecord"]>(() =>
+      Promise.resolve(okResult(makeRow("t1", { title: "タスク t1", status: "doing" }, {}))),
+    );
+    const view = vi.fn<MusunestClient["getView"]>(() => Promise.resolve(okResult(BOARD_VIEW)));
+    await renderScreen({ ...boardClient({ apply }), getView: view });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "finish" }));
+    });
+    // 送るのは**対象の行の ID だけ**である（何を書くかは宣言が持つ）
+    expect(apply).toHaveBeenCalledWith("inst-1", "finish", "t1");
+    // 成功したら一覧を読み直す（返ってきた行を勝手に足さない）。初回と合わせて 2 回
+    expect(view).toHaveBeenCalledTimes(2);
+  });
+
+  it("サーバが断った理由（409 ACTION_NOT_ALLOWED）を、その場に出す", async () => {
+    // 一覧の `allowedActions` は古くなっていることがある（別の操作が値を変えた）。
+    // そのときは**サーバの答え**を出す——画面の判断だけを守りにしない
+    const apply = vi.fn<MusunestClient["setRecord"]>(() =>
+      Promise.resolve({
+        ok: false,
+        error: {
+          status: 409,
+          code: "ACTION_NOT_ALLOWED",
+          fields: [],
+          validations: [],
+          action: "finish",
+          when: 'status != "done"',
+        },
+      }),
+    );
+    await renderScreen(boardClient({ apply }));
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "finish" }));
+    });
+    const failure = screen.getByRole("alert");
+    expect(failure.getAttribute("data-state")).toBe("action-failed");
+    // どの操作のどの条件かを、そのまま見せる
+    expect(failure.textContent).toContain("finish");
+    expect(failure.textContent).toContain('status != "done"');
+  });
+
+  it("allowedActions が無い応答では、ボタンを隠さない（M1.2 の応答を変えない）", async () => {
+    // `when` を 1 つも宣言していない entity では、data-api は欄そのものを載せない。
+    // **「条件が宣言されていない」を「何もできない」に読み替えない**
+    const rows = [makeRow("t4", { title: "タスク t4", status: "done" }, {})];
+    const client = boardClient({ view: () => Promise.resolve(okResult({ ...BOARD_VIEW, rows })) });
+    await renderScreen(client);
+
+    const actions = Array.from(document.querySelectorAll('[data-row="t4"]')).map((node) =>
+      node.getAttribute("data-action"),
+    );
+    expect(actions).toEqual(["start", "finish"]);
+  });
+
+  it("set を宣言していない entity には、操作の列そのものを出さない", async () => {
+    await renderScreen(makeClient({}));
+    expect(screen.queryByRole("columnheader", { name: "操作" })).toBeNull();
+    expect(document.querySelectorAll("[data-action]")).toHaveLength(0);
   });
 });
