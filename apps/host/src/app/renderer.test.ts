@@ -62,7 +62,7 @@ const SPEC: ApiSpecBody = {
 function makeRow(
   id: string,
   fields: Readonly<Record<string, ApiValue>>,
-  computed: Readonly<Record<string, number | null>>,
+  computed: Readonly<Record<string, number | boolean | null>>,
 ): ApiRow {
   return {
     id,
@@ -1343,5 +1343,78 @@ describe("決まった値への書き換え（set）と条件（when）（M1.3�
     await renderScreen(makeClient({}));
     expect(screen.queryByRole("columnheader", { name: "操作" })).toBeNull();
     expect(document.querySelectorAll("[data-action]")).toHaveLength(0);
+  });
+});
+
+// ── ボード（board）と強調（highlight）（M1.3。Issue #157） ────────────────
+//
+// `type: board` の一覧。列は `options` に書いた順、強調は **API が行に載せた真偽の値**をそのまま見る
+// （**画面は式を評価しない**。判定は data-api）。強調は**色だけに頼らない**——記号と文字の印を添える
+// （`04-spec-evolution.md` §7.2）。4 つの状態と列の並びは board.test.ts が見る。
+
+const BOARD_LAYOUT_SPEC: ApiSpecBody = {
+  ...SPEC,
+  spec: {
+    ...SPEC.spec,
+    entities: [
+      {
+        name: "task",
+        fields: {
+          title: "string",
+          due: "date",
+          status: {
+            type: "enum",
+            options: { todo: "未着手", doing: "進行中", done: "完了" },
+            default: "todo",
+          },
+        },
+      },
+    ],
+    views: [{ name: "taskBoard", entity: "task", type: "board", columns: "status", highlight: "overdue" }],
+    actions: [{ name: "addTask", entity: "task" }],
+    validations: [],
+    computed: [{ name: "overdue", entity: "task", expression: "due < today()", type: "boolean" }],
+  },
+  actions: [{ name: "addTask", entity: "task" }],
+};
+
+/** API が判定した強調の結果（`computed.overdue`）を行に載せる */
+const boardCard = (id: string, status: string, overdue: boolean): ApiRow =>
+  makeRow(id, { title: `タスク ${id}`, due: "2026-09-15", status }, { overdue });
+
+const BOARD_LAYOUT_VIEW: ApiViewBody = {
+  instanceId: "inst-1",
+  view: "taskBoard",
+  entity: "task",
+  fields: ["title", "due", "status"],
+  computed: [],
+  permissions: { read: true, write: true },
+  actions: [{ name: "addTask", entity: "task" }],
+  rows: [boardCard("t1", "todo", true), boardCard("t2", "done", false)],
+};
+
+const boardLayoutClient = (view: ApiViewBody = BOARD_LAYOUT_VIEW): MusunestClient =>
+  makeClient({
+    spec: () => Promise.resolve(okResult(BOARD_LAYOUT_SPEC)),
+    view: () => Promise.resolve(okResult(view)),
+  });
+
+describe("ボード（board）と強調（highlight）（M1.3）", () => {
+  it("強調された行に、色以外の印が付く（受入条件）", async () => {
+    const { container } = await renderScreen(boardLayoutClient());
+
+    await screen.findByText("タスク t1");
+    const marked = container.querySelector('[data-card="t1"]');
+    // 印は属性で見分けられる（色ではない）
+    expect(marked?.getAttribute("data-highlighted")).toBe("true");
+    // **色だけに頼らない**——記号と、強調の名前（文字）を添える
+    const mark = marked?.querySelector(".highlight-mark");
+    expect(mark).not.toBeNull();
+    expect((mark?.textContent ?? "").trim()).not.toBe("");
+    expect(mark?.textContent).toContain("overdue");
+    expect(mark?.getAttribute("aria-label")).toContain("overdue");
+    // 強調されていない行には付かない
+    expect(container.querySelector('[data-card="t2"] .highlight-mark')).toBeNull();
+    expect(container.querySelector('[data-card="t2"]')?.getAttribute("data-highlighted")).toBe("false");
   });
 });

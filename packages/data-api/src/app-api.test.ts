@@ -1118,7 +1118,7 @@ describe("warikan の採点のシナリオ（参照と文言。M1.2）", () => {
 /** メンバーの一覧を読んで、名前 → 計算値 の対応を返す */
 async function memberComputed(
   run: WarikanRun,
-): Promise<ReadonlyMap<unknown, Readonly<Record<string, number | null>>>> {
+): Promise<ReadonlyMap<unknown, Readonly<Record<string, number | boolean | null>>>> {
   const members = await getView(run.deps, WARIKAN_INSTANCE, "memberList");
   if (!members.ok) throw new Error("memberList を読めなかった");
   return new Map(members.body.rows.map((row) => [row.fields["name"], row.computed]));
@@ -1929,5 +1929,163 @@ describe("set と when（M1.3）", () => {
     if (!result.ok) return;
     // 進行中になったので、「始める」は出なくなる
     expect(rowOf(result.body).allowedActions).toEqual(["finish", "editTask"]);
+  });
+});
+
+// ── ボード（board）と強調（highlight）（M1.3。Issue #157） ──────────────────
+//
+// **配信側が読めること**と、**強調の判定を Data API が行い、真偽の計算値を行に載せること**を確かめる
+// （受入条件）。`highlight` が指す真偽の計算の値が行に載らなければ、画面は印を付けられない。
+// 真偽の計算は列（一覧の応答の `computed`）には出さない——強調（`highlight`）が指すためだけに使う。
+//
+// 見本 `samples/task-board/` は #159 が置く。ここでは、その見本と同じ形の最小の宣言を組み立てる。
+
+const BOARD_VIEW_SOURCE = [
+  "entities:",
+  "  - name: task",
+  "    fields:",
+  "      title: string",
+  "      due: date",
+  "      status:",
+  "        type: enum",
+  "        options:",
+  "          todo: 未着手",
+  "          doing: 進行中",
+  "          done: 完了",
+  "        default: todo",
+  "views:",
+  "  - name: taskBoard",
+  "    entity: task",
+  "    type: board",
+  "    columns: status",
+  "    highlight: overdue",
+  "actions:",
+  "  - name: addTask",
+  "    entity: task",
+  "validations: []",
+  "computed:",
+  "  - name: overdue",
+  "    entity: task",
+  "    expression: due < today()",
+  "    type: boolean",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+const boardViewNormalized = await normalizeSpec(BOARD_VIEW_SOURCE);
+if (!boardViewNormalized.ok) throw new Error("ボードの宣言が静的チェックに通らない");
+
+const BOARD_VIEW_APP: NormalizedAppSpec = boardViewNormalized.app;
+/** publish が R2 に置く本文（`getSpec` に渡すのと同じ形） */
+const BOARD_VIEW_JSON = boardViewNormalized.json;
+
+/** ボードの宣言を R2 に置き、登録（D1）も同じ宣言を指すようにする */
+function withBoardView(h: Harness): void {
+  h.registry.registration = {
+    sourceSha256: BOARD_VIEW_APP.sourceSha256,
+    schemaVersion: BOARD_VIEW_APP.schemaVersion,
+    sourceKey: `specs/${BOARD_VIEW_APP.sourceSha256}/app.spec.yaml`,
+    normalizedKey: `specs/${BOARD_VIEW_APP.sourceSha256}/normalized.json`,
+    createdAt: "2026-09-19T00:00:00.000Z",
+  };
+  h.specs.text = BOARD_VIEW_JSON;
+}
+
+/** ボードの task を 1 件足す（`status` は既定値 `todo` が入る） */
+async function addBoardTask(h: Harness, title: string, due: string): Promise<void> {
+  const result = await createFromAction(h.deps, INSTANCE, "addTask", { title, due });
+  if (!result.ok) throw new Error(`足せなかった: ${JSON.stringify(result.failure)}`);
+}
+
+const boardViewRows = async (h: Harness): Promise<readonly ApiRow[]> => {
+  const result = await getView(h.deps, INSTANCE, "taskBoard");
+  if (!result.ok) throw new Error(`一覧を読めなかった: ${result.failure.error}`);
+  return result.body.rows;
+};
+
+describe("ボード（board）と強調（highlight）を含む宣言の配信（M1.3）", () => {
+  it("getSpec が ok で返し、type: board・columns・highlight を保つ（受入条件）", async () => {
+    const h = harness();
+    withBoardView(h);
+
+    const result = await getSpec(h.deps, INSTANCE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.status).toBe(API_READ_STATUS);
+    expect(result.body.sourceSha256).toBe(BOARD_VIEW_APP.sourceSha256);
+    expect(result.body.spec.views).toEqual([
+      { name: "taskBoard", entity: "task", type: "board", columns: "status", highlight: "overdue" },
+    ]);
+    // 真偽の計算（highlight が指す）も、宣言のまま残る
+    expect(result.body.spec.computed).toContainEqual({
+      name: "overdue",
+      entity: "task",
+      expression: "due < today()",
+      type: "boolean",
+    });
+  });
+
+  it("readNormalizedApp が、board と boolean を含む正規化 JSON を読む（受入条件）", () => {
+    expect(readNormalizedApp(BOARD_VIEW_JSON)).toEqual(BOARD_VIEW_APP);
+  });
+
+  it("getView が ok で返し、列の並びに真偽の計算を出さない（列は status だけ）", async () => {
+    const h = harness();
+    withBoardView(h);
+    await addBoardTask(h, "宿の予約", "2026-09-15");
+
+    const result = await getView(h.deps, INSTANCE, "taskBoard");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.body.fields).toEqual(["title", "due", "status"]);
+    // 真偽の計算は**列に出さない**（`columns` が指す status は項目なので、計算の列は 0 本である）
+    expect(result.body.computed).toEqual([]);
+    expect(result.body.rows).toHaveLength(1);
+  });
+
+  it("強調の判定を Data API が行い、真偽の計算値が行に載る（受入条件）", async () => {
+    const h = harness();
+    withBoardView(h);
+    // 差し込んだ時計は日本時間の 2026-09-16 である（CLOCK）
+    await addBoardTask(h, "期限切れ", "2026-09-15");
+    await addBoardTask(h, "これから", "2026-09-30");
+
+    const rows = await boardViewRows(h);
+    // **Data API が式を解いている**（画面は式を評価しない）。真偽の値がそのまま行に載る
+    expect(rows.map((row) => row.computed["overdue"])).toEqual([true, false]);
+    // 真偽の値は、行の `computed` にだけ載る（列の並びには入らない）
+    expect(rows.map((row) => Object.keys(row.computed))).toEqual([["overdue"], ["overdue"]]);
+  });
+
+  it("highlight を宣言していない一覧の行には、真偽の値を載せない", async () => {
+    // 同じ宣言でも、`highlight` の無い表（taskList）では真偽の値を載せない
+    const source = BOARD_VIEW_SOURCE.replace("    highlight: overdue\n", "").replace(
+      "type: board",
+      "type: table",
+    ).replace("    columns: status\n", "");
+    const normalized = await normalizeSpec(source);
+    if (!normalized.ok) throw new Error("highlight の無い宣言が静的チェックに通らない");
+
+    const h = harness();
+    h.registry.registration = {
+      sourceSha256: normalized.app.sourceSha256,
+      schemaVersion: normalized.app.schemaVersion,
+      sourceKey: `specs/${normalized.app.sourceSha256}/app.spec.yaml`,
+      normalizedKey: `specs/${normalized.app.sourceSha256}/normalized.json`,
+      createdAt: "2026-09-19T00:00:00.000Z",
+    };
+    h.specs.text = normalized.json;
+    await addBoardTask(h, "期限切れ", "2026-09-15");
+
+    const result = await getView(h.deps, INSTANCE, "taskBoard");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 真偽の計算は行にも列にも載らない（強調の判定そのものを行わない）
+    expect(result.body.rows.map((row) => row.computed)).toEqual([{}]);
   });
 });

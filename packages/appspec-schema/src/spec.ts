@@ -188,8 +188,15 @@ export interface Validation {
   readonly message?: string;
 }
 
-/** computed の型（M1.1 は数だけ）。 */
-export const COMPUTED_TYPES = ["number"] as const;
+/**
+ * computed の型。M1.1 は数（`number`）だけだったが、**M1.3 で真偽（`boolean`）を足した**
+ * （Issue #157。#156 からの申し送り）。
+ *
+ * **`boolean` の計算は、ボードの強調（`highlight`）が指すためだけに使う。** 一覧の列には出さない
+ * （一覧の応答の `computed` の並びにも入らない。data-api の `computedNamesOf` が外す）。
+ * 集計（`aggregate`）と精算（`settle`）は数を返すので、`boolean` は式で求める計算だけである。
+ */
+export const COMPUTED_TYPES = ["number", "boolean"] as const;
 export type ComputedType = (typeof COMPUTED_TYPES)[number];
 
 /**
@@ -387,26 +394,30 @@ export const COMPARISON_OPERATORS = [">", ">=", "<", "<=", "==", "!="] as const;
 // ── UI 層 ───────────────────────────────────────────────────────
 
 /**
- * 一覧の種類（M1.2。04 §7.3）。`views` の `type` に書ける語彙は**この 2 つだけ**である。
+ * 一覧の種類（M1.2・M1.3。04 §7.3）。`views` の `type` に書ける語彙は**この 3 つだけ**である。
  *   `table`      … 表。項目と計算を列に並べる（`show` で列と順を選べる）
  *   `settlement` … 精算の表示。API が返した送金の並び（送金元・送金先の ID と額）を、
  *                  メンバーの名前に対応づけて見せる。**画面は計算しない**（`03` §2.3）
+ *   `board`      … ボード（M1.3）。`columns` が指す選択肢（`enum`）の**キーの順**に列を作り、
+ *                  その値ごとにカードを並べる。`highlight` が指す真偽の計算が真の行に印を付ける
  */
-export const VIEW_TYPES = ["table", "settlement"] as const;
+export const VIEW_TYPES = ["table", "settlement", "board"] as const;
 export type ViewType = (typeof VIEW_TYPES)[number];
 
 /**
  * 一覧。種類の指定の無い一覧（M1.1）は、その entity のすべてのレコードを登録順に並べる。
  *
- * M1.2 で `type` と `show` を足した。**書ける欄は `type` が決める**（語彙は閉じている）。
+ * M1.2 で `type` と `show` を足し、M1.3 でボード（`board`）の `columns`・`highlight` を足した。
+ * **書ける欄は `type` が決める**（語彙は閉じている）。
  *   `type` なし（M1.1 と同じ）… `name`・`entity` だけ
  *   `type: table`            … 上に `type`・`show`
  *   `type: settlement`       … 上に `type`。`show` は書けない（列の並びを持たない）
+ *   `type: board`            … 上に `type`・`columns`（必須）・`highlight`（任意）
  */
 export interface View {
   readonly name: string;
   readonly entity: string;
-  /** 一覧の種類（M1.2）。書かなければ種類の指定の無い一覧である */
+  /** 一覧の種類（M1.2・M1.3）。書かなければ種類の指定の無い一覧である */
   readonly type?: ViewType;
   /**
    * 表に出す、同じ entity の項目と計算（行ごとの値になる計算）の名前。
@@ -414,6 +425,19 @@ export interface View {
    * 実在しない名前は静的チェックが `UI_FIELD_NOT_FOUND` で断る。`type: table` のときだけ書ける。
    */
   readonly show?: readonly string[];
+  /**
+   * ボードの列にする、同じ entity の選択肢（`enum`）の項目の名前（M1.3）。**`type: board` では必須**である。
+   * **列の並びは、その `options` に書いた順**である（`enumKeys` の順）。値が空の列も出す。
+   * 選択肢（`enum`）の項目でなければ、静的チェックが `UI_BOARD_COLUMNS_NOT_ENUM` で断る。
+   */
+  readonly columns?: string;
+  /**
+   * ボードで強調する行を選ぶ、同じ entity の**真偽を返す計算**の名前（M1.3。任意）。
+   * 真の行には印を付ける——**色だけに頼らない**（記号と文字を添える。`04` §7.2）。
+   * 判定は Data API が行い、結果を一覧の行の `computed` に載せる（画面は式を評価しない）。
+   * 真偽を返す計算でなければ、静的チェックが `UI_HIGHLIGHT_NOT_BOOLEAN` で断る。
+   */
+  readonly highlight?: string;
 }
 
 // ── 権限 ────────────────────────────────────────────────────────
@@ -505,6 +529,7 @@ export const VOCABULARY = {
   view: "ui",
   table: "ui",
   settlement: "ui",
+  board: "ui",
   permission: "permission",
   anonymous: "permission",
 } as const satisfies Record<string, Layer>;

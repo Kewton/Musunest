@@ -190,11 +190,43 @@ describe("一覧の宣言（type・show）と精算（settlement）", () => {
     expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: spec });
   });
 
+  it("ボードの columns と highlight を、型付きで受け取る（M1.3。受入条件）", async () => {
+    const spec = {
+      ...SPEC,
+      spec: {
+        ...SPEC.spec,
+        computed: [
+          { name: "overdue", entity: "expense", expression: 'description == "x"', type: "boolean" },
+        ],
+        views: [
+          { name: "expenseList", entity: "expense", type: "board", columns: "status", highlight: "overdue" },
+        ],
+      },
+    };
+    const stub = recordingFetch(() => json(200, spec));
+
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: spec });
+  });
+
+  it("行の computed に真偽（boolean）も載る（強調の判定の結果。M1.3。受入条件）", async () => {
+    const row = { ...ROW, computed: { shareAmount: 2000, overdue: true } };
+    const stub = recordingFetch(() => json(200, { ...VIEW, rows: [row] }));
+
+    expect(await clientWith(stub.fetch).getView("inst-1", "expenseList")).toEqual({
+      ok: true,
+      value: { ...VIEW, rows: [row] },
+    });
+  });
+
   it("知らない type や、type なしの show は INVALID_RESPONSE（キャストしない）", async () => {
     const cases: unknown[] = [
-      [{ name: "expenseList", entity: "expense", type: "board" }],
+      // `board` は M1.3 で語彙に入ったので、知らない種類は別の語で確かめる
+      [{ name: "expenseList", entity: "expense", type: "calendar" }],
       [{ name: "expenseList", entity: "expense", show: ["description"] }],
       [{ name: "expenseList", entity: "expense", type: "table", show: "description" }],
+      // `columns`・`highlight` は `type: board` のときだけである
+      [{ name: "expenseList", entity: "expense", type: "table", columns: "status" }],
+      [{ name: "expenseList", entity: "expense", type: "board", columns: ["status"] }],
     ];
     for (const views of cases) {
       const stub = recordingFetch(() => json(200, { ...SPEC, spec: { ...SPEC.spec, views } }));

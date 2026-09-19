@@ -1058,17 +1058,21 @@ interface ShowFieldDraft {
   readonly node: YamlNode;
 }
 
-/** 一覧（`views`）。M1.2 で `type`（種類）と `show`（表に出す名前の順）を足した */
+/** 一覧（`views`）。M1.2 で `type`（種類）と `show`（表に出す名前の順）、M1.3 でボードの `columns`・`highlight` を足した */
 interface ViewDraft extends EntityReferenceDraft {
   /** 一覧の種類。書いていなければ `null`（種類の指定の無い一覧。M1.1 と同じ） */
   readonly type: ViewType | null;
   /** 表に出す名前（宣言の順）。`show` を書いていなければ `null` */
   readonly show: readonly ShowFieldDraft[] | null;
+  /** ボードの列にする選択肢（`enum`）の項目の名前。`columns` を書いていなければ `null`（M1.3） */
+  readonly columns: ShowFieldDraft | null;
+  /** ボードで強調する行を選ぶ計算の名前。`highlight` を書いていなければ `null`（M1.3） */
+  readonly highlight: ShowFieldDraft | null;
 }
 
 /**
- * 一覧の `type` を読む（M1.2）。**語彙は閉じている**——書けるのは表（`table`）と精算の表示
- * （`settlement`）だけで、知らない種類は `SHAPE_KEY_UNKNOWN` である（`04` §7.3・§7.7）。
+ * 一覧の `type` を読む（M1.2・M1.3）。**語彙は閉じている**——書けるのは表（`table`）と精算の表示
+ * （`settlement`）とボード（`board`）だけで、知らない種類は `SHAPE_KEY_UNKNOWN` である（`04` §7.3・§7.7）。
  */
 function readViewType(member: MemberReader, report: Report): ViewType | null {
   const entry = entryOf(member.map, "type");
@@ -1113,10 +1117,46 @@ function readViewShow(member: MemberReader, report: Report): readonly ShowFieldD
 }
 
 /**
+ * 一覧の、名前を 1 つ取る欄（ボードの `columns`・`highlight`。M1.3）を読む。
+ * **実在と種類は、entity と計算を読んだあとで見る**（`UI_BOARD_COLUMNS_NOT_ENUM`・`UI_HIGHLIGHT_NOT_BOOLEAN`）。
+ * `required` のときは、欄そのものが無ければ `SHAPE_KEY_MISSING` で断る（ボードは列が要る）。
+ */
+function readViewName(
+  member: MemberReader,
+  key: "columns" | "highlight",
+  required: boolean,
+  report: Report,
+): ShowFieldDraft | null {
+  const entry = entryOf(member.map, key);
+  if (entry === undefined) {
+    if (required) {
+      report("SHAPE_KEY_MISSING", `view に ${key} が無い（ボードは列にする選択肢の項目を指す）`, positionOf(member.map));
+    }
+    return null;
+  }
+  if (entry.value.kind !== "scalar" || entry.value.text === "") {
+    report("SHAPE_VALUE_INVALID", `view の ${key} には、名前を 1 つ書く`, positionOf(entry.value));
+    return null;
+  }
+  return { name: entry.value.text, node: entry.value };
+}
+
+/** 一覧の種類ごとに書ける欄。**書ける欄は `type` が決める**（語彙は閉じている。src/spec.ts の `View`） */
+const VIEW_KEYS: Readonly<Record<ViewType, readonly string[]>> = {
+  // M1.1 と同じ（`show` は持たない）
+  table: ["name", "entity", "type", "show"],
+  // 列の並びを持たないので `show` は書けない
+  settlement: ["name", "entity", "type"],
+  // ボード（M1.3）。列にする選択肢の項目（`columns`）と、強調する計算（`highlight`）
+  board: ["name", "entity", "type", "columns", "highlight"],
+};
+
+/**
  * 一覧（`views`）を読む。**書ける欄は `type` が決める**（語彙は閉じている。src/spec.ts の `View`）。
  *   `type` なし … `name`・`entity`            （M1.1 と同じ。`show` は持たない）
  *   `table`     … 上に `type`・`show`
  *   `settlement`… 上に `type`                 （列の並びを持たないので `show` は書けない）
+ *   `board`     … 上に `type`・`columns`（必須）・`highlight`（任意。M1.3）
  */
 function readViews(items: readonly YamlNode[], report: Report): readonly ViewDraft[] {
   const views: ViewDraft[] = [];
@@ -1127,7 +1167,7 @@ function readViews(items: readonly YamlNode[], report: Report): readonly ViewDra
     }
     const member = new MemberReader(item, `views[${index + 1}]`, report);
     const type = readViewType(member, report);
-    member.only(type === "table" ? ["name", "entity", "type", "show"] : ["name", "entity", "type"]);
+    member.only(type === null ? ["name", "entity", "type"] : VIEW_KEYS[type]);
 
     const name = member.text("name");
     if (name !== null) checkName(name.text, "view", positionOf(name.node), report);
@@ -1139,6 +1179,9 @@ function readViews(items: readonly YamlNode[], report: Report): readonly ViewDra
       entityNode: entity?.node ?? { kind: "null", line: 0, column: 0 },
       type,
       show: type === "table" ? readViewShow(member, report) : null,
+      // ボードの `columns` は必須である（列が無ければボードにならない）。`highlight` は任意である
+      columns: type === "board" ? readViewName(member, "columns", true, report) : null,
+      highlight: type === "board" ? readViewName(member, "highlight", false, report) : null,
     });
   });
   checkDuplicates(
@@ -1517,7 +1560,11 @@ function scopeFor(
   const computedTypes = new Map(
     computed
       // 精算は行ごとの値ではないので、式から参照できない（名前としても型としても出さない）
-      .filter((draft) => draft.entity === entity.name && draft.settle === null)
+      // 真偽（`boolean`）の計算も同じである（M1.3）——**強調（`highlight`）が指すためだけに使い**、
+      // ほかの式からは参照できない（評価側も `computed` に入れないので、判定が食い違わない）
+      .filter(
+        (draft) => draft.entity === entity.name && draft.settle === null && draft.type !== "boolean",
+      )
       .map((draft) => [draft.name, draft.type]),
   );
   return {
@@ -1994,6 +2041,16 @@ function checkComputed(
       continue;
     }
     if (draft.aggregate !== null) {
+      // 集計（`aggregate`）は数を返す。**真偽（`boolean`）は式で求める計算だけである**（M1.3）——
+      // 真偽の計算は強調（`highlight`）が指すためにだけ使い、集計では作れない
+      if (draft.type === "boolean") {
+        report(
+          "LOGIC_COMPUTED_TYPE_MISMATCH",
+          `computed ${draft.name} は集計なので数を返す（type は number である。boolean は書けない）`,
+          positionOf(draft.nameNode ?? draft.expressionNode),
+        );
+        continue;
+      }
       checkAggregate(draft, draft.aggregate, entity, index, computed, report);
       continue;
     }
@@ -2167,12 +2224,15 @@ function buildSpec(drafts: Drafts): AppSpec | null {
   }
   return {
     entities: built,
-    // 種類（`type`）と表に出す名前（`show`）は、書いてあるときだけ入れる（M1.1 の宣言に欄を足さない）
+    // 種類（`type`）と、種類ごとの欄（`show`・`columns`・`highlight`）は、書いてあるときだけ入れる
+    // （M1.1 の宣言に欄を足さない）
     views: views.map((draft) => ({
       name: draft.name,
       entity: draft.entity,
       ...(draft.type === null ? {} : { type: draft.type }),
       ...(draft.show === null ? {} : { show: draft.show.map((field) => field.name) }),
+      ...(draft.columns === null ? {} : { columns: draft.columns.name }),
+      ...(draft.highlight === null ? {} : { highlight: draft.highlight.name }),
     })),
     // 種類（`kind`）と、M1.3 の `set`・`when` は**書いてあるときだけ**入れる
     // （M1.1・M1.2 の宣言に欄を足さない。`kind` の省略は create である）
@@ -2292,17 +2352,55 @@ function inspect(source: string, report: Report): Drafts | null {
       continue;
     }
     // 表に出す名前は、その entity の項目か、**行ごとの値になる**計算でなければならない（M1.2）。
-    // 精算（settle）は送金の並びを返すので列に無い（data-api の computedNamesOf と同じ扱いである）
+    // 精算（settle）は送金の並びを返し、真偽（`boolean`）の計算は強調（`highlight`）の判定にだけ使うので、
+    // どちらも列に無い（data-api の computedNamesOf と同じ扱いである）
     for (const field of view.show ?? []) {
       const isField = entity.fields.some((candidate) => candidate.name === field.name);
       const isComputed = computed.some(
-        (entry) => entry.entity === entity.name && entry.name === field.name && entry.settle === null,
+        (entry) =>
+          entry.entity === entity.name &&
+          entry.name === field.name &&
+          entry.settle === null &&
+          entry.type !== "boolean",
       );
       if (!isField && !isComputed) {
         report(
           "UI_FIELD_NOT_FOUND",
           `view ${view.name} の show の ${field.name} が、entity ${entity.name} の項目にも計算にも無い`,
           positionOf(field.node),
+        );
+      }
+    }
+    // ボードの `columns` は、その entity の**選択肢（`enum`）の項目**を指さなければならない（M1.3）。
+    // 列の並びは、その `options` に書いた順である（key を読むのは画面である）
+    const columns = view.columns;
+    if (columns !== null) {
+      const field = entity.fields.find((candidate) => candidate.name === columns.name);
+      const isEnum = field !== undefined && field.declaration !== null && isEnumField(field.declaration);
+      if (!isEnum) {
+        report(
+          "UI_BOARD_COLUMNS_NOT_ENUM",
+          `view ${view.name} の columns の ${columns.name} が、entity ${entity.name} の選択肢（enum）の項目でない`,
+          positionOf(columns.node),
+        );
+      }
+    }
+    // ボードの `highlight` は、その entity の**真偽を返す計算**を指さなければならない（M1.3）。
+    // 真偽の計算は行ごとの値なので、精算（settle）ではない
+    if (view.highlight !== null) {
+      const highlightName = view.highlight.name;
+      const isBoolean = computed.some(
+        (entry) =>
+          entry.entity === entity.name &&
+          entry.name === highlightName &&
+          entry.settle === null &&
+          entry.type === "boolean",
+      );
+      if (!isBoolean) {
+        report(
+          "UI_HIGHLIGHT_NOT_BOOLEAN",
+          `view ${view.name} の highlight の ${highlightName} が、entity ${entity.name} の真偽を返す計算でない`,
+          positionOf(view.highlight.node),
         );
       }
     }

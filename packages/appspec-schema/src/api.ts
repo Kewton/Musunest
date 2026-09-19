@@ -127,8 +127,15 @@ export interface ApiRow {
   readonly updatedAt: string;
   /** 項目の値（宣言の順は一覧の `fields` が持つ） */
   readonly fields: Readonly<Record<string, ApiValue>>;
-  /** 計算の値。求められなかった計算は `null`（画面では空。計算の値は保存しない） */
-  readonly computed: Readonly<Record<string, number | null>>;
+  /**
+   * 計算の値。求められなかった計算は `null`（画面では空。計算の値は保存しない）。
+   *
+   * **M1.3 で真偽（`boolean`）も載せられるようにした**（Issue #157）。ボードの強調（`highlight`）が
+   * 指す真偽の計算の値である。**判定するのは Data API**（唯一の権限強制点）で、画面は式を評価しない
+   * ——この値をそのまま見て、真の行に印を付けるだけである（`CLAUDE.md` の不変条件）。
+   * 真偽の計算は一覧の列には出さない（一覧の応答の `computed` の並びには入らない）。
+   */
+  readonly computed: Readonly<Record<string, number | boolean | null>>;
   /**
    * この行を**参照している**保存済みの行（M1.2）。消せるかどうかを画面が判断するために載せる
    * （消せないことの判断は data-api が行い、画面はボタンを出さないだけで守りではない。`03` §2.2）。

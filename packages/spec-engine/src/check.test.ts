@@ -1,7 +1,7 @@
 // 静的チェックの unit テスト（Issue #97 の受入条件を、ここで固定する）。
 //
 //   1. 見本（expense-log・warikan）の診断が空で、7 欄を持つ AppSpec を返す
-//   2. 負例 42 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
+//   2. 負例 44 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
 //   3. 診断は空でない日本語の説明と、該当する YAML の行・列を持つ
 //   4. 不正 YAML・未知キー・未知参照・循環を拒否し、上限はちょうどが通り 1 超過で診断になる
 //   5. 検査は式を実行せず、ストレージにも触れない
@@ -735,11 +735,11 @@ describe("決まった値への書き換え（set）とボタンを出す条件�
   });
 });
 
-// ── 2. 負例 42 件 ──────────────────────────────────────────────
+// ── 2. 負例 44 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 42 件である（0 件なら以降のテストが空振りする）", () => {
-    expect(negativeIndex.negatives).toHaveLength(42);
+  it("負例の一覧は 44 件である（0 件なら以降のテストが空振りする）", () => {
+    expect(negativeIndex.negatives).toHaveLength(44);
   });
 
   it.each(negativeCases)(
@@ -977,9 +977,10 @@ describe("一覧の種類と、表に出す名前（M1.2）", () => {
   });
 
   it("知らない種類は SHAPE_KEY_UNKNOWN（負例 view-unknown-type。受入条件）", () => {
-    const result = failure(checkSpec(declaration({ views: `${BASE_PARTS.views}\n    type: board` })));
+    // `board` は M1.3 で語彙に入ったので、知らない種類は別の語で確かめる
+    const result = failure(checkSpec(declaration({ views: `${BASE_PARTS.views}\n    type: calendar` })));
     expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
-    expect(messagesOf(result, "SHAPE_KEY_UNKNOWN")).toContain("board");
+    expect(messagesOf(result, "SHAPE_KEY_UNKNOWN")).toContain("calendar");
   });
 
   it("show に entity の項目にも計算にも無い名前を書けば UI_FIELD_NOT_FOUND（位置はその名前を指す）", () => {
@@ -1001,6 +1002,188 @@ describe("一覧の種類と、表に出す名前（M1.2）", () => {
         failure(checkSpec(declaration({ views: `${BASE_PARTS.views}\n    type: settlement\n    show: [amount]` }))),
       ),
     ).toEqual(["SHAPE_KEY_UNKNOWN"]);
+  });
+});
+
+// ── 3c. ボード（board）と強調（highlight）（M1.3。Issue #157） ──────────
+//
+// `columns` は選択肢（enum）の項目を、`highlight` は真偽（boolean）を返す計算を指さなければならない。
+// **落とすときの 2 つのコードは別である**——負例 2 本（board-columns-not-enum・highlight-not-boolean）が、
+// 同じことを外から確かめる。`boolean` の計算は列（`show`）には出さない。
+
+describe("ボード（board）と強調（highlight）（M1.3）", () => {
+  const STATUS: readonly string[] = [
+    "      status:",
+    "        type: enum",
+    "        options:",
+    "          todo: 未着手",
+    "          doing: 進行中",
+    "          done: 完了",
+    "        default: todo",
+  ];
+
+  /** 選択肢の項目 status と数の項目 estimate を持つ task の宣言に、ボードの一覧を差し込む */
+  const withBoard = (viewLines: readonly string[], computedLines: readonly string[] = []): string =>
+    declaration({
+      entities: [
+        "  - name: task",
+        "    fields:",
+        "      title: string",
+        "      estimate: number",
+        ...STATUS,
+      ].join("\n"),
+      views: ["  - name: taskBoard", "    entity: task", "    type: board", ...viewLines].join("\n"),
+      actions: "[]",
+      validations: "[]",
+      computed: computedLines.length === 0 ? "[]" : computedLines.join("\n"),
+    });
+
+  const computedBlock = (name: string, expression: string, type: string): string =>
+    [`  - name: ${name}`, "    entity: task", `    expression: ${expression}`, `    type: ${type}`].join("\n");
+
+  const OVERDUE = computedBlock("overdue", 'title == "x"', "boolean");
+
+  it("type: board を書け、columns と highlight が宣言のまま残る（受入条件）", () => {
+    const result = checkSpec(withBoard(["    columns: status", "    highlight: overdue"], [OVERDUE]));
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spec.views).toEqual([
+      { name: "taskBoard", entity: "task", type: "board", columns: "status", highlight: "overdue" },
+    ]);
+  });
+
+  it("highlight は書かなくてよい（columns だけのボード）", () => {
+    const result = checkSpec(withBoard(["    columns: status"]));
+    expect(result.diagnostics).toEqual([]);
+    if (result.ok) {
+      expect(result.spec.views[0]).toEqual({
+        name: "taskBoard",
+        entity: "task",
+        type: "board",
+        columns: "status",
+      });
+    }
+  });
+
+  it("columns が enum でなければ UI_BOARD_COLUMNS_NOT_ENUM で落ちる（受入条件。負例と同じ形）", () => {
+    const text = withBoard(["    columns: estimate"]);
+    const result = failure(checkSpec(text));
+    expect(codesOf(result)).toEqual(["UI_BOARD_COLUMNS_NOT_ENUM"]);
+    expect(messagesOf(result, "UI_BOARD_COLUMNS_NOT_ENUM")).toContain("estimate");
+    // 位置は、`columns` に書いた行を指す
+    expect(result.diagnostics[0]).toMatchObject({ line: locate(text, "columns: estimate").line });
+    expect(isDiagnosticCode("UI_BOARD_COLUMNS_NOT_ENUM")).toBe(true);
+  });
+
+  it("highlight が真偽の計算でなければ UI_HIGHLIGHT_NOT_BOOLEAN で落ちる（受入条件。負例と同じ形）", () => {
+    const text = withBoard(["    columns: status", "    highlight: count"], [
+      computedBlock("count", "estimate + 1", "number"),
+    ]);
+    const result = failure(checkSpec(text));
+    expect(codesOf(result)).toEqual(["UI_HIGHLIGHT_NOT_BOOLEAN"]);
+    expect(messagesOf(result, "UI_HIGHLIGHT_NOT_BOOLEAN")).toContain("count");
+    expect(result.diagnostics[0]).toMatchObject(locate(text, "count"));
+    expect(isDiagnosticCode("UI_HIGHLIGHT_NOT_BOOLEAN")).toBe(true);
+  });
+
+  it("2 つの誤りコードは別である（受入条件）", () => {
+    const columns = codesOf(failure(checkSpec(withBoard(["    columns: estimate"]))));
+    const highlight = codesOf(
+      failure(checkSpec(withBoard(["    columns: status", "    highlight: estimate"]))),
+    );
+    expect(columns).toEqual(["UI_BOARD_COLUMNS_NOT_ENUM"]);
+    expect(highlight).toEqual(["UI_HIGHLIGHT_NOT_BOOLEAN"]);
+    expect(columns).not.toEqual(highlight);
+  });
+
+  it.each([
+    ["board-columns-not-enum", "UI_BOARD_COLUMNS_NOT_ENUM", "estimate"],
+    ["highlight-not-boolean", "UI_HIGHLIGHT_NOT_BOOLEAN", "estimate"],
+  ] as const)("負例 %s は %s **だけ**を返す（受入条件）", (name, code, where) => {
+    const result = failure(checkSpec(negativeTexts.get(name) ?? ""));
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([code]);
+    expect(messagesOf(result, code)).toContain(where);
+  });
+
+  it("columns は必須である（ボードは列が要る）", () => {
+    const result = failure(checkSpec(withBoard([])));
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_MISSING"]);
+    expect(messagesOf(result, "SHAPE_KEY_MISSING")).toContain("columns");
+  });
+
+  it("書ける欄は type が決める（board に show は書けず、table に columns は書けない）", () => {
+    expect(codesOf(failure(checkSpec(withBoard(["    columns: status", "    show: [title]"]))))).toEqual([
+      "SHAPE_KEY_UNKNOWN",
+    ]);
+    expect(
+      codesOf(
+        failure(
+          checkSpec(
+            declaration({ views: `${BASE_PARTS.views}\n    type: table\n    columns: status` }),
+          ),
+        ),
+      ),
+    ).toEqual(["SHAPE_KEY_UNKNOWN"]);
+  });
+
+  it("columns が写像や並びなら、形で断る（名前を 1 つ書く）", () => {
+    expect(codesOf(failure(checkSpec(withBoard(["    columns: [status]"]))))).toEqual([
+      "SHAPE_VALUE_INVALID",
+    ]);
+  });
+
+  it("boolean の計算は列（show）にできない（一覧の列に出さない。受入条件）", () => {
+    const text = declaration({
+      entities: [
+        "  - name: task",
+        "    fields:",
+        "      title: string",
+        ...STATUS,
+      ].join("\n"),
+      views: ["  - name: taskList", "    entity: task", "    type: table", "    show: [title, overdue]"].join("\n"),
+      actions: "[]",
+      validations: "[]",
+      computed: OVERDUE,
+    });
+    const result = failure(checkSpec(text));
+    expect(codesOf(result)).toEqual(["UI_FIELD_NOT_FOUND"]);
+    expect(messagesOf(result, "UI_FIELD_NOT_FOUND")).toContain("overdue");
+  });
+
+  it("集計（aggregate）には boolean を書けない（数を返す。受入条件の線引き）", () => {
+    const text = declaration({
+      entities: [
+        "  - name: task",
+        "    fields:",
+        "      title: string",
+        ...STATUS,
+      ].join("\n"),
+      views: "[]",
+      actions: "[]",
+      validations: "[]",
+      computed: [
+        "  - name: count",
+        "    entity: task",
+        "    aggregate:",
+        "      count: task",
+        "    type: boolean",
+      ].join("\n"),
+    });
+    expect(codesOf(failure(checkSpec(text)))).toEqual(["LOGIC_COMPUTED_TYPE_MISMATCH"]);
+  });
+
+  it("式の計算の type: boolean は、真偽になる式だけが通る（型が食い違えば断る）", () => {
+    expect(checkSpec(withBoard(["    columns: status", "    highlight: overdue"], [OVERDUE])).ok).toBe(true);
+    expect(
+      codesOf(
+        failure(
+          checkSpec(
+            withBoard(["    columns: status"], [computedBlock("overdue", "estimate + 1", "boolean")]),
+          ),
+        ),
+      ),
+    ).toEqual(["LOGIC_COMPUTED_TYPE_MISMATCH"]);
   });
 });
 

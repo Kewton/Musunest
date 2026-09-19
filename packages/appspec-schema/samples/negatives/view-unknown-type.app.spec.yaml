@@ -1,4 +1,6 @@
-# 負例：一覧に、M1.2 の語彙に無い種類 board を書いている（表は table、精算の表示は settlement である）。
+# 負例：一覧に、語彙に無い種類 button を書いている（表は table、精算の表示は settlement、ボードは board である）。
+# **これは画面の種類ではない**（ボタンは部品であって、一覧の種類にはならない）と一目で分かる語を使う。
+# `board` は M1.3 で実在の種類になったので、この負例は別の語で作る。`list` は #158 が実在の語にするので使わない。
 # 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
 
 entities:
@@ -11,7 +13,7 @@ entities:
 views:
   - name: expenseList
     entity: expense
-    type: board
+    type: button
 
 actions:
   - name: addExpense
