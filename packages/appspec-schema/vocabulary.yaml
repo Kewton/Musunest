@@ -69,13 +69,11 @@
   runtime: [spec-engine, data-api, host]
   factory: 未対応
 
-# enum と default の「見本」は、いま warikan を指している。**warikan は enum を使っていない**——
-# M1.3 のタスク管理の見本（samples/task-board/）は #159 が置くので、そのときに張り替える。
-# （#159 の対象ファイルに vocabulary.yaml は無いので、ここから先に task-board を指すことはできない）
+# M1.3 の語彙の「見本」は task-board である（#159 が置いた）。
 - name: enum
   layer: data
   since: v0.2-draft（M1.3）
-  samples: [warikan]
+  samples: [task-board]
   negatives: [enum-options-empty, enum-duplicate-option-key]
   check_rules: [DATA_FIELD_ENUM_OPTIONS_EMPTY, DATA_FIELD_ENUM_OPTION_KEY_DUPLICATE]
   semantics: docs/semantics.md#enum
@@ -85,19 +83,18 @@
 - name: default
   layer: data
   since: v0.2-draft（M1.3）
-  samples: [warikan]
+  samples: [task-board]
   negatives: [enum-default-not-in-options]
   check_rules: [DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS]
   semantics: docs/semantics.md#default
   runtime: [spec-engine, data-api, host]
   factory: 未対応
 
-# 日付（date）と「今日」（today）の「見本」も、いま warikan を指している。**warikan は date を使っていない**——
-# M1.3 のタスク管理の見本（samples/task-board/）は #159 が置くので、そのときに張り替える。
+# 日付（date）と「今日」（today）の「見本」も task-board である（#159 が置いた）。
 - name: date
   layer: data
   since: v0.2-draft（M1.3）
-  samples: [warikan]
+  samples: [task-board]
   negatives: [date-compared-with-number]
   check_rules: [LOGIC_OPERAND_TYPE_MISMATCH]
   semantics: docs/semantics.md#date
@@ -209,7 +206,7 @@
 - name: today
   layer: logic
   since: v0.2-draft（M1.3）
-  samples: [warikan]
+  samples: [task-board]
   negatives: [today-with-argument]
   check_rules: [LOGIC_FUNCTION_ARITY_MISMATCH]
   semantics: docs/semantics.md#today
@@ -256,12 +253,11 @@
   runtime: [spec-engine, data-api, host]
   factory: 未対応
 
-# set と when の「見本」も、いま warikan を指している。**warikan は set も when も使っていない**——
-# M1.3 のタスク管理の見本（samples/task-board/）は #159 が置くので、そのときに張り替える。
+# set と when の「見本」も task-board である（#159 が置いた）。
 - name: set
   layer: logic
   since: v0.2-draft（M1.3）
-  samples: [warikan]
+  samples: [task-board]
   negatives: [set-type-mismatch, set-with-expression]
   check_rules: [LOGIC_ACTION_SET_TYPE_MISMATCH, LOGIC_ACTION_SET_NOT_CONSTANT]
   semantics: docs/semantics.md#set
@@ -271,7 +267,7 @@
 - name: when
   layer: logic
   since: v0.2-draft（M1.3）
-  samples: [warikan]
+  samples: [task-board]
   negatives: [when-not-boolean]
   check_rules: [LOGIC_ACTION_WHEN_NOT_BOOLEAN]
   semantics: docs/semantics.md#when
@@ -310,12 +306,11 @@
   runtime: [spec-engine, data-api, host]
   factory: 未対応
 
-# ボード（board）の「見本」も、いま warikan を指している。**warikan は board を使っていない**——
-# M1.3 のタスク管理の見本（samples/task-board/）は #159 が置くので、そのときに張り替える。
+# ボード（board）の「見本」も task-board である（#159 が置いた）。
 - name: board
   layer: ui
   since: v0.2-draft（M1.3）
-  samples: [warikan]
+  samples: [task-board]
   negatives: [board-columns-not-enum, highlight-not-boolean]
   check_rules: [UI_BOARD_COLUMNS_NOT_ENUM, UI_HIGHLIGHT_NOT_BOOLEAN]
   semantics: docs/semantics.md#board
@@ -328,12 +323,11 @@
 # **同じ語**で、台帳は 1 行 1 語彙だからである——画面の種類の側は `view` の意味の節
 # （docs/semantics.md#view）で扱う。
 #
-# 「見本」も、いま warikan を指している。**warikan は filters を使っていない**——
-# M1.3 のタスク管理の見本（samples/task-board/）は #159 が置くので、そのときに張り替える。
+# 「見本」も task-board である（#159 が置いた）。
 - name: filters
   layer: ux
   since: v0.2-draft（M1.3）
-  samples: [warikan]
+  samples: [task-board]
   negatives: [filters-unsupported-field, filters-field-not-shown]
   check_rules: [UI_FILTER_FIELD_NOT_FILTERABLE, UI_FILTER_FIELD_NOT_SHOWN]
   semantics: docs/semantics.md#filters

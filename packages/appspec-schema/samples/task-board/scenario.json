@@ -1,0 +1,78 @@
+{
+  "$comment": "見本「タスク管理」の採点のシナリオ。steps を先頭から順に行い、各操作の結果と、最後の一覧を期待値と比べる。受理した手順の bind は、登録して得た ID に付ける名前である（入力と期待値の中の $名前 は、その ID に置き換えて使う）。時計は日本時間の 2026-09-15 に固定する（期限切れは時計に依る値なので、ここで採点する）。形は src/samples.ts の ScoringScenario、意味は docs/semantics.md。期待値の元は workspace/mvp/m1/02-l2-spec-examples.md §3.3。",
+  "sample": "task-board",
+  "clock": "2026-09-15T12:00:00+09:00",
+  "steps": [
+    {
+      "name": "メンバー A を登録する",
+      "action": "addMember",
+      "input": { "name": "A" },
+      "expect": { "accepted": true, "bind": "A" }
+    },
+    {
+      "name": "メンバー B を登録する",
+      "action": "addMember",
+      "input": { "name": "B" },
+      "expect": { "accepted": true, "bind": "B" }
+    },
+    {
+      "name": "メンバー C を登録する",
+      "action": "addMember",
+      "input": { "name": "C" },
+      "expect": { "accepted": true, "bind": "C" }
+    },
+    {
+      "name": "宿の予約（A の担当、9/20 まで、進行中）",
+      "action": "addTask",
+      "input": { "title": "宿の予約", "status": "doing", "assignee": "$A", "due": "2026-09-20", "memo": "" },
+      "expect": { "accepted": true, "bind": "yado" }
+    },
+    {
+      "name": "しおり作り（B の担当、9/10 まで、未着手）",
+      "action": "addTask",
+      "input": { "title": "しおり作り", "status": "todo", "assignee": "$B", "due": "2026-09-10", "memo": "" },
+      "expect": { "accepted": true, "bind": "shiori" }
+    },
+    {
+      "name": "レンタカー（C の担当、9/25 まで、完了）",
+      "action": "addTask",
+      "input": { "title": "レンタカー", "status": "done", "assignee": "$C", "due": "2026-09-25", "memo": "" },
+      "expect": { "accepted": true, "bind": "rental" }
+    },
+    {
+      "name": "選択肢に無い状態は、その項目名を返して断る",
+      "action": "addTask",
+      "input": { "title": "荷造り", "status": "wip", "assignee": "$A", "due": "2026-09-18", "memo": "" },
+      "expect": { "rejected": { "fields": ["status"], "validations": [] } }
+    },
+    {
+      "name": "YYYY-MM-DD でない期限は断る",
+      "action": "addTask",
+      "input": { "title": "荷造り", "status": "todo", "assignee": "$A", "due": "9/18", "memo": "" },
+      "expect": { "rejected": { "fields": ["due"], "validations": [] } }
+    },
+    {
+      "name": "存在しない担当は断る",
+      "action": "addTask",
+      "input": { "title": "荷造り", "status": "todo", "assignee": "member-does-not-exist", "due": "2026-09-18", "memo": "" },
+      "expect": { "rejected": { "fields": ["assignee"], "validations": [] } }
+    }
+  ],
+  "views": {
+    "board": [
+      { "title": "宿の予約", "status": "doing", "assignee": "$A", "due": "2026-09-20", "memo": "", "overdue": false },
+      { "title": "しおり作り", "status": "todo", "assignee": "$B", "due": "2026-09-10", "memo": "", "overdue": true },
+      { "title": "レンタカー", "status": "done", "assignee": "$C", "due": "2026-09-25", "memo": "", "overdue": false }
+    ],
+    "list": [
+      { "title": "宿の予約", "status": "doing", "assignee": "$A", "due": "2026-09-20", "memo": "" },
+      { "title": "しおり作り", "status": "todo", "assignee": "$B", "due": "2026-09-10", "memo": "" },
+      { "title": "レンタカー", "status": "done", "assignee": "$C", "due": "2026-09-25", "memo": "" }
+    ],
+    "members": [
+      { "name": "A", "openTasks": 1 },
+      { "name": "B", "openTasks": 1 },
+      { "name": "C", "openTasks": 1 }
+    ]
+  }
+}

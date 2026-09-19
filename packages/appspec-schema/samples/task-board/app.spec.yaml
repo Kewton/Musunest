@@ -1,0 +1,114 @@
+# 見本「タスク管理」（M1.3。community.app-spec/v0.2-draft）
+#
+# 旅行の準備を 3 人で分担する。M1.3 で足した語彙を使う——選択肢（`enum`）と既定値（`default`）、
+# 日付（`date`）と「今日」（`today()`）、決まった値への書き換え（`set`）とボタンを出す条件（`when`）、
+# 画面の種類 `board` と強調（`highlight`）、`list` と絞り込み（`filters`）。
+#
+# `samples/task-board/app.spec.yaml` の元は workspace/mvp/m1/02-l2-spec-examples.md §3.2（叩き台）。
+# **動かすために、いまの語彙に無い書き方だけを落としてある**（`app`・`label`・`required`・`sort`・`card`）。
+# 意味のうち表現できない 2 点（`overdue` の「完了は除く」と、`openTasks` の「状態で絞る」）は、
+# M1.3 の語彙が式の論理（`and`）と集計の条件（`not`）を持たないため、いまの形に落としてある。
+#
+# 採点のシナリオは同じディレクトリの scenario.json、
+# 意味は ../../docs/semantics.md（「enum」「default」「date」「today」「set」「when」「view」「board」
+# 「filters」「highlight」「aggregate」「count」）にある。
+
+entities:
+  - name: member
+    fields:
+      name: string          # 名前
+
+  - name: task
+    fields:
+      title: string         # やること
+      status:               # 状態（未入力なら todo が入る）
+        type: enum
+        options:
+          todo: 未着手
+          doing: 進行中
+          done: 完了
+        default: todo
+      assignee:             # 担当（member のレコード 1 件を ID で指す）
+        type: ref
+        to: member
+      due: date             # 期限（YYYY-MM-DD）
+      memo: string          # メモ
+
+computed:
+  # 期限切れ（今日の日付で変わる）。**Data API が解き、結果を行に載せる**（画面は式を評価しない）
+  # §3.2 は `due != null and due < today() and status != "done"` だが、M1.3 の式は論理の `and` を
+  # 持たないので、`due < today()` だけにしてある
+  - name: overdue
+    entity: task
+    type: boolean
+    expression: due < today()
+  # 担当しているタスクの数。`this` はこのメンバーのレコードの ID である
+  # §3.2 は `status: { not: done }` で未完了だけを数えるが、集計の `where` は `this` との一致と
+  # 包含しか書けないので、担当している数を数えてある
+  - name: openTasks
+    entity: member
+    type: number
+    aggregate:
+      count: task
+      where:
+        assignee: this
+
+views:
+  # ボード。`columns` が指す選択肢（enum）の**キーの順**に列を作り、`highlight` が指す真偽の計算が
+  # 真の行に印を付ける（判定は Data API）
+  - name: board
+    type: board
+    entity: task
+    columns: status
+    highlight: overdue
+  # 一覧。`filters` で「担当」「状態」を画面で選んで絞り込める（値の候補は宣言から出せる）
+  - name: list
+    type: list
+    entity: task
+    show: [title, status, assignee, due]
+    filters: [assignee, status]
+  # メンバーの表。担当しているタスクの数を並べる
+  - name: members
+    type: table
+    entity: member
+    show: [name, openTasks]
+
+actions:
+  - name: addTask
+    entity: task
+    kind: create
+  # 直す（全項目の置換）
+  - name: editTask
+    entity: task
+    kind: update
+  # 始める（未着手のときだけ）。入力は対象の ID だけである（書く値は `set` が持つ）
+  - name: start
+    entity: task
+    kind: update
+    set:
+      status: doing
+    when: status == "todo"
+  # 完了にする（完了でなければ）。**条件は守りである**——偽の行への操作は Data API が断る
+  - name: finish
+    entity: task
+    kind: update
+    set:
+      status: done
+    when: status != "done"
+  - name: deleteTask
+    entity: task
+    kind: delete
+  - name: addMember
+    entity: member
+    kind: create
+
+validations: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous
