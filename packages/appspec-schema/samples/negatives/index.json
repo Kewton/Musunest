@@ -16,6 +16,13 @@
       "why": "操作 addExpense の kind patch は、M1.2 の操作の種類（create / update / delete）に無い"
     },
     {
+      "name": "aggregate-app-scope-uses-this",
+      "codes": [
+        "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH"
+      ],
+      "why": "アプリ全体の集計（scope: app）の where に this を書いている（出力先のレコードが無いので、比べる相手が居ない。M1.4）"
+    },
+    {
       "name": "aggregate-cycle",
       "codes": [
         "LOGIC_COMPUTED_CYCLE"
@@ -42,6 +49,13 @@
         "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH"
       ],
       "why": "集計の where の項目 amount は数であって、this を指す参照ではない"
+    },
+    {
+      "name": "avg-target-not-number",
+      "codes": [
+        "LOGIC_AGGREGATE_TARGET_NOT_NUMBER"
+      ],
+      "why": "平均（avg）の対象 expense.description が数ではなく文字列である（M1.4）"
     },
     {
       "name": "board-columns-not-enum",

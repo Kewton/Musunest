@@ -210,6 +210,18 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           ))}
         </nav>
       )}
+      {view !== null && view.scope !== undefined && (
+        // アプリ全体の集計（`scope: app`。M1.4。Issue #177）。**API が求めた値をそのまま見せる**
+        // （画面は式も集計も評価しない）。求められなかった値（`null`）は「—」で見せ、0 と区別する
+        <dl className="scope-values" data-scope="true" aria-label="アプリ全体の集計">
+          {Object.entries(view.scope).map(([name, value]) => (
+            <div className="scope-value" key={name} data-scope-name={name}>
+              <dt>{name}</dt>
+              <dd>{computedText(value)}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
       {view === null ? (
         <p className="state" data-state="noview">
           表示できる一覧がありません
@@ -460,9 +472,22 @@ function displayOf(
 /**
  * 計算の値。**返ってきた値をそのまま見せる**（画面は式も集計も評価しない）。
  * 求められなかった計算の `null` は「—」で見せ、**0 と区別する**（M1.2。docs/semantics.md「aggregate」）。
+ *
+ * **数は小数第 1 位まで、四捨五入で見せる**（M1.4。Issue #177。docs/semantics.md「avg」の決めごと）。
+ * 割り算の結果（`1 回あたりの参加`）を読める桁に揃えるためである。**整数はそのまま見せる**
+ * （`2000` を `2000.0` にしない）。丸めるのは**見せ方だけ**で、値そのものは API が返した数のままである。
  */
 function computedText(value: number | boolean | null | undefined): string {
-  return value === null ? "—" : value === undefined ? "" : String(value);
+  if (value === null) return "—";
+  if (value === undefined) return "";
+  if (typeof value === "number") return numberText(value);
+  return String(value);
+}
+
+/** 数を、小数第 1 位まで（四捨五入）で見せる。整数はそのままである */
+function numberText(value: number): string {
+  const rounded = Math.round(value * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 }
 
 function failed(error: ClientError): ScreenState {

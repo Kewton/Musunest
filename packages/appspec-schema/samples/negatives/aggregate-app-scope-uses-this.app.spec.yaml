@@ -1,0 +1,42 @@
+# 負例：アプリ全体の集計（scope: app）の where に this を書いている。
+# アプリ全体の計算はどのレコードにも属さないので、`this`（出力先のレコードの ID）を持つ相手が居ない。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: member
+    fields:
+      name: string
+  - name: expense
+    fields:
+      amount: number
+      payer:
+        type: ref
+        to: member
+
+views:
+  - name: memberList
+    entity: member
+
+actions:
+  - name: addMember
+    entity: member
+
+validations: []
+
+computed:
+  - name: totalPaid
+    scope: app
+    aggregate:
+      sum: expense.amount
+      where:
+        payer: this
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

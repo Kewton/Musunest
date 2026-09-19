@@ -2402,3 +2402,148 @@ describe("task-board の採点のシナリオ（M1.3）", () => {
     expect(run.records.rows.find((row) => row.id === run.ids["rental"])?.data["status"]).toBe("done");
   });
 });
+
+// ── dashboard のアプリ全体の集計（scope）と平均（avg）（M1.4。Issue #177） ──
+//
+// **この Issue の語彙（`scope: app`・`avg`）を含む正規化 JSON を、`getSpec` と `getView` が `ok` で
+// 返す**ことをここで確かめる（docs/parallel-development.md §7.3）。アプリ全体の値は**行ではなく**、
+// 一覧の応答の `scope`（計算の名前 → 値）に載る。レコードの数に関わらず 1 つずつである。
+//
+// D-1 の線（同 §追記 3）は、**計算の回数が行数に対して線形を超えないこと**を見る——ここでは
+// `RecordStore.list` の呼出を数え、200 件でも読みが行数に依らないことを測る（行ごとの評価は線形である）。
+
+const DASHBOARD_INSTANCE = "inst-dashboard";
+const DASHBOARD = await normalizeSpec(fs.readFileSync(sampleSpecFile("dashboard"), "utf8"));
+if (!DASHBOARD.ok) throw new Error("dashboard が静的チェックに通らない");
+const DASHBOARD_JSON = DASHBOARD.json;
+const DASHBOARD_APP = DASHBOARD.app;
+const DASHBOARD_SCENARIO = readScoringScenario(
+  JSON.parse(fs.readFileSync(sampleScenarioFile("dashboard"), "utf8")),
+);
+
+const dashboardRegistration = (): AppRecord => ({
+  sourceSha256: DASHBOARD_APP.sourceSha256,
+  schemaVersion: DASHBOARD_APP.schemaVersion,
+  sourceKey: `specs/${DASHBOARD_APP.sourceSha256}/app.spec.yaml`,
+  normalizedKey: `specs/${DASHBOARD_APP.sourceSha256}/normalized.json`,
+  createdAt: "2026-09-19T00:00:00.000Z",
+});
+
+/** `list` の呼出を数える DO（読みが行数に依らないことを測る） */
+class CountingRecordStore extends FakeRecordStore {
+  readonly listCalls: string[] = [];
+  override async list(entity: string): Promise<StoredRecord[]> {
+    this.listCalls.push(entity);
+    return super.list(entity);
+  }
+}
+
+const dashboardDeps = (records: RecordStore, clock = fixedClock(DASHBOARD_SCENARIO.clock)): DataApiDeps => ({
+  registry: { resolve: async () => dashboardRegistration() },
+  specs: { read: async () => DASHBOARD_JSON },
+  records,
+  clock,
+});
+
+interface DashboardRun {
+  readonly deps: DataApiDeps;
+  readonly records: CountingRecordStore;
+  readonly ids: Readonly<Record<string, string>>;
+}
+
+/** シナリオの手順（メンバー 3 人と活動 3 件）を先頭から流す */
+async function runDashboard(): Promise<DashboardRun> {
+  const records = new CountingRecordStore();
+  const deps = dashboardDeps(records);
+  const ids: Record<string, string> = {};
+  for (const step of DASHBOARD_SCENARIO.steps) {
+    const input = resolveScenarioIds(step.input, ids) as Readonly<Record<string, unknown>>;
+    const result = await createFromAction(deps, DASHBOARD_INSTANCE, step.action, input);
+    if (!result.ok) throw new Error(`dashboard の手順 ${step.name} が通らない: ${result.failure.error}`);
+    if ("accepted" in step.expect && step.expect.bind !== undefined) ids[step.expect.bind] = result.body.id;
+  }
+  return { deps, records, ids };
+}
+
+const dashboardView = async (deps: DataApiDeps, view: string): Promise<ApiViewBody> => {
+  const result = await getView(deps, DASHBOARD_INSTANCE, view);
+  if (!result.ok) throw new Error(`一覧 ${view} を読めなかった: ${result.failure.error}`);
+  return result.body;
+};
+
+describe("dashboard のアプリ全体の集計（scope）と平均（avg）（M1.4）", () => {
+  it("scope: app・avg を含む正規化 JSON を、getSpec が ok で返す", async () => {
+    const run = await runDashboard();
+    const result = await getSpec(run.deps, DASHBOARD_INSTANCE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // アプリ全体の計算は entity を持たず、scope: app を持つ（avg もそのまま載る）
+    expect(result.body.spec.computed).toContainEqual({
+      name: "averageCost",
+      scope: "app",
+      aggregate: { kind: "avg", entity: "activity", name: "cost", where: {} },
+      type: "number",
+    });
+  });
+
+  it("getView が ok で、アプリ全体の値（scope）を 1 つずつ載せる", async () => {
+    const run = await runDashboard();
+    const view = await dashboardView(run.deps, "activities");
+    expect(view.rows).toHaveLength(3);
+    // 活動 3 件・のべ 6 人・1 回あたり 2 人・費用の平均 10000/3 円
+    expect(view.scope).toEqual({
+      activityCount: 3,
+      attendeeTotal: 6,
+      averageAttendees: 2,
+      averageCost: 10000 / 3,
+    });
+    // **行の計算には出ない**（アプリ全体の値は行の `computed` に入らない）
+    expect(Object.keys(view.rows[0]?.computed ?? {})).toEqual(["attendeeCount"]);
+  });
+
+  it("**対象が 0 件なら、avg は null** である（count は 0。0 に読み替えない）", async () => {
+    const deps = dashboardDeps(new FakeRecordStore());
+    const view = await dashboardView(deps, "activities");
+    expect(view.rows).toEqual([]);
+    expect(view.scope).toEqual({
+      activityCount: 0,
+      attendeeTotal: 0,
+      averageAttendees: null,
+      averageCost: null,
+    });
+  });
+
+  it("アプリ全体の計算が宣言に無ければ、応答に scope の欄そのものを載せない（M1.1〜M1.3 の応答を変えない）", async () => {
+    const h = harness();
+    expect(await listOf(h)).not.toHaveProperty("scope");
+  });
+
+  it("**200 件でも一覧を取れる（D-1）**。読みの回数は行数に依らない（行ごとに読み直さない）", async () => {
+    const records = new CountingRecordStore();
+    const deps = dashboardDeps(records);
+    const member = await createFromAction(deps, DASHBOARD_INSTANCE, "addMember", { name: "A" });
+    if (!member.ok) throw new Error("メンバーを作れない");
+    const memberId = member.body.id;
+    for (let i = 0; i < 200; i += 1) {
+      const created = await createFromAction(deps, DASHBOARD_INSTANCE, "addActivity", {
+        kind: "practice",
+        attendees: [memberId],
+        cost: 100,
+      });
+      if (!created.ok) throw new Error(`活動 ${i} を作れない: ${created.failure.error}`);
+    }
+
+    records.listCalls.length = 0;
+    const view = await dashboardView(deps, "activities");
+    expect(view.rows).toHaveLength(200);
+    expect(view.scope).toEqual({
+      activityCount: 200,
+      attendeeTotal: 200,
+      averageAttendees: 1,
+      averageCost: 100,
+    });
+    // **200 件でも読みは 1 回である**（行数に依らない。アプリ全体の集計が一覧の entity を指すときは、
+    // いま読んだ行を使い回す）
+    expect(records.listCalls).toEqual(["activity"]);
+  });
+});

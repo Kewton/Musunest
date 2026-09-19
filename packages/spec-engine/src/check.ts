@@ -11,7 +11,9 @@
 
 import {
   ACTION_KINDS,
+  AGGREGATE_KINDS,
   APPSPEC_SECTIONS,
+  COMPUTED_SCOPES,
   COMPUTED_TYPES,
   DATE_VALUE_PATTERN,
   FIELD_TYPES,
@@ -30,9 +32,11 @@ import {
   type ActionSet,
   type ActionSetValue,
   type Aggregate,
+  type AggregateKind,
   type AggregateWhereOp,
   type AppSpec,
   type Computed,
+  type ComputedScope,
   type ComputedType,
   type Entity,
   type FieldDeclaration,
@@ -442,13 +446,13 @@ interface AggregateWhereDraft {
   readonly op: AggregateWhereOp;
 }
 
-/** computed の集計（M1.2）。読み取った形で、意味の検査は組み立てのあとに行う */
+/** computed の集計（M1.2・M1.4）。読み取った形で、意味の検査は組み立てのあとに行う */
 interface AggregateDraft {
-  readonly kind: "sum" | "count";
-  /** 集計元の entity の名前（`sum` の `entity.name` の左、`count` の値） */
+  readonly kind: AggregateKind;
+  /** 集計元の entity の名前（`sum`・`avg` の `entity.name` の左、`count` の値） */
   readonly entity: string;
   readonly entityNode: YamlNode;
-  /** `sum` の対象の名前。`count` では `null` */
+  /** `sum`・`avg` の対象の名前。`count` では `null` */
   readonly name: string | null;
   readonly nameNode: YamlNode | null;
   readonly where: readonly AggregateWhereDraft[];
@@ -478,6 +482,11 @@ interface SettleDraft {
 
 interface ComputedDraft extends ExpressionDraft {
   readonly type: string;
+  /**
+   * 計算の範囲（M1.4。Issue #177）。`app` ならアプリ全体で 1 つの値である。
+   * **`null` なら従来どおり、`entity` の行ごとの値**である。
+   */
+  readonly scope: ComputedScope | null;
   /** 集計（`aggregate`。M1.2）。式でも精算でもなければ `null` */
   readonly aggregate: AggregateDraft | null;
   /** 精算（`settle`。M1.2）。式でも集計でもなければ `null` */
@@ -1267,16 +1276,18 @@ function readValidations(items: readonly YamlNode[], report: Report): readonly V
 function readAggregateTarget(
   value: YamlNode,
   report: Report,
+  /** 集計の種類（`sum`・`avg`）。診断の文言に使う */
+  kind: AggregateKind,
 ): { readonly entity: string; readonly node: YamlNode; readonly name: string } | null {
   if (value.kind !== "scalar" || value.text === "") {
-    report("SHAPE_VALUE_INVALID", "computed の sum は「entity.項目か計算」の形で書く", positionOf(value));
+    report("SHAPE_VALUE_INVALID", `computed の ${kind} は「entity.項目か計算」の形で書く`, positionOf(value));
     return null;
   }
   const [entity = "", name = "", ...rest] = value.text.split(".");
   if (entity === "" || name === "" || rest.length > 0) {
     report(
       "LOGIC_AGGREGATE_FORM_INVALID",
-      `computed の sum ${value.text} は「entity.項目か計算」の形で書く`,
+      `computed の ${kind} ${value.text} は「entity.項目か計算」の形で書く`,
       positionOf(value),
     );
     return null;
@@ -1334,58 +1345,61 @@ function readAggregateDraft(value: YamlNode, report: Report): AggregateDraft | n
   if (value.kind !== "map") {
     report(
       "SHAPE_VALUE_INVALID",
-      "computed の aggregate は「sum / count / where」を並べた写像で書く",
+      `computed の aggregate は「${AGGREGATE_KINDS.join(" / ")} / where」を並べた写像で書く`,
       positionOf(value),
     );
     return null;
   }
   reportDuplicateKeys(value, "aggregate", report);
   for (const entry of value.entries) {
-    if (!isOneOf(["sum", "count", "where"], entry.key)) {
+    if (!isOneOf([...AGGREGATE_KINDS, "where"], entry.key)) {
       report(
         "SHAPE_KEY_UNKNOWN",
-        `computed の aggregate に欄 ${entry.key} は書けない（sum と count と where だけ）`,
+        `computed の aggregate に欄 ${entry.key} は書けない（${AGGREGATE_KINDS.join(" と ")} と where だけ）`,
         { line: entry.keyLine, column: entry.keyColumn },
       );
     }
   }
-  const sum = entryOf(value, "sum");
-  const count = entryOf(value, "count");
-  if (sum !== undefined && count !== undefined) {
+  // `sum`・`count`・`avg` の**どれか 1 つ**である（M1.2・M1.4。同時には書けない）
+  const present = AGGREGATE_KINDS.filter((kind) => entryOf(value, kind) !== undefined);
+  if (present.length > 1) {
+    const second = present[1] ?? "";
     report(
       "LOGIC_AGGREGATE_FORM_INVALID",
-      "computed の aggregate に sum と count を同時に書けない（どちらか一方である）",
-      positionOf(count.value),
+      `computed の aggregate に ${present.join(" と ")} を同時に書けない（どれか 1 つである）`,
+      positionOf(entryOf(value, second)?.value ?? value),
     );
     return null;
   }
-  if (sum === undefined && count === undefined) {
+  if (present.length === 0) {
     report(
       "LOGIC_AGGREGATE_FORM_INVALID",
-      "computed の aggregate には sum（合計）か count（行数）のどちらか一方を書く",
+      `computed の aggregate には ${AGGREGATE_KINDS.join("（合計）・")} のどれか 1 つを書く`,
       positionOf(value),
     );
     return null;
   }
+  const kind = present[0];
+  if (kind === undefined) return null;
   const where = readWhereDraft(entryOf(value, "where"), report);
-  if (sum !== undefined) {
-    const target = readAggregateTarget(sum.value, report);
-    if (target === null) return null;
-    return {
-      kind: "sum",
-      entity: target.entity,
-      entityNode: target.node,
-      name: target.name,
-      nameNode: target.node,
-      where,
-    };
+  if (kind === "count") {
+    const entity = entryOf(value, "count")?.value;
+    if (entity === undefined || entity.kind !== "scalar" || entity.text === "") {
+      report("SHAPE_VALUE_INVALID", "computed の count は集計元の entity の名前で書く", positionOf(entity ?? value));
+      return null;
+    }
+    return { kind, entity: entity.text, entityNode: entity, name: null, nameNode: null, where };
   }
-  const value_ = count?.value;
-  if (value_ === undefined || value_.kind !== "scalar" || value_.text === "") {
-    report("SHAPE_VALUE_INVALID", "computed の count は集計元の entity の名前で書く", positionOf(value_ ?? value));
-    return null;
-  }
-  return { kind: "count", entity: value_.text, entityNode: value_, name: null, nameNode: null, where };
+  const target = readAggregateTarget(entryOf(value, kind)?.value ?? value, report, kind);
+  if (target === null) return null;
+  return {
+    kind,
+    entity: target.entity,
+    entityNode: target.node,
+    name: target.name,
+    nameNode: target.node,
+    where,
+  };
 }
 
 /**
@@ -1426,18 +1440,56 @@ function readComputed(items: readonly YamlNode[], report: Report): readonly Comp
   for (const member of readMembers(
     items,
     "computed",
-    ["name", "entity", "expression", "aggregate", "settle", "type"],
+    ["name", "scope", "entity", "expression", "aggregate", "settle", "type"],
     report,
   )) {
     const name = member.text("name");
     if (name !== null) checkName(name.text, "computed", positionOf(name.node), report);
-    const entity = member.text("entity");
+    const label = `computed ${name?.text ?? ""}`;
+
+    // 計算の範囲（M1.4。Issue #177）。`scope: app` なら**どのレコードにも属さない**——
+    // `entity` を持たず、`settle`（精算）も書けない。意味の検査は組み立てのあとに行う
+    const scopeEntry = entryOf(member.map, "scope");
+    let scope: ComputedScope | null = null;
+    if (scopeEntry !== undefined) {
+      if (scopeEntry.value.kind === "scalar" && isOneOf(COMPUTED_SCOPES, scopeEntry.value.text)) {
+        scope = scopeEntry.value.text as ComputedScope;
+      } else {
+        report(
+          "SHAPE_VALUE_INVALID",
+          `${label} の scope は ${COMPUTED_SCOPES.join("・")}（アプリ全体）だけを書ける`,
+          positionOf(scopeEntry.value),
+        );
+      }
+    }
+    const entityEntry = entryOf(member.map, "entity");
+    let entity: { readonly text: string; readonly node: YamlNode } | null = null;
+    if (scope === "app") {
+      // アプリ全体の計算は entity を持たない。書いてあれば断る（黙って捨てない）
+      if (entityEntry !== undefined) {
+        report(
+          "SHAPE_KEY_UNKNOWN",
+          `${label} は scope: app である（entity は書かない。どのレコードにも属さない）`,
+          { line: entityEntry.keyLine, column: entityEntry.keyColumn },
+        );
+      }
+    } else {
+      entity = member.text("entity");
+    }
 
     // 計算は、式（expression）・集計（aggregate）・精算（settle）の**どれか 1 つ**である
     // （docs/semantics.md「computed」「settle」）
     const expressionEntry = entryOf(member.map, "expression");
     const aggregateEntry = entryOf(member.map, "aggregate");
     const settleEntry = entryOf(member.map, "settle");
+    // アプリ全体の計算に精算は書けない（精算する人の entity が要る。M1.4）
+    if (scope === "app" && settleEntry !== undefined) {
+      report(
+        "SHAPE_KEY_UNKNOWN",
+        `${label} は scope: app である（settle は書かない。精算する entity が要る）`,
+        { line: settleEntry.keyLine, column: settleEntry.keyColumn },
+      );
+    }
     let expression: { readonly text: string; readonly node: YamlNode } | null = null;
     if (expressionEntry !== undefined) {
       if (expressionEntry.value.kind === "scalar" && expressionEntry.value.text !== "") {
@@ -1452,7 +1504,6 @@ function readComputed(items: readonly YamlNode[], report: Report): readonly Comp
     const forms = [expressionEntry, aggregateEntry, settleEntry].filter(
       (entry) => entry !== undefined,
     ).length;
-    const label = `computed ${name?.text ?? ""}`;
     if (forms === 0) {
       report(
         "LOGIC_AGGREGATE_FORM_INVALID",
@@ -1497,6 +1548,7 @@ function readComputed(items: readonly YamlNode[], report: Report): readonly Comp
       expression: expression?.text ?? "",
       expressionNode: expression?.node ?? { kind: "null", line: 0, column: 0 },
       type: type?.text ?? "",
+      scope,
       aggregate,
       settle,
       malformed: forms !== 1 || (settleEntry !== undefined && settle === null),
@@ -1613,6 +1665,27 @@ interface ExpressionCheck {
   readonly names: readonly string[];
 }
 
+/**
+ * **アプリ全体の計算（`scope: app`）**の式の名前解決（M1.4。Issue #177）。
+ * 参照できるのは、**ほかのアプリ全体の計算だけ**である——entity の項目も、行ごとの計算も見えない
+ * （どのレコードにも属さないので、参照する相手が決まらない）。`.` を使った参照も書けない。
+ */
+function appScopeFor(computed: readonly ComputedDraft[]): ExpressionScope {
+  const types = new Map(
+    computed
+      .filter((draft) => draft.scope === "app" && draft.settle === null)
+      .map((draft) => [draft.name, draft.type]),
+  );
+  return {
+    resolveName: (name: string): SpecType | null => {
+      const type = types.get(name);
+      if (type === undefined) return null;
+      return isOneOf(COMPUTED_TYPES, type) ? (type as ComputedType) : "unknown";
+    },
+    entityName: () => null,
+  };
+}
+
 /** AST の子を、書いた順に返す（式の中を歩くため） */
 function childrenOf(node: AstNode): readonly AstNode[] {
   switch (node.kind) {
@@ -1698,6 +1771,33 @@ function checkExpression(
   // 型の誤りが出ている式に、選択肢のキーの照合を重ねない（1 つの誤りを 2 つ以上のコードにしない）
   if (analysis.problems.length === 0) {
     checkEnumComparisons(status.ast, entity, label, text, base, report);
+  }
+  return { type: analysis.type, names: analysis.names };
+}
+
+/**
+ * **アプリ全体の計算（`scope: app`）**の式を検査する（M1.4。Issue #177）。参照できるのは
+ * ほかのアプリ全体の計算だけで、選択肢（`enum`）のキーの照合は無い（参照する項目が無い）。
+ * **式は評価しない。**
+ */
+function checkAppExpression(
+  text: string,
+  node: YamlNode,
+  label: string,
+  computed: readonly ComputedDraft[],
+  report: Report,
+): ExpressionCheck | null {
+  const base = positionOf(node);
+  const status = readExpression(text);
+  if (!status.ok) {
+    for (const problem of status.problems) {
+      report(problem.code, `${label}: ${problem.message}`, positionAt(text, problem.offset, base));
+    }
+    return null;
+  }
+  const analysis = analyzeExpression(status.ast, appScopeFor(computed));
+  for (const problem of analysis.problems) {
+    report(problem.code, `${label}: ${problem.message}`, positionAt(text, problem.offset, base));
   }
   return { type: analysis.type, names: analysis.names };
 }
@@ -1872,13 +1972,16 @@ function checkActions(
 }
 
 /**
- * 集計の意味を検査する（M1.2）。集計元の entity・対象（項目か計算）・where の整合を見る。
+ * 集計の意味を検査する（M1.2・M1.4）。集計元の entity・対象（項目か計算）・where の整合を見る。
  * 対象が計算なら、その計算を依存として覚える（**entity をまたぐ循環**を `checkCycles` が見つけられるように）。
+ *
+ * `outputEntity` は**集計の出力先の entity** である。`null` ならアプリ全体（`scope: app`）——
+ * 出力先のレコードが無いので、`where` の `this` は書けない（期間の条件は #178 で足す）。
  */
 function checkAggregate(
   draft: ComputedDraft,
   aggregate: AggregateDraft,
-  outputEntity: EntityDraft,
+  outputEntity: EntityDraft | null,
   index: ReadonlyMap<string, EntityDraft>,
   computed: readonly ComputedDraft[],
   report: Report,
@@ -1894,14 +1997,17 @@ function checkAggregate(
     return;
   }
 
-  if (aggregate.kind === "sum") {
+  // `count` は値を読まない。`sum`・`avg` は対象が数でなければならない（M1.2・M1.4）
+  if (aggregate.kind !== "count") {
     const name = aggregate.name ?? "";
     const field = source.fields.find((candidate) => candidate.name === name);
     let targetType: string | null = null;
     if (field !== undefined) {
       targetType = field.declaration === null ? null : expressionTypeOf(field.declaration);
     } else {
-      const target = computed.find((entry) => entry.entity === source.name && entry.name === name);
+      const target = computed.find(
+        (entry) => entry.scope === null && entry.entity === source.name && entry.name === name,
+      );
       if (target === undefined) {
         report(
           "LOGIC_AGGREGATE_TARGET_NOT_FOUND",
@@ -1924,6 +2030,15 @@ function checkAggregate(
   }
 
   for (const condition of aggregate.where) {
+    // アプリ全体の集計は出力先のレコードを持たないので、`this` を比べる相手が居ない（M1.4）
+    if (outputEntity === null) {
+      report(
+        "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
+        `computed ${draft.name} は scope: app である（集計の where に this は書けない。出力先のレコードが無い）`,
+        positionOf(condition.fieldNode),
+      );
+      continue;
+    }
     const field = source.fields.find((candidate) => candidate.name === condition.field);
     if (field === undefined) {
       report(
@@ -2028,12 +2143,71 @@ function checkSettleSlots(computed: readonly ComputedDraft[], report: Report): v
   }
 }
 
+/**
+ * **アプリ全体の計算（`scope: app`。M1.4。Issue #177）**の意味を検査する。
+ * entity に属さないので、項目との名前の重なりも、精算も見ない（精算は読み取りの時点で断る）。
+ * 参照できるのは**ほかのアプリ全体の計算だけ**である。
+ */
+function checkAppComputed(
+  draft: ComputedDraft,
+  index: ReadonlyMap<string, EntityDraft>,
+  computed: readonly ComputedDraft[],
+  report: Report,
+): void {
+  if (isOneOf(RESERVED_NAMES, draft.name)) {
+    report(
+      "LOGIC_COMPUTED_NAME_RESERVED",
+      `computed の名前 ${draft.name} は店頭が付ける値の名前である`,
+      positionOf(draft.nameNode ?? draft.expressionNode),
+    );
+    return;
+  }
+  if (draft.malformed) return;
+  // アプリ全体の値は数である——真偽（`boolean`）は行ごとの強調（`highlight`）が指すためだけに使う（M1.3）
+  if (draft.type === "boolean") {
+    report(
+      "LOGIC_COMPUTED_TYPE_MISMATCH",
+      `computed ${draft.name} は scope: app である（値は数である。type は number を書く）`,
+      positionOf(draft.nameNode ?? draft.expressionNode),
+    );
+    return;
+  }
+  if (draft.aggregate !== null) {
+    checkAggregate(draft, draft.aggregate, null, index, computed, report);
+    return;
+  }
+  if (draft.expression === "") return;
+  const checked = checkAppExpression(
+    draft.expression,
+    draft.expressionNode,
+    `computed ${draft.name}`,
+    computed,
+    report,
+  );
+  if (checked === null) return;
+  // 依存は entity を持たない（アプリ全体の計算の名前で引く）。循環の検査がここを辿る
+  draft.dependencies = checked.names.map((name) => ({ entity: "", name }));
+  const declared = isOneOf(COMPUTED_TYPES, draft.type) ? (draft.type as ComputedType) : null;
+  if (declared !== null && checked.type !== "unknown" && checked.type !== declared) {
+    report(
+      "LOGIC_COMPUTED_TYPE_MISMATCH",
+      `computed ${draft.name} の type は ${declared} だが、式は${typeName(checked.type)}になる`,
+      positionOf(draft.expressionNode),
+    );
+  }
+}
+
 function checkComputed(
   computed: readonly ComputedDraft[],
   index: ReadonlyMap<string, EntityDraft>,
   report: Report,
 ): void {
   for (const draft of computed) {
+    // アプリ全体の計算（`scope: app`。M1.4）は entity に属さないので、別の検査をする
+    if (draft.scope === "app") {
+      checkAppComputed(draft, index, computed, report);
+      continue;
+    }
     const entity = index.get(draft.entity);
     if (entity === undefined) {
       report(
@@ -2146,14 +2320,22 @@ function stronglyConnected<T>(nodes: readonly T[], edges: (node: T) => readonly 
 }
 
 /**
- * 計算どうしの参照の循環を断る。**entity をまたぐ**（集計の対象が別の entity の計算である）こともあるので、
- * 宣言全体を 1 つのグラフにして見る（M1.2）。辺は「同じ entity の式の参照」と「集計の対象の計算」である。
+ * 計算どうしの参照の循環を断る。**entity をまたぐ**（集計の対象が別の entity の計算である）ことも、
+ * **アプリ全体の計算**（`scope: app`）が別のアプリ全体の計算を参照することもあるので、
+ * 宣言全体を 1 つのグラフにして見る（M1.2・M1.4）。辺は「同じ entity の式の参照」と
+ * 「集計の対象の計算」である（アプリ全体の依存は entity が空である）。
  */
 function checkCycles(computed: readonly ComputedDraft[], report: Report): void {
+  // アプリ全体の計算は entity を持たないので、空の entity を名前空間にする（`\u0000名前`）
+  const keyOf = (draft: ComputedDraft): string =>
+    `${draft.scope === "app" ? "" : draft.entity}\u0000${draft.name}`;
+  const labelOf = (draft: ComputedDraft): string =>
+    draft.scope === "app" ? `app.${draft.name}` : `${draft.entity}.${draft.name}`;
   const byKey = new Map<string, ComputedDraft>();
   for (const draft of computed) {
-    if (draft.entity === "" || draft.name === "") continue;
-    const key = `${draft.entity}\u0000${draft.name}`;
+    if (draft.name === "") continue;
+    if (draft.entity === "" && draft.scope !== "app") continue;
+    const key = keyOf(draft);
     if (!byKey.has(key)) byKey.set(key, draft);
   }
   const nodes = [...byKey.values()];
@@ -2165,7 +2347,7 @@ function checkCycles(computed: readonly ComputedDraft[], report: Report): void {
     const first = component[0];
     const selfLoop = component.length === 1 && first !== undefined && edges(first).includes(first);
     if (component.length === 1 && !selfLoop) continue;
-    const labels = component.map((draft) => `${draft.entity}.${draft.name}`);
+    const labels = component.map((draft) => labelOf(draft));
     for (const draft of component) {
       const where =
         labels.length === 1
@@ -2232,6 +2414,25 @@ function buildSpec(drafts: Drafts): AppSpec | null {
       continue;
     }
     if (!isOneOf(COMPUTED_TYPES, draft.type)) return null;
+    // アプリ全体の計算（`scope: app`。M1.4）は **entity を持たない**（どのレコードにも属さない）
+    if (draft.scope === "app") {
+      builtComputed.push(
+        draft.aggregate === null
+          ? {
+              name: draft.name,
+              scope: draft.scope,
+              expression: draft.expression,
+              type: draft.type as ComputedType,
+            }
+          : {
+              name: draft.name,
+              scope: draft.scope,
+              aggregate: buildAggregate(draft.aggregate),
+              type: draft.type as ComputedType,
+            },
+      );
+      continue;
+    }
     if (draft.aggregate === null) {
       builtComputed.push({
         name: draft.name,

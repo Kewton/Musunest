@@ -1,0 +1,98 @@
+# 見本「サークルの活動」（M1.4。community.app-spec/v0.2-draft）
+#
+# 練習や試合を記録すると、**アプリ全体で 1 つ**の値（活動の回数・参加ののべ人数・1 回あたりの参加・費用の平均）
+# が出る。M1.4 の各 Issue が、自分の語彙をこの見本へ足していく（docs/parallel-development.md §7.2）。
+# **この Issue（#177）が置いたのは骨格である**——`scope: app`（アプリ全体の集計）と `avg`（平均）。
+#
+# 元は workspace/mvp/m1/02-l2-spec-examples.md §4.3（叩き台）。**いまの語彙で書けないものは落としてある**：
+#   - 期間の条件（`where: { date: { within: this_month } }`。「今月」は #178）
+#   - 見出しごとの集計（`groupBy` と `groups` 型。月ごとの回数・種類の内訳は #179）
+#   - 画面の種類 `dashboard` と部品（`number`・`bar`・`pie`・`ranking` は #180〜#182）
+#   - 表示名（`label`。日本語の見出しは #176）
+# `date`（日付）も §4.3 では使うが、この骨格では使わない（`within` が入る #178 で足す）。
+#
+# **§4.3 の `averageAttendees` は式（`attendeesThisMonth / max(1, activitiesThisMonth)`）で書いてあるが、
+# この見本では `avg`（集計）を使う。** 対象が 0 件のときの平均は `null` と決まっており（窓口の決定
+# 2026-09-19）、式の `max(1, …)` は 0 を返してしまうからである（0 と「求められなかった」を区別できない）。
+#
+# アプリ全体の値は、一覧の応答の `scope`（計算の名前 → 値）に載る。**行ごとの値とは別の欄**である。
+# 値が求められなければ `null` で、画面は「—」で見せる（0 と区別する）。
+#
+# 採点のシナリオは同じディレクトリの scenario.json、
+# 意味は ../../docs/semantics.md（「scope」「aggregate」「sum」「count」「avg」「computed」）にある。
+
+entities:
+  - name: member
+    fields:
+      name: string          # 名前
+
+  - name: activity
+    fields:
+      kind:                 # 種類（練習・試合・飲み会）
+        type: enum
+        options:
+          practice: 練習
+          match: 試合
+          party: 飲み会
+      attendees:            # 参加した人（member のレコードの並びを ID で指す）
+        type: list
+        of: member
+      cost: number          # 費用（円）
+
+computed:
+  # 活動 1 件ごと。参加した人の数である
+  - name: attendeeCount
+    entity: activity
+    expression: len(attendees)
+    type: number
+
+  # アプリ全体（どのレコードにも属さない集計。M1.4 の `scope: app`）。回数・のべ人数・平均を出す
+  - name: activityCount
+    scope: app
+    aggregate:
+      count: activity
+    type: number
+  # のべ人数。**対象が計算でもよい**——参加した人の数を足す（`scope: app` の `sum`）
+  - name: attendeeTotal
+    scope: app
+    aggregate:
+      sum: activity.attendeeCount
+    type: number
+  # 1 回あたりの参加（`avg`）。**値の無い行は数えない**。活動が 0 件なら `null` である（0 に読み替えない）
+  - name: averageAttendees
+    scope: app
+    aggregate:
+      avg: activity.attendeeCount
+    type: number
+  # 費用の平均（`avg`）。同上
+  - name: averageCost
+    scope: app
+    aggregate:
+      avg: activity.cost
+    type: number
+
+views:
+  # 活動の一覧。アプリ全体の値は、一覧の上に出る（`scope` の欄）
+  - name: activities
+    type: list
+    entity: activity
+    show: [kind, attendees, cost, attendeeCount]
+
+actions:
+  - name: addMember
+    entity: member
+    kind: create
+  - name: addActivity
+    entity: activity
+    kind: create
+
+validations: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

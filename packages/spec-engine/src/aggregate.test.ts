@@ -16,7 +16,13 @@ import type { NormalizedAppSpec } from "@musunest/appspec-schema";
 import { readScoringScenario } from "@musunest/appspec-schema";
 import { sampleScenarioFile, sampleSpecFile } from "@musunest/appspec-schema/files";
 import type { SourceRecord, SourceRecords } from "./aggregate.js";
-import { aggregateSourceEntities, matchesWhere, sumValues } from "./aggregate.js";
+import {
+  aggregateSourceEntities,
+  appAggregateSourceEntities,
+  avgValues,
+  matchesWhere,
+  sumValues,
+} from "./aggregate.js";
 import { fixedClock } from "./clock.js";
 import { evaluateRecord, type Evaluation } from "./evaluate.js";
 import { normalizeSpec } from "./normalize.js";
@@ -374,5 +380,32 @@ describe("集計の道具", () => {
     expect(aggregateSourceEntities(WARIKAN, "member")).toEqual(["expense"]);
     // member の集計は expense.shareAmount（expense の計算）を使うが、expense 自身は集計を持たない
     expect(aggregateSourceEntities(WARIKAN, "expense")).toEqual([]);
+  });
+
+  it("aggregateSourceEntities は、アプリ全体（scope: app）の集計を混ぜない（M1.4）", async () => {
+    // dashboard には scope: app の集計（activity を数える）がある。行ごとの集計元には混ざらない
+    const dashboard = await normalized(read(sampleSpecFile("dashboard")));
+    expect(aggregateSourceEntities(dashboard, "activity")).toEqual([]);
+    expect(aggregateSourceEntities(dashboard, "member")).toEqual([]);
+  });
+
+  it("appAggregateSourceEntities は、アプリ全体の集計が要る entity を推移的に集める（M1.4）", async () => {
+    const dashboard = await normalized(read(sampleSpecFile("dashboard")));
+    expect(appAggregateSourceEntities(dashboard)).toEqual(["activity"]);
+    // scope: app の集計が 1 つも無ければ空である（従来の宣言には余計な読みを足さない）
+    expect(appAggregateSourceEntities(WARIKAN)).toEqual([]);
+  });
+});
+
+// ── 平均（avg。M1.4。Issue #177） ────────────────────────────────
+
+describe("avgValues（M1.4）", () => {
+  it("読めた行だけで平均を求める（値の無い行は数えない）", () => {
+    expect(avgValues([])).toBeNull();
+    expect(avgValues([null])).toBeNull();
+    expect(avgValues([2, 4])).toBe(3);
+    // **`null` の行を数えない**——`sum` と別の決めごとである（1 行の欠損で画面全体を「—」にしない）
+    expect(avgValues([2, null, 4])).toBe(3);
+    expect(avgValues([0, 0])).toBe(0);
   });
 });

@@ -1,0 +1,50 @@
+{
+  "$comment": "見本「サークルの活動」の採点のシナリオ。時計を日本時間で固定し、メンバー 3 人と活動 3 件を入れ、一覧の行と計算値を確かめる。**アプリ全体の集計（scope: app）の値は行ではない**ので、この views には現れない——unit テスト（spec-engine・data-api・host）が確かめる。",
+  "sample": "dashboard",
+  "clock": "2026-09-15T12:00:00+09:00",
+  "steps": [
+    {
+      "name": "メンバー A を足す",
+      "action": "addMember",
+      "input": { "name": "A" },
+      "expect": { "accepted": true, "bind": "A" }
+    },
+    {
+      "name": "メンバー B を足す",
+      "action": "addMember",
+      "input": { "name": "B" },
+      "expect": { "accepted": true, "bind": "B" }
+    },
+    {
+      "name": "メンバー C を足す",
+      "action": "addMember",
+      "input": { "name": "C" },
+      "expect": { "accepted": true, "bind": "C" }
+    },
+    {
+      "name": "練習を記録する（A・B・C が参加。3000 円）",
+      "action": "addActivity",
+      "input": { "kind": "practice", "attendees": ["$A", "$B", "$C"], "cost": 3000 },
+      "expect": { "accepted": true }
+    },
+    {
+      "name": "飲み会を記録する（A・B が参加。5000 円）",
+      "action": "addActivity",
+      "input": { "kind": "party", "attendees": ["$A", "$B"], "cost": 5000 },
+      "expect": { "accepted": true }
+    },
+    {
+      "name": "試合を記録する（A が参加。2000 円）",
+      "action": "addActivity",
+      "input": { "kind": "match", "attendees": ["$A"], "cost": 2000 },
+      "expect": { "accepted": true }
+    }
+  ],
+  "views": {
+    "activities": [
+      { "kind": "practice", "attendees": ["$A", "$B", "$C"], "cost": 3000, "attendeeCount": 3 },
+      { "kind": "party", "attendees": ["$A", "$B"], "cost": 5000, "attendeeCount": 2 },
+      { "kind": "match", "attendees": ["$A"], "cost": 2000, "attendeeCount": 1 }
+    ]
+  }
+}
