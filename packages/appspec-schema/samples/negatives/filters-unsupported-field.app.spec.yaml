@@ -1,0 +1,40 @@
+# 負例：一覧（type: list）の filters が、選択肢（enum）でも参照（ref）でもない数の項目 estimate を指している。
+# filters は、**値の候補を宣言から機械で出せる** enum か ref の項目だけを指さなければならない（M1.3）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: task
+    fields:
+      title: string
+      estimate: number
+      status:
+        type: enum
+        options:
+          todo: 未着手
+          doing: 進行中
+          done: 完了
+        default: todo
+
+views:
+  - name: taskList
+    entity: task
+    type: list
+    show: [title, estimate]
+    filters: [estimate]
+
+actions:
+  - name: addTask
+    entity: task
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

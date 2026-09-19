@@ -1,0 +1,39 @@
+# 負例：一覧（type: list）の filters が、show に無い選択肢の項目 status を指している。
+# filters は、show に並べた名前を指さなければならない（画面に出ていない項目では絞り込めない。M1.3）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: task
+    fields:
+      title: string
+      status:
+        type: enum
+        options:
+          todo: 未着手
+          doing: 進行中
+          done: 完了
+        default: todo
+
+views:
+  - name: taskList
+    entity: task
+    type: list
+    show: [title]
+    filters: [status]
+
+actions:
+  - name: addTask
+    entity: task
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

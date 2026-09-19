@@ -2089,3 +2089,127 @@ describe("ボード（board）と強調（highlight）を含む宣言の配信�
     expect(result.body.rows.map((row) => row.computed)).toEqual([{}]);
   });
 });
+
+// ── 一覧（list）と絞り込み（filters）を含む宣言の配信（M1.3。Issue #158） ──
+//
+// **配信側が読めること**を確かめる。静的チェック（spec-engine）が通っても、配信側が新しい語彙を
+// 知らなければ、正規化した JSON は読み取りで落ちて `getSpec` / `getView` が 503 になる（#145 と同じ穴）。
+// 追記2 のとおり、`filters` は `ApiSpecBody.spec` に丸ごと載って画面へ届くので**本体は無変更の見込み**で
+// ある——**確かめたうえで**無変更である（この describe がその確認である）。
+// **絞り込みは画面の中で行う**ので、`getView` は今までどおり全件を返す（絞り込みの引数を持たない）。
+//
+// 見本 `samples/task-board/` は #159 が置く。ここでは、その見本と同じ形の最小の宣言を組み立てる。
+
+const LIST_VIEW_SOURCE = [
+  "entities:",
+  "  - name: member",
+  "    fields:",
+  "      name: string",
+  "  - name: task",
+  "    fields:",
+  "      title: string",
+  "      status:",
+  "        type: enum",
+  "        options:",
+  "          todo: 未着手",
+  "          doing: 進行中",
+  "          done: 完了",
+  "        default: todo",
+  "      assignee:",
+  "        type: ref",
+  "        to: member",
+  "views:",
+  "  - name: taskList",
+  "    entity: task",
+  "    type: list",
+  "    show: [title, status, assignee]",
+  "    filters: [assignee, status]",
+  "actions:",
+  "  - name: addMember",
+  "    entity: member",
+  "  - name: addTask",
+  "    entity: task",
+  "validations: []",
+  "computed: []",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+].join("\n");
+
+const listViewNormalized = await normalizeSpec(LIST_VIEW_SOURCE);
+if (!listViewNormalized.ok) throw new Error("一覧（list）の宣言が静的チェックに通らない");
+
+const LIST_VIEW_APP: NormalizedAppSpec = listViewNormalized.app;
+/** publish が R2 に置く本文（`getSpec` に渡すのと同じ形） */
+const LIST_VIEW_JSON = listViewNormalized.json;
+
+/** 一覧（list）の宣言を R2 に置き、登録（D1）も同じ宣言を指すようにする */
+function withListView(h: Harness): void {
+  h.registry.registration = {
+    sourceSha256: LIST_VIEW_APP.sourceSha256,
+    schemaVersion: LIST_VIEW_APP.schemaVersion,
+    sourceKey: `specs/${LIST_VIEW_APP.sourceSha256}/app.spec.yaml`,
+    normalizedKey: `specs/${LIST_VIEW_APP.sourceSha256}/normalized.json`,
+    createdAt: "2026-09-19T00:00:00.000Z",
+  };
+  h.specs.text = LIST_VIEW_JSON;
+}
+
+/** メンバーを 1 人足して、その ID を `assignee` に持つタスクを 1 件足す（`status` は既定値 `todo` が入る） */
+async function addListTask(h: Harness, title: string): Promise<string> {
+  const member = await createFromAction(h.deps, INSTANCE, "addMember", { name: "A" });
+  if (!member.ok) throw new Error(`メンバーを足せなかった: ${JSON.stringify(member.failure)}`);
+  const result = await createFromAction(h.deps, INSTANCE, "addTask", {
+    title,
+    assignee: rowOf(member.body).id,
+  });
+  if (!result.ok) throw new Error(`足せなかった: ${JSON.stringify(result.failure)}`);
+  return rowOf(result.body).id;
+}
+
+describe("一覧（list）と絞り込み（filters）を含む宣言の配信（M1.3）", () => {
+  it("getSpec が ok で返し、type: list・show・filters を保つ（受入条件）", async () => {
+    const h = harness();
+    withListView(h);
+
+    const result = await getSpec(h.deps, INSTANCE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.status).toBe(API_READ_STATUS);
+    expect(result.body.sourceSha256).toBe(LIST_VIEW_APP.sourceSha256);
+    expect(result.body.spec.views).toEqual([
+      {
+        name: "taskList",
+        entity: "task",
+        type: "list",
+        show: ["title", "status", "assignee"],
+        filters: ["assignee", "status"],
+      },
+    ]);
+  });
+
+  it("readNormalizedApp が、list と filters を含む正規化 JSON を読む（受入条件）", () => {
+    expect(readNormalizedApp(LIST_VIEW_JSON)).toEqual(LIST_VIEW_APP);
+  });
+
+  it("getView が ok で返し、宣言順の項目と全件の行を返す（絞り込みは画面の中で行う）", async () => {
+    const h = harness();
+    withListView(h);
+    await addListTask(h, "宿の予約");
+
+    const result = await getView(h.deps, INSTANCE, "taskList");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 項目は show の順ではなく**宣言の順**で返る（列の順は宣言の `show` が持つ。`ApiViewBody.fields`）
+    expect(result.body.fields).toEqual(["title", "status", "assignee"]);
+    // 読むのは今までどおり**全件**である（絞り込みの引数は無い。上限は M1.5）
+    expect(result.body.rows).toHaveLength(1);
+    expect(result.body.rows[0]?.fields["title"]).toBe("宿の予約");
+    // 選択肢の既定値は、保存の時点で入る
+    expect(result.body.rows[0]?.fields["status"]).toBe("todo");
+  });
+});

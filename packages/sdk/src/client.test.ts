@@ -268,6 +268,50 @@ describe("一覧の宣言（type・show）と精算（settlement）", () => {
   });
 });
 
+// ── 一覧（list）と絞り込み（filters）（M1.3。Issue #158） ──────────────
+//
+// 画面（host）が絞り込みの候補を宣言から読むので、**契約と違う形は成功にしない**。
+// また、`getView` の経路に**絞り込みの引数（query）が増えていない**ことを URL で確かめる（受入条件）。
+
+describe("一覧（list）と絞り込み（filters）（M1.3）", () => {
+  const listSpec = (views: unknown) => ({ ...SPEC, spec: { ...SPEC.spec, views } });
+
+  it("type: list と show・filters を、型付きで受け取る（受入条件）", async () => {
+    const spec = listSpec([
+      { name: "taskList", entity: "expense", type: "list", show: ["description", "amount"], filters: ["amount"] },
+    ]);
+    const stub = recordingFetch(() => json(200, spec));
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: spec });
+  });
+
+  it("契約と違う形は INVALID_RESPONSE（キャストしない）", async () => {
+    const cases: unknown[] = [
+      // filters は `type: list` のときだけである
+      [{ name: "expenseList", entity: "expense", type: "table", filters: ["amount"] }],
+      // filters は名前の並びでなければならない
+      [{ name: "taskList", entity: "expense", type: "list", filters: "amount" }],
+      // `type: list` の `show` も並びでなければならない
+      [{ name: "taskList", entity: "expense", type: "list", show: "description" }],
+    ];
+    for (const views of cases) {
+      const stub = recordingFetch(() => json(200, listSpec(views)));
+      expect(await clientWith(stub.fetch).getSpec("inst-1")).toMatchObject({
+        ok: false,
+        error: { status: 200, code: INVALID_RESPONSE },
+      });
+    }
+  });
+
+  it("getView の経路に、絞り込みの引数（query）を足していない（受入条件）", async () => {
+    const stub = recordingFetch(() => json(200, VIEW));
+    await clientWith(stub.fetch).getView("inst-1", "taskList");
+
+    // 経路は契約のとおりで、`?` 以降（絞り込みの引数）を持たない。読むのは今までどおり全件である
+    expect(stub.calls[0]?.url).toBe(`${BASE}/api/instances/inst-1/views/taskList`);
+    expect(stub.calls[0]?.url).not.toContain("?");
+  });
+});
+
 describe("失敗を成功にしない", () => {
   it("ネットワークの例外は NETWORK_FAILURE（status は null）", async () => {
     const result = await clientWith(throwingFetch()).getSpec("inst-1");

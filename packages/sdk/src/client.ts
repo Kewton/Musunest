@@ -395,9 +395,9 @@ function isComputedDeclaration(value: unknown): boolean {
 }
 
 /**
- * 一覧の宣言。M1.2 で `type`（種類。語彙は `VIEW_TYPES`：`table`・`settlement`・`board`）と
- * `show`（表に出す名前の順）を、M1.3 でボードの `columns`（必須）・`highlight`（任意）を足した。
- * **書ける欄は `type` が決める**（語彙は閉じている）。
+ * 一覧の宣言。M1.2 で `type`（種類。語彙は `VIEW_TYPES`：`table`・`settlement`・`board`・`list`）と
+ * `show`（表に出す名前の順）を、M1.3 でボードの `columns`（必須）・`highlight`（任意）と、一覧の
+ * `filters`（任意）を足した。**書ける欄は `type` が決める**（語彙は閉じている）。
  */
 function isView(value: unknown): boolean {
   if (!isRecord(value) || typeof value.name !== "string" || typeof value.entity !== "string") return false;
@@ -406,14 +406,20 @@ function isView(value: unknown): boolean {
       return false;
     }
   }
-  // `show` は `type: table` のときだけ（ほかの種類は列の並びを持たない）
-  if (value.show !== undefined && !(value.type === "table" && isStringArray(value.show))) return false;
+  // `show` は `type: table` と `type: list` のときだけ（扱いは同じ。ほかの種類は列の並びを持たない）
+  if (value.show !== undefined && !((value.type === "table" || value.type === "list") && isStringArray(value.show))) {
+    return false;
+  }
   // ボードの `columns`・`highlight` は `type: board` のときだけ。どちらも名前 1 つである
   if (value.columns !== undefined) {
     if (value.type !== "board" || typeof value.columns !== "string") return false;
   }
   if (value.highlight !== undefined) {
     if (value.type !== "board" || typeof value.highlight !== "string") return false;
+  }
+  // 絞り込み（M1.3）は `type: list` のときだけ。名前の並びである（実在と種類は静的チェックが見る）
+  if (value.filters !== undefined) {
+    if (value.type !== "list" || !isStringArray(value.filters)) return false;
   }
   return true;
 }

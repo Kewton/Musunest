@@ -1,7 +1,7 @@
 // 静的チェックの unit テスト（Issue #97 の受入条件を、ここで固定する）。
 //
 //   1. 見本（expense-log・warikan）の診断が空で、7 欄を持つ AppSpec を返す
-//   2. 負例 44 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
+//   2. 負例 46 件で返る誤りコードの集合が、負例一覧の codes と**ちょうど一致**する
 //   3. 診断は空でない日本語の説明と、該当する YAML の行・列を持つ
 //   4. 不正 YAML・未知キー・未知参照・循環を拒否し、上限はちょうどが通り 1 超過で診断になる
 //   5. 検査は式を実行せず、ストレージにも触れない
@@ -735,11 +735,11 @@ describe("決まった値への書き換え（set）とボタンを出す条件�
   });
 });
 
-// ── 2. 負例 44 件 ──────────────────────────────────────────────
+// ── 2. 負例 46 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 44 件である（0 件なら以降のテストが空振りする）", () => {
-    expect(negativeIndex.negatives).toHaveLength(44);
+  it("負例の一覧は 46 件である（0 件なら以降のテストが空振りする）", () => {
+    expect(negativeIndex.negatives).toHaveLength(46);
   });
 
   it.each(negativeCases)(
@@ -1184,6 +1184,133 @@ describe("ボード（board）と強調（highlight）（M1.3）", () => {
         ),
       ),
     ).toEqual(["LOGIC_COMPUTED_TYPE_MISMATCH"]);
+  });
+});
+
+// ── 3d. 一覧（list）と絞り込み（filters）（M1.3。Issue #158） ────────────
+//
+// `type: list` は `show` を `table` と同じ扱いで持ち、`filters`（UX 層）で画面の中を絞り込める。
+// **絞り込みは画面の中で行う**ので、静的チェックが見るのは「指せる項目か」だけである。落とすときの
+// 2 つのコードは**別である**——負例 2 本（filters-unsupported-field・filters-field-not-shown）が、
+// 同じことを外から確かめる。
+
+describe("一覧（list）と絞り込み（filters）（M1.3）", () => {
+  const STATUS: readonly string[] = [
+    "      status:",
+    "        type: enum",
+    "        options:",
+    "          todo: 未着手",
+    "          doing: 進行中",
+    "          done: 完了",
+    "        default: todo",
+  ];
+
+  /** 選択肢の項目 status と参照の項目 assignee を持つ task に、一覧（type: list）を差し込む */
+  const withList = (viewLines: readonly string[]): string =>
+    declaration({
+      entities: [
+        "  - name: member",
+        "    fields:",
+        "      name: string",
+        "  - name: task",
+        "    fields:",
+        "      title: string",
+        "      estimate: number",
+        "      assignee:",
+        "        type: ref",
+        "        to: member",
+        ...STATUS,
+      ].join("\n"),
+      views: ["  - name: taskList", "    entity: task", "    type: list", ...viewLines].join("\n"),
+      actions: "[]",
+      validations: "[]",
+      computed: "[]",
+    });
+
+  it("type: list を書け、show と filters が宣言のまま残る（受入条件）", () => {
+    const result = checkSpec(
+      withList(["    show: [title, status, assignee]", "    filters: [assignee, status]"]),
+    );
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spec.views).toEqual([
+      {
+        name: "taskList",
+        entity: "task",
+        type: "list",
+        show: ["title", "status", "assignee"],
+        filters: ["assignee", "status"],
+      },
+    ]);
+  });
+
+  it("show の扱いは table と揃う（書いた順のまま。実在しない名前は UI_FIELD_NOT_FOUND）", () => {
+    const result = checkSpec(withList(["    show: [status, title]"]));
+    expect(result.diagnostics).toEqual([]);
+    if (result.ok) expect(result.spec.views[0]?.show).toEqual(["status", "title"]);
+    // 実在しない名前は、table と同じコードで断る
+    expect(codesOf(failure(checkSpec(withList(["    show: [title, ammount]"]))))).toEqual([
+      "UI_FIELD_NOT_FOUND",
+    ]);
+  });
+
+  it("filters は、show にあり enum か ref の項目なら通る（宣言の順のまま）", () => {
+    for (const filters of ["[status]", "[assignee]", "[]"]) {
+      const result = checkSpec(withList(["    show: [title, status, assignee]", `    filters: ${filters}`]));
+      expect(result.diagnostics, filters).toEqual([]);
+    }
+  });
+
+  it("2 つの誤りのコードは、それぞれ別である（受入条件）", () => {
+    const unsupported = codesOf(
+      failure(checkSpec(withList(["    show: [title, estimate]", "    filters: [estimate]"]))),
+    );
+    const notShown = codesOf(failure(checkSpec(withList(["    show: [title]", "    filters: [status]"]))));
+    expect(unsupported).toEqual(["UI_FILTER_FIELD_NOT_FILTERABLE"]);
+    expect(notShown).toEqual(["UI_FILTER_FIELD_NOT_SHOWN"]);
+    expect(unsupported).not.toEqual(notShown);
+    // コードは正本の一覧（diagnostics.ts の DIAGNOSTIC_CODES）にある
+    for (const code of [...unsupported, ...notShown]) expect(isDiagnosticCode(code)).toBe(true);
+  });
+
+  it.each([
+    ["filters-unsupported-field", "UI_FILTER_FIELD_NOT_FILTERABLE", "estimate"],
+    ["filters-field-not-shown", "UI_FILTER_FIELD_NOT_SHOWN", "status"],
+  ] as const)("負例 %s は %s **だけ**を返す（受入条件）", (name, code, where) => {
+    const result = failure(checkSpec(negativeTexts.get(name) ?? ""));
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([code]);
+    expect(messagesOf(result, code)).toContain(where);
+  });
+
+  it("filters は type: list のときだけ書ける（語彙は閉じている）", () => {
+    // 表（type: table）は filters を知らない
+    expect(
+      codesOf(failure(checkSpec(declaration({ views: `${BASE_PARTS.views}\n    type: table\n    filters: [payer]` })))),
+    ).toEqual(["SHAPE_KEY_UNKNOWN"]);
+    // 種類を書かない一覧（M1.1）も同じ
+    expect(
+      codesOf(failure(checkSpec(declaration({ views: `${BASE_PARTS.views}\n    filters: [payer]` })))),
+    ).toEqual(["SHAPE_KEY_UNKNOWN"]);
+  });
+
+  it("filters の形が違えば、名前の照合の前に形で断る", () => {
+    expect(codesOf(failure(checkSpec(withList(["    show: [title]", "    filters: status"]))))).toEqual([
+      "SHAPE_VALUE_INVALID",
+    ]);
+  });
+
+  it("show を書いていなければ、項目（宣言の順）が並ぶものとして扱う", () => {
+    const result = checkSpec(withList(["    filters: [status]"]));
+    expect(result.diagnostics).toEqual([]);
+    if (result.ok) expect(result.spec.views[0]?.filters).toEqual(["status"]);
+  });
+
+  it("負例 view-unknown-type は、list が実在の語になっても負例のままである（追記3）", () => {
+    const text = negativeTexts.get("view-unknown-type") ?? "";
+    // #157 が実在の語でない button に差し替えてある（list に変わっていない）
+    expect(text).toContain("type: button");
+    expect(codesOf(failure(checkSpec(text)))).toEqual(["SHAPE_KEY_UNKNOWN"]);
   });
 });
 
