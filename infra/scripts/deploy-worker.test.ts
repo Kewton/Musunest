@@ -823,7 +823,7 @@ describe("deploy-staging.yml", () => {
       indexOf(/deploy-worker\.ts --env staging --target host --sha "\$GIT_SHA"$/m),
       indexOf(/pnpm smoke --env staging --expect-sha "\$GIT_SHA"$/m),
       indexOf(/repository\.pushed_at/),
-      indexOf(/infra\/scripts\/publish\.ts --env staging --instance m12-e2e-warikan --spec packages\/appspec-schema\/samples\/warikan\/app\.spec\.yaml$/m),
+      indexOf(/infra\/scripts\/publish\.ts --env staging --instance m12-e2e-warikan --spec packages\/appspec-schema\/samples\/warikan\/app\.spec\.yaml --replace$/m),
       indexOf(/pnpm --filter @musunest\/e2e test:staging/),
     ];
     expect(order).toEqual(order.toSorted((a, b) => a - b));
@@ -882,7 +882,15 @@ describe("deploy-staging.yml", () => {
     const publish = steps[indexOf(/infra\/scripts\/publish\.ts/)];
     expect(publish?.body).toContain("--env staging --instance m12-e2e-warikan");
     expect(publish?.body).toContain("--spec packages/appspec-schema/samples/warikan/app.spec.yaml");
+    expect(publish?.body).toContain("--env staging --instance m12-e2e-task-board");
+    expect(publish?.body).toContain("--spec packages/appspec-schema/samples/task-board/app.spec.yaml");
     expect(publish?.body).not.toMatch(/m11-demo-expense-log|m12-demo-warikan/);
+  });
+
+  it("e2e の見本は --replace で置く（語彙を足す Issue で原本の SHA-256 が変わっても落ちない・#175）", () => {
+    const publish = steps[indexOf(/infra\/scripts\/publish\.ts/)];
+    // 2 つとも --replace を付ける。**既定（暗黙に差し替えない）は変えない**
+    expect(publish?.body.match(/--replace/g)).toHaveLength(2);
   });
 
   it("e2e の宛先は環境変数で渡す（引数に URL を渡さない）。インスタンス ID は明示の環境変数にだけ入れる", () => {

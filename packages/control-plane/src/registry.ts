@@ -106,6 +106,8 @@ export async function registerApp(
  * インスタンスを登録する。参照先のアプリが未登録なら RegistryError("app_not_found") を投げ、行を入れない。
  * 同じ ID・同じ参照の2回目は既存の行を返す（冪等）。同じ ID で参照先が違えば
  * RegistryError("instance_conflict") を投げ、既存の行は変えない（既存インスタンスの宣言差し替えを暗黙に行わない）。
+ *
+ * **はっきり差し替える道は replaceInstance である**（#175）。そちらは差し替えてよい宣言かを呼ぶ側が確かめてから呼ぶ。
  */
 export async function registerInstance(
   executor: RegistryExecutor,
@@ -134,4 +136,44 @@ export async function registerInstance(
     throw new RegistryError("instance_conflict", `既存インスタンスの宣言は暗黙に差し替えない`);
   }
   return record;
+}
+
+/**
+ * インスタンスの参照先を、はっきり差し替える（#175）。**差し替えてよい宣言かの判定は呼ぶ側が済ませている**
+ * ——ここが守るのは登録簿の行である。
+ *
+ * - 書き換えるのは、**前の参照が expectedSourceSha256 と一致する行だけ**（compare-and-swap）。
+ *   同時に別の deploy が差し替えていても、**その行を黙って上書きしない**（0 件更新）
+ * - 差し替え先のアプリが未登録なら書き換えない（INSERT と同じ EXISTS の守り）
+ * - **1 つの batch（D1 では1トランザクション）で行う。** 読み直した行が差し替え先を指していれば成功
+ *   ——別の差し替えが同じ結果にしたときも、同じ入力の再実行も、同じ成功に合流する
+ * - それ以外は RegistryError を投げ、**行は変えない**。途中まで書いて止まらない
+ */
+export async function replaceInstance(
+  executor: RegistryExecutor,
+  registration: AppInstanceRegistration,
+  expectedSourceSha256: string,
+): Promise<AppInstanceRecord> {
+  const { instanceId, sourceSha256 } = registration;
+  const [, read] = await executor.batch([
+    {
+      sql:
+        `UPDATE ${APP_INSTANCES_TABLE} SET source_sha256 = ?` +
+        ` WHERE instance_id = ? AND source_sha256 = ?` +
+        ` AND EXISTS (SELECT 1 FROM ${APPS_TABLE} WHERE source_sha256 = ?)`,
+      params: [sourceSha256, instanceId, expectedSourceSha256, sourceSha256],
+    },
+    { sql: SELECT_INSTANCE, params: [instanceId] },
+  ]);
+  const row = read?.rows[0];
+  const record = row === undefined ? null : toInstanceRecord(row);
+  if (record === null) {
+    throw new RegistryError("instance_conflict", `差し替えるインスタンスが ${APP_INSTANCES_TABLE} に無い`);
+  }
+  if (record.sourceSha256 === sourceSha256) return record;
+  if (record.sourceSha256 === expectedSourceSha256) {
+    // 前の参照はそのままだ＝UPDATE が効かなかった。差し替え先のアプリが未登録（呼ぶ側は registerApp の後に呼ぶ）
+    throw new RegistryError("app_not_found", `差し替え先のアプリが未登録（先に登録してから差し替える）`);
+  }
+  throw new RegistryError("instance_conflict", `差し替えの前に、別の書き込みが入った（登録簿の行は変えない）`);
 }

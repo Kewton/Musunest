@@ -72,7 +72,7 @@ interface Call {
   readonly body: string;
 }
 
-/** Cloudflare の API の偽物。R2 へは PUT、D1 へは POST が来る。 */
+/** Cloudflare の API の偽物。R2 へは PUT（読みは GET）、D1 へは POST が来る。 */
 class FakeCloudflare {
   readonly calls: Call[] = [];
   failR2At = 0;
@@ -81,10 +81,14 @@ class FakeCloudflare {
   throwOnce: unknown;
   /** 設定すると、D1 が JSON でない本文を返す（壊れた応答の再現に使う） */
   rawD1Body: string | null = null;
+  /** 設定すると、R2 の GET が 1 回だけ 404 を返す（前の原本が読めない形。#175） */
+  objectMissingOnce = false;
   #r2 = 0;
   #d1 = 0;
   readonly #apps = new Map<string, Record<string, unknown>>();
   readonly #instances = new Map<string, Record<string, unknown>>();
+  /** R2 に置いたオブジェクト（キー → 本文）。GET はここから返す（#175 の差し替えが前の原本を読む） */
+  readonly #objects = new Map<string, string>();
 
   handle(url: string, init?: RequestInit): Promise<Response> {
     this.calls.push({ url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : "" });
@@ -94,12 +98,19 @@ class FakeCloudflare {
       throw thrown;
     }
     if (url.includes("/r2/buckets/")) {
+      const key = this.#objectKey(url);
+      if ((init?.method ?? "GET") === "GET") {
+        const body = this.objectMissingOnce ? undefined : this.#objects.get(key);
+        this.objectMissingOnce = false;
+        return Promise.resolve(body === undefined ? new Response("", { status: 404 }) : new Response(body, { status: 200 }));
+      }
       this.#r2 += 1;
       if (this.failR2At !== 0 && this.#r2 === this.failR2At) {
         return Promise.resolve(
           Response.json({ success: false, errors: [{ code: 10000, message: `denied ${ACCOUNT} ${BUCKET} ${url}` }] }, { status: 500 }),
         );
       }
+      this.#objects.set(key, typeof init?.body === "string" ? init.body : "");
       return Promise.resolve(Response.json({ success: true, result: {} }));
     }
     if (url.includes("/d1/database/")) {
@@ -113,10 +124,25 @@ class FakeCloudflare {
     return Promise.resolve(Response.json({ success: false }, { status: 404 }));
   }
 
+  /** R2 のオブジェクトのキー（`/objects/` の後ろ。段ごとに URL エンコードされている） */
+  #objectKey(url: string): string {
+    return (new URL(url).pathname.split("/objects/")[1] ?? "").split("/").map(decodeURIComponent).join("/");
+  }
+
   /** D1 の応答を、来た束縛引数から組み立てる（登録の読み書きの最小の再現） */
   #answer(raw: unknown): unknown {
     const parsed = typeof raw === "string" ? (JSON.parse(raw) as { batch: { sql: string; params: string[] }[] }) : { batch: [] };
     const result = parsed.batch.map(({ sql, params }) => {
+      // 差し替え（#175 の replaceInstance）：前の参照が一致する行だけ書き換える（compare-and-swap）
+      if (sql.includes("UPDATE app_instances")) {
+        const [sha, instanceId, expected] = params;
+        const row = instanceId === undefined ? undefined : this.#instances.get(instanceId);
+        const changed = row !== undefined && row["source_sha256"] === expected && sha !== undefined && this.#apps.has(sha);
+        if (changed && instanceId !== undefined && sha !== undefined && row !== undefined) {
+          this.#instances.set(instanceId, { ...row, source_sha256: sha });
+        }
+        return { results: [], success: true, meta: { changes: changed ? 1 : 0 } };
+      }
       if (sql.includes("INSERT INTO apps")) {
         const [sha, version, sourceKey, normalizedKey] = params;
         if (sha !== undefined && !this.#apps.has(sha)) {
@@ -193,6 +219,11 @@ function expectNothingSecret(run: Run): void {
   for (const marker of MARKERS) expect(run.all).not.toContain(marker);
   expect(run.all).not.toMatch(/https?:\/\//);
 }
+
+/** その呼び出しが置いた原本の SHA-256（R2 へ PUT したキーから読む。読みの GET は数えない）。 */
+const publishedSha = (calls: readonly Call[]): string =>
+  /\/objects\/specs\/([0-9a-f]{64})\/normalized\.json/
+    .exec(calls.filter((call) => call.method === "PUT").map((call) => call.url).join("\n"))?.[1] ?? "";
 
 describe("引数と資格情報の誤りは、API を呼ばずに非 0 で終わる", () => {
   it("--help は使い方を出して exit 0。API を呼ばない", async () => {
@@ -291,6 +322,132 @@ describe("成功：2 個のオブジェクトを決定的なキーへ置き、D1
     expect(second.code, second.all).toBe(EXIT_OK);
     expect(second.out.at(-1)).toBe(first.out.at(-1));
     expectNothingSecret(second);
+  });
+});
+
+// ── はっきり差し替える（--replace・#175）────────────────────────────────────
+//
+//   1. 見本の原本 SHA-256 が変わっても、--replace なら置ける。**前後の SHA-256 を出力に残す**
+//   2. 差し替えてよい宣言でなければ replacement_conflict で断り、**R2 にも D1 にも書かない**
+//   3. --replace が無いときは、いまどおり instance_conflict で断る（既定の挙動を変えない）
+//   4. 同じ見本を 2 回続けて置いても落ちない（2 回目は差し替えではない）
+//
+// どの場合も、ホスト名・オリジン・バケット名・Account ID は出ない（expectNothingSecret）。
+
+describe("はっきり差し替える（--replace・#175）", () => {
+  /** 見本の書き換えを模した宣言（`memo` を足す。データ層が広がるので差し替えてよい） */
+  const REWRITTEN = DECLARATION.replace("      participants: list\n", "      participants: list\n      memo: string\n");
+
+  it("2 回目（原本の SHA-256 が変わった見本）でも落ちず、前後の SHA-256 を出す。値は出さない", async () => {
+    const cloudflare = new FakeCloudflare();
+    const first = await publish(dev(), { cloudflare });
+    expect(first.code, first.all).toBe(EXIT_OK);
+    const previousSha = publishedSha(first.calls);
+
+    // 呼び出しは偽物に溜まるので、2 回目が打ったぶんだけを見る
+    const at = cloudflare.calls.length;
+    const second = await publish(dev(["--replace"]), { cloudflare, spec: REWRITTEN });
+    const calls = second.calls.slice(at);
+    expect(second.code, second.all).toBe(EXIT_OK);
+    const nextSha = publishedSha(calls);
+    expect(nextSha).not.toBe(previousSha);
+
+    // **差し替えの前後の SHA-256 が出力に残る**（受入条件）
+    expect(second.out).toContain(
+      `publish: OK  env=dev: 版 community.app-spec/v0.2-draft / 原本 SHA ${nextSha} / インスタンス e2e-expense-log`,
+    );
+    expect(second.out.at(-1)).toBe(
+      `publish: 差し替え  env=dev: 前の原本 SHA ${previousSha} → 後の原本 SHA ${nextSha}（インスタンス e2e-expense-log）`,
+    );
+    expectNothingSecret(second);
+
+    // 前の原本の正規化した JSON を R2 から読み、差し替えてよい宣言かを確かめる
+    expect(calls.some((call) => call.method === "GET" && call.url.includes(`/objects/specs/${previousSha}/normalized.json`))).toBe(true);
+
+    // 登録簿の行は、前の参照と一致する行だけを書き換える（値は束縛引数で渡す）
+    const updates = calls.filter((call) => call.method === "POST" && call.body.includes("UPDATE app_instances"));
+    expect(updates).toHaveLength(1);
+    const batch = (JSON.parse(updates[0]?.body ?? "null") as { batch: { sql: string; params: string[] }[] }).batch;
+    expect(batch[0]?.params).toEqual([nextSha, "e2e-expense-log", previousSha, nextSha]);
+    expect(batch[0]?.sql).not.toContain(nextSha);
+  });
+
+  it("--replace が無いときは、いまどおり instance_conflict で断る（既定の挙動を変えない）", async () => {
+    const cloudflare = new FakeCloudflare();
+    const first = await publish(dev(), { cloudflare });
+    expect(first.code, first.all).toBe(EXIT_OK);
+
+    const at = cloudflare.calls.length;
+    const second = await publish(dev(), { cloudflare, spec: REWRITTEN });
+    const calls = second.calls.slice(at);
+
+    expect(second.code).toBe(EXIT_NG);
+    expect(second.err.join("\n")).toContain("段 instance");
+    expect(second.err.join("\n")).toContain("instance_conflict");
+    // 差し替えていないので、前後の SHA-256 は出さず、行も書き換えない
+    expect(second.out.join("\n")).not.toContain("publish: 差し替え");
+    expect(calls.some((call) => call.body.includes("UPDATE app_instances"))).toBe(false);
+    expectNothingSecret(second);
+  });
+
+  it("差し替えてよい宣言でなければ（項目を消す）replacement_conflict で断り、何も書かない", async () => {
+    const cloudflare = new FakeCloudflare();
+    const first = await publish(dev(), { cloudflare, spec: REWRITTEN });
+    expect(first.code, first.all).toBe(EXIT_OK);
+
+    // 前の宣言にある `memo` を消す差し替え（保存済みのレコードの読み方を変える）
+    const at = cloudflare.calls.length;
+    const second = await publish(dev(["--replace"]), { cloudflare, spec: DECLARATION });
+    const calls = second.calls.slice(at);
+
+    expect(second.code).toBe(EXIT_NG);
+    expect(second.err.join("\n")).toContain("段 instance");
+    expect(second.err.join("\n")).toContain("replacement_conflict");
+    expect(second.out.join("\n")).not.toContain("publish: 差し替え");
+    // 断ると分かった時点で止める（R2 へも D1 へも書かない）
+    expect(calls.filter((call) => call.method === "PUT")).toEqual([]);
+    expect(calls.some((call) => call.body.includes("UPDATE app_instances"))).toBe(false);
+    expectNothingSecret(second);
+  });
+
+  it("前の原本の正規化した JSON が R2 に無ければ、断って exit 1（行は書き換えない）", async () => {
+    const cloudflare = new FakeCloudflare();
+    const first = await publish(dev(), { cloudflare });
+    expect(first.code, first.all).toBe(EXIT_OK);
+
+    cloudflare.objectMissingOnce = true;
+    const at = cloudflare.calls.length;
+    const second = await publish(dev(["--replace"]), { cloudflare, spec: REWRITTEN });
+    const calls = second.calls.slice(at);
+
+    expect(second.code).toBe(EXIT_NG);
+    expect(second.err.join("\n")).toContain("段 instance");
+    expect(second.err.join("\n")).toContain("replacement_conflict");
+    expect(calls.some((call) => call.body.includes("UPDATE app_instances"))).toBe(false);
+    expectNothingSecret(second);
+  });
+
+  it("--replace で同じ見本を 2 回続けて置いても落ちない（2 回目は差し替えではない）", async () => {
+    const cloudflare = new FakeCloudflare();
+    const first = await publish(dev(["--replace"]), { cloudflare });
+
+    const at = cloudflare.calls.length;
+    const second = await publish(dev(["--replace"]), { cloudflare });
+    const calls = second.calls.slice(at);
+
+    expect(first.code, first.all).toBe(EXIT_OK);
+    expect(second.code, second.all).toBe(EXIT_OK);
+    expect(second.out.at(-1)).toBe(first.out.at(-1));
+    expect(second.out.join("\n")).not.toContain("publish: 差し替え");
+    expect(calls.some((call) => call.body.includes("UPDATE app_instances"))).toBe(false);
+    expectNothingSecret(second);
+  });
+
+  it("--help は --replace を説明する", async () => {
+    const run = await publish(["--help"]);
+    expect(run.code).toBe(EXIT_OK);
+    expect(run.out.join("\n")).toContain("--replace");
+    expect(run.calls).toEqual([]);
   });
 });
 

@@ -17,7 +17,7 @@ import {
   type SqlStatement,
   type SqlValue,
 } from "./contract.js";
-import { getApp, getInstance, registerApp, registerInstance, resolveInstanceApp } from "./registry.js";
+import { getApp, getInstance, registerApp, registerInstance, replaceInstance, resolveInstanceApp } from "./registry.js";
 
 // ── Node 組み込みの最小の形（src は workerd 向けなので、型はここだけに書く）──────
 
@@ -197,6 +197,76 @@ describe("登録の読み書き（本物の SQLite）", () => {
     expect(await getInstance(executor, INSTANCE_1.instanceId)).toEqual(original);
   });
 
+  it("差し替え（#175）：前の参照と一致する行だけを書き換える。apps は増え、app_instances は 1 行のまま", async () => {
+    const { executor } = newRegistry();
+    const first = await registerApp(executor, APP_A);
+    const next = await registerApp(executor, APP_B);
+    const before = await registerInstance(executor, INSTANCE_1);
+
+    const replaced = await replaceInstance(executor, { instanceId: INSTANCE_1.instanceId, sourceSha256: SHA_B }, SHA_A);
+
+    // 行の中身が変わるのは指し先だけである（created_at は登録したときのまま）
+    expect(replaced).toEqual({ instanceId: INSTANCE_1.instanceId, sourceSha256: SHA_B, createdAt: before.createdAt });
+    expect(await getInstance(executor, INSTANCE_1.instanceId)).toEqual(replaced);
+    expect(await resolveInstanceApp(executor, INSTANCE_1.instanceId)).toEqual(next);
+    // 前のアプリの行は残る（巻き戻すときの材料）
+    expect(await getApp(executor, SHA_A)).toEqual(first);
+    expect(await countRows(executor, APPS_TABLE)).toBe(2);
+    expect(await countRows(executor, APP_INSTANCES_TABLE)).toBe(1);
+  });
+
+  it("差し替え（#175）：既に差し替え先を指していれば成功する（同じ入力の再実行・別の deploy が同じ結果にしたとき）", async () => {
+    const { executor } = newRegistry();
+    await registerApp(executor, APP_A);
+    await registerApp(executor, APP_B);
+    await registerInstance(executor, INSTANCE_1);
+    await replaceInstance(executor, { instanceId: INSTANCE_1.instanceId, sourceSha256: SHA_B }, SHA_A);
+
+    const again = await replaceInstance(executor, { instanceId: INSTANCE_1.instanceId, sourceSha256: SHA_B }, SHA_A);
+
+    expect(again.sourceSha256).toBe(SHA_B);
+    expect(await countRows(executor, APP_INSTANCES_TABLE)).toBe(1);
+  });
+
+  it("差し替え（#175）：期待した前の参照と違えば instance_conflict になり、行は変えない（同時に publish したとき）", async () => {
+    const { executor } = newRegistry();
+    await registerApp(executor, APP_A);
+    await registerApp(executor, APP_B);
+    const original = await registerInstance(executor, INSTANCE_1);
+
+    // 別の deploy が先に差し替えた形（期待する前の参照が、いまの行と違う）
+    await expect(
+      replaceInstance(executor, { instanceId: INSTANCE_1.instanceId, sourceSha256: SHA_B }, "c".repeat(64)),
+    ).rejects.toMatchObject({ name: "RegistryError", code: "instance_conflict" });
+
+    expect(await getInstance(executor, INSTANCE_1.instanceId)).toEqual(original);
+    expect(await countRows(executor, APP_INSTANCES_TABLE)).toBe(1);
+  });
+
+  it("差し替え（#175）：差し替え先のアプリが未登録なら app_not_found になり、行は変えない", async () => {
+    const { executor } = newRegistry();
+    await registerApp(executor, APP_A);
+    const original = await registerInstance(executor, INSTANCE_1);
+
+    await expect(
+      replaceInstance(executor, { instanceId: INSTANCE_1.instanceId, sourceSha256: SHA_B }, SHA_A),
+    ).rejects.toMatchObject({ name: "RegistryError", code: "app_not_found" });
+
+    expect(await getInstance(executor, INSTANCE_1.instanceId)).toEqual(original);
+    expect(await countRows(executor, APP_INSTANCES_TABLE)).toBe(1);
+  });
+
+  it("差し替え（#175）：差し替えるインスタンスが無ければ instance_conflict になり、行を作らない", async () => {
+    const { executor } = newRegistry();
+    await registerApp(executor, APP_B);
+
+    await expect(
+      replaceInstance(executor, { instanceId: INSTANCE_1.instanceId, sourceSha256: SHA_B }, SHA_A),
+    ).rejects.toMatchObject({ name: "RegistryError", code: "instance_conflict" });
+
+    expect(await countRows(executor, APP_INSTANCES_TABLE)).toBe(0);
+  });
+
   it("値は SQL へ埋め込まず、束縛引数として渡す（引用符を含む ID でも表は壊れない）", async () => {
     const { executor } = newRegistry();
     await registerApp(executor, APP_A);
@@ -231,5 +301,6 @@ describe("登録の読み書き（本物の SQLite）", () => {
     await expect(getInstance(failing, INSTANCE_1.instanceId)).rejects.toBe(failure);
     await expect(registerApp(failing, APP_A)).rejects.toBe(failure);
     await expect(registerInstance(failing, INSTANCE_1)).rejects.toBe(failure);
+    await expect(replaceInstance(failing, INSTANCE_1, SHA_A)).rejects.toBe(failure);
   });
 });

@@ -164,13 +164,20 @@ jobs:
       # 資格情報はこのステップの env にだけ渡す（install や build のステップに届けない）。
       # 窓口の手動 publish には頼らない。見本の原本は packages/appspec-schema/samples/ にある
       # （warikan と task-board の 2 つ。#159 で task-board を足した）。
+      # **--replace を付ける（#175）。** 語彙を足す Issue はその語彙を使う見本を同じ Issue で直すので
+      # （docs/parallel-development.md §7.2）、原本の SHA-256 が変わる。既定の publish は
+      # 「既存インスタンスの宣言を暗黙に差し替えない」（instance_conflict）ので、2 回目で落ちる。
+      # --replace は「はっきり差し替える」。差し替えてよい宣言かは publish が前の原本と比べて決める
+      # （データ層が広がる差し替えだけを通す。packages/appspec-schema/docs/semantics.md「宣言の差し替え」）。
+      # 差し替えても、保存済みのレコード（Durable Object）には触れない。e2e 用インスタンスは固定 ID のままで、
+      # **デモ用のインスタンス（m11-demo-…・m12-demo-…）は指さない**。
       - name: ⑤ e2e の見本を置く（publish）
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          pnpm exec tsx infra/scripts/publish.ts --env staging --instance m12-e2e-warikan --spec packages/appspec-schema/samples/warikan/app.spec.yaml
-          pnpm exec tsx infra/scripts/publish.ts --env staging --instance m12-e2e-task-board --spec packages/appspec-schema/samples/task-board/app.spec.yaml
+          pnpm exec tsx infra/scripts/publish.ts --env staging --instance m12-e2e-warikan --spec packages/appspec-schema/samples/warikan/app.spec.yaml --replace
+          pnpm exec tsx infra/scripts/publish.ts --env staging --instance m12-e2e-task-board --spec packages/appspec-schema/samples/task-board/app.spec.yaml --replace
 
       # ── ⑥ e2e（staging の見本の SHA-256 と、時計に依存しない採点の値）─────────────────────
       # 宛先は staging 環境の Secret SMOKE_BASE_URL から**環境変数で**渡す（--base-url を使わない。
