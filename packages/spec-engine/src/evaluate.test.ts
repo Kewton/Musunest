@@ -927,9 +927,10 @@ const activityRow = (
   id: string,
   attendees: readonly string[],
   cost: number,
+  date = "2026-09-10",
 ): { readonly id: string; readonly data: Readonly<Record<string, unknown>> } => ({
   id,
-  data: { kind: "practice", attendees, cost },
+  data: { kind: "practice", attendees, cost, date },
 });
 
 const ACTIVITIES = [activityRow("a1", ["m1", "m2", "m3"], 3000), activityRow("a2", ["m1"], 7000)];
@@ -967,6 +968,43 @@ describe("アプリ全体の集計（scope: app）（M1.4）", () => {
     expect(values["activityCount"]).toBe(3);
     expect(values["averageAttendees"]).toBe(2);
     expect(values["averageCost"]).toBe(5000);
+  });
+
+  it("期間の条件（within: this_month）で、今月の行だけを集計する（M1.4。Issue #178）", () => {
+    // 8 月・10 月の活動を混ぜても、アプリ全体の値は 9 月（時計の今月）の 2 件だけを見る
+    const mixed = [
+      ...ACTIVITIES,
+      activityRow("august", ["m1"], 9999, "2026-08-31"),
+      activityRow("october", ["m1"], 9999, "2026-10-01"),
+    ];
+    const values = evaluateScope({
+      app: DASHBOARD,
+      clock: scoringClock,
+      sources: { activity: mixed, member: [] },
+    });
+    expect(values).toEqual({
+      activityCount: 2,
+      attendeeTotal: 4,
+      averageAttendees: 2,
+      averageCost: 5000,
+    });
+  });
+
+  it("「今月」の境目は日本時間である（UTC の日付では数えない。受入条件）", () => {
+    // 時計を日本時間の 2026-10-01 00:00（UTC の 2026-09-30 15:00）に固定する
+    const firstOfMonth = fixedClock("2026-09-30T15:00:00Z");
+    const activities = [
+      activityRow("september", ["m1"], 1000, "2026-09-30"),
+      activityRow("october", ["m1"], 2000, "2026-10-01"),
+    ];
+    const values = evaluateScope({
+      app: DASHBOARD,
+      clock: firstOfMonth,
+      sources: { activity: activities, member: [] },
+    });
+    // 日本時間では 10 月に入っているので、9 月の活動は数えない（半開区間である）
+    expect(values["activityCount"]).toBe(1);
+    expect(values["averageCost"]).toBe(2000);
   });
 
   it("**対象が 0 件なら、count は 0、sum は 0、avg は null** である（決めたとおり。0 に読み替えない）", () => {

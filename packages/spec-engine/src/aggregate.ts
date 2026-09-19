@@ -7,6 +7,7 @@
 // **同じインスタンスのレコードしか見ない。** 別インスタンスのレコードは、渡された `sources` に現れない。
 
 import { isAppComputed, type AggregateWhere, type NormalizedAppSpec } from "@musunest/appspec-schema";
+import { periodRange, type Clock } from "./clock.js";
 
 /** 集計の元になる 1 件。`id` は `this`（出力先のレコードの ID）と比べる値である */
 export interface SourceRecord {
@@ -21,26 +22,44 @@ export interface SourceRecord {
  */
 export type SourceRecords = Readonly<Record<string, readonly SourceRecord[]>>;
 
-/** `where` が 1 つでも条件を持つか（`this` が要るかどうか） */
-export const hasConditions = (where: AggregateWhere): boolean => Object.keys(where).length > 0;
+/**
+ * `where` に `this`（出力先のレコードの ID）と比べる条件があるか（`equals`・`contains`）。
+ * **アプリ全体の集計（`scope: app`）は出力先のレコードを持たない**ので、これが真になる宣言は
+ * 静的チェックが `LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH` で断る（評価側も、念のため `null` にする）。
+ * **期間の条件（`within`）は `this` を要らない**——比べる相手が期間の名前だからである（M1.4）。
+ */
+export const needsThis = (where: AggregateWhere): boolean =>
+  Object.values(where).some(
+    (condition) => condition.op === "equals" || condition.op === "contains",
+  );
 
 /**
- * 1 件のレコードが `where` に合うか。`thisId` は出力先のレコードの ID である。
+ * 1 件のレコードが `where` に合うか。`thisId` は出力先のレコードの ID、`clock` は期間の条件
+ * （`within`）が「今月」を決めるのに使う時計である。
  *   `equals`   … 参照（`ref`）の一致（値が `thisId` と等しい）
  *   `contains` … 参照の並び（`list of`）の包含（値の並びに `thisId` がある）
+ *   `within`   … 期間の条件（M1.4）。値（`date`）が、その期間の半開区間にある
  * `where` が空なら、すべての行が合う。
+ *
+ * **時計は引数で受け取る**（Q17。評価の中で現在時刻を読まない）。`within` の対象が `YYYY-MM-DD` の
+ * 形でない行は**合わないものとする**（0 件に読み替えない。形は静的チェックと data-api が見ている）。
  */
 export function matchesWhere(
   where: AggregateWhere,
   data: Readonly<Record<string, unknown>>,
   thisId: string,
+  clock: Clock,
 ): boolean {
-  for (const [field, op] of Object.entries(where)) {
+  for (const [field, condition] of Object.entries(where)) {
     const value = data[field];
-    if (op === "equals") {
+    if (condition.op === "equals") {
       if (value !== thisId) return false;
-    } else if (!Array.isArray(value) || !value.includes(thisId)) {
-      return false;
+    } else if (condition.op === "contains") {
+      if (!Array.isArray(value) || !value.includes(thisId)) return false;
+    } else {
+      const range = periodRange(condition.period, clock);
+      if (range === null) return false;
+      if (typeof value !== "string" || value < range.from || value >= range.to) return false;
     }
   }
   return true;

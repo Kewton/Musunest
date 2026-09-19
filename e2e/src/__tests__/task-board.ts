@@ -69,7 +69,7 @@ export const FAKE_SPEC: AppSpec = {
     {
       name: "openTasks",
       entity: "member",
-      aggregate: { kind: "count", entity: "task", name: null, where: { assignee: "equals" } },
+      aggregate: { kind: "count", entity: "task", name: null, where: { assignee: { op: "equals" } } },
       type: "number",
     },
   ],

@@ -8,7 +8,7 @@
 // fetch と base URL は差し込める。host の画面は同じ origin の /api/* を叩くので `baseUrl: ""` でよい
 // （相対 URL のまま fetch する）。e2e のように別の origin を指す場合は絶対 URL を渡す。
 
-import { API_ERROR_CODES, ACTION_KINDS, COMPUTED_TYPES, FIELD_TYPES, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
+import { API_ERROR_CODES, ACTION_KINDS, COMPUTED_TYPES, FIELD_TYPES, PERIODS, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
 import type {
   ApiDeletedBody,
   ApiErrorCode,
@@ -370,8 +370,22 @@ function isExpression(value: unknown): boolean {
 }
 
 /**
+ * 集計の `where` の 1 つの条件（M1.2・M1.4）。**正規化のあとは、どれも `op` を持つオブジェクト**である
+ * （窓口の決定 2026-09-20）。`within`（期間の条件）は、この版の期間の名前（`PERIODS`）を持つ。
+ */
+function isWhereCondition(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value.op === "equals" || value.op === "contains") return true;
+  return (
+    value.op === "within" &&
+    typeof value.period === "string" &&
+    (PERIODS as readonly string[]).includes(value.period)
+  );
+}
+
+/**
  * 集計（`aggregate`）の形（M1.2・M1.4）。`sum`・`avg` は対象の名前を持ち、`count` は持たない。
- * どちらも `where`（項目 → `equals` / `contains`）を持つ。
+ * どちらも `where`（項目 → `op` を持つオブジェクト）を持つ。
  */
 function isAggregate(value: unknown): boolean {
   if (!isRecord(value)) return false;
@@ -380,7 +394,7 @@ function isAggregate(value: unknown): boolean {
   if (typeof value.entity !== "string") return false;
   if (kind === "count" ? value.name !== null : typeof value.name !== "string") return false;
   if (!isRecord(value.where)) return false;
-  return Object.values(value.where).every((op) => op === "equals" || op === "contains");
+  return Object.values(value.where).every(isWhereCondition);
 }
 
 /**

@@ -186,6 +186,19 @@
   runtime: [spec-engine, data-api]
   factory: 未対応
 
+# 期間の条件（`within`）。**集計の対象を期間で絞る**（M1.4。Issue #178）。**指せるのは `date` の項目だけ**で、
+# 比べる相手は期間の名前（いまは `this_month` だけ）である。**「今月」は日本時間で決め、時計は評価に引数で
+# 渡す**（式の評価の中で現在時刻を読まない。Q17）。見本は dashboard（`date: {within: this_month}`）。
+- name: within
+  layer: logic
+  since: v0.2-draft（M1.4）
+  samples: [dashboard]
+  negatives: [within-field-not-date, within-unknown-period]
+  check_rules: [LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH, LOGIC_AGGREGATE_WHERE_PERIOD_NOT_ALLOWED]
+  semantics: docs/semantics.md#within
+  runtime: [spec-engine, data-api]
+  factory: 未対応
+
 - name: settle
   layer: logic
   since: v0.2-draft（M1.2）

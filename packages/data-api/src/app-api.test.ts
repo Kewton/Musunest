@@ -2618,7 +2618,12 @@ describe("dashboard のアプリ全体の集計（scope）と平均（avg）（M
     expect(result.body.spec.computed).toContainEqual({
       name: "averageCost",
       scope: "app",
-      aggregate: { kind: "avg", entity: "activity", name: "cost", where: {} },
+      aggregate: {
+        kind: "avg",
+        entity: "activity",
+        name: "cost",
+        where: { date: { op: "within", period: "this_month" } },
+      },
       type: "number",
     });
   });
@@ -2636,6 +2641,28 @@ describe("dashboard のアプリ全体の集計（scope）と平均（avg）（M
     });
     // **行の計算には出ない**（アプリ全体の値は行の `computed` に入らない）
     expect(Object.keys(view.rows[0]?.computed ?? {})).toEqual(["attendeeCount"]);
+  });
+
+  it("within: this_month が効く——今月の行だけを集計する（M1.4。Issue #178）", async () => {
+    const run = await runDashboard();
+    // 今月（時計は 2026-09-15 なので日本時間の 2026-09）でない活動を足す
+    const outside = await createFromAction(run.deps, DASHBOARD_INSTANCE, "addActivity", {
+      kind: "practice",
+      date: "2026-08-31",
+      attendees: [run.ids["A"] ?? ""],
+      cost: 9999,
+    });
+    expect(outside.ok).toBe(true);
+    const view = await dashboardView(run.deps, "activities");
+    // **`within` は行を消さない**——集計の対象を絞るだけである（一覧には 4 件出る）
+    expect(view.rows).toHaveLength(4);
+    // アプリ全体の値は、今月（9 月）の 3 件だけを見る
+    expect(view.scope).toEqual({
+      activityCount: 3,
+      attendeeTotal: 6,
+      averageAttendees: 2,
+      averageCost: 10000 / 3,
+    });
   });
 
   it("**対象が 0 件なら、avg は null** である（count は 0。0 に読み替えない）", async () => {
@@ -2664,6 +2691,7 @@ describe("dashboard のアプリ全体の集計（scope）と平均（avg）（M
     for (let i = 0; i < 200; i += 1) {
       const created = await createFromAction(deps, DASHBOARD_INSTANCE, "addActivity", {
         kind: "practice",
+        date: "2026-09-10",
         attendees: [memberId],
         cost: 100,
       });

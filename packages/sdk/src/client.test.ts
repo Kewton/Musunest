@@ -319,6 +319,45 @@ describe("アプリ全体の集計（scope）と平均（avg）", () => {
     expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: withScope });
   });
 
+  it("where の期間の条件（within）を受け取り、知らない期間や古い形は INVALID_RESPONSE（M1.4。Issue #178）", async () => {
+    const computedWith = (where: unknown): unknown => ({
+      ...SPEC,
+      spec: {
+        ...SPEC.spec,
+        computed: [
+          ...SPEC.spec.computed,
+          {
+            name: "thisMonthAmount",
+            scope: "app",
+            aggregate: { kind: "avg", entity: "expense", name: "amount", where },
+            type: "number",
+          },
+        ],
+      },
+    });
+
+    // 期間の条件は `op` と `period` を持つオブジェクトである（窓口の決定 2026-09-20）
+    const accepted = computedWith({ paidOn: { op: "within", period: "this_month" } });
+    const okStub = recordingFetch(() => json(200, accepted));
+    expect(await clientWith(okStub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: accepted });
+
+    // 知らない期間の名前は成功にしない
+    const unknownPeriod = recordingFetch(() =>
+      json(200, computedWith({ paidOn: { op: "within", period: "last_week" } })),
+    );
+    expect(await clientWith(unknownPeriod.fetch).getSpec("inst-1")).toMatchObject({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE },
+    });
+
+    // 条件は**どれも `op` を持つオブジェクト**である（文字列の `equals` は古い形である）
+    const oldShape = recordingFetch(() => json(200, computedWith({ paidOn: "equals" })));
+    expect(await clientWith(oldShape.fetch).getSpec("inst-1")).toMatchObject({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE },
+    });
+  });
+
   it("scope: app に entity を書いた宣言は INVALID_RESPONSE（成功にしない）", async () => {
     const broken = {
       ...SPEC,

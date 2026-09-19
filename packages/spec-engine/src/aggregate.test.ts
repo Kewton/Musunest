@@ -367,13 +367,53 @@ describe("集計の道具", () => {
 
   it("matchesWhere は、参照の一致と参照の並びの包含を見る", () => {
     const data = { payer: "m1", participants: ["m1", "m2"] };
-    expect(matchesWhere({}, data, "m1")).toBe(true);
-    expect(matchesWhere({ payer: "equals" }, data, "m1")).toBe(true);
-    expect(matchesWhere({ payer: "equals" }, data, "m2")).toBe(false);
-    expect(matchesWhere({ participants: "contains" }, data, "m2")).toBe(true);
-    expect(matchesWhere({ participants: "contains" }, data, "m3")).toBe(false);
+    const clock = fixedClock("2026-09-15T12:00:00+09:00");
+    expect(matchesWhere({}, data, "m1", clock)).toBe(true);
+    expect(matchesWhere({ payer: { op: "equals" } }, data, "m1", clock)).toBe(true);
+    expect(matchesWhere({ payer: { op: "equals" } }, data, "m2", clock)).toBe(false);
+    expect(matchesWhere({ participants: { op: "contains" } }, data, "m2", clock)).toBe(true);
+    expect(matchesWhere({ participants: { op: "contains" } }, data, "m3", clock)).toBe(false);
     // 参照の一致に並びを渡しても、合わない（型は静的チェックが見る）
-    expect(matchesWhere({ participants: "equals" }, data, "m1")).toBe(false);
+    expect(matchesWhere({ participants: { op: "equals" } }, data, "m1", clock)).toBe(false);
+  });
+
+  it("matchesWhere は、期間の条件（within）を、差し込んだ時計の日本時間で見る（M1.4。Issue #178）", () => {
+    const where = { paidOn: { op: "within", period: "this_month" } } as const;
+    const clock = fixedClock("2026-09-15T12:00:00+09:00");
+    // 今月（日本時間の 2026-09）は合う
+    expect(matchesWhere(where, { paidOn: "2026-09-01" }, "", clock)).toBe(true);
+    expect(matchesWhere(where, { paidOn: "2026-09-30" }, "", clock)).toBe(true);
+    // 先月・翌月は合わない（半開区間である）
+    expect(matchesWhere(where, { paidOn: "2026-08-31" }, "", clock)).toBe(false);
+    expect(matchesWhere(where, { paidOn: "2026-10-01" }, "", clock)).toBe(false);
+    // 形に合わない値・欠けている値は合わない（0 件に読み替えない）
+    expect(matchesWhere(where, { paidOn: "" }, "", clock)).toBe(false);
+    expect(matchesWhere(where, { paidOn: "2026/09/01" }, "", clock)).toBe(false);
+    expect(matchesWhere(where, {}, "", clock)).toBe(false);
+    // **時計を替えれば「今月」も替わる**（値は時計に依る。Q17）
+    expect(matchesWhere(where, { paidOn: "2026-10-01" }, "", fixedClock("2026-10-01T00:00:00+09:00"))).toBe(
+      true,
+    );
+  });
+
+  it("月末・月初の境目が日本時間で正しい（月初の 0 時ちょうど・前月の末日の 23:59。受入条件）", () => {
+    const where = { paidOn: { op: "within", period: "this_month" } } as const;
+    // 日本時間の 2026-10-01 00:00 ちょうど → 今月は 10 月。9 月の末日は合わない
+    const firstOfMonth = fixedClock("2026-10-01T00:00:00+09:00");
+    expect(matchesWhere(where, { paidOn: "2026-10-01" }, "", firstOfMonth)).toBe(true);
+    expect(matchesWhere(where, { paidOn: "2026-09-30" }, "", firstOfMonth)).toBe(false);
+    // 日本時間の 2026-09-30 23:59:59 → まだ 9 月。10 月 1 日は合わない
+    const lastMoment = fixedClock("2026-09-30T23:59:59+09:00");
+    expect(matchesWhere(where, { paidOn: "2026-09-30" }, "", lastMoment)).toBe(true);
+    expect(matchesWhere(where, { paidOn: "2026-10-01" }, "", lastMoment)).toBe(false);
+    // UTC の 2026-09-30 15:00 は日本時間の 2026-10-01 00:00 である（**UTC の日付では数えない**）
+    expect(matchesWhere(where, { paidOn: "2026-10-01" }, "", fixedClock("2026-09-30T15:00:00Z"))).toBe(true);
+    expect(matchesWhere(where, { paidOn: "2026-09-30" }, "", fixedClock("2026-09-30T15:00:00Z"))).toBe(false);
+  });
+
+  it("集計の照合（aggregate.ts）に Date.now() の直接の呼び出しが無い（時計は引数で受け取る。Q17）", () => {
+    // 現在時刻を読むのは、時計の境界（clock.ts。`systemClock` の 1 か所）だけである
+    expect(read(new URL("./aggregate.ts", import.meta.url)).includes("Date.now")).toBe(false);
   });
 
   it("aggregateSourceEntities は、集計元を推移的に集める（自分は含めない）", () => {

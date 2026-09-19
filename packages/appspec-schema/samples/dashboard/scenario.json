@@ -1,5 +1,5 @@
 {
-  "$comment": "見本「サークルの活動」の採点のシナリオ。時計を日本時間で固定し、メンバー 3 人と活動 3 件を入れ、一覧の行と計算値を確かめる。**アプリ全体の集計（scope: app）の値は行ではない**ので、この views には現れない——unit テスト（spec-engine・data-api・host）が確かめる。",
+  "$comment": "見本「サークルの活動」の採点のシナリオ。時計を日本時間の 2026-09-15 に固定し、メンバー 3 人と、**今月（2026 年 9 月）の**活動 3 件を入れる。**アプリ全体の集計（scope: app）は `date: { within: this_month }` で今月に絞る**（Issue #178）ので、活動の日付はすべて 9 月にしてある——「今月」の境目は日本時間で決まる。アプリ全体の値は行ではないので、この views には現れない——unit テスト（spec-engine・data-api・host）が確かめる。",
   "sample": "dashboard",
   "clock": "2026-09-15T12:00:00+09:00",
   "steps": [
@@ -22,29 +22,29 @@
       "expect": { "accepted": true, "bind": "C" }
     },
     {
-      "name": "練習を記録する（A・B・C が参加。3000 円）",
+      "name": "練習を記録する（2026-09-10。A・B・C が参加。3000 円）",
       "action": "addActivity",
-      "input": { "kind": "practice", "attendees": ["$A", "$B", "$C"], "cost": 3000 },
+      "input": { "kind": "practice", "date": "2026-09-10", "attendees": ["$A", "$B", "$C"], "cost": 3000 },
       "expect": { "accepted": true }
     },
     {
-      "name": "飲み会を記録する（A・B が参加。5000 円）",
+      "name": "飲み会を記録する（2026-09-12。A・B が参加。5000 円）",
       "action": "addActivity",
-      "input": { "kind": "party", "attendees": ["$A", "$B"], "cost": 5000 },
+      "input": { "kind": "party", "date": "2026-09-12", "attendees": ["$A", "$B"], "cost": 5000 },
       "expect": { "accepted": true }
     },
     {
-      "name": "試合を記録する（A が参加。2000 円）",
+      "name": "試合を記録する（2026-09-14。A が参加。2000 円）",
       "action": "addActivity",
-      "input": { "kind": "match", "attendees": ["$A"], "cost": 2000 },
+      "input": { "kind": "match", "date": "2026-09-14", "attendees": ["$A"], "cost": 2000 },
       "expect": { "accepted": true }
     }
   ],
   "views": {
     "activities": [
-      { "kind": "practice", "attendees": ["$A", "$B", "$C"], "cost": 3000, "attendeeCount": 3 },
-      { "kind": "party", "attendees": ["$A", "$B"], "cost": 5000, "attendeeCount": 2 },
-      { "kind": "match", "attendees": ["$A"], "cost": 2000, "attendeeCount": 1 }
+      { "kind": "practice", "date": "2026-09-10", "attendees": ["$A", "$B", "$C"], "cost": 3000, "attendeeCount": 3 },
+      { "kind": "party", "date": "2026-09-12", "attendees": ["$A", "$B"], "cost": 5000, "attendeeCount": 2 },
+      { "kind": "match", "date": "2026-09-14", "attendees": ["$A"], "cost": 2000, "attendeeCount": 1 }
     ]
   }
 }

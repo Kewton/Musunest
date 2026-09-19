@@ -1,0 +1,44 @@
+# 負例：期間の条件（`within`）に、知らない期間の名前 `last_week` を書いている。
+# この版の期間は `this_month` だけである（語彙は閉じている。M1.4。Issue #178）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: member
+    fields:
+      name: string
+  - name: expense
+    fields:
+      paidOn: date
+      amount: number
+      payer:
+        type: ref
+        to: member
+
+views:
+  - name: memberList
+    entity: member
+
+actions:
+  - name: addMember
+    entity: member
+
+validations: []
+
+computed:
+  - name: lastWeekTotal
+    scope: app
+    aggregate:
+      sum: expense.amount
+      where:
+        paidOn:
+          within: last_week
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

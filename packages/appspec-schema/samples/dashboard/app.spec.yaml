@@ -1,15 +1,17 @@
 # 見本「サークルの活動」（M1.4。community.app-spec/v0.2-draft）
 #
-# 練習や試合を記録すると、**アプリ全体で 1 つ**の値（活動の回数・参加ののべ人数・1 回あたりの参加・費用の平均）
-# が出る。M1.4 の各 Issue が、自分の語彙をこの見本へ足していく（docs/parallel-development.md §7.2）。
-# **この Issue（#177）が置いたのは骨格である**——`scope: app`（アプリ全体の集計）と `avg`（平均）。
+# 練習や試合を記録すると、**アプリ全体で 1 つ**の値（**今月の**活動の回数・参加ののべ人数・1 回あたりの参加・
+# 費用の平均）が出る。M1.4 の各 Issue が、自分の語彙をこの見本へ足していく（docs/parallel-development.md §7.2）。
+# **#177 が骨格（`scope: app` と `avg`）を置き、#178 が期間の条件（`within: this_month`）を足した。**
 #
 # 元は workspace/mvp/m1/02-l2-spec-examples.md §4.3（叩き台）。**いまの語彙で書けないものは落としてある**：
-#   - 期間の条件（`where: { date: { within: this_month } }`。「今月」は #178）
 #   - 見出しごとの集計（`groupBy` と `groups` 型。月ごとの回数・種類の内訳は #179）
 #   - 画面の種類 `dashboard` と部品（`number`・`bar`・`pie`・`ranking` は #180〜#182）
 #   - 表示名（`label`。日本語の見出しは #176）
-# `date`（日付）も §4.3 では使うが、この骨格では使わない（`within` が入る #178 で足す）。
+#
+# **`within: this_month` は「今月」を日本時間で決める**（Issue #178）。時計は**評価に引数で渡す**——
+# 式の評価の中で現在時刻を直接読まない（Q17。「today」と同じ扱いである）。境目は
+# 「日本時間の月初 00:00:00 以上、翌月初 00:00:00 未満」で、意味は ../../docs/semantics.md「within」にある。
 #
 # **§4.3 の `averageAttendees` は式（`attendeesThisMonth / max(1, activitiesThisMonth)`）で書いてあるが、
 # この見本では `avg`（集計）を使う。** 対象が 0 件のときの平均は `null` と決まっており（窓口の決定
@@ -19,7 +21,7 @@
 # 値が求められなければ `null` で、画面は「—」で見せる（0 と区別する）。
 #
 # 採点のシナリオは同じディレクトリの scenario.json、
-# 意味は ../../docs/semantics.md（「scope」「aggregate」「sum」「count」「avg」「computed」）にある。
+# 意味は ../../docs/semantics.md（「scope」「aggregate」「within」「sum」「count」「avg」「computed」）にある。
 
 entities:
   - name: member
@@ -34,6 +36,7 @@ entities:
           practice: 練習
           match: 試合
           party: 飲み会
+      date: date            # 活動した日（M1.4。`within: this_month` で「今月」に絞る）
       attendees:            # 参加した人（member のレコードの並びを ID で指す）
         type: list
         of: member
@@ -46,29 +49,43 @@ computed:
     expression: len(attendees)
     type: number
 
-  # アプリ全体（どのレコードにも属さない集計。M1.4 の `scope: app`）。回数・のべ人数・平均を出す
+  # アプリ全体（どのレコードにも属さない集計。M1.4 の `scope: app`）。**今月の**回数・のべ人数・平均を出す。
+  # `where` の `date: { within: this_month }` は、日本時間の今月で絞る（Issue #178）。**比べる相手が
+  # 期間の名前なので、出力先のレコード（`this`）を持たないアプリ全体の集計でも書ける**
   - name: activityCount
     scope: app
     aggregate:
       count: activity
+      where:
+        date:
+          within: this_month
     type: number
-  # のべ人数。**対象が計算でもよい**——参加した人の数を足す（`scope: app` の `sum`）
+  # 今月ののべ人数。**対象が計算でもよい**——参加した人の数を足す（`scope: app` の `sum`）
   - name: attendeeTotal
     scope: app
     aggregate:
       sum: activity.attendeeCount
+      where:
+        date:
+          within: this_month
     type: number
-  # 1 回あたりの参加（`avg`）。**値の無い行は数えない**。活動が 0 件なら `null` である（0 に読み替えない）
+  # 今月の 1 回あたりの参加（`avg`）。**値の無い行は数えない**。今月の活動が 0 件なら `null` である
   - name: averageAttendees
     scope: app
     aggregate:
       avg: activity.attendeeCount
+      where:
+        date:
+          within: this_month
     type: number
-  # 費用の平均（`avg`）。同上
+  # 今月の費用の平均（`avg`）。同上
   - name: averageCost
     scope: app
     aggregate:
       avg: activity.cost
+      where:
+        date:
+          within: this_month
     type: number
 
 views:

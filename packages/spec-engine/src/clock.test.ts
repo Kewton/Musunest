@@ -12,6 +12,7 @@ import {
   fixedClock,
   isClockInstant,
   systemClock,
+  thisMonthRangeInTokyo,
   todayInTokyo,
 } from "./clock.js";
 
@@ -121,5 +122,75 @@ describe("日本時間の「今日」", () => {
 
   it("返すのは YYYY-MM-DD の形である（保存する形と同じ）", () => {
     expect(todayInTokyo(fixedClock(SCENARIO_CLOCK))).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+});
+
+// ── 日本時間の「今月」（within: this_month。#178。Q17） ────────────────
+//
+// 期間の条件（`within`）の境目は「**日本時間の月初 00:00:00 以上、翌月初 00:00:00 未満**」である。
+// **時計は引数で受け取る**——式の評価の中で現在時刻を直接読まない（Q17）。
+
+describe("日本時間の「今月」の範囲（within: this_month）", () => {
+  it("採点のシナリオの時計（日本時間の 2026-09-15）では、2026-09 の半開区間になる", () => {
+    expect(thisMonthRangeInTokyo(fixedClock(SCENARIO_CLOCK))).toEqual({
+      from: "2026-09-01",
+      to: "2026-10-01",
+    });
+  });
+
+  it("月初の 0 時ちょうどは、その月に入る（受入条件）", () => {
+    expect(thisMonthRangeInTokyo(fixedClock("2026-10-01T00:00:00+09:00"))).toEqual({
+      from: "2026-10-01",
+      to: "2026-11-01",
+    });
+  });
+
+  it("前月の末日の 23:59 は、まだ前の月である（受入条件）", () => {
+    expect(thisMonthRangeInTokyo(fixedClock("2026-09-30T23:59:59+09:00"))).toEqual({
+      from: "2026-09-01",
+      to: "2026-10-01",
+    });
+  });
+
+  it("UTC の日付が変わっても、日本時間の「今月」で決める", () => {
+    // UTC の 2026-09-30 15:00 は、日本時間の 2026-10-01 00:00 である
+    expect(thisMonthRangeInTokyo(fixedClock("2026-09-30T15:00:00Z"))).toEqual({
+      from: "2026-10-01",
+      to: "2026-11-01",
+    });
+    // 日本時間の 2026-09-30 23:59（UTC はまだ 14:59）は、まだ 9 月である
+    expect(thisMonthRangeInTokyo(fixedClock("2026-09-30T14:59:59Z"))).toEqual({
+      from: "2026-09-01",
+      to: "2026-10-01",
+    });
+  });
+
+  it("年をまたぐ境目でも、日本時間で数える", () => {
+    // 日本時間の 2026-12-31 → 2026-12 の区間。翌月初は 2027-01-01 である
+    expect(thisMonthRangeInTokyo(fixedClock("2026-12-31T12:00:00+09:00"))).toEqual({
+      from: "2026-12-01",
+      to: "2027-01-01",
+    });
+    // 日本時間の 2027-01-01 00:00（UTC の 2026-12-31 15:00）
+    expect(thisMonthRangeInTokyo(fixedClock("2026-12-31T15:00:00Z"))).toEqual({
+      from: "2027-01-01",
+      to: "2027-02-01",
+    });
+  });
+
+  it("月をまたぐ境目でも、翌月初は翌月の 1 日である", () => {
+    expect(thisMonthRangeInTokyo(fixedClock("2026-01-31T12:00:00+09:00"))).toEqual({
+      from: "2026-01-01",
+      to: "2026-02-01",
+    });
+    expect(thisMonthRangeInTokyo(fixedClock("2026-02-28T12:00:00+09:00"))).toEqual({
+      from: "2026-02-01",
+      to: "2026-03-01",
+    });
+  });
+
+  it("差し込んだ時計だけを読む（時計を替えれば「今月」も替わる）", () => {
+    expect(thisMonthRangeInTokyo(fixedClock("2026-09-16T12:00:00+09:00")).from).toBe("2026-09-01");
+    expect(thisMonthRangeInTokyo(fixedClock("2026-10-16T12:00:00+09:00")).from).toBe("2026-10-01");
   });
 });
