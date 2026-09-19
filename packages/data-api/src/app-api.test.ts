@@ -2213,3 +2213,192 @@ describe("一覧（list）と絞り込み（filters）を含む宣言の配信�
     expect(result.body.rows[0]?.fields["status"]).toBe("todo");
   });
 });
+
+// ── task-board の採点のシナリオ（M1.3。Issue #159） ─────────────────────────
+//
+// 見本 `samples/task-board/` の採点のシナリオをそのまま流す。**`overdue` は時計に依る値**なので、
+// シナリオの時計（日本時間の 2026-09-15）を差し込んで採点する（`Date.now()` に依らない）。
+// 件数・状態・担当・列の中身は時計に依らないので、同じ値になる。
+//
+// §3.2/§3.3 からの差分（いまの語彙で書ける形に落とした結果。見本のコメントと同じ）:
+//   - 式の論理（`and`）が無いので、`overdue` は `due < today()` である（「完了は除く」は書けない）
+//   - 集計の `where` に `not` が無いので、`openTasks` は**担当している数**である（状態で絞れない）
+
+const TASK_BOARD_INSTANCE = "inst-task-board";
+const TASK_BOARD = await normalizeSpec(fs.readFileSync(sampleSpecFile("task-board"), "utf8"));
+if (!TASK_BOARD.ok) throw new Error("task-board が静的チェックに通らない");
+const TASK_BOARD_JSON = TASK_BOARD.json;
+const TASK_BOARD_APP = TASK_BOARD.app;
+
+const TASK_BOARD_SCENARIO = readScoringScenario(
+  JSON.parse(fs.readFileSync(sampleScenarioFile("task-board"), "utf8")),
+);
+
+interface TaskBoardRun {
+  readonly deps: DataApiDeps;
+  readonly records: FakeRecordStore;
+  readonly ids: Readonly<Record<string, string>>;
+  readonly results: readonly Awaited<ReturnType<typeof createFromAction>>[];
+}
+
+/** シナリオの手順を先頭から流し、`bind` の名前を実際に登録して得た ID に結びつける */
+async function runTaskBoard(
+  clock: Clock = fixedClock(TASK_BOARD_SCENARIO.clock),
+): Promise<TaskBoardRun> {
+  const records = new FakeRecordStore();
+  const deps: DataApiDeps = {
+    registry: {
+      resolve: async () => ({
+        sourceSha256: TASK_BOARD_APP.sourceSha256,
+        schemaVersion: TASK_BOARD_APP.schemaVersion,
+        sourceKey: `specs/${TASK_BOARD_APP.sourceSha256}/app.spec.yaml`,
+        normalizedKey: `specs/${TASK_BOARD_APP.sourceSha256}/normalized.json`,
+        createdAt: "2026-09-19T00:00:00.000Z",
+      }),
+    },
+    specs: { read: async () => TASK_BOARD_JSON },
+    records,
+    clock,
+  };
+  const ids: Record<string, string> = {};
+  const results: Awaited<ReturnType<typeof createFromAction>>[] = [];
+  for (const step of TASK_BOARD_SCENARIO.steps) {
+    const input = resolveScenarioIds(step.input, ids) as Readonly<Record<string, unknown>>;
+    const result = await createFromAction(deps, TASK_BOARD_INSTANCE, step.action, input);
+    results.push(result);
+    if (result.ok && "accepted" in step.expect && step.expect.bind !== undefined) {
+      ids[step.expect.bind] = result.body.id;
+    }
+  }
+  return { deps, records, ids, results };
+}
+
+const boardRowsOf = async (run: TaskBoardRun, view: string): Promise<readonly ApiRow[]> => {
+  const result = await getView(run.deps, TASK_BOARD_INSTANCE, view);
+  if (!result.ok) throw new Error(`一覧 ${view} を読めなかった: ${result.failure.error}`);
+  return result.body.rows;
+};
+
+describe("task-board の採点のシナリオ（M1.3）", () => {
+  it("メンバー A・B・C と 3 つのタスクを作り、拒否した入力は保存しない", async () => {
+    const run = await runTaskBoard();
+    const accepted = run.results.filter((result) => result.ok).length;
+    expect(accepted).toBe(6); // メンバー 3 人 + タスク 3 件
+    expect(run.results.length - accepted).toBe(3); // 選択肢・日付・参照の誤り
+    expect(run.records.rows.filter((row) => row.entity === "member")).toHaveLength(3);
+    expect(run.records.rows.filter((row) => row.entity === "task")).toHaveLength(3);
+  });
+
+  it.each(TASK_BOARD_SCENARIO.steps.map((step, index) => [step.name, index] as const))(
+    "%s の期待どおりに受理・拒否する",
+    async (_name, index) => {
+      const step = TASK_BOARD_SCENARIO.steps[index];
+      if (step === undefined) throw new Error("手順が無い");
+      const run = await runTaskBoard();
+      const result = run.results[index];
+      if (result === undefined) throw new Error("結果が無い");
+      if ("accepted" in step.expect) {
+        expect(result.ok).toBe(true);
+        return;
+      }
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.failure.error).toBe("INPUT_REJECTED");
+      expect(namesOf(result.failure.fields)).toEqual(namesOf(step.expect.rejected.fields));
+      expect(result.failure.validations).toEqual(step.expect.rejected.validations);
+    },
+  );
+
+  it("最後の一覧（board・list・members）が、シナリオの期待値と一致する", async () => {
+    const run = await runTaskBoard();
+    for (const [view, expected] of Object.entries(TASK_BOARD_SCENARIO.views)) {
+      const rows = await boardRowsOf(run, view);
+      expect(rows.map((row) => ({ ...row.fields, ...row.computed })), view).toEqual(
+        expected.map((row) => resolveScenarioIds(row, run.ids)),
+      );
+    }
+  });
+
+  it("overdue は時計に依る（差し込んだ時計で決まる。Date.now() に依らない）", async () => {
+    // 時計を 2026-09-15 に固定すると、期限 9/10 の しおり作り だけが期限切れである
+    const today = await runTaskBoard(fixedClock(TASK_BOARD_SCENARIO.clock));
+    const board = await boardRowsOf(today, "board");
+    expect(board.map((row) => [row.fields["title"], row.computed["overdue"]])).toEqual([
+      ["宿の予約", false],
+      ["しおり作り", true],
+      ["レンタカー", false],
+    ]);
+
+    // 時計を 2026-09-30 に進めると、9/20 と 9/25 も期限切れになる（同じデータでも値が変わる）
+    const later = await runTaskBoard(fixedClock("2026-09-30T12:00:00+09:00"));
+    const after = await boardRowsOf(later, "board");
+    expect(after.map((row) => row.computed["overdue"])).toEqual([true, true, true]);
+  });
+
+  it("board の宣言（columns・highlight）と、真偽の計算は列に出ないことを保つ", async () => {
+    const run = await runTaskBoard();
+    const spec = await getSpec(run.deps, TASK_BOARD_INSTANCE);
+    if (!spec.ok) throw new Error("宣言を読めなかった");
+    expect(spec.body.spec.views.find((view) => view.name === "board")).toEqual({
+      name: "board",
+      entity: "task",
+      type: "board",
+      columns: "status",
+      highlight: "overdue",
+    });
+    const result = await getView(run.deps, TASK_BOARD_INSTANCE, "board");
+    if (!result.ok) throw new Error("一覧を読めなかった");
+    // 真偽の計算（overdue）は列の並びに出さない（行の computed にだけ載る）
+    expect(result.body.computed).toEqual([]);
+    expect(result.body.fields).toEqual(["title", "status", "assignee", "due", "memo"]);
+  });
+
+  it("finish（set と when）で完了にすると、状態と操作の可否が変わる", async () => {
+    const run = await runTaskBoard();
+    const before = await boardRowsOf(run, "board");
+    // 宣言の順（editTask → start → finish → deleteTask）のうち、when が真のものだけが入る
+    expect(before.map((row) => row.allowedActions)).toEqual([
+      ["editTask", "finish", "deleteTask"], // 進行中（start は when が偽）
+      ["editTask", "start", "finish", "deleteTask"], // 未着手
+      ["editTask", "deleteTask"], // 完了（start も finish も偽）
+    ]);
+
+    // 入力は対象の **ID だけ**である（書く値は宣言の `set` が持つ）
+    const finished = await createFromAction(run.deps, TASK_BOARD_INSTANCE, "finish", {
+      id: run.ids["shiori"] ?? "",
+    });
+    expect(finished.ok).toBe(true);
+    if (!finished.ok) return;
+    expect(rowOf(finished.body).fields["status"]).toBe("done");
+
+    const after = await boardRowsOf(run, "board");
+    expect(after.map((row) => [row.fields["title"], row.fields["status"]])).toEqual([
+      ["宿の予約", "doing"],
+      ["しおり作り", "done"],
+      ["レンタカー", "done"],
+    ]);
+    expect(after[1]?.allowedActions).toEqual(["editTask", "deleteTask"]);
+    // openTasks は「担当している数」なので、完了にしても変わらない（§3.2 の「未完了だけ」は書けない）
+    const members = await boardRowsOf(run, "members");
+    expect(members.map((row) => [row.fields["name"], row.computed["openTasks"]])).toEqual([
+      ["A", 1],
+      ["B", 1],
+      ["C", 1],
+    ]);
+  });
+
+  it("when が偽の行への操作は、409 ACTION_NOT_ALLOWED で断る（画面の非表示は守りではない）", async () => {
+    const run = await runTaskBoard();
+    // 完了している レンタカー を「始める」ことはできない（when は status == "todo"）
+    const started = await createFromAction(run.deps, TASK_BOARD_INSTANCE, "start", {
+      id: run.ids["rental"] ?? "",
+    });
+    expect(started.ok).toBe(false);
+    if (started.ok) return;
+    expect(started.failure.error).toBe("ACTION_NOT_ALLOWED");
+    expect(started.failure.action).toBe("start");
+    expect(started.failure.when).toBe('status == "todo"');
+    // 保存は変わらない
+    expect(run.records.rows.find((row) => row.id === run.ids["rental"])?.data["status"]).toBe("done");
+  });
+});

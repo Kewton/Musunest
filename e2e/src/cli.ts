@@ -21,7 +21,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createMusunestClient } from "@musunest/sdk";
 import type { FetchLike } from "@musunest/sdk";
-import { DRAFT_SCHEMA_VERSION, SAMPLE_FILE, errorKind, runWarikan } from "./warikan.js";
+import { SAMPLE_FILE as TASK_BOARD_SAMPLE_FILE, runTaskBoard } from "./task-board.js";
+import { DRAFT_SCHEMA_VERSION, SAMPLE_FILE as WARIKAN_SAMPLE_FILE, errorKind, runWarikan } from "./warikan.js";
 
 export const EXIT_OK = 0;
 export const EXIT_NG = 1;
@@ -30,6 +31,16 @@ export const EXIT_NG = 1;
 export const BASE_URL_ENV = "SMOKE_BASE_URL";
 /** e2e 専用のインスタンスの ID を渡す環境変数。明示しないと動かない（デモのインスタンスを触らない） */
 export const INSTANCE_ENV = "E2E_INSTANCE_ID";
+/** 採点する見本を選ぶ環境変数。既定は warikan（値は秘密ではない） */
+export const SAMPLE_ENV = "E2E_SAMPLE";
+/** 採点できる見本。見本のディレクトリの名前と同じである */
+export const SAMPLES = ["warikan", "task-board"] as const;
+export type SampleName = (typeof SAMPLES)[number];
+
+const SAMPLE_FILE_OF: Readonly<Record<SampleName, string>> = {
+  warikan: WARIKAN_SAMPLE_FILE,
+  "task-board": TASK_BOARD_SAMPLE_FILE,
+};
 /** 環境に残っていてもログに出さない値（この CLI 自身は使わない）。伏せる側でも持つ */
 export const CREDENTIAL_ENVS = ["SMOKE_PROBE_TOKEN", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"] as const;
 
@@ -45,7 +56,7 @@ export class E2eError extends Error {
 }
 
 export interface CliIo {
-  /** SMOKE_BASE_URL と E2E_INSTANCE_ID を読む。資格情報の名前は伏せるためにも読む */
+  /** SMOKE_BASE_URL・E2E_INSTANCE_ID・E2E_SAMPLE を読む。資格情報の名前は伏せるためにも読む */
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly out: (line: string) => void;
   readonly err: (line: string) => void;
@@ -58,13 +69,23 @@ export interface CliIo {
 
 const USAGE = `usage: pnpm --filter @musunest/e2e test:staging
 
-引数は取らない。宛先とインスタンスは環境変数から受け取る（URL をコマンド行に出さない）。
+引数は取らない。宛先・インスタンス・見本は環境変数から受け取る（URL をコマンド行に出さない）。
   ${BASE_URL_ENV}   host のオリジン（CI では staging 環境の Secret）
   ${INSTANCE_ENV}   e2e 専用のインスタンスの ID（デモのインスタンスは触らない）
+  ${SAMPLE_ENV}     採点する見本（${SAMPLES.join(" / ")}。既定は warikan）
 
-staging の見本（${SAMPLE_FILE}）の原本 SHA-256 と版を照合し、時計に依存しない採点の値
-（shareAmount・paid/owed/balance・精算）を比べ、専用データを支出 → メンバーの順に片付ける。
+見本（${WARIKAN_SAMPLE_FILE}・${TASK_BOARD_SAMPLE_FILE}）の原本 SHA-256 と版を照合し、
+**時計に依存しない**採点の値（割り勘: shareAmount・paid/owed/balance・精算。タスク管理: ボードの列・
+タスクの項目・openTasks・finish）を比べ、専用データを片付ける。期限切れのような時計に依る値は、
+時計を差し込んだ unit で採点する（ここでは見ない）。
 すべて成功したときだけ exit ${EXIT_OK}。それ以外は exit ${EXIT_NG}。`;
+
+/** 採点する見本を読む。既定は warikan。知らない名前は止める（値は表示しない） */
+export function sampleOf(raw: string | undefined): SampleName {
+  if (raw === undefined || raw === "") return "warikan";
+  if ((SAMPLES as readonly string[]).includes(raw)) return raw as SampleName;
+  throw new E2eError(`${SAMPLE_ENV} は ${SAMPLES.join(" / ")} のどれかを渡す（値は表示しない）`);
+}
 
 const URL_SHAPE = /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
 const WORKERS_DEV_HOST = /(?:[a-z0-9_-]+\.)+workers\.dev(?![a-z0-9_-])/gi;
@@ -156,20 +177,22 @@ async function run(
   // 欠落は叩く前の失敗にする（何もしなかったことを 0 と報告しない）
   const baseUrl = originOf(io.env[BASE_URL_ENV], BASE_URL_ENV);
   const instanceId = instanceOf(io.env[INSTANCE_ENV]);
-  const source = readSource(io);
+  const sample = sampleOf(io.env[SAMPLE_ENV]);
+  const sampleFile = SAMPLE_FILE_OF[sample];
+  const source = readSource(io, sampleFile);
 
   const client = createMusunestClient({ baseUrl, fetch: io.fetch });
-  out(`e2e: staging の見本（${SAMPLE_FILE}）を採点する（instance=${instanceId}）`);
-  const result = await runWarikan({
-    client,
-    instanceId,
-    source,
-    expectedSchemaVersion: DRAFT_SCHEMA_VERSION,
-    out,
-    err,
-  });
+  out(`e2e: staging の見本（${sampleFile}）を採点する（instance=${instanceId}）`);
+  const result =
+    sample === "task-board"
+      ? await runTaskBoard({ client, instanceId, source, expectedSchemaVersion: DRAFT_SCHEMA_VERSION, out, err })
+      : await runWarikan({ client, instanceId, source, expectedSchemaVersion: DRAFT_SCHEMA_VERSION, out, err });
   if (result.ok) {
-    out(`e2e: OK  ${instanceId} の見本が一致した（原本 SHA-256・shareAmount・paid/owed/balance・精算）`);
+    const scored =
+      sample === "task-board"
+        ? "原本 SHA-256・ボードの列・タスクの項目・openTasks・finish"
+        : "原本 SHA-256・shareAmount・paid/owed/balance・精算";
+    out(`e2e: OK  ${instanceId} の見本が一致した（${scored}）`);
     return EXIT_OK;
   }
   err(`e2e: NG  ${result.reason}`);
@@ -177,11 +200,11 @@ async function run(
 }
 
 /** 原本を読む。読めなければ値を含まない説明で止める */
-function readSource(io: CliIo): string {
+function readSource(io: CliIo, sampleFile: string): string {
   try {
-    return io.readFile(join(io.root, SAMPLE_FILE));
+    return io.readFile(join(io.root, sampleFile));
   } catch {
-    throw new E2eError(`原本（${SAMPLE_FILE}）を読めない`);
+    throw new E2eError(`原本（${sampleFile}）を読めない`);
   }
 }
 
