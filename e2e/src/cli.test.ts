@@ -11,7 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createFakeApi, type FakeApi, type FakeApiOptions } from "./__tests__/index.js";
-import { BASE_URL_ENV, EXIT_NG, EXIT_OK, INSTANCE_ENV, runCli } from "./cli.js";
+import { BASE_URL_ENV, EXIT_NG, EXIT_OK, INSTANCE_ENV, SAMPLE_ENV, runCli } from "./cli.js";
 import { SAMPLE_FILE, sha256Hex } from "./warikan.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -108,6 +108,7 @@ describe("runCli：欠落は叩く前の失敗にする", () => {
     ["デモのインスタンスを指している", { [INSTANCE_ENV]: "m12-demo-warikan" }, "demo を含む ID は触らない"],
     ["宛先が URL として読めない", { [BASE_URL_ENV]: "not a url" }, "URL として読めない"],
     ["宛先がオリジンでない（パスを含む）", { [BASE_URL_ENV]: "https://staging.example/foo" }, "オリジンだけを書く"],
+    ["知らない見本を選んでいる", { [SAMPLE_ENV]: "no-such-sample" }, "のどれかを渡す"],
   ])("%s なら、1つも叩かずに exit 1（値を出さない）", async (_, env, message) => {
     const harness = await cli([], { env, apiOptions: { sourceSha256: SOURCE_SHA } });
 

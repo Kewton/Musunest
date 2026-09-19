@@ -1,5 +1,7 @@
 // 採点のシナリオと負例の一覧の読み取り。形が違えば例外になることを見る（黙って読み飛ばすと、採点しなかったことが緑に化ける）。
 import { describe, expect, it } from "vitest";
+import { sampleSpecFile, vocabularyFile } from "./files.js";
+import { readLedgerYaml } from "./ledger-yaml.js";
 import {
   readNegativeIndex,
   readScoringScenario,
@@ -163,4 +165,49 @@ describe("readNegativeIndex", () => {
   ])("%s なら例外にする", (_label, value, reason) => {
     expect(() => readNegativeIndex(value)).toThrow(reason);
   });
+});
+
+// ── 台帳の見本の欄（M1.3 の張り替え漏れ。Issue #159） ────────────────────
+//
+// M1.3 の語彙（enum・default・date・today・set・when・board・filters）の「見本」は、
+// **その語彙を実際に使っている見本**でなければならない。形の検査（欄が埋まっているか）だけでは、
+// 「使っていない見本を指したまま」でも通ってしまう（#159 より前は、8 語とも warikan を指していた）。
+// ここで宣言の字面と突き合わせて、張り替え漏れがあれば落ちるようにする。
+
+interface NodeFs {
+  readFileSync(path: URL, encoding: "utf8"): string;
+}
+const importUntyped = (specifier: string) => import(/* @vite-ignore */ specifier);
+const nodeFs = (await importUntyped("node:fs")) as NodeFs;
+
+/** M1.3 の語彙 → 見本の宣言にその語彙があることを示す字面 */
+const M13_SAMPLE_TOKENS: Readonly<Record<string, RegExp>> = {
+  enum: /type: enum/,
+  default: /^\s*default:/m,
+  date: /^\s*due: date/m,
+  today: /today\(\)/,
+  set: /^\s*set:/m,
+  when: /^\s*when:/m,
+  board: /type: board/,
+  filters: /^\s*filters:/m,
+};
+
+describe("台帳の見本の欄（M1.3 の張り替え漏れ）", () => {
+  const ledger = readLedgerYaml(nodeFs.readFileSync(vocabularyFile(), "utf8"));
+
+  it.each(Object.entries(M13_SAMPLE_TOKENS))(
+    "%s の見本は、その語彙を使っている見本を指す",
+    (name, token) => {
+      const row = ledger.find((entry) => entry["name"] === name);
+      if (row === undefined) throw new Error(`${name} が台帳に無い`);
+      const samples = row["samples"];
+      if (!Array.isArray(samples)) throw new Error(`${name} の samples が並びでない`);
+      expect(samples.length).toBeGreaterThan(0);
+      for (const sample of samples as readonly string[]) {
+        expect(nodeFs.readFileSync(sampleSpecFile(sample), "utf8"), `${name} の見本 ${sample}`).toMatch(
+          token,
+        );
+      }
+    },
+  );
 });

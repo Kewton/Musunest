@@ -1,0 +1,109 @@
+{
+  "$comment": "M1.3「タスク管理が動く」のデモの証跡（Issue #160）。人がスマホで確かめた結果を機械が読める形で残す。文章の記録は demos.md にある。",
+  "milestone": "M1.3",
+  "title": "タスク管理が動く",
+  "verifiedAt": "2026-09-19",
+  "verifiedAtNote": "所有者がスマホで確認した日。窓口が同日に聞き取って記録した",
+  "verifiedBy": [
+    {
+      "who": "所有者",
+      "client": "スマホ",
+      "versionsRecorded": false,
+      "versionsNote": "OS とブラウザの版を控えていない（M1.2 と同じ欠落。M1a のゲート判定 2 は『OS とブラウザを記録する』と求めているので、M1a の判定までに直す）"
+    }
+  ],
+  "commit": "e9e82a3",
+  "environment": "staging",
+  "instanceId": "m12-e2e-task-board",
+  "instanceIdNote": "deploy-staging が毎回 publish する **e2e 専用**のインスタンスである（固定 ID）。**デモのデータは次の deploy-staging で消える**——e2e は後片付けでタスクを全部消す（e2e/src/task-board.ts）。M1.2 はデモ専用の m12-demo-warikan を使っており、M1.3 も本来は専用のインスタンスを置くべきだった。**この証跡の再現には、同じ宣言を別のインスタンスへ publish し直す必要がある**",
+  "sample": "task-board",
+  "sampleSource": "packages/appspec-schema/samples/task-board/app.spec.yaml",
+  "checks": [
+    {
+      "id": 1,
+      "what": "期限切れのタスクが強調される",
+      "roadmapWording": "期限切れのタスクが赤くなり",
+      "result": "部分的に合格",
+      "observed": "強調の印（`▲ overdue`）は出た。**赤くはならなかった**",
+      "verdict": "仕様どおり。実装は色を 1 色も使っていない（apps/host/src/app/board.tsx の色は #c9c9c9 と #4a4a4a のみ）。04-spec-evolution.md §7.2「強調は色だけに頼らない」を、#157 の Issue で窓口が『色が分からなくても分かる印を付ける』と書いた結果、**色そのものが無くなった**",
+      "gap": "ロードマップ §4 の M1.3 の行は「赤くなり」と書いている。**文言と実装が食い違っている**",
+      "significance": "この 1 点が、M1.3 でいちばん確かめたかったところである。staging の e2e は**時計に依らない値だけ**を見るので、`overdue`（`due < today()`）が**本物の Cloudflare 上で、本物の今日の日付で**正しく出ることは、このデモまで誰も見ていなかった"
+    },
+    {
+      "id": 2,
+      "what": "「完了にする」が、未完了の行にだけ出る",
+      "result": "合格",
+      "observed": "未完了の行にだけ出た",
+      "verdict": "`when` が実機で効いている"
+    },
+    {
+      "id": 3,
+      "what": "押すと列が移る",
+      "result": "合格",
+      "observed": "「完了」の列へ移った",
+      "verdict": "`set`（決まった値への書き換え）と `board` の `columns` が実機で効いている"
+    },
+    {
+      "id": 4,
+      "what": "再読み込みしても残る",
+      "result": "合格",
+      "observed": "入力したタスクが残っていた",
+      "verdict": "Durable Object への保存が効いている"
+    }
+  ],
+  "pathVerified": [
+    "宣言の `computed`（`type: boolean`・`expression: due < today()`）",
+    "Data API が JST で評価し、`ApiRow.computed.overdue` に真偽を載せる",
+    "画面は式を評価せず、`highlight` が指す名前の値を見るだけ（CLAUDE.md の不変条件どおり）"
+  ],
+  "notVerified": [
+    "OS とブラウザの版（控えていない）",
+    "別端末での表示（M1.2 では確かめたが、M1.3 では聞き取っていない）",
+    "横幅 360px での崩れ（単体テストでは見ているが、実機では確かめていない）"
+  ],
+  "findings": [
+    {
+      "id": "F-A",
+      "severity": "中",
+      "what": "強調に色が無い",
+      "why": "「色だけに頼らない」は本来『色 ＋ もう 1 つの手がかり』であるはずが、いまは後者だけになっている",
+      "proposal": "二重枠と `▲` は残したまま、赤系を足す。M1.4 で直す"
+    },
+    {
+      "id": "F-B",
+      "severity": "中",
+      "what": "強調の印に `overdue` と計算の名前がそのまま出る",
+      "why": "項目名が英語で出るのと同じ問題。日本語を出すには `label` が要る（項目名は `^[A-Za-z][A-Za-z0-9]*$` に限られる）",
+      "proposal": "M1.4 で `label` を足す。**このデモが `label` の必要性を実物で裏づけた**"
+    }
+  ],
+  "references": {
+    "issues": [
+      154,
+      155,
+      156,
+      157,
+      158,
+      159,
+      160
+    ],
+    "pullRequests": [
+      162,
+      163,
+      164,
+      165,
+      166,
+      170
+    ],
+    "openFollowUps": [
+      167,
+      168,
+      169
+    ]
+  },
+  "gate": {
+    "m1aFinalGate": false,
+    "note": "M1a は M1.5 の終わりに置く。M1.3 の完了は M1a の合格ではない"
+  },
+  "completedOn": "2026-09-19"
+}
