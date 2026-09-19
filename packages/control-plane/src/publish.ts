@@ -197,6 +197,9 @@ interface FieldShape {
 /**
  * 項目（宣言から読んだ値）を、型として読む。**読めなければ `null`**（＝差し替えない）。
  * R2 から読んだ前の宣言はこちらが書いたものだが、形を信用しない（読めない値で落ちない）。
+ *
+ * 1 語の型（`string`・`number`・`list`・`date`）は、**裸の文字列と写像の形の両方**を同じ形として
+ * 読む（#188。`label` を付けると写像の形になる。#176）。`label` は型ではないので見ない。
  */
 function readFieldShape(field: unknown): FieldShape | null {
   if (typeof field === "string") {
@@ -212,7 +215,11 @@ function readFieldShape(field: unknown): FieldShape | null {
     const optionKeys = Object.keys(field["options"]);
     return optionKeys.length === 0 ? null : { kind: "enum", target: null, optionKeys };
   }
-  return null;
+  // 1 語の型を写像で書いたもの（`{type: string}`・`{type: list}` など）。裸の文字列と同じ形として読む
+  // （種類だけを見て、参照先は `null`、選択肢のキーは空）。`of` を持つ `list` は上の枝が先に読む
+  return typeof type === "string" && (FIELD_TYPES as readonly string[]).includes(type)
+    ? { kind: type as FieldKind, target: null, optionKeys: [] }
+    : null;
 }
 
 /** 前の型が、後の型にそのまま入っているか。**種類と参照先は同じ**で、**選択肢のキーは足すのがよい**。 */

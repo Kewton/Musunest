@@ -599,3 +599,103 @@ describe("isReplaceableDeclaration：差し替えてよい宣言か（純粋関�
     }
   });
 });
+
+// ── 6. 1 語の型の写像形（label・#188）────────────────────────────────
+//
+//   #176 で `label` を付けると、宣言は `title: string` の裸の文字列から
+//   `{type: string, label: やること}` の写像形になる。差し替えの判定は写像形を読めず、
+//   `replacement_conflict` で断っていた（#188）。**写像形は裸の文字列と同じ形として読む**
+//   （種類だけを見て、参照先は null、選択肢のキーは空）。`label` の飾りは型ではない。
+
+/** entity と項目だけを持つ最小の宣言を組む（`label` の有無でフィールドの形を差し替える） */
+const fieldsDeclaration = (fields: readonly string[]): string =>
+  [
+    "entities:",
+    "  - name: task",
+    "    fields:",
+    ...fields.map((line) => `      ${line}`),
+    "views: []",
+    "actions: []",
+    "validations: []",
+    "computed: []",
+    "permissions: []",
+    "minIdentity:",
+    "  mode: anonymous",
+    "",
+  ].join("\n");
+
+/** 1 語の型を裸の文字列で書いた宣言（`string`・`number`・`list`・`date`） */
+const BARE_TYPES = fieldsDeclaration(["title: string", "count: number", "tags: list", "due: date"]);
+/** 同じ 4 項目を写像形で書いた宣言（`label` を付けると写像の形になる。#176） */
+const LABELED_TYPES = fieldsDeclaration([
+  "title:",
+  "  type: string",
+  "  label: やること",
+  "count:",
+  "  type: number",
+  "  label: 件数",
+  "tags:",
+  "  type: list",
+  "  label: しるし",
+  "due:",
+  "  type: date",
+  "  label: 期限",
+]);
+/** `label` の文言だけを変えた宣言（表示名は保存される値を変えないので、差し替えてよい） */
+const RELABELED_TYPES = LABELED_TYPES.replace("  label: やること", "  label: 用件");
+/** 写像形のまま型を変えた宣言（`title` の `string` を `number` へ。差し替えてはならない） */
+const RETYPED_MAP = LABELED_TYPES.replace("  type: string", "  type: number");
+
+describe("1 語の型の写像形（label 付き）を読む（#188）", () => {
+  /** 宣言（YAML）を検査して、正規化した成果物にする（上の describe と同じ形） */
+  const normalized = async (source: string): Promise<{ spec: AppSpec }> => {
+    const result = await normalizeSpec(source);
+    if (!result.ok) throw new Error("検査に通らない宣言（試験の作りが悪い）");
+    return result.app;
+  };
+
+  it("裸の文字列から写像形（label を付ける）への差し替えは通る", async () => {
+    const before = await normalized(BARE_TYPES);
+    const after = await normalized(LABELED_TYPES);
+    expect(isReplaceableDeclaration(before, after.spec)).toBe(true);
+  });
+
+  it("写像形から裸の文字列（label を外す）への差し替えも通る", async () => {
+    const before = await normalized(LABELED_TYPES);
+    const after = await normalized(BARE_TYPES);
+    expect(isReplaceableDeclaration(before, after.spec)).toBe(true);
+  });
+
+  it("label の文言だけを変える差し替えは通る（保存される値を変えない）", async () => {
+    const before = await normalized(LABELED_TYPES);
+    const after = await normalized(RELABELED_TYPES);
+    expect(isReplaceableDeclaration(before, after.spec)).toBe(true);
+  });
+
+  it("写像形でも型を変える差し替えは断る（false）", async () => {
+    const before = await normalized(LABELED_TYPES);
+    const after = await normalized(RETYPED_MAP);
+    expect(isReplaceableDeclaration(before, after.spec)).toBe(false);
+  });
+
+  it("label を付けた宣言への差し替えが、publish でも通る", async () => {
+    const { executor } = newRegistry();
+    const specs = new RecordingSpecWriter();
+
+    const first = await publishSpec({ specs, registry: executor }, { source: BARE_TYPES, instanceId: INSTANCE });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const replaced = await publishSpec(
+      { specs, registry: executor, readSpec: specs },
+      { source: LABELED_TYPES, instanceId: INSTANCE, replace: true },
+    );
+    expect(replaced.ok, JSON.stringify(replaced)).toBe(true);
+    if (!replaced.ok) return;
+
+    expect(replaced.app.sourceSha256).not.toBe(first.app.sourceSha256);
+    expect(replaced.replacedSourceSha256).toBe(first.app.sourceSha256);
+    expect(await getInstance(executor, INSTANCE)).toEqual(replaced.instance);
+    expect(await resolveInstanceApp(executor, INSTANCE)).toEqual(replaced.app);
+  });
+});

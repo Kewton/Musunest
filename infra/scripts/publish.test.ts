@@ -338,6 +338,12 @@ describe("はっきり差し替える（--replace・#175）", () => {
   /** 見本の書き換えを模した宣言（`memo` を足す。データ層が広がるので差し替えてよい） */
   const REWRITTEN = DECLARATION.replace("      participants: list\n", "      participants: list\n      memo: string\n");
 
+  /** 1 語の型に `label`（#176）を付けた宣言。`amount: number` が写像の形になる（#188） */
+  const LABELED = DECLARATION.replace(
+    "      amount: number\n",
+    ["      amount:", "        type: number", "        label: 金額", ""].join("\n"),
+  );
+
   it("2 回目（原本の SHA-256 が変わった見本）でも落ちず、前後の SHA-256 を出す。値は出さない", async () => {
     const cloudflare = new FakeCloudflare();
     const first = await publish(dev(), { cloudflare });
@@ -370,6 +376,25 @@ describe("はっきり差し替える（--replace・#175）", () => {
     const batch = (JSON.parse(updates[0]?.body ?? "null") as { batch: { sql: string; params: string[] }[] }).batch;
     expect(batch[0]?.params).toEqual([nextSha, "e2e-expense-log", previousSha, nextSha]);
     expect(batch[0]?.sql).not.toContain(nextSha);
+  });
+
+  it("1 語の型に label を付けた差し替え（#188）も通り、前後の SHA-256 を出す。値は出さない", async () => {
+    const cloudflare = new FakeCloudflare();
+    const first = await publish(dev(), { cloudflare });
+    expect(first.code, first.all).toBe(EXIT_OK);
+    const previousSha = publishedSha(first.calls);
+
+    const at = cloudflare.calls.length;
+    const second = await publish(dev(["--replace"]), { cloudflare, spec: LABELED });
+    const calls = second.calls.slice(at);
+
+    expect(second.code, second.all).toBe(EXIT_OK);
+    const nextSha = publishedSha(calls);
+    expect(nextSha).not.toBe(previousSha);
+    expect(second.out.at(-1)).toBe(
+      `publish: 差し替え  env=dev: 前の原本 SHA ${previousSha} → 後の原本 SHA ${nextSha}（インスタンス e2e-expense-log）`,
+    );
+    expectNothingSecret(second);
   });
 
   it("--replace が無いときは、いまどおり instance_conflict で断る（既定の挙動を変えない）", async () => {
