@@ -152,18 +152,40 @@ commandmate capture musubi --instance command-code --pane --tail 20   # 段と�
 
 - 本文と選択肢を**そのまま**人へ見せる。要約しない。番号の並びも変えない
 - **このリポジトリでは、窓口が auto-yes を有効にしてよい**（2026-09-17 所有者が決定。`cmate-delegate` §6「相手の auto-yes は触らない」を、このリポジトリに限って上書きする）。
-  **auto-yes は相手のセッションの再起動で off に戻る**（2026-09-16〜17 に 3 回。CLI の自動更新で再起動が起きる）ので、**依頼を送る前に確認して、off なら有効にする**。
+  **auto-yes は放っておくと off になる**ので、**依頼を送る前に確認して、off なら有効にする**。
 
   ```bash
   commandmate instances musubi --json                            # autoYes を見る
-  commandmate auto-yes musubi --instance command-code --enable   # off なら有効にしてから送る
+  # off なら、期間を付けて有効にしてから送る（--instance と --duration は両方とも必須と考える）
+  commandmate auto-yes musubi --instance command-code --enable --duration 8h
   ```
+
+  - **off になる理由は 2 つある。混ぜて考えない。**
+
+    | | 原因 | 効く対処 |
+    |---|---|---|
+    | **①期限切れ** | auto-yes には有効期間がある（`commandmate auto-yes --help` の `Duration (1h, 3h, 8h)`）。**既定の窓は管理の 1 ターン（40〜70 分）より短い** | **`--duration 8h`** |
+    | **②設定の初期化** | `commandmate sync` が worktree ごとの設定を戻す | **無い。送る前に毎回見るしかない**（根本は #118） |
+
+  - **①は 2026-09-20 に判明した。それまで「相手のセッションの再起動で off に戻る」と書いていたが、
+    これは誤りである**（この日は 1 日で 5 回 off になったが、サーバは 1 日 9 時間連続稼働で一度も再起動していない）。
+    根拠は 3 つ：`--help` に `--duration` がある／CommandMate の DB に `auto_yes` の列が**どのテーブルにも無い**
+    （＝永続化されない実行時の状態）／**送信直前に有効化した依頼が、ちょうど 1 時間後にプロンプトで止まっていた**
+    - **既定の窓の長さは測っていない。** CLI は期限を表示せず、`instances --json` にも期限の欄が無い。
+      **1 時間だと決めつけない。** `--duration 8h` を付ければ実用上は困らないので、測っていない
+    - 2026-09-16〜17 の 3 回は**サーバの再起動が実際に起きていた**ので、そちらの観測は誤りではない。
+      **原因が 1 つだと思い込んだのが誤り**だった
+  - **②は同日に実証された。** #188 のために走らせた `sync` が `musunest-issue-178` の `cliToolId` の固定を
+    `claude` へ戻し、dispatch が Command Code ではなく Claude へタスクを送っていた（作り直しになった）。
+    **同じ `sync` が `autoYes` も消すかは未確認**である
 
   - **`--instance` を必ず付ける。** 付けないと **worktree の既定インスタンス**（`cliToolId`）に効く。
     2026-09-17 に `commandmate auto-yes musubi --enable` を打ったところ、`Auto-yes enabled for musubi (claude)` と返り、
     **窓口自身のセッション**に効いてしまった
-  - **送る前の確認だけでは足りない。** auto-yes は**送ったあとにも off に戻る**（同日 4 回）。
+  - **送る前の確認だけでは足りない。** auto-yes は**送ったあとにも off になる**（2026-09-17 に 4 回、2026-09-20 に 5 回）。
     依頼の途中で急に prompt で止まったら、まず `autoYes` を見て、off なら入れ直してから `wait` を張り直す
+  - **exit 10 を「詰まった」と読まない。** `wait --on-prompt agent` は auto-yes に 30 秒だけ譲ってから exit 10 を返す。
+    **画面と `autoYes` を見てから**、人へ上げるかどうかを決める
 
   - 対象は**このリポジトリのセッション**（管理とワーカー）だけ。ほかのリポジトリのセッションには打たない
   - **有効にしても、プロンプトに自分で答えることはしない。** auto-yes が拾わない種類（自由記述の質問・rate limit・破壊的な操作の確認）は、従来どおり本文を人へ見せて止まる
