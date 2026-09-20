@@ -138,9 +138,19 @@ sdk・spec-engine・app-do・connector → appspec-schema
 - **スマホでのデモと振り返りは人が行う**（🧑 の Issue。マイルストーンごと。`workspace/mvp/roadmap.md` §1）。
   uat が見るのは機械で判定できる分だけである
 - **dispatch は auto-yes を基本にする**（`dispatch_defaults.auto_yes: true`）。ワーカーの yes/no と選択のプロンプトは自動で応答し、run を止めない
-  - **窓口は、依頼を送る前に相手の `autoYes` を確認し、off なら `commandmate auto-yes <worktree-id> --enable` を打ってよい**
+  - **窓口は、依頼を送る前に相手の `autoYes` を確認し、off なら有効にしてよい**
     （2026-09-17 所有者が決定。`cmate-delegate` §6 をこのリポジトリに限って上書きする。`docs/parallel-development.md` §5）。
     有効にしても、**プロンプトに自分で答えることはしない**
+  - **`--duration` を必ず付ける。auto-yes には有効期間があり、既定の窓は管理の 1 ターンより短い**
+    （2026-09-20。`commandmate auto-yes --help` に `Duration (1h, 3h, 8h)`。状態は DB に列が無く永続化されない）
+
+    ```bash
+    commandmate auto-yes <worktree-id> --enable --instance command-code --duration 8h
+    ```
+
+    **`--instance` も必ず付ける**（付けないと worktree の既定インスタンス＝窓口自身に効く）
+  - **`--duration` を付けても、送る前の確認はやめない。** `commandmate sync` が worktree ごとの設定を
+    初期化する（2026-09-20 に `cliToolId` で実証。#118）。**期限とは別の経路なので、`--duration` では防げない**
   - auto-yes が効くのは**ワーカーのプロンプトだけ**である。**merge は別のゲート**で、auto-yes では決まらない（merge runner を使うときは `--approve` が無ければ何も mutate しない）
   - 止めたい run は `--no-auto-yes` を付ける（production に触る変更・`.tf`・`.commandmate/` を含むときなど）。`--unattended` と auto-yes は併用できない（`invalid_input`）
 - 実行契約（`.commandmate/tasks/*.yaml`）の goal は **8000 文字まで**。対象のソースが概ね 30 本を超える Issue、
