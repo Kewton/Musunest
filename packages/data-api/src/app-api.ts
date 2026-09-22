@@ -966,21 +966,25 @@ export async function getView(
   const permissions = permissionsOf(app);
   if (!permissions.read) return fail("PERMISSION_DENIED");
   // ダッシュボード（`type: dashboard`。M1.4。Issue #180）は**行を並べない**——`rows` は空の並びで、
-  // 部品が読む値は `scope`（アプリ全体の集計）に 1 回で載る。`entity` も、行ごとの `fields`・
-  // `computed` も持たない。**部品ごとに取りに行かない**（1 回の取得でまとめて返す）。
+  // 部品が読む値は `scope`（アプリ全体の集計。数値の部品）・`groups`（見出しごとの集計。棒・円の部品。
+  // Issue #181）・`ranking`（順位の部品が並べる別の entity の行。Issue #182）に 1 回で載る。
+  // `entity` も、行ごとの `fields`・`computed` も持たない。**部品ごとに取りに行かない**（1 回の取得でまとめて返す）。
   if (view.type === "dashboard") {
     // 順位の部品（`type: ranking`。M1.4。Issue #182）が並べる entity のレコードを読む。**行ごとに読み直さない**
     // ——1 回の取得でまとめて返す。読んだ行は `known` で渡し、集計の元を読むときに使い回す（同じ行を 2 度読まない）
     const rankingEntities = rankingEntitiesOf(view);
     const known: Record<string, readonly StoredRecord[]> = {};
     for (const name of rankingEntities) known[name] = await deps.records.list(name);
-    // アプリ全体の集計と、順位の部品が指す entity の集計が要る entity を読む
+    // 数値の部品が読むアプリ全体の集計（`scope: app`）と、棒・円の部品が読む見出しごとの集計
+    // （`type: groups`。Issue #181）と、順位の部品が指す entity の集計が要る entity を、**まとめて読む**
     const extra = [
       ...appAggregateSourceEntities(app),
+      ...groupSourceEntities(app),
       ...rankingEntities.flatMap((name) => [name, ...aggregateSourceEntities(app, name)]),
     ];
     const sources = await loadSources(deps, app, "", extra, known);
     const scope = scopeValuesOf(app, deps.clock, sources);
+    const groups = groupsValuesOf(app, deps.clock, sources);
     // 順位（M1.4。Issue #182）。**宣言が無ければ欄そのものを載せない**（`scope` と同じ約束）
     const ranking = rankingValuesOf(app, view, deps.clock, sources, known);
     return ok(API_READ_STATUS, {
@@ -992,6 +996,7 @@ export async function getView(
       actions: [],
       rows: [],
       ...(scope === undefined ? {} : { scope }),
+      ...(groups === undefined ? {} : { groups }),
       ...(ranking === undefined ? {} : { ranking }),
     });
   }

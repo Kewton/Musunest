@@ -153,6 +153,15 @@ export const DIAGNOSTIC_CODES = [
    */
   "UI_DASHBOARD_VALUE_NOT_APP_SCOPE",
   /**
+   * ダッシュボード（`type: dashboard`）の**棒（`bar`）・円（`pie`）の部品**の `value` が、
+   * **見出しごとの集計（`type: groups`）の計算**を指していない（無い、または別の種類の計算である。
+   * M1.4。Issue #181）——棒と円は「見出しと値の組の並び」を描く部品である。
+   *
+   * **`UI_DASHBOARD_VALUE_NOT_APP_SCOPE` と別のコードにする**——数値の部品が指す先（アプリ全体の
+   * 集計の 1 つの数）と、棒・円が指す先（見出しごとの並び）は別物である（1 つの誤りを 2 つに数えない）。
+   */
+  "UI_DASHBOARD_VALUE_NOT_GROUPS",
+  /**
    * 順位の部品（`type: ranking`）の基準（`by`）が、その entity の**行ごとの数の計算**（`computed`）を
    * 指していない（無い、または**アプリ全体の集計（`scope: app`）**である。M1.4。Issue #182）——
    * アプリ全体の集計には行ごとの値が無いので、どの行を上位にするかを決められない

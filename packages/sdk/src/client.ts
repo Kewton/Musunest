@@ -8,7 +8,7 @@
 // fetch と base URL は差し込める。host の画面は同じ origin の /api/* を叩くので `baseUrl: ""` でよい
 // （相対 URL のまま fetch する）。e2e のように別の origin を指す場合は絶対 URL を渡す。
 
-import { API_ERROR_CODES, ACTION_KINDS, COMPUTED_TYPES, FIELD_TYPES, PERIODS, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
+import { API_ERROR_CODES, ACTION_KINDS, COMPUTED_TYPES, FIELD_TYPES, PERIODS, VIEW_PART_TYPES, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
 import type {
   ApiDeletedBody,
   ApiErrorCode,
@@ -470,18 +470,18 @@ function isComputedDeclaration(value: unknown): boolean {
 }
 
 /**
- * ダッシュボードの部品（M1.4。Issue #180・#182）。**数値の部品**（`type: number`）は `value`（計算の名前）を
- * 要し、`label`（表示名）と `unit`（単位）は任意である。**順位の部品**（`type: ranking`）は、鍵 `name`・
- * 並べる相手 `entity`・基準 `by`・出す項目 `show` を要し、`label` と `limit`（件数の上限）は任意である。
- * 実在と種類は静的チェックが見る——ここは形だけを確かめる。
+ * ダッシュボードの部品（M1.4。Issue #180・#181・#182）。**`value` で計算を指す部品**（数値 `number`・
+ * 棒 `bar`・円 `pie`）は `value`（計算の名前）を要し、`label`（表示名）と `unit`（単位）は任意である。
+ * **順位の部品**（`type: ranking`）は、鍵 `name`・並べる相手 `entity`・基準 `by`・出す項目 `show` を要し、
+ * `label` と `limit`（件数の上限）は任意である。実在と種類は静的チェックが見る——ここは形だけを確かめる。
+ *
+ * **種類は `VIEW_PART_TYPES`（正本）で見る**——ここで語を写すと、語彙が増えたときに配信側だけが古いまま
+ * 残り、`getSpec` が失敗して画面が動かなくなる（#145・#154 と同じ穴）。
  */
 function isViewPart(value: unknown): boolean {
   if (!isRecord(value) || !isOptionalLabel(value)) return false;
-  if (value.type === "number") {
-    return (
-      typeof value.value === "string" &&
-      (value.unit === undefined || (typeof value.unit === "string" && value.unit !== ""))
-    );
+  if (typeof value.type !== "string" || !(VIEW_PART_TYPES as readonly string[]).includes(value.type)) {
+    return false;
   }
   if (value.type === "ranking") {
     if (typeof value.name !== "string" || typeof value.entity !== "string") return false;
@@ -491,7 +491,11 @@ function isViewPart(value: unknown): boolean {
     }
     return true;
   }
-  return false;
+  // `value` で計算を指す部品（数値 `number`・棒 `bar`・円 `pie`）。書ける欄は 3 つとも同じである
+  return (
+    typeof value.value === "string" &&
+    (value.unit === undefined || (typeof value.unit === "string" && value.unit !== ""))
+  );
 }
 
 /**

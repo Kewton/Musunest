@@ -3,11 +3,12 @@
 # 練習や試合を記録すると、**アプリ全体で 1 つ**の値（**今月の**活動の回数・参加ののべ人数・1 回あたりの参加・
 # 費用の平均）が出る。M1.4 の各 Issue が、自分の語彙をこの見本へ足していく（docs/parallel-development.md §7.2）。
 # **#177 が骨格（`scope: app` と `avg`）を置き、#178 が期間の条件（`within: this_month`）を、
-# #179 が見出しごとの集計（`groupBy` と `groups` 型）を、#182 が順位の部品（`ranking`）を足した。**
+# #179 が見出しごとの集計（`groupBy` と `groups` 型）を、#181 がグラフの部品（`bar`・`pie`）を、
+# #182 が順位の部品（`ranking`）を足した。**
 #
-# 元は workspace/mvp/m1/02-l2-spec-examples.md §4.3（叩き台）。**いまの語彙で書けないものは落としてある**：
-#   - グラフの部品（`bar`・`pie`）は #181
-#   - 表示名（`label`。日本語の見出しは #176）
+# 元は workspace/mvp/m1/02-l2-spec-examples.md §4.3（叩き台）。**グラフの部品（`bar`・`pie`）は #181 が、
+# 順位の部品（`ranking`）は #182 が足した**ので、§4.3 の部品はすべてこの見本で書けている。
+# （表示名（`label`）は #176 が足した）
 #
 # **`within: this_month` は「今月」を日本時間で決める**（Issue #178）。時計は**評価に引数で渡す**——
 # 式の評価の中で現在時刻を直接読まない（Q17。「today」と同じ扱いである）。境目は
@@ -26,6 +27,10 @@
 # である（行ごとの計算は載る場所が無い）。**`entity` を持たない**し、応答の `rows` も空の並びである
 # （意味は ../../docs/semantics.md「dashboard」）。
 #
+# **棒（`bar`）と円（`pie`）の部品は #181 が足した。** 見出しごとの集計（`type: groups`）の「見出しと値の
+# 組の並び」を描く。**指せるのは `type: groups` の計算だけ**である（数値の部品が `scope: app` を指すのと
+# 対である）。値は応答の `groups` に 1 回で載る。**画面は式も集計も評価しない**。
+#
 # **順位の部品（`widgets` の `ranking`）は #182 が足した。** ダッシュボードで**初めて行を並べる**部品で、
 # `activity` の行を**行ごとの数の計算**の降順に並べる（同数は登録した順で安定させる）。**基準にアプリ全体の
 # 集計は指せない**（行ごとの値が無い）。値は応答の**兄弟の欄 `ranking`**（部品の `name` → 行の並び）に載る
@@ -33,7 +38,7 @@
 #
 # 採点のシナリオは同じディレクトリの scenario.json、
 # 意味は ../../docs/semantics.md（「scope」「aggregate」「within」「sum」「count」「avg」「groupBy」「groups」
-# 「computed」「dashboard」「ranking」）にある。
+# 「computed」「dashboard」「bar」「pie」「ranking」）にある。
 
 entities:
   - name: member
@@ -146,6 +151,18 @@ views:
         label: 今月の費用の平均
         value: averageCost
         unit: 円
+      # 棒（`bar`）と円（`pie`）の部品（M1.4。Issue #181）。**指せるのは見出しごとの集計（`type: groups`）
+      # の計算だけ**である（指せなければ UI_DASHBOARD_VALUE_NOT_GROUPS）。値は一覧の応答の `groups`
+      # （計算の名前 → 「見出しと値」の組の並び）に 1 回で載る。`enum` の見出しは宣言の `options` の
+      # 表示名に写して出す（送られてくるのはキーである）。円は**割合（%）も数字で出す**。
+      - type: bar
+        label: 月ごとの活動回数
+        value: activitiesByMonth
+        unit: 回
+      - type: pie
+        label: 種類の内訳
+        value: activitiesByKind
+        unit: 回
       # 順位の部品（`type: ranking`。M1.4。Issue #182）。**行を並べる唯一の部品**である——`activity` の行を、
       # 行ごとの数の計算（`by`）の降順に並べる。**基準にアプリ全体の集計は指せない**ので、`by` は行ごとの
       # 計算 `attendeeCount` である。`by` は `show` に含める（出す項目の 1 つとして基準を見せる）。

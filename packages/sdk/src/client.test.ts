@@ -989,10 +989,11 @@ describe("決まった値への書き換え（M1.3）", () => {
   });
 });
 
-// ── ダッシュボード（`dashboard`）と数値の部品（M1.4。Issue #180） ──────────
+// ── ダッシュボード（`dashboard`）と部品（`number`・`bar`・`pie`）（M1.4。Issue #180・#181） ──
 //
-// **ダッシュボードの一覧は `entity` を持たない**（行を並べない。追記 4）。部品（`widgets`）は `number`
-// だけで、`value` を要し、`label`・`unit` は任意である。受けないと `getSpec` が失敗し、画面が開かない。
+// **ダッシュボードの一覧は `entity` を持たない**（行を並べない。追記 4）。部品（`widgets`）は数値
+// （`number`。Issue #180）と、棒（`bar`）・円（`pie`）（Issue #181）である。どれも `value` を要し、
+// `label`・`unit` は任意である。受けないと `getSpec` が失敗し、画面が開かない（#145・#154 と同じ穴）。
 
 describe("ダッシュボード（dashboard）と数値の部品", () => {
   const DASHBOARD_SPEC = {
@@ -1062,7 +1063,7 @@ describe("ダッシュボード（dashboard）と数値の部品", () => {
       // 空の並び
       [],
       // 知らない部品の種類
-      [{ type: "bar", value: "activityCount" }],
+      [{ type: "gauge", value: "activityCount" }],
       // `value` が無い
       [{ type: "number" }],
       // `unit` が空文字
@@ -1080,6 +1081,30 @@ describe("ダッシュボード（dashboard）と数値の部品", () => {
         error: { status: 200, code: INVALID_RESPONSE },
       });
     }
+  });
+
+  it("棒（bar）と円（pie）の部品も、型付きで受け取る（M1.4。Issue #181）", async () => {
+    const withCharts = {
+      ...SPEC,
+      spec: {
+        ...SPEC.spec,
+        views: [
+          {
+            name: "dashboard",
+            type: "dashboard",
+            widgets: [
+              { type: "number", value: "activityCount" },
+              { type: "bar", label: "月ごとの活動回数", value: "activitiesByMonth", unit: "回" },
+              // `label` と `unit` は任意である
+              { type: "pie", value: "activitiesByKind" },
+            ],
+          },
+        ],
+      },
+    };
+    const stub = recordingFetch(() => json(200, withCharts));
+
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: withCharts });
   });
 
   it("dashboard 以外の一覧に widgets を書いた宣言は INVALID_RESPONSE", async () => {

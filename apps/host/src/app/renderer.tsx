@@ -224,10 +224,11 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           ))}
         </dl>
       )}
-      {view !== null && view.groups !== undefined && (
+      {view !== null && view.groups !== undefined && declaration?.type !== "dashboard" && (
         // 見出しごとの集計（`groupBy`。M1.4。Issue #179）。**API が求めた値をそのまま見せる**
         // （画面は式も集計も評価しない）。求められなかった組（`null`）は「—」で見せ、空の並びと区別する。
         // `enum` の見出しは、宣言の `options` の表示名に写す（月は `YYYY-MM` のまま出す）
+        // **ダッシュボードでは出さない**——棒（`bar`）・円（`pie`）の部品が同じ値を見せる（M1.4。Issue #181）
         <section className="group-values" data-groups="true" aria-label="見出しごとの集計">
           {Object.entries(view.groups).map(([name, entries]) => (
             <div className="group" key={name} data-group-name={name}>
@@ -258,8 +259,14 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
         </p>
       ) : declaration?.type === "dashboard" ? (
         // ダッシュボード（M1.4。Issue #180）。**行を並べない**——部品（`widgets`）が指す計算の値を
-        // `scope` からそのまま見せる（画面は式も集計も評価しない）。単位と「—」（`null`）は部品が決める
-        <Dashboard view={view} parts={declaration.widgets ?? []} />
+        // `scope`（数値の部品）と `groups`（棒・円の部品。Issue #181）からそのまま見せる
+        // （画面は式も集計も評価しない）。単位と「—」（`null`）は部品が決める。
+        // `enum` の見出しは、宣言の `options` の表示名に写す（`groupHeadingOf`。棒・円の凡例にも使う）
+        <Dashboard
+          view={view}
+          parts={declaration.widgets ?? []}
+          headingOf={(groupName, heading) => groupHeadingOf(spec.spec, groupName, heading)}
+        />
       ) : declaration?.type === "settlement" ? (
         // 精算の表示（M1.2）。**画面は計算しない**——API が返した送金の並びを、名前に対応づけて見せる。
         // `settlement` が無い（宣言が無い）ときも `null` として渡し、空の並びに読み替えない

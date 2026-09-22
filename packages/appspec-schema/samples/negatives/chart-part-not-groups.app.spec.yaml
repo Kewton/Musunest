@@ -1,0 +1,40 @@
+# 負例：ダッシュボード（type: dashboard）のグラフの部品（bar）が、見出しごとの集計（type: groups）では
+# ない計算を指している。**棒（bar）と円（pie）が指せるのは、見出しごとの集計（type: groups）の計算だけ**
+# である——「見出しと値の組の並び」を描く部品だからである（M1.4。Issue #181）。ここではアプリ全体の
+# 集計（scope: app の costTotal）を指しているので、UI_DASHBOARD_VALUE_NOT_GROUPS で落ちる。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: activity
+    fields:
+      cost: number
+
+views:
+  - name: dashboard
+    type: dashboard
+    widgets:
+      - type: bar
+        label: 費用の合計
+        value: costTotal
+
+actions:
+  - name: addActivity
+    entity: activity
+
+validations: []
+
+computed:
+  - name: costTotal
+    scope: app
+    aggregate:
+      sum: activity.cost
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

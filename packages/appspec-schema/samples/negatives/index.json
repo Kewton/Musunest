@@ -65,6 +65,13 @@
       "why": "ボード（type: board）の columns が、選択肢（enum）の項目ではなく数の項目 estimate を指している（M1.3）"
     },
     {
+      "name": "chart-part-not-groups",
+      "codes": [
+        "UI_DASHBOARD_VALUE_NOT_GROUPS"
+      ],
+      "why": "グラフの部品（bar）が、見出しごとの集計（type: groups）ではなくアプリ全体の集計（scope: app）の計算 costTotal を指している（棒と円が指せるのは見出しごとの集計だけである。M1.4。Issue #181）"
+    },
+    {
       "name": "computed-cycle",
       "codes": [
         "LOGIC_COMPUTED_CYCLE"
