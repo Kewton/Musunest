@@ -889,11 +889,11 @@ describe("表示名（label）（M1.3）", () => {
   });
 });
 
-// ── 2. 負例 52 件 ──────────────────────────────────────────────
+// ── 2. 負例 54 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 52 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本、M1.4 の #178 で 2 本足した）", () => {
-    expect(negativeIndex.negatives).toHaveLength(52);
+  it("負例の一覧は 54 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本、M1.4 の #178 で 2 本、#180 で 2 本足した）", () => {
+    expect(negativeIndex.negatives).toHaveLength(54);
   });
 
   it.each(negativeCases)(
@@ -2454,5 +2454,171 @@ describe("アプリ全体の集計（scope: app）と平均（avg）（M1.4）",
       ),
     );
     expect(codesOf(result)).toEqual(["LOGIC_COMPUTED_CYCLE"]);
+  });
+});
+
+// ── ダッシュボード（`dashboard`）と数値の部品（M1.4。Issue #180） ──────────
+//
+// **ダッシュボードは行を並べない**——`entity` を持たず、部品（`widgets`）が指すのはアプリ全体の集計
+// （`scope: app`）の計算だけである（行ごとの計算は載る場所が無い）。負例 2 本（dashboard-no-parts・
+// dashboard-number-not-app-scope）が、同じことを外から確かめる。
+
+/** 土台の行ごとの計算（headcount）に、アプリ全体の計算（activityCount）を足した computed 欄 */
+const DASHBOARD_COMPUTED = [BASE_PARTS.computed, APP_COUNT].join("\n");
+
+/** 部品の並び（`widgets:` から）。`lines` は部品の欄である */
+const widgets = (parts: readonly string[]): string => ["    widgets:", ...parts].join("\n");
+
+/** 部品 1 つ（`      - <先頭の欄>` から）。`lines` は部品の欄である */
+const part = (lines: readonly string[]): string =>
+  [`      - ${lines[0] ?? ""}`, ...lines.slice(1).map((line) => `        ${line}`)].join("\n");
+
+/** 数値の部品 1 つ（`type: number` と、渡した欄）。`lines` は部品の欄（`value:` など）である */
+const numberPart = (lines: readonly string[]): string => part(["type: number", ...lines]);
+
+/** ダッシュボードの一覧（`type: dashboard`）を持つ宣言 */
+const withDashboard = (
+  parts: readonly string[],
+  computedBody = DASHBOARD_COMPUTED,
+): string =>
+  declaration({
+    views: ["  - name: dashboard", "    type: dashboard", ...parts].join("\n"),
+    computed: computedBody,
+  });
+
+describe("ダッシュボード（dashboard）と数値の部品（M1.4。Issue #180）", () => {
+  it("見本 dashboard は静的チェックに通り、dashboard の一覧を entity なしで写す", () => {
+    const result = checkSpec(read(sampleSpecFile("dashboard")));
+    expect(result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("dashboard が静的チェックに通らない");
+    const dashboard = result.spec.views.find((view) => view.name === "dashboard");
+    // **`entity` を持たない**（写しても足さない）。部品は宣言の順に、`unit` つきで写る
+    expect(dashboard).toEqual({
+      name: "dashboard",
+      type: "dashboard",
+      widgets: [
+        { type: "number", label: "今月の活動", value: "activityCount", unit: "回" },
+        { type: "number", label: "今月の参加（のべ）", value: "attendeeTotal", unit: "人" },
+        { type: "number", label: "1 回あたりの参加", value: "averageAttendees", unit: "人" },
+        { type: "number", label: "今月の費用の平均", value: "averageCost", unit: "円" },
+      ],
+    });
+    expect(dashboard).not.toHaveProperty("entity");
+  });
+
+  it("部品の `value` がアプリ全体の計算を指せば通り、`label` と `unit` は書いてあるときだけ写す", () => {
+    const result = checkSpec(
+      withDashboard([widgets([numberPart(["value: activityCount"])])]),
+    );
+    expect(result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("dashboard が通らない");
+    expect(result.spec.views[0]).toEqual({
+      name: "dashboard",
+      type: "dashboard",
+      widgets: [{ type: "number", value: "activityCount" }],
+    });
+  });
+
+  it("部品が**行ごとの計算**を指せば UI_DASHBOARD_VALUE_NOT_APP_SCOPE（負例と同じ形）", () => {
+    const result = failure(
+      checkSpec(withDashboard([widgets([numberPart(["value: headcount"])])])),
+    );
+    expect(codesOf(result)).toEqual(["UI_DASHBOARD_VALUE_NOT_APP_SCOPE"]);
+    // メッセージに、指した名前が出る（人が直せるように）
+    expect(messagesOf(result, "UI_DASHBOARD_VALUE_NOT_APP_SCOPE")).toContain("headcount");
+  });
+
+  it("部品が実在しない名前を指しても、同じ UI_DASHBOARD_VALUE_NOT_APP_SCOPE で落ちる", () => {
+    const result = failure(
+      checkSpec(withDashboard([widgets([numberPart(["value: ammount"])])])),
+    );
+    expect(codesOf(result)).toEqual(["UI_DASHBOARD_VALUE_NOT_APP_SCOPE"]);
+  });
+
+  it("部品が 1 つも無ければ SHAPE_KEY_MISSING（部品が無ければ何も見せられない）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          views: ["  - name: dashboard", "    type: dashboard"].join("\n"),
+          computed: DASHBOARD_COMPUTED,
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_MISSING"]);
+  });
+
+  it("部品の並びが空でも SHAPE_KEY_MISSING である", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          views: ["  - name: dashboard", "    type: dashboard", "    widgets: []"].join("\n"),
+          computed: DASHBOARD_COMPUTED,
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_MISSING"]);
+  });
+
+  it("dashboard に `entity` を書けば SHAPE_KEY_UNKNOWN（行を並べない）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          views: ["  - name: dashboard", "    type: dashboard", "    entity: expense", ...widgets([numberPart(["value: activityCount"])]).split("\n")].join("\n"),
+          computed: DASHBOARD_COMPUTED,
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
+  });
+
+  it("dashboard に `show` を書けば SHAPE_KEY_UNKNOWN（列の並びを持たない）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          views: ["  - name: dashboard", "    type: dashboard", "    show: [amount]", ...widgets([numberPart(["value: activityCount"])]).split("\n")].join("\n"),
+          computed: DASHBOARD_COMPUTED,
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
+  });
+
+  it("知らない部品の種類（bar）は SHAPE_KEY_UNKNOWN（語彙は閉じている）", () => {
+    const result = failure(
+      checkSpec(
+        withDashboard([widgets([part(["type: bar", "value: activityCount"])])]),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
+  });
+
+  it("部品に `value` が無ければ SHAPE_KEY_MISSING、`unit` が空なら SHAPE_VALUE_INVALID", () => {
+    const missing = failure(
+      checkSpec(withDashboard([widgets([["      - type: number", "        label: 出し物"].join("\n")])])),
+    );
+    expect(codesOf(missing)).toEqual(["SHAPE_KEY_MISSING"]);
+    const emptyUnit = failure(
+      checkSpec(withDashboard([widgets([numberPart(["value: activityCount", "unit:"])])])),
+    );
+    expect(codesOf(emptyUnit)).toEqual(["SHAPE_VALUE_INVALID"]);
+  });
+
+  it("部品の `label` が空なら SHAPE_LABEL_EMPTY（項目・計算の label と同じ扱い）", () => {
+    const result = failure(
+      checkSpec(withDashboard([widgets([numberPart(["value: activityCount", "label:"])])])),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_LABEL_EMPTY"]);
+  });
+
+  it("dashboard でなければ、`widgets` は書けない（SHAPE_KEY_UNKNOWN）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          views: ["  - name: expenseList", "    entity: expense", ...widgets([numberPart(["value: activityCount"])]).split("\n")].join("\n"),
+          computed: DASHBOARD_COMPUTED,
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
   });
 });

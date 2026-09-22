@@ -2712,3 +2712,60 @@ describe("dashboard のアプリ全体の集計（scope）と平均（avg）（M
     expect(records.listCalls).toEqual(["activity"]);
   });
 });
+
+// ── ダッシュボード（dashboard）と数値の部品（M1.4。Issue #180） ──────────────
+//
+// **この Issue で足す語彙（`dashboard` と `widgets` の `number`・`unit`）を含む正規化 JSON を、
+// `getSpec` と `getView` が `ok` で返す**ことをここで確かめる（docs/parallel-development.md §7.3）。
+// ダッシュボードの一覧は**行を返さない**（`rows` は空の並びで、`entity` を持たない）——部品が読む値は、
+// 一覧の応答の `scope` に 1 回で載る（追記 2・追記 4）。
+
+describe("dashboard の部品が読む値（M1.4。Issue #180）", () => {
+  it("dashboard と widgets を含む正規化 JSON を、getSpec が ok で返す", async () => {
+    const run = await runDashboard();
+    const result = await getSpec(run.deps, DASHBOARD_INSTANCE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // ダッシュボードの一覧は、**entity を持たず**、部品（widgets）を宣言の順に持つ（`unit` つき）
+    expect(result.body.spec.views).toContainEqual({
+      name: "dashboard",
+      type: "dashboard",
+      widgets: [
+        { type: "number", label: "今月の活動", value: "activityCount", unit: "回" },
+        { type: "number", label: "今月の参加（のべ）", value: "attendeeTotal", unit: "人" },
+        { type: "number", label: "1 回あたりの参加", value: "averageAttendees", unit: "人" },
+        { type: "number", label: "今月の費用の平均", value: "averageCost", unit: "円" },
+      ],
+    });
+  });
+
+  it("getView が dashboard を ok で返し、**行を返さず**、部品の値を scope に載せる", async () => {
+    const run = await runDashboard();
+    const view = await dashboardView(run.deps, "dashboard");
+    // 行を並べない——`rows` は空の並びで、`entity` も `fields`・`computed` も持たない
+    expect(view.rows).toEqual([]);
+    expect(view.entity).toBeUndefined();
+    expect(view.fields).toEqual([]);
+    expect(view.computed).toEqual([]);
+    // 部品が読む値は、行ではなく `scope` に 1 回で載る（単位は宣言が持ち、値はここにある）
+    expect(view.scope).toEqual({
+      activityCount: 3,
+      attendeeTotal: 6,
+      averageAttendees: 2,
+      averageCost: 10000 / 3,
+    });
+  });
+
+  it("getView は、対象が 0 件なら値を 0 と null で区別して返す（0 に読み替えない）", async () => {
+    // 記録を 1 件も入れない——count・sum は 0、avg は null である（追記 1 の決定）
+    const deps = dashboardDeps(new FakeRecordStore());
+    const view = await dashboardView(deps, "dashboard");
+    expect(view.rows).toEqual([]);
+    expect(view.scope).toEqual({
+      activityCount: 0,
+      attendeeTotal: 0,
+      averageAttendees: null,
+      averageCost: null,
+    });
+  });
+});

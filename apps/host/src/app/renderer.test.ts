@@ -1658,3 +1658,113 @@ describe("表示名（label）を画面へ写す（M1.3）", () => {
     expect(mark?.textContent).not.toContain("overdue");
   });
 });
+
+// ── ダッシュボード（`dashboard`）と数値の部品を画面へ写す（M1.4。Issue #180） ──
+//
+// **宣言からの写像**を見る（`form.test.ts` は入力欄の部品しか見ていない。`docs/parallel-development.md` §7.3）。
+// ダッシュボードは**行を並べない**——部品（`widgets`）が指す計算の値を `scope` からそのまま見せる
+// （画面は式も集計も評価しない）。**単位（`unit`）と見出し（`label`）は宣言が持ち**、値の `null` は
+// 「—」で見せて 0 と区別する。
+
+/** dashboard の一覧（`widgets` つき）を先頭に置いた宣言。部品が指すのは `scope: app` の計算である */
+const DASHBOARD_SPEC: ApiSpecBody = {
+  ...SPEC,
+  spec: {
+    ...SPEC.spec,
+    views: [
+      {
+        name: "dashboard",
+        type: "dashboard",
+        widgets: [
+          { type: "number", label: "今月の活動", value: "activityCount", unit: "回" },
+          { type: "number", label: "1 回あたりの参加", value: "averageAttendees", unit: "人" },
+          // `label` を書かない部品は、`value` の識別子をそのまま見出しにする
+          { type: "number", value: "averageCost", unit: "円" },
+        ],
+      },
+    ],
+    computed: [
+      {
+        name: "activityCount",
+        scope: "app",
+        aggregate: { kind: "count", entity: "expense", name: null, where: {} },
+        type: "number",
+      },
+      {
+        name: "averageAttendees",
+        scope: "app",
+        aggregate: { kind: "avg", entity: "expense", name: "amount", where: {} },
+        type: "number",
+      },
+      {
+        name: "averageCost",
+        scope: "app",
+        aggregate: { kind: "avg", entity: "expense", name: "discount", where: {} },
+        type: "number",
+      },
+    ],
+  },
+};
+
+/** ダッシュボードの応答。**行を返さず**、部品の値を `scope` に載せる（`entity` を持たない） */
+const DASHBOARD_VIEW: ApiViewBody = {
+  instanceId: "inst-1",
+  view: "dashboard",
+  fields: [],
+  computed: [],
+  permissions: { read: true, write: true },
+  actions: [],
+  rows: [],
+  scope: { activityCount: 3, averageAttendees: 2.5, averageCost: null },
+};
+
+const dashboardClient = (view: ApiViewBody = DASHBOARD_VIEW): MusunestClient =>
+  makeClient({
+    spec: () => Promise.resolve(okResult(DASHBOARD_SPEC)),
+    view: () => Promise.resolve(okResult(view)),
+  });
+
+/** `data-part` の部品が出している値（`dd` の中身） */
+const partValueOf = (container: HTMLElement, name: string): string =>
+  container.querySelector(`[data-part="${name}"] dd`)?.textContent ?? "";
+
+/** `data-part` の部品の見出し（`dt` の中身） */
+const partHeadingOf = (container: HTMLElement, name: string): string =>
+  container.querySelector(`[data-part="${name}"] dt`)?.textContent ?? "";
+
+describe("ダッシュボード（dashboard）と数値の部品を画面へ写す（M1.4）", () => {
+  it("部品が指す計算の値を、宣言の単位と見出しつきで出す（受入条件）", async () => {
+    const { container } = await renderScreen(dashboardClient());
+
+    await screen.findByText("今月の活動");
+    // 見出しは宣言の `label`、値は `scope` の数に単位を添えたものである
+    expect(partHeadingOf(container, "activityCount")).toBe("今月の活動");
+    expect(partValueOf(container, "activityCount")).toBe("3 回");
+    expect(partValueOf(container, "averageAttendees")).toBe("2.5 人");
+    // `label` を書かない部品は、識別子をそのまま見出しにする
+    expect(partHeadingOf(container, "averageCost")).toBe("averageCost");
+  });
+
+  it("値が null の部品は「—」で見せ、0 と区別する（受入条件）", async () => {
+    const { container } = await renderScreen(
+      dashboardClient({ ...DASHBOARD_VIEW, scope: { activityCount: 0, averageCost: null } }),
+    );
+
+    await screen.findByText("今月の活動");
+    // 0 はそのまま 0、求められなかった値は「—」である（**0 に読み替えない**）
+    expect(partValueOf(container, "activityCount")).toBe("0 回");
+    expect(partValueOf(container, "averageCost")).toBe("— 円");
+    expect(partValueOf(container, "activityCount")).not.toBe(partValueOf(container, "averageCost"));
+  });
+
+  it("**行を並べない**——`scope` の汎用の欄は出さず、部品だけを出す", async () => {
+    const { container } = await renderScreen(dashboardClient());
+
+    await screen.findByText("今月の活動");
+    // ダッシュボードは部品が値を出すので、`scope` の汎用の並び（`data-scope`）は出さない
+    expect(container.querySelector('[data-scope="true"]')).toBeNull();
+    expect(container.querySelector(".dashboard")).not.toBeNull();
+    // 行を並べる部品（表）は出ない
+    expect(container.querySelector(".instant-table")).toBeNull();
+  });
+});

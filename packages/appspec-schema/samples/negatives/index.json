@@ -100,6 +100,20 @@
       "why": "店頭が用意していない関数 round を使っている（M1.1 は min・max・len だけ）"
     },
     {
+      "name": "dashboard-no-parts",
+      "codes": [
+        "SHAPE_KEY_MISSING"
+      ],
+      "why": "ダッシュボード（type: dashboard）に部品（widgets）が 1 つも無い（部品が無ければ何も見せられない。M1.4。Issue #180）"
+    },
+    {
+      "name": "dashboard-number-not-app-scope",
+      "codes": [
+        "UI_DASHBOARD_VALUE_NOT_APP_SCOPE"
+      ],
+      "why": "数値の部品が、行ごとの計算 costOfActivity を指している（部品が指せるのはアプリ全体の集計（scope: app）だけである。M1.4。Issue #180）"
+    },
+    {
       "name": "date-compared-with-number",
       "codes": [
         "LOGIC_OPERAND_TYPE_MISMATCH"
