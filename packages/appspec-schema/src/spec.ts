@@ -602,13 +602,53 @@ export const COMPARISON_OPERATORS = [">", ">=", "<", "<=", "==", "!="] as const;
  *                  その値ごとにカードを並べる。`highlight` が指す真偽の計算が真の行に印を付ける
  *   `list`       … 一覧（M1.3）。**縦に積む**見せ方で、狭い画面に向く。`show` の扱いは `table` と
  *                  揃え、`filters` で画面の中を絞り込める（docs/semantics.md「view」「filters」）
+ *   `dashboard`  … ダッシュボード（M1.4。Issue #180）。**行を並べない**——計算した値そのものを
+ *                  `widgets` に並べる。**`entity` を持たない**（アプリ全体の値を並べるだけである）
  *
  * **`list` は、データ層の項目の型 `list`（文字列の並び）と同じ語である**——1 つの語が 2 つの層に
  * 現れるのは、この語だけである（語彙の台帳は 1 行 1 語彙なので、画面の種類の側は台帳に行を分けず、
  * 「view」の節で扱う。`vocabulary.yaml` の注記も見ること）。
+ *
+ * **`dashboard` も、データ層の項目の型としての `number` と同じ語を使う**——部品の種類 `number` は
+ * 台帳に行を分けず、「dashboard」の節で扱う（`board` の `columns`・`highlight` と同じ扱いである）。
  */
-export const VIEW_TYPES = ["table", "settlement", "board", "list"] as const;
+export const VIEW_TYPES = ["table", "settlement", "board", "list", "dashboard"] as const;
 export type ViewType = (typeof VIEW_TYPES)[number];
+
+/**
+ * ダッシュボード（`type: dashboard`）に並べる部品の種類（M1.4。Issue #180）。
+ * **語彙は閉じている**——この Issue で書けるのは数値の部品 `number` だけである
+ * （棒 `bar`・円 `pie`・順位 `ranking` は後続の #181・#182）。
+ */
+export const VIEW_PART_TYPES = ["number"] as const;
+export type ViewPartType = (typeof VIEW_PART_TYPES)[number];
+
+/**
+ * 数値の部品（`type: number`。M1.4。Issue #180）。**アプリ全体の集計（`scope: app`）の計算**を
+ * 1 つ指し、その値を単位つきで見せる。
+ *
+ * ```yaml
+ * widgets:
+ *   - { type: number, label: 今月の活動, value: activityCount, unit: 回 }
+ * ```
+ *
+ * - **`value` は、アプリ全体の集計の計算の名前だけを指せる**（`scope: app`）。行ごとの計算を
+ *   指せば静的チェックが `UI_DASHBOARD_VALUE_NOT_APP_SCOPE` で断る——ダッシュボードは行を並べないので、
+ *   どの行の値かが決まらないからである（docs/semantics.md「dashboard」）
+ * - **単位（`unit`）は任意**である（「回」「人」「円」など）。書かなければ数をそのまま見せる
+ * - **表示名（`label`）も任意**である。書かなければ `value` の識別子をそのまま見せる
+ * - **値が求められなかった（`null`）ときは画面が「—」で見せ、0 と区別する**（「computed」の節と同じ）
+ */
+export interface NumberPart extends LabeledDeclaration {
+  readonly type: "number";
+  /** アプリ全体の集計（`scope: app`）の計算の名前 */
+  readonly value: string;
+  /** 単位（「回」「人」「円」など。任意）。書かなければ数をそのまま見せる */
+  readonly unit?: string;
+}
+
+/** ダッシュボードに並べる部品（M1.4。Issue #180）。いま書けるのは数値の部品だけである */
+export type ViewPart = NumberPart;
 
 /**
  * 一覧。種類の指定の無い一覧（M1.1）は、その entity のすべてのレコードを登録順に並べる。
@@ -620,10 +660,16 @@ export type ViewType = (typeof VIEW_TYPES)[number];
  *   `type: settlement`       … 上に `type`。`show` は書けない（列の並びを持たない）
  *   `type: board`            … 上に `type`・`columns`（必須）・`highlight`（任意）
  *   `type: list`             … 上に `type`・`show`（任意。扱いは `table` と同じ）・`filters`（任意）
+ *   `type: dashboard`        … 上に `type`・`widgets`（必須。M1.4。Issue #180）。**`entity` は書かない**
  */
 export interface View {
   readonly name: string;
-  readonly entity: string;
+  /**
+   * 並べる行の entity。**`dashboard` は持たない**（M1.4。Issue #180）——行を並べず、アプリ全体の値を
+   * 並べるだけだからである（`scope: app` の計算が `entity` を持たないのと同じ理由である）。
+   * 正規化した JSON にも `entity` は現れない。書けば静的チェックが `SHAPE_KEY_UNKNOWN` で断る。
+   */
+  readonly entity?: string;
   /** 一覧の種類（M1.2・M1.3）。書かなければ種類の指定の無い一覧である */
   readonly type?: ViewType;
   /**
@@ -658,6 +704,14 @@ export interface View {
    * `type: list` のときだけ書ける（ほかの種類は列の並びを持たない）。
    */
   readonly filters?: readonly string[];
+  /**
+   * ダッシュボード（`type: dashboard`）に並べる部品（M1.4。Issue #180）。**`type: dashboard` では必須**である
+   * （部品が無ければダッシュボードにならない）。**1 つ以上の部品を書く**——空の並びは静的チェックが
+   * `SHAPE_KEY_MISSING` で断る。ほかの種類の一覧では書けない（`SHAPE_KEY_UNKNOWN`）。
+   *
+   * **値は部品ごとに取りに行かない。** アプリ全体の値は一覧の応答の `scope` に 1 回で載る（M1.4。Issue #177）。
+   */
+  readonly widgets?: readonly ViewPart[];
 }
 
 // ── 権限 ────────────────────────────────────────────────────────
@@ -755,6 +809,7 @@ export const VOCABULARY = {
   table: "ui",
   settlement: "ui",
   board: "ui",
+  dashboard: "ui",
   label: "ui",
   filters: "ux",
   permission: "permission",

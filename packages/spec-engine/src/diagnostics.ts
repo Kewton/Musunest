@@ -146,6 +146,12 @@ export const DIAGNOSTIC_CODES = [
   "UI_BOARD_COLUMNS_NOT_ENUM",
   /** ボードの `highlight` が、その entity の真偽を返す計算を指していない（M1.3） */
   "UI_HIGHLIGHT_NOT_BOOLEAN",
+  /**
+   * ダッシュボード（`type: dashboard`）の数値の部品の `value` が、**アプリ全体の集計（`scope: app`）の
+   * 計算**を指していない（無い、または行ごとの計算である。M1.4。Issue #180）——ダッシュボードは行を
+   * 並べないので、どの行の値かが決まらない
+   */
+  "UI_DASHBOARD_VALUE_NOT_APP_SCOPE",
   /** 絞り込み（`filters`）が指す名前が、その一覧の `show` に無い（M1.3） */
   "UI_FILTER_FIELD_NOT_SHOWN",
   /** 絞り込み（`filters`）が、その entity の選択肢（`enum`）でも参照（`ref`）でもない項目を指している（M1.3） */

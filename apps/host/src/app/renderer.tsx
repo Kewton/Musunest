@@ -40,6 +40,7 @@ import type { AddFormResult, FormField, FormOption } from "./form";
 import { SettlementList } from "./settlement";
 import { Board } from "./board";
 import { ListScreen } from "./list";
+import { Dashboard } from "./dashboard";
 import type { FilterField } from "./list";
 import "./renderer.css";
 
@@ -210,9 +211,10 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           ))}
         </nav>
       )}
-      {view !== null && view.scope !== undefined && (
+      {view !== null && view.scope !== undefined && declaration?.type !== "dashboard" && (
         // アプリ全体の集計（`scope: app`。M1.4。Issue #177）。**API が求めた値をそのまま見せる**
-        // （画面は式も集計も評価しない）。求められなかった値（`null`）は「—」で見せ、0 と区別する
+        // （画面は式も集計も評価しない）。求められなかった値（`null`）は「—」で見せ、0 と区別する。
+        // **ダッシュボードでは出さない**——部品（`widgets`）が単位つきで同じ値を出す（M1.4。Issue #180）
         <dl className="scope-values" data-scope="true" aria-label="アプリ全体の集計">
           {Object.entries(view.scope).map(([name, value]) => (
             <div className="scope-value" key={name} data-scope-name={name}>
@@ -254,6 +256,10 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
         <p className="state" data-state="noview">
           表示できる一覧がありません
         </p>
+      ) : declaration?.type === "dashboard" ? (
+        // ダッシュボード（M1.4。Issue #180）。**行を並べない**——部品（`widgets`）が指す計算の値を
+        // `scope` からそのまま見せる（画面は式も集計も評価しない）。単位と「—」（`null`）は部品が決める
+        <Dashboard view={view} parts={declaration.widgets ?? []} />
       ) : declaration?.type === "settlement" ? (
         // 精算の表示（M1.2）。**画面は計算しない**——API が返した送金の並びを、名前に対応づけて見せる。
         // `settlement` が無い（宣言が無い）ときも `null` として渡し、空の並びに読み替えない
@@ -312,8 +318,8 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
         <section className="add" aria-label="追加">
           <AddForm
             action={action.name}
-            fields={formFields(spec.spec, view.entity, references)}
-            guidance={guidanceOf(spec.spec, view.entity)}
+            fields={formFields(spec.spec, view.entity ?? "", references)}
+            guidance={guidanceOf(spec.spec, view.entity ?? "")}
             onSubmit={addRecord}
           />
         </section>

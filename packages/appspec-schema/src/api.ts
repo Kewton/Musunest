@@ -250,7 +250,12 @@ export interface ApiSpecBody {
 export interface ApiViewBody {
   readonly instanceId: string;
   readonly view: string;
-  readonly entity: string;
+  /**
+   * 並べる行の entity。**ダッシュボード（`type: dashboard`。M1.4。Issue #180）は持たない**——
+   * 行を並べず、アプリ全体の値（`scope`）を部品で見せるだけだからである（`rows` は空の並びである）。
+   * 宣言（`View`）が `entity` を持たないのと同じである。読む側は、行を並べる一覧のときだけこの欄を読む。
+   */
+  readonly entity?: string;
   /**
    * 項目の名前（宣言の順）。**表（`type: table`）の列の順ではない**——列の順は宣言の `show` が
    * あればそちらが決め、無ければ「この並び（項目の宣言の順）に続いて `computed` の並び」である

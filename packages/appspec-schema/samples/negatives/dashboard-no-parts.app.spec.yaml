@@ -1,0 +1,34 @@
+# 負例：ダッシュボード（type: dashboard）に部品（widgets）が 1 つも無い。
+# ダッシュボードは**行を並べない**——部品が無ければ何も見せられないので、widgets は必須である
+# （M1.4。Issue #180）。期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: activity
+    fields:
+      cost: number
+
+views:
+  - name: dashboard
+    type: dashboard
+
+actions:
+  - name: addActivity
+    entity: activity
+
+validations: []
+
+computed:
+  - name: costTotal
+    scope: app
+    aggregate:
+      sum: activity.cost
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

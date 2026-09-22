@@ -23,6 +23,7 @@ import {
   PERMISSION_NAMES,
   PERMISSION_SUBJECTS,
   RESERVED_NAMES,
+  VIEW_PART_TYPES,
   VIEW_TYPES,
   enumKeys,
   expressionTypeOf,
@@ -44,6 +45,7 @@ import {
   type FieldKind,
   type FieldType,
   type Period,
+  type ViewPart,
   type ViewType,
 } from "@musunest/appspec-schema";
 import {
@@ -1135,8 +1137,27 @@ interface ShowFieldDraft {
   readonly node: YamlNode;
 }
 
-/** 一覧（`views`）。M1.2 で `type`（種類）と `show`（表に出す名前の順）、M1.3 でボードの `columns`・`highlight` と、一覧の `filters` を足した */
-interface ViewDraft extends EntityReferenceDraft {
+/**
+ * ダッシュボードの部品（`widgets` の 1 つ。M1.4。Issue #180）。いま書けるのは数値の部品だけである。
+ * **`value` の実在と種類は、計算を読んだあとで見る**（`UI_DASHBOARD_VALUE_NOT_APP_SCOPE`）。
+ */
+interface ViewPartDraft {
+  /** 指すアプリ全体の計算の名前 */
+  readonly value: string;
+  readonly valueNode: YamlNode;
+  /** 表示名（`label`）。無ければ `null`（画面は識別子をそのまま出す） */
+  readonly label: string | null;
+  /** 単位（`unit`）。無ければ `null`（画面は数をそのまま見せる） */
+  readonly unit: string | null;
+  /** 読み取りの時点で断った（`value` が無い・空、など）。実在の検査を重ねない（1 つの誤りを 2 つに数えない） */
+  readonly malformed: boolean;
+}
+
+/** 一覧（`views`）。M1.2 で `type`（種類）と `show`（表に出す名前の順）、M1.3 でボードの `columns`・`highlight` と、一覧の `filters` を、M1.4 でダッシュボードの `widgets` を足した */
+interface ViewDraft extends NamedDraft {
+  /** 並べる行の entity。**ダッシュボード（`type: dashboard`）は持たない**ので `null`（M1.4） */
+  readonly entity: string | null;
+  readonly entityNode: YamlNode | null;
   /** 一覧の種類。書いていなければ `null`（種類の指定の無い一覧。M1.1 と同じ） */
   readonly type: ViewType | null;
   /** 表に出す名前（宣言の順）。`show` を書いていなければ `null` */
@@ -1147,6 +1168,8 @@ interface ViewDraft extends EntityReferenceDraft {
   readonly highlight: ShowFieldDraft | null;
   /** 画面で絞り込む項目の名前（宣言の順）。`filters` を書いていなければ `null`（M1.3） */
   readonly filters: readonly ShowFieldDraft[] | null;
+  /** ダッシュボードに並べる部品（宣言の順）。`widgets` を書いていなければ `null`（M1.4。Issue #180） */
+  readonly widgets: readonly ViewPartDraft[] | null;
 }
 
 /**
@@ -1248,7 +1271,88 @@ const VIEW_KEYS: Readonly<Record<ViewType, readonly string[]>> = {
   board: ["name", "entity", "type", "columns", "highlight"],
   // 一覧（M1.3）。`show` の扱いは `table` と揃え、画面で絞り込む項目（`filters`）を持てる
   list: ["name", "entity", "type", "show", "filters"],
+  // ダッシュボード（M1.4。Issue #180）。**行を並べないので `entity` を持たない**——部品（`widgets`）を並べる
+  dashboard: ["name", "type", "widgets"],
 };
+
+/**
+ * ダッシュボードの部品（`widgets`。M1.4。Issue #180）を読む。**1 つ以上書く**——欄そのものが無い・
+ * 空の並びのときは `SHAPE_KEY_MISSING`（部品が無ければダッシュボードにならない）。**`value` の実在と
+ * 種類は、計算を読んだあとで見る**（`UI_DASHBOARD_VALUE_NOT_APP_SCOPE`）。
+ */
+function readWidgets(member: MemberReader, report: Report): readonly ViewPartDraft[] {
+  const entry = entryOf(member.map, "widgets");
+  if (entry === undefined) {
+    report("SHAPE_KEY_MISSING", "view に widgets が無い（dashboard は部品を 1 つ以上並べる）", positionOf(member.map));
+    return [];
+  }
+  if (entry.value.kind !== "seq") {
+    report("SHAPE_VALUE_INVALID", "view の widgets は、部品を並べた [ … ] で書く", positionOf(entry.value));
+    return [];
+  }
+  if (entry.value.items.length === 0) {
+    report(
+      "SHAPE_KEY_MISSING",
+      "view の widgets が空である（dashboard は部品を 1 つ以上並べる）",
+      positionOf(entry.value),
+    );
+    return [];
+  }
+  const parts: ViewPartDraft[] = [];
+  entry.value.items.forEach((item, index) => {
+    if (item.kind !== "map") {
+      report(
+        "SHAPE_VALUE_INVALID",
+        `view の widgets の ${index + 1} 番目は「欄: 値」を並べた写像で書く`,
+        positionOf(item),
+      );
+      return;
+    }
+    const what = `widgets[${index + 1}]`;
+    const widget = new MemberReader(item, what, report);
+    widget.only(["type", "value", "label", "unit"]);
+    // 部品の種類。**語彙は閉じている**——いま書けるのは数値の部品（`number`）だけである（M1.4）
+    const typeEntry = entryOf(item, "type");
+    if (typeEntry === undefined) {
+      report("SHAPE_KEY_MISSING", `view の ${what} に type が無い（いま書ける部品は ${VIEW_PART_TYPES.join("・")} である）`, positionOf(item));
+    } else if (typeEntry.value.kind !== "scalar" || !isOneOf(VIEW_PART_TYPES, typeEntry.value.text)) {
+      report(
+        "SHAPE_KEY_UNKNOWN",
+        `view の ${what} の type ${typeEntry.value.kind === "scalar" ? typeEntry.value.text : "?"} は書けない（いま書ける部品は ${VIEW_PART_TYPES.join("・")} である）`,
+        positionOf(typeEntry.value),
+      );
+    }
+    // 指す計算（`value`）。必須の、空でない文字列である
+    const value = widget.text("value");
+    // 表示名（`label`）は任意である。書いてあれば空でない文字列でなければならない（項目・計算の label と同じ）
+    const { label } = readLabel(item, `view の ${what}`, report);
+    // 単位（`unit`）も任意である。書いてあれば空でない文字列でなければならない
+    const unit = readUnit(widget, what, report);
+    parts.push({
+      value: value?.text ?? "",
+      valueNode: value?.node ?? { kind: "null", line: 0, column: 0 },
+      label,
+      unit,
+      // `value` を読めなかった（無い・空）ときは、実在の検査を重ねない（`SHAPE_KEY_MISSING` が既に出ている）
+      malformed: value === null,
+    });
+  });
+  return parts;
+}
+
+/**
+ * 部品の単位（`unit`。M1.4。Issue #180）を読む。**任意**である。書いてあれば、空でない文字列で
+ * なければならない（「回」「人」「円」など。空文字は単位にならない）。
+ */
+function readUnit(member: MemberReader, what: string, report: Report): string | null {
+  const entry = entryOf(member.map, "unit");
+  if (entry === undefined) return null;
+  if (entry.value.kind !== "scalar" || entry.value.text === "") {
+    report("SHAPE_VALUE_INVALID", `view の ${what} の unit は空でない文字列で書く`, positionOf(entry.value));
+    return null;
+  }
+  return entry.value.text;
+}
 
 /**
  * 一覧（`views`）を読む。**書ける欄は `type` が決める**（語彙は閉じている。src/spec.ts の `View`）。
@@ -1257,6 +1361,7 @@ const VIEW_KEYS: Readonly<Record<ViewType, readonly string[]>> = {
  *   `settlement`… 上に `type`                 （列の並びを持たないので `show` は書けない）
  *   `board`     … 上に `type`・`columns`（必須）・`highlight`（任意。M1.3）
  *   `list`      … 上に `type`・`show`・`filters`（M1.3）
+ *   `dashboard` … 上に `type`・`widgets`（必須。M1.4。**`entity` は書けない**）
  */
 function readViews(items: readonly YamlNode[], report: Report): readonly ViewDraft[] {
   const views: ViewDraft[] = [];
@@ -1271,13 +1376,15 @@ function readViews(items: readonly YamlNode[], report: Report): readonly ViewDra
 
     const name = member.text("name");
     if (name !== null) checkName(name.text, "view", positionOf(name.node), report);
-    const entity = member.text("entity");
+    // **ダッシュボードは行を並べないので `entity` を持たない**（M1.4。Issue #180）。書けば、上の
+    // `member.only` が `SHAPE_KEY_UNKNOWN` で断る（`scope: app` に `entity` を書いたときと揃える）
+    const entity = type === "dashboard" ? null : member.text("entity");
     const hasShow = type === "table" || type === "list";
     views.push({
       name: name?.text ?? "",
       nameNode: name?.node ?? null,
-      entity: entity?.text ?? "",
-      entityNode: entity?.node ?? { kind: "null", line: 0, column: 0 },
+      entity: entity?.text ?? null,
+      entityNode: entity?.node ?? null,
       type,
       show: hasShow ? readViewNames(member, "show", report) : null,
       // ボードの `columns` は必須である（列が無ければボードにならない）。`highlight` は任意である
@@ -1285,6 +1392,8 @@ function readViews(items: readonly YamlNode[], report: Report): readonly ViewDra
       highlight: type === "board" ? readViewName(member, "highlight", false, report) : null,
       // 絞り込み（`filters`）は一覧（`type: list`）でだけ書ける（M1.3）
       filters: type === "list" ? readViewNames(member, "filters", report) : null,
+      // 部品（`widgets`）はダッシュボード（`type: dashboard`）でだけ書ける（M1.4）
+      widgets: type === "dashboard" ? readWidgets(member, report) : null,
     });
   });
   checkDuplicates(
@@ -2436,6 +2545,34 @@ function checkSettleSlots(computed: readonly ComputedDraft[], report: Report): v
 }
 
 /**
+ * ダッシュボード（`type: dashboard`）の部品を検査する（M1.4。Issue #180）。
+ *
+ * **数値の部品が指す `value` は、アプリ全体の集計（`scope: app`）の計算でなければならない。**
+ * ダッシュボードは**行を並べない**ので、行ごとの計算は載る場所が無い（どの行の値かが決まらない）。
+ * 無い名前・行ごとの計算は、どちらも `UI_DASHBOARD_VALUE_NOT_APP_SCOPE` で断る。
+ */
+function checkDashboardWidgets(
+  view: ViewDraft,
+  computed: readonly ComputedDraft[],
+  report: Report,
+): void {
+  for (const part of view.widgets ?? []) {
+    // `value` を読めなかった部品は、ここでは見ない（1 つの誤りを 2 つのコードに数えない）
+    if (part.malformed) continue;
+    const isAppScope = computed.some(
+      (entry) => entry.scope === "app" && entry.settle === null && !entry.malformed && entry.name === part.value,
+    );
+    if (!isAppScope) {
+      report(
+        "UI_DASHBOARD_VALUE_NOT_APP_SCOPE",
+        `view ${view.name} の widgets の ${part.value} が、アプリ全体の集計（scope: app）の計算でない`,
+        positionOf(part.valueNode),
+      );
+    }
+  }
+}
+
+/**
  * **アプリ全体の計算（`scope: app`。M1.4。Issue #177）**の意味を検査する。
  * entity に属さないので、項目との名前の重なりも、精算も見ない（精算は読み取りの時点で断る）。
  * 参照できるのは**ほかのアプリ全体の計算だけ**である。
@@ -2724,6 +2861,16 @@ function buildAggregate(draft: AggregateDraft): Aggregate {
   };
 }
 
+/** 読み取った部品を、宣言の形（`ViewPart`）にする。**表示名と単位は書いてあるときだけ入れる**（M1.4。Issue #180） */
+function buildWidgets(drafts: readonly ViewPartDraft[]): readonly ViewPart[] {
+  return drafts.map((part) => ({
+    type: "number" as const,
+    value: part.value,
+    ...(part.label === null ? {} : { label: part.label }),
+    ...(part.unit === null ? {} : { unit: part.unit }),
+  }));
+}
+
 function buildSpec(drafts: Drafts): AppSpec | null {
   const { entities, views, actions, validations, computed, permissions, identityMode } = drafts;
   const built: Entity[] = [];
@@ -2809,16 +2956,18 @@ function buildSpec(drafts: Drafts): AppSpec | null {
   }
   return {
     entities: built,
-    // 種類（`type`）と、種類ごとの欄（`show`・`columns`・`highlight`・`filters`）は、書いてあるときだけ入れる
-    // （M1.1 の宣言に欄を足さない）
+    // 種類（`type`）と、種類ごとの欄（`show`・`columns`・`highlight`・`filters`・`widgets`）は、書いてある
+    // ときだけ入れる（M1.1 の宣言に欄を足さない）。**ダッシュボードは `entity` を持たない**（M1.4）——
+    // 行を並べないので、正規化した JSON にも `entity` を現さない
     views: views.map((draft) => ({
       name: draft.name,
-      entity: draft.entity,
+      ...(draft.entity === null ? {} : { entity: draft.entity }),
       ...(draft.type === null ? {} : { type: draft.type }),
       ...(draft.show === null ? {} : { show: draft.show.map((field) => field.name) }),
       ...(draft.columns === null ? {} : { columns: draft.columns.name }),
       ...(draft.highlight === null ? {} : { highlight: draft.highlight.name }),
       ...(draft.filters === null ? {} : { filters: draft.filters.map((field) => field.name) }),
+      ...(draft.widgets === null ? {} : { widgets: buildWidgets(draft.widgets) }),
     })),
     // 種類（`kind`）と、M1.3 の `set`・`when` は**書いてあるときだけ**入れる
     // （M1.1・M1.2 の宣言に欄を足さない。`kind` の省略は create である）
@@ -2927,12 +3076,17 @@ function inspect(source: string, report: Report): Drafts | null {
     }
   }
   for (const view of views) {
-    const entity = index.get(view.entity);
+    // ダッシュボード（`type: dashboard`）は**行を並べない**——entity の実在を見ず、部品が指す値を見る（M1.4。Issue #180）
+    if (view.type === "dashboard") {
+      checkDashboardWidgets(view, computed, report);
+      continue;
+    }
+    const entity = index.get(view.entity ?? "");
     if (entity === undefined) {
       report(
         "UI_ENTITY_NOT_FOUND",
         `view ${view.name} の entity ${view.entity} が宣言に無い`,
-        positionOf(view.entityNode),
+        positionOf(view.entityNode ?? view.nameNode ?? { line: 1, column: 1 }),
       );
       // entity が無ければ、表に出す名前も見られない（誤りを重ねない）
       continue;

@@ -1,0 +1,38 @@
+# 負例：ダッシュボード（type: dashboard）の数値の部品が、行ごとの計算を指している。
+# 部品が指せるのは**アプリ全体の集計（scope: app）の計算**だけである——ダッシュボードは行を並べないので、
+# 行ごとの計算は載る場所が無い（M1.4。Issue #180）。期待する誤りコードは index.json。
+
+entities:
+  - name: activity
+    fields:
+      cost: number
+
+views:
+  - name: dashboard
+    type: dashboard
+    widgets:
+      - type: number
+        label: 費用
+        value: costOfActivity
+        unit: 円
+
+actions:
+  - name: addActivity
+    entity: activity
+
+validations: []
+
+computed:
+  - name: costOfActivity
+    entity: activity
+    expression: cost
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

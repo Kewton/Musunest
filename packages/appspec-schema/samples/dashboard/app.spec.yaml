@@ -6,7 +6,7 @@
 # #179 が見出しごとの集計（`groupBy` と `groups` 型）を足した。**
 #
 # 元は workspace/mvp/m1/02-l2-spec-examples.md §4.3（叩き台）。**いまの語彙で書けないものは落としてある**：
-#   - 画面の種類 `dashboard` と部品（`number`・`bar`・`pie`・`ranking` は #180〜#182）
+#   - グラフの部品（`bar`・`pie`）と順位の部品（`ranking`）は #181・#182
 #   - 表示名（`label`。日本語の見出しは #176）
 #
 # **`within: this_month` は「今月」を日本時間で決める**（Issue #178）。時計は**評価に引数で渡す**——
@@ -21,9 +21,14 @@
 # **見出しごとの集計（`type: groups`。Issue #179）は、さらに別の欄 `groups`**（計算の名前 → 「見出しと値」の
 # 組の並び）に載る（「scope」に混ぜない）。値が求められなければ `null` で、画面は「—」で見せる（0 と区別する）。
 #
+# **ダッシュボード（`type: dashboard`）は #180 が足した。** 行を並べず、アプリ全体の値（`scope: app`）を
+# **数値の部品（`widgets` の `number`）**で、単位つきで並べる。**部品が指せるのは `scope: app` の計算だけ**
+# である（行ごとの計算は載る場所が無い）。**`entity` を持たない**し、応答の `rows` も空の並びである
+# （意味は ../../docs/semantics.md「dashboard」）。
+#
 # 採点のシナリオは同じディレクトリの scenario.json、
 # 意味は ../../docs/semantics.md（「scope」「aggregate」「within」「sum」「count」「avg」「groupBy」「groups」
-# 「computed」）にある。
+# 「computed」「dashboard」）にある。
 
 entities:
   - name: member
@@ -113,7 +118,30 @@ computed:
     type: groups
 
 views:
-  # 活動の一覧。アプリ全体の値は、一覧の上に出る（`scope` の欄）
+  # ダッシュボード（M1.4。Issue #180）。**行を並べない**——アプリ全体の集計（`scope: app`）の値を、
+  # 単位つきで並べる。**`entity` は書かない**（書けば SHAPE_KEY_UNKNOWN）。部品が指す `value` は
+  # アプリ全体の計算でなければならない（行ごとの計算を指せば UI_DASHBOARD_VALUE_NOT_APP_SCOPE）。
+  # 部品が読む値は、一覧の応答の `scope`（計算の名前 → 値）に 1 回で載る。
+  - name: dashboard
+    type: dashboard
+    widgets:
+      - type: number
+        label: 今月の活動
+        value: activityCount
+        unit: 回
+      - type: number
+        label: 今月の参加（のべ）
+        value: attendeeTotal
+        unit: 人
+      - type: number
+        label: 1 回あたりの参加
+        value: averageAttendees
+        unit: 人
+      - type: number
+        label: 今月の費用の平均
+        value: averageCost
+        unit: 円
+  # 活動の一覧。アプリ全体の値も、一覧の上に出る（`scope` の欄）
   - name: activities
     type: list
     entity: activity
