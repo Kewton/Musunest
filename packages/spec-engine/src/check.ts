@@ -46,6 +46,7 @@ import {
   type FieldType,
   type Period,
   type ViewPart,
+  type ViewPartType,
   type ViewType,
 } from "@musunest/appspec-schema";
 import {
@@ -1138,18 +1139,21 @@ interface ShowFieldDraft {
 }
 
 /**
- * ダッシュボードの部品（`widgets` の 1 つ。M1.4。Issue #180）。いま書けるのは数値の部品だけである。
- * **`value` の実在と種類は、計算を読んだあとで見る**（`UI_DASHBOARD_VALUE_NOT_APP_SCOPE`）。
+ * ダッシュボードの部品（`widgets` の 1 つ。M1.4。Issue #180・#181）。数値（`number`）・棒（`bar`）・
+ * 円（`pie`）である。**`value` の実在と種類は、計算を読んだあとで見る**——数値は
+ * `UI_DASHBOARD_VALUE_NOT_APP_SCOPE`、棒と円は `UI_DASHBOARD_VALUE_NOT_GROUPS` である。
  */
 interface ViewPartDraft {
-  /** 指すアプリ全体の計算の名前 */
+  /** 部品の種類。読めなかった（無い・語彙に無い）ときは `null`（意味の検査を重ねない） */
+  readonly type: ViewPartType | null;
+  /** 指す計算の名前 */
   readonly value: string;
   readonly valueNode: YamlNode;
   /** 表示名（`label`）。無ければ `null`（画面は識別子をそのまま出す） */
   readonly label: string | null;
   /** 単位（`unit`）。無ければ `null`（画面は数をそのまま見せる） */
   readonly unit: string | null;
-  /** 読み取りの時点で断った（`value` が無い・空、など）。実在の検査を重ねない（1 つの誤りを 2 つに数えない） */
+  /** 読み取りの時点で断った（`type`・`value` が無い・空、など）。実在の検査を重ねない（1 つの誤りを 2 つに数えない） */
   readonly malformed: boolean;
 }
 
@@ -1276,9 +1280,10 @@ const VIEW_KEYS: Readonly<Record<ViewType, readonly string[]>> = {
 };
 
 /**
- * ダッシュボードの部品（`widgets`。M1.4。Issue #180）を読む。**1 つ以上書く**——欄そのものが無い・
+ * ダッシュボードの部品（`widgets`。M1.4。Issue #180・#181）を読む。**1 つ以上書く**——欄そのものが無い・
  * 空の並びのときは `SHAPE_KEY_MISSING`（部品が無ければダッシュボードにならない）。**`value` の実在と
- * 種類は、計算を読んだあとで見る**（`UI_DASHBOARD_VALUE_NOT_APP_SCOPE`）。
+ * 種類は、計算を読んだあとで見る**——数値はアプリ全体の集計（`UI_DASHBOARD_VALUE_NOT_APP_SCOPE`）を、
+ * 棒と円は見出しごとの集計（`UI_DASHBOARD_VALUE_NOT_GROUPS`）を指さなければならない。
  */
 function readWidgets(member: MemberReader, report: Report): readonly ViewPartDraft[] {
   const entry = entryOf(member.map, "widgets");
@@ -1311,8 +1316,9 @@ function readWidgets(member: MemberReader, report: Report): readonly ViewPartDra
     const what = `widgets[${index + 1}]`;
     const widget = new MemberReader(item, what, report);
     widget.only(["type", "value", "label", "unit"]);
-    // 部品の種類。**語彙は閉じている**——いま書けるのは数値の部品（`number`）だけである（M1.4）
+    // 部品の種類。**語彙は閉じている**——数値（`number`。M1.4）、棒（`bar`）・円（`pie`。Issue #181）である
     const typeEntry = entryOf(item, "type");
+    let type: ViewPartType | null = null;
     if (typeEntry === undefined) {
       report("SHAPE_KEY_MISSING", `view の ${what} に type が無い（いま書ける部品は ${VIEW_PART_TYPES.join("・")} である）`, positionOf(item));
     } else if (typeEntry.value.kind !== "scalar" || !isOneOf(VIEW_PART_TYPES, typeEntry.value.text)) {
@@ -1321,6 +1327,8 @@ function readWidgets(member: MemberReader, report: Report): readonly ViewPartDra
         `view の ${what} の type ${typeEntry.value.kind === "scalar" ? typeEntry.value.text : "?"} は書けない（いま書ける部品は ${VIEW_PART_TYPES.join("・")} である）`,
         positionOf(typeEntry.value),
       );
+    } else {
+      type = typeEntry.value.text as ViewPartType;
     }
     // 指す計算（`value`）。必須の、空でない文字列である
     const value = widget.text("value");
@@ -1329,12 +1337,13 @@ function readWidgets(member: MemberReader, report: Report): readonly ViewPartDra
     // 単位（`unit`）も任意である。書いてあれば空でない文字列でなければならない
     const unit = readUnit(widget, what, report);
     parts.push({
+      type,
       value: value?.text ?? "",
       valueNode: value?.node ?? { kind: "null", line: 0, column: 0 },
       label,
       unit,
-      // `value` を読めなかった（無い・空）ときは、実在の検査を重ねない（`SHAPE_KEY_MISSING` が既に出ている）
-      malformed: value === null,
+      // `type` か `value` を読めなかったときは、実在の検査を重ねない（1 つの誤りを 2 つに数えない）
+      malformed: type === null || value === null,
     });
   });
   return parts;
@@ -2545,11 +2554,15 @@ function checkSettleSlots(computed: readonly ComputedDraft[], report: Report): v
 }
 
 /**
- * ダッシュボード（`type: dashboard`）の部品を検査する（M1.4。Issue #180）。
+ * ダッシュボード（`type: dashboard`）の部品を検査する（M1.4。Issue #180・#181）。
  *
- * **数値の部品が指す `value` は、アプリ全体の集計（`scope: app`）の計算でなければならない。**
- * ダッシュボードは**行を並べない**ので、行ごとの計算は載る場所が無い（どの行の値かが決まらない）。
- * 無い名前・行ごとの計算は、どちらも `UI_DASHBOARD_VALUE_NOT_APP_SCOPE` で断る。
+ * **指せる計算は、部品の種類で決まる。** どちらもダッシュボードは行を並べないので、行ごとの計算は
+ * 載る場所が無い（どの行の値かが決まらない）。
+ *   - 数値の部品（`number`）… **アプリ全体の集計（`scope: app`）の計算**（1 つの数）
+ *   - 棒（`bar`）・円（`pie`）… **見出しごとの集計（`type: groups`）の計算**（見出しと値の組の並び）
+ *
+ * **2 つを別のコードにする**（`UI_DASHBOARD_VALUE_NOT_APP_SCOPE` と `UI_DASHBOARD_VALUE_NOT_GROUPS`）
+ * ——指す先が別物であり、1 つの誤りを 2 つに数えないためである。
  */
 function checkDashboardWidgets(
   view: ViewDraft,
@@ -2557,15 +2570,29 @@ function checkDashboardWidgets(
   report: Report,
 ): void {
   for (const part of view.widgets ?? []) {
-    // `value` を読めなかった部品は、ここでは見ない（1 つの誤りを 2 つのコードに数えない）
-    if (part.malformed) continue;
-    const isAppScope = computed.some(
-      (entry) => entry.scope === "app" && entry.settle === null && !entry.malformed && entry.name === part.value,
+    // `type` か `value` を読めなかった部品は、ここでは見ない（1 つの誤りを 2 つのコードに数えない）
+    if (part.malformed || part.type === null) continue;
+    if (part.type === "number") {
+      const isAppScope = computed.some(
+        (entry) => entry.scope === "app" && entry.settle === null && !entry.malformed && entry.name === part.value,
+      );
+      if (!isAppScope) {
+        report(
+          "UI_DASHBOARD_VALUE_NOT_APP_SCOPE",
+          `view ${view.name} の widgets の ${part.value} が、アプリ全体の集計（scope: app）の計算でない`,
+          positionOf(part.valueNode),
+        );
+      }
+      continue;
+    }
+    // 棒（`bar`）・円（`pie`）は、見出しごとの集計（`type: groups`）を指さなければならない
+    const isGroups = computed.some(
+      (entry) => entry.type === "groups" && !entry.malformed && entry.name === part.value,
     );
-    if (!isAppScope) {
+    if (!isGroups) {
       report(
-        "UI_DASHBOARD_VALUE_NOT_APP_SCOPE",
-        `view ${view.name} の widgets の ${part.value} が、アプリ全体の集計（scope: app）の計算でない`,
+        "UI_DASHBOARD_VALUE_NOT_GROUPS",
+        `view ${view.name} の widgets の ${part.type} が指す ${part.value} は、見出しごとの集計（type: groups）の計算でない`,
         positionOf(part.valueNode),
       );
     }
@@ -2861,14 +2888,22 @@ function buildAggregate(draft: AggregateDraft): Aggregate {
   };
 }
 
-/** 読み取った部品を、宣言の形（`ViewPart`）にする。**表示名と単位は書いてあるときだけ入れる**（M1.4。Issue #180） */
+/**
+ * 読み取った部品を、宣言の形（`ViewPart`）にする。**表示名と単位は書いてあるときだけ入れる**
+ * （M1.4。Issue #180・#181）。種類（`number`・`bar`・`pie`）は読んだままを残す——
+ * 数値は `scope` を、棒と円は `groups` を読む（同じ部品の形で、指す先だけが違う）。
+ */
 function buildWidgets(drafts: readonly ViewPartDraft[]): readonly ViewPart[] {
-  return drafts.map((part) => ({
-    type: "number" as const,
-    value: part.value,
-    ...(part.label === null ? {} : { label: part.label }),
-    ...(part.unit === null ? {} : { unit: part.unit }),
-  }));
+  return drafts.map((part) => {
+    const common = {
+      value: part.value,
+      ...(part.label === null ? {} : { label: part.label }),
+      ...(part.unit === null ? {} : { unit: part.unit }),
+    };
+    if (part.type === "bar") return { type: "bar" as const, ...common };
+    if (part.type === "pie") return { type: "pie" as const, ...common };
+    return { type: "number" as const, ...common };
+  });
 }
 
 function buildSpec(drafts: Drafts): AppSpec | null {

@@ -6,7 +6,7 @@
 # #179 が見出しごとの集計（`groupBy` と `groups` 型）を足した。**
 #
 # 元は workspace/mvp/m1/02-l2-spec-examples.md §4.3（叩き台）。**いまの語彙で書けないものは落としてある**：
-#   - グラフの部品（`bar`・`pie`）と順位の部品（`ranking`）は #181・#182
+#   - 順位の部品（`ranking`）は #182
 #   - 表示名（`label`。日本語の見出しは #176）
 #
 # **`within: this_month` は「今月」を日本時間で決める**（Issue #178）。時計は**評価に引数で渡す**——
@@ -26,9 +26,13 @@
 # である（行ごとの計算は載る場所が無い）。**`entity` を持たない**し、応答の `rows` も空の並びである
 # （意味は ../../docs/semantics.md「dashboard」）。
 #
+# **棒（`bar`）と円（`pie`）の部品は #181 が足した。** 見出しごとの集計（`type: groups`）の「見出しと値の
+# 組の並び」を描く。**指せるのは `type: groups` の計算だけ**である（数値の部品が `scope: app` を指すのと
+# 対である）。値は応答の `groups` に 1 回で載る。**画面は式も集計も評価しない**。
+#
 # 採点のシナリオは同じディレクトリの scenario.json、
 # 意味は ../../docs/semantics.md（「scope」「aggregate」「within」「sum」「count」「avg」「groupBy」「groups」
-# 「computed」「dashboard」）にある。
+# 「computed」「dashboard」「bar」「pie」）にある。
 
 entities:
   - name: member
@@ -141,6 +145,18 @@ views:
         label: 今月の費用の平均
         value: averageCost
         unit: 円
+      # 棒（`bar`）と円（`pie`）の部品（M1.4。Issue #181）。**指せるのは見出しごとの集計（`type: groups`）
+      # の計算だけ**である（指せなければ UI_DASHBOARD_VALUE_NOT_GROUPS）。値は一覧の応答の `groups`
+      # （計算の名前 → 「見出しと値」の組の並び）に 1 回で載る。`enum` の見出しは宣言の `options` の
+      # 表示名に写して出す（送られてくるのはキーである）。円は**割合（%）も数字で出す**。
+      - type: bar
+        label: 月ごとの活動回数
+        value: activitiesByMonth
+        unit: 回
+      - type: pie
+        label: 種類の内訳
+        value: activitiesByKind
+        unit: 回
   # 活動の一覧。アプリ全体の値も、一覧の上に出る（`scope` の欄）
   - name: activities
     type: list

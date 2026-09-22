@@ -889,11 +889,11 @@ describe("表示名（label）（M1.3）", () => {
   });
 });
 
-// ── 2. 負例 56 件 ──────────────────────────────────────────────
+// ── 2. 負例 57 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 56 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本、M1.4 の #178 で 2 本、#179 で 2 本、#180 で 2 本足した）", () => {
-    expect(negativeIndex.negatives).toHaveLength(56);
+  it("負例の一覧は 57 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本、M1.4 の #178 で 2 本、#179 で 2 本、#180 で 2 本、#181 で 1 本足した）", () => {
+    expect(negativeIndex.negatives).toHaveLength(57);
   });
 
   it.each(negativeCases)(
@@ -2676,7 +2676,8 @@ describe("ダッシュボード（dashboard）と数値の部品（M1.4。Issue 
     expect(result.diagnostics).toEqual([]);
     if (!result.ok) throw new Error("dashboard が静的チェックに通らない");
     const dashboard = result.spec.views.find((view) => view.name === "dashboard");
-    // **`entity` を持たない**（写しても足さない）。部品は宣言の順に、`unit` つきで写る
+    // **`entity` を持たない**（写しても足さない）。部品は宣言の順に、`unit` つきで写る。
+    // 数値（`number`）はアプリ全体の集計を、棒（`bar`）・円（`pie`）は見出しごとの集計を指す（M1.4。Issue #181）
     expect(dashboard).toEqual({
       name: "dashboard",
       type: "dashboard",
@@ -2685,6 +2686,8 @@ describe("ダッシュボード（dashboard）と数値の部品（M1.4。Issue 
         { type: "number", label: "今月の参加（のべ）", value: "attendeeTotal", unit: "人" },
         { type: "number", label: "1 回あたりの参加", value: "averageAttendees", unit: "人" },
         { type: "number", label: "今月の費用の平均", value: "averageCost", unit: "円" },
+        { type: "bar", label: "月ごとの活動回数", value: "activitiesByMonth", unit: "回" },
+        { type: "pie", label: "種類の内訳", value: "activitiesByKind", unit: "回" },
       ],
     });
     expect(dashboard).not.toHaveProperty("entity");
@@ -2767,10 +2770,10 @@ describe("ダッシュボード（dashboard）と数値の部品（M1.4。Issue 
     expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
   });
 
-  it("知らない部品の種類（bar）は SHAPE_KEY_UNKNOWN（語彙は閉じている）", () => {
+  it("知らない部品の種類（gauge）は SHAPE_KEY_UNKNOWN（語彙は閉じている）", () => {
     const result = failure(
       checkSpec(
-        withDashboard([widgets([part(["type: bar", "value: activityCount"])])]),
+        withDashboard([widgets([part(["type: gauge", "value: activityCount"])])]),
       ),
     );
     expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
@@ -2804,5 +2807,95 @@ describe("ダッシュボード（dashboard）と数値の部品（M1.4。Issue 
       ),
     );
     expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
+  });
+});
+
+// ── グラフの部品（`bar`・`pie`）（M1.4。Issue #181） ──────────────────────
+//
+// **棒と円が指せるのは見出しごとの集計（`type: groups`）の計算だけ**である——「見出しと値の組の並び」を
+// 描く部品だからである（行ごとの計算も、1 つの数も描けない）。負例（chart-part-not-groups）が、同じことを
+// 外から確かめる。**数値の部品とは別の誤りコード**である（`UI_DASHBOARD_VALUE_NOT_APP_SCOPE` と
+// `UI_DASHBOARD_VALUE_NOT_GROUPS`。受入条件「負例がそれぞれ別の誤りコードで落ちる」）。
+
+/** 棒の部品 1 つ（`type: bar`）。`lines` は部品の欄（`value:` など）である */
+const barPart = (lines: readonly string[]): string => part(["type: bar", ...lines]);
+/** 円の部品 1 つ（`type: pie`）。`lines` は部品の欄（`value:` など）である */
+const piePart = (lines: readonly string[]): string => part(["type: pie", ...lines]);
+
+/** グラフの部品を持つ宣言。集計元（expense）は `kind`（enum）と `paidOn`（date）を持つ */
+const withChart = (parts: readonly string[], computed = [BY_KIND, BY_MONTH].join("\n")): string =>
+  declaration({
+    entities: GROUP_ENTITIES,
+    views: ["  - name: dashboard", "    type: dashboard", ...parts].join("\n"),
+    computed,
+  });
+
+describe("グラフの部品（bar・pie）（M1.4。Issue #181）", () => {
+  it("見出しごとの計算を指せば通り、`label` と `unit` は書いてあるときだけ写す", () => {
+    const result = checkSpec(withChart([widgets([barPart(["value: byKind"])])]));
+    expect(result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("bar が通らない");
+    // 種類（`bar`）はそのまま写り、`label`・`unit` は書いていないので現れない
+    expect(result.spec.views[0]).toEqual({
+      name: "dashboard",
+      type: "dashboard",
+      widgets: [{ type: "bar", value: "byKind" }],
+    });
+  });
+
+  it("`label` と `unit` を書けば写る（円も同じ約束である）", () => {
+    const result = checkSpec(
+      withChart([widgets([piePart(["label: 種類の内訳", "value: byKind", "unit: 回"])])]),
+    );
+    expect(result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("pie が通らない");
+    expect(result.spec.views[0]).toEqual({
+      name: "dashboard",
+      type: "dashboard",
+      widgets: [{ type: "pie", label: "種類の内訳", value: "byKind", unit: "回" }],
+    });
+  });
+
+  it("**棒がアプリ全体の集計（scope: app）を指せば UI_DASHBOARD_VALUE_NOT_GROUPS**（負例と同じ形）", () => {
+    const result = failure(
+      checkSpec(
+        withChart([widgets([barPart(["value: activityCount"])])], [APP_COUNT, BY_KIND].join("\n")),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["UI_DASHBOARD_VALUE_NOT_GROUPS"]);
+    // メッセージに、指した名前が出る（人が直せるように）
+    expect(messagesOf(result, "UI_DASHBOARD_VALUE_NOT_GROUPS")).toContain("activityCount");
+  });
+
+  it("**円が行ごとの計算を指しても、同じ UI_DASHBOARD_VALUE_NOT_GROUPS で落ちる**", () => {
+    const result = failure(checkSpec(withChart([widgets([piePart(["value: headcount"])])])));
+    expect(codesOf(result)).toEqual(["UI_DASHBOARD_VALUE_NOT_GROUPS"]);
+  });
+
+  it("見出しごとの計算が実在しなくても、同じ UI_DASHBOARD_VALUE_NOT_GROUPS で落ちる", () => {
+    const result = failure(checkSpec(withChart([widgets([barPart(["value: ammount"])])])));
+    expect(codesOf(result)).toEqual(["UI_DASHBOARD_VALUE_NOT_GROUPS"]);
+  });
+
+  it("**数値の負例とグラフの負例は、それぞれ別の誤りコードで落ちる**（受入条件）", () => {
+    const chart = failure(checkSpec(withChart([widgets([barPart(["value: headcount"])])])));
+    const number = failure(checkSpec(withDashboard([widgets([numberPart(["value: headcount"])])])));
+    expect(codesOf(chart)).toEqual(["UI_DASHBOARD_VALUE_NOT_GROUPS"]);
+    expect(codesOf(number)).toEqual(["UI_DASHBOARD_VALUE_NOT_APP_SCOPE"]);
+    // 1 つの誤りを 2 つのコードに数えない（指す先が別物なので、コードも別である）
+    expect(codesOf(chart)).not.toEqual(codesOf(number));
+  });
+
+  it("見本 dashboard の棒と円は、見出しごとの集計を指している（負例と対である）", () => {
+    const result = checkSpec(read(sampleSpecFile("dashboard")));
+    expect(result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("dashboard が静的チェックに通らない");
+    const dashboard = result.spec.views.find((view) => view.name === "dashboard");
+    expect(dashboard?.widgets).toEqual(
+      expect.arrayContaining([
+        { type: "bar", label: "月ごとの活動回数", value: "activitiesByMonth", unit: "回" },
+        { type: "pie", label: "種類の内訳", value: "activitiesByKind", unit: "回" },
+      ]),
+    );
   });
 });

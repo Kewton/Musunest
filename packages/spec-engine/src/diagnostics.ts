@@ -152,6 +152,15 @@ export const DIAGNOSTIC_CODES = [
    * 並べないので、どの行の値かが決まらない
    */
   "UI_DASHBOARD_VALUE_NOT_APP_SCOPE",
+  /**
+   * ダッシュボード（`type: dashboard`）の**棒（`bar`）・円（`pie`）の部品**の `value` が、
+   * **見出しごとの集計（`type: groups`）の計算**を指していない（無い、または別の種類の計算である。
+   * M1.4。Issue #181）——棒と円は「見出しと値の組の並び」を描く部品である。
+   *
+   * **`UI_DASHBOARD_VALUE_NOT_APP_SCOPE` と別のコードにする**——数値の部品が指す先（アプリ全体の
+   * 集計の 1 つの数）と、棒・円が指す先（見出しごとの並び）は別物である（1 つの誤りを 2 つに数えない）。
+   */
+  "UI_DASHBOARD_VALUE_NOT_GROUPS",
   /** 絞り込み（`filters`）が指す名前が、その一覧の `show` に無い（M1.3） */
   "UI_FILTER_FIELD_NOT_SHOWN",
   /** 絞り込み（`filters`）が、その entity の選択肢（`enum`）でも参照（`ref`）でもない項目を指している（M1.3） */

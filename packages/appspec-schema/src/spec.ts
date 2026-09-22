@@ -611,16 +611,17 @@ export const COMPARISON_OPERATORS = [">", ">=", "<", "<=", "==", "!="] as const;
  *
  * **`dashboard` も、データ層の項目の型としての `number` と同じ語を使う**——部品の種類 `number` は
  * 台帳に行を分けず、「dashboard」の節で扱う（`board` の `columns`・`highlight` と同じ扱いである）。
+ * 棒 `bar`・円 `pie`（M1.4。Issue #181）は**同じ語がほかの層に無い**ので、台帳に自分の行を持つ。
  */
 export const VIEW_TYPES = ["table", "settlement", "board", "list", "dashboard"] as const;
 export type ViewType = (typeof VIEW_TYPES)[number];
 
 /**
- * ダッシュボード（`type: dashboard`）に並べる部品の種類（M1.4。Issue #180）。
- * **語彙は閉じている**——この Issue で書けるのは数値の部品 `number` だけである
- * （棒 `bar`・円 `pie`・順位 `ranking` は後続の #181・#182）。
+ * ダッシュボード（`type: dashboard`）に並べる部品の種類（M1.4。Issue #180・#181）。
+ * **語彙は閉じている**——この版で書けるのは数値の部品 `number`（#180）と、棒 `bar`・円 `pie`
+ * （#181）である（順位の部品 `ranking` は後続の #182）。
  */
-export const VIEW_PART_TYPES = ["number"] as const;
+export const VIEW_PART_TYPES = ["number", "bar", "pie"] as const;
 export type ViewPartType = (typeof VIEW_PART_TYPES)[number];
 
 /**
@@ -647,8 +648,53 @@ export interface NumberPart extends LabeledDeclaration {
   readonly unit?: string;
 }
 
-/** ダッシュボードに並べる部品（M1.4。Issue #180）。いま書けるのは数値の部品だけである */
-export type ViewPart = NumberPart;
+/**
+ * 棒の部品（`type: bar`。M1.4。Issue #181）。**見出しごとの集計（`type: groups`）の計算**を 1 つ指し、
+ * 「見出しと値」の組の並びを**棒**で見せる（「月ごとの活動回数」など）。
+ *
+ * ```yaml
+ * widgets:
+ *   - { type: bar, label: 月ごとの活動回数, value: activitiesByMonth, unit: 回 }
+ * ```
+ *
+ * - **`value` は、見出しごとの集計（`type: groups`）の計算の名前だけを指せる。** ほか（アプリ全体の
+ *   集計・行ごとの計算・実在しない名前）を指せば静的チェックが `UI_DASHBOARD_VALUE_NOT_GROUPS` で断る
+ *   ——棒は「見出しと値の組の並び」を描く部品だからである（docs/semantics.md「bar」）
+ * - **色だけに頼らない。** 見出しと値は**文字でも読める**（表が受け持つ。`04` §7.2）
+ * - 値は一覧の応答の `groups`（計算の名前 → 組の並び）に載る。**新しい欄は作らない**（「groups」の節）
+ */
+export interface BarPart extends LabeledDeclaration {
+  readonly type: "bar";
+  /** 見出しごとの集計（`type: groups`）の計算の名前 */
+  readonly value: string;
+  /** 値の単位（「回」「人」など。任意）。書かなければ数をそのまま見せる */
+  readonly unit?: string;
+}
+
+/**
+ * 円の部品（`type: pie`。M1.4。Issue #181）。**見出しごとの集計（`type: groups`）の計算**を 1 つ指し、
+ * 「見出しと値」の組の並びを**円**で見せる（「種類の内訳」など）。凡例に**割合（%）**も数字で出す。
+ *
+ * ```yaml
+ * widgets:
+ *   - { type: pie, label: 種類の内訳, value: activitiesByKind, unit: 回 }
+ * ```
+ *
+ * 指せる計算と、値の載り方は棒（`BarPart`）と同じである（docs/semantics.md「pie」）。
+ */
+export interface PiePart extends LabeledDeclaration {
+  readonly type: "pie";
+  /** 見出しごとの集計（`type: groups`）の計算の名前 */
+  readonly value: string;
+  /** 値の単位（「回」「人」など。任意）。書かなければ数をそのまま見せる */
+  readonly unit?: string;
+}
+
+/**
+ * ダッシュボードに並べる部品（M1.4。Issue #180・#181）。数値（`number`）・棒（`bar`）・円（`pie`）である。
+ * **`value` が指せる計算は種類で決まる**——数値はアプリ全体の集計、棒と円は見出しごとの集計である。
+ */
+export type ViewPart = NumberPart | BarPart | PiePart;
 
 /**
  * 一覧。種類の指定の無い一覧（M1.1）は、その entity のすべてのレコードを登録順に並べる。
@@ -705,11 +751,15 @@ export interface View {
    */
   readonly filters?: readonly string[];
   /**
-   * ダッシュボード（`type: dashboard`）に並べる部品（M1.4。Issue #180）。**`type: dashboard` では必須**である
-   * （部品が無ければダッシュボードにならない）。**1 つ以上の部品を書く**——空の並びは静的チェックが
-   * `SHAPE_KEY_MISSING` で断る。ほかの種類の一覧では書けない（`SHAPE_KEY_UNKNOWN`）。
+   * ダッシュボード（`type: dashboard`）に並べる部品（M1.4。Issue #180・#181）。**`type: dashboard` では
+   * 必須**である（部品が無ければダッシュボードにならない）。**1 つ以上の部品を書く**——空の並びは静的
+   * チェックが `SHAPE_KEY_MISSING` で断る。ほかの種類の一覧では書けない（`SHAPE_KEY_UNKNOWN`）。
    *
-   * **値は部品ごとに取りに行かない。** アプリ全体の値は一覧の応答の `scope` に 1 回で載る（M1.4。Issue #177）。
+   * 部品は、数値（`number`）・棒（`bar`）・円（`pie`）である。指せる計算は種類で決まる——数値は
+   * **アプリ全体の集計**（`scope: app`）、棒と円は**見出しごとの集計**（`type: groups`）である。
+   *
+   * **値は部品ごとに取りに行かない。** 1 回の取得でまとめて返る——数値は応答の `scope` に（M1.4。Issue
+   * #177）、棒と円の「見出しと値の組の並び」は応答の `groups` に載る（M1.4。Issue #179・#181）。
    */
   readonly widgets?: readonly ViewPart[];
 }
@@ -810,6 +860,8 @@ export const VOCABULARY = {
   settlement: "ui",
   board: "ui",
   dashboard: "ui",
+  bar: "ui",
+  pie: "ui",
   label: "ui",
   filters: "ux",
   permission: "permission",

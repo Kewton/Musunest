@@ -1868,3 +1868,141 @@ describe("ダッシュボード（dashboard）と数値の部品を画面へ写�
     expect(container.querySelector(".instant-table")).toBeNull();
   });
 });
+
+// ── グラフ（`bar`・`pie`）の部品を画面へ写す（M1.4。Issue #181） ──────────
+//
+// **宣言からの写像**を見る（`form.test.ts` は入力欄の部品しか見ていない。`docs/parallel-development.md` §7.3）。
+// 棒と円は、部品が指す**見出しごとの集計**の値を、**API が返した `groups` からそのまま**見せる
+// （画面は式も集計も評価しない）。見出しは**保存される値のほう**（`enum` はキー）なので、画面が
+// 宣言の `options` の表示名へ写す——`ref` を ID で送って名前へ写すのと同じ考え方である。
+
+/** `activity`（`kind` は選択肢、`date` は日付）と、棒・円の部品を持つダッシュボード */
+const CHART_SPEC: ApiSpecBody = {
+  ...SPEC,
+  spec: {
+    ...SPEC.spec,
+    entities: [
+      {
+        name: "activity",
+        fields: {
+          kind: { type: "enum", options: { practice: "練習", match: "試合", party: "飲み会" } },
+          date: "date",
+        },
+      },
+    ],
+    views: [
+      {
+        name: "dashboard",
+        type: "dashboard",
+        widgets: [
+          { type: "bar", label: "月ごとの活動回数", value: "activitiesByMonth", unit: "回" },
+          { type: "pie", label: "種類の内訳", value: "activitiesByKind", unit: "回" },
+        ],
+      },
+    ],
+    computed: [
+      {
+        name: "activitiesByMonth",
+        aggregate: {
+          kind: "count",
+          entity: "activity",
+          name: null,
+          where: {},
+          groupBy: { field: "date", month: true },
+          last: 6,
+        },
+        type: "groups",
+      },
+      {
+        name: "activitiesByKind",
+        aggregate: {
+          kind: "count",
+          entity: "activity",
+          name: null,
+          where: {},
+          groupBy: { field: "kind", month: false },
+        },
+        type: "groups",
+      },
+    ],
+    actions: [{ name: "addActivity", entity: "activity" }],
+    validations: [],
+  },
+  actions: [{ name: "addActivity", entity: "activity" }],
+};
+
+/** ダッシュボードの応答。**行を返さず**、部品の値（`groups`）を載せる（`entity` を持たない） */
+const CHART_VIEW: ApiViewBody = {
+  instanceId: "inst-1",
+  view: "dashboard",
+  fields: [],
+  computed: [],
+  permissions: { read: true, write: true },
+  actions: [],
+  rows: [],
+  groups: {
+    activitiesByMonth: [
+      { heading: "2026-08", value: 0 },
+      { heading: "2026-09", value: 3 },
+    ],
+    activitiesByKind: [
+      { heading: "practice", value: 3 },
+      { heading: "match", value: 0 },
+      { heading: "party", value: 1 },
+    ],
+  },
+};
+
+const chartClient = (view: ApiViewBody = CHART_VIEW): MusunestClient =>
+  makeClient({
+    spec: () => Promise.resolve(okResult(CHART_SPEC)),
+    view: () => Promise.resolve(okResult(view)),
+  });
+
+/** `data-chart` の組の [見出し, 値, 割合] を並びの順に読む（無いセルは空である） */
+const chartEntriesOf = (container: HTMLElement, name: string): string[][] =>
+  Array.from(container.querySelectorAll(`[data-chart="${name}"] .chart-entry`)).map((row) =>
+    Array.from(row.querySelectorAll("th, td")).map((cell) => cell.textContent ?? ""),
+  );
+
+describe("グラフ（bar・pie）の部品を画面へ写す（M1.4）", () => {
+  it("API が返した groups をそのまま出し、enum の見出しは宣言の表示名に写す（受入条件）", async () => {
+    const { container } = await renderScreen(chartClient());
+
+    await screen.findByText("月ごとの活動回数");
+    // 棒は、見出しと値の両方を文字でも読める形で出す（月は `YYYY-MM` のまま）
+    expect(chartEntriesOf(container, "activitiesByMonth")).toEqual([
+      ["2026-08", "0 回"],
+      ["2026-09", "3 回"],
+    ]);
+    // 円は、見出し・値・割合（%）を出す。見出しは `options` のキーから表示名へ写る
+    expect(chartEntriesOf(container, "activitiesByKind")).toEqual([
+      ["練習", "3 回", "75%"],
+      ["試合", "0 回", "0%"],
+      ["飲み会", "1 回", "25%"],
+    ]);
+  });
+
+  it("**ダッシュボードでは `groups` の汎用の並び（`data-groups`）を出さない**（部品が同じ値を見せる）", async () => {
+    const { container } = await renderScreen(chartClient());
+
+    await screen.findByText("月ごとの活動回数");
+    // 行を並べる一覧の `groups` の欄は出さない（棒・円の部品が出している）
+    expect(container.querySelector('[data-groups="true"]')).toBeNull();
+    expect(container.querySelector('[data-chart="activitiesByMonth"]')).not.toBeNull();
+    expect(container.querySelector('[data-chart="activitiesByKind"]')).not.toBeNull();
+  });
+
+  it("**宣言が無ければグラフを描かない**（棒・円の部品が無いダッシュボードは数値の部品だけ）", async () => {
+    // `DASHBOARD_SPEC` は数値の部品だけを持つ（M1.4。Issue #180）
+    const { container } = await renderScreen(
+      makeClient({
+        spec: () => Promise.resolve(okResult(DASHBOARD_SPEC)),
+        view: () => Promise.resolve(okResult(DASHBOARD_VIEW)),
+      }),
+    );
+
+    await screen.findByText("今月の活動");
+    expect(container.querySelector(".chart")).toBeNull();
+  });
+});

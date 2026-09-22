@@ -895,12 +895,17 @@ export async function getView(
   const permissions = permissionsOf(app);
   if (!permissions.read) return fail("PERMISSION_DENIED");
   // ダッシュボード（`type: dashboard`。M1.4。Issue #180）は**行を並べない**——`rows` は空の並びで、
-  // 部品が読む値は `scope`（アプリ全体の集計）に 1 回で載る。`entity` も、行ごとの `fields`・
-  // `computed` も持たない。**部品ごとに取りに行かない**（1 回の取得でまとめて返す）。
+  // 部品が読む値は `scope`（アプリ全体の集計）と `groups`（見出しごとの集計。Issue #181）に 1 回で載る。
+  // `entity` も、行ごとの `fields`・`computed` も持たない。**部品ごとに取りに行かない**（1 回の取得でまとめて返す）。
   if (view.type === "dashboard") {
-    // アプリ全体の集計が指す entity を読む（一覧の entity が無いので `known` は空である）
-    const sources = await loadSources(deps, app, "", appAggregateSourceEntities(app));
+    // 数値の部品が読むアプリ全体の集計（`scope: app`）と、棒・円の部品が読む見出しごとの集計
+    // （`type: groups`）が指す entity を、**まとめて読む**（一覧の entity が無いので `known` は空である）
+    const sources = await loadSources(deps, app, "", [
+      ...appAggregateSourceEntities(app),
+      ...groupSourceEntities(app),
+    ]);
     const scope = scopeValuesOf(app, deps.clock, sources);
+    const groups = groupsValuesOf(app, deps.clock, sources);
     return ok(API_READ_STATUS, {
       instanceId,
       view: view.name,
@@ -910,6 +915,7 @@ export async function getView(
       actions: [],
       rows: [],
       ...(scope === undefined ? {} : { scope }),
+      ...(groups === undefined ? {} : { groups }),
     });
   }
   const entity = app.spec.entities.find((candidate) => candidate.name === view.entity);

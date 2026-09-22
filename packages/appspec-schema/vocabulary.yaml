@@ -394,6 +394,32 @@
   runtime: [spec-engine, data-api, host]
   factory: 未対応
 
+# 棒（bar）と円（pie）。**見出しごとの集計（type: groups）の「見出しと値の組の並び」を描く**部品である
+# （M1.4。Issue #181）。数値の部品（`number`）がアプリ全体の集計（`scope: app`）の 1 つの数を読むのに対し、
+# こちらは `groups` の並びを読む。**指せる計算は種類で決まる**——ほかを指せば UI_DASHBOARD_VALUE_NOT_GROUPS
+# で断る（値は一覧の応答の `groups` に載り、**新しい欄は作らない**）。見本は dashboard。
+# **データ層の `number` と違い、同じ語がほかの層に無い**ので、`dashboard` の行にまとめず、自分の行を持つ。
+# 負例（chart-part-not-groups）は 1 本で、**どちらの行もこの負例を指す**（同じ規則だからである）。
+- name: bar
+  layer: ui
+  since: v0.2-draft（M1.4）
+  samples: [dashboard]
+  negatives: [chart-part-not-groups]
+  check_rules: [UI_DASHBOARD_VALUE_NOT_GROUPS]
+  semantics: docs/semantics.md#bar
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+- name: pie
+  layer: ui
+  since: v0.2-draft（M1.4）
+  samples: [dashboard]
+  negatives: [chart-part-not-groups]
+  check_rules: [UI_DASHBOARD_VALUE_NOT_GROUPS]
+  semantics: docs/semantics.md#pie
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
 # 表示名（label）。**画面に出すためだけ**の語彙である（M1.3。Issue #176）。
 # 付けられるのは**項目（fields）と計算（computed）だけ**で、**無ければ識別子をそのまま出す**。
 # 式からは読めない（式が読むのは識別子だけである）。**保存される値は変わらない**。

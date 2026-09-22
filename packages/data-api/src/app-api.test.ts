@@ -2832,7 +2832,8 @@ describe("dashboard の部品が読む値（M1.4。Issue #180）", () => {
     const result = await getSpec(run.deps, DASHBOARD_INSTANCE);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    // ダッシュボードの一覧は、**entity を持たず**、部品（widgets）を宣言の順に持つ（`unit` つき）
+    // ダッシュボードの一覧は、**entity を持たず**、部品（widgets）を宣言の順に持つ（`unit` つき）。
+    // 数値（`number`）はアプリ全体の集計を、棒（`bar`）・円（`pie`）は見出しごとの集計を指す（M1.4。Issue #181）
     expect(result.body.spec.views).toContainEqual({
       name: "dashboard",
       type: "dashboard",
@@ -2841,6 +2842,8 @@ describe("dashboard の部品が読む値（M1.4。Issue #180）", () => {
         { type: "number", label: "今月の参加（のべ）", value: "attendeeTotal", unit: "人" },
         { type: "number", label: "1 回あたりの参加", value: "averageAttendees", unit: "人" },
         { type: "number", label: "今月の費用の平均", value: "averageCost", unit: "円" },
+        { type: "bar", label: "月ごとの活動回数", value: "activitiesByMonth", unit: "回" },
+        { type: "pie", label: "種類の内訳", value: "activitiesByKind", unit: "回" },
       ],
     });
   });
@@ -2860,6 +2863,27 @@ describe("dashboard の部品が読む値（M1.4。Issue #180）", () => {
       averageAttendees: 2,
       averageCost: 10000 / 3,
     });
+  });
+
+  it("getView が dashboard を ok で返し、**棒・円が読む `groups` も 1 回で載せる**（M1.4。Issue #181）", async () => {
+    const run = await runDashboard();
+    const view = await dashboardView(run.deps, "dashboard");
+    // 見出しごとの値も、行ではない——部品（棒・円）が読む「見出しと値の組の並び」を `groups` に載せる。
+    // **部品ごとに取りに行かない**（数値の `scope` と同じ約束である。追記 2）
+    expect(view.groups?.["activitiesByKind"]).toEqual([
+      { heading: "practice", value: 1 },
+      { heading: "match", value: 1 },
+      { heading: "party", value: 1 },
+    ]);
+    // 月は古い順で、直近 6 か月（2026-04〜2026-09）。データの無い月も 0 で出る
+    expect(view.groups?.["activitiesByMonth"]).toEqual([
+      { heading: "2026-04", value: 0 },
+      { heading: "2026-05", value: 0 },
+      { heading: "2026-06", value: 0 },
+      { heading: "2026-07", value: 0 },
+      { heading: "2026-08", value: 0 },
+      { heading: "2026-09", value: 3 },
+    ]);
   });
 
   it("getView は、対象が 0 件なら値を 0 と null で区別して返す（0 に読み替えない）", async () => {

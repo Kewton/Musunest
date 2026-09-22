@@ -8,7 +8,7 @@
 // fetch と base URL は差し込める。host の画面は同じ origin の /api/* を叩くので `baseUrl: ""` でよい
 // （相対 URL のまま fetch する）。e2e のように別の origin を指す場合は絶対 URL を渡す。
 
-import { API_ERROR_CODES, ACTION_KINDS, COMPUTED_TYPES, FIELD_TYPES, PERIODS, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
+import { API_ERROR_CODES, ACTION_KINDS, COMPUTED_TYPES, FIELD_TYPES, PERIODS, VIEW_PART_TYPES, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
 import type {
   ApiDeletedBody,
   ApiErrorCode,
@@ -470,12 +470,19 @@ function isComputedDeclaration(value: unknown): boolean {
 }
 
 /**
- * ダッシュボードの数値の部品（M1.4。Issue #180）。`type` は `number`、`value` は計算の名前である。
- * `label`（表示名）と `unit`（単位）は任意で、載っているときだけ**空でない文字列**を要求する
- * （実在と種類は静的チェックが見る。ここは形だけを確かめる）。
+ * ダッシュボードの部品（M1.4。Issue #180・#181）。`type` は数値（`number`）・棒（`bar`）・円（`pie`）で、
+ * `value` は計算の名前である。`label`（表示名）と `unit`（単位）は任意で、載っているときだけ**空でない
+ * 文字列**を要求する（実在と種類は静的チェックが見る。ここは形だけを確かめる）。
+ *
+ * **種類は `VIEW_PART_TYPES`（正本）で見る**——ここで語を写すと、語彙が増えたときに配信側だけが古いまま
+ * 残り、`getSpec` が失敗して画面が動かなくなる（#145・#154 と同じ穴）。
  */
 function isViewPart(value: unknown): boolean {
-  if (!isRecord(value) || value.type !== "number" || typeof value.value !== "string") return false;
+  if (!isRecord(value)) return false;
+  if (typeof value.type !== "string" || !(VIEW_PART_TYPES as readonly string[]).includes(value.type)) {
+    return false;
+  }
+  if (typeof value.value !== "string") return false;
   if (!isOptionalLabel(value)) return false;
   return value.unit === undefined || (typeof value.unit === "string" && value.unit !== "");
 }
