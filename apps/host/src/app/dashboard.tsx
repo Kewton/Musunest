@@ -1,15 +1,17 @@
-// ダッシュボード（M1.4。Issue #180・#181）——`type: dashboard` の一覧。**行を並べない**——
+// ダッシュボード（M1.4。Issue #180・#181・#182）——`type: dashboard` の一覧。**行を並べない**——
 // 計算した値そのものを部品（`widgets`）で並べる。M1.1〜M1.3 の画面は「行の一覧」だったが、
 // ここが初めて値そのものを並べる形である。
 //
 // この部品が決めるのは次の 3 つだけである。
-//   1. どの値を出すか — 部品が指す計算の値（**数値は `view.scope`**、**棒と円は `view.groups`**）を
-//      そのまま見せる。**画面は式も集計も評価しない**（`CLAUDE.md` の不変条件。判定も集計も Data API が行う）
+//   1. どの値を出すか — 部品が指す値（**数値は `view.scope`**、**棒と円は `view.groups`**、
+//      **順位は `view.ranking`**）をそのまま見せる。**画面は式も集計も評価しない**（`CLAUDE.md` の
+//      不変条件。判定も集計も並べ替えも Data API が行う）
 //   2. 単位（`unit`）と表示名（`label`）をどう出すか — 宣言に書いてあれば添える（「回」「人」「円」）
 //   3. **値が `null` のときは「—」で見せる**——0 と区別する（docs/semantics.md「computed」「avg」）
 //
-// 棒（`bar`）と円（`pie`）は `chart.tsx` の部品が描く（M1.4。Issue #181）。ここが決めるのは、
-// **どの部品をどの値（`scope` か `groups` か）に結びつけるか**である。
+// 棒（`bar`）と円（`pie`）は `chart.tsx` が（M1.4。Issue #181）、順位（`ranking`）は `ranking.tsx` が描く
+// （M1.4。Issue #182）。ここが決めるのは、**どの部品をどの値（`scope` か `groups` か `ranking` か）に
+// 結びつけるか**である。
 //
 // **部品は 4 つの状態を持つ**（workspace/mvp/m1/04-spec-evolution.md §7.3）——空・多い・エラー・権限なし。
 // 権限なし（`read` が無い）は API が 403 を返し、画面（renderer）がその理由を出す。この部品が持つのは
@@ -19,16 +21,19 @@
 // 部品は**折り返して縦に伸びる**——**幅 360 CSS px で、ページ全体を横に押し広げない**（`04` §7.2）。
 
 import type { CSSProperties } from "react";
+import { displayNameOf } from "@musunest/sdk";
 import type { ApiViewBody } from "@musunest/sdk";
 import { Chart } from "./chart";
 import type { ChartPart } from "./chart";
+import { Ranking } from "./ranking";
+import type { RankingPart } from "./ranking";
 
 /**
  * 数値の部品（`View` の `widgets` の 1 つ。M1.4。Issue #180）。`label`（表示名）と `unit`（単位）は
  * 任意である。**宣言の型（`@musunest/appspec-schema` の `NumberPart`）と構造的に同じ**である
  * （画面が持てる依存は sdk だけなので、型はここで写す。`View` の `widgets` から代入できる）。
  */
-export interface NumberDashboardPart {
+export interface DashboardNumberPart {
   readonly type: "number";
   /** 指すアプリ全体の計算の名前。`view.scope` をこの名前で引く */
   readonly value: string;
@@ -39,11 +44,12 @@ export interface NumberDashboardPart {
 }
 
 /**
- * ダッシュボードに並べる部品（M1.4。Issue #180・#181）。数値（`number`）と、グラフの棒（`bar`）・
- * 円（`pie`）である。**指す値の欄が違う**——数値は `scope`（1 つの数）、棒と円は `groups`
- * （見出しと値の組の並び）である。グラフの型は `chart.tsx` の `ChartPart` をそのまま使う。
+ * ダッシュボードに並べる部品（M1.4。Issue #180・#181・#182）。**指す値の欄が種類で決まる**。
+ *   - 数値（`number`）… `view.scope`（1 つの数）
+ *   - 棒（`bar`）・円（`pie`）… `view.groups`（見出しと値の組の並び）。型は `chart.tsx` の `ChartPart`
+ *   - 順位（`ranking`）… `view.ranking`（鍵 → 別の entity の行の並び）。型は `ranking.tsx` の `RankingPart`
  */
-export type DashboardPart = NumberDashboardPart | ChartPart;
+export type DashboardPart = DashboardNumberPart | ChartPart | RankingPart;
 
 export interface DashboardProps {
   readonly view: ApiViewBody;
@@ -82,6 +88,15 @@ const VALUE_STYLE: CSSProperties = {
   overflowWrap: "anywhere",
   wordBreak: "break-word",
 };
+/** 順位の部品の入れ物。**行を並べるので、数値の部品より広く取る**（折り返しは順位の部品が持つ） */
+const RANKING_PART_STYLE: CSSProperties = {
+  flex: "1 1 100%",
+  minWidth: 0,
+  maxWidth: "100%",
+  border: "1px solid #c9c9c9",
+  borderRadius: 4,
+  padding: 8,
+};
 
 /**
  * 部品が多いと見なす数（M1.4。Issue #181 の「見出しが 12 個以上」と揃える）。
@@ -100,14 +115,11 @@ function valueText(value: number | null): string {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 }
 
-/** 部品の表示名。**宣言の `label` があればそれ、無ければ `value` の識別子をそのまま出す** */
-const partHeading = (part: DashboardPart): string => part.label ?? part.value;
+/** 数値の部品の表示名。**宣言の `label` があればそれ、無ければ `value` の識別子をそのまま出す** */
+const partHeading = (part: DashboardNumberPart): string => part.label ?? part.value;
 
-/** 部品の値。**単位を添えて見せる**（`label` と揃えて、`null` のときも単位は出す） */
-function partValueText(
-  part: NumberDashboardPart,
-  scope: Readonly<Record<string, number | null>>,
-): string {
+/** 数値の部品の値。**単位を添えて見せる**（`label` と揃えて、`null` のときも単位は出す） */
+function partValueText(part: DashboardNumberPart, scope: Readonly<Record<string, number | null>>): string {
   const value = scope[part.value] ?? null;
   const text = valueText(value);
   return part.unit === undefined ? text : `${text} ${part.unit}`;
@@ -116,10 +128,20 @@ function partValueText(
 export function Dashboard({ view, parts, headingOf }: DashboardProps) {
   const scope = view.scope;
   const groups = view.groups;
-  const numberParts = parts.filter((part): part is NumberDashboardPart => part.type === "number");
+  const numberParts = parts.filter((part): part is DashboardNumberPart => part.type === "number");
   const chartParts = parts.filter(
     (part): part is ChartPart => part.type === "bar" || part.type === "pie",
   );
+  const rankingParts = parts.filter((part): part is RankingPart => part.type === "ranking");
+
+  // **空**：部品が 1 つも無ければ、出すものが無い（正しい宣言では起きない。守りは静的チェック）
+  if (parts.length === 0) {
+    return (
+      <p className="state empty" data-state="empty">
+        表示する部品がありません
+      </p>
+    );
+  }
 
   // **値を載せる `scope` が無い**——数値の部品が指す値を読めなかった（配信された応答の不整合である）。
   // 空の値に読み替えず、読めなかったことをそのまま出す
@@ -131,7 +153,8 @@ export function Dashboard({ view, parts, headingOf }: DashboardProps) {
     );
   }
 
-  // **値を載せる `groups` が無い**——グラフの部品が指す「見出しと値の組の並び」を読めなかった（同上）
+  // **値を載せる `groups` が無い**——棒・円の部品が指す「見出しと値の組の並び」を読めなかった（同上。
+  // M1.4。Issue #181）
   if (chartParts.length > 0 && groups === undefined) {
     return (
       <p className="state failure" data-state="dashboardUnavailable" role="alert">
@@ -140,11 +163,11 @@ export function Dashboard({ view, parts, headingOf }: DashboardProps) {
     );
   }
 
-  // **空**：部品が 1 つも無ければ、出すものが無い（正しい宣言では起きない。守りは静的チェック）
-  if (parts.length === 0) {
+  // **順位を載せる `ranking` が無い**——順位の部品が並べる行を読めなかった（同じく応答の不整合である）
+  if (rankingParts.length > 0 && view.ranking === undefined) {
     return (
-      <p className="state empty" data-state="empty">
-        表示する部品がありません
+      <p className="state failure" data-state="rankingUnavailable" role="alert">
+        順位を表示できません
       </p>
     );
   }
@@ -174,6 +197,17 @@ export function Dashboard({ view, parts, headingOf }: DashboardProps) {
           entries={groups?.[part.value] ?? null}
           headingOf={(headingText) => heading(part.value, headingText)}
         />
+      ))}
+      {/* 順位の部品（M1.4。Issue #182）。**API が並べた順をそのまま見せる**——画面は並べ替えない。
+          鍵は `view.ranking` を引く名前である。**求められなかった順位（`null`）は「順位を表示できません」** */}
+      {rankingParts.map((part) => (
+        <div className="dashboard-part dashboard-ranking" data-part={part.name} key={part.name} style={RANKING_PART_STYLE}>
+          <Ranking
+            part={part}
+            rows={view.ranking === undefined ? undefined : (view.ranking[part.name] ?? null)}
+            displayName={(name) => displayNameOf(view.labels, name)}
+          />
+        </div>
       ))}
     </div>
   );

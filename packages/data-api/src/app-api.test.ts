@@ -2833,7 +2833,8 @@ describe("dashboard の部品が読む値（M1.4。Issue #180）", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     // ダッシュボードの一覧は、**entity を持たず**、部品（widgets）を宣言の順に持つ（`unit` つき）。
-    // 数値（`number`）はアプリ全体の集計を、棒（`bar`）・円（`pie`）は見出しごとの集計を指す（M1.4。Issue #181）
+    // 数値（`number`）はアプリ全体の集計を、棒（`bar`）・円（`pie`）は見出しごとの集計を指し（M1.4。Issue
+    // #181）、順位（`ranking`）は並べる entity の行ごとの計算を指す（M1.4。Issue #182）
     expect(result.body.spec.views).toContainEqual({
       name: "dashboard",
       type: "dashboard",
@@ -2844,6 +2845,15 @@ describe("dashboard の部品が読む値（M1.4。Issue #180）", () => {
         { type: "number", label: "今月の費用の平均", value: "averageCost", unit: "円" },
         { type: "bar", label: "月ごとの活動回数", value: "activitiesByMonth", unit: "回" },
         { type: "pie", label: "種類の内訳", value: "activitiesByKind", unit: "回" },
+        // 順位の部品（M1.4。Issue #182）。`limit` は省いてある（既定は 5 である）
+        {
+          type: "ranking",
+          name: "topActivities",
+          label: "参加の多い活動",
+          entity: "activity",
+          by: "attendeeCount",
+          show: ["date", "kind", "attendeeCount"],
+        },
       ],
     });
   });
@@ -2897,5 +2907,146 @@ describe("dashboard の部品が読む値（M1.4。Issue #180）", () => {
       averageAttendees: null,
       averageCost: null,
     });
+  });
+});
+
+// ── 順位の部品（ranking）（M1.4。Issue #182） ──────────────────────────────
+//
+// **この Issue で足す語彙（`widgets` の `ranking` と、応答の欄 `ranking`）を含む正規化 JSON を、
+// `getSpec` と `getView` が `ok` で返す**ことをここで確かめる（docs/parallel-development.md §7.3）。
+// 順位が返すのは**別の entity の行**で、**行の形は `ApiRow` と同じ**である（`rows` と同じ読み方ができる）。
+// **`scope` にも `groups` にも混ぜず、兄弟の欄 `ranking` に載せる**。並べ替えるのは Data API である
+// ——**画面は式も集計も評価しない**（`CLAUDE.md` の不変条件）。負例ではなく**見本そのもの**を通すので、
+// 宣言・配信・SDK の取り残しがあればここで落ちる。
+
+/** 鍵（部品の `name`）で引いた順位の行の並びである */
+const rankingOf = (view: ApiViewBody, name: string): readonly ApiRow[] => view.ranking?.[name] ?? [];
+
+/** 順位の行の基準（`attendeeCount`）の値である */
+const rankedByOf = (rows: readonly ApiRow[]): readonly (number | boolean | null | undefined)[] =>
+  rows.map((row) => row.computed["attendeeCount"]);
+
+describe("dashboard の順位の部品（ranking）（M1.4。Issue #182）", () => {
+  it("ranking を含む正規化 JSON を、getSpec が ok で返す", async () => {
+    const run = await runDashboard();
+    const result = await getSpec(run.deps, DASHBOARD_INSTANCE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 順位の部品は、鍵（name）・並べる相手（entity）・基準（by）・出す項目（show）を持つ。
+    // ほかの部品（数値・棒・円）も同じ一覧に並ぶ（M1.4。Issue #180・#181）
+    expect(result.body.spec.views).toContainEqual({
+      name: "dashboard",
+      type: "dashboard",
+      widgets: [
+        { type: "number", label: "今月の活動", value: "activityCount", unit: "回" },
+        { type: "number", label: "今月の参加（のべ）", value: "attendeeTotal", unit: "人" },
+        { type: "number", label: "1 回あたりの参加", value: "averageAttendees", unit: "人" },
+        { type: "number", label: "今月の費用の平均", value: "averageCost", unit: "円" },
+        { type: "bar", label: "月ごとの活動回数", value: "activitiesByMonth", unit: "回" },
+        { type: "pie", label: "種類の内訳", value: "activitiesByKind", unit: "回" },
+        {
+          type: "ranking",
+          name: "topActivities",
+          label: "参加の多い活動",
+          entity: "activity",
+          by: "attendeeCount",
+          show: ["date", "kind", "attendeeCount"],
+        },
+      ],
+    });
+  });
+
+  it("getView が ok で、順位の行を `ranking` に載せる（by の降順）。行の形は `ApiRow` と同じ", async () => {
+    const run = await runDashboard();
+    const view = await dashboardView(run.deps, "dashboard");
+    const rows = rankingOf(view, "topActivities");
+    // 参加の多い順（練習 3 → 飲み会 2 → 試合 1）
+    expect(rankedByOf(rows)).toEqual([3, 2, 1]);
+    expect(rows.map((row) => row.fields["kind"])).toEqual(["practice", "party", "match"]);
+    // 行の形は `ApiRow` と同じである（id → createdAt・updatedAt・fields・computed を持つ）
+    expect(rows[0]).toMatchObject({
+      id: expect.any(String),
+      createdAt: expect.any(String),
+      updatedAt: expect.any(String),
+      fields: expect.any(Object),
+      computed: expect.any(Object),
+    });
+    // 順位（行の並び）は `scope`（数）には入らない——兄弟の欄である
+    expect(Object.keys(view.scope ?? {})).toEqual([
+      "activityCount",
+      "attendeeTotal",
+      "averageAttendees",
+      "averageCost",
+    ]);
+    expect(Object.keys(view.ranking ?? {})).toEqual(["topActivities"]);
+  });
+
+  it("**同じ値が並んだときは、登録した順**である（安定。受入条件）", async () => {
+    const run = await runDashboard();
+    // 最初の練習（3 人。09-10）と同じ 3 人の練習を足す——**同数なので、登録した順で後ろ**に来る
+    const added = await createFromAction(run.deps, DASHBOARD_INSTANCE, "addActivity", {
+      kind: "practice",
+      date: "2026-09-11",
+      attendees: [run.ids["A"] ?? "", run.ids["B"] ?? "", run.ids["C"] ?? ""],
+      cost: 100,
+    });
+    expect(added.ok).toBe(true);
+    const view = await dashboardView(run.deps, "dashboard");
+    const rows = rankingOf(view, "topActivities");
+    expect(rankedByOf(rows)).toEqual([3, 3, 2, 1]);
+    // 同数の 2 件は、**登録した順**（先に入れた 09-10 が先）である
+    expect(rows.slice(0, 2).map((row) => row.fields["date"])).toEqual(["2026-09-10", "2026-09-11"]);
+  });
+
+  it("**件数の上限（既定の 5）が効く**。200 件でも上位 5 件だけを返し、読みは行数に依らない（D-1）", async () => {
+    const records = new CountingRecordStore();
+    const deps = dashboardDeps(records);
+    const member = await createFromAction(deps, DASHBOARD_INSTANCE, "addMember", { name: "A" });
+    if (!member.ok) throw new Error("メンバーを作れない");
+    for (let i = 0; i < 200; i += 1) {
+      const created = await createFromAction(deps, DASHBOARD_INSTANCE, "addActivity", {
+        kind: "practice",
+        date: "2026-09-10",
+        attendees: [member.body.id],
+        cost: 100,
+      });
+      if (!created.ok) throw new Error(`活動 ${i} を作れない`);
+    }
+    records.listCalls.length = 0;
+    const view = await dashboardView(deps, "dashboard");
+    const rows = rankingOf(view, "topActivities");
+    // 200 件あっても、既定の上限 5 件だけを返す（同数なので、登録した順の先頭 5 件である）
+    expect(rows).toHaveLength(5);
+    expect(rankedByOf(rows)).toEqual([1, 1, 1, 1, 1]);
+    // **読みの回数は行数に依らない**——並べる entity を 1 回だけ読む（行ごとに読み直さない。D-1 の線）
+    expect(records.listCalls).toEqual(["activity"]);
+  });
+
+  it("**求められなかった順位は `null`**である（空の並びに読み替えない）", async () => {
+    // 並べる entity を宣言していない順位の部品（配信された宣言の不整合である）。**行を読めないので `null`**
+    const broken = {
+      ...DASHBOARD_APP,
+      spec: {
+        ...DASHBOARD_APP.spec,
+        entities: DASHBOARD_APP.spec.entities.filter((entity) => entity.name !== "activity"),
+      },
+    };
+    const deps: DataApiDeps = {
+      registry: { resolve: async () => dashboardRegistration() },
+      specs: { read: async () => JSON.stringify(broken) },
+      records: new FakeRecordStore(),
+      clock: fixedClock(DASHBOARD_SCENARIO.clock),
+    };
+    const view = await dashboardView(deps, "dashboard");
+    // `null`（求められなかった）であって、空の並び（該当が 0 件）ではない
+    expect(view.ranking?.["topActivities"]).toBeNull();
+  });
+
+  it("順位の部品が無ければ、応答に `ranking` の欄そのものを載せない（M1.1〜M1.3 の応答を変えない）", async () => {
+    const run = await runDashboard();
+    // 一覧（`activities`）にも、expense-log の一覧にも、順位の部品は無い
+    expect(await dashboardView(run.deps, "activities")).not.toHaveProperty("ranking");
+    const h = harness();
+    expect(await listOf(h)).not.toHaveProperty("ranking");
   });
 });

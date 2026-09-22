@@ -1126,3 +1126,89 @@ describe("ダッシュボード（dashboard）と数値の部品", () => {
     });
   });
 });
+
+// ── 順位の部品（`ranking`）と、応答の欄 `ranking`（M1.4。Issue #182） ──────────
+//
+// **順位の部品**（`type: ranking`）は、鍵 `name`・並べる相手 `entity`・基準 `by`・出す項目 `show` を要し、
+// `label` と `limit`（件数の上限）は任意である。**応答の欄 `ranking`** は、鍵 → 行の並び（`ApiRow`）か
+// `null`（求められなかった）である。受けないと `getSpec`／`getView` が失敗し、画面が開かない。
+
+describe("順位の部品（ranking）と応答の欄 ranking", () => {
+  const RANKING_WIDGET = {
+    type: "ranking",
+    name: "topExpenses",
+    label: "支出の多い順",
+    entity: "expense",
+    by: "shareAmount",
+    show: ["description", "shareAmount"],
+    limit: 3,
+  };
+
+  const RANKING_SPEC = {
+    ...SPEC,
+    spec: { ...SPEC.spec, views: [{ name: "dashboard", type: "dashboard", widgets: [RANKING_WIDGET] }] },
+  };
+
+  it("順位の部品を含む宣言を、型付きで受け取る（受入条件）", async () => {
+    const stub = recordingFetch(() => json(200, RANKING_SPEC));
+
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: RANKING_SPEC });
+  });
+
+  it("応答の欄 `ranking`（鍵 → 行の並び）を受け取る（受入条件）", async () => {
+    const body = { ...VIEW, entity: undefined, rows: [], ranking: { topExpenses: [ROW], topMembers: null } };
+    const stub = recordingFetch(() => json(200, body));
+    const result = await clientWith(stub.fetch).getView("inst-1", "dashboard");
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.ranking).toEqual({ topExpenses: [ROW], topMembers: null });
+  });
+
+  it("順位の部品の形が契約と違う宣言は INVALID_RESPONSE", async () => {
+    const bad: unknown[] = [
+      // 鍵（name）が無い
+      { type: "ranking", entity: "expense", by: "shareAmount", show: ["shareAmount"] },
+      // 並べる相手（entity）が無い
+      { type: "ranking", name: "top", by: "shareAmount", show: ["shareAmount"] },
+      // 基準（by）が無い
+      { type: "ranking", name: "top", entity: "expense", show: ["shareAmount"] },
+      // 出す項目（show）が無い
+      { type: "ranking", name: "top", entity: "expense", by: "shareAmount" },
+      // 出す項目が名前の並びでない
+      { type: "ranking", name: "top", entity: "expense", by: "shareAmount", show: "shareAmount" },
+      // 件数の上限が 1 以上でない
+      { type: "ranking", name: "top", entity: "expense", by: "shareAmount", show: ["shareAmount"], limit: 0 },
+      { type: "ranking", name: "top", entity: "expense", by: "shareAmount", show: ["shareAmount"], limit: 1.5 },
+      // 表示名（label）が空文字
+      { type: "ranking", name: "top", label: "", entity: "expense", by: "shareAmount", show: ["shareAmount"] },
+    ];
+    for (const widget of bad) {
+      const stub = recordingFetch(() =>
+        json(200, { ...SPEC, spec: { ...SPEC.spec, views: [{ name: "dashboard", type: "dashboard", widgets: [widget] }] } }),
+      );
+
+      expect(await clientWith(stub.fetch).getSpec("inst-1"), JSON.stringify(widget)).toMatchObject({
+        ok: false,
+        error: { status: 200, code: INVALID_RESPONSE },
+      });
+    }
+  });
+
+  it("応答の欄 `ranking` の形が契約と違えば INVALID_RESPONSE", async () => {
+    const bad: unknown[] = [
+      // 行の並びでも `null` でもない
+      { top: 1 },
+      // 行の形が違う
+      { top: [{ id: "r1" }] },
+      // 並びそのものが写像でない
+      [ROW],
+    ];
+    for (const ranking of bad) {
+      const stub = recordingFetch(() => json(200, { ...VIEW, ranking }));
+      expect(await clientWith(stub.fetch).getView("inst-1", "expenseList"), JSON.stringify(ranking)).toMatchObject({
+        ok: false,
+        error: { status: 200, code: INVALID_RESPONSE },
+      });
+    }
+  });
+});

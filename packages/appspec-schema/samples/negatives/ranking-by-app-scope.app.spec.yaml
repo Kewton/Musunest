@@ -1,0 +1,41 @@
+# 負例：順位の部品（type: ranking）の基準（by）が、アプリ全体の集計（scope: app）の計算を指している。
+# 基準にできるのは**その entity の行ごとの数の計算だけ**である——アプリ全体の集計には行ごとの値が無いので、
+# どの行を上位にするかを決められない（M1.4。Issue #182）。期待する誤りコードは index.json。
+# ほかの箇所は正しい宣言にしてある（1 か所だけを間違える）。
+
+entities:
+  - name: activity
+    fields:
+      date: date
+
+views:
+  - name: dashboard
+    type: dashboard
+    widgets:
+      - type: ranking
+        name: topActivities
+        entity: activity
+        by: activityCount
+        show: [date]
+
+actions:
+  - name: addActivity
+    entity: activity
+
+validations: []
+
+computed:
+  - name: activityCount
+    scope: app
+    aggregate:
+      count: activity
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

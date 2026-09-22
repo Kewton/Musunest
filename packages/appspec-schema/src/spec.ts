@@ -611,18 +611,26 @@ export const COMPARISON_OPERATORS = [">", ">=", "<", "<=", "==", "!="] as const;
  *
  * **`dashboard` も、データ層の項目の型としての `number` と同じ語を使う**——部品の種類 `number` は
  * 台帳に行を分けず、「dashboard」の節で扱う（`board` の `columns`・`highlight` と同じ扱いである）。
- * 棒 `bar`・円 `pie`（M1.4。Issue #181）は**同じ語がほかの層に無い**ので、台帳に自分の行を持つ。
+ * 棒 `bar`・円 `pie`（M1.4。Issue #181）と順位 `ranking`（M1.4。Issue #182）は**同じ語がほかの層に
+ * 無い**ので、台帳に自分の行を持つ。
  */
 export const VIEW_TYPES = ["table", "settlement", "board", "list", "dashboard"] as const;
 export type ViewType = (typeof VIEW_TYPES)[number];
 
 /**
- * ダッシュボード（`type: dashboard`）に並べる部品の種類（M1.4。Issue #180・#181）。
- * **語彙は閉じている**——この版で書けるのは数値の部品 `number`（#180）と、棒 `bar`・円 `pie`
- * （#181）である（順位の部品 `ranking` は後続の #182）。
+ * ダッシュボード（`type: dashboard`）に並べる部品の種類（M1.4。Issue #180・#181・#182）。
+ * **語彙は閉じている**——この版で書けるのは数値 `number`（#180）・棒 `bar`・円 `pie`（#181）・
+ * 順位 `ranking`（#182）である。
  */
-export const VIEW_PART_TYPES = ["number", "bar", "pie"] as const;
+export const VIEW_PART_TYPES = ["number", "bar", "pie", "ranking"] as const;
 export type ViewPartType = (typeof VIEW_PART_TYPES)[number];
+
+/**
+ * 順位の部品（`type: ranking`。M1.4。Issue #182）の、件数の上限を省いたときの既定である。
+ * **上位いくつの行を返すか**（窓口の決定 2026-09-19。`workspace/mvp/m1/02-l2-spec-examples.md` §4.3 の
+ * 叩き台は `limit: 5`）。意味は docs/semantics.md「ranking」にある。
+ */
+export const RANKING_LIMIT_DEFAULT = 5;
 
 /**
  * 数値の部品（`type: number`。M1.4。Issue #180）。**アプリ全体の集計（`scope: app`）の計算**を
@@ -691,10 +699,56 @@ export interface PiePart extends LabeledDeclaration {
 }
 
 /**
- * ダッシュボードに並べる部品（M1.4。Issue #180・#181）。数値（`number`）・棒（`bar`）・円（`pie`）である。
- * **`value` が指せる計算は種類で決まる**——数値はアプリ全体の集計、棒と円は見出しごとの集計である。
+ * 順位の部品（`type: ranking`。M1.4。Issue #182）。**行を並べる部品**であって、値を 1 つ出す部品ではない
+ * ——`entity` の行を、`by` の降順で `limit` 件だけ並べる（`01` §1.1）。
+ *
+ * ```yaml
+ * widgets:
+ *   - type: ranking
+ *     name: topActivities
+ *     label: 参加の多い活動
+ *     entity: activity
+ *     by: attendeeCount
+ *     show: [date, kind, attendeeCount]
+ * ```
+ *
+ * - **`name` は鍵である**（必須）。同じ一覧の `widgets` の中で重複させない。書き方は項目や計算と
+ *   同じ識別子（`^[A-Za-z][A-Za-z0-9]*$`）である。**`label`（表示名）とは別物である**——`name` は鍵、
+ *   `label` は画面に出す文字である。数値・棒・円の部品は `value`（計算の名前）が鍵になるが、
+ *   順位の部品は `value` を持たないので、鍵にできる名前を自分で持つ
+ * - **`entity` は並べる相手**である。**`by` は並べ替えの基準**——その entity の**行ごとの数の計算**
+ *   （`computed`）だけを指せる。**アプリ全体の集計（`scope: app`）は指せない**（行ごとの値が無いため）
+ *   ——指せば静的チェックが `UI_RANKING_BY_NOT_ROW_VALUE` で断る
+ * - **`by` は `show` に含めなければならない**（出す項目の 1 つとして基準を見せる）。含めなければ
+ *   `UI_RANKING_BY_NOT_SHOWN` である
+ * - **`show` は出す項目**（その entity の項目か、行ごとの値になる計算）である。書いた順に出す
+ * - **`limit` は件数の上限**（任意）。省略したときは `RANKING_LIMIT_DEFAULT`（5）である
+ * - **表示名（`label`）は任意**である。書かなければ `name` を見出しに使う
+ * - **行の形は `ApiRow` と同じ**である（画面が 2 通りの読み方を持たない。`packages/appspec-schema/src/api.ts`）。
+ *   値は一覧の応答の**兄弟の欄 `ranking`**（鍵 → 行の並び、または `null`）に載る
+ *
+ * 意味は docs/semantics.md「ranking」にある。
  */
-export type ViewPart = NumberPart | BarPart | PiePart;
+export interface RankingPart extends LabeledDeclaration {
+  readonly type: "ranking";
+  /** 鍵。同じ一覧の `widgets` の中で重複しない（`label` とは別物である） */
+  readonly name: string;
+  /** 並べる相手の entity の名前 */
+  readonly entity: string;
+  /** 並べ替えの基準になる、`entity` の行ごとの数の計算の名前 */
+  readonly by: string;
+  /** 出す項目（`entity` の項目か、行ごとの値になる計算）の名前。宣言の順に出す。`by` を必ず含める */
+  readonly show: readonly string[];
+  /** 件数の上限（1 以上）。省略したときは `RANKING_LIMIT_DEFAULT`（5）である */
+  readonly limit?: number;
+}
+
+/**
+ * ダッシュボードに並べる部品（M1.4。Issue #180・#181・#182）。数値（`number`）・棒（`bar`）・円（`pie`）・
+ * 順位（`ranking`）である。**指せる先は種類で決まる**——数値はアプリ全体の集計、棒と円は見出しごとの
+ * 集計、順位は並べる entity の行ごとの計算（`by`）である。
+ */
+export type ViewPart = NumberPart | BarPart | PiePart | RankingPart;
 
 /**
  * 一覧。種類の指定の無い一覧（M1.1）は、その entity のすべてのレコードを登録順に並べる。
@@ -751,15 +805,17 @@ export interface View {
    */
   readonly filters?: readonly string[];
   /**
-   * ダッシュボード（`type: dashboard`）に並べる部品（M1.4。Issue #180・#181）。**`type: dashboard` では
-   * 必須**である（部品が無ければダッシュボードにならない）。**1 つ以上の部品を書く**——空の並びは静的
-   * チェックが `SHAPE_KEY_MISSING` で断る。ほかの種類の一覧では書けない（`SHAPE_KEY_UNKNOWN`）。
+   * ダッシュボード（`type: dashboard`）に並べる部品（M1.4。Issue #180・#181・#182）。**`type: dashboard`
+   * では必須**である（部品が無ければダッシュボードにならない）。**1 つ以上の部品を書く**——空の並びは
+   * 静的チェックが `SHAPE_KEY_MISSING` で断る。ほかの種類の一覧では書けない（`SHAPE_KEY_UNKNOWN`）。
    *
-   * 部品は、数値（`number`）・棒（`bar`）・円（`pie`）である。指せる計算は種類で決まる——数値は
-   * **アプリ全体の集計**（`scope: app`）、棒と円は**見出しごとの集計**（`type: groups`）である。
+   * 部品は、数値（`number`）・棒（`bar`）・円（`pie`）・順位（`ranking`）である。**指せる先は種類で決まる**
+   * ——数値は**アプリ全体の集計**（`scope: app`）、棒と円は**見出しごとの集計**（`type: groups`）、
+   * 順位は**並べる entity の行ごとの計算**（`by`）である。
    *
    * **値は部品ごとに取りに行かない。** 1 回の取得でまとめて返る——数値は応答の `scope` に（M1.4。Issue
-   * #177）、棒と円の「見出しと値の組の並び」は応答の `groups` に載る（M1.4。Issue #179・#181）。
+   * #177）、棒と円の「見出しと値の組の並び」は応答の `groups` に（M1.4。Issue #179・#181）、順位の部品が
+   * 返す別の entity の行は応答の兄弟の欄 `ranking` に載る（M1.4。Issue #182。`scope` の欄には混ぜない）。
    */
   readonly widgets?: readonly ViewPart[];
 }
@@ -862,6 +918,7 @@ export const VOCABULARY = {
   dashboard: "ui",
   bar: "ui",
   pie: "ui",
+  ranking: "ui",
   label: "ui",
   filters: "ux",
   permission: "permission",

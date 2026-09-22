@@ -48,6 +48,7 @@ import {
   APPSPEC_SCHEMA_VERSION_PATTERN,
   FIELD_TYPES,
   PERIODS,
+  RANKING_LIMIT_DEFAULT,
   actionKind,
   fieldKind,
   fieldLabel,
@@ -608,6 +609,76 @@ function groupsValuesOf(
   return groups;
 }
 
+/**
+ * **順位の部品（`type: ranking`。M1.4。Issue #182）が並べる相手**の entity の名前である（重複を除く）。
+ * この entity のレコードを読んでおく——**行ごとに読み直さない**（D-1 の線。1 回の取得でまとめて返す）。
+ */
+function rankingEntitiesOf(view: View): readonly string[] {
+  const names = new Set<string>();
+  for (const part of view.widgets ?? []) {
+    if (part.type === "ranking") names.add(part.entity);
+  }
+  return [...names];
+}
+
+/** 順位の基準（`by`）の値。行の計算値のうち、その名前の値である（数でなければ `null`） */
+function rankedValueOf(row: ApiRow, by: string): number | null {
+  const value = row.computed[by];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * 順位の並べ替え（**降順。同じ値は登録した順**で安定させる。M1.4。Issue #182）。**基準の値が求められなかった
+ * 行（`null`）は、数のある行の後ろ**に置く——順位が決まらないので、上位には入れない。同数（同じ `null` を含む）
+ * は `index`（登録した順）で決める。
+ */
+function compareRanked(
+  left: { readonly index: number; readonly value: number | null },
+  right: { readonly index: number; readonly value: number | null },
+): number {
+  if (left.value === right.value) return left.index - right.index;
+  if (left.value === null) return 1;
+  if (right.value === null) return -1;
+  return right.value - left.value;
+}
+
+/**
+ * **順位の部品（`type: ranking`。M1.4。Issue #182）の値**を、部品の鍵（`name`）→ **行の並び**で求める。
+ * 順位の部品が 1 つも宣言されていなければ `undefined`（＝応答に欄を載せない。`scope`・`groups` と同じ約束）。
+ * 行を読めなかった順位（entity が宣言に無い）は **`null`** である——**空の並び（該当が 0 件）に読み替えない**。
+ *
+ * **並べ替えるのはここ（Data API）である**——画面は式も集計も評価しない（`CLAUDE.md` の不変条件）。
+ * 返す行の形は `ApiRow` と同じにする（画面が 2 通りの読み方を持たない。追記 2）。件数は部品の `limit`
+ * （省いたときは `RANKING_LIMIT_DEFAULT`。窓口の決定 2026-09-19）で切る。
+ */
+function rankingValuesOf(
+  app: NormalizedAppSpec,
+  view: View,
+  clock: Clock,
+  sources: SourceRecords,
+  stored: Readonly<Record<string, readonly StoredRecord[]>>,
+): Readonly<Record<string, readonly ApiRow[] | null>> | undefined {
+  const parts = view.widgets ?? [];
+  if (!parts.some((part) => part.type === "ranking")) return undefined;
+  const ranking: Record<string, readonly ApiRow[] | null> = {};
+  for (const part of parts) {
+    if (part.type !== "ranking") continue;
+    const entity = app.spec.entities.find((candidate) => candidate.name === part.entity);
+    const rows = stored[part.entity];
+    if (entity === undefined || rows === undefined) {
+      ranking[part.name] = null;
+      continue;
+    }
+    ranking[part.name] = rows
+      .map((record) => toApiRow(app, entity.name, record, clock, sources))
+      .map((row, index) => ({ row, index, value: rankedValueOf(row, part.by) }))
+      .sort(compareRanked)
+      .slice(0, part.limit ?? RANKING_LIMIT_DEFAULT)
+      .map((entry) => entry.row);
+  }
+  return ranking;
+}
+
 // ── その行で操作してよいか（M1.3。Issue #156） ────────────────────────
 //
 // **`when` はロジック層の守りである**（`03` §2.2）。判定するのはここ（唯一の権限強制点）で、
@@ -895,17 +966,27 @@ export async function getView(
   const permissions = permissionsOf(app);
   if (!permissions.read) return fail("PERMISSION_DENIED");
   // ダッシュボード（`type: dashboard`。M1.4。Issue #180）は**行を並べない**——`rows` は空の並びで、
-  // 部品が読む値は `scope`（アプリ全体の集計）と `groups`（見出しごとの集計。Issue #181）に 1 回で載る。
+  // 部品が読む値は `scope`（アプリ全体の集計。数値の部品）・`groups`（見出しごとの集計。棒・円の部品。
+  // Issue #181）・`ranking`（順位の部品が並べる別の entity の行。Issue #182）に 1 回で載る。
   // `entity` も、行ごとの `fields`・`computed` も持たない。**部品ごとに取りに行かない**（1 回の取得でまとめて返す）。
   if (view.type === "dashboard") {
+    // 順位の部品（`type: ranking`。M1.4。Issue #182）が並べる entity のレコードを読む。**行ごとに読み直さない**
+    // ——1 回の取得でまとめて返す。読んだ行は `known` で渡し、集計の元を読むときに使い回す（同じ行を 2 度読まない）
+    const rankingEntities = rankingEntitiesOf(view);
+    const known: Record<string, readonly StoredRecord[]> = {};
+    for (const name of rankingEntities) known[name] = await deps.records.list(name);
     // 数値の部品が読むアプリ全体の集計（`scope: app`）と、棒・円の部品が読む見出しごとの集計
-    // （`type: groups`）が指す entity を、**まとめて読む**（一覧の entity が無いので `known` は空である）
-    const sources = await loadSources(deps, app, "", [
+    // （`type: groups`。Issue #181）と、順位の部品が指す entity の集計が要る entity を、**まとめて読む**
+    const extra = [
       ...appAggregateSourceEntities(app),
       ...groupSourceEntities(app),
-    ]);
+      ...rankingEntities.flatMap((name) => [name, ...aggregateSourceEntities(app, name)]),
+    ];
+    const sources = await loadSources(deps, app, "", extra, known);
     const scope = scopeValuesOf(app, deps.clock, sources);
     const groups = groupsValuesOf(app, deps.clock, sources);
+    // 順位（M1.4。Issue #182）。**宣言が無ければ欄そのものを載せない**（`scope` と同じ約束）
+    const ranking = rankingValuesOf(app, view, deps.clock, sources, known);
     return ok(API_READ_STATUS, {
       instanceId,
       view: view.name,
@@ -916,6 +997,7 @@ export async function getView(
       rows: [],
       ...(scope === undefined ? {} : { scope }),
       ...(groups === undefined ? {} : { groups }),
+      ...(ranking === undefined ? {} : { ranking }),
     });
   }
   const entity = app.spec.entities.find((candidate) => candidate.name === view.entity);

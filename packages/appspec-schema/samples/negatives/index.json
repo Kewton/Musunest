@@ -289,6 +289,20 @@
       "why": "権限 write の subject owner は M1.1 の subject（minIdentity）に無い"
     },
     {
+      "name": "ranking-by-app-scope",
+      "codes": [
+        "UI_RANKING_BY_NOT_ROW_VALUE"
+      ],
+      "why": "順位の部品（type: ranking）の基準（by）が、行ごとの値を持たないアプリ全体の集計（scope: app）の計算 activityCount を指している（基準にできるのは、その entity の行ごとの数の計算だけである。M1.4。Issue #182）"
+    },
+    {
+      "name": "ranking-by-not-shown",
+      "codes": [
+        "UI_RANKING_BY_NOT_SHOWN"
+      ],
+      "why": "順位の部品の基準（by）tagCount が、出す項目（show）の date に無い（基準は出す項目の 1 つとして見せるので、by は show に含めなければならない。M1.4。Issue #182）"
+    },
+    {
       "name": "ref-unknown-entity",
       "codes": [
         "DATA_REF_TARGET_NOT_FOUND"

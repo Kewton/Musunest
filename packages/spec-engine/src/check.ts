@@ -45,6 +45,7 @@ import {
   type FieldKind,
   type FieldType,
   type Period,
+  type View,
   type ViewPart,
   type ViewPartType,
   type ViewType,
@@ -1139,23 +1140,51 @@ interface ShowFieldDraft {
 }
 
 /**
- * ダッシュボードの部品（`widgets` の 1 つ。M1.4。Issue #180・#181）。数値（`number`）・棒（`bar`）・
- * 円（`pie`）である。**`value` の実在と種類は、計算を読んだあとで見る**——数値は
- * `UI_DASHBOARD_VALUE_NOT_APP_SCOPE`、棒と円は `UI_DASHBOARD_VALUE_NOT_GROUPS` である。
+ * ダッシュボード（`type: dashboard`）の部品（`widgets` の 1 つ。M1.4。Issue #180・#181・#182）。
+ * 数値（`number`）・棒（`bar`）・円（`pie`）と、順位（`ranking`）の部品を、1 つの形で持つ
+ * （**書ける欄は種類で決める**）。**実在と種類は、entity と計算を読んだあとで見る**
+ * （`checkDashboardWidgets`）。
  */
 interface ViewPartDraft {
-  /** 部品の種類。読めなかった（無い・語彙に無い）ときは `null`（意味の検査を重ねない） */
-  readonly type: ViewPartType | null;
-  /** 指す計算の名前 */
-  readonly value: string;
-  readonly valueNode: YamlNode;
+  /** 部品の種類。読めなかった（`type` が無い・知らない語）ときは `null`（`malformed` が立つ） */
+  readonly kind: ViewPartType | null;
   /** 表示名（`label`）。無ければ `null`（画面は識別子をそのまま出す） */
   readonly label: string | null;
+  /** 読み取りの時点で断った（必須の欄が無い・空、など）。意味の検査を重ねない（1 つの誤りを 2 つに数えない） */
+  readonly malformed: boolean;
+  // ── `value` で計算を指す部品（数値 `number`・棒 `bar`・円 `pie`。M1.4。Issue #180・#181） ──
+  /** 指す計算の名前（数値はアプリ全体の集計、棒と円は見出しごとの集計） */
+  readonly value: string;
+  readonly valueNode: YamlNode;
   /** 単位（`unit`）。無ければ `null`（画面は数をそのまま見せる） */
   readonly unit: string | null;
-  /** 読み取りの時点で断った（`type`・`value` が無い・空、など）。実在の検査を重ねない（1 つの誤りを 2 つに数えない） */
-  readonly malformed: boolean;
+  // ── 順位の部品（`type: ranking`。M1.4。Issue #182） ────────────
+  /** 鍵（`name`）。1 つの一覧の `widgets` の中で重複しない */
+  readonly name: string;
+  readonly nameNode: YamlNode | null;
+  /** 並べる相手の entity の名前 */
+  readonly entity: string;
+  readonly entityNode: YamlNode | null;
+  /** 並べ替えの基準になる、行ごとの数の計算の名前 */
+  readonly by: string;
+  readonly byNode: YamlNode | null;
+  /** 出す項目（宣言の順）。`show` を書いていなければ `null` */
+  readonly show: readonly ShowFieldDraft[] | null;
+  /** 件数の上限（1 以上）。書いていなければ `null`（既定は `RANKING_LIMIT_DEFAULT`） */
+  readonly limit: number | null;
 }
+
+/** 位置を持たない値の代わり（読めなかった欄の位置に使う） */
+const NO_NODE: YamlNode = { kind: "null", line: 0, column: 0 };
+
+/**
+ * `value` で計算を指す部品（数値 `number`・棒 `bar`・円 `pie`）に書ける欄。
+ * **3 つとも同じである**——指す計算の種類（アプリ全体の集計か、見出しごとの集計か）だけが違う
+ */
+const VALUE_PART_KEYS = ["type", "value", "label", "unit"] as const;
+
+/** 順位の部品（`type: ranking`）に書ける欄（M1.4。Issue #182）。**`name` は鍵なので必須である** */
+const RANKING_PART_KEYS = ["type", "name", "label", "entity", "by", "show", "limit"] as const;
 
 /** 一覧（`views`）。M1.2 で `type`（種類）と `show`（表に出す名前の順）、M1.3 でボードの `columns`・`highlight` と、一覧の `filters` を、M1.4 でダッシュボードの `widgets` を足した */
 interface ViewDraft extends NamedDraft {
@@ -1212,15 +1241,24 @@ function readViewNames(
   member: MemberReader,
   key: "show" | "filters",
   report: Report,
+  /** 診断の文言の主語（`view` か `view の widgets[1]`）。順位の部品の `show` でも使う（M1.4。Issue #182） */
+  subject = "view",
+  /** 欄そのものが無いことを断るか（順位の部品の `show` は必須である。M1.4。Issue #182） */
+  required = false,
 ): readonly ShowFieldDraft[] | null {
   const entry = entryOf(member.map, key);
-  if (entry === undefined) return null;
+  if (entry === undefined) {
+    if (required) {
+      report("SHAPE_KEY_MISSING", `${subject} に ${key} が無い（出す項目を 1 つ以上書く）`, positionOf(member.map));
+    }
+    return null;
+  }
   if (entry.value.kind !== "seq") {
     report(
       "SHAPE_VALUE_INVALID",
       key === "show"
-        ? "view の show は、出す名前を並べた [a, b] で書く"
-        : "view の filters は、絞り込む項目の名前を並べた [a, b] で書く",
+        ? `${subject} の show は、出す名前を並べた [a, b] で書く`
+        : `${subject} の filters は、絞り込む項目の名前を並べた [a, b] で書く`,
       positionOf(entry.value),
     );
     return null;
@@ -1230,7 +1268,9 @@ function readViewNames(
     if (item.kind !== "scalar" || item.text === "") {
       report(
         "SHAPE_VALUE_INVALID",
-        key === "show" ? "view の show には、項目か計算の名前を書く" : "view の filters には、項目の名前を書く",
+        key === "show"
+          ? `${subject} の show には、項目か計算の名前を書く`
+          : `${subject} の filters には、項目の名前を書く`,
         positionOf(item),
       );
       continue;
@@ -1280,10 +1320,16 @@ const VIEW_KEYS: Readonly<Record<ViewType, readonly string[]>> = {
 };
 
 /**
- * ダッシュボードの部品（`widgets`。M1.4。Issue #180・#181）を読む。**1 つ以上書く**——欄そのものが無い・
- * 空の並びのときは `SHAPE_KEY_MISSING`（部品が無ければダッシュボードにならない）。**`value` の実在と
- * 種類は、計算を読んだあとで見る**——数値はアプリ全体の集計（`UI_DASHBOARD_VALUE_NOT_APP_SCOPE`）を、
- * 棒と円は見出しごとの集計（`UI_DASHBOARD_VALUE_NOT_GROUPS`）を指さなければならない。
+ * ダッシュボードの部品（`widgets`。M1.4。Issue #180・#181・#182）を読む。**1 つ以上書く**——欄そのものが
+ * 無い・空の並びのときは `SHAPE_KEY_MISSING`（部品が無ければダッシュボードにならない）。
+ *
+ * **書ける欄は `type` が決める**（語彙は閉じている。`View` の `widgets`）。
+ *   `number`     … `value`（アプリ全体の計算）と、任意の `label`・`unit`
+ *   `bar`・`pie` … `value`（見出しごとの計算）と、任意の `label`・`unit`（M1.4。Issue #181）
+ *   `ranking`    … 鍵 `name`・`entity`・`by`・`show` と、任意の `label`・`limit`（M1.4。Issue #182）
+ *
+ * 実在と種類は、entity と計算を読んだあとで見る（`UI_DASHBOARD_VALUE_NOT_APP_SCOPE`・
+ * `UI_DASHBOARD_VALUE_NOT_GROUPS`・`UI_RANKING_BY_NOT_ROW_VALUE`・`UI_RANKING_BY_NOT_SHOWN`）。
  */
 function readWidgets(member: MemberReader, report: Report): readonly ViewPartDraft[] {
   const entry = entryOf(member.map, "widgets");
@@ -1315,38 +1361,123 @@ function readWidgets(member: MemberReader, report: Report): readonly ViewPartDra
     }
     const what = `widgets[${index + 1}]`;
     const widget = new MemberReader(item, what, report);
-    widget.only(["type", "value", "label", "unit"]);
-    // 部品の種類。**語彙は閉じている**——数値（`number`。M1.4）、棒（`bar`）・円（`pie`。Issue #181）である
+    // 部品の種類。**語彙は閉じている**——数値（`number`）・棒（`bar`）・円（`pie`）・順位（`ranking`）である
     const typeEntry = entryOf(item, "type");
-    let type: ViewPartType | null = null;
+    const writtenType = typeEntry?.value.kind === "scalar" ? typeEntry.value.text : null;
+    const kind: ViewPartType | null =
+      writtenType !== null && isOneOf(VIEW_PART_TYPES, writtenType) ? (writtenType as ViewPartType) : null;
     if (typeEntry === undefined) {
-      report("SHAPE_KEY_MISSING", `view の ${what} に type が無い（いま書ける部品は ${VIEW_PART_TYPES.join("・")} である）`, positionOf(item));
-    } else if (typeEntry.value.kind !== "scalar" || !isOneOf(VIEW_PART_TYPES, typeEntry.value.text)) {
+      report(
+        "SHAPE_KEY_MISSING",
+        `view の ${what} に type が無い（書ける部品は ${VIEW_PART_TYPES.join("・")} である）`,
+        positionOf(item),
+      );
+    } else if (kind === null) {
       report(
         "SHAPE_KEY_UNKNOWN",
-        `view の ${what} の type ${typeEntry.value.kind === "scalar" ? typeEntry.value.text : "?"} は書けない（いま書ける部品は ${VIEW_PART_TYPES.join("・")} である）`,
+        `view の ${what} の type ${writtenType ?? "?"} は書けない（書ける部品は ${VIEW_PART_TYPES.join("・")} である）`,
         positionOf(typeEntry.value),
       );
-    } else {
-      type = typeEntry.value.text as ViewPartType;
     }
-    // 指す計算（`value`）。必須の、空でない文字列である
-    const value = widget.text("value");
-    // 表示名（`label`）は任意である。書いてあれば空でない文字列でなければならない（項目・計算の label と同じ）
+    // 知らない種類のときは、`type` だけを認める（ほかの欄はすべて SHAPE_KEY_UNKNOWN になる）。
+    // 数値・棒・円は `value` で計算を指すので、書ける欄は同じである（`VALUE_PART_KEYS`）
+    widget.only(kind === "ranking" ? RANKING_PART_KEYS : kind === null ? ["type"] : VALUE_PART_KEYS);
+    // 表示名（`label`）は、どの部品でも任意である。書いてあれば空でない文字列でなければならない
     const { label } = readLabel(item, `view の ${what}`, report);
-    // 単位（`unit`）も任意である。書いてあれば空でない文字列でなければならない
-    const unit = readUnit(widget, what, report);
+
+    // `value` で計算を指す部品（数値 `number`・棒 `bar`・円 `pie`）。読む欄は 3 つとも同じである
+    if (kind !== null && kind !== "ranking") {
+      // 指す計算（`value`）。必須の、空でない文字列である
+      const value = widget.text("value");
+      // 単位（`unit`）は任意である。書いてあれば空でない文字列でなければならない
+      const unit = readUnit(widget, what, report);
+      parts.push({
+        kind,
+        label,
+        // `value` を読めなかった（無い・空）ときは、実在の検査を重ねない（`SHAPE_KEY_MISSING` が既に出ている）
+        malformed: value === null,
+        value: value?.text ?? "",
+        valueNode: value?.node ?? NO_NODE,
+        unit,
+        name: "",
+        nameNode: null,
+        entity: "",
+        entityNode: null,
+        by: "",
+        byNode: null,
+        show: null,
+        limit: null,
+      });
+      return;
+    }
+
+    if (kind === "ranking") {
+      // 鍵（`name`）。必須で、書き方は項目や計算と同じ識別子である（`label` とは別物である）
+      const name = widget.text("name");
+      if (name !== null) checkName(name.text, `view の ${what} の鍵`, positionOf(name.node), report);
+      const entity = widget.text("entity");
+      const by = widget.text("by");
+      // 出す項目（`show`）は必須である。実在は、entity を読んだあとで見る（`checkRankingPart`）
+      const show = readViewNames(widget, "show", report, `view の ${what}`, true);
+      // 件数の上限（`limit`）は任意である。書いてあれば 1 以上の整数でなければならない
+      const limit = readRankingLimit(widget, what, report);
+      parts.push({
+        kind,
+        label,
+        malformed: name === null || entity === null || by === null || show === null,
+        value: "",
+        valueNode: NO_NODE,
+        unit: null,
+        name: name?.text ?? "",
+        nameNode: name?.node ?? null,
+        entity: entity?.text ?? "",
+        entityNode: entity?.node ?? null,
+        by: by?.text ?? "",
+        byNode: by?.node ?? null,
+        show,
+        limit,
+      });
+      return;
+    }
+
+    // 知らない種類（`kind` が `null`）。意味の検査を重ねない（`SHAPE_KEY_UNKNOWN` が既に出ている）
     parts.push({
-      type,
-      value: value?.text ?? "",
-      valueNode: value?.node ?? { kind: "null", line: 0, column: 0 },
+      kind: null,
       label,
-      unit,
-      // `type` か `value` を読めなかったときは、実在の検査を重ねない（1 つの誤りを 2 つに数えない）
-      malformed: type === null || value === null,
+      malformed: true,
+      value: "",
+      valueNode: NO_NODE,
+      unit: null,
+      name: "",
+      nameNode: null,
+      entity: "",
+      entityNode: null,
+      by: "",
+      byNode: null,
+      show: null,
+      limit: null,
     });
   });
   return parts;
+}
+
+/**
+ * 順位の部品の件数の上限（`limit`。M1.4。Issue #182）を読む。**任意**である。書いてあれば
+ * **1 以上の整数**でなければならない（上位いくつを出すか。省いたときの既定は `RANKING_LIMIT_DEFAULT`）。
+ */
+function readRankingLimit(member: MemberReader, what: string, report: Report): number | null {
+  const entry = entryOf(member.map, "limit");
+  if (entry === undefined) return null;
+  const value = entry.value;
+  if (value.kind !== "scalar" || !/^[1-9]\d*$/.test(value.text)) {
+    report(
+      "SHAPE_VALUE_INVALID",
+      `view の ${what} の limit は、1 以上の整数で書く（上位いくつを出すか）`,
+      positionOf(value),
+    );
+    return null;
+  }
+  return Number(value.text);
 }
 
 /**
@@ -2554,25 +2685,40 @@ function checkSettleSlots(computed: readonly ComputedDraft[], report: Report): v
 }
 
 /**
- * ダッシュボード（`type: dashboard`）の部品を検査する（M1.4。Issue #180・#181）。
+ * ダッシュボード（`type: dashboard`）の部品を検査する（M1.4。Issue #180・#181・#182）。
  *
- * **指せる計算は、部品の種類で決まる。** どちらもダッシュボードは行を並べないので、行ごとの計算は
- * 載る場所が無い（どの行の値かが決まらない）。
+ * **指せる先は、部品の種類で決まる。** ダッシュボードは**行を並べない**ので、数値・棒・円には
+ * 行ごとの計算を載せる場所が無い（どの行の値かが決まらない）。
  *   - 数値の部品（`number`）… **アプリ全体の集計（`scope: app`）の計算**（1 つの数）
  *   - 棒（`bar`）・円（`pie`）… **見出しごとの集計（`type: groups`）の計算**（見出しと値の組の並び）
  *
  * **2 つを別のコードにする**（`UI_DASHBOARD_VALUE_NOT_APP_SCOPE` と `UI_DASHBOARD_VALUE_NOT_GROUPS`）
  * ——指す先が別物であり、1 つの誤りを 2 つに数えないためである。
+ *
+ * **順位の部品**は、鍵（`name`）が 1 つの一覧の中で重複せず、基準（`by`）がその entity の行ごとの数の
+ * 計算であり（アプリ全体の集計は指せない）、`by` が `show` に含まれることを見る（`checkRankingPart`）。
  */
 function checkDashboardWidgets(
   view: ViewDraft,
   computed: readonly ComputedDraft[],
+  index: ReadonlyMap<string, EntityDraft>,
   report: Report,
 ): void {
-  for (const part of view.widgets ?? []) {
-    // `type` か `value` を読めなかった部品は、ここでは見ない（1 つの誤りを 2 つのコードに数えない）
-    if (part.malformed || part.type === null) continue;
-    if (part.type === "number") {
+  const parts = view.widgets ?? [];
+  // 順位の部品の鍵（`name`）は、応答の `ranking` の欄を引く名前である（M1.4。Issue #182）。
+  // **1 つの一覧の中で重複させない**（欠落・形は読み取りの時点で断っている）
+  checkDuplicates(
+    parts
+      .filter((part) => part.kind === "ranking")
+      .map((part) => ({ name: part.name, nameNode: part.nameNode })),
+    "UI_RANKING_NAME_DUPLICATE",
+    `view ${view.name} の widgets の鍵`,
+    report,
+  );
+  for (const part of parts) {
+    // 種類を読めなかった部品・必須の欄を読めなかった部品は、ここでは見ない（1 つの誤りを 2 つのコードに数えない）
+    if (part.malformed || part.kind === null) continue;
+    if (part.kind === "number") {
       const isAppScope = computed.some(
         (entry) => entry.scope === "app" && entry.settle === null && !entry.malformed && entry.name === part.value,
       );
@@ -2585,15 +2731,91 @@ function checkDashboardWidgets(
       }
       continue;
     }
-    // 棒（`bar`）・円（`pie`）は、見出しごとの集計（`type: groups`）を指さなければならない
-    const isGroups = computed.some(
-      (entry) => entry.type === "groups" && !entry.malformed && entry.name === part.value,
+    if (part.kind === "bar" || part.kind === "pie") {
+      // 棒（`bar`）・円（`pie`）は、見出しごとの集計（`type: groups`）を指さなければならない
+      const isGroups = computed.some(
+        (entry) => entry.type === "groups" && !entry.malformed && entry.name === part.value,
+      );
+      if (!isGroups) {
+        report(
+          "UI_DASHBOARD_VALUE_NOT_GROUPS",
+          `view ${view.name} の widgets の ${part.kind} が指す ${part.value} は、見出しごとの集計（type: groups）の計算でない`,
+          positionOf(part.valueNode),
+        );
+      }
+      continue;
+    }
+    checkRankingPart(view, part, computed, index, report);
+  }
+}
+
+/**
+ * 順位の部品（`type: ranking`。M1.4。Issue #182）の意味を検査する。
+ *
+ * - **基準（`by`）は、並べる entity の行ごとの数の計算**（`computed`）でなければならない。
+ *   **アプリ全体の集計（`scope: app`）は指せない**（行ごとの値が無く、どの行を上位にするか決まらない）。
+ *   実在しない名前・行ごとの計算でない名前も、同じ `UI_RANKING_BY_NOT_ROW_VALUE` で断る
+ * - **`by` は出す項目（`show`）に含めなければならない**（基準も出す項目の 1 つとして見せる）——
+ *   含めなければ `UI_RANKING_BY_NOT_SHOWN`
+ * - **出す項目は、その entity の項目か、行ごとの値になる計算**でなければならない（`UI_FIELD_NOT_FOUND`）
+ */
+function checkRankingPart(
+  view: ViewDraft,
+  part: ViewPartDraft,
+  computed: readonly ComputedDraft[],
+  index: ReadonlyMap<string, EntityDraft>,
+  report: Report,
+): void {
+  const label = `view ${view.name} の widgets[${part.name}]`;
+  const entity = index.get(part.entity);
+  if (entity === undefined) {
+    report(
+      "UI_ENTITY_NOT_FOUND",
+      `${label} の entity ${part.entity} が宣言に無い`,
+      positionOf(part.entityNode ?? NO_NODE),
     );
-    if (!isGroups) {
+    // entity が無ければ、基準も出す項目も見られない（誤りを重ねない）
+    return;
+  }
+  // 基準（`by`）は、**その entity の行ごとの数の計算**である（アプリ全体の集計は entity を持たないので一致しない）
+  const by = computed.find(
+    (entry) =>
+      entry.entity === entity.name &&
+      entry.name === part.by &&
+      entry.settle === null &&
+      entry.type === "number" &&
+      !entry.malformed,
+  );
+  if (by === undefined) {
+    report(
+      "UI_RANKING_BY_NOT_ROW_VALUE",
+      `${label} の by の ${part.by} が、${entity.name} の行ごとの数の計算でない（アプリ全体の集計は指せない）`,
+      positionOf(part.byNode ?? NO_NODE),
+    );
+    // 基準そのものを指せていないので、`show` に含まれているかは見ない（1 つの誤りを 2 つのコードにしない）
+  } else if (!(part.show ?? []).some((field) => field.name === part.by)) {
+    report(
+      "UI_RANKING_BY_NOT_SHOWN",
+      `${label} の by の ${part.by} が、出す項目（show）に無い`,
+      positionOf(part.byNode ?? NO_NODE),
+    );
+  }
+  // 出す項目は、その entity の項目か、**行ごとの値になる**計算である（精算と、真偽と、見出しごとの集計は出せない）
+  for (const field of part.show ?? []) {
+    const isField = entity.fields.some((candidate) => candidate.name === field.name);
+    const isComputed = computed.some(
+      (entry) =>
+        entry.entity === entity.name &&
+        entry.name === field.name &&
+        entry.settle === null &&
+        entry.type !== "boolean" &&
+        entry.type !== "groups",
+    );
+    if (!isField && !isComputed) {
       report(
-        "UI_DASHBOARD_VALUE_NOT_GROUPS",
-        `view ${view.name} の widgets の ${part.type} が指す ${part.value} は、見出しごとの集計（type: groups）の計算でない`,
-        positionOf(part.valueNode),
+        "UI_FIELD_NOT_FOUND",
+        `${label} の show の ${field.name} が、entity ${entity.name} の項目にも計算にも無い`,
+        positionOf(field.node),
       );
     }
   }
@@ -2889,21 +3111,37 @@ function buildAggregate(draft: AggregateDraft): Aggregate {
 }
 
 /**
- * 読み取った部品を、宣言の形（`ViewPart`）にする。**表示名と単位は書いてあるときだけ入れる**
- * （M1.4。Issue #180・#181）。種類（`number`・`bar`・`pie`）は読んだままを残す——
- * 数値は `scope` を、棒と円は `groups` を読む（同じ部品の形で、指す先だけが違う）。
+ * 読み取った部品を、宣言の形（`ViewPart`）にする。**表示名・単位・件数の上限は書いてあるときだけ入れる**
+ * （M1.4。Issue #180・#181・#182）。**種類を読めなかった部品があれば `null`**（組み立てない）。
  */
-function buildWidgets(drafts: readonly ViewPartDraft[]): readonly ViewPart[] {
-  return drafts.map((part) => {
-    const common = {
-      value: part.value,
-      ...(part.label === null ? {} : { label: part.label }),
-      ...(part.unit === null ? {} : { unit: part.unit }),
-    };
-    if (part.type === "bar") return { type: "bar" as const, ...common };
-    if (part.type === "pie") return { type: "pie" as const, ...common };
-    return { type: "number" as const, ...common };
-  });
+function buildWidgets(drafts: readonly ViewPartDraft[]): readonly ViewPart[] | null {
+  const parts: ViewPart[] = [];
+  for (const draft of drafts) {
+    if (draft.kind === null) return null;
+    const label = draft.label === null ? {} : { label: draft.label };
+    // 数値（`number`）・棒（`bar`）・円（`pie`）は、`value` で計算を指す（書ける欄も同じである）
+    if (draft.kind === "number" || draft.kind === "bar" || draft.kind === "pie") {
+      const common = {
+        value: draft.value,
+        ...label,
+        ...(draft.unit === null ? {} : { unit: draft.unit }),
+      };
+      if (draft.kind === "bar") parts.push({ type: "bar", ...common });
+      else if (draft.kind === "pie") parts.push({ type: "pie", ...common });
+      else parts.push({ type: "number", ...common });
+      continue;
+    }
+    parts.push({
+      type: "ranking",
+      name: draft.name,
+      entity: draft.entity,
+      by: draft.by,
+      show: (draft.show ?? []).map((field) => field.name),
+      ...label,
+      ...(draft.limit === null ? {} : { limit: draft.limit }),
+    });
+  }
+  return parts;
 }
 
 function buildSpec(drafts: Drafts): AppSpec | null {
@@ -2989,12 +3227,19 @@ function buildSpec(drafts: Drafts): AppSpec | null {
       });
     }
   }
-  return {
-    entities: built,
-    // 種類（`type`）と、種類ごとの欄（`show`・`columns`・`highlight`・`filters`・`widgets`）は、書いてある
-    // ときだけ入れる（M1.1 の宣言に欄を足さない）。**ダッシュボードは `entity` を持たない**（M1.4）——
-    // 行を並べないので、正規化した JSON にも `entity` を現さない
-    views: views.map((draft) => ({
+  // 種類（`type`）と、種類ごとの欄（`show`・`columns`・`highlight`・`filters`・`widgets`）は、書いてある
+  // ときだけ入れる（M1.1 の宣言に欄を足さない）。**ダッシュボードは `entity` を持たない**（M1.4）——
+  // 行を並べないので、正規化した JSON にも `entity` を現さない
+  const builtViews: View[] = [];
+  for (const draft of views) {
+    // 部品（`widgets`）はダッシュボードのときだけある。**種類を読めなかった部品があれば組み立てない**
+    let widgets: readonly ViewPart[] | undefined;
+    if (draft.widgets !== null) {
+      const built = buildWidgets(draft.widgets);
+      if (built === null) return null;
+      widgets = built;
+    }
+    builtViews.push({
       name: draft.name,
       ...(draft.entity === null ? {} : { entity: draft.entity }),
       ...(draft.type === null ? {} : { type: draft.type }),
@@ -3002,8 +3247,12 @@ function buildSpec(drafts: Drafts): AppSpec | null {
       ...(draft.columns === null ? {} : { columns: draft.columns.name }),
       ...(draft.highlight === null ? {} : { highlight: draft.highlight.name }),
       ...(draft.filters === null ? {} : { filters: draft.filters.map((field) => field.name) }),
-      ...(draft.widgets === null ? {} : { widgets: buildWidgets(draft.widgets) }),
-    })),
+      ...(widgets === undefined ? {} : { widgets }),
+    });
+  }
+  return {
+    entities: built,
+    views: builtViews,
     // 種類（`kind`）と、M1.3 の `set`・`when` は**書いてあるときだけ**入れる
     // （M1.1・M1.2 の宣言に欄を足さない。`kind` の省略は create である）
     actions: actions.map((draft) => ({
@@ -3113,7 +3362,7 @@ function inspect(source: string, report: Report): Drafts | null {
   for (const view of views) {
     // ダッシュボード（`type: dashboard`）は**行を並べない**——entity の実在を見ず、部品が指す値を見る（M1.4。Issue #180）
     if (view.type === "dashboard") {
-      checkDashboardWidgets(view, computed, report);
+      checkDashboardWidgets(view, computed, index, report);
       continue;
     }
     const entity = index.get(view.entity ?? "");
