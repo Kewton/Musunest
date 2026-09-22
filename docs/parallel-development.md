@@ -160,19 +160,31 @@ commandmate capture musubi --instance command-code --pane --tail 20   # 段と�
   commandmate auto-yes musubi --instance command-code --enable --duration 8h
   ```
 
-  - **off になる理由は 2 つある。混ぜて考えない。**
+  - **off になる理由は 3 つある。混ぜて考えない。**
 
     | | 原因 | 効く対処 |
     |---|---|---|
-    | **①期限切れ** | auto-yes には有効期間がある（`commandmate auto-yes --help` の `Duration (1h, 3h, 8h)`）。**既定の窓は管理の 1 ターン（40〜70 分）より短い** | **`--duration 8h`** |
+    | **①期限切れ** | auto-yes には有効期間があり、**既定は 60 分**である（2026-09-22 実測）。管理の 1 ターンは 40〜70 分かかるので、既定のままだと毎回途中で切れる | **`--duration 8h`** |
     | **②設定の初期化** | `commandmate sync` が worktree ごとの設定を戻す | **無い。送る前に毎回見るしかない**（根本は #118） |
+    | **③セッションの kill** | `commandmate instances <wt> kill <id>` で落とすと、再起動後は off から始まる（2026-09-22 実測） | **無い。落としたら入れ直す** |
 
   - **①は 2026-09-20 に判明した。それまで「相手のセッションの再起動で off に戻る」と書いていたが、
     これは誤りである**（この日は 1 日で 5 回 off になったが、サーバは 1 日 9 時間連続稼働で一度も再起動していない）。
     根拠は 3 つ：`--help` に `--duration` がある／CommandMate の DB に `auto_yes` の列が**どのテーブルにも無い**
     （＝永続化されない実行時の状態）／**送信直前に有効化した依頼が、ちょうど 1 時間後にプロンプトで止まっていた**
-    - **既定の窓の長さは測っていない。** CLI は期限を表示せず、`instances --json` にも期限の欄が無い。
-      **1 時間だと決めつけない。** `--duration 8h` を付ければ実用上は困らないので、測っていない
+    - **既定の窓は 60 分である**（2026-09-22 に実測）。**残り時間は読める**——`commandmate ls --json` の
+      `autoYesByInstance.<instance>.expiresAt`（epoch ミリ秒）から現在時刻を引く。
+      `--duration` を付けない有効化が 60.0 分、`--duration 8h` が 8.00 時間だった
+
+      ```bash
+      commandmate auto-yes <worktree-id> --enable --instance <id>   # --duration を付けない
+      commandmate ls --json                                          # autoYesByInstance.<id>.expiresAt
+      ```
+
+    - **2026-09-20 に「CLI は期限を表示せず、期限の欄が無い」と書いたのは誤りだった。**
+      そのとき見たのは `instances --json` だけで（**そちらに無いのは事実**）、`ls --json` を見ていなかった。
+      **見ていない範囲を「無い」と書いた**のが誤りである。「測っていない」で止めると、次に読む人が
+      同じ調査をやり直すことになる——実際には上の 2 コマンドで測れる
     - 2026-09-16〜17 の 3 回は**サーバの再起動が実際に起きていた**ので、そちらの観測は誤りではない。
       **原因が 1 つだと思い込んだのが誤り**だった
   - **②は同日に実証された。** #188 のために走らせた `sync` が `musunest-issue-178` の `cliToolId` の固定を
