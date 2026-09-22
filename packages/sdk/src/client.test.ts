@@ -384,6 +384,104 @@ describe("アプリ全体の集計（scope）と平均（avg）", () => {
   });
 });
 
+// ── 見出しごとの集計（`groupBy`・`groups`）（M1.4。Issue #179） ──
+//
+// 値は一覧の応答の `groups`（計算の名前 → 「見出しと値」の組の並び）に載る。**欄が無い**（宣言が無い）
+// ことと、値が `null`（求められなかった）ことを区別したまま渡す。宣言の側は `groupBy` と `type: groups`
+// を受ける——受けないと `getSpec` が失敗し、画面が開かない（#145・#154 と同じ穴）。
+
+describe("見出しごとの集計（groupBy・groups）", () => {
+  it("計算の値として受け取り、欄が無いときと null を区別する", async () => {
+    const groups = {
+      byKind: [
+        { heading: "practice", value: 2 },
+        { heading: "match", value: null },
+      ],
+    };
+
+    const withGroups = recordingFetch(() => json(200, { ...VIEW, groups }));
+    expect(await clientWith(withGroups.fetch).getView("inst-1", "expenseList")).toEqual({
+      ok: true,
+      value: { ...VIEW, groups },
+    });
+
+    // **欄そのものが無い**（宣言が無い）のは、値が `null` のときとは別の事実である
+    const none = recordingFetch(() => json(200, VIEW));
+    expect(await clientWith(none.fetch).getView("inst-1", "expenseList")).toEqual({ ok: true, value: VIEW });
+  });
+
+  it("組の形が違う値（見出しが文字列でない・値が数でも null でもない）は INVALID_RESPONSE", async () => {
+    const cases: unknown[] = [
+      { byKind: [{ heading: 1, value: 2 }] },
+      { byKind: [{ heading: "practice", value: "2" }] },
+      { byKind: "practice" },
+    ];
+    for (const groups of cases) {
+      const stub = recordingFetch(() => json(200, { ...VIEW, groups }));
+      expect(await clientWith(stub.fetch).getView("inst-1", "expenseList")).toMatchObject({
+        ok: false,
+        error: { status: 200, code: INVALID_RESPONSE },
+      });
+    }
+  });
+
+  it("groupBy と type: groups の宣言（正規化 JSON）を受け取る", async () => {
+    const withGroups: ApiSpecBody = {
+      ...SPEC,
+      spec: {
+        ...SPEC.spec,
+        computed: [
+          ...SPEC.spec.computed,
+          {
+            name: "byKind",
+            aggregate: {
+              kind: "count",
+              entity: "expense",
+              name: null,
+              where: {},
+              groupBy: { field: "amount", month: false },
+            },
+            type: "groups",
+          },
+        ],
+      },
+    };
+    const stub = recordingFetch(() => json(200, withGroups));
+
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: withGroups });
+  });
+
+  it("type: groups に entity を書いた宣言は INVALID_RESPONSE（成功にしない）", async () => {
+    const broken = {
+      ...SPEC,
+      spec: {
+        ...SPEC.spec,
+        computed: [
+          ...SPEC.spec.computed,
+          {
+            name: "bad",
+            entity: "expense",
+            aggregate: {
+              kind: "count",
+              entity: "expense",
+              name: null,
+              where: {},
+              groupBy: { field: "amount", month: false },
+            },
+            type: "groups",
+          },
+        ],
+      },
+    };
+    const stub = recordingFetch(() => json(200, broken));
+
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toMatchObject({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE },
+    });
+  });
+});
+
 // ── 一覧（list）と絞り込み（filters）（M1.3。Issue #158） ──────────────
 //
 // 画面（host）が絞り込みの候補を宣言から読むので、**契約と違う形は成功にしない**。

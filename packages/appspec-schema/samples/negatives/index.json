@@ -177,6 +177,20 @@
       "why": "一覧（type: list）の filters が、選択肢（enum）でも参照（ref）でもない数の項目 estimate を指している（M1.3）"
     },
     {
+      "name": "groupby-field-not-groupable",
+      "codes": [
+        "LOGIC_AGGREGATE_GROUPBY_NOT_GROUPABLE"
+      ],
+      "why": "見出しごとの集計（groupBy）の対象 expense.amount が数であって、分けられる enum（値ごと）でも date（月ごと）でもない（M1.4。Issue #179）"
+    },
+    {
+      "name": "groups-in-show",
+      "codes": [
+        "UI_FIELD_NOT_FOUND"
+      ],
+      "why": "見出しごとの集計（type: groups）の計算 kindCount を、一覧の show に書いている（並びを返す計算は列に出さない。M1.4。Issue #179）"
+    },
+    {
       "name": "highlight-not-boolean",
       "codes": [
         "UI_HIGHLIGHT_NOT_BOOLEAN"

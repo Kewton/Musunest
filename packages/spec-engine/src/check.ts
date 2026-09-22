@@ -449,6 +449,19 @@ interface AggregateWhereDraft {
   readonly condition: AggregateWhereCondition;
 }
 
+/**
+ * 見出しごとの集計（`groupBy`。M1.4。Issue #179）の、分ける対象。**実在と型は、entity を読んだ
+ * あとで見る**（`LOGIC_AGGREGATE_TARGET_NOT_FOUND`・`LOGIC_AGGREGATE_GROUPBY_NOT_GROUPABLE`）。
+ */
+interface AggregateGroupDraft {
+  readonly entity: string;
+  readonly entityNode: YamlNode;
+  readonly field: string;
+  readonly fieldNode: YamlNode;
+  /** `true` なら `date` の項目を月でまとめる（`false` なら `enum` の項目の値ごと） */
+  readonly month: boolean;
+}
+
 /** computed の集計（M1.2・M1.4）。読み取った形で、意味の検査は組み立てのあとに行う */
 interface AggregateDraft {
   readonly kind: AggregateKind;
@@ -459,6 +472,10 @@ interface AggregateDraft {
   readonly name: string | null;
   readonly nameNode: YamlNode | null;
   readonly where: readonly AggregateWhereDraft[];
+  /** 見出しごとに分ける対象（M1.4。Issue #179）。書いていなければ `null`（従来どおり 1 つの値） */
+  readonly groupBy: AggregateGroupDraft | null;
+  /** 見出しの数の上限（月で分けるときだけ。M1.4）。書いていなければ `null`（既定は 6） */
+  readonly last: number | null;
 }
 
 /** 循環を組み立てるための、計算への参照（同じ entity の式か、集計の対象の計算） */
@@ -1427,6 +1444,74 @@ function readWhereDraft(entry: YamlEntry | undefined, report: Report): readonly 
   return conditions;
 }
 
+/** `groupBy` の `<entity>.<項目>` を読む（月の形と、値ごとの形で共通。M1.4。Issue #179） */
+function readGroupTarget(
+  value: YamlNode,
+  report: Report,
+): { readonly entity: string; readonly field: string; readonly node: YamlNode } | null {
+  if (value.kind !== "scalar" || value.text === "") {
+    report(
+      "SHAPE_VALUE_INVALID",
+      "computed の aggregate の groupBy は「<entity>.<項目>」の形で書く",
+      positionOf(value),
+    );
+    return null;
+  }
+  const [entity = "", field = "", ...rest] = value.text.split(".");
+  if (entity === "" || field === "" || rest.length > 0) {
+    report(
+      "LOGIC_AGGREGATE_FORM_INVALID",
+      `computed の aggregate の groupBy ${value.text} は「<entity>.<項目>」の形で書く`,
+      positionOf(value),
+    );
+    return null;
+  }
+  return { entity, field, node: value };
+}
+
+/**
+ * 見出しごとに分ける対象（`groupBy`。M1.4。Issue #179）を読む。書ける形は 2 つである。
+ *   `<entity>.<enum の項目>`          … 値ごとに分ける（見出しは `options` のキー）
+ *   `{month: <entity>.<date の項目>}` … 月でまとめる（見出しは `YYYY-MM`）
+ * 分けられる型かどうかは、entity を読んだあとで見る（`LOGIC_AGGREGATE_GROUPBY_NOT_GROUPABLE`）。
+ */
+function readGroupByDraft(entry: YamlEntry | undefined, report: Report): AggregateGroupDraft | null {
+  if (entry === undefined) return null;
+  const value = entry.value;
+  if (value.kind === "map") {
+    const month = entryOf(value, "month");
+    if (month === undefined || value.entries.length !== 1) {
+      report(
+        "SHAPE_VALUE_INVALID",
+        "computed の aggregate の groupBy は、月でまとめるとき「{month: <entity>.<日付の項目>}」と書く（ほかの欄は書けない）",
+        positionOf(value),
+      );
+      return null;
+    }
+    const target = readGroupTarget(month.value, report);
+    if (target === null) return null;
+    return { entity: target.entity, entityNode: target.node, field: target.field, fieldNode: target.node, month: true };
+  }
+  const target = readGroupTarget(value, report);
+  if (target === null) return null;
+  return { entity: target.entity, entityNode: target.node, field: target.field, fieldNode: target.node, month: false };
+}
+
+/** 見出しの数の上限（`last`。M1.4）を読む。1 以上の整数である */
+function readGroupLast(entry: YamlEntry | undefined, report: Report): number | null {
+  if (entry === undefined) return null;
+  const value = entry.value;
+  if (value.kind !== "scalar" || !/^[1-9]\d*$/.test(value.text)) {
+    report(
+      "SHAPE_VALUE_INVALID",
+      "computed の aggregate の last は、1 以上の整数で書く（直近いくつの見出しか）",
+      positionOf(value),
+    );
+    return null;
+  }
+  return Number(value.text);
+}
+
 /** 集計（`aggregate`）を読む。意味の検査（対象の実在・型・where の整合）は組み立てのあとに行う */
 function readAggregateDraft(value: YamlNode, report: Report): AggregateDraft | null {
   if (value.kind !== "map") {
@@ -1439,10 +1524,10 @@ function readAggregateDraft(value: YamlNode, report: Report): AggregateDraft | n
   }
   reportDuplicateKeys(value, "aggregate", report);
   for (const entry of value.entries) {
-    if (!isOneOf([...AGGREGATE_KINDS, "where"], entry.key)) {
+    if (!isOneOf([...AGGREGATE_KINDS, "where", "groupBy", "last"], entry.key)) {
       report(
         "SHAPE_KEY_UNKNOWN",
-        `computed の aggregate に欄 ${entry.key} は書けない（${AGGREGATE_KINDS.join(" と ")} と where だけ）`,
+        `computed の aggregate に欄 ${entry.key} は書けない（${AGGREGATE_KINDS.join(" と ")} と where と groupBy と last だけ）`,
         { line: entry.keyLine, column: entry.keyColumn },
       );
     }
@@ -1469,13 +1554,16 @@ function readAggregateDraft(value: YamlNode, report: Report): AggregateDraft | n
   const kind = present[0];
   if (kind === undefined) return null;
   const where = readWhereDraft(entryOf(value, "where"), report);
+  // 見出しごとの集計（M1.4。Issue #179）。**書いていなければ従来どおり 1 つの値**である
+  const groupBy = readGroupByDraft(entryOf(value, "groupBy"), report);
+  const last = readGroupLast(entryOf(value, "last"), report);
   if (kind === "count") {
     const entity = entryOf(value, "count")?.value;
     if (entity === undefined || entity.kind !== "scalar" || entity.text === "") {
       report("SHAPE_VALUE_INVALID", "computed の count は集計元の entity の名前で書く", positionOf(entity ?? value));
       return null;
     }
-    return { kind, entity: entity.text, entityNode: entity, name: null, nameNode: null, where };
+    return { kind, entity: entity.text, entityNode: entity, name: null, nameNode: null, where, groupBy, last };
   }
   const target = readAggregateTarget(entryOf(value, kind)?.value ?? value, report, kind);
   if (target === null) return null;
@@ -1486,6 +1574,8 @@ function readAggregateDraft(value: YamlNode, report: Report): AggregateDraft | n
     name: target.name,
     nameNode: target.node,
     where,
+    groupBy,
+    last,
   };
 }
 
@@ -1551,9 +1641,28 @@ function readComputed(items: readonly YamlNode[], report: Report): readonly Comp
         );
       }
     }
+    // 見出しごとの集計（`type: groups`。M1.4。Issue #179）は **`scope` も `entity` も持たない**——
+    // 分ける対象は `aggregate` の `groupBy` が持つ。`type` を先に見て、欄の要否を決める
+    const rawTypeEntry = entryOf(member.map, "type");
+    const isGroups = rawTypeEntry?.value.kind === "scalar" && rawTypeEntry.value.text === "groups";
     const entityEntry = entryOf(member.map, "entity");
     let entity: { readonly text: string; readonly node: YamlNode } | null = null;
-    if (scope === "app") {
+    if (isGroups) {
+      for (const [key, extra] of [
+        ["scope", scopeEntry],
+        ["entity", entityEntry],
+      ] as const) {
+        if (extra !== undefined) {
+          report(
+            "SHAPE_KEY_UNKNOWN",
+            `${label} は type: groups である（${key} は書かない。分ける対象は aggregate の groupBy が持つ）`,
+            { line: extra.keyLine, column: extra.keyColumn },
+          );
+        }
+      }
+      // `scope: app` と書いていても、上の検査で断っている（entity と同じ扱いである）
+      scope = null;
+    } else if (scope === "app") {
       // アプリ全体の計算は entity を持たない。書いてあれば断る（黙って捨てない）
       if (entityEntry !== undefined) {
         report(
@@ -1741,7 +1850,10 @@ function scopeFor(
       const field = fields.get(name);
       if (field !== undefined) return field;
       const type = computedTypes.get(name);
-      if (type !== undefined) return isOneOf(COMPUTED_TYPES, type) ? (type as ComputedType) : "unknown";
+      if (type !== undefined) {
+        // 見出しごとの集計（`groups`）は行ごとの値ではないので、式から参照できない
+        return isOneOf(COMPUTED_TYPES, type) && type !== "groups" ? (type as SpecType) : "unknown";
+      }
       return null;
     },
     entityName: (name: string): string | null => (index.has(name) ? name : null),
@@ -1770,7 +1882,8 @@ function appScopeFor(computed: readonly ComputedDraft[]): ExpressionScope {
     resolveName: (name: string): SpecType | null => {
       const type = types.get(name);
       if (type === undefined) return null;
-      return isOneOf(COMPUTED_TYPES, type) ? (type as ComputedType) : "unknown";
+      // 見出しごとの集計（`groups`）は数ではないので、アプリ全体の式から参照できない
+      return isOneOf(COMPUTED_TYPES, type) && type !== "groups" ? (type as SpecType) : "unknown";
     },
     entityName: () => null,
   };
@@ -2065,8 +2178,12 @@ function checkActions(
  * 集計の意味を検査する（M1.2・M1.4）。集計元の entity・対象（項目か計算）・where の整合を見る。
  * 対象が計算なら、その計算を依存として覚える（**entity をまたぐ循環**を `checkCycles` が見つけられるように）。
  *
- * `outputEntity` は**集計の出力先の entity** である。`null` ならアプリ全体（`scope: app`）——
- * 出力先のレコードが無いので、`where` の `this` は書けない（期間の条件は #178 で足す）。
+ * `outputEntity` は**集計の出力先の entity** である。`null` なら出力先のレコードが無い——
+ * アプリ全体の集計（`scope: app`）と、見出しごとの集計（`type: groups`）である。どちらも
+ * `where` の `this` は書けない（比べる相手が居ない。期間の条件は書ける）。
+ *
+ * `groups` が `true` のときは**見出しごとの集計**（M1.4。Issue #179）として見る——`groupBy` を要り、
+ * 分けられるのは `enum` と `date` だけで、対象（`sum`・`avg`）は**項目だけ**である。
  */
 function checkAggregate(
   draft: ComputedDraft,
@@ -2075,7 +2192,32 @@ function checkAggregate(
   index: ReadonlyMap<string, EntityDraft>,
   computed: readonly ComputedDraft[],
   report: Report,
+  groups = false,
 ): void {
+  if (groups && aggregate.groupBy === null) {
+    report(
+      "LOGIC_COMPUTED_TYPE_MISMATCH",
+      `computed ${draft.name} は type: groups である（集計に groupBy を書く）`,
+      positionOf(aggregate.entityNode),
+    );
+    return;
+  }
+  if (!groups && aggregate.groupBy !== null) {
+    report(
+      "LOGIC_COMPUTED_TYPE_MISMATCH",
+      `computed ${draft.name} の集計の groupBy は、type: groups のときだけ書ける（見出しごとの集計である）`,
+      positionOf(aggregate.entityNode),
+    );
+    return;
+  }
+  // `last` は見出しの上限なので、見出しごとの集計（`groupBy`）と一緒でなければ意味を持たない
+  if (!groups && aggregate.last !== null) {
+    report(
+      "LOGIC_AGGREGATE_FORM_INVALID",
+      `computed ${draft.name} の集計の last は、groupBy と一緒に書く（見出しの数の上限である）`,
+      positionOf(aggregate.entityNode),
+    );
+  }
   const source = index.get(aggregate.entity);
   if (source === undefined) {
     report(
@@ -2087,6 +2229,47 @@ function checkAggregate(
     return;
   }
 
+  // 見出しごとの集計（M1.4。Issue #179）。**分けられるのは `enum`（値ごと）と `date`（月ごと）だけ**である
+  if (groups && aggregate.groupBy !== null) {
+    const grouping = aggregate.groupBy;
+    if (grouping.entity !== aggregate.entity) {
+      report(
+        "LOGIC_AGGREGATE_FORM_INVALID",
+        `computed ${draft.name} の groupBy の entity ${grouping.entity} は、集計元 ${aggregate.entity} と一致しなければならない`,
+        positionOf(grouping.entityNode),
+      );
+    }
+    const field = source.fields.find((candidate) => candidate.name === grouping.field);
+    if (field === undefined) {
+      report(
+        "LOGIC_AGGREGATE_TARGET_NOT_FOUND",
+        `computed ${draft.name} の groupBy の項目 ${aggregate.entity}.${grouping.field} が、集計元 entity に無い`,
+        positionOf(grouping.fieldNode),
+      );
+    } else {
+      const declaration = field.declaration;
+      const groupable = grouping.month
+        ? declaration !== null && fieldKind(declaration) === "date"
+        : declaration !== null && isEnumField(declaration);
+      if (!groupable) {
+        report(
+          "LOGIC_AGGREGATE_GROUPBY_NOT_GROUPABLE",
+          grouping.month
+            ? `computed ${draft.name} の groupBy の ${aggregate.entity}.${grouping.field} は、月でまとめられる日付（date）の項目でなければならない`
+            : `computed ${draft.name} の groupBy の ${aggregate.entity}.${grouping.field} は、選択肢（enum）の項目でなければならない（分けられるのは enum と date だけである）`,
+          positionOf(grouping.fieldNode),
+        );
+      }
+    }
+    if (aggregate.last !== null && !grouping.month) {
+      report(
+        "LOGIC_AGGREGATE_FORM_INVALID",
+        `computed ${draft.name} の集計の last は、月で分けるときだけ書ける（enum の見出しは options のキーの全部である）`,
+        positionOf(grouping.fieldNode),
+      );
+    }
+  }
+
   // `count` は値を読まない。`sum`・`avg` は対象が数でなければならない（M1.2・M1.4）
   if (aggregate.kind !== "count") {
     const name = aggregate.name ?? "";
@@ -2094,6 +2277,13 @@ function checkAggregate(
     let targetType: string | null = null;
     if (field !== undefined) {
       targetType = field.declaration === null ? null : expressionTypeOf(field.declaration);
+    } else if (groups) {
+      // **見出しごとの集計の対象は項目だけ**である（評価が行ごとの計算を持たない）
+      report(
+        "LOGIC_AGGREGATE_TARGET_NOT_FOUND",
+        `computed ${draft.name} の集計の対象 ${aggregate.entity}.${name} が、項目に無い（見出しごとの集計の対象は項目だけである）`,
+        positionOf(aggregate.nameNode ?? aggregate.entityNode),
+      );
     } else {
       const target = computed.find(
         (entry) => entry.scope === null && entry.entity === source.name && entry.name === name,
@@ -2132,7 +2322,7 @@ function checkAggregate(
     const declaration = field.declaration;
     const kind = declaration === null ? null : fieldKind(declaration);
     // 期間の条件（`within`。M1.4）は、**集計元の `date` の項目だけ**を指せる。
-    // 出力先のレコードを持たないアプリ全体の集計（`scope: app`）でも書ける（`this` を要らない）
+    // 出力先のレコードを持たない集計（`scope: app`・`type: groups`）でも書ける（`this` を要らない）
     if (condition.op === "within") {
       if (kind !== "date") {
         report(
@@ -2147,7 +2337,7 @@ function checkAggregate(
     if (outputEntity === null) {
       report(
         "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
-        `computed ${draft.name} は scope: app である（集計の where に this は書けない。出力先のレコードが無い）`,
+        `computed ${draft.name} の集計の where に this は書けない（出力先のレコードが無い）`,
         positionOf(fieldNode),
       );
       continue;
@@ -2299,12 +2489,49 @@ function checkAppComputed(
   }
 }
 
+/**
+ * **見出しごとの集計（`type: groups`。M1.4。Issue #179）**の意味を検査する。
+ * entity に属さない（`scope` も `entity` も持たない）ので、項目との名前の重なりも、精算も見ない。
+ * 集計元・`groupBy` の対象・`last` は `checkAggregate`（`groups = true`）が見る。
+ */
+function checkGroupComputed(
+  draft: ComputedDraft,
+  index: ReadonlyMap<string, EntityDraft>,
+  computed: readonly ComputedDraft[],
+  report: Report,
+): void {
+  if (isOneOf(RESERVED_NAMES, draft.name)) {
+    report(
+      "LOGIC_COMPUTED_NAME_RESERVED",
+      `computed の名前 ${draft.name} は店頭が付ける値の名前である`,
+      positionOf(draft.nameNode ?? draft.expressionNode),
+    );
+    return;
+  }
+  // 読み取りの時点で断った（式・集計・精算の重複や不足）ものは、意味の検査を重ねない
+  if (draft.malformed) return;
+  if (draft.aggregate === null) {
+    report(
+      "LOGIC_COMPUTED_TYPE_MISMATCH",
+      `computed ${draft.name} は type: groups である（集計に groupBy を書く）`,
+      positionOf(draft.nameNode ?? draft.expressionNode),
+    );
+    return;
+  }
+  checkAggregate(draft, draft.aggregate, null, index, computed, report, true);
+}
+
 function checkComputed(
   computed: readonly ComputedDraft[],
   index: ReadonlyMap<string, EntityDraft>,
   report: Report,
 ): void {
   for (const draft of computed) {
+    // 見出しごとの集計（`type: groups`。M1.4。Issue #179）は entity にも scope にも属さない
+    if (draft.type === "groups") {
+      checkGroupComputed(draft, index, computed, report);
+      continue;
+    }
     // アプリ全体の計算（`scope: app`。M1.4）は entity に属さないので、別の検査をする
     if (draft.scope === "app") {
       checkAppComputed(draft, index, computed, report);
@@ -2484,7 +2711,17 @@ function buildActionSet(values: readonly ActionSetDraft[]): ActionSet {
 function buildAggregate(draft: AggregateDraft): Aggregate {
   const where: Record<string, AggregateWhereCondition> = {};
   for (const condition of draft.where) where[condition.field] = condition.condition;
-  return { kind: draft.kind, entity: draft.entity, name: draft.name, where };
+  return {
+    kind: draft.kind,
+    entity: draft.entity,
+    name: draft.name,
+    where,
+    // 見出しごとの集計（M1.4。Issue #179）。**書いてあるときだけ入れる**（従来の宣言に欄を足さない）
+    ...(draft.groupBy === null
+      ? {}
+      : { groupBy: { field: draft.groupBy.field, month: draft.groupBy.month } }),
+    ...(draft.last === null ? {} : { last: draft.last }),
+  };
 }
 
 function buildSpec(drafts: Drafts): AppSpec | null {
@@ -2519,6 +2756,18 @@ function buildSpec(drafts: Drafts): AppSpec | null {
       continue;
     }
     if (!isOneOf(COMPUTED_TYPES, draft.type)) return null;
+    // 見出しごとの集計（`type: groups`。M1.4。Issue #179）は **entity も scope も持たない**
+    // （groupBy が分ける対象を持つ）。`groupBy` の無い groups は組み立てない
+    if (draft.type === "groups") {
+      if (draft.aggregate === null || draft.aggregate.groupBy === null) return null;
+      builtComputed.push({
+        name: draft.name,
+        ...label,
+        aggregate: buildAggregate(draft.aggregate),
+        type: "groups",
+      });
+      continue;
+    }
     // アプリ全体の計算（`scope: app`。M1.4）は **entity を持たない**（どのレコードにも属さない）
     if (draft.scope === "app") {
       builtComputed.push(
@@ -2698,7 +2947,9 @@ function inspect(source: string, report: Report): Drafts | null {
           entry.entity === entity.name &&
           entry.name === field.name &&
           entry.settle === null &&
-          entry.type !== "boolean",
+          // 真偽（強調が指す）と、見出しごとの集計（並びを返す）は列に出さない（M1.3・M1.4）
+          entry.type !== "boolean" &&
+          entry.type !== "groups",
       );
       if (!isField && !isComputed) {
         report(

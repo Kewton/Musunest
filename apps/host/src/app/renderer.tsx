@@ -222,6 +222,34 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           ))}
         </dl>
       )}
+      {view !== null && view.groups !== undefined && (
+        // 見出しごとの集計（`groupBy`。M1.4。Issue #179）。**API が求めた値をそのまま見せる**
+        // （画面は式も集計も評価しない）。求められなかった組（`null`）は「—」で見せ、空の並びと区別する。
+        // `enum` の見出しは、宣言の `options` の表示名に写す（月は `YYYY-MM` のまま出す）
+        <section className="group-values" data-groups="true" aria-label="見出しごとの集計">
+          {Object.entries(view.groups).map(([name, entries]) => (
+            <div className="group" key={name} data-group-name={name}>
+              <h2 className="group-title">{displayNameOf(view.labels, name)}</h2>
+              {entries === null ? (
+                <p className="state group-unavailable" data-state="groupsUnavailable">
+                  —
+                </p>
+              ) : (
+                <ul className="group-list">
+                  {entries.map((entry) => (
+                    <li className="group-entry" key={entry.heading} data-heading={entry.heading}>
+                      <span className="group-heading">
+                        {groupHeadingOf(spec.spec, name, entry.heading)}
+                      </span>
+                      <span className="group-number">{computedText(entry.value)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
+        </section>
+      )}
       {view === null ? (
         <p className="state" data-state="noview">
           表示できる一覧がありません
@@ -491,6 +519,26 @@ function computedText(value: number | boolean | null | undefined): string {
 function numberText(value: number): string {
   const rounded = Math.round(value * 10) / 10;
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+/**
+ * 見出しごとの集計（M1.4。Issue #179）の**見出しの表示名**。`enum` で分けたものは、宣言の
+ * `options` の表示名に写す（無ければキーのまま）——**送られてくるのはキーで、見せるのは表示名**である
+ * （`enum` の入力欄と同じ考え方である）。月（`YYYY-MM`）はそのまま出す。
+ *
+ * 宣言を引けない（計算や項目が無い）ときは、受け取った見出しをそのまま出す（**分からないものを消さない**）。
+ */
+function groupHeadingOf(spec: AppSpec, name: string, heading: string): string {
+  const entry = spec.computed.find((candidate) => candidate.name === name);
+  if (entry === undefined || !("aggregate" in entry)) return heading;
+  const grouping = entry.aggregate.groupBy;
+  if (grouping === undefined || grouping.month) return heading;
+  const entity = spec.entities.find((candidate) => candidate.name === entry.aggregate.entity);
+  const declaration = entity?.fields[grouping.field];
+  if (declaration === undefined || typeof declaration === "string" || declaration.type !== "enum") {
+    return heading;
+  }
+  return declaration.options[heading] ?? heading;
 }
 
 function failed(error: ClientError): ScreenState {

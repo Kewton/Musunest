@@ -384,8 +384,17 @@ function isWhereCondition(value: unknown): boolean {
 }
 
 /**
+ * 見出しごとに分ける対象（`groupBy`。M1.4。Issue #179）の形。`field` は文字列、`month` は真偽である。
+ * **実在や型（`enum`・`date` かどうか）は静的チェックが見る**——ここは形だけを確かめる。
+ */
+function isGrouping(value: unknown): boolean {
+  return isRecord(value) && typeof value.field === "string" && typeof value.month === "boolean";
+}
+
+/**
  * 集計（`aggregate`）の形（M1.2・M1.4）。`sum`・`avg` は対象の名前を持ち、`count` は持たない。
- * どちらも `where`（項目 → `op` を持つオブジェクト）を持つ。
+ * どちらも `where`（項目 → `op` を持つオブジェクト）を持ち、`groupBy`（見出しごとの集計。M1.4）と
+ * `last`（見出しの上限）を**載っているときだけ**確かめる。
  */
 function isAggregate(value: unknown): boolean {
   if (!isRecord(value)) return false;
@@ -394,7 +403,12 @@ function isAggregate(value: unknown): boolean {
   if (typeof value.entity !== "string") return false;
   if (kind === "count" ? value.name !== null : typeof value.name !== "string") return false;
   if (!isRecord(value.where)) return false;
-  return Object.values(value.where).every(isWhereCondition);
+  if (!Object.values(value.where).every(isWhereCondition)) return false;
+  if (value.groupBy !== undefined && !isGrouping(value.groupBy)) return false;
+  if (value.last !== undefined) {
+    if (typeof value.last !== "number" || !Number.isInteger(value.last) || value.last < 1) return false;
+  }
+  return true;
 }
 
 /**
@@ -419,25 +433,37 @@ function isComputedDeclaration(value: unknown): boolean {
   // 表示名（`label`。Issue #176）は任意である。載っているときだけ、空でない文字列を要求する
   if (!isOptionalLabel(value)) return false;
   const appScoped = value.scope === "app";
+  // 見出しごとの集計（`type: groups`。M1.4。Issue #179）は `scope` も `entity` も持たない
+  const grouped = value.type === "groups";
   if (value.scope !== undefined && !appScoped) return false;
-  if (appScoped ? value.entity !== undefined : typeof value.entity !== "string") return false;
+  if (grouped) {
+    if (value.scope !== undefined || value.entity !== undefined) return false;
+  } else if (appScoped ? value.entity !== undefined : typeof value.entity !== "string") {
+    return false;
+  }
   const forms = [
     typeof value.expression === "string",
     value.aggregate !== undefined,
     value.settle !== undefined,
   ].filter(Boolean).length;
   if (forms !== 1) return false;
-  // 精算は entity を持つ（アプリ全体の計算には書けない）
-  if (value.settle !== undefined) return !appScoped && isSettleDeclaration(value.settle);
+  // 精算は entity を持つ（アプリ全体の計算にも、見出しごとの集計にも書けない）
+  if (value.settle !== undefined) return !appScoped && !grouped && isSettleDeclaration(value.settle);
+  // 見出しごとの集計は、`groupBy` を持つ集計だけである
+  if (grouped) return value.aggregate !== undefined && isAggregate(value.aggregate);
   // アプリ全体の値は数である（`boolean` は行ごとの強調が指すためだけに使う。M1.3・M1.4）
   if (appScoped) {
     if (value.type !== "number") return false;
     return typeof value.expression === "string" || isAggregate(value.aggregate);
   }
   // 式の計算の型は `COMPUTED_TYPES`（正本）で見る（`number` と、M1.3 の `boolean`）。
-  // 集計は数を返すので `number` だけである
+  // **`groups` は式では書けない**（見出しごとの集計だけである）。集計は数を返すので `number` だけである
   if (typeof value.expression === "string") {
-    return typeof value.type === "string" && (COMPUTED_TYPES as readonly string[]).includes(value.type);
+    return (
+      typeof value.type === "string" &&
+      value.type !== "groups" &&
+      (COMPUTED_TYPES as readonly string[]).includes(value.type)
+    );
   }
   if (value.aggregate !== undefined) return value.type === "number" && isAggregate(value.aggregate);
   return isSettleDeclaration(value.settle);
@@ -499,6 +525,28 @@ function isScopeValues(value: unknown): boolean {
   return (
     isRecord(value) &&
     Object.values(value).every((item) => item === null || typeof item === "number")
+  );
+}
+
+/**
+ * **見出しごとの集計（`groupBy`。M1.4。Issue #179）の応答**。計算の名前 →
+ * **「見出しと値」の組の並び**か `null`（集計元を読めなかった）である。組は `heading`（文字列）と
+ * `value`（数か `null`）を持つ。**欄が無い**（宣言が無い）ことと、値が `null` のことを区別したまま渡す。
+ */
+function isGroupedValues(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    Object.values(value).every(
+      (entries) =>
+        entries === null ||
+        (Array.isArray(entries) &&
+          entries.every(
+            (entry) =>
+              isRecord(entry) &&
+              typeof entry.heading === "string" &&
+              (entry.value === null || typeof entry.value === "number"),
+          )),
+    )
   );
 }
 
@@ -587,6 +635,8 @@ function isViewBody(value: unknown): value is ApiViewBody {
     // 精算（M1.2）。**欄が無い**（宣言が無い）ときと `null`（読めなかった）ときを区別したまま渡す
     (value.settlement === undefined || isSettlement(value.settlement)) &&
     // アプリ全体の集計（M1.4）。**欄が無い**（宣言が無い）ときと、値の `null` を区別したまま渡す
-    (value.scope === undefined || isScopeValues(value.scope))
+    (value.scope === undefined || isScopeValues(value.scope)) &&
+    // 見出しごとの集計（M1.4。Issue #179）。**欄が無い**ときと、値の `null` を区別したまま渡す
+    (value.groups === undefined || isGroupedValues(value.groups))
   );
 }

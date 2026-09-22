@@ -889,11 +889,11 @@ describe("表示名（label）（M1.3）", () => {
   });
 });
 
-// ── 2. 負例 52 件 ──────────────────────────────────────────────
+// ── 2. 負例 54 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 52 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本、M1.4 の #178 で 2 本足した）", () => {
-    expect(negativeIndex.negatives).toHaveLength(52);
+  it("負例の一覧は 54 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本、M1.4 の #178 で 2 本、#179 で 2 本足した）", () => {
+    expect(negativeIndex.negatives).toHaveLength(54);
   });
 
   it.each(negativeCases)(
@@ -2454,5 +2454,189 @@ describe("アプリ全体の集計（scope: app）と平均（avg）（M1.4）",
       ),
     );
     expect(codesOf(result)).toEqual(["LOGIC_COMPUTED_CYCLE"]);
+  });
+});
+
+// ── 見出しごとの集計（`groupBy`）と並びを返す型（`groups`）（M1.4。Issue #179） ──
+//
+// **分けられるのは `enum`（値ごと）と `date`（月ごと）だけ**である。`type: groups` の計算は
+// `groupBy` を持つ集計を要り、`entity` も `scope` も持たない（どのレコードにも属さない）。
+// 負例 2 本（groupby-field-not-groupable・groups-in-show）が、同じことを外から確かめる。
+
+const GROUP_ENTITIES = [
+  "  - name: expense",
+  "    fields:",
+  "      paidOn: date",
+  "      amount: number",
+  "      kind:",
+  "        type: enum",
+  "        options:",
+  "          food: 食事",
+  "          travel: 移動",
+].join("\n");
+
+/** 見出しごとの集計 1 つ（`type: groups`）。`body` は aggregate の中身（この関数が 4 文字下げる） */
+const groupComputed = (name: string, body: readonly string[]): string =>
+  [`  - name: ${name}`, ...body.map((line) => `    ${line}`), "    type: groups"].join("\n");
+
+const BY_KIND = groupComputed("byKind", ["aggregate:", "  count: expense", "  groupBy: expense.kind"]);
+const BY_MONTH = groupComputed("byMonth", [
+  "aggregate:",
+  "  count: expense",
+  "  groupBy:",
+  "    month: expense.paidOn",
+  "  last: 6",
+]);
+
+describe("見出しごとの集計（groupBy）と並びを返す型（groups）（M1.4。Issue #179）", () => {
+  it("enum・月の groupBy と last を、宣言のまま写す", () => {
+    const result = checkSpec(
+      declaration({ entities: GROUP_ENTITIES, computed: [BY_KIND, BY_MONTH].join("\n") }),
+    );
+    expect(result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("見出しごとの集計が通らない");
+    // `type: groups` の計算は **entity も scope も持たない**（写しても足さない）
+    expect(result.spec.computed).toContainEqual({
+      name: "byKind",
+      aggregate: { kind: "count", entity: "expense", name: null, where: {}, groupBy: { field: "kind", month: false } },
+      type: "groups",
+    });
+    expect(result.spec.computed).toContainEqual({
+      name: "byMonth",
+      aggregate: {
+        kind: "count",
+        entity: "expense",
+        name: null,
+        where: {},
+        groupBy: { field: "paidOn", month: true },
+        last: 6,
+      },
+      type: "groups",
+    });
+  });
+
+  it("type: groups に groupBy が無ければ LOGIC_COMPUTED_TYPE_MISMATCH", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          entities: GROUP_ENTITIES,
+          computed: [groupComputed("bad", ["aggregate:", "  count: expense"])].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["LOGIC_COMPUTED_TYPE_MISMATCH"]);
+  });
+
+  it("groupBy を type: number の集計に書けば LOGIC_COMPUTED_TYPE_MISMATCH（type: groups だけが持つ）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          entities: GROUP_ENTITIES,
+          computed: [
+            ["  - name: bad", "    entity: expense", "    aggregate:", "      count: expense", "      groupBy: expense.kind", "    type: number"].join("\n"),
+          ].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["LOGIC_COMPUTED_TYPE_MISMATCH"]);
+  });
+
+  it("分けられない項目（数）を groupBy に書けば LOGIC_AGGREGATE_GROUPBY_NOT_GROUPABLE（負例と同じ形）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          entities: GROUP_ENTITIES,
+          computed: [groupComputed("bad", ["aggregate:", "  count: expense", "  groupBy: expense.amount"])].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["LOGIC_AGGREGATE_GROUPBY_NOT_GROUPABLE"]);
+    // 月の形でも、日付でない項目は同じコードで断る
+    const month = failure(
+      checkSpec(
+        declaration({
+          entities: GROUP_ENTITIES,
+          computed: [
+            groupComputed("bad", ["aggregate:", "  count: expense", "  groupBy:", "    month: expense.amount"]),
+          ].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(month)).toEqual(["LOGIC_AGGREGATE_GROUPBY_NOT_GROUPABLE"]);
+  });
+
+  it("last を enum の groupBy に書けば LOGIC_AGGREGATE_FORM_INVALID（月で分けるときだけ）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          entities: GROUP_ENTITIES,
+          computed: [
+            groupComputed("bad", ["aggregate:", "  count: expense", "  groupBy: expense.kind", "  last: 6"]),
+          ].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["LOGIC_AGGREGATE_FORM_INVALID"]);
+  });
+
+  it("見出しごとの集計を一覧の show に書けば UI_FIELD_NOT_FOUND（負例と同じ形）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          entities: GROUP_ENTITIES,
+          views: [
+            "  - name: expenseList",
+            "    type: table",
+            "    entity: expense",
+            "    show: [amount, byKind]",
+          ].join("\n"),
+          computed: [BY_KIND].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["UI_FIELD_NOT_FOUND"]);
+  });
+
+  it("type: groups に entity を書けば SHAPE_KEY_UNKNOWN（どのレコードにも属さない）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          entities: GROUP_ENTITIES,
+          computed: [
+            ["  - name: bad", "    entity: expense", "    aggregate:", "      count: expense", "      groupBy: expense.kind", "    type: groups"].join("\n"),
+          ].join("\n"),
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
+  });
+
+  it("見本 dashboard の見出しごとの集計を、宣言のまま写す（語彙と見本が一致している）", () => {
+    const result = checkSpec(read(sampleSpecFile("dashboard")));
+    expect(result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("dashboard が静的チェックに通らない");
+    expect(result.spec.computed).toContainEqual({
+      name: "activitiesByMonth",
+      aggregate: {
+        kind: "count",
+        entity: "activity",
+        name: null,
+        where: {},
+        groupBy: { field: "date", month: true },
+        last: 6,
+      },
+      type: "groups",
+    });
+    expect(result.spec.computed).toContainEqual({
+      name: "activitiesByKind",
+      aggregate: {
+        kind: "count",
+        entity: "activity",
+        name: null,
+        where: {},
+        groupBy: { field: "kind", month: false },
+      },
+      type: "groups",
+    });
   });
 });

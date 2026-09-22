@@ -1498,6 +1498,106 @@ describe("アプリ全体の集計（scope: app）と平均（avg）を画面へ
   });
 });
 
+// ── 見出しごとの集計（`groupBy`・`groups`）を画面へ写す（M1.4。Issue #179） ──
+//
+// **宣言からの写像**を見る（`form.test.ts` は入力欄の部品しか見ていない。`docs/parallel-development.md` §7.3）。
+// 見出しごとの値は **API が返した `groups` をそのまま出す**（画面は式も集計も評価しない）。`enum` の見出しは
+// **宣言の `options` の表示名に写す**（送るのはキー、見せるのは表示名という `enum` の決めごとと同じ）。
+
+/** `expense` に選択肢（`enum`）の項目 `kind` と、見出しごとの集計 `byKind` を足した宣言 */
+const GROUPS_SPEC: ApiSpecBody = {
+  ...SPEC,
+  spec: {
+    ...SPEC.spec,
+    entities: [
+      {
+        name: "expense",
+        fields: {
+          description: "string",
+          amount: "number",
+          discount: "number",
+          payer: "string",
+          participants: "list",
+          kind: { type: "enum", options: { practice: "練習", match: "試合" } },
+        },
+      },
+    ],
+    computed: [
+      ...SPEC.spec.computed,
+      {
+        name: "byKind",
+        aggregate: {
+          kind: "count",
+          entity: "expense",
+          name: null,
+          where: {},
+          groupBy: { field: "kind", month: false },
+        },
+        type: "groups",
+      },
+    ],
+  },
+};
+
+/** `groups` を差し替えて答える client（宣言にも見出しごとの集計がある） */
+const groupsClient = (groups: NonNullable<ApiViewBody["groups"]>): MusunestClient =>
+  makeClient({
+    spec: () => Promise.resolve(okResult(GROUPS_SPEC)),
+    view: () => Promise.resolve(okResult({ ...VIEW, groups })),
+  });
+
+/** `data-group-name` の組の、[見出しの表示名, 値] を並びの順に読む */
+const groupEntriesOf = (container: HTMLElement, name: string): [string, string][] =>
+  [...container.querySelectorAll(`[data-group-name="${name}"] .group-entry`)].map((entry) => [
+    entry.querySelector(".group-heading")?.textContent ?? "",
+    entry.querySelector(".group-number")?.textContent ?? "",
+  ]);
+
+describe("見出しごとの集計（groupBy・groups）を画面へ写す（M1.4）", () => {
+  it("API が返した組をそのまま出し、enum の見出しは表示名に写す。null は「—」で見せる", async () => {
+    const { container } = await renderScreen(
+      groupsClient({
+        byKind: [
+          { heading: "practice", value: 2 },
+          { heading: "match", value: 1 },
+          { heading: "party", value: null },
+        ],
+      }),
+    );
+
+    expect(container.querySelector('[data-groups="true"]')).not.toBeNull();
+    // 送られてくるのはキー（practice・match）だが、見せるのは表示名（練習・試合）である。
+    // 宣言に無いキー（party）は、キーのまま出す。値の `null` は「—」である（0 と区別する）
+    expect(groupEntriesOf(container, "byKind")).toEqual([
+      ["練習", "2"],
+      ["試合", "1"],
+      ["party", "—"],
+    ]);
+  });
+
+  it("月の見出し（`YYYY-MM`）はそのまま出し、値はそのまま見せる", async () => {
+    const { container } = await renderScreen(
+      groupsClient({
+        byMonth: [
+          { heading: "2026-08", value: 0 },
+          { heading: "2026-09", value: 3 },
+        ],
+      }),
+    );
+
+    expect(groupEntriesOf(container, "byMonth")).toEqual([
+      ["2026-08", "0"],
+      ["2026-09", "3"],
+    ]);
+  });
+
+  it("**宣言が無ければ groups を描かない**（M1.1〜M1.3 の画面を変えない）", async () => {
+    // VIEW は `groups` を持たない（宣言にも見出しごとの集計が無い）
+    const { container } = await renderScreen(makeClient({}));
+    expect(container.querySelector('[data-groups="true"]')).toBeNull();
+  });
+});
+
 // ── 期間の条件（`within`）を画面へ写す（M1.4。Issue #178） ──────────────
 //
 // **宣言からの写像**を見る（`form.test.ts` は入力欄の部品しか見ていない。`docs/parallel-development.md` §7.3）。

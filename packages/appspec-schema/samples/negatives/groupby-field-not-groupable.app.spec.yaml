@@ -1,0 +1,43 @@
+# 負例：見出しごとの集計（`groupBy`）が、分けられない項目 `expense.amount`（数）を指している。
+# **分けられるのは `enum` の項目（値ごと）と `date` の項目（月ごと）だけ**である（M1.4。Issue #179）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: member
+    fields:
+      name: string
+  - name: expense
+    fields:
+      paidOn: date
+      amount: number
+      kind:
+        type: enum
+        options:
+          food: 食事
+          travel: 移動
+
+views:
+  - name: memberList
+    entity: member
+
+actions:
+  - name: addMember
+    entity: member
+
+validations: []
+
+computed:
+  - name: amountByAmount
+    aggregate:
+      count: expense
+      groupBy: expense.amount
+    type: groups
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous
