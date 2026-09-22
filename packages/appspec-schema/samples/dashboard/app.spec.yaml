@@ -3,10 +3,10 @@
 # 練習や試合を記録すると、**アプリ全体で 1 つ**の値（**今月の**活動の回数・参加ののべ人数・1 回あたりの参加・
 # 費用の平均）が出る。M1.4 の各 Issue が、自分の語彙をこの見本へ足していく（docs/parallel-development.md §7.2）。
 # **#177 が骨格（`scope: app` と `avg`）を置き、#178 が期間の条件（`within: this_month`）を、
-# #179 が見出しごとの集計（`groupBy` と `groups` 型）を足した。**
+# #179 が見出しごとの集計（`groupBy` と `groups` 型）を、#182 が順位の部品（`ranking`）を足した。**
 #
 # 元は workspace/mvp/m1/02-l2-spec-examples.md §4.3（叩き台）。**いまの語彙で書けないものは落としてある**：
-#   - グラフの部品（`bar`・`pie`）と順位の部品（`ranking`）は #181・#182
+#   - グラフの部品（`bar`・`pie`）は #181
 #   - 表示名（`label`。日本語の見出しは #176）
 #
 # **`within: this_month` は「今月」を日本時間で決める**（Issue #178）。時計は**評価に引数で渡す**——
@@ -26,9 +26,14 @@
 # である（行ごとの計算は載る場所が無い）。**`entity` を持たない**し、応答の `rows` も空の並びである
 # （意味は ../../docs/semantics.md「dashboard」）。
 #
+# **順位の部品（`widgets` の `ranking`）は #182 が足した。** ダッシュボードで**初めて行を並べる**部品で、
+# `activity` の行を**行ごとの数の計算**の降順に並べる（同数は登録した順で安定させる）。**基準にアプリ全体の
+# 集計は指せない**（行ごとの値が無い）。値は応答の**兄弟の欄 `ranking`**（部品の `name` → 行の並び）に載る
+# （意味は ../../docs/semantics.md「ranking」）。
+#
 # 採点のシナリオは同じディレクトリの scenario.json、
 # 意味は ../../docs/semantics.md（「scope」「aggregate」「within」「sum」「count」「avg」「groupBy」「groups」
-# 「computed」「dashboard」）にある。
+# 「computed」「dashboard」「ranking」）にある。
 
 entities:
   - name: member
@@ -141,6 +146,16 @@ views:
         label: 今月の費用の平均
         value: averageCost
         unit: 円
+      # 順位の部品（`type: ranking`。M1.4。Issue #182）。**行を並べる唯一の部品**である——`activity` の行を、
+      # 行ごとの数の計算（`by`）の降順に並べる。**基準にアプリ全体の集計は指せない**ので、`by` は行ごとの
+      # 計算 `attendeeCount` である。`by` は `show` に含める（出す項目の 1 つとして基準を見せる）。
+      # `limit` は省いてある——**既定の 5 が効く**（窓口の決定 2026-09-19）。`name` は鍵である。
+      - type: ranking
+        name: topActivities
+        label: 参加の多い活動
+        entity: activity
+        by: attendeeCount
+        show: [date, kind, attendeeCount]
   # 活動の一覧。アプリ全体の値も、一覧の上に出る（`scope` の欄）
   - name: activities
     type: list

@@ -1868,3 +1868,109 @@ describe("ダッシュボード（dashboard）と数値の部品を画面へ写�
     expect(container.querySelector(".instant-table")).toBeNull();
   });
 });
+
+// ── 順位の部品（`ranking`）を画面へ写す（M1.4。Issue #182） ──────────────
+//
+// **宣言からの写像**を見る（`form.test.ts` は入力欄の部品しか見ていない。`docs/parallel-development.md` §7.3）。
+// 順位の部品は**行を並べる唯一の部品**である——API が `by` の降順（同数は登録した順）で並べた行を、
+// **そのままの順で見せる**（画面は式も集計も評価しないし、並べ替えもしない。`CLAUDE.md` の不変条件）。
+
+/** 順位の部品を持つダッシュボードの宣言。並べる相手は `activity` で、基準は行ごとの計算 `attendeeCount` である */
+const RANKING_SPEC: ApiSpecBody = {
+  ...SPEC,
+  spec: {
+    ...SPEC.spec,
+    entities: [{ name: "activity", fields: { date: "date", kind: "string", attendees: "list" } }],
+    views: [
+      {
+        name: "dashboard",
+        type: "dashboard",
+        widgets: [
+          {
+            type: "ranking",
+            name: "topActivities",
+            label: "参加の多い活動",
+            entity: "activity",
+            by: "attendeeCount",
+            show: ["date", "kind", "attendeeCount"],
+          },
+        ],
+      },
+    ],
+    computed: [
+      { name: "attendeeCount", entity: "activity", expression: "len(attendees)", type: "number" },
+    ],
+  },
+};
+
+/** 順位の行（`ApiRow` と同じ形）。`attendeeCount` は行ごとの計算である */
+function rankingRow(id: string, date: string, kind: string, count: number | null): ApiRow {
+  return {
+    id,
+    createdAt: "2026-09-15T12:00:00+09:00",
+    updatedAt: "2026-09-15T12:00:00+09:00",
+    fields: { kind, date, attendees: [] },
+    computed: { attendeeCount: count },
+  };
+}
+
+/** API が並べて返す行（`by` の降順。同数は登録した順） */
+const RANKING_ROWS: readonly ApiRow[] = [
+  rankingRow("r1", "2026-09-10", "practice", 3),
+  rankingRow("r2", "2026-09-12", "party", 2),
+  rankingRow("r3", "2026-09-14", "match", 1),
+];
+
+/** 順位の応答。**行を返さず**、順位の行は兄弟の欄 `ranking`（鍵 → 行の並び）に載る */
+const RANKING_VIEW: ApiViewBody = {
+  instanceId: "inst-1",
+  view: "dashboard",
+  fields: [],
+  computed: [],
+  permissions: { read: true, write: true },
+  actions: [],
+  rows: [],
+  ranking: { topActivities: RANKING_ROWS },
+};
+
+const rankingClient = (view: ApiViewBody = RANKING_VIEW): MusunestClient =>
+  makeClient({
+    spec: () => Promise.resolve(okResult(RANKING_SPEC)),
+    view: () => Promise.resolve(okResult(view)),
+  });
+
+/** その位置の行の、出す項目の値（`show` の順）を読む */
+const rankedValuesOf = (container: HTMLElement, rank: number): string[] =>
+  [...container.querySelectorAll(`.ranking-row[data-rank="${rank}"] .ranking-cell-value`)].map(
+    (cell) => cell.textContent ?? "",
+  );
+
+describe("順位の部品（ranking）を画面へ写す（M1.4）", () => {
+  it("API が並べた順のまま、出す項目をダッシュボードの中に出す（受入条件）", async () => {
+    const { container } = await renderScreen(rankingClient());
+
+    await screen.findByText("参加の多い活動");
+    // ダッシュボードの中に順位の部品が出る（部品だけを見るテストは部品しか見ていない。§7.3）
+    expect(container.querySelector(".dashboard .ranking")).not.toBeNull();
+    // **順は API が決めた順のまま**である（画面は並べ替えない）。値は `show` の順に読む
+    expect(rankedValuesOf(container, 1)).toEqual(["2026-09-10", "practice", "3"]);
+    expect(rankedValuesOf(container, 2)).toEqual(["2026-09-12", "party", "2"]);
+    expect(rankedValuesOf(container, 3)).toEqual(["2026-09-14", "match", "1"]);
+  });
+
+  it("**求められなかった順位（`null`）は「順位を表示できません」**で見せ、空の並びと区別する", async () => {
+    const { container } = await renderScreen(
+      rankingClient({ ...RANKING_VIEW, ranking: { topActivities: null } }),
+    );
+
+    await screen.findByText("順位を表示できません");
+    expect(container.querySelector('[data-state="rankingUnavailable"]')).not.toBeNull();
+    expect(container.querySelectorAll(".ranking-row")).toHaveLength(0);
+  });
+
+  it("**宣言が無ければ ranking を描かない**（M1.1〜M1.3 の画面を変えない）", async () => {
+    // 既定の VIEW はダッシュボードではない（順位の部品を持たない）
+    const { container } = await renderScreen(makeClient({}));
+    expect(container.querySelector(".ranking")).toBeNull();
+  });
+});

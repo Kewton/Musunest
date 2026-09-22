@@ -309,6 +309,20 @@ export interface ApiViewBody {
    * 値は data-api が求める——**画面は式も集計も評価しない**（`CLAUDE.md` の不変条件）。
    */
   readonly groups?: Readonly<Record<string, readonly ApiGroupValue[] | null>>;
+  /**
+   * **順位の部品（`type: ranking`。M1.4。Issue #182）が返す、別の entity の行**。部品の `name`（鍵）→
+   * **行の並び**（`by` の降順で `limit` 件。同数は登録した順）か、`null`（求められなかった）である。
+   *
+   * **行の形は `rows` と同じ `ApiRow`** にする——画面が 2 通りの読み方を持たないためである（追記 2）。
+   * **`scope` にも `groups` にも混ぜない**——順位が返すのは値ではなく行だからである（`#179` が `groups` を
+   * 兄弟の欄にしたのと同じである）。
+   *
+   * **宣言が無ければこの欄を載せない**（`settlement`・`scope`・`groups` と同じ約束である）。行を読めなかった
+   * （**求められなかった順位**）ときは **`null`** である——空の並び（該当が 0 件）に読み替えない。
+   * **1 回の取得でまとめて返す**（部品ごとに取りに行かない）。並べ替えるのは data-api である
+   * ——**画面は式も集計も評価しない**（`CLAUDE.md` の不変条件）。
+   */
+  readonly ranking?: Readonly<Record<string, readonly ApiRow[] | null>>;
 }
 
 /** `POST /api/instances/:instanceId/actions/:actionName` の本文。**書いた行**（計算値つき）を返す */
