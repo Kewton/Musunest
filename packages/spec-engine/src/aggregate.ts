@@ -6,8 +6,17 @@
 //
 // **同じインスタンスのレコードしか見ない。** 別インスタンスのレコードは、渡された `sources` に現れない。
 
-import { isAppComputed, type AggregateWhere, type NormalizedAppSpec } from "@musunest/appspec-schema";
-import { periodRange, type Clock } from "./clock.js";
+import {
+  DATE_VALUE_PATTERN,
+  GROUP_LIMIT_DEFAULT,
+  enumKeys,
+  isAppComputed,
+  isGroupComputed,
+  type Aggregate,
+  type AggregateWhere,
+  type NormalizedAppSpec,
+} from "@musunest/appspec-schema";
+import { periodRange, todayInTokyo, type Clock } from "./clock.js";
 
 /** 集計の元になる 1 件。`id` は `this`（出力先のレコードの ID）と比べる値である */
 export interface SourceRecord {
@@ -98,7 +107,12 @@ export function aggregateSourceEntities(
     const current = queue.shift();
     if (current === undefined) break;
     for (const computed of app.spec.computed) {
-      if (isAppComputed(computed) || computed.entity !== current || !("aggregate" in computed)) {
+      if (
+        isAppComputed(computed) ||
+        isGroupComputed(computed) ||
+        computed.entity !== current ||
+        !("aggregate" in computed)
+      ) {
         continue;
       }
       const target = computed.aggregate.entity;
@@ -156,4 +170,124 @@ export function avgValues(values: readonly (number | null)[]): number | null {
   const average = total / valid.length;
   // 割り切れても有限である。桁あふれは `sumValues` と同じく `null` にする
   return Number.isFinite(average) ? average : null;
+}
+
+// ── 見出しごとの集計（`groupBy`。M1.4。Issue #179） ──────────────────────
+//
+// **「見出しと値」の組の並び**を返す。分けられるのは `enum` の項目（値ごと）と、`date` の項目（月ごと）
+// だけである。並びは決めたとおりに安定させる——**月は古い順**、**`enum` は `options` に書いた順**である
+// （窓口の決定 2026-09-19。docs/semantics.md「groupBy」「groups」）。同じ値が並んでも、この順は変わらない。
+
+/** 見出しごとの集計の 1 組（「見出しと値」）。見出しは月なら `YYYY-MM`、`enum` なら `options` のキーである */
+export interface GroupEntry {
+  readonly heading: string;
+  /** その見出しの値。求められなければ `null`（0 に読み替えない）。`count` は常に数である */
+  readonly value: number | null;
+}
+
+/** 日付（`YYYY-MM-DD`）の「月」を `YYYY-MM` で返す。形に合わなければ `null`（その行は数えない） */
+function monthKeyOf(date: unknown): string | null {
+  return typeof date === "string" && DATE_VALUE_PATTERN.test(date) ? date.slice(0, 7) : null;
+}
+
+/**
+ * 日本時間の「今月」を終わりとして、直近 `count` か月の `YYYY-MM` を**古い順**に返す。
+ * **データの無い月も見出しとして出す**（棒グラフの軸を揃え、0 件の月も 0 として見せるためである）。
+ */
+function recentMonths(clock: Clock, count: number): readonly string[] {
+  const today = todayInTokyo(clock);
+  let year = Number(today.slice(0, 4));
+  let month = Number(today.slice(5, 7));
+  const months: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    months.push(`${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}`);
+    month -= 1;
+    if (month === 0) {
+      month = 12;
+      year -= 1;
+    }
+  }
+  return months.reverse();
+}
+
+/**
+ * 1 つの見出しの値。`count` は行数、`sum`・`avg` は**対象の項目**（数）を畳む。
+ * 対象が数でない行は `null` にして数えない——`sum` は「1 つでも欠ければ `null`」、`avg` は
+ * 「読めた行だけで平均する」（`sumValues`・`avgValues` の注記と同じ決めごとである）。
+ */
+function groupValueOf(
+  aggregate: Aggregate,
+  rows: readonly SourceRecord[],
+): number | null {
+  if (aggregate.kind === "count") return rows.length;
+  const name = aggregate.name;
+  if (name === null) return null;
+  const values = rows.map((row) => {
+    const value = row.data[name];
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  });
+  return aggregate.kind === "sum" ? sumValues(values) : avgValues(values);
+}
+
+/**
+ * 見出しごとの集計（`groupBy`。M1.4。Issue #179）の値を求める。
+ *
+ * - **`groupBy` が無ければ `null`**（呼ぶ側は、その計算を `groups` の欄に載せない）
+ * - **集計元のレコードを読めなければ（キーが無ければ）`null`** である——空の並びに読み替えない
+ *   （`computed` と同じ約束である。「読めなかった」と「0 件」は別の事実である）
+ * - **`enum`**：`options` のキーを**書いた順に全部**返す（値が 0 の見出しも出す。ボードの列と同じ考え方）
+ * - **月**：日本時間の今月を終わりとして、直近 `last`（既定 `GROUP_LIMIT_DEFAULT`＝6）か月を**古い順**に
+ *   返す（データの無い月も 0 で出す）。**上限を超える古い月は落ちる**
+ * - `where` に合わない行・日付が形に合わない行は数えない。**集計そのものは `null` にしない**
+ *   （0 件なら `count` は 0、`avg` は `null`。窓口の決定 2026-09-19）
+ *
+ * **時計は引数で受け取る**（Q17。評価の中で現在時刻を読まない）。
+ */
+export function groupValuesOf(
+  app: NormalizedAppSpec,
+  aggregate: Aggregate,
+  sources: SourceRecords,
+  clock: Clock,
+): readonly GroupEntry[] | null {
+  const grouping = aggregate.groupBy;
+  if (grouping === undefined) return null;
+  const rows = sources[aggregate.entity];
+  if (rows === undefined) return null;
+  const entity = app.spec.entities.find((candidate) => candidate.name === aggregate.entity);
+  if (entity === undefined) return null;
+  const matched = rows.filter((row) => matchesWhere(aggregate.where, row.data, "", clock));
+
+  if (grouping.month) {
+    const limit = aggregate.last ?? GROUP_LIMIT_DEFAULT;
+    return recentMonths(clock, limit).map((month) => ({
+      heading: month,
+      value: groupValueOf(
+        aggregate,
+        matched.filter((row) => monthKeyOf(row.data[grouping.field]) === month),
+      ),
+    }));
+  }
+
+  const declaration = entity.fields[grouping.field];
+  if (declaration === undefined) return null;
+  return enumKeys(declaration).map((key) => ({
+    heading: key,
+    value: groupValueOf(
+      aggregate,
+      matched.filter((row) => row.data[grouping.field] === key),
+    ),
+  }));
+}
+
+/**
+ * **見出しごとの集計（`groupBy`。M1.4。Issue #179）を解くのに要る** entity の名前を集める。
+ * 分ける対象も集計の対象も `aggregate.entity` のレコードなので、その名前を返す
+ * （集計の対象は**項目だけ**である——計算は指せない。静的チェックが保証する）。
+ */
+export function groupSourceEntities(app: NormalizedAppSpec): readonly string[] {
+  const sources = new Set<string>();
+  for (const computed of app.spec.computed) {
+    if (isGroupComputed(computed)) sources.add(computed.aggregate.entity);
+  }
+  return [...sources];
 }

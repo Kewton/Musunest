@@ -20,6 +20,8 @@ import {
   aggregateSourceEntities,
   appAggregateSourceEntities,
   avgValues,
+  groupSourceEntities,
+  groupValuesOf,
   matchesWhere,
   sumValues,
 } from "./aggregate.js";
@@ -447,5 +449,211 @@ describe("avgValues（M1.4）", () => {
     // **`null` の行を数えない**——`sum` と別の決めごとである（1 行の欠損で画面全体を「—」にしない）
     expect(avgValues([2, null, 4])).toBe(3);
     expect(avgValues([0, 0])).toBe(0);
+  });
+});
+
+// ── 見出しごとの集計（`groupBy`・`groups`。M1.4。Issue #179） ────────────
+//
+// **「見出しと値」の組の並び**を返す。分けられるのは `enum`（値ごと）と `date`（月ごと）だけである。
+// 並びは決めたとおりに安定させる——**月は古い順**、**`enum` は `options` に書いた順**（窓口の決定 2026-09-19）。
+
+const GROUP_DECLARATION = [
+  "entities:",
+  "  - name: activity",
+  "    fields:",
+  "      date: date",
+  "      cost: number",
+  "      kind:",
+  "        type: enum",
+  "        options:",
+  "          practice: 練習",
+  "          match: 試合",
+  "          party: 飲み会",
+  "views: []",
+  "actions: []",
+  "validations: []",
+  "computed:",
+  "  - name: byKind",
+  "    aggregate:",
+  "      count: activity",
+  "      groupBy: activity.kind",
+  "    type: groups",
+  "  - name: byMonth",
+  "    aggregate:",
+  "      count: activity",
+  "      groupBy:",
+  "        month: activity.date",
+  "      last: 6",
+  "    type: groups",
+  "  - name: costByKind",
+  "    aggregate:",
+  "      sum: activity.cost",
+  "      groupBy: activity.kind",
+  "    type: groups",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+const GROUPS_APP = await normalized(GROUP_DECLARATION);
+/** 日本時間の 2026-09-15（今月は 2026-09）。月の見出しの窓は 2026-04〜2026-09 になる */
+const GROUP_CLOCK = fixedClock("2026-09-15T12:00:00+09:00");
+
+const aggregateOf = (app: NormalizedAppSpec, name: string) => {
+  const entry = app.spec.computed.find((candidate) => candidate.name === name);
+  if (entry === undefined || !("aggregate" in entry)) throw new Error(`集計 ${name} が無い`);
+  return entry.aggregate;
+};
+
+const groupBy = (
+  app: NormalizedAppSpec,
+  name: string,
+  rows: readonly SourceRecord[],
+  clock = GROUP_CLOCK,
+) => groupValuesOf(app, aggregateOf(app, name), { activity: rows }, clock);
+
+describe("見出しごとの集計（groupBy・groups）（M1.4。Issue #179）", () => {
+  const activity = (id: string, kind: string, date: string, cost: number): SourceRecord =>
+    row(id, { kind, date, cost });
+
+  const ROWS = [
+    activity("a1", "practice", "2026-09-10", 3000),
+    activity("a2", "practice", "2026-09-05", 1000),
+    activity("a3", "party", "2026-09-12", 5000),
+    activity("a4", "match", "2026-08-31", 2000),
+    // 窓の外（2026-03。今月から 6 か月より古い）。**落ちる**（上限が効く）
+    activity("a5", "practice", "2026-03-01", 100),
+  ];
+
+  it("`enum` は `options` に書いた順に、値が 0 の見出しも含めて返す", () => {
+    expect(groupBy(GROUPS_APP, "byKind", ROWS)).toEqual([
+      { heading: "practice", value: 3 },
+      { heading: "match", value: 1 },
+      { heading: "party", value: 1 },
+    ]);
+  });
+
+  it("**同じ値が並んだときの順も安定している**（match と party が同数でも options の順のまま）", () => {
+    // options は practice → match → party である。値が同じでも、この順は入れ替わらない
+    const rows = [
+      activity("a1", "party", "2026-09-12", 0),
+      activity("a2", "match", "2026-09-10", 0),
+    ];
+    expect(groupBy(GROUPS_APP, "byKind", rows)).toEqual([
+      { heading: "practice", value: 0 },
+      { heading: "match", value: 1 },
+      { heading: "party", value: 1 },
+    ]);
+  });
+
+  it("月は古い順に、直近 `last` か月を返す。データの無い月も 0 で出し、窓の外の月は落ちる", () => {
+    expect(groupBy(GROUPS_APP, "byMonth", ROWS)).toEqual([
+      { heading: "2026-04", value: 0 },
+      { heading: "2026-05", value: 0 },
+      { heading: "2026-06", value: 0 },
+      { heading: "2026-07", value: 0 },
+      { heading: "2026-08", value: 1 },
+      { heading: "2026-09", value: 3 },
+    ]);
+  });
+
+  it("**件数の上限（`last`）が効く**。上限を超える月数のデータでも、直近 `last` か月だけを返す", () => {
+    // 2026-02〜2026-09 の 8 か月にデータがある。`last: 6` なので 2026-04〜2026-09 の 6 か月だけ
+    const many = [
+      activity("m02", "practice", "2026-02-01", 0),
+      activity("m03", "practice", "2026-03-01", 0),
+      activity("m04", "practice", "2026-04-01", 0),
+      activity("m05", "practice", "2026-05-01", 0),
+      activity("m06", "practice", "2026-06-01", 0),
+      activity("m07", "practice", "2026-07-01", 0),
+      activity("m08", "practice", "2026-08-01", 0),
+      activity("m09", "practice", "2026-09-01", 0),
+    ];
+    const groups = groupBy(GROUPS_APP, "byMonth", many);
+    expect(groups?.map((entry) => entry.heading)).toEqual([
+      "2026-04",
+      "2026-05",
+      "2026-06",
+      "2026-07",
+      "2026-08",
+      "2026-09",
+    ]);
+    // 上限を超えた古い月（2 月・3 月）は落ちている
+    expect(groups?.some((entry) => entry.heading === "2026-02")).toBe(false);
+    expect(groups?.some((entry) => entry.heading === "2026-03")).toBe(false);
+  });
+
+  it("`last` を省いたときの既定は 6 か月である", async () => {
+    const declaration = GROUP_DECLARATION.replace("      last: 6\n", "");
+    const app = await normalized(declaration);
+    const headings = groupBy(app, "byMonth", [])?.map((entry) => entry.heading) ?? [];
+    expect(headings).toHaveLength(6);
+  });
+
+  it("`sum` の見出しごとの集計は、その見出しの行の値を足す", () => {
+    expect(groupBy(GROUPS_APP, "costByKind", ROWS)).toEqual([
+      { heading: "practice", value: 4100 },
+      { heading: "match", value: 2000 },
+      { heading: "party", value: 5000 },
+    ]);
+  });
+
+  it("合う行が 0 件でも、見出しは残る（count は 0、値は null にしない）", () => {
+    expect(groupBy(GROUPS_APP, "byKind", [])).toEqual([
+      { heading: "practice", value: 0 },
+      { heading: "match", value: 0 },
+      { heading: "party", value: 0 },
+    ]);
+  });
+
+  it("**集計元を読めなければ（キーが無ければ）`null`** にする（空の並びに読み替えない）", () => {
+    expect(groupValuesOf(GROUPS_APP, aggregateOf(GROUPS_APP, "byKind"), {}, GROUP_CLOCK)).toBeNull();
+  });
+
+  it("日付が形に合わない行・`where` に合わない行は数えない", () => {
+    const rows = [
+      activity("ok", "practice", "2026-09-10", 0),
+      // 形に合わない日付（月の見出しに入らない）
+      row("bad", { kind: "practice", date: "2026/09/10", cost: 0 }),
+    ];
+    // `byKind` は日付を見ないので 2 件、`byMonth` は形に合わない行を数えないので 9 月は 1 件
+    expect(groupBy(GROUPS_APP, "byKind", rows)?.[0]).toEqual({ heading: "practice", value: 2 });
+    expect(groupBy(GROUPS_APP, "byMonth", rows)?.at(-1)).toEqual({ heading: "2026-09", value: 1 });
+  });
+
+  it("groupSourceEntities は、見出しごとの集計が要る entity を集める（dashboard でも）", async () => {
+    expect(groupSourceEntities(GROUPS_APP)).toEqual(["activity"]);
+    // 見出しごとの集計が 1 つも無ければ空である（従来の宣言には余計な読みを足さない）
+    expect(groupSourceEntities(WARIKAN)).toEqual([]);
+    const dashboard = await normalized(read(sampleSpecFile("dashboard")));
+    expect(groupSourceEntities(dashboard)).toEqual(["activity"]);
+  });
+
+  it("見本 dashboard の見出しごとの集計が、宣言のまま読める（語彙と評価が一致している）", async () => {
+    const dashboard = await normalized(read(sampleSpecFile("dashboard")));
+    // 時計は 8 月〜9 月に活動がある資料ではなく、窓の形だけを見る（0 件でも 6 か月が返る）
+    const byMonth = groupValuesOf(
+      dashboard,
+      aggregateOf(dashboard, "activitiesByMonth"),
+      { activity: [] },
+      GROUP_CLOCK,
+    );
+    expect(byMonth?.map((entry) => entry.heading)).toEqual([
+      "2026-04",
+      "2026-05",
+      "2026-06",
+      "2026-07",
+      "2026-08",
+      "2026-09",
+    ]);
+    const byKind = groupValuesOf(
+      dashboard,
+      aggregateOf(dashboard, "activitiesByKind"),
+      { activity: [] },
+      GROUP_CLOCK,
+    );
+    // dashboard の kind の options は practice・match・party である
+    expect(byKind?.map((entry) => entry.heading)).toEqual(["practice", "match", "party"]);
   });
 });

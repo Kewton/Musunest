@@ -2713,6 +2713,112 @@ describe("dashboard のアプリ全体の集計（scope）と平均（avg）（M
   });
 });
 
+// ── dashboard の見出しごとの集計（groupBy・groups）（M1.4。Issue #179） ──
+//
+// **この Issue の語彙（`groupBy`・`type: groups`）を含む正規化 JSON を、`getSpec` と `getView` が `ok` で
+// 返す**ことをここで確かめる（docs/parallel-development.md §7.3）。見出しごとの値は**行ではなく**、
+// 一覧の応答の `groups`（計算の名前 → 「見出しと値」の組の並び）に載る。**`scope` の欄には混ぜない。**
+//
+// 負例ではなく**見本そのもの**を通すので、宣言・配信・SDK の取り残しがあればここで落ちる。
+
+/** `data-group-name` の組の見出しと値を読む（画面ではなく応答の中身を確かめる） */
+const groupOf = (view: ApiViewBody, name: string) => view.groups?.[name] ?? null;
+
+describe("dashboard の見出しごとの集計（groupBy・groups）（M1.4。Issue #179）", () => {
+  it("groupBy・groups を含む正規化 JSON を、getSpec が ok で返す", async () => {
+    const run = await runDashboard();
+    const result = await getSpec(run.deps, DASHBOARD_INSTANCE);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 見出しごとの計算は entity も scope も持たず、groupBy を持つ集計である
+    expect(result.body.spec.computed).toContainEqual({
+      name: "activitiesByKind",
+      aggregate: {
+        kind: "count",
+        entity: "activity",
+        name: null,
+        where: {},
+        groupBy: { field: "kind", month: false },
+      },
+      type: "groups",
+    });
+    expect(result.body.spec.computed).toContainEqual({
+      name: "activitiesByMonth",
+      aggregate: {
+        kind: "count",
+        entity: "activity",
+        name: null,
+        where: {},
+        groupBy: { field: "date", month: true },
+        last: 6,
+      },
+      type: "groups",
+    });
+  });
+
+  it("getView が ok で、見出しごとの値を `groups` に載せる（enum は options の順、月は古い順）", async () => {
+    const run = await runDashboard();
+    const view = await dashboardView(run.deps, "activities");
+
+    // `enum` は `options` に書いた順である。同数（すべて 1）でも、この順は入れ替わらない
+    expect(groupOf(view, "activitiesByKind")).toEqual([
+      { heading: "practice", value: 1 },
+      { heading: "match", value: 1 },
+      { heading: "party", value: 1 },
+    ]);
+    // 月は古い順で、直近 6 か月（2026-04〜2026-09）。データの無い月も 0 で出る
+    expect(groupOf(view, "activitiesByMonth")).toEqual([
+      { heading: "2026-04", value: 0 },
+      { heading: "2026-05", value: 0 },
+      { heading: "2026-06", value: 0 },
+      { heading: "2026-07", value: 0 },
+      { heading: "2026-08", value: 0 },
+      { heading: "2026-09", value: 3 },
+    ]);
+  });
+
+  it("**`groups` の計算は、一覧の応答の `computed` の並びに入らない**（列に出さない）", async () => {
+    const run = await runDashboard();
+    const view = await dashboardView(run.deps, "activities");
+    // 行ごとの値になる計算だけが並ぶ（見出しごとの集計は並びを返すので入らない）
+    expect(view.computed).toEqual(["attendeeCount"]);
+    // 行の `computed` にも混ざらない
+    expect(Object.keys(view.rows[0]?.computed ?? {})).toEqual(["attendeeCount"]);
+  });
+
+  it("**件数の上限（`last`）が効く**。窓の外の月の活動を足しても、直近 6 か月から変わらない", async () => {
+    const run = await runDashboard();
+    // 窓（2026-04〜2026-09）より古い 2 月の活動を足す——**一覧の行は増えるが、月の見出しは増えない**
+    for (const date of ["2026-02-01", "2026-03-01"]) {
+      const outside = await createFromAction(run.deps, DASHBOARD_INSTANCE, "addActivity", {
+        kind: "practice",
+        date,
+        attendees: [run.ids["A"] ?? ""],
+        cost: 100,
+      });
+      expect(outside.ok).toBe(true);
+    }
+    const view = await dashboardView(run.deps, "activities");
+    expect(view.rows).toHaveLength(5);
+    const months = groupOf(view, "activitiesByMonth") ?? [];
+    expect(months.map((entry) => entry.heading)).toEqual([
+      "2026-04",
+      "2026-05",
+      "2026-06",
+      "2026-07",
+      "2026-08",
+      "2026-09",
+    ]);
+    // 窓の外の 2 月・3 月の活動は、どの見出しにも入らない（9 月は 3 件のまま）
+    expect(months.at(-1)).toEqual({ heading: "2026-09", value: 3 });
+  });
+
+  it("**宣言が無ければ、応答に `groups` の欄そのものを載せない**（M1.1〜M1.3 の応答を変えない）", async () => {
+    const h = harness();
+    expect(await listOf(h)).not.toHaveProperty("groups");
+  });
+});
+
 // ── ダッシュボード（dashboard）と数値の部品（M1.4。Issue #180） ──────────────
 //
 // **この Issue で足す語彙（`dashboard` と `widgets` の `number`・`unit`）を含む正規化 JSON を、

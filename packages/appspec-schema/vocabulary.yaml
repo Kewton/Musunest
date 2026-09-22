@@ -199,6 +199,33 @@
   runtime: [spec-engine, data-api]
   factory: 未対応
 
+# 見出しごとの集計（`groupBy`）。**集計の対象を、enum の項目の値ごと・date の項目の月ごとに分ける**
+# （M1.4。Issue #179）。**分けられるのは enum と date の 2 つだけ**である。並びは決めてあり（月は古い順、
+# enum は options に書いた順）、**同じ値が並んでもこの順は変わらない**（安定であることが要件。窓口の決定
+# 2026-09-19）。月の見出しの件数の上限は `last`（省いたときの既定は 6）。見本は dashboard。
+- name: groupBy
+  layer: logic
+  since: v0.2-draft（M1.4）
+  samples: [dashboard]
+  negatives: [groupby-field-not-groupable]
+  check_rules: [LOGIC_AGGREGATE_GROUPBY_NOT_GROUPABLE]
+  semantics: docs/semantics.md#groupby
+  runtime: [spec-engine, data-api]
+  factory: 未対応
+
+# 並びを返す計算の型（`groups`）。**「見出しと値」の組の並び**である（M1.4。Issue #179）。
+# **一覧の列には出さない**（真偽（`boolean`）と同じ扱い。グラフの部品が指すためだけに使う）。
+# 値は一覧の応答の `groups` に載り、**`scope` の欄には混ぜない**（別の欄である）。見本は dashboard。
+- name: groups
+  layer: logic
+  since: v0.2-draft（M1.4）
+  samples: [dashboard]
+  negatives: [groups-in-show]
+  check_rules: [UI_FIELD_NOT_FOUND]
+  semantics: docs/semantics.md#groups
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
 - name: settle
   layer: logic
   since: v0.2-draft（M1.2）

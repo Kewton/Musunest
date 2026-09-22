@@ -216,6 +216,19 @@ export interface ApiPermissions {
  */
 export type ApiScopeValue = number | null;
 
+/**
+ * 見出しごとの集計（`groupBy`。M1.4。Issue #179）の 1 組。**「見出しと値」**である。
+ *
+ * - `heading` … 見出し。**月なら `YYYY-MM`、`enum` なら `options` のキー**である（保存される値のほうで、
+ *   画面に出す名前ではない）。画面が表示名に対応づける——月はそのまま、`enum` は宣言の `options` を見る
+ * - `value` … その見出しの集計値。求められなければ **`null`** である（0 に読み替えない。
+ *   `count` は常に数である）
+ */
+export interface ApiGroupValue {
+  readonly heading: string;
+  readonly value: number | null;
+}
+
 /** `GET /api/instances/:instanceId/spec` の本文（正規化した JSON。Issue #98） */
 export interface ApiSpecBody {
   readonly instanceId: string;
@@ -281,6 +294,21 @@ export interface ApiViewBody {
    * ——**画面は式も集計も評価しない**（`CLAUDE.md` の不変条件）。
    */
   readonly scope?: Readonly<Record<string, ApiScopeValue>>;
+  /**
+   * **見出しごとの集計（`groupBy`。M1.4。Issue #179）の値**。計算の名前 → **「見出しと値」の組の並び**である
+   * （宣言の順）。`enum` で分けたものは `options` のキーの順、月で分けたものは古い順である
+   * （docs/semantics.md「groups」「groupBy」）。
+   *
+   * **`scope` の欄に混ぜない。** `Record<名前, 数 | null | 並び>` にすると、画面が項目ごとに値の型を
+   * 見分けることになる（`#177` の追記 2 が禁じた「画面が 2 通りの読み方を持つ」そのものである）。
+   * `rows`・`settlement`・`scope` と同じく、**兄弟の欄**にする。
+   *
+   * **宣言が無ければこの欄を載せない**（`settlement`・`scope` と同じ約束である）。集計元を読めなかった
+   * （正規化された宣言と、一覧の entity が食い違う）ときは **`null`** である——空の並び
+   * （合う行が無い）に読み替えない。**1 回の取得でまとめて返す**（部品ごとに取りに行かない）。
+   * 値は data-api が求める——**画面は式も集計も評価しない**（`CLAUDE.md` の不変条件）。
+   */
+  readonly groups?: Readonly<Record<string, readonly ApiGroupValue[] | null>>;
 }
 
 /** `POST /api/instances/:instanceId/actions/:actionName` の本文。**書いた行**（計算値つき）を返す */

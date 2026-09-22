@@ -30,6 +30,7 @@ import type {
   ApiActionRef,
   ApiDeletedBody,
   ApiErrorCode,
+  ApiGroupValue,
   ApiPermissions,
   ApiReference,
   ApiRow,
@@ -54,6 +55,7 @@ import {
   isAppComputed,
   isComputedExpression,
   isComputedSettle,
+  isGroupComputed,
   isRowComputed,
   takesRow,
 } from "@musunest/appspec-schema";
@@ -75,6 +77,8 @@ import {
   appAggregateSourceEntities,
   evaluateRecord,
   evaluateScope,
+  groupSourceEntities,
+  groupValuesOf,
   holdsExpression,
   settleEntity,
   settleSourceEntities,
@@ -343,8 +347,18 @@ function isWhereCondition(value: unknown): boolean {
 }
 
 /**
+ * 見出しごとに分ける対象（`groupBy`。M1.4。Issue #179）の形。`field` は文字列、`month` は真偽である。
+ * **実在や型（`enum`・`date` かどうか）は静的チェックが見る**——ここが引き受けるのは
+ * 「配信された正規化 JSON に、この欄があっても読めるか」だけである。
+ */
+function isGroupingShape(value: unknown): boolean {
+  return isRecord(value) && typeof value["field"] === "string" && typeof value["month"] === "boolean";
+}
+
+/**
  * 集計（`aggregate`）の形（M1.2・M1.4）。`sum`・`avg` は対象の名前を持ち、`count` は持たない。
- * どちらも `where`（項目 → `op` を持つオブジェクト）を持つ。
+ * どちらも `where`（項目 → `op` を持つオブジェクト）を持ち、`groupBy`（見出しごとの集計。M1.4）と
+ * `last`（見出しの上限）を**載っているときだけ**確かめる。
  */
 function isAggregateShape(value: unknown): boolean {
   if (!isRecord(value)) return false;
@@ -354,7 +368,13 @@ function isAggregateShape(value: unknown): boolean {
   if (kind === "count" ? value["name"] !== null : typeof value["name"] !== "string") return false;
   const where = value["where"];
   if (!isRecord(where)) return false;
-  return Object.values(where).every(isWhereCondition);
+  if (!Object.values(where).every(isWhereCondition)) return false;
+  if (value["groupBy"] !== undefined && !isGroupingShape(value["groupBy"])) return false;
+  if (value["last"] !== undefined) {
+    const last = value["last"];
+    if (typeof last !== "number" || !Number.isInteger(last) || last < 1) return false;
+  }
+  return true;
 }
 
 /** 精算（`settle`）の宣言の形（M1.2）。支出の entity と、その 3 つの項目の名前を持つ */
@@ -417,9 +437,16 @@ function isSpecShape(spec: unknown): spec is AppSpec {
     const settles = isRecord(entry) && entry["settle"] !== undefined;
     // **アプリ全体の計算（`scope: app`。M1.4）は `entity` を持たない**——どのレコードにも属さない
     const appScoped = isRecord(entry) && entry["scope"] === "app";
-    const strings = settles ? ["name", "entity"] : appScoped ? ["name", "type"] : ["name", "entity", "type"];
+    // **見出しごとの集計（`type: groups`。M1.4。Issue #179）は `scope` も `entity` も持たない**
+    const grouped = isRecord(entry) && entry["type"] === "groups";
+    const strings = settles
+      ? ["name", "entity"]
+      : appScoped || grouped
+        ? ["name", "type"]
+        : ["name", "entity", "type"];
     if (!hasStrings(entry, strings)) return false;
     if (appScoped && entry["entity"] !== undefined) return false;
+    if (grouped && (entry["entity"] !== undefined || entry["scope"] !== undefined)) return false;
     // 式・集計・精算のどれか 1 つである（M1.2）
     if (!isComputedShape(entry)) return false;
   }
@@ -506,8 +533,8 @@ function labelsOf(app: NormalizedAppSpec, entity: Entity): Readonly<Record<strin
     if (label !== null) labels[name] = label;
   }
   for (const entry of app.spec.computed) {
-    // アプリ全体の計算は entity を持たない（この一覧の entity のものではない）
-    if (isAppComputed(entry) || entry.entity !== entity.name) continue;
+    // アプリ全体の計算と、見出しごとの集計は entity を持たない（この一覧の entity のものではない）
+    if (isAppComputed(entry) || isGroupComputed(entry) || entry.entity !== entity.name) continue;
     if (entry.label !== undefined) labels[entry.name] = entry.label;
   }
   return Object.keys(labels).length === 0 ? undefined : labels;
@@ -559,6 +586,26 @@ function scopeValuesOf(
   const scope: Record<string, number | null> = {};
   for (const entry of declared) scope[entry.name] = values[entry.name] ?? null;
   return scope;
+}
+
+/**
+ * **見出しごとの集計（`groupBy`。M1.4。Issue #179）の値**を、宣言の順に求める。
+ * 見出しごとの計算が 1 つも宣言されていなければ `undefined`（＝応答に欄を載せない。
+ * `settlement`・`scope` と同じ約束である）。集計元を読めなかった計算は `null` である
+ * ——**空の並び（合う行が無い）に読み替えない**。
+ *
+ * **行ごとの値でも、`scope` の値でもない**——「見出しと値」の組の並びを、専用の欄（`groups`）に載せる。
+ */
+function groupsValuesOf(
+  app: NormalizedAppSpec,
+  clock: Clock,
+  sources: SourceRecords,
+): Readonly<Record<string, readonly ApiGroupValue[] | null>> | undefined {
+  const declared = app.spec.computed.filter(isGroupComputed);
+  if (declared.length === 0) return undefined;
+  const groups: Record<string, readonly ApiGroupValue[] | null> = {};
+  for (const entry of declared) groups[entry.name] = groupValuesOf(app, entry.aggregate, sources, clock);
+  return groups;
 }
 
 // ── その行で操作してよいか（M1.3。Issue #156） ────────────────────────
@@ -870,9 +917,10 @@ export async function getView(
   if (entity === undefined) return fail("SPEC_UNAVAILABLE");
 
   const stored = await deps.records.list(entity.name);
-  // 集計の元を読む。**アプリ全体の集計（`scope: app`。M1.4）が指す entity も足す**——
-  // 一覧の entity を指していれば、いま読んだ行を使い回す（同じ行を 2 度読まない。D-1）
-  const sources = await loadSources(deps, app, entity.name, appAggregateSourceEntities(app), {
+  // 集計の元を読む。**アプリ全体の集計（`scope: app`）と見出しごとの集計（`type: groups`。M1.4）が
+  // 指す entity も足す**——一覧の entity を指していれば、いま読んだ行を使い回す（同じ行を 2 度読まない。D-1）
+  const extra = [...appAggregateSourceEntities(app), ...groupSourceEntities(app)];
+  const sources = await loadSources(deps, app, entity.name, extra, {
     [entity.name]: stored,
   });
   // 参照されている行（M1.2）。`delete` を宣言している entity にだけ、消せるかの材料を載せる
@@ -883,6 +931,8 @@ export async function getView(
   const highlight = highlightOf(app, view, entity.name);
   // アプリ全体の集計（M1.4）。**宣言が無ければ欄そのものを載せない**
   const scope = scopeValuesOf(app, deps.clock, sources);
+  // 見出しごとの集計（M1.4。Issue #179）。**宣言が無ければ欄そのものを載せない**（`scope` と同じ約束）
+  const groups = groupsValuesOf(app, deps.clock, sources);
   // 表示名（`label`。M1.3）。**1 つも無ければ欄そのものを載せない**（M1.1〜M1.3 の応答を変えない）
   const labels = labelsOf(app, entity);
   return ok(API_READ_STATUS, {
@@ -907,6 +957,7 @@ export async function getView(
     ),
     ...(settlement === undefined ? {} : { settlement }),
     ...(scope === undefined ? {} : { scope }),
+    ...(groups === undefined ? {} : { groups }),
   });
 }
 

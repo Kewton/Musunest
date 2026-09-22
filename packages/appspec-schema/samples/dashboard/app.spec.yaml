@@ -2,11 +2,11 @@
 #
 # 練習や試合を記録すると、**アプリ全体で 1 つ**の値（**今月の**活動の回数・参加ののべ人数・1 回あたりの参加・
 # 費用の平均）が出る。M1.4 の各 Issue が、自分の語彙をこの見本へ足していく（docs/parallel-development.md §7.2）。
-# **#177 が骨格（`scope: app` と `avg`）を置き、#178 が期間の条件（`within: this_month`）を足した。**
+# **#177 が骨格（`scope: app` と `avg`）を置き、#178 が期間の条件（`within: this_month`）を、
+# #179 が見出しごとの集計（`groupBy` と `groups` 型）を足した。**
 #
 # 元は workspace/mvp/m1/02-l2-spec-examples.md §4.3（叩き台）。**いまの語彙で書けないものは落としてある**：
-#   - 見出しごとの集計（`groupBy` と `groups` 型。月ごとの回数・種類の内訳は #179）
-#   - グラフの部品（`bar`・`pie`）と順位の部品（`ranking`）は #181・#182。**数値の部品（`number`）は #180 が足した**
+#   - グラフの部品（`bar`・`pie`）と順位の部品（`ranking`）は #181・#182
 #   - 表示名（`label`。日本語の見出しは #176）
 #
 # **`within: this_month` は「今月」を日本時間で決める**（Issue #178）。時計は**評価に引数で渡す**——
@@ -18,7 +18,8 @@
 # 2026-09-19）、式の `max(1, …)` は 0 を返してしまうからである（0 と「求められなかった」を区別できない）。
 #
 # アプリ全体の値は、一覧の応答の `scope`（計算の名前 → 値）に載る。**行ごとの値とは別の欄**である。
-# 値が求められなければ `null` で、画面は「—」で見せる（0 と区別する）。
+# **見出しごとの集計（`type: groups`。Issue #179）は、さらに別の欄 `groups`**（計算の名前 → 「見出しと値」の
+# 組の並び）に載る（「scope」に混ぜない）。値が求められなければ `null` で、画面は「—」で見せる（0 と区別する）。
 #
 # **ダッシュボード（`type: dashboard`）は #180 が足した。** 行を並べず、アプリ全体の値（`scope: app`）を
 # **数値の部品（`widgets` の `number`）**で、単位つきで並べる。**部品が指せるのは `scope: app` の計算だけ**
@@ -26,7 +27,8 @@
 # （意味は ../../docs/semantics.md「dashboard」）。
 #
 # 採点のシナリオは同じディレクトリの scenario.json、
-# 意味は ../../docs/semantics.md（「scope」「aggregate」「within」「sum」「count」「avg」「computed」「dashboard」）にある。
+# 意味は ../../docs/semantics.md（「scope」「aggregate」「within」「sum」「count」「avg」「groupBy」「groups」
+# 「computed」「dashboard」）にある。
 
 entities:
   - name: member
@@ -92,6 +94,28 @@ computed:
         date:
           within: this_month
     type: number
+
+  # 見出しごとの集計（`type: groups`。M1.4。Issue #179）。**「見出しと値」の組の並び**を返す。
+  # `scope` も `entity` も持たない——どのレコードにも属さず、1 つの数でもないからである。
+  # 値は一覧の応答の `groups`（計算の名前 → 組の並び）に載る。**`scope` の欄には混ぜない。**
+  #
+  # 月で分けるものは**古い順**（左から右へ時間が進む。棒グラフの読み方に合わせる）で、
+  # **直近 `last` か月**である（`last` を省いたときの既定は 6。窓口の決定 2026-09-19）。
+  # データの無い月も見出しとして出し、0 と数える（軸を揃えるためである）。
+  - name: activitiesByMonth
+    aggregate:
+      count: activity
+      groupBy:
+        month: activity.date
+      last: 6
+    type: groups
+  # `enum` で分けるものは **`options` に書いた順**である（M1.3 のボードの列と揃える）。
+  # 値が 0 の見出しも出す（列を消さない。`last` は書かない——見出しは `options` のキーの全部である）。
+  - name: activitiesByKind
+    aggregate:
+      count: activity
+      groupBy: activity.kind
+    type: groups
 
 views:
   # ダッシュボード（M1.4。Issue #180）。**行を並べない**——アプリ全体の集計（`scope: app`）の値を、

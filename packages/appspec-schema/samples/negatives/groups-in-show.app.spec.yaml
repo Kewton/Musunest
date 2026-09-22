@@ -1,0 +1,44 @@
+# 負例：見出しごとの集計（`type: groups`）の計算 `kindCount` を、一覧の `show` に書いている。
+# **並びを返す計算は一覧の列に出さない**（真偽（`boolean`）と同じ扱いである。M1.4。Issue #179）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: member
+    fields:
+      name: string
+  - name: expense
+    fields:
+      amount: number
+      kind:
+        type: enum
+        options:
+          food: 食事
+          travel: 移動
+
+views:
+  - name: expenseList
+    type: table
+    entity: expense
+    show: [amount, kindCount]
+
+actions:
+  - name: addMember
+    entity: member
+
+validations: []
+
+computed:
+  - name: kindCount
+    aggregate:
+      count: expense
+      groupBy: expense.kind
+    type: groups
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

@@ -219,15 +219,43 @@ export interface Validation {
 }
 
 /**
- * computed の型。M1.1 は数（`number`）だけだったが、**M1.3 で真偽（`boolean`）を足した**
- * （Issue #157。#156 からの申し送り）。
+ * computed の型。M1.1 は数（`number`）だけだったが、**M1.3 で真偽（`boolean`）を足し**、
+ * **M1.4 で並び（`groups`）を足した**（Issue #157・#179）。
  *
  * **`boolean` の計算は、ボードの強調（`highlight`）が指すためだけに使う。** 一覧の列には出さない
  * （一覧の応答の `computed` の並びにも入らない。data-api の `computedNamesOf` が外す）。
  * 集計（`aggregate`）と精算（`settle`）は数を返すので、`boolean` は式で求める計算だけである。
+ *
+ * **`groups` の計算は、見出しごとの集計（`groupBy`）の結果（「見出しと値」の組の並び）である。**
+ * これも一覧の列には出さない（`boolean` と同じ扱い。グラフの部品が指すためだけに使う）。
+ * `groups` は **`scope: app` も `entity` も持たない**——1 つの行の値でも、1 つの数でもなく、
+ * アプリ全体で 1 つの並びだからである（`ComputedGroups` の注記）。
  */
-export const COMPUTED_TYPES = ["number", "boolean"] as const;
+export const COMPUTED_TYPES = ["number", "boolean", "groups"] as const;
 export type ComputedType = (typeof COMPUTED_TYPES)[number];
+
+/**
+ * 見出しごとの集計（`groupBy`。M1.4。Issue #179）の、見出しの数の上限の既定である。
+ * **月で分けるとき**（`groupBy: { month: ... }`）に使う——直近いくつの月を返すか。窓口の決定
+ * 2026-09-19（`workspace/mvp/m1/02-l2-spec-examples.md` §4.3 の叩き台は `last: 6`）。
+ */
+export const GROUP_LIMIT_DEFAULT = 6;
+
+/**
+ * 見出しごとに分ける対象（`aggregate` の `groupBy`。M1.4。Issue #179）。**集計元の entity の項目**を指す。
+ *
+ *   `{ field: "kind", month: false }` … `enum` の項目の値ごとに分ける（見出しは `options` のキー）
+ *   `{ field: "date", month: true }`  … `date` の項目を**月**でまとめる（見出しは `YYYY-MM`）
+ *
+ * **分けられるのは `enum` と `date` の 2 つだけ**である（M1.4）。ほかの型を指せば静的チェックが
+ * `LOGIC_AGGREGATE_GROUPBY_NOT_GROUPABLE` で断る。意味は docs/semantics.md「groupBy」にある。
+ */
+export interface AggregateGrouping {
+  /** 分ける対象の項目の名前（`aggregate.entity` の項目） */
+  readonly field: string;
+  /** `true` なら `date` の項目を月でまとめる（`false` なら `enum` の項目の値ごと） */
+  readonly month: boolean;
+}
 
 /**
  * 期間の名前（`within` の比べる相手。M1.4。Issue #178）。**語彙は閉じている**——いま書けるのは
@@ -286,6 +314,17 @@ export interface Aggregate {
    * （`AggregateWhereCondition`）。`within`（期間の条件）は **`date` の項目だけ**を指せる（M1.4）
    */
   readonly where: AggregateWhere;
+  /**
+   * **見出しごとに分ける**（M1.4。Issue #179）。書けば、集計は**1 つの値ではなく「見出しと値」の組の
+   * 並び**になる（`type: groups` の計算だけが持つ）。書かなければ、従来どおり 1 つの値である。
+   */
+  readonly groupBy?: AggregateGrouping;
+  /**
+   * 見出しの数の上限（M1.4。Issue #179）。**月で分けるときだけ**書ける——直近いくつの月を返すか。
+   * 省略したときは `GROUP_LIMIT_DEFAULT`（6）である。`enum` で分けるときは書けない
+   * （見出しは `options` のキーの全部である）。
+   */
+  readonly last?: number;
 }
 
 /**
@@ -301,15 +340,15 @@ export const COMPUTED_SCOPES = ["app"] as const;
 export type ComputedScope = (typeof COMPUTED_SCOPES)[number];
 
 /**
- * アプリ全体の計算が `entity` を持たないことを、型の上で表す。
+ * アプリ全体の計算と、見出しごとの集計が `entity` を持たないことを、型の上で表す。
  *
- * **アプリ全体の計算はどのレコードにも属さないので `entity` を書けない。** 正規化した JSON にも
+ * **どちらもどのレコードにも属さないので `entity` を書けない。** 正規化した JSON にも
  * `entity` は現れない。ここで `undefined` として宣言しておくのは、**`entity` を読む既存のコード
- * （精算など）をそのまま型検査に通す**ためである——アプリ全体の計算を扱う側は、`entity` を読む前に
- * `isAppComputed` で分ける（`scope` を持つかどうかで見る）。
+ * （精算など）をそのまま型検査に通す**ためである——それらを扱う側は、`entity` を読む前に
+ * `isAppComputed`・`isGroupComputed` で分ける（`scope`・`type` を持つかどうかで見る）。
  */
 interface AppScopeNoEntity {
-  /** アプリ全体の計算は `entity` を持たない（型の上だけの欄である） */
+  /** アプリ全体の計算と見出しごとの集計は `entity` を持たない（型の上だけの欄である） */
   readonly entity?: undefined;
 }
 
@@ -334,6 +373,22 @@ export interface ComputedAppAggregate extends AppScopeNoEntity, LabeledDeclarati
   readonly scope: ComputedScope;
   readonly aggregate: Aggregate;
   readonly type: ComputedType;
+}
+
+/**
+ * **見出しごとの集計**（M1.4。Issue #179）。`type: groups` で、`aggregate` に `groupBy` を持つ。
+ * 値は「見出しと値」の組の並びである（`AggregateGrouping`）。
+ *
+ * **`entity` も `scope` も持たない。** これは行ごとの値でも、1 つの数でもなく、**アプリ全体で 1 つの
+ * 並び**だからである——どのレコードにも属さず、`scope: app` の「1 つの数」とも別の欄に載る
+ * （`packages/appspec-schema/src/api.ts` の `ApiViewBody.groups`）。`groupBy` が指す項目の
+ * 集計元は `aggregate.entity` が持つので、`entity` を別に書く必要が無い。
+ * 意味は docs/semantics.md「groups」「groupBy」にある。
+ */
+export interface ComputedGroups extends AppScopeNoEntity, LabeledDeclaration {
+  readonly name: string;
+  readonly aggregate: Aggregate;
+  readonly type: "groups";
 }
 
 /** 式で求める計算（v0.1 からの形）。v0.1 の computed_contract の entry_fields と同じ 4 つのキーを持つ。 */
@@ -381,21 +436,23 @@ export interface ComputedSettle extends LabeledDeclaration {
   readonly settle: SettleDeclaration;
 }
 
-/** 計算（式・集計・精算のどれか）。計算の値は保存しない。 */
+/** 計算（式・集計・精算・見出しごとの集計のどれか）。計算の値は保存しない。 */
 export type Computed =
   | ComputedExpression
   | ComputedAggregate
   | ComputedSettle
   | ComputedAppExpression
-  | ComputedAppAggregate;
+  | ComputedAppAggregate
+  | ComputedGroups;
 
 /**
  * アプリ全体で 1 つの値になる計算（M1.4。Issue #177）。**`entity` を持たない**ので、
- * 行ごとの値（`RowComputed`）とは別のものである。
+ * 行ごとの値（`RowComputed`）とは別のものである。`scope: app` の**数**だけであり、
+ * 見出しごとの集計（`ComputedGroups`）は含まない——あちらは数ではなく並びである（`isGroupComputed`）。
  */
 export type AppComputed = ComputedAppExpression | ComputedAppAggregate;
 
-/** 行ごとの値になる計算（式か集計）。精算は行ではなく組の並びを返すので含まない */
+/** 行ごとの値になる計算（式か集計）。精算と、見出しごとの集計は含まない */
 export type RowComputed = ComputedExpression | ComputedAggregate;
 
 /** 式で求める計算か（`aggregate`・`settle` の側と区別する）。アプリ全体の式も `true` である */
@@ -406,7 +463,17 @@ export const isComputedExpression = (
 /** 集計で求める計算か（`expression`・`settle` の側と区別する）。アプリ全体の集計も `true` である */
 export const isComputedAggregate = (
   computed: Computed,
-): computed is ComputedAggregate | ComputedAppAggregate => "aggregate" in computed;
+): computed is ComputedAggregate | ComputedAppAggregate | ComputedGroups => "aggregate" in computed;
+
+/**
+ * **見出しごとの集計**（`type: groups`。M1.4。Issue #179）か。**`type` が `groups` かどうか**で見る
+ * ——`scope` も `entity` も持たないので、どちらでも見分けられないからである。
+ *
+ * **行ごとの値でも、アプリ全体の 1 つの数でもない**（一覧の列に出さず、行の `computed` にも、
+ * `scope` の欄にも入れない）。値は一覧の応答の `groups` に載る。
+ */
+export const isGroupComputed = (computed: Computed): computed is ComputedGroups =>
+  "type" in computed && computed.type === "groups";
 
 /**
  * アプリ全体の計算か（M1.4。Issue #177）。**`scope` を持つかどうか**で見る——
@@ -420,11 +487,11 @@ export const isComputedSettle = (computed: Computed): computed is ComputedSettle
   "settle" in computed;
 
 /**
- * 行ごとの値になる計算か。**精算と、アプリ全体の計算が `false`** である
- * （どちらも「1 つの行の値」ではない。`RowComputed` の注記を見ること）。
+ * 行ごとの値になる計算か。**精算と、アプリ全体の計算と、見出しごとの集計が `false`** である
+ * （どれも「1 つの行の値」ではない。`RowComputed` の注記を見ること）。
  */
 export const isRowComputed = (computed: Computed): computed is RowComputed =>
-  !isComputedSettle(computed) && !isAppComputed(computed);
+  !isComputedSettle(computed) && !isAppComputed(computed) && !isGroupComputed(computed);
 
 /**
  * 操作の種類（M1.2。`kind`）。**語彙は閉じている**——書けるのはこの 3 つだけである。
@@ -725,6 +792,8 @@ export const VOCABULARY = {
   count: "logic",
   avg: "logic",
   within: "logic",
+  groupBy: "logic",
+  groups: "logic",
   settle: "logic",
   min: "logic",
   max: "logic",
