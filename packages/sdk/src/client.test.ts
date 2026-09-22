@@ -890,3 +890,116 @@ describe("決まった値への書き換え（M1.3）", () => {
     }
   });
 });
+
+// ── ダッシュボード（`dashboard`）と数値の部品（M1.4。Issue #180） ──────────
+//
+// **ダッシュボードの一覧は `entity` を持たない**（行を並べない。追記 4）。部品（`widgets`）は `number`
+// だけで、`value` を要し、`label`・`unit` は任意である。受けないと `getSpec` が失敗し、画面が開かない。
+
+describe("ダッシュボード（dashboard）と数値の部品", () => {
+  const DASHBOARD_SPEC = {
+    ...SPEC,
+    spec: {
+      ...SPEC.spec,
+      views: [
+        {
+          name: "dashboard",
+          type: "dashboard",
+          widgets: [
+            { type: "number", label: "今月の活動", value: "activityCount", unit: "回" },
+            // `label` と `unit` は任意である
+            { type: "number", value: "averageCost" },
+          ],
+        },
+      ],
+    },
+  };
+
+  it("dashboard の一覧と widgets を、型付きで受け取る（受入条件）", async () => {
+    const stub = recordingFetch(() => json(200, DASHBOARD_SPEC));
+
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toEqual({ ok: true, value: DASHBOARD_SPEC });
+  });
+
+  it("entity を持たない一覧の応答（rows は空）を受け取る（受入条件）", async () => {
+    // **`entity` が無い**（ダッシュボード）。rows は空の並びで、値は scope に載る
+    const body = {
+      instanceId: "inst-1",
+      view: "dashboard",
+      fields: [],
+      computed: [],
+      permissions: { read: true, write: true },
+      actions: [],
+      rows: [],
+      scope: { activityCount: 3, averageCost: null },
+    };
+    const stub = recordingFetch(() => json(200, body));
+
+    expect(await clientWith(stub.fetch).getView("inst-1", "dashboard")).toEqual({ ok: true, value: body });
+  });
+
+  it("dashboard に entity を書いた宣言は INVALID_RESPONSE（行を並べない）", async () => {
+    const stub = recordingFetch(() =>
+      json(200, {
+        ...SPEC,
+        spec: {
+          ...SPEC.spec,
+          views: [
+            { name: "dashboard", entity: "expense", type: "dashboard", widgets: [{ type: "number", value: "activityCount" }] },
+          ],
+        },
+      }),
+    );
+
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toMatchObject({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE },
+    });
+  });
+
+  it("widgets の形が契約と違う dashboard は INVALID_RESPONSE", async () => {
+    const badWidgets: unknown[] = [
+      // widgets そのものが無い（部品が無ければダッシュボードにならない）
+      undefined,
+      // 空の並び
+      [],
+      // 知らない部品の種類
+      [{ type: "bar", value: "activityCount" }],
+      // `value` が無い
+      [{ type: "number" }],
+      // `unit` が空文字
+      [{ type: "number", value: "activityCount", unit: "" }],
+      // `label` が空文字
+      [{ type: "number", value: "activityCount", label: "" }],
+    ];
+    for (const widgets of badWidgets) {
+      const view: Record<string, unknown> = { name: "dashboard", type: "dashboard" };
+      if (widgets !== undefined) view["widgets"] = widgets;
+      const stub = recordingFetch(() => json(200, { ...SPEC, spec: { ...SPEC.spec, views: [view] } }));
+
+      expect(await clientWith(stub.fetch).getSpec("inst-1"), JSON.stringify(widgets)).toMatchObject({
+        ok: false,
+        error: { status: 200, code: INVALID_RESPONSE },
+      });
+    }
+  });
+
+  it("dashboard 以外の一覧に widgets を書いた宣言は INVALID_RESPONSE", async () => {
+    const stub = recordingFetch(() =>
+      json(200, {
+        ...SPEC,
+        spec: {
+          ...SPEC.spec,
+          views: [
+            { name: "expenseList", entity: "expense", widgets: [{ type: "number", value: "activityCount" }] },
+          ],
+        },
+      }),
+    );
+
+    expect(await clientWith(stub.fetch).getSpec("inst-1")).toMatchObject({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE },
+    });
+  });
+});

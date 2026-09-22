@@ -378,6 +378,19 @@ function isComputedShape(entry: unknown): boolean {
   return hasAggregate ? isAggregateShape(entry["aggregate"]) : isSettleShape(entry["settle"]);
 }
 
+/**
+ * 一覧（`views`）の形（M1.4。Issue #180）。**ダッシュボード（`type: dashboard`）は `entity` を持たない**
+ * ——行を並べず、アプリ全体の値（`scope`）を部品で見せるだけだからである。だから `name` だけを要求し、
+ * `entity` があれば断る（`scope: app` の計算が `entity` を持たないのと同じ扱いである）。
+ * 行を並べる一覧は、従来どおり `name` と `entity` を要する。
+ */
+function isViewShape(view: unknown): boolean {
+  const dashboard = isRecord(view) && view["type"] === "dashboard";
+  if (!hasStrings(view, dashboard ? ["name"] : ["name", "entity"])) return false;
+  if (dashboard && view["entity"] !== undefined) return false;
+  return true;
+}
+
 /** 宣言の 7 欄が、期待する形で揃っているか（**欄そのものが欠けていたら断る**） */
 function isSpecShape(spec: unknown): spec is AppSpec {
   if (!isRecord(spec)) return false;
@@ -388,7 +401,10 @@ function isSpecShape(spec: unknown): spec is AppSpec {
     if (!isRecord(entity) || !isRecord(entity["fields"])) return false;
     if (!Object.values(entity["fields"]).every(isFieldDeclaration)) return false;
   }
-  if (!Array.isArray(views) || !views.every((view) => hasStrings(view, ["name", "entity"]))) return false;
+  // **すべての一覧に `entity` を要求しない**（M1.4。Issue #180）——`dashboard` は `entity` を持たない。
+  // `entity` を要求したままにすると、`dashboard` を足した瞬間に `isSpecShape` が false を返し、
+  // 9 ゲート緑・CI 緑のまま staging の `getSpec` が 503 になる（#154 で実際に起きた形）
+  if (!Array.isArray(views) || !views.every(isViewShape)) return false;
   if (!Array.isArray(actions) || !actions.every(isActionShape)) return false;
   if (!Array.isArray(validations)) return false;
   for (const validation of validations) {
@@ -831,6 +847,24 @@ export async function getView(
   if (view === undefined) return fail("NOT_FOUND");
   const permissions = permissionsOf(app);
   if (!permissions.read) return fail("PERMISSION_DENIED");
+  // ダッシュボード（`type: dashboard`。M1.4。Issue #180）は**行を並べない**——`rows` は空の並びで、
+  // 部品が読む値は `scope`（アプリ全体の集計）に 1 回で載る。`entity` も、行ごとの `fields`・
+  // `computed` も持たない。**部品ごとに取りに行かない**（1 回の取得でまとめて返す）。
+  if (view.type === "dashboard") {
+    // アプリ全体の集計が指す entity を読む（一覧の entity が無いので `known` は空である）
+    const sources = await loadSources(deps, app, "", appAggregateSourceEntities(app));
+    const scope = scopeValuesOf(app, deps.clock, sources);
+    return ok(API_READ_STATUS, {
+      instanceId,
+      view: view.name,
+      fields: [],
+      computed: [],
+      permissions,
+      actions: [],
+      rows: [],
+      ...(scope === undefined ? {} : { scope }),
+    });
+  }
   const entity = app.spec.entities.find((candidate) => candidate.name === view.entity);
   // 宣言の不整合（静的チェックが防ぐ）。読めない宣言として断る
   if (entity === undefined) return fail("SPEC_UNAVAILABLE");

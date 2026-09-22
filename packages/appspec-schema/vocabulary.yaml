@@ -353,6 +353,20 @@
   runtime: [spec-engine, data-api, host]
   factory: 未対応
 
+# ダッシュボード（dashboard）。**行を並べず、計算した値そのものを部品で並べる**画面の種類である（M1.4。Issue #180）。
+# 見本は dashboard。**数値の部品（`widgets` の `number`）と単位（`unit`）も、この行がまとめて扱う**——
+# `board` が `columns`・`highlight` を台帳に行を分けずに扱っているのと同じである（1 語 1 行の原則。
+# 部品の種類 `number` は、データ層の項目の型 `number` と同じ語でもある）。
+- name: dashboard
+  layer: ui
+  since: v0.2-draft（M1.4）
+  samples: [dashboard]
+  negatives: [dashboard-no-parts, dashboard-number-not-app-scope]
+  check_rules: [SHAPE_KEY_MISSING, UI_DASHBOARD_VALUE_NOT_APP_SCOPE]
+  semantics: docs/semantics.md#dashboard
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
 # 表示名（label）。**画面に出すためだけ**の語彙である（M1.3。Issue #176）。
 # 付けられるのは**項目（fields）と計算（computed）だけ**で、**無ければ識別子をそのまま出す**。
 # 式からは読めない（式が読むのは識別子だけである）。**保存される値は変わらない**。

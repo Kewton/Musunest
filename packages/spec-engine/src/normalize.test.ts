@@ -551,3 +551,68 @@ describe("表示名（label）の正規化（M1.3）", () => {
     ]);
   });
 });
+
+// ── ダッシュボード（`dashboard`）と数値の部品の正規化（M1.4。Issue #180） ──
+
+describe("ダッシュボード（dashboard）と数値の部品の正規化（M1.4）", () => {
+  const DASHBOARD_SOURCE = [
+    "entities:",
+    "  - name: activity",
+    "    fields:",
+    "      cost: number",
+    "views:",
+    "  - name: dashboard",
+    "    type: dashboard",
+    "    widgets:",
+    "      - type: number",
+    "        label: 今月の費用",
+    "        value: costTotal",
+    "        unit: 円",
+    "  - name: activityList",
+    "    entity: activity",
+    "actions:",
+    "  - name: addActivity",
+    "    entity: activity",
+    "validations: []",
+    "computed:",
+    "  - name: costTotal",
+    "    scope: app",
+    "    aggregate:",
+    "      sum: activity.cost",
+    "    type: number",
+    "permissions:",
+    "  - name: read",
+    "    subject: minIdentity",
+    "  - name: write",
+    "    subject: minIdentity",
+    "minIdentity:",
+    "  mode: anonymous",
+  ].join("\n");
+
+  it("dashboard の一覧は、正規化した JSON でも `entity` を持たない（受入条件）", async () => {
+    const result = await normalized(DASHBOARD_SOURCE);
+    const dashboard = result.app.spec.views.find((view) => view.name === "dashboard");
+    expect(dashboard).toEqual({
+      name: "dashboard",
+      type: "dashboard",
+      widgets: [{ type: "number", label: "今月の費用", value: "costTotal", unit: "円" }],
+    });
+    // 正規化した JSON にも `entity` は現れない（行を並べない一覧である）
+    expect(dashboard).not.toHaveProperty("entity");
+    expect(result.json).toContain('"type": "dashboard"');
+    expect(result.json).toContain('"unit": "円"');
+  });
+
+  it("部品の `label` と `unit` を書かなければ、欄そのものが無い", async () => {
+    const source = DASHBOARD_SOURCE.replace("        label: 今月の費用\n", "").replace(
+      "        unit: 円\n",
+      "",
+    );
+    const result = await normalized(source);
+    expect(result.app.spec.views[0]).toEqual({
+      name: "dashboard",
+      type: "dashboard",
+      widgets: [{ type: "number", value: "costTotal" }],
+    });
+  });
+});

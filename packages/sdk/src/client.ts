@@ -444,17 +444,39 @@ function isComputedDeclaration(value: unknown): boolean {
 }
 
 /**
+ * ダッシュボードの数値の部品（M1.4。Issue #180）。`type` は `number`、`value` は計算の名前である。
+ * `label`（表示名）と `unit`（単位）は任意で、載っているときだけ**空でない文字列**を要求する
+ * （実在と種類は静的チェックが見る。ここは形だけを確かめる）。
+ */
+function isViewPart(value: unknown): boolean {
+  if (!isRecord(value) || value.type !== "number" || typeof value.value !== "string") return false;
+  if (!isOptionalLabel(value)) return false;
+  return value.unit === undefined || (typeof value.unit === "string" && value.unit !== "");
+}
+
+/**
  * 一覧の宣言。M1.2 で `type`（種類。語彙は `VIEW_TYPES`：`table`・`settlement`・`board`・`list`）と
  * `show`（表に出す名前の順）を、M1.3 でボードの `columns`（必須）・`highlight`（任意）と、一覧の
- * `filters`（任意）を足した。**書ける欄は `type` が決める**（語彙は閉じている）。
+ * `filters`（任意）を、M1.4 でダッシュボードの `widgets`（必須。Issue #180）を足した。
+ * **書ける欄は `type` が決める**（語彙は閉じている）。
+ *
+ * **ダッシュボードは `entity` を持たない**——行を並べないので、`widgets` を要し、`entity` を認めない。
  */
 function isView(value: unknown): boolean {
-  if (!isRecord(value) || typeof value.name !== "string" || typeof value.entity !== "string") return false;
+  if (!isRecord(value) || typeof value.name !== "string") return false;
   if (value.type !== undefined) {
     if (typeof value.type !== "string" || !(VIEW_TYPES as readonly string[]).includes(value.type)) {
       return false;
     }
   }
+  const dashboard = value.type === "dashboard";
+  // ダッシュボードは entity を持たない（書けば不正）。ほかの一覧は entity（文字列）を要する
+  if (dashboard ? value.entity !== undefined : typeof value.entity !== "string") return false;
+  // 部品（`widgets`）はダッシュボードのときだけ。**1 つ以上**ある（部品が無ければダッシュボードにならない）
+  if (dashboard) {
+    return Array.isArray(value.widgets) && value.widgets.length > 0 && value.widgets.every(isViewPart);
+  }
+  if (value.widgets !== undefined) return false;
   // `show` は `type: table` と `type: list` のときだけ（扱いは同じ。ほかの種類は列の並びを持たない）
   if (value.show !== undefined && !((value.type === "table" || value.type === "list") && isStringArray(value.show))) {
     return false;
@@ -573,7 +595,8 @@ function isViewBody(value: unknown): value is ApiViewBody {
     isRecord(value) &&
     typeof value.instanceId === "string" &&
     typeof value.view === "string" &&
-    typeof value.entity === "string" &&
+    // entity は**行を並べる一覧だけ**が持つ（ダッシュボードは持たない。M1.4。Issue #180）
+    (value.entity === undefined || typeof value.entity === "string") &&
     isStringArray(value.fields) &&
     isStringArray(value.computed) &&
     // 表示名（`label`。Issue #176）。**欄が無い**（宣言に label が 1 つも無い）ときと、
