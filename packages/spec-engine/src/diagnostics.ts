@@ -152,6 +152,23 @@ export const DIAGNOSTIC_CODES = [
    * 並べないので、どの行の値かが決まらない
    */
   "UI_DASHBOARD_VALUE_NOT_APP_SCOPE",
+  /**
+   * 順位の部品（`type: ranking`）の基準（`by`）が、その entity の**行ごとの数の計算**（`computed`）を
+   * 指していない（無い、または**アプリ全体の集計（`scope: app`）**である。M1.4。Issue #182）——
+   * アプリ全体の集計には行ごとの値が無いので、どの行を上位にするかを決められない
+   */
+  "UI_RANKING_BY_NOT_ROW_VALUE",
+  /**
+   * 順位の部品の基準（`by`）が、出す項目（`show`）に無い（M1.4。Issue #182）。
+   * 基準は**出す項目の 1 つとして見せる**ので、`by` は `show` に含めなければならない
+   */
+  "UI_RANKING_BY_NOT_SHOWN",
+  /**
+   * 順位の部品の鍵（`name`）が、同じ一覧の `widgets` の中で重なっている（M1.4。Issue #182）。
+   * `name` は応答の `ranking` の欄を引く名前なので、重複させない（欠落は `SHAPE_KEY_MISSING`、
+   * 形は `SHAPE_NAME_INVALID` である）
+   */
+  "UI_RANKING_NAME_DUPLICATE",
   /** 絞り込み（`filters`）が指す名前が、その一覧の `show` に無い（M1.3） */
   "UI_FILTER_FIELD_NOT_SHOWN",
   /** 絞り込み（`filters`）が、その entity の選択肢（`enum`）でも参照（`ref`）でもない項目を指している（M1.3） */

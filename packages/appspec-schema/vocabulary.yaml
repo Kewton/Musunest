@@ -384,6 +384,8 @@
 # 見本は dashboard。**数値の部品（`widgets` の `number`）と単位（`unit`）も、この行がまとめて扱う**——
 # `board` が `columns`・`highlight` を台帳に行を分けずに扱っているのと同じである（1 語 1 行の原則。
 # 部品の種類 `number` は、データ層の項目の型 `number` と同じ語でもある）。
+# **順位の部品 `ranking` は、この行に混ぜずに別の行にした**——データ層に同じ語が無く、`value` ではない
+# 鍵（`name`）と、行を並べる独自の意味を持つ語だからである（M1.4。Issue #182）。
 - name: dashboard
   layer: ui
   since: v0.2-draft（M1.4）
@@ -391,6 +393,22 @@
   negatives: [dashboard-no-parts, dashboard-number-not-app-scope]
   check_rules: [SHAPE_KEY_MISSING, UI_DASHBOARD_VALUE_NOT_APP_SCOPE]
   semantics: docs/semantics.md#dashboard
+  runtime: [spec-engine, data-api, host]
+  factory: 未対応
+
+# 順位の部品（`ranking`）。**ダッシュボードの部品の 1 つで、行を並べる唯一の部品である**（M1.4。Issue #182）。
+# `entity` の行を、**行ごとの数の計算**（`by`）の降順で `limit` 件（省いたときの既定は 5）だけ並べる。
+# **基準に指せるのは、その entity の行ごとの数の計算だけ**である——**アプリ全体の集計（`scope: app`）は
+# 指せない**（行ごとの値が無い）。**同数は登録した順**で安定させる（#179 の並びと同じく「安定であること」が
+# 要件である。窓口の決定 2026-09-19）。**鍵（`name`）を必須にする**——`value` を持たないので、応答の
+# `ranking` の欄に載せる名前が他に無いためである（重複・欠落・形は静的チェックが断る）。見本は dashboard。
+- name: ranking
+  layer: ui
+  since: v0.2-draft（M1.4）
+  samples: [dashboard]
+  negatives: [ranking-by-app-scope, ranking-by-not-shown]
+  check_rules: [UI_RANKING_BY_NOT_ROW_VALUE, UI_RANKING_BY_NOT_SHOWN]
+  semantics: docs/semantics.md#ranking
   runtime: [spec-engine, data-api, host]
   factory: 未対応
 

@@ -1,0 +1,40 @@
+# 負例：順位の部品（type: ranking）の基準（by）が、出す項目（show）に無い。
+# 基準は出す項目の 1 つとして見せるので、**by は show に含めなければならない**（M1.4。Issue #182）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある（1 か所だけを間違える）。
+
+entities:
+  - name: activity
+    fields:
+      date: date
+      tags: list
+
+views:
+  - name: dashboard
+    type: dashboard
+    widgets:
+      - type: ranking
+        name: topActivities
+        entity: activity
+        by: tagCount
+        show: [date]
+
+actions:
+  - name: addActivity
+    entity: activity
+
+validations: []
+
+computed:
+  - name: tagCount
+    entity: activity
+    expression: len(tags)
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

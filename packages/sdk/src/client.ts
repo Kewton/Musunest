@@ -470,14 +470,28 @@ function isComputedDeclaration(value: unknown): boolean {
 }
 
 /**
- * ダッシュボードの数値の部品（M1.4。Issue #180）。`type` は `number`、`value` は計算の名前である。
- * `label`（表示名）と `unit`（単位）は任意で、載っているときだけ**空でない文字列**を要求する
- * （実在と種類は静的チェックが見る。ここは形だけを確かめる）。
+ * ダッシュボードの部品（M1.4。Issue #180・#182）。**数値の部品**（`type: number`）は `value`（計算の名前）を
+ * 要し、`label`（表示名）と `unit`（単位）は任意である。**順位の部品**（`type: ranking`）は、鍵 `name`・
+ * 並べる相手 `entity`・基準 `by`・出す項目 `show` を要し、`label` と `limit`（件数の上限）は任意である。
+ * 実在と種類は静的チェックが見る——ここは形だけを確かめる。
  */
 function isViewPart(value: unknown): boolean {
-  if (!isRecord(value) || value.type !== "number" || typeof value.value !== "string") return false;
-  if (!isOptionalLabel(value)) return false;
-  return value.unit === undefined || (typeof value.unit === "string" && value.unit !== "");
+  if (!isRecord(value) || !isOptionalLabel(value)) return false;
+  if (value.type === "number") {
+    return (
+      typeof value.value === "string" &&
+      (value.unit === undefined || (typeof value.unit === "string" && value.unit !== ""))
+    );
+  }
+  if (value.type === "ranking") {
+    if (typeof value.name !== "string" || typeof value.entity !== "string") return false;
+    if (typeof value.by !== "string" || !isStringArray(value.show)) return false;
+    if (value.limit !== undefined) {
+      if (typeof value.limit !== "number" || !Number.isInteger(value.limit) || value.limit < 1) return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -572,6 +586,18 @@ function isGroupedValues(value: unknown): boolean {
   );
 }
 
+/**
+ * **順位の部品（`type: ranking`。M1.4。Issue #182）の応答**。部品の鍵（`name`）→ **行の並び**（`ApiRow`）か、
+ * `null`（求められなかった）である。**欄が無い**（宣言が無い）ことと、値が `null` のことを区別したまま渡す。
+ * 行の形は `rows` と同じ `ApiRow` である（画面が 2 通りの読み方を持たない）。
+ */
+function isRankingValues(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    Object.values(value).every((rows) => rows === null || (Array.isArray(rows) && rows.every(isRow)))
+  );
+}
+
 function isAppSpec(value: unknown): boolean {
   return (
     isRecord(value) &&
@@ -660,6 +686,8 @@ function isViewBody(value: unknown): value is ApiViewBody {
     // アプリ全体の集計（M1.4）。**欄が無い**（宣言が無い）ときと、値の `null` を区別したまま渡す
     (value.scope === undefined || isScopeValues(value.scope)) &&
     // 見出しごとの集計（M1.4。Issue #179）。**欄が無い**ときと、値の `null` を区別したまま渡す
-    (value.groups === undefined || isGroupedValues(value.groups))
+    (value.groups === undefined || isGroupedValues(value.groups)) &&
+    // 順位の部品（M1.4。Issue #182）。**欄が無い**ときと、値の `null` を区別したまま渡す
+    (value.ranking === undefined || isRankingValues(value.ranking))
   );
 }

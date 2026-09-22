@@ -889,11 +889,11 @@ describe("表示名（label）（M1.3）", () => {
   });
 });
 
-// ── 2. 負例 56 件 ──────────────────────────────────────────────
+// ── 2. 負例 58 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 56 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本、M1.4 の #178 で 2 本、#179 で 2 本、#180 で 2 本足した）", () => {
-    expect(negativeIndex.negatives).toHaveLength(56);
+  it("負例の一覧は 58 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本、M1.4 の #178 で 2 本、#179 で 2 本、#180 で 2 本、#182 で 2 本足した）", () => {
+    expect(negativeIndex.negatives).toHaveLength(58);
   });
 
   it.each(negativeCases)(
@@ -2685,6 +2685,15 @@ describe("ダッシュボード（dashboard）と数値の部品（M1.4。Issue 
         { type: "number", label: "今月の参加（のべ）", value: "attendeeTotal", unit: "人" },
         { type: "number", label: "1 回あたりの参加", value: "averageAttendees", unit: "人" },
         { type: "number", label: "今月の費用の平均", value: "averageCost", unit: "円" },
+        // 順位の部品（M1.4。Issue #182）。`limit` は省いてあるので写らない（既定は 5 である）
+        {
+          type: "ranking",
+          name: "topActivities",
+          label: "参加の多い活動",
+          entity: "activity",
+          by: "attendeeCount",
+          show: ["date", "kind", "attendeeCount"],
+        },
       ],
     });
     expect(dashboard).not.toHaveProperty("entity");
@@ -2799,6 +2808,234 @@ describe("ダッシュボード（dashboard）と数値の部品（M1.4。Issue 
       checkSpec(
         declaration({
           views: ["  - name: expenseList", "    entity: expense", ...widgets([numberPart(["value: activityCount"])]).split("\n")].join("\n"),
+          computed: DASHBOARD_COMPUTED,
+        }),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
+  });
+});
+
+// ── 順位の部品（`ranking`）（M1.4。Issue #182） ────────────────────────────
+//
+// **行を並べる唯一の部品**である。基準（`by`）にできるのは、その entity の**行ごとの数の計算**だけで、
+// **アプリ全体の集計（`scope: app`）は指せない**（行ごとの値が無い）。`by` は出す項目（`show`）に
+// 含めなければならない。鍵（`name`）は 1 つの一覧の中で重複させない。負例 2 本
+// （ranking-by-app-scope・ranking-by-not-shown）が、同じことを外から確かめる。
+
+/** 順位の部品 1 つ（`type: ranking` と、渡した欄）。`lines` は部品の欄（`name:` など）である */
+const rankingPart = (lines: readonly string[]): string => part(["type: ranking", ...lines]);
+
+describe("順位の部品（ranking）（M1.4。Issue #182）", () => {
+  it("見本 dashboard は静的チェックに通り、順位の部品を宣言のまま写す", () => {
+    const result = checkSpec(read(sampleSpecFile("dashboard")));
+    expect(result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("dashboard が静的チェックに通らない");
+    const dashboard = result.spec.views.find((view) => view.name === "dashboard");
+    expect(dashboard?.widgets).toContainEqual({
+      type: "ranking",
+      name: "topActivities",
+      label: "参加の多い活動",
+      entity: "activity",
+      by: "attendeeCount",
+      show: ["date", "kind", "attendeeCount"],
+    });
+  });
+
+  it("基準が行ごとの数の計算を指し、`by` が `show` にあれば通る（label と limit は書いてあるときだけ写す）", () => {
+    const result = checkSpec(
+      withDashboard([
+        widgets([
+          rankingPart([
+            "name: topExpenses",
+            "label: 支出の多い順",
+            "entity: expense",
+            "by: headcount",
+            "show: [amount, headcount]",
+            "limit: 3",
+          ]),
+        ]),
+      ]),
+    );
+    expect(result.diagnostics).toEqual([]);
+    if (!result.ok) throw new Error("dashboard が通らない");
+    expect(result.spec.views[0]?.widgets).toEqual([
+      {
+        type: "ranking",
+        name: "topExpenses",
+        label: "支出の多い順",
+        entity: "expense",
+        by: "headcount",
+        show: ["amount", "headcount"],
+        limit: 3,
+      },
+    ]);
+  });
+
+  it("基準が**アプリ全体の集計（scope: app）**を指せば UI_RANKING_BY_NOT_ROW_VALUE（負例と同じ形）", () => {
+    const result = failure(
+      checkSpec(
+        withDashboard([
+          widgets([rankingPart(["name: topExpenses", "entity: expense", "by: activityCount", "show: [amount]"])]),
+        ]),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["UI_RANKING_BY_NOT_ROW_VALUE"]);
+    // メッセージに、指した名前が出る（人が直せるように）
+    expect(messagesOf(result, "UI_RANKING_BY_NOT_ROW_VALUE")).toContain("activityCount");
+  });
+
+  it("基準が実在しない名前でも、同じ UI_RANKING_BY_NOT_ROW_VALUE で落ちる", () => {
+    const result = failure(
+      checkSpec(
+        withDashboard([
+          widgets([rankingPart(["name: topExpenses", "entity: expense", "by: ammount", "show: [amount]"])]),
+        ]),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["UI_RANKING_BY_NOT_ROW_VALUE"]);
+  });
+
+  it("基準（by）が show に無ければ UI_RANKING_BY_NOT_SHOWN（負例と同じ形）", () => {
+    const result = failure(
+      checkSpec(
+        withDashboard([
+          widgets([rankingPart(["name: topExpenses", "entity: expense", "by: headcount", "show: [amount]"])]),
+        ]),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["UI_RANKING_BY_NOT_SHOWN"]);
+    expect(messagesOf(result, "UI_RANKING_BY_NOT_SHOWN")).toContain("headcount");
+  });
+
+  it("2 つの誤りコードは別である（受入条件）", () => {
+    const byAppScope = codesOf(
+      failure(
+        checkSpec(
+          withDashboard([
+            widgets([rankingPart(["name: topExpenses", "entity: expense", "by: activityCount", "show: [amount]"])]),
+          ]),
+        ),
+      ),
+    );
+    const byNotShown = codesOf(
+      failure(
+        checkSpec(
+          withDashboard([
+            widgets([rankingPart(["name: topExpenses", "entity: expense", "by: headcount", "show: [amount]"])]),
+          ]),
+        ),
+      ),
+    );
+    expect(byAppScope).toEqual(["UI_RANKING_BY_NOT_ROW_VALUE"]);
+    expect(byNotShown).toEqual(["UI_RANKING_BY_NOT_SHOWN"]);
+    expect(byAppScope).not.toEqual(byNotShown);
+  });
+
+  it("鍵（name）が無ければ SHAPE_KEY_MISSING（name は必須である）", () => {
+    const result = failure(
+      checkSpec(
+        withDashboard([
+          widgets([rankingPart(["entity: expense", "by: headcount", "show: [headcount]"])]),
+        ]),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_MISSING"]);
+  });
+
+  it("鍵（name）の形が合わなければ SHAPE_NAME_INVALID（項目や計算と同じ識別子である）", () => {
+    const result = failure(
+      checkSpec(
+        withDashboard([
+          widgets([
+            rankingPart(["name: top-expenses", "entity: expense", "by: headcount", "show: [headcount]"]),
+          ]),
+        ]),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_NAME_INVALID"]);
+  });
+
+  it("鍵（name）が 1 つの一覧の中で重複すれば UI_RANKING_NAME_DUPLICATE", () => {
+    const result = failure(
+      checkSpec(
+        withDashboard([
+          widgets([
+            rankingPart(["name: topExpenses", "entity: expense", "by: headcount", "show: [headcount]"]),
+            rankingPart(["name: topExpenses", "entity: expense", "by: headcount", "show: [headcount]"]),
+          ]),
+        ]),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["UI_RANKING_NAME_DUPLICATE"]);
+    expect(messagesOf(result, "UI_RANKING_NAME_DUPLICATE")).toContain("topExpenses");
+  });
+
+  it("出す項目（show）に無い名前を書けば UI_FIELD_NOT_FOUND", () => {
+    const result = failure(
+      checkSpec(
+        withDashboard([
+          widgets([rankingPart(["name: topExpenses", "entity: expense", "by: headcount", "show: [headcount, ammount]"])]),
+        ]),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["UI_FIELD_NOT_FOUND"]);
+    expect(messagesOf(result, "UI_FIELD_NOT_FOUND")).toContain("ammount");
+  });
+
+  it("件数の上限（limit）が 1 以上でなければ SHAPE_VALUE_INVALID", () => {
+    const zero = failure(
+      checkSpec(
+        withDashboard([
+          widgets([rankingPart(["name: topExpenses", "entity: expense", "by: headcount", "show: [headcount]", "limit: 0"])]),
+        ]),
+      ),
+    );
+    expect(codesOf(zero)).toEqual(["SHAPE_VALUE_INVALID"]);
+    const broken = failure(
+      checkSpec(
+        withDashboard([
+          widgets([rankingPart(["name: topExpenses", "entity: expense", "by: headcount", "show: [headcount]", "limit: x"])]),
+        ]),
+      ),
+    );
+    expect(codesOf(broken)).toEqual(["SHAPE_VALUE_INVALID"]);
+  });
+
+  it("並べる entity が宣言に無ければ UI_ENTITY_NOT_FOUND", () => {
+    const result = failure(
+      checkSpec(
+        withDashboard([
+          widgets([rankingPart(["name: topExpenses", "entity: expence", "by: headcount", "show: [headcount]"])]),
+        ]),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["UI_ENTITY_NOT_FOUND"]);
+  });
+
+  it("順位の部品に知らない欄を書けば SHAPE_KEY_UNKNOWN（語彙は閉じている）", () => {
+    const result = failure(
+      checkSpec(
+        withDashboard([
+          widgets([
+            rankingPart(["name: topExpenses", "entity: expense", "by: headcount", "show: [headcount]", "order: desc"]),
+          ]),
+        ]),
+      ),
+    );
+    expect(codesOf(result)).toEqual(["SHAPE_KEY_UNKNOWN"]);
+    expect(messagesOf(result, "SHAPE_KEY_UNKNOWN")).toContain("order");
+  });
+
+  it("ダッシュボードでなければ、順位の部品は書けない（SHAPE_KEY_UNKNOWN）", () => {
+    const result = failure(
+      checkSpec(
+        declaration({
+          views: [
+            "  - name: expenseList",
+            "    entity: expense",
+            ...widgets([rankingPart(["name: topExpenses", "entity: expense", "by: headcount", "show: [headcount]"])]).split("\n"),
+          ].join("\n"),
           computed: DASHBOARD_COMPUTED,
         }),
       ),

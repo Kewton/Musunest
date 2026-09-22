@@ -616,12 +616,19 @@ export const VIEW_TYPES = ["table", "settlement", "board", "list", "dashboard"] 
 export type ViewType = (typeof VIEW_TYPES)[number];
 
 /**
- * ダッシュボード（`type: dashboard`）に並べる部品の種類（M1.4。Issue #180）。
- * **語彙は閉じている**——この Issue で書けるのは数値の部品 `number` だけである
- * （棒 `bar`・円 `pie`・順位 `ranking` は後続の #181・#182）。
+ * ダッシュボード（`type: dashboard`）に並べる部品の種類（M1.4。Issue #180・#182）。
+ * **語彙は閉じている**——いま書けるのは数値の部品 `number`（#180）と、順位の部品 `ranking`（#182）
+ * だけである（棒 `bar`・円 `pie` は #181）。
  */
-export const VIEW_PART_TYPES = ["number"] as const;
+export const VIEW_PART_TYPES = ["number", "ranking"] as const;
 export type ViewPartType = (typeof VIEW_PART_TYPES)[number];
+
+/**
+ * 順位の部品（`type: ranking`。M1.4。Issue #182）の、件数の上限を省いたときの既定である。
+ * **上位いくつの行を返すか**（窓口の決定 2026-09-19。`workspace/mvp/m1/02-l2-spec-examples.md` §4.3 の
+ * 叩き台は `limit: 5`）。意味は docs/semantics.md「ranking」にある。
+ */
+export const RANKING_LIMIT_DEFAULT = 5;
 
 /**
  * 数値の部品（`type: number`。M1.4。Issue #180）。**アプリ全体の集計（`scope: app`）の計算**を
@@ -647,8 +654,53 @@ export interface NumberPart extends LabeledDeclaration {
   readonly unit?: string;
 }
 
-/** ダッシュボードに並べる部品（M1.4。Issue #180）。いま書けるのは数値の部品だけである */
-export type ViewPart = NumberPart;
+/** ダッシュボードに並べる部品（M1.4。Issue #180・#182）。数値の部品と、順位の部品である */
+export type ViewPart = NumberPart | RankingPart;
+
+/**
+ * 順位の部品（`type: ranking`。M1.4。Issue #182）。**行を並べる部品**であって、値を 1 つ出す部品ではない
+ * ——`entity` の行を、`by` の降順で `limit` 件だけ並べる（`01` §1.1）。
+ *
+ * ```yaml
+ * widgets:
+ *   - type: ranking
+ *     name: topActivities
+ *     label: 参加の多い活動
+ *     entity: activity
+ *     by: attendeeCount
+ *     show: [date, kind, attendeeCount]
+ * ```
+ *
+ * - **`name` は鍵である**（必須）。同じ一覧の `widgets` の中で重複させない。書き方は項目や計算と
+ *   同じ識別子（`^[A-Za-z][A-Za-z0-9]*$`）である。**`label`（表示名）とは別物である**——`name` は鍵、
+ *   `label` は画面に出す文字である。数値・棒・円の部品は `value`（計算の名前）が鍵になるが、
+ *   順位の部品は `value` を持たないので、鍵にできる名前を自分で持つ
+ * - **`entity` は並べる相手**である。**`by` は並べ替えの基準**——その entity の**行ごとの数の計算**
+ *   （`computed`）だけを指せる。**アプリ全体の集計（`scope: app`）は指せない**（行ごとの値が無いため）
+ *   ——指せば静的チェックが `UI_RANKING_BY_NOT_ROW_VALUE` で断る
+ * - **`by` は `show` に含めなければならない**（出す項目の 1 つとして基準を見せる）。含めなければ
+ *   `UI_RANKING_BY_NOT_SHOWN` である
+ * - **`show` は出す項目**（その entity の項目か、行ごとの値になる計算）である。書いた順に出す
+ * - **`limit` は件数の上限**（任意）。省略したときは `RANKING_LIMIT_DEFAULT`（5）である
+ * - **表示名（`label`）は任意**である。書かなければ `name` を見出しに使う
+ * - **行の形は `ApiRow` と同じ**である（画面が 2 通りの読み方を持たない。`packages/appspec-schema/src/api.ts`）。
+ *   値は一覧の応答の**兄弟の欄 `ranking`**（鍵 → 行の並び、または `null`）に載る
+ *
+ * 意味は docs/semantics.md「ranking」にある。
+ */
+export interface RankingPart extends LabeledDeclaration {
+  readonly type: "ranking";
+  /** 鍵。同じ一覧の `widgets` の中で重複しない（`label` とは別物である） */
+  readonly name: string;
+  /** 並べる相手の entity の名前 */
+  readonly entity: string;
+  /** 並べ替えの基準になる、`entity` の行ごとの数の計算の名前 */
+  readonly by: string;
+  /** 出す項目（`entity` の項目か、行ごとの値になる計算）の名前。宣言の順に出す。`by` を必ず含める */
+  readonly show: readonly string[];
+  /** 件数の上限（1 以上）。省略したときは `RANKING_LIMIT_DEFAULT`（5）である */
+  readonly limit?: number;
+}
 
 /**
  * 一覧。種類の指定の無い一覧（M1.1）は、その entity のすべてのレコードを登録順に並べる。
@@ -710,6 +762,8 @@ export interface View {
    * `SHAPE_KEY_MISSING` で断る。ほかの種類の一覧では書けない（`SHAPE_KEY_UNKNOWN`）。
    *
    * **値は部品ごとに取りに行かない。** アプリ全体の値は一覧の応答の `scope` に 1 回で載る（M1.4。Issue #177）。
+   * **順位の部品（`type: ranking`。Issue #182）が返すのは、別の entity の行**である——そちらは応答の
+   * 兄弟の欄 `ranking` に載る（`scope` の欄には混ぜない）。
    */
   readonly widgets?: readonly ViewPart[];
 }
@@ -810,6 +864,7 @@ export const VOCABULARY = {
   settlement: "ui",
   board: "ui",
   dashboard: "ui",
+  ranking: "ui",
   label: "ui",
   filters: "ux",
   permission: "permission",
