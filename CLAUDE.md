@@ -141,8 +141,9 @@ sdk・spec-engine・app-do・connector → appspec-schema
   - **窓口は、依頼を送る前に相手の `autoYes` を確認し、off なら有効にしてよい**
     （2026-09-17 所有者が決定。`cmate-delegate` §6 をこのリポジトリに限って上書きする。`docs/parallel-development.md` §5）。
     有効にしても、**プロンプトに自分で答えることはしない**
-  - **`--duration` を必ず付ける。auto-yes には有効期間があり、既定の窓は管理の 1 ターンより短い**
-    （2026-09-20。`commandmate auto-yes --help` に `Duration (1h, 3h, 8h)`。状態は DB に列が無く永続化されない）
+  - **`--duration` を必ず付ける。auto-yes には有効期間があり、既定は 60 分**である
+    （2026-09-22 に実測。管理の 1 ターンは 40〜70 分かかるので、既定のままだと毎回途中で切れる）。
+    **残り時間は `commandmate ls --json` の `autoYesByInstance.<instance>.expiresAt`（epoch ミリ秒）で読める**
 
     ```bash
     commandmate auto-yes <worktree-id> --enable --instance command-code --duration 8h
