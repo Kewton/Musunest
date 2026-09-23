@@ -2329,12 +2329,14 @@ describe("アプリ全体の集計（scope: app）と平均（avg）（M1.4）",
       },
       type: "number",
     });
-    // 行ごとの計算（attendeeCount）は従来どおり entity を持つ
+    // 行ごとの計算（attendeeCount）は従来どおり entity を持ち、宣言の `label` も写す（M1.4。Issue #204。
+    // 順位の部品は、別の entity の行の見出しをこの `label` から引く。**確かめている中身は変えない**）
     expect(result.spec.computed).toContainEqual({
       name: "attendeeCount",
       entity: "activity",
       expression: "len(attendees)",
       type: "number",
+      label: "参加人数",
     });
   });
 

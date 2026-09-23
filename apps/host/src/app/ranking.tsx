@@ -6,8 +6,13 @@
 //      同数の順（登録した順）も API が決める——画面は受け取った順を崩さない
 //   2. **何を出すか** — 宣言の `show` に書いた名前を、その順に見せる（項目は `fields` から、計算は
 //      `computed` から読む。**どちらであるかは行の値を見て決める**）
-//   3. **見出しをどう出すか** — `label` があればそれを、無ければ `name` を見出しにする
+//   3. **見出しと値の見せ方** — 項目の見出しの表示名（宣言の `label`。無ければ識別子）と、選択肢
+//      （`enum`）のキーの表示名は、**呼ぶ側が渡す**——**一覧・ボードと同じ処理を通す**（この部品の中に
+//      写し方の表や分岐を持たない。Issue #204）。渡されなければ、見出しは名前のまま、値はそのままの文字
 //   4. **値が `null` のときは「—」で見せる**——0 と区別する（docs/semantics.md「computed」）
+//
+// **参照（`ref`・参照の並び）は、この Issue では ID のままである**——順位の部品は参照先の行を読んで
+// いない（見本も参照を `show` に入れていない）。名前へ写すのは、参照先の候補を持つ呼ぶ側の仕事である。
 //
 // **部品は 4 つの状態を持つ**（workspace/mvp/m1/04-spec-evolution.md §7.3）——空・多い・エラー・権限なし。
 // 権限なし（`read` が無い）は API が 403 を返し、画面（renderer）がその理由を出す。この部品が持つのは
@@ -47,8 +52,17 @@ export interface RankingProps {
    * ——どちらも「空の並び」には読み替えない（0 件と区別する）。
    */
   readonly rows: readonly ApiRow[] | null | undefined;
-  /** 見出しに使う表示名（`label`）。無ければ名前をそのまま返す */
+  /**
+   * 項目の見出しに使う表示名（宣言の `label`。無ければ名前をそのまま返す）。**呼ぶ側が渡す**——順位は
+   * 別の entity の行を並べるので、その entity の宣言から引く（ダッシュボードの応答には `labels` が無い）
+   */
   readonly displayName?: (name: string) => string;
+  /**
+   * 項目の値の表示。**選択肢（`enum`）のキーを宣言の `options` の表示名に写す**——**一覧・ボードと
+   * 同じ処理**（`renderer.tsx` の `displayOf`）を呼ぶ側が渡す（この部品の中に写し方を持たない。
+   * Issue #204）。書かなければ、値をそのまま見せる。
+   */
+  readonly labelOf?: (field: string, value: ApiValue | undefined) => string;
 }
 
 // ── 見た目（幅 360 CSS px で横に流さない。04 §7.2） ──────────────────────
@@ -67,7 +81,21 @@ const ROW_STYLE: CSSProperties = {
   borderTop: "1px solid #e2e2e2",
 };
 const POSITION_STYLE: CSSProperties = { minWidth: "1.5em", fontWeight: 700, color: "#4a4a4a" };
-const CELL_STYLE: CSSProperties = { overflowWrap: "anywhere", wordBreak: "break-word" };
+/**
+ * 1 つのセル。**見出しと値の間に目で分かる間を置く**（`gap`）——見出しと値がくっついて読めなくなるのを
+ * 防ぐ（Issue #204）。幅 360 CSS px では折り返す（横に押し広げない）
+ */
+const CELL_STYLE: CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  alignItems: "baseline",
+  gap: 6,
+  minWidth: 0,
+  maxWidth: "100%",
+};
+/** 見出し。**値を小さく薄く見せて、値のほうを読ませる**（`gap` と合わせて区切りになる。Issue #204） */
+const NAME_STYLE: CSSProperties = { fontSize: "0.8rem", color: "#6b6b6b" };
+const VALUE_STYLE: CSSProperties = { overflowWrap: "anywhere", wordBreak: "break-word" };
 
 /**
  * 行が多いと見なす数（M1.4。Issue #180 の `MANY_PARTS` と揃える）。**上限は置かない**——
@@ -100,16 +128,20 @@ function computedText(value: number | boolean | null | undefined): string {
 /**
  * 1 つのセルの値。**項目（`fields`）にあればその値、無ければ計算（`computed`）の値**である
  * （名前は重ならないので、応答の項目に無ければ計算である。`renderer.tsx` の表と同じ読み方である）。
+ *
+ * **項目の値は、呼ぶ側が渡す `labelOf` を通す**——選択肢（`enum`）のキーを宣言の `options` の表示名へ
+ * 写すのはそこである（この部品の中に写し方の表や分岐を持たない。Issue #204）。計算の値は写さない。
  */
-function cellText(row: ApiRow, name: string): string {
+function cellText(row: ApiRow, name: string, labelOf: RankingProps["labelOf"]): string {
   const field = row.fields[name];
-  return field === undefined ? computedText(row.computed[name]) : fieldText(field);
+  if (field === undefined) return computedText(row.computed[name]);
+  return labelOf === undefined ? fieldText(field) : labelOf(name, field);
 }
 
 /** 部品の見出し。**宣言の `label` があればそれ、無ければ鍵（`name`）をそのまま出す** */
 const partHeading = (part: RankingPart): string => part.label ?? part.name;
 
-export function Ranking({ part, rows, displayName }: RankingProps) {
+export function Ranking({ part, rows, displayName, labelOf }: RankingProps) {
   const heading = partHeading(part);
 
   // **エラー**：順位を載せる値が無い（宣言はあるのに応答が無い＝配信された応答の不整合）か、
@@ -155,10 +187,13 @@ export function Ranking({ part, rows, displayName }: RankingProps) {
               {index + 1}
             </span>
             {part.show.map((name) => (
-              <span className="ranking-cell" data-name={name} key={name}>
-                <span className="ranking-cell-name">{headingOf(name)}</span>
-                <span className="ranking-cell-value" style={CELL_STYLE}>
-                  {cellText(row, name)}
+              // **見出しと値の間に目で分かる間を置く**（`gap` と、小さく薄い見出し。Issue #204）
+              <span className="ranking-cell" data-name={name} key={name} style={CELL_STYLE}>
+                <span className="ranking-cell-name" style={NAME_STYLE}>
+                  {headingOf(name)}
+                </span>
+                <span className="ranking-cell-value" style={VALUE_STYLE}>
+                  {cellText(row, name, labelOf)}
                 </span>
               </span>
             ))}

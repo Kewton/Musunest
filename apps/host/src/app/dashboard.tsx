@@ -22,7 +22,7 @@
 
 import type { CSSProperties } from "react";
 import { displayNameOf } from "@musunest/sdk";
-import type { ApiViewBody } from "@musunest/sdk";
+import type { ApiValue, ApiViewBody } from "@musunest/sdk";
 import { Chart } from "./chart";
 import type { ChartPart } from "./chart";
 import { Ranking } from "./ranking";
@@ -61,6 +61,19 @@ export interface DashboardProps {
    * `options` が変わるからである。書かなければ、受け取った見出しをそのまま出す（月は `YYYY-MM` のまま）。
    */
   readonly headingOf?: (groupName: string, heading: string) => string;
+  /**
+   * **順位の部品の項目の見出し**（宣言の `label`。無ければ識別子）を引く（M1.4。Issue #204）。
+   * 順位は**別の entity の行**を並べるので、その entity の宣言から引く——ダッシュボードは `entity` を
+   * 持たないので、応答の `labels` が載らず、名前の対応が手元に無いからである。
+   * 書かなければ、受け取った名前をそのまま出す（識別子のまま）。
+   */
+  readonly itemLabelOf?: (entityName: string, item: string) => string;
+  /**
+   * **順位の部品の項目の値**を画面に出す文字列へ写す（M1.4。Issue #204）。**一覧・ボードと同じ処理**
+   * （選択肢のキーを宣言の `options` の表示名に写す `displayOf`）を呼ぶ側が渡す。部品の中に写し方を
+   * 持たない。書かなければ、値をそのまま見せる。
+   */
+  readonly valueLabelOf?: (entityName: string, field: string, value: ApiValue | undefined) => string;
 }
 
 // ── 見た目（幅 360 CSS px で横に流さない。04 §7.2） ──────────────────────
@@ -125,7 +138,7 @@ function partValueText(part: DashboardNumberPart, scope: Readonly<Record<string,
   return part.unit === undefined ? text : `${text} ${part.unit}`;
 }
 
-export function Dashboard({ view, parts, headingOf }: DashboardProps) {
+export function Dashboard({ view, parts, headingOf, itemLabelOf, valueLabelOf }: DashboardProps) {
   const scope = view.scope;
   const groups = view.groups;
   const numberParts = parts.filter((part): part is DashboardNumberPart => part.type === "number");
@@ -205,7 +218,16 @@ export function Dashboard({ view, parts, headingOf }: DashboardProps) {
           <Ranking
             part={part}
             rows={view.ranking === undefined ? undefined : (view.ranking[part.name] ?? null)}
-            displayName={(name) => displayNameOf(view.labels, name)}
+            // 見出しは手元の宣言の表示名（ダッシュボードの応答には `labels` が載らない）。無ければ識別子
+            displayName={(name) => itemLabelOf?.(part.entity, name) ?? displayNameOf(view.labels, name)}
+            // 値は**一覧・ボードと同じ処理**を通す（選択肢のキーを表示名へ。Issue #204）。渡されなければ
+            // 部品が値をそのまま見せる（`exactOptionalPropertyTypes` なので、無いときは欄ごと渡さない）
+            {...(valueLabelOf === undefined
+              ? {}
+              : {
+                  labelOf: (field: string, value: ApiValue | undefined) =>
+                    valueLabelOf(part.entity, field, value),
+                })}
           />
         </div>
       ))}

@@ -266,6 +266,17 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           view={view}
           parts={declaration.widgets ?? []}
           headingOf={(groupName, heading) => groupHeadingOf(spec.spec, groupName, heading)}
+          // 順位の部品は**別の entity の行**を並べる。その行の見出しと選択肢の表示名は、手元の宣言
+          // （`getSpec`）から引く——ダッシュボードの応答には `labels` が載らないからである（M1.4。Issue #204）。
+          // 値の写し方は、一覧・ボード・表と同じ `displayOf` を通す（部品の中に写し方を持たない）
+          itemLabelOf={(entityName, item) => displayNameOf(entityLabelsOf(spec.spec, entityName), item)}
+          valueLabelOf={(entityName, field, value) =>
+            displayOf(
+              spec.spec.entities.find((candidate) => candidate.name === entityName),
+              references,
+              field,
+              value,
+            )}
         />
       ) : declaration?.type === "settlement" ? (
         // 精算の表示（M1.2）。**画面は計算しない**——API が返した送金の並びを、名前に対応づけて見せる。
@@ -496,8 +507,13 @@ function fieldText(value: ApiValue | undefined): string {
 }
 
 /**
- * 参照の項目の値。**ID を画面に名前へ写す**（見つからなければ ID のまま出す。
- * 「分からないものを消す」より、分かる範囲をそのまま見せるほうが正直である）。
+ * 項目の値の表示。**一覧・ボード・表・順位の部品が共通で通る 1 つの処理**である（Issue #204）。
+ *
+ * 1. **選択肢（`enum`）** … 保存されているのはキーなので、宣言の `options` の表示名に写す
+ *    （`form` の入力欄・`groupHeadingOf` の見出しと同じ決めごとである）。写せなければキーのまま出す
+ * 2. **参照（`ref`・参照の並び）** … ID を画面に名前へ写す（見つからなければ ID のまま出す。
+ *    「分からないものを消す」より、分かる範囲をそのまま見せるほうが正直である）
+ * 3. それ以外 … 値をそのまま文字にする
  */
 function displayOf(
   entity: Entity | undefined,
@@ -506,7 +522,12 @@ function displayOf(
   value: ApiValue | undefined,
 ): string {
   const declaration = entity?.fields[field];
-  const target = declaration === undefined ? null : fieldTarget(declaration);
+  if (declaration === undefined) return fieldText(value);
+  // 選択肢（`enum`）の値はキーである。宣言の `options` の表示名に写す（無ければキーのまま）
+  if (typeof declaration !== "string" && declaration.type === "enum") {
+    return typeof value === "string" ? (declaration.options[value] ?? value) : fieldText(value);
+  }
+  const target = fieldTarget(declaration);
   if (target === null) return fieldText(value);
   const data = references.find((item) => item.entity === target);
   if (isList(value)) return value.map((id) => labelOf(data, id)).join(", ");
@@ -552,6 +573,30 @@ function groupHeadingOf(spec: AppSpec, name: string, heading: string): string {
     return heading;
   }
   return declaration.options[heading] ?? heading;
+}
+
+/**
+ * その entity の項目と計算の表示名（宣言の `label`。Issue #204）。**無ければその名前は入らない**
+ * ——画面は `displayNameOf` を通し、無ければ識別子をそのまま出す（ほかの画面と同じ規則である）。
+ *
+ * **順位の部品のために要る**——ダッシュボードは `entity` を持たず、一覧の応答に `labels` が載らない
+ * ので、別の entity（順位が並べる相手）の表示名は、手元の宣言から引くしかない。
+ */
+function entityLabelsOf(spec: AppSpec, entityName: string): Readonly<Record<string, string>> {
+  const labels: Record<string, string> = {};
+  const entity = spec.entities.find((candidate) => candidate.name === entityName);
+  if (entity === undefined) return labels;
+  for (const [name, declaration] of Object.entries(entity.fields)) {
+    if (typeof declaration !== "string" && declaration.label !== undefined) {
+      labels[name] = declaration.label;
+    }
+  }
+  for (const computed of spec.computed) {
+    if (computed.entity === entityName && computed.label !== undefined) {
+      labels[computed.name] = computed.label;
+    }
+  }
+  return labels;
 }
 
 function failed(error: ClientError): ScreenState {
