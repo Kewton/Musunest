@@ -356,13 +356,11 @@ M1 は `filters` で担当者を選んで絞り込む。M2 でゲスト参加（
 
 ## 4. 見本 3：ダッシュボード
 
-> **2026-09-19 追記（#169）：この節はまだ実装されていない。** ダッシュボードは **M1.4** である。
-> 下は**いまの語彙に無い**。§2 と共通の 4 つ（`app`・`label`・`required`・`sort`）に加えて、
-> **ダッシュボードの語彙がまるごと未実装**である——`scope: app`・`groupBy`・`groups` 型・
-> 期間の条件（`within: this_month`）・画面の種類 `dashboard` とその部品（`number`・`bar`・`pie`・`ranking`）・`unit`・`limit`。
->
-> **M1.4 の Issue を切るときに、この節を「決める材料」として使い、決まった形で書き直す**（§3 と同じ手順）。
-> あわせて、2026-09-19 のデモで見つかった **`label`（日本語の名前）** と **強調の色** も M1.4 に入れる（[`demos.md`](./demos.md)）。
+> **2026-09-23：実際に動く見本に合わせて書き直した（#184。§3 と同じ手順）。**
+> 正本は [`packages/appspec-schema/samples/dashboard/app.spec.yaml`](../../../packages/appspec-schema/samples/dashboard/app.spec.yaml) である。
+> 叩き台（2026-09-15）が使おうとして**書けなかった書き方**は §4.6 の表に残した。
+> **叩き台の画面は 2 つで、参加者を登録・選択する画面が無かった。** そのため M1.4 のデモで活動を 1 件も入力できず、
+> 見本にメンバーの一覧を足した（#200。記録は [`demos.md`](./demos.md) の M1.4）。
 
 ### 4.1 前提：何を集計するか
 
@@ -378,161 +376,228 @@ M1 は `filters` で担当者を選んで絞り込む。M2 でゲスト参加（
 
 ### 4.2 画面のイメージ
 
+M1.4 のデモ（2026-09-23・Android / Chrome）で実際に見えた形である。
+
 ```text
-サークルの活動
- [ダッシュボード]  [活動の記録]
+m14-demo-dashboard
+ [dashboard]  [activities]  [members]          ← views（ボタンは view の名前のまま出る）
 ─────────────────────────
- 今月の活動       2 回                ← widgets: number
- 今月の参加（のべ）5 人
- 1 回あたりの参加  2.5 人
- 今月の費用       8,000 円
+ 今月の活動          3 回                      ← widgets: number（scope: app・within: this_month）
+ 今月の参加（のべ）  6 人
+ 1 回あたりの参加    2 人                      ← avg。今月が 0 件なら「—」
+ 今月の費用の平均    3333.3 円                 ← 値は丸めず、画面が小数第 1 位で見せる
 ─────────────────────────
- 月ごとの活動回数                     ← widgets: bar
-   4月 |
-   5月 |
-   6月 |
-   7月 |
-   8月 |■■ 2
-   9月 |■■ 2
+ 月ごとの活動回数                              ← widgets: bar（groups。直近 6 か月・古い順）
+   2026-04 … 2026-07  0
+   2026-08  1
+   2026-09  3
 ─────────────────────────
- 種類の内訳                           ← widgets: pie
-   練習 2 ・ 試合 1 ・ 飲み会 1
+ 種類の内訳                                    ← widgets: pie（groups。options の順・割合も数字で）
+   練習 2（50%）・試合 1（25%）・飲み会 1（25%）
 ─────────────────────────
- 参加回数                             ← widgets: ranking
-   A さん 4 回
-   B さん 3 回
-   C さん 3 回
-   D さん 1 回
+ 参加の多い活動                                ← widgets: ranking（行ごとの計算の降順・既定 5 件）
+   1  日付 2026-08-30  種類 練習    参加人数 4
+   2  日付 2026-09-20  種類 練習    参加人数 3
+   3  日付 2026-09-21  種類 飲み会  参加人数 2
+   4  日付 2026-09-22  種類 試合    参加人数 1
 ```
+
+- 「今月」は日本時間で決まる。先月（8/30）の活動は数値の部品に入らず、棒の 08 と順位には入る
+- 円は `within` を持たないので、**先月の活動も数える**（今月だけの内訳ではない）
 
 ### 4.3 宣言
 
-```yaml
-app:
-  name: サークルの活動
+コメントを除いた形である（正本のコメントには、どの Issue がどの語彙を足したかと、書けなかった書き方の表がある）。
 
+```yaml
 entities:
   - name: member
-    label: メンバー
     fields:
-      name: { type: string, label: 名前, required: true }
-
+      name:                 # 名前
+        type: string
+        label: 名前
   - name: activity
-    label: 活動
     fields:
-      date:      { type: date, label: 日付, required: true }
-      kind:      { type: enum, label: 種類, options: { practice: 練習, match: 試合, party: 飲み会 }, required: true }
-      attendees: { type: list, of: member, label: 参加した人 }
-      cost:      { type: number, label: 費用（円） }
-
-validations:
-  - name: costNotNegative
-    entity: activity
-    expression: cost == null or cost >= 0
-    message: 費用は 0 円以上にしてください
-
+      kind:                 # 種類（練習・試合・飲み会）
+        type: enum
+        label: 種類
+        options:
+          practice: 練習
+          match: 試合
+          party: 飲み会
+      date:                 # 活動した日（M1.4。`within: this_month` で「今月」に絞る）
+        type: date
+        label: 日付
+      attendees:            # 参加した人（member のレコードの並びを ID で指す）
+        type: list
+        of: member
+        label: 参加した人
+      cost:                 # 費用（円）
+        type: number
+        label: 費用
 computed:
-  # 活動 1 件ごと
   - name: attendeeCount
     entity: activity
-    type: number
     expression: len(attendees)
-
-  # メンバーごと
-  - name: attendance
-    entity: member
     type: number
-    aggregate: { count: activity, where: { attendees: { contains: this } } }
-
-  # アプリ全体（どの entity にも属さない集計。v0.1 では書けない）
-  - name: activitiesThisMonth
+    label: 参加人数
+  - name: activityCount
     scope: app
+    aggregate:
+      count: activity
+      where:
+        date:
+          within: this_month
     type: number
-    aggregate: { count: activity, where: { date: { within: this_month } } }
-  - name: attendeesThisMonth
+  - name: attendeeTotal
     scope: app
+    aggregate:
+      sum: activity.attendeeCount
+      where:
+        date:
+          within: this_month
     type: number
-    aggregate: { sum: activity.attendeeCount, where: { date: { within: this_month } } }
-  - name: costThisMonth
-    scope: app
-    type: number
-    aggregate: { sum: activity.cost, where: { date: { within: this_month } } }
   - name: averageAttendees
     scope: app
+    aggregate:
+      avg: activity.attendeeCount
+      where:
+        date:
+          within: this_month
     type: number
-    expression: attendeesThisMonth / max(1, activitiesThisMonth)
+  - name: averageCost
+    scope: app
+    aggregate:
+      avg: activity.cost
+      where:
+        date:
+          within: this_month
+    type: number
   - name: activitiesByMonth
-    scope: app
-    type: groups               # 「見出しと値」の組の並び。グラフに渡す
-    aggregate: { count: activity, groupBy: { month: activity.date }, last: 6 }
-  - name: activitiesByKind
-    scope: app
+    aggregate:
+      count: activity
+      groupBy:
+        month: activity.date
+      last: 6
     type: groups
-    aggregate: { count: activity, groupBy: activity.kind }
-
+  - name: activitiesByKind
+    aggregate:
+      count: activity
+      groupBy: activity.kind
+    type: groups
 views:
   - name: dashboard
     type: dashboard
-    label: ダッシュボード
     widgets:
-      - { type: number,  label: 今月の活動,         value: activitiesThisMonth, unit: 回 }
-      - { type: number,  label: 今月の参加（のべ）, value: attendeesThisMonth,  unit: 人 }
-      - { type: number,  label: 1 回あたりの参加,   value: averageAttendees,    unit: 人 }
-      - { type: number,  label: 今月の費用,         value: costThisMonth,       unit: 円 }
-      - { type: bar,     label: 月ごとの活動回数,   value: activitiesByMonth }
-      - { type: pie,     label: 種類の内訳,         value: activitiesByKind }
-      - { type: ranking, label: 参加回数,           entity: member, show: [name, attendance], by: attendance, limit: 5 }
+      - type: number
+        label: 今月の活動
+        value: activityCount
+        unit: 回
+      - type: number
+        label: 今月の参加（のべ）
+        value: attendeeTotal
+        unit: 人
+      - type: number
+        label: 1 回あたりの参加
+        value: averageAttendees
+        unit: 人
+      - type: number
+        label: 今月の費用の平均
+        value: averageCost
+        unit: 円
+      - type: bar
+        label: 月ごとの活動回数
+        value: activitiesByMonth
+        unit: 回
+      - type: pie
+        label: 種類の内訳
+        value: activitiesByKind
+        unit: 回
+      - type: ranking
+        name: topActivities
+        label: 参加の多い活動
+        entity: activity
+        by: attendeeCount
+        show: [date, kind, attendeeCount]
   - name: activities
     type: list
-    label: 活動の記録
     entity: activity
-    show: [date, kind, attendeeCount, cost]
-    sort: { by: date, order: desc }
-
+    show: [kind, attendees, cost, attendeeCount]
+  - name: members
+    type: list
+    entity: member
+    show: [name]
 actions:
-  - { name: addActivity,    entity: activity, kind: create, label: 活動を記録する }
-  - { name: editActivity,   entity: activity, kind: update, label: 直す }
-  - { name: deleteActivity, entity: activity, kind: delete, label: 消す }
-  - { name: addMember,      entity: member,   kind: create, label: メンバーを足す }
-
+  - name: addMember
+    entity: member
+    kind: create
+  - name: addActivity
+    entity: activity
+    kind: create
+  - name: deleteActivity
+    entity: activity
+    kind: delete
+  - name: deleteMember
+    entity: member
+    kind: delete
+validations: []
 permissions:
-  - { name: read,  subject: minIdentity }
-  - { name: write, subject: minIdentity }
-
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
 minIdentity:
   mode: anonymous
 ```
 
 ### 4.4 採点のシナリオ（期待値）
 
-時計を **2026-09-15（日本時間）に固定**する。入力：メンバー A・B・C・D。
+正本は [`packages/appspec-schema/samples/dashboard/scenario.json`](../../../packages/appspec-schema/samples/dashboard/scenario.json)。時計を **2026-09-15 12:00（日本時間）に固定**する。入力：メンバー A・B・C。
 
-| 日付 | 種類 | 参加した人 | 費用 |
-|---|---|---|---|
-| 8/27 | 練習 | A・C | 2,000 |
-| 8/30 | 飲み会 | A・B・C・D | 12,000 |
-| 9/3 | 練習 | A・B・C | 3,000 |
-| 9/10 | 試合 | A・B | 5,000 |
+| 日付 | 種類 | 参加した人 | 費用 | |
+|---|---|---|---|---|
+| 8/31 | 練習 | A・C | 2,000 | **先月** |
+| 9/10 | 練習 | A・B・C | 3,000 | |
+| 9/12 | 飲み会 | A・B | 5,000 | |
+| 9/14 | 試合 | A | 2,000 | |
+| 10/1 | 練習 | A・B | 1,000 | **来月** |
 
 | 確かめるもの | 期待値 |
 |---|---|
-| 今月の活動 | 2 回 |
-| 今月の参加（のべ） | 5 人 |
-| 1 回あたりの参加 | 2.5 人 |
-| 今月の費用 | 8,000 円 |
-| 月ごとの活動回数 | 4〜7 月 0 ／ 8 月 2 ／ 9 月 2 |
-| 種類の内訳 | 練習 2 ／ 試合 1 ／ 飲み会 1 |
-| 参加回数 | A 4 ／ B 3 ／ C 3 ／ D 1 |
+| 今月の活動 | 3 回（先月と来月は入らない。**「今月」の境目がここで効く**） |
+| 今月の参加（のべ） | 6 人 |
+| 1 回あたりの参加 | 2 人 |
+| 今月の費用の平均 | 10000/3 円（画面は 3333.3） |
+| 月ごとの活動回数 | 2026-04〜07 0 ／ 08 1 ／ 09 3（10 月は直近 6 か月の窓の外） |
+| 順位 | 練習 3 人 → 先月の練習・飲み会・来月の練習 2 人（登録した順）→ 試合 1 人 |
+| **断ること** | 選択肢に無い種類・`YYYY-MM-DD` でない日付・存在しない参加者は、どれも保存されない |
 
-時計を 2026-10-01 に進めると、「今月の活動」は 0 回になり、「月ごとの活動回数」は 5〜10 月になる。**時刻で変わる値は、時計を固定しないと採点できない。**
+staging の e2e（#183）は、時計に依らない値（行ごとの計算・一覧の形・断ること）だけを見る。
+**「今月」が本物の日付で効くことは、人がスマホで確かめた**（M1.4 のデモ）。
 
 ### 4.5 ほかの見本に無かった書き方
 
-- アプリ全体の集計（`scope: app`）と、見出しごとの集計（`groupBy`・`groups` 型）
-- 期間の条件（`within: this_month`）
-- 画面の種類 `dashboard` と、その中の部品（`number`・`bar`・`pie`・`ranking`）
+- アプリ全体の集計（`scope: app`）と平均（`avg`。値の無い行は数えず、0 件なら `null`）
+- 見出しごとの集計（`groupBy`・`type: groups`。月は古い順・直近 `last` か月、選択肢は `options` の順）
+- 期間の条件（`within: this_month`。日本時間の月初以上・翌月初未満）
+- 画面の種類 `dashboard` と、その中の部品（`number`・`bar`・`pie`・`ranking`）、単位（`unit`）
 
----
+### 4.6 叩き台が使おうとして、書けなかった書き方
+
+**2026-09-23 に #183・#184 で分かった。** §3.5 と同じく、**この表は消さない**（語彙を足すかどうかの判断材料。[`04-spec-evolution.md`](./04-spec-evolution.md) §6.1）。
+
+| 叩き台の書き方 | いまの語彙 | どうしたか |
+|---|---|---|
+| `app: { name: サークルの活動 }` | **無い**（トップレベルは 7 欄で固定） | 落とした。画面のタイトルはインスタンス ID |
+| entity・一覧・操作の `label:` | **項目と計算にだけ**付けられる | 項目と計算にだけ書いた。**一覧の切替のボタンは view の名前のまま出る** |
+| `required: true` | **無い**（全項目が必須） | 落とした |
+| `cost == null or cost >= 0`（検査の式） | **`null` も `or` も無い** | `validations` を空にした（費用が負でも保存される） |
+| `sort: { by: date, order: desc }` | **無い**（行は登録した順） | 落とした |
+| `averageAttendees` を式（`… / max(1, …)`）で書く | アプリ全体の値を式では書けない | 集計の `avg` にした（**0 件は「—」**。式の `max(1, …)` は 0 を返してしまい、0 と「求められなかった」を区別できない） |
+| 順位を member の `attendance`（参加回数）で並べる | 基準に指せるのは**行ごとの計算だけ**（#182） | activity の `attendeeCount` で並べた。**「誰がよく来るか」ではなく「どの活動に多く来たか」になった** |
+| `costThisMonth`（今月の費用の**合計**） | 書ける | **見本は平均（`averageCost`）にしている。** #177 が見本を起こしたときから平均で、合計は一度も書かれていない。**理由の記録が見本に無い**ので、ここに残す |
+| `editActivity`（直す） | 書ける（`kind: update`） | 見本に入れていない |
+| 画面が 2 つ（ダッシュボード・活動の記録） | — | **参加者を登録・選択する画面が無かった。** #200 でメンバーの一覧を足した |
 
 ## 5. 指示を足すと、宣言はどう変わるか
 
