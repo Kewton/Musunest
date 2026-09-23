@@ -11,11 +11,12 @@
 //      **「今月」のアプリ全体の値（`scope`）と、月ごとの集計（`activitiesByMonth`）は時計に依るので、
 //      ここでは採点しない**——時計を差し込む unit（data-api の app-api.test.ts）で採点する（Q17）。
 //      `scope` は**欄と鍵が在ること**だけを見る（数は見ない）
-//   3. どの一覧も `getView` が ok で返すこと（配信側が M1.4 の語彙を読めること）
+//   3. どの一覧も `getView` が ok で返すこと（配信側が M1.4 の語彙を読めること）。**参照の候補を出す
+//      メンバーの一覧（`members`。Issue #200）も ok で、作った A・B・C がその行に載っていること**
 //
 // 専用インスタンス（固定 ID）だけを使う。**デモ・窓口のインスタンスには触らない。**
-// 片付けは **活動 → メンバー** の順に消す（参照されているメンバーは消せない）。メンバーは見本に一覧が
-// 無い（ダッシュボードと活動の一覧だけ）ので、**この runner が自分で作ったものだけを、記録した ID で消す**。
+// 片付けは **活動 → メンバー** の順に消す（参照されているメンバーは消せない）。メンバーは見本の一覧
+// （`members`）にも載るが、**この runner が自分で作ったものだけを、記録した ID で消す**。
 // 前回の失敗で残ったメンバーは、活動から参照されていない限りそのまま残る（採点には効かない）。
 // ログに URL・ホスト名・資格情報を出さない。応答の生の本文も出さない。
 
@@ -29,6 +30,8 @@ export const SAMPLE_FILE = `${SAMPLE_DIRECTORY}/app.spec.yaml`;
 /** 見本の一覧の名前（宣言が正本で、ここは写し） */
 export const DASHBOARD_VIEW = "dashboard";
 export const ACTIVITIES_VIEW = "activities";
+/** メンバーの一覧（参照の候補。Issue #200） */
+export const MEMBERS_VIEW = "members";
 
 /** 使うメンバー（登録した順に A・B・C） */
 export const MEMBER_NAMES = ["A", "B", "C"] as const;
@@ -122,7 +125,7 @@ async function cleanActivities(deps: DashboardDeps, deleteActivity: string): Pro
   return { ok: true, reason: "" };
 }
 
-/** 自分で作ったメンバーを、記録した ID で消す（見本にメンバーの一覧が無いので、名前で引けない） */
+/** 自分で作ったメンバーを、記録した ID で消す（同名のメンバーが前回から残っていても、それには触らない） */
 async function deleteMembers(deps: DashboardDeps, deleteMember: string, ids: readonly string[]): Promise<DashboardResult> {
   for (const id of ids) {
     const deleted = await deps.client.deleteRecord(deps.instanceId, deleteMember, id);
@@ -269,6 +272,22 @@ function checkRanking(view: ApiViewBody, problems: string[]): void {
   }
 }
 
+/** メンバーの一覧（`members`）に、作った A・B・C が載っていることを見る（参照の候補を出す view） */
+function checkMembers(
+  rows: readonly ApiRow[],
+  members: ReadonlyMap<string, string>,
+  problems: string[],
+): void {
+  const names = new Set<string>();
+  for (const row of rows) {
+    const name = row.fields["name"];
+    if (typeof name === "string") names.add(name);
+  }
+  for (const name of members.keys()) {
+    if (!names.has(name)) problems.push(`メンバーの一覧（${MEMBERS_VIEW}）に ${name} の行が無い`);
+  }
+}
+
 /** 時計に依存しない値を、API の値として比べる。問題があればその理由を返す */
 async function score(
   deps: DashboardDeps,
@@ -294,6 +313,10 @@ async function score(
   }
   checkByKind(dashboard.body.groups, DASHBOARD_VIEW, problems);
   checkRanking(dashboard.body, problems);
+
+  const memberList = await rowsOf(deps.client, deps.instanceId, MEMBERS_VIEW);
+  if (!memberList.ok) return fail(memberList.reason);
+  checkMembers(memberList.body.rows, members, problems);
 
   return problems.length > 0 ? fail(problems.join(" / ")) : { ok: true, reason: "" };
 }
@@ -335,7 +358,7 @@ export async function runDashboard(deps: DashboardDeps): Promise<DashboardResult
     } else {
       out("e2e: 前回までの活動（あれば）を片付けた");
 
-      // 4. メンバー A・B・C を新しく作る（見本にメンバーの一覧が無いので、名前で引けない）
+      // 4. メンバー A・B・C を新しく作る（採点で、members の一覧に載っていることを確かめる）
       const created = await createMembers(deps, actions.addMember, memberIds);
       if (!created.ok) {
         result = fail(created.reason);
@@ -349,7 +372,7 @@ export async function runDashboard(deps: DashboardDeps): Promise<DashboardResult
 
           // 6. 採点（時計に依存しない値だけ）
           result = await score(deps, spec.value, created.members);
-          if (result.ok) out("e2e: 採点した（活動の行・種類ごとの件数・順位）");
+          if (result.ok) out("e2e: 採点した（メンバーの一覧・活動の行・種類ごとの件数・順位）");
         }
       }
     }
