@@ -884,13 +884,23 @@ describe("deploy-staging.yml", () => {
     expect(publish?.body).toContain("--spec packages/appspec-schema/samples/warikan/app.spec.yaml");
     expect(publish?.body).toContain("--env staging --instance m12-e2e-task-board");
     expect(publish?.body).toContain("--spec packages/appspec-schema/samples/task-board/app.spec.yaml");
+    expect(publish?.body).toContain("--env staging --instance m12-e2e-dashboard");
+    expect(publish?.body).toContain("--spec packages/appspec-schema/samples/dashboard/app.spec.yaml");
     expect(publish?.body).not.toMatch(/m11-demo-expense-log|m12-demo-warikan/);
   });
 
   it("e2e の見本は --replace で置く（語彙を足す Issue で原本の SHA-256 が変わっても落ちない・#175）", () => {
     const publish = steps[indexOf(/infra\/scripts\/publish\.ts/)];
-    // 2 つとも --replace を付ける。**既定（暗黙に差し替えない）は変えない**
-    expect(publish?.body.match(/--replace/g)).toHaveLength(2);
+    // 3 つとも --replace を付ける。**既定（暗黙に差し替えない）は変えない**
+    expect(publish?.body.match(/--replace/g)).toHaveLength(3);
+  });
+
+  it("e2e は 3 つの見本（warikan・task-board・dashboard）を、それぞれの専用インスタンスで採点する", () => {
+    const e2e = steps[indexOf(/pnpm --filter @musunest\/e2e test:staging/)] ?? { body: "" };
+    // 既定（warikan）に加え、見本ごとに専用インスタンスを環境変数で渡して 3 回走らせる（デモは指さない）
+    expect(e2e.body).toContain("E2E_SAMPLE=task-board E2E_INSTANCE_ID=m12-e2e-task-board");
+    expect(e2e.body).toContain("E2E_SAMPLE=dashboard E2E_INSTANCE_ID=m12-e2e-dashboard");
+    expect(e2e.body).not.toMatch(/m11-demo|m12-demo/);
   });
 
   it("e2e の宛先は環境変数で渡す（引数に URL を渡さない）。インスタンス ID は明示の環境変数にだけ入れる", () => {

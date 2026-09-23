@@ -36,6 +36,24 @@
 # 集計は指せない**（行ごとの値が無い）。値は応答の**兄弟の欄 `ranking`**（部品の `name` → 行の並び）に載る
 # （意味は ../../docs/semantics.md「ranking」）。
 #
+# ── いまの語彙で書けなかったこと（§4.3 との違い。Issue #183） ─────────────────────
+#
+# この見本の元は workspace/mvp/m1/02-l2-spec-examples.md §4.3（2026-09-15 の叩き台）である。
+# §4.3 が使おうとした書き方のうち、**いまの語彙では書けないもの**は次のとおり。**この表は消さない**——
+# 語彙を足すかどうかの材料である（04-spec-evolution.md §6.1「見本が必要としていて、今の語彙では書けない
+# ときだけ足す」）。task-board の見本（samples/task-board/app.spec.yaml）と同じやり方で残す。
+#
+#   §4.3 の書き方                                  いまの語彙について                        どうしたか
+#   `app: { name: サークルの活動 }`                 トップレベルは 7 欄で固定（`app` が無い）  落とした
+#   entity の `label:`（メンバー・活動）            `label` は項目と計算にだけ付けられる       落とした
+#   `required: true`                                いまは全項目が必須（書く欄が無い）        落とした
+#   `cost == null or cost >= 0`（検査の式）         式に `null` も `or` も無い                validations を空にした
+#   `sort: { by: date, order: desc }`（活動の一覧） 行は登録した順                            落とした
+#   `averageAttendees` を式で書く                   アプリ全体の値を式では書けない            集計の `avg` に置き換えた
+#   `ranking` を member の `attendance` で並べる     基準に指せるのは行ごとの計算だけ（#182）  activity の `attendeeCount` にした
+#
+# 意味のうち表現できない点は、上のように**いまの形へ落としてある**（落としたことを隠さない）。
+#
 # 採点のシナリオは同じディレクトリの scenario.json、
 # 意味は ../../docs/semantics.md（「scope」「aggregate」「within」「sum」「count」「avg」「groupBy」「groups」
 # 「computed」「dashboard」「bar」「pie」「ranking」）にある。
@@ -186,6 +204,16 @@ actions:
   - name: addActivity
     entity: activity
     kind: create
+  # 消す（M1.2 の `delete`。§4.3 にもある）。**staging の e2e（Issue #183）が、固定 ID の e2e 用
+  # インスタンスを毎回作り直さずに済むよう、専用データを片付けるのに使う**——活動は見出しごとの集計と
+  # 順位に効くので、実行のたびに増やさない（片付けは活動 → メンバーの順。参照されているメンバーは消せない）
+  - name: deleteActivity
+    entity: activity
+    kind: delete
+  # §4.3 には無いが、e2e が自分で足したメンバーを片付けるために足した（warikan の `deleteMember` と同じ）
+  - name: deleteMember
+    entity: member
+    kind: delete
 
 validations: []
 
