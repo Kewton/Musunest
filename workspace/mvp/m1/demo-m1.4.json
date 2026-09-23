@@ -1,0 +1,252 @@
+{
+  "$comment": "M1.4「ダッシュボードが動く」のデモの証跡（Issue #184）。人がスマホで確かめた結果を機械が読める形で残す。文章の記録は demos.md にある。",
+  "milestone": "M1.4",
+  "title": "ダッシュボードが動く",
+  "verifiedAt": "2026-09-23",
+  "verifiedAtNote": "所有者がスマホで確認した日。窓口が同日に聞き取って記録した",
+  "verifiedBy": [
+    {
+      "who": "所有者",
+      "client": "スマホ",
+      "os": "Android 16",
+      "browser": "Chrome 153.0.8010.52",
+      "versionsRecorded": true,
+      "versionsNote": "M1.1 から初めて版を控えた（M1a のゲート判定 2 が求めている）"
+    }
+  ],
+  "commit": "465ace8",
+  "environment": "staging",
+  "instanceId": "m14-demo-dashboard",
+  "instanceIdNote": "デモ専用のインスタンス（deploy-staging は触らない）。空で置き、データは画面からだけ入れた（#202 の決まり）。デモの途中で見本を 2 回差し替えた（#200・#204 の merge 後。--replace）",
+  "sample": "dashboard",
+  "sampleSource": "packages/appspec-schema/samples/dashboard/app.spec.yaml",
+  "sampleSha256": "227d566b1d292d27facaa5c721bfc1674e877ed0d2f22ffa4b59fe44898b5465",
+  "input": {
+    "members": [
+      "田中",
+      "佐藤",
+      "鈴木",
+      "高橋"
+    ],
+    "activities": [
+      {
+        "kind": "practice",
+        "date": "2026-09-20",
+        "attendees": [
+          "田中",
+          "佐藤",
+          "鈴木"
+        ],
+        "cost": 3000
+      },
+      {
+        "kind": "party",
+        "date": "2026-09-21",
+        "attendees": [
+          "田中",
+          "佐藤"
+        ],
+        "cost": 5000
+      },
+      {
+        "kind": "match",
+        "date": "2026-09-22",
+        "attendees": [
+          "田中"
+        ],
+        "cost": 2000
+      },
+      {
+        "kind": "practice",
+        "date": "2026-08-30",
+        "attendees": [
+          "田中",
+          "佐藤",
+          "鈴木",
+          "高橋"
+        ],
+        "cost": 4000,
+        "note": "先月。「今月」の境目を確かめるため"
+      }
+    ],
+    "enteredVia": "画面（フォーム）だけ"
+  },
+  "checks": [
+    {
+      "id": 0,
+      "what": "メンバーの一覧",
+      "expected": "4 人が並ぶ",
+      "result": "合格"
+    },
+    {
+      "id": 1,
+      "what": "最初の表示",
+      "expected": "0 回・0 人・「—」（0 と区別）、棒は 2026-04〜09 が 0",
+      "result": "合格"
+    },
+    {
+      "id": 2,
+      "what": "今月の活動",
+      "expected": "3 回（先月の 1 件は入らない）",
+      "result": "合格",
+      "significance": "「今月」の境目が本物の日付（日本時間）で効くことを、このデモで初めて見た"
+    },
+    {
+      "id": 3,
+      "what": "今月の参加（のべ）",
+      "expected": "6 人",
+      "result": "合格"
+    },
+    {
+      "id": 4,
+      "what": "1 回あたりの参加",
+      "expected": "2 人",
+      "result": "合格"
+    },
+    {
+      "id": 5,
+      "what": "今月の費用の平均",
+      "expected": "3333.3 円",
+      "result": "合格"
+    },
+    {
+      "id": 6,
+      "what": "月ごとの棒",
+      "expected": "08 が 1・09 が 3・ほかは 0",
+      "result": "合格"
+    },
+    {
+      "id": 7,
+      "what": "種類の内訳（円）",
+      "expected": "練習 2・試合 1・飲み会 1（50/25/25%）",
+      "result": "合格"
+    },
+    {
+      "id": 8,
+      "what": "参加の多い活動（順位）",
+      "expected": "4 → 3 → 2 → 1、見出しと選択肢が表示名",
+      "result": "合格（2 回目）",
+      "firstObserved": "並びは正しい。見出しが識別子（date・kind・attendeeCount）、選択肢がキー（practice）、見出しと値がくっつく",
+      "fixedBy": 204
+    },
+    {
+      "id": 9,
+      "what": "再読み込み",
+      "expected": "値が残る",
+      "result": "合格"
+    }
+  ],
+  "stops": [
+    {
+      "at": "③ 活動の入力",
+      "observed": "参加者の欄が「選べる候補がありません。先に登録してください。」で、活動を 1 件も入力できなかった",
+      "cause": "見本に member を一覧にする view が無い。画面は参照の候補を、参照先を一覧にする view の行から読む",
+      "whyNotCaught": "7 段のゲート・SDK の回帰・staging の e2e はすべて API で登録するので、画面のフォームを通っていない",
+      "fixedBy": [
+        200,
+        201,
+        202
+      ]
+    },
+    {
+      "at": "確認 8",
+      "observed": "順位の部品が識別子とキーのまま",
+      "cause": "ダッシュボードの応答に表示名が載らない／順位の部品だけ共通の見せ方を通っていない",
+      "fixedBy": [
+        204
+      ]
+    }
+  ],
+  "rootCauseLayers": [
+    "設計（画面が 2 つで参加者の画面が無い）",
+    "静的チェック（画面の前提を落とさない）",
+    "機械の検査（すべて API 経由）",
+    "監督（迂回の申告を 3 回見送った）",
+    "デモ（空のインスタンスから入れたのが初めて）"
+  ],
+  "crossCheck": {
+    "samplesScanned": 4,
+    "samplesWithUnreachable": [
+      "dashboard"
+    ],
+    "componentsScanned": "画面の部品すべて",
+    "componentsBypassingSharedDisplay": [
+      "ranking"
+    ]
+  },
+  "cpu": {
+    "worker": "musunest-staging-data-api",
+    "window": "2026-09-23（1 日）",
+    "requests": 363,
+    "maxMs": 20.4,
+    "p99Ms": 11.7,
+    "p50Ms": 3.6,
+    "d1ThresholdMs": 200,
+    "note": "D-1 の測り方（200 件）ではない。デモのデータは数件"
+  },
+  "notVerified": [
+    "200 件での CPU の実測",
+    "別端末での表示",
+    "月替わりのあとの「今月」",
+    "順位の部品に参照の項目を出したときの表示（ID のまま出る）"
+  ],
+  "findings": [
+    {
+      "id": "F-C",
+      "severity": "中",
+      "what": "#201 の規則が、画面が実際に出すボタンより緩い",
+      "why": "一覧の種類 list は削除のボタンを出さない（table だけが出す）が、規則は entity の view があれば通す",
+      "proposal": "操作の種類と view の種類の組まで見るかを M1.5 で決める"
+    },
+    {
+      "id": "F-D",
+      "severity": "低",
+      "what": "順位の部品に参照の項目を出すと ID のまま出る",
+      "why": "順位の部品は参照先の行を読んでいない",
+      "proposal": "M1.5 以降。見本が必要とするまで足さない"
+    }
+  ],
+  "references": {
+    "issues": [
+      175,
+      176,
+      177,
+      178,
+      179,
+      180,
+      181,
+      182,
+      183,
+      188,
+      200,
+      201,
+      202,
+      204
+    ],
+    "pullRequests": [
+      185,
+      186,
+      187,
+      189,
+      190,
+      193,
+      194,
+      195,
+      196,
+      199,
+      203,
+      205,
+      206,
+      207
+    ],
+    "openFollowUps": [
+      168,
+      118
+    ]
+  },
+  "gate": {
+    "m1aFinalGate": false,
+    "note": "M1a は M1.5 の終わりに置く。M1.4 の完了は M1a の合格ではない。3 つの見本（割り勘・タスク管理・ダッシュボード）はこれで揃った"
+  },
+  "completedOn": "2026-09-23"
+}
