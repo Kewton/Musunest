@@ -68,21 +68,29 @@
 entities:
   - name: member
     fields:
-      name: string          # 名前
+      name:                 # 名前
+        type: string
+        label: 名前
 
   - name: activity
     fields:
       kind:                 # 種類（練習・試合・飲み会）
         type: enum
+        label: 種類
         options:
           practice: 練習
           match: 試合
           party: 飲み会
-      date: date            # 活動した日（M1.4。`within: this_month` で「今月」に絞る）
+      date:                 # 活動した日（M1.4。`within: this_month` で「今月」に絞る）
+        type: date
+        label: 日付
       attendees:            # 参加した人（member のレコードの並びを ID で指す）
         type: list
         of: member
-      cost: number          # 費用（円）
+        label: 参加した人
+      cost:                 # 費用（円）
+        type: number
+        label: 費用
 
 computed:
   # 活動 1 件ごと。参加した人の数である
@@ -90,6 +98,7 @@ computed:
     entity: activity
     expression: len(attendees)
     type: number
+    label: 参加人数
 
   # アプリ全体（どのレコードにも属さない集計。M1.4 の `scope: app`）。**今月の**回数・のべ人数・平均を出す。
   # `where` の `date: { within: this_month }` は、日本時間の今月で絞る（Issue #178）。**比べる相手が

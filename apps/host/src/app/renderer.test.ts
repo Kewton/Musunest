@@ -1419,6 +1419,25 @@ describe("ボード（board）と強調（highlight）（M1.3）", () => {
   });
 });
 
+// ── 選択肢（enum）の値は、宣言の options の表示名で出る（M1.4。Issue #204） ──────────
+//
+// **写し方は 1 つの処理（`displayOf`）である**——一覧・ボード・表・順位の部品が同じ処理を通る。
+// 保存されるのはキー（`todo`・`done`）だが、画面は宣言の `options` の表示名に写す。ここではボードの
+// カードの値で、その共通の処理が効いていることを見る（順位の部品は `ranking.test.ts` が見る）。
+
+describe("選択肢（enum）の値は、宣言の options の表示名で出る（M1.4。Issue #204）", () => {
+  it("ボードのカードの値も、一覧・ボードと同じ処理を通って表示名になる（受入条件）", async () => {
+    const { container } = await renderScreen(boardLayoutClient());
+
+    await screen.findByText("タスク t1");
+    const valueOf = (card: string, field: string): string =>
+      container.querySelector(`[data-card="${card}"] [data-field="${field}"] dd`)?.textContent ?? "";
+    // 保存されるのはキーである。画面は `options` の表示名に写す（**キーのまま出さない**）
+    expect(valueOf("t1", "status")).toBe("未着手");
+    expect(valueOf("t2", "status")).toBe("完了");
+  });
+});
+
 // ── アプリ全体の集計（`scope: app`）と平均（`avg`）を画面へ写す（M1.4。Issue #177） ──
 //
 // **宣言からの写像**を見る（`form.test.ts` は入力欄の部品しか見ていない）。アプリ全体の値は
