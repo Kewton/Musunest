@@ -1,0 +1,39 @@
+# 負例：操作（`action`）`addTag` の entity `tag` を `entity` に持つ view が 1 つも無い。
+#
+# 画面（host）は**操作のボタンとフォーム**を、**その操作の entity を `entity` に持つ view** に出す。
+# その view が無ければ、操作はどこにも現れない——API では動くのに、**画面からは届かない**
+# （M1.4。Issue #201）。ここでは `tag` を一覧にする view を消してある（正しい宣言の 1 か所だけを崩したもの）。
+#
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: member
+    fields:
+      name: string
+
+  - name: tag
+    fields:
+      title: string
+
+views:
+  - name: memberList
+    entity: member
+
+actions:
+  - name: addMember
+    entity: member
+  - name: addTag
+    entity: tag
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

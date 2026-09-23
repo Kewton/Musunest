@@ -178,6 +178,18 @@ export const DIAGNOSTIC_CODES = [
    * 形は `SHAPE_NAME_INVALID` である）
    */
   "UI_RANKING_NAME_DUPLICATE",
+  /**
+   * 参照（`ref`・参照の並び）の参照先の entity を `entity` に持つ view が 1 つも無い。
+   * 画面は参照の候補を**参照先を一覧にする view の行**から読むので、その view が無ければ
+   * **画面では選べない**（API では動くのに、画面では入力できない。M1.4。Issue #201）
+   */
+  "UI_REF_TARGET_NOT_SHOWN",
+  /**
+   * 操作（追加・書き換え・削除）の entity を `entity` に持つ view が 1 つも無い。
+   * 画面は操作のボタンとフォームを**その entity の view** に出すので、その view が無ければ
+   * **画面からは届かない**（API では動くのに、画面では押せない。M1.4。Issue #201）
+   */
+  "UI_ACTION_NOT_REACHABLE",
   /** 絞り込み（`filters`）が指す名前が、その一覧の `show` に無い（M1.3） */
   "UI_FILTER_FIELD_NOT_SHOWN",
   /** 絞り込み（`filters`）が、その entity の選択肢（`enum`）でも参照（`ref`）でもない項目を指している（M1.3） */
