@@ -163,7 +163,7 @@ jobs:
       # 貫通スモークのあとに置く（スモークが落ちたら、ここへ来ない）。所要時間の線（④ の 600 秒）には足さない。
       # 資格情報はこのステップの env にだけ渡す（install や build のステップに届けない）。
       # 窓口の手動 publish には頼らない。見本の原本は packages/appspec-schema/samples/ にある
-      # （warikan と task-board の 2 つ。#159 で task-board を足した）。
+      # （warikan・task-board・dashboard の 3 つ。#159 で task-board、#183 で dashboard を足した）。
       # **--replace を付ける（#175）。** 語彙を足す Issue はその語彙を使う見本を同じ Issue で直すので
       # （docs/parallel-development.md §7.2）、原本の SHA-256 が変わる。既定の publish は
       # 「既存インスタンスの宣言を暗黙に差し替えない」（instance_conflict）ので、2 回目で落ちる。
@@ -178,13 +178,15 @@ jobs:
         run: |
           pnpm exec tsx infra/scripts/publish.ts --env staging --instance m12-e2e-warikan --spec packages/appspec-schema/samples/warikan/app.spec.yaml --replace
           pnpm exec tsx infra/scripts/publish.ts --env staging --instance m12-e2e-task-board --spec packages/appspec-schema/samples/task-board/app.spec.yaml --replace
+          pnpm exec tsx infra/scripts/publish.ts --env staging --instance m12-e2e-dashboard --spec packages/appspec-schema/samples/dashboard/app.spec.yaml --replace
 
       # ── ⑥ e2e（staging の見本の SHA-256 と、時計に依存しない採点の値）─────────────────────
       # 宛先は staging 環境の Secret SMOKE_BASE_URL から**環境変数で**渡す（--base-url を使わない。
       # pnpm がコマンド行を引数ごとログに出す）。インスタンスは e2e 専用の固定 ID で、デモ（m11-demo-…・
       # m12-demo-…）は触らない。smoke が失敗したら ⑤⑥ へは来ない（この並びが「smoke の失敗時に e2e を
       # 起動しない」の守りである）。**e2e の所要時間と成否は smoke の線（④）とは別に記録する。**
-      # 見本は 2 つ（warikan・task-board）。**時計に依る値（期限切れ）はここでは見ない**（unit で採点する）。
+      # 見本は 3 つ（warikan・task-board・dashboard）。**時計に依る値（期限切れ・今月・月ごと）は
+      # ここでは見ない**（unit で採点する。Q17）。
       - name: ⑥ e2e（staging の見本を採点する）
         env:
           SMOKE_BASE_URL: ${{ secrets.SMOKE_BASE_URL }}
@@ -194,6 +196,7 @@ jobs:
           code=0
           pnpm --filter @musunest/e2e test:staging || code=$?
           E2E_SAMPLE=task-board E2E_INSTANCE_ID=m12-e2e-task-board pnpm --filter @musunest/e2e test:staging || code=$?
+          E2E_SAMPLE=dashboard E2E_INSTANCE_ID=m12-e2e-dashboard pnpm --filter @musunest/e2e test:staging || code=$?
           elapsed=$(( $(date +%s) - started ))
           line="e2e（staging の見本の採点）: ${elapsed} 秒 / 終了 ${code}"
           echo "$line"

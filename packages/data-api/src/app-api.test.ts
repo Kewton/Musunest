@@ -2586,20 +2586,27 @@ interface DashboardRun {
   readonly deps: DataApiDeps;
   readonly records: CountingRecordStore;
   readonly ids: Readonly<Record<string, string>>;
+  readonly results: readonly Awaited<ReturnType<typeof createFromAction>>[];
 }
 
-/** シナリオの手順（メンバー 3 人と活動 3 件）を先頭から流す */
+/**
+ * シナリオの手順（メンバー 3 人・**月をまたぐ**活動 5 件・断る 3 件）を先頭から流し、
+ * `bind` の名前を実際に登録して得た ID に結びつける。**断る手順もそのまま流す**（保存しないことを見る）。
+ */
 async function runDashboard(): Promise<DashboardRun> {
   const records = new CountingRecordStore();
   const deps = dashboardDeps(records);
   const ids: Record<string, string> = {};
+  const results: Awaited<ReturnType<typeof createFromAction>>[] = [];
   for (const step of DASHBOARD_SCENARIO.steps) {
     const input = resolveScenarioIds(step.input, ids) as Readonly<Record<string, unknown>>;
     const result = await createFromAction(deps, DASHBOARD_INSTANCE, step.action, input);
-    if (!result.ok) throw new Error(`dashboard の手順 ${step.name} が通らない: ${result.failure.error}`);
-    if ("accepted" in step.expect && step.expect.bind !== undefined) ids[step.expect.bind] = result.body.id;
+    results.push(result);
+    if (result.ok && "accepted" in step.expect && step.expect.bind !== undefined) {
+      ids[step.expect.bind] = result.body.id;
+    }
   }
-  return { deps, records, ids };
+  return { deps, records, ids, results };
 }
 
 const dashboardView = async (deps: DataApiDeps, view: string): Promise<ApiViewBody> => {
@@ -2631,8 +2638,9 @@ describe("dashboard のアプリ全体の集計（scope）と平均（avg）（M
   it("getView が ok で、アプリ全体の値（scope）を 1 つずつ載せる", async () => {
     const run = await runDashboard();
     const view = await dashboardView(run.deps, "activities");
-    expect(view.rows).toHaveLength(3);
-    // 活動 3 件・のべ 6 人・1 回あたり 2 人・費用の平均 10000/3 円
+    expect(view.rows).toHaveLength(5);
+    // **今月（2026-09）の**活動 3 件・のべ 6 人・1 回あたり 2 人・費用の平均 10000/3 円
+    // （先月 2026-08-31 と来月 2026-10-01 の活動は、`within: this_month` では入らない）
     expect(view.scope).toEqual({
       activityCount: 3,
       attendeeTotal: 6,
@@ -2643,26 +2651,66 @@ describe("dashboard のアプリ全体の集計（scope）と平均（avg）（M
     expect(Object.keys(view.rows[0]?.computed ?? {})).toEqual(["attendeeCount"]);
   });
 
-  it("within: this_month が効く——今月の行だけを集計する（M1.4。Issue #178）", async () => {
+  it("within: this_month が効く——月をまたぐデータでも、今月の境目で絞る（M1.4。Issue #178・#183）", async () => {
     const run = await runDashboard();
-    // 今月（時計は 2026-09-15 なので日本時間の 2026-09）でない活動を足す
-    const outside = await createFromAction(run.deps, DASHBOARD_INSTANCE, "addActivity", {
-      kind: "practice",
-      date: "2026-08-31",
-      attendees: [run.ids["A"] ?? ""],
-      cost: 9999,
-    });
-    expect(outside.ok).toBe(true);
     const view = await dashboardView(run.deps, "activities");
-    // **`within` は行を消さない**——集計の対象を絞るだけである（一覧には 4 件出る）
-    expect(view.rows).toHaveLength(4);
-    // アプリ全体の値は、今月（9 月）の 3 件だけを見る
+    // **`within` は行を消さない**——集計の対象を絞るだけである。
+    // 一覧には先月（08-31）・今月（09-10・09-12・09-14）・来月（10-01）の 5 件が出る
+    expect(view.rows.map((row) => row.fields["date"])).toEqual([
+      "2026-08-31",
+      "2026-09-10",
+      "2026-09-12",
+      "2026-09-14",
+      "2026-10-01",
+    ]);
+    // アプリ全体の値は、今月（日本時間の 2026-09）の 3 件だけを見る。
+    // **先月と来月の活動は 1 件も入らない**（境目は「今月の 1 日以上、翌月の 1 日未満」）
     expect(view.scope).toEqual({
       activityCount: 3,
       attendeeTotal: 6,
       averageAttendees: 2,
       averageCost: 10000 / 3,
     });
+  });
+
+  it("手順の受理・拒否が、シナリオの期待どおりである（断ることも採点する）", async () => {
+    const run = await runDashboard();
+    const accepted = run.results.filter((result) => result.ok).length;
+    expect(accepted).toBe(8); // メンバー 3 人 + 活動 5 件
+    expect(run.results.length - accepted).toBe(3); // 選択肢・日付・参照の誤り
+    expect(run.records.rows.filter((row) => row.entity === "member")).toHaveLength(3);
+    expect(run.records.rows.filter((row) => row.entity === "activity")).toHaveLength(5);
+  });
+
+  it.each(DASHBOARD_SCENARIO.steps.map((step, index) => [step.name, index] as const))(
+    "%s の期待どおりに受理・拒否する",
+    async (_name, index) => {
+      const step = DASHBOARD_SCENARIO.steps[index];
+      if (step === undefined) throw new Error("手順が無い");
+      const run = await runDashboard();
+      const result = run.results[index];
+      if (result === undefined) throw new Error("結果が無い");
+      if ("accepted" in step.expect) {
+        expect(result.ok).toBe(true);
+        return;
+      }
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.failure.error).toBe("INPUT_REJECTED");
+      expect(namesOf(result.failure.fields)).toEqual(namesOf(step.expect.rejected.fields));
+      expect(result.failure.validations).toEqual(step.expect.rejected.validations);
+    },
+  );
+
+  it("最後の一覧（activities）が、シナリオの期待値と一致する", async () => {
+    const run = await runDashboard();
+    for (const [view, expected] of Object.entries(DASHBOARD_SCENARIO.views)) {
+      const result = await getView(run.deps, DASHBOARD_INSTANCE, view);
+      if (!result.ok) throw new Error(`一覧 ${view} を読めなかった: ${result.failure.error}`);
+      expect(result.body.rows.map((row) => ({ ...row.fields, ...row.computed })), view).toEqual(
+        expected.map((row) => resolveScenarioIds(row, run.ids)),
+      );
+    }
   });
 
   it("**対象が 0 件なら、avg は null** である（count は 0。0 に読み替えない）", async () => {
@@ -2762,17 +2810,18 @@ describe("dashboard の見出しごとの集計（groupBy・groups）（M1.4。I
 
     // `enum` は `options` に書いた順である。同数（すべて 1）でも、この順は入れ替わらない
     expect(groupOf(view, "activitiesByKind")).toEqual([
-      { heading: "practice", value: 1 },
+      { heading: "practice", value: 3 },
       { heading: "match", value: 1 },
       { heading: "party", value: 1 },
     ]);
-    // 月は古い順で、直近 6 か月（2026-04〜2026-09）。データの無い月も 0 で出る
+    // 月は古い順で、直近 6 か月（2026-04〜2026-09）。データの無い月も 0 で出る。
+    // **先月（2026-08-31）は 08 に入り、来月（2026-10-01）は窓の外**である
     expect(groupOf(view, "activitiesByMonth")).toEqual([
       { heading: "2026-04", value: 0 },
       { heading: "2026-05", value: 0 },
       { heading: "2026-06", value: 0 },
       { heading: "2026-07", value: 0 },
-      { heading: "2026-08", value: 0 },
+      { heading: "2026-08", value: 1 },
       { heading: "2026-09", value: 3 },
     ]);
   });
@@ -2799,7 +2848,7 @@ describe("dashboard の見出しごとの集計（groupBy・groups）（M1.4。I
       expect(outside.ok).toBe(true);
     }
     const view = await dashboardView(run.deps, "activities");
-    expect(view.rows).toHaveLength(5);
+    expect(view.rows).toHaveLength(7);
     const months = groupOf(view, "activitiesByMonth") ?? [];
     expect(months.map((entry) => entry.heading)).toEqual([
       "2026-04",
@@ -2881,17 +2930,18 @@ describe("dashboard の部品が読む値（M1.4。Issue #180）", () => {
     // 見出しごとの値も、行ではない——部品（棒・円）が読む「見出しと値の組の並び」を `groups` に載せる。
     // **部品ごとに取りに行かない**（数値の `scope` と同じ約束である。追記 2）
     expect(view.groups?.["activitiesByKind"]).toEqual([
-      { heading: "practice", value: 1 },
+      { heading: "practice", value: 3 },
       { heading: "match", value: 1 },
       { heading: "party", value: 1 },
     ]);
-    // 月は古い順で、直近 6 か月（2026-04〜2026-09）。データの無い月も 0 で出る
+    // 月は古い順で、直近 6 か月（2026-04〜2026-09）。データの無い月も 0 で出る。
+    // **先月（2026-08-31）は 08 に入り、来月（2026-10-01）は窓の外**である
     expect(view.groups?.["activitiesByMonth"]).toEqual([
       { heading: "2026-04", value: 0 },
       { heading: "2026-05", value: 0 },
       { heading: "2026-06", value: 0 },
       { heading: "2026-07", value: 0 },
-      { heading: "2026-08", value: 0 },
+      { heading: "2026-08", value: 1 },
       { heading: "2026-09", value: 3 },
     ]);
   });
@@ -2960,9 +3010,15 @@ describe("dashboard の順位の部品（ranking）（M1.4。Issue #182）", () 
     const run = await runDashboard();
     const view = await dashboardView(run.deps, "dashboard");
     const rows = rankingOf(view, "topActivities");
-    // 参加の多い順（練習 3 → 飲み会 2 → 試合 1）
-    expect(rankedByOf(rows)).toEqual([3, 2, 1]);
-    expect(rows.map((row) => row.fields["kind"])).toEqual(["practice", "party", "match"]);
+    // 参加の多い順（練習 3 → 先月の練習・飲み会・来月の練習 2 → 試合 1。同数は登録した順で安定）
+    expect(rankedByOf(rows)).toEqual([3, 2, 2, 2, 1]);
+    expect(rows.map((row) => row.fields["kind"])).toEqual([
+      "practice",
+      "practice",
+      "party",
+      "practice",
+      "match",
+    ]);
     // 行の形は `ApiRow` と同じである（id → createdAt・updatedAt・fields・computed を持つ）
     expect(rows[0]).toMatchObject({
       id: expect.any(String),
@@ -2993,7 +3049,8 @@ describe("dashboard の順位の部品（ranking）（M1.4。Issue #182）", () 
     expect(added.ok).toBe(true);
     const view = await dashboardView(run.deps, "dashboard");
     const rows = rankingOf(view, "topActivities");
-    expect(rankedByOf(rows)).toEqual([3, 3, 2, 1]);
+    // 3 人の練習を足すと 6 件になるが、**件数の上限（既定の 5）**があるので上位 5 件である
+    expect(rankedByOf(rows)).toEqual([3, 3, 2, 2, 2]);
     // 同数の 2 件は、**登録した順**（先に入れた 09-10 が先）である
     expect(rows.slice(0, 2).map((row) => row.fields["date"])).toEqual(["2026-09-10", "2026-09-11"]);
   });

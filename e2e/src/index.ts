@@ -5,6 +5,25 @@
 export const PACKAGE_NAME = "@musunest/e2e" as const;
 
 export * from "./warikan.js";
+// dashboard の見本も warikan と同じ名前（SAMPLE_FILE・SAMPLE_DIRECTORY・MEMBER_NAMES）を持つので、
+// 衝突しないよう接頭辞を付けて出す
+export {
+  ACTIVITIES_VIEW as DASHBOARD_ACTIVITIES_VIEW,
+  DASHBOARD_VIEW,
+  EXPECTED_ACTIVITIES as DASHBOARD_EXPECTED_ACTIVITIES,
+  EXPECTED_BY_KIND as DASHBOARD_EXPECTED_BY_KIND,
+  EXPECTED_KINDS as DASHBOARD_KINDS,
+  EXPECTED_RANKING as DASHBOARD_EXPECTED_RANKING,
+  MEMBER_NAMES as DASHBOARD_MEMBER_NAMES,
+  RANKING_NAME as DASHBOARD_RANKING_NAME,
+  SAMPLE_DIRECTORY as DASHBOARD_SAMPLE_DIRECTORY,
+  SAMPLE_FILE as DASHBOARD_SAMPLE_FILE,
+  SCOPE_NAMES as DASHBOARD_SCOPE_NAMES,
+  runDashboard,
+  type DashboardDeps,
+  type DashboardIo,
+  type DashboardResult,
+} from "./dashboard.js";
 // task-board の見本は warikan と同じ名前（SAMPLE_FILE・SAMPLE_DIRECTORY・MEMBER_NAMES）を持つので、
 // 衝突しないよう接頭辞を付けて出す
 export {
