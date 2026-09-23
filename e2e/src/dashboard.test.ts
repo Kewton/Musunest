@@ -2,7 +2,7 @@
 //
 // 見るのは4つである。
 //   1. SHA と版が一致すれば、メンバー A・B・C と活動 5 件をそろえ、時計に依存しない値
-//      （活動の行・種類ごとの件数・順位）を採点し、専用データを片付ける（活動 → メンバーの順）
+//      （メンバーの一覧・活動の行・種類ごとの件数・順位）を採点し、専用データを片付ける（活動 → メンバーの順）
 //   2. **不一致・版違いでは、1つも書かない**（採点も後片付けもしない）
 //   3. 一覧の照合・活動の登録を失敗させても、**後片付けは呼ばれる**
 //   4. 後片付けが失敗したら、成功と報告しない
@@ -111,6 +111,17 @@ describe("runDashboard：失敗の経路でも後片付けする", () => {
     expect(countOf(h.api, "deleteActivity")).toBeGreaterThan(0);
     expect(h.api.activities()).toEqual([]);
     expect(h.api.members()).toEqual([]);
+  });
+
+  it("メンバーの一覧（members）に作った人が載っていなければ、採点に落ちる", async () => {
+    const h = harness({ sourceSha256: SOURCE_SHA, breakView: "members" });
+    const result = await h.run();
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("メンバーの一覧");
+    // 採点に落ちても、作ったものは片付ける
+    expect(h.api.members()).toEqual([]);
+    expect(h.api.activities()).toEqual([]);
   });
 
   it("活動の登録を失敗させても、作ったものを片付ける", async () => {

@@ -36,6 +36,13 @@
 # 集計は指せない**（行ごとの値が無い）。値は応答の**兄弟の欄 `ranking`**（部品の `name` → 行の並び）に載る
 # （意味は ../../docs/semantics.md「ranking」）。
 #
+# **メンバーの一覧（`type: list`・`entity: member`）は #200 が足した。** 画面は**参照の候補を、参照先を
+# 一覧にする view の行**から読む（意味は ../../docs/semantics.md「参照」）。この一覧が無かったのは
+# **語彙の不足ではなく、見本の書き漏れ**だった——#183 はダッシュボードと活動の一覧だけを置いたので、
+# #184 のデモで活動の参加者の欄が「選べる候補がありません。先に登録してください。」になり、活動を 1 件も
+# 入力できなかった。#200 は一覧を足し、`member` の操作（`addMember`・`deleteMember`）の対象も画面から見える
+# ようにした（**先頭の view は `dashboard` のまま**である）。
+#
 # ── いまの語彙で書けなかったこと（§4.3 との違い。Issue #183） ─────────────────────
 #
 # この見本の元は workspace/mvp/m1/02-l2-spec-examples.md §4.3（2026-09-15 の叩き台）である。
@@ -196,6 +203,15 @@ views:
     type: list
     entity: activity
     show: [kind, attendees, cost, attendeeCount]
+  # メンバーの一覧（M1.4。Issue #200）。**参照の候補を一覧にする view** である——画面は参照
+  # （`attendees: {type: list, of: member}`）の候補を、**参照先（`member`）を一覧にする view の行**から読む
+  # （意味は ../../docs/semantics.md「参照」）。これが無いと、参加者の欄が「選べる候補がありません」になり、
+  # 画面だけで活動を 1 件も入力できない。`member` の操作（`addMember`・`deleteMember`）の対象も、この一覧で
+  # 見える。**先頭の view は `dashboard` のまま**である。置き場所は `activities` の後ろ（窓口の決定 2026-09-23）。
+  - name: members
+    type: list
+    entity: member
+    show: [name]
 
 actions:
   - name: addMember

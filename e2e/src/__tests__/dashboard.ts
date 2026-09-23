@@ -18,7 +18,7 @@ import type {
   MusunestClient,
 } from "@musunest/sdk";
 import { DRAFT_SCHEMA_VERSION } from "../warikan.js";
-import { EXPECTED_KINDS } from "../dashboard.js";
+import { EXPECTED_KINDS, MEMBERS_VIEW } from "../dashboard.js";
 
 /** 見本の宣言の写し（tests 用の最小）。M1.4 の語彙（scope: app・groups・dashboard・ranking）を持つ */
 export const FAKE_SPEC: AppSpec = {
@@ -45,6 +45,7 @@ export const FAKE_SPEC: AppSpec = {
       ],
     },
     { name: "activities", type: "list", entity: "activity", show: ["kind", "date", "attendees", "cost", "attendeeCount"] },
+    { name: MEMBERS_VIEW, type: "list", entity: "member", show: ["name"] },
   ],
   actions: [
     { name: "addMember", entity: "member", kind: "create" },
@@ -148,6 +149,15 @@ export function createFakeDashboardApi(options: FakeDashboardOptions): FakeDashb
     computed: { attendeeCount: attendeeCount(activity) + offset },
   });
 
+  /** メンバーの行（見本の一覧 `members` が返す形。項目は `name` だけ） */
+  const memberRow = (member: FakeMember): ApiRow => ({
+    id: member.id,
+    createdAt: CREATED_AT,
+    updatedAt: CREATED_AT,
+    fields: { name: member.name },
+    computed: {},
+  });
+
   /** 種類ごとの件数（`options` の順。0 の見出しも返す） */
   const byKind = (): readonly { readonly heading: string; readonly value: number }[] =>
     EXPECTED_KINDS.map((kind) => ({
@@ -199,6 +209,19 @@ export function createFakeDashboardApi(options: FakeDashboardOptions): FakeDashb
         scope: { activityCount: activities.length, attendeeTotal: 0, averageAttendees: null, averageCost: null },
         groups: { activitiesByKind: byKind() },
         ranking: { topActivities: ranking() },
+      };
+    }
+    if (view === MEMBERS_VIEW) {
+      // `breakView` のときは、行を落として「members の一覧に作った人が載っていない」を作る
+      return {
+        instanceId,
+        view,
+        entity: "member",
+        fields: ["name"],
+        computed: [],
+        permissions: PERMISSIONS,
+        actions: FAKE_SPEC.actions.filter((action) => action.entity === "member"),
+        rows: options.breakView === MEMBERS_VIEW ? [] : members.map(memberRow),
       };
     }
     return null;
