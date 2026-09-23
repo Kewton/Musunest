@@ -769,6 +769,8 @@ describe("表示名（label）（M1.3）", () => {
         "        of: member",
         "        label: 割る人",
       ].join("\n"),
+      // member を一覧にする view（M1.4。Issue #201）。参照先が画面から選べるようにする
+      views: `${BASE_PARTS.views}\n  - name: memberList\n    entity: member`,
       computed: [
         "  - name: headcount",
         "    entity: expense",
@@ -889,11 +891,11 @@ describe("表示名（label）（M1.3）", () => {
   });
 });
 
-// ── 2. 負例 59 件 ──────────────────────────────────────────────
+// ── 2. 負例 61 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 59 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本、M1.4 の #178 で 2 本、#179 で 2 本、#180 で 2 本、#181 で 1 本、#182 で 2 本足した）", () => {
-    expect(negativeIndex.negatives).toHaveLength(59);
+  it("負例の一覧は 61 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本、M1.4 の #178 で 2 本、#179 で 2 本、#180 で 2 本、#181 で 1 本、#182 で 2 本、#201 で 2 本足した）", () => {
+    expect(negativeIndex.negatives).toHaveLength(61);
   });
 
   it.each(negativeCases)(
@@ -1375,7 +1377,15 @@ describe("一覧（list）と絞り込み（filters）（M1.3）", () => {
         "        to: member",
         ...STATUS,
       ].join("\n"),
-      views: ["  - name: taskList", "    entity: task", "    type: list", ...viewLines].join("\n"),
+      // member を一覧にする view（M1.4。Issue #201）。参照先（assignee の member）が画面から選べるようにする
+      views: [
+        "  - name: taskList",
+        "    entity: task",
+        "    type: list",
+        ...viewLines,
+        "  - name: memberList",
+        "    entity: member",
+      ].join("\n"),
       actions: "[]",
       validations: "[]",
       computed: "[]",
@@ -1396,6 +1406,8 @@ describe("一覧（list）と絞り込み（filters）（M1.3）", () => {
         show: ["title", "status", "assignee"],
         filters: ["assignee", "status"],
       },
+      // 参照先を選べるようにするための一覧（M1.4。Issue #201）
+      { name: "memberList", entity: "member" },
     ]);
   });
 
@@ -1583,6 +1595,8 @@ describe("参照（ref）と検査の文言（message）（M1.2）", () => {
   const expenseWithFields = (...fields: readonly string[]): string =>
     declaration({
       entities: entitiess(MEMBER, `  - name: expense\n    fields:\n${fields.join("\n")}`),
+      // member を一覧にする view（M1.4。Issue #201）。参照先が画面から選べるようにする
+      views: `${BASE_PARTS.views}\n  - name: memberList\n    entity: member`,
       validations: "[]",
       computed: "[]",
     });
@@ -1756,6 +1770,9 @@ describe("集計（aggregate。M1.2）", () => {
     "        of: member",
   ].join("\n");
   const entities = (): string => entitiess(MEMBER, EXPENSE);
+  // member を一覧にする view（M1.4。Issue #201）。**参照先（member）が画面から選べる**ようにする
+  // ——無ければ UI_REF_TARGET_NOT_SHOWN で落ちる（受入条件）
+  const views = (): string => `${BASE_PARTS.views}\n  - name: memberList\n    entity: member`;
 
   /** member の集計を 1 つ作る。`body` は aggregate の中身（`sum` / `count` / `where`） */
   const aggregateBlock = (name: string, body: readonly string[]): string =>
@@ -1768,7 +1785,7 @@ describe("集計（aggregate。M1.2）", () => {
     ].join("\n");
 
   const withAggregate = (body: readonly string[]): string =>
-    declaration({ entities: entities(), validations: "[]", computed: aggregateBlock("total", body) });
+    declaration({ entities: entities(), views: views(), validations: "[]", computed: aggregateBlock("total", body) });
 
   it("sum の対象が数の項目なら通り、宣言に集計の形で残る", () => {
     const result = checkSpec(withAggregate(["sum: expense.amount", "where:", "  payer: this"]));
@@ -1807,6 +1824,7 @@ describe("集計（aggregate。M1.2）", () => {
     const result = checkSpec(
       declaration({
         entities: entities(),
+        views: views(),
         validations: "[]",
         computed: entitiess(
           computed("share", "amount - 1"),
@@ -1990,6 +2008,8 @@ describe("精算（settle。M1.2）", () => {
     "        of: member",
   ].join("\n");
   const entities = (): string => entitiess(MEMBER, EXPENSE);
+  // member を一覧にする view（M1.4。Issue #201）。**参照先（member）が画面から選べる**ようにする
+  const views = (): string => `${BASE_PARTS.views}\n  - name: memberList\n    entity: member`;
 
   /** 支出の entity と 3 つの項目を指す、正しい精算の中身 */
   const SETTLE = ["expense: expense", "amount: amount", "payer: payer", "shares: participants"];
@@ -2005,7 +2025,7 @@ describe("精算（settle。M1.2）", () => {
     ].join("\n");
 
   const withSettle = (body: readonly string[], extra: readonly string[] = []): string =>
-    declaration({ entities: entities(), validations: "[]", computed: settleBlock(body, extra) });
+    declaration({ entities: entities(), views: views(), validations: "[]", computed: settleBlock(body, extra) });
 
   it("支出の entity と 3 つの項目を指す精算は通り、宣言に settle の形で残る（type を持たない）", () => {
     const result = checkSpec(withSettle(SETTLE));
@@ -2667,6 +2687,9 @@ const withDashboard = (
 ): string =>
   declaration({
     views: ["  - name: dashboard", "    type: dashboard", ...parts].join("\n"),
+    // ダッシュボードは**行を並べない**ので、土台の操作（`addExpense`）は書かない——書けば、
+    // その entity（expense）の view が無いので UI_ACTION_NOT_REACHABLE になる（M1.4。Issue #201）
+    actions: "[]",
     computed: computedBody,
   });
 
@@ -3064,6 +3087,8 @@ const withChart = (parts: readonly string[], computed = [BY_KIND, BY_MONTH].join
   declaration({
     entities: GROUP_ENTITIES,
     views: ["  - name: dashboard", "    type: dashboard", ...parts].join("\n"),
+    // ダッシュボードは**行を並べない**ので、土台の操作（`addExpense`）は書かない（M1.4。Issue #201）
+    actions: "[]",
     computed,
   });
 
@@ -3134,5 +3159,162 @@ describe("グラフの部品（bar・pie）（M1.4。Issue #181）", () => {
         { type: "pie", label: "種類の内訳", value: "activitiesByKind", unit: "回" },
       ]),
     );
+  });
+});
+
+// ── 画面から届くこと（M1.4。Issue #201） ──────────────────────────────
+//
+// **API では動くのに、画面では入力できない**書き漏れを落とす——画面は参照の候補を**参照先を一覧に
+// する view** から読み、操作のボタンとフォームを**その操作の entity の view** に出す。**どちらの
+// view が 1 つも無ければ、画面からは届かない**（M1.4。Issue #201）。負例 2 本（ref-target-not-shown・
+// action-not-reachable）が、同じことを外から確かめる。
+//
+// **ほかの誤りが 1 つでもある宣言では見ない**（1 つの誤りを 2 つに数えない）。
+// **ダッシュボードの部品（順位の部品など）が持つ `entity` は数えない**——部品は入力欄もボタンも出さない。
+
+describe("画面から届くこと（M1.4。Issue #201）", () => {
+  /** 参照先（member）を一覧にする view を書かない宣言。`views` を差し替えて正す */
+  const withRef = (views: string): string =>
+    declaration({
+      entities: [
+        "  - name: member",
+        "    fields:",
+        "      name: string",
+        "  - name: expense",
+        "    fields:",
+        "      amount: number",
+        "      payer:",
+        "        type: ref",
+        "        to: member",
+      ].join("\n"),
+      views,
+      actions: ["  - name: addExpense", "    entity: expense"].join("\n"),
+      validations: "[]",
+      computed: "[]",
+    });
+
+  const MEMBER_LIST = "  - name: memberList\n    entity: member";
+
+  it("参照先を一覧にする view が無ければ UI_REF_TARGET_NOT_SHOWN（負例と同じ形）", () => {
+    const text = withRef(BASE_PARTS.views);
+    const result = failure(checkSpec(text));
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(["UI_REF_TARGET_NOT_SHOWN"]);
+    const message = messagesOf(result, "UI_REF_TARGET_NOT_SHOWN");
+    expect(message).toContain("payer");
+    expect(message).toContain("member");
+    // 位置は、**参照している項目**を指す
+    expect(result.diagnostics[0]).toMatchObject({ line: locate(text, "type: ref").line });
+    expect(isDiagnosticCode("UI_REF_TARGET_NOT_SHOWN")).toBe(true);
+  });
+
+  it("参照先を一覧にする view があれば通る（受入条件）", () => {
+    const result = checkSpec(withRef(`${BASE_PARTS.views}\n${MEMBER_LIST}`));
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+  });
+
+  /** 操作の entity（tag）の view を書かない宣言 */
+  const withAction = (views: string): string =>
+    declaration({
+      entities: [
+        "  - name: member",
+        "    fields:",
+        "      name: string",
+        "  - name: tag",
+        "    fields:",
+        "      title: string",
+      ].join("\n"),
+      views,
+      actions: [
+        "  - name: addMember",
+        "    entity: member",
+        "  - name: addTag",
+        "    entity: tag",
+      ].join("\n"),
+      validations: "[]",
+      computed: "[]",
+    });
+
+  it("操作の entity の view が無ければ UI_ACTION_NOT_REACHABLE（負例と同じ形）", () => {
+    const text = withAction(MEMBER_LIST);
+    const result = failure(checkSpec(text));
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(["UI_ACTION_NOT_REACHABLE"]);
+    const message = messagesOf(result, "UI_ACTION_NOT_REACHABLE");
+    expect(message).toContain("addTag");
+    expect(message).toContain("tag");
+    // 位置は、**その操作**を指す
+    expect(result.diagnostics[0]).toMatchObject({ line: locate(text, "addTag").line });
+    expect(isDiagnosticCode("UI_ACTION_NOT_REACHABLE")).toBe(true);
+  });
+
+  it("操作の entity の view があれば通る（受入条件）", () => {
+    const views = `${MEMBER_LIST}\n  - name: tagList\n    entity: tag`;
+    const result = checkSpec(withAction(views));
+    expect(result.diagnostics).toEqual([]);
+    expect(result.ok).toBe(true);
+  });
+
+  it("2 つの誤りコードは別であり、参照先が無いことと操作が届かないことは別である（受入条件）", () => {
+    const ref = failure(checkSpec(withRef(BASE_PARTS.views)));
+    const action = failure(checkSpec(withAction(MEMBER_LIST)));
+    expect(codesOf(ref)).toEqual(["UI_REF_TARGET_NOT_SHOWN"]);
+    expect(codesOf(action)).toEqual(["UI_ACTION_NOT_REACHABLE"]);
+    expect(codesOf(ref)).not.toEqual(codesOf(action));
+  });
+
+  it("**ダッシュボードの部品が持つ entity は数えない**（順位の部品の entity は view ではない）", () => {
+    // 順位の部品は `entity: activity` を持つが、**入力欄もボタンも出さない**ので、activity の view と数えない
+    const text = declaration({
+      entities: ["  - name: activity", "    fields:", "      cost: number"].join("\n"),
+      views: [
+        "  - name: dashboard",
+        "    type: dashboard",
+        "    widgets:",
+        "      - type: ranking",
+        "        name: top",
+        "        entity: activity",
+        "        by: costValue",
+        "        show: [costValue]",
+      ].join("\n"),
+      actions: ["  - name: addActivity", "    entity: activity"].join("\n"),
+      validations: "[]",
+      computed: ["  - name: costValue", "    entity: activity", "    expression: cost", "    type: number"].join("\n"),
+    });
+    const result = failure(checkSpec(text));
+    expect(codesOf(result)).toEqual(["UI_ACTION_NOT_REACHABLE"]);
+    expect(messagesOf(result, "UI_ACTION_NOT_REACHABLE")).toContain("addActivity");
+  });
+
+  it("ほかの誤りがある宣言では見ない（1 つの誤りを 2 つに数えない）", () => {
+    // 参照先（member）の view が無いことに加えて、検査の式の名前が実在しない
+    const text = declaration({
+      entities: [
+        "  - name: member",
+        "    fields:",
+        "      name: string",
+        "  - name: expense",
+        "    fields:",
+        "      amount: number",
+        "      payer:",
+        "        type: ref",
+        "        to: member",
+      ].join("\n"),
+      views: BASE_PARTS.views,
+      actions: ["  - name: addExpense", "    entity: expense"].join("\n"),
+      validations: ["  - name: positiveAmount", "    entity: expense", "    expression: ammount > 0"].join("\n"),
+      computed: "[]",
+    });
+    const result = failure(checkSpec(text));
+    expect(codesOf(result)).toEqual(["LOGIC_REFERENCE_NOT_FOUND"]);
+    expect(codesOf(result)).not.toContain("UI_REF_TARGET_NOT_SHOWN");
+  });
+
+  it.each([
+    ["ref-target-not-shown", "UI_REF_TARGET_NOT_SHOWN", "member"],
+    ["action-not-reachable", "UI_ACTION_NOT_REACHABLE", "tag"],
+  ] as const)("負例 %s は %s **だけ**を返す（受入条件）", (name, code, where) => {
+    const result = failure(checkSpec(negativeTexts.get(name) ?? ""));
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([code]);
+    expect(messagesOf(result, code)).toContain(where);
   });
 });

@@ -3478,6 +3478,46 @@ function inspect(source: string, report: Report): Drafts | null {
 }
 
 /**
+ * **画面から届くか**を検査する（M1.4。Issue #201）。宣言が**それ以外の検査をすべて通った**ときにだけ見る
+ * ——ここは「正しい宣言なのに、API では動くのに画面では入力できない」という**書き漏れ**を落とす規則で、
+ * ほかの誤りが 1 つでもある宣言では、そもそも画面の形が決まらない（1 つの誤りを 2 つに数えない）。
+ *
+ * 画面（host）は、次の 2 つを**view の直下の `entity`** を手がかりに決めている
+ * （ダッシュボードの部品が持つ `entity` は数えない——部品は入力欄を出さない）。
+ *   1. 参照（`ref`・参照の並び）の候補 … **参照先の entity** を `entity` に持つ view の行
+ *   2. 操作（追加・書き換え・削除）のボタンとフォーム … **その操作の entity** を `entity` に持つ view
+ *
+ * 満たさないと、参照は選べず、操作は押せない（`UI_REF_TARGET_NOT_SHOWN`・`UI_ACTION_NOT_REACHABLE`）。
+ */
+function checkReachability(view: Drafts, report: Report): void {
+  const index = entityIndex(view.entities);
+  // 「`entity` に持つ view」は、**view の直下の `entity` だけ**を数える（部品の `entity` は数えない）
+  const shown = new Set(
+    view.views.map((entry) => entry.entity).filter((entity): entity is string => entity !== null),
+  );
+  for (const entity of view.entities) {
+    for (const field of entity.fields) {
+      // 参照先の entity が実在しない（`DATA_REF_TARGET_NOT_FOUND`）ときは重ねない
+      if (field.target === null || !index.has(field.target) || shown.has(field.target)) continue;
+      report(
+        "UI_REF_TARGET_NOT_SHOWN",
+        `entity ${entity.name} の項目 ${field.name} が参照する entity ${field.target} を、entity に持つ view が 1 つも無い（画面で選べない）`,
+        positionOf(field.node),
+      );
+    }
+  }
+  for (const action of view.actions) {
+    // 操作の entity が実在しない（`LOGIC_ENTITY_NOT_FOUND`）ときは重ねない
+    if (!index.has(action.entity) || shown.has(action.entity)) continue;
+    report(
+      "UI_ACTION_NOT_REACHABLE",
+      `action ${action.name} の entity ${action.entity} を、entity に持つ view が 1 つも無い（画面から届かない）`,
+      positionOf(action.nameNode ?? action.entityNode),
+    );
+  }
+}
+
+/**
  * 宣言（YAML の原文）を検査する。**式を実行せず、ストレージにも触れない。**
  *
  * - 成功：型検査済みの `AppSpec` と、空の診断
@@ -3508,6 +3548,9 @@ export function checkSpec(source: string): CheckResult {
     return failure();
   }
 
+  if (diagnostics.length > 0) return failure();
+  // **画面から届くか**（M1.4。Issue #201）は、ほかの検査をすべて通った宣言にだけ重ねる
+  if (drafts !== null) checkReachability(drafts, report);
   if (diagnostics.length > 0) return failure();
   const spec = drafts === null ? null : buildSpec(drafts);
   if (spec === null) {

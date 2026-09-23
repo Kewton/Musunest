@@ -442,6 +442,8 @@ const LIST_SOURCE = [
   "    type: list",
   "    show: [title, status, assignee]",
   "    filters: [assignee, status]",
+  "  - name: memberList",
+  "    entity: member",
   "actions:",
   "  - name: addTask",
   "    entity: task",
@@ -468,6 +470,8 @@ describe("一覧（list）と絞り込み（filters）の正規化（M1.3）", (
         show: ["title", "status", "assignee"],
         filters: ["assignee", "status"],
       },
+      // 参照先（assignee の member）を画面から選べるようにする一覧（M1.4。Issue #201）
+      { name: "memberList", entity: "member" },
     ]);
   });
 

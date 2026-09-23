@@ -2,6 +2,13 @@
   "$comment": "負例の一覧。各負例は、正しい宣言の 1 か所だけをわざと間違えたもの（本体は <name>.app.spec.yaml）。codes は静的チェックがその負例で出す誤りコード（草案。体系は spec-engine の静的チェック #97 で確定する）。どの語彙の負例かは vocabulary.yaml の negatives にある。形は src/samples.ts の NegativeIndex。",
   "negatives": [
     {
+      "name": "action-not-reachable",
+      "codes": [
+        "UI_ACTION_NOT_REACHABLE"
+      ],
+      "why": "操作 addTag の entity tag を、entity に持つ view が 1 つも無い（画面から届かない。API では動くのに、画面では押せない。M1.4。Issue #201）"
+    },
+    {
       "name": "action-unknown-entity",
       "codes": [
         "LOGIC_ENTITY_NOT_FOUND"
@@ -301,6 +308,13 @@
         "UI_RANKING_BY_NOT_SHOWN"
       ],
       "why": "順位の部品の基準（by）tagCount が、出す項目（show）の date に無い（基準は出す項目の 1 つとして見せるので、by は show に含めなければならない。M1.4。Issue #182）"
+    },
+    {
+      "name": "ref-target-not-shown",
+      "codes": [
+        "UI_REF_TARGET_NOT_SHOWN"
+      ],
+      "why": "entity expense の項目 payer が参照する entity member を、entity に持つ view が 1 つも無い（画面で選べない。M1.4。Issue #201）"
     },
     {
       "name": "ref-unknown-entity",

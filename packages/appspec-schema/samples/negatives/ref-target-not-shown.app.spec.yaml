@@ -1,0 +1,40 @@
+# 負例：参照（`ref`）の参照先 entity `member` を `entity` に持つ view が 1 つも無い。
+#
+# 画面（host）は**参照の候補**を、**参照先を一覧にする view の行**から読む。その view が無ければ
+# 候補は 0 件になり、**画面では選べない**——API では動くのに、画面では入力できない（M1.4。Issue #201）。
+# ここでは `member` を一覧にする view を消してある（正しい宣言の 1 か所だけを崩したもの）。
+#
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: member
+    fields:
+      name: string
+
+  - name: expense
+    fields:
+      amount: number
+      payer:
+        type: ref
+        to: member
+
+views:
+  - name: expenseList
+    entity: expense
+
+actions:
+  - name: addExpense
+    entity: expense
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

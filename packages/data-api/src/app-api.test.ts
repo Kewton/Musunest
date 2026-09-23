@@ -2261,6 +2261,9 @@ const LIST_VIEW_SOURCE = [
   "    type: list",
   "    show: [title, status, assignee]",
   "    filters: [assignee, status]",
+  // 参照先（assignee の member）を画面から選べるようにする一覧（M1.4。Issue #201）
+  "  - name: memberList",
+  "    entity: member",
   "actions:",
   "  - name: addMember",
   "    entity: member",
@@ -2326,6 +2329,8 @@ describe("一覧（list）と絞り込み（filters）を含む宣言の配信�
         show: ["title", "status", "assignee"],
         filters: ["assignee", "status"],
       },
+      // 参照先（assignee の member）を画面から選べるようにする一覧（M1.4。Issue #201）
+      { name: "memberList", entity: "member" },
     ]);
   });
 
