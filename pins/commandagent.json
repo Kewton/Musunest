@@ -16,10 +16,9 @@
     "$comment": "AppSpec スキーマの契約は platform-owned で、MUSUNEST 側の packages/appspec-schema/contract/ が正本である。M1.5 で草案から固めた版 community.app-spec/v0.2 にし、**同じコミット**でこのピンを差し替えた（Issue #217。README.md「版の表記」・00-open-questions.md Q9）。version は packages/appspec-schema/src/spec.ts の APPSPEC_SCHEMA_VERSION と一致する。sha256 は契約（contract/ の全ファイル。app-spec.schema.json・expression-grammar.md・rules.md を名前の昇順に混ぜたもの）の exact bytes に対する SHA-256（小文字の 16 進 64 桁）で、digest は手で書いていない——`pnpm --filter @musunest/appspec-schema contract:hash` の出力をそのまま転記した。契約を直したら、その後に digest を取り直してこの値を差し替える。"
   },
   "template_tarball": {
-    "url": null,
-    "sha256": null,
-    "$blocked": "実値を書けない。テンプレート（TanStack Start）は platform-owned deliverable であり CommandAgent 側に存在しない（同 §4『The real TanStack Start template is a platform-owned deliverable and is not copied into CM-1a』。CM-1a は synthetic-community/ の合成 fixture で代替している）。MUSUNEST 側の templates/tanstack-start も M0 では中身が無い（同 README『M1 で中身を入れる』）。tarball artifact が両側に存在しないので、SHA-256 の対象そのものが無い。",
-    "$blocked_on": "(1) templates/tanstack-start の中身（M1）。(2) 配布形態の決定 — GitHub Releases のアセットか R2 か（00c『M1着手時に決めること』3）。(3) 再現可能な tarball 生成コマンド。digest を手で書かない規律により、(1)〜(3) が揃うまで null のままにする。推測値を置かない。"
+    "url": "https://github.com/Kewton/Musunest/releases/download/template-tanstack-start-0.1.0/tanstack-start-0.1.0.tar.gz",
+    "sha256": "7cf9406f07e45a1b252383a8d238f4bb300970517de232f3f3b265945e9d8534",
+    "$source": "templates/tanstack-start（#229）の `pnpm --filter @musunest/template-tanstack-start tarball` で作った再現できる tarball。GitHub Releases の template-tanstack-start-0.1.0（コミット 59d1f8b）に置き、取り直したアセットから SHA-256 を求めた（#38。2026-09-25）"
   },
   "headless_contract": {
     "version": "commandagent.headless-summary/v1",
