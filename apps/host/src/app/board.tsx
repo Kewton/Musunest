@@ -17,7 +17,7 @@
 // 見た目はこの file の中に置く（`renderer.css` はこの Issue の変更してよい範囲に入っていない）。
 // `flex-wrap` と `max-width: 100%` を inline で当て、狭い画面でも横スクロールを出さない。
 
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import type { Action, ApiRow, ApiValue, ApiViewBody, Entity } from "@musunest/sdk";
 
 /** 1 つの列。`key` が保存される値（選択肢のキー）、`label` が画面に出す表示名である */
@@ -39,6 +39,11 @@ export interface BoardProps {
   readonly labelOf: (field: string, value: ApiValue | undefined) => string;
   /** その entity の決まった値への書き換え（`set` を持つ操作。M1.3）。宣言の順 */
   readonly setActions: readonly Action[];
+  /**
+   * カードごとの消すボタン（参照されている行には断りの理由）。**table と同じ処理を呼ぶ側が渡す**——
+   * この部品の中にボタンの出し方も断りの見せ方も持たない（Issue #214）。`undefined` なら何も出さない
+   */
+  readonly renderDelete: ((row: ApiRow) => ReactNode) | undefined;
   readonly onRunAction: (actionName: string, id: string) => void;
 }
 
@@ -110,6 +115,7 @@ export function Board({
   displayName,
   labelOf,
   setActions,
+  renderDelete,
   onRunAction,
 }: BoardProps) {
   /** 強調の印の文字。`highlight` が指す計算の表示名（無ければ識別子）である（M1.3。Issue #176） */
@@ -170,6 +176,8 @@ export function Board({
                         {action.name}
                       </button>
                     ))}
+                  {/* カードごとの消すボタン（参照されている行には理由）。**table・一覧と同じ処理**を呼ぶ（Issue #214） */}
+                  {renderDelete?.(row)}
                 </article>
               ))}
             </section>
