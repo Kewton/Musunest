@@ -3,9 +3,10 @@
 > 宣言の形だけでは 1 つに決まらない振る舞いを、この語彙について決める（`workspace/mvp/m1/04-spec-evolution.md` §1.1、`00-open-questions.md` Q3）。
 > **M1.1 の語彙は v0.1 と同じ**で、**M1.2 で参照（`ref`）・検査の文言（`message`）・entity をまたぐ集計（`aggregate` の `sum`・`count`）・精算（`settle`）・一覧の種類（`table`・`settlement`）を足した**（印を付けてある）。
 > **M1.3 で選択肢（`enum`）・既定値（`default`）、日付（`date`）・「今日」（`today()`）、決まった値への書き換え（`set`）とボタンを出す条件（`when`）、ボード（`board`）と強調（`highlight`）、一覧（`list`）と絞り込み（`filters`）、**表示名（`label`）**を足した**（印を付けてある）。
-> **M1.4 でアプリ全体の集計（`scope`）と平均（`avg`）、期間の条件（`within`）、見出しごとの集計（`groupBy`・`groups`）、ダッシュボード（`dashboard`）とその数値の部品（`widgets` の `number`）・単位（`unit`）を足した**（#177・#178・#179・#180。印を付けてある）。**まだ足していないのは、グラフの部品（`bar`・`pie`）と順位の部品（`ranking`。#181・#182）である。**
+> **M1.4 でアプリ全体の集計（`scope`）と平均（`avg`）、期間の条件（`within`）、見出しごとの集計（`groupBy`・`groups`）、ダッシュボード（`dashboard`）とその部品——数値（`widgets` の `number`）・単位（`unit`）、グラフの部品（`bar`・`pie`）、順位の部品（`ranking`）——を足した**（#177・#178・#179・#180・#181・#182。印を付けてある）。
 > **ここに無い振る舞いは、まだ決めていない**（末尾の「まだ決めていないこと」）。
 > 語彙の一覧は [`../vocabulary.yaml`](../vocabulary.yaml)、型は [`../src/spec.ts`](../src/spec.ts) にある。見本は [`../samples/expense-log/`](../samples/expense-log/)、[`../samples/warikan/`](../samples/warikan/)、[`../samples/task-board/`](../samples/task-board/)、[`../samples/dashboard/`](../samples/dashboard/)。
+> **式の文法（EBNF・演算子の優先順位と結合）は [`../contract/expression-grammar.md`](../contract/expression-grammar.md)、型・名前解決・上限と数え方・予約語・語彙が閉じていること・YAML の読み取り規則は [`../contract/rules.md`](../contract/rules.md) が正本である**（宣言の構造は `../contract/app-spec.schema.json`。所有者の決定 2026-09-24）。
 > 節の見出し（`### entity` など）は台帳の `semantics` 欄から参照される。見出しの名前を変えるときは台帳も直す（unit テストが突き合わせる）。
 
 ## 宣言の全体
@@ -659,9 +660,9 @@
   正規化した JSON にも `entity` は現れない。**1 つの一覧の応答の `rows` は空の並びである**
 - **`widgets` は必須である。** 部品が 1 つも無ければ、何も見せられない。欄そのものが無い・空の並びは
   `SHAPE_KEY_MISSING` である
-- **部品の種類（`type`）は閉じている。** 数値の部品 `number`（#180）と、棒 `bar`・円 `pie`（M1.4。Issue #181）
-  である（順位の部品 `ranking` は後続の #182）。知らない種類は `SHAPE_KEY_UNKNOWN` である
-  （棒と円の意味は「bar」「pie」の節にある）
+- **部品の種類（`type`）は閉じている。** 数値の部品 `number`（#180）・棒 `bar` と円 `pie`（#181）・順位 `ranking`（#182）
+  である。知らない種類は `SHAPE_KEY_UNKNOWN` である
+  （棒と円の意味は「bar」「pie」の節、順位は「ranking」の節にある）
 - **数値の部品（`type: number`）が指せるのは、アプリ全体の集計（`scope: app`）の計算だけ**である（`value`）。
   ダッシュボードは**行を並べない**ので、行ごとの計算は載る場所が無い（どの行の値かが決まらない）——
   行ごとの計算・実在しない名前を指せば、静的チェックが `UI_DASHBOARD_VALUE_NOT_APP_SCOPE` で断る
@@ -853,7 +854,7 @@
 |---|---|
 | 「今月」（日本時間。月初 00:00:00 以上、翌月初 00:00:00 未満。時計は引数で受け取る。Q17） | —（#178 で決定。上の「within」） |
 | 日付の値が**暦として**正しいか（いまは `YYYY-MM-DD` の形だけを見る。「date」の節） | 必要になったとき |
-| 同じ値の並んだときの順（**見出しごとの集計は決めた**：上の「groupby」。月は日付順、`enum` は `options` の順で、値に依らない） | —（#179 で決定）。**順位は M1.4（#182）** |
+| 同じ値の並んだときの順（**見出しごとの集計は決めた**：上の「groupby」。月は日付順、`enum` は `options` の順で、値に依らない） | —（#179 で決定）。**順位も決めた（上の「ranking」。`by` の降順で、同じ値は登録した順。M1.4 #182）** |
 | 割り算の表示（**決めた**：小数第 1 位まで、四捨五入。上の「avg」） | —（#177 で決定） |
 | 層の形の確定、互換の決まり | M1.5（`04` §3.1・§4） |
 | 差し替えの互換の決まりの全体（#175 が決めたのは「entity の名前を変える・消す」「項目を消す」「型を変える」の 3 つだけである。「宣言の差し替えと、保存済みのデータ」の節） | M1.5（`04` §4） |
