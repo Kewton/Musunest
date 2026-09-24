@@ -19,9 +19,12 @@ import { parse } from "jsonc-parser";
 import { describe, expect, it } from "vitest";
 import {
   aboutSent,
+  activityPlans,
   ANALYTICS_QUERY,
   analyticsVariables,
   countsOf,
+  DASHBOARD_MEMBER_NAMES,
+  DASHBOARD_ROUTES,
   DEEP_LINK_PATH,
   DEFAULT_PLAN,
   EXIT_NG,
@@ -807,6 +810,12 @@ interface ApiFakeOptions {
   readonly badWindowIndex?: number;
   /** この経路の index 回目の GET を失敗させる（index は宣言の読み込みを 1 とする） */
   readonly failGet?: { readonly routeId: string; readonly index: number; readonly status: number };
+  /** 見本 dashboard の宣言と一覧を返す（Issue #216） */
+  readonly dashboard?: boolean;
+  /** 宣言からこの action を落とす（準備と片付けに要る action が無いことを作る） */
+  readonly omitActions?: readonly string[];
+  /** 宣言の activity の kind から options を落とす */
+  readonly omitKindOptions?: boolean;
 }
 
 interface ApiFake {
@@ -815,6 +824,8 @@ interface ApiFake {
   /** host への GET のパス（それ以外は含まない） */
   hostGets(): readonly ApiCall[];
   actions(): readonly string[];
+  /** 操作の POST の入力（送った順） */
+  posted(): readonly { readonly action: string; readonly input: Record<string, unknown> }[];
   sleeps(): readonly number[];
   queries(): readonly string[];
 }
@@ -838,6 +849,8 @@ const apiRouteIdOf = (path: string): string => {
 function createApiFake(options: ApiFakeOptions = {}, now: () => number = () => Date.now()): ApiFake {
   const members: { id: string; name: string }[] = [];
   const expenses: { id: string; description: string; amount: number; payer: string; participants: string[] }[] = [];
+  const activities: { id: string; kind: string; date: string; attendees: string[]; cost: number }[] = [];
+  const posted: { action: string; input: Record<string, unknown> }[] = [];
   const calls: ApiCall[] = [];
   const sleeps: number[] = [];
   const queries: string[] = [];
@@ -850,13 +863,42 @@ function createApiFake(options: ApiFakeOptions = {}, now: () => number = () => D
   const json = (body: unknown, status = 200): Response =>
     Response.json(body, { status, headers: { date: dateHeader() } });
 
-  const specActions = [
-    { name: "addMember", entity: "member" },
-    { name: "addExpense", entity: "expense", kind: "create" },
-    { name: "editExpense", entity: "expense", kind: "update" },
-    { name: "deleteExpense", entity: "expense", kind: "delete" },
-    { name: "deleteMember", entity: "member", kind: "delete" },
-  ];
+  const specActions = (
+    options.dashboard === true
+      ? [
+          // 見本 dashboard の宣言の写し（名前は addMember・addActivity・deleteActivity・deleteMember）
+          { name: "addMember", entity: "member", kind: "create" },
+          { name: "addActivity", entity: "activity", kind: "create" },
+          { name: "deleteActivity", entity: "activity", kind: "delete" },
+          { name: "deleteMember", entity: "member", kind: "delete" },
+        ]
+      : [
+          { name: "addMember", entity: "member" },
+          { name: "addExpense", entity: "expense", kind: "create" },
+          { name: "editExpense", entity: "expense", kind: "update" },
+          { name: "deleteExpense", entity: "expense", kind: "delete" },
+          { name: "deleteMember", entity: "member", kind: "delete" },
+        ]
+  ).filter((action) => !(options.omitActions ?? []).includes(action.name));
+  const specEntities =
+    options.dashboard === true
+      ? [
+          { name: "member", fields: { name: { type: "string", label: "名前" } } },
+          {
+            name: "activity",
+            fields: {
+              kind: {
+                type: "enum",
+                label: "種類",
+                ...(options.omitKindOptions === true ? {} : { options: { practice: "練習", match: "試合", party: "飲み会" } }),
+              },
+              date: { type: "date", label: "日付" },
+              attendees: { type: "list", of: "member", label: "参加した人" },
+              cost: { type: "number", label: "費用" },
+            },
+          },
+        ]
+      : [{ name: "member", fields: { name: "string" } }];
 
   const handleGet = (url: URL): Response => {
     const routeId = apiRouteIdOf(url.pathname);
@@ -872,7 +914,7 @@ function createApiFake(options: ApiFakeOptions = {}, now: () => number = () => D
         schemaVersion: "community.app-spec/v0.2-draft",
         sourceSha256: "0".repeat(64),
         spec: {
-          entities: [{ name: "member", fields: { name: "string" } }],
+          entities: specEntities,
           views: [],
           actions: specActions,
           validations: [],
@@ -915,10 +957,74 @@ function createApiFake(options: ApiFakeOptions = {}, now: () => number = () => D
         ...(routeId === "settlement" ? { settlement: [] } : {}),
       });
     }
+    if (options.dashboard === true && routeId === "dashboard") {
+      // ダッシュボードは行を並べない（rows は空）。値は scope・groups・ranking に載る
+      return json({
+        instanceId,
+        view: "dashboard",
+        fields: [],
+        computed: [],
+        permissions: { read: true, write: true },
+        actions: [],
+        rows: [],
+        scope: { activityCount: activities.length, attendeeTotal: 0, averageAttendees: null, averageCost: null },
+        groups: { activitiesByMonth: [], activitiesByKind: [] },
+        ranking: { topActivities: [] },
+      });
+    }
+    if (options.dashboard === true && routeId === "activities") {
+      return json({
+        instanceId,
+        view: "activities",
+        entity: "activity",
+        fields: ["kind", "date", "attendees", "cost"],
+        computed: ["attendeeCount"],
+        permissions: { read: true, write: true },
+        actions: specActions.filter((action) => action.entity === "activity"),
+        rows: activities.map((activity) =>
+          apiRow(
+            activity.id,
+            { kind: activity.kind, date: activity.date, attendees: activity.attendees, cost: activity.cost },
+            { attendeeCount: activity.attendees.length },
+          ),
+        ),
+      });
+    }
+    if (options.dashboard === true && routeId === "members") {
+      return json({
+        instanceId,
+        view: "members",
+        entity: "member",
+        fields: ["name"],
+        computed: [],
+        permissions: { read: true, write: true },
+        actions: specActions.filter((action) => action.entity === "member"),
+        rows: members.map((member) => apiRow(member.id, { name: member.name }, {})),
+      });
+    }
     return json({ error: "NOT_FOUND" }, 404);
   };
 
   const handleAction = (name: string, input: Record<string, unknown>): Response => {
+    posted.push({ action: name, input });
+    if (!specActions.some((action) => action.name === name)) return json({ error: "NOT_FOUND" }, 404);
+    if (name === "addActivity") {
+      const activity = {
+        id: nextId("activity"),
+        kind: String(input["kind"] ?? ""),
+        date: String(input["date"] ?? ""),
+        attendees: Array.isArray(input["attendees"]) ? (input["attendees"] as string[]) : [],
+        cost: Number(input["cost"] ?? 0),
+      };
+      activities.push(activity);
+      return json(apiRow(activity.id, { kind: activity.kind, date: activity.date }, {}), 201);
+    }
+    if (name === "deleteActivity") {
+      const at = activities.findIndex((activity) => activity.id === String(input["id"] ?? ""));
+      if (at < 0) return json({ error: "NOT_FOUND" }, 404);
+      activities.splice(at, 1);
+      return json({ entity: "activity", id: String(input["id"]), deleted: true });
+    }
     if (name === "addMember") {
       const member = { id: nextId("member"), name: String(input["name"] ?? "") };
       members.push(member);
@@ -943,7 +1049,9 @@ function createApiFake(options: ApiFakeOptions = {}, now: () => number = () => D
         if (at < 0) return json({ error: "NOT_FOUND" }, 404);
         expenses.splice(at, 1);
       } else {
-        const referenced = expenses.some((expense) => expense.payer === id || expense.participants.includes(id));
+        const referenced =
+          expenses.some((expense) => expense.payer === id || expense.participants.includes(id)) ||
+          activities.some((activity) => activity.attendees.includes(id));
         // #109：参照されているメンバーは消せない（支出を先に消さないと 409 で残る）
         if (referenced) return json({ error: "REFERENCE_IN_USE", references: [{ entity: "expense", field: "payer", count: 1 }] }, 409);
         const at = members.findIndex((member) => member.id === id);
@@ -1020,6 +1128,7 @@ function createApiFake(options: ApiFakeOptions = {}, now: () => number = () => D
     calls,
     hostGets: () => calls.filter((call) => call.method === "GET" && !call.url.startsWith("api.cloudflare.com")),
     actions: () => calls.filter((call) => call.action !== "").map((call) => call.action),
+    posted: () => posted,
     sleeps: () => sleeps,
     queries: () => queries,
   };
@@ -1027,6 +1136,7 @@ function createApiFake(options: ApiFakeOptions = {}, now: () => number = () => D
 
 /** 計測モードの argv と fake の io を組む */
 interface ApiRunOptions {
+  readonly sample?: string;
   readonly sizes?: string;
   readonly routes?: string;
   readonly warm?: string;
@@ -1066,6 +1176,7 @@ async function runApiMode(options: ApiRunOptions = {}) {
   const argv = [
     "--instance",
     options.instance ?? API_INSTANCE,
+    ...(options.sample === undefined ? [] : ["--sample", options.sample]),
     ...(options.sizes === undefined ? [] : ["--sizes", options.sizes]),
     ...(options.routes === undefined ? [] : ["--routes", options.routes]),
     ...(options.env === undefined ? [] : ["--env", options.env]),
@@ -1374,5 +1485,168 @@ describe("API の計測：CLI への結線", () => {
     });
     expect(code).toBe(EXIT_OK);
     expect(out.join("\n")).toContain("api-measure");
+  });
+});
+
+// ── 見本 dashboard（--sample dashboard。Issue #216）──────────────────────────────
+//
+//   1. メンバー 4 → 活動 N（日付は日本時間の今月と先月・kind は宣言の options・attendees は作ったメンバー）→ 計測 →
+//      活動 N 削除 → メンバー 4 削除 の順。action の名前は宣言から entity と kind で引く
+//   2. 経路は spec・dashboard・activities・members（warikan の経路は選べない）
+//   3. 準備と片付けに要る action・kind の選択肢が宣言に無ければ、何も書かずに止める（exit 1）
+//   4. 出力に URL・サブドメイン・Account ID・トークンが無い
+
+const DASHBOARD_INSTANCE = "m15-cpu-dashboard";
+
+/** 出力に秘密の値が無いこと（API の計測の出力） */
+function expectApiNothingSecret(all: string): void {
+  for (const secret of [TOKEN, ACCOUNT_ID, SUBDOMAIN, HOSTNAME, "workers.dev", "https://"]) {
+    expect(all).not.toContain(secret);
+  }
+}
+
+describe("API の計測：見本 dashboard の準備と片付け（Issue #216）", () => {
+  it("200 件：メンバー 4 → 活動 200 → （計測）→ 活動 200 削除 → メンバー 4 削除 の順で、活動が先に消える", async () => {
+    const run = await runApiMode({
+      sample: "dashboard",
+      sizes: "200",
+      routes: "dashboard",
+      instance: DASHBOARD_INSTANCE,
+      fake: { dashboard: true },
+    });
+    expect(run.code).toBe(EXIT_OK);
+    const actions = run.fake.actions();
+    expect(actions.filter((name) => name === "addMember")).toHaveLength(4);
+    expect(actions.filter((name) => name === "addActivity")).toHaveLength(200);
+    expect(actions.filter((name) => name === "deleteActivity")).toHaveLength(200);
+    expect(actions.filter((name) => name === "deleteMember")).toHaveLength(4);
+    // warikan の action は呼ばない
+    expect(actions.some((name) => name.includes("Expense"))).toBe(false);
+    // メンバー → 活動 → 活動の削除 → メンバーの削除（参照されているメンバーを先に消すと 409 で残る）
+    expect(actions.slice(0, 4)).toEqual(["addMember", "addMember", "addMember", "addMember"]);
+    expect(actions.lastIndexOf("addActivity")).toBeLessThan(actions.indexOf("deleteActivity"));
+    expect(actions.lastIndexOf("deleteActivity")).toBeLessThan(actions.indexOf("deleteMember"));
+    // ダッシュボードを 温め 5 + 本測定 20 回 読む（準備と片付けの一覧の GET は activities・members）
+    expect(run.fake.hostGets().filter((call) => call.url.endsWith("/views/dashboard"))).toHaveLength(25);
+    const out = run.out.join("\n");
+    expect(out).toContain("見本 dashboard");
+    expect(out).toContain("メンバー 4・活動 200");
+    expect(out).toContain("活動 → メンバーの順");
+    expect(out).toContain("200 / dashboard: host 1.00 ms");
+    expectApiNothingSecret(run.all);
+  });
+
+  it("活動の入力：日付は日本時間の今月と先月に半分ずつ、kind は宣言の options、attendees は作ったメンバーの id", async () => {
+    const run = await runApiMode({
+      sample: "dashboard",
+      sizes: "200",
+      routes: "spec",
+      instance: DASHBOARD_INSTANCE,
+      fake: { dashboard: true },
+    });
+    expect(run.code).toBe(EXIT_OK);
+    const addMembers = run.fake.posted().filter((post) => post.action === "addMember");
+    expect(addMembers.map((post) => post.input["name"])).toEqual([...DASHBOARD_MEMBER_NAMES]);
+    // fake の id は作った順の通し番号（member-0001…member-0004）
+    const memberIds = new Set(addMembers.map((_, index) => `member-${String(index + 1).padStart(4, "0")}`));
+    const inputs = run.fake.posted().filter((post) => post.action === "addActivity").map((post) => post.input);
+    expect(inputs).toHaveLength(200);
+    // fake の時計は 2026-09-17T03:00Z（日本時間 9 月 17 日）。今月 = 2026-09、先月 = 2026-08
+    const dates = inputs.map((input) => String(input["date"]));
+    expect(dates.filter((date) => date.startsWith("2026-09-"))).toHaveLength(100);
+    expect(dates.filter((date) => date.startsWith("2026-08-"))).toHaveLength(100);
+    expect(dates.every((date) => /^\d{4}-\d{2}-\d{2}$/.test(date))).toBe(true);
+    expect(new Set(inputs.map((input) => input["kind"]))).toEqual(new Set(["practice", "match", "party"]));
+    for (const input of inputs) {
+      const attendees = input["attendees"] as string[];
+      expect(attendees.length).toBeGreaterThanOrEqual(1);
+      expect(attendees.length).toBeLessThanOrEqual(DASHBOARD_MEMBER_NAMES.length);
+      expect(attendees.every((id) => memberIds.has(id))).toBe(true);
+      expect(typeof input["cost"]).toBe("number");
+    }
+  });
+
+  it("経路の既定は spec・dashboard・activities・members の 4 つ（窓も 4 つ）", async () => {
+    const run = await runApiMode({ sample: "dashboard", sizes: "basic", instance: DASHBOARD_INSTANCE, fake: { dashboard: true } });
+    expect(run.code).toBe(EXIT_OK);
+    expect(DASHBOARD_ROUTES.map((route) => route.id)).toEqual(["spec", "dashboard", "activities", "members"]);
+    for (const query of run.fake.queries()) expect(query.match(/w\d+: workersInvocationsAdaptive/g)).toHaveLength(4);
+    for (const id of ["spec", "dashboard", "activities", "members"]) expect(run.all).toContain(`basic / ${id}: host`);
+    expect(run.out.join("\n")).toContain("メンバー 4・活動 2");
+  });
+
+  it("warikan の経路は dashboard では選べない（exit 1・1 回も送らない）", async () => {
+    const run = await runApiMode({ sample: "dashboard", routes: "expenseList", instance: DASHBOARD_INSTANCE, fake: { dashboard: true } });
+    expect(run.code).toBe(EXIT_NG);
+    expect(run.fake.calls).toHaveLength(0);
+    expect(run.all).toContain("--routes は spec|dashboard|activities|members から選ぶ");
+  });
+
+  it("知らない見本は測らない（exit 1・1 回も送らない・値を出さない）", async () => {
+    const run = await runApiMode({ sample: "secret-sample-x", instance: DASHBOARD_INSTANCE });
+    expect(run.code).toBe(EXIT_NG);
+    expect(run.fake.calls).toHaveLength(0);
+    expect(run.all).toContain("--sample は warikan|dashboard から選ぶ");
+    expect(run.all).not.toContain("secret-sample-x");
+  });
+});
+
+describe("API の計測：見本 dashboard の宣言が足りないとき（Issue #216）", () => {
+  it.each(["addActivity", "deleteActivity", "deleteMember"])(
+    "宣言に %s が無ければ、準備も片付けもせずに止める（exit 1）",
+    async (omitted) => {
+      const run = await runApiMode({
+        sample: "dashboard",
+        sizes: "200",
+        routes: "dashboard",
+        instance: DASHBOARD_INSTANCE,
+        fake: { dashboard: true, omitActions: [omitted] },
+      });
+      expect(run.code).toBe(EXIT_NG);
+      expect(run.all).toContain("宣言に、準備と片付けに要る action が無い（member・activity の create と delete）");
+      expect(run.fake.actions()).toHaveLength(0);
+      expect(run.fake.queries()).toHaveLength(0);
+      expectApiNothingSecret(run.all);
+    },
+  );
+
+  it("warikan の宣言に dashboard を向けても、action が無いとして止める（別の見本のインスタンスを書き換えない）", async () => {
+    const run = await runApiMode({ sample: "dashboard", sizes: "basic", routes: "spec", instance: DASHBOARD_INSTANCE });
+    expect(run.code).toBe(EXIT_NG);
+    expect(run.all).toContain("member・activity の create と delete");
+    expect(run.fake.actions()).toHaveLength(0);
+  });
+
+  it("activity の kind に選択肢（options）が無ければ、何も書かずに止める（exit 1）", async () => {
+    const run = await runApiMode({
+      sample: "dashboard",
+      sizes: "basic",
+      routes: "spec",
+      instance: DASHBOARD_INSTANCE,
+      fake: { dashboard: true, omitKindOptions: true },
+    });
+    expect(run.code).toBe(EXIT_NG);
+    expect(run.all).toContain("activity の kind の選択肢");
+    expect(run.fake.actions()).toHaveLength(0);
+  });
+});
+
+describe("activityPlans：活動の日付は日本時間の今月と先月", () => {
+  it("日本時間で月が変わっていれば、UTC がまだ前の月でも日本時間の月を今月にする", () => {
+    // 2026-01-31T16:00Z = 日本時間 2026-02-01 01:00
+    const plans = activityPlans(4, ["practice"], Date.parse("2026-01-31T16:00:00.000Z"));
+    expect(plans.map((plan) => plan.date)).toEqual(["2026-02-01", "2026-01-01", "2026-02-02", "2026-01-02"]);
+  });
+
+  it("1 月の先月は前の年の 12 月。日は 28 日までを巡る", () => {
+    const plans = activityPlans(60, ["practice", "match"], Date.parse("2026-01-10T00:00:00.000Z"));
+    expect(plans[1]?.date).toBe("2025-12-01");
+    expect(plans.every((plan) => Number(plan.date.slice(8)) <= 28)).toBe(true);
+    expect(plans[56]?.date).toBe("2026-01-01");
+    expect(plans.map((plan) => plan.kind).slice(0, 3)).toEqual(["practice", "match", "practice"]);
+  });
+
+  it("選択肢が無ければ落とす", () => {
+    expect(() => activityPlans(2, [], Date.parse("2026-09-17T03:00:00.000Z"))).toThrow(MeasureError);
   });
 });
