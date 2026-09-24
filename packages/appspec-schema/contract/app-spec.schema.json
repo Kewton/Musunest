@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$comment": "宣言（app.spec.yaml）を読んだ結果の、構造の正本である（文法の契約の一部。community.app-spec/v0.2-draft）。\n契約は 1 つの版に束ねるが、性質ごとに別の形式で書く（workspace/mvp/m1/06-grammar-and-authoring-trial.md §2.1）:\n  構造（7 欄と、欄ごとの形）          … この file（JSON Schema）\n  式                                  … EBNF（別の正本）\n  型の組み合わせ・名前解決・上限・予約語 … 規則の表（別の正本）\n  語彙が閉じていること                … この file の additionalProperties と、各 enum（知らない欄・キーを受けない）\n**対象は「YAML を読んだデータ」であって、正規化した JSON（NormalizedAppSpec）ではない。**\n値はすべて文字列である——YAML の読み取りは型を解釈せず、`true`・数・日付も字面のまま読む（spec-engine の静的チェックと同じ）。\nこの schema は意味を検証しない。参照先の実在・式の型・集計の整合は、静的チェックの規則（別の正本）が受け持つ。\n語彙の正本は docs/semantics.md と src/spec.ts である。両方を変えるときは、同じ PR でこの file も直す。",
+  "$comment": "宣言（app.spec.yaml）を読んだ結果の、構造の正本である（文法の契約の一部。community.app-spec/v0.2）。\n契約は 1 つの版に束ねるが、性質ごとに別の形式で書く（workspace/mvp/m1/06-grammar-and-authoring-trial.md §2.1）:\n  構造（7 欄と、欄ごとの形）          … この file（JSON Schema）\n  式                                  … EBNF（別の正本）\n  型の組み合わせ・名前解決・上限・予約語 … 規則の表（別の正本）\n  語彙が閉じていること                … この file の additionalProperties と、各 enum（知らない欄・キーを受けない）\n**対象は「YAML を読んだデータ」であって、正規化した JSON（NormalizedAppSpec）ではない。**\n値はすべて文字列である——YAML の読み取りは型を解釈せず、`true`・数・日付も字面のまま読む（spec-engine の静的チェックと同じ）。\nこの schema は意味を検証しない。参照先の実在・式の型・集計の整合は、静的チェックの規則（別の正本）が受け持つ。\n語彙の正本は docs/semantics.md と src/spec.ts である。両方を変えるときは、同じ PR でこの file も直す。",
   "type": "object",
   "additionalProperties": false,
   "required": ["entities", "views", "actions", "validations", "computed", "permissions", "minIdentity"],

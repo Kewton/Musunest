@@ -1,6 +1,6 @@
 # Expression grammar (EBNF)
 
-> **Contract piece: expressions.** Part of the AppSpec canonical source (`community.app-spec/v0.2-draft`).
+> **Contract piece: expressions.** Part of the AppSpec canonical source (`community.app-spec/v0.2`).
 > Read together with:
 > - [`rules.md`](./rules.md) — value types, name resolution, limits and counting, reserved words, closed vocabulary, YAML reading
 > - `app-spec.schema.json` — declaration structure (written by a separate issue)

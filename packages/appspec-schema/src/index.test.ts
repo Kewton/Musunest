@@ -38,6 +38,7 @@ import {
   type AppSpecSection,
 } from "./index.js";
 import { readLedgerYaml, type LedgerYamlRow } from "./ledger-yaml.js";
+import { contractHash } from "./contract.js";
 
 // tsconfig の types は workers-types だけなので、node:fs の型が無い。
 // このファイルは Node（vitest）で動くので、使う関数の形だけをここで宣言する（data-api のテストと同じやり方）。
@@ -77,23 +78,23 @@ describe("appspec-schema", () => {
     expect(PACKAGE_NAME).toBe("@musunest/appspec-schema");
   });
 
-  it("スキーマの版は v0.2 の草案の表記である（Q9。README.md「版の表記」）", () => {
+  it("スキーマの版は、v0.2 に固めた表記である（Q9。README.md「版の表記」）", () => {
     expect(APPSPEC_SCHEMA_VERSION).toMatch(APPSPEC_SCHEMA_VERSION_PATTERN);
-    expect(APPSPEC_SCHEMA_VERSION).toBe("community.app-spec/v0.2-draft");
-    expect(isDraftSchemaVersion(APPSPEC_SCHEMA_VERSION)).toBe(true);
-    expect(isDraftSchemaVersion("community.app-spec/v0.2")).toBe(false);
+    expect(APPSPEC_SCHEMA_VERSION).toBe("community.app-spec/v0.2");
+    expect(isDraftSchemaVersion(APPSPEC_SCHEMA_VERSION)).toBe(false);
+    expect(isDraftSchemaVersion("community.app-spec/v0.3-draft")).toBe(true);
   });
 
-  it("ピンには固めた版だけを書く。固めたあとはピンとこのパッケージの版が一致する", () => {
-    // ピンの差し替えは M1.5 の作業（pins/ はこの Issue では変えない）。ここでは書いてはいけない形だけを止める
+  it("ピンの版と契約の SHA-256 が、このパッケージの版と契約に一致する（Issue #217）", async () => {
+    // M1.5 で固めた版と、その契約（contract/ の全ファイル）の digest をピンに差し替えた（同じコミット。
+    // 00-open-questions.md Q9）。**digest は手で書かない**——contract:hash の出力を転記したものである。
     const pin = readJson(packageFile("../../pins/commandagent.json")) as {
-      appspec_schema: { version: string };
+      appspec_schema: { version: string; sha256: string };
     };
     expect(pin.appspec_schema.version).toMatch(APPSPEC_SCHEMA_VERSION_PATTERN);
     expect(isDraftSchemaVersion(pin.appspec_schema.version)).toBe(false);
-    if (!isDraftSchemaVersion(APPSPEC_SCHEMA_VERSION)) {
-      expect(pin.appspec_schema.version).toBe(APPSPEC_SCHEMA_VERSION);
-    }
+    expect(pin.appspec_schema.version).toBe(APPSPEC_SCHEMA_VERSION);
+    expect(pin.appspec_schema.sha256).toBe(await contractHash());
   });
 
   it("ファイルの場所は、パッケージの直下を指す", () => {
@@ -156,7 +157,6 @@ describe("語彙の台帳（vocabulary.yaml）", () => {
         since: "M1.1",
         check_rules: ["lowercase_code"],
         semantics: "docs/semantics.md",
-        factory: "対応",
       },
     ]);
     expect(problems.map((p) => [p.row, p.field])).toEqual([
@@ -166,13 +166,16 @@ describe("語彙の台帳（vocabulary.yaml）", () => {
       [2, "layer"],
       [2, "since"],
       [2, "semantics"],
-      [2, "factory"],
     ]);
   });
 
-  it("固めた版では factory に工場の対応を書ける", () => {
+  it("factory は、草案では「未対応」に限り、固めた版では工場の対応を書ける", () => {
     const [first] = ledger;
     if (!first) throw new Error("台帳が空");
+    // 草案の間は工場（CommandAgent）へ渡さないので「未対応」に限る（`factory` の値が問題になる）
+    const draft = checkVocabularyLedger([{ ...first, factory: "対応" }], "community.app-spec/v0.3-draft");
+    expect(draft.map((p) => [p.row, p.field])).toEqual([[1, "factory"]]);
+    // 固めた版（このパッケージの版）では工場の対応を書ける
     expect(checkVocabularyLedger([{ ...first, factory: "対応" }], "community.app-spec/v0.2")).toEqual([]);
   });
 

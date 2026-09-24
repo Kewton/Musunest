@@ -1,4 +1,4 @@
-# M1.1〜M1.4 での意味（community.app-spec/v0.2-draft）
+# M1.1〜M1.4 での意味（community.app-spec/v0.2）
 
 > 宣言の形だけでは 1 つに決まらない振る舞いを、この語彙について決める（`workspace/mvp/m1/04-spec-evolution.md` §1.1、`00-open-questions.md` Q3）。
 > **M1.1 の語彙は v0.1 と同じ**で、**M1.2 で参照（`ref`）・検査の文言（`message`）・entity をまたぐ集計（`aggregate` の `sum`・`count`）・精算（`settle`）・一覧の種類（`table`・`settlement`）を足した**（印を付けてある）。
@@ -433,7 +433,12 @@
   「項目名: 決まった値」を並べた写像である
 
   ```yaml
-  - { name: finish, entity: task, kind: update, set: { status: done }, when: 'status != "done"' }
+  - name: finish
+    entity: task
+    kind: update
+    set:
+      status: done
+    when: 'status != "done"'
   ```
 
 - **`set` を書いた操作の入力は `id` だけ**である。ほかの項目を送ると、`update` の全項目の置換ではなく
@@ -652,7 +657,10 @@
     - name: dashboard
       type: dashboard
       widgets:
-        - { type: number, label: 今月の活動, value: activityCount, unit: 回 }
+        - type: number
+          label: 今月の活動
+          value: activityCount
+          unit: 回
   ```
 
 - **`entity` を持たない。** 行を並べるのではなく、アプリ全体の値を並べるだけだからである（`scope: app` の
@@ -693,7 +701,10 @@
 
   ```yaml
   widgets:
-    - { type: bar, label: 月ごとの活動回数, value: activitiesByMonth, unit: 回 }
+    - type: bar
+      label: 月ごとの活動回数
+      value: activitiesByMonth
+      unit: 回
   ```
 
 - **指せるのは `type: groups` の計算だけ**である（`value`）。ほか（アプリ全体の集計・行ごとの計算・
@@ -720,7 +731,10 @@
 
   ```yaml
   widgets:
-    - { type: pie, label: 種類の内訳, value: activitiesByKind, unit: 回 }
+    - type: pie
+      label: 種類の内訳
+      value: activitiesByKind
+      unit: 回
   ```
 
 - **凡例に、見出し・値・割合（%）を文字で出す**（窓口の決定 2026-09-19）。割合は**小数第 1 位まで

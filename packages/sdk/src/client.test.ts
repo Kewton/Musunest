@@ -47,7 +47,7 @@ function throwingFetch(): FetchLike {
 
 const SPEC: ApiSpecBody = {
   instanceId: "inst-1",
-  schemaVersion: "community.app-spec/v0.2-draft",
+  schemaVersion: "community.app-spec/v0.2",
   sourceSha256: "a".repeat(64),
   spec: {
     entities: [{ name: "expense", fields: { description: "string", amount: "number", participants: "list" } }],

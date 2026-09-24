@@ -35,7 +35,7 @@ const errResult = (code: ClientErrorCode, status: number | null): ClientResult<n
 /** グラフの部品（棒・円）と、その値の元になる見出しごとの集計を持つ宣言 */
 const CHART_SPEC: ApiSpecBody = {
   instanceId: "inst-1",
-  schemaVersion: "community.app-spec/v0.2-draft",
+  schemaVersion: "community.app-spec/v0.2",
   sourceSha256: "e".repeat(64),
   spec: {
     entities: [

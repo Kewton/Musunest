@@ -34,7 +34,7 @@ const errResult = (code: ClientErrorCode, status: number | null): ClientResult<n
 /** タスクのボード。`columns` は選択肢の項目 status、`highlight` は真偽の計算 overdue である */
 const BOARD_SPEC: ApiSpecBody = {
   instanceId: "inst-1",
-  schemaVersion: "community.app-spec/v0.2-draft",
+  schemaVersion: "community.app-spec/v0.2",
   sourceSha256: "c".repeat(64),
   spec: {
     entities: [

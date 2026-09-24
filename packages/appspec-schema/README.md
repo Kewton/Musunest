@@ -33,15 +33,15 @@ const negatives = readNegativeIndex(JSON.parse(readFileSync(negativeIndexFile(),
 
 ## 2. 版の表記（決定。2026-09-16・#96）
 
-- `APPSPEC_SCHEMA_VERSION` は **`community.app-spec/v0.2-draft`** にする（前は M0 の仮置きの `0.0.0-m0`）
-- **M1.5 で `community.app-spec/v0.2` に固め、同じコミットで `pins/commandagent.json` の `appspec_schema` を差し替える**（`00-open-questions.md` Q9、`04` §4）。この Issue ではピンを差し替えない
+- `APPSPEC_SCHEMA_VERSION` は **`community.app-spec/v0.2`** にする（前は M0 の仮置きの `0.0.0-m0`）
+- **M1.5 で `community.app-spec/v0.2` に固め、同じコミットで `pins/commandagent.json` の `appspec_schema` を差し替える**（`00-open-questions.md` Q9、`04` §4）。#96 ではピンを差し替えず、**#217（M1.5）でこの版と契約の SHA-256 に差し替えた**
 
 理由
 
 1. 版の名前は、工場側の版の並び（`community.app-spec/v0.1`）に揃える（Q9）。`0.0.0-m0` はピンの表記と比べられなかった
 2. 草案は M1.1〜M1.4 のあいだ自由に変える（`04` §4）。`v0.2` とだけ書くと、固める前の形が v0.2 として扱われうる。`-draft` を付けて、固めた版と取り違えないようにする
 3. **ピンには固めた版だけを書く。** unit テストが「ピンの版に `-draft` が無いこと」と「固めたあとはピンとこのパッケージの版が一致すること」を確かめる
-4. 台帳の `since` も同じ表記にする（`v0.2-draft（M1.1）`。`04` §6.2 の案のとおり）。草案のあいだは、台帳の `factory` をすべて「未対応」にする（工場にはまだ渡さない）
+4. 台帳の `since` も同じ表記にする（`v0.2（M1.1）`。`04` §6.2 の案のとおり）。草案のあいだは、台帳の `factory` をすべて「未対応」にする（工場にはまだ渡さない）
 
 ## 3. 層の形（仮決め。2026-09-16・#96。M1.5 で確定する）
 

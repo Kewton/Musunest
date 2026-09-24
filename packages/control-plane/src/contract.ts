@@ -50,7 +50,7 @@ export interface RegistryExecutor {
 export interface AppRecord {
   /** 原本（app.spec.yaml）のバイト列の SHA-256。小文字の16進64桁。この表のキー */
   readonly sourceSha256: string;
-  /** 変換に使ったスキーマの版（例 `community.app-spec/v0.2-draft`） */
+  /** 変換に使ったスキーマの版（例 `community.app-spec/v0.2`） */
   readonly schemaVersion: string;
   /** 原本の R2 キー */
   readonly sourceKey: string;

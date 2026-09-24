@@ -3,11 +3,11 @@
 // 語彙を足すときは、この file・vocabulary.yaml・samples/・docs/semantics.md を同じ PR で直す（04 §2）。
 
 /**
- * AppSpec スキーマの版。M1.1〜M1.4 は草案なので `-draft` を付ける。
- * M1.5 で `community.app-spec/v0.2` に固め、同じコミットで pins/commandagent.json の
- * appspec_schema を差し替える（00-open-questions.md Q9。理由は README.md「版の表記」）。
+ * AppSpec スキーマの版。M1.5 で `community.app-spec/v0.2` に固めた——同じコミットで
+ * pins/commandagent.json の appspec_schema を、この版と契約（contract/）の SHA-256 に
+ * 差し替えた（00-open-questions.md Q9。理由は README.md「版の表記」）。
  */
-export const APPSPEC_SCHEMA_VERSION = "community.app-spec/v0.2-draft" as const;
+export const APPSPEC_SCHEMA_VERSION = "community.app-spec/v0.2" as const;
 
 /** 版の表記の形。固めた版は `-draft` を持たない。 */
 export const APPSPEC_SCHEMA_VERSION_PATTERN = /^community\.app-spec\/v\d+\.\d+(?:-draft)?$/;

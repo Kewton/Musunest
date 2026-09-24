@@ -42,7 +42,7 @@ interface Part {
 /** 部品の並びから、ダッシュボードの一覧を持つ宣言を組む（部品が指す計算はアプリ全体の集計である） */
 const dashboardSpec = (parts: readonly Part[]): ApiSpecBody => ({
   instanceId: "inst-1",
-  schemaVersion: "community.app-spec/v0.2-draft",
+  schemaVersion: "community.app-spec/v0.2",
   sourceSha256: "e".repeat(64),
   spec: {
     entities: [

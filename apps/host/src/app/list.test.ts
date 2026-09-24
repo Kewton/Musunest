@@ -38,7 +38,7 @@ const errResult = (code: ClientErrorCode, status: number | null): ClientResult<n
  */
 const LIST_SPEC: ApiSpecBody = {
   instanceId: "inst-1",
-  schemaVersion: "community.app-spec/v0.2-draft",
+  schemaVersion: "community.app-spec/v0.2",
   sourceSha256: "d".repeat(64),
   spec: {
     entities: [
@@ -407,7 +407,7 @@ const DASHBOARD_ACTIONS = [
 /** 見本 dashboard の 2 つの一覧（`activities`・`members`）と、消す操作 */
 const DASHBOARD_LIST_SPEC: ApiSpecBody = {
   instanceId: "inst-1",
-  schemaVersion: "community.app-spec/v0.2-draft",
+  schemaVersion: "community.app-spec/v0.2",
   sourceSha256: "e".repeat(64),
   spec: {
     entities: [

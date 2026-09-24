@@ -1,4 +1,4 @@
-# 見本「タスク管理」（M1.3。community.app-spec/v0.2-draft）
+# 見本「タスク管理」（M1.3。community.app-spec/v0.2）
 #
 # 旅行の準備を 3 人で分担する。M1.3 で足した語彙を使う——選択肢（`enum`）と既定値（`default`）、
 # 日付（`date`）と「今日」（`today()`）、決まった値への書き換え（`set`）とボタンを出す条件（`when`）、

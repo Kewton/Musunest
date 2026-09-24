@@ -245,13 +245,13 @@ describe("正例は原本と正規化した JSON の 2 個を同じ SHA に結�
     expect(app).toEqual(result.app);
     expect(app?.sourceKey).toBe(sourceObjectKey(sha));
     expect(app?.normalizedKey).toBe(normalizedObjectKey(sha));
-    expect(app?.schemaVersion).toBe("community.app-spec/v0.2-draft");
+    expect(app?.schemaVersion).toBe("community.app-spec/v0.2");
 
     // #102 の取得契約と同じ手順：登録の normalized_key を R2（ここでは記録）から読み、SHA を突き合わせる
     const storedJson = specs.writes.find((w) => w.key === app?.normalizedKey)?.body ?? "";
     const parsed = JSON.parse(storedJson) as { sourceSha256: string; schemaVersion: string };
     expect(parsed.sourceSha256).toBe(sha);
-    expect(parsed.schemaVersion).toBe("community.app-spec/v0.2-draft");
+    expect(parsed.schemaVersion).toBe("community.app-spec/v0.2");
 
     // インスタンスからアプリを解決できる
     expect(await resolveInstanceApp(executor, INSTANCE)).toEqual(result.app);

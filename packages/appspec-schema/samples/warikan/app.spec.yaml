@@ -1,4 +1,4 @@
-# 見本「旅行の割り勘」（M1.2。community.app-spec/v0.2-draft）
+# 見本「旅行の割り勘」（M1.2。community.app-spec/v0.2）
 #
 # M1.1 の見本「支出の記録」に、参照（`ref`）と参照の並び（`list of`）を足したものである。
 # 払った人（`payer`）は member のレコード 1 件を、割る人（`participants`）は member の並びを指す。

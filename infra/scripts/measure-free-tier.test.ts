@@ -911,7 +911,7 @@ function createApiFake(options: ApiFakeOptions = {}, now: () => number = () => D
     if (routeId === "spec") {
       return json({
         instanceId,
-        schemaVersion: "community.app-spec/v0.2-draft",
+        schemaVersion: "community.app-spec/v0.2",
         sourceSha256: "0".repeat(64),
         spec: {
           entities: specEntities,
