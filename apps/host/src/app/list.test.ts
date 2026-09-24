@@ -390,3 +390,157 @@ describe("絞り込みは画面の中で行う（受入条件）", () => {
     expect(getView.mock.calls.length).toBe(before);
   });
 });
+
+// ── 消す（Issue #214。見本 dashboard の一覧） ──────────────────────────────
+//
+// 見本 dashboard の一覧（`activities`・`members`）は `deleteActivity`・`deleteMember`
+// （`kind: delete`）を宣言している。**一覧の種類が list でも、table・ボードと同じ処理で行ごとに
+// 消すボタンを出す**——参照されている行にはボタンの代わりに理由を出す（`03` §2.2）。
+
+const DASHBOARD_ACTIONS = [
+  { name: "addMember", entity: "member", kind: "create" },
+  { name: "addActivity", entity: "activity", kind: "create" },
+  { name: "deleteActivity", entity: "activity", kind: "delete" },
+  { name: "deleteMember", entity: "member", kind: "delete" },
+] as const;
+
+/** 見本 dashboard の 2 つの一覧（`activities`・`members`）と、消す操作 */
+const DASHBOARD_LIST_SPEC: ApiSpecBody = {
+  instanceId: "inst-1",
+  schemaVersion: "community.app-spec/v0.2-draft",
+  sourceSha256: "e".repeat(64),
+  spec: {
+    entities: [
+      { name: "member", fields: { name: "string" } },
+      {
+        name: "activity",
+        fields: {
+          kind: { type: "enum", options: { practice: "練習", match: "試合", party: "飲み会" } },
+          date: "date",
+          attendees: { type: "list", of: "member" },
+          cost: "number",
+        },
+      },
+    ],
+    views: [
+      { name: "activities", entity: "activity", type: "list", show: ["kind", "attendees", "cost", "attendeeCount"] },
+      { name: "members", entity: "member", type: "list", show: ["name"] },
+    ],
+    actions: [...DASHBOARD_ACTIONS],
+    validations: [],
+    computed: [{ name: "attendeeCount", entity: "activity", expression: "len(attendees)", type: "number" }],
+    permissions: [
+      { name: "read", subject: "minIdentity" },
+      { name: "write", subject: "minIdentity" },
+    ],
+    minIdentity: { mode: "anonymous" },
+  },
+  permissions: { read: true, write: true },
+  actions: [...DASHBOARD_ACTIONS],
+};
+
+const dashActivity = (id: string, kind: string, referenced: boolean): ApiRow => ({
+  id,
+  createdAt: "2026-09-20T00:00:00+09:00",
+  updatedAt: "2026-09-20T00:00:00+09:00",
+  fields: { kind, date: "2026-09-20", attendees: ["m1"], cost: 3000 } as Readonly<Record<string, ApiValue>>,
+  computed: { attendeeCount: 1 },
+  references: referenced ? [{ entity: "activity", field: "parent", count: 1 }] : [],
+});
+
+const DASH_ACTIVITIES_VIEW: ApiViewBody = {
+  instanceId: "inst-1",
+  view: "activities",
+  entity: "activity",
+  fields: ["kind", "date", "attendees", "cost"],
+  computed: ["attendeeCount"],
+  permissions: { read: true, write: true },
+  actions: [...DASHBOARD_ACTIONS],
+  rows: [dashActivity("a1", "practice", false), dashActivity("a2", "party", true)],
+};
+
+const DASH_MEMBERS_VIEW: ApiViewBody = {
+  instanceId: "inst-1",
+  view: "members",
+  entity: "member",
+  fields: ["name"],
+  computed: [],
+  permissions: { read: true, write: true },
+  actions: [...DASHBOARD_ACTIONS],
+  rows: [
+    { id: "m1", createdAt: "2026-09-20T00:00:00+09:00", updatedAt: "2026-09-20T00:00:00+09:00", fields: { name: "田中" }, computed: {} },
+  ],
+};
+
+function dashboardListClient(parts: {
+  readonly spec?: MusunestClient["getSpec"];
+  readonly view?: MusunestClient["getView"];
+  readonly remove?: MusunestClient["deleteRecord"];
+} = {}): MusunestClient {
+  return {
+    getSpec: parts.spec ?? (() => Promise.resolve(okResult(DASHBOARD_LIST_SPEC))),
+    getView:
+      parts.view ??
+      ((_instanceId, name) =>
+        Promise.resolve(okResult(name === "members" ? DASH_MEMBERS_VIEW : DASH_ACTIVITIES_VIEW))),
+    addRecord: () => Promise.resolve(errResult("SPEC_UNAVAILABLE", 503)),
+    deleteRecord: parts.remove ?? (() => Promise.resolve(errResult("SPEC_UNAVAILABLE", 503))),
+    setRecord: () => Promise.resolve(errResult("SPEC_UNAVAILABLE", 503)),
+  };
+}
+
+describe("一覧の消すボタン（Issue #214。見本 dashboard）", () => {
+  it("消す操作がある entity の一覧に、行ごとに消すボタンが出る（参照されている行には理由）", async () => {
+    const { container } = await renderScreen(dashboardListClient());
+
+    await screen.findAllByText("練習");
+    // 消せる行（a1）にだけボタンが出る
+    const buttons = screen.getAllByRole("button", { name: "削除" });
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]?.getAttribute("data-delete")).toBe("a1");
+    // 印は **table が使うものと同じ**である（`delete` クラス。Issue #214）
+    expect(buttons[0]?.className).toBe("delete");
+    // 参照されている行（a2）にはボタンを出さず、**table と同じ**断りの理由を出す
+    expect(container.querySelector('[data-row="a2"] button')).toBeNull();
+    const blocked = container.querySelector('[data-row="a2"] .delete-blocked');
+    expect(blocked?.getAttribute("data-blocked")).toBe("true");
+    expect(blocked?.textContent).toContain("activity.parent 1 件");
+  });
+
+  it("メンバーの一覧（type list）にも、消すボタンが出る", async () => {
+    const { container } = await renderScreen(dashboardListClient());
+    await screen.findAllByText("練習");
+
+    // 一覧を切り替える（views が 2 つあるので切替が出る）
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "members" }));
+    });
+
+    await screen.findByText("田中");
+    const buttons = screen.getAllByRole("button", { name: "削除" });
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]?.getAttribute("data-delete")).toBe("m1");
+    expect(container.querySelector('[data-row="m1"] .delete')?.getAttribute("data-delete")).toBe("m1");
+  });
+
+  it("消したら、一覧を読み直す（返ってきた行を勝手に足さない）", async () => {
+    const remove = vi.fn<MusunestClient["deleteRecord"]>(() =>
+      Promise.resolve(okResult({ entity: "activity", id: "a1", deleted: true })),
+    );
+    const getView = vi.fn<MusunestClient["getView"]>((_instanceId, name) =>
+      Promise.resolve(okResult(name === "members" ? DASH_MEMBERS_VIEW : DASH_ACTIVITIES_VIEW)),
+    );
+    await renderScreen(dashboardListClient({ view: getView, remove }));
+
+    await screen.findAllByText("練習");
+    const before = getView.mock.calls.filter((call) => call[1] === "activities").length;
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button", { name: "削除" })[0] as HTMLElement);
+    });
+
+    expect(remove).toHaveBeenCalledWith("inst-1", "deleteActivity", "a1");
+    // 成功したら**一覧を読み直す**（読んだ回数が増える）
+    const after = getView.mock.calls.filter((call) => call[1] === "activities").length;
+    expect(after).toBe(before + 1);
+  });
+});

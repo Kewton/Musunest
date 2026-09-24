@@ -12,8 +12,8 @@
 // （`CLAUDE.md` の不変条件）。判定そのものは data-api の仕事である（app-api.test.ts が見る）。
 
 import { createElement } from "react";
-import { act, cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { InstantRenderer } from "./renderer";
 import type {
   ApiRow,
@@ -92,12 +92,13 @@ const BOARD_VIEW: ApiViewBody = {
 function boardClient(parts: {
   readonly spec?: MusunestClient["getSpec"];
   readonly view?: MusunestClient["getView"];
+  readonly remove?: MusunestClient["deleteRecord"];
 } = {}): MusunestClient {
   return {
     getSpec: parts.spec ?? (() => Promise.resolve(okResult(BOARD_SPEC))),
     getView: parts.view ?? (() => Promise.resolve(okResult(BOARD_VIEW))),
     addRecord: () => Promise.resolve(errResult("SPEC_UNAVAILABLE", 503)),
-    deleteRecord: () => Promise.resolve(errResult("SPEC_UNAVAILABLE", 503)),
+    deleteRecord: parts.remove ?? (() => Promise.resolve(errResult("SPEC_UNAVAILABLE", 503))),
     setRecord: () => Promise.resolve(errResult("SPEC_UNAVAILABLE", 503)),
   };
 }
@@ -292,5 +293,89 @@ describe("幅 360 CSS px（機械で見られる範囲。04 §7.2）", () => {
     expect(styleOf(".board-column")).toContain("flex: 1 1 160px");
     expect(styleOf(".board-column")).toContain("min-width: 0");
     expect(styleOf(".board-card")).toContain("overflow-wrap: anywhere");
+  });
+});
+
+// ── 消す（Issue #214。見本 task-board のボード） ──────────────────────────
+//
+// 見本 task-board のボードは `deleteTask`（`kind: delete`）を宣言している。**一覧の種類が board でも、
+// table・一覧と同じ処理でカードごとに消すボタンを出す**——参照されている行にはボタンの代わりに理由を出す。
+// 判定は data-api で、画面は返ってきた `references` をそのまま見る（`03` §2.2）。
+
+const BOARD_DELETE_ACTIONS = [
+  { name: "addTask", entity: "task", kind: "create" },
+  { name: "deleteTask", entity: "task", kind: "delete" },
+] as const;
+
+/** 見本 task-board のボード（`deleteTask` を宣言している）と、消せる行・参照されている行 */
+const DELETE_BOARD_SPEC: ApiSpecBody = {
+  ...BOARD_SPEC,
+  spec: { ...BOARD_SPEC.spec, actions: [...BOARD_DELETE_ACTIONS] },
+  actions: [...BOARD_DELETE_ACTIONS],
+};
+
+const FREE_CARD: ApiRow = { ...taskCard("t1", "todo", false), references: [] };
+const USED_CARD: ApiRow = {
+  ...taskCard("t2", "todo", false),
+  references: [{ entity: "task", field: "parent", count: 2 }],
+};
+
+const DELETE_BOARD_VIEW: ApiViewBody = {
+  ...BOARD_VIEW,
+  actions: [...BOARD_DELETE_ACTIONS],
+  rows: [FREE_CARD, USED_CARD],
+};
+
+const deleteBoardClient = (parts: {
+  readonly remove?: MusunestClient["deleteRecord"];
+  readonly view?: MusunestClient["getView"];
+} = {}): MusunestClient =>
+  boardClient({
+    spec: () => Promise.resolve(okResult(DELETE_BOARD_SPEC)),
+    view: () => Promise.resolve(okResult(DELETE_BOARD_VIEW)),
+    ...(parts.view === undefined ? {} : { view: parts.view }),
+    ...(parts.remove === undefined ? {} : { remove: parts.remove }),
+  });
+
+describe("ボードの消すボタン（Issue #214）", () => {
+  it("消す操作がある entity のボードに、カードごとに消すボタンが出る（参照されている行には理由）", async () => {
+    const { container } = await renderScreen(deleteBoardClient());
+
+    await screen.findByText("タスク t1");
+    // 消せる行（t1）にだけボタンが出る
+    const buttons = screen.getAllByRole("button", { name: "削除" });
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]?.getAttribute("data-delete")).toBe("t1");
+    // 印は **table が使うものと同じ**である（`delete` クラス。Issue #214）
+    expect(buttons[0]?.className).toBe("delete");
+    // 参照されている行（t2）にはボタンを出さず、**table と同じ**断りの理由を出す
+    expect(container.querySelector('[data-card="t2"] button')).toBeNull();
+    const blocked = container.querySelector('[data-card="t2"] .delete-blocked');
+    expect(blocked?.getAttribute("data-blocked")).toBe("true");
+    expect(blocked?.textContent).toContain("task.parent 2 件");
+  });
+
+  it("消したら、ボードを読み直す（返ってきた行を勝手に足さない）", async () => {
+    const remove = vi.fn<MusunestClient["deleteRecord"]>(() =>
+      Promise.resolve(okResult({ entity: "task", id: "t1", deleted: true })),
+    );
+    const view = vi.fn<MusunestClient["getView"]>(() => Promise.resolve(okResult(DELETE_BOARD_VIEW)));
+    await renderScreen(deleteBoardClient({ remove, view }));
+
+    await screen.findByText("タスク t1");
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button", { name: "削除" })[0] as HTMLElement);
+    });
+
+    expect(remove).toHaveBeenCalledWith("inst-1", "deleteTask", "t1");
+    // 成功したら**一覧を読み直す**（初回と合わせて 2 回）
+    expect(view).toHaveBeenCalledTimes(2);
+  });
+
+  it("消す操作を宣言していなければ、消すボタンを出さない", async () => {
+    await renderScreen(boardClient());
+
+    await screen.findByText("タスク t2");
+    expect(screen.queryByRole("button", { name: "削除" })).toBeNull();
   });
 });
