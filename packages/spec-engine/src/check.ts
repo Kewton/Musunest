@@ -128,7 +128,8 @@ interface YamlLine {
   readonly text: string;
 }
 
-interface YamlFailure {
+/** 読めなかった理由（1 始まりの行と列）。`readSpecDocument` も同じ形で返す */
+export interface YamlFailure {
   readonly line: number;
   readonly column: number;
   readonly message: string;
@@ -3561,4 +3562,46 @@ export function checkSpec(source: string): CheckResult {
     return failure();
   }
   return { ok: true, diagnostics: [], spec };
+}
+
+// ── 6. 構造の正本（JSON Schema）に渡す読み取り ──────────────────
+//
+// 宣言の**構造**の正本は `@musunest/appspec-schema/contract/app-spec.schema.json`（文法の契約の一部）
+// である。その schema を当てるには、**YAML を読んだデータ**が要る——正規化した JSON（AppSpec）ではない。
+// ここは 1 節の読み取り（`readYaml`）の結果を、JSON の値に写すだけである。
+//
+// **読み取りの規則はここで広げない。** 写すのは形だけである（写像 → オブジェクト、並び → 配列、
+// スカラ → 文字列、値の無い欄 → null）。同じ木を使うので、静的チェックと schema の判定がずれない。
+
+/** `readSpecDocument` の結果。読めたときは JSON の値、読めなかったときは理由を返す（例外は投げない） */
+export type SpecDocumentResult =
+  | { readonly ok: true; readonly document: unknown }
+  | { readonly ok: false; readonly failure: YamlFailure };
+
+/** 読み取った木を JSON の値にする。同じ欄が 2 回あれば後ろが残る（重複は静的チェックが別に断る） */
+function toJsonValue(node: YamlNode): unknown {
+  switch (node.kind) {
+    case "map": {
+      const value: Record<string, unknown> = {};
+      for (const entry of node.entries) value[entry.key] = toJsonValue(entry.value);
+      return value;
+    }
+    case "seq":
+      return node.items.map((item) => toJsonValue(item));
+    case "scalar":
+      return node.text;
+    case "null":
+      return null;
+  }
+}
+
+/**
+ * 宣言の YAML を読んで、JSON の値（構造の正本を当てられる形）にする。
+ * **静的チェックと同じ読み取り（1 節）を使う**——読む側を 2 つ持たない。
+ */
+export function readSpecDocument(source: string): SpecDocumentResult {
+  const { node, failure } = readYaml(source);
+  if (failure !== null) return { ok: false, failure };
+  if (node === null) return { ok: false, failure: { line: 1, column: 1, message: "宣言が空である" } };
+  return { ok: true, document: toJsonValue(node) };
 }

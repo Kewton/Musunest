@@ -10,6 +10,10 @@
 export const VOCABULARY_FILE = "vocabulary.yaml";
 /** M1.1 での意味の文書 */
 export const SEMANTICS_FILE = "docs/semantics.md";
+/** 文法の契約（宣言の構造の正本など）のディレクトリ */
+export const CONTRACT_DIR = "contract";
+/** 宣言の構造の正本（JSON Schema。文法の契約の一部。workspace/mvp/m1/06 §2.1） */
+export const APP_SPEC_SCHEMA_FILE = `${CONTRACT_DIR}/app-spec.schema.json`;
 /** 見本のディレクトリ。見本 1 つにつき 1 ディレクトリ（app.spec.yaml と scenario.json） */
 export const SAMPLES_DIR = "samples";
 /** 負例のディレクトリ。samples/ の中で、この名前だけは見本ではない */
@@ -34,6 +38,7 @@ export function packageFile(relativePath: string): URL {
 
 export const vocabularyFile = (): URL => packageFile(VOCABULARY_FILE);
 export const semanticsFile = (): URL => packageFile(SEMANTICS_FILE);
+export const appSpecSchemaFile = (): URL => packageFile(APP_SPEC_SCHEMA_FILE);
 export const samplesDir = (): URL => packageFile(`${SAMPLES_DIR}/`);
 export const sampleSpecFile = (sample: string): URL =>
   packageFile(`${SAMPLES_DIR}/${sample}/${SPEC_FILE_NAME}`);

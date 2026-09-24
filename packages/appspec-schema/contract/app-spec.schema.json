@@ -1,0 +1,458 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "宣言（app.spec.yaml）を読んだ結果の、構造の正本である（文法の契約の一部。community.app-spec/v0.2-draft）。\n契約は 1 つの版に束ねるが、性質ごとに別の形式で書く（workspace/mvp/m1/06-grammar-and-authoring-trial.md §2.1）:\n  構造（7 欄と、欄ごとの形）          … この file（JSON Schema）\n  式                                  … EBNF（別の正本）\n  型の組み合わせ・名前解決・上限・予約語 … 規則の表（別の正本）\n  語彙が閉じていること                … この file の additionalProperties と、各 enum（知らない欄・キーを受けない）\n**対象は「YAML を読んだデータ」であって、正規化した JSON（NormalizedAppSpec）ではない。**\n値はすべて文字列である——YAML の読み取りは型を解釈せず、`true`・数・日付も字面のまま読む（spec-engine の静的チェックと同じ）。\nこの schema は意味を検証しない。参照先の実在・式の型・集計の整合は、静的チェックの規則（別の正本）が受け持つ。\n語彙の正本は docs/semantics.md と src/spec.ts である。両方を変えるときは、同じ PR でこの file も直す。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entities", "views", "actions", "validations", "computed", "permissions", "minIdentity"],
+  "properties": {
+    "entities": { "type": "array", "items": { "$ref": "#/definitions/entity" } },
+    "views": { "type": "array", "items": { "$ref": "#/definitions/view" } },
+    "actions": { "type": "array", "items": { "$ref": "#/definitions/action" } },
+    "validations": { "type": "array", "items": { "$ref": "#/definitions/validation" } },
+    "computed": { "type": "array", "items": { "$ref": "#/definitions/computed" } },
+    "permissions": { "type": "array", "items": { "$ref": "#/definitions/permission" } },
+    "minIdentity": { "$ref": "#/definitions/minIdentity" }
+  },
+  "definitions": {
+    "name": {
+      "$comment": "名前（entity・項目・一覧・計算・操作・検査）。src/spec.ts の NAME_PATTERN と同じである。",
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9]*$"
+    },
+    "reference": {
+      "$comment": "ほかの名前を指す値（entity 名・項目名・計算の名前）。実在は静的チェックが見る。",
+      "type": "string",
+      "minLength": 1
+    },
+    "label": {
+      "$comment": "表示名。空でない文字列である（空文字は表示名にならない。M1.3。Issue #176）。",
+      "type": "string",
+      "minLength": 1
+    },
+    "fieldType": {
+      "$comment": "1 語で書ける項目の型（短い書き方。`amount: number`）。src/spec.ts の FIELD_TYPES。",
+      "type": "string",
+      "enum": ["string", "number", "list", "date"]
+    },
+    "positiveInteger": {
+      "$comment": "1 以上の整数。YAML の値を字面のまま読むので、数ではなく文字列である。",
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "dottedTarget": {
+      "$comment": "「<entity>.<項目か計算>」の形（集計の対象・groupBy）。`.` は 1 つだけである。",
+      "type": "string",
+      "pattern": "^[^.]+\\.[^.]+$"
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "fields"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "fields": {
+          "$comment": "項目名 → 宣言。項目名も名前の書式に従う。",
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9]*$" },
+          "additionalProperties": { "$ref": "#/definitions/fieldDeclaration" }
+        }
+      }
+    },
+    "fieldDeclaration": {
+      "$comment": "項目の宣言。短い書き方（`amount: number`）と、展開した書き方（写像）の両方を受ける。",
+      "oneOf": [
+        { "$ref": "#/definitions/fieldType" },
+        { "$ref": "#/definitions/plainFieldDeclaration" },
+        { "$ref": "#/definitions/refFieldDeclaration" },
+        { "$ref": "#/definitions/listFieldDeclaration" },
+        { "$ref": "#/definitions/enumFieldDeclaration" }
+      ]
+    },
+    "plainFieldDeclaration": {
+      "$comment": "1 語の型に、表示名（`label`）を付けた形。`list` は listFieldDeclaration が受ける。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "enum": ["string", "number", "date"] },
+        "label": { "$ref": "#/definitions/label" }
+      }
+    },
+    "refFieldDeclaration": {
+      "$comment": "参照（`{type: ref, to: <entity>}`）。参照先は 1 件である。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "to"],
+      "properties": {
+        "type": { "type": "string", "const": "ref" },
+        "to": { "$ref": "#/definitions/reference" },
+        "label": { "$ref": "#/definitions/label" }
+      }
+    },
+    "listFieldDeclaration": {
+      "$comment": "参照の並び（`{type: list, of: <entity>}`）。`of` を省けば文字列の並び（従来の `list`）である。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "const": "list" },
+        "of": { "$ref": "#/definitions/reference" },
+        "label": { "$ref": "#/definitions/label" }
+      }
+    },
+    "enumFieldDeclaration": {
+      "$comment": "選択肢（`{type: enum, options: {...}}`）。`options` は「キー: 表示名」で、1 つ以上書く（M1.3）。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "options"],
+      "properties": {
+        "type": { "type": "string", "const": "enum" },
+        "options": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "default": { "type": "string", "minLength": 1 },
+        "label": { "$ref": "#/definitions/label" }
+      }
+    },
+    "nameList": {
+      "$comment": "名前を 1 行に並べた `[a, b]`（`show`・`filters`）。",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "view": {
+      "$comment": "一覧。書ける欄は `type` が決める（語彙は閉じている）。`type` を書かなければ、M1.1 の形（name と entity）である。",
+      "oneOf": [
+        { "$ref": "#/definitions/plainView" },
+        { "$ref": "#/definitions/tableView" },
+        { "$ref": "#/definitions/settlementView" },
+        { "$ref": "#/definitions/boardView" },
+        { "$ref": "#/definitions/listView" },
+        { "$ref": "#/definitions/dashboardView" }
+      ]
+    },
+    "plainView": {
+      "$comment": "種類を書かない一覧（M1.1 と同じ）。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "entity"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "entity": { "$ref": "#/definitions/reference" }
+      }
+    },
+    "tableView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "entity", "type"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "entity": { "$ref": "#/definitions/reference" },
+        "type": { "type": "string", "const": "table" },
+        "show": { "$ref": "#/definitions/nameList" }
+      }
+    },
+    "settlementView": {
+      "$comment": "精算の表示。列の並びを持たないので `show` は書けない。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "entity", "type"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "entity": { "$ref": "#/definitions/reference" },
+        "type": { "type": "string", "const": "settlement" }
+      }
+    },
+    "boardView": {
+      "$comment": "ボード（M1.3）。`columns` は必須である（列が無ければボードにならない）。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "entity", "type", "columns"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "entity": { "$ref": "#/definitions/reference" },
+        "type": { "type": "string", "const": "board" },
+        "columns": { "$ref": "#/definitions/reference" },
+        "highlight": { "$ref": "#/definitions/reference" }
+      }
+    },
+    "listView": {
+      "$comment": "一覧（M1.3）。画面で絞り込む項目（`filters`）を持てる。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "entity", "type"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "entity": { "$ref": "#/definitions/reference" },
+        "type": { "type": "string", "const": "list" },
+        "show": { "$ref": "#/definitions/nameList" },
+        "filters": { "$ref": "#/definitions/nameList" }
+      }
+    },
+    "dashboardView": {
+      "$comment": "ダッシュボード（M1.4）。行を並べないので `entity` を持たず、部品（`widgets`）を 1 つ以上書く。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "widgets"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "type": { "type": "string", "const": "dashboard" },
+        "widgets": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/widget" }
+        }
+      }
+    },
+    "widget": {
+      "$comment": "ダッシュボードの部品（M1.4）。書ける欄は `type` が決める（語彙は閉じている）。",
+      "oneOf": [
+        { "$ref": "#/definitions/valueWidget" },
+        { "$ref": "#/definitions/rankingWidget" }
+      ]
+    },
+    "valueWidget": {
+      "$comment": "数値（`number`）・棒（`bar`）・円（`pie`）。`value` で計算を指す。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "type": "string", "enum": ["number", "bar", "pie"] },
+        "value": { "$ref": "#/definitions/reference" },
+        "label": { "$ref": "#/definitions/label" },
+        "unit": { "type": "string", "minLength": 1 }
+      }
+    },
+    "rankingWidget": {
+      "$comment": "順位（`ranking`。M1.4。Issue #182）。`name` は鍵で、`by` は `show` に含める。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "name", "entity", "by", "show"],
+      "properties": {
+        "type": { "type": "string", "const": "ranking" },
+        "name": { "$ref": "#/definitions/name" },
+        "entity": { "$ref": "#/definitions/reference" },
+        "by": { "$ref": "#/definitions/reference" },
+        "show": { "$ref": "#/definitions/nameList" },
+        "label": { "$ref": "#/definitions/label" },
+        "limit": { "$ref": "#/definitions/positiveInteger" }
+      }
+    },
+    "action": {
+      "$comment": "操作。書ける欄は `kind` が決める。`kind` を省くのは `create` である（M1.1 の意味を変えない）。",
+      "oneOf": [
+        { "$ref": "#/definitions/createAction" },
+        { "$ref": "#/definitions/updateAction" },
+        { "$ref": "#/definitions/deleteAction" }
+      ]
+    },
+    "createAction": {
+      "$comment": "作る（`create`。`kind` を省いた場合も同じ）。対象の行が無いので `set` も `when` も書けない。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "entity"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "entity": { "$ref": "#/definitions/reference" },
+        "kind": { "type": "string", "const": "create" }
+      }
+    },
+    "updateAction": {
+      "$comment": "直す（`update`）。決まった値への書き換え（`set`）と、その行で操作してよい条件（`when`）を持てる。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "entity", "kind"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "entity": { "$ref": "#/definitions/reference" },
+        "kind": { "type": "string", "const": "update" },
+        "set": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "when": { "type": "string", "minLength": 1 }
+      }
+    },
+    "deleteAction": {
+      "$comment": "消す（`delete`）。書き換える値が無いので `set` は書けない。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "entity", "kind"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "entity": { "$ref": "#/definitions/reference" },
+        "kind": { "type": "string", "const": "delete" },
+        "when": { "type": "string", "minLength": 1 }
+      }
+    },
+    "validation": {
+      "$comment": "入力の検査。`expression` は真偽の式である（式の文法はこの schema の外）。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "entity", "expression"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "entity": { "$ref": "#/definitions/reference" },
+        "expression": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "computed": {
+      "$comment": "計算。式（`expression`）・集計（`aggregate`）・精算（`settle`）のどれか 1 つを持つ。書ける欄は `scope` と `type` が決める。",
+      "oneOf": [
+        { "$ref": "#/definitions/settleComputed" },
+        { "$ref": "#/definitions/appComputed" },
+        { "$ref": "#/definitions/groupsComputed" },
+        { "$ref": "#/definitions/rowComputed" }
+      ]
+    },
+    "settleComputed": {
+      "$comment": "精算（M1.2）。結果は送金の並びなので `type` を持たない。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "entity", "settle"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "entity": { "$ref": "#/definitions/reference" },
+        "settle": { "$ref": "#/definitions/settle" },
+        "label": { "$ref": "#/definitions/label" }
+      }
+    },
+    "appComputed": {
+      "$comment": "アプリ全体の計算（`scope: app`。M1.4）。どのレコードにも属さないので `entity` も `settle` も書けない。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "scope", "type"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "scope": { "type": "string", "const": "app" },
+        "type": { "type": "string", "enum": ["number", "boolean"] },
+        "expression": { "type": "string", "minLength": 1 },
+        "aggregate": { "$ref": "#/definitions/aggregate" },
+        "label": { "$ref": "#/definitions/label" }
+      },
+      "oneOf": [{ "required": ["expression"] }, { "required": ["aggregate"] }]
+    },
+    "groupsComputed": {
+      "$comment": "見出しごとの集計（`type: groups`。M1.4）。`scope` も `entity` も持たず、集計に `groupBy` を書く。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "aggregate"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "type": { "type": "string", "const": "groups" },
+        "aggregate": { "$ref": "#/definitions/groupsAggregate" },
+        "label": { "$ref": "#/definitions/label" }
+      }
+    },
+    "rowComputed": {
+      "$comment": "行ごとの計算。`entity` を持ち、式か集計のどちらか 1 つを書く。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "entity", "type"],
+      "properties": {
+        "name": { "$ref": "#/definitions/name" },
+        "entity": { "$ref": "#/definitions/reference" },
+        "type": { "type": "string", "enum": ["number", "boolean"] },
+        "expression": { "type": "string", "minLength": 1 },
+        "aggregate": { "$ref": "#/definitions/aggregate" },
+        "label": { "$ref": "#/definitions/label" }
+      },
+      "oneOf": [{ "required": ["expression"] }, { "required": ["aggregate"] }]
+    },
+    "settle": {
+      "$comment": "精算（M1.2）。支出の entity と、そのうちの 3 つの項目（額・払った人・割る人）を指す。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expense", "amount", "payer", "shares"],
+      "properties": {
+        "expense": { "$ref": "#/definitions/reference" },
+        "amount": { "$ref": "#/definitions/reference" },
+        "payer": { "$ref": "#/definitions/reference" },
+        "shares": { "$ref": "#/definitions/reference" }
+      }
+    },
+    "aggregate": {
+      "$comment": "集計（M1.2・M1.4）。`sum`・`count`・`avg` のどれか 1 つを持つ。",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sum": { "$ref": "#/definitions/dottedTarget" },
+        "count": { "$ref": "#/definitions/reference" },
+        "avg": { "$ref": "#/definitions/dottedTarget" },
+        "where": { "$ref": "#/definitions/aggregateWhere" },
+        "groupBy": { "$ref": "#/definitions/aggregateGroupBy" },
+        "last": { "$ref": "#/definitions/positiveInteger" }
+      },
+      "oneOf": [{ "required": ["sum"] }, { "required": ["count"] }, { "required": ["avg"] }]
+    },
+    "groupsAggregate": {
+      "$comment": "見出しごとの集計の集計。`groupBy` が必須である（分ける対象が無ければ見出しにならない）。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["groupBy"],
+      "properties": {
+        "sum": { "$ref": "#/definitions/dottedTarget" },
+        "count": { "$ref": "#/definitions/reference" },
+        "avg": { "$ref": "#/definitions/dottedTarget" },
+        "where": { "$ref": "#/definitions/aggregateWhere" },
+        "groupBy": { "$ref": "#/definitions/aggregateGroupBy" },
+        "last": { "$ref": "#/definitions/positiveInteger" }
+      },
+      "oneOf": [{ "required": ["sum"] }, { "required": ["count"] }, { "required": ["avg"] }]
+    },
+    "aggregateWhere": {
+      "$comment": "集計の対象を絞る条件（M1.2・M1.4）。「項目: this」か「項目: {contains: this}」か「項目: {within: <期間>}」である。",
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "string", "const": "this" },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["contains"],
+            "properties": { "contains": { "type": "string", "const": "this" } }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["within"],
+            "properties": { "within": { "type": "string", "enum": ["this_month"] } }
+          }
+        ]
+      }
+    },
+    "aggregateGroupBy": {
+      "$comment": "見出しごとに分ける対象（M1.4）。「<entity>.<項目>」か「{month: <entity>.<日付の項目>}」である。",
+      "oneOf": [
+        { "$ref": "#/definitions/dottedTarget" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["month"],
+          "properties": { "month": { "$ref": "#/definitions/dottedTarget" } }
+        }
+      ]
+    },
+    "permission": {
+      "$comment": "権限（M1.1）。名前と subject はこの版の語彙に限る（語彙は閉じている）。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "subject"],
+      "properties": {
+        "name": { "type": "string", "enum": ["read", "write"] },
+        "subject": { "type": "string", "enum": ["minIdentity"] }
+      }
+    },
+    "minIdentity": {
+      "$comment": "使うのに最低限必要な本人確認（M1 はログインが無いので `anonymous` だけ）。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["anonymous"] }
+      }
+    }
+  }
+}
