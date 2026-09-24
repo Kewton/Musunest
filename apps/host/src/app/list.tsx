@@ -19,7 +19,7 @@
 // `flex-wrap` と `max-width: 100%` を inline で当て、**表のように横へ流さない**（幅 360 CSS px）。
 
 import { useState } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import type { Action, ApiRow, ApiValue, ApiViewBody } from "@musunest/sdk";
 
 /** 絞り込みの 1 項目。`options` は**「すべて」を除いた**候補である（値と、画面に出す表示名） */
@@ -40,6 +40,11 @@ export interface ListScreenProps {
   readonly labelOf: (field: string, value: ApiValue | undefined) => string;
   /** その entity の決まった値への書き換え（`set` を持つ操作。M1.3）。宣言の順 */
   readonly setActions: readonly Action[];
+  /**
+   * 行ごとの消すボタン（参照されている行には断りの理由）。**table と同じ処理を呼ぶ側が渡す**——
+   * この部品の中にボタンの出し方も断りの見せ方も持たない（Issue #214）。`undefined` なら何も出さない
+   */
+  readonly renderDelete: ((row: ApiRow) => ReactNode) | undefined;
   readonly onRunAction: (actionName: string, id: string) => void;
 }
 
@@ -109,7 +114,16 @@ const computedText = (value: number | boolean | null | undefined): string =>
 const isAllowed = (row: ApiRow, actionName: string): boolean =>
   row.allowedActions === undefined || row.allowedActions.includes(actionName);
 
-export function ListScreen({ view, show, filters, displayName, labelOf, setActions, onRunAction }: ListScreenProps) {
+export function ListScreen({
+  view,
+  show,
+  filters,
+  displayName,
+  labelOf,
+  setActions,
+  renderDelete,
+  onRunAction,
+}: ListScreenProps) {
   // 絞り込みの選択。**初期状態は「すべて」**である。この状態だけが持ち、持ち回さない（再読み込みで消えてよい）
   const [chosen, setChosen] = useState<Readonly<Record<string, string>>>({});
   const columns = columnsOf(view, show);
@@ -183,6 +197,8 @@ export function ListScreen({ view, show, filters, displayName, labelOf, setActio
                     {action.name}
                   </button>
                 ))}
+              {/* 行ごとの消すボタン（参照されている行には理由）。**table・ボードと同じ処理**を呼ぶ（Issue #214） */}
+              {renderDelete?.(row)}
             </li>
           ))}
         </ul>

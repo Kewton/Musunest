@@ -21,6 +21,7 @@
 // 利用者の入力は React の text node として挿入する（HTML として解釈させない）。
 
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import type {
   Action,
   ApiActionRef,
@@ -130,6 +131,12 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
   const action = view === null ? undefined : addActionOf(spec, view);
   // 消す操作（`kind: delete`。M1.2）。宣言が無ければ削除ボタンも出さない
   const deleteAction = view === null ? undefined : deleteActionOf(spec, view);
+  // 行ごとの消すボタン（参照されている行には理由。Issue #214）。**table・list・board が同じ処理を通る**
+  // ——3 つの部品は、この 1 つの関数を受け取って呼ぶだけである（`deleteControl` を部品ごとに書かない）
+  const renderDelete: RowDeleteControl | undefined =
+    deleteAction === undefined
+      ? undefined
+      : (row) => deleteControl(row, deleteAction, (id) => void removeRecord(deleteAction.name, id));
   // 決まった値への書き換え（`set` を持つ `kind: update`。M1.3）。宣言の順に、行ごとのボタンにする
   const setActions = view === null ? [] : setActionsOf(spec, view);
   // 一覧の種類（`type`）と、表に出す名前の順（`show`）は**宣言**にある。API の応答には行だけがある
@@ -297,6 +304,7 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           displayName={(name) => displayNameOf(view.labels, name)}
           labelOf={(field, value) => displayOf(entity, references, field, value)}
           setActions={setActions}
+          renderDelete={renderDelete}
           onRunAction={(actionName, id) => void runSetAction(actionName, id)}
         />
       ) : declaration?.type === "list" ? (
@@ -309,6 +317,7 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           displayName={(name) => displayNameOf(view.labels, name)}
           labelOf={(field, value) => displayOf(entity, references, field, value)}
           setActions={setActions}
+          renderDelete={renderDelete}
           onRunAction={(actionName, id) => void runSetAction(actionName, id)}
         />
       ) : view.rows.length === 0 ? (
@@ -321,9 +330,8 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           entity={entity}
           references={references}
           show={declaration?.show}
-          deleteAction={deleteAction}
           setActions={setActions}
-          onDelete={(id) => void removeRecord(deleteAction?.name ?? "", id)}
+          renderDelete={renderDelete}
           onRunAction={(actionName, id) => void runSetAction(actionName, id)}
         />
       )}
@@ -377,15 +385,15 @@ function columnsOf(view: ApiViewBody, show: readonly string[] | undefined): read
  * **消す操作（`kind: delete`）を宣言していれば、行ごとに削除の列を足す**（M1.2）。
  * 参照されている行（`row.references` が空でない）には**ボタンを出さず、理由を出す**——
  * ただしこれは見せ方であって守りではなく、実際に断るのは data-api である（`03` §2.2）。
+ * **この見せ方は `deleteControl` が 1 つだけ持つ**（一覧・ボードも同じものを通る。Issue #214）。
  */
 function RowTable({
   view,
   entity,
   references,
   show,
-  deleteAction,
   setActions,
-  onDelete,
+  renderDelete,
   onRunAction,
 }: {
   readonly view: ApiViewBody;
@@ -393,16 +401,15 @@ function RowTable({
   readonly references: readonly ReferenceData[];
   /** 表に出す名前の順（宣言の `show`）。書いていなければ `undefined` */
   readonly show: readonly string[] | undefined;
-  /** その entity の消す操作（`kind: delete`）。宣言が無ければ `undefined`（列も出さない） */
-  readonly deleteAction: ApiActionRef | undefined;
   /** その entity の決まった値への書き換え（`set` を持つ操作。M1.3）。宣言の順 */
   readonly setActions: readonly Action[];
-  readonly onDelete: (id: string) => void;
+  /** 行ごとの消すボタン（参照されている行には理由）。宣言が無ければ `undefined`（列も出さない） */
+  readonly renderDelete: RowDeleteControl | undefined;
   readonly onRunAction: (actionName: string, id: string) => void;
 }) {
   const columns = columnsOf(view, show);
   // 操作の列は、消す操作か、決まった値への書き換えを宣言しているときだけ出す
-  const hasActions = deleteAction !== undefined || setActions.length > 0;
+  const hasActions = renderDelete !== undefined || setActions.length > 0;
   return (
     <div className="table-scroll">
       <table className="instant-table">
@@ -451,22 +458,8 @@ function RowTable({
                         {candidate.name}
                       </button>
                     ))}
-                  {deleteAction !== undefined &&
-                    (isDeletable(row) && isActionAllowed(row, deleteAction.name) ? (
-                      <button
-                        type="button"
-                        className="delete"
-                        data-delete={row.id}
-                        onClick={() => onDelete(row.id)}
-                      >
-                        削除
-                      </button>
-                    ) : isDeletable(row) ? null : (
-                      // **参照されている行にはボタンを出さない。** 代わりに、消せない理由をその場に出す
-                      <span className="delete-blocked" data-blocked="true">
-                        {blockedReason(row.references ?? [])}
-                      </span>
-                    ))}
+                  {/* 行ごとの消すボタン（参照されている行には理由）。**一覧・ボードと 1 つの処理**（Issue #214） */}
+                  {renderDelete?.(row)}
                 </td>
               )}
             </tr>
@@ -476,6 +469,42 @@ function RowTable({
     </div>
   );
 }
+
+/**
+ * 行ごとの「消す」の見せ方（Issue #214）。**表（table）・一覧（list）・ボード（board）が、この 1 つの
+ * 処理を通る**——消すボタンの出し方も、参照されている行に出す断りも、ここで決める（部品ごとに書かない）。
+ *
+ * - その行で消す操作を実行してよいか（`row.allowedActions`）……だめなら**何も出さない**
+ * - 参照されている行（`row.references` が空でない）……**ボタンを出さず、消せない理由を出す**
+ * - それ以外……**消すボタン**を出す
+ *
+ * **隠すのは守りではない**——断るのは data-api である（`03` §2.2）。
+ */
+function deleteControl(
+  row: ApiRow,
+  deleteAction: ApiActionRef,
+  onDelete: (id: string) => void,
+): ReactNode {
+  if (!isActionAllowed(row, deleteAction.name)) return null;
+  if (!isDeletable(row)) {
+    return (
+      <span className="delete-blocked" data-blocked="true">
+        {blockedReason(row.references ?? [])}
+      </span>
+    );
+  }
+  return (
+    <button type="button" className="delete" data-delete={row.id} onClick={() => onDelete(row.id)}>
+      削除
+    </button>
+  );
+}
+
+/**
+ * 行ごとの「消す」の見せ方（`deleteControl` を、1 つの宣言と 1 つの処理に閉じたもの。Issue #214）。
+ * **部品は、渡されたこの関数を呼ぶだけである**——宣言が無ければ `undefined` で、操作の欄そのものを出さない。
+ */
+type RowDeleteControl = (row: ApiRow) => ReactNode;
 
 /** その行を消せるか。**応答に `references` が無い**（宣言が無い）ときは `false` にしない（列も出ない） */
 const isDeletable = (row: ApiRow): boolean =>
