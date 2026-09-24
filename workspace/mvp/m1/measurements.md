@@ -180,3 +180,45 @@ CPU 時間の読み方の正本は `06` §7.1・§8（M0 の実測と同じ）�
 - 計測用インスタンスのデータは、**#109 の削除の操作**（`deleteExpense` → `deleteMember` の順。参照されているメンバーは先に消せない）で片付けた。ログに `api-measure: 200 を片付けた（支出 → メンバーの順）` が出ている。最後の `finally` の片付けでは 0 行だった（「残りを片付けた」は出ていない）
 - **片付いたことを読み直して確かめた**：`expenseList` と `memberList` を `/api` から読み、**どちらも `rows=0`**（HTTP 200）
 - インスタンスの登録（R2 の原本・正規化した JSON、D1 の登録行）は残してある。**行は 0** で、再測のときに同じインスタンスを使える（`m12-e2e-warikan` と同じ扱い）
+
+---
+
+## 11. 再測：200 件で D-1 に触れるか（2026-09-24・#216）
+
+**結論：触れていない。** どの経路も data-api の Worker 単体の CPU 最大は **55.44 ms 以下**で、D-1（200 ms）の約 1/4 以下である。
+**作りに手を入れる必要は無い。** 数の上限は M1.5 では決めない（所有者の決定 2026-09-24、Q3）。
+
+### 測り方
+
+- §2 と同じ（5 回温め → 60 秒 → 20 回。窓ごと・Worker 別の `max.cpuTime`）。宛先は staging（アカウント①。**Workers Paid**）
+- 見本 dashboard を測れるように、道具に `--sample dashboard` を足した（`infra/scripts/measure-free-tier.ts`。この Issue）
+- 計測用インスタンスは**専用**：`m12-cpu-warikan`（見本 warikan。いまの原本 SHA `6ea7893c…` に差し替えた）と `m15-cpu-dashboard`（見本 dashboard。原本 SHA `227d566b…`）。デモと e2e のインスタンスには触らない
+- データ：warikan はメンバー 3・支出 200。dashboard はメンバー 4・活動 200（日本時間の今月と先月に半分ずつ）。測り終えたあと、道具が片付けた（支出／活動 → メンバーの順）
+
+```
+pnpm exec tsx --env-file=.env infra/scripts/measure-free-tier.ts --api --instance m12-cpu-warikan --sizes 200
+pnpm exec tsx --env-file=.env infra/scripts/measure-free-tier.ts --api --sample dashboard --instance m15-cpu-dashboard --sizes 200
+```
+
+### 結果（data-api の Worker 単体の `max.cpuTime`。errors は全窓 0）
+
+| 見本 | 経路 | 2026-09-24 | 2026-09-17（§4） |
+|---|---|---|---|
+| warikan | spec | 1.77 ms | 2.00 ms |
+| warikan | expenseList | 25.80 ms | 30.25 ms |
+| warikan | memberList | **55.44 ms** | 60.60 ms |
+| warikan | settlement | 28.96 ms | 32.12 ms |
+| dashboard | spec | 2.75 ms | — |
+| dashboard | dashboard（集計・グラフ・順位） | 28.60 ms | — |
+| dashboard | activities | 21.49 ms | — |
+| dashboard | members | 21.49 ms | — |
+
+- 窓は 2026-09-23T23:58Z〜2026-09-24T00:09Z。全窓にサンプリングがあった（`max` は取りこぼし得る）
+- P-1（過去 7 日の上限超過）は 0 件
+- **M1.4 で足した集計（アプリ全体・見出しごと・順位）を全部載せた dashboard でも 28.60 ms** で、warikan の精算と同じくらいである
+- warikan は 9/17 より 1 割ほど小さいが、1 回ずつの実測なので「速くなった」とは言わない
+
+### 読み方の注意
+
+- **道具の出力は「P-7 に触れた」と判定する。** 道具の判定の線が、Free の枠の 7 ms（P-7）のままだからである。アカウント①は 2026-09-18 に Workers Paid へ上げ済みで、**いまの線は D-1（200 ms）**。プランの判断は要らない。道具の判定の線を D-1 に揃えるかは、次に道具に手を入れるときに決める
+- 200 件より多いときの伸び方は測っていない（memberList は 9/17 の実測で 200 件付近から急になる）
