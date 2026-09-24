@@ -1,0 +1,44 @@
+# 負例：順位の部品（type: ranking）の鍵（name）topActivities が、同じ一覧の widgets の中で重なっている。
+# 鍵は応答の ranking の欄を引く名前なので、重複させない（M1.4。Issue #182）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: activity
+    fields:
+      amount: number
+
+views:
+  - name: dashboard
+    type: dashboard
+    widgets:
+      - type: ranking
+        name: topActivities
+        entity: activity
+        by: doubled
+        show: [amount, doubled]
+      - type: ranking
+        name: topActivities
+        entity: activity
+        by: doubled
+        show: [amount, doubled]
+
+actions:
+  - name: addActivity
+    entity: activity
+
+validations: []
+
+computed:
+  - name: doubled
+    entity: activity
+    expression: amount * 2
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

@@ -2,11 +2,25 @@
   "$comment": "負例の一覧。各負例は、正しい宣言の 1 か所だけをわざと間違えたもの（本体は <name>.app.spec.yaml）。codes は静的チェックがその負例で出す誤りコード（草案。体系は spec-engine の静的チェック #97 で確定する）。どの語彙の負例かは vocabulary.yaml の negatives にある。形は src/samples.ts の NegativeIndex。",
   "negatives": [
     {
+      "name": "action-duplicate-name",
+      "codes": [
+        "LOGIC_ACTION_DUPLICATE_NAME"
+      ],
+      "why": "操作の名前 addExpense が 2 つある"
+    },
+    {
       "name": "action-not-reachable",
       "codes": [
         "UI_ACTION_NOT_REACHABLE"
       ],
       "why": "操作 addTag の entity tag を、entity に持つ view が 1 つも無い（画面から届かない。API では動くのに、画面では押せない。M1.4。Issue #201）"
+    },
+    {
+      "name": "action-set-field-not-found",
+      "codes": [
+        "LOGIC_ACTION_SET_FIELD_NOT_FOUND"
+      ],
+      "why": "決まった値への書き換え（set）の項目 ammount が、その操作の entity に無い"
     },
     {
       "name": "action-unknown-entity",
@@ -35,6 +49,13 @@
         "LOGIC_COMPUTED_CYCLE"
       ],
       "why": "計算 totalFromBeta と totalFromAlpha が、集計をまたいで互いを参照している"
+    },
+    {
+      "name": "aggregate-form-invalid",
+      "codes": [
+        "LOGIC_AGGREGATE_FORM_INVALID"
+      ],
+      "why": "集計（aggregate）に sum と count を同時に書いている（どれか 1 つである）"
     },
     {
       "name": "aggregate-sum-of-string",
@@ -86,11 +107,25 @@
       "why": "計算 first と second が互いを参照している"
     },
     {
+      "name": "computed-duplicate-name",
+      "codes": [
+        "LOGIC_COMPUTED_DUPLICATE_NAME"
+      ],
+      "why": "同じ entity の中で、計算の名前 headcount が 2 つある"
+    },
+    {
       "name": "computed-name-conflict",
       "codes": [
         "LOGIC_COMPUTED_NAME_CONFLICT"
       ],
       "why": "計算の名前 amount が、同じ entity の項目の名前と重なる"
+    },
+    {
+      "name": "computed-name-reserved",
+      "codes": [
+        "LOGIC_COMPUTED_NAME_RESERVED"
+      ],
+      "why": "計算の名前 id が、店頭が付ける値の名前である"
     },
     {
       "name": "computed-other-entity",
@@ -105,6 +140,13 @@
         "LOGIC_COMPUTED_TYPE_MISMATCH"
       ],
       "why": "計算 isPositive の type は number なのに、式が真偽になる"
+    },
+    {
+      "name": "computed-type-unknown",
+      "codes": [
+        "LOGIC_COMPUTED_TYPE_UNKNOWN"
+      ],
+      "why": "計算 headcount の type string は、計算の型（number・boolean・groups）に無い"
     },
     {
       "name": "computed-unknown-function",
@@ -170,11 +212,53 @@
       "why": "選択肢の項目 status の options に、同じキー todo が 2 回ある（M1.3）"
     },
     {
+      "name": "enum-key-not-found",
+      "codes": [
+        "LOGIC_ENUM_KEY_NOT_FOUND"
+      ],
+      "why": "選択肢（enum）の項目 status を、options に無いキー archived と比べている"
+    },
+    {
       "name": "enum-options-empty",
       "codes": [
         "DATA_FIELD_ENUM_OPTIONS_EMPTY"
       ],
       "why": "選択肢の項目 status の options が空である（キーを 1 つも書いていない。M1.3）"
+    },
+    {
+      "name": "expression-depth-exceeded",
+      "codes": [
+        "LOGIC_EXPRESSION_DEPTH_EXCEEDED"
+      ],
+      "why": "計算 total の式の深さが、上限（8）をちょうど 1 つ超えている（9）"
+    },
+    {
+      "name": "expression-invalid",
+      "codes": [
+        "LOGIC_EXPRESSION_INVALID"
+      ],
+      "why": "計算 total の式を解析できない（比較 `> 0 == 1` を連鎖させている）"
+    },
+    {
+      "name": "expression-nodes-exceeded",
+      "codes": [
+        "LOGIC_EXPRESSION_NODES_EXCEEDED"
+      ],
+      "why": "計算 total の式のノード数が、上限（64）をちょうど 1 つ超えている（65）"
+    },
+    {
+      "name": "expression-too-long",
+      "codes": [
+        "LOGIC_EXPRESSION_TOO_LONG"
+      ],
+      "why": "計算 total の式の文字数が、上限（200）をちょうど 1 つ超えている（201 文字）"
+    },
+    {
+      "name": "field-duplicate-name",
+      "codes": [
+        "DATA_FIELD_DUPLICATE_NAME"
+      ],
+      "why": "同じ entity の中で、項目の名前 amount が 2 つある"
     },
     {
       "name": "field-reserved-name",
@@ -233,6 +317,13 @@
       "why": "minIdentity の mode google は M1 に無い（M1 はログインが無いので anonymous だけ）"
     },
     {
+      "name": "key-duplicate",
+      "codes": [
+        "SHAPE_KEY_DUPLICATE"
+      ],
+      "why": "entity の中で、同じ欄 name を 2 回書いている"
+    },
+    {
       "name": "label-empty",
       "codes": [
         "SHAPE_LABEL_EMPTY"
@@ -282,6 +373,13 @@
       "why": "len に数の項目 amount を渡している（len は list だけを受け取る）"
     },
     {
+      "name": "permission-duplicate-name",
+      "codes": [
+        "PERMISSION_DUPLICATE_NAME"
+      ],
+      "why": "権限の名前 read が 2 つある"
+    },
+    {
       "name": "permission-unknown-name",
       "codes": [
         "PERMISSION_NAME_NOT_ALLOWED"
@@ -308,6 +406,13 @@
         "UI_RANKING_BY_NOT_SHOWN"
       ],
       "why": "順位の部品の基準（by）tagCount が、出す項目（show）の date に無い（基準は出す項目の 1 つとして見せるので、by は show に含めなければならない。M1.4。Issue #182）"
+    },
+    {
+      "name": "ranking-name-duplicate",
+      "codes": [
+        "UI_RANKING_NAME_DUPLICATE"
+      ],
+      "why": "順位の部品（type: ranking）の鍵 topActivities が、同じ一覧の widgets の中で重なっている"
     },
     {
       "name": "ref-target-not-shown",
@@ -345,6 +450,13 @@
       "why": "精算（settle）の額が、支出の entity の数の項目ではなく、文字列の項目 description を指している（M1.2）"
     },
     {
+      "name": "settle-reference-type-mismatch",
+      "codes": [
+        "LOGIC_SETTLE_REFERENCE_TYPE_MISMATCH"
+      ],
+      "why": "精算（settle）の払った人が、精算する entity を指す参照（ref）ではなく数の項目 amount である"
+    },
+    {
       "name": "settle-unknown-entity",
       "codes": [
         "LOGIC_ENTITY_NOT_FOUND"
@@ -373,6 +485,13 @@
       "why": "today に引数を渡している（today は引数を取らない。M1.3）"
     },
     {
+      "name": "validation-duplicate-name",
+      "codes": [
+        "LOGIC_VALIDATION_DUPLICATE_NAME"
+      ],
+      "why": "検査の名前 positiveAmount が 2 つある"
+    },
+    {
       "name": "validation-message-not-string",
       "codes": [
         "SHAPE_VALIDATION_MESSAGE_INVALID"
@@ -392,6 +511,20 @@
         "LOGIC_REFERENCE_NOT_FOUND"
       ],
       "why": "検査の式が、expense に無い名前 ammount を参照している"
+    },
+    {
+      "name": "value-invalid",
+      "codes": [
+        "SHAPE_VALUE_INVALID"
+      ],
+      "why": "欄 views が並びではない（中身が無ければ [] と書く）"
+    },
+    {
+      "name": "view-duplicate-name",
+      "codes": [
+        "UI_VIEW_DUPLICATE_NAME"
+      ],
+      "why": "一覧の名前 expenseList が 2 つある"
     },
     {
       "name": "view-unknown-entity",
@@ -427,6 +560,13 @@
         "LOGIC_AGGREGATE_WHERE_PERIOD_NOT_ALLOWED"
       ],
       "why": "期間の条件（within）に、知らない期間の名前 last_week を書いている（この版の期間は this_month だけである。M1.4）"
+    },
+    {
+      "name": "yaml-invalid",
+      "codes": [
+        "SHAPE_YAML_INVALID"
+      ],
+      "why": "YAML として読めない（並び `[a, b]` が 1 行で閉じていない）"
     }
   ]
 }

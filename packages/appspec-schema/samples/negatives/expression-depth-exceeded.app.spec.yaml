@@ -1,0 +1,34 @@
+# 負例：計算 total の式の深さが、上限（8）をちょうど 1 つ超えている（9）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: expense
+    fields:
+      amount: number
+      payer: string
+      participants: list
+
+views:
+  - name: expenseList
+    entity: expense
+
+actions:
+  - name: addExpense
+    entity: expense
+
+validations: []
+
+computed:
+  - name: total
+    entity: expense
+    expression: min(min(min(min(min(min(min(min(1, 1), 1), 1), 1), 1), 1), 1), 1)
+    type: number
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

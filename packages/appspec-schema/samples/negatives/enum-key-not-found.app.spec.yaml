@@ -1,0 +1,38 @@
+# 負例：検査の式が、選択肢（enum）の項目 status を、options に無いキー archived と比べている。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: task
+    fields:
+      title: string
+      status:
+        type: enum
+        options:
+          todo: 未着手
+          doing: 進行中
+          done: 完了
+        default: todo
+
+views:
+  - name: taskList
+    entity: task
+
+actions:
+  - name: addTask
+    entity: task
+
+validations:
+  - name: notArchived
+    entity: task
+    expression: status != "archived"
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous
