@@ -379,3 +379,60 @@ describe("ボードの消すボタン（Issue #214）", () => {
     expect(screen.queryByRole("button", { name: "削除" })).toBeNull();
   });
 });
+
+// ── 直す（`set` を持たない `kind: update`。M1.5。Issue #215） ──────────────
+//
+// ボードでも、**table・一覧と同じ処理**でカードごとに「直す」を出す。押すと、**今の値を入れたフォーム**
+// が開く（入力欄は追加と同じ部品である）。ここではボードが「直す」を出してフォームが開くことまでを見る
+// （送信と一覧の読み直しは renderer.test.ts が見る）。
+
+/** 見本 task-board のボードに「直す」（`editTask`。`set` を持たない `kind: update`）を足した宣言 */
+const BOARD_EDIT_ACTIONS = [
+  { name: "addTask", entity: "task", kind: "create" },
+  { name: "editTask", entity: "task", kind: "update" },
+] as const;
+
+const BOARD_EDIT_SPEC: ApiSpecBody = {
+  ...BOARD_SPEC,
+  spec: { ...BOARD_SPEC.spec, actions: [...BOARD_EDIT_ACTIONS] },
+  actions: [...BOARD_EDIT_ACTIONS],
+};
+
+describe("ボードの「直す」ボタン（M1.5。Issue #215）", () => {
+  it("カードごとに「直す」が出て、押すと今の値が入ったフォームが開く（受入条件）", async () => {
+    const { container } = await renderScreen(
+      boardClient({ spec: () => Promise.resolve(okResult(BOARD_EDIT_SPEC)) }),
+    );
+
+    await screen.findByText("タスク t2");
+    const buttons = screen.getAllByRole("button", { name: "直す" });
+    // カードは列ごとに並ぶ（列の順は options の順である）。どのカードにも出る
+    expect(buttons.map((button) => button.getAttribute("data-edit")).sort()).toEqual(["t1", "t2", "t3"]);
+    const first = buttons.find((button) => button.getAttribute("data-edit") === "t1");
+    expect(first?.getAttribute("data-action")).toBe("editTask");
+    // 印は **table・一覧が使うものと同じ**である（`edit` クラス）
+    expect(first?.className).toBe("edit");
+
+    fireEvent.click(first as HTMLElement);
+
+    const form = container.querySelector<HTMLFormElement>(".edit-form form");
+    if (form === null) throw new Error("直すのフォームが無い");
+    const valueOf = (name: string): string =>
+      (
+        form.querySelector(
+          `[data-field="${name}"] input, [data-field="${name}"] textarea, [data-field="${name}"] select`,
+        ) as HTMLInputElement | null
+      )?.value ?? "";
+    // **今の値が入っている**（選択肢（enum）はキーで入る）
+    expect(valueOf("title")).toBe("タスク t1");
+    expect(valueOf("status")).toBe("done");
+    expect(valueOf("due")).toBe("2026-09-15");
+  });
+
+  it("直す操作を宣言していなければ、ボタンを出さない（M1.3 の画面を変えない）", async () => {
+    await renderScreen(boardClient());
+
+    await screen.findByText("タスク t2");
+    expect(screen.queryByRole("button", { name: "直す" })).toBeNull();
+  });
+});

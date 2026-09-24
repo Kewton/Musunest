@@ -45,6 +45,12 @@ export interface ListScreenProps {
    * この部品の中にボタンの出し方も断りの見せ方も持たない（Issue #214）。`undefined` なら何も出さない
    */
   readonly renderDelete: ((row: ApiRow) => ReactNode) | undefined;
+  /**
+   * 行ごとの「直す」の見せ方（`set` を持たない `kind: update`。M1.5。Issue #215）。**table・ボードと
+   * 同じ処理を呼ぶ側が渡す**——この部品の中にボタンの出し方もフォームの開き方も持たない。
+   * `undefined` なら何も出さない
+   */
+  readonly renderEdit: ((row: ApiRow) => ReactNode) | undefined;
   readonly onRunAction: (actionName: string, id: string) => void;
 }
 
@@ -122,6 +128,7 @@ export function ListScreen({
   labelOf,
   setActions,
   renderDelete,
+  renderEdit,
   onRunAction,
 }: ListScreenProps) {
   // 絞り込みの選択。**初期状態は「すべて」**である。この状態だけが持ち、持ち回さない（再読み込みで消えてよい）
@@ -199,6 +206,8 @@ export function ListScreen({
                 ))}
               {/* 行ごとの消すボタン（参照されている行には理由）。**table・ボードと同じ処理**を呼ぶ（Issue #214） */}
               {renderDelete?.(row)}
+              {/* 行ごとの「直す」。**table・ボードと同じ処理**を呼ぶ（M1.5。Issue #215） */}
+              {renderEdit?.(row)}
             </li>
           ))}
         </ul>

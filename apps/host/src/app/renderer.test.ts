@@ -2131,3 +2131,244 @@ describe("グラフ（bar・pie）の部品を画面へ写す（M1.4）", () => 
     expect(container.querySelector(".chart")).toBeNull();
   });
 });
+
+// ── 直す：`set` を持たない `kind: update` のフォーム（M1.5。Issue #215） ──────────
+//
+// **行ごとに「直す」を出し、今の値を入れたフォームを開く。** 表・一覧・ボードの 3 つの部品が同じ処理
+// （`editControl`）を通る。入力欄は追加と同じ部品（`AddForm`。`form.test.ts` が部品そのものを見る）で、
+// ここでは**宣言からの写像**を見る。直した値で一覧を読み直す。断られた理由はその場に出す（追加と同じ）。
+//
+// 見本の 2 つを使う——warikan の `editExpense`（表）と、task-board の `editTask`（ボード）。
+// どちらも `kind: update` で `set` を持たない（**全項目を直す**。docs/semantics.md「update」）。
+
+/** 見本 warikan に「直す」（`editExpense`。`set` を持たない `kind: update`）を足した宣言 */
+const WARIKAN_EDIT_SPEC: ApiSpecBody = {
+  ...WARIKAN_SPEC,
+  spec: {
+    ...WARIKAN_SPEC.spec,
+    actions: [...WARIKAN_SPEC.spec.actions, { name: "editExpense", entity: "expense", kind: "update" }],
+  },
+  actions: [...WARIKAN_SPEC.actions, { name: "editExpense", entity: "expense", kind: "update" }],
+};
+
+/** 見本 warikan（`editExpense`）で答える client */
+function warikanEditClient(
+  parts: { readonly add?: MusunestClient["addRecord"]; readonly view?: MusunestClient["getView"] } = {},
+): MusunestClient {
+  const getView =
+    parts.view ??
+    ((_instanceId: string, name: string) =>
+      Promise.resolve(okResult(name === "memberList" ? MEMBER_VIEW : WARIKAN_EXPENSE_VIEW)));
+  return makeClient({
+    spec: () => Promise.resolve(okResult(WARIKAN_EDIT_SPEC)),
+    view: getView,
+    ...(parts.add === undefined ? {} : { add: parts.add }),
+  });
+}
+
+/** そのフォームの、その項目の入力欄の値（**追加のフォームと混ざらないよう、フォームの中で引く**） */
+const formValueOf = (form: HTMLFormElement, name: string): string =>
+  (
+    form.querySelector(
+      `[data-field="${name}"] input, [data-field="${name}"] textarea, [data-field="${name}"] select`,
+    ) as HTMLInputElement | null
+  )?.value ?? "";
+
+/** 開いている「直す」のフォーム（無ければ例外） */
+function editFormOf(container: HTMLElement): HTMLFormElement {
+  const form = container.querySelector<HTMLFormElement>(".edit-form form");
+  if (form === null) throw new Error("直すのフォームが無い");
+  return form;
+}
+
+describe("直す：`set` を持たない `kind: update` のフォーム（M1.5。Issue #215）", () => {
+  it("見本 warikan の支出（表）に「直す」が出て、今の値が入ったフォームが開く（受入条件）", async () => {
+    const { container } = await renderScreen(warikanEditClient());
+
+    await screen.findByText("夕食");
+    // 行ごとに「直す」が出る（表の操作の列である）
+    const buttons = screen.getAllByRole("button", { name: "直す" });
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]?.getAttribute("data-action")).toBe("editExpense");
+    expect(buttons[0]?.getAttribute("data-edit")).toBe("e1");
+    // まだフォームは開いていない
+    expect(container.querySelector(".edit-form")).toBeNull();
+
+    fireEvent.click(buttons[0] as HTMLElement);
+
+    const form = editFormOf(container);
+    // **今の値が入っている**（送るのは ID で、見せるのは名前である）
+    expect(formValueOf(form, "description")).toBe("夕食");
+    expect(formValueOf(form, "amount")).toBe("6000");
+    expect(formValueOf(form, "payer")).toBe("m1");
+    const checked = Array.from(
+      form.querySelectorAll<HTMLInputElement>('[data-field="participants"] input[type="checkbox"]'),
+    )
+      .filter((box) => box.checked)
+      .map((box) => box.value);
+    expect(checked).toEqual(["m1", "m2", "m3"]);
+  });
+
+  it("**入力欄は追加のフォームと同じ部品を通っている**（受入条件）", async () => {
+    const { container } = await renderScreen(warikanEditClient());
+
+    await screen.findByText("夕食");
+    fireEvent.click(screen.getAllByRole("button", { name: "直す" })[0] as HTMLElement);
+
+    const form = editFormOf(container);
+    const addForm = container.querySelector<HTMLFormElement>(".add form");
+    expect(addForm).not.toBeNull();
+    // 同じ部品である（同じ class・同じ項目が同じ順で並ぶ）
+    expect(form.className).toBe("add-form");
+    expect(form.className).toBe(addForm?.className);
+    const fieldNames = (node: Element): (string | null)[] =>
+      Array.from(node.querySelectorAll("[data-field]")).map((field) => field.getAttribute("data-field"));
+    expect(fieldNames(form)).toEqual(fieldNames(addForm as Element));
+  });
+
+  it("直した値を送り、成功したら一覧を読み直す（受入条件）", async () => {
+    const addRecord = vi.fn<MusunestClient["addRecord"]>(() =>
+      Promise.resolve(okResult(WARIKAN_EXPENSE_VIEW.rows[0] as ApiRow)),
+    );
+    const getView = vi.fn<MusunestClient["getView"]>((_instanceId, name) =>
+      Promise.resolve(okResult(name === "memberList" ? MEMBER_VIEW : WARIKAN_EXPENSE_VIEW)),
+    );
+    const { container } = await renderScreen(warikanEditClient({ add: addRecord, view: getView }));
+
+    await screen.findByText("夕食");
+    const before = getView.mock.calls.filter((call) => call[1] === "expenseList").length;
+    fireEvent.click(screen.getAllByRole("button", { name: "直す" })[0] as HTMLElement);
+
+    const form = editFormOf(container);
+    fireEvent.change(form.querySelector('[data-field="amount"] input') as HTMLInputElement, {
+      target: { value: "3000" },
+    });
+    fireEvent.submit(form);
+
+    await waitFor(() => expect(addRecord).toHaveBeenCalledTimes(1));
+    // 送るのは**対象の ID と、入力した項目の全部**である（docs/semantics.md「update」）
+    expect(addRecord).toHaveBeenCalledWith("inst-1", "editExpense", {
+      description: "夕食",
+      amount: 3000,
+      payer: "m1",
+      participants: ["m1", "m2", "m3"],
+      id: "e1",
+    });
+    // 成功したら**一覧を読み直し**、フォームを閉じる（返ってきた行を勝手に足さない）
+    await waitFor(() =>
+      expect(getView.mock.calls.filter((call) => call[1] === "expenseList").length).toBe(before + 1),
+    );
+    await waitFor(() => expect(container.querySelector(".edit-form")).toBeNull());
+  });
+
+  it("見本 task-board のタスク（ボード）に「直す」が出て、今の値が入ったフォームが開く（受入条件）", async () => {
+    const spec: ApiSpecBody = {
+      ...BOARD_LAYOUT_SPEC,
+      spec: {
+        ...BOARD_LAYOUT_SPEC.spec,
+        actions: [
+          ...BOARD_LAYOUT_SPEC.spec.actions,
+          { name: "editTask", entity: "task", kind: "update" },
+        ],
+      },
+      actions: [...BOARD_LAYOUT_SPEC.actions, { name: "editTask", entity: "task", kind: "update" }],
+    };
+    const { container } = await renderScreen(
+      makeClient({
+        spec: () => Promise.resolve(okResult(spec)),
+        view: () => Promise.resolve(okResult(BOARD_LAYOUT_VIEW)),
+      }),
+    );
+
+    await screen.findByText("タスク t1");
+    // カードごとに「直す」が出る（**表・一覧と同じ処理**である）
+    const buttons = screen.getAllByRole("button", { name: "直す" });
+    const first = buttons.find((button) => button.getAttribute("data-edit") === "t1");
+    expect(first).toBeDefined();
+    expect(first?.getAttribute("data-action")).toBe("editTask");
+    expect(first?.className).toBe("edit");
+
+    fireEvent.click(first as HTMLElement);
+
+    const form = editFormOf(container);
+    expect(formValueOf(form, "title")).toBe("タスク t1");
+    // 選択肢（enum）はキーで入る（見せるのは表示名である）
+    expect(formValueOf(form, "status")).toBe("todo");
+    expect(formValueOf(form, "due")).toBe("2026-09-15");
+  });
+
+  it("断られた理由（422）を、その場（フォーム）に出す（追加と同じ。受入条件）", async () => {
+    const addRecord = vi.fn<MusunestClient["addRecord"]>(() =>
+      Promise.resolve({
+        ok: false,
+        error: {
+          status: 422,
+          code: "INPUT_REJECTED",
+          fields: ["amount", "participants"],
+          validations: ["positiveAmount"],
+          validationMessages: ["金額は 1 円以上にしてください"],
+        },
+      }),
+    );
+    const { container } = await renderScreen(warikanEditClient({ add: addRecord }));
+
+    await screen.findByText("夕食");
+    fireEvent.click(screen.getAllByRole("button", { name: "直す" })[0] as HTMLElement);
+    fireEvent.submit(editFormOf(container));
+
+    const alert = await screen.findByRole("alert");
+    // エラーは、失敗した入力欄と同じフォームの中にある（**打ち直させない**）
+    expect(alert.closest(".edit-form")).not.toBeNull();
+    expect(alert.textContent).toContain("amount, participants");
+    expect(alert.textContent).toContain("金額は 1 円以上にしてください");
+    // 今の値のまま残る（送信に失敗しただけである）。フォームも開いたままである
+    expect(formValueOf(editFormOf(container), "amount")).toBe("6000");
+    expect(container.querySelector(".edit-form")).not.toBeNull();
+  });
+
+  it("サーバが断った理由（409 ACTION_NOT_ALLOWED）も、その場に出す", async () => {
+    const addRecord = vi.fn<MusunestClient["addRecord"]>(() =>
+      Promise.resolve({
+        ok: false,
+        error: {
+          status: 409,
+          code: "ACTION_NOT_ALLOWED",
+          fields: [],
+          validations: [],
+          action: "editExpense",
+          when: "amount > 0",
+        },
+      }),
+    );
+    const { container } = await renderScreen(warikanEditClient({ add: addRecord }));
+
+    await screen.findByText("夕食");
+    fireEvent.click(screen.getAllByRole("button", { name: "直す" })[0] as HTMLElement);
+    fireEvent.submit(editFormOf(container));
+
+    const failure = await waitFor(() => {
+      const node = container.querySelector<HTMLElement>('[data-state="edit-failed"]');
+      expect(node).not.toBeNull();
+      return node as HTMLElement;
+    });
+    // どの操作のどの条件かを、そのまま見せる
+    expect(failure.textContent).toContain("editExpense");
+    expect(failure.textContent).toContain("amount > 0");
+    // 一覧は読み直さない（断られたのである）。フォームは開いたままである
+    expect(container.querySelector(".edit-form")).not.toBeNull();
+  });
+
+  it("直す操作（`set` を持たない update）を宣言していなければ、ボタンを出さない（M1.3 の画面を変えない）", async () => {
+    await renderScreen(makeClient({}));
+    await screen.findByText("夕食");
+    expect(screen.queryByRole("button", { name: "直す" })).toBeNull();
+  });
+
+  it("`set` を持つ操作は、従来どおりその場で実行する（直すのフォームを開かない）", async () => {
+    await renderScreen(boardClient());
+    await screen.findByText("タスク t1");
+    // start・finish は `set` を持つので、直すのボタンは出ない
+    expect(screen.queryByRole("button", { name: "直す" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: "finish" })).toHaveLength(1);
+  });
+});

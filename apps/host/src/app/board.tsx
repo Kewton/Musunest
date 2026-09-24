@@ -44,6 +44,12 @@ export interface BoardProps {
    * この部品の中にボタンの出し方も断りの見せ方も持たない（Issue #214）。`undefined` なら何も出さない
    */
   readonly renderDelete: ((row: ApiRow) => ReactNode) | undefined;
+  /**
+   * カードごとの「直す」の見せ方（`set` を持たない `kind: update`。M1.5。Issue #215）。**table・一覧と
+   * 同じ処理を呼ぶ側が渡す**——この部品の中にボタンの出し方もフォームの開き方も持たない。
+   * `undefined` なら何も出さない
+   */
+  readonly renderEdit: ((row: ApiRow) => ReactNode) | undefined;
   readonly onRunAction: (actionName: string, id: string) => void;
 }
 
@@ -116,6 +122,7 @@ export function Board({
   labelOf,
   setActions,
   renderDelete,
+  renderEdit,
   onRunAction,
 }: BoardProps) {
   /** 強調の印の文字。`highlight` が指す計算の表示名（無ければ識別子）である（M1.3。Issue #176） */
@@ -178,6 +185,8 @@ export function Board({
                     ))}
                   {/* カードごとの消すボタン（参照されている行には理由）。**table・一覧と同じ処理**を呼ぶ（Issue #214） */}
                   {renderDelete?.(row)}
+                  {/* カードごとの「直す」。**table・一覧と同じ処理**を呼ぶ（M1.5。Issue #215） */}
+                  {renderEdit?.(row)}
                 </article>
               ))}
             </section>

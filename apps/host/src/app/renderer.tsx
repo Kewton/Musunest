@@ -35,7 +35,7 @@ import type {
   Entity,
   MusunestClient,
 } from "@musunest/sdk";
-import { displayNameOf, fieldKind, fieldTarget } from "@musunest/sdk";
+import { displayNameOf, fieldKind, fieldTarget, updateRecord } from "@musunest/sdk";
 import { AddForm } from "./form";
 import type { AddFormResult, FormField, FormOption } from "./form";
 import { SettlementList } from "./settlement";
@@ -87,6 +87,12 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
     readonly state: string;
     readonly message: string;
   } | null>(null);
+  /**
+   * いま「直す」を開いている行（`set` を持たない `kind: update`。M1.5。Issue #215）。
+   * **状態はここだけが持つ**——どの部品（表・一覧・ボード）から開いても、フォームはこの 1 つである。
+   * 開いていなければ `null` である。
+   */
+  const [editing, setEditing] = useState<{ readonly action: string; readonly id: string } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -139,9 +145,18 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
       : (row) => deleteControl(row, deleteAction, (id) => void removeRecord(deleteAction.name, id));
   // 決まった値への書き換え（`set` を持つ `kind: update`。M1.3）。宣言の順に、行ごとのボタンにする
   const setActions = view === null ? [] : setActionsOf(spec, view);
+  // 直す（`set` を持たない `kind: update`。M1.5。Issue #215）。宣言の順に、行ごとのボタンにする
+  const editActions = view === null ? [] : editActionsOf(spec, view);
+  // 行ごとの「直す」（Issue #215）。**table・list・board が同じ処理を通る**——3 つの部品は、この
+  // 1 つの関数を受け取って呼ぶだけである（`editControl` を部品ごとに書かない。`deleteControl` と同じ）
+  const renderEdit: RowEditControl | undefined =
+    editActions.length === 0 ? undefined : (row) => editControl(row, editActions, openEdit);
   // 一覧の種類（`type`）と、表に出す名前の順（`show`）は**宣言**にある。API の応答には行だけがある
   const declaration = view === null ? undefined : spec.spec.views.find((item) => item.name === view.view);
   const entity = view === null ? undefined : spec.spec.entities.find((item) => item.name === view.entity);
+  // いま「直す」を開いている行。**応答から引く**——読み直しで消えていれば、フォームを出さない
+  const editingRow =
+    view === null || editing === null ? undefined : view.rows.find((row) => row.id === editing.id);
 
   /** 一覧の切替。読めなければ同じ理由の画面に落とす（読めなかったことは隠さない） */
   async function showView(name: string): Promise<void> {
@@ -199,6 +214,50 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
       return;
     }
     setState(await loadView(client, instanceId, spec, view.view));
+  }
+
+  /**
+   * 「直す」を開く（`set` を持たない `kind: update`。M1.5。Issue #215）。**今の行を選ぶだけ**である
+   * ——値をフォームへ写すのは `AddForm`（`initial`）で、ここはどの行を開くかしか決めない。
+   * 直前の断り（別の操作の）は消す。
+   */
+  function openEdit(actionName: string, id: string): void {
+    setActionFailure(null);
+    setEditing({ action: actionName, id });
+  }
+
+  /**
+   * 直す（`set` を持たない `kind: update`。M1.5。Issue #215）。送るのは**対象の行の ID と、入力した
+   * 項目の全部**である（宣言の `set` ではなく、利用者が入れた値で置き換える。docs/semantics.md「update」）。
+   * 成功したら**一覧を読み直して**フォームを閉じる。断られた理由はその場に出す（**追加と同じ**）。
+   */
+  async function editRecord(
+    actionName: string,
+    id: string,
+    values: Readonly<Record<string, ApiValue>>,
+  ): Promise<AddFormResult> {
+    if (view === null) return { ok: false };
+    setActionFailure(null);
+    const updated = await updateRecord(client, instanceId, actionName, id, values);
+    if (!updated.ok) {
+      // 入力の断り（422）は、追加と同じく**フォームに返す**（項目名・検査名・文言）。
+      // 条件（`when`）や権限などの断りは、サーバの答えをその場に出す（**画面の非表示だけを守りにしない**）
+      if (updated.error.code !== "INPUT_REJECTED") {
+        setActionFailure({ state: "edit-failed", message: reasonOfActionFailure(updated.error, actionName) });
+        return { ok: false };
+      }
+      return {
+        ok: false,
+        fields: updated.error.fields,
+        validations: updated.error.validations,
+        ...(updated.error.validationMessages === undefined
+          ? {}
+          : { validationMessages: updated.error.validationMessages }),
+      };
+    }
+    setEditing(null);
+    setState(await loadView(client, instanceId, spec, view.view));
+    return { ok: true };
   }
 
   return (
@@ -305,6 +364,7 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           labelOf={(field, value) => displayOf(entity, references, field, value)}
           setActions={setActions}
           renderDelete={renderDelete}
+          renderEdit={renderEdit}
           onRunAction={(actionName, id) => void runSetAction(actionName, id)}
         />
       ) : declaration?.type === "list" ? (
@@ -318,6 +378,7 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           labelOf={(field, value) => displayOf(entity, references, field, value)}
           setActions={setActions}
           renderDelete={renderDelete}
+          renderEdit={renderEdit}
           onRunAction={(actionName, id) => void runSetAction(actionName, id)}
         />
       ) : view.rows.length === 0 ? (
@@ -332,8 +393,24 @@ export function InstantRenderer({ instanceId, client }: InstantRendererProps) {
           show={declaration?.show}
           setActions={setActions}
           renderDelete={renderDelete}
+          renderEdit={renderEdit}
           onRunAction={(actionName, id) => void runSetAction(actionName, id)}
         />
+      )}
+      {view !== null && editing !== null && editingRow !== undefined && (
+        // 直す（`set` を持たない `kind: update`。M1.5。Issue #215）。**入力欄は追加と同じ部品**を通る
+        // ——いまの値を初めの値（`initial`）として渡すだけで、参照・選択肢・既定値・日付の扱いは
+        // 1 つも自前で書かない。`key` に行の ID を渡し、別の行を開いたら作り直す
+        <section className="edit-form" aria-label="直す">
+          <AddForm
+            key={editing.id}
+            action={editing.action}
+            fields={formFields(spec.spec, view.entity ?? "", references)}
+            guidance={guidanceOf(spec.spec, view.entity ?? "")}
+            initial={editingRow.fields}
+            onSubmit={(values) => editRecord(editing.action, editing.id, values)}
+          />
+        </section>
       )}
       {actionFailure !== null && (
         <p className="state failure" data-state={actionFailure.state} role="alert">
@@ -394,6 +471,7 @@ function RowTable({
   show,
   setActions,
   renderDelete,
+  renderEdit,
   onRunAction,
 }: {
   readonly view: ApiViewBody;
@@ -405,11 +483,13 @@ function RowTable({
   readonly setActions: readonly Action[];
   /** 行ごとの消すボタン（参照されている行には理由）。宣言が無ければ `undefined`（列も出さない） */
   readonly renderDelete: RowDeleteControl | undefined;
+  /** 行ごとの「直す」（`set` を持たない `kind: update`。M1.5）。宣言が無ければ `undefined` */
+  readonly renderEdit: RowEditControl | undefined;
   readonly onRunAction: (actionName: string, id: string) => void;
 }) {
   const columns = columnsOf(view, show);
-  // 操作の列は、消す操作か、決まった値への書き換えを宣言しているときだけ出す
-  const hasActions = renderDelete !== undefined || setActions.length > 0;
+  // 操作の列は、消す・直す・決まった値への書き換えのどれかを宣言しているときだけ出す
+  const hasActions = renderDelete !== undefined || renderEdit !== undefined || setActions.length > 0;
   return (
     <div className="table-scroll">
       <table className="instant-table">
@@ -460,6 +540,8 @@ function RowTable({
                     ))}
                   {/* 行ごとの消すボタン（参照されている行には理由）。**一覧・ボードと 1 つの処理**（Issue #214） */}
                   {renderDelete?.(row)}
+                  {/* 行ごとの「直す」。**一覧・ボードと 1 つの処理**（M1.5。Issue #215） */}
+                  {renderEdit?.(row)}
                 </td>
               )}
             </tr>
@@ -505,6 +587,46 @@ function deleteControl(
  * **部品は、渡されたこの関数を呼ぶだけである**——宣言が無ければ `undefined` で、操作の欄そのものを出さない。
  */
 type RowDeleteControl = (row: ApiRow) => ReactNode;
+
+/**
+ * 行ごとの「直す」の見せ方（`set` を持たない `kind: update`。M1.5。Issue #215）。**表（table）・
+ * 一覧（list）・ボード（board）が、この 1 つの処理を通る**——ボタンの出し方も、断られたときの見せ方も、
+ * ここで決める（部品ごとに書かない。`deleteControl` と同じ考え方である）。
+ *
+ * その行で実行してよい操作（`row.allowedActions`）だけを、**宣言の順**にボタンにする。ボタンの印は
+ * 「直す」である（`deleteControl` が「削除」であるのと同じである）。**隠すのは守りではない**——
+ * 断るのは data-api である（`03` §2.2。だから、サーバが断ったら理由をその場に出す）。
+ */
+function editControl(
+  row: ApiRow,
+  editActions: readonly Action[],
+  onEdit: (actionName: string, id: string) => void,
+): ReactNode {
+  const allowed = editActions.filter((action) => isActionAllowed(row, action.name));
+  if (allowed.length === 0) return null;
+  return (
+    <>
+      {allowed.map((action) => (
+        <button
+          key={action.name}
+          type="button"
+          className="edit"
+          data-edit={row.id}
+          data-action={action.name}
+          onClick={() => onEdit(action.name, row.id)}
+        >
+          直す
+        </button>
+      ))}
+    </>
+  );
+}
+
+/**
+ * 行ごとの「直す」の見せ方（`editControl` を、1 つの宣言の並びと 1 つの処理に閉じたもの。Issue #215）。
+ * **部品は、渡されたこの関数を呼ぶだけである**——宣言が無ければ `undefined` で、操作の欄そのものを出さない。
+ */
+type RowEditControl = (row: ApiRow) => ReactNode;
 
 /** その行を消せるか。**応答に `references` が無い**（宣言が無い）ときは `false` にしない（列も出ない） */
 const isDeletable = (row: ApiRow): boolean =>
@@ -724,6 +846,19 @@ function setActionsOf(spec: ApiSpecBody, view: ApiViewBody): readonly Action[] {
   return spec.spec.actions.filter(
     (candidate) =>
       candidate.entity === view.entity && candidate.kind === "update" && candidate.set !== undefined,
+  );
+}
+
+/**
+ * その entity の**直す**操作（`set` を持たない `kind: update`。M1.5。Issue #215）。宣言の順。
+ * **正本は宣言（`spec.spec.actions`）である**——一覧の応答（`ApiActionRef`）は `set` を持たないので、
+ * 「`set` を持つか」で「決まった値への書き換え」と「全項目の置換」を見分けられない。
+ * `when` を持つ宣言では、その行で実行してよいかを応答の `allowedActions` が見る（`editControl`）。
+ */
+function editActionsOf(spec: ApiSpecBody, view: ApiViewBody): readonly Action[] {
+  return spec.spec.actions.filter(
+    (candidate) =>
+      candidate.entity === view.entity && candidate.kind === "update" && candidate.set === undefined,
   );
 }
 

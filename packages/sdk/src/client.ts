@@ -78,6 +78,7 @@ export interface MusunestClient {
    *   `create` … `input` は「項目名: 値」。201 と、書いた行が返る
    *   `update` … `input` は「`id` ＋ 項目の全部」。200 と、書き換えた行が返る
    * 消す（`delete`）は `deleteRecord` を使う（入力は `id` だけで、返るのは行ではない）。
+   * **全項目を直す**（`set` を持たない `kind: update`）は `updateRecord` を通す（対象の `id` を別に取る）。
    */
   addRecord(
     instanceId: string,
@@ -136,6 +137,29 @@ export function createMusunestClient(options: MusunestClientOptions): MusunestCl
     setRecord: async (instanceId, actionName, id) =>
       decode(await send(request, base, apiActionPath(instanceId, actionName), "POST", { id }), isRow),
   };
+}
+
+/**
+ * **全項目の置換**（`set` を持たない `kind: update`）を呼ぶ口である（M1.5。Issue #215）。
+ * 送るのは対象の `id` と、**宣言した項目の全部**である（`{ ...項目, id }`。docs/semantics.md「update」）。
+ * 成功したら 200 と、書き換えた行（`ApiRow`）が返る。
+ *
+ * **経路と本文の組み立ては `addRecord` と同じ 1 本を通る**——何をするかを決めるのは宣言（`kind`）であって、
+ * SDK は「追加」と「直す」で呼ぶ口の名前を分けているだけである。`set` を持つ `kind: update` は
+ * `setRecord`（入力は `id` だけ）を使う。
+ *
+ * **`MusunestClient` のメソッドにしない**のは、必須のメソッドを足すと `MusunestClient` を満たす
+ * すべての実装（画面のテストの偽の client など）が一斉に型エラーになるためである。既存の口を組む
+ * この形なら、型を壊さずに「直す」の口を足せる。
+ */
+export function updateRecord(
+  client: MusunestClient,
+  instanceId: string,
+  actionName: string,
+  id: string,
+  values: Readonly<Record<string, ApiValue>>,
+): Promise<ClientResult<ApiRow>> {
+  return client.addRecord(instanceId, actionName, { ...values, id });
 }
 
 /** 1 回の呼出。経路は api.ts が組んだものを使い、body は JSON で送る */
