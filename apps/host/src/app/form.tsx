@@ -70,6 +70,12 @@ export interface AddFormProps {
    * **送信の前に**出す入力補助である——守りは data-api 側にあり、画面は文言をそのまま見せるだけである。
    */
   readonly guidance?: readonly string[];
+  /**
+   * **直すときの、いま入っている値**（項目名 → API の値。M1.5。Issue #215）。
+   * 書かなければ空欄から始める（追加である）。**入力欄は追加と同じ部品（この component）を通る**
+   * ——初めの値が入るだけで、参照・選択肢・既定値・日付の扱いは 1 つも変わらない。
+   */
+  readonly initial?: Readonly<Record<string, ApiValue>>;
   readonly onSubmit: (values: Readonly<Record<string, ApiValue>>) => Promise<AddFormResult>;
 }
 
@@ -79,8 +85,8 @@ type FormText = Readonly<Record<string, string | readonly string[]>>;
 /** 参照の並び（複数選択）の欄か */
 const isRefList = (field: FormField): boolean => field.type === "list" && (field.to ?? null) !== null;
 
-export function AddForm({ action, fields, guidance = [], onSubmit }: AddFormProps) {
-  const [text, setText] = useState<FormText>(() => emptyState(fields));
+export function AddForm({ action, fields, guidance = [], initial, onSubmit }: AddFormProps) {
+  const [text, setText] = useState<FormText>(() => initialState(fields, initial));
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<AddFormResult | null>(null);
   // 送信中の二重押下を防ぐ。**disabled だけに頼らない**——同じ tick の 2 回目を弾く
@@ -94,8 +100,8 @@ export function AddForm({ action, fields, guidance = [], onSubmit }: AddFormProp
     setFailure(null);
 
     const result = await onSubmit(toValues(fields, text));
-    // 成功したら入力欄を空に戻す。失敗したら**入力値をそのまま残す**（打ち直させない）
-    if (result.ok) setText(emptyState(fields));
+    // 成功したら入力欄を初めの値へ戻す（追加なら空、直すなら元の値）。失敗したら**入力値をそのまま残す**
+    if (result.ok) setText(initialState(fields, initial));
     else setFailure(result);
 
     inFlight.current = false;
@@ -291,20 +297,31 @@ function FailureNotice({ failure }: { readonly failure: AddFormResult }) {
 
 const inputId = (name: string): string => `field-${name}`;
 
-function emptyState(fields: readonly FormField[]): FormText {
+const isStringList = (value: ApiValue | undefined): value is readonly string[] => Array.isArray(value);
+
+/**
+ * 入力欄の初めの値。**直すときは、いま入っている値を写す**（`initial`。M1.5。Issue #215）。
+ * 値が無ければ追加と同じである（選択肢（`enum`）は宣言の既定値、ほかは空文字）。
+ */
+function initialState(
+  fields: readonly FormField[],
+  initial: Readonly<Record<string, ApiValue>> | undefined,
+): FormText {
   const text: Record<string, string | readonly string[]> = {};
-  for (const field of fields) text[field.name] = initialText(field);
+  for (const field of fields) text[field.name] = initialText(field, initial?.[field.name]);
   return text;
 }
 
 /**
- * 入力欄の初期値。参照 list は空の並び、**選択肢（enum）は宣言の既定値を最初から選んでおく**
- * （未入力を空文字で送ると、既定値が入らない。M1.3）。ほかは空文字である。
+ * 1 つの入力欄の初めの値。**いま入っている値を、その入力欄が扱う形へ写す**。
+ * 参照 list は選んだ ID の並び（チェック）、文字の並び（`list`）は 1 行に 1 つ（入力欄と同じ形）、
+ * ほかは文字である。**写せない値は作らない**——無い値は既定値か空文字にする。
  */
-function initialText(field: FormField): string | readonly string[] {
-  if (isRefList(field)) return [];
-  if (field.type === "enum") return field.default ?? "";
-  return "";
+function initialText(field: FormField, value: ApiValue | undefined): string | readonly string[] {
+  if (isRefList(field)) return isStringList(value) ? value : [];
+  if (isStringList(value)) return value.join("\n");
+  if (value === undefined) return field.type === "enum" ? (field.default ?? "") : "";
+  return String(value);
 }
 
 /** 入力欄の値を、宣言の種類の値にして送る */

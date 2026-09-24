@@ -460,3 +460,116 @@ describe("選択肢（enum）と既定値（default）", () => {
     expect(onSubmit.mock.calls[0]?.[0]).toEqual({ title: "", status: "" });
   });
 });
+
+// ── 直すときの、いま入っている値（M1.5。Issue #215） ────────────────────
+//
+// **入力欄は追加と同じ部品（この AddForm）を通る。** 直すときは `initial` に今の値を渡すだけである——
+// 文字・数・並び・参照・選択肢・日付の扱いは 1 つも変わらない（型ごとの写しは `toValues` の逆である）。
+
+describe("直すときの、いま入っている値", () => {
+  it("文字・数・並びは、その入力欄の形で入る（並びは 1 行に 1 つ）", () => {
+    render(
+      createElement(AddForm, {
+        action: "editExpense",
+        fields: FIELDS,
+        initial: { description: "夕食", amount: 6600, payer: "A", participants: ["A", "B"] },
+        onSubmit: () => Promise.resolve(accepted),
+      }),
+    );
+
+    expect(fieldValue("description")).toBe("夕食");
+    expect(fieldValue("amount")).toBe("6600");
+    expect(fieldValue("payer")).toBe("A");
+    // 文字の並び（`list`）は、入力欄（textarea）と同じ「1 行に 1 つ」の形である
+    expect(fieldValue("participants")).toBe("A\nB");
+  });
+
+  it("参照は ID、選択肢はキー、日付はその文字列で入る（見せるのは表示名である）", () => {
+    render(
+      createElement(AddForm, {
+        action: "editTask",
+        fields: [
+          { name: "title", type: "string" },
+          { name: "status", type: "enum", options: STATUS_OPTIONS, default: "todo" },
+          { name: "due", type: "date" },
+          { name: "payer", type: "ref", to: "member", options: MEMBER_OPTIONS },
+          { name: "participants", type: "list", to: "member", options: MEMBER_OPTIONS },
+        ],
+        initial: {
+          title: "宿の予約",
+          status: "done",
+          due: "2026-09-20",
+          payer: "m2",
+          participants: ["m1", "m3"],
+        },
+        onSubmit: () => Promise.resolve(accepted),
+      }),
+    );
+
+    expect(fieldValue("title")).toBe("宿の予約");
+    // 選択肢は**キー**が選ばれている（表示名ではない）
+    expect((screen.getByLabelText("status") as HTMLSelectElement).value).toBe("done");
+    expect(fieldValue("due")).toBe("2026-09-20");
+    // 参照は**ID** が選ばれている（見えるのは名前 A・B・C である）
+    expect((screen.getByLabelText("payer") as HTMLSelectElement).value).toBe("m2");
+    // 参照 list は、いま入っている ID にチェックが付く
+    expect((screen.getByRole("checkbox", { name: "A" }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "B" }) as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole("checkbox", { name: "C" }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("直した値を、追加と同じ形で送る", async () => {
+    const onSubmit = submitSpy(() => Promise.resolve(accepted));
+    render(
+      createElement(AddForm, {
+        action: "editExpense",
+        fields: FIELDS,
+        initial: { description: "夕食", amount: 6600, payer: "A", participants: ["A", "B"] },
+        onSubmit,
+      }),
+    );
+
+    fill("amount", "3000");
+    fill("participants", "A\nB\nC");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0]?.[0]).toEqual({
+      description: "夕食",
+      amount: 3000,
+      discount: "",
+      payer: "A",
+      participants: ["A", "B", "C"],
+    });
+  });
+
+  it("今の値が無い項目は、追加と同じ初めの値である（選択肢は宣言の既定値）", () => {
+    render(
+      createElement(AddForm, {
+        action: "editTask",
+        fields: [
+          { name: "title", type: "string" },
+          { name: "status", type: "enum", options: STATUS_OPTIONS, default: "todo" },
+        ],
+        initial: { title: "宿の予約" },
+        onSubmit: () => Promise.resolve(accepted),
+      }),
+    );
+
+    expect(fieldValue("title")).toBe("宿の予約");
+    expect((screen.getByLabelText("status") as HTMLSelectElement).value).toBe("todo");
+  });
+
+  it("今の値に選択肢のキーが無ければ、空文字のままである（既定値に読み替えない）", () => {
+    render(
+      createElement(AddForm, {
+        action: "editTask",
+        fields: [{ name: "status", type: "enum", options: STATUS_OPTIONS, default: "todo" }],
+        initial: { status: "" },
+        onSubmit: () => Promise.resolve(accepted),
+      }),
+    );
+
+    expect((screen.getByLabelText("status") as HTMLSelectElement).value).toBe("");
+  });
+});

@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { ApiRow, ApiSpecBody, ApiViewBody } from "@musunest/appspec-schema";
-import { INVALID_RESPONSE, NETWORK_FAILURE, createMusunestClient, displayNameOf } from "./client.js";
+import { INVALID_RESPONSE, NETWORK_FAILURE, createMusunestClient, displayNameOf, updateRecord } from "./client.js";
 import type { FetchLike } from "./client.js";
 
 const BASE = "https://api.example";
@@ -986,6 +986,54 @@ describe("決まった値への書き換え（M1.3）", () => {
         error: { code: INVALID_RESPONSE },
       });
     }
+  });
+});
+
+// ── 直す：全項目の置換（`set` を持たない `kind: update`）を呼ぶ口（M1.5。Issue #215） ──
+//
+// 画面（host）が「直す」を呼ぶ口である。送るのは対象の `id` と、**宣言した項目の全部**である
+// （docs/semantics.md「update」）。経路と本文の組み立ては `addRecord` と同じ 1 本を通る。
+// **失敗を成功にしない**のはここでも同じである（422 の fields・validations、404 の status を保つ）。
+
+describe("直す：全項目の置換（M1.5。Issue #215）", () => {
+  it("対象の id と全項目を、action の経路へ POST して、書き換えた行を受け取る（受入条件）", async () => {
+    const stub = recordingFetch(() => json(200, ROW));
+    const values = { description: "昼食", amount: 3000, participants: ["A", "B"] };
+    const result = await updateRecord(clientWith(stub.fetch), "inst-1", "editExpense", "r1", values);
+
+    expect(stub.calls[0]?.url).toBe(`${BASE}/api/instances/inst-1/actions/editExpense`);
+    expect(stub.calls[0]?.init.method).toBe("POST");
+    expect(stub.calls[0]?.init.headers).toEqual({ "content-type": "application/json" });
+    // 送るのは「id ＋ 項目の全部」である（対象の ID は id として 1 つ載る）
+    expect(JSON.parse(String(stub.calls[0]?.init.body))).toEqual({ ...values, id: "r1" });
+    expect(result).toEqual({ ok: true, value: ROW });
+  });
+
+  it("422 は fields と validations を保つ（拒否の内容を落とさない）", async () => {
+    const stub = recordingFetch(() =>
+      json(422, { error: "INPUT_REJECTED", fields: ["amount"], validations: ["positiveAmount"] }),
+    );
+    const result = await updateRecord(clientWith(stub.fetch), "inst-1", "editExpense", "r1", {});
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        status: 422,
+        code: "INPUT_REJECTED",
+        fields: ["amount"],
+        validations: ["positiveAmount"],
+      },
+    });
+  });
+
+  it("404 は NOT_FOUND として status を保つ（成功にしない）", async () => {
+    const stub = recordingFetch(() => json(404, { error: "NOT_FOUND" }));
+    const result = await updateRecord(clientWith(stub.fetch), "inst-1", "editExpense", "missing", {});
+
+    expect(result).toEqual({
+      ok: false,
+      error: { status: 404, code: "NOT_FOUND", fields: [], validations: [] },
+    });
   });
 });
 

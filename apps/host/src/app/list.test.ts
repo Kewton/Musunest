@@ -544,3 +544,59 @@ describe("一覧の消すボタン（Issue #214。見本 dashboard）", () => {
     expect(after).toBe(before + 1);
   });
 });
+
+// ── 直す（`set` を持たない `kind: update`。M1.5。Issue #215） ──────────────
+//
+// 一覧（`type: list`）でも、**table・ボードと同じ処理**で行ごとに「直す」を出す。押すと、**今の値を
+// 入れたフォーム**が開く（入力欄は追加と同じ部品である）。ここでは一覧が「直す」を出してフォームが
+// 開くことまでを見る（送信と一覧の読み直しは renderer.test.ts が見る）。
+
+/** 見本 task-board の一覧に「直す」（`editTask`。`set` を持たない `kind: update`）を足した宣言 */
+const LIST_EDIT_SPEC: ApiSpecBody = {
+  ...LIST_SPEC,
+  spec: {
+    ...LIST_SPEC.spec,
+    actions: [...LIST_SPEC.spec.actions, { name: "editTask", entity: "task", kind: "update" }],
+  },
+  actions: [...LIST_SPEC.actions, { name: "editTask", entity: "task", kind: "update" }],
+};
+
+describe("一覧の「直す」ボタン（M1.5。Issue #215）", () => {
+  it("行ごとに「直す」が出て、押すと今の値が入ったフォームが開く（受入条件）", async () => {
+    const { container } = await renderScreen(
+      listClient({ spec: () => Promise.resolve(okResult(LIST_EDIT_SPEC)) }),
+    );
+
+    await screen.findByText("宿の予約");
+    const buttons = screen.getAllByRole("button", { name: "直す" });
+    expect(buttons).toHaveLength(3);
+    expect(buttons[0]?.getAttribute("data-edit")).toBe("t1");
+    expect(buttons[0]?.getAttribute("data-action")).toBe("editTask");
+    // 印は **table・ボードが使うものと同じ**である（`edit` クラス）
+    expect(buttons[0]?.className).toBe("edit");
+    // 押すまではフォームは開いていない
+    expect(container.querySelector(".edit-form")).toBeNull();
+
+    fireEvent.click(buttons[0] as HTMLElement);
+
+    const form = container.querySelector<HTMLFormElement>(".edit-form form");
+    if (form === null) throw new Error("直すのフォームが無い");
+    const valueOf = (name: string): string =>
+      (
+        form.querySelector(
+          `[data-field="${name}"] input, [data-field="${name}"] textarea, [data-field="${name}"] select`,
+        ) as HTMLInputElement | null
+      )?.value ?? "";
+    // **今の値が入っている**（参照は ID で、見せるのは名前である）
+    expect(valueOf("title")).toBe("宿の予約");
+    expect(valueOf("status")).toBe("doing");
+    expect(valueOf("assignee")).toBe("m1");
+    expect(valueOf("due")).toBe("2026-09-20");
+  });
+
+  it("直す操作を宣言していなければ、ボタンを出さない（M1.3 の画面を変えない）", async () => {
+    await renderScreen(listClient());
+    await screen.findByText("宿の予約");
+    expect(screen.queryByRole("button", { name: "直す" })).toBeNull();
+  });
+});
