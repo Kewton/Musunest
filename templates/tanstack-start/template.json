@@ -1,0 +1,21 @@
+{
+  "name": "tanstack-start",
+  "version": "0.1.0",
+  "zones": [
+    {
+      "path": "core",
+      "factoryMutable": false,
+      "summary": "店頭が正本を持つ。工場は読むだけで変えない"
+    },
+    {
+      "path": "sdk",
+      "factoryMutable": false,
+      "summary": "工場が使ってよい。@musunest/sdk の /api（spec・view・action）だけを通る"
+    },
+    {
+      "path": "app-zone",
+      "factoryMutable": true,
+      "summary": "工場が L3/L4 のコードを置く。M1 では店頭は動かさない"
+    }
+  ]
+}
