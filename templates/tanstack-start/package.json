@@ -16,6 +16,7 @@
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty",
     "lint": "oxlint src",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "tarball": "node --no-warnings src/pack.ts"
   }
 }
