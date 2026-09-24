@@ -218,26 +218,48 @@ commandmate capture musubi --instance command-code --pane --tail 20   # 段と�
 | 6 | 管理 | PR を確認して squash merge。**2 本目以降は BEHIND になる**ので §6.3 の往復を先に見込む。例外（運用文書・`.commandmate/`・`.tf`）は人へ回す |
 | 7 | 管理 → 窓口 → 人 | 全部の merge が終わったら報告。そのあと 🧑 の Issue でデモと振り返り |
 
-### 6.1 worktree の用意と、ワーカーの CLI（2026-09-16 の実測）
+### 6.1 worktree の用意と、ワーカーの CLI
 
-- **dispatch は worktree を作らない。** `--prepare-worktrees --worktree-setup <ランチャー>` で
-  provider に作らせる形だが、**`cmate-worktree-setup` は手順であって runner を持たない**。
-  リポジトリに provider の実体を置く作業は **#118**。それまでは、**管理が `cmate-worktree-setup` の手順で
-  worktree を作ってから、`--prepare-worktrees` 無しで dispatch する**
+- **dispatch は worktree を作らない。** `--prepare-worktrees --worktree-setup <ランチャー>` は
+  provider を呼び、stdout の `worktree-setup.result.v1` を検証するだけである。**その provider の実体が
+  このリポジトリにある**（`infra/scripts/worktree-setup.mjs`・#118）。collision 検査・作成直前の
+  base SHA 再確認・baseline・`commandmate sync`・roster の固定は provider が持つ
+- **provider の呼び方**（dispatch と同じ形。`profile` / `base` / `issues` は plan が正本）:
+
+  ```bash
+  node infra/scripts/worktree-setup.mjs --issues <n[,n...]> --profile musubi --base origin/main
+  ```
+
+  stdout は result v1（JSON）だけ。人が読む進捗は stderr へ出る。branch / worktree path / baseline は
+  `.commandmate/profiles/musubi.json`（`branch_template` / `worktree_template` / `baseline`）から解決する
+- **dispatch からは、ランチャーだけを渡す。** `--worktree-setup` の argv に `--profile` / `--base` /
+  `--issues` を自分で足さない（plan が正本。二重指定は `invalid_input` で拒否される）:
+
+  ```bash
+  # --prepare-worktrees と一緒に渡す。worktree が無いと dispatch は worktree_unresolved で止まる
+  --prepare-worktrees --worktree-setup "node infra/scripts/worktree-setup.mjs"
+  ```
+
+  準備段が1件でも作れなければ、**成功した分だけを dispatch せずに止まる**（作れた分は残る。消すのは
+  `cmate-worktree-cleanup` であって dispatch ではない）
 - **ワーカーの CLI は、worktree の既定（`commandmate ls --json` の `cliToolId`）で決まる。**
   dispatch の `send` は instance を指定しないためである（#96 ではワーカーが Claude になった）
-- **Command Code に固定するには、worktree の roster から他の CLI を外す**（外した順に既定が次へ移り、
-  1 つだけ残すとそれが `cliToolId` になる）
+- **provider は roster を `command-code` だけにする。順序が要る。** 2026-09-17 の実測どおり
+  **`commandmate sync` は CLI の固定を既定（`claude`）へ戻す**ので、provider は
+  **sync を先に打ち、その後で** roster から他の CLI を外し、`cliToolId` を実測して返す（#118 追記 1）。
+  逆順にすると固定が消える
+- 手で同じことをするときも、同じ順序で打つ:
 
-```bash
-commandmate instances <worktree-id> remove claude --kill
-commandmate instances <worktree-id> remove codex
-commandmate instances <worktree-id> remove antigravity
-commandmate ls --json   # cliToolId が command-code になっていることを確かめる
-```
+  ```bash
+  commandmate sync
+  commandmate instances <worktree-id> remove claude --kill
+  commandmate instances <worktree-id> remove codex
+  commandmate instances <worktree-id> remove antigravity
+  commandmate ls --json   # cliToolId が command-code になっていることを確かめる
+  ```
 
 - **`commandmate sync` は、この固定を戻す**（`cliToolId` が既定の `claude` に戻る。2026-09-17 の実測）。
-  sync は worktree を消したあとの registry の掃除で打つので、**走っているワーカーがいる間は打たない**。
+  worktree を消したあとの registry の掃除で打つので、**走っているワーカーがいる間は打たない**。
   打ってしまったら固定し直すか、送るときに `--instance command-code` を明示する
 
 ### 6.2 ワーカーに push と PR を作らせる方法
