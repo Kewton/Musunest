@@ -23,8 +23,8 @@
   layer: data
   since: v0.2-draft（M1.1）
   samples: [expense-log, warikan]
-  negatives: [entity-duplicate-name, entity-invalid-name, entity-without-fields, field-reserved-name, field-unknown-type]
-  check_rules: [DATA_ENTITY_DUPLICATE_NAME, SHAPE_NAME_INVALID, SHAPE_KEY_MISSING, DATA_FIELD_NAME_RESERVED, DATA_FIELD_TYPE_UNKNOWN]
+  negatives: [entity-duplicate-name, entity-invalid-name, entity-without-fields, field-reserved-name, field-unknown-type, field-duplicate-name, yaml-invalid, key-duplicate]
+  check_rules: [DATA_ENTITY_DUPLICATE_NAME, SHAPE_NAME_INVALID, SHAPE_KEY_MISSING, DATA_FIELD_NAME_RESERVED, DATA_FIELD_TYPE_UNKNOWN, DATA_FIELD_DUPLICATE_NAME, SHAPE_YAML_INVALID, SHAPE_KEY_DUPLICATE]
   semantics: docs/semantics.md#entity
   runtime: [spec-engine, data-api, app-do, host]
   factory: 未対応
@@ -74,8 +74,8 @@
   layer: data
   since: v0.2-draft（M1.3）
   samples: [task-board]
-  negatives: [enum-options-empty, enum-duplicate-option-key]
-  check_rules: [DATA_FIELD_ENUM_OPTIONS_EMPTY, DATA_FIELD_ENUM_OPTION_KEY_DUPLICATE]
+  negatives: [enum-options-empty, enum-duplicate-option-key, enum-key-not-found]
+  check_rules: [DATA_FIELD_ENUM_OPTIONS_EMPTY, DATA_FIELD_ENUM_OPTION_KEY_DUPLICATE, LOGIC_ENUM_KEY_NOT_FOUND]
   semantics: docs/semantics.md#enum
   runtime: [spec-engine, data-api, host]
   factory: 未対応
@@ -107,8 +107,8 @@
   layer: logic
   since: v0.2-draft（M1.1）
   samples: [expense-log, warikan]
-  negatives: [validation-not-boolean, validation-unknown-field]
-  check_rules: [LOGIC_VALIDATION_NOT_BOOLEAN, LOGIC_REFERENCE_NOT_FOUND]
+  negatives: [validation-not-boolean, validation-unknown-field, validation-duplicate-name]
+  check_rules: [LOGIC_VALIDATION_NOT_BOOLEAN, LOGIC_REFERENCE_NOT_FOUND, LOGIC_VALIDATION_DUPLICATE_NAME]
   semantics: docs/semantics.md#validation
   runtime: [spec-engine, data-api]
   factory: 未対応
@@ -127,8 +127,8 @@
   layer: logic
   since: v0.2-draft（M1.1）
   samples: [expense-log, warikan]
-  negatives: [computed-cycle, computed-name-conflict, computed-other-entity, computed-type-mismatch, computed-unknown-function]
-  check_rules: [LOGIC_COMPUTED_CYCLE, LOGIC_COMPUTED_NAME_CONFLICT, LOGIC_REFERENCE_OUT_OF_ENTITY, LOGIC_COMPUTED_TYPE_MISMATCH, LOGIC_FUNCTION_NOT_ALLOWED]
+  negatives: [computed-cycle, computed-name-conflict, computed-other-entity, computed-type-mismatch, computed-unknown-function, computed-name-reserved, computed-duplicate-name, computed-type-unknown, expression-invalid, expression-too-long, expression-depth-exceeded, expression-nodes-exceeded]
+  check_rules: [LOGIC_COMPUTED_CYCLE, LOGIC_COMPUTED_NAME_CONFLICT, LOGIC_REFERENCE_OUT_OF_ENTITY, LOGIC_COMPUTED_TYPE_MISMATCH, LOGIC_FUNCTION_NOT_ALLOWED, LOGIC_COMPUTED_NAME_RESERVED, LOGIC_COMPUTED_DUPLICATE_NAME, LOGIC_COMPUTED_TYPE_UNKNOWN, LOGIC_EXPRESSION_INVALID, LOGIC_EXPRESSION_TOO_LONG, LOGIC_EXPRESSION_DEPTH_EXCEEDED, LOGIC_EXPRESSION_NODES_EXCEEDED]
   semantics: docs/semantics.md#computed
   runtime: [spec-engine, data-api]
   factory: 未対応
@@ -137,8 +137,8 @@
   layer: logic
   since: v0.2-draft（M1.2）
   samples: [warikan]
-  negatives: [aggregate-unknown-target, aggregate-where-type-mismatch, aggregate-cycle]
-  check_rules: [LOGIC_AGGREGATE_TARGET_NOT_FOUND, LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH, LOGIC_COMPUTED_CYCLE]
+  negatives: [aggregate-unknown-target, aggregate-where-type-mismatch, aggregate-cycle, aggregate-form-invalid]
+  check_rules: [LOGIC_AGGREGATE_TARGET_NOT_FOUND, LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH, LOGIC_COMPUTED_CYCLE, LOGIC_AGGREGATE_FORM_INVALID]
   semantics: docs/semantics.md#aggregate
   runtime: [spec-engine, data-api]
   factory: 未対応
@@ -230,8 +230,8 @@
   layer: logic
   since: v0.2-draft（M1.2）
   samples: [warikan]
-  negatives: [settle-amount-not-number, settle-unknown-entity]
-  check_rules: [LOGIC_SETTLE_AMOUNT_NOT_NUMBER, LOGIC_ENTITY_NOT_FOUND]
+  negatives: [settle-amount-not-number, settle-unknown-entity, settle-reference-type-mismatch]
+  check_rules: [LOGIC_SETTLE_AMOUNT_NOT_NUMBER, LOGIC_ENTITY_NOT_FOUND, LOGIC_SETTLE_REFERENCE_TYPE_MISMATCH]
   semantics: docs/semantics.md#settle
   runtime: [spec-engine, data-api]
   factory: 未対応
@@ -280,8 +280,8 @@
   layer: logic
   since: v0.2-draft（M1.1）
   samples: [expense-log, warikan]
-  negatives: [action-unknown-entity, action-unknown-kind, action-not-reachable]
-  check_rules: [LOGIC_ENTITY_NOT_FOUND, LOGIC_ACTION_KIND_NOT_ALLOWED, UI_ACTION_NOT_REACHABLE]
+  negatives: [action-unknown-entity, action-unknown-kind, action-not-reachable, action-duplicate-name]
+  check_rules: [LOGIC_ENTITY_NOT_FOUND, LOGIC_ACTION_KIND_NOT_ALLOWED, UI_ACTION_NOT_REACHABLE, LOGIC_ACTION_DUPLICATE_NAME]
   semantics: docs/semantics.md#action
   runtime: [spec-engine, data-api, host]
   factory: 未対応
@@ -321,8 +321,8 @@
   layer: logic
   since: v0.2-draft（M1.3）
   samples: [task-board]
-  negatives: [set-type-mismatch, set-with-expression]
-  check_rules: [LOGIC_ACTION_SET_TYPE_MISMATCH, LOGIC_ACTION_SET_NOT_CONSTANT]
+  negatives: [set-type-mismatch, set-with-expression, action-set-field-not-found]
+  check_rules: [LOGIC_ACTION_SET_TYPE_MISMATCH, LOGIC_ACTION_SET_NOT_CONSTANT, LOGIC_ACTION_SET_FIELD_NOT_FOUND]
   semantics: docs/semantics.md#set
   runtime: [spec-engine, data-api, host]
   factory: 未対応
@@ -343,8 +343,8 @@
   layer: ui
   since: v0.2-draft（M1.1）
   samples: [expense-log, warikan]
-  negatives: [view-unknown-entity, view-unknown-type]
-  check_rules: [UI_ENTITY_NOT_FOUND, SHAPE_KEY_UNKNOWN]
+  negatives: [view-unknown-entity, view-unknown-type, value-invalid, view-duplicate-name]
+  check_rules: [UI_ENTITY_NOT_FOUND, SHAPE_KEY_UNKNOWN, SHAPE_VALUE_INVALID, UI_VIEW_DUPLICATE_NAME]
   semantics: docs/semantics.md#view
   runtime: [spec-engine, data-api, host]
   factory: 未対応
@@ -432,8 +432,8 @@
   layer: ui
   since: v0.2-draft（M1.4）
   samples: [dashboard]
-  negatives: [ranking-by-app-scope, ranking-by-not-shown]
-  check_rules: [UI_RANKING_BY_NOT_ROW_VALUE, UI_RANKING_BY_NOT_SHOWN]
+  negatives: [ranking-by-app-scope, ranking-by-not-shown, ranking-name-duplicate]
+  check_rules: [UI_RANKING_BY_NOT_ROW_VALUE, UI_RANKING_BY_NOT_SHOWN, UI_RANKING_NAME_DUPLICATE]
   semantics: docs/semantics.md#ranking
   runtime: [spec-engine, data-api, host]
   factory: 未対応
@@ -476,8 +476,8 @@
   layer: permission
   since: v0.2-draft（M1.1）
   samples: [expense-log, warikan]
-  negatives: [permission-unknown-name, permission-unknown-subject]
-  check_rules: [PERMISSION_NAME_NOT_ALLOWED, PERMISSION_SUBJECT_NOT_ALLOWED]
+  negatives: [permission-unknown-name, permission-unknown-subject, permission-duplicate-name]
+  check_rules: [PERMISSION_NAME_NOT_ALLOWED, PERMISSION_SUBJECT_NOT_ALLOWED, PERMISSION_DUPLICATE_NAME]
   semantics: docs/semantics.md#permission
   runtime: [spec-engine, data-api]
   factory: 未対応

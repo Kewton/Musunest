@@ -1,0 +1,26 @@
+# 負例：YAML として読めない（並び `[a, b]` が 1 行で閉じていない）。
+# 静的チェックは読めなかった位置を指して `SHAPE_YAML_INVALID` を 1 つだけ返す。
+# 期待する誤りコードは index.json。7 欄はすべて書いてある（1 か所だけをわざと間違えている）。
+
+entities: [expense
+
+views:
+  - name: expenseList
+    entity: expense
+
+actions:
+  - name: addExpense
+    entity: expense
+
+validations: []
+
+computed: []
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous

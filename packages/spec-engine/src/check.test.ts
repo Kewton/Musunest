@@ -891,11 +891,22 @@ describe("表示名（label）（M1.3）", () => {
   });
 });
 
-// ── 2. 負例 61 件 ──────────────────────────────────────────────
+// ── 2. 負例 81 件 ──────────────────────────────────────────────
 
 describe("負例（appspec-schema の samples/negatives）", () => {
-  it("負例の一覧は 61 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本、M1.4 の #178 で 2 本、#179 で 2 本、#180 で 2 本、#181 で 1 本、#182 で 2 本、#201 で 2 本足した）", () => {
-    expect(negativeIndex.negatives).toHaveLength(61);
+  it("負例の一覧は 81 件である（0 件なら以降のテストが空振りする。M1.3 の #176 で 2 本、M1.4 の #178 で 2 本、#179 で 2 本、#180 で 2 本、#181 で 1 本、#182 で 2 本、#201 で 2 本、#210 で 20 本足した）", () => {
+    expect(negativeIndex.negatives).toHaveLength(81);
+  });
+
+  it("SHAPE_CHECK_FAILED を除くすべての誤りコードに、負例が 1 本以上ある（#210 の受入条件）", () => {
+    // 宣言では起こせないコード（検査の内部の例外）だけが、負例を持たない。
+    // ほかに抜けがあれば、そのコードは「実装されているが、期待値を固定していない」状態になる。
+    const covered = new Set(negativeIndex.negatives.flatMap((negative) => negative.codes));
+    const missing = DIAGNOSTIC_CODES.filter(
+      (code) => code !== "SHAPE_CHECK_FAILED" && !covered.has(code),
+    );
+    expect(missing).toEqual([]);
+    expect(covered.has("SHAPE_CHECK_FAILED")).toBe(false);
   });
 
   it.each(negativeCases)(

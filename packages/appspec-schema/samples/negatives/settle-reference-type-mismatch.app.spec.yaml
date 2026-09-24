@@ -1,0 +1,51 @@
+# 負例：精算（settle）の払った人が、精算する entity を指す参照（ref）ではない。
+# ここでは数の項目 amount を指している（`LOGIC_SETTLE_REFERENCE_TYPE_MISMATCH`）。
+# 期待する誤りコードは index.json。ほかの箇所は正しい宣言にしてある。
+
+entities:
+  - name: member
+    fields:
+      name: string
+
+  - name: expense
+    fields:
+      description: string
+      amount: number
+      payer:
+        type: ref
+        to: member
+      participants:
+        type: list
+        of: member
+
+views:
+  - name: memberList
+    entity: member
+  - name: expenseList
+    entity: expense
+
+actions:
+  - name: addMember
+    entity: member
+  - name: addExpense
+    entity: expense
+
+validations: []
+
+computed:
+  - name: settlement
+    entity: member
+    settle:
+      expense: expense
+      amount: amount
+      payer: amount
+      shares: participants
+
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+
+minIdentity:
+  mode: anonymous
