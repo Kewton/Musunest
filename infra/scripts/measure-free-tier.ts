@@ -76,6 +76,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { HEALTHZ_PATH, judge as judgeHealthz } from "./smoke.ts";
 import type { Env } from "./sync-bindings.ts";
+// 経路のパスは契約の正本から組む（見本 dashboard の経路は api-measure-fixture の経路の型に入らないので、直接読む）
+import { apiSpecPath, apiViewPath } from "../../packages/appspec-schema/src/api.ts";
 // /api の経路の計測（Issue #111）の測定条件と判定の正本。ここから値は読むだけで、書き戻さない。
 import {
   actionPath,
@@ -90,11 +92,7 @@ import {
   judgeP1,
   judgeP7,
   routeById,
-  routePath,
   sizeById,
-  type ApiRoute,
-  type ApiRouteId,
-  type ApiSize,
   type ApiSizeId,
   type ApiWorker,
   type ExceededReading,
@@ -716,6 +714,19 @@ export function judgeCpu(invocations: readonly InvocationRow[], sent: number, li
 // アカウント①の中で再現するときに使う（Issue #152）。回数の上限は `--max-requests` で明示的に広げられる
 // （既定 50。経路を合算して緩めるのとは別）。
 //
+// ── 見本（--sample。Issue #216）─────────────────────────────────────────────────
+//   warikan   … 既定。支出の見本（#111 の実測と同じ。規模は支出 2・20・200 件）
+//   dashboard … サークルの活動の見本（packages/appspec-schema/samples/dashboard）。規模は**活動** 2・20・200 件。
+//               メンバー 4 人 → 活動 N 件（日付は日本時間の今月と先月に散らす）を準備し、
+//               dashboard（アプリ全体の集計・見出しごとの集計・順位）・activities・members の一覧を測る。
+//               片付けは**活動 → メンバー**の順（参照されているメンバーは消せない）
+//
+//   pnpm exec tsx --env-file=.env infra/scripts/measure-free-tier.ts --api --sample dashboard --instance <計測用の ID> --sizes 200
+//
+// 回数の上限（MAX_REQUESTS・`--max-requests`）は **1 窓で送る GET（温め + 本測定）** の上限であって、準備の POST は
+// 数えない。準備と片付けは計測の窓の外で、Analytics の判定にも入らない——warikan の 200 件（支出 200 件の POST）と
+// 同じ扱いである。dashboard の 200 件も、準備の POST は メンバー 4 + 活動 200、片付けは同じ数の delete になる。
+//
 // ── 終了コード ────────────────────────────────────────────────────────────────
 //   0 … すべて判定できて、P-7・P-1 のどちらにも触れていない
 //   1 … 引数・資格情報・HTTP・API の失敗（**応答が失敗したらその場で止める**。片付けは必ず行う）
@@ -783,9 +794,27 @@ export interface ApiMeasureIo {
 /** 本測定の窓のあとに空ける時間。**片付けと次の温めを窓の外へ出す**（窓の前後の余白より長く）。 */
 export const API_OUTSIDE_WINDOW_MS = WINDOW_PAD_MS + 1_000;
 
+/** 測る経路（見本ごと）。warikan は api-measure-fixture の API_ROUTES をそのまま使う */
+export interface MeasureRoute {
+  readonly id: string;
+  readonly label: string;
+  /** 一覧の名前。spec の経路は持たない（パスが違う） */
+  readonly viewName?: string;
+}
+
+/** 規模（見本ごと）。id は `--sizes` で選ぶ名前で、どの見本も basic・20・200 */
+export interface MeasureSize {
+  readonly id: ApiSizeId;
+  readonly label: string;
+}
+
+/** 経路のパス。**契約の正本（appspec-schema の api.ts）から組む**——ここで書き直さない */
+const measureRoutePath = (instanceId: string, route: MeasureRoute): string =>
+  route.viewName === undefined ? apiSpecPath(instanceId) : apiViewPath(instanceId, route.viewName);
+
 interface MeasureWindow {
-  readonly size: ApiSize;
-  readonly route: ApiRoute;
+  readonly size: MeasureSize;
+  readonly route: MeasureRoute;
   /** 温めの窓。**記録用**（判定には使わない） */
   readonly warm: Window;
   /** 本測定の窓。判定に使う */
@@ -963,15 +992,20 @@ async function apiPost(
   return body;
 }
 
-interface ApiActions {
-  readonly addMember: string;
-  readonly addExpense: string;
-  readonly deleteExpense: string;
-  readonly deleteMember: string;
+/** entity ごとの、準備（create）と片付け（delete）の action の名前 */
+interface EntityActions {
+  readonly create: string;
+  readonly delete: string;
 }
 
-/** 宣言（spec 応答）から、準備と片付けに要る action の名前を引く（宣言が変われば追随する）。 */
-function apiActionNames(spec: Record<string, unknown>): ApiActions {
+/**
+ * 宣言（spec 応答）から、準備と片付けに要る action の名前を引く（宣言が変われば追随する）。
+ * entity と kind で引く——名前を決め打ちしない。
+ */
+function apiActionNames<E extends string>(
+  spec: Record<string, unknown>,
+  entities: readonly E[],
+): Readonly<Record<E, EntityActions>> {
   const actions = Array.isArray(spec["actions"]) ? spec["actions"].filter(isRecord) : [];
   const pick = (entity: string, kind: "create" | "delete"): string | undefined => {
     const found = actions.find(
@@ -980,14 +1014,16 @@ function apiActionNames(spec: Record<string, unknown>): ApiActions {
     const name = found?.["name"];
     return typeof name === "string" ? name : undefined;
   };
-  const addMember = pick("member", "create");
-  const addExpense = pick("expense", "create");
-  const deleteExpense = pick("expense", "delete");
-  const deleteMember = pick("member", "delete");
-  if (addMember === undefined || addExpense === undefined || deleteExpense === undefined || deleteMember === undefined) {
-    throw new MeasureError("宣言に、準備と片付けに要る action が無い（member・expense の create と delete）");
+  const picked: Partial<Record<E, EntityActions>> = {};
+  for (const entity of entities) {
+    const create = pick(entity, "create");
+    const remove = pick(entity, "delete");
+    if (create === undefined || remove === undefined) {
+      throw new MeasureError(`宣言に、準備と片付けに要る action が無い（${entities.join("・")} の create と delete）`);
+    }
+    picked[entity] = { create, delete: remove };
   }
-  return { addMember, addExpense, deleteExpense, deleteMember };
+  return picked as Record<E, EntityActions>;
 }
 
 /** 一覧の行を読む（準備の片付けに使う）。 */
@@ -995,10 +1031,10 @@ async function apiViewRows(
   io: ApiMeasureIo,
   origin: string,
   instanceId: string,
-  route: ApiRoute,
+  route: MeasureRoute,
   label: string,
 ): Promise<readonly Record<string, unknown>[]> {
-  const res = await apiFetch(io, new URL(routePath(instanceId, route), origin), label, instanceId);
+  const res = await apiFetch(io, new URL(measureRoutePath(instanceId, route), origin), label, instanceId);
   const rows = res.body["rows"];
   if (!Array.isArray(rows) || !rows.every(isRecord)) {
     throw new MeasureError(`一覧 ${route.id} の応答の形が違う（rows が行の配列でない）。ここで止める`);
@@ -1012,53 +1048,231 @@ const rowId = (row: Record<string, unknown>, label: string): string => {
   return id;
 };
 
-/** 規模のデータを作る（**計測の窓の外**）。メンバー → 支出の順。 */
-async function apiPrepare(
+/** 片付けの 1 段。一覧の行を読み、その行を action で消す */
+interface CleanUpStep {
+  readonly route: MeasureRoute;
+  readonly action: string;
+}
+
+/** 宣言を読んだあとの、見本ごとの準備と片付け */
+interface SampleSetup {
+  /** 規模のデータを作る（**計測の窓の外**）。出力に出す内訳（件数だけ）を返す */
+  readonly prepare: (io: ApiMeasureIo, origin: string, instanceId: string, size: MeasureSize) => Promise<string>;
+  /** 片付けの順。**参照する側 → される側**（逆にすると、参照されている行は消せず 409 で残る） */
+  readonly cleanUp: readonly CleanUpStep[];
+  /** 出力に出す片付けの順（例「支出 → メンバー」） */
+  readonly cleanUpOrder: string;
+}
+
+export const API_SAMPLES = ["warikan", "dashboard"] as const;
+export type ApiSampleId = (typeof API_SAMPLES)[number];
+/** 既定の見本（#111 の実測と同じ） */
+export const DEFAULT_API_SAMPLE: ApiSampleId = "warikan";
+
+/** 測る見本（`--sample`。Issue #216） */
+interface ApiSample {
+  readonly id: ApiSampleId;
+  readonly routes: readonly MeasureRoute[];
+  readonly sizes: readonly MeasureSize[];
+  /** 宣言（spec 応答）から action の名前などを引き、準備と片付けを組む。足りなければ MeasureError */
+  readonly setup: (spec: Record<string, unknown>) => SampleSetup;
+}
+
+/** 準備の create を 1 回送り、作った行の id を返す */
+async function apiCreate(
   io: ApiMeasureIo,
   origin: string,
   instanceId: string,
-  actions: ApiActions,
-  size: ApiSize,
-): Promise<{ readonly members: number; readonly expenses: number }> {
-  const memberIds: string[] = [];
-  for (const name of API_MEMBER_NAMES) {
-    const created = await apiPost(io, new URL(actionPath(instanceId, actions.addMember), origin), { name }, `操作 ${actions.addMember}`);
-    memberIds.push(rowId(created, `操作 ${actions.addMember}`));
-  }
-  const plans = expensePlans(size);
-  for (const plan of plans) {
-    const payer = memberIds[plan.payerIndex];
-    const participants = plan.participantIndexes.map((index) => memberIds[index]);
-    if (payer === undefined || participants.some((id) => id === undefined)) {
-      throw new MeasureError(`${size.id} の支出（${plan.description}）の参照先が決まらない。ここで止める`);
-    }
-    await apiPost(
-      io,
-      new URL(actionPath(instanceId, actions.addExpense), origin),
-      { description: plan.description, amount: plan.amount, payer, participants },
-      `操作 ${actions.addExpense}`,
-    );
-  }
-  return { members: memberIds.length, expenses: plans.length };
+  action: string,
+  input: Readonly<Record<string, unknown>>,
+): Promise<string> {
+  const created = await apiPost(io, new URL(actionPath(instanceId, action), origin), input, `操作 ${action}`);
+  return rowId(created, `操作 ${action}`);
 }
+
+// ── 見本 warikan（#111）────────────────────────────────────────────────────────
+
+const WARIKAN_SAMPLE: ApiSample = {
+  id: "warikan",
+  routes: API_ROUTES,
+  sizes: API_SIZES,
+  setup: (spec) => {
+    const actions = apiActionNames(spec, ["member", "expense"] as const);
+    return {
+      // 規模のデータを作る。メンバー → 支出の順
+      prepare: async (io, origin, instanceId, size) => {
+        const memberIds: string[] = [];
+        for (const name of API_MEMBER_NAMES) {
+          memberIds.push(await apiCreate(io, origin, instanceId, actions.member.create, { name }));
+        }
+        const plans = expensePlans(sizeById(size.id));
+        for (const plan of plans) {
+          const payer = memberIds[plan.payerIndex];
+          const participants = plan.participantIndexes.map((index) => memberIds[index]);
+          if (payer === undefined || participants.some((id) => id === undefined)) {
+            throw new MeasureError(`${size.id} の支出（${plan.description}）の参照先が決まらない。ここで止める`);
+          }
+          await apiCreate(io, origin, instanceId, actions.expense.create, {
+            description: plan.description,
+            amount: plan.amount,
+            payer,
+            participants,
+          });
+        }
+        return `メンバー ${memberIds.length}・支出 ${plans.length}`;
+      },
+      cleanUp: [
+        { route: routeById("expenseList"), action: actions.expense.delete },
+        { route: routeById("memberList"), action: actions.member.delete },
+      ],
+      cleanUpOrder: "支出 → メンバー",
+    };
+  },
+};
+
+// ── 見本 dashboard（Issue #216。samples/dashboard/app.spec.yaml）──────────────────
+//
+// D-1（staging の /api で Worker 単体の CPU 最大 200 ms 超・**200 件**で測る。06 §5）を、アプリ全体の集計・
+// 見出しごとの集計・順位を持つ見本で測る。200 件は **活動（activity）の件数**である。
+// 活動の日付は**日本時間の今月と先月に半分ずつ**散らす——`within: this_month` の絞り込みと、月ごとの集計
+// （`groupBy: month`）の両方に行が当たるようにするためである。項目の名前は見本の写し（warikan の
+// description・amount と同じ扱い）で、`kind` の値だけは宣言の `options` から読む（選択肢が変われば追随する）。
+
+/** 測る経路。宣言の名前は見本 app.spec.yaml の写し */
+export const DASHBOARD_ROUTES: readonly MeasureRoute[] = [
+  { id: "spec", label: "宣言の読み込み" },
+  { id: "dashboard", label: "ダッシュボード（アプリ全体の集計・見出しごとの集計・順位）", viewName: "dashboard" },
+  { id: "activities", label: "活動の一覧", viewName: "activities" },
+  { id: "members", label: "メンバーの一覧", viewName: "members" },
+];
+
+export interface DashboardSize extends MeasureSize {
+  /** 活動の件数 */
+  readonly activities: number;
+}
+
+/** 規模は3段階。**活動**を 2・20・200 件（200 件が D-1 の線） */
+export const DASHBOARD_SIZES: readonly DashboardSize[] = [
+  { id: "basic", label: "基本（活動 2 件）", activities: 2 },
+  { id: "20", label: "20 件（活動 20 件）", activities: 20 },
+  { id: "200", label: "200 件（活動 200 件）", activities: 200 },
+];
+
+/** メンバー（**規模によらず 4 人**）。参加した人（attendees）が 1〜4 人になるように */
+export const DASHBOARD_MEMBER_NAMES = ["A", "B", "C", "D"] as const;
+
+/** 1 件の活動の入力。attendees は `DASHBOARD_MEMBER_NAMES` の添字で持つ */
+export interface ActivityPlan {
+  readonly kind: string;
+  /** `YYYY-MM-DD`（日本時間の今月か先月） */
+  readonly date: string;
+  readonly attendeeIndexes: readonly number[];
+  readonly cost: number;
+}
+
+const JST_OFFSET_MS = 9 * 60 * 60_000;
+const pad2 = (value: number): string => String(value).padStart(2, "0");
+
+/**
+ * 規模の活動の並び。偶数番目を**日本時間の今月**、奇数番目を**先月**にする（日は 1〜28 日を巡る。どの月にもある日）。
+ * 種類は `kinds`（宣言の `options` のキー）を順に巡り、参加した人は 1〜4 人、費用は 500 円刻みで巡る。
+ */
+export function activityPlans(activities: number, kinds: readonly string[], nowMs: number): readonly ActivityPlan[] {
+  if (kinds.length === 0) throw new MeasureError("活動の種類（kind の選択肢）が無い");
+  const jst = new Date(nowMs + JST_OFFSET_MS);
+  const year = jst.getUTCFullYear();
+  const month = jst.getUTCMonth();
+  const months = [`${year}-${pad2(month + 1)}`, month === 0 ? `${year - 1}-12` : `${year}-${pad2(month)}`] as const;
+  const plans: ActivityPlan[] = [];
+  for (let index = 0; index < activities; index++) {
+    const attendees = 1 + (index % DASHBOARD_MEMBER_NAMES.length);
+    plans.push({
+      kind: kinds[index % kinds.length] ?? "",
+      date: `${months[index % 2]}-${pad2(1 + (Math.floor(index / 2) % 28))}`,
+      attendeeIndexes: Array.from({ length: attendees }, (_, at) => at),
+      cost: 500 * (1 + (index % 10)),
+    });
+  }
+  return plans;
+}
+
+/** 宣言の `entity` の `field` が enum なら、その `options` のキー（宣言の順）を返す。無ければ MeasureError */
+function enumOptionsOf(spec: Record<string, unknown>, entity: string, field: string): readonly string[] {
+  const declaration = spec["spec"];
+  const entities =
+    isRecord(declaration) && Array.isArray(declaration["entities"]) ? declaration["entities"].filter(isRecord) : [];
+  const fields = entities.find((candidate) => candidate["name"] === entity)?.["fields"];
+  const node = isRecord(fields) ? fields[field] : undefined;
+  const options = isRecord(node) && node["type"] === "enum" && isRecord(node["options"]) ? Object.keys(node["options"]) : [];
+  if (options.length === 0) throw new MeasureError(`宣言に、準備に要る ${entity} の ${field} の選択肢（enum の options）が無い`);
+  return options;
+}
+
+const dashboardRoute = (id: string): MeasureRoute => {
+  const route = DASHBOARD_ROUTES.find((candidate) => candidate.id === id);
+  if (route === undefined) throw new MeasureError(`dashboard の経路 ${id} が無い`);
+  return route;
+};
+
+const DASHBOARD_SAMPLE: ApiSample = {
+  id: "dashboard",
+  routes: DASHBOARD_ROUTES,
+  sizes: DASHBOARD_SIZES,
+  setup: (spec) => {
+    const actions = apiActionNames(spec, ["member", "activity"] as const);
+    const kinds = enumOptionsOf(spec, "activity", "kind");
+    return {
+      // 規模のデータを作る。メンバー → 活動の順
+      prepare: async (io, origin, instanceId, size) => {
+        const found = DASHBOARD_SIZES.find((candidate) => candidate.id === size.id);
+        if (found === undefined) throw new MeasureError(`dashboard の規模 ${size.id} が無い`);
+        const memberIds: string[] = [];
+        for (const name of DASHBOARD_MEMBER_NAMES) {
+          memberIds.push(await apiCreate(io, origin, instanceId, actions.member.create, { name }));
+        }
+        // 日付は準備を始めた時点の日本時間で決める（今月と先月に半分ずつ）
+        const plans = activityPlans(found.activities, kinds, io.now());
+        for (const plan of plans) {
+          const attendees = plan.attendeeIndexes.map((index) => memberIds[index]);
+          if (attendees.some((id) => id === undefined)) {
+            throw new MeasureError(`${size.id} の活動（${plan.date}）の参照先が決まらない。ここで止める`);
+          }
+          await apiCreate(io, origin, instanceId, actions.activity.create, {
+            kind: plan.kind,
+            date: plan.date,
+            attendees,
+            cost: plan.cost,
+          });
+        }
+        return `メンバー ${memberIds.length}・活動 ${plans.length}`;
+      },
+      cleanUp: [
+        { route: dashboardRoute("activities"), action: actions.activity.delete },
+        { route: dashboardRoute("members"), action: actions.member.delete },
+      ],
+      cleanUpOrder: "活動 → メンバー",
+    };
+  },
+};
+
+const API_SAMPLE_BY_ID: Readonly<Record<ApiSampleId, ApiSample>> = { warikan: WARIKAN_SAMPLE, dashboard: DASHBOARD_SAMPLE };
 
 /**
  * 専用インスタンスのデータを片付ける（**計測の窓の外**。Issue #111「#109 の操作で片付ける」）。
- * **支出 → メンバー**の順に消す——逆にすると、支出から参照されているメンバーは消せず（409）、データが残る。
+ * **参照する側 → される側**の順に消す（warikan は支出 → メンバー、dashboard は活動 → メンバー）——
+ * 逆にすると、参照されているメンバーは消せず（409）、データが残る。
  */
-async function apiCleanUp(
-  io: ApiMeasureIo,
-  origin: string,
-  instanceId: string,
-  actions: ApiActions,
-): Promise<number> {
+async function apiCleanUp(io: ApiMeasureIo, origin: string, instanceId: string, setup: SampleSetup): Promise<number> {
   let deleted = 0;
-  for (const routeId of ["expenseList", "memberList"] as const) {
-    const route = routeById(routeId);
-    const action = routeId === "expenseList" ? actions.deleteExpense : actions.deleteMember;
-    const rows = await apiViewRows(io, origin, instanceId, route, `一覧 ${routeId}`);
+  for (const step of setup.cleanUp) {
+    const rows = await apiViewRows(io, origin, instanceId, step.route, `一覧 ${step.route.id}`);
     for (const row of rows) {
-      await apiPost(io, new URL(actionPath(instanceId, action), origin), { id: rowId(row, `一覧 ${routeId}`) }, `操作 ${action}`);
+      await apiPost(
+        io,
+        new URL(actionPath(instanceId, step.action), origin),
+        { id: rowId(row, `一覧 ${step.route.id}`) },
+        `操作 ${step.action}`,
+      );
       deleted++;
     }
   }
@@ -1070,10 +1284,10 @@ async function apiSendPhase(
   io: ApiMeasureIo,
   origin: string,
   instanceId: string,
-  route: ApiRoute,
+  route: MeasureRoute,
   count: number,
 ): Promise<PhaseRecord> {
-  const path = routePath(instanceId, route);
+  const path = measureRoutePath(instanceId, route);
   let first = Number.POSITIVE_INFINITY;
   let last = Number.NEGATIVE_INFINITY;
   for (let index = 1; index <= count; index++) {
@@ -1261,6 +1475,7 @@ function apiParseArgs(argv: readonly string[]) {
       options: {
         instance: { type: "string" },
         env: { type: "string" },
+        sample: { type: "string" },
         sizes: { type: "string" },
         routes: { type: "string" },
         warm: { type: "string" },
@@ -1275,9 +1490,6 @@ function apiParseArgs(argv: readonly string[]) {
     throw new MeasureError(`引数が不正（値は表示しない）\n${API_USAGE}`);
   }
 }
-
-const isSizeId = (value: string): value is ApiSizeId => API_SIZES.some((size) => size.id === value);
-const isRouteId = (value: string): value is ApiRouteId => API_ROUTES.some((route) => route.id === value);
 
 const parseIds = <T extends string>(
   raw: string | undefined,
@@ -1321,8 +1533,16 @@ async function apiRun(argv: readonly string[], io: ApiMeasureIo): Promise<number
     );
   }
   const env: Env = envRaw === undefined ? TARGET_ENV : (envRaw as Env);
-  const sizes = parseIds(values.sizes, API_SIZES.map((size) => size.id).filter(isSizeId), "--sizes").map(sizeById);
-  const routes = parseIds(values.routes, API_ROUTES.map((route) => route.id).filter(isRouteId), "--routes").map(routeById);
+  const sampleRaw = values.sample ?? DEFAULT_API_SAMPLE;
+  if (!(API_SAMPLES as readonly string[]).includes(sampleRaw)) {
+    throw new MeasureError(`--sample は ${API_SAMPLES.join("|")} から選ぶ（値は表示しない）。1 回も送らずに止める`);
+  }
+  const sample = API_SAMPLE_BY_ID[sampleRaw as ApiSampleId];
+  // 経路と規模は見本ごとに違う（dashboard の経路は spec・dashboard・activities・members）
+  const sizeIds = parseIds(values.sizes, sample.sizes.map((size) => size.id), "--sizes");
+  const sizes = sample.sizes.filter((size) => sizeIds.includes(size.id));
+  const routeIds = parseIds(values.routes, sample.routes.map((route) => route.id), "--routes");
+  const routes = sample.routes.filter((route) => routeIds.includes(route.id));
   const warmup = positiveInteger(values.warm, "--warm", io.policy.warmup);
   const measured = positiveInteger(values.count, "--count", io.policy.measured);
   // 1 経路・1 規模あたりに送る回数の上限。既定は Issue #25 で承認された枠（50）。
@@ -1340,14 +1560,14 @@ async function apiRun(argv: readonly string[], io: ApiMeasureIo): Promise<number
   const origin = `https://${hostname}`;
   const secrets = [credentials.token, credentials.accountId, subdomain, hostname];
 
-  // 1. 宣言を読み、action の名前を引く（読み取りだけ。計測の窓の外）
-  const spec = await apiFetch(io, new URL(routePath(instanceId, routeById("spec")), origin), "spec（宣言）", instanceId);
-  const actions = apiActionNames(spec.body);
+  // 1. 宣言を読み、action の名前を引く（読み取りだけ。計測の窓の外）。見本に要る action が無ければ、何も書かずに止める
+  const spec = await apiFetch(io, new URL(apiSpecPath(instanceId), origin), "spec（宣言）", instanceId);
+  const setup = sample.setup(spec.body);
 
   // 2. P-1（過去 7 日。窓の外。既存の期間レポートを別に読む）
   const p1 = await apiReadP1(io, credentials, secrets);
 
-  io.out(`api-measure: env=${env} の計測用インスタンス（${instanceId}）で測る`);
+  io.out(`api-measure: env=${env} の計測用インスタンス（${instanceId}）で測る（見本 ${sample.id}）`);
   io.out(`api-measure: 経路 ${routes.map((route) => route.id).join("・")} / 規模 ${sizes.map((size) => size.id).join("・")}`);
   io.out(
     `api-measure: 各経路・各規模を ${warmup} 回温め → ${io.policy.gapMs / 1000} 秒空けて → ${measured} 回測る` +
@@ -1358,9 +1578,9 @@ async function apiRun(argv: readonly string[], io: ApiMeasureIo): Promise<number
   const windows: MeasureWindow[] = [];
   try {
     for (const size of sizes) {
-      await apiCleanUp(io, origin, instanceId, actions);
-      const created = await apiPrepare(io, origin, instanceId, actions, size);
-      io.out(`api-measure: ${size.id} を準備した（メンバー ${created.members}・支出 ${created.expenses}。計測の窓の外）`);
+      await apiCleanUp(io, origin, instanceId, setup);
+      const created = await setup.prepare(io, origin, instanceId, size);
+      io.out(`api-measure: ${size.id} を準備した（${created}。計測の窓の外）`);
       for (const route of routes) {
         const warm = await apiSendPhase(io, origin, instanceId, route, warmup);
         await io.sleep(io.policy.gapMs);
@@ -1376,13 +1596,13 @@ async function apiRun(argv: readonly string[], io: ApiMeasureIo): Promise<number
         // 片付けと次の温めを、本測定の窓の外へ出す（窓の余白より長く空ける）
         await io.sleep(API_OUTSIDE_WINDOW_MS);
       }
-      await apiCleanUp(io, origin, instanceId, actions);
-      io.out(`api-measure: ${size.id} を片付けた（支出 → メンバーの順）`);
+      await apiCleanUp(io, origin, instanceId, setup);
+      io.out(`api-measure: ${size.id} を片付けた（${setup.cleanUpOrder}の順）`);
     }
   } finally {
     // 途中で失敗しても、専用インスタンスのデータは片付ける（残すと次の計測や e2e に混ざる）
     try {
-      const removed = await apiCleanUp(io, origin, instanceId, actions);
+      const removed = await apiCleanUp(io, origin, instanceId, setup);
       if (removed > 0) io.out(`api-measure: 残りを片付けた（${removed} 行）`);
     } catch {
       io.err("api-measure: 片付けに失敗した（専用インスタンスにデータが残っている可能性がある）");
@@ -1449,20 +1669,25 @@ function apiOverallReason(findings: readonly WindowFinding[]): string {
   return `測った ${findings.length} 窓のすべてで、どの Worker の最大も単体で 7 ms を超えていない`;
 }
 
-export const API_USAGE = `usage: pnpm exec tsx --env-file=.env infra/scripts/measure-free-tier.ts --api --instance <id> [--env <${API_ENVS.join("|")}>] [--sizes basic,20,200] [--routes spec,expenseList,memberList,settlement] [--warm <n>] [--count <n>] [--max-requests <n>]
+export const API_USAGE = `usage: pnpm exec tsx --env-file=.env infra/scripts/measure-free-tier.ts --api --instance <id> [--sample <${API_SAMPLES.join("|")}>] [--env <${API_ENVS.join("|")}>] [--sizes basic,20,200] [--routes <a,b>] [--warm <n>] [--count <n>] [--max-requests <n>]
 
   --api                   /api の経路（#102 の spec・支出一覧・member の集計一覧・#108 の精算結果）の CPU 時間を測る
   --instance <id>         計測用インスタンスの ID（**必須**。demo を含む ID は使わない）
   --env <env>             測る環境（既定 ${TARGET_ENV}）。${API_ENVS.join(" / ")} だけ。production は別アカウントで /api/* が 404 なので測らない
                           dev は、上限を自分で設定して Free の壁を再現するときに使う（Issue #152）
-  --sizes <a,b>           規模（既定は全部。basic・20・200）。basic = A/B/C と 2 支出
-  --routes <a,b>          経路（既定は全部）。spec・expenseList・memberList・settlement
+  --sample <name>         測る見本（既定 ${DEFAULT_API_SAMPLE}）。${API_SAMPLES.join(" / ")}（Issue #216）
+  --sizes <a,b>           規模（既定は全部。basic・20・200）
+                          warikan: basic = A/B/C と 2 支出、20・200 は支出の件数
+                          dashboard: メンバー 4 人と活動 2・20・200 件（日付は日本時間の今月と先月）
+  --routes <a,b>          経路（既定は全部）
+                          warikan: ${API_ROUTES.map((route) => route.id).join("・")}
+                          dashboard: ${DASHBOARD_ROUTES.map((route) => route.id).join("・")}
   --warm <n>              温めの回数（既定 ${API_WARMUP_REQUESTS}）／ --count <n> 本測定の回数（既定 ${API_MEASURED_REQUESTS}）
   --max-requests <n>      1 経路・1 規模あたりに送る回数の上限（既定 ${MAX_REQUESTS}）。温め + 本測定 はこれ以下
                           （**経路を合算しない**）。既定を上げるのは、枠を明示的に広げるときだけ（Issue #152 の 200 回）
 
 各経路・各規模を ${API_WARMUP_REQUESTS} 回温め → ${API_GAP_MS / 1000} 秒空けて → ${API_MEASURED_REQUESTS} 回測る。
-準備と片付けは計測の窓の外（#109 の delete で片付ける）。CPU 時間は Workers Analytics の worker 別 cpuTime の max。
+準備と片付けは計測の窓の外（#109 の delete で片付ける。準備の POST は回数の上限に数えない）。CPU 時間は Workers Analytics の worker 別 cpuTime の max。
 資格情報は環境変数 CLOUDFLARE_API_TOKEN・CLOUDFLARE_ACCOUNT_ID（手元の .env。アカウント①）。
 出すのは回数・ミリ秒・判定・窓の時刻だけ。URL・ホスト名・Account ID・トークンを出さない。
 exit ${EXIT_OK}: 判定できて非抵触／${EXIT_NG}: 失敗／${EXIT_UNDETERMINED}: 判断不能／${EXIT_TOUCHED}: P-7 か P-1 に触れた`;
