@@ -140,7 +140,7 @@ describe("migration を実 SQLite に適用する", () => {
     db.prepare("INSERT INTO _musunest_meta (key, value) VALUES (?, ?)").run("before", "kept");
     db.prepare(
       "INSERT INTO apps (source_sha256, schema_version, source_key, normalized_key) VALUES (?, ?, ?, ?)",
-    ).run("a".repeat(64), "community.app-spec/v0.2-draft", "s/app.spec.yaml", "n/normalized.json");
+    ).run("a".repeat(64), "community.app-spec/v0.2", "s/app.spec.yaml", "n/normalized.json");
 
     for (const name of migrationFiles()) db.exec(readMigration(name));
 

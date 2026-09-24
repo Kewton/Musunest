@@ -15,7 +15,7 @@ describe("readLedgerYaml", () => {
         "  runtime: []",
         "  # 行の途中のコメント",
         "  semantics: docs/semantics.md#entity",
-        "  since: v0.2-draft（M1.1）",
+        "  since: v0.2（M1.1）",
         "- name: list",
         "  factory: 未対応",
         "",
@@ -28,7 +28,7 @@ describe("readLedgerYaml", () => {
         samples: ["expense-log", "warikan"],
         runtime: [],
         semantics: "docs/semantics.md#entity",
-        since: "v0.2-draft（M1.1）",
+        since: "v0.2（M1.1）",
       },
       { name: "list", factory: "未対応" },
     ]);

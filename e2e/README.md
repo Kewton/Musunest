@@ -9,7 +9,7 @@ staging に置いた見本「旅行の割り勘」が、リポジトリの原本
 ## 何を確かめるか
 
 1. 原本（`packages/appspec-schema/samples/warikan/app.spec.yaml`）の SHA-256 が、staging の spec 応答の
-   `sourceSha256` と一致し、版が草案の版（`community.app-spec/v0.2-draft`）と一致すること。
+   `sourceSha256` と一致し、版が草案の版（`community.app-spec/v0.2`）と一致すること。
    **一致しなければ、採点も後片付けも書込もせずに非 0 で止まる。**
 2. 時計に依存しない採点の値（`workspace/mvp/m1/02-l2-spec-examples.md` §2.3）。**時計は上書きしない**
    （ログインの無い API に時刻を変える入口を作らない。Q17）。

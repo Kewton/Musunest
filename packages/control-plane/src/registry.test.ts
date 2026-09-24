@@ -109,13 +109,13 @@ const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
 const APP_A = {
   sourceSha256: SHA_A,
-  schemaVersion: "community.app-spec/v0.2-draft",
+  schemaVersion: "community.app-spec/v0.2",
   sourceKey: `specs/${SHA_A}/app.spec.yaml`,
   normalizedKey: `specs/${SHA_A}/normalized.json`,
 };
 const APP_B = {
   sourceSha256: SHA_B,
-  schemaVersion: "community.app-spec/v0.2-draft",
+  schemaVersion: "community.app-spec/v0.2",
   sourceKey: `specs/${SHA_B}/app.spec.yaml`,
   normalizedKey: `specs/${SHA_B}/normalized.json`,
 };

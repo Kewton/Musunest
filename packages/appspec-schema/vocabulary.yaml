@@ -21,7 +21,7 @@
 
 - name: entity
   layer: data
-  since: v0.2-draft（M1.1）
+  since: v0.2（M1.1）
   samples: [expense-log, warikan]
   negatives: [entity-duplicate-name, entity-invalid-name, entity-without-fields, field-reserved-name, field-unknown-type, field-duplicate-name, yaml-invalid, key-duplicate]
   check_rules: [DATA_ENTITY_DUPLICATE_NAME, SHAPE_NAME_INVALID, SHAPE_KEY_MISSING, DATA_FIELD_NAME_RESERVED, DATA_FIELD_TYPE_UNKNOWN, DATA_FIELD_DUPLICATE_NAME, SHAPE_YAML_INVALID, SHAPE_KEY_DUPLICATE]
@@ -31,7 +31,7 @@
 
 - name: string
   layer: data
-  since: v0.2-draft（M1.1）
+  since: v0.2（M1.1）
   samples: [expense-log, warikan]
   negatives: [string-in-arithmetic]
   check_rules: [LOGIC_OPERAND_TYPE_MISMATCH]
@@ -41,7 +41,7 @@
 
 - name: number
   layer: data
-  since: v0.2-draft（M1.1）
+  since: v0.2（M1.1）
   samples: [expense-log, warikan]
   negatives: [number-in-len]
   check_rules: [LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH]
@@ -51,7 +51,7 @@
 
 - name: list
   layer: data
-  since: v0.2-draft（M1.1）
+  since: v0.2（M1.1）
   samples: [expense-log, warikan]
   negatives: [list-in-comparison]
   check_rules: [LOGIC_OPERAND_TYPE_MISMATCH]
@@ -61,7 +61,7 @@
 
 - name: ref
   layer: data
-  since: v0.2-draft（M1.2）
+  since: v0.2（M1.2）
   samples: [warikan]
   negatives: [ref-unknown-entity, list-ref-unknown-entity, ref-target-not-shown]
   check_rules: [DATA_REF_TARGET_NOT_FOUND, UI_REF_TARGET_NOT_SHOWN]
@@ -72,7 +72,7 @@
 # M1.3 の語彙の「見本」は task-board である（#159 が置いた）。
 - name: enum
   layer: data
-  since: v0.2-draft（M1.3）
+  since: v0.2（M1.3）
   samples: [task-board]
   negatives: [enum-options-empty, enum-duplicate-option-key, enum-key-not-found]
   check_rules: [DATA_FIELD_ENUM_OPTIONS_EMPTY, DATA_FIELD_ENUM_OPTION_KEY_DUPLICATE, LOGIC_ENUM_KEY_NOT_FOUND]
@@ -82,7 +82,7 @@
 
 - name: default
   layer: data
-  since: v0.2-draft（M1.3）
+  since: v0.2（M1.3）
   samples: [task-board]
   negatives: [enum-default-not-in-options]
   check_rules: [DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS]
@@ -93,7 +93,7 @@
 # 日付（date）と「今日」（today）の「見本」も task-board である（#159 が置いた）。
 - name: date
   layer: data
-  since: v0.2-draft（M1.3）
+  since: v0.2（M1.3）
   samples: [task-board]
   negatives: [date-compared-with-number]
   check_rules: [LOGIC_OPERAND_TYPE_MISMATCH]
@@ -105,7 +105,7 @@
 
 - name: validation
   layer: logic
-  since: v0.2-draft（M1.1）
+  since: v0.2（M1.1）
   samples: [expense-log, warikan]
   negatives: [validation-not-boolean, validation-unknown-field, validation-duplicate-name]
   check_rules: [LOGIC_VALIDATION_NOT_BOOLEAN, LOGIC_REFERENCE_NOT_FOUND, LOGIC_VALIDATION_DUPLICATE_NAME]
@@ -115,7 +115,7 @@
 
 - name: message
   layer: logic
-  since: v0.2-draft（M1.2）
+  since: v0.2（M1.2）
   samples: [warikan]
   negatives: [validation-message-not-string]
   check_rules: [SHAPE_VALIDATION_MESSAGE_INVALID]
@@ -125,7 +125,7 @@
 
 - name: computed
   layer: logic
-  since: v0.2-draft（M1.1）
+  since: v0.2（M1.1）
   samples: [expense-log, warikan]
   negatives: [computed-cycle, computed-name-conflict, computed-other-entity, computed-type-mismatch, computed-unknown-function, computed-name-reserved, computed-duplicate-name, computed-type-unknown, expression-invalid, expression-too-long, expression-depth-exceeded, expression-nodes-exceeded]
   check_rules: [LOGIC_COMPUTED_CYCLE, LOGIC_COMPUTED_NAME_CONFLICT, LOGIC_REFERENCE_OUT_OF_ENTITY, LOGIC_COMPUTED_TYPE_MISMATCH, LOGIC_FUNCTION_NOT_ALLOWED, LOGIC_COMPUTED_NAME_RESERVED, LOGIC_COMPUTED_DUPLICATE_NAME, LOGIC_COMPUTED_TYPE_UNKNOWN, LOGIC_EXPRESSION_INVALID, LOGIC_EXPRESSION_TOO_LONG, LOGIC_EXPRESSION_DEPTH_EXCEEDED, LOGIC_EXPRESSION_NODES_EXCEEDED]
@@ -135,7 +135,7 @@
 
 - name: aggregate
   layer: logic
-  since: v0.2-draft（M1.2）
+  since: v0.2（M1.2）
   samples: [warikan]
   negatives: [aggregate-unknown-target, aggregate-where-type-mismatch, aggregate-cycle, aggregate-form-invalid]
   check_rules: [LOGIC_AGGREGATE_TARGET_NOT_FOUND, LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH, LOGIC_COMPUTED_CYCLE, LOGIC_AGGREGATE_FORM_INVALID]
@@ -147,7 +147,7 @@
 # 見本は dashboard（`scope: app` の計算を持つ）。
 - name: scope
   layer: logic
-  since: v0.2-draft（M1.4）
+  since: v0.2（M1.4）
   samples: [dashboard]
   negatives: [aggregate-app-scope-uses-this]
   check_rules: [LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH]
@@ -157,7 +157,7 @@
 
 - name: sum
   layer: logic
-  since: v0.2-draft（M1.2）
+  since: v0.2（M1.2）
   samples: [warikan]
   negatives: [aggregate-sum-of-string]
   check_rules: [LOGIC_AGGREGATE_TARGET_NOT_NUMBER]
@@ -167,7 +167,7 @@
 
 - name: count
   layer: logic
-  since: v0.2-draft（M1.2）
+  since: v0.2（M1.2）
   samples: [warikan]
   negatives: [aggregate-unknown-target]
   check_rules: [LOGIC_AGGREGATE_TARGET_NOT_FOUND]
@@ -178,7 +178,7 @@
 # 平均（`avg`）。**値の無い行は数えない**（M1.4。Issue #177）。見本は dashboard。
 - name: avg
   layer: logic
-  since: v0.2-draft（M1.4）
+  since: v0.2（M1.4）
   samples: [dashboard]
   negatives: [avg-target-not-number]
   check_rules: [LOGIC_AGGREGATE_TARGET_NOT_NUMBER]
@@ -191,7 +191,7 @@
 # 渡す**（式の評価の中で現在時刻を読まない。Q17）。見本は dashboard（`date: {within: this_month}`）。
 - name: within
   layer: logic
-  since: v0.2-draft（M1.4）
+  since: v0.2（M1.4）
   samples: [dashboard]
   negatives: [within-field-not-date, within-unknown-period]
   check_rules: [LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH, LOGIC_AGGREGATE_WHERE_PERIOD_NOT_ALLOWED]
@@ -205,7 +205,7 @@
 # 2026-09-19）。月の見出しの件数の上限は `last`（省いたときの既定は 6）。見本は dashboard。
 - name: groupBy
   layer: logic
-  since: v0.2-draft（M1.4）
+  since: v0.2（M1.4）
   samples: [dashboard]
   negatives: [groupby-field-not-groupable]
   check_rules: [LOGIC_AGGREGATE_GROUPBY_NOT_GROUPABLE]
@@ -218,7 +218,7 @@
 # 値は一覧の応答の `groups` に載り、**`scope` の欄には混ぜない**（別の欄である）。見本は dashboard。
 - name: groups
   layer: logic
-  since: v0.2-draft（M1.4）
+  since: v0.2（M1.4）
   samples: [dashboard]
   negatives: [groups-in-show]
   check_rules: [UI_FIELD_NOT_FOUND]
@@ -228,7 +228,7 @@
 
 - name: settle
   layer: logic
-  since: v0.2-draft（M1.2）
+  since: v0.2（M1.2）
   samples: [warikan]
   negatives: [settle-amount-not-number, settle-unknown-entity, settle-reference-type-mismatch]
   check_rules: [LOGIC_SETTLE_AMOUNT_NOT_NUMBER, LOGIC_ENTITY_NOT_FOUND, LOGIC_SETTLE_REFERENCE_TYPE_MISMATCH]
@@ -238,7 +238,7 @@
 
 - name: min
   layer: logic
-  since: v0.2-draft（M1.1）
+  since: v0.2（M1.1）
   samples: [expense-log]
   negatives: [min-wrong-arity]
   check_rules: [LOGIC_FUNCTION_ARITY_MISMATCH]
@@ -248,7 +248,7 @@
 
 - name: max
   layer: logic
-  since: v0.2-draft（M1.1）
+  since: v0.2（M1.1）
   samples: [expense-log, warikan]
   negatives: [max-list-argument]
   check_rules: [LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH]
@@ -258,7 +258,7 @@
 
 - name: len
   layer: logic
-  since: v0.2-draft（M1.1）
+  since: v0.2（M1.1）
   samples: [expense-log, warikan]
   negatives: [number-in-len]
   check_rules: [LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH]
@@ -268,7 +268,7 @@
 
 - name: today
   layer: logic
-  since: v0.2-draft（M1.3）
+  since: v0.2（M1.3）
   samples: [task-board]
   negatives: [today-with-argument]
   check_rules: [LOGIC_FUNCTION_ARITY_MISMATCH]
@@ -278,7 +278,7 @@
 
 - name: action
   layer: logic
-  since: v0.2-draft（M1.1）
+  since: v0.2（M1.1）
   samples: [expense-log, warikan]
   negatives: [action-unknown-entity, action-unknown-kind, action-not-reachable, action-duplicate-name]
   check_rules: [LOGIC_ENTITY_NOT_FOUND, LOGIC_ACTION_KIND_NOT_ALLOWED, UI_ACTION_NOT_REACHABLE, LOGIC_ACTION_DUPLICATE_NAME]
@@ -288,7 +288,7 @@
 
 - name: create
   layer: logic
-  since: v0.2-draft（M1.2）
+  since: v0.2（M1.2）
   samples: [warikan]
   negatives: [action-unknown-kind]
   check_rules: [LOGIC_ACTION_KIND_NOT_ALLOWED]
@@ -298,7 +298,7 @@
 
 - name: update
   layer: logic
-  since: v0.2-draft（M1.2）
+  since: v0.2（M1.2）
   samples: [warikan]
   negatives: [action-unknown-kind]
   check_rules: [LOGIC_ACTION_KIND_NOT_ALLOWED]
@@ -308,7 +308,7 @@
 
 - name: delete
   layer: logic
-  since: v0.2-draft（M1.2）
+  since: v0.2（M1.2）
   samples: [warikan]
   negatives: [action-unknown-kind]
   check_rules: [LOGIC_ACTION_KIND_NOT_ALLOWED]
@@ -319,7 +319,7 @@
 # set と when の「見本」も task-board である（#159 が置いた）。
 - name: set
   layer: logic
-  since: v0.2-draft（M1.3）
+  since: v0.2（M1.3）
   samples: [task-board]
   negatives: [set-type-mismatch, set-with-expression, action-set-field-not-found]
   check_rules: [LOGIC_ACTION_SET_TYPE_MISMATCH, LOGIC_ACTION_SET_NOT_CONSTANT, LOGIC_ACTION_SET_FIELD_NOT_FOUND]
@@ -329,7 +329,7 @@
 
 - name: when
   layer: logic
-  since: v0.2-draft（M1.3）
+  since: v0.2（M1.3）
   samples: [task-board]
   negatives: [when-not-boolean]
   check_rules: [LOGIC_ACTION_WHEN_NOT_BOOLEAN]
@@ -341,7 +341,7 @@
 
 - name: view
   layer: ui
-  since: v0.2-draft（M1.1）
+  since: v0.2（M1.1）
   samples: [expense-log, warikan]
   negatives: [view-unknown-entity, view-unknown-type, value-invalid, view-duplicate-name]
   check_rules: [UI_ENTITY_NOT_FOUND, SHAPE_KEY_UNKNOWN, SHAPE_VALUE_INVALID, UI_VIEW_DUPLICATE_NAME]
@@ -351,7 +351,7 @@
 
 - name: table
   layer: ui
-  since: v0.2-draft（M1.2）
+  since: v0.2（M1.2）
   samples: [warikan]
   negatives: [table-unknown-field]
   check_rules: [UI_FIELD_NOT_FOUND]
@@ -361,7 +361,7 @@
 
 - name: settlement
   layer: ui
-  since: v0.2-draft（M1.2）
+  since: v0.2（M1.2）
   samples: [warikan]
   negatives: [view-unknown-type]
   check_rules: [SHAPE_KEY_UNKNOWN]
@@ -372,7 +372,7 @@
 # ボード（board）の「見本」も task-board である（#159 が置いた）。
 - name: board
   layer: ui
-  since: v0.2-draft（M1.3）
+  since: v0.2（M1.3）
   samples: [task-board]
   negatives: [board-columns-not-enum, highlight-not-boolean]
   check_rules: [UI_BOARD_COLUMNS_NOT_ENUM, UI_HIGHLIGHT_NOT_BOOLEAN]
@@ -388,7 +388,7 @@
 # 鍵（`name`）と、行を並べる独自の意味を持つ語だからである（M1.4。Issue #182）。
 - name: dashboard
   layer: ui
-  since: v0.2-draft（M1.4）
+  since: v0.2（M1.4）
   samples: [dashboard]
   negatives: [dashboard-no-parts, dashboard-number-not-app-scope]
   check_rules: [SHAPE_KEY_MISSING, UI_DASHBOARD_VALUE_NOT_APP_SCOPE]
@@ -404,7 +404,7 @@
 # 負例（chart-part-not-groups）は 1 本で、**どちらの行もこの負例を指す**（同じ規則だからである）。
 - name: bar
   layer: ui
-  since: v0.2-draft（M1.4）
+  since: v0.2（M1.4）
   samples: [dashboard]
   negatives: [chart-part-not-groups]
   check_rules: [UI_DASHBOARD_VALUE_NOT_GROUPS]
@@ -414,7 +414,7 @@
 
 - name: pie
   layer: ui
-  since: v0.2-draft（M1.4）
+  since: v0.2（M1.4）
   samples: [dashboard]
   negatives: [chart-part-not-groups]
   check_rules: [UI_DASHBOARD_VALUE_NOT_GROUPS]
@@ -430,7 +430,7 @@
 # `ranking` の欄に載せる名前が他に無いためである（重複・欠落・形は静的チェックが断る）。見本は dashboard。
 - name: ranking
   layer: ui
-  since: v0.2-draft（M1.4）
+  since: v0.2（M1.4）
   samples: [dashboard]
   negatives: [ranking-by-app-scope, ranking-by-not-shown, ranking-name-duplicate]
   check_rules: [UI_RANKING_BY_NOT_ROW_VALUE, UI_RANKING_BY_NOT_SHOWN, UI_RANKING_NAME_DUPLICATE]
@@ -445,7 +445,7 @@
 # task-board の `due`、warikan の `member.name`）。
 - name: label
   layer: ui
-  since: v0.2-draft（M1.3）
+  since: v0.2（M1.3）
   samples: [task-board, warikan]
   negatives: [label-empty, label-not-string]
   check_rules: [SHAPE_LABEL_EMPTY, SHAPE_LABEL_INVALID]
@@ -462,7 +462,7 @@
 # 「見本」も task-board である（#159 が置いた）。
 - name: filters
   layer: ux
-  since: v0.2-draft（M1.3）
+  since: v0.2（M1.3）
   samples: [task-board]
   negatives: [filters-unsupported-field, filters-field-not-shown]
   check_rules: [UI_FILTER_FIELD_NOT_FILTERABLE, UI_FILTER_FIELD_NOT_SHOWN]
@@ -474,7 +474,7 @@
 
 - name: permission
   layer: permission
-  since: v0.2-draft（M1.1）
+  since: v0.2（M1.1）
   samples: [expense-log, warikan]
   negatives: [permission-unknown-name, permission-unknown-subject, permission-duplicate-name]
   check_rules: [PERMISSION_NAME_NOT_ALLOWED, PERMISSION_SUBJECT_NOT_ALLOWED, PERMISSION_DUPLICATE_NAME]
@@ -484,7 +484,7 @@
 
 - name: anonymous
   layer: permission
-  since: v0.2-draft（M1.1）
+  since: v0.2（M1.1）
   samples: [expense-log, warikan]
   negatives: [identity-unknown-mode]
   check_rules: [PERMISSION_IDENTITY_MODE_NOT_ALLOWED]

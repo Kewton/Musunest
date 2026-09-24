@@ -291,7 +291,7 @@ describe("成功：2 個のオブジェクトを決定的なキーへ置き、D1
     const sha = /原本 SHA ([0-9a-f]{64})/.exec(run.all)?.[1] ?? "";
     expect(sha).toMatch(/^[0-9a-f]{64}$/);
     expect(run.out.at(-1)).toBe(
-      `publish: OK  env=dev: 版 community.app-spec/v0.2-draft / 原本 SHA ${sha} / インスタンス e2e-expense-log`,
+      `publish: OK  env=dev: 版 community.app-spec/v0.2 / 原本 SHA ${sha} / インスタンス e2e-expense-log`,
     );
 
     // R2 へ 2 個（原本はそのまま、JSON は #98 の成果物）
@@ -300,14 +300,14 @@ describe("成功：2 個のオブジェクトを決定的なキーへ置き、D1
     expect(puts[0]?.url).toContain(`/objects/specs/${sha}/app.spec.yaml`);
     expect(puts[0]?.body).toBe(DECLARATION);
     expect(puts[1]?.url).toContain(`/objects/specs/${sha}/normalized.json`);
-    expect(JSON.parse(puts[1]?.body ?? "null")).toMatchObject({ sourceSha256: sha, schemaVersion: "community.app-spec/v0.2-draft" });
+    expect(JSON.parse(puts[1]?.body ?? "null")).toMatchObject({ sourceSha256: sha, schemaVersion: "community.app-spec/v0.2" });
 
     // D1 へ 2 回（アプリ → インスタンス）。値は束縛引数で渡し、SQL には埋め込まない
     const posts = run.calls.filter((c) => c.method === "POST");
     expect(posts).toHaveLength(2);
     const app = JSON.parse(posts[0]?.body ?? "null") as { batch: { sql: string; params: string[] }[] };
     expect(app.batch[0]?.sql).not.toContain(sha);
-    expect(app.batch[0]?.params).toEqual([sha, "community.app-spec/v0.2-draft", `specs/${sha}/app.spec.yaml`, `specs/${sha}/normalized.json`]);
+    expect(app.batch[0]?.params).toEqual([sha, "community.app-spec/v0.2", `specs/${sha}/app.spec.yaml`, `specs/${sha}/normalized.json`]);
     const instance = JSON.parse(posts[1]?.body ?? "null") as { batch: { sql: string; params: string[] }[] };
     expect(instance.batch[0]?.params).toEqual(["e2e-expense-log", sha, sha]);
 
@@ -360,7 +360,7 @@ describe("はっきり差し替える（--replace・#175）", () => {
 
     // **差し替えの前後の SHA-256 が出力に残る**（受入条件）
     expect(second.out).toContain(
-      `publish: OK  env=dev: 版 community.app-spec/v0.2-draft / 原本 SHA ${nextSha} / インスタンス e2e-expense-log`,
+      `publish: OK  env=dev: 版 community.app-spec/v0.2 / 原本 SHA ${nextSha} / インスタンス e2e-expense-log`,
     );
     expect(second.out.at(-1)).toBe(
       `publish: 差し替え  env=dev: 前の原本 SHA ${previousSha} → 後の原本 SHA ${nextSha}（インスタンス e2e-expense-log）`,

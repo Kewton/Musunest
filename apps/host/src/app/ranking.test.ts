@@ -210,7 +210,7 @@ describe("幅 360 CSS px（機械で見られる範囲。04 §7.2）", () => {
 /** 表示名（`label`）を持つ宣言。`memo` だけは `label` を書かない（識別子のまま出ることを見る） */
 const LABELED_SPEC: ApiSpecBody = {
   instanceId: "inst-1",
-  schemaVersion: "community.app-spec/v0.2-draft",
+  schemaVersion: "community.app-spec/v0.2",
   sourceSha256: "a".repeat(64),
   spec: {
     entities: [
@@ -353,7 +353,7 @@ describe("順位の部品の表示名と選択肢の表示名（M1.4。Issue #20
 /** 順位の部品を 1 つ持つダッシュボードの宣言（権限なしの状態を見るのに使う） */
 const RANKING_SPEC: ApiSpecBody = {
   instanceId: "inst-1",
-  schemaVersion: "community.app-spec/v0.2-draft",
+  schemaVersion: "community.app-spec/v0.2",
   sourceSha256: "f".repeat(64),
   spec: {
     entities: [{ name: "activity", fields: { date: "date", kind: "string", attendees: "list" } }],

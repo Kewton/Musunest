@@ -10,11 +10,10 @@
     "$comment": "タグではなく commit SHA で止める（00c『M1着手時に決めること』1）。公開されている pre-release タグ 3 本（v0.1.0-rc.20260720 / .1 / .2）には src/headless_summary.rs も app-spec.schema.yaml も存在しない（いずれも HTTP 404）。下の 3 値が同時に存在する revision は main だけなので、ピンの粒度は SHA になる。"
   },
   "appspec_schema": {
-    "version": "community.app-spec/v0.1",
-    "sha256": "80e4cb41eeb0f60eb04640e2ac8beac7d1414e7f5a9aa9fa563fd08d17ac7e0b",
-    "source_path": "workspace/management/bench/community/appspec-schema/app-spec.schema.yaml",
-    "$comment": "AppSpec スキーマは platform-owned（MUSUNEST が正本）で、CommandAgent 側はその固定 fixture を持つ。version は同 file の schema_version、sha256 は同 file の exact bytes に対する SHA-256（CommandAgent docs/community-mini-app-profile-contract.md §9『The schema pin is SHA-256 over the exact schema bytes』）。CommandAgent 側の app-spec.schema.sha256 と manifest.sha256sums が宣言する値と一致することを、raw bytes からの再計算で確認した（手書きではない）。",
-    "$musunest_side": "packages/appspec-schema/src/index.ts の APPSPEC_SCHEMA_VERSION は M0 プレースホルダの 0.0.0-m0 で、この version 表記と揃っていない。突き合わせは M1 の作業であり、同 file の変更は Issue #24 のスコープ外。"
+    "version": "community.app-spec/v0.2",
+    "sha256": "6078c3884c087f275f55710e8d0ee0c8a0178c701c05d10db8c44504ea3a7379",
+    "source_path": "packages/appspec-schema/contract",
+    "$comment": "AppSpec スキーマの契約は platform-owned で、MUSUNEST 側の packages/appspec-schema/contract/ が正本である。M1.5 で草案から固めた版 community.app-spec/v0.2 にし、**同じコミット**でこのピンを差し替えた（Issue #217。README.md「版の表記」・00-open-questions.md Q9）。version は packages/appspec-schema/src/spec.ts の APPSPEC_SCHEMA_VERSION と一致する。sha256 は契約（contract/ の全ファイル。app-spec.schema.json・expression-grammar.md・rules.md を名前の昇順に混ぜたもの）の exact bytes に対する SHA-256（小文字の 16 進 64 桁）で、digest は手で書いていない——`pnpm --filter @musunest/appspec-schema contract:hash` の出力をそのまま転記した。契約を直したら、その後に digest を取り直してこの値を差し替える。"
   },
   "template_tarball": {
     "url": null,

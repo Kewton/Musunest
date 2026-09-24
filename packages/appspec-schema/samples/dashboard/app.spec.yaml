@@ -1,4 +1,4 @@
-# 見本「サークルの活動」（M1.4。community.app-spec/v0.2-draft）
+# 見本「サークルの活動」（M1.4。community.app-spec/v0.2）
 #
 # 練習や試合を記録すると、**アプリ全体で 1 つ**の値（**今月の**活動の回数・参加ののべ人数・1 回あたりの参加・
 # 費用の平均）が出る。M1.4 の各 Issue が、自分の語彙をこの見本へ足していく（docs/parallel-development.md §7.2）。

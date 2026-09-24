@@ -33,7 +33,7 @@ export const SETTLEMENT_VIEW = "settlement";
  * 照合する版（草案）。正本は appspec-schema の `APPSPEC_SCHEMA_VERSION`
  * （e2e が参照できる workspace の依存は sdk だけ。CLAUDE.md「依存の向き」）。版が上がればここも直す。
  */
-export const DRAFT_SCHEMA_VERSION = "community.app-spec/v0.2-draft";
+export const DRAFT_SCHEMA_VERSION = "community.app-spec/v0.2";
 
 /** 作るメンバー（`bind` に当たるもの）。登録した順に A・B・C */
 export const MEMBER_NAMES = ["A", "B", "C"] as const;

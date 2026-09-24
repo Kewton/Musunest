@@ -154,7 +154,7 @@ evaluation.validations; // 通らなかった検査の名前（宣言の順）�
 | `PERMISSION_DUPLICATE_NAME` | 権限の名前が重なっている |
 
 - 台帳（`vocabulary.yaml` の `check_rules`）と負例（`samples/negatives/index.json` の `codes`）に書いたコードは、
-  **この検査が実装する期待値**である。負例 34 件については、返るコードの集合が一覧と**ちょうど一致**することを
+   **この検査が実装する期待値**である。負例 81 件については、返るコードの集合が一覧と**ちょうど一致**することを
   unit テストで固定している
 - 誤りの内側の型は決められないものとして扱う（`unknown`）。だから 1 つの誤りが 2 つ以上のコードに化けない
   （例：`max(participants, 1)` は `LOGIC_FUNCTION_ARGUMENT_TYPE_MISMATCH` だけを返し、計算の `type` の
@@ -169,7 +169,7 @@ publish の時点で、**検査を通った宣言だけ**を正規化した JSON
 **実行のたびに YAML の解析と静的チェックを繰り返さない**（CPU 10 ms のため）。
 
 ```json
-{ "schemaVersion": "community.app-spec/v0.2-draft", "sourceSha256": "<64 桁>", "spec": { ... } }
+{ "schemaVersion": "community.app-spec/v0.2", "sourceSha256": "<64 桁>", "spec": { ... } }
 ```
 
 | 決めごと | 中身 |
@@ -179,7 +179,7 @@ publish の時点で、**検査を通った宣言だけ**を正規化した JSON
 | 決定的であること | 同じ原本からは**同じバイト列**。現在時刻・乱数・環境の情報を混ぜない |
 | 宣言の順 | **並べ替えない。** entity の項目順と、view・computed・validation・action の宣言順は意味を持つ（一覧の列の順・検査を返す順。`docs/semantics.md`）。無条件のキー並べ替えをしない |
 | 出力の規約 | UTF-8・改行は LF・字下げは 2 文字（`NORMALIZED_JSON_INDENT`）・**末尾に改行 1 つ**・キーの並びは `schemaVersion` → `sourceSha256` → `spec` |
-| バージョン | `APPSPEC_SCHEMA_VERSION`（M1.1〜M1.4 は `community.app-spec/v0.2-draft`。appspec-schema が正本） |
+| バージョン | `APPSPEC_SCHEMA_VERSION`（M1.1〜M1.4 は `community.app-spec/v0.2`。appspec-schema が正本） |
 
 - 正規化は `crypto.subtle` を使うので、Node でも Workers でも動く（依存を足さない）
 - 失敗のときは `app`・`json` の欄そのものが無い（受け取った側が中身を読めない）
@@ -255,7 +255,7 @@ pnpm check                                  # verify-parity → lint → typeche
 |---|---|
 | 見本 `expense-log` の診断が空で、7 欄を持つ AppSpec を返す | `src/check.test.ts`「見本 expense-log」 |
 | チェック中に式の実行やストレージ操作を行わない | `src/check.test.ts`「検査は式を実行しない・ストレージに触れない」（`eval`・`Function`・`fetch` を禁じた状態で検査し、ライブラリのソースも走査する） |
-| 負例 34 件の誤りコードの集合が一覧の `codes` と一致する | `src/check.test.ts`「負例」の `it.each`（`it.each` は負例の一覧から作る） |
+| 負例 81 件の誤りコードの集合が一覧の `codes` と一致する | `src/check.test.ts`「負例」の `it.each`（`it.each` は負例の一覧から作る） |
 | 診断の説明が空でなく、位置が該当する YAML の行・列を指す | 同上（全件）＋「位置は、該当する式の始まるところを指す」 |
 | 不正 YAML・未知キー・未知参照・自己循環・複数要素の循環を拒否する | 「不正な YAML は断る」「形の検査」「計算の循環」 |
 | 深さ 8・ノード 64・200 文字ちょうどは通り、1 超過は上限の診断になる | `src/expression.test.ts`「式の上限」と `src/check.test.ts`「式の上限」（両側を実測） |
@@ -274,7 +274,7 @@ pnpm check                                  # verify-parity → lint → typeche
 | `1/0` とオーバーフローの computed は `null`、それを使う検査は不合格 | 同「有限の数でなくなった計算」＋「不正な計算値を 0 に読み替えない」 |
 | `max(1, headcount)` の正例は数値を返す | 同「max(1, headcount) は数値を返す（0 で割らないための守り）」 |
 | 元の入力オブジェクトに計算値が書き込まれない | 同「計算値は戻り値にだけ入る」（入れ子まで凍らせたレコードを渡す） |
-| #97 の負例は正規化されない | `src/normalize.test.ts`「検査に通らない原本は正規化しない」（負例 34 件を `it.each` で回す） |
+| #97 の負例は正規化されない | `src/normalize.test.ts`「検査に通らない原本は正規化しない」（負例 81 件を `it.each` で回す） |
 | 評価側も同じ上限の直前・ちょうど・1 超過を検証し、超過を成功値にしない | `src/evaluate.test.ts`「式の上限」（文字数・深さ・ノードを 1 つずつ両側で実測。成果物を手で作った場合も測る） |
 | 差し込む時計を変えても M1.1 の計算値は変わらない | 同「差し込む時計を変えても、M1.1 の計算値は変わらない」（4 つの時計で実測） |
 | 時計は引数で受け取り、オフセットの無い時刻を読まない | `src/clock.test.ts` |

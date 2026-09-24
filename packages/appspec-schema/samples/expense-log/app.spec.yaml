@@ -1,4 +1,4 @@
-# 見本「支出の記録」（M1.1。community.app-spec/v0.2-draft）
+# 見本「支出の記録」（M1.1。community.app-spec/v0.2）
 #
 # 語彙は v0.1 と同じ（entity と項目・追加の操作・入力の検査・同じ entity の中の計算・一覧・anonymous）。
 # デモ：支出を 2 件入れると一覧に出て、1 人あたりの額が出る（workspace/mvp/roadmap.md §4）。

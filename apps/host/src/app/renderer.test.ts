@@ -23,7 +23,7 @@ const errResult = (code: ClientErrorCode, status: number | null): ClientResult<n
 
 const SPEC: ApiSpecBody = {
   instanceId: "inst-1",
-  schemaVersion: "community.app-spec/v0.2-draft",
+  schemaVersion: "community.app-spec/v0.2",
   sourceSha256: "a".repeat(64),
   spec: {
     entities: [
@@ -400,7 +400,7 @@ describe("幅 360 CSS px の表示（機械で見られる範囲）", () => {
 
 const WARIKAN_SPEC: ApiSpecBody = {
   instanceId: "inst-1",
-  schemaVersion: "community.app-spec/v0.2-draft",
+  schemaVersion: "community.app-spec/v0.2",
   sourceSha256: "b".repeat(64),
   spec: {
     entities: [

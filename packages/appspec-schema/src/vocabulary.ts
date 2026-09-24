@@ -44,7 +44,7 @@ const KNOWN_FIELDS: ReadonlySet<string> = new Set(LEDGER_FIELDS);
 
 const VOCABULARY_NAME = /^[a-z][A-Za-z0-9]*$/;
 const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-/** `v0.2-draft（M1.1）` の形。版と、入ったマイルストーン。 */
+/** `v0.2（M1.1）` の形。版と、入ったマイルストーン。 */
 const SINCE = /^v\d+\.\d+(?:-draft)?（M\d+(?:\.\d+)?）$/;
 /** `docs/semantics.md#entity` の形。意味の文書と、その節の見出し。 */
 const SEMANTICS = /^[\w./-]+\.md#[a-z0-9-]+$/;
@@ -128,7 +128,7 @@ export function checkVocabularyLedger(
       report("layer", `${layer}: 層は ${LAYERS.join(" / ")} のどれか`);
     }
     if (typeof since === "string" && since !== "" && !SINCE.test(since)) {
-      report("since", `${since}: 「v0.2-draft（M1.1）」の形で書く`);
+      report("since", `${since}: 「v0.2（M1.1）」の形で書く`);
     }
     if (typeof semantics === "string" && semantics !== "" && !SEMANTICS.test(semantics)) {
       report("semantics", `${semantics}: 「docs/semantics.md#<節>」の形で書く`);
