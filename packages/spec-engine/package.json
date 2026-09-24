@@ -21,5 +21,8 @@
   },
   "dependencies": {
     "@musunest/appspec-schema": "workspace:*"
+  },
+  "devDependencies": {
+    "ajv": "^8.20.0"
   }
 }
