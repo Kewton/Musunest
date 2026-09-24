@@ -1,0 +1,68 @@
+entities:
+  - name: member
+    fields:
+      name: string
+  - name: book
+    fields:
+      title: string
+      author: string
+  - name: session
+    fields:
+      date: date
+      book:
+        type: ref
+        to: book
+      participants:
+        type: list
+        of: member
+views:
+  - name: dashboard
+    type: dashboard
+    widgets:
+      - type: number
+        value: sessionCountThisMonth
+        label: 今月の読書会
+        unit: 回
+  - name: memberList
+    type: table
+    entity: member
+    show: [name]
+  - name: bookList
+    type: table
+    entity: book
+    show: [title, author, sessionCount]
+  - name: sessionList
+    type: table
+    entity: session
+    show: [date, book, participants]
+actions:
+  - name: addMember
+    entity: member
+  - name: addBook
+    entity: book
+  - name: addSession
+    entity: session
+validations: []
+computed:
+  - name: sessionCount
+    entity: book
+    type: number
+    aggregate:
+      count: session
+      where:
+        book: this
+  - name: sessionCountThisMonth
+    scope: app
+    type: number
+    aggregate:
+      count: session
+      where:
+        date:
+          within: this_month
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous
