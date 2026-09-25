@@ -1,0 +1,120 @@
+{
+  "$comment": "M1.5「契約を固めて、工場に渡せる」のデモと M1a のゲートの判定の証跡（Issue #218）。文章の記録は demos.md にある。",
+  "milestone": "M1.5",
+  "title": "契約を固めて、工場に渡せる",
+  "verifiedAt": "2026-09-25",
+  "recordedAt": "2026-09-26",
+  "verifiedBy": [
+    {
+      "who": "所有者",
+      "client": "スマホ",
+      "os": "Android 16",
+      "browser": "Chrome 153.0.8010.52",
+      "versionsRecorded": true,
+      "note": "M1.4 と同じ端末"
+    }
+  ],
+  "commit": "9a7013a",
+  "environment": "staging",
+  "instances": [
+    "m15-demo-warikan",
+    "m15-demo-task-board",
+    "m15-demo-dashboard"
+  ],
+  "schemaVersion": "community.app-spec/v0.2",
+  "humanCheck": {
+    "result": "概ね OK",
+    "itemized": false,
+    "ownerWords": "ざっと見る限りOKでした"
+  },
+  "m1aGate": [
+    {
+      "id": 1,
+      "what": "採点のシナリオ（vitest）と staging の e2e",
+      "result": "pass",
+      "evidence": "main 9a7013a の CI と deploy-staging が緑"
+    },
+    {
+      "id": 2,
+      "what": "スマホで割り勘・タスク・ダッシュボード（OS とブラウザを記録）",
+      "result": "pass",
+      "evidence": "所有者の目視で概ね OK。項目ごとではない"
+    },
+    {
+      "id": 3,
+      "what": "再読み込み・別端末で残る",
+      "result": "pass",
+      "evidence": "同上"
+    },
+    {
+      "id": 4,
+      "what": "見本が新しい版の検査に通り、負例は落ちる",
+      "result": "pass",
+      "evidence": "CI 緑。負例 81 本"
+    },
+    {
+      "id": 5,
+      "what": "staging の見本の SHA-256 がリポジトリと一致",
+      "result": "pass",
+      "evidence": "deploy-staging の ⑥ e2e"
+    },
+    {
+      "id": 6,
+      "what": "スキーマの正本の SHA-256 が pins にある",
+      "result": "pass",
+      "evidence": "pins と contract:hash が 6078c3884c087f275f55710e8d0ee0c8a0178c701c05d10db8c44504ea3a7379 で一致（#217）。テンプレートのピンも実値（#38）"
+    }
+  ],
+  "m1aVerdict": {
+    "proposedBy": "窓口",
+    "proposal": "合格",
+    "judge": "所有者",
+    "note": "この記録の PR の merge を判定とする"
+  },
+  "brokenSpecDemo": {
+    "errors": 4,
+    "codes": [
+      "DATA_REF_TARGET_NOT_FOUND",
+      "LOGIC_OPERAND_TYPE_MISMATCH",
+      "LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH",
+      "LOGIC_SETTLE_REFERENCE_TYPE_MISMATCH"
+    ],
+    "note": "打ち間違い 1 つ（menber）から 3 件に連鎖。文言に不自然な日本語（比べるに使う）"
+  },
+  "notVerified": [
+    "判定 2・3 の項目ごとの合否",
+    "200 件より多いときの CPU"
+  ],
+  "references": {
+    "issues": [
+      118,
+      168,
+      210,
+      211,
+      212,
+      213,
+      214,
+      215,
+      216,
+      217,
+      229,
+      38
+    ],
+    "pullRequests": [
+      219,
+      220,
+      221,
+      222,
+      223,
+      224,
+      225,
+      226,
+      227,
+      228,
+      230,
+      231,
+      232
+    ]
+  },
+  "completedOn": "2026-09-26"
+}
