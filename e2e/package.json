@@ -17,9 +17,13 @@
     "typecheck": "tsc -b --pretty",
     "lint": "oxlint src",
     "test": "vitest run --passWithNoTests",
-    "test:staging": "tsx src/cli.ts"
+    "test:staging": "tsx src/cli.ts",
+    "test:ui": "tsx src/ui/cli.ts"
   },
   "dependencies": {
     "@musunest/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
   }
 }
