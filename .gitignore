@@ -29,6 +29,8 @@ dist/
 workspace/proposal/
 workspace/legal/
 workspace/naming/
+# 窓口の手元の作業場（引き継ぎの README・依頼文。この機械だけ。.claude/skills/musunest-handoff）
+workspace/mem/
 
 # CommandMate のスキル（.claude/skills, .agents/skills）は **追跡する**。
 # git worktree で並列開発するとき、worktree には tracked なファイルしか複製されない。
