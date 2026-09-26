@@ -6,13 +6,16 @@ import { describe, expect, it } from "vitest";
 import {
   APP_INSTANCES_TABLE,
   APPS_TABLE,
+  BUNDLE_DECLARATION_PATH,
   HEADLESS_SCHEMA_VERSION,
   PACKAGE_NAME,
   REGISTRY_ERROR_CODES,
   RegistryError,
+  compareBundleManifestToPins,
   getApp,
   getInstance,
   judgeAcceptance,
+  publishBundle,
   readHeadlessSummary,
   registerApp,
   registerInstance,
@@ -49,5 +52,11 @@ describe("control-plane パッケージ", () => {
     expect(HEADLESS_SCHEMA_VERSION).toBe("commandagent.headless-summary/v1");
     expect(typeof readHeadlessSummary).toBe("function");
     expect(typeof judgeAcceptance).toBe("function");
+  });
+
+  it("納品物の門と publish への引き渡しを公開する（#248）", () => {
+    expect(BUNDLE_DECLARATION_PATH).toBe("artifacts/app.spec.yaml");
+    expect(typeof publishBundle).toBe("function");
+    expect(typeof compareBundleManifestToPins).toBe("function");
   });
 });

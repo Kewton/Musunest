@@ -10,6 +10,7 @@
 export const PACKAGE_NAME = "@musunest/control-plane" as const;
 
 export * from "./bundle.js";
+export * from "./bundle-publish.js";
 export * from "./contract.js";
 export * from "./headless.js";
 export * from "./publish.js";
