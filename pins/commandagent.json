@@ -26,6 +26,30 @@
     "$comment": "--summary-json が最終 stdout 行に出す JSON の schema_version。src/headless_summary.rs の const SCHEMA_VERSION と docs/user/headless.md『JSON schema』節が同じ値を宣言する。",
     "$compatibility": "既存スカラーキーは常に存在し、欠測は JSON null で埋まる。provider_usage_by_role（provider turn が無ければ空）と pack（pack 未選択なら省略）は additive な追加であり、v1 のまま行われている。exit code は 0 / 1 / 2 / 130 の 4 値で、0 は『プロセスが完了した』のみを意味する — 受入は verdict と assurance の両方で判定する。"
   },
+  "delivery_bundles": {
+    "$comment": "工場（CommandAgent）の納品物 3 つの manifest の SHA-256 と、その元になった run。値は工場が納品してから人手で転記する（digest は手で書かない）。値が入るまでは $blocked に理由（工場の納品待ち）を書く。見本ごとに独立して値が入るので、$blocked も見本ごとに持つ。#248 がこの値と照合する（null なら照合を飛ばしたことを返す）。",
+    "warikan": {
+      "manifest_sha256": null,
+      "source_run": null,
+      "$blocked": "工場の納品待ち（納品物の manifest の SHA-256 を照合してから、この欄に転記する）"
+    },
+    "task-board": {
+      "manifest_sha256": null,
+      "source_run": null,
+      "$blocked": "工場の納品待ち（納品物の manifest の SHA-256 を照合してから、この欄に転記する）"
+    },
+    "dashboard": {
+      "manifest_sha256": null,
+      "source_run": null,
+      "$blocked": "工場の納品待ち（納品物の manifest の SHA-256 を照合してから、この欄に転記する）"
+    }
+  },
+  "offline_verifier": {
+    "$comment": "決定的な再検証（Q8。所有者の手元）で使う offline verifier のバイナリの SHA-256。値は納品後に人手で転記し（digest は手で書かない）、値が入るまでは $blocked に理由を書く。verification_profile は工場の調整に使う profile 名（README §5.1。D6）で、バイナリとは別に固定する。",
+    "binary_sha256": null,
+    "verification_profile": "community-mini-app",
+    "$blocked": "工場の納品待ち（ピンした版の offline verifier のバイナリの SHA-256 を照合してから、この欄に転記する。Q8）"
+  },
   "pinned_at": "2026-09-13",
   "pinned_by": "Kewton/Musunest#24"
 }
