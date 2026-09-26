@@ -11,7 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createFakeApi, type FakeApi, type FakeApiOptions } from "./__tests__/index.js";
-import { BASE_URL_ENV, EXIT_NG, EXIT_OK, INSTANCE_ENV, SAMPLE_ENV, runCli } from "./cli.js";
+import { BASE_URL_ENV, EXIT_NG, EXIT_OK, INSTANCE_ENV, SAMPLE_ENV, SOURCE_ENV, runCli } from "./cli.js";
 import { SAMPLE_FILE, sha256Hex } from "./warikan.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -22,6 +22,16 @@ const TOKEN = "fixture-ci-token-3b7a9f2e";
 
 const SOURCE = readFileSync(join(ROOT, SAMPLE_FILE), "utf8");
 const SOURCE_SHA = await sha256Hex(SOURCE);
+
+/**
+ * 工場の納品物から取り出した宣言の原本の見立て（`E2E_SOURCE_FILE` で渡すパス）。
+ * 中身は照合先の SHA-256 にしか使わないので、見本の原本と違う文字列であればよい。
+ */
+const SOURCE_FILE_PATH = "/factory/delivery/m12-warikan/app.spec.yaml";
+const DELIVERED_SOURCE = "delivered: app.spec.yaml\n";
+const DELIVERED_SHA = await sha256Hex(DELIVERED_SOURCE);
+/** `E2E_SOURCE_FILE` のときだけ納品物を返し、それ以外は見本の原本を返す（どちらを読んだかを見る） */
+const readByPath = (path: string): string => (path === resolve(ROOT, SOURCE_FILE_PATH) ? DELIVERED_SOURCE : SOURCE);
 
 interface Harness {
   readonly code: number;
@@ -96,6 +106,53 @@ describe("runCli：成功と、終了 0 の条件", () => {
 
     expect(harness.code).toBe(EXIT_NG);
     expect(harness.err.join("\n")).toContain("後片付け");
+  });
+});
+
+describe("runCli：照合先の原本（E2E_SOURCE_FILE）", () => {
+  it("渡すと、そのファイルの SHA-256 を照合先にする（見本の原本の SHA では通らない）", async () => {
+    const delivered = await cli([], {
+      env: { [SOURCE_ENV]: SOURCE_FILE_PATH },
+      apiOptions: { sourceSha256: DELIVERED_SHA },
+      readFile: readByPath,
+    });
+    expect(delivered.code, delivered.all).toBe(EXIT_OK);
+    expect(delivered.out.join("\n")).toContain("e2e: OK");
+
+    // 見本の原本の SHA を照合先にしていると、渡したファイルを読んでいないことになる
+    const sample = await cli([], {
+      env: { [SOURCE_ENV]: SOURCE_FILE_PATH },
+      apiOptions: { sourceSha256: SOURCE_SHA },
+      readFile: readByPath,
+    });
+    expect(sample.code).toBe(EXIT_NG);
+    expect(sample.err.join("\n")).toContain("原本 SHA-256");
+  });
+
+  it("渡さなければ今までどおり見本の原本を使う（差し替えのパスは読まない）", async () => {
+    const harness = await cli([], {
+      apiOptions: { sourceSha256: SOURCE_SHA },
+      readFile: (path) => {
+        if (path === resolve(ROOT, SOURCE_FILE_PATH)) throw new Error("E2E_SOURCE_FILE を読んではいけない");
+        return SOURCE;
+      },
+    });
+
+    expect(harness.code, harness.all).toBe(EXIT_OK);
+  });
+
+  it("そのファイルを読めないときは exit 1。パスを出さない", async () => {
+    const harness = await cli([], {
+      env: { [SOURCE_ENV]: SOURCE_FILE_PATH },
+      apiOptions: { sourceSha256: DELIVERED_SHA },
+      readFile: () => {
+        throw new Error(`ENOENT ${SOURCE_FILE_PATH}`);
+      },
+    });
+
+    expect(harness.code).toBe(EXIT_NG);
+    expect(harness.err.join("\n")).toContain("原本");
+    expect(harness.all).not.toContain(SOURCE_FILE_PATH);
   });
 });
 
