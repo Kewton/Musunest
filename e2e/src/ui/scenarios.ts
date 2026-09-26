@@ -130,6 +130,7 @@ async function open(ctx: ScenarioContext, page: Page = ctx.page): Promise<void> 
 /** 一覧の切替（ボタンの文字が view の名前） */
 const switchView = async (page: Page, view: string): Promise<void> => {
   await page.locator("nav.views button", { hasText: view }).first().click();
+  await page.locator('nav.views button[aria-pressed="true"]', { hasText: view }).first().waitFor();
   await page.locator(`${READY}`).waitFor();
 };
 
