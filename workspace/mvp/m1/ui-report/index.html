@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>画面テストのレポート</title>
+<style>body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;margin:16px;line-height:1.5;color:#1a1a1a}
+h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:24px}
+table{border-collapse:collapse;width:100%;max-width:100%}
+th,td{border:1px solid #c9c9c9;padding:6px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+th{background:#f2f2f2}
+.ok{color:#1b5e20;font-weight:bold}.ng{color:#b00020;font-weight:bold}
+img{max-width:180px;border:1px solid #c9c9c9}
+.problems{color:#b00020}dl.meta{display:flex;flex-wrap:wrap;gap:4px 12px}dl.meta dt{font-weight:bold}dl.meta dd{margin:0}</style>
+</head>
+<body>
+<h1>画面テストのレポート</h1>
+<p>総合: <span class="ok">合格</span></p>
+<dl class="meta">
+<dt>実行した日時</dt><dd>2026-09-26T00:32:06.362Z 〜 2026-09-26T00:32:39.219Z</dd>
+<dt>コミット</dt><dd>b5c5f576cce8afe4acc71acacb2fdbe6c919a27e</dd>
+</dl>
+
+<h2>割り勘</h2>
+<table>
+<thead><tr><th>手順</th><th>合否</th><th>期待</th><th>実際</th><th>写真</th></tr></thead>
+<tbody>
+<tr><td>メンバー A・B・C を画面から登録</td><td class="ok">合格</td><td>memberList に A・B・C の 3 行</td><td>A 0 0 0 削除 / B 0 0 0 削除 / C 0 0 0 削除</td><td><a href="shots/warikan-warikan-members.png"><img src="shots/warikan-warikan-members.png" alt="メンバー A・B・C を画面から登録 の画面" loading="lazy"></a></td></tr>
+<tr><td>夕食 6000（A が払い A・B・C）・タクシー 3000（B が払い A・B・C）を登録</td><td class="ok">合格</td><td>1 人あたり 夕食 2000・タクシー 1000</td><td>夕食 2000 / タクシー 1000</td><td><a href="shots/warikan-warikan-expenses.png"><img src="shots/warikan-warikan-expenses.png" alt="夕食 6000（A が払い A・B・C）・タクシー 3000（B が払い A・B・C）を登録 の画面" loading="lazy"></a></td></tr>
+<tr><td>精算が「C → A 3,000」の 1 件だけ</td><td class="ok">合格</td><td>C さん → A さん 3,000 円（1 件）</td><td>C さん → A さん 3,000 円</td><td><a href="shots/warikan-warikan-settlement.png"><img src="shots/warikan-warikan-settlement.png" alt="精算が「C → A 3,000」の 1 件だけ の画面" loading="lazy"></a></td></tr>
+<tr><td>幅 360 CSS px で横にはみ出さない</td><td class="ok">合格</td><td>横にはみ出さない（scrollWidth ≤ 360）</td><td>scrollWidth=360</td><td><a href="shots/warikan-warikan-width.png"><img src="shots/warikan-warikan-width.png" alt="幅 360 CSS px で横にはみ出さない の画面" loading="lazy"></a></td></tr>
+<tr><td>タクシーを 6000 に直す</td><td class="ok">合格</td><td>C さん → A さん 2,000 円と C さん → B さん 2,000 円（2 件）</td><td>C さん → A さん 2,000 円 / C さん → B さん 2,000 円</td><td><a href="shots/warikan-warikan-edit-raise.png"><img src="shots/warikan-warikan-edit-raise.png" alt="タクシーを 6000 に直す の画面" loading="lazy"></a></td></tr>
+<tr><td>3000 に戻すと元に戻る</td><td class="ok">合格</td><td>C さん → A さん 3,000 円（1 件）</td><td>C さん → A さん 3,000 円</td><td><a href="shots/warikan-warikan-edit-restore.png"><img src="shots/warikan-warikan-edit-restore.png" alt="3000 に戻すと元に戻る の画面" loading="lazy"></a></td></tr>
+<tr><td>100 円の支出を足して消す</td><td class="ok">合格</td><td>足すと 3 行、消すと 2 行</td><td>足したあと 3 行 / 消したあと 2 行</td><td><a href="shots/warikan-warikan-add-delete.png"><img src="shots/warikan-warikan-add-delete.png" alt="100 円の支出を足して消す の画面" loading="lazy"></a></td></tr>
+<tr><td>金額 0 は保存されない</td><td class="ok">合格</td><td>「金額は 1 円以上にしてください」と出て、行が増えない</td><td>金額は 1 円以上にしてください（行 2）</td><td><a href="shots/warikan-warikan-zero.png"><img src="shots/warikan-warikan-zero.png" alt="金額 0 は保存されない の画面" loading="lazy"></a></td></tr>
+</tbody>
+</table>
+<h2>タスク管理</h2>
+<table>
+<thead><tr><th>手順</th><th>合否</th><th>期待</th><th>実際</th><th>写真</th></tr></thead>
+<tbody>
+<tr><td>メンバー A・B を画面から登録</td><td class="ok">合格</td><td>members に A・B がある（2 行以上）</td><td>members 2 行</td><td><a href="shots/task-board-task-members.png"><img src="shots/task-board-task-members.png" alt="メンバー A・B を画面から登録 の画面" loading="lazy"></a></td></tr>
+<tr><td>しおり作り（B・期限は今日より前）・宿の予約（A・期限は今日より後）を登録</td><td class="ok">合格</td><td>ボードに 2 枚のカード</td><td>▲ 期限切れ やること しおり作り 状態 未着手 担当 B due 2026-09-25 メモ startfinish削除直す / やること 宿の予約 状態 未着手 担当 A due 2026-09-27 メモ startfinish削除直す</td><td><a href="shots/task-board-task-created.png"><img src="shots/task-board-task-created.png" alt="しおり作り（B・期限は今日より前）・宿の予約（A・期限は今日より後）を登録 の画面" loading="lazy"></a></td></tr>
+<tr><td>幅 360 CSS px で横にはみ出さない</td><td class="ok">合格</td><td>横にはみ出さない（scrollWidth ≤ 360）</td><td>scrollWidth=360</td><td><a href="shots/task-board-task-width.png"><img src="shots/task-board-task-width.png" alt="幅 360 CSS px で横にはみ出さない の画面" loading="lazy"></a></td></tr>
+<tr><td>しおり作りが期限切れとして強調される</td><td class="ok">合格</td><td>強調の印「▲ 期限切れ」が出る</td><td>data-highlighted=true / ▲ 期限切れ</td><td><a href="shots/task-board-task-overdue.png"><img src="shots/task-board-task-overdue.png" alt="しおり作りが期限切れとして強調される の画面" loading="lazy"></a></td></tr>
+<tr><td>宿の予約で「始める」→ 進行中、「完了にする」→ 完了。完了には「完了にする」が出ない</td><td class="ok">合格</td><td>status が 完了。finish のボタンは 0 個</td><td>完了 / ボタン 0 個</td><td><a href="shots/task-board-task-finish.png"><img src="shots/task-board-task-finish.png" alt="宿の予約で「始める」→ 進行中、「完了にする」→ 完了。完了には「完了にする」が出ない の画面" loading="lazy"></a></td></tr>
+<tr><td>しおり作りの期限を今日より後に直す</td><td class="ok">合格</td><td>強調が消える（data-highlighted=false、印が 0 個）</td><td>data-highlighted=false / 印 0 個</td><td><a href="shots/task-board-task-fix-due.png"><img src="shots/task-board-task-fix-due.png" alt="しおり作りの期限を今日より後に直す の画面" loading="lazy"></a></td></tr>
+<tr><td>1 件を消す</td><td class="ok">合格</td><td>しおり作りのカードが消える</td><td>やること 宿の予約 状態 完了 担当 A due 2026-09-27 メモ 削除直す</td><td><a href="shots/task-board-task-delete.png"><img src="shots/task-board-task-delete.png" alt="1 件を消す の画面" loading="lazy"></a></td></tr>
+</tbody>
+</table>
+<h2>ダッシュボード</h2>
+<table>
+<thead><tr><th>手順</th><th>合否</th><th>期待</th><th>実際</th><th>写真</th></tr></thead>
+<tbody>
+<tr><td>活動が無いとき「今月の活動」は 0</td><td class="ok">合格</td><td>0 回</td><td>0 回</td><td><a href="shots/dashboard-dashboard-zero.png"><img src="shots/dashboard-dashboard-zero.png" alt="活動が無いとき「今月の活動」は 0 の画面" loading="lazy"></a></td></tr>
+<tr><td>今日の日付の活動を 1 件、画面から入れる</td><td class="ok">合格</td><td>activities に 1 行</td><td>種類 練習 参加した人 A 費用 1000 参加人数 1 削除</td><td><a href="shots/dashboard-dashboard-activity.png"><img src="shots/dashboard-dashboard-activity.png" alt="今日の日付の活動を 1 件、画面から入れる の画面" loading="lazy"></a></td></tr>
+<tr><td>「今月の活動」が 0 → 1</td><td class="ok">合格</td><td>1 回</td><td>1 回</td><td><a href="shots/dashboard-dashboard-count.png"><img src="shots/dashboard-dashboard-count.png" alt="「今月の活動」が 0 → 1 の画面" loading="lazy"></a></td></tr>
+<tr><td>月ごとの棒の今月が 1</td><td class="ok">合格</td><td>2026-09 が 1 回</td><td>2026-09 が 1 回</td><td><a href="shots/dashboard-dashboard-bar.png"><img src="shots/dashboard-dashboard-bar.png" alt="月ごとの棒の今月が 1 の画面" loading="lazy"></a></td></tr>
+<tr><td>幅 360 CSS px で横にはみ出さない</td><td class="ok">合格</td><td>横にはみ出さない（scrollWidth ≤ 360）</td><td>scrollWidth=360</td><td><a href="shots/dashboard-dashboard-width.png"><img src="shots/dashboard-dashboard-width.png" alt="幅 360 CSS px で横にはみ出さない の画面" loading="lazy"></a></td></tr>
+<tr><td>その活動を消すと「今月の活動」は 0 に戻る</td><td class="ok">合格</td><td>0 回</td><td>0 回</td><td><a href="shots/dashboard-dashboard-delete.png"><img src="shots/dashboard-dashboard-delete.png" alt="その活動を消すと「今月の活動」は 0 に戻る の画面" loading="lazy"></a></td></tr>
+</tbody>
+</table>
+<h2>残るか</h2>
+<table>
+<thead><tr><th>手順</th><th>合否</th><th>期待</th><th>実際</th><th>写真</th></tr></thead>
+<tbody>
+<tr><td>メンバーを 1 件、画面から登録</td><td class="ok">合格</td><td>memberList に「残るか」がある</td><td>残るか 0 0 0 削除</td><td><a href="shots/warikan-persist-add.png"><img src="shots/warikan-persist-add.png" alt="メンバーを 1 件、画面から登録 の画面" loading="lazy"></a></td></tr>
+<tr><td>再読み込みしても値が残る</td><td class="ok">合格</td><td>「残るか」がある</td><td>残るか 0 0 0 削除</td><td><a href="shots/warikan-persist-reload.png"><img src="shots/warikan-persist-reload.png" alt="再読み込みしても値が残る の画面" loading="lazy"></a></td></tr>
+<tr><td>別のブラウザのコンテキストで開いても同じ値が出る</td><td class="ok">合格</td><td>「残るか」がある</td><td>残るか 0 0 0 削除</td><td><a href="shots/warikan-persist-other.png"><img src="shots/warikan-persist-other.png" alt="別のブラウザのコンテキストで開いても同じ値が出る の画面" loading="lazy"></a></td></tr>
+</tbody>
+</table>
+
+<p>このレポートは機械が書き出す。手で直さない（直すのは、値を出している手順のほうである）。</p>
+</body>
+</html>
