@@ -34,6 +34,11 @@ export const BASE_URL_ENV = "SMOKE_BASE_URL";
 export const INSTANCE_ENV = "E2E_INSTANCE_ID";
 /** 採点する見本を選ぶ環境変数。既定は warikan（値は秘密ではない） */
 export const SAMPLE_ENV = "E2E_SAMPLE";
+/**
+ * 照合先の原本を差し替える環境変数。工場の納品物から取り出した宣言の原本を渡す（値＝パスは表示しない）。
+ * 渡さなければ見本の原本を使う。
+ */
+export const SOURCE_ENV = "E2E_SOURCE_FILE";
 /** 採点できる見本。見本のディレクトリの名前と同じである */
 export const SAMPLES = ["warikan", "task-board", "dashboard"] as const;
 export type SampleName = (typeof SAMPLES)[number];
@@ -58,7 +63,7 @@ export class E2eError extends Error {
 }
 
 export interface CliIo {
-  /** SMOKE_BASE_URL・E2E_INSTANCE_ID・E2E_SAMPLE を読む。資格情報の名前は伏せるためにも読む */
+  /** SMOKE_BASE_URL・E2E_INSTANCE_ID・E2E_SAMPLE・E2E_SOURCE_FILE を読む。資格情報の名前は伏せるためにも読む */
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly out: (line: string) => void;
   readonly err: (line: string) => void;
@@ -75,6 +80,7 @@ const USAGE = `usage: pnpm --filter @musunest/e2e test:staging
   ${BASE_URL_ENV}   host のオリジン（CI では staging 環境の Secret）
   ${INSTANCE_ENV}   e2e 専用のインスタンスの ID（デモのインスタンスは触らない）
   ${SAMPLE_ENV}     採点する見本（${SAMPLES.join(" / ")}。既定は warikan）
+  ${SOURCE_ENV}  照合先の原本のパス。渡すと見本の原本の代わりに読む（工場の納品物。既定は無し）
 
 見本（${WARIKAN_SAMPLE_FILE}・${TASK_BOARD_SAMPLE_FILE}・${DASHBOARD_SAMPLE_FILE}）の原本 SHA-256 と版を照合し、
 **時計に依存しない**採点の値（割り勘: shareAmount・paid/owed/balance・精算。タスク管理: ボードの列・
@@ -181,7 +187,7 @@ async function run(
   const instanceId = instanceOf(io.env[INSTANCE_ENV]);
   const sample = sampleOf(io.env[SAMPLE_ENV]);
   const sampleFile = SAMPLE_FILE_OF[sample];
-  const source = readSource(io, sampleFile);
+  const source = readSource(io, io.env[SOURCE_ENV], sampleFile);
 
   const client = createMusunestClient({ baseUrl, fetch: io.fetch });
   out(`e2e: staging の見本（${sampleFile}）を採点する（instance=${instanceId}）`);
@@ -205,8 +211,18 @@ async function run(
   return EXIT_NG;
 }
 
-/** 原本を読む。読めなければ値を含まない説明で止める */
-function readSource(io: CliIo, sampleFile: string): string {
+/**
+ * 照合先の原本を読む。`E2E_SOURCE_FILE` が渡されていればそのファイル（工場の納品物から取り出した宣言）、
+ * 渡されていなければ見本の原本を読む。**読めなければ、パスを含まない説明で止める。**
+ */
+function readSource(io: CliIo, override: string | undefined, sampleFile: string): string {
+  if (override !== undefined && override !== "") {
+    try {
+      return io.readFile(resolve(io.root, override));
+    } catch {
+      throw new E2eError(`原本（${SOURCE_ENV}）を読めない（パスは表示しない）`);
+    }
+  }
   try {
     return io.readFile(join(io.root, sampleFile));
   } catch {
