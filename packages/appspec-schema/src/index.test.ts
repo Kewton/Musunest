@@ -73,6 +73,99 @@ const text = (row: LedgerYamlRow, field: string): string => {
   return typeof value === "string" ? value : "";
 };
 
+// 工場の納品物の manifest と offline verifier のピン（Issue #245）。ここで見るのは形だけである
+// （値そのものは工場が納品してから人手で転記する。digest は手で書かない）。
+const DELIVERY_BUNDLE_SAMPLES = ["warikan", "task-board", "dashboard"];
+/** SHA-256 の値の形（小文字の 16 進 64 桁。pins の他の欄と同じ） */
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
+
+/** ピンの形の誤り 1 つ。where は欄の場所、field は欄の名前 */
+interface PinShapeProblem {
+  readonly where: string;
+  readonly field: string;
+  readonly message: string;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+// SHA-256 の欄の形。値が null の間は $blocked（理由）が要り、値が入ったら $blocked は残さない。
+const checkSha256Slot = (
+  owner: Record<string, unknown>,
+  field: string,
+  where: string,
+  problems: PinShapeProblem[],
+): void => {
+  if (!(field in owner)) {
+    problems.push({ where, field, message: "欄が無い" });
+    return;
+  }
+  const value = owner[field];
+  if (value === null) {
+    if (typeof owner["$blocked"] !== "string" || owner["$blocked"] === "") {
+      problems.push({ where, field, message: "値が null なのに $blocked が無い" });
+    }
+    return;
+  }
+  if (typeof value !== "string" || !SHA256_HEX_PATTERN.test(value)) {
+    problems.push({ where, field, message: "16 進 64 桁でない" });
+    return;
+  }
+  if ("$blocked" in owner) {
+    problems.push({ where, field, message: "値があるのに $blocked が残っている" });
+  }
+};
+
+// ピン全体の、納品物の欄（delivery_bundles・offline_verifier）の形を確かめる。
+const checkDeliveryPins = (pin: unknown): PinShapeProblem[] => {
+  if (!isRecord(pin)) return [{ where: "*", field: "*", message: "ピンが写像でない" }];
+  const problems: PinShapeProblem[] = [];
+
+  const bundles = pin["delivery_bundles"];
+  if (!isRecord(bundles)) {
+    problems.push({ where: "delivery_bundles", field: "*", message: "欄が無い" });
+  } else {
+    for (const sample of DELIVERY_BUNDLE_SAMPLES) {
+      const bundle = bundles[sample];
+      if (!isRecord(bundle)) {
+        problems.push({ where: `delivery_bundles.${sample}`, field: "*", message: "見本の欄が無い" });
+        continue;
+      }
+      if (!("source_run" in bundle)) {
+        problems.push({ where: `delivery_bundles.${sample}`, field: "source_run", message: "欄が無い" });
+      }
+      checkSha256Slot(bundle, "manifest_sha256", `delivery_bundles.${sample}`, problems);
+    }
+  }
+
+  const verifier = pin["offline_verifier"];
+  if (!isRecord(verifier)) {
+    problems.push({ where: "offline_verifier", field: "*", message: "欄が無い" });
+  } else {
+    if (typeof verifier["verification_profile"] !== "string" || verifier["verification_profile"] === "") {
+      problems.push({ where: "offline_verifier", field: "verification_profile", message: "欄が無い" });
+    }
+    checkSha256Slot(verifier, "binary_sha256", "offline_verifier", problems);
+  }
+
+  return problems;
+};
+
+// 実物のピンを読み、写しを作って壊す（二点測定。実物は書き換えない）。
+const readPin = (): unknown => readJson(packageFile("../../pins/commandagent.json"));
+const clonePin = (): Record<string, unknown> =>
+  JSON.parse(JSON.stringify(readPin())) as Record<string, unknown>;
+const bundleOf = (pin: Record<string, unknown>, sample: string): Record<string, unknown> => {
+  const bundle = (pin["delivery_bundles"] as Record<string, unknown> | undefined)?.[sample];
+  if (!isRecord(bundle)) throw new Error(`見本の欄が無い: ${sample}`);
+  return bundle;
+};
+const verifierOf = (pin: Record<string, unknown>): Record<string, unknown> => {
+  const verifier = pin["offline_verifier"];
+  if (!isRecord(verifier)) throw new Error("offline_verifier が無い");
+  return verifier;
+};
+
 describe("appspec-schema", () => {
   it("パッケージ名が正本の名前と一致する", () => {
     expect(PACKAGE_NAME).toBe("@musunest/appspec-schema");
@@ -101,6 +194,99 @@ describe("appspec-schema", () => {
     expect(fs.existsSync(packageFile("package.json"))).toBe(true);
     const pkg = readJson(packageFile("package.json")) as { name: string };
     expect(pkg.name).toBe(PACKAGE_NAME);
+  });
+});
+
+// Issue #245。工場の納品物 3 つの manifest と offline verifier の SHA-256 の欄。
+// 二点測定: 実物のピンが通ること（下の 1 つ目）と、形を崩した写しが落ちること（残り）を実測する。
+describe("ピンの納品物の欄（Issue #245）", () => {
+  it("実物のピンは、delivery_bundles（3 つの見本）と offline_verifier の形を満たす", () => {
+    expect(checkDeliveryPins(readPin())).toEqual([]);
+  });
+
+  it("delivery_bundles は、見本ごとに manifest_sha256 と source_run を持ち、どれもまだ値が無い", () => {
+    const pin = clonePin();
+    const bundles = pin["delivery_bundles"] as Record<string, Record<string, unknown>>;
+    // $comment などの説明の欄は見本として数えない
+    expect(Object.keys(bundles).filter((key) => !key.startsWith("$")).sort()).toEqual(
+      [...DELIVERY_BUNDLE_SAMPLES].sort(),
+    );
+    for (const sample of DELIVERY_BUNDLE_SAMPLES) {
+      expect(bundles[sample], sample).toMatchObject({ manifest_sha256: null, source_run: null });
+    }
+  });
+
+  it("offline_verifier は、binary_sha256 と verification_profile を持つ", () => {
+    const verifier = verifierOf(clonePin());
+    expect(verifier["binary_sha256"]).toBeNull();
+    expect(verifier["verification_profile"]).toBe("community-mini-app");
+  });
+
+  it.each(DELIVERY_BUNDLE_SAMPLES)("見本 %s が欠けると落ちる", (sample) => {
+    const pin = clonePin();
+    const bundles = pin["delivery_bundles"] as Record<string, unknown>;
+    delete bundles[sample];
+    expect(checkDeliveryPins(pin)).toContainEqual({
+      where: `delivery_bundles.${sample}`,
+      field: "*",
+      message: "見本の欄が無い",
+    });
+  });
+
+  it("16 進 64 桁でない値は落ちる", () => {
+    const pin = clonePin();
+    const bundle = bundleOf(pin, "warikan");
+    delete bundle["$blocked"];
+    bundle["manifest_sha256"] = "not-a-sha256";
+    expect(checkDeliveryPins(pin)).toContainEqual({
+      where: "delivery_bundles.warikan",
+      field: "manifest_sha256",
+      message: "16 進 64 桁でない",
+    });
+  });
+
+  it("値があるのに $blocked が残ると落ちる", () => {
+    const pin = clonePin();
+    bundleOf(pin, "warikan")["manifest_sha256"] = "0".repeat(64);
+    expect(checkDeliveryPins(pin)).toContainEqual({
+      where: "delivery_bundles.warikan",
+      field: "manifest_sha256",
+      message: "値があるのに $blocked が残っている",
+    });
+  });
+
+  it("値が null なのに $blocked が無いと落ちる", () => {
+    const pin = clonePin();
+    delete verifierOf(pin)["$blocked"];
+    expect(checkDeliveryPins(pin)).toContainEqual({
+      where: "offline_verifier",
+      field: "binary_sha256",
+      message: "値が null なのに $blocked が無い",
+    });
+  });
+
+  it("値が入った形（$blocked を外した像）も通る", () => {
+    const pin = clonePin();
+    for (const sample of DELIVERY_BUNDLE_SAMPLES) {
+      const bundle = bundleOf(pin, sample);
+      bundle["manifest_sha256"] = "a".repeat(64);
+      bundle["source_run"] = "run-1";
+      delete bundle["$blocked"];
+    }
+    const verifier = verifierOf(pin);
+    verifier["binary_sha256"] = "b".repeat(64);
+    delete verifier["$blocked"];
+    expect(checkDeliveryPins(pin)).toEqual([]);
+  });
+
+  it("delivery_bundles と offline_verifier が無いと落ちる", () => {
+    const pin = clonePin();
+    delete pin["delivery_bundles"];
+    delete pin["offline_verifier"];
+    expect(checkDeliveryPins(pin)).toEqual([
+      { where: "delivery_bundles", field: "*", message: "欄が無い" },
+      { where: "offline_verifier", field: "*", message: "欄が無い" },
+    ]);
   });
 });
 
