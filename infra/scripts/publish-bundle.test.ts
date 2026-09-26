@@ -220,39 +220,46 @@ async function run(
     readonly pins?: string;
     readonly summary?: string;
     readonly cloudflare?: FakeCloudflare;
+    /** 差し替えると、既定の読み取り（config・pins・summary）を使わず、これを io.readFile にする */
+    readonly readFile?: (path: string) => string;
   } = {},
 ): Promise<Run> {
   const cloudflare = options.cloudflare ?? new FakeCloudflare();
   const out: string[] = [];
   const err: string[] = [];
+  const readFile =
+    options.readFile ??
+    ((path: string): string => {
+      if (path === CONFIG_PATH) return CONFIG;
+      if (path === PINS_PATH) return options.pins ?? JSON.stringify(allNullPins());
+      if (path === SUMMARY_PATH) return options.summary ?? SUMMARY;
+      return readFileSync(path, "utf8");
+    });
   const io: CliIo = {
     root: ROOT,
     env: { CLOUDFLARE_API_TOKEN: TOKEN, CLOUDFLARE_ACCOUNT_ID: ACCOUNT, ...options.env },
     out: (line) => out.push(line),
     err: (line) => err.push(line),
     fetch: (input, init) => cloudflare.handle(String(input), init),
-    readFile: (path) => {
-      if (path === CONFIG_PATH) return CONFIG;
-      if (path === PINS_PATH) return options.pins ?? JSON.stringify(allNullPins());
-      if (path === SUMMARY_PATH) return options.summary ?? SUMMARY;
-      return readFileSync(path, "utf8");
-    },
+    readFile,
     requestTimeoutMs: 5_000,
   };
   const code = await runCli(argv, io);
   return { code, out, err, all: [...out, ...err].join("\n"), calls: cloudflare.calls };
 }
 
-const args = (bundle: string, extra: readonly string[] = []): string[] => [
+const args = (bundle: string, options: { readonly sample?: string; readonly extra?: readonly string[] } = {}): string[] => [
   "--env",
   "dev",
   "--instance",
   "e2e-warikan",
+  "--sample",
+  options.sample ?? "warikan",
   "--bundle",
   bundle,
   "--summary",
   "summary.json",
-  ...extra,
+  ...(options.extra ?? []),
 ];
 
 /** 目印が1つも出ていない。 */
@@ -272,16 +279,36 @@ describe("引数と資格情報の誤りは、API を呼ばずに非 0 で終わ
   });
 
   const ARG_CASES: readonly { readonly name: string; readonly argv: readonly string[]; readonly message: string }[] = [
-    { name: "--env が無い", argv: ["--instance", "x", "--bundle", "b", "--summary", "s"], message: "--env が無い" },
-    { name: "未知の env（値を出さない）", argv: ["--env", URL_SENTINEL, "--instance", "x", "--bundle", "b", "--summary", "s"], message: "未知の env" },
-    { name: "production は断る", argv: ["--env", "production", "--instance", "x", "--bundle", "b", "--summary", "s"], message: "へは publish しない" },
-    { name: "--instance が無い", argv: ["--env", "dev", "--bundle", "b", "--summary", "s"], message: "--instance が無い" },
-    { name: "--instance が形に合わない（値を出さない）", argv: ["--env", "dev", "--instance", `${URL_SENTINEL}/x`, "--bundle", "b", "--summary", "s"], message: "--instance は" },
-    { name: "--bundle が無い", argv: ["--env", "dev", "--instance", "x", "--summary", "s"], message: "--bundle が無い" },
-    { name: "--summary が無い", argv: ["--env", "dev", "--instance", "x", "--bundle", "b"], message: "--summary が無い" },
-    { name: "知らないオプション", argv: ["--env", "dev", "--instance", "x", "--bundle", "b", "--summary", "s", "--yes"], message: "引数が不正: 知らないオプションがある" },
+    { name: "--env が無い", argv: ["--instance", "x", "--sample", "warikan", "--bundle", "b", "--summary", "s"], message: "--env が無い" },
+    { name: "未知の env（値を出さない）", argv: ["--env", URL_SENTINEL, "--instance", "x", "--sample", "warikan", "--bundle", "b", "--summary", "s"], message: "未知の env" },
+    { name: "production は断る", argv: ["--env", "production", "--instance", "x", "--sample", "warikan", "--bundle", "b", "--summary", "s"], message: "へは publish しない" },
+    { name: "--instance が無い", argv: ["--env", "dev", "--sample", "warikan", "--bundle", "b", "--summary", "s"], message: "--instance が無い" },
+    { name: "--instance が形に合わない（値を出さない）", argv: ["--env", "dev", "--instance", `${URL_SENTINEL}/x`, "--sample", "warikan", "--bundle", "b", "--summary", "s"], message: "--instance は" },
+    { name: "--sample が無い", argv: ["--env", "dev", "--instance", "x", "--bundle", "b", "--summary", "s"], message: "--sample が無い" },
+    { name: "未知の sample（値を出さない）", argv: ["--env", "dev", "--instance", "x", "--sample", URL_SENTINEL, "--bundle", "b", "--summary", "s"], message: "未知の sample" },
+    { name: "--bundle が無い", argv: ["--env", "dev", "--instance", "x", "--sample", "warikan", "--summary", "s"], message: "--bundle が無い" },
+    { name: "--summary が無い", argv: ["--env", "dev", "--instance", "x", "--sample", "warikan", "--bundle", "b"], message: "--summary が無い" },
+    { name: "知らないオプション", argv: ["--env", "dev", "--instance", "x", "--sample", "warikan", "--bundle", "b", "--summary", "s", "--yes"], message: "引数が不正: 知らないオプションがある" },
     { name: "位置引数（値を出さない）", argv: ["--env", "dev", "--instance", "x", "b", "--summary", "s"], message: "引数が不正: 位置引数は取らない" },
   ];
+
+  it.each(["--sample が無い", "未知の sample"] as const)("%s は、ファイルを 1 回も読まずに断る", async (which) => {
+    const reads: string[] = [];
+    const argv =
+      which === "--sample が無い"
+        ? ["--env", "dev", "--instance", "x", "--bundle", "b", "--summary", "s"]
+        : ["--env", "dev", "--instance", "x", "--sample", "mystery", "--bundle", "b", "--summary", "s"];
+    const runResult = await run(argv, {
+      readFile: (path) => {
+        reads.push(path);
+        return "";
+      },
+    });
+    expect(runResult.code).toBe(EXIT_NG);
+    expect(runResult.calls).toEqual([]);
+    expect(reads).toEqual([]);
+    expectNothingSecret(runResult);
+  });
 
   it.each(ARG_CASES)("$name", async ({ argv, message }) => {
     const runResult = await run(argv);
@@ -348,6 +375,38 @@ describe("4 つの門のどれかが落ちると、API を呼ばずに非 0 で�
     expect(runResult.code).toBe(EXIT_NG);
     expect(runResult.calls).toEqual([]);
     expect(runResult.all).toContain("段 declaration");
+    expectNothingSecret(runResult);
+  });
+});
+
+// ── 追記 1：pins は「その見本の値とだけ」比べる（二点測定）──────────
+
+describe("別の見本の値とだけ一致する納品物は止まる（追記 1）", () => {
+  /** `warikan` には別の値、`task-board` にだけこの納品物の SHA-256 が入った pins */
+  const pinsOtherSampleMatches = (manifestSha256: string): string =>
+    JSON.stringify({
+      delivery_bundles: {
+        warikan: { manifest_sha256: "1".repeat(64), source_run: "r" },
+        "task-board": { manifest_sha256: manifestSha256, source_run: "r" },
+        dashboard: { manifest_sha256: null, source_run: null },
+      },
+    });
+
+  it("task-board の値とだけ一致する納品物を warikan として出すと、API を呼ばずに段 pins で止まる", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run(args(bundle.root, { sample: "warikan" }), { pins: pinsOtherSampleMatches(bundle.manifestSha256) });
+    expect(runResult.code).toBe(EXIT_NG);
+    expect(runResult.calls).toEqual([]);
+    expect(runResult.all).toContain("段 pins");
+    expectNothingSecret(runResult);
+  });
+
+  it("同じ納品物でも、task-board として出せば通る（二点測定の裏）", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run(args(bundle.root, { sample: "task-board" }), { pins: pinsOtherSampleMatches(bundle.manifestSha256) });
+    expect(runResult.code).toBe(EXIT_OK);
+    expect(runResult.all).toContain("pins matched");
+    expect(runResult.calls.filter((call) => call.method === "PUT")).toHaveLength(2);
     expectNothingSecret(runResult);
   });
 });

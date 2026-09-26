@@ -18,6 +18,7 @@ import {
   compareBundleManifestToPins,
   publishBundle,
   type BundlePublishResult,
+  type DeliveryBundleSample,
 } from "./bundle-publish.js";
 import type { RegistryExecutor, SqlResult, SqlRow, SqlStatement } from "./contract.js";
 import type { SpecWriter } from "./publish.js";
@@ -165,6 +166,18 @@ const pinsWith = (manifestSha256: string | null): Record<string, unknown> => ({
   },
 });
 
+/**
+ * `warikan` には別の値、`task-board` にだけこの納品物の SHA-256 が入った pins の写し
+ * （追記 1 の二点測定。見本を取り違えた納品物が止まることを確かめる）。
+ */
+const pinsOtherSampleMatches = (manifestSha256: string): Record<string, unknown> => ({
+  delivery_bundles: {
+    warikan: { manifest_sha256: "1".repeat(64), source_run: "e_test_001" },
+    "task-board": { manifest_sha256: manifestSha256, source_run: "e_test_001" },
+    dashboard: { manifest_sha256: null, source_run: null },
+  },
+});
+
 // ── 書き込みの偽の口（R2 と D1）──────────────────────────────────
 
 class RecordingSpecWriter implements SpecWriter {
@@ -239,6 +252,7 @@ async function run(
   options: {
     readonly bundleDirectory: string;
     readonly pins?: unknown;
+    readonly sample?: DeliveryBundleSample;
     readonly summaryStdout?: string;
     readonly instanceId?: string;
   },
@@ -251,6 +265,7 @@ async function run(
       bundleDirectory: options.bundleDirectory,
       summaryStdout: options.summaryStdout ?? summaryLine(),
       pins: options.pins ?? pinsWith(null),
+      sample: options.sample ?? "warikan",
       instanceId: options.instanceId ?? "e2e-warikan",
     },
   );
@@ -295,6 +310,41 @@ describe("publishBundle — 4 つの門が通ると publish の中身へ渡す",
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("通るはず");
     expect(result.pin.status).toBe("skipped");
+  });
+});
+
+// ── 追記 1：pins は「その見本の値とだけ」比べる（二点測定）──────────
+
+describe("publishBundle — 別の見本の値とだけ一致する納品物は止まる", () => {
+  it("task-board の値とだけ一致する納品物を warikan として出すと、段 pins で止まり、何も書かない", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({
+      bundleDirectory: bundle.root,
+      pins: pinsOtherSampleMatches(bundle.manifestSha256),
+      sample: "warikan",
+    });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("pins");
+    expect(runResult.result.pin?.status).toBe("mismatch");
+    expect(runResult.result.pin?.samples).toEqual(["warikan"]);
+    expectNoWrites(runResult);
+  });
+
+  it("同じ納品物でも、task-board として出せば通る（二点測定の裏）", async () => {
+    const bundle = await makeBundle();
+    const runResult = await run({
+      bundleDirectory: bundle.root,
+      pins: pinsOtherSampleMatches(bundle.manifestSha256),
+      sample: "task-board",
+    });
+
+    expect(runResult.result.ok).toBe(true);
+    if (!runResult.result.ok) throw new Error("通るはず");
+    expect(runResult.result.pin.status).toBe("matched");
+    expect(runResult.result.pin.matchedSamples).toEqual(["task-board"]);
+    expect(runResult.writer.writes).toHaveLength(2);
   });
 });
 
@@ -410,28 +460,43 @@ describe("compareBundleManifestToPins", () => {
   const SHA = "a".repeat(64);
 
   it("どの見本にも値が入っていなければ skipped（比較を飛ばしたことを返す）", () => {
-    const result = compareBundleManifestToPins(SHA, pinsWith(null));
+    const result = compareBundleManifestToPins(SHA, pinsWith(null), "warikan");
     expect(result).toEqual({ status: "skipped", samples: [], matchedSamples: [] });
   });
 
   it("値のどれかと一致すれば matched（一致した見本を返す）", () => {
-    const result = compareBundleManifestToPins(SHA, pinsWith(SHA));
+    const result = compareBundleManifestToPins(SHA, pinsWith(SHA), "warikan");
     expect(result.status).toBe("matched");
     expect(result.samples).toEqual(["warikan"]);
     expect(result.matchedSamples).toEqual(["warikan"]);
   });
 
   it("値が入っているのにどれとも一致しなければ mismatch", () => {
-    const result = compareBundleManifestToPins(SHA, pinsWith("0".repeat(64)));
+    const result = compareBundleManifestToPins(SHA, pinsWith("0".repeat(64)), "warikan");
     expect(result.status).toBe("mismatch");
     expect(result.samples).toEqual(["warikan"]);
     expect(result.matchedSamples).toEqual([]);
   });
 
+  it("その見本の値とだけ比べる（別の見本が一致しても mismatch。追記 1）", () => {
+    const pins = pinsOtherSampleMatches(SHA);
+    expect(compareBundleManifestToPins(SHA, pins, "warikan")).toEqual({ status: "mismatch", samples: ["warikan"], matchedSamples: [] });
+    expect(compareBundleManifestToPins(SHA, pins, "task-board")).toEqual({
+      status: "matched",
+      samples: ["task-board"],
+      matchedSamples: ["task-board"],
+    });
+  });
+
+  it("その見本の値が null なら、別の見本が一致していても skipped（比較を飛ばす）", () => {
+    const pins = { delivery_bundles: { warikan: { manifest_sha256: null }, "task-board": { manifest_sha256: SHA } } };
+    expect(compareBundleManifestToPins(SHA, pins, "warikan")).toEqual({ status: "skipped", samples: [], matchedSamples: [] });
+  });
+
   it("delivery_bundles が無ければ BundlePinError（pins_malformed）", () => {
     const thrown = (() => {
       try {
-        return compareBundleManifestToPins(SHA, {});
+        return compareBundleManifestToPins(SHA, {}, "warikan");
       } catch (error) {
         return error;
       }
@@ -443,7 +508,7 @@ describe("compareBundleManifestToPins", () => {
   it("値が文字列でも null でもなければ BundlePinError（安全側に倒す）", () => {
     const thrown = (() => {
       try {
-        return compareBundleManifestToPins(SHA, { delivery_bundles: { warikan: { manifest_sha256: 1234 } } });
+        return compareBundleManifestToPins(SHA, { delivery_bundles: { warikan: { manifest_sha256: 1234 } } }, "warikan");
       } catch (error) {
         return error;
       }

@@ -31,8 +31,10 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import {
   BUNDLE_DECLARATION_PATH,
+  DELIVERY_BUNDLE_SAMPLES,
   publishBundle,
   type BundlePublishResult,
+  type DeliveryBundleSample,
 } from "../../packages/control-plane/src/index.ts";
 import {
   DATA_API_CONFIG,
@@ -54,18 +56,19 @@ import { ENVS, type Env } from "./sync-bindings.ts";
 /** `pins/commandagent.json`（リポジトリルートからの相対パス）。納品物の manifest の照合先。 */
 export const PINS_FILE = "pins/commandagent.json" as const;
 
-const USAGE = `usage: pnpm exec tsx infra/scripts/publish-bundle.ts --env <${PUBLISHABLE_ENVS.join("|")}> --instance <id> --bundle <dir> --summary <file>
+const USAGE = `usage: pnpm exec tsx infra/scripts/publish-bundle.ts --env <${PUBLISHABLE_ENVS.join("|")}> --instance <id> --sample <${DELIVERY_BUNDLE_SAMPLES.join("|")}> --bundle <dir> --summary <file>
 
   --env <env>        ${PUBLISHABLE_ENVS.join(" / ")} だけ。${ENVS.filter((e) => !PUBLISHABLE_ENVS.includes(e)).join(" / ")} は書き込みの前に断る
   --instance <id>    宣言を使うインスタンスの ID（${INSTANCE_PATTERN.source}）
+  --sample <sample>  どの見本か（${DELIVERY_BUNDLE_SAMPLES.join(" / ")}）。**必須。** この見本の値とだけ pins を比べる
   --bundle <dir>     工場の納品物のディレクトリ（直下に bundle-manifest.json）
   --summary <file>   headless の stdout の全文（--summary-json の最終行を含む）を保存したファイル
   --replace          既存インスタンスの宣言を、**はっきり差し替える**（既定は差し替えない）
 
-① manifest の照合 → ② pins の delivery_bundles との比較 → ③ headless の出力の受け入れの判定 →
+① manifest の照合 → ② pins の delivery_bundles の**その見本の値**との比較 → ③ headless の出力の受け入れの判定 →
 ④ 納品物の中の宣言（${BUNDLE_DECLARATION_PATH}）の静的チェック、の 4 つがすべて通ったときだけ、
 既存の publish の中身（publishSpec）へ渡す。どれかが落ちれば、R2 にも D1 にも書かない。
-${PINS_FILE} の delivery_bundles を使う（値が null の見本は比較を飛ばす）。
+${PINS_FILE} の delivery_bundles のうち、その見本の値を使う（値が null なら比較を飛ばす）。
 資格情報は環境変数 CLOUDFLARE_API_TOKEN（D1 Write・Workers R2 Storage: Edit）と CLOUDFLARE_ACCOUNT_ID（アカウント①）。
 成功は exit ${EXIT_OK}、失敗は exit ${EXIT_NG}。トークン・Account ID・バケット名・R2 のキー・URL・ホスト名は出さない。`;
 
@@ -92,6 +95,7 @@ function parseCliArgs(argv: readonly string[]) {
       options: {
         env: { type: "string" },
         instance: { type: "string" },
+        sample: { type: "string" },
         bundle: { type: "string" },
         summary: { type: "string" },
         replace: { type: "boolean" },
@@ -117,6 +121,9 @@ function parseCliArgs(argv: readonly string[]) {
 
 const isEnv = (v: string): v is Env => (ENVS as readonly string[]).includes(v);
 
+const isDeliveryBundleSample = (v: string): v is DeliveryBundleSample =>
+  (DELIVERY_BUNDLE_SAMPLES as readonly string[]).includes(v);
+
 async function run(argv: readonly string[], io: CliIo): Promise<number> {
   const values = parseCliArgs(argv);
   if (values.help === true) {
@@ -134,6 +141,15 @@ async function run(argv: readonly string[], io: CliIo): Promise<number> {
   if (!INSTANCE_PATTERN.test(instanceId)) {
     throw new PublishError("--instance は英字で始まる英数字と . _ - で書く（値は表示しない）");
   }
+  // 見本は必須（追記 1）。**ファイルを 1 回も読まずに**、ここで検める（知らない値・省略は断る）
+  const sampleArg = values.sample;
+  if (sampleArg === undefined || sampleArg === "") {
+    throw new PublishError(`--sample が無い（見本。${DELIVERY_BUNDLE_SAMPLES.join(" / ")}）\n${USAGE}`);
+  }
+  if (!isDeliveryBundleSample(sampleArg)) {
+    throw new PublishError(`未知の sample（${DELIVERY_BUNDLE_SAMPLES.join(" / ")} のいずれか。値は表示しない）`);
+  }
+  const sample = sampleArg;
   const bundleArg = values.bundle;
   if (bundleArg === undefined || bundleArg === "") throw new PublishError(`--bundle が無い（納品物のディレクトリ）\n${USAGE}`);
   const summaryArg = values.summary;
@@ -149,7 +165,7 @@ async function run(argv: readonly string[], io: CliIo): Promise<number> {
   const credentials = readCredentials(io.env);
 
   io.out(
-    `publish-bundle: env=${env} の R2（BUNDLES）と D1（CONTROL_DB）へ、4 つの門を通した納品物を置く` +
+    `publish-bundle: env=${env} の R2（BUNDLES）と D1（CONTROL_DB）へ、見本 ${sample} の納品物を 4 つの門を通して置く` +
       (replace ? "（--replace: 既存インスタンスの宣言を差し替える）" : ""),
   );
 
@@ -160,9 +176,9 @@ async function run(argv: readonly string[], io: CliIo): Promise<number> {
       // 差し替えのときだけ、前の原本を読む口を渡す（差し替えない経路に R2 の読み取りを足さない）
       ...(replace ? { readSpec: cloudflareSpecReader(io, credentials, target.bucketName) } : {}),
     },
-    { bundleDirectory, summaryStdout, pins, instanceId, ...(replace ? { replace: true } : {}) },
+    { bundleDirectory, summaryStdout, pins, sample, instanceId, ...(replace ? { replace: true } : {}) },
   );
-  return report(io, env, result);
+  return report(io, env, sample, result);
 }
 
 /** 引数のパスを決める。リポジトリの直下からの相対はそれを基準にし、絶対パスはそのまま使う。 */
@@ -197,10 +213,10 @@ function readConfig(io: CliIo): string {
 }
 
 /** 結果を安全に出す。診断は #97 の 1 行（`<宣言>:<行>:<列>: <コード>: <説明>`）で出す。 */
-function report(io: CliIo, env: Env, result: BundlePublishResult): number {
+function report(io: CliIo, env: Env, sample: DeliveryBundleSample, result: BundlePublishResult): number {
   if (result.ok) {
     io.out(
-      `publish-bundle: OK  env=${env}: manifest SHA ${result.manifestSha256} / 版 ${result.publish.app.schemaVersion}` +
+      `publish-bundle: OK  env=${env}: 見本 ${sample} / manifest SHA ${result.manifestSha256} / 版 ${result.publish.app.schemaVersion}` +
         ` / 原本 SHA ${result.publish.app.sourceSha256} / インスタンス ${result.publish.instance.instanceId}` +
         ` / 水準 ${result.level} / pins ${result.pin.status}`,
     );

@@ -6,7 +6,8 @@
 //
 // 4 つの門を、この順に通す。**どれかが落ちたら publish しない**（R2 にも D1 にも書かない）。
 //   ① manifest の照合（#247 の verifyBundleManifest。依存の Issues の部品を使う）
-//   ② pins の `delivery_bundles` の値との比較（値が null なら比較を飛ばしたことを返す）
+//   ② pins の `delivery_bundles` の、**その見本の値とだけ**比較（値が null なら比較を飛ばしたことを返す。
+//      追記 1。見本は呼ぶ側が必ず渡す）
 //   ③ headless の出力の受け入れの判定（#246 の readHeadlessSummary と judgeAcceptance。Q7）
 //   ④ 納品物の中の宣言（`artifacts/app.spec.yaml`）を読み、静的チェックに通す（spec-engine の normalizeSpec）
 //
@@ -42,11 +43,19 @@ export const BUNDLE_DECLARATION_PATH = "artifacts/app.spec.yaml" as const;
 /** `pins/commandagent.json` の、見本ごとの納品物の欄。 */
 export const DELIVERY_BUNDLES_FIELD = "delivery_bundles" as const;
 
-/** 比較の結果の種類。`skipped` は「どの見本にも値が入っていないので比較を飛ばした」。 */
+/**
+ * 工場の納品物の見本 3 つ（`delivery_bundles` のキーと一致する）。**入口はこのどれかを必ず受け取る**
+ * （Issue #248 の追記 1。見本を取り違えても止まらない作りを直した）。fix した一覧なので、
+ * pins を読まずに引数を検める。
+ */
+export const DELIVERY_BUNDLE_SAMPLES = ["warikan", "task-board", "dashboard"] as const;
+export type DeliveryBundleSample = (typeof DELIVERY_BUNDLE_SAMPLES)[number];
+
+/** 比較の結果の種類。`skipped` は「その見本に値が入っていないので比較を飛ばした」。 */
 export const PIN_COMPARISON_STATUSES = ["matched", "skipped", "mismatch"] as const;
 export type PinComparisonStatus = (typeof PIN_COMPARISON_STATUSES)[number];
 
-/** 比較の結果。`samples` は値が入っていた見本、`matchedSamples` は一致した見本（`matched` のときだけ）。 */
+/** 比較の結果。`samples` は値が入っていた見本（＝引数の見本）、`matchedSamples` は一致した見本（`matched` のときだけ）。 */
 export interface PinComparison {
   readonly status: PinComparisonStatus;
   readonly samples: readonly string[];
@@ -71,37 +80,38 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
- * 納品物の manifest の SHA-256 を、`pins/commandagent.json` の `delivery_bundles` の値と比べる。
+ * 納品物の manifest の SHA-256 を、`pins/commandagent.json` の `delivery_bundles` の**その見本の値とだけ**比べる
+ * （Issue #248 の追記 1。見本を取り違えても止まるようにした）。
  *
- * 見本ごとに値が入る（`manifest_sha256`。まだ工場の納品待ちなら `null`）。**`null` の見本は比べない。**
- *   - どの見本にも値が入っていなければ `skipped`（比較を飛ばしたことを返す）
- *   - 値のどれかと一致すれば `matched`（一致した見本を返す）
- *   - 値が入っているのにどれとも一致しなければ `mismatch`
+ * 見本ごとに値が入る（`manifest_sha256`。まだ工場の納品待ちなら `null`）。**`null` なら比べない。**
+ *   - その見本の値が `null` なら `skipped`（比較を飛ばしたことを返す）
+ *   - その見本の値と一致すれば `matched`
+ *   - 値が入っているのに一致しなければ `mismatch`（**別の見本の値とだけ一致しても mismatch である。**）
  *
- * `delivery_bundles` が写像でない・値が文字列でも `null` でもなければ `BundlePinError`（安全側に倒す）。
+ * `delivery_bundles` が写像でない・その見本の欄が写像でない・値が文字列でも `null` でもなければ
+ * `BundlePinError`（安全側に倒す）。
  */
-export function compareBundleManifestToPins(manifestSha256: string, pins: unknown): PinComparison {
+export function compareBundleManifestToPins(
+  manifestSha256: string,
+  pins: unknown,
+  sample: DeliveryBundleSample,
+): PinComparison {
   const deliveryBundles = isRecord(pins) ? pins[DELIVERY_BUNDLES_FIELD] : undefined;
   if (!isRecord(deliveryBundles)) {
     throw new BundlePinError("pins_malformed", `${DELIVERY_BUNDLES_FIELD} が写像でない`);
   }
-  const samples: { readonly name: string; readonly sha256: string }[] = [];
-  for (const [name, entry] of Object.entries(deliveryBundles)) {
-    if (name.startsWith("$")) continue; // $comment などの説明の欄は見本として数えない
-    if (!isRecord(entry)) throw new BundlePinError("pins_malformed", `${DELIVERY_BUNDLES_FIELD}.${name} が写像でない`);
-    const value = entry["manifest_sha256"];
-    if (value === null) continue;
-    if (typeof value !== "string") {
-      throw new BundlePinError("pins_malformed", `${DELIVERY_BUNDLES_FIELD}.${name}.manifest_sha256 が文字列でない`);
-    }
-    samples.push({ name, sha256: value });
+  const entry = deliveryBundles[sample];
+  if (!isRecord(entry)) {
+    throw new BundlePinError("pins_malformed", `${DELIVERY_BUNDLES_FIELD}.${sample} が写像でない`);
   }
-  const names = samples.map((sample) => sample.name);
-  const matchedSamples = samples.filter((sample) => sample.sha256 === manifestSha256).map((sample) => sample.name);
-  if (samples.length === 0) return { status: "skipped", samples: [], matchedSamples: [] };
-  return matchedSamples.length === 0
-    ? { status: "mismatch", samples: names, matchedSamples: [] }
-    : { status: "matched", samples: names, matchedSamples };
+  const value = entry["manifest_sha256"];
+  if (value === null) return { status: "skipped", samples: [], matchedSamples: [] };
+  if (typeof value !== "string") {
+    throw new BundlePinError("pins_malformed", `${DELIVERY_BUNDLES_FIELD}.${sample}.manifest_sha256 が文字列でない`);
+  }
+  return value === manifestSha256
+    ? { status: "matched", samples: [sample], matchedSamples: [sample] }
+    : { status: "mismatch", samples: [sample], matchedSamples: [] };
 }
 
 // ── 納品物の中の宣言を読む（Node 側）──────────────────────────────
@@ -136,8 +146,10 @@ export interface BundlePublishRequest {
   readonly bundleDirectory: string;
   /** headless の stdout の全文（前の行は人向けの出力。最終行が v1 の要約） */
   readonly summaryStdout: string;
-  /** `pins/commandagent.json` を JSON として読んだ値（`delivery_bundles` を読む） */
+  /** `pins/commandagent.json` を JSON として読んだ値（`delivery_bundles` のこの見本の値を読む） */
   readonly pins: unknown;
+  /** どの見本か（`delivery_bundles` のキー。pins の比較はこの見本の値とだけ行う） */
+  readonly sample: DeliveryBundleSample;
   /** 宣言を使うインスタンスの ID */
   readonly instanceId: string;
   /** 既存インスタンスの宣言を、**はっきり差し替える**（`publishSpec` と同じ。既定は `false`） */
@@ -210,7 +222,7 @@ const isDeliveryLevel = (value: string): value is DeliveryLevel => (DELIVERY_LEV
  * 受け入れの判定・宣言の静的チェック）を通したものだけを、既存の publish の中身（`publishSpec`）へ渡す。
  *
  * **どれかが落ちたら publish しない。** 段（`failure.stage`）で止まった門が分かる。`pins` の段は、
- * 値が入っているのに一致しなかったときである（どの見本にも値が無い `skipped` は通る）。
+ * **その見本の値**が入っているのに一致しなかったときである（その値が `null` の `skipped` は通る）。
  *
  * 例外を外へ出さない（門の失敗は結果にする）。呼ぶ側（CLI）は、結果をそのまま安全に出せる。
  */
@@ -230,10 +242,10 @@ export async function publishBundle(
     return fail("manifest", MESSAGES.manifest_problems, { problems: verified.problems });
   }
 
-  // ② pins の delivery_bundles の値との比較（null の見本は飛ばす）
+  // ② pins の delivery_bundles の、**その見本の値とだけ**比較する（その値が null なら飛ばす）
   let pin: PinComparison;
   try {
-    pin = compareBundleManifestToPins(verified.manifestSha256, request.pins);
+    pin = compareBundleManifestToPins(verified.manifestSha256, request.pins, request.sample);
   } catch (error) {
     return fail("pins", error instanceof BundlePinError ? error.message : MESSAGES.pins_malformed);
   }
