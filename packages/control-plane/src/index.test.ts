@@ -6,11 +6,14 @@ import { describe, expect, it } from "vitest";
 import {
   APP_INSTANCES_TABLE,
   APPS_TABLE,
+  HEADLESS_SCHEMA_VERSION,
   PACKAGE_NAME,
   REGISTRY_ERROR_CODES,
   RegistryError,
   getApp,
   getInstance,
+  judgeAcceptance,
+  readHeadlessSummary,
   registerApp,
   registerInstance,
   replaceInstance,
@@ -40,5 +43,11 @@ describe("control-plane パッケージ", () => {
     expect(error.name).toBe("RegistryError");
     expect(error.code).toBe("app_not_found");
     expect(error.message).toBe("未登録のアプリを指すインスタンスは登録できない");
+  });
+
+  it("headless 契約 v1 の読み取りと、Q7 の受け入れの判定を公開する（#246）", () => {
+    expect(HEADLESS_SCHEMA_VERSION).toBe("commandagent.headless-summary/v1");
+    expect(typeof readHeadlessSummary).toBe("function");
+    expect(typeof judgeAcceptance).toBe("function");
   });
 });
