@@ -15,6 +15,11 @@
 // host 側（apps/host/src/worker/api.ts）は同じ形を書き写している——host は gateway を import できない
 // （infra/scripts/dep-graph.mjs で host が持てる依存は @musunest/sdk だけ）。食い違えば
 // src/index.test.ts の実機（host → gateway → data-api）が落ちる。
+//
+// M2.1（Issue #263）で、中継の前に**識別ヘッダの付け替え**が入った（withIdentity）。
+// 外から届いた IDENTITY_HEADER は必ず取り除き、セッションが示す利用者 ID だけを載せる
+// ——利用者の値でなりすませない。ここは Cloudflare を使わないので、src/api.test.ts が見る。
+import { IDENTITY_HEADER } from "./auth";
 
 /**
  * 中継する経路の接頭辞。**host の wrangler.jsonc の assets.run_worker_first と同じ範囲**にする
@@ -60,22 +65,38 @@ export function relaysApi(environment: string | undefined): boolean {
 /**
  * /api/* の入口。**中継してよい env でだけ**下流を呼ぶ。それ以外は下流を一度も呼ばずに 404 を返す
  * （healthz の詳細非公開と同じ「閉じる側」の倒し方で、SPA シェルの HTML も返さない）。
+ *
+ * `userId` はセッションが示す利用者 ID（ログインしていなければ null。判定は src/auth.ts の
+ * sessionUserId）。中継の前に withIdentity で**識別ヘッダを付け替える**。
  */
 export async function handleApi(
   request: Request,
   env: ApiEnv,
   dataApi: DataApiRelay,
+  userId: string | null = null,
 ): Promise<Response> {
   if (!relaysApi(env.ENVIRONMENT)) return json({ error: "not found" }, 404);
 
   try {
     // 下流の応答をそのまま返す。status・content-type・body は data-api のものに保たれる
-    return await dataApi(request);
+    return await dataApi(withIdentity(request, userId));
   } catch (error) {
     // 詳細は Workers のログにだけ出す（observability.enabled。公開されない）。応答は host を経て外へ出る
     console.error("[gateway] api: data_api relay failed", error);
     return json(RELAY_FAILURE_BODY, RELAY_FAILURE_STATUS);
   }
+}
+
+/**
+ * 中継する Request を作る。**外から届いた識別ヘッダは必ず取り除く**——gateway がセッションから決めた
+ * 利用者 ID だけを載せる（`userId` が null ならヘッダそのものを載せない）。外からの値で利用者を
+ * 名乗れない（なりすましを通さない。data-api は識別ヘッダの無い一覧を 401 で断る）。
+ */
+export function withIdentity(request: Request, userId: string | null): Request {
+  const headers = new Headers(request.headers);
+  headers.delete(IDENTITY_HEADER);
+  if (userId !== null && userId !== "") headers.set(IDENTITY_HEADER, userId);
+  return new Request(request, { headers });
 }
 
 function json(body: unknown, status: number): Response {

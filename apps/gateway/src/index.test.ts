@@ -24,6 +24,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestHarness, unstable_readConfig } from "wrangler";
 import type { TestHarness } from "wrangler";
 import {
+  AUTH_LOGIN_PATH,
+  AUTH_LOGOUT_PATH,
+  GOOGLE_AUTHORIZE_ENDPOINT,
+  IDENTITY_HEADER,
+  OAUTH_STATE_COOKIE,
+} from "./auth.js";
+import {
   DATA_API_BINDING,
   GATEWAY_HEALTHZ_CHECKS,
   HEALTHZ_PATH,
@@ -128,6 +135,12 @@ describe.each(ENVS)("wrangler.jsonc（env.%s）", (env) => {
   it("MUSUNEST_PROBE_TOKEN を vars に書かない（wrangler secret。リポジトリに値を置かない）", () => {
     expect(Object.keys(config.vars)).not.toContain(PROBE_TOKEN_SECRET);
   });
+
+  it("OAuth とセッションの secret も vars に書かない（wrangler secret put。M2.1・Issue #263）", () => {
+    for (const secret of ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "SESSION_SECRET"]) {
+      expect(Object.keys(config.vars), secret).not.toContain(secret);
+    }
+  });
 });
 
 describe.each(ENVS)("gateway → data-api（env.%s・workerd 上の実機）", (env) => {
@@ -135,8 +148,19 @@ describe.each(ENVS)("gateway → data-api（env.%s・workerd 上の実機）", (
   const probe = DETAIL[env] === "probe";
   const server = createTestHarness({
     workers: [
-      // 先頭が primary。server.fetch は gateway に届く
-      { configPath: CONFIG_PATH, env, vars: { GIT_SHA: "test-sha", ...(probe ? { [PROBE_TOKEN_SECRET]: PROBE_TOKEN } : {}) } },
+      // 先頭が primary。server.fetch は gateway に届く。
+      // OAuth とセッションの secret は本番では wrangler secret put で入れる（wrangler.jsonc に書かない。
+      // 上の wrangler.jsonc の検査を参照）。ここでは workerd の env として渡す（src/index.test.ts の PROBE と同じ）。
+      {
+        configPath: CONFIG_PATH,
+        env,
+        vars: {
+          GIT_SHA: "test-sha",
+          GOOGLE_CLIENT_ID: "test-client-id",
+          SESSION_SECRET: "test-session-secret-0123456789",
+          ...(probe ? { [PROBE_TOKEN_SECRET]: PROBE_TOKEN } : {}),
+        },
+      },
       { configPath: DATA_API_CONFIG_PATH, env, vars: { GIT_SHA: "test-sha" } },
     ],
   });
@@ -195,6 +219,46 @@ describe.each(ENVS)("gateway → data-api（env.%s・workerd 上の実機）", (
       expect(res.status).toBe(405);
       expect(res.headers.get("allow")).toBe("POST");
       expect(await res.json()).toEqual({ error: "METHOD_NOT_ALLOWED" });
+    }
+  });
+
+  // ── 認証（M2.1。Issue #263）──────────────────────────────────────
+
+  it("/auth/login は Google の認可画面へ 302 し、state の cookie を返す", async () => {
+    // redirect を追わせない（追うと Google の画面へ出てしまう）
+    const res = await server.fetch(AUTH_LOGIN_PATH, { redirect: "manual" });
+
+    expect(res.status).toBe(302);
+    const location = res.headers.get("location");
+    expect(location).not.toBeNull();
+    const url = new URL(location ?? "");
+    expect(`${url.origin}${url.pathname}`).toBe(GOOGLE_AUTHORIZE_ENDPOINT);
+    expect(url.searchParams.get("client_id")).toBe("test-client-id");
+    expect(url.searchParams.get("state")).not.toBeNull();
+    expect(res.headers.get("set-cookie")).toContain(OAUTH_STATE_COOKIE);
+  });
+
+  it("/auth/logout はセッション cookie を消して / へ戻す", async () => {
+    const res = await server.fetch(AUTH_LOGOUT_PATH, { redirect: "manual" });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/");
+    expect(res.headers.get("set-cookie")).toContain("Max-Age=0");
+  });
+
+  it("識別ヘッダを外から付けても /api/me/instances は 401（gateway が取り除く。なりすましを通さない）", async () => {
+    // dev / staging は data-api まで届く。gateway が偽の IDENTITY_HEADER を取り除くので、
+    // data-api は「識別ヘッダの無い一覧」として 401 を返す。取り除かなければ data-api が D1 を読もうとして
+    // 503 になる（この harness は登録もマイグレーションも当てていない）。production は中継しないので 404。
+    const res = await server.fetch("/api/me/instances", {
+      headers: { [IDENTITY_HEADER]: "u-attacker", accept: "application/json" },
+    });
+
+    if (probe) {
+      expect(res.status).toBe(404);
+    } else {
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "UNAUTHENTICATED" });
     }
   });
 });
