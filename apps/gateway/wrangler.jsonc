@@ -21,6 +21,17 @@
   //                         host はこの値を X-Musunest-Probe に載せて gateway の詳細を受け取る。置いていない production は常に隠す
   //   この値の env ごとの形と、secret が vars に無いことは src/index.test.ts が確かめる。
   //
+  // ── ログイン（Google OIDC。M2.1・Issue #263）────────────────────────────
+  //   gateway は Google OIDC のログイン・コールバック・ログアウト（/auth/*）を持ち、ログインした利用者の
+  //   識別（X-Musunest-User）を data-api への要求に載せる。**D1 / R2 / DO は持たない**——セッションは
+  //   署名付き cookie で持ち、要求ごとに D1 を読まない（2026-10-08 所有者の決定。Better Auth は使わない）。
+  //   次の3つは **Worker の secret**（`wrangler secret put`。リポジトリに値を置かない。04 §7）。
+  //   クライアント（Issue 23）が発行されるまで /auth/* は 503 で閉じる（閉じる側）:
+  //     GOOGLE_CLIENT_ID      … Google Cloud の OAuth クライアントの ID（公開情報だが、env ごとに差し替える）
+  //     GOOGLE_CLIENT_SECRET  … 同じクライアントの secret
+  //     SESSION_SECRET        … セッション cookie の署名鍵（HMAC-SHA256）
+  //   この3つを vars に書いていないことは src/index.test.ts が確かめる。
+  //
   // ⚠️ services / vars は env へ継承されない。だから3環境に丸ごと書く（data-api と同じ）。
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "musunest-dev-gateway",

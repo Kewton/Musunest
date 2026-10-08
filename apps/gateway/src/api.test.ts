@@ -18,6 +18,7 @@ import {
   relaysApi,
 } from "./api.js";
 import type { ApiEnv, DataApiRelay } from "./api.js";
+import { IDENTITY_HEADER } from "./auth.js";
 
 const GATEWAY_ORIGIN = "https://musunest-dev-gateway.example";
 const PROBE_HEADER = "X-Musunest-Probe";
@@ -266,6 +267,65 @@ describe("中継そのものの失敗（下流に届かない）", () => {
 
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "not found" });
+    expect(dataApi.calls).toEqual([]);
+  });
+});
+
+// ── 識別ヘッダの付け替え（M2.1。Issue #263 の受入条件）─────────────────────────
+//
+// **外から届いた識別ヘッダ（IDENTITY_HEADER）は、中継の前に必ず取り除く。** gateway がセッションから
+// 決めた利用者 ID だけを載せる——利用者の値でなりすませない。中継しない env では、付け替える前に 404 になる。
+describe("識別ヘッダの付け替え（なりすましを通さない）", () => {
+  const env: ApiEnv = { ENVIRONMENT: "dev" };
+
+  it("外から届いた値は取り除き、セッションの利用者 ID だけを載せる", async () => {
+    const dataApi = recorder(() => Response.json({ instances: [] }, { status: 200 }));
+    await handleApi(
+      apiRequest("/api/me/instances", { headers: { [IDENTITY_HEADER]: "attacker-chosen-id" } }),
+      env,
+      dataApi,
+      "u-a",
+    );
+
+    expect(sentTo(dataApi.calls).headers.get(IDENTITY_HEADER)).toBe("u-a");
+  });
+
+  it("ログインしていなければ、外から届いた値は落ちる（ヘッダそのものを載せない）", async () => {
+    const dataApi = recorder(() => Response.json({ error: "UNAUTHENTICATED" }, { status: 401 }));
+    await handleApi(
+      apiRequest("/api/me/instances", { headers: { [IDENTITY_HEADER]: "attacker-chosen-id" } }),
+      env,
+      dataApi,
+      null,
+    );
+
+    expect(sentTo(dataApi.calls).headers.get(IDENTITY_HEADER)).toBeNull();
+  });
+
+  it("取り除くのは識別ヘッダだけである（他のヘッダはそのまま運ぶ）", async () => {
+    const dataApi = recorder(() => Response.json({}, { status: 200 }));
+    await handleApi(
+      apiRequest("/api/me/instances", { headers: { accept: "application/json", [IDENTITY_HEADER]: "attacker" } }),
+      env,
+      dataApi,
+      "u-a",
+    );
+
+    const sent = sentTo(dataApi.calls);
+    expect(sent.headers.get("accept")).toBe("application/json");
+    expect(sent.headers.get(IDENTITY_HEADER)).toBe("u-a");
+  });
+
+  it("中継しない env では、付け替える前に 404 で下流を一度も呼ばない", async () => {
+    const dataApi = recorder(() => Response.json({}, { status: 200 }));
+    const res = await handleApi(
+      apiRequest("/api/me/instances", { headers: { [IDENTITY_HEADER]: "attacker" } }),
+      { ENVIRONMENT: "production" },
+      dataApi,
+      "u-a",
+    );
+
+    expect(res.status).toBe(404);
     expect(dataApi.calls).toEqual([]);
   });
 });
