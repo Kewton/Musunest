@@ -166,9 +166,19 @@ describe("誤りコードと HTTP ステータス（Issue #102 の案）", () =>
       ACTION_NOT_ALLOWED: 409,
       // 利用者の識別が無い（M2.1。Issue #260）。**gateway を通っていない要求である**
       UNAUTHENTICATED: 401,
+      // そのインスタンスを持つ Community に属さない（M2.1。Issue #262）。**UNAUTHENTICATED とは別の 403**
+      NOT_A_MEMBER: 403,
     });
     // コードの一覧とステータスの一覧がずれない（足し忘れをここで止める）
     expect(new Set(Object.keys(API_ERROR_STATUS))).toEqual(new Set(API_ERROR_CODES));
+  });
+
+  it("所属が無い断りは、識別が無い断りとは別のコードである（M2.1。Issue #262）", () => {
+    expect(API_ERROR_CODES).toContain("NOT_A_MEMBER");
+    expect(API_ERROR_STATUS.NOT_A_MEMBER).toBe(403);
+    expect(API_ERROR_STATUS.NOT_A_MEMBER).not.toBe(API_ERROR_STATUS.UNAUTHENTICATED);
+    // 本文はコード 1 つだけである（内部情報を載せない）
+    expect(apiErrorBody("NOT_A_MEMBER")).toEqual({ error: "NOT_A_MEMBER" });
   });
 
   it("成功のステータスは 200 と 201（**成功に見せかけた空の応答を作らない**）", () => {

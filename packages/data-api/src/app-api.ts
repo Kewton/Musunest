@@ -139,12 +139,41 @@ export interface RecordStore {
   ): Promise<GuardedDelete>;
 }
 
+/**
+ * 利用者の Community への所属（M2.1。Issue #262）。**index（Worker の入口）が組んで渡す**——
+ * 表の読み取りは control-plane（`cloudflareIdentity`）が持つので、data-api に SQL を書かない。
+ * **production のときだけ呼ばれる**（検査を掛けない env では一度も呼ばれない）。
+ */
+export interface InstanceAccess {
+  /** 利用者が、このインスタンスを持つ Community に属するか。属さなければ `false` */
+  owns(userId: string, instanceId: string): Promise<boolean>;
+}
+
+/**
+ * 経路に届いた要求の出所と、所属の判定（M2.1。Issue #262）。**index が組んで `deps` に渡す**。
+ * 検査を掛けるかどうかは `environment` が決める——**`production` のときだけ**掛ける
+ * （決定 2026-10-08。dev と staging は M1 のまま開けておき、全環境にそろえるのは M2.3）。
+ */
+export interface ApiAccess {
+  /** wrangler の vars.ENVIRONMENT。`production` のときだけ所属を検査する */
+  readonly environment: string | undefined;
+  /** 識別ヘッダ（`IDENTITY_HEADER`）の値。gateway を通っていなければ `null` */
+  readonly userId: string | null;
+  /** 利用者の Community への所属。`production` では実体を渡す */
+  readonly membership: InstanceAccess;
+}
+
 export interface DataApiDeps {
   readonly registry: InstanceRegistry;
   readonly specs: NormalizedSpecStore;
   readonly records: RecordStore;
   /** 保存する日時と評価に使う時計。テストは fixedClock を差し込む（Q17） */
   readonly clock: Clock;
+  /**
+   * 所属の検査の材料（M2.1。Issue #262）。**index が渡す**——adapter（`cloudflareDataApi`）は付けない。
+   * 無いときは検査を掛けない（dev と staging、および unit テストの既定）。
+   */
+  readonly access?: ApiAccess;
 }
 
 // ── 結果の形 ────────────────────────────────────────────────────
@@ -228,6 +257,37 @@ const notAllowed = (action: Action): ApiFailureResult => ({
     when: action.when ?? "",
   },
 });
+
+/**
+ * 所属の検査を掛ける env（M2.1。Issue #262）。**ここ以外では掛けない**——dev と staging は M1 の
+ * まま開けておく（決定 2026-10-08。全環境にそろえるのは M2.3）。
+ */
+const MEMBERSHIP_ENVIRONMENT = "production" as const;
+
+/** 識別ヘッダが無い（M2.1）。**D1 を読まずに**断る。一覧（`identity.ts`）と同じ応答である */
+const unauthenticated = (): ApiFailureResult => fail("UNAUTHENTICATED");
+
+/** そのインスタンスを持つ Community に属さない（M2.1。Issue #262） */
+const notAMember = (): ApiFailureResult => fail("NOT_A_MEMBER");
+
+/**
+ * 経路を開いてよいかを、**利用者の Community への所属**で決める（M2.1。Issue #262）。
+ * 開いてよければ `null`、断るなら失敗の結果を返す。
+ *
+ * **`production` だけに掛ける**（決定 2026-10-08。dev と staging は M1 のまま開けておく）。
+ * 識別ヘッダが無ければ 401 `UNAUTHENTICATED`（誰のものかを決められない）、属さなければ
+ * 403 `NOT_A_MEMBER`。**どちらのときも登録（D1）・R2・DO を読まない**——この検査は `loadSpec` より
+ * 先に走る（属さない要求に、宣言の有無も、保存の有無も教えない）。
+ */
+async function guardInstanceAccess(
+  access: ApiAccess | undefined,
+  instanceId: string,
+): Promise<ApiFailureResult | null> {
+  if (access === undefined || access.environment !== MEMBERSHIP_ENVIRONMENT) return null;
+  const userId = access.userId;
+  if (userId === null || userId === "") return unauthenticated();
+  return (await access.membership.owns(userId, instanceId)) ? null : notAMember();
+}
 
 /**
  * 通らなかった検査の文言（`validations` と同じ並び）。文言を 1 つも宣言していなければ `undefined`
@@ -934,6 +994,8 @@ export async function getSpec(
   deps: DataApiDeps,
   instanceId: string,
 ): Promise<ApiResult<ApiSpecBody>> {
+  const denied = await guardInstanceAccess(deps.access, instanceId);
+  if (denied !== null) return denied;
   const loaded = await loadSpec(deps, instanceId);
   if (!loaded.ok) return fail(loaded.error);
   const { app } = loaded;
@@ -958,6 +1020,8 @@ export async function getView(
   instanceId: string,
   viewName: string,
 ): Promise<ApiResult<ApiViewBody>> {
+  const denied = await guardInstanceAccess(deps.access, instanceId);
+  if (denied !== null) return denied;
   const loaded = await loadSpec(deps, instanceId);
   if (!loaded.ok) return fail(loaded.error);
   const { app } = loaded;
@@ -1065,6 +1129,8 @@ export async function createFromAction(
   actionName: string,
   input: Readonly<Record<string, unknown>>,
 ): Promise<ApiResult<ApiActionBody>> {
+  const denied = await guardInstanceAccess(deps.access, instanceId);
+  if (denied !== null) return denied;
   const loaded = await loadSpec(deps, instanceId);
   if (!loaded.ok) return fail(loaded.error);
   const { app } = loaded;
