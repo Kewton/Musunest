@@ -107,3 +107,112 @@ export class RegistryError extends Error {
     this.code = code;
   }
 }
+
+// ── identity（利用者・Community・所属・インスタンスの持ち主。#259）───────────────
+//
+// 表の名前をここに置くのは registry と同じ理由である（SQL・migration・テストが同じ1か所を見る）。
+// 正本は migrations/0003_identity.sql。外部キーは張らず、「未登録の Community・インスタンスを
+// 指す行を拒否する」は読み書きの側（src/identity.ts）で行う（0002 と同じ規律）。
+
+/** 利用者。Google OIDC の subject で 1 人に 1 行。migrations/0003_identity.sql と一致させる。 */
+export const USERS_TABLE = "users" as const;
+
+/** Community。M2.1 では持ち主 1 人に 1 つ（増やすのは M2.3 以降）。 */
+export const COMMUNITIES_TABLE = "communities" as const;
+
+/** 所属（利用者と Community の対応。M2.1 は持ち主の 1 行）。 */
+export const COMMUNITY_MEMBERSHIPS_TABLE = "community_memberships" as const;
+
+/** インスタンスの持ち主（インスタンスがどの Community のものか。AppGrant の土台）。 */
+export const INSTANCE_OWNERS_TABLE = "instance_owners" as const;
+
+/** 登録した利用者の行。`created_at` は D1 の既定値が入る。 */
+export interface UserRecord {
+  /** 利用者 ID。この表のキー */
+  readonly userId: string;
+  /** Google OIDC の subject。1 人に 1 つ（UNIQUE） */
+  readonly googleSubject: string;
+  /** 表示名。初めてのログインでは Community の名前のもとになる */
+  readonly displayName: string;
+  readonly createdAt: string;
+}
+
+/** 登録した Community の行。 */
+export interface CommunityRecord {
+  /** Community ID。この表のキー */
+  readonly communityId: string;
+  readonly name: string;
+  /** 持ち主の利用者 ID */
+  readonly ownerUserId: string;
+  readonly createdAt: string;
+}
+
+/** 所属の役割。M2.1 で作るのは持ち主の `owner` だけ。 */
+export const MEMBERSHIP_ROLES = ["owner", "member"] as const;
+export type MembershipRole = (typeof MEMBERSHIP_ROLES)[number];
+
+/** 所属の行（利用者と Community の対応）。 */
+export interface MembershipRecord {
+  readonly communityId: string;
+  readonly userId: string;
+  readonly role: MembershipRole;
+  readonly createdAt: string;
+}
+
+/** インスタンスの持ち主の行。 */
+export interface InstanceOwnerRecord {
+  /** 持ち物のインスタンス ID。この表のキー */
+  readonly instanceId: string;
+  /** 持ち主の Community ID */
+  readonly communityId: string;
+  readonly createdAt: string;
+}
+
+/** ログインの登録入力。同じ Google subject の 2 回目は冪等。 */
+export interface LoginRegistration {
+  readonly googleSubject: string;
+  readonly displayName: string;
+  /** Community の名前。省略すると表示名を使う */
+  readonly communityName?: string;
+}
+
+/** ログインの登録結果。初めてのログインでは Community と所属（owner）も 1 つ作る。 */
+export interface LoginResult {
+  readonly user: UserRecord;
+  readonly community: CommunityRecord;
+  readonly membership: MembershipRecord;
+}
+
+/** インスタンスの持ち主の登録入力。Community もインスタンスも登録済みでなければならない。 */
+export interface InstanceOwnerRegistration {
+  readonly instanceId: string;
+  readonly communityId: string;
+}
+
+export const IDENTITY_ERROR_CODES = [
+  "community_not_found",
+  "instance_not_found",
+  "owner_conflict",
+  "login_not_registered",
+] as const;
+export type IdentityErrorCode = (typeof IDENTITY_ERROR_CODES)[number];
+
+/**
+ * identity の登録の失敗。原因はコードで分ける（呼ぶ側が例外の文言に依存しないように）。
+ *   community_not_found  … 未登録の Community を指すインスタンスを持たせようとした
+ *   instance_not_found   … 未登録のインスタンスを Community の持ち物にしようとした
+ *   owner_conflict       … 既存インスタンスの持ち主を、暗黙に別の Community へ差し替えようとした
+ *   login_not_registered … 登録したはずの利用者・Community・所属を読み戻せなかった（起きない想定）
+ *
+ * RegistryError と分けるのは、publish が `RegistryErrorCode` を網羅した表を持つためである
+ * （コードを混ぜると publish 側の表が identity の都合で変わる）。呼ぶ側は code で分ける。
+ */
+export class IdentityError extends Error {
+  readonly code: IdentityErrorCode;
+
+  constructor(code: IdentityErrorCode, message: string) {
+    super(message);
+    this.name = "IdentityError";
+    this.code = code;
+  }
+}

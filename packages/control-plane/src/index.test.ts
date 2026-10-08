@@ -7,18 +7,32 @@ import {
   APP_INSTANCES_TABLE,
   APPS_TABLE,
   BUNDLE_DECLARATION_PATH,
+  COMMUNITIES_TABLE,
+  COMMUNITY_MEMBERSHIPS_TABLE,
   HEADLESS_SCHEMA_VERSION,
+  IDENTITY_ERROR_CODES,
+  INSTANCE_OWNERS_TABLE,
+  IdentityError,
   PACKAGE_NAME,
   REGISTRY_ERROR_CODES,
   RegistryError,
+  USERS_TABLE,
   compareBundleManifestToPins,
   getApp,
+  getCommunity,
   getInstance,
+  getUser,
+  getUserByGoogleSubject,
   judgeAcceptance,
+  listCommunityInstances,
+  listCommunityMembers,
+  listUserCommunities,
   publishBundle,
   readHeadlessSummary,
   registerApp,
   registerInstance,
+  registerInstanceOwner,
+  registerLogin,
   replaceInstance,
   resolveInstanceApp,
 } from "./index.js";
@@ -58,5 +72,41 @@ describe("control-plane パッケージ", () => {
     expect(BUNDLE_DECLARATION_PATH).toBe("artifacts/app.spec.yaml");
     expect(typeof publishBundle).toBe("function");
     expect(typeof compareBundleManifestToPins).toBe("function");
+  });
+
+  it("identity の 4 表の名前と読み書きを公開する（#259）", () => {
+    expect([USERS_TABLE, COMMUNITIES_TABLE, COMMUNITY_MEMBERSHIPS_TABLE, INSTANCE_OWNERS_TABLE]).toEqual([
+      "users",
+      "communities",
+      "community_memberships",
+      "instance_owners",
+    ]);
+    for (const fn of [
+      registerLogin,
+      getUser,
+      getUserByGoogleSubject,
+      getCommunity,
+      listUserCommunities,
+      listCommunityMembers,
+      registerInstanceOwner,
+      listCommunityInstances,
+    ]) {
+      expect(typeof fn).toBe("function");
+    }
+  });
+
+  it("identity の失敗はコードで分ける（RegistryError と分ける。publish の網羅表を動かさないため）", () => {
+    expect(IDENTITY_ERROR_CODES).toEqual([
+      "community_not_found",
+      "instance_not_found",
+      "owner_conflict",
+      "login_not_registered",
+    ]);
+
+    const error = new IdentityError("community_not_found", "未登録の Community を指すインスタンスは持たせられない");
+    expect(error).toBeInstanceOf(Error);
+    expect(error.name).toBe("IdentityError");
+    expect(error.code).toBe("community_not_found");
+    expect(error.message).toBe("未登録の Community を指すインスタンスは持たせられない");
   });
 });
