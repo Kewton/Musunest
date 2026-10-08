@@ -1260,3 +1260,60 @@ describe("順位の部品（ranking）と応答の欄 ranking", () => {
     }
   });
 });
+
+// ── 自分のアプリの一覧（M2.1。Issue #260） ──────────────────────────────
+//
+// 画面（host）がホームで自分のアプリを並べる材料である。**識別ヘッダは SDK が付けない**——
+// ログインした利用者は gateway が見分けて中継のときに付ける（Issue #263）。SDK は同じ origin の
+// `/api/me/instances` を叩くだけである。**失敗を成功にしない**のはここでも同じである。
+
+describe("自分のアプリの一覧（M2.1）", () => {
+  const INSTANCES = { instances: [{ instanceId: "inst-1" }, { instanceId: "inst-2" }] };
+
+  it("GET /api/me/instances を叩き、成功の型で返る", async () => {
+    const stub = recordingFetch(() => json(200, INSTANCES));
+    const result = await clientWith(stub.fetch).listMyInstances();
+
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]?.url).toBe(`${BASE}/api/me/instances`);
+    expect(stub.calls[0]?.init.method).toBe("GET");
+    expect(stub.calls[0]?.init.body).toBeUndefined();
+    expect(result).toEqual({ ok: true, value: INSTANCES });
+  });
+
+  it("401 UNAUTHENTICATED を status ごと保つ（成功にしない）", async () => {
+    const stub = recordingFetch(() => json(401, { error: "UNAUTHENTICATED" }));
+    const result = await clientWith(stub.fetch).listMyInstances();
+
+    expect(result).toEqual({
+      ok: false,
+      error: { status: 401, code: "UNAUTHENTICATED", fields: [], validations: [] },
+    });
+  });
+
+  it("契約と違う形の 200 は INVALID_RESPONSE（キャストしない）", async () => {
+    for (const body of [{ instances: [{ id: "inst-1" }] }, { instances: "inst-1" }, { hello: "world" }]) {
+      const stub = recordingFetch(() => json(200, body));
+      expect(await clientWith(stub.fetch).listMyInstances(), JSON.stringify(body)).toMatchObject({
+        ok: false,
+        error: { status: 200, code: INVALID_RESPONSE },
+      });
+    }
+  });
+
+  it("JSON でない 200（HTML）は INVALID_RESPONSE", async () => {
+    const stub = recordingFetch(() => raw(200, "<!DOCTYPE html><html></html>"));
+    expect(await clientWith(stub.fetch).listMyInstances()).toEqual({
+      ok: false,
+      error: { status: 200, code: INVALID_RESPONSE, fields: [], validations: [] },
+    });
+  });
+
+  it("空の並びは成功である（「アプリが無い」は失敗ではない）", async () => {
+    const stub = recordingFetch(() => json(200, { instances: [] }));
+    expect(await clientWith(stub.fetch).listMyInstances()).toEqual({
+      ok: true,
+      value: { instances: [] },
+    });
+  });
+});
