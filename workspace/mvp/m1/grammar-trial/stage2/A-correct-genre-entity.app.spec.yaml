@@ -1,0 +1,94 @@
+# A の別解 3：種類を enum ではなく entity にする（選択肢を画面から登録する）。要件の「料理／飲み物／道具」は固定の 3 つなので、厳密には要件からずれる
+entities:
+  - name: genre
+    fields:
+      title:
+        type: string
+        label: 種類
+  - name: member
+    fields:
+      name:
+        type: string
+        label: 名前
+  - name: item
+    fields:
+      title:
+        type: string
+        label: 持ち物
+      category:
+        type: ref
+        to: genre
+        label: 種類
+      bringer:
+        type: ref
+        to: member
+        label: 持ってくる人
+      quantity:
+        type: number
+        label: 数
+      status:
+        type: enum
+        label: 準備
+        options:
+          notyet: まだ
+          ready: 用意できた
+        default: notyet
+computed:
+  - name: itemCount
+    entity: member
+    aggregate:
+      count: item
+      where:
+        bringer: this
+    type: number
+    label: 担当の数
+views:
+  - name: board
+    type: board
+    entity: item
+    columns: status
+  - name: items
+    type: list
+    entity: item
+    show: [title, category, bringer, quantity, status]
+    filters: [category, bringer]
+  - name: genres
+    type: table
+    entity: genre
+    show: [title]
+  - name: members
+    type: table
+    entity: member
+    show: [name, itemCount]
+actions:
+  - name: addGenre
+    entity: genre
+  - name: addMember
+    entity: member
+  - name: addItem
+    entity: item
+    kind: create
+  - name: editItem
+    entity: item
+    kind: update
+  - name: markReady
+    entity: item
+    kind: update
+    set:
+      status: ready
+    when: status == "notyet"
+  - name: deleteItem
+    entity: item
+    kind: delete
+validations:
+  - name: positiveQuantity
+    entity: item
+    expression: quantity >= 1
+    message: 数は 1 以上にしてください
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

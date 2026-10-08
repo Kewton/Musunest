@@ -1,0 +1,91 @@
+# B の静的には通るが要件を破る例 1：「少ない順」を ranking（降順）で書いてしまう
+entities:
+  - name: member
+    fields:
+      name:
+        type: string
+        label: 名前
+  - name: duty
+    fields:
+      date:
+        type: date
+        label: 日付
+      kind:
+        type: enum
+        label: 当番
+        options:
+          garbage: ゴミ出し
+          cleaning: 公園の掃除
+          patrol: 夜回り
+      assignee:
+        type: ref
+        to: member
+        label: 担当
+      status:
+        type: enum
+        label: 状態
+        options:
+          planned: 予定
+          done: 済み
+        default: planned
+computed:
+  - name: isToday
+    entity: duty
+    type: boolean
+    label: 今日の当番
+    expression: date == today()
+  - name: dutyCount
+    entity: member
+    aggregate:
+      count: duty
+      where:
+        assignee: this
+    type: number
+    label: 当番の回数
+views:
+  - name: dashboard
+    type: dashboard
+    widgets:
+      - type: ranking
+        name: fewestDuties
+        label: 当番の少ない人
+        entity: member
+        by: dutyCount
+        show: [name, dutyCount]
+  - name: board
+    type: board
+    entity: duty
+    columns: status
+    highlight: isToday
+  - name: duties
+    type: list
+    entity: duty
+    show: [date, kind, assignee, status]
+    filters: [kind, assignee]
+  - name: members
+    type: table
+    entity: member
+    show: [name, dutyCount]
+actions:
+  - name: addMember
+    entity: member
+  - name: addDuty
+    entity: duty
+    kind: create
+  - name: finish
+    entity: duty
+    kind: update
+    set:
+      status: done
+    when: status == "planned"
+  - name: deleteDuty
+    entity: duty
+    kind: delete
+validations: []
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous
