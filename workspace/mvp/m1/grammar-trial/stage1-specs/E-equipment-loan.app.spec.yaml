@@ -1,0 +1,90 @@
+# E：共用品の貸し出し（P9・P10 の人の実現例）
+entities:
+  - name: member
+    fields:
+      name:
+        type: string
+        label: 名前
+  - name: equipment
+    fields:
+      title:
+        type: string
+        label: 備品
+  - name: loan
+    fields:
+      equipment:
+        type: ref
+        to: equipment
+        label: 備品
+      borrower:
+        type: ref
+        to: member
+        label: 借りた人
+      dueOn:
+        type: date
+        label: 返す日
+      status:
+        type: enum
+        label: 状態
+        options:
+          lent: 貸出中
+          returned: 返却済み
+        default: lent
+computed:
+  - name: overdue
+    entity: loan
+    type: boolean
+    label: 期限切れ
+    expression: dueOn < today()
+  - name: loanCount
+    entity: equipment
+    aggregate:
+      count: loan
+      where:
+        equipment: this
+    type: number
+    label: 貸した回数
+  - name: borrowCount
+    entity: member
+    aggregate:
+      count: loan
+      where:
+        borrower: this
+    type: number
+    label: 借りた回数
+views:
+  - name: board
+    type: board
+    entity: loan
+    columns: status
+    highlight: overdue
+  - name: equipments
+    type: table
+    entity: equipment
+    show: [title, loanCount]
+  - name: members
+    type: table
+    entity: member
+    show: [name, borrowCount]
+actions:
+  - name: addMember
+    entity: member
+  - name: addEquipment
+    entity: equipment
+  - name: lend
+    entity: loan
+    kind: create
+  - name: giveBack
+    entity: loan
+    kind: update
+    set:
+      status: returned
+    when: status == "lent"
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+validations: []
+minIdentity:
+  mode: anonymous
