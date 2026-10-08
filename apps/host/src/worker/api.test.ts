@@ -8,11 +8,18 @@
 //   2. dev / staging では、method・path・query・ヘッダ・body がそのまま下流へ届く
 //   3. 下流の応答は status・content-type・body ごと保たれる（422 を 200 の SPA HTML に化けさせない）
 //   4. 中継そのものの失敗は非 2xx になり、内部 origin も資格情報も応答に載らない
+//
+// M2.1（Issue #264）でログインの経路（/auth/*）の中継が加わった。**/api/* と違って vars.ENVIRONMENT で
+// 閉じない**——ログインは production でも要る。gateway の認証（apps/gateway/src/auth.ts）の応答をそのまま
+// 返し、中継そのものが失敗したときだけ同じ固定の非 2xx を返す。ここではその判定と作法を見る。
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   API_PREFIX,
+  AUTH_PREFIX,
   handleApi,
+  handleAuth,
   isApiPath,
+  isAuthPath,
   RELAY_ENVIRONMENTS,
   RELAY_FAILURE_BODY,
   RELAY_FAILURE_STATUS,
@@ -74,6 +81,28 @@ describe("isApiPath（中継する経路）", () => {
 
   it("接頭辞は /api（wrangler.jsonc の assets.run_worker_first と同じ範囲）", () => {
     expect(API_PREFIX).toBe("/api");
+  });
+});
+
+describe("isAuthPath（ログインの経路。M2.1。Issue #264）", () => {
+  it.each([
+    ["/auth", true],
+    ["/auth/", true],
+    ["/auth/login", true],
+    ["/auth/callback", true],
+    ["/auth/logout", true],
+    // 範囲だけを見る。未知の /auth/... をどうするかは gateway が決める（そこへ中継する）
+    ["/auth/login/extra", true],
+    ["/authentic", false],
+    ["/api/me/instances", false],
+    ["/healthz", false],
+    ["/", false],
+  ])("%s は %s", (path, expected) => {
+    expect(isAuthPath(path)).toBe(expected);
+  });
+
+  it("接頭辞は /auth（wrangler.jsonc の assets.run_worker_first に入れる。gateway の認証の範囲）", () => {
+    expect(AUTH_PREFIX).toBe("/auth");
   });
 });
 
@@ -268,5 +297,72 @@ describe("中継そのものの失敗（下流に届かない）", () => {
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "not found" });
     expect(gateway.calls).toEqual([]);
+  });
+});
+
+describe("ログインの経路（/auth/* を gateway へ中継する。M2.1。Issue #264）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("GET の path と query をそのまま下流へ渡す（ENVIRONMENT を見ない＝production でもログインできる）", async () => {
+    const gateway = recorder(
+      () => new Response(null, { status: 302, headers: { location: "https://accounts.google.com/o/oauth2/v2/auth" } }),
+    );
+    const res = await handleAuth(apiRequest("/auth/login?prompt=select_account"), gateway);
+
+    expect(gateway.calls).toHaveLength(1);
+    const sent = sentTo(gateway.calls);
+    const url = new URL(sent.url);
+    expect(url.origin).toBe(HOST_ORIGIN);
+    expect(url.pathname).toBe("/auth/login");
+    expect(url.search).toBe("?prompt=select_account");
+    expect(sent.method).toBe("GET");
+    expect(res.status).toBe(302);
+  });
+
+  it("下流の応答（302 の Location と Set-Cookie）をそのまま返す", async () => {
+    const gateway = recorder(
+      () =>
+        new Response(null, {
+          status: 302,
+          headers: {
+            location: "/",
+            "set-cookie": "musunest_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+          },
+        }),
+    );
+    const res = await handleAuth(apiRequest("/auth/logout"), gateway);
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/");
+    expect(res.headers.get("set-cookie")).toContain("musunest_session=");
+  });
+
+  it("GET 以外の method も、判定せずにそのまま下流へ渡す（405 を返すのは gateway）", async () => {
+    const gateway = recorder(() => Response.json({ error: "method not allowed" }, { status: 405, headers: { allow: "GET" } }));
+    const res = await handleAuth(apiRequest("/auth/logout", { method: "POST" }), gateway);
+
+    expect(gateway.calls).toHaveLength(1);
+    expect(sentTo(gateway.calls).method).toBe("POST");
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toBe("GET");
+  });
+
+  it("中継そのものが失敗したら非 2xx になり、内部 origin も資格情報も応答に載らない", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const leaked = new TypeError("fetch failed: https://gateway.internal/auth/login (token=probe-token-value)");
+    const res = await handleAuth(apiRequest("/auth/login"), () => Promise.reject(leaked));
+
+    expect(res.status).toBe(RELAY_FAILURE_STATUS);
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.headers.get("content-type")).toMatch(/^application\/json/);
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual(RELAY_FAILURE_BODY);
+    for (const leakedText of ["gateway.internal", "probe-token-value", "fetch failed", "TypeError"]) {
+      expect(text).not.toContain(leakedText);
+    }
+    // 詳細は Workers のログにだけ出す（応答はインターネットへ出る）
+    expect(error).toHaveBeenCalledWith("[host] auth: gateway relay failed", leaked);
   });
 });
