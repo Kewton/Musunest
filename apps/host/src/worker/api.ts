@@ -18,6 +18,12 @@
 // gateway 側（apps/gateway/src/api.ts）と同じ形を書き写している——host は gateway を import できない
 // （infra/scripts/dep-graph.mjs で host が持てる依存は @musunest/sdk だけ）。食い違えば
 // src/worker/index.test.ts の実機（host → gateway → data-api）が落ちる。
+//
+// M2.1（Issue #264）で、**ログインの経路（/auth/*）の中継**を足した。gateway の認証は `/api` の外にあるが
+// （apps/gateway/src/auth.ts）、run_worker_first に入れて Worker が先に受ける——そうしないと SPA シェルが
+// 返り、Google の認可画面へ送れない。**/api/* と違い vars.ENVIRONMENT で閉じない**（ログインは production
+// でも要る。閉じるのは gateway が client_id の有無で行う）。作法——下流の応答をそのまま返し、中継そのものが
+// 失敗したときだけ内部 origin も資格情報も含まない固定の非 2xx を返す——は /api/* と同じである。
 
 /**
  * 中継する経路の接頭辞。**wrangler.jsonc の assets.run_worker_first と同じ範囲**にする
@@ -60,6 +66,26 @@ export function relaysApi(environment: string | undefined): boolean {
   return environment !== undefined && (RELAY_ENVIRONMENTS as readonly string[]).includes(environment);
 }
 
+// ── ログインの経路（/auth/*。M2.1。Issue #264）────────────────────────────
+//
+// gateway の Google OIDC のログイン・コールバック・ログアウトは **`/api` の外**にある
+// （apps/gateway/src/auth.ts の /auth/login・/auth/callback・/auth/logout）。host はこれを SPA シェルに
+// 落とさず gateway へ中継する——落とすと、Google の認可画面へ送れない。**env では閉じない**。
+
+/**
+ * ログインの経路の接頭辞。**wrangler.jsonc の assets.run_worker_first に入れる**——
+ * そうしないと Static Assets が SPA シェルを返す（/api/* と同じ理由である）。
+ */
+export const AUTH_PREFIX = "/auth" as const;
+
+/**
+ * ログインの経路か。**範囲だけを見る**——`/auth` の下は gateway（apps/gateway/src/auth.ts の `isAuthPath`）が
+ * 判定する（host は範囲をそのまま中継すればよい。gateway が未知の `/auth/...` を 404 にする）。
+ */
+export function isAuthPath(pathname: string): boolean {
+  return pathname === AUTH_PREFIX || pathname.startsWith(`${AUTH_PREFIX}/`);
+}
+
 /**
  * /api/* の入口。**中継してよい env でだけ**下流を呼ぶ。それ以外は下流を一度も呼ばずに 404 を返す
  * （healthz の詳細非公開と同じ「閉じる側」の倒し方で、SPA シェルの HTML も返さない）。
@@ -77,6 +103,22 @@ export async function handleApi(
   } catch (error) {
     // 詳細は Workers のログにだけ出す（observability.enabled。公開されない）。応答は外へ出る
     console.error("[host] api: gateway relay failed", error);
+    return json(RELAY_FAILURE_BODY, RELAY_FAILURE_STATUS);
+  }
+}
+
+/**
+ * /auth/* の入口。**vars.ENVIRONMENT では閉じない**——ログインは dev / staging / production のどこでも要る
+ * （production でも、自分のアプリを見るためにログインする。Issue #264 の決定）。識別も検査もしない——
+ * 経路の範囲だけを見て、あとは gateway に任せる（Google の client_id が無ければ gateway が 503 で閉じる）。
+ * 下流の応答（302 の Location・Set-Cookie など）はそのまま返す。中継そのものが失敗したときだけ、
+ * /api/* と同じ固定の非 2xx を返す（内部 origin も資格情報も載せない）。
+ */
+export async function handleAuth(request: Request, gateway: GatewayRelay): Promise<Response> {
+  try {
+    return await gateway(request);
+  } catch (error) {
+    console.error("[host] auth: gateway relay failed", error);
     return json(RELAY_FAILURE_BODY, RELAY_FAILURE_STATUS);
   }
 }

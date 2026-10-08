@@ -1,6 +1,7 @@
 {
   // PWA Host Shell。**SSR にしない**（CLAUDE.md「小さく保つ」・03 §2・06 §4.1）。
-  //   ページは Static Assets（SPAシェル）が返し、Worker を起動しない。Worker が見るのは run_worker_first の2つだけ。
+  //   ページは Static Assets（SPAシェル）が返し、Worker を起動しない。Worker が見るのは run_worker_first の3つだけ
+  //   （/api/*・/auth/*・/healthz）。
   //   持つ binding は gateway への Service Binding（GATEWAY）だけ。**D1 / R2 / DO を直接触らない**（CLAUDE.md 不変条件）。
   //
   // ── infra:sync の同期先である（正本：infra/scripts/sync-bindings.ts 冒頭）──────────
@@ -51,9 +52,14 @@
   //   directory            … 書かない。vite-plugin がクライアントビルドの出力（dist/client）を入れる
   //   not_found_handling   … アセットに無いナビゲーションは index.html（SPAシェル）を返す。Worker を起動しない
   //   run_worker_first     … **ここに書いたパスだけ** Worker が先に受ける。それ以外のページロードは 100k req/日 を消費しない
+  //     /api/*   … gateway へ中継（dev / staging。production は下流を呼ばず 404。Issue #103）
+  //     /auth/*  … gateway の Google OIDC のログイン・コールバック・ログアウト（/auth/login など）へ中継する
+  //                （M2.1。Issue #264）。**SPAシェルに落とさない**——落とすと Google の認可画面へ送れない。
+  //                /api/* と違い env で閉じない（production でもログインして自分のアプリを見る）
+  //     /healthz … 貫通スモーク（03 §5）
   "assets": {
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/healthz"]
+    "run_worker_first": ["/api/*", "/auth/*", "/healthz"]
   },
 
   "env": {
