@@ -12,6 +12,7 @@
 // wrangler / vitest は devDependencies に無い。ルートの package.json に集約してある（app-do と同じ）。
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestHarness, unstable_readConfig } from "wrangler";
+import { IDENTITY_HEADER, IDENTITY_LOGIN_PATH, apiMyInstancesPath } from "@musunest/appspec-schema";
 import { sampleScenarioFile, sampleSpecFile } from "@musunest/appspec-schema/files";
 import { normalizeSpec } from "@musunest/spec-engine";
 import type { DataApiEnv } from "./cloudflare.js";
@@ -245,6 +246,28 @@ const sqlFiles = () =>
     .filter((name) => name.endsWith(".sql"))
     .sort();
 
+/**
+ * control-plane のマイグレーションの現物を、テスト中の D1 にそのまま当てる（このハーネスの D1 は
+ * テスト専用の隔離されたもの）。D1 の exec はコメントだけの行を文として数えないので注釈を落とし、
+ * 複数行の CREATE TABLE は通らないので `;` で切り分けて batch（1 トランザクション）に渡す。
+ */
+async function applyControlMigrations(env: DataApiEnv): Promise<void> {
+  for (const name of sqlFiles()) {
+    const text = node.readFileSync(`${decodeURIComponent(CONTROL_PLANE_MIGRATIONS_DIR.pathname)}${name}`, "utf8");
+    const statements = text
+      .split("\n")
+      .filter((line) => line.trim() !== "" && !line.trimStart().startsWith("--"))
+      .join("\n");
+    await env.CONTROL_DB.batch(
+      statements
+        .split(";")
+        .map((statement) => statement.trim())
+        .filter((statement) => statement !== "")
+        .map((statement) => env.CONTROL_DB.prepare(statement)),
+    );
+  }
+}
+
 describe("D1 マイグレーション（packages/control-plane/migrations）", () => {
   let persistTo = "";
 
@@ -450,27 +473,7 @@ describe("アプリの経路（env.dev・workerd 上の実機）", () => {
     await server.listen();
 
     const env = await bindings();
-    // 表はマイグレーションの現物をそのまま当てる（このハーネスの D1 はテスト専用の隔離されたもの）。
-    // D1 の exec はコメントだけの行を文として数えないので、注釈を落としてから渡す
-    for (const name of sqlFiles()) {
-      const text = node.readFileSync(
-        `${decodeURIComponent(CONTROL_PLANE_MIGRATIONS_DIR.pathname)}${name}`,
-        "utf8",
-      );
-      const statements = text
-        .split("\n")
-        .filter((line) => line.trim() !== "" && !line.trimStart().startsWith("--"))
-        .join("\n");
-      // D1 の exec は 1 行 1 文として読むので、複数行の CREATE TABLE は通らない。
-      // `;` で切り分けて batch に渡す（1 トランザクションで当てる）
-      await env.CONTROL_DB.batch(
-        statements
-          .split(";")
-          .map((statement) => statement.trim())
-          .filter((statement) => statement !== "")
-          .map((statement) => env.CONTROL_DB.prepare(statement)),
-      );
-    }
+    await applyControlMigrations(env);
     for (const seed of SEEDED) {
       await env.CONTROL_DB.prepare(
         "INSERT OR REPLACE INTO apps (source_sha256, schema_version, source_key, normalized_key) VALUES (?, ?, ?, ?)",
@@ -788,7 +791,7 @@ describe("境界（公開する型に Worker 本体を含めない）", () => {
   const source = (name: string): string =>
     node.readFileSync(decodeURIComponent(new URL(`./${name}`, HERE).pathname), "utf8");
 
-  const PUBLIC_SOURCES = ["contract.ts", "app-api.ts"] as const;
+  const PUBLIC_SOURCES = ["contract.ts", "app-api.ts", "identity.ts"] as const;
 
   /** 公開面が import してはいけないもの。**型としてでも駄目**（binding の型が漏れる入り口になる） */
   const FORBIDDEN = [
@@ -864,7 +867,115 @@ describe("境界（公開する型に Worker 本体を含めない）", () => {
       REFERENCE_IN_USE: 409,
       // 操作の条件（when）が成り立たない行への操作（M1.3）。**INPUT_REJECTED を使い回さない**
       ACTION_NOT_ALLOWED: 409,
+      // 利用者の識別が無い（M2.1。Issue #260）。**gateway を通っていない要求である**
+      UNAUTHENTICATED: 401,
     });
     expect(contracts["HEALTHZ_PATH"]).toBe("/healthz");
+  });
+});
+
+// ══ 利用者の登録と、自分のアプリの一覧（M2.1。Issue #260）══════════════════════════
+//
+// 実機（workerd・本物の D1）で、**登録の入口が `/api` の外にあること**と、**識別ヘッダが無ければ
+// 401 で、他人の Community のインスタンスを混ぜないこと**を見る。判定そのもの（D1 を読まないこと）は
+// src/identity.test.ts が差し替えた依存で見る。
+//
+// 登録の入口は gateway だけが呼ぶ（Service Binding 越し。Issue #263）ので、ここでは HTTP の作法だけを見る。
+
+describe("利用者の登録と、自分のアプリの一覧（env.dev・workerd 上の実機）", () => {
+  const server = createTestHarness({
+    workers: [{ configPath: CONFIG_PATH, env: "dev", vars: { GIT_SHA: "test-sha" } }],
+  });
+
+  const bindings = async (): Promise<DataApiEnv> => server.getWorker<DataApiEnv>().getEnv();
+
+  const login = (body: unknown) =>
+    server.fetch(IDENTITY_LOGIN_PATH, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  const list = (userId?: string) =>
+    server.fetch(apiMyInstancesPath(), {
+      headers: userId === undefined ? {} : { [IDENTITY_HEADER]: userId },
+    });
+
+  const register = async (googleSubject: string, displayName: string) => {
+    const res = await login({ googleSubject, displayName });
+    expect(res.status).toBe(200);
+    return (await res.json()) as { userId: string; communityId: string };
+  };
+
+  beforeAll(async () => {
+    await server.listen();
+    await applyControlMigrations(await bindings());
+  }, BOOT_TIMEOUT_MS);
+
+  afterAll(async () => {
+    await server.close();
+  }, BOOT_TIMEOUT_MS);
+
+  it("登録の入口は /api の外にあり、gateway の /api 中継からは届かない", async () => {
+    // gateway の中継（isApiPath）は `/api` と `/api/...` だけを運ぶ。`/api` を付けた別の経路は
+    // 登録の入口ではない（data-api も経路として読まない）
+    expect(IDENTITY_LOGIN_PATH.startsWith("/api")).toBe(false);
+    const viaApi = await server.fetch(`/api${IDENTITY_LOGIN_PATH}`, { method: "POST" });
+    expect(viaApi.status).toBe(404);
+    expect(await viaApi.json()).toEqual({ error: "NOT_FOUND" });
+  });
+
+  it("初めての登録は 200 で、同じ subject の 2 回目は同じ ID を返す（冪等）", async () => {
+    const first = await register("sub-a", "Aさん");
+    expect(typeof first.userId).toBe("string");
+    expect(typeof first.communityId).toBe("string");
+    expect(first.userId).not.toBe("");
+    const second = await register("sub-a", "Aさん");
+    expect(second).toEqual(first);
+  });
+
+  it("body が契約に合わなければ 422 で、項目名を返す（保存もしない）", async () => {
+    const res = await login({ displayName: "Aさん" });
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({
+      error: "INPUT_REJECTED",
+      fields: ["googleSubject"],
+      validations: [],
+    });
+  });
+
+  it("識別ヘッダの無い一覧は 401 UNAUTHENTICATED", async () => {
+    const res = await list();
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "UNAUTHENTICATED" });
+  });
+
+  it("利用者 A の一覧に、利用者 B の Community のインスタンスが出ない", async () => {
+    const env = await bindings();
+    const a = await register("sub-a", "Aさん");
+    const b = await register("sub-b", "Bさん");
+    for (const [instanceId, communityId] of [
+      ["issue-260-inst-a", a.communityId],
+      ["issue-260-inst-b", b.communityId],
+    ] as const) {
+      await env.CONTROL_DB.prepare(
+        "INSERT OR REPLACE INTO instance_owners (instance_id, community_id) VALUES (?, ?)",
+      )
+        .bind(instanceId, communityId)
+        .run();
+    }
+
+    const res = await list(a.userId);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { instances: readonly { instanceId: string }[] };
+    const ids = body.instances.map((entry) => entry.instanceId);
+    expect(ids).toContain("issue-260-inst-a");
+    expect(ids).not.toContain("issue-260-inst-b");
+  });
+
+  it("一覧は GET だけを受ける（POST は 405 で allow を返す）", async () => {
+    const res = await server.fetch(apiMyInstancesPath(), { method: "POST" });
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toBe("GET");
   });
 });

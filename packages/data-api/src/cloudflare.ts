@@ -14,12 +14,18 @@ import type {
   StoredRecord,
 } from "@musunest/app-do";
 import type { RegistryExecutor, SqlResult, SqlRow, SqlStatement } from "@musunest/control-plane";
-import { resolveInstanceApp } from "@musunest/control-plane";
+import {
+  listCommunityInstances,
+  listUserCommunities,
+  registerLogin,
+  resolveInstanceApp,
+} from "@musunest/control-plane";
 import type { Clock } from "@musunest/spec-engine";
 import { systemClock } from "@musunest/spec-engine";
 import type { DataApiDeps, InstanceRegistry, NormalizedSpecStore, RecordStore } from "./app-api";
 import { ProbeFailure } from "./healthz";
 import type { Probes } from "./healthz";
+import type { IdentityStore } from "./identity";
 
 /** wrangler.jsonc の env.<env> が与える binding と vars。名前は src/contract.ts の定数と一致させる。 */
 export interface DataApiEnv {
@@ -100,6 +106,19 @@ export function cloudflareRegistryExecutor(db: D1Database): RegistryExecutor {
 export function cloudflareRegistry(env: DataApiEnv): InstanceRegistry {
   const executor = cloudflareRegistryExecutor(env.CONTROL_DB);
   return { resolve: (instanceId: string) => resolveInstanceApp(executor, instanceId) };
+}
+
+/**
+ * 利用者と Community の登録（M2.1。Issue #260）。**表の定義と SQL は control-plane が持つ**
+ * （data-api に SQL を書かない。`src/identity.ts` が正本）。ここは I/O の実体だけを渡す。
+ */
+export function cloudflareIdentity(env: DataApiEnv): IdentityStore {
+  const executor = cloudflareRegistryExecutor(env.CONTROL_DB);
+  return {
+    register: (registration) => registerLogin(executor, registration),
+    listCommunities: (userId) => listUserCommunities(executor, userId),
+    listInstances: (communityId) => listCommunityInstances(executor, communityId),
+  };
 }
 
 /** 正規化した JSON（R2）。無いキーは `null` で、例外にしない（呼ぶ側が 503 にする） */

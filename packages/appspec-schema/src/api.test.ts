@@ -14,12 +14,17 @@ import {
   API_CREATED_STATUS,
   API_ERROR_CODES,
   API_ERROR_STATUS,
+  API_INSTANCES_SEGMENT,
+  API_ME_SEGMENT,
   API_PREFIX,
   API_READ_STATUS,
   API_SPEC_SEGMENT,
   API_VIEWS_SEGMENT,
+  IDENTITY_HEADER,
+  IDENTITY_LOGIN_PATH,
   apiActionPath,
   apiErrorBody,
+  apiMyInstancesPath,
   apiRouteMethod,
   apiSpecPath,
   apiViewPath,
@@ -101,6 +106,51 @@ describe("経路（api.ts）", () => {
   });
 });
 
+// ── 自分のアプリの一覧と、利用者の登録の入口（M2.1。Issue #260） ──────────
+//
+// 一覧は `/api` の中、登録の入口は `/api` の外である。**この対比が要である**——gateway の
+// 中継（`apps/gateway/src/api.ts` の `isApiPath`）は `/api` と `/api/...` だけを運ぶので、
+// 登録の入口は中継からは届かない（Issue #263）。
+
+describe("自分のアプリの一覧（M2.1）", () => {
+  it("組み立てたパスを、そのまま経路として読める（method は GET）", () => {
+    expect(apiMyInstancesPath()).toBe("/api/me/instances");
+    expect(readApiRoute(apiMyInstancesPath())).toEqual({ kind: "me" });
+    expect(apiRouteMethod({ kind: "me" })).toBe("GET");
+  });
+
+  it("末尾の `/` は同じ経路として読む", () => {
+    expect(readApiRoute("/api/me/instances/")).toEqual({ kind: "me" });
+  });
+
+  it.each([
+    ["区分だけ", "/api/me"],
+    ["深すぎる", "/api/me/instances/x"],
+    ["知らない区分", "/api/me/apps"],
+  ])("%s は経路にしない（404 になる）", (_label, pathname) => {
+    expect(readApiRoute(pathname)).toBeNull();
+  });
+
+  it("区分の名前は定数で固定する", () => {
+    expect([API_ME_SEGMENT, API_INSTANCES_SEGMENT]).toEqual(["me", "instances"]);
+  });
+});
+
+describe("利用者の登録の入口は /api の外にある（M2.1）", () => {
+  it("gateway の /api 中継（isApiPath）からは届かない——`/api` と `/api/...` の外である", () => {
+    // gateway の isApiPath と同じ判定を、依存を増やさずに書き下す（契約はこの 1 か所で見る）
+    const isApiPath = (pathname: string) => pathname === "/api" || pathname.startsWith("/api/");
+    expect(IDENTITY_LOGIN_PATH).toBe("/identity/login");
+    expect(isApiPath(IDENTITY_LOGIN_PATH)).toBe(false);
+    // /api の下に置いていないので、readApiRoute も経路にしない（インスタンスの経路と混ざらない）
+    expect(readApiRoute(IDENTITY_LOGIN_PATH)).toBeNull();
+  });
+
+  it("識別ヘッダの名前は固定する（gateway と data-api が同じ値を見る）", () => {
+    expect(IDENTITY_HEADER).toBe("X-Musunest-User");
+  });
+});
+
 describe("誤りコードと HTTP ステータス（Issue #102 の案）", () => {
   it("コードとステータスの対応は、契約の案のとおりである", () => {
     expect(API_ERROR_STATUS).toEqual({
@@ -114,6 +164,8 @@ describe("誤りコードと HTTP ステータス（Issue #102 の案）", () =>
       REFERENCE_IN_USE: 409,
       // 操作の条件（when）が成り立たない行への操作（M1.3）。**INPUT_REJECTED を使い回さない**
       ACTION_NOT_ALLOWED: 409,
+      // 利用者の識別が無い（M2.1。Issue #260）。**gateway を通っていない要求である**
+      UNAUTHENTICATED: 401,
     });
     // コードの一覧とステータスの一覧がずれない（足し忘れをここで止める）
     expect(new Set(Object.keys(API_ERROR_STATUS))).toEqual(new Set(API_ERROR_CODES));
