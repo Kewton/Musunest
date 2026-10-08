@@ -27,7 +27,7 @@ import {
   readApiRoute,
 } from "@musunest/appspec-schema";
 import type { ApiLoginRegistration, ApiRoute } from "@musunest/appspec-schema";
-import type { ApiFailure, ApiResult } from "./app-api";
+import type { ApiFailure, ApiResult, DataApiDeps, InstanceAccess } from "./app-api";
 import { createFromAction, getSpec, getView } from "./app-api";
 import { cloudflareDataApi, cloudflareIdentity, cloudflareProbes } from "./cloudflare";
 import type { DataApiEnv } from "./cloudflare";
@@ -91,6 +91,28 @@ async function readActionBody(request: Request): Promise<Readonly<Record<string,
   return value as Readonly<Record<string, unknown>>;
 }
 
+/**
+ * 利用者の Community への所属を、control-plane の登録（D1）から読む（M2.1。Issue #262）。
+ * **data-api に SQL を書かない**——表の読み取りは control-plane（`cloudflareIdentity`）が持つ。
+ * 「その利用者が属する Community のどれかが、このインスタンスを持っているか」で判定する
+ * （M2.1 は 1 人 1 Community なので、ふつうは 1 回で決まる）。
+ *
+ * **`production` のときだけ呼ばれる**（ほかの env は検査そのものを掛けないので、この実体は一度も
+ * 呼ばれない）。
+ */
+function instanceMembership(env: DataApiEnv): InstanceAccess {
+  const identity = cloudflareIdentity(env);
+  return {
+    async owns(userId, instanceId) {
+      for (const community of await identity.listCommunities(userId)) {
+        const owned = await identity.listInstances(community.communityId);
+        if (owned.some((owner) => owner.instanceId === instanceId)) return true;
+      }
+      return false;
+    },
+  };
+}
+
 async function handleApi(
   request: Request,
   env: DataApiEnv,
@@ -112,7 +134,18 @@ async function handleApi(
     }
 
     // 実時計。リクエストの値では差し替えられない（Q17）
-    const deps = cloudflareDataApi(env, route.instanceId);
+    // 所属の検査の材料（M2.1。Issue #262）。**production のときだけ** src/app-api.ts が掛ける——
+    // dev と staging は M1 のまま開けておく（決定 2026-10-08）。検査を掛けない env では
+    // `membership` の実体（D1 の読み取り）が一度も呼ばれない
+    const deps: DataApiDeps = {
+      ...cloudflareDataApi(env, route.instanceId),
+      access: {
+        environment: env.ENVIRONMENT,
+        // gateway だけが付けるヘッダ。外から届いた値は gateway が取り除いてから中継する（Issue #263）
+        userId: request.headers.get(IDENTITY_HEADER),
+        membership: instanceMembership(env),
+      },
+    };
     switch (route.kind) {
       case "spec":
         return respond(await getSpec(deps, route.instanceId));

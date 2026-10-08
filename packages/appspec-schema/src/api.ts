@@ -67,7 +67,8 @@ export const IDENTITY_LOGIN_PATH = "/identity/login" as const;
 /**
  * ログインした利用者を表すヘッダ（M2.1）。**gateway だけが付ける**——外から届いた値は
  * gateway が取り除いてから中継する（なりすましを通さない。Issue #263）。値は利用者 ID
- * （`users.user_id`）。無い要求は一覧では 401 `UNAUTHENTICATED` である。
+ * （`users.user_id`）。無い要求は 401 `UNAUTHENTICATED` である（一覧と、production のインスタンスの
+ * 3 経路。Issue #260・#262）。
  */
 export const IDENTITY_HEADER = "X-Musunest-User" as const;
 
@@ -429,10 +430,17 @@ export const API_ERROR_CODES = [
    */
   "ACTION_NOT_ALLOWED",
   /**
-   * 利用者の識別が無い（M2.1。Issue #260）。一覧の要求に `IDENTITY_HEADER` が無い**——gateway を
-   * 通っていない要求である。**D1 を読まずに**断る（誰のものかを決められないので、読む意味が無い）。
+   * 利用者の識別が無い（M2.1。Issue #260）。一覧（`/api/me/instances`）と、production の
+   * インスタンスの 3 経路に `IDENTITY_HEADER` が無い**——gateway を通っていない要求である。
+   * **D1 を読まずに**断る（誰のものかを決められないので、読む意味が無い）。
    */
   "UNAUTHENTICATED",
+  /**
+   * そのインスタンスを持つ Community に属さない利用者（M2.1。Issue #262）。識別はあるが、所属が無い。
+   * **`UNAUTHENTICATED` と分ける**——ログインの有無と、そのアプリを開けるかは別である
+   * （画面の出し方も変わる。打ち直させるのではなく、そのアプリは自分のものではないと伝える）。
+   */
+  "NOT_A_MEMBER",
 ] as const;
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
 
@@ -456,6 +464,8 @@ export const API_ERROR_STATUS = {
   ACTION_NOT_ALLOWED: 409,
   /** 利用者の識別が無い（M2.1。Issue #260）。**D1 を読まずに**断る */
   UNAUTHENTICATED: 401,
+  /** そのインスタンスを持つ Community に属さない（M2.1。Issue #262）。**`UNAUTHENTICATED` と分ける** */
+  NOT_A_MEMBER: 403,
 } as const satisfies Record<ApiErrorCode, number>;
 
 /**

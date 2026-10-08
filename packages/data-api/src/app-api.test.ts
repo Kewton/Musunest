@@ -34,6 +34,7 @@ import { fixedClock, normalizeSpec } from "@musunest/spec-engine";
 import type {
   ApiActionBody,
   DataApiDeps,
+  InstanceAccess,
   InstanceRegistry,
   NormalizedSpecStore,
   RecordStore,
@@ -144,12 +145,15 @@ function missingReferences(
 /** DO の代わり。**保存だけ**を受け持ち、判定は持たない（app-do と同じ分担） */
 class FakeRecordStore implements RecordStore {
   readonly rows: StoredRecord[] = [];
+  /** 呼ばれた操作の記録（M2.1。所属の検査が DO を呼ばないことを確かめる） */
+  readonly calls: string[] = [];
   async create(
     entity: string,
     data: RecordData,
     stamp: RecordStamp,
     expectations: readonly ReferenceExpectation[],
   ): Promise<GuardedCreate> {
+    this.calls.push("create");
     // **確かめることと書くことを 1 つの呼出で行う**（実機の DO と同じ約束）
     const fields = missingReferences(this.rows, data, expectations);
     if (fields.length > 0) return { ok: false, reason: "REFERENCE_NOT_FOUND", fields };
@@ -166,9 +170,11 @@ class FakeRecordStore implements RecordStore {
     return { ok: true, record };
   }
   async list(entity: string): Promise<StoredRecord[]> {
+    this.calls.push(`list:${entity}`);
     return this.rows.filter((record) => record.entity === entity);
   }
   async get(entity: string, id: string): Promise<StoredRecord | null> {
+    this.calls.push(`get:${entity}`);
     return this.rows.find((record) => record.entity === entity && record.id === id) ?? null;
   }
   /** ID・作成日時・登録順は保ち、更新日時だけを進める（実機の SQL と同じ） */
@@ -179,6 +185,7 @@ class FakeRecordStore implements RecordStore {
     stamp: RecordStamp,
     expectations: readonly ReferenceExpectation[],
   ): Promise<GuardedUpdate> {
+    this.calls.push("update");
     const index = this.rows.findIndex((record) => record.entity === entity && record.id === id);
     const before = this.rows[index];
     if (before === undefined) return { ok: false, reason: "NOT_FOUND" };
@@ -198,6 +205,7 @@ class FakeRecordStore implements RecordStore {
     id: string,
     guards: readonly ReferenceGuard[],
   ): Promise<GuardedDelete> {
+    this.calls.push("delete");
     const index = this.rows.findIndex((record) => record.entity === entity && record.id === id);
     if (index < 0) return { ok: false, reason: "NOT_FOUND" };
     const references = guards.flatMap((guard) => {
@@ -3110,5 +3118,118 @@ describe("dashboard の順位の部品（ranking）（M1.4。Issue #182）", () 
     expect(await dashboardView(run.deps, "activities")).not.toHaveProperty("ranking");
     const h = harness();
     expect(await listOf(h)).not.toHaveProperty("ranking");
+  });
+});
+
+// ── 所属の検査（M2.1。Issue #262） ──────────────────────────────────
+//
+// **production だけ**に掛ける（決定 2026-10-08。dev と staging は M1 のまま開けておく）。属さない
+// 利用者の宣言・一覧・操作の要求を断り、**DO を呼ばない**ことを確かめる。検査そのものはここ
+// （唯一の権限強制点）が持ち、実機（workerd）の経路は src/index.test.ts が見る。
+//
+// 断りは 2 つである——識別ヘッダが無ければ 401 `UNAUTHENTICATED`（誰のものか決められない）、
+// 属さなければ 403 `NOT_A_MEMBER`（識別はあるが、そのアプリは自分の Community のものではない）。
+// **どちらも `loadSpec` より先に走るので、登録（D1）・R2・DO を 1 つも読まない。**
+
+class FakeMembership implements InstanceAccess {
+  /** 呼ばれた順の記録。**誰に尋ねたか**をここで見る */
+  readonly calls: string[] = [];
+  owned = true;
+  async owns(userId: string, instanceId: string): Promise<boolean> {
+    this.calls.push(`${userId}:${instanceId}`);
+    return this.owned;
+  }
+}
+
+/** 所属の検査の材料を付けた依存（`environment` と `userId` を差し替える） */
+const withAccess = (
+  h: Harness,
+  membership: InstanceAccess,
+  environment: string | undefined,
+  userId: string | null,
+): DataApiDeps => ({ ...h.deps, access: { environment, userId, membership } });
+
+/** 3 経路とも断る（同じ結果になることを確かめる） */
+const THREE_ROUTES = ["spec", "view", "action"] as const;
+
+async function overThreeRoutes(
+  deps: DataApiDeps,
+): Promise<
+  readonly [
+    Awaited<ReturnType<typeof getSpec>>,
+    Awaited<ReturnType<typeof getView>>,
+    Awaited<ReturnType<typeof createFromAction>>,
+  ]
+> {
+  return [
+    await getSpec(deps, INSTANCE),
+    await getView(deps, INSTANCE, "expenseList"),
+    await createFromAction(deps, INSTANCE, "addExpense", STEPS[0]?.input ?? {}),
+  ];
+}
+
+describe("所属の検査（M2.1。Issue #262）", () => {
+  it("識別ヘッダが無ければ、3 経路とも 401 UNAUTHENTICATED で、D1 も R2 も DO も読まない", async () => {
+    const h = harness();
+    const membership = new FakeMembership();
+    const deps = withAccess(h, membership, "production", null);
+
+    for (const result of await overThreeRoutes(deps)) {
+      expect(result).toEqual({
+        ok: false,
+        failure: { error: "UNAUTHENTICATED", fields: [], validations: [] },
+      });
+    }
+    // 誰のものかを決められないので、所属は一度も尋ねない。**登録も R2 も DO も読まない**
+    expect(membership.calls).toEqual([]);
+    expect(h.specs.readKeys).toEqual([]);
+    expect(h.records.calls).toEqual([]);
+    expect(h.records.rows).toEqual([]);
+  });
+
+  it("属さない利用者の 3 経路は 403 NOT_A_MEMBER で、DO を呼ばない", async () => {
+    const h = harness();
+    const membership = new FakeMembership();
+    membership.owned = false;
+    const deps = withAccess(h, membership, "production", "user-b");
+
+    for (const result of await overThreeRoutes(deps)) {
+      expect(result).toEqual({
+        ok: false,
+        failure: { error: "NOT_A_MEMBER", fields: [], validations: [] },
+      });
+    }
+    // 所属は尋ねたが、**登録も R2 も DO も読まない**（loadSpec より先に断る）
+    expect(membership.calls).toEqual(THREE_ROUTES.map(() => `user-b:${INSTANCE}`));
+    expect(h.specs.readKeys).toEqual([]);
+    expect(h.records.calls).toEqual([]);
+    expect(h.records.rows).toEqual([]);
+  });
+
+  it("属する利用者の 3 経路は開く（production）", async () => {
+    const h = harness();
+    const membership = new FakeMembership();
+    const deps = withAccess(h, membership, "production", "user-a");
+
+    expect((await getSpec(deps, INSTANCE)).ok).toBe(true);
+    expect((await getView(deps, INSTANCE, "expenseList")).ok).toBe(true);
+    const created = await createFromAction(deps, INSTANCE, "addExpense", STEPS[0]?.input ?? {});
+    expect(created.ok).toBe(true);
+    expect(membership.calls).toEqual(THREE_ROUTES.map(() => `user-a:${INSTANCE}`));
+  });
+
+  it("production 以外（dev・staging・未設定）では検査を掛けない（M1 のまま開けておく）", async () => {
+    for (const environment of ["dev", "staging", undefined]) {
+      const h = harness();
+      const membership = new FakeMembership();
+      // 属さない・識別ヘッダも無い要求でも、production でなければ開く
+      membership.owned = false;
+      const deps = withAccess(h, membership, environment, null);
+
+      expect((await getSpec(deps, INSTANCE)).ok, String(environment)).toBe(true);
+      expect((await getView(deps, INSTANCE, "expenseList")).ok, String(environment)).toBe(true);
+      // 検査そのものを掛けないので、所属は一度も尋ねない
+      expect(membership.calls, String(environment)).toEqual([]);
+    }
   });
 });

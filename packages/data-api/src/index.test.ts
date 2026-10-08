@@ -869,6 +869,8 @@ describe("境界（公開する型に Worker 本体を含めない）", () => {
       ACTION_NOT_ALLOWED: 409,
       // 利用者の識別が無い（M2.1。Issue #260）。**gateway を通っていない要求である**
       UNAUTHENTICATED: 401,
+      // そのインスタンスを持つ Community に属さない（M2.1。Issue #262）。**UNAUTHENTICATED とは別の 403**
+      NOT_A_MEMBER: 403,
     });
     expect(contracts["HEALTHZ_PATH"]).toBe("/healthz");
   });
@@ -977,5 +979,115 @@ describe("利用者の登録と、自分のアプリの一覧（env.dev・worker
     const res = await server.fetch(apiMyInstancesPath(), { method: "POST" });
     expect(res.status).toBe(405);
     expect(res.headers.get("allow")).toBe("GET");
+  });
+});
+
+// ══ 所属の検査（M2.1。Issue #262）══════════════════════════════════════════════
+//
+// **production だけ**に掛ける（決定 2026-10-08。dev と staging は M1 のまま開けておく）。実機
+// （workerd・本物の D1）で、識別ヘッダの無い要求・属さない利用者の要求が断られることを見る。
+// **DO を呼ばない**ことを直接確かめるのは src/app-api.test.ts（差し替えた依存で、呼出の記録を見る）
+// ——ここは HTTP の作法だけを見る（#260 と同じ分担）。
+//
+// 利用者と Community は `/identity/login` で作る（表を直に INSERT しない）。
+
+/** 識別ヘッダ（`userId` が `null` なら付けない）。所属の検査（Issue #262）の要求に使う */
+const identityHeaders = (userId: string | null): Record<string, string> =>
+  userId === null ? {} : { [IDENTITY_HEADER]: userId };
+
+describe("所属の検査（env.production・workerd 上の実機）", () => {
+  const server = createTestHarness({
+    workers: [{ configPath: CONFIG_PATH, env: "production", vars: { GIT_SHA: "test-sha" } }],
+  });
+
+  const GUARD_INSTANCE = "issue-262-guard";
+
+  const bindings = async (): Promise<DataApiEnv> => server.getWorker<DataApiEnv>().getEnv();
+
+  const register = async (googleSubject: string, displayName: string) => {
+    const res = await server.fetch(IDENTITY_LOGIN_PATH, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ googleSubject, displayName }),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as { userId: string; communityId: string };
+  };
+
+  const spec = (userId: string | null) =>
+    server.fetch(apiSpecPath(GUARD_INSTANCE), { headers: identityHeaders(userId) });
+  const view = (userId: string | null) =>
+    server.fetch(apiViewPath(GUARD_INSTANCE, "expenseList"), { headers: identityHeaders(userId) });
+  const action = (userId: string | null) =>
+    server.fetch(apiActionPath(GUARD_INSTANCE, "addExpense"), {
+      method: "POST",
+      headers: identityHeaders(userId),
+      body: JSON.stringify(VALID_INPUT),
+    });
+
+  let member: { userId: string; communityId: string };
+  let outsider: { userId: string; communityId: string };
+
+  beforeAll(async () => {
+    await server.listen();
+    const env = await bindings();
+    await applyControlMigrations(env);
+
+    member = await register("issue-262-a", "Aさん");
+    outsider = await register("issue-262-b", "Bさん");
+    expect(outsider.communityId).not.toBe(member.communityId);
+
+    // インスタンスの宣言（apps / app_instances）と、正規化した JSON（R2）を置く
+    await env.CONTROL_DB.prepare(
+      "INSERT OR REPLACE INTO apps (source_sha256, schema_version, source_key, normalized_key) VALUES (?, ?, ?, ?)",
+    )
+      .bind(
+        APP_SHA,
+        expenseNormalized.app.schemaVersion,
+        `specs/${APP_SHA}/app.spec.yaml`,
+        `specs/${APP_SHA}/normalized.json`,
+      )
+      .run();
+    await env.CONTROL_DB.prepare(
+      "INSERT OR REPLACE INTO app_instances (instance_id, source_sha256) VALUES (?, ?)",
+    )
+      .bind(GUARD_INSTANCE, APP_SHA)
+      .run();
+    await env.BUNDLES.put(`specs/${APP_SHA}/normalized.json`, expenseNormalized.json);
+    // 持ち主を A の Community にする（B はこのインスタンスに属さない）
+    await env.CONTROL_DB.prepare(
+      "INSERT OR REPLACE INTO instance_owners (instance_id, community_id) VALUES (?, ?)",
+    )
+      .bind(GUARD_INSTANCE, member.communityId)
+      .run();
+  }, BOOT_TIMEOUT_MS);
+
+  afterAll(async () => {
+    await server.close();
+  }, BOOT_TIMEOUT_MS);
+
+  it("識別ヘッダの無いインスタンスの 3 経路は 401 UNAUTHENTICATED", async () => {
+    for (const res of [await spec(null), await view(null), await action(null)]) {
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "UNAUTHENTICATED" });
+    }
+  });
+
+  it("属さない利用者の 3 経路は 403 NOT_A_MEMBER で、断った操作は保存されない", async () => {
+    for (const res of [await spec(outsider.userId), await view(outsider.userId), await action(outsider.userId)]) {
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: "NOT_A_MEMBER" });
+    }
+    // 属する利用者から見ても、断った操作は 1 行も残っていない
+    const listed = await view(member.userId);
+    expect(listed.status).toBe(200);
+    const body = (await listed.json()) as { rows: readonly unknown[] };
+    expect(body.rows).toEqual([]);
+  });
+
+  it("属する利用者の 3 経路は開く（spec 200・view 200・action 201）", async () => {
+    expect((await spec(member.userId)).status).toBe(200);
+    expect((await view(member.userId)).status).toBe(200);
+    expect((await action(member.userId)).status).toBe(201);
   });
 });
