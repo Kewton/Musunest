@@ -89,6 +89,19 @@ class FakeCloudflare {
   readonly #instances = new Map<string, Record<string, unknown>>();
   /** R2 に置いたオブジェクト（キー → 本文）。GET はここから返す（#175 の差し替えが前の原本を読む） */
   readonly #objects = new Map<string, string>();
+  /** communities と instance_owners（#261。--community の持ち主の登録に使う） */
+  readonly #communities = new Map<string, Record<string, unknown>>();
+  readonly #owners = new Map<string, Record<string, unknown>>();
+
+  /** 事前に Community を 1 つ置く（CLI には Community を作る口が無いので、試験が直接置く） */
+  addCommunity(communityId: string): void {
+    this.#communities.set(communityId, {
+      community_id: communityId,
+      name: "fixture",
+      owner_user_id: "user-fixture",
+      created_at: "2026-09-16T00:00:00.000Z",
+    });
+  }
 
   handle(url: string, init?: RequestInit): Promise<Response> {
     this.calls.push({ url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : "" });
@@ -162,6 +175,31 @@ class FakeCloudflare {
           this.#instances.set(instanceId, { instance_id: instanceId, source_sha256: sha, created_at: "2026-09-16T00:00:00.000Z" });
         }
         return { results: [], success: true, meta: { changes: 0 } };
+      }
+      // 持ち主の登録（#261 の registerInstanceOwner）。Community とインスタンスのどちらも在るときだけ入る。
+      // `FROM app_instances` / `FROM communities` を含むので、下の SELECT より先に見る
+      if (sql.includes("INSERT INTO instance_owners")) {
+        const [instanceId, communityId] = params;
+        if (
+          instanceId !== undefined &&
+          communityId !== undefined &&
+          this.#communities.has(communityId) &&
+          this.#instances.has(instanceId) &&
+          !this.#owners.has(instanceId)
+        ) {
+          this.#owners.set(instanceId, { instance_id: instanceId, community_id: communityId, created_at: "2026-09-16T00:00:00.000Z" });
+        }
+        return { results: [], success: true, meta: { changes: 0 } };
+      }
+      if (sql.includes("FROM instance_owners")) {
+        const [instanceId] = params;
+        const row = instanceId === undefined ? undefined : this.#owners.get(instanceId);
+        return { results: row === undefined ? [] : [row], success: true, meta: { changes: 0 } };
+      }
+      if (sql.includes("FROM communities")) {
+        const [communityId] = params;
+        const row = communityId === undefined ? undefined : this.#communities.get(communityId);
+        return { results: row === undefined ? [] : [row], success: true, meta: { changes: 0 } };
       }
       if (sql.includes("FROM app_instances")) {
         const [instanceId] = params;
@@ -586,5 +624,75 @@ describe("純粋関数", () => {
     for (const body of [{ success: false, result: [] }, { success: true }, { success: true, result: [{ meta: {} }] }]) {
       expect(() => parseD1Results(body)).toThrow("D1 の応答の形が想定と違う");
     }
+  });
+});
+
+// ── 置いたインスタンスを Community の持ち物にする（--community・#261）────────────
+//
+//   1. --community を付けると、持ち主の登録（instance_owners）を束縛引数で出し、出力に Community を残す
+//   2. 省略すると、持ち主の登録を出さない（既存の挙動を変えない）
+//   3. 存在しない Community を指定すると、R2 にも D1 にも書かずに exit 1（置く前の確認で断る）
+//   4. --community が空・形に合わないなら、API を呼ばずに exit 1（値を出さない）
+
+describe("--community：置いたインスタンスを Community の持ち物にする（#261）", () => {
+  /** Community ID の見本（`crypto.randomUUID()` が作る形） */
+  const COMMUNITY = "c0ffee00-0000-4000-8000-000000000000";
+
+  it("--community を付けると、持ち主の登録を束縛引数で出し、出力に Community を残す", async () => {
+    const cloudflare = new FakeCloudflare();
+    cloudflare.addCommunity(COMMUNITY);
+    const run = await publish(dev(["--community", COMMUNITY]), { cloudflare });
+
+    expect(run.code, run.all).toBe(EXIT_OK);
+    // 持ち主の登録（INSERT INTO instance_owners）が、Community ID を束縛引数で渡している
+    const ownerInsert = run.calls.find((call) => call.method === "POST" && call.body.includes("INSERT INTO instance_owners"));
+    expect(ownerInsert).toBeDefined();
+    const batch = (JSON.parse(ownerInsert?.body ?? "null") as { batch: { sql: string; params: string[] }[] }).batch;
+    expect(batch[0]?.params).toEqual(["e2e-expense-log", COMMUNITY, COMMUNITY, "e2e-expense-log"]);
+    expect(batch[0]?.sql).not.toContain(COMMUNITY);
+    // 置いたインスタンスを Community の持ち物にしたことを出力に残す
+    expect(run.out.join("\n")).toContain(`インスタンス e2e-expense-log を Community ${COMMUNITY} の持ち物にした`);
+    expectNothingSecret(run);
+  });
+
+  it("省略すると、持ち主の登録を出さない（既存の挙動を変えない）", async () => {
+    const run = await publish(dev());
+    expect(run.code, run.all).toBe(EXIT_OK);
+    expect(run.calls.some((call) => call.body.includes("instance_owners"))).toBe(false);
+    expect(run.out.join("\n")).not.toContain("publish: Community");
+  });
+
+  it("存在しない Community を指定すると、R2 にも D1 にも書かずに exit 1", async () => {
+    const cloudflare = new FakeCloudflare();
+    const run = await publish(dev(["--community", COMMUNITY]), { cloudflare });
+
+    expect(run.code).toBe(EXIT_NG);
+    expect(run.err.join("\n")).toContain("段 community");
+    expect(run.err.join("\n")).toContain("置く先の Community");
+    // R2 へは 1 つも置かない
+    expect(run.calls.filter((call) => call.method === "PUT")).toEqual([]);
+    // D1 へは、Community の存在を確かめる読み取り（SELECT）しか出さない
+    const posts = run.calls.filter((call) => call.method === "POST");
+    expect(posts).toHaveLength(1);
+    const batch = (JSON.parse(posts[0]?.body ?? "null") as { batch: { sql: string }[] }).batch;
+    expect(batch.every((statement) => /^\s*SELECT\b/i.test(statement.sql))).toBe(true);
+    expectNothingSecret(run);
+  });
+
+  it("--community が空・形に合わないなら、API を呼ばずに exit 1（値を出さない）", async () => {
+    for (const bad of ["", `${URL_SENTINEL}/x`]) {
+      const run = await publish(dev(["--community", bad]));
+      expect(run.code, run.all).toBe(EXIT_NG);
+      expect(run.calls).toEqual([]);
+      expect(run.err.join("\n")).toContain("--community は");
+      expectNothingSecret(run);
+    }
+  });
+
+  it("--help は --community を説明する", async () => {
+    const run = await publish(["--help"]);
+    expect(run.code).toBe(EXIT_OK);
+    expect(run.out.join("\n")).toContain("--community");
+    expect(run.calls).toEqual([]);
   });
 });

@@ -32,6 +32,17 @@
 //   - 前の原本の SHA-256 と、後の原本の SHA-256 は結果（`replacedSourceSha256`）に残す。入口が出力に出す
 //     （**ホスト名・オリジン・バケット名・Account ID は出さない**。CLAUDE.md）
 //
+// #261 で足した決めごと（置く先の Community を指定する口。M2.1「ログインして自分のアプリが見える」）:
+//   - `request.communityId` を指定すると、置いたインスタンスを**その Community の持ち物**として登録する
+//     （登録の読み書きは src/identity.ts の registerInstanceOwner。SQL をここへ複製しない）
+//   - **指定しなければ何もしない。** どの Community の持ち物にもしない（既存の使い方の挙動を変えない）
+//   - **存在の確認は R2 へ書く前に済ませる**（getCommunity の読み取りだけ）。未登録なら R2 にも D1 にも
+//     書かずに段 `community` で断る。持ち主の登録そのものは、インスタンスを登録した後に行う
+//   - 失敗は `PublishFailure.stage` で分ける（`community` は置く前の確認、`owner` は持ち主の登録）。
+//     **identity のコード（IdentityErrorCode）は `failure.code` に載せない**——`code` は
+//     `RegistryErrorCode` のための欄であり、publish の網羅表を identity の都合で動かさないためである
+//     （src/identity.ts の註記）。持ち主の失敗は値を持たない説明（`message`）で伝える
+//
 // D1 を実際に触るのは data-api だけである（CLAUDE.md 不変条件）。ここは SQL を書かず、注入された
 // RegistryExecutor に任せる（src/contract.ts）。R2 も同じで、書き込みは注入された SpecWriter が行う。
 
@@ -39,12 +50,17 @@ import type { Diagnostic } from "@musunest/spec-engine";
 import { normalizeSpec } from "@musunest/spec-engine";
 import { FIELD_TYPES, type AppSpec, type FieldKind } from "@musunest/appspec-schema";
 import {
+  IdentityError,
   RegistryError,
   type AppInstanceRecord,
   type AppRecord,
+  type CommunityRecord,
+  type IdentityErrorCode,
+  type InstanceOwnerRecord,
   type RegistryErrorCode,
   type RegistryExecutor,
 } from "./contract.js";
+import { getCommunity, registerInstanceOwner } from "./identity.js";
 import { getApp, getInstance, registerApp, registerInstance, replaceInstance } from "./registry.js";
 
 // ── R2 のキー（原本 SHA を含む決定的な値）──────────────────────────────
@@ -97,6 +113,12 @@ export interface PublishRequest {
    * `true` でも、差し替えてよい宣言でなければ `replacement_conflict` で断る（R2 にも D1 にも書かない）。
    */
   readonly replace?: boolean;
+  /**
+   * インスタンスを置く先の Community の ID（#261）。**省略すると、どの Community の持ち物にもしない**
+   * （既存の使い方の挙動を変えない）。指定したときは、**R2 へ書く前に** Community の存在を確かめ、
+   * 置いたインスタンスをその Community の持ち物として登録する（未登録なら R2 にも D1 にも書かない）。
+   */
+  readonly communityId?: string;
 }
 
 export interface PublishDeps {
@@ -111,8 +133,12 @@ export interface PublishDeps {
   readonly readSpec?: SpecReader;
 }
 
-/** 失敗した段。検査・R2 の 1 個目・2 個目・D1 のアプリ・D1 のインスタンス。 */
-export const PUBLISH_STAGES = ["check", "source", "normalized", "app", "instance"] as const;
+/**
+ * 失敗した段。検査 → 置く先の Community の確認（#261）→ R2 の 1 個目・2 個目 →
+ * D1 のアプリ → D1 のインスタンス → D1 の持ち主（#261）。
+ * `community` と `owner` は、`request.communityId` を指定したときだけ通る段である。
+ */
+export const PUBLISH_STAGES = ["check", "community", "source", "normalized", "app", "instance", "owner"] as const;
 export type PublishStage = (typeof PUBLISH_STAGES)[number];
 
 export interface PublishFailure {
@@ -134,6 +160,11 @@ export interface PublishSuccess {
    * 入口はこれを、後の原本の SHA-256（`app.sourceSha256`）と組にして出力に残す。
    */
   readonly replacedSourceSha256: string | null;
+  /**
+   * Community を指定したときだけ、登録した持ち主の行（#261）。指定しなければ `null`
+   * （＝どの Community の持ち物にもしていない）。
+   */
+  readonly owner: InstanceOwnerRecord | null;
 }
 
 export interface PublishRejection {
@@ -147,10 +178,12 @@ export type PublishResult = PublishSuccess | PublishRejection;
 
 const MESSAGES = {
   check: "宣言が静的チェックに通らない（R2 にも D1 にも書かない）",
+  community: "置く先の Community を確かめられない（未登録か、読めなかった。R2 にも D1 にも書かない）",
   source: "原本を R2 に書けなかった（正規化した JSON も D1 の登録もしない）",
   normalized: "正規化した JSON を R2 に書けなかった（D1 の登録はしない）",
   app: "アプリを D1 に登録できなかった（インスタンスは登録しない）",
   instance: "インスタンスを D1 に登録できなかった（アプリの登録は残る。同じ入力で再実行する）",
+  owner: "インスタンスを Community の持ち物にできなかった（アプリとインスタンスの登録は残る。同じ入力で再実行する）",
 } as const satisfies Record<PublishStage, string>;
 
 const REGISTRY_MESSAGES = {
@@ -160,6 +193,17 @@ const REGISTRY_MESSAGES = {
   replacement_conflict:
     "差し替えてよい宣言ではない（項目を消す・型を変える・entity の名前を変える差し替えは断る。登録簿の行は変えない）",
 } as const satisfies Record<RegistryErrorCode, string>;
+
+/**
+ * 持ち主の登録（registerInstanceOwner）の失敗の説明。**値（Community ID・インスタンス ID・例外の文言）を
+ * 持たない**。identity のコードは `failure.code` に載せない（`code` は `RegistryErrorCode` の欄である）。
+ */
+const IDENTITY_MESSAGES = {
+  community_not_found: "指定した Community が無い（アプリとインスタンスの登録は残る）",
+  instance_not_found: "未登録のインスタンスは Community の持ち物にできない（アプリの登録は残る）",
+  owner_conflict: "既存インスタンスの持ち主は暗黙に差し替えない（元の持ち主を保つ）",
+  login_not_registered: "ログインの登録を読み戻せなかった（起きない想定）",
+} as const satisfies Record<IdentityErrorCode, string>;
 
 /** 差し替えの下調べで、断る理由。**値（SHA-256・R2 のキー・例外の文言）を持たない説明**にする。 */
 const REPLACEMENT_MESSAGES = {
@@ -180,6 +224,13 @@ const rejectRegistry = (stage: "app" | "instance", thrown: unknown): PublishReje
   thrown instanceof RegistryError
     ? reject(stage, REGISTRY_MESSAGES[thrown.code], [], thrown.code)
     : reject(stage, MESSAGES[stage]);
+
+/**
+ * 持ち主の登録の失敗（#261）。既知のコード（IdentityError）はコードごとの説明に、想定外の失敗は段の
+ * 説明にする。**identity のコードは `failure.code` に載せない**（`code` は `RegistryErrorCode` の欄）。
+ */
+const rejectIdentity = (thrown: unknown): PublishRejection =>
+  thrown instanceof IdentityError ? reject("owner", IDENTITY_MESSAGES[thrown.code]) : reject("owner", MESSAGES.owner);
 
 // ── 差し替えてよい宣言か（#175）─────────────────────────────────────
 
@@ -326,6 +377,9 @@ async function planReplacement(
  * `request.replace` が `true` のときは、既存インスタンスの参照先を**はっきり差し替える**（#175）。
  * 差し替えてよい宣言かは、前の原本の正規化した JSON と比べて決める（`isReplaceableDeclaration`）。
  *
+ * `request.communityId` を指定したときは、置いたインスタンスをその Community の持ち物として登録する（#261）。
+ * **存在の確認は R2 へ書く前に済ませる**ので、未登録の Community は何も書かずに断る。
+ *
  * 例外を外へ出さない（R2 と D1 の失敗は結果にする）。呼ぶ側（CLI）は、結果をそのまま安全に出せる。
  */
 export async function publishSpec(deps: PublishDeps, request: PublishRequest): Promise<PublishResult> {
@@ -345,27 +399,41 @@ export async function publishSpec(deps: PublishDeps, request: PublishRequest): P
   if (!plan.ok) return plan.rejection;
   const replacing = plan.replacing;
 
-  // 3. R2 の 1 個目（原本は受け取ったバイト列のまま）
+  // 3. 置く先の Community の確認（#261）。指定が無ければ何もしない（既存の使い方の挙動を変えない）。
+  //    **読み取りだけ**で、未登録なら R2 にも D1 にも書かずに断る
+  const communityId = request.communityId;
+  if (communityId !== undefined) {
+    let community: CommunityRecord | null;
+    try {
+      community = await getCommunity(deps.registry, communityId);
+    } catch {
+      // D1 の読み取りの失敗（想定外）。後ろの段を行わない。値を持たない説明にする
+      return reject("community", MESSAGES.community);
+    }
+    if (community === null) return reject("community", MESSAGES.community);
+  }
+
+  // 4. R2 の 1 個目（原本は受け取ったバイト列のまま）
   try {
     await deps.specs.write(sourceKey, request.source);
   } catch {
     return reject("source", MESSAGES.source);
   }
-  // 4. R2 の 2 個目（正規化した JSON は #98 が作ったバイト列のまま）
+  // 5. R2 の 2 個目（正規化した JSON は #98 が作ったバイト列のまま）
   try {
     await deps.specs.write(normalizedKey, normalized.json);
   } catch {
     return reject("normalized", MESSAGES.normalized);
   }
 
-  // 5. D1（アプリ → インスタンス）。R2 の 2 個が揃ってからでないと登録しない
+  // 6. D1（アプリ → インスタンス）。R2 の 2 個が揃ってからでないと登録しない
   let app: AppRecord;
   try {
     app = await registerApp(deps.registry, { sourceSha256, schemaVersion, sourceKey, normalizedKey });
   } catch (thrown) {
     return rejectRegistry("app", thrown);
   }
-  // 6. D1（インスタンス）。差し替えるときは、前の参照と一致する行だけを書き換える（compare-and-swap）
+  // 7. D1（インスタンス）。差し替えるときは、前の参照と一致する行だけを書き換える（compare-and-swap）
   let instance: AppInstanceRecord;
   try {
     instance =
@@ -375,5 +443,14 @@ export async function publishSpec(deps: PublishDeps, request: PublishRequest): P
   } catch (thrown) {
     return rejectRegistry("instance", thrown);
   }
-  return { ok: true, app, instance, replacedSourceSha256: replacing };
+  // 8. D1（持ち主。#261）。Community を指定したときだけ。インスタンスを登録した後でないと付けられない
+  let owner: InstanceOwnerRecord | null = null;
+  if (communityId !== undefined) {
+    try {
+      owner = await registerInstanceOwner(deps.registry, { instanceId: request.instanceId, communityId });
+    } catch (thrown) {
+      return rejectIdentity(thrown);
+    }
+  }
+  return { ok: true, app, instance, replacedSourceSha256: replacing, owner };
 }
