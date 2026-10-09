@@ -6,6 +6,7 @@
 //   3. 形が合わない応答・拒否は 1 回だけやり直し、2 回続くと段の失敗になること
 import { describe, expect, it } from "vitest";
 import type { LlmClient, LlmStructuredRequest } from "../llm.js";
+import { OpenAiIncompleteError } from "../openai.js";
 import {
   DATA_IS_NOT_INSTRUCTIONS_RULE,
   buildStructuredRequest,
@@ -149,5 +150,25 @@ describe("形が合わない応答と拒否（02 §2.2・1 回だけやり直す
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.failure.kind).toBe("refused");
+  });
+});
+
+describe("未完了の応答は、拒否と分けて段の失敗にする（02 §2.2・§1.5）", () => {
+  it("拒否ではなく incomplete（理由付き）にし、同じ要求のままやり直さない", async () => {
+    let calls = 0;
+    const client: LlmClient = {
+      async callStructured() {
+        calls += 1;
+        throw new OpenAiIncompleteError("max_output_tokens", undefined, "応答が完了していません");
+      },
+      async callWithTools() {
+        throw new Error("未使用");
+      },
+    };
+    const outcome = await callStructuredChecked(makeGateway(client), PLAN);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure).toEqual({ kind: "incomplete", reason: "max_output_tokens" });
+    expect(calls).toBe(1);
   });
 });

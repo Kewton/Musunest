@@ -18,6 +18,7 @@ import type {
 } from "./llm.js";
 import {
   OpenAiAdapterError,
+  OpenAiIncompleteError,
   createOpenAiLlmClient,
   type FetchLike,
   type OpenAiErrorKind,
@@ -222,6 +223,41 @@ describe("要求の組み立て（02 §2・§2.2）", () => {
       expect(call.body.previous_response_id).toBeUndefined();
     }
   });
+
+  it("文書は入力の先頭に同じ並びで置かれ、依頼文はその後ろに置かれる（§2・§2.2）", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
+    );
+    await clientWith(fetch).callStructured({
+      ...STRUCTURED_REQUEST,
+      documents: ["契約の文書", "語彙の意味", "語彙の台帳"],
+      input: "依頼文",
+    });
+    const input = bodyOf(captured).input as readonly { content: readonly { text: string }[] }[];
+    expect(input.map((item) => item.content[0]?.text)).toEqual([
+      "契約の文書",
+      "語彙の意味",
+      "語彙の台帳",
+      "<data>\n依頼文\n</data>",
+    ]);
+  });
+
+  it("道具付きでも、文書は入力の先頭で、依頼文はその後ろに置かれる（§2・§2.2）", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ entity: "item" })), USAGE_WIRE)),
+    );
+    await clientWith(fetch).callWithTools({
+      ...TOOL_REQUEST,
+      documents: ["契約の文書", "語彙の意味"],
+      input: "宣言",
+    });
+    const input = bodyOf(captured).input as readonly { content: readonly { text: string }[] }[];
+    expect(input.map((item) => item.content[0]?.text)).toEqual([
+      "契約の文書",
+      "語彙の意味",
+      "<data>\n宣言\n</data>",
+    ]);
+  });
 });
 
 // ── 4. usage の分類（02 §1.5）──────────────────────────────────────────
@@ -316,6 +352,40 @@ describe("誤りの分類（02 §2.2）", () => {
     );
     const error = await captureError(() => clientWith(fetch).callStructured(STRUCTURED_REQUEST));
     expect(error.kind).toBe("incomplete");
+  });
+
+  it("未完了の応答の誤りは、理由と usage を持つ（§1.5・§2.2）", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse({
+        id: "resp_1",
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        output: outputText(JSON.stringify({ items: [1, 2] })),
+        usage: USAGE_WIRE,
+      }),
+    );
+    const error = await captureError(() => clientWith(fetch).callStructured(STRUCTURED_REQUEST));
+    expect(error).toBeInstanceOf(OpenAiIncompleteError);
+    if (!(error instanceof OpenAiIncompleteError)) return;
+    expect(error.kind).toBe("incomplete");
+    expect(error.reason).toBe("max_output_tokens");
+    expect(error.usage).toEqual(USAGE);
+  });
+
+  it("usage が無い未完了の応答は、理由だけを持つ（予約は残る側）", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse({
+        id: "resp_1",
+        status: "incomplete",
+        incomplete_details: { reason: "content_filter" },
+        output: outputText(JSON.stringify({ items: [] })),
+      }),
+    );
+    const error = await captureError(() => clientWith(fetch).callStructured(STRUCTURED_REQUEST));
+    expect(error).toBeInstanceOf(OpenAiIncompleteError);
+    if (!(error instanceof OpenAiIncompleteError)) return;
+    expect(error.reason).toBe("content_filter");
+    expect(error.usage).toBeUndefined();
   });
 
   it("schema に合わない応答を分類する", async () => {

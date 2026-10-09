@@ -113,6 +113,8 @@ export type StageFailure =
   | { readonly kind: "malformed"; readonly attempts: number; readonly problems: readonly Problem[] }
   /** 拒否が 2 回続いた */
   | { readonly kind: "refused"; readonly attempts: number }
+  /** 応答が未完了だった（理由付き。拒否とは分ける。**同じ要求ではやり直さない**。§2.2・§1.5） */
+  | { readonly kind: "incomplete"; readonly reason: string }
   /** 形は合うが、コードの検査に合わない（やり直しても直らなかった＝未達） */
   | { readonly kind: "unmet"; readonly attempts: number; readonly problems: readonly Problem[] };
 
@@ -133,6 +135,8 @@ function mapCallFailure(result: CallFailure): StageFailure {
       return { kind: "budget", maxCostUsd: result.maxCostUsd, remainingUsd: result.remainingUsd };
     case "limitExceeded":
       return { kind: "callLimit", limit: result.limit, max: result.max, actual: result.actual };
+    case "incomplete":
+      return { kind: "incomplete", reason: result.reason };
     case "failed":
       return { kind: "refused", attempts: result.attempts };
   }
@@ -150,6 +154,7 @@ export interface StructuredPlan<T> {
 /**
  * 構造化出力を 1 つ取る。共通の口を通して呼び、**形が合わなければ 1 回だけやり直す**（§2.2）。
  * 2 回続けて形が合わなければ `malformed`、拒否（例外）が 2 回続けば `refused` を返す。
+ * **未完了の応答は拒否と分け、`incomplete`（理由付き）として返す**（共通の口がやり直さない。§2.2・§1.5）。
  * `ok` のときだけ、形の確認を通った値を返す。
  */
 export async function callStructuredChecked<T>(

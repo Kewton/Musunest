@@ -86,3 +86,86 @@ export function checkRequestText(text: string): LimitExceeded | undefined {
 export function checkDeclarationBytes(byteLength: number): LimitExceeded | undefined {
   return checkLimit("declarationBytes", byteLength);
 }
+
+// ── 段の出力の上限（effort ごと。§1.5・§2）────────────────────────
+
+/**
+ * 推論の effort の値（§2「品質優先で `high` から始める」）。
+ * 出力の上限を段ごとに決めるのに使う。**値はここ（共通の置き場所）にだけ置く**。
+ */
+export const REASONING_EFFORTS = ["low", "medium", "high"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+/** effort を指定しなかったときの既定（§2）。入口の既定（`high`）と同じ側へ倒す */
+export const DEFAULT_REASONING_EFFORT: ReasoningEffort = "high";
+
+/** LLM を呼ぶ段（出力の上限を持つ段。①〜②'・⑤a・⑥・⑥'） */
+export const OUTPUT_STAGES = [
+  "requirements", // ① 要件にする
+  "reverse-check", // ①' 逆照合
+  "design", // ② 設計する
+  "test-suite", // ②' 試験を作って固定する
+  "write", // ③ 書く
+  "correspondence", // ⑤a 対応表
+  "repair", // ⑥ 直す
+  "arbitration", // ⑥' 期待の裁定
+] as const;
+export type OutputStage = (typeof OUTPUT_STAGES)[number];
+
+/**
+ * effort ごと・段ごとの出力トークンの上限（`max_output_tokens`。§1.5・§2）。
+ *
+ * **推論のトークンもこの上限に含まれる。** 2026-10-09 の疎通の確認で、設計の段（上限 4,096）と
+ * 試験を作る段（上限 8,192）が、推論のトークンに食われて `max_output_tokens` で未完了になった。
+ * そこで `high` は、それまでの固定値（= `medium`）の **4 倍**を置く——推論の分の余白を残しつつ、
+ * モデルの出力の上限に収まる範囲で「十分大きい」側へ倒す。`medium` はそれまでの固定値、
+ * `low` はその半分（速さを優先する段の試しうち用）。
+ */
+export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage, number>> = {
+  low: {
+    requirements: 2_048,
+    "reverse-check": 1_024,
+    design: 2_048,
+    "test-suite": 4_096,
+    write: 4_096,
+    correspondence: 2_048,
+    repair: 4_096,
+    arbitration: 2_048,
+  },
+  medium: {
+    requirements: 4_096,
+    "reverse-check": 2_048,
+    design: 4_096,
+    "test-suite": 8_192,
+    write: 8_192,
+    correspondence: 4_096,
+    repair: 8_192,
+    arbitration: 4_096,
+  },
+  high: {
+    requirements: 16_384,
+    "reverse-check": 8_192,
+    design: 16_384,
+    "test-suite": 32_768,
+    write: 32_768,
+    correspondence: 16_384,
+    repair: 32_768,
+    arbitration: 16_384,
+  },
+};
+
+/** 知っている effort か（知らない値は既定へ倒す。段を止めない） */
+export function isReasoningEffort(value: string): value is ReasoningEffort {
+  return (REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
+/**
+ * 段の出力の上限（`max_output_tokens`）を、effort と段から引く（§1.5・§2）。
+ * **上限の値は `STAGE_MAX_OUTPUT_TOKENS`（この共通の置き場所）にだけ置く**——
+ * 段の側で値を書くと、effort の取り違えが「検査は通るのに店頭で切れる」ずれになる。
+ * 知らない effort は `DEFAULT_REASONING_EFFORT`（`high`）へ倒す。
+ */
+export function maxOutputTokensForEffort(effort: string, stage: OutputStage): number {
+  const key: ReasoningEffort = isReasoningEffort(effort) ? effort : DEFAULT_REASONING_EFFORT;
+  return STAGE_MAX_OUTPUT_TOKENS[key][stage];
+}

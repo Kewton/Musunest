@@ -60,9 +60,6 @@ import {
 } from "./tools.js";
 import { utf8ByteLength } from "./write.js";
 
-/** ⑥ の出力トークンの上限 */
-export const REPAIR_MAX_OUTPUT_TOKENS = 8_192;
-
 /** ⑥ に足す規則（共通の規則は先頭に付ける。§1.3・§2.2） */
 export const REPAIR_RULES: readonly string[] = [
   "あなたは、静的チェック・試験の結果・対応表の落ちを受けて、宣言（app.spec.yaml の原文）を直す役である。",
@@ -214,6 +211,8 @@ function mapGatewayFailure(result: ToolCallFailure): StageFailure {
       return { kind: "budget", maxCostUsd: result.maxCostUsd, remainingUsd: result.remainingUsd };
     case "limitExceeded":
       return { kind: "callLimit", limit: result.limit, max: result.max, actual: result.actual };
+    case "incomplete":
+      return { kind: "incomplete", reason: result.reason };
     case "failed":
       return { kind: "refused", attempts: result.attempts };
   }
@@ -232,7 +231,7 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
     documents: input.documents.map((document) => `${document.name}\n${document.text}`),
     input: buildRepairData(input).map(wrapData).join("\n"),
     tools: REPAIR_TOOLS,
-    maxOutputTokens: REPAIR_MAX_OUTPUT_TOKENS,
+    maxOutputTokens: input.gateway.maxOutputTokens("repair"),
   };
   const context: RepairToolContext = {
     list: input.list,

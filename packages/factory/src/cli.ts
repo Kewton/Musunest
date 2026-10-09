@@ -30,10 +30,10 @@ export const FACTORY_VERSION = "0.0.0" as const;
 
 /** 既定の effort（§2「品質優先で high から始める」） */
 export const DEFAULT_EFFORT = "high" as const;
-/** 既定の費用の上限（USD。C-1） */
-export const DEFAULT_BUDGET_USD = 0.1 as const;
-/** 既定の締切（ミリ秒。T-1「ジョブ全体で 5 分」） */
-export const DEFAULT_DEADLINE_MS = 5 * 60 * 1000;
+/** 既定の費用の上限（USD。C-1。2026-10-09 所有者の決定で 0.30 に広げた） */
+export const DEFAULT_BUDGET_USD = 0.3 as const;
+/** 既定の締切（ミリ秒。T-1。2026-10-09 所有者の決定で 10 分に広げた） */
+export const DEFAULT_DEADLINE_MS = 10 * 60 * 1000;
 /** 鍵を読む環境変数の名前 */
 export const API_KEY_ENV = "OPENAI_API_KEY" as const;
 
@@ -53,7 +53,7 @@ export const EXIT_USAGE = 2;
 
 /** 使い方の文（誤りを人に見せる） */
 export const USAGE =
-  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>]";
+  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>]";
 
 /** 手元の入口が受け取る引数 */
 export interface CliArguments {
@@ -61,6 +61,10 @@ export interface CliArguments {
   readonly outDir: string;
   readonly model: string;
   readonly effort: string;
+  /** 費用の上限（USD）。指定しなければ既定（`DEFAULT_BUDGET_USD`）を使う */
+  readonly budgetUsd?: number;
+  /** 締切（ミリ秒）。指定しなければ既定（`DEFAULT_DEADLINE_MS`）を使う */
+  readonly deadlineMs?: number;
 }
 
 /** 引数を読む。誤りは `error` に人の読む文を入れて返す（例外にしない） */
@@ -70,6 +74,8 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   let outDir: string | undefined;
   let model: string = DEFAULT_OPENAI_MODEL;
   let effort: string = DEFAULT_EFFORT;
+  let budgetUsd: number | undefined;
+  let deadlineMs: number | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === undefined) continue;
@@ -88,6 +94,26 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
       index += 1;
       continue;
     }
+    if (arg === "--budget") {
+      const raw = args[index + 1];
+      index += 1;
+      const value = raw === undefined ? Number.NaN : Number(raw);
+      if (!Number.isFinite(value) || value <= 0) {
+        return { error: "--budget には 0 より大きい数（USD）を指定してください" };
+      }
+      budgetUsd = value;
+      continue;
+    }
+    if (arg === "--deadline") {
+      const raw = args[index + 1];
+      index += 1;
+      const minutes = raw === undefined ? Number.NaN : Number(raw);
+      if (!Number.isFinite(minutes) || minutes <= 0) {
+        return { error: "--deadline には 0 より大きい数（分）を指定してください" };
+      }
+      deadlineMs = minutes * 60_000;
+      continue;
+    }
     if (arg.startsWith("--")) return { error: `知らない選択肢: ${arg}` };
     if (requestFile === undefined) {
       requestFile = arg;
@@ -97,7 +123,14 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   }
   if (requestFile === undefined) return { error: "依頼文のファイルを指定してください" };
   if (outDir === undefined) return { error: "--out で出力のディレクトリを指定してください" };
-  return { requestFile, outDir, model, effort };
+  return {
+    requestFile,
+    outDir,
+    model,
+    effort,
+    ...(budgetUsd === undefined ? {} : { budgetUsd }),
+    ...(deadlineMs === undefined ? {} : { deadlineMs }),
+  };
 }
 
 /** 手元の入口の依存（試験は偽物を差し込む） */
@@ -153,14 +186,16 @@ export async function runCli(deps: CliDeps): Promise<number> {
   const documents = await deps.loadDocuments();
   const client = deps.makeClient({ apiKey, model: parsed.model, effort: parsed.effort });
   const now = deps.now ?? ((): number => Date.now());
+  const budgetUsd = parsed.budgetUsd ?? deps.budgetUsd ?? DEFAULT_BUDGET_USD;
+  const deadlineMs = parsed.deadlineMs ?? deps.deadlineMs ?? DEFAULT_DEADLINE_MS;
   const run = await runGeneration({
     source,
     documents,
     client,
-    budgetUsd: deps.budgetUsd ?? DEFAULT_BUDGET_USD,
+    budgetUsd,
     rates: deps.rates ?? DEFAULT_RATES,
     now,
-    deadline: now() + (deps.deadlineMs ?? DEFAULT_DEADLINE_MS),
+    deadline: now() + deadlineMs,
     ...(deps.limits === undefined ? {} : { limits: deps.limits }),
     runId: `local-${String(now())}`,
     storageUnit: parsed.outDir,

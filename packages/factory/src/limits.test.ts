@@ -8,9 +8,13 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_LIMITS,
   LIMIT_GUARDS,
+  OUTPUT_STAGES,
+  STAGE_MAX_OUTPUT_TOKENS,
   checkDeclarationBytes,
   checkLimit,
   checkRequestText,
+  isReasoningEffort,
+  maxOutputTokensForEffort,
   type LimitName,
 } from "./limits.js";
 
@@ -61,5 +65,44 @@ describe("共通の上限（02 §1.5・§2.2）", () => {
     expect(() => checkLimit("callCount", -1)).toThrow();
     expect(() => checkLimit("callCount", 1.5)).toThrow();
     expect(() => checkLimit("callCount", Number.NaN)).toThrow();
+  });
+});
+
+// ── 段の出力の上限（effort ごと。§1.5・§2）──────────────────────
+
+describe("段の出力の上限は effort ごとに、共通の置き場所が持つ（02 §1.5・§2）", () => {
+  it("effort high の上限は、medium 以上である（段ごとに）", () => {
+    for (const stage of OUTPUT_STAGES) {
+      expect(maxOutputTokensForEffort("high", stage), stage).toBeGreaterThanOrEqual(
+        maxOutputTokensForEffort("medium", stage),
+      );
+      expect(maxOutputTokensForEffort("low", stage), stage).toBeLessThanOrEqual(
+        maxOutputTokensForEffort("medium", stage),
+      );
+    }
+  });
+
+  it("上限は、共通の置き場所（STAGE_MAX_OUTPUT_TOKENS）から取る", () => {
+    for (const stage of OUTPUT_STAGES) {
+      expect(maxOutputTokensForEffort("low", stage)).toBe(STAGE_MAX_OUTPUT_TOKENS.low[stage]);
+      expect(maxOutputTokensForEffort("medium", stage)).toBe(STAGE_MAX_OUTPUT_TOKENS.medium[stage]);
+      expect(maxOutputTokensForEffort("high", stage)).toBe(STAGE_MAX_OUTPUT_TOKENS.high[stage]);
+    }
+  });
+
+  it("high は、それまでの固定値（= medium）より十分に大きい（推論の分の余白）", () => {
+    for (const stage of OUTPUT_STAGES) {
+      expect(maxOutputTokensForEffort("high", stage), stage).toBeGreaterThan(
+        maxOutputTokensForEffort("medium", stage),
+      );
+    }
+  });
+
+  it("知らない effort は、既定（high）へ倒す（段を止めない）", () => {
+    expect(isReasoningEffort("nope")).toBe(false);
+    expect(isReasoningEffort("high")).toBe(true);
+    for (const stage of OUTPUT_STAGES) {
+      expect(maxOutputTokensForEffort("nope", stage)).toBe(maxOutputTokensForEffort("high", stage));
+    }
   });
 });

@@ -30,9 +30,6 @@ import {
 /** ②' の JSON Schema の名前 */
 export const TEST_SUITE_SCHEMA_NAME = "test-suite";
 
-/** ②' の出力トークンの上限 */
-export const TEST_SUITE_MAX_OUTPUT_TOKENS = 8_192;
-
 /** 作り直しの回数（1 回だけやり直す。§1） */
 export const TEST_SUITE_ROUNDS = 2;
 
@@ -233,7 +230,7 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
       data: buildData(input.list, previous),
       schemaName: TEST_SUITE_SCHEMA_NAME,
       schema: TEST_SUITE_SCHEMA,
-      maxOutputTokens: TEST_SUITE_MAX_OUTPUT_TOKENS,
+      maxOutputTokens: input.gateway.maxOutputTokens("test-suite"),
     });
     const answer = await callStructuredChecked(input.gateway, { request, check: checkTestSuiteOutput });
     if (!answer.ok) return answer;

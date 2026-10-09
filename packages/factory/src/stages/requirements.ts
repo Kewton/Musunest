@@ -25,9 +25,6 @@ import {
 /** ① の JSON Schema の名前 */
 export const REQUIREMENTS_SCHEMA_NAME = "requirement-list";
 
-/** ① の出力トークンの上限 */
-export const REQUIREMENTS_MAX_OUTPUT_TOKENS = 4_096;
-
 /** ① に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const REQUIREMENTS_RULES: readonly string[] = [
   "依頼文（原文）を、1 行 1 要件の一覧にする。",
@@ -190,7 +187,7 @@ export async function runRequirements(input: RequirementsInput): Promise<StageOu
     data: buildData(input),
     schemaName: REQUIREMENTS_SCHEMA_NAME,
     schema: REQUIREMENT_LIST_SCHEMA,
-    maxOutputTokens: REQUIREMENTS_MAX_OUTPUT_TOKENS,
+    maxOutputTokens: input.gateway.maxOutputTokens("requirements"),
   });
   return callStructuredChecked(input.gateway, { request, check: checkRequirementOutput });
 }

@@ -8,6 +8,7 @@
 import { HEADLESS_REQUIRED_KEYS, HEADLESS_SCHEMA_VERSION, acceptsHeadlessSummaryWire } from "@musunest/appspec-schema";
 import { describe, expect, it } from "vitest";
 import type { LlmClient, LlmUsage } from "./llm.js";
+import { OpenAiIncompleteError } from "./openai.js";
 import {
   RUN_RECORD_KEYS,
   STAGE_RECORD_KEYS,
@@ -192,5 +193,39 @@ describe("使用トークンの計（02 §1.5）", () => {
       output_tokens: 10,
       reasoning_tokens: 2,
     });
+  });
+
+  it("未完了の応答の usage も数える（拒否は usage が無いので欠けた呼び出しとして数える）", async () => {
+    const incomplete: LlmClient = {
+      callStructured: async () => {
+        throw new OpenAiIncompleteError("max_output_tokens", USAGE, "未完了");
+      },
+      callWithTools: async () => ({ kind: "done", declaration: {}, usage: undefined }),
+    };
+    const meter = new UsageMeter();
+    const wrapped = meter.wrap(incomplete);
+    await expect(wrapped.callStructured({} as never)).rejects.toBeInstanceOf(OpenAiIncompleteError);
+    expect(meter.snapshot).toEqual({
+      calls: 1,
+      missing_usage_calls: 0,
+      input_tokens: 10,
+      cached_input_tokens: 2,
+      output_tokens: 4,
+      reasoning_tokens: 1,
+    });
+  });
+
+  it("usage の無い応答は、欠けた呼び出しとして数える", async () => {
+    const missing: LlmClient = {
+      callStructured: async () => {
+        throw new OpenAiIncompleteError("max_output_tokens", undefined, "未完了");
+      },
+      callWithTools: async () => ({ kind: "done", declaration: {}, usage: undefined }),
+    };
+    const meter = new UsageMeter();
+    const wrapped = meter.wrap(missing);
+    await expect(wrapped.callStructured({} as never)).rejects.toBeInstanceOf(OpenAiIncompleteError);
+    expect(meter.snapshot.calls).toBe(1);
+    expect(meter.snapshot.missing_usage_calls).toBe(1);
   });
 });

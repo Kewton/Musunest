@@ -130,6 +130,8 @@ function stageFailureToKind(failure: StageFailure): FailureKind {
       return "malformed";
     case "refused":
       return "refused";
+    case "incomplete":
+      return "incomplete";
     case "unmet":
       return "unmet";
   }
@@ -173,6 +175,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     now: input.now,
     deadline: input.deadline,
     limits,
+    effort: input.effort,
   });
   const startedAt = input.now();
   const stages: StageRecord[] = [];

@@ -75,6 +75,27 @@ export class OpenAiAdapterError extends Error {
   }
 }
 
+/**
+ * 未完了の応答（`status` が完了でない・出力の上限で切れた。§2.2・§1.5）。
+ *
+ * 未完了でも **usage は付くことがある**——共通の口（call.ts）が、成功と同じように実際の費用で
+ * 予約を精算できるように、理由と usage を持たせる。**出力の上限で切れた応答は、同じ要求で
+ * やり直しても同じところで切れる**ので、共通の口は同じ要求のままやり直さない。
+ */
+export class OpenAiIncompleteError extends OpenAiAdapterError {
+  /** 未完了の理由（`incomplete_details.reason`。例: `max_output_tokens`）。無ければ空文字 */
+  readonly reason: string;
+  /** 未完了でも付く usage。無ければ `undefined`（共通の口が予約を残す） */
+  readonly usage: LlmUsage | undefined;
+
+  constructor(reason: string, usage: LlmUsage | undefined, message: string) {
+    super("incomplete", message);
+    this.name = "OpenAiIncompleteError";
+    this.reason = reason;
+    this.usage = usage;
+  }
+}
+
 /** adapter を作る関数の引数（Issue #284「やること」1） */
 export interface OpenAiAdapterOptions {
   /** API キー。**環境変数からは読まない**。呼ぶ側（手元の入口）が渡す */
@@ -301,7 +322,7 @@ async function callStructuredWire<T>(
 ): Promise<LlmStructuredResponse<T>> {
   const wire = await requestWire(config, buildStructuredBody(config, request), request.signal);
   const usage = parseUsage(wire.usage);
-  requireCompleted(wire);
+  requireCompleted(wire, usage);
   requireNoRefusal(wire);
   const text = extractOutputText(wire);
   if (text === undefined) throw new OpenAiAdapterError("malformed", "構造化出力の本文がありません");
@@ -317,7 +338,7 @@ async function callStructuredWire<T>(
 async function callToolsWire(config: WireConfig, request: LlmToolRequest): Promise<LlmToolResponse> {
   const wire = await requestWire(config, buildToolBody(config, request), request.signal);
   const usage = parseUsage(wire.usage);
-  requireCompleted(wire);
+  requireCompleted(wire, usage);
   requireNoRefusal(wire);
   const toolCalls = extractFunctionCalls(wire);
   if (toolCalls.length > 0) return { kind: "toolCalls", toolCalls, usage };
@@ -329,23 +350,29 @@ async function callToolsWire(config: WireConfig, request: LlmToolRequest): Promi
 }
 
 /**
- * 応答が完了していることを確かめる（§2.2）。`status` が `completed` でなければ未完了として分類する。
- * **出力が JSON として読めても、未完了なら成功にしない**（`status` を先に見る）。
+ * 応答が完了していることを確かめる（§2.2・§1.5）。`status` が `completed` でなければ未完了として
+ * 分類する。**出力が JSON として読めても、未完了なら成功にしない**（`status` を先に見る）。
+ * 未完了には、理由と（分かっていれば）usage を添える——共通の口が予約を精算できるようにする。
  */
-function requireCompleted(wire: Record<string, unknown>): void {
+function requireCompleted(wire: Record<string, unknown>, usage: LlmUsage | undefined): void {
   const status = wire.status;
   if (typeof status !== "string") {
     throw new OpenAiAdapterError("malformed", "応答に status がありません");
   }
   if (status !== "completed") {
-    const reason = incompleteReason(wire);
-    throw new OpenAiAdapterError("incomplete", `応答が完了していません（status=${status}${reason}）`);
+    const reason = incompleteReasonValue(wire);
+    throw new OpenAiIncompleteError(
+      reason,
+      usage,
+      `応答が完了していません（status=${status}${reason === "" ? "" : `, reason=${reason}`}）`,
+    );
   }
 }
 
-function incompleteReason(wire: Record<string, unknown>): string {
+/** `incomplete_details.reason` を読む（無ければ空文字） */
+function incompleteReasonValue(wire: Record<string, unknown>): string {
   const details = wire.incomplete_details;
-  if (isRecord(details) && typeof details.reason === "string") return `, reason=${details.reason}`;
+  if (isRecord(details) && typeof details.reason === "string") return details.reason;
   return "";
 }
 
