@@ -20,36 +20,21 @@
 // この経路は呼ばれない限り動かない。
 
 // ── manifest の形（v1）────────────────────────────────────────────
+//
+// 定数と型の正本は appspec-schema の納品物の入口（Issue #283。#278 で入った §3.1 の向き）。
+// ここは**公開している名前を保つために再公開するだけ**である（判定・誤りの文言は変えない）。
+
+import {
+  BUNDLE_MANIFEST_SCHEMA_VERSION,
+  type BundleManifest,
+  type BundleManifestFile,
+  type BundleManifestInstrument,
+} from "@musunest/appspec-schema";
+
+export { BUNDLE_MANIFEST_SCHEMA_VERSION, type BundleManifest, type BundleManifestFile, type BundleManifestInstrument };
 
 /** manifest のファイル名。**納品物の直下**に置かれる。 */
 export const BUNDLE_MANIFEST_FILE = "bundle-manifest.json" as const;
-
-/** 対応する manifest の版。`schema_version` がこれと違えば断る。 */
-export const BUNDLE_MANIFEST_SCHEMA_VERSION = "commandagent.community-delivery-bundle/v1" as const;
-
-/** `files` の 1 項目。納品物の直下からの相対パス（`/` 区切り）と、大きさ・SHA-256。 */
-export interface BundleManifestFile {
-  readonly path: string;
-  readonly sha256: string;
-  readonly size_bytes: number;
-}
-
-/** manifest が指す検証の道具（offline verifier のバイナリと、使った profile）。 */
-export interface BundleManifestInstrument {
-  readonly binary_sha256: string;
-  readonly verification_profile: string;
-}
-
-/** 納品物の manifest（v1）。 */
-export interface BundleManifest {
-  readonly schema_version: string;
-  readonly storage_unit: string;
-  readonly source_run: string;
-  readonly artifact_level: string;
-  readonly expected_verdict: string;
-  readonly instrument: BundleManifestInstrument;
-  readonly files: readonly BundleManifestFile[];
-}
 
 // ── 照合の結果（理由つき）─────────────────────────────────────────
 
