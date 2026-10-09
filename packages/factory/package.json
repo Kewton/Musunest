@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "プロダクト内の工場（宣言だけを作る LLM エージェント）の骨格（Issue #278）",
+  "description": "プロダクト内の工場（宣言だけを作る LLM エージェント）。段・回す部分・OpenAI の adapter・納品物・手元の入口（Issue #278・#282・#284・#285・#287・#292・#293・#294・#288）",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -16,7 +16,8 @@
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty",
     "lint": "oxlint src",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "factory:run": "node dist/cli.js"
   },
   "dependencies": {
     "@musunest/appspec-schema": "workspace:*",
