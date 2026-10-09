@@ -5,6 +5,10 @@
 // ここは、その最後の JSON の行を読んで v1 の欄を型つきで返し、Q7（`workspace/mvp/m1/00-open-questions.md` §Q7・
 // 2026-09-26 所有者）の規則で受け入れを判定する。
 //
+// 要約の wire の**版・必須の欄・型**の正本は appspec-schema の納品物の入口（Issue #283）。ここはそれらを
+// 取って**公開している名前を保つために再公開する**。**読み取りそのものはここに残す**（§3.1 の「読み取りの
+// adapter」。判定・誤りの文言も変えない）。
+//
 // **読むだけである。** パスの欄（`artifacts_dir`・`acceptance_sheet_path`・`events_path`）は読むだけで、
 // ファイルには触らない。**依存の向きを足さない**（純粋な TypeScript。CLAUDE.md「依存の向き」・Q20 が
 // 置き場所を control-plane に決めた理由）。
@@ -22,66 +26,22 @@
 //   - `provider_usage_by_role`（provider turn が無ければ空）と `pack`（pack 未選択なら省略）は
 //     additive な追加である。`pack` だけは無いことがある
 
-/** `--summary-json` が最終 stdout 行に出す JSON の `schema_version`（ピン 031ec74 の `headless_contract.version`）。 */
-export const HEADLESS_SCHEMA_VERSION = "commandagent.headless-summary/v1" as const;
-export type HeadlessSchemaVersion = typeof HEADLESS_SCHEMA_VERSION;
+import {
+  HEADLESS_OPTIONAL_KEYS,
+  HEADLESS_REQUIRED_KEYS,
+  HEADLESS_SCHEMA_VERSION,
+  type HeadlessSchemaVersion,
+  type HeadlessSummary,
+} from "@musunest/appspec-schema";
 
-/** スカラーのキーと、並びの欄（`pack` を除く、v1 で必ず存在する欄）。ピン 031ec74 の `$compatibility`。 */
-export const HEADLESS_REQUIRED_KEYS = [
-  "run_id",
-  "verdict",
-  "assurance",
-  "score",
-  "acceptance_sheet_path",
-  "artifacts_dir",
-  "events_path",
-  "duration_secs",
-  "provider_cost_usd",
-  "provider_usage_by_role",
-  "stop_class",
-  "directive_round",
-  "status",
-  "gate",
-  "stop_reason",
-  "next_action",
-  "changed_files",
-  "verify_commands",
-  "exit_code",
-] as const;
-
-/** 無いことがある欄（`pack` 未選択なら省略される。additive な追加）。 */
-export const HEADLESS_OPTIONAL_KEYS = ["pack"] as const;
-
-/**
- * v1 の要約。キーは契約の snake_case を、このリポジトリの TypeScript の作法（camelCase）に写す。
- * **無い値は `null`**（契約がそう埋める）。`pack` だけは、無いとき `null`。
- *
- * 並びの欄（`provider_usage_by_role`・`changed_files`・`verify_commands`・`pack`）の**要素の形は、
- * このピンと Issue の本文が決めていない**ので、ここでは中身を縛らない（情報を落とさない）。
- */
-export interface HeadlessSummary {
-  readonly schemaVersion: HeadlessSchemaVersion;
-  readonly runId: string | null;
-  readonly verdict: string | null;
-  readonly assurance: string | null;
-  readonly score: number | null;
-  readonly acceptanceSheetPath: string | null;
-  readonly artifactsDir: string | null;
-  readonly eventsPath: string | null;
-  readonly durationSecs: number | null;
-  readonly providerCostUsd: number | null;
-  readonly providerUsageByRole: Readonly<Record<string, unknown>>;
-  readonly stopClass: string | null;
-  readonly directiveRound: number | null;
-  readonly status: string | null;
-  readonly gate: string | null;
-  readonly stopReason: string | null;
-  readonly nextAction: string | null;
-  readonly changedFiles: readonly unknown[];
-  readonly verifyCommands: readonly unknown[];
-  readonly exitCode: number | null;
-  readonly pack: Readonly<Record<string, unknown>> | null;
-}
+// 公開している名前を保つ（control-plane からの再公開。Issue #283）。
+export {
+  HEADLESS_OPTIONAL_KEYS,
+  HEADLESS_REQUIRED_KEYS,
+  HEADLESS_SCHEMA_VERSION,
+  type HeadlessSchemaVersion,
+  type HeadlessSummary,
+};
 
 // ── 読み取り ──────────────────────────────────────────────────────
 
