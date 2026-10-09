@@ -29,12 +29,29 @@ export interface RequirementList {
   readonly unresolved: readonly string[];
 }
 
+/**
+ * ①' 逆照合で見つかった 1 つの落ち（02 §1・§1.2）。
+ *
+ * 引用の実在・位置の一致は**コードが**原文と突き合わせて見つける。覆われていない原文の文も、
+ * コードが原文を文に切り分けて見つける（会話の申告だけに頼らない）。落ちの種類を判別できる形にして、
+ * ① のやり直しに渡し、やり直しても残れば未達として持つ。
+ */
+export type ReverseCheckMiss =
+  /** 引用が原文に実在しない */
+  | { readonly kind: "quote-not-found"; readonly requirementId: string; readonly detail: string }
+  /** 引用は実在するが、位置（文字の範囲）が合わない */
+  | { readonly kind: "position-mismatch"; readonly requirementId: string; readonly detail: string }
+  /** どの要件の位置にも覆われていない原文の文 */
+  | { readonly kind: "uncovered-source"; readonly range: SourceRange; readonly detail: string };
+
 /** ①' 逆照合、の出力（原文と一覧だけを渡した別の会話＋コード） */
 export interface ReverseCheckResult {
-  /** 一覧のどれにも対応しない原文の部分 */
+  /** 一覧のどれにも対応しない原文の部分（コードが見つけた分と、会話が挙げた分） */
   readonly uncovered: readonly SourceRange[];
-  /** 引用が原文に実在したか（コードが確かめる） */
+  /** 引用が原文に実在し、位置が合ったか（コードが確かめる） */
   readonly quotesValid: boolean;
+  /** 見つかった落ち（① のやり直しと、未達の持ち越しに使う） */
+  readonly misses: readonly ReverseCheckMiss[];
 }
 
 /** ② 設計する、で要件ごとに決める語彙と置き場所 */
