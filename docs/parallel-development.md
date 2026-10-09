@@ -200,7 +200,7 @@ commandmate capture musubi --instance command-code --pane --tail 20   # 段と�
     **画面と `autoYes` を見てから**、人へ上げるかどうかを決める
 
   - 対象は**このリポジトリのセッション**（管理とワーカー）だけ。ほかのリポジトリのセッションには打たない
-  - **有効にしても、プロンプトに自分で答えることはしない。** auto-yes が拾わない種類（自由記述の質問・rate limit・破壊的な操作の確認）は、従来どおり本文を人へ見せて止まる
+  - **有効にしても、プロンプトに自分で答えることはしない。** auto-yes が拾わない種類（自由記述の質問・rate limit・破壊的な操作の確認）は、従来どおり本文を人へ見せて止まる。**ただし `Submit / Cancel` の形の質問は、自由記述を含んでいても auto-yes が `Submit` で答えてしまう**（#283。§6.5）
   - 無効化（`--disable`）は人の操作である。窓口からは戻さない
 - 人が「答えていい」と言ったときだけ `commandmate respond musubi "<番号>" --instance command-code`。**`yes` は番号に解決されない**
 
@@ -322,6 +322,8 @@ commandmate capture musubi --instance command-code --pane --tail 20   # 段と�
 | **依頼文で `commandmate sync` を一律に禁じたら、新しい worktree を登録できず止まった**（#183） | 新しい worktree は sync でしか登録できない。禁じるのではなく「sync → roster の固定 → `cliToolId` の実測」の順を書く（§6.1） |
 | **sync は、管理（`musubi` の `command-code`）の auto-yes も初期化する** | sync のあとで管理の auto-yes を確かめ、off なら `--duration 8h` で戻す。窓口も、依頼を送る前に毎回確かめる |
 | 新しいセッションは入力欄の準備が間に合わず、`dispatch` の送信が `Command Code prompt not ready` で失敗する（#201・#213・#217・#233） | `--resume` で送り直すと通る。worktree は無傷 |
+| **auto-yes が、ワーカーの自由記述の質問（`Submit / Cancel`）に `Submit` で答え、却下されるはずの提案（設計の変更）が実装され始めた**（#283。CommandMate#3497） | 依頼文に「ワーカーが質問を出したら、auto-yes が答えたかどうかとその中身を確かめ、指示と違えば止めて直させる」を書く。管理は commit の前に気づいて interrupt し、直させた |
+| **依頼文の「止めて返すとき」に運用文書の行が無く、CLAUDE.md を含む PR を管理が merge した**（#278・PR #280。#281） | **dispatch の依頼文の「止めて返すとき」に、運用文書・`.commandmate/`・`.tf` を含む PR の行を毎回書く。** Issue の `## 対象ファイル` にそれらを入れない。profile の `scope_companions` は `infra/scripts/dep-graph.mjs` が scope にあると `CLAUDE.md` を足すので、**dep-graph.mjs を対象に含む Issue の PR は人が merge する**。plan の `scope.allow` にそれらが入っていたら、dispatch の前に止める |
 | 前の回の**質問画面がセッションに残っていて**、送信が通らない（#201・#204） | **質問に答えず**、`commandmate interrupt` で古いターンを畳んでから送る |
 | 管理が Command Code の **plan のレビュー画面**（`Approve ctrl+a / Cancel esc`）を出すと、検出層も auto-yes も読めず、窓口も答えられない | 依頼文に「対話のレビュー画面を出さず、plan の要点を返信の本文に書いてターンを終える」と書く |
 | 画面が手空きに見えるのに、送信が 5 回続けて通らない | そのインスタンスだけを落とす（`commandmate instances musubi kill command-code`）。次の送信で自動起動する。**会話の記憶は失われる**ので、次の依頼文に前提を全部書く |

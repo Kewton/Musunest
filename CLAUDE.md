@@ -124,7 +124,7 @@ sdk・spec-engine・app-do・connector → appspec-schema
 
 | | やること |
 |---|---|
-| **窓口**（人・main の Claude） | Issue を切る（`cmate-issue-authoring`）／依存と粒度を決める／依頼文を組んで人に見せてから送る／`.commandmate/` 配下・`.tf`・`.gitignore`・ディレクトリの移動／**運用文書（`workspace/`・`CLAUDE.md`）を含む PR は人が読んで merge**／auto-yes で応答されない停止（rate limit・自由記述の質問）の回収／管理の報告を人へ伝える |
+| **窓口**（人・main の Claude） | Issue を切る（`cmate-issue-authoring`）／依存と粒度を決める／依頼文を組んで人に見せてから送る／`.commandmate/` 配下・`.tf`・`.gitignore`・ディレクトリの移動／**運用文書（`workspace/`・`CLAUDE.md`）を含む PR は人が読んで merge**／auto-yes で応答されない停止（rate limit・自由記述の質問）の回収（**ただし `Submit / Cancel` の形の質問は auto-yes が答えてしまうことがある**。下の auto-yes の節）／管理の報告を人へ伝える |
 | **管理**（main の Command Code） | `cmate-orchestrate` の plan → dispatch とワーカーの監督（`cmate-orchestrate-monitor`）／**ワーカーが出した PR を確認して squash merge する**／機械で判定できる受入は uat（`cmate-acceptance-test`）まで／**全部の merge が終わったら窓口へ報告する** |
 | **ワーカー**（feat/<issue> のセッション。**CLI は Command Code に固定する**） | `cmate-worker-development` に従って 1 Issue を実装し、`cmate-verify` で検証する。**緑になったら push して PR を作り、管理へ報告する**（タイトルは Conventional Commits、本文に `Closes #N` と検証の証跡）。**merge はしない** |
 
@@ -146,6 +146,7 @@ sdk・spec-engine・app-do・connector → appspec-schema
 - **スマホでのデモと振り返りは人が行う**（🧑 の Issue。マイルストーンごと。`workspace/mvp/roadmap.md` §1）。
   uat が見るのは機械で判定できる分だけである
 - **dispatch は auto-yes を基本にする**（`dispatch_defaults.auto_yes: true`）。ワーカーの yes/no と選択のプロンプトは自動で応答し、run を止めない
+  - **自由記述を含む質問でも、`Submit / Cancel` の形なら auto-yes が `Submit` で答えてしまう**（2026-10-09・#283 で実測。CommandMate#3497）。ワーカーが自分の提案を候補に入れて質問すると、その提案が承認されたことになる。**依頼文に「ワーカーが質問を出したら、auto-yes が答えたかどうかとその中身を確かめ、指示と違えば止めて直させる」を書く**
   - **窓口は、依頼を送る前に相手の `autoYes` を確認し、off なら有効にしてよい**
     （2026-09-17 所有者が決定。`cmate-delegate` §6 をこのリポジトリに限って上書きする。`docs/parallel-development.md` §5）。
     有効にしても、**プロンプトに自分で答えることはしない**
