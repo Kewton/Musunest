@@ -93,3 +93,67 @@ describe("固定する試験の型（02 §1.3・②'）", () => {
     expect(fixed.clock).toContain("+09:00");
   });
 });
+
+// ── 役割 ID・入力の契約（Issue #307）────────────────────────────
+
+describe("対象は役割 ID（roleId）でも指せる（Issue #307）", () => {
+  it("役割 ID で指した対象は、型の付いた試験として固定できる", () => {
+    const value = { ...VALID, target: { requirementId: "R-1", kind: "computation", roleId: "record.total" } };
+    const checked = checkFixedTest(value);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.test.target.roleId).toBe("record.total");
+    expect(checked.test.target.role).toBeUndefined();
+  });
+
+  it("役割も役割 ID も無ければ断る", () => {
+    const fields = problemFields({ ...VALID, target: { requirementId: "R-1", kind: "computation" } });
+    expect(fields).toContain("target.roleId");
+  });
+
+  it("役割 ID が空文字なら断る", () => {
+    const fields = problemFields({ ...VALID, target: { ...VALID.target, roleId: "" } });
+    expect(fields).toContain("target.roleId");
+  });
+});
+
+describe("入力の契約は、固定の行 ID・評価の対象の行 ID・空の集合を表せる（Issue #307）", () => {
+  const CONTRACT = { rowId: "row-1", targetRowId: "row-1", emptyEntities: ["record"] };
+
+  it("入力の契約を持つ試験は、型の付いた試験として固定できる", () => {
+    const checked = checkFixedTest({ ...VALID, inputContract: CONTRACT });
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.test.inputContract).toEqual(CONTRACT);
+  });
+
+  it("評価の対象の行 ID は null でもよい（行を評価しないとき）", () => {
+    const checked = checkFixedTest({ ...VALID, inputContract: { ...CONTRACT, targetRowId: null } });
+    expect(checked.ok).toBe(true);
+  });
+
+  it("参照の行は行 ID（rowId）を持てる", () => {
+    const referenceData = [{ rowId: "row-2", target: VALID.target, values: { amount: 10 } }];
+    const checked = checkFixedTest({ ...VALID, referenceData });
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.test.referenceData[0]?.rowId).toBe("row-2");
+  });
+
+  it("入力の契約の形が合わなければ、欄つきで断る", () => {
+    expect(problemFields({ ...VALID, inputContract: { rowId: "", targetRowId: "row-1", emptyEntities: [] } })).toContain(
+      "inputContract.rowId",
+    );
+    expect(
+      problemFields({ ...VALID, inputContract: { rowId: "row-1", targetRowId: "row-1", emptyEntities: "nope" } }),
+    ).toContain("inputContract.emptyEntities");
+    expect(
+      problemFields({ ...VALID, inputContract: { rowId: "row-1", targetRowId: "row-1", emptyEntities: [""] } }),
+    ).toContain("inputContract.emptyEntities[0]");
+  });
+
+  it("参照の行の行 ID が空文字なら断る", () => {
+    const referenceData = [{ rowId: "", target: VALID.target, values: { amount: 10 } }];
+    expect(problemFields({ ...VALID, referenceData })).toContain("referenceData[0].rowId");
+  });
+});

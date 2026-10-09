@@ -155,4 +155,28 @@ describe("すべての段の schema と道具の引数の schema が、strict �
     expect(ARBITRATION_RULES.length).toBeGreaterThan(0);
     expect(strictSchemaProblems(ARBITRATION_SCHEMA)).toEqual([]);
   });
+
+  it("設計（②）の schema は、役割 ID の表と、要件ごとの種類・確かめ方を必須にする（#307）", () => {
+    expect(strictSchemaProblems(DESIGN_SCHEMA)).toEqual([]);
+    expect(DESIGN_SCHEMA.required).toContain("roles");
+    expect(DESIGN_SCHEMA.properties.designs.items.required).toEqual(
+      expect.arrayContaining(["nature", "verification"]),
+    );
+    expect(strictSchemaProblems(DESIGN_SCHEMA.properties.roles.items)).toEqual([]);
+    expect(DESIGN_SCHEMA.properties.roles.items.required).toEqual(
+      expect.arrayContaining(["roleId", "kind", "entity", "shared", "aliasOf"]),
+    );
+  });
+
+  it("試験を作る段（②'）の schema は、分類・役割 ID・入力の契約を必須にする（#307）", () => {
+    expect(strictSchemaProblems(TEST_SUITE_SCHEMA)).toEqual([]);
+    expect(TEST_SUITE_SCHEMA.required).toEqual(expect.arrayContaining(["classifications", "tests"]));
+    const test = TEST_SUITE_SCHEMA.properties.tests.items;
+    expect(test.required).toEqual(expect.arrayContaining(["inputContract"]));
+    // 対象は自由な文の役割（role）ではなく、役割 ID（roleId）で指す
+    expect(test.properties.target.required).toEqual(expect.arrayContaining(["roleId"]));
+    expect(test.properties.target.required).not.toContain("role");
+    expect(strictSchemaProblems(test.properties.inputContract)).toEqual([]);
+    expect(test.properties.inputContract.properties.emptyEntities.type).toBe("array");
+  });
 });
