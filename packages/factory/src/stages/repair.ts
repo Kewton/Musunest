@@ -43,6 +43,7 @@ import {
   isRecord,
   mapCallErrorKind,
   serializeJson,
+  STEP_ATTEMPTS,
   type Problem,
   type PromptData,
   type PromptDocument,
@@ -69,6 +70,49 @@ export const REPAIR_RULES: readonly string[] = [
   "「この期待は誤り」と主張してよいのは、原文からの引用を添えたときだけである。引用は原文からそのまま写す。",
   "直し終えたら、応答を done にして、直した宣言（declaration）と主張（disputes）だけを返す。",
 ];
+
+/**
+ * ⑥ の最後の答え（`done` の中身）の形を決める JSON Schema の名前（構造化出力）。
+ * 全段の schema の走査（`schema-strict.test.ts`）に含める（#304）。
+ */
+export const REPAIR_ANSWER_SCHEMA_NAME = "repair-answer";
+
+/**
+ * ⑥ の最後の答え（`done` の中身）の形を決める JSON Schema（**strict**。`declaration` は文字列・
+ * `disputes` は主張の並び）。
+ *
+ * どう決めるかの根拠（Issue #304「やること 1」）：**道具と一緒に、最後の答えの形を構造化出力として
+ * 付ける**方を採る。理由は 3 つ——
+ *   1. 最後の答えは、いまも `done`（道具の呼び出しが無い応答）で受け取る。その中身の形を
+ *      strict の schema で決めれば、往復の型（`LlmToolResponse`）も応答の経路も変えずに済む
+ *   2. 提出の道具を足す案は、`done` を「誤った終わり方」に変え、道具の引数の確かめ
+ *      （checkToolArguments）と実行に提出用の分岐を足す。形の確認が 2 経路に分かれる
+ *   3. 形が合わなかったときに問題を返して 1 回だけ直させる往復（#304「やること 2」）が、
+ *      1 つの `done` の経路に閉じる
+ * 規則の文（REPAIR_RULES）で「declaration と disputes だけを返す」と頼むだけでは、モデルの最後の
+ * 文の形は決まらない。だから**機械で決まる形**（strict の schema）を要求へ付ける。
+ */
+export const REPAIR_ANSWER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["declaration", "disputes"],
+  properties: {
+    declaration: { type: "string", description: "直した宣言（app.spec.yaml の原文）" },
+    disputes: {
+      type: "array",
+      description: "「この期待は誤り」という主張の並び（原文の引用つき）",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["testId", "quote"],
+        properties: {
+          testId: { type: "string", description: "期待が誤りと主張する試験の識別子" },
+          quote: { type: "string", description: "主張の根拠にした、原文からそのまま写した引用" },
+        },
+      },
+    },
+  },
+} as const;
 
 /** ⑥ の応答を確かめた結果（直した宣言と、受け付けた／受け付けなかった主張） */
 export interface RepairAnswer {
@@ -223,10 +267,24 @@ function mapGatewayFailure(result: ToolCallFailure): StageFailure {
 }
 
 /**
+ * 最後の答えの形が合わなかったとき、**問題（欄の名前と、問題の種類）だけ**をデータとして足した入力を作る
+ * （#304「やること 2」）。値の中身（宣言の原文・依頼文）は返さない——問題の文はコードが書いたもので、
+ * 宣言や依頼文の中身を含まない。
+ */
+function shapeProblemInput(base: string, problems: readonly Problem[]): string {
+  const report = serializeJson(problems.map((problem) => ({ field: problem.field, message: problem.message })));
+  return `${base}\n${wrapData({ name: "最後の答えの形の誤り", text: report })}`;
+}
+
+/**
  * ⑥ を 1 往復ぶん回す（道具付き）。**直した宣言と主張だけ**を返す（直す役は試験と要件を変えられない）。
  *
  * 道具の呼び出しごとに、引数をコードが確かめ（形・値・宣言の大きさ）、回数の上限に照らす。合わなければ
  * 呼ばずに断る。道具の結果は往復（`turns`）へ積み、会話の状態はこちらで組み立てて毎回送る（§2）。
+ *
+ * 最後の答え（`done`）の形は、要求に付けた strict の schema（`REPAIR_ANSWER_SCHEMA`）で決まる（#304）。
+ * それでも形が合わなければ、**問題を返して 1 回だけ直させる**——`STEP_ATTEMPTS` 続けて合わなければ
+ * `malformed` として段の失敗にする。返す問題には欄の名前と種類だけを載せ、値の中身は載せない。
  */
 export async function runRepairStep(input: RepairStepInput): Promise<StageOutcome<RepairResult>> {
   const testIds = new Set(input.suite.tests.map((test) => test.id));
@@ -236,6 +294,8 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
     rules: REPAIR_RULES,
     input: buildRepairData(input).map(wrapData).join("\n"),
     tools: REPAIR_TOOLS,
+    schemaName: REPAIR_ANSWER_SCHEMA_NAME,
+    schema: REPAIR_ANSWER_SCHEMA,
     maxOutputTokens: input.gateway.maxOutputTokens("repair"),
   };
   const context: RepairToolContext = {
@@ -246,16 +306,22 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
 
   let turns: readonly LlmTurn[] = [];
   let toolCalls = 0;
+  let answerFailures = 0;
+  let answerInput = plan.input;
   while (true) {
-    const result = await input.gateway.callWithTools({ ...plan, turns });
+    const result = await input.gateway.callWithTools({ ...plan, input: answerInput, turns });
     if (result.kind !== "ok") return { ok: false, failure: mapGatewayFailure(result) };
     const response = result.value;
     if (response.kind === "done") {
       const checked = checkRepairAnswer(response.declaration, input.source, testIds);
-      if (!checked.ok) {
-        return { ok: false, failure: { kind: "malformed", attempts: 1, problems: checked.problems } };
+      if (checked.ok) return { ok: true, value: checked.value };
+      answerFailures += 1;
+      if (answerFailures >= STEP_ATTEMPTS) {
+        return { ok: false, failure: { kind: "malformed", attempts: answerFailures, problems: checked.problems } };
       }
-      return { ok: true, value: checked.value };
+      // 1 回だけ、問題を返して直させる（予算・回数・締切の上限は、呼ぶたびに共通の口が当てる）。
+      answerInput = shapeProblemInput(plan.input, checked.problems);
+      continue;
     }
 
     const budget = checkToolCallBudget(toolCalls, response.toolCalls.length);

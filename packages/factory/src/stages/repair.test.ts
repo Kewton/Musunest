@@ -26,6 +26,8 @@ import {
 import {
   checkDeclarationVersion,
   checkRepairAnswer,
+  REPAIR_ANSWER_SCHEMA,
+  REPAIR_ANSWER_SCHEMA_NAME,
   runRepairLoop,
   runRepairStep,
   type RepairStepInput,
@@ -46,6 +48,12 @@ const toolCalls = (calls: readonly { id: string; name: string; arguments: unknow
 });
 
 const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
+
+/** 最後の答えの形が合わない done（宣言が文字列でない。02 §2.2・#304） */
+const doneMalformed = {
+  kind: "tools" as const,
+  response: { kind: "done" as const, declaration: { declaration: 123 }, usage: undefined },
+};
 
 /** 抽象的な題材の宣言（`total` と `extra` の式だけを差し替える。受入の題材の言葉は使わない） */
 const declaration = (totalExpr: string, extraExpr: string): string =>
@@ -175,6 +183,14 @@ describe("直す役は試験と要件の一覧を書き換えられない（02 �
           usage: undefined,
         },
       },
+      {
+        kind: "tools",
+        response: {
+          kind: "done",
+          declaration: { declaration: V2, tests: [{ id: "t1", expected: { kind: "ok", value: 0 } }] },
+          usage: undefined,
+        },
+      },
     ]);
     const outcome = await runRepairStep({
       source: SOURCE,
@@ -188,6 +204,10 @@ describe("直す役は試験と要件の一覧を書き換えられない（02 �
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.failure.kind).toBe("malformed");
+    if (outcome.failure.kind !== "malformed") return;
+    // 1 回だけ直させる（問題を返して再試行し、2 回続けて合わなければ失敗）
+    expect(outcome.failure.attempts).toBe(2);
+    expect(outcome.failure.problems.map((problem) => problem.field)).toContain("tests");
   });
 });
 
@@ -471,7 +491,7 @@ describe("道具の引数と上限を、コードが断る（02 §2.2・§1.5）
   it("上限を超える宣言を返せば、形の誤りとして断る", async () => {
     const initial = await version(V1);
     const huge = "x".repeat(AGENT_LIMITS.declarationBytes + 1);
-    const recording = createRecordingClient([done(huge)]);
+    const recording = createRecordingClient([done(huge), done(huge)]);
     const outcome = await runRepairStep({
       source: SOURCE,
       list: LIST,
@@ -484,5 +504,65 @@ describe("道具の引数と上限を、コードが断る（02 §2.2・§1.5）
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.failure.kind).toBe("malformed");
+  });
+});
+
+// ── 最後の答えの形を決め、合わなければ 1 回だけ直させる（02 §2.2・#304）──
+
+describe("最後の答えの形を決め、合わなければ 1 回だけ直させる（02 §2.2・#304）", () => {
+  const stepWith = (recorded: Parameters<typeof createRecordingClient>[0]) => {
+    const recording = createRecordingClient(recorded);
+    return {
+      recording,
+      run: version(V1).then((current) =>
+        runRepairStep({
+          source: SOURCE,
+          list: LIST,
+          suite: SUITE,
+          current,
+          correspondences: CORRESPONDENCES,
+          documents: SAMPLE_DOCUMENTS,
+          gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+        }),
+      ),
+    };
+  };
+
+  it("⑥ の要求に、最後の答えの形を決める strict の schema（構造化出力）を付ける", async () => {
+    const { recording, run } = stepWith([done(V2)]);
+    const outcome = await run;
+    expect(outcome.ok).toBe(true);
+
+    const request = recording.tools[0];
+    expect(request?.schemaName).toBe(REPAIR_ANSWER_SCHEMA_NAME);
+    expect(request?.schema).toEqual(REPAIR_ANSWER_SCHEMA);
+  });
+
+  it("形が合わなければ、問題を返して 1 回だけ直させ、合えば通る", async () => {
+    const { recording, run } = stepWith([doneMalformed, done(V2)]);
+    const outcome = await run;
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.declaration.source).toBe(V2);
+
+    // 2 回呼び、2 回目の要求に、問題（欄の名前と種類）がデータとして足されている
+    expect(recording.tools).toHaveLength(2);
+    expect(recording.tools[0]?.input).not.toContain("最後の答えの形の誤り");
+    const second = recording.tools[1]?.input ?? "";
+    expect(second).toContain("最後の答えの形の誤り");
+    expect(second).toContain("declaration");
+    expect(second).toContain("空でない文字列");
+  });
+
+  it("2 回続けて合わなければ、段の失敗になり、問題に欄の名前と種類が入る", async () => {
+    const { recording, run } = stepWith([doneMalformed, doneMalformed]);
+    const outcome = await run;
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("malformed");
+    if (outcome.failure.kind !== "malformed") return;
+    expect(outcome.failure.attempts).toBe(2);
+    expect(outcome.failure.problems.map((problem) => problem.field)).toContain("declaration");
+    expect(recording.tools).toHaveLength(2);
   });
 });

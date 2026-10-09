@@ -157,12 +157,23 @@ function stageFailureToKind(failure: StageFailure): FailureKind {
 }
 
 /**
- * 段の失敗を、記録の失敗の帰属に写す（S-7）。**要求そのものが不正な誤り**のときは、やり直しても
+ * 段の失敗を、記録の失敗の帰属に写す（S-7・#304）。**要求そのものが不正な誤り**のときは、やり直しても
  * 通らないので、**誤りの種類（`code`。例 `invalid_json_schema`）だけ**を残す（本文の全文は残さない。S-8）。
+ *
+ * **形が合わなかった（`malformed`）・コードの検査に合わなかった（`unmet`）**ときは、どの欄がどう
+ * 合わなかったか（欄の名前と、問題の種類）を残す（ほかの段の「形が合わない」「未達」も同じ扱い）。
+ * 残すのは**欄の名前と種類だけ**で、値の中身（宣言の原文・依頼文）は残さない（#304）。
  */
 function stageFailureAttribution(stage: StageId, failure: StageFailure): FailureAttribution {
   const kind = stageFailureToKind(failure);
   if (failure.kind === "invalidRequest") return { stage, kind, code: failure.code };
+  if ((failure.kind === "malformed" || failure.kind === "unmet") && failure.problems.length > 0) {
+    return {
+      stage,
+      kind,
+      problems: failure.problems.map((problem) => ({ field: problem.field, message: problem.message })),
+    };
+  }
   return { stage, kind };
 }
 

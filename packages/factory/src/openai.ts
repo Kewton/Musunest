@@ -306,7 +306,12 @@ function buildStructuredBody(config: WireConfig, request: LlmStructuredRequest):
   return body;
 }
 
-/** 道具付きの body（`tools` に function calling を置き、往復を `input` に並べる。§2・R-2） */
+/**
+ * 道具付きの body（`tools` に function calling を置き、往復を `input` に並べる。§2・R-2）。
+ *
+ * 要求が最後の答えの schema を持つときは、**道具と一緒に構造化出力（`text.format`）も送る**（#304）
+ * ——これで、モデルが道具を使い終えたあとの最後の文の形が、この schema に決まる（strict）。
+ */
 function buildToolBody(config: WireConfig, request: LlmToolRequest): Record<string, unknown> {
   const input = [
     ...buildInput(request.documents, request.rules ?? [], request.input),
@@ -314,6 +319,16 @@ function buildToolBody(config: WireConfig, request: LlmToolRequest): Record<stri
   ];
   const body = baseBody(config, request.instructions, input, request.maxOutputTokens);
   body.tools = request.tools.map(toFunctionTool);
+  if (request.schema !== undefined) {
+    body.text = {
+      format: {
+        type: "json_schema",
+        name: request.schemaName,
+        schema: request.schema,
+        strict: true,
+      },
+    };
+  }
   return body;
 }
 

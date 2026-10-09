@@ -265,3 +265,34 @@ describe("使用トークンの計（02 §1.5）", () => {
     expect(meter.snapshot.missing_usage_calls).toBe(1);
   });
 });
+
+// ── 形・未達の失敗に、欄の名前と種類を写す（02 §3.5・S-8・#304）──
+
+describe("形・未達の失敗の帰属に、欄の名前と種類を写す（02 §3.5・S-8・#304）", () => {
+  const problem = { field: "declaration", message: "直した宣言は空でない文字列（YAML の原文）であること" };
+  const withProblems = (): RunRecord => ({
+    ...record(),
+    failure: { stage: "repair", kind: "malformed", problems: [problem] },
+  });
+
+  it("記録と要約の失敗の欄に、欄の名前と種類が出る", () => {
+    const picked = buildRunRecord(withProblems());
+    expect(picked.failure).toEqual({ stage: "repair", kind: "malformed", problems: [problem] });
+    const built = buildSummary(picked, {
+      run_id: "run-1",
+      verdict: "none",
+      assurance: "none",
+      duration_secs: 0,
+      provider_cost_usd: 0,
+      stop_class: "malformed",
+      exit_code: 1,
+    });
+    expect(built.failure).toEqual({ stage: "repair", kind: "malformed", problems: [problem] });
+  });
+
+  it("問題の無い失敗では、problems の欄を持たない", () => {
+    const picked = buildRunRecord(record());
+    expect(picked.failure).toEqual({ stage: "repair", kind: "unmet" });
+    expect("problems" in (picked.failure ?? {})).toBe(false);
+  });
+});
