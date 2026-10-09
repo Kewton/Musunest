@@ -17,10 +17,11 @@ import { AGENT_LIMITS } from "./limits.js";
 import { createFakeLlmClient, type RecordedCall } from "./llm-fake.js";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "./llm.js";
 import { OpenAiIncompleteError, createOpenAiLlmClient, type OpenAiUsage } from "./openai.js";
-import { runGeneration, type GenerationInput } from "./run.js";
+import { runGeneration, countUnresolvedTests, type GenerationInput } from "./run.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
 import {
   CORRESPONDENCE_OUTPUT,
+  CORRESPONDENCE_OUTPUT_WITH_FIELD,
   DECLARATION_SOURCE,
   DESIGN_OUTPUT,
   DESIGN_OUTPUT_PARTIAL,
@@ -30,6 +31,7 @@ import {
   REVERSE_CHECK_OUTPUT,
   SOURCE_TEXT,
   TEST_SUITE_OUTPUT,
+  TEST_SUITE_OUTPUT_WITH_UNRESOLVED,
   makeRunInput,
   recordedRun,
   structured,
@@ -202,6 +204,75 @@ describe("未実行の検査がある結果は、合格にならない（02 §1.
     expect(verificationOf(result.bundle).unexecuted_inspections).toEqual(["correspondence", "run-tests"]);
     expect(acceptsHeadlessSummaryWire(result.summary)).toBe(true);
     expect(result.summary.verdict).toBe("none");
+  });
+});
+
+// ── 3b. ⑦ へ渡す未解決に、最終版の試験の未解決も数える（02 §1.4・#306）────
+
+describe("⑦ へ渡す未解決の数（02 §1.4・#306）", () => {
+  it("期待の裁定の未解決と試験の未解決が同じ試験 ID のときは、二重に数えない", () => {
+    expect(
+      countUnresolvedTests(["t1"], { mismatches: [], unresolved: [{ testId: "t1", detail: "未解決" }] }),
+    ).toBe(1);
+  });
+
+  it("期待の裁定の未解決と試験の未解決が別の ID のときは、どちらも数える", () => {
+    expect(
+      countUnresolvedTests(["t1"], { mismatches: [], unresolved: [{ testId: "t2", detail: "未解決" }] }),
+    ).toBe(2);
+  });
+
+  it("試験を流していないときは、期待の裁定の未解決だけを数える", () => {
+    expect(countUnresolvedTests(["t1", "t2"], null)).toBe(2);
+  });
+
+  it("最終版の試験に未解決が 1 つだけ残ると、不一致と対応表の落ちが 0 でも部分案になる", async () => {
+    const { run } = runWith(
+      recordedRun({
+        suite: TEST_SUITE_OUTPUT_WITH_UNRESOLVED,
+        correspondence: CORRESPONDENCE_OUTPUT_WITH_FIELD,
+      }),
+      { limits: { ...AGENT_LIMITS, repairRoundTrips: 0 } },
+    );
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    // 未解決だけが残った版を合格（full）にしない（#306 の直す前は full になっていた）
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+    expect(result.record.failure).toBeNull();
+    expect(result.summary.verdict).toBe("partial");
+
+    // 試験の結果：不一致 0・対応表の落ち 0・未解決 1
+    expect(result.bundle).not.toBeNull();
+    if (result.bundle === null) return;
+    const verification = verificationOf(result.bundle);
+    expect(verification.correspondence_misses).toBe(0);
+    expect(verification.test_mismatches).toBe(0);
+    expect(verification.test_unresolved).toBe(1);
+    expect(verification.outcome).toEqual({ result: "partial", verdict: "partial" });
+  });
+
+  it("直しの往復の上限で止まり、未解決だけが残った版が合格（full）にならない", async () => {
+    // 直しは 1 回だけ通り、直しても未解決が残るので、往復の上限（1 回）で止まる
+    const { run } = runWith(
+      [
+        ...recordedRun({
+          suite: TEST_SUITE_OUTPUT_WITH_UNRESOLVED,
+          correspondence: CORRESPONDENCE_OUTPUT_WITH_FIELD,
+        }),
+        toolDone({ declaration: DECLARATION_SOURCE, disputes: [] }),
+      ],
+      { limits: { ...AGENT_LIMITS, repairRoundTrips: 1 } },
+    );
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    // 直しの段は上限の 1 回だけ通る（それ以上は回らない）
+    const repairStages = result.record.stages.filter((stage) => stage.stage === "repair");
+    expect(repairStages).toHaveLength(1);
+    // 未解決が残ったままなので、合格にならない
+    expect(result.outcome.result).not.toBe("pass");
+    expect(result.outcome.verdict).toBe("partial");
   });
 });
 
