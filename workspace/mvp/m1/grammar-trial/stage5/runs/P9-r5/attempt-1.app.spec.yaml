@@ -1,0 +1,88 @@
+entities:
+  - name: member
+    fields:
+      name:
+        type: string
+        label: メンバー名
+  - name: equipment
+    fields:
+      name:
+        type: string
+        label: 備品名
+  - name: loan
+    fields:
+      equipment:
+        type: ref
+        to: equipment
+        label: 備品
+      borrower:
+        type: ref
+        to: member
+        label: 借りた人
+      returnDate:
+        type: date
+        label: 返す日
+      status:
+        type: enum
+        label: 状態
+        options:
+          lending: 貸出中
+          returned: 返却済み
+        default: lending
+views:
+  - name: members
+    type: table
+    entity: member
+    show: [name, memberLoanCount]
+  - name: equipmentList
+    type: table
+    entity: equipment
+    show: [name, equipmentLoanCount]
+  - name: loanBoard
+    type: board
+    entity: loan
+    columns: status
+    highlight: overdue
+actions:
+  - name: addMember
+    entity: member
+  - name: addEquipment
+    entity: equipment
+  - name: addLoan
+    entity: loan
+  - name: markReturned
+    entity: loan
+    kind: update
+    set:
+      status: returned
+    when: status == "lending"
+validations: []
+computed:
+  - name: equipmentLoanCount
+    entity: equipment
+    type: number
+    label: 貸した回数
+    aggregate:
+      count: loan
+      where:
+        equipment: this
+  - name: memberLoanCount
+    entity: member
+    type: number
+    label: 借りた回数
+    aggregate:
+      count: loan
+      where:
+        borrower: this
+  - name: overdue
+    entity: loan
+    type: boolean
+    label: 期限超過
+    expression: returnDate < today()
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

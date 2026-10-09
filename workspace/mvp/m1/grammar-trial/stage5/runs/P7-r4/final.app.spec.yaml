@@ -1,0 +1,81 @@
+entities:
+  - name: member
+    fields:
+      name:
+        type: string
+        label: メンバー名
+  - name: match
+    fields:
+      date:
+        type: date
+        label: 日付
+      location:
+        type: string
+        label: 場所
+      capacity:
+        type: number
+        label: 定員
+  - name: attendance
+    fields:
+      match:
+        type: ref
+        to: match
+        label: 試合
+      member:
+        type: ref
+        to: member
+        label: メンバー
+views:
+  - name: matchList
+    type: table
+    entity: match
+    show: [date, location, capacity, attendeeCount, remainingSlots]
+  - name: memberList
+    type: table
+    entity: member
+    show: [name, participationCount]
+  - name: attendanceList
+    type: table
+    entity: attendance
+    show: [match, member]
+actions:
+  - name: addMember
+    entity: member
+  - name: addMatch
+    entity: match
+  - name: addAttendance
+    entity: attendance
+validations:
+  - name: capacityAtLeastOne
+    entity: match
+    expression: capacity >= 1
+    message: 定員は1人以上にしてください
+computed:
+  - name: attendeeCount
+    entity: match
+    type: number
+    aggregate:
+      count: attendance
+      where:
+        match: this
+    label: 参加人数
+  - name: remainingSlots
+    entity: match
+    type: number
+    expression: capacity - attendeeCount
+    label: 残り枠
+  - name: participationCount
+    entity: member
+    type: number
+    aggregate:
+      count: attendance
+      where:
+        member: this
+    label: 参加した試合の回数
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

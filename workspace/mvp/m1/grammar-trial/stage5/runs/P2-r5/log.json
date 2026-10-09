@@ -1,0 +1,35 @@
+{
+  "pattern": "P2",
+  "run": 5,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_04045cf69eb0420c006ac87810e84087d19c4d6a93b62bee3c",
+      "ms": 19751,
+      "usage": {
+        "input_tokens": 48703,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48700
+        },
+        "output_tokens": 1890,
+        "output_tokens_details": {
+          "reasoning_tokens": 1287
+        },
+        "total_tokens": 50593
+      },
+      "unwritable": [
+        {
+          "requirement": "「用意できた」ってボタンで切り替えたい",
+          "reason": "status を「用意できた」に変更し、「まだ」の項目にだけ操作を表示することは宣言できますが、操作ボタン自体の表示名を指定する語彙はありません。そのため、ボタンの表示文字を「用意できた」にすることは宣言できません。"
+        }
+      ],
+      "notes": "個数は number と quantity >= 1 の検査で表現しています。担当者ごとの個数は、担当する持ち物の quantity の合計として計算します。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

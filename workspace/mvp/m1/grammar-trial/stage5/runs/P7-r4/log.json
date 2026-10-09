@@ -1,0 +1,35 @@
+{
+  "pattern": "P7",
+  "run": 4,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_09805c2401617d4e006ac87a11a6a887d18c03aa828e54f88e",
+      "ms": 34867,
+      "usage": {
+        "input_tokens": 48668,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48665
+        },
+        "output_tokens": 3027,
+        "output_tokens_details": {
+          "reasoning_tokens": 2365
+        },
+        "total_tokens": 51695
+      },
+      "unwritable": [
+        {
+          "requirement": "参加する人の数が定員を超えたら登録できないこと。",
+          "reason": "参加者を試合への attendance レコードで表現し、試合ごとの参加人数は集計できます。しかし、attendance の作成時に、その参照先 match の参加人数と定員を照合する検査は、文書にある式・集計の語彙では書けません。そのため、定員超過の参加登録を禁止できません。"
+        }
+      ],
+      "notes": "参加者は match に空のリストを持たせる方式ではなく、match と member を参照する attendance レコードとして表現しています。attendance がまだ無い match も登録でき、参加人数は 0、残り枠は定員として計算されます。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

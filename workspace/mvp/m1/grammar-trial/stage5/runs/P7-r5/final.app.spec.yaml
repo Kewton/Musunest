@@ -1,0 +1,66 @@
+entities:
+  - name: member
+    fields:
+      name:
+        type: string
+        label: メンバー名
+  - name: match
+    fields:
+      matchDate:
+        type: date
+        label: 日付
+      location:
+        type: string
+        label: 場所
+      capacity:
+        type: number
+        label: 定員
+      participants:
+        type: list
+        of: member
+        label: 参加する人
+views:
+  - name: matchList
+    type: table
+    entity: match
+    show: [matchDate, location, capacity, participants, participantCount, remainingSlots]
+  - name: memberList
+    type: table
+    entity: member
+    show: [name, attendedMatchCount]
+actions:
+  - name: addMember
+    entity: member
+  - name: addMatch
+    entity: match
+validations:
+  - name: capacityAtLeastOne
+    entity: match
+    expression: capacity >= 1
+  - name: participantsWithinCapacity
+    entity: match
+    expression: len(participants) <= capacity
+computed:
+  - name: participantCount
+    entity: match
+    type: number
+    expression: len(participants)
+  - name: remainingSlots
+    entity: match
+    type: number
+    expression: capacity - participantCount
+  - name: attendedMatchCount
+    entity: member
+    type: number
+    aggregate:
+      count: match
+      where:
+        participants:
+          contains: this
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

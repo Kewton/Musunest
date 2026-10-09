@@ -1,0 +1,86 @@
+# A の正解の別解：識別子をすべて変え、構造は同じ（名前に依存した採点が別解を落とさないかを見る）
+entities:
+  - name: person
+    fields:
+      name:
+        type: string
+        label: 名前
+  - name: thing
+    fields:
+      title:
+        type: string
+        label: 持ち物
+      genre:
+        type: enum
+        label: 種類
+        options:
+          food: 料理
+          drink: 飲み物
+          gear: 道具
+      owner:
+        type: ref
+        to: person
+        label: 持ってくる人
+      qty:
+        type: number
+        label: 数
+      prep:
+        type: enum
+        label: 準備
+        options:
+          todo: まだ
+          done: 用意できた
+        default: todo
+computed:
+  - name: thingCount
+    entity: person
+    aggregate:
+      count: thing
+      where:
+        owner: this
+    type: number
+    label: 担当の数
+views:
+  - name: board
+    type: board
+    entity: thing
+    columns: prep
+  - name: things
+    type: list
+    entity: thing
+    show: [title, genre, owner, qty, prep]
+    filters: [genre, owner]
+  - name: persons
+    type: table
+    entity: person
+    show: [name, thingCount]
+actions:
+  - name: addMember
+    entity: person
+  - name: addItem
+    entity: thing
+    kind: create
+  - name: editItem
+    entity: thing
+    kind: update
+  - name: markReady
+    entity: thing
+    kind: update
+    set:
+      prep: done
+    when: prep == "todo"
+  - name: deleteItem
+    entity: thing
+    kind: delete
+validations:
+  - name: positiveQuantity
+    entity: thing
+    expression: qty >= 1
+    message: 数は 1 以上にしてください
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

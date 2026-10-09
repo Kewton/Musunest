@@ -1,0 +1,76 @@
+entities:
+  - name: Member
+    fields:
+      name:
+        type: string
+        label: メンバー名
+  - name: Item
+    fields:
+      name:
+        type: string
+        label: 持ち物名
+      kind:
+        type: enum
+        label: 種類
+        options:
+          dish: 料理
+          drink: 飲み物
+          tool: 道具
+      broughtBy:
+        type: ref
+        to: Member
+        label: 持ってくる人
+      quantity:
+        type: number
+        label: 数
+      status:
+        type: enum
+        label: 準備の状態
+        options:
+          pending: まだ
+          ready: 用意できた
+        default: pending
+views:
+  - name: memberList
+    type: table
+    entity: Member
+    show: [name, assignedItemCount]
+  - name: itemBoard
+    type: board
+    entity: Item
+    columns: status
+  - name: itemList
+    type: list
+    entity: Item
+    show: [name, kind, broughtBy, quantity, status]
+    filters: [kind, broughtBy]
+actions:
+  - name: addMember
+    entity: Member
+  - name: addItem
+    entity: Item
+  - name: markReady
+    entity: Item
+    kind: update
+    set:
+      status: ready
+    when: status == "pending"
+validations:
+  - name: quantityAtLeastOne
+    entity: Item
+    expression: quantity >= 1
+computed:
+  - name: assignedItemCount
+    entity: Member
+    type: number
+    aggregate:
+      count: Item
+      where:
+        broughtBy: this
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

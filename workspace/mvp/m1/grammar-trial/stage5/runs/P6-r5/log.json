@@ -1,0 +1,35 @@
+{
+  "pattern": "P6",
+  "run": 5,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_094ed8ce7d193777006ac879b2dcb087d1ba43e893ded4c040",
+      "ms": 21556,
+      "usage": {
+        "input_tokens": 48682,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48679
+        },
+        "output_tokens": 1882,
+        "output_tokens_details": {
+          "reasoning_tokens": 1072
+        },
+        "total_tokens": 50564
+      },
+      "unwritable": [
+        {
+          "requirement": "開いたらすぐ",
+          "reason": "ダッシュボードは宣言できますが、アプリ起動時に最初に開く一覧を指定する語彙は文書にありません。"
+        }
+      ],
+      "notes": "「払い方の割合」は、払い方ごとの集金件数を円グラフで示す宣言にしています。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

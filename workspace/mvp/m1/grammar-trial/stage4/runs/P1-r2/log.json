@@ -1,0 +1,35 @@
+{
+  "pattern": "P1",
+  "run": 2,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_04252778db3d2886006ac830235de087d08451ad211fa0ec89",
+      "ms": 24595,
+      "usage": {
+        "input_tokens": 48722,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48719
+        },
+        "output_tokens": 2021,
+        "output_tokens_details": {
+          "reasoning_tokens": 1405
+        },
+        "total_tokens": 50743
+      },
+      "unwritable": [
+        {
+          "requirement": "「用意できた」にするボタン",
+          "reason": "ボタンの表示名を指定する語彙がありません。操作名は識別子であり、label は項目・計算などに付ける語彙です。まだの持ち物だけに表示し、状態を「用意できた」に変更する動作は宣言できますが、ボタンの表示文字列を正確に「用意できた」と指定することはできません。"
+        }
+      ],
+      "notes": "種類と準備状態の選択肢表示名は要件の言葉をそのまま使用しています。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

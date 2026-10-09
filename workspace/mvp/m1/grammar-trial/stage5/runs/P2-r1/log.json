@@ -1,0 +1,35 @@
+{
+  "pattern": "P2",
+  "run": 1,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_0f86d7cadd4e4e4d006ac877c89f4487d18707b5e425d94ea8",
+      "ms": 21721,
+      "usage": {
+        "input_tokens": 48703,
+        "input_tokens_details": {
+          "cache_write_tokens": 48700,
+          "cached_tokens": 0
+        },
+        "output_tokens": 2141,
+        "output_tokens_details": {
+          "reasoning_tokens": 1552
+        },
+        "total_tokens": 50844
+      },
+      "unwritable": [
+        {
+          "requirement": "「用意できた」ってボタンで切り替えたい",
+          "reason": "状態を「用意できた」に更新し、「まだ」の行にだけ操作を許す条件は宣言できますが、操作（action）のボタン表示名を指定する語彙はありません。label は項目と計算にだけ付けられます。"
+        }
+      ],
+      "notes": "個数は number 項目にし、要件にある「1以上」を検査しています。整数のみという制約は要件にないため加えていません。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

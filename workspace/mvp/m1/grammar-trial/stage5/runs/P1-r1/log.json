@@ -1,0 +1,30 @@
+{
+  "pattern": "P1",
+  "run": 1,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_08282268a66584c9006ac8776db9c087d1b36c059ab1a4afb5",
+      "ms": 17051,
+      "usage": {
+        "input_tokens": 48722,
+        "input_tokens_details": {
+          "cache_write_tokens": 48719,
+          "cached_tokens": 0
+        },
+        "output_tokens": 1513,
+        "output_tokens_details": {
+          "reasoning_tokens": 1003
+        },
+        "total_tokens": 50235
+      },
+      "unwritable": [],
+      "notes": "「数」は要件どおり 1 以上を検査します。整数であることは要件にないため、整数制約は加えていません。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

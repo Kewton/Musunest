@@ -1,0 +1,74 @@
+entities:
+  - name: member
+    fields:
+      name:
+        type: string
+        label: 名前
+  - name: match
+    fields:
+      date:
+        type: date
+        label: 日にち
+      place:
+        type: string
+        label: 場所
+      capacity:
+        type: number
+        label: 定員
+      attendees:
+        type: list
+        of: member
+        label: 来る人
+views:
+  - name: matchList
+    type: table
+    entity: match
+    show: [date, place, capacity, attendees, attendeeCount, remainingSlots]
+  - name: memberList
+    type: table
+    entity: member
+    show: [name, attendanceCount]
+actions:
+  - name: addMember
+    entity: member
+  - name: addMatch
+    entity: match
+  - name: editMatch
+    entity: match
+    kind: update
+validations:
+  - name: positiveCapacity
+    entity: match
+    expression: capacity > 0
+    message: 定員は1人以上にしてください
+  - name: withinCapacity
+    entity: match
+    expression: len(attendees) <= capacity
+    message: 定員を超えて来る人を登録できません
+computed:
+  - name: attendeeCount
+    entity: match
+    type: number
+    expression: len(attendees)
+    label: 来る人数
+  - name: remainingSlots
+    entity: match
+    type: number
+    expression: capacity - attendeeCount
+    label: あと何人
+  - name: attendanceCount
+    entity: member
+    type: number
+    aggregate:
+      count: match
+      where:
+        attendees:
+          contains: this
+    label: 来た回数
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous
