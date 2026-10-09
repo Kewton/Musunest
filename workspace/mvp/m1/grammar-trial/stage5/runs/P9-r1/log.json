@@ -1,0 +1,30 @@
+{
+  "pattern": "P9",
+  "run": 1,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_01abda7e0e216cf8006ac87ae3a0a487d1ae370611239cc1d2",
+      "ms": 19751,
+      "usage": {
+        "input_tokens": 48709,
+        "input_tokens_details": {
+          "cache_write_tokens": 48706,
+          "cached_tokens": 0
+        },
+        "output_tokens": 1676,
+        "output_tokens_details": {
+          "reasoning_tokens": 1100
+        },
+        "total_tokens": 50385
+      },
+      "unwritable": [],
+      "notes": "貸出状態の保存キーは active / returned とし、選択肢の表示名は要件どおり「貸出中」「返却済み」です。返す日超過の印は returnDate と today() の比較で判定します。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

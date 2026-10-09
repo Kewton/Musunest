@@ -1,0 +1,30 @@
+{
+  "pattern": "P3",
+  "run": 2,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_0d2d2dec7b3e2404006ac8304cf18c87d09ccd112f2fd17eb3",
+      "ms": 18963,
+      "usage": {
+        "input_tokens": 48697,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48694
+        },
+        "output_tokens": 1519,
+        "output_tokens_details": {
+          "reasoning_tokens": 911
+        },
+        "total_tokens": 50216
+      },
+      "unwritable": [],
+      "notes": "当番回数の少ない人から並べるため、回数を負にした計算を順位の基準にしています。順位部品では基準（by）を show に含める必要があるため、「fewestFirstScore」も表示対象になります。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

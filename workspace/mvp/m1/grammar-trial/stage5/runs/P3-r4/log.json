@@ -1,0 +1,30 @@
+{
+  "pattern": "P3",
+  "run": 4,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_020c0456f0bdfc49006ac878661a6887d1a5e3b150a2ed464a",
+      "ms": 18458,
+      "usage": {
+        "input_tokens": 48697,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48694
+        },
+        "output_tokens": 1660,
+        "output_tokens_details": {
+          "reasoning_tokens": 1034
+        },
+        "total_tokens": 50357
+      },
+      "unwritable": [],
+      "notes": "順位の部品は基準値の降順のみのため、当番回数の符号を反転した計算で、回数の少ないメンバーが先になるようにしています。順位部品の仕様上、この並び替え用の値も表示対象に含まれます。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

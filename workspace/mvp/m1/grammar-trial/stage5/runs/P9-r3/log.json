@@ -1,0 +1,30 @@
+{
+  "pattern": "P9",
+  "run": 3,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_09d2f3a39dffa836006ac87b0fbb0c87d18f280ee31b1a5467",
+      "ms": 15694,
+      "usage": {
+        "input_tokens": 48709,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48706
+        },
+        "output_tokens": 1307,
+        "output_tokens_details": {
+          "reasoning_tokens": 729
+        },
+        "total_tokens": 50016
+      },
+      "unwritable": [],
+      "notes": "貸した回数・借りた回数は、状態を問わず該当する貸し出しレコードの件数として集計します。返却操作は貸出中のレコードにだけ表示・実行される条件を付けています。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

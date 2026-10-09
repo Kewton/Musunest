@@ -1,0 +1,30 @@
+{
+  "pattern": "P1",
+  "run": 3,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_08db7f588fab7520006ac8778fe40887d197709fa9d3964a38",
+      "ms": 17336,
+      "usage": {
+        "input_tokens": 48722,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48719
+        },
+        "output_tokens": 1735,
+        "output_tokens_details": {
+          "reasoning_tokens": 1198
+        },
+        "total_tokens": 50457
+      },
+      "unwritable": [],
+      "notes": "メンバーごとの数は、担当する持ち物レコードの件数として集計します。数の1以上は検査できますが、整数であることは要件にないため指定していません。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

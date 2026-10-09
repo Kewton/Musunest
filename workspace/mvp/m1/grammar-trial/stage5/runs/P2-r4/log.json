@@ -1,0 +1,35 @@
+{
+  "pattern": "P2",
+  "run": 4,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_0650bf8b8d5a94c5006ac877fef1e887d1955fa3cc522a8e99",
+      "ms": 17531,
+      "usage": {
+        "input_tokens": 48703,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48700
+        },
+        "output_tokens": 1714,
+        "output_tokens_details": {
+          "reasoning_tokens": 1144
+        },
+        "total_tokens": 50417
+      },
+      "unwritable": [
+        {
+          "requirement": "用意できたってボタンで切り替えたい",
+          "reason": "状態を「用意できた」に切り替え、状態が「まだ」の行だけで操作できる設定は書けますが、操作ボタン自体の表示文言を指定する語彙はありません。"
+        }
+      ],
+      "notes": "担当者ごとの個数は、担当者を参照する持ち物の「数」を合計して表示します。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

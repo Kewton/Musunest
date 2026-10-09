@@ -1,0 +1,35 @@
+{
+  "pattern": "P8",
+  "run": 5,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_0d8e767babe3aa74006ac87ac6ffc487d1838b51c3cd4d0250",
+      "ms": 28120,
+      "usage": {
+        "input_tokens": 48654,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48651
+        },
+        "output_tokens": 2406,
+        "output_tokens_details": {
+          "reasoning_tokens": 1785
+        },
+        "total_tokens": 51060
+      },
+      "unwritable": [
+        {
+          "requirement": "試合だけ先に作っておいて、来る人はあとから足していきたいので、最初は誰もいなくても作れるようにして。",
+          "reason": "参照の並び（list of）は空を許さず、項目は必須です。空の来る人リストで試合を作る宣言は書けません。"
+        }
+      ],
+      "notes": "来る人はメンバーへの参照リストとして宣言し、試合の作成・更新時に定員以下であることを検査します。更新操作は項目全体の置換なので、来る人を変更するときは試合の全項目を入力します。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

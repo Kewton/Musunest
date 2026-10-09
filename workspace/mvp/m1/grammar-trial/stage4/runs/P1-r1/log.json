@@ -1,0 +1,30 @@
+{
+  "pattern": "P1",
+  "run": 1,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_034de32b24915e99006ac82b0fe39c87d0b73c5cc7912dd7be",
+      "ms": 15218,
+      "usage": {
+        "input_tokens": 48722,
+        "input_tokens_details": {
+          "cache_write_tokens": 48719,
+          "cached_tokens": 0
+        },
+        "output_tokens": 1140,
+        "output_tokens_details": {
+          "reasoning_tokens": 728
+        },
+        "total_tokens": 49862
+      },
+      "unwritable": [],
+      "notes": "",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}
