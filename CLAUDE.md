@@ -42,9 +42,13 @@ host          → sdk
 gateway       → data-api, control-plane
 data-api      → sdk, spec-engine, app-do, control-plane, appspec-schema
 control-plane → spec-engine, appspec-schema
+factory       → spec-engine, appspec-schema
 e2e           → sdk
 sdk・spec-engine・app-do・connector → appspec-schema
 ```
+
+- 足した 1 本：`factory → spec-engine, appspec-schema`（プロダクト内の工場。`packages/factory`。
+  control-plane には依存しない。`workspace/mvp/m1/agent/02-architecture.md` §3.1）
 
 - 足した 3 本：`data-api → control-plane`（D1 の登録表の定義と読み書き）、`control-plane → spec-engine`（publish の中身）、`e2e → sdk`
 - **`infra/scripts` は pnpm workspace の外にあり、この検査が届かない。** 中身は workspace のパッケージに置き、

@@ -1,0 +1,25 @@
+{
+  "name": "@musunest/factory",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "プロダクト内の工場（宣言だけを作る LLM エージェント）の骨格（Issue #278）",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty",
+    "lint": "oxlint src",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@musunest/appspec-schema": "workspace:*",
+    "@musunest/spec-engine": "workspace:*"
+  }
+}
