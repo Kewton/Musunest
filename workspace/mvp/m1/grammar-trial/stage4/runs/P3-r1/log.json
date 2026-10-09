@@ -1,0 +1,35 @@
+{
+  "pattern": "P3",
+  "run": 1,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_082ddb4d21b0cdda006ac8303bb0bc87d0b3f904339dfd081f",
+      "ms": 16717,
+      "usage": {
+        "input_tokens": 48697,
+        "input_tokens_details": {
+          "cache_write_tokens": 48694,
+          "cached_tokens": 0
+        },
+        "output_tokens": 1436,
+        "output_tokens_details": {
+          "reasoning_tokens": 908
+        },
+        "total_tokens": 50133
+      },
+      "unwritable": [
+        {
+          "requirement": "メンバーごとの当番の回数を、回数の少ない人から順に並べて見られること",
+          "reason": "順位（ranking）は行ごとの数の計算を降順に並べる語彙であり、昇順にする指定はありません。要件どおり少ない人から並べる宣言は書けません。"
+        }
+      ],
+      "notes": "",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}
