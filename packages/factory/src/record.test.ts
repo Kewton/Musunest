@@ -7,8 +7,8 @@
 //   4. 偽の API キー・依頼文の全文・応答の全文・生の HTTP の誤りの本文が、要約にも記録にも**出ない**こと
 import { HEADLESS_REQUIRED_KEYS, HEADLESS_SCHEMA_VERSION, acceptsHeadlessSummaryWire } from "@musunest/appspec-schema";
 import { describe, expect, it } from "vitest";
-import type { LlmClient, LlmUsage } from "./llm.js";
-import { OpenAiIncompleteError } from "./openai.js";
+import type { LlmClient } from "./llm.js";
+import { OpenAiIncompleteError, type OpenAiUsage } from "./openai.js";
 import {
   RUN_RECORD_KEYS,
   STAGE_RECORD_KEYS,
@@ -21,14 +21,28 @@ import {
   type RunRecord,
 } from "./record.js";
 
-const USAGE: LlmUsage = { inputTokens: 10, cachedInputTokens: 2, outputTokens: 4, reasoningTokens: 1 };
+const USAGE: OpenAiUsage = {
+  inputTokens: 10,
+  cachedInputTokens: 2,
+  cacheWriteTokens: 3,
+  outputTokens: 4,
+  reasoningTokens: 1,
+};
 
 const stage = () =>
   makeStageRecord(
     "write",
     "ok",
     12,
-    { calls: 1, missing_usage_calls: 0, input_tokens: 10, cached_input_tokens: 2, output_tokens: 4, reasoning_tokens: 1 },
+    {
+      calls: 1,
+      missing_usage_calls: 0,
+      input_tokens: 10,
+      cached_input_tokens: 2,
+      cache_write_tokens: 3,
+      output_tokens: 4,
+      reasoning_tokens: 1,
+    },
     null,
   );
 
@@ -120,6 +134,9 @@ describe("版・裁定の数・予約の残り・usage が欠けた呼び出し�
     expect(built.missing_usage_calls).toBe(1);
     expect(built.failure).toEqual({ stage: "repair", kind: "unmet" });
     expect(built.stages).toHaveLength(1);
+    // キャッシュの書き込みと読み取りを、段ごとに分けて出す（#302）
+    expect(built.stages[0]?.cache_write_tokens).toBe(3);
+    expect(built.stages[0]?.cached_input_tokens).toBe(2);
     expect(built.verdict).toBe("partial");
   });
 });
@@ -177,19 +194,37 @@ describe("使用トークンの計（02 §1.5）", () => {
       missing_usage_calls: 1,
       input_tokens: 10,
       cached_input_tokens: 2,
+      cache_write_tokens: 3,
       output_tokens: 4,
       reasoning_tokens: 1,
     });
   });
 
   it("2 つの時点の差を取れる", () => {
-    const before = { calls: 1, missing_usage_calls: 0, input_tokens: 10, cached_input_tokens: 2, output_tokens: 4, reasoning_tokens: 1 };
-    const after = { calls: 3, missing_usage_calls: 1, input_tokens: 30, cached_input_tokens: 4, output_tokens: 14, reasoning_tokens: 3 };
+    const before = {
+      calls: 1,
+      missing_usage_calls: 0,
+      input_tokens: 10,
+      cached_input_tokens: 2,
+      cache_write_tokens: 1,
+      output_tokens: 4,
+      reasoning_tokens: 1,
+    };
+    const after = {
+      calls: 3,
+      missing_usage_calls: 1,
+      input_tokens: 30,
+      cached_input_tokens: 4,
+      cache_write_tokens: 5,
+      output_tokens: 14,
+      reasoning_tokens: 3,
+    };
     expect(usageDelta(before, after)).toEqual({
       calls: 2,
       missing_usage_calls: 1,
       input_tokens: 20,
       cached_input_tokens: 2,
+      cache_write_tokens: 4,
       output_tokens: 10,
       reasoning_tokens: 2,
     });
@@ -210,6 +245,7 @@ describe("使用トークンの計（02 §1.5）", () => {
       missing_usage_calls: 0,
       input_tokens: 10,
       cached_input_tokens: 2,
+      cache_write_tokens: 3,
       output_tokens: 4,
       reasoning_tokens: 1,
     });

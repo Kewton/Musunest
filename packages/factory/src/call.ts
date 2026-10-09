@@ -10,14 +10,20 @@
 //      予約を残す。
 //   3. **例外と再試行も、回数と予約に計上する**（§1.5・§2.2「1 回だけやり直す」）。試行ごとに
 //      呼び出しの回数を 1 つ数え、予約を 1 つ取る。道具の呼び出しの回数も数える。
-//   4. **締切までの残り時間で実呼び出しを中断する**（§1.5「呼び出しごとに timeout」）。残り時間が
-//      尽きていれば呼ばず、呼んでいる途中で尽きたら打ち切って、締切切れとして返す。
+//   4. **呼び出しごとの timeout を、effort と締切から決めて実呼び出しを中断する**（§1.5「呼び出し
+//      ごとに timeout」・#302）。timeout は effort ごとの基準（`callTimeoutMsForEffort`）から出し、
+//      **ジョブの締切の残りを超えない**。残り時間が尽きていれば呼ばず、呼んでいる途中で尽きたら
+//      打ち切る。**やり直しでは timeout を長くする**（同じ timeout ではやり直さない。§2.2・#302）。
+//   5. **adapter の誤りの種類を、そのまま分類する**（§2.2・#302）。`timeout`・`network`・HTTP の 5xx
+//      だけをやり直し、4xx・残高切れ・拒否・未完了・形の誤り・分類できない例外はやり直さない。
+//      **「拒否」はモデルが拒否したとき（`refusal`）だけ**にする（timeout を拒否にしない）。
 //
 // 費用の予約そのものは budget.ts（`JobBudget`）が持つ。ここは「呼ぶ前に予約し、呼んだ後で精算する」
-// 順番と、回数の集計と、締切を引き受ける。単価はコードに埋め込まない（引数で受け取る）。
+// 順番と、回数の集計と、締切と timeout を引き受ける。単価はコードに埋め込まない（引数で受け取る）。
 import { estimateMaxCostUsd, type JobBudget, type TokenRates } from "./budget.js";
 import {
   AGENT_LIMITS,
+  callTimeoutMsForEffort,
   maxOutputTokensForEffort,
   type AgentLimits,
   type LimitName,
@@ -152,10 +158,72 @@ export function isInvalidRequestError(error: unknown): error is InvalidRequestEr
   return candidate.kind === "invalidRequest" && typeof candidate.code === "string";
 }
 
+/**
+ * 共通の口が分類する誤りの種類（§2.2「誤りの種類をそのまま写す」・#302）。adapter の `kind` を
+ * **そのまま**写す。未完了（`incomplete`）と要求の不正（`invalidRequest`）は、上の結果の種類に
+ * 分けて持つので、ここには入れない。
+ */
+export const CALL_ERROR_KINDS = [
+  "timeout", // 呼び出しごとの timeout で打ち切った
+  "network", // fetch 自体が失敗した
+  "http", // HTTP の誤り（5xx はやり直してよい。4xx はやり直さない）
+  "balance", // 残高切れ（`insufficient_quota`）
+  "refusal", // モデルが拒否した
+  "malformed", // 形が合わない応答（JSON でない・schema に合わない）
+  "toolArguments", // 道具の引数が JSON として読めない
+  "unknown", // 上のどれにも分類できない例外
+] as const;
+export type CallErrorKind = (typeof CALL_ERROR_KINDS)[number];
+
+/** 誤り 1 つを分類した結果。やり直すかの判定にも使う */
+export interface CategorizedCallError {
+  readonly kind: CallErrorKind;
+  /** HTTP の誤りの状態コード（`http` のときだけ持つ） */
+  readonly status?: number;
+}
+
+/**
+ * 例外を、共通の口の種類に写す（§2.2・#302）。**口は adapter に依存しない**ので、型ではなく
+ * `kind` の形で見分ける。分類できない例外は `unknown` として別に出す（拒否に混ぜない）。
+ */
+export function categorizeCallError(error: unknown): CategorizedCallError {
+  if (!(error instanceof Error)) return { kind: "unknown" };
+  const kind = (error as { kind?: unknown }).kind;
+  const status = (error as { status?: unknown }).status;
+  if (kind === "timeout") return { kind: "timeout" };
+  if (kind === "network") return { kind: "network" };
+  if (kind === "balance") return { kind: "balance" };
+  if (kind === "refusal") return { kind: "refusal" };
+  if (kind === "malformed") return { kind: "malformed" };
+  if (kind === "toolArguments") return { kind: "toolArguments" };
+  if (kind === "http") return typeof status === "number" ? { kind: "http", status } : { kind: "http" };
+  return { kind: "unknown" };
+}
+
+/**
+ * やり直してよい誤りか（§2.2・#302）。`timeout`・`network`・HTTP の 5xx **だけ**をやり直す。
+ * 4xx（要求の不正・残高切れなど）・拒否・未完了・形の誤り・分類できない例外はやり直さない。
+ */
+export function isRetryableCallError(error: CategorizedCallError): boolean {
+  if (error.kind === "timeout" || error.kind === "network") return true;
+  if (error.kind === "http") return error.status !== undefined && error.status >= 500;
+  return false;
+}
+
+/**
+ * usage のキャッシュの**書き込み**のトークン（#302・§2.2）。adapter が付ける（読み取りの
+ * `cachedInputTokens` と分けて見る）。無い・壊れているときは 0 にする（記録を止めない）。
+ */
+export function cacheWriteTokensOf(usage: LlmUsage | undefined): number {
+  if (usage === undefined) return 0;
+  const raw = (usage as { cacheWriteTokens?: unknown }).cacheWriteTokens;
+  return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? raw : 0;
+}
+
 /** 共通の口の結果 */
 export type CallResult<T> =
   | { readonly kind: "ok"; readonly value: T }
-  /** 残り時間が尽きた（実呼び出しをしていない、または途中で打ち切った） */
+  /** 締切の残り時間が尽きた（実呼び出しをしていない、または途中で打ち切った） */
   | { readonly kind: "deadlineExceeded" }
   /** 予約が残高を超えるので呼ばなかった */
   | { readonly kind: "budgetExceeded"; readonly maxCostUsd: number; readonly remainingUsd: number }
@@ -165,8 +233,17 @@ export type CallResult<T> =
   | { readonly kind: "incomplete"; readonly reason: string; readonly usage: LlmUsage | undefined }
   /** 要求そのものが不正だった（種類付き）。**同じ要求ではやり直さない**（§2.2） */
   | { readonly kind: "invalidRequest"; readonly code: string }
-  /** 再試行を使い切っても成功しなかった */
-  | { readonly kind: "failed"; readonly attempts: number; readonly error: unknown };
+  /**
+   * 分類した誤りで失敗した（種類付き）。**やり直してよい誤りだけを、長くした timeout でやり直す**
+   * （同じ timeout ではやり直さない。§2.2・#302）。未完了と要求の不正は上の種類に分けるので来ない。
+   */
+  | {
+      readonly kind: "failed";
+      readonly errorKind: CallErrorKind;
+      readonly attempts: number;
+      /** HTTP の誤りの状態コード（それ以外は持たない） */
+      readonly status?: number;
+    };
 
 /** 共通の口の設定 */
 export interface CallGatewayOptions {
@@ -184,8 +261,13 @@ export interface CallGatewayOptions {
   readonly limits?: AgentLimits;
   /** 1 回の論理的な呼び出しで許す試行の回数（既定 2 = 1 回だけやり直す。§2.2） */
   readonly maxAttempts?: number;
-  /** 推論の effort（段の出力の上限を決める。既定 `high`。§2） */
+  /** 推論の effort（段の出力の上限と、呼び出しごとの timeout の基準を決める。既定 `high`。§2） */
   readonly effort?: string;
+  /**
+   * 呼び出し 1 回ごとの timeout の基準（ミリ秒）。既定は effort から出す（`callTimeoutMsForEffort`）。
+   * 実際に使う値は**締切の残りを超えず**、やり直しでは長くする（#302）。
+   */
+  readonly callTimeoutMs?: number;
 }
 
 const DEFAULT_MAX_ATTEMPTS = 2;
@@ -195,14 +277,19 @@ interface Attempted<T> {
   readonly usage: LlmUsage | undefined;
 }
 
-type AttemptOutcome<T> = { readonly kind: "ok"; readonly result: Attempted<T> } | { readonly kind: "deadline" };
+type AttemptOutcome<T> =
+  | { readonly kind: "ok"; readonly result: Attempted<T> }
+  /** ジョブの締切に触れて打ち切った */
+  | { readonly kind: "deadline" }
+  /** 呼び出しごとの timeout で打ち切った（締切の残りとは別。§1.5・#302） */
+  | { readonly kind: "timeout" };
 
 /**
  * すべての LLM 呼び出しを通す口。
  *
  * 呼ぶ前に最大費用を予約し、usage が返れば精算する（返らなければ予約を残す）。例外と再試行も
- * 回数と予約に計上する。締切までの残り時間で実呼び出しを打ち切る。**合否はここでは決めない**
- * （終わりの判定は code = outcome.ts が行う。§1.4）。
+ * 回数と予約に計上する。呼び出しごとの timeout を effort と締切から決め、実呼び出しを打ち切る。
+ * **合否はここでは決めない**（終わりの判定は code = outcome.ts が行う。§1.4）。
  */
 export class CallGateway {
   readonly #client: LlmClient;
@@ -213,6 +300,8 @@ export class CallGateway {
   readonly #limits: AgentLimits;
   readonly #maxAttempts: number;
   readonly #effort: string;
+  /** 呼び出し 1 回ごとの timeout の基準（ミリ秒。§1.5・#302） */
+  readonly #callTimeoutMs: number;
   #calls = 0;
   #toolCalls = 0;
   #retries = 0;
@@ -222,6 +311,11 @@ export class CallGateway {
     if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
       throw new RangeError("試行の回数は 1 以上の整数であること");
     }
+    this.#effort = options.effort ?? "high";
+    const callTimeoutMs = options.callTimeoutMs ?? callTimeoutMsForEffort(this.#effort);
+    if (!Number.isFinite(callTimeoutMs) || callTimeoutMs <= 0) {
+      throw new RangeError("呼び出しごとの timeout は 0 より大きい有限の数であること");
+    }
     this.#client = options.client;
     this.#budget = options.budget;
     this.#rates = options.rates;
@@ -229,7 +323,7 @@ export class CallGateway {
     this.#deadline = options.deadline;
     this.#limits = options.limits ?? AGENT_LIMITS;
     this.#maxAttempts = maxAttempts;
-    this.#effort = options.effort ?? "high";
+    this.#callTimeoutMs = callTimeoutMs;
   }
 
   /** 推論の effort（段の出力の上限の出所。§2） */
@@ -284,21 +378,38 @@ export class CallGateway {
   ): Promise<CallResult<T>> {
     const inputTokens = estimateInputUpperBoundTokens(parts);
     const maxCostUsd = estimateMaxCostUsd({ inputTokens, maxOutputTokens, rates: this.#rates });
-    let lastError: unknown;
+    let attempts = 0;
+    let lastKind: CallErrorKind = "unknown";
+    let lastStatus: number | undefined;
+    let previousTimeoutMs: number | undefined;
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
-      if (this.#deadline - this.#now() <= 0) return { kind: "deadlineExceeded" };
+      const remaining = this.#deadline - this.#now();
+      if (remaining <= 0) return { kind: "deadlineExceeded" };
       if (this.#calls >= this.#limits.callCount) {
         return { kind: "limitExceeded", limit: "callCount", max: this.#limits.callCount, actual: this.#calls };
       }
+      // 呼び出しごとの timeout は、effort の基準をやり直しごとに倍へ伸ばし、締切の残りで頭を打つ
+      // （#302）。**同じ timeout ではやり直さない**——伸ばせないなら、次の試行はせずに止める。
+      const timeoutMs = Math.min(this.#callTimeoutMs * 2 ** (attempt - 1), remaining);
+      if (attempt > 1 && previousTimeoutMs !== undefined && timeoutMs <= previousTimeoutMs) break;
       const reserved = this.#budget.reserve(maxCostUsd);
       if (!reserved.reserved) {
         return { kind: "budgetExceeded", maxCostUsd, remainingUsd: reserved.remainingUsd };
       }
       this.#calls += 1;
       if (attempt > 1) this.#retries += 1;
+      attempts = attempt;
       try {
-        const outcome = await this.#attempt(invoke);
+        const outcome = await this.#attempt(invoke, timeoutMs, remaining);
         if (outcome.kind === "deadline") return { kind: "deadlineExceeded" };
+        if (outcome.kind === "timeout") {
+          // 呼び出しごとの timeout。usage は分からないので予約は残し、**拒否ではなく** `timeout` として
+          // 扱い、やり直してよい誤りに入れる（伸ばせなければ、次の周で止まる。§2.2・#302）。
+          lastKind = "timeout";
+          lastStatus = undefined;
+          previousTimeoutMs = timeoutMs;
+          continue;
+        }
         if (outcome.result.usage !== undefined) {
           this.#budget.settle(reserved.reservation, outcome.result.usage, this.#rates);
         }
@@ -317,27 +428,56 @@ export class CallGateway {
         if (isInvalidRequestError(error)) {
           return { kind: "invalidRequest", code: error.code };
         }
+        // adapter の誤りを種類ごとに分類する（#302）。**「拒否」は拒否のときだけ**にする。
+        // やり直してよい種類（timeout・network・5xx）だけを、長くした timeout でやり直す。
+        const classified = categorizeCallError(error);
+        lastKind = classified.kind;
+        lastStatus = classified.status;
+        if (!isRetryableCallError(classified)) {
+          return {
+            kind: "failed",
+            errorKind: classified.kind,
+            attempts,
+            ...(classified.status === undefined ? {} : { status: classified.status }),
+          };
+        }
         // 例外のときは usage が分からないので、予約は残したまま次を試す（§1.5）
-        lastError = error;
+        previousTimeoutMs = timeoutMs;
       }
     }
-    return { kind: "failed", attempts: this.#maxAttempts, error: lastError };
+    return {
+      kind: "failed",
+      errorKind: lastKind,
+      attempts,
+      ...(lastStatus === undefined ? {} : { status: lastStatus }),
+    };
   }
 
-  async #attempt<T>(invoke: (signal: AbortSignal) => Promise<Attempted<T>>): Promise<AttemptOutcome<T>> {
-    const remaining = this.#deadline - this.#now();
-    if (remaining <= 0) return { kind: "deadline" };
+  /**
+   * 1 回の実呼び出しを、呼び出しごとの timeout（`timeoutMs`）で打ち切る（§1.5・#302）。
+   * `timeoutMs` が締切の残りに達していれば、それはジョブの締切として返す（`deadline`）。
+   * 途中で打ち切るときは合図（`signal`）を中断する——adapter は中断を timeout として返す。
+   */
+  async #attempt<T>(
+    invoke: (signal: AbortSignal) => Promise<Attempted<T>>,
+    timeoutMs: number,
+    remaining: number,
+  ): Promise<AttemptOutcome<T>> {
+    const atDeadline = timeoutMs >= remaining;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<"deadline">((resolve) => {
+    const aborted = new Promise<"deadline" | "timeout">((resolve) => {
       timer = setTimeout(() => {
         controller.abort();
-        resolve("deadline");
-      }, remaining);
+        resolve(atDeadline ? "deadline" : "timeout");
+      }, timeoutMs);
     });
     try {
-      const raced = await Promise.race([invoke(controller.signal), deadline]);
-      if (raced === "deadline") return { kind: "deadline" };
+      const call = invoke(controller.signal);
+      // 打ち切ったあとに来る拒否を握る（待っていない側の拒否を、未処理のまま残さない）
+      void call.catch(() => {});
+      const raced = await Promise.race([call, aborted]);
+      if (raced === "deadline" || raced === "timeout") return { kind: raced };
       return { kind: "ok", result: raced };
     } finally {
       if (timer !== undefined) clearTimeout(timer);

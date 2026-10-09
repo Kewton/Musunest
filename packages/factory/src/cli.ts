@@ -53,7 +53,7 @@ export const EXIT_USAGE = 2;
 
 /** 使い方の文（誤りを人に見せる） */
 export const USAGE =
-  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>]";
+  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>]";
 
 /** 手元の入口が受け取る引数 */
 export interface CliArguments {
@@ -65,6 +65,11 @@ export interface CliArguments {
   readonly budgetUsd?: number;
   /** 締切（ミリ秒）。指定しなければ既定（`DEFAULT_DEADLINE_MS`）を使う */
   readonly deadlineMs?: number;
+  /**
+   * 呼び出し 1 回ごとの timeout（ミリ秒）。指定しなければ effort から出す（#302）。
+   * 実際に使う値は締切の残りを超えない（共通の口が頭を打つ）。
+   */
+  readonly timeoutMs?: number;
 }
 
 /** 引数を読む。誤りは `error` に人の読む文を入れて返す（例外にしない） */
@@ -76,6 +81,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   let effort: string = DEFAULT_EFFORT;
   let budgetUsd: number | undefined;
   let deadlineMs: number | undefined;
+  let timeoutMs: number | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === undefined) continue;
@@ -114,6 +120,16 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
       deadlineMs = minutes * 60_000;
       continue;
     }
+    if (arg === "--timeout") {
+      const raw = args[index + 1];
+      index += 1;
+      const minutes = raw === undefined ? Number.NaN : Number(raw);
+      if (!Number.isFinite(minutes) || minutes <= 0) {
+        return { error: "--timeout には 0 より大きい数（分）を指定してください" };
+      }
+      timeoutMs = minutes * 60_000;
+      continue;
+    }
     if (arg.startsWith("--")) return { error: `知らない選択肢: ${arg}` };
     if (requestFile === undefined) {
       requestFile = arg;
@@ -130,6 +146,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
     effort,
     ...(budgetUsd === undefined ? {} : { budgetUsd }),
     ...(deadlineMs === undefined ? {} : { deadlineMs }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
   };
 }
 
@@ -197,6 +214,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
     now,
     deadline: now() + deadlineMs,
     ...(deps.limits === undefined ? {} : { limits: deps.limits }),
+    ...(parsed.timeoutMs === undefined ? {} : { callTimeoutMs: parsed.timeoutMs }),
     runId: `local-${String(now())}`,
     storageUnit: parsed.outDir,
     builder: BUILDER,

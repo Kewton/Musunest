@@ -15,6 +15,7 @@
 //   * 誤りは型付きで分類する（`OpenAiAdapterError` の `kind`）。
 //     HTTP の誤り（状態コード付き）・timeout・拒否・**未完了の応答**・形が合わない応答・
 //     道具の引数が JSON として読めない・残高切れ。**JSON として読めても未完了の応答は成功にしない。**
+import { callTimeoutMsForEffort } from "./limits.js";
 import type {
   LlmClient,
   LlmStructuredRequest,
@@ -30,8 +31,14 @@ import type {
 /** Responses API の既定のモデル（§2 の表「モデル」） */
 export const DEFAULT_OPENAI_MODEL = "gpt-6-luna";
 
-/** 呼び出しごとの timeout の既定（ミリ秒。§1.5「呼び出しごとに timeout」） */
-export const DEFAULT_TIMEOUT_MS = 60_000;
+/**
+ * usage に、キャッシュの**書き込み**のトークンを足した形（#302）。読み取り（`cachedInputTokens`）と
+ * 分けて見るために、共通の契約（`LlmUsage`）の外側に足す。adapter が wire から読んで付ける。
+ */
+export interface OpenAiUsage extends LlmUsage {
+  /** 入力のうち、キャッシュへ書き込んだトークン */
+  readonly cacheWriteTokens: number;
+}
 
 /** Responses API の入口（1 か所に固定する。環境変数からは読まない） */
 const RESPONSES_URL = "https://api.openai.com/v1/responses";
@@ -117,7 +124,11 @@ export interface OpenAiAdapterOptions {
   readonly effort?: string;
   /** 差し込む `fetch`（既定 `globalThis.fetch`。§2.1） */
   readonly fetch?: FetchLike;
-  /** 呼び出しごとの timeout（ミリ秒。既定 `DEFAULT_TIMEOUT_MS`） */
+  /**
+   * 呼び出しごとの timeout（ミリ秒）。指定しなければ effort から出す（`callTimeoutMsForEffort`）。
+   * **合図（`signal`）が渡されたときは使わない**——呼ぶ側（共通の口）が呼び出しごとの timeout を
+   * 持ち、締切の残りで頭を打つ（#302）。
+   */
   readonly timeoutMs?: number;
 }
 
@@ -143,7 +154,9 @@ export function createOpenAiLlmClient(options: OpenAiAdapterOptions): LlmClient 
     model: options.model ?? DEFAULT_OPENAI_MODEL,
     effort: options.effort,
     fetch: request,
-    timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    // 合図（signal）が渡されたときは使わない（呼ぶ側が timeout を持つ）。渡されないときの既定は、
+    // 固定の 60 秒ではなく effort ごとの値にする（#302）。
+    timeoutMs: options.timeoutMs ?? callTimeoutMsForEffort(options.effort ?? ""),
   };
   return {
     callStructured: <T>(structuredRequest: LlmStructuredRequest) =>
@@ -154,14 +167,22 @@ export function createOpenAiLlmClient(options: OpenAiAdapterOptions): LlmClient 
 
 // ── 呼び出し（fetch と timeout。§1.5・§2.1）────────────────────────────────
 
-/** 1 回の実呼び出し。timeout と、共通の口からの合図（`signal`）の両方で打ち切る */
+/**
+ * 1 回の実呼び出し。打ち切りは 2 つの経路で起こる——自分の時計（`timeoutMs`）と、共通の口からの
+ * 合図（`signal`）。**合図が渡されたときは自分の時計を持たない**：呼び出しごとの timeout は呼ぶ側
+ * （共通の口）が持ち、締切の残りで頭を打ち、やり直しでは長くする（#302）。二重の時計があると、
+ * やり直しの timeout を伸ばせない。渡されないとき（adapter を単体で使うとき）だけ、自分で打ち切る。
+ */
 async function send(config: WireConfig, body: unknown, signal: AbortSignal | undefined): Promise<Response> {
   const controller = new AbortController();
   let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, config.timeoutMs);
+  const timer =
+    signal === undefined
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, config.timeoutMs)
+      : undefined;
   const onAbort = () => controller.abort();
   signal?.addEventListener("abort", onAbort);
   try {
@@ -180,7 +201,7 @@ async function send(config: WireConfig, body: unknown, signal: AbortSignal | und
     }
     throw new OpenAiAdapterError("network", `fetch が失敗しました: ${messageOf(error)}`);
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
   }
 }
@@ -473,20 +494,28 @@ function parseToolArguments(raw: unknown): unknown {
 // ── usage（§1.5・R-6）───────────────────────────────────────────────────
 
 /**
- * usage を共通の契約の形に直す。**無い・壊れているときは `undefined`**（「usage なし」）を返し、
- * 共通の口に予約を残させる。壊れている＝数でない・負・整数でない・内訳が合計を超える。
+ * usage を共通の契約の形（＋キャッシュの書き込み。#302）に直す。**無い・壊れているときは
+ * `undefined`**（「usage なし」）を返し、共通の口に予約を残させる。壊れている＝数でない・負・
+ * 整数でない・内訳が合計を超える。
+ *
+ * キャッシュの**読み取り**（`cached_tokens`）と**書き込み**（`cache_write_tokens`）は分けて持つ。
+ * 書き込みの欄が無い wire は 0 として扱う（記録を止めない）。
  */
-function parseUsage(value: unknown): LlmUsage | undefined {
+function parseUsage(value: unknown): OpenAiUsage | undefined {
   if (!isRecord(value)) return undefined;
   const inputTokens = nonNegativeInteger(value.input_tokens);
   const outputTokens = nonNegativeInteger(value.output_tokens);
   if (inputTokens === undefined || outputTokens === undefined) return undefined;
   const cachedInputTokens = detailCount(value.input_tokens_details, "cached_tokens");
+  const cacheWriteTokens = detailCount(value.input_tokens_details, "cache_write_tokens");
   const reasoningTokens = detailCount(value.output_tokens_details, "reasoning_tokens");
-  if (cachedInputTokens === undefined || reasoningTokens === undefined) return undefined;
+  if (cachedInputTokens === undefined || cacheWriteTokens === undefined || reasoningTokens === undefined) {
+    return undefined;
+  }
   if (cachedInputTokens > inputTokens) return undefined;
+  if (cacheWriteTokens > inputTokens) return undefined;
   if (reasoningTokens > outputTokens) return undefined;
-  return { inputTokens, cachedInputTokens, outputTokens, reasoningTokens };
+  return { inputTokens, cachedInputTokens, cacheWriteTokens, outputTokens, reasoningTokens };
 }
 
 function nonNegativeInteger(value: unknown): number | undefined {

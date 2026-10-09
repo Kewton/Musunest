@@ -7,12 +7,15 @@
 import { describe, expect, it } from "vitest";
 import {
   AGENT_LIMITS,
+  CALL_TIMEOUT_BY_EFFORT,
   LIMIT_GUARDS,
   OUTPUT_STAGES,
   STAGE_MAX_OUTPUT_TOKENS,
+  callTimeoutMsForEffort,
   checkDeclarationBytes,
   checkLimit,
   checkRequestText,
+  effectiveCallTimeoutMs,
   isReasoningEffort,
   maxOutputTokensForEffort,
   type LimitName,
@@ -104,5 +107,44 @@ describe("段の出力の上限は effort ごとに、共通の置き場所が�
     for (const stage of OUTPUT_STAGES) {
       expect(maxOutputTokensForEffort("nope", stage)).toBe(maxOutputTokensForEffort("high", stage));
     }
+  });
+});
+
+// ── 呼び出しごとの timeout（effort ごと。§1.5・#302）──────────────────
+
+describe("呼び出しごとの timeout は、effort ごとに持つ（02 §1.5・#302）", () => {
+  it("effort high の timeout は、medium 以上である", () => {
+    expect(callTimeoutMsForEffort("high")).toBeGreaterThanOrEqual(callTimeoutMsForEffort("medium"));
+    expect(callTimeoutMsForEffort("medium")).toBeGreaterThanOrEqual(callTimeoutMsForEffort("low"));
+  });
+
+  it("基準の値は共通の置き場所（CALL_TIMEOUT_BY_EFFORT）から取り、固定の 60 秒ではない", () => {
+    for (const effort of ["low", "medium", "high"] as const) {
+      expect(callTimeoutMsForEffort(effort)).toBe(CALL_TIMEOUT_BY_EFFORT[effort]);
+    }
+    // high は、疎通の確認で足りなかった 60 秒より十分に長い
+    expect(callTimeoutMsForEffort("high")).toBeGreaterThan(60_000);
+  });
+
+  it("知らない effort は、既定（high）へ倒す（段を止めない）", () => {
+    expect(callTimeoutMsForEffort("nope")).toBe(callTimeoutMsForEffort("high"));
+    expect(callTimeoutMsForEffort("")).toBe(callTimeoutMsForEffort("high"));
+  });
+
+  it("実際に使う timeout は、ジョブの締切の残りを超えない", () => {
+    // 残りが基準より短ければ、残りに切り詰める
+    expect(effectiveCallTimeoutMs({ effort: "high", remainingMs: 1_000 })).toBe(1_000);
+    // 残りが基準より長ければ、基準のまま
+    expect(effectiveCallTimeoutMs({ effort: "high", remainingMs: 10_000_000 })).toBe(
+      callTimeoutMsForEffort("high"),
+    );
+    // 残りが尽きていれば 0（呼ばない）
+    expect(effectiveCallTimeoutMs({ effort: "high", remainingMs: 0 })).toBe(0);
+    expect(effectiveCallTimeoutMs({ effort: "high", remainingMs: -1 })).toBe(0);
+  });
+
+  it("呼ぶ側の指定（手元の入口の --timeout）は、effort の基準より優先し、締切の残りを超えない", () => {
+    expect(effectiveCallTimeoutMs({ effort: "high", remainingMs: 10_000_000, timeoutMs: 1_200 })).toBe(1_200);
+    expect(effectiveCallTimeoutMs({ effort: "high", remainingMs: 800, timeoutMs: 1_200 })).toBe(800);
   });
 });

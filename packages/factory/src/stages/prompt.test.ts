@@ -3,9 +3,9 @@
 // ここで固定したいのは 3 つ。
 //   1. 規則とデータが別の入力であること・データに仕込んだ「規則を無視せよ」が規則の側へ入らないこと
 //   2. 構造化出力の要求には JSON Schema が付き、文書は呼ぶ側から渡ったものだけが入ること
-//   3. 形が合わない応答・拒否は 1 回だけやり直し、2 回続くと段の失敗になること
+//   3. 形が合わない応答は 1 回だけやり直し、誤りは種類ごとに段の失敗になること（拒否はやり直さない。#302）
 import { describe, expect, it } from "vitest";
-import type { LlmClient, LlmStructuredRequest } from "../llm.js";
+import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse } from "../llm.js";
 import { OpenAiIncompleteError } from "../openai.js";
 import {
   DATA_IS_NOT_INSTRUCTIONS_RULE,
@@ -46,20 +46,8 @@ function checkN(output: unknown): ShapeCheck<NValue> {
 
 const PLAN: StructuredPlan<NValue> = { request: REQUEST, check: checkN };
 
-/** 最初の `failures` 回だけ拒否（例外）を投げ、その後は正しい答えを返す偽物 */
-function refusingClient(failures: number): LlmClient {
-  let calls = 0;
-  return {
-    async callStructured<T>() {
-      calls += 1;
-      if (calls <= failures) throw new Error("拒否（refusal）");
-      return { output: { n: 1 } as T, usage: undefined };
-    },
-    async callWithTools() {
-      throw new Error("未使用");
-    },
-  };
-}
+/** 拒否（refusal）を表す誤り（adapter が投げる形をまねる。#302） */
+const refusalError = (): Error => Object.assign(new Error("モデルが拒否しました"), { kind: "refusal" });
 
 describe("規則とデータを分ける（02 §2.2）", () => {
   it("規則は instructions に、データは input にだけ置く", () => {
@@ -118,7 +106,7 @@ describe("規則とデータを分ける（02 §2.2）", () => {
   });
 });
 
-describe("形が合わない応答と拒否（02 §2.2・1 回だけやり直す）", () => {
+describe("形が合わない応答は 1 回だけやり直す（02 §2.2）", () => {
   it("形が合わない応答は 1 回だけやり直し、2 回目が合えば通る", async () => {
     const recording = createRecordingClient([
       { kind: "structured", output: { bad: true }, usage: undefined },
@@ -143,16 +131,41 @@ describe("形が合わない応答と拒否（02 §2.2・1 回だけやり直す
     expect(recording.structured).toHaveLength(2);
   });
 
-  it("拒否は 1 回だけやり直し、2 回目が通れば通る", async () => {
-    const outcome = await callStructuredChecked(makeGateway(refusingClient(1)), PLAN);
-    expect(outcome.ok).toBe(true);
-  });
-
-  it("拒否が 2 回続くと段の失敗になる", async () => {
-    const outcome = await callStructuredChecked(makeGateway(refusingClient(Number.POSITIVE_INFINITY)), PLAN);
+  it("拒否は、拒否として段の失敗にし、やり直さない（02 §2.2・#302）", async () => {
+    let calls = 0;
+    const client: LlmClient = {
+      async callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        throw refusalError();
+      },
+      async callWithTools(): Promise<LlmToolResponse> {
+        throw new Error("未使用");
+      },
+    };
+    const outcome = await callStructuredChecked(makeGateway(client), PLAN);
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.failure.kind).toBe("refused");
+    // 拒否はやり直さない（#302。§2.2「1 回だけやり直す」は形が合わない応答に限る）
+    expect(calls).toBe(1);
+  });
+
+  it("分類できない例外は unknown として段の失敗にし、拒否に混ぜず、やり直さない（02 §2.2・#302）", async () => {
+    let calls = 0;
+    const client: LlmClient = {
+      async callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        throw new Error("分類できない");
+      },
+      async callWithTools(): Promise<LlmToolResponse> {
+        throw new Error("未使用");
+      },
+    };
+    const outcome = await callStructuredChecked(makeGateway(client), PLAN);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("unknown");
+    expect(calls).toBe(1);
   });
 });
 
