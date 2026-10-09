@@ -13,6 +13,7 @@ import {
   CallGateway,
   estimateInputUpperBoundTokens,
   isIncompleteResponseError,
+  isInvalidRequestError,
   structuredInputParts,
   toolInputParts,
   type LlmInputParts,
@@ -34,6 +35,7 @@ const RATES: TokenRates = { inputPerToken: 1, cachedInputPerToken: 0.5, outputPe
 const STRUCTURED_REQUEST: LlmStructuredRequest = {
   instructions: "規則",
   documents: ["文書"],
+  rules: ["段の規則"],
   input: "依頼文",
   schemaName: "out",
   schema: { type: "object" },
@@ -43,6 +45,7 @@ const STRUCTURED_REQUEST: LlmStructuredRequest = {
 const TOOL_REQUEST: LlmToolRequest = {
   instructions: "規則",
   documents: ["文書"],
+  rules: ["段の規則"],
   input: "宣言",
   tools: [{ name: "staticCheck", description: "静的チェックを流す", parameters: { type: "object" } }],
   turns: [],
@@ -71,6 +74,7 @@ function spyClient(onCall: () => void): LlmClient {
 const EMPTY: LlmInputParts = {
   instructions: "",
   documents: [],
+  rules: [],
   schema: undefined,
   tools: [],
   turns: [],
@@ -78,10 +82,11 @@ const EMPTY: LlmInputParts = {
 };
 
 describe("入力の上界（02 §1.5・§2.2）", () => {
-  it("規則・文書・schema・道具・履歴・データの全部から数える", () => {
+  it("規則・文書・段の規則・schema・道具・履歴・データの全部から数える", () => {
     expect(estimateInputUpperBoundTokens(EMPTY)).toBe(0);
     expect(estimateInputUpperBoundTokens({ ...EMPTY, instructions: "a" })).toBeGreaterThan(0);
     expect(estimateInputUpperBoundTokens({ ...EMPTY, documents: ["a"] })).toBeGreaterThan(0);
+    expect(estimateInputUpperBoundTokens({ ...EMPTY, rules: ["a"] })).toBeGreaterThan(0);
     expect(estimateInputUpperBoundTokens({ ...EMPTY, schema: { x: 1 } })).toBeGreaterThan(0);
     expect(
       estimateInputUpperBoundTokens({
@@ -396,5 +401,45 @@ describe("未完了の応答（02 §2.2・§1.5）", () => {
     ).toBe(true);
     expect(isIncompleteResponseError(new Error("拒否"))).toBe(false);
     expect(isIncompleteResponseError({ kind: "incomplete", reason: "max_output_tokens" })).toBe(false);
+  });
+});
+
+// ── 要求そのものが不正な誤り（02 §2.2）────────────────────────────
+
+/** 要求の誤りを表す誤り（HTTP 400 など。adapter が投げる形をまねる） */
+const invalidRequestError = (code: string): Error =>
+  Object.assign(new Error(`要求が不正です（${code}）`), { kind: "invalidRequest", code });
+
+describe("要求そのものが不正な誤り（02 §2.2）", () => {
+  it("拒否と分け、同じ要求のままやり直さない（試行は 1 回で止める）", async () => {
+    let attempts = 0;
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        attempts += 1;
+        return Promise.reject(invalidRequestError("invalid_json_schema"));
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    const budget = new JobBudget(1_000);
+    const gateway = new CallGateway({ client, budget, rates: RATES, now: () => 0, deadline: 1_000 });
+
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result).toEqual({ kind: "invalidRequest", code: "invalid_json_schema" });
+    expect(attempts).toBe(1);
+    expect(gateway.calls).toBe(1);
+    expect(gateway.retries).toBe(0);
+  });
+
+  it("要求の誤りを表す誤りを、構造で見分ける（口は adapter に依存しない）", () => {
+    expect(isInvalidRequestError(invalidRequestError("invalid_json_schema"))).toBe(true);
+    expect(
+      isInvalidRequestError(Object.assign(new Error("x"), { kind: "invalidRequest", code: "invalid_json_schema" })),
+    ).toBe(true);
+    expect(isInvalidRequestError(new Error("拒否"))).toBe(false);
+    // code が無いものは、要求の誤りとして見分けない
+    expect(isInvalidRequestError(Object.assign(new Error("x"), { kind: "invalidRequest" }))).toBe(false);
+    expect(isInvalidRequestError({ kind: "invalidRequest", code: "invalid_json_schema" })).toBe(false);
   });
 });

@@ -397,11 +397,16 @@ describe("⑥ が送る要求を観測する（02 §2.2）", () => {
     expect(request.input).toContain("静的チェックの結果");
     expect(request.input).toContain("対応表の落ち");
     expect(request.input).toContain("試験の結果");
-    expect(request.instructions).toContain("変えられない");
+    expect((request.rules ?? []).join("\n")).toContain("変えられない");
     expect(request.instructions).not.toContain(V1);
     expect(request.tools).toHaveLength(3);
     for (const tool of request.tools) expect(tool.parameters).toBeTypeOf("object");
-    expectNoAcceptanceMaterial([request.instructions, request.input, ...request.documents]);
+    expectNoAcceptanceMaterial([
+      request.instructions,
+      ...(request.rules ?? []),
+      request.input,
+      ...request.documents,
+    ]);
   });
 
   it("データに仕込んだ「規則を無視せよ」は、規則の側へ入らない", async () => {

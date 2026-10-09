@@ -9,7 +9,7 @@ import { normalizeSpec } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import { checkTestSuite } from "../../fixed-test.js";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest } from "../../llm.js";
-import { createOpenAiLlmClient } from "../../openai.js";
+import { OPENAI_PROMPT_CACHE_KEY, createOpenAiLlmClient } from "../../openai.js";
 import { runArbitration } from "../arbitrate.js";
 import { runCorrespondence } from "../correspondence.js";
 import { runDesign } from "../design.js";
@@ -85,8 +85,10 @@ async function toolRequestOf(run: (client: LlmClient) => Promise<unknown>): Prom
   return request;
 }
 
-/** 要求を openai の adapter に通し、wire の入力（`input` のテキストの並び）を読む（実 API は呼ばない） */
-async function wireInputTexts(request: LlmStructuredRequest | LlmToolRequest): Promise<readonly string[]> {
+/** 要求を openai の adapter に通し、wire の body と入力（`input` のテキストの並び）を読む（実 API は呼ばない） */
+async function wireRequest(
+  request: LlmStructuredRequest | LlmToolRequest,
+): Promise<{ readonly body: Record<string, unknown>; readonly texts: readonly string[] }> {
   const captured: Record<string, unknown>[] = [];
   const fetch = async (_url: string, init: RequestInit): Promise<Response> => {
     captured.push(JSON.parse(String(init.body)) as Record<string, unknown>);
@@ -112,24 +114,37 @@ async function wireInputTexts(request: LlmStructuredRequest | LlmToolRequest): P
   const body = captured[0];
   if (body === undefined) throw new Error("wire の要求が記録されていません");
   const input = body.input as readonly { content: readonly { text: string }[] }[];
-  return input.map((item) => item.content[0]?.text ?? "");
+  return { body, texts: input.map((item) => item.content[0]?.text ?? "") };
 }
 
-/** 1 つの要求が、規則と文書を先頭に固定し、依頼文を後ろに置いていることを確かめる */
+/** 段の規則が、wire の入力で文書の直後・データの直前に置かれる 1 項目の文字列 */
+function ruleItemText(rules: readonly string[]): string {
+  return `<rules>\n${rules.join("\n")}\n</rules>`;
+}
+
+/**
+ * 1 つの要求が、規則と文書を先頭に固定し、段の規則をその直後に、依頼文をさらに後ろに置いていることを
+ * 確かめる（§2・§2.2）。`instructions` は**共通の規則だけ**で、全段で同じ値になる。
+ */
 async function expectPreparedPrefix(request: LlmStructuredRequest | LlmToolRequest): Promise<void> {
-  // 規則：共通の規則が先頭にあり、データの囲みは規則の側に入らない
-  expect(request.instructions.startsWith(COMMON_RULES[0] ?? "")).toBe(true);
+  // 規則：`instructions` は共通の規則だけ。データの囲みは規則の側に入らない
+  expect(request.instructions).toBe(COMMON_RULES.join("\n"));
   expect(request.instructions).not.toContain("<data ");
+  // 段ごとの規則は rules に分かれている（データは入らない）
+  expect((request.rules ?? []).length).toBeGreaterThan(0);
   // 文書：段によらず同じ並びで、そのまま渡る
   expect(request.documents).toEqual(RENDERED_DOCUMENTS);
   // データ：規則とは別の `input` にだけ入る
   expect(request.input.startsWith('<data name="')).toBe(true);
-  // wire でも、文書が入力の先頭で、依頼文（データの囲み）がその後ろに置かれる
-  const wire = await wireInputTexts(request);
-  expect(wire.slice(0, RENDERED_DOCUMENTS.length)).toEqual(RENDERED_DOCUMENTS);
-  const data = wire[RENDERED_DOCUMENTS.length];
+  // wire：文書 → 段の規則 → 依頼文（データの囲み）の順に置かれる
+  const wire = await wireRequest(request);
+  expect(wire.texts.slice(0, RENDERED_DOCUMENTS.length)).toEqual(RENDERED_DOCUMENTS);
+  expect(wire.texts[RENDERED_DOCUMENTS.length]).toBe(ruleItemText(request.rules ?? []));
+  const data = wire.texts[RENDERED_DOCUMENTS.length + 1];
   expect(data?.startsWith("<data>\n")).toBe(true);
-  expect(wire).toHaveLength(RENDERED_DOCUMENTS.length + 1);
+  expect(wire.texts).toHaveLength(RENDERED_DOCUMENTS.length + 2);
+  // キャッシュの振り分けの鍵は、全段で同じ値
+  expect(wire.body.prompt_cache_key).toBe(OPENAI_PROMPT_CACHE_KEY);
 }
 
 describe("すべての段の要求で、規則と文書が入力の先頭に同じ並びで置かれる（02 §2・§2.2）", () => {
@@ -240,5 +255,42 @@ describe("すべての段の要求で、規則と文書が入力の先頭に同�
     const request = recording.structured[0];
     if (request === undefined) throw new Error("要求が記録されていません");
     await expectPreparedPrefix(request);
+  });
+});
+
+// ── 全段で前置き（共通の規則＋文書）をバイト列として同じにし、鍵も同じにする（02 §2・§2.2）──
+
+/** 段の要求の、前置きに当たる部分（共通の規則と文書）をバイト列として取り出す */
+const prefixOf = (request: LlmStructuredRequest | LlmToolRequest): string =>
+  JSON.stringify({ instructions: request.instructions, documents: request.documents });
+
+describe("2 つの段で、前置きがバイト列として同じで、鍵も同じ（02 §2）", () => {
+  it("① と ②' で、前置き（規則と文書）がバイト列として同じで、段の規則・データはその後ろにある", async () => {
+    const requirements = await structuredRequestOf((client) =>
+      runRequirements({ source: SOURCE_TEXT, documents: SAMPLE_DOCUMENTS, gateway: gatewayFor(client) }),
+    );
+    const testSuiteRecording = createRecordingClient([structured(TEST_SUITE_OUTPUT)]);
+    await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: gatewayFor(testSuiteRecording.client),
+    });
+    const testSuite = testSuiteRecording.structured[0];
+    if (testSuite === undefined) throw new Error("②' の要求が記録されていません");
+
+    // 前置き（共通の規則と文書）はバイト列として同じ
+    expect(prefixOf(requirements)).toBe(prefixOf(testSuite));
+    // 段ごとの規則は前置きの側には無く、別に持つ
+    expect(requirements.rules).not.toEqual(testSuite.rules);
+
+    // wire でも、前置き（文書）の後ろに段の規則、さらに後ろにデータが並ぶ
+    for (const request of [requirements, testSuite]) {
+      const wire = await wireRequest(request);
+      expect(wire.texts.slice(0, RENDERED_DOCUMENTS.length)).toEqual(RENDERED_DOCUMENTS);
+      expect(wire.texts[RENDERED_DOCUMENTS.length]).toBe(ruleItemText(request.rules ?? []));
+      expect(wire.texts[RENDERED_DOCUMENTS.length + 1]?.startsWith("<data>\n")).toBe(true);
+      // キャッシュの振り分けの鍵は同じ値
+      expect(wire.body.prompt_cache_key).toBe(OPENAI_PROMPT_CACHE_KEY);
+    }
   });
 });

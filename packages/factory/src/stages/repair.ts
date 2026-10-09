@@ -213,6 +213,8 @@ function mapGatewayFailure(result: ToolCallFailure): StageFailure {
       return { kind: "callLimit", limit: result.limit, max: result.max, actual: result.actual };
     case "incomplete":
       return { kind: "incomplete", reason: result.reason };
+    case "invalidRequest":
+      return { kind: "invalidRequest", code: result.code };
     case "failed":
       return { kind: "refused", attempts: result.attempts };
   }
@@ -227,8 +229,9 @@ function mapGatewayFailure(result: ToolCallFailure): StageFailure {
 export async function runRepairStep(input: RepairStepInput): Promise<StageOutcome<RepairResult>> {
   const testIds = new Set(input.suite.tests.map((test) => test.id));
   const plan: ToolPlan = {
-    instructions: [...COMMON_RULES, ...REPAIR_RULES].join("\n"),
+    instructions: COMMON_RULES.join("\n"),
     documents: input.documents.map((document) => `${document.name}\n${document.text}`),
+    rules: REPAIR_RULES,
     input: buildRepairData(input).map(wrapData).join("\n"),
     tools: REPAIR_TOOLS,
     maxOutputTokens: input.gateway.maxOutputTokens("repair"),

@@ -130,11 +130,23 @@ function stageFailureToKind(failure: StageFailure): FailureKind {
       return "malformed";
     case "refused":
       return "refused";
+    case "invalidRequest":
+      return "invalid-request";
     case "incomplete":
       return "incomplete";
     case "unmet":
       return "unmet";
   }
+}
+
+/**
+ * 段の失敗を、記録の失敗の帰属に写す（S-7）。**要求そのものが不正な誤り**のときは、やり直しても
+ * 通らないので、**誤りの種類（`code`。例 `invalid_json_schema`）だけ**を残す（本文の全文は残さない。S-8）。
+ */
+function stageFailureAttribution(stage: StageId, failure: StageFailure): FailureAttribution {
+  const kind = stageFailureToKind(failure);
+  if (failure.kind === "invalidRequest") return { stage, kind, code: failure.code };
+  return { stage, kind };
 }
 
 /** 要約の `assurance`（試験と対応表が覆った範囲。§4） */
@@ -221,7 +233,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     let value: T;
     try {
       const outcome = await fn();
-      if (!outcome.ok) throw new RunStop({ stage, kind: stageFailureToKind(outcome.failure) });
+      if (!outcome.ok) throw new RunStop(stageFailureAttribution(stage, outcome.failure));
       value = outcome.value;
     } catch (error) {
       pushRecord(stage, "failed", before, start, error instanceof RunStop ? error.attribution.kind : null);
