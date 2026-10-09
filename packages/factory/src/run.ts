@@ -89,6 +89,11 @@ export interface GenerationInput {
   readonly factoryVersion: string;
   /** 検証の道具の profile（manifest の `instrument.verification_profile`） */
   readonly verificationProfile?: string;
+  /**
+   * 呼び出し 1 回ごとの timeout の基準（ミリ秒）。指定しなければ effort から出す（#302）。
+   * 手元の入口（`--timeout`）が渡す。実際に使う値は締切の残りを超えず、やり直しでは長くする。
+   */
+  readonly callTimeoutMs?: number;
 }
 
 /** 1 回の生成の結果 */
@@ -115,7 +120,7 @@ class RunStop extends Error {
   }
 }
 
-/** 段の失敗を、記録の失敗の分類に写す（§2.2・S-7） */
+/** 段の失敗を、記録の失敗の分類に写す（§2.2・S-7・#302）。呼び出しの誤りの種類はそのまま写す */
 function stageFailureToKind(failure: StageFailure): FailureKind {
   switch (failure.kind) {
     case "limit":
@@ -126,14 +131,26 @@ function stageFailureToKind(failure: StageFailure): FailureKind {
       return "budget";
     case "callLimit":
       return "call-limit";
+    case "timeout":
+      return "timeout";
+    case "network":
+      return "network";
+    case "http":
+      return "http";
+    case "balance":
+      return "balance";
     case "malformed":
       return "malformed";
     case "refused":
       return "refused";
+    case "toolArguments":
+      return "tool-arguments";
     case "invalidRequest":
       return "invalid-request";
     case "incomplete":
       return "incomplete";
+    case "unknown":
+      return "unknown";
     case "unmet":
       return "unmet";
   }
@@ -188,6 +205,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     deadline: input.deadline,
     limits,
     effort: input.effort,
+    ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
   });
   const startedAt = input.now();
   const stages: StageRecord[] = [];

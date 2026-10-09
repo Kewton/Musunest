@@ -14,7 +14,6 @@ import type {
   LlmStructuredRequest,
   LlmToolRequest,
   LlmTurn,
-  LlmUsage,
 } from "./llm.js";
 import {
   OPENAI_PROMPT_CACHE_KEY,
@@ -23,6 +22,7 @@ import {
   createOpenAiLlmClient,
   type FetchLike,
   type OpenAiErrorKind,
+  type OpenAiUsage,
 } from "./openai.js";
 
 interface NodeFileSystem {
@@ -116,12 +116,18 @@ const TOOL_REQUEST: LlmToolRequest = {
 
 const USAGE_WIRE = {
   input_tokens: 100,
-  input_tokens_details: { cached_tokens: 40 },
+  input_tokens_details: { cached_tokens: 40, cache_write_tokens: 10 },
   output_tokens: 20,
   output_tokens_details: { reasoning_tokens: 5 },
   total_tokens: 120,
 };
-const USAGE: LlmUsage = { inputTokens: 100, cachedInputTokens: 40, outputTokens: 20, reasoningTokens: 5 };
+const USAGE: OpenAiUsage = {
+  inputTokens: 100,
+  cachedInputTokens: 40,
+  cacheWriteTokens: 10,
+  outputTokens: 20,
+  reasoningTokens: 5,
+};
 
 const clientWith = (fetch: FetchLike, timeoutMs?: number) =>
   createOpenAiLlmClient(timeoutMs === undefined ? { apiKey: "test-key", fetch } : { apiKey: "test-key", fetch, timeoutMs });
@@ -321,12 +327,34 @@ describe("usage の分類（02 §1.5・R-6）", () => {
     expect(response.usage).toBeUndefined();
   });
 
+  it("キャッシュの書き込みの欄が無ければ 0 にして、読み取りと分けて持つ（#302）", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(
+        completed(outputText(JSON.stringify({ items: [1] })), {
+          input_tokens: 100,
+          input_tokens_details: { cached_tokens: 40 },
+          output_tokens: 20,
+          output_tokens_details: { reasoning_tokens: 5 },
+        }),
+      ),
+    );
+    const response = await clientWith(fetch).callStructured(STRUCTURED_REQUEST);
+    expect(response.usage).toEqual({
+      inputTokens: 100,
+      cachedInputTokens: 40,
+      cacheWriteTokens: 0,
+      outputTokens: 20,
+      reasoningTokens: 5,
+    });
+  });
+
   it("壊れた usage（数でない・負・内訳が合計を超える）は「usage なし」にする", async () => {
     const broken: readonly unknown[] = [
       { input_tokens: "100", output_tokens: 20 },
       { input_tokens: -1, output_tokens: 20 },
       { input_tokens: 10.5, output_tokens: 20 },
       { input_tokens: 100, output_tokens: 20, input_tokens_details: { cached_tokens: 200 } },
+      { input_tokens: 100, output_tokens: 20, input_tokens_details: { cache_write_tokens: 200 } },
       { input_tokens: 100, output_tokens: 20, output_tokens_details: { reasoning_tokens: 200 } },
       { input_tokens: 100, output_tokens: 20, input_tokens_details: "壊れた" },
     ];
@@ -489,6 +517,17 @@ describe("誤りの分類（02 §2.2）", () => {
 
   it("timeout を分類する", async () => {
     const error = await captureError(() => clientWith(hangingFetch, 5).callStructured(STRUCTURED_REQUEST));
+    expect(error.kind).toBe("timeout");
+  });
+
+  it("合図（signal）が渡されたら自分の時計を持たず、合図の中断で timeout にする（#302）", async () => {
+    const client = clientWith(hangingFetch, 5);
+    const controller = new AbortController();
+    const pending = client.callStructured({ ...STRUCTURED_REQUEST, signal: controller.signal });
+    // adapter の時計（5ms）では打ち切られない（呼ぶ側が timeout を持つ）
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    controller.abort();
+    const error = await captureError(() => pending);
     expect(error.kind).toBe("timeout");
   });
 

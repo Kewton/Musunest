@@ -16,6 +16,7 @@ import {
   runCli,
 } from "./cli.js";
 import { BUNDLE_MANIFEST_FILE } from "./bundle.js";
+import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse } from "./llm.js";
 import { createRecordingClient } from "./stages/__tests__/prompt.js";
 import { SOURCE_TEXT, recordedRun } from "./__tests__/run.js";
 
@@ -126,6 +127,22 @@ describe("既定の上限は 0.30 USD・10 分で、引数で変えられる（0
       error: "--deadline には 0 より大きい数（分）を指定してください",
     });
   });
+
+  it("--timeout で、呼び出し 1 回ごとの timeout を変えられる（#302）", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--timeout", "3"])).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "gpt-6-luna",
+      effort: "high",
+      timeoutMs: 3 * 60_000,
+    });
+  });
+
+  it("--timeout の値が数でなければ誤り", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--timeout", "0"])).toEqual({
+      error: "--timeout には 0 より大きい数（分）を指定してください",
+    });
+  });
 });
 
 // ── 鍵が無いとき ─────────────────────────────────────────────────
@@ -215,5 +232,38 @@ describe("引数で変えた費用の上限が、生成に届く（02 §1.5）",
     expect(code).toBe(EXIT_RUN_FAILED);
     const summary = JSON.parse(lines.at(-1) ?? "{}") as { stop_class: string | null };
     expect(summary.stop_class).toBe("budget");
+  });
+});
+
+// ── 引数で変えた呼び出しごとの timeout が、生成に届く（#302）──────
+
+describe("引数で変えた呼び出しごとの timeout が、生成に届く（#302）", () => {
+  it("--timeout を短くすると、拒否ではなく timeout として止まる", async () => {
+    const hanging: LlmClient = {
+      callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        return new Promise<never>((_resolve, reject) => {
+          request.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("未使用"));
+      },
+    };
+    const lines: string[] = [];
+    const code = await runCli({
+      // 0.001 分 = 60ms。締切（10 分）には触れないので、呼び出しごとの timeout で打ち切られる
+      argv: ["--", "request.txt", "--out", `${directory}-timeout`, "--timeout", "0.001"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient: () => hanging,
+      log: (line) => lines.push(line),
+      now: () => 0,
+      deadlineMs: 600_000,
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    const summary = JSON.parse(lines.at(-1) ?? "{}") as { stop_class: string | null };
+    expect(summary.stop_class).toBe("timeout");
   });
 });

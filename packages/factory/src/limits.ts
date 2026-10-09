@@ -169,3 +169,51 @@ export function maxOutputTokensForEffort(effort: string, stage: OutputStage): nu
   const key: ReasoningEffort = isReasoningEffort(effort) ? effort : DEFAULT_REASONING_EFFORT;
   return STAGE_MAX_OUTPUT_TOKENS[key][stage];
 }
+
+// ── 呼び出しごとの timeout（effort ごと。§1.5・#302）─────────────────
+
+/**
+ * 呼び出し 1 回ごとの timeout（ミリ秒）の基準を、effort ごとに置く（§1.5「呼び出しごとに timeout」・
+ * #302「呼び出しの timeout を締切と effort から決める」）。
+ *
+ * 2026-10-09 の疎通の確認で、固定の 60 秒が原因で段が止まった：設計の段は 1 回 36〜52 秒かかり、
+ * 出力の大きい試験を作る段は 60 秒を超えて 2 回とも打ち切られた。effort が高いほど推論に時間を
+ * 使うので、effort ごとに置く——
+ *
+ *   - `high` … 5 分。試験を作る段の出力の上限（`STAGE_MAX_OUTPUT_TOKENS`）が `medium` の 4 倍で、
+ *     推論にも時間を使う。ジョブの既定の締切 10 分の中に、設計・試験の大きい段が収まる長さ
+ *   - `medium` … 2 分。固定値だった 60 秒の 2 倍
+ *   - `low` … 1 分。速さを優先する段の試しうち用
+ *
+ * **実際に使う値は、ジョブの締切の残りを超えない**（`effectiveCallTimeoutMs`）。値はここにだけ置く。
+ */
+export const CALL_TIMEOUT_BY_EFFORT: Record<ReasoningEffort, number> = {
+  low: 60_000,
+  medium: 120_000,
+  high: 300_000,
+};
+
+/**
+ * 呼び出しごとの timeout の基準を、effort から引く（#302）。知らない effort は
+ * `DEFAULT_REASONING_EFFORT`（`high`）へ倒す（段を止めない）。
+ */
+export function callTimeoutMsForEffort(effort: string): number {
+  const key: ReasoningEffort = isReasoningEffort(effort) ? effort : DEFAULT_REASONING_EFFORT;
+  return CALL_TIMEOUT_BY_EFFORT[key];
+}
+
+/**
+ * 実際に使う呼び出しごとの timeout（ミリ秒。#302）。effort から出した基準（または呼ぶ側の指定）と、
+ * ジョブの締切の残りを比べ、**残りを超えない**方を返す。残りが尽きていれば 0（呼ばない）。
+ */
+export function effectiveCallTimeoutMs(options: {
+  /** 推論の effort（基準の出所） */
+  readonly effort: string;
+  /** ジョブの締切の残り（ミリ秒） */
+  readonly remainingMs: number;
+  /** 呼ぶ側の指定（手元の入口の `--timeout` など）。無ければ effort の基準 */
+  readonly timeoutMs?: number;
+}): number {
+  const wanted = options.timeoutMs ?? callTimeoutMsForEffort(options.effort);
+  return Math.max(0, Math.min(wanted, options.remainingMs));
+}

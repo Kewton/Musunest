@@ -16,7 +16,7 @@ import { VERIFICATION_FILE, type BundleVerification } from "./bundle.js";
 import { AGENT_LIMITS } from "./limits.js";
 import { createFakeLlmClient, type RecordedCall } from "./llm-fake.js";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "./llm.js";
-import { OpenAiIncompleteError, createOpenAiLlmClient } from "./openai.js";
+import { OpenAiIncompleteError, createOpenAiLlmClient, type OpenAiUsage } from "./openai.js";
 import { runGeneration, type GenerationInput } from "./run.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
 import {
@@ -263,8 +263,14 @@ describe("未完了の応答の段の失敗と精算（02 §2.2・§1.5）", () 
     expect(result.summary.budget_remaining_usd).toBeLessThan(input.budgetUsd);
   });
 
-  it("段ごとに、キャッシュに当たった入力のトークンを記録に出す（02 §1.5・§2）", async () => {
-    const cachedUsage: LlmUsage = { inputTokens: 100, cachedInputTokens: 80, outputTokens: 20, reasoningTokens: 0 };
+  it("段ごとに、キャッシュの書き込みと読み取りのトークンを記録に出す（02 §1.5・§2・#302）", async () => {
+    const cachedUsage: OpenAiUsage = {
+      inputTokens: 100,
+      cachedInputTokens: 80,
+      cacheWriteTokens: 12,
+      outputTokens: 20,
+      reasoningTokens: 0,
+    };
     const cached: readonly RecordedCall[] = [
       structured(REQUIREMENT_LIST_OUTPUT, cachedUsage),
       structured(REVERSE_CHECK_OUTPUT, cachedUsage),
@@ -277,9 +283,71 @@ describe("未完了の応答の段の失敗と精算（02 §2.2・§1.5）", () 
 
     for (const stage of ["design", "write"] as const) {
       const record = result.record.stages.find((candidate) => candidate.stage === stage);
+      // 読み取りと書き込みを分けて出す（#302）
       expect(record?.cached_input_tokens, stage).toBe(80);
+      expect(record?.cache_write_tokens, stage).toBe(12);
     }
   });
+});
+
+// ── 呼び出しの誤りの種類が、段の失敗と記録に別々に出る（02 §2.2・S-7・#302）──
+
+/** 記録した応答を順に返し、`failAfter` 回を超えると決まった誤りを返す偽物（実 API を呼ばない） */
+function failingAfter(
+  recorded: readonly RecordedCall[],
+  failAfter: number,
+  error: unknown,
+): { readonly client: LlmClient } {
+  const inner = createFakeLlmClient(recorded);
+  let calls = 0;
+  return {
+    client: {
+      async callStructured<T>(request: LlmStructuredRequest) {
+        calls += 1;
+        if (calls > failAfter) throw error;
+        return inner.callStructured<T>(request);
+      },
+      async callWithTools(request: LlmToolRequest) {
+        calls += 1;
+        if (calls > failAfter) throw error;
+        return inner.callWithTools(request);
+      },
+    },
+  };
+}
+
+/** 誤りを作る（adapter が投げる形をまねる） */
+const kindError = (kind: string, extra: Record<string, unknown> = {}): Error =>
+  Object.assign(new Error(`誤り（${kind}）`), { kind }, extra);
+
+describe("呼び出しの誤りの種類が、段の失敗と記録に別々に出る（02 §2.2・S-7・#302）", () => {
+  const cases: readonly { readonly name: string; readonly error: unknown; readonly kind: string }[] = [
+    { name: "timeout", error: kindError("timeout"), kind: "timeout" },
+    { name: "network", error: kindError("network"), kind: "network" },
+    { name: "HTTP の 5xx", error: kindError("http", { status: 503 }), kind: "http" },
+    { name: "balance", error: kindError("balance"), kind: "balance" },
+    { name: "refusal", error: kindError("refusal"), kind: "refused" },
+    { name: "分類できない例外", error: new Error("分類できない"), kind: "unknown" },
+  ];
+
+  for (const one of cases) {
+    it(`${one.name} は、${one.kind} として段の失敗と記録に出る（拒否にしない）`, async () => {
+      const failing = failingAfter(
+        [structured(REQUIREMENT_LIST_OUTPUT), structured(REVERSE_CHECK_OUTPUT)],
+        2,
+        one.error,
+      );
+      const result = await runGeneration(
+        makeRunInput(failing.client, { callTimeoutMs: 100, deadline: 100_000 }),
+      );
+
+      expect(result.stopped).toEqual({ stage: "design", kind: one.kind });
+      expect(result.record.failure).toEqual({ stage: "design", kind: one.kind });
+      expect(result.summary.stop_class).toBe(one.kind);
+      const design = result.record.stages.find((stage) => stage.stage === "design");
+      expect(design).toMatchObject({ status: "failed", failure_kind: one.kind });
+    });
+  }
 });
 
 // ── 要求そのものが不正な誤り（HTTP 400）は、拒否と分け、記録に種類だけを残す（02 §2.2・S-8）──

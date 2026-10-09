@@ -41,6 +41,7 @@ import { checkCorrespondence } from "./correspondence.js";
 import {
   COMMON_RULES,
   isRecord,
+  mapCallErrorKind,
   serializeJson,
   type Problem,
   type PromptData,
@@ -216,7 +217,8 @@ function mapGatewayFailure(result: ToolCallFailure): StageFailure {
     case "invalidRequest":
       return { kind: "invalidRequest", code: result.code };
     case "failed":
-      return { kind: "refused", attempts: result.attempts };
+      // 共通の口が分類した誤りの種類を、そのまま段の失敗に写す（拒否は拒否のときだけ。#302）。
+      return mapCallErrorKind(result.errorKind, result.attempts);
   }
 }
 

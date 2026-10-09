@@ -9,10 +9,10 @@
 //   2. **文書は呼ぶ側から文字列で受け取る**（契約・語彙の意味・語彙の台帳）。このパッケージは
 //      ファイルを読まない（§2）。だから文書は引数であって、ここで組み立てない。
 //   3. **JSON Schema を付ける**。構造化出力の要求には、必ず `schemaName` と `schema` を付ける。
-//   4. **形が合わない応答・拒否は 1 回だけやり直し、2 回続いたら段の失敗にする**（§2.2）。
-//      形（JSON Schema に沿うか）は段ごとの `check` で見る。拒否は adapter が投げる誤りとして
-//      現れ、共通の口（call.ts）が 1 回だけやり直す。
-import type { CallGateway, CallResult } from "../call.js";
+//   4. **形が合わない応答は 1 回だけやり直し、2 回続いたら段の失敗にする**（§2.2）。形（JSON Schema に
+//      沿うか）は段ごとの `check` で見る。**例外として現れる誤りは、種類ごとにやり直すか決める**
+//      （共通の口＝call.ts。timeout・network・HTTP の 5xx だけをやり直す。拒否はやり直さない。#302）。
+import type { CallErrorKind, CallGateway, CallResult } from "../call.js";
 import type { LimitName } from "../limits.js";
 import type { LlmStructuredRequest } from "../llm.js";
 
@@ -110,14 +110,26 @@ export type StageFailure =
   | { readonly kind: "budget"; readonly maxCostUsd: number; readonly remainingUsd: number }
   /** 呼び出しの回数の上限に触れた */
   | { readonly kind: "callLimit"; readonly limit: LimitName; readonly max: number; readonly actual: number }
-  /** 形が合わない応答が 2 回続いた */
+  /** 呼び出しごとの timeout で打ち切られた（**拒否とは分ける**。#302） */
+  | { readonly kind: "timeout" }
+  /** fetch 自体が失敗した（#302） */
+  | { readonly kind: "network" }
+  /** HTTP の誤り（状態コード付き。5xx はやり直してよい。#302） */
+  | { readonly kind: "http" }
+  /** 残高切れ（`insufficient_quota`。**拒否とは分ける**。#302） */
+  | { readonly kind: "balance" }
+  /** 形が合わない応答が 2 回続いた、または adapter が形の誤りを返した */
   | { readonly kind: "malformed"; readonly attempts: number; readonly problems: readonly Problem[] }
-  /** 拒否が 2 回続いた */
+  /** モデルが拒否した（**拒否のときだけ**。#302） */
   | { readonly kind: "refused"; readonly attempts: number }
+  /** 道具の引数が JSON として読めなかった（#302） */
+  | { readonly kind: "toolArguments" }
   /** 応答が未完了だった（理由付き。拒否とは分ける。**同じ要求ではやり直さない**。§2.2・§1.5） */
   | { readonly kind: "incomplete"; readonly reason: string }
   /** 要求そのものが不正だった（種類付き。拒否とは分ける。**同じ要求ではやり直さない**。§2.2） */
   | { readonly kind: "invalidRequest"; readonly code: string }
+  /** 上のどれにも分類できない例外（**拒否に混ぜない**。#302） */
+  | { readonly kind: "unknown" }
   /** 形は合うが、コードの検査に合わない（やり直しても直らなかった＝未達） */
   | { readonly kind: "unmet"; readonly attempts: number; readonly problems: readonly Problem[] };
 
@@ -128,6 +140,28 @@ export type StageOutcome<T> =
 
 /** 失敗の側（`ok` を除いた共通の口の結果） */
 type CallFailure = Exclude<CallResult<unknown>, { readonly kind: "ok" }>;
+
+/** 共通の口が分類した誤りの種類を、段の失敗に写す（§2.2・#302）。**拒否は拒否のときだけ**にする */
+export function mapCallErrorKind(errorKind: CallErrorKind, attempts: number): StageFailure {
+  switch (errorKind) {
+    case "timeout":
+      return { kind: "timeout" };
+    case "network":
+      return { kind: "network" };
+    case "http":
+      return { kind: "http" };
+    case "balance":
+      return { kind: "balance" };
+    case "refusal":
+      return { kind: "refused", attempts };
+    case "malformed":
+      return { kind: "malformed", attempts, problems: [] };
+    case "toolArguments":
+      return { kind: "toolArguments" };
+    case "unknown":
+      return { kind: "unknown" };
+  }
+}
 
 /** 共通の口の失敗を、段の失敗に写す */
 function mapCallFailure(result: CallFailure): StageFailure {
@@ -143,7 +177,7 @@ function mapCallFailure(result: CallFailure): StageFailure {
     case "invalidRequest":
       return { kind: "invalidRequest", code: result.code };
     case "failed":
-      return { kind: "refused", attempts: result.attempts };
+      return mapCallErrorKind(result.errorKind, result.attempts);
   }
 }
 
@@ -158,8 +192,8 @@ export interface StructuredPlan<T> {
 
 /**
  * 構造化出力を 1 つ取る。共通の口を通して呼び、**形が合わなければ 1 回だけやり直す**（§2.2）。
- * 2 回続けて形が合わなければ `malformed`、拒否（例外）が 2 回続けば `refused` を返す。
- * **未完了の応答は拒否と分け、`incomplete`（理由付き）として返す**（共通の口がやり直さない。§2.2・§1.5）。
+ * 2 回続けて形が合わなければ `malformed` を返す。**例外として現れる誤りは、共通の口が種類ごとに
+ * 分類し**（timeout・network・HTTP の 5xx だけをやり直す）、その種類のまま段の失敗になる（#302）。
  * `ok` のときだけ、形の確認を通った値を返す。
  */
 export async function callStructuredChecked<T>(

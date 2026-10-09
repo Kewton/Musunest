@@ -14,7 +14,7 @@ import {
   HEADLESS_SCHEMA_VERSION,
   type HeadlessSummaryWire,
 } from "@musunest/appspec-schema";
-import { isIncompleteResponseError } from "./call.js";
+import { cacheWriteTokensOf, isIncompleteResponseError } from "./call.js";
 import type {
   LlmClient,
   LlmStructuredRequest,
@@ -45,17 +45,26 @@ export type StageId = (typeof STAGE_IDS)[number];
 export const STAGE_STATUSES = ["ok", "failed"] as const;
 export type StageStatus = (typeof STAGE_STATUSES)[number];
 
-/** 失敗の分類（どの種類の失敗か。02 §1.5・§2.2・S-7） */
+/**
+ * 失敗の分類（どの種類の失敗か。02 §1.5・§2.2・S-7・#302）。**呼び出しの誤りは、adapter の種類を
+ * そのまま写す**——timeout を「拒否」に混ぜない。`refused` は**モデルが拒否したときだけ**にする。
+ */
 export const FAILURE_KINDS = [
   "limit", // 入力の上限（依頼文の長さなど）
   "deadline", // 締切切れ
   "budget", // 予約の残高切れ
   "call-limit", // 呼び出しの数の超過
+  "timeout", // 呼び出しごとの timeout で打ち切られた
+  "network", // fetch 自体が失敗した
+  "http", // HTTP の誤り（5xx など）
+  "balance", // 残高切れ（`insufficient_quota`）
   "malformed", // 形が合わない応答が続いた
-  "refused", // 拒否が続いた
+  "refused", // モデルが拒否した
+  "tool-arguments", // 道具の引数が JSON として読めなかった
   "invalid-request", // 要求そのものが不正（HTTP 400 など。やり直しても通らない）
   "unmet", // コードの検査に合わなかった（未達）
-  "incomplete", // 静的チェックを通った版が無いまま終わった
+  "incomplete", // 応答が未完了だった（静的チェックを通った版が無いまま終わった場合も含む）
+  "unknown", // 上のどれにも分類できない例外
 ] as const;
 export type FailureKind = (typeof FAILURE_KINDS)[number];
 
@@ -70,12 +79,16 @@ export interface FailureAttribution {
   readonly code?: string;
 }
 
-/** 使用トークンの計（呼び出しの数と、usage が欠けた呼び出しの数を含む。§1.5） */
+/**
+ * 使用トークンの計（呼び出しの数と、usage が欠けた呼び出しの数を含む。§1.5）。
+ * キャッシュは**書き込み**（`cache_write_tokens`）と**読み取り**（`cached_input_tokens`）を分ける（#302）。
+ */
 export interface UsageSnapshot {
   readonly calls: number;
   readonly missing_usage_calls: number;
   readonly input_tokens: number;
   readonly cached_input_tokens: number;
+  readonly cache_write_tokens: number;
   readonly output_tokens: number;
   readonly reasoning_tokens: number;
 }
@@ -89,6 +102,7 @@ export const STAGE_RECORD_KEYS = [
   "missing_usage_calls",
   "input_tokens",
   "cached_input_tokens",
+  "cache_write_tokens",
   "output_tokens",
   "reasoning_tokens",
   "failure_kind",
@@ -104,6 +118,7 @@ export interface StageRecord {
   readonly missing_usage_calls: number;
   readonly input_tokens: number;
   readonly cached_input_tokens: number;
+  readonly cache_write_tokens: number;
   readonly output_tokens: number;
   readonly reasoning_tokens: number;
   readonly failure_kind: FailureKind | null;
@@ -189,6 +204,7 @@ export function makeStageRecord(
     missing_usage_calls: usage.missing_usage_calls,
     input_tokens: usage.input_tokens,
     cached_input_tokens: usage.cached_input_tokens,
+    cache_write_tokens: usage.cache_write_tokens,
     output_tokens: usage.output_tokens,
     reasoning_tokens: usage.reasoning_tokens,
     failure_kind: failureKind,
@@ -202,6 +218,7 @@ export function usageDelta(before: UsageSnapshot, after: UsageSnapshot): UsageSn
     missing_usage_calls: after.missing_usage_calls - before.missing_usage_calls,
     input_tokens: after.input_tokens - before.input_tokens,
     cached_input_tokens: after.cached_input_tokens - before.cached_input_tokens,
+    cache_write_tokens: after.cache_write_tokens - before.cache_write_tokens,
     output_tokens: after.output_tokens - before.output_tokens,
     reasoning_tokens: after.reasoning_tokens - before.reasoning_tokens,
   };
@@ -216,6 +233,7 @@ export class UsageMeter {
   #missing = 0;
   #inputTokens = 0;
   #cachedInputTokens = 0;
+  #cacheWriteTokens = 0;
   #outputTokens = 0;
   #reasoningTokens = 0;
 
@@ -226,12 +244,13 @@ export class UsageMeter {
       missing_usage_calls: this.#missing,
       input_tokens: this.#inputTokens,
       cached_input_tokens: this.#cachedInputTokens,
+      cache_write_tokens: this.#cacheWriteTokens,
       output_tokens: this.#outputTokens,
       reasoning_tokens: this.#reasoningTokens,
     };
   }
 
-  /** 1 回の呼び出しを数える。usage があれば足す */
+  /** 1 回の呼び出しを数える。usage があれば足す（キャッシュの書き込みも分けて数える。#302） */
   note(usage: LlmUsage | undefined): void {
     this.#calls += 1;
     if (usage === undefined) {
@@ -240,6 +259,7 @@ export class UsageMeter {
     }
     this.#inputTokens += usage.inputTokens;
     this.#cachedInputTokens += usage.cachedInputTokens;
+    this.#cacheWriteTokens += cacheWriteTokensOf(usage);
     this.#outputTokens += usage.outputTokens;
     this.#reasoningTokens += usage.reasoningTokens;
   }
