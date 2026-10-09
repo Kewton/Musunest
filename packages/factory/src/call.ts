@@ -80,13 +80,13 @@ export function structuredInputParts(request: LlmStructuredRequest): LlmInputPar
   };
 }
 
-/** 道具付きの要求から、入力の上界の材料を取り出す */
+/** 道具付きの要求から、入力の上界の材料を取り出す（最後の答えの schema も含める。#304・§1.5） */
 export function toolInputParts(request: LlmToolRequest): LlmInputParts {
   return {
     instructions: request.instructions,
     documents: request.documents,
     rules: request.rules ?? [],
-    schema: undefined,
+    schema: request.schema === undefined ? undefined : { name: request.schemaName, schema: request.schema },
     tools: request.tools,
     turns: request.turns,
     data: request.input,

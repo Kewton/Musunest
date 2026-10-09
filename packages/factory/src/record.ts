@@ -68,6 +68,17 @@ export const FAILURE_KINDS = [
 ] as const;
 export type FailureKind = (typeof FAILURE_KINDS)[number];
 
+/**
+ * 形が合わなかった／未達だった 1 つの欄（欄の名前と、問題の種類。#304）。
+ * **値の中身（宣言の原文・依頼文・LLM の応答の全文）は持たない**——問題の文はコードが書いた型の説明と
+ * 数だけで、値そのものを含まない（S-8）。
+ */
+export interface FailureProblem {
+  readonly field: string;
+  /** どう合わなかったか（コードが書いた、問題の種類の説明） */
+  readonly message: string;
+}
+
 /** 失敗の帰属（どの段の・どの種類の失敗か。S-7） */
 export interface FailureAttribution {
   readonly stage: StageId;
@@ -77,6 +88,11 @@ export interface FailureAttribution {
    * それ以外の失敗では持たない。**誤りの本文の全文は持たない**（種類だけを残す）。
    */
   readonly code?: string;
+  /**
+   * 形が合わなかった欄（欄の名前と、問題の種類。#304）。`malformed`・`unmet` のときだけ持つ。
+   * **値の中身は持たない**（宣言の原文・依頼文は記録に残さない。S-8）。
+   */
+  readonly problems?: readonly FailureProblem[];
 }
 
 /**
@@ -293,6 +309,22 @@ export class UsageMeter {
   }
 }
 
+/**
+ * 失敗の帰属を、列挙した欄に写す（S-7・S-8・#304）。`code` と `problems` は**あるときだけ**写し、
+ * 欄の名前と問題の種類だけを残す（値の中身は残さない）。
+ */
+function pickFailure(failure: FailureAttribution): FailureAttribution {
+  const picked: FailureAttribution =
+    failure.code === undefined
+      ? { stage: failure.stage, kind: failure.kind }
+      : { stage: failure.stage, kind: failure.kind, code: failure.code };
+  if (failure.problems === undefined || failure.problems.length === 0) return picked;
+  return {
+    ...picked,
+    problems: failure.problems.map((problem) => ({ field: problem.field, message: problem.message })),
+  };
+}
+
 /** 記録を組み立てる。**列挙した欄だけ**を写す（余分な欄は渡されても落ちる） */
 export function buildRunRecord(input: RunRecord): RunRecord {
   const failure = input.failure;
@@ -314,12 +346,7 @@ export function buildRunRecord(input: RunRecord): RunRecord {
     },
     budget_remaining_usd: input.budget_remaining_usd,
     missing_usage_calls: input.missing_usage_calls,
-    failure:
-      failure === null
-        ? null
-        : failure.code === undefined
-          ? { stage: failure.stage, kind: failure.kind }
-          : { stage: failure.stage, kind: failure.kind, code: failure.code },
+    failure: failure === null ? null : pickFailure(failure),
   };
 }
 

@@ -100,6 +100,16 @@ export interface LlmToolRequest {
   readonly input: string;
   /** 使える道具（静的チェック・試験の実行・対応表の確認。§1） */
   readonly tools: readonly LlmToolDefinition[];
+  /**
+   * 最後の答え（`done` の中身）の形を決める JSON Schema の名前（**構造化出力。strict**）。
+   * `schema` と対で置く。無ければ付けない（道具付きの要求に、構造化出力の形を足す。#304）。
+   */
+  readonly schemaName?: string;
+  /**
+   * 最後の答え（`done` の中身）の形を決める JSON Schema（構造化出力）。**道具と一緒に送る**ので、
+   * モデルが道具を使い終えたあとの最後の文が、この形に決まる（#304）。無ければ付けない。
+   */
+  readonly schema?: unknown;
   /** これまでの往復。こちらで組み立てて毎回送る（§2） */
   readonly turns: readonly LlmTurn[];
   /** 出力トークンの上限。推論のトークンも含めて上限に入れる（§1.5） */

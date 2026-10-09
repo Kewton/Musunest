@@ -28,6 +28,7 @@ import {
   RATES,
   REQUIREMENT_LIST_OUTPUT,
   REVERSE_CHECK_OUTPUT,
+  SOURCE_TEXT,
   TEST_SUITE_OUTPUT,
   makeRunInput,
   recordedRun,
@@ -44,6 +45,12 @@ const verificationOf = (bundle: { artifacts: readonly { path: string; text: stri
   if (found === undefined) throw new Error("検証の結果が無い");
   return JSON.parse(found.text) as BundleVerification;
 };
+
+/** 道具付きの段（⑥）の「最後の答え」の記録（宣言は何でもよい） */
+const toolDone = (declaration: unknown): RecordedCall => ({
+  kind: "tools",
+  response: { kind: "done", declaration, usage: undefined },
+});
 
 // ── 1. 通常の完走 ────────────────────────────────────────────────
 
@@ -154,7 +161,12 @@ describe("早期停止：止めた段と理由が記録される（02 §1.5・S-
       structured(malformed),
     ]);
     const result = await run;
-    expect(result.stopped).toEqual({ stage: "write", kind: "malformed" });
+    expect(result.stopped).toEqual({
+      stage: "write",
+      kind: "malformed",
+      // ほかの段の「形が合わない」も、どの欄がどう合わなかったかを記録に出す（#304）
+      problems: [{ field: "declaration", message: "宣言は空でない文字列（YAML の原文）であること" }],
+    });
     expect(result.record.stages.at(-1)).toMatchObject({
       stage: "write",
       status: "failed",
@@ -399,5 +411,45 @@ describe("要求そのものが不正な誤り（HTTP 400）は、拒否と分�
     const recordText = JSON.stringify(result.record);
     expect(recordText).toContain("invalid_json_schema");
     expect(recordText).not.toContain("BODY_SENTINEL");
+  });
+});
+
+// ── ⑥ の最後の答えの形が合わないと、欄の名前と種類が記録と要約に出る（02 §2.2・S-8・#304）──
+
+describe("直す段の最後の答えの形が合わないとき、欄の名前と種類を記録と要約に出す（02 §2.2・S-8・#304）", () => {
+  /** 直す役が最後の答えとして提案した宣言（記録に出てはならない値） */
+  const REPAIR_DECLARATION_SENTINEL = "DECLARATION_SENTINEL_FROM_REPAIR";
+
+  it("欄の名前と種類を出し、宣言の原文と依頼文は出さない", async () => {
+    // 書いた宣言は R-1 の計算が 3 倍で、固定した試験（2 倍を期待）に落ちる → ⑥ へ入る
+    const failingWrite = DECLARATION_SOURCE.replace("expression: amount * 2", "expression: amount * 3");
+    // ⑥ の最後の答えは、宣言はあるが余分な欄（tests）を返すので形が合わない。2 回続く。
+    const malformedAnswer = { declaration: REPAIR_DECLARATION_SENTINEL, tests: [] };
+    const { run } = runWith([
+      ...recordedRun({ write: failingWrite }),
+      toolDone(malformedAnswer),
+      toolDone(malformedAnswer),
+    ]);
+    const result = await run;
+
+    // 止めた段と理由：⑥ の malformed
+    expect(result.stopped?.stage).toBe("repair");
+    expect(result.stopped?.kind).toBe("malformed");
+    expect(result.bundle).toBeNull();
+
+    // 記録と要約の失敗の欄に、欄の名前と種類が出る
+    const failure = result.record.failure;
+    expect(failure?.stage).toBe("repair");
+    expect(failure?.kind).toBe("malformed");
+    expect(failure?.problems?.map((problem) => problem.field)).toContain("tests");
+    expect(failure?.problems?.[0]?.message).toContain("tests");
+    expect(result.summary.failure).toEqual(failure);
+    expect(result.summary.stop_class).toBe("malformed");
+
+    // 値の中身（宣言の原文・依頼文）は、記録にも要約にも出ない
+    for (const text of [JSON.stringify(result.record), JSON.stringify(result.summary)]) {
+      expect(text).not.toContain(REPAIR_DECLARATION_SENTINEL);
+      expect(text).not.toContain(SOURCE_TEXT);
+    }
   });
 });

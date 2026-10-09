@@ -192,6 +192,24 @@ describe("要求の組み立て（02 §2・§2.2）", () => {
     expect(body.text).toBeUndefined();
   });
 
+  it("最後の答えの schema を持つ道具付きの要求は、tools と一緒に strict の構造化出力も送る（#304）", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ entity: "item" })), USAGE_WIRE)),
+    );
+    const client = clientWith(fetch);
+
+    await client.callWithTools({ ...TOOL_REQUEST, schemaName: "repair-answer", schema: SCHEMA });
+
+    const body = bodyOf(captured);
+    const tools = body.tools as readonly unknown[];
+    expect(tools[0]).toMatchObject({ type: "function", name: "staticCheck", strict: true });
+    const format = (body.text as { format: { type: string; name: string; schema: unknown; strict: boolean } }).format;
+    expect(format.type).toBe("json_schema");
+    expect(format.name).toBe("repair-answer");
+    expect(format.schema).toEqual(SCHEMA);
+    expect(format.strict).toBe(true);
+  });
+
   it("往復（助手の呼び出し・道具の結果）を入力の項目に直して送る（R-2）", async () => {
     const turns: readonly LlmTurn[] = [
       { role: "assistant", toolCalls: [{ id: "call-1", name: "staticCheck", arguments: { where: "a" } }] },

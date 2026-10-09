@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { ARBITRATION_RULES, ARBITRATION_SCHEMA } from "./arbitrate.js";
 import { CORRESPONDENCE_SCHEMA } from "./correspondence.js";
 import { DESIGN_SCHEMA } from "./design.js";
+import { REPAIR_ANSWER_SCHEMA } from "./repair.js";
 import { REQUIREMENT_LIST_SCHEMA } from "./requirements.js";
 import { REVERSE_CHECK_SCHEMA } from "./reverse-check.js";
 import { TEST_SUITE_SCHEMA } from "./test-suite.js";
@@ -32,6 +33,7 @@ export const STAGE_SCHEMAS: readonly { readonly name: string; readonly schema: u
   { name: "write（③）", schema: DECLARATION_SCHEMA },
   { name: "correspondence（⑤a）", schema: CORRESPONDENCE_SCHEMA },
   { name: "arbitration（⑥'）", schema: ARBITRATION_SCHEMA },
+  { name: "repair の最後の答え（⑥）", schema: REPAIR_ANSWER_SCHEMA },
   ...REPAIR_TOOLS.map((tool) => ({ name: `道具 ${tool.name}（⑥）`, schema: tool.parameters })),
 ];
 
@@ -116,6 +118,7 @@ describe("すべての段の schema と道具の引数の schema が、strict �
       "write（③）",
       "correspondence（⑤a）",
       "arbitration（⑥'）",
+      "repair の最後の答え（⑥）",
       "道具 static-check（⑥）",
       "道具 run-tests（⑥）",
       "道具 check-correspondence（⑥）",
@@ -131,6 +134,12 @@ describe("すべての段の schema と道具の引数の schema が、strict �
     expect(strictSchemaProblems(tests.input)).toEqual([]);
     // 任意の JSON は strict で表せないので、JSON の文字列として受ける
     expect(tests.input.type).toBe("string");
+  });
+
+  it("直す段の最後の答え（⑥）の schema は、宣言（文字列）と主張の並びを決める（#304）", () => {
+    expect(strictSchemaProblems(REPAIR_ANSWER_SCHEMA)).toEqual([]);
+    expect(REPAIR_ANSWER_SCHEMA.properties.declaration.type).toBe("string");
+    expect(REPAIR_ANSWER_SCHEMA.properties.disputes.type).toBe("array");
   });
 
   it("走査は、strict に反する schema を見つける（この試験自体が効いていることの確認）", () => {
