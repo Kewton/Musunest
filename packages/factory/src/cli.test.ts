@@ -7,7 +7,10 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   API_KEY_ENV,
+  DEFAULT_BUDGET_USD,
+  DEFAULT_DEADLINE_MS,
   EXIT_OK,
+  EXIT_RUN_FAILED,
   EXIT_USAGE,
   parseCliArguments,
   runCli,
@@ -72,6 +75,55 @@ describe("引数の読み取り（02 §3.2）", () => {
   it("--out が無ければ誤り", () => {
     expect(parseCliArguments(["request.txt"])).toEqual({
       error: "--out で出力のディレクトリを指定してください",
+    });
+  });
+});
+
+// ── 既定の上限と、引数での変更（02 §1.5）─────────────────────────
+
+describe("既定の上限は 0.30 USD・10 分で、引数で変えられる（02 §1.5）", () => {
+  it("既定の費用の上限は 0.30 USD、締切は 10 分", () => {
+    expect(DEFAULT_BUDGET_USD).toBe(0.3);
+    expect(DEFAULT_DEADLINE_MS).toBe(10 * 60 * 1000);
+  });
+
+  it("指定しなければ、既定（budgetUsd・deadlineMs は持たない）", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out"])).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "gpt-6-luna",
+      effort: "high",
+    });
+  });
+
+  it("--budget と --deadline で、既定の上限を変えられる", () => {
+    expect(
+      parseCliArguments([
+        "--",
+        "request.txt",
+        "--out",
+        "out",
+        "--budget",
+        "1.5",
+        "--deadline",
+        "2",
+      ]),
+    ).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "gpt-6-luna",
+      effort: "high",
+      budgetUsd: 1.5,
+      deadlineMs: 2 * 60 * 1000,
+    });
+  });
+
+  it("--budget / --deadline の値が数でなければ誤り", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--budget", "abc"])).toEqual({
+      error: "--budget には 0 より大きい数（USD）を指定してください",
+    });
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--deadline", "0"])).toEqual({
+      error: "--deadline には 0 より大きい数（分）を指定してください",
     });
   });
 });
@@ -142,5 +194,26 @@ describe("偽物を差し込んで 1 回の生成を流し、ディレクトリ�
     const summary = JSON.parse(last) as { schema_version: string; verdict: string };
     expect(summary.schema_version).toBe("commandagent.headless-summary/v1");
     expect(summary.verdict).toBe("full");
+  });
+});
+
+// ── 引数で変えた上限が、生成に届く（02 §1.5）─────────────────────
+
+describe("引数で変えた費用の上限が、生成に届く（02 §1.5）", () => {
+  it("--budget を小さくすると、その上限で残高切れとして止まる", async () => {
+    const recording = createRecordingClient(recordedRun());
+    const lines: string[] = [];
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", `${directory}-budget`, "--budget", "0.000001"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      log: (line) => lines.push(line),
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    const summary = JSON.parse(lines.at(-1) ?? "{}") as { stop_class: string | null };
+    expect(summary.stop_class).toBe("budget");
   });
 });

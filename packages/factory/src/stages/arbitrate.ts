@@ -33,9 +33,6 @@ import {
 /** ⑥' の JSON Schema の名前 */
 export const ARBITRATION_SCHEMA_NAME = "expectation-arbitration";
 
-/** ⑥' の出力トークンの上限 */
-export const ARBITRATION_MAX_OUTPUT_TOKENS = 4_096;
-
 /** 裁定の判断（3 つ。§1.3） */
 export const ARBITRATION_VERDICTS = ["uphold", "overturn", "undecidable"] as const;
 export type ArbitrationVerdict = (typeof ARBITRATION_VERDICTS)[number];
@@ -196,7 +193,7 @@ export async function runArbitration(input: ArbitrationInput): Promise<StageOutc
     data: buildData(input),
     schemaName: ARBITRATION_SCHEMA_NAME,
     schema: ARBITRATION_SCHEMA,
-    maxOutputTokens: ARBITRATION_MAX_OUTPUT_TOKENS,
+    maxOutputTokens: input.gateway.maxOutputTokens("arbitration"),
   });
   return callStructuredChecked(input.gateway, {
     request,

@@ -1,5 +1,6 @@
 // ② 設計する（stages/design.ts）の unit テスト（02 §1・F-4・F-5）。
 import { describe, expect, it } from "vitest";
+import { maxOutputTokensForEffort } from "../limits.js";
 import { DESIGN_SCHEMA_NAME, checkDesignOutput, runDesign, type DesignInput } from "./design.js";
 import {
   DESIGN_OUTPUT,
@@ -12,6 +13,19 @@ import {
 } from "./__tests__/prompt.js";
 
 const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
+
+/** 1 つの effort で ② を回し、送った要求の出力の上限を読む */
+async function maxOutputTokensAt(effort: string): Promise<number> {
+  const recording = createRecordingClient([structured(DESIGN_OUTPUT)]);
+  await runDesign({
+    list: REQUIREMENT_LIST,
+    documents: SAMPLE_DOCUMENTS,
+    gateway: makeGateway(recording.client, { maxAttempts: 1, effort }),
+  });
+  const request = recording.structured[0];
+  if (request === undefined) throw new Error("要求が記録されていません");
+  return request.maxOutputTokens;
+}
 
 describe("② が送る要求を観測する（02 §2.2）", () => {
   it("要件の一覧だけをデータに置き、JSON Schema を付け、規則とデータを分ける", async () => {
@@ -67,6 +81,19 @@ describe("② が送る要求を観測する（02 §2.2）", () => {
     const request = recording.structured[0];
     expect(request?.input).not.toContain("DECLARATION_SENTINEL");
     expect(request?.instructions).not.toContain("DECLARATION_SENTINEL");
+  });
+});
+
+describe("② の出力の上限は effort ごとに、共通の置き場所から取る（02 §1.5・§2）", () => {
+  it("effort high の上限は、medium 以上である", async () => {
+    const high = await maxOutputTokensAt("high");
+    const medium = await maxOutputTokensAt("medium");
+    expect(high).toBeGreaterThanOrEqual(medium);
+  });
+
+  it("送る要求の上限は、共通の置き場所（maxOutputTokensForEffort）と一致する", async () => {
+    expect(await maxOutputTokensAt("medium")).toBe(maxOutputTokensForEffort("medium", "design"));
+    expect(await maxOutputTokensAt("high")).toBe(maxOutputTokensForEffort("high", "design"));
   });
 });
 

@@ -26,9 +26,6 @@ import { runRequirements } from "./requirements.js";
 /** ①' の JSON Schema の名前 */
 export const REVERSE_CHECK_SCHEMA_NAME = "reverse-check";
 
-/** ①' の出力トークンの上限 */
-export const REVERSE_CHECK_MAX_OUTPUT_TOKENS = 2_048;
-
 /** ①' に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const REVERSE_CHECK_RULES: readonly string[] = [
   "あなたは、作った要件の一覧を、原文に戻って点検する役である。",
@@ -218,7 +215,7 @@ export async function runReverseCheck(input: ReverseCheckInput): Promise<StageOu
     data,
     schemaName: REVERSE_CHECK_SCHEMA_NAME,
     schema: REVERSE_CHECK_SCHEMA,
-    maxOutputTokens: REVERSE_CHECK_MAX_OUTPUT_TOKENS,
+    maxOutputTokens: input.gateway.maxOutputTokens("reverse-check"),
   });
   const answer = await callStructuredChecked(input.gateway, { request, check: checkReverseCheckOutput });
   if (!answer.ok) return answer;
