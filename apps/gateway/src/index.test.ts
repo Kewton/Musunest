@@ -8,9 +8,10 @@
 //      gateway 自身ではなく Service Binding の先の応答から来ている
 //   4. production の設定では、/healthz の詳細を X-Musunest-Probe が secret と一致したときだけ返す（Issue #55）。
 //      ヘッダ無し・誤った値・正しい値の3通りと、secret を置いていない production（常に隠す）を workerd 上で確かめる
-//   5. /api/* の中継（Issue #103）。dev / staging では data-api まで届いた応答がそのまま返り、
-//      **production と ENVIRONMENT の未知の値では、どの method でも 404 になり data-api を一度も呼ばない**。
-//      呼ばれないことは、宛先を「呼ばれたら 418 を返す罠」に差し替えて確かめる（下の describe）
+//   5. /api/* の中継（Issue #103・#265）。dev / staging では data-api まで届いた応答がそのまま返る。
+//      production では、ログインしていない要求がどの method でも 401 UNAUTHENTICATED になり data-api を
+//      一度も呼ばず、ログインした利用者の要求だけが識別を付けられて中継される。ENVIRONMENT の未知の値では
+//      404 になる。下流を呼ぶ・呼ばないは、宛先を「呼ばれたら 418 を返す罠」に差し替えて確かめる（下の describe）
 //
 // モックにしないのは data-api と同じ理由：Service Binding が「結線されている」ことの証明は、
 // wrangler が wrangler.jsonc の services を解決した上で実際に呼ぶことでしか得られない。
@@ -23,6 +24,16 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestHarness, unstable_readConfig } from "wrangler";
 import type { TestHarness } from "wrangler";
+import {
+  AUTH_LOGIN_PATH,
+  AUTH_LOGOUT_PATH,
+  GOOGLE_AUTHORIZE_ENDPOINT,
+  IDENTITY_HEADER,
+  OAUTH_STATE_COOKIE,
+  SESSION_COOKIE,
+} from "./auth.js";
+import { cloudflareSession } from "./cloudflare.js";
+import type { GatewayEnv } from "./cloudflare.js";
 import {
   DATA_API_BINDING,
   GATEWAY_HEALTHZ_CHECKS,
@@ -50,7 +61,21 @@ const DETAIL: Readonly<Record<(typeof ENVS)[number], HealthzDetail>> = { dev: "p
  */
 const PROBE_TOKEN = "test-probe-token-0123456789abcdef";
 
-/** /api/* に送ってみる method（Issue #103 の受入条件）。production では全部 404 になる */
+/**
+ * テスト用のセッション secret（M2.1。Issue #263）。workerd の vars に渡す値と、テスト側（Node）で
+ * セッション cookie を署名する値に同じものを使う——gateway が検証する cookie をテストが作れるようにする。
+ */
+const TEST_SESSION_SECRET = "test-session-secret-0123456789";
+
+/** セッション cookie を作る。gateway が検証するのと同じ adapter を使う（SESSION_SECRET だけを読む）。 */
+const session = cloudflareSession({
+  DATA_API: {} as unknown as Fetcher,
+  ENVIRONMENT: "production",
+  GIT_SHA: "test-sha",
+  SESSION_SECRET: TEST_SESSION_SECRET,
+} satisfies GatewayEnv);
+
+/** /api/* に送ってみる method（Issue #103・#265 の受入条件）。production ではログインが無ければ全部 401 になる */
 const API_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 
 /**
@@ -69,9 +94,15 @@ const TRIPWIRE = "data-api was relayed to";
  * **宛先の無い Service Binding では workerd が起動しない**ので、本物の代わりに罠を置く
  * （src/index.test.ts の Static Assets の罠と同じ）。
  */
-function trapDataApi(env: string): { readonly configPath: string; readonly dir: string } {
+function trapDataApi(env: string, echoIdentity = false): { readonly configPath: string; readonly dir: string } {
   const dir = mkdtempSync(join(tmpdir(), `gateway-trap-${env}-`));
-  writeFileSync(join(dir, "index.js"), `export default { fetch() { return new Response(${JSON.stringify(TRIPWIRE)}, { status: 418 }); } };\n`);
+  // echoIdentity のときは、受け取った識別ヘッダ（IDENTITY_HEADER）の値も本文に載せる
+  // ——ログインした要求が「利用者の識別を付けて」中継されたことを、応答で読めるようにする（Issue #265）
+  const body = echoIdentity
+    ? `Response.json({ marker: ${JSON.stringify(TRIPWIRE)}, user: request.headers.get(${JSON.stringify(IDENTITY_HEADER.toLowerCase())}) }, { status: 418 })`
+    : `new Response(${JSON.stringify(TRIPWIRE)}, { status: 418 })`;
+  const fetchParam = echoIdentity ? "request" : "";
+  writeFileSync(join(dir, "index.js"), `export default { fetch(${fetchParam}) { return ${body}; } };\n`);
   writeFileSync(
     join(dir, "wrangler.json"),
     // 名前は wrangler.jsonc の services[].service（宛先）と同じでなければ、harness は binding を解決できない
@@ -128,6 +159,12 @@ describe.each(ENVS)("wrangler.jsonc（env.%s）", (env) => {
   it("MUSUNEST_PROBE_TOKEN を vars に書かない（wrangler secret。リポジトリに値を置かない）", () => {
     expect(Object.keys(config.vars)).not.toContain(PROBE_TOKEN_SECRET);
   });
+
+  it("OAuth とセッションの secret も vars に書かない（wrangler secret put。M2.1・Issue #263）", () => {
+    for (const secret of ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "SESSION_SECRET"]) {
+      expect(Object.keys(config.vars), secret).not.toContain(secret);
+    }
+  });
 });
 
 describe.each(ENVS)("gateway → data-api（env.%s・workerd 上の実機）", (env) => {
@@ -135,8 +172,19 @@ describe.each(ENVS)("gateway → data-api（env.%s・workerd 上の実機）", (
   const probe = DETAIL[env] === "probe";
   const server = createTestHarness({
     workers: [
-      // 先頭が primary。server.fetch は gateway に届く
-      { configPath: CONFIG_PATH, env, vars: { GIT_SHA: "test-sha", ...(probe ? { [PROBE_TOKEN_SECRET]: PROBE_TOKEN } : {}) } },
+      // 先頭が primary。server.fetch は gateway に届く。
+      // OAuth とセッションの secret は本番では wrangler secret put で入れる（wrangler.jsonc に書かない。
+      // 上の wrangler.jsonc の検査を参照）。ここでは workerd の env として渡す（src/index.test.ts の PROBE と同じ）。
+      {
+        configPath: CONFIG_PATH,
+        env,
+        vars: {
+          GIT_SHA: "test-sha",
+          GOOGLE_CLIENT_ID: "test-client-id",
+          SESSION_SECRET: TEST_SESSION_SECRET,
+          ...(probe ? { [PROBE_TOKEN_SECRET]: PROBE_TOKEN } : {}),
+        },
+      },
       { configPath: DATA_API_CONFIG_PATH, env, vars: { GIT_SHA: "test-sha" } },
     ],
   });
@@ -174,13 +222,19 @@ describe.each(ENVS)("gateway → data-api（env.%s・workerd 上の実機）", (
     expect(res.headers.get("allow")).toBe("GET");
   });
 
-  it("/api/* は JSON を返す：dev / staging は data-api の 404 が届き、production は gateway 自身の 404 が返る（Issue #103）", async () => {
+  it("/api/* は JSON を返す：dev / staging は data-api の 404 が届き、production はログインが無いので 401（Issue #103・#265）", async () => {
     const res = await server.fetch(API_PATH, { headers: { accept: "application/json" } });
 
-    expect(res.status).toBe(404);
     expect(res.headers.get("content-type")).toMatch(/^application\/json/);
-    // dev / staging の本文は data-api の契約のもの（届いた）。production の本文は gateway 自身のもの（下流を呼んでいない）
-    expect(await res.json()).toEqual(probe ? { error: "not found" } : { error: "NOT_FOUND" });
+    if (probe) {
+      // production はログインしていない要求を、下流を一度も呼ばずに 401 UNAUTHENTICATED で断る（gateway 自身の応答）
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "UNAUTHENTICATED" });
+    } else {
+      // dev / staging の本文は data-api の契約のもの（下流まで届いた）
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "NOT_FOUND" });
+    }
   });
 
   it("method と経路の判定は data-api が行う：GET を action の経路へ送ると 405 と allow がそのまま返る（dev / staging）", async () => {
@@ -189,7 +243,8 @@ describe.each(ENVS)("gateway → data-api（env.%s・workerd 上の実機）", (
     const res = await server.fetch("/api/instances/unknown/actions/addExpense", { headers: { accept: "application/json" } });
 
     if (probe) {
-      expect(res.status).toBe(404);
+      // production はログインが無いので gateway が下流を呼ばずに 401 で断る（data-api まで届かない）
+      expect(res.status).toBe(401);
       expect(res.headers.get("allow")).toBeNull();
     } else {
       expect(res.status).toBe(405);
@@ -197,16 +252,55 @@ describe.each(ENVS)("gateway → data-api（env.%s・workerd 上の実機）", (
       expect(await res.json()).toEqual({ error: "METHOD_NOT_ALLOWED" });
     }
   });
+
+  // ── 認証（M2.1。Issue #263）──────────────────────────────────────
+
+  it("/auth/login は Google の認可画面へ 302 し、state の cookie を返す", async () => {
+    // redirect を追わせない（追うと Google の画面へ出てしまう）
+    const res = await server.fetch(AUTH_LOGIN_PATH, { redirect: "manual" });
+
+    expect(res.status).toBe(302);
+    const location = res.headers.get("location");
+    expect(location).not.toBeNull();
+    const url = new URL(location ?? "");
+    expect(`${url.origin}${url.pathname}`).toBe(GOOGLE_AUTHORIZE_ENDPOINT);
+    expect(url.searchParams.get("client_id")).toBe("test-client-id");
+    expect(url.searchParams.get("state")).not.toBeNull();
+    expect(res.headers.get("set-cookie")).toContain(OAUTH_STATE_COOKIE);
+  });
+
+  it("/auth/logout はセッション cookie を消して / へ戻す", async () => {
+    const res = await server.fetch(AUTH_LOGOUT_PATH, { redirect: "manual" });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/");
+    expect(res.headers.get("set-cookie")).toContain("Max-Age=0");
+  });
+
+  it("識別ヘッダを外から付けても /api/me/instances は 401（gateway が取り除く。なりすましを通さない）", async () => {
+    // dev / staging は data-api まで届く。gateway が偽の IDENTITY_HEADER を取り除くので、
+    // data-api は「識別ヘッダの無い一覧」として 401 を返す。取り除かなければ data-api が D1 を読もうとして
+    // 503 になる（この harness は登録もマイグレーションも当てていない）。production はログインが無いので
+    // gateway が下流を呼ばずに 401 を返す（どちらも契約の UNAUTHENTICATED）。
+    const res = await server.fetch("/api/me/instances", {
+      headers: { [IDENTITY_HEADER]: "u-attacker", accept: "application/json" },
+    });
+
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "UNAUTHENTICATED" });
+  });
 });
 
-describe("production の /api/* は data-api を一度も呼ばずに 404（workerd 上の実機・Issue #103 の受入試験）", () => {
-  // 宛先を罠に差し替える。中継が下流を呼べば 418 と TRIPWIRE が返るので、「一度も呼ばれない」が応答で読める
-  // （workerd は宛先の無い Service Binding では起動しないので、binding を外す形では確かめられない）。
-  // production の設定（vars.ENVIRONMENT=production）はそのまま使う。
-  const trap = trapDataApi("production");
+describe("production の /api/* は、ログインした利用者にだけ data-api へ中継する（workerd 上の実機・Issue #265 の受入試験）", () => {
+  // 宛先を罠に差し替える。中継が下流を呼べば 418 と TRIPWIRE が返るので、「一度も呼ばれない」も
+  // 「中継された」も応答で読める。罠は受け取った識別ヘッダも返す——ログインした要求が識別を付けて
+  // 中継されたことの証拠である（workerd は宛先の無い Service Binding では起動しないので、binding を
+  // 外す形では確かめられない）。production の設定（vars.ENVIRONMENT=production）はそのまま使い、
+  // SESSION_SECRET だけテスト用の値を渡す（テスト側で、gateway が検証する cookie を作るため）。
+  const trap = trapDataApi("production", true);
   const server = createTestHarness({
     workers: [
-      { configPath: CONFIG_PATH, env: "production", vars: { GIT_SHA: "test-sha" } },
+      { configPath: CONFIG_PATH, env: "production", vars: { GIT_SHA: "test-sha", SESSION_SECRET: TEST_SESSION_SECRET } },
       { configPath: trap.configPath },
     ],
   });
@@ -220,21 +314,35 @@ describe("production の /api/* は data-api を一度も呼ばずに 404（work
     rmSync(trap.dir, { recursive: true, force: true });
   }, BOOT_TIMEOUT_MS);
 
-  it.each(API_METHODS)("%s：404 の JSON を返し、data-api を呼ばない", async (method) => {
+  it.each(API_METHODS)("%s：ログインしていなければ 401 の JSON を返し、data-api を呼ばない", async (method) => {
     const res = await server.fetch(API_PATH, { method, headers: { accept: "application/json" } });
 
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(401);
     expect(res.headers.get("content-type")).toMatch(/^application\/json/);
     const text = await res.text();
     expect(text).not.toContain(TRIPWIRE);
-    expect(JSON.parse(text)).toEqual({ error: "not found" });
+    expect(JSON.parse(text)).toEqual({ error: "UNAUTHENTICATED" });
   });
 
-  it.each(API_METHODS)("%s：X-Musunest-Probe を付けても 404 のまま（合言葉で API を開けない）", async (method) => {
+  it.each(API_METHODS)("%s：X-Musunest-Probe を付けても 401 のまま（合言葉で API を開けない）", async (method) => {
     const res = await server.fetch(API_PATH, { method, headers: { [PROBE_HEADER]: PROBE_TOKEN } });
 
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(401);
     expect(await res.text()).not.toContain(TRIPWIRE);
+  });
+
+  it("ログインした利用者の要求は、利用者の識別を付けて data-api へ中継される", async () => {
+    const token = await session.sign({ userId: "u-member", expiresAt: Date.now() + 60 * 60 * 1000 });
+    expect(token).not.toBeNull();
+
+    const res = await server.fetch(API_PATH, {
+      headers: { accept: "application/json", cookie: `${SESSION_COOKIE}=${token ?? ""}` },
+    });
+
+    // 罠の 418 が返る＝下流（data-api）まで中継された。production でもログインしていれば開く
+    expect(res.status).toBe(418);
+    // 罠が返すのは、受け取った識別ヘッダの値——gateway がセッションの利用者 ID を載せた証拠
+    expect(await res.json()).toEqual({ marker: TRIPWIRE, user: "u-member" });
   });
 });
 

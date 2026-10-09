@@ -42,11 +42,43 @@ export function apiActionPath(instanceId: string, actionName: string): string {
   return `${API_PREFIX}/${encodeURIComponent(instanceId)}/${API_ACTIONS_SEGMENT}/${encodeURIComponent(actionName)}`;
 }
 
+// ── 自分のアプリの一覧と、利用者の登録（M2.1。Issue #260）──────────────
+//
+// **一覧は `/api` の中**に置く（gateway の `/api/*` 中継と、そこから SDK で届く）。
+// **登録の入口は `/api` の外**に置く——gateway の中継（`isApiPath`）は `/api` と `/api/...`
+// だけを運ぶので、登録の入口は中継からは届かない。gateway が OIDC のコールバックで、
+// Service Binding 越しにだけ呼ぶ（`apps/gateway`。Issue #263）。だから 2 つの接頭辞は別である。
+
+/** 自分のアプリの一覧の区分（M2.1）。ログインした利用者の Community のインスタンスを返す */
+export const API_ME_SEGMENT = "me" as const;
+export const API_INSTANCES_SEGMENT = "instances" as const;
+
+export function apiMyInstancesPath(): string {
+  return `/api/${API_ME_SEGMENT}/${API_INSTANCES_SEGMENT}`;
+}
+
+/**
+ * 利用者の登録の入口の経路（M2.1）。**`/api` の外**にある——gateway の `/api` 中継
+ * （`apps/gateway/src/api.ts` の `isApiPath`）は `/api` と `/api/...` だけを運ぶので、
+ * この経路は中継からは届かない。gateway が OIDC のコールバックから Service Binding 越しにだけ呼ぶ。
+ */
+export const IDENTITY_LOGIN_PATH = "/identity/login" as const;
+
+/**
+ * ログインした利用者を表すヘッダ（M2.1）。**gateway だけが付ける**——外から届いた値は
+ * gateway が取り除いてから中継する（なりすましを通さない。Issue #263）。値は利用者 ID
+ * （`users.user_id`）。無い要求は 401 `UNAUTHENTICATED` である（一覧と、production のインスタンスの
+ * 3 経路。Issue #260・#262）。
+ */
+export const IDENTITY_HEADER = "X-Musunest-User" as const;
+
 /** 読んだ経路。`kind` ごとに、宣言の名前で対象が決まる */
 export type ApiRoute =
   | { readonly kind: "spec"; readonly instanceId: string }
   | { readonly kind: "view"; readonly instanceId: string; readonly viewName: string }
-  | { readonly kind: "action"; readonly instanceId: string; readonly actionName: string };
+  | { readonly kind: "action"; readonly instanceId: string; readonly actionName: string }
+  /** 自分のアプリの一覧（M2.1）。対象の指定は無い——識別ヘッダ（`IDENTITY_HEADER`）が対象を決める */
+  | { readonly kind: "me" };
 
 /** その経路が受ける method。ほかは 405 である */
 export function apiRouteMethod(route: ApiRoute): "GET" | "POST" {
@@ -54,15 +86,23 @@ export function apiRouteMethod(route: ApiRoute): "GET" | "POST" {
 }
 
 /**
- * パスを経路に読む。契約の 3 経路に合わなければ `null`（呼ぶ側が 404 にする）。
- * 空の区切り（`//`）と読めないパーセント符号は、経路にしない——存在しないインスタンスとして扱う。
+ * パスを経路に読む。契約の経路（インスタンスの 3 つと、自分のアプリの一覧。M2.1）に合わなければ
+ * `null`（呼ぶ側が 404 にする）。空の区切り（`//`）と読めないパーセント符号は、経路にしない
+ * ——存在しないインスタンスとして扱う。
  */
 export function readApiRoute(pathname: string): ApiRoute | null {
   const trimmed = pathname.endsWith("/") && pathname !== "/" ? pathname.slice(0, -1) : pathname;
   const parts = trimmed.split("/");
   // 先頭は空（`/` で始まる）。空の区切りはそのまま残すので、下の長さの検査で落ちる
   if (parts.shift() !== "") return null;
-  if (parts.shift() !== "api" || parts.shift() !== "instances") return null;
+  if (parts.shift() !== "api") return null;
+
+  // 自分のアプリの一覧（M2.1）。`/api/me/instances` だけが経路である（深さも固定する）
+  const head = parts.shift();
+  if (head === API_ME_SEGMENT) {
+    return parts.length === 1 && parts[0] === API_INSTANCES_SEGMENT ? { kind: "me" } : null;
+  }
+  if (head !== "instances") return null;
 
   const instanceId = decodeSegment(parts.shift());
   if (instanceId === null || instanceId === "") return null;
@@ -328,6 +368,40 @@ export interface ApiViewBody {
 /** `POST /api/instances/:instanceId/actions/:actionName` の本文。**書いた行**（計算値つき）を返す */
 export type ApiCreatedBody = ApiRow;
 
+// ── 利用者（M2.1。Issue #260）の本文 ──────────────────────────────
+
+/**
+ * `POST /identity/login` の本文。**gateway だけが送る**——Google OIDC で確かめた subject と、
+ * 画面に出す表示名である（セッションの cookie の中身ではない）。
+ */
+export interface ApiLoginRegistration {
+  /** Google OIDC の subject。1 人に 1 つ（2 回目は同じ利用者に合流する） */
+  readonly googleSubject: string;
+  /** 表示名。初めてのログインでは Community の名前のもとになる */
+  readonly displayName: string;
+  /** Community の名前。省略すると表示名を使う */
+  readonly communityName?: string;
+}
+
+/** `POST /identity/login` の応答。利用者 ID と、持ち主の Community の ID */
+export interface ApiLoginBody {
+  readonly userId: string;
+  readonly communityId: string;
+}
+
+/** `GET /api/me/instances` の 1 件。**いまはインスタンス ID だけ**である（画面はこれでアプリの画面へリンクする） */
+export interface ApiInstanceSummary {
+  readonly instanceId: string;
+}
+
+/**
+ * `GET /api/me/instances` の本文。**ログインした利用者の Community のインスタンスだけ**を返す
+ * ——他の Community のものは返さない（data-api が唯一の権限強制点として絞る）。
+ */
+export interface ApiInstancesBody {
+  readonly instances: readonly ApiInstanceSummary[];
+}
+
 // ── 応答：誤り ────────────────────────────────────────────────
 
 /**
@@ -355,6 +429,18 @@ export const API_ERROR_CODES = [
    * 画面の出し方も変わる（打ち直させるのではなく、その行ではできないことを伝える）。
    */
   "ACTION_NOT_ALLOWED",
+  /**
+   * 利用者の識別が無い（M2.1。Issue #260）。一覧（`/api/me/instances`）と、production の
+   * インスタンスの 3 経路に `IDENTITY_HEADER` が無い**——gateway を通っていない要求である。
+   * **D1 を読まずに**断る（誰のものかを決められないので、読む意味が無い）。
+   */
+  "UNAUTHENTICATED",
+  /**
+   * そのインスタンスを持つ Community に属さない利用者（M2.1。Issue #262）。識別はあるが、所属が無い。
+   * **`UNAUTHENTICATED` と分ける**——ログインの有無と、そのアプリを開けるかは別である
+   * （画面の出し方も変わる。打ち直させるのではなく、そのアプリは自分のものではないと伝える）。
+   */
+  "NOT_A_MEMBER",
 ] as const;
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
 
@@ -376,6 +462,10 @@ export const API_ERROR_STATUS = {
   REFERENCE_IN_USE: 409,
   /** 操作の条件（`when`）が成り立たない（M1.3）。`action` と `when` を返す */
   ACTION_NOT_ALLOWED: 409,
+  /** 利用者の識別が無い（M2.1。Issue #260）。**D1 を読まずに**断る */
+  UNAUTHENTICATED: 401,
+  /** そのインスタンスを持つ Community に属さない（M2.1。Issue #262）。**`UNAUTHENTICATED` と分ける** */
+  NOT_A_MEMBER: 403,
 } as const satisfies Record<ApiErrorCode, number>;
 
 /**

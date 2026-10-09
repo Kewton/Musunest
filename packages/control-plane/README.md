@@ -6,7 +6,7 @@ Control Plane の D1（`musunest-<env>-control`）の中身を持つ。**D1 は 
 
 M1.1 で置くのは、宣言（`app.spec.yaml`）と、その宣言を使うインスタンスの登録である（#100）、
 および宣言を R2 と D1 へ置く publish の中身である（#101）。
-Better Auth / User / Community / Membership / AppGrant は M2 以降。
+M2.1 で、利用者・Community・所属・インスタンスの持ち主の登録表を足した（#259。§6）。
 
 ## 1. 登録表（`migrations/0002_app_registry.sql`）
 
@@ -139,3 +139,51 @@ pnpm exec tsx infra/scripts/publish.ts --env <dev|staging> --instance <id> --spe
 `src/publish.test.ts` が受入条件を確かめる（負例は #97 と同じ診断で R2・D1 の呼び出し 0 回、正例の読み戻し、
 冪等・共有・競合、各段の失敗と再実行）。`infra/scripts/publish.test.ts` が入口を確かめる（引数・資格情報・
 production の拒否・値の非漏洩・束縛引数・各段の失敗の差し込み）。
+
+## 6. identity（利用者・Community・所属・インスタンスの持ち主。Issue #259）
+
+`migrations/0003_identity.sql` と `src/identity.ts` が、ログインした人と、その人が持ち主の Community、
+その Community の持ち物であるインスタンスを扱う。M2.1（ログインして自分のアプリが見える）の中身である。
+
+| 表 | 主キー | 列 | 誰が使うか |
+|---|---|---|---|
+| `users` | `user_id` | `google_subject`（UNIQUE）・`display_name`・`created_at` | ログイン登録（#259）・data-api（#260） |
+| `communities` | `community_id` | `name`・`owner_user_id`・`created_at` | 同上 |
+| `community_memberships` | `(community_id, user_id)` | `role`（`owner` / `member`）・`created_at` | 所属（#259） |
+| `instance_owners` | `instance_id` | `community_id`・`created_at` | インスタンスの持ち主（AppGrant の土台。publish #261・data-api #260） |
+
+- **利用者は Google OIDC の subject で識別する。** 同じ subject の 2 回目のログインは冪等（行を増やさない）
+- **初めてのログインで Community を 1 人に 1 つ作り、名前は表示名から付ける**（2026-10-08 所有者が決定。
+  増やすのは M2.3 以降）
+- **外部キーは張らない。** 未登録の Community・インスタンスを指す行の拒否は読み書きの側
+  （`src/identity.ts` の `INSERT ... WHERE EXISTS`）で行う（§1 と同じ規律）
+
+```ts
+import { registerLogin, registerInstanceOwner, listCommunityInstances } from "@musunest/control-plane";
+```
+
+| 関数 | すること |
+|---|---|
+| `registerLogin(executor, { googleSubject, displayName, communityName? })` | ログインを登録する。**初めてのときだけ**利用者・Community・所属（`owner`）を作る。同じ subject の 2 回目は既存の行を返す（冪等） |
+| `getUser(executor, userId)` / `getUserByGoogleSubject(executor, googleSubject)` | 利用者を ID・subject で読む。**存在しない読取は `null`** |
+| `getCommunity(executor, communityId)` | Community を ID で読む。存在しない読取は `null` |
+| `listUserCommunities(executor, userId)` | 利用者が所属する Community の一覧 |
+| `listCommunityMembers(executor, communityId)` | Community に属する利用者（所属）の一覧 |
+| `registerInstanceOwner(executor, { instanceId, communityId })` | インスタンスを Community の持ち物にする。同じ Community の 2 回目は冪等 |
+| `listCommunityInstances(executor, communityId)` | **その Community に属する**インスタンスの一覧（他の Community のものは返さない） |
+
+失敗の種類は `IdentityError.code` で分ける（`RegistryError` と分けるのは、publish が
+`RegistryErrorCode` を網羅した表を持つためである）。
+
+| `code` | いつ |
+|---|---|
+| `community_not_found` | 未登録の Community を指すインスタンスを持たせようとした |
+| `instance_not_found` | 未登録のインスタンスを Community の持ち物にしようとした |
+| `owner_conflict` | 既存インスタンスの持ち主を、暗黙に別の Community へ差し替えようとした |
+
+- **利用者 ID と Community ID は `registerLogin` が発番する**（`crypto.randomUUID()`。Node でも Workers でも動く）。
+  gateway は OIDC の結果だけを渡す
+- **冪等**：同じ Google subject の 2 回目の登録は、行を増やさずに既存の行を返す。同じインスタンスを同じ
+  Community へ 2 回付けても増えない（`ON CONFLICT ... DO NOTHING`。`DO UPDATE` にしない）
+- **`src/identity.test.ts` が受入条件を確かめる**（初めてのログインの自動作成、同じ subject の冪等、
+  他の Community のインスタンスを返さないこと、未登録の拒否と束縛引数）

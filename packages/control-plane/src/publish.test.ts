@@ -19,12 +19,15 @@ import { checkSpec, normalizeSpec } from "@musunest/spec-engine";
 import {
   APP_INSTANCES_TABLE,
   APPS_TABLE,
+  COMMUNITIES_TABLE,
+  INSTANCE_OWNERS_TABLE,
   type RegistryExecutor,
   type SqlResult,
   type SqlRow,
   type SqlStatement,
   type SqlValue,
 } from "./contract.js";
+import { listCommunityInstances, registerLogin } from "./identity.js";
 import { getApp, getInstance, resolveInstanceApp } from "./registry.js";
 import {
   publishSpec,
@@ -697,5 +700,118 @@ describe("1 語の型の写像形（label 付き）を読む（#188）", () => {
     expect(replaced.replacedSourceSha256).toBe(first.app.sourceSha256);
     expect(await getInstance(executor, INSTANCE)).toEqual(replaced.instance);
     expect(await resolveInstanceApp(executor, INSTANCE)).toEqual(replaced.app);
+  });
+});
+
+// ── 7. 置く先の Community（#261）────────────────────────────────────
+//
+//   1. Community を指定した publish で、そのインスタンスが指定した Community の一覧に出る
+//   2. 存在しない Community を指定した publish は、R2 にも D1 にも書かずに断る
+//   3. Community を指定しない既存の使い方は、持ち主の行を作らない（挙動を変えない）
+//
+// Community は #259 の registerLogin で作る（初めてのログインで 1 人に 1 つできる持ち主の Community）。
+
+describe("置く先の Community（#261）", () => {
+  /** ログインを登録して、持ち主の Community を 1 つ作る（#259 の registerLogin） */
+  const newCommunity = async (executor: RegistryExecutor, name: string) =>
+    (await registerLogin(executor, { googleSubject: `sub-${name}`, displayName: name })).community;
+
+  it("Community を指定すると、そのインスタンスが指定した Community の一覧に出る", async () => {
+    const { executor } = newRegistry();
+    const specs = new RecordingSpecWriter();
+    const community = await newCommunity(executor, "alice");
+
+    const result = await publishSpec(
+      { specs, registry: executor },
+      { source: SAMPLE, instanceId: INSTANCE, communityId: community.communityId },
+    );
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+
+    // 結果に持ち主の行が載る（Community を指定したときだけ）。その Community の一覧に出る
+    expect(result.owner).toEqual({
+      instanceId: INSTANCE,
+      communityId: community.communityId,
+      createdAt: expect.any(String),
+    });
+    expect(await listCommunityInstances(executor, community.communityId)).toEqual([result.owner]);
+    expect(await countRows(executor, INSTANCE_OWNERS_TABLE)).toBe(1);
+    // 他の Community のものは返さない
+    expect(await listCommunityInstances(executor, "c-other")).toEqual([]);
+  });
+
+  it("同じ Community へ 2 回置いても、持ち主の行は増えない（冪等）", async () => {
+    const { executor } = newRegistry();
+    const specs = new RecordingSpecWriter();
+    const community = await newCommunity(executor, "alice");
+    const request = { source: SAMPLE, instanceId: INSTANCE, communityId: community.communityId };
+
+    const first = await publishSpec({ specs, registry: executor }, request);
+    const second = await publishSpec({ specs, registry: executor }, request);
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+
+    expect(second.owner).toEqual(first.owner);
+    expect(await countRows(executor, INSTANCE_OWNERS_TABLE)).toBe(1);
+    expect(await listCommunityInstances(executor, community.communityId)).toEqual([first.owner]);
+  });
+
+  it("存在しない Community を指定すると community の段で断り、R2 にも D1 にも書かない", async () => {
+    const { executor } = newRegistry();
+    const specs = new RecordingSpecWriter();
+
+    const refused = expectRejected(
+      await publishSpec({ specs, registry: executor }, { source: SAMPLE, instanceId: INSTANCE, communityId: "c-unknown" }),
+    );
+
+    expect(refused.failure.stage).toBe("community");
+    expect(refused.failure.code).toBeNull();
+    // R2 へは 1 つも置かない
+    expect(specs.writes).toEqual([]);
+    // D1 へは、Community の存在を確かめる読み取り（SELECT）しか出さない。書き込みの文は出さない
+    expect(executor.statements).toHaveLength(1);
+    expect(executor.statements.every((sql) => /^\s*SELECT\b/i.test(sql))).toBe(true);
+    expect(await countRows(executor, APPS_TABLE)).toBe(0);
+    expect(await countRows(executor, APP_INSTANCES_TABLE)).toBe(0);
+    expect(await countRows(executor, INSTANCE_OWNERS_TABLE)).toBe(0);
+  });
+
+  it("Community を指定しなければ、持ち主の行を作らない（既存の挙動を変えない）", async () => {
+    const { executor } = newRegistry();
+    const specs = new RecordingSpecWriter();
+
+    const result = await publishSpec({ specs, registry: executor }, { source: SAMPLE, instanceId: INSTANCE });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.owner).toBeNull();
+    expect(await countRows(executor, INSTANCE_OWNERS_TABLE)).toBe(0);
+    expect(await countRows(executor, COMMUNITIES_TABLE)).toBe(0);
+  });
+
+  it("既存インスタンスを別の Community へ暗黙に移そうとすると owner の段で断り、元の持ち主を保つ", async () => {
+    const { executor } = newRegistry();
+    const specs = new RecordingSpecWriter();
+    const alice = await newCommunity(executor, "alice");
+    const bob = await newCommunity(executor, "bob");
+
+    const first = await publishSpec(
+      { specs, registry: executor },
+      { source: SAMPLE, instanceId: INSTANCE, communityId: alice.communityId },
+    );
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const refused = expectRejected(
+      await publishSpec({ specs, registry: executor }, { source: SAMPLE, instanceId: INSTANCE, communityId: bob.communityId }),
+    );
+    expect(refused.failure.stage).toBe("owner");
+    expect(refused.failure.code).toBeNull();
+    expect(refused.failure.message).toContain("持ち主");
+
+    // 元の持ち主（alice）のままで、bob には移らない
+    expect(await listCommunityInstances(executor, alice.communityId)).toEqual([first.owner]);
+    expect(await listCommunityInstances(executor, bob.communityId)).toEqual([]);
+    expect(await countRows(executor, INSTANCE_OWNERS_TABLE)).toBe(1);
   });
 });

@@ -8,10 +8,11 @@
 // fetch と base URL は差し込める。host の画面は同じ origin の /api/* を叩くので `baseUrl: ""` でよい
 // （相対 URL のまま fetch する）。e2e のように別の origin を指す場合は絶対 URL を渡す。
 
-import { API_ERROR_CODES, ACTION_KINDS, COMPUTED_TYPES, FIELD_TYPES, PERIODS, VIEW_PART_TYPES, VIEW_TYPES, apiActionPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
+import { API_ERROR_CODES, ACTION_KINDS, COMPUTED_TYPES, FIELD_TYPES, PERIODS, VIEW_PART_TYPES, VIEW_TYPES, apiActionPath, apiMyInstancesPath, apiSpecPath, apiViewPath } from "@musunest/appspec-schema";
 import type {
   ApiDeletedBody,
   ApiErrorCode,
+  ApiInstancesBody,
   ApiReference,
   ApiRow,
   ApiSpecBody,
@@ -25,6 +26,10 @@ import type {
 // SDK と画面が同じ実装で読む（JSON の形は api.ts が正本である）。
 export { displayNameOf } from "@musunest/appspec-schema";
 export type { ApiLabels } from "@musunest/appspec-schema";
+// 自分のアプリの一覧（M2.1。Issue #260）の応答の型も、画面（host）が参照できるように出す。
+// host が workspace で参照できるのはこのパッケージだけなので（CLAUDE.md「依存の向き」）、
+// 契約（appspec-schema）の型をここから再輸出する（`ApiLabels` と同じ形である）。
+export type { ApiInstancesBody, ApiInstanceSummary } from "@musunest/appspec-schema";
 
 /** fetch の差し替え口。Workers・ブラウザ・Node のどれでも同じ形で呼べる範囲だけを要求する */
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
@@ -110,6 +115,25 @@ export interface MusunestClient {
   ): Promise<ClientResult<ApiRow>>;
 }
 
+/**
+ * `createMusunestClient` が返す client。**ログインした利用者のアプリの一覧**（M2.1。Issue #260）を
+ * 読む口を足す。
+ *
+ * **`MusunestClient` の必須のメソッドにはしない**——足すと、この型を満たすすべての実装
+ * （画面・e2e のテストの偽の client）が一斉に型エラーになる（`updateRecord` と同じ理由である）。
+ * `createMusunestClient` を使う側（host の画面）は、この型で受け取れば一覧の口が使える。
+ *
+ * **識別ヘッダは SDK が付けない。** ログインした利用者は gateway が（署名付き cookie から）見分けて
+ * 中継のときに付ける（Issue #263）。SDK は同じ origin の `/api/me/instances` をそのまま叩く。
+ */
+export interface MusunestIdentityClient extends MusunestClient {
+  /**
+   * `GET /api/me/instances`。**ログインした利用者**の Community のインスタンスを返す。
+   * ログインしていなければ gateway / data-api が 401 `UNAUTHENTICATED` で断る（成功にしない）。
+   */
+  listMyInstances(): Promise<ClientResult<ApiInstancesBody>>;
+}
+
 export interface MusunestClientOptions {
   /** API の基点。同じ origin なら `""`（末尾の `/` は落とす） */
   readonly baseUrl: string;
@@ -117,7 +141,7 @@ export interface MusunestClientOptions {
   readonly fetch?: FetchLike;
 }
 
-export function createMusunestClient(options: MusunestClientOptions): MusunestClient {
+export function createMusunestClient(options: MusunestClientOptions): MusunestIdentityClient {
   const base = options.baseUrl.replace(/\/+$/, "");
   const request = options.fetch ?? globalThis.fetch;
   if (request === undefined) throw new Error("fetch が無い。options.fetch で渡す");
@@ -136,6 +160,8 @@ export function createMusunestClient(options: MusunestClientOptions): MusunestCl
       ),
     setRecord: async (instanceId, actionName, id) =>
       decode(await send(request, base, apiActionPath(instanceId, actionName), "POST", { id }), isRow),
+    listMyInstances: async () =>
+      decode(await send(request, base, apiMyInstancesPath(), "GET"), isInstancesBody),
   };
 }
 
@@ -677,6 +703,19 @@ function isDeletedBody(value: unknown): value is ApiDeletedBody {
     typeof value.id === "string" &&
     value.deleted === true
   );
+}
+
+/** 一覧の 1 件（M2.1。Issue #260）。インスタンス ID だけを持つ */
+function isInstanceSummary(value: unknown): boolean {
+  return isRecord(value) && typeof value.instanceId === "string";
+}
+
+/**
+ * 自分のアプリの一覧の応答（M2.1。Issue #260）。`instances` は 1 件ずつの並びである。
+ * **契約と違う形は成功にしない**（`isViewBody` と同じ約束である）。
+ */
+function isInstancesBody(value: unknown): value is ApiInstancesBody {
+  return isRecord(value) && Array.isArray(value.instances) && value.instances.every(isInstanceSummary);
 }
 
 function isSpecBody(value: unknown): value is ApiSpecBody {

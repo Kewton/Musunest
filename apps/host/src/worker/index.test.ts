@@ -1,19 +1,21 @@
-// host の受入試験（Issue #9・#103）。
+// host の受入試験（Issue #9・#103・#264）。
 //
 //   1. wrangler.jsonc（env ごと）：持つ binding は同じ env の gateway への Service Binding だけで、D1 / R2 / DO（と infra:sync が
-//      扱う KV・Queue・dispatch）を持たない。ページは Static Assets が返し、Worker が先に受けるのは /api/* と /healthz だけ
+//      扱う KV・Queue・dispatch）を持たない。ページは Static Assets が返し、Worker が先に受けるのは /api/*・/auth/*・/healthz だけ
 //   2. host を env ごとに**実際に vite build し**、`wrangler deploy` が読むのと同じ出力（.wrangler/deploy/config.json の指す先）を確かめる
 //      - SPAシェル：dist/client/index.html はシェルだけで、ルートの中身を描いていない（SSR にしない）
 //      - 配る Worker のバンドルに React / TanStack Start の描画が入っていない（入っているのはビルド時の prerender Worker だけ）
 //   3. その出力を本物の workerd の上で gateway・data-api と並べて起動し、
 //      - / と深いリンクが同じ SPAシェルを返し、/healthz が Service Binding 越しに gateway → data-api → {D1, R2, DO} まで届く
 //      - /api/* は gateway → data-api まで中継され、data-api の応答（404 の本文・405 の allow）がそのまま返る（Issue #103）
+//      - /auth/* は gateway の認証へ中継され、その応答（302 の Location）がそのまま返る（M2.1。Issue #264）。
+//        **/api/* と違い env で閉じない**——production でもログインして自分のアプリを見る
 //   4. Worker を「呼ばれたら目印を返す」罠に差し替えても、ページロードは SPAシェルが返る＝**Static Assets が Worker を起動せずに返している**。
-//      罠に掛かるのは run_worker_first の2つだけ
+//      罠に掛かるのは run_worker_first の3つ（/api/*・/auth/*・/healthz）だけ
 //   5. production のビルドの出力では、/healthz の詳細を X-Musunest-Probe が secret と一致したときだけ返す（Issue #55）。
 //      ヘッダ無し・誤った値・正しい値の3通りと、host と gateway の secret が食い違う・secret を置いていない production を workerd 上で確かめる
 //   6. production では /api/* が **gateway を一度も呼ばずに** 404 になる（Issue #103）。呼ばれないことは、宛先を
-//      「呼ばれたら 418 を返す罠」に差し替えて確かめる（下の describe）
+//      「呼ばれたら 418 を返す罠」に差し替えて確かめる（下の describe）。**同じ罠で /auth/* は届く**ことも確かめる（#264）
 //
 // モックにしないのは gateway と同じ理由：Service Binding が結線されていること、Static Assets の経路が設定どおりであることの
 // 証明は、vite-plugin が wrangler.jsonc を解決した出力を、wrangler が実際に動かすことでしか得られない。
@@ -36,7 +38,6 @@ import {
   PACKAGE_NAME,
   PROBE_HEADER,
   PROBE_TOKEN_SECRET,
-  WORKER_ROUTES,
 } from "./contract.js";
 import type { HealthzDetail, HostHealthzBody } from "./contract.js";
 import { SKIPPED } from "./healthz.js";
@@ -44,6 +45,17 @@ import { SKIPPED } from "./healthz.js";
 const HOST_DIR = fileURLToPath(new URL("../../", import.meta.url).href);
 const REPO_ROOT = resolve(HOST_DIR, "../..");
 const CONFIG_PATH = join(HOST_DIR, "wrangler.jsonc");
+
+/**
+ * Worker が先に受けるパス（wrangler.jsonc の assets.run_worker_first）。**contract.ts の WORKER_ROUTES に
+ * `/auth/*` を足したもの**である——ログインの経路（/auth/*）は SPAシェルに落とさず gateway へ中継する
+ * （M2.1。Issue #264）。契約の定数（contract.ts）はこの Issue の変更してよい範囲の外なので、
+ * テスト側で実際の設定に合わせて持つ（設定そのものは下の describe が確かめる）。
+ */
+const WORKER_FIRST = ["/api/*", "/auth/*", HEALTHZ_PATH] as const;
+
+/** ログインの経路。gateway の Google OIDC が受け持つ（apps/gateway/src/auth.ts） */
+const AUTH_PREFIX = "/auth" as const;
 /** Service Binding の宛先。gateway と data-api の Worker 名の正本はそれぞれの wrangler.jsonc */
 const GATEWAY_CONFIG_PATH = join(REPO_ROOT, "apps/gateway/wrangler.jsonc");
 const DATA_API_CONFIG_PATH = join(REPO_ROOT, "packages/data-api/wrangler.jsonc");
@@ -155,8 +167,13 @@ describe.each(ENVS)("wrangler.jsonc（env.%s）", (env) => {
     expect(config.assets).toMatchObject({ not_found_handling: "single-page-application" });
   });
 
-  it("Worker が先に受けるのは /api/* と /healthz だけ", () => {
-    expect(config.assets?.run_worker_first).toEqual([...WORKER_ROUTES]);
+  it("Worker が先に受けるのは /api/*・/auth/*・/healthz だけ", () => {
+    expect(config.assets?.run_worker_first).toEqual([...WORKER_FIRST]);
+  });
+
+  it("ログインの経路（/auth/*）も Worker が先に受ける＝SPAシェルに落とさず gateway へ中継される（M2.1。Issue #264）", () => {
+    // ここに無ければ Static Assets が SPAシェルの HTML を返し、Google の認可画面へ送れない
+    expect(config.assets?.run_worker_first).toContain(`${AUTH_PREFIX}/*`);
   });
 
   it(`独自ドメインは ${env === "production" ? "app.musunest.com の custom domain だけ" : "持たない"}（ゾーンはアカウント②。Issue #33）`, () => {
@@ -238,7 +255,7 @@ describe.each(ENVS)("vite build の出力（env.%s）", (env) => {
       // ビルドした env が刻まれる。wrangler deploy --env <別の env> はこれと食い違って失敗する
       targetEnvironment: env,
       services: [{ binding: GATEWAY_BINDING, service: `musunest-${env}-gateway` }],
-      assets: { not_found_handling: "single-page-application", run_worker_first: [...WORKER_ROUTES] },
+      assets: { not_found_handling: "single-page-application", run_worker_first: [...WORKER_FIRST] },
       // 詳細を隠すかどうかはビルドした env の vars で決まる。secret はビルドの出力にも入らない
       vars: { ENVIRONMENT: env, HEALTHZ_DETAIL: DETAIL[env] },
     });
@@ -333,6 +350,16 @@ describe.each(ENVS)("host → gateway → data-api（env.%s・workerd 上の実�
     expect(await res.json()).toEqual(probe ? { error: "not found" } : { error: "NOT_FOUND" });
   });
 
+  it("ログインの経路（/auth/logout）は SPAシェルではなく gateway へ中継される（M2.1。Issue #264）", async () => {
+    // redirect: "manual" で生の 302 を見る（既定は追跡して、戻り先の `/` の SPAシェルが返る）
+    const res = await server.fetch(`${AUTH_PREFIX}/logout`, { headers: NAVIGATION, redirect: "manual" });
+
+    // gateway の認証が返した応答（セッション cookie を消して / へ戻す）。SPAシェルの HTML ではない
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/");
+    expect(await res.text()).not.toContain("<title>MUSUNEST</title>");
+  });
+
   it("method と経路の判定は data-api が行う：GET を action の経路へ送ると 405 と allow がそのまま返る（dev / staging）", async () => {
     // data-api は経路の解析と method の検査を storage より先に行うので、登録の無い harness でも結果が決まる。
     // host も gateway も /api/* で 405 を返さない。allow: POST が返るのは data-api まで届いた証拠である
@@ -392,6 +419,15 @@ describe("production の /api/* は gateway を一度も呼ばずに 404（worke
 
     expect(res.status).toBe(404);
     expect(await res.text()).not.toContain(RELAY_TRIPWIRE);
+  });
+
+  it("ログインの経路（/auth/*）は production でも gateway へ中継される（/api/* と違って env で閉じない。Issue #264）", async () => {
+    // 罠（宛先）に届いた＝host が production でも gateway を呼んだ。404 でも SPAシェルでもない。
+    // ログインは production でも要る（自分のアプリを見る）ので、ここは 404 にならない
+    const res = await server.fetch(`${AUTH_PREFIX}/login`, { headers: NAVIGATION });
+
+    expect(res.status).toBe(418);
+    expect(await res.text()).toBe(RELAY_TRIPWIRE);
   });
 });
 
@@ -606,7 +642,7 @@ describe("Static Assets 経由の配信（Worker を罠に差し替えた実機�
     expect(res.headers.get("content-type")).toMatch(/javascript/);
   });
 
-  it.each(["/healthz", "/api/communities"])("run_worker_first の %s だけは Worker に届く（罠に掛かる）", async (path) => {
+  it.each(["/healthz", "/api/communities", `${AUTH_PREFIX}/logout`])("run_worker_first の %s だけは Worker に届く（罠に掛かる）", async (path) => {
     const res = await server.fetch(path);
     expect(res.status).toBe(418);
     expect(await res.text()).toBe(TRIPWIRE);

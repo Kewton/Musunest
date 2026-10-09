@@ -1,7 +1,7 @@
 // publish — 検査済みの見本を、原本と正規化した JSON の組で R2 に置き、D1 に登録する入口
 // （Issue #101。workspace/mvp/m1/README.md §3.1・§10.2）。
 //
-//   pnpm exec tsx infra/scripts/publish.ts --env <dev|staging> --instance <id> --spec <app.spec.yaml>
+//   pnpm exec tsx infra/scripts/publish.ts --env <dev|staging> --instance <id> --spec <app.spec.yaml> [--community <id>]
 //
 // 中身（検査 → 正規化 → R2 の 2 個 → D1 の登録）は @musunest/control-plane に置いてある（Q14）。
 // **ここが持つのは、引数の解釈・原本の読取・環境変数からの資格情報の取得・Cloudflare adapter の組立・
@@ -27,6 +27,17 @@
 //     ここが足すのは、**前の原本を読む口**（R2 の GET）と、**前後の SHA-256 の表示**だけである
 //   - 差し替えたときは、前の原本の SHA-256 と、後の原本の SHA-256 を出す。**ホスト名・オリジン・
 //     バケット名・Account ID は出さない**（CLAUDE.md。SHA-256 は原本のバイト列の digest である）
+//
+// ── 置いたインスタンスを Community の持ち物にする（--community・#261）────────────
+//
+//   M2.1「ログインして自分のアプリが見える」で、自分の Community の一覧に自分のアプリが出るように、
+//   置く先の Community を指定する口を足した。判定（存在の確認 → 持ち主の登録）は @musunest/control-plane
+//   が持つ（ここに複製しない）。ここが足すのは `--community` の解釈だけである。
+//
+//   - **省略すると、どの Community の持ち物にもしない**（既存の使い方の挙動を変えない）
+//   - 未登録の Community を指定した publish は、**R2 にも D1 にも書かない**（置く前の確認で断る）
+//   - 成功したときは、置いたインスタンスを Community の持ち物にしたことを出力に残す（Community ID は
+//     インスタンス ID と同じく値であって、資格情報ではない）
 //
 // ── なぜ Cloudflare の API を直接叩くか（wrangler を使わないか）────────────────────
 //
@@ -70,6 +81,9 @@ export const EXIT_NG = 1;
 
 /** インスタンス ID の形。URL と SQL の束縛引数に載るので、記号を絞る（値はエラーに出さない）。 */
 export const INSTANCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** Community ID の形（#261）。`crypto.randomUUID()` が作る 36 文字はこれに合う（値はエラーに出さない）。 */
+export const COMMUNITY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /** 値を含まない、そのまま利用者へ見せてよい失敗。 */
 export class PublishError extends Error {
@@ -193,15 +207,18 @@ export interface CliIo {
   readonly requestTimeoutMs: number;
 }
 
-const USAGE = `usage: pnpm exec tsx infra/scripts/publish.ts --env <${PUBLISHABLE_ENVS.join("|")}> --instance <id> --spec <app.spec.yaml>
+const USAGE = `usage: pnpm exec tsx infra/scripts/publish.ts --env <${PUBLISHABLE_ENVS.join("|")}> --instance <id> --spec <app.spec.yaml> [--community <id>]
 
   --env <env>        ${PUBLISHABLE_ENVS.join(" / ")} だけ。${ENVS.filter((e) => !PUBLISHABLE_ENVS.includes(e)).join(" / ")} は書き込みの前に断る
   --instance <id>    宣言を使うインスタンスの ID（${INSTANCE_PATTERN.source}）
   --spec <path>      原本（app.spec.yaml）のパス。リポジトリの直下からの相対、または絶対
+  --community <id>   置いたインスタンスを、この Community の持ち物として登録する（#261。省略すると
+                     どの Community の持ち物にもしない）。未登録の Community なら R2 にも D1 にも書かない
   --replace          既存インスタンスの宣言を、**はっきり差し替える**（既定は差し替えない）。
                      差し替えてよい宣言でなければ replacement_conflict で断る（R2 にも D1 にも書かない）
 
-検査 → 正規化 → R2（原本と正規化した JSON の 2 個）→ D1（アプリ → インスタンス）の順に置く。
+検査 → （--community のときは Community の確認）→ 正規化 → R2（原本と正規化した JSON の 2 個）→
+D1（アプリ → インスタンス → 持ち主）の順に置く。
 検査に通らない宣言は R2 にも D1 にも書かない。R2 のどちらかで失敗したら登録せず、D1 で失敗したら成功と報告しない。
 同じ入力の再実行で復旧できる。${DATA_API_CONFIG} の env.<env> の ${CONTROL_DB_BINDING} と ${BUNDLES_BINDING} を使う。
 --replace のときは、**R2 へ書く前に**、前の原本の正規化した JSON を読んで、差し替えてよい宣言かを確かめる
@@ -234,6 +251,7 @@ function parseCliArgs(argv: readonly string[]) {
         env: { type: "string" },
         instance: { type: "string" },
         spec: { type: "string" },
+        community: { type: "string" },
         replace: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
@@ -276,6 +294,11 @@ async function run(argv: readonly string[], io: CliIo): Promise<number> {
   }
   const specPath = values.spec;
   if (specPath === undefined || specPath === "") throw new PublishError(`--spec が無い（原本 app.spec.yaml のパス）\n${USAGE}`);
+  // 置く先の Community は任意（#261）。**指定が無いときの挙動を変えない**（どの Community の持ち物にもしない）
+  const communityId = values.community;
+  if (communityId !== undefined && !COMMUNITY_PATTERN.test(communityId)) {
+    throw new PublishError("--community は英字で始まる英数字と . _ - で書く（値は表示しない）");
+  }
   // 差し替えは既定で off。**指定が無いときの挙動を変えない**（既存インスタンスの宣言は暗黙に差し替えない）
   const replace = values.replace === true;
 
@@ -286,7 +309,8 @@ async function run(argv: readonly string[], io: CliIo): Promise<number> {
 
   io.out(
     `publish: env=${env} の R2（${BUNDLES_BINDING}）と D1（${CONTROL_DB_BINDING}）へ、検査済みの宣言を置く` +
-      (replace ? "（--replace: 既存インスタンスの宣言を差し替える）" : ""),
+      (replace ? "（--replace: 既存インスタンスの宣言を差し替える）" : "") +
+      (communityId === undefined ? "" : "（--community: 置いたインスタンスを Community の持ち物にする）"),
   );
 
   const result = await publishSpec(
@@ -296,7 +320,7 @@ async function run(argv: readonly string[], io: CliIo): Promise<number> {
       // 差し替えのときだけ、前の原本を読む口を渡す（差し替えない経路に R2 の読み取りを足さない）
       ...(replace ? { readSpec: cloudflareSpecReader(io, credentials, target.bucketName) } : {}),
     },
-    { source, instanceId, replace },
+    { source, instanceId, replace, ...(communityId === undefined ? {} : { communityId }) },
   );
   return report(io, env, specPath, result);
 }
@@ -330,6 +354,13 @@ function report(io: CliIo, env: Env, specPath: string, result: PublishResult): n
       io.out(
         `publish: 差し替え  env=${env}: 前の原本 SHA ${result.replacedSourceSha256} → 後の原本 SHA ${result.app.sourceSha256}` +
           `（インスタンス ${result.instance.instanceId}）`,
+      );
+    }
+    // Community を指定したときだけ、置いたインスタンスをその Community の持ち物にしたことを残す（#261）。
+    // Community ID はインスタンス ID と同じく値であって、資格情報ではない
+    if (result.owner !== null) {
+      io.out(
+        `publish: Community  env=${env}: インスタンス ${result.instance.instanceId} を Community ${result.owner.communityId} の持ち物にした`,
       );
     }
     return EXIT_OK;
