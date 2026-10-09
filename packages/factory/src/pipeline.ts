@@ -5,6 +5,7 @@
 // ⑦ の入力へ写す**純粋な関数**を置く。段の中身（プロンプト・道具）は stages/ にある。
 import type { NormalizedAppSpec } from "@musunest/appspec-schema";
 import type { Diagnostic } from "@musunest/spec-engine";
+import type { TestSuite } from "./fixed-test.js";
 import type { Outcome, StageResults } from "./outcome.js";
 
 /** 原文の中の文字の範囲（① で付ける引用の位置） */
@@ -168,19 +169,103 @@ export interface TestRunResult {
   readonly unresolved: readonly TestUnresolved[];
 }
 
-/** ⑥ 直す、の出力 */
-export interface RepairResult {
-  readonly declaration: Declaration;
-  /** 直す役が「この期待は誤り」と主張した試験（原文の引用つき。F-9・②'） */
-  readonly disputedTests: readonly string[];
+/**
+ * 直す役が「この期待は誤り」と主張した 1 件（§1.3・R-2）。
+ *
+ * 主張には**原文の引用**を必ず添える。引用が原文に実在しなければ（捏造）、主張として受け付けない
+ * ——受け付けなかった主張は `RejectedDispute` として残す（黙って落とさない）。
+ */
+export interface Dispute {
+  /** 期待が誤りと主張する試験の識別子 */
+  readonly testId: string;
+  /** 主張の根拠にした、原文からそのまま写した引用 */
+  readonly quote: string;
 }
 
-/** ⑥' 期待の裁定、の出力（原文の引用を根拠に、期待が誤りかを裁定する） */
+/** 受け付けなかった主張（引用が無い・原文に実在しない）。理由つきで残す（§1.3） */
+export interface RejectedDispute {
+  readonly testId: string;
+  /** 主張が添えた引用（無ければ空文字） */
+  readonly quote: string;
+  readonly reason: string;
+}
+
+/** ⑥ 直す、の出力。直した宣言と、受け付けた／受け付けなかった主張（§1.3） */
+export interface RepairResult {
+  /** 直した宣言（YAML の原文） */
+  readonly declaration: Declaration;
+  /** 受け付けた主張（引用が原文に実在するものだけ。⑥' の裁定へ渡す） */
+  readonly disputes: readonly Dispute[];
+  /** 受け付けなかった主張（引用が無い・原文に実在しない・一覧に無い試験。捏造の記録） */
+  readonly rejected: readonly RejectedDispute[];
+}
+
+/** 棄却された試験（期待が誤り）。理由と引用を記録し、その試験を外す（§1.3） */
+export interface OverturnedTest {
+  readonly testId: string;
+  /** 棄却の理由 */
+  readonly reason: string;
+  /** 棄却の根拠にした、原文に実在する引用 */
+  readonly quote: string;
+}
+
+/**
+ * ⑥' 期待の裁定、の出力（§1.3・R-2）。原文の引用を根拠に、期待が誤りかを裁定する。
+ * 3 つの結果に分ける——**維持**（期待は正しい。宣言を直す）・**棄却**（期待が誤り。試験を外す）・
+ * **裁定不能**（未解決として残す）。
+ */
 export interface ArbitrationResult {
-  /** 誤りと裁定された試験 */
-  readonly overturned: readonly string[];
-  /** 裁定できずに残った試験（⑦ で合格にならない） */
+  /** 維持：期待は正しい（宣言を直す） */
+  readonly upheld: readonly string[];
+  /** 棄却：期待が誤り（理由と引用を記録して、その試験を外す） */
+  readonly overturned: readonly OverturnedTest[];
+  /** 裁定不能：未解決として残す（⑦ で合格にならない） */
   readonly unresolved: readonly string[];
+}
+
+/**
+ * ある版の宣言と、その版に対して流し直した ④⑤ の結果（§1・§4）。
+ *
+ * `declarationSha256` は**その版**のバイト列のものである。古い版の結果へ、新しい版の SHA-256 を
+ * 付け替えない（検証の結果を、どの版を検証したかに結び付ける。§4・F-11）。
+ */
+export interface VersionChecks {
+  readonly declaration: Declaration;
+  /** この版の宣言（原文）の UTF-8 バイト列の SHA-256 */
+  readonly declarationSha256: string;
+  readonly staticCheck: StaticCheckResult;
+  /** 静的チェックを通ったときだけ。通らなければ `null`（⑤a 以降は流さない） */
+  readonly correspondence: CorrespondenceResult | null;
+  readonly testRun: TestRunResult | null;
+}
+
+/**
+ * ⑥ 直す、の往復の結果（⑥' の裁定と、直した後の流し直しを含む。§1・§1.3・§1.4・§4・§1.5）。
+ *
+ * **外側（往復の回数・打ち切り・合否）はコードが決める**。直す役は試験と要件の一覧を変えられない
+ * ——ここへ返す `list` と `suite` は、渡されたものそのまま（棄却で外した分だけを除く）である。
+ */
+export interface RepairLoopResult {
+  /** 最後に静的チェックを通った版と、その版の流し直しの結果（上限に触れたときの返り値。§1.5） */
+  readonly final: VersionChecks;
+  /** 版ごとの結果（古い版の結果に、新しい版の SHA-256 を付けない。§4） */
+  readonly versions: readonly VersionChecks[];
+  /** 直しの往復を使った回数 */
+  readonly rounds: number;
+  /** 直しの往復の上限に触れたか（⑦ の入力。§1.4・§1.5） */
+  readonly limitReached: boolean;
+  /** 直しで前に通っていたものが落ちた回帰（不一致として数える。§1） */
+  readonly regressions: readonly TestMismatch[];
+  /** 維持された試験（期待は正しい。§1.3） */
+  readonly upheld: readonly string[];
+  /** 棄却され外した試験（理由と引用つき。§1.3） */
+  readonly overturned: readonly OverturnedTest[];
+  /** 裁定できずに残った試験（未解決。§1.3） */
+  readonly unresolved: readonly string[];
+  /** 直しても変わらない要件の一覧（直す役は変えられない） */
+  readonly list: RequirementList;
+  /** 直しても変わらない固定した試験（棄却で外した分を除く） */
+  readonly suite: TestSuite;
 }
 
 /** ⑦ 終わりの判定、の入力（段の結果。§1.4） */
