@@ -1,0 +1,78 @@
+[
+  {
+    "file": "d1-pos-table-no-show.app.spec.yaml",
+    "subject": "A",
+    "expect": "PASS",
+    "why": "① table の show を書かない → 項目と計算を全部並べるので、担当の数は見られる"
+  },
+  {
+    "file": "d1-pos-untyped-view.app.spec.yaml",
+    "subject": "A",
+    "expect": "PASS",
+    "why": "① type の無い一覧 → 項目と計算を全部並べる"
+  },
+  {
+    "file": "d1-pos-list-no-show.app.spec.yaml",
+    "subject": "A",
+    "expect": "PASS",
+    "why": "① list の show を書かない → table と同じ扱い"
+  },
+  {
+    "file": "d1-neg-show-without-count.app.spec.yaml",
+    "subject": "A",
+    "expect": "FAIL",
+    "why": "① table の show を書いて、計算を入れない → 見られない"
+  },
+  {
+    "file": "d1-neg-list-show-without-count.app.spec.yaml",
+    "subject": "A",
+    "expect": "FAIL",
+    "why": "① list の show に計算を入れない → 見られない"
+  },
+  {
+    "file": "d2-pos-attendance-claimed.app.spec.yaml",
+    "subject": "D",
+    "expect": "PASS",
+    "why": "② 出欠を別の entity にし、書ける要件をすべて満たし、定員の超過を書けないと正しく申告した",
+    "log": "d2-pos-attendance-claimed.log.json"
+  },
+  {
+    "file": "d2-neg-attendance-not-claimed.app.spec.yaml",
+    "subject": "D",
+    "expect": "FAIL",
+    "why": "② 別の構造なのに、書けない要件（定員の超過）を申告していない",
+    "log": "d2-neg-attendance-not-claimed.log.json"
+  },
+  {
+    "file": "d2-neg-attendance-count-hidden.app.spec.yaml",
+    "subject": "D",
+    "expect": "FAIL",
+    "why": "② 別の構造で、参加人数を画面に出していない（書ける要件を落とした）",
+    "log": "d2-neg-attendance-count-hidden.log.json"
+  },
+  {
+    "file": "d2-neg-attendance-no-add.app.spec.yaml",
+    "subject": "D",
+    "expect": "STATIC_NG|FAIL",
+    "why": "② 別の構造で、出欠を登録する操作が無い",
+    "log": "d2-neg-attendance-no-add.log.json"
+  },
+  {
+    "file": "d2-neg-fixed-options-as-entity.app.spec.yaml",
+    "subject": "A",
+    "expect": "FAIL",
+    "why": "② 要件が選択肢を固定しているのに enum の代わりに entity にした → 不合格のまま"
+  },
+  {
+    "file": "d3-pos-dashboard-first.app.spec.yaml",
+    "subject": "C",
+    "expect": "PASS",
+    "why": "③ ダッシュボードが最初の view（参考）"
+  },
+  {
+    "file": "d3-pos-dashboard-not-first.app.spec.yaml",
+    "subject": "C",
+    "expect": "PASS",
+    "why": "③ ダッシュボードが最初の view ではない → 最初に開く画面は採点しないので、同じく合格"
+  }
+]

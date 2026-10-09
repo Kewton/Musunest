@@ -1,0 +1,67 @@
+entities:
+  - name: member
+    fields:
+      name: string
+  - name: match
+    fields:
+      date: date
+      place: string
+      capacity: number
+  - name: attendance
+    fields:
+      match:
+        type: ref
+        to: match
+      member:
+        type: ref
+        to: member
+views:
+  - name: matchList
+    type: table
+    entity: match
+    show: [date, place, capacity, remainingSlots]
+  - name: memberList
+    type: table
+    entity: member
+    show: [name, attendedMatches]
+  - name: attendanceList
+    type: table
+    entity: attendance
+    show: [match, member]
+actions:
+  - name: addMember
+    entity: member
+  - name: addMatch
+    entity: match
+  - name: addAttendance
+    entity: attendance
+validations:
+  - name: positiveCapacity
+    entity: match
+    expression: capacity > 0
+computed:
+  - name: attendeeCount
+    entity: match
+    type: number
+    aggregate:
+      count: attendance
+      where:
+        match: this
+  - name: remainingSlots
+    entity: match
+    type: number
+    expression: capacity - attendeeCount
+  - name: attendedMatches
+    entity: member
+    type: number
+    aggregate:
+      count: attendance
+      where:
+        member: this
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous
