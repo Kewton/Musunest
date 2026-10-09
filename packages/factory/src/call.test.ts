@@ -16,6 +16,7 @@ import {
   CallGateway,
   categorizeCallError,
   estimateInputUpperBoundTokens,
+  inputUpperBoundChars,
   isIncompleteResponseError,
   isInvalidRequestError,
   isRetryableCallError,
@@ -58,6 +59,14 @@ const TOOL_REQUEST: LlmToolRequest = {
   turns: [],
   maxOutputTokens: 10,
 };
+
+/** 道具付きの要求に載る、最後の答えの schema（構造化出力。#304） */
+const ANSWER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["declaration"],
+  properties: { declaration: { type: "string" } },
+} as const;
 
 const USAGE: LlmUsage = { inputTokens: 5, cachedInputTokens: 1, outputTokens: 4, reasoningTokens: 0 };
 
@@ -108,6 +117,23 @@ describe("入力の上界（02 §1.5・§2.2）", () => {
       estimateInputUpperBoundTokens({ ...EMPTY, turns: [{ role: "assistant", toolCalls: [] }] }),
     ).toBeGreaterThan(0);
     expect(estimateInputUpperBoundTokens({ ...EMPTY, data: "a" })).toBeGreaterThan(0);
+  });
+
+  it("道具付きでも、最後の答えの schema（構造化出力）の分を入力の上界に数える（#304）", () => {
+    const withSchema: LlmToolRequest = { ...TOOL_REQUEST, schemaName: "repair-answer", schema: ANSWER_SCHEMA };
+
+    // 要求が持つ schema を、名前と対で材料へ写す
+    const parts = toolInputParts(withSchema);
+    expect(parts.schema).toEqual({ name: "repair-answer", schema: ANSWER_SCHEMA });
+
+    // 上界は、schema（名前と schema）を直列化した分だけ増える
+    const base = inputUpperBoundChars(toolInputParts(TOOL_REQUEST));
+    const added = JSON.stringify({ name: "repair-answer", schema: ANSWER_SCHEMA }).length;
+    expect(added).toBeGreaterThan(0);
+    expect(inputUpperBoundChars(parts)).toBe(base + added);
+    expect(estimateInputUpperBoundTokens(parts)).toBeGreaterThan(
+      estimateInputUpperBoundTokens(toolInputParts(TOOL_REQUEST)),
+    );
   });
 });
 
