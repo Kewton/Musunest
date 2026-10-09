@@ -17,6 +17,7 @@ import type {
   LlmUsage,
 } from "./llm.js";
 import {
+  OPENAI_PROMPT_CACHE_KEY,
   OpenAiAdapterError,
   OpenAiIncompleteError,
   createOpenAiLlmClient,
@@ -96,6 +97,7 @@ const SCHEMA = {
 const STRUCTURED_REQUEST: LlmStructuredRequest = {
   instructions: "規則",
   documents: ["文書"],
+  rules: [],
   input: "依頼文",
   schemaName: "out",
   schema: SCHEMA,
@@ -105,6 +107,7 @@ const STRUCTURED_REQUEST: LlmStructuredRequest = {
 const TOOL_REQUEST: LlmToolRequest = {
   instructions: "規則",
   documents: ["文書"],
+  rules: [],
   input: "宣言",
   tools: [{ name: "staticCheck", description: "静的チェックを流す", parameters: { type: "object" } }],
   turns: [],
@@ -258,6 +261,46 @@ describe("要求の組み立て（02 §2・§2.2）", () => {
       "<data>\n宣言\n</data>",
     ]);
   });
+
+  it("段ごとの規則は、文書の後ろ・依頼文の前に置かれる（02 §2）", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
+    );
+    await clientWith(fetch).callStructured({
+      ...STRUCTURED_REQUEST,
+      documents: ["契約の文書"],
+      rules: ["段の規則", "もう 1 つの段の規則"],
+      input: "依頼文",
+    });
+    const input = bodyOf(captured).input as readonly { content: readonly { text: string }[] }[];
+    expect(input.map((item) => item.content[0]?.text)).toEqual([
+      "契約の文書",
+      "<rules>\n段の規則\nもう 1 つの段の規則\n</rules>",
+      "<data>\n依頼文\n</data>",
+    ]);
+  });
+
+  it("規則が空なら、規則の項目を送らない（文書の後ろが依頼文になる）", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
+    );
+    await clientWith(fetch).callStructured({ ...STRUCTURED_REQUEST, documents: ["契約の文書"], rules: [] });
+    const input = bodyOf(captured).input as readonly { content: readonly { text: string }[] }[];
+    expect(input.map((item) => item.content[0]?.text)).toEqual(["契約の文書", "<data>\n依頼文\n</data>"]);
+  });
+
+  it("prompt_cache_key を、構造化出力でも道具付きでも同じ値で送る（02 §2）", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
+    );
+    const client = clientWith(fetch);
+    await client.callStructured(STRUCTURED_REQUEST);
+    await client.callWithTools(TOOL_REQUEST);
+    expect(captured).toHaveLength(2);
+    for (const call of captured) {
+      expect(call.body.prompt_cache_key).toBe(OPENAI_PROMPT_CACHE_KEY);
+    }
+  });
 });
 
 // ── 4. usage の分類（02 §1.5）──────────────────────────────────────────
@@ -320,6 +363,33 @@ describe("誤りの分類（02 §2.2）", () => {
     );
     expect(error.kind).toBe("balance");
     expect(error.status).toBe(429);
+  });
+
+  it("HTTP 400（invalid_json_schema）は、要求の誤りとして分類し、種類だけを持つ（本文は残さない）", async () => {
+    const error = await errorKindOf(() =>
+      jsonResponse(
+        {
+          error: {
+            message: "BODY_SENTINEL: schema must have a 'type' key",
+            type: "invalid_request_error",
+            code: "invalid_json_schema",
+          },
+        },
+        400,
+      ),
+    );
+    expect(error.kind).toBe("invalidRequest");
+    expect(error.status).toBe(400);
+    expect(error.code).toBe("invalid_json_schema");
+    // 本文の全文は、誤りにも残さない（種類だけ）
+    expect(error.message).not.toContain("BODY_SENTINEL");
+  });
+
+  it("HTTP 400 で code が無くても、要求の誤りとして分類する", async () => {
+    const error = await errorKindOf(() => jsonResponse({ error: { message: "bad" } }, 400));
+    expect(error.kind).toBe("invalidRequest");
+    expect(error.status).toBe(400);
+    expect(error.code).toBe("invalid_request_error");
   });
 
   it("拒否（refusal）を分類する", async () => {

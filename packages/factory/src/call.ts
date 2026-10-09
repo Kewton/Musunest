@@ -45,10 +45,12 @@ export const MAX_TOKENS_PER_CHAR = 1;
 
 /** 入力の上界を数える材料（規則・文書・schema・道具・履歴・データ。§1.5・§2.2） */
 export interface LlmInputParts {
-  /** 規則（`instructions`） */
+  /** 共通の規則（`instructions`） */
   readonly instructions: string;
   /** 文書（契約・語彙の意味・語彙の台帳） */
   readonly documents: readonly string[];
+  /** 段ごとの規則（文書の後ろ・データの前に置く） */
+  readonly rules: readonly string[];
   /** JSON Schema（構造化出力のとき） */
   readonly schema: unknown;
   /** 道具の定義（道具付きのとき） */
@@ -64,6 +66,7 @@ export function structuredInputParts(request: LlmStructuredRequest): LlmInputPar
   return {
     instructions: request.instructions,
     documents: request.documents,
+    rules: request.rules ?? [],
     schema: { name: request.schemaName, schema: request.schema },
     tools: [],
     turns: [],
@@ -76,6 +79,7 @@ export function toolInputParts(request: LlmToolRequest): LlmInputParts {
   return {
     instructions: request.instructions,
     documents: request.documents,
+    rules: request.rules ?? [],
     schema: undefined,
     tools: request.tools,
     turns: request.turns,
@@ -91,10 +95,11 @@ function jsonChars(value: unknown): number {
   return text === undefined ? 0 : text.length;
 }
 
-/** 入力の上界（文字数）。規則・文書・schema・道具・履歴・データの全部から数える */
+/** 入力の上界（文字数）。規則・文書・段の規則・schema・道具・履歴・データの全部から数える */
 export function inputUpperBoundChars(parts: LlmInputParts): number {
   let chars = parts.instructions.length + parts.data.length;
   for (const document of parts.documents) chars += document.length;
+  for (const rule of parts.rules) chars += rule.length;
   chars += jsonChars(parts.schema);
   chars += jsonChars(parts.tools);
   chars += jsonChars(parts.turns);
@@ -127,6 +132,26 @@ export function isIncompleteResponseError(error: unknown): error is IncompleteRe
   return candidate.kind === "incomplete" && typeof candidate.reason === "string";
 }
 
+/**
+ * 要求そのものが不正な誤りを表す形（§2.2）。adapter（openai.ts）が投げ、ここ（共通の口）が
+ * **構造で**見分ける——口は adapter に依存しないので、型ではなく `kind` と `code` の形で判定する。
+ * HTTP 400（`invalid_json_schema` など）は、同じ要求ではやり直しても通らないので**やり直さない**。
+ * 本文の全文は持たず、誤りの種類（`code`）だけを持つ。
+ */
+export interface InvalidRequestError extends Error {
+  /** 要求の誤りであることを示す印 */
+  readonly kind: "invalidRequest";
+  /** API の誤りの種類（例: `invalid_json_schema`） */
+  readonly code: string;
+}
+
+/** 要求そのものが不正な誤りか（口がやり直さないための判定。§2.2） */
+export function isInvalidRequestError(error: unknown): error is InvalidRequestError {
+  if (!(error instanceof Error)) return false;
+  const candidate = error as { kind?: unknown; code?: unknown };
+  return candidate.kind === "invalidRequest" && typeof candidate.code === "string";
+}
+
 /** 共通の口の結果 */
 export type CallResult<T> =
   | { readonly kind: "ok"; readonly value: T }
@@ -138,6 +163,8 @@ export type CallResult<T> =
   | { readonly kind: "limitExceeded"; readonly limit: LimitName; readonly max: number; readonly actual: number }
   /** 応答が未完了だった（理由付き）。**同じ要求ではやり直さない**（§2.2・§1.5） */
   | { readonly kind: "incomplete"; readonly reason: string; readonly usage: LlmUsage | undefined }
+  /** 要求そのものが不正だった（種類付き）。**同じ要求ではやり直さない**（§2.2） */
+  | { readonly kind: "invalidRequest"; readonly code: string }
   /** 再試行を使い切っても成功しなかった */
   | { readonly kind: "failed"; readonly attempts: number; readonly error: unknown };
 
@@ -284,6 +311,11 @@ export class CallGateway {
             this.#budget.settle(reserved.reservation, error.usage, this.#rates);
           }
           return { kind: "incomplete", reason: error.reason, usage: error.usage };
+        }
+        // 要求そのものが不正な誤り（HTTP 400 など）は、拒否と分け、**同じ要求のままやり直さない**
+        // ——やり直しても通らない（§2.2）。誤りの種類（code）だけを返し、本文の全文は残さない。
+        if (isInvalidRequestError(error)) {
+          return { kind: "invalidRequest", code: error.code };
         }
         // 例外のときは usage が分からないので、予約は残したまま次を試す（§1.5）
         lastError = error;

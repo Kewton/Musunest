@@ -73,14 +73,15 @@ export function serializeJson(value: unknown): string {
 /**
  * 段の材料から、構造化出力の要求を組み立てる。
  *
- * **規則（`instructions`）には共通の規則と段の規則しか入れない。** データは `input` にだけ置き、
- * `<data>` で囲む。文書は `documents` に置く。これで「規則の側にデータが入る」ことを型と組み立ての
- * 両方で防ぐ。
+ * **`instructions`（規則）には共通の規則だけを入れる**——段ごとの規則は `rules` に分け、文書の後ろ・
+ * データの前に置く。これで前置き（共通の規則＋文書）が**全段で同じ**になり、キャッシュが効く（§2）。
+ * データは `input` にだけ置き、`<data>` で囲む。文書は `documents` に置く。
  */
 export function buildStructuredRequest(prompt: StagePrompt): LlmStructuredRequest {
   return {
-    instructions: [...COMMON_RULES, ...prompt.rules].join("\n"),
+    instructions: COMMON_RULES.join("\n"),
     documents: prompt.documents.map((document) => `${document.name}\n${document.text}`),
+    rules: prompt.rules,
     input: prompt.data.map(wrapData).join("\n"),
     schemaName: prompt.schemaName,
     schema: prompt.schema,
@@ -115,6 +116,8 @@ export type StageFailure =
   | { readonly kind: "refused"; readonly attempts: number }
   /** 応答が未完了だった（理由付き。拒否とは分ける。**同じ要求ではやり直さない**。§2.2・§1.5） */
   | { readonly kind: "incomplete"; readonly reason: string }
+  /** 要求そのものが不正だった（種類付き。拒否とは分ける。**同じ要求ではやり直さない**。§2.2） */
+  | { readonly kind: "invalidRequest"; readonly code: string }
   /** 形は合うが、コードの検査に合わない（やり直しても直らなかった＝未達） */
   | { readonly kind: "unmet"; readonly attempts: number; readonly problems: readonly Problem[] };
 
@@ -137,6 +140,8 @@ function mapCallFailure(result: CallFailure): StageFailure {
       return { kind: "callLimit", limit: result.limit, max: result.max, actual: result.actual };
     case "incomplete":
       return { kind: "incomplete", reason: result.reason };
+    case "invalidRequest":
+      return { kind: "invalidRequest", code: result.code };
     case "failed":
       return { kind: "refused", attempts: result.attempts };
   }

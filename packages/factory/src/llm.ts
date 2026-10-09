@@ -56,10 +56,12 @@ export type LlmTurn =
 
 /** 構造化出力の要求（①'・②'・⑤a・⑥'） */
 export interface LlmStructuredRequest {
-  /** 信頼する規則（毎回送る。§2） */
+  /** 共通の規則（全段で同じ。`instructions` に送る。§2） */
   readonly instructions: string;
   /** 信頼する文書（契約・語彙の意味・語彙の台帳。入力の先頭に固定する。§2） */
   readonly documents: readonly string[];
+  /** 段ごとの規則。**文書の後ろ・依頼のデータの前**に置く（前置きを全段で同じにする。§2）。 */
+  readonly rules?: readonly string[];
   /** 依頼文・要件の一覧・宣言。**データとして囲んだ入力**（規則ではない。§2.2） */
   readonly input: string;
   /** JSON Schema の名前 */
@@ -88,10 +90,12 @@ export interface LlmToolDefinition {
 
 /** 道具付きの要求（⑥ 直す） */
 export interface LlmToolRequest {
-  /** 信頼する規則（毎回送る。§2） */
+  /** 共通の規則（全段で同じ。`instructions` に送る。§2） */
   readonly instructions: string;
   /** 信頼する文書（契約・語彙の意味・語彙の台帳。§2） */
   readonly documents: readonly string[];
+  /** 段ごとの規則。**文書の後ろ・依頼のデータの前**に置く（前置きを全段で同じにする。§2）。 */
+  readonly rules?: readonly string[];
   /** 最初の入力（直す対象の宣言と、④⑤ の結果）。**データとして囲んだ入力**（§2.2） */
   readonly input: string;
   /** 使える道具（静的チェック・試験の実行・対応表の確認。§1） */

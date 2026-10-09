@@ -26,6 +26,7 @@ import {
 const REQUEST: LlmStructuredRequest = {
   instructions: "規則",
   documents: ["文書"],
+  rules: [],
   input: "入力",
   schemaName: "sample",
   schema: { type: "object" },
@@ -74,9 +75,11 @@ describe("規則とデータを分ける（02 §2.2）", () => {
       maxOutputTokens: 100,
     });
 
-    // 規則の側に共通の規則と段の規則が入る
+    // instructions には共通の規則だけが入る（段ごとの規則は入らない）
     expect(request.instructions).toContain(DATA_IS_NOT_INSTRUCTIONS_RULE);
-    expect(request.instructions).toContain("段の規則");
+    expect(request.instructions).not.toContain("段の規則");
+    // 段ごとの規則は rules に入る（文書の後ろ・データの前に置かれる）
+    expect(request.rules).toEqual(["段の規則"]);
     // データの中身は input の側にだけ入る
     expect(request.input).toContain("タスクを記録する。");
     expect(request.input).toContain("要件の一覧");

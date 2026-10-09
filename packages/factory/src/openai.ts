@@ -36,6 +36,12 @@ export const DEFAULT_TIMEOUT_MS = 60_000;
 /** Responses API の入口（1 か所に固定する。環境変数からは読まない） */
 const RESPONSES_URL = "https://api.openai.com/v1/responses";
 
+/**
+ * プロンプトのキャッシュの振り分けの鍵（`prompt_cache_key`）。**全段で同じ値**を送る——
+ * 規則（共通の規則）と文書を入力の先頭に固定し、前置きを全段で同じにしたうえで、同じ鍵へ寄せる（§2）。
+ */
+export const OPENAI_PROMPT_CACHE_KEY = "musunest-factory";
+
 /** fetch の差し替え口。Workers・ブラウザ・Node のどれでも同じ形で呼べる範囲だけを要求する（§2.1） */
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -50,6 +56,8 @@ export type OpenAiErrorKind =
   | "timeout"
   /** HTTP の誤り（状態コード付き） */
   | "http"
+  /** 要求そのものが不正（HTTP 400 など）。**同じ要求ではやり直しても通らない** */
+  | "invalidRequest"
   /** 残高切れ（`insufficient_quota`） */
   | "balance"
   /** モデルが拒否した */
@@ -66,12 +74,15 @@ export class OpenAiAdapterError extends Error {
   readonly kind: OpenAiErrorKind;
   /** HTTP の誤りの状態コード（それ以外は `undefined`） */
   readonly status: number | undefined;
+  /** 要求が不正なときの API の誤りの種類（例: `invalid_json_schema`）。無ければ `undefined` */
+  readonly code: string | undefined;
 
-  constructor(kind: OpenAiErrorKind, message: string, status?: number) {
+  constructor(kind: OpenAiErrorKind, message: string, status?: number, code?: string) {
     super(message);
     this.name = "OpenAiAdapterError";
     this.kind = kind;
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -201,12 +212,24 @@ async function readText(response: Response): Promise<string> {
   }
 }
 
-/** HTTP の誤りを分類する。`insufficient_quota` は残高切れとして分ける（§2.2・R-15） */
+/**
+ * HTTP の誤りを分類する（§2.2・R-15）。
+ *
+ *   - `insufficient_quota` … 残高切れとして分ける
+ *   - HTTP 400（`invalid_json_schema` など）… **要求そのものが不正**。同じ要求ではやり直しても通らない
+ *   - それ以外 … 状態コード付きの HTTP の誤り
+ *
+ * **誤りの本文は残さない**——種類（`code`）だけを持つ。本文の全文は、記録にも例外にも入れない。
+ */
 function httpError(status: number, text: string): OpenAiAdapterError {
   const parsed = tryParseJson(text);
   const code = parsed.ok ? errorCodeOf(parsed.value) : undefined;
   if (code === "insufficient_quota") {
     return new OpenAiAdapterError("balance", `残高が足りません（HTTP ${status}）`, status);
+  }
+  if (code === "invalid_json_schema" || status === 400) {
+    const kind = code ?? "invalid_request_error";
+    return new OpenAiAdapterError("invalidRequest", `要求が不正です（HTTP ${status}、${kind}）`, status, kind);
   }
   return new OpenAiAdapterError("http", `HTTP の誤り（HTTP ${status}）`, status);
 }
@@ -221,7 +244,10 @@ function errorCodeOf(value: unknown): string | undefined {
 
 // ── 要求の組み立て（§2・§2.2）─────────────────────────────────────────────
 
-/** 共通の要求を Responses API の body にする（`store: false`・`max_output_tokens`・`instructions`） */
+/**
+ * 共通の要求を Responses API の body にする（`store: false`・`max_output_tokens`・`instructions`・
+ * `prompt_cache_key`）。`prompt_cache_key` は**全段で同じ値**を送る（前置きを同じにしてキャッシュへ寄せる。§2）。
+ */
 function baseBody(
   config: WireConfig,
   instructions: string,
@@ -233,6 +259,7 @@ function baseBody(
     store: false,
     max_output_tokens: maxOutputTokens,
     instructions,
+    prompt_cache_key: OPENAI_PROMPT_CACHE_KEY,
     input,
   };
   if (config.effort !== undefined) body.reasoning = { effort: config.effort };
@@ -244,7 +271,7 @@ function buildStructuredBody(config: WireConfig, request: LlmStructuredRequest):
   const body = baseBody(
     config,
     request.instructions,
-    buildInput(request.documents, request.input),
+    buildInput(request.documents, request.rules ?? [], request.input),
     request.maxOutputTokens,
   );
   body.text = {
@@ -260,16 +287,24 @@ function buildStructuredBody(config: WireConfig, request: LlmStructuredRequest):
 
 /** 道具付きの body（`tools` に function calling を置き、往復を `input` に並べる。§2・R-2） */
 function buildToolBody(config: WireConfig, request: LlmToolRequest): Record<string, unknown> {
-  const input = [...buildInput(request.documents, request.input), ...turnsToInput(request.turns)];
+  const input = [
+    ...buildInput(request.documents, request.rules ?? [], request.input),
+    ...turnsToInput(request.turns),
+  ];
   const body = baseBody(config, request.instructions, input, request.maxOutputTokens);
   body.tools = request.tools.map(toFunctionTool);
   return body;
 }
 
-/** 規則とは別の入力。文書を先頭に固定し（キャッシュの効く前置き）、データは `<data>` で囲む（§2.2） */
-function buildInput(documents: readonly string[], data: string): unknown[] {
+/**
+ * 規則とは別の入力（§2.2）。**文書を先頭に固定し**（キャッシュの効く前置き）、段ごとの規則をその直後に、
+ * 依頼のデータを**さらに後ろ**に置く。データは `<data>` で囲む（規則ではないことが字の上でも分かる）。
+ */
+function buildInput(documents: readonly string[], rules: readonly string[], data: string): unknown[] {
   const items: unknown[] = [];
   for (const document of documents) items.push(userText(document));
+  const rulesText = rules.join("\n");
+  if (rulesText !== "") items.push(userText(`<rules>\n${rulesText}\n</rules>`));
   items.push(userText(`<data>\n${data}\n</data>`));
   return items;
 }

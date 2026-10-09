@@ -53,6 +53,7 @@ export const FAILURE_KINDS = [
   "call-limit", // 呼び出しの数の超過
   "malformed", // 形が合わない応答が続いた
   "refused", // 拒否が続いた
+  "invalid-request", // 要求そのものが不正（HTTP 400 など。やり直しても通らない）
   "unmet", // コードの検査に合わなかった（未達）
   "incomplete", // 静的チェックを通った版が無いまま終わった
 ] as const;
@@ -62,6 +63,11 @@ export type FailureKind = (typeof FAILURE_KINDS)[number];
 export interface FailureAttribution {
   readonly stage: StageId;
   readonly kind: FailureKind;
+  /**
+   * 要求そのものが不正なときの、API の誤りの種類（例: `invalid_json_schema`。§2.2・S-8）。
+   * それ以外の失敗では持たない。**誤りの本文の全文は持たない**（種類だけを残す）。
+   */
+  readonly code?: string;
 }
 
 /** 使用トークンの計（呼び出しの数と、usage が欠けた呼び出しの数を含む。§1.5） */
@@ -288,7 +294,12 @@ export function buildRunRecord(input: RunRecord): RunRecord {
     },
     budget_remaining_usd: input.budget_remaining_usd,
     missing_usage_calls: input.missing_usage_calls,
-    failure: failure === null ? null : { stage: failure.stage, kind: failure.kind },
+    failure:
+      failure === null
+        ? null
+        : failure.code === undefined
+          ? { stage: failure.stage, kind: failure.kind }
+          : { stage: failure.stage, kind: failure.kind, code: failure.code },
   };
 }
 

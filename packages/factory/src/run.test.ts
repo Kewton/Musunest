@@ -16,7 +16,7 @@ import { VERIFICATION_FILE, type BundleVerification } from "./bundle.js";
 import { AGENT_LIMITS } from "./limits.js";
 import { createFakeLlmClient, type RecordedCall } from "./llm-fake.js";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "./llm.js";
-import { OpenAiIncompleteError } from "./openai.js";
+import { OpenAiIncompleteError, createOpenAiLlmClient } from "./openai.js";
 import { runGeneration, type GenerationInput } from "./run.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
 import {
@@ -72,7 +72,12 @@ describe("通常の完走（02 §1）", () => {
     // ①→①'→②→②'→③→⑤a の 6 回だけ呼ぶ（⑥ には入らない）
     expect(recording.structured).toHaveLength(6);
     for (const request of recording.structured) {
-      expectNoAcceptanceMaterial([request.instructions, request.input, ...request.documents]);
+      expectNoAcceptanceMaterial([
+        request.instructions,
+        ...(request.rules ?? []),
+        request.input,
+        ...request.documents,
+      ]);
     }
 
     expect(result.bundle).not.toBeNull();
@@ -274,5 +279,57 @@ describe("未完了の応答の段の失敗と精算（02 §2.2・§1.5）", () 
       const record = result.record.stages.find((candidate) => candidate.stage === stage);
       expect(record?.cached_input_tokens, stage).toBe(80);
     }
+  });
+});
+
+// ── 要求そのものが不正な誤り（HTTP 400）は、拒否と分け、記録に種類だけを残す（02 §2.2・S-8）──
+
+/** 完了した応答を手で書く（差し込む fetch 用） */
+function completedResponse(output: unknown): Response {
+  return new Response(
+    JSON.stringify({
+      id: "resp_1",
+      status: "completed",
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(output) }] },
+      ],
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+describe("要求そのものが不正な誤り（HTTP 400）は、拒否と分け、記録に種類だけを残す（02 §2.2・S-8）", () => {
+  it("invalid_json_schema は、拒否ではなく段の失敗になり、やり直さず、本文の全文を記録に出さない", async () => {
+    const bodySentinel = "BODY_SENTINEL: schema must have a 'type' key";
+    let calls = 0;
+    const fetch = async (): Promise<Response> => {
+      calls += 1;
+      if (calls === 1) return completedResponse(REQUIREMENT_LIST_OUTPUT);
+      if (calls === 2) return completedResponse(REVERSE_CHECK_OUTPUT);
+      // 設計の段の要求が、schema の不正で断られた（疎通の確認で起きた形）
+      return new Response(
+        JSON.stringify({
+          error: { message: bodySentinel, type: "invalid_request_error", code: "invalid_json_schema" },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    };
+    const client = createOpenAiLlmClient({ apiKey: "test-key", fetch });
+    const result = await runGeneration(makeRunInput(client));
+
+    // 拒否と分け、同じ要求のままやり直さない（設計の段で 1 回だけ呼んで止まる）
+    expect(calls).toBe(3);
+    expect(result.stopped).toEqual({ stage: "design", kind: "invalid-request", code: "invalid_json_schema" });
+    expect(result.bundle).toBeNull();
+    expect(result.summary.stop_class).toBe("invalid-request");
+    expect(result.record.failure).toEqual({
+      stage: "design",
+      kind: "invalid-request",
+      code: "invalid_json_schema",
+    });
+    // 記録に、誤りの種類は出るが、本文の全文は出ない
+    const recordText = JSON.stringify(result.record);
+    expect(recordText).toContain("invalid_json_schema");
+    expect(recordText).not.toContain("BODY_SENTINEL");
   });
 });

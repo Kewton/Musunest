@@ -36,13 +36,20 @@ export const TEST_SUITE_ROUNDS = 2;
 /** ②' に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const TEST_SUITE_RULES: readonly string[] = [
   "要件ごとに、正常・異常・境界の 3 種類の試験を、入力と期待つきで作る。",
+  "入力（input）と参照データの値（values）と期待の値（value）は、任意の JSON を表すので、**JSON の文字列**として書く（例: \"{\\\"amount\\\": 21}\"）。",
+  "期待は、異常の試験では誤りコード（expected.code）を入れ、value は null にする。それ以外は値の JSON 文字列を value に入れ、code は null にする。",
   "対象（target）は名前ではなく、要件 ID と役割（role）で指す。宣言は見られないので、名前を書かない。",
   "時計（clock）は固定の日時（オフセット付きの ISO 8601）にする。",
-  "異常の試験の期待は誤りコード（expected.kind = error）、それ以外は値（expected.kind = ok）にする。",
   "要件 ID は①の一覧のものだけを使う。一覧に無い要件 ID を作らない。",
 ];
 
-/** ②' の JSON Schema（構造化出力） */
+/**
+ * ②' の JSON Schema（構造化出力）。**OpenAI の strict の規則に合わせる**（すべての節に `type`、
+ * object は `additionalProperties: false` とすべての欄を `required`、任意の欄は null を許す型で表す。§2）。
+ *
+ * 入力・参照データの値・期待の値は**任意の JSON**（宣言を見る前には形が決まらない）なので、strict で
+ * 表せるよう** JSON の文字列**として受ける。コード（`checkTestSuiteOutput`）が読んで値に戻す。
+ */
 export const TEST_SUITE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -69,7 +76,7 @@ export const TEST_SUITE_SCHEMA = {
           kind: { type: "string", enum: [...TEST_KINDS] },
           operation: { type: "string", enum: ["compute", "validate", "action", "aggregate", "screen"] },
           clock: { type: "string" },
-          input: {},
+          input: { type: "string", description: "入力（レコード）の JSON 文字列" },
           referenceData: {
             type: "array",
             items: {
@@ -87,18 +94,18 @@ export const TEST_SUITE_SCHEMA = {
                     role: { type: "string" },
                   },
                 },
-                values: { type: "object" },
+                values: { type: "string", description: "行の値（項目の役割 → 値）の JSON 文字列" },
               },
             },
           },
           expected: {
             type: "object",
             additionalProperties: false,
-            required: ["kind"],
+            required: ["kind", "value", "code"],
             properties: {
               kind: { type: "string", enum: ["ok", "error"] },
-              value: {},
-              code: { type: "string" },
+              value: { type: ["string", "null"], description: "期待する値の JSON 文字列（kind が error のときは null）" },
+              code: { type: ["string", "null"], description: "期待する誤りコード（kind が ok のときは null）" },
             },
           },
         },
@@ -188,6 +195,37 @@ export function checkSuiteAgainstRequirements(list: RequirementList, suite: Test
   return problems;
 }
 
+/**
+ * 任意の JSON を表す文字列なら、読んで値に戻す（strict の schema に合わせて文字列で受けるため。§2）。
+ * 文字列でなければそのまま返す（記録した試験の fixture は、そのままの値で渡ってくる）。
+ */
+function decodeJsonValue(raw: unknown): unknown {
+  if (typeof raw !== "string") return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/** 生の試験 1 件の、任意の JSON を表す欄（input・referenceData の values・expected の value）を値に戻す */
+function decodeTest(raw: unknown): unknown {
+  if (!isRecord(raw)) return raw;
+  const test: Record<string, unknown> = { ...raw };
+  if ("input" in test) test["input"] = decodeJsonValue(test["input"]);
+  const rawRows = test["referenceData"];
+  if (Array.isArray(rawRows)) {
+    test["referenceData"] = rawRows.map((row) =>
+      isRecord(row) && "values" in row ? { ...row, values: decodeJsonValue(row["values"]) } : row,
+    );
+  }
+  const rawExpected = test["expected"];
+  if (isRecord(rawExpected) && "value" in rawExpected) {
+    test["expected"] = { ...rawExpected, value: decodeJsonValue(rawExpected["value"]) };
+  }
+  return test;
+}
+
 /** ②' の応答の形を確かめる（欄の形は fixed-test.ts の `checkTestSuite` が正本） */
 export function checkTestSuiteOutput(output: unknown): ShapeCheck<TestSuite> {
   if (!isRecord(output)) {
@@ -197,7 +235,7 @@ export function checkTestSuiteOutput(output: unknown): ShapeCheck<TestSuite> {
   if (!Array.isArray(tests)) {
     return { ok: false, problems: [{ field: "tests", message: "試験の一覧は並び（array）であること" }] };
   }
-  const checked = checkTestSuite(tests);
+  const checked = checkTestSuite(tests.map(decodeTest));
   if (!checked.ok) return { ok: false, problems: checked.problems };
   return { ok: true, value: checked.suite };
 }
