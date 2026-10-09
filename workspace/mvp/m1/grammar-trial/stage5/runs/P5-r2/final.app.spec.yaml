@@ -1,0 +1,118 @@
+entities:
+  - name: member
+    fields:
+      name:
+        type: string
+        label: メンバー名
+  - name: payment
+    fields:
+      member:
+        type: ref
+        to: member
+        label: 払った人
+      amount:
+        type: number
+        label: 金額
+      paidOn:
+        type: date
+        label: 払った日
+      method:
+        type: enum
+        label: 払い方
+        options:
+          cash: 現金
+          transfer: 振込
+          paymentApp: 送金アプリ
+views:
+  - name: home
+    type: dashboard
+    widgets:
+      - type: number
+        value: thisMonthAmount
+        label: 今月集まった金額
+        unit: 円
+      - type: number
+        value: thisMonthCount
+        label: 今月の件数
+        unit: 件
+      - type: bar
+        value: monthlyAmount
+        label: 月ごとの集金額
+        unit: 円
+      - type: pie
+        value: amountByMethod
+        label: 払い方の内訳
+        unit: 円
+  - name: payments
+    type: list
+    entity: payment
+    show: [member, amount, paidOn, method]
+    filters: [member, method]
+  - name: members
+    type: table
+    entity: member
+    show: [name, totalPaid]
+actions:
+  - name: addMember
+    entity: member
+  - name: addPayment
+    entity: payment
+  - name: editPayment
+    entity: payment
+    kind: update
+  - name: deletePayment
+    entity: payment
+    kind: delete
+validations:
+  - name: minimumPaymentAmount
+    entity: payment
+    expression: amount >= 1
+    message: 金額は1円以上で入力してください
+computed:
+  - name: totalPaid
+    entity: member
+    type: number
+    label: 払った合計
+    aggregate:
+      sum: payment.amount
+      where:
+        member: this
+  - name: thisMonthAmount
+    scope: app
+    type: number
+    label: 今月集まった金額
+    aggregate:
+      sum: payment.amount
+      where:
+        paidOn:
+          within: this_month
+  - name: thisMonthCount
+    scope: app
+    type: number
+    label: 今月の件数
+    aggregate:
+      count: payment
+      where:
+        paidOn:
+          within: this_month
+  - name: monthlyAmount
+    type: groups
+    label: 月ごとの集金額
+    aggregate:
+      sum: payment.amount
+      groupBy:
+        month: payment.paidOn
+      last: 6
+  - name: amountByMethod
+    type: groups
+    label: 払い方の内訳
+    aggregate:
+      sum: payment.amount
+      groupBy: payment.method
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

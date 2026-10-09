@@ -1,0 +1,35 @@
+{
+  "pattern": "P7",
+  "run": 2,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_03b3888d98e15e58006ac879e6940c87d1af2682d521cc80d8",
+      "ms": 22654,
+      "usage": {
+        "input_tokens": 48668,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48665
+        },
+        "output_tokens": 2059,
+        "output_tokens_details": {
+          "reasoning_tokens": 1469
+        },
+        "total_tokens": 50727
+      },
+      "unwritable": [
+        {
+          "requirement": "参加する人の数が定員を超えたら登録できないこと。",
+          "reason": "出欠を attendance レコードとして表し、集計人数を表示することはできますが、宣言の検査式や create 操作では、登録対象の attendance が参照する match の定員と、その match の既存 attendance 数を照合できません。そのため、定員超過時の登録拒否はこの語彙では宣言できません。"
+        }
+      ],
+      "notes": "参加者は試合の participants 項目ではなく、試合とメンバーを参照する attendance レコードとして表しています。attendance が 0 件なら参加人数は 0 となり、試合を参加者なしで登録できます。定員が 1 人以上であることは validation で検査します。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

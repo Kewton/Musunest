@@ -1,0 +1,51 @@
+{
+  "pattern": "P9",
+  "run": 5,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_07b42499edfa020c006ac87b311ef487d185f9bcafe3ab0ed5",
+      "ms": 17139,
+      "usage": {
+        "input_tokens": 48709,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48706
+        },
+        "output_tokens": 1614,
+        "output_tokens_details": {
+          "reasoning_tokens": 1034
+        },
+        "total_tokens": 50323
+      },
+      "unwritable": [],
+      "notes": "貸し出しボードは状態の選択肢ごとに列を作り、返す日が今日より前の貸し出しを「期限超過」として強調します。返却操作は status が「貸出中」の行にだけ表示されます。",
+      "static_exit": 1,
+      "diag": "./attempt-0.app.spec.yaml:69:11: LOGIC_COMPUTED_DUPLICATE_NAME: computedの名前 loanCount が 2 回ある"
+    },
+    {
+      "attempt": 1,
+      "response_id": "resp_07b42499edfa020c006ac87b42765087d1859fb41f736a8414",
+      "ms": 5372,
+      "usage": {
+        "input_tokens": 50381,
+        "input_tokens_details": {
+          "cache_write_tokens": 1672,
+          "cached_tokens": 48706
+        },
+        "output_tokens": 577,
+        "output_tokens_details": {
+          "reasoning_tokens": 53
+        },
+        "total_tokens": 50958
+      },
+      "unwritable": [],
+      "notes": "",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

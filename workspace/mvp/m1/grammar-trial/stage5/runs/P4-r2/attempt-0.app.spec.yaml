@@ -1,0 +1,69 @@
+entities:
+  - name: resident
+    fields:
+      name:
+        type: string
+        label: 住民の名前
+  - name: duty
+    fields:
+      date:
+        type: date
+        label: いつ
+      dutyType:
+        type: enum
+        label: 当番の種類
+        options:
+          garbage: ゴミ出し
+          parkCleaning: 公園の掃除
+          nightPatrol: 夜回り
+      resident:
+        type: ref
+        to: resident
+        label: 誰
+      status:
+        type: enum
+        label: 状態
+        options:
+          planned: 予定
+          done: 済み
+        default: planned
+views:
+  - name: residentList
+    type: list
+    entity: resident
+    show: [name]
+  - name: dutyBoard
+    type: board
+    entity: duty
+    columns: status
+    highlight: isToday
+  - name: dutyList
+    type: list
+    entity: duty
+    show: [date, dutyType, resident, status]
+    filters: [dutyType, resident]
+actions:
+  - name: addResident
+    entity: resident
+  - name: addDuty
+    entity: duty
+  - name: markDutyDone
+    entity: duty
+    kind: update
+    set:
+      status: done
+    when: 'status == "planned"'
+validations: []
+computed:
+  - name: isToday
+    entity: duty
+    type: boolean
+    label: 今日
+    expression: date == today()
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

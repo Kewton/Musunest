@@ -1,0 +1,86 @@
+# A の静的には通るが要件を破る例 4：担当の数を計算はするが、どの画面にも出さない
+entities:
+  - name: member
+    fields:
+      name:
+        type: string
+        label: 名前
+  - name: item
+    fields:
+      title:
+        type: string
+        label: 持ち物
+      category:
+        type: enum
+        label: 種類
+        options:
+          food: 料理
+          drink: 飲み物
+          gear: 道具
+      bringer:
+        type: ref
+        to: member
+        label: 持ってくる人
+      quantity:
+        type: number
+        label: 数
+      status:
+        type: enum
+        label: 準備
+        options:
+          notyet: まだ
+          ready: 用意できた
+        default: notyet
+computed:
+  - name: itemCount
+    entity: member
+    aggregate:
+      count: item
+      where:
+        bringer: this
+    type: number
+    label: 担当の数
+views:
+  - name: board
+    type: board
+    entity: item
+    columns: status
+  - name: items
+    type: list
+    entity: item
+    show: [title, category, bringer, quantity, status]
+    filters: [category, bringer]
+  - name: members
+    type: table
+    entity: member
+    show: [name]
+actions:
+  - name: addMember
+    entity: member
+  - name: addItem
+    entity: item
+    kind: create
+  - name: editItem
+    entity: item
+    kind: update
+  - name: markReady
+    entity: item
+    kind: update
+    set:
+      status: ready
+    when: status == "notyet"
+  - name: deleteItem
+    entity: item
+    kind: delete
+validations:
+  - name: positiveQuantity
+    entity: item
+    expression: quantity >= 1
+    message: 数は 1 以上にしてください
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

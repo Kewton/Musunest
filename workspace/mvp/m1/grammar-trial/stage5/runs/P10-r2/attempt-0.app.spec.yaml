@@ -1,0 +1,76 @@
+entities:
+  - name: member
+    fields:
+      name:
+        type: string
+        label: 名前
+  - name: equipment
+    fields:
+      name:
+        type: string
+        label: 備品名
+  - name: loan
+    fields:
+      equipment:
+        type: ref
+        to: equipment
+        label: 備品
+      borrower:
+        type: ref
+        to: member
+        label: 借りている人
+      dueDate:
+        type: date
+        label: 返す日
+      status:
+        type: enum
+        options:
+          lent: 貸出中
+          returned: 返却済み
+        default: lent
+        label: 状態
+views:
+  - name: memberList
+    type: table
+    entity: member
+  - name: equipmentList
+    type: table
+    entity: equipment
+  - name: loanBoard
+    type: board
+    entity: loan
+    columns: status
+actions:
+  - name: addLoan
+    entity: loan
+  - name: markReturned
+    entity: loan
+    kind: update
+    set:
+      status: returned
+    when: 'status == "lent"'
+validations: []
+computed:
+  - name: equipmentLoanCount
+    entity: equipment
+    type: number
+    label: 貸出回数
+    aggregate:
+      count: loan
+      where:
+        equipment: this
+  - name: memberBorrowCount
+    entity: member
+    type: number
+    label: 借用回数
+    aggregate:
+      count: loan
+      where:
+        borrower: this
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

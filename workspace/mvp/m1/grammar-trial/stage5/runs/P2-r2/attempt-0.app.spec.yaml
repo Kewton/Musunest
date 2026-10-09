@@ -1,0 +1,67 @@
+entities:
+  - name: member
+    fields:
+      name: string
+  - name: item
+    fields:
+      description: string
+      kind:
+        type: enum
+        options:
+          dish: 料理
+          drink: 飲み物
+          tool: 道具
+      assignee:
+        type: ref
+        to: member
+      quantity: number
+      status:
+        type: enum
+        options:
+          todo: まだ
+          ready: 用意できた
+        default: todo
+views:
+  - name: memberList
+    type: table
+    entity: member
+    show: [name, assignedQuantity]
+  - name: itemList
+    type: list
+    entity: item
+    show: [description, kind, assignee, quantity, status]
+    filters: [kind, assignee]
+  - name: itemBoard
+    type: board
+    entity: item
+    columns: status
+actions:
+  - name: addMember
+    entity: member
+  - name: addItem
+    entity: item
+  - name: markReady
+    entity: item
+    kind: update
+    set:
+      status: ready
+    when: 'status == "todo"'
+validations:
+  - name: quantityAtLeastOne
+    entity: item
+    expression: quantity >= 1
+computed:
+  - name: assignedQuantity
+    entity: member
+    type: number
+    aggregate:
+      sum: item.quantity
+      where:
+        assignee: this
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

@@ -1,0 +1,85 @@
+# B の静的に不正な例：無い語彙（sort・order: asc）を発明して「少ない順」を書く（06 §4.4 の怖い結果）
+entities:
+  - name: member
+    fields:
+      name:
+        type: string
+        label: 名前
+  - name: duty
+    fields:
+      date:
+        type: date
+        label: 日付
+      kind:
+        type: enum
+        label: 当番
+        options:
+          garbage: ゴミ出し
+          cleaning: 公園の掃除
+          patrol: 夜回り
+      assignee:
+        type: ref
+        to: member
+        label: 担当
+      status:
+        type: enum
+        label: 状態
+        options:
+          planned: 予定
+          done: 済み
+        default: planned
+computed:
+  - name: isToday
+    entity: duty
+    type: boolean
+    label: 今日の当番
+    expression: date == today()
+  - name: dutyCount
+    entity: member
+    aggregate:
+      count: duty
+      where:
+        assignee: this
+    type: number
+    label: 当番の回数
+views:
+  - name: board
+    type: board
+    entity: duty
+    columns: status
+    highlight: isToday
+  - name: duties
+    type: list
+    entity: duty
+    show: [date, kind, assignee, status]
+    filters: [kind, assignee]
+  - name: members
+    type: table
+    entity: member
+    show: [name, dutyCount]
+    sort:
+      by: dutyCount
+      order: asc
+actions:
+  - name: addMember
+    entity: member
+  - name: addDuty
+    entity: duty
+    kind: create
+  - name: finish
+    entity: duty
+    kind: update
+    set:
+      status: done
+    when: status == "planned"
+  - name: deleteDuty
+    entity: duty
+    kind: delete
+validations: []
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

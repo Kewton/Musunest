@@ -1,0 +1,113 @@
+# C：サークルの会費の集金（P5・P6 の人の実現例）
+entities:
+  - name: member
+    fields:
+      name:
+        type: string
+        label: 名前
+  - name: payment
+    fields:
+      payer:
+        type: ref
+        to: member
+        label: 払った人
+      amount:
+        type: number
+        label: 金額
+      paidOn:
+        type: date
+        label: 払った日
+      method:
+        type: enum
+        label: 払い方
+        options:
+          cash: 現金
+          transfer: 振込
+          app: 送金アプリ
+computed:
+  - name: paidTotal
+    entity: member
+    aggregate:
+      sum: payment.amount
+      where:
+        payer: this
+    type: number
+    label: 払った合計
+  - name: collectedThisMonth
+    scope: app
+    aggregate:
+      sum: payment.amount
+    type: number
+  - name: paymentsThisMonth
+    scope: app
+    aggregate:
+      count: payment
+      where:
+        paidOn:
+          within: this_month
+    type: number
+  - name: collectedByMonth
+    aggregate:
+      sum: payment.amount
+      groupBy:
+        month: payment.paidOn
+      last: 6
+    type: groups
+  - name: paymentsByMethod
+    aggregate:
+      count: payment
+      groupBy: payment.method
+    type: groups
+views:
+  - name: dashboard
+    type: dashboard
+    widgets:
+      - type: number
+        label: 今月の集金
+        value: collectedThisMonth
+        unit: 円
+      - type: number
+        label: 今月の件数
+        value: paymentsThisMonth
+        unit: 件
+      - type: bar
+        label: 月ごとの集金
+        value: collectedByMonth
+        unit: 円
+      - type: pie
+        label: 払い方の内訳
+        value: paymentsByMethod
+        unit: 件
+  - name: payments
+    type: list
+    entity: payment
+    show: [payer, amount, paidOn, method]
+    filters: [payer, method]
+  - name: members
+    type: table
+    entity: member
+    show: [name, paidTotal]
+actions:
+  - name: addMember
+    entity: member
+  - name: addPayment
+    entity: payment
+    kind: create
+  - name: editPayment
+    entity: payment
+    kind: update
+  - name: deletePayment
+    entity: payment
+    kind: delete
+validations:
+  - name: positiveAmount
+    entity: payment
+    expression: amount > 0
+    message: 金額は 1 円以上にしてください
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

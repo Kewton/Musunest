@@ -7,7 +7,11 @@
 - **IaC二層**：アカウント単位資源は `infra/terraform`、サービス単位は `wrangler.jsonc`。越境しない
 - リクエスト経路は **TypeScript のみ**
 - Cloudflare 固有APIは adapter 層に閉じ込める（`packages/app-do` を除く）
-- Builder Plane（CommandAgent）のコードをこのリポジトリに持ち込まない。接点は headless契約 と `pins/` のみ
+- **CommandAgent のコードをこのリポジトリに持ち込まない。** CommandAgent との接点は headless契約 と `pins/` のみ
+- **プロダクト内の工場（宣言だけを作る）は持ってよい**（2026-10-09 所有者が決定。工場は 2 つ・契約は 1 つ。#273）。ただし次の 3 つを守る
+  1. CommandAgent と同じ納品物の形で出し、門（照合・受け入れ・静的チェック。`packages/control-plane` の bundle-publish）を必ず通す。**工場どうしの近道を作らない**
+  2. LLM の呼び出しは adapter 層に閉じ込める（モデルを入れ替えられるようにする）
+  3. 工場も Data API を迂回しない（D1・R2・DO を直接触らない）
 - **小さく保つ（M0〜M2前半）**：host は SSR にしない（SPAシェル＋Static Assets）。
   Workers for Platforms を使わない。Logpush を使わない（`observability.enabled` で代替）。
   `schedule:` トリガのワークフローを作らない。

@@ -1,0 +1,35 @@
+{
+  "pattern": "P8",
+  "run": 2,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_00bad4b8e715ebe0006ac87a6ca8cc87d1b3f9d384484291da",
+      "ms": 27997,
+      "usage": {
+        "input_tokens": 48654,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48651
+        },
+        "output_tokens": 2546,
+        "output_tokens_details": {
+          "reasoning_tokens": 1954
+        },
+        "total_tokens": 51200
+      },
+      "unwritable": [
+        {
+          "requirement": "定員オーバーは入れられないようにしてほしい。",
+          "reason": "宣言できる検査は同じ entity の項目・計算を参照します。Attendance を追加するときに、その Attendance の match が指す Match の集計人数と定員を検査する語彙はありません。"
+        }
+      ],
+      "notes": "参加者は Attendance レコードとして登録する構成です。そのため、試合は参加者がまだいない状態で作成でき、参加者は後から1人ずつ追加できます。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}
