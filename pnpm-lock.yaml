@@ -142,6 +142,15 @@ importers:
         specifier: workspace:*
         version: link:../spec-engine
 
+  packages/factory:
+    dependencies:
+      '@musunest/appspec-schema':
+        specifier: workspace:*
+        version: link:../appspec-schema
+      '@musunest/spec-engine':
+        specifier: workspace:*
+        version: link:../spec-engine
+
   packages/sdk:
     dependencies:
       '@musunest/appspec-schema':

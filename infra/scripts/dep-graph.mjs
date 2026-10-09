@@ -4,6 +4,8 @@
 //   data-api → control-plane   … D1 の登録表の定義と読み書きを control-plane に置き、data-api が使う
 //   control-plane → spec-engine … publish の中身（静的チェック → 正規化 → 登録する行）を control-plane に置く
 //   e2e → sdk                   … staging の e2e を host と同じ型付きクライアントで呼ぶ
+// 2026-10-09 に 1 本足した（#278。02-architecture.md §3.1）：
+//   factory → appspec-schema, spec-engine … プロダクト内の工場（宣言だけを作る）。control-plane には依存しない
 // 人が読む図は CLAUDE.md「依存の向き」にある。ここを変えたら、同じ PR で図も直す。
 export const ALLOWED = {
   "@musunest/appspec-schema": [],
@@ -12,6 +14,7 @@ export const ALLOWED = {
   "@musunest/app-do": ["@musunest/appspec-schema"],
   "@musunest/control-plane": ["@musunest/appspec-schema", "@musunest/spec-engine"],
   "@musunest/connector": ["@musunest/appspec-schema"],
+  "@musunest/factory": ["@musunest/appspec-schema", "@musunest/spec-engine"],
   "@musunest/data-api": [
     "@musunest/appspec-schema",
     "@musunest/sdk",
@@ -35,6 +38,7 @@ export const DIRS = {
   "@musunest/spec-engine": "packages/spec-engine",
   "@musunest/app-do": "packages/app-do",
   "@musunest/connector": "packages/connector",
+  "@musunest/factory": "packages/factory",
   "@musunest/sdk": "packages/sdk",
   "@musunest/e2e": "e2e",
   "@musunest/template-tanstack-start": "templates/tanstack-start",
