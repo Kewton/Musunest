@@ -1,0 +1,67 @@
+entities:
+  - name: member
+    fields:
+      name: string
+  - name: game
+    fields:
+      gameDate: date
+      place: string
+      capacity: number
+  - name: participation
+    fields:
+      game:
+        type: ref
+        to: game
+      member:
+        type: ref
+        to: member
+views:
+  - name: memberList
+    type: table
+    entity: member
+    show: [name, visitCount]
+  - name: gameList
+    type: table
+    entity: game
+    show: [gameDate, place, capacity, attendeeCount, remainingSeats]
+  - name: participationList
+    type: table
+    entity: participation
+    show: [game, member]
+actions:
+  - name: addMember
+    entity: member
+  - name: addGame
+    entity: game
+  - name: addParticipation
+    entity: participation
+validations:
+  - name: positiveCapacity
+    entity: game
+    expression: capacity > 0
+computed:
+  - name: attendeeCount
+    entity: game
+    type: number
+    aggregate:
+      count: participation
+      where:
+        game: this
+  - name: remainingSeats
+    entity: game
+    type: number
+    expression: capacity - attendeeCount
+  - name: visitCount
+    entity: member
+    type: number
+    aggregate:
+      count: participation
+      where:
+        member: this
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

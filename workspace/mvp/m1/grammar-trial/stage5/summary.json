@@ -1,0 +1,1167 @@
+{
+  "frozen": {
+    "model": "gpt-6-luna",
+    "effort": "medium",
+    "max_repairs": 3,
+    "runs_per_pattern": 5,
+    "rubric": "v4",
+    "claims": "score-claims.mjs"
+  },
+  "stopped": null,
+  "spent_usd": 0.1355,
+  "totals": {
+    "first_shot_static_pass": "45/50",
+    "final_static_pass": "50/50",
+    "spec_pass_writable": "23/30",
+    "spec_pass_partial": "9/20",
+    "claims_ok": "25/50",
+    "claims_missed": 5,
+    "false_claims": 26,
+    "invented_vocab": 0
+  },
+  "rows": [
+    {
+      "pattern": "P1",
+      "subject": "A",
+      "style": "S1",
+      "run": 1,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00685,
+      "seconds": 17
+    },
+    {
+      "pattern": "P1",
+      "subject": "A",
+      "style": "S1",
+      "run": 2,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00131,
+      "seconds": 17
+    },
+    {
+      "pattern": "P1",
+      "subject": "A",
+      "style": "S1",
+      "run": 3,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00135,
+      "seconds": 17
+    },
+    {
+      "pattern": "P1",
+      "subject": "A",
+      "style": "S1",
+      "run": 4,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "持ち物ごとに準備の状態（まだ／用意できた）を持ち、登録したときは「まだ」にすること。「用意できた」にするボタンを、まだのものにだけ出すこと 状態の選択肢・既定値・まだのものに限る更新操作は宣言できますが、操作ボタンに表示する文言を指定する語彙はありません。そのため、ボタンに「用意できた」と表示する要件は宣言できません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00127,
+      "seconds": 16
+    },
+    {
+      "pattern": "P1",
+      "subject": "A",
+      "style": "S1",
+      "run": 5,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00157,
+      "seconds": 22
+    },
+    {
+      "pattern": "P2",
+      "subject": "A",
+      "style": "S2",
+      "run": 1,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "「用意できた」ってボタンで切り替えたい 状態を「用意できた」に更新し、「まだ」の行にだけ操作を許す条件は宣言できますが、操作（action）のボタン表示名を指定する語彙はありません。label は項目と計算にだけ付けられます。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00716,
+      "seconds": 22
+    },
+    {
+      "pattern": "P2",
+      "subject": "A",
+      "style": "S2",
+      "run": 2,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.0011,
+      "seconds": 13
+    },
+    {
+      "pattern": "P2",
+      "subject": "A",
+      "style": "S2",
+      "run": 3,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "「用意できた」ってボタンで切り替えたい 状態を「まだ」から「用意できた」に変更し、「まだ」のときだけ操作できる設定はできます。ただし、操作（ボタン）の表示文言を指定する語彙は文書にありません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00142,
+      "seconds": 18
+    },
+    {
+      "pattern": "P2",
+      "subject": "A",
+      "style": "S2",
+      "run": 4,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "用意できたってボタンで切り替えたい 状態を「用意できた」に切り替え、状態が「まだ」の行だけで操作できる設定は書けますが、操作ボタン自体の表示文言を指定する語彙はありません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00134,
+      "seconds": 18
+    },
+    {
+      "pattern": "P2",
+      "subject": "A",
+      "style": "S2",
+      "run": 5,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "「用意できた」ってボタンで切り替えたい status を「用意できた」に変更し、「まだ」の項目にだけ操作を表示することは宣言できますが、操作ボタン自体の表示名を指定する語彙はありません。そのため、ボタンの表示文字を「用意できた」にすることは宣言できません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00143,
+      "seconds": 20
+    },
+    {
+      "pattern": "P3",
+      "subject": "B",
+      "style": "S1",
+      "run": 1,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00717,
+      "seconds": 22
+    },
+    {
+      "pattern": "P3",
+      "subject": "B",
+      "style": "S1",
+      "run": 2,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 1,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00149,
+      "seconds": 21
+    },
+    {
+      "pattern": "P3",
+      "subject": "B",
+      "style": "S1",
+      "run": 3,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "少ない順を負の数で書いた（画面に負の数の列が出る）",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00153,
+      "seconds": 21
+    },
+    {
+      "pattern": "P3",
+      "subject": "B",
+      "style": "S1",
+      "run": 4,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "少ない順を負の数で書いた（画面に負の数の列が出る）",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00132,
+      "seconds": 18
+    },
+    {
+      "pattern": "P3",
+      "subject": "B",
+      "style": "S1",
+      "run": 5,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "少ない順を負の数で書いた（画面に負の数の列が出る）",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00151,
+      "seconds": 21
+    },
+    {
+      "pattern": "P4",
+      "subject": "B",
+      "style": "S2",
+      "run": 1,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "人ごとの回数が見られる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 1,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "終わったら「済み」ボタンで済みにできるように（予定のやつだけでいい）。 予定のときだけ済みに更新する操作は宣言できますが、操作ボタンの表示名を指定する語彙はありません。「済み」というボタン名は宣言できません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00709,
+      "seconds": 19
+    },
+    {
+      "pattern": "P4",
+      "subject": "B",
+      "style": "S2",
+      "run": 2,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "人ごとの回数が見られる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 1,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00152,
+      "seconds": 23
+    },
+    {
+      "pattern": "P4",
+      "subject": "B",
+      "style": "S2",
+      "run": 3,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "人ごとの回数が見られる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 1,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00137,
+      "seconds": 19
+    },
+    {
+      "pattern": "P4",
+      "subject": "B",
+      "style": "S2",
+      "run": 4,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "人ごとの回数が見られる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 1,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00131,
+      "seconds": 17
+    },
+    {
+      "pattern": "P4",
+      "subject": "B",
+      "style": "S2",
+      "run": 5,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "人ごとの回数が見られる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 1,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "「済み」ボタンの表示名を「済み」にする 操作には名前を付けられますが、操作の表示名を指定する語彙はありません。済みへの更新操作自体は宣言できますが、ボタンに表示する文言は指定できません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00176,
+      "seconds": 29
+    },
+    {
+      "pattern": "P5",
+      "subject": "C",
+      "style": "S1",
+      "run": 1,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "最初の画面に、今月集まった金額と今月の件数、月ごとの集金額のグラフ（直近 6 か月）、払い方の内訳を出すこと ダッシュボードと各部品は宣言できますが、どの一覧を最初に表示するかを指定する語彙は文書にありません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00699,
+      "seconds": 17
+    },
+    {
+      "pattern": "P5",
+      "subject": "C",
+      "style": "S1",
+      "run": 2,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "最初の画面に、今月集まった金額と今月の件数、月ごとの集金額のグラフ（直近 6 か月）、払い方の内訳を出すこと ダッシュボードと各部品の内容は宣言できますが、どの画面を起動時の最初の画面にするかを指定する語彙は文書にありません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00152,
+      "seconds": 20
+    },
+    {
+      "pattern": "P5",
+      "subject": "C",
+      "style": "S1",
+      "run": 3,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "最初の画面に、今月集まった金額と今月の件数、月ごとの集金額のグラフ（直近 6 か月）、払い方の内訳を出すこと ダッシュボードと各部品は宣言できますが、画面の初期表示や開始画面を指定する語彙が文書にありません。そのため、ここでは内容を持つダッシュボードを宣言し、最初の画面にする指定はしていません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00146,
+      "seconds": 21
+    },
+    {
+      "pattern": "P5",
+      "subject": "C",
+      "style": "S1",
+      "run": 4,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "最初の画面に、今月集まった金額と今月の件数、月ごとの集金額のグラフ（直近 6 か月）、払い方の内訳を出すこと ダッシュボードとその部品は宣言できますが、どの画面を最初に表示するかを指定する語彙は文書にありません。集計・グラフ・内訳の内容は宣言していますが、最初の画面になることは保証できません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00158,
+      "seconds": 21
+    },
+    {
+      "pattern": "P5",
+      "subject": "C",
+      "style": "S1",
+      "run": 5,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "最初の画面に、今月集まった金額と今月の件数、月ごとの集金額のグラフ（直近 6 か月）、払い方の内訳を出すこと ダッシュボードと各部品は宣言できますが、画面の表示順や起動時に最初に開く画面を指定する語彙は文書にありません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.0014,
+      "seconds": 19
+    },
+    {
+      "pattern": "P6",
+      "subject": "C",
+      "style": "S2",
+      "run": 1,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "開いたらすぐ「今月いくら集まったか・何件か」と、ここ半年の月ごとの集金のグラフと、払い方の割合が見える ダッシュボードと各部品は宣言できますが、開いたときの既定画面・初期表示を指定する語彙は文書にありません。ダッシュボードを先頭に置いていますが、それが起動時に開くことまでは宣言できません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.0073,
+      "seconds": 25
+    },
+    {
+      "pattern": "P6",
+      "subject": "C",
+      "style": "S2",
+      "run": 2,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "人ごとの合計が見られる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "開いたらすぐ「今月いくら集まったか・何件か」と、ここ半年の月ごとの集金のグラフと、払い方の割合が見える ダッシュボードと各表示部品は宣言できますが、アプリを開いたときに特定の一覧を初期表示する指定語彙は文書にありません。そのため、初期表示を保証する要件は宣言できません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00151,
+      "seconds": 21
+    },
+    {
+      "pattern": "P6",
+      "subject": "C",
+      "style": "S2",
+      "run": 3,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "開いたらすぐ「今月いくら集まったか・何件か」と、ここ半年の月ごとの集金のグラフと、払い方の割合が見える ダッシュボードと各表示部品は宣言できますが、開いたときに特定の一覧（ダッシュボード）を初期表示する指定語彙は文書にありません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00145,
+      "seconds": 19
+    },
+    {
+      "pattern": "P6",
+      "subject": "C",
+      "style": "S2",
+      "run": 4,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00133,
+      "seconds": 16
+    },
+    {
+      "pattern": "P6",
+      "subject": "C",
+      "style": "S2",
+      "run": 5,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "人と支払いを登録できる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "開いたらすぐ ダッシュボードは宣言できますが、アプリ起動時に最初に開く一覧を指定する語彙は文書にありません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00143,
+      "seconds": 22
+    },
+    {
+      "pattern": "P7",
+      "subject": "D",
+      "style": "S1",
+      "run": 1,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 1,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00746,
+      "seconds": 29
+    },
+    {
+      "pattern": "P7",
+      "subject": "D",
+      "style": "S1",
+      "run": 2,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "役割が見つかる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 1,
+        "optional": 0,
+        "false_claims": [
+          "参加する人の数が定員を超えたら登録できないこと。 出欠を attendance レコードとして表し、集計人数を表示することはできますが、宣言の検査式や create 操作では、登録対象の attendance が参照する match の定員と、その match の既存 attendance 数を照合できません。そのため"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00152,
+      "seconds": 23
+    },
+    {
+      "pattern": "P7",
+      "subject": "D",
+      "style": "S1",
+      "run": 3,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "人ごとの参加回数が見られる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 1,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00137,
+      "seconds": 20
+    },
+    {
+      "pattern": "P7",
+      "subject": "D",
+      "style": "S1",
+      "run": 4,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "役割が見つかる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 1,
+        "optional": 0,
+        "false_claims": [
+          "参加する人の数が定員を超えたら登録できないこと。 参加者を試合への attendance レコードで表現し、試合ごとの参加人数は集計できます。しかし、attendance の作成時に、その参照先 match の参加人数と定員を照合する検査は、文書にある式・集計の語彙では書けません。そのため、定員超過の参加登録を禁止でき"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.002,
+      "seconds": 35
+    },
+    {
+      "pattern": "P7",
+      "subject": "D",
+      "style": "S1",
+      "run": 5,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 1,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00167,
+      "seconds": 26
+    },
+    {
+      "pattern": "P8",
+      "subject": "D",
+      "style": "S2",
+      "run": 1,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "役割が見つかる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 1,
+        "optional": 0,
+        "false_claims": [
+          "定員オーバーは入れられないようにしてほしい。 定員の検査は宣言できますが、参加者を追加する操作の検査式から別 entity（試合）の定員を参照できません。式は同じ entity の項目・計算だけを参照でき、集計にも別 entity の項目を結び付ける語彙がありません。そのため、参加者の追加時に試合の定員超過を確実に拒否"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.0073,
+      "seconds": 29
+    },
+    {
+      "pattern": "P8",
+      "subject": "D",
+      "style": "S2",
+      "run": 2,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "役割が見つかる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 1,
+        "optional": 0,
+        "false_claims": [
+          "定員オーバーは入れられないようにしてほしい。 宣言できる検査は同じ entity の項目・計算を参照します。Attendance を追加するときに、その Attendance の match が指す Match の集計人数と定員を検査する語彙はありません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00176,
+      "seconds": 28
+    },
+    {
+      "pattern": "P8",
+      "subject": "D",
+      "style": "S2",
+      "run": 3,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 1,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00166,
+      "seconds": 26
+    },
+    {
+      "pattern": "P8",
+      "subject": "D",
+      "style": "S2",
+      "run": 4,
+      "first_shot_static": 1,
+      "repairs": 1,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "役割が見つかる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 1,
+        "optional": 0,
+        "false_claims": [
+          "定員オーバーは入れられないようにしてほしい。 この語彙では、Attendance を追加する際に、参照先 Match の定員とその試合の既存 Attendance 数を照合して拒否する検査を書けません。validation は操作対象の同じ entity の項目・計算を参照するもので、別 entity の値を使った作成"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00287,
+      "seconds": 35
+    },
+    {
+      "pattern": "P8",
+      "subject": "D",
+      "style": "S2",
+      "run": 5,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 1,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00169,
+      "seconds": 28
+    },
+    {
+      "pattern": "P9",
+      "subject": "E",
+      "style": "S1",
+      "run": 1,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "equipment ごとの回数が見られる",
+        "member ごとの回数が見られる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00693,
+      "seconds": 20
+    },
+    {
+      "pattern": "P9",
+      "subject": "E",
+      "style": "S1",
+      "run": 2,
+      "first_shot_static": 1,
+      "repairs": 1,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00226,
+      "seconds": 23
+    },
+    {
+      "pattern": "P9",
+      "subject": "E",
+      "style": "S1",
+      "run": 3,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00114,
+      "seconds": 16
+    },
+    {
+      "pattern": "P9",
+      "subject": "E",
+      "style": "S1",
+      "run": 4,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00122,
+      "seconds": 17
+    },
+    {
+      "pattern": "P9",
+      "subject": "E",
+      "style": "S1",
+      "run": 5,
+      "first_shot_static": 1,
+      "repairs": 1,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00228,
+      "seconds": 23
+    },
+    {
+      "pattern": "P10",
+      "subject": "E",
+      "style": "S2",
+      "run": 1,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "返す日を過ぎたものに印",
+        "equipment ごとの回数が見られる",
+        "member ごとの回数が見られる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "貸出中と返却済みで列を分けたボードにして、返す日を過ぎてるのは目立たせてほしい。 「返す日を過ぎていて、かつ貸出中」という条件で強調するには複数条件を組み合わせる必要がありますが、式に真偽演算子がなく、highlightが指せる計算も単一の真偽式だけです。返却済みの記録まで強調する別の意味には置き換えず、強調設定は宣言"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00707,
+      "seconds": 24
+    },
+    {
+      "pattern": "P10",
+      "subject": "E",
+      "style": "S2",
+      "run": 2,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "メンバーと備品と貸し出しを登録できる",
+        "返す日を過ぎたものに印",
+        "equipment ごとの回数が見られる",
+        "member ごとの回数が見られる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "返す日を過ぎてるのは目立たせてほしい。 ボードの強調には真偽の計算が必要ですが、期限超過かつ貸出中という条件を組み合わせる真偽演算子が式の語彙にありません。期限超過だけで強調すると、返却済みの貸出も強調されるため、その代わりの意味にはしません。",
+          "「返却済み」ボタン 操作に表示名を付ける語彙はありません。操作名は英字で始まる英数字に限られるため、ボタンの表示を「返却済み」と指定できません。返却状態への切り替えと、貸出中だけ操作できる条件は宣言しています。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00184,
+      "seconds": 29
+    },
+    {
+      "pattern": "P10",
+      "subject": "E",
+      "style": "S2",
+      "run": 3,
+      "first_shot_static": 0,
+      "repairs": 0,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "メンバーと備品と貸し出しを登録できる"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [],
+        "verdict": "OK"
+      },
+      "cost_usd": 0.00138,
+      "seconds": 20
+    },
+    {
+      "pattern": "P10",
+      "subject": "E",
+      "style": "S2",
+      "run": 4,
+      "first_shot_static": 1,
+      "repairs": 1,
+      "final_static": 0,
+      "spec_verdict": "PASS",
+      "failed": [],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "「返却済み」ボタンの表示名 操作に表示名を設定する語彙がありません。返却操作と貸出中のみ実行できる条件は宣言できますが、日本語のボタン表示名は指定できません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00268,
+      "seconds": 27
+    },
+    {
+      "pattern": "P10",
+      "subject": "E",
+      "style": "S2",
+      "run": 5,
+      "first_shot_static": 1,
+      "repairs": 1,
+      "final_static": 0,
+      "spec_verdict": "FAIL",
+      "failed": [
+        "返す日を過ぎたものに印"
+      ],
+      "note": "",
+      "claims": {
+        "correct": 0,
+        "missed": 0,
+        "optional": 0,
+        "false_claims": [
+          "返す日を過ぎてるのは目立たせてほしい。 board の highlight は真偽を返す計算を指定できますが、この語彙の式には and などの真偽演算子がありません。そのため「貸出中で、かつ返す日を過ぎている」場合だけを判定する計算を書けず、返却済みの記録まで期限超過として強調する別の意味には置き換えていません。"
+        ],
+        "verdict": "NG"
+      },
+      "cost_usd": 0.00255,
+      "seconds": 27
+    }
+  ]
+}

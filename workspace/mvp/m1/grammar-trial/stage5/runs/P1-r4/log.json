@@ -1,0 +1,35 @@
+{
+  "pattern": "P1",
+  "run": 4,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_006912d82ec254dc006ac877a18f2087d19be387ab4b3fefc2",
+      "ms": 16055,
+      "usage": {
+        "input_tokens": 48722,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48719
+        },
+        "output_tokens": 1572,
+        "output_tokens_details": {
+          "reasoning_tokens": 942
+        },
+        "total_tokens": 50294
+      },
+      "unwritable": [
+        {
+          "requirement": "持ち物ごとに準備の状態（まだ／用意できた）を持ち、登録したときは「まだ」にすること。「用意できた」にするボタンを、まだのものにだけ出すこと",
+          "reason": "状態の選択肢・既定値・まだのものに限る更新操作は宣言できますが、操作ボタンに表示する文言を指定する語彙はありません。そのため、ボタンに「用意できた」と表示する要件は宣言できません。"
+        }
+      ],
+      "notes": "メンバーごとの数は、担当している持ち物レコード数として集計しています。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

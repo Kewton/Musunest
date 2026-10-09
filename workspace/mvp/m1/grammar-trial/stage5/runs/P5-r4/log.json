@@ -1,0 +1,35 @@
+{
+  "pattern": "P5",
+  "run": 4,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_027b0a176c9cb338006ac87936a8a087d18010b1173b757779",
+      "ms": 21283,
+      "usage": {
+        "input_tokens": 48705,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48702
+        },
+        "output_tokens": 2192,
+        "output_tokens_details": {
+          "reasoning_tokens": 1280
+        },
+        "total_tokens": 50897
+      },
+      "unwritable": [
+        {
+          "requirement": "最初の画面に、今月集まった金額と今月の件数、月ごとの集金額のグラフ（直近 6 か月）、払い方の内訳を出すこと",
+          "reason": "ダッシュボードとその部品は宣言できますが、どの画面を最初に表示するかを指定する語彙は文書にありません。集計・グラフ・内訳の内容は宣言していますが、最初の画面になることは保証できません。"
+        }
+      ],
+      "notes": "払い方の内訳は、払い方ごとの集金額として円グラフにしています。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "pattern": "P6",
+  "run": 2,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_03a10cbda73ae0d4006ac879793f0887d1b35a3a42f541c9a9",
+      "ms": 21318,
+      "usage": {
+        "input_tokens": 48682,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48679
+        },
+        "output_tokens": 2048,
+        "output_tokens_details": {
+          "reasoning_tokens": 1226
+        },
+        "total_tokens": 50730
+      },
+      "unwritable": [
+        {
+          "requirement": "開いたらすぐ「今月いくら集まったか・何件か」と、ここ半年の月ごとの集金のグラフと、払い方の割合が見える",
+          "reason": "ダッシュボードと各表示部品は宣言できますが、アプリを開いたときに特定の一覧を初期表示する指定語彙は文書にありません。そのため、初期表示を保証する要件は宣言できません。"
+        }
+      ],
+      "notes": "払い方の割合は、払い方ごとの支払件数を円の部品で表示する宣言です。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

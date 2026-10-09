@@ -1,0 +1,30 @@
+{
+  "pattern": "P3",
+  "run": 5,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_0fd56f7f0d75704d006ac87878d95487d1af603cbcf2aaa48d",
+      "ms": 20934,
+      "usage": {
+        "input_tokens": 48697,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48694
+        },
+        "output_tokens": 2050,
+        "output_tokens_details": {
+          "reasoning_tokens": 1400
+        },
+        "total_tokens": 50747
+      },
+      "unwritable": [],
+      "notes": "当番回数の順位は、順位部品が基準値の降順で並べる仕様を利用し、当番回数を負にした計算 fewerFirst で回数の少ない順にしています。順位部品の仕様上、基準に使う計算も表示項目に含める必要があるため、fewerFirst の値も表示されます。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

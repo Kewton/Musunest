@@ -1,0 +1,35 @@
+{
+  "pattern": "P6",
+  "run": 1,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_01de57276a48197a006ac8795fb9c487d1a9004faea874f8e5",
+      "ms": 25270,
+      "usage": {
+        "input_tokens": 48682,
+        "input_tokens_details": {
+          "cache_write_tokens": 48679,
+          "cached_tokens": 0
+        },
+        "output_tokens": 2437,
+        "output_tokens_details": {
+          "reasoning_tokens": 1552
+        },
+        "total_tokens": 51119
+      },
+      "unwritable": [
+        {
+          "requirement": "開いたらすぐ「今月いくら集まったか・何件か」と、ここ半年の月ごとの集金のグラフと、払い方の割合が見える",
+          "reason": "ダッシュボードと各部品は宣言できますが、開いたときの既定画面・初期表示を指定する語彙は文書にありません。ダッシュボードを先頭に置いていますが、それが起動時に開くことまでは宣言できません。"
+        }
+      ],
+      "notes": "「払い方の割合」は、払い方ごとの支払件数の割合として宣言しています（円の合計割合ではありません）。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

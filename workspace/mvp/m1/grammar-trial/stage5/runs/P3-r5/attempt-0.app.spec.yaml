@@ -1,0 +1,91 @@
+entities:
+  - name: member
+    fields:
+      name:
+        type: string
+        label: 氏名
+  - name: duty
+    fields:
+      dutyDate:
+        type: date
+        label: 日付
+      kind:
+        type: enum
+        label: 種類
+        options:
+          trash: ゴミ出し
+          parkCleaning: 公園の掃除
+          nightPatrol: 夜回り
+      assignee:
+        type: ref
+        to: member
+        label: 担当
+      status:
+        type: enum
+        label: 状態
+        options:
+          planned: 予定
+          done: 済み
+        default: planned
+views:
+  - name: memberList
+    type: table
+    entity: member
+    show: [name]
+  - name: dutyBoard
+    type: board
+    entity: duty
+    columns: status
+    highlight: isToday
+  - name: dutyList
+    type: list
+    entity: duty
+    show: [dutyDate, kind, assignee, status]
+    filters: [kind, assignee]
+  - name: dutyRanking
+    type: dashboard
+    widgets:
+      - type: ranking
+        name: memberDutyRanking
+        label: 回数の少ない人から
+        entity: member
+        by: fewerFirst
+        show: [name, dutyCount, fewerFirst]
+actions:
+  - name: addMember
+    entity: member
+  - name: addDuty
+    entity: duty
+  - name: finishDuty
+    entity: duty
+    kind: update
+    set:
+      status: done
+    when: status == "planned"
+validations: []
+computed:
+  - name: isToday
+    entity: duty
+    type: boolean
+    label: 今日
+    expression: dutyDate == today()
+  - name: dutyCount
+    entity: member
+    type: number
+    label: 当番回数
+    aggregate:
+      count: duty
+      where:
+        assignee: this
+  - name: fewerFirst
+    entity: member
+    type: number
+    label: 回数の少ない順
+    expression: -dutyCount
+permissions:
+  - name: read
+    subject: minIdentity
+  - name: write
+    subject: minIdentity
+minIdentity:
+  mode: anonymous

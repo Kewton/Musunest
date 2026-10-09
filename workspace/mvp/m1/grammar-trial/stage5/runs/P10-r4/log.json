@@ -1,0 +1,61 @@
+{
+  "pattern": "P10",
+  "run": 4,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_07861f6b2f6a0281006ac87b92343087d1803f01361beba09c",
+      "ms": 20947,
+      "usage": {
+        "input_tokens": 48674,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48671
+        },
+        "output_tokens": 2126,
+        "output_tokens_details": {
+          "reasoning_tokens": 1464
+        },
+        "total_tokens": 50800
+      },
+      "unwritable": [
+        {
+          "requirement": "「返却済み」ボタンの表示名",
+          "reason": "操作（actions）に表示名を設定する語彙がありません。返却操作と貸出中のみ実行できる条件は宣言できますが、日本語のボタン表示名は指定できません。"
+        }
+      ],
+      "notes": "備品・メンバーの貸出／借入回数は、貸出記録の件数として集計します。期限超過の強調は dueDate < today() で判定します。",
+      "static_exit": 1,
+      "diag": "./attempt-0.app.spec.yaml:51:5: SHAPE_KEY_UNKNOWN: views[3]に欄 actions は書けない（M1.1 の語彙に無い）\n./attempt-0.app.spec.yaml:67:11: LOGIC_COMPUTED_NAME_CONFLICT: computed の名前 loanCount が、同じ entity equipment の項目の名前と重なっている\n./attempt-0.app.spec.yaml:83:11: LOGIC_COMPUTED_NAME_CONFLICT: computed の名前 overdue が、同じ entity loan の項目の名前と重なっている"
+    },
+    {
+      "attempt": 1,
+      "response_id": "resp_07861f6b2f6a0281006ac87ba7691887d19692e68d5d735bf4",
+      "ms": 6009,
+      "usage": {
+        "input_tokens": 50951,
+        "input_tokens_details": {
+          "cache_write_tokens": 2277,
+          "cached_tokens": 48671
+        },
+        "output_tokens": 722,
+        "output_tokens_details": {
+          "reasoning_tokens": 102
+        },
+        "total_tokens": 51673
+      },
+      "unwritable": [
+        {
+          "requirement": "「返却済み」ボタンの表示名",
+          "reason": "操作に表示名を設定する語彙がありません。返却操作と貸出中のみ実行できる条件は宣言できますが、日本語のボタン表示名は指定できません。"
+        }
+      ],
+      "notes": "備品・メンバーの回数は貸出記録の件数として集計します。期限超過の強調は dueDate < today() で判定します。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

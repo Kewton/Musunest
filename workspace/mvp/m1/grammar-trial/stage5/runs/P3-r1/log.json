@@ -1,0 +1,30 @@
+{
+  "pattern": "P3",
+  "run": 1,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_05194a7cfdc82bd8006ac87825482c87d1a63979d483db8263",
+      "ms": 22228,
+      "usage": {
+        "input_tokens": 48697,
+        "input_tokens_details": {
+          "cache_write_tokens": 48694,
+          "cached_tokens": 0
+        },
+        "output_tokens": 2173,
+        "output_tokens_details": {
+          "reasoning_tokens": 1539
+        },
+        "total_tokens": 50870
+      },
+      "unwritable": [],
+      "notes": "回数の少ない人を先にするため、当番回数から 1 / (回数 + 1) を計算し、ranking の降順を利用しています。ranking の by は show に含める必要があるため、「順位用スコア」も順位一覧に表示されます。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

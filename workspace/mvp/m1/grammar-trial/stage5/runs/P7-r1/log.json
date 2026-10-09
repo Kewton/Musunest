@@ -1,0 +1,35 @@
+{
+  "pattern": "P7",
+  "run": 1,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_0d6e491a9345b67b006ac879c8c40087d181bf45fba56933e4",
+      "ms": 29151,
+      "usage": {
+        "input_tokens": 48668,
+        "input_tokens_details": {
+          "cache_write_tokens": 48665,
+          "cached_tokens": 0
+        },
+        "output_tokens": 2747,
+        "output_tokens_details": {
+          "reasoning_tokens": 2231
+        },
+        "total_tokens": 51415
+      },
+      "unwritable": [
+        {
+          "requirement": "試合は、参加する人がまだ 0 人の状態でも登録できること",
+          "reason": "参加メンバーを表す list of は、文書の意味上、空の並びを受け付けません。また、項目を省略可能にする語彙もありません。そのため、参加者が 0 人の試合を登録できる宣言は書けません。"
+        }
+      ],
+      "notes": "参加人数・残り枠・メンバーごとの参加試合回数は計算で表し、定員が 1 人以上であることと参加人数が定員を超えないことは試合の検査で表しています。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

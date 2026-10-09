@@ -1,0 +1,30 @@
+{
+  "pattern": "P10",
+  "run": 3,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_07a727eb7ef950b0006ac87b7d866487d18ecde34da09f5cc5",
+      "ms": 20300,
+      "usage": {
+        "input_tokens": 48674,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48671
+        },
+        "output_tokens": 1783,
+        "output_tokens_details": {
+          "reasoning_tokens": 1223
+        },
+        "total_tokens": 50457
+      },
+      "unwritable": [],
+      "notes": "返却期限を過ぎた貸出記録をボード上で強調するようにしています。貸出回数・借入回数は貸出記録の件数を集計します。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "pattern": "P6",
+  "run": 3,
+  "model": "gpt-6-luna",
+  "effort": "medium",
+  "max_repairs": 3,
+  "attempts": [
+    {
+      "attempt": 0,
+      "response_id": "resp_0433b6075a072fdb006ac8798ef55c87d1affe89e7edc1a462",
+      "ms": 19167,
+      "usage": {
+        "input_tokens": 48682,
+        "input_tokens_details": {
+          "cache_write_tokens": 0,
+          "cached_tokens": 48679
+        },
+        "output_tokens": 1929,
+        "output_tokens_details": {
+          "reasoning_tokens": 1010
+        },
+        "total_tokens": 50611
+      },
+      "unwritable": [
+        {
+          "requirement": "開いたらすぐ「今月いくら集まったか・何件か」と、ここ半年の月ごとの集金のグラフと、払い方の割合が見える",
+          "reason": "ダッシュボードと各表示部品は宣言できますが、開いたときに特定の一覧（ダッシュボード）を初期表示する指定語彙は文書にありません。"
+        }
+      ],
+      "notes": "払い方の割合は、文書の集計語彙で表現できる払い方ごとの集金件数を pie で表示する形にしています。支払日は date 型で記録するため、時刻までは記録できません。",
+      "static_exit": 0,
+      "diag": ""
+    }
+  ]
+}
