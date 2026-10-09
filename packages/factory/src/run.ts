@@ -28,6 +28,7 @@ import {
   type JudgeMaterials,
   type OverturnedTest,
   type RejectedDispute,
+  type TestRunResult,
   type TestSuite,
   type VersionChecks,
 } from "./pipeline.js";
@@ -196,6 +197,22 @@ function collectArbitration(
     if (!overturned.some((candidate) => candidate.testId === entry.testId)) overturned.push(entry);
   }
   for (const testId of result.unresolved) if (!unresolved.includes(testId)) unresolved.push(testId);
+}
+
+/**
+ * ⑦ へ渡す未解決の数を、重複なく数える（§1.4・#306）。
+ *
+ * 未解決は 2 か所から出る——**期待の裁定の未解決**（⑥'）と、**最終版の試験を流した結果の未解決**（⑤b。
+ * 入力の型・操作の実行など、評価器で確かめられない試験）。未解決だけが残った版を合格にしないため、
+ * **両方を数える**（#306 の直す前は裁定の未解決だけを渡していた）。同じ試験 ID が両方にあるときは 1 つに数える。
+ */
+export function countUnresolvedTests(
+  arbitrationUnresolved: readonly string[],
+  testRun: TestRunResult | null,
+): number {
+  const ids = new Set<string>(arbitrationUnresolved);
+  for (const unresolved of testRun?.unresolved ?? []) ids.add(unresolved.testId);
+  return ids.size;
 }
 
 /**
@@ -427,12 +444,13 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
 
     const final = lastPassed ?? current;
 
-    // ⑦ 終わりの判定。**実行していない検査は「不一致 0」にしない**（`null` のときは 1 として渡す）
+    // ⑦ 終わりの判定。**実行していない検査は「不一致 0」にしない**（`null` のときは 1 として渡す）。
+    // 未解決は、最終版の試験の結果の未解決と、期待の裁定の未解決の両方を数える（#306）。
     const materials: JudgeMaterials = {
       staticCheckPassed: final.staticCheck.passed,
       correspondenceMisses: final.correspondence === null ? 1 : final.correspondence.misses.length,
       testMismatches: final.testRun === null ? 1 : final.testRun.mismatches.length,
-      testUnresolved: unresolved.length,
+      testUnresolved: countUnresolvedTests(unresolved, final.testRun),
       unwritableRequirements,
       limitReached,
       carriedOver: { reverseCheck: carriedReverseCheck, testSuite: [] },

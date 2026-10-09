@@ -114,10 +114,51 @@ export const TEST_SUITE_OUTPUT = {
   ],
 };
 
+/**
+ * ②' の答え（R-1 の正常の試験だけ、項目（field）を対象にする）。⑤b でこの試験は**未解決**になる
+ * （入力の型は評価器で確かめられない）。ほかは計算の試験で一致するので、不一致は 0 のままである（#306）。
+ */
+export const TEST_SUITE_OUTPUT_WITH_UNRESOLVED = {
+  tests: [
+    {
+      id: "t1",
+      target: { requirementId: "R-1", kind: "field", role: "金額の項目" },
+      kind: "normal",
+      operation: "compute",
+      clock: "2026-09-16T12:00:00+09:00",
+      input: {},
+      referenceData: [],
+      expected: { kind: "ok", value: 1 },
+    },
+    suiteTest("t2", "R-1", "abnormal"),
+    suiteTest("t3", "R-1", "boundary"),
+    suiteTest("t4", "R-2", "normal"),
+    suiteTest("t5", "R-2", "abnormal"),
+    suiteTest("t6", "R-2", "boundary"),
+  ],
+};
+
 /** ⑤a の答え（実在して画面から辿れる場所だけを挙げる） */
 export const CORRESPONDENCE_OUTPUT = {
   entries: [
     { requirementId: "R-1", locations: [{ kind: "computation", entity: "record", name: "total" }] },
+    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "extra" }] },
+  ],
+};
+
+/**
+ * ⑤a の答え（R-1 に、項目（field）の場所も挙げる）。`TEST_SUITE_OUTPUT_WITH_UNRESOLVED` の項目の試験を
+ * 結び付けられるようにする。どの場所も実在し画面から辿れるので、対応表の落ちは 0 である（#306）。
+ */
+export const CORRESPONDENCE_OUTPUT_WITH_FIELD = {
+  entries: [
+    {
+      requirementId: "R-1",
+      locations: [
+        { kind: "computation", entity: "record", name: "total" },
+        { kind: "field", entity: "record", name: "amount" },
+      ],
+    },
     { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "extra" }] },
   ],
 };
@@ -128,14 +169,21 @@ export function structured(output: unknown, usage: LlmUsage | undefined = USAGE)
 }
 
 /** 完走する道の記録（①→①'→②→②'→③→⑤a の順。⑥ は要らない） */
-export function recordedRun(options: { readonly write?: string; readonly design?: unknown } = {}): readonly RecordedCall[] {
+export function recordedRun(
+  options: {
+    readonly write?: string;
+    readonly design?: unknown;
+    readonly suite?: unknown;
+    readonly correspondence?: unknown;
+  } = {},
+): readonly RecordedCall[] {
   return [
     structured(REQUIREMENT_LIST_OUTPUT),
     structured(REVERSE_CHECK_OUTPUT),
     structured(options.design ?? DESIGN_OUTPUT),
-    structured(TEST_SUITE_OUTPUT),
+    structured(options.suite ?? TEST_SUITE_OUTPUT),
     structured({ declaration: options.write ?? DECLARATION_SOURCE }),
-    structured(CORRESPONDENCE_OUTPUT),
+    structured(options.correspondence ?? CORRESPONDENCE_OUTPUT),
   ];
 }
 
