@@ -53,19 +53,10 @@ export interface DesignResult {
   readonly designs: readonly RequirementDesign[];
 }
 
-/** ②' で固定する 1 件の試験（入力と期待）。正常・異常・境界（F-9） */
-export interface FixedTest {
-  readonly id: string;
-  readonly requirementId: string;
-  readonly kind: "normal" | "abnormal" | "boundary";
-  readonly input: unknown;
-  readonly expected: unknown;
-}
-
-/** ②' 試験を作って固定する、の出力（コードが形を確かめて固定する。直す役は変えられない） */
-export interface TestSuite {
-  readonly tests: readonly FixedTest[];
-}
+// ②' で固定する試験の型は fixed-test.ts が正本である（種類・selector（要件 ID と役割）・操作・時計・
+// 参照データ・期待。02 §1.3・②'）。型だけの file なので、根（index.ts が `export *` するこの file）から
+// 読めるように、ここで再輸出する。②' の出力は `TestSuite` である。
+export type { FixedTest, ReferenceRow, TestExpected, TestKind, TestOperation, TestSuite, TestTarget, TestTargetKind } from "./fixed-test.js";
 
 /** ③ 書く、の出力＝宣言。静的チェックはまだ通っていない */
 export interface Declaration {
