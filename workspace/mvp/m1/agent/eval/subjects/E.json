@@ -1,0 +1,176 @@
+{
+  "id": "E",
+  "title": "共用品の貸し出し",
+  "patterns": [
+    "P9",
+    "P10"
+  ],
+  "structures": [
+    {
+      "id": "main",
+      "roles": {
+        "loan": {
+          "entity": {}
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "equipment": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "borrower": {
+          "field": {
+            "of": "loan",
+            "type": "ref",
+            "to": "member"
+          }
+        },
+        "item": {
+          "field": {
+            "of": "loan",
+            "type": "ref",
+            "to": "equipment"
+          }
+        },
+        "status": {
+          "field": {
+            "of": "loan",
+            "type": "enum",
+            "labels": [
+              "貸出中",
+              "返却済み"
+            ]
+          }
+        },
+        "due": {
+          "field": {
+            "of": "loan",
+            "type": "date"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "登録したときの状態",
+          "kind": "enumDefault",
+          "field": "status",
+          "label": "貸出中"
+        },
+        {
+          "req": "状態を進めるボタンと条件",
+          "kind": "advanceAction",
+          "field": "status",
+          "from": "貸出中",
+          "to": "返却済み"
+        },
+        {
+          "req": "状態の列のボード",
+          "kind": "boardColumns",
+          "field": "status"
+        },
+        {
+          "req": "メンバーと備品と貸し出しを登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "equipment",
+            "loan"
+          ]
+        },
+        {
+          "req": "返す日を過ぎたものに印",
+          "kind": "highlight",
+          "field": "due",
+          "trueOn": [
+            "2026-10-07"
+          ],
+          "falseOn": [
+            "2026-10-08",
+            "2026-10-09"
+          ]
+        },
+        {
+          "req": "備品ごとの回数が見られる",
+          "kind": "computedVisible",
+          "entity": "equipment",
+          "aggregateOnly": true,
+          "sources": {
+            "loan": [
+              {
+                "set": {
+                  "item": "m1"
+                }
+              },
+              {
+                "set": {
+                  "item": "m1"
+                }
+              },
+              {
+                "set": {
+                  "item": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        },
+        {
+          "req": "メンバーごとの回数が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "loan": [
+              {
+                "set": {
+                  "borrower": "m1"
+                }
+              },
+              {
+                "set": {
+                  "borrower": "m1"
+                }
+              },
+              {
+                "set": {
+                  "borrower": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        }
+      ],
+      "unwritable": []
+    }
+  ],
+  "clock": "2026-10-08T12:00:00+09:00",
+  "today": "2026-10-08"
+}

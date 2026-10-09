@@ -1,0 +1,232 @@
+{
+  "id": "C",
+  "title": "サークルの会費の集金",
+  "patterns": [
+    "P5",
+    "P6"
+  ],
+  "structures": [
+    {
+      "id": "main",
+      "roles": {
+        "main": {
+          "entity": {}
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "who": {
+          "field": {
+            "of": "main",
+            "type": "ref",
+            "to": "member"
+          }
+        },
+        "method": {
+          "field": {
+            "of": "main",
+            "type": "enum",
+            "labels": [
+              "現金",
+              "振込",
+              "送金アプリ"
+            ]
+          }
+        },
+        "amount": {
+          "field": {
+            "of": "main",
+            "type": "number"
+          }
+        },
+        "date": {
+          "field": {
+            "of": "main",
+            "type": "date"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "人と支払いを登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "main"
+          ]
+        },
+        {
+          "req": "金額は 1 円以上",
+          "kind": "validation",
+          "entity": "main",
+          "cases": [
+            {
+              "set": {
+                "amount": 0
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "amount": 1
+              },
+              "valid": true
+            }
+          ]
+        },
+        {
+          "req": "支払いを直せて消せる",
+          "kind": "actionExists",
+          "entity": "main",
+          "kinds": [
+            "update",
+            "delete"
+          ]
+        },
+        {
+          "req": "人ごとの合計が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "main": [
+              {
+                "set": {
+                  "who": "m1",
+                  "amount": 100,
+                  "date": "2026-10-05"
+                }
+              },
+              {
+                "set": {
+                  "who": "m2",
+                  "amount": 200,
+                  "date": "2026-10-01"
+                }
+              },
+              {
+                "set": {
+                  "who": "m1",
+                  "amount": 400,
+                  "date": "2026-09-20"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 500
+            }
+          ]
+        },
+        {
+          "req": "今月の集金額（ダッシュボード）",
+          "kind": "scopeOnDashboard",
+          "sources": {
+            "main": [
+              {
+                "set": {
+                  "who": "m1",
+                  "amount": 100,
+                  "date": "2026-10-05"
+                }
+              },
+              {
+                "set": {
+                  "who": "m2",
+                  "amount": 200,
+                  "date": "2026-10-01"
+                }
+              },
+              {
+                "set": {
+                  "who": "m1",
+                  "amount": 400,
+                  "date": "2026-09-20"
+                }
+              }
+            ]
+          },
+          "expect": 300,
+          "widgets": [
+            "number"
+          ]
+        },
+        {
+          "req": "今月の件数（ダッシュボード）",
+          "kind": "scopeOnDashboard",
+          "sources": {
+            "main": [
+              {
+                "set": {
+                  "who": "m1",
+                  "amount": 100,
+                  "date": "2026-10-05"
+                }
+              },
+              {
+                "set": {
+                  "who": "m2",
+                  "amount": 200,
+                  "date": "2026-10-01"
+                }
+              },
+              {
+                "set": {
+                  "who": "m1",
+                  "amount": 400,
+                  "date": "2026-09-20"
+                }
+              }
+            ]
+          },
+          "expect": 2,
+          "widgets": [
+            "number"
+          ]
+        },
+        {
+          "req": "月ごとの集金のグラフ（直近 6 か月）",
+          "kind": "groupChart",
+          "source": "main",
+          "groupBy": "date",
+          "month": true,
+          "last": 6,
+          "aggKind": "sum",
+          "value": "amount",
+          "widgets": [
+            "bar"
+          ]
+        },
+        {
+          "req": "払い方の内訳",
+          "kind": "groupChart",
+          "source": "main",
+          "groupBy": "method",
+          "month": false,
+          "widgets": [
+            "pie",
+            "bar"
+          ]
+        },
+        {
+          "req": "人と払い方で絞り込み",
+          "kind": "listFilters",
+          "entity": "main",
+          "fields": [
+            "who",
+            "method"
+          ]
+        }
+      ],
+      "unwritable": []
+    }
+  ],
+  "clock": "2026-10-08T12:00:00+09:00",
+  "today": "2026-10-08"
+}

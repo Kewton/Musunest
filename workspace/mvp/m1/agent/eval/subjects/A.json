@@ -1,0 +1,153 @@
+{
+  "id": "A",
+  "title": "持ち寄りの持ち物分担",
+  "patterns": [
+    "P1",
+    "P2"
+  ],
+  "structures": [
+    {
+      "id": "main",
+      "roles": {
+        "main": {
+          "entity": {}
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "who": {
+          "field": {
+            "of": "main",
+            "type": "ref",
+            "to": "member"
+          }
+        },
+        "kind": {
+          "field": {
+            "of": "main",
+            "type": "enum",
+            "labels": [
+              "料理",
+              "飲み物",
+              "道具"
+            ]
+          }
+        },
+        "status": {
+          "field": {
+            "of": "main",
+            "type": "enum",
+            "labels": [
+              "まだ",
+              "用意できた"
+            ]
+          }
+        },
+        "qty": {
+          "field": {
+            "of": "main",
+            "type": "number"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "登録したときの状態",
+          "kind": "enumDefault",
+          "field": "status",
+          "label": "まだ"
+        },
+        {
+          "req": "状態を進めるボタンと条件",
+          "kind": "advanceAction",
+          "field": "status",
+          "from": "まだ",
+          "to": "用意できた"
+        },
+        {
+          "req": "状態の列のボード",
+          "kind": "boardColumns",
+          "field": "status"
+        },
+        {
+          "req": "人と主役を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "main"
+          ]
+        },
+        {
+          "req": "種類と人で絞り込み",
+          "kind": "listFilters",
+          "entity": "main",
+          "fields": [
+            "kind",
+            "who"
+          ]
+        },
+        {
+          "req": "数は 1 以上",
+          "kind": "validation",
+          "entity": "main",
+          "cases": [
+            {
+              "set": {
+                "qty": 0
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "qty": 1
+              },
+              "valid": true
+            }
+          ]
+        },
+        {
+          "req": "人ごとの数が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "main": [
+              {
+                "set": {
+                  "who": "m1"
+                }
+              },
+              {
+                "set": {
+                  "who": "m1"
+                }
+              },
+              {
+                "set": {
+                  "who": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        }
+      ],
+      "unwritable": []
+    }
+  ],
+  "clock": "2026-10-08T12:00:00+09:00",
+  "today": "2026-10-08"
+}

@@ -1,0 +1,183 @@
+{
+  "id": "B",
+  "title": "町内会の当番表",
+  "patterns": [
+    "P3",
+    "P4"
+  ],
+  "structures": [
+    {
+      "id": "main",
+      "roles": {
+        "main": {
+          "entity": {}
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "who": {
+          "field": {
+            "of": "main",
+            "type": "ref",
+            "to": "member"
+          }
+        },
+        "kind": {
+          "field": {
+            "of": "main",
+            "type": "enum",
+            "labels": [
+              "ゴミ出し",
+              "公園の掃除",
+              "夜回り"
+            ]
+          }
+        },
+        "status": {
+          "field": {
+            "of": "main",
+            "type": "enum",
+            "labels": [
+              "予定",
+              "済み"
+            ]
+          }
+        },
+        "date": {
+          "field": {
+            "of": "main",
+            "type": "date"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "登録したときの状態",
+          "kind": "enumDefault",
+          "field": "status",
+          "label": "予定"
+        },
+        {
+          "req": "状態を進めるボタンと条件",
+          "kind": "advanceAction",
+          "field": "status",
+          "from": "予定",
+          "to": "済み"
+        },
+        {
+          "req": "状態の列のボード",
+          "kind": "boardColumns",
+          "field": "status"
+        },
+        {
+          "req": "人と主役を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "main"
+          ]
+        },
+        {
+          "req": "種類と人で絞り込み",
+          "kind": "listFilters",
+          "entity": "main",
+          "fields": [
+            "kind",
+            "who"
+          ]
+        },
+        {
+          "req": "今日の当番に印",
+          "kind": "highlight",
+          "field": "date",
+          "trueOn": [
+            "2026-10-08"
+          ],
+          "falseOn": [
+            "2026-10-07",
+            "2026-10-09"
+          ]
+        },
+        {
+          "req": "人ごとの回数が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "main": [
+              {
+                "set": {
+                  "who": "m1"
+                }
+              },
+              {
+                "set": {
+                  "who": "m1"
+                }
+              },
+              {
+                "set": {
+                  "who": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        },
+        {
+          "req": "少ない順を逆向きで書いていない",
+          "kind": "rankingOrder",
+          "target": "member",
+          "sources": {
+            "main": [
+              {
+                "set": {
+                  "who": "m1"
+                }
+              },
+              {
+                "set": {
+                  "who": "m1"
+                }
+              },
+              {
+                "set": {
+                  "who": "m2"
+                }
+              }
+            ]
+          },
+          "fewer": "m2",
+          "more": "m1",
+          "writes": "少ない順"
+        }
+      ],
+      "unwritable": [
+        {
+          "id": "少ない順",
+          "keys": [
+            "少ない",
+            "昇順",
+            "並べ"
+          ],
+          "optionalIfWritten": "少ない順"
+        }
+      ]
+    }
+  ],
+  "clock": "2026-10-08T12:00:00+09:00",
+  "today": "2026-10-08"
+}

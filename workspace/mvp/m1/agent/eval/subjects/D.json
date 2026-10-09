@@ -1,0 +1,394 @@
+{
+  "id": "D",
+  "title": "フットサルの出欠",
+  "patterns": [
+    "P7",
+    "P8"
+  ],
+  "structures": [
+    {
+      "id": "list",
+      "note": "参加者を試合の中の参照の並びで持つ（第 1 段の人の実現例の構造）",
+      "roles": {
+        "match": {
+          "entity": {}
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "attendees": {
+          "field": {
+            "of": "match",
+            "type": "list",
+            "to": "member"
+          }
+        },
+        "capacity": {
+          "field": {
+            "of": "match",
+            "type": "number"
+          }
+        },
+        "date": {
+          "field": {
+            "of": "match",
+            "type": "date"
+          }
+        },
+        "place": {
+          "field": {
+            "of": "match",
+            "type": "string"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "人と試合を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "match"
+          ]
+        },
+        {
+          "req": "定員を超えたら登録できない",
+          "kind": "validation",
+          "entity": "match",
+          "cases": [
+            {
+              "set": {
+                "capacity": 2,
+                "attendees": [
+                  "m1",
+                  "m2",
+                  "m3"
+                ]
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 2,
+                "attendees": [
+                  "m1",
+                  "m2"
+                ]
+              },
+              "valid": true
+            }
+          ]
+        },
+        {
+          "req": "定員は 1 人以上",
+          "kind": "validation",
+          "entity": "match",
+          "cases": [
+            {
+              "set": {
+                "capacity": 0,
+                "attendees": []
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 1,
+                "attendees": [
+                  "m1"
+                ]
+              },
+              "valid": true
+            }
+          ]
+        },
+        {
+          "req": "参加人数が見られる",
+          "kind": "computedVisible",
+          "entity": "match",
+          "probes": [
+            {
+              "set": {
+                "capacity": 5,
+                "attendees": [
+                  "m1",
+                  "m2"
+                ]
+              },
+              "expect": 2
+            }
+          ]
+        },
+        {
+          "req": "残りの枠が見られる",
+          "kind": "computedVisible",
+          "entity": "match",
+          "probes": [
+            {
+              "set": {
+                "capacity": 5,
+                "attendees": [
+                  "m1",
+                  "m2"
+                ]
+              },
+              "expect": 3
+            }
+          ]
+        },
+        {
+          "req": "人ごとの参加回数が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "match": [
+              {
+                "set": {
+                  "attendees": [
+                    "m1"
+                  ]
+                }
+              },
+              {
+                "set": {
+                  "attendees": [
+                    "m1"
+                  ]
+                }
+              },
+              {
+                "set": {
+                  "attendees": [
+                    "m2"
+                  ]
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        }
+      ],
+      "unwritable": [
+        {
+          "id": "参加者 0 人で登録",
+          "keys": [
+            "0\\s*人",
+            "０\\s*人",
+            "ゼロ",
+            "誰も(い|居)",
+            "いなくても",
+            "空",
+            "あとから",
+            "後から",
+            "任意",
+            "必須"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "attendance",
+      "note": "出欠を別の entity（試合とメンバーを参照）にした構造（2026-10-09 決定②で、申告が正しければ合格）",
+      "roles": {
+        "match": {
+          "entity": {
+            "hasFieldTypes": [
+              "number",
+              "date",
+              "string"
+            ]
+          }
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "att": {
+          "entity": {}
+        },
+        "attMatch": {
+          "field": {
+            "of": "att",
+            "type": "ref",
+            "to": "match"
+          }
+        },
+        "attMember": {
+          "field": {
+            "of": "att",
+            "type": "ref",
+            "to": "member"
+          }
+        },
+        "capacity": {
+          "field": {
+            "of": "match",
+            "type": "number"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "人と試合を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "match"
+          ]
+        },
+        {
+          "req": "参加を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "att"
+          ]
+        },
+        {
+          "req": "定員は 1 人以上",
+          "kind": "validation",
+          "entity": "match",
+          "cases": [
+            {
+              "set": {
+                "capacity": 0
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 1
+              },
+              "valid": true
+            }
+          ]
+        },
+        {
+          "req": "参加人数が見られる",
+          "kind": "computedVisible",
+          "entity": "match",
+          "sources": {
+            "att": [
+              {
+                "set": {
+                  "attMatch": "g1",
+                  "attMember": "m1"
+                }
+              },
+              {
+                "set": {
+                  "attMatch": "g1",
+                  "attMember": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "g1",
+              "set": {
+                "capacity": 5
+              },
+              "expect": 2
+            }
+          ]
+        },
+        {
+          "req": "残りの枠が見られる",
+          "kind": "computedVisible",
+          "entity": "match",
+          "sources": {
+            "att": [
+              {
+                "set": {
+                  "attMatch": "g1",
+                  "attMember": "m1"
+                }
+              },
+              {
+                "set": {
+                  "attMatch": "g1",
+                  "attMember": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "g1",
+              "set": {
+                "capacity": 5
+              },
+              "expect": 3
+            }
+          ]
+        },
+        {
+          "req": "人ごとの参加回数が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "att": [
+              {
+                "set": {
+                  "attMember": "m1",
+                  "attMatch": "g1"
+                }
+              },
+              {
+                "set": {
+                  "attMember": "m1",
+                  "attMatch": "g2"
+                }
+              },
+              {
+                "set": {
+                  "attMember": "m2",
+                  "attMatch": "g1"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        }
+      ],
+      "unwritable": [
+        {
+          "id": "定員を超えたら登録できない",
+          "keys": [
+            "定員",
+            "超"
+          ]
+        }
+      ]
+    }
+  ],
+  "clock": "2026-10-08T12:00:00+09:00",
+  "today": "2026-10-08"
+}

@@ -1,0 +1,1 @@
+{"attempts": [{"unwritable": [{"requirement": "参加する人の数が定員を超えたら登録できないこと。", "reason": "検査の式から別の entity の数を見られない"}]}]}
