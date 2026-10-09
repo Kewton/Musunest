@@ -5,7 +5,7 @@
 // ⑦ の入力へ写す**純粋な関数**を置く。段の中身（プロンプト・道具）は stages/ にある。
 import type { NormalizedAppSpec } from "@musunest/appspec-schema";
 import type { Diagnostic } from "@musunest/spec-engine";
-import type { TestSuite } from "./fixed-test.js";
+import type { RequirementNature, TestSuite, TestTargetKind } from "./fixed-test.js";
 import type { Outcome, StageResults } from "./outcome.js";
 
 /** 原文の中の文字の範囲（① で付ける引用の位置） */
@@ -56,9 +56,51 @@ export interface ReverseCheckResult {
   readonly misses: readonly ReverseCheckMiss[];
 }
 
-/** ② 設計する、で要件ごとに決める語彙と置き場所 */
+/**
+ * 要件ごとの確かめ方（② が固定する。§1・②・Issue #307）。
+ *
+ * - `fixed-test` … 固定した試験で確かめる
+ * - `structural` … 構造の条件（create の操作がある・一覧や表に項目が出る・画面の部品がある）で確かめる
+ * - `unresolved` … いまは確かめられない（未解決のまま残す）
+ *
+ * `fixed-test` 以外は**理由を必須**にする（試験を作らないときは理由を必須にする）。
+ */
+export const REQUIREMENT_VERIFICATION_KINDS = ["fixed-test", "structural", "unresolved"] as const;
+export type RequirementVerificationKind = (typeof REQUIREMENT_VERIFICATION_KINDS)[number];
+export type RequirementVerification =
+  | { readonly kind: "fixed-test" }
+  | { readonly kind: "structural"; readonly reason: string }
+  | { readonly kind: "unresolved"; readonly reason: string };
+
+/**
+ * 役割 ID の表の 1 行（② が固定する。§1・②・Issue #307）。
+ *
+ * 役割 ID は **entity の文脈を含む ID**（例 `member`・`member.name`・`session.bookCount`）。
+ * **共有**（複数の要件が同じ entity を使う）と**別名**は、`shared`・`aliasOf` の欄でだけ許す。
+ * 同名の別 entity は**別の役割 ID** にする（同じ役割 ID に潰さない）。
+ */
+export interface RoleEntry {
+  /** 役割 ID（entity の文脈を含む ID） */
+  readonly roleId: string;
+  /** 対象の種類（entity・項目・計算・操作・画面の部品） */
+  readonly kind: TestTargetKind;
+  /** 所属の entity の役割 ID（entity 自身の行では null） */
+  readonly entity: string | null;
+  /** 対象の名前（役割 ID の中の呼び名。宣言の名前ではない） */
+  readonly name: string;
+  /** 共有を明示したか（複数の要件が同じ entity を使う） */
+  readonly shared: boolean;
+  /** 別名なら、元の役割 ID（別名でなければ null） */
+  readonly aliasOf: string | null;
+}
+
+/** ② 設計する、で要件ごとに決める語彙と置き場所（役割 ID・種類・確かめ方は Issue #307 で足した） */
 export interface RequirementDesign {
   readonly requirementId: string;
+  /** 要件の種類（決まりを含む／在ることだけ）。② が固定する（Issue #307） */
+  readonly nature?: RequirementNature;
+  /** 確かめ方（固定した試験／構造の条件／未解決）。② が固定する（Issue #307） */
+  readonly verification?: RequirementVerification;
   /** 使う語彙（無い語彙・キー・関数は作らない。F-5） */
   readonly vocabulary: readonly string[];
   /** 置き場所（宣言のどの欄か） */
@@ -69,13 +111,54 @@ export interface RequirementDesign {
 
 /** ② 設計する、の出力 */
 export interface DesignResult {
+  /** 役割 ID の表（② が固定する。Issue #307） */
+  readonly roles?: readonly RoleEntry[];
   readonly designs: readonly RequirementDesign[];
 }
 
-// ②' で固定する試験の型は fixed-test.ts が正本である（種類・selector（要件 ID と役割）・操作・時計・
-// 参照データ・期待。02 §1.3・②'）。型だけの file なので、根（index.ts が `export *` するこの file）から
-// 読めるように、ここで再輸出する。②' の出力は `TestSuite` である。
-export type { FixedTest, ReferenceRow, TestExpected, TestKind, TestOperation, TestSuite, TestTarget, TestTargetKind } from "./fixed-test.js";
+/**
+ * ③ が提出する「役割 ID → 宣言の名前」の対応の 1 行（§1・Issue #307。
+ * 中身の点検は次の Issue。型だけをここに置く）。
+ */
+export interface RoleNameMapping {
+  /** 役割 ID（② の役割 ID の表のもの） */
+  readonly roleId: string;
+  /** その役割 ID に対応する、宣言での名前 */
+  readonly name: string;
+}
+
+/**
+ * ②' の分類が② の設計と食い違った 1 件（§1・②'・Issue #307）。
+ * 食い違った要件は**決まりを含むほうへ倒し**、そのことを結果に残す。
+ */
+export interface NatureDiscrepancy {
+  readonly requirementId: string;
+  /** ② の設計が決めた種類 */
+  readonly design: RequirementNature;
+  /** ②' が原文と要件の一覧から独立に分類した種類 */
+  readonly classified: RequirementNature;
+  /** 倒した先（食い違ったときは `ruled`） */
+  readonly resolved: RequirementNature;
+}
+
+/**
+ * ②' で固定する試験の型は fixed-test.ts が正本である（種類・selector（要件 ID と役割 ID）・操作・時計・
+ * 参照データ・期待。02 §1.3・②'）。型だけの file なので、根（index.ts が `export *` するこの file）から
+ * 読めるように、ここで再輸出する。②' の出力は `TestSuite` である。
+ */
+export type {
+  FixedTest,
+  ReferenceRow,
+  RequirementClassification,
+  RequirementNature,
+  TestExpected,
+  TestInputContract,
+  TestKind,
+  TestOperation,
+  TestSuite,
+  TestTarget,
+  TestTargetKind,
+} from "./fixed-test.js";
 
 /**
  * ③ 書く、の出力＝宣言（YAML の原文）。静的チェックはまだ通っていない（§1）。
