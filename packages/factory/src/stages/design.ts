@@ -20,9 +20,6 @@ import {
 /** ② の JSON Schema の名前 */
 export const DESIGN_SCHEMA_NAME = "requirement-design";
 
-/** ② の出力トークンの上限 */
-export const DESIGN_MAX_OUTPUT_TOKENS = 4_096;
-
 /** ② に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const DESIGN_RULES: readonly string[] = [
   "要件ごとに、使う語彙と、宣言のどの欄に置くか（placement）を決める。",
@@ -107,7 +104,7 @@ export async function runDesign(input: DesignInput): Promise<StageOutcome<Design
     data: [{ name: "要件の一覧", text: serializeJson(input.list) }],
     schemaName: DESIGN_SCHEMA_NAME,
     schema: DESIGN_SCHEMA,
-    maxOutputTokens: DESIGN_MAX_OUTPUT_TOKENS,
+    maxOutputTokens: input.gateway.maxOutputTokens("design"),
   });
   return callStructuredChecked(input.gateway, { request, check: checkDesignOutput });
 }

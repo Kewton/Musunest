@@ -41,6 +41,8 @@ export interface GatewayOptions {
   readonly budgetUsd?: number;
   readonly maxAttempts?: number;
   readonly deadline?: number;
+  /** 推論の effort（段の出力の上限を試すのに使う。既定 `high`） */
+  readonly effort?: string;
 }
 
 /** 試験用の共通の口。予算は十分に取り、時計は 0 に固定する（締切は絶対時刻） */
@@ -52,6 +54,7 @@ export function makeGateway(client: LlmClient, options: GatewayOptions = {}): Ca
     now: () => 0,
     deadline: options.deadline ?? 60_000,
     ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
+    ...(options.effort === undefined ? {} : { effort: options.effort }),
   });
 }
 

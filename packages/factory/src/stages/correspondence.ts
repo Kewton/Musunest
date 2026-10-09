@@ -42,9 +42,6 @@ import {
 /** ⑤a の JSON Schema の名前 */
 export const CORRESPONDENCE_SCHEMA_NAME = "requirement-correspondence";
 
-/** ⑤a の出力トークンの上限 */
-export const CORRESPONDENCE_MAX_OUTPUT_TOKENS = 4_096;
-
 /** ⑤a に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const CORRESPONDENCE_RULES: readonly string[] = [
   "あなたは、作った宣言を、原文と要件の一覧に戻って点検する役である。",
@@ -343,7 +340,7 @@ export async function runCorrespondence(
     data: buildData(input),
     schemaName: CORRESPONDENCE_SCHEMA_NAME,
     schema: CORRESPONDENCE_SCHEMA,
-    maxOutputTokens: CORRESPONDENCE_MAX_OUTPUT_TOKENS,
+    maxOutputTokens: input.gateway.maxOutputTokens("correspondence"),
   });
   const answer = await callStructuredChecked(input.gateway, { request, check: checkCorrespondenceOutput });
   if (!answer.ok) return answer;

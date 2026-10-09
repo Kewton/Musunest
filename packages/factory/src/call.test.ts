@@ -12,11 +12,13 @@ import { JobBudget, costOfUsageUsd, estimateMaxCostUsd, type TokenRates } from "
 import {
   CallGateway,
   estimateInputUpperBoundTokens,
+  isIncompleteResponseError,
   structuredInputParts,
   toolInputParts,
   type LlmInputParts,
 } from "./call.js";
 import { AGENT_LIMITS } from "./limits.js";
+import { OpenAiIncompleteError } from "./openai.js";
 import type {
   LlmClient,
   LlmStructuredRequest,
@@ -312,5 +314,87 @@ describe("共通の口（02 §1.5・§2.2）", () => {
           maxAttempts: 0,
         }),
     ).toThrow(RangeError);
+  });
+});
+
+// ── 未完了の応答（02 §2.2・§1.5）────────────────────────────────
+
+const incompleteError = (usage: LlmUsage | undefined): OpenAiIncompleteError =>
+  new OpenAiIncompleteError("max_output_tokens", usage, "応答が完了していません（reason=max_output_tokens）");
+
+/** いつも同じ誤りを返す偽物（実 API を呼ばない） */
+function throwingClient(error: unknown): LlmClient {
+  return {
+    callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+      return Promise.reject(error);
+    },
+    callWithTools(): Promise<LlmToolResponse> {
+      return Promise.reject(error);
+    },
+  };
+}
+
+describe("未完了の応答（02 §2.2・§1.5）", () => {
+  it("未完了の応答は、同じ要求のままやり直さず、拒否と分ける", async () => {
+    let attempts = 0;
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        attempts += 1;
+        return Promise.reject(incompleteError(USAGE));
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    const budget = new JobBudget(1_000);
+    const gateway = new CallGateway({ client, budget, rates: RATES, now: () => 0, deadline: 1_000 });
+
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result).toEqual({ kind: "incomplete", reason: "max_output_tokens", usage: USAGE });
+    expect(attempts).toBe(1);
+    expect(gateway.calls).toBe(1);
+    expect(gateway.retries).toBe(0);
+  });
+
+  it("usage 付きの未完了の応答は、実際の費用で精算する", async () => {
+    const budget = new JobBudget(1_000);
+    const gateway = new CallGateway({
+      client: throwingClient(incompleteError(USAGE)),
+      budget,
+      rates: RATES,
+      now: () => 0,
+      deadline: 1_000,
+    });
+
+    await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(budget.spentUsd).toBe(costOfUsageUsd(USAGE, RATES));
+    expect(budget.reservedUsd).toBe(0);
+  });
+
+  it("usage の無い未完了の応答では、予約が残る", async () => {
+    const budget = new JobBudget(1_000);
+    const gateway = new CallGateway({
+      client: throwingClient(incompleteError(undefined)),
+      budget,
+      rates: RATES,
+      now: () => 0,
+      deadline: 1_000,
+    });
+
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result).toEqual({ kind: "incomplete", reason: "max_output_tokens", usage: undefined });
+    expect(budget.spentUsd).toBe(0);
+    expect(budget.reservedUsd).toBe(
+      maxCostOf(structuredInputParts(STRUCTURED_REQUEST), STRUCTURED_REQUEST.maxOutputTokens),
+    );
+  });
+
+  it("未完了の応答を表す誤りを、構造で見分ける（口は adapter に依存しない）", () => {
+    expect(isIncompleteResponseError(incompleteError(USAGE))).toBe(true);
+    expect(
+      isIncompleteResponseError(Object.assign(new Error("x"), { kind: "incomplete", reason: "max_output_tokens" })),
+    ).toBe(true);
+    expect(isIncompleteResponseError(new Error("拒否"))).toBe(false);
+    expect(isIncompleteResponseError({ kind: "incomplete", reason: "max_output_tokens" })).toBe(false);
   });
 });

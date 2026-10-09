@@ -20,9 +20,6 @@ import {
 /** ③ の JSON Schema の名前 */
 export const WRITE_SCHEMA_NAME = "declaration";
 
-/** ③ の出力トークンの上限 */
-export const WRITE_MAX_OUTPUT_TOKENS = 8_192;
-
 /** ③ に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const WRITE_RULES: readonly string[] = [
   "設計（設計する段の出力）に従って、宣言（app.spec.yaml の原文）を 1 つ書く。",
@@ -97,7 +94,7 @@ export async function runWrite(input: WriteInput): Promise<StageOutcome<WrittenD
     data: buildData(input.list, input.design),
     schemaName: WRITE_SCHEMA_NAME,
     schema: DECLARATION_SCHEMA,
-    maxOutputTokens: WRITE_MAX_OUTPUT_TOKENS,
+    maxOutputTokens: input.gateway.maxOutputTokens("write"),
   });
   const answer = await callStructuredChecked(input.gateway, { request, check: checkWriteOutput });
   if (!answer.ok) return answer;

@@ -11,16 +11,21 @@
 import { acceptsHeadlessSummaryWire } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
+import { costOfUsageUsd } from "./budget.js";
 import { VERIFICATION_FILE, type BundleVerification } from "./bundle.js";
 import { AGENT_LIMITS } from "./limits.js";
-import type { RecordedCall } from "./llm-fake.js";
+import { createFakeLlmClient, type RecordedCall } from "./llm-fake.js";
+import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "./llm.js";
+import { OpenAiIncompleteError } from "./openai.js";
 import { runGeneration, type GenerationInput } from "./run.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
 import {
+  CORRESPONDENCE_OUTPUT,
   DECLARATION_SOURCE,
   DESIGN_OUTPUT,
   DESIGN_OUTPUT_PARTIAL,
   INVALID_DECLARATION_SOURCE,
+  RATES,
   REQUIREMENT_LIST_OUTPUT,
   REVERSE_CHECK_OUTPUT,
   TEST_SUITE_OUTPUT,
@@ -180,5 +185,94 @@ describe("未実行の検査がある結果は、合格にならない（02 §1.
     expect(verificationOf(result.bundle).unexecuted_inspections).toEqual(["correspondence", "run-tests"]);
     expect(acceptsHeadlessSummaryWire(result.summary)).toBe(true);
     expect(result.summary.verdict).toBe("none");
+  });
+});
+
+// ── 4. 未完了の応答の段の失敗と精算（02 §2.2・§1.5）────────────────
+
+/** 記録した応答を順に返し、`failAfter` 回を超えると未完了の誤りを返す偽物（実 API を呼ばない） */
+function incompleteAfter(
+  recorded: readonly RecordedCall[],
+  failAfter: number,
+  usage: LlmUsage | undefined,
+): { readonly client: LlmClient; calls: () => number } {
+  const inner = createFakeLlmClient(recorded);
+  let calls = 0;
+  const fail = (): never => {
+    throw new OpenAiIncompleteError("max_output_tokens", usage, "応答が完了していません（reason=max_output_tokens）");
+  };
+  return {
+    client: {
+      async callStructured<T>(request: LlmStructuredRequest) {
+        calls += 1;
+        if (calls > failAfter) return fail();
+        return inner.callStructured<T>(request);
+      },
+      async callWithTools(request: LlmToolRequest) {
+        calls += 1;
+        if (calls > failAfter) return fail();
+        return inner.callWithTools(request);
+      },
+    },
+    calls: () => calls,
+  };
+}
+
+const noUsageCall = (output: unknown): RecordedCall => ({ kind: "structured", output, usage: undefined });
+
+describe("未完了の応答の段の失敗と精算（02 §2.2・§1.5）", () => {
+  it("usage 付きの未完了の応答は、拒否ではなく段の失敗になり、精算されて記録と費用に入る", async () => {
+    const usage: LlmUsage = { inputTokens: 200, cachedInputTokens: 0, outputTokens: 100, reasoningTokens: 40 };
+    const failing = incompleteAfter([noUsageCall(REQUIREMENT_LIST_OUTPUT), noUsageCall(REVERSE_CHECK_OUTPUT)], 2, usage);
+    const input = makeRunInput(failing.client);
+    const result = await runGeneration(input);
+
+    expect(result.stopped).toEqual({ stage: "design", kind: "incomplete" });
+    expect(result.bundle).toBeNull();
+    expect(result.summary.stop_class).toBe("incomplete");
+
+    const design = result.record.stages.find((stage) => stage.stage === "design");
+    expect(design).toMatchObject({
+      status: "failed",
+      calls: 1,
+      missing_usage_calls: 0,
+      failure_kind: "incomplete",
+    });
+    expect(design?.output_tokens).toBe(100);
+    // 精算されて、要約の費用に入る（この走りでは、usage 付きは未完了の 1 回だけ）
+    expect(result.summary.provider_cost_usd).toBeCloseTo(costOfUsageUsd(usage, RATES), 12);
+    // 同じ要求のままやり直さない（設計の段は 1 回だけ。① と ①' で 2 回、合わせて 3 回）
+    expect(failing.calls()).toBe(3);
+  });
+
+  it("usage の無い未完了の応答では、予約が残る", async () => {
+    const failing = incompleteAfter([noUsageCall(REQUIREMENT_LIST_OUTPUT), noUsageCall(REVERSE_CHECK_OUTPUT)], 2, undefined);
+    const input = makeRunInput(failing.client);
+    const result = await runGeneration(input);
+
+    expect(result.stopped).toEqual({ stage: "design", kind: "incomplete" });
+    const design = result.record.stages.find((stage) => stage.stage === "design");
+    expect(design).toMatchObject({ calls: 1, missing_usage_calls: 1, failure_kind: "incomplete" });
+    // 精算しないので費用は 0。予約は残るので、残高は上限より小さい（戻らない）
+    expect(result.summary.provider_cost_usd).toBe(0);
+    expect(result.summary.budget_remaining_usd).toBeLessThan(input.budgetUsd);
+  });
+
+  it("段ごとに、キャッシュに当たった入力のトークンを記録に出す（02 §1.5・§2）", async () => {
+    const cachedUsage: LlmUsage = { inputTokens: 100, cachedInputTokens: 80, outputTokens: 20, reasoningTokens: 0 };
+    const cached: readonly RecordedCall[] = [
+      structured(REQUIREMENT_LIST_OUTPUT, cachedUsage),
+      structured(REVERSE_CHECK_OUTPUT, cachedUsage),
+      structured(DESIGN_OUTPUT, cachedUsage),
+      structured(TEST_SUITE_OUTPUT, cachedUsage),
+      structured({ declaration: DECLARATION_SOURCE }, cachedUsage),
+      structured(CORRESPONDENCE_OUTPUT, cachedUsage),
+    ];
+    const result = await runGeneration(makeRunInput(createRecordingClient(cached).client));
+
+    for (const stage of ["design", "write"] as const) {
+      const record = result.record.stages.find((candidate) => candidate.stage === stage);
+      expect(record?.cached_input_tokens, stage).toBe(80);
+    }
   });
 });

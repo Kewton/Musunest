@@ -16,7 +16,13 @@
 // 費用の予約そのものは budget.ts（`JobBudget`）が持つ。ここは「呼ぶ前に予約し、呼んだ後で精算する」
 // 順番と、回数の集計と、締切を引き受ける。単価はコードに埋め込まない（引数で受け取る）。
 import { estimateMaxCostUsd, type JobBudget, type TokenRates } from "./budget.js";
-import { AGENT_LIMITS, type AgentLimits, type LimitName } from "./limits.js";
+import {
+  AGENT_LIMITS,
+  maxOutputTokensForEffort,
+  type AgentLimits,
+  type LimitName,
+  type OutputStage,
+} from "./limits.js";
 import type {
   LlmClient,
   LlmStructuredRequest,
@@ -100,6 +106,27 @@ export function estimateInputUpperBoundTokens(parts: LlmInputParts): number {
   return Math.ceil(inputUpperBoundChars(parts) * MAX_TOKENS_PER_CHAR);
 }
 
+/**
+ * 未完了の応答を表す誤りの形（§2.2・§1.5）。adapter（openai.ts）が投げ、ここ（共通の口）が
+ * **構造で**見分ける——口は adapter に依存しないので、型ではなく `kind` と `reason` の形で判定する。
+ * 未完了の応答は拒否（refusal）と分け、**同じ要求のままやり直さない**（同じ上限ではまた切れる）。
+ */
+export interface IncompleteResponseError extends Error {
+  /** 未完了であることを示す印 */
+  readonly kind: "incomplete";
+  /** 未完了の理由（`max_output_tokens` など） */
+  readonly reason: string;
+  /** 未完了でも usage は付くことがある。無ければ `undefined`（予約を残す） */
+  readonly usage: LlmUsage | undefined;
+}
+
+/** 未完了の応答を表す誤りか（口がやり直さず、usage があれば精算するための判定。§2.2・§1.5） */
+export function isIncompleteResponseError(error: unknown): error is IncompleteResponseError {
+  if (!(error instanceof Error)) return false;
+  const candidate = error as { kind?: unknown; reason?: unknown };
+  return candidate.kind === "incomplete" && typeof candidate.reason === "string";
+}
+
 /** 共通の口の結果 */
 export type CallResult<T> =
   | { readonly kind: "ok"; readonly value: T }
@@ -109,6 +136,8 @@ export type CallResult<T> =
   | { readonly kind: "budgetExceeded"; readonly maxCostUsd: number; readonly remainingUsd: number }
   /** 呼び出しの回数の上限に触れた */
   | { readonly kind: "limitExceeded"; readonly limit: LimitName; readonly max: number; readonly actual: number }
+  /** 応答が未完了だった（理由付き）。**同じ要求ではやり直さない**（§2.2・§1.5） */
+  | { readonly kind: "incomplete"; readonly reason: string; readonly usage: LlmUsage | undefined }
   /** 再試行を使い切っても成功しなかった */
   | { readonly kind: "failed"; readonly attempts: number; readonly error: unknown };
 
@@ -128,6 +157,8 @@ export interface CallGatewayOptions {
   readonly limits?: AgentLimits;
   /** 1 回の論理的な呼び出しで許す試行の回数（既定 2 = 1 回だけやり直す。§2.2） */
   readonly maxAttempts?: number;
+  /** 推論の effort（段の出力の上限を決める。既定 `high`。§2） */
+  readonly effort?: string;
 }
 
 const DEFAULT_MAX_ATTEMPTS = 2;
@@ -154,6 +185,7 @@ export class CallGateway {
   readonly #deadline: number;
   readonly #limits: AgentLimits;
   readonly #maxAttempts: number;
+  readonly #effort: string;
   #calls = 0;
   #toolCalls = 0;
   #retries = 0;
@@ -170,6 +202,20 @@ export class CallGateway {
     this.#deadline = options.deadline;
     this.#limits = options.limits ?? AGENT_LIMITS;
     this.#maxAttempts = maxAttempts;
+    this.#effort = options.effort ?? "high";
+  }
+
+  /** 推論の effort（段の出力の上限の出所。§2） */
+  get effort(): string {
+    return this.#effort;
+  }
+
+  /**
+   * 段の出力の上限（`max_output_tokens`）を、effort と段から引く（§1.5・§2）。
+   * **値は共通の上限の置き場所（limits.ts）にだけ置く**——段の側で値を書かない。
+   */
+  maxOutputTokens(stage: OutputStage): number {
+    return maxOutputTokensForEffort(this.#effort, stage);
   }
 
   /** LLM 呼び出しの回数（再試行と例外も数える。§1.5） */
@@ -231,6 +277,14 @@ export class CallGateway {
         }
         return { kind: "ok", value: outcome.result.value };
       } catch (error) {
+        // 未完了の応答は拒否と分け、**同じ要求のままやり直さない**（同じ上限ではまた切れる。§2.2）。
+        // usage が分かる未完了は、成功と同じく実際の費用で精算する（§1.5）。分からなければ予約を残す。
+        if (isIncompleteResponseError(error)) {
+          if (error.usage !== undefined) {
+            this.#budget.settle(reserved.reservation, error.usage, this.#rates);
+          }
+          return { kind: "incomplete", reason: error.reason, usage: error.usage };
+        }
         // 例外のときは usage が分からないので、予約は残したまま次を試す（§1.5）
         lastError = error;
       }

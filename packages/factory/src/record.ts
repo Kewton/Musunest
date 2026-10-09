@@ -14,6 +14,7 @@ import {
   HEADLESS_SCHEMA_VERSION,
   type HeadlessSummaryWire,
 } from "@musunest/appspec-schema";
+import { isIncompleteResponseError } from "./call.js";
 import type {
   LlmClient,
   LlmStructuredRequest,
@@ -241,14 +242,26 @@ export class UsageMeter {
   wrap(client: LlmClient): LlmClient {
     return {
       callStructured: async <T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> => {
-        const response = await client.callStructured<T>(request);
-        this.note(response.usage);
-        return response;
+        try {
+          const response = await client.callStructured<T>(request);
+          this.note(response.usage);
+          return response;
+        } catch (error) {
+          // 未完了の応答は例外として現れるが、usage は付くことがある（§1.5）。呼び出しの数と
+          // トークンを数えてから投げ直す——usage が無ければ「usage が欠けた呼び出し」として数える。
+          if (isIncompleteResponseError(error)) this.note(error.usage);
+          throw error;
+        }
       },
       callWithTools: async (request: LlmToolRequest): Promise<LlmToolResponse> => {
-        const response = await client.callWithTools(request);
-        this.note(response.usage);
-        return response;
+        try {
+          const response = await client.callWithTools(request);
+          this.note(response.usage);
+          return response;
+        } catch (error) {
+          if (isIncompleteResponseError(error)) this.note(error.usage);
+          throw error;
+        }
       },
     };
   }
