@@ -462,3 +462,68 @@ describe("役割 ID の表と、要件ごとの種類に照らす（Issue #307�
     expect(outcome.value.discrepancies).toEqual([]);
   });
 });
+
+// ── ②' に設計を渡す（Issue #316）────────────────────────────────
+
+describe("②' に設計を渡す（Issue #316）", () => {
+  /** 設計と ②' がどちらも在ることだけと分類した組（R-2 は正常 1 本だけ。疎通の確認で落ちた形） */
+  const BOTH_EXISTENCE_ONLY = {
+    classifications: [
+      { requirementId: "R-1", nature: "ruled" },
+      { requirementId: "R-2", nature: "existence-only" },
+    ],
+    tests: [...R1_RULED, ...R2_EXISTENCE],
+  };
+
+  it("設計と ②' がどちらも在ることだけと分類した要件は、正常の試験だけで固定できる", async () => {
+    const recording = createRecordingClient([structured(BOTH_EXISTENCE_ONLY)]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: PLANNED_DESIGN,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 食い違いは無く、1 回で固定する（在ることだけの R-2 に異常・境界を求めない）
+    expect(outcome.value.discrepancies).toEqual([]);
+    expect(outcome.value.rounds).toBe(1);
+    expect(recording.structured).toHaveLength(1);
+  });
+
+  it("設計を渡すと、プロンプトのデータに役割 ID の表と要件ごとの種類が入る", async () => {
+    const recording = createRecordingClient([structured(BOTH_EXISTENCE_ONLY)]);
+    await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: PLANNED_DESIGN,
+    });
+    const request = recording.structured[0];
+    expect(request).toBeDefined();
+    if (request === undefined) return;
+    // 試験の対象を指せるように、設計の役割 ID の表を渡す
+    expect(request.input).toContain("役割 ID の表");
+    expect(request.input).toContain("record.total");
+    // 要件ごとの種類（在ることだけ）も渡す
+    expect(request.input).toContain("要件ごとの種類");
+    expect(request.input).toContain("existence-only");
+    // 宣言は見せない（②' の会話に宣言を入れない。§1.3）
+    expect(request.input).not.toContain("DECLARATION_SENTINEL");
+    expect(request.instructions).not.toContain("DECLARATION_SENTINEL");
+  });
+
+  it("設計を渡さなければ、役割 ID の表と要件ごとの種類はデータに入らない（旧形式）", async () => {
+    const recording = createRecordingClient([structured(TEST_SUITE_OUTPUT)]);
+    await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    const request = recording.structured[0];
+    expect(request).toBeDefined();
+    if (request === undefined) return;
+    expect(request.input).not.toContain("役割 ID の表");
+    expect(request.input).not.toContain("要件ごとの種類");
+  });
+});
