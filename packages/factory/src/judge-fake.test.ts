@@ -20,7 +20,7 @@ describe("偽物の判定（05 §4）", () => {
   it("問いの名前ごとに決めた答えを返し、モデルとトークン数を残す", async () => {
     const judge: Judge = createFakeJudge(
       {
-        kind: { kind: "choice", choice: "b", probability: 0.6, confidence: 0.7 },
+        kind: { kind: "choice", choice: "b", probabilities: { a: 0.4, b: 0.6 }, probability: 0.6, confidence: 0.7 },
         open: { kind: "noul", noul: 0.4 },
       },
       { model: "fake-1", inputTokens: 12 },
@@ -31,13 +31,19 @@ describe("偽物の判定（05 §4）", () => {
     expect(result.answeredBy).toBe("fake");
     expect(result.model).toBe("fake-1");
     expect(result.inputTokens).toBe(12);
-    expect(result.answers.kind).toEqual({ kind: "choice", choice: "b", probability: 0.6, confidence: 0.7 });
+    expect(result.answers.kind).toEqual({
+      kind: "choice",
+      choice: "b",
+      probabilities: { a: 0.4, b: 0.6 },
+      probability: 0.6,
+      confidence: 0.7,
+    });
     expect(result.answers.open).toEqual({ kind: "noul", noul: 0.4 });
   });
 
   it("答えの既定は、モデル `fake-judge`・トークン 0 にする", async () => {
     const judge = createFakeJudge({
-      kind: { kind: "choice", choice: "a", probability: undefined, confidence: undefined },
+      kind: { kind: "choice", choice: "a", probabilities: undefined, probability: undefined, confidence: undefined },
       open: { kind: "noul", noul: 0.5 },
     });
     const result = await judge.judge(REQUEST);
@@ -46,7 +52,9 @@ describe("偽物の判定（05 §4）", () => {
   });
 
   it("用意していない問いは誤りにする", async () => {
-    const judge = createFakeJudge({ kind: { kind: "choice", choice: "a", probability: undefined, confidence: undefined } });
+    const judge = createFakeJudge({
+      kind: { kind: "choice", choice: "a", probabilities: undefined, probability: undefined, confidence: undefined },
+    });
     await expect(judge.judge(REQUEST)).rejects.toBeInstanceOf(FakeJudgeError);
   });
 

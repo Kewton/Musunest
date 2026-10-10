@@ -27,6 +27,12 @@ export const DEFAULT_JEV_RETRY_BASE_MS = 1_000;
 /** 混み合っているときに待って再試行する状態コード（§1） */
 const RETRYABLE_STATUSES: readonly number[] = [429, 529];
 
+/** score の段階の数の下限（Jev の wire は 2 個から。§1・#349） */
+export const SCORE_MIN_STAGES = 2;
+
+/** score の段階の数の上限（Jev の wire は 10 個まで。§1・#349） */
+export const SCORE_MAX_STAGES = 10;
+
 /** fetch の差し替え口。Workers・ブラウザ・Node のどれでも同じ形で呼べる範囲だけを要求する（§4） */
 export type JevFetch = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -179,11 +185,24 @@ function buildBody(request: JudgeRequest, model: string): Record<string, unknown
   return { state: request.state, model, questions };
 }
 
-/** 問いを wire の形（`type`・`instructions`・`criteria`）に直す（§1） */
+/** 問いを wire の形（`type`・`instructions`・`criteria`）に直す（§1・#349） */
 function toWireQuestion(question: JudgeQuestion): Record<string, unknown> {
+  // score の criteria は順序のある段階の配列で、Jev の wire は 2〜10 個。外れたら**送る前に**断る（#349）
+  if (question.kind === "score") {
+    assertStageCount(question.criteria.length);
+  }
   const wire: Record<string, unknown> = { type: question.kind, instructions: question.instructions };
   if (question.criteria !== undefined) wire.criteria = question.criteria;
   return wire;
+}
+
+/** score の段階の数が Jev の wire の範囲（2〜10）に入ることを確かめる（#349） */
+function assertStageCount(count: number): void {
+  if (count < SCORE_MIN_STAGES || count > SCORE_MAX_STAGES) {
+    throw new RangeError(
+      `score の criteria は ${SCORE_MIN_STAGES}〜${SCORE_MAX_STAGES} 個の段階の配列であること（${count} 個）`,
+    );
+  }
 }
 
 // ── 応答の解釈（§1）───────────────────────────────────────────────────
@@ -230,12 +249,11 @@ function toResult(
   return { answers, inputTokens: readInputTokens(wire.usage), model, answeredBy: "jev" };
 }
 
-/** 問いごとに、wire の答えを判定の口の答えに直す（§1） */
+/** 問いごとに、wire の答えを判定の口の答えに直す（§1・#349） */
 function toAnswer(question: JudgeQuestion, raw: unknown): JudgeAnswer {
   if (!isRecord(raw)) {
     throw new JevAdapterError("malformed", "答えが object ではありません");
   }
-  const probability = readUnit(raw.probability);
   const confidence = readUnit(raw.confidence);
   if (question.kind === "noul") {
     const noul = raw.noul;
@@ -245,9 +263,27 @@ function toAnswer(question: JudgeQuestion, raw: unknown): JudgeAnswer {
     return { kind: "noul", noul: Math.min(1, Math.max(0, noul)) };
   }
   if (question.kind === "choice") {
-    return { kind: "choice", choice: readLabel(raw.choice), probability, confidence };
+    const choice = readLabel(raw.choice);
+    const probabilities = readLabelProbabilities(raw.probabilities);
+    // 選んだ選択肢の確率は、選択肢ごとの確率から出す（#349）
+    return { kind: "choice", choice, probabilities, probability: probabilities?.[choice], confidence };
   }
-  return { kind: "score", score: readLabel(raw.score), probability, confidence };
+  // score：`score` は数、`legend` は段階の文の一覧、`probabilities` は段階ごとの確率（#349）
+  const score = raw.score;
+  if (typeof score !== "number" || !Number.isFinite(score)) {
+    throw new JevAdapterError("malformed", "score の答えが数ではありません");
+  }
+  const legend = readIndexedStrings(raw.legend);
+  if (legend === undefined) {
+    throw new JevAdapterError("malformed", "score の legend が読めません");
+  }
+  return {
+    kind: "score",
+    score,
+    legend,
+    probabilities: readIndexedNumbers(raw.probabilities),
+    confidence,
+  };
 }
 
 /** 選択肢の名前（文字列）を読む。文字列でなければ `malformed`（§1） */
@@ -256,6 +292,51 @@ function readLabel(value: unknown): string {
     throw new JevAdapterError("malformed", "選択の答えが文字列ではありません");
   }
   return value;
+}
+
+/** 選択肢ごとの確率（名前 → 0〜1）を読む。無い・1 つでも範囲外なら `undefined`（「不明」）にする（§1・#349） */
+function readLabelProbabilities(value: unknown): Readonly<Record<string, number>> | undefined {
+  if (!isRecord(value)) return undefined;
+  const out: Record<string, number> = {};
+  for (const [label, probability] of Object.entries(value)) {
+    const unit = readUnit(probability);
+    if (unit === undefined) return undefined;
+    out[label] = unit;
+  }
+  return out;
+}
+
+/** `{"0": "…"}` の形を、番号の順の一覧（`string[]`）にする。無い・文字列でないものが混じれば `undefined`（§1・#349） */
+function readIndexedStrings(value: unknown): string[] | undefined {
+  if (!isRecord(value)) return undefined;
+  const keys = Object.keys(value);
+  if (keys.length === 0) return undefined;
+  const out: string[] = [];
+  for (const key of keys.sort(byNumber)) {
+    const text = value[key];
+    if (typeof text !== "string") return undefined;
+    out.push(text);
+  }
+  return out;
+}
+
+/** `{"0": 0.09}` の形を、番号の順の一覧（`number[]`）にする。無い・数でないものが混じれば `undefined`（§1・#349） */
+function readIndexedNumbers(value: unknown): number[] | undefined {
+  if (!isRecord(value)) return undefined;
+  const keys = Object.keys(value);
+  if (keys.length === 0) return undefined;
+  const out: number[] = [];
+  for (const key of keys.sort(byNumber)) {
+    const unit = readUnit(value[key]);
+    if (unit === undefined) return undefined;
+    out.push(unit);
+  }
+  return out;
+}
+
+/** 番号の文字列（`"0"`・`"1"`…）の一覧を、数の順に並べる（§1・#349） */
+function byNumber(a: string, b: string): number {
+  return Number(a) - Number(b);
 }
 
 /** 確率・確信度（0〜1）を読む。無い・範囲外のときは `undefined`（「不明」）にする（§1） */
