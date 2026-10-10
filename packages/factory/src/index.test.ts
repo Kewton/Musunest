@@ -7,6 +7,7 @@
 //   3. ライブラリのファイル（手元の入口と adapter を除く）が、外部の LLM の API と Cloudflare・Node 固有の
 //      入口を持たない（Issue #278「純粋な TypeScript」・Issue #288「新しいライブラリのファイルを足す」）
 import { describe, expect, it } from "vitest";
+import type { Judge } from "./index.js";
 import {
   FakeLlmExhaustedError,
   JobBudget,
@@ -15,7 +16,11 @@ import {
   buildRunRecord,
   buildSummary,
   costOfUsageUsd,
+  createFakeJudge,
   createFakeLlmClient,
+  createFallbackJudge,
+  createJevJudge,
+  createLlmJudge,
   createOpenAiLlmClient,
   decideOutcome,
   estimateMaxCostUsd,
@@ -59,16 +64,29 @@ describe("公開する面", () => {
       expect(entry).toBeTypeOf("function");
     }
   });
+
+  it("判定の口の型と 3 つの adapter が、根から読める（Issue #330）", () => {
+    for (const entry of [createJevJudge, createLlmJudge, createFakeJudge, createFallbackJudge]) {
+      expect(entry).toBeTypeOf("function");
+    }
+    // 判定の口の型（`Judge`）が根から読める
+    const judge: Judge = createFakeJudge({});
+    expect(judge.judge).toBeTypeOf("function");
+  });
 });
 
 describe("ライブラリは、外部の LLM の API と Cloudflare・Node 固有の入口を持たない", () => {
-  // 手元の入口（cli.ts）と adapter（openai.ts）だけが、環境変数・ファイル・`fetch` を扱える
+  // 手元の入口（cli.ts）と adapter（openai.ts・judge-jev.ts）だけが、環境変数・ファイル・`fetch` を扱える
+  // （`judge-jev.ts` は Jev の外部の入口を持つ adapter なので、この走査から外す。Issue #330）
   const libraryFiles = [
     "budget.ts",
     "bundle.ts",
     "call.ts",
     "fixed-test.ts",
     "index.ts",
+    "judge-fake.ts",
+    "judge-llm.ts",
+    "judge.ts",
     "limits.ts",
     "llm-fake.ts",
     "llm.ts",
