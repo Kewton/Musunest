@@ -12,7 +12,7 @@ import { acceptsHeadlessSummaryWire } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import { costOfUsageUsd } from "./budget.js";
-import { VERIFICATION_FILE, type BundleVerification } from "./bundle.js";
+import { UNWRITABLE_FILE, VERIFICATION_FILE, type BundlePartialReasons, type BundleUnwritable, type BundleVerification } from "./bundle.js";
 import { AGENT_LIMITS } from "./limits.js";
 import { createFakeLlmClient, type RecordedCall } from "./llm-fake.js";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "./llm.js";
@@ -27,6 +27,7 @@ import {
   CORRESPONDENCE_OUTPUT,
   CORRESPONDENCE_OUTPUT_WITH_FIELD,
   DECLARATION_SOURCE,
+  DECLARATION_SOURCE_FOUR,
   DECLARATION_SOURCE_MISMATCH,
   DESIGN_OUTPUT,
   DESIGN_OUTPUT_MAPPED,
@@ -37,11 +38,13 @@ import {
   REQUIREMENT_LIST_OUTPUT,
   REVERSE_CHECK_OUTPUT,
   SOURCE_TEXT,
+  SOURCE_TEXT_FOUR,
   TEST_SUITE_OUTPUT,
   TEST_SUITE_OUTPUT_MAPPED,
   TEST_SUITE_OUTPUT_WITH_UNRESOLVED,
   makeRunInput,
   recordedRun,
+  recordedRunFour,
   structured,
 } from "./__tests__/run.js";
 
@@ -1021,6 +1024,86 @@ describe("項目 × 画面の試験と、`show` に出ていない項目の落�
     // 直した後は、項目 × 画面の試験 6 本も含めてすべて一致し、完走する
     expect(result.stopped).toBeNull();
     expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+});
+
+// ── 書けなかった要件の一覧と、部分案になった理由（02 §1.4・§4・Issue #326）──────
+
+/** 納品物から、書けなかった要件の一覧（`artifacts/unwritable.json`）を読む */
+const unwritableOf = (bundle: { artifacts: readonly { path: string; text: string }[] }): BundleUnwritable => {
+  const found = bundle.artifacts.find((artifact) => artifact.path === UNWRITABLE_FILE);
+  if (found === undefined) throw new Error("書けなかった要件の一覧が無い");
+  return JSON.parse(found.text) as BundleUnwritable;
+};
+
+describe("書けなかった要件の一覧と、部分案になった理由（02 §1.4・§4・Issue #326）", () => {
+  it("R-1 と R-4 が書けない設計から、一覧（要件 ID・要件の文・引用・書けない部分）が納品物に出る", async () => {
+    const { recording, run } = runWith(recordedRunFour(), { source: SOURCE_TEXT_FOUR });
+    const result = await run;
+
+    // 送った要求に、受入の題材の言葉が無い
+    for (const request of recording.structured) {
+      expectNoAcceptanceMaterial([
+        request.instructions,
+        ...(request.rules ?? []),
+        request.input,
+        ...request.documents,
+      ]);
+    }
+
+    // 早期停止はしない。書けない要件が 2 つあるので部分案になる
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+    expect(result.bundle).not.toBeNull();
+    if (result.bundle === null) return;
+
+    // 一覧に、設計が書けないと申告した要件が出る（要件 ID・要件の文・引用・書けない部分）。
+    // 検証の結果と同じく、宣言のバイト列の SHA-256 に結び付いている
+    const list = unwritableOf(result.bundle);
+    expect(list.declaration_sha256).toBe(await sha256Hex(DECLARATION_SOURCE_FOUR));
+    expect(list.unwritable).toEqual([
+      {
+        requirementId: "R-1",
+        text: "タスクを記録できる",
+        quote: "タスクを記録する。",
+        unwritable: ["記録の並べ替えは書けない"],
+      },
+      {
+        requirementId: "R-4",
+        text: "印を出せる",
+        quote: "印を出す。",
+        unwritable: ["印の色分けは書けない"],
+      },
+    ]);
+
+    // manifest に載っている
+    expect(result.bundle.manifest.files.map((file) => file.path)).toContain(UNWRITABLE_FILE);
+
+    // 検証の結果の理由にも、書けない要件の数と ID が出る（つなぎの抜けは 0 なので、ほかは空）
+    const reasons: BundlePartialReasons = verificationOf(result.bundle).partial_reasons;
+    expect(reasons.unwritable_requirements).toEqual({ count: 2, requirement_ids: ["R-1", "R-4"] });
+    expect(reasons.unresolved).toEqual({ count: 0, ids: [] });
+    expect(reasons.ambiguities).toEqual([]);
+    expect(reasons.unresolved_tests).toEqual([]);
+    expect(reasons.correspondence_misses).toEqual([]);
+  });
+
+  it("合格の道では、部分案の理由を空で出す（欄は常にある）", async () => {
+    const { run } = runWith(recordedRun());
+    const result = await run;
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(result.bundle).not.toBeNull();
+    if (result.bundle === null) return;
+
+    // 書けなかった要件の一覧も、空の並びで出る（欄は常にある）
+    expect(unwritableOf(result.bundle).unwritable).toEqual([]);
+    expect(verificationOf(result.bundle).partial_reasons).toEqual({
+      unwritable_requirements: { count: 0, requirement_ids: [] },
+      unresolved: { count: 0, ids: [] },
+      ambiguities: [],
+      unresolved_tests: [],
+      correspondence_misses: [],
+    });
   });
 });
 
