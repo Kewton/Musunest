@@ -1,8 +1,10 @@
 // 手元の入口（02-architecture.md §3.2）。
 //
 // `factory:run -- <依頼文のファイル> --out <ディレクトリ>` で、手元から 1 回の生成を流す。出力は納品物の
-// ディレクトリである。**この入口だけが環境変数とファイルを扱う**——鍵は環境変数 `OPENAI_API_KEY` から読み、
-// 文書（契約・語彙の意味・語彙の台帳）はファイルから読む。単価はここで渡す（日付付きの既定値）。
+// ディレクトリである。**この入口だけが環境変数とファイルを扱う**——鍵は環境変数 `OPENAI_API_KEY`（LLM）と
+// `JEV_API_KEY`（Jev）から読み、文書（契約・語彙の意味・語彙の台帳）はファイルから読む。単価はここで渡す
+// （日付付きの既定値）。**判定の口（05 §4）もここで組み立てて生成に渡す**——`JEV_API_KEY` があれば Jev を
+// 主・LLM を落とし先にした組み合わせ、無ければ LLM だけを使う（標準エラーに 1 行出す）。
 //
 // **ライブラリ（run.ts・bundle.ts・record.ts・段）は、環境変数もファイルも Node 固有の API も持たない。**
 // ここが外側との境目である。鍵が無ければ、API を呼ばずに使い方の誤りで終わる。
@@ -11,6 +13,9 @@
 // appspec-schema の contract.ts と同じやり方）。
 import type { TokenRates } from "./budget.js";
 import { bundleFiles } from "./bundle.js";
+import { createFallbackJudge, type Judge } from "./judge.js";
+import { createJevJudge } from "./judge-jev.js";
+import { createLlmJudge } from "./judge-llm.js";
 import type { AgentLimits } from "./limits.js";
 import type { LlmClient } from "./llm.js";
 import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL } from "./openai.js";
@@ -36,6 +41,8 @@ export const DEFAULT_BUDGET_USD = 0.3 as const;
 export const DEFAULT_DEADLINE_MS = 10 * 60 * 1000;
 /** 鍵を読む環境変数の名前 */
 export const API_KEY_ENV = "OPENAI_API_KEY" as const;
+/** Jev の鍵を読む環境変数の名前。**鍵を読むのは手元の入口だけ**（adapter は環境変数を読まない。§4） */
+export const JEV_API_KEY_ENV = "JEV_API_KEY" as const;
 
 /**
  * 単価（USD / 1 トークン）。2026-10-09 の公開値（入力 $0.10・キャッシュの読み取り $0.01・
@@ -163,8 +170,17 @@ export interface CliDeps {
   readonly makeDirectory: (path: string) => Promise<void>;
   readonly loadDocuments: () => Promise<readonly PromptDocument[]>;
   readonly makeClient: (options: { apiKey: string; model: string; effort: string }) => LlmClient;
+  /**
+   * Jev の判定の adapter を作る（05 §4）。**鍵を読むのは手元の入口だけ**——`JEV_API_KEY` を環境変数
+   * から読んで渡す（adapter は環境変数を読まない）。試験は偽物を差し込む（実 API を呼ばない）。
+   */
+  readonly makeJevJudge?: (options: { apiKey: string }) => Judge;
+  /** LLM の判定の adapter を作る（05 §4）。試験は偽物を差し込む。既定は本物（`judge-llm.ts`） */
+  readonly makeLlmJudge?: (options: { client: LlmClient; model: string }) => Judge;
   readonly now?: () => number;
   readonly log?: (line: string) => void;
+  /** 標準エラーに 1 行出す（判定を落としたときの注意。既定は何もしない） */
+  readonly logError?: (line: string) => void;
   readonly rates?: TokenRates;
   readonly budgetUsd?: number;
   readonly deadlineMs?: number;
@@ -190,6 +206,7 @@ function parentOf(path: string): string {
  */
 export async function runCli(deps: CliDeps): Promise<number> {
   const log = deps.log ?? ((): void => {});
+  const logError = deps.logError ?? ((): void => {});
   const parsed = parseCliArguments(deps.argv);
   if ("error" in parsed) {
     log(`使い方の誤り: ${parsed.error}`);
@@ -206,6 +223,23 @@ export async function runCli(deps: CliDeps): Promise<number> {
   const source = await deps.readFile(parsed.requestFile);
   const documents = await deps.loadDocuments();
   const client = deps.makeClient({ apiKey, model: parsed.model, effort: parsed.effort });
+
+  // 判定の口を組み立てる（05 §4・Issue #355）。`JEV_API_KEY` があれば **Jev を主・LLM を落とし先**に
+  // した組み合わせ、無ければ LLM だけを使う（その旨を標準エラーに 1 行出す）。**鍵を読むのはここだけ**
+  // ——adapter（Jev・LLM）は環境変数を読まない。
+  const llmJudge = (deps.makeLlmJudge ?? createLlmJudge)({ client, model: parsed.model });
+  const jevApiKey = deps.env[JEV_API_KEY_ENV];
+  let judge: Judge;
+  if (jevApiKey !== undefined && jevApiKey !== "") {
+    judge = createFallbackJudge({
+      primary: (deps.makeJevJudge ?? createJevJudge)({ apiKey: jevApiKey }),
+      fallback: llmJudge,
+    });
+  } else {
+    judge = llmJudge;
+    logError(`環境変数 ${JEV_API_KEY_ENV} が無いので、判定は LLM（${parsed.model}）だけを使います`);
+  }
+
   const now = deps.now ?? ((): number => Date.now());
   const budgetUsd = parsed.budgetUsd ?? deps.budgetUsd ?? DEFAULT_BUDGET_USD;
   const deadlineMs = parsed.deadlineMs ?? deps.deadlineMs ?? DEFAULT_DEADLINE_MS;
@@ -219,6 +253,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
     deadline: now() + deadlineMs,
     ...(deps.limits === undefined ? {} : { limits: deps.limits }),
     ...(parsed.timeoutMs === undefined ? {} : { callTimeoutMs: parsed.timeoutMs }),
+    judge,
     runId: `local-${String(now())}`,
     storageUnit: parsed.outDir,
     builder: BUILDER,
@@ -249,6 +284,7 @@ interface NodeProcess {
   readonly env: Readonly<Record<string, string | undefined>>;
   exitCode?: number;
   readonly stdout: { write(text: string): void };
+  readonly stderr: { write(text: string): void };
 }
 
 interface NodeFs {
@@ -315,6 +351,7 @@ export async function main(): Promise<void> {
     loadDocuments: loadDocumentsFromFiles,
     makeClient: ({ apiKey, model, effort }) => createOpenAiLlmClient({ apiKey, model, effort }),
     log: (line) => proc.stdout.write(`${line}\n`),
+    logError: (line) => proc.stderr.write(`${line}\n`),
   });
   proc.exitCode = code;
 }

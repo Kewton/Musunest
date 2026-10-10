@@ -4,7 +4,7 @@
 //   1. 鍵が無いときに **API を呼ばずに**使い方の誤り（終了コード 2）で終わること
 //   2. 引数が足りないときも、使い方の誤りで終わること
 //   3. 偽物を差し込んで 1 回の生成を流し、**ディレクトリに納品物を書く**こと
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   API_KEY_ENV,
   DEFAULT_BUDGET_USD,
@@ -12,10 +12,13 @@ import {
   EXIT_OK,
   EXIT_RUN_FAILED,
   EXIT_USAGE,
+  JEV_API_KEY_ENV,
   parseCliArguments,
   runCli,
 } from "./cli.js";
 import { BUNDLE_MANIFEST_FILE } from "./bundle.js";
+import * as runModule from "./run.js";
+import type { Judge, JudgeRequest } from "./judge.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse } from "./llm.js";
 import { createRecordingClient } from "./stages/__tests__/prompt.js";
 import { SOURCE_TEXT, recordedRun } from "./__tests__/run.js";
@@ -265,5 +268,116 @@ describe("引数で変えた呼び出しごとの timeout が、生成に届く�
     expect(code).toBe(EXIT_RUN_FAILED);
     const summary = JSON.parse(lines.at(-1) ?? "{}") as { stop_class: string | null };
     expect(summary.stop_class).toBe("timeout");
+  });
+});
+
+// ── 判定の口を組み立てて生成に渡す（05 §4・Issue #355）─────────────
+
+/**
+ * 偽物の判定（実 API を呼ばない）。`answeredBy` でどちらの adapter が答えたかを見る。`stop` を渡すと、
+ * 呼ばれた時点で止まる（Jev の障害を模す）。
+ */
+function fakeJudge(source: "jev" | "llm", options: { readonly stop?: boolean } = {}): Judge {
+  return {
+    async judge(request: JudgeRequest) {
+      if (options.stop === true) throw new Error(`${source} は止まった`);
+      const answers = Object.fromEntries(
+        Object.keys(request.questions).map((name) => [name, { kind: "noul" as const, noul: source === "jev" ? 1 : 0 }]),
+      );
+      return {
+        answers,
+        inputTokens: source === "jev" ? 10 : 20,
+        model: `${source}-model`,
+        answeredBy: source,
+      };
+    },
+  };
+}
+
+/** 組み立てた判定の口に投げる、最小の問い（はい／いいえ 1 つ） */
+const JUDGE_REQUEST: JudgeRequest = {
+  state: { claim: "x" },
+  questions: { q: { kind: "noul", instructions: "?" } },
+};
+
+describe("判定の口を組み立てて生成に渡す（05 §4・Issue #355）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("JEV_API_KEY があると、Jev を主・LLM を落とし先にした判定の口が生成に渡る", async () => {
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const makeJevJudge = vi.fn(() => fakeJudge("jev"));
+    const makeLlmJudge = vi.fn(() => fakeJudge("llm"));
+    const logError = vi.fn();
+    const recording = createRecordingClient(recordedRun());
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", `${directory}/jev`],
+      env: { [API_KEY_ENV]: "sk-FAKE", [JEV_API_KEY_ENV]: "jev-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeJevJudge,
+      makeLlmJudge,
+      log: () => {},
+      logError,
+    });
+
+    expect(code).toBe(EXIT_OK);
+    const judge = spy.mock.calls[0]?.[0]?.judge;
+    expect(judge, "判定の口が judge として生成に届く").toBeDefined();
+    expect(makeJevJudge).toHaveBeenCalledWith({ apiKey: "jev-FAKE" });
+    // 主（Jev）が元気なら、Jev が答える
+    expect(judge === undefined ? "" : (await judge.judge(JUDGE_REQUEST)).answeredBy).toBe("jev");
+    // 鍵があるときは、標準エラーに何も出さない
+    expect(logError).not.toHaveBeenCalled();
+  });
+
+  it("Jev が止まると、落とし先の LLM が答える（主・落とし先の順）", async () => {
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const makeJevJudge = vi.fn(() => fakeJudge("jev", { stop: true }));
+    const recording = createRecordingClient(recordedRun());
+    await runCli({
+      argv: ["--", "request.txt", "--out", `${directory}/fallback`],
+      env: { [API_KEY_ENV]: "sk-FAKE", [JEV_API_KEY_ENV]: "jev-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeJevJudge,
+      makeLlmJudge: () => fakeJudge("llm"),
+      log: () => {},
+      logError: vi.fn(),
+    });
+
+    const judge = spy.mock.calls[0]?.[0]?.judge;
+    expect(judge, "判定の口が judge として生成に届く").toBeDefined();
+    expect(judge === undefined ? "" : (await judge.judge(JUDGE_REQUEST)).answeredBy).toBe("llm");
+  });
+
+  it("JEV_API_KEY が無いと、LLM の判定の口が渡り、標準エラーに 1 行出る", async () => {
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const makeJevJudge = vi.fn(() => fakeJudge("jev"));
+    const logError = vi.fn();
+    const recording = createRecordingClient(recordedRun());
+    await runCli({
+      argv: ["--", "request.txt", "--out", `${directory}/llm`],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeJevJudge,
+      makeLlmJudge: () => fakeJudge("llm"),
+      log: () => {},
+      logError,
+    });
+
+    const judge = spy.mock.calls[0]?.[0]?.judge;
+    expect(judge, "判定の口が judge として生成に届く").toBeDefined();
+    expect(judge === undefined ? "" : (await judge.judge(JUDGE_REQUEST)).answeredBy).toBe("llm");
+    // Jev は組み立てない（鍵が無いので呼ばない）
+    expect(makeJevJudge).not.toHaveBeenCalled();
+    // 標準エラーに 1 行だけ出す
+    expect(logError).toHaveBeenCalledTimes(1);
+    expect(String(logError.mock.calls[0]?.[0])).toContain(JEV_API_KEY_ENV);
   });
 });
