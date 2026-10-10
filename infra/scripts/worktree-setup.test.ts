@@ -155,12 +155,16 @@ interface GitState {
   branch: string;
   remote: string;
   baseSha: string;
+  /** fetch のあとに `origin/<branch>` が指す SHA（あれば）。fetch を挟んだ前後で base が動くことを表す */
+  fetchBaseSha?: string;
   baseShaAfter?: string;
   dirty: boolean;
   worktrees: { path: string; branch?: string; head?: string }[];
   localBranches: string[];
   remoteBranches: string[];
   worktreeAddFails?: boolean;
+  /** fetch を失敗させる（古い ref で黙って作らないことの試験用） */
+  fetchFails?: boolean;
 }
 
 // ── 偽物（git / gh / commandmate）────────────────────────────────────────────
@@ -172,16 +176,24 @@ const state = JSON.parse(readFileSync(process.env.WS_FAKE_GIT_STATE, "utf8"));
 const args = process.argv.slice(2);
 if (process.env.WS_FAKE_GIT_CALLS) appendFileSync(process.env.WS_FAKE_GIT_CALLS, JSON.stringify(args) + "\\n");
 const out = (v) => process.stdout.write(v + "\\n");
-// base SHA の解決。2回目以降（作成直前の再確認）に baseShaAfter があればそれを返し、drift を作る。
+// base SHA の解決。fetch のあとは fetchBaseSha（あれば）を返し、2回目以降（作成直前の再確認）に
+// baseShaAfter があればそれを返して drift を作る。
 const revParseCommit = () => {
   state.baseShaCount = (state.baseShaCount || 0) + 1;
   writeFileSync(process.env.WS_FAKE_GIT_STATE, JSON.stringify(state));
-  return state.baseShaAfter && state.baseShaCount > 1 ? state.baseShaAfter : state.baseSha;
+  const base = state.fetched && state.fetchBaseSha ? state.fetchBaseSha : state.baseSha;
+  return state.baseShaAfter && state.baseShaCount > 1 ? state.baseShaAfter : base;
 };
 if (args[0] === "rev-parse" && args[1] === "--show-toplevel") out(state.toplevel);
 else if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") out(state.branch);
 else if (args[0] === "rev-parse" && String(args[1]).endsWith("^{commit}")) out(revParseCommit());
 else if (args[0] === "remote" && args[1] === "get-url") out(state.remote);
+else if (args[0] === "fetch") {
+  if (state.fetchFails) { process.stderr.write("fatal: could not fetch origin\\n"); process.exit(1); }
+  state.fetched = true;
+  writeFileSync(process.env.WS_FAKE_GIT_STATE, JSON.stringify(state));
+  out("");
+}
 else if (args[0] === "status") { if (state.dirty) out(" M a.txt"); }
 else if (args[0] === "worktree" && args[1] === "list") {
   for (const w of state.worktrees || []) { out("worktree " + w.path); if (w.branch) out("branch refs/heads/" + w.branch); out(""); }
@@ -551,5 +563,52 @@ describe("worktree-setup：collision と drift では作らない", () => {
     expect(run.json.worktrees[0]?.created).toBe(true);
     expect(run.json.commandmate_sync.available).toBe(false);
     expect(run.json.blocking_reasons).toHaveLength(0);
+  });
+});
+
+// ── 4. 作成前の fetch（Issue #317）─────────────────────────────────────────
+
+describe("worktree-setup：作る前に origin を fetch し、fetch のあとの base SHA で作る（Issue #317）", () => {
+  // fetch のあとに `origin/main` が指す、前の Wave の merge を含む新しい SHA
+  const FRESH = "b1".repeat(20);
+
+  it("git fetch origin <base branch> を作成より先に打ち、fetch のあとの base SHA で作る", () => {
+    const run = runProvider({
+      issues: [101],
+      titles: { "101": "alpha" },
+      git: { baseSha: SHA, fetchBaseSha: FRESH },
+      cm: { worktrees: [cmWorktree()] },
+    });
+
+    const fetchIndex = run.calls.git.findIndex((args) => args[0] === "fetch");
+    const addIndex = run.calls.git.findIndex((args) => args[0] === "worktree" && args[1] === "add");
+    expect(fetchIndex).toBeGreaterThanOrEqual(0);
+    expect(addIndex).toBeGreaterThanOrEqual(0);
+    // fetch は worktree を作るより前に打つ
+    expect(fetchIndex).toBeLessThan(addIndex);
+    expect(run.calls.git[fetchIndex]).toEqual(["fetch", "origin", "main"]);
+
+    // worktree は fetch のあとの SHA で作る（fetch 前の古い baseSha ではない）
+    expect(run.calls.git[addIndex]?.[5]).toBe(FRESH);
+    expect(run.json.plan[0]?.base_sha).toBe(FRESH);
+    expect(run.json.worktrees[0]?.base_sha).toBe(FRESH);
+    expect(run.json.profile.base_sha).toBe(FRESH);
+    expect(run.json.worktrees[0]?.created).toBe(true);
+    expect(run.json.status).toBe("success");
+  });
+
+  it("fetch に失敗したら worktree を作らずに誤りにする（古い ref で黙って作らない）", () => {
+    const run = runProvider({
+      issues: [101],
+      titles: { "101": "alpha" },
+      git: { fetchFails: true },
+    });
+
+    expect(run.json.status).toBe("failure");
+    expect(ADDED(run)).toBe(false);
+    expect(run.json.plan).toHaveLength(0);
+    expect(run.json.worktrees).toHaveLength(0);
+    expect(run.json.blocking_reasons.some((line) => line.includes("base_fetch_failed"))).toBe(true);
+    expect(existsSync(worktreePath(run, EXPECTED.directory))).toBe(false);
   });
 });

@@ -435,6 +435,18 @@ function run(argv, io = {}) {
     return finalize("failure", "inspect", EXIT_NG);
   }
 
+  // --- base を fetch で最新にしてから読む（Issue #317）------------------------
+  // 作る前に origin を fetch しないと、前の Wave の merge を含まない古い base で
+  // worktree を作ってしまう。fetch に失敗したら、古い ref で黙って作らずに止める。
+  // 取るのは base の branch だけでよい（profile の base は `origin/<branch>`）。
+  const baseRemote = "origin";
+  const baseBranch = baseRef.startsWith(`${baseRemote}/`) ? baseRef.slice(baseRemote.length + 1) : baseRef;
+  const fetchResult = git(["fetch", baseRemote, baseBranch], root);
+  if (fetchResult.status !== 0) {
+    blockingReasons.push(clip(`base_fetch_failed: git fetch ${baseRemote} ${baseBranch} が失敗した（${redact(fetchResult.stderr.trim()) || "no output"}）`, 300));
+    return finalize("failure", "inspect", EXIT_NG);
+  }
+
   const worktreeResult = git(["worktree", "list", "--porcelain"], root);
   const existingWorktrees = worktreeResult.status === 0 ? parsePorcelainWorktrees(worktreeResult.stdout) : [];
   const localBranches = new Set(
@@ -450,7 +462,8 @@ function run(argv, io = {}) {
       .filter(Boolean),
   );
 
-  // --- base ref を resolved commit SHA に確定する ----------------------------
+  // --- fetch のあとの base ref を resolved commit SHA に確定する -------------
+  // ここで確定する SHA は、直前の fetch のあとの値である（result の base_sha）。
   const baseShaResult = git(["rev-parse", `${baseRef}^{commit}`], root);
   const baseSha = baseShaResult.status === 0 ? baseShaResult.stdout.trim() : "";
   if (!/^[0-9a-f]{40}$/.test(baseSha)) {
