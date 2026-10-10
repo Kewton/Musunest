@@ -368,3 +368,80 @@ describe("⑤a の不正な応答（02 §2.2）", () => {
     expect(failed.failure.kind).toBe("malformed");
   });
 });
+
+// ── 「画面から辿れない」項目の落ちは、⑥ 直すに回し、要件 ID を入れる（02 §1.3.1・Issue #324）──
+
+/** 一部の項目を `show` で出し、別の項目を出していない宣言（抽象的な題材） */
+const FIELD_SOURCE = [
+  "entities:",
+  "  - name: record",
+  "    fields:",
+  "      shown: string",
+  "      hidden: string",
+  "views:",
+  "  - name: records",
+  "    type: table",
+  "    entity: record",
+  "    show: [shown]",
+  "actions: []",
+  "validations: []",
+  "computed: []",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+const FIELD_APP = await normalized(FIELD_SOURCE);
+
+const FIELD_ROLES: readonly RoleEntry[] = [
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null },
+  { roleId: "record.shown", kind: "field", entity: "record", name: "shown", shared: true, aliasOf: null },
+  { roleId: "record.hidden", kind: "field", entity: "record", name: "hidden", shared: false, aliasOf: null },
+];
+
+const FIELD_TABLE: readonly CorrespondenceEntry[] = [
+  {
+    requirementId: "R-1",
+    locations: [
+      { kind: "entity", entity: null, name: "record" },
+      { kind: "field", entity: "record", name: "shown" },
+      { kind: "field", entity: "record", name: "hidden" },
+    ],
+  },
+];
+
+const FIELD_MAPPINGS: readonly RoleNameMapping[] = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.shown", name: "shown" },
+  { roleId: "record.hidden", name: "hidden" },
+];
+
+describe("「画面から辿れない」項目の落ちは、⑥ 直すに回し、要件 ID を入れる（02 §1.3.1・Issue #324）", () => {
+  it("一覧の `show` に出ていない項目の落ちに、もとの要件 ID と、⑥ 直すの行き先を付ける", () => {
+    const misses = checkRoleMappings(FIELD_APP, FIELD_ROLES, FIELD_TABLE, FIELD_MAPPINGS);
+    const miss = misses.find((candidate) => candidate.location?.name === "hidden");
+    expect(miss).toBeDefined();
+    // ③ のやり直しではなく、宣言の要素の欠落として ⑥ 直すへ回す（Issue #324）
+    expect(miss?.route).toBe("missing-element");
+    // 落ちには、その場所を挙げている要件の ID を入れる（空にしない）
+    expect(miss?.requirementId).toBe("R-1");
+    expect(miss?.detail).toContain("画面から辿れない");
+  });
+
+  it("`show` に出ている項目は、落ちにしない", () => {
+    const misses = checkRoleMappings(FIELD_APP, FIELD_ROLES, FIELD_TABLE, FIELD_MAPPINGS);
+    expect(misses.some((miss) => miss.location?.name === "shown")).toBe(false);
+  });
+
+  it("実在しない名前の落ちには、③ のやり直しの行き先を付ける", () => {
+    const misses = checkRoleMappings(FIELD_APP, FIELD_ROLES, FIELD_TABLE, [
+      { roleId: "record", name: "record" },
+      { roleId: "record.shown", name: "ghost" },
+      { roleId: "record.hidden", name: "hidden" },
+    ]);
+    const miss = misses.find((candidate) => candidate.location?.name === "ghost");
+    expect(miss?.route).toBe("correspondence-defect");
+  });
+});
+

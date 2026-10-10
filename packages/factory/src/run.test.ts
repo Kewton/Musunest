@@ -843,3 +843,184 @@ describe("裁定で外した試験を除いた組でも、分類を保つ（02 �
     expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
   });
 });
+
+// ── 項目 × 画面の試験と、`show` に出ていない項目の落ち（02 §1.3・§1.3.1・Issue #324）──
+
+/**
+ * ② の設計（抽象的な題材）。要件は在ることだけ（existence-only）で、2 つの entity に 3 つずつ、
+ * 合計 6 つの項目の役割 ID を持つ（②' は「項目 × 画面」の試験を 6 本作る）。
+ */
+const FIELD_DESIGN = {
+  roles: [
+    { roleId: "record", kind: "entity", entity: null, name: "記録", shared: true, aliasOf: null },
+    { roleId: "record.a", kind: "field", entity: "record", name: "項目A", shared: true, aliasOf: null },
+    { roleId: "record.b", kind: "field", entity: "record", name: "項目B", shared: true, aliasOf: null },
+    { roleId: "record.c", kind: "field", entity: "record", name: "項目C", shared: true, aliasOf: null },
+    { roleId: "other", kind: "entity", entity: null, name: "その他", shared: true, aliasOf: null },
+    { roleId: "other.a", kind: "field", entity: "other", name: "項目A", shared: true, aliasOf: null },
+    { roleId: "other.b", kind: "field", entity: "other", name: "項目B", shared: true, aliasOf: null },
+    { roleId: "other.c", kind: "field", entity: "other", name: "項目C", shared: true, aliasOf: null },
+  ],
+  designs: [
+    {
+      requirementId: "R-1",
+      nature: "existence-only",
+      verification: { kind: "structural", reason: "項目が一覧か表に出ていることを構造で確かめる" },
+      vocabulary: ["field"],
+      placement: ["entities[].fields"],
+      unwritable: [],
+    },
+    {
+      requirementId: "R-2",
+      nature: "existence-only",
+      verification: { kind: "structural", reason: "項目が一覧か表に出ていることを構造で確かめる" },
+      vocabulary: ["field"],
+      placement: ["entities[].fields"],
+      unwritable: [],
+    },
+  ],
+};
+
+/** ②' の「項目 × 画面」の試験 1 件（抽象的な題材） */
+const fieldScreenTest = (id: string, requirementId: string, roleId: string): unknown => ({
+  id,
+  target: { requirementId, kind: "field", roleId },
+  kind: "normal",
+  operation: "screen",
+  clock: CREATE_CLOCK,
+  input: {},
+  inputContract: { rowId: `${id}-row`, targetRowId: null, emptyEntities: [] },
+  referenceData: [],
+  expected: { kind: "ok", value: null },
+});
+
+/** ②' の答え（「項目 × 画面」の試験 6 本） */
+const FIELD_SUITE = {
+  classifications: [
+    { requirementId: "R-1", nature: "existence-only" },
+    { requirementId: "R-2", nature: "existence-only" },
+  ],
+  tests: [
+    fieldScreenTest("t-ra", "R-1", "record.a"),
+    fieldScreenTest("t-rb", "R-1", "record.b"),
+    fieldScreenTest("t-rc", "R-1", "record.c"),
+    fieldScreenTest("t-oa", "R-2", "other.a"),
+    fieldScreenTest("t-ob", "R-2", "other.b"),
+    fieldScreenTest("t-oc", "R-2", "other.c"),
+  ],
+};
+
+/** ③ が提出する対応（項目の役割 ID → 宣言の項目の名前） */
+const FIELD_MAPPINGS = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.a", name: "a" },
+  { roleId: "record.b", name: "b" },
+  { roleId: "record.c", name: "c" },
+  { roleId: "other", name: "other" },
+  { roleId: "other.a", name: "a" },
+  { roleId: "other.b", name: "b" },
+  { roleId: "other.c", name: "c" },
+];
+
+/**
+ * ③ が書く宣言（抽象的な題材）。`records` の `show` は `[a, b]` で、**項目 c が画面に出ていない**
+ * （疎通の確認で、要件に要る項目が画面から辿れない形）。
+ */
+const FIELD_DECLARATION_BEFORE = [
+  "entities:",
+  "  - name: record",
+  "    fields:",
+  "      a: string",
+  "      b: string",
+  "      c: string",
+  "  - name: other",
+  "    fields:",
+  "      a: string",
+  "      b: string",
+  "      c: string",
+  "views:",
+  "  - name: records",
+  "    type: table",
+  "    entity: record",
+  "    show: [a, b]",
+  "  - name: others",
+  "    type: table",
+  "    entity: other",
+  "    show: [a, b, c]",
+  "actions: []",
+  "validations: []",
+  "computed: []",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+/** ⑥ が直した宣言（`records` の `show` に、抜けていた項目 c を足す） */
+const FIELD_DECLARATION_AFTER = FIELD_DECLARATION_BEFORE.replace("show: [a, b]", "show: [a, b, c]");
+
+/** ⑤a の答え（実在して画面から辿れる場所だけを挙げる…直す前は c が辿れない） */
+const FIELD_CORRESPONDENCE = {
+  entries: [
+    {
+      requirementId: "R-1",
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "field", entity: "record", name: "a" },
+        { kind: "field", entity: "record", name: "b" },
+        { kind: "field", entity: "record", name: "c" },
+      ],
+    },
+    {
+      requirementId: "R-2",
+      locations: [
+        { kind: "entity", entity: null, name: "other" },
+        { kind: "field", entity: "other", name: "a" },
+        { kind: "field", entity: "other", name: "b" },
+        { kind: "field", entity: "other", name: "c" },
+      ],
+    },
+  ],
+};
+
+/** 記録した要求の中の、1 つのデータ（`<data name="…">…</data>`）の中身を取り出す */
+function dataBlock(input: string, name: string): string {
+  const start = input.indexOf(`<data name="${name}">`);
+  if (start < 0) return "";
+  const end = input.indexOf("</data>", start);
+  return input.slice(start, end < 0 ? undefined : end);
+}
+
+describe("項目 × 画面の試験と、`show` に出ていない項目の落ち（02 §1.3・§1.3.1・Issue #324）", () => {
+  it("画面から辿れない落ちは ⑥ 直すに回り、③ のやり直しには回らず、落ちに要件 ID が入る", async () => {
+    const { recording, run } = runWith([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(FIELD_DESIGN),
+      structured(FIELD_SUITE),
+      structured({ declaration: FIELD_DECLARATION_BEFORE, mappings: FIELD_MAPPINGS }),
+      structured(FIELD_CORRESPONDENCE),
+      // ⑥ 直す：抜けていた項目 c を `show` に足した宣言を返す
+      toolDone({ declaration: FIELD_DECLARATION_AFTER, disputes: [] }),
+      // 宣言が変わったので、⑤a を作り直す
+      structured(FIELD_CORRESPONDENCE),
+    ]);
+    const result = await run;
+
+    const stages = result.record.stages.map((stage) => stage.stage);
+    // 「画面から辿れない」落ちは ⑥ 直すへ回る
+    expect(stages).toContain("repair");
+    // ③ のやり直し（対応の表の出し直し）へは回さない
+    expect(recording.structured.every((request) => request.schemaName !== MAPPING_REDO_SCHEMA_NAME)).toBe(true);
+
+    // ⑥ に渡した「対応表の落ち」に、もとの要件 ID が入っている
+    const misses = dataBlock(recording.tools[0]?.input ?? "", "対応表の落ち");
+    expect(misses).toContain("画面から辿れない");
+    expect(misses).toContain("R-1");
+
+    // 直した後は、項目 × 画面の試験 6 本も含めてすべて一致し、完走する
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+});
+

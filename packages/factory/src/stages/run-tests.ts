@@ -8,6 +8,7 @@
 //   項目・entity × validate   … `evaluateRecord` の `validations`（検査の式）
 //   操作 × action（when）     … `allowsAction`
 //   画面 × screen            … 構造の確認（view が実在し、show の名前と highlight が実在する）
+//   項目 × screen            … 構造の確認（項目が実在し、その entity の一覧か表から辿れる。Issue #324）
 //   entity × 在ることだけ     … 構造の確認（create の操作がある・一覧か表に出る）
 //
 // **操作の実行（`set` を当てたあとの状態）と、項目の既定値は未対応**にして、未解決として数える
@@ -59,7 +60,13 @@ import type {
   TestUnresolved,
 } from "../pipeline.js";
 import { bindTests, locationKindFor, type BindResult } from "./bind.js";
-import { checkLocation, declarationHasNamedLocation, findComputed, findEntity } from "./correspondence.js";
+import {
+  checkLocation,
+  declarationHasNamedLocation,
+  fieldReachableFromScreen,
+  findComputed,
+  findEntity,
+} from "./correspondence.js";
 
 /** ⑤b 試験を流す、が受け取るもの */
 export interface RunTestsInput {
@@ -531,8 +538,22 @@ function isCreateOperation(app: NormalizedAppSpec, location: DeclarationLocation
   return action !== undefined && (action.kind ?? "create") === "create";
 }
 
-/** 評価の方法（§1.3 の表・Issue #308）。未対応は `unresolved` に数える */
-type Method = "value" | "validation" | "action" | "view" | "existence" | "unresolved";
+/**
+ * 「項目 × 画面」の試験を**構造の確認**で判定する（§1.3 の表・Issue #324）。その項目が、その entity の
+ * 一覧か表（`show` に入っている・`show` の省略で全部が出る）から辿れることを見る。値は評価しない
+ * （画面は計算しない）。実在は `checkLocation` が先に確かめる。辿れなければ**理由つきの不一致**にする
+ * （未解決にしない）。
+ */
+function judgeFieldScreen(app: NormalizedAppSpec, location: DeclarationLocation): Verdict {
+  if (fieldReachableFromScreen(app, location)) return { kind: "match" };
+  return {
+    kind: "mismatch",
+    detail: `項目 ${location.name} は画面から辿れない（entity ${location.entity ?? ""} の一覧か表に出ていない）`,
+  };
+}
+
+/** 評価の方法（§1.3 の表・Issue #308・#324）。未対応は `unresolved` に数える */
+type Method = "value" | "validation" | "action" | "view" | "field-screen" | "existence" | "unresolved";
 
 /**
  * 対象の種類 × 操作で、評価の方法を決める（§1.3 の表）。
@@ -541,6 +562,7 @@ type Method = "value" | "validation" | "action" | "view" | "existence" | "unreso
  *   - 項目・entity × `validate` … 検査の式（値の評価）
  *   - 操作 × `action`（`when`）… 値の評価
  *   - 画面 … 構造の確認
+ *   - 項目 × `screen` … 構造の確認（項目が実在し、その entity の一覧か表から辿れる。Issue #324）
  *   - entity（在ることだけ・画面）… 構造の確認
  *   - 在ることだけの要件の create の操作 … 構造の確認（実行は評価器で確かめられない。Issue #320）
  *   - それ以外（操作の実行・項目の既定値など）… 未対応（未解決）
@@ -560,6 +582,8 @@ function evaluationMethod(
   }
   if (test.target.kind === "computation") return "value";
   if (test.target.kind === "screen") return "view";
+  // 項目を対象にした画面の試験は、構造の確認にする（在ることだけの要件で作られる。Issue #324）
+  if (test.target.kind === "field") return test.operation === "screen" ? "field-screen" : "unresolved";
   if (test.target.kind === "entity") {
     return test.operation === "screen" || nature === "existence-only" ? "existence" : "unresolved";
   }
@@ -645,6 +669,11 @@ function judgeOne(
     }
     case "view":
       return { verdict: judgeViewStructural(input.app, location), route: null };
+    case "field-screen": {
+      // 辿れなければ不一致 → ⑥ 直す（宣言に項目を出す）。未解決にはしない（Issue #324）
+      const verdict = judgeFieldScreen(input.app, location);
+      return { verdict, route: routeOf(verdict) };
+    }
     case "existence":
       return { verdict: judgeExistenceStructural(input.app, location), route: null };
     case "unresolved":

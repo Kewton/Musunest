@@ -969,3 +969,97 @@ describe("空であることを明示した entity は、空の集合として�
   });
 });
 
+// ── 10. 項目 × 画面（02 §1.3・Issue #324）──────────────────────────────
+
+/**
+ * 「項目 × 画面」の試験に使う宣言（抽象的な題材）。`record` は一覧で `show` を明示して一部の項目だけを
+ * 出し、`other` は `show` を省略して全部を出す（種類なしの一覧）。
+ */
+const FIELD_SCREEN_DECLARATION = [
+  "entities:",
+  "  - name: record",
+  "    fields:",
+  "      shown: string",
+  "      hidden: string",
+  "  - name: other",
+  "    fields:",
+  "      anything: string",
+  "views:",
+  "  - name: records",
+  "    type: table",
+  "    entity: record",
+  "    show: [shown]",
+  "  - name: others",
+  "    entity: other",
+  "actions: []",
+  "validations: []",
+  "computed: []",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+const FIELD_SCREEN_APP = await normalized(FIELD_SCREEN_DECLARATION);
+
+/** 対応表（コードが確かめた後のもの）。要件ごとに、項目の場所を 1 つに決められるように並べてある */
+const fieldScreenCorrespondence: CorrespondenceResult = {
+  entries: [
+    entry("R-1", [{ kind: "field", entity: "record", name: "shown" }]),
+    entry("R-2", [{ kind: "field", entity: "record", name: "hidden" }]),
+    entry("R-3", [{ kind: "field", entity: "other", name: "anything" }]),
+  ],
+  misses: [],
+};
+
+/** ③ が提出した対応（項目の役割 ID → 宣言の項目の名前） */
+const fieldScreenMappings: readonly RoleNameMapping[] = [
+  { roleId: "record.shown", name: "shown" },
+  { roleId: "record.hidden", name: "hidden" },
+  { roleId: "other.anything", name: "anything" },
+];
+
+/** 項目を対象にした画面の試験 1 件（操作は screen） */
+const fieldScreenTest = (id: string, requirementId: string, roleId: string): Record<string, unknown> =>
+  draft({
+    id,
+    target: roleTarget(requirementId, "field", roleId),
+    operation: "screen",
+    expected: { kind: "ok", value: null },
+  });
+
+describe("項目 × 画面（02 §1.3・Issue #324）", () => {
+  it("項目が一覧か表から辿れれば通り、辿れなければ理由つきの不一致になり、未解決にならない", () => {
+    const result = runTests({
+      app: FIELD_SCREEN_APP,
+      suite: suiteOf([
+        fieldScreenTest("shown", "R-1", "record.shown"),
+        fieldScreenTest("hidden", "R-2", "record.hidden"),
+      ]),
+      correspondence: fieldScreenCorrespondence,
+      mappings: fieldScreenMappings,
+    });
+    // 未対応（未解決）ではなく、構造の確認で判定する。辿れない項目は不一致（理由つき）になる
+    expect(result.unresolved).toEqual([]);
+    expect(result.mismatches.map((mismatch) => mismatch.testId)).toEqual(["hidden"]);
+    expect(result.mismatches[0]?.detail).toContain("画面から辿れない");
+    // 不一致は ⑥ 直す（宣言の要素の欠落）へ回る
+    expect(result.routes.find((route) => route.testId === "hidden")?.route).toBe("missing-element");
+  });
+
+  it("`show` を省略して全部を出す一覧の項目は、画面から辿れる（落ちにしない）", () => {
+    const result = runTests({
+      app: FIELD_SCREEN_APP,
+      suite: suiteOf([fieldScreenTest("anything", "R-3", "other.anything")]),
+      correspondence: fieldScreenCorrespondence,
+      mappings: fieldScreenMappings,
+    });
+    expect({ mismatches: result.mismatches, unresolved: result.unresolved }).toEqual({
+      mismatches: [],
+      unresolved: [],
+    });
+    expect(result.routes).toEqual([]);
+  });
+});
+
+
