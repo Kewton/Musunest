@@ -20,7 +20,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { makeRunInput } from "./__tests__/run.js";
-import { VERIFICATION_FILE, type BundleVerification } from "./bundle.js";
+import { UNWRITABLE_FILE, VERIFICATION_FILE, type BundleUnwritable, type BundleVerification } from "./bundle.js";
 import type { RecordedCall } from "./llm-fake.js";
 import type { LlmUsage } from "./llm.js";
 import { runGeneration } from "./run.js";
@@ -141,6 +141,16 @@ const verificationOf = (
   return JSON.parse(found.text) as BundleVerification;
 };
 
+/** 納品物から、書けなかった要件の一覧（`artifacts/unwritable.json`）を読む（Issue #326） */
+const unwritableOf = (
+  bundle: { readonly artifacts: readonly { readonly path: string; readonly text: string }[] } | null,
+): BundleUnwritable => {
+  if (bundle === null) throw new Error("納品物がありません");
+  const found = bundle.artifacts.find((artifact) => artifact.path === UNWRITABLE_FILE);
+  if (found === undefined) throw new Error("書けなかった要件の一覧がありません");
+  return JSON.parse(found.text) as BundleUnwritable;
+};
+
 /** 記録の並びで、① から ⑦ まで流す（原文は記録の request.md を使う）。受け取った要求も残す */
 function runReplay(calls: readonly RecordedCall[]) {
   const recording = createRecordingClient(calls);
@@ -172,6 +182,20 @@ describe("本物の応答の再生（Issue #322）", () => {
     expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
     expect(verification.outcome).toEqual({ result: "partial", verdict: "partial" });
     expect(recordedUnwritable()).toEqual([{ requirementId: "R-1", unwritable: ["アプリ自体の名前・説明"] }]);
+
+    // #326：記録の設計が書けないと申告した要件 R-1 が、納品物の「書けなかった要件の一覧」に出る
+    // （要件の文と引用は ① の記録から写す）
+    const list = unwritableOf(result.bundle);
+    expect(list.unwritable).toEqual([
+      {
+        requirementId: "R-1",
+        text: "読書会の記録アプリを作成する。",
+        quote: "読書会の記録アプリを作ってください。",
+        unwritable: ["アプリ自体の名前・説明"],
+      },
+    ]);
+    // 一覧も、検証の結果と同じ宣言の版（SHA-256）に結び付いている
+    expect(list.declaration_sha256).toBe(verification.declaration_sha256);
 
     // ⑤a のやり直しが走る（③ のやり直しは走らない）。⑥ 直すにも入らない
     const stages = result.record.stages.map((stage) => stage.stage);

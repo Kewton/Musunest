@@ -288,3 +288,129 @@ export const BAD_MAPPINGS = [
 
 /** ③ のやり直しの答え（同じ不備を出し直す。上限で止まることを試すのに使う） */
 export const MAPPING_REDO_OUTPUT = { mappings: BAD_MAPPINGS };
+
+// ── Issue #326：書けなかった要件の一覧（要件 R-1 と R-4 が書けない設計）────────────
+
+/** 4 つの文の原文（R-1〜R-4 が 1 文ずつ覆う。抽象的な題材） */
+export const SOURCE_TEXT_FOUR = "タスクを記録する。件数を合計する。補助を出す。印を出す。";
+
+/** ① の答え（R-1〜R-4。引用と位置は原文に一致する） */
+export const REQUIREMENT_LIST_OUTPUT_FOUR = {
+  requirements: [
+    { id: "R-1", text: "タスクを記録できる", quote: "タスクを記録する。", position: { start: 0, end: 9 } },
+    { id: "R-2", text: "件数を合計できる", quote: "件数を合計する。", position: { start: 9, end: 17 } },
+    { id: "R-3", text: "補助を出せる", quote: "補助を出す。", position: { start: 17, end: 23 } },
+    { id: "R-4", text: "印を出せる", quote: "印を出す。", position: { start: 23, end: 28 } },
+  ],
+  decisions: [],
+  unresolved: [],
+};
+
+/** ② の答え（R-1 と R-4 を書けないと申告する。部分案の道） */
+export const DESIGN_OUTPUT_PARTIAL_FOUR = {
+  designs: [
+    { requirementId: "R-1", vocabulary: ["計算"], placement: ["computed"], unwritable: ["記録の並べ替えは書けない"] },
+    { requirementId: "R-2", vocabulary: ["計算"], placement: ["computed"], unwritable: [] },
+    { requirementId: "R-3", vocabulary: ["計算"], placement: ["computed"], unwritable: [] },
+    { requirementId: "R-4", vocabulary: ["計算"], placement: ["computed"], unwritable: ["印の色分けは書けない"] },
+  ],
+};
+
+/** ③ が書く宣言（R-1〜R-4 の計算 4 つを、一覧の `show` で出す） */
+export const DECLARATION_SOURCE_FOUR = [
+  "entities:",
+  "  - name: record",
+  "    fields:",
+  "      amount: number",
+  "views:",
+  "  - name: records",
+  "    type: list",
+  "    entity: record",
+  "    show: [total, extra, sub, mark]",
+  "actions: []",
+  "validations: []",
+  "computed:",
+  "  - name: total",
+  "    entity: record",
+  "    expression: amount * 2",
+  "    type: number",
+  "  - name: extra",
+  "    entity: record",
+  "    expression: amount + 1",
+  "    type: number",
+  "  - name: sub",
+  "    entity: record",
+  "    expression: amount - 1",
+  "    type: number",
+  "  - name: mark",
+  "    entity: record",
+  "    expression: amount * 3",
+  "    type: number",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+/** ②' で固定する試験 1 件（要件ごとの計算 1 つを対象にする） */
+function suiteTestFour(
+  id: string,
+  requirementId: string,
+  role: string,
+  value: number,
+  kind: "normal" | "abnormal" | "boundary",
+): unknown {
+  return {
+    id,
+    target: { requirementId, kind: "computation", role },
+    kind,
+    operation: "compute",
+    clock: "2026-09-16T12:00:00+09:00",
+    input: { amount: 21 },
+    referenceData: [],
+    expected: { kind: "ok", value },
+  };
+}
+
+/** ②' の答え（R-1〜R-4 に正常・異常・境界がそろう） */
+export const TEST_SUITE_OUTPUT_FOUR = {
+  tests: [
+    suiteTestFour("t1", "R-1", "合計を出す計算", 42, "normal"),
+    suiteTestFour("t2", "R-1", "合計を出す計算", 42, "abnormal"),
+    suiteTestFour("t3", "R-1", "合計を出す計算", 42, "boundary"),
+    suiteTestFour("t4", "R-2", "補助の値の計算", 22, "normal"),
+    suiteTestFour("t5", "R-2", "補助の値の計算", 22, "abnormal"),
+    suiteTestFour("t6", "R-2", "補助の値の計算", 22, "boundary"),
+    suiteTestFour("t7", "R-3", "差を出す計算", 20, "normal"),
+    suiteTestFour("t8", "R-3", "差を出す計算", 20, "abnormal"),
+    suiteTestFour("t9", "R-3", "差を出す計算", 20, "boundary"),
+    suiteTestFour("t10", "R-4", "印の計算", 63, "normal"),
+    suiteTestFour("t11", "R-4", "印の計算", 63, "abnormal"),
+    suiteTestFour("t12", "R-4", "印の計算", 63, "boundary"),
+  ],
+};
+
+/** ⑤a の答え（R-1〜R-4 の計算の場所。すべて実在し画面から辿れる） */
+export const CORRESPONDENCE_OUTPUT_FOUR = {
+  entries: [
+    { requirementId: "R-1", locations: [{ kind: "computation", entity: "record", name: "total" }] },
+    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "extra" }] },
+    { requirementId: "R-3", locations: [{ kind: "computation", entity: "record", name: "sub" }] },
+    { requirementId: "R-4", locations: [{ kind: "computation", entity: "record", name: "mark" }] },
+  ],
+};
+
+/**
+ * 書けなかった設計（R-1 と R-4 が `unwritable`）を流す記録（①→①'→②→②'→③→⑤a）。
+ * `SOURCE_TEXT_FOUR` を原文にして流す（`makeRunInput` の `source` を差し替える）。
+ */
+export function recordedRunFour(): readonly RecordedCall[] {
+  return [
+    structured(REQUIREMENT_LIST_OUTPUT_FOUR),
+    structured(REVERSE_CHECK_OUTPUT),
+    structured(DESIGN_OUTPUT_PARTIAL_FOUR),
+    structured(TEST_SUITE_OUTPUT_FOUR),
+    structured({ declaration: DECLARATION_SOURCE_FOUR }),
+    structured(CORRESPONDENCE_OUTPUT_FOUR),
+  ];
+}

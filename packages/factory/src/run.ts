@@ -14,7 +14,7 @@
 import { sha256Hex } from "@musunest/spec-engine";
 import { JobBudget, type TokenRates } from "./budget.js";
 import { CallGateway } from "./call.js";
-import { assembleBundle, type AssembledBundle } from "./bundle.js";
+import { assembleBundle, type AssembledBundle, type UnwritableRequirement } from "./bundle.js";
 import { AGENT_LIMITS, checkRequestText, type AgentLimits } from "./limits.js";
 import type { LlmClient } from "./llm.js";
 import { decideOutcome, type Outcome } from "./outcome.js";
@@ -347,11 +347,26 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     );
     const carriedReverseCheck = requirementList.unmet.map((miss) => `${miss.kind}: ${miss.detail}`);
 
-    // ② 設計する（書けない要件の数を、⑦ のために数えておく）
+    // ② 設計する（書けなかった要件の一覧を、⑦ と ⑧ のために組んでおく）
     const design = await runStageOk("design", () =>
       runDesign({ list: requirementList.list, documents: input.documents, gateway }),
     );
-    const unwritableRequirements = design.designs.filter((entry) => entry.unwritable.length > 0).length;
+    // 書けなかった要件を、要件の文と引用つきで並べる（Issue #326）。② の設計の `unwritable` が空でない要件だけ。
+    // 要件の文と引用は ① の一覧から写す（設計は ID しか持たない）。
+    const unwritable: readonly UnwritableRequirement[] = design.designs
+      .filter((entry) => entry.unwritable.length > 0)
+      .map((entry) => {
+        const requirement = requirementList.list.requirements.find(
+          (candidate) => candidate.id === entry.requirementId,
+        );
+        return {
+          requirementId: entry.requirementId,
+          text: requirement?.text ?? "",
+          quote: requirement?.quote ?? "",
+          unwritable: entry.unwritable,
+        };
+      });
+    const unwritableRequirements = unwritable.length;
 
     // ②' 試験を作って固定する（宣言を見る前に固定する。§1.3）。**② の設計（役割 ID の表と要件ごとの
     // 種類）を渡す**——渡さないと ②' は設計が無いときの古い経路に入り、種類の突き合わせと役割 ID の
@@ -657,6 +672,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       outcome,
       summary,
       requirements: requirementList.list,
+      unwritable,
       correspondence: final.correspondence,
       testRun: final.testRun,
       disputes,
