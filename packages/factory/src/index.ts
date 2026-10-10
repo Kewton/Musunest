@@ -45,6 +45,14 @@ export * from "./stages/test-suite.js";
 export * from "./stages/tools.js";
 export * from "./stages/write.js";
 
+// ── Plan の段（plan/。Issue #333。P1〜P6：要件を固める役）─────────────
+export * from "./plan/catalog.js";
+export * from "./plan/surface.js";
+export * from "./plan/questions.js";
+export * from "./plan/answers.js";
+export * from "./plan/confirm.js";
+export * from "./plan/session.js";
+
 // ── 記録・納品物・回す部分・手元の入口（Issue #288）───────────────
 export * from "./record.js";
 export * from "./bundle.js";
