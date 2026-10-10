@@ -535,7 +535,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         const generated = await runStageOutcome("questions", () =>
           runQuestions({
             source: input.source,
-            openIssues,
+            openIssues: open,
+            remaining: preRemaining.questions,
             revision,
             documents: input.documents,
             gateway,
