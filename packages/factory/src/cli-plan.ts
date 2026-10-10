@@ -15,13 +15,14 @@ import type { BundleJudgeUsage } from "./bundle.js";
 import type { PlanAnswerDraft } from "./plan/answers.js";
 import type { PlanQuestion } from "./plan/questions.js";
 import type { PlanConfirmationView } from "./plan/session.js";
-import type {
-  PlanAnswerOutcome,
-  PlanAnswerRequest,
-  PlanConfirmOutcome,
-  PlanResponder,
-  PlanResult,
-  PlanStageRecord,
+import {
+  isSourceClosureDecision,
+  type PlanAnswerOutcome,
+  type PlanAnswerRequest,
+  type PlanConfirmOutcome,
+  type PlanResponder,
+  type PlanResult,
+  type PlanStageRecord,
 } from "./plan/run-plan.js";
 import { isRecord } from "./stages/prompt.js";
 
@@ -205,6 +206,14 @@ function writeConfirmation(terminal: Terminal, view: PlanConfirmationView): void
     terminal.write("書けないこと（代わりの案）:");
     for (const item of view.unwritable) terminal.write(`  - ${item.part_id} → ${item.alternative_id}`);
   }
+  // 依頼文で決めたこと（事項・決めた中身・引用）を出す（直す機能は今回は作らない。04 §3 P4・Issue #370）
+  const sourceDecisions = view.plan.decisions.filter(isSourceClosureDecision);
+  if (sourceDecisions.length > 0) {
+    terminal.write("依頼文で決めたこと:");
+    for (const decision of sourceDecisions) {
+      terminal.write(`  - ${decision.subject}: ${decision.value}（引用: ${decision.reason}）`);
+    }
+  }
   terminal.write(`これで作る [y/n]`);
 }
 
@@ -257,6 +266,15 @@ export interface PlanCliQuestionRecord {
   readonly choices: readonly { readonly id: string; readonly text: string }[];
   readonly recommended: { readonly choice_id: string; readonly reason: string } | null;
   readonly allow_free_text: boolean;
+  /** この問いの答えで一緒に閉じる事項の ID（04 §3 P4・Issue #370） */
+  readonly also_closes: readonly string[];
+}
+
+/** 記録に入れる、依頼文で閉じた事項（04 §3 P4・Issue #370） */
+export interface PlanCliSourceClosureRecord {
+  readonly issue_id: string;
+  readonly quote: string;
+  readonly value: string;
 }
 
 /** 記録に入れる答え（選択肢 ID か自由入力のちょうど一方） */
@@ -280,6 +298,8 @@ export interface PlanCliRecord {
   readonly plan_id: string;
   readonly outcome: PlanResult["kind"];
   readonly rounds: readonly PlanCliRoundRecord[];
+  /** 依頼文で閉じた事項（ID・引用・決めた中身。04 §3 P4・Issue #370） */
+  readonly closed_by_source: readonly PlanCliSourceClosureRecord[];
   readonly confirmation: "build" | "stop" | null;
   readonly stages: readonly PlanStageRecord[];
   readonly judge: BundleJudgeUsage;
@@ -297,6 +317,7 @@ function toQuestionRecord(question: PlanQuestion): PlanCliQuestionRecord {
     choices: question.choices.map((choice) => ({ id: choice.id, text: choice.text })),
     recommended: recommended === undefined ? null : { choice_id: recommended.choiceId, reason: recommended.reason },
     allow_free_text: question.allowFreeText ?? false,
+    also_closes: question.alsoCloses ?? [],
   };
 }
 
@@ -324,6 +345,11 @@ export function buildPlanCliRecord(input: {
       questions: round.questions.map(toQuestionRecord),
       answers: round.answers.map(toAnswerRecord),
       all_recommended: round.allRecommended,
+    })),
+    closed_by_source: input.result.closedBySource.map((closure) => ({
+      issue_id: closure.issueId,
+      quote: closure.quote,
+      value: closure.value,
     })),
     confirmation: input.transcript.confirmation,
     stages: input.result.stages,

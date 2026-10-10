@@ -148,6 +148,45 @@ function planThenBuildRecording(): ReturnType<typeof createRecordingClient> {
   ]);
 }
 
+/** 同じことを聞く重大な事項 2 件（Issue #370） */
+const GROUPED_SURFACE_TWO = {
+  ambiguities: [
+    { id: "OI-1", requirementId: "R-1", text: "誰の分を数えるか", critical: true },
+    { id: "OI-2", requirementId: "R-1", text: "誰の分を数えるか（同じ問い）", critical: true },
+  ],
+  unwritable: [],
+};
+
+/** 2 件を 1 問で閉じる P4 の答え（主の OI-1 と、一緒に閉じる OI-2。Issue #370） */
+const GROUPED_QUESTIONS_ONE = {
+  questions: [
+    {
+      id: "Q-1",
+      openIssueId: "OI-1",
+      alsoCloses: ["OI-2"],
+      text: "誰の分を数えますか",
+      choices: [
+        { id: "c1", text: "全員" },
+        { id: "c2", text: "自分のみ" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    },
+  ],
+};
+
+/** 依頼文で決まっている事項 1 件（Issue #370） */
+const SOURCE_CLOSURE_SURFACE_ONE = {
+  ambiguities: [{ id: "OI-1", requirementId: "R-1", text: "誰の分を数えるか", critical: true }],
+  unwritable: [],
+};
+
+/** 依頼文の引用で、唯一の事項を聞かずに閉じる P4 の答え（Issue #370） */
+const SOURCE_CLOSURE_ONE = {
+  questions: [],
+  closedBySource: [{ issueId: "OI-1", quote: "タスクを記録する", value: "記録する内容を 1 行にする" }],
+};
+
 /** 実在のファイルに書く依存（鍵と文書は偽物、ファイルだけ本物） */
 const realFileDeps = () => ({
   readFile: async () => SOURCE_TEXT,
@@ -180,11 +219,21 @@ interface PlanCliRecordShape {
   readonly outcome: string;
   readonly confirmation: string | null;
   readonly rounds: readonly {
+    readonly questions: readonly {
+      readonly id: string;
+      readonly open_issue_id: string;
+      readonly also_closes: readonly string[];
+    }[];
     readonly answers: readonly {
       readonly id: string;
       readonly choice_id: string | null;
       readonly free_text: string | null;
     }[];
+  }[];
+  readonly closed_by_source: readonly {
+    readonly issue_id: string;
+    readonly quote: string;
+    readonly value: string;
   }[];
   readonly spent_usd: number;
   readonly remaining_usd: number;
@@ -435,5 +484,91 @@ describe("確定できないときは Build を流さず、0 でない終了コ�
     // 往復の記録は残る（確定していない）
     const record = await readPlanRecord(dir);
     expect(record.outcome).toBe("cannot-confirm");
+  });
+});
+
+// ── 一緒に閉じた事項と、依頼文で閉じた事項の記録（Issue #370）────────────
+
+describe("往復の記録に、一緒に閉じた事項と依頼文で閉じた事項が残る（04 §3 P4・Issue #370）", () => {
+  it("答えのファイルの形で、問いの一緒に閉じた事項の ID が記録に残る", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(GROUPED_SURFACE_TWO),
+      structured(GROUPED_QUESTIONS_ONE),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q-1"]) });
+    const dir = `${directory}/grouped-record`;
+    const answersPath = "grouped-answers.json";
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) =>
+        path === answersPath ? JSON.stringify({ "Q-1": { choiceId: "c1" } }) : SOURCE_TEXT,
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    // 問いごとの、一緒に閉じた事項の ID が残る
+    expect(record.rounds[0]?.questions[0]?.also_closes).toEqual(["OI-2"]);
+    // 依頼文で閉じた事項は無い
+    expect(record.closed_by_source).toEqual([]);
+  });
+
+  it("対話の形で、依頼文で決めたことが確認の画面に出て、記録にも残る", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SOURCE_CLOSURE_SURFACE_ONE),
+      structured(SOURCE_CLOSURE_ONE),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers([]) });
+    const dir = `${directory}/source-closure`;
+    const terminal = fakeTerminal(["これで作る"]);
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      terminal,
+      log: () => {},
+    });
+
+    // 確認の画面に、依頼文で決めたこと（事項・決めた中身・引用）が出る
+    expect(
+      terminal.out.some(
+        (line) => line.includes("記録する内容を 1 行にする") && line.includes("タスクを記録する"),
+      ),
+    ).toBe(true);
+
+    // 往復の記録に、依頼文で閉じた事項（ID・引用・決めた中身）が残る
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    expect(record.closed_by_source).toEqual([
+      { issue_id: "OI-1", quote: "タスクを記録する", value: "記録する内容を 1 行にする" },
+    ]);
+    // 問いは 0 問（一緒に閉じた事項も無い）
+    expect(record.rounds).toEqual([]);
+    // 確定したので Build が流れる
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
