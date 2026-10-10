@@ -17,6 +17,8 @@ import type {
   CorrespondenceMiss,
   Declaration,
   RequirementList,
+  RoleEntry,
+  RoleNameMapping,
   TestMismatch,
   TestSuite,
   TestUnresolved,
@@ -127,6 +129,14 @@ export interface RepairToolContext {
   readonly list: RequirementList;
   readonly suite: TestSuite;
   readonly correspondences: readonly CorrespondenceEntry[];
+  /**
+   * ③ が提出した「役割 ID → 宣言の名前」の対応（§1.3・Issue #309）。**⑥ の道具も、本番の試験を
+   * 流す段と同じ結び付けの部品（bind.ts）を使う**——道具に渡された候補の版（宣言）に対して結び付け直す。
+   * 無ければ旧形式の経路（種類の数で決める）。
+   */
+  readonly mappings?: readonly RoleNameMapping[];
+  /** ② の役割 ID の表（対応表の確認の道具で、提出された対応の点検に使う。§1.2・Issue #309） */
+  readonly roles?: readonly RoleEntry[];
 }
 
 /** 静的チェックの道具の出力 */
@@ -172,6 +182,8 @@ export async function executeRepairTool(
       app: checked.app,
       suite: context.suite,
       correspondence: { entries: context.correspondences, misses: [] },
+      // 同じ結び付けの部品（bind.ts）を使い、道具に渡された候補の版で結び付け直す（§1.3.1・Issue #309）
+      ...(context.mappings === undefined ? {} : { mappings: context.mappings }),
     });
     return {
       passed: result.mismatches.length === 0 && result.unresolved.length === 0,
@@ -182,6 +194,9 @@ export async function executeRepairTool(
     };
   }
 
-  const misses = checkCorrespondence(checked.app, context.list, context.correspondences);
+  const misses = checkCorrespondence(checked.app, context.list, context.correspondences, {
+    ...(context.roles === undefined ? {} : { roles: context.roles }),
+    ...(context.mappings === undefined ? {} : { mappings: context.mappings }),
+  });
   return { passed: misses.length === 0, detail: "", mismatches: [], unresolved: [], misses };
 }

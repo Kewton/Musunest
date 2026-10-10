@@ -215,3 +215,76 @@ export function makeRunInput(
 
 /** 文書の例（呼ぶ側から渡す。このパッケージはファイルを読まない） */
 export const DOCUMENTS: readonly PromptDocument[] = SAMPLE_DOCUMENTS;
+
+// ── Issue #309：版の整合・停滞・③ のやり直し の試験で使う題材 ─────────────────
+
+/** 宣言（③ が書く）。R-1 は `total`（`amount * 2`）、R-2 は `extra`（`amount + 1`）の計算 */
+export const DECLARATION_SOURCE_MISMATCH = DECLARATION_SOURCE.replace("expression: amount * 2", "expression: amount * 3");
+
+/**
+ * ② の答え（役割 ID の表を持つ新形式。Issue #309）。③ が提出した対応の点検（⑤a）と、
+ * 対応の表の不備（③ のやり直し）を試すのに使う。
+ */
+export const DESIGN_OUTPUT_MAPPED = {
+  roles: [
+    { roleId: "record", kind: "entity", entity: null, name: "記録", shared: false, aliasOf: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "合計", shared: false, aliasOf: null },
+    { roleId: "record.extra", kind: "computation", entity: "record", name: "補助", shared: false, aliasOf: null },
+  ],
+  designs: [
+    {
+      requirementId: "R-1",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      vocabulary: ["計算"],
+      placement: ["computed"],
+      unwritable: [],
+    },
+    {
+      requirementId: "R-2",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      vocabulary: ["計算"],
+      placement: ["computed"],
+      unwritable: [],
+    },
+  ],
+};
+
+/** 役割 ID で対象を指す試験 1 件（新形式。Issue #309） */
+function roleSuiteTest(id: string, requirementId: string, roleId: string, kind: "normal" | "abnormal" | "boundary"): unknown {
+  const r1 = requirementId === "R-1";
+  return {
+    id,
+    target: { requirementId, kind: "computation", roleId },
+    kind,
+    operation: "compute",
+    clock: "2026-09-16T12:00:00+09:00",
+    input: { amount: 21 },
+    inputContract: { rowId: `${id}-row`, targetRowId: null, emptyEntities: [] },
+    referenceData: [],
+    expected: { kind: "ok", value: r1 ? 42 : 22 },
+  };
+}
+
+/** ②' の答え（役割 ID で指す新形式。R-1・R-2 に正常・異常・境界がそろう） */
+export const TEST_SUITE_OUTPUT_MAPPED = {
+  tests: [
+    roleSuiteTest("t1", "R-1", "record.total", "normal"),
+    roleSuiteTest("t2", "R-1", "record.total", "abnormal"),
+    roleSuiteTest("t3", "R-1", "record.total", "boundary"),
+    roleSuiteTest("t4", "R-2", "record.extra", "normal"),
+    roleSuiteTest("t5", "R-2", "record.extra", "abnormal"),
+    roleSuiteTest("t6", "R-2", "record.extra", "boundary"),
+  ],
+};
+
+/** ③ が提出する対応（`record.total` を、宣言に無い名前 `nonexistent` に結び付ける。対応の表の不備） */
+export const BAD_MAPPINGS = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.total", name: "nonexistent" },
+  { roleId: "record.extra", name: "extra" },
+] as const;
+
+/** ③ のやり直しの答え（同じ不備を出し直す。上限で止まることを試すのに使う） */
+export const MAPPING_REDO_OUTPUT = { mappings: BAD_MAPPINGS };

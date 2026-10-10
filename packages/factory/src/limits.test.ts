@@ -56,6 +56,13 @@ describe("共通の上限（02 §1.5・§2.2）", () => {
     );
   });
 
+  it("③ のやり直し・⑤a の作り直し・停滞の回数の上限も、ちょうどは通り、超過は断る（02 §1.5・#309）", () => {
+    for (const name of ["correspondenceRedos", "correspondenceChecks", "stagnationRepeats"] as const) {
+      expect(checkLimit(name, AGENT_LIMITS[name]), name).toBeUndefined();
+      expect(checkLimit(name, AGENT_LIMITS[name] + 1)?.limit, name).toBe(name);
+    }
+  });
+
   it("すべての上限に、どの段が確かめるかの番人が書かれている", () => {
     const names = Object.keys(AGENT_LIMITS) as readonly LimitName[];
     for (const name of names) {
