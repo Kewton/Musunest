@@ -16,8 +16,10 @@
 // ——書くのは手元の入口（cli.ts）だけである。
 import {
   BUNDLE_MANIFEST_SCHEMA_VERSION,
+  planDigest,
   type BundleManifest,
   type BundleManifestFile,
+  type ConfirmedPlan,
 } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import type { Outcome } from "./outcome.js";
@@ -59,6 +61,14 @@ export const VERIFICATION_FILE = `${ARTIFACTS_DIR}/verification.json` as const;
  * 検証の結果と同じく、**最後の宣言のバイト列の SHA-256** を中に書く（§4・R-3）。
  */
 export const UNWRITABLE_FILE = `${ARTIFACTS_DIR}/unwritable.json` as const;
+/**
+ * 確定した仕様（`plan.json`）の置き場所（§4・Issue #334）。**無くてよい**（今の納品物と互換）。あるときは、
+ * manifest の最上位の `plan_sha256` と、検証の結果の `plan_sha256` に、**同じ仕様の SHA-256** を載せる
+ * （門（#335）が、この 2 つと `plan.json` から計算した値を照合する）。
+ */
+export const PLAN_FILE = `${ARTIFACTS_DIR}/plan.json` as const;
+/** manifest と検証の結果が、確定した仕様の SHA-256 を載せる欄の名前（門（#335）と同じ名前にする） */
+export const PLAN_SHA256_FIELD = "plan_sha256" as const;
 
 /** 納品物の 1 つのファイル（UTF-8 の文字列）。`path` は納品物の直下からの相対パス（`/` 区切り） */
 export interface BundleArtifact {
@@ -150,6 +160,11 @@ export interface BundlePartialReasons {
 export interface BundleVerification {
   /** 完成した宣言（原文）の UTF-8 バイト列の SHA-256 */
   readonly declaration_sha256: string;
+  /**
+   * 確定した仕様（`plan.json`）の SHA-256（正規化して計算したもの。§4・Issue #334）。**確定した仕様が
+   * あるときだけ**入る。manifest の同じ名前の欄と**同じ値**で、門（#335）が `plan.json` と照合する。
+   */
+  readonly plan_sha256?: string;
   /** ⑦ の合否 */
   readonly outcome: Outcome;
   readonly correspondence_misses: number;
@@ -190,6 +205,11 @@ export interface BundleInput {
   readonly verificationProfile: string;
   readonly specEngineVersion: string;
   readonly factoryVersion: string;
+  /**
+   * 確定した仕様（`plan.json`。§4・Issue #334）。**無くてよい**（今の納品物と互換）。あるときは、
+   * `artifacts/plan.json` として納品物に入れ、manifest と検証の結果に同じ仕様の SHA-256 を記録する。
+   */
+  readonly plan?: ConfirmedPlan;
 }
 
 /** 組み立てた納品物（`bundle-manifest.json` を含む。書くのは呼ぶ側） */
@@ -203,6 +223,11 @@ export interface AssembledBundle {
   /** 要約（appspec-schema の wire） */
   readonly summary: Summary;
   readonly declarationSha256: string;
+  /**
+   * 確定した仕様（`plan.json`）の SHA-256（正規化して計算したもの）。**確定した仕様が無ければ `null`**。
+   * manifest と検証の結果に載せた値と同じである（§4・Issue #334）。
+   */
+  readonly planSha256: string | null;
 }
 
 /** 決まった字下げで JSON にする（同じ入力からは同じバイト列。末尾に改行 1 つ） */
@@ -221,6 +246,9 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
   const unexecuted: string[] = [];
   if (input.correspondence === null) unexecuted.push("correspondence");
   if (input.testRun === null) unexecuted.push("run-tests");
+
+  // 確定した仕様（`plan.json`）の SHA-256。**無い納品物は null**（今の納品物と互換。§4・Issue #334）
+  const planSha256 = input.plan === undefined ? null : await planDigest(input.plan);
 
   // 未解決の ID は、⑦ に渡した数え方と同じにする（期待の裁定の未解決と、最終版の試験の未解決の和。重複は 1 つ）
   const unresolvedTests = input.testRun?.unresolved ?? [];
@@ -242,6 +270,7 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
 
   const verification: BundleVerification = {
     declaration_sha256: input.declarationSha256,
+    ...(planSha256 === null ? {} : { plan_sha256: planSha256 }),
     outcome: input.outcome,
     correspondence_misses: correspondenceMisses.length,
     test_mismatches: input.testRun?.mismatches.length ?? 0,
@@ -260,6 +289,7 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
 
   const artifacts: readonly BundleArtifact[] = [
     { path: DECLARATION_FILE, text: input.declaration.source },
+    ...(input.plan === undefined ? [] : [{ path: PLAN_FILE, text: toJson(input.plan) }]),
     { path: SUMMARY_FILE, text: toJson(input.summary) },
     { path: REQUIREMENTS_FILE, text: toJson(input.requirements) },
     { path: UNWRITABLE_FILE, text: toJson(unwritable) },
@@ -279,12 +309,15 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
     });
   }
 
-  const manifest: BundleManifest = {
+  // 確定した仕様があるときだけ、manifest の最上位に `plan_sha256` を載せる（門（#335）が照合する）。
+  // `BundleManifest` の型（appspec-schema）には欄が無い（納品物の版の型はそのまま）ので、載せるときだけ足す
+  const manifest = {
     schema_version: BUNDLE_MANIFEST_SCHEMA_VERSION,
     storage_unit: input.storageUnit,
     source_run: input.runId,
     artifact_level: input.artifactLevel,
     expected_verdict: input.outcome.verdict,
+    ...(planSha256 === null ? {} : { [PLAN_SHA256_FIELD]: planSha256 }),
     instrument: {
       binary_sha256: await sha256Hex(
         `${input.builder}\n${input.factoryVersion}\n${input.specEngineVersion}`,
@@ -292,7 +325,7 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
       verification_profile: input.verificationProfile,
     },
     files,
-  };
+  } as BundleManifest;
 
   return {
     artifacts,
@@ -300,6 +333,7 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
     manifestText: toJson(manifest),
     summary: input.summary,
     declarationSha256: input.declarationSha256,
+    planSha256,
   };
 }
 

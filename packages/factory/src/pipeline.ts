@@ -3,7 +3,7 @@
 // 外側（段の順番・記録・打ち切り・合否）はコードが決め、内側の「書く・直す」段だけを LLM に任せる。
 // ここは ① 要件にする 〜 ⑧ 納品物にする の**入力と出力の型**と、前半（①'・②'）から持ち越した未達を
 // ⑦ の入力へ写す**純粋な関数**を置く。段の中身（プロンプト・道具）は stages/ にある。
-import type { NormalizedAppSpec } from "@musunest/appspec-schema";
+import type { ConfirmedPlan, NormalizedAppSpec, PlanPartDisposition } from "@musunest/appspec-schema";
 import type { Diagnostic } from "@musunest/spec-engine";
 import type { RequirementNature, TestSuite, TestTargetKind } from "./fixed-test.js";
 import type { Outcome, StageResults } from "./outcome.js";
@@ -14,12 +14,28 @@ export interface SourceRange {
   readonly end: number;
 }
 
+/**
+ * 確定した仕様（`plan.json`）の要件の**部分**（Issue #334）。Plan の `parts[]` を写したもので、
+ * 設計の `unwritable` を `accepted_unwritable`（部分 ID）と突き合わせるのに使う。
+ */
+export interface RequirementPart {
+  readonly id: string;
+  readonly text: string;
+  readonly disposition: PlanPartDisposition;
+}
+
 /** 1 行 1 要件。原文の引用と位置を付ける（①。F-3） */
 export interface Requirement {
   readonly id: string;
   readonly text: string;
   readonly quote: string;
   readonly position: SourceRange;
+  /**
+   * 確定した仕様の部分（Plan の `parts[]`。Issue #334）。**確定した仕様を正本にしたときだけ入る**
+   * （原文から作った一覧では省く）。設計が「書けない」と申告した部分を、了承して除いた部分（部分 ID）と
+   * 突き合わせるのに使う。
+   */
+  readonly parts?: readonly RequirementPart[];
 }
 
 /** ① 要件にする、の出力 */
@@ -29,6 +45,40 @@ export interface RequirementList {
   readonly decisions: readonly string[];
   /** 重大な曖昧さ。決めずに「未解決」として最後まで持つ（F-6） */
   readonly unresolved: readonly string[];
+}
+
+/**
+ * 確定した仕様（Plan の契約 `ConfirmedPlan`）から、Build の全段が使う要件の一覧を作る（§5・Issue #334）。
+ *
+ * **確定した仕様があるときは ① と ①' を行わず、その要件をそのまま使う**（§5・Issue #334）。要件の文は
+ * 仕様の `text`、引用は `origin.quote`（出どころ）を写す。原文の位置は確定した仕様には無いので
+ * `{ 0, 0 }` とし、①' を行わないので位置の一致は確かめない。部分（`parts`）は、設計の `unwritable` を
+ * `accepted_unwritable`（部分 ID）と突き合わせるために写す。
+ */
+export function requirementsFromPlan(plan: ConfirmedPlan): RequirementList {
+  return {
+    requirements: plan.requirements.map((requirement) => ({
+      id: requirement.id,
+      text: requirement.text,
+      quote: requirement.origin.quote,
+      position: { start: 0, end: 0 },
+      parts: requirement.parts.map((part) => ({
+        id: part.id,
+        text: part.text,
+        disposition: part.disposition,
+      })),
+    })),
+    decisions: plan.decisions.map((decision) => `${decision.subject}: ${decision.value}`),
+    unresolved: [],
+  };
+}
+
+/**
+ * 了承して除いた部分（`accepted_unwritable`）の**部分 ID** を集める（§5・Issue #334）。
+ * 設計が「書けない」と申告した部分が、この集合の内側なら「了承済み」、外なら「Plan の見落とし」である。
+ */
+export function acceptedUnwritablePartIds(plan: ConfirmedPlan): ReadonlySet<string> {
+  return new Set(plan.accepted_unwritable.map((entry) => entry.part_id));
 }
 
 /**
@@ -304,6 +354,11 @@ export interface ArbitrationResult {
   readonly overturned: readonly OverturnedTest[];
   /** 裁定不能：未解決として残す（⑦ で合格にならない） */
   readonly unresolved: readonly string[];
+  /**
+   * 確定した仕様そのものと食い違う主張（§5・Issue #334）。**裁定せず Plan に戻す**——仕様を変えるには
+   * Plan のやり直し（再確認）が要るので、⑥' では棄却も維持もしない。差し戻しは 1 回までである。
+   */
+  readonly returnToPlan?: readonly string[];
 }
 
 /**
@@ -372,6 +427,11 @@ export interface JudgeMaterials {
   readonly testMismatches: number;
   readonly testUnresolved: number;
   readonly unwritableRequirements: number;
+  /**
+   * 書けないと申告された要件のうち、`accepted_unwritable`（了承して除いた部分）の内側だけの数
+   * （§5・Issue #334）。**確定した仕様があるときだけ**入れる。了承済みの部分は合格（full）を妨げない。
+   */
+  readonly acceptedUnwritable?: number;
   readonly limitReached: boolean;
   readonly carriedOver: UnmetCarryOver;
 }
@@ -390,6 +450,9 @@ export function toStageResults(materials: JudgeMaterials): StageResults {
     testMismatches: materials.testMismatches,
     unresolved: carried + materials.testUnresolved,
     unwritableRequirements: materials.unwritableRequirements,
+    ...(materials.acceptedUnwritable === undefined
+      ? {}
+      : { acceptedUnwritable: materials.acceptedUnwritable }),
     limitReached: materials.limitReached,
   };
 }

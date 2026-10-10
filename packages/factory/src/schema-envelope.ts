@@ -11,6 +11,8 @@
 // 枝の並びと中身は**決まった順**にする（同じ入力なら同じバイト列）。封筒は adapter（openai.ts）が送り、
 // 応答から `result` を取り出して段へ渡す。段ごとの指示（どの枝で答えるか）は文書の後ろ＝前置きの外に
 // 置くので、キャッシュは壊れない。
+import { QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME } from "./plan/questions.js";
+import { SURFACE_SCHEMA, SURFACE_SCHEMA_NAME } from "./plan/surface.js";
 import { ARBITRATION_SCHEMA, ARBITRATION_SCHEMA_NAME } from "./stages/arbitrate.js";
 import { CORRESPONDENCE_SCHEMA, CORRESPONDENCE_SCHEMA_NAME } from "./stages/correspondence.js";
 import { DESIGN_SCHEMA, DESIGN_SCHEMA_NAME } from "./stages/design.js";
@@ -40,11 +42,14 @@ export interface StageEnvelopeEntry {
 /**
  * 封筒に入れる段の一覧（**構造化出力を使う段**だけ。決まった順）。
  *
- * 道具付きの段（⑥ 直す）は入れない——道具の定義も前置きに入るので、直すどうしのくり返しでキャッシュが
- * 当たる（#353「道具付きの段は今のまま」）。判定の口（judge-llm）は問いごとに schema が変わるので入れない
- * （adapter は、封筒に載っていない schema は今までどおりそのまま送る）。
+ * 段の順は、生成の流れに沿う（Plan の段 P3・P4 → ①〜⑥'・③ のやり直し）。道具付きの段（⑥ 直す）は
+ * 入れない——道具の定義も前置きに入るので、直すどうしのくり返しでキャッシュが当たる（#353「道具付きの
+ * 段は今のまま」）。判定の口（judge-llm）は問いごとに schema が変わるので入れない（adapter は、封筒に
+ * 載っていない schema は今までどおりそのまま送る）。
  */
 export const STAGE_ENVELOPE_ENTRIES: readonly StageEnvelopeEntry[] = [
+  { stage: SURFACE_SCHEMA_NAME, schema: SURFACE_SCHEMA },
+  { stage: QUESTIONS_SCHEMA_NAME, schema: QUESTIONS_SCHEMA },
   { stage: REQUIREMENTS_SCHEMA_NAME, schema: REQUIREMENT_LIST_SCHEMA },
   { stage: REVERSE_CHECK_SCHEMA_NAME, schema: REVERSE_CHECK_SCHEMA },
   { stage: DESIGN_SCHEMA_NAME, schema: DESIGN_SCHEMA },

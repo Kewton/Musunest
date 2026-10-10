@@ -97,6 +97,8 @@ describe("全段で同じ「封筒」の schema（02 §2・#353）", () => {
   it("封筒には、構造化出力を使う段がすべて枝として入る", () => {
     // 枝の並びは、段の一覧の並び（決まった順）である
     expect(STAGE_ENVELOPE_ENTRIES.map((entry) => entry.stage)).toEqual([
+      "plan-surface",
+      "plan-questions",
       "requirement-list",
       "reverse-check",
       "requirement-design",

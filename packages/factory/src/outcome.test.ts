@@ -72,3 +72,34 @@ describe("終わりの判定（02 §1.4）", () => {
     expect(decideOutcome({ ...SATISFIED, staticCheckPassed: false }).verdict).toBe("none");
   });
 });
+
+// ── 了承して除いた部分と、Plan の見落とし（§5・Issue #334）────────────────
+
+describe("了承して除いた部分と、Plan の見落とし（§5・Issue #334）", () => {
+  it("了承して除いた部分だけが書けない仕様は、合格（verdict: full）", () => {
+    // 書けない部分が 2 つあっても、どちらも `accepted_unwritable`（了承済み）の内側なら合格
+    expect(decideOutcome({ ...SATISFIED, unwritableRequirements: 2, acceptedUnwritable: 2 })).toEqual({
+      result: "pass",
+      verdict: "full",
+    });
+  });
+
+  it("了承していない部分が書けなければ、部分案（理由「Plan の見落とし」）", () => {
+    // 2 つのうち 1 つが了承の外にある（Plan の見落とし）ので、部分案になる
+    expect(decideOutcome({ ...SATISFIED, unwritableRequirements: 2, acceptedUnwritable: 1 })).toEqual({
+      result: "partial",
+      verdict: "partial",
+      reason: "Plan の見落とし",
+    });
+  });
+
+  it("有効な部分が 1 つでも満たされなければ、full にならない", () => {
+    // 書けない部分はすべて了承済みでも、対応表の落ち・試験の不一致・未解決が残れば full にしない
+    expect(
+      decideOutcome({ ...SATISFIED, unwritableRequirements: 2, acceptedUnwritable: 2, testMismatches: 1 }).result,
+    ).not.toBe("pass");
+    expect(
+      decideOutcome({ ...SATISFIED, unwritableRequirements: 2, acceptedUnwritable: 2, correspondenceMisses: 1 }).result,
+    ).not.toBe("pass");
+  });
+});

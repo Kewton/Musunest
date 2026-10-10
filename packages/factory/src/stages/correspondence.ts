@@ -18,6 +18,7 @@ import {
   isComputedSettle,
   isGroupComputed,
   type Computed,
+  type ConfirmedPlan,
   type Entity,
   type NormalizedAppSpec,
   type View,
@@ -65,6 +66,10 @@ export const CORRESPONDENCE_RULES: readonly string[] = [
 /** ⑤a のやり直しにだけ足す規則（Issue #322）。落ちた場所を、その要件の対応表へ足させる */
 export const CORRESPONDENCE_REDO_RULE =
   "「前回の対応表の落ち」が与えられたときは、その落ちた場所を該当の要件の対応表へ足して、対応表を出し直す。落ちた場所は宣言に実在するので、その要件を満たす場所として挙げる。";
+
+/** 確定した仕様を渡したときだけ足す規則（§5・Issue #334）。**正本は確定した仕様**である */
+export const CORRESPONDENCE_SETTLED_RULE =
+  "「確定した仕様」が与えられたときは、原文ではなく**確定した仕様の要件と出どころ**を根拠にする。確定した仕様の要件が満たすべきものを、宣言の中で点検する（原文を優先して、利用者が確定した変更を戻さない）。";
 
 /** ⑤a の JSON Schema（構造化出力） */
 export const CORRESPONDENCE_SCHEMA = {
@@ -126,6 +131,11 @@ export interface CorrespondenceInput {
    * 「対応の名前が対応表の外にある」落ちをここに渡し、**落ちた場所を伝えて**対応表を作り直させる。
    */
   readonly previousMisses?: readonly CorrespondenceMiss[];
+  /**
+   * 確定した仕様（`plan.json`。§5・Issue #334）。渡されたときは、**原文の代わりに確定した仕様の要件と
+   * 出どころを根拠**にして点検させる（原文を優先すると、利用者が確定した変更を戻してしまう）。
+   */
+  readonly plan?: ConfirmedPlan;
 }
 
 /** 場所の形を確かめる */
@@ -618,8 +628,13 @@ export function checkRoleMappings(
 
 /** ⑤a のデータ（原文・要件の一覧・宣言。§2.2 の「データとして囲んだ入力」にだけ置く） */
 function buildData(input: CorrespondenceInput): readonly PromptData[] {
+  // 確定した仕様があるときは、原文ではなくその要件と出どころを根拠にする（§5・Issue #334）
+  const basis: PromptData =
+    input.plan === undefined
+      ? { name: "原文", text: input.source }
+      : { name: "確定した仕様", text: serializeJson(input.plan) };
   const data: PromptData[] = [
-    { name: "原文", text: input.source },
+    basis,
     { name: "要件の一覧", text: serializeJson(input.list) },
     { name: "宣言", text: input.declaration.source },
   ];
@@ -642,11 +657,13 @@ function buildData(input: CorrespondenceInput): readonly PromptData[] {
 export async function runCorrespondence(
   input: CorrespondenceInput,
 ): Promise<StageOutcome<CorrespondenceResult>> {
+  const rules: string[] = [...CORRESPONDENCE_RULES];
+  if (input.plan !== undefined) rules.push(CORRESPONDENCE_SETTLED_RULE);
+  if (input.previousMisses !== undefined && input.previousMisses.length > 0) {
+    rules.push(CORRESPONDENCE_REDO_RULE);
+  }
   const request = buildStructuredRequest({
-    rules:
-      input.previousMisses !== undefined && input.previousMisses.length > 0
-        ? [...CORRESPONDENCE_RULES, CORRESPONDENCE_REDO_RULE]
-        : CORRESPONDENCE_RULES,
+    rules,
     documents: input.documents,
     data: buildData(input),
     schemaName: CORRESPONDENCE_SCHEMA_NAME,

@@ -8,11 +8,12 @@
 //   5. 実行しなかった検査（⑤a・⑤b）を `unexecuted_inspections` に挙げること
 //   6. 書けなかった要件の一覧（要件 ID・要件の文・引用・書けない部分）と、部分案になった理由を出すこと
 //      （合格のときは空。Issue #326）
-import { BUNDLE_MANIFEST_SCHEMA_VERSION, acceptsHeadlessSummaryWire } from "@musunest/appspec-schema";
+import { BUNDLE_MANIFEST_SCHEMA_VERSION, acceptsHeadlessSummaryWire, planDigest } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import {
   BUNDLE_MANIFEST_FILE,
+  PLAN_FILE,
   UNWRITABLE_FILE,
   VERIFICATION_FILE,
   assembleBundle,
@@ -24,7 +25,7 @@ import {
 } from "./bundle.js";
 import type { CorrespondenceResult, Declaration, RequirementList } from "./pipeline.js";
 import { buildSummary, type RunRecord } from "./record.js";
-import { DECLARATION_SOURCE } from "./__tests__/run.js";
+import { CONFIRMED_PLAN, DECLARATION_SOURCE } from "./__tests__/run.js";
 
 const encoder = new TextEncoder();
 const byteLength = (text: string): number => encoder.encode(text).byteLength;
@@ -259,5 +260,33 @@ describe("書けなかった要件の一覧と、部分案になった理由（0
     expect(list.triage).toEqual([]);
     expect(list.marked_requirements).toEqual([]);
     expect(list.dropped).toEqual([]);
+  });
+});
+
+// ── 確定した仕様（plan.json）を納品物に入れる（§4・Issue #334）────────────────
+
+describe("確定した仕様（plan.json）を納品物に入れる（§4・Issue #334）", () => {
+  it("plan.json を入れ、manifest と検証の結果に同じ仕様の SHA-256 を載せる", async () => {
+    const bundle = await assembleBundle(input({ plan: CONFIRMED_PLAN }));
+    const digest = await planDigest(CONFIRMED_PLAN);
+
+    // plan.json が納品物に入り、manifest の files にも載る
+    expect(bundle.artifacts.map((artifact) => artifact.path)).toContain(PLAN_FILE);
+    expect(bundle.manifest.files.map((file) => file.path)).toContain(PLAN_FILE);
+    expect(bundle.planSha256).toBe(digest);
+
+    // manifest の最上位と、検証の結果に、**同じ仕様の** SHA-256 が載る（門（#335）が照合する）
+    expect((bundle.manifest as unknown as Record<string, unknown>)["plan_sha256"]).toBe(digest);
+    const verification = JSON.parse(findText(bundle.artifacts, VERIFICATION_FILE)) as BundleVerification;
+    expect(verification.plan_sha256).toBe(digest);
+  });
+
+  it("確定した仕様が無ければ、plan.json を入れず plan_sha256 も載せない（今の納品物と互換）", async () => {
+    const bundle = await assembleBundle(input());
+    expect(bundle.artifacts.map((artifact) => artifact.path)).not.toContain(PLAN_FILE);
+    expect(bundle.planSha256).toBeNull();
+    expect((bundle.manifest as unknown as Record<string, unknown>)["plan_sha256"]).toBeUndefined();
+    const verification = JSON.parse(findText(bundle.artifacts, VERIFICATION_FILE)) as BundleVerification;
+    expect(verification.plan_sha256).toBeUndefined();
   });
 });
