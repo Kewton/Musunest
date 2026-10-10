@@ -1,0 +1,1501 @@
+{
+ "rubric": "v5",
+ "metrics": {
+  "generated": "44/50（88.0%・95% 区間 76.2%〜94.4%）",
+  "final_static": "44/50（88.0%・95% 区間 76.2%〜94.4%）",
+  "spec_pass_writable": "14/30（46.7%・95% 区間 30.2%〜63.9%）",
+  "missed_partial": "3/16（18.8%・95% 区間 6.6%〜43.0%）",
+  "fulfillment_partial": "104/116（89.7%・95% 区間 82.8%〜94.0%）",
+  "spec_pass_partial": "13/20（65.0%・95% 区間 43.3%〜81.9%）",
+  "false_claim_runs": "43/50（86.0%・95% 区間 73.8%〜93.0%）",
+  "within_time_cost": "44/50",
+  "cost_total_usd": "3.4007",
+  "factory_verdicts": {
+   "partial": 44,
+   "none": 6
+  }
+ },
+ "bySubject": {
+  "A": {
+   "pass": "3/10（30.0%・95% 区間 10.8%〜60.3%）",
+   "S1": "3/5",
+   "S2": "0/5"
+  },
+  "B": {
+   "pass": "4/10（40.0%・95% 区間 16.8%〜68.7%）",
+   "S1": "4/5",
+   "S2": "0/5"
+  },
+  "C": {
+   "pass": "4/10（40.0%・95% 区間 16.8%〜68.7%）",
+   "S1": "3/5",
+   "S2": "1/5"
+  },
+  "D": {
+   "pass": "9/10（90.0%・95% 区間 59.6%〜98.2%）",
+   "S1": "4/5",
+   "S2": "5/5"
+  },
+  "E": {
+   "pass": "7/10（70.0%・95% 区間 39.7%〜89.2%）",
+   "S1": "3/5",
+   "S2": "4/5"
+  }
+ },
+ "rows": [
+  {
+   "run": "P1-r1",
+   "pattern": "P1",
+   "subject": "A",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.07539953,
+   "seconds": 404.452,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 7,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "持ち物を登録でき、持ち物は名前、種類（料理／飲み物／道具）、持ってくる人（メンバーから1人）、数を持つ。（持ち物を登録できること。持ち物には、名前・種類（料理／飲み物／道具）・持ってくる人（メンバーから 1 人）・数を持たせること） 参照候補を名前で表示するために必要となる member 側の string 項目は、要",
+     "メンバーごとに、担当している持ち物の数を見られる。（メンバーごとに、担当している持ち物の数が見られること） count（担当する持ち物の件数）と sum（担当する持ち物の quantity の合計）のどちらを要件とするか。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P1-r2",
+   "pattern": "P1",
+   "subject": "A",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.05904788,
+   "seconds": 291.691,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "人ごとの数が見られる"
+   ],
+   "fulfilled": 6,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "メンバーごとに、担当している持ち物の数を見られること。（メンバーごとに、担当している持ち物の数が見られること） 集計をcount（登録件数）とsum（持ち物の数の合計）のどちらにするか",
+     "メンバーごとに、担当している持ち物の数を見られること。（メンバーごとに、担当している持ち物の数が見られること） 計算結果をどの画面・表示形式で見せるか"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P1-r3",
+   "pattern": "P1",
+   "subject": "A",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.07737002,
+   "seconds": 382.434,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 7,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "アプリは持ち寄りパーティーの持ち物を分担する用途である。（持ち寄りパーティーの持ち物を分担するアプリを作ってください。） アプリが持ち寄りパーティーの持ち物を分担する用途であること。",
+     "メンバーごとに、担当している持ち物の数を確認できる。（メンバーごとに、担当している持ち物の数が見られること） quantityの合計を求める解釈。登録件数を数える解釈を選んで宣言することはできるが、どちらを要件とするかは未確定。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P1-r4",
+   "pattern": "P1",
+   "subject": "A",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.05479569,
+   "seconds": 277.703,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "人ごとの数が見られる"
+   ],
+   "fulfilled": 6,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "数は1以上でなければ登録できない。（数は 1 以上でなければ登録できないこと） 1以上の条件は書けるが、小数を許すか整数に限るかは未指定のため、その制約は書けない。",
+     "一覧で種類と持ってくる人を絞り込みに使える。（一覧では種類と持ってくる人で絞り込めること） 種類と持ってくる人を同時に絞り込む場合の条件の結合方式（AND または OR）は未指定。",
+     "メンバーごとに、担当している持ち物の数を見られる。（メンバーごとに、担当している持ち物の数が見られること） 集計関数 count または sum の選択は、持ち物の数の解釈が決まるまで書けない。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P1-r5",
+   "pattern": "P1",
+   "subject": "A",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06865029,
+   "seconds": 342.202,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 7,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "メンバーごとに、担当している持ち物の数を見られる。（メンバーごとに、担当している持ち物の数が見られること） 表示する画面・形式（どの view にどう表示するか）は指定されていない"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P2-r1",
+   "pattern": "P2",
+   "subject": "A",
+   "style": "S2",
+   "factory_verdict": "none",
+   "stop": "incomplete",
+   "failure": {
+    "stage": "reverse-check",
+    "kind": "incomplete"
+   },
+   "cost_usd": 0.0183843,
+   "seconds": 136.013,
+   "generation_failed": true
+  },
+  {
+   "run": "P2-r2",
+   "pattern": "P2",
+   "subject": "A",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "limit",
+   "failure": null,
+   "cost_usd": 0.07942565999999998,
+   "seconds": 500.152,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "人ごとの数が見られる"
+   ],
+   "fulfilled": 6,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "数量は1以上である。（数は 1 個以上じゃないとダメにしてほしい。） 数量を整数に限定するか、小数を許すかは未確定。",
+     "メンバーごとに、担当している持ち物の数を確認できる。（一人ずつ何個担当してるか見えるようにしてほしい。） 担当数を持ち物レコードの件数で数えるか、quantity の合計にするか。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P2-r3",
+   "pattern": "P2",
+   "subject": "A",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06758950000000001,
+   "seconds": 337.787,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "人ごとの数が見られる"
+   ],
+   "fulfilled": 6,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "一人ずつ、担当している量が分かるようにする。（それと、一人ずつ何個担当してるか見えるようにしてほしい。） 担当する持ち物の件数を数えるか、item.quantity を合計するかの選択"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P2-r4",
+   "pattern": "P2",
+   "subject": "A",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.0684874,
+   "seconds": 354.593,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "人ごとの数が見られる"
+   ],
+   "fulfilled": 6,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "一人ずつ、担当している個数が見えること。（それと、一人ずつ何個担当してるか見えるようにしてほしい。） 一人ごとの集計値を出す computed[].aggregate の sum/count の選択と、その計算名を views.memberList.show に加えること"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P2-r5",
+   "pattern": "P2",
+   "subject": "A",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "limit",
+   "failure": null,
+   "cost_usd": 0.09467730000000002,
+   "seconds": 504.173,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "人ごとの数が見られる"
+   ],
+   "fulfilled": 6,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "メンバーごとに、担当している数を確認できること。（それと、一人ずつ何個担当してるか見えるようにしてほしい。） メンバーごとの担当数の集計。持ち物の記録件数を数えるのか、quantity を合計するのかが未確定。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P3-r1",
+   "pattern": "P3",
+   "subject": "B",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.07750784000000001,
+   "seconds": 417.288,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 8,
+   "writable_total": 8,
+   "claims": {
+    "structure": "main",
+    "expected": [
+     "少ない順"
+    ],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [],
+    "verdict": "OK"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P3-r2",
+   "pattern": "P3",
+   "subject": "B",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06815785,
+   "seconds": 511.706,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 8,
+   "writable_total": 8,
+   "claims": {
+    "structure": "main",
+    "expected": [
+     "少ない順"
+    ],
+    "correct": 0,
+    "missed": 0,
+    "optional": 1,
+    "allowed": 0,
+    "false_claims": [
+     "一覧を当番の種類と担当メンバーで絞り込める。（種類と担当で絞り込めること） 種類と担当を同時に選択した場合の条件結合（AND または OR）。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P3-r3",
+   "pattern": "P3",
+   "subject": "B",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.08946324000000001,
+   "seconds": 582.595,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 8,
+   "writable_total": 8,
+   "claims": {
+    "structure": "main",
+    "expected": [
+     "少ない順"
+    ],
+    "correct": 0,
+    "missed": 0,
+    "optional": 1,
+    "allowed": 0,
+    "false_claims": [
+     "町内会の当番表アプリを作る。（町内会の当番表アプリを作ってください。） アプリ全体の名称・町内会という利用目的を宣言すること"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P3-r4",
+   "pattern": "P3",
+   "subject": "B",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.07583314000000001,
+   "seconds": 497.954,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "少ない順を逆向きで書いていない"
+   ],
+   "fulfilled": 7,
+   "writable_total": 8,
+   "claims": {
+    "structure": "main",
+    "expected": [
+     "少ない順"
+    ],
+    "correct": 1,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "町内会の当番表アプリを提供する。（町内会の当番表アプリを作ってください。） アプリ名「町内会の当番表」と、アプリ自体を名付ける宣言。",
+     "メンバーごとの当番回数を確認できる。（メンバーごとの当番の回数） 予定だけ、済みだけなど、状態を条件にした当番回数の集計。どの状態を数えるかが未決定で、aggregate の where では状態による絞り込みも表現できない。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P3-r5",
+   "pattern": "P3",
+   "subject": "B",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06903584000000001,
+   "seconds": 376.057,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 8,
+   "writable_total": 8,
+   "claims": {
+    "structure": "main",
+    "expected": [
+     "少ない順"
+    ],
+    "correct": 0,
+    "missed": 0,
+    "optional": 1,
+    "allowed": 0,
+    "false_claims": [
+     "町内会の当番表アプリを作る。（町内会の当番表アプリを作ってください。） 「町内会の当番表アプリ」というアプリ名・目的の明示（宣言に対応する欄がない）",
+     "当番は「予定」で登録し、終わったら「済み」にするボタンで切り替えられるようにする。このボタンは予定の当番にだけ表示する。（\n- 当番は「予定」で登録され、終わったら「済み」にするボタンで切り替えられること（予定のものにだけ出す）） 済みから予定へ戻す操作（要件の決定に含まれていない）"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P4-r1",
+   "pattern": "P4",
+   "subject": "B",
+   "style": "S2",
+   "factory_verdict": "none",
+   "stop": "deadline",
+   "failure": {
+    "stage": "repair",
+    "kind": "deadline"
+   },
+   "cost_usd": 0.08944260000000001,
+   "seconds": 600.004,
+   "generation_failed": true
+  },
+  {
+   "run": "P4-r2",
+   "pattern": "P4",
+   "subject": "B",
+   "style": "S2",
+   "factory_verdict": "none",
+   "stop": "incomplete",
+   "failure": {
+    "stage": "reverse-check",
+    "kind": "incomplete"
+   },
+   "cost_usd": 0.013451230000000002,
+   "seconds": 138.693,
+   "generation_failed": true
+  },
+  {
+   "run": "P4-r3",
+   "pattern": "P4",
+   "subject": "B",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06986051,
+   "seconds": 405.128,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "人と主役を登録できる",
+    "人ごとの回数が見られる"
+   ],
+   "fulfilled": 6,
+   "writable_total": 8,
+   "claims": {
+    "structure": "main",
+    "expected": [
+     "少ない順"
+    ],
+    "correct": 1,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "「予定」の当番は、「済み」ボタンで済みに変更できること。（終わったら「済み」ボタンで済みにできるように（予定のやつだけでいい）） 操作ボタンの表示文字を「済み」に指定すること（action に表示名の欄がない）。",
+     "紙の当番表より、当番の内容を分かりやすく確認できること。（紙だと分かりにくくて。） 紙の当番表より分かりやすいという比較は、宣言の語彙では保証できない。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P4-r4",
+   "pattern": "P4",
+   "subject": "B",
+   "style": "S2",
+   "factory_verdict": "none",
+   "stop": "deadline",
+   "failure": {
+    "stage": "correspondence",
+    "kind": "deadline"
+   },
+   "cost_usd": 0.08186419000000002,
+   "seconds": 600.004,
+   "generation_failed": true
+  },
+  {
+   "run": "P4-r5",
+   "pattern": "P4",
+   "subject": "B",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.09844351000000003,
+   "seconds": 562.937,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "役割が見つかる"
+   ],
+   "fulfilled": 0,
+   "writable_total": 8,
+   "claims": {
+    "structure": "main",
+    "expected": [
+     "少ない順"
+    ],
+    "correct": 1,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "当番ごとに、いつ・何の当番か・誰が担当するかを登録できること。（当番ごとに「いつ、何の当番、誰」を入れたい） 当番の時刻の記録（date は日付のみを表す）。",
+     "町内会の当番として、ゴミ出し・公園の掃除・夜回りなどを扱えること。（町内会でゴミ出しとか公園の掃除とか夜回りの当番を回してるんだけど、） 例示以外の当番の種類の範囲と、利用者が種類を追加する機能。",
+     "当番の情報を、紙より分かりやすく把握できること。（紙だと分かりにくくて。） 紙と比較して分かりやすいことを判定する基準。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P5-r1",
+   "pattern": "P5",
+   "subject": "C",
+   "style": "S1",
+   "factory_verdict": "none",
+   "stop": "deadline",
+   "failure": {
+    "stage": "repair",
+    "kind": "deadline"
+   },
+   "cost_usd": 0.07588603,
+   "seconds": 600.004,
+   "generation_failed": true
+  },
+  {
+   "run": "P5-r2",
+   "pattern": "P5",
+   "subject": "C",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06114352,
+   "seconds": 310.48,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 9,
+   "writable_total": 9,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [],
+    "verdict": "OK"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P5-r3",
+   "pattern": "P5",
+   "subject": "C",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "limit",
+   "failure": null,
+   "cost_usd": 0.07034074000000001,
+   "seconds": 343.035,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 9,
+   "writable_total": 9,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 2,
+    "false_claims": [
+     "メンバーごとに、払った合計を見られる。（メンバーごとに、払った合計が見られること） 払った合計の対象期間が未指定。期間を限定する場合は、その期間の確定が必要。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P5-r4",
+   "pattern": "P5",
+   "subject": "C",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.05270782,
+   "seconds": 309.67,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 9,
+   "writable_total": 9,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 2,
+    "false_claims": [
+     "メンバーごとに、払った合計を見られる。（払った合計が見られること） メンバーごとの払った合計を全期間で集計するか、特定期間で集計するかの指定。期間指定なしの集計は全期間を対象とする。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P5-r5",
+   "pattern": "P5",
+   "subject": "C",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.05722012,
+   "seconds": 317.979,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "払い方の内訳"
+   ],
+   "fulfilled": 8,
+   "writable_total": 9,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 2,
+    "false_claims": [
+     "メンバーごとに、払った合計を見られること。（メンバーごとに、払った合計が見られること） 払った合計を全期間で求めるのか、特定の期間で求めるのか。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P6-r1",
+   "pattern": "P6",
+   "subject": "C",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06431378,
+   "seconds": 359.329,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "月ごとの集金のグラフ（直近 6 か月）",
+    "払い方の内訳"
+   ],
+   "fulfilled": 7,
+   "writable_total": 9,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "月ごとの集金額を、半年分のグラフで見られるようにする。（ここ半年の月ごとの集金のグラフ） 「ここ半年」の対象月の範囲（今月を含む直近6暦月か、完了済みの月か）",
+     "支払い方法ごとの割合を見られるようにする。（払い方の割合） 割合の算出基準（支払い件数か集金額か）と、それに基づく割合表示"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P6-r2",
+   "pattern": "P6",
+   "subject": "C",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.05766779000000001,
+   "seconds": 331.043,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "月ごとの集金のグラフ（直近 6 か月）",
+    "払い方の内訳"
+   ],
+   "fulfilled": 7,
+   "writable_total": 9,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 1,
+    "false_claims": [
+     "メンバーを登録できる。（メンバーを入れておいて） メンバーの登録項目は名前以外指定されていないため、追加の属性は定めない。",
+     "ここ半年の会費の集金額を月ごとに示すグラフを確認できる。（ここ半年の月ごとの集金のグラフ） 対象期間が今月を含む直近6か月か、直近の完了した6か月かという選択。",
+     "支払い方法ごとの割合を確認できる。（払い方の割合） 割合の基準を支払い件数にするか支払額にするかという選択。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P6-r3",
+   "pattern": "P6",
+   "subject": "C",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06965819000000001,
+   "seconds": 345.289,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 9,
+   "writable_total": 9,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "直近6か月の月ごとの集金額をグラフで確認できるようにする。（ここ半年の月ごとの集金のグラフ） 対象期間が当月を含むか、直前に完了した6か月かの選択",
+     "支払い方法ごとの割合を確認できるようにする。（払い方の割合） 支払い件数と金額のどちらを割合の基準にするか"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P6-r4",
+   "pattern": "P6",
+   "subject": "C",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.08360491,
+   "seconds": 518.121,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "人と支払いを登録できる",
+    "払い方の内訳"
+   ],
+   "fulfilled": 7,
+   "writable_total": 9,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 1,
+    "false_claims": [
+     "開いたときに見えるダッシュボードで、払い方ごとの割合を表示する。（払い方の割合が見えると最高。） 割合の集計対象（支払い件数または集金金額）"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P6-r5",
+   "pattern": "P6",
+   "subject": "C",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.07120799,
+   "seconds": 398.332,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "月ごとの集金のグラフ（直近 6 か月）",
+    "払い方の内訳"
+   ],
+   "fulfilled": 7,
+   "writable_total": 9,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "支払いを受けた都度、支払った人・金額・支払日・支払い方法を記録する。支払い方法は現金、振込、送金アプリを区別する。（払ってもらったら「誰が、いくら、いつ、現金か振込か送金アプリか」を記録したい。） 支払日時に時刻まで含めるかどうか。契約のdateはYYYY-MM-DDの日付のみを表し、時刻を記録する語彙はない。",
+     "アプリを開いたとき、直近半年の月ごとの集金をグラフで確認できるようにする。（ここ半年の月ごとの集金のグラフ） 対象にする6か月の範囲（今月を含めるか、完了した月だけにするか）。",
+     "アプリを開いたとき、支払い方法ごとの割合を確認できるようにする。（払い方の割合） paymentByMethodのaggregateでcount（件数）とsum（集金額）のどちらを使うか。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P7-r1",
+   "pattern": "P7",
+   "subject": "D",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.05746008000000001,
+   "seconds": 266.835,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 6,
+   "writable_total": 6,
+   "claims": {
+    "structure": "list",
+    "expected": [
+     "参加者 0 人で登録"
+    ],
+    "correct": 1,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [],
+    "verdict": "OK"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P7-r2",
+   "pattern": "P7",
+   "subject": "D",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06922725,
+   "seconds": 412.912,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 6,
+   "writable_total": 6,
+   "claims": {
+    "structure": "list",
+    "expected": [
+     "参加者 0 人で登録"
+    ],
+    "correct": 1,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "フットサルの試合の出欠をとるアプリであること。（フットサルの試合の出欠をとるアプリを作ってください。） 不参加・未回答の状態も記録する必要があるかは未確定であり、その状態の記録方法は決められない。",
+     "参加者数が定員を超えた場合、登録できないこと。（参加する人の数が定員を超えたら登録できないこと。） 「登録」が試合作成・試合更新・参加申込のどれを指すかに応じた、適用対象の特定。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P7-r3",
+   "pattern": "P7",
+   "subject": "D",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06625315,
+   "seconds": 356.846,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 6,
+   "writable_total": 6,
+   "claims": {
+    "structure": "list",
+    "expected": [
+     "参加者 0 人で登録"
+    ],
+    "correct": 1,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [],
+    "verdict": "OK"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P7-r4",
+   "pattern": "P7",
+   "subject": "D",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06888085,
+   "seconds": 427.469,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "定員は 1 人以上"
+   ],
+   "fulfilled": 5,
+   "writable_total": 6,
+   "claims": {
+    "structure": "attendance",
+    "expected": [
+     "定員を超えたら登録できない"
+    ],
+    "correct": 1,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [],
+    "verdict": "OK"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P7-r5",
+   "pattern": "P7",
+   "subject": "D",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06873555,
+   "seconds": 413.877,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 6,
+   "writable_total": 6,
+   "claims": {
+    "structure": "list",
+    "expected": [
+     "参加者 0 人で登録"
+    ],
+    "correct": 1,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "フットサルの試合の出欠をとるアプリを作ること。（フットサルの試合の出欠をとるアプリを作ってください。） アプリ名や説明として「フットサル」を表示すること。契約にアプリ名・説明の欄がない。",
+     "参加者数が定員を超える場合、登録できないこと。（参加する人の数が定員を超えたら登録できないこと） 参加者追加時だけに拒否を適用する挙動の選択。validationはentityの保存時に適用され、参加者追加専用操作は宣言できない。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P8-r1",
+   "pattern": "P8",
+   "subject": "D",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.07401248000000002,
+   "seconds": 440.783,
+   "spec_verdict": "PASS_NEEDS_CLAIM",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 6,
+   "writable_total": 6,
+   "claims": {
+    "structure": "attendance",
+    "expected": [
+     "定員を超えたら登録できない"
+    ],
+    "correct": 1,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [],
+    "verdict": "OK"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P8-r2",
+   "pattern": "P8",
+   "subject": "D",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.07031131,
+   "seconds": 451.246,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 6,
+   "writable_total": 6,
+   "claims": {
+    "structure": "list",
+    "expected": [
+     "参加者 0 人で登録"
+    ],
+    "correct": 1,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "メンバーごとの参加回数を表示する。（メンバーごとに何回来たかも見たい。） 登録された参加者数と実際の出席回数を区別して数えること。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P8-r3",
+   "pattern": "P8",
+   "subject": "D",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.07374751000000002,
+   "seconds": 504.037,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 6,
+   "writable_total": 6,
+   "claims": {
+    "structure": "list",
+    "expected": [
+     "参加者 0 人で登録"
+    ],
+    "correct": 1,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "フットサルの出欠を管理する。（フットサルの出欠を取りたい！） 欠席・未回答を参加者と区別して記録する部分（出欠の状態の意味が未確定）"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P8-r4",
+   "pattern": "P8",
+   "subject": "D",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06911561000000001,
+   "seconds": 428.292,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 6,
+   "writable_total": 6,
+   "claims": {
+    "structure": "list",
+    "expected": [
+     "参加者 0 人で登録"
+    ],
+    "correct": 1,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [],
+    "verdict": "OK"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P8-r5",
+   "pattern": "P8",
+   "subject": "D",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06782751000000001,
+   "seconds": 398.175,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 6,
+   "writable_total": 6,
+   "claims": {
+    "structure": "list",
+    "expected": [
+     "参加者 0 人で登録"
+    ],
+    "correct": 1,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "メンバーごとに、何回来たかを見られること。（メンバーごとに何回来たかも見たい。） 実際に参加した回数を参加予定の登録回数と区別して記録・集計すること。参加結果を表す語彙は契約にない。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P9-r1",
+   "pattern": "P9",
+   "subject": "E",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.05994828000000001,
+   "seconds": 346.945,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 7,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "返す日を過ぎた貸し出しには印を付ける。（返す日を過ぎた貸し出しには印を付けること） 返却済みの貸し出しにも印を付けるかどうかは決められない。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P9-r2",
+   "pattern": "P9",
+   "subject": "E",
+   "style": "S1",
+   "factory_verdict": "none",
+   "stop": "deadline",
+   "failure": {
+    "stage": "correspondence",
+    "kind": "deadline"
+   },
+   "cost_usd": 0.0787328,
+   "seconds": 600.004,
+   "generation_failed": true
+  },
+  {
+   "run": "P9-r3",
+   "pattern": "P9",
+   "subject": "E",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.07385016,
+   "seconds": 482.918,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "返す日を過ぎたものに印"
+   ],
+   "fulfilled": 6,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "メンバーを登録できる。（メンバーと備品を登録できること） name以外に必要なメンバーの登録属性は指定されていない。",
+     "備品を登録できる。（メンバーと備品を登録できること） name以外に必要な備品の登録属性は指定されていない。",
+     "返す日を過ぎた貸し出しには印を付ける。（返す日を過ぎた貸し出しには印を付けること） 返却済み記録にも期限超過の印を付けるかどうか。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P9-r4",
+   "pattern": "P9",
+   "subject": "E",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.050984360000000006,
+   "seconds": 262.474,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 7,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "サークルの共用品の貸し出しを記録するアプリであること。（サークルの共用品（テント・クーラーボックスなど）の貸し出しを記録するアプリを作ってください。） アプリがサークルの共用品の貸し出し記録アプリであることを示す目的・説明文"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P9-r5",
+   "pattern": "P9",
+   "subject": "E",
+   "style": "S1",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06776446,
+   "seconds": 425.511,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 7,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "サークルの共用品の貸し出しを記録するアプリであること。（サークルの共用品（テント・クーラーボックスなど）の貸し出しを記録するアプリを作ってください。） アプリの名称・目的説明として、サークルの共用品の貸し出し用であることを宣言すること"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P10-r1",
+   "pattern": "P10",
+   "subject": "E",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.08593171000000001,
+   "seconds": 465.595,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 7,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 1,
+    "false_claims": [
+     "メンバーと備品を登録・管理できるようにする。（メンバーと備品を入れておいて） 登録以外の変更・削除をどこまで行うかは指定されていないため、具体的な操作は定めない。",
+     "返す期限を過ぎた貸出を目立つように表示する。（返す日を過ぎてるのは目立たせてほしい。） 返却済みの貸出を期限超過の強調から除外する条件は、式で boolean を組み合わせる語彙がないため記述できない。",
+     "備品ごとの貸出回数を確認できるようにする。（備品ごとに何回貸したか） 集計範囲と貸出状態ごとの数え方は未指定。count: loan は条件に一致する貸出記録を数える形だが、どの記録を対象とするかの確定には確認が必要。",
+     "人ごとの借用回数を確認できるようにする。（人ごとに何回借りたかも見たい。） 集計範囲と貸出状態ごとの数え方は未指定。count: loan は条件に一致する貸出記録を数える形だが、どの記録を対象とするかの確定には確認が必要。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P10-r2",
+   "pattern": "P10",
+   "subject": "E",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06177400999999999,
+   "seconds": 349.276,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 7,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "アプリで、誰が備品を持っているか分かるようにする。（誰が持ってるか分からなくなるのでアプリにしたい。） 貸出中の同一備品について貸出記録を一件に制限する規則は、行をまたいで確認する語彙がないため書けない。",
+     "備品ごとの貸出回数を見られるようにする。（備品ごとに何回貸したか） 集計対象をstatusで絞る条件はaggregate.whereに書けない。任意の期間を指定する語彙もない。状態・期間の選択方針が決まるまでは集計対象を確定できない。",
+     "メンバーごとの借入回数を見られるようにする。（人ごとに何回借りたかも見たい。） 集計対象をstatusで絞る条件はaggregate.whereに書けない。任意の期間を指定する語彙もない。状態・期間の選択方針が決まるまでは集計対象を確定できない。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P10-r3",
+   "pattern": "P10",
+   "subject": "E",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.06415181,
+   "seconds": 376.214,
+   "spec_verdict": "FAIL",
+   "verdict": "FAIL",
+   "failed": [
+    "メンバーと備品と貸し出しを登録できる"
+   ],
+   "fulfilled": 6,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "サークルの備品の貸し借りを管理し、誰が持っているか分かるアプリにする。（サークルのテントとかクーラーボックスを貸し借りしてるんだけど、誰が持ってるか分からなくなるのでアプリにしたい。\n） 同一備品に貸出中の記録を複数作成できるか、重複する貸出を拒否するか",
+     "貸すときに、備品・借りる人・返す期限を記録した貸出記録を作れる。（貸すときに「どれを、誰に、いつまで」を記録したい。） 同一備品に貸出中の記録を複数作成できるか、重複する貸出を拒否するか"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P10-r4",
+   "pattern": "P10",
+   "subject": "E",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.054081210000000005,
+   "seconds": 298.403,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 7,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "貸出中の記録を「返却済み」ボタンで返却済みに切り替えられるようにする。（返ってきたら「返却済み」ボタンで切り替え） 操作ボタンの表示文字を「返却済み」に指定すること。actions に label を付ける語彙はない。",
+     "返す期限を過ぎた記録を目立つように表示する。（返す日を過ぎてるのは目立たせてほしい） 返却済みの記録も強調するか、貸出中の記録だけに限定するか。"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  },
+  {
+   "run": "P10-r5",
+   "pattern": "P10",
+   "subject": "E",
+   "style": "S2",
+   "factory_verdict": "partial",
+   "stop": "stagnation",
+   "failure": null,
+   "cost_usd": 0.057320810000000014,
+   "seconds": 333.523,
+   "spec_verdict": "PASS",
+   "verdict": "PASS",
+   "failed": [],
+   "fulfilled": 7,
+   "writable_total": 7,
+   "claims": {
+    "structure": "main",
+    "expected": [],
+    "correct": 0,
+    "missed": 0,
+    "optional": 0,
+    "allowed": 0,
+    "false_claims": [
+     "アプリで、備品を現在誰が持っているか分かるようにする。（誰が持ってるか分からなくなるのでアプリにしたい。） 同じ備品に複数の貸出中記録を許すかという方針と、許さない場合の制約",
+     "返す期限を過ぎた貸出を目立つように表示する。（返す日を過ぎてるのは目立たせてほしい） 貸出中かつ期限日が今日より前である場合に限って強調する条件（式で比較結果を組み合わせられないため）"
+    ],
+    "verdict": "NG"
+   },
+   "final_static": 0
+  }
+ ]
+}

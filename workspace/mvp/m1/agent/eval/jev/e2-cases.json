@@ -1,0 +1,76 @@
+{
+ "ex": {
+  "list": "### list\n\n- 文字列の並び。**空の並びと、同じ文字列が 2 回ある並びは受け取らない**。要素が文字列でなければ受け取らない\n- 並びの順は、入力の順のまま保存する\n- `of: <entity>` を付けると、**参照の並び**になる（`list of`。M1.2）。要素は参照先のレコードの ID で、\n  空と重複を許さないこと、入力の順のまま保存することは文字列の並びと同じである。「ref」の節も見ること",
+  "date": "### date\n\n- 日付（M1.3）。**保存する形は `YYYY-MM-DD` の文字列**である（例 `2026-09-15`）。時刻は持たない",
+  "boolops": "\n## 6. Not writable\n\n- **No boolean or null literals.** `true`, `false`, `null` match the `Name` rule, so they are ordinary names: a lone one is unresolvable, and `true + false` parses but fails name resolution (`LOGIC_REFERENCE_NOT_FOUND`). There is no way to write a boolean literal.\n- **No boolean operators.** `and`, `or`, `not` are not keywords or operators. `a and b` is unreadable; `not` alone is an ordinary name. There is no way to combine comparisons.\n- **No exponent notation, no unary `+`.** `1e3` and `+amount` are unreadable.\n- **No string escapes** and no string operations: a string literal can only be compared with `==` / `!=` (`rules.md` R-TYPE-05).\n- **`label` is not a name.** A display name never resolves in an expression (`rules.md` R-NAME-07).",
+  "ranklim": "| **R-LIMIT-06** A `ranking` widget's `limit` is an integer ≥ **1**; omitted means **5**. | `set views.dashboard.widgets = [{type: ranking, name: top, entity: expense, by: paidAmount, show: [paidAmount], limit: 3}] ⇒ OK` | `… limit: 0 ⇒ SHAPE_VALUE_INVALID` | `limit: 1 ⇒ OK` (minimum) · omitted `⇒ OK` (default 5) |",
+  "widlabel": "- **単位（`unit`）は任意**である。「回」「人」「円」のように、その値の単位を書く。書かなければ数をそのまま見せる。\n  単位は**空でない文字列**で書く（空文字は単位にならない）。**見せ方を変えるのは単位だけで、値そのものは変えない**\n- **表示名（`label`）も任意**である。書かなければ `value` の識別子をそのまま見せる（「label」の節と同じ約束である——\n  ただし `label` を付けられるのは項目と計算であり、**部品の `label` はこの節が定める**）\n- **値は API が求める。画面は式も集計も評価しない**（`CLAUDE.md` の不変条件）",
+  "where": "| **R-NAME-10** An aggregate `where` compares a source field to `this` (a `ref` with `equals`, a `list of` with `contains`); `this` cannot be used in an `app`-scope aggregate. | `add computed.myExpenses = {entity: member, type: number, aggregate: {count: expense, where: {payer: this}}} ⇒ OK` | `add computed.bad = {entity: member, type: number, aggregate: {count: expense, where: {amount: this}}} ⇒ LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH` | `add computed.badApp = {scope: app, type: number, aggregate: {count: expense, where: {payer: this}}} ⇒ LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH` |\n| **R-NAME-11** A `within` condition targets a `date` field and a period name that is in the vocabulary (`this_month`). | `add computed.thisMonth = {scope: app, type: number, aggregate: {count: expense, where: {spentOn: {within: this_month}}}} ⇒ OK` | `add computed.bad = {scope: app, type: number, aggregate: {count: expense, where: {spentOn: {within: last_week}}}} ⇒ LOGIC_AGGREGATE_WHERE_PERIOD_NOT_ALLOWED` | `within` on a non-date field: `add computed.bad = {scope: app, type: number, aggregate: {count: expense, where: {amount: {within: this_month}}}} ⇒ LOGIC_AGGREGATE_WHERE_TYPE_MISMATCH` |",
+  "validation": "### validation\n\n- 保存してよい条件。式は真偽になる（比べる演算子で終わる）\n- 参照できるのは、同じ entity の項目と計算の名前\n- 入力の検査は data-api が行い、次の順で進める。**どこかで断ったら保存しない**",
+  "agg": "| **R-NAME-09** An aggregate target (`sum`/`count`/`avg`) must name a declared entity, and for `sum`/`avg` a number-typed field or computed. | `add computed.sumAmt = {scope: app, type: number, aggregate: {sum: expense.amount}} ⇒ OK` | `add computed.sumAmt = {scope: app, type: number, aggregate: {sum: expence.amount}} ⇒ LOGIC_AGGREGATE_TARGET_NOT_FOUND` | a target that is a string: `add computed.sumText = {scope: app, type: number, aggregate: {sum: expense.description}} ⇒ LOGIC_AGGREGATE_TARGET_NOT_NUMBER` |",
+  "enum": "### enum\n\n- 決まった選択肢のうちの **1 つ**を持つ項目（M1.3）。宣言では `{type: enum, options: {<キー>: <表示名>, …}}` と書く\n- `options` は**保存される値（キー）と、画面に出す表示名の対**である\n  - **キーは 1 つ以上書く。重複させない**（保存される値が重なると、区別が付かなくなる）\n  - キーを書いた順が、**画面に出す選択肢の順**である（M1.3 のボードの列はこの順に並ぶ）\n  - 表示名は空でない文字列である。**保存されるのは表示名ではなくキーである**",
+  "filters": "### filters\n\n- **画面が選んで絞り込む**ための UX 層の語彙である（M1.3。`03` §1・`04` §7.1）。`type: list` の一覧にだけ書ける\n  （ほかの種類は列の並びを持たない）。宣言では、絞り込みに使う**項目の名前**を並べる\n"
+ },
+ "cases": [
+  [
+   "list",
+   "参加者 0 人の空の list を保存して試合を登録することはできない。list は空の並びを受け付けない。",
+   true
+  ],
+  [
+   "boolops",
+   "式で 2 つの比較を「かつ」で組み合わせる語彙は無い。",
+   true
+  ],
+  [
+   "date",
+   "支払日に時刻まで記録することはできない。date は日付だけを表す。",
+   true
+  ],
+  [
+   "ranklim",
+   "順位の部品で、上限なしに全員を並べることはできない。limit は有限で、省略すると 5 件。",
+   true
+  ],
+  [
+   "widlabel",
+   "ダッシュボードの部品以外では、操作（action）に表示名を付けられない。表示名を付けられるのは項目と計算だけ。",
+   true
+  ],
+  [
+   "where",
+   "集計の where で、状態の項目が「済み」の記録だけに絞ることはできない。",
+   true
+  ],
+  [
+   "validation",
+   "数量が 1 以上であるという保存の条件は書けない。",
+   false
+  ],
+  [
+   "date",
+   "支払日を記録する語彙は無い。",
+   false
+  ],
+  [
+   "agg",
+   "メンバーごとに記録の件数を数える集計は書けない。",
+   false
+  ],
+  [
+   "ranklim",
+   "順位の部品で上位 3 件だけを表示することはできない。",
+   false
+  ],
+  [
+   "enum",
+   "選択肢の項目で、保存する値と画面に出す表示名を分けることはできない。",
+   false
+  ],
+  [
+   "filters",
+   "一覧で、項目を選んで絞り込むことはできない。",
+   false
+  ]
+ ]
+}
