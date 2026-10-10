@@ -6,8 +6,9 @@
 //   3. 上限を超える道具の呼び出しの回数（§1.5）を断ること
 //   4. 道具は**このリポジトリの本物の検査**（静的チェック・試験・対応表）を呼ぶこと
 import { describe, expect, it } from "vitest";
+import { checkTestSuite } from "../fixed-test.js";
 import { AGENT_LIMITS } from "../limits.js";
-import type { CorrespondenceEntry, RequirementList, TestSuite } from "../pipeline.js";
+import type { CorrespondenceEntry, RequirementList, RoleNameMapping, TestSuite } from "../pipeline.js";
 import {
   REPAIR_TOOL_NAMES,
   REPAIR_TOOLS,
@@ -37,6 +38,13 @@ const VALID = [
 const INVALID = VALID.replace("title: string", "title: nosuchtype");
 
 const EMPTY_SUITE: TestSuite = { tests: [] };
+
+/** 試験の組を、コードの検査を通して固定する（前提が壊れていれば例外） */
+function suiteOf(tests: readonly unknown[]): TestSuite {
+  const checked = checkTestSuite(tests);
+  if (!checked.ok) throw new Error(`前提が壊れた: ${checked.problems.map((problem) => problem.field).join("・")}`);
+  return checked.suite;
+}
 
 const LIST: RequirementList = {
   requirements: [
@@ -138,5 +146,72 @@ describe("道具は本物の検査を呼ぶ（02 §1）", () => {
     const output = await executeRepairTool(call.call, CONTEXT);
     expect(output.passed).toBe(false);
     expect("detail" in output && output.detail).toContain("静的チェック");
+  });
+});
+
+// ── ⑥ の道具も、同じ結び付けの部品を使う（02 §1.3.1・Issue #309）──────────
+
+/** 同じ種類の場所（一覧）が 2 つある宣言（提出された対応が無ければ 1 つに決まらない） */
+const VIEWS_DECLARATION = [
+  "entities:",
+  "  - name: record",
+  "    fields:",
+  "      title: string",
+  "views:",
+  "  - name: recordsA",
+  "    type: list",
+  "    entity: record",
+  "  - name: recordsB",
+  "    type: list",
+  "    entity: record",
+  "actions: []",
+  "validations: []",
+  "computed: []",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+describe("⑥ の道具も、提出された対応で結び付ける（02 §1.3.1・Issue #309）", () => {
+  const suite = suiteOf([
+    {
+      id: "v",
+      target: { requirementId: "R-1", kind: "screen", roleId: "record.records" },
+      kind: "normal",
+      operation: "screen",
+      clock: "2026-09-16T12:00:00+09:00",
+      input: null,
+      referenceData: [],
+      expected: { kind: "ok", value: null },
+    },
+  ]);
+  const correspondences: readonly CorrespondenceEntry[] = [
+    {
+      requirementId: "R-1",
+      locations: [
+        { kind: "view", entity: "record", name: "recordsA" },
+        { kind: "view", entity: "record", name: "recordsB" },
+      ],
+    },
+  ];
+
+  const runTool = async (context: Partial<RepairToolContext>) => {
+    const call = checkToolArguments("run-tests", { declaration: VIEWS_DECLARATION });
+    if (!call.ok) throw new Error("前提が壊れた");
+    return executeRepairTool(call.call, { list: LIST, suite, correspondences, ...context });
+  };
+
+  it("提出された対応があれば、同じ種類の場所が複数でも 1 つに結び付く", async () => {
+    const mappings: readonly RoleNameMapping[] = [{ roleId: "record.records", name: "recordsB" }];
+    const output = await runTool({ mappings });
+    expect(output.passed).toBe(true);
+    expect("mismatches" in output && output.mismatches).toEqual([]);
+  });
+
+  it("提出された対応が無ければ、1 つに決まらず未解決になる（旧形式の経路）", async () => {
+    const output = await runTool({});
+    expect(output.passed).toBe(false);
+    expect("unresolved" in output && output.unresolved.map((entry) => entry.testId)).toEqual(["v"]);
   });
 });

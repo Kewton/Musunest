@@ -28,9 +28,10 @@ import {
   type JudgeMaterials,
   type OverturnedTest,
   type RejectedDispute,
+  type RoleEntry,
+  type RoleNameMapping,
   type TestRunResult,
   type TestSuite,
-  type VersionChecks,
 } from "./pipeline.js";
 import {
   buildRunRecord,
@@ -44,14 +45,25 @@ import {
   type StageId,
   type StageRecord,
   type StageStatus,
+  type StopReason,
   type Summary,
   type UsageSnapshot,
 } from "./record.js";
 import { runArbitration } from "./stages/arbitrate.js";
-import { checkCorrespondence, runCorrespondence } from "./stages/correspondence.js";
+import {
+  checkCorrespondence,
+  checkRoleMappings,
+  runCorrespondence,
+} from "./stages/correspondence.js";
 import { runDesign } from "./stages/design.js";
 import type { PromptDocument, StageFailure, StageOutcome } from "./stages/prompt.js";
-import { runRepairStep } from "./stages/repair.js";
+import {
+  failureSignature,
+  isStagnant,
+  runCorrespondenceRedo,
+  runRepairStep,
+  type VersionReport,
+} from "./stages/repair.js";
 import { runReverseCheckLoop } from "./stages/reverse-check.js";
 import { runTests } from "./stages/run-tests.js";
 import { runStaticCheck } from "./stages/static-check.js";
@@ -315,6 +327,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       duration_secs: (input.now() - startedAt) / 1000,
       provider_cost_usd: budget.spentUsd,
       stop_class: attribution.kind,
+      stopReason: attribution.kind,
       exit_code: 1,
     });
     return { outcome, record, summary, bundle: null, stopped: attribution };
@@ -354,19 +367,36 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       tests: testSuite.suite.tests.filter((test) => !overturned.some((entry) => entry.testId === test.id)),
     });
 
-    // ⑤a の対応表は 1 回だけ取る（別の会話。§1.2）。④ を通った版で初めて呼ぶ
-    let entries: readonly CorrespondenceEntry[] | null = null;
+    // ② の設計が固定した役割 ID の表と、③ が提出した「役割 ID → 宣言の名前」の対応（§1.3・Issue #309）。
+    // 新形式（役割 ID で指す）のときだけ、結び付けの部品へ渡す。旧形式は種類の数で決める。
+    const roles: readonly RoleEntry[] | undefined = design.roles;
+    let mappings: readonly RoleNameMapping[] = written.mappings;
+    const useMappings = (): boolean => mappings.length > 0 || roles !== undefined;
 
-    /** ある版に ④⑤a⑤b を流す（④ を通らなければ⑤a 以降は流さない） */
-    const evaluate = async (declaration: Declaration): Promise<VersionChecks> => {
+    // ⑤a の対応表。**同じ宣言の版（SHA-256）のときだけ使い回し**、宣言が変われば作り直す（§1.3.1・#309）
+    let entries: readonly CorrespondenceEntry[] | null = null;
+    let entriesSha: string | null = null;
+    let correspondenceCalls = 0;
+    // ③ の対応の表の出し直しの回数（§1.5）
+    let redos = 0;
+
+    /**
+     * ある版に ④⑤a⑤b を流す（④ を通らなければ⑤a 以降は流さない）。**版の整合**：宣言が変われば
+     * ⑤a を作り直し、古い版の対応・結び付け・試験の結果を使わない（§1.3.1・R2-11・Issue #309）。
+     * ⑤a の作り直しの上限に触れたら `null` を返す（呼ぶ側が上限として止める）。
+     */
+    const evaluate = async (declaration: Declaration): Promise<VersionReport | null> => {
       const staticCheck = await runStage("static-check", () => runStaticCheck(declaration));
       const declarationSha256 = await sha256Hex(declaration.source);
-      const app = staticCheck.app;
-      if (!staticCheck.passed || app === null) {
-        return { declaration, declarationSha256, staticCheck, correspondence: null, testRun: null };
+      if (!staticCheck.passed || staticCheck.app === null) {
+        return { declaration, declarationSha256, staticCheck, correspondence: null, testRun: null, routes: [], defectMisses: [] };
       }
-      if (entries === null) {
-        const correspondence = await runStageOk("correspondence", () =>
+      const app = staticCheck.app;
+      let currentEntries = entries;
+      if (currentEntries === null || entriesSha !== declarationSha256) {
+        if (currentEntries !== null && correspondenceCalls >= limits.correspondenceChecks) return null;
+        correspondenceCalls += 1;
+        const result = await runStageOk("correspondence", () =>
           runCorrespondence({
             source: input.source,
             list: requirementList.list,
@@ -374,39 +404,107 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
             app,
             documents: input.documents,
             gateway,
+            ...(roles === undefined ? {} : { roles }),
+            ...(useMappings() ? { mappings } : {}),
           }),
         );
-        entries = correspondence.entries;
+        currentEntries = result.entries;
+        entries = currentEntries;
+        entriesSha = declarationSha256;
       }
-      const currentEntries: readonly CorrespondenceEntry[] = entries;
+      // ⑤a の落ちを、対応の表の不備（③ のやり直し）と、それ以外（要素の欠落、⑥）に分ける
+      const entriesMisses = checkCorrespondence(app, requirementList.list, currentEntries);
+      const defectMisses =
+        roles !== undefined && useMappings()
+          ? checkRoleMappings(app, roles, currentEntries, mappings)
+          : [];
       const correspondence: CorrespondenceResult = {
         entries: currentEntries,
-        misses: checkCorrespondence(app, requirementList.list, currentEntries),
+        misses: [...entriesMisses, ...defectMisses],
       };
-      const testRun = await runStage("run-tests", async () =>
-        runTests({ app, suite: withoutOverturned(), correspondence }),
+      const report = await runStage("run-tests", async () =>
+        runTests({
+          app,
+          suite: withoutOverturned(),
+          correspondence,
+          ...(useMappings() ? { mappings } : {}),
+        }),
       );
-      return { declaration, declarationSha256, staticCheck, correspondence, testRun };
+      return {
+        declaration,
+        declarationSha256,
+        staticCheck,
+        correspondence,
+        testRun: report,
+        routes: report.routes,
+        defectMisses,
+      };
     };
 
-    let current = await evaluate(written.declaration);
-    let lastPassed: VersionChecks | null = current.staticCheck.passed ? current : null;
-    let rounds = 0;
-    let limitReached = false;
-
-    const isSettled = (checks: VersionChecks): boolean =>
-      checks.staticCheck.passed &&
-      checks.correspondence !== null &&
-      checks.correspondence.misses.length === 0 &&
-      checks.testRun !== null &&
-      checks.testRun.mismatches.length === 0 &&
-      checks.testRun.unresolved.length === 0 &&
+    const isSettled = (report: VersionReport): boolean =>
+      report.staticCheck.passed &&
+      report.correspondence !== null &&
+      report.correspondence.misses.length === 0 &&
+      report.testRun !== null &&
+      report.testRun.mismatches.length === 0 &&
+      report.testRun.unresolved.length === 0 &&
       unresolved.length === 0;
 
-    // ⑥ → 流し直し（④⑤）→ ⑥' を、往復の上限まで回す（§1・§1.3・§1.5）
+    const first = await evaluate(written.declaration);
+    if (first === null) throw new RunStop({ stage: "correspondence", kind: "call-limit" });
+    let current: VersionReport = first;
+    let lastPassed: VersionReport | null = current.staticCheck.passed ? current : null;
+    let rounds = 0;
+    let limitReached = false;
+    let stopReason: StopReason = "completed";
+    let stagnant = false;
+    const history: string[] = [failureSignature(current)];
+
+    // ⑥（または ③ のやり直し）→ 流し直し（④⑤）→ ⑥' を、上限まで回す（§1・§1.3・§1.5・§1.3.1）
     while (!isSettled(current)) {
+      // 停滞の検知：同じ不一致（試験 ID・段・誤りの分類。名前は数えない）が続いたら、それ以上直さない
+      if (isStagnant(history, limits.stagnationRepeats)) {
+        stagnant = true;
+        stopReason = "stagnation";
+        break;
+      }
+      // 対応の表の不備（③ のやり直し）と、それ以外（⑥ 直す）を分ける（§1.3.1・Issue #309）
+      const defect =
+        current.defectMisses.length + current.routes.filter((route) => route.route === "correspondence-defect").length;
+      if (defect > 0 && roles !== undefined && useMappings()) {
+        if (redos >= limits.correspondenceRedos) {
+          limitReached = true;
+          stopReason = "limit";
+          break;
+        }
+        redos += 1;
+        const redo = await runStageOk("write", () =>
+          runCorrespondenceRedo({
+            source: input.source,
+            list: requirementList.list,
+            roles,
+            declaration: current.declaration,
+            documents: input.documents,
+            gateway,
+          }),
+        );
+        mappings = redo.mappings;
+        // 宣言は変えない。⑤a は同じ版なので使い回し、結び付けと試験だけ流し直す
+        const next = await evaluate(current.declaration);
+        if (next === null) {
+          limitReached = true;
+          stopReason = "limit";
+          break;
+        }
+        current = next;
+        history.push(failureSignature(current));
+        continue;
+      }
+
+      // ⑥ 直す（要素の欠落・未解決）。宣言が変われば ⑤a を作り直す
       if (rounds >= limits.repairRoundTrips) {
         limitReached = true;
+        stopReason = "limit";
         break;
       }
       rounds += 1;
@@ -416,7 +514,9 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
           list: requirementList.list,
           suite: withoutOverturned(),
           current,
-          correspondences: entries ?? [],
+          correspondences: current.correspondence?.entries ?? [],
+          ...(useMappings() ? { mappings } : {}),
+          ...(roles === undefined ? {} : { roles }),
           documents: input.documents,
           gateway,
         }),
@@ -437,12 +537,23 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         );
         collectArbitration(arbitration, upheld, overturned, unresolved);
       }
-      const checks = await evaluate(step.declaration);
-      current = checks;
-      if (checks.staticCheck.passed) lastPassed = checks;
+      const next = await evaluate(step.declaration);
+      if (next === null) {
+        limitReached = true;
+        stopReason = "limit";
+        break;
+      }
+      current = next;
+      if (current.staticCheck.passed) lastPassed = current;
+      history.push(failureSignature(current));
     }
 
     const final = lastPassed ?? current;
+
+    // 停滞で止めたら、残った不一致を**未解決**として数え、部分案で終える（§1.3.1・Issue #309）
+    if (stagnant) {
+      for (const route of current.routes) if (!unresolved.includes(route.testId)) unresolved.push(route.testId);
+    }
 
     // ⑦ 終わりの判定。**実行していない検査は「不一致 0」にしない**（`null` のときは 1 として渡す）。
     // 未解決は、最終版の試験の結果の未解決と、期待の裁定の未解決の両方を数える（#306）。
@@ -456,6 +567,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       carriedOver: { reverseCheck: carriedReverseCheck, testSuite: [] },
     };
     const outcome = await runStage("judge", async () => decideOutcome(toStageResults(materials)));
+    // 停滞で止めても、納品物は部分案として返す（早期停止ではない。止めた理由は `stop_reason` に出す）。
     const failure: FailureAttribution | null =
       outcome.result === "failed"
         ? final.staticCheck.passed
@@ -472,6 +584,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       duration_secs: (input.now() - startedAt) / 1000,
       provider_cost_usd: budget.spentUsd,
       stop_class: failure === null ? "completed" : failure.kind,
+      stopReason,
       exit_code: outcome.result === "failed" ? 1 : 0,
     });
     const bundle = await assembleBundle({

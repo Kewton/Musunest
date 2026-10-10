@@ -69,6 +69,19 @@ export const FAILURE_KINDS = [
 export type FailureKind = (typeof FAILURE_KINDS)[number];
 
 /**
+ * 止めた理由（記録と要約の `stop_reason`。§1.5・#309）。
+ *
+ *   - `completed` … 完走した（直しの上限に触れず、停滞もしなかった）
+ *   - `stagnation` … 停滞を検知して止めた（同じ不一致が続いた。未解決のまま部分案）
+ *   - `limit` … いずれかの上限に触れて止めた（直しの往復・③ のやり直し・⑤a の作り直し）
+ *   - `unresolved` … 曖昧さ・未解決だけが残り、それ以上直さなかった
+ *   - `deadline` … 締切で止めた
+ *
+ * 早期停止（入口・呼び出しの誤り・残高切れ）では、止めた段の失敗の分類（`FailureKind`）を入れる。
+ */
+export type StopReason = "completed" | "stagnation" | "limit" | "unresolved" | "deadline";
+
+/**
  * 形が合わなかった／未達だった 1 つの欄（欄の名前と、問題の種類。#304）。
  * **値の中身（宣言の原文・依頼文・LLM の応答の全文）は持たない**——問題の文はコードが書いた型の説明と
  * 数だけで、値そのものを含まない（S-8）。
@@ -198,6 +211,11 @@ export interface SummaryBase {
   readonly duration_secs: number;
   readonly provider_cost_usd: number;
   readonly stop_class: string | null;
+  /**
+   * 止めた理由（§1.5・#309）。完走なら `"completed"`、早期停止なら止めた失敗の分類。省くと `null`
+   * （従来の呼び出しを壊さない）。`StopReason` は完走側の値の一覧である。
+   */
+  readonly stopReason?: StopReason | FailureKind | null;
   readonly exit_code: number;
 }
 
@@ -372,7 +390,7 @@ export function buildSummary(record: RunRecord, base: SummaryBase): Summary {
     directive_round: null,
     status: "completed",
     gate: null,
-    stop_reason: null,
+    stop_reason: base.stopReason ?? null,
     next_action: null,
     changed_files: [],
     verify_commands: [],

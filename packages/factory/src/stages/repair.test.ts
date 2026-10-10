@@ -26,11 +26,14 @@ import {
 import {
   checkDeclarationVersion,
   checkRepairAnswer,
+  failureSignature,
+  isStagnant,
   REPAIR_ANSWER_SCHEMA,
   REPAIR_ANSWER_SCHEMA_NAME,
   runRepairLoop,
   runRepairStep,
   type RepairStepInput,
+  type VersionReport,
 } from "./repair.js";
 
 const done = (declaration: string, disputes: readonly { testId: string; quote: string }[] = []) => ({
@@ -564,5 +567,52 @@ describe("最後の答えの形を決め、合わなければ 1 回だけ直さ�
     expect(outcome.failure.attempts).toBe(2);
     expect(outcome.failure.problems.map((problem) => problem.field)).toContain("declaration");
     expect(recording.tools).toHaveLength(2);
+  });
+});
+
+// ── 停滞の検知の署名（02 §1.3.1・R2-10・Issue #309）──────────────────────
+
+/** 署名を測るための、最小の版の結果 */
+function report(over: Partial<VersionReport> = {}): VersionReport {
+  return {
+    declaration: { source: "entities: []\n" },
+    declarationSha256: "sha",
+    staticCheck: { passed: true, diagnostics: [], app: null },
+    correspondence: { entries: [], misses: [] },
+    testRun: { mismatches: [], unresolved: [] },
+    routes: [],
+    defectMisses: [],
+    ...over,
+  };
+}
+
+describe("停滞の署名は、名前ではなく分類で決まる（02 §1.3.1・Issue #309）", () => {
+  it("名前だけを付け替えた次の版でも、同じ不一致は同じ署名になる（member → memberRegistration）", () => {
+    const before = report({
+      routes: [{ testId: "t1", route: "missing-element", detail: "宣言に計算 member が無い" }],
+    });
+    const after = report({
+      routes: [{ testId: "t1", route: "missing-element", detail: "宣言に計算 memberRegistration が無い" }],
+    });
+    expect(failureSignature(before)).toBe(failureSignature(after));
+  });
+
+  it("試験 ID か誤りの分類が変われば、署名も変わる", () => {
+    const base = report({ routes: [{ testId: "t1", route: "missing-element", detail: "x" }] });
+    expect(failureSignature(base)).not.toBe(
+      failureSignature(report({ routes: [{ testId: "t2", route: "missing-element", detail: "x" }] })),
+    );
+    expect(failureSignature(base)).not.toBe(
+      failureSignature(report({ routes: [{ testId: "t1", route: "correspondence-defect", detail: "x" }] })),
+    );
+  });
+
+  it("同じ署名が上限の回数だけ続いたら停滞と見なし、変われば見なさない", () => {
+    expect(isStagnant(["a", "a"], 2)).toBe(true);
+    expect(isStagnant(["a", "b"], 2)).toBe(false);
+    expect(isStagnant(["a"], 2)).toBe(false);
+    expect(isStagnant(["a", "a", "a"], 3)).toBe(true);
+    // 2 未満の指定では止めない（停滞の検知を切る）
+    expect(isStagnant(["a", "a"], 1)).toBe(false);
   });
 });

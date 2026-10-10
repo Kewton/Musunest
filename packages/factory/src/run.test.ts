@@ -18,19 +18,27 @@ import { createFakeLlmClient, type RecordedCall } from "./llm-fake.js";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "./llm.js";
 import { OpenAiIncompleteError, createOpenAiLlmClient, type OpenAiUsage } from "./openai.js";
 import { runGeneration, countUnresolvedTests, type GenerationInput } from "./run.js";
+import { MAPPING_REDO_SCHEMA_NAME } from "./stages/repair.js";
+import { ARBITRATION_SCHEMA_NAME } from "./stages/arbitrate.js";
+import { CORRESPONDENCE_SCHEMA_NAME } from "./stages/correspondence.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
 import {
+  BAD_MAPPINGS,
   CORRESPONDENCE_OUTPUT,
   CORRESPONDENCE_OUTPUT_WITH_FIELD,
   DECLARATION_SOURCE,
+  DECLARATION_SOURCE_MISMATCH,
   DESIGN_OUTPUT,
+  DESIGN_OUTPUT_MAPPED,
   DESIGN_OUTPUT_PARTIAL,
   INVALID_DECLARATION_SOURCE,
+  MAPPING_REDO_OUTPUT,
   RATES,
   REQUIREMENT_LIST_OUTPUT,
   REVERSE_CHECK_OUTPUT,
   SOURCE_TEXT,
   TEST_SUITE_OUTPUT,
+  TEST_SUITE_OUTPUT_MAPPED,
   TEST_SUITE_OUTPUT_WITH_UNRESOLVED,
   makeRunInput,
   recordedRun,
@@ -521,6 +529,159 @@ describe("直す段の最後の答えの形が合わないとき、欄の名前�
     for (const text of [JSON.stringify(result.record), JSON.stringify(result.summary)]) {
       expect(text).not.toContain(REPAIR_DECLARATION_SENTINEL);
       expect(text).not.toContain(SOURCE_TEXT);
+    }
+  });
+});
+
+// ── 停滞の検知・裁定の呼び分け（02 §1.3.1・#309）──────────────────────
+
+describe("停滞の検知：同じ不一致が続いたら ⑥ は止める（02 §1.3.1・#309）", () => {
+  it("同じ不一致が 2 回続いたら直す段を止め、未解決として部分案で終える（裁定へは回さない）", async () => {
+    // 未解決（曖昧さ）が残る版。⑥ は直しても同じ宣言を返すので、不一致は変わらない
+    const { recording, run } = runWith([
+      ...recordedRun({
+        suite: TEST_SUITE_OUTPUT_WITH_UNRESOLVED,
+        correspondence: CORRESPONDENCE_OUTPUT_WITH_FIELD,
+      }),
+      toolDone({ declaration: DECLARATION_SOURCE, disputes: [] }),
+    ]);
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    // 未解決だけが残ったので、合格（full）ではなく部分案
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+    // 止めた理由（停滞）が記録に出る
+    expect(result.summary.stop_reason).toBe("stagnation");
+    // ⑥ は 1 回だけ（同じ不一致が 2 回続いた時点で止まる。往復の上限 6 までは回らない）
+    expect(result.record.stages.filter((stage) => stage.stage === "repair")).toHaveLength(1);
+    // 停滞だけを理由に、期待の裁定（⑥'）へは回さない
+    expect(result.record.stages.map((stage) => stage.stage)).not.toContain("arbitration");
+    expect(recording.structured.every((request) => request.schemaName !== ARBITRATION_SCHEMA_NAME)).toBe(true);
+  });
+
+  it("原文の根拠つきの異議があるときだけ、期待の裁定（⑥'）を呼ぶ", async () => {
+    const { recording, run } = runWith([
+      ...recordedRun({ write: DECLARATION_SOURCE_MISMATCH }),
+      toolDone({
+        declaration: DECLARATION_SOURCE_MISMATCH,
+        disputes: [
+          { testId: "t1", quote: "件数を合計する" },
+          { testId: "t2", quote: "件数を合計する" },
+          { testId: "t3", quote: "件数を合計する" },
+        ],
+      }),
+      structured({
+        decisions: [
+          { testId: "t1", verdict: "overturn", reason: "原文の数え方が違う", quote: "件数を合計する" },
+          { testId: "t2", verdict: "overturn", reason: "原文の数え方が違う", quote: "件数を合計する" },
+          { testId: "t3", verdict: "overturn", reason: "原文の数え方が違う", quote: "件数を合計する" },
+        ],
+      }),
+    ]);
+    const result = await run;
+
+    expect(result.record.stages.map((stage) => stage.stage)).toContain("arbitration");
+    expect(recording.structured.some((request) => request.schemaName === ARBITRATION_SCHEMA_NAME)).toBe(true);
+    // 棄却された試験を外すと、残り（R-2）は満たして合格する
+    expect(result.record.arbitration.overturned).toBe(3);
+    expect(result.outcome.result).toBe("pass");
+  });
+});
+
+// ── 失敗の振り分け（02 §1.3.1・#309）────────────────────────────────
+
+describe("失敗の行き先で次の一手が変わる（02 §1.3.1・#309）", () => {
+  it("対応の表の不備は ③ のやり直しに回り、その上限で止まる（⑥ ではない）", async () => {
+    const { recording, run } = runWith(
+      [
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(DESIGN_OUTPUT_MAPPED),
+        structured(TEST_SUITE_OUTPUT_MAPPED),
+        structured({ declaration: DECLARATION_SOURCE, mappings: BAD_MAPPINGS }),
+        structured(CORRESPONDENCE_OUTPUT),
+        structured(MAPPING_REDO_OUTPUT), // ③ のやり直し（同じ不備を出し直す）
+      ],
+      { limits: { ...AGENT_LIMITS, correspondenceRedos: 1, stagnationRepeats: 0 } },
+    );
+    const result = await run;
+
+    const stages = result.record.stages.map((stage) => stage.stage);
+    expect(stages).toContain("write"); // ③ のやり直し
+    expect(stages).not.toContain("repair"); // ⑥ 直すではない
+    expect(recording.structured.at(-1)?.schemaName).toBe(MAPPING_REDO_SCHEMA_NAME);
+    expect(result.summary.stop_reason).toBe("limit");
+  });
+
+  it("要件に要る要素の欠落は ⑥ 直すに回り、往復の上限で止まる", async () => {
+    const { recording, run } = runWith(
+      [
+        ...recordedRun({ write: DECLARATION_SOURCE_MISMATCH }),
+        toolDone({ declaration: DECLARATION_SOURCE_MISMATCH, disputes: [] }),
+      ],
+      { limits: { ...AGENT_LIMITS, repairRoundTrips: 1, stagnationRepeats: 0 } },
+    );
+    const result = await run;
+
+    const stages = result.record.stages.map((stage) => stage.stage);
+    expect(stages).toContain("repair"); // ⑥ 直す
+    // ③ のやり直しへは回さない
+    expect(recording.structured.every((request) => request.schemaName !== MAPPING_REDO_SCHEMA_NAME)).toBe(true);
+    expect(result.summary.stop_reason).toBe("limit");
+  });
+});
+
+// ── 版の整合（02 §1.3.1・#309）──────────────────────────────────────
+
+describe("宣言が変わったら、古い版の対応・結び付け・試験の結果を使わない（02 §1.3.1・#309）", () => {
+  it("新しい版で ⑤a を作り直し、納品物は最後の版に結び付く", async () => {
+    const { recording, run } = runWith([
+      ...recordedRun({ write: DECLARATION_SOURCE_MISMATCH }),
+      toolDone({ declaration: DECLARATION_SOURCE, disputes: [] }),
+      structured(CORRESPONDENCE_OUTPUT), // ⑤a の作り直し（新しい版）
+    ]);
+    const result = await run;
+
+    expect(result.outcome.result).toBe("pass");
+    // ⑤a は、最初の版と直した版の 2 回呼ぶ（同じ版なら使い回す）
+    expect(result.record.stages.filter((stage) => stage.stage === "correspondence")).toHaveLength(2);
+    expect(recording.structured.at(-1)?.schemaName).toBe(CORRESPONDENCE_SCHEMA_NAME);
+    expect(result.bundle).not.toBeNull();
+    if (result.bundle === null) return;
+    expect(result.bundle.declarationSha256).toBe(await sha256Hex(DECLARATION_SOURCE));
+  });
+});
+
+// ── 予算・記録（02 §1.5・#309）─────────────────────────────────────
+
+describe("新しい呼び出しも予算と上限に入り、段ごとの所要と止めた理由が出る（02 §1.5・#309）", () => {
+  it("⑤a の作り直しの呼び出しも、総呼び出しの上限に数えられる", async () => {
+    const { run } = runWith(
+      [
+        ...recordedRun({ write: DECLARATION_SOURCE_MISMATCH }),
+        toolDone({ declaration: DECLARATION_SOURCE, disputes: [] }),
+        // ⑤a の作り直しは呼ばれない（先に総呼び出しの上限で止まる）
+      ],
+      { limits: { ...AGENT_LIMITS, callCount: 7 } },
+    );
+    const result = await run;
+
+    expect(result.stopped).toEqual({ stage: "correspondence", kind: "call-limit" });
+    expect(result.summary.stop_reason).toBe("call-limit");
+    expect(result.bundle).toBeNull();
+  });
+
+  it("段ごとの所要（時間・呼び出しの数）と、止めた理由が記録に出る", async () => {
+    const { run } = runWith(recordedRun());
+    const result = await run;
+
+    expect(result.summary.stop_reason).toBe("completed");
+    const write = result.record.stages.find((stage) => stage.stage === "write");
+    expect(write?.calls).toBe(1);
+    expect(typeof write?.duration_ms).toBe("number");
+    for (const stage of result.record.stages) {
+      expect(typeof stage.duration_ms).toBe("number");
+      expect(stage.calls).toBeGreaterThanOrEqual(0);
     }
   });
 });

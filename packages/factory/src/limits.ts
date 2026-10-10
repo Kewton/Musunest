@@ -25,6 +25,22 @@ export const AGENT_LIMITS = {
   toolCalls: 24,
   /** 直しの往復の合計（§1.5「6 回」）。④→⑥→④ と ⑤→⑥ の往復の合計 */
   repairRoundTrips: 6,
+  /**
+   * ③ の対応の表（役割 ID → 宣言の名前）の出し直しの回数（§1.5・§1.3.1・R2-12）。
+   * 対応の表の不備（実在しない名前・種類違い・対応表の外）は ⑥ ではなく ③ のやり直しへ回す（#309）。
+   * **この呼び出しも共通の口を通す**ので、予約と総呼び出しの上限に数えられる。
+   */
+  correspondenceRedos: 2,
+  /**
+   * ⑤a 対応表の点検（版ごとの作り直し）の回数（§1.5・§1.3.1・R2-12）。宣言が変われば ⑤a を
+   * 作り直すので、作り直しの回数に上限を置く。**この呼び出しも共通の口を通す**。
+   */
+  correspondenceChecks: 6,
+  /**
+   * 停滞と見なす、同じ不一致の続いた回数（§1.3.1・R2-10）。試験 ID・段・誤りの分類が同じ不一致が
+   * これだけ続いたら、⑥ はそれ以上直さない（未解決のまま部分案で終える）。
+   */
+  stagnationRepeats: 2,
 } as const;
 
 /** 上限の名前（`AGENT_LIMITS` の欄の名前） */
@@ -41,6 +57,8 @@ export type AgentLimits = { readonly [K in LimitName]: number };
  * - **呼ぶ前に確かめる** … 共通の口（`call.ts` が `callCount`・`toolCalls` を数える）
  * - **版ごとに確かめる** … ④・⑥（`declarationBytes`）
  * - **往復を数える** … ⑥→④・⑤（`repairRoundTrips`）
+ * - **行き先ごとに数える** … ③ のやり直し（`correspondenceRedos`）・⑤a の作り直し（`correspondenceChecks`）
+ * - **停滞を数える** … ⑥（`stagnationRepeats`。同じ不一致が続いた回数）
  *
  * `satisfies` で、`AGENT_LIMITS` のすべての上限に番人が書かれていることをコンパイル時に確かめる。
  */
@@ -53,6 +71,9 @@ export const LIMIT_GUARDS = {
   callCount: "共通の口（call.ts）。呼ぶ前に数える",
   toolCalls: "共通の口（call.ts）。道具付きの呼び出しで数える",
   repairRoundTrips: "ステージ⑥（直す）から④・⑤ への往復",
+  correspondenceRedos: "ステージ③（書く）の対応の表の出し直し（§1.3.1）",
+  correspondenceChecks: "ステージ⑤a（対応表）の点検。版ごとに作り直す（§1.3.1）",
+  stagnationRepeats: "ステージ⑥（直す）の停滞の検知（同じ不一致が続いた回数）",
 } as const satisfies Record<LimitName, string>;
 
 /** 上限を超えたときの内容 */
