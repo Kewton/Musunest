@@ -37,7 +37,8 @@ manifest の `compatibility.agents` には **実測した Agent と CLI version 
 | `claude` | `native` | Claude Code 2.1.220 で、install された Skill を `.claude/skills` から発見し slash palette からも呼び出せることを実測（2026-07-26）。installer は `.agents/skills` と `.claude/skills` の両方へ byte-identical に配置する |
 | `codex` | `native` | Codex CLI 0.145.0 が `.agents/skills` の `SKILL.md` を読むことを確認。ただし **発見は model の自己申告**であり、**この version は skill を slash command として露出しない** |
 | `gemini` | `unknown` | 未計測 |
-| `opencode` | `unknown` | 未計測 |
+| `opencode` | `native` | opencode 1.18.22（2026-08-25、CommandMate#2037）と 1.18.27（2026-09-04 再確認）で `GET /skill` が `.agents/skills` と `.claude/skills` の `SKILL.md` を列挙し、`/<name>` の送信で読まれることを実測。起動時に走査するので install 後は再起動が要る。opencode 自身の `/` 補完には出ない。本 package は個別に測っていない |
+| `opencode-v2` | `native` | opencode2 2.0.18（2026-09-29、[CommandMate#2975](https://github.com/Kewton/CommandMate/issues/2975)）で `GET /api/skill` が `.agents/skills` と `.claude/skills` の `SKILL.md` を列挙し、`/<name>` の送信で model が `skill` tool を呼んで読まれることを実測。再起動は不要。v2 の `/` 補完には出ない（`@` と `/skills` picker のみ）。本 package は個別に測っていない |
 
 測定条件と限界は [evidence.md](./evidence.md) 第3節に記録してある。
 
@@ -77,3 +78,38 @@ diff -r .agents/skills/cmate-orchestrate-monitor .claude/skills/cmate-orchestrat
   --started 1 --state IDLE --idle-streak 8 --idle-threshold 8 --commits 1 --uncommitted 0
 # -> COMPLETE
 ```
+
+## 5. 監視対象の worker CLI（画面の目印）
+
+第3節の表は **この Skill を実行する Agent** の話である。それとは別に、分類は **監視される worker の
+画面**を読むので、worker がどの CLI かで目印が変わる。`classify-state.sh` は capture ペイロードの
+`cliToolId` で目印の組を選ぶ（CommandMate #2606。判定の詳細は [SKILL.md](../SKILL.md) 第3節
+「画面の目印は CLI ごとに選ぶ」）。
+
+| worker（`cliToolId`） | 目印 | 根拠 |
+|---|---|---|
+| `claude` | Claude の組 | 実運用（[evidence.md](./evidence.md) 第1節）と、実機採取の生 capture fixture |
+| `antigravity` | agy の組（0.9.0 から） | CommandMate が収録した agy 1.1.13 / 1.1.27 / 1.2.1 / 1.2.4 の実機キャプチャから作った payload。**実運用実績は未計測**（evidence 第1h節） |
+| それ以外（`codex` など）・`cliToolId` 無し | Claude の組 | その CLI の画面は未計測。Claude の文言が出ない画面は `IDLE` と読まれうるので、完了の判定は `hooks-task.sh` のタスク状態に頼る |
+
+### Antigravity（agy）の worker を監視するとき
+
+- **`<worktree-id>@antigravity` で渡す。** worktree の既定 agent が claude なら、付けないと
+  Claude のペインを capture する（capture 側の `--agent` / `--instance` と、介入の宛先
+  `mcbd-antigravity-<worktree-id>` の両方がこの指定で決まる）。
+- **読む範囲が Claude と違う。** agy は 200x1000 のペインに上端寄せで描くので、`realtimeSnippet`
+  （末尾 100 行）は transcript がペインを埋めるまで空行しか持たない。agy の組は
+  `realtimeSnippet` と `content` の**長い方の末尾**（空行を除いた最後の 64 行）を読む。
+- **目印**: 生成中は `esc to cancel` のステータス行か点字スピナー、許可待ちは `↑/↓ Navigate`
+  フッターと番号つきの選択肢、待機中は最下部の入力欄の枠。`? for shortcuts` には頼らない
+  （agy 1.2.1 はツールを使ったターンの後に出さない。CommandMate #2478）。
+- **番号の無い矢印キー画面**（trust 画面・`/model`・slash コマンドのポップアップ）は、サーバが
+  `sessionStatus=waiting` を返したときだけ `PROMPT` になる（テキストの目印では拾わない）。
+- **レート制限・API エラーの目印は agy 向けに広げていない。** agy のその画面は実機キャプチャが
+  無いので、`RATE_LIMIT` の `a` 送出と、リトライ枯渇後の再送は、agy の画面では当てにしない。
+  backoff の検出も Claude と同じ文言を読んでいるだけである。
+- **`hooks-task.sh` は必ず配線する。** ポーラーのカーソルがペインの最終行を越えたポーリングでは、
+  `realtimeSnippet` にも `content` にもペインの行が無く、分類は `IDLE` になる。
+- ペインを目で確かめるときは、`--json` ではなく `capture <worktree-id> --agent antigravity --instance antigravity --pane --tail 30`
+  （`--pane` は CommandMate #1623 以降）で画面そのものを見る。`--json` の `realtimeSnippet` /
+  `content` は agy では空行ばかりになりうる。

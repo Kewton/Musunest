@@ -19,8 +19,16 @@ classify-state.sh --json <file>
 | exit 0 | 分類できた |
 | exit 2 | `--json` が無い / file が無い / 未知の引数 |
 
-参照する payload field は `isRunning` / `isPromptWaiting` / `sessionStatus` /
-`realtimeSnippet` のみ。`output` / `text` は存在しない。`isGenerating` は意図的に見ない。
+参照する payload field は `isRunning` / `isPromptWaiting` / `sessionStatus` / `cliToolId` /
+`realtimeSnippet`、および `cliToolId` が `antigravity` のときの `content` のみ。
+`output` / `text` は存在しない。`isGenerating` は意図的に見ない。
+
+`cliToolId` は画面の目印の組を選ぶ（CommandMate #2606）。`antigravity` なら `monitor-lib.sh` の
+`ml_agy_is_retrying` / `ml_agy_has_prompt_marker` / `ml_agy_has_gen_anchor` を、それ以外（欠落を
+含む）なら `ml_is_retrying` / `ml_has_prompt_marker` / `ml_has_gen_anchor` を使う。
+`RATE_LIMIT` の `ml_has_rate_limit` はどの CLI でも共通である。agy の組は `realtimeSnippet` と
+`content` の長い方の末尾（空行を除いた最後の 64 行）を読む。各目印の定義は
+[SKILL.md](../SKILL.md) 第3節「画面の目印は CLI ごとに選ぶ」。
 
 判定順は `NOT_RUNNING → is_retrying(→GENERATING) → PROMPT → GENERATING → RATE_LIMIT → IDLE`。
 **この順序は仕様であり、実装詳細ではない**（[recipe-rationale.md](./recipe-rationale.md)）。
@@ -124,10 +132,13 @@ log 行の key も `<id>@<instance>` になる。`<worktree-id>` は
 trap を張るのは**引数検証を通り、ループへ入る直前**である。したがって不正な id・未知のフラグ・
 `--hooks` の file 欠落で落ちる経路は 1 行のままで、従来と byte 一致である。
 
-### 送信先セッションの導出（Issue #1602）
+### 送信先セッションの導出（Issue #1602, #268）
 
-そのポーリングの capture ペイロードの `cliToolId` から組み立てる（`BaseCLITool.getSessionName`
-と同形）。**分類したペインと入力するペインが同一であること**がこれで保証される。
+まずそのポーリングの capture ペイロードの `sessionName` を読む。これはサーバが**実際に作った**
+セッション名で、名前空間つきサーバ（CommandMate #2866）や旧セッション採用中のサーバでもここが正
+になる（CommandMate #2886）。`sessionName` が無い（#2886 より古い）サーバのときだけ、従来どおり
+`cliToolId` から組み立てる（`BaseCLITool.getSessionName` と同形）。**分類したペインと入力するペイン
+が同一であること**は、どちらの経路でも保証される。
 
 ```
 mcbd-<cliToolId>-<worktree-id>[-<instance suffix>]
@@ -135,8 +146,11 @@ mcbd-<cliToolId>-<worktree-id>[-<instance suffix>]
 
 instance suffix は `deriveSessionSuffix` と同じで、`<tool>-` を剥がした残り
 （`claude-2` → `2`）。primary（instance 未指定、または instance id が tool id と同一）では
-付かない。`--session-prefix <s>` を与えると `mcbd-<cliToolId>` の頭だけが `<s>` に置き換わる。
-`cliToolId` が無く `--session-prefix` も無い場合は**名前を捏造せず送信を拒否する**。
+付かない。`--session-prefix <s>` を与えると、`sessionName` の有無に関わらずそちらが勝ち、
+`mcbd-<cliToolId>` の頭だけが `<s>` に置き換わる（legacy escape hatch の意味は変えていない — この
+tool が作っていないセッションへ向けるためのものなので、サーバ報告の `sessionName` はそれに該当し
+ない）。`sessionName` も `cliToolId` も無く `--session-prefix` も無い場合は**名前を捏造せず送信を
+拒否する**。
 
 送信は `send_to_pane()` に一本化してある。
 

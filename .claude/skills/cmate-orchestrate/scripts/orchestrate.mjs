@@ -37,8 +37,12 @@ import {
   compileScopeCompanions,
   companionsForPath,
   scopeEntriesOverlap,
+  scopeMatches,
   isOverBroadScope,
   normalizeObservations,
+  normalizePrTitleTemplate,
+  workerMessageProblem,
+  WORKER_MESSAGE_KEYS,
 } from './lib.mjs';
 
 const PLAN_SCHEMA_VERSION = 2;
@@ -112,6 +116,10 @@ const PROFILE_FIELDS = [
   'dispatch_defaults',
   'integration_baseline',
   'observations',
+  // CommandMate#3005 — read by merge.mjs --create-prs. Appended last, like every
+  // optional field before it, so a profile without it plans the same bytes.
+  'pr_title_template',
+  'worker_messages',
 ];
 
 // =============================================================================
@@ -478,7 +486,46 @@ function normalizeProfile(raw) {
   // declaration means (references/profile-contract.md §12).
   const observations = normalizeObservations(raw.observations);
   if (observations !== null) profile.observations = observations;
+  // ABSENT-stays-absent a fifth time (CommandMate#3005): the merge runner titles
+  // a PR with the issue title exactly as before when the key is missing. The
+  // rules live in lib.mjs because merge.mjs re-validates the plan's copy.
+  const prTitleTemplate = normalizePrTitleTemplate(raw.pr_title_template, 'profile.pr_title_template', 'load_error', 6);
+  if (prTitleTemplate !== null) profile.pr_title_template = prTitleTemplate;
+  // ABSENT-stays-absent a fifth time (CommandMate#3009). Lives outside
+  // `dispatch_defaults` on purpose: that object is booleans and counts and refuses
+  // an unknown key, so a string there would be a second kind of thing in it.
+  const workerMessages = normalizeWorkerMessages(raw.worker_messages);
+  if (workerMessages !== null) profile.worker_messages = workerMessages;
   return profile;
+}
+
+// worker_messages — text the runners append to the messages they send workers
+// (CommandMate#3009, references/profile-contract.md §14). Closed like
+// dispatch_defaults: an unknown key is refused so a profile written for a newer
+// runner is not half-honored. REBUILT rather than passed through, for the
+// run-id reason normalizeDispatchDefaults gives.
+function normalizeWorkerMessages(raw) {
+  if (raw === undefined) return null;
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new SkillError('load_error',
+      `profile.worker_messages must be a JSON object of ${WORKER_MESSAGE_KEYS.join(' / ')}, got ${JSON.stringify(raw)}`, 6);
+  }
+  for (const key of Object.keys(raw)) {
+    if (!WORKER_MESSAGE_KEYS.includes(key)) {
+      throw new SkillError('load_error',
+        `profile.worker_messages has an unknown key "${key}"; this runner understands ${WORKER_MESSAGE_KEYS.join(', ')}`, 6);
+    }
+  }
+  const declared = {};
+  for (const key of WORKER_MESSAGE_KEYS) {
+    if (!(key in raw)) continue;
+    const problem = workerMessageProblem(raw[key]);
+    if (problem !== null) {
+      throw new SkillError('load_error', `profile.worker_messages.${key} ${problem}`, 6);
+    }
+    declared[key] = raw[key];
+  }
+  return declared;
 }
 
 // =============================================================================
@@ -1034,6 +1081,37 @@ const PATTERN_SEGMENT = '(?:[A-Za-z0-9_.*?-]|\\{[A-Za-z0-9_.,*?-]+\\})+';
 // occurs; refusing it would need the extraction to know Markdown.
 const CANDIDATE_PATTERN = PATH_START + '(?<![*?}])(\\*{1,2}(?:/\\*{1,2})*|(?:' + PATTERN_SEGMENT + '/)+(?:' + PATTERN_SEGMENT + ')?)(?![A-Za-z0-9_.*?{/-]|[^\\x00-\\x7f])';
 
+// The fifth candidate source (CommandMate #3003, folding in
+// Kewton/commandmate-skills#272): a backtick-quoted FILE NAME under a
+// deliverable heading, whatever its extension — or none. FILE_EXT is a closed
+// set, and every name outside it was refused even where the issue DECLARED it:
+// `packages/appspec-schema/contract/expression.ebnf` under `## 対象ファイル`
+// never reached scope.allow (Kewton/Musunest#212; the author renamed the file to
+// `.md` to get through), nor did `Cargo.lock` or `requirements/ci.txt`
+// (Kewton/CommandAgent#520 — `Cargo.lock`, having no "/", did not even raise
+// `unrecognized_file_extension`). The closed set exists to keep a PROSE token
+// from becoming write permission; under a deliverable heading there is no prose
+// to guard against, the same argument that lets CANDIDATE_PATTERN skip FILE_EXT
+// (#219). So this source is DECLARED-ONLY: a match outside every deliverable
+// heading is discarded, and the extraction there is exactly what it was.
+//
+// Backticks are required. Bare text under a heading still goes through the
+// closed sources above: "- `src/a.ts` を直す（e.g. node.js 側）" must not grant
+// `node.js`. Inside backticks a token is taken as a file name when it is
+//   * a path or a dotted name — `Cargo.lock`, `.gitignore`, `a/b.ebnf`,
+//     `requirements/ci.txt` — ending in a name character (not `.` or `/`), or
+//   * an extensionless name of the two shapes repositories actually use at
+//     their root: `Makefile` / `Dockerfile` / `Justfile` (`…file`) and
+//     `LICENSE` / `CODEOWNERS` (all capitals).
+// A camelCase identifier (`parseFoo`), a flag (`--json`), a number (`0.33.0`)
+// and a relative-escape (`./x`, `../x`, `/x`) are not file names here. Known and
+// accepted: a dotted identifier such as `console.log` IS taken. It can only be
+// written under the issue's own deliverable heading, and the cost is an
+// allowance nobody uses — which the scope-derivation ADR already prices at zero.
+//
+// Mirrored byte for byte in cmate-issue-authoring scripts/validate-plan.mjs.
+const CANDIDATE_DECLARED = '`((?!\\.{0,2}/)(?=[A-Za-z0-9_./-]*[A-Za-z])(?:[A-Za-z0-9_.-]*[./][A-Za-z0-9_./-]*[A-Za-z0-9_-]|[A-Z][A-Za-z0-9]*file|[A-Z][A-Z0-9_]*))`';
+
 // Which candidates the deliverable-heading rule governs: a glob metacharacter,
 // or the trailing slash that declares a directory. Applied to candidates from
 // EVERY source, not only CANDIDATE_PATTERN, because the backtick source has
@@ -1044,6 +1122,21 @@ const SCOPE_PATTERN_RE = /[*?{]|\/$/;
 // (Issue #50). See classifyFileCandidates for why the extension alone cannot
 // decide that. Mirrored in cmate-issue-authoring scripts/validate-plan.mjs.
 const DELIVERABLE_HEADING_RE = /(deliverable|成果物|対象ファイル|変更対象|変更ファイル|作成ファイル|編集対象|出力ファイル|生成ファイル|affected files|target files|output files|files to (?:change|edit|create|write|add))/i;
+
+// A heading that NEGATES the vocabulary above (CommandMate #3002).
+// DELIVERABLE_HEADING_RE matches a word anywhere in the heading, so
+// `## 変更対象外` and `## 対象ファイル外` — the headings an author writes to say
+// "do not touch these" — used to be deliverable headings, and the files listed
+// under them reached scope.allow. Once prose paths stop reaching the scope, that
+// would be the one way left to grant write permission by forbidding it. The
+// negation is read only at the END of the heading, where Japanese puts it; a
+// trailing colon is tolerated. Mirrored in cmate-issue-authoring
+// scripts/validate-plan.mjs.
+const NEGATED_HEADING_RE = /(?:外|以外|しない)[\s:：]*$/;
+
+function isDeliverableHeading(line) {
+  return DELIVERABLE_HEADING_RE.test(line) && !NEGATED_HEADING_RE.test(line);
+}
 
 // The counterpart of DELIVERABLE_HEADING_RE (Issue #54). #50 gave an issue a way
 // to say "this path IS what I produce" but no way to say the opposite, and a bug
@@ -1063,18 +1156,32 @@ const CONTEXT_HEADING_RE = /(根拠|出典|参考|参照|背景|関連|reference
 // Character offsets covered by the sections whose heading `matches`, so a
 // candidate's position in the body decides how it is classified. A section runs
 // from the line after its heading to the next heading of any level (or end of
-// text).
-function headingSpans(text, matches) {
+// text) — or, with `nested`, to the next heading of the SAME OR A HIGHER level,
+// so its subsections belong to it.
+//
+// `nested` is what a deliverable heading uses (Kewton/commandmate-skills#273,
+// folded into CommandMate #3002). `## 対象ファイル` split into `### 既存ファイル`
+// / `### 新規ファイル` ended at the first `###`, so a document listed under a
+// subsection was not a deliverable and fell to `reference_files`. While prose
+// paths still reached the scope that cost only documents; once they do not, it
+// would cost every path under every subsection. Context headings keep the old
+// reach: nothing measured asks for more.
+function headingSpans(text, matches, nested = false) {
   const spans = [];
   let offset = 0;
   let open = null;
+  let openLevel = 0;
   for (const line of text.split('\n')) {
     if (HEADING_RE.test(line.trim())) {
-      if (open !== null) {
+      const level = /^#+/.exec(line.trim())[0].length;
+      if (open !== null && (!nested || level <= openLevel)) {
         spans.push([open, offset]);
         open = null;
       }
-      if (matches(line.trim())) open = offset + line.length + 1;
+      if (open === null && matches(line.trim())) {
+        open = offset + line.length + 1;
+        openLevel = level;
+      }
     }
     offset += line.length + 1;
   }
@@ -1082,23 +1189,25 @@ function headingSpans(text, matches) {
   return spans;
 }
 
-const deliverableSpans = (text) => headingSpans(text, (line) => DELIVERABLE_HEADING_RE.test(line));
+const deliverableSpans = (text) => headingSpans(text, isDeliverableHeading, true);
 
 // A heading that reads as both ("## 対象ファイル（参考）") is a deliverable
 // heading: the statement that something is produced outranks the one that it is
 // only context, the same precedence a candidate gets below.
 const contextSpans = (text) =>
-  headingSpans(text, (line) => !DELIVERABLE_HEADING_RE.test(line) && CONTEXT_HEADING_RE.test(line));
+  headingSpans(text, (line) => !isDeliverableHeading(line) && CONTEXT_HEADING_RE.test(line));
 
 function inSpans(spans, index) {
   return spans.some(([start, end]) => index >= start && index < end);
 }
 
-// Returns { paths, deliverable, contextOnly, shadowed, droppedPatterns }: the
-// de-duplicated candidates in order of first appearance, the subset a
-// deliverable heading covers, the subset that appears ONLY under a context
-// heading, the pairs where one candidate is a path-boundary suffix of another,
-// and the scope patterns no deliverable heading claimed.
+// Returns { paths, deliverable, contextOnly, proseOnly, shadowed,
+// droppedPatterns }: the de-duplicated candidates in order of first appearance,
+// the subset a deliverable heading covers, the subset that appears ONLY under a
+// context heading, the subset an issue WITH a deliverable heading wrote only
+// outside it (CommandMate #3002), the pairs where one candidate is a
+// path-boundary suffix of another, and the scope patterns no deliverable
+// heading claimed.
 function extractFileCandidates(text) {
   // The fourth source is PATTERN-ONLY. CANDIDATE_PATTERN also matches plain
   // paths — including shapes the first three deliberately refuse, such as
@@ -1111,6 +1220,10 @@ function extractFileCandidates(text) {
     { pattern: new RegExp(CANDIDATE_KNOWN_ROOT, 'g'), patternsOnly: false },
     { pattern: new RegExp(CANDIDATE_WITH_EXT, 'g'), patternsOnly: false },
     { pattern: new RegExp(CANDIDATE_PATTERN, 'g'), patternsOnly: true },
+    // Declared-only (CommandMate #3003): read under a deliverable heading and
+    // nowhere else. Last, so the order of every candidate the four sources
+    // above find is what it was.
+    { pattern: new RegExp(CANDIDATE_DECLARED, 'g'), declaredOnly: true },
   ];
   const spans = deliverableSpans(text);
   const cSpans = contextSpans(text);
@@ -1126,6 +1239,7 @@ function extractFileCandidates(text) {
       if (!isSafeRepoPath(candidate)) continue;
       const isPattern = SCOPE_PATTERN_RE.test(candidate);
       if (source.patternsOnly && !isPattern) continue;
+      if (source.declaredOnly && !inSpans(spans, match.index)) continue;
       // A pattern is permission over files nobody has enumerated, so it is
       // honoured only where the issue DECLARES it as a product — the same "an
       // explicit declaration outranks an incidental mention" rule #177 drew for
@@ -1156,10 +1270,26 @@ function extractFileCandidates(text) {
   // the instruction. This also gives deliverable headings their precedence for
   // free, since a deliverable span is never a context span.
   const contextOnly = new Set([...inContext].filter((candidate) => !outsideContext.has(candidate)));
+  // An issue that HAS a deliverable heading has said which files it produces,
+  // and a path it wrote anywhere else — prose, 完了条件, the title — is a
+  // mention, not a declaration (CommandMate #3002). Measured on Kewton/Musunest:
+  // "the diff of <manifest> is zero" (#181) and "stop if `ci.yml` needs a change"
+  // (#183) both GRANTED write permission on the file they forbade, so the files
+  // an author most wanted untouched were the ones that reached scope.allow. It is
+  // the rule #219 drew for patterns, extended to every candidate, and it applies
+  // only where the issue gave the planner a declaration to prefer: an issue with
+  // no deliverable heading is read exactly as before, because there the prose IS
+  // the only statement of what changes. A path written both under the heading
+  // and elsewhere is a deliverable — the stronger statement wins, as above.
+  const proseOnly = spans.length === 0
+    ? new Set()
+    : new Set(found.filter((candidate) => !deliverable.has(candidate)));
   return {
     paths: found,
     deliverable,
     contextOnly,
+    proseOnly,
+    hasDeliverableHeading: spans.length > 0,
     shadowed: shadowedCandidates(found),
     // A pattern the issue declares under `## 対象ファイル` and ALSO cites under
     // `## 根拠` is not a drop: the declaration already won above.
@@ -1212,6 +1342,71 @@ function isSafeRepoPath(candidate) {
   if (SYSTEM_ROOTS.has(head)) return false;
   if (head.endsWith(':')) return false; // e.g. "https:" from a URL
   return true;
+}
+
+// The opposite declaration (Issue #301): the paths the issue says may NOT be
+// changed. A task contract's `scope.deny` — `test/**`, `.commandmate/**` — used
+// to be read as prose: a pattern was dropped as `scope_pattern_dropped`, and a
+// plain path under a forbidden heading of an issue WITHOUT a deliverable heading
+// reached scope.allow. Now every candidate under such a heading, or on a line
+// labelled that way (`- 変更してはならないパス: …`), is carried to the plan's
+// `scope_deny` and from there to the contract's `scope.deny`, and is never a
+// scope candidate. A negated deliverable heading (`## 変更対象外`) says the same
+// thing and is read the same way.
+const FORBIDDEN_LABEL_RE = /(変更(?:し)?て?は(?:ならない|いけない)|(?:変更|編集)禁止|触(?:ら|れ)ない|禁止(?:パス|ファイル|対象)|forbidden|(?:must|do) not (?:be )?(?:change|edit|touch|modif)|\bscope\.deny\b|^\W*deny\b)/i;
+const FORBIDDEN_LINE_RE = /^\s*(?:[-*+]\s+|\d+\.\s+)?(?:\*\*)?([^:：`\n]{1,60}?)(?:\*\*)?\s*[:：]/;
+
+function isForbiddenHeading(line) {
+  const text = line.replace(/^#+\s*/, '');
+  return FORBIDDEN_LABEL_RE.test(text)
+    || (DELIVERABLE_HEADING_RE.test(line) && NEGATED_HEADING_RE.test(line));
+}
+
+// A deny entry the contract cannot carry: absolute, home-relative, drive-letter,
+// `..`-escaping or backslashed. Dropping it would widen the worker's permission
+// silently, so it is a question instead (`scope_deny_untransferable`).
+const UNSAFE_DENY_RE = /^(?:\/|~|[A-Za-z]:)|(?:^|\/)\.\.(?:\/|$)|\\/;
+
+// Forbidden sections (nested, like a deliverable heading) plus every single line
+// whose label is a forbidden one.
+function forbiddenSpans(text) {
+  const spans = headingSpans(text, isForbiddenHeading, true);
+  let offset = 0;
+  for (const line of text.split('\n')) {
+    if (!HEADING_RE.test(line.trim())) {
+      const label = FORBIDDEN_LINE_RE.exec(line);
+      if (label !== null && FORBIDDEN_LABEL_RE.test(label[1].trim())) spans.push([offset, offset + line.length]);
+    }
+    offset += line.length + 1;
+  }
+  return spans;
+}
+
+// The candidates under a forbidden section or label, read by the same five
+// sources the scope extraction uses — kept OUTSIDE that extraction, which
+// cmate-issue-authoring mirrors byte for byte: the scope candidates are what
+// they were, and analyzeIssue takes the denied ones back out of the scope.
+function extractScopeDeny(text) {
+  const fSpans = forbiddenSpans(text);
+  const denied = [];
+  if (fSpans.length === 0) return { denied, unsafe: [], spans: fSpans };
+  for (const source of [CANDIDATE_BACKTICK, CANDIDATE_KNOWN_ROOT, CANDIDATE_WITH_EXT, CANDIDATE_PATTERN, CANDIDATE_DECLARED]) {
+    for (const match of text.matchAll(new RegExp(source, 'g'))) {
+      const candidate = match[1].trim();
+      if (!inSpans(fSpans, match.index) || !isSafeRepoPath(candidate)) continue;
+      if (!denied.includes(candidate)) denied.push(candidate);
+    }
+  }
+  return { denied, unsafe: forbiddenUnsafe(text, fSpans), spans: fSpans };
+}
+
+function forbiddenUnsafe(text, fSpans) {
+  const out = [];
+  for (const match of text.matchAll(/`([^`\s]+)`/g)) {
+    const candidate = match[1];
+    if (inSpans(fSpans, match.index) && UNSAFE_DENY_RE.test(candidate) && !out.includes(candidate)) out.push(candidate);
+  }
+  return out;
 }
 
 // =============================================================================
@@ -1310,14 +1505,25 @@ function partitionHarnessPaths(candidates, deliverable) {
 // inside the worker. Extraction stays conservative; the drop is reported.
 const BACKTICK_PATH_RE = /`([^`\s]*\/[^`\s]*\.[A-Za-z][A-Za-z0-9]*)`/g;
 
-function extractUnrecognizedPaths(text, candidates) {
+//
+// With a deliverable heading (CommandMate #3002 / #3003) the extension stops
+// being the reason a path is out of scope: under the heading every backtick
+// file name is taken, and outside it no path is. So `spans` splits the result:
+// `unrecognized` keeps the ones a deliverable heading still could not carry, and
+// `prose` the ones written outside every deliverable heading of an issue that
+// has one — reported as `prose_path_ignored` with the rest of the prose, not as
+// an extension to fix. Without a heading `spans` is empty and everything lands
+// in `unrecognized`, exactly as before.
+function extractUnrecognizedPaths(text, candidates, spans = [], fSpans = []) {
   const extracted = new Set(candidates);
   const seen = new Set();
-  const out = [];
+  const unrecognized = [];
+  const prose = [];
   for (const match of text.matchAll(BACKTICK_PATH_RE)) {
     const candidate = match[1].trim();
     if (extracted.has(candidate) || seen.has(candidate)) continue;
     if (!isSafeRepoPath(candidate)) continue;
+    if (inSpans(fSpans, match.index)) continue;
     // A scope PATTERN that did not reach `paths` was refused by the
     // deliverable-heading rule, not by FILE_EXT (Issue #219). `.json` is a
     // recognised extension; saying otherwise would send the author to fix a
@@ -1325,9 +1531,10 @@ function extractUnrecognizedPaths(text, candidates) {
     // `scope_pattern_dropped`.
     if (SCOPE_PATTERN_RE.test(candidate)) continue;
     seen.add(candidate);
-    out.push(candidate);
+    if (spans.length > 0 && !inSpans(spans, match.index)) prose.push(candidate);
+    else unrecognized.push(candidate);
   }
-  return out;
+  return { unrecognized, prose };
 }
 
 function extractionWarnings(analyses) {
@@ -1340,7 +1547,8 @@ function extractionWarnings(analyses) {
         detail: redact(
           `#${analysis.number} writes \`${path}\` in backticks, but ".${ext}" is not a recognised extension, ` +
             "so the path is not in suspected_files and stays outside the worker's scope; " +
-            "extend the planner's FILE_EXT or state a path with a recognised extension if the worker must touch it",
+            'if the worker must touch it, list it in backticks under a deliverable heading (`## 対象ファイル`), ' +
+            'where a file name is taken whatever its extension (CommandMate #3003), or state a path with a recognised extension',
         ),
       });
     }
@@ -1382,6 +1590,24 @@ function extractionWarnings(analyses) {
             '`## Deliverables`, DELIVERABLE_HEADING_RE); cited under `## 根拠` or written in passing prose it is ' +
             'read as a reference and stays out of `suspected_files`, hence out of the contract\'s `scope.allow`. ' +
             'If the worker must WRITE these files, move the pattern under a deliverable heading and re-plan.',
+        ),
+      });
+    }
+    // The same finding for plain paths (CommandMate #3002), in the same shape:
+    // one entry per issue, a tally, the first few by name, one sentence of fix.
+    if (analysis._prosePathsIgnored.length > 0) {
+      const ignored = analysis._prosePathsIgnored;
+      const samples = ignored.slice(0, 5).map((path) => `\`${path}\``).join(', ');
+      const more = ignored.length > 5 ? `, …and ${ignored.length - 5} more` : '';
+      out.push({
+        code: 'prose_path_ignored',
+        detail: redact(
+          `#${analysis.number} has a deliverable heading, and writes ${ignored.length} path(s) only outside it: ` +
+            `${samples}${more}. An issue that lists its files under \`## 対象ファイル\` / \`## 成果物\` / ` +
+            '`## Deliverables` (DELIVERABLE_HEADING_RE) has declared its scope, so a path in the prose, the ' +
+            'acceptance criteria or the title is read as a mention — "do not touch X" names X too — and goes to ' +
+            '`reference_files` (read, not in `scope.allow`). If the worker must WRITE one of them, add it under the ' +
+            'deliverable heading and re-plan.',
         ),
       });
     }
@@ -1553,19 +1779,30 @@ function openQuestionWarnings(analyses) {
 // The symmetric statement is a path mentioned only under a context heading
 // (Issue #54): the issue is citing it, not claiming it. Extension says nothing
 // about that case — a cited `src/foo.ts` is code — so the position has to.
-function classifyFileCandidates(candidates, deliverable, contextOnly) {
+//
+// The third statement is position again (CommandMate #3002): in an issue that
+// has a deliverable heading, a path written only outside it is read, not
+// written. It is checked LAST, so `ignored` holds exactly the paths this rule
+// moved — the ones that would have reached scope.allow before it existed — and
+// a cited path or a document, which were references already, is not reported a
+// second time.
+function classifyFileCandidates(candidates, deliverable, contextOnly, proseOnly = new Set()) {
   const suspected = [];
   const references = [];
+  const ignored = [];
   for (const candidate of candidates) {
     if (contextOnly.has(candidate)) {
       references.push(candidate);
     } else if (!deliverable.has(candidate) && (/^docs\//.test(candidate) || /\.(md|rst|txt)$/i.test(candidate))) {
       references.push(candidate);
+    } else if (proseOnly.has(candidate)) {
+      references.push(candidate);
+      ignored.push(candidate);
     } else {
       suspected.push(candidate);
     }
   }
-  return { suspected, references };
+  return { suspected, references, ignored };
 }
 
 // Ecosystem lockfiles that a dependency-manifest edit drags along (CommandMate
@@ -2558,10 +2795,12 @@ function analyzeIssue(issue, profile, binaries, companionRules) {
   const objective = redact(firstNonEmptyLine(body) || issue.title);
   const acceptance = extractAcceptanceCriteria(body).map(redact);
   const extraction = extractFileCandidates(text);
+  const deny = extractScopeDeny(text);
   const classified = classifyFileCandidates(
     extraction.paths,
     extraction.deliverable,
     extraction.contextOnly,
+    extraction.proseOnly,
   );
   // Deny-by-default for the agent harness (Issue #177), applied HERE — after the
   // context/product split, before any default is derived. Both halves of that
@@ -2587,7 +2826,35 @@ function analyzeIssue(issue, profile, binaries, companionRules) {
   // §17 / §18.
   const harness = partitionHarnessPaths(classified.suspected, extraction.deliverable);
   const suspected = harness.kept;
-  const references = [...classified.references, ...harness.denied];
+  // A backtick path no source could read. Outside the deliverable heading of an
+  // issue that has one, it is prose like any other (CommandMate #3003): read,
+  // not written, and named in `prose_path_ignored` rather than sent to fix an
+  // extension that is not why it is out of scope.
+  const unreadable = extractUnrecognizedPaths(
+    text,
+    extraction.paths,
+    extraction.hasDeliverableHeading ? deliverableSpans(text) : [],
+    deny.spans,
+  );
+  // The issue's own prohibitions (Issue #301). A suspected path one of them
+  // covers leaves the scope for `reference_files` — unless the issue DECLARED it
+  // under a deliverable heading too, which is a contradiction only the author
+  // can resolve (`scope_deny_conflict`); the path then stays, and the deny still
+  // reaches the contract.
+  const scopeDeny = deny.denied;
+  const isDenied = (path) => scopeDeny.some((pattern) => scopeMatches(pattern, path));
+  const denyConflicts = [];
+  const deniedSuspects = [];
+  for (const path of [...suspected]) {
+    if (!isDenied(path)) continue;
+    if (extraction.deliverable.has(path)) {
+      denyConflicts.push(path);
+    } else {
+      suspected.splice(suspected.indexOf(path), 1);
+      deniedSuspects.push(path);
+    }
+  }
+  const references = [...classified.references, ...harness.denied, ...unreadable.prose, ...deniedSuspects];
   // The shadow pairs the plan cannot tell apart: BOTH spellings reached the
   // scope (Issue #182). Read here, before the derived paths below join the list,
   // because a spelling is something the issue WROTE.
@@ -2619,6 +2886,11 @@ function analyzeIssue(issue, profile, binaries, companionRules) {
   const scopeDefaults = scopeDefaultsFor(suspected);
   scopeDefaults.push(...testScopeDefaultsFor(suspected, scopeDefaults));
   scopeDefaults.push(...profileScopeDefaultsFor(companionRules, suspected, scopeDefaults));
+  // A derived path never re-grants what the issue forbade (#301): `test/**`
+  // denied keeps a `scope_companions` rule from adding `test/greet.test.js`.
+  for (let i = scopeDefaults.length - 1; i >= 0; i -= 1) {
+    if (isDenied(scopeDefaults[i])) scopeDefaults.splice(i, 1);
+  }
   suspected.push(...scopeDefaults);
   const tests = extractTestExpectations(text, binaries).map(redact);
 
@@ -2664,6 +2936,29 @@ function analyzeIssue(issue, profile, binaries, companionRules) {
     openQuestions.push({
       code: 'no_suspected_files',
       text: 'Affected files are unclear; add likely modules or paths.',
+    });
+  }
+  // A prohibition the plan cannot carry is a stop, never a silent drop (#301).
+  const untransferable = [
+    ...deny.unsafe,
+    ...contractScopeDrops(scopeDeny).filter((entry) => entry.reason !== 'over_broad').map((entry) => entry.pattern),
+  ];
+  if (untransferable.length > 0) {
+    openQuestions.push({
+      code: 'scope_deny_untransferable',
+      text:
+        'The issue forbids paths the execution contract cannot carry in scope.deny; ' +
+        'write them as repository-relative paths or globs and re-plan. ' +
+        `Paths: ${untransferable.slice(0, 3).map((path) => `\`${path}\``).join(', ')}`,
+    });
+  }
+  for (const path of denyConflicts) {
+    openQuestions.push({
+      code: 'scope_deny_conflict',
+      text:
+        'A path is declared as a deliverable and also forbidden. ' +
+        'Remove it from one of the two and re-plan. ' +
+        `Path: \`${path}\``,
     });
   }
   // Which of two overlapping paths the issue means (Issue #182). Raised here,
@@ -2735,6 +3030,7 @@ function analyzeIssue(issue, profile, binaries, companionRules) {
     suspected_files: suspected,
     scope_defaults: scopeDefaults,
     reference_files: references,
+    scope_deny: scopeDeny,
     test_expectations: tests,
     labels: issue.labels,
     branch,
@@ -2754,12 +3050,19 @@ function analyzeIssue(issue, profile, binaries, companionRules) {
     _consumer: CONSUMER_RE.test(text),
     _topics: topicTokens(`${issue.title} ${body}`),
     _rawBody: body,
-    _unrecognizedPaths: extractUnrecognizedPaths(text, extraction.paths),
+    _unrecognizedPaths: unreadable.unrecognized,
     // Scope patterns the body wrote outside every deliverable heading (#219).
-    _droppedPatterns: extraction.droppedPatterns,
+    // A pattern the issue FORBIDS is carried in `scope_deny`, not dropped (#301).
+    _droppedPatterns: extraction.droppedPatterns.filter((pattern) => !scopeDeny.includes(pattern)),
     // Harness paths a deliverable heading claimed, hence granted (Issue #177).
     // The denied ones need no private field: they are in `reference_files`.
     _harnessPathsInScope: harness.declared,
+    // Paths an issue with a deliverable heading wrote only outside it
+    // (CommandMate #3002). They are in `reference_files`; this is what names
+    // them in `prose_path_ignored`. A harness path is left out: outside a
+    // deliverable heading it is denied by #177 anyway, silently by design, and
+    // naming it here would re-raise the noise that design avoids.
+    _prosePathsIgnored: [...classified.ignored, ...unreadable.prose].filter((path) => !isHarnessPath(path)),
   };
 }
 
@@ -3199,6 +3502,75 @@ function planWaves(analyses, edges, maxParallel, order) {
 }
 
 // =============================================================================
+// human-only issues (Issue #286)
+// =============================================================================
+//
+// cmate-issue-authoring 0.10.0 (CommandMate#3013) lets a plan hold an issue only
+// a person does — a demo on a phone, a document written by hand — marked by the
+// label `human-only`, and its validator names such an issue `dispatch_excluded`.
+// Nothing here read the mark, so the consumer (Kewton/Musunest) took those
+// numbers out of every plan by hand, and a human-only issue that did reach the
+// planner drew "Affected files are unclear" and a worker.
+//
+// The issue STAYS in `issues` and its edges stay in `dependencies`: the plan's
+// reader keeps seeing the human work and what waits on it. What changes is that
+// it is in no wave (so not in merge_order), it carries `dispatch_excluded:
+// 'human_only'`, and its questions are not raised — they ask what a WORKER would
+// need, and no worker takes it. An edge from a dispatched issue to it is not
+// waited for: the dispatcher has no way to see a person finish, so it is treated
+// like an edge to an issue outside the plan (`external_dependency`) and named as
+// a blocking `human_only_dependency`, whose owed decision is "has the person
+// finished #N?".
+//
+// The name is fixed and matched exactly, the same constant the validator uses
+// (the mirror-conformance test compares the two lines): `human only` or
+// `Human-Only` is not the mark. A plan with no such label is byte-identical to
+// the one written before this existed.
+const HUMAN_ONLY_LABEL = 'human-only';
+
+function humanOnlyNumbers(analyses) {
+  return new Set(analyses.filter((analysis) => analysis.labels.includes(HUMAN_ONLY_LABEL)).map((analysis) => analysis.number));
+}
+
+// Clears the questions of every human-only issue and returns how many each had,
+// for the notice below. Called after recordSuppressedInferences, so a lexical
+// question that landed on one is cleared too.
+function dropHumanOnlyQuestions(analyses, humanOnly) {
+  const dropped = new Map();
+  for (const analysis of analyses) {
+    if (!humanOnly.has(analysis.number)) continue;
+    dropped.set(analysis.number, analysis.questions.length);
+    analysis._openQuestions = [];
+    analysis.questions = [];
+  }
+  return dropped;
+}
+
+function humanOnlyWarnings(edges, humanOnly, dropped) {
+  const out = [];
+  for (const number of [...humanOnly].sort((a, b) => a - b)) {
+    const count = dropped.get(number) ?? 0;
+    out.push({
+      code: 'human_only_excluded',
+      detail:
+        `#${number} is labelled ${HUMAN_ONLY_LABEL}: a person does it, so it is in no wave and not in merge_order, ` +
+        'and the dispatch runner records it as not_dispatched without sending a worker' +
+        (count > 0 ? ` (its ${count} planner question(s) were not raised: they ask what a worker would need)` : ''),
+    });
+  }
+  for (const edge of edges) {
+    if (humanOnly.has(edge.issue) || !humanOnly.has(edge.depends_on)) continue;
+    out.push({
+      code: 'human_only_dependency',
+      detail:
+        `#${edge.issue} depends on #${edge.depends_on}, which is labelled ${HUMAN_ONLY_LABEL}: no wave waits for it and ` +
+        `the dispatch runner does not either — confirm a person has finished #${edge.depends_on} before dispatching #${edge.issue}`,
+    });
+  }
+  return out;
+}
+
+// =============================================================================
 // Risk / commands
 // =============================================================================
 
@@ -3374,6 +3746,12 @@ function publicProfile(profile) {
   // profile-contract.md §12). Appended LAST, so a profile that does not declare
   // it produces the plan bytes it produced before the field existed.
   if (profile.observations !== undefined) out.observations = profile.observations;
+  // `pr_title_template` is here for merge.mjs --create-prs (CommandMate#3005,
+  // profile-contract.md §13), and last for the same byte-order reason.
+  if (profile.pr_title_template !== undefined) out.pr_title_template = profile.pr_title_template;
+  // `worker_messages` is here because dispatch reads `plan.profile.worker_messages`
+  // and never opens the profile. Appended LAST, like every optional field.
+  if (profile.worker_messages !== undefined) out.worker_messages = profile.worker_messages;
   return out;
 }
 
@@ -3394,6 +3772,9 @@ function issueForPlan(analysis, analyses, edges) {
     worktree_id: analysis.worktree_id,
     questions: analysis.questions,
     classification: classifyIssue(analysis, analyses, edges),
+    // Written only when the issue forbids something (#301), so a plan with no
+    // prohibition stays byte-identical to the one 0.37.0 wrote.
+    ...(analysis.scope_deny.length > 0 ? { scope_deny: analysis.scope_deny } : {}),
   };
 }
 
@@ -3403,8 +3784,8 @@ function classifyIssue(analysis, analyses, edges) {
   return 'independent';
 }
 
-function buildPlan({ runId, profile, inputs, analyses, edges, waves }) {
-  const risk = assessRisk(analyses, edges, profile);
+function buildPlan({ runId, profile, inputs, analyses, edges, waves, dispatchable, dispatchEdges, humanOnly }) {
+  const risk = assessRisk(dispatchable, dispatchEdges, profile);
   const commands = planCommands(analyses, profile);
   return {
     plan_schema_version: PLAN_SCHEMA_VERSION,
@@ -3423,7 +3804,10 @@ function buildPlan({ runId, profile, inputs, analyses, edges, waves }) {
       dependency_overrides: inputs.dependsRaw.map(String),
       order: inputs.order,
     },
-    issues: analyses.map((a) => issueForPlan(a, analyses, edges)),
+    issues: analyses.map((a) => ({
+      ...issueForPlan(a, analyses, edges),
+      ...(humanOnly.has(a.number) ? { dispatch_excluded: 'human_only' } : {}),
+    })),
     dependencies: edges,
     waves,
     merge_order: waves.flat(),
@@ -3531,10 +3915,22 @@ function completionChecks(plan, dependencyErrors, ranOverwriteGuard) {
 //     `unverified_profile` factor at `high` and `profile.verified` is still
 //     `false` in the plan. Only the colour moved.
 //
+// CommandMate #3002 added `prose_path_ignored`, on the side and for the reason
+// `scope_pattern_dropped` is there: an issue that HAS a deliverable heading has
+// declared its scope, and the warning reports that a path written only outside
+// it was not read as a declaration — a fact about where the author wrote it,
+// raised on correctly written issues too ("the diff of X is zero").
+//
+// Issue #286 added `human_only_excluded`: the `human-only` label IS the
+// decision (a person does this issue), made by whoever labelled it, and the
+// warning reports that the planner honoured it. Its sibling
+// `human_only_dependency` stays blocking — "has the person finished it?" is
+// still owed, exactly as it is for `external_dependency`.
+//
 // `harness_path_in_scope` is unchanged in every other respect: it still fires, it
 // still names the path, it still sits in `plan.warnings` and in the recovery
 // table. Only the colour moved.
-const NOTICE_WARNING_CODES = new Set(['harness_path_in_scope', 'profile_repository_override', 'scope_pattern_declared', 'scope_pattern_dropped']);
+const NOTICE_WARNING_CODES = new Set(['harness_path_in_scope', 'profile_repository_override', 'scope_pattern_declared', 'scope_pattern_dropped', 'prose_path_ignored', 'human_only_excluded']);
 
 // `severity` is written on NOTICE entries only. `blocking` stays implicit, which
 // buys two things at once:
@@ -3552,10 +3948,6 @@ function withSeverity(warnings) {
   return warnings.map((warning) =>
     NOTICE_WARNING_CODES.has(warning.code) ? { ...warning, severity: 'notice' } : warning,
   );
-}
-
-function hasBlockingWarning(warnings) {
-  return warnings.some((warning) => !NOTICE_WARNING_CODES.has(warning.code));
 }
 
 function buildResult({ status, runId, runDir, artifacts, plan, errors, warnings, completionCheck, summary }) {
@@ -3583,6 +3975,13 @@ function listItems(items) {
   return items.length === 0 ? ['- none'] : items.map((item) => `- ${item}`);
 }
 
+// One line naming the human-only issues (Issue #286), or nothing, so a plan
+// without one renders exactly as before.
+function humanOnlyLine(plan, label) {
+  const numbers = plan.issues.filter((issue) => issue.dispatch_excluded === 'human_only').map((issue) => `#${issue.number}`);
+  return numbers.length === 0 ? [] : [`- ${label}: ${numbers.join(', ')}`];
+}
+
 function renderManifest(plan) {
   const lines = [
     '# cmate-orchestrate dry-run manifest',
@@ -3596,6 +3995,7 @@ function renderManifest(plan) {
     `- Max parallel: ${plan.max_parallel}`,
     `- Merge order: ${plan.merge_order.map((n) => `#${n}`).join(', ')}`,
     `- Risk: ${plan.risk.level}`,
+    ...humanOnlyLine(plan, 'Human-only (in no wave, not dispatched)'),
     '',
     '## Waves',
     '',
@@ -3604,7 +4004,8 @@ function renderManifest(plan) {
     lines.push(`- Wave ${index + 1}: ${wave.map((n) => `#${n}`).join(', ')}`);
   });
   lines.push('', '## Planned worktrees', '');
-  for (const issue of plan.issues) {
+  // A human-only issue gets no worktree from dispatch (Issue #286).
+  for (const issue of plan.issues.filter((candidate) => candidate.dispatch_excluded === undefined)) {
     lines.push(`- #${issue.number}: \`${issue.branch}\` at \`${issue.worktree}\``);
   }
   lines.push('', '## Safety', '', ...plan.notes.map((n) => `- ${n}`), '');
@@ -3622,14 +4023,22 @@ function renderIssueAnalysis(plan) {
       `- Branch: \`${issue.branch}\``,
       `- Worktree: \`${issue.worktree}\``,
       `- Labels: ${issue.labels.length ? issue.labels.join(', ') : 'none'}`,
+      ...(issue.dispatch_excluded === 'human_only' ? ['- Dispatch: excluded (human-only: a person does it; no worker is sent)'] : []),
       '',
       'Acceptance criteria:',
       ...listItems(issue.acceptance_criteria),
       '',
+      // The two counts, apart (CommandMate #3004). The derived half is a
+      // permission, most of whose paths never exist, and a reviewer who reads
+      // only the length of the list below judges "can this be dispatched" on
+      // an inflated number.
+      `Scope: ${scopeCounts(issue).declared} declared by the issue + ${scopeCounts(issue).derived} derived by the planner = ` +
+        `${issue.suspected_files.length} in scope.allow`,
+      '',
       'Suspected files:',
       ...listItems(issue.suspected_files),
       '',
-      'Scope defaults (planner-added lockfiles, included above):',
+      'Scope defaults (planner-derived lockfiles and test paths, included above):',
       ...listItems(issue.scope_defaults),
       '',
       // The paths the planner read and deliberately kept OUT of scope.allow. It
@@ -3686,6 +4095,17 @@ function renderDependencyPlan(plan) {
   return lines.join('\n');
 }
 
+// How many of an issue's scope entries it DECLARED and how many the planner
+// DERIVED from them (CommandMate #3004). `scope_defaults` is the derived list and
+// a subset of `suspected_files`, so the plan JSON already carries both numbers;
+// what was missing is a place a human reads them apart. Measured on
+// Kewton/Musunest: 55 / 61 / 60 listed against 20 / 22 / 22 real files, and the
+// operator had to write "judge by the files that exist" into every request.
+function scopeCounts(issue) {
+  const derived = issue.scope_defaults.length;
+  return { declared: issue.suspected_files.length - derived, derived };
+}
+
 function renderSummary(plan) {
   const conflicts = plan.issues.filter((i) => i.classification === 'conflicting').length;
   return [
@@ -3697,6 +4117,7 @@ function renderSummary(plan) {
     '',
     '## Wave',
     ...plan.waves.map((wave, index) => `- Wave ${index + 1}: ${wave.map((n) => `#${n}`).join(', ')}`),
+    ...humanOnlyLine(plan, 'human-only（人がやる。どの wave にも入れず dispatch しない）'),
     '',
     '## 依存とconflict',
     `- 依存 edge: ${plan.dependencies.length} 件`,
@@ -3705,6 +4126,14 @@ function renderSummary(plan) {
     '## risk と権限',
     `- risk: ${plan.risk.level}（${plan.risk.factors.map((f) => f.code).join(', ') || 'none'}）`,
     `- 要求権限: ${plan.permissions.join(', ')}`,
+    '',
+    // Declared and derived apart (CommandMate #3004): the derived half is a
+    // permission, not work, and most of its paths do not exist.
+    '## scope の本数（宣言 + 導出）',
+    ...plan.issues.map((issue) => {
+      const { declared, derived } = scopeCounts(issue);
+      return `- #${issue.number}: 宣言 ${declared} 本 + 導出 ${derived} 本（scope_defaults。使われなくても害の無い許可）`;
+    }),
     '',
     '## 次の一手',
     '- この plan を確認し、後続 phase（#1454-1456）で dispatch/PR/merge を実行する。',
@@ -3769,7 +4198,11 @@ function run(argv) {
   // Before the warnings are assembled: a suppressed inference becomes an open
   // question on its consumer, and openQuestionWarnings below is what carries
   // every question into `warnings` (Issue #52).
-  recordSuppressedInferences(analyses, suppressed);
+  const humanOnly = humanOnlyNumbers(analyses);
+  // A lexical pair with a human-only side is not a question: nothing is ever
+  // scheduled against that side (Issue #286).
+  recordSuppressedInferences(analyses, suppressed.filter((pair) => !humanOnly.has(pair.consumer) && !humanOnly.has(pair.producer)));
+  const droppedQuestions = dropHumanOnlyQuestions(analyses, humanOnly);
   // Profile warnings first: a plan built against the wrong repository is the
   // premise a reviewer has to settle before reading anything downstream of it.
   // Then per-issue extraction warnings — first the candidates that never reached
@@ -3784,14 +4217,21 @@ function run(argv) {
     ...scopePatternWarnings(analyses),
     ...openQuestionWarnings(analyses),
     ...dependencyWarnings,
+    ...humanOnlyWarnings(edges, humanOnly, droppedQuestions),
   ];
   if (depErrors.length > 0) {
     const first = depErrors[0];
     throw new SkillError(first.code, first.detail, 5);
   }
 
-  const waves = planWaves(analyses, edges, inputs.maxParallel, inputs.order);
-  const plan = buildPlan({ runId, profile, inputs, analyses, edges, waves });
+  // Waves and risk are about what dispatch runs, so a human-only issue and every
+  // edge touching one are left out of both (Issue #286). With no such issue these
+  // are the full lists, and the plan is the one written before.
+  const dispatchable = analyses.filter((analysis) => !humanOnly.has(analysis.number));
+  const dispatchEdges = edges.filter((edge) => !humanOnly.has(edge.issue) && !humanOnly.has(edge.depends_on));
+  const order = inputs.order ? inputs.order.filter((number) => !humanOnly.has(number)) : inputs.order;
+  const waves = planWaves(dispatchable, dispatchEdges, inputs.maxParallel, order);
+  const plan = buildPlan({ runId, profile, inputs, analyses, edges, waves, dispatchable, dispatchEdges, humanOnly });
   // The PLAN carries the severity annotation (execution-plan.v2's `note_entry`
   // grew an optional `severity` in #199); the result ENVELOPE below carries the
   // same code/detail pairs without it. orchestrate-result.v1 is a closed v1
@@ -3839,10 +4279,12 @@ function run(argv) {
   ];
 
   const completionCheck = completionChecks(plan, depErrors, true);
-  // `partial` iff a BLOCKING warning was raised (#199). A run whose only warnings
-  // are notices is `success` WITH warnings: the concerns are all in the artifact,
-  // named and addressed to someone, and none of them is a decision still owed.
-  const status = hasBlockingWarning(warnings) ? 'partial' : 'success';
+  // `partial` iff ANY warning was raised (#301), as SKILL.md has always said.
+  // #199 let a notice-only run read `success`, and a lead measured what that
+  // costs: two `scope_pattern_dropped` notices — the issue's prohibitions, lost —
+  // under a green `success`. `severity` still ranks what to read first; it no
+  // longer decides the colour.
+  const status = warnings.length > 0 ? 'partial' : 'success';
   const result = buildResult({
     status,
     runId,

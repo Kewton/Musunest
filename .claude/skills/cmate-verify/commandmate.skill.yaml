@@ -1,7 +1,7 @@
 schema_version: 1
 id: cmate-verify
 name: cmate-verify
-version: 0.5.1
+version: 0.6.1
 summary: 検証ゲートを .commandmate/verify.yaml に宣言し、未着手ガードとプライマリ checkout skip を挟んで worktree で逐次実行し、出力ではなく実 exit code で合否を判定する bash 3.2 互換ランナー。
 description: >-
   「このリポジトリで何が通れば合格か」を `.commandmate/verify.yaml`（形式 v1）に宣言し、
@@ -73,6 +73,9 @@ compatibility:
     - agent: command-code
       support: native
       evidence: 'Measured 2026-09-04 on Command Code 1.47.0 (CommandMate#2322): discovered from .agents/skills (cmd skills list, /skills picker); /<name> emits skill_loaded and runs. .claude/skills is not read; the installer''s .agents/skills copy suffices. No restart needed.'
+    - agent: opencode-v2
+      support: native
+      evidence: 'Measured 2026-09-29 on opencode2 2.0.18 (CommandMate#2975): GET /api/skill lists SKILL.md from .agents/skills and .claude/skills; /<name> makes the model call the skill tool. No restart needed. Not in v2''s / palette (@ and /skills only). This package was NOT separately measured.'
 requirements:
   commands:
     - name: bash
@@ -96,20 +99,20 @@ risk_rationale: >-
   verify.yaml に限られる。credential は読まない。
 files:
   - path: SKILL.md
-    sha256: d28fb20a4081a4fa2daa75390a06daa5faf44e44ea68559aba1b1c61dc58f070
-    size: 22260
+    sha256: 7a576aee2678354b4e244a4ca01443e0c4dd582610231c69174b5702e036b076
+    size: 22806
     kind: skill_md
     executable: false
     script: false
   - path: references/release-notes.md
-    sha256: f1c58cdb094cfc859d94a9ae217c227a949dcd1e580d0786643cddbff15d00b4
-    size: 8413
+    sha256: 4f12c5288b495bc74188742b977a0612e178d3d3804f63f44600d67827714171
+    size: 9392
     kind: instruction
     executable: false
     script: false
   - path: scripts/verify-run.sh
-    sha256: 505a8d145707a53badca1dda0faaa6d9206b2985abf4265ca216ac4c85bc9561
-    size: 43243
+    sha256: c1c89157ada9c1661d9a6cca872b976ba5c2b74776c5e90f6f62a7b6d087de38
+    size: 45416
     kind: script
     executable: true
     script: true

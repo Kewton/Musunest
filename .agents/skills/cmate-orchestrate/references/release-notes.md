@@ -493,7 +493,237 @@ plan は展開しない（ADR 不変条件3）ので、可視にできるのは�
 
 ---
 
+### CommandMate #3002（+ #273） — 「変えるな」と書いたファイルほど scope に入っていた
+
+planner は Issue 本文の**全体**から path を拾い、`## 対象ファイル` を持つ Issue でも地の文の
+path を `scope.allow` に入れていた。実測（Kewton/Musunest）:
+
+- 完了条件に「（依存の宣言の）ファイルの差分が 0 であること」と書いたら、そのファイルに
+  **書き換えの許可が付いた**（#181）。「`ci.yml` に手を入れる必要が出たら止めて返す」でも
+  `ci.yml` が scope に入った（#183）
+- `/` の無い `app.spec.yaml` も拾われ、宣言外の path として dispatch できなかった（#211）
+- 追記の説明文に書いた見本の短い綴りが `ambiguous_file_candidate` を立て、2 日止まった（#180）
+
+利用側は「地の文に path を書かない」運用で補っていた。**禁じた path ほど権限になる**ので、
+指示で禁じるより危ない。
+
+→ 成果物見出しを持つ Issue では、**その範囲の外の path を `suspected_files` に入れず**
+`reference_files` に回し、Issue ごとに1件の `prose_path_ignored`（notice）で名指す。
+**既定で有効にした**（利用者と Issue 上で確認済み。成果物見出しを持つ Issue はすべて挙動が変わる）。
+見出しの無い Issue は変えない —— そこでは散文が唯一の記述である。#219 が pattern に引いた線
+（明示の宣言が言及に優る）を path 全般へ延ばした。
+
+同じ変更に2つを含めた。どちらが欠けても、この変更が新しい穴を開ける:
+
+- **#273: 成果物見出しの範囲を下位の `###` で切らない。** 以前は `### 新規ファイル` で範囲が
+  切れ、その下の path は「地の文」として（偶然）scope に入っていた。地の文を外すだけだと、
+  小見出しで整理した Issue の path がすべて scope から消える（文書 path は以前から
+  `reference_files` に落ちていた。Kewton/CommandAgent #500）。
+- **否定で終わる見出しを成果物見出しから除く。** `DELIVERABLE_HEADING_RE` は語が含まれていれば
+  一致するので、`## 変更対象外` / `## 対象ファイル外` が成果物見出しだった。地の文を外した後では、
+  「変えるな」を見出しで書くことが**権限を配る最後の書き方**になる。
+
+受け入れた副作用: 完了条件にしか書いていないテスト path は scope に入らず、受入条件がテストを
+求めていれば question で止まる（fixture 93）。短い綴りの `ambiguous_file_candidate` は
+立たなくなる（fixture 57 の期待値をこの向きに改めた。question そのものは見出しの無い fixture 19 が
+固定し続ける）。起票側（cmate-issue-authoring の `validate-plan.mjs`）の写しも同じ commit で揃えた。
+
+### CommandMate #3003（+ #272） — `## 対象ファイル` に書いた `.ebnf` / `Cargo.lock` が scope に入らなかった
+
+`## 対象ファイル` に `packages/appspec-schema/contract/expression.ebnf` を宣言したが、`FILE_EXT` に
+`.ebnf` が無いので scope に入らず、利用側はファイルを `expression-grammar.md` に**改名して**回避した
+（Kewton/Musunest#212）。同じ形で `Cargo.lock`・`requirements/ci.txt` も入らず、依存更新の Issue を
+worker に出せなかった（#272、Kewton/CommandAgent#520）。`Cargo.lock` は `/` が無いので
+`unrecognized_file_extension` すら出なかった。#43・#56 に続く同じ形の3度目である。
+
+→ **成果物見出しの下では、backtick の file 名を拡張子によらず拾う**（案 B。拡張子の無い `Makefile`・
+`.gitignore` と `/` の無い名前も含む）。backtick 無しと見出しの外は従来どおり。
+
+**案 A（profile の欄 `planner.extra_extensions`）を採らなかった理由**: cmate-issue-authoring の
+`validate-plan.mjs` は profile を読まないので、欄で足した拡張子は**起票時の検査と planner の判定を
+食い違わせる**。案 B は本文だけで決まり、写しにそのまま載る。拡張子を足し続ける運用（#43・#56・#272）も
+要らなくなる。`FILE_EXT` が閉じている理由（散文の token を権限にしない）は、見出しの下では
+成り立たない —— #219 が glob について下したのと同じ判断である。利用者と Issue 上で確定した。
+
+### #286 — `human-only` ラベルの Issue を、利用側が plan から手で外していた
+
+cmate-issue-authoring 0.10.0（CommandMate #3013）で、人がやる Issue（スマホでのデモ、手で書く文書）を
+`labels` の `human-only` で計画に入れられるようになった。validator は `NOTE dispatch_excluded` で
+「dispatch の対象ではない」と名指すが、planner はこの印を読まなかった。渡せば「Affected files are unclear」が
+立ち、dispatch されうる。利用側（Kewton/Musunest）は human-only の Issue の番号を plan から手で外していた。
+
+→ **plan から消さず、wave から外す。** `issues` と `dependencies` には残して印 `dispatch_excluded: "human_only"` を
+付け、wave・merge_order には入れず、question は立てず、notice `human_only_excluded` を出す。印の判定は
+`human-only` ちょうどの名前（validator と同じ定数。mirror-conformance が byte 一致を検査する）。
+
+判断したこと:
+
+- **plan に残す（消さない）。** 消すと、依存の辺と人がやる作業の見通しが plan の読み手から見えなくなる。
+  dispatch は plan の印を読んで外す（ラベルは読まない）。
+- **依存は待たない。** dispatch には人の作業の完了を待つ手段が無い。待つ形（依存側も止める）にすると、
+  依存側は「人が終わった」ことを誰も書き込めない場所で止まり続ける。だから plan の外の Issue への依存
+  （`external_dependency`）と同じ扱いにし、wave も dispatch も待たずに進め、plan では blocking の
+  `human_only_dependency`、report では同名の limitation で「#N depends on human-only #M」と名指す。
+  blocking にしたのは、「その人の作業は終わったか」が `external_dependency` と同じく**まだ誰も決めていない**
+  判断だからである。辺そのものは `dependencies` に残す。
+- **`human_only_excluded` は notice。** ラベルが既に下された判断で、warning はそれを守ったことの報告である。
+  blocking にすると、正しくラベルを付けた plan が毎回 `partial` になる（#199 が避けた形）。
+- **question を立てない。** question は worker が要るもの（対象 file・受入条件の読み取り）を訊く。worker は来ない。
+  立てなかった件数は notice に出す。
+- ラベルの無い plan は byte 一致（全 golden がそのまま通る）。
+
+正本: [plan-contract.md](./plan-contract.md) 第3.3節。
+
+### #301 — 入力の禁止パスが落ち、伴走導出が禁止を上書きし、警告があるのに `success` だった
+
+Kewton/CommandMate#3059 の実機確認（0.37.0）。`scope.allow: [src/greet.js]`・`scope.deny: ["test/**", ".commandmate/**"]`
+のタスク契約を Issue に書き写して計画させると、(1) `test/**` / `.commandmate/**` は成果物見出しの外の pattern として
+`scope_pattern_dropped` で落ち、計画にも契約にも禁止が残らなかった。(2) profile の `scope_companions` が
+`test/greet.test.js` を許可に足した —— 元の契約が禁止していた path である。(3) 警告が2件あるのに `success` だった
+（SKILL.md は「warning が1件でもあれば success にしない」と書いている。#199 が notice を色から外していた）。
+lead は計画を実行せずに人へ報告した。
+
+→ **禁止は宣言として読む。** 禁止の見出し（`変更してはならない` / `変更禁止` / `forbidden` / `変更対象外` …）の下、
+または同じ語のラベル行（`- 変更してはならないパス: …`）の候補は、scope 候補にせず plan の `scope_deny` に入れ、
+dispatch がそのまま契約の `scope.deny` に書く（従来は常に `deny: []`）。運べない形（絶対 path・`..`・件数/長さ超過）は
+`scope_deny_untransferable`、成果物と禁止の両方に書いた path は `scope_deny_conflict` の question で止める（黙って落とさない）。
+導出（lockfile・慣習 test・`scope_companions`）は禁止に当たる path を足さない。禁止の無い plan は byte 一致。
+
+→ **warning が1件でもあれば `partial`。** #199 の「notice は色を変えない」をやめた。`severity` は「どれから読むか」の
+順位として残る。notice だけの plan が緑だったので、禁止が落ちた plan を読み手が「通った」と読めた。
+
+正本: [plan-contract.md](./plan-contract.md) 第5.6節・第5.10節。
+
 ## dispatch（`scripts/dispatch.mjs`）
+
+### #306 — 1回目だけ落ちるゲートの内訳が、内訳を読むための再実行で消えていた
+
+1ターン目の `wait --verify` が exit 20 を返すと、runner は失敗の内訳を読むために**検証をもう一度実行していた**
+（`describeFailingGates`）。#303 の実機確認（cmate-orchestrate 0.39.0 / CommandMate 0.43.0）では、初回だけ落ちる
+`marker` ゲートが run 1205 で FAIL し、内訳のための再実行 run 1206 は全 PASS だった。ワーカーへの再指示は
+「内訳を取得できませんでした。`commandmate verify <worktree-id>` を自分で実行して確認してください」になり、ワーカーは
+案内どおり `--task` なしで実行して（run 1207）task に紐づかない run（scope SKIP・env-clean ERROR）を受け取った。
+再実行は全ゲートをもう一度走らせるコストもかかる（CommandMate 本体なら unit 全体で約20分）。
+
+→ **1回目の裁定の run を読む。** `verify history --worktree <id> --limit 1 --json` → `verify show <run-id> --json` で
+その run の `gates[]` と `logTail` を取り、再実行は読めなかったときだけの退避路にした。内訳が無いときの文言は、
+task id があり CLI に `verify --task` があれば `commandmate verify <worktree-id> --task <taskId>` を案内する。
+
+判断したこと:
+
+- **#303 で見送った理由（並行する別の run の取り違え）は、`taskId` と `trigger: wait` の突き合わせで抑える。**
+  直近 run がこの task の `wait` の run でなければ読まない（`show` も呼ばない）で、従来の再実行に戻る。戻った理由は
+  `verification.checks` に1行残る。
+- **読み戻すのは最初の裁定だけ。** 再指示の後のターンは #303 の `verify --task` の run 文書をそのまま使う。
+- **history / show の有無は `--task` と同じ `verify --help` の1回で判定する。** 無い CLI（< 0.21.0）では従来の
+  再実行のまま、limitation `verify_history_unsupported` を run に1件。1ターン目で合格する run の呼び出しは変えない。
+- **fake CLI は `cli_verify_history: true` の scenario でだけ history / show を持つ。** #306 より前の case は再実行の
+  CLI のままで、期待値は変えていない。
+
+### #303 — 再指示の後の `wait --verify` が契約 task に紐づかず、直った worker が不合格になりえた
+
+CommandMate の `wait --verify` は進行中の task にしか紐づかない。1回目の裁定で task は `succeeded` / `failed` に
+閉じ、再指示の素の `send` は task を作らないので、2ターン目以降の `wait --verify` は契約に紐づかない run になる。
+CommandMate 側の実測（Kewton/CommandMate#3118）では、その run は scope が SKIP、env-clean が「ベースライン無し」の
+ERROR で exit 20 になり、ゲートも契約の `verify.gates` ではなく verify.yaml の全部（unit 全体で約21分）だった。
+runner にとっては、正しく直った worker が不合格と裁定され、`--max-turns` まで再指示が続くことになる。
+
+→ **裁定が出た後のターンは `wait`（`--verify` なし）→ `verify <id> --task <taskId> --json` の exit code で裁く。**
+`verify --task`（CommandMate 0.43.0+）は終了済みの task にも紐づき、`--gates` を省くと契約の `verify.gates` ＋必須の
+builtin で検証する。exit の意味は `wait --verify` と同じに扱う。1ターン目は従来どおり `wait --verify`。失敗ゲートの
+内訳（`describeFailingGates`）も `--task` 付きで読み、裁定が `verify --task --json` から来たターンはその run 文書を
+そのまま使って再実行しない。`--reverify` は前の report の `task_id` が引けるときだけ `--task` を渡す。
+
+判断したこと:
+
+- **`--task` の有無は `verify --help` で、必要になった時点で1回だけ聞く。** `probeContractSupport` と同じ形で、
+  版番号は比べない。1ターン目で合格する run は従来と同じ呼び出ししかしない。
+- **無い CLI では従来の `wait --verify` のまま、limitation `verify_task_unsupported` を run に1件。** 紐づかない裁定を
+  黙って続けると、report の `pass` / `fail` が「契約で判定した」のか「verify.yaml 全部で、scope を判定せずに」なのか
+  読めない。
+- **`verify history` / `show` で直前の run を読む案は採らなかった。** 並行する別の run を取り違えない手当てが要る。
+
+### #274 — `--reverify` が対象 Issue を必ず同時に検証し、重いゲートを直列にできなかった
+
+`--reverify` は再判定の対象を全件同時に走らせていたので、`cargo test --all-targets` のような重いゲートを
+2件並べると、実行時間に依存するテストが負荷で落ち、1件ずつなら通る Issue が `verification_failed` になった。
+直列にする正規の手段が無かった（`--schedule dag` は併用不可、`--max-parallel` は plan の値で変えると report と
+一致せず拒否される）。`--verify-concurrency <n>` を足し、`--reverify` の再判定を同時 n 件までにできる。
+run の引数であり run id にも突き合わせにも入らない。渡さない run は従来どおり全件同時で、report は byte 一致。
+指定した run は `verify_concurrency_limited` に値を残す。`--reverify` 無し・0・負数・非整数は `invalid_input`。
+
+### #286 — plan に入った human-only の Issue にも worker が割り当てられえた
+
+planner が human-only の Issue を wave から外しても（上の planner の節）、dispatch が plan の `issues` 全体を
+前提にしていれば、pre-flight（question・scope・worktree）で止まるか、report にその Issue の記録が無いまま
+終わる。
+
+→ **`--only` と同じ 1 か所の絞りを、`--only` より先に置いた。** 起動直後に、印 `dispatch_excluded: "human_only"` の
+Issue とそれに触れる辺を plan から外し、report の最後の waves[] entry に `not_dispatched`（note `human-only`）で
+戻す。limitation `human_only_excluded` が理由を、`human_only_dependency` が待たずに送った依存を名指す。
+blocking にはせず、status は動かさない。
+
+判断したこと:
+
+- **ラベルではなく plan の印を読む。** plan は承認された成果物であり、印の無い古い plan は書かれたとおりに
+  dispatch する（黙って挙動を変えない）。
+- **`--only` に human-only の Issue を書くと全体を断る**（`invalid_input`）。どの run も dispatch しない Issue を
+  「選んだ」run は argv と結果が食い違う。human-only への辺は `--only` の依存検査の前に外れるので、
+  human-only に依存する Issue だけを選ぶことはできる（dispatch はもともとその辺を待たない）。
+- **全 Issue が human-only の plan は `plan_invalid` で断る。** wave が空の plan を「何もしない success」に
+  すると、status が「dispatch した」ように読める。detail が理由を名指す。
+- `dispatch_schema_version` は 1 のまま。新しい enum 値も field も足していない（`not_dispatched` と limitation は既存の語彙）。
+
+正本: [dispatch-contract.md](./dispatch-contract.md) 第3.0.6節。
+
+### CommandMate #3004 — 導出したテスト候補が goal に並び、見かけの本数で判断を誤った
+
+planner は宣言した各ソースについて慣習的なテスト path（`.test` / `.spec` / `__tests__/…`）を
+`scope_defaults` に導出し、dispatch はそれを契約 goal の `## Files you may change` にも全件並べていた。
+`X.test.ts` を隣に置く規約の利用側では、その半分以上が実在しない。実測（Kewton/Musunest）で
+列挙 55 / 実在 20（#180）、61 / 22（#182）、60 / 22（#181）。「概ね 30 本超は dispatch できない」の
+判断が見かけの本数で膨らみ、利用側は「実在するファイルの数で判定する」と毎回依頼文に書いていた。
+goal は 8000 文字で切られるので、実在しない候補が本文の枠も食っていた。
+
+→ **goal には宣言した file だけを並べ**、導出分は本数を1行で述べる。plan は **宣言の本数と導出の本数を
+分けて**出す（`summary_markdown` と `issue-analysis.md`）。`scope.allow` の導出（L1）は変えない。
+
+Issue の当初案は profile の欄（`tests.layout: colocated | __tests__ | both`）で導出する形を絞るもの
+だったが、それは [ADR](./adr-scope-derivation.md) 第15.2節が却下した「profile が組み込みの L1 を上書きする」
+にあたる（設定ゼロで効く L1 の保証が profile 次第になる）。困っていたのは (1) 見かけの本数と (2) goal に
+並ぶ実在しない候補の2つだけであり、どちらも許可を削らずに解けるので、**ADR を変えずに軽い手で解いた**
+（Issue 上で利用者と確定）。使われない許可のコストはゼロ、という設計はそのままである。
+
+### CommandMate #3008 — plan の一部だけを dispatch する方法が無く、組み直していた
+
+5 本の plan のうち 2 本が条件（宣言外のパス・宣言が scope に入らない）を満たさなかった。dispatch は
+plan 全体を走らせるので、条件の揃った 3 本だけ動かすには plan を組み直すしかなかった。
+
+→ `dispatch.mjs --only 12,14,15` を足した。plan ファイルは触らず、起動直後に `issues` / `waves` /
+`dependencies` を選んだ Issue だけに絞る（絞りを 1 か所にしたので、barrier・pre-flight・lock・report が
+別々の「一部」を見ることが無い）。
+
+判断したこと:
+
+- **断り方は「全体を断る」にした（利用者との問答で確定）。** 選んだ Issue が選外の Issue に依存しているとき、
+  その Issue だけを外して残りを走らせる案もあった。しかしそれだと、argv に書いた 3 本のうち 2 本しか走らない
+  run になり、「なぜ 2 本か」を report を読まないと再構成できない。全体断り（`invalid_input`、exit 3、
+  `--out` 未作成）なら、直して同じコマンドを再実行するだけで済む。code は新設せず、plan に無い番号と同じ
+  `invalid_input` にした。ただし依存先が `--resume` で引き継いだ pass 済みの記録なら断らない（すでに満たされて
+  いる）。main に merge 済みかは調べない。依存として数えるのはスケジューラが辿る辺だけ（`lexical` の辺と plan 外への
+  辺は数えない）。
+- **pre-flight は選んだ Issue だけを見る。** 絞った plan を全工程が読むので、選外の Issue の宣言不備・
+  worktree 欠落は run を止めない（止めていたのが、この Issue の原因そのもの）。
+- **選外の Issue は `not_dispatched`（note `excluded by --only`）で記録し、blocking にしない。** 選んだ Issue が
+  すべて pass なら run は `success`。前回 attempt が pass させていたものは、その記録を転記する（最後の記録が
+  勝つ読み手の上に「excluded」を上書きしないため）。
+- **report は「plan 全体」と「今回の部分集合」の両方を残す。** 任意の `plan_scope` と `only_subset` limitation。
+  required にしていないので既存 report は検証を通り、`--only` を使わない run は byte 一致のまま。
+- **wave は plan の順序を保ったまま選外を除き、空になった wave は飛ばす。** `max_parallel` は変えない。
+- **`--resume` / `--reverify` と併用できる。** `--only` を渡さない resume は前回 report の部分集合を
+  引き継ぐ。引き継がないと「部分集合の run を再開したつもりが、選外まで dispatch される」矛盾が出る。
+
+正本: [dispatch-contract.md](./dispatch-contract.md) 第3.0.5節。
 
 ### CommandMate #1447 — 公式経路は public `commandmate` である（ADR）
 
@@ -1417,7 +1647,155 @@ transcript は `cliToolId` が `claude` のときだけ読み、**候補が2つ�
 **どちらも実作業が在る**（判定されて落ちた変更／未 commit の変更）ので、「なぜ何も無いのか」という
 問い自体が立たない。
 
+### CommandMate #3006 — 新しいセッションへの最初の送信が、起動待ちに負けて落ちていた
+
+Kewton/Musunest #201・#213・#217・#233 で、dispatch が新しく起動したワーカーへの**最初の送信**が
+`Command Code prompt not ready: timed out waiting for the composer before sending` で毎回落ちた
+（worktree は無傷）。同時に動いていたワーカーは 1〜2 本で、並列度のせいではない。上流は送信の前に
+composer を待ち、見つからなければ**打鍵する前に**止める —— つまり何も届いていない。管理が
+`--resume` で送り直すと通っていた。
+
+→ 起動中（503 `SESSION_STARTING`。上流側で Command Code もこの code を返すように直る）と
+prompt not ready の2つだけを「未送信・送り直してよい」と読み、定数の間を置いて**1回だけ**送り直す。
+判定は exit 99 と文言の両方で行う —— 409 も exit 99 で出てくるので、exit code だけで送り直すと
+別の拒否まで繰り返す。exit 2（PROMPT_WAITING）も送り直さない。再送の事実は
+`send_retried_not_ready` として report に残す（黙って送り直すと、`--resume` を要した run と
+区別がつかない）。待ち時間は flag にしない（起動の競合を吸収するためのもので、run ごとに
+調整するものではない）。fixture は `CMATE_ORCHESTRATE_SEND_PAUSE_MS=0` で実時間を待たない。
+UAT の fix worktree もその run が作るので最初の送信は必ず起動を伴い、同じ判定を共有する
+（`scripts/lib.mjs`）。正本: [dispatch-contract.md](./dispatch-contract.md) 第2.13節。
+
+### CommandMate #3007 — 前の回の質問画面が composer を塞いで、送信が理由なく落ちていた
+
+Kewton/Musunest #201・#204 で、前の回に質問を返して止まったワーカーのセッションへ新しい契約を
+送ると、残った質問画面が composer を塞いで送信が通らなかった。#201 の送信は #3006 と同じ
+`prompt not ready`（exit 99）で落ちており、report からは「起動が遅かった」と区別がつかなかった。
+上流の送信ガード（#1708）は読める質問なら 409 で止めるが、読めない質問 UI と plan レビューは
+意図的に素通りさせる（Codex の pager や `/model` まで止めないため）ので、上流だけでは直らない。
+管理は質問に答えずに `commandmate interrupt` で古いターンを畳んでから送り直していた。
+
+→ dispatch が最初の send の**前に** `capture --json` を読み、`isPromptWaiting` か
+`isSelectionListActive` が立っていれば送らずに `stale_prompt_on_session` で止める（画面の抜粋と
+`commandmate interrupt` の案内つき）。サーバ側のガードは変えない（上流 Issue での決定）。
+`--interrupt-stale-prompt`（既定 off）は管理の手順を runner がやるもので、interrupt の後に
+**capture を読み直して composer に戻ったことを確かめてから**送る —— Command Code の
+AskUserQuestion / plan レビューに Esc を送ったときにキャンセルになるのかは実測されていないので、
+interrupt の exit code だけを信じない。戻らなければ同じ code で止める。どの経路でも質問には
+答えない。fixture は CommandMate 側の Command Code 検出 fixture（AskUserQuestion・読めない
+質問 UI・plan レビュー）を capture の JSON として渡す（`tests/fixtures/cmate-orchestrate/stale-screens/`）。
+
+各 worker の最初の send の前に capture が1回増えるので、capture の回数を数えていた既存の
+fixture（d76〜d78）は回数だけを直した。最初の capture が読めない場合は送信を止めない（上流の
+ガードと同じく fail-open）ので、capture が読めない世界の既存 case の結論は変わらない。
+正本: [dispatch-contract.md](./dispatch-contract.md) 第2.14節。
+
+### CommandMate #3009 — 監督の nudge が固定文で、ワーカーに「進めてよい許可」と読まれた
+
+dispatch の nudge（「完遂してください」）は固定文だった。指示どおりに書けない状況のワーカーが
+これを許可と読み、指示を読み替えて完遂した（Musunest #159）。利用側は「書けないと分かったら
+止めて報告する」を必ず添えると決めたが、runner の文面が固定なので添える手段が無かった。
+
+→ 既定文に「指示どおりに書けないと分かったら、進めずに止めて報告してください。」を足し、
+profile の `worker_messages.nudge` と `--nudge-message` で**追記**できるようにした（優先順位は
+flag → profile）。差し替えにしなかったのは、既定文の「単一 commit が完了の合図」の行を消せると、
+commit を待つ監督ループの前提が profile 1 行で崩れるため。`dispatch_defaults` に置かなかったのは、
+あちらが真偽値と整数だけで未知 key を拒否する object だから。止まったワーカーを max-turns まで
+nudge して最後に failed にする扱いは変えていない。commit 依頼と `cmate-uat` の fix nudge も対象外。
+
+### #287 — nudge に従って止めて報告したワーカーの報告が、report のどこにも残らなかった
+
+上の #3009 で nudge に「止めて報告」を足した結果、ワーカーはそれに従って止まるようになった。しかし runner は
+止まったワーカーへ `--max-turns`（既定 8）まで nudge を送り続け、最後は「no commit / no work evidence」の
+`failed` にしていた。**ワーカーが書いた報告の文は report に残らず**、報告の無い無進捗と同じ行に並んだ。
+利用側（Kewton/Musunest）は止まって返すことを良い停止として扱っており、報告の文が残ることを求めていた。
+
+→ nudge のターンが進捗なしで終わり、ワーカーの transcript がその nudge への返答の文で終わっていたら、
+それを「止めて報告した」と読み、**その時点で nudge を止めて** worker 記録の `worker_report` と blocking
+`worker_stopped_with_report`（`worker_failed` の隣）に報告の文を写すようにした。正本は
+[dispatch-contract.md](./dispatch-contract.md) 第2.12.1節。
+
+判断したこと:
+
+- **見分けるのは nudge のターンだけにした。** 最初のターンで「まず読みます」と返して止まるワーカーは珍しくなく、
+  それを報告と読めば従来 nudge で前に進んでいた run を止めてしまう。「止めて報告」を頼んでいるのは nudge なので、
+  nudge への返答だけを報告として読む。
+- **返答の出どころは transcript にし、画面は使わなかった。** `capture --json` の `realtimeSnippet` には nudge 自身の
+  エコーが返答と並んでおり、どの行がどのターンのものかを画面は言えない。transcript なら「最後の human message が
+  この nudge で、その後の最後の発話が文」と言えて、それが「この返答はこのターンのものだ」の根拠になる。
+  読み方（`cliToolId` と `*.jsonl` がちょうど1つ）は #220 と共有し、2つの読み手が別の file を選ぶことが無いようにした。
+- **見分けたら nudge を止めることにした。** 同じ問いに既に答えたワーカーに同じ nudge を送っても、ターンを cap まで
+  使って報告を埋もれさせるだけである。次の一手（報告を読んで Issue を直すか `--resume`）は人が決める。
+- **裁定と停止理由は動かしていない。** `worker_state` は `failed`、`stop_reason` は `worker_failed`（enum は閉じた集合）、
+  `verification.outcome` はそのターンの `wait --verify` のまま。区別は新しい blocking code と `worker_report` が担う。
+  `worker_report` は schema で required にしていないので、既存 report は検証を通る。
+- **報告を読めなかったとき（`capture` 失敗・Claude 以外・transcript が無い / 2つ以上）は、止めない。**
+  「読めなかった」を報告と読めば、読めないだけの run が早く止まる。従来どおり cap まで nudge し、cap で #220 の
+  `worker_turn_evidence` を記録する。報告の無い無進捗（最後が tool 呼び出し・nudge が記録されていない）も同じ扱いで、
+  従来の挙動を変えていない。
+
+---
+
 ## merge（`scripts/merge.mjs`）
+
+### #296 — Command Code など Claude 以外のワーカーの返答が読めず、止めて報告しても上限まで nudge されていた
+
+#287 は返答を Claude Code の転写（`capture --json` の `cliToolId` が `claude`、`*.jsonl` がちょうど1つ）から読んでいた。
+Command Code など他のエージェントは「読めなかった」扱いで、止めて報告しても cap まで nudge され、`failed` の
+まま返答は report に残らなかった。上流 CommandMate 0.43.0 の `commandmate reply` は、転写リーダーが台帳に書いた
+行だけを返答とみなして返す（claude / codex / antigravity / command-code / opencode）。
+
+→ `reply` を持つ CLI では、返答の読み取りを `commandmate reply <worktree-id> --since <その nudge を送る直前の時刻> --json`
+に置き換え、出どころを `worker_report.source: commandmate_reply` として残す。返答の文への規則（上流エラー署名なら
+報告なし・末尾を残す 600 字・`truncated`）は #287 のまま。正本は [dispatch-contract.md](./dispatch-contract.md) 第2.12.1節。
+
+判断したこと:
+
+- **`reply` の有無は `reply --help` の成否を 1 回だけ probe して決めた。** 起動時の `send --help` / `wait --help` と同じ流儀で、
+  `commandmate --version` の比較は採らなかった（版番号ではなく、その CLI が実際に答えるかを見る）。
+- **`reply` が無い CLI（0.43.0 未満）では、従来の Claude 専用の転写読みに戻す（フォールバック）。** 「読めない」扱いにすると
+  0.35.0 で読めていた Claude のワーカーが後退するため。どちらでも dispatch は失敗させない。
+- **`reply` が exit 0 以外・JSON が読めない・`reply: null` のときは報告なし**として従来の無進捗の扱いに落とす。`reply` は pane に
+  フォールバックしないので、返答の無いターンを報告と読むことは無い。
+- **`--since` は nudge を送る前に取った時刻にした。** 送信後に取ると、速いワーカーの返答がそれより前になり得る。
+- **`--instance` は渡していない。** dispatch は `send` / `wait` にも instance を渡しておらず、3 つとも worktree の
+  primary instance を指す。`--instance` を足すなら send / wait と同時に足す。
+- `worker_report.source` の enum に `commandmate_reply` を足しただけで、`worker_report` は required のまま増えていない。
+  blocking `worker_stopped_with_report` の detail は、出どころに応じて「`commandmate reply` で読んだ」または
+  「Claude Code の転写から写した」と言う。
+
+### CommandMate#3005 — `--create-prs` の PR が、利用側の運用では merge できなかった
+
+利用側（Kewton/Musunest）は「検証が緑になったらワーカーが push して PR を作り、管理が merge する」で
+回しており、**毎回あとから追加のメッセージで push を指示していた**。1件はワーカーが「skill 第4節と
+実行契約が禁じている」として断った（Kewton/Musunest#210）。起票時の提案は「実行契約でワーカーに
+push と PR を許可する」だったが、問答で確かめると、**PR を作る経路はすでに `merge.mjs --create-prs`
+にあった**（run `plan-01ba9bc589cb` の #248 に preview で実行。push・PR 準備までそのまま使え、本文の
+検証証跡はワーカーに書かせていたものより充実していた）。使われていなかった理由は2つだった。
+
+1. **PR タイトルが Issue タイトルそのものだった。** 利用側は PR タイトルを Conventional Commits で
+   CI 検査しており（semantic-pull-request）、squash の件名＝PR タイトルなので、日本語の Issue
+   タイトルのままでは merge できない。
+2. **ワーカーの「読み替え・判断」の申告が PR 本文に載らなかった。** 本文は dispatch report から作られ、
+   申告はワーカーの最後の報告にしか無い。利用側は「読み替えの申告があれば merge せず窓口へ返す」を
+   決まりにしていて（先に merge された Kewton/Musunest#233 から）、申告は merge を止める合図である。
+
+→ **ワーカーは push も PR も作らない既定のまま**にした（二重 PR を防ぐ `cmate-worker-development`
+第4節と実行契約の文面は変えていない）。代わりに `--create-prs` を利用側の運用で使えるようにした。
+
+- profile に `pr_title_template` を足した（[profile-contract.md](./profile-contract.md) 第13節、
+  [merge-contract.md](./merge-contract.md) 第5.7節）。`{{type}}` / `{{scope}}` は**ブランチ自身の
+  コミット件名**から取る。Issue の label から取る案は採らなかった —— label の語彙（`enhancement` /
+  `bug`）は type の語彙ではなく、対応表はこの runner が発明する第二の規約になる。コミット件名は
+  ワーカーが既にリポジトリの規約で書いているもので、squash ではそれが PR タイトルに置き換わる
+  （タイトルは件名の後継である）。**決まらなければ推測せず、その PR を作らずに止める**
+  （`pr_title_undetermined`）。推測した type は、タイトル検査に push の後で落とされるか、違う type の
+  まま通るかのどちらかである。欄が無ければタイトルは従来どおり（既存 golden は byte 一致）。
+- ワーカーのコミットメッセージ本文の申告行（`読み替え:` / `判断:` / `本文に無い指摘:`）を PR 本文の
+  「ワーカーの申告」節へ原文転記し、report に `worker_declarations_transcribed` を出す（第5.8節）。
+  置き場所をコミットメッセージにしたのは、ワーカーが既にそこへ書いていて、ブランチと一緒に運ばれ、
+  他の誰も書き込まないからである。利用側では `.commandmate/` は人だけが書く場所なので、
+  ファイルは置かせない。申告が無い run の本文は変わらない。読めなかったときは「読めなかった」と書き
+  （`worker_declarations_unread`）、「申告なし」と見分けがつくようにした。
 
 ### #142 — 無人運転の段階 C（`merge --merge-prs`）
 
@@ -1676,6 +2054,44 @@ PR 本文の対比表は in-scope の変更を「宣言外」として数えて�
 ---
 
 ## uat（`scripts/uat.mjs`）
+
+### #288 — uat の fix nudge だけが固定文で、dispatch と同じ読み替えが起きえた
+
+何が起きたか: dispatch の監督 nudge には「指示どおりに書けないと分かったら、進めずに止めて報告してください。」が入り、
+`worker_messages.nudge` で追記もできた（CommandMate#3009）。uat の修正ループの nudge（`FIX_NUDGE_MESSAGE`）は固定文のままで、
+fix worker が指示どおりに書けないとき、止めずに別の読み替えで進めうる。
+だからこう変えた: 既定文に同じ 1 文を足し（既存の行は消さない）、`worker_messages.fix_nudge` と `--fix-nudge-message` を設けた
+（flag → profile → 既定文の順。追記であって差し替えではない）。設計判断: (1) flag を足したのは dispatch の `--nudge-message` と
+同じ操作で 1 run だけ文面を変えられるようにするため。(2) planner と dispatch は `fix_nudge` を受理する（dispatch は使わない）。
+拒否すると uat 用の欄を書いた profile が dispatch で止まるため。検証規則は `lib.mjs` の `workerMessageProblem` を共有する。
+(3) uat report の schema は増やさず、採用結果は limitations の `worker_messages_applied` に文字数だけ残した。
+
+### #259 — 意味ゲートの producer が 1 つに固定されていて、実機 UAT の判定を入れられなかった
+
+`skill.id` の検査が `cmate-acceptance-test` の 1 値決め打ちだったので、**同じ
+`acceptance-result.v1` を書いても別の Skill の判定は `invalid`** になった。これが効いたのは
+[#260](https://github.com/Kewton/commandmate-skills/issues/260) の `cmate-uat` である。
+
+分担はこうなっている。`cmate-acceptance-test` は**渡された対象を検証する判定器**で、環境は立てない。
+サーバや DB を立てないと確かめられない受入条件は `manual_pending` にしか落とせず、runner では
+`acceptance_conditional`（owner `human`）で止まる。`cmate-uat` はその穴を埋めるために環境を起動し・
+隔離を実測し・TC を回し・証跡を残してから判定する。
+
+**両方を直列に回す案は採らなかった。** `cmate-acceptance-test` は自分で check を実行する設計で、
+外から渡された証跡を受け取る入力を持たない。直列にすると受入条件の抽出・test plan の確認・実行・
+証跡の記録がまるごと二重になり、2 本目から得られるのは「判定の語彙と決定表と schema」だけになる。
+そこで `cmate-uat` 側が同じ schema を書き、**runner が producer を 2 値の allowlist で受ける**形にした。
+
+→ `skill.id` の検査を `['cmate-acceptance-test', 'cmate-uat']` の **allowlist** にし、
+per-issue の `acceptance.producer` に `{id, version}` を記録する。**緩和ではない**:
+この 2 つ以外は従来どおり `invalid` で、「v1 に見えるから通す」ことはしない。
+合成規則（第4.2節）は 1 行も変えていない —— 誰が書いたかは裁定を変えないからである。
+
+`producer` を記録したのは、fix prompt の受入判定見出しを**固定文字列にしていた**のが実害だった
+からである。producer が 2 つになった時点で、その Skill が出していない判定にその Skill の名前が乗る。
+見出しは `acceptance.producer` から組み、名乗れる producer が無い state（`missing` / `invalid` /
+`mismatched`）では総称の `semantic gate` に落とす。`uat_schema_version` は 1 のまま、
+`stop_reason` にも `verdict_source` にも新しい値は足していない。
 
 ### #142 — 無人運転の段階 C（`uat`）と、再merge が入る先の検査
 
@@ -2085,6 +2501,98 @@ fixture は `sent: []`（1件も送っていない）と `verify` の呼び先�
 ---
 
 ## パッケージ
+
+### 0.40.0 — 1ターン目の失敗ゲートの内訳を、その裁定の run から読むようにした（#306）
+
+- **#306** —— 1ターン目の exit 20 の失敗ゲートは、検証を再実行せず `verify history --worktree <id> --limit 1 --json` →
+  `verify show <run-id> --json` で裁定の run を読み戻して名指す（CommandMate 0.21.0+）。直近 run の `taskId` がこの task と
+  違う・`trigger` が `wait` でないときは読まずに従来の再実行（`--task` 付き）へ戻る。内訳が無いときの再指示は
+  `commandmate verify <worktree-id> --task <taskId>` を案内する。history / show の無い CLI では従来どおり再実行し、
+  limitation `verify_history_unsupported` を1件残す。
+
+### 0.39.0 — 再指示の後の裁定を契約 task に紐づけた（#303）
+
+- **#303** —— 裁定（20 / 21）が出た後のターンは `wait`（`--verify` なし）→ `verify <id> --task <taskId> --json` の
+  exit code で裁く（CommandMate 0.43.0+）。失敗ゲートの内訳も `--task` 付きで読み、`--reverify` は記録に task id が
+  あるときだけ `--task` を渡す。`--task` の有無は `verify --help` を1回だけ確かめ、無い CLI では従来どおり
+  `wait --verify` で裁き、limitation `verify_task_unsupported` を1件残す。
+
+### 0.38.0 — 入力の禁止パスを契約の `scope.deny` まで運び、warning のある plan を `partial` にした（#301）
+
+- **#301** —— 本文の禁止（見出し・ラベル行）を plan の `scope_deny`（任意 field）に入れ、dispatch が契約の `scope.deny` に書く。
+  運べない禁止と、成果物との矛盾は question で止める。伴走導出は禁止に当たる path を足さない。planner は warning
+  （notice を含む）が1件でもあれば `partial`。`.commandmate/tasks/*.yaml` を planner の入力として直接読むことはしていない
+  （planner の入力は今も Issue fixture / GitHub Issue だけである）。
+
+### 0.37.0 — 止めて報告した返答を、Claude 以外のワーカーからも読めるようにした（#296）
+
+- **#296** —— 0.35.0（#287）の「止めて報告」の返答は Claude Code の転写からしか読めず、Command Code などのワーカーは
+  報告しても `--max-turns` まで nudge されていた。CLI が `commandmate reply`（CommandMate 0.43.0+）を持つときは、
+  nudge を送った時刻を `--since` にしてそれで読む（`worker_report.source` は `commandmate_reply`）。有無は `reply --help` を
+  1 回だけ確かめ、無い CLI では従来の Claude 専用の転写読みに戻る。`reply: null`・exit 非 0・JSON 不正は報告無しとして従来どおり扱う。
+
+### 0.36.0 — `--reverify` の検証を直列にでき、OpenCode V2 を互換に載せた（#274 / #275）
+
+- **#274** —— `--reverify` に `--verify-concurrency <n>` を足した。重いゲートを並べると負荷で実行時間依存のテストが落ち、
+  1 件ずつなら通る Issue が `verification_failed` になっていた。run の引数であって plan の値ではないので、run id の hash にも
+  `--reverify` の突き合わせにも入れない。フラグ無しは従来どおり全件同時で、report は byte 一致。
+- **#275** —— `compatibility.agents` に `opencode-v2: native`（CommandMate#2975 の実測: opencode2 2.0.18 の `GET /api/skill` での発見と
+  `/<name>` での呼び出し）を足した。この package 単体では測っていない。同じ理由で全 package の版を patch で上げている。
+
+### 0.35.0 — 人がやる Issue と、止まって返したワーカーを runner が扱えるようにした（#286 / #287 / #288）
+
+0.34.0 で利用側の要望に応えた nudge（「書けないと分かったら止めて報告」）と、cmate-issue-authoring 0.10.0 の
+`human-only` ラベルを、runner の側で受け止める版である。各件の経緯は本文の planner / dispatch / uat の節に在る。
+
+- **#286** —— `labels` に `human-only` を持つ Issue を、planner は plan に残したまま wave / merge_order から外し
+  （`dispatch_excluded: "human_only"`、notice `human_only_excluded`）、dispatch は worker を送らずに report へ
+  `not_dispatched` として残す。human-only の Issue への依存は待たず、plan の blocking と report の limitation
+  `human_only_dependency` で名指す。全 Issue が human-only の plan は `plan_invalid`。
+- **#287** —— nudge で開いたターンが進捗なしで終わり、ワーカーの返答があるとき、nudge を止めて返答を
+  `worker_report` に残し、blocking `worker_stopped_with_report` を出す。**この版では Claude のワーカーだけ**
+  （返答を転写から読むため）。Command Code などへの拡張は #296 で入れた（上流 CommandMate#3039、`commandmate reply`）。
+- **#288** —— uat の修正ループの nudge にも「止めて報告」の 1 文を足し、profile の `worker_messages.fix_nudge` と
+  `uat --fix-nudge-message` で追記できるようにした。planner と dispatch も `fix_nudge` を受理する。
+
+**破壊的変更は無い。** schema の版は据え置きで、足したのは optional な field・code だけである。`human-only`
+ラベルも `fix_nudge` も持たない plan / report は byte 一致。
+
+### 0.34.0 — 利用側の並列開発で「運用で補っていた」箇所を runner に入れた（CommandMate #3002〜#3009、#272 / #273）
+
+**この版の 9 件は、すべて利用側（Kewton/Musunest の M1.4〜M1.6）の実測から来ている。** 利用側は手順書に
+「地の文にパスを書かない」「nudge に一文添える」「`--resume` で送り直す」などの運用を積み上げていた。
+その運用を runner の側へ移した。各件の経緯は本文の runner 別の節（planner / dispatch / merge）に在る。
+
+**planner**
+
+- **#3002（+ #273）** —— 成果物見出しを持つ Issue では、見出しの外（散文・`## 完了条件`・`## やること`・
+  `## 追記`）にだけ書いたパスを scope に入れず `reference_files` へ回し、Issue ごとに 1 件の notice
+  `prose_path_ignored` で名指す。**「変えるな」と書いたファイルほど scope に入っていた**のを止める。
+  成果物見出しの範囲は下位の `###` で切らない（#273）。「外」「以外」「しない」で終わる見出しは成果物見出しにしない。
+- **#3003（+ #272）** —— 成果物見出しの下では、backtick で囲んだファイル名を拡張子によらず拾う
+  （`expression.ebnf`・`Cargo.lock`・`Makefile`）。profile の欄にはしなかった（起票時の検査と食い違うため）。
+- **#3004** —— 契約 goal の `## Files you may change` には宣言したファイルだけを並べ、導出したテスト候補は
+  本数で述べる。plan は宣言と導出の本数を分けて出す。`scope.allow` と L1 の導出は変えていない（ADR §15.2 は不変）。
+
+**dispatch**
+
+- **#3006** —— 起動中（503 `SESSION_STARTING`）または `prompt not ready` で断られた最初の send を、
+  間を置いて 1 回だけ送り直す（limitation `send_retried_not_ready`）。exit 2 と 409 は送り直さない。
+- **#3007** —— 最初の send の前に capture を読み、前の回の質問画面が残っていれば送らずに止める
+  （blocking `stale_prompt_on_session`）。`--interrupt-stale-prompt` で畳んでから送れる（既定 off、質問には答えない）。
+- **#3008** —— `--only <issues>` で plan の一部だけを dispatch する。選外の Issue に依存する Issue は
+  `--out` を作る前に `invalid_input` で断る。`--resume` は選んだ集合を引き継ぐ。
+- **#3009** —— 監督 nudge の既定文に「指示どおりに書けないと分かったら、進めずに止めて報告してください。」を足し、
+  profile の `worker_messages.nudge` と `--nudge-message` で後ろに追記できるようにした。
+
+**merge**
+
+- **#3005** —— `--create-prs` に profile の `pr_title_template` を足した（type / scope はブランチのコミット件名から。
+  決まらなければその PR を作らない）。ワーカーのコミット本文の申告行を PR 本文の「## ワーカーの申告」へ写す。
+  ワーカーは push も PR も作らない既定のまま。
+
+**破壊的変更は無い。** schema の版はすべて据え置きで、足したのは optional な field・enum 値・code だけである。
+成果物見出しを持つ Issue の scope が狭くなるのは #3002 の狙いどおりの挙動変更で、見出しの無い Issue の plan は不変。
 
 ### 0.32.0 — 一本道の前と後ろに、測るだけの段が付いた（#217 / #218 / #219 / #220 / #221 / #222 / #223 / #224）
 

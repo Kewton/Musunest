@@ -80,20 +80,39 @@ import {
   issueOf,
   loadJson,
   parseCliJson,
+  pauseMs,
+  SEND_NOT_READY_EXIT,
+  SEND_NOT_READY_RETRY_DELAY_MS,
+  sendNotReadyKind,
+  sendPauseMs,
   redact,
   redactionsList,
   resolveLauncher,
   safeBranch,
   safeWorktreeTarget,
   validateDispatch,
+  workerMessageProblem,
 } from './lib.mjs';
 
 const UAT_SCHEMA_VERSION = 1;
 const SUPPORTED_PLAN_SCHEMA_VERSIONS = [1, 2];
 
-// The semantic gate's input contract: cmate-acceptance-test's result document
-// (skills/cmate-acceptance-test/schemas/acceptance-result.v1.json).
-const ACCEPTANCE_SKILL_ID = 'cmate-acceptance-test';
+// The semantic gate's input contract: an acceptance-result.v1 document
+// (skills/cmate-acceptance-test/schemas/acceptance-result.v1.json remains the sole
+// normative copy of that schema).
+//
+// TWO Skills produce that document and this runner accepts either as the PRODUCER.
+// `cmate-acceptance-test` judges a target it did not have to stand up; `cmate-uat`
+// stands the real environment up first and judges from the evidence it collected
+// there (#260). Both write the same schema and both are adjudicated by the same
+// composition rules below — which producer wrote it changes nothing about how the
+// verdict is read, so it is RECORDED (per-issue `acceptance.producer`) rather than
+// branched on.
+//
+// This is an allowlist of known producers, not a relaxation: a `skill.id` outside
+// the set is still `invalid`, exactly as before. Nothing is inferred from an
+// unknown id.
+const ACCEPTANCE_PRODUCER_IDS = ['cmate-acceptance-test', 'cmate-uat'];
 const SUPPORTED_ACCEPTANCE_SCHEMA_VERSION = 1;
 // How many findings/conditions are lifted out of one acceptance document. The
 // report stays bounded; the document itself remains the full record.
@@ -224,10 +243,11 @@ Options:
                          WITHOUT it the loop is a no-mutation preview.
   --max-attempts <1-${MAX_ATTEMPTS_CEILING}>    Fix-attempt cap (default ${DEFAULT_MAX_ATTEMPTS}). The loop never exceeds it;
                          reaching it with failures remaining is reported as blocked.
-  --acceptance-dir <dir> Directory holding one cmate-acceptance-test result document
-                         per issue, named issue-<n>.json. Read-only: this runner
-                         validates and composes them, it never produces a verdict.
-                         Without it the adjudication is the baseline alone.
+  --acceptance-dir <dir> Directory holding one acceptance-result.v1 document per
+                         issue, named issue-<n>.json, written by cmate-acceptance-test
+                         or cmate-uat. Read-only: this runner validates and composes
+                         them, it never produces a verdict. Without it the
+                         adjudication is the baseline alone.
   --require-acceptance   A missing, non-conformant or wrong-issue acceptance result
                          is a FAILURE instead of a recorded limitation. Needs
                          --acceptance-dir.
@@ -254,6 +274,11 @@ Options:
   --wait-timeout <sec>   --timeout for the fix worker's commandmate wait (default ${DEFAULT_WAIT_TIMEOUT_SECONDS}).
   --max-turns <n>        Max turns to drive a fix worker (initial send + nudges)
                          before giving up with no commit (default ${DEFAULT_MAX_TURNS}).
+  --fix-nudge-message <text>
+                         Appended after the default fix-worker nudge (which always
+                         keeps its commit line). Falls back to the profile's
+                         worker_messages.fix_nudge; the flag always wins. Non-blank,
+                         at most 2000 characters.
   --poll-limit <n>       Retained for compatibility; wait now blocks (default ${DEFAULT_POLL_LIMIT}).
   --help                 Show this help.
 
@@ -283,6 +308,7 @@ function parseCli(argv) {
         gh: { type: 'string' },
         'wait-timeout': { type: 'string' },
         'max-turns': { type: 'string' },
+        'fix-nudge-message': { type: 'string' },
         'poll-limit': { type: 'string' },
         help: { type: 'boolean' },
       },
@@ -363,6 +389,11 @@ function resolveInputs(parsed) {
     }
   }
 
+  if (values['fix-nudge-message'] !== undefined) {
+    const problem = workerMessageProblem(values['fix-nudge-message']);
+    if (problem !== null) throw new SkillError('invalid_input', `--fix-nudge-message ${problem}`, 3);
+  }
+
   // Resolved exactly as dispatch.mjs resolves it — one launcher convention for
   // the whole toolchain, and never a program name with a space in it (Issue #37).
   const cliArgv = resolveLauncher(values.cli);
@@ -385,6 +416,8 @@ function resolveInputs(parsed) {
     waitTimeout: positiveInt(values['wait-timeout'], 'wait-timeout', DEFAULT_WAIT_TIMEOUT_SECONDS),
     maxTurns: positiveInt(values['max-turns'], 'max-turns', DEFAULT_MAX_TURNS),
     pollLimit: positiveInt(values['poll-limit'], 'poll-limit', DEFAULT_POLL_LIMIT),
+    fixNudgeExtra: values['fix-nudge-message'] ?? null,
+    fixNudgeExtraSource: values['fix-nudge-message'] === undefined ? null : '--fix-nudge-message',
   };
 }
 
@@ -414,6 +447,13 @@ function validatePlan(plan) {
   }
   if (!Array.isArray(plan.issues)) {
     throw new SkillError('plan_invalid', 'plan.issues is missing', 3);
+  }
+  // Only fix_nudge is this runner's; the other worker_messages keys are dispatch's
+  // and are neither read nor refused here.
+  const fixNudge = profile.worker_messages?.fix_nudge;
+  if (fixNudge !== undefined) {
+    const problem = workerMessageProblem(fixNudge);
+    if (problem !== null) throw new SkillError('plan_invalid', `plan.profile.worker_messages.fix_nudge ${problem}`, 3);
   }
   return plan;
 }
@@ -566,8 +606,8 @@ function acceptanceNonConformance(doc) {
     return `unsupported result_schema_version ${JSON.stringify(doc.result_schema_version)}; this runner understands ${SUPPORTED_ACCEPTANCE_SCHEMA_VERSION}`;
   }
   const skill = doc.skill;
-  if (!skill || typeof skill !== 'object' || skill.id !== ACCEPTANCE_SKILL_ID) {
-    return `skill.id is not ${ACCEPTANCE_SKILL_ID}`;
+  if (!skill || typeof skill !== 'object' || !ACCEPTANCE_PRODUCER_IDS.includes(skill.id)) {
+    return `skill.id is not one of ${ACCEPTANCE_PRODUCER_IDS.join('/')}`;
   }
   if (typeof skill.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(skill.version)) {
     return 'skill.version is not a semantic version';
@@ -591,6 +631,10 @@ function acceptanceState(state, note) {
     status: null,
     issue_ref: null,
     verdict_reason: '',
+    // Which Skill produced the document. Only a `loaded` state can name one: a
+    // missing document has no producer, and an invalid one has no producer this
+    // runner is willing to vouch for (the id is exactly what failed to conform).
+    producer: null,
     findings: [],
     conditions: [],
     note,
@@ -718,9 +762,10 @@ function loadAcceptance(inputs, number) {
     status: doc.status,
     issue_ref: clip(doc.target.issue_ref, 120),
     verdict_reason: clip(doc.verdict_reason, 300),
+    producer: { id: doc.skill.id, version: doc.skill.version },
     findings: acceptanceFindings(doc),
     conditions: acceptanceConditions(doc),
-    note: `${name}: ${ACCEPTANCE_SKILL_ID} ${doc.skill.version} returned ${doc.verdict} (run status ${doc.status})`,
+    note: `${name}: ${doc.skill.id} ${doc.skill.version} returned ${doc.verdict} (run status ${doc.status})`,
   };
 }
 
@@ -941,6 +986,15 @@ function bullets(items, fallback) {
   return items.map((item) => `- ${redact(String(item))}`).join('\n');
 }
 
+// How to name the producer in a heading. A `loaded` document says who wrote it; any
+// other state has no producer to name, and the honest label is the generic one —
+// writing a Skill's name over a verdict that Skill never produced is how the
+// hard-coded heading misled the worker before #259.
+function acceptanceProducerLabel(acceptance) {
+  const id = acceptance && acceptance.producer ? acceptance.producer.id : null;
+  return typeof id === 'string' && id.length > 0 ? id : 'semantic gate';
+}
+
 // The semantic gate's own words, quoted into the fix prompt. A no_go names WHICH
 // criterion failed and why; handing the worker that instead of "UAT failed" is the
 // difference between a targeted repair and a guess. When acceptance did not run,
@@ -978,7 +1032,12 @@ function buildFixPrompt(plan, issue, failingScenarios, acceptance) {
     '## Failing acceptance scenarios',
     bullets(failingScenarios, 'The UAT report did not name a scenario; reproduce the acceptance check and fix the failure.'),
     '',
-    '## Acceptance verdict (cmate-acceptance-test)',
+    // Name the producer that actually wrote the verdict. Hard-coding one Skill's
+    // name here told the worker the wrong thing as soon as a second producer
+    // existed, and "who judged this" is load-bearing when the worker goes to
+    // reproduce the failure: cmate-uat's evidence came from a real environment
+    // it stood up, cmate-acceptance-test's did not.
+    `## Acceptance verdict (${acceptanceProducerLabel(acceptance)})`,
     acceptanceSection(acceptance),
     '',
     '## Objective (unchanged)',
@@ -1014,12 +1073,29 @@ function worktreeHeadSha(inputs, worktreePath) {
   return sha.length > 0 ? sha : null;
 }
 
+// ONE `commandmate send`, retried once when refused as not ready (CommandMate#3006): a fix
+// worktree is created by this run, so its first send is always the one that
+// starts a brand-new session — exactly the send that races the agent's start-up.
+// The rule is lib.mjs's, shared with dispatch; each retry is recorded in
+// `retries` so the fix record's note can say it happened.
+function sendRetryingNotReady(inputs, args, retries) {
+  const first = runCm(inputs, args);
+  const kind = sendNotReadyKind(first);
+  if (kind === null) return first;
+  const delayMs = sendPauseMs(SEND_NOT_READY_RETRY_DELAY_MS);
+  pauseMs(delayMs);
+  const second = runCm(inputs, args);
+  retries.push(`a send was refused as not ready (${kind === 'session_starting' ? '503 SESSION_STARTING' : 'prompt not ready'}, exit ${SEND_NOT_READY_EXIT}, nothing typed) `
+    + `and was re-sent once after ${Math.round(delayMs / 1000)}s: ${second.ok ? 'the retry went through' : 'the retry was refused too'}`);
+  return second;
+}
+
 // `commandmate send`, then confirm the fix worker actually started (Issue #1468).
 // A send can leave the message unsubmitted; if the capture right after shows the
 // worker is neither generating nor prompting, re-send once. Best-effort — the
 // commit check below is the ground truth.
-function sendAndConfirm(inputs, worktreeId, message) {
-  const first = runCm(inputs, ['send', worktreeId, message]);
+function sendAndConfirm(inputs, worktreeId, message, retries = []) {
+  const first = sendRetryingNotReady(inputs, ['send', worktreeId, message], retries);
   if (!first.ok) {
     return { sent: false, note: excerpt(first.stderr || first.stdout || 'send failed') };
   }
@@ -1034,8 +1110,33 @@ function sendAndConfirm(inputs, worktreeId, message) {
 // The message that nudges an idle-but-uncommitted fix worker to keep going.
 const FIX_NUDGE_MESSAGE = [
   '続けて修正を進め、この Issue の受入不合格を解消してください。',
+  '指示どおりに書けないと分かったら、進めずに止めて報告してください。',
   'まだ変更が commit されていません。完了したらこのブランチに単一 commit を作成してください（それが完了の合図です）。',
 ].join('\n');
+
+// The default fix nudge, plus the flag's / profile's text appended AFTER it —
+// never instead of it, so the commit line cannot be dropped.
+function fixNudgeMessage(inputs) {
+  return inputs.fixNudgeExtra === null ? FIX_NUDGE_MESSAGE : `${FIX_NUDGE_MESSAGE}\n${inputs.fixNudgeExtra}`;
+}
+
+// Precedence is flag → profile → nothing. Only the length is recorded, never the text.
+function fixNudgeLimitation(inputs, plan) {
+  const declared = plan.profile?.worker_messages?.fix_nudge;
+  if (inputs.fixNudgeExtra === null) {
+    if (declared === undefined) return null;
+    inputs.fixNudgeExtra = declared;
+    inputs.fixNudgeExtraSource = 'profile';
+  }
+  const profileId = String(plan.profile?.id ?? 'unknown');
+  const from = inputs.fixNudgeExtraSource === '--fix-nudge-message'
+    ? `--fix-nudge-message${declared === undefined ? '' : ` overrode profile ${profileId}'s worker_messages.fix_nudge`}`
+    : `from profile ${profileId}`;
+  return {
+    code: 'worker_messages_applied',
+    detail: `fix_nudge=${inputs.fixNudgeExtra.length} chars (${from}), appended after the default fix nudge; the default's commit line is always sent`,
+  };
+}
 
 // Supervise a fix worker to a real completion, the same way dispatch does: a fix
 // worker idles after every turn, so drive it turn by turn — dispatch, wait; on
@@ -1044,8 +1145,15 @@ const FIX_NUDGE_MESSAGE = [
 // fails, or the --max-turns cap is reached with no commit. Returns the worker state,
 // whether a fix was dispatched at all, and a note.
 function superviseFixUntilCommit(inputs, worktreeId, worktreeDir, message) {
+  const retries = [];
+  const supervised = superviseFixLoop(inputs, worktreeId, worktreeDir, message, retries);
+  if (retries.length === 0) return supervised;
+  return { ...supervised, note: [supervised.note, ...retries].filter(Boolean).join('; ') };
+}
+
+function superviseFixLoop(inputs, worktreeId, worktreeDir, message, retries) {
   const baseSha = worktreeHeadSha(inputs, worktreeDir);
-  const sent0 = sendAndConfirm(inputs, worktreeId, message);
+  const sent0 = sendAndConfirm(inputs, worktreeId, message, retries);
   if (!sent0.sent) {
     return { state: 'failed', dispatched: false, note: `fix dispatch failed: ${sent0.note}` };
   }
@@ -1070,7 +1178,7 @@ function superviseFixUntilCommit(inputs, worktreeId, worktreeDir, message) {
     if (turns >= inputs.maxTurns) {
       return { state: 'failed', dispatched: true, note: `fix worker made no new commit after ${turns} turn(s); gave up at the --max-turns ${inputs.maxTurns} cap` };
     }
-    const nudged = sendAndConfirm(inputs, worktreeId, FIX_NUDGE_MESSAGE);
+    const nudged = sendAndConfirm(inputs, worktreeId, fixNudgeMessage(inputs), retries);
     if (!nudged.sent) {
       return { state: 'failed', dispatched: true, note: `fix nudge failed: ${nudged.note}` };
     }
@@ -1577,6 +1685,10 @@ function runUatPhase(inputs, plan, dispatch, outDir) {
   // Recorded before anything else so it survives every early return below: a run
   // that stopped in the pre-flight still says what it had declared.
   if (inputs.unattended) report.limitations.push(unattendedModeLimitation(inputs));
+  if (inputs.phase === 'fix_uat') {
+    const applied = fixNudgeLimitation(inputs, plan);
+    if (applied !== null) report.limitations.push(applied);
+  }
 
   // Read-only preflight before any mutation.
   report.preflight = preflight(inputs, plan);

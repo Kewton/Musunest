@@ -119,7 +119,7 @@
     },
     "waves": {
       "type": "array",
-      "description": "Ordered waves. Every issue appears in exactly one wave; a later wave runs after all earlier waves complete. That is what the DEFAULT dispatch scheduling does with them. Under `dispatch.mjs --schedule dag` (Issue #183) they become REFERENCE INFORMATION: the dispatcher gates each issue on its own effective dependencies (this plan's `dependencies`, minus the `basis: lexical` edges section 3.1 of plan-contract.md refuses to treat as edges) and admits it as soon as they are completed + verified, so a wave boundary is no longer a synchronisation point. Two things they still ARE in that mode, and neither is optional: `merge_order` is this array flattened, and the packing rule that keeps two file-overlapping issues out of one wave is the rule the dag scheduler re-enforces itself (it never runs two issues that name a file in common at the same time). The planner is unchanged either way — it always computes and emits the waves.",
+      "description": "Ordered waves. Every issue appears in exactly one wave, except an issue marked `dispatch_excluded` (Issue #286), which appears in none; a later wave runs after all earlier waves complete. That is what the DEFAULT dispatch scheduling does with them. Under `dispatch.mjs --schedule dag` (Issue #183) they become REFERENCE INFORMATION: the dispatcher gates each issue on its own effective dependencies (this plan's `dependencies`, minus the `basis: lexical` edges section 3.1 of plan-contract.md refuses to treat as edges) and admits it as soon as they are completed + verified, so a wave boundary is no longer a synchronisation point. Two things they still ARE in that mode, and neither is optional: `merge_order` is this array flattened, and the packing rule that keeps two file-overlapping issues out of one wave is the rule the dag scheduler re-enforces itself (it never runs two issues that name a file in common at the same time). The planner is unchanged either way — it always computes and emits the waves.",
       "items": {
         "type": "array",
         "items": {
@@ -523,6 +523,29 @@
           "items": {
             "$ref": "#/$defs/observation"
           }
+        },
+        "pr_title_template": {
+          "description": "Optional PR title template for the merge runner's --create-prs (CommandMate#3005). Placeholders are the closed set {{type}} / {{scope}} (from the branch's own Conventional-Commits commit subjects; when they do not determine a value, that PR is NOT opened and the phase stops with pr_title_undetermined), {{title}} (the issue title) and {{number}} (the issue number). Absent keeps the pre-#3005 title (the issue title). Echoed by the planner only when the profile declared it, and last among the optional fields, so a plan built without it is byte-identical to the plans produced before it existed.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "worker_messages": {
+          "description": "Optional text the runners append to the messages they send workers (CommandMate#3009). `nudge` is appended AFTER dispatch's default supervision nudge and `fix_nudge` AFTER uat's default fix nudge (#288), never in place of them. Echoed only when the profile declared it, and last among the optional fields.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "nudge": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "fix_nudge": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          }
         }
       }
     },
@@ -640,6 +663,13 @@
           },
           "description": "Paths the planner read out of the issue and deliberately kept OUT of scope.allow: context the issue only cites (under a 根拠 / 参考 / references heading, or documentation named nowhere else), and agent-harness paths denied by default (.claude/skills/**, .agents/skills/**, .commandmate/**). The worker reads them; it may not write them. A path missing from suspected_files is otherwise indistinguishable from one the planner never noticed, so a drop is reported here rather than discarded. See references/plan-contract.md sections 5 and 5.3."
         },
+        "scope_deny": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/repo_path"
+          },
+          "description": "Optional (Issue #301). Paths and globs the issue forbids — under a forbidden heading (変更してはならない / 変更禁止 / forbidden / 変更対象外 …) or on a line labelled that way. The dispatch runner carries them verbatim into the execution contract's scope.deny. Absent when the issue forbids nothing. See references/plan-contract.md section 5.10."
+        },
         "test_expectations": {
           "type": "array",
           "items": {
@@ -687,6 +717,12 @@
             "dependent",
             "conflicting"
           ]
+        },
+        "dispatch_excluded": {
+          "enum": [
+            "human_only"
+          ],
+          "description": "Present ONLY on an issue that no dispatch sends a worker to (Issue #286). human_only: the issue's labels hold exactly `human-only` (the fixed name cmate-issue-authoring's validator reads) — a person does it. Such an issue stays in `issues` and in `dependencies` so the reader keeps its edges and the human work in view, but it is in no wave and not in merge_order, its questions are not raised (they ask what a worker would need), and dispatch.mjs records it as `not_dispatched` without treating it as a failure. An edge from a dispatched issue to it is not waited for, the same way an edge to an issue outside the plan is not (warning human_only_dependency). Absent means dispatchable, which is every issue a plan without the label holds, so such a plan is byte-identical to the one written before the field existed. See references/plan-contract.md section 3.3."
         }
       }
     },
@@ -749,7 +785,7 @@
             "blocking",
             "notice"
           ],
-          "description": "Whether this warning drops plan.status to partial (Issue #199). OPTIONAL and FAIL-CLOSED: an entry with NO severity is blocking, which is what every warning was before this field existed and what every code outside the notice set still is — so a plan.json written by an older planner stays valid and keeps its meaning, the same rule dependencies[].basis follows. The planner writes the field on notice entries only, so a plan that raises none is byte-identical to the one the pre-#199 planner produced; blocking is therefore a value this schema admits and this planner never emits. A code is a notice when the warning reports a decision a human ALREADY MADE and declared, rather than one still owed or something the planner could not read. The set holds FOUR codes: harness_path_in_scope, where the issue DECLARED an agent-harness path under a deliverable heading (references/plan-contract.md section 5.3); profile_repository_override (Issue #210), which cannot be raised unless the operator passed BOTH --repo (which downgrades the profile's verification) and --allow-unverified (without which the run exits 3); and scope_pattern_declared / scope_pattern_dropped (Issue #219), which report the scope patterns the issue wrote under a deliverable heading and the ones it wrote outside every deliverable heading — three author declarations and one operator declaration, the same side of the same principle. scope_pattern_dropped is on that side because what it reports is not \"the planner could not read this\" but \"the planner did not read this as a declaration\", a fact about where the author wrote it. What is declared is what decides it, not that something was declared: open_question_declared is the author stating they have NOT decided, and is blocking. Every code that can reach plan.warnings is classified with its reason, blocking ones included, in references/codes-and-recovery.md section 2; a new code is classified before it is added. Membership is an independent judgement per code — there is no bulk move. A notice never masks a blocking warning: status is partial if ANY entry is blocking. See references/plan-contract.md section 5.6."
+          "description": "Whether this warning drops plan.status to partial (Issue #199). OPTIONAL and FAIL-CLOSED: an entry with NO severity is blocking, which is what every warning was before this field existed and what every code outside the notice set still is — so a plan.json written by an older planner stays valid and keeps its meaning, the same rule dependencies[].basis follows. The planner writes the field on notice entries only, so a plan that raises none is byte-identical to the one the pre-#199 planner produced; blocking is therefore a value this schema admits and this planner never emits. A code is a notice when the warning reports a decision a human ALREADY MADE and declared, rather than one still owed or something the planner could not read. The set holds FIVE codes: harness_path_in_scope, where the issue DECLARED an agent-harness path under a deliverable heading (references/plan-contract.md section 5.3); profile_repository_override (Issue #210), which cannot be raised unless the operator passed BOTH --repo (which downgrades the profile's verification) and --allow-unverified (without which the run exits 3); and scope_pattern_declared / scope_pattern_dropped (Issue #219), which report the scope patterns the issue wrote under a deliverable heading and the ones it wrote outside every deliverable heading — three author declarations and one operator declaration, the same side of the same principle. scope_pattern_dropped is on that side because what it reports is not \"the planner could not read this\" but \"the planner did not read this as a declaration\", a fact about where the author wrote it; prose_path_ignored (CommandMate #3002) is on the same side for the same reason — an issue that HAS a deliverable heading has declared its scope, and a path it wrote only outside that heading is reported as not read as a declaration (it goes to reference_files). What is declared is what decides it, not that something was declared: open_question_declared is the author stating they have NOT decided, and is blocking. Every code that can reach plan.warnings is classified with its reason, blocking ones included, in references/codes-and-recovery.md section 2; a new code is classified before it is added. Membership is an independent judgement per code — there is no bulk move. A notice never masks a blocking warning: status is partial if ANY entry is blocking. See references/plan-contract.md section 5.6."
         }
       }
     }
