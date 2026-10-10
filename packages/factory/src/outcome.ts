@@ -14,8 +14,14 @@ export interface StageResults {
   readonly testMismatches: number;
   /** 未解決の数（重大な曖昧さ・裁定できなかった試験。①・⑥'） */
   readonly unresolved: number;
-  /** 書けない要件の数（②） */
+  /** 書けない要件の数（②。書けない部分＝語彙の穴が残った要件だけ） */
   readonly unwritableRequirements: number;
+  /**
+   * 設計の `notes` だけがある要件の数（②・Issue #332）。**部分案の理由にはしない**——`notes` は
+   * 曖昧さ・決めたこと・不確かさのメモであり、書けないことではない。`decideOutcome` はこの欄を見ない
+   * （見るのは `unwritableRequirements`。書ける部分が残っている要件を、メモだけでは部分案にしない）。
+   */
+  readonly notedRequirements?: number;
   /** 上限（呼び出しの数・直しの往復・費用・時間）に触れたか（§1.5） */
   readonly limitReached: boolean;
 }

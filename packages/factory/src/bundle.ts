@@ -66,8 +66,7 @@ export interface BundleArtifact {
   readonly text: string;
 }
 
-/**
- * 書けなかった要件の 1 件（Issue #326）。② の設計が出した `unwritable` を、要件の文と引用で包む。
+/** 書けなかった要件の 1 件（Issue #326）。② の設計が出した `unwritable` を、要件の文と引用で包む。
  * **要件 ID・要件の文・原文の引用・書けない部分**（F-2）。
  */
 export interface UnwritableRequirement {
@@ -81,11 +80,39 @@ export interface UnwritableRequirement {
   readonly unwritable: readonly string[];
 }
 
-/** 書けなかった要件の一覧（`artifacts/unwritable.json`）。宣言の版に結び付ける（§4・Issue #326） */
+/** 申告の仕分け・裏付けの判定 1 件の記録（Issue #332。依頼文の全文は残さない。S-8） */
+export interface BundleTriageJudgment {
+  /** 問いの ID */
+  readonly question_id: string;
+  /** 答え（仕分けのラベル、または裏付けの判定） */
+  readonly answer: string;
+  /** 確信度（返せない adapter では null＝不明） */
+  readonly confidence: number | null;
+  /** 答えたモデルの版の ID */
+  readonly model: string;
+  /** 答えた adapter（jev・llm・fake） */
+  readonly answered_by: string;
+}
+
+/** 落とした申告 1 件（曖昧さ・問題ではない。Issue #332） */
+export interface BundleDroppedClaim {
+  readonly requirement_id: string;
+  readonly part: string;
+  readonly label: string;
+  readonly reason: string;
+}
+
+/** 書けなかった要件の一覧（`artifacts/unwritable.json`）。宣言の版に結び付ける（§4・Issue #326・#332） */
 export interface BundleUnwritable {
   /** 設計の対象にした宣言（原文）の UTF-8 バイト列の SHA-256 */
   readonly declaration_sha256: string;
   readonly unwritable: readonly UnwritableRequirement[];
+  /** 申告の仕分けと裏付けの判定の記録（問いの ID・答え・確信度・答えたモデルの版。Issue #332） */
+  readonly triage: readonly BundleTriageJudgment[];
+  /** 印つきで残した要件 ID（裏付けが「書いていない」・確信度が閾値未満。Issue #332） */
+  readonly marked_requirements: readonly string[];
+  /** 問題ではない・曖昧さとして落とした申告（記録。Issue #332） */
+  readonly dropped: readonly BundleDroppedClaim[];
 }
 
 /**
@@ -147,6 +174,12 @@ export interface BundleInput {
   readonly requirements: RequirementList;
   /** 書けなかった要件の一覧（② の `unwritable` に、要件の文と引用を添えたもの。Issue #326） */
   readonly unwritable: readonly UnwritableRequirement[];
+  /** 申告の仕分けと裏付けの判定の記録（Issue #332。無ければ空で出る） */
+  readonly triage?: readonly BundleTriageJudgment[];
+  /** 印つきで残した要件 ID（Issue #332） */
+  readonly markedRequirements?: readonly string[];
+  /** 落とした申告（Issue #332） */
+  readonly dropped?: readonly BundleDroppedClaim[];
   readonly correspondence: CorrespondenceResult | null;
   readonly testRun: TestRunResult | null;
   readonly disputes: readonly { readonly testId: string; readonly quote: string }[];
@@ -220,6 +253,9 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
   const unwritable: BundleUnwritable = {
     declaration_sha256: input.declarationSha256,
     unwritable: input.unwritable,
+    triage: input.triage ?? [],
+    marked_requirements: input.markedRequirements ?? [],
+    dropped: input.dropped ?? [],
   };
 
   const artifacts: readonly BundleArtifact[] = [

@@ -239,3 +239,77 @@ export function checkStringArray(
   });
   return strings;
 }
+
+// ── 文書の本文から、制約 ID を取り出す（02 §1・②・Issue #332）────────────────
+
+/**
+ * 契約の規則の ID（`R-…`。例 `R-1`・`R2-12`）を取り出す。語の切れ目から始まるものだけを拾う。
+ */
+const CONSTRAINT_RULE_ID = /\bR\d*-\d+\b/g;
+
+/** 語彙の意味の見出し（`### ` で始まる行の見出しの文）を取り出す */
+const VOCABULARY_HEADING = /^#{3}[ \t]+(.+?)[ \t]*$/gm;
+
+/**
+ * 段に渡した文書の本文から、**制約 ID の集合**を取り出す（Issue #332）。契約の規則の `R-…` の ID と、
+ * 語彙の意味の `### ` 見出しの文である。設計の `unwritable` は、この集合に入っている ID だけを根拠に
+ * できる（文書に無い ID は断る）。
+ */
+export function constraintIdsIn(documents: readonly PromptDocument[]): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const document of documents) {
+    for (const match of document.text.matchAll(CONSTRAINT_RULE_ID)) ids.add(match[0]);
+    for (const match of document.text.matchAll(VOCABULARY_HEADING)) {
+      const heading = match[1]?.trim();
+      if (heading !== undefined && heading !== "") ids.add(heading);
+    }
+  }
+  return ids;
+}
+
+/** `### ` で始まる行の見出しの文を取り出す（無ければ `null`） */
+function headingText(line: string): string | null {
+  const match = /^#{3}[ \t]+(.+?)[ \t]*$/.exec(line);
+  return match === null ? null : (match[1] ?? "").trim();
+}
+
+/** 1 つの行から、契約の規則の ID（`R-…`）の字句を取り出す */
+function ruleIdsIn(line: string): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const match of line.matchAll(CONSTRAINT_RULE_ID)) ids.add(match[0]);
+  return ids;
+}
+
+/**
+ * 制約 ID の節の**抜粋**を、文書の本文から取り出す（Issue #332）。語彙の意味の `### ` 見出しは、
+ * 見出しの行と次の見出しまでの本文を、契約の規則の `R-…` は、その ID を（字句として）含む行を拾う。
+ * 抜粋は裏付けの点検（判定の口）にだけ渡す（依頼文の全文は渡さない）。
+ */
+export function constraintExcerpt(documents: readonly PromptDocument[], ids: readonly string[]): string {
+  const wanted = new Set(ids.map((id) => id.trim()).filter((id) => id !== ""));
+  if (wanted.size === 0) return "";
+  const sections: string[] = [];
+  for (const document of documents) {
+    const lines = document.text.split("\n");
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i] ?? "";
+      const heading = headingText(line);
+      if (heading !== null && wanted.has(heading)) {
+        const section = [line];
+        for (let j = i + 1; j < lines.length && headingText(lines[j] ?? "") === null; j += 1) {
+          section.push(lines[j] ?? "");
+        }
+        sections.push(section.join("\n").trim());
+        continue;
+      }
+      const tokens = ruleIdsIn(line);
+      for (const id of wanted) {
+        if (tokens.has(id)) {
+          sections.push(line.trim());
+          break;
+        }
+      }
+    }
+  }
+  return [...new Set(sections.filter((section) => section !== ""))].join("\n");
+}

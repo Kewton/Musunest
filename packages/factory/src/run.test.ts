@@ -14,6 +14,8 @@ import { describe, expect, it } from "vitest";
 import { costOfUsageUsd } from "./budget.js";
 import { UNWRITABLE_FILE, VERIFICATION_FILE, type BundlePartialReasons, type BundleUnwritable, type BundleVerification } from "./bundle.js";
 import { AGENT_LIMITS } from "./limits.js";
+import { createFakeJudge } from "./judge-fake.js";
+import type { JudgeAnswer } from "./judge.js";
 import { createFakeLlmClient, type RecordedCall } from "./llm-fake.js";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "./llm.js";
 import { OpenAiIncompleteError, createOpenAiLlmClient, type OpenAiUsage } from "./openai.js";
@@ -1107,3 +1109,94 @@ describe("書けなかった要件の一覧と、部分案になった理由（0
   });
 });
 
+
+// ── ② の「書けない」の申告を仕分けて裏を取る（判定の口。#330・Issue #332）────────
+
+/** 判定の答え（choice）を作る */
+const judgeChoice = (value: string, confidence?: number): JudgeAnswer => ({
+  kind: "choice",
+  choice: value,
+  probabilities: undefined,
+  probability: undefined,
+  confidence,
+});
+
+describe("② の申告を仕分けて裏を取る（判定の口。Issue #332）", () => {
+  /** R-1 に、語彙の穴ではない（曖昧さの）申告を 1 件足した設計（新形式） */
+  const CREATE_DESIGN_WITH_CLAIM = {
+    roles: CREATE_DESIGN.roles,
+    designs: [
+      {
+        requirementId: "R-1",
+        nature: "existence-only",
+        verification: { kind: "structural", reason: "登録できることを構造で確かめる" },
+        vocabulary: ["entity", "action"],
+        placement: ["entities", "actions"],
+        unwritable: [
+          { part: "件数の数え方を決めていない", constraintIds: ["記録"], reason: "どちらの数え方か原文に無い" },
+        ],
+        notes: [],
+      },
+      {
+        requirementId: "R-2",
+        nature: "ruled",
+        verification: { kind: "fixed-test" },
+        vocabulary: ["computation"],
+        placement: ["computed"],
+        unwritable: [],
+        notes: [],
+      },
+    ],
+  };
+
+  /** R-2 の異常の期待を直して、⑥ 直すに入らずに完走する ②' の答え */
+  const PASSING_CREATE_SUITE = {
+    classifications: CREATE_SUITE.classifications,
+    tests: CREATE_SUITE.tests.map((test) =>
+      test.id === "a" ? { ...test, expected: { kind: "ok", value: 42 } } : test,
+    ),
+  };
+
+  const recorded = (design: unknown): readonly RecordedCall[] => [
+    structured(REQUIREMENT_LIST_OUTPUT),
+    structured(REVERSE_CHECK_OUTPUT),
+    structured(design),
+    structured(PASSING_CREATE_SUITE),
+    structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+    structured(CREATE_CORRESPONDENCE),
+  ];
+
+  it("曖昧さの申告は notes に移り、部分案の理由にならない（合格のまま）", async () => {
+    const judge = createFakeJudge({ "triage:R-1:0": judgeChoice("ambiguity", 0.9) });
+    const { recording, run } = runWith(recorded(CREATE_DESIGN_WITH_CLAIM), { judge });
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    // 誤った「書けない」を落としたので、合格のまま（判定を回さなければ部分案になっていた）
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(result.bundle).not.toBeNull();
+    if (result.bundle === null) return;
+    const list = unwritableOf(result.bundle);
+    expect(list.unwritable).toEqual([]);
+    // 判定の記録と、落とした申告が残る（依頼文の全文は残さない）
+    expect(list.triage).toEqual([
+      { question_id: "triage:R-1:0", answer: "ambiguity", confidence: 0.9, model: "fake-judge", answered_by: "fake" },
+    ]);
+    expect(list.dropped).toEqual([
+      {
+        requirement_id: "R-1",
+        part: "件数の数え方を決めていない",
+        label: "ambiguity",
+        reason: "どちらの数え方か原文に無い",
+      },
+    ]);
+    // 判定は LlmClient を呼ばない（記録した応答は 6 回のまま）
+    expect(recording.structured).toHaveLength(6);
+  });
+
+  it("判定を渡さなければ、申告をそのまま残し、部分案になる（後方互換）", async () => {
+    const { run } = runWith(recorded(CREATE_DESIGN_WITH_CLAIM));
+    const result = await run;
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+  });
+});

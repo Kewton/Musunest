@@ -2,7 +2,15 @@
 import { describe, expect, it } from "vitest";
 import { maxOutputTokensForEffort } from "../limits.js";
 import type { DesignResult } from "../pipeline.js";
-import { DESIGN_SCHEMA_NAME, checkDesignOutput, checkDesignPlan, isPlannedDesign, runDesign, type DesignInput } from "./design.js";
+import {
+  DESIGN_SCHEMA_NAME,
+  checkDesignConstraints,
+  checkDesignOutput,
+  checkDesignPlan,
+  isPlannedDesign,
+  runDesign,
+  type DesignInput,
+} from "./design.js";
 import {
   DESIGN_OUTPUT,
   INJECTED_INSTRUCTION,
@@ -347,5 +355,127 @@ describe("同名の対象は、共有と別名を明示したときだけ分け�
       ],
     };
     expect(planned(ok).problems).toEqual([]);
+  });
+});
+
+// ── 「書けない」の根拠（制約 ID）と、曖昧さを分ける notes（Issue #332）──────
+
+/** 文書にある語彙の意味の見出しを根拠にした、書けない部分の申告（新形式） */
+const VALID_CLAIM = {
+  part: "アプリ自体の名前・説明",
+  constraintIds: ["アプリの名前・説明"],
+  reason: "宣言には、アプリ自体の名前や説明を置く欄が無い。",
+};
+
+/** 新形式（unwritable の要素が「部分・制約 ID・理由」の組。notes を持つ）の設計 */
+const CLAIM_DESIGN = {
+  roles: PLANNED_ROLES,
+  designs: [
+    {
+      requirementId: "R-1",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      vocabulary: ["記録"],
+      placement: ["entities[].fields"],
+      unwritable: [VALID_CLAIM],
+      notes: [],
+    },
+    {
+      requirementId: "R-2",
+      nature: "existence-only",
+      verification: { kind: "structural", reason: "在ることだけなので構造で確かめる" },
+      vocabulary: [],
+      placement: [],
+      unwritable: [],
+      notes: ["件数の数え方を決めずに残した（曖昧さのメモ）"],
+    },
+  ],
+};
+
+/** 1 つの設計を ② に流し、結果を返す（本番と同じく、形と中身と根拠を確かめる） */
+async function designOutcome(value: unknown) {
+  const recording = createRecordingClient([structured(value)]);
+  return runDesign({
+    list: REQUIREMENT_LIST,
+    documents: SAMPLE_DOCUMENTS,
+    gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+  });
+}
+
+describe("「書けない」の根拠（制約 ID）と、曖昧さを分ける notes（Issue #332）", () => {
+  it("制約 ID の無い unwritable は断る（形は通るが、根拠が無い）", async () => {
+    const bad = {
+      ...CLAIM_DESIGN,
+      designs: [{ ...CLAIM_DESIGN.designs[0], unwritable: [{ ...VALID_CLAIM, constraintIds: [] }] }, CLAIM_DESIGN.designs[1]],
+    };
+    // 形の確認は通る（写像で、部分・制約 ID・理由の欄がある）
+    const checked = checkDesignOutput(bad);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    // 根拠（制約 ID）が無いので、コードの点検が断る
+    const problems = checkDesignConstraints(checked.value, SAMPLE_DOCUMENTS);
+    expect(problems.some((problem) => problem.field.includes("constraintIds"))).toBe(true);
+
+    const outcome = await designOutcome(bad);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("unmet");
+  });
+
+  it("文書に無い制約 ID を使った unwritable は断る", async () => {
+    const bad = {
+      ...CLAIM_DESIGN,
+      designs: [
+        { ...CLAIM_DESIGN.designs[0], unwritable: [{ ...VALID_CLAIM, constraintIds: ["R-999"] }] },
+        CLAIM_DESIGN.designs[1],
+      ],
+    };
+    const checked = checkDesignOutput(bad);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    const problems = checkDesignConstraints(checked.value, SAMPLE_DOCUMENTS);
+    expect(problems.some((problem) => problem.message.includes("R-999"))).toBe(true);
+
+    const outcome = await designOutcome(bad);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("unmet");
+  });
+
+  it("契約の規則の R-… も、制約 ID として使える", () => {
+    const design = {
+      ...CLAIM_DESIGN,
+      designs: [
+        { ...CLAIM_DESIGN.designs[0], unwritable: [{ ...VALID_CLAIM, constraintIds: ["R-1"] }] },
+        CLAIM_DESIGN.designs[1],
+      ],
+    };
+    const checked = checkDesignOutput(design);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checkDesignConstraints(checked.value, SAMPLE_DOCUMENTS)).toEqual([]);
+  });
+
+  it("曖昧さを notes に書いた設計を受け取り、notes を保つ", async () => {
+    const outcome = await designOutcome(CLAIM_DESIGN);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 書けない部分（語彙の穴）は、根拠つきで残る
+    expect(outcome.value.designs[0]?.unwritableClaims).toEqual([VALID_CLAIM]);
+    // 曖昧さは notes に入り、書けない部分には混ざらない
+    expect(outcome.value.designs[1]?.notes).toEqual(["件数の数え方を決めずに残した（曖昧さのメモ）"]);
+    expect(outcome.value.designs[1]?.unwritableClaims).toEqual([]);
+  });
+
+  it("notes だけがある要件は、設計として受け取れる（形の確認で断らない）", () => {
+    const checked = checkDesignOutput({
+      designs: [
+        { requirementId: "R-1", vocabulary: [], placement: [], unwritable: [], notes: ["曖昧さのメモ"] },
+      ],
+    });
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.value.designs[0]?.notes).toEqual(["曖昧さのメモ"]);
+    expect(checked.value.designs[0]?.unwritableClaims).toEqual([]);
   });
 });

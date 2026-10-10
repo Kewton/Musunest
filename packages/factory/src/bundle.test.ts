@@ -224,4 +224,40 @@ describe("書けなかった要件の一覧と、部分案になった理由（0
       correspondence_misses: [],
     });
   });
+
+  it("申告の仕分け・裏付けの判定の記録、印つきの要件、落とした申告を出す（Issue #332）", async () => {
+    const bundle = await assembleBundle(
+      input({
+        unwritable: UNWRITABLE,
+        outcome: { result: "partial", verdict: "partial" },
+        triage: [
+          {
+            question_id: "triage:R-1:0",
+            answer: "vocabulary-hole",
+            confidence: 0.9,
+            model: "gpt-test",
+            answered_by: "llm",
+          },
+          { question_id: "support:R-1:0", answer: "not-stated", confidence: null, model: "gpt-test", answered_by: "llm" },
+        ],
+        markedRequirements: ["R-1"],
+        dropped: [{ requirement_id: "R-2", part: "曖昧さのメモ", label: "ambiguity", reason: "理由" }],
+      }),
+    );
+    const list = JSON.parse(findText(bundle.artifacts, UNWRITABLE_FILE)) as BundleUnwritable;
+    expect(list.triage).toEqual([
+      { question_id: "triage:R-1:0", answer: "vocabulary-hole", confidence: 0.9, model: "gpt-test", answered_by: "llm" },
+      { question_id: "support:R-1:0", answer: "not-stated", confidence: null, model: "gpt-test", answered_by: "llm" },
+    ]);
+    expect(list.marked_requirements).toEqual(["R-1"]);
+    expect(list.dropped).toEqual([{ requirement_id: "R-2", part: "曖昧さのメモ", label: "ambiguity", reason: "理由" }]);
+  });
+
+  it("仕分けを回さないときは、判定の記録も落とした申告も空で出す（欄は常にある）", async () => {
+    const bundle = await assembleBundle(input());
+    const list = JSON.parse(findText(bundle.artifacts, UNWRITABLE_FILE)) as BundleUnwritable;
+    expect(list.triage).toEqual([]);
+    expect(list.marked_requirements).toEqual([]);
+    expect(list.dropped).toEqual([]);
+  });
 });
