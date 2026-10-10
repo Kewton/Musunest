@@ -1,11 +1,14 @@
 // P4 質問を組み立てる（04-plan-agent.md §3 P4・§6）。
 //
 // **1 問 = 未解決の事項 1 つ**。影響の大きい順に、合わせて上限（`AGENT_LIMITS.planQuestions`）まで。1 問は
-// 「質問 ID・問い・選択肢 2〜4（選択肢 ID）・推奨（とその理由 1 行）・自由入力」である（§6 の 3）。
+// 「質問 ID・問い・選択肢 2〜4（選択肢 ID）・推奨（とその理由 1 行）・自由入力・一緒に閉じる事項
+// （`alsoCloses`）」である（§6 の 3）。**同じことを聞く事項は 1 問にまとめ**、残りを `alsoCloses` に入れる。
+// 依頼文で決まっている事項は、聞かずに依頼文の引用つきで閉じる（`closedBySource`）。
 //
 // 質問の文は利用者の言葉で書く（宣言の用語を使わない。§3）。**コードが形・数・事項との対応・重複を確かめる**
 // ——選択肢の数（2〜4）、推奨が選択肢の 1 つであること、自由入力があること、同じ事項への 2 問が無いこと、
-// 問数が上限を超えないこと。
+// `alsoCloses`・`closedBySource` のつながり（無い事項・閉じた事項・重なり）が正しいこと、問数が上限を
+// 超えないこと。**このつながりの検査は切り捨ての前に行う**。
 //
 // **実 API は呼ばない。** 質問の文と選択肢を作るのは LLM（共通の口を通す）だが、判定と形の検査はコードである。
 import type { CallGateway } from "../call.js";
@@ -35,23 +38,30 @@ export const QUESTIONS_RULES: readonly string[] = [
   "選択肢は、どれを選んでも書けるものにする。作るものが同じになる選択肢は 1 つにまとめる。",
   "推奨は必ず 1 つだけ示し、理由を 1 行で書く。自由入力はどの問いにも用意する（allowFreeText を true にする）。",
   "同じ事項を 2 問にしない。すでに答えの出ている事項は挙げない。",
+  "同じことを聞く事項は 1 問にまとめ、残りの事項の ID を「一緒に閉じる事項」（alsoCloses）に入れる。1 つの答えで、その問いの事項と一緒に閉じる事項をまとめて閉じる。",
+  "依頼文にすでに書かれていて決まっている事項は、聞かずに「依頼文で閉じる事項」（closedBySource）に入れる。引用（quote）は依頼文からそのまま写し、決まっている中身（value）を書く。",
 ];
 
 /** P4 の JSON Schema（構造化出力） */
 export const QUESTIONS_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["questions"],
+  required: ["questions", "closedBySource"],
   properties: {
     questions: {
       type: "array",
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["id", "openIssueId", "text", "choices", "recommended", "allowFreeText"],
+        required: ["id", "openIssueId", "text", "choices", "recommended", "allowFreeText", "alsoCloses"],
         properties: {
           id: { type: "string", description: "質問の識別子" },
           openIssueId: { type: "string", description: "この問いが対応する未解決の事項の ID" },
+          alsoCloses: {
+            type: "array",
+            description: "この問いの答えで一緒に閉じる、同じことを聞く事項の ID（無ければ空の配列）",
+            items: { type: "string" },
+          },
           text: { type: "string", description: "利用者の言葉で書いた問い" },
           choices: {
             type: "array",
@@ -79,6 +89,20 @@ export const QUESTIONS_SCHEMA = {
         },
       },
     },
+    closedBySource: {
+      type: "array",
+      description: "依頼文にすでに書かれていて決まっている事項（聞かずに閉じる。無ければ空の配列）",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["issueId", "quote", "value"],
+        properties: {
+          issueId: { type: "string", description: "閉じる未解決の事項の ID" },
+          quote: { type: "string", description: "依頼文からの引用（そのまま写す）" },
+          value: { type: "string", description: "依頼文で決まっている中身" },
+        },
+      },
+    },
   },
 } as const;
 
@@ -100,6 +124,9 @@ export interface PlanRecommended {
  *
  * `recommended` と `allowFreeText` を**任意の欄**にしている——`checkQuestionSet` が「無い」ことを
  * 断れるようにするためである（型で強制すると、断りの試験が書けない）。正しい問いでは両方を持つ。
+ *
+ * `alsoCloses`（同じ答えで一緒に閉じる事項の ID）も**任意の欄**である——質問を作るほかの箇所と試験の
+ * 型を壊さないためである。無いときは空の配列として扱う（`alsoClosesOf`）。
  */
 export interface PlanQuestion {
   readonly id: string;
@@ -110,6 +137,32 @@ export interface PlanQuestion {
   readonly choices: readonly PlanChoice[];
   readonly recommended?: PlanRecommended;
   readonly allowFreeText?: boolean;
+  /** この問いの答えで**一緒に閉じる**、同じことを聞く事項の ID（無いときは空の配列） */
+  readonly alsoCloses?: readonly string[];
+}
+
+/** 問いの「一緒に閉じる事項」（無いときは空の配列） */
+export function alsoClosesOf(question: PlanQuestion): readonly string[] {
+  return question.alsoCloses ?? [];
+}
+
+/**
+ * 依頼文で決まっている事項 1 つ（P4 の応答。04 §3 P4）。依頼文からの引用（`quote`）と、決まっている
+ * 中身（`value`）を持つ。引用は**依頼文にそのまま含まれる**ことをコードが確かめる。
+ */
+export interface PlanSourceClosure {
+  /** 閉じる未解決の事項の ID */
+  readonly issueId: string;
+  /** 依頼文からの引用（そのまま） */
+  readonly quote: string;
+  /** 依頼文で決まっている中身 */
+  readonly value: string;
+}
+
+/** P4 の応答（問いの束と、依頼文で閉じた事項。04 §3 P4） */
+export interface PlanQuestionsOutput {
+  readonly questions: readonly PlanQuestion[];
+  readonly closedBySource: readonly PlanSourceClosure[];
 }
 
 /** 質問の検査の誤りの種類（呼ぶ側が直し方を選べるように分ける） */
@@ -128,6 +181,10 @@ export const QUESTION_PROBLEM_CODES = [
   "issue-mapping",
   /** 同じ事項への 2 問がある */
   "duplicate-issue",
+  /** 一緒に閉じる事項の一覧（`alsoCloses`）の誤り（無い事項・閉じた事項・重なり・主の ID の再掲） */
+  "also-closes",
+  /** 依頼文で閉じる事項の一覧（`closedBySource`）の誤り */
+  "source-closure",
 ] as const;
 export type QuestionProblemCode = (typeof QUESTION_PROBLEM_CODES)[number];
 
@@ -178,12 +235,80 @@ function checkRecommended(value: unknown, field: string, problems: Problem[]): P
   return { choiceId: choiceId as string, reason: reason as string };
 }
 
+/** 問いの「一緒に閉じる事項」（`alsoCloses`）の並びを確かめる。無いときは空の配列である */
+function checkAlsoCloses(value: unknown, field: string, problems: Problem[]): readonly string[] | undefined {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    problems.push({ field, message: "一緒に閉じる事項の一覧（array）であること" });
+    return undefined;
+  }
+  const ids: string[] = [];
+  value.forEach((entry, index) => {
+    if (typeof entry !== "string" || entry === "") {
+      problems.push({ field: `${field}[${index}]`, message: "一緒に閉じる事項の ID は空でない文字列であること" });
+      return;
+    }
+    ids.push(entry);
+  });
+  return ids;
+}
+
+/**
+ * 「依頼文で決める事項」（`closedBySource`）の並びを確かめる。`source` は依頼文（原文）である。
+ * 引用は空でなく、**依頼文にそのまま含まれる**こと（含まれなければ形の誤りとしてやり直させる）。
+ */
+function checkClosedBySource(
+  value: unknown,
+  source: string,
+  problems: Problem[],
+): readonly PlanSourceClosure[] | undefined {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    problems.push({ field: "closedBySource", message: "依頼文で閉じる事項の一覧（array）であること" });
+    return undefined;
+  }
+  const closures: PlanSourceClosure[] = [];
+  value.forEach((item, index) => {
+    const field = `closedBySource[${index}]`;
+    if (!isRecord(item)) {
+      problems.push({ field, message: "依頼文で閉じる事項は写像（object）であること" });
+      return;
+    }
+    const issueId = item["issueId"];
+    const quote = item["quote"];
+    const content = item["value"];
+    let good = true;
+    if (typeof issueId !== "string" || issueId === "") {
+      problems.push({ field: `${field}.issueId`, message: "事項の ID は空でない文字列であること" });
+      good = false;
+    }
+    if (typeof quote !== "string" || quote === "") {
+      problems.push({ field: `${field}.quote`, message: "引用は空でない文字列であること" });
+      good = false;
+    } else if (!source.includes(quote)) {
+      problems.push({ field: `${field}.quote`, message: "引用が依頼文にそのまま含まれていない" });
+      good = false;
+    }
+    if (typeof content !== "string" || content === "") {
+      problems.push({ field: `${field}.value`, message: "決めた中身は空でない文字列であること" });
+      good = false;
+    }
+    if (good) closures.push({ issueId: issueId as string, quote: quote as string, value: content as string });
+  });
+  return closures;
+}
+
 /**
  * P4 の応答の形を確かめる。`revision` は、この問いを組み立てた仕様の版である（LLM には書かせず、コードが
  * 付ける）。`recommended` と `allowFreeText` は、無ければ形では断らない（意味の検査 `checkQuestionSet` が
- * 断る）。
+ * 断る）。`alsoCloses` は無ければ空の配列にする。依頼文で閉じる事項（`closedBySource`）の引用は、依頼文に
+ * そのまま含まれることを確かめる。
  */
-export function checkQuestionsOutput(output: unknown, revision: number): ShapeCheck<readonly PlanQuestion[]> {
+export function checkQuestionsOutput(
+  output: unknown,
+  revision: number,
+  source: string,
+): ShapeCheck<PlanQuestionsOutput> {
   if (!isRecord(output)) {
     return { ok: false, problems: [{ field: "", message: "応答は写像（object）であること" }] };
   }
@@ -241,6 +366,8 @@ export function checkQuestionsOutput(output: unknown, revision: number): ShapeCh
         allowFreeText = item["allowFreeText"];
       }
     }
+    const alsoCloses = checkAlsoCloses(item["alsoCloses"], `${field}.alsoCloses`, problems);
+    if (alsoCloses === undefined) good = false;
     if (good) {
       questions.push({
         id: id as string,
@@ -250,11 +377,13 @@ export function checkQuestionsOutput(output: unknown, revision: number): ShapeCh
         choices,
         ...(recommended === undefined ? {} : { recommended }),
         ...(allowFreeText === undefined ? {} : { allowFreeText }),
+        alsoCloses: alsoCloses ?? [],
       });
     }
   });
+  const closedBySource = checkClosedBySource(output["closedBySource"], source, problems);
   if (problems.length > 0) return { ok: false, problems };
-  return { ok: true, value: questions };
+  return { ok: true, value: { questions, closedBySource: closedBySource ?? [] } };
 }
 
 /**
@@ -349,6 +478,78 @@ export function checkQuestionSet(
 }
 
 /**
+ * 問いと、一緒に閉じる事項（`alsoCloses`）・依頼文で閉じる事項（`closedBySource`）の**つながり**を
+ * コードで確かめる（04 §3 P4）。**切り捨ての前に**呼ぶ——切り捨てで問いが落ちると、重なりを見落とす。
+ *
+ * 形の誤りにするもの：一覧に、無い事項・すでに閉じた（依頼文で閉じる）事項の ID がある／同じ一覧の中で
+ * 重なる／主の ID を一緒に閉じる一覧に再び書く／1 つの事項が、2 つの問い・一緒に閉じる一覧・依頼文で
+ * 閉じる一覧のうち 2 か所以上に出る。
+ */
+export function checkQuestionLinks(
+  openIssueIds: readonly string[],
+  questions: readonly PlanQuestion[],
+  closedBySource: readonly PlanSourceClosure[] = [],
+): readonly QuestionProblem[] {
+  const problems: QuestionProblem[] = [];
+  const report = (code: QuestionProblemCode, path: string, message: string): void => {
+    problems.push({ code, path, message });
+  };
+
+  const openSet = new Set(openIssueIds);
+  const closedBySourceIds = new Set<string>();
+  closedBySource.forEach((closure, index) => {
+    const path = `closedBySource[${index}]`;
+    if (!openSet.has(closure.issueId)) {
+      report("source-closure", `${path}.issueId`, `${closure.issueId}: 未解決の事項に無い`);
+    }
+    if (closedBySourceIds.has(closure.issueId)) {
+      report("source-closure", `${path}.issueId`, `事項 ${closure.issueId} が依頼文で閉じる一覧に重なっている`);
+    }
+    closedBySourceIds.add(closure.issueId);
+  });
+
+  questions.forEach((question, index) => {
+    const path = `questions[${index}]`;
+    if (!openSet.has(question.openIssueId)) {
+      report("issue-mapping", `${path}.openIssueId`, `${question.openIssueId}: 未解決の事項に無い`);
+    }
+    const seen = new Set<string>();
+    alsoClosesOf(question).forEach((id, alsoIndex) => {
+      const idPath = `${path}.alsoCloses[${alsoIndex}]`;
+      if (!openSet.has(id)) {
+        report("issue-mapping", idPath, `${id}: 未解決の事項に無い`);
+      }
+      if (closedBySourceIds.has(id)) {
+        report("also-closes", idPath, `${id}: 依頼文で閉じる事項と同じである`);
+      }
+      if (id === question.openIssueId) {
+        report("also-closes", idPath, `${id}: 主の事項を一緒に閉じる一覧に書き直している`);
+      }
+      if (seen.has(id)) {
+        report("also-closes", idPath, `事項 ${id} が一緒に閉じる一覧の中で重なっている`);
+      }
+      seen.add(id);
+    });
+  });
+
+  // 1 つの事項が、2 つの問い・一緒に閉じる一覧・依頼文で閉じる一覧のうち 2 か所以上に出ていないか
+  const placement = new Map<string, number>();
+  const place = (id: string): void => {
+    placement.set(id, (placement.get(id) ?? 0) + 1);
+  };
+  for (const closure of closedBySource) place(closure.issueId);
+  for (const question of questions) {
+    place(question.openIssueId);
+    for (const id of alsoClosesOf(question)) place(id);
+  }
+  for (const [id, count] of placement) {
+    if (count >= 2) report("duplicate-issue", "questions", `事項 ${id} が 2 か所以上に出ている（${count} か所）`);
+  }
+
+  return problems;
+}
+
+/**
  * 開いている事項だけを、**重大なものを先に並べて**返す（04 §3 P4）。答えの出た事項（`status` が `open`
  * でないもの）は落とす——P4 は開いている事項についてだけ聞く。並び順が、LLM に渡すデータの見え方を
  * 決める。
@@ -361,28 +562,40 @@ export function openIssuesForQuestions(openIssues: readonly PlanOpenIssue[]): re
 /**
  * 残りの問数に照らして、**開いている重大な事項がすべて聞かれている**かを確かめる（04 §3 P4）。
  *
- * 残りの問数が足りる（重大な事項の数が残りの問数以下である）のに、ある重大な事項への問いが無ければ、
- * 形の誤りとして返す——`runQuestions` はこれを形の検査に混ぜるので、応答は 1 回だけやり直され、
- * それでも足りなければ段の失敗になる。開いている事項があるのに問いが 0 問のときも同じである。
+ * 重大な事項は、**問い・一緒に閉じる事項（`alsoCloses`）・依頼文で閉じる事項（`closedBySource`）**の
+ * どれかで閉じていれば、取りこぼしにしない。残りの問数が足りるのに、ある重大な事項を閉じる問いが
+ * 無ければ、形の誤りとして返す——`runQuestions` はこれを形の検査に混ぜるので、応答は 1 回だけやり直され、
+ * それでも足りなければ段の失敗になる。開いている事項がすべて依頼文で閉じているなら、問いが 0 問でもよい。
  * 残りの問数が足りない（重大な事項のほうが多い）ときは、聞けるぶんだけ聞くので、ここでは何も言わない。
  */
 export function checkQuestionCoverage(
   openIssues: readonly PlanOpenIssue[],
   remaining: number,
   questions: readonly PlanQuestion[],
+  closedBySource: readonly PlanSourceClosure[] = [],
 ): readonly Problem[] {
   const problems: Problem[] = [];
   const open = openIssues.filter((issue) => issue.status === "open");
   if (open.length === 0 || remaining <= 0) return problems;
+
+  const closedBySourceIds = new Set(closedBySource.map((closure) => closure.issueId));
+  const closed = new Set<string>();
+  for (const question of questions) {
+    closed.add(question.openIssueId);
+    for (const id of alsoClosesOf(question)) closed.add(id);
+  }
+  const isClosed = (id: string): boolean => closed.has(id) || closedBySourceIds.has(id);
+
+  // 開いている事項がすべて（問いか依頼文で）閉じているなら、問いが 0 問でもよい
+  if (open.every((issue) => isClosed(issue.id))) return problems;
   if (questions.length === 0) {
     problems.push({ field: "questions", message: "開いている事項があるのに問いが 0 問である" });
     return problems;
   }
   const critical = open.filter((issue) => issue.critical);
   if (critical.length > remaining) return problems;
-  const asked = new Set(questions.map((question) => question.openIssueId));
   for (const issue of critical) {
-    if (!asked.has(issue.id)) {
+    if (!isClosed(issue.id)) {
       problems.push({
         field: "questions",
         message: `重大な事項 ${issue.id} への問いが無い（残りの問数 ${remaining} に重大な事項 ${critical.length} 件が収まる）`,
@@ -395,6 +608,9 @@ export function checkQuestionCoverage(
 /**
  * 問いが残りの問数を超えていれば、**重大なものを残して**切る（04 §3 P4）。重大な事項に対応する問いを
  * 先に、次に重大でない事項の問いを残し、残りの問数まで取る。`openIssues` は開いている事項である。
+ *
+ * 重大かどうかは、**主の事項と一緒に閉じる事項（`alsoCloses`）の両方**で見る——主が重大でなくても、
+ * 一緒に閉じる一覧に重大な事項があれば、その問いは重大なものとして残す。
  */
 export function trimQuestionsToRemaining(
   questions: readonly PlanQuestion[],
@@ -403,8 +619,10 @@ export function trimQuestionsToRemaining(
 ): readonly PlanQuestion[] {
   if (questions.length <= remaining) return questions;
   const criticalIds = new Set(openIssues.filter((issue) => issue.critical).map((issue) => issue.id));
-  const criticalQuestions = questions.filter((question) => criticalIds.has(question.openIssueId));
-  const otherQuestions = questions.filter((question) => !criticalIds.has(question.openIssueId));
+  const isCritical = (question: PlanQuestion): boolean =>
+    criticalIds.has(question.openIssueId) || alsoClosesOf(question).some((id) => criticalIds.has(id));
+  const criticalQuestions = questions.filter(isCritical);
+  const otherQuestions = questions.filter((question) => !isCritical(question));
   return [...criticalQuestions, ...otherQuestions].slice(0, remaining);
 }
 
@@ -425,13 +643,14 @@ export interface QuestionsInput {
 /**
  * P4 を 1 回呼ぶ。データは依頼文・**残りの問数**・**開いている事項**（重大なものを先）だけである。
  *
- * 形の検査には**残りの問数に照らした覆いの検査**（`checkQuestionCoverage`）を混ぜる——残りの問数が
- * 足りるのに重大な事項の問いが欠けていれば、1 回だけやり直す。問いが残りの問数を超えていれば、
- * 重大なものを残して切る（`trimQuestionsToRemaining`）。そのうえで意味の検査（`checkQuestionSet`）に
- * 合わなければ `unmet` で断る。
+ * 形の検査には、**切り捨ての前の**つながりの検査（`checkQuestionLinks`）と、**残りの問数に照らした
+ * 覆いの検査**（`checkQuestionCoverage`）を混ぜる——重なりや、足りるのに欠けた重大な事項があれば、
+ * 1 回だけやり直す。問いが残りの問数を超えていれば、重大なものを残して切る
+ * （`trimQuestionsToRemaining`）。そのうえで意味の検査（`checkQuestionSet`）に合わなければ `unmet` で断る。
  */
-export async function runQuestions(input: QuestionsInput): Promise<StageOutcome<readonly PlanQuestion[]>> {
+export async function runQuestions(input: QuestionsInput): Promise<StageOutcome<PlanQuestionsOutput>> {
   const openIssues = openIssuesForQuestions(input.openIssues);
+  const openIssueIds = openIssues.map((issue) => issue.id);
   const request = buildStructuredRequest({
     rules: QUESTIONS_RULES,
     documents: input.documents,
@@ -447,17 +666,35 @@ export async function runQuestions(input: QuestionsInput): Promise<StageOutcome<
   const answer = await callStructuredChecked(input.gateway, {
     request,
     check: (output) => {
-      const shape = checkQuestionsOutput(output, input.revision);
+      const shape = checkQuestionsOutput(output, input.revision, input.source);
       if (!shape.ok) return shape;
-      const coverage = checkQuestionCoverage(openIssues, input.remaining, shape.value);
+      const links = checkQuestionLinks(openIssueIds, shape.value.questions, shape.value.closedBySource);
+      if (links.length > 0) {
+        return {
+          ok: false,
+          problems: links.map((problem) => ({ field: problem.path, message: `${problem.code}: ${problem.message}` })),
+        };
+      }
+      const coverage = checkQuestionCoverage(
+        openIssues,
+        input.remaining,
+        shape.value.questions,
+        shape.value.closedBySource,
+      );
       if (coverage.length > 0) return { ok: false, problems: coverage };
-      return { ok: true, value: trimQuestionsToRemaining(shape.value, openIssues, input.remaining) };
+      return {
+        ok: true,
+        value: {
+          questions: trimQuestionsToRemaining(shape.value.questions, openIssues, input.remaining),
+          closedBySource: shape.value.closedBySource,
+        },
+      };
     },
   });
   if (!answer.ok) return answer;
   const problems = checkQuestionSet(
-    openIssues.map((issue) => issue.id),
-    answer.value,
+    openIssueIds,
+    answer.value.questions,
   );
   if (problems.length > 0) {
     return {

@@ -8,12 +8,17 @@ import type { PlanOpenIssue } from "@musunest/appspec-schema";
 import { SAMPLE_DOCUMENTS, createRecordingClient, makeGateway } from "../stages/__tests__/prompt.js";
 import {
   QUESTIONS_SCHEMA_NAME,
+  alsoClosesOf,
+  checkQuestionCoverage,
+  checkQuestionLinks,
   checkQuestionSet,
   checkQuestionsOutput,
   runQuestions,
+  trimQuestionsToRemaining,
   type PlanChoice,
   type PlanQuestion,
   type PlanRecommended,
+  type PlanSourceClosure,
 } from "./questions.js";
 
 const OPEN_ISSUES: readonly PlanOpenIssue[] = [
@@ -35,6 +40,7 @@ interface QuestionOverrides {
   readonly choices?: readonly PlanChoice[];
   readonly recommended?: PlanRecommended | undefined;
   readonly allowFreeText?: boolean | undefined;
+  readonly alsoCloses?: readonly string[];
 }
 
 function question(overrides: QuestionOverrides = {}, issueId = "OI-1"): PlanQuestion {
@@ -48,6 +54,7 @@ function question(overrides: QuestionOverrides = {}, issueId = "OI-1"): PlanQues
     choices: overrides.choices ?? choices("c1", "c2"),
     ...(recommended === undefined ? {} : { recommended }),
     ...(allowFreeText === undefined ? {} : { allowFreeText }),
+    ...(overrides.alsoCloses === undefined ? {} : { alsoCloses: overrides.alsoCloses }),
   };
 }
 
@@ -138,10 +145,13 @@ describe("P4 の形の確認", () => {
         ],
       },
       3,
+      "タスクを記録する。",
     );
     expect(checked.ok).toBe(true);
     if (!checked.ok) return;
-    expect(checked.value[0]?.revision).toBe(3);
+    expect(checked.value.questions[0]?.revision).toBe(3);
+    // 一緒に閉じる一覧が無い問いは、空の配列として扱われる
+    expect(alsoClosesOf(checked.value.questions[0] as PlanQuestion)).toEqual([]);
   });
 });
 
@@ -313,7 +323,161 @@ describe("P4 を 1 回呼ぶ（04 §3 P4）", () => {
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     // 残り 1 問なので、重大な事項（OI-1）の問いだけが残る（順に切るだけでやり直しはしない）
-    expect(outcome.value.map((one) => one.id)).toEqual(["Q-1"]);
+    expect(outcome.value.questions.map((one) => one.id)).toEqual(["Q-1"]);
     expect(recording.structured).toHaveLength(1);
+  });
+});
+
+// ── 一緒に閉じる事項（alsoCloses）と、依頼文で閉じる事項（closedBySource）（Issue #370）──
+
+describe("一緒に閉じる事項の一覧（alsoCloses。04 §3 P4・Issue #370）", () => {
+  it("一緒に閉じる一覧を持つ問いは受け付けられ、問数には問いの数だけが数えられる", () => {
+    const many = Array.from({ length: AGENT_LIMITS.planQuestions }, (_value, index) =>
+      question({ id: `Q-${index}`, alsoCloses: [`OI-${index}-a`] }, `OI-${index}`),
+    );
+    const openIds = many.flatMap((one) => [one.openIssueId, ...alsoClosesOf(one)]);
+    const problems = checkQuestionSet(openIds, many);
+    // 一緒に閉じる事項は問数に数えない（問いは上限ちょうどの 10 問）
+    expect(problems.map((problem) => problem.code)).not.toContain("question-count");
+    expect(problems).toEqual([]);
+  });
+
+  it("一緒に閉じる一覧が無い質問の型は、空の配列として扱われる", () => {
+    expect(alsoClosesOf(question())).toEqual([]);
+    expect(alsoClosesOf(question({ alsoCloses: ["OI-2"] }))).toEqual(["OI-2"]);
+  });
+
+  it("問いが閉じるすべての ID で切り捨ての重大さを見る（主が重大でなくても、一緒に閉じる事項が重大なら残す）", () => {
+    const openIssues: readonly PlanOpenIssue[] = [
+      { id: "OI-1", text: "重大でない主", critical: false, status: "open" },
+      { id: "OI-2", text: "重大な同義", critical: true, status: "open" },
+      { id: "OI-3", text: "重大でない 2", critical: false, status: "open" },
+    ];
+    const grouped = question({ id: "Q-a", alsoCloses: ["OI-2"] }, "OI-1");
+    const other = question({ id: "Q-b" }, "OI-3");
+    // 残り 1 問の境界：主は重大でないが、一緒に閉じる事項が重大な Q-a が残る
+    const trimmed = trimQuestionsToRemaining([other, grouped], openIssues, 1);
+    expect(trimmed.map((one) => one.id)).toEqual(["Q-a"]);
+    // 残り 2 問なら両方残る
+    expect(trimQuestionsToRemaining([other, grouped], openIssues, 2)).toHaveLength(2);
+  });
+});
+
+describe("問いと事項のつながりの検査（切り捨ての前。04 §3 P4・Issue #370）", () => {
+  const CLOSED: readonly PlanSourceClosure[] = [
+    { issueId: "OI-9", quote: "タスクを記録する", value: "記録する" },
+  ];
+
+  it("正しいつながりは通る", () => {
+    expect(checkQuestionLinks(["OI-1", "OI-2"], [question({ alsoCloses: ["OI-2"] }, "OI-1")])).toEqual([]);
+    expect(checkQuestionLinks(["OI-1", "OI-9"], [], CLOSED)).toEqual([]);
+  });
+
+  it("無い事項の ID は形の誤りになる", () => {
+    expect(checkQuestionLinks(["OI-1"], [question({ alsoCloses: ["OI-9"] })])).not.toEqual([]);
+    expect(checkQuestionLinks(["OI-1"], [question({}, "OI-9")])).not.toEqual([]);
+  });
+
+  it("すでに閉じた事項（依頼文で閉じる）の ID は形の誤りになる", () => {
+    const problems = checkQuestionLinks(
+      ["OI-1", "OI-9"],
+      [question({ alsoCloses: ["OI-9"] }, "OI-1")],
+      CLOSED,
+    );
+    expect(problems.map((problem) => problem.code)).toContain("also-closes");
+  });
+
+  it("同じ一覧の中の重なりは形の誤りになる", () => {
+    const problems = checkQuestionLinks(["OI-1", "OI-2"], [question({ alsoCloses: ["OI-2", "OI-2"] }, "OI-1")]);
+    expect(problems.map((problem) => problem.code)).toContain("also-closes");
+  });
+
+  it("主の ID の再掲は形の誤りになる", () => {
+    const problems = checkQuestionLinks(["OI-1"], [question({ alsoCloses: ["OI-1"] }, "OI-1")]);
+    expect(problems.map((problem) => problem.code)).toContain("also-closes");
+  });
+
+  it("2 か所以上に出る事項は形の誤りになる", () => {
+    const problems = checkQuestionLinks(
+      ["OI-1", "OI-2"],
+      [question({ id: "Q-1", alsoCloses: ["OI-2"] }, "OI-1"), question({ id: "Q-2" }, "OI-2")],
+    );
+    expect(problems.map((problem) => problem.code)).toContain("duplicate-issue");
+  });
+});
+
+describe("重大な事項の取りこぼしと、依頼文で閉じる事項（04 §3 P4・Issue #370）", () => {
+  const CRITICAL: readonly PlanOpenIssue[] = [
+    { id: "OI-1", text: "重大 1", critical: true, status: "open" },
+    { id: "OI-2", text: "重大 2", critical: true, status: "open" },
+  ];
+
+  it("重大な事項を、問い・一緒に閉じる一覧・依頼文で閉じる一覧のどれかで閉じていれば、取りこぼしにならない", () => {
+    // 1 問で 2 件を閉じる（主 + 一緒に閉じる）
+    expect(
+      checkQuestionCoverage(CRITICAL, 2, [question({ id: "Q-1", alsoCloses: ["OI-2"] }, "OI-1")]),
+    ).toEqual([]);
+    // 依頼文で閉じる一覧で閉じる（問いは 0 問でもよい）
+    const closed: readonly PlanSourceClosure[] = [
+      { issueId: "OI-1", quote: "タスクを記録する", value: "記録する" },
+      { issueId: "OI-2", quote: "件数を合計する", value: "合計する" },
+    ];
+    expect(checkQuestionCoverage(CRITICAL, 4, [], closed)).toEqual([]);
+    // どれでも閉じていない重大な事項があれば、取りこぼしになる
+    expect(checkQuestionCoverage(CRITICAL, 4, [question({ id: "Q-1" }, "OI-1")])).not.toEqual([]);
+    // 依頼文で閉じる一覧に無いのに 0 問なら、取りこぼしになる
+    expect(checkQuestionCoverage(CRITICAL, 4, [])).not.toEqual([]);
+  });
+});
+
+describe("依頼文で閉じる事項の引用（04 §3 P4・Issue #370）", () => {
+  const ISSUE: PlanOpenIssue = { id: "OI-1", text: "誰の分を数えるか", critical: true, status: "open" };
+
+  async function runWith(first: unknown, second: unknown) {
+    const recording = createRecordingClient([
+      { kind: "structured", output: first, usage: undefined },
+      { kind: "structured", output: second, usage: undefined },
+    ]);
+    const outcome = await runQuestions({
+      source: "タスクを記録する。件数を合計する。",
+      openIssues: [ISSUE],
+      remaining: 4,
+      revision: 1,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    return { outcome, recording };
+  }
+
+  it("依頼文に無い引用で閉じた応答は、やり直しになる", async () => {
+    const bad = {
+      questions: [],
+      closedBySource: [{ issueId: "OI-1", quote: "依頼文に無い", value: "記録する" }],
+    };
+    const good = {
+      questions: [],
+      closedBySource: [{ issueId: "OI-1", quote: "タスクを記録する", value: "記録する" }],
+    };
+    const { outcome, recording } = await runWith(bad, good);
+    expect(recording.structured).toHaveLength(2);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.closedBySource).toEqual([
+      { issueId: "OI-1", quote: "タスクを記録する", value: "記録する" },
+    ]);
+  });
+
+  it("空の引用で閉じた応答は、やり直しになる", async () => {
+    const bad = {
+      questions: [],
+      closedBySource: [{ issueId: "OI-1", quote: "", value: "記録する" }],
+    };
+    const good = {
+      questions: [],
+      closedBySource: [{ issueId: "OI-1", quote: "件数を合計する", value: "合計する" }],
+    };
+    const { outcome, recording } = await runWith(bad, good);
+    expect(recording.structured).toHaveLength(2);
+    expect(outcome.ok).toBe(true);
   });
 });

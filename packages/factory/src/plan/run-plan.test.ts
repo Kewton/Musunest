@@ -16,6 +16,7 @@ import type { LlmClient, LlmUsage } from "../llm.js";
 import { runPlan, type PlanAnswerRequest, type PlanResponder, type PlanRunInput } from "./run-plan.js";
 import { CATALOG_FACETS, catalogAppliesQuestionName, catalogQuestionName } from "./catalog.js";
 import { confirmQuestionName } from "./confirm.js";
+import { freeTextQuestionName } from "./answers.js";
 import {
   createRecordingClient,
   REQUIREMENT_LIST_OUTPUT,
@@ -113,6 +114,64 @@ const QUESTIONS_OUTPUT = {
       allowFreeText: true,
     },
   ],
+};
+
+/** 同じことを聞く重大な事項 2 件を返す P3 の答え（Issue #370） */
+const SAME_ISSUES_SURFACE = {
+  ambiguities: [
+    { id: "OI-a", requirementId: "R-1", text: "誰の分を数えるか", critical: true },
+    { id: "OI-b", requirementId: "R-1", text: "誰の分を数えるか（同じ問い）", critical: true },
+  ],
+  unwritable: [],
+};
+
+/** 2 件の事項を 1 問で閉じる P4 の答え（主の OI-a と、一緒に閉じる OI-b。Issue #370） */
+const GROUPED_QUESTIONS = {
+  questions: [
+    {
+      id: "Q-1",
+      openIssueId: "OI-a",
+      alsoCloses: ["OI-b"],
+      text: "誰の分を数えますか",
+      choices: [
+        { id: "c1", text: "全員" },
+        { id: "c2", text: "自分のみ" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    },
+  ],
+};
+
+/** 矛盾のあとの往復で使う P4 の答え（OI-a・OI-b と、矛盾から生まれた事項の 2 問） */
+const GROUPED_QUESTIONS_AFTER_CONTRADICTION = {
+  questions: [
+    ...GROUPED_QUESTIONS.questions,
+    {
+      id: "Q-2",
+      openIssueId: "OI:contradiction:A-1",
+      alsoCloses: [],
+      text: "前の答えを保ちますか",
+      choices: [
+        { id: "keep", text: "保つ" },
+        { id: "use-new", text: "新しい答えを使う" },
+      ],
+      recommended: { choiceId: "keep", reason: "前の答えを保つ" },
+      allowFreeText: true,
+    },
+  ],
+};
+
+/** 依頼文で決まっている事項 1 件を返す P3 の答え（Issue #370） */
+const SOURCE_CLOSURE_SURFACE = {
+  ambiguities: [{ id: "OI-c", requirementId: "R-1", text: "誰の分を数えるか", critical: true }],
+  unwritable: [],
+};
+
+/** 依頼文の引用で、唯一の事項を聞かずに閉じる P4 の答え（Issue #370） */
+const SOURCE_CLOSURE_QUESTIONS = {
+  questions: [],
+  closedBySource: [{ issueId: "OI-c", quote: "タスクを記録する", value: "記録する内容を 1 行にする" }],
 };
 
 function makePlanInput(
@@ -374,5 +433,162 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     expect(result.kind).toBe("confirmed");
     if (result.kind !== "confirmed") return;
     expect(result.plan.open_issues.find((issue) => issue.id === "OI-extra")?.status).toBe("resolved");
+  });
+
+  // ── 同じことを聞く事項を 1 問でまとめて閉じる（Issue #370）──────────────
+
+  it("同じことを聞く重大な事項 2 件が 1 問で閉じ、通常の答えの道で 2 件が同じ答えを指して確定まで進む", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SAME_ISSUES_SURFACE),
+      structured(GROUPED_QUESTIONS),
+    ]);
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "answers", answers: [{ id: "A-1", questionId: "Q-1", revision: 1, choiceId: "c1" }] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A-1") });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    const issues = result.plan.open_issues.filter((issue) => issue.id === "OI-a" || issue.id === "OI-b");
+    expect(issues).toHaveLength(2);
+    // 2 件とも、同じ答えの ID で閉じている
+    expect(issues.map((issue) => issue.resolution?.answer_id)).toEqual(["A-1", "A-1"]);
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+  });
+
+  it("同じことを聞く重大な事項 2 件が 1 問で閉じ、「全部推奨で進める」の道でも 2 件が同じ答えを指して確定まで進む", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SAME_ISSUES_SURFACE),
+      structured(GROUPED_QUESTIONS),
+    ]);
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q-1") });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    const issues = result.plan.open_issues.filter((issue) => issue.id === "OI-a" || issue.id === "OI-b");
+    expect(issues.map((issue) => issue.resolution?.answer_id)).toEqual(["A:Q-1", "A:Q-1"]);
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+  });
+
+  it("答えが矛盾して問いが閉じないとき、一緒に閉じる一覧の事項も開いたまま", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SAME_ISSUES_SURFACE),
+      structured(GROUPED_QUESTIONS),
+      structured(GROUPED_QUESTIONS_AFTER_CONTRADICTION),
+      structured(GROUPED_QUESTIONS_AFTER_CONTRADICTION),
+    ]);
+    let round = 0;
+    const responder: PlanResponder = {
+      async answer() {
+        round += 1;
+        if (round === 1) {
+          return {
+            kind: "answers",
+            answers: [{ id: "A-1", questionId: "Q-1", revision: 1, freeText: "全員で数える" }],
+          };
+        }
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [freeTextQuestionName("A-1")]: {
+        kind: "choice",
+        choice: "contradiction",
+        probabilities: undefined,
+        probability: undefined,
+        confidence: 0.9,
+      },
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    const openIds = result.openIssues.map((issue) => issue.id);
+    // 矛盾で閉じなかったので、主の OI-a も一緒に閉じる OI-b も開いたまま
+    expect(openIds).toContain("OI-a");
+    expect(openIds).toContain("OI-b");
+  });
+
+  // ── 依頼文で決まっている事項を、聞かずに閉じる（Issue #370）──────────────
+
+  /** 依頼文で唯一の事項を閉じる流れを 1 回まわす（答える役が呼ばれた回数も返す） */
+  async function runSourceClosure(): Promise<{ result: Awaited<ReturnType<typeof runPlan>>; answerCalls: number }> {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SOURCE_CLOSURE_SURFACE),
+      structured(SOURCE_CLOSURE_QUESTIONS),
+    ]);
+    let answerCalls = 0;
+    const responder: PlanResponder = {
+      async answer() {
+        answerCalls += 1;
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor([]) });
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+    return { result, answerCalls };
+  }
+
+  it("依頼文で閉じた事項が decisions に入り、事項の解決の根拠がその ID を指し、checkConfirmedPlan の誤りが 0", async () => {
+    const { result } = await runSourceClosure();
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    const issue = result.plan.open_issues.find((one) => one.id === "OI-c");
+    expect(issue?.status).toBe("resolved");
+    const decisionId = issue?.resolution?.decision_id;
+    expect(decisionId).toBeDefined();
+    const decision = result.plan.decisions.find((one) => one.id === decisionId);
+    expect(decision?.value).toBe("記録する内容を 1 行にする");
+    expect(decision?.reason).toBe("タスクを記録する");
+    expect(result.closedBySource).toEqual([
+      { issueId: "OI-c", quote: "タスクを記録する", value: "記録する内容を 1 行にする" },
+    ]);
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+  });
+
+  it("開いている事項がすべて依頼文で閉じたとき、答える役が呼ばれず、問数と往復が 0 のまま確認に進む", async () => {
+    const { result, answerCalls } = await runSourceClosure();
+
+    expect(result.kind).toBe("confirmed");
+    // 答える役は 1 度も呼ばれない（問いを 0 問で確認に進む）
+    expect(answerCalls).toBe(0);
+    // 答えの段は 1 度も走らない（問数を消費しない）
+    expect(result.stages.filter((stage) => stage.stage === "answers")).toHaveLength(0);
+    if (result.kind !== "confirmed") return;
+    expect(result.plan.open_issues.every((issue) => issue.status === "resolved")).toBe(true);
   });
 });

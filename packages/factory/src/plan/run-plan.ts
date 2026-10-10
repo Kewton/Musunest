@@ -47,7 +47,7 @@ import { runReverseCheckLoop, splitSourceSentences } from "../stages/reverse-che
 import { runAnswers, type ClassifiedAnswer, type PlanAnswerDraft } from "./answers.js";
 import { catalogOpenIssue, runCatalog } from "./catalog.js";
 import { runConfirm } from "./confirm.js";
-import { runQuestions, type PlanQuestion } from "./questions.js";
+import { alsoClosesOf, runQuestions, type PlanQuestion, type PlanSourceClosure } from "./questions.js";
 import {
   nextPlanStep,
   remainingPlanBudget,
@@ -111,6 +111,16 @@ export interface PlanResultBase {
   readonly remainingUsd: number;
   /** 判定の呼び出しの数（答えた adapter ごと）と費用（USD） */
   readonly judge: BundleJudgeUsage;
+  /** 依頼文で閉じた事項（往復の記録に残す。04 §3 P4・Issue #370） */
+  readonly closedBySource: readonly PlanSourceClosure[];
+}
+
+/** 依頼文で閉じた事項から作る `decisions` の ID の頭（確認の画面が「依頼文で決めたこと」を見分ける） */
+export const SOURCE_CLOSURE_DECISION_PREFIX = "D:source:" as const;
+
+/** その `decisions` が、依頼文で閉じた事項から作られたものか */
+export function isSourceClosureDecision(decision: PlanDecision): boolean {
+  return decision.id.startsWith(SOURCE_CLOSURE_DECISION_PREFIX);
 }
 
 /** Plan を 1 回流した結果（3 つの形） */
@@ -308,6 +318,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     ...(input.judgeMaxOutputTokens === undefined ? {} : { maxOutputTokens: input.judgeMaxOutputTokens }),
   });
   const stages: PlanStageRecord[] = [];
+  // 依頼文で閉じた事項（往復の記録に残す。04 §3 P4・Issue #370）
+  const closedBySource: PlanSourceClosure[] = [];
 
   const pushRecord = (
     stage: PlanStageId,
@@ -384,6 +396,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     spentUsd: budget.spentUsd,
     remainingUsd: budget.remainingUsd,
     judge: { calls_by_adapter: judgeBudget.callsByAdapter, cost_usd: judgeBudget.spentUsd },
+    closedBySource: closedBySource.slice(),
   });
 
   try {
@@ -523,8 +536,32 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       openIssues[index] = { ...issue, status: "resolved", resolution: { answer_id: answerId } };
     };
 
+    /** 問いの主の事項と、一緒に閉じる事項（`alsoCloses`）を、同じ答えの ID で閉じる（04 §3 P4） */
+    const resolveQuestionIssues = (question: PlanQuestion, answerId: string): void => {
+      resolveIssue(question.openIssueId, answerId);
+      for (const id of alsoClosesOf(question)) resolveIssue(id, answerId);
+    };
+
+    /** 依頼文で閉じた事項を、聞かずに決めたこと（`decisions`）にして閉じる（04 §3 P4・Issue #370） */
+    const applySourceClosure = (closure: PlanSourceClosure): void => {
+      const index = openIssues.findIndex((issue) => issue.id === closure.issueId && issue.status === "open");
+      const issue = openIssues[index];
+      if (issue === undefined) return;
+      const decisionId = `${SOURCE_CLOSURE_DECISION_PREFIX}${closure.issueId}`;
+      decisions.push({
+        id: decisionId,
+        subject: issue.text,
+        value: closure.value,
+        reason: closure.quote,
+      });
+      openIssues[index] = {
+        ...issue,
+        status: "resolved",
+        resolution: { decision_id: decisionId, reason: closure.quote },
+      };
+    };
+
     for (;;) {
-      const view = confirmationView();
       const open = openIssues.filter((issue) => issue.status === "open");
       const preRemaining = remainingPlanBudget(turns);
       const willAsk =
@@ -542,12 +579,19 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
             gateway,
           }),
         );
+        // 依頼文で決まっている事項は、**次の一歩を決める前に**反映する（聞かずに閉じる。04 §3 P4）
+        for (const closure of generated.closedBySource) {
+          closedBySource.push(closure);
+          applySourceClosure(closure);
+        }
         // 前の往復の矛盾から組み立てた問い（まだ未解決の事項に対応するものだけ）を足す（§6 の 7）
         const openIds = new Set(openIssues.map((issue) => issue.id));
         const carried = followUpQuestions.filter((question) => openIds.has(question.openIssueId));
-        questions = [...generated, ...carried];
+        questions = [...generated.questions, ...carried];
       }
 
+      // 確認の画面に出す下書きは、依頼文で閉じた分を反映した**後**に組む（閉じた事項を載せるため）
+      const view = confirmationView();
       const step = nextPlanStep({
         source: input.source,
         turns,
@@ -593,7 +637,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           });
           const choice = question.choices.find((candidate) => candidate.id === recommended.choiceId);
           requirements.push(answerRequirement(answerId, choice?.text ?? recommended.reason));
-          resolveIssue(question.openIssueId, answerId);
+          resolveQuestionIssues(question, answerId);
           drafts.push({ id: answerId, questionId: question.id, revision, choiceId: recommended.choiceId });
         }
         turns.push({ questions: asked, answers: drafts });
@@ -624,7 +668,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         if (answerInput === undefined) continue;
         answerInputs.push(answerInput);
         requirements.push(answerRequirement(draft.id, text));
-        resolveIssue(question.openIssueId, draft.id);
+        resolveQuestionIssues(question, draft.id);
         priorAnswers.push(accepted);
       }
       // 矛盾から組み立てた問いを、次の往復に回す（§6 の 7）。対応する未解決の事項を開いておく
