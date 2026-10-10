@@ -24,6 +24,12 @@ export * from "./limits.js";
 // ── adapter（Issue #284。`fetch` だけを使う。`openai.ts` は外部の入口を持つ唯一の library の file）──
 export * from "./openai.js";
 
+// ── 判定の口（Issue #330。Jev の adapter・LLM の adapter・偽物。`judge-jev.ts` が Jev の入口を持つ）──
+export * from "./judge.js";
+export * from "./judge-jev.js";
+export * from "./judge-llm.js";
+export * from "./judge-fake.js";
+
 // ── 段（stages/。Issue #285・#287・#292・#293・#294）──────────────
 export * from "./stages/arbitrate.js";
 export * from "./stages/bind.js";

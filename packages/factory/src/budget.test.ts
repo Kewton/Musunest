@@ -7,7 +7,15 @@
 //
 // 単価は引数で受け取る（コードに埋め込まない）。整数と 0.5 を使い、浮動小数の丸めに依らない値を選ぶ。
 import { describe, expect, it } from "vitest";
-import { JobBudget, costOfUsageUsd, estimateMaxCostUsd, type TokenRates } from "./budget.js";
+import {
+  JEV_RATES,
+  JEV_USD_PER_MILLION_INPUT_TOKENS,
+  JobBudget,
+  costOfUsageUsd,
+  estimateMaxCostUsd,
+  jevCostUsd,
+  type TokenRates,
+} from "./budget.js";
 import type { LlmUsage } from "./llm.js";
 
 const RATES: TokenRates = { inputPerToken: 1, cachedInputPerToken: 0.5, outputPerToken: 2 };
@@ -70,5 +78,43 @@ describe("費用の予約（02 §1.5）", () => {
     // 予約が残っているので、残りの 80 を超える呼び出しは予約できない（ちょうどの 80 は通る）
     expect(budget.reserve(81).reserved).toBe(false);
     expect(budget.reserve(80).reserved).toBe(true);
+  });
+});
+
+describe("Jev の費用（05 §1・§5）", () => {
+  const usage = (inputTokens: number, outputTokens = 0): LlmUsage => ({
+    inputTokens,
+    cachedInputTokens: 0,
+    outputTokens,
+    reasoningTokens: 0,
+  });
+
+  it("入力のトークン数から数える（出力は無料）", () => {
+    expect(JEV_USD_PER_MILLION_INPUT_TOKENS).toBe(0.042);
+    expect(jevCostUsd(1_000_000)).toBe(0.042);
+    expect(jevCostUsd(0)).toBe(0);
+    expect(jevCostUsd(500_000)).toBeCloseTo(0.021, 12);
+  });
+
+  it("usage から数えても、出力とキャッシュの区別に依らない（入力は同じ単価、出力は 0）", () => {
+    expect(costOfUsageUsd(usage(1_000_000, 9_999), JEV_RATES)).toBeCloseTo(0.042, 12);
+    expect(costOfUsageUsd(usage(0, 9_999), JEV_RATES)).toBe(0);
+  });
+
+  it("今の予約と同じ仕組みで、呼ぶ前に最大費用を予約し、精算できる", () => {
+    const budget = new JobBudget(1);
+    const maxCostUsd = estimateMaxCostUsd({ inputTokens: 2_000_000, maxOutputTokens: 0, rates: JEV_RATES });
+    expect(maxCostUsd).toBeCloseTo(0.084, 12);
+
+    const reserved = budget.reserve(maxCostUsd);
+    expect(reserved.reserved).toBe(true);
+    if (!reserved.reserved) return;
+    expect(budget.remainingUsd).toBeCloseTo(1 - 0.084, 12);
+
+    const actualUsd = budget.settle(reserved.reservation, usage(1_000_000), JEV_RATES);
+    expect(actualUsd).toBeCloseTo(0.042, 12);
+    expect(budget.spentUsd).toBeCloseTo(0.042, 12);
+    expect(budget.reservedUsd).toBe(0);
+    expect(budget.remainingUsd).toBeCloseTo(0.958, 12);
   });
 });

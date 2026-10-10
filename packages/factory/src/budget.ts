@@ -55,6 +55,29 @@ export function costOfUsageUsd(usage: LlmUsage, rates: TokenRates): number {
   );
 }
 
+// ── Jev（TypeSafe の System One）の費用（05-judge-model.md §1・§5）─────────────
+
+/**
+ * Jev の入力の単価（USD / 100 万トークン。05 §1「入力 100 万トークンあたり 0.042 USD・出力は無料」）。
+ * 単価はベンダーが決める固定値なので、ここに置く（OpenAI の単価のように呼ぶ側からは渡さない）。
+ */
+export const JEV_USD_PER_MILLION_INPUT_TOKENS = 0.042;
+
+/**
+ * Jev の費用を、**今の予約と同じ仕組み**（`estimateMaxCostUsd`・`costOfUsageUsd`・`JobBudget`）で
+ * 数えるための単価（05 §5）。キャッシュの区別は無く（入力はすべて同じ単価）、出力は無料である。
+ */
+export const JEV_RATES: TokenRates = {
+  inputPerToken: JEV_USD_PER_MILLION_INPUT_TOKENS / 1_000_000,
+  cachedInputPerToken: JEV_USD_PER_MILLION_INPUT_TOKENS / 1_000_000,
+  outputPerToken: 0,
+};
+
+/** Jev の費用（USD）を入力のトークン数から数える（出力は無料。05 §5） */
+export function jevCostUsd(inputTokens: number): number {
+  return (inputTokens / 1_000_000) * JEV_USD_PER_MILLION_INPUT_TOKENS;
+}
+
 /** ジョブ全体の費用の予算。呼ぶ前に予約し、usage が返ったら精算する（§1.5） */
 export class JobBudget {
   readonly #limitUsd: number;
