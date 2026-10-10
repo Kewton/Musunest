@@ -1,0 +1,20 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "urgent": { "type": "noul", "noul": 0.93 },
+    "team": {
+      "type": "choice",
+      "choice": "shipping",
+      "confidence": 1,
+      "probabilities": { "billing": 0, "shipping": 1 }
+    },
+    "tone": {
+      "type": "score",
+      "score": 1.05,
+      "confidence": 0.66,
+      "legend": { "0": "calm", "1": "annoyed", "2": "angry" },
+      "probabilities": { "0": 0.09, "1": 0.77, "2": 0.14 }
+    }
+  },
+  "usage": { "input_tokens": 364, "output_tokens": 61 }
+}

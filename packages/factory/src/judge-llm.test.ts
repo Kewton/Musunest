@@ -45,7 +45,7 @@ const REQUEST: JudgeRequest = {
   state: { note: "決まっていないことを挙げている" },
   questions: {
     kind: { kind: "choice", instructions: "What kind of note is it?", criteria: { a: "one", b: "another" } },
-    rank: { kind: "score", instructions: "How strong is it?", criteria: { low: "weak", high: "strong" } },
+    rank: { kind: "score", instructions: "How strong is it?", criteria: ["weak", "strong"] },
     open: { kind: "noul", instructions: "Does it name an undecided choice?" },
   },
 };
@@ -53,7 +53,7 @@ const REQUEST: JudgeRequest = {
 const OUTPUT = {
   answers: {
     kind: { choice: "a" },
-    rank: { score: "high" },
+    rank: { score: "strong" },
     open: { noul: 0.8 },
   },
 };
@@ -90,7 +90,7 @@ describe("要求の組み立て（05 §2.2・§4）", () => {
       properties: { choice: { type: "string", enum: ["a", "b"] } },
     });
     expect(schema.properties.answers.properties.rank).toMatchObject({
-      properties: { score: { type: "string", enum: ["low", "high"] } },
+      properties: { score: { type: "string", enum: ["weak", "strong"] } },
     });
     expect(schema.properties.answers.properties.open).toMatchObject({
       properties: { noul: { type: "number", minimum: 0, maximum: 1 } },
@@ -115,8 +115,21 @@ describe("応答の解釈（05 §1・§4）", () => {
     expect(result.answeredBy).toBe("llm");
     expect(result.model).toBe("gpt-test");
     expect(result.inputTokens).toBe(321);
-    expect(result.answers.kind).toEqual({ kind: "choice", choice: "a", probability: undefined, confidence: undefined });
-    expect(result.answers.rank).toEqual({ kind: "score", score: "high", probability: undefined, confidence: undefined });
+    expect(result.answers.kind).toEqual({
+      kind: "choice",
+      choice: "a",
+      probabilities: undefined,
+      probability: undefined,
+      confidence: undefined,
+    });
+    // score の番号は、選んだ段階の文（"strong"）の criteria の中の位置。確率は「不明」（#349）
+    expect(result.answers.rank).toEqual({
+      kind: "score",
+      score: 1,
+      legend: ["weak", "strong"],
+      probabilities: undefined,
+      confidence: undefined,
+    });
     expect(result.answers.open).toEqual({ kind: "noul", noul: 0.8 });
   });
 

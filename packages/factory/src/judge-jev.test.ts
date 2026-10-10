@@ -1,13 +1,15 @@
-// Jev（TypeSafe の System One）の判定の adapter（Issue #330）の unit テスト。
+// Jev（TypeSafe の System One）の判定の adapter（Issue #330・#349）の unit テスト。
 //
 // **実 API は呼ばない。** 差し込んだ `fetch` が受け取った要求と、手で書いた応答だけで閉じる。
-// ここで固定したいのは 6 つ。
+// ここで固定したいのは 8 つ。
 //   1. 送る本文の形（`state`・`model: jev-1.13.0`・`questions`）と `Authorization: Bearer` の見出し（§1・§4）
 //   2. 429・529 は指数の待ちで再試行し、上限で失敗になる（§1）
 //   3. 401・422 は再試行しない失敗の種類にする（§1）
 //   4. 応答の `model` を結果に残す（§8 U-J3）
-//   5. 答え（choice・noul）とトークン数を、判定の口の形に直す（§1）
+//   5. 答え（choice の確率の分布・score の数の値と段階と確率・noul）とトークン数を、判定の口の形に直す（§1・#349）
 //   6. adapter のソースが環境変数を読まない（§4・R-15）
+//   7. 窓口が記録した本物の応答を読み、送る本文が記録した要求と一致する（#349）
+//   8. score の `criteria` は順序のある配列で送り、2〜10 個の外は送る前に断る。`instructions` は object も許す（#349）
 import { describe, expect, it } from "vitest";
 import type { JudgeRequest } from "./judge.js";
 import {
@@ -93,7 +95,7 @@ const ANSWER_WIRE = {
   model: DEFAULT_JEV_MODEL,
   usage: { input_tokens: 1_234 },
   answers: {
-    kind: { choice: "a", confidence: 0.8, probability: 0.7 },
+    kind: { choice: "a", confidence: 0.8, probabilities: { a: 0.7, b: 0.3 } },
     open: { noul: 0.9 },
   },
 };
@@ -186,7 +188,13 @@ describe("応答の解釈（05 §1・§8 U-J3）", () => {
     expect(result.answeredBy).toBe("jev");
     expect(result.model).toBe("jev-1.13.0");
     expect(result.inputTokens).toBe(1_234);
-    expect(result.answers.kind).toEqual({ kind: "choice", choice: "a", probability: 0.7, confidence: 0.8 });
+    expect(result.answers.kind).toEqual({
+      kind: "choice",
+      choice: "a",
+      probabilities: { a: 0.7, b: 0.3 },
+      probability: 0.7,
+      confidence: 0.8,
+    });
     expect(result.answers.open).toEqual({ kind: "noul", noul: 0.9 });
   });
 
@@ -201,7 +209,13 @@ describe("応答の解釈（05 §1・§8 U-J3）", () => {
       jsonResponse({ model: DEFAULT_JEV_MODEL, answers: { kind: { choice: "a" }, open: { noul: 0.2, confidence: 0.5 } } }),
     );
     const result = await createJevJudge({ apiKey: "k", fetch }).judge(REQUEST);
-    expect(result.answers.kind).toEqual({ kind: "choice", choice: "a", probability: undefined, confidence: undefined });
+    expect(result.answers.kind).toEqual({
+      kind: "choice",
+      choice: "a",
+      probabilities: undefined,
+      probability: undefined,
+      confidence: undefined,
+    });
     // noul は 0〜1 の値だけを持つ（確信度は持たない）
     expect(result.answers.open).toEqual({ kind: "noul", noul: 0.2 });
   });
@@ -225,6 +239,140 @@ describe("応答の解釈（05 §1・§8 U-J3）", () => {
       unavailable: (await captureError(() => createJevJudge({ apiKey: "k", fetch: errorFetch(429), maxAttempts: 1 }).judge(REQUEST))).kind,
     };
     expect(kinds).toEqual({ unauthorized: "unauthorized", invalidRequest: "invalidRequest", unavailable: "unavailable" });
+  });
+});
+
+// ── 7. 記録した本物の応答（Issue #349）──────────────────────────────────
+
+/** fixture（`__fixtures__/jev-wire/`）を UTF-8 の JSON として読む */
+function readFixture(name: string): unknown {
+  return JSON.parse(fs.readFileSync(new URL(`./__fixtures__/jev-wire/${name}`, import.meta.url), "utf8")) as unknown;
+}
+
+describe("記録した本物の応答を読む（05 §1・Issue #349）", () => {
+  const recordedQuestions = readFixture("request.json");
+  const recordedResponse = readFixture("response.json");
+  const RECORDED: JudgeRequest = {
+    state: { note: "窓口が記録した題材" },
+    questions: {
+      urgent: { kind: "noul", instructions: "Is this urgent?" },
+      team: { kind: "choice", instructions: "Which team?", criteria: { billing: "payments", shipping: "delivery" } },
+      tone: { kind: "score", instructions: "How angry is the writer?", criteria: ["calm", "annoyed", "angry"] },
+    },
+  };
+
+  it("送る本文が、記録した要求（抜粋）と一致する", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse(recordedResponse));
+    await createJevJudge({ apiKey: "k", fetch }).judge(RECORDED);
+    expect(bodyOf(captured).questions).toEqual(recordedQuestions);
+  });
+
+  it("noul 0.93・choice shipping（確率 billing 0・shipping 1）・score 1.05（段階 3・確率 3・確信度 0.66）に直す", async () => {
+    const { fetch } = recordingFetch(() => jsonResponse(recordedResponse));
+    const result = await createJevJudge({ apiKey: "k", fetch }).judge(RECORDED);
+
+    expect(result.answeredBy).toBe("jev");
+    expect(result.model).toBe("jev-1.13.0");
+    expect(result.inputTokens).toBe(364);
+    expect(result.answers.urgent).toEqual({ kind: "noul", noul: 0.93 });
+    expect(result.answers.team).toEqual({
+      kind: "choice",
+      choice: "shipping",
+      probabilities: { billing: 0, shipping: 1 },
+      probability: 1,
+      confidence: 1,
+    });
+    expect(result.answers.tone).toEqual({
+      kind: "score",
+      score: 1.05,
+      legend: ["calm", "annoyed", "angry"],
+      probabilities: [0.09, 0.77, 0.14],
+      confidence: 0.66,
+    });
+  });
+
+  it("score の答えが数でなければ malformed にする（#349）", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse({
+        model: DEFAULT_JEV_MODEL,
+        answers: { tone: { score: "annoyed", legend: { 0: "calm", 1: "annoyed" }, probabilities: { 0: 0.5, 1: 0.5 } } },
+      }),
+    );
+    const error = await captureError(() => {
+      const request: JudgeRequest = {
+        state: {},
+        questions: { tone: { kind: "score", instructions: "?", criteria: ["calm", "annoyed"] } },
+      };
+      return createJevJudge({ apiKey: "k", fetch }).judge(request);
+    });
+    expect(error.kind).toBe("malformed");
+  });
+});
+
+// ── 8. score の criteria と instructions の object（Issue #349）──────────
+
+describe("score の criteria と instructions の object（05 §1・Issue #349）", () => {
+  const scoreRequest = (criteria: readonly string[]): JudgeRequest => ({
+    state: {},
+    questions: { tone: { kind: "score", instructions: "How angry is the writer?", criteria } },
+  });
+
+  const stageAnswer = (count: number) => ({
+    model: DEFAULT_JEV_MODEL,
+    answers: {
+      tone: {
+        score: 0,
+        confidence: 0.5,
+        legend: Object.fromEntries(Array.from({ length: count }, (_, i) => [String(i), `stage-${i}`])),
+        probabilities: Object.fromEntries(Array.from({ length: count }, (_, i) => [String(i), 1 / count])),
+      },
+    },
+  });
+
+  it("score の criteria を、順序のある配列のまま送る", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse(stageAnswer(3)));
+    await createJevJudge({ apiKey: "k", fetch }).judge(scoreRequest(["a", "b", "c"]));
+    const questions = bodyOf(captured).questions as Record<string, Record<string, unknown>>;
+    expect(questions.tone?.criteria).toEqual(["a", "b", "c"]);
+  });
+
+  it("段階が 2 個ちょうど・10 個ちょうどは送る", async () => {
+    for (const count of [2, 10]) {
+      const { fetch, captured } = recordingFetch(() => jsonResponse(stageAnswer(count)));
+      const stages = Array.from({ length: count }, (_, i) => `stage-${i}`);
+      await createJevJudge({ apiKey: "k", fetch }).judge(scoreRequest(stages));
+      expect(captured).toHaveLength(1);
+    }
+  });
+
+  it("段階が 2 個未満（1 個）なら、送る前に断る", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse({}));
+    await expect(createJevJudge({ apiKey: "k", fetch }).judge(scoreRequest(["only"]))).rejects.toThrow(RangeError);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("段階が 11 個以上（11 個）なら、送る前に断る", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse({}));
+    const eleven = Array.from({ length: 11 }, (_, i) => `stage-${i}`);
+    await expect(createJevJudge({ apiKey: "k", fetch }).judge(scoreRequest(eleven))).rejects.toThrow(RangeError);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("instructions の object は、そのまま送る", async () => {
+    const instructions = { question: "Which team?", note: { hint: "pick one" } };
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse({
+        model: DEFAULT_JEV_MODEL,
+        answers: { team: { choice: "a", confidence: 0.5, probabilities: { a: 0.5, b: 0.5 } } },
+      }),
+    );
+    const request: JudgeRequest = {
+      state: {},
+      questions: { team: { kind: "choice", instructions, criteria: { a: "one", b: "another" } } },
+    };
+    await createJevJudge({ apiKey: "k", fetch }).judge(request);
+    const questions = bodyOf(captured).questions as Record<string, Record<string, unknown>>;
+    expect(questions.team?.instructions).toEqual(instructions);
   });
 });
 
