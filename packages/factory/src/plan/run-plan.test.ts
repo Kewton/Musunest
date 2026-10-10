@@ -14,7 +14,7 @@ import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "../judge.j
 import { AGENT_LIMITS } from "../limits.js";
 import type { LlmClient, LlmUsage } from "../llm.js";
 import { runPlan, type PlanAnswerRequest, type PlanResponder, type PlanRunInput } from "./run-plan.js";
-import { CATALOG_FACETS, catalogQuestionName } from "./catalog.js";
+import { CATALOG_FACETS, catalogAppliesQuestionName, catalogQuestionName } from "./catalog.js";
 import { confirmQuestionName } from "./confirm.js";
 import {
   createRecordingClient,
@@ -29,11 +29,14 @@ const RATES = { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputP
 
 const noul = (value: number): JudgeAnswer => ({ kind: "noul", noul: value });
 
-/** 目録の問い（要件 × 観点）すべてに「決まっている」を返す答え（未指定の観点を作らない） */
+/** 目録の問い（要件 × 観点 × 2 問）すべてに「当てはまる・決まっている」を返す答え（未指定の観点を作らない） */
 function catalogAnswers(): Record<string, JudgeAnswer> {
   const answers: Record<string, JudgeAnswer> = {};
   for (const requirementId of ["R-1", "R-2"]) {
-    for (const facet of CATALOG_FACETS) answers[catalogQuestionName(requirementId, facet.id)] = noul(1);
+    for (const facet of CATALOG_FACETS) {
+      answers[catalogAppliesQuestionName(requirementId, facet.id)] = noul(1);
+      answers[catalogQuestionName(requirementId, facet.id)] = noul(1);
+    }
   }
   return answers;
 }
