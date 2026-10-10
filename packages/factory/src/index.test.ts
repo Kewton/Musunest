@@ -24,8 +24,14 @@ import {
   createOpenAiLlmClient,
   decideOutcome,
   estimateMaxCostUsd,
+  nextPlanStep,
   parseCliArguments,
+  runAnswers,
+  runCatalog,
+  runConfirm,
   runGeneration,
+  runQuestions,
+  runSurface,
 } from "./index.js";
 
 interface NodeFileSystem {
@@ -73,6 +79,12 @@ describe("公開する面", () => {
     const judge: Judge = createFakeJudge({});
     expect(judge.judge).toBeTypeOf("function");
   });
+
+  it("Plan の段（P1〜P6）の入口が、根から読める（Issue #333）", () => {
+    for (const entry of [runCatalog, runSurface, runQuestions, runAnswers, runConfirm, nextPlanStep]) {
+      expect(entry).toBeTypeOf("function");
+    }
+  });
 });
 
 describe("ライブラリは、外部の LLM の API と Cloudflare・Node 固有の入口を持たない", () => {
@@ -94,6 +106,12 @@ describe("ライブラリは、外部の LLM の API と Cloudflare・Node 固�
     "pipeline.ts",
     "record.ts",
     "run.ts",
+    "plan/answers.ts",
+    "plan/catalog.ts",
+    "plan/confirm.ts",
+    "plan/questions.ts",
+    "plan/session.ts",
+    "plan/surface.ts",
     "stages/arbitrate.ts",
     "stages/bind.ts",
     "stages/correspondence.ts",
