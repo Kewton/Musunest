@@ -148,4 +148,13 @@ export class JobBudget {
     this.#spentUsd += actualUsd;
     return actualUsd;
   }
+
+  /**
+   * 予約を、費用を掛けずに解く（呼び出しが**失敗した**とき。Issue #359）。usage が分からない
+   * 失敗では、予約をそのまま残すと残高が戻らない——**助言**である判定の呼び出しでは、失敗しても
+   * 予約を精算して残高へ戻す（段の失敗の扱いとは別。`settle` は成功した呼び出しにだけ使う）。
+   */
+  release(reservation: Reservation): void {
+    this.#reservedUsd -= reservation.maxCostUsd;
+  }
 }

@@ -72,6 +72,9 @@ export function createLlmJudge(options: LlmJudgeOptions): Judge {
       return {
         answers: parseAnswers(request.questions, response.output),
         inputTokens: response.usage?.inputTokens ?? 0,
+        // 構造化出力の使用量（入力・キャッシュ・出力のトークン）を、そのまま答えに載せる（#359・§1.5）。
+        // 呼ぶ側は、この使用量で判定の費用（出力を含む）を精算する。
+        ...(response.usage === undefined ? {} : { usage: response.usage }),
         model: options.model,
         answeredBy: "llm",
       };

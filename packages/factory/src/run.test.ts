@@ -15,7 +15,7 @@ import { costOfUsageUsd } from "./budget.js";
 import { UNWRITABLE_FILE, VERIFICATION_FILE, type BundlePartialReasons, type BundleUnwritable, type BundleVerification } from "./bundle.js";
 import { AGENT_LIMITS } from "./limits.js";
 import { createFakeJudge } from "./judge-fake.js";
-import type { JudgeAnswer } from "./judge.js";
+import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "./judge.js";
 import { createFakeLlmClient, type RecordedCall } from "./llm-fake.js";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "./llm.js";
 import { OpenAiIncompleteError, createOpenAiLlmClient, type OpenAiUsage } from "./openai.js";
@@ -1230,6 +1230,109 @@ describe("② の申告を仕分けて裏を取る（判定の口。Issue #332�
     const { run } = runWith(recorded(CREATE_DESIGN_WITH_CLAIM));
     const result = await run;
     expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+  });
+});
+
+// ── 判定の呼び出しを生成の予算に数える（05 §4〜§5・Issue #359）──────────────
+
+/** 呼ばれた回数を数える偽物の判定（包みが判定を呼ばないことを確かめる） */
+function spyJudge(inner: Judge): { readonly judge: Judge; readonly calls: () => number } {
+  let calls = 0;
+  return {
+    judge: {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        calls += 1;
+        return inner.judge(request);
+      },
+    },
+    calls: () => calls,
+  };
+}
+
+/** どの問いにも同じ答えを返し、LLM の使用量を載せる判定（実 API は呼ばない。Issue #359） */
+function llmAnsweringJudge(usage: LlmUsage, answer: JudgeAnswer): Judge {
+  return {
+    async judge(request: JudgeRequest): Promise<JudgeResponse> {
+      const answers: Record<string, JudgeAnswer> = {};
+      for (const name of Object.keys(request.questions)) answers[name] = answer;
+      return { answers, inputTokens: usage.inputTokens, usage, model: "gpt-judge", answeredBy: "llm" };
+    },
+  };
+}
+
+/** R-2 に「書けない」の申告を 1 件持つ設計（旧形式の欄は持たない＝中身の点検は掛からない） */
+const DESIGN_WITH_CLAIM = {
+  designs: [
+    { requirementId: "R-1", vocabulary: ["計算"], placement: ["computed"], unwritable: [], notes: [] },
+    {
+      requirementId: "R-2",
+      vocabulary: ["計算"],
+      placement: ["computed"],
+      unwritable: [{ part: "補助の値の並べ替えは書けない", constraintIds: ["R-2"], reason: "文書に無い" }],
+      notes: [],
+    },
+  ],
+};
+
+describe("判定の呼び出しを生成の予算に数える（05 §4〜§5・Issue #359）", () => {
+  it("判定の費用が予算の使用額に入り、要約に adapter ごとの数と費用が残る", async () => {
+    const usage: LlmUsage = { inputTokens: 800, cachedInputTokens: 200, outputTokens: 120, reasoningTokens: 0 };
+    const judge = llmAnsweringJudge(usage, judgeChoice("ambiguity", 0.9));
+
+    // 同じ記録を、判定あり／判定なしで流す（段の呼び出しは同じ。記録した usage で精算される）
+    const withJudge = await runWith(recordedRun({ design: DESIGN_WITH_CLAIM }), { judge }).run;
+    const withoutJudge = await runWith(recordedRun({ design: DESIGN_WITH_CLAIM })).run;
+
+    const judgeCost = costOfUsageUsd(usage, RATES);
+    expect(judgeCost).toBeGreaterThan(0);
+
+    // 要約に、答えた adapter（llm）ごとの呼び出しの数と、判定の費用が残る
+    expect(withJudge.summary.judge.calls_by_adapter).toEqual({ jev: 0, llm: 1, fake: 0 });
+    expect(withJudge.summary.judge.cost_usd).toBeCloseTo(judgeCost, 12);
+    // 判定の費用は、段の費用と同じ予算に入る（使用額が、判定なしの走り＋判定の費用になる）
+    expect(withJudge.summary.provider_cost_usd ?? 0).toBeCloseTo(
+      (withoutJudge.summary.provider_cost_usd ?? 0) + judgeCost,
+      12,
+    );
+    // 曖昧さとして落ちたので、合格のまま（判定を使った生成）
+    expect(withJudge.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+
+  it("予算が尽きていると、判定を呼ばずに申告をそのまま残す", async () => {
+    // R-1 に多数の「書けない」を持つ設計。判定の問いの map（1 申告 = 1 問）が大きくなり、呼ぶ前の予約が、
+    // 残りの段の呼び出しより大きくなる。予算は段の呼び出しには足りるが、判定の予約には足りない。
+    const claims = Array.from({ length: 500 }, (_, index) => ({
+      part: `p${index}`,
+      constraintIds: ["R-1"],
+      reason: "理由",
+    }));
+    const design = {
+      designs: [
+        { requirementId: "R-1", vocabulary: ["計算"], placement: ["computed"], unwritable: claims, notes: [] },
+        { requirementId: "R-2", vocabulary: ["計算"], placement: ["computed"], unwritable: [], notes: [] },
+      ],
+    };
+
+    const { judge, calls } = spyJudge(createFakeJudge({}));
+    // 予算は、段の呼び出し（③ は 500 件の設計を運ぶ）には足りるが、判定の予約（1 申告 = 1 問の
+    // 問いの map）には足りない大きさにする。
+    const result = await runWith(recordedRun({ design }), { judge, effort: "low", budgetUsd: 0.1 }).run;
+
+    // 予約できないので、判定は 1 回も呼ばれない（呼べるなら問いの答えが無くて誤りになるはず）
+    expect(calls()).toBe(0);
+    expect(result.summary.judge.calls_by_adapter).toEqual({ jev: 0, llm: 0, fake: 0 });
+    expect(result.summary.judge.cost_usd).toBe(0);
+
+    // 申告はそのまま残る（仕分けを回さない）。書けない要件があるので部分案になる
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+    expect(result.bundle).not.toBeNull();
+    if (result.bundle === null) return;
+    const list = unwritableOf(result.bundle);
+    expect(list.triage).toEqual([]);
+    expect(list.unwritable).toHaveLength(1);
+    expect(list.unwritable[0]?.requirementId).toBe("R-1");
+    expect(list.unwritable[0]?.unwritable).toHaveLength(500);
   });
 });
 

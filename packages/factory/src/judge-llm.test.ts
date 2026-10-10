@@ -133,10 +133,18 @@ describe("応答の解釈（05 §1・§4）", () => {
     expect(result.answers.open).toEqual({ kind: "noul", noul: 0.8 });
   });
 
-  it("usage が無ければ、トークン数は 0 にする", async () => {
+  it("構造化出力の使用量（入力・キャッシュ・出力）を、そのまま答えに載せる（Issue #359）", async () => {
+    const { client } = recordingClient(OUTPUT, USAGE);
+    const result = await createLlmJudge({ client, model: "gpt-test" }).judge(REQUEST);
+    expect(result.usage).toEqual(USAGE);
+    expect(result.usage?.outputTokens).toBe(20);
+  });
+
+  it("usage が無ければ、トークン数は 0 にし、使用量は載せない", async () => {
     const { client } = recordingClient(OUTPUT, undefined);
     const result = await createLlmJudge({ client, model: "gpt-test" }).judge(REQUEST);
     expect(result.inputTokens).toBe(0);
+    expect(result.usage).toBeUndefined();
   });
 
   it("答えが欠けた応答は malformed にして、成功にしない", async () => {

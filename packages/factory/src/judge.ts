@@ -11,6 +11,7 @@
 // （`answeredBy`）に残す。Jev が止まっても工場は止まらない（§6）。
 //
 // 判定は助言であって門ではない（§4）。答えで合否を開けない。
+import type { LlmUsage } from "./llm.js";
 
 /** 問いの種類（§1） */
 export type JudgeQuestionKind = "choice" | "score" | "noul";
@@ -99,6 +100,11 @@ export interface JudgeResponse {
   readonly answers: Readonly<Record<string, JudgeAnswer>>;
   /** 使った入力のトークン数（Jev の出力は無料。§5） */
   readonly inputTokens: number;
+  /**
+   * LLM が答えたときの使用量（入力・キャッシュ・出力のトークン。Issue #359・§1.5）。**入力の
+   * トークンだけ**しか返さない adapter（Jev。出力は無料。§5）は省く——呼ぶ側は `inputTokens` で数える。
+   */
+  readonly usage?: LlmUsage;
   /** 答えたモデルの版の ID（§1・§8 U-J3） */
   readonly model: string;
   /** 答えた adapter（§4） */
