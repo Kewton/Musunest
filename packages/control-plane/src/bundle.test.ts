@@ -13,6 +13,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   BUNDLE_MANIFEST_FILE,
+  BUNDLE_MANIFEST_PLAN_SHA256_FIELD,
   BUNDLE_MANIFEST_SCHEMA_VERSION,
   BundleManifestError,
   verifyBundleManifest,
@@ -74,8 +75,13 @@ async function writeEntry(root: string, relative: string, content: string): Prom
 }
 
 /** manifest（`bundle-manifest.json`）を書く。書いた本文（バイト列の元）を返す */
-function writeManifest(root: string, files: readonly BundleManifestFile[], schemaVersion: string = BUNDLE_MANIFEST_SCHEMA_VERSION): string {
-  const manifest = {
+function writeManifest(
+  root: string,
+  files: readonly BundleManifestFile[],
+  schemaVersion: string = BUNDLE_MANIFEST_SCHEMA_VERSION,
+  planSha256: string | null = null,
+): string {
+  const manifest: Record<string, unknown> = {
     schema_version: schemaVersion,
     storage_unit: "R2_delivery_unit",
     source_run: "e_test_001",
@@ -84,6 +90,7 @@ function writeManifest(root: string, files: readonly BundleManifestFile[], schem
     instrument: { binary_sha256: "b".repeat(64), verification_profile: "community-mini-app" },
     files,
   };
+  if (planSha256 !== null) manifest[BUNDLE_MANIFEST_PLAN_SHA256_FIELD] = planSha256;
   const text = `${JSON.stringify(manifest, null, 2)}\n`;
   writeFileSync(join(root, BUNDLE_MANIFEST_FILE), text);
   return text;
@@ -195,6 +202,41 @@ describe("verifyBundleManifest（食い違いを理由つきで返す）", () =>
 
     expect(kinds(result)).toEqual(["unsafe_path", "unsafe_path"]);
     expect(result.problems.map((problem) => problem.path)).toEqual(["../escape.yaml", "/etc/passwd"]);
+  });
+});
+
+// ── 確定した仕様の SHA-256（Issue #335）────────────────────────────
+
+describe("verifyBundleManifest — manifest が載せる確定した仕様の SHA-256", () => {
+  it("manifest の plan_sha256 を読んで返す", async () => {
+    const root = newBundleRoot();
+    const entry = await writeEntry(root, "a.txt", "a\n");
+    const planSha256 = "c".repeat(64);
+    writeManifest(root, [entry], BUNDLE_MANIFEST_SCHEMA_VERSION, planSha256);
+
+    const result = await verifyBundleManifest(root);
+
+    expect(result.problems).toEqual([]);
+    expect(result.planSha256).toBe(planSha256);
+  });
+
+  it("plan_sha256 が無ければ null（plan.json の無い納品物と互換）", async () => {
+    const root = newBundleRoot();
+    const entry = await writeEntry(root, "a.txt", "a\n");
+    writeManifest(root, [entry]);
+
+    const result = await verifyBundleManifest(root);
+
+    expect(result.problems).toEqual([]);
+    expect(result.planSha256).toBeNull();
+  });
+
+  it("plan_sha256 の形が違えば manifest_malformed（安全側に倒す）", async () => {
+    const root = newBundleRoot();
+    const entry = await writeEntry(root, "a.txt", "a\n");
+    writeManifest(root, [entry], BUNDLE_MANIFEST_SCHEMA_VERSION, "not-a-digest");
+
+    await expectCode(root, "manifest_malformed");
   });
 });
 

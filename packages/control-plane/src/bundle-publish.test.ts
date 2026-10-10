@@ -10,11 +10,20 @@
 // node:fs・node:os・node:path は Node 組み込みで、src の tsconfig の types は workers-types だけなので、
 // 使う形だけを書いて**動的**に読む（bundle.test.ts と同じやり方）。
 import { afterEach, describe, expect, it } from "vitest";
+import { PLAN_SPEC_SCHEMA_VERSION, planDigest } from "@musunest/appspec-schema";
 import { HEADLESS_SCHEMA_VERSION } from "./headless.js";
-import { BUNDLE_MANIFEST_FILE, BUNDLE_MANIFEST_SCHEMA_VERSION, type BundleManifestFile } from "./bundle.js";
+import {
+  BUNDLE_MANIFEST_FILE,
+  BUNDLE_MANIFEST_PLAN_SHA256_FIELD,
+  BUNDLE_MANIFEST_SCHEMA_VERSION,
+  type BundleManifestFile,
+} from "./bundle.js";
 import {
   BundlePinError,
   BUNDLE_DECLARATION_PATH,
+  BUNDLE_PLAN_PATH,
+  BUNDLE_VERIFICATION_PATH,
+  PLAN_SHA256_FIELD,
   compareBundleManifestToPins,
   publishBundle,
   type BundlePublishResult,
@@ -128,8 +137,13 @@ async function writeEntry(root: string, relative: string, content: string): Prom
   return { path: relative, sha256: await sha256Hex(bytes), size_bytes: bytes.byteLength };
 }
 
-function writeManifest(root: string, files: readonly BundleManifestFile[], artifactLevel = "L2"): string {
-  const manifest = {
+function writeManifest(
+  root: string,
+  files: readonly BundleManifestFile[],
+  artifactLevel = "L2",
+  planSha256: string | null = null,
+): string {
+  const manifest: Record<string, unknown> = {
     schema_version: BUNDLE_MANIFEST_SCHEMA_VERSION,
     storage_unit: "R2_delivery_unit",
     source_run: "e_test_001",
@@ -138,6 +152,7 @@ function writeManifest(root: string, files: readonly BundleManifestFile[], artif
     instrument: { binary_sha256: "b".repeat(64), verification_profile: "community-mini-app" },
     files,
   };
+  if (planSha256 !== null) manifest[BUNDLE_MANIFEST_PLAN_SHA256_FIELD] = planSha256;
   const text = `${JSON.stringify(manifest, null, 2)}\n`;
   writeFileSync(join(root, BUNDLE_MANIFEST_FILE), text);
   return text;
@@ -154,6 +169,73 @@ async function makeBundle(
   }
   const text = writeManifest(root, files, options.artifactLevel ?? "L2");
   if (options.tamper !== undefined) writeBundleFile(root, options.tamper, "tampered\n");
+  return { root, manifestSha256: await sha256Hex(encoder.encode(text)) };
+}
+
+// ── 確定した仕様（plan.json）を作る道具（Issue #335）──────────────
+
+/** #331 の検査に通る、最小の確定した仕様（`plan.json` の中身）。`confirmation.sha256` は外から入れる。 */
+function basePlan(): Record<string, unknown> {
+  return {
+    schema_version: PLAN_SPEC_SCHEMA_VERSION,
+    plan_id: "plan-1",
+    revision: 1,
+    vocabulary_version: "vocab-1",
+    inputs: [{ id: "in-source-1", kind: "source", text: "原文の文の範囲" }],
+    requirements: [
+      {
+        id: "req-1",
+        text: "要件の文",
+        kind: "existence",
+        origin: { input_id: "in-source-1", quote: "原文の文の範囲" },
+        parts: [],
+      },
+    ],
+    open_issues: [],
+    decisions: [],
+    accepted_unwritable: [],
+    confirmation: { sha256: "0".repeat(64), confirmed_at: "2026-10-10T00:00:00.000Z", confirmed_by: "operator" },
+  };
+}
+
+/**
+ * 確定した仕様と、その正しい SHA-256（`planDigest`）を作る。`confirmationSha` を渡すと、確認の値だけを
+ * それにする（**失効した確認**を作る）。
+ */
+async function planFixture(
+  confirmationSha?: string,
+): Promise<{ readonly plan: Record<string, unknown>; readonly digest: string }> {
+  const base = basePlan();
+  const digest = await planDigest(base);
+  const confirmation = { ...(base["confirmation"] as Record<string, unknown>), sha256: confirmationSha ?? digest };
+  return { plan: { ...base, confirmation }, digest };
+}
+
+/**
+ * `plan.json` つきの小さな納品物を作る。manifest と検証の結果の**どちらにも**、仕様の SHA-256 を載せる
+ * （既定は正しい値）。`null` を渡すとその欄を書かない（食い違いの試験に使う）。
+ */
+async function makePlanBundle(
+  fixture: { readonly plan: Record<string, unknown>; readonly digest: string },
+  options: {
+    readonly manifestPlanSha256?: string | null;
+    readonly verificationPlanSha256?: string | null;
+    readonly planText?: string;
+  } = {},
+): Promise<{ readonly root: string; readonly manifestSha256: string }> {
+  const root = newBundleRoot();
+  const files: BundleManifestFile[] = [];
+  files.push(await writeEntry(root, BUNDLE_DECLARATION_PATH, DECLARATION));
+  files.push(
+    await writeEntry(root, BUNDLE_PLAN_PATH, options.planText ?? `${JSON.stringify(fixture.plan, null, 2)}\n`),
+  );
+  const verification: Record<string, unknown> = { declaration_sha256: "a".repeat(64) };
+  const verificationPlanSha =
+    options.verificationPlanSha256 === undefined ? fixture.digest : options.verificationPlanSha256;
+  if (verificationPlanSha !== null) verification[PLAN_SHA256_FIELD] = verificationPlanSha;
+  files.push(await writeEntry(root, BUNDLE_VERIFICATION_PATH, `${JSON.stringify(verification, null, 2)}\n`));
+  const manifestPlanSha = options.manifestPlanSha256 === undefined ? fixture.digest : options.manifestPlanSha256;
+  const text = writeManifest(root, files, "L2", manifestPlanSha);
   return { root, manifestSha256: await sha256Hex(encoder.encode(text)) };
 }
 
@@ -450,6 +532,93 @@ describe("publishBundle — 門が落ちると publish しない", () => {
     expect(runResult.result.ok).toBe(false);
     if (runResult.result.ok) throw new Error("落ちるはず");
     expect(runResult.result.stage).toBe("declaration");
+    expectNoWrites(runResult);
+  });
+});
+
+// ── 受入条件：確定した仕様（plan.json）の門（Issue #335）──────────
+
+describe("publishBundle — 確定した仕様（plan.json）の門", () => {
+  it("plan.json の無い納品物は、今までどおり通る（planSha256 は null）", async () => {
+    const bundle = await makeBundle();
+    const { writer, result } = await run({ bundleDirectory: bundle.root, pins: pinsWith(bundle.manifestSha256) });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("通るはず");
+    expect(result.planSha256).toBeNull();
+    expect(writer.writes).toHaveLength(2);
+  });
+
+  it("正しい plan.json つきは通る（manifest と検証の結果の SHA が一致する）", async () => {
+    const fixture = await planFixture();
+    const bundle = await makePlanBundle(fixture);
+    const { writer, result } = await run({ bundleDirectory: bundle.root, pins: pinsWith(bundle.manifestSha256) });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("通るはず");
+    expect(result.planSha256).toBe(fixture.digest);
+    expect(writer.writes).toHaveLength(2);
+  });
+
+  it("SHA が一致しない（manifest の値が違う）と、段 plan で plan_sha256_mismatch で断る", async () => {
+    const fixture = await planFixture();
+    const bundle = await makePlanBundle(fixture, { manifestPlanSha256: "f".repeat(64) });
+    const runResult = await run({ bundleDirectory: bundle.root, pins: pinsWith(bundle.manifestSha256) });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("plan");
+    expect(runResult.result.plan?.code).toBe("plan_sha256_mismatch");
+    expectNoWrites(runResult);
+  });
+
+  it("SHA が一致しない（検証の結果の値が違う）と、段 plan で plan_sha256_mismatch で断る", async () => {
+    const fixture = await planFixture();
+    const bundle = await makePlanBundle(fixture, { verificationPlanSha256: "f".repeat(64) });
+    const runResult = await run({ bundleDirectory: bundle.root, pins: pinsWith(bundle.manifestSha256) });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("plan");
+    expect(runResult.result.plan?.code).toBe("plan_sha256_mismatch");
+    expectNoWrites(runResult);
+  });
+
+  it("確認が失効している（confirmation の SHA が古い）と、段 plan で confirmation_expired で断る", async () => {
+    const fixture = await planFixture("0".repeat(64));
+    const bundle = await makePlanBundle(fixture);
+    const runResult = await run({ bundleDirectory: bundle.root, pins: pinsWith(bundle.manifestSha256) });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("plan");
+    expect(runResult.result.plan?.code).toBe("confirmation_expired");
+    expectNoWrites(runResult);
+  });
+
+  it("検査に通らない plan.json は、段 plan で plan_invalid と診断のコードを返す", async () => {
+    const fixture = await planFixture();
+    fixture.plan["open_issues"] = [{ id: "oi-1", text: "未解決の事項", critical: true, status: "open" }];
+    const bundle = await makePlanBundle(fixture);
+    const runResult = await run({ bundleDirectory: bundle.root, pins: pinsWith(bundle.manifestSha256) });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("plan");
+    expect(runResult.result.plan?.code).toBe("plan_invalid");
+    expect(runResult.result.plan?.problems.map((problem) => problem.code)).toContain("open_critical");
+    expectNoWrites(runResult);
+  });
+
+  it("plan.json が JSON として読めないと、段 plan で plan_unreadable で断る", async () => {
+    const fixture = await planFixture();
+    const bundle = await makePlanBundle(fixture, { planText: "{ not json\n" });
+    const runResult = await run({ bundleDirectory: bundle.root, pins: pinsWith(bundle.manifestSha256) });
+
+    expect(runResult.result.ok).toBe(false);
+    if (runResult.result.ok) throw new Error("落ちるはず");
+    expect(runResult.result.stage).toBe("plan");
+    expect(runResult.result.plan?.code).toBe("plan_unreadable");
     expectNoWrites(runResult);
   });
 });

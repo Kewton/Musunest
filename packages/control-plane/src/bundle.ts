@@ -26,6 +26,7 @@
 
 import {
   BUNDLE_MANIFEST_SCHEMA_VERSION,
+  PLAN_SHA256_PATTERN,
   type BundleManifest,
   type BundleManifestFile,
   type BundleManifestInstrument,
@@ -35,6 +36,12 @@ export { BUNDLE_MANIFEST_SCHEMA_VERSION, type BundleManifest, type BundleManifes
 
 /** manifest のファイル名。**納品物の直下**に置かれる。 */
 export const BUNDLE_MANIFEST_FILE = "bundle-manifest.json" as const;
+
+/**
+ * manifest が、確定した仕様（`artifacts/plan.json`）の正規化した SHA-256 を載せる欄の名前（Issue #335）。
+ * **無くてよい**（`plan.json` の無い納品物と互換）。あるときは、門が `plan.json` から計算した値と比べる。
+ */
+export const BUNDLE_MANIFEST_PLAN_SHA256_FIELD = "plan_sha256" as const;
 
 // ── 照合の結果（理由つき）─────────────────────────────────────────
 
@@ -76,6 +83,11 @@ export interface BundleManifestVerification {
   readonly manifestSha256: string;
   /** 読んだ manifest。呼ぶ側が `instrument`・`expected_verdict` などを読める */
   readonly manifest: BundleManifest;
+  /**
+   * manifest が載せる、確定した仕様の SHA-256（`plan_sha256`）。**無ければ `null`**（`plan.json` の無い
+   * 納品物と互換）。あるときは、門が `plan.json` から計算した値と比べる（Issue #335）。
+   */
+  readonly planSha256: string | null;
   /** 過不足・値の食い違い・ディレクトリの外を指すパス。空なら合格 */
   readonly problems: readonly BundleProblem[];
 }
@@ -178,6 +190,22 @@ function readBundleManifest(value: unknown): BundleManifest {
   };
 }
 
+/**
+ * manifest が載せる、確定した仕様の SHA-256（`plan_sha256`）を読む（Issue #335）。**無ければ `null`**。
+ * 欄があるのに小文字の 16 進 64 桁でなければ `manifest_malformed`（安全側に倒す）。
+ */
+function readManifestPlanSha256(value: Record<string, unknown>): string | null {
+  const raw = value[BUNDLE_MANIFEST_PLAN_SHA256_FIELD];
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string" || !PLAN_SHA256_PATTERN.test(raw)) {
+    throw new BundleManifestError(
+      "manifest_malformed",
+      `${BUNDLE_MANIFEST_PLAN_SHA256_FIELD} が小文字の 16 進 64 桁でない`,
+    );
+  }
+  return raw;
+}
+
 // ── Node 側（ファイルから読む）────────────────────────────────────
 //
 // 使う関数の形だけをここに宣言し、動的に読む（packages/appspec-schema/src/contract.ts と同じ）。
@@ -226,6 +254,7 @@ function listBundleFiles(fs: NodeFs, path: NodePath, root: string): readonly str
 /**
  * 納品物のディレクトリを受け取り、`bundle-manifest.json` を読んで、`files` のすべてについて
  * SHA-256 と大きさを照合する。manifest 自身の SHA-256 も返す（pins との比較は呼ぶ側）。
+ * manifest が確定した仕様の SHA-256（`plan_sha256`）を載せていれば、それも返す（Issue #335）。
  *
  * manifest 自体が読めない・形が違うときは `BundleManifestError` を投げる。ファイル単位の食い違い
  * （過不足・値の食い違い・ディレクトリの外を指すパス）は、例外にせず `problems` に理由つきで並べる。
@@ -252,6 +281,7 @@ export async function verifyBundleManifest(directory: string): Promise<BundleMan
     throw new BundleManifestError("manifest_invalid_json", `${BUNDLE_MANIFEST_FILE} が JSON として読めない`);
   }
   const manifest = readBundleManifest(parsed);
+  const planSha256 = isRecord(parsed) ? readManifestPlanSha256(parsed) : null;
 
   const actualFiles = listBundleFiles(fs, path, directory);
   const actual = new Set(actualFiles);
@@ -298,5 +328,5 @@ export async function verifyBundleManifest(directory: string): Promise<BundleMan
     }
   }
 
-  return { manifestSha256, manifest, problems };
+  return { manifestSha256, manifest, planSha256, problems };
 }
