@@ -41,6 +41,17 @@ export const AGENT_LIMITS = {
    * これだけ続いたら、⑥ はそれ以上直さない（未解決のまま部分案で終える）。
    */
   stagnationRepeats: 2,
+  /**
+   * Plan で**合わせて**聞ける質問の数（04-plan-agent.md §2・§6 の 2「合わせて 10 問まで」）。
+   * **往復をまたいで数える**——直し・再開で上限を戻さない。
+   */
+  planQuestions: 10,
+  /** Plan の質問の往復の回数（04 §2・§6 の 2「往復は 3 回まで」）。**直し・再開で戻さない** */
+  planRoundTrips: 3,
+  /** 1 問の選択肢の数の上限（04 §6 の 3「選択肢 2〜4」）。下限は `PLAN_CHOICES_MIN` */
+  planChoices: 4,
+  /** 自由入力（答え）の長さの上限（文字数。04 §6 の 6「自由入力の長さの上限」） */
+  planFreeTextChars: 500,
 } as const;
 
 /** 上限の名前（`AGENT_LIMITS` の欄の名前） */
@@ -74,6 +85,10 @@ export const LIMIT_GUARDS = {
   correspondenceRedos: "ステージ③（書く）の対応の表の出し直し（§1.3.1）",
   correspondenceChecks: "ステージ⑤a（対応表）の点検。版ごとに作り直す（§1.3.1）",
   stagnationRepeats: "ステージ⑥（直す）の停滞の検知（同じ不一致が続いた回数）",
+  planQuestions: "ステージ P4（質問を組み立てる）〜 P5（答えを反映する）。往復をまたいで数える（plan/session.ts）",
+  planRoundTrips: "ステージ P4〜P5 の往復（plan/session.ts）。直し・再開で戻さない",
+  planChoices: "ステージ P4（質問を組み立てる）の形の検査。選択肢 2〜4（plan/questions.ts）",
+  planFreeTextChars: "ステージ P5（答えを反映する）の自由入力の検査（plan/answers.ts）",
 } as const satisfies Record<LimitName, string>;
 
 /** 上限を超えたときの内容 */
@@ -106,6 +121,24 @@ export function checkRequestText(text: string): LimitExceeded | undefined {
 /** 宣言（バイト列）の大きさの上限を確かめる（④・⑥。R-5） */
 export function checkDeclarationBytes(byteLength: number): LimitExceeded | undefined {
   return checkLimit("declarationBytes", byteLength);
+}
+
+// ── Plan の質問の上限（04-plan-agent.md §2・§6。P4〜P5・session.ts）──────────────
+
+/** 1 問の選択肢の数の下限（04 §6 の 3「選択肢 2〜4」）。上限は `AGENT_LIMITS.planChoices` */
+export const PLAN_CHOICES_MIN = 2;
+
+/**
+ * Plan で合わせて聞く質問の数が上限を超えているかを確かめる（04 §2・§6 の 2）。
+ * `count` は**往復をまたいだ合計**である（直し・再開で戻さない）。
+ */
+export function checkPlanQuestions(count: number): LimitExceeded | undefined {
+  return checkLimit("planQuestions", count);
+}
+
+/** Plan の質問の往復の回数が上限を超えているかを確かめる（04 §2・§6 の 2） */
+export function checkPlanRoundTrips(count: number): LimitExceeded | undefined {
+  return checkLimit("planRoundTrips", count);
 }
 
 // ── 段の出力の上限（effort ごと。§1.5・§2）────────────────────────

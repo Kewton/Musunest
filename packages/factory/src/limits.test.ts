@@ -10,10 +10,13 @@ import {
   CALL_TIMEOUT_BY_EFFORT,
   LIMIT_GUARDS,
   OUTPUT_STAGES,
+  PLAN_CHOICES_MIN,
   STAGE_MAX_OUTPUT_TOKENS,
   callTimeoutMsForEffort,
   checkDeclarationBytes,
   checkLimit,
+  checkPlanQuestions,
+  checkPlanRoundTrips,
   checkRequestText,
   effectiveCallTimeoutMs,
   isReasoningEffort,
@@ -61,6 +64,26 @@ describe("共通の上限（02 §1.5・§2.2）", () => {
       expect(checkLimit(name, AGENT_LIMITS[name]), name).toBeUndefined();
       expect(checkLimit(name, AGENT_LIMITS[name] + 1)?.limit, name).toBe(name);
     }
+  });
+
+  it("Plan の質問は 10 問ちょうどは通り、11 問は断る（04 §6 の 2）", () => {
+    expect(checkPlanQuestions(AGENT_LIMITS.planQuestions)).toBeUndefined();
+    expect(checkPlanQuestions(AGENT_LIMITS.planQuestions + 1)).toEqual({
+      limit: "planQuestions",
+      max: AGENT_LIMITS.planQuestions,
+      actual: AGENT_LIMITS.planQuestions + 1,
+    });
+  });
+
+  it("Plan の往復は 3 回ちょうどは通り、4 回は断る（04 §6 の 2）", () => {
+    expect(checkPlanRoundTrips(AGENT_LIMITS.planRoundTrips)).toBeUndefined();
+    expect(checkPlanRoundTrips(AGENT_LIMITS.planRoundTrips + 1)?.limit).toBe("planRoundTrips");
+  });
+
+  it("選択肢の数は 2〜4 で、上限は AGENT_LIMITS・下限は PLAN_CHOICES_MIN に置く（04 §6 の 3）", () => {
+    expect(PLAN_CHOICES_MIN).toBe(2);
+    expect(AGENT_LIMITS.planChoices).toBe(4);
+    expect(PLAN_CHOICES_MIN).toBeLessThan(AGENT_LIMITS.planChoices);
   });
 
   it("すべての上限に、どの段が確かめるかの番人が書かれている", () => {
