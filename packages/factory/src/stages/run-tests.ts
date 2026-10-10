@@ -19,6 +19,10 @@
 //   意味の曖昧さ（1 つに決まらない・提出された対応が無い）… 未解決
 //
 // 参照の entity も、**提出された対応**で結び付ける（対応表の先頭の entity を採る経路をなくす。R2-6）。
+//
+// 入力と参照データの**値の鍵**（項目の役割 ID）は、提出された対応で宣言の項目の名前へ写してから評価器へ
+// 渡す（Issue #320）。写せない鍵は、その試験を未解決にする（黙って落とさない）。参照（`ref`・`list of`）の
+// 値の行 ID はそのまま渡す。
 import {
   isAppComputed,
   isComputedExpression,
@@ -173,14 +177,68 @@ export function resolveReferenceEntity(target: TestTarget, input: RunTestsInput)
   return findEntity(input.app, entity.name) === undefined ? null : entity.name;
 }
 
+/** 値の鍵の写しの結果（写せなければ理由つきで断る） */
+type ValueKeyMapping =
+  | { readonly ok: true; readonly values: Readonly<Record<string, unknown>> }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * 値の鍵（項目の役割 ID）を、**提出された対応**（役割 ID → 宣言の名前）で宣言の項目の名前へ写す
+ * （§1.3・Issue #320）。写せない鍵は理由を返し、その試験を未解決にする（黙って落とさない）。
+ *
+ *   - 対応にある鍵 … その名前へ写す。名前が対象の entity の項目でなければ「別の entity の項目の役割 ID」
+ *     として断る
+ *   - 対応に無い鍵 … 既に宣言の項目の名前なら、そのまま使う（旧形式の記録の互換）。そうでなければ
+ *     「対応に無い役割 ID」として断る
+ *
+ * 提出された対応が渡されていなければ（旧形式の経路）、値をそのまま渡す。
+ */
+function mapValueKeys(
+  values: Readonly<Record<string, unknown>>,
+  entity: string | null,
+  app: NormalizedAppSpec,
+  mappings: readonly RoleNameMapping[] | undefined,
+): ValueKeyMapping {
+  if (mappings === undefined) return { ok: true, values };
+  const nameByRoleId = new Map(mappings.map((mapping) => [mapping.roleId, mapping.name]));
+  const host = entity === null ? undefined : findEntity(app, entity);
+  const mapped: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(values)) {
+    const name = nameByRoleId.get(key);
+    if (name !== undefined) {
+      if (host !== undefined && !Object.hasOwn(host.fields, name)) {
+        return {
+          ok: false,
+          reason: `値の鍵 ${key} の対応（${name}）は entity ${entity ?? ""} の項目でない（別の entity の項目の役割 ID）`,
+        };
+      }
+      mapped[name] = value;
+      continue;
+    }
+    if (host !== undefined && Object.hasOwn(host.fields, key)) {
+      mapped[key] = value;
+      continue;
+    }
+    return { ok: false, reason: `値の鍵 ${key} に提出された対応が無い（対応に無い役割 ID）` };
+  }
+  return { ok: true, values: mapped };
+}
+
+/** 参照データを組むときに見つかった問題（不一致か、写せない鍵で未解決か） */
+interface SourceProblem {
+  readonly kind: "mismatch" | "unresolved";
+  readonly detail: string;
+}
+
 /**
  * 参照データを、評価器が読む `sources`（entity の名前 → レコードの並び）にする。
- * 対象が実在の entity に結び付かない行があれば、その旨を `problem` に返す（黙って落とさない）。
+ * 対象が実在の entity に結び付かない行があればその旨を、値の鍵が写せなければその旨を `problem` に返す
+ * （黙って落とさない）。**参照（`ref`・`list of`）の値の行 ID はそのまま渡す。**
  */
 function buildSources(
   referenceData: readonly ReferenceRow[],
   input: RunTestsInput,
-): { readonly sources: SourceRecords; readonly problem: string | null } {
+): { readonly sources: SourceRecords; readonly problem: SourceProblem | null } {
   const sources: Record<string, SourceRecord[]> = {};
   const counts = new Map<string, number>();
   for (const row of referenceData) {
@@ -188,13 +246,20 @@ function buildSources(
     if (entity === null) {
       return {
         sources,
-        problem: `参照データの対象（要件 ${row.target.requirementId}・役割 ${row.target.roleId ?? row.target.role ?? ""}）が実在の entity に結び付かない`,
+        problem: {
+          kind: "mismatch",
+          detail: `参照データの対象（要件 ${row.target.requirementId}・役割 ${row.target.roleId ?? row.target.role ?? ""}）が実在の entity に結び付かない`,
+        },
       };
+    }
+    const mapped = mapValueKeys(row.values, entity, input.app, input.mappings);
+    if (!mapped.ok) {
+      return { sources, problem: { kind: "unresolved", detail: mapped.reason } };
     }
     const count = (counts.get(entity) ?? 0) + 1;
     counts.set(entity, count);
     const records = sources[entity] ?? [];
-    records.push({ id: row.rowId ?? `${entity}-${count}`, data: row.values });
+    records.push({ id: row.rowId ?? `${entity}-${count}`, data: mapped.values });
     sources[entity] = records;
   }
   return { sources, problem: null };
@@ -217,11 +282,25 @@ function judgeAction(test: FixedTest, location: DeclarationLocation, input: RunT
       detail: `操作 ${action.name} に条件（when）が無く、実行は評価器で確かめられない`,
     };
   }
-  const record = asRecord(test.input);
-  if (record === null) return { kind: "unresolved", detail: "入力が写像（object）でない" };
-  const { sources } = buildSources(test.referenceData, input);
+  const rawRecord = asRecord(test.input);
+  if (rawRecord === null) return { kind: "unresolved", detail: "入力が写像（object）でない" };
+  const mapped = mapValueKeys(rawRecord, action.entity, input.app, input.mappings);
+  if (!mapped.ok) return { kind: "unresolved", detail: mapped.reason };
+  const { sources, problem } = buildSources(test.referenceData, input);
+  if (problem !== null) return { kind: problem.kind, detail: problem.detail };
   const clock = fixedClock(test.clock);
-  const allowed = allowsAction({ app: input.app, entity: action.entity, record, clock, sources }, action.when);
+  const recordId = test.inputContract?.targetRowId ?? test.inputContract?.rowId;
+  const allowed = allowsAction(
+    {
+      app: input.app,
+      entity: action.entity,
+      record: mapped.values,
+      clock,
+      sources,
+      ...(recordId === undefined ? {} : { recordId }),
+    },
+    action.when,
+  );
   return compareBoolean(allowed, test.expected, `操作 ${action.name} の条件`);
 }
 
@@ -233,17 +312,21 @@ function judgeValidation(test: FixedTest, location: DeclarationLocation, input: 
       (location.entity === null || candidate.entity === location.entity),
   );
   if (validation === undefined) return { kind: "mismatch", detail: `宣言に検査 ${location.name} が無い` };
-  const record = asRecord(test.input);
-  if (record === null) return { kind: "unresolved", detail: "入力が写像（object）でない" };
+  const rawRecord = asRecord(test.input);
+  if (rawRecord === null) return { kind: "unresolved", detail: "入力が写像（object）でない" };
+  const mapped = mapValueKeys(rawRecord, validation.entity, input.app, input.mappings);
+  if (!mapped.ok) return { kind: "unresolved", detail: mapped.reason };
   const { sources, problem } = buildSources(test.referenceData, input);
-  if (problem !== null) return { kind: "mismatch", detail: problem };
+  if (problem !== null) return { kind: problem.kind, detail: problem.detail };
   const clock = fixedClock(test.clock);
+  const recordId = test.inputContract?.targetRowId ?? test.inputContract?.rowId;
   const evaluation = evaluateRecord({
     app: input.app,
     entity: validation.entity,
-    record,
+    record: mapped.values,
     clock,
     sources,
+    ...(recordId === undefined ? {} : { recordId }),
   });
   const failed = evaluation.validations.includes(validation.name);
   if (test.expected.kind === "ok") {
@@ -281,7 +364,7 @@ function judgeValue(test: FixedTest, location: DeclarationLocation, input: RunTe
   if (computed === undefined) return { kind: "mismatch", detail: `宣言に計算 ${location.name} が無い` };
   const clock = fixedClock(test.clock);
   const { sources, problem } = buildSources(test.referenceData, input);
-  if (problem !== null) return { kind: "mismatch", detail: problem };
+  if (problem !== null) return { kind: problem.kind, detail: problem.detail };
 
   if (isComputedSettle(computed)) return judgeSettle(test, computed, input, clock, sources);
   if (isGroupComputed(computed)) {
@@ -295,13 +378,33 @@ function judgeValue(test: FixedTest, location: DeclarationLocation, input: RunTe
 
   const entity = "entity" in computed ? computed.entity : null;
   if (entity === null) return { kind: "mismatch", detail: `計算 ${location.name} の entity が決まらない` };
-  const record = asRecord(test.input);
-  if (record === null) return { kind: "unresolved", detail: "入力が写像（object）でない" };
+  const rawRecord = asRecord(test.input);
+  if (rawRecord === null) return { kind: "unresolved", detail: "入力が写像（object）でない" };
+  const mapped = mapValueKeys(rawRecord, entity, input.app, input.mappings);
+  if (!mapped.ok) return { kind: "unresolved", detail: mapped.reason };
+  const recordId = test.inputContract?.targetRowId ?? test.inputContract?.rowId;
   if (isComputedExpression(computed) && computed.type === "boolean") {
-    const holds = holdsExpression({ app: input.app, entity, record, clock, sources }, computed.expression);
+    const holds = holdsExpression(
+      {
+        app: input.app,
+        entity,
+        record: mapped.values,
+        clock,
+        sources,
+        ...(recordId === undefined ? {} : { recordId }),
+      },
+      computed.expression,
+    );
     return compareBoolean(holds, test.expected, `印 ${computed.name}`);
   }
-  const evaluation = evaluateRecord({ app: input.app, entity, record, clock, sources });
+  const evaluation = evaluateRecord({
+    app: input.app,
+    entity,
+    record: mapped.values,
+    clock,
+    sources,
+    ...(recordId === undefined ? {} : { recordId }),
+  });
   if (!Object.hasOwn(evaluation.computed, computed.name)) {
     return { kind: "mismatch", detail: `計算 ${computed.name} が評価結果に無い` };
   }
@@ -342,11 +445,15 @@ function judgeViewStructural(app: NormalizedAppSpec, location: DeclarationLocati
 }
 
 /**
- * 「在ることだけ」の entity を**構造の確認**で判定する（§1.3 の表・Issue #308）。
- * create の操作があるか、一覧か表に出ていることを見る。
+ * 「在ることだけ」の要件を**構造の確認**で判定する（§1.3 の表・Issue #308・#320）。
+ * 対象の場所が載っている entity に create の操作があるか、一覧か表に出ていることを見る。操作（create）を
+ * 対象にした試験も同じ——**評価器で操作を実行しようとしない**。
  */
 function judgeExistenceStructural(app: NormalizedAppSpec, location: DeclarationLocation): Verdict {
-  const entity = location.name;
+  const entity = location.kind === "entity" ? location.name : location.entity;
+  if (entity === null) {
+    return { kind: "mismatch", detail: `場所 ${location.name} の entity が決まらない` };
+  }
   const hasCreate = app.spec.actions.some(
     (action) => (action.kind ?? "create") === "create" && action.entity === entity,
   );
@@ -356,6 +463,16 @@ function judgeExistenceStructural(app: NormalizedAppSpec, location: DeclarationL
   );
   if (hasCreate || shown) return { kind: "match" };
   return { kind: "mismatch", detail: `entity ${entity} に create の操作も、一覧か表の表示も無い` };
+}
+
+/** 結び付けた場所の操作が create か（在ることだけの要件の構造の確認に使う。§1.3・Issue #320） */
+function isCreateOperation(app: NormalizedAppSpec, location: DeclarationLocation): boolean {
+  const action = app.spec.actions.find(
+    (candidate) =>
+      candidate.name === location.name &&
+      (location.entity === null || candidate.entity === location.entity),
+  );
+  return action !== undefined && (action.kind ?? "create") === "create";
 }
 
 /** 評価の方法（§1.3 の表・Issue #308）。未対応は `unresolved` に数える */
@@ -369,12 +486,21 @@ type Method = "value" | "validation" | "action" | "view" | "existence" | "unreso
  *   - 操作 × `action`（`when`）… 値の評価
  *   - 画面 … 構造の確認
  *   - entity（在ることだけ・画面）… 構造の確認
+ *   - 在ることだけの要件の create の操作 … 構造の確認（実行は評価器で確かめられない。Issue #320）
  *   - それ以外（操作の実行・項目の既定値など）… 未対応（未解決）
  */
-function evaluationMethod(test: FixedTest, nature: RequirementNature): Method {
+function evaluationMethod(
+  test: FixedTest,
+  nature: RequirementNature,
+  location: DeclarationLocation,
+  app: NormalizedAppSpec,
+): Method {
   if (test.operation === "validate") return "validation";
   if (test.operation === "action") {
-    return test.target.kind === "operation" ? "action" : "unresolved";
+    if (test.target.kind !== "operation") return "unresolved";
+    // 決まりを含む要件の操作の条件（when）は allowsAction で確かめる。在ることだけの要件の create は構造で見る
+    if (nature === "existence-only" && isCreateOperation(app, location)) return "existence";
+    return "action";
   }
   if (test.target.kind === "computation") return "value";
   if (test.target.kind === "screen") return "view";
@@ -423,7 +549,7 @@ function judgeOne(
   if (!checked.ok) return { verdict: { kind: "mismatch", detail: checked.reason }, route: "missing-element" };
 
   const nature = natures.get(test.target.requirementId) ?? "ruled";
-  const method = evaluationMethod(test, nature);
+  const method = evaluationMethod(test, nature, location, input.app);
   switch (method) {
     case "value": {
       const verdict = judgeValue(test, location, input);

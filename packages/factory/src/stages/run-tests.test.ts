@@ -21,6 +21,7 @@ import {
   type RequirementClassification,
   type RoleNameMapping,
   type TestExpected,
+  type TestInputContract,
   type TestTarget,
 } from "../pipeline.js";
 import { bindTests } from "./bind.js";
@@ -185,6 +186,7 @@ interface Draft {
   readonly target: TestTarget;
   readonly operation: FixedTest["operation"];
   readonly input?: unknown;
+  readonly inputContract?: TestInputContract;
   readonly referenceData?: readonly ReferenceRow[];
   readonly expected: TestExpected;
 }
@@ -675,5 +677,241 @@ describe("名前の付け替えは、結び付けと判定を変えない（02 �
     // 宣言だけを付け替えて対応を据え置くと、結び付け先が実在せず合格に寄らない
     const stale = runTests({ app: renamedApp, suite, correspondence: table, mappings });
     expect(stale.mismatches.map((mismatch) => mismatch.testId)).toEqual(["t1"]);
+  });
+});
+
+// ── 8. 値の鍵を、提出された対応で項目の名前に写す（02 §1.3・Issue #320）──────
+
+/**
+ * 役割 ID の鍵で書いた入力と参照データを、提出された対応で宣言の項目の名前に写してから評価する試験の
+ * 題材。`contains: this` の行ごとの集計（`member.shareCount`）と、`within: this_month` のアプリ全体の
+ * 集計（`monthCount`）を持つ。題材は抽象的なものだけを使い、受入の題材の言葉は使わない。
+ */
+const MAPPED_DECLARATION = [
+  "entities:",
+  "  - name: member",
+  "    fields:",
+  "      name: string",
+  "  - name: expense",
+  "    fields:",
+  "      amount: number",
+  "      spentOn: date",
+  "      payer:",
+  "        type: ref",
+  "        to: member",
+  "      participants:",
+  "        type: list",
+  "        of: member",
+  "views:",
+  "  - name: members",
+  "    type: list",
+  "    entity: member",
+  "    show: [name, shareCount]",
+  "  - name: expenses",
+  "    type: list",
+  "    entity: expense",
+  "    show: [amount]",
+  "  - name: dashboard",
+  "    type: dashboard",
+  "    widgets:",
+  "      - type: number",
+  "        value: monthCount",
+  "actions: []",
+  "validations: []",
+  "computed:",
+  "  - name: shareCount",
+  "    entity: member",
+  "    aggregate:",
+  "      count: expense",
+  "      where:",
+  "        participants:",
+  "          contains: this",
+  "    type: number",
+  "  - name: monthCount",
+  "    scope: app",
+  "    aggregate:",
+  "      count: expense",
+  "      where:",
+  "        spentOn:",
+  "          within: this_month",
+  "    type: number",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+const MAPPED_APP = await normalized(MAPPED_DECLARATION);
+
+/** 役割 ID の鍵で書いた参照データの 1 行 */
+const refRoleRow = (
+  requirementId: string,
+  roleId: string,
+  rowId: string,
+  values: Readonly<Record<string, unknown>>,
+): ReferenceRow => ({ target: roleTarget(requirementId, "entity", roleId), rowId, values });
+
+const mappedCorrespondence: CorrespondenceResult = {
+  entries: [
+    entry("R-1", [
+      { kind: "entity", entity: null, name: "member" },
+      { kind: "computation", entity: "member", name: "shareCount" },
+    ]),
+    entry("R-2", [{ kind: "computation", entity: null, name: "monthCount" }]),
+  ],
+  misses: [],
+};
+
+/** ③ が提出した対応（役割 ID → 宣言の名前） */
+const mappedMappings: readonly RoleNameMapping[] = [
+  { roleId: "member", name: "member" },
+  { roleId: "member.name", name: "name" },
+  { roleId: "member.shareCount", name: "shareCount" },
+  { roleId: "expense", name: "expense" },
+  { roleId: "expense.amount", name: "amount" },
+  { roleId: "expense.spentOn", name: "spentOn" },
+  { roleId: "expense.payer", name: "payer" },
+  { roleId: "expense.participants", name: "participants" },
+  { roleId: "monthCount", name: "monthCount" },
+];
+
+describe("値の鍵を、提出された対応で項目の名前に写す（02 §1.3・Issue #320）", () => {
+  it("contains: this の行ごとの集計：役割 ID の鍵が項目の名前へ写ってから評価される", () => {
+    const test = draft({
+      id: "share",
+      target: roleTarget("R-1", "computation", "member.shareCount"),
+      operation: "compute",
+      input: { "member.name": "A" },
+      inputContract: { rowId: "m1", targetRowId: "m1", emptyEntities: [] },
+      referenceData: [
+        refRoleRow("R-1", "expense", "e1", { "expense.amount": 100, "expense.participants": ["m1", "m2"] }),
+        refRoleRow("R-1", "expense", "e2", { "expense.amount": 200, "expense.participants": ["m1"] }),
+        refRoleRow("R-1", "expense", "e3", { "expense.amount": 300, "expense.participants": ["m2"] }),
+      ],
+      expected: { kind: "ok", value: 2 },
+    });
+    const result = runTests({
+      app: MAPPED_APP,
+      suite: suiteOf([test]),
+      correspondence: mappedCorrespondence,
+      mappings: mappedMappings,
+    });
+    // 写さなければ participants の鍵が残り、this を含む行を数えられず null になる（疎通の確認で起きた形）
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved).toEqual([]);
+  });
+
+  it("within: this_month のアプリ全体の集計：参照データの鍵が項目の名前へ写ってから評価される", () => {
+    const test = draft({
+      id: "month",
+      target: roleTarget("R-2", "computation", "monthCount"),
+      operation: "aggregate",
+      referenceData: [
+        refRoleRow("R-2", "expense", "e1", { "expense.spentOn": "2026-09-01", "expense.amount": 100 }),
+        refRoleRow("R-2", "expense", "e2", { "expense.spentOn": "2026-09-15", "expense.amount": 200 }),
+        refRoleRow("R-2", "expense", "e3", { "expense.spentOn": "2026-08-31", "expense.amount": 300 }),
+      ],
+      expected: { kind: "ok", value: 2 },
+    });
+    const result = runTests({
+      app: MAPPED_APP,
+      suite: suiteOf([test]),
+      correspondence: mappedCorrespondence,
+      mappings: mappedMappings,
+    });
+    // 写さなければ spentOn の鍵が残り、今月の行を絞れず 0 になる（疎通の確認で起きた形）
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved).toEqual([]);
+  });
+
+  it("対応に無い役割 ID の鍵があると、その試験は理由つきの未解決になる", () => {
+    const test = draft({
+      id: "input-unmapped",
+      target: roleTarget("R-1", "computation", "member.shareCount"),
+      operation: "compute",
+      input: { "member.nickname": "A" },
+      inputContract: { rowId: "m1", targetRowId: "m1", emptyEntities: [] },
+      expected: { kind: "ok", value: 0 },
+    });
+    const result = runTests({
+      app: MAPPED_APP,
+      suite: suiteOf([test]),
+      correspondence: mappedCorrespondence,
+      mappings: mappedMappings,
+    });
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved.map((entry) => entry.testId)).toEqual(["input-unmapped"]);
+    expect(result.unresolved[0]?.detail).toContain("member.nickname");
+  });
+
+  it("別の entity の項目の役割 ID の鍵があると、別の entity として理由つきの未解決になる", () => {
+    const test = draft({
+      id: "other-entity",
+      target: roleTarget("R-1", "computation", "member.shareCount"),
+      operation: "compute",
+      input: { "expense.amount": 5 },
+      inputContract: { rowId: "m1", targetRowId: "m1", emptyEntities: [] },
+      expected: { kind: "ok", value: 0 },
+    });
+    const result = runTests({
+      app: MAPPED_APP,
+      suite: suiteOf([test]),
+      correspondence: mappedCorrespondence,
+      mappings: mappedMappings,
+    });
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved.map((entry) => entry.testId)).toEqual(["other-entity"]);
+    expect(result.unresolved[0]?.detail).toContain("別の entity");
+  });
+
+  it("参照データの値の鍵に、対応に無い役割 ID があると未解決になる", () => {
+    const test = draft({
+      id: "ref-unmapped",
+      target: roleTarget("R-1", "computation", "member.shareCount"),
+      operation: "compute",
+      input: { "member.name": "A" },
+      inputContract: { rowId: "m1", targetRowId: "m1", emptyEntities: [] },
+      referenceData: [refRoleRow("R-1", "expense", "e1", { "expense.nickname": "x" })],
+      expected: { kind: "ok", value: 0 },
+    });
+    const result = runTests({
+      app: MAPPED_APP,
+      suite: suiteOf([test]),
+      correspondence: mappedCorrespondence,
+      mappings: mappedMappings,
+    });
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved.map((entry) => entry.testId)).toEqual(["ref-unmapped"]);
+    expect(result.unresolved[0]?.detail).toContain("expense.nickname");
+  });
+});
+
+describe("在ることだけの要件の create の操作は、構造の確認で通す（02 §1.3・Issue #320）", () => {
+  const createSuite = suiteWithClassifications(
+    [
+      draft({
+        id: "create",
+        target: roleTarget("R-13", "operation", "record.add"),
+        operation: "action",
+        expected: { kind: "ok", value: null },
+      }),
+    ],
+    [{ requirementId: "R-13", nature: "existence-only" }],
+  );
+  const createCorrespondence: CorrespondenceResult = {
+    entries: [entry("R-13", [{ kind: "action", entity: "record", name: "add" }])],
+    misses: [],
+  };
+
+  it("when の無い create の操作でも、未解決にならず構造の確認で一致する", () => {
+    const result = runTests({
+      app: APP,
+      suite: createSuite,
+      correspondence: createCorrespondence,
+      mappings: [{ roleId: "record.add", name: "add" }],
+    });
+    // 実行は評価器で確かめられないが、create の操作と一覧があるので構造の確認で通る（未解決にしない）
+    expect(result.unresolved).toEqual([]);
+    expect(result.mismatches).toEqual([]);
   });
 });
