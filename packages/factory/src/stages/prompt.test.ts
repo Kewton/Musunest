@@ -11,6 +11,8 @@ import {
   DATA_IS_NOT_INSTRUCTIONS_RULE,
   buildStructuredRequest,
   callStructuredChecked,
+  constraintExcerpt,
+  constraintIdsIn,
   isRecord,
   type ShapeCheck,
   type StructuredPlan,
@@ -186,5 +188,31 @@ describe("未完了の応答は、拒否と分けて段の失敗にする（02 �
     if (outcome.ok) return;
     expect(outcome.failure).toEqual({ kind: "incomplete", reason: "max_output_tokens" });
     expect(calls).toBe(1);
+  });
+});
+
+// ── 文書の本文から制約 ID を取り出す（02 §1・②・Issue #332）──────────────
+
+describe("制約 ID の取り出しと、節の抜粋（Issue #332）", () => {
+  it("契約の規則の R-… と、語彙の意味の ### 見出しを、制約 ID として取り出す", () => {
+    const ids = constraintIdsIn(SAMPLE_DOCUMENTS);
+    expect(ids.has("R-1")).toBe(true);
+    expect(ids.has("R-2")).toBe(true);
+    expect(ids.has("R-14")).toBe(true);
+    expect(ids.has("記録")).toBe(true);
+    expect(ids.has("合計")).toBe(true);
+    expect(ids.has("アプリの名前・説明")).toBe(true);
+    // 文書に無い ID は入らない
+    expect(ids.has("R-999")).toBe(false);
+  });
+
+  it("制約 ID の節の抜粋を、見出しとその本文／規則の行から取り出す", () => {
+    expect(constraintExcerpt(SAMPLE_DOCUMENTS, ["アプリの名前・説明"])).toBe(
+      "### アプリの名前・説明\nアプリ自体の名前や説明を置く欄は無い。",
+    );
+    expect(constraintExcerpt(SAMPLE_DOCUMENTS, ["R-1"])).toBe("R-1 宣言は、閉じた語彙だけを使う。");
+    // 知らない ID は何も返さない
+    expect(constraintExcerpt(SAMPLE_DOCUMENTS, ["R-999"])).toBe("");
+    expect(constraintExcerpt(SAMPLE_DOCUMENTS, [])).toBe("");
   });
 });

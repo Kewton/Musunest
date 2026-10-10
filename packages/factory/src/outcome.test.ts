@@ -29,6 +29,13 @@ describe("終わりの判定（02 §1.4）", () => {
     });
   });
 
+  it("設計の notes だけがある要件は、部分案の理由にならない（Issue #332）", () => {
+    // notes は曖昧さ・決めたこと・不確かさのメモであり、書けないことではない。合格のままにする
+    expect(decideOutcome({ ...SATISFIED, notedRequirements: 3 })).toEqual({ result: "pass", verdict: "full" });
+    // 書けない部分（語彙の穴）が 1 つでも残れば、notes があっても部分案
+    expect(decideOutcome({ ...SATISFIED, unwritableRequirements: 1, notedRequirements: 3 }).result).toBe("partial");
+  });
+
   it("未解決（重大な曖昧さ・裁定できなかった試験）があれば部分案", () => {
     expect(decideOutcome({ ...SATISFIED, unresolved: 2 })).toEqual({
       result: "partial",

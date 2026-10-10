@@ -1,4 +1,4 @@
-// ② 設計する（02-architecture.md §1・F-4・F-5・F-7・F-8・Issue #307）。
+// ② 設計する（02-architecture.md §1・F-4・F-5・F-7・F-8・Issue #307・#332）。
 //
 // 要件ごとに、使う語彙と置き場所、そして**書けない部分**を返す。書けない部分は、その部分だけを
 // 落とし、残りの書ける部分は残す設計にさせる（F-4）。無い語彙・キー・関数を作らせない（F-5）。
@@ -8,9 +8,17 @@
 //   - **役割 ID の表**（entity の文脈を含む ID・対象の種類・所属の entity。共有と別名は明示の欄でだけ許す）
 //   - 要件ごとの**種類**（決まりを含む／在ることだけ）と**確かめ方**（固定した試験／構造の条件／未解決）
 //
-// 形（`checkDesignOutput`）と**中身の点検**（`checkDesignPlan`）を分ける。形の確認は旧形式の記録
-// （役割 ID の表・種類・確かめ方が無い）も通す（後方互換）。中身の点検は、新しい欄を持つ設計にだけ
-// 掛ける（`isPlannedDesign`）——旧形式の記録を壊さず、新しい設計は必須の欄を満たすことを強制する。
+// Issue #332 で、**誤った「書けない」の申告**を直すために、② の出力の形を変えた：
+//   - `unwritable` の要素を、文字列から「書けない部分（part）・**制約 ID**（constraintIds）・理由（reason）」
+//     の組にした（制約 ID は、渡した文書の本文から取った集合——契約の規則の `R-…` と語彙の意味の `### ` 見出し
+//     ——に入っていなければ、`checkDesignConstraints` が断る）
+//   - 曖昧さ・決めたこと・不確かさは、新しい欄 `notes` に書かせる（`unwritable` に混ぜない）
+//   - 書けない部分があっても、書ける部分は設計に残す（F-4）
+//
+// 形（`checkDesignOutput`）と**中身の点検**（`checkDesignPlan`・`checkDesignConstraints`）を分ける。形の
+// 確認は旧形式の記録（役割 ID の表・種類・確かめ方が無い、`unwritable` が文字列）も通す（後方互換）。
+// 中身の点検は、新しい欄を持つ設計にだけ掛ける（`isPlannedDesign`）——旧形式の記録を壊さず、新しい設計は
+// 必須の欄を満たすことを強制する。
 import type {
   DesignResult,
   RequirementDesign,
@@ -25,6 +33,7 @@ import {
   buildStructuredRequest,
   callStructuredChecked,
   checkStringArray,
+  constraintIdsIn,
   isRecord,
   serializeJson,
   type Problem,
@@ -39,7 +48,9 @@ export const DESIGN_SCHEMA_NAME = "requirement-design";
 /** ② に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const DESIGN_RULES: readonly string[] = [
   "要件ごとに、使う語彙と、宣言のどの欄に置くか（placement）を決める。",
-  "書けない部分は、その部分だけを unwritable に挙げる。書ける部分は残す（部分的に書けない要件でも、書ける部分は書く）。",
+  "書けない部分は、その部分（part）だけを unwritable に挙げる。1 件は「書けない部分（part）・根拠にした制約 ID（constraintIds）・理由（reason）」の組にする。書ける部分は残す（部分的に書けない要件でも、書ける部分は書く）。",
+  "制約 ID は、渡した文書の本文にあるものだけを挙げる——契約の規則の「R-…」の ID と、語彙の意味の「### 」見出しの文である。文書に無い ID を作らない。",
+  "語彙の穴ではないもの（曖昧さ・決めたこと・不確かさ・要件の言い直し）は unwritable に書かず、notes に書く。notes には書けない部分を書かない。",
   "文書（契約・語彙の意味・語彙の台帳）に無い語彙・キー・関数は作らない。書けないものを、近い別の意味に書き換えない。",
   "要件ごとに 1 つの設計を返す。要件 ID は一覧のまま写す。",
   "役割 ID の表（roles）を作る。役割 ID は entity の文脈を含む ID（例 member・member.name・session.bookCount）にし、対象の種類（kind）と、所属の entity の役割 ID（entity）を付ける。entity 自身の行は entity を null にする。",
@@ -76,7 +87,7 @@ export const DESIGN_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["requirementId", "nature", "verification", "vocabulary", "placement", "unwritable"],
+        required: ["requirementId", "nature", "verification", "vocabulary", "placement", "unwritable", "notes"],
         properties: {
           requirementId: { type: "string" },
           nature: { type: "string", enum: [...REQUIREMENT_NATURES] },
@@ -94,12 +105,69 @@ export const DESIGN_SCHEMA = {
           },
           vocabulary: { type: "array", items: { type: "string" } },
           placement: { type: "array", items: { type: "string" } },
-          unwritable: { type: "array", items: { type: "string" }, description: "書けない部分（無ければ空）" },
+          unwritable: {
+            type: "array",
+            description: "書けない部分（語彙の穴。無ければ空）。書ける部分は残す",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["part", "constraintIds", "reason"],
+              properties: {
+                part: { type: "string", description: "書けない部分" },
+                constraintIds: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "根拠にした制約 ID（契約の規則の R-… と、語彙の意味の ### 見出し）",
+                },
+                reason: { type: "string", description: "書けない理由" },
+              },
+            },
+          },
+          notes: {
+            type: "array",
+            items: { type: "string" },
+            description: "曖昧さ・決めたこと・不確かさ（書けないことではない。無ければ空）",
+          },
         },
       },
     },
   },
 } as const;
+
+/**
+ * 書けない部分の申告 1 件（② の `unwritable` の要素。§5・Issue #332）。**文字列から変えた**——
+ * 書けない部分（`part`）だけでなく、根拠にした**制約 ID**（`constraintIds`。文書の本文から取った集合の
+ * 要素）と、**理由**（`reason`）を必須にする。申告の仕分けと裏付け（`unwritable-triage.ts`）は、この
+ * 3 つを使って道を分ける。
+ */
+export interface UnwritableClaim {
+  /** 書けない部分 */
+  readonly part: string;
+  /** 根拠にした制約 ID（契約の規則の `R-…` と、語彙の意味の `### ` 見出し） */
+  readonly constraintIds: readonly string[];
+  /** 書けない理由 */
+  readonly reason: string;
+}
+
+/**
+ * 要件ごとの設計の 1 行（② の出力。`pipeline.ts` の `RequirementDesign` に、Issue #332 の欄を足したもの）。
+ *
+ * - `unwritable`（親の型）は、**書けない部分の文だけ**を持つ（互換と表示のため）。新形式の申告は
+ *   `unwritableClaims` に入る。旧形式の記録は `unwritable` に文が入り、`unwritableClaims` は空になる。
+ * - `notes` は、**書けないことではない**もの（曖昧さ・決めたこと・不確かさ）である。申告の仕分けで
+ *   「曖昧さ」と分かったものもここへ移す。
+ */
+export interface RequirementDesignEntry extends RequirementDesign {
+  /** 新形式の書けない申告（旧形式の記録では空） */
+  readonly unwritableClaims: readonly UnwritableClaim[];
+  /** 曖昧さ・決めたこと・不確かさ（書けないことではない） */
+  readonly notes: readonly string[];
+}
+
+/** ② の出力（`DesignResult` に、要件ごとの新しい欄を足したもの。Issue #332） */
+export interface DesignOutput extends DesignResult {
+  readonly designs: readonly RequirementDesignEntry[];
+}
 
 /** ② が受け取るもの */
 export interface DesignInput {
@@ -176,7 +244,33 @@ function checkVerification(value: unknown, field: string, problems: Problem[]): 
   return { kind: kind as "structural" | "unresolved", reason };
 }
 
-function checkDesign(value: unknown, field: string, problems: Problem[]): RequirementDesign | undefined {
+/** 書けない部分の申告 1 件の形を確かめる（Issue #332） */
+function checkUnwritableClaim(value: unknown, field: string, problems: Problem[]): UnwritableClaim | undefined {
+  if (!isRecord(value)) {
+    problems.push({
+      field,
+      message: "書けない部分は「部分（part）・制約 ID（constraintIds）・理由（reason）」の写像であること",
+    });
+    return undefined;
+  }
+  let good = true;
+  const part = value["part"];
+  if (typeof part !== "string" || part === "") {
+    problems.push({ field: `${field}.part`, message: "書けない部分は空でない文字列であること" });
+    good = false;
+  }
+  const reason = value["reason"];
+  if (typeof reason !== "string" || reason === "") {
+    problems.push({ field: `${field}.reason`, message: "書けない理由は空でない文字列であること" });
+    good = false;
+  }
+  const constraintIds = checkStringArray(value["constraintIds"], `${field}.constraintIds`, problems);
+  if (constraintIds === undefined) good = false;
+  if (!good || constraintIds === undefined) return undefined;
+  return { part: part as string, constraintIds, reason: reason as string };
+}
+
+function checkDesign(value: unknown, field: string, problems: Problem[]): RequirementDesignEntry | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "設計は写像（object）であること" });
     return undefined;
@@ -200,7 +294,40 @@ function checkDesign(value: unknown, field: string, problems: Problem[]): Requir
     verificationRaw === undefined ? undefined : checkVerification(verificationRaw, `${field}.verification`, problems);
   const vocabulary = checkStringArray(value["vocabulary"], `${field}.vocabulary`, problems);
   const placement = checkStringArray(value["placement"], `${field}.placement`, problems);
-  const unwritable = checkStringArray(value["unwritable"], `${field}.unwritable`, problems);
+
+  // 新形式（unwritable の要素が写像、または notes がある）か、旧形式（unwritable が文字列の並び）か。
+  // 旧形式は後方互換で通す（記録の再生を壊さない）。新形式は 3 つの欄を必須にする。
+  const unwritableRaw = value["unwritable"];
+  const notesRaw = value["notes"];
+  const newFormat =
+    notesRaw !== undefined || (Array.isArray(unwritableRaw) && unwritableRaw.some((item) => isRecord(item)));
+  let unwritable: readonly string[] | undefined;
+  let unwritableClaims: readonly UnwritableClaim[] = [];
+  let notes: readonly string[] = [];
+  if (newFormat) {
+    if (Array.isArray(unwritableRaw)) {
+      const claims: UnwritableClaim[] = [];
+      let good = true;
+      unwritableRaw.forEach((item, index) => {
+        const claim = checkUnwritableClaim(item, `${field}.unwritable[${index}]`, problems);
+        if (claim === undefined) good = false;
+        else claims.push(claim);
+      });
+      if (good) {
+        unwritableClaims = claims;
+        unwritable = claims.map((claim) => claim.part);
+      }
+    } else {
+      problems.push({ field: `${field}.unwritable`, message: "書けない部分の並び（array）であること" });
+    }
+    if (notesRaw !== undefined) {
+      const parsed = checkStringArray(notesRaw, `${field}.notes`, problems);
+      if (parsed !== undefined) notes = parsed;
+    }
+  } else {
+    unwritable = checkStringArray(unwritableRaw, `${field}.unwritable`, problems);
+  }
+
   if (
     !validId ||
     vocabulary === undefined ||
@@ -217,11 +344,13 @@ function checkDesign(value: unknown, field: string, problems: Problem[]): Requir
     vocabulary,
     placement,
     unwritable,
+    unwritableClaims,
+    notes,
   };
 }
 
 /** ② の応答の形を確かめる（新しい欄は、あるときだけ形を見る。旧形式の記録は省ける） */
-export function checkDesignOutput(output: unknown): ShapeCheck<DesignResult> {
+export function checkDesignOutput(output: unknown): ShapeCheck<DesignOutput> {
   if (!isRecord(output)) {
     return { ok: false, problems: [{ field: "", message: "応答は写像（object）であること" }] };
   }
@@ -230,7 +359,7 @@ export function checkDesignOutput(output: unknown): ShapeCheck<DesignResult> {
     return { ok: false, problems: [{ field: "designs", message: "設計の並び（array）であること" }] };
   }
   const problems: Problem[] = [];
-  const designs: RequirementDesign[] = [];
+  const designs: RequirementDesignEntry[] = [];
   raw.forEach((item, index) => {
     const checked = checkDesign(item, `designs[${index}]`, problems);
     if (checked !== undefined) designs.push(checked);
@@ -355,8 +484,39 @@ export function checkDesignPlan(list: RequirementList, design: DesignResult): re
   return problems;
 }
 
+/**
+ * 書けない部分の申告が、**渡した文書の本文の制約 ID に裏付けられている**かを確かめる（§1・②・Issue #332）。
+ *
+ * 制約 ID は、段に渡した文書の本文から取り出した集合（契約の規則の `R-…` の ID と、語彙の意味の
+ * `### ` 見出し）に入っていなければならない。**制約 ID の無い申告**と、**文書に無い ID を使った申告**を、
+ * 欄つきで断る。旧形式の記録（文字列の `unwritable`）は申告（`unwritableClaims`）を持たないので、
+ * ここでは何も断らない。
+ */
+export function checkDesignConstraints(design: DesignOutput, documents: readonly PromptDocument[]): readonly Problem[] {
+  const known = constraintIdsIn(documents);
+  const problems: Problem[] = [];
+  for (const entry of design.designs) {
+    entry.unwritableClaims.forEach((claim, index) => {
+      const field = `designs.${entry.requirementId}.unwritable[${index}].constraintIds`;
+      if (claim.constraintIds.length === 0) {
+        problems.push({
+          field,
+          message: "書けない部分には、根拠にした制約 ID が要る（文書の R-… または ### 見出し）",
+        });
+        return;
+      }
+      for (const id of claim.constraintIds) {
+        if (!known.has(id)) {
+          problems.push({ field, message: `文書に無い制約 ID: ${id}` });
+        }
+      }
+    });
+  }
+  return problems;
+}
+
 /** ② を 1 回呼ぶ。データは要件の一覧だけである */
-export async function runDesign(input: DesignInput): Promise<StageOutcome<DesignResult>> {
+export async function runDesign(input: DesignInput): Promise<StageOutcome<DesignOutput>> {
   const request = buildStructuredRequest({
     rules: DESIGN_RULES,
     documents: input.documents,
@@ -367,12 +527,15 @@ export async function runDesign(input: DesignInput): Promise<StageOutcome<Design
   });
   const answer = await callStructuredChecked(input.gateway, { request, check: checkDesignOutput });
   if (!answer.ok) return answer;
+  const problems: Problem[] = [];
   // 新しい欄を持つ設計（本番の応答）だけ、中身の点検を掛ける。旧形式の記録（試験の fixture）は通す
   if (isPlannedDesign(answer.value)) {
-    const problems = checkDesignPlan(input.list, answer.value);
-    if (problems.length > 0) {
-      return { ok: false, failure: { kind: "unmet", attempts: 1, problems } };
-    }
+    problems.push(...checkDesignPlan(input.list, answer.value));
+  }
+  // 書けない部分の根拠（制約 ID）は、旧形式では申告が無いので何も断らない（#332）
+  problems.push(...checkDesignConstraints(answer.value, input.documents));
+  if (problems.length > 0) {
+    return { ok: false, failure: { kind: "unmet", attempts: 1, problems } };
   }
   return answer;
 }

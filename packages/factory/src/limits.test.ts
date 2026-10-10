@@ -100,9 +100,15 @@ describe("段の出力の上限は effort ごとに、共通の置き場所が�
     }
   });
 
-  it("high は、それまでの固定値（= medium）より十分に大きい（推論の分の余白）", () => {
+  it("medium の上限は high と同じである（Issue #332。受入の試験で medium が途中で切れた）", () => {
     for (const stage of OUTPUT_STAGES) {
-      expect(maxOutputTokensForEffort("high", stage), stage).toBeGreaterThan(
+      expect(maxOutputTokensForEffort("medium", stage), stage).toBe(maxOutputTokensForEffort("high", stage));
+    }
+  });
+
+  it("low の上限は、medium（= high）より小さい（速さを優先する段の試しうち用）", () => {
+    for (const stage of OUTPUT_STAGES) {
+      expect(maxOutputTokensForEffort("low", stage), stage).toBeLessThan(
         maxOutputTokensForEffort("medium", stage),
       );
     }

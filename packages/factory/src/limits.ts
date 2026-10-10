@@ -139,8 +139,10 @@ export type OutputStage = (typeof OUTPUT_STAGES)[number];
  * **推論のトークンもこの上限に含まれる。** 2026-10-09 の疎通の確認で、設計の段（上限 4,096）と
  * 試験を作る段（上限 8,192）が、推論のトークンに食われて `max_output_tokens` で未完了になった。
  * そこで `high` は、それまでの固定値（= `medium`）の **4 倍**を置く——推論の分の余白を残しつつ、
- * モデルの出力の上限に収まる範囲で「十分大きい」側へ倒す。`medium` はそれまでの固定値、
- * `low` はその半分（速さを優先する段の試しうち用）。
+ * モデルの出力の上限に収まる範囲で「十分大きい」側へ倒す。`low` は速さを優先する段の試しうち用で、小さい。
+ *
+ * **Issue #332**：受入の試験（effort `medium`）で 47/50 本が逆照合の段で途中で切れたので、`medium` を
+ * `high` と**同じ値**にした（`medium` でも推論の余白を同じだけ取る）。`low` は小さいままである。
  */
 export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage, number>> = {
   low: {
@@ -154,14 +156,14 @@ export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage
     arbitration: 2_048,
   },
   medium: {
-    requirements: 4_096,
-    "reverse-check": 2_048,
-    design: 4_096,
-    "test-suite": 8_192,
-    write: 8_192,
-    correspondence: 4_096,
-    repair: 8_192,
-    arbitration: 4_096,
+    requirements: 16_384,
+    "reverse-check": 8_192,
+    design: 16_384,
+    "test-suite": 32_768,
+    write: 32_768,
+    correspondence: 16_384,
+    repair: 32_768,
+    arbitration: 16_384,
   },
   high: {
     requirements: 16_384,
@@ -174,6 +176,12 @@ export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage
     arbitration: 16_384,
   },
 };
+
+/**
+ * 申告の仕分け・裏付けの**確信度の閾値**（§4・Issue #332）。判定の口（Jev・LLM）が返す確信度が
+ * これより低い答えは、コードがそのまま使わない——申告は**印つきで残す**（捨てない）。値はここ 1 か所に置く。
+ */
+export const UNWRITABLE_CONFIDENCE_THRESHOLD = 0.6;
 
 /** 知っている effort か（知らない値は既定へ倒す。段を止めない） */
 export function isReasoningEffort(value: string): value is ReasoningEffort {

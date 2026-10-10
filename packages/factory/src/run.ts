@@ -14,8 +14,15 @@
 import { sha256Hex } from "@musunest/spec-engine";
 import { JobBudget, type TokenRates } from "./budget.js";
 import { CallGateway } from "./call.js";
-import { assembleBundle, type AssembledBundle, type UnwritableRequirement } from "./bundle.js";
-import { AGENT_LIMITS, checkRequestText, type AgentLimits } from "./limits.js";
+import {
+  assembleBundle,
+  type AssembledBundle,
+  type BundleDroppedClaim,
+  type BundleTriageJudgment,
+  type UnwritableRequirement,
+} from "./bundle.js";
+import type { Judge } from "./judge.js";
+import { AGENT_LIMITS, UNWRITABLE_CONFIDENCE_THRESHOLD, checkRequestText, type AgentLimits } from "./limits.js";
 import type { LlmClient } from "./llm.js";
 import { decideOutcome, type Outcome } from "./outcome.js";
 import {
@@ -58,6 +65,7 @@ import {
 } from "./stages/correspondence.js";
 import { runDesign } from "./stages/design.js";
 import type { PromptDocument, StageFailure, StageOutcome } from "./stages/prompt.js";
+import { runUnwritableTriage, type UnwritableTriageResult } from "./stages/unwritable-triage.js";
 import {
   failureSignature,
   isStagnant,
@@ -108,6 +116,12 @@ export interface GenerationInput {
    * 手元の入口（`--timeout`）が渡す。実際に使う値は締切の残りを超えず、やり直しでは長くする。
    */
   readonly callTimeoutMs?: number;
+  /**
+   * 判定の口（judge.ts・Issue #330）。渡されたときだけ、② の「書けない」の申告を**仕分けて裏を取る**
+   * （`unwritable-triage.ts`・Issue #332）。渡さなければ申告をそのまま残す（記録の再生など、判定を
+   * 差し込まない道）。**判定は助言であって門ではない**——答えで合否を開けない（§4）。
+   */
+  readonly judge?: Judge;
 }
 
 /** 1 回の生成の結果 */
@@ -348,25 +362,80 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     const carriedReverseCheck = requirementList.unmet.map((miss) => `${miss.kind}: ${miss.detail}`);
 
     // ② 設計する（書けなかった要件の一覧を、⑦ と ⑧ のために組んでおく）
-    const design = await runStageOk("design", () =>
+    const rawDesign = await runStageOk("design", () =>
       runDesign({ list: requirementList.list, documents: input.documents, gateway }),
     );
-    // 書けなかった要件を、要件の文と引用つきで並べる（Issue #326）。② の設計の `unwritable` が空でない要件だけ。
-    // 要件の文と引用は ① の一覧から写す（設計は ID しか持たない）。
-    const unwritable: readonly UnwritableRequirement[] = design.designs
-      .filter((entry) => entry.unwritable.length > 0)
-      .map((entry) => {
-        const requirement = requirementList.list.requirements.find(
-          (candidate) => candidate.id === entry.requirementId,
-        );
-        return {
-          requirementId: entry.requirementId,
-          text: requirement?.text ?? "",
-          quote: requirement?.quote ?? "",
-          unwritable: entry.unwritable,
-        };
-      });
+
+    // ② の「書けない」の申告を、仕分けて裏を取る（Issue #332）。判定の口（`judge`）が渡されたときだけ
+    // 回す——記録の再生のように判定を差し込まない道では、申告をそのまま残す。**判定は助言であって門では
+    // ない**ので、判定が失敗しても走りは止めない（申告をそのまま残す。§4・§6）。
+    let triage: UnwritableTriageResult | undefined;
+    if (input.judge !== undefined && rawDesign.designs.some((entry) => entry.unwritableClaims.length > 0)) {
+      const judge = input.judge;
+      try {
+        triage = await runUnwritableTriage({
+          design: rawDesign,
+          documents: input.documents,
+          judge,
+          threshold: UNWRITABLE_CONFIDENCE_THRESHOLD,
+          // 語彙の穴で「反する」と判定されたとき、その要件だけ設計をやり直す（1 回まで）
+          redoDesign: async (requirementId) => {
+            const list = {
+              ...requirementList.list,
+              requirements: requirementList.list.requirements.filter(
+                (requirement) => requirement.id === requirementId,
+              ),
+            };
+            const outcome = await runDesign({ list, documents: input.documents, gateway });
+            return outcome.ok ? outcome.value.designs[0] : undefined;
+          },
+        });
+      } catch {
+        triage = undefined;
+      }
+    }
+    const design = triage?.design ?? rawDesign;
+
+    // 書けなかった要件を、要件の文と引用つきで並べる（Issue #326・#332）。仕分けを回したときは**残った
+    // 申告だけ**（曖昧さは `notes` へ移り、問題ではないものは落ちている）。回していないときは `unwritable`
+    // が空でない要件をそのまま使う。要件の文と引用は ① の一覧から写す（設計は ID しか持たない）。
+    const unwritableParts: readonly { requirementId: string; parts: readonly string[] }[] =
+      triage === undefined
+        ? design.designs
+            .filter((entry) => entry.unwritable.length > 0)
+            .map((entry) => ({ requirementId: entry.requirementId, parts: entry.unwritable }))
+        : triage.kept.map((entry) => ({
+            requirementId: entry.requirementId,
+            parts: entry.claims.map((claim) => claim.part),
+          }));
+    const unwritable: readonly UnwritableRequirement[] = unwritableParts.map(({ requirementId, parts }) => {
+      const requirement = requirementList.list.requirements.find((candidate) => candidate.id === requirementId);
+      return {
+        requirementId,
+        text: requirement?.text ?? "",
+        quote: requirement?.quote ?? "",
+        unwritable: parts,
+      };
+    });
     const unwritableRequirements = unwritable.length;
+
+    // 判定の記録（問いの ID・答え・確信度・答えたモデルの版）と、落とした申告・印つきの要件（Issue #332）
+    const triageJudgments: readonly BundleTriageJudgment[] = (triage?.judgments ?? []).map((judgment) => ({
+      question_id: judgment.questionId,
+      answer: judgment.answer,
+      confidence: judgment.confidence ?? null,
+      model: judgment.model,
+      answered_by: judgment.answeredBy,
+    }));
+    const triageDropped: readonly BundleDroppedClaim[] = (triage?.dropped ?? []).map((claim) => ({
+      requirement_id: claim.requirementId,
+      part: claim.part,
+      label: claim.label,
+      reason: claim.reason,
+    }));
+    const markedRequirements: readonly string[] = (triage?.kept ?? [])
+      .filter((entry) => entry.marked)
+      .map((entry) => entry.requirementId);
 
     // ②' 試験を作って固定する（宣言を見る前に固定する。§1.3）。**② の設計（役割 ID の表と要件ごとの
     // 種類）を渡す**——渡さないと ②' は設計が無いときの古い経路に入り、種類の突き合わせと役割 ID の
@@ -673,6 +742,9 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       summary,
       requirements: requirementList.list,
       unwritable,
+      triage: triageJudgments,
+      markedRequirements,
+      dropped: triageDropped,
       correspondence: final.correspondence,
       testRun: final.testRun,
       disputes,

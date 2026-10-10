@@ -1,18 +1,21 @@
 // 本物の応答の再生の試験（Issue #322）。
 //
 // 2026-10-10 の疎通で、本物の OpenAI が返した応答の記録（7 回分。第 0 段の「読書会」の題材）を、偽物の
-// LlmClient の記録として**バイト列を変えずに写し**、① から ⑦ まで流し直す。段ごとの試験は通るのに、
-// 本物の応答で流すとつなぎの抜けが見つかることが続いたので、記録を再生して手元で捕まえられるようにする。
+// LlmClient の記録として写し、① から ⑦ まで流し直す。段ごとの試験は通るのに、本物の応答で流すとつなぎの
+// 抜けが見つかることが続いたので、記録を再生して手元で捕まえられるようにする。
 //
 // **実 API は呼ばない。** 記録した応答を返す偽物（llm-fake.ts）で閉じる。記録は応答の中身と usage だけで、
-// 鍵や依頼者の情報は含まない。記録の写しは `__fixtures__/smoke-reading-club/responses.json`（バイト列を
-// 変えない。その旨を SHA-256 の試験で確かめる）と `request.md`。
+// 鍵や依頼者の情報は含まない。記録の写しは `__fixtures__/smoke-reading-club/responses.json` と `request.md`。
+// **Issue #332 で、設計の段（② `requirement-design`）の応答だけを新しい形**（`unwritable` の要素を「部分・
+// 制約 ID・理由」の組にし、`notes` を足す）**に手で直した**——直した箇所と理由は同ディレクトリの
+// `CHANGES.md` にある。**ほかの段の応答は変えていない。** 手直しの後の**ファイル全体**のバイト列を、
+// SHA-256 の試験で固定する。
 //
 // **1 回分だけ手で書いた応答が要る。** ③ が提出した対応の名前（dashboard）は宣言に実在するが、⑤a の
 // 対応表の R-1 の場所に無い。だから ⑤a のやり直しが 1 回増える（Issue #322 の直し 3）。記録は ③ の
 // やり直しの応答（role-name-mappings）で終わっているので、そのままでは ⑤a のやり直しの呼び出しで尽きる。
 // 手で書いた ⑤a のやり直しの応答は、**記録とは別のファイル（この file）**に置く（記録の responses.json は
-// 1 バイトも変えない）。記録の ⑤a の応答に、要件 R-1 の場所としてダッシュボードを足したものである。
+// この応答を含まない）。記録の ⑤a の応答に、要件 R-1 の場所としてダッシュボードを足したものである。
 //
 // **結果は部分案（partial）**である。記録の設計は、要件 R-1 の「アプリ自体の名前・説明」を書けない
 // （`unwritable`）と正しく申告している。`02-architecture.md` §1.4 により、書けない要件があれば部分案に
@@ -34,14 +37,14 @@ interface NodeFileSystem {
 const importUntyped = (specifier: string) => import(/* @vite-ignore */ specifier);
 const fs = (await importUntyped("node:fs")) as NodeFileSystem;
 
-/** 写した記録（responses.json）のバイト列の SHA-256。**記録を変えていないことの証拠** */
-const RECORDING_SHA256 = "ab8f7795ba3c5ef8005423d78685ce7550c0bf1bcead6919075c678bb2365564";
+/** 写した記録（responses.json）のバイト列の SHA-256。**設計の段の応答だけを手で直した後の**値である */
+const RECORDING_SHA256 = "dd6e55ad29754c516294da53b17781958c71400c16fe8c4c63941c883c6bdeee";
 
 const fixtureUrl = (name: string): URL => new URL(`./__fixtures__/smoke-reading-club/${name}`, import.meta.url);
 
 /** 記録の原文（request.md）。① の引用の実在・位置は、この原文と突き合わせられる */
 const REQUEST = fs.readFileSync(fixtureUrl("request.md"), "utf8");
-/** 記録（responses.json）の本文。**バイト列を変えずに写したもの**（SHA-256 の試験で確かめる） */
+/** 記録（responses.json）の本文。**設計の段の応答だけを手で直したもの**（SHA-256 の試験で確かめる） */
 const RECORDING_TEXT = fs.readFileSync(fixtureUrl("responses.json"), "utf8");
 
 /** 記録した 1 回（OpenAI の Responses API の形。中身と usage だけを使う） */
@@ -118,18 +121,24 @@ function handWrittenCorrespondenceRedo(): RecordedCall {
   };
 }
 
-/** 記録の設計が「書けない（unwritable）」と申告した要件（空の申告は除く） */
+/** 記録の設計が「書けない（unwritable）」と申告した要件（空の申告は除く。新しい形の部分だけ） */
 function recordedUnwritable(): readonly {
   readonly requirementId: string;
   readonly unwritable: readonly string[];
 }[] {
   const design = recordedBySchema("requirement-design");
   const output = recordedOutput(design) as {
-    readonly designs: readonly { readonly requirementId: string; readonly unwritable: readonly string[] }[];
+    readonly designs: readonly {
+      readonly requirementId: string;
+      readonly unwritable: readonly { readonly part: string }[];
+    }[];
   };
   return output.designs
     .filter((entry) => entry.unwritable.length > 0)
-    .map((entry) => ({ requirementId: entry.requirementId, unwritable: entry.unwritable }));
+    .map((entry) => ({
+      requirementId: entry.requirementId,
+      unwritable: entry.unwritable.map((claim) => claim.part),
+    }));
 }
 
 const verificationOf = (
@@ -158,7 +167,7 @@ function runReplay(calls: readonly RecordedCall[]) {
 }
 
 describe("本物の応答の再生（Issue #322）", () => {
-  it("写した記録は、元の（窓口の checkout の）バイト列のままである", () => {
+  it("写した記録は、設計の段の応答だけを手で直した後のバイト列のままである", () => {
     const hash = createHash("sha256").update(RECORDING_TEXT).digest("hex");
     expect(hash).toBe(RECORDING_SHA256);
   });
