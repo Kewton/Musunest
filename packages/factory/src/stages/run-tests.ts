@@ -58,8 +58,8 @@ import type {
   TestTarget,
   TestUnresolved,
 } from "../pipeline.js";
-import { bindTests, type BindResult } from "./bind.js";
-import { checkLocation, findComputed, findEntity } from "./correspondence.js";
+import { bindTests, locationKindFor, type BindResult } from "./bind.js";
+import { checkLocation, declarationHasNamedLocation, findComputed, findEntity } from "./correspondence.js";
 
 /** ⑤b 試験を流す、が受け取るもの */
 export interface RunTestsInput {
@@ -70,8 +70,13 @@ export interface RunTestsInput {
   readonly mappings?: readonly RoleNameMapping[];
 }
 
-/** 失敗の行き先（§1.3.1・Issue #308） */
-export const FAILURE_ROUTES = ["correspondence-defect", "missing-element", "ambiguity"] as const;
+/** 失敗の行き先（§1.3.1・Issue #308・#322） */
+export const FAILURE_ROUTES = [
+  "correspondence-redo",
+  "correspondence-defect",
+  "missing-element",
+  "ambiguity",
+] as const;
 export type FailureRoute = (typeof FAILURE_ROUTES)[number];
 
 /** 行き先を分けた 1 件の失敗 */
@@ -79,6 +84,9 @@ export interface RoutedFailure {
   readonly testId: string;
   readonly route: FailureRoute;
   readonly detail: string;
+  /** 対応表の外（⑤a のやり直し）のとき、落ちた場所（Issue #322） */
+  readonly requirementId?: string;
+  readonly location?: DeclarationLocation;
 }
 
 /**
@@ -99,6 +107,9 @@ type Verdict =
 interface Judged {
   readonly verdict: Verdict;
   readonly route: FailureRoute | null;
+  /** 対応表の外（⑤a のやり直し）のとき、落ちた場所（Issue #322） */
+  readonly requirementId?: string;
+  readonly location?: DeclarationLocation;
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -231,13 +242,48 @@ interface SourceProblem {
 }
 
 /**
+ * 「空であることを明示した entity」（役割 ID の並び）を、宣言の entity の名前に結び付ける
+ * （§1・②'・Issue #322）。結び付かない役割 ID があれば理由を返し、その試験を未解決にする。
+ * 提出された対応が渡されていなければ（旧形式の経路）、役割 ID をそのまま entity の名前として見る。
+ */
+function resolveEmptyEntities(
+  roleIds: readonly string[],
+  input: RunTestsInput,
+): { readonly ok: true; readonly names: readonly string[] } | { readonly ok: false; readonly reason: string } {
+  const names: string[] = [];
+  for (const roleId of roleIds) {
+    if (input.mappings === undefined) {
+      if (findEntity(input.app, roleId) !== undefined) {
+        names.push(roleId);
+        continue;
+      }
+      return { ok: false, reason: `空の集合の entity の役割 ID ${roleId} が宣言の entity に結び付かない` };
+    }
+    const mapping = input.mappings.find((candidate) => candidate.roleId === roleId);
+    if (mapping === undefined) {
+      return { ok: false, reason: `空の集合の entity の役割 ID ${roleId} に提出された対応が無い` };
+    }
+    if (findEntity(input.app, mapping.name) === undefined) {
+      return { ok: false, reason: `空の集合の entity の対応（${mapping.name}）が宣言に無い` };
+    }
+    names.push(mapping.name);
+  }
+  return { ok: true, names };
+}
+
+/**
  * 参照データを、評価器が読む `sources`（entity の名前 → レコードの並び）にする。
  * 対象が実在の entity に結び付かない行があればその旨を、値の鍵が写せなければその旨を `problem` に返す
  * （黙って落とさない）。**参照（`ref`・`list of`）の値の行 ID はそのまま渡す。**
+ *
+ * `emptyEntityRoleIds`（入力の契約の「空であることを明示した entity」）は、**空の集合として**渡す
+ * ——「行が 0 件」と「評価できない」を区別する（§1・②'・Issue #322）。参照データに行があれば
+ * そちらを採り、無いときだけ空の並びを置く。
  */
 function buildSources(
   referenceData: readonly ReferenceRow[],
   input: RunTestsInput,
+  emptyEntityRoleIds: readonly string[],
 ): { readonly sources: SourceRecords; readonly problem: SourceProblem | null } {
   const sources: Record<string, SourceRecord[]> = {};
   const counts = new Map<string, number>();
@@ -262,7 +308,17 @@ function buildSources(
     records.push({ id: row.rowId ?? `${entity}-${count}`, data: mapped.values });
     sources[entity] = records;
   }
+  const empty = resolveEmptyEntities(emptyEntityRoleIds, input);
+  if (!empty.ok) return { sources, problem: { kind: "unresolved", detail: empty.reason } };
+  for (const name of empty.names) {
+    if (sources[name] === undefined) sources[name] = [];
+  }
   return { sources, problem: null };
+}
+
+/** 試験の入力の契約の「空の集合」を取り出す（無ければ空。§1・②'・Issue #322） */
+function emptyEntitiesOf(test: FixedTest): readonly string[] {
+  return test.inputContract?.emptyEntities ?? [];
 }
 
 /** 操作の条件（`when`）を評価する。`set` を当てたあとの状態（実行）は確かめられないので未解決にする */
@@ -286,7 +342,7 @@ function judgeAction(test: FixedTest, location: DeclarationLocation, input: RunT
   if (rawRecord === null) return { kind: "unresolved", detail: "入力が写像（object）でない" };
   const mapped = mapValueKeys(rawRecord, action.entity, input.app, input.mappings);
   if (!mapped.ok) return { kind: "unresolved", detail: mapped.reason };
-  const { sources, problem } = buildSources(test.referenceData, input);
+  const { sources, problem } = buildSources(test.referenceData, input, emptyEntitiesOf(test));
   if (problem !== null) return { kind: problem.kind, detail: problem.detail };
   const clock = fixedClock(test.clock);
   const recordId = test.inputContract?.targetRowId ?? test.inputContract?.rowId;
@@ -316,7 +372,7 @@ function judgeValidation(test: FixedTest, location: DeclarationLocation, input: 
   if (rawRecord === null) return { kind: "unresolved", detail: "入力が写像（object）でない" };
   const mapped = mapValueKeys(rawRecord, validation.entity, input.app, input.mappings);
   if (!mapped.ok) return { kind: "unresolved", detail: mapped.reason };
-  const { sources, problem } = buildSources(test.referenceData, input);
+  const { sources, problem } = buildSources(test.referenceData, input, emptyEntitiesOf(test));
   if (problem !== null) return { kind: problem.kind, detail: problem.detail };
   const clock = fixedClock(test.clock);
   const recordId = test.inputContract?.targetRowId ?? test.inputContract?.rowId;
@@ -363,7 +419,7 @@ function judgeValue(test: FixedTest, location: DeclarationLocation, input: RunTe
   const computed: Computed | undefined = findComputed(input.app, location);
   if (computed === undefined) return { kind: "mismatch", detail: `宣言に計算 ${location.name} が無い` };
   const clock = fixedClock(test.clock);
-  const { sources, problem } = buildSources(test.referenceData, input);
+  const { sources, problem } = buildSources(test.referenceData, input, emptyEntitiesOf(test));
   if (problem !== null) return { kind: problem.kind, detail: problem.detail };
 
   if (isComputedSettle(computed)) return judgeSettle(test, computed, input, clock, sources);
@@ -524,6 +580,18 @@ function routeOf(verdict: Verdict): FailureRoute | null {
   return null;
 }
 
+/**
+ * 結び付けられなかった試験の selector の対応（役割 ID → 名前）から、落ちた場所を組む（Issue #322）。
+ * ⑤a のやり直しへ渡し、対応表へ足させる。所属の entity は提出された対応だけからは決まらないので null。
+ */
+function mappedLocationOf(test: FixedTest, input: RunTestsInput): DeclarationLocation | null {
+  const roleId = test.target.roleId;
+  if (roleId === undefined || input.mappings === undefined) return null;
+  const mapping = input.mappings.find((candidate) => candidate.roleId === roleId);
+  if (mapping === undefined) return null;
+  return { kind: locationKindFor(test), entity: null, name: mapping.name };
+}
+
 /** 1 件の試験を判定し、失敗の行き先も返す */
 function judgeOne(
   test: FixedTest,
@@ -532,11 +600,23 @@ function judgeOne(
   natures: ReadonlyMap<string, RequirementNature>,
 ): Judged {
   if (binding === undefined || binding.kind === "unbound") {
-    // 提出された対応が無い・1 つに決まらない → 未解決（曖昧さ）。それ以外は対応の表の不備（③ のやり直し）
+    // 提出された対応が無い・1 つに決まらない → 未解決（曖昧さ）
     if (binding?.cause === "no-mapping" || binding?.cause === "ambiguous") {
       return {
         verdict: { kind: "unresolved", detail: binding.detail },
         route: "ambiguity",
+      };
+    }
+    // 対応の名前が宣言に実在するのに、⑤a の対応表の外にある → **⑤a のやり直し**（Issue #322）。
+    // ③ の対応は正しく、足りないのは対応表の場所なので、③ をやり直しても直らない。
+    // 名前が実在しない・種類違いなら ③ の対応そのものが誤りなので、③ のやり直し（対応の表の不備）。
+    const location = binding?.cause === "outside-table" ? mappedLocationOf(test, input) : null;
+    if (location !== null && declarationHasNamedLocation(input.app, location.kind, location.name)) {
+      return {
+        verdict: { kind: "mismatch", detail: binding?.detail ?? "結び付けられない" },
+        route: "correspondence-redo",
+        requirementId: test.target.requirementId,
+        location,
       };
     }
     return {
@@ -600,7 +680,13 @@ export function runTests(input: RunTestsInput): TestRunReport {
       unresolved.push({ testId: test.id, detail: judged.verdict.detail });
     }
     if (judged.verdict.kind !== "match" && judged.route !== null) {
-      routes.push({ testId: test.id, route: judged.route, detail: judged.verdict.detail });
+      routes.push({
+        testId: test.id,
+        route: judged.route,
+        detail: judged.verdict.detail,
+        ...(judged.requirementId === undefined ? {} : { requirementId: judged.requirementId }),
+        ...(judged.location === undefined ? {} : { location: judged.location }),
+      });
     }
   });
   return { mismatches, unresolved, routes };
