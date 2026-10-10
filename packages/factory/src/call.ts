@@ -211,12 +211,13 @@ export function isRetryableCallError(error: CategorizedCallError): boolean {
 }
 
 /**
- * usage のキャッシュの**書き込み**のトークン（#302・§2.2）。adapter が付ける（読み取りの
- * `cachedInputTokens` と分けて見る）。無い・壊れているときは 0 にする（記録を止めない）。
+ * usage のキャッシュの**書き込み**のトークン（#302・#342・§2.2）。共通の usage（`LlmUsage`）が
+ * 持つ欄を読む（読み取りの `cachedInputTokens` と分けて見る）。無い・壊れているときは 0 にする
+ * （記録を止めない）。
  */
 export function cacheWriteTokensOf(usage: LlmUsage | undefined): number {
   if (usage === undefined) return 0;
-  const raw = (usage as { cacheWriteTokens?: unknown }).cacheWriteTokens;
+  const raw = usage.cacheWriteTokens;
   return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? raw : 0;
 }
 
