@@ -19,10 +19,13 @@ import {
   assembleBundle,
   type AssembledBundle,
   type BundleDroppedClaim,
+  type BundleJudgeUsage,
+  type BundleSummary,
   type BundleTriageJudgment,
   type UnwritableRequirement,
 } from "./bundle.js";
 import type { Judge } from "./judge.js";
+import { createBudgetedJudge, type BudgetedJudge } from "./judge-budget.js";
 import { AGENT_LIMITS, UNWRITABLE_CONFIDENCE_THRESHOLD, checkRequestText, type AgentLimits } from "./limits.js";
 import type { LlmClient } from "./llm.js";
 import { decideOutcome, type Outcome } from "./outcome.js";
@@ -58,7 +61,6 @@ import {
   type StageRecord,
   type StageStatus,
   type StopReason,
-  type Summary,
   type UsageSnapshot,
 } from "./record.js";
 import { runArbitration } from "./stages/arbitrate.js";
@@ -124,6 +126,10 @@ export interface GenerationInput {
    * 判定の口（judge.ts・Issue #330）。渡されたときだけ、② の「書けない」の申告を**仕分けて裏を取る**
    * （`unwritable-triage.ts`・Issue #332）。渡さなければ申告をそのまま残す（記録の再生など、判定を
    * 差し込まない道）。**判定は助言であって門ではない**——答えで合否を開けない（§4）。
+   *
+   * **生成の中では、この口を予算に結び付けた包みで包む**（`judge-budget.ts`・Issue #359）。判定の
+   * 呼び出し（Jev の入力トークン・LLM の出力トークン）も、段の呼び出しと同じ予算で予約・精算する。
+   * 予約できないときは判定を呼ばず、申告をそのまま残す（判定は助言。§4）。
    */
   readonly judge?: Judge;
   /**
@@ -140,8 +146,8 @@ export interface GenerationResult {
   readonly outcome: Outcome;
   /** 段ごとの記録（要約に入る欄も持つ） */
   readonly record: RunRecord;
-  /** 納品物の要約（appspec-schema の wire。手元の入口が最後の行に出す） */
-  readonly summary: Summary;
+  /** 納品物の要約（appspec-schema の wire に、判定の呼び出しの数・費用を足したもの。手元の入口が最後の行に出す） */
+  readonly summary: BundleSummary;
   /** ⑧ の納品物。早期停止では `null`（宣言まで届かなかった） */
   readonly bundle: AssembledBundle | null;
   /** 早期停止の帰属（どの段の・どの種類の失敗か）。完走なら `null` */
@@ -277,6 +283,11 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     effort: input.effort,
     ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
   });
+  // 判定の口（渡されたときだけ）を、**この生成の予算に結び付けた包み**で包む（Issue #359）。判定の
+  // 呼び出し（Jev の入力トークン・LLM の出力トークン）も、段の呼び出しと同じ予算で予約・精算する。
+  // 予約できなければ判定を呼ばず、下の仕分けが握って申告をそのまま残す（判定は助言。§4・§6）。
+  const judgeBudget: BudgetedJudge | undefined =
+    input.judge === undefined ? undefined : createBudgetedJudge({ judge: input.judge, budget, rates: input.rates });
   const startedAt = input.now();
   const stages: StageRecord[] = [];
   const upheld: string[] = [];
@@ -351,19 +362,28 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       failure,
     });
 
+  /** 判定の呼び出しの数（答えた adapter ごと）と費用（USD）。要約の `judge` 欄に入れる（Issue #359） */
+  const judgeUsageOf = (): BundleJudgeUsage => ({
+    calls_by_adapter: judgeBudget?.callsByAdapter ?? { jev: 0, llm: 0, fake: 0 },
+    cost_usd: judgeBudget?.spentUsd ?? 0,
+  });
+
   const stopResult = (attribution: FailureAttribution): GenerationResult => {
     const outcome: Outcome = { result: "failed", verdict: "none" };
     const record = buildRecord(attribution);
-    const summary = buildSummary(record, {
-      run_id: input.runId,
-      verdict: "none",
-      assurance: "none",
-      duration_secs: (input.now() - startedAt) / 1000,
-      provider_cost_usd: budget.spentUsd,
-      stop_class: attribution.kind,
-      stopReason: attribution.kind,
-      exit_code: 1,
-    });
+    const summary: BundleSummary = {
+      ...buildSummary(record, {
+        run_id: input.runId,
+        verdict: "none",
+        assurance: "none",
+        duration_secs: (input.now() - startedAt) / 1000,
+        provider_cost_usd: budget.spentUsd,
+        stop_class: attribution.kind,
+        stopReason: attribution.kind,
+        exit_code: 1,
+      }),
+      judge: judgeUsageOf(),
+    };
     return { outcome, record, summary, bundle: null, stopped: attribution };
   };
 
@@ -398,13 +418,14 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     // 回す——記録の再生のように判定を差し込まない道では、申告をそのまま残す。**判定は助言であって門では
     // ない**ので、判定が失敗しても走りは止めない（申告をそのまま残す。§4・§6）。
     let triage: UnwritableTriageResult | undefined;
-    if (input.judge !== undefined && rawDesign.designs.some((entry) => entry.unwritableClaims.length > 0)) {
-      const judge = input.judge;
+    if (judgeBudget !== undefined && rawDesign.designs.some((entry) => entry.unwritableClaims.length > 0)) {
+      // 判定の口は**予算に結び付けた包み**（judgeBudget）である（Issue #359）。予約できなければ
+      // `JudgeBudgetExceededError` を投げ、ここで握って申告をそのまま残す（判定は助言。§4・§6）。
       try {
         triage = await runUnwritableTriage({
           design: rawDesign,
           documents: input.documents,
-          judge,
+          judge: judgeBudget,
           threshold: UNWRITABLE_CONFIDENCE_THRESHOLD,
           // 語彙の穴で「反する」と判定されたとき、その要件だけ設計をやり直す（1 回まで）
           redoDesign: async (requirementId) => {
@@ -788,16 +809,19 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
 
     // ⑧ 納品物にする（記録と要約を組んでから、納品物に埋め込む）
     const record = buildRecord(failure);
-    const summary = buildSummary(record, {
-      run_id: input.runId,
-      verdict: outcome.verdict,
-      assurance: assuranceOf(outcome),
-      duration_secs: (input.now() - startedAt) / 1000,
-      provider_cost_usd: budget.spentUsd,
-      stop_class: failure === null ? "completed" : failure.kind,
-      stopReason,
-      exit_code: outcome.result === "failed" ? 1 : 0,
-    });
+    const summary: BundleSummary = {
+      ...buildSummary(record, {
+        run_id: input.runId,
+        verdict: outcome.verdict,
+        assurance: assuranceOf(outcome),
+        duration_secs: (input.now() - startedAt) / 1000,
+        provider_cost_usd: budget.spentUsd,
+        stop_class: failure === null ? "completed" : failure.kind,
+        stopReason,
+        exit_code: outcome.result === "failed" ? 1 : 0,
+      }),
+      judge: judgeUsageOf(),
+    };
     const bundle = await assembleBundle({
       runId: input.runId,
       storageUnit: input.storageUnit,

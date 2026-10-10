@@ -125,6 +125,19 @@ describe("費用の予約（02 §1.5）", () => {
     expect(budget.remainingUsd).toBe(86);
   });
 
+  it("呼び出しが失敗したときは、予約を解いて残高へ戻す（release。Issue #359）", () => {
+    const budget = new JobBudget(100);
+    const reserved = budget.reserve(20);
+    expect(reserved.reserved).toBe(true);
+    if (!reserved.reserved) return;
+    expect(budget.remainingUsd).toBe(80);
+
+    budget.release(reserved.reservation);
+    expect(budget.reservedUsd).toBe(0);
+    expect(budget.spentUsd).toBe(0);
+    expect(budget.remainingUsd).toBe(100);
+  });
+
   it("usage が返らなければ、予約は残ったままになる", () => {
     const budget = new JobBudget(100);
     const reserved = budget.reserve(20);

@@ -22,6 +22,7 @@ import {
   type ConfirmedPlan,
 } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
+import type { JudgeSource } from "./judge.js";
 import type { Outcome } from "./outcome.js";
 import type {
   ArbitrationResult,
@@ -33,6 +34,27 @@ import type {
 } from "./pipeline.js";
 import type { Summary } from "./record.js";
 import { utf8ByteLength } from "./stages/write.js";
+
+/**
+ * 判定の呼び出しの数と費用（Issue #359）。**答えた adapter（jev・llm・fake）ごと**に呼び出しの数を
+ * 数え、判定の費用（USD）を残す。費用は**段の費用（`provider_cost_usd`）とは別の欄**に置く——
+ * 判定は助言であり、段の呼び出しと同じ予算で数えるが、費用の内訳は分けて読めるようにする（05 §5）。
+ */
+export interface BundleJudgeUsage {
+  /** 答えた adapter（jev・llm・fake）ごとの、判定の呼び出しの数 */
+  readonly calls_by_adapter: Readonly<Record<JudgeSource, number>>;
+  /** 判定の費用（USD）。段の費用（`provider_cost_usd`）とは別の欄 */
+  readonly cost_usd: number;
+}
+
+/**
+ * 納品物の要約（appspec-schema の wire に、記録の欄と**判定の呼び出しの数・費用**を足したもの。
+ * Issue #359）。wire は知らない欄を足しても受け付ける（`acceptsHeadlessSummaryWire`）ので、
+ * `judge` は additive に足す。
+ */
+export interface BundleSummary extends Summary {
+  readonly judge: BundleJudgeUsage;
+}
 
 /** manifest のファイル名。**納品物の直下**に置く（control-plane の照合と同じ名前） */
 export const BUNDLE_MANIFEST_FILE = "bundle-manifest.json" as const;
@@ -185,7 +207,8 @@ export interface BundleInput {
   /** 宣言（原文）の UTF-8 バイト列の SHA-256（流し直した最後の版のもの。§4） */
   readonly declarationSha256: string;
   readonly outcome: Outcome;
-  readonly summary: Summary;
+  /** 要約（記録の欄と、判定の呼び出しの数・費用を持つ。Issue #359） */
+  readonly summary: BundleSummary;
   readonly requirements: RequirementList;
   /** 書けなかった要件の一覧（② の `unwritable` に、要件の文と引用を添えたもの。Issue #326） */
   readonly unwritable: readonly UnwritableRequirement[];
@@ -220,8 +243,8 @@ export interface AssembledBundle {
   readonly manifest: BundleManifest;
   /** manifest（`bundle-manifest.json`）の本文 */
   readonly manifestText: string;
-  /** 要約（appspec-schema の wire） */
-  readonly summary: Summary;
+  /** 要約（appspec-schema の wire に、判定の呼び出しの数・費用を足したもの） */
+  readonly summary: BundleSummary;
   readonly declarationSha256: string;
   /**
    * 確定した仕様（`plan.json`）の SHA-256（正規化して計算したもの）。**確定した仕様が無ければ `null`**。

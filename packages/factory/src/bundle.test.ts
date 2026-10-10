@@ -19,7 +19,9 @@ import {
   assembleBundle,
   bundleFiles,
   type BundleInput,
+  type BundleJudgeUsage,
   type BundlePartialReasons,
+  type BundleSummary,
   type BundleUnwritable,
   type BundleVerification,
 } from "./bundle.js";
@@ -41,31 +43,34 @@ const CORRESPONDENCE: CorrespondenceResult = {
   misses: [],
 };
 
-const SUMMARY = buildSummary(
-  {
-    builder: "musunest-factory",
-    model: "gpt-test",
-    effort: "high",
-    prompt_version: "v1",
-    contract_version: "v0.2",
-    spec_engine_version: "0.0.0",
-    factory_version: "0.0.0",
-    stages: [],
-    arbitration: { upheld: 0, overturned: 0, undecidable: 0 },
-    budget_remaining_usd: 0.1,
-    missing_usage_calls: 0,
-    failure: null,
-  } satisfies RunRecord,
-  {
-    run_id: "run-1",
-    verdict: "full",
-    assurance: "full",
-    duration_secs: 0,
-    provider_cost_usd: 0,
-    stop_class: "completed",
-    exit_code: 0,
-  },
-);
+const SUMMARY: BundleSummary = {
+  ...buildSummary(
+    {
+      builder: "musunest-factory",
+      model: "gpt-test",
+      effort: "high",
+      prompt_version: "v1",
+      contract_version: "v0.2",
+      spec_engine_version: "0.0.0",
+      factory_version: "0.0.0",
+      stages: [],
+      arbitration: { upheld: 0, overturned: 0, undecidable: 0 },
+      budget_remaining_usd: 0.1,
+      missing_usage_calls: 0,
+      failure: null,
+    } satisfies RunRecord,
+    {
+      run_id: "run-1",
+      verdict: "full",
+      assurance: "full",
+      duration_secs: 0,
+      provider_cost_usd: 0,
+      stop_class: "completed",
+      exit_code: 0,
+    },
+  ),
+  judge: { calls_by_adapter: { jev: 0, llm: 0, fake: 0 }, cost_usd: 0 },
+};
 
 const declaration: Declaration = { source: DECLARATION_SOURCE };
 
@@ -131,6 +136,16 @@ describe("⑧ 納品物（02 §4・F-10）", () => {
     const bundle = await assembleBundle(input());
     expect(acceptsHeadlessSummaryWire(bundle.summary)).toBe(true);
     expect(acceptsHeadlessSummaryWire(JSON.parse(findText(bundle.artifacts, "artifacts/summary.json")))).toBe(true);
+  });
+
+  it("要約に、判定の呼び出しの数（adapter ごと）と費用を残す（Issue #359）", async () => {
+    const judge: BundleJudgeUsage = { calls_by_adapter: { jev: 1, llm: 2, fake: 0 }, cost_usd: 0.0004 };
+    const bundle = await assembleBundle(input({ summary: { ...SUMMARY, judge } }));
+    const summary = JSON.parse(findText(bundle.artifacts, "artifacts/summary.json")) as BundleSummary;
+    expect(summary.judge).toEqual(judge);
+    expect(bundle.summary.judge).toEqual(judge);
+    // wire は知らない欄を足しても受け付ける（additive。Issue #359）
+    expect(acceptsHeadlessSummaryWire(summary)).toBe(true);
   });
 
   it("manifest 自身は `files` に数えず、書くときは bundleFiles が含める", async () => {
