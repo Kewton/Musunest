@@ -37,6 +37,63 @@ describe("最大費用と実際の費用（02 §1.5）", () => {
   });
 });
 
+// ── キャッシュの書き込みと読み取りの単価（02 §1.2・#342）──────────────────
+
+describe("キャッシュの書き込みと読み取りを、単価で数える（02 §1.2・#342）", () => {
+  // 入力 1・読み取り 0.1（入力の 0.1 倍）・書き込み 1.25（入力の 1.25 倍）・出力 2
+  const CACHE_RATES: TokenRates = {
+    inputPerToken: 1,
+    cachedInputPerToken: 0.1,
+    cacheWritePerToken: 1.25,
+    outputPerToken: 2,
+  };
+
+  it("実際の費用は、書き込みを入力の 1.25 倍・読み取りを 0.1 倍で数える", () => {
+    const usage: LlmUsage = {
+      inputTokens: 100,
+      cachedInputTokens: 40,
+      cacheWriteTokens: 20,
+      outputTokens: 10,
+      reasoningTokens: 0,
+    };
+    // 書き込みでも読み取りでもない入力: 100 - 40 - 20 = 40
+    // 40 * 1 + 20 * 1.25 + 40 * 0.1 + 10 * 2 = 40 + 25 + 4 + 20 = 89
+    expect(costOfUsageUsd(usage, CACHE_RATES)).toBe(89);
+  });
+
+  it("書き込みの欄が無い usage は、書き込み 0 として数える（古い記録を止めない）", () => {
+    const usage: LlmUsage = {
+      inputTokens: 10,
+      cachedInputTokens: 4,
+      outputTokens: 3,
+      reasoningTokens: 1,
+    };
+    // (10 - 4) * 1 + 4 * 0.1 + 3 * 2 = 6 + 0.4 + 6 = 12.4
+    expect(costOfUsageUsd(usage, CACHE_RATES)).toBeCloseTo(12.4, 12);
+  });
+
+  it("書き込みの単価を省いたときは、書き込みを入力の単価で数える（古い呼び方）", () => {
+    const usage: LlmUsage = {
+      inputTokens: 10,
+      cachedInputTokens: 0,
+      cacheWriteTokens: 4,
+      outputTokens: 0,
+      reasoningTokens: 0,
+    };
+    // (10 - 4) * 1 + 4 * 1 = 10（RATES は書き込みの欄を持たない）
+    expect(costOfUsageUsd(usage, RATES)).toBe(10);
+  });
+
+  it("予約は、入力の全部を書き込みとして見積もる（上限を超えない）", () => {
+    // 100 * 1.25 + 10 * 2 = 125 + 20 = 145（入力の単価で見積もる 120 より大きい）
+    const maxCostUsd = estimateMaxCostUsd({ inputTokens: 100, maxOutputTokens: 10, rates: CACHE_RATES });
+    expect(maxCostUsd).toBe(145);
+    // 入力の単価で見積もった額（120）なら足りる残高でも、書き込みの単価では足りない
+    const budget = new JobBudget(120);
+    expect(budget.reserve(maxCostUsd).reserved).toBe(false);
+  });
+});
+
 describe("費用の予約（02 §1.5）", () => {
   it("残高を超える呼び出しは予約できない", () => {
     const budget = new JobBudget(10);

@@ -37,10 +37,14 @@ export const DEFAULT_DEADLINE_MS = 10 * 60 * 1000;
 /** 鍵を読む環境変数の名前 */
 export const API_KEY_ENV = "OPENAI_API_KEY" as const;
 
-/** 単価（USD / 1 トークン）。2026-10-09 の公開値（入力 $0.10・キャッシュ $0.01・出力 $0.50／100 万） */
+/**
+ * 単価（USD / 1 トークン）。2026-10-09 の公開値（入力 $0.10・キャッシュの読み取り $0.01・
+ * キャッシュの書き込み $0.125・出力 $0.50／100 万）。書き込みは入力の 1.25 倍である（§1.2・#342）。
+ */
 export const DEFAULT_RATES: TokenRates = {
   inputPerToken: 0.1 / 1_000_000,
   cachedInputPerToken: 0.01 / 1_000_000,
+  cacheWritePerToken: 0.125 / 1_000_000,
   outputPerToken: 0.5 / 1_000_000,
 };
 

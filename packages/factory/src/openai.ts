@@ -10,6 +10,10 @@
 //   * 規則（`instructions`）は**毎回**送る。会話はこちらで組み立てて `input` に並べる
 //     （`previous_response_id` は送らない。§2 の「会話の状態」）。
 //   * 依頼文などのデータは、規則とは別の入力として `<data>` で囲んで送る（§2.2「規則とデータを分ける」）。
+//   * プロンプトのキャッシュは**明示の breakpoint**で当てる（`prompt_cache_options.mode = explicit`）。
+//     文書の**最後のブロック**にだけ `prompt_cache_breakpoint` を付け、段ごとの指示（`rules`）は
+//     文書の後ろの **developer** のメッセージに置く——上の `instructions` には breakpoint を置けない。
+//     これで前置き（共通の規則と文書）が全段で同じになり、データが違っても当たる（#342・§2）。
 //   * usage を共通の契約の形に直す。無い・壊れている（数でない・負・内訳が合計を超える）ときは
 //     「usage なし」として返し、共通の口に予約を残させる（§1.5・R-6）。
 //   * 誤りは型付きで分類する（`OpenAiAdapterError` の `kind`）。
@@ -32,11 +36,11 @@ import type {
 export const DEFAULT_OPENAI_MODEL = "gpt-6-luna";
 
 /**
- * usage に、キャッシュの**書き込み**のトークンを足した形（#302）。読み取り（`cachedInputTokens`）と
- * 分けて見るために、共通の契約（`LlmUsage`）の外側に足す。adapter が wire から読んで付ける。
+ * usage のうち、キャッシュの**書き込み**のトークンを必ず持つ形（#302・#342）。共通の契約（`LlmUsage`）は
+ * 書き込みの欄を任意にしている（古い記録を止めない）ので、wire から読んで必ず付ける adapter はここで必須にする。
  */
 export interface OpenAiUsage extends LlmUsage {
-  /** 入力のうち、キャッシュへ書き込んだトークン */
+  /** 入力のうち、キャッシュへ書き込んだトークン（wire に欄が無ければ 0） */
   readonly cacheWriteTokens: number;
 }
 
@@ -267,7 +271,8 @@ function errorCodeOf(value: unknown): string | undefined {
 
 /**
  * 共通の要求を Responses API の body にする（`store: false`・`max_output_tokens`・`instructions`・
- * `prompt_cache_key`）。`prompt_cache_key` は**全段で同じ値**を送る（前置きを同じにしてキャッシュへ寄せる。§2）。
+ * `prompt_cache_key`・`prompt_cache_options`）。`prompt_cache_key` は**全段で同じ値**を送り、
+ * `prompt_cache_options.mode = explicit` で明示の breakpoint（`buildInput`）を効かせる（§2・#342）。
  */
 function baseBody(
   config: WireConfig,
@@ -281,6 +286,7 @@ function baseBody(
     max_output_tokens: maxOutputTokens,
     instructions,
     prompt_cache_key: OPENAI_PROMPT_CACHE_KEY,
+    prompt_cache_options: { mode: "explicit" },
     input,
   };
   if (config.effort !== undefined) body.reasoning = { effort: config.effort };
@@ -333,20 +339,35 @@ function buildToolBody(config: WireConfig, request: LlmToolRequest): Record<stri
 }
 
 /**
- * 規則とは別の入力（§2.2）。**文書を先頭に固定し**（キャッシュの効く前置き）、段ごとの規則をその直後に、
- * 依頼のデータを**さらに後ろ**に置く。データは `<data>` で囲む（規則ではないことが字の上でも分かる）。
+ * 規則とは別の入力（§2.2・#342）。**文書を先頭に固定し**（キャッシュの効く前置き）、段ごとの規則を
+ * その直後に、依頼のデータを**さらに後ろ**に置く。データは `<data>` で囲む（規則ではないことが字の上でも
+ * 分かる）。キャッシュの**明示の breakpoint は、文書の最後のブロックにだけ**付ける——これで前置き
+ * （共通の規則と文書）が全段で同じになり、段ごとの規則とデータが違っても当たる（§2・#342）。
  */
 function buildInput(documents: readonly string[], rules: readonly string[], data: string): unknown[] {
   const items: unknown[] = [];
-  for (const document of documents) items.push(userText(document));
+  documents.forEach((document, index) => {
+    items.push(userText(document, index === documents.length - 1));
+  });
   const rulesText = rules.join("\n");
-  if (rulesText !== "") items.push(userText(`<rules>\n${rulesText}\n</rules>`));
+  if (rulesText !== "") items.push(developerText(`<rules>\n${rulesText}\n</rules>`));
   items.push(userText(`<data>\n${data}\n</data>`));
   return items;
 }
 
-function userText(text: string): Record<string, unknown> {
-  return { role: "user", content: [{ type: "input_text", text }] };
+/** 文書・データの 1 項目（`user`）。`cacheBreakpoint` のときだけ、キャッシュの明示の breakpoint を付ける */
+function userText(text: string, cacheBreakpoint = false): Record<string, unknown> {
+  const part: Record<string, unknown> = { type: "input_text", text };
+  if (cacheBreakpoint) part.prompt_cache_breakpoint = { mode: "explicit" };
+  return { role: "user", content: [part] };
+}
+
+/**
+ * 段ごとの指示の 1 項目（`developer`）。上の `instructions` には breakpoint を置けないので、
+ * 段ごとの規則は文書の後ろに置く（前置きを全段で同じに保つ。§2・#342）。
+ */
+function developerText(text: string): Record<string, unknown> {
+  return { role: "developer", content: [{ type: "input_text", text }] };
 }
 
 /** これまでの往復を Responses API の入力の項目に直す（こちらで組み立てて毎回送る。§2） */
