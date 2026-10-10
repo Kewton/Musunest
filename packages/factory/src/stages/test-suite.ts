@@ -12,6 +12,12 @@
 //     行 ID・空の entity の集合）を足す
 //   - 異常の期待を**操作ごとの型**にする（検査は誤りコード、計算・集計は値も許す）
 //
+// Issue #316 で、**走らせる部分（run.ts）が ②' に ② の設計を渡す**ようにした。渡さないと ②' は
+// 「設計が無いときの古い経路」に入り、上の突き合わせと役割 ID の検査が実際のパイプラインでは一度も
+// 効かなかった（疎通の確認では、在ることだけの要件に異常・境界の試験を求めて未達で終わった）。設計が
+// 渡されたときは、プロンプトのデータに**役割 ID の表と要件ごとの種類**を載せる（試験の対象は、その表の
+// 役割 ID で指させる）。旧形式の記録（設計の新しい欄が無い）は、旧来の検査だけを行う（後方互換）。
+//
 // コードが次を確かめてから**固定する**。満たさなければ 1 回だけ作り直させ、それでも欠ける要件は
 // 未達として持つ（合否はここでは決めない）：
 //
@@ -36,6 +42,7 @@ import {
 import { checkLimit } from "../limits.js";
 import type { DesignResult, NatureDiscrepancy, RequirementList } from "../pipeline.js";
 import type { CallGateway } from "../call.js";
+import { isPlannedDesign } from "./design.js";
 import {
   buildStructuredRequest,
   callStructuredChecked,
@@ -185,8 +192,9 @@ export interface TestSuiteInput {
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
   /**
-   * ② の設計（要件ごとの種類）。渡されたときだけ、②' の分類と突き合わせて（`reconcileNatures`）、
-   * 種類に応じた検査（`checkSuitePlan`）を掛ける。渡されなければ旧来の検査だけを行う（後方互換）。
+   * ② の設計。**走らせる部分（`run.ts`）は必ず渡す**（Issue #316）。役割 ID の表と要件ごとの種類を、
+   * プロンプトのデータに載せ、分類と突き合わせて（`reconcileNatures`）種類に応じた検査
+   * （`checkSuitePlan`）を掛ける。渡されなければ（旧形式の記録）旧来の検査だけを行う（後方互換）。
    */
   readonly design?: DesignResult;
 }
@@ -493,9 +501,27 @@ export function checkTestSuiteOutput(output: unknown): ShapeCheck<TestSuite> {
   };
 }
 
-/** ②' のデータ（要件の一覧だけ。やり直しのときは前回の作り直しの指示を足す） */
-function buildData(list: RequirementList, previous: readonly Problem[]): readonly PromptData[] {
+/**
+ * ②' のデータ（要件の一覧。やり直しのときは前回の作り直しの指示を足す）。
+ *
+ * **② の設計が渡されたときは、役割 ID の表と要件ごとの種類も入れる**（Issue #316）。②' は宣言を
+ * 見せられないので、試験の対象を指す役割 ID は ② の表から受け取る（自由な文の名前は宣言を見ないと
+ * 決まらない）。種類も渡すのは、コードの突き合わせ（`reconcileNatures`）と同じ材料を会話にも見せ、
+ * 在ることだけの要件に異常・境界の試験を作らせないためである。
+ */
+function buildData(
+  list: RequirementList,
+  design: DesignResult | undefined,
+  previous: readonly Problem[],
+): readonly PromptData[] {
   const data: PromptData[] = [{ name: "要件の一覧", text: serializeJson(list) }];
+  if (design !== undefined && isPlannedDesign(design)) {
+    data.push({ name: "役割 ID の表", text: serializeJson(design.roles ?? []) });
+    data.push({
+      name: "要件ごとの種類",
+      text: serializeJson([...designNaturesOf(design)].map(([requirementId, nature]) => ({ requirementId, nature }))),
+    });
+  }
   if (previous.length > 0) {
     data.push({ name: "前回の作り直しの指示", text: serializeJson(previous) });
   }
@@ -518,11 +544,14 @@ export interface TestSuiteValue {
  */
 export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<TestSuiteValue>> {
   let previous: readonly Problem[] = [];
+  // 新しい契約の設計（役割 ID の表・種類・確かめ方を持つ）のときだけ、突き合わせと役割 ID の検査を
+  // 掛ける。旧形式の記録（設計の新しい欄が無い）は旧来の検査を通す（`design.ts` と同じ後方互換）。
+  const planned = input.design !== undefined && isPlannedDesign(input.design);
   for (let round = 1; round <= TEST_SUITE_ROUNDS; round += 1) {
     const request = buildStructuredRequest({
       rules: TEST_SUITE_RULES,
       documents: input.documents,
-      data: buildData(input.list, previous),
+      data: buildData(input.list, input.design, previous),
       schemaName: TEST_SUITE_SCHEMA_NAME,
       schema: TEST_SUITE_SCHEMA,
       maxOutputTokens: input.gateway.maxOutputTokens("test-suite"),
@@ -531,7 +560,7 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
     if (!answer.ok) return answer;
     let problems: readonly Problem[];
     let discrepancies: readonly NatureDiscrepancy[] = [];
-    if (input.design === undefined) {
+    if (input.design === undefined || !planned) {
       problems = checkSuiteAgainstRequirements(input.list, answer.value);
     } else {
       const reconciled = reconcileNatures(input.design, answer.value.classifications);
