@@ -28,6 +28,8 @@ export const QUESTIONS_SCHEMA_NAME = "plan-questions";
 /** P4 に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const QUESTIONS_RULES: readonly string[] = [
   "未解決の事項から、利用者への質問を組み立てる。**1 問は未解決の事項 1 つ**に対応する。",
+  "**重大な（critical が真の）未解決の事項を先に聞く。** 残りの問数の範囲で、重大な事項はすべて聞く。重大な事項が残りの問数より多いときは、残りの問数ぶんを重大なものから聞く。",
+  "重大でない事項は、残りの問数に余りがあるときだけ聞く。",
   "1 問は「質問 ID（id）・問い（text）・選択肢（choices。2〜4 個。選択肢 ID と文）・推奨（recommended。選択肢 ID と理由 1 行）・自由入力の可否（allowFreeText）」を持つ。",
   "問いと選択肢の文は、利用者の言葉で書く。宣言の用語（entity・computed・selector など）を使わない。",
   "選択肢は、どれを選んでも書けるものにする。作るものが同じになる選択肢は 1 つにまとめる。",
@@ -346,12 +348,74 @@ export function checkQuestionSet(
   return problems;
 }
 
+/**
+ * 開いている事項だけを、**重大なものを先に並べて**返す（04 §3 P4）。答えの出た事項（`status` が `open`
+ * でないもの）は落とす——P4 は開いている事項についてだけ聞く。並び順が、LLM に渡すデータの見え方を
+ * 決める。
+ */
+export function openIssuesForQuestions(openIssues: readonly PlanOpenIssue[]): readonly PlanOpenIssue[] {
+  const open = openIssues.filter((issue) => issue.status === "open");
+  return [...open.filter((issue) => issue.critical), ...open.filter((issue) => !issue.critical)];
+}
+
+/**
+ * 残りの問数に照らして、**開いている重大な事項がすべて聞かれている**かを確かめる（04 §3 P4）。
+ *
+ * 残りの問数が足りる（重大な事項の数が残りの問数以下である）のに、ある重大な事項への問いが無ければ、
+ * 形の誤りとして返す——`runQuestions` はこれを形の検査に混ぜるので、応答は 1 回だけやり直され、
+ * それでも足りなければ段の失敗になる。開いている事項があるのに問いが 0 問のときも同じである。
+ * 残りの問数が足りない（重大な事項のほうが多い）ときは、聞けるぶんだけ聞くので、ここでは何も言わない。
+ */
+export function checkQuestionCoverage(
+  openIssues: readonly PlanOpenIssue[],
+  remaining: number,
+  questions: readonly PlanQuestion[],
+): readonly Problem[] {
+  const problems: Problem[] = [];
+  const open = openIssues.filter((issue) => issue.status === "open");
+  if (open.length === 0 || remaining <= 0) return problems;
+  if (questions.length === 0) {
+    problems.push({ field: "questions", message: "開いている事項があるのに問いが 0 問である" });
+    return problems;
+  }
+  const critical = open.filter((issue) => issue.critical);
+  if (critical.length > remaining) return problems;
+  const asked = new Set(questions.map((question) => question.openIssueId));
+  for (const issue of critical) {
+    if (!asked.has(issue.id)) {
+      problems.push({
+        field: "questions",
+        message: `重大な事項 ${issue.id} への問いが無い（残りの問数 ${remaining} に重大な事項 ${critical.length} 件が収まる）`,
+      });
+    }
+  }
+  return problems;
+}
+
+/**
+ * 問いが残りの問数を超えていれば、**重大なものを残して**切る（04 §3 P4）。重大な事項に対応する問いを
+ * 先に、次に重大でない事項の問いを残し、残りの問数まで取る。`openIssues` は開いている事項である。
+ */
+export function trimQuestionsToRemaining(
+  questions: readonly PlanQuestion[],
+  openIssues: readonly PlanOpenIssue[],
+  remaining: number,
+): readonly PlanQuestion[] {
+  if (questions.length <= remaining) return questions;
+  const criticalIds = new Set(openIssues.filter((issue) => issue.critical).map((issue) => issue.id));
+  const criticalQuestions = questions.filter((question) => criticalIds.has(question.openIssueId));
+  const otherQuestions = questions.filter((question) => !criticalIds.has(question.openIssueId));
+  return [...criticalQuestions, ...otherQuestions].slice(0, remaining);
+}
+
 /** P4 が受け取るもの */
 export interface QuestionsInput {
   /** 依頼文（原文） */
   readonly source: string;
-  /** 未解決の事項（いま開いているもの） */
+  /** 未解決の事項（いま開いているもの）。答えの出た事項は含めない */
   readonly openIssues: readonly PlanOpenIssue[];
+  /** 残りの問数（あと何問聞けるか。往復をまたいで数えた残り） */
+  readonly remaining: number;
   /** 質問を組み立てた仕様の版 */
   readonly revision: number;
   readonly documents: readonly PromptDocument[];
@@ -359,16 +423,22 @@ export interface QuestionsInput {
 }
 
 /**
- * P4 を 1 回呼ぶ。データは依頼文と未解決の事項だけである。形が合わない応答は 1 回だけやり直し、
- * 意味の検査（`checkQuestionSet`）に合わなければ `unmet` で断る。
+ * P4 を 1 回呼ぶ。データは依頼文・**残りの問数**・**開いている事項**（重大なものを先）だけである。
+ *
+ * 形の検査には**残りの問数に照らした覆いの検査**（`checkQuestionCoverage`）を混ぜる——残りの問数が
+ * 足りるのに重大な事項の問いが欠けていれば、1 回だけやり直す。問いが残りの問数を超えていれば、
+ * 重大なものを残して切る（`trimQuestionsToRemaining`）。そのうえで意味の検査（`checkQuestionSet`）に
+ * 合わなければ `unmet` で断る。
  */
 export async function runQuestions(input: QuestionsInput): Promise<StageOutcome<readonly PlanQuestion[]>> {
+  const openIssues = openIssuesForQuestions(input.openIssues);
   const request = buildStructuredRequest({
     rules: QUESTIONS_RULES,
     documents: input.documents,
     data: [
       { name: "依頼文", text: input.source },
-      { name: "未解決の事項", text: serializeJson(input.openIssues) },
+      { name: "残りの問数", text: String(input.remaining) },
+      { name: "未解決の事項", text: serializeJson(openIssues) },
     ],
     schemaName: QUESTIONS_SCHEMA_NAME,
     schema: QUESTIONS_SCHEMA,
@@ -376,11 +446,17 @@ export async function runQuestions(input: QuestionsInput): Promise<StageOutcome<
   });
   const answer = await callStructuredChecked(input.gateway, {
     request,
-    check: (output) => checkQuestionsOutput(output, input.revision),
+    check: (output) => {
+      const shape = checkQuestionsOutput(output, input.revision);
+      if (!shape.ok) return shape;
+      const coverage = checkQuestionCoverage(openIssues, input.remaining, shape.value);
+      if (coverage.length > 0) return { ok: false, problems: coverage };
+      return { ok: true, value: trimQuestionsToRemaining(shape.value, openIssues, input.remaining) };
+    },
   });
   if (!answer.ok) return answer;
   const problems = checkQuestionSet(
-    input.openIssues.map((issue) => issue.id),
+    openIssues.map((issue) => issue.id),
     answer.value,
   );
   if (problems.length > 0) {

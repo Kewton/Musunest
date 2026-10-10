@@ -50,6 +50,45 @@ function coverAnswers(answerId: string): Record<string, JudgeAnswer> {
   };
 }
 
+/** 複数の答えの覆いの問いに「覆われている」を返す答え */
+function coverAnswersFor(answerIds: readonly string[]): Record<string, JudgeAnswer> {
+  const answers: Record<string, JudgeAnswer> = {
+    [confirmQuestionName("S-1")]: noul(0.95),
+    [confirmQuestionName("S-2")]: noul(0.95),
+  };
+  for (const answerId of answerIds) answers[confirmQuestionName(answerId)] = noul(0.9);
+  return answers;
+}
+
+/** 目録に無い曖昧さ 10 件（すべて重大）を返す P3 の答え（上限のちょうど内側） */
+const TEN_ISSUES_SURFACE = {
+  ambiguities: Array.from({ length: 10 }, (_value, index) => ({
+    id: `OI-${index + 1}`,
+    requirementId: "R-1",
+    text: `曖昧 ${index + 1}`,
+    critical: true,
+  })),
+  unwritable: [],
+};
+
+/** 10 件の重大な事項に 1 問ずつ（選択肢 2 つ・推奨・自由入力）を返す P4 の答え */
+const TEN_QUESTIONS = {
+  questions: Array.from({ length: 10 }, (_value, index) => ({
+    id: `Q-${index + 1}`,
+    openIssueId: `OI-${index + 1}`,
+    text: `問い ${index + 1}`,
+    choices: [
+      { id: "c1", text: "こちら" },
+      { id: "c2", text: "あちら" },
+    ],
+    recommended: { choiceId: "c1", reason: "依頼に沿う" },
+    allowFreeText: true,
+  })),
+};
+
+/** 開いている事項があるのに 0 問を返す P4 の答え（やり直しの対象） */
+const ZERO_QUESTIONS = { questions: [] };
+
 /** 目録に無い曖昧さ 1 件（重大）を返す P3 の答え */
 const SURFACE_OUTPUT = {
   ambiguities: [{ id: "OI-extra", requirementId: "R-1", text: "誰の分を数えるか", critical: true }],
@@ -279,5 +318,61 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     expect(result.spentUsd).toBeGreaterThan(result.judge.cost_usd);
     // 予算を使い切っている（残りが無い）
     expect(result.remainingUsd).toBeLessThanOrEqual(0);
+  });
+
+  it("重大な事項が 10 件以下なら、偽物の答える役が推奨で答えて確定まで進む", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(TEN_ISSUES_SURFACE),
+      structured(TEN_QUESTIONS),
+    ]);
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswersFor(Array.from({ length: 10 }, (_value, index) => `A:Q-${index + 1}`)),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 10 件の重大な事項が、すべて推奨で閉じている（1 問も取りこぼさない）
+    expect(result.plan.open_issues.every((issue) => issue.status === "resolved")).toBe(true);
+    // 10 問ぶんの答えが入力に残る（残りの問数 10 の内側で、重大なものをすべて聞く）
+    expect(result.plan.inputs.filter((input) => input.kind === "answer")).toHaveLength(10);
+  });
+
+  it("開いている事項があるのに P4 が 0 問を返したとき、やり直しになり、黙って「確定できない」にならない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(ZERO_QUESTIONS),
+      structured(QUESTIONS_OUTPUT),
+    ]);
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q-1") });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    // 0 問の応答で「確定できない」にせず、やり直して問いを出し、確定まで進む
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    expect(result.plan.open_issues.find((issue) => issue.id === "OI-extra")?.status).toBe("resolved");
   });
 });

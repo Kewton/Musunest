@@ -167,6 +167,7 @@ describe("P4 を 1 回呼ぶ（04 §3 P4）", () => {
     const outcome = await runQuestions({
       source: "タスクを記録する。",
       openIssues: [OPEN_ISSUES[0] ?? { id: "OI-1", text: "x", critical: true, status: "open" }],
+      remaining: 4,
       revision: 1,
       documents: SAMPLE_DOCUMENTS,
       gateway: makeGateway(recording.client, { maxAttempts: 1 }),
@@ -196,6 +197,7 @@ describe("P4 を 1 回呼ぶ（04 §3 P4）", () => {
     const outcome = await runQuestions({
       source: "タスクを記録する。",
       openIssues: [OPEN_ISSUES[0] ?? { id: "OI-1", text: "x", critical: true, status: "open" }],
+      remaining: 4,
       revision: 1,
       documents: SAMPLE_DOCUMENTS,
       gateway: makeGateway(recording.client, { maxAttempts: 1 }),
@@ -203,5 +205,115 @@ describe("P4 を 1 回呼ぶ（04 §3 P4）", () => {
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.failure.kind).toBe("unmet");
+  });
+
+  it("P4 に渡すデータに、残りの問数が入り、答えの出た事項が入らない", async () => {
+    const recording = createRecordingClient([{ kind: "structured", output: VALID_OUTPUT, usage: undefined }]);
+    const outcome = await runQuestions({
+      source: "タスクを記録する。",
+      openIssues: [
+        { id: "OI-3", text: "重大でない事項", critical: false, status: "open" },
+        { id: "OI-1", text: "重大な事項", critical: true, status: "open" },
+        { id: "OI-2", text: "答えの出た事項", critical: true, status: "resolved" },
+      ],
+      remaining: 7,
+      revision: 1,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    const request = recording.structured[0];
+    // 残りの問数がデータに入る
+    expect(request?.input).toContain("残りの問数");
+    expect(request?.input).toContain("7");
+    // 答えの出た事項はデータに入らない
+    expect(request?.input).not.toContain("OI-2");
+    expect(request?.input).not.toContain("答えの出た事項");
+    // 重大なものを先に並べる
+    expect(request?.input.indexOf("OI-1")).toBeLessThan(request?.input.indexOf("OI-3") ?? -1);
+  });
+
+  it("残りの問数が足りるのに重大な事項への問いが欠けた応答は、やり直しになる", async () => {
+    const missingCritical = { questions: [question({ id: "Q-2" }, "OI-2")] };
+    const recording = createRecordingClient([
+      { kind: "structured", output: missingCritical, usage: undefined },
+      { kind: "structured", output: VALID_OUTPUT, usage: undefined },
+    ]);
+    const outcome = await runQuestions({
+      source: "タスクを記録する。",
+      openIssues: [...OPEN_ISSUES],
+      remaining: 4,
+      revision: 1,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    // 1 回目（重大な事項 OI-1 の問いが無い）でやり直し、2 回目の応答を使う
+    expect(recording.structured).toHaveLength(2);
+  });
+
+  it("重大な事項への問いが欠けた応答が 2 回続くと段の失敗になる", async () => {
+    const missingCritical = { questions: [question({ id: "Q-2" }, "OI-2")] };
+    const recording = createRecordingClient([
+      { kind: "structured", output: missingCritical, usage: undefined },
+      { kind: "structured", output: missingCritical, usage: undefined },
+    ]);
+    const outcome = await runQuestions({
+      source: "タスクを記録する。",
+      openIssues: [...OPEN_ISSUES],
+      remaining: 4,
+      revision: 1,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("malformed");
+  });
+
+  it("開いている事項があるのに問いが 0 問の応答も、やり直しになる", async () => {
+    const recording = createRecordingClient([
+      { kind: "structured", output: { questions: [] }, usage: undefined },
+      { kind: "structured", output: VALID_OUTPUT, usage: undefined },
+    ]);
+    const outcome = await runQuestions({
+      source: "タスクを記録する。",
+      openIssues: [...OPEN_ISSUES],
+      remaining: 4,
+      revision: 1,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    expect(recording.structured).toHaveLength(2);
+  });
+
+  it("問いが残りの問数を超えたら、重大なものを残して切られる", async () => {
+    const issues: readonly PlanOpenIssue[] = [
+      { id: "OI-1", text: "重大", critical: true, status: "open" },
+      { id: "OI-2", text: "重大でない", critical: false, status: "open" },
+      { id: "OI-3", text: "重大でない 2", critical: false, status: "open" },
+    ];
+    const output = {
+      questions: [
+        question({ id: "Q-2" }, "OI-2"),
+        question({ id: "Q-1" }, "OI-1"),
+        question({ id: "Q-3" }, "OI-3"),
+      ],
+    };
+    const recording = createRecordingClient([{ kind: "structured", output, usage: undefined }]);
+    const outcome = await runQuestions({
+      source: "タスクを記録する。",
+      openIssues: issues,
+      remaining: 1,
+      revision: 1,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 残り 1 問なので、重大な事項（OI-1）の問いだけが残る（順に切るだけでやり直しはしない）
+    expect(outcome.value.map((one) => one.id)).toEqual(["Q-1"]);
+    expect(recording.structured).toHaveLength(1);
   });
 });
