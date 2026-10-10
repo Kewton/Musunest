@@ -1,11 +1,12 @@
 // ③ 書く（stages/write.ts）の unit テスト（02 §1・§1.5・§2.2）。
 //
-// ここで固定したいのは 3 つ。
+// ここで固定したいのは 4 つ。
 //   1. 送った要求を観測する：規則（instructions）とデータが別の入力であること・データに仕込んだ
 //      「規則を無視せよ」が規則の側へ入らないこと・その段に渡すと決めた文脈（要件の一覧と設計）だけが
 //      入っていること・JSON Schema が付いていること・受入の題材の言葉が無いこと
 //   2. 書いた直後に、宣言の大きさの上限の**ちょうど**と**超過**を確かめること
 //   3. 形が合わない応答は 1 回だけやり直すこと（共通の口）
+//   4. **役割 ID → 宣言の名前の対応（mappings）を提出する**こと（Issue #308）
 import { describe, expect, it } from "vitest";
 import { AGENT_LIMITS } from "../limits.js";
 import {
@@ -141,5 +142,60 @@ describe("③ の形の確認（02 §2.2）", () => {
     expect(checkWriteOutput({ declaration: 1 }).ok).toBe(false);
     expect(checkWriteOutput({}).ok).toBe(false);
     expect(checkWriteOutput("nope").ok).toBe(false);
+  });
+});
+
+// ── 4. 役割 ID → 宣言の名前の対応を提出する（02 §1・Issue #308）────────
+
+describe("③ は役割 ID → 宣言の名前の対応を提出する（02 §1・Issue #308）", () => {
+  const MAPPINGS = [
+    { roleId: "record", name: "record" },
+    { roleId: "record.total", name: "total" },
+  ];
+
+  const run = (output: unknown) =>
+    runWrite({
+      list: REQUIREMENT_LIST,
+      design: DESIGN_OUTPUT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(createRecordingClient([structured(output)]).client, { maxAttempts: 1 }),
+    });
+
+  it("提出された対応を、そのまま返す", async () => {
+    const outcome = await run({ declaration: SAMPLE_DECLARATION, mappings: MAPPINGS });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.mappings).toEqual(MAPPINGS);
+  });
+
+  it("対応の欄が無ければ空として扱う（旧形式の記録は壊さない）", async () => {
+    const outcome = await run({ declaration: SAMPLE_DECLARATION });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.mappings).toEqual([]);
+  });
+
+  it("対応の形が合わなければ、欄つきで断る", () => {
+    const bad = checkWriteOutput({ declaration: SAMPLE_DECLARATION, mappings: [{ roleId: "", name: 1 }] });
+    expect(bad.ok).toBe(false);
+    if (bad.ok) return;
+    const fields = bad.problems.map((problem) => problem.field);
+    expect(fields).toContain("mappings[0].roleId");
+    expect(fields).toContain("mappings[0].name");
+    expect(checkWriteOutput({ declaration: SAMPLE_DECLARATION, mappings: "nope" }).ok).toBe(false);
+  });
+
+  it("要求の schema が対応の欄を必須にし、規則が対応の提出を頼む", async () => {
+    expect(DECLARATION_SCHEMA.required).toContain("mappings");
+    expect(DECLARATION_SCHEMA.properties.mappings.type).toBe("array");
+    const recording = createRecordingClient([structured({ declaration: SAMPLE_DECLARATION, mappings: MAPPINGS })]);
+    await runWrite({
+      list: REQUIREMENT_LIST,
+      design: DESIGN_OUTPUT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    const request = recording.structured[0];
+    expect((request?.rules ?? []).join("\n")).toContain("mappings");
   });
 });

@@ -18,10 +18,13 @@ import {
   type CorrespondenceResult,
   type FixedTest,
   type ReferenceRow,
+  type RequirementClassification,
+  type RoleNameMapping,
   type TestExpected,
   type TestTarget,
 } from "../pipeline.js";
-import { runTests } from "./run-tests.js";
+import { bindTests } from "./bind.js";
+import { resolveReferenceEntity, runTests } from "./run-tests.js";
 
 const CLOCK = "2026-09-16T12:00:00+09:00";
 
@@ -408,5 +411,269 @@ describe("結び付けと実在（02 §1・R-8）", () => {
     });
     const result = runTests({ app: APP, suite: suiteOf([unmatched]), correspondence });
     expect(result.mismatches.map((mismatch) => mismatch.testId)).toEqual(["unmatched"]);
+  });
+});
+
+// ── 4. 提出された対応（③ の提出）で結び付ける（02 §1.3・R2-6・Issue #308）──
+
+/** 役割 ID で対象を指す selector */
+const roleTarget = (requirementId: string, kind: TestTarget["kind"], roleId: string): TestTarget => ({
+  requirementId,
+  kind,
+  roleId,
+});
+
+describe("参照の entity は、提出された対応で結び付く（02 §1.3・R2-6・Issue #308）", () => {
+  it("対応表の先頭の entity ではなく、提出された対応の名前を使う", () => {
+    const table: CorrespondenceResult = {
+      entries: [
+        entry("R-7", [
+          { kind: "entity", entity: null, name: "person" },
+          { kind: "entity", entity: null, name: "payment" },
+          { kind: "computation", entity: "person", name: "settlement" },
+        ]),
+      ],
+      misses: [],
+    };
+    const mappings: readonly RoleNameMapping[] = [
+      { roleId: "person", name: "person" },
+      { roleId: "payment", name: "payment" },
+    ];
+    const rowTarget = roleTarget("R-7", "entity", "payment");
+
+    // 提出された対応があれば、参照の entity は payment に結び付く
+    expect(
+      resolveReferenceEntity(rowTarget, { app: APP, suite: suiteOf([]), correspondence: table, mappings }),
+    ).toBe("payment");
+    // 対応が無ければ、対応表の先頭の entity（person）を採る古い経路になる
+    expect(resolveReferenceEntity(rowTarget, { app: APP, suite: suiteOf([]), correspondence: table })).toBe("person");
+  });
+});
+
+describe("同じ種類の場所が複数あっても、提出された対応が無ければ未解決にする（02 §1.3・Issue #308）", () => {
+  it("view の場所が 4 個で対応が無ければ、不一致ではなく未解決に数える", () => {
+    const table: CorrespondenceResult = {
+      entries: [
+        entry("R-30", [
+          { kind: "view", entity: "record", name: "listA" },
+          { kind: "view", entity: "record", name: "listB" },
+          { kind: "view", entity: "record", name: "listC" },
+          { kind: "view", entity: "record", name: "listD" },
+        ]),
+      ],
+      misses: [],
+    };
+    const only = suiteOf([
+      draft({
+        id: "v",
+        target: roleTarget("R-30", "screen", "record.list"),
+        operation: "screen",
+        expected: { kind: "ok", value: null },
+      }),
+    ]);
+    const result = runTests({ app: APP, suite: only, correspondence: table, mappings: [] });
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved.map((entry) => entry.testId)).toEqual(["v"]);
+    expect(result.routes[0]?.route).toBe("ambiguity");
+  });
+});
+
+// ── 5. 評価の方法は、対象の種類 × 操作で決める（02 §1.3・Issue #308）──────
+
+/** 要件ごとの種類（②' の独立の分類）を付けた試験の組 */
+function suiteWithClassifications(
+  tests: readonly unknown[],
+  classifications: readonly RequirementClassification[],
+): TestSuite {
+  const checked = checkTestSuite(tests);
+  if (!checked.ok) throw new Error(`前提が壊れた: ${checked.problems.map((problem) => problem.field).join("・")}`);
+  return { tests: checked.suite.tests, classifications };
+}
+
+describe("評価の方法の表（02 §1.3・Issue #308）", () => {
+  const methodCorrespondence: CorrespondenceResult = {
+    entries: [
+      entry("R-3", [{ kind: "entity", entity: null, name: "record" }]),
+      entry("R-9", [{ kind: "field", entity: "record", name: "amount" }]),
+      entry("R-12", [{ kind: "view", entity: "record", name: "records" }]),
+      entry("R-13", [{ kind: "entity", entity: null, name: "record" }]),
+    ],
+    misses: [],
+  };
+  const methodMappings: readonly RoleNameMapping[] = [
+    { roleId: "record", name: "record" },
+    { roleId: "record.amount", name: "amount" },
+    { roleId: "record.records", name: "records" },
+  ];
+  const suite = suiteWithClassifications(
+    [
+      // 操作の実行（set を当てたあとの状態）… 未対応（未解決）
+      draft({
+        id: "op-exec",
+        target: roleTarget("R-3", "entity", "record"),
+        operation: "action",
+        expected: { kind: "ok", value: true },
+      }),
+      // 項目の既定値 … 未対応（未解決）
+      draft({
+        id: "field-default",
+        target: roleTarget("R-9", "field", "record.amount"),
+        operation: "compute",
+        expected: { kind: "ok", value: 0 },
+      }),
+      // 画面 … 構造の確認（view が実在し、show の名前が実在する）
+      draft({
+        id: "screen",
+        target: roleTarget("R-12", "screen", "record.records"),
+        operation: "screen",
+        expected: { kind: "ok", value: null },
+      }),
+      // 在ることだけの entity … 構造の確認（create の操作がある）
+      draft({
+        id: "existence",
+        target: roleTarget("R-13", "entity", "record"),
+        operation: "compute",
+        expected: { kind: "ok", value: null },
+      }),
+    ],
+    [{ requirementId: "R-13", nature: "existence-only" }],
+  );
+
+  it("操作の実行と項目の既定値は未解決に数え、画面と在ることだけの要件は構造の確認で判定する", () => {
+    const result = runTests({
+      app: APP,
+      suite,
+      correspondence: methodCorrespondence,
+      mappings: methodMappings,
+    });
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved.map((entry) => entry.testId).sort()).toEqual(["field-default", "op-exec"]);
+    const routes = new Map(result.routes.map((route) => [route.testId, route.route]));
+    expect(routes.get("op-exec")).toBe("ambiguity");
+    expect(routes.get("field-default")).toBe("ambiguity");
+    // 画面と在ることだけの要件は、不一致でも未解決でもない（構造の確認で一致した）
+    expect(routes.has("screen")).toBe(false);
+    expect(routes.has("existence")).toBe(false);
+  });
+});
+
+// ── 6. 失敗を、行き先へ振り分ける（02 §1.3.1・Issue #308）──────────────
+
+describe("失敗を行き先へ振り分ける（02 §1.3.1・Issue #308）", () => {
+  const routeSuite = suiteOf([
+    draft({
+      id: "table-defect",
+      target: roleTarget("R-20", "computation", "record.total"),
+      operation: "compute",
+      expected: { kind: "ok", value: 42 },
+    }),
+    draft({
+      id: "element-missing",
+      target: roleTarget("R-21", "computation", "record.ghost"),
+      operation: "compute",
+      expected: { kind: "ok", value: 0 },
+    }),
+    draft({
+      id: "ambiguous",
+      target: roleTarget("R-22", "screen", "record.records"),
+      operation: "screen",
+      expected: { kind: "ok", value: null },
+    }),
+  ]);
+  const routeCorrespondence: CorrespondenceResult = {
+    entries: [
+      entry("R-20", [{ kind: "computation", entity: "record", name: "total" }]),
+      entry("R-21", [{ kind: "computation", entity: "record", name: "ghost" }]),
+      entry("R-22", [
+        { kind: "view", entity: "record", name: "listA" },
+        { kind: "view", entity: "record", name: "listB" },
+      ]),
+    ],
+    misses: [],
+  };
+  const routeMappings: readonly RoleNameMapping[] = [
+    { roleId: "record.total", name: "対応表に無い名前" },
+    { roleId: "record.ghost", name: "ghost" },
+  ];
+
+  it("『対応の表の不備』『要素の欠落』『曖昧さ』に振り分ける", () => {
+    const result = runTests({
+      app: APP,
+      suite: routeSuite,
+      correspondence: routeCorrespondence,
+      mappings: routeMappings,
+    });
+    const routes = new Map(result.routes.map((route) => [route.testId, route.route]));
+    expect(routes.get("table-defect")).toBe("correspondence-defect");
+    expect(routes.get("element-missing")).toBe("missing-element");
+    expect(routes.get("ambiguous")).toBe("ambiguity");
+    // 対応の表の不備・要素の欠落は不一致、曖昧さは未解決
+    expect(result.mismatches.map((mismatch) => mismatch.testId).sort()).toEqual([
+      "element-missing",
+      "table-defect",
+    ]);
+    expect(result.unresolved.map((entry) => entry.testId)).toEqual(["ambiguous"]);
+  });
+});
+
+// ── 7. 名前の付け替えは、結び付けと判定を変えない（02 §1.3.1・Issue #308）──
+
+describe("名前の付け替えは、結び付けと判定を変えない（02 §1.3.1・Issue #308）", () => {
+  const suite = suiteOf([
+    draft({
+      id: "t1",
+      target: roleTarget("R-1", "computation", "record.total"),
+      operation: "compute",
+      input: { amount: 21 },
+      expected: { kind: "ok", value: 42 },
+    }),
+  ]);
+
+  it("提出された対応で結び付き、entity の名前を付け替えても合格に寄らない", async () => {
+    const table: CorrespondenceResult = {
+      entries: [
+        entry("R-1", [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "computation", entity: "record", name: "total" },
+        ]),
+      ],
+      misses: [],
+    };
+    const mappings: readonly RoleNameMapping[] = [
+      { roleId: "record", name: "record" },
+      { roleId: "record.total", name: "total" },
+    ];
+    // 提出された対応で、計算 total に結び付く（対応表の先頭の場所ではない）
+    const bound = bindTests({ suite, correspondence: table, mappings });
+    expect(bound[0]?.kind).toBe("bound");
+
+    // 宣言の entity を、試験の文に合わせて付け替えた版（疎通の確認で起きた形）
+    const renamedSource = DECLARATION_SOURCE.replaceAll("record", "renamed");
+    const renamedApp = await normalized(renamedSource);
+    // 対応表と対応も一貫して付け替えれば、同じ判定（名前で合否は動かない）
+    const renamedTable: CorrespondenceResult = {
+      entries: [
+        entry("R-1", [
+          { kind: "entity", entity: null, name: "renamed" },
+          { kind: "computation", entity: "renamed", name: "total" },
+        ]),
+      ],
+      misses: [],
+    };
+    const renamedMappings: readonly RoleNameMapping[] = [
+      { roleId: "record", name: "renamed" },
+      { roleId: "record.total", name: "total" },
+    ];
+    const consistent = runTests({
+      app: renamedApp,
+      suite,
+      correspondence: renamedTable,
+      mappings: renamedMappings,
+    });
+    expect(consistent.mismatches).toEqual([]);
+
+    // 宣言だけを付け替えて対応を据え置くと、結び付け先が実在せず合格に寄らない
+    const stale = runTests({ app: renamedApp, suite, correspondence: table, mappings });
+    expect(stale.mismatches.map((mismatch) => mismatch.testId)).toEqual(["t1"]);
   });
 });
