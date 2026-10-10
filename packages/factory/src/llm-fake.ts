@@ -16,6 +16,7 @@ import type {
   LlmTurn,
   LlmUsage,
 } from "./llm.js";
+import { ENVELOPE_RESULT_KEY, ENVELOPE_STAGE_KEY } from "./schema-envelope.js";
 
 /** 記録した構造化出力の 1 回 */
 export interface RecordedStructuredCall {
@@ -54,6 +55,24 @@ const exhausted = (used: number): FakeLlmExhaustedError =>
 
 const kindMismatch = (expected: RecordedCall["kind"], actual: RecordedCall["kind"]): FakeLlmOrderError =>
   new FakeLlmOrderError(`記録した応答の種別が違います（期待 ${expected}、記録 ${actual}）`);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * 封筒の応答（`{"result": {…}}`）なら `result` を取り出し、判別子の `stage` を落とす（#353）。adapter
+ * （openai.ts）が本物の応答に対して行うのと同じことを、記録に対して行う。封筒を使わない今までの記録は
+ * そのまま返す——**封筒の有無にかかわらず、段の試験は今までどおり通る**（#353「守ること」）。
+ */
+function unwrapRecordedOutput(output: unknown): unknown {
+  if (!isRecord(output) || !(ENVELOPE_RESULT_KEY in output)) return output;
+  const result = output[ENVELOPE_RESULT_KEY];
+  if (!isRecord(result)) return output;
+  const unwrapped: Record<string, unknown> = { ...result };
+  delete unwrapped[ENVELOPE_STAGE_KEY];
+  return unwrapped;
+}
 
 /**
  * 往復の順を確かめる。道具付きの呼び出しが k 回目なら、こちらが期待する履歴の長さは 2k である
@@ -105,7 +124,7 @@ export function createFakeLlmClient(recorded: readonly RecordedCall[]): LlmClien
       if (call === undefined) throw exhausted(index);
       if (call.kind !== "structured") throw kindMismatch("structured", call.kind);
       index += 1;
-      return { output: call.output as T, usage: call.usage };
+      return { output: unwrapRecordedOutput(call.output) as T, usage: call.usage };
     },
     async callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
       const call = recorded[index];

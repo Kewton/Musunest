@@ -134,6 +134,19 @@ describe("偽物の LlmClient（02 §2.1・R-2）", () => {
     expect(second.usage).toBe(USAGE_B);
   });
 
+  it("封筒の記録（result で包んだもの）は、result を取り出し stage を落として返す（#353）", async () => {
+    const client = createFakeLlmClient([
+      { kind: "structured", output: { result: { stage: "requirement-list", items: [1] } }, usage: USAGE_A },
+      { kind: "structured", output: { ok: true }, usage: undefined },
+    ]);
+    // 封筒の記録は、段が受け取る中身（result）になる
+    const enveloped = await client.callStructured<{ items: number[] }>(STRUCTURED_REQUEST);
+    expect(enveloped.output).toEqual({ items: [1] });
+    // 封筒を使わない記録は、そのまま返る（封筒の有無にかかわらず、段の試験は通る）
+    const plain = await client.callStructured<{ ok: boolean }>(STRUCTURED_REQUEST);
+    expect(plain.output).toEqual({ ok: true });
+  });
+
   it("usage が無い記録は、usage を undefined にする", async () => {
     const client = createFakeLlmClient([{ kind: "structured", output: { ok: true }, usage: undefined }]);
     const response = await client.callStructured<{ ok: boolean }>(STRUCTURED_REQUEST);

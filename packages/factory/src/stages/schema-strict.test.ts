@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest";
 import { ARBITRATION_RULES, ARBITRATION_SCHEMA } from "./arbitrate.js";
 import { CORRESPONDENCE_SCHEMA } from "./correspondence.js";
 import { DESIGN_SCHEMA } from "./design.js";
-import { REPAIR_ANSWER_SCHEMA } from "./repair.js";
+import { REPAIR_ANSWER_SCHEMA, MAPPING_REDO_SCHEMA } from "./repair.js";
 import { REQUIREMENT_LIST_SCHEMA } from "./requirements.js";
 import { REVERSE_CHECK_SCHEMA } from "./reverse-check.js";
 import { TEST_SUITE_SCHEMA } from "./test-suite.js";
@@ -33,6 +33,7 @@ export const STAGE_SCHEMAS: readonly { readonly name: string; readonly schema: u
   { name: "write（③）", schema: DECLARATION_SCHEMA },
   { name: "correspondence（⑤a）", schema: CORRESPONDENCE_SCHEMA },
   { name: "arbitration（⑥'）", schema: ARBITRATION_SCHEMA },
+  { name: "role-name-mappings（③ のやり直し）", schema: MAPPING_REDO_SCHEMA },
   { name: "repair の最後の答え（⑥）", schema: REPAIR_ANSWER_SCHEMA },
   ...REPAIR_TOOLS.map((tool) => ({ name: `道具 ${tool.name}（⑥）`, schema: tool.parameters })),
 ];
@@ -118,6 +119,7 @@ describe("すべての段の schema と道具の引数の schema が、strict �
       "write（③）",
       "correspondence（⑤a）",
       "arbitration（⑥'）",
+      "role-name-mappings（③ のやり直し）",
       "repair の最後の答え（⑥）",
       "道具 static-check（⑥）",
       "道具 run-tests（⑥）",

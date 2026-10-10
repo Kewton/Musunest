@@ -14,6 +14,9 @@
 //     文書の**最後のブロック**にだけ `prompt_cache_breakpoint` を付け、段ごとの指示（`rules`）は
 //     文書の後ろの **developer** のメッセージに置く——上の `instructions` には breakpoint を置けない。
 //     これで前置き（共通の規則と文書）が全段で同じになり、データが違っても当たる（#342・§2）。
+//   * **構造化出力は、全段で同じ「封筒」の schema を送る**（`schema-envelope.ts`・#353）。出力の schema は
+//     入力より前に置かれるので、段ごとに違うと前置きが別物になり、段をまたいでキャッシュが当たらない。
+//     封筒の枝は `stage` の判別子で選び、応答の `result` を取り出して段へ渡す（`stage` が違えば形の誤り）。
 //   * usage を共通の契約の形に直す。無い・壊れている（数でない・負・内訳が合計を超える）ときは
 //     「usage なし」として返し、共通の口に予約を残させる（§1.5・R-6）。
 //   * 誤りは型付きで分類する（`OpenAiAdapterError` の `kind`）。
@@ -31,6 +34,15 @@ import type {
   LlmTurn,
   LlmUsage,
 } from "./llm.js";
+import {
+  ENVELOPE_RESULT_KEY,
+  ENVELOPE_SCHEMA,
+  ENVELOPE_SCHEMA_NAME,
+  ENVELOPE_STAGE_KEY,
+  buildStageBranch,
+  envelopeStageFor,
+  type StageEnvelopeEntry,
+} from "./schema-envelope.js";
 
 /** Responses API の既定のモデル（§2 の表「モデル」） */
 export const DEFAULT_OPENAI_MODEL = "gpt-6-luna";
@@ -293,23 +305,46 @@ function baseBody(
   return body;
 }
 
-/** 構造化出力の body（`text.format` に JSON Schema を置く。§2） */
+/**
+ * 構造化出力の body（`text.format` に JSON Schema を置く。§2）。
+ *
+ * **封筒に載っている段**（`schema-envelope.ts`）のときは、段ごとの schema ではなく**全段で同じ封筒**を
+ * 送る（#353）。これで出力の schema が全段で同じになり、段をまたいで前置きが一致してキャッシュが当たる。
+ * どの枝で答えるかは、段ごとの指示（`stageInstruction`）で伝える。封筒に載っていない schema（判定の口など）は、
+ * 今までどおりその要求の schema をそのまま送る。
+ */
 function buildStructuredBody(config: WireConfig, request: LlmStructuredRequest): Record<string, unknown> {
+  const entry = envelopeStageFor(request.schemaName);
   const body = baseBody(
     config,
     request.instructions,
-    buildInput(request.documents, request.rules ?? [], request.input),
+    buildInput(
+      request.documents,
+      request.rules ?? [],
+      request.input,
+      entry === undefined ? undefined : stageInstruction(entry.stage),
+    ),
     request.maxOutputTokens,
   );
   body.text = {
     format: {
       type: "json_schema",
-      name: request.schemaName,
-      schema: request.schema,
+      name: entry === undefined ? request.schemaName : ENVELOPE_SCHEMA_NAME,
+      schema: entry === undefined ? request.schema : ENVELOPE_SCHEMA,
       strict: true,
     },
   };
   return body;
+}
+
+/**
+ * 段ごとの指示に足す、封筒のどの枝で答えるかの指示（#353）。段ごとの指示は文書の後ろ＝前置きの外に
+ * 置かれるので、足しても前置き（キャッシュの効く部分）は変わらない。封筒の枝を選ばせるために、応答の
+ * `stage` をその段の名前にするようはっきり伝える。**段の規則の本文は変えない**——別の内容の塊として、
+ * 同じ developer のメッセージに足す（規則とデータを分ける作法を保ち、段の規則のレンダリングは変えない）。
+ */
+function stageInstruction(stage: string): string {
+  return `応答は全段で同じ「封筒」の形（{"result": {…}}）で返す。枝は stage で選ぶ——この段の stage は "${stage}" である（result.stage を "${stage}" にすること）。`;
 }
 
 /**
@@ -344,13 +379,20 @@ function buildToolBody(config: WireConfig, request: LlmToolRequest): Record<stri
  * 分かる）。キャッシュの**明示の breakpoint は、文書の最後のブロックにだけ**付ける——これで前置き
  * （共通の規則と文書）が全段で同じになり、段ごとの規則とデータが違っても当たる（§2・#342）。
  */
-function buildInput(documents: readonly string[], rules: readonly string[], data: string): unknown[] {
+function buildInput(
+  documents: readonly string[],
+  rules: readonly string[],
+  data: string,
+  stageInstructionText?: string,
+): unknown[] {
   const items: unknown[] = [];
   documents.forEach((document, index) => {
     items.push(userText(document, index === documents.length - 1));
   });
   const rulesText = rules.join("\n");
-  if (rulesText !== "") items.push(developerText(`<rules>\n${rulesText}\n</rules>`));
+  if (rulesText !== "" || stageInstructionText !== undefined) {
+    items.push(developerText(rulesText, stageInstructionText));
+  }
   items.push(userText(`<data>\n${data}\n</data>`));
   return items;
 }
@@ -365,9 +407,17 @@ function userText(text: string, cacheBreakpoint = false): Record<string, unknown
 /**
  * 段ごとの指示の 1 項目（`developer`）。上の `instructions` には breakpoint を置けないので、
  * 段ごとの規則は文書の後ろに置く（前置きを全段で同じに保つ。§2・#342）。
+ *
+ * 段の規則は 1 つ目の内容の塊（`<rules>` の囲み）に、封筒の枝を選ばせる指示（#353）は 2 つ目の
+ * 内容の塊に置く——段の規則の本文を変えずに足せる。
  */
-function developerText(text: string): Record<string, unknown> {
-  return { role: "developer", content: [{ type: "input_text", text }] };
+function developerText(rulesText: string, stageInstructionText?: string): Record<string, unknown> {
+  const content: Record<string, unknown>[] = [];
+  if (rulesText !== "") content.push({ type: "input_text", text: `<rules>\n${rulesText}\n</rules>` });
+  if (stageInstructionText !== undefined) {
+    content.push({ type: "input_text", text: stageInstructionText });
+  }
+  return { role: "developer", content };
 }
 
 /** これまでの往復を Responses API の入力の項目に直す（こちらで組み立てて毎回送る。§2） */
@@ -412,6 +462,7 @@ async function callStructuredWire<T>(
   config: WireConfig,
   request: LlmStructuredRequest,
 ): Promise<LlmStructuredResponse<T>> {
+  const entry = envelopeStageFor(request.schemaName);
   const wire = await requestWire(config, buildStructuredBody(config, request), request.signal);
   const usage = parseUsage(wire.usage);
   requireCompleted(wire, usage);
@@ -420,11 +471,41 @@ async function callStructuredWire<T>(
   if (text === undefined) throw new OpenAiAdapterError("malformed", "構造化出力の本文がありません");
   const parsed = tryParseJson(text);
   if (!parsed.ok) throw new OpenAiAdapterError("malformed", "構造化出力が JSON として読めません");
-  const schemaError = validateSchema(request.schema, parsed.value);
+  const output =
+    entry === undefined ? requireSchema(request.schema, parsed.value) : unwrapEnvelope(entry, parsed.value);
+  return { output: output as T, usage };
+}
+
+/** schema に合うことを確かめ、合えばその値を返す（合わなければ形の誤り。§2.2） */
+function requireSchema(schema: unknown, value: unknown): unknown {
+  const schemaError = validateSchema(schema, value);
   if (schemaError !== undefined) {
     throw new OpenAiAdapterError("malformed", `schema に合いません: ${schemaError}`);
   }
-  return { output: parsed.value as T, usage };
+  return value;
+}
+
+/**
+ * 封筒の応答から `result` を取り出して段へ渡す（#353）。**`stage` がその段でなければ形の誤り**にする
+ * ——枝を間違えて答えた応答は、その段の答えではない。取り出した中身は、その段の枝（段の schema に
+ * `stage` を足したもの）に合うことを確かめてから、判別子の `stage` を落として返す。こうすると、段の
+ * 側の検査は今までと同じ中身を見ることになる。
+ */
+function unwrapEnvelope(entry: StageEnvelopeEntry, value: unknown): unknown {
+  if (!isRecord(value)) {
+    throw new OpenAiAdapterError("malformed", "封筒の応答が object ではありません");
+  }
+  const result = value[ENVELOPE_RESULT_KEY];
+  if (!isRecord(result)) {
+    throw new OpenAiAdapterError("malformed", "封筒の応答に result がありません");
+  }
+  if (result[ENVELOPE_STAGE_KEY] !== entry.stage) {
+    throw new OpenAiAdapterError("malformed", `封筒の stage が違います（期待 ${entry.stage}）`);
+  }
+  requireSchema(buildStageBranch(entry), result);
+  const output: Record<string, unknown> = { ...result };
+  delete output[ENVELOPE_STAGE_KEY];
+  return output;
 }
 
 async function callToolsWire(config: WireConfig, request: LlmToolRequest): Promise<LlmToolResponse> {
