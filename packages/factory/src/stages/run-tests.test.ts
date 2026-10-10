@@ -616,6 +616,32 @@ describe("失敗を行き先へ振り分ける（02 §1.3.1・Issue #308）", ()
     ]);
     expect(result.unresolved.map((entry) => entry.testId)).toEqual(["ambiguous"]);
   });
+
+  it("対応の名前が宣言に実在して対応表の外にあるときは、⑤a のやり直しに回す（③ のやり直しではない）", () => {
+    const table: CorrespondenceResult = {
+      entries: [entry("R-20", [{ kind: "entity", entity: null, name: "record" }])],
+      misses: [],
+    };
+    const only = suiteOf([
+      draft({
+        id: "outside-real",
+        target: roleTarget("R-20", "computation", "record.total"),
+        operation: "compute",
+        expected: { kind: "ok", value: 42 },
+      }),
+    ]);
+    const result = runTests({
+      app: APP,
+      suite: only,
+      correspondence: table,
+      mappings: [{ roleId: "record.total", name: "total" }],
+    });
+    // total は宣言に実在し画面からも辿れる。対応表（R-20）が挙げていないだけなので、⑤a の表を作り直す。
+    // ③ の対応（record.total → total）は正しく、③ をやり直しても直らない（Issue #322）
+    expect(result.routes.map((route) => route.route)).toEqual(["correspondence-redo"]);
+    expect(result.routes[0]?.requirementId).toBe("R-20");
+    expect(result.routes[0]?.location).toEqual({ kind: "computation", entity: null, name: "total" });
+  });
 });
 
 // ── 7. 名前の付け替えは、結び付けと判定を変えない（02 §1.3.1・Issue #308）──
@@ -915,3 +941,31 @@ describe("在ることだけの要件の create の操作は、構造の確認�
     expect(result.mismatches).toEqual([]);
   });
 });
+
+// ── 9. 空であることを明示した entity（02 §1・②'・Issue #322）──────────────
+
+describe("空であることを明示した entity は、空の集合として集計する（02 §1・②'・Issue #322）", () => {
+  it("emptyEntities に挙げた entity は 0 件として扱われ、集計が 0 になる", () => {
+    // `shareCount` は、member をこの行として expense を数える行ごとの集計。
+    // 参照データが空でも、`emptyEntities: ["expense"]` があれば expense は「行が 0 件」と分かる
+    const test = draft({
+      id: "empty-collection",
+      target: roleTarget("R-1", "computation", "member.shareCount"),
+      operation: "compute",
+      input: { "member.name": "A" },
+      inputContract: { rowId: "m1", targetRowId: "m1", emptyEntities: ["expense"] },
+      referenceData: [],
+      expected: { kind: "ok", value: 0 },
+    });
+    const result = runTests({
+      app: MAPPED_APP,
+      suite: suiteOf([test]),
+      correspondence: mappedCorrespondence,
+      mappings: mappedMappings,
+    });
+    // 空の集合を渡さなければ 0 ではなく null になり、不一致になる（疎通の確認で起きた形）
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved).toEqual([]);
+  });
+});
+

@@ -685,3 +685,161 @@ describe("新しい呼び出しも予算と上限に入り、段ごとの所要�
     }
   });
 });
+
+// ── 裁定で外した試験を除いた組でも、分類を保つ（02 §1・②'・Issue #322）──────
+
+const CREATE_CLOCK = "2026-09-16T12:00:00+09:00";
+
+/** 在ることだけの要件の create の操作と、決まりを含む要件の計算を持つ宣言（抽象的な題材） */
+const CREATE_DECLARATION = [
+  "entities:",
+  "  - name: record",
+  "    fields:",
+  "      amount: number",
+  "views:",
+  "  - name: records",
+  "    type: list",
+  "    entity: record",
+  "    show: [total]",
+  "actions:",
+  "  - name: add",
+  "    entity: record",
+  "    kind: create",
+  "validations: []",
+  "computed:",
+  "  - name: total",
+  "    entity: record",
+  "    expression: amount * 2",
+  "    type: number",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+/** ② の設計（R-1 は在ることだけ、R-2 は決まりを含む） */
+const CREATE_DESIGN = {
+  roles: [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
+    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+  ],
+  designs: [
+    {
+      requirementId: "R-1",
+      nature: "existence-only",
+      verification: { kind: "structural", reason: "登録できることを構造で確かめる" },
+      vocabulary: ["entity", "action"],
+      placement: ["entities", "actions"],
+      unwritable: [],
+    },
+    {
+      requirementId: "R-2",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      vocabulary: ["computation"],
+      placement: ["computed"],
+      unwritable: [],
+    },
+  ],
+};
+
+/** ②' の答え（R-1 の create は構造の確認。R-2 の異常の期待が誤りで、裁定で棄却される） */
+const CREATE_SUITE = {
+  classifications: [
+    { requirementId: "R-1", nature: "existence-only" },
+    { requirementId: "R-2", nature: "ruled" },
+  ],
+  tests: [
+    {
+      id: "create",
+      target: { requirementId: "R-1", kind: "operation", roleId: "record.add" },
+      kind: "normal",
+      operation: "action",
+      clock: CREATE_CLOCK,
+      input: {},
+      inputContract: { rowId: "create-row", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: null },
+    },
+    {
+      id: "n",
+      target: { requirementId: "R-2", kind: "computation", roleId: "record.total" },
+      kind: "normal",
+      operation: "compute",
+      clock: CREATE_CLOCK,
+      input: { amount: 21 },
+      inputContract: { rowId: "n-row", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: 42 },
+    },
+    {
+      id: "a",
+      target: { requirementId: "R-2", kind: "computation", roleId: "record.total" },
+      kind: "abnormal",
+      operation: "compute",
+      clock: CREATE_CLOCK,
+      input: { amount: 21 },
+      inputContract: { rowId: "a-row", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: 100 },
+    },
+    {
+      id: "b",
+      target: { requirementId: "R-2", kind: "computation", roleId: "record.total" },
+      kind: "boundary",
+      operation: "compute",
+      clock: CREATE_CLOCK,
+      input: { amount: 21 },
+      inputContract: { rowId: "b-row", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: 42 },
+    },
+  ],
+};
+
+/** ③ が提出する対応（役割 ID → 宣言の名前） */
+const CREATE_MAPPINGS = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.add", name: "add" },
+  { roleId: "record.total", name: "total" },
+];
+
+/** ⑤a の答え（実在して画面から辿れる場所だけを挙げる） */
+const CREATE_CORRESPONDENCE = {
+  entries: [
+    {
+      requirementId: "R-1",
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "action", entity: "record", name: "add" },
+      ],
+    },
+    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "total" }] },
+  ],
+};
+
+describe("裁定で外した試験を除いた組でも、分類を保つ（02 §1・②'・Issue #322）", () => {
+  it("棄却で外した後も、在ることだけの要件の create の試験が構造の確認で通る", async () => {
+    const { run } = runWith([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(CREATE_DESIGN),
+      structured(CREATE_SUITE),
+      structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+      structured(CREATE_CORRESPONDENCE),
+      // ⑥ 直す：期待が誤りの主張（原文の引用つき）だけを返し、宣言は変えない
+      toolDone({ declaration: CREATE_DECLARATION, disputes: [{ testId: "a", quote: "件数を合計する" }] }),
+      structured({
+        decisions: [{ testId: "a", verdict: "overturn", reason: "原文のとおり", quote: "件数を合計する" }],
+      }),
+    ]);
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.record.arbitration.overturned).toBe(1);
+    // 棄却で外した後も、在ることだけの create の試験は未解決にならず、構造の確認で通る（分類が保たれる）。
+    // 分類を落とすと（#322 の直す前）、全要件が「決まりを含む」になり 3 本が未解決になって部分案になる
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+});

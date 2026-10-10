@@ -23,6 +23,7 @@ import {
   type ArbitrationResult,
   type CorrespondenceEntry,
   type CorrespondenceResult,
+  type CorrespondenceMiss,
   type Declaration,
   type Dispute,
   type JudgeMaterials,
@@ -364,8 +365,13 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       runWrite({ list: requirementList.list, design, documents: input.documents, gateway }),
     );
 
-    // 棄却で外した試験を除いた、いまの固定した試験
+    // 棄却で外した試験を除いた、いまの固定した試験。**分類（classifications）は落とさない**
+    // ——落とすと、要件ごとの種類が既定（決まりを含む）に戻り、在ることだけの要件の create の試験が
+    // 構造の確認ではなく操作の実行として未解決になる（Issue #322）。
     const withoutOverturned = (): TestSuite => ({
+      ...(testSuite.suite.classifications === undefined
+        ? {}
+        : { classifications: testSuite.suite.classifications }),
       tests: testSuite.suite.tests.filter((test) => !overturned.some((entry) => entry.testId === test.id)),
     });
 
@@ -462,7 +468,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     let stagnant = false;
     const history: string[] = [failureSignature(current)];
 
-    // ⑥（または ③ のやり直し）→ 流し直し（④⑤）→ ⑥' を、上限まで回す（§1・§1.3・§1.5・§1.3.1）
+    // ⑥（または ⑤a・③ のやり直し）→ 流し直し（④⑤）→ ⑥' を、上限まで回す（§1・§1.3・§1.5・§1.3.1・#322）
     while (!isSettled(current)) {
       // 停滞の検知：同じ不一致（試験 ID・段・誤りの分類。名前は数えない）が続いたら、それ以上直さない
       if (isStagnant(history, limits.stagnationRepeats)) {
@@ -470,6 +476,57 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         stopReason = "stagnation";
         break;
       }
+
+      // ⑤a のやり直し：対応の名前が宣言に実在するのに、⑤a の対応表の外にあるとき（Issue #322）。
+      // ③ の対応は正しく、足りないのは ⑤a の対応表の場所なので、**③ のやり直しでも ⑥ でもない**。
+      // 落ちた場所を伝えて ⑤a を作り直し、同じ宣言のまま結び付けと試験を流し直す。
+      const redoRoutes = current.routes.filter((route) => route.route === "correspondence-redo");
+      if (
+        redoRoutes.length > 0 &&
+        roles !== undefined &&
+        useMappings() &&
+        current.staticCheck.app !== null
+      ) {
+        if (correspondenceCalls >= limits.correspondenceChecks) {
+          limitReached = true;
+          stopReason = "limit";
+          break;
+        }
+        correspondenceCalls += 1;
+        const app = current.staticCheck.app;
+        const previousMisses: readonly CorrespondenceMiss[] = redoRoutes.map((route) => ({
+          requirementId: route.requirementId ?? "",
+          ...(route.location === undefined ? {} : { location: route.location }),
+          detail: route.detail,
+        }));
+        const retry = await runStageOk("correspondence", () =>
+          runCorrespondence({
+            source: input.source,
+            list: requirementList.list,
+            declaration: current.declaration,
+            app,
+            documents: input.documents,
+            gateway,
+            roles,
+            ...(useMappings() ? { mappings } : {}),
+            previousMisses,
+          }),
+        );
+        // 宣言は変えない。作り直した対応表で、結び付けと試験を流し直す（Issue #322）
+        entries = retry.entries;
+        entriesSha = current.declarationSha256;
+        const next = await evaluate(current.declaration);
+        if (next === null) {
+          limitReached = true;
+          stopReason = "limit";
+          break;
+        }
+        current = next;
+        if (current.staticCheck.passed) lastPassed = current;
+        history.push(failureSignature(current));
+        continue;
+      }
+
       // 対応の表の不備（③ のやり直し）と、それ以外（⑥ 直す）を分ける（§1.3.1・Issue #309）
       const defect =
         current.defectMisses.length + current.routes.filter((route) => route.route === "correspondence-defect").length;

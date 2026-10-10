@@ -62,6 +62,10 @@ export const CORRESPONDENCE_RULES: readonly string[] = [
   "対応の名前が宣言に実在しない・対象の種類が合わない・その要件について対応表が挙げた場所の外にある・共有や別名を明示せずに同じ場所へ二重に対応している場合は、その旨を点検の結果として扱う。",
 ];
 
+/** ⑤a のやり直しにだけ足す規則（Issue #322）。落ちた場所を、その要件の対応表へ足させる */
+export const CORRESPONDENCE_REDO_RULE =
+  "「前回の対応表の落ち」が与えられたときは、その落ちた場所を該当の要件の対応表へ足して、対応表を出し直す。落ちた場所は宣言に実在するので、その要件を満たす場所として挙げる。";
+
 /** ⑤a の JSON Schema（構造化出力） */
 export const CORRESPONDENCE_SCHEMA = {
   type: "object",
@@ -117,6 +121,11 @@ export interface CorrespondenceInput {
    * **期待の値と試験の合否はここへ入れない。**
    */
   readonly mappings?: readonly RoleNameMapping[];
+  /**
+   * 前の ⑤a の対応表の落ち（⑤a のやり直しのときだけ渡す。Issue #322）。
+   * 「対応の名前が対応表の外にある」落ちをここに渡し、**落ちた場所を伝えて**対応表を作り直させる。
+   */
+  readonly previousMisses?: readonly CorrespondenceMiss[];
 }
 
 /** 場所の形を確かめる */
@@ -309,6 +318,34 @@ export function checkLocation(app: NormalizedAppSpec, location: DeclarationLocat
       return app.spec.views.some((view) => view.name === location.name)
         ? { ok: true }
         : notFound(`宣言に一覧 ${location.name} が無い`);
+  }
+}
+
+/**
+ * 名前が、宣言にその種類の場所として実在するか（所属の entity は問わない）。
+ *
+ * 「対応の名前が ⑤a の対応表の外にある」（名前は実在するが、その要件の対応表が挙げていない）と、
+ * 「実在しない名前・種類違い」（③ の対応そのものが誤り）を**分ける**のに使う（Issue #322）。
+ * entity を問わないので、行ごとの計算のように所属が決まる場所も「実在する」と見なせる。
+ */
+export function declarationHasNamedLocation(
+  app: NormalizedAppSpec,
+  kind: DeclarationLocationKind,
+  name: string,
+): boolean {
+  switch (kind) {
+    case "entity":
+      return app.spec.entities.some((entity) => entity.name === name);
+    case "field":
+      return app.spec.entities.some((entity) => Object.hasOwn(entity.fields, name));
+    case "validation":
+      return app.spec.validations.some((validation) => validation.name === name);
+    case "computation":
+      return app.spec.computed.some((computed) => computed.name === name);
+    case "action":
+      return app.spec.actions.some((action) => action.name === name);
+    case "view":
+      return app.spec.views.some((view) => view.name === name);
   }
 }
 
@@ -561,6 +598,10 @@ function buildData(input: CorrespondenceInput): readonly PromptData[] {
   if (input.mappings !== undefined) {
     data.push({ name: "提出された対応", text: serializeJson(input.mappings) });
   }
+  // ⑤a のやり直しでは、落ちた場所を伝えて対応表を作り直させる（Issue #322）
+  if (input.previousMisses !== undefined && input.previousMisses.length > 0) {
+    data.push({ name: "前回の対応表の落ち", text: serializeJson(input.previousMisses) });
+  }
   return data;
 }
 
@@ -573,7 +614,10 @@ export async function runCorrespondence(
   input: CorrespondenceInput,
 ): Promise<StageOutcome<CorrespondenceResult>> {
   const request = buildStructuredRequest({
-    rules: CORRESPONDENCE_RULES,
+    rules:
+      input.previousMisses !== undefined && input.previousMisses.length > 0
+        ? [...CORRESPONDENCE_RULES, CORRESPONDENCE_REDO_RULE]
+        : CORRESPONDENCE_RULES,
     documents: input.documents,
     data: buildData(input),
     schemaName: CORRESPONDENCE_SCHEMA_NAME,
