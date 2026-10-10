@@ -120,3 +120,69 @@ describe("selector の種類が当たる場所の種類（02 §1.3）", () => {
     expect(locationKindFor(typedTest("field", "compute"))).toBe("field");
   });
 });
+
+// ── 提出された対応で 1 つに決める（02 §1.3・Issue #308）────────────────
+
+/** 1 つの要件に view の場所が 4 個ある対応表（疎通の確認で起きた形） */
+const fourViews = (requirementId: string): CorrespondenceEntry => ({
+  requirementId,
+  locations: [
+    { kind: "view", entity: "record", name: "listA" },
+    { kind: "view", entity: "record", name: "listB" },
+    { kind: "view", entity: "record", name: "listC" },
+    { kind: "view", entity: "record", name: "listD" },
+  ],
+});
+
+/** 役割 ID で対象を指す 1 件の試験 */
+const roleTest = (id: string, requirementId: string, roleId: string): Record<string, unknown> => ({
+  id,
+  target: { requirementId, kind: "screen", roleId },
+  kind: "normal",
+  operation: "screen",
+  clock: "2026-09-16T12:00:00+09:00",
+  input: null,
+  referenceData: [],
+  expected: { kind: "ok", value: null },
+});
+
+describe("提出された対応で 1 つに決める（02 §1.3・Issue #308）", () => {
+  const suite = () => suiteOf([roleTest("t1", "R-1", "record.list")]);
+
+  it("同じ種類の場所が 4 個でも、提出された対応があれば 1 つに結び付ける", () => {
+    const bindings = bindTests({
+      suite: suite(),
+      correspondence: correspondence([fourViews("R-1")]),
+      mappings: [{ roleId: "record.list", name: "listC" }],
+    });
+    const [binding] = bindings;
+    expect(binding?.kind).toBe("bound");
+    if (binding?.kind !== "bound") return;
+    expect(binding.location).toEqual({ kind: "view", entity: "record", name: "listC" });
+  });
+
+  it("提出された対応が無ければ、未解決の理由（1 つに決まらない）になる", () => {
+    const bindings = bindTests({
+      suite: suite(),
+      correspondence: correspondence([fourViews("R-1")]),
+      mappings: [],
+    });
+    const [binding] = bindings;
+    expect(binding?.kind).toBe("unbound");
+    if (binding?.kind !== "unbound") return;
+    expect(binding.cause).toBe("no-mapping");
+    expect(binding.detail).toContain("1 つに決まらない");
+  });
+
+  it("提出された対応の名前が対応表の外なら、対応表の外として返す", () => {
+    const bindings = bindTests({
+      suite: suite(),
+      correspondence: correspondence([fourViews("R-1")]),
+      mappings: [{ roleId: "record.list", name: "listZ" }],
+    });
+    const [binding] = bindings;
+    expect(binding?.kind).toBe("unbound");
+    if (binding?.kind !== "unbound") return;
+    expect(binding.cause).toBe("outside-table");
+  });
+});

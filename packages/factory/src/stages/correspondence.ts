@@ -8,6 +8,11 @@
 //     辿れるか
 //
 // 落ち（実在しない・画面から辿れない）は ⑦ の入力（対応表の落ち）になる。合否はここでは決めない。
+//
+// Issue #308 で、⑤a は **③ が提出した「役割 ID → 宣言の名前」の対応（mappings）を独立に点検する**（§1.2）。
+// 点検するのはコードであり、**期待の値と試験の合否は見ない**（見せると、同じ要件の中の同じ型の別の要素へ
+// 結び付けても通る R2-1 の誤りを落とせない）。落ちの分類は「実在しない名前・種類違い・対応表の外・
+// 明示しない共有・空の対応の場所」である。空の対応の場所は、旧来の対応表の点検でも落ちにする（R2-2）。
 import {
   isAppComputed,
   isComputedSettle,
@@ -25,7 +30,10 @@ import {
   type CorrespondenceResult,
   type Declaration,
   type DeclarationLocation,
+  type DeclarationLocationKind,
   type RequirementList,
+  type RoleEntry,
+  type RoleNameMapping,
 } from "../pipeline.js";
 import {
   buildStructuredRequest,
@@ -50,6 +58,8 @@ export const CORRESPONDENCE_RULES: readonly string[] = [
   "kind は entity・field・validation・computation・action・view のいずれかである。entity 自身のとき、entity は null にする。",
   "宣言に実在する名前だけを挙げる。画面から辿れない計算は挙げない。",
   "要件ごとに 1 つの項目を返す。要件 ID は一覧のまま写す。",
+  "「提出された対応」（③ が提出した役割 ID → 宣言の名前の対応）が与えられたら、原文・要件の一覧・宣言の構造に照らして、その対応を独立に点検する。期待の値と試験の合否は与えられない——それらに寄せずに点検する。",
+  "対応の名前が宣言に実在しない・対象の種類が合わない・その要件について対応表が挙げた場所の外にある・共有や別名を明示せずに同じ場所へ二重に対応している場合は、その旨を点検の結果として扱う。",
 ];
 
 /** ⑤a の JSON Schema（構造化出力） */
@@ -97,6 +107,16 @@ export interface CorrespondenceInput {
   readonly app: NormalizedAppSpec;
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
+  /**
+   * ② の役割 ID の表（③ の提出した対応を点検するのに使う。§1.2・Issue #308）。
+   * 渡されなければ、提出された対応の点検は行わない（旧形式の経路）。
+   */
+  readonly roles?: readonly RoleEntry[];
+  /**
+   * ③ が提出した「役割 ID → 宣言の名前」の対応（§1・Issue #308）。渡されたときだけ独立に点検する。
+   * **期待の値と試験の合否はここへ入れない。**
+   */
+  readonly mappings?: readonly RoleNameMapping[];
 }
 
 /** 場所の形を確かめる */
@@ -293,19 +313,28 @@ export function checkLocation(app: NormalizedAppSpec, location: DeclarationLocat
 }
 
 /**
- * 対応表の落ちを、コードが確かめる（§1）。要件ごとに、対応が無いこと・挙げた場所が実在しないこと・
- * 計算が画面から辿れないことを集める。落ちの数は ⑦ の `correspondenceMisses` になる。
+ * 対応表の落ちを、コードが確かめる（§1）。要件ごとに、対応が無いこと・対応の場所が空であること・
+ * 挙げた場所が実在しないこと・計算が画面から辿れないことを集める。落ちの数は ⑦ の
+ * `correspondenceMisses` になる。
+ *
+ * `options` に ② の役割 ID の表と ③ の提出した対応を渡すと、**その対応も独立に点検する**（Issue #308。
+ * `checkRoleMappings`）。渡さなければ旧来の点検だけを行う（後方互換）。
  */
 export function checkCorrespondence(
   app: NormalizedAppSpec,
   list: RequirementList,
   entries: readonly CorrespondenceEntry[],
+  options: { readonly roles?: readonly RoleEntry[]; readonly mappings?: readonly RoleNameMapping[] } = {},
 ): readonly CorrespondenceMiss[] {
   const misses: CorrespondenceMiss[] = [];
   for (const requirement of list.requirements) {
     const entry = entries.find((candidate) => candidate.requirementId === requirement.id);
     if (entry === undefined) {
       misses.push({ requirementId: requirement.id, detail: `要件 ${requirement.id} の対応が無い` });
+      continue;
+    }
+    if (entry.locations.length === 0) {
+      misses.push({ requirementId: requirement.id, detail: `要件 ${requirement.id} の対応の場所が空である` });
       continue;
     }
     for (const location of entry.locations) {
@@ -315,21 +344,230 @@ export function checkCorrespondence(
       }
     }
   }
+  if (options.roles !== undefined && options.mappings !== undefined) {
+    misses.push(...checkRoleMappings(app, options.roles, entries, options.mappings));
+  }
+  return misses;
+}
+
+/** 役割 ID の対象の種類が、宣言の場所の種類に対応する（§1.2・Issue #308） */
+export function declarationKindOfRole(kind: RoleEntry["kind"]): DeclarationLocationKind {
+  switch (kind) {
+    case "entity":
+      return "entity";
+    case "field":
+      return "field";
+    case "computation":
+      return "computation";
+    case "operation":
+      return "action";
+    case "screen":
+      return "view";
+  }
+}
+
+const locationKey = (location: DeclarationLocation): string =>
+  `${location.kind}\u0000${location.entity ?? ""}\u0000${location.name}`;
+
+const sameLocation = (a: DeclarationLocation, b: DeclarationLocation): boolean =>
+  a.kind === b.kind && (a.entity ?? null) === (b.entity ?? null) && a.name === b.name;
+
+/** 宣言に、その種類・所属・名前の場所が実在するか（画面からの到達は別に見る） */
+function declarationHasLocation(app: NormalizedAppSpec, location: DeclarationLocation): boolean {
+  switch (location.kind) {
+    case "entity":
+      return app.spec.entities.some((entity) => entity.name === location.name);
+    case "field": {
+      const entity = findEntity(app, location.entity);
+      return entity !== undefined && Object.hasOwn(entity.fields, location.name);
+    }
+    case "validation":
+      return app.spec.validations.some(
+        (validation) =>
+          validation.name === location.name &&
+          (location.entity === null || validation.entity === location.entity),
+      );
+    case "computation":
+      return findComputed(app, location) !== undefined;
+    case "action":
+      return app.spec.actions.some(
+        (action) => action.name === location.name && (location.entity === null || action.entity === location.entity),
+      );
+    case "view":
+      return app.spec.views.some((view) => view.name === location.name);
+  }
+}
+
+/** 同じ名前が、宣言でどの種類として実在するか（種類違いの判別に使う。§1.2・Issue #308） */
+function declarationKindsOfName(
+  app: NormalizedAppSpec,
+  name: string,
+  entity: string | null,
+): readonly DeclarationLocationKind[] {
+  const kinds: DeclarationLocationKind[] = [];
+  const host = findEntity(app, entity);
+  if (app.spec.entities.some((candidate) => candidate.name === name)) kinds.push("entity");
+  if (host !== undefined && Object.hasOwn(host.fields, name)) kinds.push("field");
+  if (app.spec.validations.some((v) => v.name === name && (entity === null || v.entity === entity))) {
+    kinds.push("validation");
+  }
+  if (app.spec.computed.some((c) => c.name === name && (entity === null || ("entity" in c && c.entity === entity)))) {
+    kinds.push("computation");
+  }
+  if (app.spec.actions.some((a) => a.name === name && (entity === null || a.entity === entity))) kinds.push("action");
+  if (app.spec.views.some((v) => v.name === name)) kinds.push("view");
+  return kinds;
+}
+
+/**
+ * 計算でない場所も、画面から辿れるか（create の操作・一覧か表の `show`。§1・Issue #308）。
+ * 計算は `checkLocation` が到達を見るので、ここでは entity・項目を確かめる。他の種類は実在で足りる。
+ */
+function screenReachable(app: NormalizedAppSpec, location: DeclarationLocation): boolean {
+  if (location.kind === "entity") {
+    const hasCreate = app.spec.actions.some(
+      (action) => (action.kind ?? "create") === "create" && action.entity === location.name,
+    );
+    const shown = app.spec.views.some(
+      (view) =>
+        view.entity === location.name &&
+        (view.type === undefined || view.type === "table" || view.type === "list"),
+    );
+    return hasCreate || shown;
+  }
+  if (location.kind === "field") {
+    return app.spec.views.some((view) => {
+      if (view.entity !== location.entity) return false;
+      if (view.show !== undefined) return view.show.includes(location.name);
+      return view.type === undefined || view.type === "table" || view.type === "list";
+    });
+  }
+  return true;
+}
+
+/**
+ * ③ が提出した「役割 ID → 宣言の名前」の対応を、コードが**独立に点検する**（§1.2・Issue #308）。
+ * **期待の値と試験の合否は見ない。** 落ちの分類は次のとおり：
+ *
+ *   - 実在しない名前 … 対応の名前が宣言に無い
+ *   - 種類違い … 名前はあるが、役割の対象の種類と合わない
+ *   - 対応表の外 … 役割 ID が役割 ID の表に無い／場所が対応表の外にある
+ *   - 明示しない共有 … 同じ場所に複数の役割 ID が対応するのに、共有も別名も明示していない
+ *
+ * 画面から辿れない場所も落ちにする（計算は `checkLocation`、entity・項目は `screenReachable`）。
+ */
+export function checkRoleMappings(
+  app: NormalizedAppSpec,
+  roles: readonly RoleEntry[],
+  entries: readonly CorrespondenceEntry[],
+  mappings: readonly RoleNameMapping[],
+): readonly CorrespondenceMiss[] {
+  const misses: CorrespondenceMiss[] = [];
+  const roleById = new Map(roles.map((role) => [role.roleId, role]));
+  const nameByRoleId = new Map(mappings.map((mapping) => [mapping.roleId, mapping.name]));
+  const tableLocations = entries.flatMap((entry) => entry.locations);
+  const resolved: { readonly role: RoleEntry; readonly location: DeclarationLocation }[] = [];
+
+  for (const mapping of mappings) {
+    const role = roleById.get(mapping.roleId);
+    if (role === undefined) {
+      misses.push({
+        requirementId: "",
+        detail: `役割 ID ${mapping.roleId} は設計の役割 ID の表に無い（対応表の外）`,
+      });
+      continue;
+    }
+    const kind = declarationKindOfRole(role.kind);
+    let entityName: string | null = null;
+    if (role.entity !== null) {
+      const mapped = nameByRoleId.get(role.entity);
+      if (mapped === undefined) {
+        misses.push({
+          requirementId: "",
+          detail: `役割 ${role.roleId} の所属の entity（役割 ID ${role.entity}）の対応が無い`,
+        });
+        continue;
+      }
+      entityName = mapped;
+    }
+    const location: DeclarationLocation = { kind, entity: entityName, name: mapping.name };
+    if (!declarationHasLocation(app, location)) {
+      const kinds = declarationKindsOfName(app, mapping.name, entityName);
+      if (kinds.length > 0) {
+        misses.push({
+          requirementId: "",
+          location,
+          detail: `役割 ${role.roleId} の名前 ${mapping.name} は宣言に ${kinds.join("・")} としてある（対象の種類 ${kind} と合わない）`,
+        });
+      } else {
+        misses.push({
+          requirementId: "",
+          location,
+          detail: `宣言に ${kind} ${mapping.name} が無い（役割 ${role.roleId} の実在しない名前）`,
+        });
+      }
+      continue;
+    }
+    if (!screenReachable(app, location)) {
+      misses.push({
+        requirementId: "",
+        location,
+        detail: `役割 ${role.roleId} の場所（${kind} ${mapping.name}）は画面から辿れない`,
+      });
+      continue;
+    }
+    if (!tableLocations.some((candidate) => sameLocation(candidate, location))) {
+      misses.push({
+        requirementId: "",
+        location,
+        detail: `役割 ${role.roleId} の場所（${kind} ${mapping.name}）が対応表の外にある`,
+      });
+      continue;
+    }
+    resolved.push({ role, location });
+  }
+
+  const groups = new Map<string, { readonly role: RoleEntry; readonly location: DeclarationLocation }[]>();
+  for (const item of resolved) {
+    const key = locationKey(item.location);
+    const list = groups.get(key) ?? [];
+    list.push(item);
+    groups.set(key, list);
+  }
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    // 共有（shared）か別名（aliasOf）を**誰か 1 人が明示している**ときだけ許す（§1・②・R2-8）
+    const declared = list.some(({ role }) => role.shared || role.aliasOf !== null);
+    if (declared) continue;
+    for (const { role, location } of list) {
+      misses.push({
+        requirementId: "",
+        location,
+        detail: `同じ場所（${location.kind} ${location.name}）に複数の役割 ID が対応しているが、役割 ${role.roleId} は共有（shared）も別名（aliasOf）も明示していない`,
+      });
+    }
+  }
   return misses;
 }
 
 /** ⑤a のデータ（原文・要件の一覧・宣言。§2.2 の「データとして囲んだ入力」にだけ置く） */
 function buildData(input: CorrespondenceInput): readonly PromptData[] {
-  return [
+  const data: PromptData[] = [
     { name: "原文", text: input.source },
     { name: "要件の一覧", text: serializeJson(input.list) },
     { name: "宣言", text: input.declaration.source },
   ];
+  // ③ の提出した対応は、独立に点検させるためにデータとしてだけ渡す（期待の値と試験の合否は渡さない）
+  if (input.mappings !== undefined) {
+    data.push({ name: "提出された対応", text: serializeJson(input.mappings) });
+  }
+  return data;
 }
 
 /**
  * ⑤a を 1 回呼ぶ。形が合わない応答は 1 回だけやり直す（`callStructuredChecked`）。
  * 会話の答えは形だけを確かめ、**落ちはコードが確かめる**（`checkCorrespondence`）。
+ * ③ の提出した対応（`mappings`）と ② の役割 ID の表（`roles`）が渡されたときは、その点検もコードが行う。
  */
 export async function runCorrespondence(
   input: CorrespondenceInput,
@@ -344,6 +582,9 @@ export async function runCorrespondence(
   });
   const answer = await callStructuredChecked(input.gateway, { request, check: checkCorrespondenceOutput });
   if (!answer.ok) return answer;
-  const misses = checkCorrespondence(input.app, input.list, answer.value.entries);
+  const misses = checkCorrespondence(input.app, input.list, answer.value.entries, {
+    ...(input.roles === undefined ? {} : { roles: input.roles }),
+    ...(input.mappings === undefined ? {} : { mappings: input.mappings }),
+  });
   return { ok: true, value: { entries: answer.value.entries, misses } };
 }

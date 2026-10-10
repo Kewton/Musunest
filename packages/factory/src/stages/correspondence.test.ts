@@ -10,11 +10,12 @@
 import type { NormalizedAppSpec } from "@musunest/appspec-schema";
 import { normalizeSpec } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
-import type { CorrespondenceEntry, Declaration } from "../pipeline.js";
+import type { CorrespondenceEntry, Declaration, RoleEntry, RoleNameMapping } from "../pipeline.js";
 import {
   CORRESPONDENCE_SCHEMA_NAME,
   checkCorrespondence,
   checkCorrespondenceOutput,
+  checkRoleMappings,
   runCorrespondence,
   type CorrespondenceInput,
 } from "./correspondence.js";
@@ -130,6 +131,101 @@ describe("コードが確かめる（実在・画面からの到達。02 §1）"
   });
 });
 
+// ── ③ の提出した対応の独立の点検（02 §1.2・Issue #308） ────────────────
+
+/** ② の役割 ID の表（③ の提出した対応を点検するのに使う） */
+const ROLES: readonly RoleEntry[] = [
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null },
+  { roleId: "record.title", kind: "field", entity: "record", name: "title", shared: false, aliasOf: null },
+  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+];
+
+/** ⑤a の対応表（R-1 に、entity・項目 title・計算 total・一覧 records を挙げる） */
+const TABLE: readonly CorrespondenceEntry[] = [
+  {
+    requirementId: "R-1",
+    locations: [
+      { kind: "entity", entity: null, name: "record" },
+      { kind: "field", entity: "record", name: "title" },
+      { kind: "computation", entity: "record", name: "total" },
+      { kind: "view", entity: null, name: "records" },
+    ],
+  },
+  { requirementId: "R-2", locations: [{ kind: "computation", entity: "other", name: "otherTotal" }] },
+];
+
+/** 通る対応（record・title・total。amount は対応表に挙げていない） */
+const VALID_MAPPINGS: readonly RoleNameMapping[] = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.title", name: "title" },
+  { roleId: "record.total", name: "total" },
+];
+
+const withMapping = (
+  base: readonly RoleNameMapping[],
+  roleId: string,
+  name: string,
+): readonly RoleNameMapping[] => [...base.filter((mapping) => mapping.roleId !== roleId), { roleId, name }];
+
+const missFor = (mappings: readonly RoleNameMapping[], roles: readonly RoleEntry[] = ROLES) =>
+  checkRoleMappings(APP, roles, TABLE, mappings);
+
+describe("③ の提出した対応を、コードが独立に点検する（02 §1.2・Issue #308）", () => {
+  it("実在して対応表の内側にある対応は、落ちにしない", () => {
+    expect(missFor(VALID_MAPPINGS)).toEqual([]);
+  });
+
+  it("実在しない名前を落ちにする", () => {
+    const misses = missFor(withMapping(VALID_MAPPINGS, "record.total", "ghost"));
+    expect(misses.map((miss) => miss.detail).join("\n")).toContain("実在しない");
+  });
+
+  it("対象の種類が合わない名前（種類違い）を落ちにする", () => {
+    // 項目の役割に、計算の名前（total）を対応させている
+    const misses = missFor(withMapping(VALID_MAPPINGS, "record.title", "total"));
+    expect(misses.map((miss) => miss.detail).join("\n")).toContain("合わない");
+  });
+
+  it("対応表の外にある場所を落ちにする", () => {
+    // amount は宣言に実在し画面からも辿れるが、対応表（R-1）は挙げていない
+    const misses = missFor([...VALID_MAPPINGS, { roleId: "record.amount", name: "amount" }]);
+    expect(misses.map((miss) => miss.detail).join("\n")).toContain("対応表の外");
+  });
+
+  it("役割 ID の表に無い役割 ID も、対応表の外として落ちにする", () => {
+    const misses = missFor([...VALID_MAPPINGS, { roleId: "record.ghost", name: "title" }]);
+    expect(misses.map((miss) => miss.detail).join("\n")).toContain("対応表の外");
+  });
+
+  it("共有も別名も明示せずに同じ場所へ二重に対応していれば、落ちにする", () => {
+    const roles: readonly RoleEntry[] = [
+      ...ROLES,
+      { roleId: "record.title2", kind: "field", entity: "record", name: "title", shared: false, aliasOf: null },
+    ];
+    const misses = missFor([...VALID_MAPPINGS, { roleId: "record.title2", name: "title" }], roles);
+    expect(misses.map((miss) => miss.detail).join("\n")).toContain("共有");
+  });
+
+  it("共有を明示していれば、同じ場所への二重の対応を落ちにしない", () => {
+    const roles: readonly RoleEntry[] = [
+      ...ROLES,
+      { roleId: "record.title2", kind: "field", entity: "record", name: "title", shared: true, aliasOf: null },
+    ];
+    expect(missFor([...VALID_MAPPINGS, { roleId: "record.title2", name: "title" }], roles)).toEqual([]);
+  });
+});
+
+describe("空の対応の場所も落ちにする（02 §1・R2-2・Issue #308）", () => {
+  it("要件の対応が空なら、落ちにする", () => {
+    const misses = checkCorrespondence(APP, REQUIREMENT_LIST, [
+      { requirementId: "R-1", locations: [] },
+      { requirementId: "R-2", locations: [{ kind: "computation", entity: "other", name: "otherTotal" }] },
+    ]);
+    expect(misses.find((miss) => miss.requirementId === "R-1")?.detail).toContain("空");
+  });
+});
+
 describe("⑤a の形の確認（02 §2.2）", () => {
   it("場所の形が合わなければ、欄つきで断る", () => {
     const bad = checkCorrespondenceOutput({
@@ -213,6 +309,46 @@ describe("⑤a が送る要求を観測する（02 §2.2・§1）", () => {
     const request = recording.structured[0];
     expect(request?.input).not.toContain("SUITE_SENTINEL");
     expect(request?.instructions).not.toContain("SUITE_SENTINEL");
+  });
+});
+
+describe("⑤a の点検役に、期待の値と試験の合否を見せない（02 §1.2・Issue #308）", () => {
+  const EXPECTED_SENTINEL = "EXPECTED_VALUE_SENTINEL";
+  const RESULT_SENTINEL = "TEST_RESULT_SENTINEL";
+  const answer = {
+    entries: [{ requirementId: "R-1", locations: [{ kind: "computation", entity: "record", name: "total" }] }],
+  };
+
+  it("提出された対応は渡すが、期待の値と試験の合否は渡さない", async () => {
+    const recording = createRecordingClient([structured(answer)]);
+    const input = {
+      source: SOURCE_TEXT,
+      list: REQUIREMENT_LIST,
+      declaration: DECLARATION,
+      app: APP,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      roles: ROLES,
+      mappings: VALID_MAPPINGS,
+      // 期待の値と試験の合否に当たる余分な欄（点検役へ渡ってはならない）
+      expected: { kind: "ok", value: EXPECTED_SENTINEL },
+      testRun: { mismatches: [{ testId: RESULT_SENTINEL, detail: RESULT_SENTINEL }], unresolved: [] },
+      suite: [{ id: RESULT_SENTINEL }],
+    } as unknown as CorrespondenceInput;
+    await runCorrespondence(input);
+
+    const request = recording.structured[0];
+    expect(request).toBeDefined();
+    if (request === undefined) return;
+    // 提出された対応は、独立に点検させるために渡す
+    expect(request.input).toContain("提出された対応");
+    expect(request.input).toContain("record.total");
+    // 期待の値と試験の合否は、規則・データ・文書のどこにも入らない
+    const texts = [request.instructions, ...(request.rules ?? []), request.input, ...request.documents];
+    for (const text of texts) {
+      expect(text).not.toContain(EXPECTED_SENTINEL);
+      expect(text).not.toContain(RESULT_SENTINEL);
+    }
   });
 });
 

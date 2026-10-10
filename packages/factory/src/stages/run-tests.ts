@@ -1,21 +1,24 @@
-// ⑤b 試験を流す（02-architecture.md §1・§1.3・F-9・R-8）。
+// ⑤b 試験を流す（02-architecture.md §1・§1.3・F-9・R-8・Issue #308）。
 //
-// 固定した試験を、結び付けの規則（bind.ts）で宣言の実在の要素に結び付けてから、spec-engine の
-// 評価器で流す。**合否はコードが決める**（LLM の自己申告ではない）：
+// 固定した試験を、**③ が提出した対応**（結び付けの規則、bind.ts）で宣言の実在の要素に結び付けてから、
+// **評価の方法の表**（§1.3。対象の種類 × 操作）に従って流す。**合否はコードが決める**（LLM の自己申告
+// ではない）：
 //
-//   計算の値   … `evaluateRecord` の `computed`
-//   検査       … `evaluateRecord` の `validations`
-//   操作の条件 … `allowsAction`（`when` の式）
-//   印         … `holdsExpression`（真偽の計算をその行で解く）
-//   アプリ全体の集計 … `evaluateScope`
-//   見出しごとの集計 … `groupValuesOf`
-//   精算       … `settleEntity`
+//   計算 × compute・aggregate … `evaluateRecord`・`evaluateScope`・`groupValuesOf`・`settleEntity`
+//   項目・entity × validate   … `evaluateRecord` の `validations`（検査の式）
+//   操作 × action（when）     … `allowsAction`
+//   画面 × screen            … 構造の確認（view が実在し、show の名前と highlight が実在する）
+//   entity × 在ることだけ     … 構造の確認（create の操作がある・一覧か表に出る）
 //
-// **入力の型（フォームが受け付ける値）と、操作の実行（`set` を当てたあとの状態）だけは流さず**、
-// 未解決として数える（§1.3・U-G）。未解決は合格にしない（⑦ が部分案へ倒す）。
+// **操作の実行（`set` を当てたあとの状態）と、項目の既定値は未対応**にして、未解決として数える
+// （§1.3・U-G）。未解決は合格にしない（⑦ が部分案へ倒す）。
 //
-// 結び付けられなかった試験・実在しない場所を指す試験は**不一致**にする。評価器は存在しない entity にも
-// 空の結果を返すので、実在はここで先に確かめる（R-8）。
+// 結び付けられない試験は、**行き先を分けて**結果に出す（§1.3.1・Issue #308）：
+//   対応の表の不備（対応表の外・当たる場所が無い）… ③ のやり直し（不一致）
+//   要件に要る要素の欠落（結び付けた場所が実在しない・値が合わない）… ⑥ 直す（不一致）
+//   意味の曖昧さ（1 つに決まらない・提出された対応が無い）… 未解決
+//
+// 参照の entity も、**提出された対応**で結び付ける（対応表の先頭の entity を採る経路をなくす。R2-6）。
 import {
   isAppComputed,
   isComputedExpression,
@@ -42,7 +45,8 @@ import type {
   DeclarationLocation,
   FixedTest,
   ReferenceRow,
-  TestBinding,
+  RequirementNature,
+  RoleNameMapping,
   TestExpected,
   TestMismatch,
   TestRunResult,
@@ -50,7 +54,7 @@ import type {
   TestTarget,
   TestUnresolved,
 } from "../pipeline.js";
-import { bindTests } from "./bind.js";
+import { bindTests, type BindResult } from "./bind.js";
 import { checkLocation, findComputed, findEntity } from "./correspondence.js";
 
 /** ⑤b 試験を流す、が受け取るもの */
@@ -58,6 +62,27 @@ export interface RunTestsInput {
   readonly app: NormalizedAppSpec;
   readonly suite: TestSuite;
   readonly correspondence: CorrespondenceResult;
+  /** ③ が提出した「役割 ID → 宣言の名前」の対応（§1・Issue #308）。旧形式の経路では省ける */
+  readonly mappings?: readonly RoleNameMapping[];
+}
+
+/** 失敗の行き先（§1.3.1・Issue #308） */
+export const FAILURE_ROUTES = ["correspondence-defect", "missing-element", "ambiguity"] as const;
+export type FailureRoute = (typeof FAILURE_ROUTES)[number];
+
+/** 行き先を分けた 1 件の失敗 */
+export interface RoutedFailure {
+  readonly testId: string;
+  readonly route: FailureRoute;
+  readonly detail: string;
+}
+
+/**
+ * ⑤b の結果（`TestRunResult` に、失敗の行き先を足したもの）。`routes` は不一致・未解決になった
+ * 試験の行き先である（⑦ の先の段が、③ のやり直し・⑥ 直す・未解決へ振り分ける。§1.3.1）。
+ */
+export interface TestRunReport extends TestRunResult {
+  readonly routes: readonly RoutedFailure[];
 }
 
 /** 1 件の試験の判定 */
@@ -65,6 +90,12 @@ type Verdict =
   | { readonly kind: "match" }
   | { readonly kind: "mismatch"; readonly detail: string }
   | { readonly kind: "unresolved"; readonly detail: string };
+
+/** 判定と、失敗のときの行き先 */
+interface Judged {
+  readonly verdict: Verdict;
+  readonly route: FailureRoute | null;
+}
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -122,8 +153,17 @@ function show(value: unknown): string {
   return text === undefined ? String(value) : text;
 }
 
-/** 参照データの対象（selector）を、実在の entity の名前に結び付ける */
-function resolveEntityTarget(target: TestTarget, input: RunTestsInput): string | null {
+/**
+ * 参照データの対象（selector）を、実在の entity の名前に結び付ける（§1.3・R2-6・Issue #308）。
+ * **③ が提出した対応があればそれを使い**、対応表の先頭の entity は採らない。対応が無ければ
+ * （旧形式）、対応表が挙げた entity の場所を使う。
+ */
+export function resolveReferenceEntity(target: TestTarget, input: RunTestsInput): string | null {
+  if (input.mappings !== undefined && target.roleId !== undefined) {
+    const mapping = input.mappings.find((candidate) => candidate.roleId === target.roleId);
+    if (mapping === undefined) return null;
+    return findEntity(input.app, mapping.name) === undefined ? null : mapping.name;
+  }
   const entry = input.correspondence.entries.find(
     (candidate) => candidate.requirementId === target.requirementId,
   );
@@ -144,17 +184,17 @@ function buildSources(
   const sources: Record<string, SourceRecord[]> = {};
   const counts = new Map<string, number>();
   for (const row of referenceData) {
-    const entity = resolveEntityTarget(row.target, input);
+    const entity = resolveReferenceEntity(row.target, input);
     if (entity === null) {
       return {
         sources,
-        problem: `参照データの対象（要件 ${row.target.requirementId}・役割 ${row.target.role}）が実在の entity に結び付かない`,
+        problem: `参照データの対象（要件 ${row.target.requirementId}・役割 ${row.target.roleId ?? row.target.role ?? ""}）が実在の entity に結び付かない`,
       };
     }
     const count = (counts.get(entity) ?? 0) + 1;
     counts.set(entity, count);
     const records = sources[entity] ?? [];
-    records.push({ id: `${entity}-${count}`, data: row.values });
+    records.push({ id: row.rowId ?? `${entity}-${count}`, data: row.values });
     sources[entity] = records;
   }
   return { sources, problem: null };
@@ -268,42 +308,174 @@ function judgeValue(test: FixedTest, location: DeclarationLocation, input: RunTe
   return compareValue(evaluation.computed[computed.name] ?? null, test.expected, `計算 ${computed.name}`);
 }
 
-/** 1 件の試験を判定する */
-function judgeOne(test: FixedTest, binding: TestBinding | undefined, input: RunTestsInput): Verdict {
+/**
+ * 画面（view）を**構造の確認**で判定する（§1.3 の表・Issue #308）。view が実在し、`show` の名前と
+ * `highlight` が実在することを見る。値は評価しない（画面は計算しない）。
+ */
+function judgeViewStructural(app: NormalizedAppSpec, location: DeclarationLocation): Verdict {
+  const view = app.spec.views.find((candidate) => candidate.name === location.name);
+  if (view === undefined) return { kind: "mismatch", detail: `宣言に一覧 ${location.name} が無い` };
+  if (view.entity !== undefined) {
+    const entity = findEntity(app, view.entity);
+    if (entity === undefined) {
+      return { kind: "mismatch", detail: `一覧 ${view.name} の entity ${view.entity} が無い` };
+    }
+    for (const name of view.show ?? []) {
+      const isField = Object.hasOwn(entity.fields, name);
+      const isComputed = app.spec.computed.some(
+        (computed) => computed.name === name && "entity" in computed && computed.entity === view.entity,
+      );
+      if (!isField && !isComputed) {
+        return { kind: "mismatch", detail: `一覧 ${view.name} の show の ${name} が entity ${view.entity} に無い` };
+      }
+    }
+    if (view.type === "board" && view.highlight !== undefined) {
+      const isComputed = app.spec.computed.some(
+        (computed) => computed.name === view.highlight && "entity" in computed && computed.entity === view.entity,
+      );
+      if (!isComputed) {
+        return { kind: "mismatch", detail: `ボード ${view.name} の highlight ${view.highlight} が計算に無い` };
+      }
+    }
+  }
+  return { kind: "match" };
+}
+
+/**
+ * 「在ることだけ」の entity を**構造の確認**で判定する（§1.3 の表・Issue #308）。
+ * create の操作があるか、一覧か表に出ていることを見る。
+ */
+function judgeExistenceStructural(app: NormalizedAppSpec, location: DeclarationLocation): Verdict {
+  const entity = location.name;
+  const hasCreate = app.spec.actions.some(
+    (action) => (action.kind ?? "create") === "create" && action.entity === entity,
+  );
+  const shown = app.spec.views.some(
+    (view) =>
+      view.entity === entity && (view.type === undefined || view.type === "table" || view.type === "list"),
+  );
+  if (hasCreate || shown) return { kind: "match" };
+  return { kind: "mismatch", detail: `entity ${entity} に create の操作も、一覧か表の表示も無い` };
+}
+
+/** 評価の方法（§1.3 の表・Issue #308）。未対応は `unresolved` に数える */
+type Method = "value" | "validation" | "action" | "view" | "existence" | "unresolved";
+
+/**
+ * 対象の種類 × 操作で、評価の方法を決める（§1.3 の表）。
+ *
+ *   - 計算（`computation`）… 値の評価（`compute`・`aggregate`。画面の印も値の評価）
+ *   - 項目・entity × `validate` … 検査の式（値の評価）
+ *   - 操作 × `action`（`when`）… 値の評価
+ *   - 画面 … 構造の確認
+ *   - entity（在ることだけ・画面）… 構造の確認
+ *   - それ以外（操作の実行・項目の既定値など）… 未対応（未解決）
+ */
+function evaluationMethod(test: FixedTest, nature: RequirementNature): Method {
+  if (test.operation === "validate") return "validation";
+  if (test.operation === "action") {
+    return test.target.kind === "operation" ? "action" : "unresolved";
+  }
+  if (test.target.kind === "computation") return "value";
+  if (test.target.kind === "screen") return "view";
+  if (test.target.kind === "entity") {
+    return test.operation === "screen" || nature === "existence-only" ? "existence" : "unresolved";
+  }
+  return "unresolved";
+}
+
+/** 要件ごとの種類（②' の独立の分類）。無ければ `ruled` として扱う（旧形式） */
+function natureMap(suite: TestSuite): ReadonlyMap<string, RequirementNature> {
+  const map = new Map<string, RequirementNature>();
+  for (const entry of suite.classifications ?? []) map.set(entry.requirementId, entry.nature);
+  return map;
+}
+
+/** 評価の結果に、失敗の行き先を付ける（不一致は ⑥、未解決は曖昧さ） */
+function routeOf(verdict: Verdict): FailureRoute | null {
+  if (verdict.kind === "mismatch") return "missing-element";
+  if (verdict.kind === "unresolved") return "ambiguity";
+  return null;
+}
+
+/** 1 件の試験を判定し、失敗の行き先も返す */
+function judgeOne(
+  test: FixedTest,
+  binding: BindResult | undefined,
+  input: RunTestsInput,
+  natures: ReadonlyMap<string, RequirementNature>,
+): Judged {
   if (binding === undefined || binding.kind === "unbound") {
-    return { kind: "mismatch", detail: binding?.detail ?? "結び付けられない" };
+    // 提出された対応が無い・1 つに決まらない → 未解決（曖昧さ）。それ以外は対応の表の不備（③ のやり直し）
+    if (binding?.cause === "no-mapping" || binding?.cause === "ambiguous") {
+      return {
+        verdict: { kind: "unresolved", detail: binding.detail },
+        route: "ambiguity",
+      };
+    }
+    return {
+      verdict: { kind: "mismatch", detail: binding?.detail ?? "結び付けられない" },
+      route: "correspondence-defect",
+    };
   }
   const location = binding.location;
   const checked = checkLocation(input.app, location);
-  if (!checked.ok) return { kind: "mismatch", detail: checked.reason };
-  // 入力の型（フォームが受け付ける値）は評価器で確かめられない（U-G）
-  if (test.target.kind === "field") {
-    return { kind: "unresolved", detail: `入力の型は評価器で確かめられない（${location.name}）` };
-  }
-  switch (test.operation) {
-    case "action":
-      return judgeAction(test, location, input);
-    case "validate":
-      return judgeValidation(test, location, input);
-    case "compute":
-    case "aggregate":
-    case "screen":
-      return judgeValue(test, location, input);
+  if (!checked.ok) return { verdict: { kind: "mismatch", detail: checked.reason }, route: "missing-element" };
+
+  const nature = natures.get(test.target.requirementId) ?? "ruled";
+  const method = evaluationMethod(test, nature);
+  switch (method) {
+    case "value": {
+      const verdict = judgeValue(test, location, input);
+      return { verdict, route: routeOf(verdict) };
+    }
+    case "validation": {
+      const verdict = judgeValidation(test, location, input);
+      return { verdict, route: routeOf(verdict) };
+    }
+    case "action": {
+      const verdict = judgeAction(test, location, input);
+      return { verdict, route: routeOf(verdict) };
+    }
+    case "view":
+      return { verdict: judgeViewStructural(input.app, location), route: null };
+    case "existence":
+      return { verdict: judgeExistenceStructural(input.app, location), route: null };
+    case "unresolved":
+      return {
+        verdict: {
+          kind: "unresolved",
+          detail: `評価の方法の表で未対応である（対象 ${test.target.kind} × 操作 ${test.operation}）`,
+        },
+        route: "ambiguity",
+      };
   }
 }
 
 /**
- * 固定した試験の組を流し、不一致と未解決を返す（§1.3・F-9）。
- * 結び付けられなかった試験も不一致として数える（R-8）。
+ * 固定した試験の組を流し、不一致と未解決、失敗の行き先を返す（§1.3・F-9・Issue #308）。
+ * 結び付けられなかった試験も、行き先つきで数える（R-8）。
  */
-export function runTests(input: RunTestsInput): TestRunResult {
-  const bindings = bindTests({ suite: input.suite, correspondence: input.correspondence });
+export function runTests(input: RunTestsInput): TestRunReport {
+  const natures = natureMap(input.suite);
+  const bindings = bindTests({
+    suite: input.suite,
+    correspondence: input.correspondence,
+    ...(input.mappings === undefined ? {} : { mappings: input.mappings }),
+  });
   const mismatches: TestMismatch[] = [];
   const unresolved: TestUnresolved[] = [];
+  const routes: RoutedFailure[] = [];
   input.suite.tests.forEach((test, index) => {
-    const verdict = judgeOne(test, bindings[index], input);
-    if (verdict.kind === "mismatch") mismatches.push({ testId: test.id, detail: verdict.detail });
-    else if (verdict.kind === "unresolved") unresolved.push({ testId: test.id, detail: verdict.detail });
+    const judged = judgeOne(test, bindings[index], input, natures);
+    if (judged.verdict.kind === "mismatch") {
+      mismatches.push({ testId: test.id, detail: judged.verdict.detail });
+    } else if (judged.verdict.kind === "unresolved") {
+      unresolved.push({ testId: test.id, detail: judged.verdict.detail });
+    }
+    if (judged.verdict.kind !== "match" && judged.route !== null) {
+      routes.push({ testId: test.id, route: judged.route, detail: judged.verdict.detail });
+    }
   });
-  return { mismatches, unresolved };
+  return { mismatches, unresolved, routes };
 }

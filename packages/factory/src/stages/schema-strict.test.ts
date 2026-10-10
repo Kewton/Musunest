@@ -179,4 +179,13 @@ describe("すべての段の schema と道具の引数の schema が、strict �
     expect(strictSchemaProblems(test.properties.inputContract)).toEqual([]);
     expect(test.properties.inputContract.properties.emptyEntities.type).toBe("array");
   });
+
+  it("書く段（③）の schema は、役割 ID → 宣言の名前の対応（mappings）を必須にする（#308）", () => {
+    expect(strictSchemaProblems(DECLARATION_SCHEMA)).toEqual([]);
+    expect(DECLARATION_SCHEMA.required).toContain("mappings");
+    const mappings = DECLARATION_SCHEMA.properties.mappings;
+    expect(mappings.type).toBe("array");
+    expect(strictSchemaProblems(mappings.items)).toEqual([]);
+    expect(mappings.items.required).toEqual(expect.arrayContaining(["roleId", "name"]));
+  });
 });
