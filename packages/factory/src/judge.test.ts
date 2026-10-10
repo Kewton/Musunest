@@ -63,7 +63,13 @@ describe("落とす組み合わせ（05 §4）", () => {
 
     expect(result.answeredBy).toBe("llm");
     expect(result.model).toBe("gpt-test");
-    expect(result.answers.kind).toEqual({ kind: "choice", choice: "a", probability: undefined, confidence: undefined });
+    expect(result.answers.kind).toEqual({
+      kind: "choice",
+      choice: "a",
+      probabilities: undefined,
+      probability: undefined,
+      confidence: undefined,
+    });
     expect(result.answers.open).toEqual({ kind: "noul", noul: 0.8 });
   });
 
@@ -88,7 +94,13 @@ describe("落とす組み合わせ（05 §4）", () => {
 
     expect(result.answeredBy).toBe("jev");
     expect(result.model).toBe("jev-1.13.0");
-    expect(result.answers.kind).toEqual({ kind: "choice", choice: "b", probability: undefined, confidence: 0.9 });
+    expect(result.answers.kind).toEqual({
+      kind: "choice",
+      choice: "b",
+      probabilities: undefined,
+      probability: undefined,
+      confidence: 0.9,
+    });
   });
 
   it("両方失敗したら、あとの誤りを投げる", async () => {

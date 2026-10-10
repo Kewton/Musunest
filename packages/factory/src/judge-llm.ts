@@ -4,8 +4,9 @@
 // **Jev が使えないときの落とし先**である（§4「同じ口を Luna の構造化出力でも実装し、Jev が使えない
 // とき（429・529・障害）はそちらに落とす」）。
 //
-// 確率は返せないので、**choice・score の `probability` と `confidence` は `undefined`（「不明」）**に
-// する（§4）。noul は 0〜1 の値を構造化出力で受け取る。
+// 確率は返せないので、**choice の `probabilities`・`probability`、score の `probabilities`、両者の
+// `confidence` は `undefined`（「不明」）**にする（§4・#349）。score の番号（数）は、LLM が選んだ段階の文を
+// 問いの `criteria` の中の位置に対応づけて出す。noul は 0〜1 の値を構造化出力で受け取る。
 //
 // LLM の呼び出しは adapter 層に閉じ込める（CLAUDE.md の不変条件）。ここは `LlmClient` を受け取るだけで、
 // `fetch` も鍵も環境変数も扱わない。
@@ -108,7 +109,7 @@ function buildAnswersSchema(questions: Readonly<Record<string, JudgeQuestion>>):
   };
 }
 
-/** 問い 1 つの答えの JSON Schema（choice・score は criteria のどれか、noul は 0〜1 の数。§4） */
+/** 問い 1 つの答えの JSON Schema（choice・score は criteria のどれか、noul は 0〜1 の数。§4・#349） */
 function answerSchema(question: JudgeQuestion): Record<string, unknown> {
   if (question.kind === "noul") {
     return {
@@ -118,12 +119,20 @@ function answerSchema(question: JudgeQuestion): Record<string, unknown> {
       properties: { noul: { type: "number", minimum: 0, maximum: 1 } },
     };
   }
-  const key = question.kind === "choice" ? "choice" : "score";
+  if (question.kind === "choice") {
+    return {
+      type: "object",
+      additionalProperties: false,
+      required: ["choice"],
+      properties: { choice: { type: "string", enum: Object.keys(question.criteria) } },
+    };
+  }
+  // score は順序のある段階の配列（#349）。LLM には段階の文のどれかを選ばせ、番号は adapter が対応づける
   return {
     type: "object",
     additionalProperties: false,
-    required: [key],
-    properties: { [key]: { type: "string", enum: Object.keys(question.criteria) } },
+    required: ["score"],
+    properties: { score: { type: "string", enum: [...question.criteria] } },
   };
 }
 
@@ -158,10 +167,28 @@ function parseAnswers(
       continue;
     }
     if (question.kind === "choice") {
-      answers[name] = { kind: "choice", choice: readLabel(answer.choice, name), probability: undefined, confidence: undefined };
+      answers[name] = {
+        kind: "choice",
+        choice: readLabel(answer.choice, name),
+        probabilities: undefined,
+        probability: undefined,
+        confidence: undefined,
+      };
       continue;
     }
-    answers[name] = { kind: "score", score: readLabel(answer.score, name), probability: undefined, confidence: undefined };
+    // score：LLM には段階の文を選ばせる。番号（数）は criteria の中の位置から出し、確率は返せない＝不明（#349）
+    const label = readLabel(answer.score, name);
+    const index = question.criteria.indexOf(label);
+    if (index < 0) {
+      throw new LlmJudgeError(`問い ${name} の score が段階の中にありません`);
+    }
+    answers[name] = {
+      kind: "score",
+      score: index,
+      legend: [...question.criteria],
+      probabilities: undefined,
+      confidence: undefined,
+    };
   }
   return answers;
 }

@@ -1,0 +1,13 @@
+{
+  "urgent": { "type": "noul", "instructions": "Is this urgent?" },
+  "team": {
+    "type": "choice",
+    "instructions": "Which team?",
+    "criteria": { "billing": "payments", "shipping": "delivery" }
+  },
+  "tone": {
+    "type": "score",
+    "instructions": "How angry is the writer?",
+    "criteria": ["calm", "annoyed", "angry"]
+  }
+}
