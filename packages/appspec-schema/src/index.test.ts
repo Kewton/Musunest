@@ -29,13 +29,19 @@ import {
   LEDGER_FIELDS,
   LEDGER_LIST_FIELDS,
   PACKAGE_NAME,
+  PLAN_SPEC_SCHEMA_VERSION,
   SECTION_LAYER,
   VOCABULARY,
+  checkConfirmedPlan,
+  checkPlan,
   checkVocabularyLedger,
+  isConfirmationValid,
   isDraftSchemaVersion,
+  planDigest,
   readNegativeIndex,
   readScoringScenario,
   type AppSpecSection,
+  type ConfirmedPlan,
 } from "./index.js";
 import { readLedgerYaml, type LedgerYamlRow } from "./ledger-yaml.js";
 import { contractHash } from "./contract.js";
@@ -558,5 +564,20 @@ describe("見本・負例・採点のシナリオ（samples/）", () => {
         .filter((found): found is string => found !== undefined);
       expect(sections, negative.name).toEqual([...APPSPEC_SECTIONS]);
     }
+  });
+});
+
+// Issue #331。確定した仕様（v1）の型・検査・SHA は plan.ts にあり、**入口（index.ts）から取れる**。
+// 型は `ConfirmedPlan`、検査は `checkPlan` / `checkConfirmedPlan`、SHA は `planDigest` /
+// `isConfirmationValid` である。中身の検査は plan.test.ts が見る。
+describe("確定した仕様（v1）の入口（Issue #331）", () => {
+  it("型・検査・SHA の関数を index.ts から import できる", () => {
+    expect(PLAN_SPEC_SCHEMA_VERSION).toBe("musunest.plan-spec/v1");
+    expect(typeof checkPlan).toBe("function");
+    expect(typeof checkConfirmedPlan).toBe("function");
+    expect(typeof planDigest).toBe("function");
+    expect(typeof isConfirmationValid).toBe("function");
+    const typed: ConfirmedPlan | null = null;
+    expect(typed).toBeNull();
   });
 });
