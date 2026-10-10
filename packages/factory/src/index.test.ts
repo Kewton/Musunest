@@ -30,6 +30,7 @@ import {
   runCatalog,
   runConfirm,
   runGeneration,
+  runPlan,
   runQuestions,
   runSurface,
 } from "./index.js";
@@ -85,6 +86,10 @@ describe("公開する面", () => {
       expect(entry).toBeTypeOf("function");
     }
   });
+
+  it("Plan を 1 回流す口が、根から読める（Issue #363）", () => {
+    expect(runPlan).toBeTypeOf("function");
+  });
 });
 
 describe("ライブラリは、外部の LLM の API と Cloudflare・Node 固有の入口を持たない", () => {
@@ -110,6 +115,7 @@ describe("ライブラリは、外部の LLM の API と Cloudflare・Node 固�
     "plan/catalog.ts",
     "plan/confirm.ts",
     "plan/questions.ts",
+    "plan/run-plan.ts",
     "plan/session.ts",
     "plan/surface.ts",
     "stages/arbitrate.ts",

@@ -52,6 +52,8 @@ export * from "./plan/questions.js";
 export * from "./plan/answers.js";
 export * from "./plan/confirm.js";
 export * from "./plan/session.js";
+// Plan を 1 回流す口（Issue #363。答える役の口を差し込み、確定した仕様まで進める）
+export * from "./plan/run-plan.js";
 
 // ── 記録・納品物・回す部分・手元の入口（Issue #288）───────────────
 export * from "./record.js";
