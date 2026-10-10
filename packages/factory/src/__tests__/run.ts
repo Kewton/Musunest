@@ -1,6 +1,7 @@
 // 回す部分（run.ts）・納品物（bundle.ts）・記録（record.ts）・手元の入口（cli.ts）の試験で使う、
 // **手で書いた**題材と記録（02 §1・§1.3）。**実 API は呼ばない**——記録した応答を返す偽物（llm-fake.ts）で
 // 閉じる。題材は抽象的なものだけを使い、受入の題材の言葉（持ち寄り・当番表…）は使わない。
+import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-schema";
 import type { LlmUsage } from "../llm.js";
 import type { RecordedCall } from "../llm-fake.js";
 import type { GenerationInput } from "../run.js";
@@ -412,5 +413,87 @@ export function recordedRunFour(): readonly RecordedCall[] {
     structured(TEST_SUITE_OUTPUT_FOUR),
     structured({ declaration: DECLARATION_SOURCE_FOUR }),
     structured(CORRESPONDENCE_OUTPUT_FOUR),
+  ];
+}
+
+// ── 確定した仕様（plan.json。§5・Issue #334）───────────────────────────
+
+/** R-1（記録）・R-2（合計）を持つ、確定した仕様（Plan の契約 `ConfirmedPlan`） */
+export const CONFIRMED_PLAN: ConfirmedPlan = {
+  schema_version: PLAN_SPEC_SCHEMA_VERSION,
+  plan_id: "plan-test",
+  revision: 1,
+  vocabulary_version: "v1",
+  inputs: [{ id: "in-1", kind: "source", text: SOURCE_TEXT }],
+  requirements: [
+    {
+      id: "R-1",
+      text: "記録できる",
+      kind: "existence",
+      origin: { input_id: "in-1", quote: "タスクを記録する" },
+      parts: [{ id: "R-1-p1", text: "記録", disposition: "met" }],
+    },
+    {
+      id: "R-2",
+      text: "合計できる",
+      kind: "constraining",
+      origin: { input_id: "in-1", quote: "件数を合計する" },
+      parts: [{ id: "R-2-p1", text: "合計", disposition: "met" }],
+    },
+  ],
+  open_issues: [],
+  decisions: [],
+  accepted_unwritable: [],
+  confirmation: { sha256: "0".repeat(64), confirmed_at: "2026-09-16T12:00:00+09:00", confirmed_by: "tester" },
+};
+
+/**
+ * R-2 の「補助の値の並べ替えは書けない」を**了承して除いた**確定した仕様（`accepted_unwritable`）。
+ * `DESIGN_OUTPUT_PARTIAL` の申告（同じ文）と突き合うと、了承済みなので合格（full）になる（§5・Issue #334）。
+ */
+export const CONFIRMED_PLAN_ACCEPTED: ConfirmedPlan = {
+  schema_version: PLAN_SPEC_SCHEMA_VERSION,
+  plan_id: "plan-test-accepted",
+  revision: 1,
+  vocabulary_version: "v1",
+  inputs: [{ id: "in-1", kind: "source", text: SOURCE_TEXT }],
+  requirements: [
+    {
+      id: "R-1",
+      text: "記録できる",
+      kind: "existence",
+      origin: { input_id: "in-1", quote: "タスクを記録する" },
+      parts: [{ id: "R-1-p1", text: "記録", disposition: "met" }],
+    },
+    {
+      id: "R-2",
+      text: "合計できる",
+      kind: "constraining",
+      origin: { input_id: "in-1", quote: "件数を合計する" },
+      parts: [{ id: "R-2-p1", text: "補助の値の並べ替えは書けない", disposition: "accepted_removal" }],
+    },
+  ],
+  open_issues: [],
+  decisions: [],
+  accepted_unwritable: [
+    {
+      part_id: "R-2-p1",
+      alternative_id: "R-1",
+      basis: { doc_version: "v1", location: "contract", constraint_id: "R-1" },
+    },
+  ],
+  confirmation: { sha256: "0".repeat(64), confirmed_at: "2026-09-16T12:00:00+09:00", confirmed_by: "tester" },
+};
+
+/**
+ * 確定した仕様を渡した道の記録（②→②'→③→⑤a）。**①・①' は無い**（`run.ts` が確定した仕様から
+ * 要件の一覧を作るので、①・①' を呼ばない。§5・Issue #334）。
+ */
+export function recordedRunFromPlan(options: { readonly design?: unknown } = {}): readonly RecordedCall[] {
+  return [
+    structured(options.design ?? DESIGN_OUTPUT),
+    structured(TEST_SUITE_OUTPUT),
+    structured({ declaration: DECLARATION_SOURCE }),
+    structured(CORRESPONDENCE_OUTPUT),
   ];
 }

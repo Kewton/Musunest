@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { checkTestSuite, type TestSuite } from "../fixed-test.js";
 import type { Declaration, Dispute } from "../pipeline.js";
+import { CONFIRMED_PLAN } from "../__tests__/run.js";
 import {
   ARBITRATION_SCHEMA_NAME,
   checkArbitrationOutput,
@@ -185,5 +186,52 @@ describe("⑥' が送る要求を観測する（02 §2.2）", () => {
     const request = recording.structured[0];
     expect(request?.input).not.toContain("STATIC_SENTINEL");
     expect(request?.instructions).not.toContain("STATIC_SENTINEL");
+  });
+});
+
+// ── 確定した仕様と食い違う主張は「Plan に戻す」（§5・Issue #334）──────────────
+
+describe("確定した仕様と食い違う主張は「Plan に戻す」（§5・Issue #334）", () => {
+  it("return-to-plan の判断は returnToPlan に入り、維持も棄却もしない", async () => {
+    const recording = createRecordingClient([
+      structured({
+        decisions: [{ testId: "t1", verdict: "return-to-plan", reason: "確定した仕様と食い違う", quote: "" }],
+      }),
+    ]);
+    const outcome = await runArbitration({
+      ...baseInput(disputes("t1")),
+      plan: CONFIRMED_PLAN,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.returnToPlan).toEqual(["t1"]);
+    expect(outcome.value.upheld).toEqual([]);
+    expect(outcome.value.overturned).toEqual([]);
+    expect(outcome.value.unresolved).toEqual([]);
+  });
+
+  it("確定した仕様が無ければ、戻す先が無いので未解決へ落とす", () => {
+    const checked = checkArbitrationOutput(
+      { decisions: [{ testId: "t1", verdict: "return-to-plan", reason: "戻す先が無い", quote: "" }] },
+      disputes("t1"),
+      SOURCE_TEXT,
+    );
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.value.returnToPlan).toEqual([]);
+    expect(checked.value.unresolved).toEqual(["t1"]);
+  });
+
+  it("確定した仕様があるときは、データに確定した仕様を入れる", async () => {
+    const recording = createRecordingClient([
+      structured({ decisions: [{ testId: "t1", verdict: "uphold", reason: "期待は正しい", quote: "" }] }),
+    ]);
+    await runArbitration({
+      ...baseInput(disputes("t1")),
+      plan: CONFIRMED_PLAN,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(recording.structured[0]?.input).toContain("確定した仕様");
   });
 });
