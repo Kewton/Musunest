@@ -24,6 +24,9 @@ import {
   type OpenAiErrorKind,
   type OpenAiUsage,
 } from "./openai.js";
+import { ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_NAME } from "./schema-envelope.js";
+import { REQUIREMENT_LIST_SCHEMA, REQUIREMENTS_SCHEMA_NAME } from "./stages/requirements.js";
+import { REVERSE_CHECK_SCHEMA, REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
 
 interface NodeFileSystem {
   readFileSync(path: URL, encoding: "utf8"): string;
@@ -421,6 +424,126 @@ describe("プロンプトのキャッシュを、明示の breakpoint で文書�
       undefined,
       undefined,
     ]);
+  });
+});
+
+// ── 3.7. 全段で同じ封筒の schema（02 §2・#353）────────────────────────────
+
+/** 封筒の応答（`result` で包み、`stage` を判別子にする） */
+const enveloped = (stage: string, output: Record<string, unknown>): Record<string, unknown> => ({
+  result: { stage, ...output },
+});
+
+/** ① の答え（`REQUIREMENT_LIST_SCHEMA` に合う最小の形） */
+const REQUIREMENT_OUTPUT = {
+  requirements: [{ id: "R-1", text: "要件", quote: "引用", position: { start: 0, end: 1 } }],
+  decisions: [],
+  unresolved: [],
+};
+
+/** ①' の答え */
+const REVERSE_OUTPUT = { uncovered: [] };
+
+/** 封筒の `text.format` を読む */
+function formatOf(body: Record<string, unknown>): {
+  readonly name: string;
+  readonly schema: unknown;
+  readonly strict: boolean;
+} {
+  return (body.text as { format: { name: string; schema: unknown; strict: boolean } }).format;
+}
+
+const stageRequest = (schemaName: string, schema: unknown): LlmStructuredRequest => ({
+  ...STRUCTURED_REQUEST,
+  schemaName,
+  schema,
+});
+
+describe("構造化出力は、全段で同じ封筒の schema を送る（02 §2・#353）", () => {
+  it("構造化出力のどの段の要求でも、text.format の名前と schema が同じ", async () => {
+    const reply = (call: number): Record<string, unknown> =>
+      call === 1
+        ? enveloped(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_OUTPUT)
+        : enveloped(REVERSE_CHECK_SCHEMA_NAME, REVERSE_OUTPUT);
+    const { fetch, captured } = recordingFetch((call) =>
+      jsonResponse(completed(outputText(JSON.stringify(reply(call))), USAGE_WIRE)),
+    );
+    const client = clientWith(fetch);
+
+    await client.callStructured(stageRequest(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_LIST_SCHEMA));
+    await client.callStructured(stageRequest(REVERSE_CHECK_SCHEMA_NAME, REVERSE_CHECK_SCHEMA));
+
+    expect(captured).toHaveLength(2);
+    for (const call of captured) {
+      const format = formatOf(call.body);
+      expect(format.name).toBe(ENVELOPE_SCHEMA_NAME);
+      expect(format.schema).toEqual(ENVELOPE_SCHEMA);
+      expect(format.strict).toBe(true);
+    }
+  });
+
+  it("封筒に載っていない schema は、今までどおりその要求の schema を送る（判定の口など）", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
+    );
+    await clientWith(fetch).callStructured(stageRequest("judge-answers", SCHEMA));
+
+    const format = formatOf(bodyOf(captured));
+    expect(format.name).toBe("judge-answers");
+    expect(format.schema).toEqual(SCHEMA);
+  });
+
+  it("答えの result を取り出し、判別子の stage を落として段に渡す", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(
+        completed(outputText(JSON.stringify(enveloped(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_OUTPUT))), USAGE_WIRE),
+      ),
+    );
+    const response = await clientWith(fetch).callStructured<Record<string, unknown>>(
+      stageRequest(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_LIST_SCHEMA),
+    );
+    expect(response.output).toEqual(REQUIREMENT_OUTPUT);
+    expect(response.output).not.toHaveProperty("stage");
+  });
+
+  it("答えの stage がその段でなければ、形の誤り（malformed）になる", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(
+        completed(outputText(JSON.stringify(enveloped(REVERSE_CHECK_SCHEMA_NAME, REVERSE_OUTPUT))), USAGE_WIRE),
+      ),
+    );
+    const error = await captureError(() =>
+      clientWith(fetch).callStructured(stageRequest(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_LIST_SCHEMA)),
+    );
+    expect(error.kind).toBe("malformed");
+  });
+
+  it("result が無い応答は、形の誤り（malformed）になる", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify(REQUIREMENT_OUTPUT)), USAGE_WIRE)),
+    );
+    const error = await captureError(() =>
+      clientWith(fetch).callStructured(stageRequest(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_LIST_SCHEMA)),
+    );
+    expect(error.kind).toBe("malformed");
+  });
+
+  it("段ごとの指示に、その段の stage が入る（文書より後ろ・データより前）", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(
+        completed(outputText(JSON.stringify(enveloped(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_OUTPUT))), USAGE_WIRE),
+      ),
+    );
+    await clientWith(fetch).callStructured({
+      ...stageRequest(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_LIST_SCHEMA),
+      rules: ["段の規則"],
+    });
+    const input = inputOf(captured);
+    // 文書（user）→ 段の規則（developer）→ データ（user）
+    expect(input.map((item) => item.role)).toEqual(["user", "developer", "user"]);
+    expect(input[1]?.content[0]).toEqual({ type: "input_text", text: "<rules>\n段の規則\n</rules>" });
+    // 段の規則の本文は変えず、別の内容の塊として stage の指示を足す
+    expect(input[1]?.content[1]?.["text"]).toContain(REQUIREMENTS_SCHEMA_NAME);
   });
 });
 

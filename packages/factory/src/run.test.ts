@@ -23,6 +23,11 @@ import { runGeneration, countUnresolvedTests, type GenerationInput } from "./run
 import { MAPPING_REDO_SCHEMA_NAME } from "./stages/repair.js";
 import { ARBITRATION_SCHEMA_NAME } from "./stages/arbitrate.js";
 import { CORRESPONDENCE_SCHEMA_NAME } from "./stages/correspondence.js";
+import { REQUIREMENTS_SCHEMA_NAME } from "./stages/requirements.js";
+import { REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
+import { DESIGN_SCHEMA_NAME } from "./stages/design.js";
+import { TEST_SUITE_SCHEMA_NAME } from "./stages/test-suite.js";
+import { WRITE_SCHEMA_NAME } from "./stages/write.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
 import {
   BAD_MAPPINGS,
@@ -65,6 +70,15 @@ const verificationOf = (bundle: { artifacts: readonly { path: string; text: stri
 const toolDone = (declaration: unknown): RecordedCall => ({
   kind: "tools",
   response: { kind: "done", declaration, usage: undefined },
+});
+
+/**
+ * 構造化出力の記録を、全段で同じ「封筒」の形にする（#353）。adapter は封筒の `result` を取り出し、
+ * `stage` がその段でなければ形の誤りにする。偽物（llm-fake.ts）も、本物の adapter と同じように
+ * 封筒をほどく——**封筒の有無にかかわらず、段の試験は今までどおり通る**（#353「守ること」）。
+ */
+const enveloped = (stage: string, output: Record<string, unknown>): Record<string, unknown> => ({
+  result: { stage, ...output },
 });
 
 // ── 1. 通常の完走 ────────────────────────────────────────────────
@@ -111,6 +125,21 @@ describe("通常の完走（02 §1）", () => {
     expect(result.summary.verdict).toBe("full");
     expect(result.summary.spec_engine_version).toBe("0.0.0");
     expect(result.summary.factory_version).toBe("0.0.0");
+  });
+
+  it("記録が全段同じ封筒の形（result で包んだもの）でも、合格の道は同じように流れる（#353）", async () => {
+    const { run } = runWith([
+      structured(enveloped(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_LIST_OUTPUT)),
+      structured(enveloped(REVERSE_CHECK_SCHEMA_NAME, REVERSE_CHECK_OUTPUT)),
+      structured(enveloped(DESIGN_SCHEMA_NAME, DESIGN_OUTPUT)),
+      structured(enveloped(TEST_SUITE_SCHEMA_NAME, TEST_SUITE_OUTPUT)),
+      structured(enveloped(WRITE_SCHEMA_NAME, { declaration: DECLARATION_SOURCE })),
+      structured(enveloped(CORRESPONDENCE_SCHEMA_NAME, CORRESPONDENCE_OUTPUT)),
+    ]);
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
   });
 
   it("部分案の道：書けない要件があるまま最後まで流し、部分案になる", async () => {
@@ -468,8 +497,8 @@ describe("要求そのものが不正な誤り（HTTP 400）は、拒否と分�
     let calls = 0;
     const fetch = async (): Promise<Response> => {
       calls += 1;
-      if (calls === 1) return completedResponse(REQUIREMENT_LIST_OUTPUT);
-      if (calls === 2) return completedResponse(REVERSE_CHECK_OUTPUT);
+      if (calls === 1) return completedResponse(enveloped(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_LIST_OUTPUT));
+      if (calls === 2) return completedResponse(enveloped(REVERSE_CHECK_SCHEMA_NAME, REVERSE_CHECK_OUTPUT));
       // 設計の段の要求が、schema の不正で断られた（疎通の確認で起きた形）
       return new Response(
         JSON.stringify({
