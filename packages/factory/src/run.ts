@@ -352,9 +352,11 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     );
     const unwritableRequirements = design.designs.filter((entry) => entry.unwritable.length > 0).length;
 
-    // ②' 試験を作って固定する（宣言を見る前に固定する。§1.3）
+    // ②' 試験を作って固定する（宣言を見る前に固定する。§1.3）。**② の設計（役割 ID の表と要件ごとの
+    // 種類）を渡す**——渡さないと ②' は設計が無いときの古い経路に入り、種類の突き合わせと役割 ID の
+    // 検査が効かない（Issue #316。疎通の確認では、在ることだけの要件に異常・境界の試験を求めて落ちた）。
     const testSuite = await runStageOk("test-suite", () =>
-      runTestSuite({ list: requirementList.list, documents: input.documents, gateway }),
+      runTestSuite({ list: requirementList.list, design, documents: input.documents, gateway }),
     );
 
     // ③ 書く
