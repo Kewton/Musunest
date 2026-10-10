@@ -327,6 +327,103 @@ describe("要求の組み立て（02 §2・§2.2）", () => {
   });
 });
 
+// ── 3.5. プロンプトのキャッシュ（02 §2・§1.2・#342）──────────────────────
+
+/** 入力の項目（role と content をそのまま見る） */
+type InputItem = { readonly role: string; readonly content: readonly Record<string, unknown>[] };
+
+function inputOf(captured: readonly Captured[], index = 0): readonly InputItem[] {
+  return bodyOf(captured, index).input as readonly InputItem[];
+}
+
+describe("プロンプトのキャッシュを、明示の breakpoint で文書の直後に当てる（02 §2・#342）", () => {
+  it("送る本文に prompt_cache_options.mode = explicit がある", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
+    );
+    await clientWith(fetch).callStructured(STRUCTURED_REQUEST);
+    expect(bodyOf(captured).prompt_cache_options).toEqual({ mode: "explicit" });
+  });
+
+  it("文書の最後のブロックだけに breakpoint が付き、ほかのブロックには付かない", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
+    );
+    await clientWith(fetch).callStructured({
+      ...STRUCTURED_REQUEST,
+      documents: ["契約の文書", "語彙の意味", "語彙の台帳"],
+      rules: ["段の規則"],
+      input: "依頼文",
+    });
+    // 文書 3・段の規則 1・データ 1 の 5 項目。breakpoint は 3 つ目の文書だけ
+    expect(inputOf(captured).map((item) => item.content[0]?.prompt_cache_breakpoint)).toEqual([
+      undefined,
+      undefined,
+      { mode: "explicit" },
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it("段ごとの指示は、文書より後ろの developer のメッセージにある", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
+    );
+    await clientWith(fetch).callStructured({
+      ...STRUCTURED_REQUEST,
+      documents: ["契約の文書"],
+      rules: ["段の規則", "もう 1 つの段の規則"],
+      input: "依頼文",
+    });
+    const input = inputOf(captured);
+    // 文書（user）→ 段の規則（developer）→ データ（user）の順
+    expect(input.map((item) => item.role)).toEqual(["user", "developer", "user"]);
+    expect(input[1]?.content[0]).toEqual({
+      type: "input_text",
+      text: "<rules>\n段の規則\nもう 1 つの段の規則\n</rules>",
+    });
+  });
+
+  it("上の instructions は段によらず同じで、段ごとの指示は developer のメッセージに分かれる", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
+    );
+    const client = clientWith(fetch);
+    await client.callStructured({ ...STRUCTURED_REQUEST, documents: ["文書"], rules: ["段 A の規則"] });
+    await client.callStructured({ ...STRUCTURED_REQUEST, documents: ["文書"], rules: ["段 B の規則"] });
+
+    expect(captured).toHaveLength(2);
+    // 上の instructions は、段によらず同じ値
+    expect(bodyOf(captured, 0).instructions).toBe("規則");
+    expect(bodyOf(captured, 1).instructions).toBe("規則");
+    // 段ごとの指示は、上の instructions ではなく developer のメッセージにある
+    expect(inputOf(captured, 0)[1]).toMatchObject({ role: "developer" });
+    expect(inputOf(captured, 0)[1]?.content[0]?.text).toContain("段 A の規則");
+    expect(inputOf(captured, 1)[1]?.content[0]?.text).toContain("段 B の規則");
+  });
+
+  it("道具付きの要求でも、prompt_cache_options を送り、最後の文書にだけ breakpoint を付ける", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ entity: "item" })), USAGE_WIRE)),
+    );
+    await clientWith(fetch).callWithTools({
+      ...TOOL_REQUEST,
+      documents: ["契約の文書", "語彙の意味"],
+      rules: ["段の規則"],
+      input: "宣言",
+    });
+    const body = bodyOf(captured);
+    expect(body.prompt_cache_options).toEqual({ mode: "explicit" });
+    // 文書 2・段の規則 1・データ 1 の 4 項目。breakpoint は 2 つ目の文書だけ
+    expect(inputOf(captured).map((item) => item.content[0]?.prompt_cache_breakpoint)).toEqual([
+      undefined,
+      { mode: "explicit" },
+      undefined,
+      undefined,
+    ]);
+  });
+});
+
 // ── 4. usage の分類（02 §1.5）──────────────────────────────────────────
 
 describe("usage の分類（02 §1.5・R-6）", () => {

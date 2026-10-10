@@ -7,10 +7,16 @@
 // 単価は引数で受け取る（コードに埋め込まない。Issue #278）。
 import type { LlmUsage } from "./llm.js";
 
-/** トークンの単価（USD / 1 トークン）。入力・キャッシュに当たった入力・出力の 3 つ */
+/**
+ * トークンの単価（USD / 1 トークン）。入力・キャッシュに当たった入力（読み取り）・キャッシュへ書き込む
+ * 入力（書き込み）・出力の 4 つ。書き込みは入力の 1.25 倍である（§1.2・#342）。欄を省いた単価
+ * （古い呼び方）では、書き込みを入力と同じ単価として扱う。
+ */
 export interface TokenRates {
   readonly inputPerToken: number;
   readonly cachedInputPerToken: number;
+  /** キャッシュへ書き込む入力の単価（USD / 1 トークン。入力の 1.25 倍。§1.2）。省くと入力の単価を使う */
+  readonly cacheWritePerToken?: number;
   readonly outputPerToken: number;
 }
 
@@ -28,29 +34,33 @@ export type ReserveResult =
   | { readonly reserved: false; readonly maxCostUsd: number; readonly remainingUsd: number };
 
 /**
- * 引数のトークン数と出力の上限から、その呼び出しの最大費用を求める（§1.5）。
- * 入力は**キャッシュが当たらない前提**で見積もる（予約は安全側に倒す）。
+ * 引数のトークン数と出力の上限から、その呼び出しの最大費用を求める（§1.5・#342）。
+ * 入力は**キャッシュへ書き込む前提**で見積もる——キャッシュの書き込みは入力より高い（1.25 倍）ので、
+ * 全部を書き込みとして数えておけば予約が実際の費用を下回らない（安全側に倒す）。
  */
 export function estimateMaxCostUsd(request: {
   readonly inputTokens: number;
   readonly maxOutputTokens: number;
   readonly rates: TokenRates;
 }): number {
-  return (
-    request.inputTokens * request.rates.inputPerToken +
-    request.maxOutputTokens * request.rates.outputPerToken
-  );
+  const inputPerToken = request.rates.cacheWritePerToken ?? request.rates.inputPerToken;
+  return request.inputTokens * inputPerToken + request.maxOutputTokens * request.rates.outputPerToken;
 }
 
 /**
- * usage から実際の費用を求める（§1.5）。入力のトークンにはキャッシュに当たった分が含まれるので、
- * その分を安い単価で数える。`reasoningTokens` は `outputTokens` の内訳なので、足さない。
+ * usage から実際の費用を求める（§1.5・#342）。入力は 3 つに分けて数える——キャッシュに当たった分
+ * （読み取り。安い単価）・キャッシュへ書き込んだ分（書き込み。入力の 1.25 倍）・そのどちらでもない分
+ * （入力の単価）。`reasoningTokens` は `outputTokens` の内訳なので、足さない。
  */
 export function costOfUsageUsd(usage: LlmUsage, rates: TokenRates): number {
-  const uncachedInputTokens = Math.max(0, usage.inputTokens - usage.cachedInputTokens);
+  const cacheReadTokens = usage.cachedInputTokens;
+  const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
+  const uncachedInputTokens = Math.max(0, usage.inputTokens - cacheReadTokens - cacheWriteTokens);
+  const cacheWritePerToken = rates.cacheWritePerToken ?? rates.inputPerToken;
   return (
     uncachedInputTokens * rates.inputPerToken +
-    usage.cachedInputTokens * rates.cachedInputPerToken +
+    cacheWriteTokens * cacheWritePerToken +
+    cacheReadTokens * rates.cachedInputPerToken +
     usage.outputTokens * rates.outputPerToken
   );
 }
@@ -65,11 +75,13 @@ export const JEV_USD_PER_MILLION_INPUT_TOKENS = 0.042;
 
 /**
  * Jev の費用を、**今の予約と同じ仕組み**（`estimateMaxCostUsd`・`costOfUsageUsd`・`JobBudget`）で
- * 数えるための単価（05 §5）。キャッシュの区別は無く（入力はすべて同じ単価）、出力は無料である。
+ * 数えるための単価（05 §5）。キャッシュの区別は無く（入力・読み取り・書き込みはすべて同じ単価）、
+ * 出力は無料である（#342 で足した書き込みの欄も同じ単価にする）。
  */
 export const JEV_RATES: TokenRates = {
   inputPerToken: JEV_USD_PER_MILLION_INPUT_TOKENS / 1_000_000,
   cachedInputPerToken: JEV_USD_PER_MILLION_INPUT_TOKENS / 1_000_000,
+  cacheWritePerToken: JEV_USD_PER_MILLION_INPUT_TOKENS / 1_000_000,
   outputPerToken: 0,
 };
 

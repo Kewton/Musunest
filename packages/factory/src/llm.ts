@@ -19,8 +19,13 @@
 export interface LlmUsage {
   /** 入力のトークン（キャッシュに当たった分も含む） */
   readonly inputTokens: number;
-  /** 入力のうち、キャッシュに当たったトークン */
+  /** 入力のうち、キャッシュに当たったトークン（読み取り） */
   readonly cachedInputTokens: number;
+  /**
+   * 入力のうち、キャッシュへ**書き込んだ**トークン（#342）。読み取り（`cachedInputTokens`）と分けて持つ。
+   * 欄の無い記録（古い記録・書き込みの欄が無い wire）は 0 として扱う（記録を止めない）。
+   */
+  readonly cacheWriteTokens?: number;
   /** 出力のトークン（推論のトークンを含む） */
   readonly outputTokens: number;
   /** 出力のうち、推論に使ったトークン（`outputTokens` の内訳） */
