@@ -4,6 +4,66 @@ Catalog の `changelog` はこの Skill の release tag の annotation から生
 その annotation の元になる記述をここに置く。install 前の利用者が読む前提で書く。
 **新しい version を上に置く。version を上げたらこの file も同じ commit で更新する。**
 
+## 0.3.0
+
+command で検証する受入条件のための runner（`scripts/run-acceptance.mjs`）を同梱し、
+**合否は exit code で判定する。件数は参考** を SKILL.md と `evidence.md` に明記した
+（#299）。
+
+### なぜ
+
+cmate-orchestrate 0.37.0 の UAT（2026-10-02、4 Issue）で、開発リーダーがこの Skill を
+読んだうえで受入判定を自作スクリプトで行い、`node --test` の件数行を読み違えた
+（既定の spec reporter は `ℹ pass 28`、スクリプトは TAP の `# pass 28` を探していた）。
+`npm test` が exit 0・28/28 だったのに 4 件とも NO-GO と判定し、リーダーが自分で
+気付いて直した。結果は正しかったが、判定の正しさが書いた人の注意力に依っていた。
+
+### 何が変わるか
+
+- **runner が受入条件 1 行ごとに command を実行し、result document を書く。**
+  evidence は実行した command・exit code・実行時間・出力の末尾（3000 文字まで）。
+  `status` / `verdict` は `verdict-rubric.md` の決定表どおりに導き、runner 独自の
+  規則は無い。plan の形式は `references/runner.md`。
+- **判定は exit code だけで決まる。** spec と TAP どちらの件数行も、読めれば evidence の
+  `summary` に参考として書くが、読めなくても判定は変わらない。
+- **schema は変わらない。** `acceptance-result.v1` に field を足していないので、
+  cmate-orchestrate の uat runner はそのまま読める。
+- Node 22 以上が要る（`requirements.commands` に `node` を追加）。runner は標準
+  ライブラリだけで動き、実行 bit は無い（`node` 経由で呼ぶ）。`declared_risk` は
+  `moderate` のまま。
+
+### 使う側への影響
+
+- 手順・outcome・決定表は変わらない。0.2.x の result document はそのまま有効である。
+- command の無い条件、未承認の `confirm_required`、手動確認は runner が `pass` に
+  しない（`manual_pending` / `not_run`）。手動確認は従来どおり人が行う。
+
+## 0.2.0
+
+`acceptance-result.v1` の `skill.id` を、この Skill の名前に固定した `const` から
+**2 値の `enum`**（`cmate-acceptance-test` / `cmate-uat`）へ広げた（#259 / #260）。
+
+### 何が変わるか
+
+- **この Skill の手順・判定規則・決定表・outcome の定義は 1 つも変わっていない。**
+  変わったのは schema が「誰が書いた document を v1 と認めるか」だけである。
+- **`cmate-uat` が書いた document も v1 に適合するようになった。** 受入判定の *形* は
+  証跡の取り方に依存しない —— `cmate-acceptance-test` は渡された対象を検証し、
+  `cmate-uat` は実機環境を立ててから検証する、という違いは document の shape を変えない。
+  そこで schema を 2 つの producer で共有し、**schema 自体はこの package に 1 本だけ置く**
+  （複製すると必ず乖離する）。
+- **`enum` は閉じたままである。** `cmate-orchestrate` の uat runner はこの document を
+  意味ゲートとして読むので、**著者を特定できない判定は受け付けない**。
+  「v1 に見えるから通す」ようにはしていない。
+
+### 使う側への影響
+
+- この Skill が書く document は従来どおり `skill.id: cmate-acceptance-test` である。
+  **既存の document は 1 つも無効にならない**（`const` から `enum` への拡大なので、
+  以前適合していたものは今も適合する）。
+- 読む側で `skill.id` を `cmate-acceptance-test` と決め打ちで比較している consumer は、
+  `cmate-uat` の document を弾く。runner 側の対応は `cmate-orchestrate` 0.33.0（#259）。
+
 ## 0.1.3
 
 SKILL.md を「いつ使うか / どう呼ぶか / 出力をどう読むか / 止まったとき何をするか」の

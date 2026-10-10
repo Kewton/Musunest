@@ -42,11 +42,14 @@ CommandMate の exit code へ移しただけで、report 上の表現（field �
 | `--prepare-worktrees` | 任意 | **off** | pre-flight で未解決だった worktree を `cmate-worktree-setup` provider に作らせてから dispatch する（第3.0.1節）。既定 off＝従来どおり停止する |
 | `--worktree-setup <launcher>` | 任意（`--prepare-worktrees` 指定時は実質必須） | なし | 上記 provider のランチャー（`--cli` と同じ argv 規約・同じ guard。シェルは経由しない）。`--prepare-worktrees` 無しに渡すと `invalid_input` |
 | `--worker-method <skill-id>` | 任意 | **なし（off）** | worker が従うべき開発スキルの id（例 `cmate-worker-development`）。指定すると、dispatch 対象 worktree に**その skill が install されていることを実測**してから dispatch し、契約 goal と worker prompt の**両方**に `## Method` 節を1つ足す（第3.0.2節）。**指定しない run は、この flag が存在しなかった頃と byte 一致する。** id は `^[a-z0-9][a-z0-9-]{0,63}$`（path に展開されるので、それ以外は `invalid_input`） |
+| `--only <issues>` | 任意 | なし（plan 全体） | plan のうち**指定した Issue だけ**を dispatch する（カンマ区切り。例 `--only 12,14,15`）。plan は組み直さない（第3.0.5節）。plan に無い番号は `invalid_input`、選外の Issue への依存（`plan.dependencies`）を持つ Issue を選ぶと、その依存が `--resume` で引き継いだ pass 済みの記録でない限り同じく `invalid_input`（どちらも exit 3・**何も dispatch せず `--out` も作らない**）。選外の Issue は worker_state `not_dispatched`（note に `excluded by --only`）で記録し、blocking にしない。report は `plan_scope` に plan 全体と選んだ部分集合の両方を残す。`--resume` / `--reverify` とは併用でき、`--only` を渡さなければ前回 report の部分集合を引き継ぐ |
+| `--verify-concurrency <n>` | 任意 | なし（全件同時） | **`--reverify` のときだけ**、再判定を同時に n 件までにする（正の整数。`1` = 1件ずつ）。重いゲートを並べて走らせると負荷で落ちる repo のための run 引数で、**plan の値ではない**: run id の hash にも、`--reverify` が突き合わせる plan / 前回 report の一致検査にも入らないので、`--max-parallel` のように変えて拒否されることはない。再判定の開始順は plan 順、report の並びと verdict は値によって変わらない。指定した run は limitation `verify_concurrency_limited` に使った値を1件残す（渡さない run は従来と byte 一致）。0・負数・非整数、および `--reverify` 無しで渡した場合は `invalid_input` |
 | `--schedule <mode>` | 任意 | **`wave`** | `wave`（既定）/ `dag`。**いつ dispatch してよいか**の決め方（第3.2節）。`wave` は plan の wave と barrier をそのまま使う。`dag` は **その Issue 自身の依存**が completed かつ verification pass になった時点で空き枠へ投入する。`--schedule` を渡さない run は、この flag が存在しなかった頃と **report が byte 一致**する（fixture `d87-schedule-wave-default-nonregression`）。`--reverify` との併用は `invalid_input` |
 | `--contract-mode <m>` | 任意 | `auto` | `auto` / `require` / `off`。契約非対応 CLI での挙動を決める（第2.7節） |
 | `--verify-gates <ids>` | 任意 | なし | 契約の `verify.gates` に載せる gate id（comma 区切り）。既定は省略＝全ゲート |
 | `--expect-branch <name>` | 任意 | なし | plan 承認時の統合 branch。dispatch 時に不一致なら drift |
 | `--wait-timeout <sec>` | 任意 | 300（profile 既定可） | `commandmate wait` に渡す1回あたり timeout。profile の `dispatch_defaults.wait_timeout`（第1.1節） |
+| `--nudge-message <text>` | 任意 | なし（profile 可） | 監督 nudge の既定文の**後ろに追記**する文。空白のみ・2000 文字超は `invalid_input`。優先順位は flag → profile の `worker_messages.nudge`（[profile-contract.md](./profile-contract.md) 第14節）→ 追記なし。既定文（単一 commit が完了の合図の行を含む）は消せない。解決結果は limitation `worker_messages_applied`（文字数のみ） |
 | `--max-turns <n>` | 任意 | 8（profile 既定可） | 各 worker を駆動する最大ターン数（初回 send + nudge / 再指示）。未 commit のまま到達で当該 worker を failed とする。profile の `dispatch_defaults.max_turns`（第1.1節） |
 | `--poll-limit <n>` | 任意 | 120 | 互換のため保持（wait は block するので poll しない） |
 
@@ -99,7 +102,8 @@ limitation `dispatch_defaults_no_infer_not_applied` を残して「`--no-infer` 
 ## 2. commandmate CLI の呼び出し規約（worktree-id ベース）
 
 実 `commandmate` CLI は **worktree-id ベース**であり、`--json --worktree`・`--prompt-file`・
-`--task` は無い（#1467）。CommandMate **0.17.0** で実行契約（`send --contract`）と検証
+`wait --task` は無い（#1467）。`verify --task <taskId>` は CommandMate **0.43.0** で入った
+（第2.5.1節。[#303](https://github.com/Kewton/commandmate-skills/issues/303)）。CommandMate **0.17.0** で実行契約（`send --contract`）と検証
 （`verify` / `wait --verify`）が入り、`send --contract` は **task id を stdout に返す**
 （[#1544](https://github.com/Kewton/CommandMate/issues/1544) /
 [#1545](https://github.com/Kewton/CommandMate/issues/1545)）。dispatch runner は次を呼ぶ。
@@ -112,10 +116,14 @@ limitation `dispatch_defaults_no_infer_not_applied` を残して「`--no-infer` 
 | `send` | `<worktree-id> <message>` | exit 0 で送信成功 | 継続 nudge・再指示・送信確定・フォールバック時の generic worker prompt |
 | `capture` | `<worktree-id> --json` | `{ "isGenerating", "isPromptWaiting", "content", "promptData": { "question" }, … }` | 送信確定の確認・prompt/出力の human 提示用取得 |
 | `wait` | `<worktree-id> --on-prompt agent --verify --timeout <sec>` | **exit code**: 0 pass / 20 判定して不合格 / 21 作業証跡ゼロ / 10 prompt / 99 **判定に到達せず** / 124 timeout / 1・2 インフラ | 1ターンの終了を待ち、契約ゲートの裁定を受け取る |
-| `wait` | `<worktree-id> --on-prompt agent --timeout <sec>` | **exit code**: 0 idle / 10 prompt / 124 timeout / その他 failed | 裁定済み（pass 後）の commit 待ち・フォールバック時の idle 待ち |
-| `verify` | `<worktree-id> --json` | 検証 run document（`{ status, gates: [{ gateId, status, exitCode, logTail }] }`） | exit 20 のとき**失敗ゲートを特定**する（裁定そのものではない。第2.3節） |
+| `wait` | `<worktree-id> --on-prompt agent --timeout <sec>` | **exit code**: 0 idle / 10 prompt / 124 timeout / その他 failed | 裁定済み（pass 後）の commit 待ち・再指示の後のターンの完了待ち（`verify --task` がある CLI。第2.5.1節）・フォールバック時の idle 待ち |
+| `verify` | `<worktree-id> --task <taskId> --json` | 検証 run document と**裁定の exit code**（`wait --verify` と同じ 0 / 20 / 21 / 99 / その他） | 再指示の後のターンの裁定と、exit 20 の失敗ゲートの特定（0.43.0 以降。第2.3節・第2.5.1節） |
+| `verify` | `<worktree-id> --json` | 検証 run document（`{ status, gates: [{ gateId, status, exitCode, logTail }] }`） | `--task` の無い CLI で exit 20 のとき**失敗ゲートを特定**する（裁定そのものではない。第2.3節） |
 | `respond` | `<worktree-id> yes` | exit 0 | prompt への応答（`--auto-yes` 時のみ） |
+| `capture` | `<worktree-id> --json`（最初の send の前） | `isPromptWaiting` / `isSelectionListActive` | 前の回の質問画面が残っていないかを見る（第2.14節） |
+| `interrupt` | `<worktree-id>` | exit 0 で中断。30 は「動いているセッションが無く何も中断していない」 | `--interrupt-stale-prompt` 時だけ、残った質問画面を**答えずに**畳む（第2.14節。CommandMate 0.28.0+） |
 | `send`/`wait` | `--help` | 出力に `--contract` / `--verify` が載るか | 実行冒頭のバージョンゲート（第2.7節） |
+| `verify` | `--help` | 出力に `--task` が載るか | 裁定を契約 task に紐づけられるか（必要になった時点で1回だけ。第2.5.1節） |
 
 **`--on-prompt` は「誰が prompt に答えるか」である。** `agent`（既定）は prompt を**呼び出し元へ
 exit 10 で返す**。`human` は「人が UI で答えるまで `wait` が block する」ため **exit 10 を返さない**。
@@ -295,6 +303,14 @@ exit 20 は「ゲートが判定して落ちた」なので、**何が落ちた�
 **裁定は wait の exit code のままとし**、この呼び出しは gate を**名指しする**用途に限る。内訳が
 取れなかった場合はその事実を `checks` と再指示メッセージに書く（取れなかったことを隠さない）。
 
+`verify --task` がある CLI（0.43.0 以降）では `commandmate verify <worktree-id> --task <taskId> --json`
+で読む（[#303](https://github.com/Kewton/commandmate-skills/issues/303)）。wait の裁定で task は
+閉じているので、`--task` の無い `verify` は契約に紐づかない run になり、名指すゲートが契約の
+`verify.gates` ではなく `.commandmate/verify.yaml` の全部になる。再指示の後のターンで裁定そのものが
+`verify --task --json` から来た場合（第2.5.1節）は、**その run 文書をそのまま読み、再実行しない**
+（同じ裁定に対して食い違いうる2つ目の run を作らない）。`verify history` / `verify show` で直前の
+run を読む方式は採らない —— 並行する別の run を取り違えない手当てが要るからである。
+
 ### 2.3.1 収束しない scope 再指示は遮断する（`scope_unsatisfiable`）
 
 scope ゲートの再指示文は違反 path を転記し、「不可避なら worker 側では解決できない」とまで書いて
@@ -383,6 +399,17 @@ runner は承認済み plan **だけ**から契約を組み立てる。時刻・
 - Issue が受入ゲートを宣言している場合、`goal` に `## Acceptance gates this issue declared`
   （`require:`）／`## Acceptance gates this issue defined`（`gates:`）節が足される。
   宣言が無い Issue の `goal` は **byte 単位で従来どおり**である。
+- `goal` の `## Files you may change` には **Issue が宣言した file だけ**を並べる（CommandMate #3004）。
+  planner が導出した分（plan の `scope_defaults`: lockfile と慣習的なテスト path）は列挙せず、
+  「導出した許可が N 件ある。作業項目ではなく許可である」の1行で本数だけを述べる。
+  **`scope.allow` は変わらない** —— 導出分も含めた `suspected_files` 全体のままである
+  （[adr-scope-derivation.md](./adr-scope-derivation.md) 第15.2節の裁定はそのまま）。Issue が自分で
+  書いたテスト path（`__tests__/x.test.ts`）は宣言した file なので残る。`scope_defaults` を持たない
+  plan（#44 以前）では、従来どおり全件を並べる。
+- `scope.deny` は plan の任意 field `issues[].scope_deny`（Issue 本文の禁止パス。
+  [plan-contract.md](./plan-contract.md) 第5.10節、[#301](https://github.com/Kewton/commandmate-skills/issues/301)）を
+  ソート＋重複除去して書き、`goal` に `## Files you must not change` 節として同じ一覧を足す。
+  `scope_deny` の無い Issue は従来どおり `deny: []` で、`goal` も byte 単位で従来どおりである。
 - `success.requireScopeClean` は**常に `true`** である。以前は `<allow が非空か>` で決めており、
   対象 file を1つも挙げていない Issue だけ scope ゲートが丸ごと無効化されていた。scope 判定が
   無い契約は「worktree 内の何を書いても clean」と同義なので、これは過剰拒否の裏返しの
@@ -473,6 +500,67 @@ exit 0 の run は契約タスクを `succeeded`（終端）へ遷移させる�
 返る（[#1620](https://github.com/Kewton/CommandMate/issues/1620)）。したがって runner は、いったん
 pass を得た worker に対して `--verify` を**二度と付けない**。付ければ、自分で「判定に到達しなかった」
 状態を作り出すことになる。pass 後に commit を待つ必要があるときは `--verify` 無しの `wait` を使う。
+
+### 2.5.1 再指示の後の裁定は契約 task に紐づける（[#303](https://github.com/Kewton/commandmate-skills/issues/303)）
+
+`wait --verify` は**進行中**（`running` / `waiting_input` / `verifying`）の task にしか紐づかない。
+1ターン目の裁定（exit 20 / 21）で task は `succeeded` / `failed` に閉じ、再指示・nudge の素の `send` は
+task を作らないので、**2ターン目以降の `wait --verify` は契約に紐づかない run になる**。その run では
+scope が **SKIP**（契約の範囲で判定されない）、env-clean が「ベースライン無し」の **ERROR**（宣言ゲートが
+全部 PASS でも exit 20）、ゲートは契約の `verify.gates` ではなく verify.yaml の全部になる
+（Kewton/CommandMate#3118 の実測）。正しく直った worker が不合格と裁定され、`--max-turns` まで
+再指示が続く。
+
+`commandmate verify <worktree-id> --task <taskId>`（CommandMate 0.43.0 以降）は終了済みの task にも
+紐づき、`--gates` を省くと契約の `verify.gates` ＋必須の builtin（work-evidence / scope / env-clean）で
+検証する。runner は次のように使い分ける。
+
+| ターン | `verify --task` がある | 無い（< 0.43.0） |
+|---|---|---|
+| 1ターン目（task は進行中） | `wait --verify`（従来どおり） | 同左 |
+| 裁定（20 / 21）が出た後のターン | `wait`（`--verify` なし）で完了を待ち、`verify <id> --task <taskId> --json` の **exit code** で裁定する | `wait --verify`（従来どおり）＋ limitation `verify_task_unsupported` を run に1件 |
+| pass の後 | `wait`（`--verify` なし。第2.5節） | 同左 |
+
+- `verify --task` の exit code の意味は `wait --verify` と**同じ**に扱う（0 pass / 20 / 21 / 99 / その他は
+  インフラ）。`wait` が prompt（10）・timeout（124）・失敗で返ったときは `verify` を呼ばず、従来の
+  分岐をそのまま通る。gate の一覧は GATE 行ではなく run 文書の `gates[]` から読み、`checks` の行は
+  `commandmate verify --task --json → exit <n> (…)` と書く（どちらの機構で裁定したかが report で読める）。
+- `--task` があるかは、第2.7節の probe と同じ形で `verify --help` に `--task` が載るかで判定する
+  （版番号は比べない）。**必要になった時点で1回だけ**聞く: 1ターン目で合格する run は従来と同じ
+  呼び出ししかしない。
+- task id は `send --contract` の stdout の値（`task_id`）である。task id が無い worker は従来の
+  経路のままにする。
+
+#### 1ターン目の失敗ゲートの内訳は、その裁定の run を読み戻す（[#306](https://github.com/Kewton/commandmate-skills/issues/306)）
+
+1ターン目の `wait --verify` が exit 20 を返したとき、再指示に載せる失敗ゲートの内訳（`describeFailingGates`）は
+検証を**再実行せず**、その裁定の run を読み戻して取る。再実行すると、**1回目だけ落ちるゲート**（負荷で落ちる
+テスト、ティアダウンの race、worktree の外の要因による env-clean）は2回目で通り、再指示に内訳が載らない
+（#303 の実機確認: run 1205 で marker が FAIL、内訳を読むための再実行 run 1206 は全 PASS）。
+
+| 手順 | 呼び出し | 使わずに再実行へ戻る条件 |
+|---|---|---|
+| 1 | `commandmate verify history --worktree <worktree-id> --limit 1 --json` | 読めない・run が無い・直近 run の `taskId` がこの task と違う・`trigger` が `wait` でない |
+| 2 | `commandmate verify show <run-id> --json`（`gates[]` と `logTail`） | 読めない・`gates[]` が無い・`id` / `taskId` / `trigger` が手順 1 と一致しない |
+
+- `taskId` と `trigger: wait` の突き合わせは、並行する別の run（手で走らせた `commandmate verify`、GUI、
+  別の process）の取り違えを防ぐためである。一致しない run は**読まない**（`show` も呼ばない）。
+- 再実行は、読み戻せなかったときだけの退避路である。そのときも `verify --task` があれば `--task <taskId>` を付ける
+  （上の表）。退避した理由は `verification.checks` に1行残る（`… so the failing gates were named by re-running them`）。
+  読み戻せたときは `the failing gates were read from commandmate verify show <run-id>, the run that reached this verdict (not re-run)`
+  の1行が残る。裁定は従来どおり `wait --verify` の exit code のままで、読み戻した run は**ゲートを名指すためだけ**に使う。
+- 読み戻すのは**最初の裁定**だけである。再指示の後のターンは `verify --task` の run 文書をそのまま使い（上の表）、
+  `--task` の無い CLI の2ターン目以降の `wait --verify` は task に紐づかない run なので、照合しても一致しない。
+- history / show があるかは、`--task` と同じ `verify --help` の出力（commander の Commands 欄に `history` と `show`）
+  で判定する。`verify --help` は run に1回しか呼ばない。1ターン目で合格する run は従来と同じ呼び出ししかしない。
+- 無い CLI（CommandMate < 0.21.0）では従来どおり再実行し、limitation `verify_history_unsupported` を**run に1件**残す。
+- task id の無い worker（契約なし。`task_id` が worktree id）は読み戻さず、従来の再実行のままにする。
+
+内訳が取れなかったとき（`failing` が空）の再指示は、task id があり CLI に `verify --task` があれば
+`` `commandmate verify <worktree-id> --task <taskId>` を自分で実行して確認してください `` と案内する。exit 20 の後は
+task が閉じているので、`--task` の無い `commandmate verify <worktree-id>` は task に紐づかない別の run になり
+（scope SKIP・env-clean ERROR。Kewton/CommandMate#3118 / #3123）、worker を別の問いに答えさせてしまう。
+task id が無い・`--task` が無い CLI では従来の文言のままである。
 
 ### 2.6 exit 99 は「判定していない」
 
@@ -778,6 +866,122 @@ no work evidence after 12 turn(s); gave up at the --max-turns 12 cap
 上流側だけである。誤る向きとしても安全な側である: 実は過大だった Issue を待って `--resume` すれば run 1回を失うが、
 健全な Issue を分割させれば人間が正しい Issue を書き直すことになる。
 
+### 2.12.1 nudge に「止めて報告」で答えた worker は、報告を残して nudge を止める（[#287](https://github.com/Kewton/commandmate-skills/issues/287)）
+
+監督 nudge は「指示どおりに書けないと分かったら、進めずに止めて報告してください。」を含む
+（cmate-orchestrate 0.34.0、CommandMate#3009）。これに従って止まった worker を、runner は
+`--max-turns` まで nudge し続け、最後は第2.12節の cap（no work evidence）の `failed` にしていた。
+**worker が書いた報告の文は report のどこにも残らず**、報告の無い無進捗と区別できなかった。
+
+**「止めて報告した」ターンの見分け方**（runner が決めるのはここだけ）:
+
+1. そのターンを開いた send が**監督 nudge**である（最初の send・commit 依頼・gate 再指示のターンは対象外）
+2. そのターンが**進捗なしで終わった**: 契約経路は `wait --verify` exit 21（commit も未 commit の変更も無い）、
+   fallback 経路は新しい commit が無い
+3. worker の返答が読め、それがその nudge へのものだと言える。読み方は2つで、runner は起動後に
+   `commandmate reply --help` の成否を **1回だけ** probe して選ぶ（`--version` の比較はしない。#296）:
+   - **`reply` を持つ CLI（CommandMate 0.43.0+）**: `commandmate reply <worktree-id> --since <その nudge を送る直前の時刻> --json`
+     の `reply`。転写リーダーが台帳に書いた行だけが返答で、pane にはフォールバックしない。エージェントは問わない
+     （claude / codex / antigravity / command-code / opencode）。出どころは `source: commandmate_reply`。
+     exit 0 以外・JSON が読めない・`reply: null` は「報告なし」。`--instance` は渡さない（dispatch は `send` / `wait` にも
+     渡さず、3つとも primary instance を指す）
+   - **`reply` を持たない CLI**: 下の Claude 専用の転写読み（従来どおり。出どころは `source: claude_transcript`）。
+     dispatch はどちらでも失敗しない
+
+   転写読みの規則（第2.12節と同じ読み方: `capture --json` の `cliToolId` が `claude`、
+   その worktree の `*.jsonl` がちょうど1つ）: **最後の human message がその nudge**
+   （既定 nudge の1行目を含む。`--nudge-message` / `worker_messages.nudge` の追記はその後ろに付くので影響しない）であり、
+   その後の worker の**最後の発話が文**（最後の tool 呼び出しより後の text。上流エラー署名に一致するものは除く）である
+
+3 の「最後の human message がその nudge」が、**この返答がこのターンのものだ**と言える根拠である。
+それが言えない transcript（nudge がまだ記録されていない・別の古い file）は「報告なし」と読む。
+**画面（`realtimeSnippet`）は使わない** —— nudge 自身のエコーが返答と並んでおり、どの行がどのターンのものかを
+画面は言えない。
+
+見分けたら:
+
+- **その時点で nudge を止める**（cap より先に判定する。cap のターンの報告も報告として残る）。
+  同じ問いに既に答えた worker へ同じ nudge を送り続けても、ターンを cap まで使って報告を埋もれさせるだけである。
+- worker 記録に **`worker_report`**（`code: worker_stopped_with_report` / `turn` / `source: claude_transcript` または `commandmate_reply` /
+  `text` / `truncated`）を書く。`text` は既存の抜粋規則（redaction・空白の畳み込み・**末尾を残す**）で上限 600 字。
+- blocking に **`worker_stopped_with_report`**（Issue ごとに1件、`workers` 順）を `worker_failed` の**隣に**足す。
+  detail は報告の文と、次の一手（報告を読んで Issue を直して re-plan するか、障害が解消済みなら `--resume`）を言う。
+- **裁定は動かさない**: `verification.outcome` はそのターンの `wait --verify` の結果のまま、`worker_state` は `failed`、
+  `stop_reason` は `worker_failed`（enum に値を足していない）。`worker_turn_evidence` は cap に到達していないので付かない。
+
+**報告を読めなかったとき**（`reply` がある CLI: exit 0 以外・JSON でない・`reply: null`。無い CLI: `capture` が失敗・JSON でない・Claude 以外・transcript が無い / 2つ以上）と、
+**報告の無い無進捗**（最後が tool 呼び出し・nudge が記録されていない）は、どちらも「報告なし」として
+**従来どおり** `--max-turns` まで nudge し、cap で第2.12節の `worker_turn_evidence` を記録する。
+「読めなかった」は報告ではなく、止める理由でもない。`worker_report` が**無い**ことは「worker が何も言わなかった」ではない。
+
+### 2.13 起動が間に合わなかった send は 1 回だけ送り直す（[CommandMate#3006](https://github.com/Kewton/CommandMate/issues/3006)）
+
+dispatch が新しく起動したセッションへの最初の `send` は、エージェントの起動が送信側の待ち枠に
+間に合わず断られることがある。このとき上流は**何も打鍵していない**。断り方は2つで、どちらも
+exit 99 であり、stderr の文言で区別する（写しは
+`tests/fixtures/cmate-orchestrate/commandmate-cli-contract.json` の `send_failures`）。
+
+| 断り方 | 上流 | exit | stderr（抜粋） | 再送 |
+|---|---|---|---|---|
+| `session_starting` | 503 `SESSION_STARTING` | 99 | `Server error: <tool> did not reach its input prompt within <n>s (initialization timeout)` | **する（1回）** |
+| `prompt_not_ready` | 送信前の composer 待ちの時間切れ | 99 | `… prompt not ready: timed out waiting for the composer before sending` | **する（1回）** |
+| `prompt_waiting` | 409 `PROMPT_WAITING` | 2 | `<id> is waiting on a prompt …` | しない |
+| その他の 409 | 409 | 99 | `Unexpected HTTP status: 409` | しない |
+
+規則:
+
+- 判定は **exit 99 と文言の両方**で行う。exit 99 だけでは 409 や「本文が届かなかった」（半端に
+  打鍵されうる）も含むので、それだけで送り直さない。**エージェントの種類には依らない**。
+- 待ち時間は定数（`SEND_NOT_READY_RETRY_DELAY_MS` = 15 秒、`scripts/lib.mjs`）で、flag ではない。
+  `--wall-clock-budget` の残りに収まらないときは送り直さず、1回目の失敗をそのまま返す。
+- 送り直すのは**1回だけ**。2回目も断られたら、再送が無かったときと同じ dispatch 失敗として返す。
+- 対象は runner が打つすべての `send`（`send --contract`・fallback の最初の送信・nudge・再指示）で
+  ある。`send --contract` の再送は新しい task 行になる —— 断られた側の task は CLI が `failed` に
+  してから終了するので、**二重に作業されることはない**。report の `task_id` は再送側のものである。
+- 再送したことは、送れたかどうかに関わらず limitation **`send_retried_not_ready`**（再送1回ごとに
+  1件、`workers` 順）に残す。detail は断り方・待った秒数・結果を名指しする。
+- UAT の fix worker への送信も同じ判定・同じ定数で送り直す（[uat-contract.md](./uat-contract.md)
+  第5節）。
+
+### 2.14 前の回の質問画面が残るセッションには、見てから送る（[CommandMate#3007](https://github.com/Kewton/CommandMate/issues/3007)）
+
+ワーカーが前の回に質問を返して止まったまま、同じセッションへ新しい契約を送ると、残った質問画面が
+composer を塞いで送信が通らない。上流の断り方は画面によって違い、どちらも「古い質問が残っている」
+とは言わない —— 上流が読める質問（AskUserQuestion など）は 409 `PROMPT_WAITING`（exit 2）、
+読めない質問 UI と Command Code の plan レビューは送信ガードが**意図的に素通りさせる**ので、
+composer 待ちの時間切れ（exit 99 prompt not ready）になるだけである。
+
+そこで dispatch は **各 worker の最初の send の前に** `commandmate capture <worktree-id> --json` を
+1回読む（契約経路・fallback 経路とも。`--auto-yes` の arming より前）。
+
+| capture の欄 | 意味 |
+|---|---|
+| `isPromptWaiting: true` | 上流が答えられる prompt（AskUserQuestion・y/n） |
+| `isSelectionListActive: true` | 上流が誰の代わりにも答えない選択画面（読めない質問 UI・plan レビュー） |
+
+どちらかが true なら:
+
+- **既定**: 送らずに止める。blocking reason **`stale_prompt_on_session`** に、どの欄が立っていたか・
+  画面の抜粋（`promptData.question`、無ければ画面の末尾）・`commandmate interrupt <worktree-id>` の
+  案内を載せる。worker は `worker_state: prompt`（`prompt.excerpt` に同じ抜粋）で、run は
+  `human_required` として止まる（第5節の順位は `prompt` と同じ）。
+- **`--interrupt-stale-prompt`**（既定 off）: `commandmate interrupt <worktree-id>` で畳み、少し置いて
+  capture を**もう一度**読む。両方の欄が下りている（composer に戻った）ことを確かめてから送る。
+  interrupt が失敗した・再読が読めない・まだ欄が立っている、のいずれでも送らずに同じ
+  `stale_prompt_on_session` で止める（detail が理由を名指しする）。畳んで送ったときは limitation
+  **`stale_prompt_interrupted`**（Issue ごとに1件、画面の抜粋つき）を残す。
+
+規則:
+
+- **質問には答えない。** `respond` はこの経路から一度も呼ばれない。`--auto-yes` でも同じである ——
+  その質問は、この run が文脈を持たない前の回のターンのものである。
+- 見るのは**最初の send の前だけ**である。それより後の send（nudge・再指示）は、この run の `wait` が
+  idle を返した後にしか打たれない。
+- 最初の capture が読めない（失敗・JSON でない）ときは**送信を止めない**。この確認は上流の送信ガードに
+  重ねる絞り込みであり、上流のガードも同じ理由（誤って止めれば誰も話しかけられないセッションになる）
+  で fail-open である。読める prompt が残っていれば、送信自体が上流で断られる。
+- UAT は見ない: fix worktree はその run が作るので、前の回のターンが存在しない。
+
 ## 3. 監督ループと gate
 
 ### 3.0 blocking pre-flight（`--out` を消費する前）
@@ -1052,6 +1256,65 @@ acceptance コマンドは `execFileSync` に `timeout` を渡さずに実行さ
 無人ではその瞬間が無く、**job 定義を書く時点でしか決められない**（uat の `--max-attempts` を
 明示必須にしたのと同じ型。ADR 第5節）。
 
+### 3.0.5 plan の一部だけ dispatch する（`--only`。既定 off。CommandMate#3008）
+
+5 本の plan のうち 2 本が条件（宣言外のパス・scope に入らない宣言）を満たさないとき、残り 3 本を
+動かすために plan を組み直すしかなかった。`--only <issues>` は plan ファイルを触らずに、この run が
+扱う Issue を指定したものに絞る。
+
+- **絞り方は 1 か所。** 起動直後に plan の `issues` / `waves` / `dependencies` を選んだ Issue だけに
+  絞り、以降（barrier・pre-flight・lock・`--max-parallel`・report）は絞った plan を読む。wave は選外を
+  除いて詰める（空になった wave は無くなる）ので、wave の幅は `max_parallel` 以下のまま。
+- **断り方は全体断り（`invalid_input`、exit 3）。** 選外の Issue を黙って外して残りだけ走らせると、
+  argv から run を再構成できない。番号が plan に無い場合と、選んだ Issue が選ばれていない Issue に依存している
+  場合（detail に「#N depends on #M」を全件並べる）がこれに当たる。**1 人も dispatch せず `--out` も
+  作らない**ので、直して同じコマンドを再実行できる。ただし、その依存が `--resume` で引き継いだ
+  「worker completed かつ verification pass」の記録なら断らない（すでに満たされている）。main に merge
+  済みかどうかは調べない。依存として数えるのはスケジューラが辿る辺だけで、`basis: lexical` の辺と plan 外の
+  Issue への辺は数えない。
+- **pre-flight は選んだ Issue だけが対象。** scope 宣言・open questions・worktree の解決・
+  `--prepare-worktrees`・`--unattended` の all-or-nothing 検査は、絞った plan に対して走る。選外の
+  Issue の宣言不備や worktree 欠落は、この run を止めない（それが `--only` の目的である）。
+- **report。** 任意の `plan_scope`（`plan_issues` / `selected` / `deselected` / `inherited`）と、
+  `only_subset` の limitation を書く。選外の Issue は `waves[]` の**最後の entry**（`dispatched: []`）に
+  worker_state `not_dispatched`・note `excluded by --only` で並べる（前回 attempt が pass させていた
+  ものは、その記録の転記）。blocking reason にはせず、status / completion_check も動かさない: 選んだ Issue が
+  すべて pass なら run は `success` である。`--only` を使わない run は byte 一致のまま。
+- **wave の順序。** plan の wave の順番を保ったまま選外を除き、空になった wave は飛ばす。
+  `max_parallel` は変えない。
+- **`--resume` / `--reverify` との組み合わせ。** 併用できる（`--resume <dir> --only 12,14,15,16` で
+  部分集合を広げることもできる）。`--only` を渡さない resume / reverify は、前回 report の
+  `plan_scope.selected` を引き継ぐ（`inherited: true`）: 部分集合の run を「そのまま再開」したつもりで
+  選外まで dispatch しないため。plan が別物なら従来どおり `resume_plan_mismatch`。
+- **`--schedule dag` とは独立**に効く（絞った plan に対して dag が走る）。merge / uat は選んだ
+  Issue の記録だけを読む。
+
+### 3.0.6 human-only の Issue は dispatch しない（[#286](https://github.com/Kewton/commandmate-skills/issues/286)）
+
+plan が `issues[].dispatch_excluded: "human_only"` の印を付けた Issue（`labels` に `human-only` を持つ。
+[plan-contract.md](./plan-contract.md) 第3.3節）には worker を割り当てない。
+
+- **読むのは plan の印だけ。** ラベルは読まない。plan は承認された成果物であり、印の無い古い plan
+  （0.34.0 以前の planner が書いたもの）は書かれたとおりに dispatch する。
+- **外し方は `--only` と同じ 1 か所で、`--only` より先。** 起動直後に、印の付いた Issue と、それに触れる
+  辺（どちら側でも）を plan の `issues` / `dependencies` / `waves` から外す。以降（`--only`・barrier・
+  `--schedule dag`・pre-flight・lock・report）は外した後の plan を読む。したがって human-only の Issue の
+  question・scope 宣言・worktree の有無は、この run を止めない。
+- **report。** 印の付いた Issue は `waves[]` の**最後の entry**（`dispatched: []`）に worker_state
+  `not_dispatched`・note `human-only: …` で並べる（`--only` の選外と同じ entry。Issue 番号順）。limitation
+  `human_only_excluded` が理由を残す。blocking reason にはせず、status / completion_check も動かさない。
+- **依存。** human-only の Issue に依存する Issue は**待たずに**送る。dispatch は人の作業の完了を見る
+  手段を持たない —— plan の外の Issue への依存（`external_dependency`）を待たないのと同じ理由である。
+  その代わり limitation `human_only_dependency` が「#N depends on human-only #M」を、この run が
+  dispatch した依存側についてだけ全件並べる。人の作業が終わったことを確かめてから依存側を merge する。
+- **`--only` との組み合わせ。** human-only の Issue を `--only` に書くと `invalid_input`（exit 3）で全体を
+  断る（どの run も dispatch しないので、選べる対象ではない）。human-only への辺は `--only` の依存検査より
+  先に外れているので、human-only に依存する Issue だけを選んでも断らない。`plan_scope.plan_issues` は
+  dispatch できる Issue だけを数える。
+- **全 Issue が human-only の plan** は wave が空なので `plan_invalid`（exit 3）で断り、detail がその理由を名指す。
+- 印の無い plan の run は byte 一致のまま（limitation も entry も増えない）。merge / uat は
+  `not_dispatched` を適格にしないので変更は無い。
+
 ### 3.1 Wave ループ
 
 各 Wave について、plan の順に次を行う。
@@ -1307,6 +1570,7 @@ pre-flight（第3.0節）で停止した failure は artifact を書かないの
 | `worker_failed` | `worker_upstream_unavailable` | exit 21 で cap に到達した時点で、**1ターンも実行できていない肯定的証拠**があった（第2.12節）。`worker_failed` の**隣に**出る Issue ごとの1件で、「なぜ止まったか」ではなく「**なぜ何も無いのか**」を言う。**`stop_reason` の enum に値を足していない**。next action は「待って `--resume`」であり、Issue の分割ではない |
 | `worker_failed` | `worker_produced_nothing` | 同じ cap で、**ターンが成立した肯定的証拠**があった（第2.12節）。Issue ごとに1件。next action は Issue の分割か書き直しと re-plan |
 | `worker_failed` | `worker_output_unreadable` | 同じ cap で、**どちらの肯定的証拠も得られなかった**（第2.12節）。Issue ごとに1件。**どちらとも読み替えない**（merge の `change_evidence_unavailable` と同型） |
+| `worker_failed` | `worker_stopped_with_report` | nudge の後のターンが進捗なしで終わり、worker の transcript がその nudge への**返答の文**で終わっていた ——「止めて報告」した（第2.12.1節）。`worker_failed` の**隣に**出る Issue ごとの1件で、detail と worker 記録の `worker_report.text` に報告の文がある。その時点で nudge を止めている。**`stop_reason` の enum に値を足していない**。next action は報告を読んでから、Issue を直して re-plan か `--resume`（owner: human） |
 | `timeout` | `worker_timeout` | `commandmate wait` が timeout した |
 | `timeout` | `wait_window_exhausted` | その timeout の時点で `capture` が**稼働中**を示した（第2.11節）。`worker_timeout` の**隣に**出る Issue ごとの1件で、「なぜ止まったか」ではなく「その timeout はどちらだったか」を言う。**`stop_reason` の enum に値を足していない**。next action は「待って `--reverify`」であり、再 dispatch ではない |
 | `timeout` | `worker_stalled` | 同じ時点で `capture` が答えたが、**稼働の証拠が無かった**（第2.11節）。Issue ごとに1件 |
@@ -1315,7 +1579,8 @@ pre-flight（第3.0節）で停止した failure は artifact を書かないの
 | `verification_failed` / `worker_failed` | `scope_unsatisfiable` | scope ゲートの違反 path が2ターン連続で同一だったため、再指示ループを収束しないと判定して打ち切った（第2.3.1節）。**`stop_reason` の enum に値を足していない**（commit があれば `verification_failed`、無ければ `worker_failed`）。detail に違反 path が入る。対処は Issue の対象ファイルへの追加と re-plan（owner: human） |
 
 timeout の生死3 code（`wait_window_exhausted` / `worker_stalled` / `worker_liveness_unreadable`）と
-cap の3 code（`worker_upstream_unavailable` / `worker_produced_nothing` / `worker_output_unreadable`）は
+cap の3 code（`worker_upstream_unavailable` / `worker_produced_nothing` / `worker_output_unreadable`）、
+止めて報告した worker の `worker_stopped_with_report` は
 **停止理由ではなく所見**である。したがって同じ wave に prompt や exit 99 が在って `stop_reason` が
 そちらに決まった run でも、該当する worker が在れば出る —— 測った事実は、どの停止理由が勝ったかで
 消えない。上表で `timeout` / `worker_failed` の行に置いてあるのは、単独で出るときの典型的な組を
@@ -1527,6 +1792,14 @@ merge の eligible（`worker_state === 'completed' && verification.outcome === '
 worker をもう一度走らせることではなく、**その worktree の現在の状態をもう一度ゲートにかけること**
 であり、再 dispatch は worker のターンを1つ消費し、終わっていると分かっている worker に契約を
 再送するので、契約 scope 内とはいえ不要な差分が生まれる余地も残す。
+
+**task への紐づけ（[#303](https://github.com/Kewton/commandmate-skills/issues/303)）。** reverify が
+判定し直すのは、前の attempt の裁定で task が閉じた worktree である。前の report の worker 記録から
+task id（`task_id`）が引け、かつ CLI に `verify --task` があるときだけ
+`verify <worktree-id> --task <taskId> --json` で判定する。task id が引けない（古い report・契約なしの
+run で `task_id` が worktree id の場合を含む）ときは従来どおり `verify <worktree-id> --json` である。
+task id があるのに CLI に `--task` が無いときは、第2.5.1節と同じ limitation `verify_task_unsupported`
+を1件記録する。
 
 #### 8.5.1 分割規則
 

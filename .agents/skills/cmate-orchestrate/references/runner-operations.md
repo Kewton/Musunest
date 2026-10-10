@@ -214,6 +214,13 @@ dispatch 側の規約は [dispatch-contract.md](./dispatch-contract.md) 第2.9�
 契約を再送するので余計な差分が生まれる余地も残る。`--reverify` は同じ分割を行い、後半に対して
 **送らずに裁定だけを取り直す**。
 
+**重いゲートを並べると負荷で落ちる repo は `--verify-concurrency <n>`**（[#274](https://github.com/Kewton/commandmate-skills/issues/274)）。
+`--reverify` は対象 Issue を既定で**同時に**判定する。`cargo test --all-targets` のように実行時間に依存するテストを
+含むゲートを2件並べると、1件ずつなら通るのに負荷で timeout して `verification_failed` になる。
+`--reverify <dir> --verify-concurrency 1` で1件ずつ判定する。これは plan の値ではなく run の引数なので、
+`--max-parallel` と違って run id にも前回 report との突き合わせにも入らず、付け外しで `--reverify` が拒否されない。
+使った値は limitation `verify_concurrency_limited` に残り、report の並びと verdict は値で変わらない。
+
 **どちらの timeout だったかは、report が言う**（[#179](https://github.com/Kewton/commandmate-skills/issues/179)）。
 runner は wait が timeout した時点で `capture --json` を1回だけ叩き、当該 worker の `worker_liveness`
 （`isRunning` / `isGenerating` / `isPromptWaiting` / `sessionStatus` / 経過秒）と blocking code を書く ——
@@ -252,6 +259,22 @@ runner は wait が timeout した時点で `capture --json` を1回だけ叩き
 
 規則の正本は [dispatch-contract.md](./dispatch-contract.md) 第8.5節。
 
+
+## 8.5 dispatch: plan の一部だけ dispatch する（`--only`）
+
+**条件の揃った Issue だけ先に走らせる（`--only 12,14,15`）** — 5 本の plan のうち 2 本が宣言の不備で
+止まっているとき、plan を組み直さずに残り 3 本を dispatch できる。
+
+1. `--only` には plan にある番号だけを書く。無い番号は `invalid_input`。
+2. 選んだ Issue が依存する Issue も一緒に選ぶ（前回 attempt が pass させた依存を `--resume` で引き継ぐ場合は
+   不要）。選ばないと `invalid_input`（何も dispatch せず、`--out` も作らない。detail の
+   「#N depends on #M」を見て足すか外す）。
+3. 走った結果は report の `plan_scope` で読む。`deselected` の Issue は worker_state `not_dispatched`
+   （note `excluded by --only`）で、失敗ではなく**未着手**である。選んだ Issue がすべて pass なら `success`。
+4. 残りは、条件を直したあとに `--resume <前回の --out> --only <残り>`（部分集合を広げる）か、
+   `--only` を付けずに `--resume`（前回の部分集合を引き継ぐ）で進める。
+
+正本: [dispatch-contract.md](./dispatch-contract.md) 第3.0.5節。
 
 ## 9. dispatch: 契約経路とフォールバック
 

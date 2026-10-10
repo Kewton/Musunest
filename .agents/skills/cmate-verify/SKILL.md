@@ -36,8 +36,9 @@ allowed-tools: Bash(.claude/skills/cmate-verify/scripts/*), Bash(.agents/skills/
 **テストは package に同梱しない**（Issue #69。後述「テスト」）。
 
 install 先は `.claude/skills/cmate-verify/` と `.agents/skills/cmate-verify/` の両方で、
-中身は byte-identical である（Claude は前者、Codex は後者を読む）。以下のコマンド例は
-`.claude/...` で書いてあるが、`.agents/...` に読み替えても同じものが走る。
+中身は byte-identical である（Claude は前者、Codex と Command Code は後者を読む）。以下のコマンド例の
+`<skills-root>` は、worktree の root（`git rev-parse --show-toplevel`）の下の `.agents/skills` と
+`.claude/skills` のうち `cmate-verify/SKILL.md` が**在る方**である。どちらから実行しても同じものが走る。
 
 ## 手順 1: init（`.commandmate/verify.yaml` が無い場合）
 
@@ -68,7 +69,8 @@ UAT / 人間の確認に残す。担保されない条件を黙って落とす�
 ## 手順 2: run（verify.yaml がある場合）
 
 ```bash
-.claude/skills/cmate-verify/scripts/verify-run.sh --cwd <worktree-path>
+<skills-root>/cmate-verify/scripts/verify-run.sh --cwd <worktree-path>
+# 例: .agents/skills/cmate-verify/scripts/verify-run.sh または .claude/skills/cmate-verify/scripts/verify-run.sh
 ```
 
 | オプション | 意味 |
@@ -166,6 +168,7 @@ cmate-verify-advisor はこの集合に追随する**（`tests/fixtures/cmate-ve
 | `options` | `maxLogTailBytes` | 整数 0..1048576 | 8192 |
 | `options` | `requireCommit` | `true` / `false` | false |
 | `options` | `requireEnvClean` | `true` / `false` | false |
+| `options` | `envCleanIgnoreHomeEntries` | 文字列のリスト（フロー `[...]` または `- ` の縦列挙）。各要素は空文字・`.`・`..`・`/` を含む値を禁止、最大 32 件。受理するだけで本ランナーは判定に使わない | `[]` |
 
 このランナーは awk / sed で読むため、**YAML のサブセットしか受け付けない**:
 

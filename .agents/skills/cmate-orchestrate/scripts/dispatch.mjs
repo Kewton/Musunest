@@ -72,6 +72,10 @@ import {
   issueOf,
   matchUpstreamFault,
   parseCliJson,
+  SEND_NOT_READY_EXIT,
+  SEND_NOT_READY_RETRY_DELAY_MS,
+  sendNotReadyKind,
+  sendPauseMs,
   parseGateLine,
   redact,
   redactionsList,
@@ -80,6 +84,8 @@ import {
   isOverBroadScope,
   readVerifyConfigGates,
   VERIFY_CONFIG_RELATIVE,
+  workerMessageProblem,
+  WORKER_MESSAGE_KEYS,
 } from './lib.mjs';
 
 const DISPATCH_SCHEMA_VERSION = 1;
@@ -417,6 +423,18 @@ Options:
                          record is transcribed unchanged. Artifacts append under
                          <dir>/${RESUME_ATTEMPT_PREFIX}<n>/ exactly as a resume's
                          do. Mutually exclusive with --out and --resume.
+  --only <issues>        Dispatch only these issues of the plan (comma-separated
+                         issue numbers, e.g. --only 12,14,15) without re-planning.
+                         Refused, with nothing dispatched and --out unconsumed,
+                         (invalid_input) when a number is not in the plan, or a
+                         selected issue depends (plan.dependencies, not a
+                         lexical-only edge) on an unselected issue that no
+                         prior attempt passed (--resume carries that pass). The
+                         report keeps the whole plan and the chosen subset
+                         (plan_scope); unselected issues are recorded as
+                         not_dispatched, not as a failure. With
+                         --resume / --reverify and no --only, the subset the
+                         prior report recorded is kept.
   --cli <launcher>       The CommandMate launcher to drive: an executable plus
                          fixed leading arguments, split on whitespace and run
                          WITHOUT a shell — "commandmate" (default),
@@ -517,7 +535,27 @@ Options:
                          before giving up with no commit (default ${DEFAULT_MAX_TURNS}).
                          The plan's profile may declare this default instead
                          (dispatch_defaults.max_turns); the flag always wins.
+  --nudge-message <text> Appended after the default supervision nudge (which always
+                         keeps its "single commit is the completion signal" line).
+                         The plan's profile may declare this instead
+                         (worker_messages.nudge); the flag always wins. Non-blank,
+                         at most 2000 characters.
+  --verify-concurrency <n>
+                         With --reverify only: re-judge at most <n> issues at a
+                         time (a positive integer; default: all at once). For
+                         gates heavy enough that two runs side by side fail on
+                         load, not on the change (1 = one at a time). Not a plan
+                         value and not part of the run id: the report's order and
+                         verdicts do not depend on it. Refused without --reverify.
   --poll-limit <n>       Retained for compatibility; wait now blocks (default ${DEFAULT_POLL_LIMIT}).
+  --interrupt-stale-prompt
+                         Before a worker's first send, dispatch reads the
+                         session (capture --json). A question or selection screen
+                         left by an earlier turn stops that issue with
+                         stale_prompt_on_session (the default). With this flag it
+                         runs "commandmate interrupt" instead, re-reads the
+                         session, and sends only once the composer is back. The
+                         question is never answered.
   --help                 Show this help.
 
 The dispatch runner mutates: it sends work to real workers, nudging each until it
@@ -535,6 +573,7 @@ function parseCli(argv) {
         out: { type: 'string' },
         resume: { type: 'string' },
         reverify: { type: 'string' },
+        only: { type: 'string' },
         cli: { type: 'string' },
         git: { type: 'string' },
         gh: { type: 'string' },
@@ -557,6 +596,9 @@ function parseCli(argv) {
         'wait-timeout': { type: 'string' },
         'max-turns': { type: 'string' },
         'poll-limit': { type: 'string' },
+        'verify-concurrency': { type: 'string' },
+        'interrupt-stale-prompt': { type: 'boolean' },
+        'nudge-message': { type: 'string' },
         help: { type: 'boolean' },
       },
     });
@@ -572,6 +614,25 @@ function positiveInt(raw, name, fallback) {
     throw new SkillError('invalid_input', `${name} must be a positive integer`, 3);
   }
   return Number.parseInt(raw, 10);
+}
+
+// Runs `fn` over `items` with at most `limit` in flight, starting them in order.
+// A null limit is the unbounded form (every item starts at once), which is what a
+// caller that never stated a width gets.
+async function forEachLimited(items, limit, fn) {
+  if (limit === null) {
+    await Promise.all(items.map(fn));
+    return;
+  }
+  let next = 0;
+  const lane = async () => {
+    while (next < items.length) {
+      const item = items[next];
+      next += 1;
+      await fn(item);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
 }
 
 // `--contract-mode` is validated here rather than defaulted silently: a typo'd
@@ -771,6 +832,15 @@ function resolveInputs(parsed) {
         + 'ready gate ("every dependency completed AND verified") would refuse to re-judge exactly the issues downstream of the failure the '
         + 'reverify is being run to clear. Re-judge with --reverify alone, then dispatch what is left with --schedule dag', 3);
   }
+  // A run argument, never a plan value (Issue #274): it is not hashed into the
+  // run id and a --reverify does not match it against the prior report. Only a
+  // reverify judges in a fan-out that could be narrowed, so it is refused elsewhere
+  // rather than accepted and ignored.
+  const verifyConcurrency = positiveInt(values['verify-concurrency'], 'verify-concurrency', null);
+  if (verifyConcurrency !== null && values.reverify === undefined) {
+    throw new SkillError('invalid_input',
+      '--verify-concurrency is only meaningful with --reverify: it bounds how many re-judgements run at once, and no other mode re-judges', 3);
+  }
   const unattended = resolveUnattended(values);
   // The three-state reading of every flag a profile may also declare (Issue
   // #180). `stated` is the answer to "did the operator type this?", which is a
@@ -781,11 +851,17 @@ function resolveInputs(parsed) {
     waitTimeout: values['wait-timeout'] === undefined ? null : positiveInt(values['wait-timeout'], 'wait-timeout', null),
     maxTurns: values['max-turns'] === undefined ? null : positiveInt(values['max-turns'], 'max-turns', null),
   };
+  if (values['nudge-message'] !== undefined) {
+    const problem = workerMessageProblem(values['nudge-message']);
+    if (problem !== null) throw new SkillError('invalid_input', `--nudge-message ${problem}`, 3);
+  }
   return {
     planPath: values.plan,
     outDir: values.out ?? null,
     resumeDir: values.resume ?? null,
     reverifyDir: values.reverify ?? null,
+    verifyConcurrency,
+    only: resolveOnly(values.only),
     cliArgv,
     cli: cliArgv.join(' '),
     git: values.git ?? 'git',
@@ -807,11 +883,244 @@ function resolveInputs(parsed) {
     waitTimeout: stated.waitTimeout ?? DEFAULT_WAIT_TIMEOUT_SECONDS,
     maxTurns: stated.maxTurns ?? DEFAULT_MAX_TURNS,
     pollLimit: positiveInt(values['poll-limit'], 'poll-limit', DEFAULT_POLL_LIMIT),
+    interruptStalePrompt: Boolean(values['interrupt-stale-prompt']),
     stated,
     // Filled in by applyDispatchDefaults, and read by emptyReport. Empty on a run
     // whose profile declares nothing, which is what keeps such a run's report
     // byte-for-byte the one it was before this field existed.
     dispatchDefaultNotes: [],
+    // CLI flag → profile (applyWorkerMessages) → nothing. Appended to NUDGE_MESSAGE.
+    nudgeExtra: values['nudge-message'] ?? null,
+    nudgeExtraSource: values['nudge-message'] === undefined ? null : '--nudge-message',
+    // Filled in by run() when `--only` (or a resumed subset) narrowed the plan;
+    // null otherwise, so emptyReport writes nothing for an ordinary run.
+    onlyScope: null,
+    onlyCarried: new Map(),
+    // Filled in by run() from the plan's `dispatch_excluded: 'human_only'` marks
+    // (Issue #286); empty on a plan without one, which writes nothing.
+    humanOnly: { issues: [], dependencies: [] },
+  };
+}
+
+// =============================================================================
+// human-only issues: in the plan, never dispatched (Issue #286)
+// =============================================================================
+//
+// The planner marks an issue whose labels hold `human-only` with
+// `dispatch_excluded: 'human_only'`, keeps it (and its edges) in the plan so a
+// reader sees the human work, and leaves it out of every wave. This runner reads
+// the MARK, never the labels: the plan is the approved artifact, and a plan from
+// a planner that predates the mark is dispatched as it was written.
+//
+// It is done the way `--only` is done, and before it: the plan the runner works
+// on loses the marked issues and every edge touching one, once, so the barrier,
+// the dag scheduler, the pre-flight, the locks, `--only` and the report all see
+// the same smaller plan. The marked issues come back as `not_dispatched` records
+// in the trailing waves[] entry, and an edge from a dispatched issue to one of
+// them is NOT waited for — this runner cannot see a person finish, the same
+// reason an edge to an issue outside the plan waits for nothing — but it is
+// named in the `human_only_dependency` limitation, so the reader who merges the
+// dependent knows what to confirm first.
+
+function excludeHumanOnly(plan) {
+  const marked = new Set(plan.issues
+    .filter((issue) => issue?.dispatch_excluded === 'human_only')
+    .map((issue) => issue.number));
+  if (marked.size === 0) return { plan, issues: [], dependencies: [] };
+  const dependencies = (plan.dependencies ?? [])
+    .filter((edge) => !marked.has(edge.issue) && marked.has(edge.depends_on))
+    .map((edge) => ({ issue: edge.issue, depends_on: edge.depends_on }));
+  return {
+    plan: {
+      ...plan,
+      issues: plan.issues.filter((issue) => !marked.has(issue.number)),
+      dependencies: (plan.dependencies ?? []).filter((edge) => !marked.has(edge.issue) && !marked.has(edge.depends_on)),
+      waves: plan.waves.map((wave) => wave.filter((number) => !marked.has(number))).filter((wave) => wave.length > 0),
+    },
+    issues: [...marked].sort((a, b) => a - b),
+    dependencies,
+  };
+}
+
+function humanOnlyWorkers(inputs) {
+  return inputs.humanOnly.issues.map((number) => ({
+    issue: number,
+    task_id: null,
+    worker_state: 'not_dispatched',
+    verification: { ran: false, report_schema_version: null, outcome: 'not_run', gates: [], checks: [] },
+    prompt: { detected: false, excerpt: null },
+    note: 'human-only: the plan marks this issue dispatch_excluded (labelled human-only, a person does it), so no worker was sent and it was not judged (not a failure)',
+  }));
+}
+
+// The limitations a plan with human-only issues adds, or none. The dependency
+// line names only the dependents THIS run dispatches (an `--only` subset may
+// have left one out, and a line about an issue the run never touched is noise).
+function humanOnlyLimitations(inputs, plan) {
+  const { issues, dependencies } = inputs.humanOnly;
+  if (issues.length === 0) return [];
+  const list = (numbers) => numbers.map((n) => `#${n}`).join(', ');
+  const out = [{
+    code: 'human_only_excluded',
+    detail: `the plan marks ${list(issues)} human-only (dispatch_excluded): a person does ${issues.length === 1 ? 'it' : 'them'}, so this run sent no worker and judged nothing there. `
+      + 'They are recorded in a trailing waves[] entry as `not_dispatched` ("human-only"); it is not a failure and not a blocking reason',
+  }];
+  const inRun = new Set(plan.issues.map((issue) => issue.number));
+  const edges = dependencies.filter((edge) => inRun.has(edge.issue));
+  if (edges.length > 0) {
+    out.push({
+      code: 'human_only_dependency',
+      detail: `${edges.map((edge) => `#${edge.issue} depends on human-only #${edge.depends_on}`).join('; ')}. `
+        + 'This run did not wait for the human-only side (it cannot see a person finish, the same as a dependency outside the plan): '
+        + 'confirm that work is done before merging the dependent',
+    });
+  }
+  return out;
+}
+
+// =============================================================================
+// --only: dispatch a subset of the plan (CommandMate#3008)
+// =============================================================================
+//
+// A plan is approved as a whole, but the set of issues that are READY is not: a
+// declaration outside the scope or an unmet condition can hold back two of five,
+// and the only way forward used to be re-planning the other three. `--only`
+// restricts THIS run to the named issues and leaves the plan file untouched.
+//
+// It is done by narrowing the plan the runner works on (issues, waves,
+// dependencies) once, before anything else reads it, so the barrier, the
+// pre-flight, the locks and the report all see the same smaller plan and no
+// second code path exists to drift from the first.
+//
+// A refusal is WHOLE, never partial: a selected issue whose dependency is not
+// selected is not silently dropped from the run, because a run that quietly
+// dispatches two of the three the operator typed is a run nobody can reconstruct
+// from the argv. Both refusals happen before `--out` is created, so the same
+// command can be corrected and re-run.
+
+function resolveOnly(raw) {
+  if (raw === undefined) return null;
+  const tokens = raw.split(',').map((token) => token.trim());
+  if (tokens.some((token) => !/^\d+$/.test(token) || Number.parseInt(token, 10) < 1)) {
+    throw new SkillError('invalid_input',
+      '--only must be a comma-separated list of issue numbers (e.g. --only 12,14,15)', 3);
+  }
+  return [...new Set(tokens.map((token) => Number.parseInt(token, 10)))].sort((a, b) => a - b);
+}
+
+// The prior report `--resume` / `--reverify` continues, or null on a first
+// attempt. Read here (and again by buildResume) because the subset a resume runs
+// is decided BEFORE the plan is narrowed, and the narrowed plan is what
+// buildResume reads.
+function priorForOnly(inputs, plan) {
+  const reverifying = inputs.reverifyDir !== null;
+  const dir = reverifying ? inputs.reverifyDir : inputs.resumeDir;
+  if (dir === null) return null;
+  const op = reverifying ? REVERIFY_OP : RESUME_OP;
+  const found = priorReport(dir, op);
+  const doc = loadResumeReport(found.path, plan, op);
+  return { attempt: found.attempt, doc, records: priorWorkerRecords(doc) };
+}
+
+// Returns { plan, scope, carried }. `scope` is null when no subset applies, which
+// is what keeps a run without the flag byte-for-byte the run it was before it
+// existed. `carried` maps a DESELECTED issue to the pass record a prior attempt
+// left for it: that record is what satisfies a selected issue's dependency on it,
+// and it is transcribed into this report so a later reader that takes the last
+// record of an issue never finds "excluded" written over a pass.
+function restrictToOnly(inputs, plan) {
+  const prior = priorForOnly(inputs, plan);
+  let selected = inputs.only;
+  let inherited = false;
+  if (selected === null && prior !== null) {
+    const recorded = prior.doc.plan_scope?.selected;
+    if (Array.isArray(recorded) && recorded.length > 0 && recorded.every(Number.isInteger)) {
+      selected = [...recorded].sort((a, b) => a - b);
+      inherited = true;
+    }
+  }
+  if (selected === null) return { plan, scope: null, carried: new Map() };
+
+  const humanOnly = selected.filter((number) => inputs.humanOnly.issues.includes(number));
+  if (humanOnly.length > 0) {
+    throw new SkillError('invalid_input',
+      `--only names ${humanOnly.map((n) => `#${n}`).join(', ')}, which the plan marks human-only (dispatch_excluded): a person does `
+        + `${humanOnly.length === 1 ? 'it' : 'them'} and no run dispatches ${humanOnly.length === 1 ? 'it' : 'them'}. Nothing was dispatched: drop ${humanOnly.length === 1 ? 'it' : 'them'} from --only`, 3);
+  }
+  const planIssues = plan.issues.map((issue) => issue.number).sort((a, b) => a - b);
+  const known = new Set(planIssues);
+  const unknown = selected.filter((number) => !known.has(number));
+  if (unknown.length > 0) {
+    throw new SkillError('invalid_input',
+      `--only names ${unknown.map((n) => `#${n}`).join(', ')}, which ${unknown.length === 1 ? 'is' : 'are'} not in the plan `
+        + `(the plan holds ${planIssues.map((n) => `#${n}`).join(', ')})`, 3);
+  }
+  const chosen = new Set(selected);
+  const carried = new Map();
+  if (prior !== null) {
+    for (const number of planIssues) {
+      const record = prior.records.get(number);
+      if (!chosen.has(number) && record !== undefined && isCarryable(record)) carried.set(number, carriedWorkerRecord(record, prior.attempt));
+    }
+  }
+  const missing = [];
+  for (const edge of plan.dependencies ?? []) {
+    // Only the edges the scheduler honours: a lexical-only edge is advisory, and
+    // an edge naming an issue outside the plan waits for nothing. A dependency a
+    // prior attempt already passed is satisfied, not missing.
+    if (edge.basis === 'lexical' || !chosen.has(edge.issue) || chosen.has(edge.depends_on) || !known.has(edge.depends_on)) continue;
+    if (carried.has(edge.depends_on)) continue;
+    missing.push(`#${edge.issue} depends on #${edge.depends_on}`);
+  }
+  if (missing.length > 0) {
+    throw new SkillError('invalid_input',
+      `--only selects ${selected.map((n) => `#${n}`).join(', ')}, but ${[...new Set(missing)].join('; ')}, which is not selected `
+        + 'and has no passed record from a prior attempt to --resume. Nothing was dispatched: add the dependency to --only, or drop the dependent issue from it', 3);
+  }
+  const waves = plan.waves.map((wave) => wave.filter((number) => chosen.has(number))).filter((wave) => wave.length > 0);
+  if (selected.some((number) => !waves.flat().includes(number))) {
+    throw new SkillError('plan_invalid', '--only names an issue that no wave of the plan schedules', 3);
+  }
+  const narrowed = {
+    ...plan,
+    issues: plan.issues.filter((issue) => chosen.has(issue.number)),
+    dependencies: (plan.dependencies ?? []).filter((edge) => chosen.has(edge.issue) && chosen.has(edge.depends_on)),
+    waves,
+  };
+  return {
+    plan: narrowed,
+    scope: {
+      plan_issues: planIssues,
+      selected,
+      deselected: planIssues.filter((number) => !chosen.has(number)),
+      inherited,
+    },
+    carried,
+  };
+}
+
+// The trailing wave entry that accounts for every deselected issue: a pass a
+// prior attempt left is transcribed, everything else is `not_dispatched` with a
+// note saying WHY. Not a blocking reason: the operator asked for the subset.
+function onlyExcludedWorkers(inputs) {
+  return inputs.onlyScope.deselected.map((number) => inputs.onlyCarried.get(number) ?? {
+    issue: number,
+    task_id: null,
+    worker_state: 'not_dispatched',
+    verification: { ran: false, report_schema_version: null, outcome: 'not_run', gates: [], checks: [] },
+    prompt: { detected: false, excerpt: null },
+    note: 'excluded by --only: this issue was not selected for this run, so it was neither dispatched nor judged (not a failure)',
+  });
+}
+
+function onlyLimitation(scope) {
+  const list = (numbers) => (numbers.length === 0 ? 'なし' : numbers.map((n) => `#${n}`).join(', '));
+  return {
+    code: 'only_subset',
+    detail: `${scope.inherited ? 'the subset recorded by the prior attempt (--only was not typed again)' : '--only'}: this run dispatches ${list(scope.selected)} `
+      + `of the plan's ${list(scope.plan_issues)}; NOT dispatched, and not judged here: ${list(scope.deselected)}. `
+      + 'They are recorded in a trailing waves[] entry as `not_dispatched` ("excluded by --only") or, when a prior attempt already passed them, as that carried record; '
+      + 'either way it is not a failure and not a blocking reason',
   };
 }
 
@@ -979,6 +1288,45 @@ function applyDispatchDefaults(inputs, plan) {
   }
 }
 
+// worker_messages (CommandMate#3009): text appended to the supervision nudge.
+// Precedence is flag → profile → nothing, and the flag is already in `inputs`.
+// A malformed declaration is `plan_invalid` for the reason readDispatchDefaults
+// gives. Only the length is recorded, never the text.
+function applyWorkerMessages(inputs, plan) {
+  const raw = plan.profile?.worker_messages;
+  if (raw !== undefined) {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new SkillError('plan_invalid',
+        `plan.profile.worker_messages must be a JSON object of ${WORKER_MESSAGE_KEYS.join(' / ')}, got ${JSON.stringify(raw)}`, 3);
+    }
+    for (const key of Object.keys(raw)) {
+      if (!WORKER_MESSAGE_KEYS.includes(key)) {
+        throw new SkillError('plan_invalid',
+          `plan.profile.worker_messages has an unknown key "${key}"; this runner understands ${WORKER_MESSAGE_KEYS.join(', ')} (fix_nudge is the uat runner's and is not used here)`, 3);
+      }
+    }
+    for (const key of WORKER_MESSAGE_KEYS) {
+      if (!(key in raw)) continue;
+      const problem = workerMessageProblem(raw[key]);
+      if (problem !== null) throw new SkillError('plan_invalid', `plan.profile.worker_messages.${key} ${problem}`, 3);
+    }
+  }
+  const declared = raw?.nudge;
+  if (declared === undefined && inputs.nudgeExtra === null) return;
+  const profileId = String(plan.profile?.id ?? 'unknown');
+  if (inputs.nudgeExtra === null) {
+    inputs.nudgeExtra = declared;
+    inputs.nudgeExtraSource = 'profile';
+  }
+  const detail = inputs.nudgeExtraSource === '--nudge-message'
+    ? `nudge=${inputs.nudgeExtra.length} chars (--nudge-message${declared === undefined ? '' : ` overrode profile ${profileId}'s worker_messages.nudge`})`
+    : `nudge=${inputs.nudgeExtra.length} chars (from profile ${profileId})`;
+  inputs.dispatchDefaultNotes.push({
+    code: 'worker_messages_applied',
+    detail: `${detail}, appended after the default supervision nudge; the default's single-commit completion line is always sent`,
+  });
+}
+
 // `auto_yes=true (from the profile)` / `max_turns=10 overridden by --max-turns (8)`.
 // The declared value is named even when it lost, because the operator reading
 // this is deciding whether their flag was the one that mattered.
@@ -1037,7 +1385,12 @@ function validatePlan(plan) {
     throw new SkillError('plan_invalid', 'plan.max_parallel is out of the 1-3 range', 3);
   }
   if (!Array.isArray(plan.waves) || plan.waves.length === 0) {
-    throw new SkillError('plan_invalid', 'plan.waves is empty', 3);
+    // A plan whose every issue is human-only has no wave by construction (Issue #286).
+    const allHumanOnly = Array.isArray(plan.issues) && plan.issues.length > 0
+      && plan.issues.every((issue) => issue?.dispatch_excluded === 'human_only');
+    throw new SkillError('plan_invalid', allHumanOnly
+      ? 'plan.waves is empty: every issue of the plan is marked human-only (dispatch_excluded), so there is nothing to dispatch'
+      : 'plan.waves is empty', 3);
   }
   for (const wave of plan.waves) {
     if (!Array.isArray(wave) || wave.length === 0) {
@@ -2583,6 +2936,98 @@ function probeContractSupport(inputs) {
   };
 }
 
+// Can a verdict be bound to a contract task that is no longer in flight? (#303)
+//
+// `wait --verify` binds only to a task that is still running / waiting_input /
+// verifying. The first verdict moves the task to succeeded / failed, and a plain
+// re-instruction `send` creates no task, so every LATER `wait --verify` runs
+// detached: its scope gate is SKIPped instead of judged against the contract, its
+// env-clean gate has no baseline (an ERROR, so exit 20 on a fixed worker), and its
+// gate set is the whole verify.yaml rather than the contract's `verify.gates`
+// (Kewton/CommandMate#3118). `verify <id> --task <taskId>` (CommandMate 0.43.0+)
+// binds to a finished task too, and without `--gates` runs the contract's gates
+// plus the mandatory builtins.
+//
+// Asked ONCE per process, lazily, and the same way `probeContractSupport` asks:
+// does `verify --help` list `--task` (a version number is never compared). Lazily
+// because only a run that re-judges needs the answer, and a run that passes on its
+// first turn must call exactly what it called before.
+//
+// The `verify --help` text is read once and shared with the `verify history` /
+// `verify show` probe below (#306), so a run that needs both still asks once.
+let verifyHelpText = null;
+function readVerifyHelp(inputs) {
+  if (verifyHelpText === null) {
+    const help = runCm(inputs, ['verify', '--help']);
+    verifyHelpText = help.ok ? `${help.stdout}${help.stderr}` : '';
+  }
+  return verifyHelpText;
+}
+
+function probeVerifyTaskSupport(inputs) {
+  return readVerifyHelp(inputs).includes('--task');
+}
+
+// Can the run that reached the FIRST verdict be read back? (#306)
+//
+// A first-turn exit 20 used to be broken down by running the gates AGAIN
+// (`verify [--task] --json`). A gate that fails only once — a test that falls
+// over under load, a teardown race, an env-clean tripped by something outside the
+// worktree — passes on that second run, so the re-instruction named no gate at
+// all and the worker was left guessing. `verify history` / `verify show`
+// (CommandMate 0.21.0+, #1593) read the run that already happened instead.
+// Asked the way `--task` is asked: does `verify --help` list both subcommands
+// (commander prints them under "Commands:"); a version number is never compared.
+function probeVerifyHistorySupport(inputs) {
+  const help = readVerifyHelp(inputs);
+  return /^\s*history\b/m.test(help) && /^\s*show\b/m.test(help);
+}
+
+// Set when a first-turn 20 had to be broken down by re-running the gates because
+// this commandmate cannot read the run back. Stated once per report, like
+// `verify_task_unsupported`: it is a fact about the CLI, not about a worker.
+let verifyHistoryUnavailableUsed = false;
+
+function recordVerifyHistoryRead(report) {
+  if (!verifyHistoryUnavailableUsed) return;
+  report.limitations.push({
+    code: 'verify_history_unsupported',
+    detail: 'the failing gates of a first-turn verification failure were named by RE-RUNNING the gates: this commandmate has no `verify history` / '
+      + '`verify show` (CommandMate < 0.21.0), so the run that reached the verdict could not be read back — a gate that failed only once '
+      + '(load, a teardown race, an outside env-clean) can pass on the re-run and leave the re-instruction without its breakdown',
+  });
+}
+
+// Set when a verdict that should have been bound to the contract task was read
+// from an unbound run because the CLI has no `verify --task`. Stated once per
+// report (recordVerifyTaskBinding), never per worker: it is a fact about the CLI.
+let unboundRejudgeUsed = false;
+
+function recordVerifyTaskBinding(report) {
+  if (!unboundRejudgeUsed) return;
+  report.limitations.push({
+    code: 'verify_task_unsupported',
+    detail: 'a verdict reached after a re-instruction was NOT bound to the contract task: this commandmate has no `verify --task` (CommandMate < 0.43.0), '
+      + 'so it was read from `wait --verify` / `verify --json`, which cannot bind to a task the first verdict already closed — its scope gate is not '
+      + 'judged against the contract, env-clean has no baseline, and the gates run are verify.yaml\'s rather than the contract\'s verify.gates',
+  });
+}
+
+// The task id a `verify --task` may be given, or null when the run must stay on
+// the unbound path. Only a REAL task id qualifies: without a contract `task_id`
+// carries the worktree id (no task exists), and that must never be passed as one.
+// `rejudge` marks a call whose VERDICT should have been bound (a turn after a
+// re-instruction, a --reverify): only those make an unsupporting CLI a limitation.
+// Naming the failing gates of a first-turn 20 was unbound before #303 as well.
+function bindableTaskId(inputs, taskId, worktreeId, { rejudge = false } = {}) {
+  if (typeof taskId !== 'string' || taskId === '' || taskId === worktreeId) return null;
+  if (!probeVerifyTaskSupport(inputs)) {
+    if (rejudge) unboundRejudgeUsed = true;
+    return null;
+  }
+  return taskId;
+}
+
 // =============================================================================
 // Execution contract generation (CommandMate task contract v1)
 // =============================================================================
@@ -2748,6 +3193,17 @@ function contractScopeDroppedDetail(number, declared, dropped) {
     + `and cannot widen it from inside the worktree. Declare fewer files (${MAX_SCOPE_PATTERNS} is CommandMate's contract bound, `
     + 'not this runner\'s — split the issue) or write the offending paths as plain repository-relative paths, then re-plan',
   );
+}
+
+// `scope.deny` for one issue: the paths the issue itself forbids (Issue #301),
+// carried verbatim from the plan's optional `scope_deny`. The planner already
+// refused every shape the contract cannot carry (`scope_deny_untransferable`),
+// so this only normalises — trim, de-duplicate, sort — like `scope.allow`.
+function contractScopeDeny(issue) {
+  const raw = Array.isArray(issue.scope_deny) ? issue.scope_deny : [];
+  const deny = [...new Set(raw.filter((entry) => typeof entry === 'string').map((entry) => entry.trim()))]
+    .filter((entry) => entry !== '');
+  return deny.sort();
 }
 
 function contractTitle(issue) {
@@ -3174,8 +3630,14 @@ function buildContractGoal(plan, issue, requiredGates = [], workerMethod = null,
     bullets(issue.acceptance_criteria, 'Derive from the issue; if unclear, stop and ask.'),
     '',
     '## Files you may change',
-    bullets(issue.suspected_files, 'Unknown — inspect first; do not touch files owned by another issue.'),
+    bullets(declaredScopeFiles(issue), 'Unknown — inspect first; do not touch files owned by another issue.'),
+    ...derivedScopeNote(issue),
     '',
+    ...(contractScopeDeny(issue).length === 0 ? [] : [
+      '## Files you must not change',
+      bullets(contractScopeDeny(issue), ''),
+      '',
+    ]),
     ...(requiredGates.length === 0 ? [] : [
       '## Acceptance gates this issue declared',
       ...requiredGates.map((id) => `- ${id}`),
@@ -3294,7 +3756,13 @@ function buildTaskContract(plan, issue, inputs, requiredGates = [], workerMethod
     lines.push('  allow:');
     for (const pattern of allow) lines.push(`    - ${yamlString(pattern)}`);
   }
-  lines.push('  deny: []');
+  const deny = contractScopeDeny(issue);
+  if (deny.length === 0) {
+    lines.push('  deny: []');
+  } else {
+    lines.push('  deny:');
+    for (const pattern of deny) lines.push(`    - ${yamlString(pattern)}`);
+  }
   // `verify` is omitted unless the operator named gates: an id that does not
   // exist in the repository's verify.yaml makes `send --contract` exit 2.
   // Omitting the key means "run every declared gate", which is the stricter
@@ -3569,6 +4037,36 @@ function placeContract(worktreePath, issueNumber, text, artifactDir) {
 function bullets(items, fallback) {
   if (!Array.isArray(items) || items.length === 0) return `- ${fallback}`;
   return items.map((item) => `- ${item}`).join('\n');
+}
+
+// The files the ISSUE declared, without the ones the planner derived from them
+// (CommandMate #3004). `scope_defaults` — same-directory lockfiles and the
+// conventional test paths of every declared source file (ADR layer L1) — is a
+// PERMISSION the contract's `scope.allow` still carries in full; listing it in
+// the goal presented it as work. Measured on Kewton/Musunest: 55 / 61 / 60
+// listed paths for 20 / 22 / 22 real files (#180 / #182 / #181), so the goal
+// read as three times the work, the 8000-character cap was spent on files that
+// do not exist, and "is this dispatchable" was judged on the inflated number.
+// A plan without `scope_defaults` (written before #44) lists every entry, as
+// before. A test path the issue itself declared is a declared file and stays.
+function declaredScopeFiles(issue) {
+  const files = Array.isArray(issue.suspected_files) ? issue.suspected_files : [];
+  const derived = new Set(Array.isArray(issue.scope_defaults) ? issue.scope_defaults : []);
+  return files.filter((file) => !derived.has(file));
+}
+
+// One line saying the derived allowances exist and what they are for, so a
+// worker that needs a lockfile or a test beside a declared file knows it may
+// write one — without the goal enumerating paths most of which never exist.
+function derivedScopeNote(issue) {
+  const files = new Set(Array.isArray(issue.suspected_files) ? issue.suspected_files : []);
+  const derived = (Array.isArray(issue.scope_defaults) ? issue.scope_defaults : []).filter((file) => files.has(file));
+  if (derived.length === 0) return [];
+  return [
+    `Also allowed, not listed: ${derived.length} path(s) the planner derived from the files above (lockfiles`,
+    'beside a dependency manifest, conventional test paths beside a source file). They are permissions,',
+    'not work items: write one only if the task needs it.',
+  ];
 }
 
 // Everything a worker needs to act on one issue, drawn only from the plan. It is
@@ -3881,7 +4379,7 @@ function autoYesSendFlags(inputs) {
 // purpose. The re-send below stays plain for the same reason — it exists to submit
 // a message the first send may have left in the input box, not to re-arm anything.
 async function sendAndConfirm(inputs, worktreeId, message, { armAutoYes = false } = {}) {
-  const first = await runCmAsync(inputs, ['send', worktreeId, message, ...(armAutoYes ? autoYesSendFlags(inputs) : [])]);
+  const first = await sendRetryingNotReady(inputs, worktreeId, ['send', worktreeId, message, ...(armAutoYes ? autoYesSendFlags(inputs) : [])]);
   if (!first.ok) {
     return { sent: false, note: excerpt(first.stderr || first.stdout || 'send failed') };
   }
@@ -3895,11 +4393,176 @@ async function sendAndConfirm(inputs, worktreeId, message, { armAutoYes = false 
   return { sent: true, confirmed: false, note: 're-sent after an unconfirmed first send' };
 }
 
+// What happened on the send side of each worker, keyed by worktree id and read
+// back once its supervision has returned (CommandMate#3006 / #3007). A side
+// table rather than a field on every return of the two supervision loops: those
+// have a dozen exits each, and a fact that only some of them remembered to carry
+// is a fact the report would lose on the others.
+const sendTraces = new Map();
+
+function sendTraceOf(worktreeId) {
+  if (!sendTraces.has(worktreeId)) sendTraces.set(worktreeId, { notReadyRetries: [], stalePrompt: null });
+  return sendTraces.get(worktreeId);
+}
+
+function sleepMs(ms) {
+  return ms > 0 ? new Promise((resolveSleep) => { setTimeout(resolveSleep, ms); }) : Promise.resolve();
+}
+
+// ONE `commandmate send`, retried exactly once when the server refused it as
+// not-ready (CommandMate#3006; the rule and both spellings are in lib.mjs
+// `sendNotReadyKind`). Everything else — exit 2 PROMPT_WAITING, a 409, a
+// contract rejection — is returned untouched, as before: those are refusals a
+// second identical send cannot change. A retry that the wall-clock budget cannot
+// fit is not made; the budget's own timeout then reports the stop.
+async function sendRetryingNotReady(inputs, worktreeId, args) {
+  const first = await runCmAsync(inputs, args);
+  const kind = sendNotReadyKind(first);
+  if (kind === null) return first;
+  const delayMs = sendPauseMs(SEND_NOT_READY_RETRY_DELAY_MS);
+  const entry = { kind, delay_ms: delayMs, contract: args.includes('--contract'), outcome: 'not_retried', first: excerpt(first.stderr || first.stdout), second: null };
+  sendTraceOf(worktreeId).notReadyRetries.push(entry);
+  if (wallClockDeadline !== null && Date.now() + delayMs >= wallClockDeadline) return first;
+  await sleepMs(delayMs);
+  if (wallClockExhausted()) return first;
+  const second = await runCmAsync(inputs, args);
+  entry.outcome = second.ok ? 'sent' : 'refused_again';
+  if (!second.ok) entry.second = excerpt(second.stderr || second.stdout);
+  return second;
+}
+
+// The report's half of a not-ready retry: one limitation per retry, sent or not.
+function notReadyRetryLimitation(issue, entry) {
+  const cause = entry.kind === 'session_starting'
+    ? 'the session was still starting (503 SESSION_STARTING)'
+    : 'the agent\'s composer was not ready (prompt not ready)';
+  const outcome = {
+    sent: 'the retry went through',
+    refused_again: `the retry was refused too (${entry.second ?? 'no output'}), so this send failed exactly as it did before the retry existed`,
+    not_retried: 'no retry was made: the --wall-clock-budget could not fit the wait before it',
+  }[entry.outcome];
+  return {
+    code: 'send_retried_not_ready',
+    detail: redact(`#${issue}: a \`commandmate send\` exited ${SEND_NOT_READY_EXIT} because ${cause}; nothing had been typed. `
+      + `Waited ${Math.round(entry.delay_ms / 1000)}s and sent it once more — ${outcome}`
+      + (entry.contract && entry.outcome === 'sent'
+        ? '. The refused `send --contract` had already marked its task failed, so the recorded task id is the retry\'s'
+        : '')),
+  };
+}
+
+// A question left on the session by an EARLIER turn (CommandMate#3007).
+//
+// MEASURED (Kewton/Musunest #201 / #204): a worker that stopped on a question in a
+// previous run still shows it when the next contract is sent to the same session,
+// and the question UI holds the composer. Upstream refuses such a send in two
+// different ways, neither of which says "a stale question": a question the
+// scraper can read is 409 PROMPT_WAITING (exit 2), while one it cannot read — and
+// Command Code's plan review, which the send guard deliberately does not count —
+// only times out the composer wait (exit 99, "prompt not ready"). So dispatch
+// LOOKS before the first send: one `capture --json`, and either of the two flags
+// the server publishes for "a human has to decide on this screen" stops it.
+//
+//   isPromptWaiting        a prompt the server can answer (AskUserQuestion, y/n)
+//   isSelectionListActive  a selection screen it cannot answer for anyone
+//                          (an unreadable question UI, the plan review)
+//
+// The question is NEVER answered — not with --auto-yes either: it belongs to a
+// turn whose context this run does not have. The default is to stop with
+// `stale_prompt_on_session`. `--interrupt-stale-prompt` dismisses it with
+// `commandmate interrupt` (the GUI's interrupt button; Esc on these screens),
+// reads the session again, and sends only when neither flag is up any more.
+//
+// A capture that cannot be read does not stop the send: this check is a
+// narrowing on top of the server's own guard, which is fail-open for the same
+// reason (a false refusal makes a session nobody can talk to), and the send
+// itself is still refused upstream if a readable prompt is there.
+const STALE_PROMPT_SETTLE_MS = 3000;
+const STALE_SCREEN_FLAGS = ['isPromptWaiting', 'isSelectionListActive'];
+
+function readStaleScreen(result) {
+  const payload = parseCliJson(result);
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const flags = STALE_SCREEN_FLAGS.filter((flag) => payload[flag] === true);
+  const question = typeof payload.promptData?.question === 'string' ? payload.promptData.question : '';
+  return {
+    flags,
+    excerpt: excerpt(question || (typeof payload.content === 'string' ? payload.content : '')) ?? 'a question or selection screen',
+  };
+}
+
+// Null when the first send may go ahead; otherwise the stop, already recorded in
+// the worker's send trace.
+async function clearStalePrompt(inputs, worktreeId) {
+  const screen = readStaleScreen(await runCmAsync(inputs, ['capture', worktreeId, '--json']));
+  if (screen === null || screen.flags.length === 0) return null;
+  const record = { flags: screen.flags, excerpt: screen.excerpt, action: 'stopped', detail: null };
+  sendTraceOf(worktreeId).stalePrompt = record;
+  if (!inputs.interruptStalePrompt) return record;
+  const interrupted = await runCmAsync(inputs, ['interrupt', worktreeId]);
+  if (!interrupted.ok) {
+    record.action = 'interrupt_failed';
+    record.detail = `\`commandmate interrupt\` exited ${interrupted.status ?? 'with an error'} (${excerpt(interrupted.stderr || interrupted.stdout) ?? 'no output'})`;
+    return record;
+  }
+  await sleepMs(sendPauseMs(STALE_PROMPT_SETTLE_MS));
+  const after = readStaleScreen(await runCmAsync(inputs, ['capture', worktreeId, '--json']));
+  if (after === null) {
+    record.action = 'not_confirmed';
+    record.detail = 'the session could not be read after the interrupt, so nothing shows the composer is back';
+    return record;
+  }
+  if (after.flags.length > 0) {
+    record.action = 'still_on_screen';
+    record.detail = `the session still reports ${after.flags.join(' / ')} after the interrupt (${after.excerpt})`;
+    return record;
+  }
+  record.action = 'interrupted';
+  return null;
+}
+
+// The supervision result for a worker stopped by a stale screen. `prompt`,
+// because that is what it is — a session waiting on a human's decision — and the
+// halt ladder already stops the run for a human on it.
+function stalePromptStop(stale) {
+  return `a question from an earlier turn is still on this session (${stale.flags.join(' / ')}); nothing was sent and it was not answered`
+    + (stale.detail ? `; --interrupt-stale-prompt did not clear it: ${stale.detail}` : '');
+}
+
+function stalePromptBlockingReason(issue, stale) {
+  return {
+    code: 'stale_prompt_on_session',
+    detail: redact(`#${issue}: before the first send, \`commandmate capture --json\` showed ${stale.flags.join(' and ')} — a question or selection screen `
+      + `left by an earlier turn holds the composer: "${stale.excerpt}". Nothing was sent, and the question was NOT answered. `
+      + (stale.detail
+        ? `--interrupt-stale-prompt was given and did not clear it: ${stale.detail}. Look at the session (\`commandmate capture <worktree-id>\`) before doing anything else. `
+        : 'Look at it (`commandmate capture <worktree-id>`); if it belongs to a turn that is over, dismiss it WITHOUT answering with `commandmate interrupt <worktree-id>` '
+          + '(or re-run with --interrupt-stale-prompt, which does that and sends only once the composer is back); if it still matters, answer it yourself. ')
+      + 'Then re-dispatch this issue with --resume'),
+  };
+}
+
+function stalePromptInterruptedLimitation(issue, stale) {
+  return {
+    code: 'stale_prompt_interrupted',
+    detail: redact(`#${issue}: before the first send the session showed ${stale.flags.join(' and ')} from an earlier turn ("${stale.excerpt}"). `
+      + 'Under --interrupt-stale-prompt it was dismissed with `commandmate interrupt` WITHOUT being answered, a second capture showed the composer back, and only then was this run\'s work sent. '
+      + 'Whatever that question asked was not decided by anyone'),
+  };
+}
+
 // The message that nudges an idle-but-uncommitted worker to keep going.
 const NUDGE_MESSAGE = [
   '続けて作業を進め、この Issue の実装を最後まで完遂してください。',
+  '指示どおりに書けないと分かったら、進めずに止めて報告してください。',
   'まだ変更が commit されていません。完了したら work ブランチに単一 commit を作成してください（それが完了の合図です）。',
 ].join('\n');
+
+// The default nudge, plus the profile's / flag's text appended AFTER it — never
+// instead of it, so the single-commit completion line cannot be dropped.
+function nudgeMessage(inputs) {
+  return inputs.nudgeExtra === null ? NUDGE_MESSAGE : `${NUDGE_MESSAGE}\n${inputs.nudgeExtra}`;
+}
 
 // Sent after a `send --contract` that capture says never started. It doubles as
 // the submission the first send may have left unconfirmed and as a harmless nudge
@@ -3934,7 +4597,11 @@ const COMMIT_REQUEST_MESSAGE = [
 // (see AUTO_YES_ALLOWED_PROMPT_TYPES). This send is where the state is enabled,
 // because it is the send that opens the supervision.
 async function sendContractAndConfirm(inputs, worktreeId, relativeContractPath) {
-  const first = await runCmAsync(inputs, ['send', worktreeId, '--contract', relativeContractPath, ...autoYesSendFlags(inputs)]);
+  // A not-ready retry re-sends WITH --contract, and that is not a double send:
+  // the refused attempt typed nothing, and `send --contract` marks the task it
+  // created `failed` before it exits (CommandMate `send.ts`), so the retry's task
+  // row is the only one anybody works on. `readTaskId` below reads the retry's.
+  const first = await sendRetryingNotReady(inputs, worktreeId, ['send', worktreeId, '--contract', relativeContractPath, ...autoYesSendFlags(inputs)]);
   if (!first.ok) {
     return { sent: false, taskId: null, note: excerpt(first.stderr || first.stdout || 'contract send failed') };
   }
@@ -4046,6 +4713,66 @@ function gatesFromWaitOutput(output, requiredGateIds = new Set()) {
   return capGates(gates);
 }
 
+// The run document `commandmate verify … --json` printed, or null. Parsed
+// regardless of exit status: `verify` exits WITH the verdict, so a failing run
+// exits 20 and still prints its document.
+function parseVerifyDocument(stdout) {
+  try {
+    const run = JSON.parse(stdout);
+    return run !== null && typeof run === 'object' ? run : null;
+  } catch {
+    return null;
+  }
+}
+
+// Is this run the one `wait --verify` produced for THIS task? (#306) A worktree's
+// newest run is not necessarily the verdict's: a run started by hand, by the GUI,
+// or by another process can land between the wait and this read. Only a run that
+// carries this task's id and was started by `wait` is read; anything else is
+// left alone and the gates are re-run as before.
+function isFirstVerdictRun(run, taskId) {
+  return run !== null && typeof run === 'object'
+    && Number.isInteger(run.id) && run.id > 0
+    && run.taskId === taskId
+    && run.trigger === 'wait';
+}
+
+// Read back the run that reached the first verdict: { run, runLabel, note }.
+// `run` is the `verify show --json` document, or null when it could not be read
+// or was not provably this verdict's run; `note` says why (a `checks` line), or
+// is null when nothing was attempted. Never reached without a REAL task id:
+// without a contract there is no task the run could be matched against.
+async function readFirstVerdictRun(inputs, worktreeId, taskId) {
+  const none = { run: null, runLabel: null, note: null };
+  if (typeof taskId !== 'string' || taskId === '' || taskId === worktreeId) return none;
+  if (!probeVerifyHistorySupport(inputs)) {
+    verifyHistoryUnavailableUsed = true;
+    return none;
+  }
+  const fallback = (why) => ({ run: null, runLabel: null, note: `${why}, so the failing gates were named by re-running them` });
+  const listed = await runCmAsync(inputs, ['verify', 'history', '--worktree', worktreeId, '--limit', '1', '--json']);
+  let runs = null;
+  try {
+    runs = listed.ok ? JSON.parse(listed.stdout) : null;
+  } catch {
+    runs = null;
+  }
+  if (!Array.isArray(runs)) return fallback('commandmate verify history could not be read');
+  if (runs.length === 0) return fallback('commandmate verify history listed no run for this worktree');
+  const latest = runs[0];
+  const describe = (run) => `#${redact(String(run?.id ?? '?'))} (task ${redact(String(run?.taskId ?? 'none'))}, trigger ${redact(String(run?.trigger ?? 'unknown'))})`;
+  if (!isFirstVerdictRun(latest, taskId)) {
+    return fallback(`the newest run in commandmate verify history, ${describe(latest)}, is not this task's wait --verify run`);
+  }
+  const shown = await runCmAsync(inputs, ['verify', 'show', String(latest.id), '--json']);
+  const run = shown.ok ? parseVerifyDocument(shown.stdout) : null;
+  if (run === null || !Array.isArray(run.gates)) return fallback(`commandmate verify show ${latest.id} could not be read`);
+  if (run.id !== latest.id || !isFirstVerdictRun(run, taskId)) {
+    return fallback(`commandmate verify show ${latest.id} returned ${describe(run)}, not this task's wait --verify run`);
+  }
+  return { run, runLabel: `commandmate verify show ${latest.id}`, note: null };
+}
+
 // `commandmate verify <worktree-id> --json` prints the verification run document
 // (CommandMate's VerificationRunView), whose `gates[]` is what turns "verification
 // failed" into something a worker can act on.
@@ -4058,24 +4785,50 @@ function gatesFromWaitOutput(output, requiredGateIds = new Set()) {
 // Async on purpose: it runs inside the per-worker supervision that a wave drives
 // concurrently (#1474). A synchronous execFileSync here would block the event loop
 // for a whole gate run and stall every other worker in the wave.
-async function describeFailingGates(inputs, worktreeId) {
-  // `verify` exits with the verdict, so on the very runs this function exists to
-  // read — a failing gate — the exit is 20, not 0. The run document is still on
-  // stdout; parse it regardless of exit status (parseCliJson's ok-check would
-  // discard every failing run and leave the re-instruction with no gate names).
-  const result = await runCmAsync(inputs, ['verify', worktreeId, '--json']);
+//
+// Bound to the contract task when the CLI can (#303): `verify --task` judges the
+// contract's own gates, so the gates it names are the ones the verdict was about,
+// not verify.yaml's whole list. And when the verdict ITSELF came from a
+// `verify --task --json` run (a turn after a re-instruction), that document is
+// passed in as `boundRun` and read as it is — running the gates again would only
+// produce a second run to disagree with the first.
+//
+// And on the FIRST verdict (#306) the run `wait --verify` itself produced is read
+// back first — `verify history --worktree <id> --limit 1` → `verify show <run-id>`
+// — so a gate that failed only once is still named. Re-running is the fallback,
+// taken only when that run cannot be read or is not provably this verdict's run.
+async function describeFailingGates(inputs, worktreeId, { taskId = null, boundRun, firstVerdict = false } = {}) {
   let run = null;
-  try {
-    run = JSON.parse(result.stdout);
-  } catch {
-    run = null;
+  let source = 'commandmate verify --json';
+  let verdictSource = 'commandmate wait --verify';
+  const readBackNotes = [];
+  const readBack = boundRun === undefined && firstVerdict
+    ? await readFirstVerdictRun(inputs, worktreeId, taskId)
+    : { run: null, note: null };
+  if (readBack.note !== null) readBackNotes.push(readBack.note);
+  if (boundRun !== undefined) {
+    run = boundRun;
+    source = 'commandmate verify --task --json';
+    verdictSource = source;
+  } else if (readBack.run !== null) {
+    run = readBack.run;
+    source = 'commandmate verify show --json';
+  } else {
+    const boundTask = bindableTaskId(inputs, taskId, worktreeId);
+    if (boundTask !== null) source = 'commandmate verify --task --json';
+    // `verify` exits with the verdict, so on the very runs this function exists to
+    // read — a failing gate — the exit is 20, not 0. The run document is still on
+    // stdout; parse it regardless of exit status (parseCliJson's ok-check would
+    // discard every failing run and leave the re-instruction with no gate names).
+    const result = await runCmAsync(inputs, ['verify', worktreeId, ...(boundTask === null ? [] : ['--task', boundTask]), '--json']);
+    run = parseVerifyDocument(result.stdout);
   }
   const gates = run && Array.isArray(run.gates) ? run.gates : null;
   if (!gates) {
     return {
       failing: [],
-      checks: [`commandmate wait --verify → exit ${VERIFY_EXIT_FAILED} (a gate failed; the breakdown could not be read from commandmate verify --json)`],
-      summary: 'the failing gates could not be read from commandmate verify --json',
+      checks: [`${verdictSource} → exit ${VERIFY_EXIT_FAILED} (a gate failed; the breakdown could not be read from ${source})`, ...readBackNotes],
+      summary: `the failing gates could not be read from ${source}`,
     };
   }
   const failing = gates
@@ -4100,7 +4853,7 @@ async function describeFailingGates(inputs, worktreeId) {
   if (failing.length === 0) {
     return {
       failing,
-      checks: [`commandmate wait --verify → exit ${VERIFY_EXIT_FAILED} (a gate failed; the confirming commandmate verify run named none)`],
+      checks: [`${verdictSource} → exit ${VERIFY_EXIT_FAILED} (a gate failed; the confirming commandmate verify run named none)`, ...readBackNotes],
       summary: 'the confirming verify run named no failing gate',
     };
   }
@@ -4109,7 +4862,11 @@ async function describeFailingGates(inputs, worktreeId) {
     // The flaky note goes AFTER the exit code, never before it: merge.mjs reads
     // the first `exit <n>` in this line into the PR body's Exit column, and a
     // second number in front of it would be transcribed as this gate's exit.
-    checks: failing.map((gate) => `gate ${gate.id}: ${gate.status}${gate.exitCode !== null ? ` (exit ${gate.exitCode})` : ''}${gate.flakyOutcome === 'flaky' ? ' — FLAKY: it failed, then passed on a re-run of the same tree, and this repository does not declare flakyIsPass for it' : ''}`),
+    checks: [
+      ...failing.map((gate) => `gate ${gate.id}: ${gate.status}${gate.exitCode !== null ? ` (exit ${gate.exitCode})` : ''}${gate.flakyOutcome === 'flaky' ? ' — FLAKY: it failed, then passed on a re-run of the same tree, and this repository does not declare flakyIsPass for it' : ''}`),
+      ...(readBack.run !== null && run === readBack.run ? [`the failing gates were read from ${readBack.runLabel}, the run that reached this verdict (not re-run)`] : []),
+      ...readBackNotes,
+    ],
     summary: failing.map((gate) => gate.id).join(', '),
   };
 }
@@ -4185,10 +4942,17 @@ function scopeViolationSet(failing) {
 
 // The re-instruction sent to a worker whose contract verification failed. It
 // quotes the gates, because "verification failed" alone makes the worker guess.
-function buildVerifyReinstruction(failing) {
+//
+// When the breakdown is missing, the command it hands the worker carries
+// `--task <taskId>` whenever there is a real task (#306): after the verdict the
+// task is closed, and a bare `commandmate verify <worktree-id>` is a detached run
+// — scope SKIPped, env-clean with no baseline — that answers a different question
+// (Kewton/CommandMate#3118 / #3123).
+function buildVerifyReinstruction(failing, { taskId = null } = {}) {
   const lines = ['検証（commandmate verify）が不合格でした。次のゲートが通っていません。'];
   if (failing.length === 0) {
-    lines.push('- （失敗ゲートの内訳を取得できませんでした。`commandmate verify <worktree-id>` を自分で実行して確認してください）');
+    const command = taskId === null ? 'commandmate verify <worktree-id>' : `commandmate verify <worktree-id> --task ${taskId}`;
+    lines.push(`- （失敗ゲートの内訳を取得できませんでした。\`${command}\` を自分で実行して確認してください）`);
   }
   for (const gate of failing) {
     const exit = gate.exitCode !== null ? ` (exit ${gate.exitCode})` : '';
@@ -4257,6 +5021,13 @@ async function superviseWithContract(inputs, worktreeId, worktreePath, relativeC
   const startedAtMs = Date.now();
   let autoResponded = false;
 
+  const stale = await clearStalePrompt(inputs, worktreeId);
+  if (stale !== null) {
+    return {
+      state: 'prompt', taskId: null, verdict: null, notJudged: false,
+      promptExcerpt: stale.excerpt, nudges: 0, autoResponded, note: stalePromptStop(stale),
+    };
+  }
   const sent0 = await sendContractAndConfirm(inputs, worktreeId, relativeContractPath);
   if (!sent0.sent) {
     // A send that failed after the deadline failed BECAUSE of the deadline: the
@@ -4303,6 +5074,11 @@ async function superviseWithContract(inputs, worktreeId, worktreePath, relativeC
   // Asking twice would manufacture the very "no verdict" state we escalate on.
   let verdict = null;
   let passed = false;
+  // Whether a verdict (20 / 21) has already been reached, which CLOSED the
+  // contract task (#303). From then on a `wait --verify` cannot bind to it, so
+  // the verdict of every later turn is read from `verify --task` when the CLI
+  // has it. A pass needs no such flag: nothing is judged after a pass at all.
+  let verdictReached = false;
   // The previous turn's scope violations (ADR section 6 / Issue #148), kept so
   // this loop can tell a worker that is CONVERGING from one that is repeating
   // itself. Reset by every turn that is not a scope-gate failure, so only two
@@ -4314,6 +5090,10 @@ async function superviseWithContract(inputs, worktreeId, worktreePath, relativeC
   // given to act on, and it belongs in the record rather than only in the message
   // that was sent — a report listing 20 paths must not read as a run that had 20.
   let scopeViolationCut = null;
+  // Whether the send that opened the CURRENT turn was the supervision nudge —
+  // the only turn a stop-and-report is read from (Issue #287).
+  let nudgedThisTurn = false;
+  let nudgeSinceIso = null; // when the nudge that opened this turn was sent (Issue #296)
   const scopeCutClause = () => (scopeViolationCut === null
     ? ''
     : `; a scope re-instruction was bounded: ${scopeViolationCut.shown.length} of ${scopeViolationCut.total} violating line(s) were transcribed `
@@ -4332,7 +5112,13 @@ async function superviseWithContract(inputs, worktreeId, worktreePath, relativeC
         note: `the --wall-clock-budget was exhausted after ${turns} turn(s); supervision stopped without waiting for this worker`,
       };
     }
-    const waitArgs = passed
+    // The task a turn after a re-instruction is judged against (#303), or null:
+    // the first turn's `wait --verify` is still bound (the task is in flight),
+    // and a CLI without `verify --task` keeps the unbound `wait --verify`.
+    const boundTask = !passed && verdictReached
+      ? bindableTaskId(inputs, taskId, worktreeId, { rejudge: true })
+      : null;
+    const waitArgs = passed || boundTask !== null
       ? ['wait', worktreeId, '--on-prompt', 'agent', '--timeout', String(inputs.waitTimeout)]
       : ['wait', worktreeId, '--on-prompt', 'agent', '--verify', '--timeout', String(inputs.waitTimeout)];
     const waited = await runCmAsync(inputs, waitArgs);
@@ -4347,7 +5133,29 @@ async function superviseWithContract(inputs, worktreeId, worktreePath, relativeC
         note: `the --wall-clock-budget was exhausted during turn ${turns}; the pending \`commandmate wait\` was cut short and this worker was left mid-supervision`,
       };
     }
-    const code = waited.ok ? VERIFY_EXIT_PASS : (waited.status ?? null);
+    let code = waited.ok ? VERIFY_EXIT_PASS : (waited.status ?? null);
+    // Where this turn's verdict was read: the wait's own exit code and GATE lines,
+    // or — on a bound re-judgment — the exit code and run document of
+    // `verify --task`. Its exit vocabulary is the wait's (0 / 20 / 21 / 99 / other),
+    // so every branch below reads `code` the same way whichever produced it.
+    let judged = waited;
+    let boundRun;
+    let verdictSource = 'commandmate wait --verify';
+    if (boundTask !== null && code === WAIT_EXIT_IDLE) {
+      judged = await runCmAsync(inputs, ['verify', worktreeId, '--task', boundTask, '--json']);
+      if (wallClockExhausted()) {
+        return {
+          state: 'timeout', taskId, verdict, notJudged: false, promptExcerpt: null, nudges: turns - 1, autoResponded,
+          note: `the --wall-clock-budget was exhausted during turn ${turns}; the pending \`commandmate verify --task\` was cut short and this worker was left mid-supervision`,
+        };
+      }
+      boundRun = parseVerifyDocument(judged.stdout);
+      code = judged.ok ? VERIFY_EXIT_PASS : (judged.status ?? null);
+      verdictSource = 'commandmate verify --task --json';
+    }
+    const turnGates = () => (boundRun !== undefined
+      ? gatesFromVerifyDocument(boundRun, requiredGateIds)
+      : gatesFromWaitOutput(waitStreams(waited), requiredGateIds));
     const done = (state, note) => ({ state, taskId, verdict, notJudged: false, promptExcerpt: null, nudges: turns - 1, autoResponded, note: `${note}${scopeCutClause()}` });
 
     if (code === WAIT_EXIT_PROMPT) {
@@ -4377,7 +5185,7 @@ async function superviseWithContract(inputs, worktreeId, worktreePath, relativeC
         ran: true,
         outcome: 'not_run',
         gates: [],
-        checks: [`commandmate wait --verify → exit ${VERIFY_EXIT_NO_VERDICT} (the verification run ended error/cancelled; no verdict was reached)`],
+        checks: [`${verdictSource} → exit ${VERIFY_EXIT_NO_VERDICT} (the verification run ended error/cancelled; no verdict was reached)`],
       };
       const committed = await hasNewCommit(inputs, worktreePath, baseSha);
       return {
@@ -4393,13 +5201,15 @@ async function superviseWithContract(inputs, worktreeId, worktreePath, relativeC
         // The GATE lines of THIS passing run are the only safe source of the
         // gate list: a `commandmate verify` after a pass cannot bind to the
         // succeeded task and manufactures exit 99 (#1620).
-        const passGates = gatesFromWaitOutput(waitStreams(waited), requiredGateIds);
+        // On a bound re-judgment the source is the `verify --task` document of
+        // this very run, for the same reason.
+        const passGates = turnGates();
         verdict = {
           ran: true,
           outcome: 'pass',
           gates: passGates.gates,
           checks: [
-            `commandmate wait --verify → exit ${VERIFY_EXIT_PASS} (every declared gate passed)`,
+            `${verdictSource} → exit ${VERIFY_EXIT_PASS} (every declared gate passed)`,
             ...droppedGateChecks(passGates),
           ],
         };
@@ -4425,22 +5235,36 @@ async function superviseWithContract(inputs, worktreeId, worktreePath, relativeC
       if (!asked.sent) return budgetCutoff() ?? done('failed', `commit request failed: ${asked.note}`);
       closeTurn();
       turns += 1;
+      nudgedThisTurn = false;
       continue;
     }
 
     if (code === VERIFY_EXIT_NOT_STARTED) {
       // work-evidence found no commit and no change: the worker has not started,
       // or has nothing to show yet. Never a pass.
-      const startGates = gatesFromWaitOutput(waitStreams(waited), requiredGateIds);
+      const startGates = turnGates();
+      verdictReached = true;
       verdict = {
         ran: true,
         outcome: 'fail',
         gates: startGates.gates,
         checks: [
-          `commandmate wait --verify → exit ${VERIFY_EXIT_NOT_STARTED} (work-evidence found no commit and no uncommitted change)`,
+          `${verdictSource} → exit ${VERIFY_EXIT_NOT_STARTED} (work-evidence found no commit and no uncommitted change)`,
           ...droppedGateChecks(startGates),
         ],
       };
+      // A worker that answered the nudge by stopping and reporting (Issue #287)
+      // is not nudged again — read BEFORE the cap, so a report given on the last
+      // turn is recorded as one rather than as the cap's "why there is nothing".
+      if (nudgedThisTurn) {
+        const workerReport = await readWorkerStopReport(inputs, worktreeId, worktreePath, turns, nudgeSinceIso);
+        if (workerReport !== null) {
+          return {
+            ...done('failed', workerReportNoteClause(workerReport, inputs, 'no work evidence (no commit, no uncommitted change)')),
+            workerReport,
+          };
+        }
+      }
       if (turns >= inputs.maxTurns) {
         // One collection, here (Issue #220), for the same reason #179 reads the
         // liveness at a wait timeout: this cap is either "the worker ran N turns
@@ -4463,16 +5287,24 @@ async function superviseWithContract(inputs, worktreeId, worktreePath, relativeC
         };
       }
       previousScopeViolations = null; // this turn was not a scope-gate failure
-      const nudged = await sendAndConfirm(inputs, worktreeId, NUDGE_MESSAGE);
+      // Taken BEFORE the send: `commandmate reply --since` keeps a reply written
+      // at or after it, and a stamp taken after could postdate a fast worker's answer.
+      nudgeSinceIso = new Date().toISOString();
+      const nudged = await sendAndConfirm(inputs, worktreeId, nudgeMessage(inputs));
       if (!nudged.sent) return budgetCutoff() ?? done('failed', `nudge failed: ${nudged.note}`);
       closeTurn();
       turns += 1;
+      nudgedThisTurn = true;
       continue;
     }
 
     if (code === VERIFY_EXIT_FAILED) {
-      const waitGates = gatesFromWaitOutput(waitStreams(waited), requiredGateIds);
-      const failing = await describeFailingGates(inputs, worktreeId);
+      const waitGates = turnGates();
+      // The FIRST verdict is the one `wait --verify` bound to the in-flight task,
+      // so its run can be read back instead of re-run (#306).
+      const firstVerdict = !verdictReached;
+      verdictReached = true;
+      const failing = await describeFailingGates(inputs, worktreeId, { taskId, boundRun, firstVerdict });
       verdict = {
         ran: true,
         outcome: 'fail',
@@ -4527,15 +5359,23 @@ async function superviseWithContract(inputs, worktreeId, worktreePath, relativeC
         };
       }
       previousScopeViolations = scopeViolations;
-      const resent = await sendAndConfirm(inputs, worktreeId, buildVerifyReinstruction(failing.failing));
+      const resent = await sendAndConfirm(inputs, worktreeId, buildVerifyReinstruction(failing.failing, {
+        // Only a task id this commandmate can be given back (`verify --task`,
+        // already probed by the breakdown above): telling the worker to pass a
+        // flag its CLI refuses would be a worse guess than the bare command.
+        // Read only when the message needs it (no breakdown).
+        taskId: failing.failing.length === 0 && typeof taskId === 'string' && taskId !== '' && taskId !== worktreeId
+          && probeVerifyTaskSupport(inputs) ? taskId : null,
+      }));
       if (!resent.sent) return budgetCutoff() ?? done('failed', `re-instruction failed: ${resent.note}`);
       closeTurn();
       turns += 1;
+      nudgedThisTurn = false;
       continue;
     }
 
     // 1 / 2 / anything else: infrastructure, not a verdict.
-    return done('failed', excerpt(waited.stderr || waited.stdout || `wait exited ${code ?? 'with an error'}`));
+    return done('failed', excerpt(judged.stderr || judged.stdout || `${judged === waited ? 'wait' : 'verify --task'} exited ${code ?? 'with an error'}`));
   }
   return { state: 'failed', taskId, verdict, notJudged: false, promptExcerpt: null, nudges: turns - 1, autoResponded, note: 'supervision exceeded its hard iteration bound' };
 }
@@ -4556,6 +5396,13 @@ async function superviseUntilCommit(inputs, worktreeId, worktreePath, initialMes
   // #136): `--auto-yes` promises "prompts do not stop this run", and which
   // dispatch path a CLI version put the run on is not something the operator who
   // passed the flag chose.
+  // The stale-screen check (CommandMate#3007), BEFORE auto-yes is armed: a
+  // worktree whose session holds an old question must not be given a window in
+  // which the server could answer it.
+  const stale = await clearStalePrompt(inputs, worktreeId);
+  if (stale !== null) {
+    return { state: 'prompt', promptExcerpt: stale.excerpt, nudges: 0, autoResponded, note: stalePromptStop(stale) };
+  }
   const sent0 = await sendAndConfirm(inputs, worktreeId, initialMessage, { armAutoYes: true });
   if (!sent0.sent) {
     // As on the contract path: a send the budget killed is a stopped clock.
@@ -4568,6 +5415,10 @@ async function superviseUntilCommit(inputs, worktreeId, worktreePath, initialMes
     };
   }
   let turns = 1;
+  // As on the contract path (Issue #287): every later turn here is opened by
+  // the nudge, and only those turns are read for a stop-and-report.
+  let nudgedThisTurn = false;
+  let nudgeSinceIso = null; // when the nudge that opened this turn was sent (Issue #296)
   const budgetCutoff = () => (wallClockExhausted()
     ? {
       state: 'timeout', promptExcerpt: null, nudges: turns - 1, autoResponded,
@@ -4631,6 +5482,15 @@ async function superviseUntilCommit(inputs, worktreeId, worktreePath, initialMes
       const note = turns > 1 ? `completed after ${turns - 1} nudge(s); new commit detected` : 'completed; new commit detected';
       return { state: 'completed', promptExcerpt: null, nudges: turns - 1, autoResponded, note };
     }
+    if (nudgedThisTurn) {
+      const workerReport = await readWorkerStopReport(inputs, worktreeId, worktreePath, turns, nudgeSinceIso);
+      if (workerReport !== null) {
+        return {
+          state: 'failed', promptExcerpt: null, nudges: turns - 1, autoResponded, workerReport,
+          note: workerReportNoteClause(workerReport, inputs, 'no new commit'),
+        };
+      }
+    }
     if (turns >= inputs.maxTurns) {
       return {
         state: 'failed',
@@ -4640,13 +5500,15 @@ async function superviseUntilCommit(inputs, worktreeId, worktreePath, initialMes
         note: `no new commit after ${turns} turn(s); gave up at the --max-turns ${inputs.maxTurns} cap`,
       };
     }
-    const nudged = await sendAndConfirm(inputs, worktreeId, NUDGE_MESSAGE);
+    nudgeSinceIso = new Date().toISOString(); // before the send; see the contract path
+    const nudged = await sendAndConfirm(inputs, worktreeId, nudgeMessage(inputs));
     if (!nudged.sent) {
       const cutShort = budgetCutoff();
       if (cutShort) return cutShort;
       return { state: 'failed', promptExcerpt: null, nudges: turns - 1, autoResponded, note: `nudge failed: ${nudged.note}` };
     }
     turns += 1;
+    nudgedThisTurn = true;
   }
   return { state: 'failed', promptExcerpt: null, nudges: turns - 1, autoResponded, note: 'supervision exceeded its hard iteration bound' };
 }
@@ -4884,22 +5746,25 @@ function assistantEntryParts(entry) {
 // counts as OUTPUT.
 const TUI_CHROME_LINE = /^(?:[\s─-╿▀-▟|+._=-]*|[>❯»]\s*|\?\s*for shortcuts.*|esc to interrupt.*|Press up to edit queued messages.*|⏵+.*|Bypassing Permissions.*)$/i;
 
-// The transcript half of the evidence. Returns the object the report carries
-// plus the sentences (if any) it supports. Nothing in here can FAIL the probe:
-// every unreadable path becomes `{ read: false, reason }`, which is a fact about
-// this run and not an error in it.
-function readWorkerTranscript(worktreePath, cliToolId) {
-  const notRead = (reason) => ({ record: { read: false, reason: redact(reason) }, upstream: null, turn: null, signature: null });
+// Where a worker's Claude Code transcript is, and its bounded tail as parsed
+// JSONL entries — or why it could not be read. Shared by the #220 cap probe and
+// the #287 stop-report reader, so the two can never disagree about WHICH file
+// is this worker's (or refuse for different reasons).
+function transcriptNotRead(reason) {
+  return { ok: false, reason };
+}
+
+function readTranscriptEntries(worktreePath, cliToolId) {
   // dispatch is deliberately agent-agnostic — it drives worktrees, not CLIs — so
   // the only thing that can name the agent is `capture --json`'s `cliToolId`.
   // Not naming it is not permission to guess: Codex keeps rollouts under
   // `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, a layout this runner does
   // not read, and reading the wrong layout would produce confident nonsense.
   if (typeof cliToolId !== 'string' || cliToolId.length === 0) {
-    return notRead('`commandmate capture <worktree-id> --json` did not name the CLI tool (`cliToolId`), so which agent\'s transcript layout to read is unknown');
+    return transcriptNotRead('`commandmate capture <worktree-id> --json` did not name the CLI tool (`cliToolId`), so which agent\'s transcript layout to read is unknown');
   }
   if (cliToolId !== 'claude') {
-    return notRead(`this runner reads Claude Code's transcript layout only; \`cliToolId\` is "${excerpt(cliToolId, 24)}" (Codex keeps its rollouts under ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl)`);
+    return transcriptNotRead(`this runner reads Claude Code's transcript layout only; \`cliToolId\` is "${excerpt(cliToolId, 24)}" (Codex keeps its rollouts under ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl)`);
   }
   let absolute;
   try {
@@ -4914,21 +5779,21 @@ function readWorkerTranscript(worktreePath, cliToolId) {
   try {
     names = readdirSync(dir).filter((name) => name.endsWith('.jsonl')).sort();
   } catch {
-    return notRead('no Claude Code transcript directory exists for this worktree (CLAUDE_CONFIG_DIR/projects/<encoded cwd>)');
+    return transcriptNotRead('no Claude Code transcript directory exists for this worktree (CLAUDE_CONFIG_DIR/projects/<encoded cwd>)');
   }
-  if (names.length === 0) return notRead('the Claude Code transcript directory for this worktree holds no *.jsonl file');
+  if (names.length === 0) return transcriptNotRead('the Claude Code transcript directory for this worktree holds no *.jsonl file');
   if (names.length > 1) {
     // Picking "the newest" would be a guess dressed as a measurement: several
     // sessions can share one worktree, and the wrong one answers a different
     // question. The operator has the whole directory and can read them all.
-    return notRead(`the Claude Code transcript directory for this worktree holds ${names.length} *.jsonl files and this runner will not guess which session was this worker's (read them with: ${MANUAL_TRANSCRIPT_COMMAND})`);
+    return transcriptNotRead(`the Claude Code transcript directory for this worktree holds ${names.length} *.jsonl files and this runner will not guess which session was this worker's (read them with: ${MANUAL_TRANSCRIPT_COMMAND})`);
   }
   const path = join(dir, names[0]);
   let tail;
   try {
     tail = readFileTail(path, TRANSCRIPT_TAIL_BYTES);
   } catch (error) {
-    return notRead(`the Claude Code transcript for this worktree could not be read: ${excerpt(error.message, 80)}`);
+    return transcriptNotRead(`the Claude Code transcript for this worktree could not be read: ${excerpt(error.message, 80)}`);
   }
   const lines = tail.text.split('\n').filter((line) => line.trim().length > 0);
   // A tail read can start mid-entry; that first fragment is not a record.
@@ -4942,7 +5807,19 @@ function readWorkerTranscript(worktreePath, cliToolId) {
       // direction. It is skipped, not counted.
     }
   }
-  if (entries.length === 0) return notRead('the Claude Code transcript for this worktree holds no readable JSONL entry');
+  if (entries.length === 0) return transcriptNotRead('the Claude Code transcript for this worktree holds no readable JSONL entry');
+  return { ok: true, path, tail, lines, entries };
+}
+
+// The transcript half of the evidence. Returns the object the report carries
+// plus the sentences (if any) it supports. Nothing in here can FAIL the probe:
+// every unreadable path becomes `{ read: false, reason }`, which is a fact about
+// this run and not an error in it.
+function readWorkerTranscript(worktreePath, cliToolId) {
+  const notRead = (reason) => ({ record: { read: false, reason: redact(reason) }, upstream: null, turn: null, signature: null });
+  const read = readTranscriptEntries(worktreePath, cliToolId);
+  if (!read.ok) return notRead(read.reason);
+  const { path, tail, lines, entries } = read;
   const assistants = entries.filter((entry) => entry?.type === 'assistant').map(assistantEntryParts);
   const bounded = tail.truncated || lines.length > TRANSCRIPT_MAX_ENTRIES
     ? ` (only the last ${TRANSCRIPT_MAX_ENTRIES} entr(ies) of the final ${TRANSCRIPT_TAIL_BYTES} byte(s) were read)`
@@ -5176,6 +6053,164 @@ function turnEvidenceNoteClause(evidence) {
 }
 
 // =============================================================================
+// A worker that stopped and reported (Issue #287)
+// =============================================================================
+//
+// The supervision nudge asks a worker that finds it cannot write what it was told
+// to STOP AND REPORT instead of pressing on (CommandMate#3009, 0.34.0). A worker
+// that did exactly that used to be nudged on to the `--max-turns` cap and then
+// recorded as "no commit / no work evidence" — the same `failed` as a worker that
+// said nothing — and its report was nowhere in the report. The consumer
+// (Kewton/Musunest) treats that stop as a GOOD stop, so the words have to survive
+// and the run has to be able to tell it from silence.
+//
+// What counts as "stopped and reported", decided here and nowhere else:
+//
+//   - the turn was opened by the supervision NUDGE (the message that carries the
+//     stop-and-report instruction) — a first turn or a commit request / gate
+//     re-instruction is not one;
+//   - it ended without progress: exit 21 on the contract path (work-evidence: no
+//     commit, no uncommitted change), no new commit on the fallback path;
+//   - the worker's transcript records THAT nudge as its last human message, and
+//     after it the worker's last word is text — not a tool call left hanging,
+//     not an upstream error line.
+//
+// The third condition is what makes "the reply of THIS turn" a measurement
+// rather than a guess: a transcript whose last human message is not our nudge
+// (a session that has not recorded it, a stale file) has no reply this runner
+// can attribute to the turn, and is read as "no report" — the conventional loop
+// goes on exactly as before. So does every world in which the reply could not be
+// read at all (a failed or unparseable `capture`, a non-Claude agent, no or
+// several transcripts): "we could not look" is never a report, and it is never a
+// reason to stop either. The screen (`realtimeSnippet`) is deliberately not
+// used: it holds the nudge's own echo beside the reply, and a pane cannot say
+// which lines belong to which turn.
+//
+// Found, the nudge STOPS: another nudge would ask the same question of a worker
+// that has already answered it, spend turns up to the cap, and bury the answer.
+// The adjudication does not move — `verification.outcome` stays what the turn's
+// `wait --verify` returned, `worker_state` stays `failed`, blocking
+// `worker_failed` still says why the run stopped. What is added is the report
+// itself (`worker_report`) and a blocking `worker_stopped_with_report` that
+// sends a human to read it.
+const WORKER_STOPPED_WITH_REPORT = 'worker_stopped_with_report';
+// The same excerpt rule as every other transcribed text in this report (tail
+// kept, whitespace collapsed, redacted), with a wider bound: a report is the
+// deliverable of this turn, and its conclusion is at the end.
+const WORKER_REPORT_EXCERPT_LIMIT = 600;
+// How a transcript's human message is recognized as this runner's nudge. The
+// first line only: `--nudge-message` / `worker_messages.nudge` append after it.
+const NUDGE_MARKER = NUDGE_MESSAGE.split('\n')[0];
+
+// The text of a transcript entry that a HUMAN (or this runner) sent, or null.
+// Claude Code records tool results as `type: user` too; those are not messages.
+function humanEntryText(entry) {
+  if (entry?.type !== 'user') return null;
+  const content = entry?.message?.content ?? entry?.content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return null;
+  if (content.some((part) => part?.type === 'tool_result')) return null;
+  const texts = content.filter((part) => typeof part?.text === 'string').map((part) => part.text);
+  return texts.length > 0 ? texts.join('\n') : null;
+}
+
+// `commandmate reply` (CommandMate 0.43.0+, Issue #296) reads the reply the
+// server's transcript readers wrote to the ledger — for Claude, Codex,
+// Antigravity, Command Code and OpenCode alike — so it is the reader when the
+// CLI has it. Whether it has it is asked ONCE per process, the same way
+// `probeContractSupport` asks about `send` / `wait` (`--help` succeeding is the
+// answer; a version number is never compared). A CLI without it keeps the
+// Claude-only transcript reader below, so nothing 0.35.0 read is lost.
+let replySupported = null;
+function probeReplySupport(inputs) {
+  if (replySupported === null) replySupported = runCm(inputs, ['reply', '--help']).ok;
+  return replySupported;
+}
+
+// The reply of the turn the nudge opened, or null: exit != 0, unparseable JSON
+// and `reply: null` (no transcript row since the nudge) are all "no report".
+// `--instance` is not passed: dispatch names none on `send` / `wait` either, so
+// all three address the worktree's primary instance.
+async function readReplyViaCli(inputs, worktreeId, turns, sinceIso) {
+  const args = ['reply', worktreeId, ...(sinceIso === null ? [] : ['--since', sinceIso]), '--json'];
+  const result = await runCmAsync(inputs, args);
+  if (!result.ok) return null;
+  const payload = parseCliJson(result);
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  if (typeof payload.reply !== 'string') return null;
+  return workerReportFromText(payload.reply.trim(), turns, 'commandmate_reply');
+}
+
+// The shared tail of both readers: the upstream-fault rule, the excerpt rule.
+function workerReportFromText(text, turns, source) {
+  if (text.length === 0) return null;
+  if (matchUpstreamFault(text) !== null) return null;
+  const clipped = excerpt(text, WORKER_REPORT_EXCERPT_LIMIT);
+  if (clipped === null) return null;
+  return {
+    code: WORKER_STOPPED_WITH_REPORT,
+    turn: turns,
+    source,
+    text: clipped,
+    truncated: clipped.startsWith('…'),
+  };
+}
+
+async function readWorkerStopReport(inputs, worktreeId, worktreePath, turns, sinceIso = null) {
+  if (probeReplySupport(inputs)) return readReplyViaCli(inputs, worktreeId, turns, sinceIso);
+  return readClaudeTranscriptReport(inputs, worktreeId, worktreePath, turns);
+}
+
+// ONE `capture` (for `cliToolId`, which names the transcript layout — the #220
+// rule), then the transcript. Returns the `worker_report` object, or null for
+// every world that is not a readable stop-and-report.
+async function readClaudeTranscriptReport(inputs, worktreeId, worktreePath, turns) {
+  const capture = await runCmAsync(inputs, ['capture', worktreeId, '--json']);
+  if (!capture.ok) return null;
+  const payload = parseCliJson(capture);
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const read = readTranscriptEntries(worktreePath, payload.cliToolId);
+  if (!read.ok) return null;
+  let lastHuman = -1;
+  for (let i = read.entries.length - 1; i >= 0; i -= 1) {
+    if (humanEntryText(read.entries[i]) !== null) {
+      lastHuman = i;
+      break;
+    }
+  }
+  if (lastHuman < 0 || !humanEntryText(read.entries[lastHuman]).includes(NUDGE_MARKER)) return null;
+  const replies = read.entries.slice(lastHuman + 1)
+    .filter((entry) => entry?.type === 'assistant')
+    .map(assistantEntryParts);
+  // The FINAL reply: the text entries after the last tool call (Claude Code
+  // writes one entry per content block, so one answer can span several).
+  const finalTexts = [];
+  for (let i = replies.length - 1; i >= 0; i -= 1) {
+    if (replies[i].hasTool) break;
+    const text = replies[i].text.trim();
+    if (text.length > 0) finalTexts.unshift(text);
+  }
+  if (finalTexts.length === 0) return null;
+  return workerReportFromText(finalTexts.join('\n'), turns, 'claude_transcript');
+}
+
+// The one-sentence version for the worker `note`, rendered FROM the record
+// (Issue #83's rule).
+function workerReportNoteClause(report, inputs, progress) {
+  return `the worker stopped and reported on turn ${report.turn} (opened by the supervision nudge) with ${progress}; `
+    + `no further nudge was sent (the --max-turns cap is ${inputs.maxTurns}) — ${WORKER_STOPPED_WITH_REPORT}: read its report (worker_report) before deciding`;
+}
+
+function workerReportBlockingDetail(issue, report) {
+  return `#${issue}: after the supervision nudge that opened turn ${report.turn} — which tells a worker that cannot write what it was told to stop and report — `
+    + 'the worker ended that turn without progress and with a reply, so supervision stopped nudging it rather than spending the rest of --max-turns on a worker that had already answered. '
+    + `Its report, ${report.source === 'commandmate_reply' ? 'read with `commandmate reply` (the transcript reader\'s ledger row)' : 'transcribed from its Claude Code transcript'}${report.truncated ? ` (the tail, cut to ${WORKER_REPORT_EXCERPT_LIMIT} characters)` : ''}: "${report.text}". `
+    + 'Read it, then either fix the Issue (or its 対象ファイル / 受入条件) and re-plan, or — when the report says the obstacle is gone — re-dispatch the same plan with '
+    + '`dispatch.mjs --plan <plan.json> --resume <this run\'s dispatch directory>`. '
+    + 'The adjudication is unchanged: `worker_state` stays `failed` and blocking `worker_failed` still says why the run stopped; this entry is what the worker said';
+}
+
+// =============================================================================
 // Recording a verification verdict (Issue #83)
 // =============================================================================
 //
@@ -5346,7 +6381,13 @@ function gatesFromVerifyDocument(run, requiredGateIds = new Set()) {
 // 0 pass, 20 judged-and-failed, 21 the work-evidence gate finding nothing,
 // 99 NO VERDICT AT ALL (escalated, never re-instructed), anything else
 // infrastructure and therefore no verdict to record.
-async function reverifyWorker(inputs, plan, contractMode, worktreeId, worktreePath, issueGateIds) {
+//
+// Bound to the contract task (#303) only when the prior record names one: a
+// reverify judges work whose task the earlier verdict already closed, so an
+// unbound `verify` would skip the contract's scope and find no env baseline. No
+// task id on record (an older report, a send that returned none) keeps the
+// unbound run this function always made.
+async function reverifyWorker(inputs, plan, contractMode, worktreeId, worktreePath, issueGateIds, taskId = null) {
   if (!contractMode) {
     // The fallback judge, unchanged: the profile baseline re-run inside the
     // worktree. It is the same function, called with the same arguments, as the
@@ -5366,16 +6407,13 @@ async function reverifyWorker(inputs, plan, contractMode, worktreeId, worktreePa
       note: verification.note,
     };
   }
-  const result = await runCmAsync(inputs, ['verify', worktreeId, '--json']);
+  const boundTask = bindableTaskId(inputs, taskId, worktreeId, { rejudge: true });
+  const result = await runCmAsync(inputs, ['verify', worktreeId, ...(boundTask === null ? [] : ['--task', boundTask]), '--json']);
   // `verify` exits WITH the verdict, so on a failing run the exit is 20 and the
   // run document is still on stdout. Parse it regardless of exit status — the
   // same reading describeFailingGates takes, and for the same reason.
-  let run = null;
-  try {
-    run = JSON.parse(result.stdout);
-  } catch {
-    run = null;
-  }
+  const run = parseVerifyDocument(result.stdout);
+  const judgeLabel = boundTask === null ? 'commandmate verify --json' : 'commandmate verify --task --json';
   const code = result.ok ? VERIFY_EXIT_PASS : (result.status ?? null);
   const reverifyGates = gatesFromVerifyDocument(run, new Set(issueGateIds));
   const done = (outcome, checks, extra = {}) => ({
@@ -5386,17 +6424,17 @@ async function reverifyWorker(inputs, plan, contractMode, worktreeId, worktreePa
     ...extra,
   });
   if (code === VERIFY_EXIT_PASS) {
-    return done('pass', [`commandmate verify --json → exit ${VERIFY_EXIT_PASS} (every declared gate passed; re-judged in place, nothing was sent)`]);
+    return done('pass', [`${judgeLabel} → exit ${VERIFY_EXIT_PASS} (every declared gate passed; re-judged in place, nothing was sent)`]);
   }
   if (code === VERIFY_EXIT_FAILED) {
-    return done('fail', [`commandmate verify --json → exit ${VERIFY_EXIT_FAILED} (a gate failed; re-judged in place, nothing was sent)`]);
+    return done('fail', [`${judgeLabel} → exit ${VERIFY_EXIT_FAILED} (a gate failed; re-judged in place, nothing was sent)`]);
   }
   if (code === VERIFY_EXIT_NOT_STARTED) {
     // The judge disagrees with the git measurement that selected this issue.
     // Recorded as the verdict it is (exit 21 has always been `fail`), and the
     // disagreement itself is reported by the caller rather than smoothed over.
     return done('fail',
-      [`commandmate verify --json → exit ${VERIFY_EXIT_NOT_STARTED} (work-evidence found no commit and no uncommitted change)`],
+      [`${judgeLabel} → exit ${VERIFY_EXIT_NOT_STARTED} (work-evidence found no commit and no uncommitted change)`],
       { workEvidenceDisagreed: true });
   }
   if (code === VERIFY_EXIT_NO_VERDICT) {
@@ -5408,7 +6446,7 @@ async function reverifyWorker(inputs, plan, contractMode, worktreeId, worktreePa
         report_schema_version: null,
         outcome: 'not_run',
         gates: [],
-        checks: [`commandmate verify --json → exit ${VERIFY_EXIT_NO_VERDICT} (the verification run ended error/cancelled; no verdict was reached)`],
+        checks: [`${judgeLabel} → exit ${VERIFY_EXIT_NO_VERDICT} (the verification run ended error/cancelled; no verdict was reached)`],
       },
       note: `escalated to a human rather than re-judged (exit ${VERIFY_EXIT_NO_VERDICT}: the run ended error/cancelled)`,
     };
@@ -5568,6 +6606,10 @@ function emptyReport(inputs, plan, outDir) {
       base: plan.profile.base,
       verified: plan.profile.verified === true,
     },
+    // Written ONLY when `--only` narrowed the plan (CommandMate#3008): the whole
+    // plan and the subset this run took, side by side, so a reader can tell "not
+    // selected" from "not dispatched". Absent otherwise.
+    ...(inputs.onlyScope === null ? {} : { plan_scope: inputs.onlyScope }),
     drift_checks: [],
     waves: [],
     blocking_reasons: [],
@@ -5578,7 +6620,11 @@ function emptyReport(inputs, plan, outDir) {
     // decided there, and a reader who does not know which of them came from the
     // profile cannot reconstruct the run from the argv. Empty (and therefore
     // invisible) on a plan whose profile declares nothing.
-    limitations: [...inputs.dispatchDefaultNotes],
+    limitations: [
+      ...inputs.dispatchDefaultNotes,
+      ...(inputs.onlyScope === null ? [] : [onlyLimitation(inputs.onlyScope)]),
+      ...humanOnlyLimitations(inputs, plan),
+    ],
     redactions: [],
     completion_check: { passed: false, checks: [] },
     summary_markdown: '',
@@ -5620,6 +6666,15 @@ async function runDispatch(inputs, plan, outDir, preflight = null, preparation =
   // carried, and what it re-dispatched. Every other line of the report is read
   // against that.
   if (resume !== null) report.limitations.push(resumeLimitation(plan, resume));
+  // The width a reverify was told to judge at (Issue #274). Pushed only when the
+  // flag was passed, so a reverify without it keeps the report it always had.
+  if (reverifying && inputs.verifyConcurrency !== null) {
+    report.limitations.push({
+      code: 'verify_concurrency_limited',
+      detail: `--verify-concurrency ${inputs.verifyConcurrency}: this reverify re-judged at most ${inputs.verifyConcurrency} issue(s) at a time. `
+        + 'It changes how many gate runs overlap, never which issues are judged or what a verdict says; it is a run argument, not part of the plan or the run id',
+    });
+  }
   // The run-wide method declaration (Issue #128 / ADR section 9), stated before
   // any wave: everything below — the `## Method` section in each contract, the
   // per-issue `worker_method_applied` entries — is read against it. Nothing is
@@ -5785,6 +6840,10 @@ async function runDispatch(inputs, plan, outDir, preflight = null, preparation =
   // the report by whichever worker happened to finish first and two runs of the
   // same plan could differ.
   const scopeUnsatisfiable = new Map();
+  // What the send side did for each issue (CommandMate#3006 / #3007): a
+  // not-ready retry, or a stale question found before the first send. Read out
+  // in plan order by recordScopeAndLivenessReasons, like the entries above.
+  const sendTraceByIssue = new Map();
 
   // Step 3a for ONE issue: build its worker record, take its already-resolved
   // worktree id/path, write its prompt artifact and place its contract. Workers
@@ -6094,8 +7153,12 @@ async function runDispatch(inputs, plan, outDir, preflight = null, preparation =
     // (Issue #220), and for the same reason: its ABSENCE means no collection was
     // made, which must never read as "there was nothing to find".
     if (supervised.turnEvidence) worker.worker_turn_evidence = supervised.turnEvidence;
+    // Only the workers that stopped and reported after a nudge carry this (Issue
+    // #287); absent means no report was read, not that the worker said nothing.
+    if (supervised.workerReport) worker.worker_report = supervised.workerReport;
     if (supervised.autoResponded) autoResponded = true;
     if (supervised.scopeUnsatisfiable) scopeUnsatisfiable.set(worker.issue, supervised.scopeUnsatisfiable);
+    if (sendTraces.has(worktreeId)) sendTraceByIssue.set(worker.issue, sendTraces.get(worktreeId));
     if (supervised.state === 'prompt') {
       worker.prompt = { detected: true, excerpt: supervised.promptExcerpt };
     }
@@ -6211,6 +7274,22 @@ async function runDispatch(inputs, plan, outDir, preflight = null, preparation =
       });
     }
 
+    // The send side (CommandMate#3006 / #3007), in `workers` order for the same
+    // reason as everything in this pass. A stale question that stopped the send
+    // is a blocking reason — it is why this worker never started; one that was
+    // interrupted, and every not-ready retry, is a limitation: the run went on,
+    // and the report still has to say it did so by acting on the session.
+    for (const worker of workers) {
+      const trace = sendTraceByIssue.get(worker.issue);
+      if (!trace) continue;
+      if (trace.stalePrompt && trace.stalePrompt.action === 'interrupted') {
+        report.limitations.push(stalePromptInterruptedLimitation(worker.issue, trace.stalePrompt));
+      } else if (trace.stalePrompt) {
+        report.blocking_reasons.push(stalePromptBlockingReason(worker.issue, trace.stalePrompt));
+      }
+      for (const entry of trace.notReadyRetries) report.limitations.push(notReadyRetryLimitation(worker.issue, entry));
+    }
+
     // The liveness of every worker whose `commandmate wait` timed out (Issue
     // #179), read out of the record the supervision wrote. In `workers` order
     // and outside the concurrent loop, for the reason above: an entry pushed
@@ -6248,6 +7327,18 @@ async function runDispatch(inputs, plan, outDir, preflight = null, preparation =
       report.blocking_reasons.push({
         code: evidence.code,
         detail: redact(`#${worker.issue}: ${evidence.detail}`),
+      });
+    }
+
+    // And for a worker that stopped and reported (Issue #287): beside
+    // `worker_failed`, for the reason #220 gave — that code says why the run
+    // stopped, this one says what the worker said.
+    for (const worker of workers) {
+      const workerReport = worker.worker_report;
+      if (!workerReport) continue;
+      report.blocking_reasons.push({
+        code: WORKER_STOPPED_WITH_REPORT,
+        detail: redact(workerReportBlockingDetail(worker.issue, workerReport)),
       });
     }
   };
@@ -6413,7 +7504,10 @@ async function runDispatch(inputs, plan, outDir, preflight = null, preparation =
     //      Concurrent for the same reason the supervision loop is: a gate run is
     //      the slow part, the wave width is already <= max_parallel, and one
     //      issue's gates must not wait behind another's.
-    await Promise.all(reverifiable.map(async ({ worker, worktreeId, worktreePath, issueGateIds }) => {
+    //
+    //      `--verify-concurrency` (Issue #274) narrows that to n at a time, taken
+    //      in plan order; without it every issue starts at once, as before.
+    await forEachLimited(reverifiable, inputs.verifyConcurrency, async ({ worker, worktreeId, worktreePath, issueGateIds }) => {
       // A pending prompt is a worker still mid-turn, waiting for a human. The
       // tree under it is being changed by somebody who has not finished, so a
       // verdict about it would describe a state that is not a deliverable — and
@@ -6448,7 +7542,7 @@ async function runDispatch(inputs, plan, outDir, preflight = null, preparation =
           : 'not re-judged by this --reverify attempt: its worktree holds no work evidence (no commit, no uncommitted change)');
         return;
       }
-      const judged = await reverifyWorker(inputs, plan, contractMode, worktreeId, worktreePath, issueGateIds);
+      const judged = await reverifyWorker(inputs, plan, contractMode, worktreeId, worktreePath, issueGateIds, worker.task_id);
       if (judged.workEvidenceDisagreed) {
         report.limitations.push({
           code: 'reverify_evidence_disagreement',
@@ -6483,7 +7577,7 @@ async function runDispatch(inputs, plan, outDir, preflight = null, preparation =
         return;
       }
       reverifyVerdicts.set(worker.issue, judged);
-    }));
+    });
 
     // 4. Wave barrier — every dispatched worker must have completed.
     const allCompleted = workers.length > 0 && workers.every((worker) => worker.worker_state === 'completed');
@@ -6993,6 +8087,26 @@ async function runDispatch(inputs, plan, outDir, preflight = null, preparation =
   // `commandmate sync` is a fact about how this run resolved its targets, so it is
   // recorded whatever the outcome — including on the runs it made succeed.
   recordSyncAttempt(report);
+  recordVerifyTaskBinding(report);
+  recordVerifyHistoryRead(report);
+
+  // `--only` (CommandMate#3008): account for the issues this run was told not to
+  // touch. After every wave, so it cannot be mistaken for a scheduling decision,
+  // and it changes neither the status nor the completion check: a run whose
+  // SELECTED issues all passed is a success.
+  // The human-only issues (Issue #286) join the same entry, in issue order.
+  const excludedWorkers = [
+    ...(inputs.onlyScope === null ? [] : onlyExcludedWorkers(inputs)),
+    ...humanOnlyWorkers(inputs),
+  ].sort((a, b) => a.issue - b.issue);
+  if (excludedWorkers.length > 0) {
+    report.waves.push({
+      index: report.waves.length,
+      dispatched: [],
+      workers: excludedWorkers,
+      barrier: { all_workers_completed: false, all_verifications_passed: false, advanced: false },
+    });
+  }
 
   // Completion self-check. `no_auto_prompt_response` guards the safe default: a
   // prompt is never answered UNLESS --auto-yes was explicitly set.
@@ -7326,6 +8440,9 @@ function renderSummary(report, contractMode = false, openQuestions = [], resume 
     if (report.blocking_reasons.some((reason) => reason.code === TURN_EVIDENCE_NOTHING)) {
       lines.push('- next: **worker は実際にターンを回したうえで、commit も未 commit の変更も残していない**（blocking の `worker_produced_nothing`）。worker のログを読み、**Issue の粒度か指示の曖昧さ**を疑う。分割か書き直しをして re-plan する。`--resume` だけでは同じ所で止まる（owner: human）。');
     }
+    if (report.blocking_reasons.some((reason) => reason.code === WORKER_STOPPED_WITH_REPORT)) {
+      lines.push('- next: worker が nudge に従って**止めて報告した**（blocking の `worker_stopped_with_report` と該当 worker の `worker_report.text` に報告の文がある）。**報告を読んでから決める** —— 書けない理由が Issue 側（対象ファイル・受入条件・指示の矛盾）にあるなら Issue を直して re-plan し、障害が解消済みなら `dispatch.mjs --plan <plan.json> --resume <この run の dispatch ディレクトリ>` で再開する。報告の無い無進捗（`worker_produced_nothing` など）とは別の停止である（owner: human）。');
+    }
     if (report.blocking_reasons.some((reason) => reason.code === TURN_EVIDENCE_UNREADABLE)) {
       lines.push('- next: `--max-turns` に到達した理由を**測れていない**（blocking の `worker_output_unreadable`）。**「ターンを回して何も出なかった」とも「上流が落ちていた」とも読み替えない。** `commandmate capture <worktree-id> --json` と、Claude worker なら `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<cwd を非英数字ごと "-" にしたもの>/*.jsonl` の末尾を手で読んでから、上の2つのどちらかへ進む（owner: operator）。');
     }
@@ -7480,13 +8597,23 @@ async function run(argv) {
   // worktree preparation stage are part of what it pays for (Issue #122).
   startWallClockBudget(inputs.wallClockBudget);
   const rawPlan = loadPlan(inputs.planPath);
-  const plan = validatePlan(rawPlan);
+  const validatedPlan = validatePlan(rawPlan);
+  // The human-only issues leave the plan first (Issue #286), so `--only` below
+  // and everything after it sees only what can be dispatched.
+  const humanOnly = excludeHumanOnly(validatedPlan);
+  inputs.humanOnly = { issues: humanOnly.issues, dependencies: humanOnly.dependencies };
+  // `--only` narrows the plan ONCE, here, before anything reads it (CommandMate#3008).
+  const restricted = restrictToOnly(inputs, humanOnly.plan);
+  const plan = restricted.plan;
+  inputs.onlyScope = restricted.scope;
+  inputs.onlyCarried = restricted.carried;
   // The profile's operating defaults (Issue #180), resolved against the flags
   // actually typed. It happens HERE — after the plan is readable and before the
   // resume decision, the lock, the pre-flight and `--out` — because the values it
   // decides are inputs to all four, and because a refusal it raises has to leave
   // the world exactly as untouched as an argv refusal does.
   applyDispatchDefaults(inputs, plan);
+  applyWorkerMessages(inputs, plan);
 
   // The resume decision (Issue #98) is made FIRST: it decides which directory
   // this attempt writes into, which wave the pre-flight has to probe, and which

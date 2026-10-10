@@ -318,6 +318,38 @@ Issue 本文が **集合外**の Issue（例: 既に merge 済みの前提）を
 この場合 result の `status` は `partial` になる。warning の文面は**読み取った方向を
 そのまま述べる**（reverse なら「#A blocks #B, which is not in this plan」）。
 
+### 3.3 human-only の Issue（[#286](https://github.com/Kewton/commandmate-skills/issues/286)）
+
+`labels` に `human-only` が**ちょうど**入っている Issue は、人がやる Issue である（名前は
+cmate-issue-authoring 0.10.0 の validator と同じ固定名で、`HUMAN_ONLY_LABEL` として byte 一致を
+mirror-conformance テストが検査する。`human only` や `Human-Only` は当たらない）。planner はその Issue を
+次のように扱う。
+
+| 項目 | 扱い |
+|---|---|
+| `issues` | **残す**。任意 field `dispatch_excluded: "human_only"` を `classification` の後に付ける |
+| `waves` / `merge_order` | **入れない**（第4節の「全 Issue がちょうど1つの wave」の例外） |
+| `dependencies` | **残す**。その Issue に触れる辺も読み手に見えるように置く。ただし wave の計算には使わない |
+| `questions` | **立てない**（その Issue に向いた lexical 推論の question も含む）。question は worker が要るものを訊くもので、worker は来ない。立たなかった件数は下の notice に出る |
+| `risk` | dispatch する Issue と辺だけで評価する |
+| `warnings` | Issue ごとに notice `human_only_excluded`。dispatch する Issue が human-only の Issue に依存する辺ごとに **blocking** の `human_only_dependency`。いずれも依存の warning の後に置く |
+| `manifest.md` 等 | 人がやる Issue の番号を 1 行で出し、「Planned worktrees」からは外す |
+
+**依存。** human-only の Issue に依存する Issue は、その辺を**待たない**（同じ wave にも入りうる）。
+dispatch は人の作業の完了を見る手段を持たないので、plan の外の Issue への依存（`external_dependency`、
+第3.2節）と同じ扱いにした。`human_only_dependency` が blocking なのも同じ理由である ——「その人の作業は
+終わったか」は、まだ誰かが決めていない判断だからである。逆向き（human-only の Issue が dispatch する
+Issue に依存する）は何も起こさない。`--depends` で human-only への辺を足すこともでき、`override` の辺として
+残る。`--order` は従来どおり plan の全 Issue（human-only を含む）の順列を求め、wave には human-only を除いた
+順で効く。
+
+**`human_only_excluded` を notice にした理由**（第5.6節の原理）: ラベルが「人がやる」という**既に下された
+判断**であり、warning はその判断を planner が守ったことの報告だからである。
+
+**全 Issue が human-only** の plan は `waves: []` / `merge_order: []` で出る（dispatch はそれを断る）。
+**ラベルの無い Issue だけの plan は byte 一致のまま**（field も warning も行も出ない）。dispatch 側の扱いは
+[dispatch-contract.md](./dispatch-contract.md) 第3.0.6節。
+
 ## 4. Wave
 
 `waves` は Wave の順序付き配列で、各 Wave は Issue 番号の配列である。
@@ -329,6 +361,7 @@ Wave 生成の規則は次の3つ。
 3. **幅の上限** — 各 Wave の Issue 数は `max_parallel`（1〜3）以下。
 
 `merge_order` は Wave を先頭から平坦化したものである。
+`human-only` の Issue（第3.3節）はどの Wave にも入らず、したがって `merge_order` にも無い。
 
 規則2の「重なる」は**文字列の一致ではない**（[#219](https://github.com/Kewton/commandmate-skills/issues/219)）。
 `suspected_files` の entry は pattern でもディレクトリでもありうるので、判定は上流の scope ゲートと
@@ -356,6 +389,15 @@ Wave 生成の規則は次の3つ。
 そこで planner は、**宣言されたファイルを編集すれば機械的に付いてくるファイル**を
 既定で許可し、足した分を `scope_defaults` に列挙する。裁定の記録は
 [adr-scope-derivation.md](./adr-scope-derivation.md)（第2節「認可境界は宣言の閉包である」）にある。
+
+**宣言の本数と導出の本数は分けて読む**（CommandMate #3004）。`scope_defaults` は `suspected_files` の
+部分集合なので、plan JSON には両方の本数が既に在る（宣言 = `suspected_files` の件数 − `scope_defaults` の件数）。
+人間が読む側 —— result の `summary_markdown` の `## scope の本数（宣言 + 導出）` 節と、`issue-analysis.md` の
+`Scope: N declared by the issue + M derived by the planner` 行 —— が、それを Issue ごとに分けて出す。
+導出分は**使われなくても害の無い許可**であり、その大半は実在しない。合計だけを見て
+「dispatch できる大きさか」を判断しないこと。dispatch の契約 goal も宣言分だけを列挙する
+（[dispatch-contract.md](./dispatch-contract.md) 第2.4節）。plan JSON に本数の field は足していない ——
+同じ事実を2か所に持つと食い違いうるうえ、全 plan の byte が動くからである。
 
 導出元は4つある。**列挙の順序もこのとおり**で、同じ path を2つの由来が出したら1件だけ出る。
 
@@ -625,14 +667,15 @@ Kewton/BorderFreeKidsMap#63）: 「未決の問い」3件を本文に残した�
 
 ## 5.6 warning の severity と `status`（`plan.warnings[].severity`）
 
-**規範。** `plan.status` は **blocking** な warning が1件以上あるとき `partial`、そうでなければ
-`success` である（[#199](https://github.com/Kewton/commandmate-skills/issues/199)）。
+**規範。** `plan.status` は warning が**1件でも**あるとき `partial`、無いとき `success` である
+（[#301](https://github.com/Kewton/commandmate-skills/issues/301)。0.37.0 までは #199 により blocking な warning
+だけが `partial` にしていた）。`severity` は色を決めず、**どれから読むか**の順位として残る。
 `plan.warnings[]` の entry は任意 field `severity`（`blocking` / `notice`）を持ちうる。
 
 | 項目 | 規範 |
 |---|---|
 | **既定** | `blocking`。`severity` を持たない entry は blocking である |
-| **notice 集合** | `harness_path_in_scope`（#199）、`profile_repository_override`（#210）、`scope_pattern_declared` と `scope_pattern_dropped`（[#219](https://github.com/Kewton/commandmate-skills/issues/219)。第5.7節）の **4件** |
+| **notice 集合** | `harness_path_in_scope`（#199）、`profile_repository_override`（#210）、`scope_pattern_declared` と `scope_pattern_dropped`（[#219](https://github.com/Kewton/commandmate-skills/issues/219)。第5.7節）、`prose_path_ignored`（CommandMate #3002。第5.8節）、`human_only_excluded`（[#286](https://github.com/Kewton/commandmate-skills/issues/286)。第3.3節）の **6件** |
 | **emit 規則** | planner は **notice の entry にだけ** `severity` を書く。blocking は暗黙のまま |
 | **required か** | **いいえ。** `note_entry` の `required` には入れない |
 | **envelope** | `orchestrate-result.v1` の `warnings` は code と detail だけを運ぶ（`severity` は載せない） |
@@ -645,9 +688,10 @@ Kewton/BorderFreeKidsMap#63）: 「未決の問い」3件を本文に残した�
 
 分けるのは「宣言されたか」ではなく「**何が**宣言されたか」である。`open_question_declared` は
 著者自身の宣言だが、宣言している内容が「まだ決めていない」なので blocking である。
-notice 集合の4件は、3件が**著者**の宣言（成果物見出しに書いたハーネス path、および
-成果物見出しの内／外に書いた scope pattern）の報告、1件が **operator** の宣言
-（`--repo` と `--allow-unverified` の2 flag）の報告であり、同じ原理の同じ側にある。
+notice 集合の6件は、4件が**著者**の宣言（成果物見出しに書いたハーネス path、
+成果物見出しの内／外に書いた scope pattern、および成果物見出しの外に書いた path）の報告、1件が **operator** の宣言
+（`--repo` と `--allow-unverified` の2 flag）の報告、1件が Issue に付けた `human-only` ラベル（「人がやる」という
+判断。第3.3節）の報告であり、同じ原理の同じ側にある。
 `scope_pattern_dropped` も同じ側である —— 報告しているのは「planner が読めなかった」ではなく
 「**宣言として読まなかった**」、つまり著者が書いた位置についての事実だからである。
 
@@ -674,17 +718,12 @@ plan がすべて 1 byte 変わる。notice にだけ書けば、**notice を1�
 既にディスクに在る `plan.json` も、そのまま生き残る。副作用として
 「`severity` が無い」が fail-closed 既定そのものを表すので、読み手は欠落を解釈しなくてよい。
 
-**なぜ `success` にしてよいか。** **`status` は人間が読む色であって、run を止める信号ではない。**
-dispatch を止めるのは `issues[].questions` の配列であり（`execution-plan.v2` schema の
-`questions` の記述が「this array — not plan.status — is what stops a run」と明言し、
-dispatch runner はその field だけを読む）、`plan.status` を読んで分岐する自動化系は無い。
-したがって notice を `success` に含めても**自動化系の振る舞いは1つも変わらない**。
-変わるのは色の情報量だけであり、それがこの節の主題である。
-
-**`success` は「warning が無い」ではない。** notice は `plan.warnings` に残り、
-`dependency-plan.md` の `## Warnings` にも `(notice)` の印つきで出て、
-[codes-and-recovery.md](./codes-and-recovery.md) 第4節の対処表にも在る。
-**落としたのは色だけで、記録は落としていない。**
+**なぜ notice も `partial` にするか（#301 で #199 を改めた）。** #199 は「`status` は色であって
+自動化系の信号ではない」ことを理由に notice を `success` に含めた。Kewton/CommandMate#3059 の実機確認では、
+入力の禁止パスが `scope_pattern_dropped`（notice）で2件落ちた plan が `success` で返り、SKILL.md の
+「warning が1件でもあれば success にしない」と食い違った。**色を読むのは人であり、緑は「読まなくてよい」と
+読まれる。** だから warning は1件でも `partial` にし、notice / blocking の区別は「著者の宣言の報告か、
+未決の報告か」という読む順の情報として残す。dispatch を止めるのが `issues[].questions` であることは変わらない。
 
 ## 5.7 著者が宣言した scope pattern（`scope_pattern_declared` / `scope_pattern_dropped`）
 
@@ -738,6 +777,106 @@ token を pattern として受けると Markdown の強調（`**bold**`）が sc
 repository 直下も含めて全 Markdown を指すなら `**/*.md` と書く（`**` は 0 段も跨ぐ）。
 また、日本語の散文に隙間なく続けて書いた pattern（`data/geo/stations/配下`）は抽出されない ——
 backtick で囲めば拾われる。
+
+## 5.8 成果物見出しの外の path（`prose_path_ignored`）
+
+**規範。** Issue 本文が**成果物見出し**（`DELIVERABLE_HEADING_RE`。`## 対象ファイル` /
+`## 成果物` / `## Deliverables` …）を1つでも持つとき、**その見出しの範囲の外**にしか書かれて
+いない path は `suspected_files` に入らない（CommandMate #3002）。範囲の外とは、見出しの
+範囲以外のすべて —— 散文、`## やること`、`## 完了条件`、`## 追記 N`、`## 注記`、title —— で
+あり、`/` の有無を問わない（`app.spec.yaml` も同じ）。
+
+| path を書いた場所 | 行き先 | 報告 |
+|---|---|---|
+| 成果物見出しの範囲（下位の `###` を含む） | `suspected_files` | —— |
+| 成果物見出しのある Issue の、範囲の外（文脈見出しの配下・文書 path・ハーネス path を除く） | `reference_files`（読む。`scope.allow` には入らない） | `prose_path_ignored`（notice。**Issue ごとに1件**、件数と先頭5件を名指す） |
+| 成果物見出しの無い Issue の、どこか | **従来どおり**（第5.3節・#50・#54 の規則のまま） | —— |
+
+- **見出しの範囲は下位の見出しで切れない**（[#273](https://github.com/Kewton/commandmate-skills/issues/273)）。
+  `## 対象ファイル` の範囲は、**同じかより上位の**見出しまで続く。`### 既存ファイル` /
+  `### 新規ファイル` の下の path は成果物である（文書 path も `reference_files` に落ちない）。
+  文脈見出し（`## 根拠` 等）の範囲は従来どおり次の見出しで切れる。
+- **否定で終わる見出しは成果物見出しではない**（`NEGATED_HEADING_RE`）。`## 変更対象外` /
+  `## 対象ファイル外` / `## 対象ファイル以外` / `## 変更しない` のように、見出しが「外」「以外」
+  「しない」で終わる（末尾の空白・コロンは無視）とき、語彙を含んでいても成果物見出しとして
+  扱わない。**「変えるな」を見出しで書いた path が scope に入る穴**を塞ぐためである。
+- 同じ path を見出しの範囲とその外の両方に書いたら、**成果物**である（強い方の言明が勝つ。#54 と同じ）。
+- **ハーネス path は warning に名指さない。** 見出しの外のハーネス path は #177 により元々
+  黙って拒否される（第5.3節）ので、ここで名指せば #177 が避けた騒音を戻すことになる。
+- 文脈見出しの配下の path と、見出しの外の文書 path（`docs/` / `.md` / `.rst` / `.txt`）は、
+  この規則の前から `reference_files` だったので**名指さない**。warning が名指すのは、この規則が
+  無ければ `scope.allow` に入っていた path だけである。
+
+**なぜ既定で有効か。** 実測（Kewton/Musunest）で、「（依存宣言の）ファイルの差分が 0 であること」
+（#181）、「`ci.yml` に手を入れる必要が出たら止めて返す」（#183）と完了条件に書いた path に
+**書き込み権限が付いた**。**「変えるな」と書いたファイルほど scope に入る**。成果物見出しを持つ
+Issue は scope を既に宣言している —— それ以外の言及を権限に変える理由が無い。#219 が pattern に
+引いた線（明示の宣言が言及に優る。第5.7節）を path 全般へ延ばしたものである。
+**見出しの無い Issue は変えない**: そこでは散文が「何を変えるか」の唯一の記述である。
+
+**意図した副作用**（Issue 上で利用者が確認済み）:
+
+- `## 完了条件` にだけ書いたテスト path は scope に入らない。受入条件がテストを求めていれば
+  `acceptance_requires_tests_but_scope_has_none`（第5.2節）で**止まる**。直し方は
+  テスト path を `## 対象ファイル` に書くこと。
+- 見出しの外の短い綴りによる `ambiguous_file_candidate`（第5.4節）は立たない。
+  その綴りは scope に入らないからである。
+
+**なぜ notice か。** 第5.6節の原理に従う。報告しているのは「planner が読めなかった」ではなく、
+「著者が成果物見出しで scope を宣言したので、それ以外を**宣言として読まなかった**」という
+著者が書いた位置についての事実である（`scope_pattern_dropped` と同じ側）。
+
+## 5.9 成果物見出しの下は拡張子によらず拾う（CommandMate #3003）
+
+**規範。** 成果物見出しの範囲（第5.8節。下位の `###` を含む）で **backtick に囲まれた file 名**は、
+拡張子によらず `suspected_files` に入る。`FILE_EXT` に無い拡張子（`expression.ebnf`・`Cargo.lock`・
+`requirements/ci.txt`）も、拡張子の無い名前（`Makefile`・`Dockerfile`・`.gitignore`・`LICENSE`）も、
+`/` の無い名前も同じである（[#272](https://github.com/Kewton/commandmate-skills/issues/272) をここに統合した）。
+
+| 書き方 | 成果物見出しの範囲 | 範囲の外 |
+|---|---|---|
+| backtick の file 名（拡張子不問） | `suspected_files` | 読まない（第5.8節の地の文。backtick の path なら `prose_path_ignored` に名指す） |
+| backtick 無しの path | 従来どおり（`FILE_EXT` と既知 root で判定） | 第5.8節 |
+
+file 名とみなす token（`CANDIDATE_DECLARED`）は、`/` か `.` を含み名前の文字で終わるもの、
+または `…file`（`Makefile` / `Justfile`）か全大文字（`LICENSE` / `CODEOWNERS`）の拡張子無し名である。
+camelCase の識別子（`parseFoo`）・flag（`--json`）・数字列（`0.33.0`）・`./x` / `../x` / `/x` は拾わない。
+`console.log` のような点つき識別子は拾う —— 成果物見出しの下にしか書けず、代価は誰も使わない
+許可1件である（使われない許可のコストはゼロ。[ADR](./adr-scope-derivation.md) 第2節）。
+
+**なぜ profile の欄（拡張子を足す）ではないか。** 起票時の検査（cmate-issue-authoring の
+`validate-plan.mjs`）は profile を読まないので、欄で足した拡張子は**起票時の判定と planner の判定を
+食い違わせる**。見出しの下の規則は本文だけで決まり、写しにそのまま載る（Issue 上で利用者と確定）。
+
+**なぜ見出しの下だけか、なぜ backtick だけか。** `FILE_EXT` が閉じているのは**散文の token を書き込み権限に
+しない**ためであり、成果物見出しの下は宣言であって散文ではない —— #219 が pattern について下した判断と
+同じである。backtick を要求するのは、見出しの下の箇条書きにも散文（「`src/a.ts` を直す（例: node.js 側）」）が
+混ざるからである。
+
+**`unrecognized_file_extension` の範囲が変わる。** 成果物見出しを持つ Issue では、見出しの下の backtick path は
+すべて拾われ、見出しの外の path は拡張子と無関係に scope の外なので、見出しの外の未知拡張子 path は
+`prose_path_ignored` と `reference_files` に回る（拡張子を直せと言うのは誤診になる）。見出しの無い Issue では
+従来どおり `unrecognized_file_extension`（blocking）が出る。
+
+## 5.10 本文の禁止パス（`issues[].scope_deny`、[#301](https://github.com/Kewton/commandmate-skills/issues/301)）
+
+**規範。** 禁止の見出し（`変更してはならない` / `変更禁止` / `編集禁止` / `触らない` / `禁止パス` / `forbidden` /
+`must not change` / `scope.deny` / `deny`、および否定の成果物見出し `変更対象外` など）の下と、同じ語をラベルに持つ行
+（`` - 変更してはならないパス: `test/**` ``）にある path と pattern は、**scope 候補にしない**。plan の任意 field
+`issues[].scope_deny` に書いた順で入り、dispatch が実行契約の `scope.deny` に（sort して）そのまま書く。
+禁止した pattern は `scope_pattern_dropped` に、未知拡張子の path は `unrecognized_file_extension` に数えない
+（成果物見出しを持つ Issue では、禁止した plain path は従来どおり `prose_path_ignored` に名指され `reference_files` に出る）。
+
+| 場合 | 扱い |
+|---|---|
+| 禁止の無い Issue | `scope_deny` を**書かない**（plan は 0.37.0 と byte 一致、契約は `deny: []`） |
+| 散文から scope に入った path が禁止に当たる | scope から外して `reference_files` に回す |
+| 導出 path（lockfile・慣習 test・`scope_companions`）が禁止に当たる | **足さない**（`scope_defaults` にも出ない） |
+| 成果物見出しの path が禁止に当たる | `scope_deny_conflict`（question）。どちらにも決めない |
+| 契約が運べない禁止（絶対 path・`~`・`..`・バックスラッシュ・件数/長さ超過） | `scope_deny_untransferable`（question）。**黙って落とさない** |
+
+禁止の判定は CommandMate の scope gate と同じ glob 語彙（`lib.mjs` の `scopeMatches`）で行う。
+`.commandmate/tasks/*.yaml` のタスク契約を planner が直接読むことはしない（入力は Issue だけ）。
 
 ## 6. risk
 
