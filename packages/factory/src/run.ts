@@ -11,6 +11,7 @@
 //
 // 共通の口（call.ts）を通してだけ LLM を呼ぶ。adapter は呼ぶ側が渡す（この file は API キーも環境変数も
 // 触らない）。単価も引数で受け取る（コードに埋め込まない）。
+import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import { JobBudget, type TokenRates } from "./budget.js";
 import { CallGateway } from "./call.js";
@@ -26,6 +27,8 @@ import { AGENT_LIMITS, UNWRITABLE_CONFIDENCE_THRESHOLD, checkRequestText, type A
 import type { LlmClient } from "./llm.js";
 import { decideOutcome, type Outcome } from "./outcome.js";
 import {
+  acceptedUnwritablePartIds,
+  requirementsFromPlan,
   toStageResults,
   type ArbitrationResult,
   type CorrespondenceEntry,
@@ -36,6 +39,7 @@ import {
   type JudgeMaterials,
   type OverturnedTest,
   type RejectedDispute,
+  type RequirementList,
   type RoleEntry,
   type RoleNameMapping,
   type TestRunResult,
@@ -122,6 +126,12 @@ export interface GenerationInput {
    * 差し込まない道）。**判定は助言であって門ではない**——答えで合否を開けない（§4）。
    */
   readonly judge?: Judge;
+  /**
+   * 確定した仕様（Plan の契約 `plan.json`。#331・§5・Issue #334）。**渡されたときは、これが全段の正本**である
+   * ——① と ①' を行わず、②'・⑤a・⑥' の根拠も原文ではなくこの仕様の要件と出どころにする。渡さなければ、
+   * これまでどおり依頼文（原文）から ① → ①' を回す。
+   */
+  readonly plan?: ConfirmedPlan;
 }
 
 /** 1 回の生成の結果 */
@@ -136,6 +146,11 @@ export interface GenerationResult {
   readonly bundle: AssembledBundle | null;
   /** 早期停止の帰属（どの段の・どの種類の失敗か）。完走なら `null` */
   readonly stopped: FailureAttribution | null;
+  /**
+   * ⑥' が、確定した仕様そのものと食い違う主張を見つけて **Plan に戻した**か（§5・Issue #334）。
+   * `true` のとき、走りは差し戻しで止まっている（差し戻しは 1 回まで）。確定した仕様が無ければ `false`。
+   */
+  readonly returnToPlan?: boolean;
 }
 
 /** 早期停止を、段の外へ伝えるための合図（runGeneration の中でだけ使う） */
@@ -269,6 +284,10 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
   const unresolved: string[] = [];
   const disputes: Dispute[] = [];
   const rejected: RejectedDispute[] = [];
+  /** ⑥' が確定した仕様と食い違う主張を見つけて Plan に戻したか（§5・Issue #334） */
+  let returnToPlan = false;
+  /** Plan に戻した試験 ID（差し戻しの記録。§5・Issue #334） */
+  const returnedToPlan: string[] = [];
 
   const pushRecord = (
     stage: StageId,
@@ -349,21 +368,30 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
   };
 
   try {
-    // ① の入口：依頼文の上限。超えていれば LLM を呼ばずに止める（§1.5）
-    if (checkRequestText(input.source) !== undefined) {
-      pushRecord("requirements", "failed", meter.snapshot, input.now(), "limit");
-      throw new RunStop({ stage: "requirements", kind: "limit" });
+    // 入口：**確定した仕様（Plan の契約）があれば、それを正本にする**——① と ①' は行わず、その要件を
+    // そのまま使う（§5・Issue #334）。無ければ、これまでどおり ① の入口 → ①' を回す。
+    let requirementList: RequirementList;
+    let carriedReverseCheck: readonly string[];
+    if (input.plan !== undefined) {
+      requirementList = requirementsFromPlan(input.plan);
+      carriedReverseCheck = [];
+    } else {
+      // ① の入口：依頼文の上限。超えていれば LLM を呼ばずに止める（§1.5）
+      if (checkRequestText(input.source) !== undefined) {
+        pushRecord("requirements", "failed", meter.snapshot, input.now(), "limit");
+        throw new RunStop({ stage: "requirements", kind: "limit" });
+      }
+      // ① → ①'（逆照合。落ちがあれば ① を 1 回だけやり直す。§1）
+      const reverse = await runStageOk("reverse-check", () =>
+        runReverseCheckLoop({ source: input.source, documents: input.documents, gateway }),
+      );
+      requirementList = reverse.list;
+      carriedReverseCheck = reverse.unmet.map((miss) => `${miss.kind}: ${miss.detail}`);
     }
-
-    // ① → ①'（逆照合。落ちがあれば ① を 1 回だけやり直す。§1）
-    const requirementList = await runStageOk("reverse-check", () =>
-      runReverseCheckLoop({ source: input.source, documents: input.documents, gateway }),
-    );
-    const carriedReverseCheck = requirementList.unmet.map((miss) => `${miss.kind}: ${miss.detail}`);
 
     // ② 設計する（書けなかった要件の一覧を、⑦ と ⑧ のために組んでおく）
     const rawDesign = await runStageOk("design", () =>
-      runDesign({ list: requirementList.list, documents: input.documents, gateway }),
+      runDesign({ list: requirementList, documents: input.documents, gateway }),
     );
 
     // ② の「書けない」の申告を、仕分けて裏を取る（Issue #332）。判定の口（`judge`）が渡されたときだけ
@@ -381,8 +409,8 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
           // 語彙の穴で「反する」と判定されたとき、その要件だけ設計をやり直す（1 回まで）
           redoDesign: async (requirementId) => {
             const list = {
-              ...requirementList.list,
-              requirements: requirementList.list.requirements.filter(
+              ...requirementList,
+              requirements: requirementList.requirements.filter(
                 (requirement) => requirement.id === requirementId,
               ),
             };
@@ -409,7 +437,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
             parts: entry.claims.map((claim) => claim.part),
           }));
     const unwritable: readonly UnwritableRequirement[] = unwritableParts.map(({ requirementId, parts }) => {
-      const requirement = requirementList.list.requirements.find((candidate) => candidate.id === requirementId);
+      const requirement = requirementList.requirements.find((candidate) => candidate.id === requirementId);
       return {
         requirementId,
         text: requirement?.text ?? "",
@@ -418,6 +446,27 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       };
     });
     const unwritableRequirements = unwritable.length;
+
+    // 確定した仕様があるときは、設計の「書けない」を `accepted_unwritable`（了承して除いた部分の**部分 ID**）と
+    // 突き合わせる（§5・Issue #334）。**了承済みの部分だけが書けない要件は、合格（full）を妨げない**。
+    // 了承の外にある「書けない」は「Plan の見落とし」として部分案になる（`decideOutcome`）。
+    const acceptedTextsByRequirement = new Map<string, ReadonlySet<string>>();
+    if (input.plan !== undefined) {
+      const acceptedIds = acceptedUnwritablePartIds(input.plan);
+      for (const requirement of input.plan.requirements) {
+        const texts = new Set<string>();
+        for (const part of requirement.parts) if (acceptedIds.has(part.id)) texts.add(part.text);
+        if (texts.size > 0) acceptedTextsByRequirement.set(requirement.id, texts);
+      }
+    }
+    const acceptedUnwritable =
+      input.plan === undefined
+        ? undefined
+        : unwritable.filter((entry) =>
+            entry.unwritable.every(
+              (part) => acceptedTextsByRequirement.get(entry.requirementId)?.has(part) === true,
+            ),
+          ).length;
 
     // 判定の記録（問いの ID・答え・確信度・答えたモデルの版）と、落とした申告・印つきの要件（Issue #332）
     const triageJudgments: readonly BundleTriageJudgment[] = (triage?.judgments ?? []).map((judgment) => ({
@@ -441,12 +490,18 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     // 種類）を渡す**——渡さないと ②' は設計が無いときの古い経路に入り、種類の突き合わせと役割 ID の
     // 検査が効かない（Issue #316。疎通の確認では、在ることだけの要件に異常・境界の試験を求めて落ちた）。
     const testSuite = await runStageOk("test-suite", () =>
-      runTestSuite({ list: requirementList.list, design, documents: input.documents, gateway }),
+      runTestSuite({
+        list: requirementList,
+        design,
+        documents: input.documents,
+        gateway,
+        ...(input.plan === undefined ? {} : { plan: input.plan }),
+      }),
     );
 
     // ③ 書く
     const written = await runStageOk("write", () =>
-      runWrite({ list: requirementList.list, design, documents: input.documents, gateway }),
+      runWrite({ list: requirementList, design, documents: input.documents, gateway }),
     );
 
     // 棄却で外した試験を除いた、いまの固定した試験。**分類（classifications）は落とさない**
@@ -491,11 +546,12 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         const result = await runStageOk("correspondence", () =>
           runCorrespondence({
             source: input.source,
-            list: requirementList.list,
+            list: requirementList,
             declaration,
             app,
             documents: input.documents,
             gateway,
+            ...(input.plan === undefined ? {} : { plan: input.plan }),
             ...(roles === undefined ? {} : { roles }),
             ...(useMappings() ? { mappings } : {}),
           }),
@@ -506,7 +562,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       }
       // ⑤a の落ちを、対応の表の不備（③ のやり直し）と、それ以外（宣言の要素の欠落、⑥）に分ける（§1.3.1・Issue #324）。
       // **画面から辿れない場所は「宣言の要素の欠落」**なので、③ のやり直しには数えない（⑥ 直すへ回す）
-      const entriesMisses = checkCorrespondence(app, requirementList.list, currentEntries);
+      const entriesMisses = checkCorrespondence(app, requirementList, currentEntries);
       const mappingMisses =
         roles !== undefined && useMappings()
           ? checkRoleMappings(app, roles, currentEntries, mappings)
@@ -588,12 +644,13 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         const retry = await runStageOk("correspondence", () =>
           runCorrespondence({
             source: input.source,
-            list: requirementList.list,
+            list: requirementList,
             declaration: current.declaration,
             app,
             documents: input.documents,
             gateway,
             roles,
+            ...(input.plan === undefined ? {} : { plan: input.plan }),
             ...(useMappings() ? { mappings } : {}),
             previousMisses,
           }),
@@ -626,7 +683,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         const redo = await runStageOk("write", () =>
           runCorrespondenceRedo({
             source: input.source,
-            list: requirementList.list,
+            list: requirementList,
             roles,
             declaration: current.declaration,
             documents: input.documents,
@@ -656,7 +713,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       const step = await runStageOk("repair", () =>
         runRepairStep({
           source: input.source,
-          list: requirementList.list,
+          list: requirementList,
           suite: withoutOverturned(),
           current,
           correspondences: current.correspondence?.entries ?? [],
@@ -672,15 +729,23 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         const arbitration = await runStageOk("arbitration", () =>
           runArbitration({
             source: input.source,
-            list: requirementList.list,
+            list: requirementList,
             suite: withoutOverturned(),
             declaration: step.declaration,
             disputes: step.disputes,
             documents: input.documents,
             gateway,
+            ...(input.plan === undefined ? {} : { plan: input.plan }),
           }),
         );
         collectArbitration(arbitration, upheld, overturned, unresolved);
+        // 確定した仕様そのものと食い違う主張があれば、裁定せず Plan に戻して止める（差し戻しは 1 回まで。§5）
+        if (arbitration.returnToPlan !== undefined && arbitration.returnToPlan.length > 0) {
+          returnToPlan = true;
+          for (const testId of arbitration.returnToPlan) if (!returnedToPlan.includes(testId)) returnedToPlan.push(testId);
+          stopReason = "unresolved";
+          break;
+        }
       }
       const next = await evaluate(step.declaration);
       if (next === null) {
@@ -708,6 +773,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       testMismatches: final.testRun === null ? 1 : final.testRun.mismatches.length,
       testUnresolved: countUnresolvedTests(unresolved, final.testRun),
       unwritableRequirements,
+      ...(acceptedUnwritable === undefined ? {} : { acceptedUnwritable }),
       limitReached,
       carriedOver: { reverseCheck: carriedReverseCheck, testSuite: [] },
     };
@@ -740,7 +806,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       declarationSha256: final.declarationSha256,
       outcome,
       summary,
-      requirements: requirementList.list,
+      requirements: requirementList,
       unwritable,
       triage: triageJudgments,
       markedRequirements,
@@ -749,13 +815,26 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       testRun: final.testRun,
       disputes,
       rejected,
-      arbitration: { upheld, overturned, unresolved },
+      arbitration: {
+        upheld,
+        overturned,
+        unresolved,
+        ...(returnedToPlan.length === 0 ? {} : { returnToPlan: returnedToPlan }),
+      },
       builder: input.builder,
       verificationProfile: input.verificationProfile ?? "musunest-factory/l2",
       specEngineVersion: input.specEngineVersion,
       factoryVersion: input.factoryVersion,
+      ...(input.plan === undefined ? {} : { plan: input.plan }),
     });
-    return { outcome, record, summary, bundle, stopped: failure };
+    return {
+      outcome,
+      record,
+      summary,
+      bundle,
+      stopped: failure,
+      ...(returnToPlan ? { returnToPlan: true } : {}),
+    };
   } catch (error) {
     if (error instanceof RunStop) return stopResult(error.attribution);
     throw error;

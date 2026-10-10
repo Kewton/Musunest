@@ -26,6 +26,7 @@
 //   - 要件ごとの種類に応じて、正常・異常・境界（決まりを含む）か、正常だけ（在ることだけ）がそろう
 //   - selector（要件 ID と役割 ID）が 1 つの要件と役割に一意に決まる
 //   - 上限（要件ごとの試験の数・参照データの行数。§1.5）
+import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import {
   REQUIREMENT_NATURES,
   TEST_KINDS,
@@ -197,6 +198,11 @@ export interface TestSuiteInput {
    * （`checkSuitePlan`）を掛ける。渡されなければ（旧形式の記録）旧来の検査だけを行う（後方互換）。
    */
   readonly design?: DesignResult;
+  /**
+   * 確定した仕様（`plan.json`。§5・Issue #334）。渡されたときは、**要件と出どころの正本**として
+   * データに載せる（原文の代わりに、確定した仕様の要件と出どころを根拠にする）。
+   */
+  readonly plan?: ConfirmedPlan;
 }
 
 /** selector の鍵（要件 ID と役割 ID。旧形式の自由な文の役割も受ける） */
@@ -513,8 +519,12 @@ function buildData(
   list: RequirementList,
   design: DesignResult | undefined,
   previous: readonly Problem[],
+  plan: ConfirmedPlan | undefined,
 ): readonly PromptData[] {
   const data: PromptData[] = [{ name: "要件の一覧", text: serializeJson(list) }];
+  if (plan !== undefined) {
+    data.push({ name: "確定した仕様", text: serializeJson(plan) });
+  }
   if (design !== undefined && isPlannedDesign(design)) {
     data.push({ name: "役割 ID の表", text: serializeJson(design.roles ?? []) });
     data.push({
@@ -551,7 +561,7 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
     const request = buildStructuredRequest({
       rules: TEST_SUITE_RULES,
       documents: input.documents,
-      data: buildData(input.list, input.design, previous),
+      data: buildData(input.list, input.design, previous, input.plan),
       schemaName: TEST_SUITE_SCHEMA_NAME,
       schema: TEST_SUITE_SCHEMA,
       maxOutputTokens: input.gateway.maxOutputTokens("test-suite"),

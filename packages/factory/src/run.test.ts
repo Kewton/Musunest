@@ -8,7 +8,7 @@
 //   3. **未実行の検査**がある結果が、合格にならないこと
 //   4. ⑧ の納品物が組まれ、検証の結果の SHA-256 が最後の宣言のバイト列と一致すること
 //   5. 送った要求に、受入の題材の言葉が無いこと
-import { acceptsHeadlessSummaryWire } from "@musunest/appspec-schema";
+import { acceptsHeadlessSummaryWire, planDigest } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import { costOfUsageUsd } from "./budget.js";
@@ -23,9 +23,13 @@ import { runGeneration, countUnresolvedTests, type GenerationInput } from "./run
 import { MAPPING_REDO_SCHEMA_NAME } from "./stages/repair.js";
 import { ARBITRATION_SCHEMA_NAME } from "./stages/arbitrate.js";
 import { CORRESPONDENCE_SCHEMA_NAME } from "./stages/correspondence.js";
+import { REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
+import { REQUIREMENTS_SCHEMA_NAME } from "./stages/requirements.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
 import {
   BAD_MAPPINGS,
+  CONFIRMED_PLAN,
+  CONFIRMED_PLAN_ACCEPTED,
   CORRESPONDENCE_OUTPUT,
   CORRESPONDENCE_OUTPUT_WITH_FIELD,
   DECLARATION_SOURCE,
@@ -47,6 +51,7 @@ import {
   makeRunInput,
   recordedRun,
   recordedRunFour,
+  recordedRunFromPlan,
   structured,
 } from "./__tests__/run.js";
 
@@ -1198,5 +1203,50 @@ describe("② の申告を仕分けて裏を取る（判定の口。Issue #332�
     const { run } = runWith(recorded(CREATE_DESIGN_WITH_CLAIM));
     const result = await run;
     expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+  });
+});
+
+// ── 確定した仕様（plan.json）を全段の正本にする（§5・Issue #334）──────────────
+
+describe("確定した仕様を正本にする（§5・Issue #334）", () => {
+  it("確定した仕様を渡すと、①・①' を行わず、その要件で最後まで流れる", async () => {
+    const { recording, run } = runWith(recordedRunFromPlan(), { plan: CONFIRMED_PLAN });
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    // ①（要件）・①'（逆照合）の段は回さない
+    const stages = result.record.stages.map((stage) => stage.stage);
+    expect(stages).not.toContain("reverse-check");
+    expect(stages).toContain("design");
+    // 送った要求に、①・①' の schema が無い（② から始まる）
+    expect(recording.structured.every((request) => request.schemaName !== REQUIREMENTS_SCHEMA_NAME)).toBe(true);
+    expect(recording.structured.every((request) => request.schemaName !== REVERSE_CHECK_SCHEMA_NAME)).toBe(true);
+    // ②'・⑤a の根拠に、確定した仕様が入る
+    expect(recording.structured.some((request) => request.input.includes("確定した仕様"))).toBe(true);
+    // 納品物に plan.json が入り、仕様の SHA-256 が載る
+    expect(result.bundle).not.toBeNull();
+    expect(result.bundle?.planSha256).toBe(await planDigest(CONFIRMED_PLAN));
+  });
+
+  it("了承して除いた部分だけが書けない仕様は、合格（full）になる", async () => {
+    const { run } = runWith(recordedRunFromPlan({ design: DESIGN_OUTPUT_PARTIAL }), {
+      plan: CONFIRMED_PLAN_ACCEPTED,
+    });
+    const result = await run;
+
+    // 設計は R-2 を「書けない」と申告するが、確定した仕様で了承して除いているので合格のまま
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(result.bundle?.planSha256).toBe(await planDigest(CONFIRMED_PLAN_ACCEPTED));
+  });
+
+  it("確定した仕様を渡さなければ、これまでどおり原文から ①・①' を回す", async () => {
+    const { recording, run } = runWith(recordedRun());
+    const result = await run;
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(result.record.stages.map((stage) => stage.stage)).toContain("reverse-check");
+    expect(recording.structured.some((request) => request.schemaName === REQUIREMENTS_SCHEMA_NAME)).toBe(true);
+    expect(recording.structured.some((request) => request.schemaName === REVERSE_CHECK_SCHEMA_NAME)).toBe(true);
   });
 });
