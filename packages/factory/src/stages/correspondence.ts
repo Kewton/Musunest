@@ -457,6 +457,20 @@ function declarationKindsOfName(
 }
 
 /**
+ * 項目が、その entity の一覧か表から辿れるか（§1・§1.3・Issue #324）。`show` に入っているか、`show` を
+ * 省略して全部を出す一覧（種類なし・`table`・`list`）に載っていれば辿れる。⑤a の点検（`screenReachable`）と
+ * ⑤b の「項目 × 画面」の判定（`judgeFieldScreen`）が、**同じ規則**を使う。
+ */
+export function fieldReachableFromScreen(app: NormalizedAppSpec, location: DeclarationLocation): boolean {
+  if (location.kind !== "field") return false;
+  return app.spec.views.some((view) => {
+    if (view.entity !== location.entity) return false;
+    if (view.show !== undefined) return view.show.includes(location.name);
+    return view.type === undefined || view.type === "table" || view.type === "list";
+  });
+}
+
+/**
  * 計算でない場所も、画面から辿れるか（create の操作・一覧か表の `show`。§1・Issue #308）。
  * 計算は `checkLocation` が到達を見るので、ここでは entity・項目を確かめる。他の種類は実在で足りる。
  */
@@ -472,14 +486,22 @@ function screenReachable(app: NormalizedAppSpec, location: DeclarationLocation):
     );
     return hasCreate || shown;
   }
-  if (location.kind === "field") {
-    return app.spec.views.some((view) => {
-      if (view.entity !== location.entity) return false;
-      if (view.show !== undefined) return view.show.includes(location.name);
-      return view.type === undefined || view.type === "table" || view.type === "list";
-    });
-  }
+  if (location.kind === "field") return fieldReachableFromScreen(app, location);
   return true;
+}
+
+/**
+ * 提出された対応の点検の落ち（Issue #324）。`CorrespondenceMiss` に、行き先（`route`）を足したものである。
+ *
+ *   - `correspondence-defect` … **③ のやり直し**へ回す「対応の表の不備」（実在しない名前・種類違い・
+ *     対応表の外・共有の不備）。対応の表そのものが誤っているので、③ に出し直させる（§1.3.1）
+ *   - `missing-element` … **⑥ 直す**へ回す「要件に要る宣言の要素の欠落」（画面から辿れない場所）。
+ *     名前は実在するので、③ をやり直しても直らない。宣言の要素（項目・`show`）を足す ⑥ へ回す
+ *
+ * 名前は `RoutedFailure` の行き先とそろえてある。落ちには、**もとの要件 ID** を入れる（空にしない）。
+ */
+export interface RoleMappingMiss extends CorrespondenceMiss {
+  readonly route: "correspondence-defect" | "missing-element";
 }
 
 /**
@@ -492,24 +514,31 @@ function screenReachable(app: NormalizedAppSpec, location: DeclarationLocation):
  *   - 明示しない共有 … 同じ場所に複数の役割 ID が対応するのに、共有も別名も明示していない
  *
  * 画面から辿れない場所も落ちにする（計算は `checkLocation`、entity・項目は `screenReachable`）。
+ * ただし、その落ちの行き先は **⑥ 直す**である（名前が実在するので ③ のやり直しでは直らない。Issue #324）。
+ * 落ちには、その場所を挙げている要件の ID を入れる（空にしない）。
  */
 export function checkRoleMappings(
   app: NormalizedAppSpec,
   roles: readonly RoleEntry[],
   entries: readonly CorrespondenceEntry[],
   mappings: readonly RoleNameMapping[],
-): readonly CorrespondenceMiss[] {
-  const misses: CorrespondenceMiss[] = [];
+): readonly RoleMappingMiss[] {
+  const misses: RoleMappingMiss[] = [];
   const roleById = new Map(roles.map((role) => [role.roleId, role]));
   const nameByRoleId = new Map(mappings.map((mapping) => [mapping.roleId, mapping.name]));
   const tableLocations = entries.flatMap((entry) => entry.locations);
   const resolved: { readonly role: RoleEntry; readonly location: DeclarationLocation }[] = [];
+  /** その場所を挙げている要件の ID（落ちに、もとの要件 ID を入れる。Issue #324） */
+  const requirementIdOf = (location: DeclarationLocation): string =>
+    entries.find((entry) => entry.locations.some((candidate) => sameLocation(candidate, location)))
+      ?.requirementId ?? "";
 
   for (const mapping of mappings) {
     const role = roleById.get(mapping.roleId);
     if (role === undefined) {
       misses.push({
         requirementId: "",
+        route: "correspondence-defect",
         detail: `役割 ID ${mapping.roleId} は設計の役割 ID の表に無い（対応表の外）`,
       });
       continue;
@@ -521,6 +550,7 @@ export function checkRoleMappings(
       if (mapped === undefined) {
         misses.push({
           requirementId: "",
+          route: "correspondence-defect",
           detail: `役割 ${role.roleId} の所属の entity（役割 ID ${role.entity}）の対応が無い`,
         });
         continue;
@@ -530,34 +560,32 @@ export function checkRoleMappings(
     const location: DeclarationLocation = { kind, entity: entityName, name: mapping.name };
     if (!declarationHasLocation(app, location)) {
       const kinds = declarationKindsOfName(app, mapping.name, entityName);
-      if (kinds.length > 0) {
-        misses.push({
-          requirementId: "",
-          location,
-          detail: `役割 ${role.roleId} の名前 ${mapping.name} は宣言に ${kinds.join("・")} としてある（対象の種類 ${kind} と合わない）`,
-        });
-      } else {
-        misses.push({
-          requirementId: "",
-          location,
-          detail: `宣言に ${kind} ${mapping.name} が無い（役割 ${role.roleId} の実在しない名前）`,
-        });
-      }
-      continue;
-    }
-    if (!screenReachable(app, location)) {
       misses.push({
         requirementId: "",
+        route: "correspondence-defect",
         location,
-        detail: `役割 ${role.roleId} の場所（${kind} ${mapping.name}）は画面から辿れない`,
+        detail:
+          kinds.length > 0
+            ? `役割 ${role.roleId} の名前 ${mapping.name} は宣言に ${kinds.join("・")} としてある（対象の種類 ${kind} と合わない）`
+            : `宣言に ${kind} ${mapping.name} が無い（役割 ${role.roleId} の実在しない名前）`,
       });
       continue;
     }
     if (!tableLocations.some((candidate) => sameLocation(candidate, location))) {
       misses.push({
         requirementId: "",
+        route: "correspondence-defect",
         location,
         detail: `役割 ${role.roleId} の場所（${kind} ${mapping.name}）が対応表の外にある`,
+      });
+      continue;
+    }
+    if (!screenReachable(app, location)) {
+      misses.push({
+        requirementId: requirementIdOf(location),
+        route: "missing-element",
+        location,
+        detail: `役割 ${role.roleId} の場所（${kind} ${mapping.name}）は画面から辿れない`,
       });
       continue;
     }
@@ -579,6 +607,7 @@ export function checkRoleMappings(
     for (const { role, location } of list) {
       misses.push({
         requirementId: "",
+        route: "correspondence-defect",
         location,
         detail: `同じ場所（${location.kind} ${location.name}）に複数の役割 ID が対応しているが、役割 ${role.roleId} は共有（shared）も別名（aliasOf）も明示していない`,
       });

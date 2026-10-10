@@ -420,15 +420,17 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         entries = currentEntries;
         entriesSha = declarationSha256;
       }
-      // ⑤a の落ちを、対応の表の不備（③ のやり直し）と、それ以外（要素の欠落、⑥）に分ける
+      // ⑤a の落ちを、対応の表の不備（③ のやり直し）と、それ以外（宣言の要素の欠落、⑥）に分ける（§1.3.1・Issue #324）。
+      // **画面から辿れない場所は「宣言の要素の欠落」**なので、③ のやり直しには数えない（⑥ 直すへ回す）
       const entriesMisses = checkCorrespondence(app, requirementList.list, currentEntries);
-      const defectMisses =
+      const mappingMisses =
         roles !== undefined && useMappings()
           ? checkRoleMappings(app, roles, currentEntries, mappings)
           : [];
+      const defectMisses = mappingMisses.filter((miss) => miss.route === "correspondence-defect");
       const correspondence: CorrespondenceResult = {
         entries: currentEntries,
-        misses: [...entriesMisses, ...defectMisses],
+        misses: [...entriesMisses, ...mappingMisses],
       };
       const report = await runStage("run-tests", async () =>
         runTests({
