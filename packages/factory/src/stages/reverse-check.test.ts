@@ -9,6 +9,7 @@ import type { RequirementList } from "../pipeline.js";
 import {
   REVERSE_CHECK_SCHEMA_NAME,
   checkRequirementCoverage,
+  isBlankRange,
   runReverseCheck,
   runReverseCheckLoop,
   splitSourceSentences,
@@ -281,6 +282,8 @@ describe("①' が送る要求を観測する（02 §2.2・§1.2）", () => {
     const ranges = outcome.value.uncovered.map((range) => `${range.start}-${range.end}`);
     expect(ranges).toContain("0-3");
     expect(ranges).not.toContain("90-99");
+    // 捨てた断片は無い（範囲外は元から落ちにしない）
+    expect(outcome.value.droppedBlankMisses).toBe(0);
   });
 });
 
@@ -305,5 +308,134 @@ describe("①' の不正な応答（02 §2.2）", () => {
       gateway: makeGateway(recovered.client),
     });
     expect(retried.ok).toBe(true);
+  });
+});
+
+describe("中身の無い落ちを捨てる（Issue #377）", () => {
+  /** 原文から引用の位置を求めて、要件 1 件を作る */
+  function requirement(source: string, id: string, text: string, quote: string) {
+    const start = source.indexOf(quote);
+    return { id, text, quote, position: { start, end: start + quote.length } };
+  }
+
+  /** 原文の一部を覆う要件 1 件だけの一覧 */
+  function listCovering(source: string, quote: string): RequirementList {
+    return { requirements: [requirement(source, "R-1", "記録できる", quote)], decisions: [], unresolved: [] };
+  }
+
+  it("中身の無い範囲の判定は、空白・改行と列挙した記号だけを中身が無いと見なす", () => {
+    const source = " \t\n-*・•‐–—、。，．,.:：;；あ";
+    expect(isBlankRange(source, { start: 0, end: source.length - 1 })).toBe(true);
+    expect(isBlankRange(source, { start: 0, end: source.length })).toBe(false);
+    expect(isBlankRange(source, { start: 3, end: 3 })).toBe(true);
+  });
+
+  it("改行だけ・空白だけ・記号だけの範囲は、会話が返しても落ちにならない", async () => {
+    const source = "タスクを記録する。\n   \n・\n";
+    const recording = createRecordingClient([
+      structured({
+        uncovered: [
+          { start: 9, end: 10 },
+          { start: 10, end: 13 },
+          { start: 13, end: 14 },
+          { start: 14, end: 15 },
+          { start: 15, end: 16 },
+        ],
+      }),
+    ]);
+    const outcome = await runReverseCheck({
+      source,
+      list: listCovering(source, "タスクを記録する。"),
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.uncovered).toEqual([]);
+    expect(outcome.value.droppedBlankMisses).toBe(5);
+  });
+
+  it("原文に記号だけの行があっても、覆いの検査で落ちにならず、やり直しが起きない", async () => {
+    const source = "タスクを記録する。\n・\n件数を合計する。";
+    expect(splitSourceSentences(source)).toEqual([
+      { start: 0, end: 9 },
+      { start: 12, end: 20 },
+    ]);
+    const recording = createRecordingClient([
+      structured({
+        requirements: [
+          { id: "R-1", text: "記録できる", quote: "タスクを記録する。", position: { start: 0, end: 9 } },
+          { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: { start: 12, end: 20 } },
+        ],
+        decisions: [],
+        unresolved: [],
+      }),
+      structured({ uncovered: [] }),
+    ]);
+    const outcome = await runReverseCheckLoop({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.redone).toBe(false);
+    expect(outcome.value.report.misses).toEqual([]);
+    expect(outcome.value.report.droppedBlankMisses).toBe(0);
+    // ① と ①' の 2 回だけ（やり直しの 2 回は呼ばれない）
+    expect(recording.structured).toHaveLength(2);
+  });
+
+  it("枠を差し引いた残りが句読点と空白だけなら捨て、中身のある断片は原文の上の位置のまま残す", async () => {
+    const source = "a、frm、b";
+    const list: RequirementList = {
+      requirements: [requirement(source, "R-1", "全部", source)],
+      framing: [{ quote: "frm", position: { start: 2, end: 5 } }],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured({ uncovered: [{ start: 1, end: 7 }] }),
+    ]);
+    const outcome = await runReverseCheck({
+      source,
+      list,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const ranges = outcome.value.uncovered.map((range) => `${range.start}-${range.end}`);
+    // 枠（2-5）を差し引くと 1-2（「、」だけ）と 5-7（「、b」）に分かれる。前者だけ捨てる
+    expect(ranges).not.toContain("1-2");
+    expect(ranges).toContain("5-7");
+    expect(outcome.value.droppedBlankMisses).toBe(1);
+  });
+
+  it("前後に空白のついた、中身のある文の範囲は、落ちのまま残る", async () => {
+    const source = "タスクを記録する。\n件数を合計する。\n";
+    const list: RequirementList = {
+      requirements: [
+        requirement(source, "R-1", "記録できる", "タスクを記録する。"),
+        requirement(source, "R-2", "合計できる", "件数を合計する。"),
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured({ uncovered: [{ start: 9, end: 19 }] }),
+    ]);
+    const outcome = await runReverseCheck({
+      source,
+      list,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const ranges = outcome.value.uncovered.map((range) => `${range.start}-${range.end}`);
+    // 前後の空白を詰めた 10-18 が、落ちのまま残る
+    expect(ranges).toContain("10-18");
+    expect(outcome.value.droppedBlankMisses).toBe(0);
   });
 });

@@ -119,6 +119,11 @@ export interface ReverseCheckResult {
   readonly quotesValid: boolean;
   /** 見つかった落ち（① のやり直しと、未達の持ち越しに使う） */
   readonly misses: readonly ReverseCheckMiss[];
+  /**
+   * 中身が無い（空白・改行と記号だけ）ので捨てた、会話が挙げた断片の数（Issue #377。0 のときは 0）。
+   * **記録はこの戻り値だけ**で、納品物や Plan の記録には残さない。
+   */
+  readonly droppedBlankMisses: number;
 }
 
 /**
