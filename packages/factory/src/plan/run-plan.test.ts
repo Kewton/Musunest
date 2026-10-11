@@ -694,4 +694,76 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     expect(Object.keys(result.plan)).not.toContain("framing");
     expect(await checkConfirmedPlan(result.plan)).toEqual([]);
   });
+
+  // ── 要件の位置をコードが引用から求める（Issue #382）────────────────────
+
+  it("位置がずれた（引用は正しい）要件の偽物の応答で、Plan が確定し、確定した仕様の要件の出どころが正しい位置を指す", async () => {
+    const shifted = {
+      ...REQUIREMENT_LIST_OUTPUT,
+      requirements: REQUIREMENT_LIST_OUTPUT.requirements.map((requirement) => ({
+        ...requirement,
+        position: { start: requirement.position.start + 1, end: requirement.position.end + 1 },
+      })),
+    };
+    const recording = createRecordingClient([
+      structured(shifted),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [confirmQuestionName("S-1")]: noul(0.95),
+      [confirmQuestionName("S-2")]: noul(0.95),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 出どころが、直した位置の指す原文の文（S-1・S-2）を指す
+    expect(result.plan.requirements.find((requirement) => requirement.id === "R-1")?.origin.input_id).toBe("S-1");
+    expect(result.plan.requirements.find((requirement) => requirement.id === "R-2")?.origin.input_id).toBe("S-2");
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+  });
+
+  it("原文に無い引用（言い換え）の要件が残ると、Plan が確定しない", async () => {
+    const paraphrase = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "タスクを登録する", position: { start: 0, end: 8 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する", position: { start: 9, end: 16 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge(catalogAnswers());
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    // 引用の落ちが残ったまま確定しない
+    expect(result.kind).not.toBe("confirmed");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.openIssues.some((issue) => issue.text.includes("原文に見つからない"))).toBe(true);
+  });
 });

@@ -1,11 +1,13 @@
 // ① 要件にする（stages/requirements.ts）の unit テスト（02 §1・F-3・F-6）。
 import { describe, expect, it } from "vitest";
 import { AGENT_LIMITS } from "../limits.js";
+import type { RequirementList } from "../pipeline.js";
 import {
   REQUIREMENTS_SCHEMA_NAME,
   checkRequirementOutput,
   runRequirements,
 } from "./requirements.js";
+import { checkRequirementCoverage, runReverseCheckLoop } from "./reverse-check.js";
 import {
   INJECTED_INSTRUCTION,
   REQUIREMENT_LIST,
@@ -212,5 +214,123 @@ describe("① の形の確認", () => {
   it("要件の一覧が並びでなければ断る", () => {
     expect(checkRequirementOutput({ requirements: {}, decisions: [], unresolved: [] }).ok).toBe(false);
     expect(checkRequirementOutput("nope").ok).toBe(false);
+  });
+});
+
+describe("① の位置の正規化（Issue #382）", () => {
+  const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
+
+  /** 1 件の要件を持つ応答（引用は原文からそのまま、位置だけを差し替える） */
+  const requirementOutputAt = (position: { readonly start: number; readonly end: number }) => ({
+    requirements: [{ id: "R-1", text: "記録できる", quote: "タスクを記録する", position }],
+    decisions: [],
+    unresolved: [],
+  });
+
+  const source = "タスクを記録する。";
+
+  it("始まりが 1 文字ずれた位置は、形の誤りにならず、コードが求めた正しい位置で返る", () => {
+    const checked = checkRequirementOutput(requirementOutputAt({ start: 1, end: 9 }), source);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.value.requirements[0]?.position).toEqual({ start: 0, end: 8 });
+  });
+
+  it("終わりだけずれた位置も、形の誤りにならず、引用の長さに合わせて返る", () => {
+    const checked = checkRequirementOutput(requirementOutputAt({ start: 0, end: 10 }), source);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.value.requirements[0]?.position).toEqual({ start: 0, end: 8 });
+  });
+
+  it("範囲が原文の外の位置も、形の誤りにならず、引用の位置で返る", () => {
+    const checked = checkRequirementOutput(requirementOutputAt({ start: 50, end: 60 }), source);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.value.requirements[0]?.position).toEqual({ start: 0, end: 8 });
+  });
+
+  it("LLM の位置が正しいときは、そのまま使い、positionCorrections は 0 になる", () => {
+    const checked = checkRequirementOutput(requirementOutputAt({ start: 0, end: 8 }), source);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.value.requirements[0]?.position).toEqual({ start: 0, end: 8 });
+    expect(checked.value.positionCorrections).toBe(0);
+  });
+
+  it("絵文字（UTF-16 で 2 単位の文字）を含む原文で、終わりが「始まり＋引用の長さ」になる", () => {
+    const emojiSource = "🐶を記録する。";
+    const quote = "🐶を記録する";
+    const checked = checkRequirementOutput(
+      {
+        requirements: [{ id: "R-1", text: "記録できる", quote, position: { start: 3, end: 5 } }],
+        decisions: [],
+        unresolved: [],
+      },
+      emojiSource,
+    );
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    const position = checked.value.requirements[0]?.position;
+    expect(position?.start).toBe(0);
+    expect(position?.end).toBe(quote.length);
+    expect(position?.end).toBe((position?.start ?? 0) + quote.length);
+  });
+
+  it("positionCorrections は、要件と枠の文を 1 件ずつ数える", () => {
+    const countingSource = "タスクを記録する。アプリを作ってください";
+    const checked = checkRequirementOutput(
+      {
+        requirements: [{ id: "R-1", text: "記録できる", quote: "タスクを記録する", position: { start: 1, end: 9 } }],
+        framing: [{ quote: "アプリを作ってください", position: { start: 10, end: 20 } }],
+        decisions: [],
+        unresolved: [],
+      },
+      countingSource,
+    );
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.value.positionCorrections).toBe(2);
+  });
+
+  it("同じ引用が原文に 2 か所あり位置がどちらとも一致しないとき、引用の誤りになり、やり直しの指示に「1 か所に決まる引用」が入る", async () => {
+    const ambiguousSource = "同じ文。同じ文。";
+    const ambiguous = {
+      requirements: [{ id: "R-1", text: "同じ文を扱える", quote: "同じ文", position: { start: 5, end: 8 } }],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(ambiguous),
+      structured({ uncovered: [] }),
+      structured(ambiguous),
+      structured({ uncovered: [] }),
+    ]);
+    const outcome = await runReverseCheckLoop({
+      source: ambiguousSource,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 位置を推測せず、引用の誤り（落ち）としてやり直す
+    expect(outcome.value.redone).toBe(true);
+    // やり直しの ① に渡す「逆照合で見つかった落ち」に、1 か所に決まる引用 への指示が入る
+    const redoRequest = recording.structured[2];
+    expect(redoRequest).toBeDefined();
+    expect(redoRequest?.input).toContain("1 か所に決まる引用");
+  });
+
+  it("空の引用・原文に無い引用は、引用の誤りになる", () => {
+    const list: RequirementList = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "", position: { start: 0, end: 0 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する", position: { start: 0, end: 0 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const quoteMisses = checkRequirementCoverage(source, list).filter((miss) => miss.kind === "quote-not-found");
+    expect(quoteMisses.map((miss) => miss.requirementId)).toEqual(["R-1", "R-2"]);
   });
 });

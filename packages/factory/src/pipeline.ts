@@ -60,6 +60,11 @@ export interface RequirementList {
   readonly decisions: readonly string[];
   /** 重大な曖昧さ。決めずに「未解決」として最後まで持つ（F-6） */
   readonly unresolved: readonly string[];
+  /**
+   * ① の正規化（Issue #382）で、引用から位置を求め直した件数。**要件と枠の文を 1 件ずつ**数え、
+   * 直さなかったときは 0。**原文から作った一覧だけが持ち、納品物には残さない**（記録は戻り値だけ）。
+   */
+  readonly positionCorrections?: number;
 }
 
 /**
