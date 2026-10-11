@@ -146,31 +146,24 @@ export async function runUnwritableTriage(input: UnwritableTriageInput): Promise
   // ── 1. 仕分け（曖昧さ／語彙の穴／問題ではない）──────────────────────
   const triageQuestions: Record<string, JudgeQuestion> = {};
   const triageTargets: { work: WorkingEntry; claim: UnwritableClaim; index: number }[] = [];
-  const triageState: {
-    requirementId: string;
-    part: string;
-    reason: string;
-    constraintIds: readonly string[];
-  }[] = [];
   for (const work of works) {
     work.entry.unwritableClaims.forEach((claim, index) => {
       const name = triageQuestionName(work.requirementId, index);
       triageQuestions[name] = {
         kind: "choice",
-        instructions:
-          "次の『書けない』の申告は、どの種類か。本当に書けない（語彙の穴）ものだけが vocabulary-hole である。",
+        instructions: {
+          // 対象の申告（部分と理由）を問いの欄に載せる（問いの名前だけでは Jev が読めない。Issue #376）
+          claim: claim.part,
+          reason: claim.reason,
+          constraintIds: claim.constraintIds,
+          ask: "Which kind of 'cannot write' claim is this? Only a claim that is genuinely unwritable because the vocabulary is missing is a vocabulary-hole.",
+        },
         criteria: {
           ambiguity: "曖昧さ・決めたこと・不確かさのメモ（語彙の穴ではない）",
           "vocabulary-hole": "文書の語彙に無いために書けない（語彙の穴）",
           "not-a-problem": "問題ではない（要件の言い直しなど。実際には書けている）",
         },
       };
-      triageState.push({
-        requirementId: work.requirementId,
-        part: claim.part,
-        reason: claim.reason,
-        constraintIds: claim.constraintIds,
-      });
       triageTargets.push({ work, claim, index });
     });
   }
@@ -178,7 +171,8 @@ export async function runUnwritableTriage(input: UnwritableTriageInput): Promise
     return { design: input.design, kept: [], dropped, judgments };
   }
 
-  const classify = await input.judge.judge({ state: { claims: triageState }, questions: triageQuestions });
+  // state には、問いをまたいで共通に要るものは無い（対象の申告は問いの欄へ移した。Issue #376）
+  const classify = await input.judge.judge({ state: {}, questions: triageQuestions });
   const vocabularyHoles: { work: WorkingEntry; claim: UnwritableClaim; index: number }[] = [];
   for (const target of triageTargets) {
     const name = triageQuestionName(target.work.requirementId, target.index);
@@ -219,32 +213,26 @@ export async function runUnwritableTriage(input: UnwritableTriageInput): Promise
   // ── 2. 語彙の穴の裏付け（制約 ID の節の抜粋と主張）──────────────────
   if (vocabularyHoles.length > 0) {
     const supportQuestions: Record<string, JudgeQuestion> = {};
-    const supportState: {
-      requirementId: string;
-      part: string;
-      reason: string;
-      excerpt: string;
-    }[] = [];
     for (const target of vocabularyHoles) {
       const name = supportQuestionName(target.work.requirementId, target.index);
       supportQuestions[name] = {
         kind: "choice",
-        instructions:
-          "抜粋（文書の該当の節）が、申告（書けない部分）を裏付けるか。抜粋に書かれていなければ not-stated。",
+        instructions: {
+          // 対象の申告と、根拠にした制約 ID の節の抜粋を問いの欄に載せる（Issue #376）
+          claim: target.claim.part,
+          reason: target.claim.reason,
+          excerpt: constraintExcerpt(input.documents, target.claim.constraintIds),
+          ask: "Does the excerpt (the relevant section of the documents) support the claim that this part cannot be written? If the excerpt does not state it, answer not-stated.",
+        },
         criteria: {
           supports: "抜粋が主張を裏付ける",
           contradicts: "抜粋が主張に反する",
           "not-stated": "抜粋に書いていない",
         },
       };
-      supportState.push({
-        requirementId: target.work.requirementId,
-        part: target.claim.part,
-        reason: target.claim.reason,
-        excerpt: constraintExcerpt(input.documents, target.claim.constraintIds),
-      });
     }
-    const support = await input.judge.judge({ state: { claims: supportState }, questions: supportQuestions });
+    // state には、問いをまたいで共通に要るものは無い（対象の申告と抜粋は問いの欄へ移した。Issue #376）
+    const support = await input.judge.judge({ state: {}, questions: supportQuestions });
     for (const target of vocabularyHoles) {
       const name = supportQuestionName(target.work.requirementId, target.index);
       const answer = support.answers[name];

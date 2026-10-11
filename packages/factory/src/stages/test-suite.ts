@@ -520,25 +520,24 @@ export async function decideDiscrepantNatures(input: {
   const decisions = new Map<string, NatureDecision>();
   if (input.requirementIds.length === 0) return decisions;
   const questions: Record<string, JudgeQuestion> = {};
-  const state: { requirementId: string; text: string; quote: string }[] = [];
   for (const requirementId of input.requirementIds) {
     const requirement = input.list.requirements.find((candidate) => candidate.id === requirementId);
     questions[natureQuestionName(requirementId)] = {
       kind: "choice",
-      instructions:
-        "対象の要件が、条件・計算・検査などの決まりを含むか、在ることだけかを選ぶ。決まりを含むなら ruled、在ることだけなら existence-only。",
+      instructions: {
+        // 対象の要件の文と原文の引用を問いの欄に載せる（問いの名前だけでは Jev が読めない。Issue #376）
+        requirement: requirement?.text ?? "",
+        quote: requirement?.quote ?? "",
+        ask: "Does the target requirement contain rules (conditions, calculations, validations), or is it only about existence? Choose ruled if it contains rules, existence-only if it is only about existence.",
+      },
       criteria: NATURE_JUDGE_CRITERIA,
     };
-    state.push({
-      requirementId,
-      text: requirement?.text ?? "",
-      quote: requirement?.quote ?? "",
-    });
   }
   let model = "";
   let answers: Readonly<Record<string, JudgeAnswer>> | undefined;
   try {
-    const response = await input.judge.judge({ state: { requirements: state }, questions });
+    // state には、問いをまたいで共通に要るものは無い（対象の文は問いの欄へ移した。Issue #376）
+    const response = await input.judge.judge({ state: {}, questions });
     model = response.model;
     answers = response.answers;
   } catch {

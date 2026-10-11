@@ -472,6 +472,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       runCatalog({
         requirements: list.requirements.map((requirement) => ({ id: requirement.id, text: requirement.text })),
         judge: judgeBudget,
+        source: input.source,
         threshold,
       }),
     );
