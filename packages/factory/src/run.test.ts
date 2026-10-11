@@ -8,7 +8,7 @@
 //   3. **未実行の検査**がある結果が、合格にならないこと
 //   4. ⑧ の納品物が組まれ、検証の結果の SHA-256 が最後の宣言のバイト列と一致すること
 //   5. 送った要求に、受入の題材の言葉が無いこと
-import { acceptsHeadlessSummaryWire, planDigest } from "@musunest/appspec-schema";
+import { acceptsHeadlessSummaryWire, planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import { costOfUsageUsd } from "./budget.js";
@@ -2382,5 +2382,97 @@ describe("誰でも行える操作を構造の検査で確かめる（02 §1.4�
       requirement_id: "R-1",
       result: "mismatch",
     });
+  });
+});
+
+// ── 設計の段の中身の作り直し（Issue #407）────────────────────────────
+
+/**
+ * 代わりの案の要件（R-2）と、了承して除いた部分（`R-1-p1`）の参照を持つ確定した仕様（Issue #407）。
+ * R-2 の文には、元の要件 R-1 の部分 R-1-p1 の文脈が添えられる（`requirementsFromPlan`）。
+ */
+const CONFIRMED_PLAN_ALTERNATIVE: ConfirmedPlan = {
+  ...CONFIRMED_PLAN,
+  plan_id: "plan-test-alternative",
+  requirements: [
+    { ...CONFIRMED_PLAN.requirements[0]!, parts: [{ id: "R-1-p1", text: "記録の並べ替え", disposition: "accepted_removal" }] },
+    CONFIRMED_PLAN.requirements[1]!,
+  ],
+  accepted_unwritable: [
+    {
+      part_id: "R-1-p1",
+      alternative_id: "R-2",
+      basis: { doc_version: "v1", location: "contract", constraint_id: "R-1" },
+    },
+  ],
+};
+
+/** 代わりの案（R-2）の設計を落とした応答（R-1 の設計だけ。新形式） */
+const DESIGN_MISSING_R2_MAPPED = {
+  roles: DESIGN_OUTPUT_MAPPED.roles,
+  designs: [DESIGN_OUTPUT_MAPPED.designs[0]],
+};
+
+/** ③ が提出する対応（役割 ID → 宣言の名前。R-1 は total、R-2 は extra） */
+const ALT_MAPPINGS = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.total", name: "total" },
+  { roleId: "record.extra", name: "extra" },
+];
+
+/** ⑤a の対応表（役割 `record` の場所も挙げ、③ のやり直しに入らないようにする） */
+const ALT_CORRESPONDENCE = {
+  entries: [
+    {
+      requirementId: "R-1",
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "computation", entity: "record", name: "total" },
+      ],
+    },
+    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "extra" }] },
+  ],
+};
+
+/** 確定した仕様の代わりの案で流す記録（② の応答 2 回→②'→③→⑤a） */
+const alternativeRun = (design: unknown, redo: unknown): readonly RecordedCall[] => [
+  structured(design),
+  structured(redo),
+  structured(TEST_SUITE_OUTPUT_MAPPED),
+  structured({ declaration: DECLARATION_SOURCE, mappings: ALT_MAPPINGS }),
+  structured(ALT_CORRESPONDENCE),
+];
+
+describe("設計の段の中身の作り直し（§5・Issue #407）", () => {
+  it("② の 1 回目が代わりの案の設計を落とし、2 回目で直して完走する（design は ok・calls 2）", async () => {
+    const { recording, run } = runWith(alternativeRun(DESIGN_MISSING_R2_MAPPED, DESIGN_OUTPUT_MAPPED), {
+      plan: CONFIRMED_PLAN_ALTERNATIVE,
+    });
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    // 設計の段は 2 回呼ぶ（1 回目は R-2 の設計が無く、2 回目で直る）
+    const design = result.record.stages.find((stage) => stage.stage === "design");
+    expect(design).toMatchObject({ status: "ok", calls: 2 });
+    // ② のデータの要件の文に、代わりの案の文脈が入る
+    const designRequest = recording.structured.find((request) => request.schemaName === DESIGN_SCHEMA_NAME);
+    expect(designRequest?.input).toContain("要件 R-1 の部分 R-1-p1");
+    expect(designRequest?.input).toContain("記録の並べ替え");
+    expect(designRequest?.input).toContain("の代わりの案");
+  });
+
+  it("2 回とも代わりの案の設計を落とせば、設計の段で未達として止まる（design は failed・calls 2）", async () => {
+    const { run } = runWith(
+      [structured(DESIGN_MISSING_R2_MAPPED), structured(DESIGN_MISSING_R2_MAPPED)],
+      { plan: CONFIRMED_PLAN_ALTERNATIVE },
+    );
+    const result = await run;
+
+    expect(result.stopped).toMatchObject({ stage: "design", kind: "unmet" });
+    expect(result.record.failure).toMatchObject({ stage: "design", kind: "unmet" });
+    const design = result.record.stages.find((stage) => stage.stage === "design");
+    expect(design).toMatchObject({ status: "failed", calls: 2, failure_kind: "unmet" });
+    expect(result.bundle).toBeNull();
   });
 });

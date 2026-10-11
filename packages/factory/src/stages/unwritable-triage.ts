@@ -116,6 +116,12 @@ interface WorkingEntry {
   keptClaims: UnwritableClaim[];
   marked: boolean;
   redone: boolean;
+  /**
+   * 設計のやり直しの callback を、この要件で既に呼んだか（成功・失敗によらず 1 回まで。Issue #407）。
+   * 失敗（`undefined`）でも立てる——同じ要件の次の申告で呼び直さない（中身の枠が増えた分、失敗のときの
+   * 要件ごとの呼び出しが増殖するのを抑える）。`redone`（やり直した設計を採ったか）とは別に持つ。
+   */
+  attemptedRedo: boolean;
 }
 
 function choiceOf(answer: JudgeAnswer | undefined): string | undefined {
@@ -141,6 +147,7 @@ export async function runUnwritableTriage(input: UnwritableTriageInput): Promise
     keptClaims: [],
     marked: false,
     redone: false,
+    attemptedRedo: false,
   }));
 
   // ── 1. 仕分け（曖昧さ／語彙の穴／問題ではない）──────────────────────
@@ -247,8 +254,15 @@ export async function runUnwritableTriage(input: UnwritableTriageInput): Promise
       });
       // 同じ要件の別の申告で既にやり直していれば、その申告はやり直した設計に置き換わっている（触らない）
       if (target.work.redone) continue;
-      // 「反する」なら、その要件だけ設計をやり直す（1 回まで）。やり直せたら、やり直した設計を採る
-      if (verdict === "contradicts" && !target.work.redone && input.redoDesign !== undefined) {
+      // 「反する」なら、その要件だけ設計をやり直す。**成功・失敗によらず、その要件につき 1 回まで**
+      // （Issue #407）。失敗（`undefined`）でも試行済みの印を立て、同じ要件の次の申告で呼び直さない。
+      if (
+        verdict === "contradicts" &&
+        !target.work.redone &&
+        !target.work.attemptedRedo &&
+        input.redoDesign !== undefined
+      ) {
+        target.work.attemptedRedo = true;
         const redone = await input.redoDesign(target.work.requirementId);
         if (redone !== undefined) {
           target.work.entry = redone;

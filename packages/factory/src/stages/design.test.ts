@@ -1,9 +1,14 @@
 // ② 設計する（stages/design.ts）の unit テスト（02 §1・F-4・F-5・Issue #307）。
 import { describe, expect, it } from "vitest";
+import { JobBudget, estimateMaxCostUsd } from "../budget.js";
+import { CallGateway, estimateInputUpperBoundTokens, structuredInputParts } from "../call.js";
 import { maxOutputTokensForEffort } from "../limits.js";
-import type { DesignResult } from "../pipeline.js";
+import type { LlmClient, LlmStructuredRequest } from "../llm.js";
+import type { DesignResult, RequirementList } from "../pipeline.js";
 import {
+  DESIGN_ROUNDS,
   DESIGN_RULES,
+  DESIGN_SCHEMA,
   DESIGN_SCHEMA_NAME,
   checkDesignConstraints,
   checkDesignOutput,
@@ -12,6 +17,7 @@ import {
   runDesign,
   type DesignInput,
 } from "./design.js";
+import { buildStructuredRequest, serializeJson } from "./prompt.js";
 import {
   DESIGN_OUTPUT,
   INJECTED_INSTRUCTION,
@@ -23,6 +29,9 @@ import {
 } from "./__tests__/prompt.js";
 
 const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
+
+/** 試験の共通の口と同じ単価（予約の見積もりを、段とすり合わせるのに使う） */
+const RATES = { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputPerToken: 0.000002 };
 
 /** 抽象的な役割 ID の表（entity の文脈を含む ID。共有・別名は明示の欄でだけ許す） */
 const PLANNED_ROLES = [
@@ -291,7 +300,7 @@ describe("役割 ID の表・種類・確かめ方は必須で、旧形式の記
     expect(checked.problems.map((problem) => problem.field)).toContain("designs[0].nature");
   });
 
-  it("中身の点検に合わない設計を送ると、② は未達として断る（やり直さない）", async () => {
+  it("中身の点検に合わない設計を 2 回送ると、② は未達として断る（作り直しても直らない）", async () => {
     const bad = {
       ...PLANNED_DESIGN,
       designs: [
@@ -299,7 +308,7 @@ describe("役割 ID の表・種類・確かめ方は必須で、旧形式の記
         { requirementId: "R-2", nature: "existence-only", vocabulary: [], placement: [], unwritable: [] },
       ],
     };
-    const recording = createRecordingClient([structured(bad)]);
+    const recording = createRecordingClient([structured(bad), structured(bad)]);
     const outcome = await runDesign({
       list: REQUIREMENT_LIST,
       documents: [],
@@ -393,9 +402,12 @@ const CLAIM_DESIGN = {
   ],
 };
 
-/** 1 つの設計を ② に流し、結果を返す（本番と同じく、形と中身と根拠を確かめる） */
-async function designOutcome(value: unknown) {
-  const recording = createRecordingClient([structured(value)]);
+/**
+ * 1 つの設計を ② に流し、結果を返す（本番と同じく、形と中身と根拠を確かめる）。中身の点検に
+ * 合わなければもう 1 回作り直すので、**既定では同じ応答を 2 回**渡す（やり直しで直る例は `redo` を渡す）。
+ */
+async function designOutcome(value: unknown, redo: unknown = value) {
+  const recording = createRecordingClient([structured(value), structured(redo)]);
   return runDesign({
     list: REQUIREMENT_LIST,
     documents: SAMPLE_DOCUMENTS,
@@ -676,5 +688,275 @@ describe("計測で断られた形が通り、門は緩めない（Issue #398）
     expect(outcome.ok).toBe(false);
     if (outcome.ok || outcome.failure.kind !== "unmet") return;
     for (const problem of outcome.failure.problems) expect(problem.message).not.toContain("### ");
+  });
+});
+
+// ── 中身の作り直し（1 回。Issue #407）──────────────────────────────
+
+/** 形の誤りの応答（JSON Schema に合わない） */
+const MALFORMED_DESIGN = { designs: "nope" };
+
+/** 設計の欠けた応答（R-2 の設計が無い。形は正しい） */
+const DESIGN_MISSING_R2 = { roles: PLANNED_ROLES, designs: [PLANNED_DESIGN.designs[0]] };
+
+/** 制約 ID だけが誤った設計（R-1 の申告が、文書に無い R-999 を根拠にする） */
+const DESIGN_BAD_CONSTRAINT = {
+  roles: PLANNED_ROLES,
+  designs: [
+    { ...CLAIM_DESIGN.designs[0], unwritable: [{ ...VALID_CLAIM, constraintIds: ["R-999"] }] },
+    CLAIM_DESIGN.designs[1],
+  ],
+};
+
+/** 欠けと制約 ID の誤りが同時にある設計（R-2 の設計が無く、R-1 の申告が R-999 を根拠にする） */
+const DESIGN_MISSING_AND_BAD_CONSTRAINT = {
+  roles: PLANNED_ROLES,
+  designs: [{ ...CLAIM_DESIGN.designs[0], unwritable: [{ ...VALID_CLAIM, constraintIds: ["R-999"] }] }],
+};
+
+/** 与えられた誤りを投げる偽物の LlmClient（通信の失敗・拒否・要求の誤りを試す） */
+function throwingClient(error: unknown): LlmClient {
+  return {
+    async callStructured() {
+      throw error;
+    },
+    async callWithTools() {
+      throw error;
+    },
+  };
+}
+
+/** `kind` 付きの誤りを作る（共通の口が種類で分類する） */
+const errorOf = (kind: string, extra: Record<string, unknown> = {}): Error =>
+  Object.assign(new Error(kind), { kind, ...extra });
+
+/** 23 回の下ごしらえに使う、ごく小さい構造化出力の要求 */
+const PRIME_REQUEST: LlmStructuredRequest = {
+  instructions: "",
+  documents: [],
+  rules: [],
+  input: "",
+  schemaName: "prime",
+  schema: {},
+  maxOutputTokens: 1,
+};
+
+describe("中身の作り直しを 1 回だけ入れる（02 §1・Issue #407）", () => {
+  it("1 回目に設計が欠け、2 回目に直ったら ok（呼び出し 2 回）。前回の指示はデータにだけ入り、規則と前置きは変わらない", async () => {
+    const recording = createRecordingClient([structured(DESIGN_MISSING_R2), structured(PLANNED_DESIGN)]);
+    const outcome = await runDesign({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    // 構造化の呼び出しは 2 回（形 1 回 × 中身 2 回）
+    expect(recording.structured).toHaveLength(2);
+    const first = recording.structured[0];
+    const second = recording.structured[1];
+    // 1 回目には前回の指示が無く、2 回目にはある
+    expect(first?.input).not.toContain("前回の作り直しの指示");
+    expect(second?.input).toContain("前回の作り直しの指示");
+    // 目印（モデル由来の要件 ID を含む問題の文）は、データにだけ入る
+    const marker = "要件 R-2 の設計が無い";
+    expect(second?.input).toContain(marker);
+    for (const request of [first, second]) {
+      expect(request?.instructions).not.toContain("前回の作り直しの指示");
+      expect(request?.instructions).not.toContain(marker);
+      for (const rule of request?.rules ?? []) expect(rule).not.toContain(marker);
+      for (const document of request?.documents ?? []) expect(document).not.toContain(marker);
+    }
+    // 共通の規則と前置き（instructions・rules・文書）は、1 回目と 2 回目で変わらない
+    expect(second?.instructions).toBe(first?.instructions);
+    expect(second?.rules).toEqual(first?.rules);
+    expect(second?.documents).toEqual(first?.documents);
+  });
+
+  it("形の誤り→形の正しい未達→形の誤り→正しい設計、の合成例で ok になり、呼び出しは最大 4 回（5 回目を呼ばない）", async () => {
+    const recording = createRecordingClient([
+      structured(MALFORMED_DESIGN),
+      structured(DESIGN_MISSING_R2),
+      structured(MALFORMED_DESIGN),
+      structured(PLANNED_DESIGN),
+    ]);
+    const outcome = await runDesign({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    expect(recording.structured).toHaveLength(4);
+  });
+
+  it("2 回とも中身に合わなければ unmet（attempts 2、問題は最後の回のもの）", async () => {
+    const recording = createRecordingClient([
+      structured(DESIGN_MISSING_R2),
+      structured(DESIGN_BAD_CONSTRAINT),
+    ]);
+    const outcome = await runDesign({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    expect(outcome.failure.attempts).toBe(DESIGN_ROUNDS);
+    // 問題は最後の回（2 回目）のもの。1 回目の「設計が無い」は残らない
+    expect(outcome.failure.problems.some((problem) => problem.message.includes("R-999"))).toBe(true);
+    expect(outcome.failure.problems.some((problem) => problem.message.includes("R-2 の設計が無い"))).toBe(false);
+  });
+
+  it("制約 ID の誤りも同じ枠で 1 回作り直し、直れば ok、直らなければ unmet", async () => {
+    const fixed = await designOutcome(DESIGN_BAD_CONSTRAINT, CLAIM_DESIGN);
+    expect(fixed.ok).toBe(true);
+
+    const failed = await designOutcome(DESIGN_BAD_CONSTRAINT);
+    expect(failed.ok).toBe(false);
+    if (failed.ok) return;
+    expect(failed.failure.kind).toBe("unmet");
+  });
+
+  it("欠けと制約 ID の誤りが同時にあれば、1 回目の問題に両方が入る（前回の指示のデータで渡す）", async () => {
+    const recording = createRecordingClient([
+      structured(DESIGN_MISSING_AND_BAD_CONSTRAINT),
+      structured(PLANNED_DESIGN),
+    ]);
+    const outcome = await runDesign({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    const second = recording.structured[1];
+    expect(second?.input).toContain("要件 R-2 の設計が無い");
+    expect(second?.input).toContain("R-999");
+  });
+
+  it("形の誤り（malformed）は中身の枠に入らない（2 試行で malformed、3 回目を呼ばない）", async () => {
+    const recording = createRecordingClient([structured(MALFORMED_DESIGN), structured(MALFORMED_DESIGN)]);
+    const outcome = await runDesign({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("malformed");
+    expect(recording.structured).toHaveLength(2);
+  });
+
+  it("拒否・要求の誤り・打ち切りは 1 回で返り、追加の要求を出さない", async () => {
+    const cases: readonly [Error, string][] = [
+      [errorOf("refusal"), "refused"],
+      [errorOf("invalidRequest", { code: "invalid_json_schema" }), "invalidRequest"],
+      [errorOf("incomplete", { reason: "max_output_tokens" }), "incomplete"],
+    ];
+    for (const [error, expected] of cases) {
+      const gateway = makeGateway(throwingClient(error), { deadline: 10_000_000 });
+      const outcome = await runDesign({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
+      expect(outcome.ok, expected).toBe(false);
+      if (outcome.ok) continue;
+      expect(outcome.failure.kind, expected).toBe(expected);
+      expect(gateway.calls, expected).toBe(1);
+    }
+  });
+
+  it("通信の失敗（timeout）は共通の口の既定 2 試行で別に数える", async () => {
+    const gateway = makeGateway(throwingClient(errorOf("timeout")), { deadline: 10_000_000 });
+    const outcome = await runDesign({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("timeout");
+    // 段では数えず、共通の口の試行の数（既定 2）になる
+    expect(gateway.calls).toBe(2);
+  });
+
+  it("呼び出しの数が 23 回使われた状態で 1 回目が unmet なら、2 回目は callLimit で止まり、25 回目を呼ばない", async () => {
+    const recording = createRecordingClient([
+      ...Array.from({ length: 23 }, () => structured({ ok: true })),
+      structured(DESIGN_MISSING_R2),
+    ]);
+    const gateway = makeGateway(recording.client);
+    // 下ごしらえで 23 回使う（全試行がジョブの上限に数えられることを確かめる）
+    for (let i = 0; i < 23; i += 1) await gateway.callStructured(PRIME_REQUEST);
+    expect(gateway.calls).toBe(23);
+
+    const outcome = await runDesign({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("callLimit");
+    // 24 回目（1 回目の設計）で使い切り、25 回目（2 回目）は呼ばない
+    expect(gateway.calls).toBe(24);
+    expect(recording.structured.filter((request) => request.schemaName === DESIGN_SCHEMA_NAME)).toHaveLength(1);
+  });
+
+  it("最初の未達のあとで締切に達すると deadline で止まり、追加の要求を出さない", async () => {
+    let checks = 0;
+    const now = () => (checks++ === 0 ? 0 : 10 ** 9);
+    const recording = createRecordingClient([structured(DESIGN_MISSING_R2)]);
+    const gateway = new CallGateway({
+      client: recording.client,
+      budget: new JobBudget(10),
+      rates: RATES,
+      now,
+      deadline: 1000,
+      effort: "high",
+    });
+    const outcome = await runDesign({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("deadline");
+    expect(gateway.calls).toBe(1);
+    expect(recording.structured).toHaveLength(1);
+  });
+
+  it("2 回目の予約が足りない予算では budget で止まり、追加の要求を出さない（usage が無いので予約は残る）", async () => {
+    const firstRequest = buildStructuredRequest({
+      rules: DESIGN_RULES,
+      documents: SAMPLE_DOCUMENTS,
+      data: [{ name: "要件の一覧", text: serializeJson(REQUIREMENT_LIST) }],
+      schemaName: DESIGN_SCHEMA_NAME,
+      schema: DESIGN_SCHEMA,
+      maxOutputTokens: maxOutputTokensForEffort("high", "design"),
+    });
+    const maxCost = estimateMaxCostUsd({
+      inputTokens: estimateInputUpperBoundTokens(structuredInputParts(firstRequest)),
+      maxOutputTokens: firstRequest.maxOutputTokens,
+      rates: RATES,
+    });
+    const recording = createRecordingClient([structured(DESIGN_MISSING_R2)]);
+    // 1 回目は通るが、2 回目（前回の問題を含む分だけ大きい要求）の予約は残高を超える予算にする
+    const gateway = makeGateway(recording.client, { budgetUsd: maxCost * 1.5, maxAttempts: 1 });
+    const outcome = await runDesign({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("budget");
+    expect(gateway.calls).toBe(1);
+    expect(recording.structured).toHaveLength(1);
+  });
+
+  it("代わりの案の要件（一覧の中の R:alt: の形）に設計が無い応答は、欠けとして断る", async () => {
+    const list: RequirementList = {
+      ...REQUIREMENT_LIST,
+      requirements: [
+        ...REQUIREMENT_LIST.requirements,
+        { id: "R:alt:R-9", text: "代わりの案", quote: "代わりの案", position: { start: 0, end: 0 } },
+      ],
+    };
+    const recording = createRecordingClient([structured(PLANNED_DESIGN), structured(PLANNED_DESIGN)]);
+    const outcome = await runDesign({
+      list,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("unmet");
+    if (outcome.failure.kind !== "unmet") return;
+    expect(outcome.failure.problems.some((problem) => problem.message.includes("R:alt:R-9"))).toBe(true);
+  });
+
+  it("規則に、代わりの案の要件にも設計を返す決まりがある", () => {
+    expect(DESIGN_RULES.some((rule) => rule.includes("代わりの案の要件にも 1 つ設計を返す"))).toBe(true);
   });
 });

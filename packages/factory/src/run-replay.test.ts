@@ -27,6 +27,7 @@ import { UNWRITABLE_FILE, VERIFICATION_FILE, type BundleUnwritable, type BundleV
 import type { RecordedCall } from "./llm-fake.js";
 import type { LlmUsage } from "./llm.js";
 import { runGeneration } from "./run.js";
+import { DESIGN_SCHEMA_NAME } from "./stages/design.js";
 import { createRecordingClient } from "./stages/__tests__/prompt.js";
 import { MAPPING_REDO_SCHEMA_NAME } from "./stages/repair.js";
 
@@ -173,7 +174,8 @@ describe("本物の応答の再生（Issue #322）", () => {
   });
 
   it("記録と、手で足した ⑤a のやり直しの応答 1 回分で、① から ⑦ まで流すと、部分案（partial）になる", async () => {
-    const { recording, run } = runReplay([...recordedCalls(), handWrittenCorrespondenceRedo()]);
+    const calls = [...recordedCalls(), handWrittenCorrespondenceRedo()];
+    const { recording, run } = runReplay(calls);
     const result = await run;
 
     // 早期停止はしない（① から ⑦ まで通る）
@@ -211,6 +213,9 @@ describe("本物の応答の再生（Issue #322）", () => {
     expect(stages.filter((stage) => stage === "correspondence").length).toBeGreaterThanOrEqual(2);
     expect(stages).not.toContain("repair");
     expect(recording.structured.every((request) => request.schemaName !== MAPPING_REDO_SCHEMA_NAME)).toBe(true);
+    // 設計の段は記録の 1 回分だけで通り、作り直しの要求を出さない（受け取った要求の数が今までと同じ。Issue #407）
+    expect(recording.structured.filter((request) => request.schemaName === DESIGN_SCHEMA_NAME)).toHaveLength(1);
+    expect(recording.structured).toHaveLength(calls.length);
   });
 
   it("手で足した応答を除いた記録だけで流すと、⑤a のやり直しで記録が尽きる", async () => {

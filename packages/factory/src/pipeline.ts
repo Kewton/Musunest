@@ -101,20 +101,68 @@ export function requirementTextWithQuestionContext(
   inputs: readonly PlanInput[],
   openIssues: readonly PlanOpenIssue[],
 ): string {
+  const context = questionContextOf(requirement, inputs, openIssues);
+  if (context === undefined) return requirement.text;
+  return withReferenceContext(requirement.text, [context]);
+}
+
+/** 答えの問いの文脈（`参考の文脈` に付ける 1 本）。引けなければ `undefined`（#391） */
+function questionContextOf(
+  requirement: PlanRequirement,
+  inputs: readonly PlanInput[],
+  openIssues: readonly PlanOpenIssue[],
+): string | undefined {
   const change = requirement.change;
-  if (change === undefined || change.kind !== "added") return requirement.text;
+  if (change === undefined || change.kind !== "added") return undefined;
   const answerId = change.answer_id;
-  if (typeof answerId !== "string" || answerId === "") return requirement.text;
+  if (typeof answerId !== "string" || answerId === "") return undefined;
   const answer = inputs.find((input) => input.id === answerId);
-  if (answer === undefined || answer.kind !== "answer") return requirement.text;
+  if (answer === undefined || answer.kind !== "answer") return undefined;
   const question = inputs.find((input) => input.id === answer.question_id);
-  if (question === undefined || question.kind !== "question") return requirement.text;
+  if (question === undefined || question.kind !== "question") return undefined;
   const openIssue = openIssues.find((issue) => issue.id === question.open_issue_id);
-  if (openIssue === undefined) return requirement.text;
+  if (openIssue === undefined) return undefined;
+  return `問い ${question.id}: ${question.text} 未解決の事項 ${openIssue.id}: ${openIssue.text}`;
+}
+
+/**
+ * 要件の文に、参考の文脈を添える（#391・#407 の共通の形）。文脈が無ければ素の文を返す。
+ * 確定した要件の文（正本）と、参考（問い・代わりの案の由来）を、同じラベルで区別する。
+ */
+function withReferenceContext(base: string, contexts: readonly string[]): string {
+  if (contexts.length === 0) return base;
   return [
-    `${CONFIRMED_REQUIREMENT_LABEL}: ${requirement.text}`,
-    `${REFERENCE_CONTEXT_LABEL}: 問い ${question.id}: ${question.text} 未解決の事項 ${openIssue.id}: ${openIssue.text}`,
+    `${CONFIRMED_REQUIREMENT_LABEL}: ${base}`,
+    ...contexts.map((context) => `${REFERENCE_CONTEXT_LABEL}: ${context}`),
   ].join("\n");
+}
+
+/**
+ * 了承して除いた部分（`accepted_unwritable`）の参照（`alternative_id`）から、代わりの案の要件に添える
+ * 文脈を組む（§5・Issue #407）。**代わりの案の要件であることは `alternative_id` の参照だけで決め、
+ * 要件 ID の接頭辞 `R:alt:` は見ない**（接頭辞があっても参照が無ければ文脈を添えない。参照があれば
+ * 接頭辞が無くても添える）。
+ *
+ * 元の要件は、`part_id` を `parts` に持つ要件から引く。部分 ID が見つからない（`parts` に無い）ときは、
+ * その参照からは文脈を作らない。代わりの案の `origin.quote` は使わない。
+ */
+function alternativeContexts(plan: ConfirmedPlan): ReadonlyMap<string, readonly string[]> {
+  const partById = new Map<string, { readonly requirementId: string; readonly partId: string; readonly text: string }>();
+  for (const requirement of plan.requirements) {
+    for (const part of requirement.parts) {
+      partById.set(part.id, { requirementId: requirement.id, partId: part.id, text: part.text });
+    }
+  }
+  const byAlternative = new Map<string, string[]>();
+  for (const entry of plan.accepted_unwritable) {
+    const original = partById.get(entry.part_id);
+    if (original === undefined) continue;
+    const context = `要件 ${original.requirementId} の部分 ${original.partId}「${original.text}」の代わりの案`;
+    const contexts = byAlternative.get(entry.alternative_id);
+    if (contexts === undefined) byAlternative.set(entry.alternative_id, [context]);
+    else contexts.push(context);
+  }
+  return byAlternative;
 }
 
 /**
@@ -126,21 +174,30 @@ export function requirementTextWithQuestionContext(
  * `accepted_unwritable`（部分 ID）と突き合わせるために写す。
  *
  * **答えから増えた要件（`change.kind` が `added`）の文には、その答えの問いの文脈を添える**（Issue #391。
- * `requirementTextWithQuestionContext`）。Plan の本体と SHA は変えず、この一覧だけを組む。
+ * `requirementTextWithQuestionContext`）。**了承して除いた部分の代わりの案の要件（`accepted_unwritable` の
+ * `alternative_id` が指す要件）の文には、元の要件と部分の文脈を添える**（Issue #407）。Plan の本体と SHA は
+ * 変えず、この一覧だけを組む。要件 ID・`quote`・`parts` は変えない。
  */
 export function requirementsFromPlan(plan: ConfirmedPlan): RequirementList {
+  const alternatives = alternativeContexts(plan);
   return {
-    requirements: plan.requirements.map((requirement) => ({
-      id: requirement.id,
-      text: requirementTextWithQuestionContext(requirement, plan.inputs, plan.open_issues),
-      quote: requirement.origin.quote,
-      position: { start: 0, end: 0 },
-      parts: requirement.parts.map((part) => ({
-        id: part.id,
-        text: part.text,
-        disposition: part.disposition,
-      })),
-    })),
+    requirements: plan.requirements.map((requirement) => {
+      const contexts: string[] = [];
+      const questionContext = questionContextOf(requirement, plan.inputs, plan.open_issues);
+      if (questionContext !== undefined) contexts.push(questionContext);
+      contexts.push(...(alternatives.get(requirement.id) ?? []));
+      return {
+        id: requirement.id,
+        text: withReferenceContext(requirement.text, contexts),
+        quote: requirement.origin.quote,
+        position: { start: 0, end: 0 },
+        parts: requirement.parts.map((part) => ({
+          id: part.id,
+          text: part.text,
+          disposition: part.disposition,
+        })),
+      };
+    }),
     decisions: plan.decisions.map((decision) => `${decision.subject}: ${decision.value}`),
     unresolved: [],
   };
