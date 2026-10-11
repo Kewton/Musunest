@@ -1715,6 +1715,63 @@ describe("② の申告を仕分けて裏を取る（判定の口。Issue #332�
   });
 });
 
+// ── Build の裏付けに渡る ID と抜粋が正規化後のもの（Issue #398）──────────────
+
+/** 判定の要求を記録する偽物の判定（仕分けと裏付けに渡る中身を見る） */
+function recordingJudge(answers: Readonly<Record<string, JudgeAnswer>>): {
+  readonly judge: Judge;
+  readonly requests: JudgeRequest[];
+} {
+  const inner = createFakeJudge(answers);
+  const requests: JudgeRequest[] = [];
+  return {
+    judge: {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        requests.push(request);
+        return inner.judge(request);
+      },
+    },
+    requests,
+  };
+}
+
+describe("Build の裏付けに渡る ID と抜粋が正規化後のもの（Issue #398）", () => {
+  /** R-1 に、記号つきの見出し（### computed）を根拠にした「書けない」の申告を持つ設計 */
+  const DESIGN_WITH_SYMBOL_CLAIM = {
+    designs: [
+      {
+        requirementId: "R-1",
+        vocabulary: ["計算"],
+        placement: ["computed"],
+        unwritable: [
+          { part: "計算の並べ替えは書けない", constraintIds: ["### computed"], reason: "文書に欄が無い" },
+        ],
+        notes: [],
+      },
+      { requirementId: "R-2", vocabulary: ["計算"], placement: ["computed"], unwritable: [], notes: [] },
+    ],
+  };
+
+  it("仕分けと裏付けの要求に、正規化後の ID と、その節の抜粋が載る", async () => {
+    const { judge, requests } = recordingJudge({
+      "triage:R-1:0": judgeChoice("vocabulary-hole", 0.9),
+      "support:R-1:0": judgeChoice("supports", 0.9),
+    });
+    const { run } = runWith(recordedRun({ design: DESIGN_WITH_SYMBOL_CLAIM }), { judge });
+    const result = await run;
+
+    // 仕分けの問いに、正規化後の制約 ID（### computed → computed）が載る
+    expect(requests[0]?.questions["triage:R-1:0"]?.instructions).toMatchObject({ constraintIds: ["computed"] });
+    // 裏付けの問いに、その節（### computed の本文）の抜粋が載る
+    const instructions = requests[1]?.questions["support:R-1:0"]?.instructions;
+    const excerpt =
+      typeof instructions === "object" ? (instructions as Record<string, unknown>)["excerpt"] : undefined;
+    expect(String(excerpt)).toContain("計算の意味の説明。");
+    // 申告は残るので部分案になる（門は緩めない）
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+  });
+});
+
 // ── 判定の呼び出しを生成の予算に数える（05 §4〜§5・Issue #359）──────────────
 
 /** 呼ばれた回数を数える偽物の判定（包みが判定を呼ばないことを確かめる） */

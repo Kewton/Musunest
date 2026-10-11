@@ -5,6 +5,7 @@
 //   2. 構造化出力の要求には JSON Schema が付き、文書は呼ぶ側から渡ったものだけが入ること
 //   3. 形が合わない応答は 1 回だけやり直し、誤りは種類ごとに段の失敗になること（拒否はやり直さない。#302）
 import { describe, expect, it } from "vitest";
+import { CONTRACT_DIR, packageFile, semanticsFile, vocabularyFile } from "@musunest/appspec-schema/files";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse } from "../llm.js";
 import { OpenAiIncompleteError } from "../openai.js";
 import {
@@ -14,6 +15,9 @@ import {
   constraintExcerpt,
   constraintIdsIn,
   isRecord,
+  normalizeConstraintId,
+  normalizeConstraintIds,
+  type PromptDocument,
   type ShapeCheck,
   type StructuredPlan,
 } from "./prompt.js";
@@ -133,6 +137,23 @@ describe("形が合わない応答は 1 回だけやり直す（02 §2.2）", ()
     expect(recording.structured).toHaveLength(2);
   });
 
+  it("問題の型の任意の code は、段の失敗まで保たれる（欄の名前と message の写し方は変えない。Issue #397）", async () => {
+    const recording = createRecordingClient([
+      { kind: "structured", output: { bad: true }, usage: undefined },
+      { kind: "structured", output: { also: "bad" }, usage: undefined },
+    ]);
+    const plan: StructuredPlan<NValue> = {
+      request: REQUEST,
+      check: () => ({ ok: false, problems: [{ field: "n", message: "数であること", code: "shape" }] }),
+    };
+    const outcome = await callStructuredChecked(makeGateway(recording.client), plan);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    if (outcome.failure.kind !== "malformed") return;
+    // 欄の名前と message（Build への写し方）はそのままに、分類（code）も保たれる
+    expect(outcome.failure.problems).toEqual([{ field: "n", message: "数であること", code: "shape" }]);
+  });
+
   it("拒否は、拒否として段の失敗にし、やり直さない（02 §2.2・#302）", async () => {
     let calls = 0;
     const client: LlmClient = {
@@ -214,5 +235,157 @@ describe("制約 ID の取り出しと、節の抜粋（Issue #332）", () => {
     // 知らない ID は何も返さない
     expect(constraintExcerpt(SAMPLE_DOCUMENTS, ["R-999"])).toBe("");
     expect(constraintExcerpt(SAMPLE_DOCUMENTS, [])).toBe("");
+  });
+});
+
+// ── 制約 ID の正規化（Issue #398）──────────────────────────────────
+
+describe("制約 ID の正規化（Issue #398）", () => {
+  it("見出しの接頭辞・全体を囲むバッククォート・前後の空白を、1 回だけ外す", () => {
+    expect(normalizeConstraintId("### action")).toBe("action");
+    expect(normalizeConstraintId("`R-TYPE-07`")).toBe("R-TYPE-07");
+    expect(normalizeConstraintId("  action  ")).toBe("action");
+    expect(normalizeConstraintId("## action")).toBe("action");
+    // 内部の記号・大文字小文字は変えない
+    expect(normalizeConstraintId("`R-TYPE-07` の文")).toBe("`R-TYPE-07` の文");
+  });
+
+  it("正規化した結果に当てても変わらない（冪等）", () => {
+    for (const raw of ["### action", "`R-TYPE-07`", "  action  ", "## action"]) {
+      const once = normalizeConstraintId(raw);
+      expect(normalizeConstraintId(once), raw).toBe(once);
+    }
+  });
+
+  it("片側だけのバッククォート・# が 4 個以上・空は、正規化しても知らない ID のままである", () => {
+    const known = constraintIdsIn(SAMPLE_DOCUMENTS);
+    for (const raw of ["`action", "action`", "#### action", "", "R-999"]) {
+      expect(known.has(normalizeConstraintId(raw)), raw).toBe(false);
+    }
+  });
+
+  it("### ### action は 1 回だけ外すので、知らない ID のまま残る", () => {
+    // 2 回外すと action になってしまう。1 回だけなので ### action のまま残る
+    expect(normalizeConstraintId("### ### action")).toBe("### action");
+    expect(constraintIdsIn(SAMPLE_DOCUMENTS).has("### action")).toBe(false);
+  });
+
+  it("正規化して重なった ID は 1 つになり、空になったものは落ちる", () => {
+    expect(normalizeConstraintIds(["`computed`", "### computed", "computed"])).toEqual(["computed"]);
+    expect(normalizeConstraintIds(["", "` `", "action"])).toEqual(["action"]);
+  });
+
+  it("旧形式（R-1 の形）は、文書にあるときだけ集合に入る", () => {
+    expect(constraintIdsIn(SAMPLE_DOCUMENTS).has("R-1")).toBe(true);
+    expect(constraintIdsIn([{ name: "契約", text: "R-TYPE-01 だけがある。" }]).has("R-1")).toBe(false);
+  });
+});
+
+// ── 制約 ID の節の抜粋の範囲（Issue #398）────────────────────────────
+
+describe("制約 ID の節の抜粋の範囲（Issue #398）", () => {
+  const DOCUMENTS: readonly PromptDocument[] = [
+    {
+      name: "語彙の意味",
+      text: [
+        "## 宣言の全体",
+        "全体の本文。",
+        "## データ層",
+        "データ層の本文。",
+        "### 前半",
+        "前半の本文。",
+        "#### 子の節",
+        "子の本文。",
+        "### 後半",
+        "後半の本文。",
+      ].join("\n"),
+    },
+    { name: "語彙の台帳", text: "次の文書の本文。" },
+  ];
+
+  it("対象の本文と子の節を含み、次の同じ段か上の段の節を含まない", () => {
+    expect(constraintExcerpt(DOCUMENTS, ["前半"])).toBe(
+      ["### 前半", "前半の本文。", "#### 子の節", "子の本文。"].join("\n"),
+    );
+  });
+
+  it("許可した ## の抜粋も、同じ段か上の段の見出しで止まる", () => {
+    expect(constraintExcerpt(DOCUMENTS, ["宣言の全体"])).toBe(["## 宣言の全体", "全体の本文。"].join("\n"));
+  });
+
+  it("次の文書の本文を含まない", () => {
+    expect(constraintExcerpt(DOCUMENTS, ["後半"])).toBe(["### 後半", "後半の本文。"].join("\n"));
+    expect(constraintExcerpt(DOCUMENTS, ["後半"])).not.toContain("次の文書の本文。");
+  });
+
+  it("知らない ID・許可していない見出しの抜粋は空", () => {
+    expect(constraintExcerpt(DOCUMENTS, ["知らない"])).toBe("");
+    expect(constraintExcerpt(DOCUMENTS, ["データ層"])).toBe("");
+  });
+});
+
+// ── 実物の文書から制約 ID を取り出す（Issue #398）──────────────────────
+
+interface NodeFileSystem {
+  readdirSync(path: URL): string[];
+  readFileSync(path: URL, encoding: "utf8"): string;
+}
+const importUntyped = (specifier: string) => import(/* @vite-ignore */ specifier);
+const fileSystem = (await importUntyped("node:fs")) as NodeFileSystem;
+
+/** 入口（cli.ts）と同じ順と連結で、契約・語彙の意味・語彙の台帳を読む（Issue #398） */
+function realDocuments(): readonly PromptDocument[] {
+  const contractDirectory = packageFile(`${CONTRACT_DIR}/`);
+  const names = fileSystem
+    .readdirSync(contractDirectory)
+    .filter((name) => !name.startsWith("."))
+    .sort();
+  const contractParts = names.map((name) => fileSystem.readFileSync(new URL(name, contractDirectory), "utf8"));
+  return [
+    { name: "契約", text: contractParts.join("\n") },
+    { name: "語彙の意味", text: fileSystem.readFileSync(semanticsFile(), "utf8") },
+    { name: "語彙の台帳", text: fileSystem.readFileSync(vocabularyFile(), "utf8") },
+  ];
+}
+
+/**
+ * 期待する規則の ID を、実装と独立に列挙する（本番の正規表現から作らない。Issue #398）：
+ * TYPE 01〜14・NAME 01〜13・LIMIT 01〜06・RESERVED 01〜02・VOCAB 01〜13・YAML 01〜09 の計 57。
+ */
+const EXPECTED_RULE_IDS: readonly string[] = [
+  ...prefixRange("R-TYPE", 14),
+  ...prefixRange("R-NAME", 13),
+  ...prefixRange("R-LIMIT", 6),
+  ...prefixRange("R-RESERVED", 2),
+  ...prefixRange("R-VOCAB", 13),
+  ...prefixRange("R-YAML", 9),
+];
+
+function prefixRange(prefix: string, count: number): readonly string[] {
+  return Array.from({ length: count }, (_value, index) => `${prefix}-${String(index + 1).padStart(2, "0")}`);
+}
+
+describe("実物の文書から制約 ID を取り出す（Issue #398）", () => {
+  const ids = constraintIdsIn(realDocuments());
+
+  it("実物の規則の ID 57 個がそろって取れ、規則の形の ID はそれとちょうど一致する", () => {
+    expect(EXPECTED_RULE_IDS).toHaveLength(57);
+    expect(EXPECTED_RULE_IDS.filter((id) => !ids.has(id))).toEqual([]);
+    // 規則の形（R-<英大文字>-<数字>）の ID は、期待の 57 個を過不足なく含む
+    const ruleLike = [...ids].filter((id) => /^R-[A-Z]+-\d+$/.test(id));
+    expect(new Set(ruleLike)).toEqual(new Set(EXPECTED_RULE_IDS));
+  });
+
+  it("語彙の意味の見出しと、明示した許可の ## の見出しが入る", () => {
+    expect(ids.has("R-TYPE-01")).toBe(true);
+    expect(ids.has("R-VOCAB-01")).toBe(true);
+    expect(ids.has("number")).toBe(true);
+    expect(ids.has("computed")).toBe(true);
+    expect(ids.has("宣言の全体")).toBe(true);
+  });
+
+  it("許可していない ## の見出しは入らない", () => {
+    expect(ids.has("データ層")).toBe(false);
+    expect(ids.has("ロジック層")).toBe(false);
   });
 });

@@ -183,12 +183,14 @@ function addUndecidedProblem(source: string, field: string, quote: string, posit
   if (count >= 2) {
     problems.push({
       field: `${field}.position`,
+      code: "position-mismatch",
       message: `引用「${quote}」が原文に ${count} か所あり、位置が 1 か所に決まらない。前後を含めて、原文の中で 1 か所に決まる引用にする`,
     });
     return;
   }
   problems.push({
     field: `${field}.position`,
+    code: "position-mismatch",
     message: `引用の位置（${position.start}-${position.end}）が、原文の「${quote}」の位置と一致しない`,
   });
 }
@@ -251,7 +253,7 @@ function checkFraming(value: unknown, field: string, problems: Problem[]): Frami
  */
 export function checkRequirementOutput(output: unknown, source?: string): ShapeCheck<RequirementList> {
   if (!isRecord(output)) {
-    return { ok: false, problems: [{ field: "", message: "応答は写像（object）であること" }] };
+    return { ok: false, problems: [{ field: "", code: "shape", message: "応答は写像（object）であること" }] };
   }
   const problems: Problem[] = [];
   const raw = output["requirements"];
@@ -278,7 +280,9 @@ export function checkRequirementOutput(output: unknown, source?: string): ShapeC
   }
   const decisions = checkStringArray(output["decisions"], "decisions", problems);
   const unresolved = checkStringArray(output["unresolved"], "unresolved", problems);
-  if (problems.length > 0) return { ok: false, problems };
+  if (problems.length > 0) {
+    return { ok: false, problems: problems.map((problem) => ({ ...problem, code: problem.code ?? "shape" })) };
+  }
 
   let positionCorrections = 0;
   let normalizedRequirements = requirements;
@@ -301,7 +305,9 @@ export function checkRequirementOutput(output: unknown, source?: string): ShapeC
       normalizedFraming.push({ ...frame, position: decided.position });
     });
   }
-  if (problems.length > 0) return { ok: false, problems };
+  if (problems.length > 0) {
+    return { ok: false, problems: problems.map((problem) => ({ ...problem, code: problem.code ?? "shape" })) };
+  }
   return {
     ok: true,
     value: {

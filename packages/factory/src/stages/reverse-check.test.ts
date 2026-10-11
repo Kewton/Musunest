@@ -5,6 +5,13 @@
 //   2. 落ちがあれば ① をやり直し、やり直しても残る落ちを未達として返す
 //   3. ①' が送る要求を観測する（規則とデータが別・原文と一覧だけ・JSON Schema が付く）
 import { describe, expect, it } from "vitest";
+import type {
+  LlmClient,
+  LlmStructuredRequest,
+  LlmStructuredResponse,
+  LlmToolRequest,
+  LlmToolResponse,
+} from "../llm.js";
 import type { RequirementList } from "../pipeline.js";
 import {
   REVERSE_CHECK_SCHEMA_NAME,
@@ -12,11 +19,13 @@ import {
   isBlankRange,
   runReverseCheck,
   runReverseCheckLoop,
+  runReverseCheckLoopWithOperation,
   splitSourceSentences,
 } from "./reverse-check.js";
 import {
   INJECTED_INSTRUCTION,
   REQUIREMENT_LIST,
+  REQUIREMENT_LIST_OUTPUT,
   REVERSE_CHECK_OUTPUT,
   SAMPLE_DOCUMENTS,
   SOURCE_TEXT,
@@ -481,5 +490,82 @@ describe("① の位置の正規化と逆照合（Issue #382）", () => {
     const misses = checkRequirementCoverage(SOURCE_TEXT, shifted);
     const mismatch = misses.find((miss) => miss.kind === "position-mismatch");
     expect(mismatch?.requirementId).toBe("R-1");
+  });
+});
+
+// ── ① と ①' の停止に、どの呼び出しかを付ける（Issue #397）────────────────
+
+describe("① と ①' の停止に、どの呼び出しかを付ける（Issue #397）", () => {
+  /** `failAt` 回目の呼び出しでだけ要求の誤りを投げる偽物の呼び出し */
+  function clientThrowingAt(failAt: number, recorded: readonly { kind: "structured"; output: unknown; usage: undefined }[]): LlmClient {
+    const inner = createRecordingClient(recorded);
+    let calls = 0;
+    return {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        if (calls === failAt) {
+          throw Object.assign(new Error("要求が不正です"), {
+            kind: "invalidRequest",
+            code: "invalid_json_schema",
+          });
+        }
+        return inner.client.callStructured<T>(request);
+      },
+      async callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
+        return inner.client.callWithTools(request);
+      },
+    };
+  }
+
+  it("① で打ち切られると operation: requirements、①' で要求の誤りなら operation: reverse-check", async () => {
+    const requirementsOutcome = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(clientThrowingAt(1, []), { maxAttempts: 1 }),
+    });
+    expect(requirementsOutcome.ok).toBe(false);
+    if (requirementsOutcome.ok) return;
+    expect(requirementsOutcome.operation).toBe("requirements");
+    expect(requirementsOutcome.failure.kind).toBe("invalidRequest");
+
+    const reverseCheckOutcome = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(clientThrowingAt(2, [structured(REQUIREMENT_LIST_OUTPUT)]), { maxAttempts: 1 }),
+    });
+    expect(reverseCheckOutcome.ok).toBe(false);
+    if (reverseCheckOutcome.ok) return;
+    expect(reverseCheckOutcome.operation).toBe("reverse-check");
+    expect(reverseCheckOutcome.failure.kind).toBe("invalidRequest");
+  });
+
+  it("やり直しの ① で止まれば requirements-redo、①' で止まれば reverse-check-redo", async () => {
+    const redo = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(
+        clientThrowingAt(3, [structured(BAD_LIST_OUTPUT), structured(REVERSE_CHECK_OUTPUT)]),
+        { maxAttempts: 1 },
+      ),
+    });
+    expect(redo.ok).toBe(false);
+    if (redo.ok) return;
+    expect(redo.operation).toBe("requirements-redo");
+
+    const redoReverse = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(
+        clientThrowingAt(4, [
+          structured(BAD_LIST_OUTPUT),
+          structured(REVERSE_CHECK_OUTPUT),
+          structured(BAD_LIST_OUTPUT),
+        ]),
+        { maxAttempts: 1 },
+      ),
+    });
+    expect(redoReverse.ok).toBe(false);
+    if (redoReverse.ok) return;
+    expect(redoReverse.operation).toBe("reverse-check-redo");
   });
 });

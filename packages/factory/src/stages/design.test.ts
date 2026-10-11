@@ -624,3 +624,57 @@ describe("設計の段が要件の範囲を広げない（Issue #391）", () => 
     ).toBe(true);
   });
 });
+
+// ── 計測で断られた形が通り、門は緩めない（Issue #398）──────────────────
+
+describe("計測で断られた形が通り、門は緩めない（Issue #398）", () => {
+  /** 根拠の制約 ID だけを差し替えた設計（新形式）を作る */
+  const withConstraintIds = (ids: readonly string[]) => ({
+    ...CLAIM_DESIGN,
+    designs: [
+      { ...CLAIM_DESIGN.designs[0], unwritable: [{ ...VALID_CLAIM, constraintIds: ids }] },
+      CLAIM_DESIGN.designs[1],
+    ],
+  });
+
+  it("実物の ID（R-VOCAB-01・R-TYPE-07・R-NAME-10）と記号つきの見出し（### computed・### 宣言の全体）が通る", async () => {
+    const outcome = await designOutcome(
+      withConstraintIds(["R-VOCAB-01", "R-TYPE-07", "R-NAME-10", "### computed", "### 宣言の全体"]),
+    );
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("正規化して重なった ID は 1 つになり、申告に残す ID も正規化後になる", async () => {
+    const outcome = await designOutcome(withConstraintIds(["### computed", "`computed`", "computed"]));
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.designs[0]?.unwritableClaims[0]?.constraintIds).toEqual(["computed"]);
+  });
+
+  it("文書に無い ID と、正規化しても知らない ID は今までどおり断る", () => {
+    for (const id of ["R-999", "### ### computed", "#### nope", "`computed", "computed`"]) {
+      const checked = checkDesignOutput(withConstraintIds([id]));
+      expect(checked.ok, id).toBe(true);
+      if (!checked.ok) continue;
+      expect(checkDesignConstraints(checked.value, SAMPLE_DOCUMENTS).length, id).toBeGreaterThan(0);
+    }
+  });
+
+  it("旧形式（R-1 の形）は、文書にあるときだけ通り、無いときは断る", () => {
+    const checked = checkDesignOutput(withConstraintIds(["R-1"]));
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checkDesignConstraints(checked.value, SAMPLE_DOCUMENTS)).toEqual([]);
+    expect(
+      checkDesignConstraints(checked.value, [{ name: "契約", text: "R-TYPE-01 だけがある。" }]).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("規則の文と断る文言に、記号つき（### ）の例が無い", async () => {
+    for (const rule of DESIGN_RULES) expect(rule).not.toContain("### ");
+    const outcome = await designOutcome(withConstraintIds([]));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    for (const problem of outcome.failure.problems) expect(problem.message).not.toContain("### ");
+  });
+});

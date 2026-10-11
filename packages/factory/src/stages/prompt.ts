@@ -93,6 +93,12 @@ export function buildStructuredRequest(prompt: StagePrompt): LlmStructuredReques
 export interface Problem {
   readonly field: string;
   readonly message: string;
+  /**
+   * 問題の分類（コードの中の有限の一覧から選ぶ。任意。Issue #397）。**発生側が付ける**——Plan の段の
+   * 失敗の診断（`failure.problems`）が、値の中身を含まずに問題の種類を残すのに使う。無ければ呼ぶ側が
+   * `other` として扱う。**Build への写し方（欄の名前と `message`）は変えない。**
+   */
+  readonly code?: string;
 }
 
 /** 段ごとの形の確認（JSON Schema に沿うかを、コードが見る） */
@@ -240,40 +246,104 @@ export function checkStringArray(
   return strings;
 }
 
-// ── 文書の本文から、制約 ID を取り出す（02 §1・②・Issue #332）────────────────
+// ── 文書の本文から、制約 ID を取り出す（02 §1・②・Issue #332・#398）──────────
 
 /**
- * 契約の規則の ID（`R-…`。例 `R-1`・`R2-12`）を取り出す。語の切れ目から始まるものだけを拾う。
+ * 契約の規則の ID を取り出す。**実物の形**（`R-<英大文字>-<数字>`。例 `R-TYPE-01`・`R-VOCAB-13`）と、
+ * 旧形式（`R-1`・`R2-12`）の両方を拾う。語の切れ目から始まるものだけを拾う（Issue #398）。
  */
-const CONSTRAINT_RULE_ID = /\bR\d*-\d+\b/g;
+const CONSTRAINT_RULE_ID = /\bR(?:-[A-Z]+-\d+|\d*-\d+)\b/g;
 
-/** 語彙の意味の見出し（`### ` で始まる行の見出しの文）を取り出す */
+/** `### ` で始まる行の見出しの文を取り出す */
 const VOCABULARY_HEADING = /^#{3}[ \t]+(.+?)[ \t]*$/gm;
 
+/** `## ` で始まる行の見出しの文を取り出す（明示した許可のものだけを制約 ID にする） */
+const LEVEL2_HEADING = /^#{2}[ \t]+(.+?)[ \t]*$/gm;
+
 /**
- * 段に渡した文書の本文から、**制約 ID の集合**を取り出す（Issue #332）。契約の規則の `R-…` の ID と、
- * 語彙の意味の `### ` 見出しの文である。設計の `unwritable` は、この集合に入っている ID だけを根拠に
- * できる（文書に無い ID は断る）。
+ * **明示した許可**の `##` の見出し（Issue #398）。「語彙の意味の文書・深さ 2・見出しの文」の組に結び
+ * 付ける。見出しの名前だけの全文書共通の一覧にはしない——その文書に実際にその見出しがあるときだけ、
+ * 制約 ID として足す。任意の `##` は通さない。
+ */
+const ALLOWED_LEVEL2_HEADINGS: readonly { readonly document: string; readonly heading: string }[] = [
+  { document: "語彙の意味", heading: "宣言の全体" },
+];
+
+/** その文書の、許可した `##` の見出しか */
+function isAllowedLevel2Heading(documentName: string, heading: string): boolean {
+  return ALLOWED_LEVEL2_HEADINGS.some(
+    (allowed) => allowed.document === documentName && allowed.heading === heading,
+  );
+}
+
+/**
+ * 制約 ID を正規化する（Issue #398）。外すのは**1 回だけ**である：
+ *   - 前後の空白
+ *   - 全体を囲む対応した 1 組のバッククォート（両端にあるときだけ）
+ *   - 先頭の見出しの接頭辞（`##` か `###` と空白）
+ * 内部の記号・内部のコード表記・大文字小文字は変えない。繰り返し外さないので、正規化した結果に
+ * 当てても変わらない（冪等）。`### ### action` は 1 回だけ外すので `### action` のまま残り、知らない
+ * ID として断られる。
+ */
+export function normalizeConstraintId(raw: string): string {
+  let value = raw.trim();
+  if (value.length >= 2 && value.startsWith("`") && value.endsWith("`")) {
+    value = value.slice(1, -1).trim();
+  }
+  return value.replace(/^#{2,3}[ \t]+/, "");
+}
+
+/** 制約 ID の並びを正規化し、**重なったものを 1 つ**にする（空になったものは落とす。Issue #398） */
+export function normalizeConstraintIds(ids: readonly string[]): readonly string[] {
+  const seen = new Set<string>();
+  for (const id of ids) {
+    const normalized = normalizeConstraintId(id);
+    if (normalized !== "") seen.add(normalized);
+  }
+  return [...seen];
+}
+
+/**
+ * 段に渡した文書の本文から、**制約 ID の集合**を取り出す（Issue #332・#398）。契約の規則の ID と、
+ * 語彙の意味の `### ` 見出しの文、そして**明示した許可**の `##` の見出しである。設計の `unwritable` は、
+ * この集合に入っている ID だけを根拠にできる（文書に無い ID は断る）。
  */
 export function constraintIdsIn(documents: readonly PromptDocument[]): ReadonlySet<string> {
   const ids = new Set<string>();
   for (const document of documents) {
-    for (const match of document.text.matchAll(CONSTRAINT_RULE_ID)) ids.add(match[0]);
+    for (const match of document.text.matchAll(CONSTRAINT_RULE_ID)) {
+      const id = normalizeConstraintId(match[0]);
+      if (id !== "") ids.add(id);
+    }
     for (const match of document.text.matchAll(VOCABULARY_HEADING)) {
       const heading = match[1]?.trim();
-      if (heading !== undefined && heading !== "") ids.add(heading);
+      if (heading !== undefined && heading !== "") ids.add(normalizeConstraintId(heading));
+    }
+    for (const match of document.text.matchAll(LEVEL2_HEADING)) {
+      const heading = match[1]?.trim();
+      if (heading !== undefined && heading !== "" && isAllowedLevel2Heading(document.name, heading)) {
+        ids.add(normalizeConstraintId(heading));
+      }
     }
   }
   return ids;
 }
 
-/** `### ` で始まる行の見出しの文を取り出す（無ければ `null`） */
-function headingText(line: string): string | null {
-  const match = /^#{3}[ \t]+(.+?)[ \t]*$/.exec(line);
-  return match === null ? null : (match[1] ?? "").trim();
+/** 行が見出しなら、その段（`#` の数）と見出しの文を返す（見出しでなければ `null`） */
+function headingAt(line: string): { readonly level: number; readonly heading: string } | null {
+  const match = /^(#{1,6})[ \t]+(.+?)[ \t]*$/.exec(line);
+  if (match === null) return null;
+  return { level: (match[1] ?? "").length, heading: (match[2] ?? "").trim() };
 }
 
-/** 1 つの行から、契約の規則の ID（`R-…`）の字句を取り出す */
+/** その見出しが制約 ID として使えるか（`### ` は常に、`## ` は明示した許可だけ。Issue #398） */
+function headingIsConstraintId(documentName: string, level: number, heading: string): boolean {
+  if (level === 3) return true;
+  if (level !== 2) return false;
+  return isAllowedLevel2Heading(documentName, heading);
+}
+
+/** 1 つの行から、契約の規則の ID の字句を取り出す */
 function ruleIdsIn(line: string): ReadonlySet<string> {
   const ids = new Set<string>();
   for (const match of line.matchAll(CONSTRAINT_RULE_ID)) ids.add(match[0]);
@@ -281,22 +351,30 @@ function ruleIdsIn(line: string): ReadonlySet<string> {
 }
 
 /**
- * 制約 ID の節の**抜粋**を、文書の本文から取り出す（Issue #332）。語彙の意味の `### ` 見出しは、
- * 見出しの行と次の見出しまでの本文を、契約の規則の `R-…` は、その ID を（字句として）含む行を拾う。
- * 抜粋は裏付けの点検（判定の口）にだけ渡す（依頼文の全文は渡さない）。
+ * 制約 ID の節の**抜粋**を、文書の本文から取り出す（Issue #332・#398）。見出し（`### ` と、明示した
+ * 許可の `## `）は、見出しの行と**同じ段か上の段**の見出しまでの本文（子の節は含む）を、契約の規則の
+ * ID は、その ID を（字句として）含む行を拾う。**次の文書へは越えない。** 抜粋は裏付けの点検（判定の
+ * 口）にだけ渡す（依頼文の全文は渡さない）。
  */
 export function constraintExcerpt(documents: readonly PromptDocument[], ids: readonly string[]): string {
-  const wanted = new Set(ids.map((id) => id.trim()).filter((id) => id !== ""));
+  const wanted = new Set(normalizeConstraintIds(ids));
   if (wanted.size === 0) return "";
   const sections: string[] = [];
   for (const document of documents) {
     const lines = document.text.split("\n");
     for (let i = 0; i < lines.length; i += 1) {
       const line = lines[i] ?? "";
-      const heading = headingText(line);
-      if (heading !== null && wanted.has(heading)) {
+      const heading = headingAt(line);
+      if (
+        heading !== null &&
+        headingIsConstraintId(document.name, heading.level, heading.heading) &&
+        wanted.has(heading.heading)
+      ) {
         const section = [line];
-        for (let j = i + 1; j < lines.length && headingText(lines[j] ?? "") === null; j += 1) {
+        // 同じ段か上の段の見出しで止める（子の節は含む）
+        for (let j = i + 1; j < lines.length; j += 1) {
+          const next = headingAt(lines[j] ?? "");
+          if (next !== null && next.level <= heading.level) break;
           section.push(lines[j] ?? "");
         }
         sections.push(section.join("\n").trim());
