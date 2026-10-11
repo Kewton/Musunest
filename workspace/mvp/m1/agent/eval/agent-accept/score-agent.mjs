@@ -16,7 +16,11 @@ for (const d of readdirSync(outRoot).filter((x) => /^P\d+-r\d+$/.test(x)).sort((
   const sl = existsSync(join(dir, "summary.line.json")) ? JSON.parse(readFileSync(join(dir, "summary.line.json"), "utf8")) : null;
   const s = sl?.summary ?? null;
   const spec = join(dir, "bundle/artifacts/app.spec.yaml");
-  const base = { run: d, pattern: p, subject, style: STYLE[p], factory_verdict: s?.verdict ?? null, stop: s?.stop_reason ?? s?.stop_class ?? null, failure: s?.failure ?? null, cost_usd: s?.provider_cost_usd ?? 0, seconds: s?.duration_secs ?? sl?.wall_s ?? 0 };
+  // --plan の本（#378）：費用は Plan と Build の合計。Plan の結果と質問の数も残す
+  const planRecordPath = join(dir, "bundle/plan-record.json");
+  const pr = existsSync(planRecordPath) ? JSON.parse(readFileSync(planRecordPath, "utf8")) : null;
+  const plan = pr === null ? null : { outcome: pr.outcome ?? null, questions: (pr.rounds ?? []).reduce((n, round) => n + (round.questions ?? []).length, 0), rounds: (pr.rounds ?? []).length, usd: sl?.plan_cost?.plan_usd ?? pr.spent_usd ?? 0 };
+  const base = { run: d, pattern: p, subject, style: STYLE[p], factory_verdict: s?.verdict ?? null, stop: s?.stop_reason ?? s?.stop_class ?? null, failure: s?.failure ?? null, cost_usd: sl?.plan_cost?.total_usd ?? s?.provider_cost_usd ?? 0, seconds: sl?.wall_s ?? s?.duration_secs ?? 0, plan };
   if (!existsSync(spec)) { rows.push({ ...base, generation_failed: true }); continue; }
   const def = loadDef(join(ev, "subjects", `${subject}.json`));
   const r = await score(engine, spec, def);
