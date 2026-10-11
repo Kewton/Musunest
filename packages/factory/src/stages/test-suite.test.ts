@@ -14,9 +14,11 @@ import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest, JudgeResponse } f
 import {
   NATURE_JUDGE_THRESHOLD,
   NATURE_JUDGE_THRESHOLD_VERSION,
+  TEST_SUITE_RULES,
   TEST_SUITE_SCHEMA_NAME,
   checkSuiteAgainstRequirements,
   checkSuitePlan,
+  dropNonstructuralTests,
   natureQuestionName,
   reconcileNatures,
   runTestSuite,
@@ -1110,5 +1112,250 @@ describe("構造の検査（Issue #386）", () => {
     expect(request?.input).toContain("要件ごとの確かめ方");
     expect(request?.input).toContain("checks");
     expect((request?.rules ?? []).join("\n")).toContain("確かめ方の欄は使わない");
+  });
+});
+
+// ── 構造で確かめる要件には、構造の検査だけを固定する（§1・②'・Issue #392）──────────
+
+/** 構造で確かめる要件（R-1）を **ruled** とする設計（種類が ruled でも構造の検査だけを作る） */
+function ruledStructuralDesign(checks: readonly StructuralAssertionKind[]): DesignResult {
+  const base = structuralDesign(checks);
+  return { ...base, designs: [{ ...base.designs[0]!, nature: "ruled" }, base.designs[1]!] };
+}
+
+/** R-1（構造で確かめる）に、入力・画面・集計・操作の実行の試験を混ぜた ②' の答え（Issue #392） */
+function mixedStructuralSuite(): { readonly tests: readonly Record<string, unknown>[] } {
+  return {
+    tests: [
+      ...structureTestsFor(["action-kind"]),
+      plannedTest({ id: "x-compute", requirementId: "R-1", roleId: "record.total", kind: "normal", operation: "compute" }),
+      plannedTest({
+        id: "x-validate",
+        requirementId: "R-1",
+        roleId: "record.amount",
+        targetKind: "field",
+        kind: "abnormal",
+        operation: "validate",
+        expected: { kind: "error", code: "E_X" },
+      }),
+      plannedTest({
+        id: "x-action",
+        requirementId: "R-1",
+        roleId: "record.add",
+        targetKind: "operation",
+        kind: "normal",
+        operation: "action",
+        expected: { kind: "ok", value: null },
+      }),
+      plannedTest({ id: "x-aggregate", requirementId: "R-1", roleId: "record.total", kind: "normal", operation: "aggregate" }),
+      // 設計の役割 ID の表に無い役割を指す実行の試験（外すので、残った試験の照合には掛からない）
+      plannedTest({
+        id: "x-screen",
+        requirementId: "R-1",
+        roleId: "record.missing",
+        targetKind: "screen",
+        kind: "normal",
+        operation: "screen",
+        expected: { kind: "ok", value: null },
+      }),
+      ...R2_TRIPLE_PLANNED,
+    ],
+  };
+}
+
+/** 外す対象の試験 ID（入力・画面・集計・操作の実行。構造の検査 s0 は残る） */
+const DROPPED_IDS = ["x-compute", "x-validate", "x-action", "x-aggregate", "x-screen"] as const;
+
+describe("構造で確かめる要件には、構造の検査だけを固定する（§1・②'・Issue #392）", () => {
+  it("構造の要件の入力・画面・集計・操作の試験を外し、構造の検査と別の要件の試験は残す", async () => {
+    const recording = createRecordingClient([structured(mixedStructuralSuite())]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: ruledStructuralDesign(["action-kind"]),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 外した試験が戻り値に出る（回・試験 ID・要件 ID・操作）
+    expect(outcome.value.dropped).toEqual(
+      DROPPED_IDS.map((testId) => ({ round: 1, testId, requirementId: "R-1", operation: expect.any(String) })),
+    );
+    expect(outcome.value.dropped.map((entry) => entry.operation)).toEqual([
+      "compute",
+      "validate",
+      "action",
+      "aggregate",
+      "screen",
+    ]);
+    // 構造の検査（R-1 の s0）と、fixed-test の要件（R-2）の正常・異常・境界は残る
+    expect(outcome.value.suite.tests.map((test) => test.id)).toEqual(["s0", "n2", "a2", "b2"]);
+  });
+
+  it("checks の無い設計・fixed-test（checks が空）・unresolved・確かめ方の無い要件では何も外さない", () => {
+    const suite = suiteOf(mixedStructuralSuite().tests);
+    /** fixed-test の要件（R-2）は checks が空の並びでも外さない（R-1 の構造の検査だけを外す） */
+    const fixedTestWithEmptyChecks = { requirementId: "R-2", nature: "ruled" as const, verification: { kind: "fixed-test" as const }, checks: [], vocabulary: [], placement: [], unwritable: [] };
+    const designs: readonly DesignResult[] = [
+      {
+        roles: STRUCTURE_ROLES,
+        designs: [
+          { requirementId: "R-1", nature: "existence-only", verification: { kind: "structural", reason: "構造で確かめる" }, vocabulary: [], placement: [], unwritable: [] },
+          fixedTestWithEmptyChecks,
+        ],
+      },
+      {
+        roles: STRUCTURE_ROLES,
+        designs: [
+          { requirementId: "R-1", nature: "existence-only", verification: { kind: "unresolved", reason: "確かめられない" }, vocabulary: [], placement: [], unwritable: [] },
+          fixedTestWithEmptyChecks,
+        ],
+      },
+      {
+        roles: STRUCTURE_ROLES,
+        designs: [
+          { requirementId: "R-1", nature: "existence-only", vocabulary: [], placement: [], unwritable: [] },
+          fixedTestWithEmptyChecks,
+        ],
+      },
+    ];
+    for (const design of designs) {
+      expect(dropNonstructuralTests(design, suite, 1).dropped).toEqual([]);
+    }
+    // checks を持つ構造の要件（R-1）だけが対象で、fixed-test の R-2 の試験は残る
+    expect(dropNonstructuralTests(ruledStructuralDesign(["action-kind"]), suite, 1).dropped.map((entry) => entry.testId)).toEqual([
+      ...DROPPED_IDS,
+    ]);
+  });
+
+  it("外す対象の試験でも、形が不正なら形の誤りとしてやり直しになる", async () => {
+    const invalid = {
+      tests: [{ ...plannedTest({ id: "bad", requirementId: "R-1", roleId: "record.total" }), operation: "nonsense" }],
+    };
+    const recording = createRecordingClient([structured(invalid), structured(invalid)]);
+    const notifications: number[] = [];
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: ruledStructuralDesign(["action-kind"]),
+      onDropped: (dropped) => notifications.push(dropped.length),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("malformed");
+    // 形が合わないので、外す（通知する）ところまで届かない
+    expect(notifications).toEqual([]);
+  });
+
+  it("やり直しの回をまたいでも、外した件数を回ごとに数える", async () => {
+    const round1 = {
+      tests: [
+        ...structureTestsFor(["action-kind"]),
+        plannedTest({ id: "r1-exec", requirementId: "R-1", roleId: "record.total", operation: "compute" }),
+        R2_TRIPLE_PLANNED[0]!,
+      ],
+    };
+    const round2 = {
+      tests: [
+        ...structureTestsFor(["action-kind"]),
+        plannedTest({ id: "r2-exec", requirementId: "R-1", roleId: "record.total", operation: "compute" }),
+        ...R2_TRIPLE_PLANNED,
+      ],
+    };
+    const recording = createRecordingClient([structured(round1), structured(round2)]);
+    const rounds: number[][] = [];
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: ruledStructuralDesign(["action-kind"]),
+      onDropped: (dropped) => rounds.push(dropped.map((entry) => entry.round)),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.rounds).toBe(2);
+    expect(outcome.value.dropped.map((entry) => [entry.round, entry.testId])).toEqual([
+      [1, "r1-exec"],
+      [2, "r2-exec"],
+    ]);
+    // 通知の口にも、回ごとに渡る（成功の戻り値だけに頼らない）
+    expect(rounds).toEqual([[1], [2]]);
+  });
+
+  it("決まりの文に「構造の検査だけを作る」があり、データの欄に確かめ方の種類が入る", async () => {
+    const checks: readonly StructuralAssertionKind[] = ["action-kind"];
+    const output = { tests: [...structureTestsFor(checks), ...R2_TRIPLE_PLANNED] };
+    const recording = createRecordingClient([structured(output)]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: ruledStructuralDesign(checks),
+    });
+    expect(outcome.ok).toBe(true);
+
+    const rules = TEST_SUITE_RULES.join("\n");
+    expect(rules).toContain("構造の検査だけを作る");
+    // 3 種類を作る文は、確かめ方が structural の要件を除く
+    const threeKinds = TEST_SUITE_RULES.find((rule) => rule.includes("3 種類"));
+    expect(threeKinds).toContain("structural の要件を除いて");
+
+    // データの例に、ruled かつ structural の要件が入る（種類と、確かめ方の種類）
+    const request = recording.structured[0];
+    expect(request?.input).toContain('"nature": "ruled"');
+    expect(request?.input).toContain('"verificationKind": "structural"');
+    expect(request?.input).toContain("要件ごとの確かめ方");
+  });
+
+  it("外したあとに構造の検査が欠ける（中身の一部だけ・0 本）なら、今までどおりやり直しになる", async () => {
+    // 中身の一部だけ（action-unconditioned の構造の検査が無い）
+    const partial = {
+      tests: [
+        ...structureTestsFor(["action-kind"]),
+        plannedTest({ id: "p-exec", requirementId: "R-1", roleId: "record.total", operation: "compute" }),
+        ...R2_TRIPLE_PLANNED,
+      ],
+    };
+    const partialRun = createRecordingClient([structured(partial), structured(partial)]);
+    const partialOutcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(partialRun.client, { maxAttempts: 1 }),
+      design: ruledStructuralDesign(["action-kind", "action-unconditioned"]),
+    });
+    expect(partialOutcome.ok).toBe(false);
+    if (partialOutcome.ok) return;
+    expect(partialOutcome.failure.kind).toBe("unmet");
+    if (partialOutcome.failure.kind !== "unmet") return;
+    expect(
+      partialOutcome.failure.problems.some(
+        (problem) => problem.message.includes("構造の検査 action-unconditioned が無い"),
+      ),
+    ).toBe(true);
+
+    // 0 本（実行の試験だけ）
+    const zero = {
+      tests: [
+        plannedTest({ id: "z-exec", requirementId: "R-1", roleId: "record.total", operation: "compute" }),
+        ...R2_TRIPLE_PLANNED,
+      ],
+    };
+    const zeroRun = createRecordingClient([structured(zero), structured(zero)]);
+    const zeroOutcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(zeroRun.client, { maxAttempts: 1 }),
+      design: ruledStructuralDesign(["action-kind"]),
+    });
+    expect(zeroOutcome.ok).toBe(false);
+    if (zeroOutcome.ok) return;
+    expect(zeroOutcome.failure.kind).toBe("unmet");
+    if (zeroOutcome.failure.kind !== "unmet") return;
+    expect(
+      zeroOutcome.failure.problems.some(
+        (problem) => problem.message.includes("R-1") && problem.message.includes("試験が無い"),
+      ),
+    ).toBe(true);
   });
 });

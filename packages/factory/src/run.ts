@@ -18,6 +18,7 @@ import { CallGateway } from "./call.js";
 import {
   assembleBundle,
   toBundleNatureDiscrepancies,
+  toDroppedNonstructuralTests,
   type AssembledBundle,
   type BundleDroppedClaim,
   type BundleJudgeUsage,
@@ -84,7 +85,7 @@ import {
 import { runReverseCheckLoop } from "./stages/reverse-check.js";
 import { runTests } from "./stages/run-tests.js";
 import { runStaticCheck } from "./stages/static-check.js";
-import { runTestSuite } from "./stages/test-suite.js";
+import { runTestSuite, type DroppedNonstructuralTest } from "./stages/test-suite.js";
 import { runWrite } from "./stages/write.js";
 
 /** 手元の入口（cli.ts）と試験が渡す、1 回の生成の入力 */
@@ -375,9 +376,17 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
    */
   let natureDiscrepancies: readonly BundleNatureDiscrepancy[] = [];
 
+  /**
+   * ②' が固定の前に外した、**構造で確かめる要件の構造の検査でない試験**（回ごと。Issue #392）。②' から
+   * 通知の口（`onDropped`）で受け取る——**②' が最後に失敗しても・後の段で早く止まっても**要約に残すため、
+   * 成功の戻り値だけに頼らない。②' まで届かなければ空のまま（要約の欄は省く）。
+   */
+  const droppedTests: DroppedNonstructuralTest[] = [];
+
   const stopResult = (attribution: FailureAttribution): GenerationResult => {
     const outcome: Outcome = { result: "failed", verdict: "none" };
     const record = buildRecord(attribution);
+    const droppedSummary = toDroppedNonstructuralTests(droppedTests);
     const summary: BundleSummary = {
       ...buildSummary(record, {
         run_id: input.runId,
@@ -391,6 +400,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       }),
       judge: judgeUsageOf(),
       nature_discrepancies: natureDiscrepancies,
+      ...(droppedSummary === undefined ? {} : { dropped_nonstructural_tests: droppedSummary }),
     };
     return { outcome, record, summary, bundle: null, stopped: attribution };
   };
@@ -528,6 +538,11 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         gateway,
         ...(input.plan === undefined ? {} : { plan: input.plan }),
         ...(judgeBudget === undefined ? {} : { judge: judgeBudget }),
+        // 固定の前に外した試験を、**回ごとに**受け取る（②' が最後に失敗しても・後の段で早く止まっても
+        // 要約に残すため。成功の戻り値だけに頼らない。Issue #392）
+        onDropped: (dropped) => {
+          for (const entry of dropped) droppedTests.push(entry);
+        },
       }),
     );
     natureDiscrepancies = toBundleNatureDiscrepancies(testSuite.discrepancies);
@@ -821,6 +836,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
 
     // ⑧ 納品物にする（記録と要約を組んでから、納品物に埋め込む）
     const record = buildRecord(failure);
+    const droppedSummary = toDroppedNonstructuralTests(droppedTests);
     const summary: BundleSummary = {
       ...buildSummary(record, {
         run_id: input.runId,
@@ -834,6 +850,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       }),
       judge: judgeUsageOf(),
       nature_discrepancies: natureDiscrepancies,
+      ...(droppedSummary === undefined ? {} : { dropped_nonstructural_tests: droppedSummary }),
     };
     const bundle = await assembleBundle({
       runId: input.runId,

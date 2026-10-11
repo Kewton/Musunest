@@ -193,6 +193,22 @@ describe("⑧ 納品物（02 §4・F-10）", () => {
     expect(acceptsHeadlessSummaryWire(summary)).toBe(true);
   });
 
+  it("要約に、固定の前に外した試験の数（任意の欄）を残す。欄の無い記録も読める（Issue #392）", async () => {
+    const dropped = { count: 3, by_operation: { compute: 2, screen: 1 } };
+    const withDropped = await assembleBundle(input({ summary: { ...SUMMARY, dropped_nonstructural_tests: dropped } }));
+    const summary = JSON.parse(findText(withDropped.artifacts, "artifacts/summary.json")) as BundleSummary;
+    expect(summary.dropped_nonstructural_tests).toEqual(dropped);
+    expect(withDropped.summary.dropped_nonstructural_tests).toEqual(dropped);
+    // wire は知らない欄を足しても受け付ける（additive。Issue #392）
+    expect(acceptsHeadlessSummaryWire(summary)).toBe(true);
+
+    // 欄が無い記録も読める（欄は任意。0 件のときは省く）
+    const withoutDropped = await assembleBundle(input());
+    const plain = JSON.parse(findText(withoutDropped.artifacts, "artifacts/summary.json")) as BundleSummary;
+    expect(plain.dropped_nonstructural_tests).toBeUndefined();
+    expect(acceptsHeadlessSummaryWire(plain)).toBe(true);
+  });
+
   it("manifest 自身は `files` に数えず、書くときは bundleFiles が含める", async () => {
     const bundle = await assembleBundle(input());
     expect(bundle.manifest.files.map((entry) => entry.path)).not.toContain(BUNDLE_MANIFEST_FILE);
