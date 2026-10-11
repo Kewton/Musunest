@@ -35,8 +35,10 @@ import {
   TEST_TARGET_KINDS,
   checkTestSuite,
   isRequirementNature,
+  type FixedTest,
   type RequirementClassification,
   type RequirementNature,
+  type TestOperation,
   type TestSuite,
   type TestTarget,
   type TestTargetKind,
@@ -67,9 +69,9 @@ export const TEST_SUITE_ROUNDS = 2;
 /** ②' に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const TEST_SUITE_RULES: readonly string[] = [
   "原文と要件の一覧だけから、要件ごとの種類（nature）を独立に分類し直す（設計の出力は見せられない）。決まり（条件・計算・検査）を含むなら ruled、在ることだけ（例「名前を持つメンバーを登録できる」）なら existence-only。分類は classifications に入れる。**分類は原文と要件の文だけで決め、確かめ方の欄は使わない。**",
-  "決まりを含む要件は、決まりの役割ごとに、正常・異常・境界の 3 種類の試験を、入力と期待つきで作る。",
+  "確かめ方が structural の要件を除いて、決まりを含む要件は、決まりの役割ごとに、正常・異常・境界の 3 種類の試験を、入力と期待つきで作る。",
   "在ることだけの要件は、正常のシナリオ 1 本か、構造の条件（create の操作がある・その entity の一覧か表に項目が出る・画面の部品がある）だけを固定する。**異常・境界の試験や検査（validate）の試験は作らない**。",
-  "確かめ方が structural の要件には、checks の中身ごとに 1 本以上の**構造の検査**を作る。実行の試験だけで済ませない。構造の検査は操作（operation）を structure にし、assertion に検査の中身を持つ。種類（kind）は normal だけ、期待（expected）は「成り立つ」（kind を ok・value を \"true\"・code を null）にする。",
+  "確かめ方が structural の要件には、checks の中身ごとに 1 本以上の**構造の検査だけを作る**。種類（ruled／existence）にかかわらず構造の検査だけを作り、正常・異常・境界の実行の試験（入力・画面・集計・操作の試験）は作らない。構造の検査は操作（operation）を structure にし、assertion に検査の中身を持つ。種類（kind）は normal だけ、期待（expected）は「成り立つ」（kind を ok・value を \"true\"・code を null）にする。",
   "構造の検査の assertion.check は、設計の checks の中身（field-type・action-kind・action-unconditioned・view-shows・aggregate-no-period）と同じ値にする。assertion の expected・refEntity・role は検査の種類に応じて埋める——field-type は expected に項目の種類（string・number・date・list・ref・enum）、参照（ref・参照の並び）なら refEntity に参照先 entity の役割 ID。action-kind は expected に操作の種類（create・update・delete）。view-shows は role に、表示を期待する項目か計算の役割 ID。action-unconditioned・aggregate-no-period は expected・refEntity・role を null にする。",
   "構造の検査は、確かめ方が structural の要件だけを対象にする。構造の検査でない試験は assertion を null にする。確かめ方が structural の要件には、正常・異常・境界のそろいを求めない。",
   "入力（input）と参照データの値（values）と期待の値（value）は、任意の JSON を表すので、**JSON の文字列**として書く（例: \"{\\\"amount\\\": 21}\"）。",
@@ -233,6 +235,12 @@ export interface TestSuiteInput {
    * （判定の費用は生成の予算と要約の `judge` 欄に入る）。渡さなければ今までどおり `ruled` に倒す。
    */
   readonly judge?: Judge;
+  /**
+   * 外した（**構造で確かめる要件**の、構造の検査でない）試験を、**回ごとに**受け取る口（§1・②'・
+   * Issue #392）。走らせる部分（`run.ts`）はここで受け取り、**②' が最後に失敗しても・後の段で早く
+   * 止まっても**要約に残せるようにする（成功の戻り値だけに頼らない）。渡さなければ何もしない。
+   */
+  readonly onDropped?: (dropped: readonly DroppedNonstructuralTest[]) => void;
 }
 
 /** selector の鍵（要件 ID と役割 ID。旧形式の自由な文の役割も受ける） */
@@ -389,6 +397,65 @@ function structuralChecksRequired(design: DesignResult): ReadonlySet<string> {
     if (entry.verification?.kind === "structural" && entry.checks !== undefined) checked.add(entry.requirementId);
   }
   return checked;
+}
+
+/**
+ * ②' で、**構造で確かめる要件**（`verification.kind` が `structural` で `checks` を持つ）の試験のうち、
+ * **構造の検査でない試験**を、固定の前に外した 1 件（§1・②'・Issue #392）。
+ *
+ * 設計の契約では、構造で確かめる要件は構造の検査だけで確かめ切れる。だから ②' は構造の検査だけを作り、
+ * それ以外（入力・画面・集計・操作の実行の試験）を外す。外した件数は**形の検査を通した生成の回ごと**に
+ * 数える——同じ ID が別の回で作り直されても回ごとに数え、採用した最終の組の件数とは分ける。
+ */
+export interface DroppedNonstructuralTest {
+  /** 外した回（②' の作り直しの回。1 から数える） */
+  readonly round: number;
+  /** 外した試験の識別子 */
+  readonly testId: string;
+  /** その試験が対象にしていた要件 ID（構造で確かめる要件） */
+  readonly requirementId: string;
+  /** 外した試験の操作（`structure` 以外） */
+  readonly operation: TestOperation;
+}
+
+/**
+ * **構造で確かめる要件**の試験から、**構造の検査でない試験**を、固定の前に外す（§1・②'・Issue #392）。
+ * **形の検査（`checkTestSuiteOutput`）を通した応答**に対して、**設計との照合と固定の前**に掛ける純粋な関数
+ * である（形の不正な試験は、ここへ来る前に断られている）。
+ *
+ *   - 対象は、設計が `verification.kind` を `structural` とし `checks` を持つ要件（`structuralChecksRequired`）
+ *     の試験だけ。操作が `structure` でないものを外す
+ *   - `checks` の無い設計（記録した古い応答）・`fixed-test`・`unresolved` の要件・確かめ方の無い要件は
+ *     対象にしない（**何も外さない**）
+ *   - **外すのは、その構造の要件を対象にした試験だけ。** 別の要件（`fixed-test` の要件など）の試験は
+ *     外さない
+ *
+ * 外した 1 件ごとに、**回・試験 ID・要件 ID・操作**を返す（回ごとに数える。Issue #392）。外したあとの
+ * 検査（構造の検査の欠け・要件の試験の欠け・役割と assertion の形）は、呼ぶ側が今までどおり掛ける。
+ */
+export function dropNonstructuralTests(
+  design: DesignResult,
+  suite: TestSuite,
+  round: number,
+): { readonly suite: TestSuite; readonly dropped: readonly DroppedNonstructuralTest[] } {
+  const structural = structuralChecksRequired(design);
+  if (structural.size === 0) return { suite, dropped: [] };
+  const tests: FixedTest[] = [];
+  const dropped: DroppedNonstructuralTest[] = [];
+  for (const test of suite.tests) {
+    if (test.operation !== "structure" && structural.has(test.target.requirementId)) {
+      dropped.push({
+        round,
+        testId: test.id,
+        requirementId: test.target.requirementId,
+        operation: test.operation,
+      });
+      continue;
+    }
+    tests.push(test);
+  }
+  if (dropped.length === 0) return { suite, dropped: [] };
+  return { suite: { ...suite, tests }, dropped };
 }
 
 /**
@@ -808,12 +875,18 @@ function buildData(
       name: "要件ごとの種類",
       text: serializeJson([...designNaturesOf(design)].map(([requirementId, nature]) => ({ requirementId, nature }))),
     });
-    // 確かめ方（求める検査の形＝checks）は、種類の分類とは**別のデータの欄**で渡す（Issue #386。
-    // 分類は原文と要件の文だけで決めさせ、確かめ方の欄は使わせない）。空の checks は構造で確かめない。
+    // 確かめ方（求める検査の形＝checks と、確かめ方の種類＝verification.kind）は、種類の分類とは
+    // **別のデータの欄**で渡す（Issue #386・#392。分類は原文と要件の文だけで決めさせ、確かめ方の欄は
+    // 使わせない）。空の checks は構造で確かめない。種類（verificationKind）が structural の要件には、
+    // 構造の検査だけを作らせる（Issue #392）。
     data.push({
       name: "要件ごとの確かめ方",
       text: serializeJson(
-        design.designs.map((entry) => ({ requirementId: entry.requirementId, checks: entry.checks ?? [] })),
+        design.designs.map((entry) => ({
+          requirementId: entry.requirementId,
+          verificationKind: entry.verification?.kind ?? null,
+          checks: entry.checks ?? [],
+        })),
       ),
     });
   }
@@ -832,6 +905,12 @@ export interface TestSuiteValue {
    * §1・②'・Issue #307・#373）
    */
   readonly discrepancies: readonly NatureDiscrepancy[];
+  /**
+   * 固定の前に外した、**構造で確かめる要件の構造の検査でない試験**（回・試験 ID・要件 ID・操作。
+   * §1・②'・Issue #392）。**回ごとに数える**——やり直しの回で外した分も入る（採用した最終の組の件数
+   * とは分ける）。外していなければ空の並びである。
+   */
+  readonly dropped: readonly DroppedNonstructuralTest[];
 }
 
 /**
@@ -847,6 +926,8 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
   let previous: readonly Problem[] = [];
   // 食い違った要件の決め方（要件 ID ごと）。やり直しの回をまたいで持ち越す（聞き直さない。Issue #373）
   const decisions = new Map<string, NatureDecision>();
+  // 固定の前に外した、構造で確かめる要件の構造の検査でない試験（回ごとに数える。Issue #392）
+  const droppedAll: DroppedNonstructuralTest[] = [];
   // 新しい契約の設計（役割 ID の表・種類・確かめ方を持つ）のときだけ、突き合わせと役割 ID の検査を
   // 掛ける。旧形式の記録（設計の新しい欄が無い）は旧来の検査を通す（`design.ts` と同じ後方互換）。
   const planned = input.design !== undefined && isPlannedDesign(input.design);
@@ -884,14 +965,21 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
       }
       const reconciled = reconcileNatures(input.design, answer.value.classifications, decisions);
       discrepancies = reconciled.discrepancies;
+      // **構造で確かめる要件**の、構造の検査でない試験を、照合と固定の前に外す（§1・②'・Issue #392）。
+      // 外した分は回ごとに数え、成功の戻り値だけでなく通知の口でも渡す（後の段で早く止まっても要約に残す）。
+      const dropResult = dropNonstructuralTests(input.design, answer.value, round);
+      if (dropResult.dropped.length > 0) {
+        for (const entry of dropResult.dropped) droppedAll.push(entry);
+        input.onDropped?.(dropResult.dropped);
+      }
       // 採った種類を、返す試験集合の分類にも書き込む（後の段が同じ種類で評価できるように。Issue #373）
       const adopted = new Map<string, RequirementNature>();
       for (const entry of reconciled.discrepancies) adopted.set(entry.requirementId, entry.resolved);
-      suite = withAdoptedNatures(answer.value, adopted);
+      suite = withAdoptedNatures(dropResult.suite, adopted);
       problems = checkSuitePlan(input.list, suite, input.design, reconciled.natures);
     }
     if (problems.length === 0) {
-      return { ok: true, value: { suite, rounds: round, discrepancies } };
+      return { ok: true, value: { suite, rounds: round, discrepancies, dropped: droppedAll } };
     }
     previous = problems;
   }

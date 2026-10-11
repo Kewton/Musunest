@@ -38,6 +38,7 @@ import type {
 } from "./pipeline.js";
 import type { Summary } from "./record.js";
 import { utf8ByteLength } from "./stages/write.js";
+import type { DroppedNonstructuralTest } from "./stages/test-suite.js";
 
 /**
  * 判定の呼び出しの数と費用（Issue #359）。**答えた adapter（jev・llm・fake）ごと**に呼び出しの数を
@@ -74,14 +75,45 @@ export interface BundleNatureDiscrepancy {
 }
 
 /**
+ * 固定の前に外した、**構造で確かめる要件の構造の検査でない試験**の数（Issue #392）。形の検査を通した
+ * **生成の回ごと**に外した件数を合計し、**操作ごと**の内訳も持つ。**0 件のときは欄を省く**（要約の任意の欄）。
+ */
+export interface BundleDroppedNonstructuralTests {
+  /** 外した件数の合計（回ごとに数えたものの合計） */
+  readonly count: number;
+  /** 外した試験の操作ごとの件数 */
+  readonly by_operation: Readonly<Record<string, number>>;
+}
+
+/**
  * 納品物の要約（appspec-schema の wire に、記録の欄と**判定の呼び出しの数・費用**、②' の種類の食い違いの
- * 記録を足したもの。Issue #359・#373）。wire は知らない欄を足しても受け付ける
- * （`acceptsHeadlessSummaryWire`）ので、どちらも additive に足す。
+ * 記録、固定の前に外した試験の数を足したもの。Issue #359・#373・#392）。wire は知らない欄を足しても
+ * 受け付ける（`acceptsHeadlessSummaryWire`）ので、どれも additive に足す。
  */
 export interface BundleSummary extends Summary {
   readonly judge: BundleJudgeUsage;
   /** ②' で種類が食い違った要件の記録（食い違いが無ければ空の並び。Issue #373） */
   readonly nature_discrepancies: readonly BundleNatureDiscrepancy[];
+  /**
+   * 固定の前に外した、構造で確かめる要件の構造の検査でない試験の数（**0 件のときは省く**。Issue #392）。
+   * **②' が最後に失敗しても・後の段で早く止まっても**残る（成功の戻り値だけに頼らない）。
+   */
+  readonly dropped_nonstructural_tests?: BundleDroppedNonstructuralTests;
+}
+
+/**
+ * 外した試験の記録（回・試験 ID・要件 ID・操作。Issue #392）から、要約の欄（数と操作ごとの内訳）を組む。
+ * **0 件なら `undefined`** を返し、要約の欄を省く。
+ */
+export function toDroppedNonstructuralTests(
+  entries: readonly DroppedNonstructuralTest[],
+): BundleDroppedNonstructuralTests | undefined {
+  if (entries.length === 0) return undefined;
+  const byOperation: Record<string, number> = {};
+  for (const entry of entries) {
+    byOperation[entry.operation] = (byOperation[entry.operation] ?? 0) + 1;
+  }
+  return { count: entries.length, by_operation: byOperation };
 }
 
 /** ②' の食い違いの記録を、要約に載せる形（snake_case）に写す（Issue #373） */

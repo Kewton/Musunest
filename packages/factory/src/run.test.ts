@@ -1090,6 +1090,279 @@ describe("構造の要件を含む生成（02 §1.4・Issue #387）", () => {
   });
 });
 
+// ── 構造で確かめる要件には、構造の検査だけを固定する（02 §1.4・Issue #392）──────────
+
+/** ②' の答え（R-1 の構造の検査に、外される実行の試験を混ぜる。`xe` の期待はわざと違える） */
+const STRUCTURAL_CHECKS_SUITE_WITH_EXECUTION = {
+  classifications: STRUCTURAL_CHECKS_SUITE.classifications,
+  tests: [
+    STRUCTURAL_CHECKS_SUITE.tests[0]!, // sc（構造の検査）
+    {
+      id: "xe",
+      target: { requirementId: "R-1", kind: "computation", roleId: "record.total" },
+      kind: "normal",
+      operation: "compute",
+      clock: CREATE_CLOCK,
+      input: { amount: 21 },
+      inputContract: { rowId: "xe-row", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      // 外さなければ一致しない期待（外したことを、合格で示す）
+      expected: { kind: "ok", value: 999 },
+    },
+    {
+      id: "xa",
+      target: { requirementId: "R-1", kind: "operation", roleId: "record.add" },
+      kind: "normal",
+      operation: "action",
+      clock: CREATE_CLOCK,
+      input: {},
+      inputContract: { rowId: "xa-row", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: null },
+    },
+    ...STRUCTURAL_CHECKS_SUITE.tests.slice(1), // R-2 の n・a・b
+  ],
+};
+
+/** R-2 の境界の試験を、外されない集計の値の試験にして、期待を違える（Issue #392） */
+const STRUCTURAL_CHECKS_SUITE_WITH_AGGREGATE_MISMATCH = {
+  classifications: STRUCTURAL_CHECKS_SUITE_WITH_EXECUTION.classifications,
+  tests: STRUCTURAL_CHECKS_SUITE_WITH_EXECUTION.tests.map((test) =>
+    test.id === "b" ? { ...test, operation: "aggregate", expected: { kind: "ok", value: 999 } } : test,
+  ),
+};
+
+/** ②' の答え（R-2 の試験が欠けたまま。②' 自体が最後に失敗する。外す対象は残っている） */
+const STRUCTURAL_CHECKS_SUITE_INCOMPLETE = {
+  classifications: STRUCTURAL_CHECKS_SUITE.classifications,
+  tests: [
+    STRUCTURAL_CHECKS_SUITE.tests[0]!, // sc
+    STRUCTURAL_CHECKS_SUITE_WITH_EXECUTION.tests[1]!, // xe（外される）
+    STRUCTURAL_CHECKS_SUITE.tests[1]!, // R-2 の n だけ（異常・境界が無い）
+  ],
+};
+
+/** ④ を通らない宣言（`STRUCTURAL_CHECKS_DESIGN` に対する宣言・対応）を流す記録の後ろ 3 段 */
+const structuralRunTail = (): readonly RecordedCall[] => [
+  structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+  structured(CREATE_CORRESPONDENCE),
+];
+
+const structuralRun = (suite: unknown): readonly RecordedCall[] => [
+  structured(REQUIREMENT_LIST_OUTPUT),
+  structured(REVERSE_CHECK_OUTPUT),
+  structured(STRUCTURAL_CHECKS_DESIGN),
+  structured(suite),
+  ...structuralRunTail(),
+];
+
+const DROPPED_EXECUTION_SUMMARY = { count: 2, by_operation: { compute: 1, action: 1 } };
+
+describe("構造で確かめる要件には、構造の検査だけを固定する（02 §1.4・Issue #392）", () => {
+  it("実行の試験が混ざっていても、構造の検査が成り立てば合格になり、要約に外した件数が出る", async () => {
+    const { run } = runWith(structuralRun(STRUCTURAL_CHECKS_SUITE_WITH_EXECUTION));
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    // 外した件数（回ごとに数えた合計と、操作ごとの内訳）
+    expect(result.summary.dropped_nonstructural_tests).toEqual(DROPPED_EXECUTION_SUMMARY);
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const verification = verificationOf(result.bundle);
+    expect(verification.test_mismatches).toBe(0);
+    expect(verification.structural_checks).toEqual([
+      { test_id: "sc", requirement_id: "R-1", check: "action-kind", result: "pass", detail: expect.any(String) },
+    ]);
+  });
+
+  it("構造の検査が 1 本でも成り立たなければ、合格にならず、外した件数は残る", async () => {
+    const suite = {
+      classifications: STRUCTURAL_CHECKS_SUITE.classifications,
+      tests: STRUCTURAL_CHECKS_SUITE_WITH_EXECUTION.tests.map((test) =>
+        test.id === "sc" ? { ...test, assertion: { check: "action-kind", expected: "update" } } : test,
+      ),
+    };
+    const { run } = runWith(structuralRun(suite), { limits: { ...AGENT_LIMITS, repairRoundTrips: 0 } });
+    const result = await run;
+
+    expect(result.outcome.result).not.toBe("pass");
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const verification = verificationOf(result.bundle);
+    expect(verification.structural_checks[0]).toMatchObject({ test_id: "sc", result: "mismatch" });
+    expect(result.summary.dropped_nonstructural_tests).toEqual(DROPPED_EXECUTION_SUMMARY);
+  });
+
+  it("別の要件（fixed-test）の集計の値の試験が不一致なら、合格にならない（外さない）", async () => {
+    const { run } = runWith(structuralRun(STRUCTURAL_CHECKS_SUITE_WITH_AGGREGATE_MISMATCH), {
+      limits: { ...AGENT_LIMITS, repairRoundTrips: 0 },
+    });
+    const result = await run;
+
+    expect(result.outcome.result).not.toBe("pass");
+    // R-1 の実行の試験（2 本）だけを外し、fixed-test の R-2 の集計の試験は外さない
+    expect(result.summary.dropped_nonstructural_tests).toEqual(DROPPED_EXECUTION_SUMMARY);
+    if (result.bundle === null) throw new Error("納品物が無い");
+    expect(verificationOf(result.bundle).test_mismatches).toBeGreaterThanOrEqual(1);
+  });
+
+  it("外したあとに後の段で早く止まっても、要約に外した件数が残る", async () => {
+    const malformed = { declaration: 123 };
+    const { run } = runWith([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(STRUCTURAL_CHECKS_DESIGN),
+      structured(STRUCTURAL_CHECKS_SUITE_WITH_EXECUTION),
+      structured(malformed),
+      structured(malformed),
+    ]);
+    const result = await run;
+
+    expect(result.stopped?.stage).toBe("write");
+    expect(result.summary.dropped_nonstructural_tests).toEqual(DROPPED_EXECUTION_SUMMARY);
+  });
+
+  it("②' 自体が最後に失敗しても、要約に外した件数が残る（回ごとに数える）", async () => {
+    const { run } = runWith([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(STRUCTURAL_CHECKS_DESIGN),
+      structured(STRUCTURAL_CHECKS_SUITE_INCOMPLETE),
+      structured(STRUCTURAL_CHECKS_SUITE_INCOMPLETE),
+    ]);
+    const result = await run;
+
+    expect(result.stopped).toMatchObject({ stage: "test-suite", kind: "unmet" });
+    // やり直しの 2 回とも xe を外すので、回ごとに数えて 2 件
+    expect(result.summary.dropped_nonstructural_tests).toEqual({ count: 2, by_operation: { compute: 2 } });
+  });
+});
+
+// ── 残った view-shows の参照の不備・役割の対応の欠け（02 §1.3・Issue #392）──────────
+
+/** 画面（record.records）・項目（record.amount）・計算（record.total）を持つ役割 ID の表 */
+const VIEW_SHOWS_ROLES = [
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
+  { roleId: "record.records", kind: "screen", entity: "record", name: "records", shared: false, aliasOf: null },
+  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+];
+
+/** ② の設計（R-1 は view-shows で確かめる。実行の試験も混ざる） */
+const VIEW_SHOWS_DESIGN = {
+  roles: VIEW_SHOWS_ROLES,
+  designs: [
+    {
+      requirementId: "R-1",
+      nature: "existence-only",
+      verification: { kind: "structural", reason: "表示を構造で確かめる" },
+      checks: ["view-shows"],
+      vocabulary: [],
+      placement: [],
+      unwritable: [],
+    },
+    {
+      requirementId: "R-2",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      checks: [],
+      vocabulary: [],
+      placement: [],
+      unwritable: [],
+    },
+  ],
+};
+
+/** ②' の答え（R-1 の view-shows は、一覧が出さない項目 amount を期待する。実行の試験も混ざる） */
+const VIEW_SHOWS_SUITE = {
+  classifications: [
+    { requirementId: "R-1", nature: "existence-only" },
+    { requirementId: "R-2", nature: "ruled" },
+  ],
+  tests: [
+    {
+      id: "vs",
+      target: { requirementId: "R-1", kind: "screen", roleId: "record.records" },
+      kind: "normal",
+      operation: "structure",
+      clock: CREATE_CLOCK,
+      input: {},
+      inputContract: { rowId: "vs-row", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: true },
+      assertion: { check: "view-shows", role: "record.amount" },
+    },
+    {
+      id: "xr1",
+      target: { requirementId: "R-1", kind: "computation", roleId: "record.total" },
+      kind: "normal",
+      operation: "compute",
+      clock: CREATE_CLOCK,
+      input: { amount: 21 },
+      inputContract: { rowId: "xr1-row", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: 42 },
+    },
+    ...STRUCTURAL_CHECKS_SUITE.tests.slice(1, 4), // R-2 の n・a・b
+  ],
+};
+
+const VIEW_SHOWS_MAPPINGS = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.records", name: "records" },
+  { roleId: "record.amount", name: "amount" },
+  { roleId: "record.total", name: "total" },
+];
+
+const VIEW_SHOWS_CORRESPONDENCE = {
+  entries: [
+    {
+      requirementId: "R-1",
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "view", entity: null, name: "records" },
+      ],
+    },
+    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "total" }] },
+  ],
+};
+
+const viewShowsRun = (mappings: readonly unknown[]): readonly RecordedCall[] => [
+  structured(REQUIREMENT_LIST_OUTPUT),
+  structured(REVERSE_CHECK_OUTPUT),
+  structured(VIEW_SHOWS_DESIGN),
+  structured(VIEW_SHOWS_SUITE),
+  structured({ declaration: CREATE_DECLARATION, mappings }),
+  structured(VIEW_SHOWS_CORRESPONDENCE),
+];
+
+describe("残った view-shows の参照の不備・役割の対応の欠け（02 §1.3・Issue #392）", () => {
+  it("一覧が出さない項目を期待する view-shows は不一致になり、合格にならない", async () => {
+    const { run } = runWith(viewShowsRun(VIEW_SHOWS_MAPPINGS), {
+      limits: { ...AGENT_LIMITS, repairRoundTrips: 0, correspondenceRedos: 0, correspondenceChecks: 0 },
+    });
+    const result = await run;
+
+    expect(result.outcome.result).not.toBe("pass");
+    if (result.bundle === null) throw new Error("納品物が無い");
+    expect(verificationOf(result.bundle).structural_checks[0]).toMatchObject({ test_id: "vs", result: "mismatch" });
+    // 外したのは R-1 の実行の試験 1 本だけ
+    expect(result.summary.dropped_nonstructural_tests).toEqual({ count: 1, by_operation: { compute: 1 } });
+  });
+
+  it("表示を期待する役割の対応が欠けていれば未解決になり、合格にならない", async () => {
+    const withoutAmount = VIEW_SHOWS_MAPPINGS.filter((mapping) => mapping.roleId !== "record.amount");
+    const { run } = runWith(viewShowsRun(withoutAmount), {
+      limits: { ...AGENT_LIMITS, repairRoundTrips: 0, correspondenceRedos: 0, correspondenceChecks: 0 },
+    });
+    const result = await run;
+
+    expect(result.outcome.result).not.toBe("pass");
+    if (result.bundle === null) throw new Error("納品物が無い");
+    expect(verificationOf(result.bundle).structural_checks[0]).toMatchObject({ test_id: "vs", result: "unresolved" });
+    expect(result.summary.dropped_nonstructural_tests).toEqual({ count: 1, by_operation: { compute: 1 } });
+  });
+});
+
 // ── 項目 × 画面の試験と、`show` に出ていない項目の落ち（02 §1.3・§1.3.1・Issue #324）──
 
 /**
@@ -1700,7 +1973,10 @@ describe("試験の段の種類の食い違いを判定に選ばせる（Issue #
   it("予算の予約が断られると、判定を呼ばずに ruled に倒れる", async () => {
     // 判定の予約は、問いの数（＝食い違った要件の数）で大きくなる。要件を多くして、試験の段の
     // 呼び出しは通るが、判定の予約だけが残高を超えるようにする（設計はすべて existence-only、
-    // ②' はすべて ruled と分類する＝食い違い）。
+    // ②' はすべて ruled と分類する＝食い違い）。**残高は、段の要求の大きさに合わせてある**——
+    // ②' のデータが要件ごとの確かめ方の種類（verification.kind）も運ぶようになった分（Issue #392）、
+    // 段の予約が少し大きくなったので、値を上げてある（この窓の外では、段の予約か判定の予約の
+    // どちらかが通ってしまい、この試験の前提が崩れる）。
     const count = 300;
     const quotes = Array.from({ length: count }, (_, index) => `項目${index + 1}。`);
     const source = quotes.join("");
@@ -1755,7 +2031,7 @@ describe("試験の段の種類の食い違いを判定に選ばせる（Issue #
         // 試験の段のあとの段（③）は、予算が尽きているか、この応答で形が合わずに止まる
         structured({}),
       ],
-      { source, judge, budgetUsd: 0.106, effort: "low" },
+      { source, judge, budgetUsd: 0.115, effort: "low" },
     );
     const result = await run;
 
