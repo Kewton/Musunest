@@ -25,7 +25,7 @@ import {
   type TestTarget,
 } from "../pipeline.js";
 import { bindTests } from "./bind.js";
-import { resolveReferenceEntity, runTests } from "./run-tests.js";
+import { holdsWriteAnonymous, resolveReferenceEntity, runTests } from "./run-tests.js";
 
 const CLOCK = "2026-09-16T12:00:00+09:00";
 
@@ -1377,6 +1377,116 @@ describe("構造の検査の記録とほかの試験への影響（02 §1.3・Is
     // 構造の検査は合格しているのに、ほかの試験の未解決（入力の型）は残る
     expect(result.structural.map((entry) => entry.result)).toEqual(["pass"]);
     expect(result.unresolved.map((entry) => entry.testId)).toEqual(["u-field"]);
+  });
+});
+
+// ── 12. 構造の検査：write-anonymous（02 §1.3・Issue #393）────────────────
+
+/** `write` の権限を外した定義（read だけ） */
+const READ_ONLY_APP = await normalized(
+  DECLARATION_SOURCE.replace("  - name: write\n    subject: minIdentity\n", ""),
+);
+/** `read` の権限を外した定義（write と匿名の本人確認だけ） */
+const WRITE_NO_READ_APP = await normalized(
+  DECLARATION_SOURCE.replace("  - name: read\n    subject: minIdentity\n", ""),
+);
+/** 対象の操作（add）を消して、別の操作（close）だけを残した定義 */
+const WITHOUT_ADD_APP = await normalized(
+  DECLARATION_SOURCE.replace("  - name: add\n    entity: record\n    kind: create\n", ""),
+);
+
+/** write-anonymous の構造の検査 1 件（対象は操作 record.add） */
+const writeAnonymousTest = (id: string, requirementId: string, roleId: string): Record<string, unknown> =>
+  structureTest(id, requirementId, "operation", roleId, { check: "write-anonymous" });
+
+describe("構造の検査：write-anonymous（02 §1.3・Issue #393）", () => {
+  it("操作が在り、write があり、anonymous なら成り立つ", () => {
+    const result = runStructureTests([writeAnonymousTest("wa-ok", "R-13", "record.add")]);
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved).toEqual([]);
+  });
+
+  it("権限に write が無い宣言は不一致になる（action-kind・action-unconditioned が成り立っても）", () => {
+    const result = runStructureTests(
+      [
+        structureTest("ak", "R-13", "operation", "record.add", { check: "action-kind", expected: "create" }),
+        structureTest("au", "R-13", "operation", "record.add", { check: "action-unconditioned" }),
+        writeAnonymousTest("wa", "R-13", "record.add"),
+      ],
+      READ_ONLY_APP,
+    );
+    // action-kind・action-unconditioned は成り立ち、write-anonymous だけが不一致になる
+    expect(result.mismatches.map((mismatch) => mismatch.testId)).toEqual(["wa"]);
+    expect(result.unresolved).toEqual([]);
+  });
+
+  it("read だけの宣言は不一致。read が無くても write と anonymous があれば成り立つ", () => {
+    expect(structureMismatchIds([writeAnonymousTest("wa", "R-13", "record.add")], READ_ONLY_APP)).toEqual(["wa"]);
+    expect(structureMismatchIds([writeAnonymousTest("wa", "R-13", "record.add")], WRITE_NO_READ_APP)).toEqual([]);
+  });
+
+  it("対象の操作を消して別の操作だけを残した宣言では成り立たない（未解決）", () => {
+    const result = runStructureTests([writeAnonymousTest("wa", "R-13", "record.add")], WITHOUT_ADD_APP);
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved.map((entry) => entry.testId)).toEqual(["wa"]);
+  });
+
+  it("役割の対応が欠けていれば成り立たない（未解決）", () => {
+    const withoutAdd = structureMappings.filter((mapping) => mapping.roleId !== "record.add");
+    const result = runTests({
+      app: APP,
+      suite: suiteOf([writeAnonymousTest("wa", "R-13", "record.add")]),
+      correspondence: structureCorrespondence,
+      mappings: withoutAdd,
+    });
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved.map((entry) => entry.testId)).toEqual(["wa"]);
+  });
+
+  it("別の entity の場所に結び付いた例では成り立たない", () => {
+    const otherEntity: CorrespondenceResult = {
+      entries: [entry("R-13", [{ kind: "action", entity: "person", name: "add" }])],
+      misses: [],
+    };
+    const result = runTests({
+      app: APP,
+      suite: suiteOf([writeAnonymousTest("wa", "R-13", "record.add")]),
+      correspondence: otherEntity,
+      mappings: [{ roleId: "record.add", name: "add" }],
+    });
+    // 結び付いた場所は person の add だが、宣言の add は record に在る（別の entity として未解決）
+    expect(result.unresolved.map((entry) => entry.testId)).toEqual(["wa"]);
+  });
+
+  it("判定の関数に不正な mode・subject を与えると成り立たない（防御）", () => {
+    const withSpec = (permissions: readonly unknown[], mode: string): NormalizedAppSpec =>
+      ({ spec: { permissions, minIdentity: { mode } } }) as unknown as NormalizedAppSpec;
+    expect(holdsWriteAnonymous(withSpec([{ name: "write", subject: "minIdentity" }], "anonymous"))).toBe(true);
+    expect(holdsWriteAnonymous(withSpec([{ name: "write", subject: "other" }], "anonymous"))).toBe(false);
+    expect(holdsWriteAnonymous(withSpec([{ name: "write", subject: "minIdentity" }], "login"))).toBe(false);
+    expect(holdsWriteAnonymous(withSpec([{ name: "read", subject: "minIdentity" }], "anonymous"))).toBe(false);
+  });
+
+  it("不正な mode・subject の宣言は、静的チェックが止める", async () => {
+    expect((await normalizeSpec(DECLARATION_SOURCE.replace("mode: anonymous", "mode: login"))).ok).toBe(false);
+    const badSubject = DECLARATION_SOURCE.replace(
+      "  - name: write\n    subject: minIdentity",
+      "  - name: write\n    subject: other",
+    );
+    expect((await normalizeSpec(badSubject)).ok).toBe(false);
+  });
+
+  it("write-anonymous の結果も、1 件ごとに記録される", () => {
+    const result = runStructureTests([writeAnonymousTest("wa-ok", "R-13", "record.add")]);
+    expect(result.structural).toEqual([
+      {
+        testId: "wa-ok",
+        requirementId: "R-13",
+        check: "write-anonymous",
+        result: "pass",
+        detail: expect.any(String),
+      },
+    ]);
   });
 });
 

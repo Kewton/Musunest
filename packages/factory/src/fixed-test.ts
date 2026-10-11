@@ -54,13 +54,14 @@ export type TestTargetKind = (typeof TEST_TARGET_KINDS)[number];
 export const TEST_OPERATIONS = ["compute", "validate", "action", "aggregate", "screen", "structure"] as const;
 export type TestOperation = (typeof TEST_OPERATIONS)[number];
 
-/** 構造の検査の中身（5 つから 1 つ選ぶ。§1.3・Issue #386） */
+/** 構造の検査の中身（6 つから 1 つ選ぶ。§1.3・Issue #386・#393） */
 export const STRUCTURAL_ASSERTIONS = [
   "field-type",
   "action-kind",
   "action-unconditioned",
   "view-shows",
   "aggregate-no-period",
+  "write-anonymous",
 ] as const;
 export type StructuralAssertionKind = (typeof STRUCTURAL_ASSERTIONS)[number];
 
@@ -71,7 +72,7 @@ export const STRUCTURAL_FIELD_KINDS: readonly FieldKind[] = ["string", "number",
 export const STRUCTURAL_ACTION_KINDS: readonly ActionKind[] = [...ACTION_KINDS];
 
 /**
- * 構造の検査の中身（1 件。§1.3・Issue #386）。対象は要件 ID と役割 ID、検査の中身は 5 つの選択肢、
+ * 構造の検査の中身（1 件。§1.3・Issue #386・#393）。対象は要件 ID と役割 ID、検査の中身は 6 つの選択肢、
  * 期待は「成り立つ」（`ok`・値 `true`）である。種類ごとに埋める欄が決まる。
  *
  *   - `field-type` … `expected` に `FieldKind`。参照（`ref`）は `refEntity` に参照先 entity の役割 ID。
@@ -80,6 +81,7 @@ export const STRUCTURAL_ACTION_KINDS: readonly ActionKind[] = [...ACTION_KINDS];
  *   - `action-unconditioned` … 条件（`when`）を持たない（期待の値は無い）
  *   - `view-shows` … `role` に、表示を期待する項目か計算の役割 ID
  *   - `aggregate-no-period` … 集計の絞り込みに期間の条件を持たない（期待の値は無い）
+ *   - `write-anonymous` … 誰でも書き込める（本人確認と書き込みの権限で制限されていない。期待の値は無い）
  */
 export interface StructuralAssertion {
   readonly check: StructuralAssertionKind;
@@ -91,13 +93,14 @@ export interface StructuralAssertion {
   readonly role?: string;
 }
 
-/** 検査の中身ごとに、対象が持つべき役割の種類（§1.3・Issue #386） */
+/** 検査の中身ごとに、対象が持つべき役割の種類（§1.3・Issue #386・#393） */
 export const STRUCTURAL_TARGET_KINDS: Readonly<Record<StructuralAssertionKind, TestTargetKind>> = {
   "field-type": "field",
   "action-kind": "operation",
   "action-unconditioned": "operation",
   "view-shows": "screen",
   "aggregate-no-period": "computation",
+  "write-anonymous": "operation",
 };
 
 /** 検査の中身が知っている選択肢か */
@@ -484,7 +487,7 @@ function checkAssertion(
     return { check, role };
   }
 
-  // action-unconditioned・aggregate-no-period（期待の値を持たない）
+  // action-unconditioned・aggregate-no-period・write-anonymous（期待の値を持たない）
   if (expected !== undefined || refEntity !== undefined || role !== undefined) {
     problems.push({ field, message: `${check} では expected・refEntity・role を書かない` });
     return undefined;

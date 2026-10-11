@@ -11,9 +11,9 @@
 //   項目 × screen            … 構造の確認（項目が実在し、その entity の一覧か表から辿れる。Issue #324）
 //   entity × 在ることだけ     … 構造の確認（create の操作がある・一覧か表に出る）
 //   操作 structure           … **構造の検査**（field-type・action-kind・action-unconditioned・view-shows・
-//                               aggregate-no-period）。結び付けた場所と、提出された対応で写した参照の役割で
-//                               判定する（Issue #387）。成り立てば合格、成り立たなければ不一致、役割が
-//                               結び付かない・宣言に対象が無いときは未解決。1 件ごとに結果を記録する
+//                               aggregate-no-period・write-anonymous）。結び付けた場所と、提出された対応で
+//                               写した参照の役割で判定する（Issue #387・#393）。成り立てば合格、成り立たなければ
+//                               不一致、役割が結び付かない・宣言に対象が無いときは未解決。1 件ごとに結果を記録する
 //
 // **操作の実行（`set` を当てたあとの状態）と、項目の既定値は未対応**にして、未解決として数える
 // （§1.3・U-G）。未解決は合格にしない（⑦ が部分案へ倒す）。
@@ -656,6 +656,34 @@ function judgeActionUnconditioned(location: DeclarationLocation, input: RunTests
   return { kind: "match" };
 }
 
+/**
+ * 構造の検査 `write-anonymous` が成り立つか（§1.3・Issue #393）。アプリ全体の権限（`permissions`）に
+ * `name: write`・`subject: minIdentity` の行があり、本人確認（`minIdentity.mode`）が `anonymous` であること
+ * を見る。**本人確認と書き込みの権限で制限されていないことだけ**を確かめる——読むこと（`read`）は別の要件で
+ * 確かめ、入力の検査・参照・保存の成功は確かめない。宣言に無い値（不正な `mode`・`subject`）は成り立たない
+ * 側に倒す（宣言は静的チェックが止めるが、ここでも防御する）。
+ */
+export function holdsWriteAnonymous(app: NormalizedAppSpec): boolean {
+  const hasWrite = app.spec.permissions.some(
+    (permission) => permission.name === "write" && permission.subject === "minIdentity",
+  );
+  return hasWrite && app.spec.minIdentity.mode === "anonymous";
+}
+
+/**
+ * 構造の検査 `write-anonymous`：対象の操作が宣言に実在し、誰でも書き込めるか（§1.3・Issue #393）。
+ * 操作が無ければ未解決、権限（`write`）または本人確認（`anonymous`）で制限されていれば不一致。
+ */
+function judgeWriteAnonymous(location: DeclarationLocation, input: RunTestsInput): Verdict {
+  const action = findActionAt(input.app, location);
+  if (action === undefined) return { kind: "unresolved", detail: `宣言に操作 ${location.name} が無い` };
+  if (holdsWriteAnonymous(input.app)) return { kind: "match" };
+  return {
+    kind: "mismatch",
+    detail: `操作 ${action.name} は、書き込みの権限（write）か本人確認（anonymous）で制限されている`,
+  };
+}
+
 /** 名前が、宣言のどこかの項目か計算として実在するか（構造の検査の参照の実在確認。Issue #387） */
 function declarationHasFieldOrComputed(app: NormalizedAppSpec, name: string): boolean {
   if (app.spec.entities.some((entity) => Object.hasOwn(entity.fields, name))) return true;
@@ -749,6 +777,8 @@ function judgeStructure(test: FixedTest, location: DeclarationLocation, input: R
       return judgeViewShows(location, assertion, input);
     case "aggregate-no-period":
       return judgeAggregateNoPeriod(location, input);
+    case "write-anonymous":
+      return judgeWriteAnonymous(location, input);
   }
 }
 

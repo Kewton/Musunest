@@ -640,6 +640,34 @@ describe("構造の検査を持つ試験の段の応答が、封筒を通る（0
     );
     expect(error.kind).toBe("malformed");
   });
+
+  it("write-anonymous を持つ応答も、封筒を通る（Issue #393）", async () => {
+    const writeAnonymousSuite = {
+      ...STRUCTURAL_TEST_SUITE_OUTPUT,
+      tests: [
+        {
+          ...STRUCTURAL_TEST_SUITE_OUTPUT.tests[0],
+          assertion: { check: "write-anonymous", expected: null, refEntity: null, role: null },
+        },
+      ],
+    };
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(
+        completed(outputText(JSON.stringify(enveloped(TEST_SUITE_SCHEMA_NAME, writeAnonymousSuite))), USAGE_WIRE),
+      ),
+    );
+    const response = await clientWith(fetch).callStructured<Record<string, unknown>>(
+      stageRequest(TEST_SUITE_SCHEMA_NAME, TEST_SUITE_SCHEMA),
+    );
+    const tests = response.output["tests"] as readonly Record<string, unknown>[];
+    expect(tests).toHaveLength(1);
+    expect(tests[0]?.["assertion"]).toEqual({
+      check: "write-anonymous",
+      expected: null,
+      refEntity: null,
+      role: null,
+    });
+  });
 });
 
 // ── 4. usage の分類（02 §1.5）──────────────────────────────────────────

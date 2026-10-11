@@ -213,6 +213,28 @@ describe("全段で同じ「封筒」の schema（02 §2・#353）", () => {
     expect(checks.type).toBe("array");
   });
 
+  it("試験の段と設計の段の枝に、write-anonymous が入る（Issue #393）", () => {
+    const testSuiteEntry = STAGE_ENVELOPE_ENTRIES.find((entry) => entry.stage === "test-suite");
+    const designEntry = STAGE_ENVELOPE_ENTRIES.find((entry) => entry.stage === "requirement-design");
+    expect(testSuiteEntry).toBeDefined();
+    expect(designEntry).toBeDefined();
+    if (testSuiteEntry === undefined || designEntry === undefined) return;
+
+    const testBranch = buildStageBranch(testSuiteEntry);
+    const testItems = (testBranch.properties as Record<string, unknown>)["tests"] as Record<string, unknown>;
+    const testItem = testItems.items as Record<string, unknown>;
+    const assertion = (testItem.properties as Record<string, unknown>)["assertion"] as Record<string, unknown>;
+    const check = (assertion.properties as Record<string, unknown>)["check"] as { readonly enum: readonly string[] };
+    expect(check.enum).toContain("write-anonymous");
+
+    const designBranch = buildStageBranch(designEntry);
+    const designItems = (designBranch.properties as Record<string, unknown>)["designs"] as Record<string, unknown>;
+    const designItem = designItems.items as Record<string, unknown>;
+    const branchChecks = (designItem.properties as Record<string, unknown>)["checks"] as Record<string, unknown>;
+    const branchCheckItems = branchChecks.items as { readonly enum: readonly string[] };
+    expect(branchCheckItems.enum).toContain("write-anonymous");
+  });
+
   it("段の名前から、その枝（段の schema）を引ける", () => {
     for (const entry of STAGE_ENVELOPE_ENTRIES) {
       expect(envelopeStageFor(entry.stage)?.schema, entry.stage).toBe(entry.schema);

@@ -181,7 +181,7 @@ function structuralTest(
 }
 
 describe("構造の検査の型（Issue #386）", () => {
-  it("5 つの検査の中身を、それぞれ受け付ける", () => {
+  it("6 つの検査の中身を、それぞれ受け付ける", () => {
     const cases: readonly Record<string, unknown>[] = [
       structuralTest("s1", "field", "record.amount", { check: "field-type", expected: "number" }),
       structuralTest("s2", "field", "record.owner", { check: "field-type", expected: "ref", refEntity: "person" }),
@@ -189,6 +189,7 @@ describe("構造の検査の型（Issue #386）", () => {
       structuralTest("s4", "operation", "record.add", { check: "action-unconditioned" }),
       structuralTest("s5", "screen", "record.records", { check: "view-shows", role: "record.amount" }),
       structuralTest("s6", "computation", "record.total", { check: "aggregate-no-period" }),
+      structuralTest("s7", "operation", "record.add", { check: "write-anonymous" }),
     ];
     for (const value of cases) {
       const checked = checkFixedTest(value);
@@ -254,6 +255,22 @@ describe("構造の検査の型（Issue #386）", () => {
       problemFields(structuralTest("s", "computation", "record.total", { check: "view-shows", role: "record.amount" })),
     ).toContain("assertion.check");
     expect(problemFields(structuralTest("s", "entity", "record", { check: "aggregate-no-period" }))).toContain(
+      "assertion.check",
+    );
+  });
+
+  it("write-anonymous は受け付け、expected・refEntity・role を持つものと対象が操作でないものを断る", () => {
+    expect(checkFixedTest(structuralTest("s", "operation", "record.add", { check: "write-anonymous" })).ok).toBe(true);
+    expect(
+      problemFields(structuralTest("s", "operation", "record.add", { check: "write-anonymous", expected: "create" })),
+    ).toContain("assertion");
+    expect(
+      problemFields(structuralTest("s", "operation", "record.add", { check: "write-anonymous", refEntity: "person" })),
+    ).toContain("assertion");
+    expect(
+      problemFields(structuralTest("s", "operation", "record.add", { check: "write-anonymous", role: "record.amount" })),
+    ).toContain("assertion");
+    expect(problemFields(structuralTest("s", "field", "record.amount", { check: "write-anonymous" }))).toContain(
       "assertion.check",
     );
   });

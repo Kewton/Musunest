@@ -568,6 +568,43 @@ describe("構造の要件の checks（Issue #386）", () => {
   it("設計の規則に、構造で確かめるときの checks の決まりがある", () => {
     expect(DESIGN_RULES.some((rule) => rule.includes("checks"))).toBe(true);
   });
+
+  it("checks に write-anonymous を受け付ける（Issue #393）", () => {
+    const value = {
+      ...STRUCTURAL_DESIGN,
+      designs: [
+        STRUCTURAL_DESIGN.designs[0],
+        {
+          ...STRUCTURAL_DESIGN.designs[1],
+          checks: ["action-kind", "action-unconditioned", "write-anonymous"],
+        },
+      ],
+    };
+    const checked = checkDesignOutput(value);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.value.designs[1]?.checks).toEqual(["action-kind", "action-unconditioned", "write-anonymous"]);
+  });
+
+  it("設計の規則に、誰でも行える操作を構造で確かめる 3 文がある（Issue #393）", () => {
+    expect(
+      DESIGN_RULES.some(
+        (rule) =>
+          rule.includes("誰でも行える") &&
+          rule.includes("action-kind") &&
+          rule.includes("action-unconditioned") &&
+          rule.includes("write-anonymous"),
+      ),
+    ).toBe(true);
+    expect(DESIGN_RULES.some((rule) => rule.includes("書き換えの結果") && rule.includes("structural にしない"))).toBe(
+      true,
+    );
+    expect(
+      DESIGN_RULES.some(
+        (rule) => rule.includes("権限") && rule.includes("本人確認") && rule.includes("write-anonymous"),
+      ),
+    ).toBe(true);
+  });
 });
 
 // ── 設計の段が要件の範囲を広げない（§1・②・Issue #391）────────────────

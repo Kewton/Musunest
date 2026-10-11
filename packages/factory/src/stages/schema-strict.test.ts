@@ -190,4 +190,11 @@ describe("すべての段の schema と道具の引数の schema が、strict �
     expect(strictSchemaProblems(mappings.items)).toEqual([]);
     expect(mappings.items.required).toEqual(expect.arrayContaining(["roleId", "name"]));
   });
+
+  it("試験の段と設計の段の schema に、write-anonymous が入る（Issue #393）", () => {
+    expect(TEST_SUITE_SCHEMA.properties.tests.items.properties.assertion.properties.check.enum).toContain(
+      "write-anonymous",
+    );
+    expect(DESIGN_SCHEMA.properties.designs.items.properties.checks.items.enum).toContain("write-anonymous");
+  });
 });
