@@ -42,6 +42,8 @@ import {
   checkStringArray,
   constraintIdsIn,
   isRecord,
+  normalizeConstraintId,
+  normalizeConstraintIds,
   serializeJson,
   type Problem,
   type PromptDocument,
@@ -56,7 +58,7 @@ export const DESIGN_SCHEMA_NAME = "requirement-design";
 export const DESIGN_RULES: readonly string[] = [
   "要件ごとに、使う語彙と、宣言のどの欄に置くか（placement）を決める。",
   "書けない部分は、その部分（part）だけを unwritable に挙げる。1 件は「書けない部分（part）・根拠にした制約 ID（constraintIds）・理由（reason）」の組にする。書ける部分は残す（部分的に書けない要件でも、書ける部分は書く）。",
-  "制約 ID は、渡した文書の本文にあるものだけを挙げる——契約の規則の「R-…」の ID と、語彙の意味の「### 」見出しの文である。文書に無い ID を作らない。",
+  "制約 ID は、渡した文書の本文にあるものだけを挙げる——契約の規則の ID（例 `R-TYPE-01`）か、語彙の意味の見出しの文（例 `number`。`#` の記号は付けない）である。文書に無い ID を作らない。",
   "語彙の穴ではないもの（曖昧さ・決めたこと・不確かさ・要件の言い直し）は unwritable に書かず、notes に書く。notes には書けない部分を書かない。",
   "文書（契約・語彙の意味・語彙の台帳）に無い語彙・キー・関数は作らない。書けないものを、近い別の意味に書き換えない。",
   "要件ごとに 1 つの設計を返す。要件 ID は一覧のまま写す。",
@@ -135,7 +137,7 @@ export const DESIGN_SCHEMA = {
                 constraintIds: {
                   type: "array",
                   items: { type: "string" },
-                  description: "根拠にした制約 ID（契約の規則の R-… と、語彙の意味の ### 見出し）",
+                  description: "根拠にした制約 ID（契約の規則の ID（例 R-TYPE-01）か、語彙の意味の見出しの文（例 number））",
                 },
                 reason: { type: "string", description: "書けない理由" },
               },
@@ -574,18 +576,39 @@ export function checkDesignConstraints(design: DesignOutput, documents: readonly
       if (claim.constraintIds.length === 0) {
         problems.push({
           field,
-          message: "書けない部分には、根拠にした制約 ID が要る（文書の R-… または ### 見出し）",
+          message: "書けない部分には、根拠にした制約 ID が要る（文書の規則の ID か見出しの文）",
         });
         return;
       }
-      for (const id of claim.constraintIds) {
-        if (!known.has(id)) {
-          problems.push({ field, message: `文書に無い制約 ID: ${id}` });
+      for (const raw of claim.constraintIds) {
+        // **生の申告の ID を 1 回だけ**正規化して、文書から取り出した集合（正規化済み）と突き合わせる
+        // （Issue #398）。`### ### action` は 1 回だけ外すので `### action` のまま残り、断られる。
+        const id = normalizeConstraintId(raw);
+        if (id === "" || !known.has(id)) {
+          problems.push({ field, message: `文書に無い制約 ID: ${id === "" ? raw : id}` });
         }
       }
     });
   }
   return problems;
+}
+
+/**
+ * 書けない申告の制約 ID を**正規化した写し**を作る（保存する側。Issue #398）。段は、根拠の照合
+ * （`checkDesignConstraints`）を通ったあとにこれを返す——下流（仕分け・Plan の根拠）へ渡る ID は
+ * 正規化後になる。確定済みの Plan を読み込むときは書き換えない（読み込みの側では正規化しない）。
+ */
+function normalizeDesignClaims(design: DesignOutput): DesignOutput {
+  return {
+    ...design,
+    designs: design.designs.map((entry) => ({
+      ...entry,
+      unwritableClaims: entry.unwritableClaims.map((claim) => ({
+        ...claim,
+        constraintIds: normalizeConstraintIds(claim.constraintIds),
+      })),
+    })),
+  };
 }
 
 /** ② を 1 回呼ぶ。データは要件の一覧だけである */
@@ -610,5 +633,6 @@ export async function runDesign(input: DesignInput): Promise<StageOutcome<Design
   if (problems.length > 0) {
     return { ok: false, failure: { kind: "unmet", attempts: 1, problems } };
   }
-  return answer;
+  // 根拠の照合を通ったあと、保存する側の ID を正規化する（Issue #398）
+  return { ok: true, value: normalizeDesignClaims(answer.value) };
 }
