@@ -3,7 +3,14 @@
 // 外側（段の順番・記録・打ち切り・合否）はコードが決め、内側の「書く・直す」段だけを LLM に任せる。
 // ここは ① 要件にする 〜 ⑧ 納品物にする の**入力と出力の型**と、前半（①'・②'）から持ち越した未達を
 // ⑦ の入力へ写す**純粋な関数**を置く。段の中身（プロンプト・道具）は stages/ にある。
-import type { ConfirmedPlan, NormalizedAppSpec, PlanPartDisposition } from "@musunest/appspec-schema";
+import type {
+  ConfirmedPlan,
+  NormalizedAppSpec,
+  PlanInput,
+  PlanOpenIssue,
+  PlanPartDisposition,
+  PlanRequirement,
+} from "@musunest/appspec-schema";
 import type { Diagnostic } from "@musunest/spec-engine";
 import type { RequirementNature, StructuralAssertionKind, TestSuite, TestTargetKind } from "./fixed-test.js";
 import type { Outcome, StageResults } from "./outcome.js";
@@ -68,18 +75,64 @@ export interface RequirementList {
 }
 
 /**
+ * 要件の一覧で、**確定した要件の文**と**参考の文脈**を区別する固定のラベル（§5・Issue #391）。
+ *
+ * 確定した仕様の `added`（答えから増えた）の要件の文に、その答えが何についての答えかを示す文脈を添える。
+ * 確定した要件の文（正本）と、参考（問い・未解決の事項の文）を、このラベルで区別する。
+ */
+export const CONFIRMED_REQUIREMENT_LABEL = "確定した要件の文" as const;
+export const REFERENCE_CONTEXT_LABEL = "参考の文脈" as const;
+
+/**
+ * 確定した仕様の要件の文に、答えの問いの文脈を添える（§5・Issue #391）。
+ *
+ * `change.kind` が `added` で `change.answer_id` を持つ要件だけ、`text` を「確定した要件の文」＋
+ * 「参考の文脈」に組む。参考は、その答え（`inputs` の answer）の `question_id` が指す問いの文と、その
+ * 問いの `open_issue_id` が指す未解決の事項の文である。**要件の文は確定した `requirement.text` を
+ * そのまま使う**——答えの生の値（選択肢の文・自由入力）で置き換えない（自由入力を選択肢に正規化した
+ * 場合や、確認の画面で文を直した場合に、未確定の文へ戻さないため）。要件 ID・`quote`・`parts` は変えない。
+ *
+ * 答え・問い・未解決の事項のどれかが引けないときは、元の文のままにする（ID の文字列から推測しない）。
+ * `changed`・`removed` の要件と、原文から来た要件（`change` が無い）も、元の文のままである。
+ * **同じ入力からは同じ文になる純粋な関数**である。
+ */
+export function requirementTextWithQuestionContext(
+  requirement: PlanRequirement,
+  inputs: readonly PlanInput[],
+  openIssues: readonly PlanOpenIssue[],
+): string {
+  const change = requirement.change;
+  if (change === undefined || change.kind !== "added") return requirement.text;
+  const answerId = change.answer_id;
+  if (typeof answerId !== "string" || answerId === "") return requirement.text;
+  const answer = inputs.find((input) => input.id === answerId);
+  if (answer === undefined || answer.kind !== "answer") return requirement.text;
+  const question = inputs.find((input) => input.id === answer.question_id);
+  if (question === undefined || question.kind !== "question") return requirement.text;
+  const openIssue = openIssues.find((issue) => issue.id === question.open_issue_id);
+  if (openIssue === undefined) return requirement.text;
+  return [
+    `${CONFIRMED_REQUIREMENT_LABEL}: ${requirement.text}`,
+    `${REFERENCE_CONTEXT_LABEL}: 問い ${question.id}: ${question.text} 未解決の事項 ${openIssue.id}: ${openIssue.text}`,
+  ].join("\n");
+}
+
+/**
  * 確定した仕様（Plan の契約 `ConfirmedPlan`）から、Build の全段が使う要件の一覧を作る（§5・Issue #334）。
  *
  * **確定した仕様があるときは ① と ①' を行わず、その要件をそのまま使う**（§5・Issue #334）。要件の文は
  * 仕様の `text`、引用は `origin.quote`（出どころ）を写す。原文の位置は確定した仕様には無いので
  * `{ 0, 0 }` とし、①' を行わないので位置の一致は確かめない。部分（`parts`）は、設計の `unwritable` を
  * `accepted_unwritable`（部分 ID）と突き合わせるために写す。
+ *
+ * **答えから増えた要件（`change.kind` が `added`）の文には、その答えの問いの文脈を添える**（Issue #391。
+ * `requirementTextWithQuestionContext`）。Plan の本体と SHA は変えず、この一覧だけを組む。
  */
 export function requirementsFromPlan(plan: ConfirmedPlan): RequirementList {
   return {
     requirements: plan.requirements.map((requirement) => ({
       id: requirement.id,
-      text: requirement.text,
+      text: requirementTextWithQuestionContext(requirement, plan.inputs, plan.open_issues),
       quote: requirement.origin.quote,
       position: { start: 0, end: 0 },
       parts: requirement.parts.map((part) => ({

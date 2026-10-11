@@ -569,3 +569,21 @@ describe("構造の要件の checks（Issue #386）", () => {
     expect(DESIGN_RULES.some((rule) => rule.includes("checks"))).toBe(true);
   });
 });
+
+// ── 設計の段が要件の範囲を広げない（§1・②・Issue #391）────────────────
+
+describe("設計の段が要件の範囲を広げない（Issue #391）", () => {
+  it("出どころが答えの要件を、問いが対象にした範囲にだけ当てる文がある", () => {
+    expect(
+      DESIGN_RULES.some(
+        (rule) => rule.includes("範囲にだけ当てる") && rule.includes("役割 ID の表に足さない"),
+      ),
+    ).toBe(true);
+  });
+
+  it("参考の文脈を新しい要件にせず、確定した要件の文と有効な parts を優先する文がある", () => {
+    expect(
+      DESIGN_RULES.some((rule) => rule.includes("参考の文脈") && rule.includes("確定した要件の文")),
+    ).toBe(true);
+  });
+});

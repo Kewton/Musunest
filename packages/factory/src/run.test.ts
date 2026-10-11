@@ -12,7 +12,7 @@ import { acceptsHeadlessSummaryWire, planDigest } from "@musunest/appspec-schema
 import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import { costOfUsageUsd } from "./budget.js";
-import { UNWRITABLE_FILE, VERIFICATION_FILE, type BundlePartialReasons, type BundleUnwritable, type BundleVerification } from "./bundle.js";
+import { ARBITRATION_FILE, UNWRITABLE_FILE, VERIFICATION_FILE, type BundlePartialReasons, type BundleUnwritable, type BundleVerification } from "./bundle.js";
 import { AGENT_LIMITS } from "./limits.js";
 import { createFakeJudge } from "./judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "./judge.js";
@@ -30,9 +30,12 @@ import { NATURE_JUDGE_THRESHOLD_VERSION, TEST_SUITE_SCHEMA_NAME, natureQuestionN
 import { WRITE_SCHEMA_NAME } from "./stages/write.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
 import {
+  ADDED_OPEN_ISSUE_TEXT,
+  ADDED_QUESTION_TEXT,
   BAD_MAPPINGS,
   CONFIRMED_PLAN,
   CONFIRMED_PLAN_ACCEPTED,
+  CONFIRMED_PLAN_ADDED,
   CORRESPONDENCE_OUTPUT,
   CORRESPONDENCE_OUTPUT_WITH_FIELD,
   DECLARATION_SOURCE,
@@ -1767,5 +1770,60 @@ describe("試験の段の種類の食い違いを判定に選ばせる（Issue #
         (entry) => entry.resolution === "fallback" && entry.resolved === "ruled",
       ),
     ).toBe(true);
+  });
+});
+
+// ── 答えから増えた要件の文に問いの文脈を添える（§5・Issue #391）────────────────
+
+describe("答えから増えた要件の文に問いの文脈を添える（§5・Issue #391）", () => {
+  it("答えから増えた要件を含む確定した仕様で、② のデータの要件の文に問いの文脈が入る", async () => {
+    const { recording, run } = runWith(recordedRunFromPlan(), { plan: CONFIRMED_PLAN_ADDED });
+    const result = await run;
+
+    // 答えから増えた R-2 があるが、仕様どおりなので合格のまま流れる
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+
+    // ② のデータ（要件の一覧）の R-2 の文に、問いと未解決の事項の文が参考として入る
+    const designRequest = recording.structured.find((request) => request.schemaName === DESIGN_SCHEMA_NAME);
+    expect(designRequest).toBeDefined();
+    expect(designRequest?.input).toContain(ADDED_QUESTION_TEXT);
+    expect(designRequest?.input).toContain(ADDED_OPEN_ISSUE_TEXT);
+    // 原文から来た要件の文は、そのまま
+    expect(designRequest?.input).toContain("記録できる");
+  });
+
+  it("Plan への差し戻しの判断があれば、合格（full）にならず、差し戻しが結果に残る", async () => {
+    const { recording, run } = runWith(
+      [
+        structured(DESIGN_OUTPUT),
+        structured(TEST_SUITE_OUTPUT),
+        structured({ declaration: DECLARATION_SOURCE_MISMATCH }),
+        structured(CORRESPONDENCE_OUTPUT),
+        toolDone({
+          declaration: DECLARATION_SOURCE_MISMATCH,
+          disputes: [{ testId: "t1", quote: "件数を合計する" }],
+        }),
+        structured({
+          decisions: [{ testId: "t1", verdict: "return-to-plan", reason: "確定した仕様と食い違う", quote: "" }],
+        }),
+      ],
+      { plan: CONFIRMED_PLAN_ADDED },
+    );
+    const result = await run;
+
+    // ⑥' まで回り、差し戻しの判断が返る
+    expect(result.record.stages.map((stage) => stage.stage)).toContain("arbitration");
+    expect(recording.structured.some((request) => request.schemaName === ARBITRATION_SCHEMA_NAME)).toBe(true);
+    // 差し戻しの判断があれば合格（full）にはならない
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.summary.verdict).not.toBe("full");
+    // 差し戻しが結果に残る
+    expect(result.returnToPlan).toBe(true);
+    expect(result.bundle).not.toBeNull();
+    if (result.bundle === null) return;
+    const arbitrationText = result.bundle.artifacts.find((artifact) => artifact.path === ARBITRATION_FILE)?.text ?? "{}";
+    const arbitration = JSON.parse(arbitrationText) as { readonly returnToPlan?: readonly string[] };
+    expect(arbitration.returnToPlan).toEqual(["t1"]);
   });
 });
