@@ -8,7 +8,7 @@
 //   5. 自由入力が長すぎれば断る
 import { describe, expect, it } from "vitest";
 import { createFakeJudge } from "../judge-fake.js";
-import type { JudgeAnswer } from "../judge.js";
+import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest } from "../judge.js";
 import { AGENT_LIMITS } from "../limits.js";
 import { contradictionQuestion, freeTextQuestionName, runAnswers, validateAnswer, type PlanAnswerDraft } from "./answers.js";
 import type { PlanQuestion } from "./questions.js";
@@ -20,6 +20,12 @@ const choice = (value: string, confidence?: number): JudgeAnswer => ({
   probability: undefined,
   confidence,
 });
+
+/** 問いの `instructions` を写像として読む（object でないときは undefined） */
+function instructionsOf(question: JudgeQuestion | undefined): Record<string, unknown> | undefined {
+  const instructions = question?.instructions;
+  return typeof instructions === "object" ? (instructions as Record<string, unknown>) : undefined;
+}
 
 const QUESTION: PlanQuestion = {
   id: "Q-1",
@@ -189,6 +195,38 @@ describe("自由入力の振り分け（04 §6 の 5・7・05 §3・E6）", () =
     expect(result.rejected).toHaveLength(1);
     expect(result.rejected[0]?.problems.map((problem) => problem.code)).toContain("unknown-question");
     expect(result.accepted).toEqual([]);
+  });
+  it("問いの instructions に、対象の答えの文と、対応する問いの文を載せる（Issue #376）", async () => {
+    const requests: JudgeRequest[] = [];
+    const judge: Judge = {
+      async judge(request: JudgeRequest) {
+        requests.push(request);
+        const answers: Record<string, JudgeAnswer> = {};
+        for (const name of Object.keys(request.questions)) answers[name] = choice("new-requirement", 0.9);
+        return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+      },
+    };
+    await runAnswers({
+      questions: [QUESTION, { ...QUESTION, id: "Q-2", text: "記録する範囲は" }],
+      answers: [
+        { id: "A-1", questionId: "Q-1", revision: 2, freeText: "期限も記録する" },
+        { id: "A-2", questionId: "Q-2", revision: 2, freeText: "今月だけ" },
+      ],
+      revision: 2,
+      source: "タスクを記録する。",
+      judge,
+    });
+
+    const questions = requests[0]?.questions ?? {};
+    const q1 = questions[freeTextQuestionName("A-1")];
+    const q2 = questions[freeTextQuestionName("A-2")];
+    // instructions は object（対象の答えの文と対応する問いの文を問いの中に載せる）
+    expect(q1?.instructions).toBeTypeOf("object");
+    expect(q1?.instructions).toMatchObject({ answer: "期限も記録する", question: "どちらにしますか" });
+    // 同じ呼び出しの中の 2 つの問いで、対象の答えの文が別々になる
+    expect(q2?.instructions).toMatchObject({ answer: "今月だけ", question: "記録する範囲は" });
+    // 問いの文は英語
+    expect(String(instructionsOf(q1)?.ask)).toMatch(/^[\x20-\x7E]+$/);
   });
 });
 

@@ -20,6 +20,11 @@ export interface CatalogFacet {
   readonly id: string;
   /** 利用者の言葉で書いた観点（宣言の用語を使わない。04 §3） */
   readonly question: string;
+  /**
+   * 判定の口に渡す、観点の**英語の説明**（Issue #376）。利用者に見せる `question`（日本語）はそのまま
+   * 残し、問いの `instructions` には、対象の要件の文とともにこちらを載せる。
+   */
+  readonly point: string;
   /** 指定されていないまま残ると**重大**か（答えで作るものが変わるか。04 §3 P3） */
   readonly critical: boolean;
 }
@@ -29,14 +34,54 @@ export interface CatalogFacet {
  * 用語を使わない）。`critical` は、指定されないまま残ると**作るものが変わる**観点に立てる。
  */
 export const CATALOG_FACETS: readonly CatalogFacet[] = [
-  { id: "aggregation", question: "何を数え、どう出すか（数える・合計する・平均するなど）", critical: true },
-  { id: "period", question: "対象にする期間（いつからいつまでか）", critical: false },
-  { id: "current-period", question: "今の期間（今月など）を含むかどうか", critical: false },
-  { id: "counted-state", question: "どの状態のものを数えるか", critical: true },
-  { id: "integer", question: "値が整数か、小数を許すか", critical: false },
-  { id: "filter-combination", question: "複数の絞り込みを組み合わせたときにどう絞るか", critical: false },
-  { id: "include-zero", question: "0 件のときも表示するかどうか", critical: false },
-  { id: "editable-by", question: "誰が直せるか", critical: false },
+  {
+    id: "aggregation",
+    question: "何を数え、どう出すか（数える・合計する・平均するなど）",
+    point: "what to count and how to present it (count, sum, average, and so on)",
+    critical: true,
+  },
+  {
+    id: "period",
+    question: "対象にする期間（いつからいつまでか）",
+    point: "the period the requirement covers (from when to when)",
+    critical: false,
+  },
+  {
+    id: "current-period",
+    question: "今の期間（今月など）を含むかどうか",
+    point: "whether it includes the current period such as this month",
+    critical: false,
+  },
+  {
+    id: "counted-state",
+    question: "どの状態のものを数えるか",
+    point: "which states are counted",
+    critical: true,
+  },
+  {
+    id: "integer",
+    question: "値が整数か、小数を許すか",
+    point: "whether the value is an integer or may be fractional",
+    critical: false,
+  },
+  {
+    id: "filter-combination",
+    question: "複数の絞り込みを組み合わせたときにどう絞るか",
+    point: "how several filters combine when applied together",
+    critical: false,
+  },
+  {
+    id: "include-zero",
+    question: "0 件のときも表示するかどうか",
+    point: "whether a row is shown when the count is zero",
+    critical: false,
+  },
+  {
+    id: "editable-by",
+    question: "誰が直せるか",
+    point: "who is allowed to edit it",
+    critical: false,
+  },
 ];
 
 /** 目録に照らす要件（ID と文だけでよい。要件の一覧から作る） */
@@ -101,6 +146,11 @@ export interface CatalogInput {
   readonly requirements: readonly CatalogRequirement[];
   /** 判定の口（Jev・LLM・偽物。試験は偽物を差し込む） */
   readonly judge: Judge;
+  /**
+   * 依頼文（原文。Issue #376）。「決まっているか」は、依頼で指定されているかを見るので、原文を state に
+   * 入れて聞く（要件の文だけでは、依頼で決まっているかを判定できないため）。
+   */
+  readonly source: string;
   /** 「決まっている」と見なす確率の閾値（これ**未満**は未指定） */
   readonly threshold: number;
 }
@@ -128,14 +178,25 @@ export async function runCatalog(input: CatalogInput): Promise<CatalogResult> {
   const targets: CatalogTarget[] = [];
   for (const requirement of input.requirements) {
     for (const facet of CATALOG_FACETS) {
+      // 問いの名前（`catalog:要件 ID:観点 ID`）だけで対象を区別しても、Jev は名前を読まない。だから
+      // **問いの `instructions` に対象の要件の文と観点の説明を載せ**、問いの文は英語にする（Issue #376）。
       questions[catalogAppliesQuestionName(requirement.id, facet.id)] = {
         kind: "noul",
-        instructions: `対象の要件について、次の点が当てはまる（その要件に関係する）かを yes／no で答える。点: ${facet.question}`,
+        instructions: {
+          requirement: requirement.text,
+          point: facet.point,
+          question: "Does this point apply to the target requirement (is it relevant to it)? Answer yes or no.",
+        },
         criteria: { yes: "当てはまる（関係する）", no: "当てはまらない（関係しない）" },
       };
       questions[catalogQuestionName(requirement.id, facet.id)] = {
         kind: "noul",
-        instructions: `対象の要件について、次の点が決まっている（依頼か答えで指定されている）かを yes／no で答える。点: ${facet.question}`,
+        instructions: {
+          requirement: requirement.text,
+          point: facet.point,
+          question:
+            "Is this point already decided for the target requirement (specified by the request or by an answer)? Answer yes or no.",
+        },
         criteria: { yes: "決まっている（指定されている）", no: "決まっていない（指定されていない）" },
       };
       targets.push({ requirementId: requirement.id, requirementText: requirement.text, facet });
@@ -143,7 +204,10 @@ export async function runCatalog(input: CatalogInput): Promise<CatalogResult> {
   }
   if (targets.length === 0) return { unspecified: [], judgments: [] };
 
+  // state には、問いをまたいで共通に要るものだけを残す（対象の文は問いの欄に載せた。Issue #376）。
+  // 「決まっているか」は依頼で指定されているかを見るので、原文を state に入れて渡す。
   const state = {
+    source: input.source,
     requirements: input.requirements.map((requirement) => ({ id: requirement.id, text: requirement.text })),
   };
   const response = await input.judge.judge({ state, questions });

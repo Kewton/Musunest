@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import { checkTestSuite, type RequirementNature, type TestSuite } from "../fixed-test.js";
 import type { DesignResult } from "../pipeline.js";
 import { createFakeJudge } from "../judge-fake.js";
-import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "../judge.js";
+import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest, JudgeResponse } from "../judge.js";
 import {
   NATURE_JUDGE_THRESHOLD,
   NATURE_JUDGE_THRESHOLD_VERSION,
@@ -34,6 +34,12 @@ import {
 } from "./__tests__/prompt.js";
 
 const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
+
+/** 問いの `instructions` を写像として読む（object でないときは undefined） */
+function instructionsOf(question: JudgeQuestion | undefined): Record<string, unknown> | undefined {
+  const instructions = question?.instructions;
+  return typeof instructions === "object" ? (instructions as Record<string, unknown>) : undefined;
+}
 
 /** 手で書いた試験の並びを、型の付いた組にする（形は fixed-test.ts の正本を通す） */
 function suiteOf(tests: readonly unknown[]): TestSuite {
@@ -766,9 +772,11 @@ describe("種類の食い違いを判定の口に選ばせる（§1・②'・Iss
     };
     const recording = createRecordingClient([structured(output)]);
     const questionsSeen: string[][] = [];
+    const requests: JudgeRequest[] = [];
     const judge: Judge = {
       async judge(request: JudgeRequest): Promise<JudgeResponse> {
         questionsSeen.push(Object.keys(request.questions));
+        requests.push(request);
         const answers: Record<string, JudgeAnswer> = {};
         for (const name of Object.keys(request.questions)) answers[name] = natureAnswer("existence-only", 0.8);
         return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
@@ -785,6 +793,12 @@ describe("種類の食い違いを判定の口に選ばせる（§1・②'・Iss
     if (!outcome.ok) return;
     // 2 つの食い違いを、1 回の呼び出しの 2 問としてまとめて聞く
     expect(questionsSeen).toEqual([[natureQuestionName("R-1"), natureQuestionName("R-2")]]);
+    // それぞれの問いに、対象の要件の文が別々に載る（Issue #376）
+    const first = requests[0];
+    const q1 = first?.questions[natureQuestionName("R-1")];
+    const q2 = first?.questions[natureQuestionName("R-2")];
+    expect(q1?.instructions).toMatchObject({ requirement: "タスクを記録できる" });
+    expect(q2?.instructions).toMatchObject({ requirement: "件数を合計できる" });
     expect(outcome.value.discrepancies.map((entry) => entry.requirementId)).toEqual(["R-1", "R-2"]);
   });
 
@@ -866,7 +880,7 @@ describe("種類の食い違いを判定の口に選ばせる（§1・②'・Iss
     expect(outcome.value.discrepancies[0]).toMatchObject({ resolved: "ruled", resolution: "fallback" });
   });
 
-  it("判定の state には、要件の文と原文の引用だけを入れる（設計の出力・試験は入れない）", async () => {
+  it("判定の問いには、対象の要件の文と原文の引用を載せ、設計の出力・試験は入れない（Issue #376）", async () => {
     const design: DesignResult = {
       roles: PLANNED_ROLES,
       designs: [
@@ -882,12 +896,12 @@ describe("種類の食い違いを判定の口に選ばせる（§1・②'・Iss
       tests: [{ ...R1_EXISTENCE[0]!, id: "TEST_SENTINEL" }, ...R2_EXISTENCE],
     };
     const recording = createRecordingClient([structured(output)]);
-    let state: unknown;
+    let request: JudgeRequest | undefined;
     const judge: Judge = {
-      async judge(request: JudgeRequest): Promise<JudgeResponse> {
-        state = request.state;
+      async judge(req: JudgeRequest): Promise<JudgeResponse> {
+        request = req;
         const answers: Record<string, JudgeAnswer> = {};
-        for (const name of Object.keys(request.questions)) answers[name] = natureAnswer("existence-only", 0.8);
+        for (const name of Object.keys(req.questions)) answers[name] = natureAnswer("existence-only", 0.8);
         return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
       },
     };
@@ -899,11 +913,15 @@ describe("種類の食い違いを判定の口に選ばせる（§1・②'・Iss
       judge,
     });
     expect(outcome.ok).toBe(true);
-    const serialized = JSON.stringify(state);
-    // 要件の文と原文の引用は入る
-    expect(serialized).toContain("タスクを記録できる");
-    expect(serialized).toContain("タスクを記録する");
+
+    const question = request?.questions[natureQuestionName("R-1")];
+    // instructions は object（対象の要件の文と原文の引用を問いの中に載せる）
+    expect(question?.instructions).toBeTypeOf("object");
+    expect(question?.instructions).toMatchObject({ requirement: "タスクを記録できる", quote: "タスクを記録する" });
+    // 問いの文は英語
+    expect(String(instructionsOf(question)?.ask)).toMatch(/^[\x20-\x7E]+$/);
     // 設計の出力（役割・語彙）も、試験も入らない
+    const serialized = JSON.stringify(request);
     expect(serialized).not.toContain("DESIGN_SENTINEL");
     expect(serialized).not.toContain("TEST_SENTINEL");
     expect(serialized).not.toContain("record.total");

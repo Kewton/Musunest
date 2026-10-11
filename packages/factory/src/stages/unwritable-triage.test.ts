@@ -8,7 +8,7 @@
 //   4. 確信度が閾値より低い（と「書いていない」）→ 印つきで残す（捨てない）
 import { describe, expect, it } from "vitest";
 import { createFakeJudge } from "../judge-fake.js";
-import type { Judge, JudgeAnswer, JudgeRequest } from "../judge.js";
+import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest } from "../judge.js";
 import { UNWRITABLE_CONFIDENCE_THRESHOLD } from "../limits.js";
 import type { DesignOutput, RequirementDesignEntry, UnwritableClaim } from "./design.js";
 import {
@@ -27,6 +27,12 @@ const choice = (value: string, confidence?: number): JudgeAnswer => ({
   probability: undefined,
   confidence,
 });
+
+/** 問いの `instructions` を写像として読む（object でないときは undefined） */
+function instructionsOf(question: JudgeQuestion | undefined): Record<string, unknown> | undefined {
+  const instructions = question?.instructions;
+  return typeof instructions === "object" ? (instructions as Record<string, unknown>) : undefined;
+}
 
 /** 申告 1 件を作る */
 const claim = (part: string, constraintIds: readonly string[], reason: string): UnwritableClaim => ({
@@ -210,7 +216,7 @@ describe("申告の仕分けと裏付け（05 §3・Issue #332）", () => {
 });
 
 describe("判定への渡し方（05 §2.2・§4・Issue #332）", () => {
-  it("問いの名前は要件 ID と申告の番号で決まり、裏付けの state に制約 ID の節の抜粋を渡す", async () => {
+  it("問いの名前は要件 ID と申告の番号で決まり、問いの欄に申告と抜粋を載せる（Issue #376）", async () => {
     const { run, requests } = triage(design(entry("R-1", [CLAIM])), {
       [triageQuestionName("R-1", 0)]: choice("vocabulary-hole", 0.9),
       [supportQuestionName("R-1", 0)]: choice("supports", 0.9),
@@ -220,10 +226,35 @@ describe("判定への渡し方（05 §2.2・§4・Issue #332）", () => {
     // 1 回目は仕分け、2 回目は裏付け
     expect(Object.keys(requests[0]?.questions ?? {})).toEqual(["triage:R-1:0"]);
     expect(Object.keys(requests[1]?.questions ?? {})).toEqual(["support:R-1:0"]);
-    // 裏付けの state に、根拠にした制約 ID の節の抜粋（語彙の意味の見出し）が入る
-    const supportState = JSON.stringify(requests[1]?.state);
-    expect(supportState).toContain("アプリの名前・説明");
-    expect(supportState).toContain("アプリ自体の名前や説明を置く欄は無い。");
+    // 仕分けの問いに、対象の申告（部分と理由）を載せる
+    const triageQuestion = requests[0]?.questions[triageQuestionName("R-1", 0)];
+    expect(triageQuestion?.instructions).toBeTypeOf("object");
+    expect(triageQuestion?.instructions).toMatchObject({ claim: "アプリ自体の名前・説明", reason: "宣言に欄が無い" });
+    // 裏付けの問いに、根拠にした制約 ID の節の抜粋（語彙の意味の見出し）を載せる
+    const supportQuestion = requests[1]?.questions[supportQuestionName("R-1", 0)];
+    expect(supportQuestion?.instructions).toBeTypeOf("object");
+    const instructions = instructionsOf(supportQuestion);
+    expect(String(instructions?.excerpt)).toContain("アプリの名前・説明");
+    expect(String(instructions?.excerpt)).toContain("アプリ自体の名前や説明を置く欄は無い。");
+    // 問いの文は英語（仕分けと裏付けの両方）
+    expect(String(instructionsOf(triageQuestion)?.ask)).toMatch(/^[\x20-\x7E]+$/);
+    expect(String(instructions?.ask)).toMatch(/^[\x20-\x7E]+$/);
+  });
+
+  it("同じ呼び出しの中の 2 つの申告の問いで、対象の申告の文が別々になる（Issue #376）", async () => {
+    const claimA = claim("部分 A", ["記録"], "理由 A");
+    const claimB = claim("部分 B", ["合計"], "理由 B");
+    const { run, requests } = triage(design(entry("R-1", [claimA, claimB])), {
+      [triageQuestionName("R-1", 0)]: choice("ambiguity", 0.9),
+      [triageQuestionName("R-1", 1)]: choice("ambiguity", 0.9),
+    });
+    await run;
+
+    const questions = requests[0]?.questions ?? {};
+    const q1 = questions[triageQuestionName("R-1", 0)];
+    const q2 = questions[triageQuestionName("R-1", 1)];
+    expect(q1?.instructions).toMatchObject({ claim: "部分 A" });
+    expect(q2?.instructions).toMatchObject({ claim: "部分 B" });
   });
 
   it("判定の記録に、問いの ID・答え・確信度・答えたモデルの版を残す", async () => {
