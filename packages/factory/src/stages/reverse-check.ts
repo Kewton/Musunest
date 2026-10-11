@@ -19,6 +19,7 @@ import {
   type PromptData,
   type PromptDocument,
   type ShapeCheck,
+  type StageFailure,
   type StageOutcome,
 } from "./prompt.js";
 import { runRequirements } from "./requirements.js";
@@ -242,24 +243,27 @@ function removeFraming(range: SourceRange, framing: readonly SourceRange[]): rea
 /** ①' の応答の形を確かめる */
 export function checkReverseCheckOutput(output: unknown): ShapeCheck<ReverseCheckAnswer> {
   if (!isRecord(output)) {
-    return { ok: false, problems: [{ field: "", message: "応答は写像（object）であること" }] };
+    return { ok: false, problems: [{ field: "", code: "shape", message: "応答は写像（object）であること" }] };
   }
   const raw = output["uncovered"];
   if (!Array.isArray(raw)) {
-    return { ok: false, problems: [{ field: "uncovered", message: "覆われていない部分の並び（array）であること" }] };
+    return {
+      ok: false,
+      problems: [{ field: "uncovered", code: "shape", message: "覆われていない部分の並び（array）であること" }],
+    };
   }
   const problems: Problem[] = [];
   const uncovered: SourceRange[] = [];
   raw.forEach((item, index) => {
     const field = `uncovered[${index}]`;
     if (!isRecord(item)) {
-      problems.push({ field, message: "部分は写像（object）であること" });
+      problems.push({ field, code: "shape", message: "部分は写像（object）であること" });
       return;
     }
     const start = item["start"];
     const end = item["end"];
     if (!Number.isInteger(start) || !Number.isInteger(end) || (start as number) < 0 || (start as number) > (end as number)) {
-      problems.push({ field, message: "部分は 0 以上で start <= end の整数であること" });
+      problems.push({ field, code: "shape", message: "部分は 0 以上で start <= end の整数であること" });
       return;
     }
     uncovered.push({ start: start as number, end: end as number });
@@ -378,19 +382,53 @@ export interface ReverseCheckLoopResult {
  * やり直しても残った落ちは未達として返す（合否はここでは決めない）。
  */
 export async function runReverseCheckLoop(input: ReverseCheckLoopInput): Promise<StageOutcome<ReverseCheckLoopResult>> {
+  const outcome = await runReverseCheckLoopWithOperation(input);
+  if (!outcome.ok) return { ok: false, failure: outcome.failure };
+  return { ok: true, value: outcome.value };
+}
+
+/** P1/P2 のどの呼び出しで止まったか（有限の値。Issue #397） */
+export const REVERSE_CHECK_OPERATIONS = [
+  /** 要件にする（① の 1 回目） */
+  "requirements",
+  /** 逆照合（①' の 1 回目） */
+  "reverse-check",
+  /** 要件にするのやり直し（① の 2 回目） */
+  "requirements-redo",
+  /** 逆照合のやり直し（①' の 2 回目） */
+  "reverse-check-redo",
+] as const;
+export type ReverseCheckOperation = (typeof REVERSE_CHECK_OPERATIONS)[number];
+
+/**
+ * ① → ①' の停止（**どの呼び出しで止まったか**を付ける。Issue #397）。P1/P2 は 1 つの段の記録に
+ * まとまっているので、失敗に `operation`（有限の値）を付けて、記録と診断で区別できるようにする。
+ * 呼ぶ回数・やり直す条件・止まる結果は `runReverseCheckLoop` と同じである。
+ */
+export type ReverseCheckLoopOutcome =
+  | { readonly ok: true; readonly value: ReverseCheckLoopResult }
+  | { readonly ok: false; readonly failure: StageFailure; readonly operation: ReverseCheckOperation };
+
+/**
+ * ① → ①' を回し、落ちがあれば ① を**1 回だけ**やり直す（§1）。やり直しても残った落ちは未達として
+ * 返す（合否はここでは決めない）。**止まったときは、どの呼び出しで止まったかを返す**（Issue #397）。
+ */
+export async function runReverseCheckLoopWithOperation(
+  input: ReverseCheckLoopInput,
+): Promise<ReverseCheckLoopOutcome> {
   const first = await runRequirements({
     source: input.source,
     documents: input.documents,
     gateway: input.gateway,
   });
-  if (!first.ok) return first;
+  if (!first.ok) return { ok: false, failure: first.failure, operation: "requirements" };
   const initial = await runReverseCheck({
     source: input.source,
     list: first.value,
     documents: input.documents,
     gateway: input.gateway,
   });
-  if (!initial.ok) return initial;
+  if (!initial.ok) return { ok: false, failure: initial.failure, operation: "reverse-check" };
   if (initial.value.misses.length === 0) {
     return { ok: true, value: { list: first.value, report: initial.value, redone: false, unmet: [] } };
   }
@@ -400,14 +438,14 @@ export async function runReverseCheckLoop(input: ReverseCheckLoopInput): Promise
     gateway: input.gateway,
     redo: { previous: first.value, misses: initial.value.misses },
   });
-  if (!redone.ok) return redone;
+  if (!redone.ok) return { ok: false, failure: redone.failure, operation: "requirements-redo" };
   const second = await runReverseCheck({
     source: input.source,
     list: redone.value,
     documents: input.documents,
     gateway: input.gateway,
   });
-  if (!second.ok) return second;
+  if (!second.ok) return { ok: false, failure: second.failure, operation: "reverse-check-redo" };
   return {
     ok: true,
     value: { list: redone.value, report: second.value, redone: true, unmet: second.value.misses },

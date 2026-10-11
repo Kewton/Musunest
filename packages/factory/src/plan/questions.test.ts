@@ -215,6 +215,9 @@ describe("P4 を 1 回呼ぶ（04 §3 P4）", () => {
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.failure.kind).toBe("unmet");
+    if (outcome.failure.kind !== "unmet") return;
+    // 断る理由の分類（コード）が残る（Issue #397）
+    expect(outcome.failure.problems.map((problem) => problem.code)).toContain("choices-count");
   });
 
   it("P4 に渡すデータに、残りの問数が入り、答えの出た事項が入らない", async () => {

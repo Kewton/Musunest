@@ -191,7 +191,7 @@ function checkUnwritable(value: unknown, field: string, problems: Problem[]): Pl
 /** P3 の洗い出しの応答の形を確かめる */
 export function checkSurfaceOutput(output: unknown): ShapeCheck<PlanSurface> {
   if (!isRecord(output)) {
-    return { ok: false, problems: [{ field: "", message: "応答は写像（object）であること" }] };
+    return { ok: false, problems: [{ field: "", code: "shape", message: "応答は写像（object）であること" }] };
   }
   const problems: Problem[] = [];
   const rawAmbiguities = output["ambiguities"];
@@ -214,7 +214,9 @@ export function checkSurfaceOutput(output: unknown): ShapeCheck<PlanSurface> {
       if (checked !== undefined) unwritable.push(checked);
     });
   }
-  if (problems.length > 0) return { ok: false, problems };
+  if (problems.length > 0) {
+    return { ok: false, problems: problems.map((problem) => ({ ...problem, code: problem.code ?? "shape" })) };
+  }
   return { ok: true, value: { ambiguities, unwritable } };
 }
 
@@ -233,12 +235,15 @@ export function checkSurfaceConstraints(
     if (item.constraintIds.length === 0) {
       problems.push({
         field,
+        code: "constraint-id-missing",
         message: "書けないことには、根拠にした制約 ID が要る（文書の R-… または ### 見出し）",
       });
       return;
     }
     for (const id of item.constraintIds) {
-      if (!known.has(id)) problems.push({ field, message: `文書に無い制約 ID: ${id}` });
+      if (!known.has(id)) {
+        problems.push({ field, code: "constraint-id-unknown", message: `文書に無い制約 ID: ${id}` });
+      }
     }
   });
   return problems;

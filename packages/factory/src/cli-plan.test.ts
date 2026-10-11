@@ -246,6 +246,19 @@ interface PlanCliRecordShape {
   }[];
   readonly spent_usd: number;
   readonly remaining_usd: number;
+  /** 段の失敗の診断（止まったときだけ。Issue #397） */
+  readonly failure?: {
+    readonly stage: string;
+    readonly kind: string;
+    readonly problems?: readonly { readonly field: string; readonly code: string }[];
+    readonly operation?: string;
+  } | null;
+  /** 確定できなかった理由（確定できないときだけ。Issue #397） */
+  readonly cannot_confirm?: readonly {
+    readonly source: string;
+    readonly code: string;
+    readonly path: string;
+  }[];
 }
 
 async function readPlanRecord(dir: string): Promise<PlanCliRecordShape> {
@@ -440,6 +453,9 @@ describe("答えのファイルの形で、足りない質問を推奨で埋め�
     // 答えた Q-1（c1）と、推奨で埋めた Q-2（c2）・Q-3（c1）
     const answers = record.rounds.flatMap((round) => round.answers);
     expect(answers.map((answer) => answer.choice_id)).toEqual(["c1", "c2", "c1"]);
+    // 確定したときは failure・cannot_confirm の欄が無い（Issue #397）
+    expect(record.failure).toBeUndefined();
+    expect(record.cannot_confirm).toBeUndefined();
 
     // 確定した仕様が生成の plan に渡り、予算が「全体（0.3）− Plan の使った額」になる
     expect(spy).toHaveBeenCalledTimes(1);
@@ -466,13 +482,20 @@ describe("確定できないときは Build を流さず、0 でない終了コ�
     const dir = `${directory}/cannot-confirm`;
     const answersPath = "bad-answers.json";
     const spy = vi.spyOn(runModule, "runGeneration");
+    const lines: string[] = [];
+    // 答えにも目印を入れる（往復の記録には残るが、診断と理由の行には出ない。Issue #397）
+    const answerMark = "MARK_ANSWER_FREE";
 
     const code = await runCli({
       argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
       env: { [API_KEY_ENV]: "sk-FAKE" },
       readFile: async (path) =>
         path === answersPath
-          ? JSON.stringify({ "Q-1": { choiceId: "nope" }, "Q-2": { choiceId: "nope" }, "Q-3": { choiceId: "nope" } })
+          ? JSON.stringify({
+              "Q-1": { choiceId: answerMark },
+              "Q-2": { choiceId: "nope" },
+              "Q-3": { choiceId: "nope" },
+            })
           : SOURCE_TEXT,
       writeFile: async (path, text) => {
         await fs.writeFile(path, text, "utf8");
@@ -484,7 +507,7 @@ describe("確定できないときは Build を流さず、0 でない終了コ�
       makeClient: () => recording.client,
       makeLlmJudge: () => judge,
       now: () => 0,
-      log: () => {},
+      log: (line) => lines.push(line),
     });
 
     expect(code).toBe(EXIT_RUN_FAILED);
@@ -493,6 +516,58 @@ describe("確定できないときは Build を流さず、0 でない終了コ�
     // 往復の記録は残る（確定していない）
     const record = await readPlanRecord(dir);
     expect(record.outcome).toBe("cannot-confirm");
+    // 確定できなかった理由が記録に残る（Issue #397）
+    expect(record.cannot_confirm).toEqual([{ source: "session", code: "round-trip-limit", path: "open_issues" }]);
+    expect(record.failure).toBeUndefined();
+    // 止まった理由の行に、分類（先頭の数件）が出る
+    expect(lines.some((line) => line.includes("round-trip-limit"))).toBe(true);
+    // 値が漏れない：答えの目印は、往復の記録には残るが、診断と理由の行には出ない
+    expect(JSON.stringify(record.rounds)).toContain(answerMark);
+    expect(JSON.stringify(record.cannot_confirm)).not.toContain(answerMark);
+    expect(lines.join("\n")).not.toContain(answerMark);
+  });
+
+  it("段の失敗で止まると、plan-record に failure が入り、理由の行に分類が出る（Issue #397）", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured({ questions: "並びでない" }),
+      structured({ questions: "並びでない" }),
+    ]);
+    const judge = createFakeJudge(catalogAnswers());
+    const dir = `${directory}/stopped`;
+    const answersPath = "empty-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const lines: string[] = [];
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: (line) => lines.push(line),
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.stage).toBe("questions");
+    expect(record.failure?.kind).toBe("malformed");
+    expect(record.failure?.problems).toEqual([{ field: "questions", code: "shape" }]);
+    expect(record.cannot_confirm).toBeUndefined();
+    // 止まった理由の行に、分類が出る（値の中身は出ない）
+    expect(lines.some((line) => line.includes("malformed") && line.includes("shape"))).toBe(true);
   });
 });
 
