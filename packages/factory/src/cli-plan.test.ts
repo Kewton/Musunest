@@ -21,7 +21,12 @@ import {
 } from "./cli-plan.js";
 import { createFakeJudge } from "./judge-fake.js";
 import type { JudgeAnswer } from "./judge.js";
-import { CATALOG_FACETS, catalogAppliesQuestionName, catalogQuestionName } from "./plan/catalog.js";
+import {
+  CATALOG_FACETS,
+  catalogAppliesQuestionName,
+  catalogGateQuestionName,
+  catalogQuestionName,
+} from "./plan/catalog.js";
 import { confirmQuestionName } from "./plan/confirm.js";
 import { freeTextQuestionName } from "./plan/answers.js";
 import {
@@ -66,10 +71,14 @@ afterEach(() => {
 
 const noul = (value: number): JudgeAnswer => ({ kind: "noul", noul: value });
 
-/** 目録の問い（要件 × 観点 × 2 問）すべてに「当てはまる・決まっている」を返す答え（未指定の観点を作らない） */
+/**
+ * 目録の問い（要件ごとの門 + 要件 × 観点 × 2 問）すべてに「当てはまる・決まっている」を返す答え
+ * （未指定の観点を作らない）。門にも答える（Issue #384）。
+ */
 function catalogAnswers(): Record<string, JudgeAnswer> {
   const answers: Record<string, JudgeAnswer> = {};
   for (const requirementId of ["R-1", "R-2"]) {
+    answers[catalogGateQuestionName(requirementId)] = noul(1);
     for (const facet of CATALOG_FACETS) {
       answers[catalogAppliesQuestionName(requirementId, facet.id)] = noul(1);
       answers[catalogQuestionName(requirementId, facet.id)] = noul(1);
