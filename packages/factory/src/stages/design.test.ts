@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { maxOutputTokensForEffort } from "../limits.js";
 import type { DesignResult } from "../pipeline.js";
 import {
+  DESIGN_RULES,
   DESIGN_SCHEMA_NAME,
   checkDesignConstraints,
   checkDesignOutput,
@@ -477,5 +478,94 @@ describe("「書けない」の根拠（制約 ID）と、曖昧さを分ける 
     if (!checked.ok) return;
     expect(checked.value.designs[0]?.notes).toEqual(["曖昧さのメモ"]);
     expect(checked.value.designs[0]?.unwritableClaims).toEqual([]);
+  });
+});
+
+// ── 構造の要件の checks（Issue #386）────────────────────────────
+
+/** 構造の要件（checks 付き）を持つ設計 */
+const STRUCTURAL_DESIGN = {
+  roles: PLANNED_ROLES,
+  designs: [
+    {
+      requirementId: "R-1",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      checks: [],
+      vocabulary: ["記録"],
+      placement: ["entities[].fields"],
+      unwritable: [],
+    },
+    {
+      requirementId: "R-2",
+      nature: "existence-only",
+      verification: { kind: "structural", reason: "構造で確かめる" },
+      checks: ["action-kind", "action-unconditioned"],
+      vocabulary: [],
+      placement: [],
+      unwritable: [],
+    },
+  ],
+};
+
+describe("構造の要件の checks（Issue #386）", () => {
+  it("構造の要件の checks を受け付け、中身を保つ", () => {
+    const checked = checkDesignOutput(STRUCTURAL_DESIGN);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.value.designs[1]?.checks).toEqual(["action-kind", "action-unconditioned"]);
+    expect(checked.value.designs[0]?.checks).toEqual([]);
+  });
+
+  it("選択肢に無い中身を断る", () => {
+    const bad = {
+      ...STRUCTURAL_DESIGN,
+      designs: [STRUCTURAL_DESIGN.designs[0], { ...STRUCTURAL_DESIGN.designs[1], checks: ["nope"] }],
+    };
+    const checked = checkDesignOutput(bad);
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.problems.map((problem) => problem.field)).toContain("designs[1].checks[0]");
+  });
+
+  it("重なった中身を断る", () => {
+    const bad = {
+      ...STRUCTURAL_DESIGN,
+      designs: [STRUCTURAL_DESIGN.designs[0], { ...STRUCTURAL_DESIGN.designs[1], checks: ["action-kind", "action-kind"] }],
+    };
+    const checked = checkDesignOutput(bad);
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.problems.some((problem) => problem.message.includes("重なっている"))).toBe(true);
+  });
+
+  it("構造で確かめるのに checks が空なら断る", () => {
+    const bad = {
+      ...STRUCTURAL_DESIGN,
+      designs: [STRUCTURAL_DESIGN.designs[0], { ...STRUCTURAL_DESIGN.designs[1], checks: [] }],
+    };
+    const checked = checkDesignOutput(bad);
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.problems.map((problem) => problem.field)).toContain("designs[1].checks");
+  });
+
+  it("checks の無い古い応答は受け付ける（後方互換）", () => {
+    const checked = checkDesignOutput(PLANNED_DESIGN);
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.value.designs[1]?.checks).toBeUndefined();
+  });
+
+  it("checks の欄が並びでなければ断る", () => {
+    const bad = {
+      ...STRUCTURAL_DESIGN,
+      designs: [STRUCTURAL_DESIGN.designs[0], { ...STRUCTURAL_DESIGN.designs[1], checks: "nope" }],
+    };
+    expect(checkDesignOutput(bad).ok).toBe(false);
+  });
+
+  it("設計の規則に、構造で確かめるときの checks の決まりがある", () => {
+    expect(DESIGN_RULES.some((rule) => rule.includes("checks"))).toBe(true);
   });
 });

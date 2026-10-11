@@ -881,6 +881,118 @@ describe("裁定で外した試験を除いた組でも、分類を保つ（02 �
   });
 });
 
+// ── 構造の要件を含む生成は、合格（full）にならない（02 §1.4・Issue #386）──────
+
+/** ② の設計（R-1 は構造で確かめる（checks 付き）、R-2 は固定した試験） */
+const STRUCTURAL_CHECKS_DESIGN = {
+  roles: [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
+    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+  ],
+  designs: [
+    {
+      requirementId: "R-1",
+      nature: "existence-only",
+      verification: { kind: "structural", reason: "登録を構造で確かめる" },
+      checks: ["action-kind"],
+      vocabulary: ["action"],
+      placement: ["actions"],
+      unwritable: [],
+    },
+    {
+      requirementId: "R-2",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      checks: [],
+      vocabulary: ["computation"],
+      placement: ["computed"],
+      unwritable: [],
+    },
+  ],
+};
+
+/** ②' の答え（R-1 は構造の検査 1 本、R-2 は計算の正常・異常・境界） */
+const STRUCTURAL_CHECKS_SUITE = {
+  classifications: [
+    { requirementId: "R-1", nature: "existence-only" },
+    { requirementId: "R-2", nature: "ruled" },
+  ],
+  tests: [
+    {
+      id: "sc",
+      target: { requirementId: "R-1", kind: "operation", roleId: "record.add" },
+      kind: "normal",
+      operation: "structure",
+      clock: CREATE_CLOCK,
+      input: {},
+      inputContract: { rowId: "sc-row", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: true },
+      assertion: { check: "action-kind", expected: "create" },
+    },
+    {
+      id: "n",
+      target: { requirementId: "R-2", kind: "computation", roleId: "record.total" },
+      kind: "normal",
+      operation: "compute",
+      clock: CREATE_CLOCK,
+      input: { amount: 21 },
+      inputContract: { rowId: "n-row", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: 42 },
+    },
+    {
+      id: "a",
+      target: { requirementId: "R-2", kind: "computation", roleId: "record.total" },
+      kind: "abnormal",
+      operation: "compute",
+      clock: CREATE_CLOCK,
+      input: { amount: 21 },
+      inputContract: { rowId: "a-row", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: 42 },
+    },
+    {
+      id: "b",
+      target: { requirementId: "R-2", kind: "computation", roleId: "record.total" },
+      kind: "boundary",
+      operation: "compute",
+      clock: CREATE_CLOCK,
+      input: { amount: 21 },
+      inputContract: { rowId: "b-row", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: 42 },
+    },
+  ],
+};
+
+describe("構造の要件を含む生成は、この Issue の状態では合格（full）にならない（02 §1.4・Issue #386）", () => {
+  it("構造の検査は未解決として数えられ、部分案（partial）で終わる", async () => {
+    const { run } = runWith(
+      [
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(STRUCTURAL_CHECKS_DESIGN),
+        structured(STRUCTURAL_CHECKS_SUITE),
+        structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+        structured(CREATE_CORRESPONDENCE),
+      ],
+      // 直しの往復を 0 にして、構造の検査が未解決のまま止まる（後続の Issue で実行する）
+      { limits: { ...AGENT_LIMITS, repairRoundTrips: 0 } },
+    );
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.bundle).not.toBeNull();
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+    if (result.bundle === null) return;
+    const verification = verificationOf(result.bundle);
+    expect(verification.test_unresolved).toBeGreaterThanOrEqual(1);
+    expect(verification.test_mismatches).toBe(0);
+  });
+});
+
 // ── 項目 × 画面の試験と、`show` に出ていない項目の落ち（02 §1.3・§1.3.1・Issue #324）──
 
 /**
@@ -1546,7 +1658,7 @@ describe("試験の段の種類の食い違いを判定に選ばせる（Issue #
         // 試験の段のあとの段（③）は、予算が尽きているか、この応答で形が合わずに止まる
         structured({}),
       ],
-      { source, judge, budgetUsd: 0.081, effort: "low" },
+      { source, judge, budgetUsd: 0.106, effort: "low" },
     );
     const result = await run;
 

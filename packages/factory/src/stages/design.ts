@@ -27,7 +27,14 @@ import type {
   RoleEntry,
 } from "../pipeline.js";
 import { REQUIREMENT_VERIFICATION_KINDS } from "../pipeline.js";
-import { REQUIREMENT_NATURES, TEST_TARGET_KINDS, isRequirementNature } from "../fixed-test.js";
+import {
+  REQUIREMENT_NATURES,
+  STRUCTURAL_ASSERTIONS,
+  TEST_TARGET_KINDS,
+  isRequirementNature,
+  isStructuralAssertionKind,
+  type StructuralAssertionKind,
+} from "../fixed-test.js";
 import type { CallGateway } from "../call.js";
 import {
   buildStructuredRequest,
@@ -58,6 +65,7 @@ export const DESIGN_RULES: readonly string[] = [
   "同名の別 entity を同じ役割 ID にしない。別 entity の同名の対象は、別の役割 ID にする。",
   "要件ごとに、種類（nature）を決める。決まり（条件・計算・検査）を含むなら ruled、在ることだけ（例「名前を持つメンバーを登録できる」）なら existence-only。",
   "要件ごとに、確かめ方（verification）を決める。固定した試験で確かめるなら fixed-test、構造の条件で確かめるなら structural、いまは確かめられないなら unresolved。fixed-test 以外は reason（理由）を書く。",
+  "確かめ方が structural の要件は、求める構造の検査の中身（checks）を、field-type・action-kind・action-unconditioned・view-shows・aggregate-no-period から、重ならずに挙げる。挙げられない条件があるなら structural にしない。構造で確かめない要件の checks は空にする。",
 ];
 
 /** ② の JSON Schema（構造化出力。strict の規則に合わせる） */
@@ -87,7 +95,7 @@ export const DESIGN_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["requirementId", "nature", "verification", "vocabulary", "placement", "unwritable", "notes"],
+        required: ["requirementId", "nature", "verification", "checks", "vocabulary", "placement", "unwritable", "notes"],
         properties: {
           requirementId: { type: "string" },
           nature: { type: "string", enum: [...REQUIREMENT_NATURES] },
@@ -102,6 +110,11 @@ export const DESIGN_SCHEMA = {
                 description: "試験を作らないときの理由（fixed-test のときは null）",
               },
             },
+          },
+          checks: {
+            type: "array",
+            items: { type: "string", enum: [...STRUCTURAL_ASSERTIONS] },
+            description: "構造で確かめる条件（field-type など）。構造で確かめない要件では空にする",
           },
           vocabulary: { type: "array", items: { type: "string" } },
           placement: { type: "array", items: { type: "string" } },
@@ -270,6 +283,42 @@ function checkUnwritableClaim(value: unknown, field: string, problems: Problem[]
   return { part: part as string, constraintIds, reason: reason as string };
 }
 
+/**
+ * 求める構造の検査の中身（`checks`）の形を確かめる（Issue #386）。選択肢の内側で、重ならないこと。
+ * 合わなければ断る（`undefined`）。旧形式の記録は `checks` の欄を省くので、ここへは来ない。
+ */
+function checkChecks(
+  value: unknown,
+  field: string,
+  problems: Problem[],
+): readonly StructuralAssertionKind[] | undefined {
+  if (!Array.isArray(value)) {
+    problems.push({ field, message: "checks は並び（array）であること" });
+    return undefined;
+  }
+  const seen = new Set<string>();
+  const checks: StructuralAssertionKind[] = [];
+  let good = true;
+  value.forEach((item, index) => {
+    if (!isStructuralAssertionKind(item)) {
+      problems.push({
+        field: `${field}[${index}]`,
+        message: `checks の中身は ${STRUCTURAL_ASSERTIONS.join("・")} のいずれかであること`,
+      });
+      good = false;
+      return;
+    }
+    if (seen.has(item)) {
+      problems.push({ field: `${field}[${index}]`, message: `checks の中身 ${item} が重なっている` });
+      good = false;
+      return;
+    }
+    seen.add(item);
+    checks.push(item);
+  });
+  return good ? checks : undefined;
+}
+
 function checkDesign(value: unknown, field: string, problems: Problem[]): RequirementDesignEntry | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "設計は写像（object）であること" });
@@ -292,6 +341,23 @@ function checkDesign(value: unknown, field: string, problems: Problem[]): Requir
   const verificationRaw = value["verification"];
   const verification =
     verificationRaw === undefined ? undefined : checkVerification(verificationRaw, `${field}.verification`, problems);
+  // checks（求める構造の検査の中身。Issue #386）。欄が無い旧形式の記録は省ける（後方互換）。
+  const checksRaw = value["checks"];
+  let checks: readonly StructuralAssertionKind[] | undefined;
+  let checksOk = true;
+  if (checksRaw !== undefined) {
+    const parsed = checkChecks(checksRaw, `${field}.checks`, problems);
+    if (parsed === undefined) checksOk = false;
+    else checks = parsed;
+  }
+  // 構造で確かめるのに、確かめる条件を 1 つも挙げていなければ断る（挙げられないなら structural にしない）
+  if (checksOk && checks !== undefined && verification?.kind === "structural" && checks.length === 0) {
+    problems.push({
+      field: `${field}.checks`,
+      message: "構造で確かめる要件の checks は空でない（確かめる条件を挙げる）",
+    });
+    checksOk = false;
+  }
   const vocabulary = checkStringArray(value["vocabulary"], `${field}.vocabulary`, problems);
   const placement = checkStringArray(value["placement"], `${field}.placement`, problems);
 
@@ -330,6 +396,7 @@ function checkDesign(value: unknown, field: string, problems: Problem[]): Requir
 
   if (
     !validId ||
+    !checksOk ||
     vocabulary === undefined ||
     placement === undefined ||
     unwritable === undefined ||
@@ -341,6 +408,7 @@ function checkDesign(value: unknown, field: string, problems: Problem[]): Requir
     requirementId: requirementId as string,
     ...(nature === undefined ? {} : { nature }),
     ...(verification === undefined ? {} : { verification }),
+    ...(checks === undefined ? {} : { checks }),
     vocabulary,
     placement,
     unwritable,

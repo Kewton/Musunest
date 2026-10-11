@@ -14,7 +14,14 @@
 //   - `referenceData` … 参照する他の entity の行
 //   - `expected` … 期待（値か、誤りコード）
 //
+// Issue #386 で、**構造の検査**を試験の型に足した（操作 `structure`）。構造で確かめると決まった要件は、
+// 実行する試験ではなく、**決まった選択肢から選ぶ検査の中身**（`assertion`）を宣言を見る前に固定する。
+// 対象は要件 ID と役割 ID、検査の中身は `STRUCTURAL_ASSERTIONS` の 5 つ、種類は `normal` だけ、期待は
+// 「成り立つ」（`ok`・値 `true`）である。**この Issue では実行しない**（必ず未解決にする。⑤b）。
+//
 // 形は `checkFixedTest` が確かめる。合わないものは**断る**（固定してから気づくのでは遅い）。
+
+import { ACTION_KINDS, type ActionKind, type FieldKind } from "@musunest/appspec-schema";
 
 /** 試験の種類（正常・異常・境界。§1.3） */
 export const TEST_KINDS = ["normal", "abnormal", "boundary"] as const;
@@ -43,9 +50,60 @@ export interface RequirementClassification {
 export const TEST_TARGET_KINDS = ["entity", "field", "computation", "operation", "screen"] as const;
 export type TestTargetKind = (typeof TEST_TARGET_KINDS)[number];
 
-/** 操作（計算・検査・操作の条件・集計・画面。②'） */
-export const TEST_OPERATIONS = ["compute", "validate", "action", "aggregate", "screen"] as const;
+/** 操作（計算・検査・操作の条件・集計・画面・構造の検査。②'・Issue #386） */
+export const TEST_OPERATIONS = ["compute", "validate", "action", "aggregate", "screen", "structure"] as const;
 export type TestOperation = (typeof TEST_OPERATIONS)[number];
+
+/** 構造の検査の中身（5 つから 1 つ選ぶ。§1.3・Issue #386） */
+export const STRUCTURAL_ASSERTIONS = [
+  "field-type",
+  "action-kind",
+  "action-unconditioned",
+  "view-shows",
+  "aggregate-no-period",
+] as const;
+export type StructuralAssertionKind = (typeof STRUCTURAL_ASSERTIONS)[number];
+
+/** 項目の種類の語彙（`FieldKind`。`field-type` の期待に使う。§1.3・Issue #386） */
+export const STRUCTURAL_FIELD_KINDS: readonly FieldKind[] = ["string", "number", "date", "list", "ref", "enum"];
+
+/** 操作の種類の語彙（`ACTION_KINDS`。`action-kind` の期待に使う。§1.3・Issue #386） */
+export const STRUCTURAL_ACTION_KINDS: readonly ActionKind[] = [...ACTION_KINDS];
+
+/**
+ * 構造の検査の中身（1 件。§1.3・Issue #386）。対象は要件 ID と役割 ID、検査の中身は 5 つの選択肢、
+ * 期待は「成り立つ」（`ok`・値 `true`）である。種類ごとに埋める欄が決まる。
+ *
+ *   - `field-type` … `expected` に `FieldKind`。参照（`ref`）は `refEntity` に参照先 entity の役割 ID。
+ *     参照の並び（`list` で `refEntity` あり）と文字列の並び（`list` で `refEntity` なし）を区別する
+ *   - `action-kind` … `expected` に `ACTION_KINDS`
+ *   - `action-unconditioned` … 条件（`when`）を持たない（期待の値は無い）
+ *   - `view-shows` … `role` に、表示を期待する項目か計算の役割 ID
+ *   - `aggregate-no-period` … 集計の絞り込みに期間の条件を持たない（期待の値は無い）
+ */
+export interface StructuralAssertion {
+  readonly check: StructuralAssertionKind;
+  /** `field-type` は期待する項目の種類、`action-kind` は操作の種類。ほかの検査では省く */
+  readonly expected?: FieldKind | ActionKind;
+  /** `field-type` で参照（`ref`・参照の並び）のときの、参照先 entity の役割 ID */
+  readonly refEntity?: string;
+  /** `view-shows` で、表示を期待する項目か計算の役割 ID */
+  readonly role?: string;
+}
+
+/** 検査の中身ごとに、対象が持つべき役割の種類（§1.3・Issue #386） */
+export const STRUCTURAL_TARGET_KINDS: Readonly<Record<StructuralAssertionKind, TestTargetKind>> = {
+  "field-type": "field",
+  "action-kind": "operation",
+  "action-unconditioned": "operation",
+  "view-shows": "screen",
+  "aggregate-no-period": "computation",
+};
+
+/** 検査の中身が知っている選択肢か */
+export const isStructuralAssertionKind = (value: unknown): value is StructuralAssertionKind =>
+  typeof value === "string" && (STRUCTURAL_ASSERTIONS as readonly string[]).includes(value);
+
 
 /**
  * 対象の selector。**名前ではなく、要件 ID と役割 ID で指す**（§1.3・②'・Issue #307）。
@@ -106,6 +164,11 @@ export interface FixedTest {
   readonly inputContract?: TestInputContract;
   readonly referenceData: readonly ReferenceRow[];
   readonly expected: TestExpected;
+  /**
+   * 構造の検査の中身（操作が `structure` のときだけ。§1.3・Issue #386）。構造の検査でない試験は
+   * **省く**（API の strict な schema では `null` を送る）。旧形式の記録は省く。
+   */
+  readonly assertion?: StructuralAssertion;
 }
 
 /** ②' で固定する試験の組（コードが形を確かめて固定する） */
@@ -312,6 +375,124 @@ function checkExpected(value: unknown, problems: FixedTestProblem[]): TestExpect
 }
 
 /**
+ * 構造の検査の中身（`assertion`）の形を確かめる（§1.3・Issue #386）。対象の種類（`targetKind`）に
+ * 照らして、検査の中身と、埋まっている欄の組み合わせを見る。**`null`／省いた欄は「構造の検査でない」
+ * として `null` を返す**（旧形式の記録を通す）。写像でなければ `undefined`（断る）。
+ *
+ * 参照する役割（`refEntity`・`role`）が設計の役割 ID の表にあるかは、設計を要するので段の点検
+ * （`test-suite.ts` の `checkSuitePlan`）が確かめる。
+ */
+function checkAssertion(
+  value: unknown,
+  targetKind: TestTargetKind,
+  field: string,
+  problems: FixedTestProblem[],
+): StructuralAssertion | null | undefined {
+  if (value === null || value === undefined) return null;
+  if (!isRecord(value)) {
+    problems.push({ field, message: "構造の検査の中身は写像（object）か null であること" });
+    return undefined;
+  }
+  const check = value["check"];
+  if (!isStructuralAssertionKind(check)) {
+    problems.push({
+      field: `${field}.check`,
+      message: `検査の中身は ${STRUCTURAL_ASSERTIONS.join("・")} のいずれかであること`,
+    });
+    return undefined;
+  }
+  const wantKind = STRUCTURAL_TARGET_KINDS[check];
+  if (targetKind !== wantKind) {
+    problems.push({
+      field: `${field}.check`,
+      message: `検査 ${check} は対象の種類 ${wantKind} の役割にだけ使える（対象は ${targetKind}）`,
+    });
+    return undefined;
+  }
+  const rawExpected = value["expected"];
+  const rawRefEntity = value["refEntity"];
+  const rawRole = value["role"];
+  // strict な schema では欄を null で埋めるので、null は「無し」として読む
+  const expected = rawExpected === null ? undefined : rawExpected;
+  const refEntity = rawRefEntity === null ? undefined : rawRefEntity;
+  const role = rawRole === null ? undefined : rawRole;
+
+  if (check === "field-type") {
+    if (typeof expected !== "string" || !(STRUCTURAL_FIELD_KINDS as readonly string[]).includes(expected)) {
+      problems.push({
+        field: `${field}.expected`,
+        message: `field-type の期待は項目の種類（${STRUCTURAL_FIELD_KINDS.join("・")}）のいずれかであること`,
+      });
+      return undefined;
+    }
+    if (role !== undefined) {
+      problems.push({ field: `${field}.role`, message: "field-type では role を書かない" });
+      return undefined;
+    }
+    if (expected !== "ref" && expected !== "list" && refEntity !== undefined) {
+      problems.push({
+        field: `${field}.refEntity`,
+        message: `field-type で期待が ${expected} のとき、参照先 entity の役割は書かない`,
+      });
+      return undefined;
+    }
+    if (expected === "ref" && refEntity === undefined) {
+      problems.push({
+        field: `${field}.refEntity`,
+        message: "field-type で期待が ref なら、参照先 entity の役割 ID（refEntity）が要る",
+      });
+      return undefined;
+    }
+    if (refEntity !== undefined && (typeof refEntity !== "string" || refEntity === "")) {
+      problems.push({ field: `${field}.refEntity`, message: "参照先 entity の役割 ID は空でない文字列であること" });
+      return undefined;
+    }
+    return {
+      check,
+      expected: expected as FieldKind,
+      ...(refEntity === undefined ? {} : { refEntity }),
+    };
+  }
+
+  if (check === "action-kind") {
+    if (typeof expected !== "string" || !(ACTION_KINDS as readonly string[]).includes(expected)) {
+      problems.push({
+        field: `${field}.expected`,
+        message: `action-kind の期待は操作の種類（${ACTION_KINDS.join("・")}）のいずれかであること`,
+      });
+      return undefined;
+    }
+    if (refEntity !== undefined || role !== undefined) {
+      problems.push({ field, message: "action-kind では refEntity・role を書かない" });
+      return undefined;
+    }
+    return { check, expected: expected as ActionKind };
+  }
+
+  if (check === "view-shows") {
+    if (typeof role !== "string" || role === "") {
+      problems.push({
+        field: `${field}.role`,
+        message: "view-shows は表示を期待する項目か計算の役割 ID（role）が要る",
+      });
+      return undefined;
+    }
+    if (expected !== undefined || refEntity !== undefined) {
+      problems.push({ field, message: "view-shows では expected・refEntity を書かない" });
+      return undefined;
+    }
+    return { check, role };
+  }
+
+  // action-unconditioned・aggregate-no-period（期待の値を持たない）
+  if (expected !== undefined || refEntity !== undefined || role !== undefined) {
+    problems.push({ field, message: `${check} では expected・refEntity・role を書かない` });
+    return undefined;
+  }
+  return { check };
+}
+
+/**
  * 固定する試験の形を確かめる。合わない欄を**すべて**挙げて返す（1 つ直すたびにやり直させない）。
  * 形が合えば、型の付いた試験を返す（固定できる）。
  */
@@ -346,6 +527,7 @@ export function checkFixedTest(value: unknown): FixedTestCheck {
   const inputContract = "inputContract" in value ? checkInputContract(value["inputContract"], problems) : undefined;
   const referenceData = checkReferenceData(value["referenceData"], problems);
   const expected = checkExpected(value["expected"], problems);
+  const assertion = checkStructure(value, operation, kind, target, expected, problems);
   if (problems.length > 0) return { ok: false, problems };
   return {
     ok: true,
@@ -359,8 +541,47 @@ export function checkFixedTest(value: unknown): FixedTestCheck {
       ...(inputContract === undefined ? {} : { inputContract }),
       referenceData: referenceData as readonly ReferenceRow[],
       expected: expected as TestExpected,
+      ...(assertion === undefined ? {} : { assertion }),
     },
   };
+}
+
+/**
+ * 操作 `structure` と `assertion` の対応を確かめる（§1.3・Issue #386）。操作が `structure` なら、
+ * 対象の種類に合う `assertion` が要り、種類は `normal` だけ、期待は「成り立つ」（`ok`・値 `true`）で
+ * ある。構造の検査でない試験は `assertion` を書かない（API の strict な schema では `null`）。
+ */
+function checkStructure(
+  value: Record<string, unknown>,
+  operation: unknown,
+  kind: unknown,
+  target: TestTarget | undefined,
+  expected: TestExpected | undefined,
+  problems: FixedTestProblem[],
+): StructuralAssertion | undefined {
+  const rawAssertion = value["assertion"];
+  if (operation !== "structure") {
+    if (rawAssertion !== undefined && rawAssertion !== null) {
+      problems.push({
+        field: "assertion",
+        message: "操作が structure でない試験は、構造の検査の中身（assertion）を書かない",
+      });
+    }
+    return undefined;
+  }
+  if (kind !== "normal") {
+    problems.push({ field: "kind", message: "構造の検査の種類は normal であること" });
+  }
+  if (expected === undefined || expected.kind !== "ok" || expected.value !== true) {
+    problems.push({ field: "expected", message: "構造の検査の期待は「成り立つ」（kind が ok・値 true）であること" });
+  }
+  if (target === undefined) return undefined;
+  const parsed = checkAssertion(rawAssertion, target.kind, "assertion", problems);
+  if (parsed === null) {
+    problems.push({ field: "assertion", message: "操作が structure なら、構造の検査の中身（assertion）が要る" });
+    return undefined;
+  }
+  return parsed;
 }
 
 /** 試験の組の形を確かめる。欄の名前は `tests[i].…` として返す */

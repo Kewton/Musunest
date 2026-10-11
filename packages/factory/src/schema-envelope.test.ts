@@ -185,6 +185,34 @@ describe("全段で同じ「封筒」の schema（02 §2・#353）", () => {
     expect(position.required).toEqual(["start", "end"]);
   });
 
+  it("試験の段の枝に assertion の欄があり、設計の段の枝に checks の欄がある（Issue #386）", () => {
+    const testSuiteEntry = STAGE_ENVELOPE_ENTRIES.find((entry) => entry.stage === "test-suite");
+    const designEntry = STAGE_ENVELOPE_ENTRIES.find((entry) => entry.stage === "requirement-design");
+    expect(testSuiteEntry).toBeDefined();
+    expect(designEntry).toBeDefined();
+    if (testSuiteEntry === undefined || designEntry === undefined) return;
+
+    const testBranch = buildStageBranch(testSuiteEntry);
+    expect(strictProblems(testBranch)).toEqual([]);
+    const testItems = (testBranch.properties as Record<string, unknown>)["tests"] as Record<string, unknown>;
+    const testItem = testItems.items as Record<string, unknown>;
+    expect(testItem.required as readonly string[]).toContain("assertion");
+    const assertion = (testItem.properties as Record<string, unknown>)["assertion"] as Record<string, unknown>;
+    expect(assertion.type).toEqual(["object", "null"]);
+    const assertionProps = assertion.properties as Record<string, unknown>;
+    for (const key of ["check", "expected", "refEntity", "role"]) {
+      expect(Object.keys(assertionProps), key).toContain(key);
+    }
+
+    const designBranch = buildStageBranch(designEntry);
+    expect(strictProblems(designBranch)).toEqual([]);
+    const designItems = (designBranch.properties as Record<string, unknown>)["designs"] as Record<string, unknown>;
+    const designItem = designItems.items as Record<string, unknown>;
+    expect(designItem.required as readonly string[]).toContain("checks");
+    const checks = (designItem.properties as Record<string, unknown>)["checks"] as Record<string, unknown>;
+    expect(checks.type).toBe("array");
+  });
+
   it("段の名前から、その枝（段の schema）を引ける", () => {
     for (const entry of STAGE_ENVELOPE_ENTRIES) {
       expect(envelopeStageFor(entry.stage)?.schema, entry.stage).toBe(entry.schema);

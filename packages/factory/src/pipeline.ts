@@ -5,7 +5,7 @@
 // ⑦ の入力へ写す**純粋な関数**を置く。段の中身（プロンプト・道具）は stages/ にある。
 import type { ConfirmedPlan, NormalizedAppSpec, PlanPartDisposition } from "@musunest/appspec-schema";
 import type { Diagnostic } from "@musunest/spec-engine";
-import type { RequirementNature, TestSuite, TestTargetKind } from "./fixed-test.js";
+import type { RequirementNature, StructuralAssertionKind, TestSuite, TestTargetKind } from "./fixed-test.js";
 import type { Outcome, StageResults } from "./outcome.js";
 
 /** 原文の中の文字の範囲（① で付ける引用の位置） */
@@ -176,6 +176,13 @@ export interface RequirementDesign {
   readonly nature?: RequirementNature;
   /** 確かめ方（固定した試験／構造の条件／未解決）。② が固定する（Issue #307） */
   readonly verification?: RequirementVerification;
+  /**
+   * 求める**構造の検査の中身**（`verification.kind` が `structural` のとき。Issue #386）。5 つの
+   * 選択肢（`field-type`・`action-kind`・`action-unconditioned`・`view-shows`・`aggregate-no-period`）から
+   * **重ならず**に挙げる。②' は、この中身ごとに 1 本以上の構造の検査を作る。旧形式の記録（`checks` の
+   * 無い応答）では省く（後方互換）。
+   */
+  readonly checks?: readonly StructuralAssertionKind[];
   /** 使う語彙（無い語彙・キー・関数は作らない。F-5） */
   readonly vocabulary: readonly string[];
   /** 置き場所（宣言のどの欄か） */

@@ -29,6 +29,7 @@
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import {
   REQUIREMENT_NATURES,
+  STRUCTURAL_ASSERTIONS,
   TEST_KINDS,
   TEST_OPERATIONS,
   TEST_TARGET_KINDS,
@@ -65,9 +66,12 @@ export const TEST_SUITE_ROUNDS = 2;
 
 /** ②' に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const TEST_SUITE_RULES: readonly string[] = [
-  "原文と要件の一覧だけから、要件ごとの種類（nature）を独立に分類し直す（設計の出力は見せられない）。決まり（条件・計算・検査）を含むなら ruled、在ることだけ（例「名前を持つメンバーを登録できる」）なら existence-only。分類は classifications に入れる。",
+  "原文と要件の一覧だけから、要件ごとの種類（nature）を独立に分類し直す（設計の出力は見せられない）。決まり（条件・計算・検査）を含むなら ruled、在ることだけ（例「名前を持つメンバーを登録できる」）なら existence-only。分類は classifications に入れる。**分類は原文と要件の文だけで決め、確かめ方の欄は使わない。**",
   "決まりを含む要件は、決まりの役割ごとに、正常・異常・境界の 3 種類の試験を、入力と期待つきで作る。",
   "在ることだけの要件は、正常のシナリオ 1 本か、構造の条件（create の操作がある・その entity の一覧か表に項目が出る・画面の部品がある）だけを固定する。**異常・境界の試験や検査（validate）の試験は作らない**。",
+  "確かめ方が structural の要件には、checks の中身ごとに 1 本以上の**構造の検査**を作る。実行の試験だけで済ませない。構造の検査は操作（operation）を structure にし、assertion に検査の中身を持つ。種類（kind）は normal だけ、期待（expected）は「成り立つ」（kind を ok・value を \"true\"・code を null）にする。",
+  "構造の検査の assertion.check は、設計の checks の中身（field-type・action-kind・action-unconditioned・view-shows・aggregate-no-period）と同じ値にする。assertion の expected・refEntity・role は検査の種類に応じて埋める——field-type は expected に項目の種類（string・number・date・list・ref・enum）、参照（ref・参照の並び）なら refEntity に参照先 entity の役割 ID。action-kind は expected に操作の種類（create・update・delete）。view-shows は role に、表示を期待する項目か計算の役割 ID。action-unconditioned・aggregate-no-period は expected・refEntity・role を null にする。",
+  "構造の検査は、確かめ方が structural の要件だけを対象にする。構造の検査でない試験は assertion を null にする。確かめ方が structural の要件には、正常・異常・境界のそろいを求めない。",
   "入力（input）と参照データの値（values）と期待の値（value）は、任意の JSON を表すので、**JSON の文字列**として書く（例: \"{\\\"amount\\\": 21}\"）。",
   "異常の期待は、操作ごとの型にする。検査（validate）の異常は誤りコード（expected.code）で確かめ、value は null にする。計算・集計（compute・aggregate）の異常は、値（expected.value）でもよい。それ以外の正常は値の JSON 文字列を value に入れ、code は null にする。",
   "対象（target）と参照の行（referenceData の target）は、名前ではなく**役割 ID（roleId）**で指す。役割 ID は ② の役割 ID の表のものを使う。宣言は見られないので、名前を書かない。",
@@ -116,6 +120,7 @@ export const TEST_SUITE_SCHEMA = {
           "inputContract",
           "referenceData",
           "expected",
+          "assertion",
         ],
         properties: {
           id: { type: "string" },
@@ -133,6 +138,24 @@ export const TEST_SUITE_SCHEMA = {
           operation: { type: "string", enum: [...TEST_OPERATIONS] },
           clock: { type: "string" },
           input: { type: "string", description: "入力（レコード）の JSON 文字列" },
+          assertion: {
+            type: ["object", "null"],
+            description: "構造の検査の中身（構造の検査でない試験は null）",
+            additionalProperties: false,
+            required: ["check", "expected", "refEntity", "role"],
+            properties: {
+              check: { type: "string", enum: [...STRUCTURAL_ASSERTIONS] },
+              expected: {
+                type: ["string", "null"],
+                description: "field-type は項目の種類、action-kind は操作の種類。ほかの検査は null",
+              },
+              refEntity: {
+                type: ["string", "null"],
+                description: "field-type で参照（ref・参照の並び）のときの参照先 entity の役割 ID",
+              },
+              role: { type: ["string", "null"], description: "view-shows で表示する項目か計算の役割 ID" },
+            },
+          },
           inputContract: {
             type: "object",
             additionalProperties: false,
@@ -269,6 +292,7 @@ function checkKinds(
   suite: TestSuite,
   natures: ReadonlyMap<string, RequirementNature>,
   problems: Problem[],
+  checkedRequirements: ReadonlySet<string>,
 ): void {
   for (const requirement of list.requirements) {
     const mine = suite.tests.filter((test) => test.target.requirementId === requirement.id);
@@ -283,6 +307,8 @@ function checkKinds(
         message: `要件 ${requirement.id} の試験が上限 ${overCount.max} を超えている（${overCount.actual}）`,
       });
     }
+    // 新形式で構造の検査を作る要件は、正常・異常・境界のそろいを求めない（構造の検査が確かめる。Issue #386）
+    if (checkedRequirements.has(requirement.id)) continue;
     const nature = natures.get(requirement.id) ?? "ruled";
     if (nature === "existence-only") {
       for (const test of mine) {
@@ -354,13 +380,108 @@ function checkExpectationKind(suite: TestSuite, problems: Problem[]): void {
 }
 
 /**
+ * **新形式**で `checks` を持つ、構造で確かめる要件の集合を返す（Issue #386）。`checks` を持つ要件だけが
+ * 新しい検査（中身ごとに 1 本）を要求する——`checks` の無い旧形式の設計は、今までどおりの検査になる。
+ */
+function structuralChecksRequired(design: DesignResult): ReadonlySet<string> {
+  const checked = new Set<string>();
+  for (const entry of design.designs) {
+    if (entry.verification?.kind === "structural" && entry.checks !== undefined) checked.add(entry.requirementId);
+  }
+  return checked;
+}
+
+/**
+ * **構造の検査**を、設計（役割 ID の表・確かめ方・checks）に照らして確かめる（§1.3・Issue #386）。
+ *
+ *   - 構造の検査は、確かめ方が `structural` の要件だけを対象にできる
+ *   - 構造の検査の `assertion` が参照する役割（`field-type` の `refEntity`・`view-shows` の `role`）が、
+ *     設計の役割 ID の表にあり、種類が合い（entity か、項目か計算か）、対象と同じ entity に属すること
+ *   - **新形式**（`checks` を持つ設計）では、`checks` の中身ごとに 1 本以上の構造の検査があること
+ */
+function checkStructuralChecks(suite: TestSuite, design: DesignResult, problems: Problem[]): void {
+  const roleById = new Map((design.roles ?? []).map((entry) => [entry.roleId, entry]));
+  const designById = new Map(design.designs.map((entry) => [entry.requirementId, entry]));
+  suite.tests.forEach((test, index) => {
+    if (test.operation !== "structure") return;
+    const target = designById.get(test.target.requirementId);
+    if (target?.verification?.kind !== "structural") {
+      problems.push({
+        field: `tests[${index}].target`,
+        message: `構造の検査は、確かめ方が構造の要件だけを対象にできる（要件 ${test.target.requirementId} は構造でない）`,
+      });
+      return;
+    }
+    const assertion = test.assertion;
+    if (assertion === undefined) return;
+    const field = `tests[${index}].assertion`;
+    if (assertion.check === "view-shows") {
+      const role = assertion.role ?? "";
+      const referenced = roleById.get(role);
+      if (referenced === undefined) {
+        problems.push({ field: `${field}.role`, message: `参照する役割 ID ${role} が設計の役割 ID の表に無い` });
+        return;
+      }
+      if (referenced.kind !== "field" && referenced.kind !== "computation") {
+        problems.push({
+          field: `${field}.role`,
+          message: `view-shows の参照する役割 ${role} は項目か計算でなければならない（種類は ${referenced.kind}）`,
+        });
+        return;
+      }
+      const targetRole = test.target.roleId === undefined ? undefined : roleById.get(test.target.roleId);
+      if (targetRole !== undefined && referenced.entity !== targetRole.entity) {
+        problems.push({
+          field: `${field}.role`,
+          message: `参照する役割 ${role} が、対象の役割 ${test.target.roleId ?? ""} とは別の entity（${String(referenced.entity)}）に属する`,
+        });
+      }
+      return;
+    }
+    if (assertion.check === "field-type" && assertion.refEntity !== undefined) {
+      const referenced = roleById.get(assertion.refEntity);
+      if (referenced === undefined) {
+        problems.push({
+          field: `${field}.refEntity`,
+          message: `参照する役割 ID ${assertion.refEntity} が設計の役割 ID の表に無い`,
+        });
+        return;
+      }
+      if (referenced.kind !== "entity") {
+        problems.push({
+          field: `${field}.refEntity`,
+          message: `field-type の参照先 ${assertion.refEntity} は entity の役割でなければならない（種類は ${referenced.kind}）`,
+        });
+      }
+    }
+  });
+
+  // 新形式（checks を持つ設計）では、checks の中身ごとに 1 本以上の構造の検査が要る
+  for (const entry of design.designs) {
+    if (entry.verification?.kind !== "structural" || entry.checks === undefined) continue;
+    const mine = suite.tests.filter(
+      (test) => test.target.requirementId === entry.requirementId && test.operation === "structure",
+    );
+    const have = new Set(mine.map((test) => test.assertion?.check));
+    for (const check of entry.checks) {
+      if (!have.has(check)) {
+        problems.push({
+          field: "tests",
+          message: `要件 ${entry.requirementId} の構造の検査 ${check} が無い（checks の中身ごとに 1 本以上が要る）`,
+        });
+      }
+    }
+  }
+}
+
+/**
  * 固定する前にコードが確かめる（§1）。合わない欄を**すべて**挙げて返す。役割 ID の検査はしない
  * （旧形式の記録も通すため。新しい設計を渡す `checkSuitePlan` を使う）。
  */
 export function checkSuiteAgainstRequirements(list: RequirementList, suite: TestSuite): readonly Problem[] {
   const problems: Problem[] = [];
   checkSuiteBasics(list, suite, problems);
-  checkKinds(list, suite, new Map(), problems);
+  checkKinds(list, suite, new Map(), problems, new Set());
   return problems;
 }
 
@@ -375,10 +496,12 @@ export function checkSuitePlan(
   natures: ReadonlyMap<string, RequirementNature>,
 ): readonly Problem[] {
   const problems: Problem[] = [];
+  const checked = structuralChecksRequired(design);
   checkSuiteBasics(list, suite, problems);
-  checkKinds(list, suite, natures, problems);
+  checkKinds(list, suite, natures, problems, checked);
   checkRoleIds(suite, roleIdsOf(design), problems);
   checkExpectationKind(suite, problems);
+  checkStructuralChecks(suite, design, problems);
   return problems;
 }
 
@@ -684,6 +807,14 @@ function buildData(
     data.push({
       name: "要件ごとの種類",
       text: serializeJson([...designNaturesOf(design)].map(([requirementId, nature]) => ({ requirementId, nature }))),
+    });
+    // 確かめ方（求める検査の形＝checks）は、種類の分類とは**別のデータの欄**で渡す（Issue #386。
+    // 分類は原文と要件の文だけで決めさせ、確かめ方の欄は使わせない）。空の checks は構造で確かめない。
+    data.push({
+      name: "要件ごとの確かめ方",
+      text: serializeJson(
+        design.designs.map((entry) => ({ requirementId: entry.requirementId, checks: entry.checks ?? [] })),
+      ),
     });
   }
   if (previous.length > 0) {

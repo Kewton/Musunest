@@ -1062,4 +1062,88 @@ describe("項目 × 画面（02 §1.3・Issue #324）", () => {
   });
 });
 
+// ── 11. 構造の検査（02 §1.3・Issue #386）──────────────────────────────
+
+describe("構造の検査は、どの対象の種類でも未解決になる（02 §1.3・Issue #386）", () => {
+  const structureCorrespondence: CorrespondenceResult = {
+    entries: [
+      entry("R-1", [{ kind: "computation", entity: "record", name: "total" }]),
+      entry("R-3", [{ kind: "action", entity: "record", name: "close" }]),
+      entry("R-9", [{ kind: "field", entity: "record", name: "amount" }]),
+      entry("R-12", [{ kind: "view", entity: "record", name: "records" }]),
+    ],
+    misses: [],
+  };
+  const structureMappings: readonly RoleNameMapping[] = [
+    { roleId: "record.total", name: "total" },
+    { roleId: "record.close", name: "close" },
+    { roleId: "record.amount", name: "amount" },
+    { roleId: "record.records", name: "records" },
+  ];
+
+  /** 対象の種類ごとの構造の検査（画面の判定で合格になりうるものも含む） */
+  const cases: readonly { readonly id: string; readonly test: Record<string, unknown> }[] = [
+    {
+      id: "screen",
+      test: {
+        ...draft({ id: "screen", target: roleTarget("R-12", "screen", "record.records"), operation: "structure", expected: { kind: "ok", value: true } }),
+        assertion: { check: "view-shows", role: "record.amount" },
+      },
+    },
+    {
+      id: "field",
+      test: {
+        ...draft({ id: "field", target: roleTarget("R-9", "field", "record.amount"), operation: "structure", expected: { kind: "ok", value: true } }),
+        assertion: { check: "field-type", expected: "number" },
+      },
+    },
+    {
+      id: "operation",
+      test: {
+        ...draft({ id: "operation", target: roleTarget("R-3", "operation", "record.close"), operation: "structure", expected: { kind: "ok", value: true } }),
+        assertion: { check: "action-unconditioned" },
+      },
+    },
+    {
+      id: "computation",
+      test: {
+        ...draft({ id: "computation", target: roleTarget("R-1", "computation", "record.total"), operation: "structure", expected: { kind: "ok", value: true } }),
+        assertion: { check: "aggregate-no-period" },
+      },
+    },
+  ];
+
+  it("どの対象の種類でも未解決に数え、合格（一致）にしない", () => {
+    const result = runTests({
+      app: APP,
+      suite: suiteOf(cases.map((entry) => entry.test)),
+      correspondence: structureCorrespondence,
+      mappings: structureMappings,
+    });
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved.map((entry) => entry.testId).sort()).toEqual(["computation", "field", "operation", "screen"]);
+    // 未解決は「曖昧さ」の行き先（合格にしない）
+    expect(result.routes.every((route) => route.route === "ambiguity")).toBe(true);
+  });
+
+  it("未解決が残るかぎり、⑦ は合格（full）にしない", () => {
+    const result = runTests({
+      app: APP,
+      suite: suiteOf(cases.map((entry) => entry.test)),
+      correspondence: structureCorrespondence,
+      mappings: structureMappings,
+    });
+    const stage = toStageResults({
+      staticCheckPassed: true,
+      correspondenceMisses: 0,
+      testMismatches: result.mismatches.length,
+      testUnresolved: result.unresolved.length,
+      unwritableRequirements: 0,
+      limitReached: false,
+      carriedOver: { reverseCheck: [], testSuite: [] },
+    });
+    expect(decideOutcome(stage).verdict).not.toBe("full");
+  });
+});
+
 
