@@ -14,6 +14,8 @@ import {
   checkStringArray,
   constraintIdsIn,
   isRecord,
+  normalizeConstraintId,
+  normalizeConstraintIds,
   serializeJson,
   type Problem,
   type PromptDocument,
@@ -28,7 +30,7 @@ export const SURFACE_SCHEMA_NAME = "plan-surface";
 export const SURFACE_RULES: readonly string[] = [
   "要件の一覧から、次を挙げる：**未解決の事項**（答えで作るものが変わる。重大か否か。語彙の決めどころの目録に無いもの）と、**語彙で書けないこと**。",
   "質問や観点の文は、利用者の言葉で書く。宣言の用語（entity・computed・selector など）を使わない。",
-  "書けないことには、根拠にした**制約 ID**（constraintIds）を必須にする——渡した文書の本文にある「R-…」の ID か、語彙の意味の「### 」見出しの文だけを挙げる。文書に無い ID を作らない。",
+  "書けないことには、根拠にした**制約 ID**（constraintIds）を必須にする——渡した文書の本文にある契約の規則の ID（例 `R-TYPE-01`）か、語彙の意味の見出しの文（例 `number`。`#` の記号は付けない）だけを挙げる。文書に無い ID を作らない。",
   "書けないことには、**代わりの案**（alternative）を 1 つ書く——文書の語彙で書ける、近い形である。代わりの案を採るかどうかは利用者が決める。",
   "曖昧さ（まだ書ける）と、書けないこと（語彙の穴）を混ぜない。要件の言い直しや、すでに決まっていることは挙げない。",
 ];
@@ -71,7 +73,7 @@ export const SURFACE_SCHEMA = {
           constraintIds: {
             type: "array",
             items: { type: "string" },
-            description: "根拠にした制約 ID（契約の規則の R-… と、語彙の意味の ### 見出し）",
+            description: "根拠にした制約 ID（契約の規則の ID（例 R-TYPE-01）か、語彙の意味の見出しの文（例 number））",
           },
           reason: { type: "string", description: "書けない理由" },
           alternative: { type: "string", description: "代わりの案（文書の語彙で書ける近い形を 1 つ。U-P2）" },
@@ -236,17 +238,35 @@ export function checkSurfaceConstraints(
       problems.push({
         field,
         code: "constraint-id-missing",
-        message: "書けないことには、根拠にした制約 ID が要る（文書の R-… または ### 見出し）",
+        message: "書けないことには、根拠にした制約 ID が要る（文書の規則の ID か見出しの文）",
       });
       return;
     }
-    for (const id of item.constraintIds) {
-      if (!known.has(id)) {
-        problems.push({ field, code: "constraint-id-unknown", message: `文書に無い制約 ID: ${id}` });
+    for (const raw of item.constraintIds) {
+      // **生の申告の ID を 1 回だけ**正規化して、文書から取り出した集合（正規化済み）と突き合わせる
+      // （Issue #398）。`### ### action` は 1 回だけ外すので `### action` のまま残り、断られる。
+      const id = normalizeConstraintId(raw);
+      if (id === "" || !known.has(id)) {
+        problems.push({ field, code: "constraint-id-unknown", message: `文書に無い制約 ID: ${id === "" ? raw : id}` });
       }
     }
   });
   return problems;
+}
+
+/**
+ * 書けないことの申告の制約 ID を**正規化した写し**を作る（保存する側。Issue #398）。段は、根拠の照合
+ * （`checkSurfaceConstraints`）を通ったあとにこれを返す——下流（Plan の `basis.constraint_id`）へ渡る
+ * ID は正規化後になる。確定済みの Plan を読み込むときは書き換えない（読み込みの側では正規化しない）。
+ */
+function normalizeSurfaceClaims(surface: PlanSurface): PlanSurface {
+  return {
+    ...surface,
+    unwritable: surface.unwritable.map((item) => ({
+      ...item,
+      constraintIds: normalizeConstraintIds(item.constraintIds),
+    })),
+  };
 }
 
 /**
@@ -268,5 +288,6 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
   if (problems.length > 0) {
     return { ok: false, failure: { kind: "unmet", attempts: 1, problems } };
   }
-  return answer;
+  // 根拠の照合を通ったあと、保存する側の ID を正規化する（Issue #398）
+  return { ok: true, value: normalizeSurfaceClaims(answer.value) };
 }

@@ -44,6 +44,7 @@ import type { LlmClient } from "../llm.js";
 import type { ReverseCheckMiss, SourceRange } from "../pipeline.js";
 import { UsageMeter, usageDelta, type FailureKind, type StageStatus, type UsageSnapshot } from "../record.js";
 import type { PromptDocument, StageFailure, StageOutcome } from "../stages/prompt.js";
+import { normalizeConstraintId } from "../stages/prompt.js";
 import {
   runReverseCheckLoopWithOperation,
   splitSourceSentences,
@@ -870,7 +871,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         basis: {
           doc_version: input.vocabularyVersion,
           location: item.part,
-          constraint_id: item.constraintIds[0] ?? "",
+          // 根拠の ID は**確認の前・SHA を計算する前**に正規化する（Issue #398）。
+          // 確定済みの Plan を読み込むときに書き換えない（読み込みの側では正規化しない）。
+          constraint_id: normalizeConstraintId(item.constraintIds[0] ?? ""),
         },
       });
     }

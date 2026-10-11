@@ -12,7 +12,7 @@ import {
   createRecordingClient,
   makeGateway,
 } from "../stages/__tests__/prompt.js";
-import { SURFACE_SCHEMA_NAME, checkSurfaceOutput, runSurface } from "./surface.js";
+import { SURFACE_RULES, SURFACE_SCHEMA_NAME, checkSurfaceOutput, runSurface } from "./surface.js";
 
 /** 正しい応答（未解決の事項 1 件・書けないこと 1 件） */
 const SURFACE_OUTPUT = {
@@ -147,5 +147,59 @@ describe("P3 の書けないことの裏付け（04 §3 P3・#332）", () => {
     const { outcome } = run(output);
     const result = await outcome;
     expect(result.ok).toBe(true);
+  });
+});
+
+// ── 計測で断られた形が通り、門は緩めない（Issue #398）──────────────────
+
+describe("計測で断られた形が通り、門は緩めない（Issue #398）", () => {
+  it("実物の ID と記号つきの見出しが通る", async () => {
+    const output = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-1", requirementId: "R-1", part: "部分", constraintIds: ["R-VOCAB-01"], reason: "理由", alternative: "代わり" },
+        { id: "U-2", requirementId: "R-1", part: "部分", constraintIds: ["R-TYPE-07"], reason: "理由", alternative: "代わり" },
+        { id: "U-3", requirementId: "R-1", part: "部分", constraintIds: ["R-NAME-10"], reason: "理由", alternative: "代わり" },
+        { id: "U-4", requirementId: "R-1", part: "部分", constraintIds: ["### computed"], reason: "理由", alternative: "代わり" },
+        { id: "U-5", requirementId: "R-1", part: "部分", constraintIds: ["### 宣言の全体"], reason: "理由", alternative: "代わり" },
+      ],
+    };
+    const { outcome } = run(output);
+    const result = await outcome;
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 申告に残す ID も正規化後である（Issue #398）
+    expect(result.value.unwritable[0]?.constraintIds).toEqual(["R-VOCAB-01"]);
+    expect(result.value.unwritable[3]?.constraintIds).toEqual(["computed"]);
+    expect(result.value.unwritable[4]?.constraintIds).toEqual(["宣言の全体"]);
+  });
+
+  it("文書に無い ID と、正規化しても知らない ID は今までどおり断る", async () => {
+    for (const id of ["R-999", "### ### computed", "#### nope", "`computed", "computed`"]) {
+      const output = {
+        ambiguities: [],
+        unwritable: [
+          { id: "U-1", requirementId: "R-1", part: "部分", constraintIds: [id], reason: "理由", alternative: "代わり" },
+        ],
+      };
+      const result = await run(output).outcome;
+      expect(result.ok, id).toBe(false);
+      if (result.ok || result.failure.kind !== "unmet") continue;
+      expect(result.failure.problems[0]?.code, id).toBe("constraint-id-unknown");
+    }
+  });
+
+  it("規則の文と断る文言に、記号つき（### ）の例が無い", async () => {
+    for (const rule of SURFACE_RULES) expect(rule).not.toContain("### ");
+    const output = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-1", requirementId: "R-1", part: "部分", constraintIds: [], reason: "理由", alternative: "代わり" },
+      ],
+    };
+    const result = await run(output).outcome;
+    expect(result.ok).toBe(false);
+    if (result.ok || result.failure.kind !== "unmet") return;
+    for (const problem of result.failure.problems) expect(problem.message).not.toContain("### ");
   });
 });

@@ -8,7 +8,7 @@
 //   5. 予算が尽きると「止まった」になる。使った額に LLM と判定の費用が入る
 //   6. 段ごとの記録が結果に入る
 import { describe, expect, it } from "vitest";
-import { checkConfirmedPlan, isConfirmationValid } from "@musunest/appspec-schema";
+import { checkConfirmedPlan, isConfirmationValid, planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
 import { planStopReasonLine } from "../cli-plan.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "../judge.js";
@@ -29,9 +29,10 @@ import {
   sessionCannotConfirmReason,
   type PlanAnswerRequest,
   type PlanResponder,
+  type PlanResult,
   type PlanRunInput,
 } from "./run-plan.js";
-import type { PlanTurn } from "./session.js";
+import type { PlanConfirmationView, PlanTurn } from "./session.js";
 import {
   CATALOG_FACETS,
   catalogAppliesQuestionName,
@@ -1282,5 +1283,110 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
     // 確定した仕様（既存の保存が認められた欄）には、原文の目印が残る
     expect(JSON.stringify(result.plan)).toContain(sourceMark);
     expect(planStopReasonLine(result)).toBe("");
+  });
+});
+
+// ── 制約 ID の正規化（確認の前・SHA を計算する前。Issue #398）──────────────────
+
+/** P3 の申告（書けない）に、記号つきの見出しを制約 ID として使う */
+const SURFACE_UNWRITABLE_SYMBOL = {
+  ambiguities: [],
+  unwritable: [
+    {
+      id: "U-1",
+      requirementId: "R-2",
+      part: "補助の値の並べ替え",
+      constraintIds: ["### computed"],
+      reason: "宣言に欄が無い",
+      alternative: "題名を画面の見出しとして置く",
+    },
+  ],
+};
+
+/** 確定した Plan の根拠の ID だけを差し替え、SHA を計算し直す（保存されていた Plan を模す） */
+async function withConstraintId(plan: ConfirmedPlan, id: string): Promise<ConfirmedPlan> {
+  const accepted_unwritable = plan.accepted_unwritable.map((entry) => ({
+    ...entry,
+    basis: { ...entry.basis, constraint_id: id },
+  }));
+  const sha256 = await planDigest({ ...plan, accepted_unwritable });
+  return { ...plan, accepted_unwritable, confirmation: { ...plan.confirmation, sha256 } };
+}
+
+/** 記号つきの見出しを根拠にした Plan を、確認まで進めて返す */
+async function planWithSymbolConstraint(): Promise<{
+  readonly result: PlanResult;
+  readonly views: readonly PlanConfirmationView[];
+}> {
+  const recording = createRecordingClient([
+    structured(REQUIREMENT_LIST_OUTPUT),
+    structured(REVERSE_CHECK_OUTPUT),
+    structured(SURFACE_UNWRITABLE_SYMBOL),
+  ]);
+  const views: PlanConfirmationView[] = [];
+  const responder: PlanResponder = {
+    async answer() {
+      return { kind: "answers", answers: [] };
+    },
+    async confirm(view) {
+      views.push(view);
+      return "build";
+    },
+  };
+  const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor([]) });
+  const result = await runPlan(makePlanInput(recording.client, judge, responder));
+  return { result, views };
+}
+
+describe("制約 ID の正規化（確認の前・SHA を計算する前。Issue #398）", () => {
+  it("P3 の申告の根拠と、確認の役が受け取る根拠が、正規化後の ID になる", async () => {
+    const { result, views } = await planWithSymbolConstraint();
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 確定した Plan の根拠は正規化後（### computed → computed）
+    expect(result.plan.accepted_unwritable[0]?.basis.constraint_id).toBe("computed");
+    // 確認の役が受け取る根拠も正規化後
+    expect(views[0]?.unwritable[0]?.basis.constraint_id).toBe("computed");
+    // 確定した同じ Plan が、確定した仕様の検査を通り、内容と SHA が一致する（Build へ渡るもの）
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+    expect(await isConfirmationValid(result.plan)).toBe(true);
+    expect(result.plan.confirmation.sha256).toBe(await planDigest(result.plan));
+  });
+
+  it("確定済みの記号つきの ID を持つ Plan を読み込んでも、元の内容と保存した内容を書き換えない", async () => {
+    const { result } = await planWithSymbolConstraint();
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 「保存されていた」Plan（記号つきの ID と、それに合う SHA）を作る
+    const saved = await withConstraintId(result.plan, "### computed");
+    const before = JSON.stringify(saved);
+    expect(await checkConfirmedPlan(saved)).toEqual([]);
+    expect(await isConfirmationValid(saved)).toBe(true);
+    // 読み込んでも書き換えない（元の内容も、保存した内容も）
+    expect(JSON.stringify(saved)).toBe(before);
+  });
+
+  it("確認のあとに ID を変えた Plan は、確認が失効する", async () => {
+    const { result } = await planWithSymbolConstraint();
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    const saved = await withConstraintId(result.plan, "### computed");
+    // 確認のあとに ID だけを変える（SHA は計算し直さない）
+    const changed: ConfirmedPlan = {
+      ...saved,
+      accepted_unwritable: saved.accepted_unwritable.map((entry) => ({
+        ...entry,
+        basis: { ...entry.basis, constraint_id: "computed" },
+      })),
+    };
+    expect(await isConfirmationValid(saved)).toBe(true);
+    expect(await isConfirmationValid(changed)).toBe(false);
+    expect(await checkConfirmedPlan(changed)).toEqual([
+      {
+        code: "confirmation_expired",
+        path: "confirmation.sha256",
+        message: "仕様の SHA-256 と一致しない（確認が失効している）",
+      },
+    ]);
   });
 });
