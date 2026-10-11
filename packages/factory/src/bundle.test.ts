@@ -18,8 +18,10 @@ import {
   VERIFICATION_FILE,
   assembleBundle,
   bundleFiles,
+  toBundleNatureDiscrepancies,
   type BundleInput,
   type BundleJudgeUsage,
+  type BundleNatureDiscrepancy,
   type BundlePartialReasons,
   type BundleSummary,
   type BundleUnwritable,
@@ -70,6 +72,7 @@ const SUMMARY: BundleSummary = {
     },
   ),
   judge: { calls_by_adapter: { jev: 0, llm: 0, fake: 0 }, cost_usd: 0 },
+  nature_discrepancies: [],
 };
 
 const declaration: Declaration = { source: DECLARATION_SOURCE };
@@ -145,6 +148,41 @@ describe("⑧ 納品物（02 §4・F-10）", () => {
     expect(summary.judge).toEqual(judge);
     expect(bundle.summary.judge).toEqual(judge);
     // wire は知らない欄を足しても受け付ける（additive。Issue #359）
+    expect(acceptsHeadlessSummaryWire(summary)).toBe(true);
+  });
+
+  it("要約に、種類の食い違いの記録（決め方・確率・判定のモデル・閾値の版）を残す（Issue #373）", async () => {
+    const nature_discrepancies = toBundleNatureDiscrepancies([
+      {
+        requirementId: "R-1",
+        design: "existence-only",
+        classified: "ruled",
+        resolved: "existence-only",
+        resolution: "judged",
+        probability: 0.82,
+        model: "gpt-judge",
+        thresholdVersion: "nature-judge-v1",
+      },
+      { requirementId: "R-2", design: "ruled", classified: "existence-only", resolved: "ruled", resolution: "fallback" },
+    ]);
+    const bundle = await assembleBundle(input({ summary: { ...SUMMARY, nature_discrepancies } }));
+    const summary = JSON.parse(findText(bundle.artifacts, "artifacts/summary.json")) as BundleSummary;
+    const expected: readonly BundleNatureDiscrepancy[] = [
+      {
+        requirement_id: "R-1",
+        design: "existence-only",
+        classified: "ruled",
+        resolved: "existence-only",
+        resolution: "judged",
+        probability: 0.82,
+        model: "gpt-judge",
+        threshold_version: "nature-judge-v1",
+      },
+      { requirement_id: "R-2", design: "ruled", classified: "existence-only", resolved: "ruled", resolution: "fallback" },
+    ];
+    expect(summary.nature_discrepancies).toEqual(expected);
+    expect(bundle.summary.nature_discrepancies).toEqual(expected);
+    // wire は知らない欄を足しても受け付ける（additive。Issue #373）
     expect(acceptsHeadlessSummaryWire(summary)).toBe(true);
   });
 

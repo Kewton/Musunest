@@ -9,10 +9,15 @@
 import { describe, expect, it } from "vitest";
 import { checkTestSuite, type RequirementNature, type TestSuite } from "../fixed-test.js";
 import type { DesignResult } from "../pipeline.js";
+import { createFakeJudge } from "../judge-fake.js";
+import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "../judge.js";
 import {
+  NATURE_JUDGE_THRESHOLD,
+  NATURE_JUDGE_THRESHOLD_VERSION,
   TEST_SUITE_SCHEMA_NAME,
   checkSuiteAgainstRequirements,
   checkSuitePlan,
+  natureQuestionName,
   reconcileNatures,
   runTestSuite,
   type TestSuiteInput,
@@ -407,7 +412,7 @@ describe("役割 ID の表と、要件ごとの種類に照らす（Issue #307�
     const reconciled = reconcileNatures(design, [{ requirementId: "R-1", nature: "ruled" }]);
     expect(reconciled.natures.get("R-1")).toBe("ruled");
     expect(reconciled.discrepancies).toEqual([
-      { requirementId: "R-1", design: "existence-only", classified: "ruled", resolved: "ruled" },
+      { requirementId: "R-1", design: "existence-only", classified: "ruled", resolved: "ruled", resolution: "fallback" },
     ]);
   });
 
@@ -446,7 +451,7 @@ describe("役割 ID の表と、要件ごとの種類に照らす（Issue #307�
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     expect(outcome.value.discrepancies).toEqual([
-      { requirementId: "R-1", design: "existence-only", classified: "ruled", resolved: "ruled" },
+      { requirementId: "R-1", design: "existence-only", classified: "ruled", resolved: "ruled", resolution: "fallback" },
     ]);
   });
 
@@ -525,5 +530,382 @@ describe("②' に設計を渡す（Issue #316）", () => {
     if (request === undefined) return;
     expect(request.input).not.toContain("役割 ID の表");
     expect(request.input).not.toContain("要件ごとの種類");
+  });
+});
+
+// ── 種類の食い違いを判定の口に選ばせる（§1・②'・Issue #373）──────────────
+
+/** 設計が R-1 を「在ることだけ」、R-2 を「在ることだけ」とする設計（R-1 の向きを逆にする） */
+const DESIGN_R1_EXISTENCE: DesignResult = {
+  roles: PLANNED_ROLES,
+  designs: [
+    { requirementId: "R-1", nature: "existence-only", verification: { kind: "structural", reason: "在ることだけ" }, vocabulary: [], placement: [], unwritable: [] },
+    { requirementId: "R-2", nature: "existence-only", verification: { kind: "structural", reason: "在ることだけ" }, vocabulary: [], placement: [], unwritable: [] },
+  ],
+};
+
+/** 在ることだけの R-1 の正常 1 本（entity の create を構造で確かめる形） */
+const R1_EXISTENCE = [
+  plannedTest({
+    id: "e1",
+    requirementId: "R-1",
+    roleId: "record",
+    targetKind: "entity",
+    kind: "normal",
+    operation: "action",
+    expected: { kind: "ok", value: 1 },
+  }),
+];
+
+/** 種類の判定の答え（choice。確率つき） */
+const natureAnswer = (nature: string, probability?: number): JudgeAnswer => ({
+  kind: "choice",
+  choice: nature,
+  probabilities: undefined,
+  probability,
+  confidence: 0.9,
+});
+
+/** 食い違いを含む ②' の答え（R-1 だけ食い違う） */
+const discrepantOutput = (tests: readonly unknown[]) => ({
+  classifications: [
+    { requirementId: "R-1", nature: "existence-only" },
+    { requirementId: "R-2", nature: "existence-only" },
+  ],
+  tests,
+});
+
+describe("種類の食い違いを判定の口に選ばせる（§1・②'・Issue #373）", () => {
+  it("判定が閾値以上の確率で existence-only を選ぶと、その要件にふつうの試験だけで合格する", async () => {
+    // 設計は R-1 を ruled とするが、②' は existence-only と分類した（食い違い）
+    const recording = createRecordingClient([structured(discrepantOutput([...R1_EXISTENCE, ...R2_EXISTENCE]))]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: PLANNED_DESIGN,
+      judge: createFakeJudge({ [natureQuestionName("R-1")]: natureAnswer("existence-only", 0.8) }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.discrepancies).toEqual([
+      {
+        requirementId: "R-1",
+        design: "ruled",
+        classified: "existence-only",
+        resolved: "existence-only",
+        resolution: "judged",
+        probability: 0.8,
+        model: "fake-judge",
+        thresholdVersion: NATURE_JUDGE_THRESHOLD_VERSION,
+      },
+    ]);
+    // 採った種類が、返す試験集合の分類に書き込まれている（後の段が同じ種類で評価する）
+    expect(outcome.value.suite.classifications).toEqual([
+      { requirementId: "R-1", nature: "existence-only" },
+      { requirementId: "R-2", nature: "existence-only" },
+    ]);
+  });
+
+  it("設計が existence-only・試験の段が ruled の向きの食い違いでも、判定の答えで決まる", async () => {
+    const recording = createRecordingClient([
+      structured({
+        classifications: [
+          { requirementId: "R-1", nature: "ruled" },
+          { requirementId: "R-2", nature: "existence-only" },
+        ],
+        tests: [...R1_EXISTENCE, ...R2_EXISTENCE],
+      }),
+    ]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: DESIGN_R1_EXISTENCE,
+      judge: createFakeJudge({ [natureQuestionName("R-1")]: natureAnswer("existence-only", 0.8) }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.discrepancies).toEqual([
+      {
+        requirementId: "R-1",
+        design: "existence-only",
+        classified: "ruled",
+        resolved: "existence-only",
+        resolution: "judged",
+        probability: 0.8,
+        model: "fake-judge",
+        thresholdVersion: NATURE_JUDGE_THRESHOLD_VERSION,
+      },
+    ]);
+  });
+
+  it("確率がちょうど閾値なら採る", async () => {
+    // 設計は R-1 を ruled、②' は existence-only と分類した（食い違い）
+    const recording = createRecordingClient([structured(discrepantOutput([...R1_EXISTENCE, ...R2_EXISTENCE]))]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: PLANNED_DESIGN,
+      judge: createFakeJudge({
+        [natureQuestionName("R-1")]: natureAnswer("existence-only", NATURE_JUDGE_THRESHOLD),
+      }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.discrepancies[0]).toMatchObject({
+      resolution: "judged",
+      resolved: "existence-only",
+      probability: NATURE_JUDGE_THRESHOLD,
+    });
+  });
+
+  /** 設計 existence-only・②' ruled の食い違いで、R-1 に正常・異常・境界を作った組（判定で ruled に倒れると通る） */
+  const RULED_SUITE_OUTPUT = {
+    classifications: [
+      { requirementId: "R-1", nature: "ruled" },
+      { requirementId: "R-2", nature: "existence-only" },
+    ],
+    tests: [...R1_RULED, ...R2_EXISTENCE],
+  };
+
+  it("閾値未満なら ruled に倒れる", async () => {
+    const recording = createRecordingClient([structured(RULED_SUITE_OUTPUT)]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: DESIGN_R1_EXISTENCE,
+      judge: createFakeJudge({ [natureQuestionName("R-1")]: natureAnswer("existence-only", 0.5) }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.discrepancies).toEqual([
+      { requirementId: "R-1", design: "existence-only", classified: "ruled", resolved: "ruled", resolution: "fallback" },
+    ]);
+  });
+
+  it("確率が無ければ ruled に倒れる", async () => {
+    const recording = createRecordingClient([structured(RULED_SUITE_OUTPUT)]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: DESIGN_R1_EXISTENCE,
+      judge: createFakeJudge({ [natureQuestionName("R-1")]: natureAnswer("existence-only", undefined) }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.discrepancies[0]).toMatchObject({ resolved: "ruled", resolution: "fallback" });
+    expect(outcome.value.discrepancies[0]?.probability).toBeUndefined();
+  });
+
+  it("選択肢に無い答えなら ruled に倒れる", async () => {
+    const recording = createRecordingClient([structured(RULED_SUITE_OUTPUT)]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: DESIGN_R1_EXISTENCE,
+      judge: createFakeJudge({ [natureQuestionName("R-1")]: natureAnswer("unknown", 0.9) }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.discrepancies[0]).toMatchObject({ resolved: "ruled", resolution: "fallback" });
+  });
+
+  it("判定の口が無ければ、今までどおり ruled に倒れる", async () => {
+    const recording = createRecordingClient([structured(RULED_SUITE_OUTPUT)]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: DESIGN_R1_EXISTENCE,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.discrepancies).toEqual([
+      { requirementId: "R-1", design: "existence-only", classified: "ruled", resolved: "ruled", resolution: "fallback" },
+    ]);
+  });
+
+  it("判定が失敗したら ruled に倒れる", async () => {
+    const recording = createRecordingClient([structured(RULED_SUITE_OUTPUT)]);
+    const failing: Judge = {
+      async judge(): Promise<JudgeResponse> {
+        throw new Error("判定が失敗した");
+      },
+    };
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: DESIGN_R1_EXISTENCE,
+      judge: failing,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.discrepancies[0]).toMatchObject({ resolved: "ruled", resolution: "fallback" });
+  });
+
+  it("食い違った要件が複数あれば、1 回の呼び出しにまとめて聞く", async () => {
+    const bothRuled: DesignResult = {
+      roles: PLANNED_ROLES,
+      designs: [
+        { requirementId: "R-1", nature: "ruled", verification: { kind: "fixed-test" }, vocabulary: [], placement: [], unwritable: [] },
+        { requirementId: "R-2", nature: "ruled", verification: { kind: "fixed-test" }, vocabulary: [], placement: [], unwritable: [] },
+      ],
+    };
+    const output = {
+      classifications: [
+        { requirementId: "R-1", nature: "existence-only" },
+        { requirementId: "R-2", nature: "existence-only" },
+      ],
+      tests: [...R1_EXISTENCE, ...R2_EXISTENCE],
+    };
+    const recording = createRecordingClient([structured(output)]);
+    const questionsSeen: string[][] = [];
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        questionsSeen.push(Object.keys(request.questions));
+        const answers: Record<string, JudgeAnswer> = {};
+        for (const name of Object.keys(request.questions)) answers[name] = natureAnswer("existence-only", 0.8);
+        return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+      },
+    };
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: bothRuled,
+      judge,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 2 つの食い違いを、1 回の呼び出しの 2 問としてまとめて聞く
+    expect(questionsSeen).toEqual([[natureQuestionName("R-1"), natureQuestionName("R-2")]]);
+    expect(outcome.value.discrepancies.map((entry) => entry.requirementId)).toEqual(["R-1", "R-2"]);
+  });
+
+  it("食い違った要件だけを 1 回にまとめ、やり直しの回でも聞き直さない", async () => {
+    // 1 回目は R-2 の試験が無く作り直しになる。2 回目も R-1 は ruled と分類される（食い違いのまま）
+    const round1 = {
+      classifications: [
+        { requirementId: "R-1", nature: "ruled" },
+        { requirementId: "R-2", nature: "existence-only" },
+      ],
+      tests: [...R1_EXISTENCE],
+    };
+    const round2 = {
+      classifications: [
+        { requirementId: "R-1", nature: "ruled" },
+        { requirementId: "R-2", nature: "existence-only" },
+      ],
+      tests: [...R1_EXISTENCE, ...R2_EXISTENCE],
+    };
+    const recording = createRecordingClient([structured(round1), structured(round2)]);
+    const questionsSeen: string[][] = [];
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        questionsSeen.push(Object.keys(request.questions));
+        const answers: Record<string, JudgeAnswer> = {};
+        for (const name of Object.keys(request.questions)) answers[name] = natureAnswer("existence-only", 0.8);
+        return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+      },
+    };
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: DESIGN_R1_EXISTENCE,
+      judge,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.rounds).toBe(2);
+    // 1 回だけ、食い違った R-1 の 1 問だけを聞く（2 回目のやり直しでは聞き直さない）
+    expect(questionsSeen).toEqual([[natureQuestionName("R-1")]]);
+    expect(outcome.value.discrepancies[0]).toMatchObject({ requirementId: "R-1", resolution: "judged" });
+  });
+
+  it("判定が失敗した要件も、やり直しの回で聞き直さない", async () => {
+    const round1 = {
+      classifications: [
+        { requirementId: "R-1", nature: "ruled" },
+        { requirementId: "R-2", nature: "existence-only" },
+      ],
+      tests: [...R1_EXISTENCE],
+    };
+    const round2 = {
+      classifications: [
+        { requirementId: "R-1", nature: "ruled" },
+        { requirementId: "R-2", nature: "existence-only" },
+      ],
+      tests: [...R1_RULED, ...R2_EXISTENCE],
+    };
+    const recording = createRecordingClient([structured(round1), structured(round2)]);
+    let calls = 0;
+    const failing: Judge = {
+      async judge(): Promise<JudgeResponse> {
+        calls += 1;
+        throw new Error("判定が失敗した");
+      },
+    };
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: DESIGN_R1_EXISTENCE,
+      judge: failing,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.rounds).toBe(2);
+    expect(calls).toBe(1);
+    expect(outcome.value.discrepancies[0]).toMatchObject({ resolved: "ruled", resolution: "fallback" });
+  });
+
+  it("判定の state には、要件の文と原文の引用だけを入れる（設計の出力・試験は入れない）", async () => {
+    const design: DesignResult = {
+      roles: PLANNED_ROLES,
+      designs: [
+        { requirementId: "R-1", nature: "existence-only", verification: { kind: "fixed-test" }, vocabulary: ["DESIGN_SENTINEL"], placement: [], unwritable: [] },
+        { requirementId: "R-2", nature: "existence-only", verification: { kind: "structural", reason: "在ることだけ" }, vocabulary: [], placement: [], unwritable: [] },
+      ],
+    };
+    const output = {
+      classifications: [
+        { requirementId: "R-1", nature: "ruled" },
+        { requirementId: "R-2", nature: "existence-only" },
+      ],
+      tests: [{ ...R1_EXISTENCE[0]!, id: "TEST_SENTINEL" }, ...R2_EXISTENCE],
+    };
+    const recording = createRecordingClient([structured(output)]);
+    let state: unknown;
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        state = request.state;
+        const answers: Record<string, JudgeAnswer> = {};
+        for (const name of Object.keys(request.questions)) answers[name] = natureAnswer("existence-only", 0.8);
+        return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+      },
+    };
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design,
+      judge,
+    });
+    expect(outcome.ok).toBe(true);
+    const serialized = JSON.stringify(state);
+    // 要件の文と原文の引用は入る
+    expect(serialized).toContain("タスクを記録できる");
+    expect(serialized).toContain("タスクを記録する");
+    // 設計の出力（役割・語彙）も、試験も入らない
+    expect(serialized).not.toContain("DESIGN_SENTINEL");
+    expect(serialized).not.toContain("TEST_SENTINEL");
+    expect(serialized).not.toContain("record.total");
   });
 });

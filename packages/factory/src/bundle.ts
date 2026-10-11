@@ -28,8 +28,10 @@ import type {
   ArbitrationResult,
   CorrespondenceResult,
   Declaration,
+  NatureDiscrepancy,
   RejectedDispute,
   RequirementList,
+  RequirementNature,
   TestRunResult,
 } from "./pipeline.js";
 import type { Summary } from "./record.js";
@@ -48,12 +50,52 @@ export interface BundleJudgeUsage {
 }
 
 /**
- * 納品物の要約（appspec-schema の wire に、記録の欄と**判定の呼び出しの数・費用**を足したもの。
- * Issue #359）。wire は知らない欄を足しても受け付ける（`acceptsHeadlessSummaryWire`）ので、
- * `judge` は additive に足す。
+ * ②' で種類が食い違った要件の記録（Issue #373）。**決め方**（決まりで倒した `fallback`／判定で選んだ
+ * `judged`）を残し、判定で選んだときは確率・判定のモデル・閾値の版を残す（依頼文の全文は残さない）。
+ */
+export interface BundleNatureDiscrepancy {
+  readonly requirement_id: string;
+  /** ② の設計が決めた種類 */
+  readonly design: RequirementNature;
+  /** ②' が独立に分類した種類 */
+  readonly classified: RequirementNature;
+  /** 実際に採った種類 */
+  readonly resolved: RequirementNature;
+  /** どう決めたか（決まりで倒した／判定で選んだ） */
+  readonly resolution: "fallback" | "judged";
+  /** 判定で選んだときの、選んだ選択肢の確率（閾値以上） */
+  readonly probability?: number;
+  /** 判定で答えたモデルの版の ID */
+  readonly model?: string;
+  /** 判定の閾値の版の ID */
+  readonly threshold_version?: string;
+}
+
+/**
+ * 納品物の要約（appspec-schema の wire に、記録の欄と**判定の呼び出しの数・費用**、②' の種類の食い違いの
+ * 記録を足したもの。Issue #359・#373）。wire は知らない欄を足しても受け付ける
+ * （`acceptsHeadlessSummaryWire`）ので、どちらも additive に足す。
  */
 export interface BundleSummary extends Summary {
   readonly judge: BundleJudgeUsage;
+  /** ②' で種類が食い違った要件の記録（食い違いが無ければ空の並び。Issue #373） */
+  readonly nature_discrepancies: readonly BundleNatureDiscrepancy[];
+}
+
+/** ②' の食い違いの記録を、要約に載せる形（snake_case）に写す（Issue #373） */
+export function toBundleNatureDiscrepancies(
+  entries: readonly NatureDiscrepancy[],
+): readonly BundleNatureDiscrepancy[] {
+  return entries.map((entry) => ({
+    requirement_id: entry.requirementId,
+    design: entry.design,
+    classified: entry.classified,
+    resolved: entry.resolved,
+    resolution: entry.resolution,
+    ...(entry.probability === undefined ? {} : { probability: entry.probability }),
+    ...(entry.model === undefined ? {} : { model: entry.model }),
+    ...(entry.thresholdVersion === undefined ? {} : { threshold_version: entry.thresholdVersion }),
+  }));
 }
 
 /** manifest のファイル名。**納品物の直下**に置く（control-plane の照合と同じ名前） */
