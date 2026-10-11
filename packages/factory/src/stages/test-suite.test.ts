@@ -998,7 +998,7 @@ function structureTest(
   };
 }
 
-/** 5 つの検査の中身と、その対象（役割の種類と役割 ID） */
+/** 6 つの検査の中身と、その対象（役割の種類と役割 ID） */
 const CHECK_CASES: Readonly<
   Record<StructuralAssertionKind, { readonly targetKind: "entity" | "field" | "computation" | "operation" | "screen"; readonly roleId: string; readonly assertion: Record<string, unknown> }>
 > = {
@@ -1007,6 +1007,7 @@ const CHECK_CASES: Readonly<
   "action-unconditioned": { targetKind: "operation", roleId: "record.add", assertion: { check: "action-unconditioned" } },
   "view-shows": { targetKind: "screen", roleId: "record.records", assertion: { check: "view-shows", role: "record.amount" } },
   "aggregate-no-period": { targetKind: "computation", roleId: "record.total", assertion: { check: "aggregate-no-period" } },
+  "write-anonymous": { targetKind: "operation", roleId: "record.add", assertion: { check: "write-anonymous" } },
 };
 
 /** 検査の中身の並びに対する構造の検査の並び（R-1 を対象にする） */
@@ -1029,6 +1030,16 @@ describe("構造の検査（Issue #386）", () => {
     const checks: readonly StructuralAssertionKind[] = STRUCTURAL_ASSERTIONS;
     const suite = suiteOf([...structureTestsFor(checks), ...R2_TRIPLE_PLANNED]);
     expect(checkSuitePlan(REQUIREMENT_LIST, suite, structuralDesign(checks), STRUCTURE_NATURES)).toEqual([]);
+  });
+
+  it("write-anonymous の構造の検査が形の検査を通り、対象の種類違いは断られる（Issue #393）", () => {
+    const ok = structureTest("w", "R-1", "operation", "record.add", { check: "write-anonymous" });
+    expect(checkTestSuite([ok]).ok).toBe(true);
+    const wrongKind = structureTest("w2", "R-1", "field", "record.payer", { check: "write-anonymous" });
+    const checked = checkTestSuite([wrongKind]);
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.problems.map((problem) => problem.field)).toContain("tests[0].assertion.check");
   });
 
   it("checks の中身の一部だけなら、欠けた検査を挙げる", () => {

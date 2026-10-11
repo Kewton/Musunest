@@ -65,7 +65,10 @@ export const DESIGN_RULES: readonly string[] = [
   "同名の別 entity を同じ役割 ID にしない。別 entity の同名の対象は、別の役割 ID にする。",
   "要件ごとに、種類（nature）を決める。決まり（条件・計算・検査）を含むなら ruled、在ることだけ（例「名前を持つメンバーを登録できる」）なら existence-only。",
   "要件ごとに、確かめ方（verification）を決める。固定した試験で確かめるなら fixed-test、構造の条件で確かめるなら structural、いまは確かめられないなら unresolved。fixed-test 以外は reason（理由）を書く。",
-  "確かめ方が structural の要件は、求める構造の検査の中身（checks）を、field-type・action-kind・action-unconditioned・view-shows・aggregate-no-period から、重ならずに挙げる。挙げられない条件があるなら structural にしない。構造で確かめない要件の checks は空にする。",
+  "確かめ方が structural の要件は、求める構造の検査の中身（checks）を、field-type・action-kind・action-unconditioned・view-shows・aggregate-no-period・write-anonymous から、重ならずに挙げる。挙げられない条件があるなら structural にしない。構造で確かめない要件の checks は空にする。",
+  "対象の操作が在ること・その種類・条件（when）を持たないこと・誰でも行えることだけを求める要件は structural にし、action-kind・action-unconditioned・write-anonymous のうち要るものを checks に挙げる。",
+  "書き換えの結果（set のあとの値）や、保存したあとの状態を求める要件は、この形で structural にしない。",
+  "権限（permissions）と本人確認（minIdentity）は、write-anonymous で確かめる。",
   "出どころが答えの要件は、その問いが対象にした要件の範囲にだけ当てる。要件に無い操作・項目・画面・計算を役割 ID の表に足さない。",
   "要件の一覧の「参考の文脈」は、その答えが何についての答えかを知るためだけに使う。参考の文脈に残る、選ばれなかった案・疑問・過去の要求を新しい要件にしない。食い違うときは確定した要件の文と有効な parts を優先する。",
 ];

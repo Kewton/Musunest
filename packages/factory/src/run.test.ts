@@ -2103,3 +2103,221 @@ describe("答えから増えた要件の文に問いの文脈を添える（§5�
     expect(arbitration.returnToPlan).toEqual(["t1"]);
   });
 });
+
+// ── 誰でも行える操作を構造の検査で確かめる（02 §1.4・Issue #393）────────────────
+
+const WRITE_CLOCK = "2026-09-16T12:00:00+09:00";
+
+/** 操作（add・条件なし）と、read・write の権限、匿名の本人確認を持つ宣言（抽象的な題材） */
+const WRITE_DECLARATION = [
+  "entities:",
+  "  - name: record",
+  "    fields:",
+  "      amount: number",
+  "views:",
+  "  - name: records",
+  "    type: list",
+  "    entity: record",
+  "    show: [total]",
+  "actions:",
+  "  - name: add",
+  "    entity: record",
+  "    kind: create",
+  "validations: []",
+  "computed:",
+  "  - name: total",
+  "    entity: record",
+  "    expression: amount * 2",
+  "    type: number",
+  "permissions:",
+  "  - name: read",
+  "    subject: minIdentity",
+  "  - name: write",
+  "    subject: minIdentity",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+/** 操作の種類が違う宣言（create ではなく delete） */
+const WRITE_WRONG_KIND = WRITE_DECLARATION.replace("    kind: create", "    kind: delete");
+/** 条件（when）を足した宣言（delete は when を持てる） */
+const WRITE_WITH_WHEN = WRITE_DECLARATION.replace(
+  "  - name: add\n    entity: record\n    kind: create\n",
+  "  - name: add\n    entity: record\n    kind: delete\n    when: amount > 0\n",
+);
+/** 書き込みの権限（write）を外した宣言 */
+const WRITE_NO_PERMISSION = WRITE_DECLARATION.replace("  - name: write\n    subject: minIdentity\n", "");
+/** 対象の操作（add）を消して、別の操作（enrol）だけを残した宣言 */
+const WRITE_NO_ACTION = WRITE_DECLARATION.replace(
+  "  - name: add\n    entity: record\n    kind: create\n",
+  "  - name: enrol\n    entity: record\n    kind: create\n",
+);
+
+/** ② の設計（R-1 は「誰でも直せる」を 3 つの構造の検査で確かめる。R-2 は固定した試験） */
+const WRITE_DESIGN = {
+  roles: [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
+    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+  ],
+  designs: [
+    {
+      requirementId: "R-1",
+      nature: "existence-only",
+      verification: { kind: "structural", reason: "誰でも直せることを構造で確かめる" },
+      checks: ["action-kind", "action-unconditioned", "write-anonymous"],
+      vocabulary: ["action"],
+      placement: ["actions"],
+      unwritable: [],
+    },
+    {
+      requirementId: "R-2",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      checks: [],
+      vocabulary: ["computation"],
+      placement: ["computed"],
+      unwritable: [],
+    },
+  ],
+};
+
+/** 誰でも直せる操作（R-1）の構造の検査 1 件 */
+const writeStructureTest = (id: string, assertion: Record<string, unknown>): unknown => ({
+  id,
+  target: { requirementId: "R-1", kind: "operation", roleId: "record.add" },
+  kind: "normal",
+  operation: "structure",
+  clock: WRITE_CLOCK,
+  input: {},
+  inputContract: { rowId: `${id}-row`, targetRowId: null, emptyEntities: [] },
+  referenceData: [],
+  expected: { kind: "ok", value: true },
+  assertion,
+});
+
+/** ②' の答え（R-1 は種類・条件無し・誰でも書けるの 3 本、R-2 は計算の正常・異常・境界） */
+const WRITE_SUITE = {
+  classifications: [
+    { requirementId: "R-1", nature: "existence-only" },
+    { requirementId: "R-2", nature: "ruled" },
+  ],
+  tests: [
+    writeStructureTest("sa", { check: "action-kind", expected: "create" }),
+    writeStructureTest("su", { check: "action-unconditioned" }),
+    writeStructureTest("sw", { check: "write-anonymous" }),
+    ...STRUCTURAL_CHECKS_SUITE.tests.slice(1), // R-2 の n・a・b
+  ],
+};
+
+/** ③ が提出する対応（役割 ID → 宣言の名前） */
+const WRITE_MAPPINGS = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.add", name: "add" },
+  { roleId: "record.total", name: "total" },
+];
+
+/** ⑤a の答え（R-1 は entity と操作 add、R-2 は計算 total） */
+const WRITE_CORRESPONDENCE = {
+  entries: [
+    {
+      requirementId: "R-1",
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "action", entity: "record", name: "add" },
+      ],
+    },
+    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "total" }] },
+  ],
+};
+
+/** 宣言を差し替えて流す記録（①→①'→②→②'→③→⑤a） */
+const writeRun = (declaration: string): readonly RecordedCall[] => [
+  structured(REQUIREMENT_LIST_OUTPUT),
+  structured(REVERSE_CHECK_OUTPUT),
+  structured(WRITE_DESIGN),
+  structured(WRITE_SUITE),
+  structured({ declaration, mappings: WRITE_MAPPINGS }),
+  structured(WRITE_CORRESPONDENCE),
+];
+
+describe("誰でも行える操作を構造の検査で確かめる（02 §1.4・Issue #393）", () => {
+  it("3 つの構造の検査が成り立てば、合格（full）になり、write-anonymous の記録が残る", async () => {
+    const { run } = runWith(writeRun(WRITE_DECLARATION));
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    if (result.bundle === null) throw new Error("納品物が無い");
+    expect(verificationOf(result.bundle).structural_checks).toEqual([
+      { test_id: "sa", requirement_id: "R-1", check: "action-kind", result: "pass", detail: expect.any(String) },
+      { test_id: "su", requirement_id: "R-1", check: "action-unconditioned", result: "pass", detail: expect.any(String) },
+      { test_id: "sw", requirement_id: "R-1", check: "write-anonymous", result: "pass", detail: expect.any(String) },
+    ]);
+  });
+
+  it("操作が無ければ未解決になり、合格にならない（write-anonymous が unresolved で残る）", async () => {
+    const { run } = runWith(writeRun(WRITE_NO_ACTION), {
+      limits: { ...AGENT_LIMITS, repairRoundTrips: 0, correspondenceRedos: 0 },
+    });
+    const result = await run;
+
+    expect(result.outcome.result).not.toBe("pass");
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const writeCheck = verificationOf(result.bundle).structural_checks.find(
+      (entry) => entry.check === "write-anonymous",
+    );
+    expect(writeCheck).toMatchObject({
+      test_id: "sw",
+      requirement_id: "R-1",
+      check: "write-anonymous",
+      result: "unresolved",
+    });
+  });
+
+  it("操作の種類が違えば不一致になり、合格にならない", async () => {
+    const { run } = runWith(writeRun(WRITE_WRONG_KIND), {
+      limits: { ...AGENT_LIMITS, repairRoundTrips: 0, correspondenceRedos: 0 },
+    });
+    const result = await run;
+
+    expect(result.outcome.result).not.toBe("pass");
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const structural = verificationOf(result.bundle).structural_checks;
+    expect(structural.find((entry) => entry.check === "action-kind")).toMatchObject({ result: "mismatch" });
+    // 種類に依らない write-anonymous は成り立ったままである
+    expect(structural.find((entry) => entry.check === "write-anonymous")).toMatchObject({ result: "pass" });
+  });
+
+  it("操作に条件（when）を足せば不一致になり、合格にならない", async () => {
+    const { run } = runWith(writeRun(WRITE_WITH_WHEN), {
+      limits: { ...AGENT_LIMITS, repairRoundTrips: 0, correspondenceRedos: 0 },
+    });
+    const result = await run;
+
+    expect(result.outcome.result).not.toBe("pass");
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const structural = verificationOf(result.bundle).structural_checks;
+    expect(structural.find((entry) => entry.check === "action-unconditioned")).toMatchObject({ result: "mismatch" });
+  });
+
+  it("書き込みの権限（write）を外せば不一致になり、合格にならない", async () => {
+    const { run } = runWith(writeRun(WRITE_NO_PERMISSION), {
+      limits: { ...AGENT_LIMITS, repairRoundTrips: 0, correspondenceRedos: 0 },
+    });
+    const result = await run;
+
+    expect(result.outcome.result).not.toBe("pass");
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const structural = verificationOf(result.bundle).structural_checks;
+    // action-kind・action-unconditioned は成り立っても、write-anonymous が不一致になる
+    expect(structural.find((entry) => entry.check === "action-kind")).toMatchObject({ result: "pass" });
+    expect(structural.find((entry) => entry.check === "action-unconditioned")).toMatchObject({ result: "pass" });
+    expect(structural.find((entry) => entry.check === "write-anonymous")).toMatchObject({
+      test_id: "sw",
+      requirement_id: "R-1",
+      result: "mismatch",
+    });
+  });
+});
