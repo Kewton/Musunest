@@ -74,8 +74,56 @@ const SENTENCE_BREAKS = new Set(["。", "．", "！", "？", "!", "?"]);
 const isSpace = (char: string): boolean => char === " " || char === "\t" || char === "\r" || char === "\n";
 
 /**
+ * 中身と見なさない記号（Issue #377）。箇条書きの印や句読点である。空白・改行とあわせて「中身の無い
+ * 範囲」を作る。
+ */
+const BLANK_MARKS = new Set([
+  "-",
+  "*",
+  "・",
+  "•",
+  "‐",
+  "–",
+  "—",
+  "、",
+  "。",
+  "，",
+  "．",
+  ",",
+  ".",
+  ":",
+  "：",
+  ";",
+  "；",
+]);
+
+/**
+ * 中身の無い範囲かどうかを判定する（Issue #377）。空白・改行と `BLANK_MARKS` の記号だけの範囲は
+ * 「中身が無い」と見なす。空の範囲（`start >= end`）も中身が無い。
+ */
+export function isBlankRange(source: string, range: SourceRange): boolean {
+  for (let index = range.start; index < range.end; index += 1) {
+    const char = source[index];
+    if (char === undefined || !(isSpace(char) || BLANK_MARKS.has(char))) return false;
+  }
+  return true;
+}
+
+/**
+ * 範囲の前後の空白を詰める（中身の判定と、落ちとして残す範囲に使う。Issue #377）。
+ */
+function trimWhitespace(source: string, range: SourceRange): SourceRange {
+  let start = range.start;
+  let end = range.end;
+  while (start < end && isSpace(source[start] ?? "")) start += 1;
+  while (end > start && isSpace(source[end - 1] ?? "")) end -= 1;
+  return { start, end };
+}
+
+/**
  * 原文を文に切り分け、**前後の空白を除いた**文字の範囲を返す（コードが覆いを数えるのに使う）。
- * 区切りは文の終わりの記号と改行である。空の文は返さない。
+ * 区切りは文の終わりの記号と改行である。空の文と、**中身の無い文（空白・改行と記号だけ）は返さない**
+ * （Issue #377。原文に記号だけの行があっても、覆いの検査で落ちにしない）。
  */
 export function splitSourceSentences(source: string): readonly SourceRange[] {
   const ranges: SourceRange[] = [];
@@ -86,7 +134,7 @@ export function splitSourceSentences(source: string): readonly SourceRange[] {
     let to = end;
     while (from < to && isSpace(source[from] ?? "")) from += 1;
     while (to > from && isSpace(source[to - 1] ?? "")) to -= 1;
-    if (to > from) ranges.push({ start: from, end: to });
+    if (to > from && !isBlankRange(source, { start: from, end: to })) ranges.push({ start: from, end: to });
     start = -1;
   };
   for (let index = 0; index < source.length; index += 1) {
@@ -199,39 +247,54 @@ export function checkReverseCheckOutput(output: unknown): ShapeCheck<ReverseChec
   return { ok: true, value: { uncovered } };
 }
 
+/** コードの落ちに会話の申告を足した結果（`droppedBlankMisses` は捨てた断片の数。Issue #377） */
+interface MergedUncovered {
+  readonly misses: readonly ReverseCheckMiss[];
+  readonly droppedBlankMisses: number;
+}
+
 /**
  * コードが見つけた落ちに、会話が挙げた部分（原文の中にあるもの）を足す。範囲が同じものは重ねない。
  *
  * 会話が挙げた範囲は、**枠の範囲にすべて含まれるときだけ落とす**（Issue #372）。一部だけ重なるときは、
  * 枠の範囲を差し引いた残りを覆われていない範囲として残す（枠の文に混ざった条件を消さない）。重ならない
  * ものはそのまま残す。
+ *
+ * 差し引いた残りは、**断片ごとに前後の空白を詰め、中身の無い断片（空白・改行と記号だけ。Issue #377）は
+ * 捨てる**。中身のある断片は、原文の上の位置のまま落ちとして残す。捨てた断片の数を返す。
  */
 function mergeUncovered(
   codeMisses: readonly ReverseCheckMiss[],
   reported: readonly SourceRange[],
   source: string,
   framing: readonly SourceRange[],
-): readonly ReverseCheckMiss[] {
+): MergedUncovered {
   const misses: ReverseCheckMiss[] = [...codeMisses];
   const seen = new Set(
     codeMisses
       .filter((miss): miss is Extract<ReverseCheckMiss, { kind: "uncovered-source" }> => miss.kind === "uncovered-source")
       .map((miss) => `${miss.range.start}-${miss.range.end}`),
   );
+  let droppedBlankMisses = 0;
   for (const range of reported) {
     if (range.start < 0 || range.end > source.length || range.start >= range.end) continue;
     for (const piece of removeFraming(range, framing)) {
-      const key = `${piece.start}-${piece.end}`;
+      const trimmed = trimWhitespace(source, piece);
+      if (isBlankRange(source, trimmed)) {
+        droppedBlankMisses += 1;
+        continue;
+      }
+      const key = `${trimmed.start}-${trimmed.end}`;
       if (seen.has(key)) continue;
       seen.add(key);
       misses.push({
         kind: "uncovered-source",
-        range: piece,
-        detail: `逆照合の会話が挙げた、覆われていない部分「${source.slice(piece.start, piece.end)}」`,
+        range: trimmed,
+        detail: `逆照合の会話が挙げた、覆われていない部分「${source.slice(trimmed.start, trimmed.end)}」`,
       });
     }
   }
-  return misses;
+  return { misses, droppedBlankMisses };
 }
 
 /**
@@ -256,17 +319,18 @@ export async function runReverseCheck(input: ReverseCheckInput): Promise<StageOu
   });
   const answer = await callStructuredChecked(input.gateway, { request, check: checkReverseCheckOutput });
   if (!answer.ok) return answer;
-  const misses = mergeUncovered(
+  const merged = mergeUncovered(
     checkRequirementCoverage(input.source, input.list),
     answer.value.uncovered,
     input.source,
     framingPositions,
   );
+  const misses = merged.misses;
   const uncovered = misses
     .filter((miss): miss is Extract<ReverseCheckMiss, { kind: "uncovered-source" }> => miss.kind === "uncovered-source")
     .map((miss) => miss.range);
   const quotesValid = !misses.some((miss) => miss.kind === "quote-not-found" || miss.kind === "position-mismatch");
-  return { ok: true, value: { uncovered, quotesValid, misses } };
+  return { ok: true, value: { uncovered, quotesValid, misses, droppedBlankMisses: merged.droppedBlankMisses } };
 }
 
 /** ①' と ① のやり直しをまとめた入力 */
