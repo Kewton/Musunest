@@ -622,6 +622,45 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     expect(result.plan.open_issues.every((issue) => issue.status === "resolved")).toBe(true);
   });
 
+  it("runPlan に渡した原文が、目録の点検の「決まっているか」の state に届く（Issue #376）", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const inner = createFakeJudge({
+      ...catalogAnswers(),
+      [confirmQuestionName("S-1")]: noul(0.95),
+      [confirmQuestionName("S-2")]: noul(0.95),
+    });
+    const requests: JudgeRequest[] = [];
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        requests.push(request);
+        return inner.judge(request);
+      },
+    };
+
+    await runPlan(makePlanInput(recording.client, judge, responder));
+
+    const catalogRequest = requests.find((request) =>
+      Object.keys(request.questions).includes(catalogQuestionName("R-1", "aggregation")),
+    );
+    // 原文が、目録の点検の state に届く
+    expect(catalogRequest?.state).toMatchObject({ source: SOURCE_TEXT });
+    // 対象の要件の文が、問いの欄に入る
+    const specified = catalogRequest?.questions[catalogQuestionName("R-1", "aggregation")];
+    expect(specified?.instructions).toMatchObject({ requirement: "タスクを記録できる" });
+  });
+
   // ── 依頼の枠の文を要件にしない（Issue #372）───────────────────────────
 
   it("枠の文を持つ依頼文で、枠の文を要件にしないまま P6 の照合を通って確定し、確定した仕様に framing も枠の要件も入らない", async () => {

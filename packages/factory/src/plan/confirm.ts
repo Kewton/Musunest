@@ -19,6 +19,7 @@ import type {
   PlanInput,
   PlanOpenIssue,
   PlanProblem,
+  PlanQuestionInput,
   PlanRequirement,
   PlanSourceInput,
 } from "@musunest/appspec-schema";
@@ -170,6 +171,49 @@ export function confirmQuestionName(inputId: string): string {
 }
 
 /**
+ * 覆いの問いの `instructions` に載せる、対象の部分の文（Issue #376）。**問いの名前だけで対象を区別しても、
+ * Jev は名前を読まない**ので、部分の文そのものを問いに載せる。部分は 3 種類ある：
+ *   - 原文の文 … その文をそのまま載せる
+ *   - 自由入力の答え … その文と、元の問いの文を載せる
+ *   - 選択式の答え … 質問 ID と選択肢 ID から**選択肢の文を引き**、元の問いの文も添える
+ * 問いの文そのもの（`ask`）は英語にする。
+ */
+function coverInstructions(
+  target: PlanInput,
+  questionsById: ReadonlyMap<string, PlanQuestionInput>,
+): Readonly<Record<string, unknown>> {
+  if (target.kind === "source") {
+    return {
+      part: target.text,
+      ask: "Is this part of the request covered by one of the requirements? Answer yes or no.",
+    };
+  }
+  if (target.kind === "answer") {
+    const question = questionsById.get(target.question_id);
+    const originalQuestion = question?.text ?? "";
+    if (target.choice_id !== undefined) {
+      const choice = question?.choices.find((candidate) => candidate.id === target.choice_id);
+      return {
+        part: choice?.text ?? target.choice_id,
+        choice_id: target.choice_id,
+        question: originalQuestion,
+        ask: "Is the chosen option covered by one of the requirements? Answer yes or no.",
+      };
+    }
+    return {
+      part: target.free_text ?? "",
+      question: originalQuestion,
+      ask: "Is this answer covered by one of the requirements? Answer yes or no.",
+    };
+  }
+  // 覆いの対象は原文と答えだけである（質問は出どころの引用としてだけ数える）
+  return {
+    part: target.text,
+    ask: "Is this part of the request covered by one of the requirements? Answer yes or no.",
+  };
+}
+
+/**
  * P6 を 1 回回す。出どころを正規化し、覆いをコードで確かめ、判定の口の Noul で助言を取り、§4 の形にして
  * #331 の `checkPlan` を掛ける。`confirmed` は**コードの誤りと `checkPlan` の誤りがどちらも空**のときだけ真。
  */
@@ -219,21 +263,27 @@ export async function runConfirm(input: ConfirmInput): Promise<ConfirmResult> {
     ...input.inputs.filter((entry) => entry.kind === "answer"),
   ];
   if (coverTargets.length > 0) {
+    const questionsById = new Map<string, PlanQuestionInput>();
+    for (const entry of input.inputs) {
+      if (entry.kind === "question") questionsById.set(entry.id, entry);
+    }
     const questions: Record<string, JudgeQuestion> = {};
     for (const target of coverTargets) {
+      // 対象の部分の文そのものを問いの `instructions` に載せる（問いの名前だけでは Jev が読めない。
+      // 選択式の答えは、選択肢の文を引き、元の問いの文も添える。Issue #376）。
       questions[confirmQuestionName(target.id)] = {
         kind: "noul",
-        instructions: "次の依頼文または答えの部分が、いずれかの要件に覆われているかを yes／no で答える。",
+        instructions: coverInstructions(target, questionsById),
         criteria: { yes: "覆われている", no: "覆われていない" },
       };
     }
+    // state には、問いをまたいで共通に要る要件の一覧だけを残す（部分の文は問いの欄へ移した。Issue #376）
     const state = {
       requirements: requirements.map((requirement) => ({
         id: requirement.id,
         text: requirement.text,
         origin: requirement.origin,
       })),
-      parts: coverTargets.map((target) => ({ id: target.id, kind: target.kind })),
     };
     const response = await input.judge.judge({ state, questions });
     for (const target of coverTargets) {

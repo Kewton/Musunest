@@ -8,7 +8,7 @@
 //   5. 要件が無ければ判定を呼ばない
 import { describe, expect, it } from "vitest";
 import { createFakeJudge } from "../judge-fake.js";
-import type { Judge, JudgeAnswer, JudgeRequest } from "../judge.js";
+import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest } from "../judge.js";
 import {
   CATALOG_FACETS,
   catalogAppliesQuestionName,
@@ -20,7 +20,16 @@ import {
 
 const NOUL_THRESHOLD = 0.6;
 
+/** 依頼文（原文）。「決まっているか」の state に入り、要件の文が決まっているかを判定する材料になる */
+const SOURCE = "件数を合計する。一覧を出す。";
+
 const noul = (value: number): JudgeAnswer => ({ kind: "noul", noul: value });
+
+/** 問いの `instructions` を写像として読む（object でないときは undefined） */
+function instructionsOf(question: JudgeQuestion | undefined): Record<string, unknown> | undefined {
+  const instructions = question?.instructions;
+  return typeof instructions === "object" ? (instructions as Record<string, unknown>) : undefined;
+}
 
 /** 要件 1 件ぶんの全観点に、「当てはまる」と「決まっている」の確率を割り当てた答えを作る */
 function uniformAnswers(
@@ -65,7 +74,7 @@ describe("語彙の決めどころの目録（04 §3 P3・05 §3・Issue #366）
       ...uniformAnswers("R-2", { applies: 1, specified: 0.9 }),
     };
     const { judge } = recordingJudge(answers);
-    const result = await runCatalog({ requirements: REQUIREMENTS, judge, threshold: NOUL_THRESHOLD });
+    const result = await runCatalog({ requirements: REQUIREMENTS, judge, source: SOURCE, threshold: NOUL_THRESHOLD });
     expect(result.unspecified).toEqual([]);
   });
 
@@ -74,6 +83,7 @@ describe("語彙の決めどころの目録（04 §3 P3・05 §3・Issue #366）
     const result = await runCatalog({
       requirements: [{ id: "R-2", text: "件数を合計する" }],
       judge,
+      source: SOURCE,
       threshold: NOUL_THRESHOLD,
     });
     expect(result.unspecified).toEqual([]);
@@ -84,6 +94,7 @@ describe("語彙の決めどころの目録（04 §3 P3・05 §3・Issue #366）
     const result = await runCatalog({
       requirements: [{ id: "R-2", text: "件数を合計する" }],
       judge,
+      source: SOURCE,
       threshold: NOUL_THRESHOLD,
     });
     // 目録の順に並ぶ
@@ -103,6 +114,7 @@ describe("語彙の決めどころの目録（04 §3 P3・05 §3・Issue #366）
     const result = await runCatalog({
       requirements: [{ id: "R-1", text: "件数を合計する" }],
       judge,
+      source: SOURCE,
       threshold: NOUL_THRESHOLD,
     });
     expect(result.unspecified).toEqual([]);
@@ -114,7 +126,7 @@ describe("語彙の決めどころの目録（04 §3 P3・05 §3・Issue #366）
       ...uniformAnswers("R-2", { applies: 1, specified: 1 }),
     };
     const { judge, requests } = recordingJudge(answers);
-    await runCatalog({ requirements: REQUIREMENTS, judge, threshold: NOUL_THRESHOLD });
+    await runCatalog({ requirements: REQUIREMENTS, judge, source: SOURCE, threshold: NOUL_THRESHOLD });
     expect(requests).toHaveLength(1);
     expect(Object.keys(requests[0]?.questions ?? {})).toHaveLength(
       REQUIREMENTS.length * CATALOG_FACETS.length * 2,
@@ -125,9 +137,50 @@ describe("語彙の決めどころの目録（04 §3 P3・05 §3・Issue #366）
     expect(Object.keys(requests[0]?.questions ?? {})).toContain(catalogQuestionName("R-2", "editable-by"));
   });
 
+  it("「決まっているか」の呼び出しの state に依頼文（原文）を入れる（Issue #376）", async () => {
+    const answers = {
+      ...uniformAnswers("R-1", { applies: 1, specified: 1 }),
+      ...uniformAnswers("R-2", { applies: 1, specified: 1 }),
+    };
+    const { judge, requests } = recordingJudge(answers);
+    await runCatalog({ requirements: REQUIREMENTS, judge, source: SOURCE, threshold: NOUL_THRESHOLD });
+    expect(requests[0]?.state).toMatchObject({ source: SOURCE });
+  });
+
+  it("問いの instructions は object で、対象の要件の文・観点の英語の説明・英語の問いを載せる（Issue #376）", async () => {
+    const answers = {
+      ...uniformAnswers("R-1", { applies: 1, specified: 1 }),
+      ...uniformAnswers("R-2", { applies: 1, specified: 1 }),
+    };
+    const { judge, requests } = recordingJudge(answers);
+    await runCatalog({ requirements: REQUIREMENTS, judge, source: SOURCE, threshold: NOUL_THRESHOLD });
+
+    const questions = requests[0]?.questions ?? {};
+    const applies1 = questions[catalogAppliesQuestionName("R-1", "aggregation")];
+    const specified1 = questions[catalogQuestionName("R-1", "aggregation")];
+    const specified2 = questions[catalogQuestionName("R-2", "aggregation")];
+
+    // instructions は object（対象の文を問いの中に載せる）
+    expect(applies1?.instructions).toBeTypeOf("object");
+    expect(specified1?.instructions).toMatchObject({
+      requirement: "件数を合計する",
+      point: expect.stringContaining("count"),
+    });
+    // 「当てはまるか」の問いにも、同じ対象の要件の文が入る
+    expect(instructionsOf(applies1)?.requirement).toBe("件数を合計する");
+    // 問いの文は英語（両方の問いとも）
+    expect(instructionsOf(applies1)?.question).toMatch(/^[\x20-\x7E]+$/);
+    const questionText = instructionsOf(specified1)?.question;
+    expect(typeof questionText).toBe("string");
+    expect(String(questionText)).toMatch(/^[\x20-\x7E]+$/);
+    // 同じ呼び出しの中の 2 つの問い（R-1 と R-2）で、対象の文が別々になる
+    expect(instructionsOf(specified2)).toMatchObject({ requirement: "一覧を出す" });
+    expect(instructionsOf(specified1)?.requirement).not.toBe(instructionsOf(specified2)?.requirement);
+  });
+
   it("要件が無ければ、判定を呼ばずに空を返す", async () => {
     const { judge, requests } = recordingJudge({});
-    const result = await runCatalog({ requirements: [], judge, threshold: NOUL_THRESHOLD });
+    const result = await runCatalog({ requirements: [], judge, source: SOURCE, threshold: NOUL_THRESHOLD });
     expect(requests).toEqual([]);
     expect(result).toEqual({ unspecified: [], judgments: [] });
   });
@@ -137,6 +190,7 @@ describe("語彙の決めどころの目録（04 §3 P3・05 §3・Issue #366）
     const result = await runCatalog({
       requirements: [{ id: "R-1", text: "件数を合計する" }],
       judge,
+      source: SOURCE,
       threshold: NOUL_THRESHOLD,
     });
     const forFacet = result.judgments.filter((judgment) => judgment.questionId.endsWith(":aggregation"));
@@ -163,6 +217,7 @@ describe("語彙の決めどころの目録（04 §3 P3・05 §3・Issue #366）
     const result = await runCatalog({
       requirements: [{ id: "R-1", text: "件数を合計する" }],
       judge,
+      source: SOURCE,
       threshold: NOUL_THRESHOLD,
     });
     const first = result.unspecified[0];
