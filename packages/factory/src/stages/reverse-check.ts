@@ -155,8 +155,25 @@ export function splitSourceSentences(source: string): readonly SourceRange[] {
 }
 
 /**
+ * 引用が原文に現れる回数（**重なる出現も含む**。Issue #382）。空の引用は 0。
+ */
+function quoteOccurrences(source: string, quote: string): number {
+  if (quote === "") return 0;
+  let count = 0;
+  let index = source.indexOf(quote);
+  while (index !== -1) {
+    count += 1;
+    index = source.indexOf(quote, index + 1);
+  }
+  return count;
+}
+
+/**
  * コードの検査（会話ではなくコードが見つける。§1・§1.2）：引用が原文に実在すること・位置が合うこと・
  * 原文の文がどれかの要件の位置に覆われていること。見つけた落ちを返す。
+ *
+ * 位置が合わないとき、**引用が原文に 2 か所以上ある**（重なる出現を含む）なら、位置を 1 か所に決められ
+ * ないので、やり直しの指示で「前後を含めて、原文の中で 1 か所に決まる引用にする」と伝える（Issue #382）。
  */
 export function checkRequirementCoverage(source: string, list: RequirementList): readonly ReverseCheckMiss[] {
   const misses: ReverseCheckMiss[] = [];
@@ -172,10 +189,14 @@ export function checkRequirementCoverage(source: string, list: RequirementList):
     const { start, end } = requirement.position;
     const inBounds = start >= 0 && end <= source.length && start <= end;
     if (!inBounds || source.slice(start, end) !== requirement.quote) {
+      const occurrences = quoteOccurrences(source, requirement.quote);
       misses.push({
         kind: "position-mismatch",
         requirementId: requirement.id,
-        detail: `引用の位置（${start}-${end}）が、原文の「${requirement.quote}」の位置と一致しない`,
+        detail:
+          occurrences >= 2
+            ? `引用「${requirement.quote}」が原文に ${occurrences} か所あり、位置が 1 か所に決まらない。前後を含めて、原文の中で 1 か所に決まる引用にする`
+            : `引用の位置（${start}-${end}）が、原文の「${requirement.quote}」の位置と一致しない`,
       });
     }
   }

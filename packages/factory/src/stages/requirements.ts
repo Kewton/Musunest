@@ -29,6 +29,7 @@ export const REQUIREMENTS_SCHEMA_NAME = "requirement-list";
 export const REQUIREMENTS_RULES: readonly string[] = [
   "依頼文（原文）を、1 行 1 要件の一覧にする。",
   "各要件には、原文からそのまま写した引用（quote）と、その位置（position。原文の文字の範囲 start/end）を付ける。",
+  "位置（position）は目安でよい。引用（quote）は原文からそのまま写し、原文の中で 1 か所に決まる引用にする。",
   "「〜のアプリを作ってください」のように、アプリを作ってほしいと述べるだけでほかの条件を持たない文は、要件にせず framing に入れる。framing の各件にも、原文からそのまま写した引用（quote）と、その位置（position）を付ける。",
   "その枠の文に、アプリの名前・対象の人・目的などの条件が混ざっているときは、その条件の部分を要件にする（条件は framing に含めない）。",
   "軽い曖昧さは、どちらに決めたかを decisions に記録して書き進める。",
@@ -126,6 +127,72 @@ function checkPosition(value: unknown, field: string, problems: Problem[]): Sour
   return { start: start as number, end: end as number };
 }
 
+/** 引用が原文に現れる開始位置をすべて返す（**重なる出現も含む**。Issue #382）。空の引用は空の並び */
+function quoteStarts(source: string, quote: string): readonly number[] {
+  if (quote === "") return [];
+  const starts: number[] = [];
+  let index = source.indexOf(quote);
+  while (index !== -1) {
+    starts.push(index);
+    index = source.indexOf(quote, index + 1);
+  }
+  return starts;
+}
+
+/** LLM の位置（start-end）が、原文のその範囲をちょうど指しているか */
+function positionMatches(source: string, quote: string, position: SourceRange): boolean {
+  return (
+    position.start >= 0 &&
+    position.end <= source.length &&
+    position.start <= position.end &&
+    source.slice(position.start, position.end) === quote
+  );
+}
+
+/**
+ * 引用から決めた位置（Issue #382）。`corrected` は、LLM の位置を引用から求め直したか（そのままで
+ * よければ false）。
+ */
+interface DecidedPosition {
+  readonly position: SourceRange;
+  readonly corrected: boolean;
+}
+
+/**
+ * 引用から位置を決める（Issue #382）。**LLM の位置をそのまま使うのは、その範囲の原文が引用と一致する
+ * ときだけ**である。一致せず、引用が原文に **1 か所だけ**あれば、その位置にする（直した）。一致せず、
+ * 引用が空か **2 か所以上**（重なる出現を含む）のときは、位置を推測せず `undefined` を返す（呼ぶ側が
+ * 落ちとして扱う）。
+ */
+function decidePosition(source: string, quote: string, position: SourceRange): DecidedPosition | undefined {
+  if (positionMatches(source, quote, position)) return { position, corrected: false };
+  const starts = quoteStarts(source, quote);
+  if (starts.length === 1) {
+    const start = starts[0] as number;
+    return { position: { start, end: start + quote.length }, corrected: true };
+  }
+  return undefined;
+}
+
+/**
+ * 引用が原文に無い・1 か所に決まらないときの誤りを、`problems` へ足す（Issue #382）。**2 か所以上ある
+ * ときは、やり直しの指示で「1 か所に決まる引用にする」と伝える**。
+ */
+function addUndecidedProblem(source: string, field: string, quote: string, position: SourceRange, problems: Problem[]): void {
+  const count = quoteStarts(source, quote).length;
+  if (count >= 2) {
+    problems.push({
+      field: `${field}.position`,
+      message: `引用「${quote}」が原文に ${count} か所あり、位置が 1 か所に決まらない。前後を含めて、原文の中で 1 か所に決まる引用にする`,
+    });
+    return;
+  }
+  problems.push({
+    field: `${field}.position`,
+    message: `引用の位置（${position.start}-${position.end}）が、原文の「${quote}」の位置と一致しない`,
+  });
+}
+
 function checkRequirement(value: unknown, field: string, problems: Problem[]): Requirement | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "要件は写像（object）であること" });
@@ -154,15 +221,10 @@ function checkRequirement(value: unknown, field: string, problems: Problem[]): R
 }
 
 /**
- * 枠の文 1 件の形を確かめる（Issue #372）。引用は空でなく、位置の範囲の原文が引用と一致すること。
- * `source` を渡されたときだけ、位置と引用の一致を確かめる（判定の口ではない——コードが見る）。
+ * 枠の文 1 件の**形**を確かめる（Issue #372）。引用は空でない文字列で、位置は範囲の形であること。
+ * 位置と引用の一致は、応答の形を確かめたあとの正規化（Issue #382）で見る。
  */
-function checkFraming(
-  value: unknown,
-  field: string,
-  problems: Problem[],
-  source: string | undefined,
-): Framing | undefined {
+function checkFraming(value: unknown, field: string, problems: Problem[]): Framing | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "枠の文は写像（object）であること" });
     return undefined;
@@ -176,20 +238,17 @@ function checkFraming(
   const position = checkPosition(value["position"], `${field}.position`, problems);
   if (position === undefined) good = false;
   if (!good || position === undefined || typeof quote !== "string") return undefined;
-  if (source !== undefined) {
-    const inBounds = position.start >= 0 && position.end <= source.length && position.start <= position.end;
-    if (!inBounds || source.slice(position.start, position.end) !== quote) {
-      problems.push({
-        field: `${field}.position`,
-        message: `引用の位置（${position.start}-${position.end}）が、原文の「${quote}」の位置と一致しない`,
-      });
-      return undefined;
-    }
-  }
   return { quote, position };
 }
 
-/** ① の応答の形を確かめる。合わない欄を**すべて**挙げて返す。`source` を渡すと枠の引用と位置も確かめる */
+/**
+ * ① の応答の形を確かめる。合わない欄を**すべて**挙げて返す。`source` を渡すと、形を確かめたあとに
+ * **正規化**として、要件と枠の文の 1 件ずつについて**コードが引用から位置を求める**（Issue #382）。
+ *
+ * 要件は、引用が原文に無い・1 か所に決まらないとき、位置を推測せずそのままにする（①' 逆照合が
+ * `quote-not-found`・`position-mismatch` の**落ち**として見つける）。枠の文は ①' が引用を見ないので、
+ * ここで**誤り**にする（`framing[i].position`）。
+ */
 export function checkRequirementOutput(output: unknown, source?: string): ShapeCheck<RequirementList> {
   if (!isRecord(output)) {
     return { ok: false, problems: [{ field: "", message: "応答は写像（object）であること" }] };
@@ -213,20 +272,44 @@ export function checkRequirementOutput(output: unknown, source?: string): ShapeC
     problems.push({ field: "framing", message: "枠の文の一覧は並び（array）であること" });
   } else {
     rawFraming.forEach((item, index) => {
-      const checked = checkFraming(item, `framing[${index}]`, problems, source);
+      const checked = checkFraming(item, `framing[${index}]`, problems);
       if (checked !== undefined) framing.push(checked);
     });
   }
   const decisions = checkStringArray(output["decisions"], "decisions", problems);
   const unresolved = checkStringArray(output["unresolved"], "unresolved", problems);
   if (problems.length > 0) return { ok: false, problems };
+
+  let positionCorrections = 0;
+  let normalizedRequirements = requirements;
+  let normalizedFraming = framing;
+  if (source !== undefined) {
+    normalizedRequirements = requirements.map((requirement) => {
+      const decided = decidePosition(source, requirement.quote, requirement.position);
+      if (decided === undefined) return requirement;
+      if (decided.corrected) positionCorrections += 1;
+      return { ...requirement, position: decided.position };
+    });
+    normalizedFraming = [];
+    framing.forEach((frame, index) => {
+      const decided = decidePosition(source, frame.quote, frame.position);
+      if (decided === undefined) {
+        addUndecidedProblem(source, `framing[${index}]`, frame.quote, frame.position, problems);
+        return;
+      }
+      if (decided.corrected) positionCorrections += 1;
+      normalizedFraming.push({ ...frame, position: decided.position });
+    });
+  }
+  if (problems.length > 0) return { ok: false, problems };
   return {
     ok: true,
     value: {
-      requirements,
-      framing,
+      requirements: normalizedRequirements,
+      framing: normalizedFraming,
       decisions: decisions ?? [],
       unresolved: unresolved ?? [],
+      ...(source === undefined ? {} : { positionCorrections }),
     },
   };
 }

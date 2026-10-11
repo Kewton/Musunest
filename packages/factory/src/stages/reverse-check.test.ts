@@ -439,3 +439,47 @@ describe("中身の無い落ちを捨てる（Issue #377）", () => {
     expect(outcome.value.droppedBlankMisses).toBe(0);
   });
 });
+
+describe("① の位置の正規化と逆照合（Issue #382）", () => {
+  /** 原文から引用の位置を求め、1 文字後ろへずらした位置（引用は正しい） */
+  function shiftedSpan(source: string, quote: string) {
+    const start = source.indexOf(quote);
+    return { start: start + 1, end: start + quote.length + 1 };
+  }
+
+  it("要件の段の応答の位置がずれていても（引用は正しい）、逆照合のループで要件の段の呼び出しは 1 回のままで、やり直しにならない", async () => {
+    const shifted = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "タスクを記録する", position: shiftedSpan(SOURCE_TEXT, "タスクを記録する") },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する", position: shiftedSpan(SOURCE_TEXT, "件数を合計する") },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([structured(shifted), structured({ uncovered: [] })]);
+    const outcome = await runReverseCheckLoop({
+      source: SOURCE_TEXT,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // ① が位置を直すので、①' の落ちは無く、やり直しにならない（① と ①' の 2 回だけ）
+    expect(outcome.value.redone).toBe(false);
+    expect(outcome.value.report.misses).toEqual([]);
+    expect(recording.structured).toHaveLength(2);
+  });
+
+  it("位置の食い違った要件の一覧を逆照合に直接渡したときは、今までどおり位置の食い違いの落ちになる", () => {
+    const shifted: RequirementList = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "タスクを記録する", position: { start: 1, end: 9 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const misses = checkRequirementCoverage(SOURCE_TEXT, shifted);
+    const mismatch = misses.find((miss) => miss.kind === "position-mismatch");
+    expect(mismatch?.requirementId).toBe("R-1");
+  });
+});

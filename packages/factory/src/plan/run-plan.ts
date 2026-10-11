@@ -40,7 +40,7 @@ import type { Judge } from "../judge.js";
 import { JudgeBudgetExceededError, createBudgetedJudge, type BudgetedJudge } from "../judge-budget.js";
 import { AGENT_LIMITS, type AgentLimits } from "../limits.js";
 import type { LlmClient } from "../llm.js";
-import type { SourceRange } from "../pipeline.js";
+import type { ReverseCheckMiss, SourceRange } from "../pipeline.js";
 import { UsageMeter, usageDelta, type FailureKind, type StageStatus, type UsageSnapshot } from "../record.js";
 import type { PromptDocument, StageFailure, StageOutcome } from "../stages/prompt.js";
 import { runReverseCheckLoop, splitSourceSentences } from "../stages/reverse-check.js";
@@ -287,6 +287,14 @@ function requirementTextOf(answer: ClassifiedAnswer, question: PlanQuestion): st
 }
 
 /**
+ * 逆照合で残った**引用にまつわる落ち**（引用が原文に無い・位置が 1 か所に決まらない。Issue #382）。
+ * これが残ったまま Plan を確定させない——`run.ts` が同じ落ちを未達として数えるのと揃える。
+ */
+function quoteMissesOf(misses: readonly ReverseCheckMiss[]): readonly ReverseCheckMiss[] {
+  return misses.filter((miss) => miss.kind === "quote-not-found" || miss.kind === "position-mismatch");
+}
+
+/**
  * Plan を 1 回流す（04 §2・§3・§6・§8）。
  *
  * 段を決まった順に回し、答える役の口が答えたら答えを反映し、往復の上限（合わせて 10 問・3 往復）まで
@@ -453,6 +461,20 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       critical: true,
       status: "open",
     }));
+
+    // P1 の逆照合で、引用が原文に無い・1 か所に決まらない要件が残っていれば、Plan を確定させない
+    // （Issue #382）。`run.ts` は同じ落ちを未達として数える（⑦ の合否）。ここでも同じ扱いにする。
+    const quoteMisses = quoteMissesOf(reverse.unmet);
+    if (quoteMisses.length > 0) {
+      const missIssues: PlanOpenIssue[] = quoteMisses.map((miss, index) => ({
+        id: `OI:reverse:${index + 1}`,
+        text: miss.detail,
+        critical: true,
+        status: "open",
+      }));
+      const critical = openIssues.filter((issue) => issue.status === "open" && issue.critical);
+      return { kind: "cannot-confirm", openIssues: [...critical, ...missIssues], ...resultBase() };
+    }
 
     // ── P3 洗い出し（目録に無い曖昧さ）──────────────────────────────
     const surface = await runStageOutcome("surface", () =>
