@@ -9,10 +9,16 @@
 //      規則とデータを分け、受入の題材の言葉を使わないこと
 import { describe, expect, it } from "vitest";
 import { checkTestSuite, type TestSuite } from "../fixed-test.js";
-import type { Declaration, Dispute } from "../pipeline.js";
-import { CONFIRMED_PLAN } from "../__tests__/run.js";
+import { requirementsFromPlan, type Declaration, type Dispute } from "../pipeline.js";
+import {
+  ADDED_OPEN_ISSUE_TEXT,
+  ADDED_QUESTION_TEXT,
+  CONFIRMED_PLAN,
+  CONFIRMED_PLAN_ADDED,
+} from "../__tests__/run.js";
 import {
   ARBITRATION_SCHEMA_NAME,
+  ARBITRATION_SETTLED_RULE,
   checkArbitrationOutput,
   runArbitration,
   type ArbitrationInput,
@@ -233,5 +239,37 @@ describe("確定した仕様と食い違う主張は「Plan に戻す」（§5�
       gateway: makeGateway(recording.client, { maxAttempts: 1 }),
     });
     expect(recording.structured[0]?.input).toContain("確定した仕様");
+  });
+});
+
+// ── 確定した仕様が正本で、参考の文脈は引用の根拠にならない（§5・Issue #391）──────
+
+describe("確定した仕様が正本で、参考の文脈は引用の根拠にならない（§5・Issue #391）", () => {
+  it("確定した仕様を渡したときの決まりの文に、正本と補足の旨がある", () => {
+    expect(ARBITRATION_SETTLED_RULE).toContain("正本");
+    expect(ARBITRATION_SETTLED_RULE).toContain("補足");
+  });
+
+  it("参考の文脈だけにある文を引用にした棄却は、受け付けない（覆らない）", () => {
+    // 答えから増えた要件の文には、参考の文脈（問い・未解決の事項の文）が添えられている
+    const list = requirementsFromPlan(CONFIRMED_PLAN_ADDED);
+    const addedText = list.requirements.find((requirement) => requirement.id === "R-2")?.text ?? "";
+    expect(addedText).toContain(ADDED_QUESTION_TEXT);
+    expect(addedText).toContain(ADDED_OPEN_ISSUE_TEXT);
+    // しかし、参考の文脈は原文には実在しない
+    expect(SOURCE_TEXT).not.toContain(ADDED_QUESTION_TEXT);
+    expect(SOURCE_TEXT).not.toContain(ADDED_OPEN_ISSUE_TEXT);
+
+    for (const quote of [ADDED_QUESTION_TEXT, ADDED_OPEN_ISSUE_TEXT]) {
+      const checked = checkArbitrationOutput(
+        { decisions: [{ testId: "t1", verdict: "overturn", reason: "参考に書いてある", quote }] },
+        disputes("t1"),
+        SOURCE_TEXT,
+      );
+      expect(checked.ok).toBe(true);
+      if (!checked.ok) return;
+      expect(checked.value.overturned).toEqual([]);
+      expect(checked.value.unresolved).toEqual(["t1"]);
+    }
   });
 });

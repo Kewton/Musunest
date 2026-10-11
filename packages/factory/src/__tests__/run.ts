@@ -499,3 +499,75 @@ export function recordedRunFromPlan(options: { readonly design?: unknown } = {})
     structured(CORRESPONDENCE_OUTPUT),
   ];
 }
+
+// ── 答えから増えた要件の文に問いの文脈を添える（§5・Issue #391）────────────────
+
+/** 答えから増えた要件（R-2）の問い（`inputs` の question）の ID と文 */
+export const ADDED_QUESTION_ID = "q-added";
+export const ADDED_QUESTION_TEXT = "合計をどんなときに出すか";
+/** その問いが対応する未解決の事項（`open_issues`）の ID と文 */
+export const ADDED_OPEN_ISSUE_ID = "o-added";
+export const ADDED_OPEN_ISSUE_TEXT = "合計を出す条件が未決である";
+/** その答え（`inputs` の answer）の ID（選択肢で答えたもの） */
+export const ADDED_ANSWER_ID = "a-added";
+
+/**
+ * R-2 が**答えから増えた**要件（`change.kind` が `added`）である、確定した仕様（§5・Issue #391）。
+ * R-1 は原文から来た要件（`change` が無い）で、文脈は添えない。要件の一覧の R-2 の文には、問い
+ * （`ADDED_QUESTION_ID`）と未解決の事項（`ADDED_OPEN_ISSUE_ID`）の文が参考として添えられる。
+ */
+export const CONFIRMED_PLAN_ADDED: ConfirmedPlan = {
+  schema_version: PLAN_SPEC_SCHEMA_VERSION,
+  plan_id: "plan-test-added",
+  revision: 1,
+  vocabulary_version: "v1",
+  inputs: [
+    { id: "in-1", kind: "source", text: SOURCE_TEXT },
+    {
+      id: ADDED_QUESTION_ID,
+      kind: "question",
+      open_issue_id: ADDED_OPEN_ISSUE_ID,
+      text: ADDED_QUESTION_TEXT,
+      choices: [
+        { id: "c-added-1", text: "いつでも出す" },
+        { id: "c-added-2", text: "締めのときだけ出す" },
+      ],
+      recommended: { choice_id: "c-added-1", reason: "素直な解釈である" },
+    },
+    {
+      id: ADDED_ANSWER_ID,
+      kind: "answer",
+      question_id: ADDED_QUESTION_ID,
+      choice_id: "c-added-1",
+    },
+  ],
+  requirements: [
+    {
+      id: "R-1",
+      text: "記録できる",
+      kind: "existence",
+      origin: { input_id: "in-1", quote: "タスクを記録する" },
+      parts: [{ id: "R-1-p1", text: "記録", disposition: "met" }],
+    },
+    {
+      id: "R-2",
+      text: "合計できる",
+      kind: "constraining",
+      origin: { input_id: "in-1", quote: "件数を合計する" },
+      change: { kind: "added", answer_id: ADDED_ANSWER_ID },
+      parts: [{ id: "R-2-p1", text: "合計", disposition: "met" }],
+    },
+  ],
+  open_issues: [
+    {
+      id: ADDED_OPEN_ISSUE_ID,
+      text: ADDED_OPEN_ISSUE_TEXT,
+      critical: false,
+      status: "resolved",
+      resolution: { answer_id: ADDED_ANSWER_ID },
+    },
+  ],
+  decisions: [],
+  accepted_unwritable: [],
+  confirmation: { sha256: "0".repeat(64), confirmed_at: "2026-09-16T12:00:00+09:00", confirmed_by: "tester" },
+};

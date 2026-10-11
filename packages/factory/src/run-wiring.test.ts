@@ -10,7 +10,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runGeneration } from "./run.js";
 import type { RecordedCall } from "./llm-fake.js";
+import { requirementsFromPlan } from "./pipeline.js";
+import * as arbitrateStage from "./stages/arbitrate.js";
 import * as correspondenceStage from "./stages/correspondence.js";
+import * as designStage from "./stages/design.js";
 import * as repairStage from "./stages/repair.js";
 import * as runTestsStage from "./stages/run-tests.js";
 import { TEST_SUITE_SCHEMA_NAME } from "./stages/test-suite.js";
@@ -18,10 +21,14 @@ import * as testSuiteStage from "./stages/test-suite.js";
 import * as writeStage from "./stages/write.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
 import {
+  CONFIRMED_PLAN_ADDED,
+  CORRESPONDENCE_OUTPUT,
   DECLARATION_SOURCE,
   DECLARATION_SOURCE_MISMATCH,
+  DESIGN_OUTPUT,
   REQUIREMENT_LIST_OUTPUT,
   REVERSE_CHECK_OUTPUT,
+  TEST_SUITE_OUTPUT,
   makeRunInput,
   structured,
 } from "./__tests__/run.js";
@@ -192,5 +199,63 @@ describe("段どうしのつなぎ：各段の任意の入力が走らせる部�
     // 旧経路（設計を渡さない呼び出し）なら design は undefined になる。渡っていれば undefined にならず、
     // ここが誤りになる（Issue #316 の回帰の番人）
     expect(testSuiteSpy.mock.calls[0]?.[0]?.design).toBeDefined();
+  });
+});
+
+// ── 確定した仕様を正本にした道でも、全段が同じ要件の一覧を受け取る（§5・Issue #391）──
+
+/**
+ * 確定した仕様を正本にした道で、⑥ 直す・⑥' 裁定まで回る記録。③ の宣言（`amount * 3`）は R-1 の
+ * 期待（`amount * 2`）と合わず、⑥ が異議（原文の引用つき）を出し、⑥' が「確定した仕様と食い違う」と
+ * 裁定して Plan に戻す（返答は新しい抽象的な題材。既存の共通の Plan や本物の応答は置き換えない）。
+ */
+function recordedPlanRepairToPlan(): readonly RecordedCall[] {
+  return [
+    structured(DESIGN_OUTPUT),
+    structured(TEST_SUITE_OUTPUT),
+    structured({ declaration: DECLARATION_SOURCE_MISMATCH }),
+    structured(CORRESPONDENCE_OUTPUT),
+    toolDone({
+      declaration: DECLARATION_SOURCE_MISMATCH,
+      disputes: [{ testId: "t1", quote: "件数を合計する" }],
+    }),
+    structured({
+      decisions: [{ testId: "t1", verdict: "return-to-plan", reason: "確定した仕様と食い違う", quote: "" }],
+    }),
+  ];
+}
+
+describe("確定した仕様を正本にした道でも、全段が同じ要件の一覧を受け取る（§5・Issue #391）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("②・②'・③・⑤a・⑥・⑥' に渡る一覧は同じ変換の結果で、⑤a・⑥' には確定した仕様が入力のまま渡る", async () => {
+    const designSpy = vi.spyOn(designStage, "runDesign");
+    const testSuiteSpy = vi.spyOn(testSuiteStage, "runTestSuite");
+    const writeSpy = vi.spyOn(writeStage, "runWrite");
+    const correspondenceSpy = vi.spyOn(correspondenceStage, "runCorrespondence");
+    const repairSpy = vi.spyOn(repairStage, "runRepairStep");
+    const arbitrateSpy = vi.spyOn(arbitrateStage, "runArbitration");
+
+    const recording = createRecordingClient(recordedPlanRepairToPlan());
+    const result = await runGeneration(makeRunInput(recording.client, { plan: CONFIRMED_PLAN_ADDED }));
+
+    // すべての段に渡る要件の一覧が、同じ変換の結果（`requirementsFromPlan`）である
+    const expected = requirementsFromPlan(CONFIRMED_PLAN_ADDED);
+    expect(designSpy.mock.calls[0]?.[0]?.list, "② に同じ一覧が渡る").toEqual(expected);
+    expect(testSuiteSpy.mock.calls[0]?.[0]?.list, "②' に同じ一覧が渡る").toEqual(expected);
+    expect(writeSpy.mock.calls[0]?.[0]?.list, "③ に同じ一覧が渡る").toEqual(expected);
+    expect(correspondenceSpy.mock.calls[0]?.[0]?.list, "⑤a に同じ一覧が渡る").toEqual(expected);
+    expect(repairSpy.mock.calls[0]?.[0]?.list, "⑥ に同じ一覧が渡る").toEqual(expected);
+    expect(arbitrateSpy.mock.calls[0]?.[0]?.list, "⑥' に同じ一覧が渡る").toEqual(expected);
+
+    // 確定した仕様を受け取る段（⑤a・⑥'）には、入力の Plan がそのまま渡る
+    expect(correspondenceSpy.mock.calls[0]?.[0]?.plan, "⑤a に確定した仕様が入力のまま渡る").toBe(CONFIRMED_PLAN_ADDED);
+    expect(arbitrateSpy.mock.calls[0]?.[0]?.plan, "⑥' に確定した仕様が入力のまま渡る").toBe(CONFIRMED_PLAN_ADDED);
+
+    // Plan への差し戻しの判断があれば、合格（full）にならず、差し戻しが結果に残る
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.returnToPlan).toBe(true);
   });
 });

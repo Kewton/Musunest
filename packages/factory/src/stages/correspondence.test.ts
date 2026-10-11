@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import type { CorrespondenceEntry, Declaration, RoleEntry, RoleNameMapping } from "../pipeline.js";
 import {
   CORRESPONDENCE_SCHEMA_NAME,
+  CORRESPONDENCE_SETTLED_RULE,
   checkCorrespondence,
   checkCorrespondenceOutput,
   checkRoleMappings,
@@ -442,6 +443,15 @@ describe("「画面から辿れない」項目の落ちは、⑥ 直すに回し
     ]);
     const miss = misses.find((candidate) => candidate.location?.name === "ghost");
     expect(miss?.route).toBe("correspondence-defect");
+  });
+});
+
+// ── 確定した仕様が正本で、一覧の文は補足である（§5・Issue #391）──────────────
+
+describe("確定した仕様が正本で、一覧の文は補足である（§5・Issue #391）", () => {
+  it("確定した仕様を渡したときの決まりの文に、正本と補足の旨がある", () => {
+    expect(CORRESPONDENCE_SETTLED_RULE).toContain("正本");
+    expect(CORRESPONDENCE_SETTLED_RULE).toContain("補足");
   });
 });
 

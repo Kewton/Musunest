@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import {
   BUNDLE_MANIFEST_FILE,
   PLAN_FILE,
+  REQUIREMENTS_FILE,
   UNWRITABLE_FILE,
   VERIFICATION_FILE,
   assembleBundle,
@@ -27,9 +28,15 @@ import {
   type BundleUnwritable,
   type BundleVerification,
 } from "./bundle.js";
-import type { CorrespondenceResult, Declaration, RequirementList } from "./pipeline.js";
+import { requirementsFromPlan, type CorrespondenceResult, type Declaration, type RequirementList } from "./pipeline.js";
 import { buildSummary, type RunRecord } from "./record.js";
-import { CONFIRMED_PLAN, DECLARATION_SOURCE } from "./__tests__/run.js";
+import {
+  ADDED_OPEN_ISSUE_TEXT,
+  ADDED_QUESTION_TEXT,
+  CONFIRMED_PLAN,
+  CONFIRMED_PLAN_ADDED,
+  DECLARATION_SOURCE,
+} from "./__tests__/run.js";
 
 const encoder = new TextEncoder();
 const byteLength = (text: string): number => encoder.encode(text).byteLength;
@@ -341,6 +348,29 @@ describe("確定した仕様（plan.json）を納品物に入れる（§4・Issu
     expect((bundle.manifest as unknown as Record<string, unknown>)["plan_sha256"]).toBeUndefined();
     const verification = JSON.parse(findText(bundle.artifacts, VERIFICATION_FILE)) as BundleVerification;
     expect(verification.plan_sha256).toBeUndefined();
+  });
+});
+
+// ── 答えから増えた要件の一覧を添えても、plan の本体と SHA は変わらない（§4・Issue #391）──
+
+describe("答えから増えた要件の一覧を添えても、plan の本体と SHA は変わらない（§4・Issue #391）", () => {
+  it("plan.json の本体と plan の SHA は入力のまま、要件の一覧だけが添えた文になる", async () => {
+    const requirements = requirementsFromPlan(CONFIRMED_PLAN_ADDED);
+    const digest = await planDigest(CONFIRMED_PLAN_ADDED);
+    const bundle = await assembleBundle(input({ plan: CONFIRMED_PLAN_ADDED, requirements }));
+
+    // plan の本体は入力の仕様のまま（キー順も含めて同じバイト列）。SHA も変わらない
+    expect(findText(bundle.artifacts, PLAN_FILE)).toBe(`${JSON.stringify(CONFIRMED_PLAN_ADDED, null, 2)}\n`);
+    expect(bundle.planSha256).toBe(digest);
+    const verification = JSON.parse(findText(bundle.artifacts, VERIFICATION_FILE)) as BundleVerification;
+    expect(verification.plan_sha256).toBe(digest);
+
+    // 要件の一覧だけが、参考の文脈を添えた文になる（原文から来た要件は元のまま）
+    const written = JSON.parse(findText(bundle.artifacts, REQUIREMENTS_FILE)) as RequirementList;
+    const added = written.requirements.find((requirement) => requirement.id === "R-2");
+    expect(added?.text).toContain(ADDED_QUESTION_TEXT);
+    expect(added?.text).toContain(ADDED_OPEN_ISSUE_TEXT);
+    expect(written.requirements.find((requirement) => requirement.id === "R-1")?.text).toBe("記録できる");
   });
 });
 
