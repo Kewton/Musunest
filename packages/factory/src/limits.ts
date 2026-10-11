@@ -153,8 +153,10 @@ export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 /** effort を指定しなかったときの既定（§2）。入口の既定（`high`）と同じ側へ倒す */
 export const DEFAULT_REASONING_EFFORT: ReasoningEffort = "high";
 
-/** LLM を呼ぶ段（出力の上限を持つ段。①〜②'・⑤a・⑥・⑥'） */
+/** LLM を呼ぶ段（出力の上限を持つ段。Plan の P3・P4 と、①〜②'・③・⑤a・⑥・⑥'） */
 export const OUTPUT_STAGES = [
+  "surface", // P3 洗い出す（目録に無い曖昧さ・書けないこと）
+  "questions", // P4 質問を組み立てる
   "requirements", // ① 要件にする
   "reverse-check", // ①' 逆照合
   "design", // ② 設計する
@@ -167,31 +169,41 @@ export const OUTPUT_STAGES = [
 export type OutputStage = (typeof OUTPUT_STAGES)[number];
 
 /**
- * effort ごと・段ごとの出力トークンの上限（`max_output_tokens`。§1.5・§2）。
+ * effort ごと・段ごとの出力トークンの上限（`max_output_tokens`。§1.5・§2）。**値は暫定**で、
+ * 成功率・費用・所要は今後の計測で確かめる。
  *
- * **推論のトークンもこの上限に含まれる。** 2026-10-09 の疎通の確認で、設計の段（上限 4,096）と
- * 試験を作る段（上限 8,192）が、推論のトークンに食われて `max_output_tokens` で未完了になった。
- * そこで `high` は、それまでの固定値（= `medium`）の **4 倍**を置く——推論の分の余白を残しつつ、
- * モデルの出力の上限に収まる範囲で「十分大きい」側へ倒す。`low` は速さを優先する段の試しうち用で、小さい。
+ * **推論のトークンもこの上限に含まれる。** 2026-10-11 の手元の計測（60 本）では、打ち切り
+ * （`incomplete`）が 7 本あった——設計の段 4 本（`low` の 3 本は上限 2,048、`high` の 1 本は上限
+ * 16,384 のうち推論に大半を使って達した）と、質問の段 1 本（当時は設計の段の値を借りていた）、
+ * 要件の段 2 本（複数の呼び出しの合計しか記録が無く、理由は確定していない）。打ち切った呼び出しも
+ * 費用が掛かり、やり直さずにそこで終わる。そこで、**初期値として余白を取り、Plan の段にも自分の
+ * 値を持たせる**。
  *
- * **Issue #332**：受入の試験（effort `medium`）で 47/50 本が逆照合の段で途中で切れたので、`medium` を
- * `high` と**同じ値**にした（`medium` でも推論の余白を同じだけ取る）。`low` は小さいままである。
+ *   - 2026-10-09・#332 で `medium` を `high` と同じ値にした（受入の試験で `medium` が途中で切れた）。
+ *   - 今回（Issue #399）は、`low` を `medium`（= `high`）と**同じ値**にし（`low` の設計の余白が
+ *     足りなかった）、設計の段を 32,768 に上げ、Plan の洗い出し（`surface`）と質問（`questions`）を
+ *     段に足して**自分の名前で値を持つ**ようにした（値は設計の段と同じ）。**effort そのもの
+ *     （全段で同じ値）は変えない。** 3 つの effort の値は今のところ同じである。
  */
 export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage, number>> = {
   low: {
-    requirements: 2_048,
-    "reverse-check": 1_024,
-    design: 2_048,
-    "test-suite": 4_096,
-    write: 4_096,
-    correspondence: 2_048,
-    repair: 4_096,
-    arbitration: 2_048,
-  },
-  medium: {
+    surface: 32_768,
+    questions: 32_768,
     requirements: 16_384,
     "reverse-check": 8_192,
-    design: 16_384,
+    design: 32_768,
+    "test-suite": 32_768,
+    write: 32_768,
+    correspondence: 16_384,
+    repair: 32_768,
+    arbitration: 16_384,
+  },
+  medium: {
+    surface: 32_768,
+    questions: 32_768,
+    requirements: 16_384,
+    "reverse-check": 8_192,
+    design: 32_768,
     "test-suite": 32_768,
     write: 32_768,
     correspondence: 16_384,
@@ -199,9 +211,11 @@ export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage
     arbitration: 16_384,
   },
   high: {
+    surface: 32_768,
+    questions: 32_768,
     requirements: 16_384,
     "reverse-check": 8_192,
-    design: 16_384,
+    design: 32_768,
     "test-suite": 32_768,
     write: 32_768,
     correspondence: 16_384,

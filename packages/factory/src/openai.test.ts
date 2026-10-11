@@ -15,6 +15,7 @@ import type {
   LlmToolRequest,
   LlmTurn,
 } from "./llm.js";
+import { OUTPUT_STAGES, maxOutputTokensForEffort } from "./limits.js";
 import {
   OPENAI_PROMPT_CACHE_KEY,
   OpenAiAdapterError,
@@ -328,6 +329,37 @@ describe("要求の組み立て（02 §2・§2.2）", () => {
     for (const call of captured) {
       expect(call.body.prompt_cache_key).toBe(OPENAI_PROMPT_CACHE_KEY);
     }
+  });
+});
+
+// ── 3.4. 送る max_output_tokens は段と effort の値（02 §1.5・Issue #399）──────────
+
+describe("送る max_output_tokens は、段と effort の値になる（02 §1.5・Issue #399）", () => {
+  it("段と effort の値（STAGE_MAX_OUTPUT_TOKENS）をそのまま送る", async () => {
+    for (const effort of ["low", "medium", "high"] as const) {
+      for (const stage of OUTPUT_STAGES) {
+        const expected = maxOutputTokensForEffort(effort, stage);
+        const { fetch, captured } = recordingFetch(() =>
+          jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
+        );
+        const client = createOpenAiLlmClient({ apiKey: "test-key", effort, fetch });
+        await client.callStructured({ ...STRUCTURED_REQUEST, maxOutputTokens: expected });
+        expect(bodyOf(captured).max_output_tokens, `${effort}/${stage}`).toBe(expected);
+      }
+    }
+  });
+
+  it("代表の値を名指しでも確かめる（設計・洗い出しは 32,768、逆照合は 8,192）", async () => {
+    const design = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
+    );
+    await createOpenAiLlmClient({ apiKey: "test-key", effort: "low", fetch: design.fetch }).callStructured({
+      ...STRUCTURED_REQUEST,
+      maxOutputTokens: maxOutputTokensForEffort("low", "design"),
+    });
+    expect(bodyOf(design.captured).max_output_tokens).toBe(32_768);
+    expect(maxOutputTokensForEffort("low", "surface")).toBe(32_768);
+    expect(maxOutputTokensForEffort("high", "reverse-check")).toBe(8_192);
   });
 });
 

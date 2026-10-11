@@ -3,7 +3,7 @@
 // **偽物の LLM で回す。実 API は呼ばない。** ここで固定したいのは、コードが形・数・事項との対応・重複を
 // 確かめること。断るもの：選択肢が 1 つ・5 つ、推奨が無い、自由入力が無い、同じ事項への 2 問。
 import { describe, expect, it } from "vitest";
-import { PLAN_CHOICES_MIN, AGENT_LIMITS } from "../limits.js";
+import { PLAN_CHOICES_MIN, AGENT_LIMITS, maxOutputTokensForEffort } from "../limits.js";
 import type { PlanOpenIssue } from "@musunest/appspec-schema";
 import { SAMPLE_DOCUMENTS, createRecordingClient, makeGateway } from "../stages/__tests__/prompt.js";
 import {
@@ -188,6 +188,20 @@ describe("P4 を 1 回呼ぶ（04 §3 P4）", () => {
     expect(request?.input).toContain("依頼文");
     expect(request?.input).toContain("未解決の事項");
     expect(request?.instructions).not.toContain("未解決の事項");
+  });
+
+  it("出力の上限は、自分の段（questions）の値になる（02 §1.5・Issue #399）", async () => {
+    const recording = createRecordingClient([{ kind: "structured", output: VALID_OUTPUT, usage: undefined }]);
+    const outcome = await runQuestions({
+      source: "タスクを記録する。",
+      openIssues: [OPEN_ISSUES[0] ?? { id: "OI-1", text: "x", critical: true, status: "open" }],
+      remaining: 4,
+      revision: 1,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    expect(recording.structured[0]?.maxOutputTokens).toBe(maxOutputTokensForEffort("high", "questions"));
   });
 
   it("意味の検査に合わない応答は unmet で断る", async () => {

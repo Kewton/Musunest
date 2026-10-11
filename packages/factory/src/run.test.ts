@@ -1854,8 +1854,9 @@ describe("判定の呼び出しを生成の予算に数える（05 §4〜§5・I
 
     const { judge, calls } = spyJudge(createFakeJudge({}));
     // 予算は、段の呼び出し（③ は 500 件の設計を運ぶ）には足りるが、判定の予約（1 申告 = 1 問の
-    // 問いの map）には足りない大きさにする。
-    const result = await runWith(recordedRun({ design }), { judge, effort: "low", budgetUsd: 0.1 }).run;
+    // 問いの map）には足りない大きさにする。Issue #399 で low を medium（= high）と同じ値にした分、
+    // 段の予約が大きくなったので、値を上げてある。
+    const result = await runWith(recordedRun({ design }), { judge, effort: "low", budgetUsd: 0.15 }).run;
 
     // 予約できないので、判定は 1 回も呼ばれない（呼べるなら問いの答えが無くて誤りになるはず）
     expect(calls()).toBe(0);
@@ -2032,8 +2033,9 @@ describe("試験の段の種類の食い違いを判定に選ばせる（Issue #
     // 呼び出しは通るが、判定の予約だけが残高を超えるようにする（設計はすべて existence-only、
     // ②' はすべて ruled と分類する＝食い違い）。**残高は、段の要求の大きさに合わせてある**——
     // ②' のデータが要件ごとの確かめ方の種類（verification.kind）も運ぶようになった分（Issue #392）、
-    // 段の予約が少し大きくなったので、値を上げてある（この窓の外では、段の予約か判定の予約の
-    // どちらかが通ってしまい、この試験の前提が崩れる）。
+    // さらに low を medium（= high）と同じ値にした分（Issue #399）、段の予約が大きくなったので、
+    // 値を上げてある（この窓の外では、段の予約か判定の予約のどちらかが通ってしまい、この試験の
+    // 前提が崩れる）。
     const count = 300;
     const quotes = Array.from({ length: count }, (_, index) => `項目${index + 1}。`);
     const source = quotes.join("");
@@ -2079,18 +2081,22 @@ describe("試験の段の種類の食い違いを判定に選ばせる（Issue #
 
     // 答えを用意しない偽物（呼ばれれば誤りになる）。予約が断られれば 1 回も呼ばれない
     const { judge, calls } = spyJudge(createFakeJudge({}));
-    const { run } = runWith(
+    // 段の呼び出しの usage を欠けさせ、予約を残したままにする（Issue #399）。low を medium（= high）と
+    // 同じ値にした分、段の予約が大きくなり、settle で戻ると「段は通るが判定の予約は断られる」窓が
+    // ほぼ消える。予約を残せば、判定の手前の残高が判定の予約を下回るので、判定は呼ばれず ruled に倒れる
+    // （幅のある窓で確かめられる）。
+    const noUsage = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
+    const result = await runWith(
       [
-        structured({ requirements, framing: [], decisions: [], unresolved: [] }),
-        structured(REVERSE_CHECK_OUTPUT),
-        structured(design),
-        structured(suite),
+        noUsage({ requirements, framing: [], decisions: [], unresolved: [] }),
+        noUsage(REVERSE_CHECK_OUTPUT),
+        noUsage(design),
+        noUsage(suite),
         // 試験の段のあとの段（③）は、予算が尽きているか、この応答で形が合わずに止まる
-        structured({}),
+        noUsage({}),
       ],
-      { source, judge, budgetUsd: 0.115, effort: "low" },
-    );
-    const result = await run;
+      { source, judge, budgetUsd: 0.42, effort: "low" },
+    ).run;
 
     // 予約が断られたので、判定は 1 回も呼ばれない（要約の judge 欄にも入らない）
     expect(calls()).toBe(0);

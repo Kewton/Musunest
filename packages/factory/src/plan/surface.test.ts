@@ -6,6 +6,7 @@
 //   3. 文書に無い制約 ID を使った「書けない」も断る
 //   4. 代わりの案（alternative）が無い「書けない」は形で断る
 import { describe, expect, it } from "vitest";
+import { maxOutputTokensForEffort } from "../limits.js";
 import {
   REQUIREMENT_LIST,
   SAMPLE_DOCUMENTS,
@@ -60,6 +61,12 @@ describe("P3 の洗い出しが送る要求を観測する（04 §2.2）", () =>
     expect(request.documents).toEqual(SAMPLE_DOCUMENTS.map((document) => `${document.name}\n${document.text}`));
     // データは要件の一覧ただ 1 つ（原文は渡さない。04 §2.2）
     expect(request.input.match(/<data name=/g)).toHaveLength(1);
+  });
+
+  it("出力の上限は、自分の段（surface）の値になる（02 §1.5・Issue #399）", async () => {
+    const { recording, outcome } = run(SURFACE_OUTPUT);
+    await outcome;
+    expect(recording.structured[0]?.maxOutputTokens).toBe(maxOutputTokensForEffort("high", "surface"));
   });
 });
 

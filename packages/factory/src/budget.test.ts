@@ -151,6 +151,30 @@ describe("費用の予約（02 §1.5）", () => {
   });
 });
 
+describe("上限を上げた呼び出しでも、予約は入力込みで見積もり、残高の境界で分ける（02 §1.5・Issue #399）", () => {
+  const rates: TokenRates = { inputPerToken: 1, cachedInputPerToken: 0.5, outputPerToken: 2 };
+
+  it("残高がちょうど足りれば予約でき、1 足りなければ予約できない（入力の分を数える）", () => {
+    // 入力 1,000 × 1 + 出力の上限 32,768 × 2 = 1,000 + 65,536
+    const maxCostUsd = estimateMaxCostUsd({ inputTokens: 1_000, maxOutputTokens: 32_768, rates });
+    expect(maxCostUsd).toBe(66_536);
+
+    // 出力の上限だけの額（65,536）では、入力の分が足りない
+    const outputOnly = new JobBudget(65_536);
+    expect(outputOnly.reserve(maxCostUsd).reserved).toBe(false);
+    expect(outputOnly.reservedUsd).toBe(0);
+
+    // 入力込みの額（66,536）ならちょうど足りる
+    const exact = new JobBudget(maxCostUsd);
+    const reserved = exact.reserve(maxCostUsd);
+    expect(reserved.reserved).toBe(true);
+    if (!reserved.reserved) return;
+    // usage が欠けた応答の扱いは変わらない——精算しなければ予約は残る
+    expect(exact.reservedUsd).toBe(maxCostUsd);
+    expect(exact.remainingUsd).toBe(0);
+  });
+});
+
 describe("Jev の費用（05 §1・§5）", () => {
   const usage = (inputTokens: number, outputTokens = 0): LlmUsage => ({
     inputTokens,

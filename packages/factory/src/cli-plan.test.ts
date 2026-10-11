@@ -21,6 +21,7 @@ import {
 } from "./cli-plan.js";
 import { createFakeJudge } from "./judge-fake.js";
 import type { JudgeAnswer } from "./judge.js";
+import type { LlmClient } from "./llm.js";
 import {
   CATALOG_FACETS,
   catalogAppliesQuestionName,
@@ -246,6 +247,7 @@ interface PlanCliRecordShape {
   }[];
   readonly spent_usd: number;
   readonly remaining_usd: number;
+  readonly budget_usd: number;
   /** 段の失敗の診断（止まったときだけ。Issue #397） */
   readonly failure?: {
     readonly stage: string;
@@ -654,5 +656,97 @@ describe("往復の記録に、一緒に閉じた事項と依頼文で閉じた�
     expect(record.rounds).toEqual([]);
     // 確定したので Build が流れる
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── 上限を上げても、Plan のあとの Build の予算と締切の扱いは変わらない（Issue #399）──
+
+describe("上限を上げても、Plan のあとの Build の予算と締切の扱いは変わらない（Issue #399）", () => {
+  /** usage の欠けた構造化出力の記録（精算されず、予約が残る側） */
+  const withoutUsage = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
+
+  it("Plan で usage の欠けた呼び出しがあると、Build の予算は「全体 − 使った額 − 残る予約」になる", async () => {
+    const recording = createRecordingClient([
+      withoutUsage(REQUIREMENT_LIST_OUTPUT),
+      withoutUsage(REVERSE_CHECK_OUTPUT),
+      withoutUsage(SURFACE_THREE),
+      withoutUsage(QUESTIONS_THREE),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q-1", "A:Q-2", "A:Q-3"]) });
+    const dir = `${directory}/reserved-budget`;
+    const answersPath = "reserved-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--budget", "0.3"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({ "Q-1": { choiceId: "c1" } }) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    // usage が欠けた呼び出しは精算されないので、使った額は 0、予約だけが残る
+    expect(record.spent_usd).toBe(0);
+    expect(record.remaining_usd).toBeLessThan(record.budget_usd);
+    // Build に渡る予算は、残高そのもの（全体 − 使った額 − 残る予約）
+    expect(spy).toHaveBeenCalledTimes(1);
+    const call = spy.mock.calls[0]?.[0];
+    expect(call?.budgetUsd).toBeCloseTo(record.remaining_usd, 12);
+    expect(call?.budgetUsd).toBeLessThan(record.budget_usd - record.spent_usd);
+  });
+
+  it("Plan に時間を使ったあとの Build が、締切を取り直さない", async () => {
+    const recording = planThenBuildRecording();
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q-1", "A:Q-2", "A:Q-3"]) });
+    const dir = `${directory}/deadline`;
+    const answersPath = "deadline-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+    let clock = 0;
+    // 呼ぶたびに時計を進める偽物（Plan が時間を使うことを模す）
+    const tickingClient: LlmClient = {
+      callStructured: (request) => {
+        clock += 1_000;
+        return recording.client.callStructured(request);
+      },
+      callWithTools: (request) => {
+        clock += 1_000;
+        return recording.client.callWithTools(request);
+      },
+    };
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--deadline", "10"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({ "Q-1": { choiceId: "c1" } }) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => tickingClient,
+      makeLlmJudge: () => judge,
+      now: () => clock,
+      log: () => {},
+    });
+
+    // Plan に時間を使った（時計が進んだ）
+    expect(clock).toBeGreaterThan(0);
+    const call = spy.mock.calls[0]?.[0];
+    // 締切は入口で 1 度だけ決めた値（開始 0 + 10 分）のまま——Build が取り直さない
+    expect(call?.deadline).toBe(600_000);
   });
 });
