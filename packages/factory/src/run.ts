@@ -17,9 +17,11 @@ import { JobBudget, type TokenRates } from "./budget.js";
 import { CallGateway } from "./call.js";
 import {
   assembleBundle,
+  toBundleNatureDiscrepancies,
   type AssembledBundle,
   type BundleDroppedClaim,
   type BundleJudgeUsage,
+  type BundleNatureDiscrepancy,
   type BundleSummary,
   type BundleTriageJudgment,
   type UnwritableRequirement,
@@ -368,6 +370,11 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     cost_usd: judgeBudget?.spentUsd ?? 0,
   });
 
+  /**
+   * ②' で種類が食い違った要件の記録（要約に残す。Issue #373）。②' まで届かなければ空の並びのまま。
+   */
+  let natureDiscrepancies: readonly BundleNatureDiscrepancy[] = [];
+
   const stopResult = (attribution: FailureAttribution): GenerationResult => {
     const outcome: Outcome = { result: "failed", verdict: "none" };
     const record = buildRecord(attribution);
@@ -383,6 +390,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         exit_code: 1,
       }),
       judge: judgeUsageOf(),
+      nature_discrepancies: natureDiscrepancies,
     };
     return { outcome, record, summary, bundle: null, stopped: attribution };
   };
@@ -510,6 +518,8 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     // ②' 試験を作って固定する（宣言を見る前に固定する。§1.3）。**② の設計（役割 ID の表と要件ごとの
     // 種類）を渡す**——渡さないと ②' は設計が無いときの古い経路に入り、種類の突き合わせと役割 ID の
     // 検査が効かない（Issue #316。疎通の確認では、在ることだけの要件に異常・境界の試験を求めて落ちた）。
+    // `judge` は**予算に結び付けた包み**（judgeBudget）をそのまま渡す（Issue #373）——種類が食い違った
+    // 要件の判定の呼び出しも、段の呼び出しと同じ予算で予約・精算し、要約の `judge` 欄に数える。
     const testSuite = await runStageOk("test-suite", () =>
       runTestSuite({
         list: requirementList,
@@ -517,8 +527,10 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         documents: input.documents,
         gateway,
         ...(input.plan === undefined ? {} : { plan: input.plan }),
+        ...(judgeBudget === undefined ? {} : { judge: judgeBudget }),
       }),
     );
+    natureDiscrepancies = toBundleNatureDiscrepancies(testSuite.discrepancies);
 
     // ③ 書く
     const written = await runStageOk("write", () =>
@@ -821,6 +833,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         exit_code: outcome.result === "failed" ? 1 : 0,
       }),
       judge: judgeUsageOf(),
+      nature_discrepancies: natureDiscrepancies,
     };
     const bundle = await assembleBundle({
       runId: input.runId,

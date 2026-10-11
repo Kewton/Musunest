@@ -193,8 +193,17 @@ export interface RoleNameMapping {
 }
 
 /**
- * ②' の分類が② の設計と食い違った 1 件（§1・②'・Issue #307）。
- * 食い違った要件は**決まりを含むほうへ倒し**、そのことを結果に残す。
+ * 食い違った種類をどう決めたか（§1・②'・Issue #373）。
+ *
+ * - `fallback` … 今までどおり**決まりを含むほうへ倒した**（判定の口が無い・確率が閾値未満・
+ *   確率が無い・選択肢に無い答え・判定が失敗した・予算の予約が断られた、のいずれか）
+ * - `judged` … 判定の口（Jev → LLM）に選ばせ、**選んだ選択肢の確率が閾値以上**だったので採った
+ */
+export type NatureResolution = "fallback" | "judged";
+
+/**
+ * ②' の分類が② の設計と食い違った 1 件（§1・②'・Issue #307・#373）。
+ * どう決めたか（`resolution`）と、判定で選んだときは確率・判定のモデル・閾値の版を残す。
  */
 export interface NatureDiscrepancy {
   readonly requirementId: string;
@@ -202,8 +211,16 @@ export interface NatureDiscrepancy {
   readonly design: RequirementNature;
   /** ②' が原文と要件の一覧から独立に分類した種類 */
   readonly classified: RequirementNature;
-  /** 倒した先（食い違ったときは `ruled`） */
+  /** 実際に採った種類（判定で決めたときは `existence-only` もありうる） */
   readonly resolved: RequirementNature;
+  /** どう決めたか（決まりで倒した／判定で選んだ） */
+  readonly resolution: NatureResolution;
+  /** 判定で選んだときの、選んだ選択肢の確率（閾値以上） */
+  readonly probability?: number;
+  /** 判定で答えたモデルの版の ID（判定で選んだときだけ） */
+  readonly model?: string;
+  /** 判定の確率の閾値の版の ID（判定で選んだときだけ。版を上げたら測り直す） */
+  readonly thresholdVersion?: string;
 }
 
 /**

@@ -26,7 +26,7 @@ import { CORRESPONDENCE_SCHEMA_NAME } from "./stages/correspondence.js";
 import { REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
 import { REQUIREMENTS_SCHEMA_NAME } from "./stages/requirements.js";
 import { DESIGN_SCHEMA_NAME } from "./stages/design.js";
-import { TEST_SUITE_SCHEMA_NAME } from "./stages/test-suite.js";
+import { NATURE_JUDGE_THRESHOLD_VERSION, TEST_SUITE_SCHEMA_NAME, natureQuestionName } from "./stages/test-suite.js";
 import { WRITE_SCHEMA_NAME } from "./stages/write.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
 import {
@@ -1378,5 +1378,188 @@ describe("確定した仕様を正本にする（§5・Issue #334）", () => {
     expect(result.record.stages.map((stage) => stage.stage)).toContain("reverse-check");
     expect(recording.structured.some((request) => request.schemaName === REQUIREMENTS_SCHEMA_NAME)).toBe(true);
     expect(recording.structured.some((request) => request.schemaName === REVERSE_CHECK_SCHEMA_NAME)).toBe(true);
+  });
+});
+
+// ── 試験の段の種類の食い違いを判定に選ばせる（02 §1・②'・Issue #373）──────────
+
+/** 種類の判定の答え（choice。選んだ選択肢の確率つき） */
+const judgeChoiceProb = (value: string, probability: number): JudgeAnswer => ({
+  kind: "choice",
+  choice: value,
+  probabilities: undefined,
+  probability,
+  confidence: undefined,
+});
+
+/** 種類の食い違いを含む完走の記録（①→①'→②→②'→③→⑤a） */
+const recordedWithNature = (design: unknown, suite: unknown): readonly RecordedCall[] => [
+  structured(REQUIREMENT_LIST_OUTPUT),
+  structured(REVERSE_CHECK_OUTPUT),
+  structured(design),
+  structured(suite),
+  structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+  structured(CREATE_CORRESPONDENCE),
+];
+
+/** R-1 の create の正常 1 本（在ることだけの要件） */
+const R1_CREATE_NORMAL = CREATE_SUITE.tests.filter((test) => test.target.requirementId === "R-1");
+
+/** R-2 の正常・異常・境界（決まりを含む要件。異常の期待を直して、計算の結果と一致させる） */
+const R2_RULED_TRIPLE = CREATE_SUITE.tests
+  .filter((test) => test.target.requirementId === "R-2")
+  .map((test) => (test.id === "a" ? { ...test, expected: { kind: "ok", value: 42 } } : test));
+
+/** 設計が R-1 を「在ることだけ」、R-2 を「決まりを含む」とする（CREATE_DESIGN と同じ種類） */
+const DESIGN_CREATE = CREATE_DESIGN;
+
+describe("試験の段の種類の食い違いを判定に選ばせる（Issue #373）", () => {
+  it("使用量の付いた判定の呼び出しが、要約の judge 欄と生成の予算に入る", async () => {
+    // 設計は R-2 を「在ることだけ」とするが、②' は ruled と分類する（食い違い）。判定は ruled を選ぶ
+    const design = {
+      roles: CREATE_DESIGN.roles,
+      designs: CREATE_DESIGN.designs.map((entry) => ({
+        ...entry,
+        nature: "existence-only",
+        verification: { kind: "structural", reason: "在ることだけ" },
+      })),
+    };
+    const suite = {
+      classifications: [
+        { requirementId: "R-1", nature: "existence-only" },
+        { requirementId: "R-2", nature: "ruled" },
+      ],
+      tests: [...R1_CREATE_NORMAL, ...R2_RULED_TRIPLE],
+    };
+    const usage: LlmUsage = { inputTokens: 800, cachedInputTokens: 200, outputTokens: 120, reasoningTokens: 0 };
+    const judge = llmAnsweringJudge(usage, judgeChoiceProb("ruled", 0.9));
+
+    const withJudge = await runWith(recordedWithNature(design, suite), { judge }).run;
+    const withoutJudge = await runWith(recordedWithNature(design, suite)).run;
+
+    const judgeCost = costOfUsageUsd(usage, RATES);
+    expect(judgeCost).toBeGreaterThan(0);
+    // 要約の judge 欄に、呼び出しの数（llm）と費用が入る
+    expect(withJudge.summary.judge.calls_by_adapter).toEqual({ jev: 0, llm: 1, fake: 0 });
+    expect(withJudge.summary.judge.cost_usd).toBeCloseTo(judgeCost, 12);
+    // 判定の費用は、生成の使用額に入り、残りの予算から引かれる
+    expect(withJudge.summary.provider_cost_usd ?? 0).toBeCloseTo(
+      (withoutJudge.summary.provider_cost_usd ?? 0) + judgeCost,
+      12,
+    );
+    expect(withJudge.summary.budget_remaining_usd).toBeCloseTo(
+      (withoutJudge.summary.budget_remaining_usd ?? 0) - judgeCost,
+      12,
+    );
+    // どちらも合格（判定は助言。門は変えない）
+    expect(withJudge.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(withoutJudge.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+
+  it("判定で採った種類で、試験の段のあとの段も評価される", async () => {
+    // 設計は R-1 を「在ることだけ」とするが、②' は ruled と分類する。判定が existence-only を選ぶ
+    const suite = {
+      classifications: [
+        { requirementId: "R-1", nature: "ruled" },
+        { requirementId: "R-2", nature: "ruled" },
+      ],
+      tests: [...R1_CREATE_NORMAL, ...R2_RULED_TRIPLE],
+    };
+    const judge = createFakeJudge({ [natureQuestionName("R-1")]: judgeChoiceProb("existence-only", 0.9) });
+    const { run } = runWith(recordedWithNature(DESIGN_CREATE, suite), { judge });
+    const result = await run;
+
+    // 採った種類（existence-only）が分類に書き込まれ、後の段（試験を流す）が構造の確認で評価する。
+    // 書き込まなければ（ruled のまま）R-1 の create の試験は実行として扱われ、合格にならない
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    // 要約にも、食い違いの記録（決め方・確率・判定のモデル・閾値の版）が残る
+    expect(result.summary.nature_discrepancies).toEqual([
+      {
+        requirement_id: "R-1",
+        design: "existence-only",
+        classified: "ruled",
+        resolved: "existence-only",
+        resolution: "judged",
+        probability: 0.9,
+        model: "fake-judge",
+        threshold_version: NATURE_JUDGE_THRESHOLD_VERSION,
+      },
+    ]);
+  });
+
+  it("予算の予約が断られると、判定を呼ばずに ruled に倒れる", async () => {
+    // 判定の予約は、問いの数（＝食い違った要件の数）で大きくなる。要件を多くして、試験の段の
+    // 呼び出しは通るが、判定の予約だけが残高を超えるようにする（設計はすべて existence-only、
+    // ②' はすべて ruled と分類する＝食い違い）。
+    const count = 300;
+    const quotes = Array.from({ length: count }, (_, index) => `項目${index + 1}。`);
+    const source = quotes.join("");
+    let offset = 0;
+    const requirements = quotes.map((quote, index) => {
+      const start = offset;
+      offset += quote.length;
+      return {
+        id: `R-${index + 1}`,
+        text: `${quote.slice(0, -1)}できる`,
+        quote,
+        position: { start, end: offset },
+      };
+    });
+    const design = {
+      roles: [{ roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null }],
+      designs: requirements.map((requirement) => ({
+        requirementId: requirement.id,
+        nature: "existence-only",
+        verification: { kind: "structural", reason: "在ることだけ" },
+        vocabulary: [],
+        placement: [],
+        unwritable: [],
+      })),
+    };
+    // 正常・異常・境界をそろえる（判定が断られて ruled に倒れたときに、試験の段は通る）
+    const suite = {
+      classifications: requirements.map((requirement) => ({ requirementId: requirement.id, nature: "ruled" })),
+      tests: requirements.flatMap((requirement, index) =>
+        (["normal", "abnormal", "boundary"] as const).map((kind, kindIndex) => ({
+          id: `t${index * 3 + kindIndex + 1}`,
+          target: { requirementId: requirement.id, kind: "entity", roleId: "record" },
+          kind,
+          operation: "action",
+          clock: "2026-09-16T12:00:00+09:00",
+          input: {},
+          inputContract: { rowId: `row-${index + 1}`, targetRowId: null, emptyEntities: [] },
+          referenceData: [],
+          expected: { kind: "ok", value: null },
+        })),
+      ),
+    };
+
+    // 答えを用意しない偽物（呼ばれれば誤りになる）。予約が断られれば 1 回も呼ばれない
+    const { judge, calls } = spyJudge(createFakeJudge({}));
+    const { run } = runWith(
+      [
+        structured({ requirements, framing: [], decisions: [], unresolved: [] }),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(design),
+        structured(suite),
+        // 試験の段のあとの段（③）は、予算が尽きているか、この応答で形が合わずに止まる
+        structured({}),
+      ],
+      { source, judge, budgetUsd: 0.081, effort: "low" },
+    );
+    const result = await run;
+
+    // 予約が断られたので、判定は 1 回も呼ばれない（要約の judge 欄にも入らない）
+    expect(calls()).toBe(0);
+    expect(result.summary.judge.calls_by_adapter).toEqual({ jev: 0, llm: 0, fake: 0 });
+    expect(result.summary.judge.cost_usd).toBe(0);
+    // 採らずに ruled へ倒れたことが、要約の食い違いの記録に残る（決め方は fallback）
+    expect(result.summary.nature_discrepancies).toHaveLength(count);
+    expect(
+      result.summary.nature_discrepancies.every(
+        (entry) => entry.resolution === "fallback" && entry.resolved === "ruled",
+      ),
+    ).toBe(true);
   });
 });

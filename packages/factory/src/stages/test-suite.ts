@@ -42,6 +42,7 @@ import {
 } from "../fixed-test.js";
 import { checkLimit } from "../limits.js";
 import type { DesignResult, NatureDiscrepancy, RequirementList } from "../pipeline.js";
+import type { Judge, JudgeAnswer, JudgeQuestion } from "../judge.js";
 import type { CallGateway } from "../call.js";
 import { isPlannedDesign } from "./design.js";
 import {
@@ -203,6 +204,12 @@ export interface TestSuiteInput {
    * データに載せる（原文の代わりに、確定した仕様の要件と出どころを根拠にする）。
    */
   readonly plan?: ConfirmedPlan;
+  /**
+   * 判定の口（Jev・LLM・偽物。Issue #373）。渡されたときだけ、**種類が食い違った要件**の種類を
+   * 1 回の Choice の呼び出しで選ばせる。生成（`run.ts`）は、予算に結び付けた包みをそのまま渡す
+   * （判定の費用は生成の予算と要約の `judge` 欄に入る）。渡さなければ今までどおり `ruled` に倒す。
+   */
+  readonly judge?: Judge;
 }
 
 /** selector の鍵（要件 ID と役割 ID。旧形式の自由な文の役割も受ける） */
@@ -375,6 +382,43 @@ export function checkSuitePlan(
   return problems;
 }
 
+/**
+ * 食い違った要件の種類を判定の口（Jev → LLM）に選ばせるときの、選んだ選択肢の**確率の閾値**（§1・②'・
+ * Issue #373）。**これ以上**なら採り、下なら今までどおり `ruled` に倒す。Plan の判定の閾値
+ * （`DEFAULT_PLAN_JUDGE_THRESHOLD`）と同じ考え方で、**版の ID に結び付けて**測り直せるようにする。
+ */
+export const NATURE_JUDGE_THRESHOLD = 0.6;
+
+/** 上の閾値の版の ID。**版を上げたら測り直す**（記録に残す。§4・S-5・Issue #373） */
+export const NATURE_JUDGE_THRESHOLD_VERSION = "nature-judge-v1";
+
+/** 種類の問いの名前の頭（問いの名前は `nature:要件 ID`） */
+export const NATURE_QUESTION_PREFIX = "nature";
+
+/** 種類の問いの名前（要件 ID ごとに 1 問） */
+export function natureQuestionName(requirementId: string): string {
+  return `${NATURE_QUESTION_PREFIX}:${requirementId}`;
+}
+
+/** 種類の選択肢（`ruled`／`existence-only`。Choice 1 問の criteria） */
+export const NATURE_JUDGE_CRITERIA: Readonly<Record<string, string>> = {
+  ruled: "条件・計算・検査などの決まりを含む",
+  "existence-only": "在ることだけ（決まりを含まない）",
+};
+
+/**
+ * 食い違った要件について、判定で採った種類（要件 ID ごとに、1 回の生成の中で 1 度だけ決めて保持する）。
+ * `fallback` は今までどおり `ruled` へ倒したこと（判定の口が無い・確率が足りない・失敗した）。
+ */
+export type NatureDecision =
+  | {
+      readonly kind: "judged";
+      readonly nature: RequirementNature;
+      readonly probability: number;
+      readonly model: string;
+    }
+  | { readonly kind: "fallback" };
+
 /** ②' の分類を、② の設計と突き合わせた結果（実際に使う種類と、食い違った要件） */
 export interface NatureReconciliation {
   readonly natures: ReadonlyMap<string, RequirementNature>;
@@ -391,13 +435,15 @@ function designNaturesOf(design: DesignResult): ReadonlyMap<string, RequirementN
 }
 
 /**
- * ②' が独立に分類した種類を、② の設計の種類と突き合わせる（§1・②'・Issue #307）。
- * **食い違った要件は「決まりを含む」ほうへ倒し**、食い違いを結果に残す。片方しか無ければそれを採り、
- * どちらも無ければ `ruled`（決まりを含む。見落としを合格にしない側へ倒す）。
+ * ②' が独立に分類した種類を、② の設計の種類と突き合わせる（§1・②'・Issue #307・#373）。
+ * 食い違った要件は、`decisions` に**判定で採った種類**があればそれを採り、無ければ今までどおり
+ * 「決まりを含む」ほうへ倒す（`fallback`）。片方しか無ければそれを採り、どちらも無ければ `ruled`
+ * （決まりを含む。見落としを合格にしない側へ倒す）。
  */
 export function reconcileNatures(
   design: DesignResult,
   classifications: readonly RequirementClassification[] | undefined,
+  decisions?: ReadonlyMap<string, NatureDecision>,
 ): NatureReconciliation {
   const designNatures = designNaturesOf(design);
   const classified = new Map<string, RequirementNature>();
@@ -409,13 +455,122 @@ export function reconcileNatures(
     const fromDesign = designNatures.get(id);
     const fromClassified = classified.get(id);
     if (fromDesign !== undefined && fromClassified !== undefined && fromDesign !== fromClassified) {
-      natures.set(id, "ruled");
-      discrepancies.push({ requirementId: id, design: fromDesign, classified: fromClassified, resolved: "ruled" });
+      const decision = decisions?.get(id);
+      if (decision !== undefined && decision.kind === "judged") {
+        natures.set(id, decision.nature);
+        discrepancies.push({
+          requirementId: id,
+          design: fromDesign,
+          classified: fromClassified,
+          resolved: decision.nature,
+          resolution: "judged",
+          probability: decision.probability,
+          model: decision.model,
+          thresholdVersion: NATURE_JUDGE_THRESHOLD_VERSION,
+        });
+      } else {
+        natures.set(id, "ruled");
+        discrepancies.push({
+          requirementId: id,
+          design: fromDesign,
+          classified: fromClassified,
+          resolved: "ruled",
+          resolution: "fallback",
+        });
+      }
       continue;
     }
     natures.set(id, fromDesign ?? fromClassified ?? "ruled");
   }
   return { natures, discrepancies };
+}
+
+/** いま食い違っている要件 ID（判定の問いを立てる対象。`reconcileNatures` の生の結果から取る） */
+function discrepantIdsOf(design: DesignResult, classifications: readonly RequirementClassification[] | undefined): readonly string[] {
+  return reconcileNatures(design, classifications).discrepancies.map((entry) => entry.requirementId);
+}
+
+/**
+ * 判定の答え（choice）から、種類を採るかどうかを決める（§1・②'・Issue #373）。
+ * 選択肢が `ruled`／`existence-only` でなく、確率が無い・不正な数・閾値未満のときは `fallback`
+ * （`ruled` へ倒す）。**確率がちょうど閾値なら採る**。
+ */
+function decideNature(answer: JudgeAnswer | undefined, model: string): NatureDecision {
+  if (answer === undefined || answer.kind !== "choice") return { kind: "fallback" };
+  if (!isRequirementNature(answer.choice)) return { kind: "fallback" };
+  const probability = answer.probability;
+  if (typeof probability !== "number" || !Number.isFinite(probability) || probability < 0 || probability > 1) {
+    return { kind: "fallback" };
+  }
+  if (probability < NATURE_JUDGE_THRESHOLD) return { kind: "fallback" };
+  return { kind: "judged", nature: answer.choice, probability, model };
+}
+
+/**
+ * 食い違った要件を、**1 回の呼び出しにまとめて**判定の口に聞く（§1・②'・Issue #373）。
+ * state は**要件の文と原文の引用だけ**（設計の出力・試験は渡さない）。答えが無い・確率が足りない・
+ * 判定が失敗した要件は `fallback`（`ruled` へ倒す）。**要件ごとに 1 度だけ**聞くので、呼ぶ側は
+ * 決めた結果を保持し、やり直しの回で聞き直さない。
+ */
+export async function decideDiscrepantNatures(input: {
+  readonly judge: Judge;
+  readonly list: RequirementList;
+  readonly requirementIds: readonly string[];
+}): Promise<ReadonlyMap<string, NatureDecision>> {
+  const decisions = new Map<string, NatureDecision>();
+  if (input.requirementIds.length === 0) return decisions;
+  const questions: Record<string, JudgeQuestion> = {};
+  const state: { requirementId: string; text: string; quote: string }[] = [];
+  for (const requirementId of input.requirementIds) {
+    const requirement = input.list.requirements.find((candidate) => candidate.id === requirementId);
+    questions[natureQuestionName(requirementId)] = {
+      kind: "choice",
+      instructions:
+        "対象の要件が、条件・計算・検査などの決まりを含むか、在ることだけかを選ぶ。決まりを含むなら ruled、在ることだけなら existence-only。",
+      criteria: NATURE_JUDGE_CRITERIA,
+    };
+    state.push({
+      requirementId,
+      text: requirement?.text ?? "",
+      quote: requirement?.quote ?? "",
+    });
+  }
+  let model = "";
+  let answers: Readonly<Record<string, JudgeAnswer>> | undefined;
+  try {
+    const response = await input.judge.judge({ state: { requirements: state }, questions });
+    model = response.model;
+    answers = response.answers;
+  } catch {
+    // 判定が失敗したら（予算の予約が断られたときも含む）、食い違った要件はすべて ruled へ倒す
+    for (const requirementId of input.requirementIds) decisions.set(requirementId, { kind: "fallback" });
+    return decisions;
+  }
+  for (const requirementId of input.requirementIds) {
+    decisions.set(requirementId, decideNature(answers[natureQuestionName(requirementId)], model));
+  }
+  return decisions;
+}
+
+/**
+ * 採った種類を、試験集合の分類（`classifications`）に書き込む（§1・②'・Issue #373）。
+ * 後の段（試験の実行・直す段）が、②' で検査したのと同じ種類で評価できるようにする。
+ */
+function withAdoptedNatures(
+  suite: TestSuite,
+  adopted: ReadonlyMap<string, RequirementNature>,
+): TestSuite {
+  if (adopted.size === 0) return suite;
+  const out: RequirementClassification[] = [];
+  const seen = new Set<string>();
+  for (const entry of suite.classifications ?? []) {
+    out.push({ requirementId: entry.requirementId, nature: adopted.get(entry.requirementId) ?? entry.nature });
+    seen.add(entry.requirementId);
+  }
+  for (const [requirementId, nature] of adopted) {
+    if (!seen.has(requirementId)) out.push({ requirementId, nature });
+  }
+  return { ...suite, classifications: out };
 }
 
 /**
@@ -542,18 +697,26 @@ function buildData(
 export interface TestSuiteValue {
   readonly suite: TestSuite;
   readonly rounds: number;
-  /** ②' の分類と ② の設計が食い違った要件（決まりを含むほうへ倒した。§1・②'・Issue #307） */
+  /**
+   * ②' の分類と ② の設計が食い違った要件（どう決めたかと、判定で選んだときは確率つき。
+   * §1・②'・Issue #307・#373）
+   */
   readonly discrepancies: readonly NatureDiscrepancy[];
 }
 
 /**
  * ②' を回す。形は `callStructuredChecked` が 1 回だけやり直し、コードの検査に合わなければ
- * **1 回だけ作り直させる**。設計が渡されたときは、分類との食い違いを決まりを含むほうへ倒し、
- * 種類に応じた検査（`checkSuitePlan`）を掛ける。それでも合わなければ `unmet`（未達）として、欠けの
- * 内容を返す。
+ * **1 回だけ作り直させる**。設計が渡されたときは、分類との食い違いを突き合わせ、**食い違った要件だけ**
+ * を判定の口に 1 回の Choice で選ばせ（`decideDiscrepantNatures`）、種類に応じた検査（`checkSuitePlan`）
+ * を掛ける。それでも合わなければ `unmet`（未達）として、欠けの内容を返す。
+ *
+ * **同じ要件は 1 回の生成の中で 1 度だけ聞く**——決めた結果（`decisions`）をやり直しの回へ持ち越すので、
+ * 分類が変わっても聞き直さず、失敗した要件も聞き直さない（Issue #373）。
  */
 export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<TestSuiteValue>> {
   let previous: readonly Problem[] = [];
+  // 食い違った要件の決め方（要件 ID ごと）。やり直しの回をまたいで持ち越す（聞き直さない。Issue #373）
+  const decisions = new Map<string, NatureDecision>();
   // 新しい契約の設計（役割 ID の表・種類・確かめ方を持つ）のときだけ、突き合わせと役割 ID の検査を
   // 掛ける。旧形式の記録（設計の新しい欄が無い）は旧来の検査を通す（`design.ts` と同じ後方互換）。
   const planned = input.design !== undefined && isPlannedDesign(input.design);
@@ -570,15 +733,35 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
     if (!answer.ok) return answer;
     let problems: readonly Problem[];
     let discrepancies: readonly NatureDiscrepancy[] = [];
+    let suite = answer.value;
     if (input.design === undefined || !planned) {
       problems = checkSuiteAgainstRequirements(input.list, answer.value);
     } else {
-      const reconciled = reconcileNatures(input.design, answer.value.classifications);
+      // 食い違った要件のうち、まだ決めていないものを 1 回の呼び出しにまとめて判定に聞く（Issue #373）。
+      // 判定の口が無ければ聞かず、`reconcileNatures` が今までどおり `ruled` に倒す。
+      if (input.judge !== undefined) {
+        const pending = discrepantIdsOf(input.design, answer.value.classifications).filter(
+          (requirementId) => !decisions.has(requirementId),
+        );
+        if (pending.length > 0) {
+          const verdicts = await decideDiscrepantNatures({
+            judge: input.judge,
+            list: input.list,
+            requirementIds: pending,
+          });
+          for (const [requirementId, decision] of verdicts) decisions.set(requirementId, decision);
+        }
+      }
+      const reconciled = reconcileNatures(input.design, answer.value.classifications, decisions);
       discrepancies = reconciled.discrepancies;
-      problems = checkSuitePlan(input.list, answer.value, input.design, reconciled.natures);
+      // 採った種類を、返す試験集合の分類にも書き込む（後の段が同じ種類で評価できるように。Issue #373）
+      const adopted = new Map<string, RequirementNature>();
+      for (const entry of reconciled.discrepancies) adopted.set(entry.requirementId, entry.resolved);
+      suite = withAdoptedNatures(answer.value, adopted);
+      problems = checkSuitePlan(input.list, suite, input.design, reconciled.natures);
     }
     if (problems.length === 0) {
-      return { ok: true, value: { suite: answer.value, rounds: round, discrepancies } };
+      return { ok: true, value: { suite, rounds: round, discrepancies } };
     }
     previous = problems;
   }
