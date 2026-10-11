@@ -405,6 +405,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       runReverseCheckLoop({ source: input.source, documents: input.documents, gateway }),
     );
     const list = reverse.list;
+    // P1 の枠の文の範囲。**P6 の照合に渡し、枠の範囲も覆われていると数える**（Issue #372）。枠の文は
+    // 要件にしないので、そのままでは原文が覆われていないと見なされて確定できない。
+    const framing: SourceRange[] = (list.framing ?? []).map((entry) => entry.position);
 
     // ── 入力（原文）と、原文を覆う要件を組む ──────────────────────────────
     // 原文を文に切り、文ごとに 1 つの `source` の入力を作る（`checkSourceCoverage` が文と入力の本文を
@@ -694,6 +697,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         revision,
         vocabularyVersion: input.vocabularyVersion,
         source: input.source,
+        framing,
         inputs: [...sourceInputs, ...questionInputs, ...answerInputs],
         requirements,
         openIssues,

@@ -65,6 +65,7 @@ export const REQUIREMENT_LIST_OUTPUT = {
     { id: "R-1", text: "記録できる", quote: "タスクを記録する", position: { start: 0, end: 8 } },
     { id: "R-2", text: "合計できる", quote: "件数を合計する", position: { start: 9, end: 16 } },
   ],
+  framing: [],
   decisions: [],
   unresolved: [],
 };
@@ -295,7 +296,7 @@ export const MAPPING_REDO_OUTPUT = { mappings: BAD_MAPPINGS };
 /** 4 つの文の原文（R-1〜R-4 が 1 文ずつ覆う。抽象的な題材） */
 export const SOURCE_TEXT_FOUR = "タスクを記録する。件数を合計する。補助を出す。印を出す。";
 
-/** ① の答え（R-1〜R-4。引用と位置は原文に一致する） */
+/** ① の答え（R-1〜R-4。引用と位置は原文に一致する。`framing` は必須の欄なので空の配列を置く。Issue #372） */
 export const REQUIREMENT_LIST_OUTPUT_FOUR = {
   requirements: [
     { id: "R-1", text: "タスクを記録できる", quote: "タスクを記録する。", position: { start: 0, end: 9 } },
@@ -303,6 +304,7 @@ export const REQUIREMENT_LIST_OUTPUT_FOUR = {
     { id: "R-3", text: "補助を出せる", quote: "補助を出す。", position: { start: 17, end: 23 } },
     { id: "R-4", text: "印を出せる", quote: "印を出す。", position: { start: 23, end: 28 } },
   ],
+  framing: [],
   decisions: [],
   unresolved: [],
 };

@@ -24,6 +24,16 @@ export interface RequirementPart {
   readonly disposition: PlanPartDisposition;
 }
 
+/**
+ * 依頼の枠の文（①。Issue #372）。「〜のアプリを作ってください」のように、アプリを作ってほしいと述べる
+ * だけでほかの条件を持たない文である。**要件にはしない**——設計も試験も当てはまらないためである。
+ * 原文からの引用と、その位置（文字の範囲）を持つ。
+ */
+export interface Framing {
+  readonly quote: string;
+  readonly position: SourceRange;
+}
+
 /** 1 行 1 要件。原文の引用と位置を付ける（①。F-3） */
 export interface Requirement {
   readonly id: string;
@@ -41,6 +51,11 @@ export interface Requirement {
 /** ① 要件にする、の出力 */
 export interface RequirementList {
   readonly requirements: readonly Requirement[];
+  /**
+   * 依頼の枠の文の一覧（Issue #372）。API に送る schema では必須（空の配列でよい）だが、工場の中の型では
+   * **任意**にする——記録した本物の応答にはこの欄が無いためである。無いときは空の配列として扱う。
+   */
+  readonly framing?: readonly Framing[];
   /** 軽い曖昧さについて、どちらに決めたかの記録（F-6） */
   readonly decisions: readonly string[];
   /** 重大な曖昧さ。決めずに「未解決」として最後まで持つ（F-6） */

@@ -163,6 +163,28 @@ describe("全段で同じ「封筒」の schema（02 §2・#353）", () => {
     ]);
   });
 
+  it("要件の段の枝は framing を必須にし、1 件の形（引用・位置）を入れ子で定める（Issue #372）", () => {
+    const entry = STAGE_ENVELOPE_ENTRIES.find((candidate) => candidate.stage === "requirement-list");
+    expect(entry).toBeDefined();
+    if (entry === undefined) return;
+    const branch = buildStageBranch(entry);
+    expect(strictProblems(branch)).toEqual([]);
+    const required = branch.required as readonly string[];
+    expect(required).toContain("framing");
+    const properties = branch.properties as Record<string, unknown>;
+    const framing = properties["framing"] as Record<string, unknown>;
+    expect(framing.type).toBe("array");
+    const items = framing.items as Record<string, unknown>;
+    expect(items.type).toBe("object");
+    expect(items.additionalProperties).toBe(false);
+    expect(items.required).toEqual(["quote", "position"]);
+    const itemProperties = items.properties as Record<string, unknown>;
+    expect(itemProperties["quote"]).toMatchObject({ type: "string" });
+    const position = itemProperties["position"] as Record<string, unknown>;
+    expect(position.type).toBe("object");
+    expect(position.required).toEqual(["start", "end"]);
+  });
+
   it("段の名前から、その枝（段の schema）を引ける", () => {
     for (const entry of STAGE_ENVELOPE_ENTRIES) {
       expect(envelopeStageFor(entry.stage)?.schema, entry.stage).toBe(entry.schema);

@@ -131,7 +131,11 @@ export function checkRequirementCoverage(source: string, list: RequirementList):
       });
     }
   }
-  const positions = list.requirements.map((requirement) => requirement.position);
+  // 枠の文（要件にしない文）の範囲も「覆われている」と数える（Issue #372）
+  const positions = [
+    ...list.requirements.map((requirement) => requirement.position),
+    ...(list.framing ?? []).map((framing) => framing.position),
+  ];
   for (const sentence of splitSourceSentences(source)) {
     const covered = positions.some((position) => position.start < sentence.end && sentence.start < position.end);
     if (!covered) {
@@ -143,6 +147,27 @@ export function checkRequirementCoverage(source: string, list: RequirementList):
     }
   }
   return misses;
+}
+
+/**
+ * 原文の範囲から、枠の範囲を取り除く（Issue #372）。枠にすべて含まれていれば空の並びを返し、一部だけ
+ * 重なれば差し引いた残りを返し、重ならなければそのまま返す。**枠の文に混ざった条件を消さない**。
+ */
+function removeFraming(range: SourceRange, framing: readonly SourceRange[]): readonly SourceRange[] {
+  let pieces: SourceRange[] = [range];
+  for (const frame of framing) {
+    const next: SourceRange[] = [];
+    for (const piece of pieces) {
+      if (frame.end <= piece.start || piece.end <= frame.start) {
+        next.push(piece);
+        continue;
+      }
+      if (frame.start > piece.start) next.push({ start: piece.start, end: frame.start });
+      if (frame.end < piece.end) next.push({ start: frame.end, end: piece.end });
+    }
+    pieces = next;
+  }
+  return pieces;
 }
 
 /** ①' の応答の形を確かめる */
@@ -174,11 +199,18 @@ export function checkReverseCheckOutput(output: unknown): ShapeCheck<ReverseChec
   return { ok: true, value: { uncovered } };
 }
 
-/** コードが見つけた落ちに、会話が挙げた部分（原文の中にあるもの）を足す。範囲が同じものは重ねない */
+/**
+ * コードが見つけた落ちに、会話が挙げた部分（原文の中にあるもの）を足す。範囲が同じものは重ねない。
+ *
+ * 会話が挙げた範囲は、**枠の範囲にすべて含まれるときだけ落とす**（Issue #372）。一部だけ重なるときは、
+ * 枠の範囲を差し引いた残りを覆われていない範囲として残す（枠の文に混ざった条件を消さない）。重ならない
+ * ものはそのまま残す。
+ */
 function mergeUncovered(
   codeMisses: readonly ReverseCheckMiss[],
   reported: readonly SourceRange[],
   source: string,
+  framing: readonly SourceRange[],
 ): readonly ReverseCheckMiss[] {
   const misses: ReverseCheckMiss[] = [...codeMisses];
   const seen = new Set(
@@ -188,14 +220,16 @@ function mergeUncovered(
   );
   for (const range of reported) {
     if (range.start < 0 || range.end > source.length || range.start >= range.end) continue;
-    const key = `${range.start}-${range.end}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    misses.push({
-      kind: "uncovered-source",
-      range,
-      detail: `逆照合の会話が挙げた、覆われていない部分「${source.slice(range.start, range.end)}」`,
-    });
+    for (const piece of removeFraming(range, framing)) {
+      const key = `${piece.start}-${piece.end}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      misses.push({
+        kind: "uncovered-source",
+        range: piece,
+        detail: `逆照合の会話が挙げた、覆われていない部分「${source.slice(piece.start, piece.end)}」`,
+      });
+    }
   }
   return misses;
 }
@@ -205,9 +239,12 @@ function mergeUncovered(
  * 会話の申告を足す。`quotesValid` は引用の実在と位置の一致の有無である。
  */
 export async function runReverseCheck(input: ReverseCheckInput): Promise<StageOutcome<ReverseCheckResult>> {
+  const framing = input.list.framing ?? [];
+  const framingPositions = framing.map((entry) => entry.position);
   const data: readonly PromptData[] = [
     { name: "原文", text: input.source },
-    { name: "要件の一覧", text: serializeJson(input.list) },
+    // 枠の文（要件にしない文）も一覧に含めて渡す（無いときは空の配列。Issue #372）
+    { name: "要件の一覧", text: serializeJson({ ...input.list, framing }) },
   ];
   const request = buildStructuredRequest({
     rules: REVERSE_CHECK_RULES,
@@ -219,7 +256,12 @@ export async function runReverseCheck(input: ReverseCheckInput): Promise<StageOu
   });
   const answer = await callStructuredChecked(input.gateway, { request, check: checkReverseCheckOutput });
   if (!answer.ok) return answer;
-  const misses = mergeUncovered(checkRequirementCoverage(input.source, input.list), answer.value.uncovered, input.source);
+  const misses = mergeUncovered(
+    checkRequirementCoverage(input.source, input.list),
+    answer.value.uncovered,
+    input.source,
+    framingPositions,
+  );
   const uncovered = misses
     .filter((miss): miss is Extract<ReverseCheckMiss, { kind: "uncovered-source" }> => miss.kind === "uncovered-source")
     .map((miss) => miss.range);

@@ -91,6 +91,102 @@ describe("コードが見つける落ち（02 §1・§1.2）", () => {
   });
 });
 
+describe("枠の文の覆い（Issue #372）", () => {
+  /** 原文から引用の位置を求めて、要件 1 件を作る */
+  function requirement(source: string, id: string, text: string, quote: string) {
+    const start = source.indexOf(quote);
+    return { id, text, quote, position: { start, end: start + quote.length } };
+  }
+
+  /** 原文から引用の位置を求めて、枠の文 1 件を作る */
+  function framing(source: string, quote: string) {
+    const start = source.indexOf(quote);
+    return { quote, position: { start, end: start + quote.length } };
+  }
+
+  it("枠の文だけが要件に覆われていない原文で、覆いの検査の漏れが 0 件になる", () => {
+    const source = "アプリを作ってください。タスクを記録する。";
+    const list: RequirementList = {
+      requirements: [requirement(source, "R-1", "タスクを記録できる", "タスクを記録する")],
+      framing: [framing(source, "アプリを作ってください")],
+      decisions: [],
+      unresolved: [],
+    };
+    expect(checkRequirementCoverage(source, list)).toEqual([]);
+  });
+
+  it("枠でも要件でもない文が覆われていなければ、今までどおり漏れになる", () => {
+    const source = "アプリを作ってください。タスクを記録する。件数を合計する。";
+    const list: RequirementList = {
+      requirements: [requirement(source, "R-1", "タスクを記録できる", "タスクを記録する")],
+      framing: [framing(source, "アプリを作ってください")],
+      decisions: [],
+      unresolved: [],
+    };
+    const uncovered = checkRequirementCoverage(source, list).filter((miss) => miss.kind === "uncovered-source");
+    expect(uncovered).toHaveLength(1);
+    expect(uncovered[0]).toMatchObject({ range: { start: source.indexOf("件数を合計する。"), end: source.length } });
+  });
+
+  it("会話が挙げた範囲は、枠にすべて含まれるときだけ落ち、一部の重なりは差し引いた残りが残り、重ならないものはそのまま残る", async () => {
+    const source = "ABCDEFGHIJ";
+    const list: RequirementList = {
+      requirements: [requirement(source, "R-1", "全部", "ABCDEFGHIJ")],
+      framing: [framing(source, "CDE")],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured({ uncovered: [{ start: 2, end: 5 }, { start: 1, end: 6 }, { start: 7, end: 9 }] }),
+    ]);
+    const outcome = await runReverseCheck({
+      source,
+      list,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const ranges = outcome.value.uncovered.map((range) => `${range.start}-${range.end}`);
+    // 枠にすべて含まれる範囲は落ちる
+    expect(ranges).not.toContain("2-5");
+    // 一部だけ重なる範囲は、枠を差し引いた残りが残る
+    expect(ranges).toContain("1-2");
+    expect(ranges).toContain("5-6");
+    // 重ならない範囲はそのまま残る
+    expect(ranges).toContain("7-9");
+  });
+
+  it("枠の文に条件が混ざった原文で、条件の部分が覆われていなければ漏れになる", async () => {
+    const source = "メモという名前のアプリを作ってください。タスクを記録する。";
+    const framingPart = framing(source, "アプリを作ってください");
+    const list: RequirementList = {
+      requirements: [requirement(source, "R-1", "タスクを記録できる", "タスクを記録する")],
+      framing: [framingPart],
+      decisions: [],
+      unresolved: [],
+    };
+    // コードは文ごとに見るので、枠に重なる文は覆われていると数える。条件は会話が挙げた範囲の差し引きで残す
+    const firstSentence = splitSourceSentences(source)[0];
+    expect(firstSentence).toBeDefined();
+    if (firstSentence === undefined) return;
+    const recording = createRecordingClient([
+      structured({ uncovered: [{ start: firstSentence.start, end: firstSentence.end }] }),
+    ]);
+    const outcome = await runReverseCheck({
+      source,
+      list,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 枠を差し引いた残り＝名前の条件の部分が、漏れとして残る
+    const ranges = outcome.value.uncovered.map((range) => `${range.start}-${range.end}`);
+    expect(ranges).toContain(`0-${framingPart.position.start}`);
+  });
+});
+
 describe("①' → ① のやり直し（02 §1）", () => {
   it("落ちが無ければやり直さない", async () => {
     const recording = createRecordingClient([

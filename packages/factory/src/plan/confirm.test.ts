@@ -113,6 +113,70 @@ describe("P6 の照合と確定（04 §3 P6・§4）", () => {
     expect(result.problems.some((problem) => problem.message.includes("件数を合計する。"))).toBe(true);
   });
 
+  it("枠の文は要件にしなくても、枠の範囲で覆われていれば確定できる（Issue #372）", async () => {
+    const source = "アプリを作ってください。タスクを記録する。";
+    const framingQuote = "アプリを作ってください";
+    const framing: PlanSourceInput = { id: "S-1", kind: "source", text: "アプリを作ってください。" };
+    const record: PlanSourceInput = { id: "S-2", kind: "source", text: "タスクを記録する。" };
+    const result = await runConfirm(
+      validInput({
+        source,
+        framing: [{ start: 0, end: framingQuote.length }],
+        requirements: [
+          {
+            id: "R-1",
+            text: "タスクを記録できる",
+            kind: "existence",
+            origin: { input_id: "S-2", quote: "タスクを記録する" },
+            parts: [],
+          },
+        ],
+        inputs: [framing, record],
+        openIssues: [],
+        decisions: [],
+        judge: createFakeJudge(
+          { [confirmQuestionName("S-1")]: noul(0.9), [confirmQuestionName("S-2")]: noul(0.95) },
+          { model: "fake-judge" },
+        ),
+      }),
+    );
+    expect(result.problems).toEqual([]);
+    expect(result.confirmed).toBe(true);
+    // 確定した仕様に framing は入らず、枠の要件も増えない（枠の文は要件にしない）
+    expect(Object.keys(result.plan)).not.toContain("framing");
+    expect(result.plan.requirements.map((requirement) => requirement.id)).toEqual(["R-1"]);
+  });
+
+  it("枠の範囲を渡さなければ、枠の文は覆われていない原文として扱われる（Issue #372）", async () => {
+    const source = "アプリを作ってください。タスクを記録する。";
+    const result = await runConfirm(
+      validInput({
+        source,
+        requirements: [
+          {
+            id: "R-1",
+            text: "タスクを記録できる",
+            kind: "existence",
+            origin: { input_id: "S-2", quote: "タスクを記録する" },
+            parts: [],
+          },
+        ],
+        inputs: [
+          { id: "S-1", kind: "source", text: "アプリを作ってください。" },
+          { id: "S-2", kind: "source", text: "タスクを記録する。" },
+        ],
+        openIssues: [],
+        decisions: [],
+        judge: createFakeJudge(
+          { [confirmQuestionName("S-1")]: noul(0.9), [confirmQuestionName("S-2")]: noul(0.95) },
+          { model: "fake-judge" },
+        ),
+      }),
+    );
+    expect(result.confirmed).toBe(false);
+    expect(result.problems.map((problem) => problem.code)).toContain("uncovered-source");
+  });
+
   it("どの要件にも使われていない答えがあれば確定しない", async () => {
     const extraAnswer: PlanAnswerInput = { id: "A-2", kind: "answer", question_id: "Q-1", free_text: "全員" };
     const result = await runConfirm(

@@ -8,7 +8,7 @@
 // ①' の逆照合で落ちが見つかれば、その落ちをデータに足して**もう一度**この段を呼ぶ（やり直しは 1 回）。
 import type { CallGateway } from "../call.js";
 import { checkRequestText } from "../limits.js";
-import type { Requirement, RequirementList, ReverseCheckMiss, SourceRange } from "../pipeline.js";
+import type { Framing, Requirement, RequirementList, ReverseCheckMiss, SourceRange } from "../pipeline.js";
 import {
   buildStructuredRequest,
   callStructuredChecked,
@@ -29,6 +29,8 @@ export const REQUIREMENTS_SCHEMA_NAME = "requirement-list";
 export const REQUIREMENTS_RULES: readonly string[] = [
   "依頼文（原文）を、1 行 1 要件の一覧にする。",
   "各要件には、原文からそのまま写した引用（quote）と、その位置（position。原文の文字の範囲 start/end）を付ける。",
+  "「〜のアプリを作ってください」のように、アプリを作ってほしいと述べるだけでほかの条件を持たない文は、要件にせず framing に入れる。framing の各件にも、原文からそのまま写した引用（quote）と、その位置（position）を付ける。",
+  "その枠の文に、アプリの名前・対象の人・目的などの条件が混ざっているときは、その条件の部分を要件にする（条件は framing に含めない）。",
   "軽い曖昧さは、どちらに決めたかを decisions に記録して書き進める。",
   "重大な曖昧さ（どちらに決めるかで作るものが変わる）は決めずに、unresolved にその問いを残す。",
 ];
@@ -40,7 +42,7 @@ export const REQUIREMENTS_RULES: readonly string[] = [
 export const REQUIREMENT_LIST_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["requirements", "decisions", "unresolved"],
+  required: ["requirements", "framing", "decisions", "unresolved"],
   properties: {
     requirements: {
       type: "array",
@@ -51,6 +53,27 @@ export const REQUIREMENT_LIST_SCHEMA = {
         properties: {
           id: { type: "string", description: "要件の識別子（例 R-1）" },
           text: { type: "string", description: "要件の文" },
+          quote: { type: "string", description: "原文からそのまま写した引用" },
+          position: {
+            type: "object",
+            additionalProperties: false,
+            required: ["start", "end"],
+            properties: {
+              start: { type: "integer", minimum: 0 },
+              end: { type: "integer", minimum: 0 },
+            },
+          },
+        },
+      },
+    },
+    framing: {
+      type: "array",
+      description: "依頼の枠の文（要件にしない文）の一覧。無ければ空の配列",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["quote", "position"],
+        properties: {
           quote: { type: "string", description: "原文からそのまま写した引用" },
           position: {
             type: "object",
@@ -130,8 +153,44 @@ function checkRequirement(value: unknown, field: string, problems: Problem[]): R
   return { id: id as string, text: text as string, quote: quote as string, position };
 }
 
-/** ① の応答の形を確かめる。合わない欄を**すべて**挙げて返す */
-export function checkRequirementOutput(output: unknown): ShapeCheck<RequirementList> {
+/**
+ * 枠の文 1 件の形を確かめる（Issue #372）。引用は空でなく、位置の範囲の原文が引用と一致すること。
+ * `source` を渡されたときだけ、位置と引用の一致を確かめる（判定の口ではない——コードが見る）。
+ */
+function checkFraming(
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  source: string | undefined,
+): Framing | undefined {
+  if (!isRecord(value)) {
+    problems.push({ field, message: "枠の文は写像（object）であること" });
+    return undefined;
+  }
+  const quote = value["quote"];
+  let good = true;
+  if (typeof quote !== "string" || quote === "") {
+    problems.push({ field: `${field}.quote`, message: "引用は空でない文字列であること（原文からそのまま写す）" });
+    good = false;
+  }
+  const position = checkPosition(value["position"], `${field}.position`, problems);
+  if (position === undefined) good = false;
+  if (!good || position === undefined || typeof quote !== "string") return undefined;
+  if (source !== undefined) {
+    const inBounds = position.start >= 0 && position.end <= source.length && position.start <= position.end;
+    if (!inBounds || source.slice(position.start, position.end) !== quote) {
+      problems.push({
+        field: `${field}.position`,
+        message: `引用の位置（${position.start}-${position.end}）が、原文の「${quote}」の位置と一致しない`,
+      });
+      return undefined;
+    }
+  }
+  return { quote, position };
+}
+
+/** ① の応答の形を確かめる。合わない欄を**すべて**挙げて返す。`source` を渡すと枠の引用と位置も確かめる */
+export function checkRequirementOutput(output: unknown, source?: string): ShapeCheck<RequirementList> {
   if (!isRecord(output)) {
     return { ok: false, problems: [{ field: "", message: "応答は写像（object）であること" }] };
   }
@@ -146,6 +205,18 @@ export function checkRequirementOutput(output: unknown): ShapeCheck<RequirementL
       if (checked !== undefined) requirements.push(checked);
     });
   }
+  const framing: Framing[] = [];
+  const rawFraming = output["framing"];
+  if (rawFraming === undefined) {
+    // 無いときは空の配列として扱う（記録した本物の応答にはこの欄が無い。Issue #372）
+  } else if (!Array.isArray(rawFraming)) {
+    problems.push({ field: "framing", message: "枠の文の一覧は並び（array）であること" });
+  } else {
+    rawFraming.forEach((item, index) => {
+      const checked = checkFraming(item, `framing[${index}]`, problems, source);
+      if (checked !== undefined) framing.push(checked);
+    });
+  }
   const decisions = checkStringArray(output["decisions"], "decisions", problems);
   const unresolved = checkStringArray(output["unresolved"], "unresolved", problems);
   if (problems.length > 0) return { ok: false, problems };
@@ -153,6 +224,7 @@ export function checkRequirementOutput(output: unknown): ShapeCheck<RequirementL
     ok: true,
     value: {
       requirements,
+      framing,
       decisions: decisions ?? [],
       unresolved: unresolved ?? [],
     },
@@ -189,5 +261,8 @@ export async function runRequirements(input: RequirementsInput): Promise<StageOu
     schema: REQUIREMENT_LIST_SCHEMA,
     maxOutputTokens: input.gateway.maxOutputTokens("requirements"),
   });
-  return callStructuredChecked(input.gateway, { request, check: checkRequirementOutput });
+  return callStructuredChecked(input.gateway, {
+    request,
+    check: (output) => checkRequirementOutput(output, input.source),
+  });
 }
