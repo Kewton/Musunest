@@ -343,3 +343,58 @@ describe("確定した仕様（plan.json）を納品物に入れる（§4・Issu
     expect(verification.plan_sha256).toBeUndefined();
   });
 });
+
+// ── 構造の検査の記録を、照合の記録に入れる（02 §1.3・§4・Issue #387）──────────────
+
+describe("構造の検査の記録を、照合の記録に入れる（02 §1.3・§4・Issue #387）", () => {
+  const STRUCTURAL_CHECKS = [
+    { testId: "sc-1", requirementId: "R-1", check: "field-type", result: "pass", detail: "成り立った" },
+    {
+      testId: "sc-2",
+      requirementId: "R-1",
+      check: "action-kind",
+      result: "mismatch",
+      detail: "操作 add の種類が create（期待 update）",
+    },
+    {
+      testId: "sc-3",
+      requirementId: "R-2",
+      check: "view-shows",
+      result: "unresolved",
+      detail: "表示を期待する役割 ID に提出された対応が無い",
+    },
+  ] as const;
+
+  it("1 件ごとの記録（試験 ID・要件 ID・検査の中身・結果）を出し、合格・不一致・未解決を区別する", async () => {
+    const bundle = await assembleBundle(
+      input({
+        outcome: { result: "partial", verdict: "partial" },
+        testRun: { mismatches: [], unresolved: [], structural: STRUCTURAL_CHECKS },
+      }),
+    );
+    const verification = JSON.parse(findText(bundle.artifacts, VERIFICATION_FILE)) as BundleVerification;
+    expect(verification.structural_checks).toEqual([
+      { test_id: "sc-1", requirement_id: "R-1", check: "field-type", result: "pass", detail: "成り立った" },
+      {
+        test_id: "sc-2",
+        requirement_id: "R-1",
+        check: "action-kind",
+        result: "mismatch",
+        detail: "操作 add の種類が create（期待 update）",
+      },
+      {
+        test_id: "sc-3",
+        requirement_id: "R-2",
+        check: "view-shows",
+        result: "unresolved",
+        detail: "表示を期待する役割 ID に提出された対応が無い",
+      },
+    ]);
+  });
+
+  it("構造の検査が無ければ、空の並びで出す（欄は常にある）", async () => {
+    const bundle = await assembleBundle(input());
+    const verification = JSON.parse(findText(bundle.artifacts, VERIFICATION_FILE)) as BundleVerification;
+    expect(verification.structural_checks).toEqual([]);
+  });
+});
