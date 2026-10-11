@@ -93,6 +93,12 @@ export function buildStructuredRequest(prompt: StagePrompt): LlmStructuredReques
 export interface Problem {
   readonly field: string;
   readonly message: string;
+  /**
+   * 問題の分類（コードの中の有限の一覧から選ぶ。任意。Issue #397）。**発生側が付ける**——Plan の段の
+   * 失敗の診断（`failure.problems`）が、値の中身を含まずに問題の種類を残すのに使う。無ければ呼ぶ側が
+   * `other` として扱う。**Build への写し方（欄の名前と `message`）は変えない。**
+   */
+  readonly code?: string;
 }
 
 /** 段ごとの形の確認（JSON Schema に沿うかを、コードが見る） */

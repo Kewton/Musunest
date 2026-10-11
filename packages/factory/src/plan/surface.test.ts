@@ -107,6 +107,8 @@ describe("P3 の書けないことの裏付け（04 §3 P3・#332）", () => {
     expect(result.failure.kind).toBe("unmet");
     if (result.failure.kind !== "unmet") return;
     expect(result.failure.problems.some((problem) => problem.field === "unwritable[0].constraintIds")).toBe(true);
+    // 分類（コード）も残る（Issue #397）
+    expect(result.failure.problems[0]?.code).toBe("constraint-id-missing");
   });
 
   it("文書に無い制約 ID を使った書けないことも断る", async () => {
@@ -130,6 +132,8 @@ describe("P3 の書けないことの裏付け（04 §3 P3・#332）", () => {
     expect(result.failure.kind).toBe("unmet");
     if (result.failure.kind !== "unmet") return;
     expect(result.failure.problems.some((problem) => problem.message.includes("文書に無い制約 ID"))).toBe(true);
+    // 分類（コード）も残る（Issue #397）
+    expect(result.failure.problems[0]?.code).toBe("constraint-id-unknown");
   });
 
   it("文書にある制約 ID（契約の R-… と語彙の ### 見出し）なら通す", async () => {

@@ -17,9 +17,11 @@ import type { PlanQuestion } from "./plan/questions.js";
 import type { PlanConfirmationView } from "./plan/session.js";
 import {
   isSourceClosureDecision,
+  type CannotConfirmReason,
   type PlanAnswerOutcome,
   type PlanAnswerRequest,
   type PlanConfirmOutcome,
+  type PlanFailure,
   type PlanResponder,
   type PlanResult,
   type PlanStageRecord,
@@ -306,6 +308,10 @@ export interface PlanCliRecord {
   readonly budget_usd: number;
   readonly spent_usd: number;
   readonly remaining_usd: number;
+  /** 段の失敗の診断（止まったときだけ。値の中身を含まない。Issue #397） */
+  readonly failure?: PlanFailure | null;
+  /** 確定できなかった理由（確定できないときだけ。値の中身を含まない。Issue #397） */
+  readonly cannot_confirm?: readonly CannotConfirmReason[];
 }
 
 function toQuestionRecord(question: PlanQuestion): PlanCliQuestionRecord {
@@ -357,16 +363,39 @@ export function buildPlanCliRecord(input: {
     budget_usd: input.budgetUsd,
     spent_usd: input.result.spentUsd,
     remaining_usd: input.result.remainingUsd,
+    // 確定したときは、どちらの欄も残さない（Issue #397）
+    ...(input.result.kind === "stopped" ? { failure: input.result.failure } : {}),
+    ...(input.result.kind === "cannot-confirm" ? { cannot_confirm: input.result.reasons } : {}),
   };
+}
+
+/** 分類の先頭の何件かを 1 つの文にする（値の中身は含まない。Issue #397） */
+function summarizeCodes(codes: readonly string[], head = 3): string {
+  const unique = [...new Set(codes)];
+  const shown = unique.slice(0, head);
+  const rest = unique.length - shown.length;
+  return rest > 0 ? `${shown.join(", ")} ほか ${rest} 件` : shown.join(", ");
+}
+
+/** 止まった理由の行に出す分類（段の失敗の診断と、P1/P2 のoperation。Issue #397） */
+function failureCodes(failure: PlanFailure | null): readonly string[] {
+  if (failure === null) return [];
+  const codes = (failure.problems ?? []).map((problem) => problem.code);
+  if (failure.operation !== undefined) codes.push(failure.operation);
+  return codes;
 }
 
 /** Plan を確定できずに止まったときの、理由の 1 行（Build を流さないとき出す） */
 export function planStopReasonLine(result: PlanResult): string {
   if (result.kind === "cannot-confirm") {
-    return `Plan で確定できませんでした（重大な未解決の事項が ${result.openIssues.length} 件残りました）`;
+    const codes = summarizeCodes(result.reasons.map((reason) => reason.code));
+    return `Plan で確定できませんでした（重大な未解決の事項が ${result.openIssues.length} 件残りました。分類: ${codes}）`;
   }
   if (result.kind === "stopped") {
-    return `Plan を止めました（${result.reason}）`;
+    const codes = summarizeCodes(failureCodes(result.failure));
+    return codes === ""
+      ? `Plan を止めました（${result.reason}）`
+      : `Plan を止めました（${result.reason}。分類: ${codes}）`;
   }
   return "";
 }

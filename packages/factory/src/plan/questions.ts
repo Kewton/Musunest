@@ -310,11 +310,11 @@ export function checkQuestionsOutput(
   source: string,
 ): ShapeCheck<PlanQuestionsOutput> {
   if (!isRecord(output)) {
-    return { ok: false, problems: [{ field: "", message: "応答は写像（object）であること" }] };
+    return { ok: false, problems: [{ field: "", code: "shape", message: "応答は写像（object）であること" }] };
   }
   const raw = output["questions"];
   if (!Array.isArray(raw)) {
-    return { ok: false, problems: [{ field: "questions", message: "質問の並び（array）であること" }] };
+    return { ok: false, problems: [{ field: "questions", code: "shape", message: "質問の並び（array）であること" }] };
   }
   const problems: Problem[] = [];
   const questions: PlanQuestion[] = [];
@@ -382,7 +382,9 @@ export function checkQuestionsOutput(
     }
   });
   const closedBySource = checkClosedBySource(output["closedBySource"], source, problems);
-  if (problems.length > 0) return { ok: false, problems };
+  if (problems.length > 0) {
+    return { ok: false, problems: problems.map((problem) => ({ ...problem, code: problem.code ?? "shape" })) };
+  }
   return { ok: true, value: { questions, closedBySource: closedBySource ?? [] } };
 }
 
@@ -589,7 +591,7 @@ export function checkQuestionCoverage(
   // 開いている事項がすべて（問いか依頼文で）閉じているなら、問いが 0 問でもよい
   if (open.every((issue) => isClosed(issue.id))) return problems;
   if (questions.length === 0) {
-    problems.push({ field: "questions", message: "開いている事項があるのに問いが 0 問である" });
+    problems.push({ field: "questions", code: "question-coverage", message: "開いている事項があるのに問いが 0 問である" });
     return problems;
   }
   const critical = open.filter((issue) => issue.critical);
@@ -598,6 +600,7 @@ export function checkQuestionCoverage(
     if (!isClosed(issue.id)) {
       problems.push({
         field: "questions",
+        code: "question-coverage",
         message: `重大な事項 ${issue.id} への問いが無い（残りの問数 ${remaining} に重大な事項 ${critical.length} 件が収まる）`,
       });
     }
@@ -672,7 +675,11 @@ export async function runQuestions(input: QuestionsInput): Promise<StageOutcome<
       if (links.length > 0) {
         return {
           ok: false,
-          problems: links.map((problem) => ({ field: problem.path, message: `${problem.code}: ${problem.message}` })),
+          problems: links.map((problem) => ({
+            field: problem.path,
+            code: problem.code,
+            message: `${problem.code}: ${problem.message}`,
+          })),
         };
       }
       const coverage = checkQuestionCoverage(
@@ -702,7 +709,11 @@ export async function runQuestions(input: QuestionsInput): Promise<StageOutcome<
       failure: {
         kind: "unmet",
         attempts: 1,
-        problems: problems.map((problem) => ({ field: problem.path, message: `${problem.code}: ${problem.message}` })),
+        problems: problems.map((problem) => ({
+          field: problem.path,
+          code: problem.code,
+          message: `${problem.code}: ${problem.message}`,
+        })),
       },
     };
   }

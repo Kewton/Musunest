@@ -9,11 +9,29 @@
 //   6. 段ごとの記録が結果に入る
 import { describe, expect, it } from "vitest";
 import { checkConfirmedPlan, isConfirmationValid } from "@musunest/appspec-schema";
+import { planStopReasonLine } from "../cli-plan.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "../judge.js";
 import { AGENT_LIMITS } from "../limits.js";
-import type { LlmClient, LlmUsage } from "../llm.js";
-import { runPlan, type PlanAnswerRequest, type PlanResponder, type PlanRunInput } from "./run-plan.js";
+import type {
+  LlmClient,
+  LlmStructuredRequest,
+  LlmStructuredResponse,
+  LlmToolRequest,
+  LlmToolResponse,
+  LlmUsage,
+} from "../llm.js";
+import type { RecordedCall } from "../llm-fake.js";
+import {
+  planDiagnosisCode,
+  planDiagnosisField,
+  runPlan,
+  sessionCannotConfirmReason,
+  type PlanAnswerRequest,
+  type PlanResponder,
+  type PlanRunInput,
+} from "./run-plan.js";
+import type { PlanTurn } from "./session.js";
 import {
   CATALOG_FACETS,
   catalogAppliesQuestionName,
@@ -40,8 +58,13 @@ const noul = (value: number): JudgeAnswer => ({ kind: "noul", noul: value });
  * （未指定の観点を作らない）。門にも答える（Issue #384）。
  */
 function catalogAnswers(): Record<string, JudgeAnswer> {
+  return catalogAnswersFor(["R-1", "R-2"]);
+}
+
+/** 指定した要件の目録の問い（門 + 要件 × 観点 × 2 問）すべてに「当てはまる・決まっている」を返す */
+function catalogAnswersFor(requirementIds: readonly string[]): Record<string, JudgeAnswer> {
   const answers: Record<string, JudgeAnswer> = {};
-  for (const requirementId of ["R-1", "R-2"]) {
+  for (const requirementId of requirementIds) {
     answers[catalogGateQuestionName(requirementId)] = noul(1);
     for (const facet of CATALOG_FACETS) {
       answers[catalogAppliesQuestionName(requirementId, facet.id)] = noul(1);
@@ -774,5 +797,490 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     expect(result.kind).not.toBe("confirmed");
     if (result.kind !== "cannot-confirm") return;
     expect(result.openIssues.some((issue) => issue.text.includes("原文に見つからない"))).toBe(true);
+  });
+});
+
+// ── Issue #397：Plan が止まった理由を、値を含めずに記録と入口の出力に残す ──────────
+
+const ANSWER_NONE: PlanResponder = {
+  async answer() {
+    return { kind: "answers", answers: [] };
+  },
+  async confirm() {
+    return "build";
+  },
+};
+
+const ALL_RECOMMENDED: PlanResponder = {
+  async answer() {
+    return { kind: "all-recommended" };
+  },
+  async confirm() {
+    return "build";
+  },
+};
+
+/** api の誤りを模す（種類だけを持つ。本文は残さない） */
+function invalidRequestError(code: string, message = "要求が不正です"): Error {
+  return Object.assign(new Error(message), { kind: "invalidRequest", code });
+}
+
+/** 未完了の応答を模す（理由だけを持つ） */
+function incompleteError(reason: string): Error {
+  return Object.assign(new Error("応答が完了していません"), { kind: "incomplete", reason, usage: undefined });
+}
+
+/** `failAt` 回目の構造化出力の呼び出しでだけ誤りを投げる偽物の呼び出し */
+function clientThrowingAt(
+  recorded: readonly RecordedCall[],
+  failAt: number,
+  makeError: () => Error,
+): LlmClient {
+  const inner = createRecordingClient(recorded);
+  let calls = 0;
+  return {
+    async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+      calls += 1;
+      if (calls === failAt) throw makeError();
+      return inner.client.callStructured<T>(request);
+    },
+    async callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
+      return inner.client.callWithTools(request);
+    },
+  };
+}
+
+/** 3 文の原文（R-1・R-2 が最初の 2 文だけを覆う） */
+const THREE_SOURCE = "タスクを記録する。件数を合計する。印を出す。";
+const THREE_REQUIREMENTS = {
+  requirements: [
+    { id: "R-1", text: "タスクを記録できる", quote: "タスクを記録する。", position: { start: 0, end: 9 } },
+    { id: "R-2", text: "件数を合計できる", quote: "件数を合計する。", position: { start: 9, end: 17 } },
+  ],
+  framing: [],
+  decisions: [],
+  unresolved: [],
+};
+const THREE_COVER: Record<string, JudgeAnswer> = {
+  [confirmQuestionName("S-1")]: noul(0.95),
+  [confirmQuestionName("S-2")]: noul(0.95),
+  [confirmQuestionName("S-3")]: noul(0.95),
+};
+
+describe("Plan が止まった理由を、値を含めずに残す（Issue #397）", () => {
+  it("P3 で文書に無い制約 ID・空の制約 ID で止まると、failure.problems に添字つきの欄と分類が残る", async () => {
+    const badSurface = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-1", requirementId: "R-1", part: "部分", constraintIds: ["文書に無い ID"], reason: "理由", alternative: "代案" },
+        { id: "U-2", requirementId: "R-2", part: "部分", constraintIds: [], reason: "理由", alternative: "代案" },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(badSurface),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("surface");
+    expect(result.failure?.kind).toBe("unmet");
+    expect(result.failure?.problems).toEqual([
+      { field: "unwritable[0].constraintIds", code: "constraint-id-unknown" },
+      { field: "unwritable[1].constraintIds", code: "constraint-id-missing" },
+    ]);
+  });
+
+  it("P4 の形の誤りで止まると、分類が残る", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured({ questions: "並びでない" }),
+      structured({ questions: "並びでない" }),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("questions");
+    expect(result.failure?.kind).toBe("malformed");
+    expect(result.failure?.problems).toEqual([{ field: "questions", code: "shape" }]);
+  });
+
+  it("P6 で覆われていない原文があると、cannot-confirm の理由に source: confirm で残る", async () => {
+    const recording = createRecordingClient([
+      structured(THREE_REQUIREMENTS),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(THREE_REQUIREMENTS),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...THREE_COVER }), ANSWER_NONE, {
+        source: THREE_SOURCE,
+      }),
+    );
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons).toEqual([{ source: "confirm", code: "uncovered-source", path: "source[2]" }]);
+  });
+
+  it("確定した仕様の形の誤りは、cannot-confirm の理由に source: plan-check で残る", async () => {
+    const surface = {
+      ambiguities: [
+        { id: "OI-a", requirementId: "R-1", text: "問い a", critical: true },
+        { id: "OI-b", requirementId: "R-1", text: "問い b", critical: false },
+      ],
+      unwritable: [],
+    };
+    const questions = {
+      questions: [
+        {
+          id: "Q-a",
+          openIssueId: "OI-a",
+          text: "問い a",
+          choices: [
+            { id: "c1", text: "こちら" },
+            { id: "c2", text: "あちら" },
+          ],
+          recommended: { choiceId: "c1", reason: "依頼に沿う" },
+          allowFreeText: true,
+        },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      structured(questions),
+    ]);
+
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q-a") }), ALL_RECOMMENDED),
+    );
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 重大でない事項 OI-b が開いたまま（open_issue）。P6 の中の検査と外側の検査の重なりは 1 件にまとまる
+    expect(result.reasons).toEqual([{ source: "plan-check", code: "open_issue", path: "open_issues[1].status" }]);
+  });
+
+  it("path が違う同じ code は別件として残る（重なりは 1 件にまとめる）", async () => {
+    const surface = {
+      ambiguities: [
+        { id: "OI-a", requirementId: "R-1", text: "問い a", critical: false },
+        { id: "OI-b", requirementId: "R-1", text: "問い b", critical: false },
+        { id: "OI-c", requirementId: "R-2", text: "問い c", critical: true },
+      ],
+      unwritable: [],
+    };
+    const questions = {
+      questions: [
+        {
+          id: "Q-c",
+          openIssueId: "OI-c",
+          text: "問い c",
+          choices: [
+            { id: "c1", text: "こちら" },
+            { id: "c2", text: "あちら" },
+          ],
+          recommended: { choiceId: "c1", reason: "依頼に沿う" },
+          allowFreeText: true,
+        },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      structured(questions),
+    ]);
+
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q-c") }), ALL_RECOMMENDED),
+    );
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    const planCheck = result.reasons.filter((reason) => reason.source === "plan-check");
+    expect(planCheck).toHaveLength(2);
+    expect(planCheck.map((reason) => reason.code)).toEqual(["open_issue", "open_issue"]);
+    expect(planCheck.map((reason) => reason.path)).toEqual([
+      "open_issues[0].status",
+      "open_issues[1].status",
+    ]);
+  });
+
+  it("逆照合の落ちは source: reverse-check として残る", async () => {
+    const paraphrase = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "タスクを登録する", position: { start: 0, end: 8 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する", position: { start: 9, end: 16 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons).toEqual([
+      { source: "reverse-check", code: "quote-not-found", path: "requirements[*].quote" },
+    ]);
+  });
+
+  it("往復の制御の落ちは source: session として、reverse-check と区別できる", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons).toEqual([{ source: "session", code: "round-trip-limit", path: "open_issues" }]);
+  });
+
+  it("往復の制御の理由は、質問数の上限・往復数の上限・重大な事項があるのに問いが無い、で区別できる", () => {
+    const question = (id: string) => ({
+      id,
+      openIssueId: "OI",
+      revision: 1,
+      text: "問い",
+      choices: [
+        { id: "c1", text: "こちら" },
+        { id: "c2", text: "あちら" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    });
+    const turnWith = (count: number): PlanTurn => ({
+      questions: Array.from({ length: count }, (_value, index) => question(`Q-${index}`)),
+      answers: [],
+    });
+    expect(sessionCannotConfirmReason([turnWith(AGENT_LIMITS.planQuestions)]).code).toBe("question-limit");
+    expect(
+      sessionCannotConfirmReason([
+        turnWith(1),
+        turnWith(1),
+        turnWith(1),
+      ]).code,
+    ).toBe("round-trip-limit");
+    expect(sessionCannotConfirmReason([turnWith(1)]).code).toBe("critical-no-question");
+    expect(sessionCannotConfirmReason([turnWith(1)]).source).toBe("session");
+  });
+
+  it("P1/P2 の各呼び出しで止まると、operation と有限の分類が残る", async () => {
+    // 要件にする（依頼文が長すぎる＝打ち切り）
+    const long = "あ".repeat(AGENT_LIMITS.requestTextChars + 1);
+    const limitRun = await runPlan(
+      makePlanInput(createRecordingClient([]).client, createFakeJudge({}), ANSWER_NONE, { source: long }),
+    );
+    expect(limitRun.kind).toBe("stopped");
+    if (limitRun.kind === "stopped") {
+      expect(limitRun.failure).toEqual({
+        stage: "requirements",
+        kind: "limit",
+        problems: [{ field: "limit", code: "limit-request-text" }],
+        operation: "requirements",
+      });
+    }
+
+    // 逆照合（① は通り、①' で要求の誤り）
+    const reverseCheck = await runPlan(
+      makePlanInput(
+        clientThrowingAt([structured(REQUIREMENT_LIST_OUTPUT)], 2, () => invalidRequestError("invalid_json_schema")),
+        createFakeJudge({}),
+        ANSWER_NONE,
+      ),
+    );
+    expect(reverseCheck.kind).toBe("stopped");
+    if (reverseCheck.kind === "stopped") {
+      expect(reverseCheck.failure?.operation).toBe("reverse-check");
+      expect(reverseCheck.failure?.problems).toEqual([
+        { field: "invalidRequest.code", code: "invalid_json_schema" },
+      ]);
+    }
+
+    // 要件にするのやり直し（①' で落ちが出て、① の 2 回目で要求の誤り）
+    const redo = await runPlan(
+      makePlanInput(
+        clientThrowingAt([structured(THREE_REQUIREMENTS), structured(REVERSE_CHECK_OUTPUT)], 3, () =>
+          invalidRequestError("invalid_json_schema"),
+        ),
+        createFakeJudge({}),
+        ANSWER_NONE,
+        { source: THREE_SOURCE },
+      ),
+    );
+    expect(redo.kind).toBe("stopped");
+    if (redo.kind === "stopped") expect(redo.failure?.operation).toBe("requirements-redo");
+
+    // 逆照合のやり直し（①' の 2 回目で要求の誤り）
+    const redoReverse = await runPlan(
+      makePlanInput(
+        clientThrowingAt(
+          [structured(THREE_REQUIREMENTS), structured(REVERSE_CHECK_OUTPUT), structured(THREE_REQUIREMENTS)],
+          4,
+          () => invalidRequestError("invalid_json_schema"),
+        ),
+        createFakeJudge({}),
+        ANSWER_NONE,
+        { source: THREE_SOURCE },
+      ),
+    );
+    expect(redoReverse.kind).toBe("stopped");
+    if (redoReverse.kind === "stopped") expect(redoReverse.failure?.operation).toBe("reverse-check-redo");
+  });
+
+  it("一覧に無い分類・API の誤りの種類・打ち切りの理由は other になる", async () => {
+    expect(planDiagnosisCode("知らない分類")).toBe("other");
+    expect(planDiagnosisCode("shape")).toBe("shape");
+    expect(planDiagnosisCode(undefined)).toBe("other");
+
+    const unknownApi = await runPlan(
+      makePlanInput(
+        clientThrowingAt([], 1, () => invalidRequestError("知らない_api_code")),
+        createFakeJudge({}),
+        ANSWER_NONE,
+      ),
+    );
+    expect(unknownApi.kind).toBe("stopped");
+    if (unknownApi.kind === "stopped") {
+      expect(unknownApi.failure?.problems).toEqual([{ field: "invalidRequest.code", code: "other" }]);
+    }
+
+    const unknownReason = await runPlan(
+      makePlanInput(
+        clientThrowingAt([], 1, () => incompleteError("知らない_reason")),
+        createFakeJudge({}),
+        ANSWER_NONE,
+      ),
+    );
+    expect(unknownReason.kind).toBe("stopped");
+    if (unknownReason.kind === "stopped") {
+      expect(unknownReason.failure).toEqual({
+        stage: "requirements",
+        kind: "incomplete",
+        problems: [{ field: "incomplete.reason", code: "other" }],
+        operation: "requirements",
+      });
+    }
+  });
+
+  it("値が漏れない：API の誤りの種類と生の文は、診断と止まった理由の行に出ない", async () => {
+    const apiMark = "MARK_API_CODE_QQQ";
+    const messageMark = "MARK_MESSAGE_WWW";
+    const result = await runPlan(
+      makePlanInput(
+        clientThrowingAt([], 1, () => invalidRequestError(apiMark, messageMark)),
+        createFakeJudge({}),
+        ANSWER_NONE,
+      ),
+    );
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(JSON.stringify(result.failure)).not.toContain(apiMark);
+    expect(JSON.stringify(result.failure)).not.toContain(messageMark);
+    expect(planStopReasonLine(result)).not.toContain(apiMark);
+    expect(planStopReasonLine(result)).toContain("other");
+  });
+
+  it("値が漏れない：モデルの出力の ID は理由に出ないが、既存の欄（未解決の事項）は値を残す", async () => {
+    const quoteMark = "MARK_QUOTE_ZZZ";
+    const paraphrase = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: `${quoteMark}する`, position: { start: 0, end: quoteMark.length + 2 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する", position: { start: 9, end: 16 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(JSON.stringify(result.reasons)).not.toContain(quoteMark);
+    expect(planStopReasonLine(result)).not.toContain(quoteMark);
+    // 既存の欄（未解決の事項の文）は、今までどおり値を残す
+    expect(JSON.stringify(result.openIssues)).toContain(quoteMark);
+  });
+
+  it("値が漏れない：生の path は既知の欄と配列の位置から組み直される", () => {
+    const pathMark = "MARK_PATH_EEE";
+    expect(planDiagnosisField(`inputs.${pathMark}`)).not.toContain(pathMark);
+    expect(planDiagnosisField(`inputs.${pathMark}`)).toBe("inputs.*");
+    expect(planDiagnosisField("unwritable[0].constraintIds")).toBe("unwritable[0].constraintIds");
+    expect(planDiagnosisField("open_issues[2].status")).toBe("open_issues[2].status");
+  });
+
+  it("値が漏れない：確定した仕様には、原文の目印が今までどおり残る", async () => {
+    const sourceMark = "MARK_SOURCE_XYZ";
+    const leakSource = `タスクを記録する。件数を合計する。${sourceMark}を出す。`;
+    const s1 = "タスクを記録する。";
+    const s2 = "件数を合計する。";
+    const s3 = `${sourceMark}を出す。`;
+    const pos = (quote: string) => {
+      const start = leakSource.indexOf(quote);
+      return { start, end: start + quote.length };
+    };
+    const leakList = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: s1, position: pos(s1) },
+        { id: "R-2", text: "合計できる", quote: s2, position: pos(s2) },
+        { id: "R-3", text: "印を出せる", quote: s3, position: pos(s3) },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(leakList),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswersFor(["R-1", "R-2", "R-3"]),
+      [confirmQuestionName("S-1")]: noul(0.95),
+      [confirmQuestionName("S-2")]: noul(0.95),
+      [confirmQuestionName("S-3")]: noul(0.95),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE, { source: leakSource }));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 確定した仕様（既存の保存が認められた欄）には、原文の目印が残る
+    expect(JSON.stringify(result.plan)).toContain(sourceMark);
+    expect(planStopReasonLine(result)).toBe("");
   });
 });

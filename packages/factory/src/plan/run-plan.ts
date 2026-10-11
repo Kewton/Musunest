@@ -29,6 +29,7 @@ import {
   type PlanInput,
   type PlanOpenIssue,
   type PlanPart,
+  type PlanProblem,
   type PlanQuestionInput,
   type PlanRequirement,
   type PlanSourceInput,
@@ -38,15 +39,19 @@ import type { BundleJudgeUsage } from "../bundle.js";
 import { CallGateway } from "../call.js";
 import type { Judge } from "../judge.js";
 import { JudgeBudgetExceededError, createBudgetedJudge, type BudgetedJudge } from "../judge-budget.js";
-import { AGENT_LIMITS, type AgentLimits } from "../limits.js";
+import { AGENT_LIMITS, type AgentLimits, type LimitName } from "../limits.js";
 import type { LlmClient } from "../llm.js";
 import type { ReverseCheckMiss, SourceRange } from "../pipeline.js";
 import { UsageMeter, usageDelta, type FailureKind, type StageStatus, type UsageSnapshot } from "../record.js";
 import type { PromptDocument, StageFailure, StageOutcome } from "../stages/prompt.js";
-import { runReverseCheckLoop, splitSourceSentences } from "../stages/reverse-check.js";
+import {
+  runReverseCheckLoopWithOperation,
+  splitSourceSentences,
+  type ReverseCheckOperation,
+} from "../stages/reverse-check.js";
 import { runAnswers, type ClassifiedAnswer, type PlanAnswerDraft } from "./answers.js";
 import { catalogOpenIssue, runCatalog } from "./catalog.js";
-import { runConfirm } from "./confirm.js";
+import { runConfirm, type ConfirmProblem } from "./confirm.js";
 import { alsoClosesOf, runQuestions, type PlanQuestion, type PlanSourceClosure } from "./questions.js";
 import {
   nextPlanStep,
@@ -92,10 +97,260 @@ export interface PlanStageRecord {
   readonly failure_kind: FailureKind | null;
 }
 
-/** 早く止まった帰属（どの段の・どの種類の失敗か） */
+/**
+ * 段の失敗の診断に載せる、問題の分類の有限の一覧（Issue #397）。**`other` 以外は、既存の分類
+ * （質問の段・答え・P6 の照合・確定した仕様の検査・上限）を保持する対応表である**——発生側が付けた
+ * 分類がこの一覧にあればそれを残し、無ければ `other` にする。
+ */
+export const PLAN_DIAGNOSIS_CODES = [
+  /** 形（欄の欠け・型違い・知らない値。質問・答え・確定した仕様の形） */
+  "shape",
+  // 引用（P1 要件にする・P2 逆照合）
+  "quote-not-found",
+  "position-mismatch",
+  "uncovered-source",
+  // 制約 ID の裏付け（P3 洗い出し）
+  "constraint-id-missing",
+  "constraint-id-unknown",
+  // 質問（P4）
+  "question-count",
+  "choices-count",
+  "recommendation",
+  "free-text",
+  "issue-mapping",
+  "duplicate-issue",
+  "also-closes",
+  "source-closure",
+  "question-coverage",
+  // 答え（P5）
+  "unknown-question",
+  "unknown-choice",
+  "stale-revision",
+  "free-text-length",
+  // P6 照合
+  "uncovered-answer",
+  "origin-not-answer",
+  // 確定した仕様の検査（#331 の `checkPlan`）
+  "unknown_reference",
+  "accepted_outside_parts",
+  "accepted_not_removal",
+  "resolution_without_basis",
+  "open_issue",
+  "open_critical",
+  "confirmation_expired",
+  // API が返した誤りの種類（`invalidRequest.code`。既知の値だけ残す）
+  "invalid_json_schema",
+  "invalid_request_error",
+  // 打ち切りの理由（`incomplete.reason`。既知の値だけ残す）
+  "max_output_tokens",
+  "content_filter",
+  // 上限の種類
+  "limit-request-text",
+  "limit-declaration-bytes",
+  "limit-call-count",
+  "limit-tool-calls",
+  "limit-plan-questions",
+  "limit-plan-round-trips",
+  "limit-other",
+  // 往復の制御（`cannot-confirm` の `source: session`）
+  "question-limit",
+  "round-trip-limit",
+  "critical-no-question",
+  // 一覧に無いもの
+  "other",
+] as const;
+
+/** 診断の問題の分類の集合（`other` にするかの判定に使う） */
+const DIAGNOSIS_CODES: ReadonlySet<string> = new Set(PLAN_DIAGNOSIS_CODES);
+
+/**
+ * 診断の欄の名前を、**既知の欄と配列の位置から組み直す**（Issue #397）。生の path を写して加工しない。
+ * `name[0].field` の形の各段の名前を既知の一覧（`KNOWN_FIELD_NAMES`）と照らし、無い名前は `*` に伏せる。
+ * **出力に由来する ID・原文・答えの文字列は、欄の名前に入らない。**
+ */
+const KNOWN_FIELD_NAMES: ReadonlySet<string> = new Set([
+  // Plan の仕様の欄
+  "schema_version",
+  "plan_id",
+  "revision",
+  "vocabulary_version",
+  "inputs",
+  "requirements",
+  "open_issues",
+  "decisions",
+  "accepted_unwritable",
+  "confirmation",
+  "sha256",
+  "confirmed_at",
+  "confirmed_by",
+  // 入出力の欄
+  "source",
+  "framing",
+  "unresolved",
+  "questions",
+  "closedBySource",
+  "uncovered",
+  // 要素の欄
+  "id",
+  "unwritable",
+  "text",
+  "quote",
+  "position",
+  "start",
+  "end",
+  "kind",
+  "critical",
+  "status",
+  "value",
+  "reason",
+  "origin",
+  "input_id",
+  "change",
+  "answer_id",
+  "from_requirement_id",
+  "question_id",
+  "choice_id",
+  "choices",
+  "recommended",
+  "choiceId",
+  "allowFreeText",
+  "alsoCloses",
+  "openIssueId",
+  "issueId",
+  "parts",
+  "part_id",
+  "alternative_id",
+  "disposition",
+  "basis",
+  "doc_version",
+  "location",
+  "constraint_id",
+  "resolution",
+  "decision_id",
+  "constraintIds",
+  "part",
+  "alternative",
+  // 診断の欄
+  "limit",
+  "invalidRequest",
+  "incomplete",
+  "code",
+]);
+
+/** 1 つの段の名前（`name[0][1]` の形）を、既知の欄と配列の位置から組み直す */
+function safeFieldSegment(segment: string): string {
+  const match = /^([A-Za-z_][A-Za-z0-9_]*)?((?:\[\d+\]|\[\*\])*)$/.exec(segment);
+  if (match === null) return "*";
+  const name = match[1];
+  const indices = match[2] ?? "";
+  if (name === undefined || name === "") return indices === "" ? "*" : indices;
+  return KNOWN_FIELD_NAMES.has(name) ? `${name}${indices}` : "*";
+}
+
+/** 診断の欄の名前を組み直す（`rawPath` に由来する値を持ち込まない） */
+export function planDiagnosisField(rawPath: string): string {
+  if (rawPath === "") return "";
+  return rawPath.split(".").map(safeFieldSegment).join(".");
+}
+
+/** 分類を有限の一覧に写す（一覧に無いものは `other`） */
+export function planDiagnosisCode(code: string | undefined): string {
+  return code !== undefined && DIAGNOSIS_CODES.has(code) ? code : "other";
+}
+
+/** 上限の名前を、診断の分類に写す */
+function limitDiagnosisCode(limit: LimitName): string {
+  switch (limit) {
+    case "requestTextChars":
+      return "limit-request-text";
+    case "declarationBytes":
+      return "limit-declaration-bytes";
+    case "callCount":
+      return "limit-call-count";
+    case "toolCalls":
+      return "limit-tool-calls";
+    case "planQuestions":
+      return "limit-plan-questions";
+    case "planRoundTrips":
+      return "limit-plan-round-trips";
+    default:
+      return "limit-other";
+  }
+}
+
+/** API が返した誤りの種類を、既知の一覧に写す（知らない値は `other`） */
+function apiDiagnosisCode(code: string): string {
+  return code === "invalid_json_schema" || code === "invalid_request_error" ? code : "other";
+}
+
+/** 打ち切りの理由を、既知の一覧に写す（知らない値は `other`） */
+function incompleteDiagnosisCode(reason: string): string {
+  return reason === "max_output_tokens" || reason === "content_filter" ? reason : "other";
+}
+
+/**
+ * 段の失敗から、**値の中身を含まない**診断（欄の名前と分類）を取り出す（Issue #397）。生の `message`・
+ * API の誤りの種類・打ち切りの理由はそのまま転記せず、有限の一覧に写す（一覧に無い値は `other`）。
+ */
+function diagnoseStageFailure(failure: StageFailure): readonly PlanFailureProblem[] {
+  switch (failure.kind) {
+    case "malformed":
+    case "unmet":
+      return failure.problems.map((problem) => ({
+        field: planDiagnosisField(problem.field),
+        code: planDiagnosisCode(problem.code),
+      }));
+    case "limit":
+      return [{ field: "limit", code: limitDiagnosisCode(failure.limit) }];
+    case "callLimit":
+      return [{ field: "limit", code: limitDiagnosisCode(failure.limit) }];
+    case "invalidRequest":
+      return [{ field: "invalidRequest.code", code: apiDiagnosisCode(failure.code) }];
+    case "incomplete":
+      return [{ field: "incomplete.reason", code: incompleteDiagnosisCode(failure.reason) }];
+    default:
+      return [];
+  }
+}
+
+/** 段の失敗の診断（欄の名前と分類。値の中身を含まない。Issue #397） */
+export interface PlanFailureProblem {
+  readonly field: string;
+  readonly code: string;
+}
+
+/** P1/P2 のどの呼び出しで止まったか（有限の値。Issue #397） */
+export const PLAN_OPERATIONS = ["requirements", "reverse-check", "requirements-redo", "reverse-check-redo"] as const;
+export type PlanOperation = (typeof PLAN_OPERATIONS)[number];
+
+/** 早く止まった帰属（どの段の・どの種類の失敗か。P1/P2 ではどの呼び出しかも持つ） */
 export interface PlanFailure {
   readonly stage: PlanStageId;
   readonly kind: FailureKind;
+  /** 段の失敗の診断（形が合わない・コードの検査に合わない・上限・要求の誤り・打ち切り。Issue #397） */
+  readonly problems?: readonly PlanFailureProblem[];
+  /** P1/P2 で、どの呼び出しで止まったか（有限の値。Issue #397） */
+  readonly operation?: PlanOperation;
+}
+
+/** 確定できなかった理由の出どころ（有限の 4 つ。Issue #397） */
+export const CANNOT_CONFIRM_SOURCES = [
+  /** P6 の覆いの問題（覆われていない原文・使われていない答え） */
+  "confirm",
+  /** P6 の中の仕様の検査と、外側の確定した仕様の検査 */
+  "plan-check",
+  /** 逆照合で落ちが残った */
+  "reverse-check",
+  /** 往復の制御（質問数の上限・往復数の上限・重大な事項があるのに問いが無い） */
+  "session",
+] as const;
+export type CannotConfirmSource = (typeof CANNOT_CONFIRM_SOURCES)[number];
+
+/** 確定できなかった理由 1 つ（**値の中身を含まない**。欄の名前はコードが組み、分類は有限の一覧。Issue #397） */
+export interface CannotConfirmReason {
+  readonly source: CannotConfirmSource;
+  readonly code: string;
+  readonly path: string;
 }
 
 /** 止まった理由（`declined` は答える役が「やめる」と言ったとき。それ以外は失敗の分類） */
@@ -126,7 +381,12 @@ export function isSourceClosureDecision(decision: PlanDecision): boolean {
 /** Plan を 1 回流した結果（3 つの形） */
 export type PlanResult =
   | ({ readonly kind: "confirmed"; readonly plan: ConfirmedPlan } & PlanResultBase)
-  | ({ readonly kind: "cannot-confirm"; readonly openIssues: readonly PlanOpenIssue[] } & PlanResultBase)
+  | ({
+      readonly kind: "cannot-confirm";
+      readonly openIssues: readonly PlanOpenIssue[];
+      /** 確定できなかった理由（全件。値の中身を含まない。Issue #397） */
+      readonly reasons: readonly CannotConfirmReason[];
+    } & PlanResultBase)
   | ({ readonly kind: "stopped"; readonly reason: PlanStopReason; readonly failure: PlanFailure | null } & PlanResultBase);
 
 /** 答える役に渡す、質問の束と残り */
@@ -241,6 +501,24 @@ function stageFailureToKind(failure: StageFailure): FailureKind {
   }
 }
 
+/**
+ * 段の失敗を、記録の帰属（`PlanFailure`）に写す（Issue #397）。段の失敗の診断（欄の名前と分類。
+ * **値の中身を含まない**）と、P1/P2 のときだけどの呼び出しか（`operation`）を付ける。
+ */
+function planFailureOf(
+  stage: PlanStageId,
+  failure: StageFailure,
+  operation?: ReverseCheckOperation,
+): PlanFailure {
+  const problems = diagnoseStageFailure(failure);
+  return {
+    stage,
+    kind: stageFailureToKind(failure),
+    ...(problems.length === 0 ? {} : { problems }),
+    ...(operation === undefined ? {} : { operation }),
+  };
+}
+
 /** 質問を、確定した仕様の入力（`PlanQuestionInput`）に写す */
 function toQuestionInput(question: PlanQuestion): PlanQuestionInput {
   const recommended = question.recommended ?? { choiceId: question.choices[0]?.id ?? "", reason: "" };
@@ -292,6 +570,61 @@ function requirementTextOf(answer: ClassifiedAnswer, question: PlanQuestion): st
  */
 function quoteMissesOf(misses: readonly ReverseCheckMiss[]): readonly ReverseCheckMiss[] {
   return misses.filter((miss) => miss.kind === "quote-not-found" || miss.kind === "position-mismatch");
+}
+
+/** 逆照合の落ちを、確定できなかった理由（`source: reverse-check`）に写す（Issue #397） */
+function reverseCheckReasons(misses: readonly ReverseCheckMiss[]): readonly CannotConfirmReason[] {
+  return misses.map((miss) => ({
+    source: "reverse-check" as const,
+    code: planDiagnosisCode(miss.kind),
+    path:
+      miss.kind === "uncovered-source"
+        ? "source[*]"
+        : `requirements[*].${miss.kind === "quote-not-found" ? "quote" : "position"}`,
+  }));
+}
+
+/** P6 の覆いの問題を、確定できなかった理由（`source: confirm`）に写す（Issue #397） */
+function confirmReasons(problems: readonly ConfirmProblem[]): readonly CannotConfirmReason[] {
+  return problems.map((problem) => ({
+    source: "confirm" as const,
+    code: planDiagnosisCode(problem.code),
+    path: planDiagnosisField(problem.path),
+  }));
+}
+
+/**
+ * 確定した仕様の検査の問題を、確定できなかった理由（`source: plan-check`）に写す（Issue #397）。
+ * **P6 の中の検査（`planProblems`）と外側の検査（`checkConfirmedPlan`）の重なりだけ**を、同じ
+ * `source`・`code`・`path` の組で 1 件にまとめる（`path` が違えば別件として残す）。
+ */
+function planCheckReasons(problems: readonly PlanProblem[]): readonly CannotConfirmReason[] {
+  const seen = new Set<string>();
+  const reasons: CannotConfirmReason[] = [];
+  for (const problem of problems) {
+    const code = planDiagnosisCode(problem.code);
+    const path = planDiagnosisField(problem.path);
+    const key = `${code}\0${path}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    reasons.push({ source: "plan-check", code, path });
+  }
+  return reasons;
+}
+
+/**
+ * 往復の制御で確定できなかった理由（`source: session`）を、有限の `code` で区別する（Issue #397）。
+ * 質問の数の上限・往復の数の上限・重大な事項があるのに問いが無い、を分ける。
+ */
+export function sessionCannotConfirmReason(turns: readonly PlanTurn[]): CannotConfirmReason {
+  const remaining = remainingPlanBudget(turns);
+  const code =
+    remaining.questions <= 0
+      ? "question-limit"
+      : remaining.roundTrips <= 0
+        ? "round-trip-limit"
+        : "critical-no-question";
+  return { source: "session", code, path: "open_issues" };
 }
 
 /**
@@ -374,14 +707,23 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     }
   };
 
-  /** LLM の段を回す。**段の失敗は、記録してから早期停止にする**（止めた段と理由を残す） */
-  const runStageOutcome = async <T>(stage: PlanStageId, fn: () => Promise<StageOutcome<T>>): Promise<T> => {
+  /**
+   * LLM の段を回す。**段の失敗は、記録してから早期停止にする**（止めた段と理由、診断を残す）。
+   * P1/P2 の呼び出しは、どの呼び出しで止まったか（`operation`）も付ける（Issue #397）。
+   */
+  const runStageOutcome = async <T>(
+    stage: PlanStageId,
+    fn: () => Promise<StageOutcome<T> | { readonly ok: false; readonly failure: StageFailure; readonly operation: ReverseCheckOperation }>,
+  ): Promise<T> => {
     const before = meter.snapshot;
     const start = input.now();
     let value: T;
     try {
       const outcome = await fn();
-      if (!outcome.ok) throw new PlanStop({ stage, kind: stageFailureToKind(outcome.failure) });
+      if (!outcome.ok) {
+        const operation = "operation" in outcome ? outcome.operation : undefined;
+        throw new PlanStop(planFailureOf(stage, outcome.failure, operation));
+      }
       value = outcome.value;
     } catch (error) {
       if (error instanceof PlanStop) {
@@ -410,7 +752,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   try {
     // ── P1 要件にする・P2 逆照合（① → ①'。落ちがあれば ① を 1 回だけやり直す）────────────
     const reverse = await runStageOutcome("requirements", () =>
-      runReverseCheckLoop({ source: input.source, documents: input.documents, gateway }),
+      runReverseCheckLoopWithOperation({ source: input.source, documents: input.documents, gateway }),
     );
     const list = reverse.list;
     // P1 の枠の文の範囲。**P6 の照合に渡し、枠の範囲も覆われていると数える**（Issue #372）。枠の文は
@@ -473,7 +815,12 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         status: "open",
       }));
       const critical = openIssues.filter((issue) => issue.status === "open" && issue.critical);
-      return { kind: "cannot-confirm", openIssues: [...critical, ...missIssues], ...resultBase() };
+      return {
+        kind: "cannot-confirm",
+        openIssues: [...critical, ...missIssues],
+        reasons: reverseCheckReasons(quoteMisses),
+        ...resultBase(),
+      };
     }
 
     // ── P3 洗い出し（目録に無い曖昧さ）──────────────────────────────
@@ -627,7 +974,12 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         allRecommended,
       });
       if (step.kind === "cannot-confirm") {
-        return { kind: "cannot-confirm", openIssues: step.openIssues, ...resultBase() };
+        return {
+          kind: "cannot-confirm",
+          openIssues: step.openIssues,
+          reasons: [sessionCannotConfirmReason(turns)],
+          ...resultBase(),
+        };
       }
       if (step.kind === "confirm") {
         const decision = await input.responder.confirm(view);
@@ -734,9 +1086,16 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     );
     const problems = await checkConfirmedPlan(confirmed.plan);
     if (!confirmed.confirmed || problems.length > 0) {
+      // 確定できなかった理由を全件残す（P6 の覆い・確定した仕様の検査。値の中身は含めない。Issue #397）。
+      // `planProblems`（P6 の中の検査）と `problems`（外側の検査）の重なりは、同じ source・code・path
+      // の組で 1 件にまとめる（`path` が違えば別件）。
       return {
         kind: "cannot-confirm",
         openIssues: openIssues.filter((issue) => issue.status === "open" && issue.critical),
+        reasons: [
+          ...confirmReasons(confirmed.problems),
+          ...planCheckReasons([...confirmed.planProblems, ...problems]),
+        ],
         ...resultBase(),
       };
     }

@@ -133,6 +133,23 @@ describe("形が合わない応答は 1 回だけやり直す（02 §2.2）", ()
     expect(recording.structured).toHaveLength(2);
   });
 
+  it("問題の型の任意の code は、段の失敗まで保たれる（欄の名前と message の写し方は変えない。Issue #397）", async () => {
+    const recording = createRecordingClient([
+      { kind: "structured", output: { bad: true }, usage: undefined },
+      { kind: "structured", output: { also: "bad" }, usage: undefined },
+    ]);
+    const plan: StructuredPlan<NValue> = {
+      request: REQUEST,
+      check: () => ({ ok: false, problems: [{ field: "n", message: "数であること", code: "shape" }] }),
+    };
+    const outcome = await callStructuredChecked(makeGateway(recording.client), plan);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    if (outcome.failure.kind !== "malformed") return;
+    // 欄の名前と message（Build への写し方）はそのままに、分類（code）も保たれる
+    expect(outcome.failure.problems).toEqual([{ field: "n", message: "数であること", code: "shape" }]);
+  });
+
   it("拒否は、拒否として段の失敗にし、やり直さない（02 §2.2・#302）", async () => {
     let calls = 0;
     const client: LlmClient = {
