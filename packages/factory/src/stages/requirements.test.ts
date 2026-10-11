@@ -102,6 +102,92 @@ describe("① のやり直し（02 §1・①' の落ちを受けて）", () => {
   });
 });
 
+describe("① の枠の文（Issue #372）", () => {
+  it("framing を持つ応答を受け付け、framing の無い応答は空の配列として扱う", () => {
+    const source = "タスクを記録する。アプリを作ってください";
+    const withFraming = checkRequirementOutput(
+      {
+        requirements: [
+          { id: "R-1", text: "タスクを記録できる", quote: "タスクを記録する", position: { start: 0, end: 8 } },
+        ],
+        framing: [{ quote: "アプリを作ってください", position: { start: 9, end: 20 } }],
+        decisions: [],
+        unresolved: [],
+      },
+      source,
+    );
+    expect(withFraming.ok).toBe(true);
+    if (!withFraming.ok) return;
+    expect(withFraming.value.framing).toEqual([
+      { quote: "アプリを作ってください", position: { start: 9, end: 20 } },
+    ]);
+
+    const withoutFraming = checkRequirementOutput(REQUIREMENT_LIST_OUTPUT);
+    expect(withoutFraming.ok).toBe(true);
+    if (!withoutFraming.ok) return;
+    expect(withoutFraming.value.framing).toEqual([]);
+  });
+
+  it("引用が空の framing は、形の誤りになる", () => {
+    const bad = checkRequirementOutput({
+      requirements: [],
+      framing: [{ quote: "", position: { start: 0, end: 1 } }],
+      decisions: [],
+      unresolved: [],
+    });
+    expect(bad.ok).toBe(false);
+    if (bad.ok) return;
+    expect(bad.problems.map((problem) => problem.field)).toContain("framing[0].quote");
+  });
+
+  it("位置の範囲の原文と引用が合わない framing は、形の誤りになる", () => {
+    const bad = checkRequirementOutput(
+      {
+        requirements: [],
+        framing: [{ quote: "アプリ", position: { start: 0, end: 3 } }],
+        decisions: [],
+        unresolved: [],
+      },
+      SOURCE_TEXT,
+    );
+    expect(bad.ok).toBe(false);
+    if (bad.ok) return;
+    expect(bad.problems.map((problem) => problem.field)).toContain("framing[0].position");
+  });
+
+  it("位置の合わない framing の応答は、1 回だけやり直す（2 回続くと失敗になる）", async () => {
+    const badOutput = {
+      requirements: [],
+      framing: [{ quote: "アプリ", position: { start: 0, end: 3 } }],
+      decisions: [],
+      unresolved: [],
+    };
+    const bad = createRecordingClient([
+      { kind: "structured", output: badOutput, usage: undefined },
+      { kind: "structured", output: badOutput, usage: undefined },
+    ]);
+    const failed = await runRequirements({
+      source: SOURCE_TEXT,
+      documents: [],
+      gateway: makeGateway(bad.client),
+    });
+    expect(failed.ok).toBe(false);
+    if (failed.ok) return;
+    expect(failed.failure.kind).toBe("malformed");
+
+    const recovered = createRecordingClient([
+      { kind: "structured", output: badOutput, usage: undefined },
+      { kind: "structured", output: REQUIREMENT_LIST_OUTPUT, usage: undefined },
+    ]);
+    const retried = await runRequirements({
+      source: SOURCE_TEXT,
+      documents: [],
+      gateway: makeGateway(recovered.client),
+    });
+    expect(retried.ok).toBe(true);
+  });
+});
+
 describe("① の形の確認", () => {
   it("正しい応答は固定できる", () => {
     const checked = checkRequirementOutput(REQUIREMENT_LIST_OUTPUT);

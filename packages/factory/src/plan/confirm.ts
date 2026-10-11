@@ -24,6 +24,7 @@ import type {
 } from "@musunest/appspec-schema";
 import { PLAN_SPEC_SCHEMA_VERSION, checkPlan, planDigest } from "@musunest/appspec-schema";
 import type { Judge, JudgeQuestion } from "../judge.js";
+import type { SourceRange } from "../pipeline.js";
 import { splitSourceSentences } from "../stages/reverse-check.js";
 
 /** P6 の照合の誤りの種類 */
@@ -63,6 +64,11 @@ export interface ConfirmInput {
   readonly vocabularyVersion: string;
   /** 依頼文（原文） */
   readonly source: string;
+  /**
+   * P1 が受け取った依頼の枠の文の範囲（Issue #372）。**枠の範囲も覆われていると数える**——枠の文は
+   * 要件にしないので、要件の出どころでは覆われないためである。無いときは空の配列として扱う。
+   */
+  readonly framing?: readonly SourceRange[];
   readonly inputs: readonly PlanInput[];
   readonly requirements: readonly PlanRequirement[];
   readonly openIssues: readonly PlanOpenIssue[];
@@ -117,12 +123,13 @@ interface SentenceCoverage {
 /**
  * 原文を文に切り、各文が**要件の出どころ**（`inputs` の `source`）で覆われているかを求める（04 §3 P6）。
  * 文に対応する `source` の入力が無い、またはその入力がどの要件の出どころにもなっていなければ、覆われて
- * いない。
+ * いない。ただし**枠の範囲**（`framing`）に重なる文は、覆われていると数える（Issue #372）。
  */
 export function checkSourceCoverage(
   source: string,
   inputs: readonly PlanInput[],
   requirements: readonly PlanRequirement[],
+  framing: readonly SourceRange[] = [],
 ): readonly SentenceCoverage[] {
   const coveredInputIds = new Set(requirements.map((requirement) => requirement.origin.input_id));
   const sourceInputs = inputs.filter((input): input is PlanSourceInput => input.kind === "source");
@@ -131,7 +138,11 @@ export function checkSourceCoverage(
     const text = source.slice(range.start, range.end);
     const trimmed = text.trim();
     const match = sourceInputs.find((input) => input.text.trim() === trimmed);
-    result.push({ text: trimmed, covered: match !== undefined && coveredInputIds.has(match.id) });
+    const byFraming = framing.some((frame) => frame.start < range.end && range.start < frame.end);
+    result.push({
+      text: trimmed,
+      covered: byFraming || (match !== undefined && coveredInputIds.has(match.id)),
+    });
   }
   return result;
 }
@@ -181,8 +192,8 @@ export async function runConfirm(input: ConfirmInput): Promise<ConfirmResult> {
     }
   });
 
-  // 2. 覆われていない原文の文があれば確定しない
-  checkSourceCoverage(input.source, input.inputs, requirements).forEach((sentence, index) => {
+  // 2. 覆われていない原文の文があれば確定しない（枠の範囲も覆われていると数える。Issue #372）
+  checkSourceCoverage(input.source, input.inputs, requirements, input.framing ?? []).forEach((sentence, index) => {
     if (!sentence.covered) {
       problems.push({
         code: "uncovered-source",

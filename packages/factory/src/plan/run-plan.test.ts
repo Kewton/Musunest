@@ -174,6 +174,36 @@ const SOURCE_CLOSURE_QUESTIONS = {
   closedBySource: [{ issueId: "OI-c", quote: "タスクを記録する", value: "記録する内容を 1 行にする" }],
 };
 
+/** 依頼の枠の文を 1 文持つ原文（枠の文は要件にしない。Issue #372） */
+const FRAMING_SOURCE = "アプリを作ってください。タスクを記録する。件数を合計する。";
+
+/** 原文から引用の位置を求める（枠の文の試験のため） */
+function spanOf(source: string, quote: string): { readonly start: number; readonly end: number } {
+  const start = source.indexOf(quote);
+  return { start, end: start + quote.length };
+}
+
+/** 枠の文を持つ ① の答え（枠の文は framing に入れ、要件にはしない。Issue #372） */
+const FRAMING_REQUIREMENT_LIST_OUTPUT = {
+  requirements: [
+    {
+      id: "R-1",
+      text: "タスクを記録できる",
+      quote: "タスクを記録する",
+      position: spanOf(FRAMING_SOURCE, "タスクを記録する"),
+    },
+    {
+      id: "R-2",
+      text: "件数を合計できる",
+      quote: "件数を合計する",
+      position: spanOf(FRAMING_SOURCE, "件数を合計する"),
+    },
+  ],
+  framing: [{ quote: "アプリを作ってください", position: spanOf(FRAMING_SOURCE, "アプリを作ってください") }],
+  decisions: ["記録の形は 1 行とした"],
+  unresolved: [],
+};
+
 function makePlanInput(
   client: LlmClient,
   judge: Judge,
@@ -590,5 +620,39 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     expect(result.stages.filter((stage) => stage.stage === "answers")).toHaveLength(0);
     if (result.kind !== "confirmed") return;
     expect(result.plan.open_issues.every((issue) => issue.status === "resolved")).toBe(true);
+  });
+
+  // ── 依頼の枠の文を要件にしない（Issue #372）───────────────────────────
+
+  it("枠の文を持つ依頼文で、枠の文を要件にしないまま P6 の照合を通って確定し、確定した仕様に framing も枠の要件も入らない", async () => {
+    const recording = createRecordingClient([
+      structured(FRAMING_REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [confirmQuestionName("S-1")]: noul(0.9),
+      [confirmQuestionName("S-2")]: noul(0.95),
+      [confirmQuestionName("S-3")]: noul(0.95),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder, { source: FRAMING_SOURCE }));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 枠の文は要件にしないので、要件は R-1・R-2 のまま（枠の要件が増えない）
+    expect(result.plan.requirements.map((requirement) => requirement.id)).toEqual(["R-1", "R-2"]);
+    // 確定した仕様に framing は入らない（`@musunest/appspec-schema` の型を変えない）
+    expect(Object.keys(result.plan)).not.toContain("framing");
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
   });
 });

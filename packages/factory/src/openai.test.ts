@@ -434,9 +434,10 @@ const enveloped = (stage: string, output: Record<string, unknown>): Record<strin
   result: { stage, ...output },
 });
 
-/** ① の答え（`REQUIREMENT_LIST_SCHEMA` に合う最小の形） */
+/** ① の答え（`REQUIREMENT_LIST_SCHEMA` に合う最小の形。`framing` は必須の欄なので空の配列を置く。Issue #372） */
 const REQUIREMENT_OUTPUT = {
   requirements: [{ id: "R-1", text: "要件", quote: "引用", position: { start: 0, end: 1 } }],
+  framing: [],
   decisions: [],
   unresolved: [],
 };
