@@ -7,8 +7,8 @@
 //   3. 満たさなければ 1 回だけ作り直し、それでも欠ける要件は未達として持つこと
 //   4. ①' と同じく、送った要求を観測できること（規則とデータが別・JSON Schema が付く）
 import { describe, expect, it } from "vitest";
-import { checkTestSuite, type RequirementNature, type TestSuite } from "../fixed-test.js";
-import type { DesignResult } from "../pipeline.js";
+import { checkTestSuite, STRUCTURAL_ASSERTIONS, type RequirementNature, type StructuralAssertionKind, type TestSuite } from "../fixed-test.js";
+import type { DesignResult, RoleEntry } from "../pipeline.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest, JudgeResponse } from "../judge.js";
 import {
@@ -925,5 +925,190 @@ describe("種類の食い違いを判定の口に選ばせる（§1・②'・Iss
     expect(serialized).not.toContain("DESIGN_SENTINEL");
     expect(serialized).not.toContain("TEST_SENTINEL");
     expect(serialized).not.toContain("record.total");
+  });
+});
+
+// ── 構造の検査（Issue #386）────────────────────────────────────
+
+/** 構造の検査を試すための役割 ID の表（entity・画面・項目・操作・計算） */
+const STRUCTURE_ROLES: readonly RoleEntry[] = [
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
+  { roleId: "record.records", kind: "screen", entity: "record", name: "records", shared: false, aliasOf: null },
+  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null },
+  { roleId: "record.payer", kind: "field", entity: "record", name: "payer", shared: false, aliasOf: null },
+  { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+  { roleId: "other", kind: "entity", entity: null, name: "other", shared: false, aliasOf: null },
+  { roleId: "other.amount", kind: "field", entity: "other", name: "amount", shared: false, aliasOf: null },
+];
+
+/** checks を持つ構造の要件（R-1）と、固定した試験の要件（R-2）の設計（Issue #386） */
+function structuralDesign(checks: readonly StructuralAssertionKind[]): DesignResult {
+  return {
+    roles: STRUCTURE_ROLES,
+    designs: [
+      {
+        requirementId: "R-1",
+        nature: "existence-only",
+        verification: { kind: "structural", reason: "構造で確かめる" },
+        checks: [...checks],
+        vocabulary: [],
+        placement: [],
+        unwritable: [],
+      },
+      {
+        requirementId: "R-2",
+        nature: "ruled",
+        verification: { kind: "fixed-test" },
+        checks: [],
+        vocabulary: [],
+        placement: [],
+        unwritable: [],
+      },
+    ],
+  };
+}
+
+const STRUCTURE_NATURES: ReadonlyMap<string, RequirementNature> = new Map([
+  ["R-1", "existence-only"],
+  ["R-2", "ruled"],
+]);
+
+/** 構造の検査 1 件（操作 structure・種類 normal・期待は「成り立つ」） */
+function structureTest(
+  id: string,
+  requirementId: string,
+  targetKind: "entity" | "field" | "computation" | "operation" | "screen",
+  roleId: string,
+  assertion: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    id,
+    target: { requirementId, kind: targetKind, roleId },
+    kind: "normal",
+    operation: "structure",
+    clock: CLOCK,
+    input: {},
+    inputContract: { rowId: `${id}-row`, targetRowId: null, emptyEntities: [] },
+    referenceData: [],
+    expected: { kind: "ok", value: true },
+    assertion,
+  };
+}
+
+/** 5 つの検査の中身と、その対象（役割の種類と役割 ID） */
+const CHECK_CASES: Readonly<
+  Record<StructuralAssertionKind, { readonly targetKind: "entity" | "field" | "computation" | "operation" | "screen"; readonly roleId: string; readonly assertion: Record<string, unknown> }>
+> = {
+  "field-type": { targetKind: "field", roleId: "record.payer", assertion: { check: "field-type", expected: "ref", refEntity: "record" } },
+  "action-kind": { targetKind: "operation", roleId: "record.add", assertion: { check: "action-kind", expected: "create" } },
+  "action-unconditioned": { targetKind: "operation", roleId: "record.add", assertion: { check: "action-unconditioned" } },
+  "view-shows": { targetKind: "screen", roleId: "record.records", assertion: { check: "view-shows", role: "record.amount" } },
+  "aggregate-no-period": { targetKind: "computation", roleId: "record.total", assertion: { check: "aggregate-no-period" } },
+};
+
+/** 検査の中身の並びに対する構造の検査の並び（R-1 を対象にする） */
+function structureTestsFor(checks: readonly StructuralAssertionKind[]): readonly Record<string, unknown>[] {
+  return checks.map((check, index) => {
+    const spec = CHECK_CASES[check];
+    return structureTest(`s${index}`, "R-1", spec.targetKind, spec.roleId, spec.assertion);
+  });
+}
+
+/** R-2（決まりを含む）の正常・異常・境界 */
+const R2_TRIPLE_PLANNED = [
+  plannedTest({ id: "n2", requirementId: "R-2", roleId: "record.total", kind: "normal", operation: "compute" }),
+  plannedTest({ id: "a2", requirementId: "R-2", roleId: "record.total", kind: "abnormal", operation: "compute", expected: { kind: "ok", value: 0 } }),
+  plannedTest({ id: "b2", requirementId: "R-2", roleId: "record.total", kind: "boundary", operation: "compute", expected: { kind: "ok", value: 0 } }),
+];
+
+describe("構造の検査（Issue #386）", () => {
+  it("設計の checks の中身ごとに構造の検査があれば、実行の試験が無くても断らない", () => {
+    const checks: readonly StructuralAssertionKind[] = STRUCTURAL_ASSERTIONS;
+    const suite = suiteOf([...structureTestsFor(checks), ...R2_TRIPLE_PLANNED]);
+    expect(checkSuitePlan(REQUIREMENT_LIST, suite, structuralDesign(checks), STRUCTURE_NATURES)).toEqual([]);
+  });
+
+  it("checks の中身の一部だけなら、欠けた検査を挙げる", () => {
+    const suite = suiteOf([...structureTestsFor(["action-kind"]), ...R2_TRIPLE_PLANNED]);
+    const problems = checkSuitePlan(
+      REQUIREMENT_LIST,
+      suite,
+      structuralDesign(["action-kind", "action-unconditioned"]),
+      STRUCTURE_NATURES,
+    );
+    expect(
+      problems.some((problem) => problem.message.includes("action-unconditioned") && problem.message.includes("無い")),
+    ).toBe(true);
+  });
+
+  it("実行の試験だけで構造の検査が 0 本なら、欠けとして断る", () => {
+    const execution = plannedTest({ id: "e1", requirementId: "R-1", roleId: "record.total", kind: "normal", operation: "compute" });
+    const suite = suiteOf([execution, ...R2_TRIPLE_PLANNED]);
+    const problems = checkSuitePlan(REQUIREMENT_LIST, suite, structuralDesign(["action-kind"]), STRUCTURE_NATURES);
+    expect(problems.some((problem) => problem.message.includes("構造の検査 action-kind が無い"))).toBe(true);
+  });
+
+  it("構造の検査が、確かめ方が構造でない要件を対象にすると断る", () => {
+    const wrong = structureTest("w1", "R-2", "operation", "record.add", { check: "action-kind", expected: "create" });
+    const suite = suiteOf([...structureTestsFor(["action-kind"]), wrong, ...R2_TRIPLE_PLANNED]);
+    const problems = checkSuitePlan(REQUIREMENT_LIST, suite, structuralDesign(["action-kind"]), STRUCTURE_NATURES);
+    expect(problems.some((problem) => problem.message.includes("確かめ方が構造の要件だけを対象にできる"))).toBe(true);
+  });
+
+  it("view-shows の参照する役割が表に無い・別の entity・種類違いなら断る", () => {
+    const design = structuralDesign(["view-shows"]);
+    const notInTable = structureTest("v1", "R-1", "screen", "record.records", { check: "view-shows", role: "record.missing" });
+    const otherEntity = structureTest("v2", "R-1", "screen", "record.records", { check: "view-shows", role: "other.amount" });
+    const wrongKind = structureTest("v3", "R-1", "screen", "record.records", { check: "view-shows", role: "record" });
+    const notInTableProblems = checkSuitePlan(REQUIREMENT_LIST, suiteOf([notInTable, ...R2_TRIPLE_PLANNED]), design, STRUCTURE_NATURES);
+    expect(
+      notInTableProblems.some((problem) => problem.field.includes("assertion.role") && problem.message.includes("役割 ID の表に無い")),
+    ).toBe(true);
+    const otherEntityProblems = checkSuitePlan(REQUIREMENT_LIST, suiteOf([otherEntity, ...R2_TRIPLE_PLANNED]), design, STRUCTURE_NATURES);
+    expect(otherEntityProblems.some((problem) => problem.message.includes("別の entity"))).toBe(true);
+    const wrongKindProblems = checkSuitePlan(REQUIREMENT_LIST, suiteOf([wrongKind, ...R2_TRIPLE_PLANNED]), design, STRUCTURE_NATURES);
+    expect(wrongKindProblems.some((problem) => problem.message.includes("項目か計算"))).toBe(true);
+  });
+
+  it("field-type の参照先が表に無い・entity でなければ断る", () => {
+    const design = structuralDesign(["field-type"]);
+    const notEntity = structureTest("f1", "R-1", "field", "record.payer", { check: "field-type", expected: "ref", refEntity: "record.amount" });
+    const notInTable = structureTest("f2", "R-1", "field", "record.payer", { check: "field-type", expected: "ref", refEntity: "ghost" });
+    const notEntityProblems = checkSuitePlan(REQUIREMENT_LIST, suiteOf([notEntity, ...R2_TRIPLE_PLANNED]), design, STRUCTURE_NATURES);
+    expect(notEntityProblems.some((problem) => problem.message.includes("entity の役割でなければならない"))).toBe(true);
+    const notInTableProblems = checkSuitePlan(REQUIREMENT_LIST, suiteOf([notInTable, ...R2_TRIPLE_PLANNED]), design, STRUCTURE_NATURES);
+    expect(notInTableProblems.some((problem) => problem.message.includes("役割 ID の表に無い"))).toBe(true);
+  });
+
+  it("checks の無い設計と assertion の無い組は、今までどおりの検査になる（後方互換）", () => {
+    // PLANNED_DESIGN は R-2 が structural だが checks を持たず、R2_EXISTENCE は assertion を持たない
+    const suite = suiteOf([...R1_RULED, ...R2_EXISTENCE]);
+    expect(checkSuitePlan(REQUIREMENT_LIST, suite, PLANNED_DESIGN, RULED_NATURES)).toEqual([]);
+  });
+
+  it("確かめ方は、種類の分類とは別のデータの欄で渡す（Issue #386）", async () => {
+    const checks: readonly StructuralAssertionKind[] = ["action-kind"];
+    const design = structuralDesign(checks);
+    const output = {
+      classifications: [
+        { requirementId: "R-1", nature: "existence-only" },
+        { requirementId: "R-2", nature: "ruled" },
+      ],
+      tests: [...structureTestsFor(checks), ...R2_TRIPLE_PLANNED],
+    };
+    const recording = createRecordingClient([structured(output)]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design,
+    });
+    expect(outcome.ok).toBe(true);
+    const request = recording.structured[0];
+    expect(request?.input).toContain("要件ごとの種類");
+    expect(request?.input).toContain("要件ごとの確かめ方");
+    expect(request?.input).toContain("checks");
+    expect((request?.rules ?? []).join("\n")).toContain("確かめ方の欄は使わない");
   });
 });

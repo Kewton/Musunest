@@ -27,6 +27,7 @@ import {
 import { ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_NAME } from "./schema-envelope.js";
 import { REQUIREMENT_LIST_SCHEMA, REQUIREMENTS_SCHEMA_NAME } from "./stages/requirements.js";
 import { REVERSE_CHECK_SCHEMA, REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
+import { TEST_SUITE_SCHEMA, TEST_SUITE_SCHEMA_NAME } from "./stages/test-suite.js";
 
 interface NodeFileSystem {
   readFileSync(path: URL, encoding: "utf8"): string;
@@ -545,6 +546,99 @@ describe("構造化出力は、全段で同じ封筒の schema を送る（02 §
     expect(input[1]?.content[0]).toEqual({ type: "input_text", text: "<rules>\n段の規則\n</rules>" });
     // 段の規則の本文は変えず、別の内容の塊として stage の指示を足す
     expect(input[1]?.content[1]?.["text"]).toContain(REQUIREMENTS_SCHEMA_NAME);
+  });
+});
+
+// ── 3.8. 構造の検査を持つ試験の段の応答（#386）────────────────────────────
+
+/**
+ * 試験の段の応答（**構造の検査** 1 本。strict の schema に合わせ、`assertion` の欄をすべて埋める。
+ * Issue #386）。`expected.value` と `input` は JSON の**文字列**である。
+ */
+const STRUCTURAL_TEST_SUITE_OUTPUT = {
+  classifications: [{ requirementId: "R-1", nature: "ruled" }],
+  tests: [
+    {
+      id: "t1",
+      target: { requirementId: "R-1", kind: "operation", roleId: "record.add" },
+      kind: "normal",
+      operation: "structure",
+      clock: "2026-09-16T12:00:00+09:00",
+      input: "{}",
+      inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: "true", code: null },
+      assertion: { check: "action-kind", expected: "create", refEntity: null, role: null },
+    },
+  ],
+};
+
+describe("構造の検査を持つ試験の段の応答が、封筒を通る（02 §2・Issue #386）", () => {
+  it("構造の検査を持つ応答は、封筒を通り、assertion を保つ", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(
+        completed(
+          outputText(JSON.stringify(enveloped(TEST_SUITE_SCHEMA_NAME, STRUCTURAL_TEST_SUITE_OUTPUT))),
+          USAGE_WIRE,
+        ),
+      ),
+    );
+    const response = await clientWith(fetch).callStructured<Record<string, unknown>>(
+      stageRequest(TEST_SUITE_SCHEMA_NAME, TEST_SUITE_SCHEMA),
+    );
+    const tests = response.output["tests"] as readonly Record<string, unknown>[];
+    expect(tests).toHaveLength(1);
+    expect(tests[0]?.["assertion"]).toEqual({ check: "action-kind", expected: "create", refEntity: null, role: null });
+    expect(response.output).not.toHaveProperty("stage");
+  });
+
+  it("assertion の欄が欠けた応答は、形の誤り（malformed）になる", async () => {
+    const withoutAssertion = {
+      classifications: [{ requirementId: "R-1", nature: "ruled" }],
+      tests: [
+        {
+          id: "t1",
+          target: { requirementId: "R-1", kind: "operation", roleId: "record.add" },
+          kind: "normal",
+          operation: "structure",
+          clock: "2026-09-16T12:00:00+09:00",
+          input: "{}",
+          inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: [] },
+          referenceData: [],
+          expected: { kind: "ok", value: "true", code: null },
+        },
+      ],
+    };
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(
+        completed(outputText(JSON.stringify(enveloped(TEST_SUITE_SCHEMA_NAME, withoutAssertion))), USAGE_WIRE),
+      ),
+    );
+    const error = await captureError(() =>
+      clientWith(fetch).callStructured(stageRequest(TEST_SUITE_SCHEMA_NAME, TEST_SUITE_SCHEMA)),
+    );
+    expect(error.kind).toBe("malformed");
+  });
+
+  it("assertion の形が違う応答は、形の誤り（malformed）になる", async () => {
+    const wrongShape = {
+      ...STRUCTURAL_TEST_SUITE_OUTPUT,
+      tests: [
+        {
+          ...STRUCTURAL_TEST_SUITE_OUTPUT.tests[0],
+          assertion: { check: "nope", expected: null, refEntity: null, role: null },
+        },
+      ],
+    };
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(
+        completed(outputText(JSON.stringify(enveloped(TEST_SUITE_SCHEMA_NAME, wrongShape))), USAGE_WIRE),
+      ),
+    );
+    const error = await captureError(() =>
+      clientWith(fetch).callStructured(stageRequest(TEST_SUITE_SCHEMA_NAME, TEST_SUITE_SCHEMA)),
+    );
+    expect(error.kind).toBe("malformed");
   });
 });
 

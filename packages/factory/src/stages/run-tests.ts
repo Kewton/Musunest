@@ -573,6 +573,8 @@ function evaluationMethod(
   location: DeclarationLocation,
   app: NormalizedAppSpec,
 ): Method {
+  // 構造の検査は、この Issue では実行しない（必ず未解決にする。Issue #386）。実行と判定は後続の Issue
+  if (test.operation === "structure") return "unresolved";
   if (test.operation === "validate") return "validation";
   if (test.operation === "action") {
     if (test.target.kind !== "operation") return "unresolved";
@@ -623,6 +625,14 @@ function judgeOne(
   input: RunTestsInput,
   natures: ReadonlyMap<string, RequirementNature>,
 ): Judged {
+  // 構造の検査は、この Issue では**必ず未解決**にする（今の画面の判定などへ流さない。Issue #386）。
+  // 結び付けの可否によらず未解決にする——実行と判定は後続の Issue で行う。合格（一致）にしない。
+  if (test.operation === "structure") {
+    return {
+      verdict: { kind: "unresolved", detail: "構造の検査は、この Issue では実行しない（未解決にする）" },
+      route: "ambiguity",
+    };
+  }
   if (binding === undefined || binding.kind === "unbound") {
     // 提出された対応が無い・1 つに決まらない → 未解決（曖昧さ）
     if (binding?.cause === "no-mapping" || binding?.cause === "ambiguous") {

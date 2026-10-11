@@ -157,3 +157,134 @@ describe("入力の契約は、固定の行 ID・評価の対象の行 ID・空�
     expect(problemFields({ ...VALID, referenceData })).toContain("referenceData[0].rowId");
   });
 });
+
+// ── 構造の検査（Issue #386）────────────────────────────────────
+
+/** 構造の検査 1 件（操作 structure・種類 normal・期待は「成り立つ」） */
+function structuralTest(
+  id: string,
+  targetKind: "entity" | "field" | "computation" | "operation" | "screen",
+  roleId: string,
+  assertion: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    id,
+    target: { requirementId: "R-1", kind: targetKind, roleId },
+    kind: "normal",
+    operation: "structure",
+    clock: "2026-09-16T12:00:00+09:00",
+    input: {},
+    referenceData: [],
+    expected: { kind: "ok", value: true },
+    assertion,
+  };
+}
+
+describe("構造の検査の型（Issue #386）", () => {
+  it("5 つの検査の中身を、それぞれ受け付ける", () => {
+    const cases: readonly Record<string, unknown>[] = [
+      structuralTest("s1", "field", "record.amount", { check: "field-type", expected: "number" }),
+      structuralTest("s2", "field", "record.owner", { check: "field-type", expected: "ref", refEntity: "person" }),
+      structuralTest("s3", "operation", "record.add", { check: "action-kind", expected: "create" }),
+      structuralTest("s4", "operation", "record.add", { check: "action-unconditioned" }),
+      structuralTest("s5", "screen", "record.records", { check: "view-shows", role: "record.amount" }),
+      structuralTest("s6", "computation", "record.total", { check: "aggregate-no-period" }),
+    ];
+    for (const value of cases) {
+      const checked = checkFixedTest(value);
+      expect(checked.ok, JSON.stringify(value["assertion"])).toBe(true);
+    }
+  });
+
+  it("受け付けた構造の検査は、検査の中身を保つ（判別できる）", () => {
+    const checked = checkFixedTest(
+      structuralTest("s", "field", "record.owner", { check: "field-type", expected: "ref", refEntity: "person" }),
+    );
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    expect(checked.test.operation).toBe("structure");
+    expect(checked.test.assertion).toEqual({ check: "field-type", expected: "ref", refEntity: "person" });
+  });
+
+  it("語彙に無い種類（例 boolean）を断る", () => {
+    expect(
+      problemFields(structuralTest("s", "field", "record.amount", { check: "field-type", expected: "boolean" })),
+    ).toContain("assertion.expected");
+  });
+
+  it("選択肢に無い検査の中身を断る", () => {
+    expect(problemFields(structuralTest("s", "field", "record.amount", { check: "unknown" }))).toContain(
+      "assertion.check",
+    );
+  });
+
+  it("欠けた欄を断る（field-type の期待・view-shows の役割・ref の参照先）", () => {
+    expect(problemFields(structuralTest("s", "field", "record.amount", { check: "field-type" }))).toContain(
+      "assertion.expected",
+    );
+    expect(problemFields(structuralTest("s", "screen", "record.records", { check: "view-shows" }))).toContain(
+      "assertion.role",
+    );
+    expect(
+      problemFields(structuralTest("s", "field", "record.owner", { check: "field-type", expected: "ref" })),
+    ).toContain("assertion.refEntity");
+  });
+
+  it("種類が normal でなければ断る", () => {
+    const value = { ...structuralTest("s", "operation", "record.add", { check: "action-kind", expected: "create" }), kind: "abnormal" };
+    expect(problemFields(value)).toContain("kind");
+  });
+
+  it("期待が「成り立つ」（ok・値 true）でなければ断る", () => {
+    const value = {
+      ...structuralTest("s", "operation", "record.add", { check: "action-kind", expected: "create" }),
+      expected: { kind: "ok", value: false },
+    };
+    expect(problemFields(value)).toContain("expected");
+  });
+
+  it("対象の種類違いを断る", () => {
+    expect(
+      problemFields(structuralTest("s", "operation", "record.add", { check: "field-type", expected: "number" })),
+    ).toContain("assertion.check");
+    expect(
+      problemFields(structuralTest("s", "field", "record.amount", { check: "action-kind", expected: "create" })),
+    ).toContain("assertion.check");
+    expect(
+      problemFields(structuralTest("s", "computation", "record.total", { check: "view-shows", role: "record.amount" })),
+    ).toContain("assertion.check");
+    expect(problemFields(structuralTest("s", "entity", "record", { check: "aggregate-no-period" }))).toContain(
+      "assertion.check",
+    );
+  });
+
+  it("文字列の並びと参照の並びを区別する（list に参照先があるかないか）", () => {
+    // 文字列の並び（参照先なし）と、参照の並び（参照先あり）は、どちらも受け付ける
+    const stringList = structuralTest("s1", "field", "record.tags", { check: "field-type", expected: "list" });
+    const refList = structuralTest("s2", "field", "record.members", {
+      check: "field-type",
+      expected: "list",
+      refEntity: "person",
+    });
+    expect(checkFixedTest(stringList).ok).toBe(true);
+    expect(checkFixedTest(refList).ok).toBe(true);
+    // 参照でない種類に参照先を書くと断る（2 つを混同しない）
+    expect(
+      problemFields(
+        structuralTest("s3", "field", "record.amount", { check: "field-type", expected: "number", refEntity: "person" }),
+      ),
+    ).toContain("assertion.refEntity");
+  });
+
+  it("構造の検査でない試験に、構造の検査の中身を書くと断る", () => {
+    expect(problemFields({ ...VALID, assertion: { check: "action-kind", expected: "create" } })).toContain(
+      "assertion",
+    );
+  });
+
+  it("構造の検査の中身が写像でなければ断る", () => {
+    expect(
+      problemFields({ ...structuralTest("s", "operation", "record.add", { check: "action-kind" }), assertion: "nope" }),
+    ).toContain("assertion");
+  });
+});
