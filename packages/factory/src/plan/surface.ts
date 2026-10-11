@@ -280,7 +280,7 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
     data: [{ name: "要件の一覧", text: serializeJson(input.list) }],
     schemaName: SURFACE_SCHEMA_NAME,
     schema: SURFACE_SCHEMA,
-    maxOutputTokens: input.gateway.maxOutputTokens("design"),
+    maxOutputTokens: input.gateway.maxOutputTokens("surface"),
   });
   const answer = await callStructuredChecked(input.gateway, { request, check: checkSurfaceOutput });
   if (!answer.ok) return answer;

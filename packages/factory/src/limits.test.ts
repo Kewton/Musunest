@@ -123,17 +123,39 @@ describe("段の出力の上限は effort ごとに、共通の置き場所が�
     }
   });
 
+  it("値は次の表のとおりで、3 つの effort で同じである（Issue #399）", () => {
+    // 2026-10-11 の計測で打ち切りが出た段に余白を取り、Plan の段（surface・questions）を自分の名前で
+    // 足した。値は暫定で、3 つの effort は同じである。
+    const table: Record<(typeof OUTPUT_STAGES)[number], number> = {
+      requirements: 16_384,
+      "reverse-check": 8_192,
+      design: 32_768,
+      surface: 32_768,
+      questions: 32_768,
+      "test-suite": 32_768,
+      write: 32_768,
+      correspondence: 16_384,
+      repair: 32_768,
+      arbitration: 16_384,
+    };
+    // 表は、段の一覧（OUTPUT_STAGES）を漏れなく覆う（足し忘れは型で見つかる）
+    expect(Object.keys(table).sort()).toEqual([...OUTPUT_STAGES].sort());
+    for (const effort of ["low", "medium", "high"] as const) {
+      for (const stage of OUTPUT_STAGES) {
+        expect(maxOutputTokensForEffort(effort, stage), `${effort}/${stage}`).toBe(table[stage]);
+      }
+    }
+  });
+
   it("medium の上限は high と同じである（Issue #332。受入の試験で medium が途中で切れた）", () => {
     for (const stage of OUTPUT_STAGES) {
       expect(maxOutputTokensForEffort("medium", stage), stage).toBe(maxOutputTokensForEffort("high", stage));
     }
   });
 
-  it("low の上限は、medium（= high）より小さい（速さを優先する段の試しうち用）", () => {
+  it("low の上限は、medium（= high）と同じである（Issue #399。low の設計の余白が足りなかった）", () => {
     for (const stage of OUTPUT_STAGES) {
-      expect(maxOutputTokensForEffort("low", stage), stage).toBeLessThan(
-        maxOutputTokensForEffort("medium", stage),
-      );
+      expect(maxOutputTokensForEffort("low", stage), stage).toBe(maxOutputTokensForEffort("medium", stage));
     }
   });
 

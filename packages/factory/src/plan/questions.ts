@@ -664,7 +664,7 @@ export async function runQuestions(input: QuestionsInput): Promise<StageOutcome<
     ],
     schemaName: QUESTIONS_SCHEMA_NAME,
     schema: QUESTIONS_SCHEMA,
-    maxOutputTokens: input.gateway.maxOutputTokens("design"),
+    maxOutputTokens: input.gateway.maxOutputTokens("questions"),
   });
   const answer = await callStructuredChecked(input.gateway, {
     request,

@@ -26,7 +26,7 @@ import {
   type CallResult,
   type LlmInputParts,
 } from "./call.js";
-import { AGENT_LIMITS } from "./limits.js";
+import { AGENT_LIMITS, maxOutputTokensForEffort } from "./limits.js";
 import { OpenAiIncompleteError } from "./openai.js";
 import type {
   LlmClient,
@@ -374,6 +374,54 @@ describe("共通の口（02 §1.5・§2.2）", () => {
   });
 });
 
+// ── 上限を上げた呼び出しの予約の境界（02 §1.5・Issue #399）──────────────
+
+describe("上限を上げた呼び出しの予約は、入力込みで見積もり、残高の境界で分ける（02 §1.5・Issue #399）", () => {
+  /** 設計の段の上限まで上げた要求（入力は今までどおり） */
+  const raised: LlmStructuredRequest = {
+    ...STRUCTURED_REQUEST,
+    maxOutputTokens: maxOutputTokensForEffort("high", "design"),
+  };
+
+  it("残高がちょうど足りれば呼び、1 足りなければ呼ばない", async () => {
+    const maxCostUsd = maxCostOf(structuredInputParts(raised), raised.maxOutputTokens);
+    // 予約は入力込み——出力の上限だけの費用より、入力の分だけ大きい
+    expect(maxCostUsd).toBeGreaterThan(raised.maxOutputTokens * RATES.outputPerToken);
+
+    // ちょうど足りる：呼び、usage が返らないので入力込みの予約が残る（扱いは変わらない）
+    const exact = new JobBudget(maxCostUsd);
+    const exactGateway = new CallGateway({
+      client: createFakeLlmClient([{ kind: "structured", output: { ok: true }, usage: undefined }]),
+      budget: exact,
+      rates: RATES,
+      now: () => 0,
+      deadline: 1_000_000,
+    });
+    expect((await exactGateway.callStructured(raised)).kind).toBe("ok");
+    expect(exact.reservedUsd).toBe(maxCostUsd);
+
+    // 1 足りない：呼ばずに知らせる
+    const short = new JobBudget(maxCostUsd - 1);
+    let called = 0;
+    const shortGateway = new CallGateway({
+      client: spyClient(() => {
+        called += 1;
+      }),
+      budget: short,
+      rates: RATES,
+      now: () => 0,
+      deadline: 1_000_000,
+    });
+    expect(await shortGateway.callStructured(raised)).toEqual({
+      kind: "budgetExceeded",
+      maxCostUsd,
+      remainingUsd: maxCostUsd - 1,
+    });
+    expect(called).toBe(0);
+    expect(short.reservedUsd).toBe(0);
+  });
+});
+
 // ── 未完了の応答（02 §2.2・§1.5）────────────────────────────────
 
 const incompleteError = (usage: LlmUsage | undefined): OpenAiIncompleteError =>
@@ -674,6 +722,95 @@ describe("呼び出しごとの timeout（02 §1.5・#302）", () => {
       expect(result.kind).toBe("ok");
       expect(attempts).toBe(2);
       expect(gateway.retries).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ── effort から出した timeout と、締切の残り（Issue #399）──────────────────
+
+describe("effort low の timeout は 60 秒で、やり直しで伸び、締切の残りを超えない（Issue #399）", () => {
+  /** いつまでも返らない偽物（打ち切りの合図で、打ち切られたことだけ数える） */
+  const hangingClient = (onAbort: () => void): LlmClient => ({
+    callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+      return new Promise<never>(() => {
+        request.signal?.addEventListener("abort", () => {
+          onAbort();
+        });
+      });
+    },
+    callWithTools(): Promise<LlmToolResponse> {
+      return Promise.reject(new Error("使わない"));
+    },
+  });
+
+  it("最初の試行は 60 秒（low の基準）で、やり直しは 120 秒へ伸びる", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      let aborts = 0;
+      const gateway = new CallGateway({
+        client: hangingClient(() => {
+          aborts += 1;
+        }),
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => Date.now(),
+        deadline: 600_000,
+        effort: "low",
+        maxAttempts: 3,
+      });
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      // 1 回目は 60 秒まで打ち切らない
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(aborts).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(aborts).toBe(1);
+      // やり直しは 120 秒——60 秒を過ぎても打ち切られない
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(aborts).toBe(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(aborts).toBe(2);
+      // 3 回目（240 秒）まで進めて、試行を使い切る
+      await vi.advanceTimersByTimeAsync(240_000);
+      const result = await pending;
+      expect(result.kind).toBe("failed");
+      if (result.kind !== "failed") return;
+      expect(result.errorKind).toBe("timeout");
+      expect(result.attempts).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("やり直しの timeout が残り時間で伸ばせなければ、試行を重ねずに timeout で止まる", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      let aborts = 0;
+      const gateway = new CallGateway({
+        client: hangingClient(() => {
+          aborts += 1;
+        }),
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => Date.now(),
+        deadline: 90_000,
+        effort: "low",
+        maxAttempts: 3,
+      });
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      await vi.advanceTimersByTimeAsync(60_000);
+      // 1 回目は 60 秒で打ち切った（まだ締切ではない）
+      expect(aborts).toBe(1);
+      const result = await pending;
+      // 2 回目の 120 秒は残り 30 秒に切り詰められる（60 秒より短い）——同じ・短い timeout ではやり直さない
+      expect(result.kind).toBe("failed");
+      if (result.kind !== "failed") return;
+      expect(result.errorKind).toBe("timeout");
+      expect(result.attempts).toBe(1);
+      expect(aborts).toBe(1);
     } finally {
       vi.useRealTimers();
     }
