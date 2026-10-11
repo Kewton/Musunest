@@ -153,6 +153,40 @@ describe("P4 の形の確認", () => {
     // 一緒に閉じる一覧が無い問いは、空の配列として扱われる
     expect(alsoClosesOf(checked.value.questions[0] as PlanQuestion)).toEqual([]);
   });
+
+  it("応答の中で質問 ID が重なると、形の確認で duplicate-question-id として断る（Issue #405）", () => {
+    const item = (openIssueId: string) => ({
+      id: "Q-1",
+      openIssueId,
+      text: "どちらにしますか",
+      choices: [
+        { id: "c1", text: "こちら" },
+        { id: "c2", text: "あちら" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    });
+    const checked = checkQuestionsOutput(
+      { questions: [item("OI-1"), item("OI-2")] },
+      1,
+      "タスクを記録する。",
+    );
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    // 重なりの欄は、添字つきの `questions[n].id`。分類は `duplicate-question-id`
+    expect(checked.problems).toEqual([
+      { field: "questions[1].id", code: "duplicate-question-id", message: "質問 ID が重複している" },
+    ]);
+  });
+
+  it("質問 ID の重なりは、意味の検査（checkQuestionSet）では二重に数えない（Issue #405）", () => {
+    const problems = checkQuestionSet(
+      ["OI-1", "OI-2"],
+      [question({ id: "Q-1" }, "OI-1"), question({ id: "Q-1" }, "OI-2")],
+    );
+    // 形の確認が `duplicate-question-id` を出すので、意味の検査は重なりを数えない
+    expect(problems.map((problem) => problem.code)).not.toContain("duplicate-question-id");
+  });
 });
 
 describe("P4 を 1 回呼ぶ（04 §3 P4）", () => {
