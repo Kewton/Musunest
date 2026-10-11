@@ -16,10 +16,30 @@ import type {
   PlanSourceInput,
 } from "@musunest/appspec-schema";
 import { createFakeJudge } from "../judge-fake.js";
-import type { JudgeAnswer } from "../judge.js";
+import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest } from "../judge.js";
 import { confirmQuestionName, runConfirm, type ConfirmInput } from "./confirm.js";
 
 const noul = (value: number): JudgeAnswer => ({ kind: "noul", noul: value });
+
+/** 問いの `instructions` を写像として読む（object でないときは undefined） */
+function instructionsOf(question: JudgeQuestion | undefined): Record<string, unknown> | undefined {
+  const instructions = question?.instructions;
+  return typeof instructions === "object" ? (instructions as Record<string, unknown>) : undefined;
+}
+
+/** すべての覆いの問いに「覆われている」を返しつつ、受け取った要求を残す偽物の判定 */
+function recordingJudge(): { readonly judge: Judge; readonly requests: JudgeRequest[] } {
+  const requests: JudgeRequest[] = [];
+  const judge: Judge = {
+    async judge(request: JudgeRequest) {
+      requests.push(request);
+      const answers: Record<string, JudgeAnswer> = {};
+      for (const name of Object.keys(request.questions)) answers[name] = noul(0.9);
+      return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+    },
+  };
+  return { judge, requests };
+}
 
 const THRESHOLD = 0.6;
 
@@ -201,6 +221,39 @@ describe("P6 の照合と確定（04 §3 P6・§4）", () => {
     const result = await runConfirm(validInput({ openIssues: [openIssue] }));
     expect(result.confirmed).toBe(false);
     expect(result.planProblems.map((problem) => problem.code)).toContain("open_critical");
+  });
+
+  it("P6 の問いに、原文の文・自由入力の答え・選択式の答えの選択肢の文（元の問いの文つき）を問いごとに載せる（Issue #376）", async () => {
+    const { judge, requests } = recordingJudge();
+    const freeAnswer: PlanAnswerInput = { id: "A-1", kind: "answer", question_id: "Q-1", free_text: "全員で数える" };
+    const choiceAnswer: PlanAnswerInput = { id: "A-2", kind: "answer", question_id: "Q-1", choice_id: "c2" };
+    await runConfirm(
+      validInput({
+        inputs: [sourceInput, questionInput, freeAnswer, choiceAnswer],
+        judge,
+      }),
+    );
+
+    const questions = requests[0]?.questions ?? {};
+    const sourceQuestion = questions[confirmQuestionName("S-1")];
+    const freeQuestion = questions[confirmQuestionName("A-1")];
+    const choiceQuestion = questions[confirmQuestionName("A-2")];
+
+    // instructions は object（対象の部分の文を問いの中に載せる）
+    expect(sourceQuestion?.instructions).toBeTypeOf("object");
+    expect(sourceQuestion?.instructions).toMatchObject({ part: "タスクを記録する。" });
+    expect(freeQuestion?.instructions).toMatchObject({ part: "全員で数える" });
+    // 選択式の答えは、質問 ID と選択肢 ID から選択肢の文（c2「自分のみ」）を引き、元の問いの文も添える
+    expect(choiceQuestion?.instructions).toMatchObject({
+      part: "自分のみ",
+      choice_id: "c2",
+      question: "誰の分を数えるか",
+    });
+    // 問いの文は英語
+    expect(String(instructionsOf(sourceQuestion)?.ask)).toMatch(/^[\x20-\x7E]+$/);
+    // 同じ呼び出しの中の 2 つの問いで、対象の文が別々になる
+    expect(instructionsOf(sourceQuestion)?.part).not.toBe(instructionsOf(freeQuestion)?.part);
+    expect(instructionsOf(freeQuestion)?.part).not.toBe(instructionsOf(choiceQuestion)?.part);
   });
 
   it("判定の記録に、覆いの問い・確率・閾値を満たしたかを残す", async () => {

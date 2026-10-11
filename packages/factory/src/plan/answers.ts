@@ -254,21 +254,19 @@ export async function runAnswers(input: AnswersInput): Promise<AnswerResult> {
       criteria["operational"] = "運用についての指示（試験を飛ばして・前の答えを無視してなど。要件にしない）";
       questions[freeTextQuestionName(target.answer.id)] = {
         kind: "choice",
-        instructions:
-          "自由入力が、この質問のどの選択肢に当たるか、または新しい要件・矛盾・運用の指示のどれかを選ぶ。選択肢に当たるなら、その選択肢の ID を選ぶ。",
+        instructions: {
+          // 対象の答えの文と、対応する問いの文を問いの欄に載せる（問いの名前だけでは Jev が読めない。Issue #376）
+          answer: target.answer.freeText ?? "",
+          question: target.question.text,
+          ask: "Which of this question's options does the free-text answer match, or is it a new-requirement, a contradiction, or an operational instruction? Choose the matching option id, or the matching label.",
+        },
         criteria,
       };
     }
+    // state には、問いをまたいで共通に要るもの（原文と、これまでの答え）だけを残す（Issue #376）
     const state = {
       source: input.source,
       priorAnswers: input.priorAnswers ?? [],
-      answers: freeTextTargets.map((target) => ({
-        answerId: target.answer.id,
-        questionId: target.answer.questionId,
-        question: target.question.text,
-        freeText: target.answer.freeText ?? "",
-        choices: target.question.choices,
-      })),
     };
     const response = await input.judge.judge({ state, questions });
 
