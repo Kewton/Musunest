@@ -32,6 +32,8 @@ import type {
   RejectedDispute,
   RequirementList,
   RequirementNature,
+  StructuralAssertionKind,
+  StructuralCheckResult,
   TestRunResult,
 } from "./pipeline.js";
 import type { Summary } from "./record.js";
@@ -220,6 +222,20 @@ export interface BundlePartialReasons {
   }[];
 }
 
+/**
+ * 構造の検査 1 件の記録（`artifacts/verification.json` の中。§1.3・Issue #387）。**試験 ID・要件 ID・
+ * 検査の中身・結果**を持ち、**合格（`pass`）・不一致（`mismatch`）・未解決（`unresolved`）を区別する**。
+ */
+export interface BundleStructuralCheck {
+  readonly test_id: string;
+  readonly requirement_id: string;
+  /** 検査の中身（`field-type`・`action-kind`・`action-unconditioned`・`view-shows`・`aggregate-no-period`） */
+  readonly check: StructuralAssertionKind;
+  readonly result: StructuralCheckResult;
+  /** 結果の理由（人向けの短い説明） */
+  readonly detail: string;
+}
+
 /** 検証の結果（`artifacts/verification.json`）。**最後の宣言のバイト列の SHA-256** を中に書く（§4・R-3） */
 export interface BundleVerification {
   /** 完成した宣言（原文）の UTF-8 バイト列の SHA-256 */
@@ -236,6 +252,8 @@ export interface BundleVerification {
   readonly test_unresolved: number;
   /** 実行しなかった検査（`correspondence`・`run-tests`）。**空でなければ合格にしない**（§1.4） */
   readonly unexecuted_inspections: readonly string[];
+  /** 構造の検査の 1 件ごとの記録（合格・不一致・未解決。§1.3・Issue #387）。検査が無ければ空で出る */
+  readonly structural_checks: readonly BundleStructuralCheck[];
   /** 部分案になった理由（Issue #326）。合格のときは空で出る */
   readonly partial_reasons: BundlePartialReasons;
 }
@@ -333,6 +351,17 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
     })),
   };
 
+  // 構造の検査の 1 件ごとの記録（試験 ID・要件 ID・検査の中身・結果）。§1.3・Issue #387
+  const structuralChecks: readonly BundleStructuralCheck[] = (input.testRun?.structural ?? []).map(
+    (entry) => ({
+      test_id: entry.testId,
+      requirement_id: entry.requirementId,
+      check: entry.check,
+      result: entry.result,
+      detail: entry.detail,
+    }),
+  );
+
   const verification: BundleVerification = {
     declaration_sha256: input.declarationSha256,
     ...(planSha256 === null ? {} : { plan_sha256: planSha256 }),
@@ -341,6 +370,7 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
     test_mismatches: input.testRun?.mismatches.length ?? 0,
     test_unresolved: unresolvedTests.length,
     unexecuted_inspections: unexecuted,
+    structural_checks: structuralChecks,
     partial_reasons: partialReasons,
   };
 

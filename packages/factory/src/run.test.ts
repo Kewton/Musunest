@@ -967,29 +967,123 @@ const STRUCTURAL_CHECKS_SUITE = {
   ],
 };
 
-describe("構造の要件を含む生成は、この Issue の状態では合格（full）にならない（02 §1.4・Issue #386）", () => {
-  it("構造の検査は未解決として数えられ、部分案（partial）で終わる", async () => {
+// ── 構造の要件を含む生成：検査を実行し、判定と照合の記録に入れる（02 §1.4・Issue #387）──────
+
+/** ③ が直した宣言（R-1 の create の操作を update に変える） */
+const CREATE_DECLARATION_UPDATED = CREATE_DECLARATION.replace("kind: create", "kind: update");
+
+/** ②' の答え（R-1 の構造の検査が update を期待するので、直す前は成り立たない） */
+const STRUCTURAL_CHECKS_SUITE_UPDATE = {
+  classifications: STRUCTURAL_CHECKS_SUITE.classifications,
+  tests: STRUCTURAL_CHECKS_SUITE.tests.map((test) =>
+    test.id === "sc" ? { ...test, assertion: { check: "action-kind", expected: "update" } } : test,
+  ),
+};
+
+/** ②' の答え（R-2 の異常の試験を、評価器で確かめられない試験に差し替える＝未解決が残る） */
+const STRUCTURAL_CHECKS_SUITE_UNRESOLVED = {
+  classifications: STRUCTURAL_CHECKS_SUITE.classifications,
+  tests: STRUCTURAL_CHECKS_SUITE.tests.map((test) =>
+    test.id === "a" ? { ...test, operation: "action", expected: { kind: "ok", value: null } } : test,
+  ),
+};
+
+describe("構造の要件を含む生成（02 §1.4・Issue #387）", () => {
+  it("構造の検査がすべて成り立ち、ほかの試験と対応表に落ちが無ければ合格（full）になる", async () => {
+    const { run } = runWith([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(STRUCTURAL_CHECKS_DESIGN),
+      structured(STRUCTURAL_CHECKS_SUITE),
+      structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+      structured(CREATE_CORRESPONDENCE),
+    ]);
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const verification = verificationOf(result.bundle);
+    expect(verification.test_mismatches).toBe(0);
+    expect(verification.test_unresolved).toBe(0);
+    // 構造の検査の記録が、照合の記録に入る（合格）
+    expect(verification.structural_checks).toEqual([
+      { test_id: "sc", requirement_id: "R-1", check: "action-kind", result: "pass", detail: expect.any(String) },
+    ]);
+  });
+
+  it("構造の検査が 1 本でも成り立たなければ、合格にならない", async () => {
     const { run } = runWith(
       [
         structured(REQUIREMENT_LIST_OUTPUT),
         structured(REVERSE_CHECK_OUTPUT),
         structured(STRUCTURAL_CHECKS_DESIGN),
-        structured(STRUCTURAL_CHECKS_SUITE),
+        structured(STRUCTURAL_CHECKS_SUITE_UPDATE),
         structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
         structured(CREATE_CORRESPONDENCE),
       ],
-      // 直しの往復を 0 にして、構造の検査が未解決のまま止まる（後続の Issue で実行する）
+      { limits: { ...AGENT_LIMITS, repairRoundTrips: 0 } },
+    );
+    const result = await run;
+
+    // 成り立たない構造の検査は不一致として数えられ、合格（pass）にしない
+    expect(result.outcome.result).not.toBe("pass");
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const verification = verificationOf(result.bundle);
+    expect(verification.test_mismatches).toBeGreaterThanOrEqual(1);
+    expect(verification.structural_checks).toEqual([
+      { test_id: "sc", requirement_id: "R-1", check: "action-kind", result: "mismatch", detail: expect.any(String) },
+    ]);
+  });
+
+  it("直す段で宣言が変わったとき、最終の宣言に対して構造の検査を実行し直す", async () => {
+    const { run } = runWith([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(STRUCTURAL_CHECKS_DESIGN),
+      structured(STRUCTURAL_CHECKS_SUITE_UPDATE),
+      structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+      structured(CREATE_CORRESPONDENCE),
+      // ⑥ 直す：create の操作を update に変えて、構造の検査が成り立つようにする
+      toolDone({ declaration: CREATE_DECLARATION_UPDATED, disputes: [] }),
+      // 宣言が変わったので、⑤a を作り直す
+      structured(CREATE_CORRESPONDENCE),
+    ]);
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    if (result.bundle === null) throw new Error("納品物が無い");
+    // 納品物は最後の宣言（直した版）に結び付き、構造の検査もその版で実行し直されている（合格）
+    expect(result.bundle.declarationSha256).toBe(await sha256Hex(CREATE_DECLARATION_UPDATED));
+    expect(verificationOf(result.bundle).structural_checks).toEqual([
+      { test_id: "sc", requirement_id: "R-1", check: "action-kind", result: "pass", detail: expect.any(String) },
+    ]);
+  });
+
+  it("構造の検査が成り立っても、ほかの試験の未解決は残る", async () => {
+    const { run } = runWith(
+      [
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(STRUCTURAL_CHECKS_DESIGN),
+        structured(STRUCTURAL_CHECKS_SUITE_UNRESOLVED),
+        structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+        structured(CREATE_CORRESPONDENCE),
+      ],
       { limits: { ...AGENT_LIMITS, repairRoundTrips: 0 } },
     );
     const result = await run;
 
     expect(result.stopped).toBeNull();
-    expect(result.bundle).not.toBeNull();
     expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
-    if (result.bundle === null) return;
+    if (result.bundle === null) throw new Error("納品物が無い");
     const verification = verificationOf(result.bundle);
+    // 構造の検査は成り立っている（合格）が、ほかの試験の未解決は残る
+    expect(verification.structural_checks).toEqual([
+      { test_id: "sc", requirement_id: "R-1", check: "action-kind", result: "pass", detail: expect.any(String) },
+    ]);
     expect(verification.test_unresolved).toBeGreaterThanOrEqual(1);
-    expect(verification.test_mismatches).toBe(0);
   });
 });
 

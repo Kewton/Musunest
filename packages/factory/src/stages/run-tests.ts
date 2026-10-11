@@ -10,6 +10,10 @@
 //   画面 × screen            … 構造の確認（view が実在し、show の名前と highlight が実在する）
 //   項目 × screen            … 構造の確認（項目が実在し、その entity の一覧か表から辿れる。Issue #324）
 //   entity × 在ることだけ     … 構造の確認（create の操作がある・一覧か表に出る）
+//   操作 structure           … **構造の検査**（field-type・action-kind・action-unconditioned・view-shows・
+//                               aggregate-no-period）。結び付けた場所と、提出された対応で写した参照の役割で
+//                               判定する（Issue #387）。成り立てば合格、成り立たなければ不一致、役割が
+//                               結び付かない・宣言に対象が無いときは未解決。1 件ごとに結果を記録する
 //
 // **操作の実行（`set` を当てたあとの状態）と、項目の既定値は未対応**にして、未解決として数える
 // （§1.3・U-G）。未解決は合格にしない（⑦ が部分案へ倒す）。
@@ -25,13 +29,20 @@
 // 渡す（Issue #320）。写せない鍵は、その試験を未解決にする（黙って落とさない）。参照（`ref`・`list of`）の
 // 値の行 ID はそのまま渡す。
 import {
+  actionKind,
+  fieldKind,
+  fieldTarget,
   isAppComputed,
+  isComputedAggregate,
   isComputedExpression,
   isComputedSettle,
   isGroupComputed,
+  type ActionKind,
   type Computed,
   type ComputedSettle,
+  type FieldKind,
   type NormalizedAppSpec,
+  type View,
 } from "@musunest/appspec-schema";
 import {
   allowsAction,
@@ -52,6 +63,8 @@ import type {
   ReferenceRow,
   RequirementNature,
   RoleNameMapping,
+  StructuralAssertion,
+  StructuralCheckOutcome,
   TestExpected,
   TestMismatch,
   TestRunResult,
@@ -99,9 +112,11 @@ export interface RoutedFailure {
 /**
  * ⑤b の結果（`TestRunResult` に、失敗の行き先を足したもの）。`routes` は不一致・未解決になった
  * 試験の行き先である（⑦ の先の段が、③ のやり直し・⑥ 直す・未解決へ振り分ける。§1.3.1）。
+ * `structural` は**構造の検査の 1 件ごとの記録**で、結果（合格・不一致・未解決）を必ず持つ（Issue #387）。
  */
 export interface TestRunReport extends TestRunResult {
   readonly routes: readonly RoutedFailure[];
+  readonly structural: readonly StructuralCheckOutcome[];
 }
 
 /** 1 件の試験の判定 */
@@ -552,8 +567,201 @@ function judgeFieldScreen(app: NormalizedAppSpec, location: DeclarationLocation)
   };
 }
 
-/** 評価の方法（§1.3 の表・Issue #308・#324）。未対応は `unresolved` に数える */
-type Method = "value" | "validation" | "action" | "view" | "field-screen" | "existence" | "unresolved";
+/**
+ * 役割 ID を、**③ が提出した対応（役割 ID → 宣言の名前）**で宣言の名前へ写す（§1.3・Issue #387）。
+ * 対応が無ければ `undefined` を返し、呼ぶ側がその検査を未解決にする（名前を推測しない）。提出された
+ * 対応が渡されていなければ（旧形式の経路）、役割 ID をそのまま名前として見る。
+ */
+function mappedNameOf(roleId: string, input: RunTestsInput): string | undefined {
+  if (input.mappings === undefined) return roleId;
+  return input.mappings.find((mapping) => mapping.roleId === roleId)?.name;
+}
+
+/** 結び付けた場所の名前で操作を引く（構造の検査で使う。Issue #387） */
+function findActionAt(app: NormalizedAppSpec, location: DeclarationLocation) {
+  return app.spec.actions.find(
+    (candidate) =>
+      candidate.name === location.name &&
+      (location.entity === null || candidate.entity === location.entity),
+  );
+}
+
+/**
+ * 構造の検査 `field-type`：項目の種類（`FieldKind`）と、参照（`ref`・参照の並び）の参照先が期待どおりか
+ * （§1.3・Issue #387）。**文字列の並びと参照の並びを区別する**——参照先を書かなければ文字列の並び、
+ * 書けば参照の並びである。役割が結び付かない・宣言に項目が無いときは未解決にする。
+ */
+function judgeFieldType(
+  location: DeclarationLocation,
+  assertion: StructuralAssertion,
+  input: RunTestsInput,
+): Verdict {
+  const entity = findEntity(input.app, location.entity);
+  if (entity === undefined) {
+    return { kind: "unresolved", detail: `宣言に entity ${location.entity ?? ""} が無い` };
+  }
+  const field = entity.fields[location.name];
+  if (field === undefined) {
+    return { kind: "unresolved", detail: `entity ${entity.name} に項目 ${location.name} が無い` };
+  }
+  const actual = fieldKind(field);
+  const expected = assertion.expected as FieldKind;
+  if (actual !== expected) {
+    return { kind: "mismatch", detail: `項目 ${location.name} の種類が ${actual}（期待 ${expected}）` };
+  }
+  if (assertion.refEntity !== undefined) {
+    const want = mappedNameOf(assertion.refEntity, input);
+    if (want === undefined) {
+      return { kind: "unresolved", detail: `参照先の役割 ID ${assertion.refEntity} に提出された対応が無い` };
+    }
+    const target = fieldTarget(field);
+    if (target !== want) {
+      return {
+        kind: "mismatch",
+        detail: `項目 ${location.name} の参照先が ${target ?? "無し"}（期待 ${want}）`,
+      };
+    }
+    return { kind: "match" };
+  }
+  // 参照先を書かないのは「文字列の並び」のときだけである（参照の並びは `of` を持つ）
+  if (expected === "list" && fieldTarget(field) !== null) {
+    return { kind: "mismatch", detail: `項目 ${location.name} は参照の並び（期待は文字列の並び）` };
+  }
+  return { kind: "match" };
+}
+
+/** 構造の検査 `action-kind`：操作の種類（省略は `create`）が期待どおりか（§1.3・Issue #387） */
+function judgeActionKind(
+  location: DeclarationLocation,
+  assertion: StructuralAssertion,
+  input: RunTestsInput,
+): Verdict {
+  const action = findActionAt(input.app, location);
+  if (action === undefined) return { kind: "unresolved", detail: `宣言に操作 ${location.name} が無い` };
+  const actual = actionKind(action);
+  const expected = assertion.expected as ActionKind;
+  if (actual !== expected) {
+    return { kind: "mismatch", detail: `操作 ${action.name} の種類が ${actual}（期待 ${expected}）` };
+  }
+  return { kind: "match" };
+}
+
+/** 構造の検査 `action-unconditioned`：操作が条件（`when`）を持たないか（§1.3・Issue #387） */
+function judgeActionUnconditioned(location: DeclarationLocation, input: RunTestsInput): Verdict {
+  const action = findActionAt(input.app, location);
+  if (action === undefined) return { kind: "unresolved", detail: `宣言に操作 ${location.name} が無い` };
+  if (action.when !== undefined) {
+    return { kind: "mismatch", detail: `操作 ${action.name} は条件（when）を持つ` };
+  }
+  return { kind: "match" };
+}
+
+/** 名前が、宣言のどこかの項目か計算として実在するか（構造の検査の参照の実在確認。Issue #387） */
+function declarationHasFieldOrComputed(app: NormalizedAppSpec, name: string): boolean {
+  if (app.spec.entities.some((entity) => Object.hasOwn(entity.fields, name))) return true;
+  return app.spec.computed.some((computed) => computed.name === name);
+}
+
+/**
+ * 一覧が、その名前（項目か計算）を表示するか（§1.3・Issue #387）。**`show` を省いた部品は、語彙の
+ * 決まり（省略は、項目に続いて計算を全部並べる）どおりに扱う**。種類ごとに表示の仕方が決まる。
+ */
+function viewShows(app: NormalizedAppSpec, view: View, name: string): boolean {
+  if (view.show !== undefined) return view.show.includes(name);
+  if (view.type === "dashboard") {
+    return (view.widgets ?? []).some(
+      (part) =>
+        ("value" in part && part.value === name) ||
+        (part.type === "ranking" && (part.by === name || part.show.includes(name))),
+    );
+  }
+  if (view.type === "board") return view.highlight === name || view.columns === name;
+  if (view.type === "settlement") return false;
+  // 種類なし・table・list：`show` を省くと、項目（宣言の順）に続いて計算（宣言の順）を全部出す
+  const entity = findEntity(app, view.entity ?? null);
+  if (entity !== undefined && Object.hasOwn(entity.fields, name)) return true;
+  return app.spec.computed.some(
+    (computed) => computed.name === name && "entity" in computed && computed.entity === view.entity,
+  );
+}
+
+/**
+ * 構造の検査 `view-shows`：**対象の画面の部品**が、期待した項目または計算を表示するか（§1.3・Issue #387）。
+ * 別の画面だけに表示していても合格にしない（対象の画面だけを見る）。役割が結び付かない・宣言に無いときは
+ * 未解決にする。
+ */
+function judgeViewShows(
+  location: DeclarationLocation,
+  assertion: StructuralAssertion,
+  input: RunTestsInput,
+): Verdict {
+  const role = assertion.role;
+  if (role === undefined) {
+    return { kind: "unresolved", detail: "view-shows の表示を期待する役割 ID（role）が無い" };
+  }
+  const name = mappedNameOf(role, input);
+  if (name === undefined) {
+    return { kind: "unresolved", detail: `表示を期待する役割 ID ${role} に提出された対応が無い` };
+  }
+  const view = input.app.spec.views.find((candidate) => candidate.name === location.name);
+  if (view === undefined) return { kind: "unresolved", detail: `宣言に一覧 ${location.name} が無い` };
+  if (!declarationHasFieldOrComputed(input.app, name)) {
+    return { kind: "unresolved", detail: `宣言に ${name} という項目も計算も無い` };
+  }
+  if (viewShows(input.app, view, name)) return { kind: "match" };
+  return { kind: "mismatch", detail: `一覧 ${view.name} は ${name} を表示しない` };
+}
+
+/**
+ * 構造の検査 `aggregate-no-period`：集計の絞り込みに期間の条件（`within`）が無いか（§1.3・Issue #387）。
+ * 行を結び付ける絞り込み（`equals`・`contains` など）はあってよい。集計でなければ不一致にする。
+ */
+function judgeAggregateNoPeriod(location: DeclarationLocation, input: RunTestsInput): Verdict {
+  const computed = findComputed(input.app, location);
+  if (computed === undefined) return { kind: "unresolved", detail: `宣言に計算 ${location.name} が無い` };
+  if (!isComputedAggregate(computed)) {
+    return { kind: "mismatch", detail: `計算 ${computed.name} は集計ではない` };
+  }
+  const hasPeriod = Object.values(computed.aggregate.where).some((condition) => condition.op === "within");
+  if (hasPeriod) {
+    return { kind: "mismatch", detail: `集計 ${computed.name} の絞り込みに期間の条件（within）がある` };
+  }
+  return { kind: "match" };
+}
+
+/**
+ * 構造の検査を、結び付けた場所と検査の中身で判定する（§1.3・Issue #387）。検査の中身ごとに、対象と
+ * 参照する役割は、**提出された対応（役割 ID → 宣言の名前）だけ**で結び付ける（名前を推測しない）。
+ */
+function judgeStructure(test: FixedTest, location: DeclarationLocation, input: RunTestsInput): Verdict {
+  const assertion = test.assertion;
+  if (assertion === undefined) {
+    return { kind: "unresolved", detail: "構造の検査の中身（assertion）が無い" };
+  }
+  switch (assertion.check) {
+    case "field-type":
+      return judgeFieldType(location, assertion, input);
+    case "action-kind":
+      return judgeActionKind(location, assertion, input);
+    case "action-unconditioned":
+      return judgeActionUnconditioned(location, input);
+    case "view-shows":
+      return judgeViewShows(location, assertion, input);
+    case "aggregate-no-period":
+      return judgeAggregateNoPeriod(location, input);
+  }
+}
+
+/** 評価の方法（§1.3 の表・Issue #308・#324・#387）。未対応は `unresolved` に数える */
+type Method =
+  | "value"
+  | "validation"
+  | "action"
+  | "view"
+  | "field-screen"
+  | "existence"
+  | "structure"
+  | "unresolved";
 
 /**
  * 対象の種類 × 操作で、評価の方法を決める（§1.3 の表）。
@@ -573,8 +781,8 @@ function evaluationMethod(
   location: DeclarationLocation,
   app: NormalizedAppSpec,
 ): Method {
-  // 構造の検査は、この Issue では実行しない（必ず未解決にする。Issue #386）。実行と判定は後続の Issue
-  if (test.operation === "structure") return "unresolved";
+  // 構造の検査を、宣言に対して実行する（§1.3・Issue #387）
+  if (test.operation === "structure") return "structure";
   if (test.operation === "validate") return "validation";
   if (test.operation === "action") {
     if (test.target.kind !== "operation") return "unresolved";
@@ -625,13 +833,20 @@ function judgeOne(
   input: RunTestsInput,
   natures: ReadonlyMap<string, RequirementNature>,
 ): Judged {
-  // 構造の検査は、この Issue では**必ず未解決**にする（今の画面の判定などへ流さない。Issue #386）。
-  // 結び付けの可否によらず未解決にする——実行と判定は後続の Issue で行う。合格（一致）にしない。
+  // 構造の検査を、宣言に対して実行する（§1.3・Issue #387）。**役割が結び付かない・宣言に対象が無い
+  // ときは未解決**にする（結び付けの行き先を分けず、合格（一致）にも不一致にもしない）。
   if (test.operation === "structure") {
-    return {
-      verdict: { kind: "unresolved", detail: "構造の検査は、この Issue では実行しない（未解決にする）" },
-      route: "ambiguity",
-    };
+    if (binding === undefined || binding.kind === "unbound") {
+      return {
+        verdict: {
+          kind: "unresolved",
+          detail: binding?.detail ?? "構造の検査の対象の役割が結び付かない",
+        },
+        route: "ambiguity",
+      };
+    }
+    const verdict = judgeStructure(test, binding.location, input);
+    return { verdict, route: routeOf(verdict) };
   }
   if (binding === undefined || binding.kind === "unbound") {
     // 提出された対応が無い・1 つに決まらない → 未解決（曖昧さ）
@@ -686,6 +901,10 @@ function judgeOne(
     }
     case "existence":
       return { verdict: judgeExistenceStructural(input.app, location), route: null };
+    case "structure": {
+      const verdict = judgeStructure(test, location, input);
+      return { verdict, route: routeOf(verdict) };
+    }
     case "unresolved":
       return {
         verdict: {
@@ -711,12 +930,23 @@ export function runTests(input: RunTestsInput): TestRunReport {
   const mismatches: TestMismatch[] = [];
   const unresolved: TestUnresolved[] = [];
   const routes: RoutedFailure[] = [];
+  const structural: StructuralCheckOutcome[] = [];
   input.suite.tests.forEach((test, index) => {
     const judged = judgeOne(test, bindings[index], input, natures);
     if (judged.verdict.kind === "mismatch") {
       mismatches.push({ testId: test.id, detail: judged.verdict.detail });
     } else if (judged.verdict.kind === "unresolved") {
       unresolved.push({ testId: test.id, detail: judged.verdict.detail });
+    }
+    // 構造の検査は、1 件ごとに結果（合格・不一致・未解決）を記録する（照合の記録へ残す。Issue #387）
+    if (test.operation === "structure" && test.assertion !== undefined) {
+      structural.push({
+        testId: test.id,
+        requirementId: test.target.requirementId,
+        check: test.assertion.check,
+        result: judged.verdict.kind === "match" ? "pass" : judged.verdict.kind,
+        detail: judged.verdict.kind === "match" ? "成り立った" : judged.verdict.detail,
+      });
     }
     if (judged.verdict.kind !== "match" && judged.route !== null) {
       routes.push({
@@ -728,5 +958,5 @@ export function runTests(input: RunTestsInput): TestRunReport {
       });
     }
   });
-  return { mismatches, unresolved, routes };
+  return { mismatches, unresolved, routes, structural };
 }

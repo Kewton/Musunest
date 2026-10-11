@@ -1062,87 +1062,321 @@ describe("項目 × 画面（02 §1.3・Issue #324）", () => {
   });
 });
 
-// ── 11. 構造の検査（02 §1.3・Issue #386）──────────────────────────────
+// ── 11. 構造の検査（02 §1.3・Issue #387）──────────────────────────────
 
-describe("構造の検査は、どの対象の種類でも未解決になる（02 §1.3・Issue #386）", () => {
-  const structureCorrespondence: CorrespondenceResult = {
-    entries: [
-      entry("R-1", [{ kind: "computation", entity: "record", name: "total" }]),
-      entry("R-3", [{ kind: "action", entity: "record", name: "close" }]),
-      entry("R-9", [{ kind: "field", entity: "record", name: "amount" }]),
-      entry("R-12", [{ kind: "view", entity: "record", name: "records" }]),
-    ],
-    misses: [],
-  };
-  const structureMappings: readonly RoleNameMapping[] = [
-    { roleId: "record.total", name: "total" },
-    { roleId: "record.close", name: "close" },
-    { roleId: "record.amount", name: "amount" },
-    { roleId: "record.records", name: "records" },
-  ];
+/** 構造の検査に使う対応表（対象と、参照する役割を、提出された対応で写せるように並べてある） */
+const structureCorrespondence: CorrespondenceResult = {
+  entries: [
+    entry("R-1", [{ kind: "computation", entity: "record", name: "total" }]),
+    entry("R-3", [{ kind: "action", entity: "record", name: "close" }]),
+    entry("R-9", [{ kind: "field", entity: "record", name: "amount" }]),
+    entry("R-10", [{ kind: "field", entity: "payment", name: "payer" }]),
+    entry("R-11", [{ kind: "field", entity: "payment", name: "shares" }]),
+    entry("R-12", [{ kind: "view", entity: "record", name: "records" }]),
+    entry("R-13", [{ kind: "action", entity: "record", name: "add" }]),
+  ],
+  misses: [],
+};
 
-  /** 対象の種類ごとの構造の検査（画面の判定で合格になりうるものも含む） */
-  const cases: readonly { readonly id: string; readonly test: Record<string, unknown> }[] = [
-    {
-      id: "screen",
-      test: {
-        ...draft({ id: "screen", target: roleTarget("R-12", "screen", "record.records"), operation: "structure", expected: { kind: "ok", value: true } }),
-        assertion: { check: "view-shows", role: "record.amount" },
-      },
-    },
-    {
-      id: "field",
-      test: {
-        ...draft({ id: "field", target: roleTarget("R-9", "field", "record.amount"), operation: "structure", expected: { kind: "ok", value: true } }),
-        assertion: { check: "field-type", expected: "number" },
-      },
-    },
-    {
-      id: "operation",
-      test: {
-        ...draft({ id: "operation", target: roleTarget("R-3", "operation", "record.close"), operation: "structure", expected: { kind: "ok", value: true } }),
-        assertion: { check: "action-unconditioned" },
-      },
-    },
-    {
-      id: "computation",
-      test: {
-        ...draft({ id: "computation", target: roleTarget("R-1", "computation", "record.total"), operation: "structure", expected: { kind: "ok", value: true } }),
-        assertion: { check: "aggregate-no-period" },
-      },
-    },
-  ];
+const structureMappings: readonly RoleNameMapping[] = [
+  { roleId: "record", name: "record" },
+  { roleId: "person", name: "person" },
+  { roleId: "record.total", name: "total" },
+  { roleId: "record.close", name: "close" },
+  { roleId: "record.add", name: "add" },
+  { roleId: "record.amount", name: "amount" },
+  { roleId: "payment.payer", name: "payer" },
+  { roleId: "payment.shares", name: "shares" },
+  { roleId: "record.records", name: "records" },
+];
 
-  it("どの対象の種類でも未解決に数え、合格（一致）にしない", () => {
-    const result = runTests({
-      app: APP,
-      suite: suiteOf(cases.map((entry) => entry.test)),
-      correspondence: structureCorrespondence,
-      mappings: structureMappings,
-    });
-    expect(result.mismatches).toEqual([]);
-    expect(result.unresolved.map((entry) => entry.testId).sort()).toEqual(["computation", "field", "operation", "screen"]);
-    // 未解決は「曖昧さ」の行き先（合格にしない）
-    expect(result.routes.every((route) => route.route === "ambiguity")).toBe(true);
+/** 構造の検査 1 件の下書き（操作は structure、期待は「成り立つ」、assertion を添える） */
+const structureTest = (
+  id: string,
+  requirementId: string,
+  kind: TestTarget["kind"],
+  roleId: string,
+  assertion: Record<string, unknown>,
+): Record<string, unknown> => ({
+  ...draft({
+    id,
+    target: roleTarget(requirementId, kind, roleId),
+    operation: "structure",
+    expected: { kind: "ok", value: true },
+  }),
+  assertion,
+});
+
+/** 構造の検査を、APP の宣言と構造の検査用の対応で流す */
+const runStructureTests = (tests: readonly Record<string, unknown>[], app = APP) =>
+  runTests({ app, suite: suiteOf(tests), correspondence: structureCorrespondence, mappings: structureMappings });
+
+/** 構造の検査を流して、不一致になった試験 ID を返す */
+const structureMismatchIds = (tests: readonly Record<string, unknown>[], app = APP): readonly string[] =>
+  runStructureTests(tests, app).mismatches.map((mismatch) => mismatch.testId);
+
+describe("構造の検査：field-type（02 §1.3・Issue #387）", () => {
+  it("種類が合えば合格、種類違い・参照の取り違え・参照先違いは不一致", () => {
+    // 種類が合えば合格
+    expect(
+      structureMismatchIds([
+        structureTest("ft-ok", "R-9", "field", "record.amount", { check: "field-type", expected: "number" }),
+      ]),
+    ).toEqual([]);
+    // 種類違いは不一致
+    expect(
+      structureMismatchIds([
+        structureTest("ft-kind", "R-9", "field", "record.amount", { check: "field-type", expected: "string" }),
+      ]),
+    ).toEqual(["ft-kind"]);
+    // ref を期待して参照の並び（list of）の項目は不一致
+    expect(
+      structureMismatchIds([
+        structureTest("ft-ref-list", "R-11", "field", "payment.shares", {
+          check: "field-type",
+          expected: "ref",
+          refEntity: "person",
+        }),
+      ]),
+    ).toEqual(["ft-ref-list"]);
+    // 文字列の並びと参照の並びの取り違え（参照の並びに、参照先を書かない期待）は不一致
+    expect(
+      structureMismatchIds([
+        structureTest("ft-str-list", "R-11", "field", "payment.shares", { check: "field-type", expected: "list" }),
+      ]),
+    ).toEqual(["ft-str-list"]);
+    // 参照の並びは、参照先が合えば合格
+    expect(
+      structureMismatchIds([
+        structureTest("ft-list-ok", "R-11", "field", "payment.shares", {
+          check: "field-type",
+          expected: "list",
+          refEntity: "person",
+        }),
+      ]),
+    ).toEqual([]);
+    // 参照先が違うと不一致
+    expect(
+      structureMismatchIds([
+        structureTest("ft-target", "R-11", "field", "payment.shares", {
+          check: "field-type",
+          expected: "list",
+          refEntity: "record",
+        }),
+      ]),
+    ).toEqual(["ft-target"]);
+    // ref は参照先が合えば合格、違えば不一致
+    expect(
+      structureMismatchIds([
+        structureTest("ft-ref-ok", "R-10", "field", "payment.payer", {
+          check: "field-type",
+          expected: "ref",
+          refEntity: "person",
+        }),
+      ]),
+    ).toEqual([]);
+    expect(
+      structureMismatchIds([
+        structureTest("ft-ref-target", "R-10", "field", "payment.payer", {
+          check: "field-type",
+          expected: "ref",
+          refEntity: "record",
+        }),
+      ]),
+    ).toEqual(["ft-ref-target"]);
+  });
+});
+
+describe("構造の検査：action-kind・action-unconditioned（02 §1.3・Issue #387）", () => {
+  it("種類違い・when のある操作は不一致", () => {
+    // 種類が合えば合格（close は update）
+    expect(
+      structureMismatchIds([
+        structureTest("ak-ok", "R-3", "operation", "record.close", { check: "action-kind", expected: "update" }),
+      ]),
+    ).toEqual([]);
+    // 種類違いは不一致
+    expect(
+      structureMismatchIds([
+        structureTest("ak-kind", "R-3", "operation", "record.close", { check: "action-kind", expected: "create" }),
+      ]),
+    ).toEqual(["ak-kind"]);
+    // when の無い create は合格
+    expect(
+      structureMismatchIds([
+        structureTest("au-ok", "R-13", "operation", "record.add", { check: "action-unconditioned" }),
+      ]),
+    ).toEqual([]);
+    // when のある操作は不一致
+    expect(
+      structureMismatchIds([
+        structureTest("au-when", "R-3", "operation", "record.close", { check: "action-unconditioned" }),
+      ]),
+    ).toEqual(["au-when"]);
+  });
+});
+
+/**
+ * 「構造の検査 view-shows」に使う宣言（抽象的な題材）。`records` は `show` に `shown` だけを出し、
+ * `allRecords` は `show` を省いて全部を出し、`otherRecords` は別の項目だけを出す。
+ */
+const VIEWS_DECLARATION = [
+  "entities:",
+  "  - name: record",
+  "    fields:",
+  "      shown: string",
+  "      hidden: string",
+  "      count: number",
+  "views:",
+  "  - name: records",
+  "    type: list",
+  "    entity: record",
+  "    show: [shown]",
+  "  - name: allRecords",
+  "    entity: record",
+  "  - name: otherRecords",
+  "    type: list",
+  "    entity: record",
+  "    show: [hidden]",
+  "actions: []",
+  "validations: []",
+  "computed:",
+  "  - name: doubled",
+  "    entity: record",
+  "    expression: count * 2",
+  "    type: number",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+const VIEWS_APP = await normalized(VIEWS_DECLARATION);
+
+const viewsCorrespondence: CorrespondenceResult = {
+  entries: [
+    entry("R-1", [{ kind: "view", entity: "record", name: "records" }]),
+    entry("R-2", [{ kind: "view", entity: "record", name: "allRecords" }]),
+  ],
+  misses: [],
+};
+
+const viewsMappings: readonly RoleNameMapping[] = [
+  { roleId: "record.records", name: "records" },
+  { roleId: "record.allRecords", name: "allRecords" },
+  { roleId: "record.shown", name: "shown" },
+  { roleId: "record.hidden", name: "hidden" },
+  { roleId: "record.doubled", name: "doubled" },
+];
+
+describe("構造の検査：view-shows（02 §1.3・Issue #387）", () => {
+  const viewTest = (id: string, requirementId: string, viewRoleId: string, role: string) =>
+    structureTest(id, requirementId, "screen", viewRoleId, { check: "view-shows", role });
+  const run = (tests: readonly Record<string, unknown>[]) =>
+    runTests({ app: VIEWS_APP, suite: suiteOf(tests), correspondence: viewsCorrespondence, mappings: viewsMappings });
+
+  it("表示していれば合格、表示しない部品・別の画面だけの表示は不一致", () => {
+    // records は show に shown を出す → 合格
+    expect(run([viewTest("vs-shown", "R-1", "record.records", "record.shown")]).mismatches).toEqual([]);
+    // records は計算 doubled を表示しない → 不一致
+    expect(
+      run([viewTest("vs-computed", "R-1", "record.records", "record.doubled")]).mismatches.map(
+        (mismatch) => mismatch.testId,
+      ),
+    ).toEqual(["vs-computed"]);
+    // hidden は別の画面（otherRecords）にだけ出る → records では不一致
+    expect(
+      run([viewTest("vs-other", "R-1", "record.records", "record.hidden")]).mismatches.map(
+        (mismatch) => mismatch.testId,
+      ),
+    ).toEqual(["vs-other"]);
   });
 
-  it("未解決が残るかぎり、⑦ は合格（full）にしない", () => {
+  it("`show` を省いた部品は、語彙の決まりどおりに全部を並べる", () => {
+    expect(
+      run([
+        viewTest("vs-all-field", "R-2", "record.allRecords", "record.hidden"),
+        viewTest("vs-all-computed", "R-2", "record.allRecords", "record.doubled"),
+      ]).mismatches,
+    ).toEqual([]);
+  });
+});
+
+describe("構造の検査：aggregate-no-period（02 §1.3・Issue #387）", () => {
+  it("行を結び付ける絞り込みだけなら合格・within を足すと不一致", () => {
+    const contains = structureTest("an-ok", "R-1", "computation", "member.shareCount", {
+      check: "aggregate-no-period",
+    });
+    const within = structureTest("an-within", "R-2", "computation", "monthCount", {
+      check: "aggregate-no-period",
+    });
     const result = runTests({
-      app: APP,
-      suite: suiteOf(cases.map((entry) => entry.test)),
-      correspondence: structureCorrespondence,
-      mappings: structureMappings,
+      app: MAPPED_APP,
+      suite: suiteOf([contains, within]),
+      correspondence: mappedCorrespondence,
+      mappings: mappedMappings,
     });
-    const stage = toStageResults({
-      staticCheckPassed: true,
-      correspondenceMisses: 0,
-      testMismatches: result.mismatches.length,
-      testUnresolved: result.unresolved.length,
-      unwritableRequirements: 0,
-      limitReached: false,
-      carriedOver: { reverseCheck: [], testSuite: [] },
+    expect(result.mismatches.map((mismatch) => mismatch.testId)).toEqual(["an-within"]);
+    expect(result.unresolved).toEqual([]);
+  });
+});
+
+describe("構造の検査：役割が結び付かないと未解決（02 §1.3・Issue #387）", () => {
+  it("提出された対応に無い役割 ID の対象は未解決", () => {
+    const unmapped = structureTest("su-unmapped", "R-9", "field", "record.unknown", {
+      check: "field-type",
+      expected: "number",
     });
-    expect(decideOutcome(stage).verdict).not.toBe("full");
+    const result = runStructureTests([unmapped]);
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved.map((entry) => entry.testId)).toEqual(["su-unmapped"]);
+    expect(result.routes[0]?.route).toBe("ambiguity");
+  });
+
+  it("参照する役割 ID に提出された対応が無いと未解決", () => {
+    const refUnknown = structureTest("su-ref", "R-10", "field", "payment.payer", {
+      check: "field-type",
+      expected: "ref",
+      refEntity: "person.unknown",
+    });
+    const result = runStructureTests([refUnknown]);
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved.map((entry) => entry.testId)).toEqual(["su-ref"]);
+  });
+});
+
+describe("構造の検査の記録とほかの試験への影響（02 §1.3・Issue #387）", () => {
+  it("1 件ごとに、試験 ID・要件 ID・検査の中身・結果を記録し、合格・不一致・未解決を区別する", () => {
+    const ok = structureTest("s-ok", "R-9", "field", "record.amount", { check: "field-type", expected: "number" });
+    const bad = structureTest("s-bad", "R-9", "field", "record.amount", { check: "field-type", expected: "string" });
+    const unknown = structureTest("s-unknown", "R-9", "field", "record.unknown", {
+      check: "field-type",
+      expected: "number",
+    });
+    const result = runStructureTests([ok, bad, unknown]);
+    expect(result.structural).toEqual([
+      { testId: "s-ok", requirementId: "R-9", check: "field-type", result: "pass", detail: expect.any(String) },
+      { testId: "s-bad", requirementId: "R-9", check: "field-type", result: "mismatch", detail: expect.any(String) },
+      { testId: "s-unknown", requirementId: "R-9", check: "field-type", result: "unresolved", detail: expect.any(String) },
+    ]);
+  });
+
+  it("構造の検査が成り立っても、ほかの試験の未解決は消えない", () => {
+    const structure = structureTest("s-pass", "R-9", "field", "record.amount", {
+      check: "field-type",
+      expected: "number",
+    });
+    const unresolvedField = draft({
+      id: "u-field",
+      target: roleTarget("R-9", "field", "record.amount"),
+      operation: "compute",
+      expected: { kind: "ok", value: 0 },
+    });
+    const result = runStructureTests([structure, unresolvedField]);
+    expect(result.mismatches).toEqual([]);
+    // 構造の検査は合格しているのに、ほかの試験の未解決（入力の型）は残る
+    expect(result.structural.map((entry) => entry.result)).toEqual(["pass"]);
+    expect(result.unresolved.map((entry) => entry.testId)).toEqual(["u-field"]);
   });
 });
 

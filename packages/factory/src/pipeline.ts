@@ -250,6 +250,8 @@ export type {
   ReferenceRow,
   RequirementClassification,
   RequirementNature,
+  StructuralAssertion,
+  StructuralAssertionKind,
   TestExpected,
   TestInputContract,
   TestKind,
@@ -342,13 +344,36 @@ export interface TestUnresolved {
   readonly detail: string;
 }
 
+/** 構造の検査 1 件の結果（合格・不一致・未解決。§1.3・Issue #387） */
+export const STRUCTURAL_CHECK_RESULTS = ["pass", "mismatch", "unresolved"] as const;
+export type StructuralCheckResult = (typeof STRUCTURAL_CHECK_RESULTS)[number];
+
+/**
+ * 構造の検査 1 件の記録（§1.3・Issue #387）。**試験 ID・要件 ID・検査の中身・結果**を持ち、照合の記録
+ * （`verification.json`）へ 1 件ごとに残す（合格・不一致・未解決を区別する）。
+ */
+export interface StructuralCheckOutcome {
+  readonly testId: string;
+  readonly requirementId: string;
+  /** 検査の中身（`field-type`・`action-kind`・…） */
+  readonly check: StructuralAssertionKind;
+  /** 結果（合格・不一致・未解決） */
+  readonly result: StructuralCheckResult;
+  /** 結果の理由（人向けの短い説明） */
+  readonly detail: string;
+}
+
 /**
  * ⑤b 試験を流した結果（結び付けられなかった試験は不一致として数える。F-9・R-8）。
  * `unresolved` は評価器で確かめられない試験で、⑦ では「未解決」として数える（合格にしない）。
+ * `structural` は**構造の検査の 1 件ごとの記録**である（照合の記録へ残す。§1.3・Issue #387）。
+ * 旧形式の結果（構造の検査を知らない記録）では省ける。
  */
 export interface TestRunResult {
   readonly mismatches: readonly TestMismatch[];
   readonly unresolved: readonly TestUnresolved[];
+  /** 構造の検査の 1 件ごとの記録（§1.3・Issue #387）。旧形式の結果では省ける */
+  readonly structural?: readonly StructuralCheckOutcome[];
 }
 
 /**
