@@ -14,14 +14,14 @@
 // 門の値が「1 − 閾値」**以下**（はっきり集計を含まない）の要件では、**集計の観点**（集計の仕方・期間・
 // 今の期間を含むか・数える状態・0 件を含むか）を未解決の事項にしない。門の値が閾値**以上**なら今まで
 // どおり当てはまり・決まっているで決め、その間は門を開けて（今までどおり扱って）取りこぼしを避ける。
-// 整数か・絞り込みの組み合わせ・直せる人は、門の値によらず当てはまりで決める。
+// 直せる人は、門の値によらず当てはまりで決める。
 //
 // 「決まっているか」を yes とする——Noul の値が高いほど「依頼や答えで指定されている」。
 //
 // **実 API は呼ばない。** 判定は差し込まれた `Judge`（試験は偽物）だけを使う。
 import type { Judge, JudgeAnswer, JudgeQuestion } from "../judge.js";
 
-/** 目録の 1 観点（04 §3 P3 の「集計の種類・期間・今月を含むか・数える状態・整数か・絞り込みの組み合わせ・0 件を含むか・直せる人」） */
+/** 目録の 1 観点（04 §3 P3 の「集計の種類・期間・今月を含むか・数える状態・0 件を含むか・直せる人」） */
 export interface CatalogFacet {
   /** 観点の ID（問いの名前と未解決の事項の ID に使う） */
   readonly id: string;
@@ -64,18 +64,6 @@ export const CATALOG_FACETS: readonly CatalogFacet[] = [
     question: "どの状態のものを数えるか",
     point: "which states of records are counted (e.g. only meetings that were actually held)",
     critical: true,
-  },
-  {
-    id: "integer",
-    question: "値が整数か、小数を許すか",
-    point: "whether a value must be a whole number or may have decimals",
-    critical: false,
-  },
-  {
-    id: "filter-combination",
-    question: "複数の絞り込みを組み合わせたときにどう絞るか",
-    point: "how several filters combine when used together",
-    critical: false,
   },
   {
     id: "include-zero",
@@ -225,8 +213,7 @@ function gateValue(answer: JudgeAnswer | undefined): GateValue {
  * 要件ごとに集計の門を 1 つ、要件 × 観点ごとに「当てはまるか」と「決まっているか」の 2 つを、同じ 1 回の
  * 呼び出しで聞く。**当てはまる確率が閾値以上で、かつ決まっている確率が閾値未満の観点だけ**を `unspecified`
  * にする。ただし、門の値が「1 − 閾値」以下（はっきり集計を含まない）の要件では、**集計の観点**を未解決の
- * 事項にしない（整数か・絞り込みの組み合わせ・直せる人は、門によらず当てはまりで決める）。要件が 1 つも
- * 無ければ判定を呼ばない。
+ * 事項にしない（直せる人は、門によらず当てはまりで決める）。要件が 1 つも無ければ判定を呼ばない。
  */
 export async function runCatalog(input: CatalogInput): Promise<CatalogResult> {
   const questions: Record<string, JudgeQuestion> = {};
