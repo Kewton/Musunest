@@ -3,7 +3,9 @@
 //   --set：評価セットの定義ファイル（#427。README §5.6）。既定は <repo> の sets/dev-p1-p10.json（今の P1〜P10 を同じ形で書き直したもの）。
 //          依頼文・題材・書き方・書ける範囲・採点の定義・台本はここから読む。P 番号と題材の対応をこの道具の中に持たない。
 //          定義ファイルの指紋は条件のファイルの set に書き、署名に入る。台本の指紋は scripts に書くが署名から外す（今の台本は採点で事後に当てる。
-//          工場の答えの口は質問 ID で Plan の前に 1 度だけ読むので、事項で書いた台本を実行中に当てられない。答えは今までどおり全部推奨）
+//          工場の答えの口は質問 ID で Plan の前に 1 度だけ読むので、事項で書いた台本を実行中に当てられない。答えは今までどおり全部推奨）。
+//          組が参照する採点の定義の実体は scoring の指紋に入る（definition:<題材>。subjects/ の外の定義も数える。fix-427）
+//   v2 以前（#427 より前）の条件のファイルの計測は、この道具で再開できない（schema と set が署名に入るので一致しない。安全側の拒否。README §5.1）
 //   --plan：Plan を通す（答えは空のファイル＝すべて推奨。#378）。費用は Plan と Build を合わせた額で数える
 //   --resume：前の計測の続きから流す（#400）。保存した条件と一致し、全文と要約がそろっているときだけ許す
 //   --model / --factory-budget-usd / --deadline-min：工場へ渡す値。既定は工場の dist が公開する既定値（別に手書きしない）
@@ -108,10 +110,10 @@ const measured = {
     stage_output_limits: limits.STAGE_MAX_OUTPUT_TOKENS[effort] ?? limits.STAGE_MAX_OUTPUT_TOKENS[limits.DEFAULT_REASONING_EFFORT],
   },
   child_args: jobs.map((j) => ({ id: idOf(j), argv: childArgsFor(j) })),
-  // 採点の定義と集計のコードの指紋（<repo> の採点器）。署名からは外す：採点は生成のあとに全本へ同じ版を当てるもので、採点の出力が
-  // 実際に実行した集計のコードの指紋をこの値と照合する（score-agent.mjs）。ただし source.commit・source.dirty は署名に残るので、
+  // 採点の定義と集計のコードの指紋（<repo> の採点器と、組が実際に参照する採点の定義の実体）。署名からは外す：採点は生成のあとに全本へ同じ版を当てるもので、
+  // 採点の出力が実際に実行した集計のコードの指紋をこの値と照合する（score-agent.mjs）。ただし source.commit・source.dirty は署名に残るので、
   // clean な checkout を編集したり採点だけの commit を積んだりすれば再開は断られる。外す効果があるのは source が変わらない場合に限る
-  scoring: { dir: relative(repo, evDir), ...scoringFingerprint(evDir) },
+  scoring: { dir: relative(repo, evDir), ...scoringFingerprint(evDir, undefined, evalSet.definitions) },
   // 台本（#427）：題材ごとの台本の指紋と当て方。今は採点で事後に当てる（post-hoc）ので生成の条件ではなく、scoring と同じく署名から外す。
   // 採点の出力が、実際に当てた台本の指紋をこの値と照合する
   scripts: { mode: SCRIPT_MODE, fingerprint: scriptsFp.fingerprint, files: [...evalSet.scripts.entries()].map(([subject, sc]) => ({ subject, path: relToRepo(sc.path), sha256: sc.sha256 })) },

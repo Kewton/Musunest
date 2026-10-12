@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { DEFAULT_SET_PATH, EVAL_SET_SCHEMA, PLAN_SCRIPT_SCHEMA, loadEvalSet, reconcile, scoringFingerprint, scriptsFingerprint } from "./score-agent.mjs";
@@ -280,8 +280,11 @@ test("条件のファイルに、spec-engine の dist・生成に渡す文書・
     assert.equal(cond.prompt_documents.vocabulary.path, "packages/appspec-schema/vocabulary.yaml");
     assert.equal(cond.prompt_documents.vocabulary.sha256, sha256(readFileSync(join(repo, "packages/appspec-schema/vocabulary.yaml"))));
     assert.equal(cond.scoring.dir, "workspace/mvp/m1/agent/eval");
-    assert.deepEqual(cond.scoring, { dir: "workspace/mvp/m1/agent/eval", ...scoringFingerprint(join(repo, "workspace/mvp/m1/agent/eval")) });
+    const fakeEv = join(repo, "workspace/mvp/m1/agent/eval");
+    assert.deepEqual(cond.scoring, { dir: "workspace/mvp/m1/agent/eval", ...scoringFingerprint(fakeEv, undefined, loadEvalSet(join(fakeEv, "sets/dev-p1-p10.json")).definitions) });
     assert.deepEqual(cond.scoring.missing, []);
+    // 組が参照する採点の定義の実体（definition:<題材>）も指紋に入る（fix-427）
+    assert.deepEqual(cond.scoring.files.filter((f) => f.path.startsWith("definition:")), ["A", "B", "C", "D", "E"].map((s) => ({ path: `definition:${s}`, source: `subjects/${s}.json`, sha256: sha256(readFileSync(join(fakeEv, `subjects/${s}.json`))) })));
     assert.deepEqual(cond.judge, { configuration: "jev-primary-llm-fallback", jev_key_env: "JEV_API_KEY" });
     // Jev の鍵が無ければ LLM だけ（cli.ts の assembleJudge と同じ分かれ方）。空文字も「無い」
     const out2 = join(base, "out-fp-llm");
@@ -349,6 +352,59 @@ test("v1 の条件のファイル（#401）の計測を、今の道具で再開�
   });
 });
 
+test("v2 の条件のファイル（#425）の計測を、今の道具で再開することはできない（schema と set が署名に入る。安全側の拒否で、救済のために署名から外さない）", async () => {
+  await withRepo(async (base, repo) => {
+    const log = join(base, "spawn-v2.log");
+    const args = ["--only", "P1,P2", "--runs", "1", "--concurrency", "1"];
+    const out = join(base, "out-v2");
+    assert.equal(runAgent(repo, out, args, { FAKE_SPAWN_LOG: log }).status, 0);
+    rmSync(join(out, "P2-r1"), { recursive: true, force: true });
+    // v2 の形（#425）：set・scripts（#427）が無く schema は v2。署名は started_at・scoring・params.budget_usd を除いた全部（#425 の計算と同じ）
+    const v3 = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+    const { set: _set, scripts: _sc, started_at: _t, signature: _sig, scoring: _scoring, ...generation } = v3;
+    const measured = { ...generation, schema: "musunest-factory/agent-accept-conditions/v2" };
+    const { budget_usd: _b, ...params } = measured.params;
+    writeFileSync(join(out, "conditions.json"), JSON.stringify({ ...measured, scoring: v3.scoring, started_at: v3.started_at, signature: sha256(JSON.stringify({ ...measured, params })) }, null, 1));
+    const resumed = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.notEqual(resumed.status, 0);
+    assert.match(resumed.stderr, /保存した条件と今の条件が一致しません/);
+    assert.equal(spawnCount(log), 2);
+    // 採点の道具は v2 の条件のファイルをそのまま照合できる（score-agent.test.mjs の v2 の例と同じ）
+    const c = reconcile(out);
+    assert.equal(c.status, "incomplete");
+    assert.deepEqual(c.unexecuted, ["P2-r1"]);
+  });
+});
+
+test("組が subjects/ の外の採点の定義を参照すると、その実体が条件の採点の指紋に入り、組を変えずに中身だけ変えると指紋が変わる（署名の外なので再開は妨げない）", async () => {
+  await withRepo(async (base, repo) => {
+    const fakeEv = join(repo, "workspace/mvp/m1/agent/eval");
+    const defPath = join(base, "custom/defs/A.json");
+    mkdirSync(dirname(defPath), { recursive: true });
+    writeFileSync(defPath, readFileSync(join(fakeEv, "subjects/A.json")));
+    const setPath = join(base, "custom/reg.json");
+    writeFileSync(setPath, JSON.stringify({ schema: EVAL_SET_SCHEMA, id: "reg-t", version: 1, role: "regression", title: "t", styles: { S1: "s1" }, items: [{ id: "P1", subject: "A", style: "S1", writable: true, scoring: defPath, script: null, request: ["行 X"] }] }));
+    const log = join(base, "spawn-def.log");
+    const args = ["--runs", "2", "--concurrency", "1", "--set", setPath];
+    const out = join(base, "out-def");
+    assert.equal(runAgent(repo, out, args, { FAKE_SPAWN_LOG: log }).status, 0);
+    assert.deepEqual(spawnLines(log), ["P1-r1", "P1-r2"]);
+    const cond = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+    assert.deepEqual(cond.scoring.files.filter((f) => f.path.startsWith("definition:")), [{ path: "definition:A", source: relative(fakeEv, defPath), sha256: sha256(readFileSync(defPath)) }]);
+    assert.deepEqual(cond.scoring, { dir: "workspace/mvp/m1/agent/eval", ...scoringFingerprint(fakeEv, undefined, loadEvalSet(setPath).definitions) });
+    // 組はそのまま、参照先の定義だけを変える：指紋は変わる（採点の出力が不一致と出す）。署名の外なので途中の計測の再開は断られない
+    rmSync(join(out, "P1-r2"), { recursive: true, force: true });
+    appendFileSync(defPath, "\n");
+    const changed = scoringFingerprint(fakeEv, undefined, loadEvalSet(setPath).definitions);
+    assert.notEqual(changed.fingerprint, cond.scoring.fingerprint);
+    assert.equal(loadEvalSet(setPath).sha256, cond.set.sha256, "組の指紋は同じ");
+    const resumed = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.equal(spawnCount(log), 3);
+    assert.equal(JSON.parse(readFileSync(join(out, "conditions.json"), "utf8")).scoring.fingerprint, cond.scoring.fingerprint, "条件のファイルは初回の値のまま");
+  });
+});
+
 test("採点の定義の変更は署名の外で、source が変わらない限り再開を妨げない（採点は生成のあとに全本へ同じ版を当て、採点の出力が条件と照合する）", async () => {
   // 偽物のリポジトリは git の外（source.commit・source.dirty が null のまま）なので、source が変わらない場合の挙動だけを確かめる。
   // 本物の checkout では source.commit・source.dirty が署名に残るので、clean を編集したり採点だけの commit を積んだりすれば再開は断られる
@@ -360,7 +416,8 @@ test("採点の定義の変更は署名の外で、source が変わらない限�
     const before = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
     rmSync(join(out, "P2-r1"), { recursive: true, force: true });
     appendFileSync(join(repo, "workspace/mvp/m1/agent/eval/subjects/A.json"), "\n");
-    assert.notEqual(scoringFingerprint(join(repo, "workspace/mvp/m1/agent/eval")).fingerprint, before.scoring.fingerprint);
+    const evDir = join(repo, "workspace/mvp/m1/agent/eval");
+    assert.notEqual(scoringFingerprint(evDir, undefined, loadEvalSet(join(evDir, "sets/dev-p1-p10.json")).definitions).fingerprint, before.scoring.fingerprint);
     const resumed = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
     assert.equal(resumed.status, 0, resumed.stderr);
     assert.equal(spawnCount(log), 3);

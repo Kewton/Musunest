@@ -26,6 +26,9 @@
 //   台本 … Plan の質問に、質問 ID ではなく点検済みの事項（文の鍵と目録の観点）で答える台本（sets/scripts/<題材>.json）を、往復の記録の
 //              全部の問いに**事後に**当てる（工場の答えの口は質問 ID で Plan の前に 1 度だけ読むので、実行中には当てられない）。台本に無い問いは
 //              「不明」、決められない問いは「決められない」として数え、推奨に丸めない（rows[].script・metrics_script）。判定と合格率は変えない
+//   独立レビューの直し（fix-427）… 採点の指紋に、組が実際に参照する採点の定義の実体（definition:<題材>）を含める。予定の本が採点する組に無ければ
+//              採点せずに断る。照合に採点した本数と採点できない本（組に無い ID）を足し、黙って分母から除かない。--anonymous は読み込みと診断の
+//              前に伝え、標準エラーも件数だけにする
 // run-agent.mjs は、ここから指紋の関数と定義ファイルの読み込みを import して条件のファイルに書く（道具は 2 本で 1 組。入口として起動したときだけ採点する）
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -63,33 +66,38 @@ export const fingerprintDir = (dir) => {
   for (const rel of files) { const full = join(dir, rel); h.update(rel); h.update("\0"); h.update(sha256(readFileSync(full))); h.update("\n"); mtime = Math.max(mtime, statSync(full).mtimeMs); }
   return { fingerprint: h.digest("hex"), files: files.length, mtime_ms: files.length ? mtime : null };
 };
-/** 採点の定義と集計のコード：エンジン・申告の採点・入口・この採点の道具と、題材の定義（subjects/*.json）全部 */
+/** 採点の定義と集計のコード：エンジン・申告の採点・入口・この採点の道具と、題材の定義（subjects/*.json）全部。組が参照する採点の定義の実体は definitions で足す */
 export const SCORING_FILES = ["engine.mjs", "score-claims.mjs", "rubric-v5.mjs", "agent-accept/score-agent.mjs"];
 /** 集計のコード（この道具）。指紋の中では evDir からの相対名で数えるが、実体は aggregator で差し替えられる */
 export const AGGREGATOR_FILE = "agent-accept/score-agent.mjs";
 /**
  * evDir は定義とエンジンを実際に読み込む場所。aggregator は集計のコードの実体のパス（既定は evDir の中の score-agent.mjs。
  * 条件のファイルへ書く run-agent.mjs は既定のまま＝ <repo> の採点器。採点する scoreOutput は実行中のファイルを渡す）。
- * 別の checkout の採点器を起動して <repo> を渡したときに、<repo> の旧い採点器の指紋を「一致」と出さないため
+ * 別の checkout の採点器を起動して <repo> を渡したときに、<repo> の旧い採点器の指紋を「一致」と出さないため。
+ * definitions は、組（定義ファイル）が実際に参照する採点の定義の実体（loadEvalSet の definitions。題材 → { path }）。subjects/ の外に置いた定義も
+ * ここで指紋に入る（definition:<題材>。中身の SHA-256 で数え、パスに依らない）。組を変えずに参照先の中身だけを変えても、計測の条件と採点の指紋が食い違う
  */
-export function scoringFingerprint(evDir, aggregator = join(evDir, AGGREGATOR_FILE)) {
+export function scoringFingerprint(evDir, aggregator = join(evDir, AGGREGATOR_FILE), definitions = new Map()) {
   const subjectsDir = join(evDir, "subjects");
   const subjects = existsSync(subjectsDir) ? readdirSync(subjectsDir).filter((n) => n.endsWith(".json")).sort().map((n) => `subjects/${n}`) : [];
   const h = createHash("sha256");
   const files = [], missing = [];
-  for (const rel of [...SCORING_FILES, ...subjects]) {
-    const full = rel === AGGREGATOR_FILE ? aggregator : join(evDir, rel);
-    if (!existsSync(full)) { missing.push(rel); continue; }
+  const add = (rel, full, extra = {}) => {
+    if (!existsSync(full)) { missing.push(rel); return; }
     const digest = sha256(readFileSync(full));
-    files.push({ path: rel, sha256: digest });
+    files.push({ path: rel, ...extra, sha256: digest });
     h.update(rel); h.update("\0"); h.update(digest); h.update("\n");
-  }
+  };
+  for (const rel of [...SCORING_FILES, ...subjects]) add(rel, rel === AGGREGATOR_FILE ? aggregator : join(evDir, rel));
+  for (const subject of [...definitions.keys()].sort()) add(`definition:${subject}`, definitions.get(subject).path, { source: relative(evDir, definitions.get(subject).path) });
   return { fingerprint: h.digest("hex"), files, missing };
 }
 
 // ── 本数の照合
 const RUN_DIR = /^P\d+-r\d+$/;
 const PATTERN_ID = /^P\d+$/;
+/** 本の名前（P<n>-r<n>）から本の ID（P<n>） */
+const patternOf = (run) => run.split("-")[0];
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 const runDirs = (outRoot) => readdirSync(outRoot).filter((x) => RUN_DIR.test(x)).sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
 /** 条件のファイルを読む：無ければ missing、JSON として読めないか object でなければ unreadable */
@@ -129,18 +137,23 @@ const stopCodeOf = (r) => (STOP_CODES.includes(r.stop_code) ? r.stop_code : r.st
  * 予定した本（条件のファイルの child_args）・実行した本（要約のある本）・未実行の本（ディレクトリが無い）・途中の本（要約の無い本）・予定外の本（予定に無いディレクトリ）を照合する。
  * 未実行・途中・予定外が 1 本でもあれば「未完了」（正式な比較基準にしない、の機械の目印。方法論 01 §3）。
  * 条件のファイルが無い出力先（#401 より前の計測）・読めない条件・予定を検証できない条件（validatePlanned）は照合できないので「未照合」と理由。
+ * set（採点する組。loadEvalSet の結果）を渡すと、採点した本数（scored）と採点できない本（unscored。組に無い ID の本。採点の道具は行に入れない）も照合し、
+ * 採点できない本が 1 本でもあれば理由に残す（黙って分母から除かない）。渡さなければ scored・unscored は null
  */
-export function reconcile(outRoot) {
+export function reconcile(outRoot, set = null) {
   const dirs = runDirs(outRoot);
   const executed = dirs.filter((d) => existsSync(join(outRoot, d, "summary.line.json")));
   const incomplete = dirs.filter((d) => !executed.includes(d));
+  const unscored = set === null ? null : dirs.filter((d) => !set.byId.has(patternOf(d)));
+  const scored = unscored === null ? null : dirs.length - unscored.length;
+  const unscoredReasons = unscored !== null && unscored.length > 0 ? [`採点できない ${unscored.length} 本（組に無い ID）`] : [];
   // 1 回の起動の記録（run-<時刻>.json。再開は resume-<時刻>.json も残す）。いちばん新しいものの止まった理由（文とコード）・残りの本・その起動で有効だった目安の額を添える
   const records = readdirSync(outRoot).filter((n) => /^(run|resume)-\d+\.json$/.test(n)).sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]));
   const last = records.at(-1);
   const latest_record = last === undefined ? null : (() => { const r = readJson(join(outRoot, last)); return { file: last, stop: r.stop ?? null, stop_code: stopCodeOf(r), pending: r.pending ?? [], budget_usd: typeof r.budget_usd === "number" ? r.budget_usd : null }; })();
   const loaded = loadConditions(outRoot);
   const cond = loaded.cond;
-  const unverified = (reasons) => ({ status: "unverified", label: COMPLETION_LABELS.unverified, reasons, measurement_id: typeof cond?.measurement_id === "string" ? cond.measurement_id : null, signature: typeof cond?.signature === "string" ? cond.signature : null, planned: null, executed: executed.length, executed_ids: executed, unexecuted: null, incomplete, extra: null, latest_record });
+  const unverified = (reasons) => ({ status: "unverified", label: COMPLETION_LABELS.unverified, reasons: [...reasons, ...unscoredReasons], measurement_id: typeof cond?.measurement_id === "string" ? cond.measurement_id : null, signature: typeof cond?.signature === "string" ? cond.signature : null, planned: null, executed: executed.length, executed_ids: executed, scored, unscored, unexecuted: null, incomplete, extra: null, latest_record });
   if (loaded.status === "missing") return unverified(["条件のファイルが無い"]);
   if (loaded.status === "unreadable") return unverified(["条件のファイルを読めない"]);
   const invalid = validatePlanned(cond);
@@ -152,8 +165,9 @@ export function reconcile(outRoot) {
   if (unexecuted.length > 0) reasons.push(`未実行 ${unexecuted.length} 本`);
   if (incomplete.length > 0) reasons.push(`途中 ${incomplete.length} 本`);
   if (extra.length > 0) reasons.push(`予定外 ${extra.length} 本`);
+  reasons.push(...unscoredReasons);
   const status = reasons.length === 0 ? "complete" : "incomplete";
-  return { status, label: COMPLETION_LABELS[status], reasons, measurement_id: cond.measurement_id ?? null, signature: cond.signature ?? null, planned: planned.length, executed: executed.length, executed_ids: executed, unexecuted, incomplete, extra, latest_record };
+  return { status, label: COMPLETION_LABELS[status], reasons, measurement_id: cond.measurement_id ?? null, signature: cond.signature ?? null, planned: planned.length, executed: executed.length, executed_ids: executed, scored, unscored, unexecuted, incomplete, extra, latest_record };
 }
 
 // ── 評価セットの定義ファイルと台本（#427。README §5.6）
@@ -217,7 +231,8 @@ const resolveFrom = (dir, p) => (isAbsolute(p) ? p : resolve(dir, p));
 /**
  * 評価セットの定義ファイルを読む（README §5.6.1）。無ければ missing、読めなければ unreadable、欠けた欄・形の違う欄があれば invalid と理由の一覧
  * （入力の値は書かない）、通れば ok。ok のときは本の一覧（items。依頼文は requestText に組み立て済み）・本の ID → 本（byId）・題材の順（subjects）・
- * 題材ごとの台本（scripts：読み込んだ台本と SHA-256。無い題材は入れない）・定義ファイルの SHA-256 を返す。パスは定義ファイルの場所からの相対（絶対も通す）
+ * 題材ごとの台本（scripts：読み込んだ台本と SHA-256。無い題材は入れない）・題材ごとの採点の定義の実体（definitions：パス・相対の書き方・SHA-256。
+ * 採点の指紋 scoringFingerprint に渡す）・定義ファイルの SHA-256 を返す。パスは定義ファイルの場所からの相対（絶対も通す）
  */
 export function loadEvalSet(path) {
   if (!existsSync(path)) return { status: "missing", reasons: ["定義ファイルが無い"], set: null };
@@ -235,7 +250,7 @@ export function loadEvalSet(path) {
   if (set.source !== undefined && (!isObj(set.source) || (set.source.document !== undefined && typeof set.source.document !== "string"))) reasons.push("source の形が違う（document は文字列）");
   if (!Array.isArray(set.items) || set.items.length === 0) { reasons.push("items が配列でないか 0 件"); return { status: "invalid", reasons, set: null }; }
   const dir = dirname(path);
-  const items = [], ids = new Set(), bySubject = new Map(), scripts = new Map(), subjects = [];
+  const items = [], ids = new Set(), bySubject = new Map(), scripts = new Map(), definitions = new Map(), subjects = [];
   set.items.forEach((it, i) => {
     if (!isObj(it)) { reasons.push(`items[${i}] が写像でない`); return; }
     if (typeof it.id !== "string" || !ITEM_ID.test(it.id)) reasons.push(`items[${i}].id が P<n> の形でない`);
@@ -248,8 +263,10 @@ export function loadEvalSet(path) {
     if (typeof it.scoring !== "string" || it.scoring === "") reasons.push(`items[${i}].scoring が文字列でない`);
     else {
       scoringPath = resolveFrom(dir, it.scoring);
-      try { scoringDef = JSON.parse(readFileSync(scoringPath, "utf8")); } catch { reasons.push(`items[${i}].scoring の定義が無いか読めない`); }
+      let scoringText = null;
+      try { scoringText = readFileSync(scoringPath, "utf8"); scoringDef = JSON.parse(scoringText); } catch { reasons.push(`items[${i}].scoring の定義が無いか読めない`); }
       if (scoringDef !== null && scoringDef?.id !== it.subject) reasons.push(`items[${i}].scoring の定義の id が subject と違う`);
+      else if (scoringDef !== null && typeof it.subject === "string" && !definitions.has(it.subject)) definitions.set(it.subject, { path: scoringPath, rel: it.scoring, sha256: sha256(scoringText) });
     }
     let scriptPath = null;
     if (it.script !== null && (typeof it.script !== "string" || it.script === "")) reasons.push(`items[${i}].script が文字列でも null でもない`);
@@ -269,7 +286,7 @@ export function loadEvalSet(path) {
     items.push({ id: it.id, subject: it.subject, style: it.style, writable: it.writable, scoring: it.scoring, scoringPath, script: it.script, scriptPath, requestText: Array.isArray(it.request) ? it.request.join("\n") : "" });
   });
   if (reasons.length > 0) return { status: "invalid", reasons: [...new Set(reasons)], set: null };
-  return { status: "ok", reasons: [], set, path, dir, sha256: sha256(text), items, byId: new Map(items.map((it) => [it.id, it])), subjects, scripts };
+  return { status: "ok", reasons: [], set, path, dir, sha256: sha256(text), items, byId: new Map(items.map((it) => [it.id, it])), subjects, scripts, definitions };
 }
 /** 台本のまとめた指紋（題材と中身の SHA-256 だけ。パスに依らない）と一覧 */
 export function scriptsFingerprint(scripts) {
@@ -552,11 +569,16 @@ const sum = (xs, f) => xs.reduce((s, r) => s + f(r), 0);
 const pass = (r) => !r.generation_failed && r.verdict === "PASS";
 const relReal = (from, to) => { try { return relative(realpathSync(from), realpathSync(to)); } catch { return relative(from, to); } };
 
+/** 採点せずに断る誤り（入口が「断りました」と exit 3 にする）。文は opts.anonymous のときパス・本の ID・組の ID を含めない */
+const refusal = (message) => Object.assign(new Error(message), { refused: true });
 /**
  * 採点する。opts.setPath（--set）があればその定義ファイル、無ければ条件のファイルの set.path（<repo> からの相対。絶対も通す）、それも無ければ既定の組。
- * 定義ファイルを読めなければ採点しない（例外）。出力先に定義ファイルに無い ID の本があれば採点せず飛ばす（標準エラー。照合では予定外に数える）
+ * 定義ファイルを読めなければ採点しない（断る）。予定の本（条件のファイルの child_args。検証できるとき）が採点する組に無ければ採点しない（断る。
+ * 一部の本だけを含む組で採点して、予定した本を分母から黙って除かないため）。出力先に組に無い ID の本（予定外）があれば採点せず行に入れないが、
+ * 照合（completion.unscored）に残して理由に出す。opts.anonymous は匿名の実行の印：断る文と照合の文に識別子を含めない
  */
 export async function scoreOutput(repo, outRoot, opts = {}) {
+  const anonymous = opts.anonymous === true;
   const ev = join(repo, "workspace/mvp/m1/agent/eval");
   const { loadDef, score } = await import(pathToFileURL(join(ev, "engine.mjs")).href);
   const { finalVerdict, scoreClaims, DEFAULT_ALLOWED } = await import(pathToFileURL(join(ev, "score-claims.mjs")).href);
@@ -569,14 +591,18 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
   // 評価セットの定義ファイル（#427）：--set ＞ 条件のファイルの set.path ＞ 既定の組
   const setPath = opts.setPath !== undefined ? resolve(opts.setPath) : typeof cond?.set?.path === "string" ? resolveFrom(repo, cond.set.path) : join(repo, DEFAULT_SET_PATH);
   const loadedSet = loadEvalSet(setPath);
-  if (loadedSet.status !== "ok") throw new Error(`定義ファイルを読めません（${relReal(repo, setPath)}）: ${loadedSet.reasons.join("、")}`);
+  if (loadedSet.status !== "ok") throw refusal(`定義ファイルを読めません${anonymous ? "" : `（${relReal(repo, setPath)}）`}: ${loadedSet.reasons.join("、")}`);
   const evalSet = loadedSet;
+  // 予定の本が採点する組に無ければ断る（fix-427）。匿名なら本数だけ
+  const planned = cond !== null && validatePlanned(cond).length === 0 ? cond.child_args.map((c) => c.id) : [];
+  const unscorable = planned.filter((id) => !evalSet.byId.has(patternOf(id)));
+  if (unscorable.length > 0) throw refusal(`予定の本が採点する組${anonymous ? "" : `（${evalSet.set.id}）`}に無い（${unscorable.length} 本${anonymous ? "" : `: ${unscorable.join(",")}`}）`);
   // 了承後系の対象（#426）：計測が Plan を通した（条件のファイルの params.plan）なら全本。そうでなければ Plan の記録（plan-record.json か plan.json）のある本だけ
   const planScope = cond?.params?.plan === true;
   const rows = [];
   for (const d of runDirs(outRoot)) {
-    const p = d.split("-")[0], item = evalSet.byId.get(p), dir = join(outRoot, d);
-    if (item === undefined) { console.error(`飛ばしました: ${d} は定義ファイル（${evalSet.set.id}）に無い ID の本です`); continue; }
+    const p = patternOf(d), item = evalSet.byId.get(p), dir = join(outRoot, d);
+    if (item === undefined) continue; // 組に無い ID の本（予定外）：照合の unscored に残り、入口が標準エラーに出す
     const subject = item.subject;
     const sl = existsSync(join(dir, "summary.line.json")) ? readJson(join(dir, "summary.line.json")) : null;
     const s = sl?.summary ?? null;
@@ -683,10 +709,11 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
     runs_ok: runsS((st) => st === "ok" || st === "no-questions"), runs_disagreed: runsS((st) => st === "disagreed"), runs_unanswered: runsS((st) => st === "unanswered"),
   };
   const bySubject = Object.fromEntries(evalSet.subjects.map((s) => { const xs = rows.filter((r) => r.subject === s), xa = xs.filter((r) => r.fulfillment_accepted !== null); return [s, { pass: fmt(xs.filter(pass).length, xs.length), S1: `${xs.filter((r) => r.style === "S1" && pass(r)).length}/${xs.filter((r) => r.style === "S1").length}`, S2: `${xs.filter((r) => r.style === "S2" && pass(r)).length}/${xs.filter((r) => r.style === "S2").length}`, pass_accepted: fmt(xa.filter(passAccepted).length, xa.length) }]; }));
-  const completion = reconcile(outRoot);
-  // 採点に使った定義とエンジン（<repo> から読み込んだ ev）・集計のコード（実行中のこのファイル）・spec-engine の dist の指紋。条件のファイル（計測の始めに記録）の値と照合する
+  const completion = reconcile(outRoot, evalSet);
+  // 採点に使った定義とエンジン（<repo> から読み込んだ ev）・組が参照する採点の定義の実体・集計のコード（実行中のこのファイル）・spec-engine の dist の指紋。
+  // 条件のファイル（計測の始めに記録）の値と照合する
   const aggregator = fileURLToPath(import.meta.url);
-  const scoring = { dir: relative(repo, ev), aggregator: { path: relReal(repo, aggregator), sha256: sha256(readFileSync(aggregator)) }, ...scoringFingerprint(ev, aggregator) };
+  const scoring = { dir: relative(repo, ev), aggregator: { path: relReal(repo, aggregator), sha256: sha256(readFileSync(aggregator)) }, ...scoringFingerprint(ev, aggregator, evalSet.definitions) };
   const se = fingerprintDir(specEngineDist), as = fingerprintDir(appspecDist);
   const matches = (mine, theirs) => (theirs === undefined || theirs === null ? null : mine === theirs);
   // 読んだ定義ファイルと台本の指紋（#427）。条件のファイルの値（set.sha256・scripts.fingerprint）と照合する
@@ -750,7 +777,7 @@ export function anonymize(full) {
     // 組（#427）：版と役割と指紋だけ（ID・題名は出さない）
     set: { version: intOrNull(full.set?.version), role: enumOrUnknown(EVAL_SET_ROLES, full.set?.role ?? null), sha256: hashOrNull(full.set?.sha256) },
     fulfillment: Object.fromEntries(["v1", "v2", "accepted"].map((v) => [v, { label: v === "accepted" ? SCORING_SYSTEMS.accepted : AGGREGATION_VERSIONS[v], partial: full.fulfillment[v]?.partial ?? null, writable: full.fulfillment[v]?.writable ?? null, all: full.fulfillment[v]?.all ?? null, ...(v === "accepted" ? { unevaluated: { checks: intOrNull(full.fulfillment.accepted?.unevaluated?.checks), runs: intOrNull(full.fulfillment.accepted?.unevaluated?.runs) } } : {}) }])),
-    completion: { status, label: COMPLETION_LABELS[status] ?? "unknown", planned: intOrNull(c.planned), executed: intOrNull(c.executed), unexecuted: countOrNull(c.unexecuted), incomplete: countOrNull(c.incomplete), extra: countOrNull(c.extra), stop_code: enumOrUnknown(STOP_CODES, c.latest_record?.stop_code ?? null) },
+    completion: { status, label: COMPLETION_LABELS[status] ?? "unknown", planned: intOrNull(c.planned), executed: intOrNull(c.executed), scored: intOrNull(c.scored), unexecuted: countOrNull(c.unexecuted), incomplete: countOrNull(c.incomplete), extra: countOrNull(c.extra), unscored: countOrNull(c.unscored), stop_code: enumOrUnknown(STOP_CODES, c.latest_record?.stop_code ?? null) },
     fingerprints: {
       scoring: hashOrNull(f.scoring.fingerprint), spec_engine: hashOrNull(f.spec_engine.fingerprint), appspec_schema: hashOrNull(f.appspec_schema?.fingerprint ?? null),
       set: hashOrNull(f.set?.sha256), scripts: hashOrNull(f.scripts?.fingerprint),
@@ -767,8 +794,16 @@ async function main() {
   const anonymous = process.argv.includes("--anonymous");
   const setPath = process.argv.includes("--set") ? process.argv[process.argv.indexOf("--set") + 1] : undefined;
   let full;
-  try { full = await scoreOutput(repo, outRoot, setPath === undefined ? {} : { setPath }); } catch (e) { if (/定義ファイル/.test(String(e?.message))) { console.error(`断りました: ${e.message}`); process.exit(3); } throw e; }
+  try { full = await scoreOutput(repo, outRoot, { ...(setPath === undefined ? {} : { setPath }), anonymous }); } catch (e) {
+    if (e?.refused === true) { console.error(`断りました: ${e.message}`); process.exit(3); }
+    // 匿名の実行では、予期しない誤りの文（パスや本の ID を含みうる）も標準エラーに出さない
+    if (anonymous) { console.error("失敗しました: 採点できなかった（匿名の実行では詳細を出さない。匿名でない実行で確かめる）"); process.exit(1); }
+    throw e;
+  }
   const name = `score${label ? "-" + label : ""}`;
+  // 組に無い ID の本（採点せず飛ばした。照合の unscored に残る）。匿名なら件数だけ
+  const unscored = full.completion.unscored ?? [];
+  if (unscored.length > 0) console.error(anonymous ? `飛ばしました: 組に無い ID の本 ${unscored.length} 本` : `飛ばしました: ${unscored.join(",")}（組 ${full.set.id} に無い ID の本）`);
   if (anonymous) {
     const a = anonymize(full);
     writeFileSync(join(outRoot, `${name}.anonymous.json`), JSON.stringify(a, null, 1));
@@ -779,7 +814,7 @@ async function main() {
   const { set, metrics, metrics_accepted, metrics_script, fulfillment, completion, fingerprints, bySubject, rows } = full;
   console.log(JSON.stringify({ set, metrics, metrics_accepted, metrics_script, fulfillment, completion, bySubject }, null, 1));
   for (const r of rows) console.log([r.run, r.factory_verdict, r.verdict ?? "GEN_FAIL", (r.failed ?? []).join("・"), r.claims ? `claims ok=${r.claims.correct} miss=${r.claims.missed} false=${r.claims.false_claims.length}` : "", r.cost_usd?.toFixed(3), Math.round(r.seconds), `了承後=${r.verdict_accepted ?? "-"}`].join("\t"));
-  console.log(`照合: ${completion.label}（予定 ${completion.planned ?? "-"}・実行 ${completion.executed}・未実行 ${completion.unexecuted?.length ?? "-"}・途中 ${completion.incomplete.length}${completion.latest_record?.stop ? `・止まった理由: ${completion.latest_record.stop}` : ""}${completion.status === "unverified" ? `・理由: ${completion.reasons.join("、")}` : ""}）`);
+  console.log(`照合: ${completion.label}（予定 ${completion.planned ?? "-"}・実行 ${completion.executed}・採点 ${completion.scored}・未実行 ${completion.unexecuted?.length ?? "-"}・途中 ${completion.incomplete.length}・採点できない ${completion.unscored.length}${completion.latest_record?.stop ? `・止まった理由: ${completion.latest_record.stop}` : ""}${completion.status === "unverified" ? `・理由: ${completion.reasons.join("、")}` : ""}）`);
   const ma = metrics_accepted, ar = ma.absent_reasons, wa = ma.wrong_acceptances, us = ma.unverified_sources;
   console.log(`了承後: 対象 ${ma.runs} 本（確定 ${ma.confirmed}・記録なし ${ma.absent}［未確定 ${ar.plan_not_confirmed}・確定後に仕様なし ${ar.confirmed_without_plan}・不明 ${ar.unknown}］・読めない ${ma.invalid}）・未評価の本 ${fulfillment.accepted.unevaluated.runs}・未検証の有効な要件 ${ma.unverified_requirements} 件（代替先 ${us.accepted_unwritable + us.part}・変更後 ${us.changed}・追加 ${us.added}）・誤った除外 ${ma.wrong_exclusions} 件（判定不能 ${ma.undecided_exclusions} 件）・誤った了承 未評価（証拠 ${wa.evidence} 件・判定不能 ${wa.unmatched + wa.ambiguous} 件・書ける要件の変更 ${wa.unevaluated} 件）・充足 ${fulfillment.accepted.all}（未評価の判定 ${fulfillment.accepted.unevaluated.checks}）`);
   const ms = metrics_script;
