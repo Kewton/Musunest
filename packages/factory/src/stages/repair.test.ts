@@ -18,7 +18,14 @@ import { checkTestSuite, type TestSuite } from "../fixed-test.js";
 import { AGENT_LIMITS } from "../limits.js";
 import type { RecordedCall } from "../llm-fake.js";
 import type { LlmClient, LlmStructuredResponse, LlmToolRequest, LlmToolResponse } from "../llm.js";
-import type { CorrespondenceEntry, RequirementList, VersionChecks } from "../pipeline.js";
+import type {
+  CorrespondenceEntry,
+  RequirementList,
+  RoleEntry,
+  RoleNameMapping,
+  VersionChecks,
+} from "../pipeline.js";
+import type { RequirementRoleOwnership } from "./correspondence.js";
 import {
   INJECTED_INSTRUCTION,
   SAMPLE_DOCUMENTS,
@@ -586,9 +593,73 @@ function report(over: Partial<VersionReport> = {}): VersionReport {
     testRun: { mismatches: [], unresolved: [] },
     routes: [],
     defectMisses: [],
+    redoMisses: [],
     ...over,
   };
 }
+
+// ── 流し直しも、要件ごとの所属を点検する（Issue #431）──────────────────────
+
+describe("流し直しも、要件ごとの所属を点検する（Issue #431）", () => {
+  /** 一覧が `title` を出す宣言（entity record は一覧で辿れる） */
+  const PERM_DECLARATION = [
+    "entities:",
+    "  - name: record",
+    "    fields:",
+    "      title: string",
+    "views:",
+    "  - name: records",
+    "    type: list",
+    "    entity: record",
+    "    show: [title]",
+    "actions: []",
+    "validations: []",
+    "computed: []",
+    "permissions: []",
+    "minIdentity:",
+    "  mode: anonymous",
+    "",
+  ].join("\n");
+  const roles: readonly RoleEntry[] = [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null },
+    { roleId: "record.title", kind: "field", entity: "record", name: "title", shared: false, aliasOf: null },
+  ];
+  const mappings: readonly RoleNameMapping[] = [
+    { roleId: "record", name: "record" },
+    { roleId: "record.title", name: "title" },
+  ];
+  const ownership: readonly RequirementRoleOwnership[] = [
+    {
+      requirementId: "R-1",
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "行の所属として参照するため" },
+        { roleId: "record.title", basis: "dependency", reason: "一覧に出す項目として参照するため" },
+      ],
+    },
+  ];
+  // R-1 の対応表は entity record だけを挙げ、項目 title を挙げていない
+  const correspondences: readonly CorrespondenceEntry[] = [
+    { requirementId: "R-1", locations: [{ kind: "entity", entity: null, name: "record" }] },
+  ];
+
+  it("所属を渡すと、要件ごとの点検の落ち（要件 ID つき）を redoMisses に返す", async () => {
+    const report = await checkDeclarationVersion(
+      { source: PERM_DECLARATION },
+      { list: LIST, suite: SUITE, correspondences, roles, mappings, ownership },
+    );
+    expect(report.redoMisses.map((miss) => miss.requirementId)).toContain("R-1");
+    expect(report.correspondence?.misses.some((miss) => miss.requirementId === "R-1")).toBe(true);
+  });
+
+  it("所属を渡さなければ、要件ごとの点検はせず、要件 ID つきの落ちを足さない（旧形式の経路）", async () => {
+    const report = await checkDeclarationVersion(
+      { source: PERM_DECLARATION },
+      { list: LIST, suite: SUITE, correspondences, roles, mappings },
+    );
+    expect(report.redoMisses).toEqual([]);
+    expect(report.correspondence?.misses.filter((miss) => miss.requirementId === "R-1")).toEqual([]);
+  });
+});
 
 describe("停滞の署名は、名前ではなく分類で決まる（02 §1.3.1・Issue #309）", () => {
   it("名前だけを付け替えた次の版でも、同じ不一致は同じ署名になる（member → memberRegistration）", () => {
