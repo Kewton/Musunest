@@ -5,7 +5,9 @@
 //   --model / --factory-budget-usd / --deadline-min：工場へ渡す値。既定は工場の dist が公開する既定値（別に手書きしない）
 //   --budget-usd：計測全体の停止の目安の額。**起動中の本の予約を含まない**（終わった本の額だけを足す）
 // 条件のファイル（conditions.json。#425 で v2）には、工場の dist に加えて spec-engine の dist・生成に渡す文書（契約・語彙の意味・語彙の台帳）・
-//   採点の定義と集計のコード・判定の口の構成（鍵そのものは書かない）の指紋を残す。1 回の起動ごとに run-<時刻>.json（流した本・残りの本・止まった理由）を残す
+//   採点の定義と集計のコード・判定の口の構成（鍵そのものは書かない）の指紋を残す。1 回の起動ごとに run-<時刻>.json（流した本・残りの本・止まった理由と
+//   そのコード・その起動で有効だった計測全体の目安の額と初回の条件との差・済みの額）を残す。署名が保証するのは生成の条件であって、管理の条件
+//   （計測全体の目安の額）まで含めた一致ではない。再開で変えた値は起動の記録から読む
 // 採点は: node score-agent.mjs <repo> <out> [--label high]（リポジトリ・出力先の順で渡す）
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
@@ -89,11 +91,14 @@ const measured = {
     stage_output_limits: limits.STAGE_MAX_OUTPUT_TOKENS[effort] ?? limits.STAGE_MAX_OUTPUT_TOKENS[limits.DEFAULT_REASONING_EFFORT],
   },
   child_args: jobs.map((j) => ({ id: idOf(j), argv: childArgsFor(j) })),
-  // 採点の定義と集計のコードの指紋。署名からは外す：採点は生成のあとに全本へ同じ版を当てるもので、採点の出力が条件のファイルと照合する（score-agent.mjs）
+  // 採点の定義と集計のコードの指紋（<repo> の採点器）。署名からは外す：採点は生成のあとに全本へ同じ版を当てるもので、採点の出力が
+  // 実際に実行した集計のコードの指紋をこの値と照合する（score-agent.mjs）。ただし source.commit・source.dirty は署名に残るので、
+  // clean な checkout を編集したり採点だけの commit を積んだりすれば再開は断られる。外す効果があるのは source が変わらない場合に限る
   scoring: { dir: relative(repo, evDir), ...scoringFingerprint(evDir) },
 };
 // 署名（--resume の一致の判定）から外すもの：started_at（補助）、scoring（上）、params.budget_usd（計測全体の停止の目安。
-// 予算で止まった計測を --budget-usd を上げて流し切れるようにする。工場 1 本の予算 factory_budget_usd は生成の条件なので残す）
+// 予算で止まった計測を --budget-usd を上げて流し切れるようにする。工場 1 本の予算 factory_budget_usd は生成の条件なので残す）。
+// 署名は生成の条件の一致を保証するもので、管理の条件（計測全体の目安の額）の一致ではない。有効だった額は起動の記録（下）に残す
 const { scoring: _scoring, ...generationConditions } = measured;
 const { budget_usd: _budget, ...paramsForSignature } = measured.params;
 const signature = sha256(JSON.stringify({ ...generationConditions, params: paramsForSignature }));
@@ -101,7 +106,9 @@ const signature = sha256(JSON.stringify({ ...generationConditions, params: param
 const costOfDir = (dir) => { try { const sl = JSON.parse(readFileSync(join(dir, "summary.line.json"), "utf8")); return sl.plan_cost?.total_usd ?? sl.summary?.provider_cost_usd ?? 0; } catch { return 0; } };
 const refuse = (msg) => { console.error(`断りました: ${msg}`); process.exit(3); };
 
-let spent = 0, stop = null, skipped = [], reopened = [], executed = [], runQueue = [];
+let spent = 0, stop = null, stopCode = null, skipped = [], reopened = [], executed = [], runQueue = [];
+// この起動で有効な計測全体の目安の額（budget）と、初回の条件のファイルに記録した額。再開で変えたかどうかを起動の記録に残す
+let initialBudget = budget;
 mkdirSync(outRoot, { recursive: true });
 const conditionsPath = join(outRoot, "conditions.json");
 const priorDirs = readdirSync(outRoot).filter((n) => /^P\d+-r\d+$/.test(n));
@@ -111,6 +118,7 @@ if (priorDirs.length > 0 || existsSync(conditionsPath)) {
   if (!existsSync(conditionsPath)) refuse("条件のファイルの無い出力先です（新しい出力先を使ってください）");
   let saved = null; try { saved = JSON.parse(readFileSync(conditionsPath, "utf8")); } catch { refuse("条件のファイルを読めません"); }
   if (saved?.signature !== signature) refuse("保存した条件と今の条件が一致しません");
+  initialBudget = typeof saved.params?.budget_usd === "number" ? saved.params.budget_usd : null;
   for (const job of jobs) {
     const dir = dirOf(job);
     if (!existsSync(dir)) continue;
@@ -162,7 +170,7 @@ const runOne = (job) => new Promise((resolve) => {
 const queue = [...runQueue];
 await Promise.all(Array.from({ length: CONC }, async () => {
   while (queue.length && !stop) {
-    if (spent >= budget) { stop = `予算 ${budget} USD に達した`; break; }
+    if (spent >= budget) { stop = `予算 ${budget} USD に達した`; stopCode = "budget"; break; }
     const job = queue.shift();
     if (resume) { job.resumed = true; reopened.push(idOf(job)); }
     executed.push(idOf(job));
@@ -172,8 +180,10 @@ await Promise.all(Array.from({ length: CONC }, async () => {
 const pending = queue.map(idOf);
 if (resume) {
   // 再開した本・飛ばした本・終わっていない本を区別して残す（既存のファイルは上書きしない）
-  writeFileSync(join(outRoot, `resume-${Date.now()}.json`), JSON.stringify({ resumed_at: new Date().toISOString(), skipped, reopened, pending, stop }, null, 1));
+  writeFileSync(join(outRoot, `resume-${Date.now()}.json`), JSON.stringify({ resumed_at: new Date().toISOString(), skipped, reopened, pending, stop, stop_code: stopCode, budget_usd: budget }, null, 1));
 }
-// 1 回の起動の記録：流した本・残りの本・止まった理由（予算で止まった計測を採点の道具が「未完了」と照合するための根拠。#425）
-writeFileSync(join(outRoot, `run-${Date.now()}.json`), JSON.stringify({ finished_at: new Date().toISOString(), mode: resume ? "resume" : "fresh", executed, pending, stop }, null, 1));
+// 1 回の起動の記録：流した本・残りの本・止まった理由（文とコード。予算で止まった計測を採点の道具が「未完了」と照合するための根拠。#425）と、
+// この起動で有効だった計測全体の目安の額（budget_usd）・初回の条件の額（initial_budget_usd。条件のファイルは初回の値のまま上書きしない）・
+// 変えたかどうか（budget_changed）・済みの額（spent_usd）。完走した再開でも残すので、署名が同じでも管理の条件の変更履歴を読める
+writeFileSync(join(outRoot, `run-${Date.now()}.json`), JSON.stringify({ finished_at: new Date().toISOString(), mode: resume ? "resume" : "fresh", executed, pending, stop, stop_code: stopCode, budget_usd: budget, initial_budget_usd: initialBudget, budget_changed: initialBudget === null ? null : initialBudget !== budget, spent_usd: spent }, null, 1));
 console.log("done", stop ?? "", "spent", spent.toFixed(4));

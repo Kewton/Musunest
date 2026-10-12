@@ -195,6 +195,8 @@ test("再開で条件が一致すると、終わった本の費用を足して�
     assert.deepEqual(rr.skipped, ["P1-r1"]);
     assert.deepEqual(rr.reopened, ["P2-r1"]);
     assert.deepEqual(rr.pending, []);
+    assert.equal(rr.budget_usd, 15, "再開の記録にも、その起動で有効だった目安の額（既定 15）");
+    assert.equal(rr.stop_code, null);
   });
 });
 
@@ -289,10 +291,48 @@ test("生成に渡す文書か判定の口の構成が変わると条件が一�
     assert.notEqual(resumed2.status, 0);
     assert.match(resumed2.stderr, /条件/);
     assert.equal(spawnCount(log), 4);
+    // spec-engine の dist・契約・語彙の意味のそれぞれの変更も、署名に残るので再開を断る（変更は積み上がるが、新しい計測は毎回その時点の条件で始める）
+    let spawned = 4;
+    for (const [name, file] of [["spec-engine", "packages/spec-engine/dist/index.js"], ["contract", "packages/appspec-schema/contract/rules.md"], ["semantics", "packages/appspec-schema/docs/semantics.md"]]) {
+      const outN = join(base, `out-${name}`);
+      assert.equal(runAgent(repo, outN, args, { FAKE_SPAWN_LOG: log }).status, 0, name);
+      spawned += 2;
+      rmSync(join(outN, "P2-r1"), { recursive: true, force: true });
+      appendFileSync(join(repo, file), "\n");
+      const resumedN = runAgent(repo, outN, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
+      assert.notEqual(resumedN.status, 0, name);
+      assert.match(resumedN.stderr, /条件/, name);
+      assert.equal(spawnCount(log), spawned, name);
+    }
   });
 });
 
-test("採点の定義の変更は署名の外で、再開を妨げない（採点は生成のあとに全本へ同じ版を当て、採点の出力が条件と照合する）", async () => {
+test("v1 の条件のファイル（#401）の計測を、v2 の道具で再開することはできない（schema が署名に入る）", async () => {
+  await withRepo(async (base, repo) => {
+    const log = join(base, "spawn-v1.log");
+    const args = ["--only", "P1,P2", "--runs", "1", "--concurrency", "1"];
+    const out = join(base, "out-v1");
+    assert.equal(runAgent(repo, out, args, { FAKE_SPAWN_LOG: log }).status, 0);
+    rmSync(join(out, "P2-r1"), { recursive: true, force: true });
+    // v1 の形（#401）：spec_engine・prompt_documents・judge・scoring が無く、署名は全欄から取る
+    const v2 = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+    const { spec_engine: _se, prompt_documents: _pd, judge: _j, scoring: _s, started_at: _t, signature: _sig, ...rest } = v2;
+    const measured = { ...rest, schema: "musunest-factory/agent-accept-conditions/v1" };
+    writeFileSync(join(out, "conditions.json"), JSON.stringify({ ...measured, started_at: v2.started_at, signature: sha256(JSON.stringify(measured)) }, null, 1));
+    const resumed = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.notEqual(resumed.status, 0);
+    assert.match(resumed.stderr, /条件/);
+    assert.equal(spawnCount(log), 2);
+    // 採点の道具は v1 の条件のファイルをそのまま照合できる（score-agent.test.mjs の v1 の例と同じ）
+    const c = reconcile(out);
+    assert.equal(c.status, "incomplete");
+    assert.deepEqual(c.unexecuted, ["P2-r1"]);
+  });
+});
+
+test("採点の定義の変更は署名の外で、source が変わらない限り再開を妨げない（採点は生成のあとに全本へ同じ版を当て、採点の出力が条件と照合する）", async () => {
+  // 偽物のリポジトリは git の外（source.commit・source.dirty が null のまま）なので、source が変わらない場合の挙動だけを確かめる。
+  // 本物の checkout では source.commit・source.dirty が署名に残るので、clean を編集したり採点だけの commit を積んだりすれば再開は断られる
   await withRepo(async (base, repo) => {
     const log = join(base, "spawn-scoring.log");
     const args = ["--only", "P1,P2", "--runs", "1", "--concurrency", "1"];
@@ -323,6 +363,12 @@ test("予算で止まると、流した本・残りの本・止まった理由�
     assert.deepEqual(rec.executed, ["P1-r1"]);
     assert.deepEqual(rec.pending, ["P2-r1", "P3-r1"]);
     assert.match(rec.stop, /予算/);
+    assert.equal(rec.stop_code, "budget");
+    // その起動で有効だった計測全体の目安の額と、初回の条件との差
+    assert.equal(rec.budget_usd, 0.25);
+    assert.equal(rec.initial_budget_usd, 0.25);
+    assert.equal(rec.budget_changed, false);
+    assert.equal(rec.spent_usd, 0.25);
     const c = reconcile(out);
     assert.equal(c.status, "incomplete");
     assert.equal(c.label, "未完了");
@@ -336,11 +382,37 @@ test("予算で止まると、流した本・残りの本・止まった理由�
     const resumed = runAgent(repo, out, ["--only", "P1,P2,P3", "--runs", "1", "--concurrency", "1", "--budget-usd", "1", "--resume"], { FAKE_SPAWN_LOG: log, FAKE_COST: "0.25" });
     assert.equal(resumed.status, 0, resumed.stderr);
     assert.deepEqual(spawnLines(log), ["P1-r1", "P2-r1", "P3-r1"]);
-    assert.equal(readdirSync(out).filter((n) => /^run-\d+\.json$/.test(n)).length, 2);
+    const records2 = readdirSync(out).filter((n) => /^run-\d+\.json$/.test(n)).sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]));
+    assert.equal(records2.length, 2);
     const c2 = reconcile(out);
     assert.equal(c2.status, "complete");
     assert.equal(c2.label, "完了");
     assert.deepEqual(c2.unexecuted, []);
     assert.equal(c2.latest_record.stop, null);
+    assert.equal(c2.latest_record.stop_code, null);
+    // 完走した再開でも、変更後の目安の額が起動の記録に残る（条件のファイルは初回の値のまま。署名は管理の条件の一致を保証しない）
+    const rec2 = JSON.parse(readFileSync(join(out, records2[1]), "utf8"));
+    assert.equal(rec2.mode, "resume");
+    assert.equal(rec2.stop, null);
+    assert.equal(rec2.stop_code, null);
+    assert.equal(rec2.budget_usd, 1);
+    assert.equal(rec2.initial_budget_usd, 0.25);
+    assert.equal(rec2.budget_changed, true);
+    assert.equal(rec2.spent_usd, 0.75);
+    assert.deepEqual(rec2.executed, ["P2-r1", "P3-r1"]);
+    assert.equal(c2.latest_record.budget_usd, 1);
+    const cond = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+    assert.equal(cond.params.budget_usd, 0.25, "条件のファイルは初回の値のまま上書きしない");
+    // 同じ額で再開した（変えていない）起動は budget_changed が false
+    const out2 = join(base, "out-budget-same");
+    assert.equal(runAgent(repo, out2, ["--only", "P1,P2", "--runs", "1", "--concurrency", "1", "--budget-usd", "0.25"], { FAKE_SPAWN_LOG: log, FAKE_COST: "0.25" }).status, 0);
+    assert.equal(runAgent(repo, out2, ["--only", "P1,P2", "--runs", "1", "--concurrency", "1", "--budget-usd", "0.25", "--resume"], { FAKE_SPAWN_LOG: log, FAKE_COST: "0.25" }).status, 0);
+    const last = readdirSync(out2).filter((n) => /^run-\d+\.json$/.test(n)).sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0])).at(-1);
+    const rec3 = JSON.parse(readFileSync(join(out2, last), "utf8"));
+    assert.equal(rec3.mode, "resume");
+    assert.equal(rec3.budget_changed, false);
+    assert.equal(rec3.budget_usd, 0.25);
+    assert.equal(rec3.stop_code, "budget", "済みの額を足した時点で目安に達する（上げなければ流し切れない）");
+    assert.deepEqual(rec3.executed, []);
   });
 });

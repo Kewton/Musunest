@@ -4,18 +4,21 @@
 // 実行: node --test "workspace/mvp/m1/agent/eval/agent-accept/*.test.mjs"（先に pnpm build で spec-engine の dist を作る）
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { SCORING_FILES, anonymize, reconcile, scoringFingerprint } from "./score-agent.mjs";
+import { CONDITIONS_SCHEMAS, SCORING_FILES, anonymize, fingerprintDir, reconcile, scoringFingerprint, sha256, validatePlanned } from "./score-agent.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const scoreFile = join(here, "score-agent.mjs");
 const ev = resolve(here, "..");
 const repo = resolve(ev, "../../../../..");
 assert.ok(existsSync(join(repo, "packages/spec-engine/dist/index.js")), "spec-engine の dist が無い（pnpm build を先に）");
+const [V1, V2] = CONDITIONS_SCHEMAS;
+const SIG = sha256("sig");
+const HEX64 = /^[0-9a-f]{64}$/;
 
 // 固定の宣言（cases/ の正例・負例。期待の判定は cases.json）
 const CASES = join(ev, "cases");
@@ -31,24 +34,39 @@ const defOf = (s) => JSON.parse(readFileSync(join(ev, "subjects", `${s}.json`), 
 const totalOf = (s) => defOf(s).structures[0].checks.length;
 const reqsOf = (s) => defOf(s).structures.flatMap((st) => st.checks.map((c) => c.req));
 
-const summaryLine = (generated) => JSON.stringify({ exit: generated ? 0 : 1, wall_s: 120, summary: { schema_version: "commandagent.headless-summary/v1", verdict: generated ? "partial" : "none", stop_reason: generated ? "completed" : "deadline", provider_cost_usd: 0.05, failure: null }, plan_cost: null, stderr_tail: "", resumed: false });
-/** 本を 1 つ置く。spec が無ければ生成失敗（宣言が無い）。summary が false なら要約の無い途中の本 */
-function addRun(out, id, { spec = null, unwritable = null, summary = true } = {}) {
+const summaryLine = (generated, verdict) => JSON.stringify({ exit: generated ? 0 : 1, wall_s: 120, summary: { schema_version: "commandagent.headless-summary/v1", verdict: verdict ?? (generated ? "partial" : "none"), stop_reason: generated ? "completed" : "deadline", provider_cost_usd: 0.05, failure: null }, plan_cost: null, stderr_tail: "", resumed: false });
+/** 本を 1 つ置く。spec が無ければ生成失敗（宣言が無い）。summary が false なら要約の無い途中の本。verdict で工場の要約の判定の値を差し替える */
+function addRun(out, id, { spec = null, unwritable = null, summary = true, verdict } = {}) {
   const dir = join(out, id);
   mkdirSync(join(dir, "bundle/artifacts"), { recursive: true });
-  if (summary) { writeFileSync(join(dir, "summary.line.json"), summaryLine(spec !== null)); writeFileSync(join(dir, "stdout.log"), ""); writeFileSync(join(dir, "stderr.log"), ""); }
+  if (summary) { writeFileSync(join(dir, "summary.line.json"), summaryLine(spec !== null, verdict)); writeFileSync(join(dir, "stdout.log"), ""); writeFileSync(join(dir, "stderr.log"), ""); }
   if (spec !== null) writeFileSync(join(dir, "bundle/artifacts/app.spec.yaml"), spec);
   if (unwritable !== null) writeFileSync(join(dir, "bundle/artifacts/unwritable.json"), JSON.stringify(unwritable));
 }
-const conditions = (out, ids, extra = {}) => writeFileSync(join(out, "conditions.json"), JSON.stringify({ schema: "musunest-factory/agent-accept-conditions/v2", measurement_id: "t", child_args: ids.map((id) => ({ id, argv: [] })), signature: "sig", ...extra }));
-function scoreRun(out, extra = []) {
-  const r = spawnSync(process.execPath, [scoreFile, repo, out, ...extra], { encoding: "utf8" });
+/** 予定の一覧と整合する params（patterns は ID の出現順・runs は最大の回）を持つ v2 の条件のファイル */
+const paramsFor = (ids) => ({ patterns: [...new Set(ids.map((id) => id.split("-")[0]))], runs: Math.max(0, ...ids.map((id) => Number(id.split("-r")[1]))) });
+const conditions = (out, ids, extra = {}) => writeFileSync(join(out, "conditions.json"), JSON.stringify({ schema: V2, measurement_id: "t", params: paramsFor(ids), child_args: ids.map((id) => ({ id, argv: [] })), signature: SIG, ...extra }));
+const rawConditions = (out, obj) => { mkdirSync(out, { recursive: true }); writeFileSync(join(out, "conditions.json"), typeof obj === "string" ? obj : JSON.stringify(obj)); };
+function scoreRun(out, extra = [], repoArg = repo) {
+  const r = spawnSync(process.execPath, [scoreFile, repoArg, out, ...extra], { encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
   return r;
 }
 const readScore = (out, name = "score.json") => JSON.parse(readFileSync(join(out, name), "utf8"));
 const rowOf = (full, id) => full.rows.find((r) => r.run === id);
+const fileOf = (fp, path) => fp.files.find((f) => f.path === path);
 const startsWith = (s, head) => assert.ok(s.startsWith(head), `${JSON.stringify(s)} は ${head} で始まらない`);
+/** 別の checkout を装う偽物のリポジトリ：採点の定義とエンジンはこの checkout の写し。集計のコードは旧い版（1 行足す）か同じ版。spec-engine の dist は実体へのリンク */
+function makeCheckout(base, name, { sameAggregator = false } = {}) {
+  const fake = join(base, name), fakeEv = join(fake, "workspace/mvp/m1/agent/eval");
+  mkdirSync(join(fakeEv, "agent-accept"), { recursive: true });
+  for (const f of SCORING_FILES) cpSync(join(ev, f), join(fakeEv, f));
+  cpSync(join(ev, "subjects"), join(fakeEv, "subjects"), { recursive: true });
+  if (!sameAggregator) appendFileSync(join(fakeEv, "agent-accept/score-agent.mjs"), "\n// 旧い採点器\n");
+  mkdirSync(join(fake, "packages/spec-engine"), { recursive: true });
+  symlinkSync(join(repo, "packages/spec-engine/dist"), join(fake, "packages/spec-engine/dist"), "dir");
+  return { repo: fake, ev: fakeEv };
+}
 
 async function withOut(fn) {
   const base = mkdtempSync(join(tmpdir(), "score-agent-test-"));
@@ -122,7 +140,7 @@ test("予定した本に未実行・途中の本が残る計測は「未完了�
     addRun(out, "P1-r2", { spec: PASS_A });
     conditions(out, ["P1-r1", "P1-r2", "P1-r3", "P1-r4"]);
     addRun(out, "P1-r4", { summary: false });
-    writeFileSync(join(out, "run-1000.json"), JSON.stringify({ finished_at: "t", mode: "fresh", executed: ["P1-r1", "P1-r2"], pending: ["P1-r3"], stop: "予算 0.5 USD に達した" }));
+    writeFileSync(join(out, "run-1000.json"), JSON.stringify({ finished_at: "t", mode: "fresh", executed: ["P1-r1", "P1-r2"], pending: ["P1-r3"], stop: "予算 0.5 USD に達した", stop_code: "budget", budget_usd: 0.5 }));
     const r = scoreRun(out);
     const c = readScore(out).completion;
     assert.equal(c.status, "incomplete");
@@ -133,7 +151,7 @@ test("予定した本に未実行・途中の本が残る計測は「未完了�
     assert.deepEqual(c.unexecuted, ["P1-r3"]);
     assert.deepEqual(c.incomplete, ["P1-r4"]);
     assert.deepEqual(c.extra, []);
-    assert.deepEqual(c.latest_record, { file: "run-1000.json", stop: "予算 0.5 USD に達した", pending: ["P1-r3"] });
+    assert.deepEqual(c.latest_record, { file: "run-1000.json", stop: "予算 0.5 USD に達した", stop_code: "budget", pending: ["P1-r3"], budget_usd: 0.5 });
     assert.match(r.stdout, /照合: 未完了（予定 4・実行 2・未実行 1・途中 1・止まった理由: 予算 0\.5 USD に達した）/);
     // 流し切った計測は完了。予定に無い本があれば未完了（予定外）
     const done = join(base, "done");
@@ -150,16 +168,78 @@ test("予定した本に未実行・途中の本が残る計測は「未完了�
     // 条件のファイルの無い出力先（#401 より前）は照合できない
     const old = join(base, "old");
     addRun(old, "P1-r1", { spec: PASS_A });
-    scoreRun(old);
+    const r3 = scoreRun(old);
     const c3 = readScore(old).completion;
     assert.equal(c3.status, "unverified");
     assert.equal(c3.label, "未照合");
+    assert.deepEqual(c3.reasons, ["条件のファイルが無い"]);
     assert.equal(c3.planned, null);
     assert.equal(c3.executed, 1);
+    assert.match(r3.stdout, /照合: 未照合（予定 -・実行 1・未実行 -・途中 0・理由: 条件のファイルが無い）/);
   });
 });
 
-test("採点の定義か集計のコードを 1 文字変えると指紋が変わり、採点の出力は条件のファイルの指紋と照合する", async () => {
+test("予定を検証できない条件のファイルは「完了」に丸めず「未照合」と理由を出す（欠落・重複・予定の短縮・未知の schema・params との不一致・0 本・読めない）", async () => {
+  await withOut(async (base) => {
+    const cases = [
+      ["no-child-args", { schema: V2, params: { patterns: ["P1"], runs: 2 } }, "予定の一覧（child_args）が無いか配列でない"],
+      ["duplicate", { schema: V2, child_args: [{ id: "P1-r1" }, { id: "P1-r1" }], params: { patterns: ["P1"], runs: 2 } }, "予定の ID が重複"],
+      ["short", { schema: V2, child_args: [{ id: "P1-r1" }], params: { patterns: ["P1"], runs: 2 } }, "予定の一覧が params.patterns × runs と一致しない"],
+      ["other-pattern", { schema: V2, child_args: [{ id: "P1-r1" }, { id: "P2-r1" }], params: { patterns: ["P1"], runs: 2 } }, "予定の一覧が params.patterns × runs と一致しない"],
+      ["unknown-schema", { schema: "MARK_SCHEMA/v9", child_args: [{ id: "P1-r1" }], params: { patterns: ["P1"], runs: 1 } }, "schema が未知"],
+      ["no-params", { schema: V2, child_args: [{ id: "P1-r1" }] }, "params.patterns・params.runs が無いか形が違う"],
+      ["bad-id", { schema: V2, child_args: [{ id: 1 }], params: { patterns: ["P1"], runs: 1 } }, "予定の ID が文字列でないか P<n>-r<n> の形でない"],
+      ["empty", { schema: V2, child_args: [], params: { patterns: [], runs: 1 } }, "予定が 0 本"],
+      ["unreadable", "{ これは JSON でない", "条件のファイルを読めない"],
+    ];
+    for (const [name, cond, reason] of cases) {
+      const out = join(base, name);
+      addRun(out, "P1-r1", { spec: PASS_A });
+      rawConditions(out, cond);
+      const r = scoreRun(out);
+      const c = readScore(out).completion;
+      assert.equal(c.status, "unverified", name);
+      assert.equal(c.label, "未照合", name);
+      assert.ok(c.reasons.includes(reason), `${name}: ${JSON.stringify(c.reasons)}`);
+      assert.ok(!c.reasons.join("").includes("MARK_"), `${name}: 理由に入力の値が出ている`);
+      assert.equal(c.planned, null, name);
+      assert.equal(c.unexecuted, null, name);
+      assert.equal(c.extra, null, name);
+      assert.equal(c.executed, 1, name);
+      assert.match(r.stdout, /照合: 未照合（予定 -・実行 1・未実行 -・途中 0・理由: /);
+      // 匿名の出し方でも未照合のまま（完了に丸めない）
+      scoreRun(out, ["--anonymous"]);
+      assert.equal(readScore(out, "score.anonymous.json").completion.status, "unverified", name);
+    }
+    // 検証だけを直接：正しい v1・v2 は空、params.runs が文字列でも落ちる
+    assert.deepEqual(validatePlanned({ schema: V2, child_args: [{ id: "P1-r1" }, { id: "P1-r2" }], params: { patterns: ["P1"], runs: 2 } }), []);
+    assert.deepEqual(validatePlanned({ schema: V1, child_args: [{ id: "P3-r1" }], params: { patterns: ["P3"], runs: 1 } }), []);
+    assert.ok(validatePlanned({ schema: V2, child_args: [{ id: "P1-r1" }], params: { patterns: ["P1"], runs: "1" } }).length > 0);
+  });
+});
+
+test("v1 の条件のファイル（#401）の計測はそのまま照合でき、採点と spec-engine の指紋は条件に無いので null", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    addRun(out, "P1-r1", { spec: PASS_A });
+    addRun(out, "P1-r2", { spec: FAIL_A });
+    rawConditions(out, { schema: V1, measurement_id: "t", params: { effort: "high", patterns: ["P1"], runs: 2, budget_usd: 15 }, child_args: [{ id: "P1-r1", argv: [] }, { id: "P1-r2", argv: [] }], signature: SIG });
+    scoreRun(out);
+    const full = readScore(out);
+    assert.equal(full.completion.status, "complete");
+    assert.equal(full.completion.planned, 2);
+    assert.equal(full.fingerprints.conditions.schema, V1);
+    assert.equal(full.fingerprints.scoring_matches_conditions, null);
+    assert.equal(full.fingerprints.spec_engine_matches_conditions, null);
+    startsWith(full.fulfillment.v2.writable, `${2 * totalOf("A") - 1}/${2 * totalOf("A")}（`);
+    scoreRun(out, ["--anonymous"]);
+    const a = readScore(out, "score.anonymous.json");
+    assert.equal(a.fingerprints.conditions.schema, V1);
+    assert.equal(a.completion.status, "complete");
+  });
+});
+
+test("採点の定義か集計のコードを 1 文字変えると指紋が変わり、採点の出力は条件のファイルの指紋（採点・spec-engine）と照合する", async () => {
   await withOut(async (base) => {
     const copy = join(base, "eval");
     mkdirSync(join(copy, "agent-accept"), { recursive: true });
@@ -179,6 +259,8 @@ test("採点の定義か集計のコードを 1 文字変えると指紋が変�
     assert.deepEqual(scoringFingerprint(copy).missing, ["rubric-v5.mjs"]);
     // 採点の出力：条件のファイルの指紋と一致／不一致／無い
     const mine = scoringFingerprint(ev).fingerprint;
+    const seMine = fingerprintDir(join(repo, "packages/spec-engine/dist")).fingerprint;
+    assert.match(seMine, HEX64);
     for (const [name, recorded, expected] of [["same", mine, true], ["diff", defChanged.fingerprint, false], ["none", undefined, null]]) {
       const out = join(base, name);
       addRun(out, "P1-r1", { spec: PASS_A });
@@ -187,10 +269,60 @@ test("採点の定義か集計のコードを 1 文字変えると指紋が変�
       const fp = readScore(out).fingerprints;
       assert.equal(fp.scoring.fingerprint, mine, name);
       assert.equal(fp.scoring.dir, "workspace/mvp/m1/agent/eval");
+      assert.deepEqual(fp.scoring.aggregator, { path: "workspace/mvp/m1/agent/eval/agent-accept/score-agent.mjs", sha256: sha256(readFileSync(scoreFile)) }, "集計のコードは実行中のファイル");
       assert.equal(fp.scoring_matches_conditions, expected, name);
-      assert.match(fp.spec_engine.fingerprint, /^[0-9a-f]{64}$/);
+      assert.equal(fp.spec_engine.fingerprint, seMine);
       assert.equal(fp.spec_engine_matches_conditions, null, "条件のファイルに spec-engine の指紋が無い");
     }
+    // spec-engine の dist の指紋：条件のファイルの値と一致（true）・不一致（false）
+    for (const [name, recorded, expected] of [["se-same", seMine, true], ["se-diff", sha256("other dist"), false]]) {
+      const out = join(base, name);
+      addRun(out, "P1-r1", { spec: PASS_A });
+      conditions(out, ["P1-r1"], { scoring: { fingerprint: mine }, spec_engine: { fingerprint: recorded } });
+      scoreRun(out);
+      const fp = readScore(out).fingerprints;
+      assert.equal(fp.spec_engine_matches_conditions, expected, name);
+      assert.equal(fp.scoring_matches_conditions, true, name);
+      assert.equal(fp.conditions.spec_engine, recorded);
+    }
+  });
+});
+
+test("別の checkout の旧い採点器を <repo> に渡しても、集計のコードの指紋は実行中のファイルから取り、定義とエンジンは読み込んだ先から取る", async () => {
+  await withOut(async (base) => {
+    const old = makeCheckout(base, "old-checkout");
+    // 旧い checkout で計測したときに条件のファイルへ記録された値（旧い採点器の指紋）
+    const recorded = scoringFingerprint(old.ev);
+    const runningSha = sha256(readFileSync(scoreFile));
+    assert.notEqual(fileOf(recorded, "agent-accept/score-agent.mjs").sha256, runningSha, "偽物の checkout の採点器は旧い版");
+    const out = join(base, "out");
+    addRun(out, "P1-r1", { spec: PASS_A });
+    addRun(out, "P1-r2", { spec: STATIC_NG });
+    conditions(out, ["P1-r1", "P1-r2"], { scoring: { fingerprint: recorded.fingerprint } });
+    scoreRun(out, [], old.repo);
+    const full = readScore(out);
+    const fp = full.fingerprints;
+    assert.equal(fp.scoring_matches_conditions, false, "旧い採点器の指紋を一致と出さない");
+    assert.notEqual(fp.scoring.fingerprint, recorded.fingerprint);
+    assert.equal(fp.scoring.fingerprint, scoringFingerprint(old.ev, scoreFile).fingerprint, "定義とエンジンは <repo>、集計は実行中のファイル");
+    assert.equal(fileOf(fp.scoring, "agent-accept/score-agent.mjs").sha256, runningSha);
+    assert.equal(fp.scoring.aggregator.sha256, runningSha);
+    assert.ok(fp.scoring.aggregator.path.endsWith("agent-accept/score-agent.mjs"), fp.scoring.aggregator.path);
+    assert.notEqual(fp.scoring.aggregator.path, "workspace/mvp/m1/agent/eval/agent-accept/score-agent.mjs", "別の checkout なので <repo> の中のパスにならない");
+    for (const f of ["engine.mjs", "score-claims.mjs", "rubric-v5.mjs", "subjects/A.json"]) assert.equal(fileOf(fp.scoring, f).sha256, fileOf(recorded, f).sha256, f);
+    assert.equal(fp.scoring.dir, "workspace/mvp/m1/agent/eval");
+    assert.equal(fp.spec_engine.dist_dir, "packages/spec-engine/dist");
+    assert.equal(fp.spec_engine.fingerprint, fingerprintDir(join(repo, "packages/spec-engine/dist")).fingerprint, "リンク先の dist と同じ指紋");
+    // 採点そのものは <repo> の定義とエンジンで通る（v2 の分母はこの採点器のもの）
+    assert.equal(rowOf(full, "P1-r1").verdict, "PASS");
+    assert.deepEqual(rowOf(full, "P1-r2").fulfillment_v2, { fulfilled: 0, total: totalOf("A"), total_from: "definition:main" });
+    // 同じ版の採点器を持つ checkout なら一致する
+    const same = makeCheckout(base, "same-checkout", { sameAggregator: true });
+    const out2 = join(base, "out2");
+    addRun(out2, "P1-r1", { spec: PASS_A });
+    conditions(out2, ["P1-r1"], { scoring: { fingerprint: scoringFingerprint(same.ev).fingerprint } });
+    scoreRun(out2, [], same.repo);
+    assert.equal(readScore(out2).fingerprints.scoring_matches_conditions, true);
   });
 });
 
@@ -201,7 +333,7 @@ test("匿名の出し方は、行ごとの失敗の鍵・要件の文・題材 I
     addRun(out, "P1-r2", { spec: FAIL_A });
     addRun(out, "P1-r3", { spec: NOROLE_A });
     addRun(out, "P7-r1", { spec: PASS_D, unwritable: CLAIM_D });
-    conditions(out, ["P1-r1", "P1-r2", "P1-r3", "P7-r1", "P7-r2"]);
+    conditions(out, ["P1-r1", "P1-r2", "P1-r3", "P7-r1", "P7-r2", "P7-r3"]);
     const r = scoreRun(out, ["--label", "t", "--anonymous"]);
     assert.equal(existsSync(join(out, "score-t.json")), false, "行つきのファイルは書かない");
     const text = readFileSync(join(out, "score-t.anonymous.json"), "utf8");
@@ -210,22 +342,64 @@ test("匿名の出し方は、行ごとの失敗の鍵・要件の文・題材 I
     assert.equal(a.runs, 4);
     assert.equal("rows" in a, false);
     assert.equal("bySubject" in a, false);
-    const forbidden = ["P1-r1", "P1-r2", "P1-r3", "P7-r1", "P7-r2", "役割が見つかる", ...reqsOf("A"), ...reqsOf("D"), ...CLAIM_D.unwritable.flatMap((u) => [u.text, ...u.unwritable])];
+    const forbidden = ["P1-r1", "P1-r2", "P1-r3", "P7-r1", "P7-r2", "P7-r3", "役割が見つかる", ...reqsOf("A"), ...reqsOf("D"), ...CLAIM_D.unwritable.flatMap((u) => [u.text, ...u.unwritable])];
     for (const word of forbidden) { assert.ok(!text.includes(word), `ファイルに ${word}`); assert.ok(!r.stdout.includes(word), `標準出力に ${word}`); }
     const keys = []; const walk = (v) => { if (v && typeof v === "object" && !Array.isArray(v)) for (const [k, x] of Object.entries(v)) { keys.push(k); walk(x); } };
     walk(a);
     for (const s of ["A", "B", "C", "D", "E"]) assert.ok(!keys.includes(s), `題材 ID ${s} が鍵に出ている`);
     startsWith(a.metrics.generated, "4/4（");
     startsWith(a.metrics.spec_pass_writable, "1/3（");
+    assert.deepEqual(a.metrics.factory_verdicts, { full: 0, partial: 4, none: 0, unknown: 0 });
     startsWith(a.fulfillment.v2.all, `${2 * totalOf("A") - 1 + totalOf("D")}/${3 * totalOf("A") + totalOf("D")}（`);
-    assert.deepEqual(a.completion, { status: "incomplete", label: "未完了", planned: 5, executed: 4, unexecuted: 1, incomplete: 0, extra: 0, stop: null });
-    assert.equal(typeof a.fingerprints.scoring, "string");
-    assert.equal(a.fingerprints.conditions.signature, "sig");
+    assert.deepEqual(a.completion, { status: "incomplete", label: "未完了", planned: 6, executed: 4, unexecuted: 2, incomplete: 0, extra: 0, stop_code: null });
+    assert.match(a.fingerprints.scoring, HEX64);
+    assert.match(a.fingerprints.spec_engine, HEX64);
+    assert.deepEqual(a.fingerprints.conditions, { schema: V2, signature: SIG, factory: null, spec_engine: null, scoring: null, judge: null });
     assert.deepEqual(JSON.parse(r.stdout), a, "標準出力も匿名の集計そのもの");
     // 既定の出し方は今のまま：行つきのファイルを書き、行を標準出力に出す
     const full = scoreRun(out, ["--label", "t"]);
     assert.equal(readScore(out, "score-t.json").rows.length, 4);
     assert.match(full.stdout, /P1-r2\tpartial\tFAIL\t/);
     assert.deepEqual(anonymize(readScore(out, "score-t.json")), a);
+  });
+});
+
+test("匿名の出し方は、判定の値・止まった理由・条件のファイルの署名と指紋と schema と判定の口の構成に入った自由な文字列を通さない", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    addRun(out, "P1-r1", { spec: PASS_A, verdict: "MARK_VERDICT" });
+    addRun(out, "P1-r2", { spec: FAIL_A });
+    conditions(out, ["P1-r1", "P1-r2"], { measurement_id: "MARK_ID", signature: "MARK_SIG", factory: { fingerprint: "MARK_FACTORY" }, spec_engine: { fingerprint: "MARK_SE" }, scoring: { fingerprint: "MARK_SCORING" }, judge: { configuration: "MARK_JUDGE", jev_key_env: "MARK_ENV" } });
+    writeFileSync(join(out, "run-1000.json"), JSON.stringify({ finished_at: "t", mode: "fresh", executed: ["P1-r1", "P1-r2"], pending: [], stop: "MARK_STOP", budget_usd: 1 }));
+    const r = scoreRun(out, ["--anonymous"]);
+    const text = readFileSync(join(out, "score.anonymous.json"), "utf8");
+    assert.ok(!text.includes("MARK_"), `ファイルに目印が残る: ${text}`);
+    assert.ok(!r.stdout.includes("MARK_"), "標準出力に目印が残る");
+    const a = JSON.parse(text);
+    assert.deepEqual(a.metrics.factory_verdicts, { full: 0, partial: 1, none: 0, unknown: 1 }, "既知でない判定の値は unknown にまとめる");
+    assert.deepEqual(Object.keys(a.metrics), ["generated", "final_static", "spec_pass_writable", "missed_partial", "fulfillment_partial", "spec_pass_partial", "false_claim_runs", "within_time_cost", "cost_total_usd", "factory_verdicts"]);
+    assert.deepEqual(a.completion, { status: "complete", label: "完了", planned: 2, executed: 2, unexecuted: 0, incomplete: 0, extra: 0, stop_code: "other" });
+    assert.deepEqual(a.fingerprints.conditions, { schema: V2, signature: null, factory: null, spec_engine: null, scoring: null, judge: "unknown" }, "ハッシュの形でない指紋は null、既知でない構成は unknown");
+    assert.equal(a.fingerprints.scoring_matches_conditions, false);
+    assert.equal(a.fingerprints.spec_engine_matches_conditions, false);
+    // 行つきの出力（匿名でない）には入力の値がそのまま残る。止まった理由のコードと有効だった目安の額も読める
+    scoreRun(out);
+    const full = readScore(out);
+    assert.equal(rowOf(full, "P1-r1").factory_verdict, "MARK_VERDICT");
+    assert.deepEqual(full.completion.latest_record, { file: "run-1000.json", stop: "MARK_STOP", stop_code: "other", pending: [], budget_usd: 1 });
+    assert.equal(full.fingerprints.conditions.signature, "MARK_SIG");
+    // 予算で止まった記録はコード budget（stop_code の無い旧い記録でも文から読む）。目安の額の無い記録は null
+    writeFileSync(join(out, "run-2000.json"), JSON.stringify({ stop: "予算 1 USD に達した", pending: [] }));
+    assert.deepEqual(reconcile(out).latest_record, { file: "run-2000.json", stop: "予算 1 USD に達した", stop_code: "budget", pending: [], budget_usd: null });
+    // 未知の schema は未照合のまま匿名でも unknown（値は出ない）
+    const out2 = join(base, "out2");
+    addRun(out2, "P1-r1", { spec: PASS_A });
+    rawConditions(out2, { schema: "MARK_SCHEMA", child_args: [{ id: "P1-r1" }], params: { patterns: ["P1"], runs: 1 } });
+    const r2 = scoreRun(out2, ["--anonymous"]);
+    assert.ok(!r2.stdout.includes("MARK_"));
+    const a2 = JSON.parse(r2.stdout);
+    assert.equal(a2.completion.status, "unverified");
+    assert.equal(a2.completion.label, "未照合");
+    assert.equal(a2.fingerprints.conditions.schema, "unknown");
   });
 });
