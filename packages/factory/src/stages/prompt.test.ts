@@ -17,7 +17,10 @@ import {
   isRecord,
   normalizeConstraintId,
   normalizeConstraintIds,
+  ruleDefinitionDefects,
+  ruleTexts,
   type PromptDocument,
+  type RuleDefinition,
   type ShapeCheck,
   type StructuredPlan,
 } from "./prompt.js";
@@ -109,6 +112,36 @@ describe("規則とデータを分ける（02 §2.2）", () => {
       maxOutputTokens: 100,
     });
     expectNoAcceptanceMaterial([request.instructions, request.input, ...request.documents]);
+  });
+});
+
+// ── 規則の定義（id・text・why・since。Issue #431）────────────────────
+
+describe("規則の定義と、送信用の文の組み立て（Issue #431）", () => {
+  const DEFINITIONS: readonly RuleDefinition[] = [
+    { id: "R-x-01", text: "第一の文。", why: "第一の理由", since: "Issue #1" },
+    { id: "R-x-02", text: "第二の文。", why: "第二の理由", since: "Issue #2", modes: ["M-01"] },
+  ];
+
+  it("定義の並びから、送信用の文の並びを定義の順に作る", () => {
+    expect(ruleTexts(DEFINITIONS)).toEqual(["第一の文。", "第二の文。"]);
+    expect(ruleTexts([])).toEqual([]);
+  });
+
+  it("正例：ID の重複も、why・since の欠落も無ければ、不備を返さない", () => {
+    expect(ruleDefinitionDefects(DEFINITIONS)).toEqual([]);
+  });
+
+  it("負例：ID が重複していれば、不備を返す", () => {
+    const duplicated: readonly RuleDefinition[] = [...DEFINITIONS, { ...DEFINITIONS[0]!, text: "別の文。" }];
+    expect(ruleDefinitionDefects(duplicated).join("\n")).toContain("重複");
+  });
+
+  it("負例：why か since が空なら、不備を返す", () => {
+    const noWhy: readonly RuleDefinition[] = [{ id: "R-x-03", text: "文。", why: "  ", since: "Issue #3" }];
+    expect(ruleDefinitionDefects(noWhy).join("\n")).toContain("why");
+    const noSince: readonly RuleDefinition[] = [{ id: "R-x-04", text: "文。", why: "理由", since: "" }];
+    expect(ruleDefinitionDefects(noSince).join("\n")).toContain("since");
   });
 });
 

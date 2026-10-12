@@ -32,6 +32,50 @@ export const COMMON_RULES: readonly string[] = [
   "与えられた文書（契約・語彙の意味・語彙の台帳）に無い語彙・キー・関数を作らない。",
 ];
 
+/**
+ * 規則の定義（Issue #431）。段の規則を、送る文だけでなく、**ID・理由（why）・履歴（since）・対応する
+ * 失敗のモード（modes）**を持つ形でコードの台帳にする。**送る文は `text` から組み**、送信の振る舞いを
+ * 保つ。規則を変更する段から、定義の並びを唯一の出どころにする。
+ */
+export interface RuleDefinition {
+  /** 規則の ID（段ごとに一意。例 `R-corr-07`） */
+  readonly id: string;
+  /** 送信する規則の文。送る文の並びは、この `text` を定義の順に並べて作る */
+  readonly text: string;
+  /** その規則が要る理由（空にしない。分からなければ「出どころ不明」） */
+  readonly why: string;
+  /** いつからあるか（Issue 番号など。空にしない） */
+  readonly since: string;
+  /** 対応する失敗のモードの ID（任意。役割・安全の不変条件の規則では省いてよい） */
+  readonly modes?: readonly string[];
+}
+
+/**
+ * 定義の並びから、**送信用の文の並び**を作る（定義の順のまま。Issue #431）。段は、送る規則の並びを
+ * 手で持たず、定義の `text` から組む——文と定義が食い違わないようにする。
+ */
+export function ruleTexts(definitions: readonly RuleDefinition[]): readonly string[] {
+  return definitions.map((definition) => definition.text);
+}
+
+/**
+ * 定義の並びの**不備**を返す（Issue #431）。空なら不備なし：
+ *   - ID の重複
+ *   - why か since の欠落（空・空白だけ）
+ * 単体試験で、規則の定義の並びの不備をここで確かめる。
+ */
+export function ruleDefinitionDefects(definitions: readonly RuleDefinition[]): readonly string[] {
+  const defects: string[] = [];
+  const seen = new Set<string>();
+  for (const definition of definitions) {
+    if (seen.has(definition.id)) defects.push(`規則の ID ${definition.id} が重複している`);
+    seen.add(definition.id);
+    if (definition.why.trim() === "") defects.push(`規則 ${definition.id} の why が空である`);
+    if (definition.since.trim() === "") defects.push(`規則 ${definition.id} の since が空である`);
+  }
+  return defects;
+}
+
 /** 信頼する文書（契約・語彙の意味・語彙の台帳）。呼ぶ側が文字列で渡す（§2） */
 export interface PromptDocument {
   readonly name: string;

@@ -10,16 +10,29 @@
 import type { NormalizedAppSpec } from "@musunest/appspec-schema";
 import { normalizeSpec } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
-import type { CorrespondenceEntry, Declaration, RoleEntry, RoleNameMapping } from "../pipeline.js";
 import {
+  LEGACY_DESIGN_CONTRACT,
+  type CorrespondenceEntry,
+  type Declaration,
+  type RoleEntry,
+  type RoleNameMapping,
+} from "../pipeline.js";
+import {
+  CORRESPONDENCE_REDO_DEFINITION,
+  CORRESPONDENCE_REDO_RULE,
+  CORRESPONDENCE_RULE_DEFINITIONS,
+  CORRESPONDENCE_RULES,
   CORRESPONDENCE_SCHEMA_NAME,
+  CORRESPONDENCE_SETTLED_DEFINITION,
   CORRESPONDENCE_SETTLED_RULE,
   checkCorrespondence,
   checkCorrespondenceOutput,
   checkRoleMappings,
   runCorrespondence,
   type CorrespondenceInput,
+  type RequirementRoleOwnership,
 } from "./correspondence.js";
+import { ruleDefinitionDefects, ruleTexts } from "./prompt.js";
 import {
   INJECTED_INSTRUCTION,
   REQUIREMENT_LIST,
@@ -170,7 +183,7 @@ const withMapping = (
 ): readonly RoleNameMapping[] => [...base.filter((mapping) => mapping.roleId !== roleId), { roleId, name }];
 
 const missFor = (mappings: readonly RoleNameMapping[], roles: readonly RoleEntry[] = ROLES) =>
-  checkRoleMappings(APP, roles, TABLE, mappings);
+  checkRoleMappings(APP, roles, TABLE, mappings, { version: LEGACY_DESIGN_CONTRACT });
 
 describe("③ の提出した対応を、コードが独立に点検する（02 §1.2・Issue #308）", () => {
   it("実在して対応表の内側にある対応は、落ちにしない", () => {
@@ -420,7 +433,9 @@ const FIELD_MAPPINGS: readonly RoleNameMapping[] = [
 
 describe("「画面から辿れない」項目の落ちは、⑥ 直すに回し、要件 ID を入れる（02 §1.3.1・Issue #324）", () => {
   it("一覧の `show` に出ていない項目の落ちに、もとの要件 ID と、⑥ 直すの行き先を付ける", () => {
-    const misses = checkRoleMappings(FIELD_APP, FIELD_ROLES, FIELD_TABLE, FIELD_MAPPINGS);
+    const misses = checkRoleMappings(FIELD_APP, FIELD_ROLES, FIELD_TABLE, FIELD_MAPPINGS, {
+      version: LEGACY_DESIGN_CONTRACT,
+    });
     const miss = misses.find((candidate) => candidate.location?.name === "hidden");
     expect(miss).toBeDefined();
     // ③ のやり直しではなく、宣言の要素の欠落として ⑥ 直すへ回す（Issue #324）
@@ -431,18 +446,320 @@ describe("「画面から辿れない」項目の落ちは、⑥ 直すに回し
   });
 
   it("`show` に出ている項目は、落ちにしない", () => {
-    const misses = checkRoleMappings(FIELD_APP, FIELD_ROLES, FIELD_TABLE, FIELD_MAPPINGS);
+    const misses = checkRoleMappings(FIELD_APP, FIELD_ROLES, FIELD_TABLE, FIELD_MAPPINGS, {
+      version: LEGACY_DESIGN_CONTRACT,
+    });
     expect(misses.some((miss) => miss.location?.name === "shown")).toBe(false);
   });
 
   it("実在しない名前の落ちには、③ のやり直しの行き先を付ける", () => {
-    const misses = checkRoleMappings(FIELD_APP, FIELD_ROLES, FIELD_TABLE, [
-      { roleId: "record", name: "record" },
-      { roleId: "record.shown", name: "ghost" },
-      { roleId: "record.hidden", name: "hidden" },
-    ]);
+    const misses = checkRoleMappings(
+      FIELD_APP,
+      FIELD_ROLES,
+      FIELD_TABLE,
+      [
+        { roleId: "record", name: "record" },
+        { roleId: "record.shown", name: "ghost" },
+        { roleId: "record.hidden", name: "hidden" },
+      ],
+      { version: LEGACY_DESIGN_CONTRACT },
+    );
     const miss = misses.find((candidate) => candidate.location?.name === "ghost");
     expect(miss?.route).toBe("correspondence-defect");
+  });
+});
+
+// ── 要件ごとの所属を、⑤a が独立に点検する（新契約。Issue #431）────────────────
+
+/** 新契約の役割 ID の表（entity `record`・項目 `amount`・計算 `total`） */
+const PERMS_ROLES: readonly RoleEntry[] = [
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null },
+  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+];
+
+/** 3 つの役割すべての対応（名前は宣言に実在する） */
+const PERMS_MAPPINGS: readonly RoleNameMapping[] = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.amount", name: "amount" },
+  { roleId: "record.total", name: "total" },
+];
+
+/** R-1 が、名指しされない項目 `amount` を含めて 3 つの役割に所属する（新契約） */
+const PERMS_OWNERSHIP: readonly RequirementRoleOwnership[] = [
+  {
+    requirementId: "R-1",
+    ownership: [
+      { roleId: "record", basis: "dependency", reason: "行の所属として参照するため" },
+      { roleId: "record.amount", basis: "dependency", reason: "入力の行に保存する項目として参照するため" },
+      { roleId: "record.total", basis: "stated", reason: null },
+    ],
+  },
+];
+
+const permsCheck = (
+  entries: readonly CorrespondenceEntry[],
+  mappings: readonly RoleNameMapping[] = PERMS_MAPPINGS,
+  ownership: readonly RequirementRoleOwnership[] = PERMS_OWNERSHIP,
+  roles: readonly RoleEntry[] = PERMS_ROLES,
+) => checkRoleMappings(APP, roles, entries, mappings, { ownership });
+
+describe("要件ごとの所属を、⑤a が独立に点検する（新契約。Issue #431）", () => {
+  it("所属の場所がその要件の対応表の外にあり、宣言に実在するときは、要件 ID と場所つきで ⑤a のやり直しに回す", () => {
+    // R-1 の対応表は entity record と計算 total だけを挙げ、項目 amount を挙げていない
+    const table: readonly CorrespondenceEntry[] = [
+      {
+        requirementId: "R-1",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "computation", entity: "record", name: "total" },
+        ],
+      },
+    ];
+    const misses = permsCheck(table);
+    const miss = misses.find((candidate) => candidate.route === "correspondence-redo");
+    expect(miss).toBeDefined();
+    expect(miss?.requirementId).toBe("R-1");
+    expect(miss?.location).toEqual({ kind: "field", entity: "record", name: "amount" });
+  });
+
+  it("同じ例で、対応の名前が宣言に無ければ correspondence-defect になる", () => {
+    const table: readonly CorrespondenceEntry[] = [
+      {
+        requirementId: "R-1",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "computation", entity: "record", name: "total" },
+        ],
+      },
+    ];
+    const ghost = PERMS_MAPPINGS.map((mapping) =>
+      mapping.roleId === "record.amount" ? { roleId: "record.amount", name: "ghost" } : mapping,
+    );
+    const misses = permsCheck(table, ghost);
+    const miss = misses.find(
+      (candidate) => candidate.requirementId === "R-1" && candidate.location?.name === "ghost",
+    );
+    expect(miss?.route).toBe("correspondence-defect");
+  });
+
+  it("同じ操作を 2 要件が所属させ、対応表が片方にだけ載せた例では、もう片方の要件 ID で落ちる（表全体では通っていた）", () => {
+    const ownership: readonly RequirementRoleOwnership[] = [
+      {
+        requirementId: "R-1",
+        ownership: [
+          { roleId: "record", basis: "dependency", reason: "行の所属として参照するため" },
+          { roleId: "record.total", basis: "stated", reason: null },
+        ],
+      },
+      {
+        requirementId: "R-2",
+        ownership: [
+          { roleId: "record", basis: "dependency", reason: "行の所属として参照するため" },
+          // 同じ操作（計算 total）を R-2 も所属させている
+          { roleId: "record.total", basis: "dependency", reason: "同じ計算を共有するため" },
+        ],
+      },
+    ];
+    // 対応表は R-1 にだけ total を載せ、R-2 には載せていない（表全体では total が挙がっている＝通っていた）
+    const table: readonly CorrespondenceEntry[] = [
+      {
+        requirementId: "R-1",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "computation", entity: "record", name: "total" },
+        ],
+      },
+      { requirementId: "R-2", locations: [{ kind: "entity", entity: null, name: "record" }] },
+    ];
+    // 表の役割（record・record.total）は、どちらも誰かに所属している（入力の不備を作らない）
+    const roles: readonly RoleEntry[] = [
+      { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null },
+      { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null },
+    ];
+    const mappings: readonly RoleNameMapping[] = [
+      { roleId: "record", name: "record" },
+      { roleId: "record.total", name: "total" },
+    ];
+    const misses = permsCheck(table, mappings, ownership, roles);
+    const miss = misses.find(
+      (candidate) => candidate.route === "correspondence-redo" && candidate.location?.name === "total",
+    );
+    expect(miss?.requirementId).toBe("R-2");
+  });
+
+  it("表の役割の対応が提出されていなければ correspondence-defect で、要件 ID が空でない", () => {
+    const table: readonly CorrespondenceEntry[] = [
+      {
+        requirementId: "R-1",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "field", entity: "record", name: "amount" },
+          { kind: "computation", entity: "record", name: "total" },
+        ],
+      },
+    ];
+    const missing = PERMS_MAPPINGS.filter((mapping) => mapping.roleId !== "record.amount");
+    const misses = permsCheck(table, missing);
+    const miss = misses.find((candidate) => candidate.detail.includes("提出されていない"));
+    expect(miss?.route).toBe("correspondence-defect");
+    expect(miss?.requirementId).not.toBe("");
+  });
+
+  it("表の役割の対応が重複していれば correspondence-defect で、要件 ID が空でない", () => {
+    const table: readonly CorrespondenceEntry[] = [
+      {
+        requirementId: "R-1",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "field", entity: "record", name: "amount" },
+          { kind: "computation", entity: "record", name: "total" },
+        ],
+      },
+    ];
+    const duplicated = [...PERMS_MAPPINGS, { roleId: "record.total", name: "total" }];
+    const misses = permsCheck(table, duplicated);
+    const miss = misses.find((candidate) => candidate.detail.includes("重複"));
+    expect(miss?.route).toBe("correspondence-defect");
+    expect(miss?.requirementId).not.toBe("");
+  });
+});
+
+describe("⑤a の要求に、要件ごとの所属を別のデータで渡す（新契約。Issue #431）", () => {
+  const EXPECTED_SENTINEL = "EXPECTED_VALUE_SENTINEL";
+  const PLACEMENT_SENTINEL = "PLACEMENT_SENTINEL";
+  const NOTES_SENTINEL = "NOTES_SENTINEL";
+  const answer = {
+    entries: [{ requirementId: "R-1", locations: [{ kind: "computation", entity: "record", name: "total" }] }],
+  };
+
+  it("要件ごとの所属は別の <data name= で入り、期待の値・合否・placement・notes の目印は入らない", async () => {
+    const recording = createRecordingClient([structured(answer)]);
+    const input = {
+      source: SOURCE_TEXT,
+      list: REQUIREMENT_LIST,
+      declaration: DECLARATION,
+      app: APP,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      roles: PERMS_ROLES,
+      mappings: PERMS_MAPPINGS,
+      ownership: PERMS_OWNERSHIP,
+      // 期待の値・合否・設計の自由文に当たる余分な欄（点検役へ渡ってはならない）
+      expected: { kind: "ok", value: EXPECTED_SENTINEL },
+      testRun: { mismatches: [{ testId: EXPECTED_SENTINEL, detail: EXPECTED_SENTINEL }], unresolved: [] },
+      placement: [PLACEMENT_SENTINEL],
+      notes: [NOTES_SENTINEL],
+    } as unknown as CorrespondenceInput;
+    await runCorrespondence(input);
+
+    const request = recording.structured[0];
+    expect(request).toBeDefined();
+    if (request === undefined) return;
+    expect(request.input).toContain(`<data name="要件ごとの所属">`);
+    expect(request.input).toContain("record.amount");
+    const texts = [request.instructions, ...(request.rules ?? []), request.input, ...request.documents];
+    for (const text of texts) {
+      expect(text).not.toContain(EXPECTED_SENTINEL);
+      expect(text).not.toContain(PLACEMENT_SENTINEL);
+      expect(text).not.toContain(NOTES_SENTINEL);
+    }
+  });
+});
+
+describe("⑤a の規則：申告を独立に点検し、実在だけで足させない（Issue #431）", () => {
+  it("規則の文に「実在するので…挙げる」が無く、申告・独立に点検・実在だけで挙げない・追認の文がある", () => {
+    const rules = CORRESPONDENCE_RULES.join("\n");
+    expect(rules).not.toContain("実在するので、その要件を満たす場所として挙げる");
+    expect(rules).toContain("申告");
+    expect(rules).toContain("独立に点検");
+    expect(rules).toContain("実在するという理由だけで場所を挙げない");
+    expect(rules).toContain("追認");
+    // やり直しの規則にも、実在だけで挙げる文は無い
+    expect(CORRESPONDENCE_REDO_RULE).not.toContain("実在するので、その要件を満たす場所として挙げる");
+    for (const definition of [
+      ...CORRESPONDENCE_RULE_DEFINITIONS,
+      CORRESPONDENCE_REDO_DEFINITION,
+      CORRESPONDENCE_SETTLED_DEFINITION,
+    ]) {
+      expect(definition.text).not.toContain("実在するので、その要件を満たす場所として挙げる");
+    }
+  });
+
+  it("やり直しの要求のデータに、前回の落ちが要件 ID と場所つきで入る", async () => {
+    const recording = createRecordingClient([structured({ entries: [] })]);
+    await runCorrespondence({
+      source: SOURCE_TEXT,
+      list: REQUIREMENT_LIST,
+      declaration: DECLARATION,
+      app: APP,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      roles: PERMS_ROLES,
+      mappings: PERMS_MAPPINGS,
+      ownership: PERMS_OWNERSHIP,
+      previousMisses: [
+        { requirementId: "R-1", location: { kind: "field", entity: "record", name: "amount" }, detail: "要件 R-1 の対応表に無い" },
+      ],
+    });
+    const request = recording.structured[0];
+    expect(request?.input).toContain("前回の対応表の落ち");
+    expect(request?.input).toContain("R-1");
+    expect(request?.input).toContain("amount");
+    expect(request?.rules ?? []).toContain(CORRESPONDENCE_REDO_RULE);
+  });
+});
+
+describe("⑤a の規則の定義の整合（Issue #431）", () => {
+  const ALL_DEFINITIONS = [
+    ...CORRESPONDENCE_RULE_DEFINITIONS,
+    CORRESPONDENCE_REDO_DEFINITION,
+    CORRESPONDENCE_SETTLED_DEFINITION,
+  ];
+
+  it("配列は 9 件で、やり直し・確定した仕様と合わせて、ID の重複が無く why・since が空でない", () => {
+    expect(CORRESPONDENCE_RULE_DEFINITIONS).toHaveLength(9);
+    expect(ruleDefinitionDefects(ALL_DEFINITIONS)).toEqual([]);
+  });
+
+  it("送信用の配列と単独の文が、定義の text と順まで一致する", () => {
+    expect(CORRESPONDENCE_RULES).toEqual(ruleTexts(CORRESPONDENCE_RULE_DEFINITIONS));
+    expect(CORRESPONDENCE_REDO_RULE).toBe(CORRESPONDENCE_REDO_DEFINITION.text);
+    expect(CORRESPONDENCE_SETTLED_RULE).toBe(CORRESPONDENCE_SETTLED_DEFINITION.text);
+  });
+
+  it("要求の規則の文が、定義の text の結合と一致する（やり直しの規則を含む）", async () => {
+    const plain = createRecordingClient([structured({ entries: [] })]);
+    await runCorrespondence({
+      source: SOURCE_TEXT,
+      list: REQUIREMENT_LIST,
+      declaration: DECLARATION,
+      app: APP,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(plain.client, { maxAttempts: 1 }),
+      roles: PERMS_ROLES,
+      mappings: PERMS_MAPPINGS,
+      ownership: PERMS_OWNERSHIP,
+    });
+    expect(plain.structured[0]?.rules ?? []).toEqual(ruleTexts(CORRESPONDENCE_RULE_DEFINITIONS));
+
+    const redo = createRecordingClient([structured({ entries: [] })]);
+    await runCorrespondence({
+      source: SOURCE_TEXT,
+      list: REQUIREMENT_LIST,
+      declaration: DECLARATION,
+      app: APP,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(redo.client, { maxAttempts: 1 }),
+      roles: PERMS_ROLES,
+      mappings: PERMS_MAPPINGS,
+      ownership: PERMS_OWNERSHIP,
+      previousMisses: [{ requirementId: "R-1", detail: "対応表の外" }],
+    });
+    expect(redo.structured[0]?.rules ?? []).toEqual([
+      ...ruleTexts(CORRESPONDENCE_RULE_DEFINITIONS),
+      CORRESPONDENCE_REDO_DEFINITION.text,
+    ]);
   });
 });
 
@@ -452,6 +769,107 @@ describe("確定した仕様が正本で、一覧の文は補足である（§5�
   it("確定した仕様を渡したときの決まりの文に、正本と補足の旨がある", () => {
     expect(CORRESPONDENCE_SETTLED_RULE).toContain("正本");
     expect(CORRESPONDENCE_SETTLED_RULE).toContain("補足");
+  });
+});
+
+// ── 新契約で所属が欠けた入力は、照合なしの成功にしない（Issue #431・レビュー 1）──
+
+describe("新契約で所属が欠けた入力は、照合なしの成功にしない（Issue #431）", () => {
+  /** 全ての所属の場所が対応表の内側にある（所属さえあれば落ちにしない） */
+  const completeTable: readonly CorrespondenceEntry[] = [
+    {
+      requirementId: "R-1",
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "field", entity: "record", name: "amount" },
+        { kind: "computation", entity: "record", name: "total" },
+      ],
+    },
+  ];
+
+  it("所属を渡さなければ（版も省略）、要件ごとの照合を省略せず、入力の不備として断る", () => {
+    // 所属が無いと、要件ごとの照合は一度も走らず、表全体の内側の検査にも戻らない＝黙って通ってしまう
+    const misses = checkRoleMappings(APP, PERMS_ROLES, completeTable, PERMS_MAPPINGS);
+    expect(misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    expect(misses).not.toEqual([]);
+  });
+
+  it("所属が空でも、入力の不備として断る", () => {
+    const misses = checkRoleMappings(APP, PERMS_ROLES, completeTable, PERMS_MAPPINGS, { ownership: [] });
+    expect(misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+  });
+
+  it("所属が一部だけ欠け、その場所が対応表からも欠けていても、入力の不備として断る", () => {
+    // 所属から項目（record.amount）だけを省き、entity・計算の所属は残す。全体の集合は空ではないので
+    // 以前の門は通ってしまい、対応表からも項目を落とすと落ちを返さなかった（レビュー 1 の残り）
+    const partialOwnership: readonly RequirementRoleOwnership[] = [
+      {
+        requirementId: "R-1",
+        ownership: [
+          { roleId: "record", basis: "dependency", reason: "行の所属として参照するため" },
+          { roleId: "record.total", basis: "stated", reason: null },
+        ],
+      },
+    ];
+    const shortTable: readonly CorrespondenceEntry[] = [
+      {
+        requirementId: "R-1",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "computation", entity: "record", name: "total" },
+        ],
+      },
+    ];
+    const misses = checkRoleMappings(APP, PERMS_ROLES, shortTable, PERMS_MAPPINGS, {
+      ownership: partialOwnership,
+    });
+    expect(misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    // 一部だけの照合で通さない（要件ごとの照合は走らせない）
+    expect(misses.some((miss) => miss.route === "correspondence-redo")).toBe(false);
+  });
+
+  it("所属があり、対応表から所属の場所を落としていれば、黙って通らない（⑤a のやり直し／③ の不備）", () => {
+    const shortTable: readonly CorrespondenceEntry[] = [
+      {
+        requirementId: "R-1",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "computation", entity: "record", name: "total" },
+        ],
+      },
+    ];
+    const misses = checkRoleMappings(APP, PERMS_ROLES, shortTable, PERMS_MAPPINGS, {
+      ownership: PERMS_OWNERSHIP,
+    });
+    expect(misses.some((miss) => miss.route === "correspondence-redo")).toBe(true);
+  });
+});
+
+// ── 所属 entity の対応が無いときは、null の場所で実在と誤認しない（レビュー 2）──
+
+describe("所属 entity の対応が無いときは、null の場所で実在と誤認しない（Issue #431）", () => {
+  const roles: readonly RoleEntry[] = [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+  ];
+  // 計算の対応（record.total → total）は正しいが、所属 entity の対応（record）だけ欠けている
+  const mappings: readonly RoleNameMapping[] = [{ roleId: "record.total", name: "total" }];
+  const ownership: readonly RequirementRoleOwnership[] = [
+    {
+      requirementId: "R-1",
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "行の所属として参照するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
+    },
+  ];
+
+  it("所属 entity の mapping が引けない役割は、null の場所を組まず correspondence-redo を足さない", () => {
+    // 場所を未確定として扱い、実在（entity を問わない）と誤認しない。③ の不備は別に出す
+    const misses = checkRoleMappings(APP, roles, [entry("R-1", [])], mappings, { ownership });
+    expect(misses.some((miss) => miss.route === "correspondence-redo")).toBe(false);
+    // ③ の対応そのものの不備（entity の mapping 欠落）は落ちとして残る
+    expect(misses.some((miss) => miss.route === "correspondence-defect")).toBe(true);
   });
 });
 

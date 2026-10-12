@@ -18,7 +18,15 @@ import { checkTestSuite, type TestSuite } from "../fixed-test.js";
 import { AGENT_LIMITS } from "../limits.js";
 import type { RecordedCall } from "../llm-fake.js";
 import type { LlmClient, LlmStructuredResponse, LlmToolRequest, LlmToolResponse } from "../llm.js";
-import type { CorrespondenceEntry, RequirementList, VersionChecks } from "../pipeline.js";
+import {
+  LEGACY_DESIGN_CONTRACT,
+  type CorrespondenceEntry,
+  type RequirementList,
+  type RoleEntry,
+  type RoleNameMapping,
+  type VersionChecks,
+} from "../pipeline.js";
+import type { RequirementRoleOwnership } from "./correspondence.js";
 import {
   INJECTED_INSTRUCTION,
   SAMPLE_DOCUMENTS,
@@ -586,9 +594,109 @@ function report(over: Partial<VersionReport> = {}): VersionReport {
     testRun: { mismatches: [], unresolved: [] },
     routes: [],
     defectMisses: [],
+    redoMisses: [],
     ...over,
   };
 }
+
+// ── 流し直しも、要件ごとの所属を点検する（Issue #431）──────────────────────
+
+describe("流し直しも、要件ごとの所属を点検する（Issue #431）", () => {
+  /** 一覧が `title` を出す宣言（entity record は一覧で辿れる） */
+  const PERM_DECLARATION = [
+    "entities:",
+    "  - name: record",
+    "    fields:",
+    "      title: string",
+    "views:",
+    "  - name: records",
+    "    type: list",
+    "    entity: record",
+    "    show: [title]",
+    "actions: []",
+    "validations: []",
+    "computed: []",
+    "permissions: []",
+    "minIdentity:",
+    "  mode: anonymous",
+    "",
+  ].join("\n");
+  const roles: readonly RoleEntry[] = [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null },
+    { roleId: "record.title", kind: "field", entity: "record", name: "title", shared: false, aliasOf: null },
+  ];
+  const mappings: readonly RoleNameMapping[] = [
+    { roleId: "record", name: "record" },
+    { roleId: "record.title", name: "title" },
+  ];
+  const ownership: readonly RequirementRoleOwnership[] = [
+    {
+      requirementId: "R-1",
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "行の所属として参照するため" },
+        { roleId: "record.title", basis: "dependency", reason: "一覧に出す項目として参照するため" },
+      ],
+    },
+  ];
+  // R-1 の対応表は entity record だけを挙げ、項目 title を挙げていない
+  const correspondences: readonly CorrespondenceEntry[] = [
+    { requirementId: "R-1", locations: [{ kind: "entity", entity: null, name: "record" }] },
+  ];
+
+  it("所属を渡すと、要件ごとの点検の落ち（要件 ID つき）を redoMisses に返す", async () => {
+    const report = await checkDeclarationVersion(
+      { source: PERM_DECLARATION },
+      { list: LIST, suite: SUITE, correspondences, roles, mappings, ownership },
+    );
+    expect(report.redoMisses.map((miss) => miss.requirementId)).toContain("R-1");
+    expect(report.correspondence?.misses.some((miss) => miss.requirementId === "R-1")).toBe(true);
+  });
+
+  it("新契約で所属を渡さなければ、入力の不備として断り、照合なしの成功にしない", async () => {
+    const report = await checkDeclarationVersion(
+      { source: PERM_DECLARATION },
+      { list: LIST, suite: SUITE, correspondences, roles, mappings },
+    );
+    expect(report.correspondence?.misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    // 要件ごとの照合は走らず、⑤a のやり直しの落ちも足さない
+    expect(report.redoMisses).toEqual([]);
+  });
+
+  it("新契約で所属が空でも、入力の不備として断る", async () => {
+    const report = await checkDeclarationVersion(
+      { source: PERM_DECLARATION },
+      { list: LIST, suite: SUITE, correspondences, roles, mappings, ownership: [] },
+    );
+    expect(report.correspondence?.misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    expect(report.redoMisses).toEqual([]);
+  });
+
+  it("legacy を明示したときは、従来どおり表全体の外の落ちにする（要件 ID は足さない）", async () => {
+    const report = await checkDeclarationVersion(
+      { source: PERM_DECLARATION },
+      { list: LIST, suite: SUITE, correspondences, roles, mappings, version: LEGACY_DESIGN_CONTRACT },
+    );
+    // record.title は宣言に実在するが、表全体（R-1 は entity record だけ）の挙げていない場所なので落ちになる
+    expect(report.correspondence?.misses.some((miss) => miss.detail.includes("対応表の外"))).toBe(true);
+    expect(report.redoMisses).toEqual([]);
+  });
+
+  it("所属が一部だけ欠ける入力は、入力の不備として断る（表の役割の全部に所属を要る）", async () => {
+    // 表の役割 record.title の所属を省く（全体の集合は空ではないので、以前の門を通ってしまっていた）
+    const partialOwnership: readonly RequirementRoleOwnership[] = [
+      {
+        requirementId: "R-1",
+        ownership: [{ roleId: "record", basis: "dependency", reason: "行の所属として参照するため" }],
+      },
+    ];
+    const report = await checkDeclarationVersion(
+      { source: PERM_DECLARATION },
+      { list: LIST, suite: SUITE, correspondences, roles, mappings, ownership: partialOwnership },
+    );
+    expect(report.correspondence?.misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    expect(report.redoMisses).toEqual([]);
+  });
+});
 
 describe("停滞の署名は、名前ではなく分類で決まる（02 §1.3.1・Issue #309）", () => {
   it("名前だけを付け替えた次の版でも、同じ不一致は同じ署名になる（member → memberRegistration）", () => {

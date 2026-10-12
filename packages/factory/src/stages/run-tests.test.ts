@@ -19,6 +19,7 @@ import {
   type FixedTest,
   type ReferenceRow,
   type RequirementClassification,
+  type RoleEntry,
   type RoleNameMapping,
   type TestExpected,
   type TestInputContract,
@@ -1592,6 +1593,117 @@ describe("値の鍵 id・rowId の文言を、②' と同じにする（§1・�
     });
     // 対応に無い rowId・amount は、宣言の項目の名前としてそのまま使われる（未解決にしない）
     expect({ mismatches: result.mismatches, unresolved: result.unresolved }).toEqual({ mismatches: [], unresolved: [] });
+  });
+});
+
+// ── 構造の検査の行き先：対応表の外は ⑤a のやり直しへ（Issue #431）──────────────
+
+/** 新契約の役割 ID の表（entity `record`・項目 `amount`・項目 `name`（record には無い）） */
+const ROUTE_ROLES: readonly RoleEntry[] = [
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null },
+  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null },
+  { roleId: "record.name", kind: "field", entity: "record", name: "name", shared: false, aliasOf: null },
+];
+
+/** 構造の検査 1 件（対象は項目。`field-type` だけを使う） */
+const routeStructure = (roleId: string, expected: string): Record<string, unknown> => ({
+  ...draft({
+    id: "struct",
+    target: roleTarget("R-1", "field", roleId),
+    operation: "structure",
+    expected: { kind: "ok", value: true },
+  }),
+  assertion: { check: "field-type", expected },
+});
+
+/** R-1 の対応表は entity record だけを挙げ、項目を挙げていない（＝構造の検査が結び付かない） */
+const outsideTable: CorrespondenceResult = {
+  entries: [entry("R-1", [{ kind: "entity", entity: null, name: "record" }])],
+  misses: [],
+};
+
+describe("構造の検査が対応表の外になるときの行き先（02 §1.3.1・Issue #431）", () => {
+  it("対応の場所が実在するなら、判定は未解決のまま要件 ID・場所つきで ⑤a のやり直しに回す", () => {
+    const result = runTests({
+      app: APP,
+      suite: suiteOf([routeStructure("record.amount", "number")]),
+      correspondence: outsideTable,
+      mappings: [
+        { roleId: "record", name: "record" },
+        { roleId: "record.amount", name: "amount" },
+      ],
+      roles: ROUTE_ROLES,
+    });
+    // 判定は未解決のまま（不一致にしない）
+    expect(result.unresolved.map((unresolved) => unresolved.testId)).toEqual(["struct"]);
+    expect(result.mismatches).toEqual([]);
+    const route = result.routes.find((candidate) => candidate.testId === "struct");
+    expect(route?.route).toBe("correspondence-redo");
+    expect(route?.requirementId).toBe("R-1");
+    expect(route?.location).toEqual({ kind: "field", entity: "record", name: "amount" });
+  });
+
+  it("対応の場所が宣言に実在しなければ correspondence-defect になる", () => {
+    // 別 entity（person）には name があるが、entity record には無い（別 entity の同名を実在と見なさない）
+    const result = runTests({
+      app: APP,
+      suite: suiteOf([routeStructure("record.name", "string")]),
+      correspondence: outsideTable,
+      mappings: [
+        { roleId: "record", name: "record" },
+        { roleId: "record.name", name: "name" },
+      ],
+      roles: ROUTE_ROLES,
+    });
+    expect(result.unresolved.map((unresolved) => unresolved.testId)).toEqual(["struct"]);
+    const route = result.routes.find((candidate) => candidate.testId === "struct");
+    expect(route?.route).toBe("correspondence-defect");
+  });
+
+  it("所属 entity の mapping が引けないときは、null の場所を組まず ⑤a のやり直しに回さない", () => {
+    // record.amount の対応はあるが、所属 entity（record）の対応だけ欠けている
+    const result = runTests({
+      app: APP,
+      suite: suiteOf([routeStructure("record.amount", "number")]),
+      correspondence: outsideTable,
+      mappings: [{ roleId: "record.amount", name: "amount" }],
+      roles: ROUTE_ROLES,
+    });
+    expect(result.unresolved.map((unresolved) => unresolved.testId)).toEqual(["struct"]);
+    const route = result.routes.find((candidate) => candidate.testId === "struct");
+    // entity を問わない null の場所で実在と誤認せず、correspondence-redo を足さない
+    expect(route?.route).not.toBe("correspondence-redo");
+    expect(route?.route).toBe("ambiguity");
+  });
+
+  it("no-mapping・ambiguous は、今までどおり行き先を付けない（未解決）", () => {
+    const missing = runTests({
+      app: APP,
+      suite: suiteOf([routeStructure("record.amount", "number")]),
+      correspondence: outsideTable,
+      mappings: [], // record.amount の対応が無い
+      roles: ROUTE_ROLES,
+    });
+    expect(missing.routes.find((candidate) => candidate.testId === "struct")?.route).toBe("ambiguity");
+
+    const ambiguous: CorrespondenceResult = {
+      entries: [
+        entry("R-1", [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "field", entity: "record", name: "amount" },
+          { kind: "field", entity: "record", name: "amount" },
+        ]),
+      ],
+      misses: [],
+    };
+    const two = runTests({
+      app: APP,
+      suite: suiteOf([routeStructure("record.amount", "number")]),
+      correspondence: ambiguous,
+      mappings: [{ roleId: "record.amount", name: "amount" }],
+      roles: ROUTE_ROLES,
+    });
+    expect(two.routes.find((candidate) => candidate.testId === "struct")?.route).toBe("ambiguity");
   });
 });
 

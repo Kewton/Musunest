@@ -16,6 +16,7 @@ import type {
   CorrespondenceEntry,
   CorrespondenceMiss,
   Declaration,
+  DesignContractVersion,
   RequirementList,
   RoleEntry,
   RoleNameMapping,
@@ -23,7 +24,7 @@ import type {
   TestSuite,
   TestUnresolved,
 } from "../pipeline.js";
-import { checkCorrespondence } from "./correspondence.js";
+import { checkCorrespondence, type RequirementRoleOwnership } from "./correspondence.js";
 import { isRecord, type Problem } from "./prompt.js";
 import { runTests } from "./run-tests.js";
 import { runStaticCheck } from "./static-check.js";
@@ -143,6 +144,14 @@ export interface RepairToolContext {
   readonly mappings?: readonly RoleNameMapping[];
   /** ② の役割 ID の表（対応表の確認の道具で、提出された対応の点検に使う。§1.2・Issue #309） */
   readonly roles?: readonly RoleEntry[];
+  /**
+   * 要件ごとの所属（② の設計から写す。Issue #431）。「対応表の確認」の道具を、⑤a と同じ**要件ごと**の
+   * 点検にする。「試験の実行」の道具は、結び付けられなかった構造の検査の落ちに所属 entity を引くのに
+   * `roles` を使う。**1 つの道具にだけ渡す形にしない**。
+   */
+  readonly ownership?: readonly RequirementRoleOwnership[];
+  /** 設計の契約の版（決定 ⑨・Issue #418・#431）。呼ぶ側が明示する */
+  readonly version?: DesignContractVersion;
 }
 
 /** 静的チェックの道具の出力 */
@@ -190,6 +199,8 @@ export async function executeRepairTool(
       correspondence: { entries: context.correspondences, misses: [] },
       // 同じ結び付けの部品（bind.ts）を使い、道具に渡された候補の版で結び付け直す（§1.3.1・Issue #309）
       ...(context.mappings === undefined ? {} : { mappings: context.mappings }),
+      // 結び付けられなかった構造の検査の落ちに、所属 entity を引く（Issue #431）
+      ...(context.roles === undefined ? {} : { roles: context.roles }),
     });
     return {
       passed: result.mismatches.length === 0 && result.unresolved.length === 0,
@@ -203,6 +214,9 @@ export async function executeRepairTool(
   const misses = checkCorrespondence(checked.app, context.list, context.correspondences, {
     ...(context.roles === undefined ? {} : { roles: context.roles }),
     ...(context.mappings === undefined ? {} : { mappings: context.mappings }),
+    // ⑤a と同じ要件ごとの点検にする（所属と版を渡す。Issue #431）
+    ...(context.ownership === undefined ? {} : { ownership: context.ownership }),
+    ...(context.version === undefined ? {} : { version: context.version }),
   });
   return { passed: misses.length === 0, detail: "", mismatches: [], unresolved: [], misses };
 }

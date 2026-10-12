@@ -26,6 +26,7 @@ import type {
   CorrespondenceMiss,
   CorrespondenceResult,
   Declaration,
+  DesignContractVersion,
   Dispute,
   OverturnedTest,
   RejectedDispute,
@@ -40,7 +41,11 @@ import type {
   VersionChecks,
 } from "../pipeline.js";
 import { runArbitration } from "./arbitrate.js";
-import { checkCorrespondence, checkRoleMappings } from "./correspondence.js";
+import {
+  checkCorrespondence,
+  checkRoleMappings,
+  type RequirementRoleOwnership,
+} from "./correspondence.js";
 import {
   COMMON_RULES,
   buildStructuredRequest,
@@ -230,6 +235,13 @@ export interface RepairStepInput {
   readonly mappings?: readonly RoleNameMapping[];
   /** ② の役割 ID の表（道具の対応表の点検に使う。§1.2・Issue #309） */
   readonly roles?: readonly RoleEntry[];
+  /**
+   * 要件ごとの所属（② の設計から写す。Issue #431）。道具の「対応表の確認」を、⑤a と同じ要件ごとの
+   * 点検にするために渡す（提出された対応とは別のデータ。新契約では必須）。
+   */
+  readonly ownership?: readonly RequirementRoleOwnership[];
+  /** 設計の契約の版（決定 ⑨・Issue #418・#431）。呼ぶ側が明示する */
+  readonly version?: DesignContractVersion;
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
 }
@@ -322,6 +334,8 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
     correspondences: input.correspondences,
     ...(input.mappings === undefined ? {} : { mappings: input.mappings }),
     ...(input.roles === undefined ? {} : { roles: input.roles }),
+    ...(input.ownership === undefined ? {} : { ownership: input.ownership }),
+    ...(input.version === undefined ? {} : { version: input.version }),
   };
 
   let turns: readonly LlmTurn[] = [];
@@ -473,6 +487,12 @@ export async function runCorrespondenceRedo(
 export interface VersionReport extends VersionChecks {
   readonly routes: readonly RoutedFailure[];
   readonly defectMisses: readonly CorrespondenceMiss[];
+  /**
+   * ⑤a の要件ごとの点検が返した「⑤a のやり直し」の落ち（要件 ID と場所つき。Issue #431）。
+   * `correspondence.misses` の一部でもあるが、⑤a のやり直し（`runCorrespondence` の再呼び出し）の
+   * 引き金にするために、行き先つきで別に持つ。
+   */
+  readonly redoMisses: readonly CorrespondenceMiss[];
 }
 
 /** 流し直しに必要な、直しても変わらない文脈 */
@@ -484,6 +504,10 @@ export interface RerunContext {
   readonly roles?: readonly RoleEntry[];
   /** ③ が提出した「役割 ID → 宣言の名前」の対応（結び付けに使う。§1.3・Issue #309） */
   readonly mappings?: readonly RoleNameMapping[];
+  /** 要件ごとの所属（要件ごとの点検に使う。Issue #431） */
+  readonly ownership?: readonly RequirementRoleOwnership[];
+  /** 設計の契約の版（呼ぶ側が明示する。Issue #418・#431） */
+  readonly version?: DesignContractVersion;
 }
 
 /**
@@ -510,22 +534,29 @@ export async function checkDeclarationVersion(
       testRun: null,
       routes: [],
       defectMisses: [],
+      redoMisses: [],
     };
   }
-  const entriesMisses = checkCorrespondence(staticCheck.app, context.list, context.correspondences);
-  const defectMisses =
+  const mappingMisses =
     context.roles !== undefined && context.mappings !== undefined
-      ? checkRoleMappings(staticCheck.app, context.roles, context.correspondences, context.mappings)
+      ? checkRoleMappings(staticCheck.app, context.roles, context.correspondences, context.mappings, {
+          ...(context.ownership === undefined ? {} : { ownership: context.ownership }),
+          ...(context.version === undefined ? {} : { version: context.version }),
+        })
       : [];
+  const defectMisses = mappingMisses.filter((miss) => miss.route === "correspondence-defect");
+  const redoMisses = mappingMisses.filter((miss) => miss.route === "correspondence-redo");
+  const entriesMisses = checkCorrespondence(staticCheck.app, context.list, context.correspondences);
   const correspondence: CorrespondenceResult = {
     entries: context.correspondences,
-    misses: [...entriesMisses, ...defectMisses],
+    misses: [...entriesMisses, ...mappingMisses],
   };
   const report = runTests({
     app: staticCheck.app,
     suite: context.suite,
     correspondence,
     ...(context.mappings === undefined ? {} : { mappings: context.mappings }),
+    ...(context.roles === undefined ? {} : { roles: context.roles }),
   });
   return {
     declaration,
@@ -535,6 +566,7 @@ export async function checkDeclarationVersion(
     testRun: report,
     routes: report.routes,
     defectMisses,
+    redoMisses,
   };
 }
 
@@ -632,6 +664,8 @@ export async function runRepairLoop(input: RepairLoopInput): Promise<StageOutcom
       correspondences: input.correspondences,
       ...(input.mappings === undefined ? {} : { mappings: input.mappings }),
       ...(input.roles === undefined ? {} : { roles: input.roles }),
+      ...(input.ownership === undefined ? {} : { ownership: input.ownership }),
+      ...(input.version === undefined ? {} : { version: input.version }),
       documents: input.documents,
       gateway: input.gateway,
     });
@@ -657,6 +691,8 @@ export async function runRepairLoop(input: RepairLoopInput): Promise<StageOutcom
       correspondences: input.correspondences,
       ...(input.mappings === undefined ? {} : { mappings: input.mappings }),
       ...(input.roles === undefined ? {} : { roles: input.roles }),
+      ...(input.ownership === undefined ? {} : { ownership: input.ownership }),
+      ...(input.version === undefined ? {} : { version: input.version }),
     });
     const nowPassing = passingIds(withoutOverturned(), checks.testRun);
     for (const testId of settled) {
