@@ -269,6 +269,58 @@ export interface CallGatewayOptions {
    * 実際に使う値は**締切の残りを超えず**、やり直しでは長くする（#302）。
    */
   readonly callTimeoutMs?: number;
+  /**
+   * 生成と判定で共有する実試行の門（Issue #432）。渡すと、総呼び出し数の門は**この門の数**（生成の
+   * 呼び出し・その再試行・判定の呼び出し・切り替え・再点検の合計）に掛かる。渡さなければ、この口の
+   * `#calls` だけを上限に照らす（従来どおり）。
+   */
+  readonly gate?: CallGate;
+}
+
+/**
+ * 生成と判定で共有する、**実試行の門**（Issue #432）。時計・締切・総呼び出し数を 1 つに持つ——生成の
+ * `CallGateway` も判定の包みも、これを通して実試行を数え、締切と上限に照らす。これにより、生成の
+ * 呼び出し・その再試行・判定の呼び出し・Jev→Luna の切り替え・独立した再点検が、**同じ 1 つの数**で
+ * 掛かる。判定は生成の `CallGateway` を通らないので、門を共有しないと合算できない。
+ */
+export interface CallGate {
+  /** いまの時刻（ミリ秒） */
+  readonly now: () => number;
+  /** 締切（ミリ秒） */
+  readonly deadline: number;
+  /** 総呼び出しの上限 */
+  readonly limit: number;
+  /** これまでに数えた実試行の数 */
+  attempts(): number;
+  /** 締切までの残り（ミリ秒。負にならない） */
+  remainingMs(): number;
+  /**
+   * 実試行の**直前**の検査。締切を過ぎていれば `"deadline"`、上限に達していれば `"limit"` を返し、
+   * **試行を数えない**。`"ok"` のときだけ試行を 1 つ数える（失敗した試行も数える）。
+   */
+  begin(): "ok" | "deadline" | "limit";
+}
+
+/** 共有の門を作る（Issue #432）。時計・締切・上限は生成と判定で同じ値を渡す */
+export function createCallGate(options: {
+  readonly now: () => number;
+  readonly deadline: number;
+  readonly limit: number;
+}): CallGate {
+  let attempts = 0;
+  return {
+    now: options.now,
+    deadline: options.deadline,
+    limit: options.limit,
+    attempts: () => attempts,
+    remainingMs: () => Math.max(0, options.deadline - options.now()),
+    begin: () => {
+      if (options.now() >= options.deadline) return "deadline";
+      if (attempts >= options.limit) return "limit";
+      attempts += 1;
+      return "ok";
+    },
+  };
 }
 
 const DEFAULT_MAX_ATTEMPTS = 2;
@@ -303,6 +355,8 @@ export class CallGateway {
   readonly #effort: string;
   /** 呼び出し 1 回ごとの timeout の基準（ミリ秒。§1.5・#302） */
   readonly #callTimeoutMs: number;
+  /** 生成と判定で共有する実試行の門（無ければ、この口の `#calls` だけを上限に照らす。Issue #432） */
+  readonly #gate: CallGate | undefined;
   #calls = 0;
   #toolCalls = 0;
   #retries = 0;
@@ -325,6 +379,7 @@ export class CallGateway {
     this.#limits = options.limits ?? AGENT_LIMITS;
     this.#maxAttempts = maxAttempts;
     this.#callTimeoutMs = callTimeoutMs;
+    this.#gate = options.gate;
   }
 
   /** 推論の effort（段の出力の上限の出所。§2） */
@@ -386,7 +441,15 @@ export class CallGateway {
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
       const remaining = this.#deadline - this.#now();
       if (remaining <= 0) return { kind: "deadlineExceeded" };
-      if (this.#calls >= this.#limits.callCount) {
+      // 総呼び出し数の門。**共有の門があれば、生成の呼び出し・その再試行・判定の呼び出し・切り替え・
+      // 再点検の合計**で照らし、この試行を数える（Issue #432）。無ければ、この口の `#calls` だけを見る。
+      if (this.#gate !== undefined) {
+        const begun = this.#gate.begin();
+        if (begun === "deadline") return { kind: "deadlineExceeded" };
+        if (begun === "limit") {
+          return { kind: "limitExceeded", limit: "callCount", max: this.#gate.limit, actual: this.#gate.attempts() };
+        }
+      } else if (this.#calls >= this.#limits.callCount) {
         return { kind: "limitExceeded", limit: "callCount", max: this.#limits.callCount, actual: this.#calls };
       }
       // 呼び出しごとの timeout は、effort の基準をやり直しごとに倍へ伸ばし、締切の残りで頭を打つ

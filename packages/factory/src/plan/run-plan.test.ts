@@ -2729,12 +2729,24 @@ describe("判定も、生成と共有する締切・総呼び出し数の門を�
     const judge = createFakeJudge({
       ...catalogAnswers(),
       [surfaceTriageQuestionName(0)]: choice("vocabulary-hole"),
-      [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
-      [surfaceRecheckEvidenceQuestionName(0)]: choice("記録", 0.9),
     });
+    // 再点検の口を渡す（合算の上限が「実際に再点検できる口」に掛かることを確かめる）
+    let recheckCalls = 0;
+    const recheckJudge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        recheckCalls += 1;
+        return createFakeJudge({
+          [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
+          [surfaceRecheckEvidenceQuestionName(0)]: choice("記録", 0.9),
+        }).judge(request);
+      },
+    };
 
     const result = await runPlan(
-      makePlanInput(recording.client, judge, ANSWER_NONE, { limits: { ...AGENT_LIMITS, callCount: 5 } }),
+      makePlanInput(recording.client, judge, ANSWER_NONE, {
+        limits: { ...AGENT_LIMITS, callCount: 5 },
+        recheckJudge,
+      }),
     );
 
     expect(result.kind).toBe("stopped");
@@ -2742,8 +2754,93 @@ describe("判定も、生成と共有する締切・総呼び出し数の門を�
     expect(result.reason).toBe("call-limit");
     expect(result.failure?.stage).toBe("surface-check");
     expect(result.failure?.kind).toBe("call-limit");
-    // 再点検を開始していない（受理 0・未点検のまま）
+    // 仕分けは終わっている（その判定の記録が残る）が、再点検は開始していない
+    expect(result.surfaceCheck.judgments.map((judgment) => judgment.questionId)).toEqual(["plan-triage:0"]);
+    expect(recheckCalls).toBe(0);
     expect(result.surfaceCheck.accepted).toBe(0);
+  });
+
+  it("生成の再試行も、判定と合算した上限に掛かる", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+    ]);
+    const base = recording.client;
+    // 生成側の実呼び出しの 4 回目（P4 の最初の問いの呼び出し）で、やり直してよい誤りを返す
+    let calls = 0;
+    const client: LlmClient = {
+      callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        if (calls === 4) return Promise.reject(Object.assign(new Error("通信の誤り"), { kind: "network" }));
+        return base.callStructured<T>(request);
+      },
+      callWithTools: (request: LlmToolRequest): Promise<LlmToolResponse> => base.callWithTools(request),
+    };
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+
+    const result = await runPlan(
+      makePlanInput(client, judge, responder, { limits: { ...AGENT_LIMITS, callCount: 5 } }),
+    );
+
+    // 合算の上限（5）に達しているので、生成の再試行は開始できない → 段 questions が call-limit で止まる
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("call-limit");
+    expect(result.failure?.stage).toBe("questions");
+    expect(result.failure?.kind).toBe("call-limit");
+    // 実際に試した生成の呼び出しは 4 回（再試行は開始していない）
+    expect(calls).toBe(4);
+  });
+
+  it("P6 の判定が締切を越えて返ったら、confirmed を返さず deadline で止まる", async () => {
+    let clock = 0;
+    const deadline = 1_000;
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const base = createFakeJudge({
+      ...catalogAnswers(),
+      [confirmQuestionName("S-1")]: noul(0.95),
+      [confirmQuestionName("S-2")]: noul(0.95),
+    });
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        // P6 の覆いの判定で、**締切を越えて**返る（遅い応答）
+        if (Object.keys(request.questions).some((name) => name.startsWith("cover:"))) clock = deadline + 1;
+        return base.judge(request);
+      },
+    };
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+
+    const result = await runPlan(
+      makePlanInput(recording.client, judge, responder, { now: () => clock, deadline }),
+    );
+
+    // 遅い応答を成功にしない——締切後に confirmed を返さない
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("deadline");
+    expect(result.failure?.stage).toBe("confirm");
+    expect(result.failure?.kind).toBe("deadline");
   });
 
   it("落とし先（Luna）の口が無い入力では、主（Jev）を再点検に使わず、低確信を受理しない", async () => {

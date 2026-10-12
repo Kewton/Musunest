@@ -115,6 +115,8 @@ describe("落とし先（Luna）の口を載せる（Issue #432）", () => {
     const judge = createFallbackJudge({ primary: failingJev(429), fallback });
     // 同じ口をもう一度呼ぶと主（Jev）が答え直すだけなので、落とし先を明示的に選べるようにしてある
     expect(judge.fallback).toBe(fallback);
+    // 主も載せる——包みは主と落とし先を別々に包み直し、切り替えの 2 回を実試行として数える（Issue #432）
+    expect(judge.primary).toBeDefined();
   });
 
   it("LLM だけの口には、落とし先が無い（その口自身が Luna）", () => {

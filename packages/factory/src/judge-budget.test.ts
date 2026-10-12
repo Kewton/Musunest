@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import { JEV_RATES, JobBudget, costOfUsageUsd, type TokenRates } from "./budget.js";
 import { JudgeBudgetExceededError, JudgeCallLimitExceededError, JudgeDeadlineExceededError, createBudgetedJudge } from "./judge-budget.js";
+import { createCallGate } from "./call.js";
 import type { Judge, JudgeRequest, JudgeResponse } from "./judge.js";
 import type { LlmUsage } from "./llm.js";
 
@@ -166,19 +167,18 @@ describe("落とし先（Luna）も同じ予算で包む（Issue #432）", () =>
 });
 
 describe("締切と総呼び出し数の門（生成と共有。Issue #432）", () => {
-  /** 門の設定を 1 か所で組む */
-  const gate = (overrides: Partial<{ now: () => number; deadline: number; callLimit: number; generationCalls: () => number }> = {}) => ({
-    now: () => 0,
-    deadline: 1_000,
-    callLimit: 10,
-    generationCalls: () => 0,
-    ...overrides,
-  });
+  /** 固定した答えを返す偽物の判定（呼ばれた回数を数える） */
+  const response = (answeredBy: "fake" | "llm" | "jev"): JudgeResponse => ({ answers: {}, inputTokens: 0, model: "x", answeredBy });
 
   it("締切を過ぎていれば、判定を呼ばずに deadline の誤りを返す", async () => {
-    const { judge, calls } = fixedJudge({ answers: {}, inputTokens: 0, model: "x", answeredBy: "fake" });
+    const { judge, calls } = fixedJudge(response("fake"));
     const budget = new JobBudget(10);
-    const budgeted = createBudgetedJudge({ judge, budget, rates: RATES, gate: gate({ now: () => 1_000, deadline: 1_000 }) });
+    const budgeted = createBudgetedJudge({
+      judge,
+      budget,
+      rates: RATES,
+      gate: createCallGate({ now: () => 1_000, deadline: 1_000, limit: 10 }),
+    });
 
     await expect(budgeted.judge(REQUEST)).rejects.toBeInstanceOf(JudgeDeadlineExceededError);
     expect(calls()).toBe(0);
@@ -186,14 +186,14 @@ describe("締切と総呼び出し数の門（生成と共有。Issue #432）", 
     expect(budgeted.attempts).toBe(0);
   });
 
-  it("生成で総呼び出し数に達していれば、判定を呼ばずに limit の誤りを返す", async () => {
-    const { judge, calls } = fixedJudge({ answers: {}, inputTokens: 0, model: "x", answeredBy: "fake" });
-    const budgeted = createBudgetedJudge({
-      judge,
-      budget: new JobBudget(10),
-      rates: RATES,
-      gate: gate({ callLimit: 3, generationCalls: () => 3 }),
-    });
+  it("合算した総呼び出し数に達していれば、判定を呼ばずに limit の誤りを返す", async () => {
+    const { judge, calls } = fixedJudge(response("fake"));
+    // 生成側が 3 回使ったところから始める（同じ門を共有する）
+    const gate = createCallGate({ now: () => 0, deadline: 1_000, limit: 3 });
+    gate.begin();
+    gate.begin();
+    gate.begin();
+    const budgeted = createBudgetedJudge({ judge, budget: new JobBudget(10), rates: RATES, gate });
 
     await expect(budgeted.judge(REQUEST)).rejects.toBeInstanceOf(JudgeCallLimitExceededError);
     expect(calls()).toBe(0);
@@ -202,26 +202,82 @@ describe("締切と総呼び出し数の門（生成と共有。Issue #432）", 
 
   it("門を通った試行は、失敗しても数える（成功・失敗を問わない）", async () => {
     const { judge } = failingJudge(new Error("判定が失敗した"));
-    const budgeted = createBudgetedJudge({ judge, budget: new JobBudget(10), rates: RATES, gate: gate() });
+    const gate = createCallGate({ now: () => 0, deadline: 1_000, limit: 10 });
+    const budgeted = createBudgetedJudge({ judge, budget: new JobBudget(10), rates: RATES, gate });
 
     await expect(budgeted.judge(REQUEST)).rejects.toThrow("判定が失敗した");
     expect(budgeted.attempts).toBe(1);
+    expect(gate.attempts()).toBe(1);
   });
 
-  it("落とし先（Luna）も同じ門を通り、試行の数は主と共有する", async () => {
-    const primary = fixedJudge({ answers: {}, inputTokens: 0, model: "p", answeredBy: "fake" });
-    const luna = fixedJudge({ answers: {}, inputTokens: 0, model: "l", answeredBy: "fake" });
-    const judge: Judge = { judge: primary.judge.judge.bind(primary.judge), fallback: luna.judge };
+  it("合成した口（Jev→Luna）の切り替えは、2 回とも 1 試行として数える", async () => {
+    const { judge: primary } = failingJudge(new Error("Jev が止まった"));
+    const { judge: luna, calls: lunaCalls } = fixedJudge(response("llm"));
+    const composed: Judge = { judge: async () => response("fake"), primary, fallback: luna };
+    const gate = createCallGate({ now: () => 0, deadline: 1_000, limit: 10 });
+    const budgeted = createBudgetedJudge({ judge: composed, budget: new JobBudget(10), rates: RATES, gate });
+
+    const result = await budgeted.judge(REQUEST);
+
+    expect(result.answeredBy).toBe("llm");
+    expect(lunaCalls()).toBe(1);
+    // 切り替えの 2 回（失敗した主＋落とし先）が、それぞれ 1 試行として数えられる
+    expect(budgeted.attempts).toBe(2);
+    expect(gate.attempts()).toBe(2);
+  });
+
+  it("切り替え先も門で守る（上限に達していれば、落とし先を呼ばない）", async () => {
+    const { judge: primary } = failingJudge(new Error("Jev が止まった"));
+    const { judge: luna, calls: lunaCalls } = fixedJudge(response("llm"));
+    const composed: Judge = { judge: async () => response("fake"), primary, fallback: luna };
+    // 上限 1：主の試行で使い切る → 落とし先は呼ばれない
+    const budgeted = createBudgetedJudge({
+      judge: composed,
+      budget: new JobBudget(10),
+      rates: RATES,
+      gate: createCallGate({ now: () => 0, deadline: 1_000, limit: 1 }),
+    });
+
+    await expect(budgeted.judge(REQUEST)).rejects.toBeInstanceOf(JudgeCallLimitExceededError);
+    expect(lunaCalls()).toBe(0);
+  });
+
+  it("呼び出しの途中で締切を過ぎたら、待たずに打ち切る", async () => {
+    const judge: Judge = {
+      async judge(request) {
+        // 締切の合図が来るまで待つ（返さない）
+        await new Promise<void>((resolve) => {
+          if (request.signal?.aborted === true) resolve();
+          else request.signal?.addEventListener("abort", () => resolve());
+        });
+        throw new Error("打ち切られました");
+      },
+    };
     const budgeted = createBudgetedJudge({
       judge,
       budget: new JobBudget(10),
       rates: RATES,
-      gate: gate({ callLimit: 2, generationCalls: () => 1 }),
+      gate: createCallGate({ now: () => 0, deadline: 20, limit: 10 }),
     });
 
-    await budgeted.judge(REQUEST); // 主（1 + 0 < 2）
-    expect(budgeted.attempts).toBe(1);
-    // 落とし先は、生成 1 + 試行 1 = 2 で上限に達する → 呼ばない
-    await expect(budgeted.fallback?.judge(REQUEST)).rejects.toBeInstanceOf(JudgeCallLimitExceededError);
+    await expect(budgeted.judge(REQUEST)).rejects.toBeInstanceOf(JudgeDeadlineExceededError);
+  });
+
+  it("締切を越えて返った応答を、成功にしない", async () => {
+    let clock = 0;
+    const judge: Judge = {
+      async judge() {
+        clock = 100; // 締切（50）を越えて返る
+        return response("fake");
+      },
+    };
+    const budgeted = createBudgetedJudge({
+      judge,
+      budget: new JobBudget(10),
+      rates: RATES,
+      gate: createCallGate({ now: () => clock, deadline: 50, limit: 10 }),
+    });
+
+    await expect(budgeted.judge(REQUEST)).rejects.toBeInstanceOf(JudgeDeadlineExceededError);
   });
 });

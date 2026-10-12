@@ -38,7 +38,7 @@ import {
 } from "@musunest/appspec-schema";
 import { JobBudget, type TokenRates } from "../budget.js";
 import type { BundleJudgeUsage } from "../bundle.js";
-import { CallGateway } from "../call.js";
+import { CallGateway, createCallGate } from "../call.js";
 import type { Judge } from "../judge.js";
 import { JudgeBudgetExceededError, JudgeCallLimitExceededError, JudgeDeadlineExceededError, createBudgetedJudge, type BudgetedJudge } from "../judge-budget.js";
 import { AGENT_LIMITS, type AgentLimits, type LimitName } from "../limits.js";
@@ -782,6 +782,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const threshold = input.judgeThreshold ?? DEFAULT_PLAN_JUDGE_THRESHOLD;
   const meter = new UsageMeter();
   const budget = new JobBudget(input.budgetUsd);
+  // 生成と判定で共有する実試行の門（Issue #432）。生成の呼び出し・その再試行・判定の呼び出し・Jev→Luna の
+  // 切り替え・独立した再点検が、**同じ 1 つの数**で締切と総呼び出し数に掛かる。
+  const gate = createCallGate({ now: input.now, deadline: input.deadline, limit: limits.callCount });
   const gateway = new CallGateway({
     client: meter.wrap(input.client),
     budget,
@@ -790,20 +793,20 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     deadline: input.deadline,
     limits,
     effort: input.effort,
+    gate,
     ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
   });
   // 判定の口を、**この Plan の予算に結び付けた包み**で包む（#359）。判定の費用も、段の呼び出しと同じ
   // 予算で予約・精算する。予約できなければ判定を呼ばずに `JudgeBudgetExceededError` になる（止まる）。
-  // **締切と総呼び出し数の門**（生成と共有）も掛ける（Issue #432）——判定は生成の `CallGateway` を通らない
-  // ので、ここで同じ時計・締切・上限を見る。落とし先（Luna）は**明示の `recheckJudge`** を優先し、無ければ
-  // `judge.fallback` を使う（主を再点検に使わない）。
+  // **締切と総呼び出し数の門**（生成と同じ `gate`）も掛け、実試行の直前に照らす（Issue #432）。落とし先
+  // （Luna）は**明示の `recheckJudge`** を優先し、無ければ `judge.fallback` を使う（主を再点検に使わない）。
   const judgeBudget: BudgetedJudge = createBudgetedJudge({
     judge: input.judge,
     budget,
     rates: input.rates,
     ...(input.judgeMaxOutputTokens === undefined ? {} : { maxOutputTokens: input.judgeMaxOutputTokens }),
     ...(input.recheckJudge === undefined ? {} : { recheck: input.recheckJudge }),
-    gate: { now: input.now, deadline: input.deadline, callLimit: limits.callCount, generationCalls: () => gateway.calls },
+    gate,
   });
   const stages: PlanStageRecord[] = [];
   // 依頼文で閉じた事項（往復の記録に残す。04 §3 P4・Issue #370）
@@ -924,14 +927,13 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
 
   /**
    * 生成と共有する締切・総呼び出し数の門を、段の外でも守る（Issue #432）。判定の**実呼び出し**の直前
-   * （判定の口の包み）だけでなく、再点検のあと・確認へ渡す前にも照らし、**締切の残りと総呼び出し数の
-   * 上限**を越えていれば段の失敗として止める。生成側の呼び出しの数と、判定の試行の数を足して数える。
+   * （判定の口の包み）だけでなく、再点検のあと・確認へ渡す前・確定を返す前にも照らし、**締切の残りと
+   * 総呼び出し数の上限**を越えていれば段の失敗として止める。生成の呼び出し・再試行・判定の呼び出し・
+   * 切り替え・再点検は、同じ門で数える。
    */
   const checkGate = (stage: PlanStageId): void => {
-    if (input.now() >= input.deadline) throw new PlanStop({ stage, kind: "deadline" });
-    if (gateway.calls + judgeBudget.attempts >= limits.callCount) {
-      throw new PlanStop({ stage, kind: "call-limit" });
-    }
+    if (gate.now() >= gate.deadline) throw new PlanStop({ stage, kind: "deadline" });
+    if (gate.attempts() >= gate.limit) throw new PlanStop({ stage, kind: "call-limit" });
   };
 
   const resultBase = (): PlanResultBase => ({
@@ -1467,6 +1469,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         ...resultBase(),
       };
     }
+    // **確定を返す前にも**、生成と共有する締切・総呼び出し数の門を守る（Issue #432）。P6 の判定が締切を
+    // 越えて返る（遅い応答）経路は包みが止めるが、仕様の検査の間にも時計は進む——締切後に `confirmed` を
+    // 返さないよう、ここでも照らす。
+    checkGate("confirm");
     return { kind: "confirmed", plan: confirmed.plan, ...resultBase() };
   } catch (error) {
     if (error instanceof PlanStop) {

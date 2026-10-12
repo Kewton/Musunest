@@ -93,6 +93,11 @@ export type JudgeSource = "jev" | "llm" | "fake";
 export interface JudgeRequest {
   readonly state: Readonly<Record<string, unknown>>;
   readonly questions: Readonly<Record<string, JudgeQuestion>>;
+  /**
+   * 締切までの残りで実呼び出しを打ち切るための合図（包みが付ける。Issue #432）。adapter は、受け取った
+   * 合図を実呼び出しへ渡す（LLM）。無ければ付けない——Jev など合図を使わない adapter は無視してよい。
+   */
+  readonly signal?: AbortSignal;
 }
 
 /** 1 回の判定の答え（§1）。問いごとの答え・使ったトークン数・答えたモデルの版の ID */
@@ -111,10 +116,17 @@ export interface JudgeResponse {
   readonly answeredBy: JudgeSource;
 }
 
-/** 判定の口（port。§4）。Jev・LLM・偽物がこの型を実装する */
+/**
+ * 判定の口（port。§4）。Jev・LLM・偽物がこの型を実装する
+ */
 export interface Judge {
   /** 1 つの state と問いの map を渡し、問いごとの答えを返す（§1） */
   judge(request: JudgeRequest): Promise<JudgeResponse>;
+  /**
+   * 合成した口（Jev → Luna）の**主**（Issue #432）。包みは、これと `fallback` を別々に包み直して
+   * **実試行ごと**に門・予算を掛ける。合成していない口には無い。
+   */
+  readonly primary?: Judge;
   /**
    * 判定の落とし先（Luna = LLM）の口（Issue #432）。合成した口（Jev → Luna）はここに Luna を置く。
    * **独立した再点検を Luna の別の会話で行う**ときに使う——合成した口をもう一度呼ぶだけでは、主（Jev）が
@@ -148,6 +160,7 @@ export function createFallbackJudge(options: FallbackJudgeOptions): Judge {
         return await options.fallback.judge(request);
       }
     },
+    primary: options.primary,
     fallback: options.fallback,
   };
 }
