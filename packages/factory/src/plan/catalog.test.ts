@@ -40,8 +40,6 @@ const POINTS: Readonly<Record<string, string>> = {
   period: "which time period is covered (from when to when)",
   "current-period": "whether the current period (e.g. this month) is included",
   "counted-state": "which states of records are counted (e.g. only meetings that were actually held)",
-  integer: "whether a value must be a whole number or may have decimals",
-  "filter-combination": "how several filters combine when used together",
   "include-zero": "whether items with zero results are still shown",
   "editable-by": "who may edit or delete the records afterwards",
 };
@@ -286,6 +284,42 @@ describe("語彙の決めどころの目録（04 §3 P3・05 §3・Issue #366）
       status: "open",
     });
   });
+
+  it("観点の一覧に integer と filter-combination が無い（Issue #406）", () => {
+    const ids = CATALOG_FACETS.map((facet) => facet.id);
+    expect(ids).not.toContain("integer");
+    expect(ids).not.toContain("filter-combination");
+    // 残るのは、集計の 5 観点と直せる人の 6 つである
+    expect(ids).toEqual(["aggregation", "period", "current-period", "counted-state", "include-zero", "editable-by"]);
+  });
+
+  it("要件 1 件で、門 1 問と観点 6 × 2 問の 13 問だけを組み、外した 2 観点の問いは組まない（Issue #406）", async () => {
+    const { judge, requests } = recordingJudge(uniformAnswers("R-1", { applies: 1, specified: 0 }));
+    await runCatalog({
+      requirements: [{ id: "R-1", text: "件数を合計する" }],
+      judge,
+      source: SOURCE,
+      threshold: NOUL_THRESHOLD,
+    });
+    const names = Object.keys(requests[0]?.questions ?? {});
+    expect(names).toHaveLength(13);
+    expect(names).toContain(catalogGateQuestionName("R-1"));
+    expect(names).not.toContain(catalogAppliesQuestionName("R-1", "integer"));
+    expect(names).not.toContain(catalogQuestionName("R-1", "integer"));
+    expect(names).not.toContain(catalogAppliesQuestionName("R-1", "filter-combination"));
+    expect(names).not.toContain(catalogQuestionName("R-1", "filter-combination"));
+  });
+
+  it("「決まっていない」の答えでも、外した 2 観点の未解決の事項を作らない（Issue #406）", async () => {
+    const result = await runOne({ applies: 1, specified: 0 });
+    const issueIds = result.unspecified.map(
+      (facet) => `OI:${catalogQuestionName(facet.requirementId, facet.facetId)}`,
+    );
+    expect(issueIds).not.toContain("OI:catalog:R-1:integer");
+    expect(issueIds).not.toContain("OI:catalog:R-1:filter-combination");
+    // 未指定になるのは、残る 6 観点だけである
+    expect(result.unspecified.map((facet) => facet.facetId)).toEqual(CATALOG_FACETS.map((facet) => facet.id));
+  });
 });
 
 describe("集計の門（04 §3 P3・Issue #384）", () => {
@@ -368,11 +402,11 @@ describe("集計の門（04 §3 P3・Issue #384）", () => {
     expect(zero.unspecified.map((facet) => facet.facetId)).toEqual(OTHER_FACET_IDS);
   });
 
-  it("整数か・絞り込みの組み合わせ・直せる人は、門の値によらず当てはまりで今までどおり決まる", async () => {
+  it("直せる人は、門の値によらず当てはまりで今までどおり決まる", async () => {
     for (const gate of [0, 0.4, 0.5, 0.6, 1]) {
       const result = await runOne({ applies: 1, specified: 0, gate });
       const ids = result.unspecified.map((facet) => facet.facetId);
-      // どの門の値でも、この 3 つの観点は当てはまり・決まっているで決まる
+      // どの門の値でも、直せる人は当てはまり・決まっているで決まる
       expect(ids).toEqual(expect.arrayContaining([...OTHER_FACET_IDS]));
     }
   });
