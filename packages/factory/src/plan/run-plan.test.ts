@@ -43,7 +43,13 @@ import {
 } from "./catalog.js";
 import { confirmQuestionName } from "./confirm.js";
 import { freeTextQuestionName } from "./answers.js";
-import { surfaceSupportQuestionName, surfaceTriageQuestionName } from "./surface-check.js";
+import {
+  SURFACE_RECHECK_NO_EVIDENCE,
+  surfaceRecheckEvidenceQuestionName,
+  surfaceRecheckKindQuestionName,
+  surfaceSupportQuestionName,
+  surfaceTriageQuestionName,
+} from "./surface-check.js";
 import {
   createRecordingClient,
   REQUIREMENT_LIST_OUTPUT,
@@ -2489,6 +2495,9 @@ describe("P3 の「書けない」の申告を判定の口で点検する（04 �
       ...catalogAnswers(),
       [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
       [surfaceSupportQuestionName(0)]: choice("not-stated", 0.9),
+      // 「書いていない」を再点検（Luna）に回すが、根拠が取れない → 未点検（根拠不足）のまま
+      [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceRecheckEvidenceQuestionName(0)]: choice(SURFACE_RECHECK_NO_EVIDENCE, 0.9),
     });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
@@ -2573,15 +2582,18 @@ describe("P3 の「書けない」の申告を判定の口で点検する（04 �
     };
     const judge = createFakeJudge({
       ...catalogAnswers(),
-      // not-a-problem でも、仕分けの確信度が閾値未満 → 落とさず未点検
+      // not-a-problem でも、仕分けの確信度が閾値未満 → 落とさず再点検へ回す
       [surfaceTriageQuestionName(0)]: choice("not-a-problem", 0.1),
+      // 再点検も判定不能 → 未点検（確定させない）
+      [surfaceRecheckKindQuestionName(0)]: choice("undecidable", 0.9),
+      [surfaceRecheckEvidenceQuestionName(0)]: choice(SURFACE_RECHECK_NO_EVIDENCE, 0.9),
     });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
-    expect(result.reasons).toEqual([{ source: "surface-check", code: "low-confidence", path: "unwritable[0]" }]);
+    expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]" }]);
     // P4 も答える役も呼ばれない
     expect(answerCalls).toBe(0);
     expect(result.stages.some((stage) => stage.stage === "questions")).toBe(false);

@@ -66,7 +66,7 @@ import {
   type PlanTurn,
 } from "./session.js";
 import { runSurface, type SurfaceCatalogData } from "./surface.js";
-import { runSurfaceCheck, type SurfaceJudgment, type SurfaceUncheckedClaim } from "./surface-check.js";
+import { runSurfaceCheck, type SurfaceClaimDiagnostic, type SurfaceJudgment, type SurfaceUncheckedClaim } from "./surface-check.js";
 
 /** Plan の段（記録の `stage` に使う。生成の段とは別の一覧である） */
 export const PLAN_STAGE_IDS = [
@@ -432,9 +432,15 @@ export interface PlanResultBase {
   readonly requirementsDiagnosis: ReverseCheckDiagnosis;
   /**
    * P3 の「書けない」の申告の点検の記録（受理・落とした・曖昧さへ・未点検の件数と、判定の記録。Issue #432）。
-   * 値（申告の部分の文・理由・制約 ID）は入れない。
+   * 値（申告の部分の文・理由・制約 ID）は入れない。**往復の記録（`plan-record.json`）に載せる要約**である。
    */
   readonly surfaceCheck: PlanSurfaceCheckSummary;
+  /**
+   * P3 の申告 1 件ずつの診断（申告の添字・要件 ID・部分・理由・制約 ID・文書の版と、点検の段階・分類・
+   * adapter・確信度・根拠 ID。Issue #432）。**受理・落とした・途中停止のどれも**残す——呼ぶ側（`cli.ts`）が
+   * 別の診断ファイルに書く。`plan-record.json`（`surfaceCheck`）には入れない。
+   */
+  readonly surfaceCheckDiagnostics: readonly SurfaceClaimDiagnostic[];
 }
 
 /** 依頼文で閉じた事項から作る `decisions` の ID の頭（確認の画面が「依頼文で決めたこと」を見分ける） */
@@ -804,6 +810,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     judgments: [],
     completed: false,
   };
+  // P3 の申告 1 件ずつの診断（受理・落とした・途中停止のどれも。Issue #432。別の診断ファイルに書く）
+  let surfaceCheckDiagnostics: readonly SurfaceClaimDiagnostic[] = [];
   // コードが目録から作った事項の対応（事項 ID → 未指定の観点）と、要件ごとの門の判定（Issue #408）
   const catalogIssueFacets = new Map<string, UnspecifiedFacet>();
   const aggregatesByRequirement = new Map<string, boolean | null>();
@@ -896,6 +904,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     closedByDefault: closedByDefaults.slice(),
     requirementsDiagnosis,
     surfaceCheck: surfaceCheckSummary,
+    surfaceCheckDiagnostics,
   });
 
   try {
@@ -1065,8 +1074,11 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         documents: input.documents,
         judge: judgeBudget,
         threshold,
-        // 仕分けのあとに得た分類・判定を、続く裏付けの予算が尽きても残す（Issue #432）。段が止まっても
-        // 途中までの記録が結果と往復の記録に載る（`completed` は false のまま）。
+        // 対象の要件の文（再点検の対象のデータ。Issue #432）
+        requirements: new Map(requirements.map((requirement) => [requirement.id, requirement.text])),
+        docVersion: input.vocabularyVersion,
+        // 段の途中までに得た分類・判定・診断を、続く裏付けや再点検の予算が尽きても残す（Issue #432）。
+        // 段が止まっても途中までの記録が結果と診断ファイルに載る（`completed` は false のまま）。
         onProgress: (partial) => {
           surfaceCheckSummary = {
             accepted: partial.accepted.length,
@@ -1076,6 +1088,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
             judgments: partial.judgments,
             completed: false,
           };
+          surfaceCheckDiagnostics = partial.diagnostics;
         },
       }),
     );
@@ -1087,6 +1100,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       judgments: surfaceCheck.judgments,
       completed: true,
     };
+    surfaceCheckDiagnostics = surfaceCheck.diagnostics;
     // 曖昧さと判定された申告（了承除外になるはずだった部分）は、**重大な**開いている事項にして P4 に渡す。
     // 聞かずに落とさない。
     for (const claim of surfaceCheck.ambiguities) {

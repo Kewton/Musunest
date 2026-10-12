@@ -70,24 +70,40 @@ export interface BudgetedJudge extends Judge {
   readonly spentUsd: number;
   /** 答えた adapter（jev・llm・fake）ごとの呼び出しの数 */
   readonly callsByAdapter: Readonly<Record<JudgeSource, number>>;
+  /**
+   * 判定の落とし先（Luna）も、**同じ予算**に結び付けた口（Issue #432）。独立した再点検を Luna の
+   * 別の会話で行うとき、呼び側（`runPlan`）はここを使う——費用と呼び出しの数は主と共有する。
+   */
+  readonly fallback?: BudgetedJudge;
+}
+
+/** 主と落とし先で**共有する**、判定の費用と呼び出しの数の台帳（Issue #432）。 */
+interface JudgeAccount {
+  spentUsd: number;
+  readonly callsByAdapter: Record<JudgeSource, number>;
 }
 
 /**
  * 判定の口を、生成の予算に結び付けた包みで包む（§1.5・§5・Issue #359）。呼ぶ前に最大費用を予約し、
  * 呼んだあとで実際の費用で精算する。予約できなければ判定を呼ばずに `JudgeBudgetExceededError` を投げる。
+ * 落とし先（Luna）があれば、それも**同じ予算**で包み、費用と呼び出しの数は主と共有する（Issue #432）。
  */
 export function createBudgetedJudge(options: BudgetedJudgeOptions): BudgetedJudge {
+  const account: JudgeAccount = { spentUsd: 0, callsByAdapter: { jev: 0, llm: 0, fake: 0 } };
+  return wrapBudgetedJudge(options.judge, options, account);
+}
+
+/** 判定 1 つ（主または落とし先）を、共有の台帳に結び付けて包む（Issue #432） */
+function wrapBudgetedJudge(judge: Judge, options: BudgetedJudgeOptions, account: JudgeAccount): BudgetedJudge {
   const rates = options.rates;
   const jevRates = options.jevRates ?? JEV_RATES;
   const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS;
-  const callsByAdapter: Record<JudgeSource, number> = { jev: 0, llm: 0, fake: 0 };
-  let spentUsd = 0;
   return {
     get spentUsd(): number {
-      return spentUsd;
+      return account.spentUsd;
     },
     get callsByAdapter(): Readonly<Record<JudgeSource, number>> {
-      return { ...callsByAdapter };
+      return { ...account.callsByAdapter };
     },
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
       const maxCostUsd = estimateJudgeMaxCostUsd({ request, rates, jevRates, maxOutputTokens });
@@ -96,9 +112,9 @@ export function createBudgetedJudge(options: BudgetedJudgeOptions): BudgetedJudg
         throw new JudgeBudgetExceededError(reserved.maxCostUsd, reserved.remainingUsd);
       }
       try {
-        const response = await options.judge.judge(request);
-        spentUsd += settleResponse(options.budget, reserved.reservation, response, rates, jevRates);
-        callsByAdapter[response.answeredBy] += 1;
+        const response = await judge.judge(request);
+        account.spentUsd += settleResponse(options.budget, reserved.reservation, response, rates, jevRates);
+        account.callsByAdapter[response.answeredBy] += 1;
         return response;
       } catch (error) {
         // 呼び出しが失敗しても、予約は精算する（残高へ戻す。Issue #359）
@@ -106,6 +122,7 @@ export function createBudgetedJudge(options: BudgetedJudgeOptions): BudgetedJudg
         throw error;
       }
     },
+    ...(judge.fallback === undefined ? {} : { fallback: wrapBudgetedJudge(judge.fallback, options, account) }),
   };
 }
 

@@ -140,3 +140,27 @@ describe("単価の既定（Issue #359）", () => {
     expect(budgeted.spentUsd).toBeCloseTo(0.021, 12);
   });
 });
+
+describe("落とし先（Luna）も同じ予算で包む（Issue #432）", () => {
+  it("落とし先を fallback に載せ、費用と呼び出しの数を主と共有する", async () => {
+    const primary = fixedJudge({ answers: {}, inputTokens: 0, model: "jev", answeredBy: "jev" });
+    const luna = fixedJudge({ answers: {}, inputTokens: 1_000_000, model: "gpt-judge", answeredBy: "llm" });
+    const judge: Judge = { judge: primary.judge.judge.bind(primary.judge), fallback: luna.judge };
+    const budget = new JobBudget(10);
+    const budgeted = createBudgetedJudge({ judge, budget, rates: RATES });
+
+    expect(budgeted.fallback).toBeDefined();
+    await budgeted.fallback?.judge(REQUEST);
+
+    // 落とし先の呼び出しが、主の口の台帳にも数えられる（費用も同じ予算で精算される）
+    expect(budgeted.spentUsd).toBeCloseTo(1, 12);
+    expect(budget.spentUsd).toBeCloseTo(1, 12);
+    expect(budgeted.callsByAdapter).toEqual({ jev: 0, llm: 1, fake: 0 });
+  });
+
+  it("落とし先が無ければ、fallback は undefined", () => {
+    const { judge } = fixedJudge({ answers: {}, inputTokens: 0, model: "fake", answeredBy: "fake" });
+    const budgeted = createBudgetedJudge({ judge, budget: new JobBudget(10), rates: RATES });
+    expect(budgeted.fallback).toBeUndefined();
+  });
+});

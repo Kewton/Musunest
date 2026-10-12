@@ -285,6 +285,13 @@ export function createInteractivePlanResponder(
 export const PLAN_CLI_RECORD_FILE = "plan-record.json" as const;
 /** 往復の記録の版 */
 export const PLAN_CLI_RECORD_SCHEMA = "musunest-factory/plan-cli-record/v1" as const;
+/**
+ * P3 の申告の点検の診断を置くファイルの名前（`--out` の直下。`plan-record.json` とは**別**。Issue #432）。
+ * 申告 1 件ずつの対応（受理・落とした・途中停止のどれも）を持ち、`plan-record.json` は今の要約のままにする。
+ */
+export const PLAN_SURFACE_CHECK_FILE = "plan-surface-check.json" as const;
+/** 点検の診断の版 */
+export const PLAN_SURFACE_CHECK_SCHEMA = "musunest-factory/plan-surface-check/v1" as const;
 
 /** 記録に入れる問い（安定した形に写す） */
 export interface PlanCliQuestionRecord {
@@ -384,6 +391,35 @@ export interface PlanCliSurfaceCheckRecord {
   readonly judgments: readonly PlanCliSurfaceJudgmentRecord[];
 }
 
+/**
+ * 別ファイルの診断（`--out` の `plan-surface-check.json`。Issue #432）に載せる、申告 1 件の記録。
+ * 申告の添字・要件 ID・部分・理由・制約 ID・文書の版と、点検の段階・分類・adapter・確信度・根拠 ID を
+ * 結び付ける。**P3 の応答全体や会話の全文は入れない**。
+ */
+export interface PlanCliSurfaceClaimRecord {
+  readonly index: number;
+  readonly requirement_id: string;
+  readonly part: string;
+  readonly reason: string;
+  readonly constraint_ids: readonly string[];
+  readonly doc_version: string;
+  /** 点検の段階（`triage`・`support`・`recheck`） */
+  readonly stage: string;
+  readonly classification: string;
+  /** 答えた adapter（jev・llm・fake。答えが無ければ `none`） */
+  readonly adapter: string;
+  /** 確信度（不明は `null`） */
+  readonly confidence: number | null;
+  readonly evidence_id: string | null;
+}
+
+/** 別ファイルの診断（`--out` の診断。Issue #432）。`plan-record.json` とは別に置く */
+export interface PlanCliSurfaceCheckDiagnostic {
+  readonly schema_version: string;
+  readonly plan_id: string;
+  readonly claims: readonly PlanCliSurfaceClaimRecord[];
+}
+
 /** 往復の記録（`--out` の `plan-record.json`。質問・答え・段の記録・使った額） */
 export interface PlanCliRecord {
   readonly schema_version: string;
@@ -468,6 +504,30 @@ function toSurfaceCheckRecord(summary: PlanSurfaceCheckSummary): PlanCliSurfaceC
       confidence: judgment.confidence ?? null,
       model: judgment.model,
       answered_by: judgment.answeredBy,
+    })),
+  };
+}
+
+/** P3 の申告の点検の診断を、別ファイルに書く形（snake_case）に組む（Issue #432） */
+export function buildSurfaceCheckDiagnostic(input: {
+  readonly result: PlanResult;
+  readonly planId: string;
+}): PlanCliSurfaceCheckDiagnostic {
+  return {
+    schema_version: PLAN_SURFACE_CHECK_SCHEMA,
+    plan_id: input.planId,
+    claims: input.result.surfaceCheckDiagnostics.map((claim) => ({
+      index: claim.index,
+      requirement_id: claim.requirementId,
+      part: claim.part,
+      reason: claim.reason,
+      constraint_ids: claim.constraintIds,
+      doc_version: claim.docVersion,
+      stage: claim.stage,
+      classification: claim.classification,
+      adapter: claim.adapter,
+      confidence: claim.confidence,
+      evidence_id: claim.evidenceId,
     })),
   };
 }

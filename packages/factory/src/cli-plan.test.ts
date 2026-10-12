@@ -14,6 +14,7 @@ import {
   FREE_TEXT_INPUT,
   PLAN_CLI_RECORD_FILE,
   PLAN_CLI_RECORD_SCHEMA,
+  PLAN_SURFACE_CHECK_FILE,
   RECOMMENDED_INPUT,
   createAnswersFilePlanResponder,
   createInteractivePlanResponder,
@@ -40,7 +41,13 @@ import {
 } from "./plan/catalog.js";
 import { confirmQuestionName } from "./plan/confirm.js";
 import { freeTextQuestionName } from "./plan/answers.js";
-import { surfaceSupportQuestionName, surfaceTriageQuestionName } from "./plan/surface-check.js";
+import {
+  SURFACE_RECHECK_NO_EVIDENCE,
+  surfaceRecheckEvidenceQuestionName,
+  surfaceRecheckKindQuestionName,
+  surfaceSupportQuestionName,
+  surfaceTriageQuestionName,
+} from "./plan/surface-check.js";
 import {
   createRecordingClient,
   REQUIREMENT_LIST_OUTPUT,
@@ -345,6 +352,29 @@ interface PlanCliRecordShape {
 
 async function readPlanRecord(dir: string): Promise<PlanCliRecordShape> {
   return JSON.parse(await fs.readFile(`${dir}/${PLAN_CLI_RECORD_FILE}`, "utf8")) as PlanCliRecordShape;
+}
+
+/** 別ファイルの診断（`plan-surface-check.json`。Issue #432） */
+interface PlanSurfaceCheckShape {
+  readonly schema_version: string;
+  readonly plan_id: string;
+  readonly claims: readonly {
+    readonly index: number;
+    readonly requirement_id: string;
+    readonly part: string;
+    readonly reason: string;
+    readonly constraint_ids: readonly string[];
+    readonly doc_version: string;
+    readonly stage: string;
+    readonly classification: string;
+    readonly adapter: string;
+    readonly confidence: number | null;
+    readonly evidence_id: string | null;
+  }[];
+}
+
+async function readSurfaceCheck(dir: string): Promise<PlanSurfaceCheckShape> {
+  return JSON.parse(await fs.readFile(`${dir}/${PLAN_SURFACE_CHECK_FILE}`, "utf8")) as PlanSurfaceCheckShape;
 }
 
 // ── 引数の読み取り（--plan・--answers）─────────────────────────────
@@ -1418,6 +1448,24 @@ describe("P3 の申告の点検を plan-record.json の surface_check に残す�
       { question_id: "plan-triage:0", answer: "vocabulary-hole", confidence: 0.9, model: "fake-judge", answered_by: "fake" },
       { question_id: "plan-support:0", answer: "supports", confidence: 0.95, model: "fake-judge", answered_by: "fake" },
     ]);
+    // 別ファイルの診断（`plan-surface-check.json`）に、申告 1 件の対応が残る
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.schema_version).toBe("musunest-factory/plan-surface-check/v1");
+    expect(diagnostic.claims).toEqual([
+      {
+        index: 0,
+        requirement_id: "R-1",
+        part: "部分",
+        reason: "理由",
+        constraint_ids: ["記録"],
+        doc_version: "v1",
+        stage: "support",
+        classification: "supports",
+        adapter: "fake",
+        confidence: 0.95,
+        evidence_id: null,
+      },
+    ]);
     // 確定したので Build が流れる
     expect(spy).toHaveBeenCalledTimes(1);
   });
@@ -1447,6 +1495,9 @@ describe("P3 の申告の点検を plan-record.json の surface_check に残す�
       // 裏付けが「書いていない」→ 未点検
       [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
       [surfaceSupportQuestionName(0)]: choice("not-stated", 0.9),
+      // 再点検（Luna）も根拠が取れない → 未点検（根拠不足）のまま
+      [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceRecheckEvidenceQuestionName(0)]: choice(SURFACE_RECHECK_NO_EVIDENCE, 0.9),
     });
     const dir = `${directory}/surface-check-unchecked`;
     const answersPath = "surface-check-unchecked-answers.json";
@@ -1554,5 +1605,10 @@ describe("P3 の申告の点検を plan-record.json の surface_check に残す�
     expect(record.surface_check.dropped).toBe(1);
     expect(record.surface_check.judgments).toHaveLength(2);
     expect(record.surface_check.judgments.map((judgment) => judgment.answer)).toEqual(["not-a-problem", "vocabulary-hole"]);
+    // 途中停止でも、申告 1 件ずつの診断が別ファイルに残る（落とした 1 件目と、裏付けの前に止まった 2 件目）
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.claims).toHaveLength(2);
+    expect(diagnostic.claims[0]).toMatchObject({ index: 0, stage: "triage", classification: "not-a-problem" });
+    expect(diagnostic.claims[1]).toMatchObject({ index: 1, stage: "triage", classification: "vocabulary-hole" });
   });
 });

@@ -16,11 +16,13 @@ import type { TokenRates } from "./budget.js";
 import { bundleFiles } from "./bundle.js";
 import {
   buildPlanCliRecord,
+  buildSurfaceCheckDiagnostic,
   createAnswersFilePlanResponder,
   createInteractivePlanResponder,
   createPlanTranscript,
   parsePlanAnswers,
   PLAN_CLI_RECORD_FILE,
+  PLAN_SURFACE_CHECK_FILE,
   planBuildCostLine,
   planStopReasonLine,
   type Terminal,
@@ -383,6 +385,12 @@ async function runPlanThenBuild(
   await deps.writeFile(
     joinPath(job.outDir, PLAN_CLI_RECORD_FILE),
     JSON.stringify(buildPlanCliRecord({ result, transcript, budgetUsd: job.budgetUsd, planId })),
+  );
+  // P3 の申告 1 件ずつの診断を、**別のファイル**に置く（受理・落とした・途中停止のどれも。Issue #432）。
+  // `plan-record.json` は今の要約のままにする。
+  await deps.writeFile(
+    joinPath(job.outDir, PLAN_SURFACE_CHECK_FILE),
+    JSON.stringify(buildSurfaceCheckDiagnostic({ result, planId })),
   );
 
   if (result.kind !== "confirmed") {
