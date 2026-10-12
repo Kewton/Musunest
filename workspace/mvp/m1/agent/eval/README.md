@@ -140,7 +140,7 @@ a10d827eff477dda51394bff96faa0f9c42631cb818a1653098446bc979bfe70  subjects/C.jso
 
 ### 5.5 了承後の採点（#426）
 
-Plan を通した本は、依頼文の要件の一部が、利用者が了承した既定や除外で形が変わる。原文だけで数えると正しい了承を落ちと数え、了承後だけで数えると誤った了承や除外を見逃す（方法論 `01` §3・所有者の決定⑥）。だから**原文系**（凍結した v5 の判定のまま。集計の版 v1・v2）と**了承後系**を別に数え、並べて読む。了承後系は原文系の欄を変えない（足すだけ）。定義は**候補の計測の結果を見る前に**書いた（読んだ出力は形だけ。`workspace/mem/requests/impl-426.result.md`）。独立レビュー（`review-impl-426.result.md`）の指摘 1〜5 を `fix-426.result.md` で反映した：**判定の手段が無いものは「判定不能」「未評価」と正直に出し、誤り 0 件や充足に丸めない**。変更後・代替・追加の要件を判定する対応データは別の Issue で決める（ここには入れない）。
+Plan を通した本は、依頼文の要件の一部が、利用者が了承した既定や除外で形が変わる。原文だけで数えると正しい了承を落ちと数え、了承後だけで数えると誤った了承や除外を見逃す（方法論 `01` §3・所有者の決定⑥）。だから**原文系**（凍結した v5 の判定のまま。集計の版 v1・v2）と**了承後系**を別に数え、並べて読む。了承後系は原文系の欄を変えない（足すだけ）。定義は**候補の計測の結果を見る前に**書いた（読んだ出力は形だけ。`workspace/mem/requests/impl-426.result.md`）。独立レビュー（`review-impl-426.result.md`）の指摘 1〜5 を `fix-426.result.md` で反映した：**判定の手段が無いものは「判定不能」「未評価」と正直に出し、誤り 0 件や充足に丸めない**。再レビュー（`review-impl-426b.result.md`）で残った 1 件を `fix-426b.result.md` で反映した：**処分の照合ができたこと（`expected`・`allowed`）と、了承後の有効な要件（代替先・変更後・追加）を満たしたことを分けて持ち、後者を判定する手段が無い本は PASS にしない**。変更後・代替・追加の要件を判定する対応データは別の Issue で決める（ここには入れない）。
 
 #### 5.5.1 何を読むか
 
@@ -154,7 +154,8 @@ Plan を通した本は、依頼文の要件の一部が、利用者が了承し
 #### 5.5.2 了承後の要件と、原文の要件との対応
 
 - **了承後の要件** ＝ 確定した仕様の要件の**有効な部分**（`disposition: "met"` の部分。部分の無い要件は全体）。Build が満たすべきもの（`04` §5）と同じ読み
-- **形が変わったもの**（了承の対象）を 2 つに分ける。**除外** ＝ `accepted_removal` の部分と、`removed` の要件（作らない、と了承した）。**変更** ＝ `alternative` の部分と、`changed` の要件（別の形で作る、と了承した）。`added`（答えから増えた要件）は**数えるだけ**（原文の要件の形を変えたのではなく、足したもの。v5 で判定できる形ではない）
+- **形が変わったもの**（了承の対象）を 2 つに分ける。**除外** ＝ `accepted_removal` の部分と、`removed` の要件（作らない、と了承した）。**変更** ＝ `alternative` の部分と、`changed` の要件（別の形で作る、と了承した）。`added`（答えから増えた要件）は**照合しない**（原文の要件の形を変えたのではなく、足したもの。v5 で判定できる形ではない）が、下の「未検証の有効な要件」には数える
+- **処分の照合と、了承後の有効な要件の評価は別のもの**。照合が `expected` なのは「処分の対象が書けない要件に当たった」という判断で、除外の `expected` と申告の挙げ漏れの免除（5.5.3）はそれで決まる。一方、了承して除いた部分の**代替先**（`accepted_unwritable[].alternative_id`・`parts[].alternative_id` が指す要件）、`changed` の**変更後**の要件、`added` の**追加**の要件は、了承後の有効な要件として Build が満たすべきもの（`04` §5：有効な部分を**すべて**満たしたときだけ合格）だが、v5 には判定する手段が無い。これらを**未検証の有効な要件**として別に数え（`acceptance.effective`）、1 つでもあれば照合が `expected`・`allowed` でも、その本の了承後の判定は `UNEVALUATED`（5.5.4）
 - **原文の要件との対応は、採点定義の `keys`（正規表現）で取る**（申告の採点 `score-claims.mjs` と同じ照合）。**照合する文**：部分の処分なら**その部分の文だけ**（親の要件の全文・変更後の文・代わりの案の文は使わない。親の別の部分の語で当てたり、代替先の語で免除したりしない）。要件全体の `changed`・`removed` なら**元の要件（`from_requirement_id`）の文**（変更後の文は使わない。`changed` の元が自分自身なら元の文が無いので照合できない）
 - **当たる先**は 4 種で、**当たったものを全部**挙げる（先頭の 1 件で決めない）：当てはまった構造（無ければ主の構造）の**書けない要件**（`unwritable[].keys`）／**許される申告**（`DEFAULT_ALLOWED`＋定義の `allowedClaims`）／**書ける要件**（`checks[].keys`。**v5 の定義には無い**ので今は当たらない）／**他の構造の書けない要件**（`unwritable[].keys`。当てはまった構造では書けるのに処分した、の目印）
 - **処分 1 つの判定**（`judged`）：
@@ -180,6 +181,7 @@ Plan を通した本は、依頼文の要件の一部が、利用者が了承し
 | **判定不能の除外**（`counts.exclusions.unmatched`・`ambiguous`） | 誤りにも正しい了承にも数えない。書ける残りの落ちは、分母に残る判定が拾う |
 | **誤った了承**（`metrics_accepted.wrong_acceptances`） | **未評価**。変更後の要件を判定する対応データ（別の Issue）が無い間は `status: "unevaluated"` で、**証拠**（`evidence`：他の構造の書けない要件に当たった変更 ＝ `counts.changes.wrong`）と**判定不能・未評価**（`unmatched`・`ambiguous`・`unevaluated`）の件数を添える。**0 件に丸めない**（JSON・匿名の集計・標準出力のどれでも） |
 | **未評価の判定**（`unevaluated_checks`・`fulfillment_accepted.unevaluated`） | 変更が当てた書ける要件の判定。**分母からも分子からも外さない**（原文の判定のまま数える。落ちた判定を変更扱いにしても率は上がらない）。その本の了承後の判定は `UNEVALUATED` |
+| **未検証の有効な要件**（`acceptance.effective`・`metrics_accepted.unverified_requirements`） | 判定の手段が無い了承後の有効な要件。出どころは 4 つ：`accepted_unwritable` ＝ 了承して除いた記録の代替先（`accepted_unwritable[].alternative_id` が指す要件）／`part` ＝ 部分の代替先（`met` でない部分の `alternative_id` が指す要件）／`changed` ＝ 変更後の要件（その要件自身）／`added` ＝ 追加の要件（その要件自身）。**要件 ID で 1 件**に数え（同じ要件を 2 つの出どころが指せば出どころを両方残す）、指す先が `requirements` に無くても数える（契約の検査が落とすので確定した本には現れない）。`effective.status` は未検証が 0 なら `evaluated`、1 つでもあれば `unevaluated`。**分母・分子は引かない**（v2 と同じまま）。その本の了承後の判定は `UNEVALUATED`（照合が `expected`・`allowed` でも）。件数は行（`effective.unverified[]`・`effective.counts`）・集計（`unverified_requirements`・`unverified_sources`・`unverified_runs`）・匿名（数だけ）・標準出力に出す。**除外だけ**（代替先も追加も無い）の本は、照合が `expected`・`allowed` なら今までどおり PASS になりうる |
 | 許される了承（`allowed`） | 許される申告に当たるもの。数えない |
 | 変更の数（`changes`）・決めたこと（`decisions`） | `added`／`changed`／`removed` の要件の数と、既定で決めたことの数。照合しない（既定で決めたことは、原文が固定しない事項の既定で、要件の文を変えない。変えたなら `change` に現れる） |
 
@@ -193,23 +195,23 @@ Plan を通した本は、依頼文の要件の一部が、利用者が了承し
 | どちらも無く、計測も Plan を通していない | `none` | **対象外**（`fulfillment_accepted`・`claims_accepted`・`verdict_accepted` は `null`。了承後系の分母に入れない） |
 
 - **了承後系の分母 ＝ v2 の分母**（当てはまった構造の判定の数。生成失敗・静的 NG・役割が見つからない・記録の無い・読めない本は充足 0 で、主の構造の判定の数。#425 の決まりをそのまま当てる）。**了承で変わった判定も、誤った除外も、分母から外さない**。分子 ＝ 原文の判定で満たした数（失敗の本は 0）。だから充足率の数は v2 と同じで、了承後系が足すのは未評価の印（`fulfillment.accepted.unevaluated`：判定の数と本の数）と、申告（`claims_accepted`）・判定（`verdict_accepted`）の読み替えである。`plan.json` があれば、失敗の本でも了承の記録（除外・変更の照合）は出す
-- **了承後の最終の判定**（`verdict_accepted`）：静的 NG は `STATIC_NG`。変更のうち `expected`・`allowed` でないものがあれば原則 `UNEVALUATED`（PASS にしない）。ただし変更が当てた判定が分かっていて（`unevaluated` だけ）、それ以外の判定が落ちているか挙げ漏れがあれば `FAIL`（落ちは隠さない）。残りは `finalVerdict` を了承後の申告（`claims_accepted`）で取る
+- **了承後の最終の判定**（`verdict_accepted`）：静的 NG は `STATIC_NG`。変更のうち `expected`・`allowed` でないものがあるか、**未検証の有効な要件が 1 つでもあれば**原則 `UNEVALUATED`（PASS にしない。照合が `expected`・`allowed` でも同じ）。ただし変更が当てた判定が分かっていて（`wrong`・判定不能の変更が無い）、未評価の判定の外に落ちがあるか挙げ漏れがあれば `FAIL`（落ちは隠さない。未検証の代替先があっても同じ）。残りは `finalVerdict` を了承後の申告（`claims_accepted`）で取る
 
 #### 5.5.5 出力の欄（足しただけ。既存の欄の名前と意味は変えない）
 
 | 欄 | 中身 |
 |---|---|
 | `scoring_systems` | 原文系・了承後系の説明 |
-| `rows[].acceptance` | 了承の記録の読み：`status`・`reasons`・`plan_outcome`、記録の無い本は `absent_reason`、確定した本はさらに `plan_id`・`revision`・`structure`（照合に使った構造）・`changes`・`decisions`・`exclusions[]`・`changed[]`（ID・種類・照合の範囲 `scope`・当たった先 `matched[]`・判定 `judged`）・`counts`（除外・変更ごとの判定の件数）・`accepted_unwritable_ids`・`unevaluated_checks`・`allowed` |
+| `rows[].acceptance` | 了承の記録の読み：`status`・`reasons`・`plan_outcome`、記録の無い本は `absent_reason`、確定した本はさらに `plan_id`・`revision`・`structure`（照合に使った構造）・`changes`・`decisions`・`exclusions[]`・`changed[]`（ID・種類・照合の範囲 `scope`・当たった先 `matched[]`・判定 `judged`）・`counts`（除外・変更ごとの判定の件数）・`accepted_unwritable_ids`・`unevaluated_checks`・`allowed`・`effective`（有効な要件の評価の状態：`status`・`unverified[]`（要件 ID と出どころ `via[]`）・`counts`（`total` と出どころごと）） |
 | `rows[].claims_accepted` | 了承後の申告の採点：`structure`・`expected`・`correct`・`accepted`（了承済みで申告の無いもの）・`optional`・`missed`・`verdict`。誤った申告は原文系の `claims.false_claims` と同じ |
 | `rows[].fulfillment_accepted` | 了承後の充足：`fulfilled`・`total`・`total_from`（v2 と同じ数）・`unevaluated`（変更が当てた判定の名前） |
 | `rows[].verdict_accepted` | 了承後の最終の判定（確定した本だけ。`PASS`／`FAIL`／`STATIC_NG`／`UNEVALUATED`。ほかは `null`） |
 | `fulfillment.accepted` | 了承後系の充足率（`partial`・`writable`・`all`。対象の本だけ）と `unevaluated`（`checks`・`runs`） |
-| `metrics_accepted` | 了承後系の指標：対象の本数（`runs`・`confirmed`・`absent`・`absent_reasons`・`invalid`）・`spec_pass_writable`・`missed_partial`・`spec_pass_partial`・`unevaluated_runs`・`unevaluated_checks`・`wrong_exclusion_runs`・`undecided_exclusion_runs`（分母は確定した本）・`wrong_exclusions`・`undecided_exclusions`・`wrong_acceptances`（**未評価**の状態と内訳）・`wrong_acceptance_runs`（同）・`changes`・`decisions` |
+| `metrics_accepted` | 了承後系の指標：対象の本数（`runs`・`confirmed`・`absent`・`absent_reasons`・`invalid`）・`spec_pass_writable`・`missed_partial`・`spec_pass_partial`・`unevaluated_runs`・`unevaluated_checks`・`unverified_requirements`（未検証の有効な要件の数）・`unverified_sources`（出どころごと）・`unverified_runs`（それを持つ本。分母は確定した本）・`wrong_exclusion_runs`・`undecided_exclusion_runs`（分母は確定した本）・`wrong_exclusions`・`undecided_exclusions`・`wrong_acceptances`（**未評価**の状態と内訳）・`wrong_acceptance_runs`（同）・`changes`・`decisions` |
 | `bySubject[].pass_accepted` | 題材ごとの了承後の合格（`UNEVALUATED` は合格に数えない） |
 | `fingerprints.appspec_schema` | 契約の検査に使った `packages/appspec-schema/dist` の指紋（条件のファイルには無いので照合しない） |
 
-匿名の集計には `fulfillment.accepted` と `metrics_accepted`（数・区間・既知の状態だけ）を足す。標準出力には行ごとの了承後の判定の列と、了承後の 1 行（本数の内訳・未評価の本・誤った除外と判定不能・誤った了承は「未評価」と内訳・充足と未評価の判定）を足す。
+匿名の集計には `fulfillment.accepted` と `metrics_accepted`（数・区間・既知の状態だけ。未検証の有効な要件は数と出どころごとの数だけで、要件の ID は出さない）を足す。標準出力には行ごとの了承後の判定の列と、了承後の 1 行（本数の内訳・未評価の本・未検証の有効な要件の件数と内訳（代替先・変更後・追加）・誤った除外と判定不能・誤った了承は「未評価」と内訳・充足と未評価の判定）を足す。
 
 #### 5.5.6 採らなかった案
 
@@ -223,15 +225,18 @@ Plan を通した本は、依頼文の要件の一部が、利用者が了承し
 | 了承で変わった判定を分母から外す（最初の実装） | 落ちた判定を変更扱いにすると率が上がる（レビューの指摘 2）。変更後を判定する手段が無いなら、外さず未評価の印を付ける |
 | 何にも当たらない除外を誤った除外に数える（最初の実装） | 書ける要件の鍵が無い v5 では、判定できないものを誤りに丸めることになる（指摘 1・3）。判定不能として件数で出し、免除にも誤りにも使わない |
 | 親の要件の全文を部分の照合に使う（最初の実装） | 親の別の部分の語で当たり、書ける部分だけの除外が正しい了承になる（指摘 3） |
+| 照合が `expected`・`allowed` なら代替先・追加の要件も満たしたとみなす（1 回目の直し） | 照合は処分の対象が書けない要件に当たったという判断で、代替先・変更後・追加の要件の充足の判定ではない。今の工場は `accepted_removal` のたびに代替先の要件を足して `alternative_id` で指すので、代替先を検証していない本が PASS と合格率に入る（再レビューの指摘 2）。照合の結果と有効な要件の評価の状態を別に持ち、未検証が 1 つでもあれば `UNEVALUATED` にする |
+| 未検証の有効な要件のある本を `FAIL` にする | 満たしていない証拠が無い。判定の手段が無いことと落ちは別（判定不能・未評価の扱いと同じ）。対応データが入ったら判定できる |
 | 既定で決めたこと（`decisions`）を要件に照合する | 要件の文を変えない（変えたなら `change` に現れる）。照合すると、原文と同じ既定を決めた本まで誤った了承に数える |
 | `plan.json` の無い本を了承後系の対象外にする | Plan を通した計測で Plan が確定しなかった本は失敗であり、分母から落とすと率が上がる（#425 の分母の決まりに反する） |
 | 契約の検査を工場の dist から読む | 工場の公開の面（`@musunest/factory` の dist）は契約の検査を再公開していない。`packages/` を変えずに、契約の持ち主の `appspec-schema` の dist から同じ関数を読む |
 
 #### 5.5.7 限界（#426 で直していないこと）
 
-- v5 の定義には `checks[].keys` が無いので、**書ける要件の除外・変更は照合できず、判定不能（`unmatched`）に入る**。誤った了承の指標は、対応データ（変更後・代替・追加の要件の判定。別の Issue）が入るまで**未評価**のまま。今の工場の Plan は `accepted_removal` の部分と `added` の要件しか作らない（`changed`・`removed`・`alternative` は契約にあるが未使用）ので、今の計測では判定不能の除外が出るだけで、未評価の本は出ない
+- v5 の定義には `checks[].keys` が無いので、**書ける要件の除外・変更は照合できず、判定不能（`unmatched`）に入る**。誤った了承の指標は、対応データ（変更後・代替・追加の要件の判定。別の Issue）が入るまで**未評価**のまま。今の工場の Plan は `accepted_removal` の部分（**そのたびに代替先の要件を足し、`accepted_unwritable[].alternative_id` で指す**。`packages/factory` の `run-plan.ts`）と `added` の要件を作る（`changed`・`removed`・`alternative` は契約にあるが未使用）。**だから今の工場の出力でも、書けない要件を 1 つでも了承して除いた本・答えから要件が増えた本は、未検証の有効な要件を持ち、了承後の判定は `UNEVALUATED` になる**（過去の計測では確定した 3 本がすべて該当した。`fix-426b.result.md`）。PASS になりうるのは、了承の記録に代替先も追加も無い本だけ
+- **未検証の有効な要件は「満たしたか分からない」であって「満たしていない」ではない**。対応データが入るまで、了承後の合格率（`spec_pass_*`・`pass_accepted`）はこれらの本を合格に数えず、分母には残す。合格率を読むときは `unverified_runs`・`unevaluated_runs` と並べて読む
 - **許される申告の事項**（`DEFAULT_ALLOWED`：ボタンの表示名・最初に開く画面）**を、無条件に要件の除外・変更でも許している**（`allowed`）。申告で許されることと、要件として除くことを同じに扱ってよいかは点検していない（レビュー §3）
 - 契約の検査は読んだ `plan.json` 単体に当てる。納品物の manifest・検証の結果との SHA の結び付き、工場の入口（`run-agent.mjs` が起動する CLI）が門を通したことは確かめない
-- 正しい了承（`expected`）の代わりの案（`alternative`）が実装されたこと、`added` の要件が満たされたことは確かめない
+- 正しい了承（`expected`）の代替先（`alternative_id` が指す要件・`alternative` の部分）が実装されたこと、`changed` の変更後・`added` の要件が満たされたことは確かめない（だから未検証として数え、本を PASS にしない。判定の手段は対応データの Issue で決める）
 - 他の構造の書けない要件に当たった処分の `matched` は、その要件の ID を目印に出すだけで、処分した部分がその要件そのものである保証はない（鍵の部分一致）
 - Plan が確定して納品物に `plan.json` が無い本（`confirmed_without_plan`）は、Build のどこまで進んだかを記録から読めない（往復の記録は Build の前に書かれる）
