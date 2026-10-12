@@ -13,22 +13,43 @@ import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import {
   BUNDLE_MANIFEST_FILE,
+  DESIGN_FILE,
+  DIAGNOSTICS_DECLARATION_FILE,
+  DIAGNOSTICS_DESIGN_FILE,
+  DIAGNOSTICS_LISTING_FILE,
+  DIAGNOSTICS_MAPPINGS_FILE,
+  DIAGNOSTICS_STATIC_CHECK_FILE,
+  DIAGNOSTICS_TEST_SUITE_FILE,
+  MAPPINGS_FILE,
+  MATERIAL_KINDS,
   PLAN_FILE,
   REQUIREMENTS_FILE,
+  TEST_SUITE_FILE,
   UNWRITABLE_FILE,
   VERIFICATION_FILE,
   assembleBundle,
+  buildDiagnostics,
   bundleFiles,
   toBundleNatureDiscrepancies,
+  type BundleEvaluationRow,
   type BundleInput,
   type BundleJudgeUsage,
+  type BundleMaterialEntry,
   type BundleNatureDiscrepancy,
   type BundlePartialReasons,
   type BundleSummary,
   type BundleUnwritable,
   type BundleVerification,
 } from "./bundle.js";
-import { requirementsFromPlan, type CorrespondenceResult, type Declaration, type RequirementList } from "./pipeline.js";
+import {
+  requirementsFromPlan,
+  type CorrespondenceResult,
+  type Declaration,
+  type DesignResult,
+  type RequirementList,
+  type RoleNameMapping,
+  type TestSuite,
+} from "./pipeline.js";
 import { buildSummary, type RunRecord } from "./record.js";
 import {
   ADDED_OPEN_ISSUE_TEXT,
@@ -84,6 +105,56 @@ const SUMMARY: BundleSummary = {
 
 const declaration: Declaration = { source: DECLARATION_SOURCE };
 
+/** 受理した設計（②。Issue #417）の例 */
+const DESIGN: DesignResult = {
+  roles: [{ roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null }],
+  designs: [{ requirementId: "R-1", nature: "ruled", verification: { kind: "fixed-test" }, vocabulary: ["計算"], placement: ["computed"], unwritable: [] }],
+};
+
+/** 受理した固定した試験の組（②'。Issue #417）の例 */
+const TEST_SUITE: TestSuite = {
+  classifications: [{ requirementId: "R-1", nature: "ruled" }],
+  tests: [
+    {
+      id: "t1",
+      target: { requirementId: "R-1", kind: "computation", roleId: "record.total" },
+      kind: "normal",
+      operation: "compute",
+      clock: "2026-09-16T12:00:00+09:00",
+      input: { amount: 21 },
+      referenceData: [],
+      expected: { kind: "ok", value: 42 },
+    },
+  ],
+};
+
+/** 提出された対応（③。Issue #417）の例 */
+const MAPPINGS: readonly RoleNameMapping[] = [{ roleId: "record.total", name: "total" }];
+
+/** 完走のときの、材料の状態の一覧（Issue #417）の例 */
+const MATERIALS: readonly BundleMaterialEntry[] = [
+  { material: "design", state: "accepted", version: { stage_index: 1, sha256: "design-sha" } },
+  { material: "test_suite", state: "accepted", version: { stage_index: 2, sha256: "suite-sha" } },
+  { material: "mappings", state: "accepted", version: { stage_index: 3, sha256: "mappings-sha" } },
+  { material: "declaration", state: "candidate", version: { sha256: "declared-sha" }, static_check_passed: true },
+  { material: "correspondence", state: "accepted" },
+  { material: "test_run", state: "accepted" },
+  { material: "evaluation", state: "accepted" },
+];
+
+/** 完走のときの、版ごとの評価の行（Issue #417）の例 */
+const EVALUATIONS: readonly BundleEvaluationRow[] = [
+  {
+    declaration_sha256: "declared-sha",
+    static_check_passed: true,
+    static_check_diagnostics: 0,
+    correspondence_misses: 0,
+    test_mismatches: 0,
+    test_unresolved: 0,
+    routes: {},
+  },
+];
+
 const input = (overrides: Partial<BundleInput> = {}): BundleInput => ({
   runId: "run-1",
   storageUnit: "test-unit",
@@ -103,6 +174,11 @@ const input = (overrides: Partial<BundleInput> = {}): BundleInput => ({
   verificationProfile: "musunest-factory/l2",
   specEngineVersion: "0.0.0",
   factoryVersion: "0.0.0",
+  design: DESIGN,
+  testSuite: TEST_SUITE,
+  mappings: MAPPINGS,
+  materials: MATERIALS,
+  evaluations: EVALUATIONS,
   ...overrides,
 });
 
@@ -129,6 +205,25 @@ describe("⑧ 納品物（02 §4・F-10）", () => {
       const text = findText(bundle.artifacts, entry.path);
       expect(entry.sha256).toBe(await sha256Hex(text));
       expect(entry.size_bytes).toBe(byteLength(text));
+    }
+  });
+
+  it("manifest 自身を除く納品物の全ファイルが、files と過不足なく一致する（追加の 3 ファイルを含む。Issue #417）", async () => {
+    const bundle = await assembleBundle(input());
+    // 納品物のファイルの集合（manifest 自身は含めない）と、manifest の files が同じ並びである
+    expect(bundle.manifest.files.map((entry) => entry.path)).toEqual(
+      bundle.artifacts.map((artifact) => artifact.path),
+    );
+    // 追加の 3 ファイル（設計・固定した試験・提出された対応）が入っている
+    const paths = bundle.manifest.files.map((entry) => entry.path);
+    expect(paths).toContain(DESIGN_FILE);
+    expect(paths).toContain(TEST_SUITE_FILE);
+    expect(paths).toContain(MAPPINGS_FILE);
+    // 各ファイルの中に、**最後の宣言の SHA-256** が書いてある（02 §4。Issue #417）
+    const verification = JSON.parse(findText(bundle.artifacts, VERIFICATION_FILE)) as BundleVerification;
+    for (const path of [DESIGN_FILE, TEST_SUITE_FILE, MAPPINGS_FILE]) {
+      const material = JSON.parse(findText(bundle.artifacts, path)) as { declaration_sha256: string };
+      expect(material.declaration_sha256, path).toBe(verification.declaration_sha256);
     }
   });
 
@@ -442,5 +537,105 @@ describe("構造の検査の記録を、照合の記録に入れる（02 §1.3�
     const bundle = await assembleBundle(input());
     const verification = JSON.parse(findText(bundle.artifacts, VERIFICATION_FILE)) as BundleVerification;
     expect(verification.structural_checks).toEqual([]);
+  });
+});
+
+// ── 材料の状態と、早期停止の診断（§1.4・§4・Issue #417）──────────────────────
+
+describe("材料の状態と、早期停止の診断（§1.4・§4・Issue #417）", () => {
+  it("検証の結果に、材料の状態の一覧と、版ごとの評価の行・回数を出す", async () => {
+    const bundle = await assembleBundle(input());
+    const verification = JSON.parse(findText(bundle.artifacts, VERIFICATION_FILE)) as BundleVerification;
+    expect(verification.materials).toEqual(MATERIALS);
+    expect(verification.evaluations).toEqual(EVALUATIONS);
+    // 回数は段の記録から数える（この例は段が空なので全部 0）
+    expect(verification.counts).toEqual({
+      evaluations: 0,
+      write_initial: 0,
+      write_redos: 0,
+      correspondence_generations: 0,
+      repair_executions: 0,
+    });
+  });
+
+  it("早期停止の診断で、宣言が無ければ宣言のファイルも manifest も作らず、一覧に未受理と未実行を区別して出す", () => {
+    const materials: readonly BundleMaterialEntry[] = [
+      { material: "design", state: "accepted", version: { stage_index: 1, sha256: "design-sha" } },
+      { material: "test_suite", state: "unaccepted" },
+      { material: "mappings", state: "unexecuted" },
+      { material: "declaration", state: "unexecuted" },
+      { material: "correspondence", state: "unexecuted" },
+      { material: "test_run", state: "unexecuted" },
+      { material: "evaluation", state: "unexecuted" },
+    ];
+    const diagnostics = buildDiagnostics({
+      stopped: { stage: "test-suite", kind: "malformed" },
+      materials,
+      evaluations: [],
+      counts: { evaluations: 0, write_initial: 0, write_redos: 0, correspondence_generations: 0, repair_executions: 0 },
+      design: DESIGN,
+    });
+    const paths = diagnostics.map((artifact) => artifact.path);
+    // 在る材料（設計）のファイルは作る
+    expect(paths).toContain(DIAGNOSTICS_DESIGN_FILE);
+    // 無い材料のファイルは作らない（宣言のファイルも、manifest も）
+    expect(paths).not.toContain(DIAGNOSTICS_DECLARATION_FILE);
+    expect(paths).not.toContain(DIAGNOSTICS_TEST_SUITE_FILE);
+    expect(paths).not.toContain(DIAGNOSTICS_MAPPINGS_FILE);
+    expect(paths).not.toContain(DIAGNOSTICS_STATIC_CHECK_FILE);
+    expect(paths).not.toContain(BUNDLE_MANIFEST_FILE);
+
+    // 一覧は常にある。未受理（試験）と未実行（対応・宣言・評価）を区別して出す
+    const listing = JSON.parse(findText(diagnostics, DIAGNOSTICS_LISTING_FILE)) as {
+      stopped: { stage: string; kind: string };
+      materials: readonly BundleMaterialEntry[];
+      evaluations: readonly BundleEvaluationRow[];
+    };
+    expect(listing.stopped).toEqual({ stage: "test-suite", kind: "malformed" });
+    const stateOf = (material: string) => listing.materials.find((entry) => entry.material === material)?.state;
+    expect(stateOf("design")).toBe("accepted");
+    expect(stateOf("test_suite")).toBe("unaccepted");
+    expect(stateOf("mappings")).toBe("unexecuted");
+    expect(stateOf("declaration")).toBe("unexecuted");
+    expect(stateOf("evaluation")).toBe("unexecuted");
+    // 一覧には、材料の種類がすべて出る（1 行も欠けない）
+    expect(listing.materials.map((entry) => entry.material)).toEqual([...MATERIAL_KINDS]);
+  });
+
+  it("材料のファイル名は、コードの定数である（モデル由来の ID をファイル名にしない）", async () => {
+    // 診断の 5 つの材料のファイルは、エクスポートした定数と一致する
+    expect(DIAGNOSTICS_DESIGN_FILE).toBe("diagnostics/design.json");
+    expect(DIAGNOSTICS_TEST_SUITE_FILE).toBe("diagnostics/test-suite.json");
+    expect(DIAGNOSTICS_MAPPINGS_FILE).toBe("diagnostics/mappings.json");
+    expect(DIAGNOSTICS_DECLARATION_FILE).toBe("diagnostics/declaration.json");
+    expect(DIAGNOSTICS_STATIC_CHECK_FILE).toBe("diagnostics/static-check.json");
+    // 納品物に足す 3 ファイルも定数で決まる
+    expect(DESIGN_FILE).toBe("artifacts/design.json");
+    expect(TEST_SUITE_FILE).toBe("artifacts/test-suite.json");
+    expect(MAPPINGS_FILE).toBe("artifacts/mappings.json");
+    // 早期停止の診断は、納品物の置き場所（artifacts/）を使わない
+    const diagnostics = buildDiagnostics({
+      stopped: { stage: "design", kind: "malformed" },
+      materials: MATERIALS,
+      evaluations: EVALUATIONS,
+      counts: { evaluations: 1, write_initial: 1, write_redos: 0, correspondence_generations: 1, repair_executions: 0 },
+    });
+    expect(diagnostics.every((artifact) => !artifact.path.startsWith("artifacts/"))).toBe(true);
+  });
+
+  it("宣言が無ければ、診断の宣言のファイルを作らないが、宣言があれば作る", () => {
+    const base = {
+      stopped: { stage: "write", kind: "malformed" },
+      materials: MATERIALS,
+      evaluations: EVALUATIONS,
+      counts: { evaluations: 1, write_initial: 1, write_redos: 0, correspondence_generations: 0, repair_executions: 0 },
+    };
+    const withoutDeclaration = buildDiagnostics(base);
+    expect(withoutDeclaration.map((artifact) => artifact.path)).not.toContain(DIAGNOSTICS_DECLARATION_FILE);
+
+    const withDeclaration = buildDiagnostics({ ...base, declarations: [{ sha256: "declared-sha", declaration: DECLARATION_SOURCE }] });
+    const file = findText(withDeclaration, DIAGNOSTICS_DECLARATION_FILE);
+    const parsed = JSON.parse(file) as { declarations: readonly { sha256: string; declaration: string }[] };
+    expect(parsed.declarations).toEqual([{ sha256: "declared-sha", declaration: DECLARATION_SOURCE }]);
   });
 });

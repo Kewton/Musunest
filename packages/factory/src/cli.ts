@@ -313,6 +313,16 @@ async function runBuild(
       await deps.writeFile(joinPath(job.outDir, file.path), file.text);
     }
   }
+  // 早期停止で診断が空でなければ、出力のディレクトリの下の**診断の置き場所**に書く（Issue #417）。
+  // **納品物の成果物と manifest は書かない**し、**診断の有無を終了コードの条件に加えない**。
+  if (run.bundle === null && run.diagnostics.length > 0) {
+    await deps.makeDirectory(job.outDir);
+    for (const file of run.diagnostics) {
+      const parent = parentOf(file.path);
+      if (parent !== "") await deps.makeDirectory(joinPath(job.outDir, parent));
+      await deps.writeFile(joinPath(job.outDir, file.path), file.text);
+    }
+  }
   log(JSON.stringify(run.summary));
   return {
     code: run.bundle === null ? EXIT_RUN_FAILED : EXIT_OK,

@@ -16,7 +16,7 @@ import {
   parseCliArguments,
   runCli,
 } from "./cli.js";
-import { BUNDLE_MANIFEST_FILE } from "./bundle.js";
+import { BUNDLE_MANIFEST_FILE, DESIGN_FILE, DIAGNOSTICS_LISTING_FILE, MAPPINGS_FILE, TEST_SUITE_FILE } from "./bundle.js";
 import * as runModule from "./run.js";
 import type { Judge, JudgeRequest } from "./judge.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse } from "./llm.js";
@@ -192,10 +192,18 @@ describe("偽物を差し込んで 1 回の生成を流し、ディレクトリ�
   it("納品物を書き、最後の行に要約を出す", async () => {
     const recording = createRecordingClient(recordedRun());
     const lines: string[] = [];
+    const written: string[] = [];
     const code = await runCli({
       argv: ["--", "request.txt", "--out", directory],
       env: { [API_KEY_ENV]: "sk-FAKE" },
-      ...realFileDeps(),
+      readFile: async () => SOURCE_TEXT,
+      writeFile: async (path: string, text: string) => {
+        written.push(path);
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path: string) => {
+        await fs.mkdir(path, { recursive: true });
+      },
       loadDocuments: async () => [],
       makeClient: () => recording.client,
       log: (line) => lines.push(line),
@@ -206,9 +214,19 @@ describe("偽物を差し込んで 1 回の生成を流し、ディレクトリ�
       files: readonly { path: string }[];
     };
     expect(manifest.files.map((file) => file.path)).toContain("artifacts/app.spec.yaml");
+    // Issue #417：受理した材料（設計・固定した試験・提出された対応）の 3 ファイルが manifest に載る
+    const paths = manifest.files.map((file) => file.path);
+    for (const path of [DESIGN_FILE, TEST_SUITE_FILE, MAPPINGS_FILE]) {
+      expect(paths, path).toContain(path);
+    }
     for (const file of manifest.files) {
       expect(await fs.readFile(`${directory}/${file.path}`, "utf8")).not.toBe("");
     }
+    // 書いたファイルの集合は、納品物のファイル（manifest 自身を含む）の集合と一致する
+    const expected = [...paths.map((path) => `${directory}/${path}`), `${directory}/${BUNDLE_MANIFEST_FILE}`].sort();
+    expect([...written].sort()).toEqual(expected);
+    // 完走では、診断の置き場所に書かない（Issue #417）
+    expect(written.some((path) => path.includes("/diagnostics/"))).toBe(false);
 
     const last = lines.at(-1) ?? "";
     const summary = JSON.parse(last) as { schema_version: string; verdict: string };
@@ -235,6 +253,16 @@ describe("引数で変えた費用の上限が、生成に届く（02 §1.5）",
     expect(code).toBe(EXIT_RUN_FAILED);
     const summary = JSON.parse(lines.at(-1) ?? "{}") as { stop_class: string | null };
     expect(summary.stop_class).toBe("budget");
+
+    // Issue #417：早期停止では、出力のディレクトリの下の**診断の置き場所**に一覧が書かれる。
+    // **納品物の成果物と manifest は書かない**
+    const listing = JSON.parse(
+      await fs.readFile(`${directory}-budget/${DIAGNOSTICS_LISTING_FILE}`, "utf8"),
+    ) as { stopped: { stage: string; kind: string } | null; materials: readonly { material: string }[] };
+    expect(listing.stopped?.kind).toBe("budget");
+    expect(listing.materials.length).toBeGreaterThan(0);
+    await expect(fs.readFile(`${directory}-budget/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
+    await expect(fs.readFile(`${directory}-budget/artifacts/app.spec.yaml`, "utf8")).rejects.toThrow();
   });
 });
 
