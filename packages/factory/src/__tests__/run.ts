@@ -170,22 +170,29 @@ export function structured(output: unknown, usage: LlmUsage | undefined = USAGE)
   return { kind: "structured", output, usage };
 }
 
-/** 完走する道の記録（①→①'→②→②'→③→⑤a の順。⑥ は要らない） */
+/**
+ * 完走する道の記録（①→①'→②→②'→③→⑤a の順。⑥ は要らない）。
+ *
+ * **既定は新契約の fixture**（役割 ID の表・選択肢・所属を持つ設計。Issue #418）。旧形式の設計を渡す
+ * 例は、`makeRunInput` の `designVersion` に `"legacy"` を明示する。`mappings` を省くと、新契約の既定の
+ * 対応（`MAPPINGS_PLANNED`）を使う。
+ */
 export function recordedRun(
   options: {
     readonly write?: string;
     readonly design?: unknown;
     readonly suite?: unknown;
     readonly correspondence?: unknown;
+    readonly mappings?: unknown;
   } = {},
 ): readonly RecordedCall[] {
   return [
     structured(REQUIREMENT_LIST_OUTPUT),
     structured(REVERSE_CHECK_OUTPUT),
-    structured(options.design ?? DESIGN_OUTPUT),
-    structured(options.suite ?? TEST_SUITE_OUTPUT),
-    structured({ declaration: options.write ?? DECLARATION_SOURCE }),
-    structured(options.correspondence ?? CORRESPONDENCE_OUTPUT),
+    structured(options.design ?? DESIGN_OUTPUT_MAPPED),
+    structured(options.suite ?? TEST_SUITE_OUTPUT_MAPPED),
+    structured({ declaration: options.write ?? DECLARATION_SOURCE, mappings: options.mappings ?? MAPPINGS_PLANNED }),
+    structured(options.correspondence ?? CORRESPONDENCE_OUTPUT_PLANNED),
   ];
 }
 
@@ -224,14 +231,17 @@ export const DOCUMENTS: readonly PromptDocument[] = SAMPLE_DOCUMENTS;
 export const DECLARATION_SOURCE_MISMATCH = DECLARATION_SOURCE.replace("expression: amount * 2", "expression: amount * 3");
 
 /**
- * ② の答え（役割 ID の表を持つ新形式。Issue #309）。③ が提出した対応の点検（⑤a）と、
- * 対応の表の不備（③ のやり直し）を試すのに使う。
+ * ② の答え（役割 ID の表・選択肢・所属を持つ新形式。Issue #309・#418）。③ が提出した対応の点検（⑤a）と、
+ * 対応の表の不備（③ のやり直し）、②' の対象の所属の点検に使う。
+ *
+ * `record`（entity）は R-1（`record.total`）と R-2（`record.extra`）の両方が使うので `shared` を真にする。
+ * 各計算は entity `record` を参照するので、R-1・R-2 は `record` にも依存として所属する。
  */
 export const DESIGN_OUTPUT_MAPPED = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "記録", shared: false, aliasOf: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "合計", shared: false, aliasOf: null },
-    { roleId: "record.extra", kind: "computation", entity: "record", name: "補助", shared: false, aliasOf: null },
+    { roleId: "record", kind: "entity", entity: null, name: "記録", shared: true, aliasOf: null, options: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "合計", shared: false, aliasOf: null, options: null },
+    { roleId: "record.extra", kind: "computation", entity: "record", name: "補助", shared: false, aliasOf: null, options: null },
   ],
   designs: [
     {
@@ -241,6 +251,10 @@ export const DESIGN_OUTPUT_MAPPED = {
       vocabulary: ["計算"],
       placement: ["computed"],
       unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "記録の行を参照・識別するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
     },
     {
       requirementId: "R-2",
@@ -249,6 +263,26 @@ export const DESIGN_OUTPUT_MAPPED = {
       vocabulary: ["計算"],
       placement: ["computed"],
       unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "記録の行を参照・識別するため" },
+        { roleId: "record.extra", basis: "stated", reason: null },
+      ],
+    },
+  ],
+};
+
+/**
+ * ② の答え（新契約。R-2 を書けないと申告する。部分案の道。Issue #418）。所属と `options` を持ち、
+ * 申告は「部分・制約 ID・理由」の組（`SAMPLE_DOCUMENTS` の `### computed` を根拠にする）。
+ */
+export const DESIGN_OUTPUT_PLANNED_PARTIAL = {
+  roles: DESIGN_OUTPUT_MAPPED.roles,
+  designs: [
+    DESIGN_OUTPUT_MAPPED.designs[0],
+    {
+      ...DESIGN_OUTPUT_MAPPED.designs[1],
+      unwritable: [{ part: "補助の値の並べ替えは書けない", constraintIds: ["computed"], reason: "文書に欄が無い" }],
+      notes: [],
     },
   ],
 };
@@ -278,6 +312,30 @@ export const TEST_SUITE_OUTPUT_MAPPED = {
     roleSuiteTest("t4", "R-2", "record.extra", "normal"),
     roleSuiteTest("t5", "R-2", "record.extra", "abnormal"),
     roleSuiteTest("t6", "R-2", "record.extra", "boundary"),
+  ],
+};
+
+/** ③ の提出する対応（新契約の既定。役割 ID → 宣言に実在する名前。Issue #418） */
+export const MAPPINGS_PLANNED = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.total", name: "total" },
+  { roleId: "record.extra", name: "extra" },
+] as const;
+
+/**
+ * ⑤a の答え（新契約の既定。entity `record` と、計算 `total`・`extra` の場所を挙げる。Issue #418）。
+ * ③ の提出した対応（`MAPPINGS_PLANNED`）の各名前が対応表の内側にあるので、③ のやり直しに入らない。
+ */
+export const CORRESPONDENCE_OUTPUT_PLANNED = {
+  entries: [
+    {
+      requirementId: "R-1",
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "computation", entity: "record", name: "total" },
+      ],
+    },
+    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "extra" }] },
   ],
 };
 
@@ -493,10 +551,10 @@ export const CONFIRMED_PLAN_ACCEPTED: ConfirmedPlan = {
  */
 export function recordedRunFromPlan(options: { readonly design?: unknown } = {}): readonly RecordedCall[] {
   return [
-    structured(options.design ?? DESIGN_OUTPUT),
-    structured(TEST_SUITE_OUTPUT),
-    structured({ declaration: DECLARATION_SOURCE }),
-    structured(CORRESPONDENCE_OUTPUT),
+    structured(options.design ?? DESIGN_OUTPUT_MAPPED),
+    structured(TEST_SUITE_OUTPUT_MAPPED),
+    structured({ declaration: DECLARATION_SOURCE, mappings: MAPPINGS_PLANNED }),
+    structured(CORRESPONDENCE_OUTPUT_PLANNED),
   ];
 }
 

@@ -197,4 +197,19 @@ describe("すべての段の schema と道具の引数の schema が、strict �
     );
     expect(DESIGN_SCHEMA.properties.designs.items.properties.checks.items.enum).toContain("write-anonymous");
   });
+
+  it("設計（②）の schema は、選択肢（options）と所属（ownership）を required に入れ、strict に合う（Issue #418）", () => {
+    expect(strictSchemaProblems(DESIGN_SCHEMA)).toEqual([]);
+    // 役割 ID の表の行に、選択肢（options）が required で入る
+    expect(DESIGN_SCHEMA.properties.roles.items.required).toEqual(expect.arrayContaining(["options"]));
+    expect(strictSchemaProblems(DESIGN_SCHEMA.properties.roles.items.properties.options)).toEqual([]);
+    expect(DESIGN_SCHEMA.properties.roles.items.properties.options.type).toEqual(["array", "null"]);
+    // 要件ごとの設計に、所属（ownership）が required で入る
+    expect(DESIGN_SCHEMA.properties.designs.items.required).toEqual(expect.arrayContaining(["ownership"]));
+    const ownership = DESIGN_SCHEMA.properties.designs.items.properties.ownership;
+    expect(strictSchemaProblems(ownership)).toEqual([]);
+    expect(ownership.items.required).toEqual(expect.arrayContaining(["roleId", "basis", "reason"]));
+    expect(ownership.items.properties.basis.enum).toEqual(["stated", "dependency"]);
+    expect(ownership.items.properties.reason.type).toEqual(["string", "null"]);
+  });
 });

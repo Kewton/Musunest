@@ -8,7 +8,8 @@
 //   4. ①' と同じく、送った要求を観測できること（規則とデータが別・JSON Schema が付く）
 import { describe, expect, it } from "vitest";
 import { checkTestSuite, STRUCTURAL_ASSERTIONS, type RequirementNature, type StructuralAssertionKind, type TestSuite } from "../fixed-test.js";
-import type { DesignResult, RoleEntry } from "../pipeline.js";
+import type { DesignResult, RequirementList, RoleEntry } from "../pipeline.js";
+import { LEGACY_DESIGN_CONTRACT } from "../pipeline.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest, JudgeResponse } from "../judge.js";
 import {
@@ -17,11 +18,11 @@ import {
   TEST_SUITE_RULES,
   TEST_SUITE_SCHEMA_NAME,
   checkSuiteAgainstRequirements,
-  checkSuitePlan,
+  checkSuitePlan as checkSuitePlanImpl,
   dropNonstructuralTests,
   natureQuestionName,
   reconcileNatures,
-  runTestSuite,
+  runTestSuite as runTestSuiteImpl,
   type TestSuiteInput,
 } from "./test-suite.js";
 import {
@@ -34,6 +35,19 @@ import {
   fixedTest,
   makeGateway,
 } from "./__tests__/prompt.js";
+
+/**
+ * 既存の試験は、**旧形式の設計**（所属を持たない役割 ID の表）を使うので、**互換を明示して**掛ける
+ * （決定 ⑨・Issue #418）。新契約（所属を求める）の試験は、`checkSuitePlanImpl`・`runTestSuiteImpl` を
+ * 直接呼ぶ（`version` を省く）。
+ */
+const checkSuitePlan = (
+  list: RequirementList,
+  suite: TestSuite,
+  design: DesignResult,
+  natures: ReadonlyMap<string, RequirementNature>,
+) => checkSuitePlanImpl(list, suite, design, natures, LEGACY_DESIGN_CONTRACT);
+const runTestSuite = (input: TestSuiteInput) => runTestSuiteImpl({ version: LEGACY_DESIGN_CONTRACT, ...input });
 
 const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
 
@@ -1713,5 +1727,168 @@ describe("値の鍵を、所属 entity の項目の役割 ID に照らす（§1�
         (problem) => problem.field === "tests[0].referenceData[0].values" && problem.message.includes("行の ID は rowId に置く"),
       ),
     ).toBe(true);
+  });
+});
+
+// ── 新契約：対象と view-shows の役割が、その要件の所属にあること（§1・②'・Issue #418）──
+
+/** entity・計算 2 つ・画面を持つ役割 ID の表（`record` は 2 要件が使うので共有） */
+const OWNED_ROLES: readonly RoleEntry[] = [
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
+  { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null },
+  { roleId: "record.records", kind: "screen", entity: "record", name: "records", shared: false, aliasOf: null, options: null },
+];
+
+/** 所属を持つ設計（R-1 は `record.total`、R-2 は `record.extra` を使う） */
+const OWNED_DESIGN: DesignResult = {
+  roles: OWNED_ROLES,
+  designs: [
+    {
+      requirementId: "R-1",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      vocabulary: [],
+      placement: [],
+      unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
+    },
+    {
+      requirementId: "R-2",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      vocabulary: [],
+      placement: [],
+      unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+        { roleId: "record.extra", basis: "stated", reason: null },
+      ],
+    },
+  ],
+};
+
+const OWNED_NATURES = naturesOf([
+  ["R-1", "ruled"],
+  ["R-2", "ruled"],
+]);
+
+/** 要件の正常・異常・境界（指定の役割 ID を対象にする） */
+function ownedTriple(requirementId: string, roleId: string, expected = { kind: "ok", value: 42 }): readonly Record<string, unknown>[] {
+  return (["normal", "abnormal", "boundary"] as const).map((kind, index) =>
+    plannedTest({ id: `${requirementId}-${index}`, requirementId, roleId, kind, expected }),
+  );
+}
+
+/** 新契約の正しい組 */
+const OWNED_VALID = [...ownedTriple("R-1", "record.total"), ...ownedTriple("R-2", "record.extra")];
+
+describe("新契約：対象の役割 ID が、その要件の所属にあること（Issue #418）", () => {
+  it("対象の役割 ID がその要件の所属に無い試験を断る", () => {
+    const wrongTarget = plannedTest({ id: "x", requirementId: "R-1", roleId: "record.extra" });
+    const problems = checkSuitePlanImpl(REQUIREMENT_LIST, suiteOf([...OWNED_VALID, wrongTarget]), OWNED_DESIGN, OWNED_NATURES);
+    expect(problems.some((problem) => problem.field.endsWith("target.roleId") && problem.message.includes("所属に無い"))).toBe(true);
+  });
+
+  it("view-shows の参照する役割がその要件の所属に無い試験を断る", () => {
+    const view = structureTest("v", "R-1", "screen", "record.records", { check: "view-shows", role: "record.total" });
+    const design: DesignResult = {
+      roles: OWNED_ROLES,
+      designs: [
+        {
+          requirementId: "R-1",
+          nature: "existence-only",
+          verification: { kind: "structural", reason: "表示" },
+          checks: ["view-shows"],
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+            { roleId: "record.records", basis: "stated", reason: null },
+          ],
+        },
+        OWNED_DESIGN.designs[1]!,
+      ],
+    };
+    const problems = checkSuitePlanImpl(
+      REQUIREMENT_LIST,
+      suiteOf([view, ...ownedTriple("R-2", "record.extra")]),
+      design,
+      OWNED_NATURES,
+    );
+    expect(problems.some((problem) => problem.field.endsWith("assertion.role") && problem.message.includes("所属に無い"))).toBe(true);
+  });
+
+  it("参照データの行の対象には、所属を求めない", () => {
+    const first = plannedTest({
+      id: "r1-0",
+      requirementId: "R-1",
+      roleId: "record.total",
+      kind: "normal",
+      referenceData: [
+        { rowId: "row-2", target: { requirementId: "R-1", kind: "computation", roleId: "record.extra" }, values: {} },
+      ],
+    });
+    const problems = checkSuitePlanImpl(
+      REQUIREMENT_LIST,
+      suiteOf([first, ...OWNED_VALID.slice(1)]),
+      OWNED_DESIGN,
+      OWNED_NATURES,
+    );
+    expect(problems.some((problem) => problem.field.includes("referenceData") && problem.message.includes("所属に無い"))).toBe(false);
+  });
+
+  it("1 回目に直れば、新契約でも固定できる", async () => {
+    const wrongTarget = plannedTest({ id: "x", requirementId: "R-1", roleId: "record.extra" });
+    const recording = createRecordingClient([
+      structured({ tests: [...OWNED_VALID, wrongTarget] }),
+      structured({ tests: OWNED_VALID }),
+    ]);
+    const outcome = await runTestSuiteImpl({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: OWNED_DESIGN,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.rounds).toBe(2);
+  });
+
+  it("新契約で設計が渡らない入力は断る", async () => {
+    const recording = createRecordingClient([structured({ tests: OWNED_VALID }), structured({ tests: OWNED_VALID })]);
+    const outcome = await runTestSuiteImpl({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("unmet");
+    if (outcome.failure.kind !== "unmet") return;
+    expect(outcome.failure.problems.some((problem) => problem.field === "design")).toBe(true);
+  });
+
+  it("②' のデータの役割 ID の表に options が入り、要件ごとの所属も入る", async () => {
+    const roles = OWNED_ROLES.map((role) =>
+      role.roleId === "record.total" ? { ...role, options: ["a", "b"] } : role,
+    );
+    const design: DesignResult = { roles, designs: OWNED_DESIGN.designs };
+    const recording = createRecordingClient([structured({ tests: OWNED_VALID })]);
+    const outcome = await runTestSuiteImpl({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design,
+    });
+    expect(outcome.ok).toBe(true);
+    const request = recording.structured[0];
+    expect(request?.input).toContain("役割 ID の表");
+    expect(request?.input).toContain("options");
+    expect(request?.input).toContain("要件ごとの所属");
   });
 });
