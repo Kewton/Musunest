@@ -1,4 +1,4 @@
-// score-agent.mjs の試験（node --test。#425）。ネットワーク無し・API 無しで閉じる：
+// score-agent.mjs の試験（node --test。#425・#426）。ネットワーク無し・API 無しで閉じる：
 // 一時の出力先に固定の出力（要約・宣言・申告・条件のファイル・起動の記録）を置き、このリポジトリの凍結した採点表 v5
 // （engine.mjs・subjects/）と spec-engine の dist で採点する。宣言は cases/ の正例・負例を使う（題材の言葉をここに書かない）。
 // 実行: node --test "workspace/mvp/m1/agent/eval/agent-accept/*.test.mjs"（先に pnpm build で spec-engine の dist を作る）
@@ -9,7 +9,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { CONDITIONS_SCHEMAS, SCORING_FILES, anonymize, fingerprintDir, reconcile, scoringFingerprint, sha256, validatePlanned } from "./score-agent.mjs";
+import { ACCEPTANCE_STATUSES, CONDITIONS_SCHEMAS, PLAN_SPEC_SCHEMA, SCORING_FILES, acceptanceMatcher, anonymize, fingerprintDir, reconcile, scoringFingerprint, sha256, validatePlanShape, validatePlanned } from "./score-agent.mjs";
+import { DEFAULT_ALLOWED } from "../score-claims.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const scoreFile = join(here, "score-agent.mjs");
@@ -401,5 +402,326 @@ test("匿名の出し方は、判定の値・止まった理由・条件のフ�
     assert.equal(a2.completion.status, "unverified");
     assert.equal(a2.completion.label, "未照合");
     assert.equal(a2.fingerprints.conditions.schema, "unknown");
+  });
+});
+
+// ── 了承後の採点（#426。README §5.5）。了承の記録（plan.json）は作り物で、要件の文は目印（MARK_）か定義から読んだ ID を使う（題材の言葉をここに書かない）
+const planFixture = ({ requirements = [], accepted = [], decisions = [], revision = 1, schema = PLAN_SPEC_SCHEMA } = {}) => ({ schema_version: schema, plan_id: "plan-t", revision, vocabulary_version: "v", inputs: [], requirements, open_issues: [], decisions, accepted_unwritable: accepted, confirmation: { sha256: "0".repeat(64), confirmed_at: "t", confirmed_by: "u" } });
+const req = (id, text, extra = {}) => ({ id, text, kind: "constraining", origin: { input_id: "S:1", quote: text }, parts: [], ...extra });
+const part = (id, text, disposition = "accepted_removal") => ({ id, text, disposition });
+const basis = { doc_version: "v", location: "l", constraint_id: "c" };
+/** 本に Plan の記録を足す（plan ＝ bundle/artifacts/plan.json。文字列ならそのまま書く。record ＝ bundle/plan-record.json） */
+function addPlan(out, id, { plan = null, record = null } = {}) {
+  const dir = join(out, id);
+  mkdirSync(join(dir, "bundle/artifacts"), { recursive: true });
+  if (plan !== null) writeFileSync(join(dir, "bundle/artifacts/plan.json"), typeof plan === "string" ? plan : JSON.stringify(plan));
+  if (record !== null) writeFileSync(join(dir, "bundle/plan-record.json"), JSON.stringify({ schema_version: "musunest-factory/plan-cli-record/v1", plan_id: "plan-t", rounds: [], spent_usd: 0.01, ...record }));
+}
+/** Plan を通した計測の条件のファイル（params.plan） */
+const planConditions = (out, ids, extra = {}) => conditions(out, ids, { params: { ...paramsFor(ids), plan: true }, ...extra });
+const structureIds = (s) => defOf(s).structures.map((st) => st.id);
+const unwritableIdOf = (s, structureId) => defOf(s).structures.find((st) => st.id === structureId).unwritable[0].id;
+
+test("了承で形が変わった要件（了承して除いた書けない要件）：原文系は挙げ漏れで落とし、了承後系は了承済みとして通す", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    const [, ALT] = structureIds("D");
+    const accepted = unwritableIdOf("D", ALT);
+    const n = defOf("D").structures[1].checks.length;
+    // P7-r1：別の構造で全部満たすが申告が無い。Plan で了承して除いた（accepted_removal）
+    addRun(out, "P7-r1", { spec: PASS_D });
+    addPlan(out, "P7-r1", { plan: planFixture({ requirements: [req("R1", "MARK_REQ", { parts: [part("P:1", accepted)] }), req("R:alt:1", "MARK_ALT")], accepted: [{ part_id: "P:1", alternative_id: "R:alt:1", basis }], decisions: [{ id: "D1", subject: "s", value: "v", reason: "r" }] }), record: { outcome: "confirmed", confirmation: "build" } });
+    // P8-r1：同じ宣言。代わりの案（alternative）で了承した
+    addRun(out, "P8-r1", { spec: PASS_D });
+    addPlan(out, "P8-r1", { plan: planFixture({ requirements: [req("R1", "MARK_REQ", { parts: [{ ...part("P:1", accepted, "alternative"), alternative_id: "R:alt:1" }] }), req("R:alt:1", "MARK_ALT")] }), record: { outcome: "confirmed" } });
+    // P7-r2：同じ宣言を申告つきで（原文系も通る）。了承の記録に除外は無い
+    addRun(out, "P7-r2", { spec: PASS_D, unwritable: CLAIM_D });
+    addPlan(out, "P7-r2", { plan: planFixture(), record: { outcome: "confirmed" } });
+    planConditions(out, ["P7-r1", "P7-r2", "P8-r1"]);
+    const r = scoreRun(out);
+    const full = readScore(out);
+    const a = rowOf(full, "P7-r1");
+    assert.equal(a.verdict, "FAIL");
+    assert.equal(a.claims.missed, 1);
+    assert.equal(a.verdict_accepted, "PASS");
+    assert.deepEqual(a.claims_accepted, { structure: ALT, expected: [accepted], correct: 0, accepted: 1, optional: 0, missed: 0, verdict: "OK" });
+    assert.equal(a.acceptance.status, "confirmed");
+    assert.equal(a.acceptance.structure, ALT);
+    assert.equal(a.acceptance.plan_outcome, "confirmed");
+    assert.equal(a.acceptance.plan_id, "plan-t");
+    assert.deepEqual(a.acceptance.exclusions, [{ id: "P:1", kind: "accepted_removal", matched: { kind: "unwritable", id: accepted }, judged: "expected" }]);
+    assert.deepEqual(a.acceptance.changed, []);
+    assert.deepEqual(a.acceptance.accepted_unwritable_ids, [accepted]);
+    assert.deepEqual(a.acceptance.changes, { added: 0, changed: 0, removed: 0 });
+    assert.equal(a.acceptance.decisions, 1);
+    assert.equal(a.acceptance.wrong_exclusions, 0);
+    assert.equal(a.acceptance.wrong_acceptances, 0);
+    assert.deepEqual(a.fulfillment_accepted, { fulfilled: n, total: n, total_from: `structure:${ALT}`, excluded_changed: 0 });
+    assert.deepEqual(a.fulfillment_v2, { fulfilled: n, total: n, total_from: `structure:${ALT}` }, "原文系の欄は変わらない");
+    const b = rowOf(full, "P8-r1");
+    assert.equal(b.verdict, "FAIL");
+    assert.equal(b.verdict_accepted, "PASS");
+    assert.deepEqual(b.acceptance.changed, [{ id: "P:1", kind: "alternative", matched: { kind: "unwritable", id: accepted }, judged: "expected" }]);
+    assert.deepEqual(b.acceptance.exclusions, []);
+    assert.equal(b.claims_accepted.accepted, 1);
+    const c = rowOf(full, "P7-r2");
+    assert.equal(c.verdict, "PASS");
+    assert.equal(c.verdict_accepted, "PASS");
+    assert.equal(c.claims_accepted.correct, 1);
+    assert.equal(c.claims_accepted.accepted, 0);
+    // 集計：原文系の指標は従来どおり、了承後系は別の欄に並ぶ
+    startsWith(full.metrics.missed_partial, "2/3（");
+    startsWith(full.metrics.spec_pass_partial, "1/3（");
+    startsWith(full.metrics_accepted.missed_partial, "0/3（");
+    startsWith(full.metrics_accepted.spec_pass_partial, "3/3（");
+    assert.equal(full.metrics_accepted.runs, 3);
+    assert.equal(full.metrics_accepted.confirmed, 3);
+    assert.equal(full.metrics_accepted.decisions, 1);
+    startsWith(full.fulfillment.accepted.partial, `${3 * n}/${3 * n}（`);
+    assert.equal(full.fulfillment.accepted.all, full.fulfillment.accepted.partial);
+    assert.equal(full.fulfillment.v2.partial, full.fulfillment.accepted.partial);
+    assert.deepEqual(Object.keys(full.fulfillment), ["v1", "v2", "accepted"]);
+    assert.equal(full.scoring_systems.source.startsWith("原文系"), true);
+    assert.equal(full.scoring_systems.accepted.startsWith("了承後系"), true);
+    startsWith(full.bySubject.D.pass_accepted, "3/3（");
+    startsWith(full.bySubject.D.pass, "1/3（");
+    startsWith(full.bySubject.A.pass_accepted, "0/0（");
+    assert.match(r.stdout, /了承後: 対象 3 本（確定 3・記録なし 0・読めない 0）・誤った除外 0 件・誤った了承 0 件・了承で変わった判定 0・充足 /);
+    assert.match(r.stdout, /P7-r1\tpartial\tFAIL\t.*\t了承後=PASS$/m);
+  });
+});
+
+test("誤った除外：書けない要件にも許される申告にも当たらない除外は数え、了承後系の分母から外さない。匿名の出力には件数だけ", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    const [MAIN, ALT] = structureIds("D");
+    const otherStructureUnwritable = unwritableIdOf("D", MAIN); // 当てはまった構造（別の構造）では書ける
+    const allowedText = DEFAULT_ALLOWED[1].id;
+    addRun(out, "P7-r1", { spec: PASS_D, unwritable: CLAIM_D });
+    addPlan(out, "P7-r1", { plan: planFixture({
+      requirements: [
+        req("R1", "MARK_R1", { parts: [part("P:other", otherStructureUnwritable), part("P:none", "MARK_NONE"), part("P:allowed", allowedText), part("P:met", "MARK_MET", "met")] }),
+        req("R2", "MARK_REMOVED", { change: { kind: "removed", from_requirement_id: "R9", answer_id: "A:1" } }),
+        req("R3", "MARK_ADDED", { change: { kind: "added", answer_id: "A:1" } }),
+      ],
+      accepted: [{ part_id: "P:other", alternative_id: "R3", basis }, { part_id: "P:orphan", alternative_id: "R3", basis }],
+    }), record: { outcome: "confirmed" } });
+    addRun(out, "P7-r2", { spec: PASS_D, unwritable: CLAIM_D });
+    addPlan(out, "P7-r2", { plan: planFixture(), record: { outcome: "confirmed" } });
+    planConditions(out, ["P7-r1", "P7-r2"]);
+    const r = scoreRun(out);
+    const full = readScore(out);
+    const a = rowOf(full, "P7-r1");
+    assert.equal(a.verdict, "PASS");
+    assert.equal(a.verdict_accepted, "PASS", "誤った除外は判定を変えず、別に数える");
+    assert.deepEqual(a.acceptance.exclusions, [
+      { id: "P:other", kind: "accepted_removal", matched: { kind: "other_unwritable", id: `${MAIN}:${otherStructureUnwritable}` }, judged: "wrong" },
+      { id: "P:none", kind: "accepted_removal", matched: null, judged: "wrong" },
+      { id: "P:allowed", kind: "accepted_removal", matched: { kind: "allowed", id: allowedText }, judged: "allowed" },
+      { id: "R2", kind: "removed", matched: null, judged: "wrong" },
+      { id: "P:orphan", kind: "accepted_unwritable", matched: null, judged: "wrong" },
+    ]);
+    assert.deepEqual(a.acceptance.changed, []);
+    assert.equal(a.acceptance.wrong_exclusions, 4);
+    assert.equal(a.acceptance.allowed, 1);
+    assert.equal(a.acceptance.wrong_acceptances, 0);
+    assert.deepEqual(a.acceptance.changes, { added: 1, changed: 0, removed: 1 });
+    assert.deepEqual(a.acceptance.accepted_unwritable_ids, []);
+    assert.equal(a.claims_accepted.correct, 1);
+    assert.equal(a.claims_accepted.accepted, 0);
+    const n = defOf("D").structures[1].checks.length;
+    assert.deepEqual(a.fulfillment_accepted, { fulfilled: n, total: n, total_from: `structure:${ALT}`, excluded_changed: 0 }, "誤った除外は分母から外さない");
+    startsWith(full.metrics_accepted.wrong_exclusion_runs, "1/2（");
+    assert.equal(full.metrics_accepted.wrong_exclusions, 4);
+    startsWith(full.metrics_accepted.wrong_acceptance_runs, "0/2（");
+    assert.deepEqual(full.metrics_accepted.changes, { added: 1, changed: 0, removed: 1 });
+    assert.match(r.stdout, /誤った除外 4 件・誤った了承 0 件/);
+    // 匿名の出し方：件数と区間だけ。部分の ID・要件の文・当たった先は出ない
+    scoreRun(out, ["--anonymous"]);
+    const text = readFileSync(join(out, "score.anonymous.json"), "utf8");
+    for (const w of ["MARK_", "P:other", "P:none", "P:orphan", "plan-t", otherStructureUnwritable, allowedText]) assert.ok(!text.includes(w), `匿名の出力に ${w}`);
+    const an = JSON.parse(text);
+    assert.equal(an.metrics_accepted.wrong_exclusions, 4);
+    assert.equal(an.metrics_accepted.runs, 2);
+    startsWith(an.metrics_accepted.wrong_exclusion_runs, "1/2（");
+    assert.deepEqual(an.metrics_accepted.changes, { added: 1, changed: 0, removed: 1 });
+    assert.equal(an.fulfillment.accepted.all, full.fulfillment.accepted.all);
+    assert.deepEqual(an, anonymize(full));
+  });
+});
+
+test("了承の記録が無い本：Plan を通した計測では充足 0 で分母に残り、Plan を通していない計測では対象外（null）", async () => {
+  await withOut(async (base) => {
+    const n = totalOf("A");
+    // Plan を通した計測（params.plan）：確定しなかった本・記録の無い本・読めない本は充足 0・判定 null で分母に残る
+    const out = join(base, "plan");
+    addRun(out, "P1-r1", { spec: PASS_A });
+    addPlan(out, "P1-r1", { record: { outcome: "stopped", confirmation: null } });
+    addRun(out, "P1-r2", { spec: PASS_A });
+    addRun(out, "P1-r3", { spec: PASS_A });
+    addPlan(out, "P1-r3", { plan: "{ これは JSON でない" });
+    addRun(out, "P1-r4", { spec: PASS_A });
+    addPlan(out, "P1-r4", { plan: planFixture({ schema: "MARK_SCHEMA" }) });
+    addRun(out, "P1-r5", { spec: PASS_A });
+    addPlan(out, "P1-r5", { plan: planFixture(), record: { outcome: "confirmed" } });
+    addRun(out, "P1-r6");
+    addPlan(out, "P1-r6", { record: { outcome: "cannot-confirm" } });
+    planConditions(out, ["P1-r1", "P1-r2", "P1-r3", "P1-r4", "P1-r5", "P1-r6"]);
+    const r = scoreRun(out);
+    const full = readScore(out);
+    const a1 = rowOf(full, "P1-r1");
+    assert.equal(a1.verdict, "PASS", "原文系は通る");
+    assert.deepEqual(a1.acceptance, { status: "absent", reasons: [], plan_outcome: "stopped" });
+    assert.equal(a1.verdict_accepted, null);
+    assert.equal(a1.claims_accepted, null);
+    assert.deepEqual(a1.fulfillment_accepted, { fulfilled: 0, total: n, total_from: "definition:main", excluded_changed: 0 });
+    assert.deepEqual(rowOf(full, "P1-r2").acceptance, { status: "absent", reasons: [], plan_outcome: null });
+    const a3 = rowOf(full, "P1-r3");
+    assert.equal(a3.acceptance.status, "invalid");
+    assert.deepEqual(a3.acceptance.reasons, ["plan.json を読めない"]);
+    assert.deepEqual(a3.fulfillment_accepted, { fulfilled: 0, total: n, total_from: "definition:main", excluded_changed: 0 });
+    const a4 = rowOf(full, "P1-r4");
+    assert.equal(a4.acceptance.status, "invalid");
+    assert.deepEqual(a4.acceptance.reasons, ["schema_version が未知"]);
+    assert.ok(!JSON.stringify(a4.acceptance).includes("MARK_"), "理由に入力の値を出さない");
+    const a5 = rowOf(full, "P1-r5");
+    assert.equal(a5.acceptance.status, "confirmed");
+    assert.equal(a5.verdict_accepted, "PASS");
+    assert.deepEqual(a5.fulfillment_accepted, { fulfilled: n, total: n, total_from: "structure:main", excluded_changed: 0 });
+    const a6 = rowOf(full, "P1-r6");
+    assert.equal(a6.generation_failed, true);
+    assert.deepEqual(a6.acceptance, { status: "absent", reasons: [], plan_outcome: "cannot-confirm" });
+    assert.deepEqual(a6.fulfillment_accepted, { fulfilled: 0, total: n, total_from: "definition:main", excluded_changed: 0 });
+    assert.deepEqual([full.metrics_accepted.runs, full.metrics_accepted.confirmed, full.metrics_accepted.absent, full.metrics_accepted.invalid], [6, 1, 3, 2]);
+    startsWith(full.metrics_accepted.spec_pass_writable, "1/6（");
+    startsWith(full.metrics.spec_pass_writable, "5/6（");
+    startsWith(full.fulfillment.accepted.writable, `${n}/${6 * n}（`);
+    startsWith(full.fulfillment.v2.writable, `${5 * n}/${6 * n}（`);
+    assert.match(r.stdout, /了承後: 対象 6 本（確定 1・記録なし 3・読めない 2）/);
+    // Plan を通していない計測：記録の無い本は対象外（null）。記録のある本だけが対象
+    const out2 = join(base, "noplan");
+    addRun(out2, "P1-r1", { spec: PASS_A });
+    addRun(out2, "P1-r2", { spec: PASS_A });
+    addPlan(out2, "P1-r2", { plan: planFixture(), record: { outcome: "confirmed" } });
+    addRun(out2, "P1-r3", { spec: PASS_A });
+    addPlan(out2, "P1-r3", { record: { outcome: "stopped" } });
+    conditions(out2, ["P1-r1", "P1-r2", "P1-r3"]);
+    const r2 = scoreRun(out2);
+    const full2 = readScore(out2);
+    const b1 = rowOf(full2, "P1-r1");
+    assert.deepEqual(b1.acceptance, { status: "none" });
+    assert.equal(b1.fulfillment_accepted, null);
+    assert.equal(b1.claims_accepted, null);
+    assert.equal(b1.verdict_accepted, null);
+    assert.equal(b1.verdict, "PASS");
+    assert.equal(rowOf(full2, "P1-r2").acceptance.status, "confirmed");
+    assert.equal(rowOf(full2, "P1-r3").acceptance.status, "absent");
+    assert.deepEqual([full2.metrics_accepted.runs, full2.metrics_accepted.confirmed, full2.metrics_accepted.absent], [2, 1, 1]);
+    startsWith(full2.fulfillment.accepted.all, `${n}/${2 * n}（`);
+    startsWith(full2.fulfillment.v2.all, `${3 * n}/${3 * n}（`);
+    startsWith(full2.bySubject.A.pass_accepted, "1/2（");
+    assert.match(r2.stdout, /P1-r1\tpartial\tPASS\t.*\t了承後=-$/m);
+    // 条件のファイルの無い出力先（#401 より前。Plan なし・記録なし）：対象 0 本。匿名でも 0/0
+    const out3 = join(base, "old");
+    addRun(out3, "P1-r1", { spec: PASS_A });
+    scoreRun(out3, ["--anonymous"]);
+    const a3n = readScore(out3, "score.anonymous.json");
+    assert.equal(a3n.metrics_accepted.runs, 0);
+    startsWith(a3n.fulfillment.accepted.all, "0/0（");
+    assert.deepEqual(ACCEPTANCE_STATUSES, ["confirmed", "invalid", "absent", "none"]);
+    assert.deepEqual(validatePlanShape({ schema_version: PLAN_SPEC_SCHEMA, requirements: [{ id: "R", text: "t" }], accepted_unwritable: [], decisions: [] }), ["requirements の形が違う（id・text・parts）"]);
+    assert.deepEqual(validatePlanShape({ schema_version: PLAN_SPEC_SCHEMA, requirements: [], accepted_unwritable: [], decisions: [] }), []);
+    assert.deepEqual(validatePlanShape([]), ["plan.json が写像でない"]);
+  });
+});
+
+test("生成に失敗した本・静的 NG の本は、了承の記録があっても両系の分母に充足 0 で残る", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    const [MAIN, ALT] = structureIds("D");
+    const n = totalOf("D"), nAlt = defOf("D").structures[1].checks.length;
+    const accepted = unwritableIdOf("D", ALT);
+    addRun(out, "P7-r1", { spec: PASS_D, unwritable: CLAIM_D });
+    addPlan(out, "P7-r1", { plan: planFixture(), record: { outcome: "confirmed" } });
+    // Plan は確定した（了承して除いた部分つき）が、生成に失敗した
+    addRun(out, "P7-r2");
+    addPlan(out, "P7-r2", { plan: planFixture({ requirements: [req("R1", "MARK_R1", { parts: [part("P:1", accepted)] }), req("R:alt:1", "MARK_ALT")], accepted: [{ part_id: "P:1", alternative_id: "R:alt:1", basis }] }), record: { outcome: "confirmed" } });
+    addRun(out, "P7-r3", { spec: STATIC_NG });
+    addPlan(out, "P7-r3", { plan: planFixture(), record: { outcome: "confirmed" } });
+    planConditions(out, ["P7-r1", "P7-r2", "P7-r3"]);
+    scoreRun(out);
+    const full = readScore(out);
+    const f = rowOf(full, "P7-r2");
+    assert.equal(f.generation_failed, true);
+    assert.equal(f.acceptance.status, "confirmed", "生成に失敗しても了承の記録は読む");
+    assert.equal(f.acceptance.structure, MAIN, "構造が当てはまらないので主の構造の鍵で照合する");
+    assert.deepEqual(f.acceptance.exclusions[0].matched, { kind: "other_unwritable", id: `${ALT}:${accepted}` });
+    assert.deepEqual(f.fulfillment_accepted, { fulfilled: 0, total: n, total_from: `definition:${MAIN}`, excluded_changed: 0 });
+    assert.deepEqual(f.fulfillment_v2, { fulfilled: 0, total: n, total_from: `definition:${MAIN}` });
+    assert.equal(f.claims_accepted, null);
+    assert.equal(f.verdict_accepted, null);
+    const s = rowOf(full, "P7-r3");
+    assert.equal(s.spec_verdict, "STATIC_NG");
+    assert.equal(s.verdict_accepted, "STATIC_NG");
+    assert.equal(s.claims_accepted.structure, MAIN);
+    assert.deepEqual(s.fulfillment_accepted, { fulfilled: 0, total: n, total_from: `definition:${MAIN}`, excluded_changed: 0 });
+    startsWith(full.fulfillment.v2.partial, `${nAlt}/${nAlt + 2 * n}（`);
+    assert.equal(full.fulfillment.accepted.partial, full.fulfillment.v2.partial);
+    startsWith(full.fulfillment.v1.partial, `${nAlt}/${nAlt}（`, "補正前は分母から落ちる（従来どおり）");
+    startsWith(full.metrics.missed_partial, "2/3（");
+    startsWith(full.metrics_accepted.missed_partial, "2/3（");
+    startsWith(full.metrics_accepted.spec_pass_partial, "1/3（");
+    assert.deepEqual([full.metrics_accepted.runs, full.metrics_accepted.confirmed], [3, 3]);
+  });
+});
+
+test("了承で変わった書ける要件（checks に keys を持つ定義）：変更は誤った了承として分母から外し、除外は誤った除外として分母に残す", async () => {
+  await withOut(async (base) => {
+    // v5 の定義には checks[].keys が無い。将来の定義を装って、写しの定義の判定 1 つに鍵（要件の名前そのもの）を足す
+    const fake = makeCheckout(base, "keyed-checkout", { sameAggregator: true });
+    const defPath = join(fake.ev, "subjects/A.json");
+    const def = JSON.parse(readFileSync(defPath, "utf8"));
+    const target = def.structures[0].checks[1];
+    const escape = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    target.keys = [escape(target.req)];
+    writeFileSync(defPath, JSON.stringify(def));
+    const n = def.structures[0].checks.length;
+    const m = acceptanceMatcher(def, "main", DEFAULT_ALLOWED);
+    assert.deepEqual(m.match(`MARK ${target.req}`), { kind: "check", id: target.req });
+    assert.deepEqual(m.match(DEFAULT_ALLOWED[0].id), { kind: "allowed", id: DEFAULT_ALLOWED[0].id });
+    assert.equal(m.match("MARK_NOTHING"), null);
+    assert.equal(acceptanceMatcher(def, "MARK_UNKNOWN_STRUCTURE").structure, "main", "構造が無ければ主の構造");
+    const out = join(base, "out");
+    // P1-r1：原文が固定していた要件を、答えで別の形に変えた（changed）
+    addRun(out, "P1-r1", { spec: PASS_A });
+    addPlan(out, "P1-r1", { plan: planFixture({ requirements: [req("R1", "MARK_OLD"), req("R1b", target.req, { change: { kind: "changed", from_requirement_id: "R1", answer_id: "A:1" } })] }), record: { outcome: "confirmed" } });
+    // P1-r2：同じ要件を了承して除いた（誤った除外。分母から外さない）
+    addRun(out, "P1-r2", { spec: FAIL_A });
+    addPlan(out, "P1-r2", { plan: planFixture({ requirements: [req("R1", "MARK_R1", { parts: [part("P:1", target.req)] })], accepted: [{ part_id: "P:1", alternative_id: "R1", basis }] }), record: { outcome: "confirmed" } });
+    planConditions(out, ["P1-r1", "P1-r2"]);
+    scoreRun(out, [], fake.repo);
+    const full = readScore(out);
+    const a = rowOf(full, "P1-r1");
+    assert.equal(a.verdict, "PASS");
+    assert.deepEqual(a.acceptance.changed, [{ id: "R1b", kind: "changed", matched: { kind: "check", id: target.req }, judged: "wrong" }]);
+    assert.deepEqual(a.acceptance.changed_checks, [target.req]);
+    assert.equal(a.acceptance.wrong_acceptances, 1);
+    assert.equal(a.acceptance.wrong_exclusions, 0);
+    assert.deepEqual(a.acceptance.changes, { added: 0, changed: 1, removed: 0 });
+    assert.deepEqual(a.fulfillment_accepted, { fulfilled: n - 1, total: n - 1, total_from: "structure:main", excluded_changed: 1 }, "了承で変わった判定は分母（と分子）から外す");
+    assert.deepEqual(a.fulfillment_v2, { fulfilled: n, total: n, total_from: "structure:main" }, "原文系は従来どおり判定する");
+    assert.equal(a.verdict_accepted, "PASS");
+    const b = rowOf(full, "P1-r2");
+    assert.equal(b.verdict, "FAIL");
+    assert.deepEqual(b.acceptance.exclusions, [{ id: "P:1", kind: "accepted_removal", matched: { kind: "check", id: target.req }, judged: "wrong" }]);
+    assert.equal(b.acceptance.wrong_exclusions, 1);
+    assert.deepEqual(b.acceptance.changed_checks, []);
+    assert.deepEqual(b.fulfillment_accepted, { ...b.fulfillment_v2, excluded_changed: 0 }, "誤った除外は分母から外さない");
+    assert.equal(b.verdict_accepted, "FAIL");
+    assert.equal(full.metrics_accepted.changed_checks, 1);
+    startsWith(full.metrics_accepted.wrong_acceptance_runs, "1/2（");
+    startsWith(full.metrics_accepted.wrong_exclusion_runs, "1/2（");
+    startsWith(full.fulfillment.accepted.writable, `${2 * n - 2}/${2 * n - 1}（`);
+    startsWith(full.fulfillment.v2.writable, `${2 * n - 1}/${2 * n}（`);
   });
 });

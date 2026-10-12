@@ -10,6 +10,11 @@
 //              してから出力先の本と照合し、未実行・途中・予定外が 1 本でもあれば「未完了」。検証に落ちれば「未照合」と理由
 //   指紋 … fingerprints。採点に使った定義とエンジン（<repo> から実際に読み込んだもの）と集計のコード（実行中のこのファイル）の指紋、
 //          spec-engine の dist の指紋。条件のファイルの値と照合する（別の checkout を <repo> に渡しても、集計したコードの指紋が出る）
+// #426 で足したもの（原文系の欄は変えない。README §5.5）：
+//   了承後系 … Plan を通した本を、確定した仕様（bundle/artifacts/plan.json）の了承の記録で読み替えて別に数える。了承済みの書けない要件は申告が
+//              無くても挙げ漏れにせず（claims_accepted）、了承で変わった書ける要件は分母から外し（fulfillment_accepted）、誤った除外・誤った了承を
+//              別に数える（rows[].acceptance・metrics_accepted・fulfillment.accepted）。原文の要件との対応は定義の keys（正規表現）で取る。
+//              記録の無い本・読めない本は充足 0 で分母に残す。Plan を通していない計測の本は対象外（null）
 // run-agent.mjs は、ここから指紋の関数を import して条件のファイルに書く（道具は 2 本で 1 組。入口として起動したときだけ採点する）
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -21,6 +26,11 @@ export const STYLE = { P1: "S1", P2: "S2", P3: "S1", P4: "S2", P5: "S1", P6: "S2
 export const AGGREGATION_VERSIONS = {
   v1: "補正前：充足率の分母は当てはまった構造の判定の数。生成失敗・静的 NG の本は分母に入らない",
   v2: "補正後：充足率の分母は題材の採点定義の判定の数（当てはまった構造。無ければ主の構造）。生成失敗・静的 NG・役割が見つからない本は充足 0 で分母に残す",
+};
+/** 採点の系（#426）。原文系 ＝ 凍結した v5 の判定のまま。了承後系 ＝ 確定した仕様の了承の記録で読み替える。2 つの系は別の欄に並べ、混ぜない */
+export const SCORING_SYSTEMS = {
+  source: "原文系：凍結した v5 の判定のまま（集計の版 v1・v2）。了承の記録は見ない",
+  accepted: "了承後系：確定した仕様（plan.json）の了承の記録で読み替える。了承済みの書けない要件は申告が無くても挙げ漏れにせず、了承で変わった書ける要件は分母から外し、誤った除外・誤った了承を別に数える。生成失敗・静的 NG・記録の無い本は充足 0 で分母に残す",
 };
 /** 条件のファイルの既知の schema（v1 ＝ #401、v2 ＝ #425。どちらも child_args と params.patterns・params.runs を持つ） */
 export const CONDITIONS_SCHEMAS = ["musunest-factory/agent-accept-conditions/v1", "musunest-factory/agent-accept-conditions/v2"];
@@ -137,6 +147,117 @@ export function reconcile(outRoot) {
   return { status, label: COMPLETION_LABELS[status], reasons, measurement_id: cond.measurement_id ?? null, signature: cond.signature ?? null, planned: planned.length, executed: executed.length, executed_ids: executed, unexecuted, incomplete, extra, latest_record };
 }
 
+// ── 了承後の採点（#426。README §5.5）
+/** 確定した仕様の契約の版（appspec-schema の PLAN_SPEC_SCHEMA_VERSION と同じ値。契約の版を上げたら、ここも上げる） */
+export const PLAN_SPEC_SCHEMA = "musunest.plan-spec/v1";
+/** 了承の記録の読みの状態（confirmed ＝ 読めた、invalid ＝ あるが読めない・形が違う、absent ＝ 無い、none ＝ Plan を通していない本＝対象外） */
+export const ACCEPTANCE_STATUSES = ["confirmed", "invalid", "absent", "none"];
+/** plan.json の形（この道具が読む欄だけ）を検証する。落ちた理由の一覧（空なら読める）。理由に入力の値は含めない */
+export function validatePlanShape(plan) {
+  if (plan === null || typeof plan !== "object" || Array.isArray(plan)) return ["plan.json が写像でない"];
+  const reasons = [];
+  if (plan.schema_version !== PLAN_SPEC_SCHEMA) reasons.push("schema_version が未知");
+  for (const k of ["requirements", "accepted_unwritable", "decisions"]) if (!Array.isArray(plan[k])) reasons.push(`${k} が配列でない`);
+  if (Array.isArray(plan.requirements) && !plan.requirements.every((r) => r !== null && typeof r === "object" && typeof r.id === "string" && typeof r.text === "string" && Array.isArray(r.parts))) reasons.push("requirements の形が違う（id・text・parts）");
+  return reasons;
+}
+/** 了承の記録（bundle/artifacts/plan.json）を読む：無ければ absent、読めない・形が違えば invalid と理由、読めれば confirmed */
+export function loadPlan(dir) {
+  const path = join(dir, "bundle/artifacts/plan.json");
+  if (!existsSync(path)) return { status: "absent", plan: null, reasons: [] };
+  let plan;
+  try { plan = readJson(path); } catch { return { status: "invalid", plan: null, reasons: ["plan.json を読めない"] }; }
+  const reasons = validatePlanShape(plan);
+  return reasons.length > 0 ? { status: "invalid", plan: null, reasons } : { status: "confirmed", plan, reasons: [] };
+}
+const compileKeys = (keys) => (Array.isArray(keys) ? keys : []).map((k) => new RegExp(k));
+const hits = (res, text) => res.some((re) => re.test(text));
+/**
+ * 原文の要件との対応（README §5.5.2）。score-claims.mjs と同じ照合（定義の keys を正規表現として読み、文に当てる）。
+ * 当たる先は順に：当てはまった構造（無ければ主の構造）の書けない要件（unwritable）→ 許される申告（allowed）→
+ * 書ける要件（check。checks[].keys。v5 の定義には無い）→ 他の構造の書けない要件（other_unwritable。当てはまった構造では書ける、の目印）
+ */
+export function acceptanceMatcher(def, structureId, allowedClaims = []) {
+  const st = def.structures.find((x) => x.id === structureId) ?? def.structures[0];
+  const table = (kind, list) => list.map((u) => ({ kind, id: u.id, res: compileKeys(u.keys) }));
+  const candidates = [
+    ...table("unwritable", st.unwritable ?? []),
+    ...table("allowed", [...allowedClaims, ...(def.allowedClaims ?? [])]),
+    ...table("check", (st.checks ?? []).filter((c) => Array.isArray(c.keys) && c.keys.length > 0).map((c) => ({ id: c.req, keys: c.keys }))),
+    ...table("other_unwritable", def.structures.filter((x) => x.id !== st.id).flatMap((x) => (x.unwritable ?? []).map((u) => ({ id: `${x.id}:${u.id}`, keys: u.keys })))),
+  ];
+  return { structure: st.id, match: (text) => { const m = candidates.find((c) => hits(c.res, text)); return m ? { kind: m.kind, id: m.id } : null; } };
+}
+// 除外の判定：書けない要件 ＝ expected（正しい了承）、許される申告 ＝ allowed、それ以外（書ける要件・他の構造の書けない要件・当たらない）＝ wrong（誤った除外）
+const judgeExclusion = (m) => (m === null ? "wrong" : m.kind === "unwritable" ? "expected" : m.kind === "allowed" ? "allowed" : "wrong");
+// 変更の判定：書けない要件 ＝ expected、許される申告 ＝ allowed、書ける要件・他の構造の書けない要件 ＝ wrong（誤った了承）、当たらない ＝ unmatched（誤りの証拠が無い）
+const judgeChange = (m) => (m === null ? "unmatched" : m.kind === "unwritable" ? "expected" : m.kind === "allowed" ? "allowed" : "wrong");
+/**
+ * 確定した仕様の了承の記録を、定義の鍵で読む（README §5.5.2〜§5.5.3）。
+ * 除外 ＝ accepted_removal の部分・removed の要件（作らない、と了承した）。変更 ＝ alternative の部分・changed の要件（別の形で作る、と了承した）。
+ * added の要件は数えるだけ。照合する文は、要件の文に部分の文（と元の要件・代わりの案の文）を連結したもの。
+ * 誤った除外は了承後の分母から外さない（落ちを隠さない）。誤った了承のうち書ける要件（check）に当たった判定は changed_checks として分母から外す
+ */
+export function readAcceptance(plan, matcher) {
+  const byId = new Map(plan.requirements.map((r) => [r.id, r]));
+  const textOf = (id) => (typeof id === "string" ? byId.get(id)?.text ?? "" : "");
+  const changes = { added: 0, changed: 0, removed: 0 };
+  const exclusions = [], changed = [];
+  const entry = (id, kind, text, judge) => { const m = matcher.match(text); return { id, kind, matched: m, judged: judge(m) }; };
+  const partIds = new Set();
+  for (const r of plan.requirements) {
+    const kind = r.change?.kind;
+    if (typeof kind === "string" && kind in changes) changes[kind] += 1;
+    const withFrom = `${r.text} ${textOf(r.change?.from_requirement_id)}`;
+    if (kind === "removed") exclusions.push(entry(r.id, "removed", withFrom, judgeExclusion));
+    else if (kind === "changed") changed.push(entry(r.id, "changed", withFrom, judgeChange));
+    for (const part of r.parts) {
+      if (part === null || typeof part !== "object") continue;
+      partIds.add(part.id);
+      if (part.disposition === "met") continue;
+      const text = `${r.text} ${part.text ?? ""}`;
+      if (part.disposition === "alternative") changed.push(entry(part.id, "alternative", `${text} ${textOf(part.alternative_id)}`, judgeChange));
+      else exclusions.push(entry(part.id, typeof part.disposition === "string" ? part.disposition : "unknown", text, judgeExclusion));
+    }
+  }
+  // 部分の無い accepted_unwritable の記録（門は通さないはず）は、照合できない除外として誤った除外に数える
+  for (const a of plan.accepted_unwritable) if (!partIds.has(a?.part_id)) exclusions.push({ id: typeof a?.part_id === "string" ? a.part_id : null, kind: "accepted_unwritable", matched: null, judged: "wrong" });
+  const all = [...exclusions, ...changed];
+  return {
+    changes, decisions: plan.decisions.length, exclusions, changed,
+    accepted_unwritable_ids: [...new Set(all.filter((x) => x.judged === "expected").map((x) => x.matched.id))],
+    changed_checks: [...new Set(changed.filter((x) => x.matched?.kind === "check").map((x) => x.matched.id))],
+    wrong_exclusions: exclusions.filter((x) => x.judged === "wrong").length,
+    wrong_acceptances: changed.filter((x) => x.judged === "wrong").length,
+    allowed: all.filter((x) => x.judged === "allowed").length,
+  };
+}
+/**
+ * 了承後の申告の採点：score-claims.mjs と同じ照合で、期待の書けない要件ごとに「申告あり（correct）／任意（optional）／了承済みで申告なし（accepted）／挙げ漏れ（missed）」に分ける。
+ * 誤った申告は原文系の claims.false_claims と同じ（数だけ受け取り、verdict に使う）
+ */
+export function claimsAfterAcceptance(def, structureId, claimsList, written, acceptedIds, falseClaims = 0) {
+  const st = def.structures.find((x) => x.id === structureId) ?? def.structures[0];
+  const claims = claimsList.map((u) => `${u.requirement} ${u.reason}`);
+  const result = { structure: st.id, expected: st.unwritable.map((u) => u.id), correct: 0, accepted: 0, optional: 0, missed: 0 };
+  for (const u of st.unwritable) {
+    const res = compileKeys(u.keys);
+    const claimed = claims.some((c) => hits(res, c));
+    if (u.optionalIfWritten && written?.[u.optionalIfWritten]) result.optional += claimed ? 1 : 0;
+    else if (claimed) result.correct += 1;
+    else if (acceptedIds.includes(u.id)) result.accepted += 1;
+    else result.missed += 1;
+  }
+  result.verdict = result.missed === 0 && falseClaims === 0 ? "OK" : "NG";
+  return result;
+}
+/** 了承後の充足：了承で変わった書ける要件（changed_checks）を分母（と、満たしていれば分子）から外す。構造が当てはまらない本は呼ばない（充足 0・定義の判定の数） */
+export function fulfillmentAfterAcceptance(r, changedChecks) {
+  const excluded = changedChecks.filter((k) => k in r.checks);
+  const passedExcluded = excluded.filter((k) => r.checks[k] === true).length;
+  return { fulfilled: (r.fulfilled ?? 0) - passedExcluded, total: (r.writable_total ?? 0) - excluded.length, total_from: `structure:${r.structure}`, excluded_changed: excluded.length };
+}
+
 // ── 採点と集計
 const wilson = (k, n) => { if (!n) return [0, 0]; const z = 1.96, ph = k / n, d = 1 + z * z / n, c = ph + z * z / (2 * n), m = z * Math.sqrt(ph * (1 - ph) / n + z * z / (4 * n * n)); return [(c - m) / d, (c + m) / d]; };
 const pct = (x) => `${(x * 100).toFixed(1)}%`;
@@ -148,9 +269,12 @@ const relReal = (from, to) => { try { return relative(realpathSync(from), realpa
 export async function scoreOutput(repo, outRoot) {
   const ev = join(repo, "workspace/mvp/m1/agent/eval");
   const { loadDef, score } = await import(pathToFileURL(join(ev, "engine.mjs")).href);
-  const { finalVerdict, scoreClaims } = await import(pathToFileURL(join(ev, "score-claims.mjs")).href);
+  const { finalVerdict, scoreClaims, DEFAULT_ALLOWED } = await import(pathToFileURL(join(ev, "score-claims.mjs")).href);
   const specEngineDist = join(repo, "packages/spec-engine/dist");
   const engine = await import(pathToFileURL(join(specEngineDist, "index.js")).href);
+  const cond = readConditions(outRoot);
+  // 了承後系の対象（#426）：計測が Plan を通した（条件のファイルの params.plan）なら全本。そうでなければ Plan の記録（plan-record.json か plan.json）のある本だけ
+  const planScope = cond?.params?.plan === true;
   const rows = [];
   for (const d of runDirs(outRoot)) {
     const p = d.split("-")[0], subject = SUBJECT[p], dir = join(outRoot, d);
@@ -165,14 +289,31 @@ export async function scoreOutput(repo, outRoot) {
     const def = loadDef(join(ev, "subjects", `${subject}.json`));
     // 補正後（v2）の分母の既定：主の構造（0 番目）の判定の数。役割が見つからないときに engine.mjs が writable_total に使う値と同じ
     const main = def.structures[0], fromDefinition = { total: main.checks.length, total_from: `definition:${main.id}` };
-    if (!existsSync(spec)) { rows.push({ ...base, generation_failed: true, fulfillment_v2: { fulfilled: 0, ...fromDefinition } }); continue; }
+    // 了承の記録（#426）：plan.json を読み、当てはまった構造（無ければ主の構造）の定義の鍵で除外・変更を照合する。記録の無い本は absent（Plan を通していない計測なら none ＝ 対象外）
+    const loaded = loadPlan(dir);
+    const status = loaded.status === "absent" && pr === null && !planScope ? "none" : loaded.status;
+    const acceptanceOf = (structureId) => {
+      if (status === "none") return { status };
+      const head = { status, reasons: loaded.reasons, plan_outcome: pr?.outcome ?? null };
+      if (status !== "confirmed") return head;
+      const matcher = acceptanceMatcher(def, structureId, DEFAULT_ALLOWED);
+      return { ...head, plan_id: loaded.plan.plan_id ?? null, revision: loaded.plan.revision ?? null, structure: matcher.structure, ...readAcceptance(loaded.plan, matcher) };
+    };
+    // 了承後の充足の既定：記録の無い本・読めない本・構造が当てはまらない本は充足 0 で、主の構造の判定の数が分母（v2 と同じ決まり）
+    const zeroAccepted = status === "none" ? null : { fulfilled: 0, ...fromDefinition, excluded_changed: 0 };
+    if (!existsSync(spec)) { rows.push({ ...base, generation_failed: true, fulfillment_v2: { fulfilled: 0, ...fromDefinition }, acceptance: acceptanceOf(null), claims_accepted: null, fulfillment_accepted: zeroAccepted, verdict_accepted: null }); continue; }
     const r = await score(engine, spec, def);
     const uw = existsSync(join(dir, "bundle/artifacts/unwritable.json")) ? readJson(join(dir, "bundle/artifacts/unwritable.json")).unwritable ?? [] : [];
     const claimsList = uw.flatMap((u) => (u.unwritable ?? []).map((part) => ({ requirement: `${u.text}（${u.quote}）`, reason: part })));
     const claims = scoreClaims({ attempts: [{ unwritable: claimsList }] }, def, r.structure, r.written);
     // 構造が当てはまった本は、その構造の判定の数が分母。静的 NG・役割が見つからない本は充足 0 で、主の構造の判定の数が分母
     const fulfillment_v2 = r.structure ? { fulfilled: r.fulfilled ?? 0, total: r.writable_total, total_from: `structure:${r.structure}` } : { fulfilled: 0, ...fromDefinition };
-    rows.push({ ...base, spec_verdict: r.verdict, verdict: finalVerdict(r, claims), failed: Object.entries(r.checks).filter(([, ok]) => !ok).map(([k]) => k), fulfilled: r.fulfilled ?? 0, writable_total: r.writable_total ?? 0, claims, final_static: r.verdict === "STATIC_NG" ? 1 : 0, fulfillment_v2 });
+    // 了承後系：確定した本だけ読み替える（了承済みの書けない要件は挙げ漏れにしない。了承で変わった書ける要件は分母から外す）。それ以外は充足 0・判定 null
+    const acceptance = acceptanceOf(r.structure);
+    const claims_accepted = status === "confirmed" ? claimsAfterAcceptance(def, r.structure, claimsList, r.written, acceptance.accepted_unwritable_ids, claims.false_claims.length) : null;
+    const fulfillment_accepted = status === "confirmed" && r.structure ? fulfillmentAfterAcceptance(r, acceptance.changed_checks) : zeroAccepted;
+    const verdict_accepted = status === "confirmed" ? finalVerdict(r, claims_accepted) : null;
+    rows.push({ ...base, spec_verdict: r.verdict, verdict: finalVerdict(r, claims), failed: Object.entries(r.checks).filter(([, ok]) => !ok).map(([k]) => k), fulfilled: r.fulfilled ?? 0, writable_total: r.writable_total ?? 0, claims, final_static: r.verdict === "STATIC_NG" ? 1 : 0, fulfillment_v2, acceptance, claims_accepted, fulfillment_accepted, verdict_accepted });
   }
   const W = rows.filter((r) => ["A", "C", "E"].includes(r.subject)), P = rows.filter((r) => ["B", "D"].includes(r.subject));
   const withUnwritable = P.filter((r) => r.generation_failed || r.claims.missed + r.claims.correct > 0);
@@ -192,14 +333,33 @@ export async function scoreOutput(repo, outRoot) {
   // 充足率を集計の版ごとに並べる（partial ＝ 一部書けない題材 B・D、writable ＝ 書ける題材 A・C・E、all ＝ 全部）。v1.partial は metrics.fulfillment_partial と同じ値
   const v1 = (xs) => fmt(sum(xs, (r) => r.fulfilled ?? 0), sum(xs, (r) => r.writable_total || 0));
   const v2 = (xs) => fmt(sum(xs, (r) => r.fulfillment_v2.fulfilled), sum(xs, (r) => r.fulfillment_v2.total));
+  // 了承後系（#426）：対象の本（fulfillment_accepted が null でない本）だけで数える。記録の無い本・読めない本は充足 0・判定 null で分母に残る
+  const inScope = rows.filter((r) => r.fulfillment_accepted !== null);
+  const confirmed = inScope.filter((r) => r.acceptance.status === "confirmed");
+  const WA = inScope.filter((r) => ["A", "C", "E"].includes(r.subject)), PA = inScope.filter((r) => ["B", "D"].includes(r.subject));
+  const passAccepted = (r) => r.verdict_accepted === "PASS";
+  const withUnwritableA = PA.filter((r) => r.claims_accepted === null || r.claims_accepted.missed + r.claims_accepted.correct + r.claims_accepted.accepted > 0);
+  const countOf = (st) => inScope.filter((r) => r.acceptance.status === st).length;
+  const sumA = (f) => sum(confirmed, (r) => f(r.acceptance));
+  const fa = (xs) => fmt(sum(xs, (r) => r.fulfillment_accepted.fulfilled), sum(xs, (r) => r.fulfillment_accepted.total));
+  const metrics_accepted = {
+    runs: inScope.length, confirmed: confirmed.length, absent: countOf("absent"), invalid: countOf("invalid"),
+    spec_pass_writable: fmt(WA.filter(passAccepted).length, WA.length),
+    missed_partial: fmt(withUnwritableA.filter((r) => r.claims_accepted === null || r.claims_accepted.missed > 0).length, withUnwritableA.length),
+    spec_pass_partial: fmt(PA.filter(passAccepted).length, PA.length),
+    wrong_exclusion_runs: fmt(confirmed.filter((r) => r.acceptance.wrong_exclusions > 0).length, confirmed.length),
+    wrong_acceptance_runs: fmt(confirmed.filter((r) => r.acceptance.wrong_acceptances > 0).length, confirmed.length),
+    wrong_exclusions: sumA((a) => a.wrong_exclusions), wrong_acceptances: sumA((a) => a.wrong_acceptances), changed_checks: sumA((a) => a.changed_checks.length),
+    changes: { added: sumA((a) => a.changes.added), changed: sumA((a) => a.changes.changed), removed: sumA((a) => a.changes.removed) }, decisions: sumA((a) => a.decisions),
+  };
   const fulfillment = {
     v1: { label: AGGREGATION_VERSIONS.v1, partial: v1(P), writable: v1(W), all: v1(rows) },
     v2: { label: AGGREGATION_VERSIONS.v2, partial: v2(P), writable: v2(W), all: v2(rows) },
+    accepted: { label: SCORING_SYSTEMS.accepted, partial: fa(PA), writable: fa(WA), all: fa(inScope) },
   };
-  const bySubject = Object.fromEntries(["A", "B", "C", "D", "E"].map((s) => { const xs = rows.filter((r) => r.subject === s); return [s, { pass: fmt(xs.filter(pass).length, xs.length), S1: `${xs.filter((r) => r.style === "S1" && pass(r)).length}/${xs.filter((r) => r.style === "S1").length}`, S2: `${xs.filter((r) => r.style === "S2" && pass(r)).length}/${xs.filter((r) => r.style === "S2").length}` }]; }));
+  const bySubject = Object.fromEntries(["A", "B", "C", "D", "E"].map((s) => { const xs = rows.filter((r) => r.subject === s), xa = xs.filter((r) => r.fulfillment_accepted !== null); return [s, { pass: fmt(xs.filter(pass).length, xs.length), S1: `${xs.filter((r) => r.style === "S1" && pass(r)).length}/${xs.filter((r) => r.style === "S1").length}`, S2: `${xs.filter((r) => r.style === "S2" && pass(r)).length}/${xs.filter((r) => r.style === "S2").length}`, pass_accepted: fmt(xa.filter(passAccepted).length, xa.length) }]; }));
   const completion = reconcile(outRoot);
   // 採点に使った定義とエンジン（<repo> から読み込んだ ev）・集計のコード（実行中のこのファイル）・spec-engine の dist の指紋。条件のファイル（計測の始めに記録）の値と照合する
-  const cond = readConditions(outRoot);
   const aggregator = fileURLToPath(import.meta.url);
   const scoring = { dir: relative(repo, ev), aggregator: { path: relReal(repo, aggregator), sha256: sha256(readFileSync(aggregator)) }, ...scoringFingerprint(ev, aggregator) };
   const se = fingerprintDir(specEngineDist);
@@ -211,13 +371,15 @@ export async function scoreOutput(repo, outRoot) {
     scoring_matches_conditions: matches(scoring.fingerprint, cond?.scoring?.fingerprint),
     spec_engine_matches_conditions: matches(se.fingerprint, cond?.spec_engine?.fingerprint),
   };
-  return { rubric: "v5", aggregation_versions: AGGREGATION_VERSIONS, metrics, fulfillment, completion, fingerprints, bySubject, rows };
+  return { rubric: "v5", aggregation_versions: AGGREGATION_VERSIONS, scoring_systems: SCORING_SYSTEMS, metrics, metrics_accepted, fulfillment, completion, fingerprints, bySubject, rows };
 }
 
 // ── 匿名の集計（回帰用・保留用の組）：許可した欄だけを組み立てる。入力の文字列をそのまま通さない
 const HEX64 = /^[0-9a-f]{64}$/;
 /** 匿名で出す指標（数と区間だけ。factory_verdicts は別に既知の値へまとめる） */
 export const ANONYMOUS_METRICS = ["generated", "final_static", "spec_pass_writable", "missed_partial", "fulfillment_partial", "spec_pass_partial", "false_claim_runs", "within_time_cost", "cost_total_usd"];
+/** 匿名で出す了承後系の指標（数と区間だけ。#426）。本数・件数は別に整数だけを通す */
+export const ANONYMOUS_ACCEPTED_METRICS = ["spec_pass_writable", "missed_partial", "spec_pass_partial", "wrong_exclusion_runs", "wrong_acceptance_runs"];
 const hashOrNull = (x) => (typeof x === "string" && HEX64.test(x) ? x : null);
 const enumOrUnknown = (allowed, x) => (x === null || x === undefined ? null : allowed.includes(x) ? x : "unknown");
 const boolOrNull = (x) => (typeof x === "boolean" ? x : null);
@@ -229,14 +391,21 @@ const countOrNull = (xs) => (Array.isArray(xs) ? xs.length : null);
  * schema と判定の口の構成は既知の値か unknown にする。測定 ID・署名以外の自由な文字列は出ない
  */
 export function anonymize(full) {
-  const c = full.completion, f = full.fingerprints, m = full.metrics, cond = f.conditions;
+  const c = full.completion, f = full.fingerprints, m = full.metrics, ma = full.metrics_accepted ?? {}, cond = f.conditions;
   const verdicts = Object.fromEntries([...FACTORY_VERDICTS, "unknown"].map((k) => [k, 0]));
   for (const [k, n] of Object.entries(m.factory_verdicts ?? {})) verdicts[FACTORY_VERDICTS.includes(k) ? k : "unknown"] += Number.isInteger(n) ? n : 0;
   const status = enumOrUnknown(Object.keys(COMPLETION_LABELS), c.status);
   return {
-    rubric: "v5", anonymous: true, aggregation_versions: AGGREGATION_VERSIONS, runs: full.rows.length,
+    rubric: "v5", anonymous: true, aggregation_versions: AGGREGATION_VERSIONS, scoring_systems: SCORING_SYSTEMS, runs: full.rows.length,
     metrics: { ...Object.fromEntries(ANONYMOUS_METRICS.map((k) => [k, m[k]])), factory_verdicts: verdicts },
-    fulfillment: Object.fromEntries(["v1", "v2"].map((v) => [v, { label: AGGREGATION_VERSIONS[v], partial: full.fulfillment[v].partial, writable: full.fulfillment[v].writable, all: full.fulfillment[v].all }])),
+    // 了承後系（#426）：本数・件数は整数だけ、率は数と区間の文字列だけ。要件の文・部分の ID・当たった先は出さない
+    metrics_accepted: {
+      runs: intOrNull(ma.runs), confirmed: intOrNull(ma.confirmed), absent: intOrNull(ma.absent), invalid: intOrNull(ma.invalid),
+      ...Object.fromEntries(ANONYMOUS_ACCEPTED_METRICS.map((k) => [k, ma[k] ?? null])),
+      wrong_exclusions: intOrNull(ma.wrong_exclusions), wrong_acceptances: intOrNull(ma.wrong_acceptances), changed_checks: intOrNull(ma.changed_checks),
+      changes: Object.fromEntries(["added", "changed", "removed"].map((k) => [k, intOrNull(ma.changes?.[k])])), decisions: intOrNull(ma.decisions),
+    },
+    fulfillment: Object.fromEntries(["v1", "v2", "accepted"].map((v) => [v, { label: v === "accepted" ? SCORING_SYSTEMS.accepted : AGGREGATION_VERSIONS[v], partial: full.fulfillment[v]?.partial ?? null, writable: full.fulfillment[v]?.writable ?? null, all: full.fulfillment[v]?.all ?? null }])),
     completion: { status, label: COMPLETION_LABELS[status] ?? "unknown", planned: intOrNull(c.planned), executed: intOrNull(c.executed), unexecuted: countOrNull(c.unexecuted), incomplete: countOrNull(c.incomplete), extra: countOrNull(c.extra), stop_code: enumOrUnknown(STOP_CODES, c.latest_record?.stop_code ?? null) },
     fingerprints: {
       scoring: hashOrNull(f.scoring.fingerprint), spec_engine: hashOrNull(f.spec_engine.fingerprint),
@@ -259,10 +428,11 @@ async function main() {
     return;
   }
   writeFileSync(join(outRoot, `${name}.json`), JSON.stringify(full, null, 1));
-  const { metrics, fulfillment, completion, fingerprints, bySubject, rows } = full;
-  console.log(JSON.stringify({ metrics, fulfillment, completion, bySubject }, null, 1));
-  for (const r of rows) console.log([r.run, r.factory_verdict, r.verdict ?? "GEN_FAIL", (r.failed ?? []).join("・"), r.claims ? `claims ok=${r.claims.correct} miss=${r.claims.missed} false=${r.claims.false_claims.length}` : "", r.cost_usd?.toFixed(3), Math.round(r.seconds)].join("\t"));
+  const { metrics, metrics_accepted, fulfillment, completion, fingerprints, bySubject, rows } = full;
+  console.log(JSON.stringify({ metrics, metrics_accepted, fulfillment, completion, bySubject }, null, 1));
+  for (const r of rows) console.log([r.run, r.factory_verdict, r.verdict ?? "GEN_FAIL", (r.failed ?? []).join("・"), r.claims ? `claims ok=${r.claims.correct} miss=${r.claims.missed} false=${r.claims.false_claims.length}` : "", r.cost_usd?.toFixed(3), Math.round(r.seconds), `了承後=${r.verdict_accepted ?? "-"}`].join("\t"));
   console.log(`照合: ${completion.label}（予定 ${completion.planned ?? "-"}・実行 ${completion.executed}・未実行 ${completion.unexecuted?.length ?? "-"}・途中 ${completion.incomplete.length}${completion.latest_record?.stop ? `・止まった理由: ${completion.latest_record.stop}` : ""}${completion.status === "unverified" ? `・理由: ${completion.reasons.join("、")}` : ""}）`);
+  console.log(`了承後: 対象 ${metrics_accepted.runs} 本（確定 ${metrics_accepted.confirmed}・記録なし ${metrics_accepted.absent}・読めない ${metrics_accepted.invalid}）・誤った除外 ${metrics_accepted.wrong_exclusions} 件・誤った了承 ${metrics_accepted.wrong_acceptances} 件・了承で変わった判定 ${metrics_accepted.changed_checks}・充足 ${fulfillment.accepted.all}`);
   const judge = (m) => (m === null ? "条件のファイルに無い" : m ? "条件のファイルと一致" : "条件のファイルと不一致");
   console.log(`指紋: 採点 ${fingerprints.scoring.fingerprint.slice(0, 12)}…（${judge(fingerprints.scoring_matches_conditions)}）・spec-engine ${fingerprints.spec_engine.fingerprint?.slice(0, 12) ?? "-"}…（${judge(fingerprints.spec_engine_matches_conditions)}）`);
 }
