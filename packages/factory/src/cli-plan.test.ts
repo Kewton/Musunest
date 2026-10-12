@@ -23,7 +23,14 @@ import {
 } from "./cli-plan.js";
 import { createFakeJudge } from "./judge-fake.js";
 import type { JudgeAnswer } from "./judge.js";
-import type { LlmClient } from "./llm.js";
+import type {
+  LlmClient,
+  LlmStructuredRequest,
+  LlmStructuredResponse,
+  LlmToolRequest,
+  LlmToolResponse,
+} from "./llm.js";
+import type { RecordedCall } from "./llm-fake.js";
 import {
   CATALOG_FACETS,
   catalogAppliesQuestionName,
@@ -1253,5 +1260,78 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
     expect(JSON.stringify(record.requirements_diagnosis)).not.toContain("件数を");
     expect(JSON.stringify(record)).not.toContain(mark);
     expect(lines.join("\n")).not.toContain(mark);
+  });
+});
+
+// ── 止まったときの内訳も plan-record に写る（Issue #430 の直し）──────────────
+
+describe("止まったときの内訳も plan-record に写る（Issue #430 の直し）", () => {
+  /** `failAt` 回目の構造化出力の呼び出しでだけ要求の誤りを投げる偽物の呼び出し */
+  function clientThrowingAt(recorded: readonly RecordedCall[], failAt: number): LlmClient {
+    const inner = createRecordingClient(recorded);
+    let calls = 0;
+    return {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        if (calls === failAt) {
+          throw Object.assign(new Error("要求が不正です"), { kind: "invalidRequest", code: "invalid_json_schema" });
+        }
+        return inner.client.callStructured<T>(request);
+      },
+      async callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
+        return inner.client.callWithTools(request);
+      },
+    };
+  }
+
+  it("① のやり直しが成功したあと ①' で止まると、記録の redone が true になる", async () => {
+    // 引用の落ちと覆いの落ちを作る一覧（やり直しが走る）
+    const list = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "タスクを記録する", position: { start: 0, end: 8 } },
+        { id: "R-2", text: "合計できる", quote: "件数を数える", position: { start: 0, end: 0 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const conversation = { uncovered: [{ start: 0, end: 2 }] };
+    // 1: ①／2: ①'（落ちを作る）／3: ① のやり直し／4: ①' のやり直しで要求の誤り
+    const client = clientThrowingAt([structured(list), structured(conversation), structured(list)], 4);
+    const dir = `${directory}/stopped-diagnosis`;
+    const answersPath = "stopped-diagnosis-answers.json";
+    const lines: string[] = [];
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => client,
+      makeLlmJudge: () => createFakeJudge({}),
+      now: () => 0,
+      log: (line) => lines.push(line),
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.operation).toBe("reverse-check-redo");
+    // ① のやり直しは成功しているので、止まった記録でも redone は true（Issue #430 の直し）
+    expect(record.requirements_diagnosis.redone).toBe(true);
+    expect(record.requirements_diagnosis.rounds).toHaveLength(1);
+    // 止まったので、やり直し後に残った落ちの内訳は 0 のまま
+    expect(record.requirements_diagnosis.unmet).toEqual({
+      quote_not_found: 0,
+      position_mismatch: 0,
+      uncovered_source: { code: 0, conversation: 0 },
+    });
+    expect(lines.some((line) => line.includes("reverse-check-redo"))).toBe(true);
   });
 });

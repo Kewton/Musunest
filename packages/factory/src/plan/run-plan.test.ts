@@ -2352,8 +2352,10 @@ describe("P1/P2 の往復ごとの落ちの内訳を結果に残す（Issue #430
     );
     expect(atRedo.kind).toBe("stopped");
     expect(atRedo.requirementsDiagnosis.rounds).toHaveLength(1);
+    // ① のやり直し**自体**が失敗したので、やり直しは終えていない（Issue #430 の直し）
+    expect(atRedo.requirementsDiagnosis.redone).toBe(false);
 
-    // ①' のやり直しで止まる → 往復 1
+    // ①' のやり直しで止まる → 往復 1。① のやり直しは成功しているので、やり直しは終えている
     const atRedoReverse = await runPlan(
       makePlanInput(
         clientThrowingAt(
@@ -2368,6 +2370,7 @@ describe("P1/P2 の往復ごとの落ちの内訳を結果に残す（Issue #430
     );
     expect(atRedoReverse.kind).toBe("stopped");
     expect(atRedoReverse.requirementsDiagnosis.rounds).toHaveLength(1);
+    expect(atRedoReverse.requirementsDiagnosis.redone).toBe(true);
     expect(atRedoReverse.requirementsDiagnosis.unmet).toEqual(ZERO_MISS_COUNTS);
   });
 });

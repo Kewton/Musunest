@@ -499,12 +499,14 @@ export async function runReverseCheckLoopWithOperation(
 ): Promise<ReverseCheckLoopOutcome> {
   /** 終えた往復の診断（止まったときは、止まるまでに終えた分だけを持つ） */
   const rounds: ReverseCheckRoundDiagnosis[] = [];
+  /** ① のやり直しを**終えた**か（やり直しの要求が失敗したときは false のまま。Issue #430） */
+  let redoCompleted = false;
   /** 止まったときの結果（終えた往復の分だけを持ち、やり直し後の落ちは無い） */
   const stop = (failure: StageFailure, operation: ReverseCheckOperation): ReverseCheckLoopOutcome => ({
     ok: false,
     failure,
     operation,
-    diagnosis: { rounds, redone: false, unmet: emptyReverseCheckMissCounts() },
+    diagnosis: { rounds, redone: redoCompleted, unmet: emptyReverseCheckMissCounts() },
   });
   const first = await runRequirements({
     source: input.source,
@@ -542,6 +544,8 @@ export async function runReverseCheckLoopWithOperation(
     redo: { previous: first.value, misses: initial.value.misses },
   });
   if (!redone.ok) return stop(redone.failure, "requirements-redo");
+  // ここから先は、① のやり直しが成功している（2 回目の逆照合で止まっても `redone` を true にする）
+  redoCompleted = true;
   const second = await runReverseCheck({
     source: input.source,
     list: redone.value,

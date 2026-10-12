@@ -740,7 +740,7 @@ describe("往復ごとの落ちの件数の内訳（種類ごと・出どころ�
     expect(atReverseCheck.operation).toBe("reverse-check");
     expect(atReverseCheck.diagnosis.rounds).toEqual([]);
 
-    // ① のやり直しで止まる → 往復 1（初回の逆照合まで終えた）
+    // ① のやり直しで止まる → 往復 1（初回の逆照合まで終えた）。① のやり直し自体が失敗したので `redone` は false
     const atRedo = await runReverseCheckLoopWithOperation({
       source: SOURCE_TEXT,
       documents: SAMPLE_DOCUMENTS,
@@ -754,5 +754,21 @@ describe("往復ごとの落ちの件数の内訳（種類ごと・出どころ�
     expect(atRedo.operation).toBe("requirements-redo");
     expect(atRedo.diagnosis.rounds).toHaveLength(1);
     expect(atRedo.diagnosis.rounds[0]?.misses).toEqual(ROUND_COUNTS);
+    expect(atRedo.diagnosis.redone).toBe(false);
+
+    // ①' のやり直しで止まる → 往復 1。① のやり直しは成功しているので `redone` は true（Issue #430 の直し）
+    const atRedoReverse = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(
+        clientThrowingAt(4, [structured(ROUND_LIST), structured(ROUND_CONVERSATION), structured(ROUND_LIST)]),
+        { maxAttempts: 1 },
+      ),
+    });
+    expect(atRedoReverse.ok).toBe(false);
+    if (atRedoReverse.ok) return;
+    expect(atRedoReverse.operation).toBe("reverse-check-redo");
+    expect(atRedoReverse.diagnosis.rounds).toHaveLength(1);
+    expect(atRedoReverse.diagnosis.redone).toBe(true);
   });
 });
