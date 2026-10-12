@@ -16,6 +16,7 @@ import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest } from "../judge.j
 import {
   CATALOG_AGGREGATION_FACET_IDS,
   CATALOG_FACETS,
+  CATALOG_TARGET_STATUSES,
   catalogAppliesQuestionName,
   catalogDefaultOf,
   catalogGateQuestionName,
@@ -251,7 +252,7 @@ describe("語彙の決めどころの目録（04 §3 P3・05 §3・Issue #366）
     const { judge, requests } = recordingJudge({});
     const result = await runCatalog({ requirements: [], judge, source: SOURCE, threshold: NOUL_THRESHOLD });
     expect(requests).toEqual([]);
-    expect(result).toEqual({ unspecified: [], judgments: [] });
+    expect(result).toEqual({ unspecified: [], judgments: [], reviewed: [] });
   });
 
   it("判定の記録に、当てはまるかと決まっているかの両方の分を残す", async () => {
@@ -549,5 +550,89 @@ describe("許可の表——観点ごとの既定（04 §3「既定で決めて�
     // 「今の期間を含む」「0 件の見出しも出す」は、語彙の省略時の振る舞いと一致する
     expect(facetOf("current-period").default?.value).toBe("今の期間を含む");
     expect(facetOf("include-zero").default?.value).toBe("0 件の見出しも出す");
+  });
+});
+
+// ── Issue #419：目録が点検した対象の一覧 ────────────────────────────────
+
+describe("目録が点検した対象の一覧（04 §3 P3・Issue #419）", () => {
+  /** 一覧から 1 つの観点の結果を引く */
+  const statusOf = (result: Awaited<ReturnType<typeof runCatalog>>, facetId: string): string | undefined =>
+    result.reviewed.find((target) => target.facetId === facetId)?.status;
+
+  it("要件 × 観点で結果を持ち、当てはまらない・決まっている・開いているを区別する", async () => {
+    const open = await runOne({ applies: 1, specified: 0.2, gate: 0.9 });
+    expect(open.reviewed).toHaveLength(CATALOG_FACETS.length);
+    expect(open.reviewed.every((target) => target.requirementId === "R-1")).toBe(true);
+    expect(open.reviewed.map((target) => target.facetId)).toEqual(CATALOG_FACETS.map((facet) => facet.id));
+    expect(open.reviewed.every((target) => target.status === "開いている")).toBe(true);
+
+    const notApplicable = await runOne({ applies: 0.2, specified: 0 });
+    expect(notApplicable.reviewed.every((target) => target.status === "当てはまらない")).toBe(true);
+
+    const decided = await runOne({ applies: 1, specified: 1 });
+    expect(decided.reviewed.every((target) => target.status === "決まっている")).toBe(true);
+  });
+
+  it("門の閉じと閾値の境界が、既存の未指定の判定と同じ結果になる", async () => {
+    // 閾値 0.6 → 門 0.4 は「1 − 閾値」ちょうど（以下なので閉じる）
+    const closed = await runOne({ applies: 1, specified: 0, gate: 0.4 });
+    for (const facetId of CATALOG_AGGREGATION_FACET_IDS) expect(statusOf(closed, facetId)).toBe("当てはまらない");
+    expect(statusOf(closed, "editable-by")).toBe("開いている");
+    // 未指定の判定（既存）と同じ——集計の観点は外れ、直せる人は残る
+    expect(closed.unspecified.map((facet) => facet.facetId)).toEqual(OTHER_FACET_IDS);
+
+    // 0.41 は境界の外（門を開ける）→ 今までどおり当てはまり・決まりで決まる
+    const opened = await runOne({ applies: 1, specified: 0, gate: 0.41 });
+    for (const facetId of CATALOG_AGGREGATION_FACET_IDS) expect(statusOf(opened, facetId)).toBe("開いている");
+    expect(opened.unspecified.map((facet) => facet.facetId)).toEqual(CATALOG_FACETS.map((facet) => facet.id));
+  });
+
+  it("門・当てはまり・決まりの判定の欠け・型違い・範囲外は「判定不明」になり、0 と区別される", async () => {
+    const gateName = catalogGateQuestionName("R-1");
+    const base = uniformAnswers("R-1", { applies: 1, specified: 0 });
+    const run = (answers: Readonly<Record<string, JudgeAnswer | undefined>>) =>
+      runCatalog({
+        requirements: [{ id: "R-1", text: "件数を合計する" }],
+        judge: customJudge(answers).judge,
+        source: SOURCE,
+        threshold: NOUL_THRESHOLD,
+      });
+
+    // 門の答えが無い → 集計の観点は「判定不明」、直せる人は当てはまり・決まりで決まる
+    const noGate = { ...base };
+    delete noGate[gateName];
+    const missingGate = await run(noGate);
+    expect(statusOf(missingGate, "aggregation")).toBe("判定不明");
+    expect(statusOf(missingGate, "editable-by")).toBe("開いている");
+
+    // 当てはまりが Noul でない → 「判定不明」（値 0 と区別）
+    const scoreAnswer: JudgeAnswer = {
+      kind: "score",
+      score: 0.5,
+      legend: ["a", "b"],
+      probabilities: undefined,
+      confidence: undefined,
+    };
+    const notNoul = await run({ ...base, [catalogAppliesQuestionName("R-1", "editable-by")]: scoreAnswer });
+    expect(statusOf(notNoul, "editable-by")).toBe("判定不明");
+
+    // 値 0（既知の 0）は「当てはまらない」で、判定不明と区別される
+    const zero = await run({ ...base, [catalogAppliesQuestionName("R-1", "editable-by")]: noul(0) });
+    expect(statusOf(zero, "editable-by")).toBe("当てはまらない");
+
+    // 決まっているの値が範囲の外 → 「判定不明」
+    const outOfRange = await run({ ...base, [catalogQuestionName("R-1", "editable-by")]: noul(1.5) });
+    expect(statusOf(outOfRange, "editable-by")).toBe("判定不明");
+  });
+
+  it("既定で閉じた扱いは一覧に含めない（閉じるのは呼ぶ側）", async () => {
+    // 表の既定が当たる要件でも、一覧は「開いている」のままで、既定の値・理由を持たない
+    const result = await runOne({ applies: 1, specified: 0, gate: 1 });
+    const period = result.reviewed.find((target) => target.facetId === "period");
+    expect(period?.status).toBe("開いている");
+    expect(Object.keys(period ?? {})).toEqual(["requirementId", "facetId", "status"]);
+    // 結果は有限の 4 つだけで、「既定で決まっている」のような値は無い
+    expect([...CATALOG_TARGET_STATUSES]).toEqual(["当てはまらない", "決まっている", "開いている", "判定不明"]);
   });
 });

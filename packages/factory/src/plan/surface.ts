@@ -19,6 +19,7 @@ import {
   serializeJson,
   type Problem,
   type PromptDocument,
+  type PromptData,
   type ShapeCheck,
   type StageOutcome,
 } from "../stages/prompt.js";
@@ -28,7 +29,9 @@ export const SURFACE_SCHEMA_NAME = "plan-surface";
 
 /** P3 の洗い出しに足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const SURFACE_RULES: readonly string[] = [
-  "要件の一覧から、次を挙げる：**未解決の事項**（答えで作るものが変わる。重大か否か。語彙の決めどころの目録に無いもの）と、**語彙で書けないこと**。",
+  "要件の一覧から、次を挙げる：**未解決の事項**（答えで作るものが変わる。重大か否か）と、**語彙で書けないこと**。",
+  "同じ要件の同じ決めどころを、**実際に開いている事項**か、**仮に適用した既定**（有効なもの）が覆う場合だけ、重複として挙げない。目録が同じ観点を点検したというだけでは除外しない。",
+  "次は、同じ決めどころでも重複として**挙げる**：対象の要件が違う／目録の結果が**判定不明**／**当てはまらない**と判定されたが要件がその決めどころを含む／既定の値と要件の明示が**矛盾**する／**重大**／要件どうしの**矛盾**／**書けない**こと。",
   "質問や観点の文は、利用者の言葉で書く。宣言の用語（entity・computed・selector など）を使わない。",
   "書けないことには、根拠にした**制約 ID**（constraintIds）を必須にする——渡した文書の本文にある契約の規則の ID（例 `R-TYPE-01`）か、語彙の意味の見出しの文（例 `number`。`#` の記号は付けない）だけを挙げる。文書に無い ID を作らない。",
   "書けないことには、**代わりの案**（alternative）を 1 つ書く——文書の語彙で書ける、近い形である。代わりの案を採るかどうかは利用者が決める。",
@@ -109,11 +112,53 @@ export interface PlanSurface {
   readonly unwritable: readonly PlanUnwritable[];
 }
 
+/** 目録が点検した対象 1 つ（要件 × 観点 と結果。P3 のデータにだけ渡す。Issue #419） */
+export interface SurfaceReviewedTarget {
+  readonly requirementId: string;
+  readonly facetId: string;
+  readonly status: string;
+}
+
+/** コードが目録から作った、開いている事項 1 つ（P3 のデータにだけ渡す。Issue #419） */
+export interface SurfaceOpenIssue {
+  readonly id: string;
+  readonly requirementId: string;
+  readonly facetId: string;
+  readonly text: string;
+}
+
+/** P3 の前に**仮に適用した**既定 1 つ（事項 ID・要件 ID・観点 ID・値・理由。Issue #419） */
+export interface SurfaceAppliedDefault {
+  readonly issueId: string;
+  readonly requirementId: string;
+  readonly facetId: string;
+  readonly value: string;
+  readonly reason: string;
+}
+
+/**
+ * P3 に渡す、目録の点検の結果（Issue #419）。**決定も閉じた記録も作らない**——ここで渡す既定は
+ * **仮適用**であり、確定は `runPlan` が P3 の事項を加えたあとに行う。**依頼文・答えの本文は入れない**。
+ */
+export interface SurfaceCatalogData {
+  /** 目録が点検した対象（要件 × 観点 と結果） */
+  readonly targets: readonly SurfaceReviewedTarget[];
+  /** コードが目録から作った、開いている事項 */
+  readonly openIssues: readonly SurfaceOpenIssue[];
+  /** 仮に適用した既定（事項 ID・要件 ID・観点 ID・値・理由） */
+  readonly defaults: readonly SurfaceAppliedDefault[];
+}
+
 /** P3 の洗い出しが受け取るもの */
 export interface SurfaceInput {
   readonly list: RequirementList;
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
+  /**
+   * 目録の点検の結果（Issue #419）。渡さなければデータは要件の一覧だけである（既存の道）。
+   * 渡すと「目録が点検した対象」「開いている事項」「仮に適用した既定」を**別々のデータ**として足す。
+   */
+  readonly catalog?: SurfaceCatalogData;
 }
 
 function checkAmbiguity(value: unknown, field: string, problems: Problem[]): PlanAmbiguity | undefined {
@@ -270,14 +315,21 @@ function normalizeSurfaceClaims(surface: PlanSurface): PlanSurface {
 }
 
 /**
- * P3 の洗い出しを 1 回呼ぶ。データは要件の一覧だけである。形が合わない応答は 1 回だけやり直し、
+ * P3 の洗い出しを 1 回呼ぶ。データは要件の一覧と、渡されていれば目録の点検の結果（点検した対象・
+ * 開いている事項・仮に適用した既定）である（Issue #419）。形が合わない応答は 1 回だけやり直し、
  * 制約 ID の裏付けが取れない申告は断る（`unmet`）。
  */
 export async function runSurface(input: SurfaceInput): Promise<StageOutcome<PlanSurface>> {
+  const data: PromptData[] = [{ name: "要件の一覧", text: serializeJson(input.list) }];
+  if (input.catalog !== undefined) {
+    data.push({ name: "目録が点検した対象", text: serializeJson(input.catalog.targets) });
+    data.push({ name: "開いている事項", text: serializeJson(input.catalog.openIssues) });
+    data.push({ name: "仮に適用した既定", text: serializeJson(input.catalog.defaults) });
+  }
   const request = buildStructuredRequest({
     rules: SURFACE_RULES,
     documents: input.documents,
-    data: [{ name: "要件の一覧", text: serializeJson(input.list) }],
+    data,
     schemaName: SURFACE_SCHEMA_NAME,
     schema: SURFACE_SCHEMA,
     maxOutputTokens: input.gateway.maxOutputTokens("surface"),

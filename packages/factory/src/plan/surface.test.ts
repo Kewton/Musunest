@@ -13,7 +13,7 @@ import {
   createRecordingClient,
   makeGateway,
 } from "../stages/__tests__/prompt.js";
-import { SURFACE_RULES, SURFACE_SCHEMA_NAME, checkSurfaceOutput, runSurface } from "./surface.js";
+import { SURFACE_RULES, SURFACE_SCHEMA_NAME, checkSurfaceOutput, runSurface, type SurfaceCatalogData } from "./surface.js";
 
 /** 正しい応答（未解決の事項 1 件・書けないこと 1 件） */
 const SURFACE_OUTPUT = {
@@ -67,6 +67,76 @@ describe("P3 の洗い出しが送る要求を観測する（04 §2.2）", () =>
     const { recording, outcome } = run(SURFACE_OUTPUT);
     await outcome;
     expect(recording.structured[0]?.maxOutputTokens).toBe(maxOutputTokensForEffort("high", "surface"));
+  });
+});
+
+// ── Issue #419：目録の点検の結果をデータに渡す ─────────────────────────
+
+describe("目録の点検の結果をデータに渡す（04 §3 P3・Issue #419）", () => {
+  /** 目録の点検の結果（3 つの欄。値と理由はコードの定数） */
+  const CATALOG: SurfaceCatalogData = {
+    targets: [{ requirementId: "R-1", facetId: "period", status: "開いている" }],
+    openIssues: [
+      {
+        id: "OI:catalog:R-1:period",
+        requirementId: "R-1",
+        facetId: "period",
+        text: "要件 R-1「タスクを記録できる」について：対象にする期間（いつからいつまでか）",
+      },
+    ],
+    defaults: [
+      {
+        issueId: "OI:catalog:R-1:current-period",
+        requirementId: "R-1",
+        facetId: "current-period",
+        value: "今の期間を含む",
+        reason: "語彙は、期間の条件（within）を書かなければ期間で絞らず、今の期間を含む（語彙の意味 §within）",
+      },
+    ],
+  };
+
+  it("3 つの欄が、別々のデータ（<data name=>）として入る", async () => {
+    const recorded = [
+      { kind: "structured" as const, output: SURFACE_OUTPUT, usage: undefined },
+      { kind: "structured" as const, output: SURFACE_OUTPUT, usage: undefined },
+    ];
+    const recording = createRecordingClient(recorded);
+    const outcome = await runSurface({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      catalog: CATALOG,
+    });
+    expect(outcome.ok).toBe(true);
+    const request = recording.structured[0];
+    expect(request).toBeDefined();
+    if (request === undefined) return;
+    // 要件の一覧 + 3 つの欄で、データは 4 つ
+    expect(request.input.match(/<data name=/g)).toHaveLength(4);
+    expect(request.input).toContain('<data name="要件の一覧">');
+    expect(request.input).toContain('<data name="目録が点検した対象">');
+    expect(request.input).toContain('<data name="開いている事項">');
+    expect(request.input).toContain('<data name="仮に適用した既定">');
+    // 規則の側には、データの名前が入らない（規則とデータを分ける）
+    expect(request.instructions).not.toContain("仮に適用した既定");
+  });
+
+  it("規則の文に「目録に無いもの」の一律の文が無く、挙げない条件と挙げる条件がある", () => {
+    const text = SURFACE_RULES.join("\n");
+    // 一律の文（置き換える前の規則）が無い
+    expect(text).not.toContain("目録に無いもの");
+    // 挙げない条件：同じ要件の同じ決めどころを、開いた事項か仮に適用した既定が覆う
+    expect(text).toContain("同じ要件の同じ決めどころ");
+    expect(text).toContain("開いている事項");
+    expect(text).toContain("仮に適用した既定");
+    // 挙げる条件：対象違い・判定不明・矛盾・重大・明示と既定の衝突・書けないこと
+    expect(text).toContain("対象の要件が違う");
+    expect(text).toContain("判定不明");
+    expect(text).toContain("当てはまらない");
+    expect(text).toContain("矛盾");
+    expect(text).toContain("重大");
+    expect(text).toContain("明示");
+    expect(text).toContain("書けない");
   });
 });
 
