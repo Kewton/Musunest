@@ -232,6 +232,7 @@ interface PlanCliRecordShape {
     readonly questions: readonly {
       readonly id: string;
       readonly open_issue_id: string;
+      readonly revision: number;
       readonly also_closes: readonly string[];
     }[];
     readonly answers: readonly {
@@ -350,12 +351,12 @@ describe("答える役の 2 つの形（04 §7）", () => {
     expect(terminal.out.some((line) => line.includes(RECOMMENDED_INPUT))).toBe(true);
   });
 
-  it("答えのファイルの形は、足りない質問を推奨で埋める", async () => {
+  it("答えのファイルの形は、組み直した質問 ID の鍵で答え、足りない質問を推奨で埋める", async () => {
     const transcript = createPlanTranscript();
-    const responder = createAnswersFilePlanResponder({ "Q-1": { choiceId: "c2" } }, transcript);
+    const responder = createAnswersFilePlanResponder({ "Q1-1": { choiceId: "c2" } }, transcript);
     const questions = [
-      { id: "Q-1", openIssueId: "OI-1", revision: 1, text: "?", choices: [{ id: "c1", text: "A" }, { id: "c2", text: "B" }], recommended: { choiceId: "c1", reason: "r" }, allowFreeText: true },
-      { id: "Q-2", openIssueId: "OI-2", revision: 1, text: "?", choices: [{ id: "c1", text: "A" }, { id: "c2", text: "B" }], recommended: { choiceId: "c2", reason: "r" }, allowFreeText: true },
+      { id: "Q1-1", openIssueId: "OI-1", revision: 1, text: "?", choices: [{ id: "c1", text: "A" }, { id: "c2", text: "B" }], recommended: { choiceId: "c1", reason: "r" }, allowFreeText: true },
+      { id: "Q1-2", openIssueId: "OI-2", revision: 1, text: "?", choices: [{ id: "c1", text: "A" }, { id: "c2", text: "B" }], recommended: { choiceId: "c2", reason: "r" }, allowFreeText: true },
     ];
 
     const outcome = await responder.answer({ questions, remaining: { questions: 8, roundTrips: 2 } });
@@ -363,13 +364,29 @@ describe("答える役の 2 つの形（04 §7）", () => {
     expect(outcome).toEqual({
       kind: "answers",
       answers: [
-        { id: "A:Q-1", questionId: "Q-1", revision: 1, choiceId: "c2" },
-        { id: "A:Q-2", questionId: "Q-2", revision: 1, choiceId: "c2" },
+        { id: "A:Q1-1", questionId: "Q1-1", revision: 1, choiceId: "c2" },
+        { id: "A:Q1-2", questionId: "Q1-2", revision: 1, choiceId: "c2" },
       ],
     });
     // 確認は自動で「これで作る」
     expect(await responder.confirm({ plan: { schema_version: "x", plan_id: "p", revision: 1, vocabulary_version: "v1", inputs: [], requirements: [], open_issues: [], decisions: [], accepted_unwritable: [] }, diff: [], unwritable: [] })).toBe("build");
     expect(transcript.confirmation).toBe("build");
+  });
+
+  it("答えのファイルの鍵は、組み直した質問 ID と一致するときだけ使われ、LLM 由来の古い鍵は変換されずに推奨で埋まる（Issue #405）", async () => {
+    const transcript = createPlanTranscript();
+    // 古い鍵（LLM 由来の ID）は自動で変換しない——現在の質問 ID（Q1-1）と一致しないので、無いものとして推奨で埋める
+    const responder = createAnswersFilePlanResponder({ "Q-1": { choiceId: "c1" } }, transcript);
+    const questions = [
+      { id: "Q1-1", openIssueId: "OI-1", revision: 1, text: "?", choices: [{ id: "c1", text: "A" }, { id: "c2", text: "B" }], recommended: { choiceId: "c2", reason: "r" }, allowFreeText: true },
+    ];
+
+    const outcome = await responder.answer({ questions, remaining: { questions: 8, roundTrips: 2 } });
+
+    expect(outcome).toEqual({
+      kind: "answers",
+      answers: [{ id: "A:Q1-1", questionId: "Q1-1", revision: 1, choiceId: "c2" }],
+    });
   });
 });
 
@@ -380,8 +397,8 @@ describe("偽物の端末で、番号・推奨で決める・自由入力を受�
     const recording = planThenBuildRecording();
     const judge = createFakeJudge({
       ...catalogAnswers(),
-      ...coverAnswers(["A:Q-1", "A:Q-2", "A:Q-3"]),
-      [freeTextQuestionName("A:Q-3")]: {
+      ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]),
+      [freeTextQuestionName("A:Q1-3")]: {
         kind: "choice",
         choice: "new-requirement",
         probabilities: undefined,
@@ -427,7 +444,7 @@ describe("答えのファイルの形で、足りない質問を推奨で埋め�
     const recording = planThenBuildRecording();
     const judge = createFakeJudge({
       ...catalogAnswers(),
-      ...coverAnswers(["A:Q-1", "A:Q-2", "A:Q-3"]),
+      ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]),
     });
     const dir = `${directory}/answers`;
     const answersPath = "answers.json";
@@ -436,7 +453,7 @@ describe("答えのファイルの形で、足りない質問を推奨で埋め�
     await runCli({
       argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--budget", "0.3"],
       env: { [API_KEY_ENV]: "sk-FAKE" },
-      readFile: async (path) => (path === answersPath ? JSON.stringify({ "Q-1": { choiceId: "c1" } }) : SOURCE_TEXT),
+      readFile: async (path) => (path === answersPath ? JSON.stringify({ "Q1-1": { choiceId: "c1" } }) : SOURCE_TEXT),
       writeFile: async (path, text) => {
         await fs.writeFile(path, text, "utf8");
       },
@@ -494,9 +511,16 @@ describe("確定できないときは Build を流さず、0 でない終了コ�
       readFile: async (path) =>
         path === answersPath
           ? JSON.stringify({
-              "Q-1": { choiceId: answerMark },
-              "Q-2": { choiceId: "nope" },
-              "Q-3": { choiceId: "nope" },
+              // 1 往復目は目印つきの選択肢、2・3 往復目は存在しない選択肢——どれも採られない（Issue #405）
+              "Q1-1": { choiceId: answerMark },
+              "Q1-2": { choiceId: "nope" },
+              "Q1-3": { choiceId: "nope" },
+              "Q2-1": { choiceId: "nope" },
+              "Q2-2": { choiceId: "nope" },
+              "Q2-3": { choiceId: "nope" },
+              "Q3-1": { choiceId: "nope" },
+              "Q3-2": { choiceId: "nope" },
+              "Q3-3": { choiceId: "nope" },
             })
           : SOURCE_TEXT,
       writeFile: async (path, text) => {
@@ -584,7 +608,7 @@ describe("往復の記録に、一緒に閉じた事項と依頼文で閉じた�
       structured(GROUPED_QUESTIONS_ONE),
       ...recordedRunFromPlan(),
     ]);
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q-1"]) });
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q1-1"]) });
     const dir = `${directory}/grouped-record`;
     const answersPath = "grouped-answers.json";
 
@@ -592,7 +616,7 @@ describe("往復の記録に、一緒に閉じた事項と依頼文で閉じた�
       argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
       env: { [API_KEY_ENV]: "sk-FAKE" },
       readFile: async (path) =>
-        path === answersPath ? JSON.stringify({ "Q-1": { choiceId: "c1" } }) : SOURCE_TEXT,
+        path === answersPath ? JSON.stringify({ "Q1-1": { choiceId: "c1" } }) : SOURCE_TEXT,
       writeFile: async (path, text) => {
         await fs.writeFile(path, text, "utf8");
       },
@@ -673,7 +697,7 @@ describe("上限を上げても、Plan のあとの Build の予算と締切の�
       withoutUsage(QUESTIONS_THREE),
       ...recordedRunFromPlan(),
     ]);
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q-1", "A:Q-2", "A:Q-3"]) });
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]) });
     const dir = `${directory}/reserved-budget`;
     const answersPath = "reserved-answers.json";
     const spy = vi.spyOn(runModule, "runGeneration");
@@ -681,7 +705,7 @@ describe("上限を上げても、Plan のあとの Build の予算と締切の�
     await runCli({
       argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--budget", "0.3"],
       env: { [API_KEY_ENV]: "sk-FAKE" },
-      readFile: async (path) => (path === answersPath ? JSON.stringify({ "Q-1": { choiceId: "c1" } }) : SOURCE_TEXT),
+      readFile: async (path) => (path === answersPath ? JSON.stringify({ "Q1-1": { choiceId: "c1" } }) : SOURCE_TEXT),
       writeFile: async (path, text) => {
         await fs.writeFile(path, text, "utf8");
       },
@@ -709,7 +733,7 @@ describe("上限を上げても、Plan のあとの Build の予算と締切の�
 
   it("Plan に時間を使ったあとの Build が、締切を取り直さない", async () => {
     const recording = planThenBuildRecording();
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q-1", "A:Q-2", "A:Q-3"]) });
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]) });
     const dir = `${directory}/deadline`;
     const answersPath = "deadline-answers.json";
     const spy = vi.spyOn(runModule, "runGeneration");
@@ -729,7 +753,7 @@ describe("上限を上げても、Plan のあとの Build の予算と締切の�
     await runCli({
       argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--deadline", "10"],
       env: { [API_KEY_ENV]: "sk-FAKE" },
-      readFile: async (path) => (path === answersPath ? JSON.stringify({ "Q-1": { choiceId: "c1" } }) : SOURCE_TEXT),
+      readFile: async (path) => (path === answersPath ? JSON.stringify({ "Q1-1": { choiceId: "c1" } }) : SOURCE_TEXT),
       writeFile: async (path, text) => {
         await fs.writeFile(path, text, "utf8");
       },
@@ -748,5 +772,147 @@ describe("上限を上げても、Plan のあとの Build の予算と締切の�
     const call = spy.mock.calls[0]?.[0];
     // 締切は入口で 1 度だけ決めた値（開始 0 + 10 分）のまま——Build が取り直さない
     expect(call?.deadline).toBe(600_000);
+  });
+});
+
+// ── 質問 ID と答えの ID を往復をまたいで一意にする（Issue #405）──────────────────
+
+describe("往復をまたいで質問 ID が重ならない（Issue #405）", () => {
+  /** 重大な事項 1 件の P3 の答え */
+  const SURFACE_ONE = {
+    ambiguities: [{ id: "OI-1", requirementId: "R-1", text: "誰の分を数えるか", critical: true }],
+    unwritable: [],
+  };
+
+  /** 未解決の事項 1 つへの P4 の答え（2 往復とも LLM が同じ `id`（Q-1）を返す） */
+  const QUESTIONS_ONE = {
+    questions: [
+      {
+        id: "Q-1",
+        openIssueId: "OI-1",
+        text: "誰の分を数えますか",
+        choices: [
+          { id: "c1", text: "全員" },
+          { id: "c2", text: "自分のみ" },
+        ],
+        recommended: { choiceId: "c1", reason: "依頼に沿う" },
+        allowFreeText: true,
+      },
+    ],
+  };
+
+  it("対話の形で 2 往復を答えて確定し、記録の問いに版が載り、確定した仕様が Build に渡る", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_ONE),
+      structured(QUESTIONS_ONE),
+      structured(QUESTIONS_ONE),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswers(["A:Q2-1"]),
+      // 1 往復目の自由入力は運用の指示——要件にせず、事項を開いたまま残す（3 往復目に進ませない）
+      [freeTextQuestionName("A:Q1-1")]: {
+        kind: "choice",
+        choice: "operational",
+        probabilities: undefined,
+        probability: undefined,
+        confidence: 0.9,
+      },
+    });
+    const dir = `${directory}/two-rounds`;
+    const terminal = fakeTerminal([FREE_TEXT_INPUT, "運用で決める", "1", "これで作る"]);
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      terminal,
+      log: () => {},
+    });
+
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    // 2 往復になり、問いの ID が往復をまたいで重ならない（1 往復目は Q1-1、2 往復目は Q2-1）
+    expect(record.rounds.map((round) => round.questions.map((question) => question.id))).toEqual([
+      ["Q1-1"],
+      ["Q2-1"],
+    ]);
+    // 記録に版（revision）が載る
+    expect(record.rounds.map((round) => round.questions.map((question) => question.revision))).toEqual([
+      [1],
+      [2],
+    ]);
+    // 答える役に渡った問いの数と、往復の記録の問いの数が一致する（黙って捨てる分岐が無い）
+    const recordedQuestions = record.rounds.flatMap((round) => round.questions);
+    const planQuestions = (spy.mock.calls[0]?.[0]?.plan?.inputs ?? []).filter(
+      (input) => input.kind === "question",
+    );
+    expect(recordedQuestions).toHaveLength(planQuestions.length);
+    // 対話の形で 2 往復を答えて確定し、確定した仕様が Build に渡る
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]?.[0]?.plan?.plan_id).toBe("local-plan-0");
+  });
+
+  it("目印を含む重複 ID の応答で止まると、記録と停止の行に添字と分類だけが残り、ID の値と message が無い", async () => {
+    const mark = "MARK_DUP_QQQ";
+    const questionOf = (text: string) => ({
+      id: `Q-${mark}`,
+      openIssueId: "OI-1",
+      text,
+      choices: [
+        { id: "c1", text: "全員" },
+        { id: "c2", text: "自分のみ" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    });
+    const duplicated = { questions: [questionOf("問い a"), questionOf("問い b")] };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(duplicated),
+      structured(duplicated),
+    ]);
+    const judge = createFakeJudge(catalogAnswers());
+    const dir = `${directory}/duplicate-question-id`;
+    const answersPath = "empty-answers.json";
+    const lines: string[] = [];
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: (line) => lines.push(line),
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.problems).toEqual([{ field: "questions[1].id", code: "duplicate-question-id" }]);
+    // 目印を含む重複 ID の値と、問題の message が、記録と停止の行のどこにも無い
+    const recordText = JSON.stringify(record);
+    expect(recordText).not.toContain(mark);
+    expect(recordText).not.toContain("message");
+    expect(lines.join("\n")).not.toContain(mark);
+    expect(lines.join("\n")).toContain("duplicate-question-id");
   });
 });

@@ -264,6 +264,8 @@ export const PLAN_CLI_RECORD_SCHEMA = "musunest-factory/plan-cli-record/v1" as c
 export interface PlanCliQuestionRecord {
   readonly id: string;
   readonly open_issue_id: string;
+  /** この問いを組み立てた仕様の版（往復ごとに ID を追えるようにする。Issue #405） */
+  readonly revision: number;
   readonly text: string;
   readonly choices: readonly { readonly id: string; readonly text: string }[];
   readonly recommended: { readonly choice_id: string; readonly reason: string } | null;
@@ -319,6 +321,7 @@ function toQuestionRecord(question: PlanQuestion): PlanCliQuestionRecord {
   return {
     id: question.id,
     open_issue_id: question.openIssueId,
+    revision: question.revision,
     text: question.text,
     choices: question.choices.map((choice) => ({ id: choice.id, text: choice.text })),
     recommended: recommended === undefined ? null : { choice_id: recommended.choiceId, reason: recommended.reason },
