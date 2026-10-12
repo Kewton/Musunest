@@ -295,10 +295,10 @@ function shapeProblemInput(base: string, problems: readonly Problem[]): string {
 /**
  * ⑥ を 1 往復ぶん回す（道具付き）。**直した宣言と主張だけ**を返す（直す役は試験と要件を変えられない）。
  *
- * 道具の呼び出しごとに、引数をコードが確かめ（形・値・宣言の大きさ）、**共通の口の累計**を実行の前に
- * 上限（`toolCalls`）へ照らす（§1.5・Issue #429）。1 つの段の中で受け取ってよい応答の数にも上限
- * （`repairStepTurns`）を置く。合わなければ呼ばずに断る。道具の結果は往復（`turns`）へ積み、会話の
- * 状態はこちらで組み立てて毎回送る（§2）。
+ * 道具の呼び出しごとに、引数をコードが確かめ（形・値・宣言の大きさ）、**共通の口の累計そのもの**
+ * （応答の後に読む。この応答の束を含む）を実行の前に上限（`toolCalls`）へ照らす（§1.5・Issue #429）。
+ * 1 つの段の中で受け取ってよい応答の数にも上限（`repairStepTurns`）を置く。合わなければ呼ばずに断る。
+ * 道具の結果は往復（`turns`）へ積み、会話の状態はこちらで組み立てて毎回送る（§2）。
  *
  * 最後の答え（`done`）の形は、要求に付けた strict の schema（`REPAIR_ANSWER_SCHEMA`）で決まる（#304）。
  * それでも形が合わなければ、**問題を返して 1 回だけ直させる**——`STEP_ATTEMPTS` 続けて合わなければ
@@ -340,9 +340,6 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
         failure: { kind: "callLimit", limit: turnLimit.limit, max: turnLimit.max, actual: turnLimit.actual },
       };
     }
-    // 道具の累計は**ジョブ全体**（共通の口の数え方）——段の局所の数え直しをしない（§1.5・Issue #429）。
-    // 応答を受け取る**前**に読む（受け取ると、共通の口がこの応答の束を足す）。
-    const cumulativeTools = input.gateway.toolCalls;
     const result = await input.gateway.callWithTools({ ...plan, input: answerInput, turns });
     if (result.kind !== "ok") return { ok: false, failure: mapGatewayFailure(result) };
     const response = result.value;
@@ -359,9 +356,11 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
       continue;
     }
 
-    // 実行する**前**に、**累計（この応答の束を含む）**を上限に照らす（§1.5・Issue #429）。超えていれば
-    // 1 つも実行せず、累計の上限として段を終える。1 応答に複数の道具があるときは、束の合計で照らす。
-    const budget = checkToolCallBudget(cumulativeTools, response.toolCalls.length);
+    // 実行する**前**に、**共通の口の累計そのもの**（この応答の束を含む）を上限に照らす（§1.5・Issue #429）。
+    // 超えていれば 1 つも実行せず、累計の上限として段を終える。累計は**応答の後**に読む——timeout で
+    // 打ち切った試行の応答が遅れて返っても、共通の口はその束を数えるためである（呼び出しの**前**に読んだ
+    // 値へ今回の束を足すと、打ち切り後に遅れて数えられた分が抜け、実行を許してしまう）。
+    const budget = checkToolCallBudget(input.gateway.toolCalls);
     if (budget !== undefined) {
       return { ok: false, failure: { kind: "callLimit", limit: budget.limit, max: budget.max, actual: budget.actual } };
     }

@@ -17,7 +17,7 @@ import { CallGateway, type CallGatewayOptions } from "../call.js";
 import { checkTestSuite, type TestSuite } from "../fixed-test.js";
 import { AGENT_LIMITS } from "../limits.js";
 import type { RecordedCall } from "../llm-fake.js";
-import type { LlmClient, LlmToolRequest } from "../llm.js";
+import type { LlmClient, LlmStructuredResponse, LlmToolRequest, LlmToolResponse } from "../llm.js";
 import type { CorrespondenceEntry, RequirementList, VersionChecks } from "../pipeline.js";
 import {
   INJECTED_INSTRUCTION,
@@ -686,7 +686,7 @@ class PreloadedGateway extends CallGateway {
 function preloadedGateway(
   client: LlmClient,
   preloaded: number,
-  options: { readonly maxAttempts?: number } = {},
+  options: { readonly maxAttempts?: number; readonly callTimeoutMs?: number } = {},
 ): PreloadedGateway {
   return new PreloadedGateway(
     {
@@ -696,9 +696,33 @@ function preloadedGateway(
       now: () => 0,
       deadline: 60_000,
       ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
+      ...(options.callTimeoutMs === undefined ? {} : { callTimeoutMs: options.callTimeoutMs }),
     },
     preloaded,
   );
+}
+
+/**
+ * timeout で打ち切った 1 回目の応答が**遅れて返り**、再試行が成功する偽物（打ち切り時の累計の門の
+ * 回帰。Issue #429）。1 回目は `lateMs` 後に道具の束 1 件を（打ち切り後でも）返し、2 回目は `retryMs`
+ * 後に道具の束 2 件を返す。**実 API は呼ばない**（偽物の時計で順序を作る）。
+ */
+function lateResponseClient(options: { readonly lateMs: number; readonly retryMs: number }): LlmClient {
+  let attempt = 0;
+  return {
+    callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+      return Promise.reject(new Error("使わない"));
+    },
+    callWithTools(): Promise<LlmToolResponse> {
+      attempt += 1;
+      const first = attempt === 1;
+      const delayMs = first ? options.lateMs : options.retryMs;
+      const calls = first ? toolBundle(1, V1) : toolBundle(2, V1, 1);
+      return new Promise((resolve) => {
+        setTimeout(() => resolve({ kind: "toolCalls", toolCalls: calls, usage: undefined }), delayMs);
+      });
+    },
+  };
 }
 
 describe("⑥ の道具の累計と 1 回の段の応答の往復の上限（02 §1.5・Issue #429）", () => {
@@ -841,5 +865,46 @@ describe("⑥ の道具の累計と 1 回の段の応答の往復の上限（02 
       max: AGENT_LIMITS.toolCalls,
       actual: AGENT_LIMITS.toolCalls + 1,
     });
+  });
+
+  it("打ち切り後に遅れて返った束を取りこぼさない（応答の後に読んだ累計そのもので断る）", async () => {
+    const spy = vi.spyOn(repairTools, "executeRepairTool");
+    // 版は、偽物の時計を使う前に作る（順序を単純にする）
+    const initial = await version(V1);
+    // 応答前 22。1 回目の応答（束 1）は timeout で打ち切られた**あと**に遅れて返り（累計 23）、
+    // 再試行（束 2）が成功する（累計 25）。**呼び出しの前に読んだ累計へ束を足すと 22＋2＝24 で通って
+    // しまい**、2 件を実行する——応答の後に読んだ累計そのものを照らすことで断る。
+    const client = lateResponseClient({ lateMs: 150, retryMs: 180 });
+    const gateway = preloadedGateway(client, AGENT_LIMITS.toolCalls - 2, { maxAttempts: 2, callTimeoutMs: 100 });
+
+    vi.useFakeTimers();
+    try {
+      const pending = runRepairStep({
+        source: SOURCE,
+        list: LIST,
+        suite: SUITE,
+        current: initial,
+        correspondences: CORRESPONDENCES,
+        documents: SAMPLE_DOCUMENTS,
+        gateway,
+      });
+      // 打ち切り（100ms）→ 遅れて返る束（150ms）→ 再試行の成功（180ms）まで進める
+      await vi.advanceTimersByTimeAsync(400);
+      const outcome = await pending;
+
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) return;
+      expect(outcome.failure).toEqual({
+        kind: "callLimit",
+        limit: "toolCalls",
+        max: AGENT_LIMITS.toolCalls,
+        actual: AGENT_LIMITS.toolCalls + 1,
+      });
+      expect(spy).toHaveBeenCalledTimes(0);
+      // 打ち切り後に遅れて数えられた束（1）と、再試行の束（2）を含む累計は 25
+      expect(gateway.toolCalls).toBe(AGENT_LIMITS.toolCalls + 1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

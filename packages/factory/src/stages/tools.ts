@@ -117,14 +117,17 @@ export function checkToolArguments(name: string, args: unknown): ToolCallCheck {
 }
 
 /**
- * 道具の呼び出しの回数の上限を、**共通の口の累計**に照らして確かめる（§1.5・Issue #429）。
- * `cumulative` はこれまでの累計（共通の口の `toolCalls` の getter。§1.5 の「ジョブ全体」）、`requested`
- * はこれから実行する応答の束の数。**合計（この応答の束を含む累計）**が上限を超えれば `LimitExceeded`
- * を返す（呼ぶ前に断る）。上限の値は共通の上限の表（`AGENT_LIMITS`）から引く——段に別の値を渡す口は
- * 作らない。
+ * 道具の呼び出しの回数の上限を、**共通の口の累計そのもの**に照らして確かめる（§1.5・Issue #429）。
+ * `cumulative` は共通の口の `toolCalls` の getter を、**この応答の束を受け取った後**に読んだ値である
+ * ——**この応答の束を含む累計**（束を二重に足さない）。超えていれば `LimitExceeded` を返す（実行の前に
+ * 断る）。上限の値は共通の上限の表（`AGENT_LIMITS`）から引く——段に別の値を渡す口は作らない。
+ *
+ * 累計を**応答の後**に読むのは、timeout で打ち切った試行の応答が遅れて返っても、共通の口はその束を
+ * 数えるためである（`call.ts` の打ち切りは、待っていない側の応答の完了を止めない）。呼び出しの**前**に
+ * 読んだ値へ今回の束を足すと、打ち切り後に遅れて数えられた分が抜け、実行を許してしまう。
  */
-export function checkToolCallBudget(cumulative: number, requested: number): LimitExceeded | undefined {
-  return checkLimit("toolCalls", cumulative + requested);
+export function checkToolCallBudget(cumulative: number): LimitExceeded | undefined {
+  return checkLimit("toolCalls", cumulative);
 }
 
 /** 道具が触る、直しても変わらない文脈（要件の一覧・固定した試験・対応表の場所。§1.3） */

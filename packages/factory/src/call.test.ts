@@ -414,7 +414,7 @@ describe("共通の口の道具の累計（02 §1.5・Issue #429）", () => {
     expect(gateway.toolCalls).toBe(0);
   });
 
-  it("通信のやり直しでは、成功した応答の束の数だけ増える（失敗した試行では増えない）", async () => {
+  it("通信のやり直しでは、成功した応答の束の数だけ増える", async () => {
     let attempts = 0;
     const client: LlmClient = {
       callStructured<T>(): Promise<LlmStructuredResponse<T>> {
