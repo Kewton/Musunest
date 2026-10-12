@@ -13,6 +13,7 @@ import {
   AUTO_BUILD_LINE,
   FREE_TEXT_INPUT,
   PLAN_CLI_RECORD_FILE,
+  PLAN_CLI_RECORD_SCHEMA,
   RECOMMENDED_INPUT,
   createAnswersFilePlanResponder,
   createInteractivePlanResponder,
@@ -250,6 +251,7 @@ function fakeTerminal(lines: readonly string[]): FakeTerminal {
 }
 
 interface PlanCliRecordShape {
+  readonly schema_version: string;
   readonly outcome: string;
   readonly confirmation: string | null;
   readonly rounds: readonly {
@@ -276,6 +278,23 @@ interface PlanCliRecordShape {
     readonly facet_id: string;
     readonly value: string;
   }[];
+  /** P1/P2 の往復ごとの逆照合の落ちの内訳（種類ごと・出どころごと。Issue #430） */
+  readonly requirements_diagnosis: {
+    readonly rounds: readonly {
+      readonly misses: {
+        readonly quote_not_found: number;
+        readonly position_mismatch: number;
+        readonly uncovered_source: { readonly code: number; readonly conversation: number };
+      };
+      readonly dropped_blank_misses: number;
+    }[];
+    readonly redone: boolean;
+    readonly unmet: {
+      readonly quote_not_found: number;
+      readonly position_mismatch: number;
+      readonly uncovered_source: { readonly code: number; readonly conversation: number };
+    };
+  };
   readonly spent_usd: number;
   readonly remaining_usd: number;
   readonly budget_usd: number;
@@ -1157,5 +1176,82 @@ describe("既定で決めたことを、依頼文で決めたことと別の見�
     const record = await readPlanRecord(dir);
     expect(record.outcome).toBe("stopped");
     expect(record.confirmation).toBe("stop");
+  });
+});
+
+// ── P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430）────────────────
+
+describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430）", () => {
+  it("requirements_diagnosis に往復の数・種類・出どころの件数が残り、依頼文の目印が出ず、schema_version は変わらない", async () => {
+    const mark = "MARK_SOURCE_DIAG";
+    const source = `${mark}する。件数を合計する。`;
+    const spanOf = (quote: string): { readonly start: number; readonly end: number } => {
+      const start = source.indexOf(quote);
+      return { start, end: start + quote.length };
+    };
+    // R-2 は引用が原文に無く、位置も退避しているので、コードの落ち（引用なし・覆われない原文）を作る
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: `${mark}する`, position: spanOf(`${mark}する`) },
+        { id: "R-2", text: "合計できる", quote: "件数を数える", position: { start: 0, end: 0 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    // 会話が挙げた、覆われていない部分（コードの落ちとは重ならない）
+    const conversation = { uncovered: [{ start: 0, end: 2 }] };
+    const recording = createRecordingClient([
+      structured(list),
+      structured(conversation),
+      structured(list),
+      structured(conversation),
+    ]);
+    const dir = `${directory}/requirements-diagnosis`;
+    const answersPath = "diagnosis-answers.json";
+    const lines: string[] = [];
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : source),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => createFakeJudge({}),
+      now: () => 0,
+      log: (line) => lines.push(line),
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    const record = await readPlanRecord(dir);
+    // 引用の落ちが残るので、確定できない
+    expect(record.outcome).toBe("cannot-confirm");
+    // 版の文字列は今までどおり
+    expect(record.schema_version).toBe(PLAN_CLI_RECORD_SCHEMA);
+    // 往復は 2（初回 + やり直し）。種類ごと・出どころごとの件数が結果と一致する
+    const expected = {
+      quote_not_found: 1,
+      position_mismatch: 0,
+      uncovered_source: { code: 1, conversation: 1 },
+    };
+    expect(record.requirements_diagnosis).toEqual({
+      rounds: [
+        { misses: expected, dropped_blank_misses: 0 },
+        { misses: expected, dropped_blank_misses: 0 },
+      ],
+      redone: true,
+      unmet: expected,
+    });
+    // 値（依頼文の目印・原文の断片・位置）は、内訳にも記録のどこにも出ない
+    expect(JSON.stringify(record.requirements_diagnosis)).not.toContain(mark);
+    expect(JSON.stringify(record.requirements_diagnosis)).not.toContain("件数を");
+    expect(JSON.stringify(record)).not.toContain(mark);
+    expect(lines.join("\n")).not.toContain(mark);
   });
 });

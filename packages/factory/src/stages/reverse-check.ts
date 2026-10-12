@@ -358,6 +358,77 @@ export async function runReverseCheck(input: ReverseCheckInput): Promise<StageOu
   return { ok: true, value: { uncovered, quotesValid, misses, droppedBlankMisses: merged.droppedBlankMisses } };
 }
 
+/**
+ * 落ちの件数の内訳（Issue #430）。**件数だけ**を持ち、落ちの文言・引用・原文の断片・位置は入れない
+ * （`02-failure-modes.md` §1）。`uncovered-source` は、コードが見つけた分（`code`）と会話が挙げた分
+ * （`conversation`）に分ける。
+ */
+export interface ReverseCheckMissCounts {
+  readonly quoteNotFound: number;
+  readonly positionMismatch: number;
+  readonly uncoveredSource: {
+    readonly code: number;
+    readonly conversation: number;
+  };
+}
+
+/** 1 往復の逆照合の診断（Issue #430）。落ちの件数の内訳と、捨てた中身の無い断片の数。 */
+export interface ReverseCheckRoundDiagnosis {
+  readonly misses: ReverseCheckMissCounts;
+  readonly droppedBlankMisses: number;
+}
+
+/** 逆照合の往復ごとの診断（Issue #430）。往復の一覧・やり直したか・やり直し後に残った落ちの内訳。 */
+export interface ReverseCheckDiagnosis {
+  /** 往復ごとの内訳（初回、やり直しがあればそのあと。止まったときは、止まるまでに終えた往復の分） */
+  readonly rounds: readonly ReverseCheckRoundDiagnosis[];
+  /** ① をやり直したか */
+  readonly redone: boolean;
+  /** やり直しても残った落ち（`unmet`）の件数の内訳 */
+  readonly unmet: ReverseCheckMissCounts;
+}
+
+/** 0 件の落ちの内訳 */
+export function emptyReverseCheckMissCounts(): ReverseCheckMissCounts {
+  return { quoteNotFound: 0, positionMismatch: 0, uncoveredSource: { code: 0, conversation: 0 } };
+}
+
+/** 往復の無い診断（止まる前の初期値） */
+export function emptyReverseCheckDiagnosis(): ReverseCheckDiagnosis {
+  return { rounds: [], redone: false, unmet: emptyReverseCheckMissCounts() };
+}
+
+/**
+ * 落ちの件数を、種類ごと（`quote-not-found`・`position-mismatch`・`uncovered-source`）と、
+ * `uncovered-source` の出どころごと（コードが見つけた分・会話が挙げた分）に数える（Issue #430）。
+ *
+ * 出どころは、コードの落ち（`checkRequirementCoverage`）を**その往復の中で数え直して**求める
+ * （落ちの型は変えず、pipeline の型に欄を足さない）。`misses` はコードの落ちと会話の申告を合わせた
+ * 一覧である。**件数だけ**を数え、文言・引用・位置は入れない。
+ */
+export function countReverseCheckMisses(
+  source: string,
+  list: RequirementList,
+  misses: readonly ReverseCheckMiss[],
+): ReverseCheckMissCounts {
+  let quoteNotFound = 0;
+  let positionMismatch = 0;
+  let uncovered = 0;
+  for (const miss of misses) {
+    if (miss.kind === "quote-not-found") quoteNotFound += 1;
+    else if (miss.kind === "position-mismatch") positionMismatch += 1;
+    else uncovered += 1;
+  }
+  const codeUncovered = checkRequirementCoverage(source, list).filter(
+    (miss) => miss.kind === "uncovered-source",
+  ).length;
+  return {
+    quoteNotFound,
+    positionMismatch,
+    uncoveredSource: { code: codeUncovered, conversation: uncovered - codeUncovered },
+  };
+}
+
 /** ①' と ① のやり直しをまとめた入力 */
 export interface ReverseCheckLoopInput {
   readonly source: string;
@@ -375,6 +446,8 @@ export interface ReverseCheckLoopResult {
   readonly redone: boolean;
   /** やり直しても残った落ち（未達。無ければ空） */
   readonly unmet: readonly ReverseCheckMiss[];
+  /** 往復ごとの落ちの内訳（種類ごと・出どころごと。Issue #430） */
+  readonly diagnosis: ReverseCheckDiagnosis;
 }
 
 /**
@@ -407,30 +480,60 @@ export type ReverseCheckOperation = (typeof REVERSE_CHECK_OPERATIONS)[number];
  */
 export type ReverseCheckLoopOutcome =
   | { readonly ok: true; readonly value: ReverseCheckLoopResult }
-  | { readonly ok: false; readonly failure: StageFailure; readonly operation: ReverseCheckOperation };
+  | {
+      readonly ok: false;
+      readonly failure: StageFailure;
+      readonly operation: ReverseCheckOperation;
+      /** 止まるまでに終えた往復の分の内訳（Issue #430） */
+      readonly diagnosis: ReverseCheckDiagnosis;
+    };
 
 /**
  * ① → ①' を回し、落ちがあれば ① を**1 回だけ**やり直す（§1）。やり直しても残った落ちは未達として
  * 返す（合否はここでは決めない）。**止まったときは、どの呼び出しで止まったかを返す**（Issue #397）。
+ * あわせて、往復ごとの落ちの件数の内訳（種類ごと・出どころごと。Issue #430）を返す——止まったときは、
+ * 止まるまでに終えた往復の分だけを持つ。
  */
 export async function runReverseCheckLoopWithOperation(
   input: ReverseCheckLoopInput,
 ): Promise<ReverseCheckLoopOutcome> {
+  /** 終えた往復の診断（止まったときは、止まるまでに終えた分だけを持つ） */
+  const rounds: ReverseCheckRoundDiagnosis[] = [];
+  /** 止まったときの結果（終えた往復の分だけを持ち、やり直し後の落ちは無い） */
+  const stop = (failure: StageFailure, operation: ReverseCheckOperation): ReverseCheckLoopOutcome => ({
+    ok: false,
+    failure,
+    operation,
+    diagnosis: { rounds, redone: false, unmet: emptyReverseCheckMissCounts() },
+  });
   const first = await runRequirements({
     source: input.source,
     documents: input.documents,
     gateway: input.gateway,
   });
-  if (!first.ok) return { ok: false, failure: first.failure, operation: "requirements" };
+  if (!first.ok) return stop(first.failure, "requirements");
   const initial = await runReverseCheck({
     source: input.source,
     list: first.value,
     documents: input.documents,
     gateway: input.gateway,
   });
-  if (!initial.ok) return { ok: false, failure: initial.failure, operation: "reverse-check" };
+  if (!initial.ok) return stop(initial.failure, "reverse-check");
+  rounds.push({
+    misses: countReverseCheckMisses(input.source, first.value, initial.value.misses),
+    droppedBlankMisses: initial.value.droppedBlankMisses,
+  });
   if (initial.value.misses.length === 0) {
-    return { ok: true, value: { list: first.value, report: initial.value, redone: false, unmet: [] } };
+    return {
+      ok: true,
+      value: {
+        list: first.value,
+        report: initial.value,
+        redone: false,
+        unmet: [],
+        diagnosis: { rounds, redone: false, unmet: emptyReverseCheckMissCounts() },
+      },
+    };
   }
   const redone = await runRequirements({
     source: input.source,
@@ -438,16 +541,30 @@ export async function runReverseCheckLoopWithOperation(
     gateway: input.gateway,
     redo: { previous: first.value, misses: initial.value.misses },
   });
-  if (!redone.ok) return { ok: false, failure: redone.failure, operation: "requirements-redo" };
+  if (!redone.ok) return stop(redone.failure, "requirements-redo");
   const second = await runReverseCheck({
     source: input.source,
     list: redone.value,
     documents: input.documents,
     gateway: input.gateway,
   });
-  if (!second.ok) return { ok: false, failure: second.failure, operation: "reverse-check-redo" };
+  if (!second.ok) return stop(second.failure, "reverse-check-redo");
+  rounds.push({
+    misses: countReverseCheckMisses(input.source, redone.value, second.value.misses),
+    droppedBlankMisses: second.value.droppedBlankMisses,
+  });
   return {
     ok: true,
-    value: { list: redone.value, report: second.value, redone: true, unmet: second.value.misses },
+    value: {
+      list: redone.value,
+      report: second.value,
+      redone: true,
+      unmet: second.value.misses,
+      diagnosis: {
+        rounds,
+        redone: true,
+        unmet: countReverseCheckMisses(input.source, redone.value, second.value.misses),
+      },
+    },
   };
 }

@@ -2230,3 +2230,144 @@ describe("目録の点検を P3 の前に回し、点検の結果を P3 に渡�
     expect(targets).toContain("当てはまらない");
   });
 });
+
+// ── Issue #430：P1/P2 の往復ごとの落ちの内訳を結果に残す ─────────────────
+
+/** 落ち 0 件の内訳（Issue #430） */
+const ZERO_MISS_COUNTS = { quoteNotFound: 0, positionMismatch: 0, uncoveredSource: { code: 0, conversation: 0 } };
+
+describe("P1/P2 の往復ごとの落ちの内訳を結果に残す（Issue #430）", () => {
+  it("確定した結果にも内訳があり、落ちが無ければ往復 1 つで全部 0 になる", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+    ]);
+    const responder: PlanResponder = {
+      async answer(request) {
+        return { kind: "answers", answers: [answerTo(request.questions[0])] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    // 落ちが無いので、往復は 1 つだけ、種類ごと・出どころごとに全部 0（Issue #430）
+    expect(result.requirementsDiagnosis).toEqual({
+      rounds: [{ misses: ZERO_MISS_COUNTS, droppedBlankMisses: 0 }],
+      redone: false,
+      unmet: ZERO_MISS_COUNTS,
+    });
+  });
+
+  it("確定できない結果（逆照合の落ち）でも、往復ごとの内訳と unmet の内訳が残る", async () => {
+    const paraphrase = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "タスクを登録する", position: { start: 0, end: 8 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する", position: { start: 9, end: 16 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    // 往復 2（初回 + やり直し）。やり直し後の往復 2 の内訳と unmet の内訳が一致する
+    expect(result.requirementsDiagnosis.redone).toBe(true);
+    expect(result.requirementsDiagnosis.rounds).toHaveLength(2);
+    expect(result.requirementsDiagnosis.rounds[1]?.misses).toEqual(result.requirementsDiagnosis.unmet);
+    expect(result.requirementsDiagnosis.unmet).toEqual({
+      quoteNotFound: 1,
+      positionMismatch: 0,
+      uncoveredSource: { code: 0, conversation: 0 },
+    });
+  });
+
+  it("確定できない結果（P6 の落ち）でも、往復ごとの内訳が残る", async () => {
+    const recording = createRecordingClient([
+      structured(THREE_REQUIREMENTS),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(THREE_REQUIREMENTS),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...THREE_COVER }), ANSWER_NONE, {
+        source: THREE_SOURCE,
+      }),
+    );
+
+    expect(result.kind).toBe("cannot-confirm");
+    // 覆われていない原文の文（コードが見つけた分）が、やり直し後も残っている
+    expect(result.requirementsDiagnosis.unmet).toEqual({
+      quoteNotFound: 0,
+      positionMismatch: 0,
+      uncoveredSource: { code: 1, conversation: 0 },
+    });
+  });
+
+  it("止まった結果では、止まるまでに終えた往復の分だけの内訳がある", async () => {
+    // ① で止まる → 往復は 0
+    const atRequirements = await runPlan(
+      makePlanInput(clientThrowingAt([], 1, () => invalidRequestError("invalid_json_schema")), createFakeJudge({}), ANSWER_NONE),
+    );
+    expect(atRequirements.kind).toBe("stopped");
+    expect(atRequirements.requirementsDiagnosis.rounds).toEqual([]);
+
+    // ①' で止まる → 往復は 0（初回の逆照合が終わっていない）
+    const atReverseCheck = await runPlan(
+      makePlanInput(
+        clientThrowingAt([structured(REQUIREMENT_LIST_OUTPUT)], 2, () => invalidRequestError("invalid_json_schema")),
+        createFakeJudge({}),
+        ANSWER_NONE,
+      ),
+    );
+    expect(atReverseCheck.kind).toBe("stopped");
+    expect(atReverseCheck.requirementsDiagnosis.rounds).toEqual([]);
+
+    // ① のやり直しで止まる → 往復 1（初回の逆照合まで終えた）
+    const atRedo = await runPlan(
+      makePlanInput(
+        clientThrowingAt([structured(THREE_REQUIREMENTS), structured(REVERSE_CHECK_OUTPUT)], 3, () =>
+          invalidRequestError("invalid_json_schema"),
+        ),
+        createFakeJudge({}),
+        ANSWER_NONE,
+        { source: THREE_SOURCE },
+      ),
+    );
+    expect(atRedo.kind).toBe("stopped");
+    expect(atRedo.requirementsDiagnosis.rounds).toHaveLength(1);
+
+    // ①' のやり直しで止まる → 往復 1
+    const atRedoReverse = await runPlan(
+      makePlanInput(
+        clientThrowingAt(
+          [structured(THREE_REQUIREMENTS), structured(REVERSE_CHECK_OUTPUT), structured(THREE_REQUIREMENTS)],
+          4,
+          () => invalidRequestError("invalid_json_schema"),
+        ),
+        createFakeJudge({}),
+        ANSWER_NONE,
+        { source: THREE_SOURCE },
+      ),
+    );
+    expect(atRedoReverse.kind).toBe("stopped");
+    expect(atRedoReverse.requirementsDiagnosis.rounds).toHaveLength(1);
+    expect(atRedoReverse.requirementsDiagnosis.unmet).toEqual(ZERO_MISS_COUNTS);
+  });
+});

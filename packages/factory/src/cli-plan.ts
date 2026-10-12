@@ -27,6 +27,7 @@ import {
   type PlanStageRecord,
 } from "./plan/run-plan.js";
 import { isRecord } from "./stages/prompt.js";
+import type { ReverseCheckDiagnosis, ReverseCheckMissCounts } from "./stages/reverse-check.js";
 
 /** 端末の口（1 行を出し、1 行を読む）。本物と偽物を差し替えられる。入力が尽きたら `undefined` */
 export interface Terminal {
@@ -327,6 +328,32 @@ export interface PlanCliRoundRecord {
   readonly all_recommended: boolean;
 }
 
+/**
+ * 記録に入れる落ちの件数の内訳（種類ごと・出どころごと。Issue #430）。**件数だけ**を持ち、落ちの文言・
+ * 引用・原文の断片・位置は入れない（`02-failure-modes.md` §1）。
+ */
+export interface PlanCliMissCountsRecord {
+  readonly quote_not_found: number;
+  readonly position_mismatch: number;
+  readonly uncovered_source: {
+    readonly code: number;
+    readonly conversation: number;
+  };
+}
+
+/** 記録に入れる 1 往復の逆照合の診断（Issue #430）。落ちの内訳と、捨てた中身の無い断片の数。 */
+export interface PlanCliRoundDiagnosisRecord {
+  readonly misses: PlanCliMissCountsRecord;
+  readonly dropped_blank_misses: number;
+}
+
+/** 記録に入れる、P1/P2 の往復ごとの逆照合の診断（Issue #430）。 */
+export interface PlanCliRequirementsDiagnosisRecord {
+  readonly rounds: readonly PlanCliRoundDiagnosisRecord[];
+  readonly redone: boolean;
+  readonly unmet: PlanCliMissCountsRecord;
+}
+
 /** 往復の記録（`--out` の `plan-record.json`。質問・答え・段の記録・使った額） */
 export interface PlanCliRecord {
   readonly schema_version: string;
@@ -337,6 +364,8 @@ export interface PlanCliRecord {
   readonly closed_by_source: readonly PlanCliSourceClosureRecord[];
   /** 既定で閉じた事項（事項 ID・観点 ID・値。04 §3・Issue #408） */
   readonly closed_by_default: readonly PlanCliDefaultClosureRecord[];
+  /** P1/P2 の往復ごとの逆照合の落ちの内訳（種類ごと・出どころごと。値は件数だけ。Issue #430） */
+  readonly requirements_diagnosis: PlanCliRequirementsDiagnosisRecord;
   readonly confirmation: "build" | "stop" | null;
   readonly stages: readonly PlanStageRecord[];
   readonly judge: BundleJudgeUsage;
@@ -372,6 +401,27 @@ function toAnswerRecord(answer: PlanAnswerDraft): PlanCliAnswerRecord {
   };
 }
 
+/** 落ちの内訳を、記録の形（snake_case）に写す（件数だけ。Issue #430） */
+function toMissCountsRecord(counts: ReverseCheckMissCounts): PlanCliMissCountsRecord {
+  return {
+    quote_not_found: counts.quoteNotFound,
+    position_mismatch: counts.positionMismatch,
+    uncovered_source: { code: counts.uncoveredSource.code, conversation: counts.uncoveredSource.conversation },
+  };
+}
+
+/** 往復ごとの逆照合の診断を、記録の形（snake_case）に写す（Issue #430） */
+function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCliRequirementsDiagnosisRecord {
+  return {
+    rounds: diagnosis.rounds.map((round) => ({
+      misses: toMissCountsRecord(round.misses),
+      dropped_blank_misses: round.droppedBlankMisses,
+    })),
+    redone: diagnosis.redone,
+    unmet: toMissCountsRecord(diagnosis.unmet),
+  };
+}
+
 /** 往復の記録を組む（`--out` に書く。納品物には入れない。§7・Issue #336） */
 export function buildPlanCliRecord(input: {
   readonly result: PlanResult;
@@ -398,6 +448,7 @@ export function buildPlanCliRecord(input: {
       facet_id: closure.facetId,
       value: closure.value,
     })),
+    requirements_diagnosis: toRequirementsDiagnosisRecord(input.result.requirementsDiagnosis),
     confirmation: input.transcript.confirmation,
     stages: input.result.stages,
     judge: input.result.judge,
