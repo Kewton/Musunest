@@ -65,19 +65,23 @@ import {
   DESIGN_OUTPUT_MAPPED,
   DESIGN_OUTPUT_PLANNED_PARTIAL,
   GROUPED_CORRESPONDENCE_OUTPUT,
+  GROUPED_CORRESPONDENCE_OUTPUT_WITHOUT_STATUS,
   GROUPED_CORRESPONDENCE_OUTPUT_WRONG_TARGET,
   GROUPED_DECLARATION_MISSING_OPTION,
   GROUPED_DECLARATION_REVERSED,
-  GROUPED_DECLARATION_REVERSED_OPTION,
+  GROUPED_DECLARATION_REVERSED_LABEL,
   GROUPED_DECLARATION_SOURCE,
   GROUPED_DECLARATION_WRONG_TARGET,
   GROUPED_DESIGN,
   GROUPED_DESIGN_MISSING_OPTION,
-  GROUPED_DESIGN_REVERSED_OPTION,
   GROUPED_DESIGN_WRONG_TARGET,
   GROUPED_MAPPINGS,
   GROUPED_MAPPINGS_WRONG_TARGET,
+  GROUPED_PLAN_LABEL,
+  GROUPED_PLAN_OPTION,
+  GROUPED_PLAN_TARGET,
   GROUPED_TEST_SUITE_OUTPUT,
+  GROUPED_TEST_SUITE_WITHOUT_AGGREGATE,
   INVALID_DECLARATION_SOURCE,
   MAPPING_REDO_OUTPUT,
   RATES,
@@ -3922,15 +3926,20 @@ describe("⑤a・②' へ正本が渡り、期待・集計値・合否は渡さ�
   });
 });
 
-// ── 設計の意味の誤り 3 種（Issue #433・review 2）────────────────────────────
+// ── 設計の意味だけを誤らせた 3 種（Issue #433・review 2）────────────────────
 
-describe("設計の意味だけを誤らせても、独立の点検が残す落ちで full にならない（Issue #433・review 2）", () => {
+describe("設計の意味だけを誤らせた 3 種は、それぞれ ③・⑤a まで進んで full にならない（Issue #433・review 2）", () => {
   /** 正本（確定した仕様）が ②'・⑤a に渡り、期待・集計値・合否が ⑤a へ渡らないことを確かめる */
-  const expectPlanWiring = (recording: ReturnType<typeof createRecordingClient>): void => {
+  const expectMeaningWiring = (recording: ReturnType<typeof createRecordingClient>, planBody: string): void => {
     const suites = recording.structured.filter((request) => request.schemaName === TEST_SUITE_SCHEMA_NAME);
-    for (const request of suites) expect(request.input).toContain("確定した仕様");
+    expect(suites.length).toBeGreaterThan(0);
+    for (const request of suites) expect(request.input, "②' に正本の本文が渡る").toContain(planBody);
     const correspondences = recording.structured.filter((request) => request.schemaName === CORRESPONDENCE_SCHEMA_NAME);
+    // **⑤a の要求が 1 件以上ある**（③・⑤a まで進んでいる）
+    expect(correspondences.length).toBeGreaterThan(0);
     for (const request of correspondences) {
+      // 正本の内容（欄名だけでなく本文）が ⑤a に渡る
+      expect(request.input, "⑤a に正本の本文が渡る").toContain(planBody);
       const names = [...request.input.matchAll(/<data name="([^"]+)"/g)].map((match) => match[1]);
       expect(names).toContain("確定した仕様");
       // 期待・集計値・合否は、⑤a へ新たに渡していない（データの欄の名前で確かめる）
@@ -3940,52 +3949,65 @@ describe("設計の意味だけを誤らせても、独立の点検が残す落�
     }
   };
 
-  it("選択肢の意味の欠落を設計と宣言が共有しても、独立の試験が落ちを残すので full にならない", async () => {
+  it("選択肢の意味の欠落を設計と宣言が共有しても、③・⑤a まで進んで独立の点検が落ちを残す", async () => {
     const { recording, run } = runWith(
       recordedRunGroupedFromPlan({
         design: GROUPED_DESIGN_MISSING_OPTION,
         declaration: GROUPED_DECLARATION_MISSING_OPTION,
-        // 2 回目（作り直し）も同じ、正本から固定した試験を返す
-        suites: [GROUPED_TEST_SUITE_OUTPUT, GROUPED_TEST_SUITE_OUTPUT],
+        // 見出しの期待は設計の選択肢に合わせる（キーの形は ②' が通り、正本の意味は ⑤a が点検する）
+        suites: [GROUPED_TEST_SUITE_WITHOUT_AGGREGATE],
+        // ⑤a の独立の点検は、状態の項目を満たすと挙げない（作り直しでも消えない）
+        correspondences: [
+          GROUPED_CORRESPONDENCE_OUTPUT_WITHOUT_STATUS,
+          GROUPED_CORRESPONDENCE_OUTPUT_WITHOUT_STATUS,
+        ],
       }),
-      { plan: CONFIRMED_PLAN },
+      { plan: GROUPED_PLAN_OPTION },
     );
     const result = await run;
     expect(result.outcome.verdict).not.toBe("full");
-    // ②' の作り直し（再点検）でも消えない（②' で止まる。⑤a の列の照合は一致している）
-    expect(result.stopped?.stage).toBe("test-suite");
-    expect(recording.structured.filter((request) => request.schemaName === TEST_SUITE_SCHEMA_NAME)).toHaveLength(2);
-    expectPlanWiring(recording);
+    const stages = result.record.stages.map((stage) => stage.stage);
+    expect(stages).toContain("write");
+    expect(stages).toContain("correspondence");
+    expectMeaningWiring(recording, "状態には未了と完了の 2 つの選択肢が要る");
   });
 
-  it("ラベルとキーの対応の逆転を設計と宣言が共有しても、独立の試験が落ちを残すので full にならない", async () => {
+  it("ラベルとキーの対応の逆転は、キーの並びを保ったままでも、③・⑤a まで進んで独立の点検が落ちを残す", async () => {
     const { recording, run } = runWith(
       recordedRunGroupedFromPlan({
-        design: GROUPED_DESIGN_REVERSED_OPTION,
-        declaration: GROUPED_DECLARATION_REVERSED_OPTION,
-        suites: [GROUPED_TEST_SUITE_OUTPUT, GROUPED_TEST_SUITE_OUTPUT],
+        // 設計の `options` は変えない（キーの並びの整合は保つ）。宣言のラベルだけを逆にする
+        declaration: GROUPED_DECLARATION_REVERSED_LABEL,
+        suites: [GROUPED_TEST_SUITE_OUTPUT],
+        // ⑤a の独立の点検は、ラベルの意味が逆なので状態の項目を満たすと挙げない
+        correspondences: [
+          GROUPED_CORRESPONDENCE_OUTPUT_WITHOUT_STATUS,
+          GROUPED_CORRESPONDENCE_OUTPUT_WITHOUT_STATUS,
+        ],
       }),
-      { plan: CONFIRMED_PLAN },
+      { plan: GROUPED_PLAN_LABEL },
     );
     const result = await run;
     expect(result.outcome.verdict).not.toBe("full");
-    expect(result.stopped?.stage).toBe("test-suite");
-    expect(recording.structured.filter((request) => request.schemaName === TEST_SUITE_SCHEMA_NAME)).toHaveLength(2);
-    expectPlanWiring(recording);
+    const stages = result.record.stages.map((stage) => stage.stage);
+    expect(stages).toContain("write");
+    expect(stages).toContain("correspondence");
+    // ②' の列の整合（キーの並び）では止まらない
+    expect(result.stopped?.stage).not.toBe("test-suite");
+    expectMeaningWiring(recording, "キー open は未了、キー closed は完了を表す");
   });
 
-  it("集計対象の誤りを設計と宣言が共有しても、⑤b の値の照合が落ちを残すので full にならない", async () => {
+  it("集計対象の誤りを設計と宣言が共有しても、③・⑤a まで進んで ⑤b の値の照合が落ちを残す", async () => {
     const { recording, run } = runWith(
       [
         ...recordedRunGroupedFromPlan({
           design: GROUPED_DESIGN_WRONG_TARGET,
           declaration: GROUPED_DECLARATION_WRONG_TARGET,
           mappings: GROUPED_MAPPINGS_WRONG_TARGET,
-          correspondence: GROUPED_CORRESPONDENCE_OUTPUT_WRONG_TARGET,
+          correspondences: [GROUPED_CORRESPONDENCE_OUTPUT_WRONG_TARGET],
         }),
         toolDone({ declaration: GROUPED_DECLARATION_WRONG_TARGET, disputes: [] }),
       ],
-      { plan: CONFIRMED_PLAN, limits: { ...AGENT_LIMITS, repairRoundTrips: 1, stagnationRepeats: 0 } },
+      { plan: GROUPED_PLAN_TARGET, limits: { ...AGENT_LIMITS, repairRoundTrips: 1, stagnationRepeats: 0 } },
     );
     const result = await run;
     expect(result.outcome.verdict).not.toBe("full");
@@ -3993,6 +4015,27 @@ describe("設計の意味だけを誤らせても、独立の点検が残す落�
     // ⑤b の値の不一致が、⑥ の修復・再点検の後も残る
     expect(verificationOf(result.bundle).test_mismatches).toBeGreaterThanOrEqual(1);
     expect(result.record.stages.map((stage) => stage.stage)).toContain("repair");
-    expectPlanWiring(recording);
+    expectMeaningWiring(recording, "状態別の件数は項目 status で分ける");
+  });
+});
+
+// ── （別の試験）正本から固定した見出しの期待は、②' の列の整合で止める ──────────────
+//
+// これは**意味の点検の証拠ではない**（キーの形の不一致を ②' が断るだけである）。意味の点検の証拠は、
+// 上の 3 種（③・⑤a まで進むもの）である。
+
+describe("（別の試験）正本から固定した見出しの期待は、②' の列の整合で止める（Issue #433・review 2）", () => {
+  it("選択肢の欠落を設計と宣言が共有しても、正本の見出しを期待する ②' が断る（意味の点検の証拠ではない）", async () => {
+    const { run } = runWith(
+      recordedRunGroupedFromPlan({
+        design: GROUPED_DESIGN_MISSING_OPTION,
+        declaration: GROUPED_DECLARATION_MISSING_OPTION,
+        suites: [GROUPED_TEST_SUITE_OUTPUT, GROUPED_TEST_SUITE_OUTPUT],
+      }),
+      { plan: GROUPED_PLAN_OPTION },
+    );
+    const result = await run;
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.stopped?.stage).toBe("test-suite");
   });
 });
