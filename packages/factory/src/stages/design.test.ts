@@ -8,18 +8,21 @@ import type { DesignResult, RequirementDesign, RequirementList, RoleEntry } from
 import { LEGACY_DESIGN_CONTRACT } from "../pipeline.js";
 import {
   DESIGN_ROUNDS,
+  DESIGN_RULE_DEFINITIONS,
   DESIGN_RULES,
   DESIGN_SCHEMA,
   DESIGN_SCHEMA_NAME,
+  REDO_DESIGN_FIXED_TABLE_DEFINITION,
   REDO_DESIGN_FIXED_TABLE_RULE,
   checkDesignConstraints,
   checkDesignOutput,
   checkDesignPlan,
+  checkGroupBy,
   isPlannedDesign,
   runDesign,
   type DesignInput,
 } from "./design.js";
-import { buildStructuredRequest, serializeJson } from "./prompt.js";
+import { buildStructuredRequest, ruleDefinitionDefects, ruleTexts, serializeJson } from "./prompt.js";
 import {
   DESIGN_OUTPUT,
   INJECTED_INSTRUCTION,
@@ -37,9 +40,9 @@ const RATES = { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputP
 
 /** 抽象的な役割 ID の表（entity の文脈を含む ID。共有・別名は明示の欄でだけ許す。新契約） */
 const PLANNED_ROLES = [
-  { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null },
-  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null, options: null },
-  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: null },
 ];
 
 /** R-1 の所属（役割の表の役割をすべて覆う。新契約） */
@@ -1002,9 +1005,9 @@ describe("中身の作り直しを 1 回だけ入れる（02 §1・Issue #407）
 
 /** 新契約の役割 ID の表（entity・計算 2 つ。`record` は 2 要件が使うので共有） */
 const ROLES_418: readonly RoleEntry[] = [
-  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
-  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
-  { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null },
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null, groupBy: null },
 ];
 
 /** 正しい所属（R-1 が `record.total`、R-2 が `record.extra`。`record` は両方の依存） */
@@ -1052,8 +1055,8 @@ describe("所属と選択肢を持つ設計は通り、戻り値にそのまま�
   it("所属と options を持つ設計が、形も中身も通り、戻り値にそのまま保持される", async () => {
     const fixture = {
       roles: [
-        { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null },
-        { roleId: "record.status", kind: "field", entity: "record", name: "status", shared: false, aliasOf: null, options: ["open", "closed"] },
+        { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null, groupBy: null },
+        { roleId: "record.status", kind: "field", entity: "record", name: "status", shared: false, aliasOf: null, options: ["open", "closed"], groupBy: null },
       ],
       designs: [
         {
@@ -1148,7 +1151,7 @@ describe("所属の中身の点検は、別々の合成例を断る（Issue #418
   it("aliasOf の先が表に無い・別名の別名を断る", () => {
     const rolesWithAlias = [
       ...ROLES_418,
-      { roleId: "record.sum", kind: "computation", entity: "record", name: "sum", shared: false, aliasOf: "ghost", options: null },
+      { roleId: "record.sum", kind: "computation", entity: "record", name: "sum", shared: false, aliasOf: "ghost", options: null, groupBy: null },
     ];
     const ownership = {
       ...OWNERSHIP_418,
@@ -1159,8 +1162,8 @@ describe("所属の中身の点検は、別々の合成例を断る（Issue #418
 
     const aliasOfAlias = [
       ...ROLES_418,
-      { roleId: "record.sum", kind: "computation", entity: "record", name: "sum", shared: false, aliasOf: "record.total", options: null },
-      { roleId: "record.sum2", kind: "computation", entity: "record", name: "sum2", shared: false, aliasOf: "record.sum", options: null },
+      { roleId: "record.sum", kind: "computation", entity: "record", name: "sum", shared: false, aliasOf: "record.total", options: null, groupBy: null },
+      { roleId: "record.sum2", kind: "computation", entity: "record", name: "sum2", shared: false, aliasOf: "record.sum", options: null, groupBy: null },
     ];
     const ownership2 = {
       ...OWNERSHIP_418,
@@ -1201,6 +1204,7 @@ describe("選択肢と根拠の形の誤り（Issue #418）", () => {
     shared: false,
     aliasOf: null,
     options: null,
+    groupBy: null,
     ...overrides,
   });
   const baseDesign = (roles: readonly unknown[]) =>
@@ -1303,7 +1307,7 @@ describe("新契約の形の誤りと、互換の明示（Issue #418）", () => 
     // options の有無が混ざっていても、互換でも断る
     const mixedOptions = {
       roles: [
-        { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null },
+        { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null, groupBy: null },
         { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
       ],
       designs: withoutOwnership.designs,
@@ -1327,8 +1331,8 @@ describe("新契約の形の誤りと、互換の明示（Issue #418）", () => 
     const marker = "MARKER418";
     const design = {
       roles: [
-        { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null },
-        { roleId: `record.${marker}`, kind: "field", entity: "record", name: `${marker}`, shared: false, aliasOf: null, options: [`${marker}-option`] },
+        { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null, groupBy: null },
+        { roleId: `record.${marker}`, kind: "field", entity: "record", name: `${marker}`, shared: false, aliasOf: null, options: [`${marker}-option`], groupBy: null },
       ],
       designs: [
         {
@@ -1427,5 +1431,139 @@ describe("単一要件の作り直しは、表を固定し、1 件を全体へ�
     expect(outcome.ok).toBe(false);
     if (outcome.ok || outcome.failure.kind !== "unmet") return;
     expect(outcome.failure.problems.some((problem) => problem.message.includes("参照先の entity の所属を伴わない"))).toBe(true);
+  });
+});
+
+// ── 見出しの元の項目（groupBy。Issue #433）──────────────────────────────
+
+describe("見出しの元の項目（groupBy）の形と中身（Issue #433）", () => {
+  const ENTITY_ROLE = { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null };
+  const STATUS_ROLE = { roleId: "record.status", kind: "field", entity: "record", name: "status", shared: false, aliasOf: null, options: ["open", "closed"], groupBy: null };
+  const TOTAL_ROLE = { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: "record.status" };
+
+  /** groupBy つきの設計（R-1 が表の全役割を所属させる。R-2 は在ることだけ） */
+  const designOf = (roles: readonly unknown[]): unknown => ({
+    roles,
+    designs: [
+      {
+        requirementId: "R-1",
+        nature: "ruled",
+        verification: { kind: "fixed-test" },
+        vocabulary: [],
+        placement: [],
+        unwritable: [],
+        ownership: [
+          { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+          { roleId: "record.status", basis: "stated", reason: null },
+          { roleId: "record.total", basis: "stated", reason: null },
+        ],
+      },
+      { requirementId: "R-2", nature: "existence-only", verification: { kind: "structural", reason: "在ることだけ" }, vocabulary: [], placement: [], unwritable: [], ownership: [] },
+    ],
+  });
+
+  it("計算の役割の groupBy が、表の選択肢の項目を指せば通る", () => {
+    const { problems } = planned(designOf([ENTITY_ROLE, STATUS_ROLE, TOTAL_ROLE]));
+    expect(problems).toEqual([]);
+  });
+
+  it("無い ID を指す groupBy は断る", () => {
+    const { problems } = planned(designOf([ENTITY_ROLE, STATUS_ROLE, { ...TOTAL_ROLE, groupBy: "ghost" }]));
+    expect(problems).toContain("見出しの元の項目の役割 ID が役割 ID の表に無い");
+  });
+
+  it("項目でない役割を指す groupBy は断る", () => {
+    const { problems } = planned(designOf([ENTITY_ROLE, STATUS_ROLE, { ...TOTAL_ROLE, groupBy: "record" }]));
+    expect(problems).toContain("見出しの元の項目が項目（field）でない");
+  });
+
+  it("選択肢（options）の無い項目を指す groupBy は断る", () => {
+    const note = { roleId: "record.note", kind: "field", entity: "record", name: "note", shared: false, aliasOf: null, options: null, groupBy: null };
+    const { problems } = planned(
+      designOf([ENTITY_ROLE, STATUS_ROLE, note, { ...TOTAL_ROLE, groupBy: "record.note" }]),
+    );
+    expect(problems).toContain("見出しの元の項目に選択肢（options）が無い");
+  });
+
+  it("計算でない役割の非 null の groupBy は、形の確認で断る", () => {
+    const checked = checkDesignOutput(designOf([ENTITY_ROLE, { ...STATUS_ROLE, groupBy: "record.status" }, TOTAL_ROLE]));
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.problems.some((problem) => problem.field === "roles[1].groupBy")).toBe(true);
+  });
+
+  it("新契約で groupBy が欠けた役割は、形の確認で断る", () => {
+    const { groupBy: _omitted, ...withoutGroupBy } = TOTAL_ROLE;
+    const checked = checkDesignOutput(designOf([ENTITY_ROLE, STATUS_ROLE, withoutGroupBy]));
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.problems.some((problem) => problem.field === "roles[2].groupBy")).toBe(true);
+  });
+
+  it("役割ごとに groupBy の有無が混ざっていれば、形の確認で断る", () => {
+    const { groupBy: _omitted, ...noGroupBy } = ENTITY_ROLE;
+    const checked = checkDesignOutput(designOf([noGroupBy, STATUS_ROLE, TOTAL_ROLE]));
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.problems.some((problem) => problem.message.includes("見出しの元の項目（groupBy）の有無が役割ごとに混ざっている"))).toBe(true);
+  });
+
+  it("中身の点検の Problem に、groupBy の先の値（目印）が出ない", () => {
+    const marker = "MARKER433";
+    const problems = checkGroupBy([
+      { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+      { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: `ghost-${marker}` },
+    ]);
+    expect(problems).not.toEqual([]);
+    for (const problem of problems) {
+      expect(`${problem.field} ${problem.message}`).not.toContain(marker);
+    }
+  });
+
+  it("規則の文に、groupBy の 1 文と理由がある", () => {
+    expect(DESIGN_RULES.some((rule) => rule.includes("groupBy"))).toBe(true);
+    expect(
+      DESIGN_RULES.some(
+        (rule) =>
+          rule.includes("groupBy") &&
+          rule.includes("見出しごとの集計") &&
+          rule.includes("宣言と固定する試験が別々の表現を推測しないため"),
+      ),
+    ).toBe(true);
+  });
+
+  it("② の規則の定義は、ID が台帳のもので、重複が無く、why と since が空でない", () => {
+    expect(ruleDefinitionDefects(DESIGN_RULE_DEFINITIONS)).toEqual([]);
+    expect(ruleDefinitionDefects([REDO_DESIGN_FIXED_TABLE_DEFINITION])).toEqual([]);
+    const ids = [...DESIGN_RULE_DEFINITIONS.map((definition) => definition.id), REDO_DESIGN_FIXED_TABLE_DEFINITION.id];
+    const ledger = [
+      ...Array.from({ length: 23 }, (_, index) => `R-design-${String(index + 1).padStart(2, "0")}`),
+      "R-design-redo",
+    ];
+    expect([...ids].sort()).toEqual([...ledger].sort());
+    for (const definition of [...DESIGN_RULE_DEFINITIONS, REDO_DESIGN_FIXED_TABLE_DEFINITION]) {
+      expect(definition.why.trim(), definition.id).not.toBe("");
+      expect(definition.since.trim(), definition.id).not.toBe("");
+    }
+  });
+
+  it("DESIGN_RULES と作り直し専用の文が、定義の text と順まで一致する", () => {
+    expect(DESIGN_RULES).toEqual(ruleTexts(DESIGN_RULE_DEFINITIONS));
+    expect(DESIGN_RULES).toHaveLength(DESIGN_RULE_DEFINITIONS.length);
+    expect(REDO_DESIGN_FIXED_TABLE_RULE).toBe(REDO_DESIGN_FIXED_TABLE_DEFINITION.text);
+  });
+
+  it("legacy の役割の表（groupBy の無い旧形式）は、互換を明示すれば通る", () => {
+    const legacy = {
+      roles: [
+        { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
+        { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+      ],
+      designs: [
+        { requirementId: "R-1", vocabulary: [], placement: [], unwritable: [] },
+        { requirementId: "R-2", vocabulary: [], placement: [], unwritable: [] },
+      ],
+    };
+    expect(checkDesignOutput(legacy, LEGACY_DESIGN_CONTRACT).ok).toBe(true);
   });
 });

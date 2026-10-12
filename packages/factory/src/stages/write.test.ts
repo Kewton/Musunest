@@ -11,12 +11,15 @@ import { describe, expect, it } from "vitest";
 import { AGENT_LIMITS } from "../limits.js";
 import {
   DECLARATION_SCHEMA,
+  WRITE_RULE_DEFINITIONS,
+  WRITE_RULES,
   WRITE_SCHEMA_NAME,
   checkWriteOutput,
   runWrite,
   utf8ByteLength,
   type WriteInput,
 } from "./write.js";
+import { ruleDefinitionDefects, ruleTexts } from "./prompt.js";
 import {
   DESIGN_OUTPUT,
   INJECTED_INSTRUCTION,
@@ -197,5 +200,35 @@ describe("③ は役割 ID → 宣言の名前の対応を提出する（02 §1�
     });
     const request = recording.structured[0];
     expect((request?.rules ?? []).join("\n")).toContain("mappings");
+  });
+});
+
+// ── 選択肢の順と集計元の規則、規則の定義（Issue #433）────────────────────
+
+describe("③ は選択肢の順と集計元を規則で固定し、定義を台帳の形にする（Issue #433）", () => {
+  it("規則の文に、options の同じ順と groupBy の 1 文と理由がある", () => {
+    expect(
+      WRITE_RULES.some(
+        (rule) =>
+          rule.includes("options") &&
+          rule.includes("同じ順") &&
+          rule.includes("groupBy") &&
+          rule.includes("宣言と固定する試験が別々の表現を推測しないため"),
+      ),
+    ).toBe(true);
+  });
+
+  it("③ の規則の定義の整合（ID の重複・why と since・配列との一致）", () => {
+    expect(ruleDefinitionDefects(WRITE_RULE_DEFINITIONS)).toEqual([]);
+    const ids = WRITE_RULE_DEFINITIONS.map((definition) => definition.id);
+    expect([...ids].sort()).toEqual(
+      Array.from({ length: 8 }, (_, index) => `R-write-${String(index + 1).padStart(2, "0")}`).sort(),
+    );
+    expect(WRITE_RULES).toEqual(ruleTexts(WRITE_RULE_DEFINITIONS));
+    expect(WRITE_RULES).toHaveLength(WRITE_RULE_DEFINITIONS.length);
+    for (const definition of WRITE_RULE_DEFINITIONS) {
+      expect(definition.why.trim(), definition.id).not.toBe("");
+      expect(definition.since.trim(), definition.id).not.toBe("");
+    }
   });
 });

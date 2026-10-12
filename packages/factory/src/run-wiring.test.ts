@@ -49,9 +49,9 @@ function readArtifact(
 /** ② の設計（役割 ID の表・選択肢・所属を持つ新契約。Issue #307・#316・#418） */
 const DESIGN_PLANNED = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
-    { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null },
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null, groupBy: null },
   ],
   designs: [
     {
@@ -269,13 +269,23 @@ describe("段どうしのつなぎ：各段の任意の入力が走らせる部�
     expect(testSuiteSpy2.mock.calls[0]?.[0]?.version).toBe(legacy);
   });
 
+  it("②' のデータの役割 ID の表に、選択肢（options）と見出しの元の項目（groupBy）が入る（Issue #433）", async () => {
+    const recording = createRecordingClient(recordedWiring());
+    const result = await runGeneration(makeRunInput(recording.client));
+    expect(result.outcome.result).toBe("pass");
+    const request = recording.structured.find((candidate) => candidate.schemaName === TEST_SUITE_SCHEMA_NAME);
+    expect(request?.input).toContain("役割 ID の表");
+    expect(request?.input).toContain("options");
+    expect(request?.input).toContain("groupBy");
+  });
+
   it("⑤a のやり直しにも、同じ所属と版が渡り、前回の落ちに要件 ID と場所が入る（Issue #431）", async () => {
     const correspondenceSpy = vi.spyOn(correspondenceStage, "runCorrespondence");
     // 所属だけが誤っている：R-2 も `record.total` に所属するが、⑤a は `total` を R-1 にだけ載せる
     const wrongOwnershipDesign = {
       roles: [
         ...DESIGN_PLANNED.roles.filter((role) => role.roleId !== "record.total"),
-        { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null, options: null },
+        { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null, options: null, groupBy: null },
       ],
       designs: [
         {

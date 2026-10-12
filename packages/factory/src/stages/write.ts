@@ -14,10 +14,12 @@ import {
   buildStructuredRequest,
   callStructuredChecked,
   isRecord,
+  ruleTexts,
   serializeJson,
   type Problem,
   type PromptData,
   type PromptDocument,
+  type RuleDefinition,
   type ShapeCheck,
   type StageOutcome,
 } from "./prompt.js";
@@ -25,16 +27,64 @@ import {
 /** ③ の JSON Schema の名前 */
 export const WRITE_SCHEMA_NAME = "declaration";
 
-/** ③ に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
-export const WRITE_RULES: readonly string[] = [
-  "設計（設計する段の出力）に従って、宣言（app.spec.yaml の原文）を 1 つ書く。",
-  "宣言は 7 欄（entities・views・actions・validations・computed・permissions・minIdentity）をすべて書く。中身が無ければ `[]` と書く。",
-  "文書（契約・語彙の意味・語彙の台帳）に無い語彙・キー・関数を使わない。",
-  "設計で「書けない」とされた部分は、書かずに残す（設計に無いものを勝手に足さない）。",
-  "出力は応答の declaration 欄に、YAML の原文として入れる。説明・前置き・後書きを付けない。",
-  "宣言と一緒に、設計の役割 ID の表（roles）の各役割 ID に対応する、宣言での名前（mappings）を提出する。",
-  "mappings は応答の mappings 欄に、roleId（設計の役割 ID）と name（宣言でその役割に付けた名前）の組として入れる。宣言に無い名前を書かない。",
+/**
+ * ③ に足す規則の定義（Issue #433）。**送る文は `text` から組む**——段は規則の文を手で持たない。
+ * ID は規則の台帳（`workspace/mvp/m1/agent/methodology/ledger/rules.md`）の R-write-01〜08 を配列の順に
+ * 振る（#433 で R-write-08 を足した）。`why`・`since` は注釈と Issue 番号から写す（空にしない）。
+ */
+export const WRITE_RULE_DEFINITIONS: readonly RuleDefinition[] = [
+  {
+    id: "R-write-01",
+    text: "設計（設計する段の出力）に従って、宣言（app.spec.yaml の原文）を 1 つ書く。",
+    why: "設計に従って宣言を 1 つ書かせる（§1.5）",
+    since: "Issue #292",
+  },
+  {
+    id: "R-write-02",
+    text: "宣言は 7 欄（entities・views・actions・validations・computed・permissions・minIdentity）をすべて書く。中身が無ければ `[]` と書く。",
+    why: "宣言の 7 欄をすべて書かせ、中身が無い欄も明示させる",
+    since: "Issue #292",
+  },
+  {
+    id: "R-write-03",
+    text: "文書（契約・語彙の意味・語彙の台帳）に無い語彙・キー・関数を使わない。",
+    why: "文書に無い語彙・キー・関数を使わせない（F-5）",
+    since: "Issue #292",
+  },
+  {
+    id: "R-write-04",
+    text: "設計で「書けない」とされた部分は、書かずに残す（設計に無いものを勝手に足さない）。",
+    why: "書けないとされた部分を勝手に足させない（F-4）",
+    since: "Issue #332",
+  },
+  {
+    id: "R-write-05",
+    text: "出力は応答の declaration 欄に、YAML の原文として入れる。説明・前置き・後書きを付けない。",
+    why: "宣言を declaration 欄に原文で入れさせ、前置きを付けさせない（§2.2）",
+    since: "Issue #292",
+  },
+  {
+    id: "R-write-06",
+    text: "宣言と一緒に、設計の役割 ID の表（roles）の各役割 ID に対応する、宣言での名前（mappings）を提出する。",
+    why: "役割 ID と宣言の名前の対応を提出させ、結び付けを推測させない（§1・Issue #308）",
+    since: "Issue #308",
+  },
+  {
+    id: "R-write-07",
+    text: "mappings は応答の mappings 欄に、roleId（設計の役割 ID）と name（宣言でその役割に付けた名前）の組として入れる。宣言に無い名前を書かない。",
+    why: "対応の形を固定し、宣言に無い名前を書かせない（§1・Issue #308）",
+    since: "Issue #308",
+  },
+  {
+    id: "R-write-08",
+    text: "選択肢（enum）の項目の宣言の options は、役割 ID の表の options のキーを同じ順で使う。見出しごとの集計の groupBy は、表の groupBy の役割に対応する項目で分ける。（宣言と固定する試験が別々の表現を推測しないため、選択肢の参照表現と集計元の関係を固定して共有する。）",
+    why: "宣言の選択肢と集計元を、表（②）の表現に合わせて共有し、別々の推測をなくす",
+    since: "Issue #433",
+  },
 ];
+
+/** ③ に足す規則（共通の規則は buildStructuredRequest が先頭に付ける。定義の `text` から組む） */
+export const WRITE_RULES: readonly string[] = ruleTexts(WRITE_RULE_DEFINITIONS);
 
 /** ③ の JSON Schema（構造化出力）。宣言の原文（YAML）と、役割 ID → 宣言の名前の対応を受ける */
 export const DECLARATION_SCHEMA = {

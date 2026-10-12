@@ -14,6 +14,7 @@
 // 結び付けても通る R2-1 の誤りを落とせない）。落ちの分類は「実在しない名前・種類違い・対応表の外・
 // 明示しない共有・空の対応の場所」である。空の対応の場所は、旧来の対応表の点検でも落ちにする（R2-2）。
 import {
+  enumKeys,
   isAppComputed,
   isComputedSettle,
   isGroupComputed,
@@ -946,10 +947,94 @@ function checkRoleMappingsPerRequirement(
       });
     }
   }
+  // 5. 宣言の選択肢のキーの並びと、見出しごとの集計の集計元（新契約。Issue #433）
+  misses.push(...checkChoiceKeyOrder(app, roles, nameByRoleId, firstOwner));
+  misses.push(...checkGroupByRelation(app, roles, nameByRoleId, firstOwner));
   return misses;
 }
 
-/** ⑤a のデータ（原文・要件の一覧・宣言。§2.2 の「データとして囲んだ入力」にだけ置く） */
+/**
+ * 宣言の**選択肢（enum）の項目**のキーの並びが、役割 ID の表の `options` と**順まで一致する**かを確かめる
+ * （**新契約**。§1・③・Issue #433）。役割の対応の先が宣言の選択肢の項目であり、キーの集合と順が同じで
+ * なければ `missing-element` にする（宣言の中身の直しであり、対応の表の出し直しでは直らない）。
+ *
+ * 実在しない名前・選択肢でない項目は、ここでは落ちにしない（実在の点検が別に落ちにする）。`detail` に
+ * 期待のキー列を載せる（値の埋め込みの禁止は `Problem` の話であり、落ちの `detail` は人向けである）。
+ */
+function checkChoiceKeyOrder(
+  app: NormalizedAppSpec,
+  roles: readonly RoleEntry[],
+  nameByRoleId: ReadonlyMap<string, string>,
+  requirementIdOf: (roleId: string) => string,
+): readonly RoleMappingMiss[] {
+  const misses: RoleMappingMiss[] = [];
+  for (const role of roles) {
+    if (role.kind !== "field" || role.options === null || role.options === undefined) continue;
+    const name = nameByRoleId.get(role.roleId);
+    if (name === undefined) continue;
+    const entityName = role.entity === null ? null : nameByRoleId.get(role.entity);
+    if (role.entity !== null && entityName === undefined) continue;
+    const entity = findEntity(app, entityName ?? null);
+    const declaration = entity === undefined ? undefined : entity.fields[name];
+    if (declaration === undefined) continue;
+    const declaredKeys = enumKeys(declaration);
+    const expected = role.options;
+    const sameOrder = declaredKeys.length === expected.length && declaredKeys.every((key, index) => key === expected[index]);
+    if (sameOrder) continue;
+    misses.push({
+      requirementId: requirementIdOf(role.roleId),
+      route: "missing-element",
+      location: { kind: "field", entity: entityName ?? null, name },
+      detail: `宣言の選択肢の項目 ${name} のキーの並び（${declaredKeys.join("・")}）が、役割 ${role.roleId} の options（${expected.join("・")}）と合わない`,
+    });
+  }
+  return misses;
+}
+
+/**
+ * 見出しごとの集計の計算が、役割 ID の表の `groupBy` の**組**（分ける元の項目の所属 entity と項目）で
+ * 分けているかを確かめる（**新契約**。§1・③・Issue #433）。参照先の項目の役割から所属 entity の役割を
+ * 引き、双方の提出対応を使って、宣言の `aggregate.entity` と `groupBy.field` がその組に一致し、
+ * `groupBy.month` が false であることを確かめる。集計の関係が無い・月で分ける・別 entity の同名の項目で
+ * 分ける場合は `missing-element` にする。**項目名だけで照合しない**（別 entity の同名に当たらない）。
+ */
+function checkGroupByRelation(
+  app: NormalizedAppSpec,
+  roles: readonly RoleEntry[],
+  nameByRoleId: ReadonlyMap<string, string>,
+  requirementIdOf: (roleId: string) => string,
+): readonly RoleMappingMiss[] {
+  const misses: RoleMappingMiss[] = [];
+  const roleById = new Map(roles.map((role) => [role.roleId, role]));
+  for (const role of roles) {
+    if (role.kind !== "computation" || role.groupBy === null || role.groupBy === undefined) continue;
+    const name = nameByRoleId.get(role.roleId);
+    if (name === undefined) continue;
+    const groupRole = roleById.get(role.groupBy);
+    if (groupRole === undefined || groupRole.kind !== "field") continue;
+    const fieldName = nameByRoleId.get(groupRole.roleId);
+    const entityName = groupRole.entity === null ? null : nameByRoleId.get(groupRole.entity);
+    if (fieldName === undefined || (groupRole.entity !== null && entityName === undefined)) continue;
+    const location: DeclarationLocation = { kind: "computation", entity: null, name };
+    const computed = findComputed(app, location);
+    const grouping = computed !== undefined && isGroupComputed(computed) ? computed.aggregate.groupBy : undefined;
+    const matches =
+      computed !== undefined &&
+      isGroupComputed(computed) &&
+      grouping !== undefined &&
+      grouping.month === false &&
+      grouping.field === fieldName &&
+      computed.aggregate.entity === entityName;
+    if (matches) continue;
+    misses.push({
+      requirementId: requirementIdOf(role.roleId),
+      route: "missing-element",
+      location,
+      detail: `見出しごとの集計 ${name} が、役割 ${role.roleId} の groupBy の組（entity ${String(entityName)} の項目 ${String(fieldName)}）で分けていない`,
+    });
+  }
+  return misses;
+}
 function buildData(input: CorrespondenceInput): readonly PromptData[] {
   // 確定した仕様があるときは、原文ではなくその要件と出どころを根拠にする（§5・Issue #334）
   const basis: PromptData =

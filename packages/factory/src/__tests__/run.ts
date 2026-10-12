@@ -239,9 +239,9 @@ export const DECLARATION_SOURCE_MISMATCH = DECLARATION_SOURCE.replace("expressio
  */
 export const DESIGN_OUTPUT_MAPPED = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "記録", shared: true, aliasOf: null, options: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "合計", shared: false, aliasOf: null, options: null },
-    { roleId: "record.extra", kind: "computation", entity: "record", name: "補助", shared: false, aliasOf: null, options: null },
+    { roleId: "record", kind: "entity", entity: null, name: "記録", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "合計", shared: false, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.extra", kind: "computation", entity: "record", name: "補助", shared: false, aliasOf: null, options: null, groupBy: null },
   ],
   designs: [
     {
@@ -637,3 +637,195 @@ export const CONFIRMED_PLAN_ADDED: ConfirmedPlan = {
   accepted_unwritable: [],
   confirmation: { sha256: "0".repeat(64), confirmed_at: "2026-09-16T12:00:00+09:00", confirmed_by: "tester" },
 };
+
+// ── 見出しごとの集計を持つ新契約の fixture（Issue #433）──────────────────────
+//
+// 選択肢の項目 `record.status`（enum）と、それを元に分ける見出しごとの集計 `record.byStatus` を持つ。
+// ③ の宣言の選択肢のキー列・②' の見出しの期待・⑤a の集計元の組を、1 組で通しで確かめられる。
+
+/** 選択肢の項目と、見出しごとの集計を持つ宣言（`status` は enum、`byStatus` は groups の計算） */
+export const GROUPED_DECLARATION_SOURCE = [
+  "entities:",
+  "  - name: record",
+  "    fields:",
+  "      amount: number",
+  "      status:",
+  "        type: enum",
+  "        options:",
+  "          open: 未了",
+  "          closed: 完了",
+  "views:",
+  "  - name: dashboard",
+  "    type: dashboard",
+  "    widgets:",
+  "      - type: bar",
+  "        value: byStatus",
+  "  - name: records",
+  "    type: list",
+  "    entity: record",
+  "    show: [status, amount, total, extra]",
+  "actions: []",
+  "validations: []",
+  "computed:",
+  "  - name: total",
+  "    entity: record",
+  "    expression: amount * 2",
+  "    type: number",
+  "  - name: extra",
+  "    entity: record",
+  "    expression: amount + 1",
+  "    type: number",
+  "  - name: byStatus",
+  "    aggregate:",
+  "      count: record",
+  "      groupBy: record.status",
+  "    type: groups",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+/** 宣言の選択肢のキーの並びを逆にした宣言（③ の宣言が表の順を守らない例。Issue #433） */
+export const GROUPED_DECLARATION_REVERSED = GROUPED_DECLARATION_SOURCE.replace(
+  "          open: 未了\n          closed: 完了",
+  "          closed: 完了\n          open: 未了",
+);
+
+/** 見出しごとの集計を持つ新契約の設計（`record.byStatus` の `groupBy` は `record.status`） */
+export const GROUPED_DESIGN = {
+  roles: [
+    { roleId: "record", kind: "entity", entity: null, name: "記録", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.status", kind: "field", entity: "record", name: "状態", shared: false, aliasOf: null, options: ["open", "closed"], groupBy: null },
+    { roleId: "record.amount", kind: "field", entity: "record", name: "金額", shared: false, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "合計", shared: false, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.byStatus", kind: "computation", entity: null, name: "状態別", shared: false, aliasOf: null, options: null, groupBy: "record.status" },
+    { roleId: "record.extra", kind: "computation", entity: "record", name: "補助", shared: false, aliasOf: null, options: null, groupBy: null },
+  ],
+  designs: [
+    {
+      requirementId: "R-1",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      vocabulary: ["計算"],
+      placement: ["computed"],
+      unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "記録の行を参照・識別するため" },
+        { roleId: "record.status", basis: "stated", reason: null },
+        { roleId: "record.amount", basis: "dependency", reason: "入力の行に保存する項目として参照するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+        { roleId: "record.byStatus", basis: "stated", reason: null },
+      ],
+    },
+    {
+      requirementId: "R-2",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      vocabulary: ["計算"],
+      placement: ["computed"],
+      unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "記録の行を参照・識別するため" },
+        { roleId: "record.extra", basis: "stated", reason: null },
+      ],
+    },
+  ],
+};
+
+/** ③ の提出する対応（見出しごとの集計の fixture） */
+export const GROUPED_MAPPINGS = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.status", name: "status" },
+  { roleId: "record.amount", name: "amount" },
+  { roleId: "record.total", name: "total" },
+  { roleId: "record.byStatus", name: "byStatus" },
+  { roleId: "record.extra", name: "extra" },
+] as const;
+
+/** 見出しごとの集計の fixture で使う、計算を対象にした試験 1 件 */
+function groupedComputeTest(
+  id: string,
+  requirementId: string,
+  roleId: string,
+  kind: "normal" | "abnormal" | "boundary",
+): Record<string, unknown> {
+  return {
+    id,
+    target: { requirementId, kind: "computation", roleId },
+    kind,
+    operation: "compute",
+    clock: "2026-09-16T12:00:00+09:00",
+    input: { "record.amount": 21 },
+    inputContract: { rowId: `${id}-row`, targetRowId: null, emptyEntities: [] },
+    referenceData: [],
+    expected: { kind: "ok", value: requirementId === "R-1" ? 42 : 22 },
+  };
+}
+
+/** ②' の答え（見出しごとの集計の期待を含む。見出しは options の順） */
+export const GROUPED_TEST_SUITE_OUTPUT = {
+  tests: [
+    groupedComputeTest("t1", "R-1", "record.total", "normal"),
+    groupedComputeTest("t2", "R-1", "record.total", "abnormal"),
+    groupedComputeTest("t3", "R-1", "record.total", "boundary"),
+    {
+      id: "t4",
+      target: { requirementId: "R-1", kind: "computation", roleId: "record.byStatus" },
+      kind: "normal",
+      operation: "aggregate",
+      clock: "2026-09-16T12:00:00+09:00",
+      input: {},
+      inputContract: { rowId: "t4-row", targetRowId: null, emptyEntities: [] },
+      referenceData: [
+        {
+          rowId: "row-2",
+          target: { requirementId: "R-1", kind: "entity", roleId: "record" },
+          values: { "record.status": "open" },
+        },
+      ],
+      expected: { kind: "ok", value: [{ heading: "open", value: 1 }, { heading: "closed", value: 0 }] },
+    },
+    groupedComputeTest("t5", "R-2", "record.extra", "normal"),
+    groupedComputeTest("t6", "R-2", "record.extra", "abnormal"),
+    groupedComputeTest("t7", "R-2", "record.extra", "boundary"),
+  ],
+};
+
+/** ⑤a の答え（見出しごとの集計の fixture。要件ごとの所属の場所をすべて挙げる） */
+export const GROUPED_CORRESPONDENCE_OUTPUT = {
+  entries: [
+    {
+      requirementId: "R-1",
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "field", entity: "record", name: "status" },
+        { kind: "field", entity: "record", name: "amount" },
+        { kind: "computation", entity: "record", name: "total" },
+        { kind: "computation", entity: null, name: "byStatus" },
+      ],
+    },
+    {
+      requirementId: "R-2",
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "computation", entity: "record", name: "extra" },
+      ],
+    },
+  ],
+};
+
+/** 見出しごとの集計の fixture の走り（①→①'→②→②'→③→⑤a） */
+export function recordedRunGrouped(options: {
+  readonly suite?: unknown;
+  readonly declaration?: string;
+} = {}): readonly RecordedCall[] {
+  return [
+    structured(REQUIREMENT_LIST_OUTPUT),
+    structured(REVERSE_CHECK_OUTPUT),
+    structured(GROUPED_DESIGN),
+    structured(options.suite ?? GROUPED_TEST_SUITE_OUTPUT),
+    structured({ declaration: options.declaration ?? GROUPED_DECLARATION_SOURCE, mappings: GROUPED_MAPPINGS }),
+    structured(GROUPED_CORRESPONDENCE_OUTPUT),
+  ];
+}

@@ -256,6 +256,21 @@ describe("全段で同じ「封筒」の schema（02 §2・#353）", () => {
     expect(strictProblems(ownership)).toEqual([]);
   });
 
+  it("設計の段の枝の役割の行に、見出しの元の項目（groupBy）が required で入る（Issue #433）", () => {
+    const designEntry = STAGE_ENVELOPE_ENTRIES.find((entry) => entry.stage === "requirement-design");
+    expect(designEntry).toBeDefined();
+    if (designEntry === undefined) return;
+
+    const designBranch = buildStageBranch(designEntry);
+    expect(strictProblems(designBranch)).toEqual([]);
+    const roles = (designBranch.properties as Record<string, unknown>)["roles"] as Record<string, unknown>;
+    const roleItem = roles.items as Record<string, unknown>;
+    expect(roleItem.required as readonly string[]).toContain("groupBy");
+    const groupBy = (roleItem.properties as Record<string, unknown>)["groupBy"] as Record<string, unknown>;
+    expect(groupBy.type).toEqual(["string", "null"]);
+    expect(strictProblems(roleItem)).toEqual([]);
+  });
+
   it("段の名前から、その枝（段の schema）を引ける", () => {
     for (const entry of STAGE_ENVELOPE_ENTRIES) {
       expect(envelopeStageFor(entry.stage)?.schema, entry.stage).toBe(entry.schema);
