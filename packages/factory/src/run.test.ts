@@ -19,7 +19,7 @@ import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "./judge.js
 import { createFakeLlmClient, type RecordedCall } from "./llm-fake.js";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "./llm.js";
 import { OpenAiIncompleteError, createOpenAiLlmClient, type OpenAiUsage } from "./openai.js";
-import { runGeneration, countUnresolvedTests, type GenerationInput } from "./run.js";
+import { runGeneration, countUnresolvedTests, redoDesignRecorded, type GenerationInput } from "./run.js";
 import { MAPPING_REDO_SCHEMA_NAME } from "./stages/repair.js";
 import { ARBITRATION_SCHEMA_NAME } from "./stages/arbitrate.js";
 import { CORRESPONDENCE_SCHEMA_NAME } from "./stages/correspondence.js";
@@ -54,6 +54,7 @@ import {
   TEST_SUITE_OUTPUT,
   TEST_SUITE_OUTPUT_MAPPED,
   TEST_SUITE_OUTPUT_WITH_UNRESOLVED,
+  USAGE,
   makeRunInput,
   recordedRun,
   recordedRunFour,
@@ -2589,5 +2590,399 @@ describe("値の鍵と行の ID（§1・②'・Issue #409）", () => {
     expect(verification.test_mismatches).toBe(0);
     // ②' は 2 回呼ぶ（1 回目は値の鍵の誤り、2 回目で直る）
     expect(recording.structured.filter((request) => request.schemaName === TEST_SUITE_SCHEMA_NAME)).toHaveLength(2);
+  });
+});
+
+// ── 仕分けが呼ぶ設計のやり直しを段の記録に残す（Issue #410）────────────────────
+
+/** やり直しの対象になる申告（R-1。制約 ID は文書の見出しにある `記録`） */
+const REDO_PART = "記録の並べ替えは書けない";
+
+/** R-1 に語彙の穴の申告を 1 件持つ設計（新形式。R-2 は申告なし） */
+const REDO_DESIGN_ORIGINAL = {
+  roles: CREATE_DESIGN.roles,
+  designs: [
+    {
+      requirementId: "R-1",
+      nature: "existence-only",
+      verification: { kind: "structural", reason: "登録できることを構造で確かめる" },
+      vocabulary: ["entity", "action"],
+      placement: ["entities", "actions"],
+      unwritable: [{ part: REDO_PART, constraintIds: ["記録"], reason: "文書に欄が無い" }],
+      notes: [],
+    },
+    {
+      requirementId: "R-2",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      vocabulary: ["computation"],
+      placement: ["computed"],
+      unwritable: [],
+      notes: [],
+    },
+  ],
+};
+
+/** やり直しの応答（R-1 の設計だけ。申告は無い＝やり直しが成功する） */
+const REDO_DESIGN_OK = { roles: CREATE_DESIGN.roles, designs: [CREATE_DESIGN.designs[0]] };
+
+/** やり直しの応答（R-1 の設計が無い＝中身の点検に落ちる。未達） */
+const REDO_DESIGN_UNMET = { roles: CREATE_DESIGN.roles, designs: [] };
+
+/** 仕分けが「語彙の穴 → 反する」を返す偽物の判定（実 API は呼ばない） */
+const redoJudge = createFakeJudge({
+  "triage:R-1:0": judgeChoice("vocabulary-hole", 0.9),
+  "support:R-1:0": judgeChoice("contradicts", 0.9),
+});
+
+/** R-2 の異常の期待を直した ②' の答え（⑥ に入らずに完走する） */
+const REDO_PASSING_SUITE = {
+  classifications: CREATE_SUITE.classifications,
+  tests: CREATE_SUITE.tests.map((test) =>
+    test.id === "a" ? { ...test, expected: { kind: "ok", value: 42 } } : test,
+  ),
+};
+
+/** 記録の並び（①→①'→②→[やり直し]→②'→③→⑤a） */
+const trackedRedo = (redo: readonly RecordedCall[]): readonly RecordedCall[] => [
+  structured(REQUIREMENT_LIST_OUTPUT),
+  structured(REVERSE_CHECK_OUTPUT),
+  structured(REDO_DESIGN_ORIGINAL),
+  ...redo,
+  structured(REDO_PASSING_SUITE),
+  structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+  structured(CREATE_CORRESPONDENCE),
+];
+
+/** 中身の点検に入る前に例外を投げる応答（予期しない例外の経路を作る） */
+function throwingDesignOutput(): unknown {
+  const output: Record<string, unknown> = {};
+  Object.defineProperty(output, "designs", {
+    get() {
+      throw new Error("予期しない誤り");
+    },
+  });
+  return output;
+}
+
+/** 仕分けは費用を掛けず、裏付けの 1 回で予算を使い切る偽物の判定（予約で断られる予算を作る） */
+function drainingJudge(huge: LlmUsage): Judge {
+  let calls = 0;
+  return {
+    async judge(request: JudgeRequest): Promise<JudgeResponse> {
+      calls += 1;
+      const answers: Record<string, JudgeAnswer> = {};
+      for (const name of Object.keys(request.questions)) {
+        answers[name] = name.startsWith("triage:")
+          ? judgeChoice("vocabulary-hole", 0.9)
+          : judgeChoice("contradicts", 0.9);
+      }
+      if (calls === 1) {
+        return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+      }
+      return { answers, inputTokens: huge.inputTokens, usage: huge, model: "gpt-judge", answeredBy: "llm" };
+    },
+  };
+}
+
+/** 段の記録から、その段の費用（USD）を数える（`costOfUsageUsd` と同じ式） */
+const stageCostUsd = (stage: {
+  readonly input_tokens: number;
+  readonly cached_input_tokens: number;
+  readonly cache_write_tokens: number;
+  readonly output_tokens: number;
+  readonly reasoning_tokens: number;
+}): number =>
+  costOfUsageUsd(
+    {
+      inputTokens: stage.input_tokens,
+      cachedInputTokens: stage.cached_input_tokens,
+      cacheWriteTokens: stage.cache_write_tokens,
+      outputTokens: stage.output_tokens,
+      reasoningTokens: stage.reasoning_tokens,
+    },
+    RATES,
+  );
+
+describe("仕分けが呼ぶ設計のやり直しを段の記録に残す（Issue #410）", () => {
+  it("やり直しが成功すると、design が 2 件になり、2 件目は operation が redo-design・status が ok・calls 1・トークンは usage と一致する", async () => {
+    const { run } = runWith(trackedRedo([structured(REDO_DESIGN_OK)]), { judge: redoJudge });
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    // 仕分けの結果（やり直した設計を採る・申告が無い）と verdict は変わらない
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+
+    const designs = result.record.stages.filter((stage) => stage.stage === "design");
+    expect(designs).toHaveLength(2);
+    expect(designs[0]).toMatchObject({ status: "ok", operation: null });
+    expect(designs[1]).toMatchObject({
+      operation: "redo-design",
+      status: "ok",
+      calls: 1,
+      missing_usage_calls: 0,
+      input_tokens: USAGE.inputTokens,
+      cached_input_tokens: USAGE.cachedInputTokens,
+      cache_write_tokens: 0,
+      output_tokens: USAGE.outputTokens,
+      reasoning_tokens: USAGE.reasoningTokens,
+      failure_kind: null,
+    });
+    // ほかの段の operation は null
+    for (const stage of result.record.stages) {
+      if (stage === designs[1]) continue;
+      expect(stage.operation, stage.stage).toBeNull();
+    }
+    // やり直した設計を採り、申告が無い
+    expect(result.bundle).not.toBeNull();
+    if (result.bundle === null) return;
+    const list = unwritableOf(result.bundle);
+    expect(list.unwritable).toEqual([]);
+    expect(list.marked_requirements).toEqual([]);
+    expect(list.triage.map((entry) => entry.answer)).toEqual(["vocabulary-hole", "contradicts"]);
+  });
+
+  it("やり直しが 2 回とも中身の点検に落ちると、2 件目は failed・unmet・calls 2 で残り、後段の応答を消費せず、走りは止まらず終端は同じ", async () => {
+    const { recording, run } = runWith(
+      trackedRedo([structured(REDO_DESIGN_UNMET), structured(REDO_DESIGN_UNMET)]),
+      { judge: redoJudge },
+    );
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    const designs = result.record.stages.filter((stage) => stage.stage === "design");
+    expect(designs).toHaveLength(2);
+    expect(designs[1]).toMatchObject({
+      operation: "redo-design",
+      status: "failed",
+      failure_kind: "unmet",
+      calls: 2,
+    });
+    // 後段の応答を消費していない（② は 3 回＝① の 1 回＋やり直しの 2 ラウンド、②' は 1 回だけ）
+    expect(recording.structured.filter((request) => request.schemaName === DESIGN_SCHEMA_NAME)).toHaveLength(3);
+    expect(recording.structured.filter((request) => request.schemaName === TEST_SUITE_SCHEMA_NAME)).toHaveLength(1);
+    // 仕分けは申告を印つきで残す
+    expect(result.bundle).not.toBeNull();
+    if (result.bundle === null) return;
+    const list = unwritableOf(result.bundle);
+    expect(list.marked_requirements).toEqual(["R-1"]);
+    expect(list.unwritable.map((entry) => entry.requirementId)).toEqual(["R-1"]);
+    // 終端は同じ（止まらず、部分案）
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+  });
+
+  it("予約が断られる予算では、2 件目は failed・budget で残り、追加の要求を出さず、終端は同じ", async () => {
+    const huge: LlmUsage = { inputTokens: 10_000_000_000, cachedInputTokens: 0, outputTokens: 0, reasoningTokens: 0 };
+    const judge = drainingJudge(huge);
+    const { recording, run } = runWith(trackedRedo([]), { judge });
+    const result = await run;
+
+    const designs = result.record.stages.filter((stage) => stage.stage === "design");
+    expect(designs).toHaveLength(2);
+    expect(designs[1]).toMatchObject({
+      operation: "redo-design",
+      status: "failed",
+      failure_kind: "budget",
+      calls: 0,
+    });
+    // やり直しは予約で断られ、要求を出していない（①・①'・② の 3 回だけ）
+    expect(recording.structured).toHaveLength(3);
+    // 終端は同じ（予算切れで止まる）
+    expect(result.stopped?.kind).toBe("budget");
+  });
+
+  it("複数の申告を持つ例で、段の失敗では対象の要件だけ印つきで残る", async () => {
+    const design = {
+      roles: CREATE_DESIGN.roles,
+      designs: [
+        {
+          requirementId: "R-1",
+          nature: "existence-only",
+          verification: { kind: "structural", reason: "登録できることを構造で確かめる" },
+          vocabulary: ["entity", "action"],
+          placement: ["entities", "actions"],
+          unwritable: [
+            { part: "記録の並べ替えは書けない", constraintIds: ["記録"], reason: "文書に欄が無い" },
+            { part: "記録の見出しの付け方は書けない", constraintIds: ["記録"], reason: "文書に欄が無い" },
+          ],
+          notes: [],
+        },
+        {
+          requirementId: "R-2",
+          nature: "ruled",
+          verification: { kind: "fixed-test" },
+          vocabulary: ["computation"],
+          placement: ["computed"],
+          unwritable: [],
+          notes: [],
+        },
+      ],
+    };
+    const judge = createFakeJudge({
+      "triage:R-1:0": judgeChoice("vocabulary-hole", 0.9),
+      "triage:R-1:1": judgeChoice("vocabulary-hole", 0.9),
+      "support:R-1:0": judgeChoice("contradicts", 0.9),
+      "support:R-1:1": judgeChoice("contradicts", 0.9),
+    });
+    const { run } = runWith(
+      [
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(design),
+        structured(REDO_DESIGN_UNMET),
+        structured(REDO_DESIGN_UNMET),
+        structured(REDO_PASSING_SUITE),
+        structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+        structured(CREATE_CORRESPONDENCE),
+      ],
+      { judge },
+    );
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    // やり直しは要件 R-1 につき 1 回だけ（calls 2 は中身の 2 ラウンド）
+    const designs = result.record.stages.filter((stage) => stage.stage === "design");
+    expect(designs[1]).toMatchObject({
+      operation: "redo-design",
+      status: "failed",
+      failure_kind: "unmet",
+      calls: 2,
+    });
+    expect(result.bundle).not.toBeNull();
+    if (result.bundle === null) return;
+    const list = unwritableOf(result.bundle);
+    // 対象の要件 R-1 だけ印つき（R-2 は申告が無く触らない）
+    expect(list.marked_requirements).toEqual(["R-1"]);
+    expect(list.unwritable.map((entry) => entry.requirementId)).toEqual(["R-1"]);
+    expect(list.unwritable[0]?.unwritable).toHaveLength(2);
+  });
+
+  it("予期しない例外では、failed・unknown の記録を残し、仕分け全体を採らず元の設計に戻る", async () => {
+    const { run } = runWith(
+      [
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(REDO_DESIGN_ORIGINAL),
+        structured(throwingDesignOutput()),
+        structured(REDO_PASSING_SUITE),
+        structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+        structured(CREATE_CORRESPONDENCE),
+      ],
+      { judge: redoJudge },
+    );
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    const designs = result.record.stages.filter((stage) => stage.stage === "design");
+    expect(designs).toHaveLength(2);
+    expect(designs[1]).toMatchObject({
+      operation: "redo-design",
+      status: "failed",
+      failure_kind: "unknown",
+    });
+    // 仕分け全体を採らない（判定の記録が無い）＝元の設計に戻る（R-1 の申告が残る）
+    expect(result.bundle).not.toBeNull();
+    if (result.bundle === null) return;
+    const list = unwritableOf(result.bundle);
+    expect(list.triage).toEqual([]);
+    expect(list.unwritable.map((entry) => entry.requirementId)).toEqual(["R-1"]);
+    expect(list.unwritable[0]?.unwritable).toEqual([REDO_PART]);
+  });
+
+  it("usage が全件ある走りで、段の費用の合計＋判定の費用が provider_cost_usd と一致し、やり直しの記録を除くと一致しない", async () => {
+    const { run } = runWith(trackedRedo([structured(REDO_DESIGN_OK)]), { judge: redoJudge });
+    const result = await run;
+
+    const provider = result.summary.provider_cost_usd ?? 0;
+    const all = result.record.stages.reduce((sum, stage) => sum + stageCostUsd(stage), 0);
+    expect(all + result.summary.judge.cost_usd).toBeCloseTo(provider, 12);
+    // やり直しの記録（operation が redo-design）を外すと、1 要件の設計 1 回分（0.0002 USD）だけずれる
+    const withoutRedo = result.record.stages.filter((stage) => stage.operation !== "redo-design");
+    expect(withoutRedo.reduce((sum, stage) => sum + stageCostUsd(stage), 0) + result.summary.judge.cost_usd).not.toBeCloseTo(
+      provider,
+      12,
+    );
+  });
+
+  it("usage の欠けた呼び出しがある走りでは、その段の missing_usage_calls で別に確かめる", async () => {
+    const { run } = runWith(trackedRedo([noUsageCall(REDO_DESIGN_OK)]), { judge: redoJudge });
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    const designs = result.record.stages.filter((stage) => stage.stage === "design");
+    expect(designs[1]).toMatchObject({
+      operation: "redo-design",
+      status: "ok",
+      calls: 1,
+      missing_usage_calls: 1,
+      input_tokens: 0,
+      output_tokens: 0,
+    });
+  });
+});
+
+// ── 設計のやり直しの記録を組む包み（Issue #410）────────────────────────────
+
+/** 包みが足す記録を集める口（段の失敗と例外の 2 経路を直接見る） */
+function collector(): {
+  readonly pushed: { status: string; kind: string | null }[];
+  readonly push: (status: "ok" | "failed", durationMs: number, failureKind: string | null) => void;
+} {
+  const pushed: { status: string; kind: string | null }[] = [];
+  return {
+    pushed,
+    push: (status, _durationMs, failureKind) => {
+      pushed.push({ status, kind: failureKind });
+    },
+  };
+}
+
+describe("設計のやり直しの記録を組む包み（Issue #410）", () => {
+  it("段が成功すると、ok の記録を足して値を返す", async () => {
+    const { pushed, push } = collector();
+    const value = await redoDesignRecorded({
+      call: async () => ({ ok: true as const, value: { designs: ["R-1"] } }),
+      now: () => 0,
+      push,
+    });
+    expect(value).toEqual({ designs: ["R-1"] });
+    expect(pushed).toEqual([{ status: "ok", kind: null }]);
+  });
+
+  it("段の失敗では、failed の記録を足して undefined を返す", async () => {
+    const { pushed, push } = collector();
+    const value = await redoDesignRecorded<unknown>({
+      call: async () => ({ ok: false, failure: { kind: "unmet", attempts: 2, problems: [] } }),
+      now: () => 0,
+      push,
+    });
+    expect(value).toBeUndefined();
+    expect(pushed).toEqual([{ status: "failed", kind: "unmet" }]);
+  });
+
+  it("予約が断られる予算では、failed・budget で残す", async () => {
+    const { pushed, push } = collector();
+    const value = await redoDesignRecorded<unknown>({
+      call: async () => ({ ok: false, failure: { kind: "budget", maxCostUsd: 1, remainingUsd: 0 } }),
+      now: () => 0,
+      push,
+    });
+    expect(value).toBeUndefined();
+    expect(pushed).toEqual([{ status: "failed", kind: "budget" }]);
+  });
+
+  it("予期しない例外では、failed（unknown）の記録を足して同じ例外を投げ直す", async () => {
+    const boom = new Error("予期しない誤り");
+    const { pushed, push } = collector();
+    await expect(
+      redoDesignRecorded<unknown>({
+        call: async () => {
+          throw boom;
+        },
+        now: () => 0,
+        push,
+      }),
+    ).rejects.toBe(boom);
+    expect(pushed).toEqual([{ status: "failed", kind: "unknown" }]);
   });
 });

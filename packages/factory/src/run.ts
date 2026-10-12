@@ -61,6 +61,7 @@ import {
   type FailureKind,
   type RunRecord,
   type StageId,
+  type StageOperation,
   type StageRecord,
   type StageStatus,
   type StopReason,
@@ -229,6 +230,43 @@ function stageFailureAttribution(stage: StageId, failure: StageFailure): Failure
   return { stage, kind };
 }
 
+/**
+ * 仕分けが呼ぶ設計のやり直し（`redoDesign`。Issue #410）を、段 `design` の記録（`operation` は
+ * `"redo-design"`）として残す包み。**戻り方は変えない**（門を緩めない）。
+ *
+ *   - 段が成功 → `ok` の記録を足し、値（設計の出力）を返す
+ *   - 段が失敗（`StageOutcome` が `ok` でない）→ `failed` の記録（分類は `stageFailureToKind`）を足し、
+ *     今までどおり `undefined` を返す（仕分けは申告を印つきで残し、走りは止めない）
+ *   - **予期しない例外** → `failed`（分類 `unknown`）の記録を足して、**同じ例外を投げ直す**（外側の
+ *     既存の catch に委ね、仕分け全体を採らず元の設計に戻す）
+ *
+ * 段の失敗と例外の 2 経路を直接試験できるよう、走らせるもの（`call`）と記録の口（`push`）を外から
+ * 受け取る。所要時間は `now` の差で出す。
+ */
+export async function redoDesignRecorded<T>(input: {
+  /** 段を回す（本番は ② の設計を要件 1 つで呼び直す `runDesign`） */
+  readonly call: () => Promise<StageOutcome<T>>;
+  /** いまの時刻（ミリ秒。時計は差し込む） */
+  readonly now: () => number;
+  /** 記録を足す（段は `design`・`operation` は `"redo-design"`。所要時間と分類を受け取る） */
+  readonly push: (status: StageStatus, durationMs: number, failureKind: FailureKind | null) => void;
+}): Promise<T | undefined> {
+  const start = input.now();
+  let outcome: StageOutcome<T>;
+  try {
+    outcome = await input.call();
+  } catch (error) {
+    input.push("failed", input.now() - start, "unknown");
+    throw error;
+  }
+  if (!outcome.ok) {
+    input.push("failed", input.now() - start, stageFailureToKind(outcome.failure));
+    return undefined;
+  }
+  input.push("ok", input.now() - start, null);
+  return outcome.value;
+}
+
 /** 要約の `assurance`（試験と対応表が覆った範囲。§4） */
 function assuranceOf(outcome: Outcome): string {
   if (outcome.result === "pass") return "full";
@@ -309,9 +347,10 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     before: UsageSnapshot,
     start: number,
     failureKind: FailureKind | null,
+    operation: StageOperation | null = null,
   ): void => {
     stages.push(
-      makeStageRecord(stage, status, input.now() - start, usageDelta(before, meter.snapshot), failureKind),
+      makeStageRecord(stage, status, input.now() - start, usageDelta(before, meter.snapshot), failureKind, operation),
     );
   };
 
@@ -453,8 +492,27 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
                 (requirement) => requirement.id === requirementId,
               ),
             };
-            const outcome = await runDesign({ list, documents: input.documents, gateway });
-            return outcome.ok ? outcome.value.designs[0] : undefined;
+            // やり直しの 1 回を、段 `design` の記録（`operation` は `"redo-design"`）として残す
+            // （Issue #410）。**戻り方は変えない**——段の失敗は今までどおり `undefined` を返し、例外は
+            // 記録を足して投げ直し、外側の既存の catch に委ねる。
+            const before = meter.snapshot;
+            const value = await redoDesignRecorded({
+              call: () => runDesign({ list, documents: input.documents, gateway }),
+              now: input.now,
+              push: (status, durationMs, failureKind) => {
+                stages.push(
+                  makeStageRecord(
+                    "design",
+                    status,
+                    durationMs,
+                    usageDelta(before, meter.snapshot),
+                    failureKind,
+                    "redo-design",
+                  ),
+                );
+              },
+            });
+            return value?.designs[0];
           },
         });
       } catch {

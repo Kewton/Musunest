@@ -46,6 +46,14 @@ export const STAGE_STATUSES = ["ok", "failed"] as const;
 export type StageStatus = (typeof STAGE_STATUSES)[number];
 
 /**
+ * 段の記録の `operation`（段をどんな理由で回したか。Issue #410）。通常の段は `null`、仕分けが呼ぶ
+ * 設計のやり直しだけ `"redo-design"` を持つ。**上限のある値の並び**——この外の値は記録に写さない
+ * （`null` にする）。
+ */
+export const STAGE_OPERATIONS = ["redo-design"] as const;
+export type StageOperation = (typeof STAGE_OPERATIONS)[number];
+
+/**
  * 失敗の分類（どの種類の失敗か。02 §1.5・§2.2・S-7・#302）。**呼び出しの誤りは、adapter の種類を
  * そのまま写す**——timeout を「拒否」に混ぜない。`refused` は**モデルが拒否したときだけ**にする。
  */
@@ -125,6 +133,7 @@ export interface UsageSnapshot {
 /** 段ごとの記録の欄（この欄だけを持つ） */
 export const STAGE_RECORD_KEYS = [
   "stage",
+  "operation",
   "status",
   "duration_ms",
   "calls",
@@ -141,6 +150,8 @@ export type StageRecordKey = (typeof STAGE_RECORD_KEYS)[number];
 /** 段ごとの記録（列挙した欄だけ） */
 export interface StageRecord {
   readonly stage: StageId;
+  /** 段を回した理由（通常は `null`、仕分けが呼ぶ設計のやり直しは `"redo-design"`。Issue #410） */
+  readonly operation: StageOperation | null;
   readonly status: StageStatus;
   readonly duration_ms: number;
   readonly calls: number;
@@ -220,8 +231,16 @@ export interface SummaryBase {
 }
 
 /**
+ * `operation` を、**上限のある値の並び**（`STAGE_OPERATIONS`）にあるときだけ写す（Issue #410）。
+ * それ以外（モデルの出力・任意の文字列・`null` など）は `null` にする。
+ */
+function pickStageOperation(value: unknown): StageOperation | null {
+  return (STAGE_OPERATIONS as readonly unknown[]).includes(value) ? (value as StageOperation) : null;
+}
+
+/**
  * 段ごとの記録を組み立てる。**列挙した欄だけ**を名指しで写す（余分な欄は写さない）。
- * 渡した `usage` の差は、その段が使ったトークンである。
+ * 渡した `usage` の差は、その段が使ったトークンである。`operation` は省けば `null`（通常の段）。
  */
 export function makeStageRecord(
   stage: StageId,
@@ -229,9 +248,11 @@ export function makeStageRecord(
   durationMs: number,
   usage: UsageSnapshot,
   failureKind: FailureKind | null,
+  operation: StageOperation | null = null,
 ): StageRecord {
   return {
     stage,
+    operation: pickStageOperation(operation),
     status,
     duration_ms: durationMs,
     calls: usage.calls,
@@ -355,7 +376,7 @@ export function buildRunRecord(input: RunRecord): RunRecord {
     spec_engine_version: input.spec_engine_version,
     factory_version: input.factory_version,
     stages: input.stages.map((stage) =>
-      makeStageRecord(stage.stage, stage.status, stage.duration_ms, stage, stage.failure_kind),
+      makeStageRecord(stage.stage, stage.status, stage.duration_ms, stage, stage.failure_kind, stage.operation),
     ),
     arbitration: {
       upheld: input.arbitration.upheld,
