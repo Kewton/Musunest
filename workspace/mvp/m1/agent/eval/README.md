@@ -86,25 +86,28 @@ a10d827eff477dda51394bff96faa0f9c42631cb818a1653098446bc979bfe70  subjects/C.jso
 
 | ファイル | 中身 |
 |---|---|
-| `agent-accept/run-agent.mjs` | 計測。P1〜P10 × 回数を工場の入口（`packages/factory/dist/cli.js`）で流す（API を呼ぶ。窓口の手元だけ）。出力先に `conditions.json`（計測の条件）・本ごとのディレクトリ・`run-<時刻>.json`（1 回の起動の記録）を残す |
-| `agent-accept/score-agent.mjs` | 採点。出力先の本を採点表 v5 で採点し、`score[-label].json` を書く。`--anonymous` なら `score[-label].anonymous.json` だけを書く。Plan を通した本は、原文系と了承後系を別に数える（§5.5） |
+| `agent-accept/run-agent.mjs` | 計測。評価セットの定義ファイル（既定は `sets/dev-p1-p10.json`。`--set <パス>` で差し替える）の本 × 回数を工場の入口（`packages/factory/dist/cli.js`）で流す（API を呼ぶ。窓口の手元だけ）。出力先に `conditions.json`（計測の条件）・本ごとのディレクトリ・`run-<時刻>.json`（1 回の起動の記録）を残す |
+| `agent-accept/score-agent.mjs` | 採点。条件のファイルに記録された定義ファイル（無ければ既定の `sets/dev-p1-p10.json`。`--set <パス>` で差し替える）を読んで、出力先の本を採点表 v5 で採点し、`score[-label].json` を書く。`--anonymous` なら `score[-label].anonymous.json` だけを書く。Plan を通した本は、原文系と了承後系を別に数え、台本を事後に当てる（§5.5・§5.6） |
 | `agent-accept/run-agent.test.mjs`・`agent-accept/score-agent.test.mjs` | `node --test "workspace/mvp/m1/agent/eval/agent-accept/*.test.mjs"`（API・ネットワーク無し。計測の試験は偽物の工場で、採点の試験は `cases/` の固定の宣言と凍結したエンジンで閉じる。先に `pnpm build`） |
+| `sets/<組の id>.json`・`sets/scripts/<題材>.json` | 評価セットの定義ファイルと、題材ごとの台本（§5.6）。`dev-p1-p10.json` は今の P1〜P10 を同じ形で書き直したもの（依頼文の指紋が `stage1-patterns.md` の表と一致することを試験で確かめる） |
 
-方法論 `methodology/01-eval-sets.md` §2〜§4 の前提のうち、**分母の補正・本数の照合・比較の条件の指紋・匿名の集計**をここで満たす（#425）。**原文と了承後の二系統の採点**は §5.5（#426）。評価セットの入口と台本は別の Issue（#427）。
+方法論 `methodology/01-eval-sets.md` §2〜§4 の前提のうち、**分母の補正・本数の照合・比較の条件の指紋・匿名の集計**をここで満たす（#425）。**原文と了承後の二系統の採点**は §5.5（#426）。**評価セットの定義ファイルと台本**は §5.6（#427）。
 
-### 5.1 計測の条件（`conditions.json`。schema `musunest-factory/agent-accept-conditions/v2`）
+### 5.1 計測の条件（`conditions.json`。schema `musunest-factory/agent-accept-conditions/v3`。v2 は #425、v1 は #401）
 
 | 欄 | 中身 |
 |---|---|
 | `source` | コミットと未コミットの変更の有無 |
 | `factory` | 工場の `dist` の指紋と、`src` より新しいか（作り直した根拠） |
 | `spec_engine` | spec-engine の `dist` の指紋（工場の生成と採点の両方が読む） |
-| `document` | 依頼文の表（`stage1-patterns.md`）の SHA-256 |
+| `set` | **読んだ定義ファイル**（§5.6。v3）：パス・SHA-256・`id`・`version`・`role`・本の一覧（`items[]`：ID・題材・書き方・書ける範囲）。署名に入る（依頼文はここから組む） |
+| `document` | 依頼文の出どころの文書（定義ファイルの `source.document`。`dev-p1-p10.json` なら `stage1-patterns.md`）のパスと SHA-256（文書が無ければ `null`）。v2 までは「依頼文の表の SHA-256」で、値は同じ。計測はこの文書を読まない（定義ファイルが写し） |
+| `scripts` | 台本（§5.6。v3）：`mode`（今は `post-hoc`＝採点で事後に当てる）・題材ごとの台本のパスと SHA-256・まとめた指紋。**署名から外す**（`scoring` と同じ理由：今の台本は生成に関わらず、採点の出力が条件と照合する） |
 | `prompt_documents` | 生成に渡す文書。工場の入口が読むものと同じ場所を appspec-schema の `files` から引く：契約（ディレクトリの指紋）・語彙の意味・語彙の台帳（各 SHA-256） |
 | `judge` | 判定の口の構成。`jev-primary-llm-fallback`（Jev の鍵の環境変数が空でない）か `llm-only`。**鍵の値は書かない**（環境変数の名前だけ） |
 | `params`・`child_args` | モデル・effort・Plan の有無・題材と回数・同時数・全体の目安額・工場 1 本の予算と締切・段ごとの出力の上限と、子プロセスへ渡す引数 |
 | `scoring` | 採点の定義と集計のコードの指紋（`engine.mjs`・`score-claims.mjs`・`rubric-v5.mjs`・`agent-accept/score-agent.mjs`・`subjects/*.json`。`<repo>` の採点器のもの） |
-| `signature` | `--resume` の一致の判定に使う SHA-256。**`started_at`・`scoring`・`params.budget_usd` を除いた全部** |
+| `signature` | `--resume` の一致の判定に使う SHA-256。**`started_at`・`scoring`・`scripts`・`params.budget_usd` を除いた全部** |
 
 - **署名が保証するのは生成の条件の一致であって、管理の条件（計測全体の停止の目安 `params.budget_usd`）まで含めた一致ではない。** 再開で変えた目安の額は条件のファイルには書かず（初回の値のまま上書きしない）、起動の記録（下の `run-<時刻>.json`）から読む
 - `scoring` を署名から外すのは、採点は生成のあとに全本へ同じ版を当てるもので、一致は採点の出力（§5.2 の `fingerprints`）で照合するから。**ただし「採点だけ直したあとは再開できる」とは限らない**：`source.commit`・`source.dirty` は署名に残るので、clean な checkout を編集したり、採点だけの commit を積んだりすれば再開は断られる。外す効果があるのは `source` が変わらない場合（すでに未コミットの変更がある作業ツリーで採点の定義だけを直したとき）に限る。挙動は変えない
@@ -240,3 +243,95 @@ Plan を通した本は、依頼文の要件の一部が、利用者が了承し
 - 正しい了承（`expected`）の代替先（`alternative_id` が指す要件・`alternative` の部分）が実装されたこと、`changed` の変更後・`added` の要件が満たされたことは確かめない（だから未検証として数え、本を PASS にしない。判定の手段は対応データの Issue で決める）
 - 他の構造の書けない要件に当たった処分の `matched` は、その要件の ID を目印に出すだけで、処分した部分がその要件そのものである保証はない（鍵の部分一致）
 - Plan が確定して納品物に `plan.json` が無い本（`confirmed_without_plan`）は、Build のどこまで進んだかを記録から読めない（往復の記録は Build の前に書かれる）
+
+### 5.6 評価セットの定義ファイルと台本（#427）
+
+方法論 `01-eval-sets.md` §2 の「評価セットの入口」と「台本」。今まで計測の道具は依頼文を固定の文書（`stage1-patterns.md`）から読み、採点の道具は P 番号 → 題材・書き方・書ける範囲の対応を道具の中に固定していた。これを **1 つの定義ファイル**に移し、道具はそれを読んで流す・採点する。P 番号と題材の対応は道具の中に持たない。**今の P1〜P10 の依頼文と採点の対応は変えない**（形を移すだけ。定義ファイルから組み立てた依頼文の指紋が今の表と一致することを試験で確かめる）。形は**実装の前に**ここに書いた。
+
+#### 5.6.1 定義ファイル（`sets/<組の id>.json`。schema `musunest-eval/eval-set/v1`）
+
+| 欄 | 中身 |
+|---|---|
+| `schema`・`id`・`version` | 契約の版・組の ID・組の版（題材を入れ替えたら上げる。方法論 `01` §1「組の版を上げて基準を測り直す」） |
+| `role` | 組の役割：`development`（開発用）／`regression`（回帰用）／`holdout`（保留用）。方法論 `01` §1 |
+| `title` | 人が読む名前 |
+| `source` | 出どころ（任意）：`document`（依頼文を写した文書のパス。リポジトリの根からの相対）・`section` |
+| `styles` | 書き方の ID → 説明（例 `S1`＝丁寧な箇条書き、`S2`＝会話体）。本の `style` はここにあること |
+| `items[]` | 本 1 つ。**`id`**（`P<n>` の形。出力先の本の名前 `<id>-r<回>` と条件の `params.patterns` に使う。照合の道具がこの形を前提にする）・**`subject`**（題材 ID。採点の定義の `id` と一致）・**`style`**・**`writable`**（対象範囲：`true`＝全部書ける、`false`＝一部書けない。集計の `partial`／`writable` の分け方になる）・**`scoring`**（採点の定義のパス）・**`script`**（台本のパス。無ければ `null`）・**`request`**（依頼文。行の配列。改行でつないだものが依頼文で、計測はその末尾に改行を 1 つ足して `request.md` に書く） |
+
+- パスは**定義ファイルの場所からの相対**（`../subjects/A.json`・`scripts/A.json`）。絶対パスも通す（試験用）
+- **欠けた欄・形の違う欄は断る**（理由の一覧。入力の値は書かない）：未知の `schema`・`id`／`version`／`role`／`styles`／`items` の形・本の ID の形と一意性・`styles` に無い書き方・`writable` が真偽値でない・採点の定義が無い／`id` が `subject` と違う・台本が無い／読めない／形が違う・`request` が文字列の配列でないか 0 行・同じ題材の本で `writable` が食い違う。計測の道具は 1 本も起こさずに非 0 で終え、採点の道具は採点しない
+- 同じ題材の本は同じ採点の定義と台本を指す（P1 と P2 は `A`）。**採点の定義そのものは凍結した `subjects/` のまま**（定義ファイルは指すだけ）
+- **匿名の集計には、組の ID・題材 ID・本の ID を出さない**（§5.3 のまま）
+
+#### 5.6.2 台本（`sets/scripts/<題材>.json`。schema `musunest-eval/plan-script/v1`）
+
+Plan の質問に、**質問 ID ではなく点検済みの事項（どの要件のどの決めどころか）で答える**。質問 ID（`Q<版>-<n>`）・選択肢 ID・要件 ID（`R-<n>`）は実行のたびに工場が付け直すので、台本はそれらを持たず、**文**（要件の文・問いの文・選択肢の文）と**目録の観点 ID**で指す。
+
+| 欄 | 中身 |
+|---|---|
+| `schema`・`subject`・`version` | 契約の版・題材 ID（定義ファイルの `subject` と一致）・台本の版 |
+| `entries[]` | 点検済みの事項 1 つ。**`id`**（台本の中で一意）・**`facet`**（工場の目録の観点 ID：`aggregation`／`period`／`current-period`／`counted-state`／`include-zero`／`editable-by`。目録に無い決めどころなら `null`）・**`keys`**（正規表現の配列。**全部**が当たること。要件と決めどころの両方を指す語を書く）・**`answer`**（`{ "choose": [正規表現…] }`＝選択肢の文で指す。全部が当たる選択肢が**ちょうど 1 つ**のときだけ決まる／`{ "recommended": true }`＝点検の結果「推奨でよい」と決めた事項。**台本に無いのとは区別する**）・**`basis`**（根拠：依頼文の引用と、採点の定義のどの判定が決めているか） |
+
+**当て方**（1 問ごと）：
+
+1. 問いの**事項の文**を集める：問いの文・選択肢の文・問いが閉じる事項（`open_issue_id`・`also_closes`）の文と、目録の事項（`OI:catalog:<要件 ID>:<観点 ID>`）が指す**要件の文**。事項と要件の文は確定した仕様（`bundle/artifacts/plan.json`）から引く（無い本は問いと選択肢の文だけ）
+2. 問いが持つ**観点**を、目録の事項の ID から読む（`OI:catalog:…:<観点 ID>`。`also_closes` も見る）。工場の目録の事項の ID の形に依存する（変われば観点は読めなくなるが、文の照合は残る）
+3. `keys` が全部当たり、かつ観点が食い違わない（台本の `facet` が `null`、問いに観点が無い、または問いの観点に含まれる）台本の件を集める。**0 件なら「不明」（`unknown`）**。2 件以上なら「決められない」（`unresolved`・`entries`）
+4. 1 件なら答えを決める：`choose` が全部当たる選択肢がちょうど 1 つならその選択肢、0 か 2 つ以上なら「決められない」（`unresolved`・`no-choice`／`many-choices`）。`recommended: true` なら推奨の選択肢
+5. 決まった答えを、**工場が実際に採った答え**（往復の記録 `plan-record.json` の `answers`。全部推奨で閉じた往復は推奨）と比べる：同じなら `agreed`、違えば `disagreed`
+
+- **台本の答えの出どころは依頼文と採点の定義（凍結した v5）だけ。候補の計測の結果（工場の推奨の中身）を見て台本を選ばない。** 採点の定義が区別しない事項（例：内訳を件数で出すか金額で出すか）と依頼文が決めていない事項は台本に入れない（不明のまま数える）。最初の台本は、今の組（A〜E）で**依頼文か採点の定義が決めている事項**の分だけ（目録の観点 × 集計の要件と、依頼文が明示する目録外の決めどころ）。曖昧な依頼の組（`04-plan-agent.md` §9）の台本は別の Issue
+- 自由入力の答えは今は扱わない（選択式だけ）
+
+#### 5.6.3 「不明」の扱いと、工場を変えずにできないこと
+
+**工場の答えの口は質問 ID で、Plan を始める前に 1 度だけ読む**（`packages/factory/src/cli-plan.ts` の `parsePlanAnswers`・`createAnswersFilePlanResponder`。質問 ID → 選択肢 ID か自由入力。無い質問は推奨で埋める）。質問は Plan の途中で工場が作るので、**事項で書いた台本を実行中に当てる口が工場に無い**。「不明」を表す値も無い（空の答えは推奨になる）。だから今は：
+
+| | 今 |
+|---|---|
+| 計測（`run-agent.mjs`） | 答えのファイルは今までどおり **`{}`（すべて推奨。`params.answers_mode: "recommended"`）**。台本は実行中に当てない。条件のファイルに台本の指紋と `scripts.mode: "post-hoc"` を残す |
+| 採点（`score-agent.mjs`） | 往復の記録の**全部の問いに台本を事後に当て**、本ごとに `scripted`（台本で答えられた。`agreed`／`disagreed`）・`unknown`（台本に無い）・`unresolved`（決められない）を数える。**台本に無い問いに工場が推奨で進んだことを、黙って採らずに結果で知らせる**：行の `script.status`（`ok`／`disagreed`／`unanswered`／`no-questions`／`none`）・集計 `metrics_script`・匿名の集計（数だけ）・標準出力の 1 行 |
+
+- **どこで止まるか**：**実行中は止まらない**（工場が推奨で進み、Build まで流れる）。止まるのは採点で、`unanswered`・`disagreed` の本は「台本が保証しない答えの上で測った本」として印が付く。了承後系の判定（`verdict_accepted`）や合格率は**変えない**（足すだけ）。読むときは `spec_pass_*` を `metrics_script.runs_unanswered`・`runs_disagreed` と並べて読む
+- 工場に事項で答える口が付いたら（別の Issue。`packages/factory` を触る）、**同じ台本をそのまま渡す**。そのとき変わるのは `run-agent.mjs` の答えの書き方と `scripts.mode` だけで、台本と採点の当て方は変えない。「不明」のときに Plan を止めるか推奨で進むかも、その口の仕様で決める
+- 事後に当てるので、台本の照合が示すのは「工場の推奨が点検済みの答えと同じだったか」であって「台本で答えたらどうなったか」ではない。`disagreed` の本の Build の結果は、台本の答えで作ったものではない
+
+#### 5.6.4 条件と出力の欄（足しただけ。既存の欄の名前と意味は変えない）
+
+| どこ | 欄 | 中身 |
+|---|---|---|
+| `conditions.json`（v3） | `set`・`document`・`scripts` | §5.1 の表 |
+| `score[-label].json` | `set` | 採点に使った組：`id`・`version`・`role`・`path`・`sha256`。条件のファイルの値との一致は `fingerprints.set_matches_conditions`（条件に無ければ `null`。v2 以前の計測は既定の組で採点する） |
+| | `rows[].writable` | 本の対象範囲（定義ファイルの `writable`） |
+| | `rows[].script` | 台本の照合：`file`（台本のパス。無ければ `null`）・`status`・`questions`（問いの数）・`scripted`・`agreed`・`disagreed`・`unknown`・`unresolved`・`details[]`（問いごと：`question_id`・`open_issue_id`・`facets`・`status`・`reason`・`entry_id`・`choice_id`（台本の答え）・`actual_choice_id`（工場の答え）・`agrees`）。往復の記録の無い本は `status: "none"` |
+| | `metrics_script` | `mode`・`label`・`runs`（往復の記録のある本）・`questions`・`scripted`・`agreed`・`disagreed`・`unknown`・`unresolved`・`runs_ok`・`runs_disagreed`・`runs_unanswered`（数と区間。分母は往復の記録のある本） |
+| | `fingerprints.set`・`fingerprints.scripts` | 読んだ定義ファイルの SHA-256 と、台本のまとめた指紋（ファイルの一覧つき）。条件のファイルの値との一致（`set_matches_conditions`・`scripts_matches_conditions`） |
+| | `bySubject` | 鍵は定義ファイルの題材の順（今の組では `A`〜`E` のまま） |
+| 匿名の集計 | `metrics_script`・`set`・`fingerprints.set`・`fingerprints.scripts` | 数と区間・既知の値（`mode`・`role`）・版・ハッシュだけ。問いの文・事項の ID・台本の件の ID・組の ID・題名は出さない |
+
+標準出力には `台本: 対象 n 本・問い q（台本で答えられた k［推奨と同じ a・違う d］・不明 u・決められない v）・本の内訳（一致 x・不一致 y・不明あり z）` の 1 行を足す。
+
+- 採点の道具が読む組は、`--set <パス>` ＞ 条件のファイルの `set.path`（リポジトリの根からの相対。絶対パスも通す）＞ 既定の `sets/dev-p1-p10.json` の順。出力先に**定義ファイルに無い ID の本**があれば採点せず飛ばす（標準エラーに出す。照合 `completion` は予定外として数える）
+- 定義ファイルは署名に入る（依頼文の出どころ）。**変えると再開は断られる**。台本は署名の外（`scoring` と同じ扱い）で、採点の出力が条件の指紋と照合する
+
+#### 5.6.5 採らなかった案
+
+| 案 | 採らなかった理由 |
+|---|---|
+| 台本を質問 ID → 選択肢 ID で書く（今の答えのファイルの形） | ID は実行のたびに変わる。前の計測の ID で次の計測に答えられない。方法論 `01` §2「質問 ID ではなく点検済みの事項で答える」に反する |
+| 工場の対話の口（端末）を計測の道具が擬似端末で駆動し、実行中に台本で答える | 問いの文を標準出力から読み戻す形になり、事項の ID（観点）が端末に出ないので観点で当てられない。答えのファイルの口と違う経路になり、`answers_mode` の意味が変わる。依頼は答えのファイルの口に合わせること |
+| 自由入力で「不明」と答える | 工場は自由入力を判定の口（API）で分類し、分類できなければ断って次の往復で聞き直す。費用と往復を増やすうえ、質問 ID が要るので事前に書けない |
+| 不明な問いのある本を了承後系の分母から外す・判定を変える | 既存の欄の意味を変える。台本の照合は別の欄で出し、並べて読む |
+| 定義ファイルに採点の定義の中身を写す | 凍結した `subjects/` が正本。写すと二重になり、指紋が二つになる |
+| 台本の `keys` を要件 ID（`R-<n>`）で書く | 要件 ID は P1 で LLM が付け、実行ごとに変わる |
+| 台本の答えを候補の計測の推奨から写す | 台本がその計測に適応する（方法論 `01` §0）。出どころは依頼文と採点の定義だけにする |
+
+#### 5.6.6 限界（#427 で直していないこと）
+
+- 台本は実行中に当たらない（§5.6.3）。不明な問いで Plan は止まらず、推奨で進む
+- 文の照合（正規表現）は、工場が利用者の言葉で書く問いと選択肢の言い回しに依存する。当たらない・複数に当たるときは「不明」「決められない」に倒し、推奨に丸めない。台本の精度（問いの文に当たる率）は本物の計測で確かめていない
+- 問いの観点は目録の事項の ID の形（`OI:catalog:<要件 ID>:<観点 ID>`）から読む。工場が形を変えれば観点は読めなくなる（文の照合だけになる）
+- 本の ID は `P<n>` の形に固定している（照合の道具 `validatePlanned`・`reconcile` が前提にする）。新しい組も `P<n>` で番号を振る
+- `regress.mjs`・`rescore-baseline.mjs`（v5 の回帰と基準線の採点し直し）は P 番号 → 題材の対応を自分で持ったまま（凍結した採点表の道具。触らない）
+- 定義ファイルの `request` は依頼文の写しで、`source.document` との一致は試験（`run-agent.test.mjs`）が確かめるだけ。計測の道具は文書を読まない

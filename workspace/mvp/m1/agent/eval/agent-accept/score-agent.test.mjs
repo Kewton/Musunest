@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
-import { ABSENT_REASONS, ACCEPTANCE_STATUSES, CONDITIONS_SCHEMAS, JUDGEMENTS, PLAN_SPEC_SCHEMA, SCORING_FILES, UNVERIFIED_SOURCES, VERDICT_UNEVALUATED, WRONG_ACCEPTANCE_EVALUATION, acceptanceMatcher, anonymize, fingerprintDir, judgeDisposition, loadPlan, readAcceptance, reconcile, scoringFingerprint, sha256, validatePlanShape, validatePlanned } from "./score-agent.mjs";
+import { ABSENT_REASONS, ACCEPTANCE_STATUSES, CATALOG_FACET_IDS, CONDITIONS_SCHEMAS, DEFAULT_SET_PATH, EVAL_SET_SCHEMA, JUDGEMENTS, PLAN_SCRIPT_SCHEMA, PLAN_SPEC_SCHEMA, SCORING_FILES, SCRIPT_MODE, SCRIPT_RUN_STATUSES, UNVERIFIED_SOURCES, VERDICT_UNEVALUATED, WRONG_ACCEPTANCE_EVALUATION, acceptanceMatcher, anonymize, applyScript, fingerprintDir, judgeDisposition, loadEvalSet, loadPlan, loadScript, planTexts, questionFacets, readAcceptance, reconcile, scoringFingerprint, scriptSummary, scriptsFingerprint, sha256, validatePlanShape, validatePlanned, validateScript } from "./score-agent.mjs";
 import { DEFAULT_ALLOWED } from "../score-claims.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -20,7 +20,7 @@ assert.ok(existsSync(join(repo, "packages/spec-engine/dist/index.js")), "spec-en
 assert.ok(existsSync(join(repo, "packages/appspec-schema/dist/index.js")), "appspec-schema の dist が無い（pnpm build を先に）");
 // 確定した仕様の契約の検査と SHA（採点器が読むものと同じ dist）。試験の正例が契約に通ることの確認と、失効の負例の作成に使う
 const { checkConfirmedPlan, planDigest } = await import(pathToFileURL(join(repo, "packages/appspec-schema/dist/index.js")).href);
-const [V1, V2] = CONDITIONS_SCHEMAS;
+const [V1, V2, V3] = CONDITIONS_SCHEMAS;
 const SIG = sha256("sig");
 const HEX64 = /^[0-9a-f]{64}$/;
 
@@ -66,6 +66,8 @@ function makeCheckout(base, name, { sameAggregator = false } = {}) {
   mkdirSync(join(fakeEv, "agent-accept"), { recursive: true });
   for (const f of SCORING_FILES) cpSync(join(ev, f), join(fakeEv, f));
   cpSync(join(ev, "subjects"), join(fakeEv, "subjects"), { recursive: true });
+  // 既定の組（#427）も写す（採点の道具は <repo> の既定の定義ファイルを読む）
+  cpSync(join(ev, "sets"), join(fakeEv, "sets"), { recursive: true });
   if (!sameAggregator) appendFileSync(join(fakeEv, "agent-accept/score-agent.mjs"), "\n// 旧い採点器\n");
   mkdirSync(join(fake, "packages/spec-engine"), { recursive: true });
   symlinkSync(join(repo, "packages/spec-engine/dist"), join(fake, "packages/spec-engine/dist"), "dir");
@@ -360,7 +362,7 @@ test("匿名の出し方は、行ごとの失敗の鍵・要件の文・題材 I
     assert.deepEqual(a.completion, { status: "incomplete", label: "未完了", planned: 6, executed: 4, unexecuted: 2, incomplete: 0, extra: 0, stop_code: null });
     assert.match(a.fingerprints.scoring, HEX64);
     assert.match(a.fingerprints.spec_engine, HEX64);
-    assert.deepEqual(a.fingerprints.conditions, { schema: V2, signature: SIG, factory: null, spec_engine: null, scoring: null, judge: null });
+    assert.deepEqual(a.fingerprints.conditions, { schema: V2, signature: SIG, factory: null, spec_engine: null, scoring: null, judge: null, set: null, scripts: null });
     assert.deepEqual(JSON.parse(r.stdout), a, "標準出力も匿名の集計そのもの");
     // 既定の出し方は今のまま：行つきのファイルを書き、行を標準出力に出す
     const full = scoreRun(out, ["--label", "t"]);
@@ -385,7 +387,7 @@ test("匿名の出し方は、判定の値・止まった理由・条件のフ�
     assert.deepEqual(a.metrics.factory_verdicts, { full: 0, partial: 1, none: 0, unknown: 1 }, "既知でない判定の値は unknown にまとめる");
     assert.deepEqual(Object.keys(a.metrics), ["generated", "final_static", "spec_pass_writable", "missed_partial", "fulfillment_partial", "spec_pass_partial", "false_claim_runs", "within_time_cost", "cost_total_usd", "factory_verdicts"]);
     assert.deepEqual(a.completion, { status: "complete", label: "完了", planned: 2, executed: 2, unexecuted: 0, incomplete: 0, extra: 0, stop_code: "other" });
-    assert.deepEqual(a.fingerprints.conditions, { schema: V2, signature: null, factory: null, spec_engine: null, scoring: null, judge: "unknown" }, "ハッシュの形でない指紋は null、既知でない構成は unknown");
+    assert.deepEqual(a.fingerprints.conditions, { schema: V2, signature: null, factory: null, spec_engine: null, scoring: null, judge: "unknown", set: null, scripts: null }, "ハッシュの形でない指紋は null、既知でない構成は unknown");
     assert.equal(a.fingerprints.scoring_matches_conditions, false);
     assert.equal(a.fingerprints.spec_engine_matches_conditions, false);
     // 行つきの出力（匿名でない）には入力の値がそのまま残る。止まった理由のコードと有効だった目安の額も読める
@@ -987,5 +989,262 @@ test("了承で変わった書ける要件（checks に keys を持つ定義）�
     assert.equal(full2.fulfillment.accepted.writable, full2.fulfillment.v2.writable);
     assert.deepEqual(full2.fulfillment.accepted.unevaluated, { checks: 1, runs: 1 });
     assert.match(r2.stdout, /未評価の本 1・.*充足 2\/4（.*（未評価の判定 1）$/m);
+  });
+});
+
+// ── 評価セットの定義ファイルと台本（#427。README §5.6）。定義ファイル・台本・往復の記録は作り物で、文は目印（MARK_）を使う（題材の言葉をここに書かない）
+const SET_DEFAULTS = { schema: EVAL_SET_SCHEMA, id: "t-set", version: 1, role: "development", title: "t", styles: { S1: "s1", S2: "s2" } };
+const realScoring = (s) => join(ev, "subjects", `${s}.json`);
+/** 台本（entries は作り物） */
+const scriptOf = (subject, entries, over = {}) => ({ schema: PLAN_SCRIPT_SCHEMA, subject, version: 1, entries, ...over });
+const entry = (id, keys, answer, facet = null) => ({ id, facet, keys, answer, basis: "b" });
+/** 定義ファイルの本（採点の定義は本物の subjects/<題材>.json を絶対パスで指す） */
+const itemOf = (id, subject, over = {}) => ({ id, subject, style: "S1", writable: subject !== "D", scoring: realScoring(subject), script: null, request: [`MARK_REQ_${id}`, "MARK_LINE2"], ...over });
+const writeJson = (path, obj) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, typeof obj === "string" ? obj : JSON.stringify(obj)); return path; };
+/** 往復の記録の問い（記録の形。plan-record.json の rounds[].questions[]） */
+const question = (id, text, choices, recommended, over = {}) => ({ id, open_issue_id: `OI:unresolved:${id}`, revision: 1, text, choices, recommended: recommended === null ? null : { choice_id: recommended, reason: "r" }, allow_free_text: true, also_closes: [], ...over });
+const Q_HOW = (id = "Q1-1") => question(id, "MARK_REQ MARK_HOW?", [{ id: "c1", text: "MARK_C1 one" }, { id: "c2", text: "MARK_C2 two" }], "c1");
+const answered = (q, choiceId) => ({ id: `A:${q.id}`, question_id: q.id, choice_id: choiceId, free_text: null });
+const round = (questions, answers, all = false) => ({ questions, answers, all_recommended: all });
+const SCRIPT_T = [entry("e1", ["MARK_REQ", "MARK_HOW"], { choose: ["MARK_C1"] }, "aggregation"), entry("e2", ["MARK_REQ", "MARK_STATE"], { choose: ["MARK_BOTH"] }, "counted-state"), entry("e3", ["MARK_TOPIC"], { recommended: true }), entry("e4", ["MARK_DUP"], { choose: ["MARK_X"] }), entry("e5", ["MARK_DUP"], { choose: ["MARK_Y"] })];
+
+test("定義ファイルの読み込み：既定の組は読め、欠けた欄・形の違う欄は理由を挙げて断る（入力の値は書かない）。台本の形の検証も同じ", async () => {
+  await withOut(async (base) => {
+    const real = loadEvalSet(join(repo, DEFAULT_SET_PATH));
+    assert.equal(real.status, "ok", real.reasons.join("、"));
+    assert.equal(real.items.length, 10);
+    assert.deepEqual(real.subjects, ["A", "B", "C", "D", "E"]);
+    assert.deepEqual([...real.scripts.keys()], ["A", "B", "C", "D", "E"]);
+    for (const it of real.items) { assert.ok(existsSync(it.scoringPath), it.id); assert.ok(it.requestText.length > 0, it.id); assert.equal(real.byId.get(it.id), it); }
+    assert.match(real.sha256, HEX64);
+    // 欠けた欄・形の違う欄（入力の値 MARK_ は理由に出ない）
+    const scriptA = writeJson(join(base, "scripts/A.json"), scriptOf("A", []));
+    const good = { ...SET_DEFAULTS, items: [itemOf("P1", "A", { script: scriptA }), itemOf("P2", "A", { script: scriptA, style: "S2" })] };
+    assert.equal(loadEvalSet(writeJson(join(base, "good.json"), good)).status, "ok");
+    const cases = [
+      ["no-schema", { ...good, schema: "MARK_SCHEMA" }, "schema が未知"],
+      ["no-id", { ...good, id: 1 }, "id が文字列でない"],
+      ["no-version", { ...good, version: "1" }, "version が整数でない"],
+      ["role", { ...good, role: "MARK_ROLE" }, "role が未知"],
+      ["styles", { ...good, styles: [] }, "styles が写像でない"],
+      ["source", { ...good, source: { document: 1 } }, "source の形が違う（document は文字列）"],
+      ["no-items", { ...good, items: [] }, "items が配列でないか 0 件"],
+      ["bad-id", { ...good, items: [itemOf("MARK_X1", "A", { script: scriptA })] }, "items[0].id が P<n> の形でない"],
+      ["dup-id", { ...good, items: [itemOf("P1", "A", { script: scriptA }), itemOf("P1", "A", { script: scriptA })] }, "items の id が重複"],
+      ["subject", { ...good, items: [itemOf("P1", 1, { script: scriptA })] }, "items[0].subject が文字列でない"],
+      ["style", { ...good, items: [itemOf("P1", "A", { script: scriptA, style: "MARK_S9" })] }, "items[0].style が styles に無い"],
+      ["writable", { ...good, items: [itemOf("P1", "A", { script: scriptA, writable: "yes" })] }, "items[0].writable が真偽値でない"],
+      ["scoring-missing", { ...good, items: [itemOf("P1", "A", { script: scriptA, scoring: join(base, "MARK_NONE.json") })] }, "items[0].scoring の定義が無いか読めない"],
+      ["scoring-id", { ...good, items: [itemOf("P1", "A", { script: scriptA, scoring: realScoring("B") })] }, "items[0].scoring の定義の id が subject と違う"],
+      ["script-missing", { ...good, items: [itemOf("P1", "A", { script: join(base, "MARK_NONE.json") })] }, "items[0].script の台本が読めない: 台本が無い"],
+      ["script-subject", { ...good, items: [itemOf("P1", "A", { script: writeJson(join(base, "scripts/B.json"), scriptOf("B", [])) })] }, "items[0].script の台本の subject が違う"],
+      ["script-shape", { ...good, items: [itemOf("P1", "A", { script: writeJson(join(base, "scripts/bad.json"), scriptOf("A", [{ id: "x" }])) })] }, "items[0].script の台本が読めない: entries[0].facet が未知、entries[0].keys が正規表現の配列でないか 0 件、entries[0].answer が choose（正規表現の配列）か recommended: true のちょうど一方でない、entries[0].basis が文字列でない"],
+      ["script-type", { ...good, items: [itemOf("P1", "A", { script: 1 })] }, "items[0].script が文字列でも null でもない"],
+      ["request", { ...good, items: [itemOf("P1", "A", { script: scriptA, request: [] })] }, "items[0].request が文字列の配列でないか 0 行"],
+      ["request-type", { ...good, items: [itemOf("P1", "A", { script: scriptA, request: "MARK_TEXT" })] }, "items[0].request が文字列の配列でないか 0 行"],
+      ["writable-conflict", { ...good, items: [itemOf("P1", "A", { script: scriptA }), itemOf("P2", "A", { script: scriptA, writable: false })] }, "同じ題材の items で writable が食い違う"],
+      ["script-conflict", { ...good, items: [itemOf("P1", "A", { script: scriptA }), itemOf("P2", "A", { script: null })] }, "同じ題材の items で scoring・script が食い違う"],
+      ["not-object", [], "定義ファイルが写像でない"],
+    ];
+    for (const [name, obj, reason] of cases) {
+      const r = loadEvalSet(writeJson(join(base, `${name}.json`), obj));
+      assert.equal(r.status, "invalid", name);
+      assert.ok(r.reasons.includes(reason), `${name}: ${JSON.stringify(r.reasons)}`);
+      assert.ok(!r.reasons.join("").includes("MARK_"), `${name}: 理由に入力の値が出ている`);
+      assert.equal(r.set, null, name);
+    }
+    assert.equal(loadEvalSet(join(base, "MARK_MISSING.json")).status, "missing");
+    assert.equal(loadEvalSet(writeJson(join(base, "broken.json"), "{ これは JSON でない")).status, "unreadable");
+    // 台本の形：欠けた欄・正規表現でない鍵・答えの両方／どちらも無い・重複した ID
+    assert.deepEqual(validateScript(scriptOf("A", [])), []);
+    assert.deepEqual(validateScript(scriptOf("A", SCRIPT_T)), []);
+    assert.deepEqual(validateScript([]), ["台本が写像でない"]);
+    assert.deepEqual(validateScript({ subject: "A", version: 1 }), ["台本の schema が未知", "台本の entries が配列でない"]);
+    assert.deepEqual(validateScript(scriptOf("", [], { version: "1" })), ["台本の subject が文字列でない", "台本の version が整数でない"]);
+    assert.deepEqual(validateScript(scriptOf("A", [entry("e", ["("], { choose: ["x"] })])), ["entries[0].keys が正規表現の配列でないか 0 件"]);
+    assert.deepEqual(validateScript(scriptOf("A", [entry("e", ["x"], { choose: ["x"], recommended: true })])), ["entries[0].answer が choose（正規表現の配列）か recommended: true のちょうど一方でない"]);
+    assert.deepEqual(validateScript(scriptOf("A", [entry("e", ["x"], {})])), ["entries[0].answer が choose（正規表現の配列）か recommended: true のちょうど一方でない"]);
+    assert.deepEqual(validateScript(scriptOf("A", [entry("e", ["x"], { recommended: false })])), ["entries[0].answer が choose（正規表現の配列）か recommended: true のちょうど一方でない"]);
+    assert.deepEqual(validateScript(scriptOf("A", [entry("e", ["x"], { choose: ["x"] }, "MARK_FACET")])), ["entries[0].facet が未知"]);
+    assert.deepEqual(validateScript(scriptOf("A", [entry("e", ["x"], { choose: ["x"] }), entry("e", ["y"], { choose: ["y"] })])), ["entries[1].id が文字列でないか重複"]);
+    assert.equal(loadScript(join(base, "MARK_NONE.json")).status, "missing");
+    assert.equal(loadScript(writeJson(join(base, "scripts/broken.json"), "{")).status, "unreadable");
+    assert.equal(loadScript(writeJson(join(base, "scripts/invalid.json"), { schema: PLAN_SCRIPT_SCHEMA })).status, "invalid");
+    assert.deepEqual(CATALOG_FACET_IDS, ["aggregation", "period", "current-period", "counted-state", "include-zero", "editable-by"]);
+    // 工場の目録の観点と同じ値（packages/factory の dist から読む。ずれたらここで気づく）
+    const catalog = await import(pathToFileURL(join(repo, "packages/factory/dist/plan/catalog.js")).href);
+    assert.deepEqual(catalog.CATALOG_FACETS.map((f) => f.id), CATALOG_FACET_IDS);
+  });
+});
+
+test("既定の組（dev-p1-p10）の台本は形が正しく、鍵と選択肢の正規表現は読め、観点は目録の値の中にある", () => {
+  const real = loadEvalSet(join(repo, DEFAULT_SET_PATH));
+  assert.equal(real.status, "ok");
+  assert.equal(real.set.id, "dev-p1-p10");
+  assert.equal(real.set.role, "development");
+  for (const [subject, sc] of real.scripts) {
+    assert.deepEqual(validateScript(sc.script), [], subject);
+    assert.equal(sc.script.subject, subject);
+    assert.ok(sc.script.entries.length > 0, `${subject} の台本に件が無い`);
+    for (const e of sc.script.entries) {
+      assert.ok(e.facet === null || CATALOG_FACET_IDS.includes(e.facet), e.id);
+      assert.ok(e.id.startsWith(`${subject}:`), `${e.id} は題材の ID で始まる`);
+      for (const k of e.keys) new RegExp(k);
+      if (e.answer.choose) for (const k of e.answer.choose) new RegExp(k);
+    }
+  }
+  const fp = scriptsFingerprint(real.scripts);
+  assert.match(fp.fingerprint, HEX64);
+  assert.deepEqual(fp.files.map((f) => f.subject), ["A", "B", "C", "D", "E"]);
+  assert.equal(scriptsFingerprint(new Map()).fingerprint, null);
+});
+
+test("台本の当てはめ：鍵が全部当たり観点が食い違わない件が 1 つのときだけ答え、台本に無い問いは不明、2 件以上・選択肢が決まらない問いは決められない。確定した仕様の事項と要件の文も鍵の対象", () => {
+  const script = scriptOf("T", SCRIPT_T);
+  const q1 = Q_HOW();
+  const a = applyScript(script, q1, "c1");
+  assert.deepEqual(a, { question_id: "Q1-1", open_issue_id: "OI:unresolved:Q1-1", facets: [], actual_choice_id: "c1", status: "scripted", reason: null, entry_id: "e1", choice_id: "c1", agrees: true });
+  assert.equal(applyScript(script, q1, "c2").agrees, false, "工場の答えが台本と違う");
+  assert.equal(applyScript(script, q1, null).agrees, null, "工場の答えが無ければ null");
+  // 観点：問いが目録の事項を閉じるなら、台本の facet と食い違う件は当てない（文は当たっても）
+  const qState = Q_HOW("Q1-2");
+  const withFacet = (q, ids) => ({ ...q, open_issue_id: ids[0], also_closes: ids.slice(1) });
+  assert.equal(applyScript(script, withFacet(qState, ["OI:catalog:R-1:counted-state"]), "c1").status, "unknown", "観点が食い違えば不明");
+  assert.equal(applyScript(script, withFacet(qState, ["OI:unresolved:1", "A-R1-x", "OI:catalog:R-1:aggregation"]), "c1").entry_id, "e1", "also_closes の観点でも当たる");
+  assert.deepEqual(questionFacets(withFacet(qState, ["OI:catalog:R-1:period", "OI:catalog:R-2:period", "A-R1-x", "OI:catalog:R-3:include-zero"])), { facets: ["period", "include-zero"], requirementIds: ["R-1", "R-2", "R-3"] });
+  assert.deepEqual(questionFacets({ open_issue_id: "OI:unresolved:1" }), { facets: [], requirementIds: [] });
+  // 確定した仕様の文：問いの文だけでは当たらないが、閉じる事項の文と目録の事項が指す要件の文で当たる
+  const qPlain = question("Q1-3", "MARK_Q?", [{ id: "c1", text: "MARK_C1" }, { id: "c2", text: "MARK_C2" }], "c1", { open_issue_id: "OI:catalog:R-7:aggregation" });
+  assert.equal(applyScript(script, qPlain, "c1").status, "unknown");
+  const texts = planTexts({ open_issues: [{ id: "OI:catalog:R-7:aggregation", text: "MARK_HOW について" }], requirements: [{ id: "R-7", text: "MARK_REQ" }] });
+  assert.equal(applyScript(script, qPlain, "c1", texts).entry_id, "e1");
+  assert.equal(applyScript(script, qPlain, "c1", planTexts({ open_issues: [{ id: "OI:catalog:R-7:aggregation", text: "MARK_HOW MARK_REQ" }] })).entry_id, "e1", "事項の文だけでも当たる");
+  assert.deepEqual(planTexts(null), { issues: new Map(), requirements: new Map() });
+  // 推奨でよいと点検済みの件は推奨の選択肢（台本に無いのとは別の状態）
+  const qTopic = question("Q1-4", "MARK_TOPIC?", [{ id: "x", text: "MARK_X" }, { id: "y", text: "MARK_Y" }], "y");
+  assert.deepEqual([applyScript(script, qTopic, "y").status, applyScript(script, qTopic, "y").choice_id, applyScript(script, qTopic, "y").agrees], ["scripted", "y", true]);
+  assert.equal(applyScript(script, { ...qTopic, recommended: null }, "y").reason, "no-choice", "推奨の無い問いは決められない");
+  // 決められない：台本の件が 2 つ以上当たる／当たる選択肢が無い／2 つ以上
+  const dup = applyScript(script, question("Q1-5", "MARK_DUP?", [{ id: "x", text: "MARK_X" }], "x"), "x");
+  assert.deepEqual([dup.status, dup.reason, dup.entry_id, dup.choice_id], ["unresolved", "entries", ["e4", "e5"], null]);
+  const none = applyScript(script, question("Q1-6", "MARK_REQ MARK_HOW?", [{ id: "c2", text: "MARK_C2" }, { id: "c3", text: "MARK_C3" }], "c2"), "c2");
+  assert.deepEqual([none.status, none.reason, none.entry_id], ["unresolved", "no-choice", "e1"]);
+  const many = applyScript(script, question("Q1-7", "MARK_REQ MARK_HOW?", [{ id: "c1", text: "MARK_C1 a" }, { id: "c9", text: "MARK_C1 b" }], "c1"), "c1");
+  assert.deepEqual([many.status, many.reason], ["unresolved", "many-choices"]);
+  // 台本が無い題材は全部不明
+  assert.equal(applyScript(null, q1, "c1").status, "unknown");
+  // 本 1 つの照合：往復の記録の全部の問い（全部推奨で閉じた往復は推奨が工場の答え）
+  const q5 = question("Q1-5", "MARK_DUP?", [{ id: "x", text: "MARK_X" }], "x");
+  const pr = { rounds: [round([q1, q5], [answered(q1, "c2")]), round([qTopic], [], true)] };
+  const sum = scriptSummary({ rel: "scripts/T.json", script }, pr, null);
+  assert.deepEqual({ ...sum, details: undefined }, { file: "scripts/T.json", status: "disagreed", questions: 3, scripted: 2, agreed: 1, disagreed: 1, unknown: 0, unresolved: 1, details: undefined });
+  assert.deepEqual(sum.details.map((d) => [d.question_id, d.status, d.agrees]), [["Q1-1", "scripted", false], ["Q1-5", "unresolved", null], ["Q1-4", "scripted", true]]);
+  assert.equal(scriptSummary({ rel: "s", script }, null, null).status, "none");
+  assert.equal(scriptSummary({ rel: "s", script }, { rounds: [] }, null).status, "no-questions");
+  assert.equal(scriptSummary({ rel: "s", script }, { rounds: [round([q1], [answered(q1, "c1")])] }, null).status, "ok");
+  assert.equal(scriptSummary({ rel: "s", script }, { rounds: [round([q1, qPlain], [answered(q1, "c1"), answered(qPlain, "c1")])] }, null).status, "unanswered", "不明な問いが 1 つでもあれば unanswered");
+  assert.equal(scriptSummary({ rel: "s", script }, { rounds: [round([q1], [])] }, null).status, "unanswered", "工場の答えが記録に無ければ一致とは言えない");
+  assert.deepEqual(scriptSummary(null, { rounds: [round([q1], [answered(q1, "c1")])] }, null), { file: null, status: "unanswered", questions: 1, scripted: 0, agreed: 0, disagreed: 0, unknown: 1, unresolved: 0, details: [applyScript(null, q1, "c1")] });
+  assert.deepEqual(SCRIPT_RUN_STATUSES, ["ok", "disagreed", "unanswered", "no-questions", "none"]);
+});
+
+test("採点の道具は定義ファイルから題材・書き方・書ける範囲・採点の定義・台本を読み、台本を事後に当てた結果を行と集計と匿名の集計に足す。定義ファイルに無い ID の本は飛ばし、読めない定義ファイルは断る", async () => {
+  await withOut(async (base) => {
+    const scriptA = writeJson(join(base, "set/scripts/A.json"), scriptOf("A", [entry("A:e1", ["MARK_REQ", "MARK_HOW"], { choose: ["MARK_C1"] }, "aggregation")]));
+    const setPath = writeJson(join(base, "set/t-set.json"), { ...SET_DEFAULTS, items: [itemOf("P1", "A", { script: "scripts/A.json" }), itemOf("P7", "D", { style: "S2" })] });
+    const loaded = loadEvalSet(setPath);
+    assert.equal(loaded.status, "ok", loaded.reasons.join("、"));
+    assert.equal(loaded.scripts.get("A").path, scriptA);
+    const out = join(base, "out");
+    const q1 = Q_HOW(), qU = question("Q1-2", "MARK_UNKNOWN?", [{ id: "u1", text: "MARK_U1" }, { id: "u2", text: "MARK_U2" }], "u1");
+    addRun(out, "P1-r1", { spec: PASS_A }); await addPlan(out, "P1-r1", { record: { outcome: "confirmed", rounds: [round([q1], [answered(q1, "c1")])] } });
+    addRun(out, "P1-r2", { spec: PASS_A }); await addPlan(out, "P1-r2", { record: { outcome: "confirmed", rounds: [round([q1, qU], [answered(q1, "c1"), answered(qU, "u1")])] } });
+    addRun(out, "P1-r3", { spec: PASS_A }); await addPlan(out, "P1-r3", { record: { outcome: "stopped", rounds: [round([q1], [answered(q1, "c2")])] } });
+    addRun(out, "P1-r4", { spec: PASS_A });
+    addRun(out, "P7-r1", { spec: PASS_D, unwritable: CLAIM_D }); await addPlan(out, "P7-r1", { record: { outcome: "confirmed", rounds: [round([qU], [answered(qU, "u1")])] } });
+    for (const id of ["P7-r2", "P7-r3", "P7-r4"]) addRun(out, id);
+    addRun(out, "P9-r1", { spec: PASS_A });
+    const ids = ["P1-r1", "P1-r2", "P1-r3", "P1-r4", "P7-r1", "P7-r2", "P7-r3", "P7-r4"];
+    const scriptsFp = scriptsFingerprint(loaded.scripts);
+    planConditions(out, ids, { schema: V3, set: { path: setPath, sha256: loaded.sha256, id: "t-set", version: 1, role: "development" }, scripts: { mode: SCRIPT_MODE, fingerprint: scriptsFp.fingerprint } });
+    const r = scoreRun(out);
+    assert.match(r.stderr, /飛ばしました: P9-r1/);
+    const full = readScore(out);
+    assert.deepEqual(full.set, { id: "t-set", version: 1, role: "development", path: full.set.path, sha256: loaded.sha256 });
+    assert.ok(full.set.path.endsWith("set/t-set.json"));
+    assert.deepEqual(full.rows.map((x) => x.run), ids, "定義ファイルに無い ID の本は行に入れない");
+    assert.deepEqual(full.completion.extra, ["P9-r1"], "照合では予定外として数える");
+    assert.deepEqual(full.rows.map((x) => [x.subject, x.style, x.writable]), [["A", "S1", true], ["A", "S1", true], ["A", "S1", true], ["A", "S1", true], ["D", "S2", false], ["D", "S2", false], ["D", "S2", false], ["D", "S2", false]]);
+    assert.deepEqual(Object.keys(full.bySubject), ["A", "D"], "題材の順は定義ファイル");
+    startsWith(full.metrics.spec_pass_writable, "4/4（");
+    startsWith(full.metrics.spec_pass_partial, "1/4（");
+    assert.equal(rowOf(full, "P7-r2").script.status, "none", "往復の記録の無い本は対象外");
+    assert.equal(rowOf(full, "P7-r1").verdict, "PASS", "採点の定義は定義ファイルが指す subjects/D.json");
+    const sc = (id) => rowOf(full, id).script;
+    assert.deepEqual({ ...sc("P1-r1"), details: undefined }, { file: "scripts/A.json", status: "ok", questions: 1, scripted: 1, agreed: 1, disagreed: 0, unknown: 0, unresolved: 0, details: undefined });
+    assert.deepEqual(sc("P1-r1").details, [{ question_id: "Q1-1", open_issue_id: "OI:unresolved:Q1-1", facets: [], actual_choice_id: "c1", status: "scripted", reason: null, entry_id: "A:e1", choice_id: "c1", agrees: true }]);
+    assert.deepEqual([sc("P1-r2").status, sc("P1-r2").unknown, sc("P1-r2").agreed], ["unanswered", 1, 1]);
+    assert.deepEqual([sc("P1-r3").status, sc("P1-r3").disagreed], ["disagreed", 1]);
+    assert.deepEqual(sc("P1-r4"), { file: "scripts/A.json", status: "none", questions: 0, scripted: 0, agreed: 0, disagreed: 0, unknown: 0, unresolved: 0, details: [] });
+    assert.deepEqual([sc("P7-r1").file, sc("P7-r1").status, sc("P7-r1").unknown], [null, "unanswered", 1], "台本の無い題材は全部不明");
+    assert.equal(rowOf(full, "P1-r3").verdict_accepted, null, "台本の照合は判定を変えない（Plan が確定しなかった本は null のまま）");
+    assert.equal(rowOf(full, "P1-r1").verdict, "PASS");
+    const ms = full.metrics_script;
+    assert.deepEqual({ ...ms, label: undefined }, { mode: "post-hoc", label: undefined, runs: 4, questions: 5, scripted: 3, agreed: 2, disagreed: 1, unknown: 2, unresolved: 0, runs_ok: ms.runs_ok, runs_disagreed: ms.runs_disagreed, runs_unanswered: ms.runs_unanswered });
+    startsWith(ms.runs_ok, "1/4（");
+    startsWith(ms.runs_disagreed, "1/4（");
+    startsWith(ms.runs_unanswered, "2/4（");
+    assert.match(r.stdout, /^台本: 対象 4 本・問い 5（台本で答えられた 3［推奨と同じ 2・違う 1］・不明 2・決められない 0）・本の内訳（一致 1\/4（.*・不一致 1\/4（.*・不明あり 2\/4（.*）$/m);
+    assert.match(r.stdout, /・組 t-set v1 [0-9a-f]{12}…（条件のファイルと一致）・台本 [0-9a-f]{12}…（条件のファイルと一致）$/m);
+    const fp = full.fingerprints;
+    assert.deepEqual(fp.set, { path: full.set.path, sha256: loaded.sha256 });
+    assert.deepEqual(fp.scripts, scriptsFp);
+    assert.equal(fp.set_matches_conditions, true);
+    assert.equal(fp.scripts_matches_conditions, true);
+    assert.equal(fp.conditions.set, loaded.sha256);
+    assert.equal(fp.conditions.scripts, scriptsFp.fingerprint);
+    // 匿名の集計：件数・区間・既知の値・ハッシュだけ（問いの文・事項の ID・台本の件の ID・組の ID は出ない）
+    const ra = scoreRun(out, ["--anonymous"]);
+    const text = readFileSync(join(out, "score.anonymous.json"), "utf8");
+    for (const w of ["MARK_", "A:e1", "Q1-1", "OI:", "t-set", "scripts/A.json"]) { assert.ok(!text.includes(w), `匿名の出力に ${w}`); assert.ok(!ra.stdout.includes(w), `標準出力に ${w}`); }
+    const an = JSON.parse(text);
+    assert.deepEqual(an.metrics_script, { mode: "post-hoc", runs: 4, questions: 5, scripted: 3, agreed: 2, disagreed: 1, unknown: 2, unresolved: 0, runs_ok: ms.runs_ok, runs_disagreed: ms.runs_disagreed, runs_unanswered: ms.runs_unanswered });
+    assert.deepEqual(an.set, { version: 1, role: "development", sha256: loaded.sha256 });
+    assert.equal(an.fingerprints.set, loaded.sha256);
+    assert.equal(an.fingerprints.scripts, scriptsFp.fingerprint);
+    assert.equal(an.fingerprints.set_matches_conditions, true);
+    assert.equal(an.fingerprints.conditions.set, loaded.sha256);
+    assert.deepEqual(an, anonymize(full));
+    // --set で別の定義ファイル（1 文字違う写し）を渡すと、組の指紋は条件と不一致。台本を変えれば台本の指紋も不一致
+    const copy = writeJson(join(base, "set/copy.json"), readFileSync(setPath, "utf8") + "\n");
+    scoreRun(out, ["--set", copy]);
+    assert.equal(readScore(out).fingerprints.set_matches_conditions, false);
+    appendFileSync(scriptA, "\n");
+    scoreRun(out);
+    assert.equal(readScore(out).fingerprints.scripts_matches_conditions, false);
+    assert.equal(readScore(out).fingerprints.set_matches_conditions, true);
+    // 条件のファイルに組が無い（v2 以前）計測は既定の組で採点し、一致は null
+    const old = join(base, "old");
+    addRun(old, "P1-r1", { spec: PASS_A });
+    conditions(old, ["P1-r1"]);
+    scoreRun(old);
+    const fo = readScore(old);
+    assert.equal(fo.set.id, "dev-p1-p10");
+    assert.equal(fo.fingerprints.set_matches_conditions, null);
+    assert.equal(fo.fingerprints.scripts_matches_conditions, null);
+    assert.equal(rowOf(fo, "P1-r1").writable, true);
+    assert.equal(rowOf(fo, "P1-r1").script.status, "none");
+    assert.deepEqual(fo.metrics_script.runs, 0);
+    // 読めない定義ファイル（条件の set.path が無い・--set が欠けた欄）は採点せずに断る
+    const bad = join(base, "bad");
+    addRun(bad, "P1-r1", { spec: PASS_A });
+    conditions(bad, ["P1-r1"], { set: { path: join(base, "MARK_NONE.json") } });
+    const rb = spawnSync(process.execPath, [scoreFile, repo, bad], { encoding: "utf8" });
+    assert.equal(rb.status, 3);
+    assert.match(rb.stderr, /断りました: 定義ファイルを読めません/);
+    assert.equal(existsSync(join(bad, "score.json")), false);
+    const rb2 = spawnSync(process.execPath, [scoreFile, repo, bad, "--set", writeJson(join(base, "set/no-items.json"), { ...SET_DEFAULTS, items: [] })], { encoding: "utf8" });
+    assert.equal(rb2.status, 3);
+    assert.match(rb2.stderr, /items が配列でないか 0 件/);
   });
 });

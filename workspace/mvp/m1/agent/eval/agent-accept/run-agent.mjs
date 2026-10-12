@@ -1,23 +1,33 @@
-// 受入の試験：P1〜P10 × 回数 を、プロダクト内の工場（factory:run）で流す。API を呼ぶ（窓口の手元だけで使う）。
-// 使い方: OPENAI_API_KEY=... node run-agent.mjs <repo> <out> --effort low|medium|high [--runs 5] [--concurrency 3] [--only P1,P3] [--budget-usd 15] [--plan] [--resume]
+// 受入の試験：評価セットの定義ファイルの本 × 回数 を、プロダクト内の工場（factory:run）で流す。API を呼ぶ（窓口の手元だけで使う）。
+// 使い方: OPENAI_API_KEY=... node run-agent.mjs <repo> <out> --effort low|medium|high [--runs 5] [--concurrency 3] [--only P1,P3] [--budget-usd 15] [--plan] [--resume] [--set <定義ファイル>]
+//   --set：評価セットの定義ファイル（#427。README §5.6）。既定は <repo> の sets/dev-p1-p10.json（今の P1〜P10 を同じ形で書き直したもの）。
+//          依頼文・題材・書き方・書ける範囲・採点の定義・台本はここから読む。P 番号と題材の対応をこの道具の中に持たない。
+//          定義ファイルの指紋は条件のファイルの set に書き、署名に入る。台本の指紋は scripts に書くが署名から外す（今の台本は採点で事後に当てる。
+//          工場の答えの口は質問 ID で Plan の前に 1 度だけ読むので、事項で書いた台本を実行中に当てられない。答えは今までどおり全部推奨）
 //   --plan：Plan を通す（答えは空のファイル＝すべて推奨。#378）。費用は Plan と Build を合わせた額で数える
 //   --resume：前の計測の続きから流す（#400）。保存した条件と一致し、全文と要約がそろっているときだけ許す
 //   --model / --factory-budget-usd / --deadline-min：工場へ渡す値。既定は工場の dist が公開する既定値（別に手書きしない）
 //   --budget-usd：計測全体の停止の目安の額。**起動中の本の予約を含まない**（終わった本の額だけを足す）
-// 条件のファイル（conditions.json。#425 で v2）には、工場の dist に加えて spec-engine の dist・生成に渡す文書（契約・語彙の意味・語彙の台帳）・
+// 条件のファイル（conditions.json。#425 で v2・#427 で v3）には、工場の dist に加えて spec-engine の dist・生成に渡す文書（契約・語彙の意味・語彙の台帳）・
 //   採点の定義と集計のコード・判定の口の構成（鍵そのものは書かない）の指紋を残す。1 回の起動ごとに run-<時刻>.json（流した本・残りの本・止まった理由と
 //   そのコード・その起動で有効だった計測全体の目安の額と初回の条件との差・済みの額）を残す。署名が保証するのは生成の条件であって、管理の条件
 //   （計測全体の目安の額）まで含めた一致ではない。再開で変えた値は起動の記録から読む
 // 採点は: node score-agent.mjs <repo> <out> [--label high]（リポジトリ・出力先の順で渡す）
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
-import { basename, join, relative } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { fingerprintDir, scoringFingerprint, sha256 } from "./score-agent.mjs";
+import { DEFAULT_SET_PATH, SCRIPT_MODE, fingerprintDir, loadEvalSet, scoringFingerprint, scriptsFingerprint, sha256 } from "./score-agent.mjs";
 
 const args = process.argv.slice(2);
 const [repo, outRoot] = args;
 const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
+const refuse = (msg) => { console.error(`断りました: ${msg}`); process.exit(3); };
+
+// 評価セットの定義ファイル（#427）。欠けた欄があれば 1 本も起こさずに断る
+const setPath = resolve(opt("--set", join(repo, DEFAULT_SET_PATH)));
+const evalSet = loadEvalSet(setPath);
+if (evalSet.status !== "ok") refuse(`定義ファイルを読めません（${setPath}）: ${evalSet.reasons.join("、")}`);
 
 // 工場の dist を実際に読んで、既定値と段ごとの出力の上限を得る（条件の値と、子へ渡す値を同じ所から出す）
 const distDir = join(repo, "packages/factory/dist");
@@ -35,11 +45,11 @@ const model = opt("--model", openai.DEFAULT_OPENAI_MODEL);
 const perRunBudget = Number(opt("--factory-budget-usd", String(factory.DEFAULT_BUDGET_USD)));
 const deadlineMin = Number(opt("--deadline-min", String(factory.DEFAULT_DEADLINE_MS / 60000)));
 
-const tablePath = join(repo, "workspace/mvp/m1/grammar-trial/stage1-patterns.md");
-const table = readFileSync(tablePath, "utf8");
-const reqOf = (pid) => { const m = table.match(new RegExp(`\\*\\*${pid}（[^）]*）\\*\\*\\n\\n((?:> .*\\n?)+)`)); if (!m) throw new Error(pid); return m[1].replace(/^> ?/gm, "").trim(); };
+// 依頼文は定義ファイルの本から組む（行を改行でつなぐ。request.md にはその末尾に改行を 1 つ足す）
+const reqOf = (pid) => evalSet.byId.get(pid).requestText;
+if (only) { const unknown = only.filter((pid) => !evalSet.byId.has(pid)); if (unknown.length > 0) refuse(`--only に定義ファイル（${evalSet.set.id}）に無い ID があります: ${unknown.join(",")}`); }
 const jobs = [];
-for (let p = 1; p <= 10; p++) { const pid = `P${p}`; if (only && !only.includes(pid)) continue; for (let r = 1; r <= RUNS; r++) jobs.push({ pid, r }); }
+for (const item of evalSet.items) { const pid = item.id; if (only && !only.includes(pid)) continue; for (let r = 1; r <= RUNS; r++) jobs.push({ pid, r }); }
 
 const dirOf = (job) => join(outRoot, `${job.pid}-r${job.r}`);
 const idOf = (job) => `${job.pid}-r${job.r}`;
@@ -64,6 +74,11 @@ const semanticsPath = fileURLToPath(schemaFiles.semanticsFile()), vocabularyPath
 // files が import.meta.url から引く場所は実体のパス（symlink を解いた形）なので、リポジトリ側も解いてから相対にする
 const relToRepo = (p) => relative(realpathSync(repo), realpathSync(p));
 const evDir = join(repo, "workspace/mvp/m1/agent/eval");
+// 依頼文の出どころの文書（定義ファイルの source.document。無ければ null）。計測はこれを読まない（定義ファイルが写し）。v2 までの document と同じ値になる
+const sourceDoc = typeof evalSet.set.source?.document === "string" ? evalSet.set.source.document : null;
+const sourceDocPath = sourceDoc === null ? null : join(repo, sourceDoc);
+const document = { path: sourceDoc, sha256: sourceDocPath !== null && existsSync(sourceDocPath) ? sha256(readFileSync(sourceDocPath)) : null };
+const scriptsFp = scriptsFingerprint(evalSet.scripts);
 // 判定の口の構成（cli.ts の assembleJudge と同じ条件）：Jev の鍵の環境変数が空でなければ Jev を主・LLM を落とし先、無ければ LLM だけ。鍵の値は記録しない
 const jevEnv = factory.JEV_API_KEY_ENV;
 if (typeof jevEnv !== "string") throw new Error("工場の dist が JEV_API_KEY_ENV を公開していないので、判定の口の構成を記録できない");
@@ -71,12 +86,14 @@ const jevKey = process.env[jevEnv];
 const judge = { configuration: jevKey !== undefined && jevKey !== "" ? "jev-primary-llm-fallback" : "llm-only", jev_key_env: jevEnv };
 const head = gitOut(["rev-parse", "HEAD"]), status = gitOut(["status", "--porcelain"]);
 const measured = {
-  schema: "musunest-factory/agent-accept-conditions/v2",
+  schema: "musunest-factory/agent-accept-conditions/v3",
   measurement_id: basename(outRoot),
   source: { commit: head === null ? null : head.trim(), dirty: status === null ? null : status.trim().length > 0 },
   factory: { dist_dir: relative(repo, distDir), fingerprint: distInfo.fingerprint, rebuilt: distInfo.mtime_ms !== null && (srcInfo.mtime_ms === null || distInfo.mtime_ms >= srcInfo.mtime_ms) },
   spec_engine: { dist_dir: relative(repo, specEngineDist), fingerprint: specEngineInfo.fingerprint, files: specEngineInfo.files },
-  document: { path: relative(repo, tablePath), sha256: sha256(table) },
+  document,
+  // 読んだ定義ファイル（#427）：パス・SHA-256・組の ID と版と役割・本の一覧。依頼文の出どころなので署名に入る
+  set: { path: relToRepo(evalSet.path), sha256: evalSet.sha256, id: evalSet.set.id, version: evalSet.set.version, role: evalSet.set.role, items: evalSet.items.map(({ id, subject, style, writable }) => ({ id, subject, style, writable })) },
   prompt_documents: {
     contract: { dir: relToRepo(contractDir), fingerprint: contractInfo.fingerprint, files: contractInfo.files },
     semantics: { path: relToRepo(semanticsPath), sha256: sha256(readFileSync(semanticsPath)) },
@@ -95,16 +112,18 @@ const measured = {
   // 実際に実行した集計のコードの指紋をこの値と照合する（score-agent.mjs）。ただし source.commit・source.dirty は署名に残るので、
   // clean な checkout を編集したり採点だけの commit を積んだりすれば再開は断られる。外す効果があるのは source が変わらない場合に限る
   scoring: { dir: relative(repo, evDir), ...scoringFingerprint(evDir) },
+  // 台本（#427）：題材ごとの台本の指紋と当て方。今は採点で事後に当てる（post-hoc）ので生成の条件ではなく、scoring と同じく署名から外す。
+  // 採点の出力が、実際に当てた台本の指紋をこの値と照合する
+  scripts: { mode: SCRIPT_MODE, fingerprint: scriptsFp.fingerprint, files: [...evalSet.scripts.entries()].map(([subject, sc]) => ({ subject, path: relToRepo(sc.path), sha256: sc.sha256 })) },
 };
-// 署名（--resume の一致の判定）から外すもの：started_at（補助）、scoring（上）、params.budget_usd（計測全体の停止の目安。
+// 署名（--resume の一致の判定）から外すもの：started_at（補助）、scoring・scripts（上）、params.budget_usd（計測全体の停止の目安。
 // 予算で止まった計測を --budget-usd を上げて流し切れるようにする。工場 1 本の予算 factory_budget_usd は生成の条件なので残す）。
 // 署名は生成の条件の一致を保証するもので、管理の条件（計測全体の目安の額）の一致ではない。有効だった額は起動の記録（下）に残す
-const { scoring: _scoring, ...generationConditions } = measured;
+const { scoring: _scoring, scripts: _scripts, ...generationConditions } = measured;
 const { budget_usd: _budget, ...paramsForSignature } = measured.params;
 const signature = sha256(JSON.stringify({ ...generationConditions, params: paramsForSignature }));
 
 const costOfDir = (dir) => { try { const sl = JSON.parse(readFileSync(join(dir, "summary.line.json"), "utf8")); return sl.plan_cost?.total_usd ?? sl.summary?.provider_cost_usd ?? 0; } catch { return 0; } };
-const refuse = (msg) => { console.error(`断りました: ${msg}`); process.exit(3); };
 
 let spent = 0, stop = null, stopCode = null, skipped = [], reopened = [], executed = [], runQueue = [];
 // この起動で有効な計測全体の目安の額（budget）と、初回の条件のファイルに記録した額。再開で変えたかどうかを起動の記録に残す
@@ -143,6 +162,7 @@ const runOne = (job) => new Promise((resolve) => {
   const dir = dirOf(job);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "request.md"), reqOf(job.pid) + "\n");
+  // 答えのファイルは空（すべて推奨）のまま。台本は実行中に当てられない（README §5.6.3）
   if (plan) writeFileSync(join(dir, "answers.json"), "{}\n");
   const cliArgs = childArgsFor(job);
   const t0 = Date.now();
