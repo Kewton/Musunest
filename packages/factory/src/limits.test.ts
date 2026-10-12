@@ -59,6 +59,25 @@ describe("共通の上限（02 §1.5・§2.2）", () => {
     );
   });
 
+  it("⑥ の 1 回の直す段の応答の往復は 8 ちょうどは通り、9 は断る（§1.5・Issue #429）", () => {
+    expect(AGENT_LIMITS.repairStepTurns).toBe(8);
+    expect(checkLimit("repairStepTurns", AGENT_LIMITS.repairStepTurns)).toBeUndefined();
+    expect(checkLimit("repairStepTurns", AGENT_LIMITS.repairStepTurns + 1)).toEqual({
+      limit: "repairStepTurns",
+      max: AGENT_LIMITS.repairStepTurns,
+      actual: AGENT_LIMITS.repairStepTurns + 1,
+    });
+  });
+
+  it("道具の呼び出しの累計は、ジョブ全体の上限（toolCalls）に照らす（§1.5・Issue #429）", () => {
+    expect(checkLimit("toolCalls", AGENT_LIMITS.toolCalls)).toBeUndefined();
+    expect(checkLimit("toolCalls", AGENT_LIMITS.toolCalls + 1)).toEqual({
+      limit: "toolCalls",
+      max: AGENT_LIMITS.toolCalls,
+      actual: AGENT_LIMITS.toolCalls + 1,
+    });
+  });
+
   it("③ のやり直し・⑤a の作り直し・停滞の回数の上限も、ちょうどは通り、超過は断る（02 §1.5・#309）", () => {
     for (const name of ["correspondenceRedos", "correspondenceChecks", "stagnationRepeats"] as const) {
       expect(checkLimit(name, AGENT_LIMITS[name]), name).toBeUndefined();

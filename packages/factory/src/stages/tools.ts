@@ -117,11 +117,14 @@ export function checkToolArguments(name: string, args: unknown): ToolCallCheck {
 }
 
 /**
- * 道具の呼び出しの回数の上限を確かめる（§1.5）。すでに `used` 回呼んでいて、いま `requested` 回呼ぶ。
- * 合計が上限を超えれば `LimitExceeded` を返す（呼ぶ前に断る）。
+ * 道具の呼び出しの回数の上限を、**共通の口の累計**に照らして確かめる（§1.5・Issue #429）。
+ * `cumulative` はこれまでの累計（共通の口の `toolCalls` の getter。§1.5 の「ジョブ全体」）、`requested`
+ * はこれから実行する応答の束の数。**合計（この応答の束を含む累計）**が上限を超えれば `LimitExceeded`
+ * を返す（呼ぶ前に断る）。上限の値は共通の上限の表（`AGENT_LIMITS`）から引く——段に別の値を渡す口は
+ * 作らない。
  */
-export function checkToolCallBudget(used: number, requested: number): LimitExceeded | undefined {
-  return checkLimit("toolCalls", used + requested);
+export function checkToolCallBudget(cumulative: number, requested: number): LimitExceeded | undefined {
+  return checkLimit("toolCalls", cumulative + requested);
 }
 
 /** 道具が触る、直しても変わらない文脈（要件の一覧・固定した試験・対応表の場所。§1.3） */

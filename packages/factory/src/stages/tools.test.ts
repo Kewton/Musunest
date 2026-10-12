@@ -108,9 +108,19 @@ describe("引数をコードが確かめる（02 §2.2）", () => {
   });
 });
 
-describe("道具の呼び出しの回数の上限（02 §1.5）", () => {
-  it("上限に収まる回数は通し、超える回数は断る", () => {
+describe("道具の呼び出しの回数の上限（02 §1.5・Issue #429）", () => {
+  it("累計（この応答の束を含む）が上限ちょうどは通り、1 つ超えると断る", () => {
+    // 応答前 23 に、束 1（累計 24）は通る
     expect(checkToolCallBudget(AGENT_LIMITS.toolCalls - 1, 1)).toBeUndefined();
+    // 応答前 23 に、束 2（累計 25）は断る
+    expect(checkToolCallBudget(AGENT_LIMITS.toolCalls - 1, 2)).toEqual({
+      limit: "toolCalls",
+      max: AGENT_LIMITS.toolCalls,
+      actual: AGENT_LIMITS.toolCalls + 1,
+    });
+  });
+
+  it("累計が既に上限のときは、束 1 つでも断る（段の局所で数え直さない）", () => {
     const over = checkToolCallBudget(AGENT_LIMITS.toolCalls, 1);
     expect(over).toEqual({ limit: "toolCalls", max: AGENT_LIMITS.toolCalls, actual: AGENT_LIMITS.toolCalls + 1 });
   });

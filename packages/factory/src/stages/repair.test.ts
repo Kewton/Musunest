@@ -11,10 +11,13 @@
 //   6. 送った要求を観測する：規則とデータを分け、その段に渡すと決めた文脈だけを置き、道具（JSON Schema）
 //      を付け、受入の題材の言葉を使わないこと
 import { sha256Hex } from "@musunest/spec-engine";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { JobBudget } from "../budget.js";
+import { CallGateway, type CallGatewayOptions } from "../call.js";
 import { checkTestSuite, type TestSuite } from "../fixed-test.js";
 import { AGENT_LIMITS } from "../limits.js";
-import type { LlmToolRequest } from "../llm.js";
+import type { RecordedCall } from "../llm-fake.js";
+import type { LlmClient, LlmToolRequest } from "../llm.js";
 import type { CorrespondenceEntry, RequirementList, VersionChecks } from "../pipeline.js";
 import {
   INJECTED_INSTRUCTION,
@@ -35,6 +38,7 @@ import {
   type RepairStepInput,
   type VersionReport,
 } from "./repair.js";
+import * as repairTools from "./tools.js";
 
 const done = (declaration: string, disputes: readonly { testId: string; quote: string }[] = []) => ({
   kind: "tools" as const,
@@ -614,5 +618,228 @@ describe("停滞の署名は、名前ではなく分類で決まる（02 §1.3.1
     expect(isStagnant(["a", "a", "a"], 3)).toBe(true);
     // 2 未満の指定では止めない（停滞の検知を切る）
     expect(isStagnant(["a", "a"], 1)).toBe(false);
+  });
+});
+
+// ── ⑥ の道具の累計・1 回の段の応答の往復の上限（02 §1.5・Issue #429）──────────────
+//
+// ⑥ の道具の実行は、**ジョブ全体の累計**（共通の口の `toolCalls` の getter）を実行の前に照らして断る。
+// 1 回の直す段の中で受け取ってよい応答の数にも上限（`repairStepTurns`）を置く。**実 API は呼ばない。**
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+/** ⑥ の道具の呼び出し 1 つ（静的チェック。宣言は妥当なものを使う） */
+const staticCheckCall = (id: string, source: string) => ({
+  id,
+  name: "static-check",
+  arguments: { declaration: source },
+});
+
+/** 1 応答に載せる道具の束（`count` 件） */
+const toolBundle = (count: number, source: string, offset = 0) =>
+  Array.from({ length: count }, (_, i) => staticCheckCall(`c${offset + i}`, source));
+
+/**
+ * 記録した応答を順に返す偽物。**直す段（`runRepairStep`）ごとに会話が切れる**ことを許す——記録した
+ * 応答の順だけを見て、往復の順（`turns`）は確かめない。2 つの段にまたがる累計を試すのに使う。
+ */
+function flatClient(recorded: readonly RecordedCall[]): LlmClient {
+  let index = 0;
+  const next = (): RecordedCall => {
+    const call = recorded[index];
+    index += 1;
+    if (call === undefined) throw new Error("記録した応答が尽きました");
+    return call;
+  };
+  return {
+    async callStructured<T>() {
+      const call = next();
+      if (call.kind !== "structured") throw new Error("記録と種別が違います（構造化出力）");
+      return { output: call.output as T, usage: call.usage };
+    },
+    async callWithTools() {
+      const call = next();
+      if (call.kind !== "tools") throw new Error("記録と種別が違います（道具付き）");
+      return call.response;
+    },
+  };
+}
+
+/**
+ * 道具の累計を**事前に `preloaded` から始める**共通の口。`toolCalls` の getter を上書きして、ジョブの
+ * これまでの累計（例：23）を模す——本物の `CallGateway` は累計を外から与えられないため。
+ */
+class PreloadedGateway extends CallGateway {
+  readonly #preloaded: number;
+  constructor(options: CallGatewayOptions, preloaded: number) {
+    super(options);
+    this.#preloaded = preloaded;
+  }
+  override get toolCalls(): number {
+    return this.#preloaded + super.toolCalls;
+  }
+}
+
+/** 累計を事前に持つ共通の口を作る（予算は十分・時計は 0 に固定し、締切は絶対時刻） */
+function preloadedGateway(
+  client: LlmClient,
+  preloaded: number,
+  options: { readonly maxAttempts?: number } = {},
+): PreloadedGateway {
+  return new PreloadedGateway(
+    {
+      client,
+      budget: new JobBudget(10),
+      rates: { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputPerToken: 0.000002 },
+      now: () => 0,
+      deadline: 60_000,
+      ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
+    },
+    preloaded,
+  );
+}
+
+describe("⑥ の道具の累計と 1 回の段の応答の往復の上限（02 §1.5・Issue #429）", () => {
+  /** 最初の版（V1）を渡して、⑥ を 1 回回す */
+  const runStep = async (gateway: CallGateway): Promise<Awaited<ReturnType<typeof runRepairStep>>> => {
+    const initial = await version(V1);
+    return runRepairStep({
+      source: SOURCE,
+      list: LIST,
+      suite: SUITE,
+      current: initial,
+      correspondences: CORRESPONDENCES,
+      documents: SAMPLE_DOCUMENTS,
+      gateway,
+    });
+  };
+
+  it("累計が応答前 23 に、1 つの束（累計 24）は実行し、段は続く", async () => {
+    const spy = vi.spyOn(repairTools, "executeRepairTool");
+    const recording = createRecordingClient([toolCalls([staticCheckCall("c1", V1)]), done(V2)]);
+    const gateway = preloadedGateway(recording.client, AGENT_LIMITS.toolCalls - 1, { maxAttempts: 1 });
+
+    const outcome = await runStep(gateway);
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.declaration.source).toBe(V2);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(gateway.toolCalls).toBe(AGENT_LIMITS.toolCalls);
+  });
+
+  it("累計が応答前 23 に、2 つの束（累計 25）は 1 つも実行せず、累計の上限で段が終わる", async () => {
+    const spy = vi.spyOn(repairTools, "executeRepairTool");
+    const recording = createRecordingClient([
+      toolCalls([staticCheckCall("c1", V1), staticCheckCall("c2", V1)]),
+    ]);
+    const gateway = preloadedGateway(recording.client, AGENT_LIMITS.toolCalls - 1, { maxAttempts: 1 });
+
+    const outcome = await runStep(gateway);
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure).toEqual({
+      kind: "callLimit",
+      limit: "toolCalls",
+      max: AGENT_LIMITS.toolCalls,
+      actual: AGENT_LIMITS.toolCalls + 1,
+    });
+    expect(spy).toHaveBeenCalledTimes(0);
+    // 拒否した束も、共通の口の累計には数えられる（getter が 25 を示すこと自体は不具合ではない）
+    expect(gateway.toolCalls).toBe(AGENT_LIMITS.toolCalls + 1);
+  });
+
+  it("成功して受け取った応答が上限ちょうどまでは続き、8 回目が形の合う done なら受け付ける", async () => {
+    const recording = createRecordingClient([
+      ...Array.from({ length: AGENT_LIMITS.repairStepTurns - 1 }, (_, i) =>
+        toolCalls([staticCheckCall(`c${i}`, V1)]),
+      ),
+      done(V2),
+    ]);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+
+    const outcome = await runStep(gateway);
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.declaration.source).toBe(V2);
+    expect(recording.tools).toHaveLength(AGENT_LIMITS.repairStepTurns);
+  });
+
+  it("応答が上限（8）に達したら次の応答は求めず、往復の上限で段が終わる", async () => {
+    const recording = createRecordingClient(
+      Array.from({ length: AGENT_LIMITS.repairStepTurns }, (_, i) => toolCalls([staticCheckCall(`c${i}`, V1)])),
+    );
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+
+    const outcome = await runStep(gateway);
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("callLimit");
+    if (outcome.failure.kind !== "callLimit") return;
+    expect(outcome.failure.limit).toBe("repairStepTurns");
+    expect(outcome.failure.max).toBe(AGENT_LIMITS.repairStepTurns);
+    // 9 回目は求めない（求めれば記録が尽きて、別の失敗になる）
+    expect(recording.tools).toHaveLength(AGENT_LIMITS.repairStepTurns);
+  });
+
+  it("最後の答えの形の直しの応答も往復に数える（8 回目が形の合わない done なら、直しを求めずに上限で終わる）", async () => {
+    const recording = createRecordingClient([
+      ...Array.from({ length: AGENT_LIMITS.repairStepTurns - 1 }, (_, i) =>
+        toolCalls([staticCheckCall(`c${i}`, V1)]),
+      ),
+      doneMalformed,
+    ]);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+
+    const outcome = await runStep(gateway);
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("callLimit");
+    if (outcome.failure.kind !== "callLimit") return;
+    expect(outcome.failure.limit).toBe("repairStepTurns");
+    expect(recording.tools).toHaveLength(AGENT_LIMITS.repairStepTurns);
+  });
+
+  it("形の直しの往復も数え、8 回目が形の合う done なら受け付ける（STEP_ATTEMPTS は 1 回のまま）", async () => {
+    const recording = createRecordingClient([
+      ...Array.from({ length: AGENT_LIMITS.repairStepTurns - 2 }, (_, i) =>
+        toolCalls([staticCheckCall(`c${i}`, V1)]),
+      ),
+      doneMalformed,
+      done(V2),
+    ]);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+
+    const outcome = await runStep(gateway);
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.declaration.source).toBe(V2);
+    expect(recording.tools).toHaveLength(AGENT_LIMITS.repairStepTurns);
+  });
+
+  it("段の開始で累計が戻らない（2 つの段を続けて回すと、2 つ目の段が累計の続きから照らす）", async () => {
+    const client = flatClient([toolCalls(toolBundle(20, V1)), done(V2), toolCalls(toolBundle(5, V1, 20))]);
+    const gateway = makeGateway(client, { maxAttempts: 1 });
+
+    const first = await runStep(gateway);
+    expect(first.ok).toBe(true);
+    expect(gateway.toolCalls).toBe(20);
+
+    const second = await runStep(gateway);
+    expect(second.ok).toBe(false);
+    if (second.ok) return;
+    expect(second.failure).toEqual({
+      kind: "callLimit",
+      limit: "toolCalls",
+      max: AGENT_LIMITS.toolCalls,
+      actual: AGENT_LIMITS.toolCalls + 1,
+    });
   });
 });

@@ -374,6 +374,97 @@ describe("共通の口（02 §1.5・§2.2）", () => {
   });
 });
 
+// ── 道具の累計の数え方（02 §1.5・Issue #429）────────────────────────
+//
+// ⑥ の実行の門（累計で断る）が読むのは、この public getter（`toolCalls`）である。**新しい interface や
+// getter は作らない**——数え方をここで固定する：道具の束を返す応答でその数だけ増え、`done` の応答・
+// 通信のやり直し・例外では増えない。
+
+describe("共通の口の道具の累計（02 §1.5・Issue #429）", () => {
+  it("道具の束を返す応答で、その数だけ増える", async () => {
+    const client = createFakeLlmClient([
+      {
+        kind: "tools",
+        response: {
+          kind: "toolCalls",
+          toolCalls: [
+            { id: "call-1", name: "staticCheck", arguments: {} },
+            { id: "call-2", name: "runTests", arguments: {} },
+            { id: "call-3", name: "checkCorrespondence", arguments: {} },
+          ],
+          usage: undefined,
+        },
+      },
+    ]);
+    const gateway = new CallGateway({ client, budget: new JobBudget(1_000), rates: RATES, now: () => 0, deadline: 1_000 });
+
+    const result = await gateway.callWithTools(TOOL_REQUEST);
+    expect(result.kind).toBe("ok");
+    expect(gateway.toolCalls).toBe(3);
+  });
+
+  it("最後の答え（done）の応答では、増えない", async () => {
+    const client = createFakeLlmClient([
+      { kind: "tools", response: { kind: "done", declaration: {}, usage: undefined } },
+    ]);
+    const gateway = new CallGateway({ client, budget: new JobBudget(1_000), rates: RATES, now: () => 0, deadline: 1_000 });
+
+    const result = await gateway.callWithTools(TOOL_REQUEST);
+    expect(result.kind).toBe("ok");
+    expect(gateway.toolCalls).toBe(0);
+  });
+
+  it("通信のやり直しでは、成功した応答の束の数だけ増える（失敗した試行では増えない）", async () => {
+    let attempts = 0;
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        return Promise.reject(new Error("使わない"));
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        attempts += 1;
+        if (attempts === 1) return Promise.reject(networkError());
+        return Promise.resolve({
+          kind: "toolCalls",
+          toolCalls: [
+            { id: "call-1", name: "staticCheck", arguments: {} },
+            { id: "call-2", name: "runTests", arguments: {} },
+          ],
+          usage: undefined,
+        });
+      },
+    };
+    const gateway = new CallGateway({
+      client,
+      budget: new JobBudget(1_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 100_000,
+      callTimeoutMs: 100,
+    });
+
+    const result = await gateway.callWithTools(TOOL_REQUEST);
+    expect(result.kind).toBe("ok");
+    expect(attempts).toBe(2);
+    expect(gateway.calls).toBe(2);
+    expect(gateway.retries).toBe(1);
+    expect(gateway.toolCalls).toBe(2);
+  });
+
+  it("例外（やり直さない誤り）では、増えない", async () => {
+    const gateway = new CallGateway({
+      client: throwingClient(errorWithKind("refusal")),
+      budget: new JobBudget(1_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 1_000,
+    });
+
+    const result = await gateway.callWithTools(TOOL_REQUEST);
+    expect(result.kind).toBe("failed");
+    expect(gateway.toolCalls).toBe(0);
+  });
+});
+
 // ── 上限を上げた呼び出しの予約の境界（02 §1.5・Issue #399）──────────────
 
 describe("上限を上げた呼び出しの予約は、入力込みで見積もり、残高の境界で分ける（02 §1.5・Issue #399）", () => {
