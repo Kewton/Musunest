@@ -1892,3 +1892,100 @@ describe("新契約：対象の役割 ID が、その要件の所属にあるこ
     expect(request?.input).toContain("要件ごとの所属");
   });
 });
+
+// ── 新契約：版は欄の有無から推定しない（§1・②'・Issue #428）────────────────────
+
+/** 役割 ID の表も種類も確かめ方も持たない旧形式の設計（新契約では旧来の検査へ落とさず断る） */
+const OLD_FORMAT_DESIGN: DesignResult = {
+  designs: [
+    { requirementId: "R-1", vocabulary: [], placement: [], unwritable: [] },
+    { requirementId: "R-2", vocabulary: [], placement: [], unwritable: [] },
+  ],
+};
+
+/** 役割 ID の表はあるが、種類・確かめ方・所属を持たない設計（新契約では所属の点検で断られる） */
+const ROLES_ONLY_DESIGN: DesignResult = {
+  roles: OWNED_ROLES,
+  designs: [
+    { requirementId: "R-1", vocabulary: [], placement: [], unwritable: [] },
+    { requirementId: "R-2", vocabulary: [], placement: [], unwritable: [] },
+  ],
+};
+
+describe("新契約：版は欄の有無から推定しない（§1・②'・Issue #428）", () => {
+  it("役割 ID の表を持たない設計は、旧来の検査に合う応答でも中身の点検で断る", async () => {
+    // 応答そのものは旧来の検査に合っている（断りの理由は設計の側にある）
+    expect(checkSuiteAgainstRequirements(REQUIREMENT_LIST, suiteOf(OWNED_VALID))).toEqual([]);
+    const output = { tests: OWNED_VALID };
+    const recording = createRecordingClient([structured(output), structured(output)]);
+    const outcome = await runTestSuiteImpl({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: OLD_FORMAT_DESIGN,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("unmet");
+    if (outcome.failure.kind !== "unmet") return;
+    const problems = outcome.failure.problems;
+    // 設計の問題として断る（欄は design）
+    expect(problems.some((problem) => problem.field === "design")).toBe(true);
+    // 役割 ID の検査が掛かった印（旧来の検査には無い欄）
+    expect(
+      problems.some(
+        (problem) => problem.field.endsWith("target.roleId") && problem.message.includes("役割 ID の表に無い"),
+      ),
+    ).toBe(true);
+    // 所属の検査が掛かった印
+    expect(
+      problems.some(
+        (problem) => problem.field.endsWith("target.roleId") && problem.message.includes("所属に無い"),
+      ),
+    ).toBe(true);
+    // 要求は 2 試行の枠のまま送られている（設計が要るからと送らない、はしない）
+    expect(recording.structured).toHaveLength(2);
+  });
+
+  it("役割の表はあるが種類・確かめ方・所属の無い設計は、所属の点検で断る（旧来の検査だけでは固定しない）", async () => {
+    expect(checkSuiteAgainstRequirements(REQUIREMENT_LIST, suiteOf(OWNED_VALID))).toEqual([]);
+    const output = { tests: OWNED_VALID };
+    const recording = createRecordingClient([structured(output), structured(output)]);
+    const outcome = await runTestSuiteImpl({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: ROLES_ONLY_DESIGN,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("unmet");
+    if (outcome.failure.kind !== "unmet") return;
+    // checkSuitePlan の中身の点検（対象が所属に無い）で断る
+    expect(
+      outcome.failure.problems.some(
+        (problem) => problem.field.endsWith("target.roleId") && problem.message.includes("所属に無い"),
+      ),
+    ).toBe(true);
+    expect(recording.structured).toHaveLength(2);
+  });
+
+  it("設計の欄が無くても、データに役割 ID の表・種類・確かめ方・所属の 4 つが入る", async () => {
+    const output = { tests: OWNED_VALID };
+    const recording = createRecordingClient([structured(output), structured(output)]);
+    await runTestSuiteImpl({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: OLD_FORMAT_DESIGN,
+    });
+    const request = recording.structured[0];
+    expect(request).toBeDefined();
+    if (request === undefined) return;
+    // 要件の一覧に加えて、4 つの欄が（中身が空でも）入る
+    expect(request.input.match(/<data name=/g)).toHaveLength(5);
+    for (const name of ["役割 ID の表", "要件ごとの種類", "要件ごとの確かめ方", "要件ごとの所属"]) {
+      expect(request.input).toContain(name);
+    }
+  });
+});
