@@ -21,6 +21,44 @@
 // **実 API は呼ばない。** 判定は差し込まれた `Judge`（試験は偽物）だけを使う。
 import type { Judge, JudgeAnswer, JudgeQuestion } from "../judge.js";
 
+/**
+ * 既定を当てるかの判定（コードが判定できる**事実だけ**を見る。Issue #408）。`unknown` は「判定できない」
+ * であり、そのときは閉じない（表の外として扱う）。
+ */
+export type FacetDefaultMatch = "match" | "no-match" | "unknown";
+
+/**
+ * 既定を当てるかの判定に使う**事実**（Issue #408）。**依頼文・答え・モデルの出力の文字列は入れない**——
+ * 目録の判定の結果のように、コードが確かめられるものだけを持つ。`null` は「判定できない」である。
+ */
+export interface FacetDefaultFacts {
+  /**
+   * 対象の要件が、記録を数える・合計する・数字を求めることを含むと**判定できた**か（目録の門の判定）。
+   * 門の答えが無い・Noul でない・範囲の外なら `null`（判定できない）。
+   */
+  readonly aggregates: boolean | null;
+}
+
+/**
+ * 目録の観点の**既定**（許可の表の 1 行。04 §3「既定で決めてよいものは聞かない」・Issue #408）。
+ * 行は 観点（`CatalogFacet.id`）・対象の要件の条件（`target`）・適用条件（`applies`）・定数の値（`value`）・
+ * 理由（`reason`）を持つ。値は**コードの定数だけ**にする——依頼文・答え・モデルの出力の文字列を使わない。
+ *
+ * `match` は適用条件を**コードで判定**する。確かめられない要件には `unknown` を返し、閉じない。
+ */
+export interface CatalogFacetDefault {
+  /** 対象の要件の条件（人が読む説明。語彙の意味で確かめられた対象と形式） */
+  readonly target: string;
+  /** 適用条件（人が読む説明。コードが判定できる事実だけで書く） */
+  readonly applies: string;
+  /** 定数の値（コードの定数だけ） */
+  readonly value: string;
+  /** 理由（決定を組む側が観点の ID を添える） */
+  readonly reason: string;
+  /** 適用条件をコードで判定する（`match` のときだけ閉じる） */
+  readonly match: (facts: FacetDefaultFacts) => FacetDefaultMatch;
+}
+
 /** 目録の 1 観点（04 §3 P3 の「集計の種類・期間・今月を含むか・数える状態・0 件を含むか・直せる人」） */
 export interface CatalogFacet {
   /** 観点の ID（問いの名前と未解決の事項の ID に使う） */
@@ -34,6 +72,20 @@ export interface CatalogFacet {
   readonly point: string;
   /** 指定されていないまま残ると**重大**か（答えで作るものが変わるか。04 §3 P3） */
   readonly critical: boolean;
+  /**
+   * 許可の表の既定（Issue #408）。**無い観点（重大・権限）は閉じない**。重大（`aggregation`・
+   * `counted-state`）と権限（`editable-by`）には付けない。
+   */
+  readonly default?: CatalogFacetDefault;
+}
+
+/**
+ * 集計の対象だと**判定できた**要件にだけ当てる既定の適用条件（Issue #408）。目録の門の判定
+ * （`aggregates`）だけを見る。判定できないときは `unknown` にして閉じない。
+ */
+function matchAggregationFacet(facts: FacetDefaultFacts): FacetDefaultMatch {
+  if (facts.aggregates === null) return "unknown";
+  return facts.aggregates ? "match" : "no-match";
 }
 
 /**
@@ -52,24 +104,50 @@ export const CATALOG_FACETS: readonly CatalogFacet[] = [
     question: "対象にする期間（いつからいつまでか）",
     point: "which time period is covered (from when to when)",
     critical: false,
+    default: {
+      target: "集計の要件（記録を数える・合計する・数字を求めることを含むと判定できた要件）",
+      applies: "目録の門の判定が「集計を含む」と言っている要件。判定できない要件には当てない",
+      // 語彙の意味 §within：期間の条件（`within`）を書かなければ期間で絞らない。**「全期間」とは書かない**
+      // ——月の見出しごとの集計（§groupby）は、語彙が `last` の既定の直近 6 か月に絞るので、全期間ではない。
+      value: "期間の条件を足さない",
+      reason: "語彙は、期間の条件（within）を書かなければ期間で絞らない（語彙の意味 §within）",
+      match: matchAggregationFacet,
+    },
   },
   {
     id: "current-period",
     question: "今の期間（今月など）を含むかどうか",
     point: "whether the current period (e.g. this month) is included",
     critical: false,
+    default: {
+      target: "集計の要件（見出しごとの集計など、語彙の意味 §within・§groupby で確かめられた対象）",
+      applies: "目録の門の判定が「集計を含む」と言っている要件。判定できない要件には当てない",
+      // 語彙の意味 §within：期間で絞らなければ（月の見出しごとの既定の 6 か月でも）今の期間を含む
+      value: "今の期間を含む",
+      reason: "語彙は、期間の条件（within）を書かなければ期間で絞らず、今の期間を含む（語彙の意味 §within）",
+      match: matchAggregationFacet,
+    },
   },
   {
     id: "counted-state",
     question: "どの状態のものを数えるか",
     point: "which states of records are counted (e.g. only meetings that were actually held)",
     critical: true,
+    // 重大なので既定を持たせない（Issue #408）
   },
   {
     id: "include-zero",
     question: "0 件のときも表示するかどうか",
     point: "whether items with zero results are still shown",
     critical: false,
+    default: {
+      target: "見出しごとの集計（語彙の意味 §groupby で確かめられた対象）",
+      applies: "目録の門の判定が「集計を含む」と言っている要件。判定できない要件には当てない",
+      // 語彙の意味 §groupby：値が 0 の見出しも出す（データの無い月も 0 と数える）
+      value: "0 件の見出しも出す",
+      reason: "語彙は、見出しごとの集計で、値が 0 の見出し（データの無い月）も出す（語彙の意味 §groupby）",
+      match: matchAggregationFacet,
+    },
   },
   {
     id: "editable-by",
@@ -91,6 +169,20 @@ export const CATALOG_AGGREGATION_FACET_IDS: ReadonlySet<string> = new Set([
   "counted-state",
   "include-zero",
 ]);
+
+/**
+ * 目録の観点の既定を、コードが判定できる事実に照らして**当てるか**を決める（Issue #408）。適用条件が
+ * `match` のときだけ、値と理由を返す。`no-match`・`unknown`（判定できない）と、既定の無い観点は
+ * `undefined`（閉じない）。
+ */
+export function catalogDefaultOf(
+  facet: CatalogFacet,
+  facts: FacetDefaultFacts,
+): { readonly value: string; readonly reason: string } | undefined {
+  const def = facet.default;
+  if (def === undefined) return undefined;
+  return def.match(facts) === "match" ? { value: def.value, reason: def.reason } : undefined;
+}
 
 /** 「当てはまるか」の問いの英語の文（`point` は観点の説明、`requirement` は対象の要件の文。Issue #384） */
 export const CATALOG_APPLIES_QUESTION_TEXT =

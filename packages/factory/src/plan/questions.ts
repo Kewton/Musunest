@@ -40,6 +40,8 @@ export const QUESTIONS_RULES: readonly string[] = [
   "同じ事項を 2 問にしない。すでに答えの出ている事項は挙げない。",
   "同じことを聞く事項は 1 問にまとめ、残りの事項の ID を「一緒に閉じる事項」（alsoCloses）に入れる。1 つの答えで、その問いの事項と一緒に閉じる事項をまとめて閉じる。",
   "依頼文にすでに書かれていて決まっている事項は、聞かずに「依頼文で閉じる事項」（closedBySource）に入れる。引用（quote）は依頼文からそのまま写し、決まっている中身（value）を書く。",
+  "依頼文から**逐語で引用できない**事項は、「依頼文で閉じる事項」（closedBySource）に含めない。引用は依頼文の一部をそのまま写す——言い換えない・空白や改行を足さない（逐語でない引用はコードが断る）。",
+  "コードの**許可の表**（観点ごとの既定）に当てはまる事項だけは、P4 に渡す前に**コードが既定で閉じる**。ここには入れず、問いにもしない。",
 ];
 
 /** P4 の JSON Schema（構造化出力） */
@@ -205,6 +207,16 @@ export const QUESTION_PROBLEM_CODES = [
   "also-closes",
   /** 依頼文で閉じる事項の一覧（`closedBySource`）の誤り */
   "source-closure",
+  /**
+   * 依頼文で閉じる事項の引用が、**依頼文にそのまま（逐語で）含まれていない**（Issue #408）。
+   * 逐語の門は変えない——今までどおり形の誤りとして断る。診断だけを分ける。
+   */
+  "source-closure-quote",
+  /**
+   * 依頼文で閉じる事項の引用が、**空白と改行の違いだけ**で依頼文に含まれる（Issue #408）。
+   * やはり逐語では受理しない（形の誤り）。診断だけを分ける。
+   */
+  "source-closure-quote-whitespace",
 ] as const;
 export type QuestionProblemCode = (typeof QUESTION_PROBLEM_CODES)[number];
 
@@ -274,8 +286,30 @@ function checkAlsoCloses(value: unknown, field: string, problems: Problem[]): re
 }
 
 /**
+ * 空白と改行を除いた形（空白の差だけの引用を見分ける。Issue #408）。**引用そのものの受理の条件は
+ * 変えない**——逐語でない引用は、今までどおり形の誤りとして断る。診断だけを分ける。
+ */
+function withoutWhitespace(text: string): string {
+  return text.replace(/\s+/g, "");
+}
+
+/**
+ * 依頼文から逐語で引用できなかった引用の分類（診断だけ。Issue #408）。**空白を除いた引用が空なら、
+ * 空白差の一致にしない**（空白だけの引用は `source-closure-quote`）。**問題に引用の値は入れない**。
+ */
+function quoteProblemCode(source: string, quote: string): QuestionProblemCode {
+  const stripped = withoutWhitespace(quote);
+  if (stripped !== "" && withoutWhitespace(source).includes(stripped)) {
+    return "source-closure-quote-whitespace";
+  }
+  return "source-closure-quote";
+}
+
+/**
  * 「依頼文で決める事項」（`closedBySource`）の並びを確かめる。`source` は依頼文（原文）である。
  * 引用は空でなく、**依頼文にそのまま含まれる**こと（含まれなければ形の誤りとしてやり直させる）。
+ * 逐語でない引用は、置き換えの違い（`source-closure-quote`）と、空白の差だけの違い
+ * （`source-closure-quote-whitespace`）に分けて診断するが、**どちらも受理しない**（Issue #408）。
  */
 function checkClosedBySource(
   value: unknown,
@@ -303,10 +337,16 @@ function checkClosedBySource(
       good = false;
     }
     if (typeof quote !== "string" || quote === "") {
-      problems.push({ field: `${field}.quote`, message: "引用は空でない文字列であること" });
+      // 空・型違いは今までどおり `shape`
+      problems.push({ field: `${field}.quote`, code: "shape", message: "引用は空でない文字列であること" });
       good = false;
     } else if (!source.includes(quote)) {
-      problems.push({ field: `${field}.quote`, message: "引用が依頼文にそのまま含まれていない" });
+      // 逐語でない引用の分類（診断だけ）。問題に引用の値は入れない
+      problems.push({
+        field: `${field}.quote`,
+        code: quoteProblemCode(source, quote),
+        message: "引用が依頼文にそのまま（逐語で）含まれていない",
+      });
       good = false;
     }
     if (typeof content !== "string" || content === "") {

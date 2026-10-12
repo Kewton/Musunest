@@ -51,7 +51,7 @@ import {
   type ReverseCheckOperation,
 } from "../stages/reverse-check.js";
 import { runAnswers, validateAnswer, type ClassifiedAnswer, type PlanAnswerDraft } from "./answers.js";
-import { catalogOpenIssue, runCatalog } from "./catalog.js";
+import { CATALOG_FACETS, catalogDefaultOf, catalogGateQuestionName, catalogOpenIssue, runCatalog, type UnspecifiedFacet } from "./catalog.js";
 import { runConfirm, type ConfirmProblem } from "./confirm.js";
 import { alsoClosesOf, assignQuestionIds, runQuestions, type PlanQuestion, type PlanSourceClosure } from "./questions.js";
 import {
@@ -123,6 +123,9 @@ export const PLAN_DIAGNOSIS_CODES = [
   "duplicate-question-id",
   "also-closes",
   "source-closure",
+  // 依頼文で閉じる事項の引用（Issue #408。逐語でない引用の診断。どちらも形の誤りとして断る）
+  "source-closure-quote",
+  "source-closure-quote-whitespace",
   "question-coverage",
   // 答え（P5）
   "unknown-question",
@@ -158,6 +161,8 @@ export const PLAN_DIAGNOSIS_CODES = [
   "question-limit",
   "round-trip-limit",
   "critical-no-question",
+  // 上限のあとに重大でない事項だけが残った（既定の無い観点・自由文など。Issue #408）
+  "noncritical-without-default",
   // 一覧に無いもの
   "other",
 ] as const;
@@ -358,6 +363,16 @@ export interface CannotConfirmReason {
 /** 止まった理由（`declined` は答える役が「やめる」と言ったとき。それ以外は失敗の分類） */
 export type PlanStopReason = "declined" | FailureKind;
 
+/** 既定で閉じた事項 1 つ（Issue #408）。事項 ID・観点 ID・値を持つ（値はコードの定数なので記録してよい） */
+export interface PlanDefaultClosure {
+  /** 既定で閉じた未解決の事項の ID */
+  readonly issueId: string;
+  /** 当てた観点の ID */
+  readonly facetId: string;
+  /** 観点の定数の値（コードの定数だけ） */
+  readonly value: string;
+}
+
 /** 3 つの結果に共通する記録（使った額・残りの額・段ごとの記録・判定の呼び出し） */
 export interface PlanResultBase {
   /** 段ごとの記録（生成の段の記録と同じ形） */
@@ -370,6 +385,8 @@ export interface PlanResultBase {
   readonly judge: BundleJudgeUsage;
   /** 依頼文で閉じた事項（往復の記録に残す。04 §3 P4・Issue #370） */
   readonly closedBySource: readonly PlanSourceClosure[];
+  /** 許可の表の既定で閉じた事項（04 §3・Issue #408） */
+  readonly closedByDefault: readonly PlanDefaultClosure[];
 }
 
 /** 依頼文で閉じた事項から作る `decisions` の ID の頭（確認の画面が「依頼文で決めたこと」を見分ける） */
@@ -378,6 +395,14 @@ export const SOURCE_CLOSURE_DECISION_PREFIX = "D:source:" as const;
 /** その `decisions` が、依頼文で閉じた事項から作られたものか */
 export function isSourceClosureDecision(decision: PlanDecision): boolean {
   return decision.id.startsWith(SOURCE_CLOSURE_DECISION_PREFIX);
+}
+
+/** 許可の表の既定で閉じた事項から作る `decisions` の ID の頭（決定の ID は安定した形。Issue #408） */
+export const DEFAULT_DECISION_PREFIX = "D:default:" as const;
+
+/** 既定で閉じた事項の決定の ID（`D:default:<事項 ID>`。事項 ID から安定して決まる） */
+export function defaultDecisionId(issueId: string): string {
+  return `${DEFAULT_DECISION_PREFIX}${issueId}`;
 }
 
 /** Plan を 1 回流した結果（3 つの形） */
@@ -648,10 +673,19 @@ function planCheckReasons(problems: readonly PlanProblem[]): readonly CannotConf
 }
 
 /**
- * 往復の制御で確定できなかった理由（`source: session`）を、有限の `code` で区別する（Issue #397）。
- * 質問の数の上限・往復の数の上限・重大な事項があるのに問いが無い、を分ける。
+ * 往復の制御で確定できなかった理由（`source: session`）を、有限の `code` で区別する（Issue #397・#408）。
+ * 残った事項が**重大でないものだけ**なら `noncritical-without-default`（既定の無い観点・自由文など。
+ * 既定で閉じられないまま上限に触れた）。重大な事項が残れば、質問の数の上限・往復の数の上限・
+ * 重大な事項があるのに問いが無い、を今までどおり分ける。**重大な事項の理由を非重大の分類に置き換えない。**
  */
-export function sessionCannotConfirmReason(turns: readonly PlanTurn[]): CannotConfirmReason {
+export function sessionCannotConfirmReason(
+  turns: readonly PlanTurn[],
+  openIssues: readonly PlanOpenIssue[],
+): CannotConfirmReason {
+  const open = openIssues.filter((issue) => issue.status === "open");
+  if (open.length > 0 && open.every((issue) => !issue.critical)) {
+    return { source: "session", code: "noncritical-without-default", path: "open_issues" };
+  }
   const remaining = remainingPlanBudget(turns);
   const code =
     remaining.questions <= 0
@@ -696,6 +730,11 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const stages: PlanStageRecord[] = [];
   // 依頼文で閉じた事項（往復の記録に残す。04 §3 P4・Issue #370）
   const closedBySource: PlanSourceClosure[] = [];
+  // 許可の表の既定で閉じた事項（Issue #408）
+  const closedByDefaults: PlanDefaultClosure[] = [];
+  // コードが目録から作った事項の対応（事項 ID → 未指定の観点）と、要件ごとの門の判定（Issue #408）
+  const catalogIssueFacets = new Map<string, UnspecifiedFacet>();
+  const aggregatesByRequirement = new Map<string, boolean | null>();
 
   const pushRecord = (
     stage: PlanStageId,
@@ -782,6 +821,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     remainingUsd: budget.remainingUsd,
     judge: { calls_by_adapter: judgeBudget.callsByAdapter, cost_usd: judgeBudget.spentUsd },
     closedBySource: closedBySource.slice(),
+    closedByDefault: closedByDefaults.slice(),
   });
 
   try {
@@ -880,7 +920,26 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         threshold,
       }),
     );
-    for (const facet of catalog.unspecified) openIssues.push(catalogOpenIssue(facet));
+    for (const facet of catalog.unspecified) {
+      const issue = catalogOpenIssue(facet);
+      openIssues.push(issue);
+      // コードが目録から作った事項に、**事項 ID → （観点 ID・対象の要件）の対応**を持たせる（Issue #408）。
+      // **ID の接頭辞は解析しない**——モデルが同じ形（`OI:catalog:`）の ID を作っても、この対応には
+      // 入らないので既定の対象にならない。
+      catalogIssueFacets.set(issue.id, facet);
+    }
+    // 目録の門の判定（要件 ID → 集計を含むか）を、既定の適用条件の事実として組む（Issue #408）。門の
+    // 答えが無い・Noul でない・範囲の外は `null`（判定できない＝閉じない）。問いの名前は、要件 ID と
+    // 同じ組み立て（`catalogGateQuestionName`）で引き直す——事項 ID の接頭辞は解析しない。
+    for (const facet of catalog.unspecified) {
+      if (aggregatesByRequirement.has(facet.requirementId)) continue;
+      const gateName = catalogGateQuestionName(facet.requirementId);
+      const judgment = catalog.judgments.find(
+        (candidate) => candidate.kind === "gate" && candidate.questionId === gateName,
+      );
+      const value = judgment?.value ?? null;
+      aggregatesByRequirement.set(facet.requirementId, value === null ? null : value > 1 - threshold);
+    }
 
     // 書けないことを、了承して除く部分（`accepted_unwritable`）に写す（§4・U-P2）。代わりの案は、
     // 宣言で書ける近い形を 1 つ出したものなので、要件として残し、部分から代わりの案の ID で指す。
@@ -919,6 +978,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     const askedQuestionIds = new Set<string>();
     let followUpQuestions: readonly PlanQuestion[] = [];
     let allRecommended = false;
+    /** 既定で決めたこと（確認の画面が「既定で決めたこと」を出すための並び。Issue #408） */
+    const defaultDecisions: PlanDecision[] = [];
 
     const planDraft = () => ({
       schema_version: PLAN_SPEC_SCHEMA_VERSION,
@@ -937,6 +998,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         requirement.change === undefined ? [] : [requirement.change],
       ),
       unwritable: acceptedUnwritable,
+      // 既定で決めたこと（ID の接頭辞では見分けない。下書きの並びから出す。Issue #408）
+      closedByDefault: defaultDecisions.slice(),
     });
 
     const resolveIssue = (issueId: string, answerId: string): void => {
@@ -971,7 +1034,46 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       };
     };
 
+    /**
+     * 許可の表の既定で、未指定の事項のうち適用条件に合う**重大でない**ものを閉じる（04 §3「既定で
+     * 決めてよいものは聞かない」・Issue #408）。**最初の往復を含め、各往復で P4 の要否を決める前に**
+     * 呼ぶ。閉じた事項は P4 の材料に含めず、問数・往復も消費しない。
+     *
+     * 対象は、**コードが目録から作った事項**（`catalogIssueFacets`）だけである。モデルが同じ形
+     * （`OI:catalog:`）の ID を作った事項・重複した ID の事項・重大な事項は対象にしない。適用条件は、
+     * 目録の判定の結果（要件ごとの門の判定）だけを見る。**表の外の事項（権限・自由文・矛盾の再質問・
+     * P1 の未解決）は閉じない。**
+     */
+    const applyDefaults = (): void => {
+      const counts = new Map<string, number>();
+      for (const issue of openIssues) counts.set(issue.id, (counts.get(issue.id) ?? 0) + 1);
+      for (const [issueId, facet] of catalogIssueFacets) {
+        // 重複した ID は既定の対象にしない（同じ ID の事項が 2 つ以上ある）
+        if ((counts.get(issueId) ?? 0) !== 1) continue;
+        const index = openIssues.findIndex((issue) => issue.id === issueId && issue.status === "open");
+        const issue = openIssues[index];
+        // 重大な事項は既定の対象にしない
+        if (issue === undefined || issue.critical) continue;
+        const catalogFacet = CATALOG_FACETS.find((candidate) => candidate.id === facet.facetId);
+        if (catalogFacet === undefined) continue;
+        const applied = catalogDefaultOf(catalogFacet, {
+          aggregates: aggregatesByRequirement.get(facet.requirementId) ?? null,
+        });
+        // 表に無い観点・適用条件に合わない（no-match）・判定できない（unknown）は閉じない
+        if (applied === undefined) continue;
+        const decisionId = defaultDecisionId(issueId);
+        const reason = `${applied.reason}（観点: ${facet.facetId}）`;
+        const decision: PlanDecision = { id: decisionId, subject: issue.text, value: applied.value, reason };
+        decisions.push(decision);
+        defaultDecisions.push(decision);
+        openIssues[index] = { ...issue, status: "resolved", resolution: { decision_id: decisionId, reason } };
+        closedByDefaults.push({ issueId, facetId: facet.facetId, value: applied.value });
+      }
+    };
+
     for (;;) {
+      // 表の既定で閉じるのは、**P4 の要否を決める前**（最初の往復を含む。Issue #408）
+      applyDefaults();
       const open = openIssues.filter((issue) => issue.status === "open");
       const preRemaining = remainingPlanBudget(turns);
       const willAsk =
@@ -1016,7 +1118,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         return {
           kind: "cannot-confirm",
           openIssues: step.openIssues,
-          reasons: [sessionCannotConfirmReason(turns)],
+          reasons: [sessionCannotConfirmReason(turns, openIssues)],
           ...resultBase(),
         };
       }
