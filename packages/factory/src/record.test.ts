@@ -19,6 +19,7 @@ import {
   makeStageRecord,
   usageDelta,
   type RunRecord,
+  type StageRecord,
 } from "./record.js";
 
 const USAGE: OpenAiUsage = {
@@ -100,6 +101,62 @@ describe("記録の欄は列挙した欄だけである（02 §3.5）", () => {
     const picked = buildRunRecord(raw);
     expect(Object.keys(picked).sort()).toEqual([...RUN_RECORD_KEYS].sort());
     expect(Object.keys(picked.stages[0] ?? {}).sort()).toEqual([...STAGE_RECORD_KEYS].sort());
+  });
+});
+
+// ── 1b. 段の記録の operation（Issue #410）────────────────────────
+
+describe("段の記録の operation（Issue #410）", () => {
+  const snapshot = {
+    calls: 1,
+    missing_usage_calls: 0,
+    input_tokens: 10,
+    cached_input_tokens: 2,
+    cache_write_tokens: 3,
+    output_tokens: 4,
+    reasoning_tokens: 1,
+  };
+
+  it("欄の一覧に operation がある", () => {
+    expect(STAGE_RECORD_KEYS).toContain("operation");
+  });
+
+  it("makeStageRecord は、省けば null、redo-design を渡せばその値を写す", () => {
+    expect(makeStageRecord("design", "ok", 12, snapshot, null).operation).toBeNull();
+    expect(makeStageRecord("design", "ok", 12, snapshot, null, "redo-design").operation).toBe("redo-design");
+  });
+
+  it("上限のある値の並びの外（有限でない値）は写さず null にする", () => {
+    expect(makeStageRecord("design", "ok", 12, snapshot, null, "model-output" as never).operation).toBeNull();
+    expect(makeStageRecord("design", "ok", 12, snapshot, null, 42 as never).operation).toBeNull();
+  });
+
+  it("buildRunRecord で組み直しても値が残り、余分な欄は残らない", () => {
+    const redone = { ...makeStageRecord("design", "ok", 12, snapshot, null, "redo-design"), extra: "余分" };
+    const picked = buildRunRecord({ ...record(), stages: [redone as unknown as StageRecord] });
+    expect(picked.stages[0]?.operation).toBe("redo-design");
+    expect(Object.keys(picked.stages[0] ?? {}).sort()).toEqual([...STAGE_RECORD_KEYS].sort());
+    expect((picked.stages[0] as unknown as Record<string, unknown>)["extra"]).toBeUndefined();
+  });
+
+  it("buildSummary の要約の同じ段にも値が残り、余分な欄は残らず、wire に受け付けられる", () => {
+    const redone = { ...makeStageRecord("design", "ok", 12, snapshot, null, "redo-design"), extra: "余分" };
+    const built = buildSummary(
+      { ...record(), stages: [redone as unknown as StageRecord] },
+      {
+        run_id: "run-1",
+        verdict: "partial",
+        assurance: "partial",
+        duration_secs: 1.5,
+        provider_cost_usd: 0.02,
+        stop_class: "completed",
+        exit_code: 1,
+      },
+    );
+    expect(built.stages[0]?.operation).toBe("redo-design");
+    expect(Object.keys(built.stages[0] ?? {}).sort()).toEqual([...STAGE_RECORD_KEYS].sort());
+    expect((built.stages[0] as unknown as Record<string, unknown>)["extra"]).toBeUndefined();
+    expect(acceptsHeadlessSummaryWire(built)).toBe(true);
   });
 });
 
