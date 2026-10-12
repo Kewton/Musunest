@@ -2489,6 +2489,14 @@ describe("断る Problem の field と message に、値を埋めない（§1・
     }
   };
 
+  /** 要求のデータ（`<data name="…">…</data>`）の中身を取り出す（欄ごとに確かめる） */
+  const dataBlockOf = (input: string, name: string): string => {
+    const open = `<data name="${name}">`;
+    const start = input.indexOf(open);
+    expect(start, name).toBeGreaterThanOrEqual(0);
+    return input.slice(start + open.length, input.indexOf("</data>", start)).trim();
+  };
+
   it("一意に決まらない selector の断りに、要件 ID・役割 ID の目印が出ない", () => {
     const suite = suiteOf([
       markedTest({ id: "s1", roleId: `record-${marker}.total` }),
@@ -2645,7 +2653,7 @@ describe("断る Problem の field と message に、値を埋めない（§1・
     expectNoMarker(problems);
   });
 
-  it("作り直しの指示のデータ（前回の問題）にも、値の目印が出ない", async () => {
+  it("作り直しの指示のデータ（前回の問題）にも、値の目印が出ず、位置を解決する参照データを欠かさない", async () => {
     const bad = { tests: keyWithFirstInput({ [`ghost-${marker}`]: 1 }) };
     const good = { tests: KEY_VALID };
     const recording = createRecordingClient([structured(bad), structured(good)]);
@@ -2661,7 +2669,127 @@ describe("断る Problem の field と message に、値を埋めない（§1・
     const remake = recording.structured[1];
     expect(remake).toBeDefined();
     if (remake === undefined) return;
-    expect(remake.input).toContain("前回の作り直しの指示");
-    expect(remake.input).not.toContain(marker);
+    // 目印の非出現は「前回の問題」のブロックに対してだけ見る（要求全体には、参照データの試験が入る）
+    const previousProblems = JSON.parse(dataBlockOf(remake.input, "前回の作り直しの指示")) as readonly {
+      readonly field: string;
+      readonly message: string;
+    }[];
+    for (const entry of previousProblems) {
+      expect(`${entry.field} ${entry.message}`).not.toContain(marker);
+    }
+    // 添字の参照先になる、前回に実際に検査した試験集合を欠かさない
+    const previousTests = JSON.parse(dataBlockOf(remake.input, "前回の試験")) as readonly { readonly id: string }[];
+    expect(previousTests.map((test) => test.id)).toEqual(KEY_VALID.map((test) => test.id));
+  });
+
+  it("作り直しの要求から、Problem の tests[添字] の位置を解決できる（複数要件・複数役割・途中で外す）", async () => {
+    const roles: readonly RoleEntry[] = [
+      { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+      { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null, options: null, groupBy: null },
+      { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: null },
+      { roleId: "record.records", kind: "screen", entity: "record", name: "records", shared: false, aliasOf: null, options: null, groupBy: null },
+    ];
+    const list = markedList(["R-1", "R-2", "R-3"]);
+    const design: DesignResult = {
+      roles,
+      designs: [
+        {
+          requirementId: "R-1",
+          nature: "existence-only",
+          verification: { kind: "structural", reason: "構造で確かめる" },
+          checks: ["view-shows"],
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+            { roleId: "record.records", basis: "stated", reason: null },
+          ],
+        },
+        {
+          requirementId: "R-2",
+          nature: "ruled",
+          verification: { kind: "fixed-test" },
+          checks: [],
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+            { roleId: "record.total", basis: "stated", reason: null },
+          ],
+        },
+        {
+          requirementId: "R-3",
+          nature: "ruled",
+          verification: { kind: "fixed-test" },
+          checks: [],
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+            { roleId: "record.total", basis: "stated", reason: null },
+          ],
+        },
+      ],
+    };
+    const exec = (id: string, requirementId: string, kind: "normal" | "abnormal" | "boundary", input: unknown = {}) =>
+      markedTest({ id, requirementId, roleId: "record.total", kind, input });
+    // 生の応答：R-1 の実行の試験（構造で確かめる要件なので固定の前に外れる）を、指してほしい試験の前に置く
+    const raw = {
+      tests: [
+        exec("d1", "R-1", "normal"),
+        exec("d2", "R-1", "abnormal"),
+        exec("a1", "R-2", "normal"),
+        exec("a2", "R-2", "abnormal", { [`ghost-${marker}`]: 1 }),
+        exec("a3", "R-2", "boundary"),
+        exec("b1", "R-3", "normal"),
+        exec("b2", "R-3", "abnormal"),
+        exec("b3", "R-3", "boundary"),
+      ],
+    };
+    const shape = checkTestSuite(raw.tests);
+    expect(shape.ok).toBe(true);
+    if (!shape.ok) return;
+    // 固定の前に外した後の、**実際に検査する**試験集合が Problem の添字の参照先になる
+    const examined = dropNonstructuralTests(design, shape.suite, 1).suite;
+    expect(examined.tests.map((test) => test.id)).toEqual(["a1", "a2", "a3", "b1", "b2", "b3"]);
+
+    const recording = createRecordingClient([structured(raw), structured(raw)]);
+    const outcome = await runTestSuiteImpl({
+      list,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design,
+    });
+    expect(outcome.ok).toBe(false);
+    expect(recording.structured).toHaveLength(2);
+    const remake = recording.structured[1];
+    expect(remake).toBeDefined();
+    if (remake === undefined) return;
+
+    const previousTests = JSON.parse(dataBlockOf(remake.input, "前回の試験")) as readonly {
+      readonly id: string;
+      readonly target: { readonly requirementId: string; readonly roleId?: string };
+    }[];
+    // 送った前回の試験は、外した後の集合（生の応答の並びではない）
+    expect(previousTests.map((test) => test.id)).toEqual(["a1", "a2", "a3", "b1", "b2", "b3"]);
+
+    const previousProblems = JSON.parse(dataBlockOf(remake.input, "前回の作り直しの指示")) as readonly {
+      readonly field: string;
+      readonly message: string;
+    }[];
+    // 値の鍵の誤りが、添字で指されている（生の応答では 3 番目、外した後は 1 番目）
+    const problem = previousProblems.find((entry) => entry.field === "tests[1].input");
+    expect(problem).toBeDefined();
+    // 送った前回の試験の 1 番目が、指された試験（a2・R-2・record.total）である ＝ 位置を解決できる
+    expect(previousTests[1]?.id).toBe("a2");
+    expect(previousTests[1]?.target.requirementId).toBe("R-2");
+    expect(previousTests[1]?.target.roleId).toBe("record.total");
+    // 目印の非出現は「前回の問題」のブロックに対してだけ見る（参照データには値が入ってよい）
+    for (const entry of previousProblems) {
+      expect(`${entry.field} ${entry.message}`).not.toContain(marker);
+    }
   });
 });

@@ -1299,6 +1299,11 @@ function checkRoleGroupByFields(design: DesignResult): readonly Problem[] {
  * 決まらない）。種類も渡すのは、コードの突き合わせ（`reconcileNatures`）と同じ材料を会話にも見せ、
  * 在ることだけの要件に異常・境界の試験を作らせないためである。
  *
+ * **やり直しでは、前回に実際に検査した試験集合（構造で確かめる要件の実行の試験を外した後）も、
+ * 前回の作り直しの指示とは別のデータとして渡す**（Issue #439）。Problem の `field` は位置を添字で
+ * 示す（`tests[添字]`）が値を文に埋めないので、その添字がどの試験を指すかは、この集合が無いと
+ * 解決できない。`requirements[添字]` は毎回送る要件の一覧に対応するので、この集合は要らない。
+ *
  * **版は呼ぶ側の明示でだけ決める**（欄の有無から推定しない。決定 ⑨・Issue #428）。新契約（`version` を
  * 省いたとき）は、設計の欄（役割 ID の表・種類・確かめ方・所属）が無くても**必ず** 4 つを入れる
  * （黙って省かない。無ければ空の並び）。`legacy` を明示したときだけ `isPlannedDesign` で決め、
@@ -1308,6 +1313,7 @@ function buildData(
   list: RequirementList,
   design: DesignResult | undefined,
   previous: readonly Problem[],
+  previousTests: readonly FixedTest[] | undefined,
   plan: ConfirmedPlan | undefined,
   version: DesignContractVersion | undefined,
 ): readonly PromptData[] {
@@ -1354,6 +1360,11 @@ function buildData(
     });
   }
   if (previous.length > 0) {
+    // 前回に実際に検査した試験集合を、作り直しの指示とは**別のデータ**として渡す（Issue #439）。
+    // 作り直しの指示の `tests[添字]` は、この集合の添字を指す（値を Problem の文に戻さない）。
+    if (previousTests !== undefined) {
+      data.push({ name: "前回の試験", text: serializeJson(previousTests) });
+    }
     data.push({ name: "前回の作り直しの指示", text: serializeJson(previous) });
   }
   return data;
@@ -1413,6 +1424,10 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
             },
           ];
   let previous: readonly Problem[] = [];
+  // **前回に実際に検査した試験集合**（構造で確かめる要件の実行の試験を外した後）。作り直しの指示の
+  // `tests[添字]` の参照先になる。Problem の文に値を戻さずに位置を解決できるように、別のデータとして渡す
+  // （Issue #439）。
+  let previousTests: readonly FixedTest[] | undefined;
   // 食い違った要件の決め方（要件 ID ごと）。やり直しの回をまたいで持ち越す（聞き直さない。Issue #373）
   const decisions = new Map<string, NatureDecision>();
   // 固定の前に外した、構造で確かめる要件の構造の検査でない試験（回ごとに数える。Issue #392）
@@ -1425,7 +1440,7 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
     const request = buildStructuredRequest({
       rules: TEST_SUITE_RULES,
       documents: input.documents,
-      data: buildData(input.list, input.design, previous, input.plan, input.version),
+      data: buildData(input.list, input.design, previous, previousTests, input.plan, input.version),
       schemaName: TEST_SUITE_SCHEMA_NAME,
       schema: TEST_SUITE_SCHEMA,
       maxOutputTokens: input.gateway.maxOutputTokens("test-suite"),
@@ -1472,7 +1487,9 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
     if (problems.length === 0) {
       return { ok: true, value: { suite, rounds: round, discrepancies, dropped: droppedAll } };
     }
+    // 次の回に、作り直しの指示と**その添字の参照先**（実際に検査した試験集合）を渡す（Issue #439）
     previous = problems;
+    previousTests = suite.tests;
   }
   return { ok: false, failure: { kind: "unmet", attempts: TEST_SUITE_ROUNDS, problems: previous } };
 }
