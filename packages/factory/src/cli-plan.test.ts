@@ -1611,4 +1611,60 @@ describe("P3 の申告の点検を plan-record.json の surface_check に残す�
     expect(diagnostic.claims[0]).toMatchObject({ index: 0, stage: "triage", classification: "not-a-problem" });
     expect(diagnostic.claims[1]).toMatchObject({ index: 1, stage: "triage", classification: "vocabulary-hole" });
   });
+
+  it("最初の判定の予約が失敗しても、診断ファイルに全申告が未実行で残る（申告 0 件と区別できる）", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    const surface = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-0", requirementId: "R-1", part: "部分 0", constraintIds: ["記録"], reason: "理由 0", alternative: "代案 0" },
+        { id: "U-1", requirementId: "R-2", part: "部分 1", constraintIds: ["合計"], reason: "理由 1", alternative: "代案 1" },
+      ],
+    };
+    // surface の応答で予算を使い切る → surface-check の最初の判定の予約が失敗する
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface, hugeUsage),
+    ]);
+    const judge = createFakeJudge(catalogAnswers());
+    const dir = `${directory}/surface-check-unexecuted`;
+    const answersPath = "surface-check-unexecuted-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--budget", "1"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.stage).toBe("surface-check");
+    expect(record.failure?.kind).toBe("budget");
+    // 全申告が「未実行」で別ファイルに残る（申告が無かった場合と区別できる）
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.claims).toEqual([
+      expect.objectContaining({ index: 0, requirement_id: "R-1", stage: "unexecuted", classification: "unexecuted", doc_version: "v1" }),
+      expect.objectContaining({ index: 1, requirement_id: "R-2", stage: "unexecuted", classification: "unexecuted", doc_version: "v1" }),
+    ]);
+  });
 });

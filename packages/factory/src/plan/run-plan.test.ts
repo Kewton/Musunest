@@ -2495,12 +2495,14 @@ describe("P3 の「書けない」の申告を判定の口で点検する（04 �
       ...catalogAnswers(),
       [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
       [surfaceSupportQuestionName(0)]: choice("not-stated", 0.9),
-      // 「書いていない」を再点検（Luna）に回すが、根拠が取れない → 未点検（根拠不足）のまま
+    });
+    // 「書いていない」を再点検（Luna）に回すが、根拠が取れない → 未点検（根拠不足）のまま
+    const recheckJudge = createFakeJudge({
       [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
       [surfaceRecheckEvidenceQuestionName(0)]: choice(SURFACE_RECHECK_NO_EVIDENCE, 0.9),
     });
 
-    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+    const result = await runPlan(makePlanInput(recording.client, judge, responder, { recheckJudge }));
 
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
@@ -2556,6 +2558,16 @@ describe("P3 の「書けない」の申告を判定の口で点検する（04 �
     expect(result.stages.find((stage) => stage.stage === "surface-check")?.failure_kind).toBe("budget");
     // 申告が通らない（受理 0）
     expect(result.surfaceCheck.accepted).toBe(0);
+    // 最初の判定の予約が失敗しても、全申告が未実行の印で診断に残る（Issue #432。申告 0 件と区別できる）
+    expect(result.surfaceCheckDiagnostics).toEqual([
+      expect.objectContaining({
+        index: 0,
+        requirementId: "R-1",
+        stage: "unexecuted",
+        classification: "unexecuted",
+        docVersion: "v1",
+      }),
+    ]);
   });
 
   it("仕分けの確信度が閾値未満なら、落とさず（not-a-problem でも）未点検にして確定させない", async () => {
@@ -2584,12 +2596,14 @@ describe("P3 の「書けない」の申告を判定の口で点検する（04 �
       ...catalogAnswers(),
       // not-a-problem でも、仕分けの確信度が閾値未満 → 落とさず再点検へ回す
       [surfaceTriageQuestionName(0)]: choice("not-a-problem", 0.1),
-      // 再点検も判定不能 → 未点検（確定させない）
+    });
+    // 再点検も判定不能 → 未点検（確定させない）
+    const recheckJudge = createFakeJudge({
       [surfaceRecheckKindQuestionName(0)]: choice("undecidable", 0.9),
       [surfaceRecheckEvidenceQuestionName(0)]: choice(SURFACE_RECHECK_NO_EVIDENCE, 0.9),
     });
 
-    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+    const result = await runPlan(makePlanInput(recording.client, judge, responder, { recheckJudge }));
 
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
@@ -2658,5 +2672,101 @@ describe("P3 の「書けない」の申告を判定の口で点検する（04 �
     ]);
     // 受理はまだ 0（裏付けに届いていない）
     expect(result.surfaceCheck.accepted).toBe(0);
+  });
+});
+
+// ── 判定も、生成と共有する締切・総呼び出し数の門を通る（Issue #432）─────────────
+
+describe("判定も、生成と共有する締切・総呼び出し数の門を通る（Issue #432）", () => {
+  /** 仕分けが確信度不明（閾値未満）で、再点検へ回る 1 件の申告を持つ P3 の出力 */
+  const SURFACE_RECHECK_ONE = {
+    ambiguities: [],
+    unwritable: [
+      { id: "U-0", requirementId: "R-1", part: "部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+    ],
+  };
+
+  it("再点検の間に締切を越えたら、確認へ進まず deadline で止まる", async () => {
+    let clock = 0;
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_RECHECK_ONE),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      // 仕分けは確信度不明 → 再点検へ
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole"),
+    });
+    // 再点検の間に時計が進み、締切を越える
+    const recheckJudge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        clock = 2_000;
+        return createFakeJudge({
+          [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
+          [surfaceRecheckEvidenceQuestionName(0)]: choice("記録", 0.9),
+        }).judge(request);
+      },
+    };
+
+    const result = await runPlan(
+      makePlanInput(recording.client, judge, ANSWER_NONE, { deadline: 1_000, now: () => clock, recheckJudge }),
+    );
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("deadline");
+    expect(result.failure?.stage).toBe("surface-check");
+    expect(result.failure?.kind).toBe("deadline");
+  });
+
+  it("生成で呼び出し上限に達したら、再点検を開始せず call-limit で止まる", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_RECHECK_ONE),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole"),
+      [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceRecheckEvidenceQuestionName(0)]: choice("記録", 0.9),
+    });
+
+    const result = await runPlan(
+      makePlanInput(recording.client, judge, ANSWER_NONE, { limits: { ...AGENT_LIMITS, callCount: 5 } }),
+    );
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("call-limit");
+    expect(result.failure?.stage).toBe("surface-check");
+    expect(result.failure?.kind).toBe("call-limit");
+    // 再点検を開始していない（受理 0・未点検のまま）
+    expect(result.surfaceCheck.accepted).toBe(0);
+  });
+
+  it("落とし先（Luna）の口が無い入力では、主（Jev）を再点検に使わず、低確信を受理しない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_RECHECK_ONE),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      // 仕分けは低確信（語彙の穴）→ 再点検へ回したい
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.1),
+      // 主が万一再点検に使われたら受理してしまう答えを持たせておく（使われないことを確かめる）
+      [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceRecheckEvidenceQuestionName(0)]: choice("記録", 0.9),
+    });
+
+    // recheckJudge を渡さない（落とし先が無い）
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.surfaceCheck.accepted).toBe(0);
+    expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]" }]);
   });
 });

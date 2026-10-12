@@ -11,6 +11,7 @@
 //   5. 診断に、申告の添字・要件 ID・部分・理由・制約 ID・文書の版・段階・分類・adapter・確信度・根拠 ID を残す
 import { describe, expect, it } from "vitest";
 import { createFakeJudge } from "../judge-fake.js";
+import { JudgeBudgetExceededError } from "../judge-budget.js";
 import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest } from "../judge.js";
 import { SAMPLE_DOCUMENTS } from "../stages/__tests__/prompt.js";
 import {
@@ -72,16 +73,16 @@ const REQUIREMENTS = new Map([
 ]);
 
 /**
- * 主の判定と落とし先（Luna）の判定を別々に持つ、要求を記録する偽物。
- * 既定では落とし先も同じ答えを使う（落とし先を指定しない試験は、同じ写像で再点検にも答える）。
+ * 主の判定と再点検（Luna）の判定を別々に持つ、要求を記録する偽物。再点検の宛先は**明示的に渡す**
+ * （`recheckJudge`。合成した口をもう一度呼ぶと主が答え直すだけなので、主は再点検に使わない）。
+ * 既定では再点検も同じ答えを使う（落とし先を指定しない試験は、同じ写像で再点検にも答える）。
  */
 function recordingJudge(
   answers: Readonly<Record<string, JudgeAnswer>>,
-  fallbackAnswers: Readonly<Record<string, JudgeAnswer>> = answers,
-  fallbackModel = "fake-judge",
-): { readonly judge: Judge; readonly requests: JudgeRequest[] } {
+  recheckAnswers: Readonly<Record<string, JudgeAnswer>> = answers,
+): { readonly judge: Judge; readonly recheckJudge: Judge; readonly requests: JudgeRequest[] } {
   const primary = createFakeJudge(answers, { model: "fake-judge" });
-  const luna = createFakeJudge(fallbackAnswers, { model: fallbackModel });
+  const luna = createFakeJudge(recheckAnswers, { model: "fake-luna" });
   const requests: JudgeRequest[] = [];
   return {
     judge: {
@@ -89,11 +90,11 @@ function recordingJudge(
         requests.push(request);
         return primary.judge(request);
       },
-      fallback: {
-        async judge(request: JudgeRequest) {
-          requests.push(request);
-          return luna.judge(request);
-        },
+    },
+    recheckJudge: {
+      async judge(request: JudgeRequest) {
+        requests.push(request);
+        return luna.judge(request);
       },
     },
     requests,
@@ -122,6 +123,7 @@ function check(
       surface: output,
       documents: SAMPLE_DOCUMENTS,
       judge: recording.judge,
+      recheckJudge: recording.recheckJudge,
       threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
       requirements: REQUIREMENTS,
       docVersion: "v1",
@@ -303,17 +305,18 @@ describe("未確定の申告を、Luna の別の会話で再点検する（05 §
         requests.push(request);
         return primary.judge(request);
       },
-      fallback: {
-        async judge(request) {
-          requests.push(request);
-          return luna.judge(request);
-        },
+    };
+    const recheckJudge: Judge = {
+      async judge(request) {
+        requests.push(request);
+        return luna.judge(request);
       },
     };
     const result = await runSurfaceCheck({
       surface: surface(HOLE),
       documents: SAMPLE_DOCUMENTS,
       judge,
+      recheckJudge,
       threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
       requirements: REQUIREMENTS,
       docVersion: "v1",
@@ -398,14 +401,12 @@ describe("未確定の申告を、Luna の別の会話で再点検する（05 §
   });
 
   it("落とし先も失敗したら、受理せず未点検にする（確認へ進ませない）", async () => {
-    const judge: Judge = {
-      ...createFakeJudge({ [surfaceTriageQuestionName(0)]: choice("vocabulary-hole") }, { model: "fake-primary" }),
-      fallback: failingJudge(),
-    };
+    const judge = createFakeJudge({ [surfaceTriageQuestionName(0)]: choice("vocabulary-hole") }, { model: "fake-primary" });
     const result = await runSurfaceCheck({
       surface: surface(HOLE),
       documents: SAMPLE_DOCUMENTS,
       judge,
+      recheckJudge: failingJudge(),
       threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
       requirements: REQUIREMENTS,
       docVersion: "v1",
@@ -467,6 +468,111 @@ describe("診断に、申告と点検を結び付けて残す（Issue #432）", 
         confidence: 0.9,
         evidenceId: null,
       }),
+    ]);
+  });
+});
+
+// ── 未知の答えは、確信度にかかわらず拒否する（Issue #432）──────────────────────
+
+describe("未知の答えを、確信度で分けない（Issue #432）", () => {
+  it("仕分けの未知のラベルは、高確信・低確信・不明のどれでも未点検に残し、再点検へ回さない", async () => {
+    for (const confidence of [0.9, DEFAULT_PLAN_JUDGE_THRESHOLD - 0.1, undefined]) {
+      const { run, requests } = check(surface(HOLE), {
+        [surfaceTriageQuestionName(0)]: choice("???", confidence),
+      });
+      const result = await run;
+      // 有限の選択肢に無い答えは、確信度にかかわらず未点検（受理にも落とすにも転じない）
+      expect(result.accepted, String(confidence)).toEqual([]);
+      expect(result.dropped, String(confidence)).toEqual([]);
+      expect(result.ambiguities, String(confidence)).toEqual([]);
+      expect(result.unchecked, String(confidence)).toEqual([
+        { index: 0, requirementId: "R-1", part: "アプリ自体の名前・説明", code: "unknown" },
+      ]);
+      // 再点検へは回さない（仕分け 1 回だけ）
+      expect(requests, String(confidence)).toHaveLength(1);
+    }
+  });
+
+  it("裏付けの未知のラベルも、高確信・低確信・不明のどれでも未点検に残す（再点検へ回さない）", async () => {
+    for (const confidence of [0.9, DEFAULT_PLAN_JUDGE_THRESHOLD - 0.1, undefined]) {
+      const { run, requests } = check(surface(HOLE), {
+        [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+        [surfaceSupportQuestionName(0)]: choice("???", confidence),
+      });
+      const result = await run;
+      expect(result.accepted, String(confidence)).toEqual([]);
+      expect(result.unchecked, String(confidence)).toEqual([
+        { index: 0, requirementId: "R-1", part: "アプリ自体の名前・説明", code: "unknown" },
+      ]);
+      // 仕分け + 裏付けの 2 回だけ（再点検はしない）
+      expect(requests, String(confidence)).toHaveLength(2);
+    }
+  });
+});
+
+// ── Luna の口が無ければ再点検しない（主を再点検に使わない。Issue #432）───────────
+
+describe("再点検の宛先が無いとき（Issue #432）", () => {
+  it("Luna の口が無ければ、再点検せず未点検に残す（主を再点検に使わない）", async () => {
+    const judge = createFakeJudge({
+      // 仕分けは確信度不明（閾値未満）→ 再点検へ回したいが、宛先が無い
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole"),
+      // 主が万一再点検に使われたら受理してしまう答えを持たせておく（使われないことを確かめる）
+      [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceRecheckEvidenceQuestionName(0)]: choice("アプリの名前・説明", 0.9),
+    });
+    const result = await runSurfaceCheck({
+      surface: surface(HOLE),
+      documents: SAMPLE_DOCUMENTS,
+      judge,
+      threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
+      requirements: REQUIREMENTS,
+      docVersion: "v1",
+    });
+
+    expect(result.accepted).toEqual([]);
+    expect(result.unchecked).toEqual([
+      { index: 0, requirementId: "R-1", part: "アプリ自体の名前・説明", code: "unknown" },
+    ]);
+    expect(result.diagnostics[0]).toMatchObject({ stage: "recheck", adapter: "none", evidenceId: null });
+  });
+});
+
+// ── 最初の判定の予約が失敗しても、全申告の診断が残る（Issue #432）───────────────
+
+describe("最初の判定で止まっても、全申告の診断が残る（Issue #432）", () => {
+  it("最初の判定の予約が失敗したら、全申告が未実行の印で報告される", async () => {
+    const second = claim("U-1", "R-2", "部分 2", ["記録"], "理由 2");
+    const judge: Judge = {
+      async judge() {
+        throw new JudgeBudgetExceededError(1, 0);
+      },
+    };
+    const progress: { readonly index: number; readonly stage: string; readonly classification: string; readonly docVersion: string }[][] = [];
+    await expect(
+      runSurfaceCheck({
+        surface: surface(HOLE, second),
+        documents: SAMPLE_DOCUMENTS,
+        judge,
+        threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
+        requirements: REQUIREMENTS,
+        docVersion: "v1",
+        onProgress: (partial) =>
+          progress.push(
+            partial.diagnostics.map((entry) => ({
+              index: entry.index,
+              stage: entry.stage,
+              classification: entry.classification,
+              docVersion: entry.docVersion,
+            })),
+          ),
+      }),
+    ).rejects.toBeInstanceOf(JudgeBudgetExceededError);
+
+    // 判定を呼ぶ前に、全申告の最小データと未実行の印が報告される（申告が無かった場合と区別できる）
+    expect(progress.at(-1)).toEqual([
+      { index: 0, stage: "unexecuted", classification: "unexecuted", docVersion: "v1" },
+      { index: 1, stage: "unexecuted", classification: "unexecuted", docVersion: "v1" },
     ]);
   });
 });

@@ -246,18 +246,27 @@ function parentOf(path: string): string {
  * 判定の口を組み立てる（05 §4・Issue #355）。`JEV_API_KEY` があれば **Jev を主・LLM を落とし先**にした
  * 組み合わせ、無ければ LLM だけを使う（その旨を標準エラーに 1 行出す）。**鍵を読むのはここだけ**——adapter
  * （Jev・LLM）は環境変数を読まない。Plan にも Build にも**同じ判定の口**を渡す（Issue #336）。
+ *
+ * 併せて、**再点検専用の Luna の口**（LLM）を返す（Issue #432）——P3 の未確定の申告の再点検を、主（Jev）
+ * ではなく Luna の別の会話へ明示的に回すため、呼ぶ側（Plan）へ渡す。Build には使わない。
  */
-function assembleJudge(deps: CliDeps, model: string, client: LlmClient, logError: (line: string) => void): Judge {
+function assembleJudge(
+  deps: CliDeps,
+  model: string,
+  client: LlmClient,
+  logError: (line: string) => void,
+): { readonly judge: Judge; readonly recheckJudge: Judge } {
   const llmJudge = (deps.makeLlmJudge ?? createLlmJudge)({ client, model });
   const jevApiKey = deps.env[JEV_API_KEY_ENV];
   if (jevApiKey !== undefined && jevApiKey !== "") {
-    return createFallbackJudge({
+    const judge = createFallbackJudge({
       primary: (deps.makeJevJudge ?? createJevJudge)({ apiKey: jevApiKey }),
       fallback: llmJudge,
     });
+    return { judge, recheckJudge: llmJudge };
   }
   logError(`環境変数 ${JEV_API_KEY_ENV} が無いので、判定は LLM（${model}）だけを使います`);
-  return llmJudge;
+  return { judge: llmJudge, recheckJudge: llmJudge };
 }
 
 /** 生成の入力のうち、Plan の有無で変わらない部分（`--out` のディレクトリ・締切・上限） */
@@ -266,6 +275,8 @@ interface BuildJob {
   readonly documents: readonly PromptDocument[];
   readonly client: LlmClient;
   readonly judge: Judge;
+  /** 再点検専用の Luna の口（Plan だけが使う。Issue #432） */
+  readonly recheckJudge: Judge;
   readonly outDir: string;
   readonly model: string;
   readonly effort: string;
@@ -368,6 +379,7 @@ async function runPlanThenBuild(
     documents: job.documents,
     client: job.client,
     judge: job.judge,
+    recheckJudge: job.recheckJudge,
     responder,
     budgetUsd: job.budgetUsd,
     rates: deps.rates ?? DEFAULT_RATES,
@@ -433,7 +445,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
   const source = await deps.readFile(parsed.requestFile);
   const documents = await deps.loadDocuments();
   const client = deps.makeClient({ apiKey, model: parsed.model, effort: parsed.effort });
-  const judge = assembleJudge(deps, parsed.model, client, logError);
+  const { judge, recheckJudge } = assembleJudge(deps, parsed.model, client, logError);
 
   const now = deps.now ?? ((): number => Date.now());
   const deadline = now() + (parsed.deadlineMs ?? deps.deadlineMs ?? DEFAULT_DEADLINE_MS);
@@ -442,6 +454,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
     documents,
     client,
     judge,
+    recheckJudge,
     outDir: parsed.outDir,
     model: parsed.model,
     effort: parsed.effort,

@@ -47,6 +47,38 @@ export class JudgeBudgetExceededError extends Error {
   }
 }
 
+/** 実際の呼び出しの前に、締切と総呼び出し数の門で止まるとき投げる誤り（締切。Issue #432） */
+export class JudgeDeadlineExceededError extends Error {
+  constructor() {
+    super("判定の締切を過ぎています");
+    this.name = "JudgeDeadlineExceededError";
+  }
+}
+
+/** 実際の呼び出しの前に、総呼び出し数の門で止まるとき投げる誤り（Issue #432） */
+export class JudgeCallLimitExceededError extends Error {
+  constructor(remaining: number) {
+    super(`判定の呼び出しの上限に達しています（残り ${remaining}）`);
+    this.name = "JudgeCallLimitExceededError";
+  }
+}
+
+/**
+ * 判定の**実呼び出し**を、生成と共有する締切・総呼び出し数の門に結び付ける（Issue #432）。判定の口は
+ * 生成の `CallGateway` を通らないので、ここで同じ時計・締切・上限を見る——**締切の残りで中断し、
+ * 失敗した試行も数える**。費用の予約はこの門のあと 1 回だけ行う（二重に予約しない）。
+ */
+export interface JudgeCallGate {
+  /** いまの時刻（ミリ秒）。生成と同じ時計を渡す */
+  readonly now: () => number;
+  /** 締切（ミリ秒）。これ以上なら呼ばない */
+  readonly deadline: number;
+  /** 総呼び出しの上限（生成の `callCount` と共有） */
+  readonly callLimit: number;
+  /** 生成側が既に使った呼び出しの数（いまの値。判定の試行と足して上限に照らす） */
+  readonly generationCalls: () => number;
+}
+
 /** 予算に結び付けた判定を作る関数の引数 */
 export interface BudgetedJudgeOptions {
   /** 包む判定の口（Jev・LLM・偽物のどれでもよい） */
@@ -62,6 +94,13 @@ export interface BudgetedJudgeOptions {
    * どちらが答えるか分からないので、Jev と LLM の両方の見積もりに同じ値を渡す。
    */
   readonly maxOutputTokens?: number;
+  /**
+   * **再点検専用の Luna の口**（Issue #432）。渡すと、これを落とし先（`fallback`）として同じ予算・
+   * 同じ台帳で包む——`judge.fallback` より優先する。渡さなければ `judge.fallback` を使う。
+   */
+  readonly recheck?: Judge;
+  /** 締切と総呼び出し数の門（生成と共有。Issue #432）。渡さなければ門を掛けない */
+  readonly gate?: JudgeCallGate;
 }
 
 /** 予算に結び付けた判定。`Judge` に、判定の費用と、答えた adapter ごとの呼び出しの数を足したもの */
@@ -75,29 +114,43 @@ export interface BudgetedJudge extends Judge {
    * 別の会話で行うとき、呼び側（`runPlan`）はここを使う——費用と呼び出しの数は主と共有する。
    */
   readonly fallback?: BudgetedJudge;
+  /**
+   * 門を通した判定の**試行**の数（主と落とし先の合計。成功・失敗を問わない。Issue #432）。生成側の
+   * 呼び出しの数と足して、総呼び出し数の上限に照らすのに使う。
+   */
+  readonly attempts: number;
 }
 
-/** 主と落とし先で**共有する**、判定の費用と呼び出しの数の台帳（Issue #432）。 */
+/** 主と落とし先で**共有する**、判定の費用・呼び出しの数・試行の数の台帳（Issue #432）。 */
 interface JudgeAccount {
   spentUsd: number;
+  attempts: number;
   readonly callsByAdapter: Record<JudgeSource, number>;
 }
 
 /**
  * 判定の口を、生成の予算に結び付けた包みで包む（§1.5・§5・Issue #359）。呼ぶ前に最大費用を予約し、
  * 呼んだあとで実際の費用で精算する。予約できなければ判定を呼ばずに `JudgeBudgetExceededError` を投げる。
- * 落とし先（Luna）があれば、それも**同じ予算**で包み、費用と呼び出しの数は主と共有する（Issue #432）。
+ * 落とし先（Luna）があれば、それも**同じ予算・同じ台帳**で包む（Issue #432）。締切と総呼び出し数の門
+ * （`gate`）があれば、**費用の予約の前に**照らし、失敗した試行も数える。
  */
 export function createBudgetedJudge(options: BudgetedJudgeOptions): BudgetedJudge {
-  const account: JudgeAccount = { spentUsd: 0, callsByAdapter: { jev: 0, llm: 0, fake: 0 } };
-  return wrapBudgetedJudge(options.judge, options, account);
+  const account: JudgeAccount = { spentUsd: 0, attempts: 0, callsByAdapter: { jev: 0, llm: 0, fake: 0 } };
+  const fallback = options.recheck ?? options.judge.fallback;
+  return wrapBudgetedJudge(options.judge, options, account, fallback);
 }
 
 /** 判定 1 つ（主または落とし先）を、共有の台帳に結び付けて包む（Issue #432） */
-function wrapBudgetedJudge(judge: Judge, options: BudgetedJudgeOptions, account: JudgeAccount): BudgetedJudge {
+function wrapBudgetedJudge(
+  judge: Judge,
+  options: BudgetedJudgeOptions,
+  account: JudgeAccount,
+  fallback: Judge | undefined,
+): BudgetedJudge {
   const rates = options.rates;
   const jevRates = options.jevRates ?? JEV_RATES;
   const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS;
+  const gate = options.gate;
   return {
     get spentUsd(): number {
       return account.spentUsd;
@@ -105,7 +158,17 @@ function wrapBudgetedJudge(judge: Judge, options: BudgetedJudgeOptions, account:
     get callsByAdapter(): Readonly<Record<JudgeSource, number>> {
       return { ...account.callsByAdapter };
     },
+    get attempts(): number {
+      return account.attempts;
+    },
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
+      // 締切と総呼び出し数の門（生成と共有。Issue #432）。**費用を予約する前に**照らし、失敗した試行も数える
+      if (gate !== undefined) {
+        if (gate.now() >= gate.deadline) throw new JudgeDeadlineExceededError();
+        const used = gate.generationCalls() + account.attempts;
+        if (used >= gate.callLimit) throw new JudgeCallLimitExceededError(gate.callLimit - used);
+        account.attempts += 1;
+      }
       const maxCostUsd = estimateJudgeMaxCostUsd({ request, rates, jevRates, maxOutputTokens });
       const reserved = options.budget.reserve(maxCostUsd);
       if (!reserved.reserved) {
@@ -122,7 +185,9 @@ function wrapBudgetedJudge(judge: Judge, options: BudgetedJudgeOptions, account:
         throw error;
       }
     },
-    ...(judge.fallback === undefined ? {} : { fallback: wrapBudgetedJudge(judge.fallback, options, account) }),
+    ...(fallback === undefined
+      ? {}
+      : { fallback: wrapBudgetedJudge(fallback, options, account, fallback.fallback) }),
   };
 }
 

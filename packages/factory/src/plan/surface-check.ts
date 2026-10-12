@@ -23,10 +23,15 @@
 // 了承除外を増やさない。受理するのは、仕分けと裏付け（再点検なら分類と根拠）の両方が取れたときだけ
 // である。未確定の申告が残れば、呼ぶ側（`runPlan`）が Plan を確定させない（決定⑤）。
 //
-// **実 API は呼ばない。** 判定は差し込まれた `Judge`（試験は偽物）だけを使う。落とし先（Luna）は
-// 合成した口の `fallback` から取る。鍵もファイルも環境変数も扱わない（CLAUDE.md の不変条件）。
+// **実 API は呼ばない。** 判定は差し込まれた `Judge`（試験は偽物）だけを使う。再点検の宛先（Luna）は、
+// 呼ぶ側が**明示的に渡した口**（`recheckJudge`）だけを使う——合成した口をもう一度呼ぶと主（Jev）が
+// 答え直すだけなので、落とし先が無ければ再点検せず未点検に残す。鍵もファイルも環境変数も扱わない。
 import type { Judge, JudgeAnswer, JudgeQuestion, JudgeResponse } from "../judge.js";
-import { JudgeBudgetExceededError } from "../judge-budget.js";
+import {
+  JudgeBudgetExceededError,
+  JudgeCallLimitExceededError,
+  JudgeDeadlineExceededError,
+} from "../judge-budget.js";
 import { constraintExcerpt, type PromptDocument } from "../stages/prompt.js";
 import type { PlanSurface, PlanUnwritable } from "./surface.js";
 
@@ -41,6 +46,14 @@ export type SurfaceSupportVerdict = (typeof SURFACE_SUPPORT_VERDICTS)[number];
 /** 再点検の仕分けの答え（語彙の穴か・問題ではないか・曖昧さか・判定不能か。Issue #432） */
 export const SURFACE_RECHECK_KINDS = ["vocabulary-hole", "not-a-problem", "ambiguity", "undecidable"] as const;
 export type SurfaceRecheckKind = (typeof SURFACE_RECHECK_KINDS)[number];
+
+/**
+ * 有限の答えの集合の判定（`includes` の型を避けるための小さな道具）。**未知の答えを確信度で分けない**
+ * ——仕分け・裏付けとも、まずここで所属を確かめ、未知なら確信度にかかわらず未点検にする。
+ */
+const TRIAGE_LABELS: ReadonlySet<string> = new Set(SURFACE_TRIAGE_LABELS);
+const SUPPORT_VERDICTS: ReadonlySet<string> = new Set(SURFACE_SUPPORT_VERDICTS);
+const RECHECK_KINDS: ReadonlySet<string> = new Set(SURFACE_RECHECK_KINDS);
 
 /** 再点検の根拠の問いで、どの節も述べていないことを示す選択肢の名前（Issue #432） */
 export const SURFACE_RECHECK_NO_EVIDENCE = "none" as const;
@@ -85,8 +98,8 @@ export type SurfaceDroppedCode = (typeof SURFACE_DROPPED_CODES)[number];
 export const SURFACE_UNCHECKED_CODES = ["not-stated", "low-confidence", "unknown"] as const;
 export type SurfaceUncheckedCode = (typeof SURFACE_UNCHECKED_CODES)[number];
 
-/** 点検の段階（診断に残す。Issue #432） */
-export const SURFACE_CHECK_STAGES = ["triage", "support", "recheck"] as const;
+/** 点検の段階（診断に残す。Issue #432）。`unexecuted` は判定を呼ぶ前に止まった印 */
+export const SURFACE_CHECK_STAGES = ["unexecuted", "triage", "support", "recheck"] as const;
 export type SurfaceCheckStage = (typeof SURFACE_CHECK_STAGES)[number];
 
 /** 判定 1 件の記録（問いの ID・答え・確信度・答えたモデルの版・adapter。依頼文の全文は残さない。§4） */
@@ -180,8 +193,13 @@ export interface SurfaceCheckInput {
   readonly surface: PlanSurface;
   /** 段に渡した文書（制約 ID の節の抜粋を取り出すのに使う） */
   readonly documents: readonly PromptDocument[];
-  /** 判定の口（Jev・LLM・偽物。試験は偽物を差し込む）。落とし先（Luna）は `fallback` から取る */
+  /** 判定の口（Jev・LLM・偽物。試験は偽物を差し込む）。落とし先（Luna）は `recheckJudge` から取る */
   readonly judge: Judge;
+  /**
+   * **再点検専用の Luna の口**（同じ Plan 予算で包んだもの。Issue #432）。無ければ再点検せず、未確定の
+   * 申告は未点検に残す——合成した口をもう一度呼ぶと主（Jev）が答え直すだけなので、主を再点検には使わない。
+   */
+  readonly recheckJudge?: Judge;
   /** 確信度の閾値（これ**未満**は未確定） */
   readonly threshold: number;
   /** 対象の要件の文（要件 ID → 文）。再点検の対象のデータに使う（Issue #432） */
@@ -271,6 +289,12 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
 
   if (claims.length === 0) return snapshot();
 
+  // **最初の判定を呼ぶ前に**、全申告の最小データと「未実行」の印を登録して報告する（Issue #432）。最初の
+  // 判定の予約が失敗しても、`plan-surface-check.json` に申告が 1 件も残らない（申告が無かった場合と区別
+  // できない）ことを避ける。
+  claims.forEach((claim, index) => setDiagnostic(claim, index, "unexecuted", "unexecuted", "none", null, null));
+  report();
+
   // ── 1. 仕分け（曖昧さ／語彙の穴／問題ではない）──────────────────────
   const triageQuestions: Record<string, JudgeQuestion> = {};
   claims.forEach((claim, index) => {
@@ -312,8 +336,8 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
       model: classify.model,
       answeredBy: classify.answeredBy,
     });
-    if (label === undefined) {
-      // 答えが読めないものは、捨てずに未点検として残す（確定を止める）
+    if (label === undefined || !TRIAGE_LABELS.has(label)) {
+      // **未知の答えは、確信度にかかわらず**未点検として残す（拒否が確信度で変わらないように。Issue #432）
       unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
       setDiagnostic(claim, index, "triage", "unknown", classify.answeredBy, confidence ?? null, null);
     } else if (confidence === undefined || confidence < input.threshold) {
@@ -334,14 +358,11 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
         code: "not-a-problem",
       });
       setDiagnostic(claim, index, "triage", "not-a-problem", classify.answeredBy, confidence, null);
-    } else if (label === "vocabulary-hole") {
-      // 裏付けはこれから。途中で止まっても診断に残るよう、仕分けの結果を先に置く（Issue #432）
+    } else {
+      // vocabulary-hole（有限のラベルは上で確かめ済み）。裏付けはこれから。途中で止まっても診断に残るよう、
+      // 仕分けの結果を先に置く（Issue #432）
       holes.push({ claim, index });
       setDiagnostic(claim, index, "triage", "vocabulary-hole", classify.answeredBy, confidence, null);
-    } else {
-      // 知らないラベルは、捨てずに未点検として残す（確定を止める）
-      unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
-      setDiagnostic(claim, index, "triage", "unknown", classify.answeredBy, confidence, null);
     }
   });
   report();
@@ -385,8 +406,8 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
         model: support.model,
         answeredBy: support.answeredBy,
       });
-      if (verdict === undefined) {
-        // 答えが読めない（unknown）
+      if (verdict === undefined || !SUPPORT_VERDICTS.has(verdict)) {
+        // **未知の答えは、確信度にかかわらず**未点検として残す（Issue #432）
         unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
         setDiagnostic(claim, index, "support", "unknown", support.answeredBy, confidence ?? null, null);
       } else if (verdict === "not-stated") {
@@ -401,7 +422,8 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
       } else if (verdict === "supports") {
         accepted.push(claim);
         setDiagnostic(claim, index, "support", "supports", support.answeredBy, confidence, null);
-      } else if (verdict === "contradicts") {
+      } else {
+        // contradicts（有限の判定は上で確かめ済み）
         dropped.push({
           index,
           requirementId: claim.requirementId,
@@ -410,9 +432,6 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
           code: "contradicts",
         });
         setDiagnostic(claim, index, "support", "contradicts", support.answeredBy, confidence, null);
-      } else {
-        unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
-        setDiagnostic(claim, index, "support", "unknown", support.answeredBy, confidence, null);
       }
     }
     report();
@@ -420,8 +439,17 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
 
   // ── 3. 再点検（Luna の別の会話。独立の点検。Issue #432）──────────────
   if (pending.length > 0) {
-    // 合成した口をもう一度呼ぶと主（Jev）が答え直すだけなので、落とし先（Luna）を明示的に選ぶ。
-    const luna = input.judge.fallback ?? input.judge;
+    // 再点検の宛先は、呼ぶ側が**明示的に渡した Luna の口**だけを使う（Issue #432）。合成した口をもう一度
+    // 呼ぶと主（Jev）が答え直すだけなので、主を再点検には使わない。Luna の口が無ければ再点検せず未点検に残す。
+    const luna = input.recheckJudge;
+    if (luna === undefined) {
+      for (const entry of pending) {
+        unchecked.push({ index: entry.index, requirementId: entry.claim.requirementId, part: entry.claim.part, code: "unknown" });
+        setDiagnostic(entry.claim, entry.index, "recheck", "unknown", "none", null, null);
+      }
+      report();
+      return snapshot();
+    }
     const kindQuestions: Record<string, JudgeQuestion> = {};
     const evidenceQuestions: Record<string, JudgeQuestion> = {};
     for (const entry of pending) {
@@ -492,24 +520,28 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
       });
       const evidenceId =
         evidence !== undefined && claim.constraintIds.includes(evidence) ? evidence : null;
-      if (kind === "not-a-problem") {
+      if (kind === undefined || !RECHECK_KINDS.has(kind)) {
+        // 未知の判定・読めない答えは、確信度にかかわらず未点検（Issue #432）
+        unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
+        setDiagnostic(claim, index, "recheck", "unknown", recheck.answeredBy, kindConfidence ?? null, null);
+      } else if (kind === "not-a-problem") {
         dropped.push({ index, requirementId: claim.requirementId, part: claim.part, reason: claim.reason, code: "not-a-problem" });
         setDiagnostic(claim, index, "recheck", "not-a-problem", recheck.answeredBy, kindConfidence ?? null, null);
       } else if (kind === "ambiguity") {
         ambiguities.push({ index, requirementId: claim.requirementId, part: claim.part, reason: claim.reason });
         setDiagnostic(claim, index, "recheck", "ambiguity", recheck.answeredBy, kindConfidence ?? null, null);
-      } else if (kind === "vocabulary-hole" && evidenceId !== null) {
-        // 分類（語彙の穴）と根拠（節）の両方が取れたときだけ受理する
+      } else if (kind === "undecidable") {
+        // 判定不能 → 未点検
+        unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
+        setDiagnostic(claim, index, "recheck", "unknown", recheck.answeredBy, kindConfidence ?? null, null);
+      } else if (evidenceId !== null) {
+        // vocabulary-hole かつ根拠（節）が取れたときだけ受理する（分類と根拠の両方）
         accepted.push(claim);
         setDiagnostic(claim, index, "recheck", "vocabulary-hole", recheck.answeredBy, kindConfidence ?? null, evidenceId);
-      } else if (kind === "vocabulary-hole") {
+      } else {
         // 語彙の穴だが根拠が取れない → 未点検（根拠不足）
         unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "not-stated" });
         setDiagnostic(claim, index, "recheck", "not-stated", recheck.answeredBy, kindConfidence ?? null, null);
-      } else {
-        // 判定不能・読めない答え → 未点検
-        unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
-        setDiagnostic(claim, index, "recheck", "unknown", recheck.answeredBy, kindConfidence ?? null, null);
       }
     }
     report();
@@ -520,14 +552,21 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
 
 /**
  * 判定の口を 1 回呼ぶ。**判定が失敗しても工場は止めない**（05 §6「Jev が止まっても工場は止まらない」）
- * ——ただし**予算が尽きたときは投げ直す**（呼ぶ側が段の失敗（`budget`）として記録し、申告を通さない）。
- * それ以外の失敗は `null` にして、呼び側が「未確定」として扱う（確認へ進ませない）。
+ * ——ただし**予算・締切・総呼び出し数の門で止まったときは投げ直す**（呼ぶ側が段の失敗（`budget`・
+ * `deadline`・`call-limit`）として記録し、申告を通さない。Issue #432）。それ以外の失敗は `null` にして、
+ * 呼び側が「未確定」として扱う（確認へ進ませない）。
  */
 async function safeJudge(judge: Judge, request: Parameters<Judge["judge"]>[0]): Promise<JudgeResponse | null> {
   try {
     return await judge.judge(request);
   } catch (error) {
-    if (error instanceof JudgeBudgetExceededError) throw error;
+    if (
+      error instanceof JudgeBudgetExceededError ||
+      error instanceof JudgeDeadlineExceededError ||
+      error instanceof JudgeCallLimitExceededError
+    ) {
+      throw error;
+    }
     return null;
   }
 }

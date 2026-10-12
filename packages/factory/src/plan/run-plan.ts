@@ -40,7 +40,7 @@ import { JobBudget, type TokenRates } from "../budget.js";
 import type { BundleJudgeUsage } from "../bundle.js";
 import { CallGateway } from "../call.js";
 import type { Judge } from "../judge.js";
-import { JudgeBudgetExceededError, createBudgetedJudge, type BudgetedJudge } from "../judge-budget.js";
+import { JudgeBudgetExceededError, JudgeCallLimitExceededError, JudgeDeadlineExceededError, createBudgetedJudge, type BudgetedJudge } from "../judge-budget.js";
 import { AGENT_LIMITS, type AgentLimits, type LimitName } from "../limits.js";
 import type { LlmClient } from "../llm.js";
 import type { ReverseCheckMiss, SourceRange } from "../pipeline.js";
@@ -506,6 +506,12 @@ export interface PlanRunInput {
   readonly client: LlmClient;
   /** 判定の口（Jev・LLM・偽物。試験は偽物を差し込む） */
   readonly judge: Judge;
+  /**
+   * **再点検専用の Luna の口**（Issue #432）。渡すと、これを同じ Plan 予算で包み、P3 の未確定の申告の
+   * 再点検の宛先にする。渡さなければ `judge.fallback` を使い、それも無ければ再点検しない（未点検に残す）
+   * ——合成した口をもう一度呼ぶと主（Jev）が答え直すだけなので、主を再点検には使わない。
+   */
+  readonly recheckJudge?: Judge;
   /** 答える役の口（端末・ファイル・評価の利用者役は外側に置く） */
   readonly responder: PlanResponder;
   /** Plan の費用の上限（USD。呼ぶ側が Plan と Build で分けて渡す。§8） */
@@ -788,11 +794,16 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   });
   // 判定の口を、**この Plan の予算に結び付けた包み**で包む（#359）。判定の費用も、段の呼び出しと同じ
   // 予算で予約・精算する。予約できなければ判定を呼ばずに `JudgeBudgetExceededError` になる（止まる）。
+  // **締切と総呼び出し数の門**（生成と共有）も掛ける（Issue #432）——判定は生成の `CallGateway` を通らない
+  // ので、ここで同じ時計・締切・上限を見る。落とし先（Luna）は**明示の `recheckJudge`** を優先し、無ければ
+  // `judge.fallback` を使う（主を再点検に使わない）。
   const judgeBudget: BudgetedJudge = createBudgetedJudge({
     judge: input.judge,
     budget,
     rates: input.rates,
     ...(input.judgeMaxOutputTokens === undefined ? {} : { maxOutputTokens: input.judgeMaxOutputTokens }),
+    ...(input.recheckJudge === undefined ? {} : { recheck: input.recheckJudge }),
+    gate: { now: input.now, deadline: input.deadline, callLimit: limits.callCount, generationCalls: () => gateway.calls },
   });
   const stages: PlanStageRecord[] = [];
   // 依頼文で閉じた事項（往復の記録に残す。04 §3 P4・Issue #370）
@@ -856,6 +867,14 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         pushRecord(stage, "failed", before, start, "budget");
         throw new PlanStop({ stage, kind: "budget" });
       }
+      if (error instanceof JudgeDeadlineExceededError) {
+        pushRecord(stage, "failed", before, start, "deadline");
+        throw new PlanStop({ stage, kind: "deadline" });
+      }
+      if (error instanceof JudgeCallLimitExceededError) {
+        pushRecord(stage, "failed", before, start, "call-limit");
+        throw new PlanStop({ stage, kind: "call-limit" });
+      }
       pushRecord(stage, "failed", before, start, "unknown");
       throw error;
     }
@@ -888,11 +907,31 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         pushRecord(stage, "failed", before, start, "budget");
         throw new PlanStop({ stage, kind: "budget" });
       }
+      if (error instanceof JudgeDeadlineExceededError) {
+        pushRecord(stage, "failed", before, start, "deadline");
+        throw new PlanStop({ stage, kind: "deadline" });
+      }
+      if (error instanceof JudgeCallLimitExceededError) {
+        pushRecord(stage, "failed", before, start, "call-limit");
+        throw new PlanStop({ stage, kind: "call-limit" });
+      }
       pushRecord(stage, "failed", before, start, "unknown");
       throw error;
     }
     pushRecord(stage, "ok", before, start, null);
     return value;
+  };
+
+  /**
+   * 生成と共有する締切・総呼び出し数の門を、段の外でも守る（Issue #432）。判定の**実呼び出し**の直前
+   * （判定の口の包み）だけでなく、再点検のあと・確認へ渡す前にも照らし、**締切の残りと総呼び出し数の
+   * 上限**を越えていれば段の失敗として止める。生成側の呼び出しの数と、判定の試行の数を足して数える。
+   */
+  const checkGate = (stage: PlanStageId): void => {
+    if (input.now() >= input.deadline) throw new PlanStop({ stage, kind: "deadline" });
+    if (gateway.calls + judgeBudget.attempts >= limits.callCount) {
+      throw new PlanStop({ stage, kind: "call-limit" });
+    }
   };
 
   const resultBase = (): PlanResultBase => ({
@@ -1068,11 +1107,13 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     // あり、点検は申告を減らす・止める方向にだけ効く。申告が 0 件なら判定を呼ばず、段を `ok` で残す
     // （`runSurfaceCheck` が早期に返す）。判定の予算が尽きれば、既存どおり段 `surface-check` の失敗
     // （`budget`）で止まる（`runStage` が `JudgeBudgetExceededError` を握る）。
-    const surfaceCheck = await runStage("surface-check", () =>
-      runSurfaceCheck({
+    const surfaceCheck = await runStage("surface-check", async () => {
+      const value = await runSurfaceCheck({
         surface,
         documents: input.documents,
         judge: judgeBudget,
+        // 再点検の宛先（Luna）は、同じ予算で包んだ落とし先だけを使う（主を再点検に使わない。Issue #432）
+        ...(judgeBudget.fallback === undefined ? {} : { recheckJudge: judgeBudget.fallback }),
         threshold,
         // 対象の要件の文（再点検の対象のデータ。Issue #432）
         requirements: new Map(requirements.map((requirement) => [requirement.id, requirement.text])),
@@ -1090,8 +1131,11 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           };
           surfaceCheckDiagnostics = partial.diagnostics;
         },
-      }),
-    );
+      });
+      // 再点検のあとにも、生成と共有する締切・総呼び出し数の門を守る（Issue #432）
+      checkGate("surface-check");
+      return value;
+    });
     surfaceCheckSummary = {
       accepted: surfaceCheck.accepted.length,
       dropped: surfaceCheck.dropped.length,
@@ -1300,6 +1344,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         };
       }
       if (step.kind === "confirm") {
+        // 確認へ渡す前にも、生成と共有する締切・総呼び出し数の門を守る（Issue #432）
+        checkGate("confirm");
         const decision = await input.responder.confirm(view);
         if (decision === "stop") {
           return { kind: "stopped", reason: "declined", failure: null, ...resultBase() };
