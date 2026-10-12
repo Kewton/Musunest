@@ -25,6 +25,7 @@ import {
   type PlanResponder,
   type PlanResult,
   type PlanStageRecord,
+  type PlanSurfaceCheckSummary,
 } from "./plan/run-plan.js";
 import { isRecord } from "./stages/prompt.js";
 import type { ReverseCheckDiagnosis, ReverseCheckMissCounts } from "./stages/reverse-check.js";
@@ -354,6 +355,30 @@ export interface PlanCliRequirementsDiagnosisRecord {
   readonly unmet: PlanCliMissCountsRecord;
 }
 
+/**
+ * 記録に入れる、P3 の「書けない」の申告の点検の判定 1 件（問いの ID・答え・確信度・モデルの版・adapter。
+ * 依頼文の全文・申告の文は残さない。Issue #432）。
+ */
+export interface PlanCliSurfaceJudgmentRecord {
+  readonly question_id: string;
+  readonly answer: string;
+  readonly confidence: number | null;
+  readonly model: string;
+  readonly answered_by: string;
+}
+
+/**
+ * 記録に入れる、P3 の申告の点検（件数＝受理・落とした・曖昧さへ・未点検と、判定の記録。Issue #432）。
+ * **値は件数と判定の記録だけ**である（申告の部分の文・理由・制約 ID は入れない）。
+ */
+export interface PlanCliSurfaceCheckRecord {
+  readonly accepted: number;
+  readonly dropped: number;
+  readonly ambiguity: number;
+  readonly unchecked: number;
+  readonly judgments: readonly PlanCliSurfaceJudgmentRecord[];
+}
+
 /** 往復の記録（`--out` の `plan-record.json`。質問・答え・段の記録・使った額） */
 export interface PlanCliRecord {
   readonly schema_version: string;
@@ -366,6 +391,8 @@ export interface PlanCliRecord {
   readonly closed_by_default: readonly PlanCliDefaultClosureRecord[];
   /** P1/P2 の往復ごとの逆照合の落ちの内訳（種類ごと・出どころごと。値は件数だけ。Issue #430） */
   readonly requirements_diagnosis: PlanCliRequirementsDiagnosisRecord;
+  /** P3 の「書けない」の申告の点検（件数と判定の記録。値は件数と記録だけ。Issue #432） */
+  readonly surface_check: PlanCliSurfaceCheckRecord;
   readonly confirmation: "build" | "stop" | null;
   readonly stages: readonly PlanStageRecord[];
   readonly judge: BundleJudgeUsage;
@@ -422,6 +449,23 @@ function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCl
   };
 }
 
+/** P3 の申告の点検の記録を、記録の形（snake_case。確信度は `null`）に写す（Issue #432） */
+function toSurfaceCheckRecord(summary: PlanSurfaceCheckSummary): PlanCliSurfaceCheckRecord {
+  return {
+    accepted: summary.accepted,
+    dropped: summary.dropped,
+    ambiguity: summary.ambiguity,
+    unchecked: summary.unchecked,
+    judgments: summary.judgments.map((judgment) => ({
+      question_id: judgment.questionId,
+      answer: judgment.answer,
+      confidence: judgment.confidence ?? null,
+      model: judgment.model,
+      answered_by: judgment.answeredBy,
+    })),
+  };
+}
+
 /** 往復の記録を組む（`--out` に書く。納品物には入れない。§7・Issue #336） */
 export function buildPlanCliRecord(input: {
   readonly result: PlanResult;
@@ -449,6 +493,7 @@ export function buildPlanCliRecord(input: {
       value: closure.value,
     })),
     requirements_diagnosis: toRequirementsDiagnosisRecord(input.result.requirementsDiagnosis),
+    surface_check: toSurfaceCheckRecord(input.result.surfaceCheck),
     confirmation: input.transcript.confirmation,
     stages: input.result.stages,
     judge: input.result.judge,

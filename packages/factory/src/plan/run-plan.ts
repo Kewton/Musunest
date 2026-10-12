@@ -66,12 +66,14 @@ import {
   type PlanTurn,
 } from "./session.js";
 import { runSurface, type SurfaceCatalogData } from "./surface.js";
+import { runSurfaceCheck, type SurfaceJudgment, type SurfaceUncheckedClaim } from "./surface-check.js";
 
 /** Plan の段（記録の `stage` に使う。生成の段とは別の一覧である） */
 export const PLAN_STAGE_IDS = [
   "requirements", // P1 要件にする・P2 逆照合（`runReverseCheckLoop`）
   "catalog", // P3 目録の点検（`runCatalog`）
   "surface", // P3 洗い出し（`runSurface`）
+  "surface-check", // P3 の「書けない」の申告を判定の口で点検する（`runSurfaceCheck`。Issue #432）
   "questions", // P4 質問を組み立てる（`runQuestions`）
   "answers", // P5 答えを反映する（`runAnswers`）
   "confirm", // P6 照合と確定（`runConfirm`）
@@ -117,6 +119,10 @@ export const PLAN_DIAGNOSIS_CODES = [
   // 制約 ID の裏付け（P3 洗い出し）
   "constraint-id-missing",
   "constraint-id-unknown",
+  // P3 の「書けない」の申告の点検（Issue #432）。未点検の分類（低確信・書いていない・読めない）
+  "not-stated",
+  "low-confidence",
+  "unknown",
   // 質問（P4）
   "question-count",
   "choices-count",
@@ -344,7 +350,7 @@ export interface PlanFailure {
   readonly operation?: PlanOperation;
 }
 
-/** 確定できなかった理由の出どころ（有限の 4 つ。Issue #397） */
+/** 確定できなかった理由の出どころ（有限の 5 つ。Issue #397・#432） */
 export const CANNOT_CONFIRM_SOURCES = [
   /** P6 の覆いの問題（覆われていない原文・使われていない答え） */
   "confirm",
@@ -352,6 +358,8 @@ export const CANNOT_CONFIRM_SOURCES = [
   "plan-check",
   /** 逆照合で落ちが残った */
   "reverse-check",
+  /** P3 の「書けない」の申告に未点検が残った（Issue #432） */
+  "surface-check",
   /** 往復の制御（質問数の上限・往復数の上限・重大な事項があるのに問いが無い） */
   "session",
 ] as const;
@@ -377,6 +385,25 @@ export interface PlanDefaultClosure {
   readonly value: string;
 }
 
+/**
+ * P3 の「書けない」の申告の点検の記録（Issue #432）。**件数（受理・落とした・曖昧さへ・未点検）と、判定の
+ * 記録（問いの ID・答え・確信度・モデルの版・adapter）**だけを持つ——申告の部分の文・理由・制約 ID の
+ * 値は入れない（`02-failure-modes.md` §1）。確定・確定できない・止まったの 3 つの結果に共通で、申告 0 件
+ * なら件数も 0、記録も空である。
+ */
+export interface PlanSurfaceCheckSummary {
+  /** 受理した申告（語彙の穴で裏付けが取れたもの）の件数 */
+  readonly accepted: number;
+  /** 落とした申告（問題ではない・裏付けが反する）の件数 */
+  readonly dropped: number;
+  /** 曖昧さと判定した申告（開いている事項に写した）の件数 */
+  readonly ambiguity: number;
+  /** 未点検の申告（裏付けが書いていない・確信度が閾値未満・答えが読めない）の件数 */
+  readonly unchecked: number;
+  /** 判定の記録（仕分けと裏付けの両方） */
+  readonly judgments: readonly SurfaceJudgment[];
+}
+
 /** 3 つの結果に共通する記録（使った額・残りの額・段ごとの記録・判定の呼び出し） */
 export interface PlanResultBase {
   /** 段ごとの記録（生成の段の記録と同じ形） */
@@ -397,6 +424,11 @@ export interface PlanResultBase {
    * **値は件数だけ**である（落ちの文言・引用・位置は入れない。`02-failure-modes.md` §1）。
    */
   readonly requirementsDiagnosis: ReverseCheckDiagnosis;
+  /**
+   * P3 の「書けない」の申告の点検の記録（受理・落とした・曖昧さへ・未点検の件数と、判定の記録。Issue #432）。
+   * 値（申告の部分の文・理由・制約 ID）は入れない。
+   */
+  readonly surfaceCheck: PlanSurfaceCheckSummary;
 }
 
 /** 依頼文で閉じた事項から作る `decisions` の ID の頭（確認の画面が「依頼文で決めたこと」を見分ける） */
@@ -654,6 +686,19 @@ function reverseCheckReasons(misses: readonly ReverseCheckMiss[]): readonly Cann
   }));
 }
 
+/**
+ * P3 の「書けない」の申告の点検で未点検が残ったことを、確定できなかった理由（`source: surface-check`）に
+ * 写す（Issue #432）。**値の中身（部分の文・理由・制約 ID）を含まない**——`path` は添字つきの欄の名前
+ * （`unwritable[<番号>]`）をコードが組み、`code` は有限の分類（`not-stated`・`low-confidence`・`unknown`）。
+ */
+function surfaceCheckReasons(unchecked: readonly SurfaceUncheckedClaim[]): readonly CannotConfirmReason[] {
+  return unchecked.map((claim) => ({
+    source: "surface-check" as const,
+    code: planDiagnosisCode(claim.code),
+    path: `unwritable[${claim.index}]`,
+  }));
+}
+
 /** P6 の覆いの問題を、確定できなかった理由（`source: confirm`）に写す（Issue #397） */
 function confirmReasons(problems: readonly ConfirmProblem[]): readonly CannotConfirmReason[] {
   return problems.map((problem) => ({
@@ -744,6 +789,14 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const closedByDefaults: PlanDefaultClosure[] = [];
   // P1/P2 の往復ごとの逆照合の落ちの内訳（Issue #430）。止まったときは、止まるまでに得た分だけになる。
   let requirementsDiagnosis: ReverseCheckDiagnosis = emptyReverseCheckDiagnosis();
+  // P3 の「書けない」の申告の点検の記録（Issue #432）。申告 0 件・P3 に届かなかったときは 0 のまま。
+  let surfaceCheckSummary: PlanSurfaceCheckSummary = {
+    accepted: 0,
+    dropped: 0,
+    ambiguity: 0,
+    unchecked: 0,
+    judgments: [],
+  };
   // コードが目録から作った事項の対応（事項 ID → 未指定の観点）と、要件ごとの門の判定（Issue #408）
   const catalogIssueFacets = new Map<string, UnspecifiedFacet>();
   const aggregatesByRequirement = new Map<string, boolean | null>();
@@ -835,6 +888,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     closedBySource: closedBySource.slice(),
     closedByDefault: closedByDefaults.slice(),
     requirementsDiagnosis,
+    surfaceCheck: surfaceCheckSummary,
   });
 
   try {
@@ -993,10 +1047,51 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       catalogIssueFacets.set(issue.id, facet);
     }
 
-    // 書けないことを、了承して除く部分（`accepted_unwritable`）に写す（§4・U-P2）。代わりの案は、
+    // ── surface-check（P3 の「書けない」の申告を、確認の前に判定の口で点検する。Issue #432）──
+    // 申告 1 件ずつを仕分け・裏付けし、**裏付けの取れた語彙の穴だけ**を了承除外の候補にする。判定は助言で
+    // あり、点検は申告を減らす・止める方向にだけ効く。申告が 0 件なら判定を呼ばず、段を `ok` で残す
+    // （`runSurfaceCheck` が早期に返す）。判定の予算が尽きれば、既存どおり段 `surface-check` の失敗
+    // （`budget`）で止まる（`runStage` が `JudgeBudgetExceededError` を握る）。
+    const surfaceCheck = await runStage("surface-check", () =>
+      runSurfaceCheck({
+        surface,
+        documents: input.documents,
+        judge: judgeBudget,
+        threshold,
+      }),
+    );
+    surfaceCheckSummary = {
+      accepted: surfaceCheck.accepted.length,
+      dropped: surfaceCheck.dropped.length,
+      ambiguity: surfaceCheck.ambiguities.length,
+      unchecked: surfaceCheck.unchecked.length,
+      judgments: surfaceCheck.judgments,
+    };
+    // 曖昧さと判定された申告（了承除外になるはずだった部分）は、**重大な**開いている事項にして P4 に渡す。
+    // 聞かずに落とさない。
+    for (const claim of surfaceCheck.ambiguities) {
+      openIssues.push({
+        id: `OI:surface-check:${claim.index}`,
+        text: claim.part,
+        critical: true,
+        status: "open",
+      });
+    }
+    // 未点検が 1 件でも残れば、P4・確認に進まず「確定できない」。理由は値の中身を含まない（Issue #432）。
+    if (surfaceCheck.unchecked.length > 0) {
+      return {
+        kind: "cannot-confirm",
+        openIssues: openIssues.filter((issue) => issue.status === "open" && issue.critical),
+        reasons: surfaceCheckReasons(surfaceCheck.unchecked),
+        ...resultBase(),
+      };
+    }
+
+    // 受理した申告（語彙の穴で裏付けが取れたもの）だけを、了承して除く部分（`accepted_unwritable`）に写す
+    // （§4・U-P2）。落とした申告・曖昧さと判定した申告の要件は**そのまま残す**（Build が書く）。代わりの案は、
     // 宣言で書ける近い形を 1 つ出したものなので、要件として残し、部分から代わりの案の ID で指す。
     const acceptedUnwritable: PlanAcceptedUnwritable[] = [];
-    for (const item of surface.unwritable) {
+    for (const item of surfaceCheck.accepted) {
       const index = requirements.findIndex((requirement) => requirement.id === item.requirementId);
       const target = requirements[index];
       if (target === undefined) continue;
