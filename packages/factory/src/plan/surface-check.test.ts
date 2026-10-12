@@ -236,3 +236,56 @@ describe("判定への渡し方（05 §3・§4・Issue #376・#432）", () => {
     expect(result).toEqual({ accepted: [], dropped: [], ambiguities: [], unchecked: [], judgments: [] });
   });
 });
+
+// ── 仕分けにも閾値を掛ける（独立の点検が成立していなければ未点検。Issue #432）──────────
+
+describe("仕分けの確信度が閾値未満・不明なら、分類先へ流さず未点検にする（Issue #432）", () => {
+  const labels = ["ambiguity", "vocabulary-hole", "not-a-problem"] as const;
+
+  it("3 つの仕分けラベルとも、確信度が閾値未満なら未点検（落とさず・分類しない）", async () => {
+    for (const label of labels) {
+      const { run } = check(surface(HOLE), {
+        [surfaceTriageQuestionName(0)]: choice(label, DEFAULT_PLAN_JUDGE_THRESHOLD - 0.1),
+      });
+      const result = await run;
+      expect(result.accepted, label).toEqual([]);
+      expect(result.dropped, label).toEqual([]);
+      expect(result.ambiguities, label).toEqual([]);
+      expect(result.unchecked, label).toEqual([
+        { index: 0, requirementId: "R-1", part: "アプリ自体の名前・説明", code: "low-confidence" },
+      ]);
+    }
+  });
+
+  it("3 つの仕分けラベルとも、確信度が不明（返せない adapter）なら未点検", async () => {
+    for (const label of labels) {
+      const { run } = check(surface(HOLE), {
+        // 確信度を渡さない＝不明（Jev が使えず LLM に落ちたときと同じ）
+        [surfaceTriageQuestionName(0)]: choice(label),
+      });
+      const result = await run;
+      expect(result.accepted, label).toEqual([]);
+      expect(result.dropped, label).toEqual([]);
+      expect(result.ambiguities, label).toEqual([]);
+      expect(result.unchecked, label).toEqual([
+        { index: 0, requirementId: "R-1", part: "アプリ自体の名前・説明", code: "low-confidence" },
+      ]);
+    }
+  });
+
+  it("低確信の仕分け（語彙の穴）＋高確信の裏付けでも、受理しない（裏付けだけでは独立の仕分けを保証できない）", async () => {
+    const { run, requests } = check(surface(HOLE), {
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", DEFAULT_PLAN_JUDGE_THRESHOLD - 0.1),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    const result = await run;
+
+    // 裏付けの問いは呼ばれない（仕分けが成立していないので、裏付けへ流さない）
+    expect(requests).toHaveLength(1);
+    expect(Object.keys(requests[0]?.questions ?? {})).toEqual(["plan-triage:0"]);
+    expect(result.accepted).toEqual([]);
+    expect(result.unchecked).toEqual([
+      { index: 0, requirementId: "R-1", part: "アプリ自体の名前・説明", code: "low-confidence" },
+    ]);
+  });
+});

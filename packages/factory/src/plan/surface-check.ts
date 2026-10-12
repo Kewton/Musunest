@@ -129,6 +129,12 @@ export interface SurfaceCheckInput {
   readonly judge: Judge;
   /** 確信度の閾値（これ**未満**は未点検） */
   readonly threshold: number;
+  /**
+   * 途中までに得た分類と判定を報告する口（任意。Issue #432）。仕分けのあとに 1 回呼ぶ——続く裏付けが
+   * 予算で止まっても、**そこまでに終えた判定・分類を呼ぶ側が残せる**ようにする。段の成否・停止の意味は
+   * 変えない（報告するだけ）。
+   */
+  readonly onProgress?: (result: SurfaceCheckResult) => void;
 }
 
 /** 答えから、選んだ選択肢を取り出す（choice でない・無いときは `undefined`） */
@@ -187,14 +193,23 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
     const name = surfaceTriageQuestionName(index);
     const answer = classify.answers[name];
     const label = choiceOf(answer);
+    const confidence = confidenceOf(answer);
     judgments.push({
       questionId: name,
       answer: label ?? "unknown",
-      confidence: confidenceOf(answer),
+      confidence,
       model: classify.model,
       answeredBy: classify.answeredBy,
     });
-    if (label === "ambiguity") {
+    if (label === undefined) {
+      // 答えが読めないものは、捨てずに未点検として残す（確定を止める）
+      unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
+    } else if (confidence === undefined || confidence < input.threshold) {
+      // 仕分けの確信度が閾値未満（返せない adapter は不明）。**独立の仕分けが成立していない**ので、
+      // 分類先（曖昧さ・落とす・裏付けへ）に流す前に未点検として残す（Issue #432）。Jev が使えず LLM に
+      // 落ちた場合は確信度が実際に不明になるので、この経路は adapter の契約上も到達する。
+      unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "low-confidence" });
+    } else if (label === "ambiguity") {
       ambiguities.push({ index, requirementId: claim.requirementId, part: claim.part, reason: claim.reason });
     } else if (label === "not-a-problem") {
       dropped.push({
@@ -207,9 +222,18 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
     } else if (label === "vocabulary-hole") {
       holes.push({ claim, index });
     } else {
-      // 知らないラベル・答えが読めないものは、捨てずに未点検として残す（確定を止める）
+      // 知らないラベルは、捨てずに未点検として残す（確定を止める）
       unchecked.push({ index, requirementId: claim.requirementId, part: claim.part, code: "unknown" });
     }
+  });
+
+  // 仕分けまでに得た分類と判定を報告する（続く裏付けの予算が尽きても呼ぶ側が残せるように。Issue #432）
+  input.onProgress?.({
+    accepted: accepted.slice(),
+    dropped: dropped.slice(),
+    ambiguities: ambiguities.slice(),
+    unchecked: unchecked.slice(),
+    judgments: judgments.slice(),
   });
 
   // ── 2. 語彙の穴の裏付け（制約 ID の節の抜粋と主張）──────────────────

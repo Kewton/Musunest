@@ -2548,4 +2548,103 @@ describe("P3 の「書けない」の申告を判定の口で点検する（04 �
     // 申告が通らない（受理 0）
     expect(result.surfaceCheck.accepted).toBe(0);
   });
+
+  it("仕分けの確信度が閾値未満なら、落とさず（not-a-problem でも）未点検にして確定させない", async () => {
+    const surface = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-1", requirementId: "R-1", part: "部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+    ]);
+    let answerCalls = 0;
+    const responder: PlanResponder = {
+      async answer() {
+        answerCalls += 1;
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      // not-a-problem でも、仕分けの確信度が閾値未満 → 落とさず未点検
+      [surfaceTriageQuestionName(0)]: choice("not-a-problem", 0.1),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons).toEqual([{ source: "surface-check", code: "low-confidence", path: "unwritable[0]" }]);
+    // P4 も答える役も呼ばれない
+    expect(answerCalls).toBe(0);
+    expect(result.stages.some((stage) => stage.stage === "questions")).toBe(false);
+    expect(result.surfaceCheck.dropped).toBe(0);
+    expect(result.surfaceCheck.unchecked).toBe(1);
+  });
+
+  it("仕分けのあと裏付けの予算が尽きても、仕分けまでに得た分類と判定が結果に残る（completed は false）", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    // 申告 2 件：1 件目は「問題ではない」で落ち、2 件目は語彙の穴で裏付けへ進む（そこで予算が尽きる）
+    const surface = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-0", requirementId: "R-1", part: "部分 0", constraintIds: ["記録"], reason: "理由 0", alternative: "代案 0" },
+        { id: "U-1", requirementId: "R-2", part: "部分 1", constraintIds: ["合計"], reason: "理由 1", alternative: "代案 1" },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+    ]);
+    // 仕分けの判定は答えつつ、巨大な usage（LLM の adapter）で予算を使い切る → 裏付けの予約が失敗する
+    const triageAnswers: Record<string, JudgeAnswer> = {
+      [surfaceTriageQuestionName(0)]: choice("not-a-problem", 0.9),
+      [surfaceTriageQuestionName(1)]: choice("vocabulary-hole", 0.9),
+    };
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        const answers: Record<string, JudgeAnswer> = {};
+        let triage = false;
+        for (const name of Object.keys(request.questions)) {
+          if (name.startsWith("plan-triage:")) triage = true;
+          answers[name] = triageAnswers[name] ?? choice("supports", 0.9);
+        }
+        // 仕分けの呼び出しだけ巨大な usage（LLM の adapter）で予算を使い切る → 裏付けの予約が失敗する
+        return triage
+          ? { answers, inputTokens: 0, usage: hugeUsage, model: "judge", answeredBy: "llm" }
+          : { answers, inputTokens: 0, model: "judge", answeredBy: "fake" };
+      },
+    };
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE, { budgetUsd: 1 }));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("budget");
+    expect(result.failure?.stage).toBe("surface-check");
+    expect(result.failure?.kind).toBe("budget");
+    // 途中までの記録が結果に残る（全件 0 と区別できる）
+    expect(result.surfaceCheck.completed).toBe(false);
+    expect(result.surfaceCheck.dropped).toBe(1);
+    expect(result.surfaceCheck.judgments).toHaveLength(2);
+    expect(result.surfaceCheck.judgments.map((judgment) => judgment.answer)).toEqual([
+      "not-a-problem",
+      "vocabulary-hole",
+    ]);
+    // 受理はまだ 0（裏付けに届いていない）
+    expect(result.surfaceCheck.accepted).toBe(0);
+  });
 });

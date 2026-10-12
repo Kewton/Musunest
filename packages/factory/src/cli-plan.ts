@@ -376,6 +376,11 @@ export interface PlanCliSurfaceCheckRecord {
   readonly dropped: number;
   readonly ambiguity: number;
   readonly unchecked: number;
+  /**
+   * 点検が最後まで終えたか（Issue #432）。`false` は予算切れなどで途中で止まり、**申告 0 件と区別**して
+   * 全部を点検し終えていないことを示す。
+   */
+  readonly completed: boolean;
   readonly judgments: readonly PlanCliSurfaceJudgmentRecord[];
 }
 
@@ -456,6 +461,7 @@ function toSurfaceCheckRecord(summary: PlanSurfaceCheckSummary): PlanCliSurfaceC
     dropped: summary.dropped,
     ambiguity: summary.ambiguity,
     unchecked: summary.unchecked,
+    completed: summary.completed,
     judgments: summary.judgments.map((judgment) => ({
       question_id: judgment.questionId,
       answer: judgment.answer,

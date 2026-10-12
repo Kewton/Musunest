@@ -402,6 +402,12 @@ export interface PlanSurfaceCheckSummary {
   readonly unchecked: number;
   /** 判定の記録（仕分けと裏付けの両方） */
   readonly judgments: readonly SurfaceJudgment[];
+  /**
+   * 点検の段が最後まで終えたか（Issue #432）。`false` は、仕分けの途中で止まった（判定の予算が尽きた）などで
+   * **全部の申告を点検し終えていない**ことを示す——申告 0 件（`accepted`・`dropped`・`ambiguity`・`unchecked`
+   * がすべて 0・`judgments` も空）と区別する。
+   */
+  readonly completed: boolean;
 }
 
 /** 3 つの結果に共通する記録（使った額・残りの額・段ごとの記録・判定の呼び出し） */
@@ -796,6 +802,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     ambiguity: 0,
     unchecked: 0,
     judgments: [],
+    completed: false,
   };
   // コードが目録から作った事項の対応（事項 ID → 未指定の観点）と、要件ごとの門の判定（Issue #408）
   const catalogIssueFacets = new Map<string, UnspecifiedFacet>();
@@ -1058,6 +1065,18 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         documents: input.documents,
         judge: judgeBudget,
         threshold,
+        // 仕分けのあとに得た分類・判定を、続く裏付けの予算が尽きても残す（Issue #432）。段が止まっても
+        // 途中までの記録が結果と往復の記録に載る（`completed` は false のまま）。
+        onProgress: (partial) => {
+          surfaceCheckSummary = {
+            accepted: partial.accepted.length,
+            dropped: partial.dropped.length,
+            ambiguity: partial.ambiguities.length,
+            unchecked: partial.unchecked.length,
+            judgments: partial.judgments,
+            completed: false,
+          };
+        },
       }),
     );
     surfaceCheckSummary = {
@@ -1066,6 +1085,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       ambiguity: surfaceCheck.ambiguities.length,
       unchecked: surfaceCheck.unchecked.length,
       judgments: surfaceCheck.judgments,
+      completed: true,
     };
     // 曖昧さと判定された申告（了承除外になるはずだった部分）は、**重大な**開いている事項にして P4 に渡す。
     // 聞かずに落とさない。
