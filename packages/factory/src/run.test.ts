@@ -775,7 +775,9 @@ describe("失敗の行き先で次の一手が変わる（02 §1.3.1・#309）",
         structured(DESIGN_OUTPUT_MAPPED),
         structured(TEST_SUITE_OUTPUT_MAPPED),
         structured({ declaration: DECLARATION_SOURCE, mappings: BAD_MAPPINGS }),
-        structured(CORRESPONDENCE_OUTPUT),
+        // 新契約の fixture（R-1・R-2 の所属の場所を要件ごとに載せる）。③ の対応（record.total →
+        // nonexistent）の不備だけが残るようにして、③ のやり直しへ回す（Issue #431）
+        structured(CORRESPONDENCE_OUTPUT_PLANNED),
         structured(MAPPING_REDO_OUTPUT), // ③ のやり直し（同じ不備を出し直す）
       ],
       { limits: { ...AGENT_LIMITS, correspondenceRedos: 1, stagnationRepeats: 0 } },
@@ -804,6 +806,156 @@ describe("失敗の行き先で次の一手が変わる（02 §1.3.1・#309）",
     // ③ のやり直しへは回さない
     expect(recording.structured.every((request) => request.schemaName !== MAPPING_REDO_SCHEMA_NAME)).toBe(true);
     expect(result.summary.stop_reason).toBe("limit");
+  });
+});
+
+// ── 誤った所属は、要件 ID つきの落ちで ⑤a のやり直しに回る（Issue #431）────────
+
+/**
+ * 所属だけが誤った設計：R-2 が `record.total` にも所属するが、⑤a（偽物）は `total` を R-1 にだけ載せる。
+ * `record.total` は 2 要件に所属するので `shared` を真にする（設計の形は通るが、所属と対応表が食い違う）。
+ */
+const WRONG_OWNERSHIP_DESIGN = {
+  roles: [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null, options: null },
+    { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null },
+  ],
+  designs: [
+    {
+      ...DESIGN_OUTPUT_MAPPED.designs[0],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "記録の行を参照・識別するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
+    },
+    {
+      ...DESIGN_OUTPUT_MAPPED.designs[1],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "記録の行を参照・識別するため" },
+        { roleId: "record.total", basis: "dependency", reason: "同じ計算を共有するため" },
+        { roleId: "record.extra", basis: "stated", reason: null },
+      ],
+    },
+  ],
+};
+
+describe("誤った所属は、要件 ID つきの落ちで ⑤a のやり直しに回る（Issue #431）", () => {
+  it("所属だけを誤らせた設計で、⑤b の試験は通るのに ⑤a のコードの落ちで ⑤a のやり直しに回り、full にならない", async () => {
+    // 試験の対象・期待・宣言・⑤a の応答は、通常の成功例のまま固定する（所属だけを誤らせる）。
+    // これで ⑤b の従来の outside-table ではなく、**⑤a の新しい要件ごとの落ち**が引き金になることを確かめる。
+    const { recording, run } = runWith([
+      ...recordedRun({ design: WRONG_OWNERSHIP_DESIGN }),
+      structured(CORRESPONDENCE_OUTPUT_PLANNED), // ⑤a のやり直し（同じ応答なので停滞で止まる）
+    ]);
+    const result = await run;
+
+    // 停滞で部分案になり、⑥ の失敗には誤って帰属しない（review 6）
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+    expect(result.summary.stop_reason).toBe("stagnation");
+    // ⑤b の試験は通っている（不一致 0・未解決 0）。⑥ 直すへは回らない
+    expect(result.record.stages.some((step) => step.stage === "repair")).toBe(false);
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const verification = verificationOf(result.bundle);
+    expect(verification.test_mismatches).toBe(0);
+    expect(verification.test_unresolved).toBe(0);
+    // 初回とやり直しの 2 回、⑤a を呼ぶ（段の記録も 2 件）
+    expect(result.record.stages.filter((step) => step.stage === "correspondence")).toHaveLength(2);
+    // やり直しの要求のデータに、前回の落ちが要件 ID と場所つきで入る
+    const requests = recording.structured.filter((request) => request.schemaName === CORRESPONDENCE_SCHEMA_NAME);
+    expect(requests).toHaveLength(2);
+    const retry = requests[1]?.input ?? "";
+    expect(retry).toContain("前回の対応表の落ち");
+    expect(retry).toContain("R-2");
+    expect(retry).toContain("total");
+  });
+});
+
+// ── 所属 entity の対応が欠けると、⑤a ではなく ③ のやり直しに回る（レビュー 2）────
+
+describe("所属 entity の対応が欠けると、⑤a ではなく ③ のやり直しに回る（Issue #431）", () => {
+  it("entity の mapping だけ欠けると、⑤a を作り直さず ③ のやり直しを呼ぶ", async () => {
+    // 計算の対応（total・extra）は正しいが、entity `record` の対応だけ欠けている
+    const mappingsNoEntity = [
+      { roleId: "record.total", name: "total" },
+      { roleId: "record.extra", name: "extra" },
+    ];
+    const { run } = runWith(
+      [
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(DESIGN_OUTPUT_MAPPED),
+        structured(TEST_SUITE_OUTPUT_MAPPED),
+        structured({ declaration: DECLARATION_SOURCE, mappings: mappingsNoEntity }),
+        structured(CORRESPONDENCE_OUTPUT_PLANNED),
+        structured(MAPPING_REDO_OUTPUT), // ③ のやり直し
+      ],
+      { limits: { ...AGENT_LIMITS, correspondenceRedos: 1, stagnationRepeats: 0 } },
+    );
+    const result = await run;
+
+    const stages = result.record.stages.map((step) => step.stage);
+    expect(stages).toContain("write"); // ③ のやり直し
+    // ⑤a は作り直さない（null の場所で correspondence-redo を足さない）
+    expect(result.record.stages.filter((step) => step.stage === "correspondence")).toHaveLength(1);
+  });
+});
+
+// ── 構造の検査が対応表の外になると、⑤a のやり直しで結び付く（Issue #431）────────
+
+describe("構造の検査が対応表の外になると、⑤a のやり直しで結び付く（Issue #431）", () => {
+  // R-1 の対応表が操作 add を挙げていない（構造の検査の対象が結び付かない）
+  const OUTSIDE_CORRESPONDENCE = {
+    entries: [
+      { requirementId: "R-1", locations: [{ kind: "entity", entity: null, name: "record" }] },
+      {
+        requirementId: "R-2",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "computation", entity: "record", name: "total" },
+        ],
+      },
+    ],
+  };
+  // やり直し後の対応表（操作 add を R-1 に載せる）
+  const REDONE_CORRESPONDENCE = {
+    entries: [
+      {
+        requirementId: "R-1",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "action", entity: "record", name: "add" },
+        ],
+      },
+      {
+        requirementId: "R-2",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "computation", entity: "record", name: "total" },
+        ],
+      },
+    ],
+  };
+
+  it("⑤a のやり直しが呼ばれ、やり直し後の対応表で結び付けば、構造の検査が実行される", async () => {
+    const { run } = runWith([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(STRUCTURAL_CHECKS_DESIGN),
+      structured(STRUCTURAL_CHECKS_SUITE),
+      structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+      structured(OUTSIDE_CORRESPONDENCE), // 初回の ⑤a
+      structured(REDONE_CORRESPONDENCE), // ⑤a のやり直し
+    ]);
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    // 初回とやり直しの 2 回、⑤a を呼ぶ（段の記録も 2 件）
+    expect(result.record.stages.filter((step) => step.stage === "correspondence")).toHaveLength(2);
+    if (result.bundle === null) throw new Error("納品物が無い");
+    expect(verificationOf(result.bundle).structural_checks.find((entry) => entry.test_id === "sc")?.result).toBe("pass");
   });
 });
 
@@ -999,7 +1151,14 @@ const CREATE_CORRESPONDENCE = {
         { kind: "action", entity: "record", name: "add" },
       ],
     },
-    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "total" }] },
+    {
+      requirementId: "R-2",
+      // R-2 も entity `record` に依存として所属するので、要件ごとに載せる（Issue #431）
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "computation", entity: "record", name: "total" },
+      ],
+    },
   ],
 };
 
@@ -2480,7 +2639,14 @@ const WRITE_CORRESPONDENCE = {
         { kind: "action", entity: "record", name: "add" },
       ],
     },
-    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "total" }] },
+    {
+      requirementId: "R-2",
+      // R-2 も entity `record` に依存として所属するので、要件ごとに載せる（Issue #431）
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "computation", entity: "record", name: "total" },
+      ],
+    },
   ],
 };
 
@@ -2619,7 +2785,14 @@ const ALT_CORRESPONDENCE = {
         { kind: "computation", entity: "record", name: "total" },
       ],
     },
-    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "extra" }] },
+    {
+      requirementId: "R-2",
+      // R-2 も entity `record` に依存として所属するので、要件ごとに載せる（Issue #431）
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "computation", entity: "record", name: "extra" },
+      ],
+    },
   ],
 };
 
@@ -2776,7 +2949,15 @@ const KEY_RUN_CORRESPONDENCE = {
         { kind: "computation", entity: "record", name: "total" },
       ],
     },
-    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "total" }] },
+    {
+      requirementId: "R-2",
+      // R-2 も entity `record`・項目 `amount`・計算 `total` に所属するので、要件ごとに載せる（Issue #431）
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "field", entity: "record", name: "amount" },
+        { kind: "computation", entity: "record", name: "total" },
+      ],
+    },
   ],
 };
 

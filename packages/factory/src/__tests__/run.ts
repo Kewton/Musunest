@@ -335,7 +335,15 @@ export const CORRESPONDENCE_OUTPUT_PLANNED = {
         { kind: "computation", entity: "record", name: "total" },
       ],
     },
-    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "extra" }] },
+    {
+      requirementId: "R-2",
+      // R-2 は `record`（entity）にも依存として所属するので、要件ごとの点検に合わせて**両方の要件に**
+      // 載せる（共有する役割は両方の要件に載せる。Issue #431）
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "computation", entity: "record", name: "extra" },
+      ],
+    },
   ],
 };
 

@@ -62,6 +62,7 @@ import type {
   FixedTest,
   ReferenceRow,
   RequirementNature,
+  RoleEntry,
   RoleNameMapping,
   StructuralAssertion,
   StructuralCheckOutcome,
@@ -75,6 +76,7 @@ import type {
 import { bindTests, locationKindFor, type BindResult } from "./bind.js";
 import {
   checkLocation,
+  declarationHasLocation,
   declarationHasNamedLocation,
   fieldReachableFromScreen,
   findComputed,
@@ -89,6 +91,11 @@ export interface RunTestsInput {
   readonly correspondence: CorrespondenceResult;
   /** ③ が提出した「役割 ID → 宣言の名前」の対応（§1・Issue #308）。旧形式の経路では省ける */
   readonly mappings?: readonly RoleNameMapping[];
+  /**
+   * ② の役割 ID の表（§1・Issue #431）。結び付けられなかった試験の落ちに、**所属 entity を引いて**
+   * 場所（種類・entity・名前）を組むのに使う——別 entity の同名を実在と誤認しないため。省ける。
+   */
+  readonly roles?: readonly RoleEntry[];
 }
 
 /** 失敗の行き先（§1.3.1・Issue #308・#322） */
@@ -850,15 +857,36 @@ function routeOf(verdict: Verdict): FailureRoute | null {
 }
 
 /**
- * 結び付けられなかった試験の selector の対応（役割 ID → 名前）から、落ちた場所を組む（Issue #322）。
- * ⑤a のやり直しへ渡し、対応表へ足させる。所属の entity は提出された対応だけからは決まらないので null。
+ * 結び付けられなかった試験の selector の役割 ID から、その**所属 entity の名前**を引く（Issue #431）。
+ * ② の役割 ID の表（`roles`）から役割の所属 entity を引き、その entity の役割 ID を提出された対応で
+ * 名前へ写す。表が渡されていなければ `null`（旧形式の経路）。**別 entity の同名を実在と誤認しない**ため、
+ * 構造の検査の行き先（`correspondence-redo` か `correspondence-defect` か）の判定に使う。
+ */
+function mappedEntityOf(roleId: string, input: RunTestsInput): string | null | undefined {
+  // 役割の表が無い（旧形式）ときは、所属 entity を引けないので null（entity を問わない場所を組む）
+  if (input.roles === undefined || input.mappings === undefined) return null;
+  const role = input.roles.find((candidate) => candidate.roleId === roleId);
+  if (role === undefined || role.entity === null) return null;
+  const entityMapping = input.mappings.find((candidate) => candidate.roleId === role.entity);
+  // 所属 entity の対応が引けないときは **未確定**（`undefined`）。null と区別する（別 entity の同名を
+  // 実在と誤認しないため。Issue #431）
+  return entityMapping === undefined ? undefined : entityMapping.name;
+}
+
+/**
+ * 結び付けられなかった試験の selector の対応（役割 ID → 名前）から、落ちた場所を組む（Issue #322・#431）。
+ * ⑤a のやり直しへ渡し、対応表へ足させる。**所属の entity は、② の役割 ID の表があれば引いて null に
+ * しない**——別 entity の同名を実在と見なさないためである。表が無ければ entity は null。
  */
 function mappedLocationOf(test: FixedTest, input: RunTestsInput): DeclarationLocation | null {
   const roleId = test.target.roleId;
   if (roleId === undefined || input.mappings === undefined) return null;
   const mapping = input.mappings.find((candidate) => candidate.roleId === roleId);
   if (mapping === undefined) return null;
-  return { kind: locationKindFor(test), entity: null, name: mapping.name };
+  const entity = mappedEntityOf(roleId, input);
+  // 所属 entity の対応が引けない（未確定）ときは、場所を組まない（null の場所で実在と誤認しない。Issue #431）
+  if (entity === undefined) return null;
+  return { kind: locationKindFor(test), entity, name: mapping.name };
 }
 
 /** 1 件の試験を判定し、失敗の行き先も返す */
@@ -872,13 +900,26 @@ function judgeOne(
   // ときは未解決**にする（結び付けの行き先を分けず、合格（一致）にも不一致にもしない）。
   if (test.operation === "structure") {
     if (binding === undefined || binding.kind === "unbound") {
-      return {
-        verdict: {
-          kind: "unresolved",
-          detail: binding?.detail ?? "構造の検査の対象の役割が結び付かない",
-        },
-        route: "ambiguity",
-      };
+      const detail = binding?.detail ?? "構造の検査の対象の役割が結び付かない";
+      // 対応表の外（`outside-table`）で、対応の場所が宣言に実在するなら、**判定は未解決のまま**⑤a の
+      // やり直しへ回す（要件 ID と場所つき。Issue #431）。実在しない・種類違いは③ のやり直し
+      // （`correspondence-defect`）。`no-mapping`・`ambiguous`・`no-table-entry`・`no-candidate` は、
+      // 今までどおり曖昧さ（未解決）で、行き先を付けない。
+      if (binding?.cause === "outside-table") {
+        const location = mappedLocationOf(test, input);
+        if (location !== null) {
+          if (declarationHasLocation(input.app, location)) {
+            return {
+              verdict: { kind: "unresolved", detail },
+              route: "correspondence-redo",
+              requirementId: test.target.requirementId,
+              location,
+            };
+          }
+          return { verdict: { kind: "unresolved", detail }, route: "correspondence-defect" };
+        }
+      }
+      return { verdict: { kind: "unresolved", detail }, route: "ambiguity" };
     }
     const verdict = judgeStructure(test, binding.location, input);
     return { verdict, route: routeOf(verdict) };

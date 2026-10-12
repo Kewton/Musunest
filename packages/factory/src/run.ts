@@ -41,6 +41,7 @@ import type { LlmClient } from "./llm.js";
 import { decideOutcome, type Outcome } from "./outcome.js";
 import {
   acceptedUnwritablePartIds,
+  LEGACY_DESIGN_CONTRACT,
   requirementsFromPlan,
   toStageResults,
   type ArbitrationResult,
@@ -83,6 +84,7 @@ import {
   checkCorrespondence,
   checkRoleMappings,
   runCorrespondence,
+  type RequirementRoleOwnership,
 } from "./stages/correspondence.js";
 import { runDesign } from "./stages/design.js";
 import type { PromptDocument, StageFailure, StageOutcome } from "./stages/prompt.js";
@@ -859,6 +861,15 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     const roles: readonly RoleEntry[] | undefined = design.roles;
     let mappings: readonly RoleNameMapping[] = written.mappings;
     const useMappings = (): boolean => mappings.length > 0 || roles !== undefined;
+    // 要件ごとの所属（② の設計から写す。Issue #431）。**版は呼ぶ側が明示する**——互換（`legacy`）を
+    // 明示したときだけ渡さず、従来の表全体の点検を保つ。省いた新契約では、設計の所属をそのまま渡す。
+    const ownership: readonly RequirementRoleOwnership[] | undefined =
+      input.designVersion === LEGACY_DESIGN_CONTRACT
+        ? undefined
+        : design.designs.map((entry) => ({
+            requirementId: entry.requirementId,
+            ownership: entry.ownership ?? [],
+          }));
 
     // ⑤a の対応表。**同じ宣言の版（SHA-256）のときだけ使い回し**、宣言が変われば作り直す（§1.3.1・#309）
     let entries: readonly CorrespondenceEntry[] | null = null;
@@ -880,7 +891,16 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       recordDeclaration(declaration, declarationSha256, staticCheck);
       const row = evaluationRow(declarationSha256, staticCheck);
       if (!staticCheck.passed || staticCheck.app === null) {
-        return { declaration, declarationSha256, staticCheck, correspondence: null, testRun: null, routes: [], defectMisses: [] };
+        return {
+          declaration,
+          declarationSha256,
+          staticCheck,
+          correspondence: null,
+          testRun: null,
+          routes: [],
+          defectMisses: [],
+          redoMisses: [],
+        };
       }
       const app = staticCheck.app;
       let currentEntries = entries;
@@ -898,20 +918,27 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
             ...(input.plan === undefined ? {} : { plan: input.plan }),
             ...(roles === undefined ? {} : { roles }),
             ...(useMappings() ? { mappings } : {}),
+            ...(ownership === undefined ? {} : { ownership }),
+            ...(input.designVersion === undefined ? {} : { version: input.designVersion }),
           }),
         );
         currentEntries = result.entries;
         entries = currentEntries;
         entriesSha = declarationSha256;
       }
-      // ⑤a の落ちを、対応の表の不備（③ のやり直し）と、それ以外（宣言の要素の欠落、⑥）に分ける（§1.3.1・Issue #324）。
-      // **画面から辿れない場所は「宣言の要素の欠落」**なので、③ のやり直しには数えない（⑥ 直すへ回す）
+      // ⑤a の落ちを、対応の表の不備（③ のやり直し）・要件の対応表の外（⑤a のやり直し）・それ以外
+      // （宣言の要素の欠落、⑥）に分ける（§1.3.1・Issue #324・#431）。**画面から辿れない場所は「宣言の
+      // 要素の欠落」**なので、③ のやり直しには数えない（⑥ 直すへ回す）
       const entriesMisses = checkCorrespondence(app, requirementList, currentEntries);
       const mappingMisses =
         roles !== undefined && useMappings()
-          ? checkRoleMappings(app, roles, currentEntries, mappings)
+          ? checkRoleMappings(app, roles, currentEntries, mappings, {
+              ...(ownership === undefined ? {} : { ownership }),
+              ...(input.designVersion === undefined ? {} : { version: input.designVersion }),
+            })
           : [];
       const defectMisses = mappingMisses.filter((miss) => miss.route === "correspondence-defect");
+      const redoMisses = mappingMisses.filter((miss) => miss.route === "correspondence-redo");
       const correspondence: CorrespondenceResult = {
         entries: currentEntries,
         misses: [...entriesMisses, ...mappingMisses],
@@ -924,6 +951,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
           suite: withoutOverturned(),
           correspondence,
           ...(useMappings() ? { mappings } : {}),
+          ...(roles === undefined ? {} : { roles }),
         }),
       );
       // ⑤b の完了時に、同じ宣言の SHA-256 の行へ追記する（件数と、行き先ごとの件数だけ。Issue #417）
@@ -938,6 +966,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         testRun: report,
         routes: report.routes,
         defectMisses,
+        redoMisses,
       };
     };
 
@@ -969,12 +998,14 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         break;
       }
 
-      // ⑤a のやり直し：対応の名前が宣言に実在するのに、⑤a の対応表の外にあるとき（Issue #322）。
+      // ⑤a のやり直し：対応の名前が宣言に実在するのに ⑤a の対応表の外にあるとき（Issue #322・#431）。
       // ③ の対応は正しく、足りないのは ⑤a の対応表の場所なので、**③ のやり直しでも ⑥ でもない**。
-      // 落ちた場所を伝えて ⑤a を作り直し、同じ宣言のまま結び付けと試験を流し直す。
+      // 落ちた場所を伝えて ⑤a を作り直し、同じ宣言のまま結び付けと試験を流し直す。落ちは 2 経路から来る
+      // ——⑤b の構造の検査の行き先（`routes`）と、⑤a の**要件ごとの点検**の落ち（`redoMisses`）。
       const redoRoutes = current.routes.filter((route) => route.route === "correspondence-redo");
+      const redoMisses = current.redoMisses;
       if (
-        redoRoutes.length > 0 &&
+        (redoRoutes.length > 0 || redoMisses.length > 0) &&
         roles !== undefined &&
         useMappings() &&
         current.staticCheck.app !== null
@@ -986,11 +1017,18 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         }
         correspondenceCalls += 1;
         const app = current.staticCheck.app;
-        const previousMisses: readonly CorrespondenceMiss[] = redoRoutes.map((route) => ({
-          requirementId: route.requirementId ?? "",
-          ...(route.location === undefined ? {} : { location: route.location }),
-          detail: route.detail,
-        }));
+        const previousMisses: readonly CorrespondenceMiss[] = [
+          ...redoRoutes.map((route) => ({
+            requirementId: route.requirementId ?? "",
+            ...(route.location === undefined ? {} : { location: route.location }),
+            detail: route.detail,
+          })),
+          ...redoMisses.map((miss) => ({
+            requirementId: miss.requirementId,
+            ...(miss.location === undefined ? {} : { location: miss.location }),
+            detail: miss.detail,
+          })),
+        ];
         const retry = await runStageOk("correspondence", () =>
           runCorrespondence({
             source: input.source,
@@ -1002,6 +1040,8 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
             roles,
             ...(input.plan === undefined ? {} : { plan: input.plan }),
             ...(useMappings() ? { mappings } : {}),
+            ...(ownership === undefined ? {} : { ownership }),
+            ...(input.designVersion === undefined ? {} : { version: input.designVersion }),
             previousMisses,
           }),
         );
@@ -1071,6 +1111,8 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
           correspondences: current.correspondence?.entries ?? [],
           ...(useMappings() ? { mappings } : {}),
           ...(roles === undefined ? {} : { roles }),
+          ...(ownership === undefined ? {} : { ownership }),
+          ...(input.designVersion === undefined ? {} : { version: input.designVersion }),
           documents: input.documents,
           gateway,
         }),
@@ -1112,10 +1154,13 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
 
     const final = lastPassed ?? current;
 
-    // 停滞で止めたら、残った不一致を**未解決**として数え、部分案で終える（§1.3.1・Issue #309）
+    // 停滞で止めたら、残った不一致を**未解決**として数え、部分案で終える（§1.3.1・Issue #309）。
+    // ⑤a のコードの落ち（要件 ID と場所つき）だけが残って停滞したときも、未解決として ⑦ へ渡す
+    // ——試験 ID を作らず、件数だけを足す（要件 ID と場所は対応表の落ちに保ったまま。Issue #431・レビュー 6）。
     if (stagnant) {
       for (const route of current.routes) if (!unresolved.includes(route.testId)) unresolved.push(route.testId);
     }
+    const stalledCorrespondenceMisses = stagnant ? final.correspondence?.misses.length ?? 0 : 0;
 
     // ⑦ 終わりの判定。**実行していない検査は「不一致 0」にしない**（`null` のときは 1 として渡す）。
     // 未解決は、最終版の試験の結果の未解決と、期待の裁定の未解決の両方を数える（#306）。
@@ -1123,7 +1168,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       staticCheckPassed: final.staticCheck.passed,
       correspondenceMisses: final.correspondence === null ? 1 : final.correspondence.misses.length,
       testMismatches: final.testRun === null ? 1 : final.testRun.mismatches.length,
-      testUnresolved: countUnresolvedTests(unresolved, final.testRun),
+      testUnresolved: countUnresolvedTests(unresolved, final.testRun) + stalledCorrespondenceMisses,
       unwritableRequirements,
       ...(acceptedUnwritable === undefined ? {} : { acceptedUnwritable }),
       limitReached,
