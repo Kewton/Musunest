@@ -1,0 +1,233 @@
+{
+  "id": "R3",
+  "title": "家庭菜園の収穫",
+  "patterns": [
+    "P5",
+    "P6"
+  ],
+  "note": "開発用 C と同じ判定の組（役割の名前と選択肢の表示名だけが違う）。#450",
+  "structures": [
+    {
+      "id": "main",
+      "roles": {
+        "main": {
+          "entity": {}
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "who": {
+          "field": {
+            "of": "main",
+            "type": "ref",
+            "to": "member"
+          }
+        },
+        "crop": {
+          "field": {
+            "of": "main",
+            "type": "enum",
+            "labels": [
+              "トマト",
+              "きゅうり",
+              "なす"
+            ]
+          }
+        },
+        "qty": {
+          "field": {
+            "of": "main",
+            "type": "number"
+          }
+        },
+        "date": {
+          "field": {
+            "of": "main",
+            "type": "date"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "人と収穫を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "main"
+          ]
+        },
+        {
+          "req": "個数は 1 以上",
+          "kind": "validation",
+          "entity": "main",
+          "cases": [
+            {
+              "set": {
+                "qty": 0
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "qty": 1
+              },
+              "valid": true
+            }
+          ]
+        },
+        {
+          "req": "収穫を直せて消せる",
+          "kind": "actionExists",
+          "entity": "main",
+          "kinds": [
+            "update",
+            "delete"
+          ]
+        },
+        {
+          "req": "人ごとの合計が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "main": [
+              {
+                "set": {
+                  "who": "m1",
+                  "qty": 100,
+                  "date": "2026-10-05"
+                }
+              },
+              {
+                "set": {
+                  "who": "m2",
+                  "qty": 200,
+                  "date": "2026-10-01"
+                }
+              },
+              {
+                "set": {
+                  "who": "m1",
+                  "qty": 400,
+                  "date": "2026-09-20"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 500
+            }
+          ]
+        },
+        {
+          "req": "今月の個数の合計（ダッシュボード）",
+          "kind": "scopeOnDashboard",
+          "sources": {
+            "main": [
+              {
+                "set": {
+                  "who": "m1",
+                  "qty": 100,
+                  "date": "2026-10-05"
+                }
+              },
+              {
+                "set": {
+                  "who": "m2",
+                  "qty": 200,
+                  "date": "2026-10-01"
+                }
+              },
+              {
+                "set": {
+                  "who": "m1",
+                  "qty": 400,
+                  "date": "2026-09-20"
+                }
+              }
+            ]
+          },
+          "expect": 300,
+          "widgets": [
+            "number"
+          ]
+        },
+        {
+          "req": "今月の件数（ダッシュボード）",
+          "kind": "scopeOnDashboard",
+          "sources": {
+            "main": [
+              {
+                "set": {
+                  "who": "m1",
+                  "qty": 100,
+                  "date": "2026-10-05"
+                }
+              },
+              {
+                "set": {
+                  "who": "m2",
+                  "qty": 200,
+                  "date": "2026-10-01"
+                }
+              },
+              {
+                "set": {
+                  "who": "m1",
+                  "qty": 400,
+                  "date": "2026-09-20"
+                }
+              }
+            ]
+          },
+          "expect": 2,
+          "widgets": [
+            "number"
+          ]
+        },
+        {
+          "req": "月ごとの個数のグラフ（直近 6 か月）",
+          "kind": "groupChart",
+          "source": "main",
+          "groupBy": "date",
+          "month": true,
+          "last": 6,
+          "aggKind": "sum",
+          "value": "qty",
+          "widgets": [
+            "bar"
+          ]
+        },
+        {
+          "req": "作物の内訳",
+          "kind": "groupChart",
+          "source": "main",
+          "groupBy": "crop",
+          "month": false,
+          "widgets": [
+            "pie",
+            "bar"
+          ]
+        },
+        {
+          "req": "人と作物で絞り込み",
+          "kind": "listFilters",
+          "entity": "main",
+          "fields": [
+            "who",
+            "crop"
+          ]
+        }
+      ],
+      "unwritable": []
+    }
+  ],
+  "clock": "2026-10-08T12:00:00+09:00",
+  "today": "2026-10-08"
+}

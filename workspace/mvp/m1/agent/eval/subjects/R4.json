@@ -1,0 +1,395 @@
+{
+  "id": "R4",
+  "title": "ボードゲーム会の参加者",
+  "patterns": [
+    "P7",
+    "P8"
+  ],
+  "note": "開発用 D と同じ判定の組（役割の名前だけが違う）。主の構造（参照の並び）と別の構造（参加の entity）、書けない要件（参加者 0 人で登録）も同じ種類。#450",
+  "structures": [
+    {
+      "id": "list",
+      "note": "参加者をゲーム会の中の参照の並びで持つ構造",
+      "roles": {
+        "event": {
+          "entity": {}
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "attendees": {
+          "field": {
+            "of": "event",
+            "type": "list",
+            "to": "member"
+          }
+        },
+        "capacity": {
+          "field": {
+            "of": "event",
+            "type": "number"
+          }
+        },
+        "date": {
+          "field": {
+            "of": "event",
+            "type": "date"
+          }
+        },
+        "place": {
+          "field": {
+            "of": "event",
+            "type": "string"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "人とゲーム会を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "event"
+          ]
+        },
+        {
+          "req": "定員を超えたら登録できない",
+          "kind": "validation",
+          "entity": "event",
+          "cases": [
+            {
+              "set": {
+                "capacity": 2,
+                "attendees": [
+                  "m1",
+                  "m2",
+                  "m3"
+                ]
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 2,
+                "attendees": [
+                  "m1",
+                  "m2"
+                ]
+              },
+              "valid": true
+            }
+          ]
+        },
+        {
+          "req": "定員は 1 人以上",
+          "kind": "validation",
+          "entity": "event",
+          "cases": [
+            {
+              "set": {
+                "capacity": 0,
+                "attendees": []
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 1,
+                "attendees": [
+                  "m1"
+                ]
+              },
+              "valid": true
+            }
+          ]
+        },
+        {
+          "req": "参加人数が見られる",
+          "kind": "computedVisible",
+          "entity": "event",
+          "probes": [
+            {
+              "set": {
+                "capacity": 5,
+                "attendees": [
+                  "m1",
+                  "m2"
+                ]
+              },
+              "expect": 2
+            }
+          ]
+        },
+        {
+          "req": "残りの枠が見られる",
+          "kind": "computedVisible",
+          "entity": "event",
+          "probes": [
+            {
+              "set": {
+                "capacity": 5,
+                "attendees": [
+                  "m1",
+                  "m2"
+                ]
+              },
+              "expect": 3
+            }
+          ]
+        },
+        {
+          "req": "人ごとの参加回数が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "event": [
+              {
+                "set": {
+                  "attendees": [
+                    "m1"
+                  ]
+                }
+              },
+              {
+                "set": {
+                  "attendees": [
+                    "m1"
+                  ]
+                }
+              },
+              {
+                "set": {
+                  "attendees": [
+                    "m2"
+                  ]
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        }
+      ],
+      "unwritable": [
+        {
+          "id": "参加者 0 人で登録",
+          "keys": [
+            "0\\s*人",
+            "０\\s*人",
+            "ゼロ",
+            "誰も(い|居)",
+            "いなくても",
+            "空",
+            "あとから",
+            "後から",
+            "任意",
+            "必須"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "attendance",
+      "note": "参加を別の entity（ゲーム会とメンバーを参照）にした構造（決定②：申告が正しければ合格）",
+      "roles": {
+        "event": {
+          "entity": {
+            "hasFieldTypes": [
+              "number",
+              "date",
+              "string"
+            ]
+          }
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "att": {
+          "entity": {}
+        },
+        "attEvent": {
+          "field": {
+            "of": "att",
+            "type": "ref",
+            "to": "event"
+          }
+        },
+        "attMember": {
+          "field": {
+            "of": "att",
+            "type": "ref",
+            "to": "member"
+          }
+        },
+        "capacity": {
+          "field": {
+            "of": "event",
+            "type": "number"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "人とゲーム会を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "event"
+          ]
+        },
+        {
+          "req": "参加を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "att"
+          ]
+        },
+        {
+          "req": "定員は 1 人以上",
+          "kind": "validation",
+          "entity": "event",
+          "cases": [
+            {
+              "set": {
+                "capacity": 0
+              },
+              "valid": false
+            },
+            {
+              "set": {
+                "capacity": 1
+              },
+              "valid": true
+            }
+          ]
+        },
+        {
+          "req": "参加人数が見られる",
+          "kind": "computedVisible",
+          "entity": "event",
+          "sources": {
+            "att": [
+              {
+                "set": {
+                  "attEvent": "g1",
+                  "attMember": "m1"
+                }
+              },
+              {
+                "set": {
+                  "attEvent": "g1",
+                  "attMember": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "g1",
+              "set": {
+                "capacity": 5
+              },
+              "expect": 2
+            }
+          ]
+        },
+        {
+          "req": "残りの枠が見られる",
+          "kind": "computedVisible",
+          "entity": "event",
+          "sources": {
+            "att": [
+              {
+                "set": {
+                  "attEvent": "g1",
+                  "attMember": "m1"
+                }
+              },
+              {
+                "set": {
+                  "attEvent": "g1",
+                  "attMember": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "g1",
+              "set": {
+                "capacity": 5
+              },
+              "expect": 3
+            }
+          ]
+        },
+        {
+          "req": "人ごとの参加回数が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "att": [
+              {
+                "set": {
+                  "attMember": "m1",
+                  "attEvent": "g1"
+                }
+              },
+              {
+                "set": {
+                  "attMember": "m1",
+                  "attEvent": "g2"
+                }
+              },
+              {
+                "set": {
+                  "attMember": "m2",
+                  "attEvent": "g1"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        }
+      ],
+      "unwritable": [
+        {
+          "id": "定員を超えたら登録できない",
+          "keys": [
+            "定員",
+            "超"
+          ]
+        }
+      ]
+    }
+  ],
+  "clock": "2026-10-08T12:00:00+09:00",
+  "today": "2026-10-08"
+}
