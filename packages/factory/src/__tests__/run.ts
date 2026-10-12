@@ -829,3 +829,97 @@ export function recordedRunGrouped(options: {
     structured(GROUPED_CORRESPONDENCE_OUTPUT),
   ];
 }
+
+// ── 完了条件の負例：② の設計の意味の誤り 3 種（Issue #433・review 2）───────────────
+//
+// いずれも、確定した仕様（正本）から**独立に固定した** ②' の試験（見出しの期待）を先に置き、② の設計と
+// ③ の宣言が**同じ誤りを共有**して、列の相互照合（⑤a のコード）は一致する形にする。それでも、独立の
+// 点検が残した落ちが消えないので full にならない、ということを確かめるための材料である。
+
+/** 選択肢の意味の欠落：`status` の選択肢から `closed` を落とした設計と宣言 */
+export const GROUPED_DESIGN_MISSING_OPTION = {
+  ...GROUPED_DESIGN,
+  roles: GROUPED_DESIGN.roles.map((role) =>
+    role.roleId === "record.status" ? { ...role, options: ["open"] } : role,
+  ),
+};
+
+export const GROUPED_DECLARATION_MISSING_OPTION = GROUPED_DECLARATION_SOURCE.replace(
+  "          open: 未了\n          closed: 完了",
+  "          open: 未了",
+);
+
+/** ラベルとキーの対応の逆転：`status` の選択肢の順とラベルを入れ替えた設計と宣言 */
+export const GROUPED_DESIGN_REVERSED_OPTION = {
+  ...GROUPED_DESIGN,
+  roles: GROUPED_DESIGN.roles.map((role) =>
+    role.roleId === "record.status" ? { ...role, options: ["closed", "open"] } : role,
+  ),
+};
+
+export const GROUPED_DECLARATION_REVERSED_OPTION = GROUPED_DECLARATION_SOURCE.replace(
+  "          open: 未了\n          closed: 完了",
+  "          closed: 未了\n          open: 完了",
+);
+
+/** 集計対象の誤り：`byStatus` が `status` ではなく `kind`（同じ選択肢の項目）で分ける設計と宣言 */
+export const GROUPED_DESIGN_WRONG_TARGET = {
+  roles: [
+    ...GROUPED_DESIGN.roles,
+    { roleId: "record.kind", kind: "field", entity: "record", name: "種別", shared: false, aliasOf: null, options: ["open", "closed"], groupBy: null },
+  ].map((role) => (role.roleId === "record.byStatus" ? { ...role, groupBy: "record.kind" } : role)),
+  designs: GROUPED_DESIGN.designs.map((entry) =>
+    entry.requirementId === "R-1"
+      ? {
+          ...entry,
+          ownership: [
+            ...entry.ownership,
+            { roleId: "record.kind", basis: "dependency", reason: "分ける元の項目として参照するため" },
+          ],
+        }
+      : entry,
+  ),
+};
+
+export const GROUPED_MAPPINGS_WRONG_TARGET = [
+  ...GROUPED_MAPPINGS,
+  { roleId: "record.kind", name: "kind" },
+] as const;
+
+export const GROUPED_CORRESPONDENCE_OUTPUT_WRONG_TARGET = {
+  entries: GROUPED_CORRESPONDENCE_OUTPUT.entries.map((entry) =>
+    entry.requirementId === "R-1"
+      ? { ...entry, locations: [...entry.locations, { kind: "field", entity: "record", name: "kind" }] }
+      : entry,
+  ),
+};
+
+export const GROUPED_DECLARATION_WRONG_TARGET = GROUPED_DECLARATION_SOURCE.replace(
+  "      amount: number\n      status:",
+  "      amount: number\n      kind:\n        type: enum\n        options:\n          open: 未了\n          closed: 完了\n      status:",
+)
+  .replace("    show: [status, amount, total, extra]", "    show: [status, kind, amount, total, extra]")
+  .replace("      groupBy: record.status", "      groupBy: record.kind");
+
+/**
+ * 確定した仕様（正本）を渡した、見出しごとの集計の fixture の走り（**①・①' は無い**。§5・Issue #334）。
+ * ②→②'→③→⑤a の 4 回（②' の作り直しの回だけ `suites` を増やす）。
+ */
+export function recordedRunGroupedFromPlan(options: {
+  readonly design?: unknown;
+  readonly suites?: readonly unknown[];
+  readonly declaration?: string;
+  readonly mappings?: unknown;
+  readonly correspondence?: unknown;
+} = {}): readonly RecordedCall[] {
+  const suites = options.suites ?? [GROUPED_TEST_SUITE_OUTPUT];
+  return [
+    structured(options.design ?? GROUPED_DESIGN),
+    ...suites.map((suite) => structured(suite)),
+    structured({
+      declaration: options.declaration ?? GROUPED_DECLARATION_SOURCE,
+      mappings: options.mappings ?? GROUPED_MAPPINGS,
+    }),
+    structured(options.correspondence ?? GROUPED_CORRESPONDENCE_OUTPUT),
+  ];
+}

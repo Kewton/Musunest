@@ -1213,6 +1213,59 @@ function isNewContractDesign(design: DesignResult): boolean {
 }
 
 /**
+ * **新契約**の役割 ID の表の `groupBy` を確かめる（Issue #433・review 1）。`checkSuitePlan` の見出しの
+ * 検査は、**欄が無い（欠落）**を `null` と同じく対象外にする。だから、入口で欠落・形・参照先の不備を
+ * 断らないと、この欄だけを欠かせた設計が、見出しの検査を省いたまま固定できてしまう（#428 が設けた
+ * 「入力が欠けても旧来の検査だけで固定しない」の境界に、#433 の欄を反映する）。
+ *
+ *   - 欠落（欄が無い）… 新契約では必須（計算でなければ `null` を書く）。**`null` は対象外であって不備ではない**
+ *   - 計算でない役割の非 null／空でない文字列でない
+ *   - 参照先の役割 ID が表に無い・項目（`field`）でない・選択肢（`options`）が無い
+ *   - 有無の混在
+ *
+ * **Problem の `field`・`message` に値を埋めない**。`legacy` を明示したときは掛けない（呼ぶ側が分ける）。
+ */
+function checkRoleGroupByFields(design: DesignResult): readonly Problem[] {
+  const problems: Problem[] = [];
+  const roles = design.roles ?? [];
+  const roleById = new Map(roles.map((role) => [role.roleId, role]));
+  let present = 0;
+  roles.forEach((role, index) => {
+    const field = `roles[${index}].groupBy`;
+    if (role.groupBy === undefined) {
+      problems.push({ field, message: "見出しの元の項目の欄（groupBy）が要る（計算でなければ null）" });
+      return;
+    }
+    present += 1;
+    if (role.groupBy === null) return;
+    if (typeof role.groupBy !== "string" || role.groupBy === "") {
+      problems.push({ field, message: "見出しの元の項目は空でない文字列か null であること" });
+      return;
+    }
+    if (role.kind !== "computation") {
+      problems.push({ field, message: "計算でない役割の見出しの元の項目は null であること" });
+      return;
+    }
+    const target = roleById.get(role.groupBy);
+    if (target === undefined) {
+      problems.push({ field, message: "見出しの元の項目の役割 ID が役割 ID の表に無い" });
+      return;
+    }
+    if (target.kind !== "field") {
+      problems.push({ field, message: "見出しの元の項目が項目（field）でない" });
+      return;
+    }
+    if (target.options === null || target.options === undefined) {
+      problems.push({ field, message: "見出しの元の項目に選択肢（options）が無い" });
+    }
+  });
+  if (present > 0 && present < roles.length) {
+    problems.push({ field: "roles", message: "見出しの元の項目（groupBy）の有無が役割ごとに混ざっている" });
+  }
+  return problems;
+}
+
+/**
  * ②' のデータ（要件の一覧。やり直しのときは前回の作り直しの指示を足す）。
  *
  * **② の設計が渡されたときは、役割 ID の表と要件ごとの種類も入れる**（Issue #316）。②' は宣言を
@@ -1311,17 +1364,28 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
   // **版は欄の有無から推定しない。** 新契約（`version` を省いたとき）では、② の設計を必ず渡す。設計が
   // 役割 ID の表・種類・確かめ方を持たなくても、旧来の検査（`checkSuiteAgainstRequirements`）へ落とさず、
   // **中身の点検で断る**（`designProblem` と同じ扱いで `unmet`。要求は今までどおり送る。Issue #418・#428）。
-  // `isPlannedDesign` は `legacy` を明示したときだけ使う。
-  const designProblem: readonly Problem[] =
-    legacy || (input.design !== undefined && isNewContractDesign(input.design))
-      ? []
-      : [
+  // 新契約の形（役割 ID の表・種類・確かめ方）を持つときも、#433 の欄（役割ごとの `groupBy`）の欠落・
+  // 形・参照先の不備を入口で断る——見出しの検査は欠落を対象外にするので、ここで断らないと欄だけを
+  // 欠かせた設計が固定できてしまう（Issue #433・review 1）。`isPlannedDesign` は `legacy` を明示したときだけ使う。
+  const designProblem: readonly Problem[] = legacy
+    ? []
+    : input.design === undefined
+      ? [
           {
             field: "design",
             message:
               "新契約では、役割 ID の表・要件ごとの種類・確かめ方を持つ ② の設計が要る（無い・欠ける入力は断る）",
           },
-        ];
+        ]
+      : isNewContractDesign(input.design)
+        ? checkRoleGroupByFields(input.design)
+        : [
+            {
+              field: "design",
+              message:
+                "新契約では、役割 ID の表・要件ごとの種類・確かめ方を持つ ② の設計が要る（無い・欠ける入力は断る）",
+            },
+          ];
   let previous: readonly Problem[] = [];
   // 食い違った要件の決め方（要件 ID ごと）。やり直しの回をまたいで持ち越す（聞き直さない。Issue #373）
   const decisions = new Map<string, NatureDecision>();

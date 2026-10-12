@@ -17,6 +17,7 @@ import {
   NATURE_JUDGE_THRESHOLD_VERSION,
   TEST_SUITE_RULE_DEFINITIONS,
   TEST_SUITE_RULES,
+  TEST_SUITE_ROUNDS,
   TEST_SUITE_SCHEMA_NAME,
   checkSuiteAgainstRequirements,
   checkSuitePlan as checkSuitePlanImpl,
@@ -2251,6 +2252,84 @@ describe("選択肢の値と見出しごとの集計の期待を、コードで�
     for (const definition of TEST_SUITE_RULE_DEFINITIONS) {
       expect(definition.why.trim(), definition.id).not.toBe("");
       expect(definition.since.trim(), definition.id).not.toBe("");
+    }
+  });
+});
+
+// ── 新契約の入口が、groupBy の欠けた設計を断る（Issue #433・review 1）──────────────
+
+describe("新契約の入口は、役割ごとの groupBy の欠落・形・参照先の不備を断る（Issue #433・review 1）", () => {
+  /** `groupBy` の欄を丸ごと外した役割（欠落。`null` とは別物である） */
+  const withoutGroupBy = (role: RoleEntry): RoleEntry => {
+    const { groupBy: _omitted, ...rest } = role;
+    return rest;
+  };
+
+  const designWithRoles = (roles: readonly RoleEntry[]): DesignResult => ({ ...OWNED_DESIGN, roles });
+
+  const run = (design: DesignResult, version?: typeof LEGACY_DESIGN_CONTRACT) =>
+    runTestSuiteImpl({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(createRecordingClient([structured({ tests: OWNED_VALID }), structured({ tests: OWNED_VALID })]).client, {
+        maxAttempts: 1,
+      }),
+      design,
+      ...(version === undefined ? {} : { version }),
+    });
+
+  it("新契約で groupBy の欄ごと欠かした設計は、1 回の作り直し後も固定できず unmet", async () => {
+    const outcome = await run(designWithRoles(OWNED_ROLES.map(withoutGroupBy)));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    expect(outcome.failure.attempts).toBe(TEST_SUITE_ROUNDS);
+    expect(outcome.failure.problems.some((problem) => problem.field.endsWith("groupBy"))).toBe(true);
+  });
+
+  it("新契約で groupBy の有無が混ざった設計は unmet", async () => {
+    const roles = OWNED_ROLES.map((role, index) => (index === 0 ? withoutGroupBy(role) : role));
+    const outcome = await run(designWithRoles(roles));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    expect(
+      outcome.failure.problems.some((problem) => problem.message.includes("見出しの元の項目（groupBy）の有無が役割ごとに混ざっている")),
+    ).toBe(true);
+  });
+
+  it("新契約で groupBy の参照先が表に無い・項目でない設計は unmet", async () => {
+    for (const target of ["ghost", "record.records"]) {
+      const roles = OWNED_ROLES.map((role) =>
+        role.roleId === "record.total" ? { ...role, groupBy: target } : role,
+      );
+      const outcome = await run(designWithRoles(roles));
+      expect(outcome.ok, target).toBe(false);
+      if (outcome.ok || outcome.failure.kind !== "unmet") continue;
+      expect(outcome.failure.problems.some((problem) => problem.field.endsWith("groupBy")), target).toBe(true);
+    }
+  });
+
+  it("legacy を明示した旧形式（groupBy の欄ごと無い）は、固定できる", async () => {
+    const outcome = await run(designWithRoles(OWNED_ROLES.map(withoutGroupBy)), LEGACY_DESIGN_CONTRACT);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.suite.tests).toHaveLength(OWNED_VALID.length);
+  });
+
+  it("正しい null（全役割の groupBy が null）は、固定できる", async () => {
+    const outcome = await run(OWNED_DESIGN);
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("断る Problem に、目印を入れた参照先の値が出ない", async () => {
+    const marker = "MARKER433R1";
+    const roles = OWNED_ROLES.map((role) =>
+      role.roleId === "record.total" ? { ...role, groupBy: `ghost-${marker}` } : role,
+    );
+    const outcome = await run(designWithRoles(roles));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    for (const problem of outcome.failure.problems) {
+      expect(`${problem.field} ${problem.message}`).not.toContain(marker);
     }
   });
 });

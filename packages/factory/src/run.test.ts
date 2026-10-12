@@ -65,10 +65,18 @@ import {
   DESIGN_OUTPUT_MAPPED,
   DESIGN_OUTPUT_PLANNED_PARTIAL,
   GROUPED_CORRESPONDENCE_OUTPUT,
+  GROUPED_CORRESPONDENCE_OUTPUT_WRONG_TARGET,
+  GROUPED_DECLARATION_MISSING_OPTION,
   GROUPED_DECLARATION_REVERSED,
+  GROUPED_DECLARATION_REVERSED_OPTION,
   GROUPED_DECLARATION_SOURCE,
+  GROUPED_DECLARATION_WRONG_TARGET,
   GROUPED_DESIGN,
+  GROUPED_DESIGN_MISSING_OPTION,
+  GROUPED_DESIGN_REVERSED_OPTION,
+  GROUPED_DESIGN_WRONG_TARGET,
   GROUPED_MAPPINGS,
+  GROUPED_MAPPINGS_WRONG_TARGET,
   GROUPED_TEST_SUITE_OUTPUT,
   INVALID_DECLARATION_SOURCE,
   MAPPING_REDO_OUTPUT,
@@ -85,6 +93,7 @@ import {
   recordedRun,
   recordedRunFour,
   recordedRunGrouped,
+  recordedRunGroupedFromPlan,
   recordedRunFromPlan,
   structured,
 } from "./__tests__/run.js";
@@ -3910,5 +3919,80 @@ describe("⑤a・②' へ正本が渡り、期待・集計値・合否は渡さ�
     expect(result.outcome.verdict).not.toBe("full");
     if (result.bundle === null) throw new Error("納品物が無い");
     expect(verificationOf(result.bundle).test_mismatches).toBe(1);
+  });
+});
+
+// ── 設計の意味の誤り 3 種（Issue #433・review 2）────────────────────────────
+
+describe("設計の意味だけを誤らせても、独立の点検が残す落ちで full にならない（Issue #433・review 2）", () => {
+  /** 正本（確定した仕様）が ②'・⑤a に渡り、期待・集計値・合否が ⑤a へ渡らないことを確かめる */
+  const expectPlanWiring = (recording: ReturnType<typeof createRecordingClient>): void => {
+    const suites = recording.structured.filter((request) => request.schemaName === TEST_SUITE_SCHEMA_NAME);
+    for (const request of suites) expect(request.input).toContain("確定した仕様");
+    const correspondences = recording.structured.filter((request) => request.schemaName === CORRESPONDENCE_SCHEMA_NAME);
+    for (const request of correspondences) {
+      const names = [...request.input.matchAll(/<data name="([^"]+)"/g)].map((match) => match[1]);
+      expect(names).toContain("確定した仕様");
+      // 期待・集計値・合否は、⑤a へ新たに渡していない（データの欄の名前で確かめる）
+      expect(names).not.toContain("期待");
+      expect(names).not.toContain("集計値");
+      expect(names).not.toContain("合否");
+    }
+  };
+
+  it("選択肢の意味の欠落を設計と宣言が共有しても、独立の試験が落ちを残すので full にならない", async () => {
+    const { recording, run } = runWith(
+      recordedRunGroupedFromPlan({
+        design: GROUPED_DESIGN_MISSING_OPTION,
+        declaration: GROUPED_DECLARATION_MISSING_OPTION,
+        // 2 回目（作り直し）も同じ、正本から固定した試験を返す
+        suites: [GROUPED_TEST_SUITE_OUTPUT, GROUPED_TEST_SUITE_OUTPUT],
+      }),
+      { plan: CONFIRMED_PLAN },
+    );
+    const result = await run;
+    expect(result.outcome.verdict).not.toBe("full");
+    // ②' の作り直し（再点検）でも消えない（②' で止まる。⑤a の列の照合は一致している）
+    expect(result.stopped?.stage).toBe("test-suite");
+    expect(recording.structured.filter((request) => request.schemaName === TEST_SUITE_SCHEMA_NAME)).toHaveLength(2);
+    expectPlanWiring(recording);
+  });
+
+  it("ラベルとキーの対応の逆転を設計と宣言が共有しても、独立の試験が落ちを残すので full にならない", async () => {
+    const { recording, run } = runWith(
+      recordedRunGroupedFromPlan({
+        design: GROUPED_DESIGN_REVERSED_OPTION,
+        declaration: GROUPED_DECLARATION_REVERSED_OPTION,
+        suites: [GROUPED_TEST_SUITE_OUTPUT, GROUPED_TEST_SUITE_OUTPUT],
+      }),
+      { plan: CONFIRMED_PLAN },
+    );
+    const result = await run;
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.stopped?.stage).toBe("test-suite");
+    expect(recording.structured.filter((request) => request.schemaName === TEST_SUITE_SCHEMA_NAME)).toHaveLength(2);
+    expectPlanWiring(recording);
+  });
+
+  it("集計対象の誤りを設計と宣言が共有しても、⑤b の値の照合が落ちを残すので full にならない", async () => {
+    const { recording, run } = runWith(
+      [
+        ...recordedRunGroupedFromPlan({
+          design: GROUPED_DESIGN_WRONG_TARGET,
+          declaration: GROUPED_DECLARATION_WRONG_TARGET,
+          mappings: GROUPED_MAPPINGS_WRONG_TARGET,
+          correspondence: GROUPED_CORRESPONDENCE_OUTPUT_WRONG_TARGET,
+        }),
+        toolDone({ declaration: GROUPED_DECLARATION_WRONG_TARGET, disputes: [] }),
+      ],
+      { plan: CONFIRMED_PLAN, limits: { ...AGENT_LIMITS, repairRoundTrips: 1, stagnationRepeats: 0 } },
+    );
+    const result = await run;
+    expect(result.outcome.verdict).not.toBe("full");
+    if (result.bundle === null) throw new Error("納品物が無い");
+    // ⑤b の値の不一致が、⑥ の修復・再点検の後も残る
+    expect(verificationOf(result.bundle).test_mismatches).toBeGreaterThanOrEqual(1);
+    expect(result.record.stages.map((stage) => stage.stage)).toContain("repair");
+    expectPlanWiring(recording);
   });
 });
