@@ -648,7 +648,22 @@ export function checkRoleMappings(
   options: RoleMappingCheckOptions = {},
 ): readonly RoleMappingMiss[] {
   if (options.version !== LEGACY_DESIGN_CONTRACT) {
-    return checkRoleMappingsPerRequirement(app, roles, entries, mappings, options.ownership ?? []);
+    const ownership = options.ownership ?? [];
+    // 新契約では、**要件ごとの所属の欠落・空**を入力の不備として断る（照合なしの成功にしない。Issue #431）。
+    // 所属が無いと要件ごとの照合が一度も走らず、表全体の内側の検査にも戻らないので、黙って通ってしまう。
+    const ownedRoleIds = new Set(
+      ownership.flatMap((entry) => entry.ownership.map((own) => own.roleId)),
+    );
+    if (ownedRoleIds.size === 0) {
+      return [
+        {
+          requirementId: "",
+          route: "correspondence-defect",
+          detail: "要件ごとの所属が渡されていない、または空である（新契約の入力の不備）",
+        },
+      ];
+    }
+    return checkRoleMappingsPerRequirement(app, roles, entries, mappings, ownership);
   }
   return checkRoleMappingsTableWide(app, roles, entries, mappings);
 }
@@ -876,7 +891,17 @@ function checkRoleMappingsPerRequirement(
       const mapping = mappings.find((candidate) => candidate.roleId === own.roleId);
       if (mapping === undefined) continue; // 1. で、提出されていない落ちにした
       const kind = declarationKindOfRole(role.kind);
-      const entityName = role.entity === null ? null : nameByRoleId.get(role.entity) ?? null;
+      // 所属 entity の対応が引けないときは、**場所を未確定**として扱い、null の場所（entity を問わない）を
+      // 組んで correspondence-redo を足さない（Issue #431）。③ の対応そのものの不備は、2. が
+      // correspondence-defect として既に出している。役割自身が entity を持たない場合の null と区別する。
+      let entityName: string | null;
+      if (role.entity === null) {
+        entityName = null;
+      } else {
+        const resolved = nameByRoleId.get(role.entity);
+        if (resolved === undefined) continue;
+        entityName = resolved;
+      }
       const location: DeclarationLocation = { kind, entity: entityName, name: mapping.name };
       const inTable = table !== undefined && table.locations.some((candidate) => sameLocation(candidate, location));
       if (inTable) continue;

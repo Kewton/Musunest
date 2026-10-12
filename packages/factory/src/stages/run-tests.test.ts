@@ -1660,6 +1660,22 @@ describe("構造の検査が対応表の外になるときの行き先（02 §1.
     expect(route?.route).toBe("correspondence-defect");
   });
 
+  it("所属 entity の mapping が引けないときは、null の場所を組まず ⑤a のやり直しに回さない", () => {
+    // record.amount の対応はあるが、所属 entity（record）の対応だけ欠けている
+    const result = runTests({
+      app: APP,
+      suite: suiteOf([routeStructure("record.amount", "number")]),
+      correspondence: outsideTable,
+      mappings: [{ roleId: "record.amount", name: "amount" }],
+      roles: ROUTE_ROLES,
+    });
+    expect(result.unresolved.map((unresolved) => unresolved.testId)).toEqual(["struct"]);
+    const route = result.routes.find((candidate) => candidate.testId === "struct");
+    // entity を問わない null の場所で実在と誤認せず、correspondence-redo を足さない
+    expect(route?.route).not.toBe("correspondence-redo");
+    expect(route?.route).toBe("ambiguity");
+  });
+
   it("no-mapping・ambiguous は、今までどおり行き先を付けない（未解決）", () => {
     const missing = runTests({
       app: APP,

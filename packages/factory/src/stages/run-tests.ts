@@ -862,12 +862,15 @@ function routeOf(verdict: Verdict): FailureRoute | null {
  * 名前へ写す。表が渡されていなければ `null`（旧形式の経路）。**別 entity の同名を実在と誤認しない**ため、
  * 構造の検査の行き先（`correspondence-redo` か `correspondence-defect` か）の判定に使う。
  */
-function mappedEntityOf(roleId: string, input: RunTestsInput): string | null {
+function mappedEntityOf(roleId: string, input: RunTestsInput): string | null | undefined {
+  // 役割の表が無い（旧形式）ときは、所属 entity を引けないので null（entity を問わない場所を組む）
   if (input.roles === undefined || input.mappings === undefined) return null;
   const role = input.roles.find((candidate) => candidate.roleId === roleId);
   if (role === undefined || role.entity === null) return null;
   const entityMapping = input.mappings.find((candidate) => candidate.roleId === role.entity);
-  return entityMapping?.name ?? null;
+  // 所属 entity の対応が引けないときは **未確定**（`undefined`）。null と区別する（別 entity の同名を
+  // 実在と誤認しないため。Issue #431）
+  return entityMapping === undefined ? undefined : entityMapping.name;
 }
 
 /**
@@ -880,7 +883,10 @@ function mappedLocationOf(test: FixedTest, input: RunTestsInput): DeclarationLoc
   if (roleId === undefined || input.mappings === undefined) return null;
   const mapping = input.mappings.find((candidate) => candidate.roleId === roleId);
   if (mapping === undefined) return null;
-  return { kind: locationKindFor(test), entity: mappedEntityOf(roleId, input), name: mapping.name };
+  const entity = mappedEntityOf(roleId, input);
+  // 所属 entity の対応が引けない（未確定）ときは、場所を組まない（null の場所で実在と誤認しない。Issue #431）
+  if (entity === undefined) return null;
+  return { kind: locationKindFor(test), entity, name: mapping.name };
 }
 
 /** 1 件の試験を判定し、失敗の行き先も返す */

@@ -295,33 +295,20 @@ describe("段どうしのつなぎ：各段の任意の入力が走らせる部�
         },
       ],
     };
-    // R-2 の試験も `record.total` を対象にする（対応表が R-2 に total を載せないので結び付かない）
-    const wrongOwnershipSuite = {
-      classifications: TEST_SUITE_PLANNED.classifications,
-      tests: TEST_SUITE_PLANNED.tests.map((test) => {
-        const entry = test as { readonly target: { readonly requirementId: string } };
-        return entry.target.requirementId === "R-2"
-          ? {
-              ...entry,
-              target: { requirementId: "R-2", kind: "computation", roleId: "record.total" },
-              expected: { kind: "ok", value: 42 },
-            }
-          : entry;
-      }),
-    };
     const recording = createRecordingClient([
       structured(REQUIREMENT_LIST_OUTPUT),
       structured(REVERSE_CHECK_OUTPUT),
       structured(wrongOwnershipDesign),
-      structured(wrongOwnershipSuite),
+      structured(TEST_SUITE_PLANNED),
       structured({ declaration: DECLARATION_SOURCE, mappings: GOOD_MAPPINGS }),
       structured(CORRESPONDENCE_PLANNED), // 初回の ⑤a
       structured(CORRESPONDENCE_PLANNED), // ⑤a のやり直し（同じ応答なので停滞で止まる）
     ]);
     const result = await runGeneration(makeRunInput(recording.client));
 
-    // 誤った所属が残るので合格（full）にならない。同じ応答が続けば停滞で部分案になる
-    expect(result.outcome.result).toBe("partial");
+    // 誤った所属が残るので合格（full）にならない。同じ応答が続けば停滞で止まる
+    expect(result.outcome.result).not.toBe("pass");
+    expect(result.outcome.verdict).not.toBe("full");
     // 初回とやり直しの 2 回、⑤a を呼ぶ（段の記録も 2 件）
     expect(correspondenceSpy.mock.calls).toHaveLength(2);
     expect(result.record.stages.filter((step) => step.stage === "correspondence")).toHaveLength(2);

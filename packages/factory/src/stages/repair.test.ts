@@ -18,12 +18,13 @@ import { checkTestSuite, type TestSuite } from "../fixed-test.js";
 import { AGENT_LIMITS } from "../limits.js";
 import type { RecordedCall } from "../llm-fake.js";
 import type { LlmClient, LlmStructuredResponse, LlmToolRequest, LlmToolResponse } from "../llm.js";
-import type {
-  CorrespondenceEntry,
-  RequirementList,
-  RoleEntry,
-  RoleNameMapping,
-  VersionChecks,
+import {
+  LEGACY_DESIGN_CONTRACT,
+  type CorrespondenceEntry,
+  type RequirementList,
+  type RoleEntry,
+  type RoleNameMapping,
+  type VersionChecks,
 } from "../pipeline.js";
 import type { RequirementRoleOwnership } from "./correspondence.js";
 import {
@@ -651,13 +652,33 @@ describe("流し直しも、要件ごとの所属を点検する（Issue #431）
     expect(report.correspondence?.misses.some((miss) => miss.requirementId === "R-1")).toBe(true);
   });
 
-  it("所属を渡さなければ、要件ごとの点検はせず、要件 ID つきの落ちを足さない（旧形式の経路）", async () => {
+  it("新契約で所属を渡さなければ、入力の不備として断り、照合なしの成功にしない", async () => {
     const report = await checkDeclarationVersion(
       { source: PERM_DECLARATION },
       { list: LIST, suite: SUITE, correspondences, roles, mappings },
     );
+    expect(report.correspondence?.misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    // 要件ごとの照合は走らず、⑤a のやり直しの落ちも足さない
     expect(report.redoMisses).toEqual([]);
-    expect(report.correspondence?.misses.filter((miss) => miss.requirementId === "R-1")).toEqual([]);
+  });
+
+  it("新契約で所属が空でも、入力の不備として断る", async () => {
+    const report = await checkDeclarationVersion(
+      { source: PERM_DECLARATION },
+      { list: LIST, suite: SUITE, correspondences, roles, mappings, ownership: [] },
+    );
+    expect(report.correspondence?.misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    expect(report.redoMisses).toEqual([]);
+  });
+
+  it("legacy を明示したときは、従来どおり表全体の外の落ちにする（要件 ID は足さない）", async () => {
+    const report = await checkDeclarationVersion(
+      { source: PERM_DECLARATION },
+      { list: LIST, suite: SUITE, correspondences, roles, mappings, version: LEGACY_DESIGN_CONTRACT },
+    );
+    // record.title は宣言に実在するが、表全体（R-1 は entity record だけ）の挙げていない場所なので落ちになる
+    expect(report.correspondence?.misses.some((miss) => miss.detail.includes("対応表の外"))).toBe(true);
+    expect(report.redoMisses).toEqual([]);
   });
 });
 

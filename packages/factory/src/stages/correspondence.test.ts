@@ -762,3 +762,75 @@ describe("確定した仕様が正本で、一覧の文は補足である（§5�
   });
 });
 
+// ── 新契約で所属が欠けた入力は、照合なしの成功にしない（Issue #431・レビュー 1）──
+
+describe("新契約で所属が欠けた入力は、照合なしの成功にしない（Issue #431）", () => {
+  /** 全ての所属の場所が対応表の内側にある（所属さえあれば落ちにしない） */
+  const completeTable: readonly CorrespondenceEntry[] = [
+    {
+      requirementId: "R-1",
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "field", entity: "record", name: "amount" },
+        { kind: "computation", entity: "record", name: "total" },
+      ],
+    },
+  ];
+
+  it("所属を渡さなければ（版も省略）、要件ごとの照合を省略せず、入力の不備として断る", () => {
+    // 所属が無いと、要件ごとの照合は一度も走らず、表全体の内側の検査にも戻らない＝黙って通ってしまう
+    const misses = checkRoleMappings(APP, PERMS_ROLES, completeTable, PERMS_MAPPINGS);
+    expect(misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    expect(misses).not.toEqual([]);
+  });
+
+  it("所属が空でも、入力の不備として断る", () => {
+    const misses = checkRoleMappings(APP, PERMS_ROLES, completeTable, PERMS_MAPPINGS, { ownership: [] });
+    expect(misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+  });
+
+  it("所属があり、対応表から所属の場所を落としていれば、黙って通らない（⑤a のやり直し／③ の不備）", () => {
+    const shortTable: readonly CorrespondenceEntry[] = [
+      {
+        requirementId: "R-1",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "computation", entity: "record", name: "total" },
+        ],
+      },
+    ];
+    const misses = checkRoleMappings(APP, PERMS_ROLES, shortTable, PERMS_MAPPINGS, {
+      ownership: PERMS_OWNERSHIP,
+    });
+    expect(misses.some((miss) => miss.route === "correspondence-redo")).toBe(true);
+  });
+});
+
+// ── 所属 entity の対応が無いときは、null の場所で実在と誤認しない（レビュー 2）──
+
+describe("所属 entity の対応が無いときは、null の場所で実在と誤認しない（Issue #431）", () => {
+  const roles: readonly RoleEntry[] = [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+  ];
+  // 計算の対応（record.total → total）は正しいが、所属 entity の対応（record）だけ欠けている
+  const mappings: readonly RoleNameMapping[] = [{ roleId: "record.total", name: "total" }];
+  const ownership: readonly RequirementRoleOwnership[] = [
+    {
+      requirementId: "R-1",
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "行の所属として参照するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
+    },
+  ];
+
+  it("所属 entity の mapping が引けない役割は、null の場所を組まず correspondence-redo を足さない", () => {
+    // 場所を未確定として扱い、実在（entity を問わない）と誤認しない。③ の不備は別に出す
+    const misses = checkRoleMappings(APP, roles, [entry("R-1", [])], mappings, { ownership });
+    expect(misses.some((miss) => miss.route === "correspondence-redo")).toBe(false);
+    // ③ の対応そのものの不備（entity の mapping 欠落）は落ちとして残る
+    expect(misses.some((miss) => miss.route === "correspondence-defect")).toBe(true);
+  });
+});
+

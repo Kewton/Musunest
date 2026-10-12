@@ -8,12 +8,13 @@
 import { describe, expect, it } from "vitest";
 import { checkTestSuite } from "../fixed-test.js";
 import { AGENT_LIMITS } from "../limits.js";
-import type {
-  CorrespondenceEntry,
-  RequirementList,
-  RoleEntry,
-  RoleNameMapping,
-  TestSuite,
+import {
+  LEGACY_DESIGN_CONTRACT,
+  type CorrespondenceEntry,
+  type RequirementList,
+  type RoleEntry,
+  type RoleNameMapping,
+  type TestSuite,
 } from "../pipeline.js";
 import type { RequirementRoleOwnership } from "./correspondence.js";
 import {
@@ -290,7 +291,7 @@ describe("対応表の確認の道具も、要件ごとの点検をする（Issu
     expect(output.passed).toBe(false);
   });
 
-  it("所属を渡さなければ、要件ごとの点検はせず、落ちにしない（旧形式の経路）", async () => {
+  it("新契約で所属を渡さなければ、入力の不備として断り、照合なしの成功にしない", async () => {
     const call = checkToolArguments("check-correspondence", { declaration: PERM_DECLARATION });
     expect(call.ok).toBe(true);
     if (!call.ok) return;
@@ -301,6 +302,24 @@ describe("対応表の確認の道具も、要件ごとの点検をする（Issu
       roles,
       mappings,
     });
-    expect("misses" in output && output.misses).toEqual([]);
+    expect("misses" in output && output.misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    expect(output.passed).toBe(false);
+  });
+
+  it("legacy を明示したときは、従来どおり表全体の外の落ちにする", async () => {
+    const call = checkToolArguments("check-correspondence", { declaration: PERM_DECLARATION });
+    expect(call.ok).toBe(true);
+    if (!call.ok) return;
+    const output = await executeRepairTool(call.call, {
+      list: LIST,
+      suite: EMPTY_SUITE,
+      correspondences,
+      roles,
+      mappings,
+      version: LEGACY_DESIGN_CONTRACT,
+    });
+    // record.title は宣言に実在するが、表全体（R-1・R-2 は entity record だけ）の挙げていない場所
+    expect("misses" in output && output.misses.some((miss) => miss.detail.includes("対応表の外"))).toBe(true);
+    expect(output.passed).toBe(false);
   });
 });

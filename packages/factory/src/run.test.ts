@@ -840,27 +840,21 @@ const WRONG_OWNERSHIP_DESIGN = {
   ],
 };
 
-/** R-2 の試験も `record.total` を対象にする（対応表が R-2 に total を載せないので結び付かない） */
-const WRONG_OWNERSHIP_SUITE = {
-  tests: TEST_SUITE_OUTPUT_MAPPED.tests.map((test) => {
-    const entry = test as { readonly target: { readonly requirementId: string } };
-    return entry.target.requirementId === "R-2"
-      ? { ...entry, target: { requirementId: "R-2", kind: "computation", roleId: "record.total" }, expected: { kind: "ok", value: 42 } }
-      : entry;
-  }),
-};
-
 describe("誤った所属は、要件 ID つきの落ちで ⑤a のやり直しに回る（Issue #431）", () => {
-  it("正しい要件にだけ場所を載せると、落ちが要件 ID つきで出て ⑤a のやり直しに回り、full にならない", async () => {
+  it("所属だけを誤らせた設計で、⑤b の試験は通るのに ⑤a のコードの落ちで ⑤a のやり直しに回り、full にならない", async () => {
+    // 試験の対象・期待・宣言・⑤a の応答は、通常の成功例のまま固定する（所属だけを誤らせる）。
+    // これで ⑤b の従来の outside-table ではなく、**⑤a の新しい要件ごとの落ち**が引き金になることを確かめる。
     const { recording, run } = runWith([
-      ...recordedRun({ design: WRONG_OWNERSHIP_DESIGN, suite: WRONG_OWNERSHIP_SUITE }),
+      ...recordedRun({ design: WRONG_OWNERSHIP_DESIGN }),
       structured(CORRESPONDENCE_OUTPUT_PLANNED), // ⑤a のやり直し（同じ応答なので停滞で止まる）
     ]);
     const result = await run;
 
-    // 誤った所属が残るので合格（full）にならない。同じ応答が続けば停滞で部分案になる
-    expect(result.outcome.result).not.toBe("full");
-    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+    // 誤った所属が残るので合格（full）にならない。同じ応答が続けば停滞で止まる
+    expect(result.outcome.result).not.toBe("pass");
+    expect(result.outcome.verdict).not.toBe("full");
+    // ⑤b の試験は通っている（⑥ 直すへは回らない）
+    expect(result.record.stages.some((step) => step.stage === "repair")).toBe(false);
     // 初回とやり直しの 2 回、⑤a を呼ぶ（段の記録も 2 件）
     expect(result.record.stages.filter((step) => step.stage === "correspondence")).toHaveLength(2);
     // やり直しの要求のデータに、前回の落ちが要件 ID と場所つきで入る
@@ -870,6 +864,36 @@ describe("誤った所属は、要件 ID つきの落ちで ⑤a のやり直し
     expect(retry).toContain("前回の対応表の落ち");
     expect(retry).toContain("R-2");
     expect(retry).toContain("total");
+  });
+});
+
+// ── 所属 entity の対応が欠けると、⑤a ではなく ③ のやり直しに回る（レビュー 2）────
+
+describe("所属 entity の対応が欠けると、⑤a ではなく ③ のやり直しに回る（Issue #431）", () => {
+  it("entity の mapping だけ欠けると、⑤a を作り直さず ③ のやり直しを呼ぶ", async () => {
+    // 計算の対応（total・extra）は正しいが、entity `record` の対応だけ欠けている
+    const mappingsNoEntity = [
+      { roleId: "record.total", name: "total" },
+      { roleId: "record.extra", name: "extra" },
+    ];
+    const { run } = runWith(
+      [
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(DESIGN_OUTPUT_MAPPED),
+        structured(TEST_SUITE_OUTPUT_MAPPED),
+        structured({ declaration: DECLARATION_SOURCE, mappings: mappingsNoEntity }),
+        structured(CORRESPONDENCE_OUTPUT_PLANNED),
+        structured(MAPPING_REDO_OUTPUT), // ③ のやり直し
+      ],
+      { limits: { ...AGENT_LIMITS, correspondenceRedos: 1, stagnationRepeats: 0 } },
+    );
+    const result = await run;
+
+    const stages = result.record.stages.map((step) => step.stage);
+    expect(stages).toContain("write"); // ③ のやり直し
+    // ⑤a は作り直さない（null の場所で correspondence-redo を足さない）
+    expect(result.record.stages.filter((step) => step.stage === "correspondence")).toHaveLength(1);
   });
 });
 
