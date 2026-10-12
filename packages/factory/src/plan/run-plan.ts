@@ -50,10 +50,10 @@ import {
   splitSourceSentences,
   type ReverseCheckOperation,
 } from "../stages/reverse-check.js";
-import { runAnswers, type ClassifiedAnswer, type PlanAnswerDraft } from "./answers.js";
+import { runAnswers, validateAnswer, type ClassifiedAnswer, type PlanAnswerDraft } from "./answers.js";
 import { catalogOpenIssue, runCatalog } from "./catalog.js";
 import { runConfirm, type ConfirmProblem } from "./confirm.js";
-import { alsoClosesOf, runQuestions, type PlanQuestion, type PlanSourceClosure } from "./questions.js";
+import { alsoClosesOf, assignQuestionIds, runQuestions, type PlanQuestion, type PlanSourceClosure } from "./questions.js";
 import {
   nextPlanStep,
   remainingPlanBudget,
@@ -120,6 +120,7 @@ export const PLAN_DIAGNOSIS_CODES = [
   "free-text",
   "issue-mapping",
   "duplicate-issue",
+  "duplicate-question-id",
   "also-closes",
   "source-closure",
   "question-coverage",
@@ -566,6 +567,39 @@ function requirementTextOf(answer: ClassifiedAnswer, question: PlanQuestion): st
 }
 
 /**
+ * 答える役から受け取った答えの ID を、コードが組み直す（`A:<組み直した質問 ID>`。Issue #405）。
+ *
+ * **現在の束にある質問を指し、版が現在のもの**の答えだけを組み直す。質問 ID・版・選択肢 ID は補正しない
+ * （合わない答えは今までどおり P5 の検査で断る）。組み直す前に、既存の `validateAnswer` で検査し、
+ * **問題の無いものだけ**組み直す——空の答えの ID など、不合格の答えは補正せずそのまま渡し、既存の検査の
+ * 順と分類で断らせ、判定・入力・要件・事項の解決に採らせない。同じ質問に 2 つ以上の答えが来たら、
+ * **黙って 1 つを選ばず**、その質問の答えを全部断る（要件にせず、事項は開いたまま）。
+ */
+function rebuildAnswerIds(
+  questions: readonly PlanQuestion[],
+  answers: readonly PlanAnswerDraft[],
+  revision: number,
+  freeTextMax: number | undefined,
+): readonly PlanAnswerDraft[] {
+  const countByQuestion = new Map<string, number>();
+  for (const answer of answers) {
+    countByQuestion.set(answer.questionId, (countByQuestion.get(answer.questionId) ?? 0) + 1);
+  }
+  const rebuilt: PlanAnswerDraft[] = [];
+  for (const answer of answers) {
+    if ((countByQuestion.get(answer.questionId) ?? 0) > 1) continue;
+    const problems = validateAnswer({
+      questions,
+      revision,
+      answer,
+      ...(freeTextMax === undefined ? {} : { freeTextMax }),
+    });
+    rebuilt.push(problems.length > 0 ? answer : { ...answer, id: `A:${answer.questionId}` });
+  }
+  return rebuilt;
+}
+
+/**
  * 逆照合で残った**引用にまつわる落ち**（引用が原文に無い・位置が 1 か所に決まらない。Issue #382）。
  * これが残ったまま Plan を確定させない——`run.ts` が同じ落ちを未達として数えるのと揃える。
  */
@@ -960,10 +994,12 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           closedBySource.push(closure);
           applySourceClosure(closure);
         }
-        // 前の往復の矛盾から組み立てた問い（まだ未解決の事項に対応するものだけ）を足す（§6 の 7）
+        // 前の往復の矛盾から組み立てた問い（まだ未解決の事項に対応するものだけ）を足す（§6 の 7）。
+        // 通常の問いの ID は、コードが `Q<版>-<n>` に組み直す（LLM の ID は仕様の ID にしない。Issue #405）。
+        // 矛盾の再質問は、すでに答えの ID から組んであるのでその形のまま（`n` に数えない）
         const openIds = new Set(openIssues.map((issue) => issue.id));
         const carried = followUpQuestions.filter((question) => openIds.has(question.openIssueId));
-        questions = [...generated.questions, ...carried];
+        questions = [...assignQuestionIds(generated.questions, revision), ...carried];
       }
 
       // 確認の画面に出す下書きは、依頼文で閉じた分を反映した**後**に組む（閉じた事項を載せるため）
@@ -995,7 +1031,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       // ── 質問を出す（P4）。残りの問数の範囲だけを出す ────────────────────
       const asked = step.questions;
       for (const question of asked) {
-        if (askedQuestionIds.has(question.id)) continue;
+        if (askedQuestionIds.has(question.id)) {
+          // 一意化のあとで重なりは起きない。起きたら**黙って捨てず**、段の失敗として止める（Issue #405）
+          throw new PlanStop({ stage: "questions", kind: "unknown" });
+        }
         askedQuestionIds.add(question.id);
         questionInputs.push(toQuestionInput(question));
       }
@@ -1026,11 +1065,12 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         continue;
       }
 
-      // ── 答えを反映する（P5）。コードで断った答えは要件にしない ────────────
+      // ── 答えを反映する（P5）。コードで断った答えは要件にしない。ID は組み直したものを使う ──────
+      const rebuiltAnswers = rebuildAnswerIds(asked, answer.answers, revision, input.freeTextMax);
       const answerResult = await runStage("answers", () =>
         runAnswers({
           questions: asked,
-          answers: answer.answers,
+          answers: rebuiltAnswers,
           revision,
           source: input.source,
           priorAnswers,
@@ -1038,7 +1078,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           ...(input.freeTextMax === undefined ? {} : { freeTextMax: input.freeTextMax }),
         }),
       );
-      const byId = new Map(answer.answers.map((draft) => [draft.id, draft]));
+      const byId = new Map(rebuiltAnswers.map((draft) => [draft.id, draft]));
       for (const accepted of answerResult.accepted) {
         const draft = byId.get(accepted.answerId);
         const question = asked.find((candidate) => candidate.id === accepted.questionId);
@@ -1064,7 +1104,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         }
       }
       followUpQuestions = answerResult.followUpQuestions;
-      turns.push({ questions: asked, answers: answer.answers });
+      turns.push({ questions: asked, answers: rebuiltAnswers });
       revision += 1;
     }
 

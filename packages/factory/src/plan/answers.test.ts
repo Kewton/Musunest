@@ -107,6 +107,38 @@ describe("答えのコードの検査（04 §6 の 6）", () => {
   });
 });
 
+describe("古い往復の答えの断り方（既存の検査順のまま。Issue #405）", () => {
+  it("前の往復の質問 ID を指す答えは、unknown-question として rejected に残り、判定に回らない", async () => {
+    const judge = createFakeJudge({}, { model: "fake-judge" });
+    const result = await runAnswers({
+      questions: [QUESTION],
+      answers: [answer({ questionId: "Q1-1", choiceId: "c1" })],
+      revision: 2,
+      source: "タスクを記録する。",
+      judge,
+    });
+    expect(result.rejected).toHaveLength(1);
+    expect(result.rejected[0]?.problems.map((problem) => problem.code)).toContain("unknown-question");
+    expect(result.accepted).toEqual([]);
+    expect(result.judgments).toEqual([]);
+  });
+
+  it("現在の質問 ID に古い版を付けた答えは、stale-revision として rejected に残り、判定に回らない", async () => {
+    const judge = createFakeJudge({}, { model: "fake-judge" });
+    const result = await runAnswers({
+      questions: [QUESTION],
+      answers: [answer({ questionId: "Q-1", revision: 1, choiceId: "c1" })],
+      revision: 2,
+      source: "タスクを記録する。",
+      judge,
+    });
+    expect(result.rejected).toHaveLength(1);
+    expect(result.rejected[0]?.problems.map((problem) => problem.code)).toContain("stale-revision");
+    expect(result.accepted).toEqual([]);
+    expect(result.judgments).toEqual([]);
+  });
+});
+
 describe("自由入力の振り分け（04 §6 の 5・7・05 §3・E6）", () => {
   it("運用の指示は要件にしない", async () => {
     const judge = createFakeJudge({ [freeTextQuestionName("A-1")]: choice("operational", 0.95) }, { model: "fake-judge" });

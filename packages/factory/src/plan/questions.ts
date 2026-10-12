@@ -147,6 +147,26 @@ export function alsoClosesOf(question: PlanQuestion): readonly string[] {
 }
 
 /**
+ * 質問の ID を組み直す（`Q<版>-<n>`。`n` は 1 始まり。Issue #405）。LLM が付けた ID は**仕様の ID に
+ * しない**——応答の中の整合の検査にだけ使い、答える役へ渡す前にコードがこの形へ組み直す。
+ */
+export function questionIdForRevision(revision: number, index: number): string {
+  return `Q${revision}-${index + 1}`;
+}
+
+/**
+ * 通常の質問の並びの ID を、コードが組み直す（`Q<版>-<n>`。並びの順に `n` を 1 から振る。Issue #405）。
+ * 前の往復から持ち越した矛盾の再質問は、すでに答えの ID から組んであるので、この関数に通さない
+ * （`runPlan` が、生成した通常の問いにだけ通す。`n` に数えない）。
+ */
+export function assignQuestionIds(
+  questions: readonly PlanQuestion[],
+  revision: number,
+): readonly PlanQuestion[] {
+  return questions.map((question, index) => ({ ...question, id: questionIdForRevision(revision, index) }));
+}
+
+/**
  * 依頼文で決まっている事項 1 つ（P4 の応答。04 §3 P4）。依頼文からの引用（`quote`）と、決まっている
  * 中身（`value`）を持つ。引用は**依頼文にそのまま含まれる**ことをコードが確かめる。
  */
@@ -318,6 +338,7 @@ export function checkQuestionsOutput(
   }
   const problems: Problem[] = [];
   const questions: PlanQuestion[] = [];
+  const seenIds = new Set<string>();
   raw.forEach((item, index) => {
     const field = `questions[${index}]`;
     if (!isRecord(item)) {
@@ -331,6 +352,13 @@ export function checkQuestionsOutput(
     if (typeof id !== "string" || id === "") {
       problems.push({ field: `${field}.id`, message: "質問 ID は空でない文字列であること" });
       good = false;
+    } else if (seenIds.has(id)) {
+      // 1 つの応答の中で質問 ID が重なるのは**形の誤り**である（1 回やり直し、2 回続けば malformed。
+      // 分類は `duplicate-question-id`。Issue #405）
+      problems.push({ field: `${field}.id`, code: "duplicate-question-id", message: "質問 ID が重複している" });
+      good = false;
+    } else {
+      seenIds.add(id);
     }
     if (typeof openIssueId !== "string" || openIssueId === "") {
       problems.push({ field: `${field}.openIssueId`, message: "未解決の事項の ID は空でない文字列であること" });
@@ -410,14 +438,11 @@ export function checkQuestionSet(
   }
 
   const openSet = new Set(openIssueIds);
-  const seenIds = new Set<string>();
   const issueToIndex = new Map<string, number>();
 
   questions.forEach((question, index) => {
     const path = `questions[${index}]`;
     if (question.id === "") report("shape", `${path}.id`, "質問 ID が空である");
-    if (seenIds.has(question.id)) report("shape", `${path}.id`, `質問 ID ${question.id} が重複している`);
-    seenIds.add(question.id);
     if (question.text === "") report("shape", `${path}.text`, "問いが空である");
     if (!Number.isInteger(question.revision) || question.revision < 1) {
       report("shape", `${path}.revision`, "版は 1 以上の整数であること");
