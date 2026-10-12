@@ -32,6 +32,8 @@ import {
   type PlanResult,
   type PlanRunInput,
 } from "./run-plan.js";
+import type { PlanQuestion } from "./questions.js";
+import type { PlanAnswerDraft } from "./answers.js";
 import type { PlanConfirmationView, PlanTurn } from "./session.js";
 import {
   CATALOG_FACETS,
@@ -182,7 +184,7 @@ const GROUPED_QUESTIONS_AFTER_CONTRADICTION = {
     ...GROUPED_QUESTIONS.questions,
     {
       id: "Q-2",
-      openIssueId: "OI:contradiction:A-1",
+      openIssueId: "OI:contradiction:A:Q1-1",
       alsoCloses: [],
       text: "前の答えを保ちますか",
       choices: [
@@ -261,6 +263,14 @@ function makePlanInput(
   };
 }
 
+/**
+ * 問い 1 つに答える下書きを組む（答えの ID は**コードが組み直す**前提で、受け取った問いから組む。
+ * Issue #405）。`id` は固定値にして、組み直しが効いていることを観測できるようにする。
+ */
+function answerTo(question: PlanQuestion | undefined, choiceId = "c1"): PlanAnswerDraft {
+  return { id: "A-1", questionId: question?.id ?? "", revision: question?.revision ?? 1, choiceId };
+}
+
 describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
   it("偽物の答える役が答えて、確定した仕様まで進む", async () => {
     const recording = createRecordingClient([
@@ -270,14 +280,15 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
       structured(QUESTIONS_OUTPUT),
     ]);
     const responder: PlanResponder = {
-      async answer() {
-        return { kind: "answers", answers: [{ id: "A-1", questionId: "Q-1", revision: 1, choiceId: "c1" }] };
+      async answer(request) {
+        // 質問 ID はコードが `Q<版>-<n>` に組み直す。答えの ID もコードが組み直す（Issue #405）
+        return { kind: "answers", answers: [answerTo(request.questions[0])] };
       },
       async confirm() {
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A-1") });
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -287,9 +298,9 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     expect(await checkConfirmedPlan(result.plan)).toEqual([]);
     expect(await isConfirmationValid(result.plan)).toBe(true);
     expect(result.plan.confirmation.sha256).toMatch(/^[0-9a-f]{64}$/);
-    // 答えから増えた要件が、その答えを出どころにしている
-    const added = result.plan.requirements.find((requirement) => requirement.id === "R:A-1");
-    expect(added?.origin.input_id).toBe("A-1");
+    // 答えから増えた要件が、組み直した答えの ID を出どころにしている
+    const added = result.plan.requirements.find((requirement) => requirement.id === "R:A:Q1-1");
+    expect(added?.origin.input_id).toBe("A:Q1-1");
     // 段ごとの記録が結果に入る（生成の段の記録と同じ形）
     expect(result.stages.map((stage) => stage.stage)).toEqual([
       "requirements",
@@ -321,7 +332,7 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q-1") });
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -330,9 +341,9 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     // 未解決の事項は、推奨で閉じている
     const resolved = result.plan.open_issues.find((issue) => issue.id === "OI-extra");
     expect(resolved?.status).toBe("resolved");
-    expect(resolved?.resolution?.answer_id).toBe("A:Q-1");
+    expect(resolved?.resolution?.answer_id).toBe("A:Q1-1");
     // 推奨の選択肢（c1）を選んだ答えが、入力に残る
-    const answer = result.plan.inputs.find((input) => input.kind === "answer" && input.id === "A:Q-1");
+    const answer = result.plan.inputs.find((input) => input.kind === "answer" && input.id === "A:Q1-1");
     expect(answer?.kind === "answer" ? answer.choice_id : undefined).toBe("c1");
   });
 
@@ -459,7 +470,7 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     };
     const judge = createFakeJudge({
       ...catalogAnswers(),
-      ...coverAnswersFor(Array.from({ length: 10 }, (_value, index) => `A:Q-${index + 1}`)),
+      ...coverAnswersFor(Array.from({ length: 10 }, (_value, index) => `A:Q1-${index + 1}`)),
     });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
@@ -488,7 +499,7 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q-1") });
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -508,14 +519,14 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
       structured(GROUPED_QUESTIONS),
     ]);
     const responder: PlanResponder = {
-      async answer() {
-        return { kind: "answers", answers: [{ id: "A-1", questionId: "Q-1", revision: 1, choiceId: "c1" }] };
+      async answer(request) {
+        return { kind: "answers", answers: [answerTo(request.questions[0])] };
       },
       async confirm() {
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A-1") });
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -523,8 +534,8 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     if (result.kind !== "confirmed") return;
     const issues = result.plan.open_issues.filter((issue) => issue.id === "OI-a" || issue.id === "OI-b");
     expect(issues).toHaveLength(2);
-    // 2 件とも、同じ答えの ID で閉じている
-    expect(issues.map((issue) => issue.resolution?.answer_id)).toEqual(["A-1", "A-1"]);
+    // 2 件とも、同じ（組み直した）答えの ID で閉じている
+    expect(issues.map((issue) => issue.resolution?.answer_id)).toEqual(["A:Q1-1", "A:Q1-1"]);
     expect(await checkConfirmedPlan(result.plan)).toEqual([]);
   });
 
@@ -543,14 +554,14 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q-1") });
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
     expect(result.kind).toBe("confirmed");
     if (result.kind !== "confirmed") return;
     const issues = result.plan.open_issues.filter((issue) => issue.id === "OI-a" || issue.id === "OI-b");
-    expect(issues.map((issue) => issue.resolution?.answer_id)).toEqual(["A:Q-1", "A:Q-1"]);
+    expect(issues.map((issue) => issue.resolution?.answer_id)).toEqual(["A:Q1-1", "A:Q1-1"]);
     expect(await checkConfirmedPlan(result.plan)).toEqual([]);
   });
 
@@ -565,12 +576,20 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     ]);
     let round = 0;
     const responder: PlanResponder = {
-      async answer() {
+      async answer(request) {
         round += 1;
         if (round === 1) {
+          const question = request.questions[0];
           return {
             kind: "answers",
-            answers: [{ id: "A-1", questionId: "Q-1", revision: 1, freeText: "全員で数える" }],
+            answers: [
+              {
+                id: "A-1",
+                questionId: question?.id ?? "",
+                revision: question?.revision ?? 1,
+                freeText: "全員で数える",
+              },
+            ],
           };
         }
         return { kind: "answers", answers: [] };
@@ -581,7 +600,7 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     };
     const judge = createFakeJudge({
       ...catalogAnswers(),
-      [freeTextQuestionName("A-1")]: {
+      [freeTextQuestionName("A:Q1-1")]: {
         kind: "choice",
         choice: "contradiction",
         probabilities: undefined,
@@ -964,7 +983,7 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
     ]);
 
     const result = await runPlan(
-      makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q-a") }), ALL_RECOMMENDED),
+      makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") }), ALL_RECOMMENDED),
     );
 
     expect(result.kind).toBe("cannot-confirm");
@@ -1005,7 +1024,7 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
     ]);
 
     const result = await runPlan(
-      makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q-c") }), ALL_RECOMMENDED),
+      makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") }), ALL_RECOMMENDED),
     );
 
     expect(result.kind).toBe("cannot-confirm");
@@ -1388,5 +1407,245 @@ describe("制約 ID の正規化（確認の前・SHA を計算する前。Issue
         message: "仕様の SHA-256 と一致しない（確認が失効している）",
       },
     ]);
+  });
+});
+
+// ── Issue #405：質問 ID と答えの ID を往復をまたいで一意にする ──────────────────
+
+/** 重大 1 件・重大でない 1 件を返す P3 の答え（2 往復させる） */
+const SURFACE_MIX = {
+  ambiguities: [
+    { id: "OI-1", requirementId: "R-1", text: "誰の分を数えるか", critical: true },
+    { id: "OI-2", requirementId: "R-1", text: "いつの分を数えるか", critical: false },
+  ],
+  unwritable: [],
+};
+
+/** 未解決の事項 1 つへの P4 の答え（2 往復とも LLM が同じ `id` を返す） */
+const questionFor = (openIssueId: string) => ({
+  id: "Q-1",
+  openIssueId,
+  text: "どうしますか",
+  choices: [
+    { id: "c1", text: "こちら" },
+    { id: "c2", text: "あちら" },
+  ],
+  recommended: { choiceId: "c1", reason: "依頼に沿う" },
+  allowFreeText: true,
+});
+
+const ROUND_1_QUESTION = { questions: [questionFor("OI-1")] };
+const ROUND_2_QUESTION = { questions: [questionFor("OI-2")] };
+
+describe("質問 ID と答えの ID を往復をまたいで一意にする（Issue #405）", () => {
+  it("答えの ID が空なら、質問 ID と版と選択肢が正しくても採られない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+    ]);
+    let round = 0;
+    const responder: PlanResponder = {
+      async answer(request) {
+        round += 1;
+        if (round === 1) {
+          const question = request.questions[0];
+          // 質問 ID・版・選択肢は正しいが、答えの ID が空 ——採られない（質問 ID と版と選択肢が正しくても）
+          return {
+            kind: "answers",
+            answers: [{ id: "", questionId: question?.id ?? "", revision: question?.revision ?? 1, choiceId: "c1" }],
+          };
+        }
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q2-1") });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(round).toBe(2);
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    const answerIds = result.plan.inputs.filter((input) => input.kind === "answer").map((input) => input.id);
+    // 空の ID の答えは、入力・要件・事項の解決に入らない。次の往復の推奨の答えだけが残る
+    expect(answerIds).toEqual(["A:Q2-1"]);
+    expect(result.plan.requirements.map((requirement) => requirement.id)).not.toContain("R:A:Q1-1");
+    expect(result.plan.open_issues.find((issue) => issue.id === "OI-extra")?.resolution?.answer_id).toBe("A:Q2-1");
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+  });
+
+  it("2 往復とも同じ質問 ID と答えの ID でも、ID が重ならず、組み直した ID で確定する", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_MIX),
+      structured(ROUND_1_QUESTION),
+      structured(ROUND_2_QUESTION),
+    ]);
+    const asked: PlanAnswerRequest[] = [];
+    const responder: PlanResponder = {
+      async answer(request) {
+        asked.push(request);
+        // 2 往復とも、答える役は同じ答えの ID（A-1）を返す。コードが組み直す（Issue #405）
+        return { kind: "answers", answers: [answerTo(request.questions[0])] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]) });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+    // 質問 ID が `Q<版>-<n>`（1 往復目は `Q1-1`）。往復をまたいで重ならない
+    expect(asked.map((request) => request.questions.map((question) => question.id))).toEqual([["Q1-1"], ["Q2-1"]]);
+    const questionIds = result.plan.inputs.filter((input) => input.kind === "question").map((input) => input.id);
+    const answerIds = result.plan.inputs.filter((input) => input.kind === "answer").map((input) => input.id);
+    expect(questionIds).toEqual(["Q1-1", "Q2-1"]);
+    expect(answerIds).toEqual(["A:Q1-1", "A:Q2-1"]);
+    // 答えの ID・解決の根拠・`R:A:…` の要件が、同じ組み直した ID を指す
+    const requirementIds = result.plan.requirements.map((requirement) => requirement.id);
+    expect(requirementIds).toContain("R:A:Q1-1");
+    expect(requirementIds).toContain("R:A:Q2-1");
+    expect(result.plan.open_issues.find((issue) => issue.id === "OI-1")?.resolution?.answer_id).toBe("A:Q1-1");
+    expect(result.plan.open_issues.find((issue) => issue.id === "OI-2")?.resolution?.answer_id).toBe("A:Q2-1");
+    // 答える役に渡った問いの数と、確定した仕様の問いの数が一致する（黙って捨てる分岐が無い）
+    const askedTotal = asked.reduce((total, request) => total + request.questions.length, 0);
+    expect(questionIds).toHaveLength(askedTotal);
+  });
+
+  it("2 往復目に、古い質問 ID と古い版の答えを返しても、どちらも要件にならない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_MIX),
+      structured(ROUND_1_QUESTION),
+      structured(ROUND_2_QUESTION),
+      structured(ROUND_2_QUESTION),
+    ]);
+    let round = 0;
+    const responder: PlanResponder = {
+      async answer(request) {
+        round += 1;
+        const question = request.questions[0];
+        if (round === 1) {
+          return { kind: "answers", answers: [answerTo(question)] };
+        }
+        if (round === 2) {
+          return {
+            kind: "answers",
+            answers: [
+              // 1 往復目の質問 ID を指す答え
+              { id: "A-1", questionId: "Q1-1", revision: 2, choiceId: "c1" },
+              // 現在の質問 ID に古い版を付けた答え
+              { id: "A-2", questionId: question?.id ?? "", revision: 1, choiceId: "c1" },
+            ],
+          };
+        }
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor(["A:Q1-1", "A:Q3-1"]) });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+    // 古い質問 ID・古い版の答えは、どちらも入力・要件・解決の根拠にならない
+    const answerIds = result.plan.inputs.filter((input) => input.kind === "answer").map((input) => input.id);
+    expect(answerIds).toEqual(["A:Q1-1", "A:Q3-1"]);
+    expect(result.plan.requirements.map((requirement) => requirement.id)).not.toContain("R:A:Q2-1");
+    expect(result.plan.open_issues.find((issue) => issue.id === "OI-2")?.resolution?.answer_id).toBe("A:Q3-1");
+  });
+
+  it("同じ質問に 2 つの答えを返すと、どちらも採られず、事項が開いたまま残る", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+    ]);
+    let round = 0;
+    const responder: PlanResponder = {
+      async answer(request) {
+        round += 1;
+        const question = request.questions[0];
+        if (round === 1) {
+          return {
+            kind: "answers",
+            answers: [
+              { id: "A-1", questionId: question?.id ?? "", revision: question?.revision ?? 1, choiceId: "c1" },
+              { id: "A-2", questionId: question?.id ?? "", revision: question?.revision ?? 1, choiceId: "c2" },
+            ],
+          };
+        }
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q2-1") });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    const answerIds = result.plan.inputs.filter((input) => input.kind === "answer").map((input) => input.id);
+    // 同じ質問への 2 つの答えは、どちらも採られない。次の往復の推奨の答えだけが残る
+    expect(answerIds).toEqual(["A:Q2-1"]);
+    expect(result.plan.requirements.map((requirement) => requirement.id)).not.toContain("R:A:Q1-1");
+    expect(result.plan.open_issues.find((issue) => issue.id === "OI-extra")?.resolution?.answer_id).toBe("A:Q2-1");
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+  });
+
+  it("同じ応答の中で質問 ID が重なると、1 回やり直し、2 回続くと malformed で止まり、ID の値が残らない", async () => {
+    const mark = "MARK_DUP_QQQ";
+    const questionOf = (text: string) => ({
+      id: `Q-${mark}`,
+      openIssueId: "OI-extra",
+      text,
+      choices: [
+        { id: "c1", text: "こちら" },
+        { id: "c2", text: "あちら" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    });
+    const duplicated = { questions: [questionOf("問い a"), questionOf("問い b")] };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(duplicated),
+      structured(duplicated),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure).toEqual({
+      stage: "questions",
+      kind: "malformed",
+      problems: [{ field: "questions[1].id", code: "duplicate-question-id" }],
+    });
+    // 目印を含む重複 ID の文字列が、失敗の記録と停止の行のどこにも無い
+    expect(JSON.stringify(result)).not.toContain(mark);
+    expect(planStopReasonLine(result)).not.toContain(mark);
+    expect(planStopReasonLine(result)).toContain("duplicate-question-id");
   });
 });
