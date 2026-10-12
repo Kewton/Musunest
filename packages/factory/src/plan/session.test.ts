@@ -1,10 +1,11 @@
-// Plan の往復を純粋な関数にする（plan/session.ts）の unit テスト（04-plan-agent.md §2・§6）。
+// Plan の往復を純粋な関数にする（plan/session.ts）の unit テスト（04-plan-agent.md §2・§6・Issue #408）。
 //
 // **LLM も端末もファイルも触らない。** ここで固定したいのは 4 つ。
 //   1. 曖昧さの無い依頼（開いている事項が無い）は 0 問で確認に進む
 //   2. 11 問目と 4 回目の往復を出さない（上限は往復をまたいで数える）
-//   3. 上限のあとも重大な事項が残れば「確定できない」を返す
-//   4. 「全部推奨で進める」で確定できる
+//   3. 上限のあとに事項が開いたままなら「確定できない」を返す（重大か否かによらず。既定で閉じるのは
+//      呼ぶ側＝`runPlan` の仕事である）
+//   4. 「全部推奨で進める」も、開いている事項が 0 のときだけ確認を返す
 import { describe, expect, it } from "vitest";
 import type { PlanOpenIssue } from "@musunest/appspec-schema";
 import { AGENT_LIMITS } from "../limits.js";
@@ -62,6 +63,7 @@ const VIEW: PlanConfirmationView = {
   },
   diff: [],
   unwritable: [],
+  closedByDefault: [],
 };
 
 describe("Plan の往復の上限の数え方（04 §6 の 2）", () => {
@@ -125,7 +127,7 @@ describe("次の一歩（04 §2・§6）", () => {
     expect(step.kind).toBe("cannot-confirm");
   });
 
-  it("上限のあとも重大な事項が残れば「確定できない」を返す", () => {
+  it("上限のあとも事項が開いていれば「確定できない」を返し、開いている事項を全部返す", () => {
     const turns = [turn("a", 1), turn("b", 1), turn("c", 1)];
     const step = nextPlanStep({
       source: "記録する。",
@@ -136,11 +138,11 @@ describe("次の一歩（04 §2・§6）", () => {
     });
     expect(step.kind).toBe("cannot-confirm");
     if (step.kind !== "cannot-confirm") return;
-    // 残った重大な事項だけを返す
-    expect(step.openIssues.map((issue) => issue.id)).toEqual(["OI-1"]);
+    // 開いている事項を全部返す（重大なものだけに絞らない。分類は呼ぶ側が決める）
+    expect(step.openIssues.map((issue) => issue.id)).toEqual(["OI-1", "OI-2"]);
   });
 
-  it("上限のあとに残った重大でない事項は、既定で閉じて確認に進む", () => {
+  it("上限のあとに重大でない事項が開いたままなら確定できない（閉じるのは呼ぶ側）", () => {
     const turns = [turn("a", AGENT_LIMITS.planQuestions)];
     const step = nextPlanStep({
       source: "記録する。",
@@ -149,10 +151,11 @@ describe("次の一歩（04 §2・§6）", () => {
       questions: [question("x-0", "OI-1")],
       view: VIEW,
     });
-    expect(step.kind).toBe("confirm");
+    // 重大でない事項も、既定で閉じるのは呼ぶ側（`runPlan`）。ここでは確定に進まない
+    expect(step.kind).toBe("cannot-confirm");
   });
 
-  it("「全部推奨で進める」で確定できる", () => {
+  it("「全部推奨で進める」でも、開いている事項が残れば確認に進まない", () => {
     const step = nextPlanStep({
       source: "記録する。",
       turns: [],
@@ -161,6 +164,29 @@ describe("次の一歩（04 §2・§6）", () => {
       view: VIEW,
       allRecommended: true,
     });
-    expect(step.kind).toBe("confirm");
+    expect(step.kind).toBe("ask");
+  });
+
+  it("「全部推奨で進める」で、開いている事項が 0 なら確認に進む", () => {
+    const step = nextPlanStep({
+      source: "記録する。",
+      turns: [],
+      openIssues: [openIssue("OI-1", true)],
+      questions: [],
+      view: VIEW,
+      allRecommended: true,
+    });
+    // 問いが 1 つも出せないのに事項が開いているので確定できない（開いている事項が 0 でない）
+    expect(step.kind).toBe("cannot-confirm");
+
+    const done = nextPlanStep({
+      source: "記録する。",
+      turns: [],
+      openIssues: [{ ...openIssue("OI-1", true), status: "resolved", resolution: { reason: "既定で決めた" } }],
+      questions: [],
+      view: VIEW,
+      allRecommended: true,
+    });
+    expect(done.kind).toBe("confirm");
   });
 });
