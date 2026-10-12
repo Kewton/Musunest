@@ -4,12 +4,14 @@ import { JobBudget, estimateMaxCostUsd } from "../budget.js";
 import { CallGateway, estimateInputUpperBoundTokens, structuredInputParts } from "../call.js";
 import { maxOutputTokensForEffort } from "../limits.js";
 import type { LlmClient, LlmStructuredRequest } from "../llm.js";
-import type { DesignResult, RequirementList } from "../pipeline.js";
+import type { DesignResult, RequirementDesign, RequirementList, RoleEntry } from "../pipeline.js";
+import { LEGACY_DESIGN_CONTRACT } from "../pipeline.js";
 import {
   DESIGN_ROUNDS,
   DESIGN_RULES,
   DESIGN_SCHEMA,
   DESIGN_SCHEMA_NAME,
+  REDO_DESIGN_FIXED_TABLE_RULE,
   checkDesignConstraints,
   checkDesignOutput,
   checkDesignPlan,
@@ -33,14 +35,21 @@ const structured = (output: unknown) => ({ kind: "structured" as const, output, 
 /** 試験の共通の口と同じ単価（予約の見積もりを、段とすり合わせるのに使う） */
 const RATES = { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputPerToken: 0.000002 };
 
-/** 抽象的な役割 ID の表（entity の文脈を含む ID。共有・別名は明示の欄でだけ許す） */
+/** 抽象的な役割 ID の表（entity の文脈を含む ID。共有・別名は明示の欄でだけ許す。新契約） */
 const PLANNED_ROLES = [
-  { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
-  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null },
-  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null },
+  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null, options: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
 ];
 
-/** 役割 ID の表・種類・確かめ方を備えた設計（本番の応答の形） */
+/** R-1 の所属（役割の表の役割をすべて覆う。新契約） */
+const OWNERSHIP_R1 = [
+  { roleId: "record", basis: "dependency", reason: "記録の行を参照するため" },
+  { roleId: "record.amount", basis: "dependency", reason: "入力の行に保存する項目として参照するため" },
+  { roleId: "record.total", basis: "stated", reason: null },
+];
+
+/** 役割 ID の表・種類・確かめ方・所属を備えた設計（本番の応答の形） */
 const PLANNED_DESIGN = {
   roles: PLANNED_ROLES,
   designs: [
@@ -51,6 +60,7 @@ const PLANNED_DESIGN = {
       vocabulary: ["記録"],
       placement: ["entities[].fields"],
       unwritable: [],
+      ownership: OWNERSHIP_R1,
     },
     {
       requirementId: "R-2",
@@ -59,17 +69,30 @@ const PLANNED_DESIGN = {
       vocabulary: [],
       placement: [],
       unwritable: [],
+      ownership: [],
     },
   ],
 };
 
-/** 形を通したうえで、中身の点検を掛ける（本番では `runDesign` が自動で掛ける） */
+/** 形を通したうえで、中身の点検を掛ける（本番では `runDesign` が自動で掛ける。新契約） */
 function planned(value: unknown): { readonly design: DesignResult; readonly problems: readonly string[] } {
   const checked = checkDesignOutput(value);
   if (!checked.ok) throw new Error(`前提（形）が壊れた: ${checked.problems.map((problem) => problem.field).join("・")}`);
   return {
     design: checked.value,
     problems: checkDesignPlan(REQUIREMENT_LIST, checked.value).map((problem) => problem.message),
+  };
+}
+
+/** 旧形式の設計を、**互換を明示して**形と中身（旧来の規則）に掛ける（決定 ⑨・Issue #418） */
+function legacyPlanned(value: unknown): { readonly design: DesignResult; readonly problems: readonly string[] } {
+  const checked = checkDesignOutput(value, LEGACY_DESIGN_CONTRACT);
+  if (!checked.ok) throw new Error(`前提（形）が壊れた: ${checked.problems.map((problem) => problem.field).join("・")}`);
+  return {
+    design: checked.value,
+    problems: checkDesignPlan(REQUIREMENT_LIST, checked.value, LEGACY_DESIGN_CONTRACT).map(
+      (problem) => problem.message,
+    ),
   };
 }
 
@@ -93,6 +116,7 @@ describe("② が送る要求を観測する（02 §2.2）", () => {
       list: REQUIREMENT_LIST,
       documents: SAMPLE_DOCUMENTS,
       gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      version: LEGACY_DESIGN_CONTRACT,
     });
     expect(outcome.ok).toBe(true);
 
@@ -121,6 +145,7 @@ describe("② が送る要求を観測する（02 §2.2）", () => {
       list,
       documents: SAMPLE_DOCUMENTS,
       gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      version: LEGACY_DESIGN_CONTRACT,
     });
     expect(outcome.ok).toBe(true);
     const request = recording.structured[0];
@@ -158,7 +183,7 @@ describe("② の出力の上限は effort ごとに、共通の置き場所か�
 
 describe("② の形の確認", () => {
   it("正しい応答は固定できる", () => {
-    expect(checkDesignOutput(DESIGN_OUTPUT).ok).toBe(true);
+    expect(checkDesignOutput(PLANNED_DESIGN).ok).toBe(true);
   });
 
   it("欄の形が合わなければ、欄つきで断る", () => {
@@ -196,6 +221,7 @@ describe("② の不正な応答（02 §2.2）", () => {
       list: REQUIREMENT_LIST,
       documents: [],
       gateway: makeGateway(recovered.client),
+      version: LEGACY_DESIGN_CONTRACT,
     });
     expect(retried.ok).toBe(true);
   });
@@ -204,12 +230,13 @@ describe("② の不正な応答（02 §2.2）", () => {
 // ── 役割 ID の表・種類・確かめ方（Issue #307）────────────────────
 
 describe("役割 ID の表・種類・確かめ方は必須で、旧形式の記録は後方互換で通す（Issue #307）", () => {
-  it("旧形式の設計（役割 ID の表も種類も無い）は、② が受け入れる（後方互換）", async () => {
+  it("旧形式の設計（役割 ID の表も種類も無い）は、② が受け入れる（後方互換を明示する）", async () => {
     const recording = createRecordingClient([structured(DESIGN_OUTPUT)]);
     const outcome = await runDesign({
       list: REQUIREMENT_LIST,
       documents: SAMPLE_DOCUMENTS,
       gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      version: LEGACY_DESIGN_CONTRACT,
     });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
@@ -217,11 +244,11 @@ describe("役割 ID の表・種類・確かめ方は必須で、旧形式の記
   });
 
   it("旧形式の設計は、形の確認は通るが、中身の点検は必須の欄（種類・確かめ方）を求める", () => {
-    const checked = checkDesignOutput(DESIGN_OUTPUT);
+    const checked = checkDesignOutput(DESIGN_OUTPUT, LEGACY_DESIGN_CONTRACT);
     expect(checked.ok).toBe(true);
     if (!checked.ok) return;
     expect(isPlannedDesign(checked.value)).toBe(false);
-    expect(checkDesignPlan(REQUIREMENT_LIST, checked.value).length).toBeGreaterThan(0);
+    expect(checkDesignPlan(REQUIREMENT_LIST, checked.value, LEGACY_DESIGN_CONTRACT).length).toBeGreaterThan(0);
   });
 
   it("役割 ID の表・種類・確かめ方を備えた設計は、形も中身も通す", () => {
@@ -244,7 +271,7 @@ describe("役割 ID の表・種類・確かめ方は必須で、旧形式の記
       ...PLANNED_DESIGN,
       designs: [
         PLANNED_DESIGN.designs[0],
-        { requirementId: "R-2", nature: "existence-only", vocabulary: [], placement: [], unwritable: [] },
+        { requirementId: "R-2", nature: "existence-only", vocabulary: [], placement: [], unwritable: [], ownership: [] },
       ],
     };
     const { problems } = planned(bad);
@@ -262,6 +289,7 @@ describe("役割 ID の表・種類・確かめ方は必須で、旧形式の記
           vocabulary: [],
           placement: [],
           unwritable: [],
+          ownership: [],
         },
       ],
     };
@@ -269,10 +297,12 @@ describe("役割 ID の表・種類・確かめ方は必須で、旧形式の記
     expect(problems.some((message) => message.includes("R-2") && message.includes("種類"))).toBe(true);
   });
 
-  it("役割 ID の表が無ければ断る", () => {
+  it("役割 ID の表が無ければ、新契約の形の確認で断る", () => {
     const bad = { designs: PLANNED_DESIGN.designs };
-    const { problems } = planned(bad);
-    expect(problems.some((message) => message.includes("役割 ID の表"))).toBe(true);
+    const checked = checkDesignOutput(bad);
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.problems.map((problem) => problem.field)).toContain("roles");
   });
 
   it("fixed-test 以外の確かめ方に理由が無ければ、形の確認で断る", () => {
@@ -280,7 +310,7 @@ describe("役割 ID の表・種類・確かめ方は必須で、旧形式の記
       ...PLANNED_DESIGN,
       designs: [
         PLANNED_DESIGN.designs[0],
-        { requirementId: "R-2", nature: "existence-only", verification: { kind: "unresolved", reason: "" }, vocabulary: [], placement: [], unwritable: [] },
+        { requirementId: "R-2", nature: "existence-only", verification: { kind: "unresolved", reason: "" }, vocabulary: [], placement: [], unwritable: [], ownership: [] },
       ],
     };
     const checked = checkDesignOutput(bad);
@@ -305,7 +335,7 @@ describe("役割 ID の表・種類・確かめ方は必須で、旧形式の記
       ...PLANNED_DESIGN,
       designs: [
         PLANNED_DESIGN.designs[0],
-        { requirementId: "R-2", nature: "existence-only", vocabulary: [], placement: [], unwritable: [] },
+        { requirementId: "R-2", nature: "existence-only", vocabulary: [], placement: [], unwritable: [], ownership: [] },
       ],
     };
     const recording = createRecordingClient([structured(bad), structured(bad)]);
@@ -329,7 +359,7 @@ describe("同名の対象は、共有と別名を明示したときだけ分け�
         { roleId: "name", kind: "field", entity: "session", name: "name", shared: false, aliasOf: null },
       ],
     };
-    const { problems } = planned(bad);
+    const { problems } = legacyPlanned(bad);
     expect(problems.some((message) => message.includes("同名の別 entity"))).toBe(true);
   });
 
@@ -341,7 +371,7 @@ describe("同名の対象は、共有と別名を明示したときだけ分け�
         { roleId: "record.sum", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
       ],
     };
-    const { problems } = planned(bad);
+    const { problems } = legacyPlanned(bad);
     expect(problems.some((message) => message.includes("同じ名前") && message.includes("total"))).toBe(true);
   });
 
@@ -353,7 +383,7 @@ describe("同名の対象は、共有と別名を明示したときだけ分け�
         { roleId: "record.sum", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null },
       ],
     };
-    expect(planned(ok).problems).toEqual([]);
+    expect(legacyPlanned(ok).problems).toEqual([]);
   });
 
   it("別名（aliasOf）を明示すれば、同名の対象を複数の役割 ID にできる", () => {
@@ -364,7 +394,7 @@ describe("同名の対象は、共有と別名を明示したときだけ分け�
         { roleId: "record.sum", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: "record.total" },
       ],
     };
-    expect(planned(ok).problems).toEqual([]);
+    expect(legacyPlanned(ok).problems).toEqual([]);
   });
 });
 
@@ -389,6 +419,7 @@ const CLAIM_DESIGN = {
       placement: ["entities[].fields"],
       unwritable: [VALID_CLAIM],
       notes: [],
+      ownership: OWNERSHIP_R1,
     },
     {
       requirementId: "R-2",
@@ -398,6 +429,7 @@ const CLAIM_DESIGN = {
       placement: [],
       unwritable: [],
       notes: ["件数の数え方を決めずに残した（曖昧さのメモ）"],
+      ownership: [],
     },
   ],
 };
@@ -481,11 +513,14 @@ describe("「書けない」の根拠（制約 ID）と、曖昧さを分ける 
   });
 
   it("notes だけがある要件は、設計として受け取れる（形の確認で断らない）", () => {
-    const checked = checkDesignOutput({
-      designs: [
-        { requirementId: "R-1", vocabulary: [], placement: [], unwritable: [], notes: ["曖昧さのメモ"] },
-      ],
-    });
+    const checked = checkDesignOutput(
+      {
+        designs: [
+          { requirementId: "R-1", vocabulary: [], placement: [], unwritable: [], notes: ["曖昧さのメモ"] },
+        ],
+      },
+      LEGACY_DESIGN_CONTRACT,
+    );
     expect(checked.ok).toBe(true);
     if (!checked.ok) return;
     expect(checked.value.designs[0]?.notes).toEqual(["曖昧さのメモ"]);
@@ -507,6 +542,7 @@ const STRUCTURAL_DESIGN = {
       vocabulary: ["記録"],
       placement: ["entities[].fields"],
       unwritable: [],
+      ownership: OWNERSHIP_R1,
     },
     {
       requirementId: "R-2",
@@ -516,6 +552,7 @@ const STRUCTURAL_DESIGN = {
       vocabulary: [],
       placement: [],
       unwritable: [],
+      ownership: [],
     },
   ],
 };
@@ -958,5 +995,437 @@ describe("中身の作り直しを 1 回だけ入れる（02 §1・Issue #407）
 
   it("規則に、代わりの案の要件にも設計を返す決まりがある", () => {
     expect(DESIGN_RULES.some((rule) => rule.includes("代わりの案の要件にも 1 つ設計を返す"))).toBe(true);
+  });
+});
+
+// ── 所属（根拠つき）と選択肢の順序（Issue #418）──────────────────────
+
+/** 新契約の役割 ID の表（entity・計算 2 つ。`record` は 2 要件が使うので共有） */
+const ROLES_418: readonly RoleEntry[] = [
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
+  { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null },
+];
+
+/** 正しい所属（R-1 が `record.total`、R-2 が `record.extra`。`record` は両方の依存） */
+const OWNERSHIP_418: Record<string, readonly Record<string, unknown>[]> = {
+  "R-1": [
+    { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+    { roleId: "record.total", basis: "stated", reason: null },
+  ],
+  "R-2": [
+    { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+    { roleId: "record.extra", basis: "stated", reason: null },
+  ],
+};
+
+/** 役割の表と所属から、要件ごとの設計（新契約）を組む */
+function designOf(
+  roles: readonly unknown[],
+  ownership: Readonly<Record<string, readonly unknown[]>>,
+): unknown {
+  return {
+    roles,
+    designs: REQUIREMENT_LIST.requirements.map((requirement) => ({
+      requirementId: requirement.id,
+      nature: "existence-only",
+      verification: { kind: "structural", reason: "在ることだけ" },
+      vocabulary: [],
+      placement: [],
+      unwritable: [],
+      ownership: ownership[requirement.id] ?? [],
+    })),
+  };
+}
+
+/** 1 つの設計を新しい契約で ② に流す（同じ応答を 2 回渡す） */
+async function designRun(value: unknown, redo: unknown = value) {
+  const recording = createRecordingClient([structured(value), structured(redo)]);
+  return runDesign({
+    list: REQUIREMENT_LIST,
+    documents: SAMPLE_DOCUMENTS,
+    gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+  });
+}
+
+describe("所属と選択肢を持つ設計は通り、戻り値にそのまま保持される（Issue #418）", () => {
+  it("所属と options を持つ設計が、形も中身も通り、戻り値にそのまま保持される", async () => {
+    const fixture = {
+      roles: [
+        { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null },
+        { roleId: "record.status", kind: "field", entity: "record", name: "status", shared: false, aliasOf: null, options: ["open", "closed"] },
+      ],
+      designs: [
+        {
+          requirementId: "R-1",
+          nature: "ruled",
+          verification: { kind: "fixed-test" },
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+            { roleId: "record.status", basis: "stated", reason: null },
+          ],
+        },
+        {
+          requirementId: "R-2",
+          nature: "existence-only",
+          verification: { kind: "structural", reason: "在ることだけ" },
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [],
+        },
+      ],
+    };
+    const outcome = await designRun(fixture);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.roles?.[1]?.options).toEqual(["open", "closed"]);
+    expect(outcome.value.designs[0]?.ownership).toEqual([
+      { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+      { roleId: "record.status", basis: "stated", reason: null },
+    ]);
+  });
+
+  it("規則の文に、所属・根拠の無い役割・付け替え・options の順・固定の表の 5 つの文がある", () => {
+    expect(DESIGN_RULES.some((rule) => rule.includes("所属") && rule.includes("stated") && rule.includes("dependency"))).toBe(true);
+    expect(DESIGN_RULES.some((rule) => rule.includes("根拠の無い役割"))).toBe(true);
+    expect(DESIGN_RULES.some((rule) => rule.includes("付け替え"))).toBe(true);
+    expect(DESIGN_RULES.some((rule) => rule.includes("options") && rule.includes("使う順"))).toBe(true);
+    expect(REDO_DESIGN_FIXED_TABLE_RULE).toContain("固定");
+  });
+});
+
+describe("所属の中身の点検は、別々の合成例を断る（Issue #418）", () => {
+  const withOwnership = (ownership: Record<string, readonly Record<string, unknown>[]>, roles: readonly unknown[] = ROLES_418) =>
+    designOf(roles, ownership);
+
+  it("表に無い役割 ID の所属を断る", () => {
+    const bad = withOwnership({
+      ...OWNERSHIP_418,
+      "R-1": [...OWNERSHIP_418["R-1"]!, { roleId: "ghost", basis: "stated", reason: null }],
+    });
+    const { problems } = planned(bad);
+    expect(problems.some((message) => message.includes("所属の役割 ID が役割 ID の表に無い"))).toBe(true);
+  });
+
+  it("同じ要件の中の重複した所属を断る", () => {
+    const bad = withOwnership({
+      ...OWNERSHIP_418,
+      "R-1": [...OWNERSHIP_418["R-1"]!, { roleId: "record.total", basis: "stated", reason: null }],
+    });
+    const { problems } = planned(bad);
+    expect(problems.some((message) => message.includes("同じ要件の中で役割の所属が重なっている"))).toBe(true);
+  });
+
+  it("どの要件にも所属しない役割を断る", () => {
+    const bad = withOwnership({
+      "R-1": OWNERSHIP_418["R-1"]!,
+      "R-2": [{ roleId: "record", basis: "dependency", reason: "行を参照するため" }],
+    });
+    const { problems } = planned(bad);
+    expect(problems.some((message) => message.includes("根拠の無い役割"))).toBe(true);
+  });
+
+  it("参照先の entity の所属を伴わない役割の所属を断る", () => {
+    const bad = withOwnership({
+      "R-1": [{ roleId: "record.total", basis: "stated", reason: null }],
+      "R-2": OWNERSHIP_418["R-2"]!,
+    });
+    const { problems } = planned(bad);
+    expect(problems.some((message) => message.includes("参照先の entity の所属を伴わない"))).toBe(true);
+  });
+
+  it("2 つの要件に所属するのに shared が偽なら断る", () => {
+    const roles = ROLES_418.map((role) => (role.roleId === "record" ? { ...role, shared: false } : role));
+    const bad = withOwnership(OWNERSHIP_418, roles);
+    const { problems } = planned(bad);
+    expect(problems.some((message) => message.includes("shared を真にすること"))).toBe(true);
+  });
+
+  it("aliasOf の先が表に無い・別名の別名を断る", () => {
+    const rolesWithAlias = [
+      ...ROLES_418,
+      { roleId: "record.sum", kind: "computation", entity: "record", name: "sum", shared: false, aliasOf: "ghost", options: null },
+    ];
+    const ownership = {
+      ...OWNERSHIP_418,
+      "R-1": [...OWNERSHIP_418["R-1"]!, { roleId: "record.sum", basis: "stated", reason: null }],
+    };
+    const missing = planned(designOf(rolesWithAlias, ownership)).problems;
+    expect(missing.some((message) => message.includes("別名の元の役割 ID が役割 ID の表に無い"))).toBe(true);
+
+    const aliasOfAlias = [
+      ...ROLES_418,
+      { roleId: "record.sum", kind: "computation", entity: "record", name: "sum", shared: false, aliasOf: "record.total", options: null },
+      { roleId: "record.sum2", kind: "computation", entity: "record", name: "sum2", shared: false, aliasOf: "record.sum", options: null },
+    ];
+    const ownership2 = {
+      ...OWNERSHIP_418,
+      "R-1": [
+        ...OWNERSHIP_418["R-1"]!,
+        { roleId: "record.sum", basis: "stated", reason: null },
+        { roleId: "record.sum2", basis: "stated", reason: null },
+      ],
+    };
+    const chained = planned(designOf(aliasOfAlias, ownership2)).problems;
+    expect(chained.some((message) => message.includes("別名の別名は作らない"))).toBe(true);
+  });
+
+  it("1 回目に直れば ok、2 回とも落ちれば unmet（attempts 2）", async () => {
+    const bad = withOwnership({
+      ...OWNERSHIP_418,
+      "R-1": [...OWNERSHIP_418["R-1"]!, { roleId: "ghost", basis: "stated", reason: null }],
+    });
+    const good = designOf(ROLES_418, OWNERSHIP_418);
+    const fixed = await designRun(bad, good);
+    expect(fixed.ok).toBe(true);
+    if (!fixed.ok) return;
+    expect(fixed.value.designs[0]?.ownership).toEqual(OWNERSHIP_418["R-1"]);
+
+    const failed = await designRun(bad);
+    expect(failed.ok).toBe(false);
+    if (failed.ok || failed.failure.kind !== "unmet") return;
+    expect(failed.failure.attempts).toBe(DESIGN_ROUNDS);
+  });
+});
+
+describe("選択肢と根拠の形の誤り（Issue #418）", () => {
+  const role = (overrides: Record<string, unknown>) => ({
+    roleId: "record.status",
+    kind: "field",
+    entity: "record",
+    name: "status",
+    shared: false,
+    aliasOf: null,
+    options: null,
+    ...overrides,
+  });
+  const baseDesign = (roles: readonly unknown[]) =>
+    checkDesignOutput({
+      roles,
+      designs: [
+        { requirementId: "R-1", nature: "ruled", verification: { kind: "fixed-test" }, vocabulary: [], placement: [], unwritable: [], ownership: [] },
+      ],
+    });
+
+  it("項目でない役割の options が非 null なら断る", () => {
+    const checked = baseDesign([role({ kind: "entity", entity: null, options: ["a"] })]);
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.problems.map((problem) => problem.field)).toContain("roles[0].options");
+  });
+
+  it("options が空・重複・文字列でないなら断る", () => {
+    for (const [options, expected] of [
+      [[], "選択肢は空でない並びであること"],
+      [["a", "a"], "選択肢のキーが重なっている"],
+      [[1], "選択肢のキーは空でない文字列であること"],
+    ] as const) {
+      const checked = baseDesign([role({ options })]);
+      expect(checked.ok, JSON.stringify(options)).toBe(false);
+      if (checked.ok) continue;
+      expect(checked.problems.some((problem) => problem.message.includes(expected)), JSON.stringify(options)).toBe(true);
+    }
+  });
+
+  const ownershipDesign = (ownership: readonly unknown[]) =>
+    checkDesignOutput({
+      roles: [role({ kind: "entity", entity: null, options: null })],
+      designs: [
+        { requirementId: "R-1", nature: "ruled", verification: { kind: "fixed-test" }, vocabulary: [], placement: [], unwritable: [], ownership },
+      ],
+    });
+
+  it("所属の basis が知らない値なら断る", () => {
+    const checked = ownershipDesign([{ roleId: "record.status", basis: "nope", reason: null }]);
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.problems.map((problem) => problem.field)).toContain("designs[0].ownership[0].basis");
+  });
+
+  it("dependency の reason が空か空白だけなら断る", () => {
+    for (const reason of ["", "   "]) {
+      const checked = ownershipDesign([{ roleId: "record.status", basis: "dependency", reason }]);
+      expect(checked.ok, reason).toBe(false);
+      if (checked.ok) continue;
+      expect(checked.problems.map((problem) => problem.field)).toContain("designs[0].ownership[0].reason");
+    }
+  });
+});
+
+describe("新契約の形の誤りと、互換の明示（Issue #418）", () => {
+  it("全欠落・一部の欠落・型違いは形の誤り（2 試行で malformed）", async () => {
+    const cases: readonly unknown[] = [
+      {}, // 全欠落（役割の表も設計も無い）
+      { roles: ROLES_418, designs: [{ requirementId: "R-1", nature: "ruled", verification: { kind: "fixed-test" }, vocabulary: [], placement: [], unwritable: [] }] }, // 所属の欠落
+      { roles: ROLES_418.map((entry) => ({ ...entry, options: undefined })), designs: [] }, // options の欠落
+      { roles: ROLES_418, designs: [{ requirementId: "R-1", ownership: "nope" }] }, // 型違い
+    ];
+    for (const [index, value] of cases.entries()) {
+      const recording = createRecordingClient([structured(value), structured(value)]);
+      const outcome = await runDesign({
+        list: REQUIREMENT_LIST,
+        documents: SAMPLE_DOCUMENTS,
+        gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      });
+      expect(outcome.ok, `case ${index}`).toBe(false);
+      if (outcome.ok) continue;
+      expect(outcome.failure.kind, `case ${index}`).toBe("malformed");
+    }
+  });
+
+  it("互換を明示すれば、役割の表の無い旧形式と所属の無い形式が通り、混在は断る", () => {
+    // 役割の表の無い旧形式
+    expect(checkDesignOutput(DESIGN_OUTPUT, LEGACY_DESIGN_CONTRACT).ok).toBe(true);
+    // 表はあるが所属の無い形式（`options` も無い）
+    const withoutOwnership = {
+      roles: [
+        { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
+      ],
+      designs: [
+        { requirementId: "R-1", vocabulary: [], placement: [], unwritable: [] },
+        { requirementId: "R-2", vocabulary: [], placement: [], unwritable: [] },
+      ],
+    };
+    expect(checkDesignOutput(withoutOwnership, LEGACY_DESIGN_CONTRACT).ok).toBe(true);
+    // 所属の有無が混ざっていれば、互換でも断る
+    const mixedOwnership = {
+      roles: withoutOwnership.roles,
+      designs: [
+        { requirementId: "R-1", vocabulary: [], placement: [], unwritable: [], ownership: [] },
+        { requirementId: "R-2", vocabulary: [], placement: [], unwritable: [] },
+      ],
+    };
+    expect(checkDesignOutput(mixedOwnership, LEGACY_DESIGN_CONTRACT).ok).toBe(false);
+    // options の有無が混ざっていても、互換でも断る
+    const mixedOptions = {
+      roles: [
+        { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null },
+        { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+      ],
+      designs: withoutOwnership.designs,
+    };
+    expect(checkDesignOutput(mixedOptions, LEGACY_DESIGN_CONTRACT).ok).toBe(false);
+  });
+
+  it("互換を明示した、表を持つ旧設計の従来の不正例は従来どおり断る", () => {
+    const bad = {
+      ...PLANNED_DESIGN,
+      roles: [
+        { roleId: "name", kind: "field", entity: "member", name: "name", shared: false, aliasOf: null },
+        { roleId: "name", kind: "field", entity: "session", name: "name", shared: false, aliasOf: null },
+      ],
+    };
+    const { problems } = legacyPlanned(bad);
+    expect(problems.some((message) => message.includes("同名の別 entity"))).toBe(true);
+  });
+
+  it("新しい検査の Problem に、目印を入れた役割 ID・options・basis・reason の値が出ない", async () => {
+    const marker = "MARKER418";
+    const design = {
+      roles: [
+        { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null },
+        { roleId: `record.${marker}`, kind: "field", entity: "record", name: `${marker}`, shared: false, aliasOf: null, options: [`${marker}-option`] },
+      ],
+      designs: [
+        {
+          requirementId: "R-1",
+          nature: "ruled",
+          verification: { kind: "fixed-test" },
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [{ roleId: `ghost-${marker}`, basis: "dependency", reason: `${marker}-reason` }],
+        },
+        { requirementId: "R-2", nature: "existence-only", verification: { kind: "structural", reason: "在ることだけ" }, vocabulary: [], placement: [], unwritable: [], ownership: [] },
+      ],
+    };
+    const recording = createRecordingClient([structured(design), structured(design)]);
+    const outcome = await runDesign({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    for (const problem of outcome.failure.problems) {
+      expect(`${problem.field} ${problem.message}`).not.toContain(marker);
+    }
+  });
+});
+
+describe("単一要件の作り直しは、表を固定し、1 件を全体へ差し替えて点検する（Issue #418）", () => {
+  /** R-2 の設計（他の要件の採用済み） */
+  const adoptedR2: RequirementDesign = {
+    requirementId: "R-2",
+    nature: "existence-only",
+    verification: { kind: "structural", reason: "在ることだけ" },
+    vocabulary: [],
+    placement: [],
+    unwritable: [],
+    ownership: [
+      { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+      { roleId: "record.extra", basis: "stated", reason: null },
+    ],
+  };
+  /** R-1 の設計（作り直しの応答。`record.extra` は R-2 だけが使うので所属させない） */
+  const redoR1 = {
+    requirementId: "R-1",
+    nature: "ruled",
+    verification: { kind: "fixed-test" },
+    vocabulary: [],
+    placement: [],
+    unwritable: [],
+    ownership: [
+      { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+      { roleId: "record.total", basis: "stated", reason: null },
+    ],
+  };
+  const redoInput = (response: unknown): DesignInput => ({
+    list: { ...REQUIREMENT_LIST, requirements: REQUIREMENT_LIST.requirements.filter((r) => r.id === "R-1") },
+    documents: SAMPLE_DOCUMENTS,
+    gateway: makeGateway(createRecordingClient([structured(response), structured(response)]).client, { maxAttempts: 1 }),
+    redo: { roles: ROLES_418, adopted: [adoptedR2], wholeList: REQUIREMENT_LIST },
+  });
+
+  it("整合する応答は ok（他の要件だけが使う役割を対象の要件に所属させなくても通る）", async () => {
+    const outcome = await runDesign(redoInput({ roles: ROLES_418, designs: [redoR1] }));
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 戻り値の表は固定の表のまま
+    expect(outcome.value.roles).toEqual(ROLES_418);
+    expect(outcome.value.designs[0]?.ownership).toEqual(redoR1.ownership);
+  });
+
+  it("表を変えた応答は unmet", async () => {
+    const outcome = await runDesign(redoInput({ roles: ROLES_418.slice(0, 2), designs: [redoR1] }));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    expect(outcome.failure.problems.some((problem) => problem.message.includes("固定の役割 ID の表と一致しない"))).toBe(true);
+  });
+
+  it("表に無い ID の所属の応答は unmet", async () => {
+    const withGhost = {
+      ...redoR1,
+      ownership: [...redoR1.ownership, { roleId: "ghost", basis: "stated", reason: null }],
+    };
+    const outcome = await runDesign(redoInput({ roles: ROLES_418, designs: [withGhost] }));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    expect(outcome.failure.problems.some((problem) => problem.message.includes("所属の役割 ID が役割 ID の表に無い"))).toBe(true);
+  });
+
+  it("差し替えた全体が整合しない応答は unmet（R-1 が参照先の entity を所属させない）", async () => {
+    const withoutEntity = {
+      ...redoR1,
+      ownership: [{ roleId: "record.total", basis: "stated", reason: null }],
+    };
+    const outcome = await runDesign(redoInput({ roles: ROLES_418, designs: [withoutEntity] }));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    expect(outcome.failure.problems.some((problem) => problem.message.includes("参照先の entity の所属を伴わない"))).toBe(true);
   });
 });

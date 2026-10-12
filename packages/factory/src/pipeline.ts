@@ -263,6 +263,9 @@ export type RequirementVerification =
  * 役割 ID は **entity の文脈を含む ID**（例 `member`・`member.name`・`session.bookCount`）。
  * **共有**（複数の要件が同じ entity を使う）と**別名**は、`shared`・`aliasOf` の欄でだけ許す。
  * 同名の別 entity は**別の役割 ID** にする（同じ役割 ID に潰さない）。
+ *
+ * Issue #418 で `options` を足した——選択肢（enum）の項目なら、宣言で使う順の、空でない重複の無い
+ * キーの並び。それ以外の役割は `null`。**旧形式の記録では省ける**（工場の中の型では任意）。
  */
 export interface RoleEntry {
   /** 役割 ID（entity の文脈を含む ID） */
@@ -277,7 +280,37 @@ export interface RoleEntry {
   readonly shared: boolean;
   /** 別名なら、元の役割 ID（別名でなければ null） */
   readonly aliasOf: string | null;
+  /**
+   * 選択肢（enum）の項目なら、宣言で使う順の、空でない重複の無いキーの並び（Issue #418）。
+   * それ以外の役割は `null`。旧形式の記録では省ける（工場の中の型では任意）。
+   */
+  readonly options?: readonly string[] | null;
 }
+
+/** 役割の所属の根拠（有限の 2 値。§1・②・Issue #418） */
+export const ROLE_OWNERSHIP_BASES = ["stated", "dependency"] as const;
+export type RoleOwnershipBasis = (typeof ROLE_OWNERSHIP_BASES)[number];
+
+/**
+ * 要件が使う役割の所属（**申告**。§1・②・Issue #418）。
+ *
+ * `basis` が `stated` なら要件の文が名指しする役割（`reason` は null）、`dependency` なら要件の実現に
+ * 必要な依存（参照・識別・表示・入力の保存など。`reason` を必須にする）。所属と根拠は**申告**であり、
+ * 必要性や要件の意味の正しさを形の検査が証明したとは扱わない。
+ */
+export interface RoleOwnership {
+  readonly roleId: string;
+  readonly basis: RoleOwnershipBasis;
+  readonly reason: string | null;
+}
+
+/**
+ * 設計の契約の版（決定 ⑨・Issue #418）。**呼ぶ側が明示する**——`legacy` を明示したときだけ、過去の
+ * 記録の読み込みとして旧形式（役割の表・所属・`options` の無い形式）を許す。省けば**新契約**であり、
+ * 役割の表・所属・`options` の必須欄の欠落を形の誤り（`malformed`）として断る。
+ */
+export const LEGACY_DESIGN_CONTRACT = "legacy" as const;
+export type DesignContractVersion = typeof LEGACY_DESIGN_CONTRACT;
 
 /** ② 設計する、で要件ごとに決める語彙と置き場所（役割 ID・種類・確かめ方は Issue #307 で足した） */
 export interface RequirementDesign {
@@ -299,6 +332,11 @@ export interface RequirementDesign {
   readonly placement: readonly string[];
   /** 書けない部分（書ける部分は残す。F-4） */
   readonly unwritable: readonly string[];
+  /**
+   * 要件が使う役割の所属（根拠つきの申告。Issue #418）。**旧形式の記録では省ける**（工場の中の型では
+   * 任意。入力の版の省略を互換に変える理由にはしない）。
+   */
+  readonly ownership?: readonly RoleOwnership[];
 }
 
 /** ② 設計する、の出力 */
@@ -306,6 +344,22 @@ export interface DesignResult {
   /** 役割 ID の表（② が固定する。Issue #307） */
   readonly roles?: readonly RoleEntry[];
   readonly designs: readonly RequirementDesign[];
+}
+
+/**
+ * 役割 ID ごとに、それを所属させた**要件 ID の並び**（表の順）を返す純粋な索引（Issue #418）。
+ * 同じ入力からは同じ結果になる。同じ要件の中で重なった所属は 1 つに数える。
+ */
+export function roleOwnershipIndex(design: DesignResult): ReadonlyMap<string, readonly string[]> {
+  const index = new Map<string, string[]>();
+  for (const entry of design.designs) {
+    for (const ownership of entry.ownership ?? []) {
+      const owners = index.get(ownership.roleId);
+      if (owners === undefined) index.set(ownership.roleId, [entry.requirementId]);
+      else if (!owners.includes(entry.requirementId)) owners.push(entry.requirementId);
+    }
+  }
+  return index;
 }
 
 /**

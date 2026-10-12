@@ -21,12 +21,14 @@
 // 必須の欄を満たすことを強制する。
 import type {
   DesignResult,
+  DesignContractVersion,
   RequirementDesign,
   RequirementList,
   RequirementVerification,
   RoleEntry,
+  RoleOwnership,
 } from "../pipeline.js";
-import { REQUIREMENT_VERIFICATION_KINDS } from "../pipeline.js";
+import { LEGACY_DESIGN_CONTRACT, REQUIREMENT_VERIFICATION_KINDS, ROLE_OWNERSHIP_BASES } from "../pipeline.js";
 import {
   REQUIREMENT_NATURES,
   STRUCTURAL_ASSERTIONS,
@@ -55,6 +57,13 @@ import {
 /** ② の JSON Schema の名前 */
 export const DESIGN_SCHEMA_NAME = "requirement-design";
 
+/**
+ * 作り直し（`redoDesign`）だけに足す規則（Issue #418）。元の全役割の表を**固定の文脈**として渡し、
+ * 役割 ID を足し引きさせない（表は呼ぶ側が持つ。応答は対象の要件 1 件の設計だけ）。
+ */
+export const REDO_DESIGN_FIXED_TABLE_RULE =
+  "役割 ID の表は固定の文脈である。作り直しでは、役割 ID を足したり変えたりしない（表の行の増減・欄の違い・options の変更をしない）。応答には、対象の要件 1 件の設計だけを返す。";
+
 /** 作り直しの回数（1 回だけやり直す。§1）。試験の段（`TEST_SUITE_ROUNDS`）と同じ形 */
 export const DESIGN_ROUNDS = 2;
 
@@ -69,6 +78,11 @@ export const DESIGN_RULES: readonly string[] = [
   "役割 ID の表（roles）を作る。役割 ID は entity の文脈を含む ID（例 member・member.name・session.bookCount）にし、対象の種類（kind）と、所属の entity の役割 ID（entity）を付ける。entity 自身の行は entity を null にする。",
   "同じ名前の対象を複数の役割 ID にするときは、共有（shared を true）か別名（aliasOf を元の役割 ID）を明示する。明示しなければ、同じ名前の対象を 1 つの役割 ID にまとめる。",
   "同名の別 entity を同じ役割 ID にしない。別 entity の同名の対象は、別の役割 ID にする。",
+  "要件ごとに、その要件が使う役割の所属（ownership）を挙げる。要件の文が名指しする役割は basis を stated にして reason を null にする。要件の実現に必要な依存（参照・識別・表示・入力の保存など）として使う役割は basis を dependency にして、その必要の根拠（reason）を空でない文で書く。",
+  "名前だけの項目（entity の項目）も、参照・識別・表示に要るなら、その要件に dependency として根拠つきで所属させる。",
+  "根拠の無い役割を役割 ID の表に残さない。どの要件にも所属しない役割があると、その設計は未達になる。",
+  "役割を都合の良い要件へ付け替えない。表の役割は、その役割を実際に使う要件に所属させる。",
+  "選択肢（enum）の項目は、宣言で使う順の、空でない重複の無いキーの並びを options に書く。それ以外の役割の options は null にする。",
   "要件ごとに、種類（nature）を決める。決まり（条件・計算・検査）を含むなら ruled、在ることだけ（例「名前を持つメンバーを登録できる」）なら existence-only。",
   "要件ごとに、確かめ方（verification）を決める。固定した試験で確かめるなら fixed-test、構造の条件で確かめるなら structural、いまは確かめられないなら unresolved。fixed-test 以外は reason（理由）を書く。",
   "確かめ方が structural の要件は、求める構造の検査の中身（checks）を、field-type・action-kind・action-unconditioned・view-shows・aggregate-no-period・write-anonymous から、重ならずに挙げる。挙げられない条件があるなら structural にしない。構造で確かめない要件の checks は空にする。",
@@ -90,7 +104,7 @@ export const DESIGN_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["roleId", "kind", "entity", "name", "shared", "aliasOf"],
+        required: ["roleId", "kind", "entity", "name", "shared", "aliasOf", "options"],
         properties: {
           roleId: { type: "string", description: "役割 ID（entity の文脈を含む。例 member.name）" },
           kind: { type: "string", enum: [...TEST_TARGET_KINDS] },
@@ -98,6 +112,11 @@ export const DESIGN_SCHEMA = {
           name: { type: "string", description: "対象の名前（役割 ID の中の呼び名）" },
           shared: { type: "boolean", description: "共有を明示したか（複数の要件が同じ entity を使う）" },
           aliasOf: { type: ["string", "null"], description: "別名なら元の役割 ID（別名でなければ null）" },
+          options: {
+            type: ["array", "null"],
+            description: "選択肢（enum）の項目なら、宣言で使う順の重複の無いキーの並び。それ以外は null",
+            items: { type: "string" },
+          },
         },
       },
     },
@@ -106,7 +125,7 @@ export const DESIGN_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["requirementId", "nature", "verification", "checks", "vocabulary", "placement", "unwritable", "notes"],
+        required: ["requirementId", "nature", "verification", "checks", "vocabulary", "placement", "unwritable", "notes", "ownership"],
         properties: {
           requirementId: { type: "string" },
           nature: { type: "string", enum: [...REQUIREMENT_NATURES] },
@@ -152,6 +171,27 @@ export const DESIGN_SCHEMA = {
             items: { type: "string" },
             description: "曖昧さ・決めたこと・不確かさ（書けないことではない。無ければ空）",
           },
+          ownership: {
+            type: "array",
+            description: "要件が使う役割の所属（根拠つき。空でもよい）",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["roleId", "basis", "reason"],
+              properties: {
+                roleId: { type: "string", description: "所属させる役割 ID（役割 ID の表のもの）" },
+                basis: {
+                  type: "string",
+                  enum: [...ROLE_OWNERSHIP_BASES],
+                  description: "stated（要件の文が名指しする）／dependency（実現に必要な依存）",
+                },
+                reason: {
+                  type: ["string", "null"],
+                  description: "dependency のときの根拠（空でない文）。stated のときは null",
+                },
+              },
+            },
+          },
         },
       },
     },
@@ -193,15 +233,71 @@ export interface DesignOutput extends DesignResult {
   readonly designs: readonly RequirementDesignEntry[];
 }
 
+/** 作り直し（`redoDesign`）に渡す**固定の文脈**（Issue #418） */
+export interface DesignRedoContext {
+  /** 元の**全役割の表**（固定。応答の表はこれと一致しなければならない） */
+  readonly roles: readonly RoleEntry[];
+  /** 他の要件の採用済みの設計（対象の要件の設計は含まない） */
+  readonly adopted: readonly RequirementDesign[];
+  /** 全体の要件の一覧（1 件を全体へ差し替えた候補を、これに照らす） */
+  readonly wholeList: RequirementList;
+}
+
 /** ② が受け取るもの */
 export interface DesignInput {
   readonly list: RequirementList;
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
+  /**
+   * 設計の契約の版（決定 ⑨・Issue #418）。`legacy` を明示したときだけ、過去の記録の読み込みとして
+   * 旧形式を通す。省けば**新契約**。
+   */
+  readonly version?: DesignContractVersion;
+  /**
+   * 作り直しの**固定の文脈**（Issue #418）。渡されたときは、表を固定し、応答 1 件を全体へ差し替えて
+   * 点検する（全役割の所属・共有の点検）。省けば通常の設計。
+   */
+  readonly redo?: DesignRedoContext;
+}
+
+/** 選択肢（enum）のキーの並びの形を確かめる（null か、空でない重複の無い文字列の並び。Issue #418） */
+function checkOptions(value: unknown, field: string, problems: Problem[]): readonly string[] | null | undefined {
+  if (value === null) return null;
+  if (!Array.isArray(value)) {
+    problems.push({ field, message: "選択肢は文字列の並びか null であること" });
+    return undefined;
+  }
+  const seen = new Set<string>();
+  const options: string[] = [];
+  let good = true;
+  value.forEach((item, index) => {
+    if (typeof item !== "string" || item === "") {
+      problems.push({ field: `${field}[${index}]`, message: "選択肢のキーは空でない文字列であること" });
+      good = false;
+      return;
+    }
+    if (seen.has(item)) {
+      problems.push({ field: `${field}[${index}]`, message: "選択肢のキーが重なっている" });
+      good = false;
+      return;
+    }
+    seen.add(item);
+    options.push(item);
+  });
+  if (options.length === 0) {
+    problems.push({ field, message: "選択肢は空でない並びであること" });
+    good = false;
+  }
+  return good ? options : undefined;
 }
 
 /** 役割 ID の表の 1 行の形を確かめる */
-function checkRoleEntry(value: unknown, field: string, problems: Problem[]): RoleEntry | undefined {
+function checkRoleEntry(
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  requireOptions: boolean,
+): RoleEntry | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "役割 ID の表の行は写像（object）であること" });
     return undefined;
@@ -213,7 +309,8 @@ function checkRoleEntry(value: unknown, field: string, problems: Problem[]): Rol
     good = false;
   }
   const kind = value["kind"];
-  if (typeof kind !== "string" || !(TEST_TARGET_KINDS as readonly string[]).includes(kind)) {
+  const kindValid = typeof kind === "string" && (TEST_TARGET_KINDS as readonly string[]).includes(kind);
+  if (!kindValid) {
     problems.push({ field: `${field}.kind`, message: `対象の種類は ${TEST_TARGET_KINDS.join("・")} のいずれかであること` });
     good = false;
   }
@@ -237,6 +334,22 @@ function checkRoleEntry(value: unknown, field: string, problems: Problem[]): Rol
     problems.push({ field: `${field}.aliasOf`, message: "別名の元の役割 ID は空でない文字列か null であること" });
     good = false;
   }
+  // 選択肢（enum）のキーの並び（Issue #418）。新契約では必須。欄が無い旧形式の記録は省ける。
+  let options: readonly string[] | null | undefined;
+  if (value["options"] === undefined) {
+    if (requireOptions) {
+      problems.push({ field: `${field}.options`, message: "選択肢の欄（options）が要る（選択肢の項目でなければ null）" });
+      good = false;
+    }
+  } else {
+    options = checkOptions(value["options"], `${field}.options`, problems);
+    if (options === undefined) good = false;
+  }
+  // 項目でない役割の options は null でなければならない（Issue #418）
+  if (kindValid && kind !== "field" && options !== null && options !== undefined) {
+    problems.push({ field: `${field}.options`, message: "項目でない役割の選択肢は null であること" });
+    good = false;
+  }
   if (!good) return undefined;
   return {
     roleId: roleId as string,
@@ -245,6 +358,46 @@ function checkRoleEntry(value: unknown, field: string, problems: Problem[]): Rol
     name: name as string,
     shared: shared as boolean,
     aliasOf: aliasOf as string | null,
+    ...(options === undefined ? {} : { options }),
+  };
+}
+
+/** 所属 1 件の形を確かめる（roleId 空・basis の値・dependency の reason 欠けを断る。Issue #418） */
+function checkOwnership(value: unknown, field: string, problems: Problem[]): RoleOwnership | undefined {
+  if (!isRecord(value)) {
+    problems.push({ field, message: "所属は「役割 ID・根拠・理由」の写像であること" });
+    return undefined;
+  }
+  let good = true;
+  const roleId = value["roleId"];
+  if (typeof roleId !== "string" || roleId === "") {
+    problems.push({ field: `${field}.roleId`, message: "所属の役割 ID は空でない文字列であること" });
+    good = false;
+  }
+  const basis = value["basis"];
+  const basisValid = typeof basis === "string" && (ROLE_OWNERSHIP_BASES as readonly string[]).includes(basis);
+  if (!basisValid) {
+    problems.push({
+      field: `${field}.basis`,
+      message: `所属の根拠は ${ROLE_OWNERSHIP_BASES.join("・")} のいずれかであること`,
+    });
+    good = false;
+  }
+  const reason = value["reason"];
+  if (basisValid && basis === "dependency") {
+    if (typeof reason !== "string" || reason.trim() === "") {
+      problems.push({ field: `${field}.reason`, message: "依存の所属には理由（reason）が要る（空でない文字列）" });
+      good = false;
+    }
+  } else if (reason !== null && reason !== undefined) {
+    problems.push({ field: `${field}.reason`, message: "名指し（stated）の所属の理由は null であること" });
+    good = false;
+  }
+  if (!good) return undefined;
+  return {
+    roleId: roleId as string,
+    basis: basis as RoleOwnership["basis"],
+    reason: typeof reason === "string" ? reason : null,
   };
 }
 
@@ -330,7 +483,12 @@ function checkChecks(
   return good ? checks : undefined;
 }
 
-function checkDesign(value: unknown, field: string, problems: Problem[]): RequirementDesignEntry | undefined {
+function checkDesign(
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  planned: boolean,
+): RequirementDesignEntry | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "設計は写像（object）であること" });
     return undefined;
@@ -405,9 +563,34 @@ function checkDesign(value: unknown, field: string, problems: Problem[]): Requir
     unwritable = checkStringArray(unwritableRaw, `${field}.unwritable`, problems);
   }
 
+  // 所属（ownership。Issue #418）。新契約では必須。欄が無い旧形式の記録は省ける（混在は応答の側で断る）。
+  const ownershipRaw = value["ownership"];
+  let ownership: readonly RoleOwnership[] | undefined;
+  let ownershipOk = true;
+  if (ownershipRaw === undefined) {
+    if (planned) {
+      problems.push({ field: `${field}.ownership`, message: "役割の所属（ownership）の欄が要る" });
+      ownershipOk = false;
+    }
+  } else if (!Array.isArray(ownershipRaw)) {
+    problems.push({ field: `${field}.ownership`, message: "所属は並び（array）であること" });
+    ownershipOk = false;
+  } else {
+    const list: RoleOwnership[] = [];
+    let good = true;
+    ownershipRaw.forEach((item, index) => {
+      const parsed = checkOwnership(item, `${field}.ownership[${index}]`, problems);
+      if (parsed === undefined) good = false;
+      else list.push(parsed);
+    });
+    if (good) ownership = list;
+    else ownershipOk = false;
+  }
+
   if (
     !validId ||
     !checksOk ||
+    !ownershipOk ||
     vocabulary === undefined ||
     placement === undefined ||
     unwritable === undefined ||
@@ -425,11 +608,16 @@ function checkDesign(value: unknown, field: string, problems: Problem[]): Requir
     unwritable,
     unwritableClaims,
     notes,
+    ...(ownership === undefined ? {} : { ownership }),
   };
 }
 
-/** ② の応答の形を確かめる（新しい欄は、あるときだけ形を見る。旧形式の記録は省ける） */
-export function checkDesignOutput(output: unknown): ShapeCheck<DesignOutput> {
+/**
+ * ② の応答の形を確かめる。**新契約**（`version` を省いたとき）では、役割 ID の表・所属・`options` の
+ * 必須の欄と、所属・選択肢の有無の混在を断る。`legacy` を明示したときだけ、役割の表・所属・`options` の
+ * 無い旧形式の記録を通す（決定 ⑨・Issue #418）。
+ */
+export function checkDesignOutput(output: unknown, version?: DesignContractVersion): ShapeCheck<DesignOutput> {
   if (!isRecord(output)) {
     return { ok: false, problems: [{ field: "", message: "応答は写像（object）であること" }] };
   }
@@ -437,27 +625,39 @@ export function checkDesignOutput(output: unknown): ShapeCheck<DesignOutput> {
   if (!Array.isArray(raw)) {
     return { ok: false, problems: [{ field: "designs", message: "設計の並び（array）であること" }] };
   }
+  const planned = version !== LEGACY_DESIGN_CONTRACT;
   const problems: Problem[] = [];
   const designs: RequirementDesignEntry[] = [];
+  let designsWithOwnership = 0;
   raw.forEach((item, index) => {
-    const checked = checkDesign(item, `designs[${index}]`, problems);
+    if (isRecord(item) && item["ownership"] !== undefined) designsWithOwnership += 1;
+    const checked = checkDesign(item, `designs[${index}]`, problems, planned);
     if (checked !== undefined) designs.push(checked);
   });
   let roles: readonly RoleEntry[] | undefined;
   const rawRoles = output["roles"];
-  if (rawRoles !== undefined) {
-    if (!Array.isArray(rawRoles)) {
-      problems.push({ field: "roles", message: "役割 ID の表は並び（array）であること" });
-    } else {
-      const entries: RoleEntry[] = [];
-      let good = true;
-      rawRoles.forEach((item, index) => {
-        const checked = checkRoleEntry(item, `roles[${index}]`, problems);
-        if (checked === undefined) good = false;
-        else entries.push(checked);
-      });
-      if (good) roles = entries;
-    }
+  let rolesWithOptions = 0;
+  if (rawRoles === undefined) {
+    if (planned) problems.push({ field: "roles", message: "役割 ID の表（roles）が要る" });
+  } else if (!Array.isArray(rawRoles)) {
+    problems.push({ field: "roles", message: "役割 ID の表は並び（array）であること" });
+  } else {
+    const entries: RoleEntry[] = [];
+    let good = true;
+    rawRoles.forEach((item, index) => {
+      if (isRecord(item) && item["options"] !== undefined) rolesWithOptions += 1;
+      const checked = checkRoleEntry(item, `roles[${index}]`, problems, planned);
+      if (checked === undefined) good = false;
+      else entries.push(checked);
+    });
+    if (good) roles = entries;
+  }
+  // 混在（一部の設計にだけ所属がある・一部の行にだけ options がある）は、互換でも断る（決定 ⑨）
+  if (designsWithOwnership > 0 && designsWithOwnership < raw.length) {
+    problems.push({ field: "designs", message: "所属（ownership）の有無が設計ごとに混ざっている" });
+  }
+  if (rawRoles !== undefined && Array.isArray(rawRoles) && rolesWithOptions > 0 && rolesWithOptions < rawRoles.length) {
+    problems.push({ field: "roles", message: "選択肢（options）の有無が役割ごとに混ざっている" });
   }
   if (problems.length > 0) return { ok: false, problems };
   return { ok: true, value: { ...(roles === undefined ? {} : { roles }), designs } };
@@ -518,14 +718,119 @@ function checkRoleTable(roles: readonly RoleEntry[]): readonly Problem[] {
 }
 
 /**
+ * 役割の所属の中身を確かめる（**新契約**。§1・②・Issue #418）。合わない欄を**すべて**返す。
+ *
+ *   - 所属の役割 ID が表に無い／同じ要件の中で重なる
+ *   - 表の役割がどの要件にも所属しない（根拠の無い役割＝未達）
+ *   - entity を参照する役割（`entity` が null でない）を所属させた要件に、参照先の entity の所属が無い
+ *   - 2 つ以上の要件に所属する役割が `shared` を真にしていない
+ *   - `aliasOf` の先が表に無い・別名の別名
+ *
+ * **Problem の `field`・`message` に、役割 ID・要件 ID の値を埋めない**（停止の要約と段の失敗の記録に
+ * 写るため。位置は配列の添字で示す）。
+ */
+export function checkDesignOwnership(design: DesignResult): readonly Problem[] {
+  const problems: Problem[] = [];
+  const roles = design.roles ?? [];
+  const roleById = new Map<string, RoleEntry>();
+  const roleIndexById = new Map<string, number>();
+  roles.forEach((entry, index) => {
+    if (!roleById.has(entry.roleId)) {
+      roleById.set(entry.roleId, entry);
+      roleIndexById.set(entry.roleId, index);
+    }
+  });
+
+  // aliasOf の先が表に無い・別名の別名
+  roles.forEach((entry, index) => {
+    if (entry.aliasOf === null) return;
+    const target = roleById.get(entry.aliasOf);
+    if (target === undefined) {
+      problems.push({ field: `roles[${index}].aliasOf`, message: "別名の元の役割 ID が役割 ID の表に無い" });
+      return;
+    }
+    if (target.aliasOf !== null) {
+      problems.push({ field: `roles[${index}].aliasOf`, message: "別名の別名は作らない（元の役割 ID を指す）" });
+    }
+  });
+
+  // 要件ごとの所属（重なりと、表に無い ID）
+  const ownersOf = new Map<string, string[]>();
+  design.designs.forEach((entry, dIndex) => {
+    const seen = new Set<string>();
+    (entry.ownership ?? []).forEach((ownership, oIndex) => {
+      const field = `designs[${dIndex}].ownership[${oIndex}].roleId`;
+      if (!roleById.has(ownership.roleId)) {
+        problems.push({ field, message: "所属の役割 ID が役割 ID の表に無い" });
+        return;
+      }
+      if (seen.has(ownership.roleId)) {
+        problems.push({ field, message: "同じ要件の中で役割の所属が重なっている" });
+        return;
+      }
+      seen.add(ownership.roleId);
+      const owners = ownersOf.get(ownership.roleId);
+      if (owners === undefined) ownersOf.set(ownership.roleId, [entry.requirementId]);
+      else if (!owners.includes(entry.requirementId)) owners.push(entry.requirementId);
+    });
+  });
+
+  // どの要件にも所属しない役割（根拠の無い役割＝未達）
+  roles.forEach((entry, index) => {
+    if (!ownersOf.has(entry.roleId)) {
+      problems.push({
+        field: `roles[${index}]`,
+        message: "どの要件にも所属しない役割が表に残っている（根拠の無い役割）",
+      });
+    }
+  });
+
+  // 参照先の entity の所属を伴わない役割の所属
+  design.designs.forEach((entry, dIndex) => {
+    const owned = new Set((entry.ownership ?? []).map((ownership) => ownership.roleId));
+    (entry.ownership ?? []).forEach((ownership, oIndex) => {
+      const role = roleById.get(ownership.roleId);
+      if (role === undefined || role.entity === null) return;
+      const entityRole = roleById.get(role.entity);
+      if (entityRole === undefined || entityRole.kind !== "entity") return;
+      if (!owned.has(role.entity)) {
+        problems.push({
+          field: `designs[${dIndex}].ownership[${oIndex}].roleId`,
+          message: "参照先の entity の所属を伴わない役割を所属させている",
+        });
+      }
+    });
+  });
+
+  // 2 つ以上の要件に所属する役割が shared を真にしていない
+  for (const [roleId, owners] of ownersOf) {
+    if (owners.length < 2) continue;
+    const role = roleById.get(roleId);
+    if (role !== undefined && role.shared !== true) {
+      const index = roleIndexById.get(roleId) ?? 0;
+      problems.push({ field: `roles[${index}]`, message: "2 つ以上の要件に所属する役割は shared を真にすること" });
+    }
+  }
+
+  return problems;
+}
+
+/**
  * 設計の中身を、要件の一覧に照らして確かめる（§1・②・Issue #307）。合わない欄を**すべて**挙げて返す。
  *
  *   - 役割 ID の表がある（空でない）
  *   - 一覧の要件 ID ごとに、設計が 1 つあり、種類（nature）と確かめ方（verification）がある
  *   - fixed-test 以外の確かめ方には理由がある
  *   - 同名の対象の規則（共有・別名の明示、同名の別 entity を潰さない）
+ *
+ * **新契約**（`version` を省いたとき）では、上の規則に**所属の点検**（`checkDesignOwnership`）を足す。
+ * `legacy` を明示したときは、従来どおり所属を求めない（決定 ⑨・Issue #418）。
  */
-export function checkDesignPlan(list: RequirementList, design: DesignResult): readonly Problem[] {
+export function checkDesignPlan(
+  list: RequirementList,
+  design: DesignResult,
+  version?: DesignContractVersion,
+): readonly Problem[] {
   const problems: Problem[] = [];
   const roles = design.roles;
   if (roles === undefined || roles.length === 0) {
@@ -559,6 +864,9 @@ export function checkDesignPlan(list: RequirementList, design: DesignResult): re
     if (entry.verification === undefined) {
       problems.push({ field: "designs", message: `要件 ${requirement.id} に確かめ方が無い` });
     }
+  }
+  if (version !== LEGACY_DESIGN_CONTRACT) {
+    problems.push(...checkDesignOwnership(design));
   }
   return problems;
 }
@@ -629,34 +937,73 @@ function normalizeDesignClaims(design: DesignOutput): DesignOutput {
  * 試行の数（既定 2）で別に数え、段では数えない。**どの試行もジョブの総呼び出しの上限に数える。**
  */
 export async function runDesign(input: DesignInput): Promise<StageOutcome<DesignOutput>> {
+  const planned = input.version !== LEGACY_DESIGN_CONTRACT;
   let previous: readonly Problem[] = [];
   for (let round = 1; round <= DESIGN_ROUNDS; round += 1) {
     const data: PromptData[] = [{ name: "要件の一覧", text: serializeJson(input.list) }];
+    if (input.redo !== undefined) {
+      // 固定の文脈（元の全役割の表と、他の要件の採用済みの設計）をデータで渡す（Issue #418）
+      data.push({ name: "固定の役割 ID の表", text: serializeJson(input.redo.roles) });
+      data.push({ name: "他の要件の設計", text: serializeJson(input.redo.adopted) });
+    }
     if (previous.length > 0) {
       data.push({ name: "前回の作り直しの指示", text: serializeJson(previous) });
     }
     const request = buildStructuredRequest({
-      rules: DESIGN_RULES,
+      rules: input.redo === undefined ? DESIGN_RULES : [...DESIGN_RULES, REDO_DESIGN_FIXED_TABLE_RULE],
       documents: input.documents,
       data,
       schemaName: DESIGN_SCHEMA_NAME,
       schema: DESIGN_SCHEMA,
       maxOutputTokens: input.gateway.maxOutputTokens("design"),
     });
-    const answer = await callStructuredChecked(input.gateway, { request, check: checkDesignOutput });
+    const answer = await callStructuredChecked(input.gateway, {
+      request,
+      check: (output: unknown) => checkDesignOutput(output, input.version),
+    });
     if (!answer.ok) return answer;
     const problems: Problem[] = [];
-    // 新しい欄を持つ設計（本番の応答）だけ、中身の点検を掛ける。旧形式の記録（試験の fixture）は通す
-    if (isPlannedDesign(answer.value)) {
+    if (input.redo !== undefined) {
+      // 表は固定。応答の表が元の表と一致しなければ断る（Issue #418）
+      if (!sameRoles(answer.value.roles ?? [], input.redo.roles)) {
+        problems.push({
+          field: "roles",
+          message: "固定の役割 ID の表と一致しない（行の増減・欄の違い・options の変更）",
+        });
+      }
+      // 応答 1 件を全体へ差し替えた候補に対して、全役割の所属・共有を点検する（Issue #418）
+      const candidate: DesignResult = {
+        roles: input.redo.roles,
+        designs: [...input.redo.adopted, ...answer.value.designs],
+      };
+      problems.push(...checkDesignPlan(input.redo.wholeList, candidate));
+    } else if (planned) {
+      // 新契約では、中身の点検（所属を含む）を必ず掛ける（決定 ⑨・Issue #418）
       problems.push(...checkDesignPlan(input.list, answer.value));
+    } else if (isPlannedDesign(answer.value)) {
+      // 旧形式の記録（試験の fixture）は、新しい欄を持つときだけ中身の点検を掛ける（後方互換）
+      problems.push(...checkDesignPlan(input.list, answer.value, LEGACY_DESIGN_CONTRACT));
     }
     // 書けない部分の根拠（制約 ID）は、旧形式では申告が無いので何も断らない（#332）
     problems.push(...checkDesignConstraints(answer.value, input.documents));
     if (problems.length === 0) {
       // 根拠の照合を通ったあと、保存する側の ID を正規化する（Issue #398）
-      return { ok: true, value: normalizeDesignClaims(answer.value) };
+      const normalized = normalizeDesignClaims(answer.value);
+      if (input.redo !== undefined) return { ok: true, value: { ...normalized, roles: input.redo.roles } };
+      return { ok: true, value: normalized };
     }
     previous = problems;
   }
   return { ok: false, failure: { kind: "unmet", attempts: DESIGN_ROUNDS, problems: previous } };
+}
+
+/** 2 つの役割 ID の表が、行・欄・options まで一致するか（作り直しの「表は固定」の点検。Issue #418） */
+function sameRoles(a: readonly RoleEntry[], b: readonly RoleEntry[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((role, index) => roleKey(role) === roleKey(b[index]!));
+}
+
+/** 役割 1 行の、値の比較のための鍵（options の無い旧形式と null を同じに扱う） */
+function roleKey(role: RoleEntry): string {
+  return JSON.stringify([role.roleId, role.kind, role.entity, role.name, role.shared, role.aliasOf, role.options ?? null]);
 }

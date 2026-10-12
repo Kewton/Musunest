@@ -44,7 +44,8 @@ import {
   type TestTargetKind,
 } from "../fixed-test.js";
 import { checkLimit } from "../limits.js";
-import type { DesignResult, NatureDiscrepancy, RequirementList, RoleEntry } from "../pipeline.js";
+import type { DesignContractVersion, DesignResult, NatureDiscrepancy, RequirementList, RoleEntry } from "../pipeline.js";
+import { LEGACY_DESIGN_CONTRACT } from "../pipeline.js";
 import type { Judge, JudgeAnswer, JudgeQuestion } from "../judge.js";
 import type { CallGateway } from "../call.js";
 import { isPlannedDesign } from "./design.js";
@@ -225,6 +226,12 @@ export interface TestSuiteInput {
    * （`checkSuitePlan`）を掛ける。渡されなければ（旧形式の記録）旧来の検査だけを行う（後方互換）。
    */
   readonly design?: DesignResult;
+  /**
+   * 設計の契約の版（決定 ⑨・Issue #418）。`legacy` を明示したときだけ、過去の記録の読み込みとして
+   * 設計の無い旧経路・所属の無い設計を許す。省けば**新契約**——② の設計を必ず渡し、対象と
+   * `view-shows` の役割の所属を求める。
+   */
+  readonly version?: DesignContractVersion;
   /**
    * 確定した仕様（`plan.json`。§5・Issue #334）。渡されたときは、**要件と出どころの正本**として
    * データに載せる（原文の代わりに、確定した仕様の要件と出どころを根拠にする）。
@@ -657,14 +664,52 @@ export function checkSuiteAgainstRequirements(list: RequirementList, suite: Test
 }
 
 /**
+ * **新契約**で、試験の対象の役割 ID と `view-shows` の参照する役割が、その要件の**所属**にあるかを
+ * 確かめる（§1・②'・Issue #418）。**参照データの行の対象には所属を求めない**（他の entity の行を
+ * 参照する）。Problem の `field` は配列の添字と固定の欄名、`message` は固定文（役割 ID を埋めない）。
+ */
+function checkOwnedByRequirement(suite: TestSuite, design: DesignResult, problems: Problem[]): void {
+  const ownedByRequirement = new Map<string, ReadonlySet<string>>();
+  for (const entry of design.designs) {
+    ownedByRequirement.set(entry.requirementId, new Set((entry.ownership ?? []).map((ownership) => ownership.roleId)));
+  }
+  suite.tests.forEach((test, index) => {
+    const owned = ownedByRequirement.get(test.target.requirementId);
+    if (owned === undefined) return;
+    if (test.target.roleId !== undefined && !owned.has(test.target.roleId)) {
+      problems.push({
+        field: `tests[${index}].target.roleId`,
+        message: "対象の役割 ID が、その要件の所属に無い",
+      });
+    }
+    const assertion = test.assertion;
+    if (
+      assertion !== undefined &&
+      assertion.check === "view-shows" &&
+      typeof assertion.role === "string" &&
+      !owned.has(assertion.role)
+    ) {
+      problems.push({
+        field: `tests[${index}].assertion.role`,
+        message: "view-shows の参照する役割が、その要件の所属に無い",
+      });
+    }
+  });
+}
+
+/**
  * 設計と分類を突き合わせた結果を、種類に応じて確かめる（§1・②'・Issue #307）。合わない欄を**すべて**返す。
  * `natures` は `reconcileNatures` の結果（設計の種類と ②' の分類を突き合わせた、実際に使う種類）。
+ *
+ * **新契約**（`version` を省いたとき）では、対象と `view-shows` の役割がその要件の所属にあるかを足す。
+ * `legacy` を明示したときは、従来どおり所属を求めない（決定 ⑨・Issue #418）。
  */
 export function checkSuitePlan(
   list: RequirementList,
   suite: TestSuite,
   design: DesignResult,
   natures: ReadonlyMap<string, RequirementNature>,
+  version?: DesignContractVersion,
 ): readonly Problem[] {
   const problems: Problem[] = [];
   const checked = structuralChecksRequired(design);
@@ -674,6 +719,9 @@ export function checkSuitePlan(
   checkExpectationKind(suite, problems);
   checkStructuralChecks(suite, design, problems);
   checkRecordValueKeys(suite, design, problems);
+  if (version !== LEGACY_DESIGN_CONTRACT) {
+    checkOwnedByRequirement(suite, design, problems);
+  }
   return problems;
 }
 
@@ -994,6 +1042,16 @@ function buildData(
         })),
       ),
     });
+    // 要件ごとの所属（根拠つき。Issue #418）。試験の対象の役割 ID は、その要件の所属から選ばせる。
+    data.push({
+      name: "要件ごとの所属",
+      text: serializeJson(
+        design.designs.map((entry) => ({
+          requirementId: entry.requirementId,
+          ownership: entry.ownership ?? [],
+        })),
+      ),
+    });
   }
   if (previous.length > 0) {
     data.push({ name: "前回の作り直しの指示", text: serializeJson(previous) });
@@ -1028,6 +1086,14 @@ export interface TestSuiteValue {
  * 分類が変わっても聞き直さず、失敗した要件も聞き直さない（Issue #373）。
  */
 export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<TestSuiteValue>> {
+  const legacy = input.version === LEGACY_DESIGN_CONTRACT;
+  // 新契約では、② の設計が渡らない入力を断る（設計の無い旧経路へ落とさない。決定 ⑨・Issue #418）。
+  // **形の検査（`checkSuiteAgainstRequirements`）と合わせて中身の点検で断る**——要求は今までどおり
+  // 送る（前置きの観測の試験は、要求の中身だけを見る）。
+  const designProblem: readonly Problem[] =
+    legacy || input.design !== undefined
+      ? []
+      : [{ field: "design", message: "新契約では ② の設計が要る（設計の無い入力は断る）" }];
   let previous: readonly Problem[] = [];
   // 食い違った要件の決め方（要件 ID ごと）。やり直しの回をまたいで持ち越す（聞き直さない。Issue #373）
   const decisions = new Map<string, NatureDecision>();
@@ -1051,7 +1117,7 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
     let discrepancies: readonly NatureDiscrepancy[] = [];
     let suite = answer.value;
     if (input.design === undefined || !planned) {
-      problems = checkSuiteAgainstRequirements(input.list, answer.value);
+      problems = [...designProblem, ...checkSuiteAgainstRequirements(input.list, answer.value)];
     } else {
       // 食い違った要件のうち、まだ決めていないものを 1 回の呼び出しにまとめて判定に聞く（Issue #373）。
       // 判定の口が無ければ聞かず、`reconcileNatures` が今までどおり `ruled` に倒す。
@@ -1081,7 +1147,7 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
       const adopted = new Map<string, RequirementNature>();
       for (const entry of reconciled.discrepancies) adopted.set(entry.requirementId, entry.resolved);
       suite = withAdoptedNatures(dropResult.suite, adopted);
-      problems = checkSuitePlan(input.list, suite, input.design, reconciled.natures);
+      problems = checkSuitePlan(input.list, suite, input.design, reconciled.natures, input.version);
     }
     if (problems.length === 0) {
       return { ok: true, value: { suite, rounds: round, discrepancies, dropped: droppedAll } };

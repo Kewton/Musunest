@@ -48,11 +48,13 @@ import {
   type CorrespondenceResult,
   type CorrespondenceMiss,
   type Declaration,
+  type DesignContractVersion,
   type DesignResult,
   type Dispute,
   type JudgeMaterials,
   type OverturnedTest,
   type RejectedDispute,
+  type RequirementDesign,
   type RequirementList,
   type RoleEntry,
   type RoleNameMapping,
@@ -151,6 +153,11 @@ export interface GenerationInput {
    * これまでどおり依頼文（原文）から ① → ①' を回す。
    */
   readonly plan?: ConfirmedPlan;
+  /**
+   * 設計の契約の版（決定 ⑨・Issue #418）。`legacy` を明示したときだけ、過去の記録の読み込みとして
+   * 旧形式の設計を通す。省けば**新契約**——初回の設計・単一要件の作り直し・②' に**同じ値**を渡す。
+   */
+  readonly designVersion?: DesignContractVersion;
 }
 
 /** 1 回の生成の結果 */
@@ -665,9 +672,13 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       carriedReverseCheck = reverse.unmet.map((miss) => `${miss.kind}: ${miss.detail}`);
     }
 
+    // 設計の契約の版（決定 ⑨・Issue #418）。呼ぶ側が明示し、初回の設計・作り直し・②' へ同じ値を渡す。
+    const versionField: { readonly version?: DesignContractVersion } =
+      input.designVersion === undefined ? {} : { version: input.designVersion };
+
     // ② 設計する（書けなかった要件の一覧を、⑦ と ⑧ のために組んでおく）
     const rawDesign = await runStageOk("design", () =>
-      runDesign({ list: requirementList, documents: input.documents, gateway }),
+      runDesign({ list: requirementList, documents: input.documents, gateway, ...versionField }),
     );
 
     // ② の「書けない」の申告を、仕分けて裏を取る（Issue #332）。判定の口（`judge`）が渡されたときだけ
@@ -675,6 +686,11 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     // ない**ので、判定が失敗しても走りは止めない（申告をそのまま残す。§4・§6）。
     let triage: UnwritableTriageResult | undefined;
     if (judgeBudget !== undefined && rawDesign.designs.some((entry) => entry.unwritableClaims.length > 0)) {
+      // 単一要件の作り直しの**基準**（採用した設計）を、呼ぶ側（ここ）が持つ（Issue #418）。1 件目の採用を
+      // 反映した全体を、2 件目の点検の基準にする（採用と更新を同時に行う）。
+      const adoptedDesigns = new Map<string, RequirementDesign>(
+        rawDesign.designs.map((entry) => [entry.requirementId, entry]),
+      );
       // 判定の口は**予算に結び付けた包み**（judgeBudget）である（Issue #359）。予約できなければ
       // `JudgeBudgetExceededError` を投げ、ここで握って申告をそのまま残す（判定は助言。§4・§6）。
       try {
@@ -691,12 +707,21 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
                 (requirement) => requirement.id === requirementId,
               ),
             };
+            // 他の要件の採用済みの設計を基準にする（対象の要件は除く。Issue #418）
+            const others = [...adoptedDesigns.values()].filter((entry) => entry.requirementId !== requirementId);
             // やり直しの 1 回を、段 `design` の記録（`operation` は `"redo-design"`）として残す
             // （Issue #410）。**戻り方は変えない**——段の失敗は今までどおり `undefined` を返し、例外は
             // 記録を足して投げ直し、外側の既存の catch に委ねる。
             const before = meter.snapshot;
             const value = await redoDesignRecorded({
-              call: () => runDesign({ list, documents: input.documents, gateway }),
+              call: () =>
+                runDesign({
+                  list,
+                  documents: input.documents,
+                  gateway,
+                  ...versionField,
+                  redo: { roles: rawDesign.roles ?? [], adopted: others, wholeList: requirementList },
+                }),
               now: input.now,
               push: (status, durationMs, failureKind) => {
                 stages.push(
@@ -711,7 +736,10 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
                 );
               },
             });
-            return value?.designs[0];
+            const entry = value?.designs[0];
+            // 採用を基準へ反映する（同時に更新。Issue #418）
+            if (entry !== undefined) adoptedDesigns.set(requirementId, entry);
+            return entry;
           },
         });
       } catch {
@@ -795,6 +823,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         design,
         documents: input.documents,
         gateway,
+        ...versionField,
         ...(input.plan === undefined ? {} : { plan: input.plan }),
         ...(judgeBudget === undefined ? {} : { judge: judgeBudget }),
         // 固定の前に外した試験を、**回ごとに**受け取る（②' が最後に失敗しても・後の段で早く止まっても
