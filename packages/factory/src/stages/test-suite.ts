@@ -53,10 +53,12 @@ import {
   buildStructuredRequest,
   callStructuredChecked,
   isRecord,
+  ruleTexts,
   serializeJson,
   type Problem,
   type PromptData,
   type PromptDocument,
+  type RuleDefinition,
   type ShapeCheck,
   type StageOutcome,
 } from "./prompt.js";
@@ -67,22 +69,100 @@ export const TEST_SUITE_SCHEMA_NAME = "test-suite";
 /** 作り直しの回数（1 回だけやり直す。§1） */
 export const TEST_SUITE_ROUNDS = 2;
 
-/** ②' に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
-export const TEST_SUITE_RULES: readonly string[] = [
-  "原文と要件の一覧だけから、要件ごとの種類（nature）を独立に分類し直す（設計の出力は見せられない）。決まり（条件・計算・検査）を含むなら ruled、在ることだけ（例「名前を持つメンバーを登録できる」）なら existence-only。分類は classifications に入れる。**分類は原文と要件の文だけで決め、確かめ方の欄は使わない。**",
-  "確かめ方が structural の要件を除いて、決まりを含む要件は、決まりの役割ごとに、正常・異常・境界の 3 種類の試験を、入力と期待つきで作る。",
-  "在ることだけの要件は、正常のシナリオ 1 本か、構造の条件（create の操作がある・その entity の一覧か表に項目が出る・画面の部品がある）だけを固定する。**異常・境界の試験や検査（validate）の試験は作らない**。",
-  "確かめ方が structural の要件には、checks の中身ごとに 1 本以上の**構造の検査だけを作る**。種類（ruled／existence）にかかわらず構造の検査だけを作り、正常・異常・境界の実行の試験（入力・画面・集計・操作の試験）は作らない。構造の検査は操作（operation）を structure にし、assertion に検査の中身を持つ。種類（kind）は normal だけ、期待（expected）は「成り立つ」（kind を ok・value を \"true\"・code を null）にする。",
-  "構造の検査の assertion.check は、設計の checks の中身（field-type・action-kind・action-unconditioned・view-shows・aggregate-no-period・write-anonymous）と同じ値にする。assertion の expected・refEntity・role は検査の種類に応じて埋める——field-type は expected に項目の種類（string・number・date・list・ref・enum）、参照（ref・参照の並び）なら refEntity に参照先 entity の役割 ID。action-kind は expected に操作の種類（create・update・delete）。view-shows は role に、表示を期待する項目か計算の役割 ID。action-unconditioned・aggregate-no-period・write-anonymous は expected・refEntity・role を null にする。",
-  "構造の検査は、確かめ方が structural の要件だけを対象にする。構造の検査でない試験は assertion を null にする。確かめ方が structural の要件には、正常・異常・境界のそろいを求めない。",
-  "入力（input）と参照データの値（values）と期待の値（value）は、任意の JSON を表すので、**JSON の文字列**として書く（例: \"{\\\"amount\\\": 21}\"）。",
-  "異常の期待は、操作ごとの型にする。検査（validate）の異常は誤りコード（expected.code）で確かめ、value は null にする。計算・集計（compute・aggregate）の異常は、値（expected.value）でもよい。それ以外の正常は値の JSON 文字列を value に入れ、code は null にする。",
-  "対象（target）と参照の行（referenceData の target）は、名前ではなく**役割 ID（roleId）**で指す。役割 ID は ② の役割 ID の表のものを使う。宣言は見られないので、名前を書かない。",
-  "入力の契約（inputContract）に、固定の行 ID（rowId）・評価の対象の行 ID（targetRowId。行を評価しないときは null）・空であることを明示する entity の役割 ID（emptyEntities）を入れる。",
-  "所属 entity の決まったレコードの入力（input）と参照の行の値（values）の直下の鍵は、その entity の項目（kind が field）の役割 ID だけにする。行の ID は inputContract.rowId・referenceData[*].rowId に置き、値の鍵（id・rowId）にしない。この規則は、対象の役割の所属 entity の項目の役割が役割 ID の表にあるときにだけ掛かる。項目の役割の無い表と、役割 ID の表の無い旧形式では、宣言の項目の名前を鍵にしてよい。",
-  "時計（clock）は固定の日時（オフセット付きの ISO 8601）にする。",
-  "要件 ID は①の一覧のものだけを使う。一覧に無い要件 ID を作らない。",
+/**
+ * ②' に足す規則の定義（Issue #433）。**送る文は `text` から組む**——段は規則の文を手で持たない。
+ * ID は規則の台帳（`workspace/mvp/m1/agent/methodology/ledger/rules.md`）の R-suite-01〜14 を配列の順に
+ * 振る（#433 で R-suite-14 を足した）。`why`・`since` は注釈と Issue 番号から写す（空にしない）。
+ */
+export const TEST_SUITE_RULE_DEFINITIONS: readonly RuleDefinition[] = [
+  {
+    id: "R-suite-01",
+    text: "原文と要件の一覧だけから、要件ごとの種類（nature）を独立に分類し直す（設計の出力は見せられない）。決まり（条件・計算・検査）を含むなら ruled、在ることだけ（例「名前を持つメンバーを登録できる」）なら existence-only。分類は classifications に入れる。**分類は原文と要件の文だけで決め、確かめ方の欄は使わない。**",
+    why: "原文と要件の一覧から種類を独立に分類させる（R2-3）",
+    since: "Issue #307",
+  },
+  {
+    id: "R-suite-02",
+    text: "確かめ方が structural の要件を除いて、決まりを含む要件は、決まりの役割ごとに、正常・異常・境界の 3 種類の試験を、入力と期待つきで作る。",
+    why: "決まりを含む要件に正常・異常・境界の試験を作らせる",
+    since: "Issue #307",
+  },
+  {
+    id: "R-suite-03",
+    text: "在ることだけの要件は、正常のシナリオ 1 本か、構造の条件（create の操作がある・その entity の一覧か表に項目が出る・画面の部品がある）だけを固定する。**異常・境界の試験や検査（validate）の試験は作らない**。",
+    why: "在ることだけの要件に異常・境界の試験を作らせない",
+    since: "Issue #307",
+  },
+  {
+    id: "R-suite-04",
+    text: "確かめ方が structural の要件には、checks の中身ごとに 1 本以上の**構造の検査だけを作る**。種類（ruled／existence）にかかわらず構造の検査だけを作り、正常・異常・境界の実行の試験（入力・画面・集計・操作の試験）は作らない。構造の検査は操作（operation）を structure にし、assertion に検査の中身を持つ。種類（kind）は normal だけ、期待（expected）は「成り立つ」（kind を ok・value を \"true\"・code を null）にする。",
+    why: "構造で確かめる要件には構造の検査だけを固定させる",
+    since: "Issue #392",
+  },
+  {
+    id: "R-suite-05",
+    text: "構造の検査の assertion.check は、設計の checks の中身（field-type・action-kind・action-unconditioned・view-shows・aggregate-no-period・write-anonymous）と同じ値にする。assertion の expected・refEntity・role は検査の種類に応じて埋める——field-type は expected に項目の種類（string・number・date・list・ref・enum）、参照（ref・参照の並び）なら refEntity に参照先 entity の役割 ID。action-kind は expected に操作の種類（create・update・delete）。view-shows は role に、表示を期待する項目か計算の役割 ID。action-unconditioned・aggregate-no-period・write-anonymous は expected・refEntity・role を null にする。",
+    why: "構造の検査の中身と参照の欄の埋め方を、設計の checks に合わせる",
+    since: "Issue #386",
+  },
+  {
+    id: "R-suite-06",
+    text: "構造の検査は、確かめ方が structural の要件だけを対象にする。構造の検査でない試験は assertion を null にする。確かめ方が structural の要件には、正常・異常・境界のそろいを求めない。",
+    why: "構造の検査を構造の要件だけに当て、実行の試験と混ぜさせない",
+    since: "Issue #386",
+  },
+  {
+    id: "R-suite-07",
+    text: "入力（input）と参照データの値（values）と期待の値（value）は、任意の JSON を表すので、**JSON の文字列**として書く（例: \"{\\\"amount\\\": 21}\"）。",
+    why: "任意の JSON を、strict で表せる JSON の文字列として受けさせる（§2）",
+    since: "Issue #307",
+  },
+  {
+    id: "R-suite-08",
+    text: "異常の期待は、操作ごとの型にする。検査（validate）の異常は誤りコード（expected.code）で確かめ、value は null にする。計算・集計（compute・aggregate）の異常は、値（expected.value）でもよい。それ以外の正常は値の JSON 文字列を value に入れ、code は null にする。",
+    why: "異常の期待を操作ごとの型にし、検査と計算を分ける",
+    since: "Issue #307",
+  },
+  {
+    id: "R-suite-09",
+    text: "対象（target）と参照の行（referenceData の target）は、名前ではなく**役割 ID（roleId）**で指す。役割 ID は ② の役割 ID の表のものを使う。宣言は見られないので、名前を書かない。",
+    why: "試験の対象を、宣言の名前ではなく役割 ID で指させる（§1.3）",
+    since: "Issue #307",
+  },
+  {
+    id: "R-suite-10",
+    text: "入力の契約（inputContract）に、固定の行 ID（rowId）・評価の対象の行 ID（targetRowId。行を評価しないときは null）・空であることを明示する entity の役割 ID（emptyEntities）を入れる。",
+    why: "入力の契約（固定の行 ID・評価の対象・空の集合）を書かせる（Issue #322）",
+    since: "Issue #307",
+  },
+  {
+    id: "R-suite-11",
+    text: "所属 entity の決まったレコードの入力（input）と参照の行の値（values）の直下の鍵は、その entity の項目（kind が field）の役割 ID だけにする。行の ID は inputContract.rowId・referenceData[*].rowId に置き、値の鍵（id・rowId）にしない。この規則は、対象の役割の所属 entity の項目の役割が役割 ID の表にあるときにだけ掛かる。項目の役割の無い表と、役割 ID の表の無い旧形式では、宣言の項目の名前を鍵にしてよい。",
+    why: "値の鍵を所属 entity の項目の役割 ID に限り、行の ID を値の鍵に書かせない（Issue #409）",
+    since: "Issue #409",
+  },
+  {
+    id: "R-suite-12",
+    text: "時計（clock）は固定の日時（オフセット付きの ISO 8601）にする。",
+    why: "時計を固定の日時にし、評価を再現できるようにする",
+    since: "Issue #307",
+  },
+  {
+    id: "R-suite-13",
+    text: "要件 ID は①の一覧のものだけを使う。一覧に無い要件 ID を作らない。",
+    why: "一覧に無い要件 ID を作らせない",
+    since: "Issue #307",
+  },
+  {
+    id: "R-suite-14",
+    text: "選択肢（enum）の項目の値は、役割 ID の表の options から選ぶ。見出しごとの集計の期待は、分ける元の項目の options の全キーを順に、heading と value だけで書き、集計元を読めない入力の期待は null にする。（宣言と固定する試験が別々の表現を推測しないため、選択肢の参照表現と集計元の関係を固定して共有する。）",
+    why: "期待の値と見出しを、表（②）の選択肢の参照表現に合わせ、別々の推測をなくす",
+    since: "Issue #433",
+  },
 ];
+
+/** ②' に足す規則（共通の規則は buildStructuredRequest が先頭に付ける。定義の `text` から組む） */
+export const TEST_SUITE_RULES: readonly string[] = ruleTexts(TEST_SUITE_RULE_DEFINITIONS);
 
 /**
  * ②' の JSON Schema（構造化出力）。**OpenAI の strict の規則に合わせる**（すべての節に `type`、
@@ -485,6 +565,120 @@ function checkRecordValueKeys(suite: TestSuite, design: DesignResult, problems: 
   });
 }
 
+/**
+ * **選択肢（enum）の項目**の値が、役割 ID の表の `options` の中にあるか（**新契約**。§1・②'・Issue #433）。
+ * 直下の鍵が `options` を持つ項目の役割 ID のとき、その値が `options` の中であることを確かめる。
+ *
+ *   - 入力は、正常・境界の試験だけを、所属 entity が決まるときに見る（`#409` と同じ適用条件。**異常の
+ *     試験の入力は検査しない**——拒否を観測する契約が無い）
+ *   - 参照の行の値は、行の対象の所属 entity が決まるとき、すべての試験で見る
+ *   - **入れ子（直下でない鍵）と、計算の結果は検査しない**
+ *   - **所属 entity の選択肢の項目**だけを見る（別 entity の同名の項目は見ない）
+ */
+function checkOptionValues(suite: TestSuite, design: DesignResult, problems: Problem[]): void {
+  const roleById = new Map((design.roles ?? []).map((entry) => [entry.roleId, entry]));
+  const optionsByRoleId = new Map<string, readonly string[]>();
+  const optionRoleIdsByEntity = new Map<string, Set<string>>();
+  for (const entry of design.roles ?? []) {
+    if (entry.kind !== "field" || entry.options === null || entry.options === undefined) continue;
+    optionsByRoleId.set(entry.roleId, entry.options);
+    if (entry.entity !== null) {
+      const set = optionRoleIdsByEntity.get(entry.entity) ?? new Set<string>();
+      set.add(entry.roleId);
+      optionRoleIdsByEntity.set(entry.entity, set);
+    }
+  }
+  if (optionsByRoleId.size === 0) return;
+  const checkValues = (values: Readonly<Record<string, unknown>>, owner: string, field: string): void => {
+    const ownerOptions = optionRoleIdsByEntity.get(owner);
+    if (ownerOptions === undefined) return;
+    for (const key of Object.keys(values)) {
+      if (!ownerOptions.has(key)) continue;
+      const options = optionsByRoleId.get(key);
+      if (options === undefined) continue;
+      if (!options.includes(values[key] as string)) {
+        // **値を埋めない**（止まった記録に漏れる。Issue #433 の管理の指示）
+        problems.push({ field, message: "選択肢の項目の値が、その項目の options の外である" });
+      }
+    }
+  };
+  suite.tests.forEach((test, index) => {
+    const owner = owningEntityOf(test.target, roleById);
+    // 計算で参照の行を持つ試験は、レコードの入力と確かめられないので入力の鍵を見ない（⑤b に委ねる）
+    const referenceEvaluatedComputation = test.target.kind === "computation" && test.referenceData.length > 0;
+    if (
+      (test.kind === "normal" || test.kind === "boundary") &&
+      (test.operation === "compute" || test.operation === "validate" || test.operation === "action") &&
+      owner !== null &&
+      !referenceEvaluatedComputation &&
+      isRecord(test.input)
+    ) {
+      checkValues(test.input, owner, `tests[${index}].input`);
+    }
+    test.referenceData.forEach((row, rowIndex) => {
+      const rowOwner = owningEntityOf(row.target, roleById);
+      if (rowOwner === null || !isRecord(row.values)) return;
+      checkValues(row.values, rowOwner, `tests[${index}].referenceData[${rowIndex}].values`);
+    });
+  });
+}
+
+/**
+ * **見出しごとの集計**の期待を、役割 ID の表の `options` に照らす（**新契約**。§1・②'・Issue #433）。
+ * 操作が `aggregate` で、対象の計算の役割が `groupBy` を持つ試験の期待は、見出しの並びか `null` を許す。
+ * 並びのときは、分ける元の項目の `options` の全キーを**同じ順**に、`heading` と `value` だけの欄で持ち、
+ * `value` は数か `null` であること。**結果全体が `null` の期待はそのまま通す**（正しさは ⑤b が確かめる）。
+ * `groupBy` が `null` の計算（月・分けない）には掛けない。
+ */
+function checkAggregateHeadings(suite: TestSuite, design: DesignResult, problems: Problem[]): void {
+  const roleById = new Map((design.roles ?? []).map((entry) => [entry.roleId, entry]));
+  suite.tests.forEach((test, index) => {
+    if (test.operation !== "aggregate") return;
+    const roleId = test.target.roleId;
+    if (roleId === undefined) return;
+    const role = roleById.get(roleId);
+    if (role === undefined || role.kind !== "computation" || role.groupBy === null || role.groupBy === undefined) return;
+    const groupRole = roleById.get(role.groupBy);
+    if (groupRole === undefined || groupRole.kind !== "field" || groupRole.options === null || groupRole.options === undefined) {
+      return;
+    }
+    if (test.expected.kind !== "ok") return;
+    const value = test.expected.value;
+    if (value === null) return;
+    const field = `tests[${index}].expected.value`;
+    if (!Array.isArray(value)) {
+      problems.push({ field, message: "見出しごとの集計の期待は、見出しの並びか null であること" });
+      return;
+    }
+    const options = groupRole.options;
+    if (value.length !== options.length) {
+      problems.push({ field, message: "見出しごとの集計の期待は、選択肢（options）の全キーと同じ数であること" });
+      return;
+    }
+    for (let i = 0; i < value.length; i += 1) {
+      const entry = value[i];
+      if (!isRecord(entry)) {
+        problems.push({ field: `${field}[${i}]`, message: "見出しの組は写像（object）であること" });
+        return;
+      }
+      const keys = Object.keys(entry);
+      if (keys.length !== 2 || !keys.includes("heading") || !keys.includes("value")) {
+        problems.push({ field: `${field}[${i}]`, message: "見出しの組は heading と value だけを持つこと" });
+        return;
+      }
+      if (entry["heading"] !== options[i]) {
+        problems.push({ field: `${field}[${i}].heading`, message: "見出しの順が、選択肢（options）の順と合わない" });
+        return;
+      }
+      const itemValue = entry["value"];
+      if (itemValue !== null && typeof itemValue !== "number") {
+        problems.push({ field: `${field}[${i}].value`, message: "見出しの値は数か null であること" });
+        return;
+      }
+    }
+  });
+}
+
 /** 異常の期待を、操作ごとの型に照らす（検査は誤りコード。計算・集計は値も許す） */
 function checkExpectationKind(suite: TestSuite, problems: Problem[]): void {
   suite.tests.forEach((test, index) => {
@@ -721,6 +915,8 @@ export function checkSuitePlan(
   checkRecordValueKeys(suite, design, problems);
   if (version !== LEGACY_DESIGN_CONTRACT) {
     checkOwnedByRequirement(suite, design, problems);
+    checkOptionValues(suite, design, problems);
+    checkAggregateHeadings(suite, design, problems);
   }
   return problems;
 }
@@ -1017,6 +1213,59 @@ function isNewContractDesign(design: DesignResult): boolean {
 }
 
 /**
+ * **新契約**の役割 ID の表の `groupBy` を確かめる（Issue #433・review 1）。`checkSuitePlan` の見出しの
+ * 検査は、**欄が無い（欠落）**を `null` と同じく対象外にする。だから、入口で欠落・形・参照先の不備を
+ * 断らないと、この欄だけを欠かせた設計が、見出しの検査を省いたまま固定できてしまう（#428 が設けた
+ * 「入力が欠けても旧来の検査だけで固定しない」の境界に、#433 の欄を反映する）。
+ *
+ *   - 欠落（欄が無い）… 新契約では必須（計算でなければ `null` を書く）。**`null` は対象外であって不備ではない**
+ *   - 計算でない役割の非 null／空でない文字列でない
+ *   - 参照先の役割 ID が表に無い・項目（`field`）でない・選択肢（`options`）が無い
+ *   - 有無の混在
+ *
+ * **Problem の `field`・`message` に値を埋めない**。`legacy` を明示したときは掛けない（呼ぶ側が分ける）。
+ */
+function checkRoleGroupByFields(design: DesignResult): readonly Problem[] {
+  const problems: Problem[] = [];
+  const roles = design.roles ?? [];
+  const roleById = new Map(roles.map((role) => [role.roleId, role]));
+  let present = 0;
+  roles.forEach((role, index) => {
+    const field = `roles[${index}].groupBy`;
+    if (role.groupBy === undefined) {
+      problems.push({ field, message: "見出しの元の項目の欄（groupBy）が要る（計算でなければ null）" });
+      return;
+    }
+    present += 1;
+    if (role.groupBy === null) return;
+    if (typeof role.groupBy !== "string" || role.groupBy === "") {
+      problems.push({ field, message: "見出しの元の項目は空でない文字列か null であること" });
+      return;
+    }
+    if (role.kind !== "computation") {
+      problems.push({ field, message: "計算でない役割の見出しの元の項目は null であること" });
+      return;
+    }
+    const target = roleById.get(role.groupBy);
+    if (target === undefined) {
+      problems.push({ field, message: "見出しの元の項目の役割 ID が役割 ID の表に無い" });
+      return;
+    }
+    if (target.kind !== "field") {
+      problems.push({ field, message: "見出しの元の項目が項目（field）でない" });
+      return;
+    }
+    if (target.options === null || target.options === undefined) {
+      problems.push({ field, message: "見出しの元の項目に選択肢（options）が無い" });
+    }
+  });
+  if (present > 0 && present < roles.length) {
+    problems.push({ field: "roles", message: "見出しの元の項目（groupBy）の有無が役割ごとに混ざっている" });
+  }
+  return problems;
+}
+
+/**
  * ②' のデータ（要件の一覧。やり直しのときは前回の作り直しの指示を足す）。
  *
  * **② の設計が渡されたときは、役割 ID の表と要件ごとの種類も入れる**（Issue #316）。②' は宣言を
@@ -1115,17 +1364,28 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
   // **版は欄の有無から推定しない。** 新契約（`version` を省いたとき）では、② の設計を必ず渡す。設計が
   // 役割 ID の表・種類・確かめ方を持たなくても、旧来の検査（`checkSuiteAgainstRequirements`）へ落とさず、
   // **中身の点検で断る**（`designProblem` と同じ扱いで `unmet`。要求は今までどおり送る。Issue #418・#428）。
-  // `isPlannedDesign` は `legacy` を明示したときだけ使う。
-  const designProblem: readonly Problem[] =
-    legacy || (input.design !== undefined && isNewContractDesign(input.design))
-      ? []
-      : [
+  // 新契約の形（役割 ID の表・種類・確かめ方）を持つときも、#433 の欄（役割ごとの `groupBy`）の欠落・
+  // 形・参照先の不備を入口で断る——見出しの検査は欠落を対象外にするので、ここで断らないと欄だけを
+  // 欠かせた設計が固定できてしまう（Issue #433・review 1）。`isPlannedDesign` は `legacy` を明示したときだけ使う。
+  const designProblem: readonly Problem[] = legacy
+    ? []
+    : input.design === undefined
+      ? [
           {
             field: "design",
             message:
               "新契約では、役割 ID の表・要件ごとの種類・確かめ方を持つ ② の設計が要る（無い・欠ける入力は断る）",
           },
-        ];
+        ]
+      : isNewContractDesign(input.design)
+        ? checkRoleGroupByFields(input.design)
+        : [
+            {
+              field: "design",
+              message:
+                "新契約では、役割 ID の表・要件ごとの種類・確かめ方を持つ ② の設計が要る（無い・欠ける入力は断る）",
+            },
+          ];
   let previous: readonly Problem[] = [];
   // 食い違った要件の決め方（要件 ID ごと）。やり直しの回をまたいで持ち越す（聞き直さない。Issue #373）
   const decisions = new Map<string, NatureDecision>();

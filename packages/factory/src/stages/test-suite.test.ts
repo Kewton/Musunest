@@ -15,7 +15,9 @@ import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest, JudgeResponse } f
 import {
   NATURE_JUDGE_THRESHOLD,
   NATURE_JUDGE_THRESHOLD_VERSION,
+  TEST_SUITE_RULE_DEFINITIONS,
   TEST_SUITE_RULES,
+  TEST_SUITE_ROUNDS,
   TEST_SUITE_SCHEMA_NAME,
   checkSuiteAgainstRequirements,
   checkSuitePlan as checkSuitePlanImpl,
@@ -25,6 +27,7 @@ import {
   runTestSuite as runTestSuiteImpl,
   type TestSuiteInput,
 } from "./test-suite.js";
+import { ruleDefinitionDefects, ruleTexts } from "./prompt.js";
 import {
   INJECTED_INSTRUCTION,
   REQUIREMENT_LIST,
@@ -1734,10 +1737,10 @@ describe("値の鍵を、所属 entity の項目の役割 ID に照らす（§1�
 
 /** entity・計算 2 つ・画面を持つ役割 ID の表（`record` は 2 要件が使うので共有） */
 const OWNED_ROLES: readonly RoleEntry[] = [
-  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
-  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
-  { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null },
-  { roleId: "record.records", kind: "screen", entity: "record", name: "records", shared: false, aliasOf: null, options: null },
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.records", kind: "screen", entity: "record", name: "records", shared: false, aliasOf: null, options: null, groupBy: null },
 ];
 
 /** 所属を持つ設計（R-1 は `record.total`、R-2 は `record.extra` を使う） */
@@ -1986,6 +1989,347 @@ describe("新契約：版は欄の有無から推定しない（§1・②'・Iss
     expect(request.input.match(/<data name=/g)).toHaveLength(5);
     for (const name of ["役割 ID の表", "要件ごとの種類", "要件ごとの確かめ方", "要件ごとの所属"]) {
       expect(request.input).toContain(name);
+    }
+  });
+});
+
+// ── 選択肢の値と見出しごとの集計の期待（新契約。Issue #433）──────────────────
+
+describe("選択肢の値と見出しごとの集計の期待を、コードで検査する（新契約。Issue #433）", () => {
+  const OPTION_ROLES: readonly RoleEntry[] = [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.status", kind: "field", entity: "record", name: "status", shared: false, aliasOf: null, options: ["open", "closed"], groupBy: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: "record.status" },
+    { roleId: "record.plain", kind: "computation", entity: "record", name: "plain", shared: false, aliasOf: null, options: null, groupBy: null },
+  ];
+
+  const OPTION_DESIGN: DesignResult = {
+    roles: OPTION_ROLES,
+    designs: [
+      {
+        requirementId: "R-1",
+        nature: "ruled",
+        verification: { kind: "fixed-test" },
+        vocabulary: [],
+        placement: [],
+        unwritable: [],
+        ownership: [
+          { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+          { roleId: "record.status", basis: "stated", reason: null },
+          { roleId: "record.total", basis: "stated", reason: null },
+        ],
+      },
+      {
+        requirementId: "R-2",
+        nature: "ruled",
+        verification: { kind: "fixed-test" },
+        vocabulary: [],
+        placement: [],
+        unwritable: [],
+        ownership: [
+          { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+          { roleId: "record.plain", basis: "stated", reason: null },
+        ],
+      },
+    ],
+  };
+
+  const OPTION_NATURES = new Map<string, RequirementNature>([
+    ["R-1", "ruled"],
+    ["R-2", "ruled"],
+  ]);
+
+  const optionTest = (options: {
+    readonly id: string;
+    readonly requirementId: string;
+    readonly roleId: string;
+    readonly kind?: "normal" | "abnormal" | "boundary";
+    readonly operation?: "compute" | "validate" | "action" | "aggregate" | "screen";
+    readonly input?: unknown;
+    readonly referenceData?: readonly unknown[];
+    readonly expected?: unknown;
+  }): Record<string, unknown> => ({
+    id: options.id,
+    target: { requirementId: options.requirementId, kind: "computation", roleId: options.roleId },
+    kind: options.kind ?? "normal",
+    operation: options.operation ?? "compute",
+    clock: CLOCK,
+    input: "input" in options ? options.input : { "record.status": "open" },
+    inputContract: { rowId: `${options.id}-row`, targetRowId: null, emptyEntities: [] },
+    referenceData: options.referenceData ?? [],
+    expected: options.expected ?? { kind: "ok", value: 42 },
+  });
+
+  const optionTriple = (requirementId: string, roleId: string): readonly Record<string, unknown>[] =>
+    (["normal", "abnormal", "boundary"] as const).map((kind, index) =>
+      optionTest({ id: `${requirementId}-${index}`, requirementId, roleId, kind }),
+    );
+
+  const OPTION_VALID = [...optionTriple("R-1", "record.total"), ...optionTriple("R-2", "record.plain")];
+
+  const optionProblems = (
+    tests: readonly unknown[],
+    design: DesignResult = OPTION_DESIGN,
+  ): readonly { readonly field: string; readonly message: string }[] =>
+    checkSuitePlanImpl(REQUIREMENT_LIST, suiteOf(tests), design, OPTION_NATURES);
+
+  const withFirst = (first: Record<string, unknown>): readonly Record<string, unknown>[] => [
+    first,
+    ...OPTION_VALID.slice(1),
+  ];
+
+  it("選択肢の値が options の中なら通る", () => {
+    expect(optionProblems(OPTION_VALID)).toEqual([]);
+  });
+
+  it("正常の入力の、options の外の値を断る", () => {
+    const first = optionTest({
+      id: "R-1-0",
+      requirementId: "R-1",
+      roleId: "record.total",
+      kind: "normal",
+      input: { "record.status": "unknown" },
+    });
+    const problems = optionProblems(withFirst(first));
+    expect(problems.some((problem) => problem.field === "tests[0].input")).toBe(true);
+  });
+
+  it("参照の行の値の、options の外の値を断る", () => {
+    const first = optionTest({
+      id: "R-1-0",
+      requirementId: "R-1",
+      roleId: "record.total",
+      kind: "normal",
+      referenceData: [
+        {
+          rowId: "row-2",
+          target: { requirementId: "R-1", kind: "entity", roleId: "record" },
+          values: { "record.status": "unknown" },
+        },
+      ],
+    });
+    const problems = optionProblems(withFirst(first));
+    expect(problems.some((problem) => problem.field === "tests[0].referenceData[0].values")).toBe(true);
+  });
+
+  it("異常の試験の入力は検査しない", () => {
+    const first = optionTest({
+      id: "R-1-0",
+      requirementId: "R-1",
+      roleId: "record.total",
+      kind: "abnormal",
+      input: { "record.status": "unknown" },
+    });
+    const problems = optionProblems(withFirst(first));
+    expect(problems.some((problem) => problem.field === "tests[0].input")).toBe(false);
+  });
+
+  it("見出しごとの集計の期待が、options の全キーと同じ順なら通る", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-1",
+      roleId: "record.total",
+      operation: "aggregate",
+      expected: { kind: "ok", value: [{ heading: "open", value: 1 }, { heading: "closed", value: 0 }] },
+    });
+    expect(optionProblems([...OPTION_VALID, agg])).toEqual([]);
+  });
+
+  it("見出しの順が違えば断る", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-1",
+      roleId: "record.total",
+      operation: "aggregate",
+      expected: { kind: "ok", value: [{ heading: "closed", value: 0 }, { heading: "open", value: 1 }] },
+    });
+    const problems = optionProblems([...OPTION_VALID, agg]);
+    expect(problems.some((problem) => problem.field.endsWith("expected.value[0].heading"))).toBe(true);
+  });
+
+  it("見出しが欠ければ断る", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-1",
+      roleId: "record.total",
+      operation: "aggregate",
+      expected: { kind: "ok", value: [{ heading: "open", value: 1 }] },
+    });
+    const problems = optionProblems([...OPTION_VALID, agg]);
+    expect(problems.some((problem) => problem.field.endsWith("expected.value"))).toBe(true);
+  });
+
+  it("見出しの組に余計な欄があれば断る", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-1",
+      roleId: "record.total",
+      operation: "aggregate",
+      expected: { kind: "ok", value: [{ heading: "open", value: 1, extra: 2 }, { heading: "closed", value: 0 }] },
+    });
+    const problems = optionProblems([...OPTION_VALID, agg]);
+    expect(problems.some((problem) => problem.field.endsWith("expected.value[0]"))).toBe(true);
+  });
+
+  it("見出しの値が数でも null でもなければ断る", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-1",
+      roleId: "record.total",
+      operation: "aggregate",
+      expected: { kind: "ok", value: [{ heading: "open", value: "x" }, { heading: "closed", value: 0 }] },
+    });
+    const problems = optionProblems([...OPTION_VALID, agg]);
+    expect(problems.some((problem) => problem.field.endsWith("expected.value[0].value"))).toBe(true);
+  });
+
+  it("結果全体が null の期待は通り、見出しを足させない", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-1",
+      roleId: "record.total",
+      operation: "aggregate",
+      expected: { kind: "ok", value: null },
+    });
+    expect(optionProblems([...OPTION_VALID, agg])).toEqual([]);
+  });
+
+  it("groupBy が null の計算には、見出しの検査を掛けない", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-2",
+      roleId: "record.plain",
+      operation: "aggregate",
+      expected: { kind: "ok", value: [{ heading: "anything", value: "x" }] },
+    });
+    const problems = optionProblems([...OPTION_VALID, agg]);
+    expect(problems.some((problem) => problem.field.includes("expected"))).toBe(false);
+  });
+
+  it("1 回目に直れば固定できる（作り直しの枠）", async () => {
+    const bad = optionTest({
+      id: "R-1-0",
+      requirementId: "R-1",
+      roleId: "record.total",
+      kind: "normal",
+      input: { "record.status": "unknown" },
+    });
+    const recording = createRecordingClient([
+      structured({ tests: [bad, ...OPTION_VALID.slice(1)] }),
+      structured({ tests: OPTION_VALID }),
+    ]);
+    const outcome = await runTestSuiteImpl({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: OPTION_DESIGN,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.rounds).toBe(2);
+  });
+
+  it("規則の文に、見出しごとの集計の期待と理由がある", () => {
+    expect(
+      TEST_SUITE_RULES.some(
+        (rule) =>
+          rule.includes("見出しごとの集計") &&
+          rule.includes("options") &&
+          rule.includes("heading") &&
+          rule.includes("宣言と固定する試験が別々の表現を推測しないため"),
+      ),
+    ).toBe(true);
+  });
+
+  it("②' の規則の定義の整合（ID の重複・why と since・配列との一致）", () => {
+    expect(ruleDefinitionDefects(TEST_SUITE_RULE_DEFINITIONS)).toEqual([]);
+    const ids = TEST_SUITE_RULE_DEFINITIONS.map((definition) => definition.id);
+    expect([...ids].sort()).toEqual(
+      Array.from({ length: 14 }, (_, index) => `R-suite-${String(index + 1).padStart(2, "0")}`).sort(),
+    );
+    expect(TEST_SUITE_RULES).toEqual(ruleTexts(TEST_SUITE_RULE_DEFINITIONS));
+    expect(TEST_SUITE_RULES).toHaveLength(TEST_SUITE_RULE_DEFINITIONS.length);
+    for (const definition of TEST_SUITE_RULE_DEFINITIONS) {
+      expect(definition.why.trim(), definition.id).not.toBe("");
+      expect(definition.since.trim(), definition.id).not.toBe("");
+    }
+  });
+});
+
+// ── 新契約の入口が、groupBy の欠けた設計を断る（Issue #433・review 1）──────────────
+
+describe("新契約の入口は、役割ごとの groupBy の欠落・形・参照先の不備を断る（Issue #433・review 1）", () => {
+  /** `groupBy` の欄を丸ごと外した役割（欠落。`null` とは別物である） */
+  const withoutGroupBy = (role: RoleEntry): RoleEntry => {
+    const { groupBy: _omitted, ...rest } = role;
+    return rest;
+  };
+
+  const designWithRoles = (roles: readonly RoleEntry[]): DesignResult => ({ ...OWNED_DESIGN, roles });
+
+  const run = (design: DesignResult, version?: typeof LEGACY_DESIGN_CONTRACT) =>
+    runTestSuiteImpl({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(createRecordingClient([structured({ tests: OWNED_VALID }), structured({ tests: OWNED_VALID })]).client, {
+        maxAttempts: 1,
+      }),
+      design,
+      ...(version === undefined ? {} : { version }),
+    });
+
+  it("新契約で groupBy の欄ごと欠かした設計は、1 回の作り直し後も固定できず unmet", async () => {
+    const outcome = await run(designWithRoles(OWNED_ROLES.map(withoutGroupBy)));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    expect(outcome.failure.attempts).toBe(TEST_SUITE_ROUNDS);
+    expect(outcome.failure.problems.some((problem) => problem.field.endsWith("groupBy"))).toBe(true);
+  });
+
+  it("新契約で groupBy の有無が混ざった設計は unmet", async () => {
+    const roles = OWNED_ROLES.map((role, index) => (index === 0 ? withoutGroupBy(role) : role));
+    const outcome = await run(designWithRoles(roles));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    expect(
+      outcome.failure.problems.some((problem) => problem.message.includes("見出しの元の項目（groupBy）の有無が役割ごとに混ざっている")),
+    ).toBe(true);
+  });
+
+  it("新契約で groupBy の参照先が表に無い・項目でない設計は unmet", async () => {
+    for (const target of ["ghost", "record.records"]) {
+      const roles = OWNED_ROLES.map((role) =>
+        role.roleId === "record.total" ? { ...role, groupBy: target } : role,
+      );
+      const outcome = await run(designWithRoles(roles));
+      expect(outcome.ok, target).toBe(false);
+      if (outcome.ok || outcome.failure.kind !== "unmet") continue;
+      expect(outcome.failure.problems.some((problem) => problem.field.endsWith("groupBy")), target).toBe(true);
+    }
+  });
+
+  it("legacy を明示した旧形式（groupBy の欄ごと無い）は、固定できる", async () => {
+    const outcome = await run(designWithRoles(OWNED_ROLES.map(withoutGroupBy)), LEGACY_DESIGN_CONTRACT);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.suite.tests).toHaveLength(OWNED_VALID.length);
+  });
+
+  it("正しい null（全役割の groupBy が null）は、固定できる", async () => {
+    const outcome = await run(OWNED_DESIGN);
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("断る Problem に、目印を入れた参照先の値が出ない", async () => {
+    const marker = "MARKER433R1";
+    const roles = OWNED_ROLES.map((role) =>
+      role.roleId === "record.total" ? { ...role, groupBy: `ghost-${marker}` } : role,
+    );
+    const outcome = await run(designWithRoles(roles));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    for (const problem of outcome.failure.problems) {
+      expect(`${problem.field} ${problem.message}`).not.toContain(marker);
     }
   });
 });

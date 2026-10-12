@@ -391,9 +391,9 @@ describe("了承して除いた部分の代わりの案に、元の要件と部�
 
 const ROLE_DESIGN: DesignResult = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null, options: null },
-    { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null },
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null, groupBy: null },
   ],
   designs: [
     {
@@ -438,5 +438,39 @@ describe("所属の索引は純粋で、同じ入力から同じ結果になる�
       designs: [{ requirementId: "R-1", vocabulary: [], placement: [], unwritable: [] }],
     };
     expect(roleOwnershipIndex(legacy).size).toBe(0);
+  });
+});
+
+// ── 役割 ID の表の groupBy（Issue #433）─────────────────────────────────
+
+describe("役割 ID の表は groupBy を持ち、既存の純粋な関数の結果は変わらない（Issue #433）", () => {
+  it("計算の役割に groupBy（分ける元の項目の役割 ID）を書け、所属の索引はその値に依らない", () => {
+    const design: DesignResult = {
+      roles: [
+        { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+        { roleId: "record.status", kind: "field", entity: "record", name: "status", shared: false, aliasOf: null, options: ["open", "closed"], groupBy: null },
+        { roleId: "record.byStatus", kind: "computation", entity: "record", name: "byStatus", shared: false, aliasOf: null, options: null, groupBy: "record.status" },
+      ],
+      designs: [
+        {
+          requirementId: "R-1",
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+            { roleId: "record.status", basis: "stated", reason: null },
+            { roleId: "record.byStatus", basis: "stated", reason: null },
+          ],
+        },
+      ],
+    };
+    expect(design.roles?.[2]?.groupBy).toBe("record.status");
+    // 既存の純粋な関数（所属の索引）の結果は変わらない
+    const index = roleOwnershipIndex(design);
+    expect(index.get("record")).toEqual(["R-1"]);
+    expect(index.get("record.byStatus")).toEqual(["R-1"]);
+    // groupBy を持たない旧形式の行も受けられる（欄は任意）
+    expect(roleOwnershipIndex(ROLE_DESIGN).get("record")).toEqual(["R-1", "R-2"]);
   });
 });
