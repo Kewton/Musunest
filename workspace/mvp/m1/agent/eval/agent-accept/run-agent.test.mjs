@@ -1,12 +1,15 @@
-// run-agent.mjs の試験（node --test。#400）。ネットワーク無し・API 無しで閉じる：
+// run-agent.mjs の試験（node --test。#400・#425）。ネットワーク無し・API 無しで閉じる：
 // 一時の偽物のリポジトリに、偽物の工場の入口（dist/cli.js）と抽象的な依頼文を置き、run-agent を子プロセスで回す。
+// 実行: node --test "workspace/mvp/m1/agent/eval/agent-accept/*.test.mjs"
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { reconcile, scoringFingerprint } from "./score-agent.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const runAgentFile = join(here, "run-agent.mjs");
@@ -18,6 +21,8 @@ import { fileURLToPath } from "node:url";
 export const DEFAULT_EFFORT = "high";
 export const DEFAULT_BUDGET_USD = 0.3;
 export const DEFAULT_DEADLINE_MS = 600000;
+export const API_KEY_ENV = "OPENAI_API_KEY";
+export const JEV_API_KEY_ENV = "JEV_API_KEY";
 function isEntry() {
   if (process.argv[1] === undefined) return false;
   try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; }
@@ -48,6 +53,12 @@ if (isEntry()) main();
 
 const fakeOpenai = 'export const DEFAULT_OPENAI_MODEL = "fake-model";\n';
 const fakeLimits = 'export const DEFAULT_REASONING_EFFORT = "high";\nexport const STAGE_MAX_OUTPUT_TOKENS = { low: { requirements: 2048 }, medium: { requirements: 16384 }, high: { requirements: 16384 } };\n';
+// 偽物の appspec-schema の files（工場の入口が生成に渡す文書の置き場所を引く口。packages/appspec-schema/src/files.ts と同じ形）
+const fakeSchemaFiles = `export const CONTRACT_DIR = "contract";
+export function packageFile(relativePath) { return new URL("../" + relativePath, import.meta.url); }
+export const vocabularyFile = () => packageFile("vocabulary.yaml");
+export const semanticsFile = () => packageFile("docs/semantics.md");
+`;
 
 function makeTable() {
   let text = "# 題材\n\n";
@@ -67,14 +78,32 @@ function makeRepo(base) {
   writeFileSync(join(repo, "packages/factory/dist/openai.js"), fakeOpenai);
   writeFileSync(join(repo, "packages/factory/dist/limits.js"), fakeLimits);
   writeFileSync(join(repo, "workspace/mvp/m1/grammar-trial/stage1-patterns.md"), makeTable());
+  // #425：spec-engine の dist・生成に渡す文書・採点の定義と集計のコード（指紋を取るだけ。中身は動かさない）
+  mkdirSync(join(repo, "packages/spec-engine/dist"), { recursive: true });
+  writeFileSync(join(repo, "packages/spec-engine/dist/index.js"), "export const version = 1;\n");
+  mkdirSync(join(repo, "packages/appspec-schema/dist"), { recursive: true });
+  mkdirSync(join(repo, "packages/appspec-schema/contract"), { recursive: true });
+  mkdirSync(join(repo, "packages/appspec-schema/docs"), { recursive: true });
+  writeFileSync(join(repo, "packages/appspec-schema/dist/files.js"), fakeSchemaFiles);
+  writeFileSync(join(repo, "packages/appspec-schema/contract/rules.md"), "# 契約 1\n");
+  writeFileSync(join(repo, "packages/appspec-schema/contract/schema.json"), "{}\n");
+  writeFileSync(join(repo, "packages/appspec-schema/docs/semantics.md"), "# 意味\n");
+  writeFileSync(join(repo, "packages/appspec-schema/vocabulary.yaml"), "words: []\n");
+  const ev = join(repo, "workspace/mvp/m1/agent/eval");
+  mkdirSync(join(ev, "subjects"), { recursive: true });
+  mkdirSync(join(ev, "agent-accept"), { recursive: true });
+  for (const f of ["engine.mjs", "score-claims.mjs", "rubric-v5.mjs", "agent-accept/score-agent.mjs"]) writeFileSync(join(ev, f), `// ${f}\n`);
+  writeFileSync(join(ev, "subjects/A.json"), JSON.stringify({ id: "A", structures: [{ id: "main", checks: [{ req: "要件 1" }], unwritable: [] }] }));
   return repo;
 }
 
 function runAgent(repo, out, extra, env = {}) {
-  return spawnSync(process.execPath, [runAgentFile, repo, out, ...extra], { encoding: "utf8", env: { ...process.env, ...env } });
+  return spawnSync(process.execPath, [runAgentFile, repo, out, ...extra], { encoding: "utf8", env: { ...process.env, JEV_API_KEY: "", ...env } });
 }
 const spawnCount = (log) => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).length : 0);
 const spawnLines = (log) => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean) : []);
+const sha256 = (data) => createHash("sha256").update(data).digest("hex");
+const HEX64 = /^[0-9a-f]{64}$/;
 
 async function withRepo(fn) {
   const base = mkdtempSync(join(tmpdir(), "run-agent-test-"));
@@ -166,6 +195,8 @@ test("再開で条件が一致すると、終わった本の費用を足して�
     assert.deepEqual(rr.skipped, ["P1-r1"]);
     assert.deepEqual(rr.reopened, ["P2-r1"]);
     assert.deepEqual(rr.pending, []);
+    assert.equal(rr.budget_usd, 15, "再開の記録にも、その起動で有効だった目安の額（既定 15）");
+    assert.equal(rr.stop_code, null);
   });
 });
 
@@ -204,5 +235,184 @@ test("要約の無い途中の本がある出力先は断る", async () => {
     assert.notEqual(resumed.status, 0);
     assert.equal(spawnCount(log), 1);
     assert.match(resumed.stderr, /要約/);
+  });
+});
+
+// ── #425：比較の条件の指紋と判定の口の構成
+
+test("条件のファイルに、spec-engine の dist・生成に渡す文書・採点の定義と集計・判定の口の構成の指紋が入り、鍵の値は入らない", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-fp");
+    const secret = "fake-jev-key-value-that-must-not-be-recorded";
+    const r = runAgent(repo, out, ["--only", "P1", "--runs", "1"], { JEV_API_KEY: secret });
+    assert.equal(r.status, 0, r.stderr);
+    const text = readFileSync(join(out, "conditions.json"), "utf8");
+    assert.ok(!text.includes(secret), "鍵の値が条件のファイルに出ている");
+    const cond = JSON.parse(text);
+    assert.equal(cond.schema, "musunest-factory/agent-accept-conditions/v2");
+    assert.equal(cond.spec_engine.dist_dir, "packages/spec-engine/dist");
+    assert.match(cond.spec_engine.fingerprint, HEX64);
+    assert.equal(cond.spec_engine.files, 1);
+    assert.equal(cond.prompt_documents.contract.dir, "packages/appspec-schema/contract");
+    assert.match(cond.prompt_documents.contract.fingerprint, HEX64);
+    assert.equal(cond.prompt_documents.contract.files, 2);
+    assert.equal(cond.prompt_documents.semantics.path, "packages/appspec-schema/docs/semantics.md");
+    assert.equal(cond.prompt_documents.semantics.sha256, sha256(readFileSync(join(repo, "packages/appspec-schema/docs/semantics.md"))));
+    assert.equal(cond.prompt_documents.vocabulary.path, "packages/appspec-schema/vocabulary.yaml");
+    assert.equal(cond.prompt_documents.vocabulary.sha256, sha256(readFileSync(join(repo, "packages/appspec-schema/vocabulary.yaml"))));
+    assert.equal(cond.scoring.dir, "workspace/mvp/m1/agent/eval");
+    assert.deepEqual(cond.scoring, { dir: "workspace/mvp/m1/agent/eval", ...scoringFingerprint(join(repo, "workspace/mvp/m1/agent/eval")) });
+    assert.deepEqual(cond.scoring.missing, []);
+    assert.deepEqual(cond.judge, { configuration: "jev-primary-llm-fallback", jev_key_env: "JEV_API_KEY" });
+    // Jev の鍵が無ければ LLM だけ（cli.ts の assembleJudge と同じ分かれ方）。空文字も「無い」
+    const out2 = join(base, "out-fp-llm");
+    assert.equal(runAgent(repo, out2, ["--only", "P1", "--runs", "1"], { JEV_API_KEY: "" }).status, 0);
+    assert.equal(JSON.parse(readFileSync(join(out2, "conditions.json"), "utf8")).judge.configuration, "llm-only");
+  });
+});
+
+test("生成に渡す文書か判定の口の構成が変わると条件が一致せず、再開を断る", async () => {
+  await withRepo(async (base, repo) => {
+    const log = join(base, "spawn-doc.log");
+    const args = ["--only", "P1,P2", "--runs", "1", "--concurrency", "1"];
+    const out = join(base, "out-doc");
+    assert.equal(runAgent(repo, out, args, { FAKE_SPAWN_LOG: log }).status, 0);
+    rmSync(join(out, "P2-r1"), { recursive: true, force: true });
+    appendFileSync(join(repo, "packages/appspec-schema/vocabulary.yaml"), "#\n");
+    const resumed = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.notEqual(resumed.status, 0);
+    assert.match(resumed.stderr, /条件/);
+    assert.equal(spawnCount(log), 2);
+    // 判定の口の構成：LLM だけで始めた計測を、Jev ありで再開することはできない
+    const out2 = join(base, "out-judge");
+    assert.equal(runAgent(repo, out2, args, { FAKE_SPAWN_LOG: log }).status, 0);
+    rmSync(join(out2, "P2-r1"), { recursive: true, force: true });
+    const resumed2 = runAgent(repo, out2, [...args, "--resume"], { FAKE_SPAWN_LOG: log, JEV_API_KEY: "x" });
+    assert.notEqual(resumed2.status, 0);
+    assert.match(resumed2.stderr, /条件/);
+    assert.equal(spawnCount(log), 4);
+    // spec-engine の dist・契約・語彙の意味のそれぞれの変更も、署名に残るので再開を断る（変更は積み上がるが、新しい計測は毎回その時点の条件で始める）
+    let spawned = 4;
+    for (const [name, file] of [["spec-engine", "packages/spec-engine/dist/index.js"], ["contract", "packages/appspec-schema/contract/rules.md"], ["semantics", "packages/appspec-schema/docs/semantics.md"]]) {
+      const outN = join(base, `out-${name}`);
+      assert.equal(runAgent(repo, outN, args, { FAKE_SPAWN_LOG: log }).status, 0, name);
+      spawned += 2;
+      rmSync(join(outN, "P2-r1"), { recursive: true, force: true });
+      appendFileSync(join(repo, file), "\n");
+      const resumedN = runAgent(repo, outN, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
+      assert.notEqual(resumedN.status, 0, name);
+      assert.match(resumedN.stderr, /条件/, name);
+      assert.equal(spawnCount(log), spawned, name);
+    }
+  });
+});
+
+test("v1 の条件のファイル（#401）の計測を、v2 の道具で再開することはできない（schema が署名に入る）", async () => {
+  await withRepo(async (base, repo) => {
+    const log = join(base, "spawn-v1.log");
+    const args = ["--only", "P1,P2", "--runs", "1", "--concurrency", "1"];
+    const out = join(base, "out-v1");
+    assert.equal(runAgent(repo, out, args, { FAKE_SPAWN_LOG: log }).status, 0);
+    rmSync(join(out, "P2-r1"), { recursive: true, force: true });
+    // v1 の形（#401）：spec_engine・prompt_documents・judge・scoring が無く、署名は全欄から取る
+    const v2 = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+    const { spec_engine: _se, prompt_documents: _pd, judge: _j, scoring: _s, started_at: _t, signature: _sig, ...rest } = v2;
+    const measured = { ...rest, schema: "musunest-factory/agent-accept-conditions/v1" };
+    writeFileSync(join(out, "conditions.json"), JSON.stringify({ ...measured, started_at: v2.started_at, signature: sha256(JSON.stringify(measured)) }, null, 1));
+    const resumed = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.notEqual(resumed.status, 0);
+    assert.match(resumed.stderr, /条件/);
+    assert.equal(spawnCount(log), 2);
+    // 採点の道具は v1 の条件のファイルをそのまま照合できる（score-agent.test.mjs の v1 の例と同じ）
+    const c = reconcile(out);
+    assert.equal(c.status, "incomplete");
+    assert.deepEqual(c.unexecuted, ["P2-r1"]);
+  });
+});
+
+test("採点の定義の変更は署名の外で、source が変わらない限り再開を妨げない（採点は生成のあとに全本へ同じ版を当て、採点の出力が条件と照合する）", async () => {
+  // 偽物のリポジトリは git の外（source.commit・source.dirty が null のまま）なので、source が変わらない場合の挙動だけを確かめる。
+  // 本物の checkout では source.commit・source.dirty が署名に残るので、clean を編集したり採点だけの commit を積んだりすれば再開は断られる
+  await withRepo(async (base, repo) => {
+    const log = join(base, "spawn-scoring.log");
+    const args = ["--only", "P1,P2", "--runs", "1", "--concurrency", "1"];
+    const out = join(base, "out-scoring");
+    assert.equal(runAgent(repo, out, args, { FAKE_SPAWN_LOG: log }).status, 0);
+    const before = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+    rmSync(join(out, "P2-r1"), { recursive: true, force: true });
+    appendFileSync(join(repo, "workspace/mvp/m1/agent/eval/subjects/A.json"), "\n");
+    assert.notEqual(scoringFingerprint(join(repo, "workspace/mvp/m1/agent/eval")).fingerprint, before.scoring.fingerprint);
+    const resumed = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.equal(spawnCount(log), 3);
+  });
+});
+
+test("予算で止まると、流した本・残りの本・止まった理由を run-<時刻>.json に残し、照合は未完了になる", async () => {
+  await withRepo(async (base, repo) => {
+    const out = join(base, "out-budget");
+    const log = join(base, "spawn-budget.log");
+    const r = runAgent(repo, out, ["--only", "P1,P2,P3", "--runs", "1", "--concurrency", "1", "--budget-usd", "0.25"], { FAKE_SPAWN_LOG: log, FAKE_COST: "0.25" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(spawnLines(log), ["P1-r1"]);
+    assert.match(r.stdout, /done 予算 0\.25 USD に達した/);
+    const records = readdirSync(out).filter((n) => /^run-\d+\.json$/.test(n));
+    assert.equal(records.length, 1);
+    const rec = JSON.parse(readFileSync(join(out, records[0]), "utf8"));
+    assert.equal(rec.mode, "fresh");
+    assert.deepEqual(rec.executed, ["P1-r1"]);
+    assert.deepEqual(rec.pending, ["P2-r1", "P3-r1"]);
+    assert.match(rec.stop, /予算/);
+    assert.equal(rec.stop_code, "budget");
+    // その起動で有効だった計測全体の目安の額と、初回の条件との差
+    assert.equal(rec.budget_usd, 0.25);
+    assert.equal(rec.initial_budget_usd, 0.25);
+    assert.equal(rec.budget_changed, false);
+    assert.equal(rec.spent_usd, 0.25);
+    const c = reconcile(out);
+    assert.equal(c.status, "incomplete");
+    assert.equal(c.label, "未完了");
+    assert.equal(c.planned, 3);
+    assert.equal(c.executed, 1);
+    assert.deepEqual(c.unexecuted, ["P2-r1", "P3-r1"]);
+    assert.deepEqual(c.incomplete, []);
+    assert.deepEqual(c.extra, []);
+    assert.match(c.latest_record.stop, /予算/);
+    // 全体の目安の額は署名の外なので、上げて再開し、残りを流し切ると完了になる（再開の記録も run-<時刻>.json に残る）
+    const resumed = runAgent(repo, out, ["--only", "P1,P2,P3", "--runs", "1", "--concurrency", "1", "--budget-usd", "1", "--resume"], { FAKE_SPAWN_LOG: log, FAKE_COST: "0.25" });
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.deepEqual(spawnLines(log), ["P1-r1", "P2-r1", "P3-r1"]);
+    const records2 = readdirSync(out).filter((n) => /^run-\d+\.json$/.test(n)).sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]));
+    assert.equal(records2.length, 2);
+    const c2 = reconcile(out);
+    assert.equal(c2.status, "complete");
+    assert.equal(c2.label, "完了");
+    assert.deepEqual(c2.unexecuted, []);
+    assert.equal(c2.latest_record.stop, null);
+    assert.equal(c2.latest_record.stop_code, null);
+    // 完走した再開でも、変更後の目安の額が起動の記録に残る（条件のファイルは初回の値のまま。署名は管理の条件の一致を保証しない）
+    const rec2 = JSON.parse(readFileSync(join(out, records2[1]), "utf8"));
+    assert.equal(rec2.mode, "resume");
+    assert.equal(rec2.stop, null);
+    assert.equal(rec2.stop_code, null);
+    assert.equal(rec2.budget_usd, 1);
+    assert.equal(rec2.initial_budget_usd, 0.25);
+    assert.equal(rec2.budget_changed, true);
+    assert.equal(rec2.spent_usd, 0.75);
+    assert.deepEqual(rec2.executed, ["P2-r1", "P3-r1"]);
+    assert.equal(c2.latest_record.budget_usd, 1);
+    const cond = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
+    assert.equal(cond.params.budget_usd, 0.25, "条件のファイルは初回の値のまま上書きしない");
+    // 同じ額で再開した（変えていない）起動は budget_changed が false
+    const out2 = join(base, "out-budget-same");
+    assert.equal(runAgent(repo, out2, ["--only", "P1,P2", "--runs", "1", "--concurrency", "1", "--budget-usd", "0.25"], { FAKE_SPAWN_LOG: log, FAKE_COST: "0.25" }).status, 0);
+    assert.equal(runAgent(repo, out2, ["--only", "P1,P2", "--runs", "1", "--concurrency", "1", "--budget-usd", "0.25", "--resume"], { FAKE_SPAWN_LOG: log, FAKE_COST: "0.25" }).status, 0);
+    const last = readdirSync(out2).filter((n) => /^run-\d+\.json$/.test(n)).sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0])).at(-1);
+    const rec3 = JSON.parse(readFileSync(join(out2, last), "utf8"));
+    assert.equal(rec3.mode, "resume");
+    assert.equal(rec3.budget_changed, false);
+    assert.equal(rec3.budget_usd, 0.25);
+    assert.equal(rec3.stop_code, "budget", "済みの額を足した時点で目安に達する（上げなければ流し切れない）");
+    assert.deepEqual(rec3.executed, []);
   });
 });
