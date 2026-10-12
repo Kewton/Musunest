@@ -48,8 +48,10 @@ import { UsageMeter, usageDelta, type FailureKind, type StageStatus, type UsageS
 import type { PromptDocument, StageFailure, StageOutcome } from "../stages/prompt.js";
 import { normalizeConstraintId } from "../stages/prompt.js";
 import {
+  emptyReverseCheckDiagnosis,
   runReverseCheckLoopWithOperation,
   splitSourceSentences,
+  type ReverseCheckDiagnosis,
   type ReverseCheckOperation,
 } from "../stages/reverse-check.js";
 import { runAnswers, validateAnswer, type ClassifiedAnswer, type PlanAnswerDraft } from "./answers.js";
@@ -389,6 +391,12 @@ export interface PlanResultBase {
   readonly closedBySource: readonly PlanSourceClosure[];
   /** 許可の表の既定で閉じた事項（04 §3・Issue #408） */
   readonly closedByDefault: readonly PlanDefaultClosure[];
+  /**
+   * P1/P2 の往復ごとの逆照合の落ちの内訳（種類ごと・出どころごと。Issue #430）。確定・確定できない・
+   * 止まったの 3 つの結果に共通で、P1/P2 で止まったときは、止まるまでに得た往復の分だけを持つ。
+   * **値は件数だけ**である（落ちの文言・引用・位置は入れない。`02-failure-modes.md` §1）。
+   */
+  readonly requirementsDiagnosis: ReverseCheckDiagnosis;
 }
 
 /** 依頼文で閉じた事項から作る `decisions` の ID の頭（確認の画面が「依頼文で決めたこと」を見分ける） */
@@ -734,6 +742,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const closedBySource: PlanSourceClosure[] = [];
   // 許可の表の既定で閉じた事項（Issue #408）
   const closedByDefaults: PlanDefaultClosure[] = [];
+  // P1/P2 の往復ごとの逆照合の落ちの内訳（Issue #430）。止まったときは、止まるまでに得た分だけになる。
+  let requirementsDiagnosis: ReverseCheckDiagnosis = emptyReverseCheckDiagnosis();
   // コードが目録から作った事項の対応（事項 ID → 未指定の観点）と、要件ごとの門の判定（Issue #408）
   const catalogIssueFacets = new Map<string, UnspecifiedFacet>();
   const aggregatesByRequirement = new Map<string, boolean | null>();
@@ -824,13 +834,21 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     judge: { calls_by_adapter: judgeBudget.callsByAdapter, cost_usd: judgeBudget.spentUsd },
     closedBySource: closedBySource.slice(),
     closedByDefault: closedByDefaults.slice(),
+    requirementsDiagnosis,
   });
 
   try {
     // ── P1 要件にする・P2 逆照合（① → ①'。落ちがあれば ① を 1 回だけやり直す）────────────
-    const reverse = await runStageOutcome("requirements", () =>
-      runReverseCheckLoopWithOperation({ source: input.source, documents: input.documents, gateway }),
-    );
+    const reverse = await runStageOutcome("requirements", async () => {
+      const outcome = await runReverseCheckLoopWithOperation({
+        source: input.source,
+        documents: input.documents,
+        gateway,
+      });
+      // 止まったときも、止まるまでに終えた往復の分を結果へ残す（Issue #430）
+      requirementsDiagnosis = outcome.ok ? outcome.value.diagnosis : outcome.diagnosis;
+      return outcome;
+    });
     const list = reverse.list;
     // P1 の枠の文の範囲。**P6 の照合に渡し、枠の範囲も覆われていると数える**（Issue #372）。枠の文は
     // 要件にしないので、そのままでは原文が覆われていないと見なされて確定できない。

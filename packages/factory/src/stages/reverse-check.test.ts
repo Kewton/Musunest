@@ -569,3 +569,206 @@ describe("① と ①' の停止に、どの呼び出しかを付ける（Issue 
     expect(redoReverse.operation).toBe("reverse-check-redo");
   });
 });
+
+// ── 往復ごとの落ちの件数の内訳（種類ごと・出どころごと。Issue #430）──────────────
+
+describe("往復ごとの落ちの件数の内訳（種類ごと・出どころごと。Issue #430）", () => {
+  /**
+   * 引用が原文に無い要件（R-2）と、覆われない原文の文（2 文目）を作る一覧。R-2 の位置を {0,0} に
+   * して、コードの覆いの検査で 2 文目が覆われないようにする（引用の落ちと覆いの落ちを同時に作る）。
+   */
+  const ROUND_LIST = {
+    requirements: [
+      { id: "R-1", text: "記録できる", quote: "タスクを記録する", position: { start: 0, end: 8 } },
+      { id: "R-2", text: "合計できる", quote: "件数を数える", position: { start: 0, end: 0 } },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+  /** 会話が挙げた、覆われていない部分（コードの落ちとは重ならない） */
+  const ROUND_CONVERSATION = { uncovered: [{ start: 0, end: 3 }] };
+  /** 往復 1 の期待する内訳（引用なし 1・覆われない原文はコード 1・会話 1） */
+  const ROUND_COUNTS = {
+    quoteNotFound: 1,
+    positionMismatch: 0,
+    uncoveredSource: { code: 1, conversation: 1 },
+  };
+
+  /** `failAt` 回目の呼び出しでだけ要求の誤りを投げる偽物の呼び出し */
+  function clientThrowingAt(
+    failAt: number,
+    recorded: readonly { kind: "structured"; output: unknown; usage: undefined }[],
+  ): LlmClient {
+    const inner = createRecordingClient(recorded);
+    let calls = 0;
+    return {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        if (calls === failAt) {
+          throw Object.assign(new Error("要求が不正です"), { kind: "invalidRequest", code: "invalid_json_schema" });
+        }
+        return inner.client.callStructured<T>(request);
+      },
+      async callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
+        return inner.client.callWithTools(request);
+      },
+    };
+  }
+
+  it("往復 1 の内訳が種類ごと・出どころごとに一致し、やり直し後の往復 2 の内訳と unmet の内訳が一致する", async () => {
+    const recording = createRecordingClient([
+      structured(ROUND_LIST),
+      structured(ROUND_CONVERSATION),
+      structured(ROUND_LIST),
+      structured(ROUND_CONVERSATION),
+    ]);
+    const outcome = await runReverseCheckLoop({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 往復 2（初回 + やり直し）
+    expect(outcome.value.diagnosis.rounds).toHaveLength(2);
+    expect(outcome.value.diagnosis.redone).toBe(true);
+    // 往復 1 の内訳が、種類ごと・出どころごとに一致する
+    expect(outcome.value.diagnosis.rounds[0]?.misses).toEqual(ROUND_COUNTS);
+    // やり直し後の往復 2 の内訳と、unmet の内訳が一致する
+    expect(outcome.value.diagnosis.rounds[1]?.misses).toEqual(outcome.value.diagnosis.unmet);
+    expect(outcome.value.diagnosis.unmet).toEqual(ROUND_COUNTS);
+  });
+
+  it("落ちが無ければ、往復 1 つだけで、種類ごと・出どころごとに全部 0 になる", async () => {
+    const recording = createRecordingClient([
+      structured({
+        requirements: REQUIREMENT_LIST.requirements,
+        decisions: REQUIREMENT_LIST.decisions,
+        unresolved: REQUIREMENT_LIST.unresolved,
+      }),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const outcome = await runReverseCheckLoop({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const zero = { quoteNotFound: 0, positionMismatch: 0, uncoveredSource: { code: 0, conversation: 0 } };
+    expect(outcome.value.diagnosis.rounds).toEqual([{ misses: zero, droppedBlankMisses: 0 }]);
+    expect(outcome.value.diagnosis.redone).toBe(false);
+    expect(outcome.value.diagnosis.unmet).toEqual(zero);
+  });
+
+  it("中身の無い断片を捨てた数が、往復ごとの内訳に入る", async () => {
+    const source = "タスクを記録する。\n   \n・\n";
+    const list = {
+      requirements: [{ id: "R-1", text: "記録できる", quote: "タスクを記録する。", position: { start: 0, end: 9 } }],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured({
+        uncovered: [
+          { start: 9, end: 10 },
+          { start: 10, end: 13 },
+          { start: 13, end: 14 },
+          { start: 14, end: 15 },
+          { start: 15, end: 16 },
+        ],
+      }),
+    ]);
+    const outcome = await runReverseCheckLoop({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.diagnosis.rounds).toHaveLength(1);
+    expect(outcome.value.diagnosis.rounds[0]?.droppedBlankMisses).toBe(5);
+  });
+
+  it("内訳には、引用・原文の断片・位置の値が入らない（件数だけ）", async () => {
+    const mark = "MARK_RC_QUOTE";
+    const source = `${mark}する。件数を合計する。`;
+    const spanOf = (quote: string): { readonly start: number; readonly end: number } => {
+      const start = source.indexOf(quote);
+      return { start, end: start + quote.length };
+    };
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: `${mark}する`, position: spanOf(`${mark}する`) },
+        { id: "R-2", text: "合計できる", quote: "件数を数える", position: { start: 0, end: 0 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured({ uncovered: [{ start: 0, end: 2 }] }),
+      structured(list),
+      structured({ uncovered: [{ start: 0, end: 2 }] }),
+    ]);
+    const outcome = await runReverseCheckLoop({
+      source,
+      documents: [],
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 内訳は件数だけである（引用の目印・原文の断片は入らない）
+    const text = JSON.stringify(outcome.value.diagnosis);
+    expect(text).not.toContain(mark);
+    expect(text).not.toContain("件数を");
+  });
+
+  it("止まったときは、止まるまでに終えた往復の分だけの内訳を返す", async () => {
+    // ①' の 1 回目で止まる → 往復は 0
+    const atReverseCheck = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(clientThrowingAt(2, [structured(ROUND_LIST)]), { maxAttempts: 1 }),
+    });
+    expect(atReverseCheck.ok).toBe(false);
+    if (atReverseCheck.ok) return;
+    expect(atReverseCheck.operation).toBe("reverse-check");
+    expect(atReverseCheck.diagnosis.rounds).toEqual([]);
+
+    // ① のやり直しで止まる → 往復 1（初回の逆照合まで終えた）。① のやり直し自体が失敗したので `redone` は false
+    const atRedo = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(
+        clientThrowingAt(3, [structured(ROUND_LIST), structured(ROUND_CONVERSATION)]),
+        { maxAttempts: 1 },
+      ),
+    });
+    expect(atRedo.ok).toBe(false);
+    if (atRedo.ok) return;
+    expect(atRedo.operation).toBe("requirements-redo");
+    expect(atRedo.diagnosis.rounds).toHaveLength(1);
+    expect(atRedo.diagnosis.rounds[0]?.misses).toEqual(ROUND_COUNTS);
+    expect(atRedo.diagnosis.redone).toBe(false);
+
+    // ①' のやり直しで止まる → 往復 1。① のやり直しは成功しているので `redone` は true（Issue #430 の直し）
+    const atRedoReverse = await runReverseCheckLoopWithOperation({
+      source: SOURCE_TEXT,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(
+        clientThrowingAt(4, [structured(ROUND_LIST), structured(ROUND_CONVERSATION), structured(ROUND_LIST)]),
+        { maxAttempts: 1 },
+      ),
+    });
+    expect(atRedoReverse.ok).toBe(false);
+    if (atRedoReverse.ok) return;
+    expect(atRedoReverse.operation).toBe("reverse-check-redo");
+    expect(atRedoReverse.diagnosis.rounds).toHaveLength(1);
+    expect(atRedoReverse.diagnosis.redone).toBe(true);
+  });
+});
