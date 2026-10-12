@@ -1005,28 +1005,53 @@ export function checkTestSuiteOutput(output: unknown): ShapeCheck<TestSuite> {
 }
 
 /**
+ * **新契約**の設計の形を満たすか（決定 ⑨・Issue #428）。役割 ID の表を持ち、要件ごとに種類（nature）と
+ * 確かめ方（verification）を持つこと。**中身の正しさはここで見ない**——所属の点検・役割 ID の検査・
+ * 構造の検査は `checkSuitePlan` が別に掛ける。ここは「新契約で渡された設計が、新契約の必須の欄を
+ * 備えているか」だけを点検する。**欄の有無から版を推定しない**——版は呼ぶ側の明示で決まるので、
+ * `isPlannedDesign` は `legacy` を明示したときだけ使う。
+ */
+function isNewContractDesign(design: DesignResult): boolean {
+  if (design.roles === undefined) return false;
+  return design.designs.every((entry) => entry.nature !== undefined && entry.verification !== undefined);
+}
+
+/**
  * ②' のデータ（要件の一覧。やり直しのときは前回の作り直しの指示を足す）。
  *
  * **② の設計が渡されたときは、役割 ID の表と要件ごとの種類も入れる**（Issue #316）。②' は宣言を
  * 見せられないので、試験の対象を指す役割 ID は ② の表から受け取る（自由な文の名前は宣言を見ないと
  * 決まらない）。種類も渡すのは、コードの突き合わせ（`reconcileNatures`）と同じ材料を会話にも見せ、
  * 在ることだけの要件に異常・境界の試験を作らせないためである。
+ *
+ * **版は呼ぶ側の明示でだけ決める**（欄の有無から推定しない。決定 ⑨・Issue #428）。新契約（`version` を
+ * 省いたとき）は、設計の欄（役割 ID の表・種類・確かめ方・所属）が無くても**必ず** 4 つを入れる
+ * （黙って省かない。無ければ空の並び）。`legacy` を明示したときだけ `isPlannedDesign` で決め、
+ * 役割 ID の表を持たない旧形式の記録では入れない（後方互換）。
  */
 function buildData(
   list: RequirementList,
   design: DesignResult | undefined,
   previous: readonly Problem[],
   plan: ConfirmedPlan | undefined,
+  version: DesignContractVersion | undefined,
 ): readonly PromptData[] {
   const data: PromptData[] = [{ name: "要件の一覧", text: serializeJson(list) }];
   if (plan !== undefined) {
     data.push({ name: "確定した仕様", text: serializeJson(plan) });
   }
-  if (design !== undefined && isPlannedDesign(design)) {
-    data.push({ name: "役割 ID の表", text: serializeJson(design.roles ?? []) });
+  const legacy = version === LEGACY_DESIGN_CONTRACT;
+  if (legacy ? design !== undefined && isPlannedDesign(design) : true) {
+    const designs = design?.designs ?? [];
+    data.push({ name: "役割 ID の表", text: serializeJson(design?.roles ?? []) });
     data.push({
       name: "要件ごとの種類",
-      text: serializeJson([...designNaturesOf(design)].map(([requirementId, nature]) => ({ requirementId, nature }))),
+      text: serializeJson(
+        [...(design === undefined ? [] : designNaturesOf(design))].map(([requirementId, nature]) => ({
+          requirementId,
+          nature,
+        })),
+      ),
     });
     // 確かめ方（求める検査の形＝checks と、確かめ方の種類＝verification.kind）は、種類の分類とは
     // **別のデータの欄**で渡す（Issue #386・#392。分類は原文と要件の文だけで決めさせ、確かめ方の欄は
@@ -1035,7 +1060,7 @@ function buildData(
     data.push({
       name: "要件ごとの確かめ方",
       text: serializeJson(
-        design.designs.map((entry) => ({
+        designs.map((entry) => ({
           requirementId: entry.requirementId,
           verificationKind: entry.verification?.kind ?? null,
           checks: entry.checks ?? [],
@@ -1046,7 +1071,7 @@ function buildData(
     data.push({
       name: "要件ごとの所属",
       text: serializeJson(
-        design.designs.map((entry) => ({
+        designs.map((entry) => ({
           requirementId: entry.requirementId,
           ownership: entry.ownership ?? [],
         })),
@@ -1087,26 +1112,34 @@ export interface TestSuiteValue {
  */
 export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<TestSuiteValue>> {
   const legacy = input.version === LEGACY_DESIGN_CONTRACT;
-  // 新契約では、② の設計が渡らない入力を断る（設計の無い旧経路へ落とさない。決定 ⑨・Issue #418）。
-  // **形の検査（`checkSuiteAgainstRequirements`）と合わせて中身の点検で断る**——要求は今までどおり
-  // 送る（前置きの観測の試験は、要求の中身だけを見る）。
+  // **版は欄の有無から推定しない。** 新契約（`version` を省いたとき）では、② の設計を必ず渡す。設計が
+  // 役割 ID の表・種類・確かめ方を持たなくても、旧来の検査（`checkSuiteAgainstRequirements`）へ落とさず、
+  // **中身の点検で断る**（`designProblem` と同じ扱いで `unmet`。要求は今までどおり送る。Issue #418・#428）。
+  // `isPlannedDesign` は `legacy` を明示したときだけ使う。
   const designProblem: readonly Problem[] =
-    legacy || input.design !== undefined
+    legacy || (input.design !== undefined && isNewContractDesign(input.design))
       ? []
-      : [{ field: "design", message: "新契約では ② の設計が要る（設計の無い入力は断る）" }];
+      : [
+          {
+            field: "design",
+            message:
+              "新契約では、役割 ID の表・要件ごとの種類・確かめ方を持つ ② の設計が要る（無い・欠ける入力は断る）",
+          },
+        ];
   let previous: readonly Problem[] = [];
   // 食い違った要件の決め方（要件 ID ごと）。やり直しの回をまたいで持ち越す（聞き直さない。Issue #373）
   const decisions = new Map<string, NatureDecision>();
   // 固定の前に外した、構造で確かめる要件の構造の検査でない試験（回ごとに数える。Issue #392）
   const droppedAll: DroppedNonstructuralTest[] = [];
-  // 新しい契約の設計（役割 ID の表・種類・確かめ方を持つ）のときだけ、突き合わせと役割 ID の検査を
-  // 掛ける。旧形式の記録（設計の新しい欄が無い）は旧来の検査を通す（`design.ts` と同じ後方互換）。
-  const planned = input.design !== undefined && isPlannedDesign(input.design);
+  // 経路を分けるのは**版**だけである（欄の有無から推定しない。Issue #428）。新契約では、設計が渡されれば
+  // （役割 ID の表・種類・確かめ方を持たなくても）必ず中身の点検の経路へ通す。`legacy` を明示したときだけ
+  // `isPlannedDesign` で旧形式の記録を旧来の検査へ通す（設計が無い・新形式の欄を持たないとき）。
+  const planned = input.design !== undefined && (!legacy || isPlannedDesign(input.design));
   for (let round = 1; round <= TEST_SUITE_ROUNDS; round += 1) {
     const request = buildStructuredRequest({
       rules: TEST_SUITE_RULES,
       documents: input.documents,
-      data: buildData(input.list, input.design, previous, input.plan),
+      data: buildData(input.list, input.design, previous, input.plan, input.version),
       schemaName: TEST_SUITE_SCHEMA_NAME,
       schema: TEST_SUITE_SCHEMA,
       maxOutputTokens: input.gateway.maxOutputTokens("test-suite"),
@@ -1147,7 +1180,8 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
       const adopted = new Map<string, RequirementNature>();
       for (const entry of reconciled.discrepancies) adopted.set(entry.requirementId, entry.resolved);
       suite = withAdoptedNatures(dropResult.suite, adopted);
-      problems = checkSuitePlan(input.list, suite, input.design, reconciled.natures, input.version);
+      // 新契約で設計が必須の欄を欠くときは `designProblem` を先頭に残す（中身の点検もあわせて掛ける。Issue #428）
+      problems = [...designProblem, ...checkSuitePlan(input.list, suite, input.design, reconciled.natures, input.version)];
     }
     if (problems.length === 0) {
       return { ok: true, value: { suite, rounds: round, discrepancies, dropped: droppedAll } };
