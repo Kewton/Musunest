@@ -80,6 +80,7 @@ import {
   findComputed,
   findEntity,
 } from "./correspondence.js";
+import { rowIdValueKeyReason } from "./test-suite.js";
 
 /** ⑤b 試験を流す、が受け取るもの */
 export interface RunTestsInput {
@@ -251,6 +252,10 @@ function mapValueKeys(
     if (host !== undefined && Object.hasOwn(host.fields, key)) {
       mapped[key] = value;
       continue;
+    }
+    // 従来から断っている鍵のうち、行の ID（`id`・`rowId`）だけは、②' と同じ文言にする（Issue #409）
+    if (key === "id" || key === "rowId") {
+      return { ok: false, reason: rowIdValueKeyReason(key) };
     }
     return { ok: false, reason: `値の鍵 ${key} に提出された対応が無い（対応に無い役割 ID）` };
   }

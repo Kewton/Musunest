@@ -259,7 +259,7 @@ function plannedTest(options: {
     kind: options.kind ?? "normal",
     operation: options.operation ?? "compute",
     clock: CLOCK,
-    input: { amount: 21 },
+    input: { "record.amount": 21 },
     inputContract: { rowId: "row-1", targetRowId: "row-1", emptyEntities: [] },
     referenceData: options.referenceData ?? [],
     expected: options.expected ?? { kind: "ok", value: 42 },
@@ -1366,6 +1366,351 @@ describe("構造で確かめる要件には、構造の検査だけを固定す�
     expect(
       zeroOutcome.failure.problems.some(
         (problem) => problem.message.includes("R-1") && problem.message.includes("試験が無い"),
+      ),
+    ).toBe(true);
+  });
+});
+
+// ── 値の鍵を、所属 entity の項目の役割 ID に照らす（§1・②'・Issue #409）──────────
+
+/** entity・項目・計算・操作・画面を持つ役割 ID の表（②' の値の鍵の検査に使う） */
+const KEY_ROLES: readonly RoleEntry[] = [
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
+  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+  { roleId: "record.settle", kind: "computation", entity: "record", name: "settle", shared: false, aliasOf: null },
+  { roleId: "record.mark", kind: "operation", entity: "record", name: "mark", shared: false, aliasOf: null },
+  { roleId: "record.screen", kind: "screen", entity: "record", name: "screen", shared: false, aliasOf: null },
+  { roleId: "other", kind: "entity", entity: null, name: "other", shared: false, aliasOf: null },
+  { roleId: "other.amount", kind: "field", entity: "other", name: "amount", shared: false, aliasOf: null },
+  { roleId: "appTotal", kind: "computation", entity: null, name: "appTotal", shared: false, aliasOf: null },
+];
+
+/** 上の表に、項目の役割 ID がちょうど `rowId` の項目を足した表（字面で断らないことの確認） */
+const ROW_ID_FIELD_ROLES: readonly RoleEntry[] = [
+  ...KEY_ROLES,
+  { roleId: "rowId", kind: "field", entity: "record", name: "rowId", shared: false, aliasOf: null },
+];
+
+/** 項目の役割を 1 つも持たない表（この検査を掛けない。⑤b に委ねる） */
+const NO_FIELD_ROLES: readonly RoleEntry[] = [
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+];
+
+const KEY_NATURES = naturesOf([
+  ["R-1", "ruled"],
+  ["R-2", "ruled"],
+]);
+
+/** R-1・R-2 をどちらも決まりを含む（fixed-test）とする設計 */
+function keyDesign(roles: readonly RoleEntry[]): DesignResult {
+  return {
+    roles,
+    designs: [
+      { requirementId: "R-1", nature: "ruled", verification: { kind: "fixed-test" }, vocabulary: [], placement: [], unwritable: [] },
+      { requirementId: "R-2", nature: "ruled", verification: { kind: "fixed-test" }, vocabulary: [], placement: [], unwritable: [] },
+    ],
+  };
+}
+
+interface KeyTestOptions {
+  readonly id: string;
+  readonly requirementId: string;
+  readonly roleId: string;
+  readonly kind?: "normal" | "abnormal" | "boundary";
+  readonly operation?: "compute" | "validate" | "action" | "aggregate" | "screen";
+  readonly targetKind?: "entity" | "field" | "computation" | "operation" | "screen";
+  readonly input?: unknown;
+  readonly referenceData?: readonly unknown[];
+  readonly expected?: unknown;
+}
+
+/** 役割 ID の表に照らす検査用の試験 1 件（入力の既定は `record.amount` の鍵） */
+function keyTest(options: KeyTestOptions): Record<string, unknown> {
+  return {
+    id: options.id,
+    target: { requirementId: options.requirementId, kind: options.targetKind ?? "computation", roleId: options.roleId },
+    kind: options.kind ?? "normal",
+    operation: options.operation ?? "compute",
+    clock: CLOCK,
+    input: "input" in options ? options.input : { "record.amount": 21 },
+    inputContract: { rowId: `${options.id}-row`, targetRowId: null, emptyEntities: [] },
+    referenceData: options.referenceData ?? [],
+    expected: options.expected ?? { kind: "ok", value: 42 },
+  };
+}
+
+/** 要件の正常・異常・境界（既定で `record.total` を対象にする） */
+function keyTriple(requirementId: string): readonly Record<string, unknown>[] {
+  return (["normal", "abnormal", "boundary"] as const).map((kind, index) =>
+    keyTest({ id: `${requirementId}-${index}`, requirementId, roleId: "record.total", kind }),
+  );
+}
+
+/** R-1・R-2 の正常・異常・境界（正しい組） */
+const KEY_VALID = [...keyTriple("R-1"), ...keyTriple("R-2")];
+
+/** 正しい組の 1 件目（R-1 の正常）の入力だけを差し替えた組 */
+function keyWithFirstInput(input: unknown): readonly Record<string, unknown>[] {
+  const rest = KEY_VALID.slice(1);
+  return [keyTest({ id: "R-1-0", requirementId: "R-1", roleId: "record.total", input }), ...rest];
+}
+
+/** 正しい組の 1 件目（R-1 の正常）に、参照の行を足した組 */
+function keyWithFirstReferenceRows(values: Readonly<Record<string, unknown>>): readonly Record<string, unknown>[] {
+  const first = keyTest({ id: "R-1-0", requirementId: "R-1", roleId: "record.total", input: { "record.amount": 21 } });
+  return [
+    {
+      ...first,
+      referenceData: [{ rowId: "row-2", target: { requirementId: "R-1", kind: "entity", roleId: "record" }, values }],
+    },
+    ...KEY_VALID.slice(1),
+  ];
+}
+
+/** R-1 の正常 1 件を、役割 ID と入力・参照の行を差し替えた組に置き換える */
+function keyWithFirstReplaced(first: Record<string, unknown>): readonly Record<string, unknown>[] {
+  return [first, ...KEY_VALID.slice(1)];
+}
+
+/** 正しい組に、追加の試験 1 件を足したもの */
+function keyWithExtra(extra: Record<string, unknown>): readonly Record<string, unknown>[] {
+  return [...KEY_VALID, extra];
+}
+
+const problemsFor = (
+  tests: readonly unknown[],
+  roles: readonly RoleEntry[] = KEY_ROLES,
+): readonly { readonly field: string; readonly message: string }[] =>
+  checkSuitePlan(REQUIREMENT_LIST, suiteOf(tests), keyDesign(roles), KEY_NATURES);
+
+describe("値の鍵を、所属 entity の項目の役割 ID に照らす（§1・②'・Issue #409）", () => {
+  it("所属 entity の項目の役割 ID だけなら断らない", () => {
+    expect(problemsFor(KEY_VALID)).toEqual([]);
+  });
+
+  it("入力の直下の鍵が、別の entity の項目の役割 IDなら断る", () => {
+    const problems = problemsFor(keyWithFirstInput({ "other.amount": 1 }));
+    expect(problems.some((problem) => problem.field === "tests[0].input" && problem.message.includes("別の entity"))).toBe(true);
+  });
+
+  it("入力の直下の鍵が、項目でない役割 ID（計算）なら断る", () => {
+    const problems = problemsFor(keyWithFirstInput({ "record.total": 1 }));
+    expect(
+      problems.some((problem) => problem.field === "tests[0].input" && problem.message.includes("項目の役割 ID でない")),
+    ).toBe(true);
+  });
+
+  it("入力の直下の鍵が、表に無い名前なら断る", () => {
+    const problems = problemsFor(keyWithFirstInput({ amount: 21 }));
+    expect(problems.some((problem) => problem.field === "tests[0].input" && problem.message.includes("表に無い"))).toBe(true);
+  });
+
+  it("入力の直下の鍵が、裸の id・rowId なら、行の ID を rowId に置く理由で断る", () => {
+    for (const key of ["id", "rowId"]) {
+      const problems = problemsFor(keyWithFirstInput({ [key]: "row-9" }));
+      expect(problems.some((problem) => problem.field === "tests[0].input" && problem.message.includes("行の ID は rowId に置く")), key).toBe(true);
+    }
+  });
+
+  it("入力の直下の鍵が、役割 ID が rowId という名前の項目なら通る（字面で断らない）", () => {
+    const problems = problemsFor(keyWithFirstInput({ rowId: "row-9" }), ROW_ID_FIELD_ROLES);
+    expect(problems.some((problem) => problem.field === "tests[0].input")).toBe(false);
+  });
+
+  it("検査（validate）の入力の鍵も、対象の役割の所属 entity の項目の役割 ID に照らす", () => {
+    const validate = (input: unknown) =>
+      keyTest({
+        id: "v",
+        requirementId: "R-1",
+        roleId: "record.amount",
+        targetKind: "field",
+        operation: "validate",
+        kind: "abnormal",
+        expected: { kind: "error", code: "E" },
+        input,
+      });
+    expect(
+      problemsFor(keyWithExtra(validate({ "other.amount": 1 }))).some((problem) => problem.message.includes("別の entity")),
+    ).toBe(true);
+    expect(problemsFor(keyWithExtra(validate({ "record.amount": 1 })))).toEqual([]);
+  });
+
+  it("操作（action）の入力の鍵も、対象の役割の所属 entity の項目の役割 ID に照らす", () => {
+    const action = (input: unknown) =>
+      keyTest({
+        id: "a",
+        requirementId: "R-1",
+        roleId: "record.mark",
+        targetKind: "operation",
+        operation: "action",
+        expected: { kind: "ok", value: null },
+        input,
+      });
+    expect(
+      problemsFor(keyWithExtra(action({ "other.amount": 1 }))).some((problem) => problem.message.includes("別の entity")),
+    ).toBe(true);
+    expect(problemsFor(keyWithExtra(action({ "record.amount": 1 })))).toEqual([]);
+  });
+
+  it("参照の行の values の鍵も、行の対象の役割の所属 entity の項目の役割 ID に照らす", () => {
+    const bad = problemsFor(keyWithFirstReferenceRows({ id: "row-9" }));
+    expect(
+      bad.some(
+        (problem) => problem.field === "tests[0].referenceData[0].values" && problem.message.includes("行の ID は rowId に置く"),
+      ),
+    ).toBe(true);
+    expect(problemsFor(keyWithFirstReferenceRows({ "record.amount": 9 }))).toEqual([]);
+  });
+
+  it("所属 entity が null の計算の入力は検査せず、同じ試験の参照の行の不正な values は断る", () => {
+    const first = {
+      ...keyTest({
+        id: "R-1-0",
+        requirementId: "R-1",
+        roleId: "appTotal",
+        operation: "compute",
+        input: { transfers: [{ from: "a", to: "b", amount: 1 }] },
+        expected: { kind: "ok", value: { headings: ["a"], transfers: [{ from: "a", to: "b" }] } },
+      }),
+      referenceData: [{ rowId: "row-2", target: { requirementId: "R-1", kind: "entity", roleId: "record" }, values: { "other.amount": 5 } }],
+    };
+    const problems = problemsFor(keyWithFirstReplaced(first));
+    expect(problems.some((problem) => problem.field === "tests[0].input")).toBe(false);
+    expect(problems.some((problem) => problem.field === "tests[0].referenceData[0].values")).toBe(true);
+  });
+
+  it("所属 entity が null でない参照評価の計算の入力も検査せず、同じ試験の参照の行の不正な values は断る", () => {
+    const first = {
+      ...keyTest({
+        id: "R-1-0",
+        requirementId: "R-1",
+        roleId: "record.settle",
+        operation: "compute",
+        input: { transfers: [{ from: "a", to: "b", amount: 1 }] },
+      }),
+      referenceData: [{ rowId: "row-2", target: { requirementId: "R-1", kind: "entity", roleId: "record" }, values: { id: "row-9" } }],
+    };
+    const problems = problemsFor(keyWithFirstReplaced(first));
+    expect(problems.some((problem) => problem.field === "tests[0].input")).toBe(false);
+    expect(
+      problems.some(
+        (problem) => problem.field === "tests[0].referenceData[0].values" && problem.message.includes("行の ID は rowId に置く"),
+      ),
+    ).toBe(true);
+  });
+
+  it("screen・aggregate の入力と、期待の値の鍵は検査しない", () => {
+    const screen = keyTest({
+      id: "s",
+      requirementId: "R-1",
+      roleId: "record.screen",
+      targetKind: "screen",
+      operation: "screen",
+      input: { declared: { nested: [1, 2] } },
+      expected: { kind: "ok", value: { panel: "x", rows: ["a"] } },
+    });
+    const aggregate = keyTest({
+      id: "g",
+      requirementId: "R-1",
+      roleId: "record.total",
+      operation: "aggregate",
+      input: { heading: "x" },
+      expected: { kind: "ok", value: [{ heading: "x", value: 1 }] },
+    });
+    const problems = problemsFor(keyWithExtra(screen).concat(aggregate));
+    expect(problems.some((problem) => problem.field.endsWith(".input"))).toBe(false);
+    expect(problems.some((problem) => problem.field.endsWith(".expected"))).toBe(false);
+  });
+
+  it("構造の検査（structure）の入力の鍵は検査しない", () => {
+    const structuralKey: DesignResult = {
+      roles: KEY_ROLES,
+      designs: [
+        {
+          requirementId: "R-1",
+          nature: "existence-only",
+          verification: { kind: "structural", reason: "構造で確かめる" },
+          checks: ["action-kind"],
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+        },
+        { requirementId: "R-2", nature: "ruled", verification: { kind: "fixed-test" }, checks: [], vocabulary: [], placement: [], unwritable: [] },
+      ],
+    };
+    const structure = {
+      ...structureTest("sk", "R-1", "operation", "record.mark", { check: "action-kind", expected: "create" }),
+      input: { declared: 1 },
+    };
+    const suite = suiteOf([structure, ...keyTriple("R-2")]);
+    const problems = checkSuitePlan(REQUIREMENT_LIST, suite, structuralKey, naturesOf([["R-1", "existence-only"], ["R-2", "ruled"]]));
+    expect(problems.some((problem) => problem.field.endsWith(".input"))).toBe(false);
+  });
+
+  it("所属 entity に項目の役割が無い表では、宣言の名前の鍵も id も検査しない（⑤b に委ねる）", () => {
+    expect(problemsFor(keyWithFirstInput({ amount: 21 }), NO_FIELD_ROLES)).toEqual([]);
+    expect(problemsFor(keyWithFirstInput({ id: "row-9" }), NO_FIELD_ROLES)).toEqual([]);
+  });
+
+  it("役割 ID の表の無い旧形式の設計では、鍵の検査が走らない", async () => {
+    const oldDesign: DesignResult = {
+      designs: [
+        { requirementId: "R-1", vocabulary: [], placement: [], unwritable: [] },
+        { requirementId: "R-2", vocabulary: [], placement: [], unwritable: [] },
+      ],
+    };
+    const recording = createRecordingClient([structured({ tests: TEST_SUITE_OUTPUT.tests })]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: oldDesign,
+    });
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("規則の文に、値の鍵と行の ID の 1 行と、適用条件・互換の例外がある", () => {
+    const rules = TEST_SUITE_RULES.join("\n");
+    expect(rules).toContain("値の鍵");
+    expect(rules).toContain("行の ID は inputContract.rowId・referenceData[*].rowId に置き");
+    expect(rules).toContain("値の鍵（id・rowId）にしない");
+    expect(rules).toContain("項目の役割が役割 ID の表にあるときにだけ掛かる");
+    expect(rules).toContain("項目の役割の無い表と、役割 ID の表の無い旧形式では、宣言の項目の名前を鍵にしてよい");
+  });
+
+  it("参照の行の values の id は、1 回目に直れば固定できる", async () => {
+    const bad = { tests: keyWithFirstReferenceRows({ id: "row-9" }) };
+    const good = { tests: keyWithFirstReferenceRows({ "record.amount": 9 }) };
+    const recording = createRecordingClient([structured(bad), structured(good)]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: keyDesign(KEY_ROLES),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.rounds).toBe(2);
+  });
+
+  it("参照の行の values の id が 2 回とも残れば、欄と理由つきの未達になる", async () => {
+    const bad = { tests: keyWithFirstReferenceRows({ id: "row-9" }) };
+    const recording = createRecordingClient([structured(bad), structured(bad)]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: keyDesign(KEY_ROLES),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("unmet");
+    if (outcome.failure.kind !== "unmet") return;
+    expect(
+      outcome.failure.problems.some(
+        (problem) => problem.field === "tests[0].referenceData[0].values" && problem.message.includes("行の ID は rowId に置く"),
       ),
     ).toBe(true);
   });

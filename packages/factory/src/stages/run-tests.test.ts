@@ -26,6 +26,7 @@ import {
 } from "../pipeline.js";
 import { bindTests } from "./bind.js";
 import { holdsWriteAnonymous, resolveReferenceEntity, runTests } from "./run-tests.js";
+import { rowIdValueKeyReason } from "./test-suite.js";
 
 const CLOCK = "2026-09-16T12:00:00+09:00";
 
@@ -1487,6 +1488,110 @@ describe("構造の検査：write-anonymous（02 §1.3・Issue #393）", () => {
         detail: expect.any(String),
       },
     ]);
+  });
+});
+
+// ── 値の鍵 id・rowId の文言を、②' と同じにする（§1・②'・Issue #409）──────────────
+
+/** `rowId` という項目を持つ宣言（対応に無い鍵でも、宣言の項目名として通ることを確かめる） */
+const ROW_ID_DECLARATION = [
+  "entities:",
+  "  - name: record",
+  "    fields:",
+  "      rowId: string",
+  "      amount: number",
+  "views:",
+  "  - name: records",
+  "    type: list",
+  "    entity: record",
+  "    show: [total]",
+  "actions: []",
+  "validations: []",
+  "computed:",
+  "  - name: total",
+  "    entity: record",
+  "    expression: amount * 2",
+  "    type: number",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+const ROW_ID_APP = await normalized(ROW_ID_DECLARATION);
+
+const rowIdCorrespondence: CorrespondenceResult = {
+  entries: [entry("R-1", [{ kind: "computation", entity: "record", name: "total" }])],
+  misses: [],
+};
+
+const rowIdMappings: readonly RoleNameMapping[] = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.total", name: "total" },
+];
+
+describe("値の鍵 id・rowId の文言を、②' と同じにする（§1・②'・Issue #409）", () => {
+  it("対応に無い id・rowId の鍵を持つ入力は、②' と同じ文言の未解決になる", () => {
+    for (const key of ["id", "rowId"]) {
+      const test = draft({
+        id: `input-${key}`,
+        target: roleTarget("R-1", "computation", "member.shareCount"),
+        operation: "compute",
+        input: { [key]: "m1" },
+        expected: { kind: "ok", value: 0 },
+      });
+      const result = runTests({
+        app: MAPPED_APP,
+        suite: suiteOf([test]),
+        correspondence: mappedCorrespondence,
+        mappings: mappedMappings,
+      });
+      expect(result.mismatches).toEqual([]);
+      expect(result.unresolved.map((entry) => entry.testId)).toEqual([`input-${key}`]);
+      expect(result.unresolved[0]?.detail).toBe(rowIdValueKeyReason(key));
+    }
+  });
+
+  it("対応に無い id・rowId の鍵を持つ参照の行も、②' と同じ文言の未解決になる", () => {
+    for (const key of ["id", "rowId"]) {
+      const test = draft({
+        id: `ref-${key}`,
+        target: roleTarget("R-1", "computation", "member.shareCount"),
+        operation: "compute",
+        input: { "member.name": "A" },
+        inputContract: { rowId: "m1", targetRowId: "m1", emptyEntities: [] },
+        referenceData: [refRoleRow("R-1", "expense", "e1", { [key]: "x" })],
+        expected: { kind: "ok", value: 0 },
+      });
+      const result = runTests({
+        app: MAPPED_APP,
+        suite: suiteOf([test]),
+        correspondence: mappedCorrespondence,
+        mappings: mappedMappings,
+      });
+      expect(result.mismatches).toEqual([]);
+      expect(result.unresolved.map((entry) => entry.testId)).toEqual([`ref-${key}`]);
+      expect(result.unresolved[0]?.detail).toBe(rowIdValueKeyReason(key));
+    }
+  });
+
+  it("宣言に rowId という項目があり対応が無いときは、宣言の項目名として通る（互換の回帰）", () => {
+    const test = draft({
+      id: "rowid-field",
+      target: roleTarget("R-1", "computation", "record.total"),
+      operation: "compute",
+      input: { rowId: "r1", amount: 21 },
+      inputContract: { rowId: "r1", targetRowId: "r1", emptyEntities: [] },
+      expected: { kind: "ok", value: 42 },
+    });
+    const result = runTests({
+      app: ROW_ID_APP,
+      suite: suiteOf([test]),
+      correspondence: rowIdCorrespondence,
+      mappings: rowIdMappings,
+    });
+    // 対応に無い rowId・amount は、宣言の項目の名前としてそのまま使われる（未解決にしない）
+    expect({ mismatches: result.mismatches, unresolved: result.unresolved }).toEqual({ mismatches: [], unresolved: [] });
   });
 });
 

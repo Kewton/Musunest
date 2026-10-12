@@ -44,7 +44,7 @@ import {
   type TestTargetKind,
 } from "../fixed-test.js";
 import { checkLimit } from "../limits.js";
-import type { DesignResult, NatureDiscrepancy, RequirementList } from "../pipeline.js";
+import type { DesignResult, NatureDiscrepancy, RequirementList, RoleEntry } from "../pipeline.js";
 import type { Judge, JudgeAnswer, JudgeQuestion } from "../judge.js";
 import type { CallGateway } from "../call.js";
 import { isPlannedDesign } from "./design.js";
@@ -78,6 +78,7 @@ export const TEST_SUITE_RULES: readonly string[] = [
   "異常の期待は、操作ごとの型にする。検査（validate）の異常は誤りコード（expected.code）で確かめ、value は null にする。計算・集計（compute・aggregate）の異常は、値（expected.value）でもよい。それ以外の正常は値の JSON 文字列を value に入れ、code は null にする。",
   "対象（target）と参照の行（referenceData の target）は、名前ではなく**役割 ID（roleId）**で指す。役割 ID は ② の役割 ID の表のものを使う。宣言は見られないので、名前を書かない。",
   "入力の契約（inputContract）に、固定の行 ID（rowId）・評価の対象の行 ID（targetRowId。行を評価しないときは null）・空であることを明示する entity の役割 ID（emptyEntities）を入れる。",
+  "所属 entity の決まったレコードの入力（input）と参照の行の値（values）の直下の鍵は、その entity の項目（kind が field）の役割 ID だけにする。行の ID は inputContract.rowId・referenceData[*].rowId に置き、値の鍵（id・rowId）にしない。この規則は、対象の役割の所属 entity の項目の役割が役割 ID の表にあるときにだけ掛かる。項目の役割の無い表と、役割 ID の表の無い旧形式では、宣言の項目の名前を鍵にしてよい。",
   "時計（clock）は固定の日時（オフセット付きの ISO 8601）にする。",
   "要件 ID は①の一覧のものだけを使う。一覧に無い要件 ID を作らない。",
 ];
@@ -374,6 +375,109 @@ function checkRoleIds(suite: TestSuite, roleIds: ReadonlySet<string>, problems: 
   });
 }
 
+/**
+ * 行の ID を**値の鍵**に書いたときの理由（②' と ⑤b で同じ文言を使う。§1・②'・Issue #409）。
+ * 行の ID は `inputContract.rowId`・`referenceData[*].rowId` に置き、値の鍵（`id`・`rowId`）には書かない。
+ */
+export function rowIdValueKeyReason(key: string): string {
+  return `値の鍵 ${key} は行の ID である（行の ID は rowId に置く。行の ID は inputContract.rowId・referenceData[*].rowId の欄に書く）`;
+}
+
+/** 対象の役割の**所属 entity**（entity の役割ならそれ自身、ほかはその所属）。決まらなければ null */
+function owningEntityOf(target: TestTarget, roleById: ReadonlyMap<string, RoleEntry>): string | null {
+  if (target.kind === "entity") return target.roleId ?? null;
+  if (target.roleId === undefined) return null;
+  return roleById.get(target.roleId)?.entity ?? null;
+}
+
+/**
+ * 値の鍵の並びを、所属 entity の**項目（`kind` が `field`）の役割 ID** に照らす（§1・②'・Issue #409）。
+ * 鍵は**まず**所属 entity の項目の役割 ID として見る（正当な項目なら、字面が行 ID に似ていても断らない）。
+ * 表に無ければ、別の entity の項目の役割 ID・項目でない役割 ID・裸の `id`・`rowId`・表に無い鍵に分けて断る。
+ */
+function checkValueKeysAgainstEntity(
+  values: Readonly<Record<string, unknown>>,
+  owner: string,
+  fieldRoleIds: ReadonlySet<string>,
+  roleById: ReadonlyMap<string, RoleEntry>,
+  field: string,
+  problems: Problem[],
+): void {
+  for (const key of Object.keys(values)) {
+    if (fieldRoleIds.has(key)) continue;
+    const role = roleById.get(key);
+    if (role === undefined) {
+      problems.push({
+        field,
+        message:
+          key === "id" || key === "rowId"
+            ? rowIdValueKeyReason(key)
+            : `値の鍵 ${key} は entity ${owner} の項目の役割 ID の表に無い`,
+      });
+      continue;
+    }
+    if (role.kind === "field") {
+      problems.push({
+        field,
+        message: `値の鍵 ${key} は entity ${owner} の項目の役割 ID でない（別の entity（${role.entity ?? ""}）の項目の役割 ID）`,
+      });
+      continue;
+    }
+    problems.push({ field, message: `値の鍵 ${key} は項目の役割 ID でない（種類は ${role.kind}）` });
+  }
+}
+
+/**
+ * **所属 entity の決まったレコード**の入力と、**参照の行の値**の直下の鍵を、所属 entity の項目の役割 ID に
+ * 照らす（§1・②'・Issue #409）。
+ *
+ *   - 入力は、操作が `compute`・`validate`・`action` で、対象の役割の所属 entity が表で決まるときだけ見る。
+ *     `screen`・`structure`・`aggregate` の入力は見ない。写像でない入力は、配列・スカラー・入れ子を一律に
+ *     制限せず、⑤b に委ねる
+ *   - 計算は、所属 entity が null でないという理由だけでは行のレコードと見なさない。参照の行を持つ計算の
+ *     入力は、参照の行だけで評価する計算（精算・アプリ全体・見出しごとの集計）かもしれず、②' が持つ情報
+ *     だけではレコードの入力と確かめられないので、入力の鍵を検査しない（⑤b の既存の扱いに委ねる）
+ *   - 参照の行の値は、対象の役割の所属 entity（entity の役割ならそれ自身、ほかはその所属）が決まるとき、
+ *     すべての試験で見る
+ *   - **所属 entity に項目の役割が 1 つも無い表**では掛けない（宣言の項目名を鍵にしてよい互換の経路を
+ *     保つ。②' は宣言を知らない）
+ *   - 期待（`expected`）の値は検査しない
+ */
+function checkRecordValueKeys(suite: TestSuite, design: DesignResult, problems: Problem[]): void {
+  const roleById = new Map((design.roles ?? []).map((entry) => [entry.roleId, entry]));
+  const fieldRoleIdsByEntity = new Map<string, Set<string>>();
+  for (const entry of design.roles ?? []) {
+    if (entry.kind !== "field" || entry.entity === null) continue;
+    const set = fieldRoleIdsByEntity.get(entry.entity) ?? new Set<string>();
+    set.add(entry.roleId);
+    fieldRoleIdsByEntity.set(entry.entity, set);
+  }
+  suite.tests.forEach((test, index) => {
+    if (test.operation === "compute" || test.operation === "validate" || test.operation === "action") {
+      const owner = owningEntityOf(test.target, roleById);
+      const fieldRoleIds = owner === null ? undefined : fieldRoleIdsByEntity.get(owner);
+      // 計算で参照の行を持つ試験は、レコードの入力と確かめられないので入力の鍵を見ない（⑤b に委ねる）
+      const referenceEvaluatedComputation = test.target.kind === "computation" && test.referenceData.length > 0;
+      if (owner !== null && fieldRoleIds !== undefined && !referenceEvaluatedComputation && isRecord(test.input)) {
+        checkValueKeysAgainstEntity(test.input, owner, fieldRoleIds, roleById, `tests[${index}].input`, problems);
+      }
+    }
+    test.referenceData.forEach((row, rowIndex) => {
+      const owner = owningEntityOf(row.target, roleById);
+      const fieldRoleIds = owner === null ? undefined : fieldRoleIdsByEntity.get(owner);
+      if (owner === null || fieldRoleIds === undefined || !isRecord(row.values)) return;
+      checkValueKeysAgainstEntity(
+        row.values,
+        owner,
+        fieldRoleIds,
+        roleById,
+        `tests[${index}].referenceData[${rowIndex}].values`,
+        problems,
+      );
+    });
+  });
+}
+
 /** 異常の期待を、操作ごとの型に照らす（検査は誤りコード。計算・集計は値も許す） */
 function checkExpectationKind(suite: TestSuite, problems: Problem[]): void {
   suite.tests.forEach((test, index) => {
@@ -569,6 +673,7 @@ export function checkSuitePlan(
   checkRoleIds(suite, roleIdsOf(design), problems);
   checkExpectationKind(suite, problems);
   checkStructuralChecks(suite, design, problems);
+  checkRecordValueKeys(suite, design, problems);
   return problems;
 }
 
