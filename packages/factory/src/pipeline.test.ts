@@ -15,7 +15,9 @@ import {
   CONFIRMED_REQUIREMENT_LABEL,
   REFERENCE_CONTEXT_LABEL,
   requirementsFromPlan,
+  roleOwnershipIndex,
   toStageResults,
+  type DesignResult,
   type UnmetCarryOver,
 } from "./pipeline.js";
 
@@ -382,5 +384,59 @@ describe("了承して除いた部分の代わりの案に、元の要件と部�
     expect(text).toContain(REFERENCE_CONTEXT_LABEL);
     expect(text).toContain(QUESTION_TEXT);
     expect(text).not.toContain("の代わりの案");
+  });
+});
+
+// ── 所属の索引（純粋な関数。Issue #418）────────────────────────────────
+
+const ROLE_DESIGN: DesignResult = {
+  roles: [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null, options: null },
+    { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null },
+  ],
+  designs: [
+    {
+      requirementId: "R-1",
+      vocabulary: [],
+      placement: [],
+      unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
+    },
+    {
+      requirementId: "R-2",
+      vocabulary: [],
+      placement: [],
+      unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+        { roleId: "record.extra", basis: "stated", reason: null },
+      ],
+    },
+  ],
+};
+
+describe("所属の索引は純粋で、同じ入力から同じ結果になる（Issue #418）", () => {
+  it("役割 ID ごとに、所属させた要件 ID の並びを返す（同じ要件の中の重なりは 1 つ）", () => {
+    const index = roleOwnershipIndex(ROLE_DESIGN);
+    expect(index.get("record")).toEqual(["R-1", "R-2"]);
+    expect(index.get("record.total")).toEqual(["R-1", "R-2"]);
+    expect(index.get("record.extra")).toEqual(["R-2"]);
+    expect(index.get("record.unknown")).toBeUndefined();
+  });
+
+  it("同じ入力からは同じ結果になる（写しを変えても、元の索引は変わらない）", () => {
+    expect(roleOwnershipIndex(ROLE_DESIGN)).toEqual(roleOwnershipIndex(ROLE_DESIGN));
+  });
+
+  it("所属の無い旧形式の設計では、空の索引を返す", () => {
+    const legacy: DesignResult = {
+      designs: [{ requirementId: "R-1", vocabulary: [], placement: [], unwritable: [] }],
+    };
+    expect(roleOwnershipIndex(legacy).size).toBe(0);
   });
 });

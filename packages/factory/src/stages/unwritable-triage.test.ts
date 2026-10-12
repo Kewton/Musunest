@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest } from "../judge.js";
 import { UNWRITABLE_CONFIDENCE_THRESHOLD } from "../limits.js";
+import type { RoleEntry } from "../pipeline.js";
 import type { DesignOutput, RequirementDesignEntry, UnwritableClaim } from "./design.js";
 import {
   runUnwritableTriage,
@@ -242,6 +243,43 @@ describe("申告の仕分けと裏付け（05 §3・Issue #332）", () => {
     const result = await run;
 
     expect(result.kept).toEqual([{ requirementId: "R-1", claims: [CLAIM], marked: false, redone: false }]);
+  });
+
+  it("作り直した設計の所属（ownership）が、採ったあとの設計に残り、役割 ID の表は元のままである（Issue #418）", async () => {
+    const roles: readonly RoleEntry[] = [
+      { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null },
+      { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
+    ];
+    const original: DesignOutput = {
+      roles,
+      designs: [
+        { requirementId: "R-1", vocabulary: [], placement: [], unwritable: [CLAIM.part], unwritableClaims: [CLAIM], notes: [] },
+      ],
+    };
+    const ownership = [{ roleId: "record.total", basis: "stated" as const, reason: null }];
+    const redone: RequirementDesignEntry = {
+      requirementId: "R-1",
+      vocabulary: [],
+      placement: [],
+      unwritable: [],
+      unwritableClaims: [],
+      notes: [],
+      ownership,
+    };
+    const { run } = triage(
+      original,
+      {
+        [triageQuestionName("R-1", 0)]: choice("vocabulary-hole", 0.9),
+        [supportQuestionName("R-1", 0)]: choice("contradicts", 0.9),
+      },
+      { redoDesign: async () => redone },
+    );
+    const result = await run;
+
+    // 役割 ID の表は元のまま
+    expect(result.design.roles).toEqual(roles);
+    // 作り直した設計の所属が、採ったあとの設計に残る
+    expect(result.design.designs[0]?.ownership).toEqual(ownership);
   });
 });
 

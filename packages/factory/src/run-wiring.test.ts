@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { runGeneration } from "./run.js";
 import { DESIGN_FILE, MAPPINGS_FILE, TEST_SUITE_FILE } from "./bundle.js";
 import type { RecordedCall } from "./llm-fake.js";
-import { requirementsFromPlan } from "./pipeline.js";
+import { requirementsFromPlan, LEGACY_DESIGN_CONTRACT } from "./pipeline.js";
 import * as arbitrateStage from "./stages/arbitrate.js";
 import * as correspondenceStage from "./stages/correspondence.js";
 import * as designStage from "./stages/design.js";
@@ -46,12 +46,12 @@ function readArtifact(
   return JSON.parse(found.text) as Record<string, unknown>;
 }
 
-/** ② の設計（役割 ID の表と要件ごとの種類を持つ新しい契約。Issue #307・#316） */
+/** ② の設計（役割 ID の表・選択肢・所属を持つ新契約。Issue #307・#316・#418） */
 const DESIGN_PLANNED = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
-    { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null },
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
+    { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null },
   ],
   designs: [
     {
@@ -61,6 +61,10 @@ const DESIGN_PLANNED = {
       vocabulary: ["計算"],
       placement: ["computed"],
       unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "記録の行を参照・識別するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
     },
     {
       requirementId: "R-2",
@@ -69,6 +73,10 @@ const DESIGN_PLANNED = {
       vocabulary: ["計算"],
       placement: ["computed"],
       unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "記録の行を参照・識別するため" },
+        { roleId: "record.extra", basis: "stated", reason: null },
+      ],
     },
   ],
 };
@@ -219,6 +227,32 @@ describe("段どうしのつなぎ：各段の任意の入力が走らせる部�
     // ここが誤りになる（Issue #316 の回帰の番人）
     expect(testSuiteSpy.mock.calls[0]?.[0]?.design).toBeDefined();
   });
+
+  it("版（designVersion）が初回の設計と ②' に同じ値で渡り、②' のデータに options と所属が入る（Issue #418）", async () => {
+    const designSpy = vi.spyOn(designStage, "runDesign");
+    const testSuiteSpy = vi.spyOn(testSuiteStage, "runTestSuite");
+
+    // 版を省いた走り（新契約）。初回の設計と ②' に、どちらも省略（undefined）が渡る
+    const recording = createRecordingClient(recordedWiring());
+    const result = await runGeneration(makeRunInput(recording.client));
+    expect(result.outcome.result).toBe("pass");
+    const omitted = designSpy.mock.calls[0]?.[0]?.version;
+    expect(omitted).toBeUndefined();
+    expect(testSuiteSpy.mock.calls[0]?.[0]?.version).toBe(omitted);
+    const request = recording.structured.find((candidate) => candidate.schemaName === TEST_SUITE_SCHEMA_NAME);
+    expect(request?.input).toContain("options");
+    expect(request?.input).toContain("要件ごとの所属");
+
+    // 互換を明示した走りでは、同じ値（legacy）が両方に渡る
+    vi.restoreAllMocks();
+    const designSpy2 = vi.spyOn(designStage, "runDesign");
+    const testSuiteSpy2 = vi.spyOn(testSuiteStage, "runTestSuite");
+    const recording2 = createRecordingClient(recordedWiring());
+    await runGeneration(makeRunInput(recording2.client, { designVersion: LEGACY_DESIGN_CONTRACT }));
+    const legacy = designSpy2.mock.calls[0]?.[0]?.version;
+    expect(legacy).toBe(LEGACY_DESIGN_CONTRACT);
+    expect(testSuiteSpy2.mock.calls[0]?.[0]?.version).toBe(legacy);
+  });
 });
 
 // ── 確定した仕様を正本にした道でも、全段が同じ要件の一覧を受け取る（§5・Issue #391）──
@@ -258,7 +292,9 @@ describe("確定した仕様を正本にした道でも、全段が同じ要件�
     const arbitrateSpy = vi.spyOn(arbitrateStage, "runArbitration");
 
     const recording = createRecordingClient(recordedPlanRepairToPlan());
-    const result = await runGeneration(makeRunInput(recording.client, { plan: CONFIRMED_PLAN_ADDED }));
+    const result = await runGeneration(
+      makeRunInput(recording.client, { plan: CONFIRMED_PLAN_ADDED, designVersion: LEGACY_DESIGN_CONTRACT }),
+    );
 
     // すべての段に渡る要件の一覧が、同じ変換の結果（`requirementsFromPlan`）である
     const expected = requirementsFromPlan(CONFIRMED_PLAN_ADDED);

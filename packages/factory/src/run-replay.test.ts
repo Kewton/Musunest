@@ -23,6 +23,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { makeRunInput } from "./__tests__/run.js";
+import { LEGACY_DESIGN_CONTRACT } from "./pipeline.js";
 import { UNWRITABLE_FILE, VERIFICATION_FILE, type BundleUnwritable, type BundleVerification } from "./bundle.js";
 import type { RecordedCall } from "./llm-fake.js";
 import type { LlmUsage } from "./llm.js";
@@ -161,10 +162,17 @@ const unwritableOf = (
   return JSON.parse(found.text) as BundleUnwritable;
 };
 
-/** 記録の並びで、① から ⑦ まで流す（原文は記録の request.md を使う）。受け取った要求も残す */
+/**
+ * 記録の並びで、① から ⑦ まで流す（原文は記録の request.md を使う）。受け取った要求も残す。
+ * 記録は**旧形式の設計**（役割の表・所属・`options` を持たない）なので、**互換を明示する**（決定 ⑨・
+ * 記録と SHA は手で直さない。Issue #418）。
+ */
 function runReplay(calls: readonly RecordedCall[]) {
   const recording = createRecordingClient(calls);
-  return { recording, run: runGeneration(makeRunInput(recording.client, { source: REQUEST })) };
+  return {
+    recording,
+    run: runGeneration(makeRunInput(recording.client, { source: REQUEST, designVersion: LEGACY_DESIGN_CONTRACT })),
+  };
 }
 
 describe("本物の応答の再生（Issue #322）", () => {

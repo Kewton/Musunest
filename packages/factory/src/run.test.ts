@@ -37,6 +37,7 @@ import { createFakeLlmClient, type RecordedCall } from "./llm-fake.js";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest, LlmUsage } from "./llm.js";
 import { OpenAiIncompleteError, createOpenAiLlmClient, type OpenAiUsage } from "./openai.js";
 import { runGeneration, countUnresolvedTests, redoDesignRecorded, type GenerationInput } from "./run.js";
+import { LEGACY_DESIGN_CONTRACT } from "./pipeline.js";
 import { MAPPING_REDO_SCHEMA_NAME } from "./stages/repair.js";
 import { ARBITRATION_SCHEMA_NAME } from "./stages/arbitrate.js";
 import { CORRESPONDENCE_SCHEMA_NAME } from "./stages/correspondence.js";
@@ -54,13 +55,14 @@ import {
   CONFIRMED_PLAN_ACCEPTED,
   CONFIRMED_PLAN_ADDED,
   CORRESPONDENCE_OUTPUT,
+  CORRESPONDENCE_OUTPUT_PLANNED,
   CORRESPONDENCE_OUTPUT_WITH_FIELD,
   DECLARATION_SOURCE,
   DECLARATION_SOURCE_FOUR,
   DECLARATION_SOURCE_MISMATCH,
   DESIGN_OUTPUT,
   DESIGN_OUTPUT_MAPPED,
-  DESIGN_OUTPUT_PARTIAL,
+  DESIGN_OUTPUT_PLANNED_PARTIAL,
   INVALID_DECLARATION_SOURCE,
   MAPPING_REDO_OUTPUT,
   RATES,
@@ -224,14 +226,17 @@ describe("通常の完走（02 §1）", () => {
   });
 
   it("記録が全段同じ封筒の形（result で包んだもの）でも、合格の道は同じように流れる（#353）", async () => {
-    const { run } = runWith([
-      structured(enveloped(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_LIST_OUTPUT)),
-      structured(enveloped(REVERSE_CHECK_SCHEMA_NAME, REVERSE_CHECK_OUTPUT)),
-      structured(enveloped(DESIGN_SCHEMA_NAME, DESIGN_OUTPUT)),
-      structured(enveloped(TEST_SUITE_SCHEMA_NAME, TEST_SUITE_OUTPUT)),
-      structured(enveloped(WRITE_SCHEMA_NAME, { declaration: DECLARATION_SOURCE })),
-      structured(enveloped(CORRESPONDENCE_SCHEMA_NAME, CORRESPONDENCE_OUTPUT)),
-    ]);
+    const { run } = runWith(
+      [
+        structured(enveloped(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_LIST_OUTPUT)),
+        structured(enveloped(REVERSE_CHECK_SCHEMA_NAME, REVERSE_CHECK_OUTPUT)),
+        structured(enveloped(DESIGN_SCHEMA_NAME, DESIGN_OUTPUT)),
+        structured(enveloped(TEST_SUITE_SCHEMA_NAME, TEST_SUITE_OUTPUT)),
+        structured(enveloped(WRITE_SCHEMA_NAME, { declaration: DECLARATION_SOURCE })),
+        structured(enveloped(CORRESPONDENCE_SCHEMA_NAME, CORRESPONDENCE_OUTPUT)),
+      ],
+      { designVersion: LEGACY_DESIGN_CONTRACT },
+    );
     const result = await run;
 
     expect(result.stopped).toBeNull();
@@ -239,7 +244,7 @@ describe("通常の完走（02 §1）", () => {
   });
 
   it("部分案の道：書けない要件があるまま最後まで流し、部分案になる", async () => {
-    const { run } = runWith(recordedRun({ design: DESIGN_OUTPUT_PARTIAL }));
+    const { run } = runWith(recordedRun({ design: DESIGN_OUTPUT_PLANNED_PARTIAL }));
     const result = await run;
 
     expect(result.stopped).toBeNull();
@@ -296,14 +301,17 @@ describe("早期停止：止めた段と理由が記録される（02 §1.5・S-
 
   it("前半の段の失敗（③ が形の合わない応答を返し続ける）", async () => {
     const malformed = { declaration: 123 };
-    const { run } = runWith([
-      structured(REQUIREMENT_LIST_OUTPUT),
-      structured(REVERSE_CHECK_OUTPUT),
-      structured(DESIGN_OUTPUT),
-      structured(TEST_SUITE_OUTPUT),
-      structured(malformed),
-      structured(malformed),
-    ]);
+    const { run } = runWith(
+      [
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(DESIGN_OUTPUT),
+        structured(TEST_SUITE_OUTPUT),
+        structured(malformed),
+        structured(malformed),
+      ],
+      { designVersion: LEGACY_DESIGN_CONTRACT },
+    );
     const result = await run;
     expect(result.stopped).toEqual({
       stage: "write",
@@ -331,7 +339,7 @@ describe("未実行の検査がある結果は、合格にならない（02 §1.
         structured(TEST_SUITE_OUTPUT),
         structured({ declaration: INVALID_DECLARATION_SOURCE }),
       ],
-      { limits: { ...AGENT_LIMITS, repairRoundTrips: 0 } },
+      { limits: { ...AGENT_LIMITS, repairRoundTrips: 0 }, designVersion: LEGACY_DESIGN_CONTRACT },
     );
     const result = await run;
 
@@ -393,10 +401,12 @@ describe("⑦ へ渡す未解決の数（02 §1.4・#306）", () => {
   it("最終版の試験に未解決が 1 つだけ残ると、不一致と対応表の落ちが 0 でも部分案になる", async () => {
     const { run } = runWith(
       recordedRun({
+        design: DESIGN_OUTPUT,
+        mappings: [],
         suite: TEST_SUITE_OUTPUT_WITH_UNRESOLVED,
         correspondence: CORRESPONDENCE_OUTPUT_WITH_FIELD,
       }),
-      { limits: { ...AGENT_LIMITS, repairRoundTrips: 0 } },
+      { limits: { ...AGENT_LIMITS, repairRoundTrips: 0 }, designVersion: LEGACY_DESIGN_CONTRACT },
     );
     const result = await run;
 
@@ -421,12 +431,14 @@ describe("⑦ へ渡す未解決の数（02 §1.4・#306）", () => {
     const { run } = runWith(
       [
         ...recordedRun({
+          design: DESIGN_OUTPUT,
+          mappings: [],
           suite: TEST_SUITE_OUTPUT_WITH_UNRESOLVED,
           correspondence: CORRESPONDENCE_OUTPUT_WITH_FIELD,
         }),
         toolDone({ declaration: DECLARATION_SOURCE, disputes: [] }),
       ],
-      { limits: { ...AGENT_LIMITS, repairRoundTrips: 1 } },
+      { limits: { ...AGENT_LIMITS, repairRoundTrips: 1 }, designVersion: LEGACY_DESIGN_CONTRACT },
     );
     const result = await run;
 
@@ -526,7 +538,9 @@ describe("未完了の応答の段の失敗と精算（02 §2.2・§1.5）", () 
       structured({ declaration: DECLARATION_SOURCE }, cachedUsage),
       structured(CORRESPONDENCE_OUTPUT, cachedUsage),
     ];
-    const result = await runGeneration(makeRunInput(createRecordingClient(cached).client));
+    const result = await runGeneration(
+      makeRunInput(createRecordingClient(cached).client, { designVersion: LEGACY_DESIGN_CONTRACT }),
+    );
 
     for (const stage of ["design", "write"] as const) {
       const record = result.record.stages.find((candidate) => candidate.stage === stage);
@@ -694,13 +708,18 @@ describe("直す段の最後の答えの形が合わないとき、欄の名前�
 describe("停滞の検知：同じ不一致が続いたら ⑥ は止める（02 §1.3.1・#309）", () => {
   it("同じ不一致が 2 回続いたら直す段を止め、未解決として部分案で終える（裁定へは回さない）", async () => {
     // 未解決（曖昧さ）が残る版。⑥ は直しても同じ宣言を返すので、不一致は変わらない
-    const { recording, run } = runWith([
-      ...recordedRun({
-        suite: TEST_SUITE_OUTPUT_WITH_UNRESOLVED,
-        correspondence: CORRESPONDENCE_OUTPUT_WITH_FIELD,
-      }),
-      toolDone({ declaration: DECLARATION_SOURCE, disputes: [] }),
-    ]);
+    const { recording, run } = runWith(
+      [
+        ...recordedRun({
+          design: DESIGN_OUTPUT,
+          mappings: [],
+          suite: TEST_SUITE_OUTPUT_WITH_UNRESOLVED,
+          correspondence: CORRESPONDENCE_OUTPUT_WITH_FIELD,
+        }),
+        toolDone({ declaration: DECLARATION_SOURCE, disputes: [] }),
+      ],
+      { designVersion: LEGACY_DESIGN_CONTRACT },
+    );
     const result = await run;
 
     expect(result.stopped).toBeNull();
@@ -794,7 +813,7 @@ describe("宣言が変わったら、古い版の対応・結び付け・試験�
     const { recording, run } = runWith([
       ...recordedRun({ write: DECLARATION_SOURCE_MISMATCH }),
       toolDone({ declaration: DECLARATION_SOURCE, disputes: [] }),
-      structured(CORRESPONDENCE_OUTPUT), // ⑤a の作り直し（新しい版）
+      structured(CORRESPONDENCE_OUTPUT_PLANNED), // ⑤a の作り直し（新しい版）
     ]);
     const result = await run;
 
@@ -873,12 +892,12 @@ const CREATE_DECLARATION = [
   "",
 ].join("\n");
 
-/** ② の設計（R-1 は在ることだけ、R-2 は決まりを含む） */
+/** ② の設計（R-1 は在ることだけ、R-2 は決まりを含む。役割の表・選択肢・所属を持つ新契約。Issue #418） */
 const CREATE_DESIGN = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
-    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
+    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null, options: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
   ],
   designs: [
     {
@@ -888,6 +907,10 @@ const CREATE_DESIGN = {
       vocabulary: ["entity", "action"],
       placement: ["entities", "actions"],
       unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "登録する行の所属として参照するため" },
+        { roleId: "record.add", basis: "stated", reason: null },
+      ],
     },
     {
       requirementId: "R-2",
@@ -896,6 +919,10 @@ const CREATE_DESIGN = {
       vocabulary: ["computation"],
       placement: ["computed"],
       unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "合計する行の所属として参照するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
     },
   ],
 };
@@ -1002,12 +1029,12 @@ describe("裁定で外した試験を除いた組でも、分類を保つ（02 �
 
 // ── 構造の要件を含む生成は、合格（full）にならない（02 §1.4・Issue #386）──────
 
-/** ② の設計（R-1 は構造で確かめる（checks 付き）、R-2 は固定した試験） */
+/** ② の設計（R-1 は構造で確かめる（checks 付き）、R-2 は固定した試験。新契約。Issue #418） */
 const STRUCTURAL_CHECKS_DESIGN = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
-    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
+    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null, options: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
   ],
   designs: [
     {
@@ -1018,6 +1045,10 @@ const STRUCTURAL_CHECKS_DESIGN = {
       vocabulary: ["action"],
       placement: ["actions"],
       unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "登録する行の所属として参照するため" },
+        { roleId: "record.add", basis: "stated", reason: null },
+      ],
     },
     {
       requirementId: "R-2",
@@ -1027,6 +1058,10 @@ const STRUCTURAL_CHECKS_DESIGN = {
       vocabulary: ["computation"],
       placement: ["computed"],
       unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "合計する行の所属として参照するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
     },
   ],
 };
@@ -1357,10 +1392,10 @@ describe("構造で確かめる要件には、構造の検査だけを固定す�
 
 /** 画面（record.records）・項目（record.amount）・計算（record.total）を持つ役割 ID の表 */
 const VIEW_SHOWS_ROLES = [
-  { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
-  { roleId: "record.records", kind: "screen", entity: "record", name: "records", shared: false, aliasOf: null },
-  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null },
-  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
+  { roleId: "record.records", kind: "screen", entity: "record", name: "records", shared: false, aliasOf: null, options: null },
+  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null, options: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
 ];
 
 /** ② の設計（R-1 は view-shows で確かめる。実行の試験も混ざる） */
@@ -1375,6 +1410,11 @@ const VIEW_SHOWS_DESIGN = {
       vocabulary: [],
       placement: [],
       unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "画面と項目を載せる entity として参照するため" },
+        { roleId: "record.records", basis: "stated", reason: null },
+        { roleId: "record.amount", basis: "dependency", reason: "画面に表示する項目として参照するため" },
+      ],
     },
     {
       requirementId: "R-2",
@@ -1384,6 +1424,10 @@ const VIEW_SHOWS_DESIGN = {
       vocabulary: [],
       placement: [],
       unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "合計する行の所属として参照するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
     },
   ],
 };
@@ -1488,14 +1532,14 @@ describe("残った view-shows の参照の不備・役割の対応の欠け（0
  */
 const FIELD_DESIGN = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "記録", shared: true, aliasOf: null },
-    { roleId: "record.a", kind: "field", entity: "record", name: "項目A", shared: true, aliasOf: null },
-    { roleId: "record.b", kind: "field", entity: "record", name: "項目B", shared: true, aliasOf: null },
-    { roleId: "record.c", kind: "field", entity: "record", name: "項目C", shared: true, aliasOf: null },
-    { roleId: "other", kind: "entity", entity: null, name: "その他", shared: true, aliasOf: null },
-    { roleId: "other.a", kind: "field", entity: "other", name: "項目A", shared: true, aliasOf: null },
-    { roleId: "other.b", kind: "field", entity: "other", name: "項目B", shared: true, aliasOf: null },
-    { roleId: "other.c", kind: "field", entity: "other", name: "項目C", shared: true, aliasOf: null },
+    { roleId: "record", kind: "entity", entity: null, name: "記録", shared: true, aliasOf: null, options: null },
+    { roleId: "record.a", kind: "field", entity: "record", name: "項目A", shared: true, aliasOf: null, options: null },
+    { roleId: "record.b", kind: "field", entity: "record", name: "項目B", shared: true, aliasOf: null, options: null },
+    { roleId: "record.c", kind: "field", entity: "record", name: "項目C", shared: true, aliasOf: null, options: null },
+    { roleId: "other", kind: "entity", entity: null, name: "その他", shared: true, aliasOf: null, options: null },
+    { roleId: "other.a", kind: "field", entity: "other", name: "項目A", shared: true, aliasOf: null, options: null },
+    { roleId: "other.b", kind: "field", entity: "other", name: "項目B", shared: true, aliasOf: null, options: null },
+    { roleId: "other.c", kind: "field", entity: "other", name: "項目C", shared: true, aliasOf: null, options: null },
   ],
   designs: [
     {
@@ -1505,6 +1549,12 @@ const FIELD_DESIGN = {
       vocabulary: ["field"],
       placement: ["entities[].fields"],
       unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "項目を載せる entity として参照するため" },
+        { roleId: "record.a", basis: "stated", reason: null },
+        { roleId: "record.b", basis: "stated", reason: null },
+        { roleId: "record.c", basis: "stated", reason: null },
+      ],
     },
     {
       requirementId: "R-2",
@@ -1513,6 +1563,12 @@ const FIELD_DESIGN = {
       vocabulary: ["field"],
       placement: ["entities[].fields"],
       unwritable: [],
+      ownership: [
+        { roleId: "other", basis: "dependency", reason: "項目を載せる entity として参照するため" },
+        { roleId: "other.a", basis: "stated", reason: null },
+        { roleId: "other.b", basis: "stated", reason: null },
+        { roleId: "other.c", basis: "stated", reason: null },
+      ],
     },
   ],
 };
@@ -1671,7 +1727,10 @@ const unwritableOf = (bundle: { artifacts: readonly { path: string; text: string
 
 describe("書けなかった要件の一覧と、部分案になった理由（02 §1.4・§4・Issue #326）", () => {
   it("R-1 と R-4 が書けない設計から、一覧（要件 ID・要件の文・引用・書けない部分）が納品物に出る", async () => {
-    const { recording, run } = runWith(recordedRunFour(), { source: SOURCE_TEXT_FOUR });
+    const { recording, run } = runWith(recordedRunFour(), {
+      source: SOURCE_TEXT_FOUR,
+      designVersion: LEGACY_DESIGN_CONTRACT,
+    });
     const result = await run;
 
     // 送った要求に、受入の題材の言葉が無い
@@ -1758,23 +1817,14 @@ describe("② の申告を仕分けて裏を取る（判定の口。Issue #332�
     roles: CREATE_DESIGN.roles,
     designs: [
       {
-        requirementId: "R-1",
-        nature: "existence-only",
-        verification: { kind: "structural", reason: "登録できることを構造で確かめる" },
-        vocabulary: ["entity", "action"],
-        placement: ["entities", "actions"],
+        ...CREATE_DESIGN.designs[0],
         unwritable: [
           { part: "件数の数え方を決めていない", constraintIds: ["記録"], reason: "どちらの数え方か原文に無い" },
         ],
         notes: [],
       },
       {
-        requirementId: "R-2",
-        nature: "ruled",
-        verification: { kind: "fixed-test" },
-        vocabulary: ["computation"],
-        placement: ["computed"],
-        unwritable: [],
+        ...CREATE_DESIGN.designs[1],
         notes: [],
       },
     ],
@@ -1853,19 +1903,18 @@ function recordingJudge(answers: Readonly<Record<string, JudgeAnswer>>): {
 }
 
 describe("Build の裏付けに渡る ID と抜粋が正規化後のもの（Issue #398）", () => {
-  /** R-1 に、記号つきの見出し（### computed）を根拠にした「書けない」の申告を持つ設計 */
+  /** R-1 に、記号つきの見出し（### computed）を根拠にした「書けない」の申告を持つ設計（新契約） */
   const DESIGN_WITH_SYMBOL_CLAIM = {
+    roles: DESIGN_OUTPUT_MAPPED.roles,
     designs: [
       {
-        requirementId: "R-1",
-        vocabulary: ["計算"],
-        placement: ["computed"],
+        ...DESIGN_OUTPUT_MAPPED.designs[0],
         unwritable: [
           { part: "計算の並べ替えは書けない", constraintIds: ["### computed"], reason: "文書に欄が無い" },
         ],
         notes: [],
       },
-      { requirementId: "R-2", vocabulary: ["計算"], placement: ["computed"], unwritable: [], notes: [] },
+      { ...DESIGN_OUTPUT_MAPPED.designs[1], notes: [] },
     ],
   };
 
@@ -1936,8 +1985,13 @@ describe("判定の呼び出しを生成の予算に数える（05 §4〜§5・I
     const judge = llmAnsweringJudge(usage, judgeChoice("ambiguity", 0.9));
 
     // 同じ記録を、判定あり／判定なしで流す（段の呼び出しは同じ。記録した usage で精算される）
-    const withJudge = await runWith(recordedRun({ design: DESIGN_WITH_CLAIM }), { judge }).run;
-    const withoutJudge = await runWith(recordedRun({ design: DESIGN_WITH_CLAIM })).run;
+    const withJudge = await runWith(recordedRun({ design: DESIGN_WITH_CLAIM }), {
+      judge,
+      designVersion: LEGACY_DESIGN_CONTRACT,
+    }).run;
+    const withoutJudge = await runWith(recordedRun({ design: DESIGN_WITH_CLAIM }), {
+      designVersion: LEGACY_DESIGN_CONTRACT,
+    }).run;
 
     const judgeCost = costOfUsageUsd(usage, RATES);
     expect(judgeCost).toBeGreaterThan(0);
@@ -1973,7 +2027,12 @@ describe("判定の呼び出しを生成の予算に数える（05 §4〜§5・I
     // 予算は、段の呼び出し（③ は 500 件の設計を運ぶ）には足りるが、判定の予約（1 申告 = 1 問の
     // 問いの map）には足りない大きさにする。Issue #399 で low を medium（= high）と同じ値にした分、
     // 段の予約が大きくなったので、値を上げてある。
-    const result = await runWith(recordedRun({ design }), { judge, effort: "low", budgetUsd: 0.15 }).run;
+    const result = await runWith(recordedRun({ design }), {
+      judge,
+      effort: "low",
+      budgetUsd: 0.15,
+      designVersion: LEGACY_DESIGN_CONTRACT,
+    }).run;
 
     // 予約できないので、判定は 1 回も呼ばれない（呼べるなら問いの答えが無くて誤りになるはず）
     expect(calls()).toBe(0);
@@ -2017,7 +2076,7 @@ describe("確定した仕様を正本にする（§5・Issue #334）", () => {
   });
 
   it("了承して除いた部分だけが書けない仕様は、合格（full）になる", async () => {
-    const { run } = runWith(recordedRunFromPlan({ design: DESIGN_OUTPUT_PARTIAL }), {
+    const { run } = runWith(recordedRunFromPlan({ design: DESIGN_OUTPUT_PLANNED_PARTIAL }), {
       plan: CONFIRMED_PLAN_ACCEPTED,
     });
     const result = await run;
@@ -2168,7 +2227,9 @@ describe("試験の段の種類の食い違いを判定に選ばせる（Issue #
       };
     });
     const design = {
-      roles: [{ roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null }],
+      roles: [
+        { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
+      ],
       designs: requirements.map((requirement) => ({
         requirementId: requirement.id,
         nature: "existence-only",
@@ -2176,6 +2237,7 @@ describe("試験の段の種類の食い違いを判定に選ばせる（Issue #
         vocabulary: [],
         placement: [],
         unwritable: [],
+        ownership: [{ roleId: "record", basis: "stated", reason: null }],
       })),
     };
     // 正常・異常・境界をそろえる（判定が断られて ruled に倒れたときに、試験の段は通る）
@@ -2201,7 +2263,8 @@ describe("試験の段の種類の食い違いを判定に選ばせる（Issue #
     // 段の呼び出しの usage を欠けさせ、予約を残したままにする（Issue #399）。low を medium（= high）と
     // 同じ値にした分、段の予約が大きくなり、settle で戻ると「段は通るが判定の予約は断られる」窓が
     // ほぼ消える。予約を残せば、判定の手前の残高が判定の予約を下回るので、判定は呼ばれず ruled に倒れる
-    // （幅のある窓で確かめられる）。
+    // （幅のある窓で確かめられる）。**②' のデータが要件ごとの所属（ownership）も運ぶようになった分
+    // （Issue #418）、値を上げてある。**
     const noUsage = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
     const result = await runWith(
       [
@@ -2212,7 +2275,7 @@ describe("試験の段の種類の食い違いを判定に選ばせる（Issue #
         // 試験の段のあとの段（③）は、予算が尽きているか、この応答で形が合わずに止まる
         noUsage({}),
       ],
-      { source, judge, budgetUsd: 0.42, effort: "low" },
+      { source, judge, budgetUsd: 0.5, effort: "low" },
     ).run;
 
     // 予約が断られたので、判定は 1 回も呼ばれない（要約の judge 欄にも入らない）
@@ -2264,7 +2327,7 @@ describe("答えから増えた要件の文に問いの文脈を添える（§5�
           decisions: [{ testId: "t1", verdict: "return-to-plan", reason: "確定した仕様と食い違う", quote: "" }],
         }),
       ],
-      { plan: CONFIRMED_PLAN_ADDED },
+      { plan: CONFIRMED_PLAN_ADDED, designVersion: LEGACY_DESIGN_CONTRACT },
     );
     const result = await run;
 
@@ -2337,9 +2400,9 @@ const WRITE_NO_ACTION = WRITE_DECLARATION.replace(
 /** ② の設計（R-1 は「誰でも直せる」を 3 つの構造の検査で確かめる。R-2 は固定した試験） */
 const WRITE_DESIGN = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
-    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
+    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null, options: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
   ],
   designs: [
     {
@@ -2350,6 +2413,10 @@ const WRITE_DESIGN = {
       vocabulary: ["action"],
       placement: ["actions"],
       unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "操作の対象の entity として参照するため" },
+        { roleId: "record.add", basis: "stated", reason: null },
+      ],
     },
     {
       requirementId: "R-2",
@@ -2359,6 +2426,10 @@ const WRITE_DESIGN = {
       vocabulary: ["computation"],
       placement: ["computed"],
       unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "合計する行の所属として参照するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
     },
   ],
 };
@@ -2599,13 +2670,37 @@ describe("設計の段の中身の作り直し（§5・Issue #407）", () => {
 /** entity・項目（record.amount）・計算（record.total）を持つ設計（値の鍵の検査が掛かる） */
 const KEY_RUN_DESIGN = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
-    { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
+    { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: true, aliasOf: null, options: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null, options: null },
   ],
   designs: [
-    { requirementId: "R-1", nature: "ruled", verification: { kind: "fixed-test" }, vocabulary: [], placement: [], unwritable: [] },
-    { requirementId: "R-2", nature: "ruled", verification: { kind: "fixed-test" }, vocabulary: [], placement: [], unwritable: [] },
+    {
+      requirementId: "R-1",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      vocabulary: [],
+      placement: [],
+      unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "評価する行の所属として参照するため" },
+        { roleId: "record.amount", basis: "dependency", reason: "入力の行に保存する項目として参照するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
+    },
+    {
+      requirementId: "R-2",
+      nature: "ruled",
+      verification: { kind: "fixed-test" },
+      vocabulary: [],
+      placement: [],
+      unwritable: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "評価する行の所属として参照するため" },
+        { roleId: "record.amount", basis: "dependency", reason: "入力の行に保存する項目として参照するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
+    },
   ],
 };
 
@@ -2713,25 +2808,17 @@ describe("値の鍵と行の ID（§1・②'・Issue #409）", () => {
 /** やり直しの対象になる申告（R-1。制約 ID は文書の見出しにある `記録`） */
 const REDO_PART = "記録の並べ替えは書けない";
 
-/** R-1 に語彙の穴の申告を 1 件持つ設計（新形式。R-2 は申告なし） */
+/** R-1 に語彙の穴の申告を 1 件持つ設計（新形式。R-2 は申告なし。所属は CREATE_DESIGN と同じ） */
 const REDO_DESIGN_ORIGINAL = {
   roles: CREATE_DESIGN.roles,
   designs: [
     {
-      requirementId: "R-1",
-      nature: "existence-only",
-      verification: { kind: "structural", reason: "登録できることを構造で確かめる" },
-      vocabulary: ["entity", "action"],
-      placement: ["entities", "actions"],
+      ...CREATE_DESIGN.designs[0],
       unwritable: [{ part: REDO_PART, constraintIds: ["記録"], reason: "文書に欄が無い" }],
       notes: [],
     },
     {
-      requirementId: "R-2",
-      nature: "ruled",
-      verification: { kind: "fixed-test" },
-      vocabulary: ["computation"],
-      placement: ["computed"],
+      ...CREATE_DESIGN.designs[1],
       unwritable: [],
       notes: [],
     },
@@ -2911,11 +2998,7 @@ describe("仕分けが呼ぶ設計のやり直しを段の記録に残す（Issu
       roles: CREATE_DESIGN.roles,
       designs: [
         {
-          requirementId: "R-1",
-          nature: "existence-only",
-          verification: { kind: "structural", reason: "登録できることを構造で確かめる" },
-          vocabulary: ["entity", "action"],
-          placement: ["entities", "actions"],
+          ...CREATE_DESIGN.designs[0],
           unwritable: [
             { part: "記録の並べ替えは書けない", constraintIds: ["記録"], reason: "文書に欄が無い" },
             { part: "記録の見出しの付け方は書けない", constraintIds: ["記録"], reason: "文書に欄が無い" },
@@ -2923,11 +3006,7 @@ describe("仕分けが呼ぶ設計のやり直しを段の記録に残す（Issu
           notes: [],
         },
         {
-          requirementId: "R-2",
-          nature: "ruled",
-          verification: { kind: "fixed-test" },
-          vocabulary: ["computation"],
-          placement: ["computed"],
+          ...CREATE_DESIGN.designs[1],
           unwritable: [],
           notes: [],
         },
@@ -3107,13 +3186,16 @@ describe("設計のやり直しの記録を組む包み（Issue #410）", () => 
 describe("早期停止でも、受理した材料を診断に残す（Issue #417）", () => {
   it("②' が 2 回とも形に合わず malformed で止まっても、受理した設計は診断に残る", async () => {
     const malformed = { tests: 123 };
-    const { run } = runWith([
-      structured(REQUIREMENT_LIST_OUTPUT),
-      structured(REVERSE_CHECK_OUTPUT),
-      structured(DESIGN_OUTPUT),
-      structured(malformed),
-      structured(malformed),
-    ]);
+    const { run } = runWith(
+      [
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(DESIGN_OUTPUT),
+        structured(malformed),
+        structured(malformed),
+      ],
+      { designVersion: LEGACY_DESIGN_CONTRACT },
+    );
     const result = await run;
 
     // 止め方（stopped・outcome・要約の exit_code・stop_reason・bundle）は今までどおり
@@ -3213,5 +3295,177 @@ describe("早期停止でも、受理した材料を診断に残す（Issue #417
       correspondence_generations: 1,
       repair_executions: 1,
     });
+  });
+});
+
+// ── 設計の契約：所属と選択肢（§1・②・Issue #418）──────────────────────
+
+describe("設計の契約：所属と選択肢（Issue #418）", () => {
+  it("新契約の fixture で ①〜⑦ が完走し、②' の要求のデータに options 込みの表と所属が入る", async () => {
+    const { recording, run } = runWith(recordedRun());
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const request = recording.structured.find((candidate) => candidate.schemaName === TEST_SUITE_SCHEMA_NAME);
+    expect(request?.input).toContain("役割 ID の表");
+    expect(request?.input).toContain("options");
+    expect(request?.input).toContain("要件ごとの所属");
+  });
+
+  it("版を省いた走りは新契約（所属の無い応答が形の誤りで止まる）", async () => {
+    // 旧形式の設計（役割の表・所属・options を持たない）を、互換を明示せずに渡す
+    const { run } = runWith([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(DESIGN_OUTPUT),
+      structured(DESIGN_OUTPUT),
+    ]);
+    const result = await run;
+
+    expect(result.stopped).toMatchObject({ stage: "design", kind: "malformed" });
+    expect(result.bundle).toBeNull();
+  });
+
+  it("差し替えた全体の所属を壊す作り直しの設計は採らず、記録は failed・unmet・calls 2 で、元の申告を印つきで残し、終端は同じ", async () => {
+    // 表は固定のまま、対象の要件の所属だけを空にする（全体の所属が壊れる）
+    const brokenOwnership = {
+      roles: CREATE_DESIGN.roles,
+      designs: [{ ...CREATE_DESIGN.designs[0], ownership: [] }],
+    };
+    const { recording, run } = runWith(
+      trackedRedo([structured(brokenOwnership), structured(brokenOwnership)]),
+      { judge: redoJudge },
+    );
+    const result = await run;
+
+    // 走りは止まらない（終端は同じ＝部分案）
+    expect(result.stopped).toBeNull();
+    const designs = result.record.stages.filter((stage) => stage.stage === "design");
+    expect(designs).toHaveLength(2);
+    expect(designs[1]).toMatchObject({
+      operation: "redo-design",
+      status: "failed",
+      failure_kind: "unmet",
+      calls: 2,
+    });
+    // 1 要件 1 callback（中身の 2 ラウンドだけ）。後段の応答を消費していない
+    expect(recording.structured.filter((request) => request.schemaName === TEST_SUITE_SCHEMA_NAME)).toHaveLength(1);
+    expect(result.bundle).not.toBeNull();
+    if (result.bundle === null) return;
+    const list = unwritableOf(result.bundle);
+    expect(list.marked_requirements).toEqual(["R-1"]);
+    expect(list.unwritable.map((entry) => entry.requirementId)).toEqual(["R-1"]);
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+  });
+
+  it("整合する作り直しの設計は採る（既存の #410 の成功例と同じく、表は元のまま）", async () => {
+    const { run } = runWith(trackedRedo([structured(REDO_DESIGN_OK)]), { judge: redoJudge });
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const designs = result.record.stages.filter((stage) => stage.stage === "design");
+    expect(designs[1]).toMatchObject({ operation: "redo-design", status: "ok" });
+    const list = unwritableOf(result.bundle!);
+    expect(list.unwritable).toEqual([]);
+  });
+
+  it("2 要件を続けて作り直すと、2 件目の基準に 1 件目の採用が反映され、採用後も共有・全役割の所属が成立する", async () => {
+    const designTwoClaims = {
+      roles: CREATE_DESIGN.roles,
+      designs: [
+        {
+          ...CREATE_DESIGN.designs[0],
+          unwritable: [{ part: "記録の並べ替えは書けない", constraintIds: ["記録"], reason: "文書に欄が無い" }],
+          notes: [],
+        },
+        {
+          ...CREATE_DESIGN.designs[1],
+          unwritable: [{ part: "合計の丸め方は書けない", constraintIds: ["記録"], reason: "文書に欄が無い" }],
+          notes: [],
+        },
+      ],
+    };
+    // 1 件目（R-1）のやり直しの所属に、目印の理由を入れる
+    const redoR1 = {
+      roles: CREATE_DESIGN.roles,
+      designs: [
+        {
+          ...CREATE_DESIGN.designs[0],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "REDO-R1-REASON" },
+            { roleId: "record.add", basis: "stated", reason: null },
+          ],
+        },
+      ],
+    };
+    const redoR2 = { roles: CREATE_DESIGN.roles, designs: [CREATE_DESIGN.designs[1]] };
+    const judge = createFakeJudge({
+      "triage:R-1:0": judgeChoice("vocabulary-hole", 0.9),
+      "triage:R-2:0": judgeChoice("vocabulary-hole", 0.9),
+      "support:R-1:0": judgeChoice("contradicts", 0.9),
+      "support:R-2:0": judgeChoice("contradicts", 0.9),
+    });
+    const { recording, run } = runWith(
+      [
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(designTwoClaims),
+        structured(redoR1),
+        structured(redoR2),
+        structured(REDO_PASSING_SUITE),
+        structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+        structured(CREATE_CORRESPONDENCE),
+      ],
+      { judge },
+    );
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const designs = result.record.stages.filter((stage) => stage.stage === "design");
+    // 初回 1 件＋作り直し 2 件
+    expect(designs.filter((stage) => stage.operation === "redo-design")).toHaveLength(2);
+    // 2 件目の作り直しの要求のデータに、1 件目の採用（目印の理由）が入る
+    const designRequests = recording.structured.filter((request) => request.schemaName === DESIGN_SCHEMA_NAME);
+    expect(designRequests.some((request) => request.input.includes("REDO-R1-REASON"))).toBe(true);
+  });
+
+  it("目印を入れた不正な所属・options・reason で止まる例で、要約と段の失敗の記録にその目印が無い", async () => {
+    const marker = "MARKER418";
+    const badDesign = {
+      roles: [
+        { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
+        { roleId: `record.${marker}`, kind: "field", entity: "record", name: marker, shared: false, aliasOf: null, options: [`${marker}-option`] },
+      ],
+      designs: [
+        {
+          requirementId: "R-1",
+          nature: "ruled",
+          verification: { kind: "fixed-test" },
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [{ roleId: `ghost-${marker}`, basis: "dependency", reason: `${marker}-reason` }],
+        },
+        {
+          requirementId: "R-2",
+          nature: "existence-only",
+          verification: { kind: "structural", reason: "在ることだけ" },
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [],
+        },
+      ],
+    };
+    const { run } = runWith([structured(REQUIREMENT_LIST_OUTPUT), structured(REVERSE_CHECK_OUTPUT), structured(badDesign), structured(badDesign)]);
+    const result = await run;
+
+    expect(result.stopped).toMatchObject({ stage: "design", kind: "unmet" });
+    expect(JSON.stringify(result.summary)).not.toContain(marker);
+    expect(JSON.stringify(result.record)).not.toContain(marker);
+    expect(JSON.stringify(result.diagnostics)).not.toContain(marker);
   });
 });

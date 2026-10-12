@@ -235,6 +235,27 @@ describe("全段で同じ「封筒」の schema（02 §2・#353）", () => {
     expect(branchCheckItems.enum).toContain("write-anonymous");
   });
 
+  it("設計の段の枝に、選択肢（options）と所属（ownership）の欄があり、required で strict（Issue #418）", () => {
+    const designEntry = STAGE_ENVELOPE_ENTRIES.find((entry) => entry.stage === "requirement-design");
+    expect(designEntry).toBeDefined();
+    if (designEntry === undefined) return;
+
+    const designBranch = buildStageBranch(designEntry);
+    expect(strictProblems(designBranch)).toEqual([]);
+    // 役割 ID の表の行に、選択肢（options）が required で入る
+    const roles = (designBranch.properties as Record<string, unknown>)["roles"] as Record<string, unknown>;
+    const roleItem = roles.items as Record<string, unknown>;
+    expect(roleItem.required as readonly string[]).toContain("options");
+    expect(strictProblems(roleItem)).toEqual([]);
+    // 要件ごとの設計に、所属（ownership）が required で入る
+    const designs = (designBranch.properties as Record<string, unknown>)["designs"] as Record<string, unknown>;
+    const designItem = designs.items as Record<string, unknown>;
+    expect(designItem.required as readonly string[]).toContain("ownership");
+    const ownership = (designItem.properties as Record<string, unknown>)["ownership"] as Record<string, unknown>;
+    expect(ownership.type).toBe("array");
+    expect(strictProblems(ownership)).toEqual([]);
+  });
+
   it("段の名前から、その枝（段の schema）を引ける", () => {
     for (const entry of STAGE_ENVELOPE_ENTRIES) {
       expect(envelopeStageFor(entry.stage)?.schema, entry.stage).toBe(entry.schema);
