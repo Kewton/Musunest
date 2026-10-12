@@ -788,27 +788,35 @@ export function anonymize(full) {
   };
 }
 
+/** 匿名の失敗で標準エラーに出してよい理由（OS のファイル操作の既知のコードだけ。誤りの文・パス・スタックは出さない） */
+const KNOWN_FS_CODES = ["EACCES", "EPERM", "EROFS", "EISDIR", "ENOTDIR", "ENOENT", "ENOSPC", "EDQUOT", "EMFILE", "ENFILE", "EBUSY", "EEXIST", "ENAMETOOLONG", "ELOOP", "EIO"];
+
 async function main() {
   const [repo, outRoot] = process.argv.slice(2);
   const label = process.argv.includes("--label") ? process.argv[process.argv.indexOf("--label") + 1] : "";
   const anonymous = process.argv.includes("--anonymous");
   const setPath = process.argv.includes("--set") ? process.argv[process.argv.indexOf("--set") + 1] : undefined;
-  let full;
-  try { full = await scoreOutput(repo, outRoot, { ...(setPath === undefined ? {} : { setPath }), anonymous }); } catch (e) {
-    if (e?.refused === true) { console.error(`断りました: ${e.message}`); process.exit(3); }
-    // 匿名の実行では、予期しない誤りの文（パスや本の ID を含みうる）も標準エラーに出さない
-    if (anonymous) { console.error("失敗しました: 採点できなかった（匿名の実行では詳細を出さない。匿名でない実行で確かめる）"); process.exit(1); }
-    throw e;
-  }
   const name = `score${label ? "-" + label : ""}`;
-  // 組に無い ID の本（採点せず飛ばした。照合の unscored に残る）。匿名なら件数だけ
-  const unscored = full.completion.unscored ?? [];
-  if (unscored.length > 0) console.error(anonymous ? `飛ばしました: 組に無い ID の本 ${unscored.length} 本` : `飛ばしました: ${unscored.join(",")}（組 ${full.set.id} に無い ID の本）`);
-  if (anonymous) {
-    const a = anonymize(full);
-    writeFileSync(join(outRoot, `${name}.anonymous.json`), JSON.stringify(a, null, 1));
-    console.log(JSON.stringify(a, null, 1));
-    return;
+  // 匿名の実行では、採点から匿名化・JSON 化・結果の書き込みまでを 1 つの範囲で守る
+  // （予期しない誤りの文・スタックは出力先のパス＝本・組の ID を含みうる。書き込みの失敗が外にあった：fix-427b B1）
+  let full, stage = "採点できなかった";
+  try {
+    full = await scoreOutput(repo, outRoot, { ...(setPath === undefined ? {} : { setPath }), anonymous });
+    // 組に無い ID の本（採点せず飛ばした。照合の unscored に残る）。匿名なら件数だけ
+    const unscored = full.completion.unscored ?? [];
+    if (unscored.length > 0) console.error(anonymous ? `飛ばしました: 組に無い ID の本 ${unscored.length} 本` : `飛ばしました: ${unscored.join(",")}（組 ${full.set.id} に無い ID の本）`);
+    if (anonymous) {
+      stage = "結果を書けなかった";
+      const text = JSON.stringify(anonymize(full), null, 1);
+      writeFileSync(join(outRoot, `${name}.anonymous.json`), text);
+      console.log(text);
+      return;
+    }
+  } catch (e) {
+    if (e?.refused === true) { console.error(`断りました: ${e.message}`); process.exit(3); }
+    // 匿名の実行では、どの段の予期しない誤りでも文・スタックを標準エラーに出さない。出すのは段と OS の既知のコードだけ
+    if (anonymous) { console.error(`失敗しました: ${stage}（${KNOWN_FS_CODES.includes(e?.code) ? `理由: ${e.code}。` : ""}匿名の実行では詳細を出さない。匿名でない実行で確かめる）`); process.exit(1); }
+    throw e;
   }
   writeFileSync(join(outRoot, `${name}.json`), JSON.stringify(full, null, 1));
   const { set, metrics, metrics_accepted, metrics_script, fulfillment, completion, fingerprints, bySubject, rows } = full;

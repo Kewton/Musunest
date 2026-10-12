@@ -1424,3 +1424,40 @@ test("--anonymous は読み込みと診断の前に伝わり、成功・断り�
     assert.ok(r7.stderr.includes("MARK_NOREPO"), "匿名でなければ誤りの詳細はそのまま");
   });
 });
+
+test("--anonymous は結果の書き込みに失敗しても標準出力・標準エラーに本の ID・組の ID・パス・スタックを出さない（既知の理由コードだけ）。匿名でなければ誤りの詳細はそのまま", async () => {
+  await withOut(async (base) => {
+    const setPath = writeJson(join(base, "MARK_DIR/MARK_SET.json"), { ...SET_DEFAULTS, id: "MARK_SET", items: [itemOf("P1", "A")] });
+    const loaded = loadEvalSet(setPath);
+    assert.equal(loaded.status, "ok");
+    const out = join(base, "MARK_OUT");
+    addRun(out, "P1-r1", { spec: PASS_A });
+    planConditions(out, ["P1-r1"], { schema: V3, measurement_id: "MARK_ID", set: { path: setPath, sha256: loaded.sha256, id: "MARK_SET" } });
+    // 書き込みの関数を差し替え、出力先への書き込みだけを OS の権限エラーと同じ形（EACCES・文にパスを含む）で失敗させる（物理の権限は変えない）
+    const preload = join(base, "MARK_DIR/fail-write.mjs");
+    writeFileSync(preload, `import fs from "node:fs"; import { syncBuiltinESMExports } from "node:module";
+const orig = fs.writeFileSync, out = ${JSON.stringify(out)};
+fs.writeFileSync = (p, ...rest) => { if (String(p).startsWith(out)) { const e = new Error(\`EACCES: permission denied, open '\${p}'\`); e.code = "EACCES"; e.errno = -13; e.syscall = "open"; e.path = String(p); throw e; } return orig(p, ...rest); };
+syncBuiltinESMExports();
+`);
+    const forbidden = ["P1-r1", "MARK_", base, "score-agent.mjs", "    at "];
+    const clean = (r, name) => { for (const w of forbidden) { assert.ok(!r.stdout.includes(w), `${name}: 標準出力に ${w}`); assert.ok(!r.stderr.includes(w), `${name}: 標準エラーに ${w}`); } };
+    const r = spawnSync(process.execPath, ["--import", pathToFileURL(preload).href, scoreFile, repo, out, "--anonymous"], { encoding: "utf8" });
+    assert.equal(r.status, 1);
+    clean(r, "EACCES");
+    assert.equal(r.stdout, "");
+    assert.equal(r.stderr, "失敗しました: 結果を書けなかった（理由: EACCES。匿名の実行では詳細を出さない。匿名でない実行で確かめる）\n");
+    assert.equal(existsSync(join(out, "score.anonymous.json")), false);
+    // 実際の OS の誤り：結果のパスにディレクトリがある（EISDIR。権限に依らず起きる）
+    mkdirSync(join(out, "score.anonymous.json"));
+    const r2 = spawnSync(process.execPath, [scoreFile, repo, out, "--anonymous"], { encoding: "utf8" });
+    assert.equal(r2.status, 1);
+    clean(r2, "EISDIR");
+    assert.equal(r2.stdout, "");
+    assert.equal(r2.stderr, "失敗しました: 結果を書けなかった（理由: EISDIR。匿名の実行では詳細を出さない。匿名でない実行で確かめる）\n");
+    // 匿名でない実行では、同じ失敗で誤りの詳細（コード・パス・スタック）をそのまま出す（調べられる）
+    const r3 = spawnSync(process.execPath, ["--import", pathToFileURL(preload).href, scoreFile, repo, out], { encoding: "utf8" });
+    assert.notEqual(r3.status, 0);
+    assert.ok(r3.stderr.includes("EACCES") && r3.stderr.includes(join(out, "score.json")) && r3.stderr.includes("    at "), "匿名でなければ誤りの詳細はそのまま");
+  });
+});
