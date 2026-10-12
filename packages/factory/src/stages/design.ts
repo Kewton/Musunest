@@ -46,6 +46,7 @@ import {
   normalizeConstraintIds,
   serializeJson,
   type Problem,
+  type PromptData,
   type PromptDocument,
   type ShapeCheck,
   type StageOutcome,
@@ -54,6 +55,9 @@ import {
 /** ② の JSON Schema の名前 */
 export const DESIGN_SCHEMA_NAME = "requirement-design";
 
+/** 作り直しの回数（1 回だけやり直す。§1）。試験の段（`TEST_SUITE_ROUNDS`）と同じ形 */
+export const DESIGN_ROUNDS = 2;
+
 /** ② に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const DESIGN_RULES: readonly string[] = [
   "要件ごとに、使う語彙と、宣言のどの欄に置くか（placement）を決める。",
@@ -61,7 +65,7 @@ export const DESIGN_RULES: readonly string[] = [
   "制約 ID は、渡した文書の本文にあるものだけを挙げる——契約の規則の ID（例 `R-TYPE-01`）か、語彙の意味の見出しの文（例 `number`。`#` の記号は付けない）である。文書に無い ID を作らない。",
   "語彙の穴ではないもの（曖昧さ・決めたこと・不確かさ・要件の言い直し）は unwritable に書かず、notes に書く。notes には書けない部分を書かない。",
   "文書（契約・語彙の意味・語彙の台帳）に無い語彙・キー・関数は作らない。書けないものを、近い別の意味に書き換えない。",
-  "要件ごとに 1 つの設計を返す。要件 ID は一覧のまま写す。",
+  "要件ごとに 1 つの設計を返す。要件 ID は一覧のまま写す。**代わりの案の要件にも 1 つ設計を返す**（一覧の中の `R:alt:` の形の要件 ID も、一覧のまま写して設計を返す）。",
   "役割 ID の表（roles）を作る。役割 ID は entity の文脈を含む ID（例 member・member.name・session.bookCount）にし、対象の種類（kind）と、所属の entity の役割 ID（entity）を付ける。entity 自身の行は entity を null にする。",
   "同じ名前の対象を複数の役割 ID にするときは、共有（shared を true）か別名（aliasOf を元の役割 ID）を明示する。明示しなければ、同じ名前の対象を 1 つの役割 ID にまとめる。",
   "同名の別 entity を同じ役割 ID にしない。別 entity の同名の対象は、別の役割 ID にする。",
@@ -611,28 +615,48 @@ function normalizeDesignClaims(design: DesignOutput): DesignOutput {
   };
 }
 
-/** ② を 1 回呼ぶ。データは要件の一覧だけである */
+/**
+ * ② を回す。形は `callStructuredChecked` が 1 回だけやり直し（2 試行）、**中身の点検に合わなければ
+ * 1 回だけ作り直させる**（`DESIGN_ROUNDS`）。前回の問題（欄・短い説明）はデータ
+ * （`前回の作り直しの指示`）にだけ入れ、規則（instructions・rules）と文書の前置きへは昇格させない。
+ *
+ * **中身の枠が握るのは `unmet` だけ**——形の失敗（`malformed`）・予算・締切・呼び出しの数・拒否・
+ * 要求の誤り・打ち切り・通信の失敗は、そのまま返す（中身の枠で再試行しない）。2 回目も合わなければ
+ * `unmet`（`attempts` は `DESIGN_ROUNDS`、問題は最後の回のもの）にする。
+ *
+ * **枠の数**：形（`callStructuredChecked` の 2 試行）× 中身（`DESIGN_ROUNDS` = 2 回）＝ 1 回の呼び出しで
+ * 構造化の呼び出しは最大 4 回。通信（timeout・network・5xx）のやり直しは共通の口（`CallGateway`）の
+ * 試行の数（既定 2）で別に数え、段では数えない。**どの試行もジョブの総呼び出しの上限に数える。**
+ */
 export async function runDesign(input: DesignInput): Promise<StageOutcome<DesignOutput>> {
-  const request = buildStructuredRequest({
-    rules: DESIGN_RULES,
-    documents: input.documents,
-    data: [{ name: "要件の一覧", text: serializeJson(input.list) }],
-    schemaName: DESIGN_SCHEMA_NAME,
-    schema: DESIGN_SCHEMA,
-    maxOutputTokens: input.gateway.maxOutputTokens("design"),
-  });
-  const answer = await callStructuredChecked(input.gateway, { request, check: checkDesignOutput });
-  if (!answer.ok) return answer;
-  const problems: Problem[] = [];
-  // 新しい欄を持つ設計（本番の応答）だけ、中身の点検を掛ける。旧形式の記録（試験の fixture）は通す
-  if (isPlannedDesign(answer.value)) {
-    problems.push(...checkDesignPlan(input.list, answer.value));
+  let previous: readonly Problem[] = [];
+  for (let round = 1; round <= DESIGN_ROUNDS; round += 1) {
+    const data: PromptData[] = [{ name: "要件の一覧", text: serializeJson(input.list) }];
+    if (previous.length > 0) {
+      data.push({ name: "前回の作り直しの指示", text: serializeJson(previous) });
+    }
+    const request = buildStructuredRequest({
+      rules: DESIGN_RULES,
+      documents: input.documents,
+      data,
+      schemaName: DESIGN_SCHEMA_NAME,
+      schema: DESIGN_SCHEMA,
+      maxOutputTokens: input.gateway.maxOutputTokens("design"),
+    });
+    const answer = await callStructuredChecked(input.gateway, { request, check: checkDesignOutput });
+    if (!answer.ok) return answer;
+    const problems: Problem[] = [];
+    // 新しい欄を持つ設計（本番の応答）だけ、中身の点検を掛ける。旧形式の記録（試験の fixture）は通す
+    if (isPlannedDesign(answer.value)) {
+      problems.push(...checkDesignPlan(input.list, answer.value));
+    }
+    // 書けない部分の根拠（制約 ID）は、旧形式では申告が無いので何も断らない（#332）
+    problems.push(...checkDesignConstraints(answer.value, input.documents));
+    if (problems.length === 0) {
+      // 根拠の照合を通ったあと、保存する側の ID を正規化する（Issue #398）
+      return { ok: true, value: normalizeDesignClaims(answer.value) };
+    }
+    previous = problems;
   }
-  // 書けない部分の根拠（制約 ID）は、旧形式では申告が無いので何も断らない（#332）
-  problems.push(...checkDesignConstraints(answer.value, input.documents));
-  if (problems.length > 0) {
-    return { ok: false, failure: { kind: "unmet", attempts: 1, problems } };
-  }
-  // 根拠の照合を通ったあと、保存する側の ID を正規化する（Issue #398）
-  return { ok: true, value: normalizeDesignClaims(answer.value) };
+  return { ok: false, failure: { kind: "unmet", attempts: DESIGN_ROUNDS, problems: previous } };
 }

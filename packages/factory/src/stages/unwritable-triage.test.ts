@@ -182,6 +182,36 @@ describe("申告の仕分けと裏付け（05 §3・Issue #332）", () => {
     expect(result.kept).toEqual([{ requirementId: "R-1", claims: [redoneClaim], marked: false, redone: true }]);
   });
 
+  it("同じ要件に「反する」が 2 つあり、最初のやり直しが undefined を返すと、callback は 1 回だけである", async () => {
+    let redoCalls = 0;
+    const claimA = claim("部分 A", ["記録"], "理由 A");
+    const claimB = claim("部分 B", ["合計"], "理由 B");
+    const { run } = triage(
+      design(entry("R-1", [claimA, claimB])),
+      {
+        [triageQuestionName("R-1", 0)]: choice("vocabulary-hole", 0.9),
+        [triageQuestionName("R-1", 1)]: choice("vocabulary-hole", 0.9),
+        [supportQuestionName("R-1", 0)]: choice("contradicts", 0.9),
+        [supportQuestionName("R-1", 1)]: choice("contradicts", 0.9),
+      },
+      {
+        redoDesign: async () => {
+          redoCalls += 1;
+          // 設計のやり直しが失敗（undefined）しても、同じ要件で呼び直さない（Issue #407）
+          return undefined;
+        },
+      },
+    );
+    const result = await run;
+
+    // 成功・失敗によらず、その要件につき 1 回だけ
+    expect(redoCalls).toBe(1);
+    // 申告は印つきで残る（捨てない）
+    expect(result.kept).toEqual([
+      { requirementId: "R-1", claims: [claimA, claimB], marked: true, redone: false },
+    ]);
+  });
+
   it("確信度が閾値より低い裏付けは、印つきで残す（捨てない）", async () => {
     const { run } = triage(design(entry("R-1", [CLAIM])), {
       [triageQuestionName("R-1", 0)]: choice("vocabulary-hole", 0.9),

@@ -261,3 +261,126 @@ describe("答えから増えた要件の文に問いの文脈を添える（§5�
     expect(second).toContain("q-2");
   });
 });
+
+// ── 了承して除いた部分の代わりの案に、元の要件と部分の文脈を添える（§5・Issue #407）──
+
+const ORIGINAL_TEXT = "記録できる";
+const ALTERNATIVE_TEXT = "代わりの案の記録";
+const ORIGINAL_PART_ID = "R-1-p1";
+const ORIGINAL_PART_TEXT = "記録の並べ替え";
+
+/** 代わりの案の文脈の試験で使う、確定した仕様の土台 */
+const ALTERNATIVE_BASE: ConfirmedPlan = {
+  schema_version: PLAN_SPEC_SCHEMA_VERSION,
+  plan_id: "plan-alt",
+  revision: 1,
+  vocabulary_version: "v1",
+  inputs: [{ id: "in-1", kind: "source", text: SOURCE }],
+  requirements: [],
+  open_issues: [],
+  decisions: [],
+  accepted_unwritable: [],
+  confirmation: { sha256: "0".repeat(64), confirmed_at: "2026-09-16T12:00:00+09:00", confirmed_by: "tester" },
+};
+
+/** 元の要件（部分 `R-1-p1` を「了承して除く」） */
+const originalRequirement: ConfirmedPlan["requirements"][number] = {
+  id: "R-1",
+  text: ORIGINAL_TEXT,
+  kind: "existence",
+  origin: { input_id: "in-1", quote: "タスクを記録する" },
+  parts: [{ id: ORIGINAL_PART_ID, text: ORIGINAL_PART_TEXT, disposition: "accepted_removal" }],
+};
+
+/** 代わりの案の要件（ID は接頭辞 `R:alt:` があってもなくてもよい） */
+function alternativeRequirement(id: string): ConfirmedPlan["requirements"][number] {
+  return {
+    id,
+    text: ALTERNATIVE_TEXT,
+    kind: "existence",
+    origin: { input_id: "in-1", quote: "代わりの案の記録をする" },
+    parts: [{ id: `${id}-p1`, text: "代わりの案", disposition: "met" }],
+  };
+}
+
+/** 代わりの案の要件と、`accepted_unwritable` の参照を持つ確定した仕様を組む */
+function alternativePlan(options: {
+  readonly alternativeId: string;
+  /** 参照を持つか（既定 true）。false なら `accepted_unwritable` は空 */
+  readonly reference?: boolean;
+  /** 参照する部分 ID（既定 `R-1-p1`） */
+  readonly partId?: string;
+}): ConfirmedPlan {
+  return {
+    ...ALTERNATIVE_BASE,
+    requirements: [originalRequirement, alternativeRequirement(options.alternativeId)],
+    accepted_unwritable:
+      options.reference === false
+        ? []
+        : [
+            {
+              part_id: options.partId ?? ORIGINAL_PART_ID,
+              alternative_id: options.alternativeId,
+              basis: { doc_version: "v1", location: "contract", constraint_id: "R-1" },
+            },
+          ],
+  };
+}
+
+/** ある要件の文を返す（無ければ空文字） */
+function textOf(plan: ConfirmedPlan, id: string): string {
+  return requirementsFromPlan(plan).requirements.find((requirement) => requirement.id === id)?.text ?? "";
+}
+
+describe("了承して除いた部分の代わりの案に、元の要件と部分の文脈を添える（§5・Issue #407）", () => {
+  it("参照から代わりの案の要件に文脈が付き、元の要件 ID・部分 ID・部分の文を含む", () => {
+    const text = textOf(alternativePlan({ alternativeId: "R-2" }), "R-2");
+    expect(text).toContain(CONFIRMED_REQUIREMENT_LABEL);
+    expect(text).toContain(ALTERNATIVE_TEXT);
+    expect(text).toContain(REFERENCE_CONTEXT_LABEL);
+    expect(text).toContain("R-1"); // 元の要件 ID
+    expect(text).toContain(ORIGINAL_PART_ID); // 部分 ID
+    expect(text).toContain(ORIGINAL_PART_TEXT); // 部分の文
+    // 参照されていない元の要件は、素の文のまま
+    expect(textOf(alternativePlan({ alternativeId: "R-2" }), "R-1")).toBe(ORIGINAL_TEXT);
+  });
+
+  it("参照が欠ければ、元の文のまま", () => {
+    expect(textOf(alternativePlan({ alternativeId: "R-2", reference: false }), "R-2")).toBe(ALTERNATIVE_TEXT);
+  });
+
+  it("部分 ID が `parts` に無ければ、元の文のまま", () => {
+    expect(textOf(alternativePlan({ alternativeId: "R-2", partId: "R-1-pX" }), "R-2")).toBe(ALTERNATIVE_TEXT);
+  });
+
+  it("R:alt: の接頭辞があっても参照が無ければ素の文、接頭辞が無くても参照があれば文脈が付く", () => {
+    // 接頭辞あり・参照なし → 素の文
+    expect(textOf(alternativePlan({ alternativeId: "R:alt:R-9", reference: false }), "R:alt:R-9")).toBe(
+      ALTERNATIVE_TEXT,
+    );
+    // 接頭辞なし・参照あり → 文脈が付く
+    expect(textOf(alternativePlan({ alternativeId: "R-2" }), "R-2")).toContain(REFERENCE_CONTEXT_LABEL);
+    // 接頭辞あり・参照あり → 文脈が付く
+    expect(textOf(alternativePlan({ alternativeId: "R:alt:R-9" }), "R:alt:R-9")).toContain(REFERENCE_CONTEXT_LABEL);
+  });
+
+  it("要件 ID・quote・parts は変えず、同じ入力から同じ文になる", () => {
+    const plan = alternativePlan({ alternativeId: "R:alt:R-9" });
+    const requirement = requirementsFromPlan(plan).requirements.find(
+      (candidate) => candidate.id === "R:alt:R-9",
+    );
+    expect(requirement?.id).toBe("R:alt:R-9");
+    expect(requirement?.quote).toBe("代わりの案の記録をする");
+    expect(requirement?.parts).toEqual([{ id: "R:alt:R-9-p1", text: "代わりの案", disposition: "met" }]);
+    expect(textOf(plan, "R:alt:R-9")).toBe(textOf(plan, "R:alt:R-9"));
+  });
+
+  it("答えから増えた要件の既存の文脈は変わらない（代わりの案の参照が無い）", () => {
+    // 既存の planWith の R-2 は added で、問いの文脈だけを持つ
+    const text = requirementsFromPlan(planWith({})).requirements[0]?.text ?? "";
+    expect(text).toContain(CONFIRMED_REQUIREMENT_LABEL);
+    expect(text).toContain(REFERENCE_CONTEXT_LABEL);
+    expect(text).toContain(QUESTION_TEXT);
+    expect(text).not.toContain("の代わりの案");
+  });
+});
