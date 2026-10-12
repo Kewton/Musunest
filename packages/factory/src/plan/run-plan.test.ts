@@ -2843,6 +2843,29 @@ describe("判定も、生成と共有する締切・総呼び出し数の門を�
     expect(result.failure?.kind).toBe("deadline");
   });
 
+  it("総呼び出し数の上限ちょうどで正常に終わったら、上限の停止にせず確定を返す", async () => {
+    // 生成 3 回（要件・逆照合・P3）＋目録判定 1 回＋P6 判定 1 回 = 合計 5。上限も 5（ちょうど）
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [confirmQuestionName("S-1")]: noul(0.95),
+      [confirmQuestionName("S-2")]: noul(0.95),
+    });
+
+    const result = await runPlan(
+      makePlanInput(recording.client, judge, ANSWER_NONE, { limits: { ...AGENT_LIMITS, callCount: 5 } }),
+    );
+
+    // 上限ちょうどで終わった Plan を、上限の停止と誤って報告しない（締切も過ぎていない）
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+  });
+
   it("落とし先（Luna）の口が無い入力では、主（Jev）を再点検に使わず、低確信を受理しない", async () => {
     const recording = createRecordingClient([
       structured(REQUIREMENT_LIST_OUTPUT),

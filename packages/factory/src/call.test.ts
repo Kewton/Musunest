@@ -523,6 +523,16 @@ describe("生成と判定で共有する実試行の門（Issue #432）", () => 
     expect(called).toBe(0);
     expect(gate.attempts()).toBe(0);
   });
+
+  it("門は上限ちょうどまで通し、その次の試行は拒否する（開始の可否）", () => {
+    const gate = createCallGate({ now: () => 0, deadline: 1_000, limit: 2 });
+    // 上限の 2 回までは始められる
+    expect(gate.begin()).toBe("ok");
+    expect(gate.begin()).toBe("ok");
+    // 3 回目は上限に達しているので始められない（試行は数えない）
+    expect(gate.begin()).toBe("limit");
+    expect(gate.attempts()).toBe(2);
+  });
 });
 
 // ── 上限を上げた呼び出しの予約の境界（02 §1.5・Issue #399）──────────────

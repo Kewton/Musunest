@@ -926,14 +926,24 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   };
 
   /**
-   * 生成と共有する締切・総呼び出し数の門を、段の外でも守る（Issue #432）。判定の**実呼び出し**の直前
-   * （判定の口の包み）だけでなく、再点検のあと・確認へ渡す前・確定を返す前にも照らし、**締切の残りと
-   * 総呼び出し数の上限**を越えていれば段の失敗として止める。生成の呼び出し・再試行・判定の呼び出し・
-   * 切り替え・再点検は、同じ門で数える。
+   * **次の実試行を始めてよいか**の門（Issue #432）。判定の実呼び出しの直前（判定の口の包み）と同じ基準で、
+   * 段の外（再点検のあと・確認へ渡す前）でも照らす——締切を過ぎていれば `deadline`、総呼び出し数の上限に
+   * **達していれば** `call-limit`（これから 1 回始めるので、`attempts >= limit` で拒む）。
    */
   const checkGate = (stage: PlanStageId): void => {
     if (gate.now() >= gate.deadline) throw new PlanStop({ stage, kind: "deadline" });
     if (gate.attempts() >= gate.limit) throw new PlanStop({ stage, kind: "call-limit" });
+  };
+
+  /**
+   * **終わった時点で上限の内か**の門（Issue #432）。もう実試行を始めない場所（確定を返す前）で使う。
+   * 締切の検査は残す——仕様の検査の間に締切を越えても `confirmed` を返さない。総呼び出し数は、共通の
+   * 上限検査（`checkLimit`。`actual > max` を超過とする）と同じく **`attempts > limit` を超過**とする——
+   * **上限ちょうどで正常に終わった Plan を、上限の停止と誤って報告しない。**
+   */
+  const checkGateAtEnd = (stage: PlanStageId): void => {
+    if (gate.now() >= gate.deadline) throw new PlanStop({ stage, kind: "deadline" });
+    if (gate.attempts() > gate.limit) throw new PlanStop({ stage, kind: "call-limit" });
   };
 
   const resultBase = (): PlanResultBase => ({
@@ -1469,10 +1479,11 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         ...resultBase(),
       };
     }
-    // **確定を返す前にも**、生成と共有する締切・総呼び出し数の門を守る（Issue #432）。P6 の判定が締切を
-    // 越えて返る（遅い応答）経路は包みが止めるが、仕様の検査の間にも時計は進む——締切後に `confirmed` を
-    // 返さないよう、ここでも照らす。
-    checkGate("confirm");
+    // **確定を返す前にも**、生成と共有する締切の門を守る（Issue #432）。P6 の判定が締切を越えて返る経路は
+    // 包みが止めるが、仕様の検査の間にも時計は進む——締切後に `confirmed` を返さないよう、ここでも照らす。
+    // 総呼び出し数は「終わった時点で上限の内か」で見る（上限ちょうどで正常に終わった Plan を、上限の停止と
+    // 誤って報告しない。次の試行を始めてよいかの判定とは別）。
+    checkGateAtEnd("confirm");
     return { kind: "confirmed", plan: confirmed.plan, ...resultBase() };
   } catch (error) {
     if (error instanceof PlanStop) {
