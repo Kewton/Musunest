@@ -12,19 +12,26 @@
 // 共通の口（call.ts）を通してだけ LLM を呼ぶ。adapter は呼ぶ側が渡す（この file は API キーも環境変数も
 // 触らない）。単価も引数で受け取る（コードに埋め込まない）。
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
-import { sha256Hex } from "@musunest/spec-engine";
+import { sha256Hex, type Diagnostic } from "@musunest/spec-engine";
 import { JobBudget, type TokenRates } from "./budget.js";
 import { CallGateway } from "./call.js";
 import {
   assembleBundle,
+  buildDiagnostics,
+  materialCounts,
   toBundleNatureDiscrepancies,
   toDroppedNonstructuralTests,
+  UNEXECUTED,
   type AssembledBundle,
+  type BundleArtifact,
   type BundleDroppedClaim,
   type BundleJudgeUsage,
+  type BundleMaterialEntry,
   type BundleNatureDiscrepancy,
   type BundleSummary,
   type BundleTriageJudgment,
+  type InspectionCount,
+  type MaterialKind,
   type UnwritableRequirement,
 } from "./bundle.js";
 import type { Judge } from "./judge.js";
@@ -41,6 +48,7 @@ import {
   type CorrespondenceResult,
   type CorrespondenceMiss,
   type Declaration,
+  type DesignResult,
   type Dispute,
   type JudgeMaterials,
   type OverturnedTest,
@@ -48,6 +56,7 @@ import {
   type RequirementList,
   type RoleEntry,
   type RoleNameMapping,
+  type StaticCheckResult,
   type TestRunResult,
   type TestSuite,
 } from "./pipeline.js";
@@ -156,6 +165,11 @@ export interface GenerationResult {
   readonly bundle: AssembledBundle | null;
   /** 早期停止の帰属（どの段の・どの種類の失敗か）。完走なら `null` */
   readonly stopped: FailureAttribution | null;
+  /**
+   * 早期停止の診断の成果物（Issue #417）。早期停止では、段が受理した時点で積んだ材料だけから組む
+   * （一覧と、在る材料のファイル）。完走では空。**合否・stop_reason・終了コードの決め方には使わない**。
+   */
+  readonly diagnostics: readonly BundleArtifact[];
   /**
    * ⑥' が、確定した仕様そのものと食い違う主張を見つけて **Plan に戻した**か（§5・Issue #334）。
    * `true` のとき、走りは差し戻しで止まっている（差し戻しは 1 回まで）。確定した仕様が無ければ `false`。
@@ -304,6 +318,47 @@ export function countUnresolvedTests(
   return ids.size;
 }
 
+// ── 段が受理した材料の入れ物（Issue #417）────────────────────────────
+//
+// **段が受理した時点で積む**（成功の戻り値だけに頼らない。#392 の外した試験と同じ考え）。早期停止でも、
+// ここに積んだ材料だけを診断の成果物として返す。完走では、同じ材料を納品物の成果物に足す。
+
+/** 段が受理した材料の 1 つ（値と、その版。Issue #417） */
+interface MaterialSlot<T> {
+  readonly value: T;
+  readonly stageIndex: number;
+  readonly sha256: string;
+}
+
+/** 候補の宣言の 1 版（③ か ⑥ が返した原文と、その版の静的チェックの結果。Issue #417） */
+interface CandidateDeclaration {
+  readonly source: string;
+  readonly sha256: string;
+  /** その版が静的チェックを通ったか（最終の判定の前の、通過だけの記録） */
+  staticCheckPassed: boolean;
+}
+
+/** 評価の行（組み立てる間は可変。Issue #417） */
+interface MutableEvaluationRow {
+  declaration_sha256: string;
+  static_check_passed: boolean;
+  static_check_diagnostics: number;
+  correspondence_misses: InspectionCount;
+  test_mismatches: InspectionCount;
+  test_unresolved: InspectionCount;
+  routes: Record<string, number>;
+}
+
+/** 材料の JSON の SHA-256（版の値。Issue #417） */
+const materialDigest = (value: unknown): Promise<string> => sha256Hex(JSON.stringify(value));
+
+/** 失敗の行き先ごとの件数（試験 ID・文言は持たない。Issue #417） */
+const countRoutes = (routes: readonly { readonly route: string }[]): Record<string, number> => {
+  const counts: Record<string, number> = {};
+  for (const route of routes) counts[route.route] = (counts[route.route] ?? 0) + 1;
+  return counts;
+};
+
 /**
  * 段を順に回して、1 回の生成を流す（§1・§1.4・§1.5）。
  *
@@ -340,6 +395,143 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
   let returnToPlan = false;
   /** Plan に戻した試験 ID（差し戻しの記録。§5・Issue #334） */
   const returnedToPlan: string[] = [];
+
+  /** 段が受理した材料の入れ物（Issue #417）。段が ok で採った時点で積む */
+  const materialStore: {
+    design: MaterialSlot<DesignResult> | null;
+    testSuite: MaterialSlot<TestSuite> | null;
+    mappings: MaterialSlot<readonly RoleNameMapping[]> | null;
+    declarations: CandidateDeclaration[];
+    evaluations: Map<string, MutableEvaluationRow>;
+    staticChecks: Map<string, { readonly passed: boolean; readonly diagnostics: readonly Diagnostic[] }>;
+  } = {
+    design: null,
+    testSuite: null,
+    mappings: null,
+    declarations: [],
+    evaluations: new Map(),
+    staticChecks: new Map(),
+  };
+
+  /** 材料を、受理した段の記録の添字と一緒に積む */
+  const acceptSlot = async <T>(value: T, stageIndex: number): Promise<MaterialSlot<T>> => ({
+    value,
+    stageIndex,
+    sha256: await materialDigest(value),
+  });
+
+  /** ある段の、最後に ok になった記録の添字（受理した段。無ければ -1） */
+  const lastOkStageIndex = (stage: StageId): number => {
+    for (let index = stages.length - 1; index >= 0; index -= 1) {
+      const record = stages[index];
+      if (record !== undefined && record.stage === stage && record.status === "ok") return index;
+    }
+    return -1;
+  };
+
+  /** いまの段の記録から、材料ごとの状態を決める（Issue #417） */
+  const materialEntries = (): readonly BundleMaterialEntry[] => {
+    const ran = (stage: StageId): boolean => stages.some((record) => record.stage === stage);
+    const ok = (stage: StageId): boolean =>
+      stages.some((record) => record.stage === stage && record.status === "ok");
+    const slot = (
+      material: MaterialKind,
+      value: MaterialSlot<unknown> | null,
+      stage: StageId,
+    ): BundleMaterialEntry =>
+      value === null
+        ? { material, state: ran(stage) ? "unaccepted" : "unexecuted" }
+        : { material, state: "accepted", version: { stage_index: value.stageIndex, sha256: value.sha256 } };
+    // 宣言は、最後に静的チェックを通った版（無ければ最後の候補）を候補として示す（最終の判定は別）
+    const passed = materialStore.declarations.filter((entry) => entry.staticCheckPassed);
+    const declaration = passed.at(-1) ?? materialStore.declarations.at(-1);
+    return [
+      slot("design", materialStore.design, "design"),
+      slot("test_suite", materialStore.testSuite, "test-suite"),
+      slot("mappings", materialStore.mappings, "write"),
+      {
+        material: "declaration",
+        state:
+          materialStore.declarations.length > 0
+            ? "candidate"
+            : ran("write") || ran("repair")
+              ? "unaccepted"
+              : "unexecuted",
+        ...(declaration === undefined
+          ? {}
+          : { version: { sha256: declaration.sha256 }, static_check_passed: declaration.staticCheckPassed }),
+      },
+      {
+        material: "correspondence",
+        state: ok("correspondence") ? "accepted" : ran("correspondence") ? "unaccepted" : "unexecuted",
+      },
+      { material: "test_run", state: ok("run-tests") ? "accepted" : ran("run-tests") ? "unaccepted" : "unexecuted" },
+      {
+        material: "evaluation",
+        state: ok("static-check") ? "accepted" : ran("static-check") ? "unaccepted" : "unexecuted",
+      },
+    ];
+  };
+
+  /** 候補の宣言と、その版の静的チェックの結果を積む（③ か ⑥ が返すたび） */
+  const recordDeclaration = (declaration: Declaration, sha256: string, staticCheck: StaticCheckResult): void => {
+    materialStore.staticChecks.set(sha256, { passed: staticCheck.passed, diagnostics: staticCheck.diagnostics });
+    const existing = materialStore.declarations.find((entry) => entry.sha256 === sha256);
+    if (existing === undefined) {
+      materialStore.declarations.push({
+        source: declaration.source,
+        sha256,
+        staticCheckPassed: staticCheck.passed,
+      });
+    } else {
+      existing.staticCheckPassed = staticCheck.passed;
+    }
+  };
+
+  /** 評価の行を積む（④ の結果を受け取った時点）。同じ宣言の SHA-256 の行があれば、それを返す */
+  const evaluationRow = (sha256: string, staticCheck: StaticCheckResult): MutableEvaluationRow => {
+    let row = materialStore.evaluations.get(sha256);
+    if (row === undefined) {
+      row = {
+        declaration_sha256: sha256,
+        static_check_passed: staticCheck.passed,
+        static_check_diagnostics: staticCheck.diagnostics.length,
+        correspondence_misses: UNEXECUTED,
+        test_mismatches: UNEXECUTED,
+        test_unresolved: UNEXECUTED,
+        routes: {},
+      };
+      materialStore.evaluations.set(sha256, row);
+    } else {
+      row.static_check_passed = staticCheck.passed;
+      row.static_check_diagnostics = staticCheck.diagnostics.length;
+    }
+    return row;
+  };
+
+  /** 診断の成果物を組む（早期停止のとき。積んだ材料だけから。Issue #417） */
+  const diagnosticsFor = (attribution: FailureAttribution, record: RunRecord): readonly BundleArtifact[] =>
+    buildDiagnostics({
+      stopped: { stage: attribution.stage, kind: attribution.kind },
+      materials: materialEntries(),
+      evaluations: [...materialStore.evaluations.values()],
+      counts: materialCounts(record.stages),
+      ...(materialStore.design === null ? {} : { design: materialStore.design.value }),
+      ...(materialStore.testSuite === null ? {} : { testSuite: materialStore.testSuite.value }),
+      ...(materialStore.mappings === null ? {} : { mappings: materialStore.mappings.value }),
+      ...(materialStore.declarations.length === 0
+        ? {}
+        : { declarations: materialStore.declarations.map((entry) => ({ sha256: entry.sha256, declaration: entry.source })) }),
+      ...(materialStore.staticChecks.size === 0
+        ? {}
+        : {
+            staticChecks: [...materialStore.staticChecks.entries()].map(([sha256, check]) => ({
+              declaration_sha256: sha256,
+              passed: check.passed,
+              diagnostics: check.diagnostics,
+            })),
+          }),
+    });
 
   const pushRecord = (
     stage: StageId,
@@ -441,7 +633,14 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       nature_discrepancies: natureDiscrepancies,
       ...(droppedSummary === undefined ? {} : { dropped_nonstructural_tests: droppedSummary }),
     };
-    return { outcome, record, summary, bundle: null, stopped: attribution };
+    return {
+      outcome,
+      record,
+      summary,
+      bundle: null,
+      stopped: attribution,
+      diagnostics: diagnosticsFor(attribution, record),
+    };
   };
 
   try {
@@ -520,6 +719,8 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       }
     }
     const design = triage?.design ?? rawDesign;
+    // ② の設計を、受理した時点で材料として積む（仕分けのあとに採った版。Issue #417）
+    materialStore.design = await acceptSlot(design, lastOkStageIndex("design"));
 
     // 書けなかった要件を、要件の文と引用つきで並べる（Issue #326・#332）。仕分けを回したときは**残った
     // 申告だけ**（曖昧さは `notes` へ移り、問題ではないものは落ちている）。回していないときは `unwritable`
@@ -604,11 +805,15 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       }),
     );
     natureDiscrepancies = toBundleNatureDiscrepancies(testSuite.discrepancies);
+    // ②' の固定した試験の組（分類込み。棄却で外す前）を、受理した時点で材料として積む（Issue #417）
+    materialStore.testSuite = await acceptSlot(testSuite.suite, lastOkStageIndex("test-suite"));
 
     // ③ 書く
     const written = await runStageOk("write", () =>
       runWrite({ list: requirementList, design, documents: input.documents, gateway }),
     );
+    // ③ が提出した対応を、受理した時点で材料として積む（Issue #417）
+    materialStore.mappings = await acceptSlot(written.mappings, lastOkStageIndex("write"));
 
     // 棄却で外した試験を除いた、いまの固定した試験。**分類（classifications）は落とさない**
     // ——落とすと、要件ごとの種類が既定（決まりを含む）に戻り、在ることだけの要件の create の試験が
@@ -641,6 +846,10 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     const evaluate = async (declaration: Declaration): Promise<VersionReport | null> => {
       const staticCheck = await runStage("static-check", () => runStaticCheck(declaration));
       const declarationSha256 = await sha256Hex(declaration.source);
+      // ④ の結果を受け取った時点で、候補の宣言と評価の行を積む（Issue #417）。⑤a・⑤b の完了時に、
+      // **同じ宣言の SHA-256 の行**へ追記する。
+      recordDeclaration(declaration, declarationSha256, staticCheck);
+      const row = evaluationRow(declarationSha256, staticCheck);
       if (!staticCheck.passed || staticCheck.app === null) {
         return { declaration, declarationSha256, staticCheck, correspondence: null, testRun: null, routes: [], defectMisses: [] };
       }
@@ -678,6 +887,8 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         entries: currentEntries,
         misses: [...entriesMisses, ...mappingMisses],
       };
+      // ⑤a の完了時に、同じ宣言の SHA-256 の行へ追記する（件数だけ。試験 ID と文言は持たない。Issue #417）
+      row.correspondence_misses = correspondence.misses.length;
       const report = await runStage("run-tests", async () =>
         runTests({
           app,
@@ -686,6 +897,10 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
           ...(useMappings() ? { mappings } : {}),
         }),
       );
+      // ⑤b の完了時に、同じ宣言の SHA-256 の行へ追記する（件数と、行き先ごとの件数だけ。Issue #417）
+      row.test_mismatches = report.mismatches.length;
+      row.test_unresolved = report.unresolved.length;
+      row.routes = countRoutes(report.routes);
       return {
         declaration,
         declarationSha256,
@@ -797,6 +1012,8 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
           }),
         );
         mappings = redo.mappings;
+        // ③ のやり直しの対応（最新）を材料として積み直す（Issue #417）
+        materialStore.mappings = await acceptSlot(redo.mappings, lastOkStageIndex("write"));
         // 宣言は変えない。⑤a は同じ版なので使い回し、結び付けと試験だけ流し直す
         const next = await evaluate(current.declaration);
         if (next === null) {
@@ -938,6 +1155,13 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       specEngineVersion: input.specEngineVersion,
       factoryVersion: input.factoryVersion,
       ...(input.plan === undefined ? {} : { plan: input.plan }),
+      // 受理した材料（設計・固定した試験・提出された対応）と、材料の状態・版ごとの評価の行（Issue #417）。
+      // 完走では、同じ材料を納品物の成果物へ足す（設計・試験・対応の 3 ファイルと、検証の結果の欄）。
+      design,
+      testSuite: testSuite.suite,
+      mappings,
+      materials: materialEntries(),
+      evaluations: [...materialStore.evaluations.values()],
     });
     return {
       outcome,
@@ -945,6 +1169,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       summary,
       bundle,
       stopped: failure,
+      diagnostics: [],
       ...(returnToPlan ? { returnToPlan: true } : {}),
     };
   } catch (error) {

@@ -28,15 +28,18 @@ import type {
   ArbitrationResult,
   CorrespondenceResult,
   Declaration,
+  DesignResult,
   NatureDiscrepancy,
   RejectedDispute,
   RequirementList,
   RequirementNature,
+  RoleNameMapping,
   StructuralAssertionKind,
   StructuralCheckResult,
   TestRunResult,
+  TestSuite,
 } from "./pipeline.js";
-import type { Summary } from "./record.js";
+import type { StageId, StageRecord, Summary } from "./record.js";
 import { utf8ByteLength } from "./stages/write.js";
 import type { DroppedNonstructuralTest } from "./stages/test-suite.js";
 
@@ -168,6 +171,184 @@ export const PLAN_FILE = `${ARTIFACTS_DIR}/plan.json` as const;
 /** manifest と検証の結果が、確定した仕様の SHA-256 を載せる欄の名前（門（#335）と同じ名前にする） */
 export const PLAN_SHA256_FIELD = "plan_sha256" as const;
 
+// ── 受理した材料（設計・固定した試験・提出された対応）と、早期停止の診断（Issue #417）──────
+//
+// 早期停止でも、段が**受理した時点で積んだ材料**だけを診断の成果物として残す。完走では、同じ材料を
+// 納品物の成果物に足す。**合否・verdict・停止理由・終了コードの決め方は変えない**——診断の有無は門の
+// 条件にしない。材料の状態は 4 値：受理済み（段が ok で採った）・候補（段が返したが最終の判定の前）・
+// 未受理（段を実行したが材料を採れなかった）・未実行（段に届かなかった）。
+
+/** 納品物の成果物に足す、受理した設計（②）の置き場所（Issue #417） */
+export const DESIGN_FILE = `${ARTIFACTS_DIR}/design.json` as const;
+/** 納品物の成果物に足す、固定した試験の組（②'）の置き場所（Issue #417） */
+export const TEST_SUITE_FILE = `${ARTIFACTS_DIR}/test-suite.json` as const;
+/** 納品物の成果物に足す、提出された対応（③）の置き場所（Issue #417） */
+export const MAPPINGS_FILE = `${ARTIFACTS_DIR}/mappings.json` as const;
+
+/**
+ * 診断の成果物の置き場所（早期停止のときだけ）。**納品物の置き場所（`ARTIFACTS_DIR`）とは別**にする
+ * ——早期停止を納品物にしないためである（Issue #417）。
+ */
+export const DIAGNOSTICS_DIR = "diagnostics" as const;
+/** 診断の一覧（材料ごとの状態・止めた段と分類・版ごとの評価の行・回数）の置き場所 */
+export const DIAGNOSTICS_LISTING_FILE = `${DIAGNOSTICS_DIR}/materials.json` as const;
+/** 診断に出す、受理した設計の置き場所 */
+export const DIAGNOSTICS_DESIGN_FILE = `${DIAGNOSTICS_DIR}/design.json` as const;
+/** 診断に出す、固定した試験の組の置き場所 */
+export const DIAGNOSTICS_TEST_SUITE_FILE = `${DIAGNOSTICS_DIR}/test-suite.json` as const;
+/** 診断に出す、提出された対応の置き場所 */
+export const DIAGNOSTICS_MAPPINGS_FILE = `${DIAGNOSTICS_DIR}/mappings.json` as const;
+/** 診断に出す、候補の宣言（③ か ⑥ が返した原文。版ごと）の置き場所 */
+export const DIAGNOSTICS_DECLARATION_FILE = `${DIAGNOSTICS_DIR}/declaration.json` as const;
+/** 診断に出す、静的チェックの診断（版ごと）の置き場所 */
+export const DIAGNOSTICS_STATIC_CHECK_FILE = `${DIAGNOSTICS_DIR}/static-check.json` as const;
+
+/** 材料・検査の種類（一覧の 1 行ごと。コードの定数） */
+export const MATERIAL_KINDS = [
+  "design", // ② の設計（役割 ID の表と要件ごとの設計）
+  "test_suite", // ②' の固定した試験の組（分類込み。棄却で外す前）
+  "mappings", // ③ の提出した対応（役割 ID → 宣言の名前）
+  "declaration", // ③ か ⑥ が返した宣言（候補）
+  "correspondence", // ⑤a の対応表
+  "test_run", // ⑤b の試験の結果
+  "evaluation", // ④⑤ の評価（版ごとの行）
+] as const;
+export type MaterialKind = (typeof MATERIAL_KINDS)[number];
+
+/** 材料の状態の 4 値（§Issue #417） */
+export const MATERIAL_STATES = ["accepted", "candidate", "unaccepted", "unexecuted"] as const;
+export type MaterialState = (typeof MATERIAL_STATES)[number];
+
+/**
+ * 材料の版。設計・試験・対応は**受理した段の記録の添字**（`stages` の何件目か）と、**材料の JSON の
+ * SHA-256**。宣言は**宣言（原文）のバイト列の SHA-256** だけ（どちらも `sha256` に入れる）。
+ */
+export interface BundleMaterialVersion {
+  readonly sha256: string;
+  /** 受理した段の記録の添字（設計・試験・対応。宣言では省く） */
+  readonly stage_index?: number;
+}
+
+/** 一覧の 1 行（材料ごとの状態。Issue #417） */
+export interface BundleMaterialEntry {
+  readonly material: MaterialKind;
+  readonly state: MaterialState;
+  readonly version?: BundleMaterialVersion;
+  /** 宣言が候補のとき、その版が静的チェックを通ったか（宣言の行だけ） */
+  readonly static_check_passed?: boolean;
+}
+
+/** 実行していない検査の落ちの件数（0 と区別する。Issue #417） */
+export const UNEXECUTED = "unexecuted" as const;
+export type InspectionCount = number | typeof UNEXECUTED;
+
+/**
+ * 版ごとの評価の行（§Issue #417）。④ の結果を受け取った時点で積み、⑤a・⑤b の完了時に同じ宣言の
+ * SHA-256 の行へ追記する。**試験 ID と文言は持たない**——件数と、失敗の行き先ごとの件数だけを持つ。
+ * 実行していない検査の落ちの件数は 0 とせず `"unexecuted"` と記す。
+ */
+export interface BundleEvaluationRow {
+  readonly declaration_sha256: string;
+  readonly static_check_passed: boolean;
+  readonly static_check_diagnostics: number;
+  readonly correspondence_misses: InspectionCount;
+  readonly test_mismatches: InspectionCount;
+  readonly test_unresolved: InspectionCount;
+  /** 失敗の行き先（`correspondence-redo` など）ごとの件数 */
+  readonly routes: Readonly<Record<string, number>>;
+}
+
+/**
+ * 回数（段の記録から数える。§Issue #417）。評価の回数・③ の初回・③ の対応の出し直し・⑤a の生成・
+ * ⑥ の段の実行数を**別々に**数え、LLM の試行の数や道具の内部の検査の数と同一視しない。
+ */
+export interface BundleMaterialCounts {
+  readonly evaluations: number;
+  readonly write_initial: number;
+  readonly write_redos: number;
+  readonly correspondence_generations: number;
+  readonly repair_executions: number;
+}
+
+/**
+ * 段の記録から回数を数える（§Issue #417）。評価は ④（`static-check`）の記録の数、③ の初回は
+ * `write` の記録の有無、③ の出し直しは `write` の記録から初回を除いた数、⑤a の生成は
+ * `correspondence`、⑥ の実行は `repair` の記録の数である。**段の記録と必ず一致する**——
+ * 数え方を 2 つ持たない。
+ */
+export function materialCounts(stages: readonly StageRecord[]): BundleMaterialCounts {
+  const countOf = (stage: StageId): number => stages.filter((record) => record.stage === stage).length;
+  const writes = countOf("write");
+  return {
+    evaluations: countOf("static-check"),
+    write_initial: writes > 0 ? 1 : 0,
+    write_redos: Math.max(0, writes - 1),
+    correspondence_generations: countOf("correspondence"),
+    repair_executions: countOf("repair"),
+  };
+}
+
+/**
+ * 早期停止の診断の組み立ての入力（§Issue #417）。**積んだ材料だけ**を渡す——無い材料は省き、一覧には
+ * 状態（未受理・未実行）として出る。空の宣言も manifest も組まない。
+ */
+export interface DiagnosticsInput {
+  /** 止めた段と分類（早期停止。無ければ null） */
+  readonly stopped: { readonly stage: string; readonly kind: string } | null;
+  readonly materials: readonly BundleMaterialEntry[];
+  readonly evaluations: readonly BundleEvaluationRow[];
+  readonly counts: BundleMaterialCounts;
+  /** 受理した設計（在るときだけ） */
+  readonly design?: DesignResult;
+  /** 受理した固定した試験の組（在るときだけ） */
+  readonly testSuite?: TestSuite;
+  /** 受理した提出された対応（在るときだけ） */
+  readonly mappings?: readonly RoleNameMapping[];
+  /** 候補の宣言（版ごと。在るときだけ） */
+  readonly declarations?: readonly { readonly sha256: string; readonly declaration: string }[];
+  /** 静的チェックの診断（版ごと。実行したときだけ） */
+  readonly staticChecks?: readonly {
+    readonly declaration_sha256: string;
+    readonly passed: boolean;
+    readonly diagnostics: readonly unknown[];
+  }[];
+}
+
+/**
+ * 早期停止の診断の成果物を組む（§1.4・§4・Issue #417）。**積んだ材料だけ**から組み、無い材料の
+ * ファイルは作らない。一覧（材料ごとの状態・止めた段と分類・版ごとの評価の行・回数）は常に出す。
+ * **manifest は組まない**（早期停止を納品物にしない）。ファイルの名前はコードの定数である。
+ */
+export function buildDiagnostics(input: DiagnosticsInput): readonly BundleArtifact[] {
+  const artifacts: BundleArtifact[] = [
+    {
+      path: DIAGNOSTICS_LISTING_FILE,
+      text: toJson({
+        stopped: input.stopped,
+        materials: input.materials,
+        evaluations: input.evaluations,
+        counts: input.counts,
+      }),
+    },
+  ];
+  if (input.design !== undefined) {
+    artifacts.push({ path: DIAGNOSTICS_DESIGN_FILE, text: toJson({ design: input.design }) });
+  }
+  if (input.testSuite !== undefined) {
+    artifacts.push({ path: DIAGNOSTICS_TEST_SUITE_FILE, text: toJson({ suite: input.testSuite }) });
+  }
+  if (input.mappings !== undefined) {
+    artifacts.push({ path: DIAGNOSTICS_MAPPINGS_FILE, text: toJson({ mappings: input.mappings }) });
+  }
+  if (input.declarations !== undefined && input.declarations.length > 0) {
+    artifacts.push({ path: DIAGNOSTICS_DECLARATION_FILE, text: toJson({ declarations: input.declarations }) });
+  }
+  if (input.staticChecks !== undefined && input.staticChecks.length > 0) {
+    artifacts.push({ path: DIAGNOSTICS_STATIC_CHECK_FILE, text: toJson({ checks: input.staticChecks }) });
+  }
+  return artifacts;
+}
+
 /** 納品物の 1 つのファイル（UTF-8 の文字列）。`path` は納品物の直下からの相対パス（`/` 区切り） */
 export interface BundleArtifact {
   readonly path: string;
@@ -288,6 +469,15 @@ export interface BundleVerification {
   readonly structural_checks: readonly BundleStructuralCheck[];
   /** 部分案になった理由（Issue #326）。合格のときは空で出る */
   readonly partial_reasons: BundlePartialReasons;
+  /**
+   * 材料の状態の一覧（設計・固定した試験・提出された対応・候補の宣言・⑤a・⑤b・評価。Issue #417）。
+   * **試験 ID・文言・署名の文字列は入れない**——状態と版だけを持つ。
+   */
+  readonly materials: readonly BundleMaterialEntry[];
+  /** 版ごとの評価の行（Issue #417）。**試験 ID・文言は入れない**——件数だけを持つ */
+  readonly evaluations: readonly BundleEvaluationRow[];
+  /** 回数（評価・③ の初回・③ の出し直し・⑤a の生成・⑥ の実行。Issue #417） */
+  readonly counts: BundleMaterialCounts;
 }
 
 /** ⑧ が受け取るもの（⑦ までの結果と、宣言・要約・記録） */
@@ -325,6 +515,16 @@ export interface BundleInput {
    * `artifacts/plan.json` として納品物に入れ、manifest と検証の結果に同じ仕様の SHA-256 を記録する。
    */
   readonly plan?: ConfirmedPlan;
+  /** 受理した設計（② の役割 ID の表と要件ごとの設計）。納品物の設計のファイルに入れる（Issue #417） */
+  readonly design: DesignResult;
+  /** 受理した固定した試験の組（②' の分類込み。棄却で外す前）。納品物の試験のファイルに入れる（Issue #417） */
+  readonly testSuite: TestSuite;
+  /** 最終版の提出された対応（③）。納品物の対応のファイルに入れる（Issue #417） */
+  readonly mappings: readonly RoleNameMapping[];
+  /** 材料の状態の一覧（検証の結果に入れる。Issue #417） */
+  readonly materials: readonly BundleMaterialEntry[];
+  /** 版ごとの評価の行（検証の結果に入れる。Issue #417） */
+  readonly evaluations: readonly BundleEvaluationRow[];
 }
 
 /** 組み立てた納品物（`bundle-manifest.json` を含む。書くのは呼ぶ側） */
@@ -404,6 +604,9 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
     unexecuted_inspections: unexecuted,
     structural_checks: structuralChecks,
     partial_reasons: partialReasons,
+    materials: input.materials,
+    evaluations: input.evaluations,
+    counts: materialCounts(input.summary.stages),
   };
 
   const unwritable: BundleUnwritable = {
@@ -414,6 +617,17 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
     dropped: input.dropped ?? [],
   };
 
+  // 受理した材料（設計・固定した試験・提出された対応）のファイル（§4・Issue #417）。**各ファイルの中に
+  // 最終の宣言のバイト列の SHA-256 を書く**（R-3）。固定した試験のファイルには、**棄却で外した試験の ID**
+  // も載せる（試験の組は棄却で外す前のものをそのまま残す——材料を後から作り直さない）。
+  const designMaterial = { declaration_sha256: input.declarationSha256, design: input.design };
+  const testSuiteMaterial = {
+    declaration_sha256: input.declarationSha256,
+    suite: input.testSuite,
+    overturned_test_ids: input.arbitration.overturned.map((entry) => entry.testId),
+  };
+  const mappingsMaterial = { declaration_sha256: input.declarationSha256, mappings: input.mappings };
+
   const artifacts: readonly BundleArtifact[] = [
     { path: DECLARATION_FILE, text: input.declaration.source },
     ...(input.plan === undefined ? [] : [{ path: PLAN_FILE, text: toJson(input.plan) }]),
@@ -422,6 +636,9 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
     { path: UNWRITABLE_FILE, text: toJson(unwritable) },
     { path: CORRESPONDENCE_FILE, text: toJson(input.correspondence) },
     { path: TESTS_FILE, text: toJson(input.testRun) },
+    { path: DESIGN_FILE, text: toJson(designMaterial) },
+    { path: TEST_SUITE_FILE, text: toJson(testSuiteMaterial) },
+    { path: MAPPINGS_FILE, text: toJson(mappingsMaterial) },
     { path: DISPUTES_FILE, text: toJson({ disputes: input.disputes, rejected: input.rejected }) },
     { path: ARBITRATION_FILE, text: toJson(input.arbitration) },
     { path: VERIFICATION_FILE, text: toJson(verification) },

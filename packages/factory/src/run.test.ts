@@ -12,7 +12,24 @@ import { acceptsHeadlessSummaryWire, planDigest, type ConfirmedPlan } from "@mus
 import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import { costOfUsageUsd } from "./budget.js";
-import { ARBITRATION_FILE, UNWRITABLE_FILE, VERIFICATION_FILE, type BundlePartialReasons, type BundleUnwritable, type BundleVerification } from "./bundle.js";
+import {
+  ARBITRATION_FILE,
+  BUNDLE_MANIFEST_FILE,
+  DESIGN_FILE,
+  DIAGNOSTICS_DECLARATION_FILE,
+  DIAGNOSTICS_DESIGN_FILE,
+  DIAGNOSTICS_LISTING_FILE,
+  DIAGNOSTICS_STATIC_CHECK_FILE,
+  DIAGNOSTICS_TEST_SUITE_FILE,
+  MAPPINGS_FILE,
+  TEST_SUITE_FILE,
+  UNWRITABLE_FILE,
+  VERIFICATION_FILE,
+  type BundleMaterialEntry,
+  type BundlePartialReasons,
+  type BundleUnwritable,
+  type BundleVerification,
+} from "./bundle.js";
 import { AGENT_LIMITS } from "./limits.js";
 import { createFakeJudge } from "./judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "./judge.js";
@@ -73,6 +90,55 @@ const verificationOf = (bundle: { artifacts: readonly { path: string; text: stri
   return JSON.parse(found.text) as BundleVerification;
 };
 
+/** 診断の成果物から、あるパスの本文を読む（Issue #417） */
+const diagnosticTextOf = (artifacts: readonly { path: string; text: string }[], path: string): string => {
+  const found = artifacts.find((artifact) => artifact.path === path);
+  if (found === undefined) throw new Error(`診断に無い: ${path}`);
+  return found.text;
+};
+
+/** 一覧（診断の `materials.json`）を読む（Issue #417） */
+const listingOf = (
+  artifacts: readonly { path: string; text: string }[],
+): { stopped: { stage: string; kind: string } | null; materials: readonly BundleMaterialEntry[] } =>
+  JSON.parse(diagnosticTextOf(artifacts, DIAGNOSTICS_LISTING_FILE)) as {
+    stopped: { stage: string; kind: string } | null;
+    materials: readonly BundleMaterialEntry[];
+  };
+
+/** 一覧から、ある材料の状態を読む（Issue #417） */
+const stateOf = (artifacts: readonly { path: string; text: string }[], material: string): string | undefined =>
+  listingOf(artifacts).materials.find((entry) => entry.material === material)?.state;
+
+/** 納品物の成果物から、あるパスの本文を読む（Issue #417） */
+const fileTextOf = (bundle: { artifacts: readonly { path: string; text: string }[] }, path: string): string => {
+  const found = bundle.artifacts.find((artifact) => artifact.path === path);
+  if (found === undefined) throw new Error(`納品物に無い: ${path}`);
+  return found.text;
+};
+
+/**
+ * 記録を順に返しつつ、**N 回目の構造化呼び出しのあとで時計を進める**偽物（Issue #417）。
+ * 締切を狙った段に当てる——次の呼び出しで締切の残りが尽きる。実 API は呼ばない。
+ */
+function clientWithClockJump(
+  recording: { client: LlmClient },
+  jumpAfter: number,
+  jumpedTo: number,
+  clock: { value: number },
+): LlmClient {
+  let calls = 0;
+  return {
+    async callStructured<T>(request: LlmStructuredRequest) {
+      const response = await recording.client.callStructured<T>(request);
+      calls += 1;
+      if (calls === jumpAfter) clock.value = jumpedTo;
+      return response;
+    },
+    callWithTools: (request: LlmToolRequest) => recording.client.callWithTools(request),
+  };
+}
+
 /** 道具付きの段（⑥）の「最後の答え」の記録（宣言は何でもよい） */
 const toolDone = (declaration: unknown): RecordedCall => ({
   kind: "tools",
@@ -132,6 +198,29 @@ describe("通常の完走（02 §1）", () => {
     expect(result.summary.verdict).toBe("full");
     expect(result.summary.spec_engine_version).toBe("0.0.0");
     expect(result.summary.factory_version).toBe("0.0.0");
+
+    // Issue #417：納品物に、受理した材料（設計・固定した試験・提出された対応）の 3 ファイルが入り、
+    // 各ファイルの中の宣言の SHA-256 が、**検証の結果の宣言の SHA-256** と一致する（02 §4）
+    const verification = verificationOf(result.bundle);
+    for (const path of [DESIGN_FILE, TEST_SUITE_FILE, MAPPINGS_FILE]) {
+      const material = JSON.parse(fileTextOf(result.bundle, path)) as { declaration_sha256: string };
+      expect(material.declaration_sha256, path).toBe(verification.declaration_sha256);
+    }
+    // 検証の結果の回数が、**段の記録**の件数と整合する（評価・⑤a の生成・③ の出し直し・⑥ の実行）
+    const countIn = (stage: string): number => result.record.stages.filter((entry) => entry.stage === stage).length;
+    expect(verification.counts).toEqual({
+      evaluations: countIn("static-check"),
+      write_initial: countIn("write") > 0 ? 1 : 0,
+      write_redos: Math.max(0, countIn("write") - 1),
+      correspondence_generations: countIn("correspondence"),
+      repair_executions: countIn("repair"),
+    });
+    // 早期停止ではないので、診断は空（Issue #417）
+    expect(result.diagnostics).toEqual([]);
+    // 実行した検査は件数（0）で記され、「未実行」とは区別される（Issue #417）
+    expect(verification.evaluations).toHaveLength(1);
+    expect(verification.evaluations[0]?.correspondence_misses).toBe(0);
+    expect(verification.evaluations[0]?.test_mismatches).toBe(0);
   });
 
   it("記録が全段同じ封筒の形（result で包んだもの）でも、合格の道は同じように流れる（#353）", async () => {
@@ -178,6 +267,10 @@ describe("早期停止：止めた段と理由が記録される（02 §1.5・S-
       status: "failed",
       failure_kind: "limit",
     });
+    // Issue #417：① の入口で止まった走りも、一覧だけは返す。全部が未実行で、材料のファイルは無い
+    expect(listingOf(result.diagnostics).stopped).toEqual({ stage: "requirements", kind: "limit" });
+    expect(listingOf(result.diagnostics).materials.every((entry) => entry.state === "unexecuted")).toBe(true);
+    expect(result.diagnostics.map((artifact) => artifact.path)).toEqual([DIAGNOSTICS_LISTING_FILE]);
   });
 
   it("予約の残高切れ", async () => {
@@ -250,9 +343,31 @@ describe("未実行の検査がある結果は、合格にならない（02 §1.
     expect(stages).not.toContain("run-tests");
     expect(result.bundle).not.toBeNull();
     if (result.bundle === null) return;
-    expect(verificationOf(result.bundle).unexecuted_inspections).toEqual(["correspondence", "run-tests"]);
+    const verification = verificationOf(result.bundle);
+    expect(verification.unexecuted_inspections).toEqual(["correspondence", "run-tests"]);
     expect(acceptsHeadlessSummaryWire(result.summary)).toBe(true);
     expect(result.summary.verdict).toBe("none");
+
+    // Issue #417：材料の状態の一覧。設計・固定した試験・提出された対応は受理済み、宣言は候補
+    // （静的チェック不通過）、⑤a・⑤b は未実行。**この例を早期停止へ変えない**（納品物を返す）
+    expect(verification.materials.map((entry) => [entry.material, entry.state])).toEqual([
+      ["design", "accepted"],
+      ["test_suite", "accepted"],
+      ["mappings", "accepted"],
+      ["declaration", "candidate"],
+      ["correspondence", "unexecuted"],
+      ["test_run", "unexecuted"],
+      ["evaluation", "accepted"],
+    ]);
+    expect(verification.materials.find((entry) => entry.material === "declaration")?.static_check_passed).toBe(false);
+    // 実行していない検査の落ちの件数は、0 とせず「未実行」と記す
+    const row = verification.evaluations.at(-1);
+    expect(row?.static_check_passed).toBe(false);
+    expect(row?.correspondence_misses).toBe("unexecuted");
+    expect(row?.test_mismatches).toBe("unexecuted");
+    expect(row?.test_unresolved).toBe("unexecuted");
+    // 早期停止ではないので、診断は空（Issue #417）
+    expect(result.diagnostics).toEqual([]);
   });
 });
 
@@ -2972,7 +3087,7 @@ describe("設計のやり直しの記録を組む包み（Issue #410）", () => 
   });
 
   it("予期しない例外では、failed（unknown）の記録を足して同じ例外を投げ直す", async () => {
-    const boom = new Error("予期しない誤り");
+    const boom = new Error("予期しない例外");
     const { pushed, push } = collector();
     await expect(
       redoDesignRecorded<unknown>({
@@ -2984,5 +3099,119 @@ describe("設計のやり直しの記録を組む包み（Issue #410）", () => 
       }),
     ).rejects.toBe(boom);
     expect(pushed).toEqual([{ status: "failed", kind: "unknown" }]);
+  });
+});
+
+// ── 早期停止でも、受理した材料を診断に残す（§1.4・§4・Issue #417）──────────────
+
+describe("早期停止でも、受理した材料を診断に残す（Issue #417）", () => {
+  it("②' が 2 回とも形に合わず malformed で止まっても、受理した設計は診断に残る", async () => {
+    const malformed = { tests: 123 };
+    const { run } = runWith([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(DESIGN_OUTPUT),
+      structured(malformed),
+      structured(malformed),
+    ]);
+    const result = await run;
+
+    // 止め方（stopped・outcome・要約の exit_code・stop_reason・bundle）は今までどおり
+    expect(result.stopped?.stage).toBe("test-suite");
+    expect(result.stopped?.kind).toBe("malformed");
+    expect(result.outcome).toEqual({ result: "failed", verdict: "none" });
+    expect(result.bundle).toBeNull();
+    expect(result.summary.exit_code).toBe(1);
+    expect(result.summary.stop_reason).toBe("malformed");
+
+    // 一覧：設計は受理済み、試験は未受理（段は実行したが材料を採れなかった）、対応・宣言・評価は未実行
+    expect(listingOf(result.diagnostics).stopped).toEqual({ stage: "test-suite", kind: "malformed" });
+    expect(stateOf(result.diagnostics, "design")).toBe("accepted");
+    expect(stateOf(result.diagnostics, "test_suite")).toBe("unaccepted");
+    expect(stateOf(result.diagnostics, "mappings")).toBe("unexecuted");
+    expect(stateOf(result.diagnostics, "declaration")).toBe("unexecuted");
+    expect(stateOf(result.diagnostics, "evaluation")).toBe("unexecuted");
+
+    // 設計のファイルはあり、試験・宣言・manifest のファイルは無い
+    const paths = result.diagnostics.map((artifact) => artifact.path);
+    expect(paths).toContain(DIAGNOSTICS_DESIGN_FILE);
+    expect(paths).not.toContain(DIAGNOSTICS_TEST_SUITE_FILE);
+    expect(paths).not.toContain(DIAGNOSTICS_DECLARATION_FILE);
+    expect(paths).not.toContain(BUNDLE_MANIFEST_FILE);
+  });
+
+  it("④ を通った後に ⑤a で締切に当たると、静的チェック通過の評価と受理した材料が診断に残る", async () => {
+    const recording = createRecordingClient(recordedRun());
+    const clock = { value: 0 };
+    // 5 回目（③）のあとで時計を進め、6 回目（⑤a）で締切に当てる
+    const client = clientWithClockJump(recording, 5, 2_000, clock);
+    const result = await runGeneration(makeRunInput(client, { now: () => clock.value, deadline: 1_000 }));
+
+    expect(result.bundle).toBeNull();
+    expect(result.stopped).toEqual({ stage: "correspondence", kind: "deadline" });
+    expect(result.summary.exit_code).toBe(1);
+
+    // 設計・試験・対応は受理済み、⑤a は未受理、⑤b は未実行、宣言は候補（静的通過・最終判定なし）
+    expect(stateOf(result.diagnostics, "design")).toBe("accepted");
+    expect(stateOf(result.diagnostics, "test_suite")).toBe("accepted");
+    expect(stateOf(result.diagnostics, "mappings")).toBe("accepted");
+    expect(stateOf(result.diagnostics, "correspondence")).toBe("unaccepted");
+    expect(stateOf(result.diagnostics, "test_run")).toBe("unexecuted");
+    expect(stateOf(result.diagnostics, "declaration")).toBe("candidate");
+    expect(
+      listingOf(result.diagnostics).materials.find((entry) => entry.material === "declaration")?.static_check_passed,
+    ).toBe(true);
+
+    // 一覧に、**静的チェック通過の評価の行**がある。⑤a は実行していないので、落ちの件数は 0 ではなく未実行
+    const listing = JSON.parse(diagnosticTextOf(result.diagnostics, DIAGNOSTICS_LISTING_FILE)) as {
+      evaluations: readonly { static_check_passed: boolean; correspondence_misses: unknown }[];
+    };
+    expect(listing.evaluations.some((row) => row.static_check_passed)).toBe(true);
+    expect(listing.evaluations.at(-1)?.correspondence_misses).toBe("unexecuted");
+    // 静的チェックを実行したので、その診断のファイルもある
+    expect(result.diagnostics.map((artifact) => artifact.path)).toContain(DIAGNOSTICS_STATIC_CHECK_FILE);
+  });
+
+  it("⑥ の途中で締切に当たると、最後に静的チェックを通った版の宣言と、版ごとの評価が診断に残る", async () => {
+    const recording = createRecordingClient([
+      ...recordedRun({ write: DECLARATION_SOURCE_MISMATCH }),
+      toolDone({ declaration: DECLARATION_SOURCE, disputes: [] }),
+    ]);
+    const clock = { value: 0 };
+    // 6 回目（⑤a）のあとで時計を進め、⑥（道具付き）で締切に当てる
+    const client = clientWithClockJump(recording, 6, 2_000, clock);
+    const result = await runGeneration(makeRunInput(client, { now: () => clock.value, deadline: 1_000 }));
+
+    expect(result.bundle).toBeNull();
+    expect(result.stopped).toEqual({ stage: "repair", kind: "deadline" });
+
+    // 設計・試験・対応は受理済み。最後に静的チェックを通った版の宣言が候補（静的通過・最終判定なし）
+    expect(stateOf(result.diagnostics, "design")).toBe("accepted");
+    expect(stateOf(result.diagnostics, "test_suite")).toBe("accepted");
+    expect(stateOf(result.diagnostics, "mappings")).toBe("accepted");
+    expect(stateOf(result.diagnostics, "declaration")).toBe("candidate");
+    expect(
+      listingOf(result.diagnostics).materials.find((entry) => entry.material === "declaration")?.static_check_passed,
+    ).toBe(true);
+
+    // 版ごとの評価の行と、回数が一覧にある（回数は段の記録と整合する）
+    const listing = JSON.parse(diagnosticTextOf(result.diagnostics, DIAGNOSTICS_LISTING_FILE)) as {
+      evaluations: readonly unknown[];
+      counts: {
+        evaluations: number;
+        write_initial: number;
+        write_redos: number;
+        correspondence_generations: number;
+        repair_executions: number;
+      };
+    };
+    expect(listing.evaluations.length).toBeGreaterThanOrEqual(1);
+    expect(listing.counts).toEqual({
+      evaluations: 1,
+      write_initial: 1,
+      write_redos: 0,
+      correspondence_generations: 1,
+      repair_executions: 1,
+    });
   });
 });

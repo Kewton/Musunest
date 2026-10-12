@@ -9,6 +9,7 @@
 // 抽象的なものだけを使い、受入の題材の言葉は使わない。
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runGeneration } from "./run.js";
+import { DESIGN_FILE, MAPPINGS_FILE, TEST_SUITE_FILE } from "./bundle.js";
 import type { RecordedCall } from "./llm-fake.js";
 import { requirementsFromPlan } from "./pipeline.js";
 import * as arbitrateStage from "./stages/arbitrate.js";
@@ -34,6 +35,16 @@ import {
 } from "./__tests__/run.js";
 
 const CLOCK = "2026-09-16T12:00:00+09:00";
+
+/** 納品物の成果物を読み、JSON として返す（Issue #417） */
+function readArtifact(
+  bundle: { readonly artifacts: readonly { readonly path: string; readonly text: string }[] },
+  path: string,
+): Record<string, unknown> {
+  const found = bundle.artifacts.find((artifact) => artifact.path === path);
+  if (found === undefined) throw new Error(`納品物に無い: ${path}`);
+  return JSON.parse(found.text) as Record<string, unknown>;
+}
 
 /** ② の設計（役割 ID の表と要件ごとの種類を持つ新しい契約。Issue #307・#316） */
 const DESIGN_PLANNED = {
@@ -188,6 +199,14 @@ describe("段どうしのつなぎ：各段の任意の入力が走らせる部�
     for (const request of recording.structured) {
       expectNoAcceptanceMaterial([request.instructions, ...(request.rules ?? []), request.input, ...request.documents]);
     }
+
+    // Issue #417：納品物の成果物（設計・固定した試験・提出された対応）が、各段に渡ったものと同じ値である
+    const bundle = result.bundle;
+    expect(bundle).not.toBeNull();
+    if (bundle === null) return;
+    expect(readArtifact(bundle, DESIGN_FILE).design).toEqual(testSuiteSpy.mock.calls[0]?.[0]?.design);
+    expect(readArtifact(bundle, TEST_SUITE_FILE).suite).toEqual(repairSpy.mock.calls[0]?.[0]?.suite);
+    expect(readArtifact(bundle, MAPPINGS_FILE).mappings).toEqual(correspondenceSpy.mock.calls[0]?.[0]?.mappings);
   });
 
   it("設計が無いときの古い経路は、走らせる部分から呼ばれない（呼ばれればこの試験が誤りになる）", async () => {
