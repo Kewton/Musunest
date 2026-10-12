@@ -10,7 +10,7 @@
 //   5. 送った要求に、受入の題材の言葉が無いこと
 import { acceptsHeadlessSummaryWire, planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { costOfUsageUsd } from "./budget.js";
 import {
   ARBITRATION_FILE,
@@ -39,6 +39,7 @@ import { OpenAiIncompleteError, createOpenAiLlmClient, type OpenAiUsage } from "
 import { runGeneration, countUnresolvedTests, redoDesignRecorded, type GenerationInput } from "./run.js";
 import { LEGACY_DESIGN_CONTRACT } from "./pipeline.js";
 import { MAPPING_REDO_SCHEMA_NAME } from "./stages/repair.js";
+import * as repairTools from "./stages/tools.js";
 import { ARBITRATION_SCHEMA_NAME } from "./stages/arbitrate.js";
 import { CORRESPONDENCE_SCHEMA_NAME } from "./stages/correspondence.js";
 import { REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
@@ -3467,5 +3468,84 @@ describe("設計の契約：所属と選択肢（Issue #418）", () => {
     expect(JSON.stringify(result.summary)).not.toContain(marker);
     expect(JSON.stringify(result.record)).not.toContain(marker);
     expect(JSON.stringify(result.diagnostics)).not.toContain(marker);
+  });
+});
+
+// ── 2 つの直す段にまたがる、道具の累計の上限（02 §1.5・Issue #429）──────────────
+//
+// ⑥ の道具の実行は、**ジョブ全体の累計**（共通の口の `toolCalls`）を実行の前に照らして断る（§1.5）。
+// 1 つの段で収まっても、⑥ を複数回回せばジョブ全体の線を越えうる——**段の局所で数え直さない**ことを、
+// 2 つの直す段を続けて回す走りで固定する。**実 API は呼ばない。**
+
+/**
+ * 記録した応答を順に返す偽物。**直す段ごとに会話が切れる**ことを許す（`turns` は確かめない）——
+ * 本物の記録の偽物（llm-fake.ts）は往復の順をジョブ全体で通して確かめるので、段が変わって会話が
+ * 切れるこの走りには使えない。記録した応答の順だけを見る。
+ */
+function acrossStepsClient(recorded: readonly RecordedCall[]): LlmClient {
+  let index = 0;
+  const next = (): RecordedCall => {
+    const call = recorded[index];
+    index += 1;
+    if (call === undefined) throw new Error("記録した応答が尽きました");
+    return call;
+  };
+  return {
+    async callStructured<T>() {
+      const call = next();
+      if (call.kind !== "structured") throw new Error("記録と種別が違います（構造化出力）");
+      return { output: call.output as T, usage: call.usage };
+    },
+    async callWithTools() {
+      const call = next();
+      if (call.kind !== "tools") throw new Error("記録と種別が違います（道具付き）");
+      return call.response;
+    },
+  };
+}
+
+/** 1 応答に載せる道具の束（静的チェック。宣言は妥当） */
+const staticCheckBundle = (count: number, offset: number): RecordedCall => ({
+  kind: "tools",
+  response: {
+    kind: "toolCalls",
+    toolCalls: Array.from({ length: count }, (_, i) => ({
+      id: `c${offset + i}`,
+      name: "static-check",
+      arguments: { declaration: DECLARATION_SOURCE },
+    })),
+    usage: undefined,
+  },
+});
+
+describe("2 つの直す段にまたがる、道具の累計の上限（02 §1.5・Issue #429）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("1 段目に 20 件、2 段目に 5 件の束を返すと、2 段目の束を 1 つも実行せずに call-limit で止まる", async () => {
+    const spy = vi.spyOn(repairTools, "executeRepairTool");
+    const client = acrossStepsClient([
+      ...recordedRun({ write: DECLARATION_SOURCE_MISMATCH }),
+      // 1 段目：道具 20 件の束（累計 20）→ 続く done（宣言は直っても一致しない）
+      staticCheckBundle(20, 0),
+      toolDone({ declaration: DECLARATION_SOURCE_MISMATCH, disputes: [] }),
+      // 2 段目：道具 5 件の束（応答前の累計 20 に足すと 25。上限 24 を超える）
+      staticCheckBundle(5, 20),
+    ]);
+
+    const result = await runGeneration(
+      makeRunInput(client, { limits: { ...AGENT_LIMITS, stagnationRepeats: 0 } }),
+    );
+
+    // 止め方：⑥ の累計の上限。納品物は返さず、終了コードは 1
+    expect(result.stopped).toEqual({ stage: "repair", kind: "call-limit" });
+    expect(result.record.failure).toEqual({ stage: "repair", kind: "call-limit" });
+    expect(result.bundle).toBeNull();
+    expect(result.summary.exit_code).toBe(1);
+
+    // 直す段は 2 回走る。道具を実行したのは 1 段目の 20 件だけ（2 段目の 5 件は 1 つも実行しない）
+    expect(result.record.stages.filter((stage) => stage.stage === "repair")).toHaveLength(2);
+    expect(spy).toHaveBeenCalledTimes(20);
   });
 });
