@@ -12,6 +12,10 @@
   1. CommandAgent と同じ納品物の形で出し、門（照合・受け入れ・静的チェック。`packages/control-plane` の bundle-publish）を必ず通す。**工場どうしの近道を作らない**
   2. LLM の呼び出しは adapter 層に閉じ込める（モデルを入れ替えられるようにする）
   3. 工場も Data API を迂回しない（D1・R2・DO を直接触らない）
+- **工場（`packages/factory`）の直し方は [`workspace/mvp/m1/agent/methodology/`](workspace/mvp/m1/agent/methodology/README.md) に従う**（2026-10-12 所有者が採用。#423）。
+  工場の変更は、実装前に共通の原因と観測外の反例を示し、コード・契約・入力から直す候補を検討する。意味の独立の点検と門を保つ。規則には理由と履歴を残す。
+  wave の統合候補は実装に関与しないレビューと窓口の変更前後の評価を経てから merge し、確認されるまで次の wave へ進めない。
+  ワーカーは API を呼ばず、封（保留の組）を読まない。Issue・scope・人の merge は既存の手順に従う
 - **小さく保つ（M0〜M2前半）**：host は SSR にしない（SPAシェル＋Static Assets）。
   Workers for Platforms を使わない。Logpush を使わない（`observability.enabled` で代替）。
   `schedule:` トリガのワークフローを作らない。
