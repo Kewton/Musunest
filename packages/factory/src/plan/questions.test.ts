@@ -278,7 +278,8 @@ describe("P4 を 1 回呼ぶ（04 §3 P4）", () => {
         { id: "OI-1", text: "重大な事項", critical: true, status: "open" },
         { id: "OI-2", text: "答えの出た事項", critical: true, status: "resolved" },
       ],
-      remaining: 7,
+      // 残り 1 問（開いている 2 件が収まらない）——重大な事項への問いだけでよい設定
+      remaining: 1,
       revision: 1,
       documents: SAMPLE_DOCUMENTS,
       gateway: makeGateway(recording.client, { maxAttempts: 1 }),
@@ -286,8 +287,7 @@ describe("P4 を 1 回呼ぶ（04 §3 P4）", () => {
     expect(outcome.ok).toBe(true);
     const request = recording.structured[0];
     // 残りの問数がデータに入る
-    expect(request?.input).toContain("残りの問数");
-    expect(request?.input).toContain("7");
+    expect(request?.input).toContain('<data name="残りの問数">\n1\n</data>');
     // 答えの出た事項はデータに入らない
     expect(request?.input).not.toContain("OI-2");
     expect(request?.input).not.toContain("答えの出た事項");
@@ -296,10 +296,12 @@ describe("P4 を 1 回呼ぶ（04 §3 P4）", () => {
   });
 
   it("残りの問数が足りるのに重大な事項への問いが欠けた応答は、やり直しになる", async () => {
+    // 2 件が残り 4 に収まるので、重大な OI-1 と重大でない OI-2 の両方を覆う必要がある
+    const covering = { questions: [question({ id: "Q-1", alsoCloses: ["OI-2"] }, "OI-1")] };
     const missingCritical = { questions: [question({ id: "Q-2" }, "OI-2")] };
     const recording = createRecordingClient([
       { kind: "structured", output: missingCritical, usage: undefined },
-      { kind: "structured", output: VALID_OUTPUT, usage: undefined },
+      { kind: "structured", output: covering, usage: undefined },
     ]);
     const outcome = await runQuestions({
       source: "タスクを記録する。",
@@ -334,9 +336,11 @@ describe("P4 を 1 回呼ぶ（04 §3 P4）", () => {
   });
 
   it("開いている事項があるのに問いが 0 問の応答も、やり直しになる", async () => {
+    // 2 件が残り 4 に収まるので、両方を覆う問いを出す必要がある
+    const covering = { questions: [question({ id: "Q-1", alsoCloses: ["OI-2"] }, "OI-1")] };
     const recording = createRecordingClient([
       { kind: "structured", output: { questions: [] }, usage: undefined },
-      { kind: "structured", output: VALID_OUTPUT, usage: undefined },
+      { kind: "structured", output: covering, usage: undefined },
     ]);
     const outcome = await runQuestions({
       source: "タスクを記録する。",
@@ -482,6 +486,80 @@ describe("重大な事項の取りこぼしと、依頼文で閉じる事項（0
   });
 });
 
+// ── 開いている事項が残りの問数に収まるときは全部を覆わせる（Issue #419）──
+
+describe("残りの問数に収まる事項は全部覆わせる（04 §3 P4・Issue #419）", () => {
+  const MIX: readonly PlanOpenIssue[] = [
+    { id: "OI-1", text: "重大", critical: true, status: "open" },
+    { id: "OI-2", text: "重大でない 1", critical: false, status: "open" },
+    { id: "OI-3", text: "重大でない 2", critical: false, status: "open" },
+  ];
+
+  it("3 件が残り 5 に収まるなら、重大でない事項を聞かない応答は覆いの誤りになる", () => {
+    const problems = checkQuestionCoverage(MIX, 5, [question({ id: "Q-1" }, "OI-1")]);
+    expect(problems.map((problem) => problem.code)).toContain("question-coverage");
+  });
+
+  it("収まるなら、一緒に閉じる事項（alsoCloses）で覆えば通る", () => {
+    const problems = checkQuestionCoverage(MIX, 5, [
+      question({ id: "Q-1", alsoCloses: ["OI-2", "OI-3"] }, "OI-1"),
+    ]);
+    expect(problems).toEqual([]);
+  });
+
+  it("収まらない（残り 2）なら、重大な事項だけでよい", () => {
+    expect(checkQuestionCoverage(MIX, 2, [question({ id: "Q-1" }, "OI-1")])).toEqual([]);
+    // 重大な事項が収まるのに覆われていなければ、今までどおり誤りになる
+    expect(checkQuestionCoverage(MIX, 2, [question({ id: "Q-2" }, "OI-2")])).not.toEqual([]);
+  });
+
+  it("依頼文で閉じた事項を除いた数で判定する（依頼文で閉じた分は聞かなくてよい）", () => {
+    const closed: readonly PlanSourceClosure[] = [
+      { issueId: "OI-2", quote: "タスクを記録する", value: "記録する" },
+      { issueId: "OI-3", quote: "件数を合計する", value: "合計する" },
+    ];
+    // 依頼文で 2 件閉じれば、残りは重大な 1 件だけ——問い 1 問で収まる
+    expect(checkQuestionCoverage(MIX, 5, [question({ id: "Q-1" }, "OI-1")], closed)).toEqual([]);
+  });
+
+  it("覆いの誤りは 1 回だけやり直し、2 回続けば段の失敗になる", async () => {
+    const asking = { questions: [question({ id: "Q-1" }, "OI-1")] };
+    const recording = createRecordingClient([
+      { kind: "structured", output: asking, usage: undefined },
+      { kind: "structured", output: asking, usage: undefined },
+    ]);
+    const outcome = await runQuestions({
+      source: "タスクを記録する。",
+      openIssues: [...MIX],
+      remaining: 5,
+      revision: 1,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("malformed");
+    if (outcome.failure.kind !== "malformed") return;
+    expect(outcome.failure.problems.map((problem) => problem.code)).toContain("question-coverage");
+    expect(recording.structured).toHaveLength(2);
+  });
+
+  it("収まるなら、全部を覆う応答は通る（やり直しは走らない）", async () => {
+    const output = { questions: [question({ id: "Q-1", alsoCloses: ["OI-2", "OI-3"] }, "OI-1")] };
+    const recording = createRecordingClient([{ kind: "structured", output, usage: undefined }]);
+    const outcome = await runQuestions({
+      source: "タスクを記録する。",
+      openIssues: [...MIX],
+      remaining: 5,
+      revision: 1,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    expect(recording.structured).toHaveLength(1);
+  });
+});
+
 describe("依頼文で閉じる事項の引用（04 §3 P4・Issue #370）", () => {
   const ISSUE: PlanOpenIssue = { id: "OI-1", text: "誰の分を数えるか", critical: true, status: "open" };
 
@@ -612,5 +690,12 @@ describe("依頼文で閉じる事項の引用（04 §3 P4・Issue #370）", () 
     expect(text).toContain("依頼文で閉じる事項");
     expect(text).toContain("許可の表");
     expect(text).toContain("既定で閉じる");
+  });
+
+  it("規則の 3 文目が、収まるなら重大でない事項も聞く（か一緒に閉じる）ことと、収まらなければ重大を先にすることを書く", () => {
+    const rule = QUESTIONS_RULES[2] ?? "";
+    expect(rule).toContain("全部収まる");
+    expect(rule).toContain("重大でない事項も聞く");
+    expect(rule).toContain("収まらない");
   });
 });

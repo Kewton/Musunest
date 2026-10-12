@@ -4,10 +4,12 @@
 // **確定した仕様**まで進める。**端末にもファイルにも縛られない**——答える役（利用者）は口
 // （`PlanResponder`）として外から差し込む。端末・ファイル・評価の利用者役は、この口の実装として外側に置く。
 //
-// 流れ：P1 要件にする・P2 逆照合（`runReverseCheckLoop`）→ P3 洗い出し（`runSurface`）と目録の点検
-// （`runCatalog`）→ P4 質問（`runQuestions`）→ 往復の関数（`nextPlanStep`）で次の一歩を決める →
+// 流れ：P1 要件にする・P2 逆照合（`runReverseCheckLoop`）→ P3 目録の点検（`runCatalog`）と洗い出し
+// （`runSurface`）→ P4 質問（`runQuestions`）→ 往復の関数（`nextPlanStep`）で次の一歩を決める →
 // 答える役の口で答えを受け取り P5 で反映する（`runAnswers`）→ …（上限は往復をまたいで数える）→
-// P6 照合と確定（`runConfirm`）。
+// P6 照合と確定（`runConfirm`）。**目録の点検は洗い出しより先に回す**——点検した対象・開いている事項・
+// 仮に適用した既定を洗い出しに渡し、同じ決めどころの重複を抑える（Issue #419）。既定の確定は今までどおり
+// 洗い出しの後（各往復の P4 の前）である。
 //
 // 結果は 3 つの形である：**確定した**（`checkConfirmedPlan` を通った仕様）／**確定できない**（残った
 // 重大な未解決の事項）／**止まった**（予算・締切・段の失敗・答える役が「やめる」）。
@@ -61,7 +63,7 @@ import {
   type PlanRemaining,
   type PlanTurn,
 } from "./session.js";
-import { runSurface } from "./surface.js";
+import { runSurface, type SurfaceCatalogData } from "./surface.js";
 
 /** Plan の段（記録の `stage` に使う。生成の段とは別の一覧である） */
 export const PLAN_STAGE_IDS = [
@@ -898,20 +900,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       };
     }
 
-    // ── P3 洗い出し（目録に無い曖昧さ）──────────────────────────────
-    const surface = await runStageOutcome("surface", () =>
-      runSurface({ list, documents: input.documents, gateway }),
-    );
-    for (const ambiguity of surface.ambiguities) {
-      openIssues.push({
-        id: ambiguity.id,
-        text: ambiguity.text,
-        critical: ambiguity.critical,
-        status: "open",
-      });
-    }
-
-    // ── P3 目録の点検（語彙の決めどころ）────────────────────────────
+    // ── P3 目録の点検（語彙の決めどころ）。**P3 の洗い出しより先に回す**（Issue #419）────────
     const catalog = await runStage("catalog", () =>
       runCatalog({
         requirements: list.requirements.map((requirement) => ({ id: requirement.id, text: requirement.text })),
@@ -920,14 +909,6 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         threshold,
       }),
     );
-    for (const facet of catalog.unspecified) {
-      const issue = catalogOpenIssue(facet);
-      openIssues.push(issue);
-      // コードが目録から作った事項に、**事項 ID → （観点 ID・対象の要件）の対応**を持たせる（Issue #408）。
-      // **ID の接頭辞は解析しない**——モデルが同じ形（`OI:catalog:`）の ID を作っても、この対応には
-      // 入らないので既定の対象にならない。
-      catalogIssueFacets.set(issue.id, facet);
-    }
     // 目録の門の判定（要件 ID → 集計を含むか）を、既定の適用条件の事実として組む（Issue #408）。門の
     // 答えが無い・Noul でない・範囲の外は `null`（判定できない＝閉じない）。問いの名前は、要件 ID と
     // 同じ組み立て（`catalogGateQuestionName`）で引き直す——事項 ID の接頭辞は解析しない。
@@ -939,6 +920,59 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       );
       const value = judgment?.value ?? null;
       aggregatesByRequirement.set(facet.requirementId, value === null ? null : value > 1 - threshold);
+    }
+    /** 未指定の観点に、許可の表の既定が当たるときだけ値と理由を返す（仮適用と確定の両方で使う。Issue #419） */
+    const defaultFor = (facet: UnspecifiedFacet): { readonly value: string; readonly reason: string } | undefined => {
+      const catalogFacet = CATALOG_FACETS.find((candidate) => candidate.id === facet.facetId);
+      if (catalogFacet === undefined) return undefined;
+      return catalogDefaultOf(catalogFacet, {
+        aggregates: aggregatesByRequirement.get(facet.requirementId) ?? null,
+      });
+    };
+    // P3 に渡す 3 つのデータを組む（Issue #419）。**ここでは決定も閉じた記録も作らない**——仮適用である。
+    // 値と理由はコードの定数（`defaultFor` の返す値と、表の理由）だけを使う。依頼文・答えの本文は渡さない。
+    const catalogData: SurfaceCatalogData = {
+      targets: catalog.reviewed,
+      openIssues: catalog.unspecified.map((facet) => {
+        const issue = catalogOpenIssue(facet);
+        return { id: issue.id, requirementId: facet.requirementId, facetId: facet.facetId, text: issue.text };
+      }),
+      defaults: catalog.unspecified.flatMap((facet) => {
+        // 重大な事項は既定の対象にしない（Issue #408）
+        if (facet.critical) return [];
+        const applied = defaultFor(facet);
+        if (applied === undefined) return [];
+        return [
+          {
+            issueId: catalogOpenIssue(facet).id,
+            requirementId: facet.requirementId,
+            facetId: facet.facetId,
+            value: applied.value,
+            reason: applied.reason,
+          },
+        ];
+      }),
+    };
+
+    // ── P3 洗い出し（目録に無い曖昧さ）──────────────────────────────
+    const surface = await runStageOutcome("surface", () =>
+      runSurface({ list, documents: input.documents, gateway, catalog: catalogData }),
+    );
+    for (const ambiguity of surface.ambiguities) {
+      openIssues.push({
+        id: ambiguity.id,
+        text: ambiguity.text,
+        critical: ambiguity.critical,
+        status: "open",
+      });
+    }
+    // コードが目録から作った事項を、開いている事項に足す（04 §3・Issue #408）。**ID の接頭辞は解析
+    // しない**——モデルが同じ形（`OI:catalog:`）の ID を作っても、この対応には入らないので既定の対象に
+    // ならない（後で `applyDefaults` が重複として弾く）。
+    for (const facet of catalog.unspecified) {
+      const issue = catalogOpenIssue(facet);
+      openIssues.push(issue);
+      catalogIssueFacets.set(issue.id, facet);
     }
 
     // 書けないことを、了承して除く部分（`accepted_unwritable`）に写す（§4・U-P2）。代わりの案は、
@@ -1054,11 +1088,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         const issue = openIssues[index];
         // 重大な事項は既定の対象にしない
         if (issue === undefined || issue.critical) continue;
-        const catalogFacet = CATALOG_FACETS.find((candidate) => candidate.id === facet.facetId);
-        if (catalogFacet === undefined) continue;
-        const applied = catalogDefaultOf(catalogFacet, {
-          aggregates: aggregatesByRequirement.get(facet.requirementId) ?? null,
-        });
+        const applied = defaultFor(facet);
         // 表に無い観点・適用条件に合わない（no-match）・判定できない（unknown）は閉じない
         if (applied === undefined) continue;
         const decisionId = defaultDecisionId(issueId);

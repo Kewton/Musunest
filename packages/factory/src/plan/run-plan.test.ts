@@ -340,11 +340,11 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     // 答えから増えた要件が、組み直した答えの ID を出どころにしている
     const added = result.plan.requirements.find((requirement) => requirement.id === "R:A:Q1-1");
     expect(added?.origin.input_id).toBe("A:Q1-1");
-    // 段ごとの記録が結果に入る（生成の段の記録と同じ形）
+    // 段ごとの記録が結果に入る（生成の段の記録と同じ形）。**目録の段が洗い出しより前**（Issue #419）
     expect(result.stages.map((stage) => stage.stage)).toEqual([
       "requirements",
-      "surface",
       "catalog",
+      "surface",
       "questions",
       "answers",
       "confirm",
@@ -994,7 +994,7 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
     expect(result.reasons).toEqual([{ source: "confirm", code: "uncovered-source", path: "source[2]" }]);
   });
 
-  it("重大でない事項が開いたまま残れば、cannot-confirm（source: session・noncritical-without-default）になり、P6 を呼ばない", async () => {
+  it("残りの問数に収まる重大でない事項を聞かない応答は、覆いの検査でやり直し、2 回続けば段の失敗になる（Issue #419）", async () => {
     const surface = {
       ambiguities: [
         { id: "OI-a", requirementId: "R-1", text: "問い a", critical: true },
@@ -1002,6 +1002,7 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
       ],
       unwritable: [],
     };
+    // 重大な OI-a は聞くが、残り 10 問に収まる重大でない OI-b を聞かない応答
     const questions = {
       questions: [
         {
@@ -1022,16 +1023,60 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
       structured(REVERSE_CHECK_OUTPUT),
       structured(surface),
       structured(questions),
+      // やり直しも同じ応答 → 2 回続くので段の失敗
+      structured(questions),
     ]);
 
     const result = await runPlan(
       makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") }), ALL_RECOMMENDED),
     );
 
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("questions");
+    expect(result.failure?.kind).toBe("malformed");
+    expect(result.failure?.problems).toEqual([{ field: "questions", code: "question-coverage" }]);
+  });
+
+  it("残りの問数に全事項が収まらない設定で、重大でない事項だけが残れば cannot-confirm（noncritical-without-default）になり、P6 を呼ばない（Issue #408・#419）", async () => {
+    // 開いている事項 11 件（すべて重大でない）が、残りの問数 10 に収まらない
+    const surface = {
+      ambiguities: Array.from({ length: 11 }, (_value, index) => ({
+        id: `OI-${index + 1}`,
+        requirementId: "R-1",
+        text: `問い ${index + 1}`,
+        critical: false,
+      })),
+      unwritable: [],
+    };
+    // P4 は残りの問数の範囲で 10 件を聞く（覆いは収まらないので重大だけでよい）
+    const questions = {
+      questions: Array.from({ length: 10 }, (_value, index) => ({
+        id: `Q-${index + 1}`,
+        openIssueId: `OI-${index + 1}`,
+        text: `問い ${index + 1}`,
+        choices: [
+          { id: "c1", text: "こちら" },
+          { id: "c2", text: "あちら" },
+        ],
+        recommended: { choiceId: "c1", reason: "依頼に沿う" },
+        allowFreeText: true,
+      })),
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      structured(questions),
+    ]);
+
+    const result = await runPlan(
+      makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor([]) }), ANSWER_NONE),
+    );
+
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
-    // 重大でない事項 OI-b が既定の無いまま残った
-    expect(result.openIssues.map((issue) => issue.id)).toEqual(["OI-b"]);
+    // 重大でない事項だけが既定の無いまま残った
     expect(result.reasons).toEqual([{ source: "session", code: "noncritical-without-default", path: "open_issues" }]);
     // P6（confirm の段）を呼ばない
     expect(result.stages.some((stage) => stage.stage === "confirm")).toBe(false);
@@ -1045,13 +1090,25 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
       ],
       unwritable: [],
     };
-    // 重大な事項 OI-a への問いは答える役が答えず、上限まで往復して残る
+    // 重大な OI-a と重大でない OI-b の両方を聞く（残り 10 問に収まるので全部を覆う。Issue #419）。
+    // 答える役は答えないので、どちらも閉じずに上限まで往復して残る
     const questions = {
       questions: [
         {
           id: "Q-a",
           openIssueId: "OI-a",
           text: "問い a",
+          choices: [
+            { id: "c1", text: "こちら" },
+            { id: "c2", text: "あちら" },
+          ],
+          recommended: { choiceId: "c1", reason: "依頼に沿う" },
+          allowFreeText: true,
+        },
+        {
+          id: "Q-b",
+          openIssueId: "OI-b",
+          text: "問い b",
           choices: [
             { id: "c1", text: "こちら" },
             { id: "c2", text: "あちら" },
@@ -1481,7 +1538,16 @@ const questionFor = (openIssueId: string) => ({
   allowFreeText: true,
 });
 
-const ROUND_1_QUESTION = { questions: [questionFor("OI-1")] };
+/**
+ * 1 往復目の P4 の答え。**残り 10 問に収まるので、重大な OI-1 と重大でない OI-2 の両方を聞く**
+ * （Issue #419 の覆いの検査）。ID は LLM が別々の `Q-1`・`Q-2` を返し、コードが `Q<版>-<n>` に組み直す。
+ */
+const ROUND_1_QUESTION = {
+  questions: [
+    { ...questionFor("OI-1"), id: "Q-1" },
+    { ...questionFor("OI-2"), id: "Q-2" },
+  ],
+};
 const ROUND_2_QUESTION = { questions: [questionFor("OI-2")] };
 
 describe("質問 ID と答えの ID を往復をまたいで一意にする（Issue #405）", () => {
@@ -1552,11 +1618,14 @@ describe("質問 ID と答えの ID を往復をまたいで一意にする（Is
     expect(result.kind).toBe("confirmed");
     if (result.kind !== "confirmed") return;
     expect(await checkConfirmedPlan(result.plan)).toEqual([]);
-    // 質問 ID が `Q<版>-<n>`（1 往復目は `Q1-1`）。往復をまたいで重ならない
-    expect(asked.map((request) => request.questions.map((question) => question.id))).toEqual([["Q1-1"], ["Q2-1"]]);
+    // 質問 ID が `Q<版>-<n>`（1 往復目は `Q1-1`・`Q1-2`、2 往復目は `Q2-1`）。往復をまたいで重ならない
+    expect(asked.map((request) => request.questions.map((question) => question.id))).toEqual([
+      ["Q1-1", "Q1-2"],
+      ["Q2-1"],
+    ]);
     const questionIds = result.plan.inputs.filter((input) => input.kind === "question").map((input) => input.id);
     const answerIds = result.plan.inputs.filter((input) => input.kind === "answer").map((input) => input.id);
-    expect(questionIds).toEqual(["Q1-1", "Q2-1"]);
+    expect(questionIds).toEqual(["Q1-1", "Q1-2", "Q2-1"]);
     expect(answerIds).toEqual(["A:Q1-1", "A:Q2-1"]);
     // 答えの ID・解決の根拠・`R:A:…` の要件が、同じ組み直した ID を指す
     const requirementIds = result.plan.requirements.map((requirement) => requirement.id);
@@ -1929,7 +1998,7 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
     expect(result.closedByDefault).toEqual([]);
   });
 
-  it("「全部推奨で進める」で、出した質問だけが推奨で閉じ、未質問の表の事項は既定で閉じ、表の外の事項が残れば確定しない", async () => {
+  it("「全部推奨」でも、残りの問数に収まる重大でない事項を聞かない応答は、覆いの検査でやり直し、2 回続けば段の失敗になる（Issue #419）", async () => {
     const surface = {
       ambiguities: [
         { id: "OI-c", requirementId: "R-1", text: "重大な事項", critical: true },
@@ -1937,29 +2006,64 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
       ],
       unwritable: [],
     };
-    // P4 は重大な OI-c だけを聞く（重大でない OI-n は聞かない）
+    // P4 は重大な OI-c だけを聞き、残り 10 問に収まる重大でない OI-n を聞かない（やり直しも同じ）
     const recording = createRecordingClient([
       structured(REQUIREMENT_LIST_OUTPUT),
       structured(REVERSE_CHECK_OUTPUT),
       structured(surface),
       structured(questionsFor("OI-c")),
+      structured(questionsFor("OI-c")),
     ]);
-    const responder: PlanResponder = ALL_RECOMMENDED;
     const judge = createFakeJudge({
       ...catalogUnspecifiedFor({ "R-1": ["period"] }),
       ...coverAnswersFor(["A:Q1-1"]),
     });
 
-    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("questions");
+    expect(result.failure?.kind).toBe("malformed");
+    expect(result.failure?.problems).toEqual([{ field: "questions", code: "question-coverage" }]);
+  });
+
+  it("残りの問数に全事項が収まらない設定では、「全部推奨」でも未質問の表の外の事項を閉じない（Issue #408・#419）", async () => {
+    // 重大 10 件 + 表の外の重大でない 1 件 = 11 件。残り 10 問に収まらないので、重大だけを求めればよい
+    const surface = {
+      ambiguities: [
+        ...Array.from({ length: 10 }, (_value, index) => ({
+          id: `OI-${index + 1}`,
+          requirementId: "R-1",
+          text: `重大 ${index + 1}`,
+          critical: true,
+        })),
+        { id: "OI-n", requirementId: "R-1", text: "表の外の重大でない事項", critical: false },
+      ],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      structured(TEN_QUESTIONS),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["period"] }),
+      ...coverAnswersFor(Array.from({ length: 10 }, (_value, index) => `A:Q1-${index + 1}`)),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED));
 
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
-    // 出した質問（OI-c）は推奨で閉じ、未質問の表の事項（period）は既定で閉じている＝開いているのは OI-n だけ
+    // 推奨で答えた重大 10 件だけが閉じ、未質問の表の外の事項（OI-n）は閉じない
     expect(result.openIssues.map((issue) => issue.id)).toEqual(["OI-n"]);
+    // 表の事項（period）は既定で閉じている
     expect(result.closedByDefault).toEqual([
       { issueId: "OI:catalog:R-1:period", facetId: "period", value: "期間の条件を足さない" },
     ]);
-    // 表の外の事項（OI-n）が残るので確定しない
+    // 表の外の事項が残るので確定しない
     expect(result.reasons).toEqual([{ source: "session", code: "noncritical-without-default", path: "open_issues" }]);
   });
 
@@ -1987,5 +2091,142 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
     // 重大な 10 件はそのまま 10 問で聞く（既定の分を足した 11 問にはしない）
     expect(result.plan.inputs.filter((input) => input.kind === "question")).toHaveLength(AGENT_LIMITS.planQuestions);
     expect(result.plan.open_issues.every((issue) => issue.status === "resolved")).toBe(true);
+  });
+});
+
+// ── Issue #419：目録の点検を P3 の前に回し、点検の結果を P3 に渡す ─────────────
+
+describe("目録の点検を P3 の前に回し、点検の結果を P3 に渡す（04 §3 P3・Issue #419）", () => {
+  /** `<data name="…">…</data>` の中身を取り出す（データの欄ごとに確かめる） */
+  const dataBlockOf = (input: string, name: string): string =>
+    input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "";
+
+  it("P3 の要求のデータに、目録が点検した対象・開いている事項・仮に適用した既定が入り、値・理由はコードの定数で、依頼文の目印が入らない", async () => {
+    const mark = "MARK_SOURCE_P3";
+    const source = `${mark}する。件数を合計する。`;
+    const pos = (quote: string): { readonly start: number; readonly end: number } => {
+      const start = source.indexOf(quote);
+      return { start, end: start + quote.length };
+    };
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: `${mark}する`, position: pos(`${mark}する`) },
+        { id: "R-2", text: "件数を合計できる", quote: "件数を合計する", position: pos("件数を合計する") },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    // period を未指定にする → 既定が当たる（仮適用。まだ閉じない）
+    const judge = createFakeJudge({ ...catalogUnspecifiedFor({ "R-1": ["period"] }), ...coverAnswersFor([]) });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE, { source }));
+
+    expect(result.kind).toBe("confirmed");
+    // 目録の段が P3 の段より前（段の記録）
+    expect(result.stages.map((stage) => stage.stage).slice(0, 3)).toEqual(["requirements", "catalog", "surface"]);
+    const request = recording.structured[2];
+    expect(request).toBeDefined();
+    if (request === undefined) return;
+    const input = request.input;
+    // 3 つの欄が別々の `<data name=` で入る
+    expect(input).toContain('<data name="目録が点検した対象">');
+    expect(input).toContain('<data name="開いている事項">');
+    expect(input).toContain('<data name="仮に適用した既定">');
+    // 開いている事項（コードが目録から作った事項）
+    expect(dataBlockOf(input, "開いている事項")).toContain("OI:catalog:R-1:period");
+    // 仮に適用した既定（値・理由はコードの定数）
+    const defaults = dataBlockOf(input, "仮に適用した既定");
+    expect(defaults).toContain("期間の条件を足さない");
+    expect(defaults).toContain("語彙の意味");
+    expect(defaults).toContain("OI:catalog:R-1:period");
+    // 3 つの新しい欄に、依頼文の目印が入らない（依頼文・答えの本文を渡さない）
+    for (const name of ["目録が点検した対象", "開いている事項", "仮に適用した既定"]) {
+      expect(dataBlockOf(input, name)).not.toContain(mark);
+    }
+  });
+
+  it("偽物の P3 が、仮に適用した既定と同じ決めどころの自由文の事項を返しても、閉じず・落とさず、開いた事項として P4 に渡る", async () => {
+    // 目録は period を未指定にする（既定は仮適用）。P3 は同じ決めどころ（期間）を自由文で挙げる
+    const surface = {
+      ambiguities: [{ id: "OI-free", requirementId: "R-1", text: "期間のことを決めたい", critical: false }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      structured(questionsFor("OI-free")),
+      structured(questionsFor("OI-free")),
+      structured(questionsFor("OI-free")),
+    ]);
+    const asked: PlanAnswerRequest[] = [];
+    const responder: PlanResponder = {
+      async answer(request) {
+        asked.push(request);
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({ ...catalogUnspecifiedFor({ "R-1": ["period"] }), ...coverAnswersFor([]) });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 自由文の事項（OI-free）は、既定と決めどころが同じでも、コードが閉じない・落とさない
+    expect(result.openIssues.map((issue) => issue.id)).toContain("OI-free");
+    // 開いた事項として P4 に渡る（自動で閉じない）
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked[0]?.questions.map((question) => question.openIssueId)).toContain("OI-free");
+    // 目録が作った period の事項だけが、既定で確定して閉じている
+    expect(result.closedByDefault).toEqual([
+      { issueId: "OI:catalog:R-1:period", facetId: "period", value: "期間の条件を足さない" },
+    ]);
+  });
+
+  it("目録の門が判定不明の要件と、当てはまらないと判定した要件で、P3 の重大な事項が開いたまま残れば確定しない", async () => {
+    // R-1: 門の答えが範囲の外（不明）→ 集計の観点は判定不明。R-2: 当てはまりを閾値未満（当てはまらない）
+    const answers: Record<string, JudgeAnswer> = {
+      [catalogGateQuestionName("R-1")]: noul(1.5),
+      [catalogGateQuestionName("R-2")]: noul(1),
+    };
+    for (const facet of CATALOG_FACETS) {
+      answers[catalogAppliesQuestionName("R-1", facet.id)] = noul(1);
+      answers[catalogQuestionName("R-1", facet.id)] = noul(1);
+      answers[catalogAppliesQuestionName("R-2", facet.id)] = noul(0.1);
+      answers[catalogQuestionName("R-2", facet.id)] = noul(0);
+    }
+    const surface = {
+      ambiguities: [{ id: "OI-crit", requirementId: "R-1", text: "重大な曖昧さ", critical: true }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      structured(questionsFor("OI-crit")),
+      structured(questionsFor("OI-crit")),
+      structured(questionsFor("OI-crit")),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge(answers), ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 重大な事項 OI-crit が開いたまま残る（目録の一覧は抑制の根拠にしない）
+    expect(result.openIssues.map((issue) => issue.id)).toContain("OI-crit");
+    // 一覧では、R-1 の集計の観点が「判定不明」、R-2 の観点が「当てはまらない」
+    const request = recording.structured[2];
+    const targets = dataBlockOf(request?.input ?? "", "目録が点検した対象");
+    expect(targets).toContain("判定不明");
+    expect(targets).toContain("当てはまらない");
   });
 });

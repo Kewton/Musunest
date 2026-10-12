@@ -256,11 +256,32 @@ export interface CatalogJudgment {
   readonly answeredBy: string;
 }
 
+/**
+ * 目録が点検した 1 つの対象（要件 × 観点）の結果（Issue #419）。値は有限の 4 つ——「当てはまらない」
+ * （その観点がその要件に関係しない）・「決まっている」（依頼か答えで指定されている）・「開いている」
+ * （指定されておらず、答えで作るものが変わる）・「判定不明」（判定が欠け・Noul 以外・非有限・0〜1 の外
+ * で、確定できない）。**「不明」を値 0 と区別する**（#384 のまま）。
+ */
+export const CATALOG_TARGET_STATUSES = ["当てはまらない", "決まっている", "開いている", "判定不明"] as const;
+export type CatalogTargetStatus = (typeof CATALOG_TARGET_STATUSES)[number];
+
+/** 目録が点検した対象 1 つ（要件 ID・観点 ID・結果。Issue #419） */
+export interface CatalogTarget {
+  readonly requirementId: string;
+  readonly facetId: string;
+  readonly status: CatalogTargetStatus;
+}
+
 /** 目録の判定の結果 */
 export interface CatalogResult {
   /** 指定されていない観点（当てはまるかつ閾値より低いものだけ）。要件の順・観点の順に並ぶ */
   readonly unspecified: readonly UnspecifiedFacet[];
   readonly judgments: readonly CatalogJudgment[];
+  /**
+   * 目録が点検した対象の一覧（要件 × 観点 と結果。Issue #419）。**許可の表の既定の適用は含めない**
+   * ——既定で閉じるのは呼ぶ側（`runPlan`）の仕事である。要件の順・観点の順に並ぶ。
+   */
+  readonly reviewed: readonly CatalogTarget[];
 }
 
 /** 目録の判定が受け取るもの */
@@ -283,21 +304,50 @@ function noulValue(answer: JudgeAnswer | undefined): number {
   return answer !== undefined && answer.kind === "noul" ? answer.noul : 0;
 }
 
-/** 集計の門の値（答えが無い・Noul でない・数でない・0〜1 の外は「不明」） */
-type GateValue = { readonly kind: "known"; readonly value: number } | { readonly kind: "unknown" };
+/**
+ * 検証した Noul の値（答えが無い・Noul でない・数でない・0〜1 の外は「不明」）。**欠けを 0 にする
+ * `noulValue` とは別**——不明を値 0 と区別する（Issue #384）。
+ */
+export type JudgmentValue = { readonly kind: "known"; readonly value: number } | { readonly kind: "unknown" };
 
 /**
- * 集計の門の値を取り出す（Issue #384）。**欠けを 0 にする `noulValue` は門には使わない**——答えが無い・
- * Noul でない答え・数でない値・0〜1 の外の値は、値 0 と区別して「不明」にする。不明のときは門を開けて
- * （今までどおり扱って）取りこぼしを避ける。
+ * 答えから、検証した Noul の値を取り出す（Issue #384）。**欠けを 0 にする `noulValue` は門と一覧には
+ * 使わない**——答えが無い・Noul でない答え・数でない値・0〜1 の外の値は、値 0 と区別して「不明」にする。
+ * 不明のときは門を開けて（今までどおり扱って）取りこぼしを避ける。
  */
-function gateValue(answer: JudgeAnswer | undefined): GateValue {
+export function judgmentValue(answer: JudgeAnswer | undefined): JudgmentValue {
   if (answer === undefined || answer.kind !== "noul") return { kind: "unknown" };
   const value = answer.noul;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
     return { kind: "unknown" };
   }
   return { kind: "known", value };
+}
+
+/**
+ * 目録が点検した 1 つの対象（要件 × 観点）の結果を、閾値と門の閉じに照らして**1 か所で**決める
+ * （Issue #419）。優先の順は既存の目録の条件（閾値・門の閉じ）と同じにする。
+ *
+ *   - 集計の観点は、門の判定が不明なら「判定不明」（適用そのものを確定できない）、門がはっきり閉じて
+ *     いれば（`1 − 閾値` 以下）「当てはまらない」
+ *   - 当てはまりの判定が不明なら「判定不明」、閾値未満なら「当てはまらない」
+ *   - 決まっているかの判定が不明なら「判定不明」、閾値以上なら「決まっている」、未満なら「開いている」
+ */
+export function catalogTargetStatus(input: {
+  readonly aggregation: boolean;
+  readonly gate: JudgmentValue;
+  readonly applies: JudgmentValue;
+  readonly specified: JudgmentValue;
+  readonly threshold: number;
+}): CatalogTargetStatus {
+  if (input.aggregation) {
+    if (input.gate.kind === "unknown") return "判定不明";
+    if (input.gate.value <= 1 - input.threshold) return "当てはまらない";
+  }
+  if (input.applies.kind === "unknown") return "判定不明";
+  if (input.applies.value < input.threshold) return "当てはまらない";
+  if (input.specified.kind === "unknown") return "判定不明";
+  return input.specified.value < input.threshold ? "開いている" : "決まっている";
 }
 
 /**
@@ -342,7 +392,7 @@ export async function runCatalog(input: CatalogInput): Promise<CatalogResult> {
       };
     }
   }
-  if (input.requirements.length === 0) return { unspecified: [], judgments: [] };
+  if (input.requirements.length === 0) return { unspecified: [], judgments: [], reviewed: [] };
 
   // state には、問いをまたいで共通に要るものだけを残す（対象の文は問いの欄に載せた。Issue #376）。
   // 「決まっているか」は依頼で指定されているかを見るので、原文を state に入れて渡す。
@@ -354,9 +404,11 @@ export async function runCatalog(input: CatalogInput): Promise<CatalogResult> {
 
   const unspecified: UnspecifiedFacet[] = [];
   const judgments: CatalogJudgment[] = [];
+  // 点検した対象の一覧（要件 × 観点 と結果。Issue #419）
+  const reviewed: CatalogTarget[] = [];
   for (const requirement of input.requirements) {
     const gateName = catalogGateQuestionName(requirement.id);
-    const gate = gateValue(response.answers[gateName]);
+    const gate = judgmentValue(response.answers[gateName]);
     // 門の判定も記録に残す。不明のときは値 `null` にして、値 0 と区別する（Issue #384）
     judgments.push({
       questionId: gateName,
@@ -386,6 +438,19 @@ export async function runCatalog(input: CatalogInput): Promise<CatalogResult> {
         model: response.model,
         answeredBy: response.answeredBy,
       });
+      // 点検した対象の一覧に、要件 × 観点 の結果を加える（欠け・Noul 以外・非有限・0〜1 の外は
+      // 値 0 と区別して「判定不明」にする。Issue #419）
+      reviewed.push({
+        requirementId: requirement.id,
+        facetId: facet.id,
+        status: catalogTargetStatus({
+          aggregation: CATALOG_AGGREGATION_FACET_IDS.has(facet.id),
+          gate,
+          applies: judgmentValue(response.answers[appliesName]),
+          specified: judgmentValue(response.answers[specifiedName]),
+          threshold: input.threshold,
+        }),
+      });
       // 集計を含まないと分かっている要件では、集計の観点を未解決の事項にしない（Issue #384）
       if (gateClosed && CATALOG_AGGREGATION_FACET_IDS.has(facet.id)) continue;
       // 当てはまらない観点は、決まっていなくても未解決の事項にしない（Issue #366）
@@ -401,7 +466,7 @@ export async function runCatalog(input: CatalogInput): Promise<CatalogResult> {
       }
     }
   }
-  return { unspecified, judgments };
+  return { unspecified, judgments, reviewed };
 }
 
 /**

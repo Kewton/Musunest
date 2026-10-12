@@ -32,7 +32,7 @@ export const QUESTIONS_SCHEMA_NAME = "plan-questions";
 export const QUESTIONS_RULES: readonly string[] = [
   "未解決の事項から、利用者への質問を組み立てる。**1 問は未解決の事項 1 つ**に対応する。",
   "**重大な（critical が真の）未解決の事項を先に聞く。** 残りの問数の範囲で、重大な事項はすべて聞く。重大な事項が残りの問数より多いときは、残りの問数ぶんを重大なものから聞く。",
-  "重大でない事項は、残りの問数に余りがあるときだけ聞く。",
+  "残りの問数に**全部収まるなら、重大でない事項も聞く（か一緒に閉じる）**。収まらないなら重大なものを先に。",
   "1 問は「質問 ID（id）・問い（text）・選択肢（choices。2〜4 個。選択肢 ID と文）・推奨（recommended。選択肢 ID と理由 1 行）・自由入力の可否（allowFreeText）」を持つ。",
   "問いと選択肢の文は、利用者の言葉で書く。宣言の用語（entity・computed・selector など）を使わない。",
   "選択肢は、どれを選んでも書けるものにする。作るものが同じになる選択肢は 1 つにまとめる。",
@@ -627,13 +627,15 @@ export function openIssuesForQuestions(openIssues: readonly PlanOpenIssue[]): re
 }
 
 /**
- * 残りの問数に照らして、**開いている重大な事項がすべて聞かれている**かを確かめる（04 §3 P4）。
+ * 残りの問数に照らして、**開いている事項が覆われている**かを確かめる（04 §3 P4・Issue #419）。
  *
  * 重大な事項は、**問い・一緒に閉じる事項（`alsoCloses`）・依頼文で閉じる事項（`closedBySource`）**の
- * どれかで閉じていれば、取りこぼしにしない。残りの問数が足りるのに、ある重大な事項を閉じる問いが
- * 無ければ、形の誤りとして返す——`runQuestions` はこれを形の検査に混ぜるので、応答は 1 回だけやり直され、
- * それでも足りなければ段の失敗になる。開いている事項がすべて依頼文で閉じているなら、問いが 0 問でもよい。
- * 残りの問数が足りない（重大な事項のほうが多い）ときは、聞けるぶんだけ聞くので、ここでは何も言わない。
+ * どれかで閉じていれば、取りこぼしにしない。**依頼文で閉じた事項を除いた**開いている事項の数が
+ * **残りの問数以下**なら、重大でない事項も含めて**全部**が覆われていることを求める（収まるのだから、
+ * 聞かずに残してはならない）。**収まらない**ときは、今までどおり重大な事項だけを求める。覆われていな
+ * い事項があれば、形の誤りとして返す——`runQuestions` はこれを形の検査に混ぜるので、応答は 1 回だけ
+ * やり直され、それでも足りなければ段の失敗になる。開いている事項がすべて依頼文で閉じているなら、問いが
+ * 0 問でもよい。**誤りの文には、事項 ID・要件 ID・観点 ID を埋めない**（止まった記録に漏れる）。
  */
 export function checkQuestionCoverage(
   openIssues: readonly PlanOpenIssue[],
@@ -653,22 +655,37 @@ export function checkQuestionCoverage(
   }
   const isClosed = (id: string): boolean => closed.has(id) || closedBySourceIds.has(id);
 
-  // 開いている事項がすべて（問いか依頼文で）閉じているなら、問いが 0 問でもよい
-  if (open.every((issue) => isClosed(issue.id))) return problems;
+  // 依頼文で閉じた事項を除いた、まだ覆いの要る事項（依頼文で閉じた分は聞かなくてよい）
+  const needCover = open.filter((issue) => !closedBySourceIds.has(issue.id));
+  if (needCover.length === 0) return problems;
   if (questions.length === 0) {
     problems.push({ field: "questions", code: "question-coverage", message: "開いている事項があるのに問いが 0 問である" });
     return problems;
   }
-  const critical = open.filter((issue) => issue.critical);
-  if (critical.length > remaining) return problems;
-  for (const issue of critical) {
-    if (!isClosed(issue.id)) {
+
+  // 全部が収まるなら、重大でない事項も含めて全部を覆う
+  if (needCover.length <= remaining) {
+    for (const issue of needCover) {
+      if (isClosed(issue.id)) continue;
       problems.push({
         field: "questions",
         code: "question-coverage",
-        message: `重大な事項 ${issue.id} への問いが無い（残りの問数 ${remaining} に重大な事項 ${critical.length} 件が収まる）`,
+        message: `覆われていない事項が残っている（残りの問数 ${remaining} に開いている事項 ${needCover.length} 件が収まる）`,
       });
     }
+    return problems;
+  }
+
+  // 収まらないときは、今までどおり重大な事項だけを求める
+  const critical = needCover.filter((issue) => issue.critical);
+  if (critical.length > remaining) return problems;
+  for (const issue of critical) {
+    if (isClosed(issue.id)) continue;
+    problems.push({
+      field: "questions",
+      code: "question-coverage",
+      message: `重大な事項への問いが無い（残りの問数 ${remaining} に重大な事項 ${critical.length} 件が収まる）`,
+    });
   }
   return problems;
 }

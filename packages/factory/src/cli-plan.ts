@@ -40,6 +40,8 @@ export const RECOMMENDED_INPUT = "推奨で決める" as const;
 export const ALL_RECOMMENDED_INPUT = "全部推奨で進める" as const;
 /** 「自由入力」を選ぶ入力 */
 export const FREE_TEXT_INPUT = "f" as const;
+/** 答えのファイルの形で、確認を自動で受けたことを示す 1 行（Issue #419） */
+export const AUTO_BUILD_LINE = "自動で これで作る" as const;
 /** 「これで作る」を表す入力 */
 const BUILD_INPUTS = ["y", "yes", "build", "はい", "これで作る", "作る"] as const;
 
@@ -126,11 +128,14 @@ function recommendedDraft(question: PlanQuestion): PlanAnswerDraft | undefined {
 
 /**
  * 答えのファイルの形の答える役（評価用。§7）。質問 ID の答えがあればそれを使い、**足りない質問は推奨で
- * 埋める**。確認の画面は自動で「これで作る」を返す。
+ * 埋める**。確認では、**対話の形と同じ関数**で同じ内容（差分・書けないことと代わりの案・依頼文で決めた
+ * こと・既定で決めたこと）を `log` に出し、**端末の入力は待たず**に「自動で これで作る」の 1 行を出して
+ * `build` を返す（Issue #419）。`log` は呼ぶ側（入口）が渡す。
  */
 export function createAnswersFilePlanResponder(
   answers: PlanAnswers,
   transcript: PlanTranscript,
+  log: (line: string) => void = (): void => {},
 ): PlanResponder {
   return {
     async answer(request: PlanAnswerRequest): Promise<PlanAnswerOutcome> {
@@ -144,7 +149,9 @@ export function createAnswersFilePlanResponder(
       transcript.rounds.push({ questions: request.questions, answers: drafts, allRecommended: false });
       return outcome;
     },
-    async confirm(_view: PlanConfirmationView): Promise<PlanConfirmOutcome> {
+    async confirm(view: PlanConfirmationView): Promise<PlanConfirmOutcome> {
+      writeConfirmationBody(log, view);
+      log(AUTO_BUILD_LINE);
       transcript.confirmation = "build";
       return "build";
     },
@@ -193,37 +200,46 @@ async function askQuestion(
   }
 }
 
-/** 確認の画面を端末に出す（元の依頼との差分・書けないことと代わりの案。§2） */
-function writeConfirmation(terminal: Terminal, view: PlanConfirmationView): void {
-  terminal.write("この仕様で作ります。");
+/**
+ * 確認の内容（元の依頼との差分・書けないことと代わりの案・依頼文で決めたこと・既定で決めたこと）を
+ * 1 行ずつ出す。**対話の形と答えのファイルの形が共有する**——出力の口（`write`）だけを変える（Issue #419）。
+ * 「はい・いいえ」の問いと、自動の選択の 1 行は**ここに入れない**（呼ぶ側が分けて出す）。
+ */
+export function writeConfirmationBody(write: (line: string) => void, view: PlanConfirmationView): void {
+  write("この仕様で作ります。");
   if (view.diff.length === 0) {
-    terminal.write("元の依頼からの差分: なし");
+    write("元の依頼からの差分: なし");
   } else {
-    terminal.write("元の依頼からの差分:");
-    for (const change of view.diff) terminal.write(`  - ${JSON.stringify(change)}`);
+    write("元の依頼からの差分:");
+    for (const change of view.diff) write(`  - ${JSON.stringify(change)}`);
   }
   if (view.unwritable.length === 0) {
-    terminal.write("書けないこと: なし");
+    write("書けないこと: なし");
   } else {
-    terminal.write("書けないこと（代わりの案）:");
-    for (const item of view.unwritable) terminal.write(`  - ${item.part_id} → ${item.alternative_id}`);
+    write("書けないこと（代わりの案）:");
+    for (const item of view.unwritable) write(`  - ${item.part_id} → ${item.alternative_id}`);
   }
   // 依頼文で決めたこと（事項・決めた中身・引用）を出す（直す機能は今回は作らない。04 §3 P4・Issue #370）
   const sourceDecisions = view.plan.decisions.filter(isSourceClosureDecision);
   if (sourceDecisions.length > 0) {
-    terminal.write("依頼文で決めたこと:");
+    write("依頼文で決めたこと:");
     for (const decision of sourceDecisions) {
-      terminal.write(`  - ${decision.subject}: ${decision.value}（引用: ${decision.reason}）`);
+      write(`  - ${decision.subject}: ${decision.value}（引用: ${decision.reason}）`);
     }
   }
   // 既定で決めたこと（観点・値・理由）を、依頼文で決めたことと**別の見出し**で出す（Issue #408）。
   // ID の接頭辞では見分けず、下書きの並び（`closedByDefault`）から出す。
   if (view.closedByDefault.length > 0) {
-    terminal.write("既定で決めたこと（観点・値・理由）:");
+    write("既定で決めたこと（観点・値・理由）:");
     for (const decision of view.closedByDefault) {
-      terminal.write(`  - ${decision.subject}: ${decision.value}（理由: ${decision.reason}）`);
+      write(`  - ${decision.subject}: ${decision.value}（理由: ${decision.reason}）`);
     }
   }
+}
+
+/** 確認の画面を端末に出す（本文のあとに「はい・いいえ」の問いを出す。§2・Issue #419） */
+function writeConfirmation(terminal: Terminal, view: PlanConfirmationView): void {
+  writeConfirmationBody(terminal.write, view);
   terminal.write(`これで作る [y/n]`);
 }
 

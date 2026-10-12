@@ -10,6 +10,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { API_KEY_ENV, EXIT_RUN_FAILED, parseCliArguments, runCli } from "./cli.js";
 import * as runModule from "./run.js";
 import {
+  AUTO_BUILD_LINE,
   FREE_TEXT_INPUT,
   PLAN_CLI_RECORD_FILE,
   RECOMMENDED_INPUT,
@@ -511,6 +512,111 @@ describe("答えのファイルの形で、足りない質問を推奨で埋め�
     expect(call?.plan).toBeDefined();
     expect(call?.budgetUsd).toBeCloseTo(record.remaining_usd, 10);
     expect(call?.budgetUsd).toBeCloseTo(0.3 - record.spent_usd, 10);
+  });
+});
+
+// ── 答えのファイルの形でも、確認の内容を log に出す（04 §7・Issue #419）──────
+
+describe("答えのファイルの形でも、確認の内容を log に出す（04 §7・Issue #419）", () => {
+  /** 計測の道具（評価の外側）と同じ抽出：JSON として読める行を `schema_version` で絞って最後を取る */
+  function extractFromLog(lines: readonly string[]): {
+    readonly summary: Record<string, unknown> | null;
+    readonly planCost: Record<string, unknown> | null;
+  } {
+    const parsed = lines
+      .map((line) => {
+        try {
+          return JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .filter((value): value is Record<string, unknown> => value !== null);
+    return {
+      summary: parsed.filter((value) => value.schema_version === "commandagent.headless-summary/v1").at(-1) ?? null,
+      planCost: parsed.filter((value) => value.schema_version === "musunest-factory/plan-build-cost/v1").at(-1) ?? null,
+    };
+  }
+
+  it("確認の内容と「自動で これで作る」を出し、対話の問いは出さず、要約と費用の行は JSON として読め、確認の行は読めない", async () => {
+    const MARK = "MARK_SOURCE_FILE";
+    const markedSource = `${MARK}する。件数を合計する。`;
+    const spanOf = (quote: string): { readonly start: number; readonly end: number } => {
+      const start = markedSource.indexOf(quote);
+      return { start, end: start + quote.length };
+    };
+    const markedList = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: `${MARK}する`, position: spanOf(`${MARK}する`) },
+        { id: "R-2", text: "件数を合計できる", quote: "件数を合計する", position: spanOf("件数を合計する") },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(markedList),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["period"] }),
+      ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]),
+    });
+    const dir = `${directory}/answers-file-log`;
+    const answersPath = "log-answers.json";
+    const lines: string[] = [];
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({ "Q1-1": { choiceId: "c1" } }) : markedSource),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: (line) => lines.push(line),
+    });
+
+    const text = lines.join("\n");
+    // 確認の内容（差分・書けないこと・既定で決めたこと）の見出しと、自動の 1 行が出る
+    expect(text).toContain("元の依頼からの差分");
+    expect(text).toContain("書けないこと");
+    expect(text).toContain("既定で決めたこと（観点・値・理由）");
+    expect(text).toContain(AUTO_BUILD_LINE);
+    // 対話の「はい・いいえ」の問いは出ない
+    expect(text).not.toContain("これで作る [y/n]");
+    // 既定の値・理由に、依頼文の目印が出ない
+    const defaultLines = lines.filter(
+      (line) => line.includes("期間の条件を足さない") || line.includes("理由:"),
+    );
+    expect(defaultLines.join("\n")).not.toContain(MARK);
+
+    // 確認の行は JSON として読めない（抽出の経路を壊さない）
+    for (const line of lines) {
+      if (
+        line.includes("元の依頼") ||
+        line.includes("書けないこと") ||
+        line.includes("既定で決めたこと") ||
+        line === AUTO_BUILD_LINE
+      ) {
+        expect(() => JSON.parse(line)).toThrow();
+      }
+    }
+    // 計測の道具と同じ抽出で、要約の行の stop_reason・exit_code と、費用の行の合計が読める
+    const { summary, planCost } = extractFromLog(lines);
+    expect(summary?.stop_reason).toBeDefined();
+    expect(typeof summary?.exit_code).toBe("number");
+    expect(typeof planCost?.total_usd).toBe("number");
+    expect(planCost?.total_usd).toBeGreaterThanOrEqual(0);
   });
 });
 

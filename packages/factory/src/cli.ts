@@ -350,7 +350,7 @@ async function runPlanThenBuild(
       log(`使い方の誤り: ${answers.error}`);
       return EXIT_USAGE;
     }
-    responder = createAnswersFilePlanResponder(answers, transcript);
+    responder = createAnswersFilePlanResponder(answers, transcript, log);
   } else {
     const terminal = deps.terminal;
     if (terminal === undefined) {
