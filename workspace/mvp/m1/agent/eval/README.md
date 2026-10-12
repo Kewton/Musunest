@@ -352,7 +352,7 @@ Plan の質問に、**質問 ID ではなく点検済みの事項（どの要件
 
 方法論 `01-eval-sets.md` §1 の**回帰用の組の初期の予備セット**。直しの前後で同じ組を数え、壊していないかを見る組で、**落ちの中身は調べない**。開発用（§5.6 の `dev-p1-p10`）と同じ入口の形（`sets/regression-r1.json`。`role: regression`）で、新しい題材 5 つ（`subjects/R1〜R5.json`）を開発用の題材と**同じ判定の組**で持つ。
 
-> 状態：**案**（2026-10-13・窓口）。使うのは **Codex の独立のレビューと、所有者の確認（保留用の題材との重なりが無いこと）を経てから**。作る側は保留用の題材を見ていない。題材と採点は、**候補の計測の結果を見ずに**（過去の計測の記録を読まずに）、開発用の対応表（§6.2）だけから選んだ。凍結した v5（`engine.mjs`・`score-claims.mjs`・`rubric-v5.mjs`）と開発用の定義（`subjects/A〜E.json`・`sets/dev-p1-p10.json`・`sets/scripts/`）は変えていない。
+> 状態：**案**（2026-10-13・窓口）。**Codex の独立のレビュー（2026-10-13。指摘 5・直さないと誤る 3）は反映済み**（`fix-450`。§6.2 の「開発用との差」・§6.5・§6.6）。使うのは**所有者の確認（保留用の題材との重なりが無いこと）を経てから**。作る側は保留用の題材を見ていない。題材と採点は、**候補の計測の結果を見ずに**（過去の計測の記録を読まずに）、開発用の対応表（§6.2）だけから選んだ。凍結した v5（`engine.mjs`・`score-claims.mjs`・`rubric-v5.mjs`）と開発用の定義（`subjects/A〜E.json`・`sets/dev-p1-p10.json`・`sets/scripts/`）は変えていない。
 
 ### 6.1 役割と読み方（方法論 `01` §1）
 
@@ -363,7 +363,11 @@ Plan の質問に、**質問 ID ではなく点検済みの事項（どの要件
 
 ### 6.2 対応表（開発用 P1〜P10 と回帰用 P1〜P10）
 
-回帰用の題材は、開発用の題材と**1 対 1 に対応**する（`MIRROR`：A→R1・B→R2・C→R3・D→R4・E→R5）。対応する題材どうしは、採点の定義の**構造の数・判定の種類と並び・集計の限定・部品の種類・書けない要件の数と申告の鍵**が同じで、違うのは役割の名前・選択肢の表示名・依頼文の題材だけ。試験 `score-agent.test.mjs`（「回帰用の題材の採点の定義は、対応する開発用の題材と…同じ」）がこの対応を機械で固定する。
+回帰用の題材は、開発用の題材と**1 対 1 に対応**する（`MIRROR`：A→R1・B→R2・C→R3・D→R4・E→R5）。対応する題材どうしは、採点の定義の**構造の数・判定の種類と並び・集計の限定・部品の種類・書けない要件の数と申告の鍵**が同じ。試験 `score-agent.test.mjs`（「回帰用の題材の採点の定義は、対応する開発用の題材と…同じ」）がこの対応を機械で固定する。違うのは役割の名前・選択肢の表示名・依頼文の題材と、次の**開発用との差**（Codex のレビューの指摘 1〜3 で足した。開発用の定義は凍結のままなので同じ弱点を持つ。直すなら別の Issue で版を上げる）：
+
+- **境界（指摘 1）**：「1 以上」の検査（R1 の数・R3 の個数・R4 の定員。R4 は両方の構造）に、0 と 1 の間の値（0.5）を拒否する行を足した。`> 0` で書いた宣言は落ちる（語彙は `number` を整数に限定しない）。試験「回帰用の「1 以上」の検査…」が固定する
+- **件数と合計（指摘 3）**：人ごとの件数の判定の sources に、件数と数の項目の合計が一致しない数を入れた（R1 の数 2・5・3 → 件数 2・1 ≠ 合計 7・3。R4 の主の構造の定員 4・6・5）。件数を合計に取り違えた宣言は落ちる。依頼文も集計の単位と対象を一意に読める文にした（R1：荷物の件数で「数」の合計ではない。R2：未実施を含む担当の件数。R3 の S2：個数は 1 個以上）。試験「回帰用の人ごとの集計…の sources は、件数と数の項目の合計が一致しない」が固定する
+- **主役の名前（指摘 2）**：R1 の主役（荷物）に名前用の `string` の項目を求める役割 `name` を足した。名前の項目を省いた宣言は役割が見つからず落ちる（判定の数は 7 のまま。役割の結び付けで実現し、エンジンは変えていない）
 
 **機能（語彙の構成要素）**：
 
@@ -434,32 +438,38 @@ node workspace/mvp/m1/agent/eval/agent-accept/score-agent.mjs <repo> <out> --ano
 
 ### 6.5 正例と負例（`cases/regression/`）
 
-**形**：1 本 1 つの JSON。`spec`（宣言 `app.spec.yaml` の**行の配列**。採点では改行でつないで一時ファイルに書く）と、任意の `log`（申告。`cases/*.log.json` と同じ `{ attempts: [{ unwritable: [{ requirement, reason }] }] }`）。索引は `cases.json`（`file`・`subject`・`expect`（`PASS`／`FAIL`／`STATIC_NG`。`A|B` はどちらでもよい）・`claims`（任意。申告の判定の期待 `OK`／`NG`）・`why`）。依頼文（§5.6.1）と同じ「行の配列」の形で JSON に収めた（Issue の対象ファイルが `cases/regression/*.json`）。
+**形**：1 本 1 つの JSON。`spec`（宣言 `app.spec.yaml` の**行の配列**。採点では改行でつないで一時ファイルに書く）と、任意の `log`（申告。`cases/*.log.json` と同じ `{ attempts: [{ unwritable: [{ requirement, reason }] }] }`）。索引は `cases.json`（`file`・`subject`・`structure`（当てはまる構造の id。役割が見つからない／静的 NG は `null`）・`expect`（`PASS`／`FAIL`／`STATIC_NG`）・`failed`（落ちる判定の名前の並び。正例は `[]`。役割が見つからないときは `役割が見つかる`）・`codes`（静的 NG の診断コード）・`written`（任意。`rankingOrder` の `written` の期待）・`claims`（任意。申告の判定の期待 `OK`／`NG`）・`missed`（任意。申告の挙げ漏れの数の期待）・`why`）。試験は最終の判定だけでなく、構造・落ちる判定の**集合**・診断コード・`written`・申告の判定と挙げ漏れの数まで索引と照合する（指摘 5。狙いと違う判定で落ちた負例を通さない）。依頼文（§5.6.1）と同じ「行の配列」の形で JSON に収めた（Issue の対象ファイルが `cases/regression/*.json`）。
 
 **確かめ方**：`node --test "workspace/mvp/m1/agent/eval/agent-accept/*.test.mjs"`（「回帰用の題材の正例・負例…」）。`engine.mjs` の `score` と `score-claims.mjs` の `scoreClaims`・`finalVerdict` で採点し、期待と比べる。API は呼ばない。手で 1 本流すなら、行をつないで `.app.spec.yaml` に書き、`node rubric-v5.mjs <spec-engine の dist> subjects/R1.json <yaml>`。
 
-| ファイル | 題材 | 期待 | 何を確かめるか |
-|---|---|---|---|
-| `r1-pos-full` | R1 | PASS | 主の構造で全部満たす（`show` の無い表＝決定①） |
-| `r1-neg-filter-without-who` | R1 | FAIL | 絞り込みが種類だけ |
-| `r1-neg-default-packed` | R1 | FAIL | 登録したときの状態が進んだ側 |
-| `r2-pos-table-claimed` | R2 | PASS（申告 OK） | 回数の列を出す表まで。少ない順を書けないと申告 |
-| `r2-pos-ranked-fewer-first` | R2 | PASS（申告 OK） | 少ない順を負の数の計算の順位の部品で書いた（`written`。申告なしで OK） |
-| `r2-neg-ranking-descending` | R2 | FAIL | 順位の部品を降順のまま（多い順）に使った |
-| `r2-neg-highlight-before-today` | R2 | FAIL | 今日の印の式が「今日より前」 |
-| `r2-neg-invented-sort` | R2 | STATIC_NG | 語彙に無い `sort` を発明した（`SHAPE_KEY_UNKNOWN`） |
-| `r3-pos-dashboard` | R3 | PASS | 数値 2・棒・円の部品、直せて消せる、人ごとの合計 |
-| `r3-neg-no-delete` | R3 | FAIL | 消す操作が無い |
-| `r3-neg-chart-last-12` | R3 | FAIL | 月ごとのグラフが直近 12 か月 |
-| `r4-pos-list-claimed` | R4 | PASS（申告 OK） | 主の構造（参照の並び）。0 人で登録できないと申告 |
-| `r4-neg-list-without-capacity-check` | R4 | FAIL | 主の構造で定員の超過の検査が無い |
-| `r4-pos-attendance-claimed` | R4 | PASS（申告 OK） | 別の構造（参加の entity）。定員の超過を書けないと申告 → `PASS_NEEDS_CLAIM` → PASS |
-| `r4-neg-attendance-not-claimed` | R4 | FAIL（申告 NG） | 別の構造で申告が無い |
-| `r5-pos-full` | R5 | PASS | 3 つの entity と 2 本の参照、納期超過の印、2 つの回数 |
-| `r5-neg-highlight-includes-today` | R5 | FAIL | 印の式が納期当日も含む |
-| `r5-neg-device-count-hidden` | R5 | FAIL | 機器ごとの回数を画面に出していない |
+| ファイル | 題材 | 構造 | 期待 | 落ちる判定（`failed`）／申告 | 何を確かめるか |
+|---|---|---|---|---|---|
+| `r1-pos-full` | R1 | main | PASS | — | 主の構造で全部満たす（`show` の無い表＝決定①） |
+| `r1-neg-filter-without-who` | R1 | main | FAIL | 種類と人で絞り込み | 絞り込みが種類だけ |
+| `r1-neg-default-packed` | R1 | main | FAIL | 登録したときの状態 | 登録したときの状態が進んだ側 |
+| `r1-neg-no-title` | R1 | — | FAIL | 役割が見つかる | 荷物の名前の項目が無い（指摘 2） |
+| `r1-neg-quantity-gt-zero` | R1 | main | FAIL | 数は 1 以上 | 下限を `> 0` で書いた（0.5 を通す。指摘 1） |
+| `r1-neg-sum-instead-of-count` | R1 | main | FAIL | 人ごとの件数が見られる | 件数を「数」の合計にした（件数 2 の人が 7。指摘 3） |
+| `r2-pos-table-claimed` | R2 | main | PASS | 申告 OK（`written` 偽） | 回数の列を出す表まで。少ない順を書けないと申告 |
+| `r2-pos-ranked-fewer-first` | R2 | main | PASS | 申告 OK（`written` 真） | 少ない順を負の数の計算の順位の部品で書いた（申告なしで OK） |
+| `r2-neg-ranking-descending` | R2 | main | FAIL | 少ない順を逆向きで書いていない／申告 OK | 少ない順を書けないと申告したうえで、順位の部品を降順のまま置いた（申告 OK のまま順位だけ落ちる。指摘 5） |
+| `r2-neg-highlight-before-today` | R2 | main | FAIL | 今日の点検に印／申告 OK | 今日の印の式が「今日より前」 |
+| `r2-neg-invented-sort` | R2 | — | STATIC_NG | `SHAPE_KEY_UNKNOWN` | 語彙に無い `sort` を発明した |
+| `r3-pos-dashboard` | R3 | main | PASS | — | 数値 2・棒・円の部品、直せて消せる、人ごとの合計 |
+| `r3-neg-no-delete` | R3 | main | FAIL | 収穫を直せて消せる | 消す操作が無い |
+| `r3-neg-chart-last-12` | R3 | main | FAIL | 月ごとの個数のグラフ（直近 6 か月） | 月ごとのグラフが直近 12 か月 |
+| `r3-neg-quantity-gt-zero` | R3 | main | FAIL | 個数は 1 以上 | 下限を `> 0` で書いた（指摘 1） |
+| `r4-pos-list-claimed` | R4 | list | PASS | 申告 OK | 主の構造（参照の並び）。0 人で登録できないと申告 |
+| `r4-neg-list-without-capacity-check` | R4 | list | FAIL | 定員を超えたら登録できない／申告 OK | 主の構造で定員の超過の検査が無い |
+| `r4-neg-list-capacity-gt-zero` | R4 | list | FAIL | 定員は 1 人以上／申告 OK | 主の構造で下限を `> 0` で書いた（指摘 1） |
+| `r4-pos-attendance-claimed` | R4 | attendance | PASS | 申告 OK | 別の構造（参加の entity）。定員の超過を書けないと申告 → `PASS_NEEDS_CLAIM` → PASS。下限は `>= 1`（指摘 1） |
+| `r4-neg-attendance-not-claimed` | R4 | attendance | FAIL | —／申告 NG（挙げ漏れ 1） | 別の構造で宣言は全部満たす（`PASS_NEEDS_CLAIM`）が申告が無い |
+| `r4-neg-attendance-capacity-gt-zero` | R4 | attendance | FAIL | 定員は 1 人以上／申告 OK | 別の構造で下限を `> 0` で書いた（指摘 1） |
+| `r5-pos-full` | R5 | main | PASS | — | 3 つの entity と 2 本の参照、納期超過の印、2 つの回数 |
+| `r5-neg-highlight-includes-today` | R5 | main | FAIL | 納期を過ぎたものに印 | 印の式が納期当日も含む |
+| `r5-neg-device-count-hidden` | R5 | main | FAIL | 機器ごとの回数が見られる | 機器ごとの回数を画面に出していない |
 
-18 本（正例 7・負例 11。決定①の正例 1、②の正例 1・負例 1、申告の正例 3・負例 1、静的 NG 1）。
+24 本（正例 7・負例 17。別の構造の正例 1・負例 2、申告 NG の負例 1、静的 NG 1、境界 `> 0` の負例 4、件数の取り違えの負例 1、名前の省略の負例 1）。負例は正例の宣言から 1 か所だけ変えて作る（落ちる判定が狙いの 1 つに限られることを索引で固定する）。
 
 ### 6.6 足りない範囲・偏り（開発用と回帰用に共通）
 
@@ -467,10 +477,16 @@ node workspace/mvp/m1/agent/eval/agent-accept/score-agent.mjs <repo> <out> --ano
 - **書けない要件の種類は 2 つ**（少ない順・空の並び）のまま。語彙の穴の組（`03` §3）が別に要る
 - **書き方は 2 つ**（丁寧・会話体）のまま。保留用にある「短いメモ」の書き方は無い
 - **偏り**：5 題材のうち 4 つが「主役 → 人」の参照 1 本の構造。一部書けない題材 2 つは、どちらも「人ごとの件数」を含む。回帰用は開発用の構造を写したので、開発用の偏りをそのまま持つ
+- **測れるもの・測れないもの（レビューの指摘 4）**：この組で測れるのは、**固定した同型の 5 題材での劣化の信号**だけである。構造・判定の並び・申告の鍵・入力の値まで開発用を写しているので、**開発用の形に合わせた直し（構造への適応）は回帰用でも成功し**、別の参照の構成・機能の組み合わせ・境界・未収録の語彙での劣化は未観測のまま残る（指摘 1・3 は、写しが採点の弱点まで共有した例）。独立性や劣化の不存在の保証には使わない（方法論 `06-transition.md` §1）。匿名の集計では、ある本の改善と別の本の劣化が**相殺**されて合格の数が同じに見えることがある（本ごとの充足の数の分布まで見る。§5.3）。**30 本は 5 題材の反復**であり、30 の独立した題材ではない。未知の題材への一般化は保留用の役割
+- **次の版（r2）の方針**（レビュー §3。今回は作らない。版を上げるときは §6.1 のとおり基準を測り直し、旧版と新版の数を改善として直接比較しない）：
+  - 候補の成績を見る前に、機能・書き方・書けない範囲の対応表を固定したうえで、**同じ機能を異なる組み合わせや役割の配置で覆う題材を混ぜる**（「主役 → 人」の参照 1 本に偏らせない）
+  - 判定の種類と並びの完全一致を固定する試験は、**機能の対応を確かめる試験**に改める
+  - 正しい実装と誤った実装の結果が分かれる probes を選ぶ：数量と件数が違う入力・複数の値での計算・対象が 0 件の場合・状態の混在・日付と数の境界（状態の混在は、定義の `set` が選択肢の鍵を宣言に依らず書けないので、エンジンの版を上げるときに）
+  - 採点のエンジンと開発用の定義の凍結は維持し、新しい定義と正例・負例は独立にレビューする（Codex・所有者）
 - **採点の指紋**：`subjects/` に R1〜R5 を足したので、`scoringFingerprint` の `subjects/*.json` の並びが変わり、**この変更より前の計測**の条件のファイルとは `scoring_matches_conditions` が不一致になる（A〜E の定義と集計のコードは 1 文字も変えていない。`fingerprints.scoring.files[]` の個々の `sha256` で確かめられる）。この変更のあとに測る前後比較には影響しない
 
 ### 6.7 確かめていないこと
 
 - **本物の計測は流していない**（基準は方法論 `06` §1 の作業 3）。依頼文を工場に渡したときの Plan の問い・Build の結果は未観測
-- 保留用の題材との重なり（所有者が確かめる）。Codex の独立のレビュー
+- 保留用の題材との重なり（所有者が確かめる）。レビューの指摘を反映した版の再確認（窓口の判断）
 - 正例の宣言が画面（host）で動くこと（静的チェックと spec-engine の評価だけで確かめた。開発用の `stage1-specs/` と同じ範囲）

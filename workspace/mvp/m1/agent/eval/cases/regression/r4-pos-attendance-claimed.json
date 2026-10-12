@@ -41,7 +41,7 @@
     "validations:",
     "  - name: positiveCapacity",
     "    entity: event",
-    "    expression: capacity > 0",
+    "    expression: capacity >= 1",
     "computed:",
     "  - name: attendeeCount",
     "    entity: event",

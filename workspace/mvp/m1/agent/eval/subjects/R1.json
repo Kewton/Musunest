@@ -5,7 +5,7 @@
     "P1",
     "P2"
   ],
-  "note": "開発用 A と同じ判定の組（役割の名前と選択肢の表示名だけが違う）。#450",
+  "note": "開発用 A と同じ判定の組（役割の名前と選択肢の表示名が違う）。A との差（fix-450。Codex のレビュー指摘 1〜3）：主役に名前用の string の項目を求める役割 name・「1 以上」の検査に 0.5 を拒否する行・件数の判定の sources に件数と合計が一致しない数（2・5・3）。#450",
   "structures": [
     {
       "id": "main",
@@ -52,6 +52,12 @@
           "field": {
             "of": "main",
             "type": "number"
+          }
+        },
+        "name": {
+          "field": {
+            "of": "main",
+            "type": "string"
           }
         }
       },
@@ -104,6 +110,12 @@
             },
             {
               "set": {
+                "qty": 0.5
+              },
+              "valid": false
+            },
+            {
+              "set": {
                 "qty": 1
               },
               "valid": true
@@ -111,7 +123,7 @@
           ]
         },
         {
-          "req": "人ごとの数が見られる",
+          "req": "人ごとの件数が見られる",
           "kind": "computedVisible",
           "entity": "member",
           "aggregateOnly": true,
@@ -119,17 +131,20 @@
             "main": [
               {
                 "set": {
-                  "who": "m1"
+                  "who": "m1",
+                  "qty": 2
                 }
               },
               {
                 "set": {
-                  "who": "m1"
+                  "who": "m1",
+                  "qty": 5
                 }
               },
               {
                 "set": {
-                  "who": "m2"
+                  "who": "m2",
+                  "qty": 3
                 }
               }
             ]
