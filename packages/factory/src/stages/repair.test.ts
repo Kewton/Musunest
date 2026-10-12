@@ -680,6 +680,22 @@ describe("流し直しも、要件ごとの所属を点検する（Issue #431）
     expect(report.correspondence?.misses.some((miss) => miss.detail.includes("対応表の外"))).toBe(true);
     expect(report.redoMisses).toEqual([]);
   });
+
+  it("所属が一部だけ欠ける入力は、入力の不備として断る（表の役割の全部に所属を要る）", async () => {
+    // 表の役割 record.title の所属を省く（全体の集合は空ではないので、以前の門を通ってしまっていた）
+    const partialOwnership: readonly RequirementRoleOwnership[] = [
+      {
+        requirementId: "R-1",
+        ownership: [{ roleId: "record", basis: "dependency", reason: "行の所属として参照するため" }],
+      },
+    ];
+    const report = await checkDeclarationVersion(
+      { source: PERM_DECLARATION },
+      { list: LIST, suite: SUITE, correspondences, roles, mappings, ownership: partialOwnership },
+    );
+    expect(report.correspondence?.misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    expect(report.redoMisses).toEqual([]);
+  });
 });
 
 describe("停滞の署名は、名前ではなく分類で決まる（02 §1.3.1・Issue #309）", () => {

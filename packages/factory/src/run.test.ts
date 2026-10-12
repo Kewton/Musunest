@@ -850,11 +850,16 @@ describe("誤った所属は、要件 ID つきの落ちで ⑤a のやり直し
     ]);
     const result = await run;
 
-    // 誤った所属が残るので合格（full）にならない。同じ応答が続けば停滞で止まる
-    expect(result.outcome.result).not.toBe("pass");
-    expect(result.outcome.verdict).not.toBe("full");
-    // ⑤b の試験は通っている（⑥ 直すへは回らない）
+    // 停滞で部分案になり、⑥ の失敗には誤って帰属しない（review 6）
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+    expect(result.summary.stop_reason).toBe("stagnation");
+    // ⑤b の試験は通っている（不一致 0・未解決 0）。⑥ 直すへは回らない
     expect(result.record.stages.some((step) => step.stage === "repair")).toBe(false);
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const verification = verificationOf(result.bundle);
+    expect(verification.test_mismatches).toBe(0);
+    expect(verification.test_unresolved).toBe(0);
     // 初回とやり直しの 2 回、⑤a を呼ぶ（段の記録も 2 件）
     expect(result.record.stages.filter((step) => step.stage === "correspondence")).toHaveLength(2);
     // やり直しの要求のデータに、前回の落ちが要件 ID と場所つきで入る

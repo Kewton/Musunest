@@ -649,17 +649,19 @@ export function checkRoleMappings(
 ): readonly RoleMappingMiss[] {
   if (options.version !== LEGACY_DESIGN_CONTRACT) {
     const ownership = options.ownership ?? [];
-    // 新契約では、**要件ごとの所属の欠落・空**を入力の不備として断る（照合なしの成功にしない。Issue #431）。
-    // 所属が無いと要件ごとの照合が一度も走らず、表全体の内側の検査にも戻らないので、黙って通ってしまう。
+    // 新契約では、**表の全部の役割に、要件ごとの所属があること**を照合の前に確かめ、不備は入力の不備として
+    // 断る（照合なし・一部だけの照合で通さない。Issue #431・レビュー 1）。所属が空なら要件ごとの照合が
+    // 一度も走らず、一部の役割の所属が欠けると、その役割が対応表からも欠けていても落ちを返さない。
     const ownedRoleIds = new Set(
       ownership.flatMap((entry) => entry.ownership.map((own) => own.roleId)),
     );
-    if (ownedRoleIds.size === 0) {
+    const rolesWithoutOwnership = roles.some((role) => !ownedRoleIds.has(role.roleId));
+    if (ownedRoleIds.size === 0 || rolesWithoutOwnership) {
       return [
         {
           requirementId: "",
           route: "correspondence-defect",
-          detail: "要件ごとの所属が渡されていない、または空である（新契約の入力の不備）",
+          detail: "役割 ID の表の全部の役割に、要件ごとの所属が無い（新契約の入力の不備）",
         },
       ];
     }

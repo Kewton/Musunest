@@ -306,9 +306,10 @@ describe("段どうしのつなぎ：各段の任意の入力が走らせる部�
     ]);
     const result = await runGeneration(makeRunInput(recording.client));
 
-    // 誤った所属が残るので合格（full）にならない。同じ応答が続けば停滞で止まる
-    expect(result.outcome.result).not.toBe("pass");
-    expect(result.outcome.verdict).not.toBe("full");
+    // 停滞で部分案になる（⑤a のコードの落ちだけでも、未解決として ⑦ へ渡る。review 6）
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+    expect(result.summary.stop_reason).toBe("stagnation");
     // 初回とやり直しの 2 回、⑤a を呼ぶ（段の記録も 2 件）
     expect(correspondenceSpy.mock.calls).toHaveLength(2);
     expect(result.record.stages.filter((step) => step.stage === "correspondence")).toHaveLength(2);

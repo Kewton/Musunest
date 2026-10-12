@@ -1154,10 +1154,13 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
 
     const final = lastPassed ?? current;
 
-    // 停滞で止めたら、残った不一致を**未解決**として数え、部分案で終える（§1.3.1・Issue #309）
+    // 停滞で止めたら、残った不一致を**未解決**として数え、部分案で終える（§1.3.1・Issue #309）。
+    // ⑤a のコードの落ち（要件 ID と場所つき）だけが残って停滞したときも、未解決として ⑦ へ渡す
+    // ——試験 ID を作らず、件数だけを足す（要件 ID と場所は対応表の落ちに保ったまま。Issue #431・レビュー 6）。
     if (stagnant) {
       for (const route of current.routes) if (!unresolved.includes(route.testId)) unresolved.push(route.testId);
     }
+    const stalledCorrespondenceMisses = stagnant ? final.correspondence?.misses.length ?? 0 : 0;
 
     // ⑦ 終わりの判定。**実行していない検査は「不一致 0」にしない**（`null` のときは 1 として渡す）。
     // 未解決は、最終版の試験の結果の未解決と、期待の裁定の未解決の両方を数える（#306）。
@@ -1165,7 +1168,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       staticCheckPassed: final.staticCheck.passed,
       correspondenceMisses: final.correspondence === null ? 1 : final.correspondence.misses.length,
       testMismatches: final.testRun === null ? 1 : final.testRun.mismatches.length,
-      testUnresolved: countUnresolvedTests(unresolved, final.testRun),
+      testUnresolved: countUnresolvedTests(unresolved, final.testRun) + stalledCorrespondenceMisses,
       unwritableRequirements,
       ...(acceptedUnwritable === undefined ? {} : { acceptedUnwritable }),
       limitReached,

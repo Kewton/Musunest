@@ -322,4 +322,27 @@ describe("対応表の確認の道具も、要件ごとの点検をする（Issu
     expect("misses" in output && output.misses.some((miss) => miss.detail.includes("対応表の外"))).toBe(true);
     expect(output.passed).toBe(false);
   });
+
+  it("所属が一部だけ欠ける入力は、入力の不備として断る（表の役割の全部に所属を要る）", async () => {
+    const call = checkToolArguments("check-correspondence", { declaration: PERM_DECLARATION });
+    expect(call.ok).toBe(true);
+    if (!call.ok) return;
+    // 表の役割 record.title の所属を省く（全体の集合は空ではないので、以前の門を通ってしまっていた）
+    const partialOwnership: readonly RequirementRoleOwnership[] = [
+      {
+        requirementId: "R-1",
+        ownership: [{ roleId: "record", basis: "dependency", reason: "行の所属として参照するため" }],
+      },
+    ];
+    const output = await executeRepairTool(call.call, {
+      list: LIST,
+      suite: EMPTY_SUITE,
+      correspondences,
+      roles,
+      mappings,
+      ownership: partialOwnership,
+    });
+    expect("misses" in output && output.misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    expect(output.passed).toBe(false);
+  });
 });

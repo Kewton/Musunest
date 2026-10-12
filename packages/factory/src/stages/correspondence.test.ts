@@ -501,7 +501,8 @@ const permsCheck = (
   entries: readonly CorrespondenceEntry[],
   mappings: readonly RoleNameMapping[] = PERMS_MAPPINGS,
   ownership: readonly RequirementRoleOwnership[] = PERMS_OWNERSHIP,
-) => checkRoleMappings(APP, PERMS_ROLES, entries, mappings, { ownership });
+  roles: readonly RoleEntry[] = PERMS_ROLES,
+) => checkRoleMappings(APP, roles, entries, mappings, { ownership });
 
 describe("要件ごとの所属を、⑤a が独立に点検する（新契約。Issue #431）", () => {
   it("所属の場所がその要件の対応表の外にあり、宣言に実在するときは、要件 ID と場所つきで ⑤a のやり直しに回す", () => {
@@ -571,7 +572,16 @@ describe("要件ごとの所属を、⑤a が独立に点検する（新契約�
       },
       { requirementId: "R-2", locations: [{ kind: "entity", entity: null, name: "record" }] },
     ];
-    const misses = permsCheck(table, PERMS_MAPPINGS, ownership);
+    // 表の役割（record・record.total）は、どちらも誰かに所属している（入力の不備を作らない）
+    const roles: readonly RoleEntry[] = [
+      { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null },
+      { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null },
+    ];
+    const mappings: readonly RoleNameMapping[] = [
+      { roleId: "record", name: "record" },
+      { roleId: "record.total", name: "total" },
+    ];
+    const misses = permsCheck(table, mappings, ownership, roles);
     const miss = misses.find(
       (candidate) => candidate.route === "correspondence-redo" && candidate.location?.name === "total",
     );
@@ -787,6 +797,35 @@ describe("新契約で所属が欠けた入力は、照合なしの成功にし�
   it("所属が空でも、入力の不備として断る", () => {
     const misses = checkRoleMappings(APP, PERMS_ROLES, completeTable, PERMS_MAPPINGS, { ownership: [] });
     expect(misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+  });
+
+  it("所属が一部だけ欠け、その場所が対応表からも欠けていても、入力の不備として断る", () => {
+    // 所属から項目（record.amount）だけを省き、entity・計算の所属は残す。全体の集合は空ではないので
+    // 以前の門は通ってしまい、対応表からも項目を落とすと落ちを返さなかった（レビュー 1 の残り）
+    const partialOwnership: readonly RequirementRoleOwnership[] = [
+      {
+        requirementId: "R-1",
+        ownership: [
+          { roleId: "record", basis: "dependency", reason: "行の所属として参照するため" },
+          { roleId: "record.total", basis: "stated", reason: null },
+        ],
+      },
+    ];
+    const shortTable: readonly CorrespondenceEntry[] = [
+      {
+        requirementId: "R-1",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "computation", entity: "record", name: "total" },
+        ],
+      },
+    ];
+    const misses = checkRoleMappings(APP, PERMS_ROLES, shortTable, PERMS_MAPPINGS, {
+      ownership: partialOwnership,
+    });
+    expect(misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    // 一部だけの照合で通さない（要件ごとの照合は走らせない）
+    expect(misses.some((miss) => miss.route === "correspondence-redo")).toBe(false);
   });
 
   it("所属があり、対応表から所属の場所を落としていれば、黙って通らない（⑤a のやり直し／③ の不備）", () => {
