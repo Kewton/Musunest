@@ -1297,12 +1297,13 @@ const VIEW_SHOWS_SUITE = {
       kind: "normal",
       operation: "compute",
       clock: CREATE_CLOCK,
-      input: { amount: 21 },
+      input: { "record.amount": 21 },
       inputContract: { rowId: "xr1-row", targetRowId: null, emptyEntities: [] },
       referenceData: [],
       expected: { kind: "ok", value: 42 },
     },
-    ...STRUCTURAL_CHECKS_SUITE.tests.slice(1, 4), // R-2 の n・a・b
+    // R-2 の n・a・b。VIEW_SHOWS_DESIGN は項目の役割 record.amount を持つので、入力の鍵も役割 ID にする
+    ...STRUCTURAL_CHECKS_SUITE.tests.slice(1, 4).map((test) => ({ ...test, input: { "record.amount": 21 } })),
   ],
 };
 
@@ -2474,5 +2475,119 @@ describe("設計の段の中身の作り直し（§5・Issue #407）", () => {
     const design = result.record.stages.find((stage) => stage.stage === "design");
     expect(design).toMatchObject({ status: "failed", calls: 2, failure_kind: "unmet" });
     expect(result.bundle).toBeNull();
+  });
+});
+
+// ── 値の鍵と行の ID（§1・②'・Issue #409）────────────────────────────
+
+/** entity・項目（record.amount）・計算（record.total）を持つ設計（値の鍵の検査が掛かる） */
+const KEY_RUN_DESIGN = {
+  roles: [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null },
+    { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null },
+  ],
+  designs: [
+    { requirementId: "R-1", nature: "ruled", verification: { kind: "fixed-test" }, vocabulary: [], placement: [], unwritable: [] },
+    { requirementId: "R-2", nature: "ruled", verification: { kind: "fixed-test" }, vocabulary: [], placement: [], unwritable: [] },
+  ],
+};
+
+/** 要件の正常・異常・境界（`record.total` を対象にする。入力の鍵は項目の役割 ID `record.amount`） */
+function keyRunTriple(requirementId: string): readonly Record<string, unknown>[] {
+  return (["normal", "abnormal", "boundary"] as const).map((kind, index) => ({
+    id: `${requirementId}-${index}`,
+    target: { requirementId, kind: "computation", roleId: "record.total" },
+    kind,
+    operation: "compute",
+    clock: CREATE_CLOCK,
+    input: { "record.amount": 21 },
+    inputContract: { rowId: `${requirementId}-${index}-row`, targetRowId: null, emptyEntities: [] },
+    referenceData: [],
+    expected: { kind: "ok", value: 42 },
+  }));
+}
+
+/** 1 件目（R-1 の正常）の参照の行の値だけを差し替えた ②' の応答 */
+function keyRunSuite(values: Readonly<Record<string, unknown>>): { readonly tests: readonly Record<string, unknown>[] } {
+  return {
+    tests: [...keyRunTriple("R-1"), ...keyRunTriple("R-2")].map((test, index) =>
+      index === 0
+        ? {
+            ...test,
+            referenceData: [{ rowId: "row-2", target: { requirementId: "R-1", kind: "entity", roleId: "record" }, values }],
+          }
+        : test,
+    ),
+  };
+}
+
+/** ③ が書く宣言（`records` は `amount` と `total` を出すので、どちらも画面から辿れる） */
+const KEY_RUN_DECLARATION = [
+  "entities:",
+  "  - name: record",
+  "    fields:",
+  "      amount: number",
+  "views:",
+  "  - name: records",
+  "    type: list",
+  "    entity: record",
+  "    show: [amount, total]",
+  "actions: []",
+  "validations: []",
+  "computed:",
+  "  - name: total",
+  "    entity: record",
+  "    expression: amount * 2",
+  "    type: number",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+/** ③ が提出する対応（役割 ID → 宣言の名前） */
+const KEY_RUN_MAPPINGS = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.amount", name: "amount" },
+  { roleId: "record.total", name: "total" },
+];
+
+/** ⑤a の答え（実在し画面から辿れる場所だけを挙げる） */
+const KEY_RUN_CORRESPONDENCE = {
+  entries: [
+    {
+      requirementId: "R-1",
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "field", entity: "record", name: "amount" },
+        { kind: "computation", entity: "record", name: "total" },
+      ],
+    },
+    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "total" }] },
+  ],
+};
+
+describe("値の鍵と行の ID（§1・②'・Issue #409）", () => {
+  it("参照の行に id を書いた ②' の応答を 1 回目に、直した応答を 2 回目に返すと、⑤b まで未解決 0 で完走する", async () => {
+    const { recording, run } = runWith([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(KEY_RUN_DESIGN),
+      structured(keyRunSuite({ id: "row-9" })), // 1 回目：参照の行の値の鍵が行の ID
+      structured(keyRunSuite({ "record.amount": 9 })), // 2 回目：直した応答
+      structured({ declaration: KEY_RUN_DECLARATION, mappings: KEY_RUN_MAPPINGS }),
+      structured(KEY_RUN_CORRESPONDENCE),
+    ]);
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const verification = verificationOf(result.bundle);
+    expect(verification.test_unresolved).toBe(0);
+    expect(verification.test_mismatches).toBe(0);
+    // ②' は 2 回呼ぶ（1 回目は値の鍵の誤り、2 回目で直る）
+    expect(recording.structured.filter((request) => request.schemaName === TEST_SUITE_SCHEMA_NAME)).toHaveLength(2);
   });
 });
