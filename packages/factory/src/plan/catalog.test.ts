@@ -17,10 +17,13 @@ import {
   CATALOG_AGGREGATION_FACET_IDS,
   CATALOG_FACETS,
   catalogAppliesQuestionName,
+  catalogDefaultOf,
   catalogGateQuestionName,
   catalogOpenIssue,
   catalogQuestionName,
   runCatalog,
+  type CatalogFacet,
+  type FacetDefaultMatch,
   type CatalogRequirement,
 } from "./catalog.js";
 
@@ -458,5 +461,93 @@ describe("集計の門（04 §3 P3・Issue #384）", () => {
       model: "fake-judge",
       answeredBy: "fake",
     });
+  });
+});
+
+// ── Issue #408：許可の表（観点ごとの既定）────────────────────────────────
+
+describe("許可の表——観点ごとの既定（04 §3「既定で決めてよいものは聞かない」・Issue #408）", () => {
+  const facetOf = (id: string): CatalogFacet => {
+    const facet = CATALOG_FACETS.find((candidate) => candidate.id === id);
+    if (facet === undefined) throw new Error(`観点 ${id} が無い`);
+    return facet;
+  };
+
+  it("表の行が、観点・対象の要件の条件・適用条件・値・理由を持ち、既定の無い観点（重大・権限）と区別できる", () => {
+    // 表を持つ 3 観点：対象の要件の条件・適用条件・値・理由のどれも空でない
+    for (const id of ["period", "current-period", "include-zero"]) {
+      const def = facetOf(id).default;
+      expect(def).toBeDefined();
+      if (def === undefined) continue;
+      expect(def.target).not.toBe("");
+      expect(def.applies).not.toBe("");
+      expect(def.value).not.toBe("");
+      expect(def.reason).not.toBe("");
+      expect(def.match).toBeTypeOf("function");
+    }
+    // 既定の無い観点（重大な aggregation・counted-state と、権限の editable-by）と区別できる
+    expect(facetOf("aggregation").default).toBeUndefined();
+    expect(facetOf("counted-state").default).toBeUndefined();
+    expect(facetOf("editable-by").default).toBeUndefined();
+    // 既定を持つのは、重大でない 3 観点だけである
+    const withDefault = CATALOG_FACETS.filter((facet) => facet.default !== undefined).map((facet) => facet.id);
+    expect(withDefault).toEqual(["period", "current-period", "include-zero"]);
+    // 重大な観点には既定を持たせない（権限は重大でないが既定を持たない）
+    expect(CATALOG_FACETS.every((facet) => facet.critical === false || facet.default === undefined)).toBe(true);
+  });
+
+  it("適用条件の判定を、合う要件・合わない要件・判定できない要件（閉じない）で対にする", () => {
+    const facts = (aggregates: boolean | null) => ({ aggregates });
+    for (const id of ["period", "current-period", "include-zero"]) {
+      const def = facetOf(id).default;
+      if (def === undefined) throw new Error(`観点 ${id} に既定が無い`);
+      const match: FacetDefaultMatch = def.match(facts(true));
+      expect(match).toBe("match");
+      expect(def.match(facts(false))).toBe("no-match");
+      // 判定できない（門の答えが無い・Noul でない・範囲の外）ときは閉じない
+      expect(def.match(facts(null))).toBe("unknown");
+    }
+  });
+
+  it("適用条件に合うときだけ値を返し、合わない・判定できない・既定の無い観点は返さない", () => {
+    expect(catalogDefaultOf(facetOf("period"), { aggregates: true })).toEqual({
+      value: "期間の条件を足さない",
+      reason: expect.stringContaining("語彙の意味"),
+    });
+    expect(catalogDefaultOf(facetOf("period"), { aggregates: false })).toBeUndefined();
+    expect(catalogDefaultOf(facetOf("period"), { aggregates: null })).toBeUndefined();
+    expect(catalogDefaultOf(facetOf("editable-by"), { aggregates: true })).toBeUndefined();
+  });
+
+  it("期間の既定の値が「期間の条件を足さない」で、月の見出しごとの集計を含む要件でも「全期間」にならない", async () => {
+    // 月の見出しごとの集計（語彙の意味 §groupby）を含む要件でも、期間の既定は「期間の条件を足さない」
+    const { judge } = recordingJudge(uniformAnswers("R-1", { applies: 1, specified: 0, gate: 1 }));
+    const result = await runCatalog({
+      requirements: [{ id: "R-1", text: "月ごとの件数を合計する" }],
+      judge,
+      source: "月ごとの件数を合計する。",
+      threshold: NOUL_THRESHOLD,
+    });
+    const period = result.unspecified.find((facet) => facet.facetId === "period");
+    expect(period).toBeDefined();
+    const applied = catalogDefaultOf(facetOf("period"), { aggregates: true });
+    // 語彙は月の見出しごとの集計を既定で直近 6 か月に絞る。だから「全期間」とは書かない
+    expect(applied?.value).toBe("期間の条件を足さない");
+    expect(applied?.value).not.toBe("全期間");
+    expect(applied?.value).not.toContain("全期間");
+    // 各観点の値も「全期間」を含まない
+    for (const facet of CATALOG_FACETS) {
+      expect(facet.default?.value ?? "").not.toContain("全期間");
+    }
+  });
+
+  it("表の値・理由は、コードの定数で、語彙の意味を根拠に残す", () => {
+    // 語彙の意味（§within・§groupby）を根拠にした注釈を、値と理由の両方で確かめられる
+    expect(facetOf("period").default?.reason).toContain("語彙の意味");
+    expect(facetOf("current-period").default?.reason).toContain("語彙の意味");
+    expect(facetOf("include-zero").default?.reason).toContain("語彙の意味");
+    // 「今の期間を含む」「0 件の見出しも出す」は、語彙の省略時の振る舞いと一致する
+    expect(facetOf("current-period").default?.value).toBe("今の期間を含む");
+    expect(facetOf("include-zero").default?.value).toBe("0 件の見出しも出す");
   });
 });

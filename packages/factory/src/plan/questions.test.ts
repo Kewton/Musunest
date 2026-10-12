@@ -7,6 +7,7 @@ import { PLAN_CHOICES_MIN, AGENT_LIMITS, maxOutputTokensForEffort } from "../lim
 import type { PlanOpenIssue } from "@musunest/appspec-schema";
 import { SAMPLE_DOCUMENTS, createRecordingClient, makeGateway } from "../stages/__tests__/prompt.js";
 import {
+  QUESTIONS_RULES,
   QUESTIONS_SCHEMA_NAME,
   alsoClosesOf,
   checkQuestionCoverage,
@@ -530,5 +531,86 @@ describe("依頼文で閉じる事項の引用（04 §3 P4・Issue #370）", () 
     const { outcome, recording } = await runWith(bad, good);
     expect(recording.structured).toHaveLength(2);
     expect(outcome.ok).toBe(true);
+  });
+
+  it("逐語でない引用は、置き換え（source-closure-quote）と空白の差（source-closure-quote-whitespace）に分けて断り、どちらも受理しない", () => {
+    const source = "タスクを記録する。件数を合計する。";
+    const item = (quote: string) => ({ issueId: "OI-1", quote, value: "記録する" });
+
+    // 依頼文にそのまま含まれない（置き換え）
+    const missing = checkQuestionsOutput({ questions: [], closedBySource: [item("タスクを登録する。")] }, 1, source);
+    expect(missing.ok).toBe(false);
+    if (missing.ok) return;
+    expect(missing.problems.map((problem) => problem.code)).toEqual(["source-closure-quote"]);
+
+    // 空白の差だけ
+    const spaced = checkQuestionsOutput({ questions: [], closedBySource: [item("タスクを 記録する。")] }, 1, source);
+    expect(spaced.ok).toBe(false);
+    if (spaced.ok) return;
+    expect(spaced.problems.map((problem) => problem.code)).toEqual(["source-closure-quote-whitespace"]);
+
+    // 空白だけの引用は、空白差の一致にしない（source-closure-quote）
+    const blank = checkQuestionsOutput({ questions: [], closedBySource: [item("   ")] }, 1, source);
+    expect(blank.ok).toBe(false);
+    if (blank.ok) return;
+    expect(blank.problems.map((problem) => problem.code)).toEqual(["source-closure-quote"]);
+
+    // 空文字は今までどおり shape
+    const empty = checkQuestionsOutput({ questions: [], closedBySource: [item("")] }, 1, source);
+    expect(empty.ok).toBe(false);
+    if (empty.ok) return;
+    expect(empty.problems.map((problem) => problem.code)).toEqual(["shape"]);
+  });
+
+  it("逐語でない引用の問題に、引用の値が入らない", () => {
+    const source = "タスクを記録する。件数を合計する。";
+    const mark = "MARK_QUOTE_JJJ";
+    const checked = checkQuestionsOutput(
+      { questions: [], closedBySource: [{ issueId: "OI-1", quote: `${mark}する`, value: "記録する" }] },
+      1,
+      source,
+    );
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    // 問題（欄の名前・分類・文）のどこにも、引用の値が入らない
+    expect(JSON.stringify(checked.problems)).not.toContain(mark);
+    expect(checked.problems.map((problem) => problem.code)).toEqual(["source-closure-quote"]);
+  });
+
+  it("依頼文に無い引用は source-closure-quote で、やり直しになる", async () => {
+    const bad = {
+      questions: [],
+      closedBySource: [{ issueId: "OI-1", quote: "依頼文に無い", value: "記録する" }],
+    };
+    const good = {
+      questions: [],
+      closedBySource: [{ issueId: "OI-1", quote: "タスクを記録する", value: "記録する" }],
+    };
+    const { outcome, recording } = await runWith(bad, good);
+    // 逐語の受理の条件は変えない——やり直しになり、2 回目で通る
+    expect(recording.structured).toHaveLength(2);
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("空白の差だけの引用も、今までどおりやり直しになる", async () => {
+    const bad = {
+      questions: [],
+      closedBySource: [{ issueId: "OI-1", quote: "タスクを 記録する", value: "記録する" }],
+    };
+    const good = {
+      questions: [],
+      closedBySource: [{ issueId: "OI-1", quote: "タスクを記録する", value: "記録する" }],
+    };
+    const { outcome, recording } = await runWith(bad, good);
+    expect(recording.structured).toHaveLength(2);
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("規則の文に、逐語で引用できない事項は依頼文による解決に含めないことと、許可の表に当てはまる事項はコードが既定で閉じることがある", () => {
+    const text = QUESTIONS_RULES.join("\n");
+    expect(text).toContain("逐語で引用できない");
+    expect(text).toContain("依頼文で閉じる事項");
+    expect(text).toContain("許可の表");
+    expect(text).toContain("既定で閉じる");
   });
 });

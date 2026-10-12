@@ -5,9 +5,10 @@
 // **端末とファイルは扱わない**——答えを待つあいだは状態（`turns`）を返して終わり、再開は呼ぶ側が行う（§7）。
 //
 // 上限（`AGENT_LIMITS.planQuestions`・`planRoundTrips`）は**往復をまたいで**数え、直し・再開で戻さない
-// （§2・§6 の 2）。だから **11 問目**も **4 回目の往復**も出さない。上限のあとも**重大な**未解決の事項が
-// 残っていれば「確定できない」を返す（§2）。「全部推奨で進める」なら、推奨で閉じて確認に進む。
-import type { ConfirmedPlan, PlanAcceptedUnwritable, PlanChange, PlanOpenIssue } from "@musunest/appspec-schema";
+// （§2・§6 の 2）。だから **11 問目**も **4 回目の往復**も出さない。**確定に進むのは、開いている事項が
+// 0 のときだけ**である（Issue #408）——重大でない事項も、表の外なら聞き直すか、上限で確定できないかで
+// ある。**既定で閉じるのは呼ぶ側（`runPlan`）の仕事**であり、ここでは閉じない。
+import type { ConfirmedPlan, PlanAcceptedUnwritable, PlanChange, PlanDecision, PlanOpenIssue } from "@musunest/appspec-schema";
 import { AGENT_LIMITS } from "../limits.js";
 import type { PlanAnswerDraft } from "./answers.js";
 import type { PlanQuestion } from "./questions.js";
@@ -22,6 +23,11 @@ export interface PlanConfirmationView {
   readonly diff: readonly PlanChange[];
   /** 書けないこと（了承して除く部分）と、代わりの案 */
   readonly unwritable: readonly PlanAcceptedUnwritable[];
+  /**
+   * コードが採った既定の決定（04 §3「既定で決めてよいものは聞かない」・Issue #408）。確認の画面は、
+   * **ID の接頭辞では見分けず、この並びから**「既定で決めたこと」を出す。
+   */
+  readonly closedByDefault: readonly PlanDecision[];
 }
 
 /** 1 往復（質問の束と、それへの答え） */
@@ -50,7 +56,10 @@ export interface PlanSessionInput {
   readonly questions: readonly PlanQuestion[];
   /** 確認の画面に出す下書き */
   readonly view: PlanConfirmationView;
-  /** 「全部推奨で進める」。真なら、推奨で閉じて確認に進む */
+  /**
+   * 「全部推奨で進める」で答えた往復か（Issue #408）。**開いている事項が 0 のときだけ**確認を返す——
+   * 未質問の事項が残っていれば、推奨で閉じた分のほかは聞き直すか、上限で確定できないかである。
+   */
   readonly allRecommended?: boolean;
 }
 
@@ -78,46 +87,33 @@ export function remainingPlanBudget(turns: readonly PlanTurn[]): PlanRemaining {
   };
 }
 
-/** 開いている事項のうち、重大なものだけを返す */
-function criticalOpenIssues(openIssues: readonly PlanOpenIssue[]): readonly PlanOpenIssue[] {
-  return openIssues.filter((issue) => issue.status === "open" && issue.critical);
-}
-
 /** 開いている事項（重大かによらず） */
 function openIssuesOf(openIssues: readonly PlanOpenIssue[]): readonly PlanOpenIssue[] {
   return openIssues.filter((issue) => issue.status === "open");
 }
 
 /**
- * 次の一歩を決める（**純粋な関数**。04 §2・§6）。LLM も端末もファイルも触らない。
+ * 次の一歩を決める（**純粋な関数**。04 §2・§6・Issue #408）。LLM も端末もファイルも触らない。
  *
  * - 開いている事項が無ければ、質問 0 問で確認に進む（`confirm`）
- * - 「全部推奨で進める」なら、推奨で閉じて確認に進む（`confirm`）
  * - 開いている事項があり、まだ上限の内側なら、**残りの問数の範囲で**次の質問を出す（`ask`）。
  *   11 問目と 4 回目の往復は出さない
- * - 上限のあとも**重大な**事項が残れば「確定できない」（`cannot-confirm`）。重大でなければ既定で閉じる
+ * - 上限に触れた、または出せる問いが 1 つも無いのに事項が開いていれば「確定できない」
+ *   （`cannot-confirm`）。**重大でない事項でも、表の外として既定で閉じない限りは確定に進まない**
+ *   ——既定で閉じるのは呼ぶ側（`runPlan`）である
+ * - 「全部推奨で進める」（`allRecommended`）も、**開いている事項が 0 のときだけ**確認を返す。
+ *   未質問の事項が残っていれば、聞き直すか、上限で確定できないかである
  */
 export function nextPlanStep(input: PlanSessionInput): PlanStep {
   const open = openIssuesOf(input.openIssues);
   if (open.length === 0) return { kind: "confirm", view: input.view };
-  if (input.allRecommended === true) return { kind: "confirm", view: input.view };
 
   const remaining = remainingPlanBudget(input.turns);
   const exhausted = remaining.questions <= 0 || remaining.roundTrips <= 0;
-  if (exhausted) {
-    const critical = criticalOpenIssues(input.openIssues);
-    return critical.length > 0
-      ? { kind: "cannot-confirm", openIssues: critical }
-      : { kind: "confirm", view: input.view };
-  }
+  if (exhausted) return { kind: "cannot-confirm", openIssues: open };
 
   const questions = input.questions.slice(0, remaining.questions);
-  if (questions.length === 0) {
-    const critical = criticalOpenIssues(input.openIssues);
-    return critical.length > 0
-      ? { kind: "cannot-confirm", openIssues: critical }
-      : { kind: "confirm", view: input.view };
-  }
+  if (questions.length === 0) return { kind: "cannot-confirm", openIssues: open };
 
   return {
     kind: "ask",

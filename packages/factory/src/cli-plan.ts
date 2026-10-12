@@ -216,6 +216,14 @@ function writeConfirmation(terminal: Terminal, view: PlanConfirmationView): void
       terminal.write(`  - ${decision.subject}: ${decision.value}（引用: ${decision.reason}）`);
     }
   }
+  // 既定で決めたこと（観点・値・理由）を、依頼文で決めたことと**別の見出し**で出す（Issue #408）。
+  // ID の接頭辞では見分けず、下書きの並び（`closedByDefault`）から出す。
+  if (view.closedByDefault.length > 0) {
+    terminal.write("既定で決めたこと（観点・値・理由）:");
+    for (const decision of view.closedByDefault) {
+      terminal.write(`  - ${decision.subject}: ${decision.value}（理由: ${decision.reason}）`);
+    }
+  }
   terminal.write(`これで作る [y/n]`);
 }
 
@@ -281,6 +289,13 @@ export interface PlanCliSourceClosureRecord {
   readonly value: string;
 }
 
+/** 記録に入れる、既定で閉じた事項（事項 ID・観点 ID・値。04 §3・Issue #408） */
+export interface PlanCliDefaultClosureRecord {
+  readonly issue_id: string;
+  readonly facet_id: string;
+  readonly value: string;
+}
+
 /** 記録に入れる答え（選択肢 ID か自由入力のちょうど一方） */
 export interface PlanCliAnswerRecord {
   readonly id: string;
@@ -304,6 +319,8 @@ export interface PlanCliRecord {
   readonly rounds: readonly PlanCliRoundRecord[];
   /** 依頼文で閉じた事項（ID・引用・決めた中身。04 §3 P4・Issue #370） */
   readonly closed_by_source: readonly PlanCliSourceClosureRecord[];
+  /** 既定で閉じた事項（事項 ID・観点 ID・値。04 §3・Issue #408） */
+  readonly closed_by_default: readonly PlanCliDefaultClosureRecord[];
   readonly confirmation: "build" | "stop" | null;
   readonly stages: readonly PlanStageRecord[];
   readonly judge: BundleJudgeUsage;
@@ -358,6 +375,11 @@ export function buildPlanCliRecord(input: {
     closed_by_source: input.result.closedBySource.map((closure) => ({
       issue_id: closure.issueId,
       quote: closure.quote,
+      value: closure.value,
+    })),
+    closed_by_default: input.result.closedByDefault.map((closure) => ({
+      issue_id: closure.issueId,
+      facet_id: closure.facetId,
       value: closure.value,
     })),
     confirmation: input.transcript.confirmation,

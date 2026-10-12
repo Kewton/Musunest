@@ -8,7 +8,7 @@
 //   5. 予算が尽きると「止まった」になる。使った額に LLM と判定の費用が入る
 //   6. 段ごとの記録が結果に入る
 import { describe, expect, it } from "vitest";
-import { checkConfirmedPlan, isConfirmationValid, planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
+import { checkConfirmedPlan, isConfirmationValid, planDigest, type ConfirmedPlan, type PlanOpenIssue } from "@musunest/appspec-schema";
 import { planStopReasonLine } from "../cli-plan.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "../judge.js";
@@ -75,6 +75,45 @@ function catalogAnswersFor(requirementIds: readonly string[]): Record<string, Ju
     }
   }
   return answers;
+}
+
+/**
+ * 目録の答え（Issue #408）。指定した要件の、指定した観点だけを「決まっていない」にし、ほかは
+ * 「決まっている」にする。門は既定で「集計を含む」（1）。
+ */
+function catalogUnspecifiedFor(
+  unspecified: Readonly<Record<string, readonly string[]>>,
+  requirementIds: readonly string[] = ["R-1", "R-2"],
+): Record<string, JudgeAnswer> {
+  const answers: Record<string, JudgeAnswer> = {};
+  for (const requirementId of requirementIds) {
+    answers[catalogGateQuestionName(requirementId)] = noul(1);
+    const open = new Set(unspecified[requirementId] ?? []);
+    for (const facet of CATALOG_FACETS) {
+      answers[catalogAppliesQuestionName(requirementId, facet.id)] = noul(1);
+      answers[catalogQuestionName(requirementId, facet.id)] = noul(open.has(facet.id) ? 0 : 1);
+    }
+  }
+  return answers;
+}
+
+/** 未解決の事項 1 つへの正しい P4 の答え（選択肢 2 つ・推奨・自由入力） */
+function questionsFor(issueId: string, id = "Q-1"): { readonly questions: readonly unknown[] } {
+  return {
+    questions: [
+      {
+        id,
+        openIssueId: issueId,
+        text: "どうしますか",
+        choices: [
+          { id: "c1", text: "こちら" },
+          { id: "c2", text: "あちら" },
+        ],
+        recommended: { choiceId: "c1", reason: "依頼に沿う" },
+        allowFreeText: true,
+      },
+    ],
+  };
 }
 
 /** 覆いの問い（原文の文と、答え）に「覆われている」を返す答え */
@@ -617,6 +656,9 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     // 矛盾で閉じなかったので、主の OI-a も一緒に閉じる OI-b も開いたまま
     expect(openIds).toContain("OI-a");
     expect(openIds).toContain("OI-b");
+    // 矛盾の再質問のような重大な事項は既定では閉じず、理由も今までの上限の分類を保つ（Issue #408）
+    expect(result.closedByDefault).toEqual([]);
+    expect(result.reasons).toEqual([{ source: "session", code: "round-trip-limit", path: "open_issues" }]);
   });
 
   // ── 依頼文で決まっている事項を、聞かずに閉じる（Issue #370）──────────────
@@ -952,7 +994,7 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
     expect(result.reasons).toEqual([{ source: "confirm", code: "uncovered-source", path: "source[2]" }]);
   });
 
-  it("確定した仕様の形の誤りは、cannot-confirm の理由に source: plan-check で残る", async () => {
+  it("重大でない事項が開いたまま残れば、cannot-confirm（source: session・noncritical-without-default）になり、P6 を呼ばない", async () => {
     const surface = {
       ambiguities: [
         { id: "OI-a", requirementId: "R-1", text: "問い a", critical: true },
@@ -988,25 +1030,28 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
 
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
-    // 重大でない事項 OI-b が開いたまま（open_issue）。P6 の中の検査と外側の検査の重なりは 1 件にまとまる
-    expect(result.reasons).toEqual([{ source: "plan-check", code: "open_issue", path: "open_issues[1].status" }]);
+    // 重大でない事項 OI-b が既定の無いまま残った
+    expect(result.openIssues.map((issue) => issue.id)).toEqual(["OI-b"]);
+    expect(result.reasons).toEqual([{ source: "session", code: "noncritical-without-default", path: "open_issues" }]);
+    // P6（confirm の段）を呼ばない
+    expect(result.stages.some((stage) => stage.stage === "confirm")).toBe(false);
   });
 
-  it("path が違う同じ code は別件として残る（重なりは 1 件にまとめる）", async () => {
+  it("重大な事項が残れば、既存の上限の分類を保つ（noncritical-without-default に置き換えない）", async () => {
     const surface = {
       ambiguities: [
-        { id: "OI-a", requirementId: "R-1", text: "問い a", critical: false },
+        { id: "OI-a", requirementId: "R-1", text: "問い a", critical: true },
         { id: "OI-b", requirementId: "R-1", text: "問い b", critical: false },
-        { id: "OI-c", requirementId: "R-2", text: "問い c", critical: true },
       ],
       unwritable: [],
     };
+    // 重大な事項 OI-a への問いは答える役が答えず、上限まで往復して残る
     const questions = {
       questions: [
         {
-          id: "Q-c",
-          openIssueId: "OI-c",
-          text: "問い c",
+          id: "Q-a",
+          openIssueId: "OI-a",
+          text: "問い a",
           choices: [
             { id: "c1", text: "こちら" },
             { id: "c2", text: "あちら" },
@@ -1021,21 +1066,19 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
       structured(REVERSE_CHECK_OUTPUT),
       structured(surface),
       structured(questions),
+      structured(questions),
+      structured(questions),
     ]);
 
-    const result = await runPlan(
-      makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") }), ALL_RECOMMENDED),
-    );
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
 
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
-    const planCheck = result.reasons.filter((reason) => reason.source === "plan-check");
-    expect(planCheck).toHaveLength(2);
-    expect(planCheck.map((reason) => reason.code)).toEqual(["open_issue", "open_issue"]);
-    expect(planCheck.map((reason) => reason.path)).toEqual([
-      "open_issues[0].status",
-      "open_issues[1].status",
-    ]);
+    // 重大な事項が残っているので、理由の分類は今までの上限の分類（往復の上限）のまま
+    expect(result.reasons).toEqual([{ source: "session", code: "round-trip-limit", path: "open_issues" }]);
+    expect(result.openIssues.map((issue) => issue.id)).toContain("OI-a");
+    // P6（confirm の段）を呼ばない
+    expect(result.stages.some((stage) => stage.stage === "confirm")).toBe(false);
   });
 
   it("逆照合の落ちは source: reverse-check として残る", async () => {
@@ -1081,7 +1124,7 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
     expect(result.reasons).toEqual([{ source: "session", code: "round-trip-limit", path: "open_issues" }]);
   });
 
-  it("往復の制御の理由は、質問数の上限・往復数の上限・重大な事項があるのに問いが無い、で区別できる", () => {
+  it("往復の制御の理由は、質問数の上限・往復数の上限・重大な事項があるのに問いが無い・重大でない事項だけ、で区別できる", () => {
     const question = (id: string) => ({
       id,
       openIssueId: "OI",
@@ -1098,16 +1141,20 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
       questions: Array.from({ length: count }, (_value, index) => question(`Q-${index}`)),
       answers: [],
     });
-    expect(sessionCannotConfirmReason([turnWith(AGENT_LIMITS.planQuestions)]).code).toBe("question-limit");
+    const critical: PlanOpenIssue = { id: "OI", text: "重大な事項", critical: true, status: "open" };
+    const noncritical: PlanOpenIssue = { id: "OI", text: "重大でない事項", critical: false, status: "open" };
+    expect(sessionCannotConfirmReason([turnWith(AGENT_LIMITS.planQuestions)], [critical]).code).toBe(
+      "question-limit",
+    );
     expect(
-      sessionCannotConfirmReason([
-        turnWith(1),
-        turnWith(1),
-        turnWith(1),
-      ]).code,
+      sessionCannotConfirmReason([turnWith(1), turnWith(1), turnWith(1)], [critical]).code,
     ).toBe("round-trip-limit");
-    expect(sessionCannotConfirmReason([turnWith(1)]).code).toBe("critical-no-question");
-    expect(sessionCannotConfirmReason([turnWith(1)]).source).toBe("session");
+    expect(sessionCannotConfirmReason([turnWith(1)], [critical]).code).toBe("critical-no-question");
+    expect(sessionCannotConfirmReason([turnWith(1)], [critical]).source).toBe("session");
+    // 残った事項が重大でないものだけなら `noncritical-without-default`（Issue #408）
+    expect(sessionCannotConfirmReason([turnWith(1)], [noncritical]).code).toBe("noncritical-without-default");
+    // 重大な事項が 1 つでも混ざれば、今までの分類を保つ
+    expect(sessionCannotConfirmReason([turnWith(1)], [critical, noncritical]).code).toBe("critical-no-question");
   });
 
   it("P1/P2 の各呼び出しで止まると、operation と有限の分類が残る", async () => {
@@ -1647,5 +1694,298 @@ describe("質問 ID と答えの ID を往復をまたいで一意にする（Is
     expect(JSON.stringify(result)).not.toContain(mark);
     expect(planStopReasonLine(result)).not.toContain(mark);
     expect(planStopReasonLine(result)).toContain("duplicate-question-id");
+  });
+});
+
+// ── Issue #408：許可の表の既定で、未指定の事項を最初の往復から閉じる ──────────────
+
+describe("許可の表の既定で、未指定の事項を最初の往復から閉じる（04 §3・Issue #408）", () => {
+  it("表の観点がすべて適用条件に合うと、P4 も答える役も 0 回で既定で閉じ、確認の役の下書きと確定した仕様が一致する", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    let answerCalls = 0;
+    const views: PlanConfirmationView[] = [];
+    const responder: PlanResponder = {
+      async answer() {
+        answerCalls += 1;
+        return { kind: "answers", answers: [] };
+      },
+      async confirm(view) {
+        views.push(view);
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["period", "current-period", "include-zero"] }),
+      ...coverAnswersFor([]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // P4 も答える役も 0 回（`questions` の段の記録が無い）
+    expect(answerCalls).toBe(0);
+    expect(result.stages.some((stage) => stage.stage === "questions")).toBe(false);
+    // decisions に `D:default:` の決定が並ぶ
+    const defaults = result.plan.decisions.filter((decision) => decision.id.startsWith("D:default:"));
+    expect(defaults.map((decision) => decision.id)).toEqual([
+      "D:default:OI:catalog:R-1:period",
+      "D:default:OI:catalog:R-1:current-period",
+      "D:default:OI:catalog:R-1:include-zero",
+    ]);
+    // 事項が `resolution.decision_id` で解決する
+    for (const decision of defaults) {
+      const issueId = decision.id.slice("D:default:".length);
+      const issue = result.plan.open_issues.find((candidate) => candidate.id === issueId);
+      expect(issue?.status).toBe("resolved");
+      expect(issue?.resolution?.decision_id).toBe(decision.id);
+    }
+    // 確定した仕様の検査の誤りが 0
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+    expect(await isConfirmationValid(result.plan)).toBe(true);
+    // 確認の役が受け取った下書きの decisions・open_issues と、確定した仕様のそれが一致する
+    expect(views[0]?.plan.decisions).toEqual(result.plan.decisions);
+    expect(views[0]?.plan.open_issues).toEqual(result.plan.open_issues);
+    expect(views[0]?.closedByDefault.map((decision) => decision.id)).toEqual(defaults.map((one) => one.id));
+    // 既定で閉じた事項の記録（事項 ID・観点 ID・値）
+    expect(result.closedByDefault).toEqual([
+      { issueId: "OI:catalog:R-1:period", facetId: "period", value: "期間の条件を足さない" },
+      { issueId: "OI:catalog:R-1:current-period", facetId: "current-period", value: "今の期間を含む" },
+      { issueId: "OI:catalog:R-1:include-zero", facetId: "include-zero", value: "0 件の見出しも出す" },
+    ]);
+    // 既定を当てた仕様が Build に渡る（決定の文が、確定した仕様の decisions に入る）
+    expect(result.plan.decisions.map((decision) => decision.subject)).toContain(defaults[0]?.subject);
+    // 確認のあとに決定の値を変えた仕様は確認が失効する
+    const changed: ConfirmedPlan = {
+      ...result.plan,
+      decisions: result.plan.decisions.map((decision) =>
+        decision.id === "D:default:OI:catalog:R-1:period" ? { ...decision, value: "変えた値" } : decision,
+      ),
+    };
+    expect(await isConfirmationValid(changed)).toBe(false);
+    expect(await checkConfirmedPlan(changed)).toEqual([
+      {
+        code: "confirmation_expired",
+        path: "confirmation.sha256",
+        message: "仕様の SHA-256 と一致しない（確認が失効している）",
+      },
+    ]);
+  });
+
+  it("重大な事項と表の事項が混ざると、表の事項だけが既定で閉じ、P4 の入力に重大な事項だけが渡る", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(questionsFor("OI:catalog:R-1:aggregation")),
+    ]);
+    const asked: PlanAnswerRequest[] = [];
+    const responder: PlanResponder = {
+      async answer(request) {
+        asked.push(request);
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["aggregation", "period"] }),
+      ...coverAnswersFor(["A:Q1-1"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // P4 に渡った事項は、重大な aggregation だけ（表の period は既定で閉じている）
+    expect(asked[0]?.questions.map((question) => question.openIssueId)).toEqual(["OI:catalog:R-1:aggregation"]);
+    expect(result.closedByDefault).toEqual([
+      { issueId: "OI:catalog:R-1:period", facetId: "period", value: "期間の条件を足さない" },
+    ]);
+    // 既定で閉じた分は問数・往復を消費しない（出した問いは重大な 1 問だけ）
+    expect(result.plan.inputs.filter((input) => input.kind === "question")).toHaveLength(1);
+    const usedQuestions = asked.reduce((total, request) => total + request.questions.length, 0);
+    expect(usedQuestions).toBe(1);
+  });
+
+  it("表の外の事項（権限・P3 の自由文・P1 の未解決）は既定では閉じず、問数が残れば P4 を呼ぶ", async () => {
+    const listWithUnresolved = { ...REQUIREMENT_LIST_OUTPUT, unresolved: ["P1 の未解決"] };
+    const surface = {
+      ambiguities: [{ id: "OI-p3", requirementId: "R-1", text: "自由文の事項", critical: false }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(listWithUnresolved),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      structured({
+        questions: [
+          ...(questionsFor("OI:catalog:R-1:editable-by", "Q-1").questions as readonly object[]),
+          ...(questionsFor("OI:unresolved:1", "Q-2").questions as readonly object[]),
+          ...(questionsFor("OI-p3", "Q-3").questions as readonly object[]),
+        ],
+      }),
+    ]);
+    const asked: PlanAnswerRequest[] = [];
+    const responder: PlanResponder = {
+      async answer(request) {
+        asked.push(request);
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["editable-by"] }),
+      ...coverAnswersFor(["A:Q1-1", "A:Q1-2", "A:Q1-3"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    // 表の外の事項は既定では閉じない
+    expect(result.closedByDefault).toEqual([]);
+    // 問数が残っているので P4 を呼ぶ
+    expect(asked.length).toBeGreaterThan(0);
+  });
+
+  it("上限で残る事項が重大でないものだけなら cannot-confirm（source: session・noncritical-without-default）で、P6 を呼ばない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(questionsFor("OI:catalog:R-1:editable-by")),
+      structured(questionsFor("OI:catalog:R-1:editable-by")),
+      structured(questionsFor("OI:catalog:R-1:editable-by")),
+    ]);
+    const responder: PlanResponder = ANSWER_NONE;
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["editable-by"] }),
+      ...coverAnswersFor([]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons).toEqual([{ source: "session", code: "noncritical-without-default", path: "open_issues" }]);
+    expect(result.closedByDefault).toEqual([]);
+    expect(result.stages.some((stage) => stage.stage === "confirm")).toBe(false);
+  });
+
+  it("モデルが同じ形（OI:catalog:）の ID を作った事項は、既定の対象にならない", async () => {
+    const surface = {
+      ambiguities: [{ id: "OI:catalog:R-1:period", requirementId: "R-1", text: "モデルが作った事項", critical: false }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      structured(questionsFor("OI:catalog:R-1:period")),
+      structured(questionsFor("OI:catalog:R-1:period")),
+      structured(questionsFor("OI:catalog:R-1:period")),
+    ]);
+    // 目録の答えはすべて「決まっている」（コードが作った事項は無い）
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor([]) });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.closedByDefault).toEqual([]);
+    // 事項は開いたままである
+    expect(result.openIssues.map((issue) => issue.id)).toContain("OI:catalog:R-1:period");
+  });
+
+  it("重複した ID の事項は、既定の対象にならない", async () => {
+    const surface = {
+      ambiguities: [{ id: "OI:catalog:R-1:period", requirementId: "R-1", text: "重複した事項", critical: false }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      structured(questionsFor("OI:catalog:R-1:period")),
+      structured(questionsFor("OI:catalog:R-1:period")),
+      structured(questionsFor("OI:catalog:R-1:period")),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["period"] }),
+      ...coverAnswersFor([]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // コードが作った事項とモデルが作った事項で ID が重なっているので、既定で閉じない
+    expect(result.closedByDefault).toEqual([]);
+  });
+
+  it("「全部推奨で進める」で、出した質問だけが推奨で閉じ、未質問の表の事項は既定で閉じ、表の外の事項が残れば確定しない", async () => {
+    const surface = {
+      ambiguities: [
+        { id: "OI-c", requirementId: "R-1", text: "重大な事項", critical: true },
+        { id: "OI-n", requirementId: "R-1", text: "重大でない事項", critical: false },
+      ],
+      unwritable: [],
+    };
+    // P4 は重大な OI-c だけを聞く（重大でない OI-n は聞かない）
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      structured(questionsFor("OI-c")),
+    ]);
+    const responder: PlanResponder = ALL_RECOMMENDED;
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["period"] }),
+      ...coverAnswersFor(["A:Q1-1"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 出した質問（OI-c）は推奨で閉じ、未質問の表の事項（period）は既定で閉じている＝開いているのは OI-n だけ
+    expect(result.openIssues.map((issue) => issue.id)).toEqual(["OI-n"]);
+    expect(result.closedByDefault).toEqual([
+      { issueId: "OI:catalog:R-1:period", facetId: "period", value: "期間の条件を足さない" },
+    ]);
+    // 表の外の事項（OI-n）が残るので確定しない
+    expect(result.reasons).toEqual([{ source: "session", code: "noncritical-without-default", path: "open_issues" }]);
+  });
+
+  it("問数 10・往復 3 の境界で、既定の閉じ方が上限を消費しない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(TEN_ISSUES_SURFACE),
+      structured(TEN_QUESTIONS),
+    ]);
+    const responder: PlanResponder = ALL_RECOMMENDED;
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["period"] }),
+      ...coverAnswersFor(Array.from({ length: 10 }, (_value, index) => `A:Q1-${index + 1}`)),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 既定で閉じた分（period）は問数を消費しない
+    expect(result.closedByDefault).toEqual([
+      { issueId: "OI:catalog:R-1:period", facetId: "period", value: "期間の条件を足さない" },
+    ]);
+    // 重大な 10 件はそのまま 10 問で聞く（既定の分を足した 11 問にはしない）
+    expect(result.plan.inputs.filter((input) => input.kind === "question")).toHaveLength(AGENT_LIMITS.planQuestions);
+    expect(result.plan.open_issues.every((issue) => issue.status === "resolved")).toBe(true);
   });
 });

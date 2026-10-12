@@ -98,6 +98,29 @@ function coverAnswers(answerIds: readonly string[]): Record<string, JudgeAnswer>
   return answers;
 }
 
+/**
+ * 目録の答え（Issue #408）。指定した要件の、指定した観点だけを「決まっていない」にし、ほかは
+ * 「決まっている」にする。門は既定で「集計を含む」（1）。
+ */
+function catalogUnspecifiedFor(
+  unspecified: Readonly<Record<string, readonly string[]>>,
+  requirementIds: readonly string[] = ["R-1", "R-2"],
+): Record<string, JudgeAnswer> {
+  const answers: Record<string, JudgeAnswer> = {};
+  for (const requirementId of requirementIds) {
+    answers[catalogGateQuestionName(requirementId)] = noul(1);
+    const open = new Set(unspecified[requirementId] ?? []);
+    for (const facet of CATALOG_FACETS) {
+      answers[catalogAppliesQuestionName(requirementId, facet.id)] = noul(1);
+      answers[catalogQuestionName(requirementId, facet.id)] = noul(open.has(facet.id) ? 0 : 1);
+    }
+  }
+  return answers;
+}
+
+/** 曖昧さ 0 件の P3 の答え */
+const SURFACE_CLEAR = { ambiguities: [], unwritable: [] };
+
 /** 目録に無い曖昧さ 3 件（重大）。3 問を出し、番号・推奨・自由入力を試せるようにする */
 const SURFACE_THREE = {
   ambiguities: [
@@ -246,6 +269,12 @@ interface PlanCliRecordShape {
     readonly quote: string;
     readonly value: string;
   }[];
+  /** 既定で閉じた事項（事項 ID・観点 ID・値。Issue #408） */
+  readonly closed_by_default: readonly {
+    readonly issue_id: string;
+    readonly facet_id: string;
+    readonly value: string;
+  }[];
   readonly spent_usd: number;
   readonly remaining_usd: number;
   readonly budget_usd: number;
@@ -369,7 +398,7 @@ describe("答える役の 2 つの形（04 §7）", () => {
       ],
     });
     // 確認は自動で「これで作る」
-    expect(await responder.confirm({ plan: { schema_version: "x", plan_id: "p", revision: 1, vocabulary_version: "v1", inputs: [], requirements: [], open_issues: [], decisions: [], accepted_unwritable: [] }, diff: [], unwritable: [] })).toBe("build");
+    expect(await responder.confirm({ plan: { schema_version: "x", plan_id: "p", revision: 1, vocabulary_version: "v1", inputs: [], requirements: [], open_issues: [], decisions: [], accepted_unwritable: [] }, diff: [], unwritable: [], closedByDefault: [] })).toBe("build");
     expect(transcript.confirmation).toBe("build");
   });
 
@@ -914,5 +943,113 @@ describe("往復をまたいで質問 ID が重ならない（Issue #405）", ()
     expect(recordText).not.toContain("message");
     expect(lines.join("\n")).not.toContain(mark);
     expect(lines.join("\n")).toContain("duplicate-question-id");
+  });
+});
+
+// ── 既定で決めたことの表示と記録（04 §3・Issue #408）───────────────────────
+
+describe("既定で決めたことを、依頼文で決めたことと別の見出しで出し、記録に残す（04 §3・Issue #408）", () => {
+  const MARK = "MARK_SOURCE_ZZZ";
+  /** 依頼文の目印を含む 2 文。要件はそのまま引用する */
+  const markedSource = `${MARK}する。件数を合計する。`;
+  const spanOf = (quote: string) => {
+    const start = markedSource.indexOf(quote);
+    return { start, end: start + quote.length };
+  };
+  const markedList = {
+    requirements: [
+      { id: "R-1", text: "印を出せる", quote: `${MARK}する`, position: spanOf(`${MARK}する`) },
+      { id: "R-2", text: "件数を合計できる", quote: "件数を合計する", position: spanOf("件数を合計する") },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+
+  it("対話の形で、既定で決めたことが別の見出しで出て、P4 を呼ばずに確定し、記録の closed_by_default に残り、Build に渡る", async () => {
+    const recording = createRecordingClient([
+      structured(markedList),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_CLEAR),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["period", "current-period", "include-zero"] }),
+      ...coverAnswers([]),
+    });
+    const dir = `${directory}/closed-by-default`;
+    const terminal = fakeTerminal(["これで作る"]);
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      readFile: async () => markedSource,
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      terminal,
+      log: () => {},
+    });
+
+    // 既定で決めたことが、依頼文で決めたことと別の見出しで出る
+    expect(terminal.out.some((line) => line.includes("既定で決めたこと（観点・値・理由）"))).toBe(true);
+    // 既定の値・理由に、依頼文の目印の文字列が出ない
+    const defaultLines = terminal.out.filter((line) => line.includes("期間の条件を足さない") || line.includes("理由:"));
+    expect(defaultLines.join("\n")).not.toContain(MARK);
+
+    // 往復の記録：P4 を 1 回も呼ばず（rounds が空）、closed_by_default に事項 ID・観点 ID・値が残る
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    expect(record.rounds).toEqual([]);
+    expect(record.closed_by_default).toEqual([
+      { issue_id: "OI:catalog:R-1:period", facet_id: "period", value: "期間の条件を足さない" },
+      { issue_id: "OI:catalog:R-1:current-period", facet_id: "current-period", value: "今の期間を含む" },
+      { issue_id: "OI:catalog:R-1:include-zero", facet_id: "include-zero", value: "0 件の見出しも出す" },
+    ]);
+    // 既定の値に目印が出ない
+    expect(JSON.stringify(record.closed_by_default)).not.toContain(MARK);
+
+    // 既定を当てた仕様が Build に渡る
+    expect(spy).toHaveBeenCalledTimes(1);
+    const plan = spy.mock.calls[0]?.[0]?.plan;
+    expect(plan).toBeDefined();
+    const decisions = (plan?.decisions ?? []).map((decision) => decision.id);
+    expect(decisions).toContain("D:default:OI:catalog:R-1:period");
+  });
+
+  it("確認で「やめる」なら、既定で決めていても Build を呼ばない", async () => {
+    const recording = createRecordingClient([
+      structured(markedList),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["period"] }),
+      ...coverAnswers([]),
+    });
+    const dir = `${directory}/closed-by-default-stop`;
+    const terminal = fakeTerminal(["やめる"]);
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      readFile: async () => markedSource,
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      terminal,
+      log: () => {},
+    });
+
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.confirmation).toBe("stop");
   });
 });
