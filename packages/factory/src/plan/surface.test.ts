@@ -13,7 +13,7 @@ import {
   createRecordingClient,
   makeGateway,
 } from "../stages/__tests__/prompt.js";
-import { SURFACE_RULES, SURFACE_SCHEMA_NAME, checkSurfaceOutput, runSurface, type SurfaceCatalogData } from "./surface.js";
+import { SURFACE_RULES, SURFACE_SCHEMA_NAME, checkSurfaceOutput, checkSurfaceTargets, runSurface, type PlanSurface, type SurfaceCatalogData, type SurfaceContext } from "./surface.js";
 
 /** 正しい応答（未解決の事項 1 件・書けないこと 1 件） */
 const SURFACE_OUTPUT = {
@@ -278,5 +278,219 @@ describe("計測で断られた形が通り、門は緩めない（Issue #398）
     expect(result.ok).toBe(false);
     if (result.ok || result.failure.kind !== "unmet") return;
     for (const problem of result.failure.problems) expect(problem.message).not.toContain("### ");
+  });
+});
+
+// ── Issue #434：差分の洗い出しに、参照用の文脈を別のデータとして渡す ───────────
+
+describe("差分の洗い出しに、参照用の文脈を別のデータとして渡す（04 §3 P3・Issue #434）", () => {
+  /** `<data name="…">…</data>` の中身を取り出す（データの欄ごとに確かめる） */
+  const dataBlockOf = (input: string, name: string): string =>
+    input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "";
+
+  /** 点検の対象（差分だけ。位置は 0〜0） */
+  const DIFF_LIST = {
+    requirements: [
+      {
+        id: "R:A:Q1-1",
+        text: "確定した要件の文: 全員で数える\n参考の文脈: 問い Q1-1: 誰の分を数えるか 未解決の事項 OI-1: 誰の分を数えるか",
+        quote: "全員で数える",
+        position: { start: 0, end: 0 },
+      },
+    ],
+    decisions: [],
+    unresolved: [],
+  };
+
+  /** 目録の点検の結果（仮適用。3 つの欄の形は既存のまま） */
+  const CATALOG: SurfaceCatalogData = {
+    targets: [{ requirementId: "R:A:Q1-1", facetId: "period", status: "開いている" }],
+    openIssues: [
+      {
+        id: "OI:catalog:R:A:Q1-1:period",
+        requirementId: "R:A:Q1-1",
+        facetId: "period",
+        text: "要件 R:A:Q1-1 について：対象にする期間（いつからいつまでか）",
+      },
+    ],
+    defaults: [],
+  };
+
+  /** 参照用の文脈（点検時点の全要件・既存の決定・了承除外・関係する問いと答え） */
+  const CONTEXT: SurfaceContext = {
+    requirements: [
+      { id: "R-1", text: "タスクを記録できる", origin: "S-1" },
+      { id: "R-2", text: "件数を合計できる", origin: "S-2" },
+      { id: "R:A:Q1-1", text: "確定した要件の文: 全員で数える", origin: "A:Q1-1" },
+    ],
+    decisions: [
+      {
+        id: "D-1",
+        subject: "既定で決めた",
+        value: "記録の形は 1 行とした",
+        reason: "Plan が既定で決めた（確認の画面で直せる）",
+      },
+    ],
+    acceptedUnwritable: [
+      {
+        part_id: "P:U-0",
+        alternative_id: "R:alt:U-0",
+        basis: { doc_version: "v1", location: "部分", constraint_id: "記録" },
+      },
+    ],
+    questionsAndAnswers: [
+      { questionId: "Q1-1", question: "誰の分を数えるか", answerId: "A:Q1-1", answer: "全員で数える" },
+    ],
+  };
+
+  /** 1 回まわして、送った要求と結果を返す */
+  function runWith(options: { catalog?: SurfaceCatalogData; context?: SurfaceContext }) {
+    const recorded = [
+      { kind: "structured" as const, output: SURFACE_OUTPUT, usage: undefined },
+      { kind: "structured" as const, output: SURFACE_OUTPUT, usage: undefined },
+    ];
+    const recording = createRecordingClient(recorded);
+    const outcome = runSurface({
+      list: DIFF_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      ...options,
+    });
+    return { recording, outcome };
+  }
+
+  it("参照用の文脈を渡すと、全要件・既存の決定・了承除外・関係する問いと答えが別々のデータとして入り、点検の対象は差分だけである", async () => {
+    const { recording, outcome } = runWith({ catalog: CATALOG, context: CONTEXT });
+    const result = await outcome;
+    expect(result.ok).toBe(true);
+    const request = recording.structured[0];
+    expect(request).toBeDefined();
+    if (request === undefined) return;
+    // 要件の一覧 + 目録の 3 つ + 文脈の 4 つ = 8 つ
+    expect(request.input.match(/<data name=/g)).toHaveLength(8);
+    expect(request.input).toContain('<data name="点検時点の全要件">');
+    expect(request.input).toContain('<data name="既存の決定">');
+    expect(request.input).toContain('<data name="了承除外">');
+    expect(request.input).toContain('<data name="関係する問いと答え">');
+    // 点検の対象（要件の一覧）は、差分の R:A:Q1-1 だけである
+    const target = dataBlockOf(request.input, "要件の一覧");
+    expect(target).toContain("R:A:Q1-1");
+    expect(target).not.toContain("R-1");
+    expect(target).not.toContain("R-2");
+    // 文脈には、全要件・既存の決定・了承除外・関係する問いと答えが入る
+    expect(dataBlockOf(request.input, "点検時点の全要件")).toContain("R-2");
+    expect(dataBlockOf(request.input, "既存の決定")).toContain("D-1");
+    expect(dataBlockOf(request.input, "了承除外")).toContain("R:alt:U-0");
+    expect(dataBlockOf(request.input, "関係する問いと答え")).toContain("A:Q1-1");
+    // 代わりの案の採否・合否の目印の文字列は、文脈に入らない
+    const contextText = ["点検時点の全要件", "既存の決定", "了承除外", "関係する問いと答え"]
+      .map((name) => dataBlockOf(request.input, name))
+      .join("\n");
+    for (const marker of ["受理", "棄却", "合否", "採否", "accepted", "rejected"]) {
+      expect(contextText).not.toContain(marker);
+    }
+    // 規則の側には、データの名前が入らない（規則とデータを分ける）
+    expect(request.instructions).not.toContain("点検時点の全要件");
+  });
+
+  it("参照用の文脈を渡さなければ、要求のデータの数は既存のままである", async () => {
+    const { recording, outcome } = runWith({ catalog: CATALOG });
+    const result = await outcome;
+    expect(result.ok).toBe(true);
+    const request = recording.structured[0];
+    if (request === undefined) return;
+    // 要件の一覧 + 目録の 3 つ = 4 つ（文脈の分は増えない）
+    expect(request.input.match(/<data name=/g)).toHaveLength(4);
+    expect(request.input).not.toContain("点検時点の全要件");
+    expect(request.input).not.toContain("関係する問いと答え");
+  });
+});
+
+// ── Issue #434：応答が指す要件 ID を、点検の対象（その往復の差分）へ照合する ──────
+
+describe("応答が指す要件 ID を、点検の対象（その往復の差分）へ照合する（04 §3 P3・Issue #434）", () => {
+  /** 正しい応答を、形の検査を通した `PlanSurface` にする */
+  function parsed(): PlanSurface {
+    const checked = checkSurfaceOutput(SURFACE_OUTPUT);
+    if (!checked.ok) throw new Error("題材の応答が不正です");
+    return checked.value;
+  }
+
+  it("点検の対象の内側を指す応答は、断らない", () => {
+    const target = checkSurfaceTargets(parsed(), new Set(["R-1", "R-2"]));
+    expect(target.problems).toEqual([]);
+    expect(target.dropped).toEqual([]);
+    expect(target.keptUnwritable).toHaveLength(1);
+  });
+
+  it("点検の対象に無い要件を指す応答は、欄つきで断る（重複として除くものが無ければ）", () => {
+    const target = checkSurfaceTargets(parsed(), new Set(["R:A:Q1-1"]));
+    expect(target.problems).toEqual([
+      {
+        field: "unwritable[0].requirementId",
+        code: "requirement-id-unknown",
+        message: "点検の対象（その往復の差分）に無い要件を指している",
+      },
+      {
+        field: "ambiguities[0].requirementId",
+        code: "requirement-id-unknown",
+        message: "点検の対象（その往復の差分）に無い要件を指している",
+      },
+    ]);
+    expect(target.dropped).toEqual([]);
+    expect(target.rejected).toHaveLength(2);
+    // 誤りの文に、要件 ID の値を入れない（止まった記録に漏らさない）
+    for (const problem of target.problems) {
+      expect(problem.message).not.toContain("R-1");
+      expect(problem.message).not.toContain("R:A:Q1-1");
+    }
+  });
+
+  it("対象外の「書けない」の申告を、dropClaim が真を返したときだけ重複として除く（曖昧さは除かない）", () => {
+    const target = checkSurfaceTargets(parsed(), new Set(["R:A:Q1-1"]), (claim) => claim.requirementId === "R-2");
+    // 申告だけが除かれ、曖昧さは断られる
+    expect(target.dropped.map((item) => item.index)).toEqual([0]);
+    expect(target.dropped[0]?.claim.requirementId).toBe("R-2");
+    expect(target.keptUnwritable).toEqual([]);
+    expect(target.rejected.map((ref) => ref.kind)).toEqual(["ambiguity"]);
+    expect(target.problems.map((problem) => problem.field)).toEqual(["ambiguities[0].requirementId"]);
+  });
+
+  it("dropClaim が偽を返す申告は、重複として除かず断る", () => {
+    const target = checkSurfaceTargets(parsed(), new Set(["R:A:Q1-1"]), () => false);
+    expect(target.dropped).toEqual([]);
+    expect(target.problems.map((problem) => problem.field)).toEqual([
+      "unwritable[0].requirementId",
+      "ambiguities[0].requirementId",
+    ]);
+  });
+});
+
+// ── Issue #434（D2）：制約 ID の正規化は 1 回だけ ─────────────────────────────
+
+describe("制約 ID の正規化は 1 回だけである（Issue #434・D2）", () => {
+  it("接頭辞が 1 つ残る既知 ID は通り、保存する値も 1 回だけ外した形になる", async () => {
+    // `### action` と `### ### ### action` の見出しを持つ文書 → 制約集合は `action` と `### action`
+    const documents = [{ name: "語彙の意味", text: "### action\n説明。\n### ### ### action\n説明。" }];
+    const output = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-1", requirementId: "R-1", part: "部分", constraintIds: ["### ### action"], reason: "理由", alternative: "代わり" },
+      ],
+    };
+    const recorded = [
+      { kind: "structured" as const, output, usage: undefined },
+      { kind: "structured" as const, output, usage: undefined },
+    ];
+    const recording = createRecordingClient(recorded);
+    const result = await runSurface({
+      list: REQUIREMENT_LIST,
+      documents,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 保存する値は、1 回だけ外した `### action`（繰り返し外さない）
+    expect(result.value.unwritable[0]?.constraintIds).toEqual(["### action"]);
   });
 });

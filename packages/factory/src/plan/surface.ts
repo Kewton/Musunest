@@ -6,6 +6,7 @@
 // 併せて、書けない部分には**代わりの案を 1 つ**出させる（U-P2「文書の語彙で書ける近い形を 1 つ」）。
 //
 // 段の作法（規則とデータの分離・構造化出力・形の確認と 1 回だけのやり直し）は stages/prompt.ts に合わせる。
+import type { PlanAcceptedUnwritable, PlanDecision } from "@musunest/appspec-schema";
 import type { CallGateway } from "../call.js";
 import type { RequirementList } from "../pipeline.js";
 import {
@@ -149,6 +150,40 @@ export interface SurfaceCatalogData {
   readonly defaults: readonly SurfaceAppliedDefault[];
 }
 
+/** 参照用の文脈に入れる、点検時点の要件 1 つ（ID・文・出どころ。Issue #434） */
+export interface SurfaceContextRequirement {
+  readonly id: string;
+  readonly text: string;
+  readonly origin: string;
+}
+
+/** 参照用の文脈に入れる、関係する問いと答え 1 組（Issue #434） */
+export interface SurfaceContextQuestionAnswer {
+  readonly questionId: string;
+  readonly question: string;
+  readonly answerId: string;
+  readonly answer: string;
+}
+
+/**
+ * 差分の洗い出しに渡す、**参照用の文脈**（Issue #434）。**点検の対象ではない**——点検する要件は `list`
+ * （その往復で増えた差分）だけである。判定に要る文脈（点検時点の全要件・既存の決定・了承除外・関係する
+ * 問いと答え）を、点検の対象と混ぜずに、別々の `<data name=` で渡す。
+ *
+ * **代わりの案の採否や過去の合否は入れない**（正解として渡さない）。既存の要件を新しい点検の対象に
+ * 戻さない——文脈として見せるだけである。渡さなければ要求は今までどおりである（初回の経路は変えない）。
+ */
+export interface SurfaceContext {
+  /** 点検時点の全要件（ID・文・出どころ） */
+  readonly requirements: readonly SurfaceContextRequirement[];
+  /** 既存の決定 */
+  readonly decisions: readonly PlanDecision[];
+  /** 了承して除いた部分（代わりの案つき） */
+  readonly acceptedUnwritable: readonly PlanAcceptedUnwritable[];
+  /** 関係する問いと答え */
+  readonly questionsAndAnswers: readonly SurfaceContextQuestionAnswer[];
+}
+
 /** P3 の洗い出しが受け取るもの */
 export interface SurfaceInput {
   readonly list: RequirementList;
@@ -159,6 +194,18 @@ export interface SurfaceInput {
    * 渡すと「目録が点検した対象」「開いている事項」「仮に適用した既定」を**別々のデータ**として足す。
    */
   readonly catalog?: SurfaceCatalogData;
+  /**
+   * 参照用の文脈（Issue #434。差分の洗い出しの道だけ渡す）。渡すと、点検時点の全要件・既存の決定・
+   * 了承除外・関係する問いと答えを、**別々のデータ**として足す（点検の対象は `list` のまま）。
+   */
+  readonly context?: SurfaceContext;
+  /**
+   * **形が正しい応答**を、制約 ID の裏付けの検査の前に受け取る口（Issue #434。差分の洗い出しの道だけ渡す）。
+   * **失敗を返す前にも、対象外の集合・分類と照合の進捗を記録できる**ようにするためである——制約検査が
+   * 不成立でも、対象外の参照の件数はここで数えられる。渡す値は**保存用に 1 回だけ正規化した**応答である
+   * （正規化はここで 1 回だけ行い、呼ぶ側はもう正規化しない）。
+   */
+  readonly onShapeValid?: (surface: PlanSurface) => void;
 }
 
 function checkAmbiguity(value: unknown, field: string, problems: Problem[]): PlanAmbiguity | undefined {
@@ -299,6 +346,68 @@ export function checkSurfaceConstraints(
   return problems;
 }
 
+/** 対象外の参照 1 つ（点検の対象の外を指した「書けない」の申告・未解決の事項。Issue #434） */
+export type SurfaceOutOfScopeRef =
+  | { readonly kind: "claim"; readonly index: number; readonly claim: PlanUnwritable }
+  | { readonly kind: "ambiguity"; readonly index: number; readonly ambiguity: PlanAmbiguity };
+
+/** 点検の対象の照合の結果（Issue #434） */
+export interface SurfaceTargetResult {
+  /** 断る理由（対象外・未知の参照。空なら通る） */
+  readonly problems: readonly Problem[];
+  /** 点検に残す「書けない」の申告（対象内と、重複として除かなかった対象外） */
+  readonly keptUnwritable: readonly PlanUnwritable[];
+  /** 重複として除いた「書けない」の申告（**原応答の添字**つき） */
+  readonly dropped: readonly { readonly index: number; readonly claim: PlanUnwritable }[];
+  /** 断った対象外の参照（原応答の添字つき。分類と件数は呼ぶ側が記録する） */
+  readonly rejected: readonly SurfaceOutOfScopeRef[];
+}
+
+/**
+ * 応答が指す要件 ID が、**点検の対象（この往復の差分）**の内側であるかを確かめる（Issue #434）。対象外・
+ * 未知の参照は断る（`problems`）。ただし、**対象外の「書けない」の申告**については、`dropClaim` が真を
+ * 返したものだけを**重複として除く**（`dropped`。新しい了承除外・代案・決定は作らず、既存の事項を閉じない）。
+ * **未解決の事項（ambiguities）は除かない**——従来どおり断る（§3 の 5）。**誤りの文に ID の値は入れない**。
+ *
+ * 分類はモデルに選ばせない——呼ぶ側が `rejected` と `dropped` の要件 ID を、内部の対応で有限の分類に写す。
+ */
+export function checkSurfaceTargets(
+  surface: PlanSurface,
+  targetRequirementIds: ReadonlySet<string>,
+  dropClaim?: (claim: PlanUnwritable, index: number) => boolean,
+): SurfaceTargetResult {
+  const problems: Problem[] = [];
+  const keptUnwritable: PlanUnwritable[] = [];
+  const dropped: { index: number; claim: PlanUnwritable }[] = [];
+  const rejected: SurfaceOutOfScopeRef[] = [];
+  const outOfScope = (field: string): void => {
+    problems.push({
+      field,
+      code: "requirement-id-unknown",
+      message: "点検の対象（その往復の差分）に無い要件を指している",
+    });
+  };
+  surface.unwritable.forEach((claim, index) => {
+    if (targetRequirementIds.has(claim.requirementId)) {
+      keptUnwritable.push(claim);
+      return;
+    }
+    if (dropClaim?.(claim, index) === true) {
+      dropped.push({ index, claim });
+      return;
+    }
+    keptUnwritable.push(claim);
+    rejected.push({ kind: "claim", index, claim });
+    outOfScope(`unwritable[${index}].requirementId`);
+  });
+  surface.ambiguities.forEach((ambiguity, index) => {
+    if (targetRequirementIds.has(ambiguity.requirementId)) return;
+    rejected.push({ kind: "ambiguity", index, ambiguity });
+    outOfScope(`ambiguities[${index}].requirementId`);
+  });
+  return { problems, keptUnwritable, dropped, rejected };
+}
+
 /**
  * 書けないことの申告の制約 ID を**正規化した写し**を作る（保存する側。Issue #398）。段は、根拠の照合
  * （`checkSurfaceConstraints`）を通ったあとにこれを返す——下流（Plan の `basis.constraint_id`）へ渡る
@@ -326,6 +435,12 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
     data.push({ name: "開いている事項", text: serializeJson(input.catalog.openIssues) });
     data.push({ name: "仮に適用した既定", text: serializeJson(input.catalog.defaults) });
   }
+  if (input.context !== undefined) {
+    data.push({ name: "点検時点の全要件", text: serializeJson(input.context.requirements) });
+    data.push({ name: "既存の決定", text: serializeJson(input.context.decisions) });
+    data.push({ name: "了承除外", text: serializeJson(input.context.acceptedUnwritable) });
+    data.push({ name: "関係する問いと答え", text: serializeJson(input.context.questionsAndAnswers) });
+  }
   const request = buildStructuredRequest({
     rules: SURFACE_RULES,
     documents: input.documents,
@@ -336,10 +451,16 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
   });
   const answer = await callStructuredChecked(input.gateway, { request, check: checkSurfaceOutput });
   if (!answer.ok) return answer;
+  // 保存用に**1 回だけ**正規化する（Issue #398・#434）。対象外の照合・記録は、この正規化のあとの値で
+  // 行う（もう正規化しない。正規化は一般の文字列で冪等でないため）。
+  const normalized = normalizeSurfaceClaims(answer.value);
+  // 形が正しい応答を、制約検査の前に知らせる——失敗を返す前にも、対象外の集合・分類と照合の進捗を
+  // 記録できるようにする（Issue #434）
+  input.onShapeValid?.(normalized);
+  // 形と、現文書への制約 ID の裏付けを、**生の値**で確かめる（除外で隠さない。Issue #434・#398）
   const problems = checkSurfaceConstraints(answer.value, input.documents);
   if (problems.length > 0) {
     return { ok: false, failure: { kind: "unmet", attempts: 1, problems } };
   }
-  // 根拠の照合を通ったあと、保存する側の ID を正規化する（Issue #398）
-  return { ok: true, value: normalizeSurfaceClaims(answer.value) };
+  return { ok: true, value: normalized };
 }

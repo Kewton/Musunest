@@ -337,6 +337,44 @@ export interface PlanCliRoundRecord {
 }
 
 /**
+ * 記録に入れる、対象外の参照の分類別の件数（Issue #434）。分類はコードが内部の対応で決める（モデルに
+ * 選ばせない）。**値ではなく件数**である。
+ */
+export interface PlanCliDiffOutOfScopeKindCount {
+  readonly kind: string;
+  readonly claims: number;
+  readonly ambiguities: number;
+}
+
+/**
+ * 記録に入れる、差分点検 1 回の**対象外の参照の記録**（Issue #434）。原応答で対象外だった件数・コードが
+ * 重複として除いた件数・重複と認めず断った件数を区別して持つ。**値は持たない**。
+ */
+export interface PlanCliDiffOutOfScopeRecord {
+  readonly scanned: boolean;
+  readonly claims: number;
+  readonly ambiguities: number;
+  readonly deduped: number;
+  readonly rejected_claims: number;
+  readonly rejected_ambiguities: number;
+  readonly kinds: readonly PlanCliDiffOutOfScopeKindCount[];
+  readonly deduped_indexes: readonly number[];
+}
+
+/**
+ * 記録に入れる、差分点検 1 回の記録（Issue #434）。**値ではなく件数だけ**である——何往復目の P5 のあとに、
+ * その往復で増えた何件の要件を点検し、そこで何件の事項が開き、何件を了承除外に加え、対象外の参照をどう
+ * 扱ったか。
+ */
+export interface PlanCliDiffReviewRecord {
+  readonly round: number;
+  readonly added: number;
+  readonly open_issues: number;
+  readonly accepted_unwritable: number;
+  readonly out_of_scope: PlanCliDiffOutOfScopeRecord;
+}
+
+/**
  * 記録に入れる落ちの件数の内訳（種類ごと・出どころごと。Issue #430）。**件数だけ**を持ち、落ちの文言・
  * 引用・原文の断片・位置は入れない（`02-failure-modes.md` §1）。
  */
@@ -364,9 +402,11 @@ export interface PlanCliRequirementsDiagnosisRecord {
 
 /**
  * 記録に入れる、P3 の「書けない」の申告の点検の判定 1 件（問いの ID・答え・確信度・モデルの版・adapter。
- * 依頼文の全文・申告の文は残さない。Issue #432）。
+ * 依頼文の全文・申告の文は残さない。Issue #432）。**点検の番号**（`check`。1 始まり）も残す——同じ問いの
+ * 名前が点検ごとに繰り返すので、どの点検の判定かを一意に引けるようにする（Issue #434）。
  */
 export interface PlanCliSurfaceJudgmentRecord {
+  readonly check: number;
   readonly question_id: string;
   readonly answer: string;
   readonly confidence: number | null;
@@ -397,6 +437,7 @@ export interface PlanCliSurfaceCheckRecord {
  * 結び付ける。**P3 の応答全体や会話の全文は入れない**。
  */
 export interface PlanCliSurfaceClaimRecord {
+  readonly check: number;
   readonly index: number;
   readonly requirement_id: string;
   readonly part: string;
@@ -434,6 +475,8 @@ export interface PlanCliRecord {
   readonly requirements_diagnosis: PlanCliRequirementsDiagnosisRecord;
   /** P3 の「書けない」の申告の点検（件数と判定の記録。値は件数と記録だけ。Issue #432） */
   readonly surface_check: PlanCliSurfaceCheckRecord;
+  /** 差分点検（各往復の P5 のあと）の記録。**値ではなく件数だけ**（Issue #434） */
+  readonly diff_reviews: readonly PlanCliDiffReviewRecord[];
   readonly confirmation: "build" | "stop" | null;
   readonly stages: readonly PlanStageRecord[];
   readonly judge: BundleJudgeUsage;
@@ -490,7 +533,7 @@ function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCl
   };
 }
 
-/** P3 の申告の点検の記録を、記録の形（snake_case。確信度は `null`）に写す（Issue #432） */
+/** P3 の申告の点検の記録を、記録の形（snake_case。確信度は `null`）に写す（Issue #432・#434） */
 function toSurfaceCheckRecord(summary: PlanSurfaceCheckSummary): PlanCliSurfaceCheckRecord {
   return {
     accepted: summary.accepted,
@@ -499,6 +542,7 @@ function toSurfaceCheckRecord(summary: PlanSurfaceCheckSummary): PlanCliSurfaceC
     unchecked: summary.unchecked,
     completed: summary.completed,
     judgments: summary.judgments.map((judgment) => ({
+      check: judgment.check,
       question_id: judgment.questionId,
       answer: judgment.answer,
       confidence: judgment.confidence ?? null,
@@ -517,6 +561,7 @@ export function buildSurfaceCheckDiagnostic(input: {
     schema_version: PLAN_SURFACE_CHECK_SCHEMA,
     plan_id: input.planId,
     claims: input.result.surfaceCheckDiagnostics.map((claim) => ({
+      check: claim.check,
       index: claim.index,
       requirement_id: claim.requirementId,
       part: claim.part,
@@ -560,6 +605,26 @@ export function buildPlanCliRecord(input: {
     })),
     requirements_diagnosis: toRequirementsDiagnosisRecord(input.result.requirementsDiagnosis),
     surface_check: toSurfaceCheckRecord(input.result.surfaceCheck),
+    diff_reviews: input.result.diffReviews.map((review) => ({
+      round: review.round,
+      added: review.added,
+      open_issues: review.openIssues,
+      accepted_unwritable: review.acceptedUnwritable,
+      out_of_scope: {
+        scanned: review.outOfScope.scanned,
+        claims: review.outOfScope.claims,
+        ambiguities: review.outOfScope.ambiguities,
+        deduped: review.outOfScope.deduped,
+        rejected_claims: review.outOfScope.rejectedClaims,
+        rejected_ambiguities: review.outOfScope.rejectedAmbiguities,
+        kinds: review.outOfScope.kinds.map((entry) => ({
+          kind: entry.kind,
+          claims: entry.claims,
+          ambiguities: entry.ambiguities,
+        })),
+        deduped_indexes: review.outOfScope.dedupedIndexes.slice(),
+      },
+    })),
     confirmation: input.transcript.confirmation,
     stages: input.result.stages,
     judge: input.result.judge,

@@ -98,11 +98,12 @@ function choice(value: string, confidence?: number): JudgeAnswer {
 
 /**
  * 目録の問い（要件ごとの門 + 要件 × 観点 × 2 問）すべてに「当てはまる・決まっている」を返す答え
- * （未指定の観点を作らない）。門にも答える（Issue #384）。
+ * （未指定の観点を作らない）。門にも答える（Issue #384）。**差分点検で増える要件の ID も含める**
+ * （Issue #434。余分な答えは無害）。
  */
 function catalogAnswers(): Record<string, JudgeAnswer> {
   const answers: Record<string, JudgeAnswer> = {};
-  for (const requirementId of ["R-1", "R-2"]) {
+  for (const requirementId of ["R-1", "R-2", "R:A:Q1-1", "R:A:Q1-2", "R:A:Q1-3", "R:A:Q2-1"]) {
     answers[catalogGateQuestionName(requirementId)] = noul(1);
     for (const facet of CATALOG_FACETS) {
       answers[catalogAppliesQuestionName(requirementId, facet.id)] = noul(1);
@@ -144,6 +145,24 @@ function catalogUnspecifiedFor(
 
 /** 曖昧さ 0 件の P3 の答え */
 const SURFACE_CLEAR = { ambiguities: [], unwritable: [] };
+
+/** 対象外の参照が無いときの、差分点検の記録の `out_of_scope`（Issue #434） */
+const NO_CLI_OUT_OF_SCOPE = {
+  scanned: true,
+  claims: 0,
+  ambiguities: 0,
+  deduped: 0,
+  rejected_claims: 0,
+  rejected_ambiguities: 0,
+  kinds: [
+    { kind: "source", claims: 0, ambiguities: 0 },
+    { kind: "previous-answer", claims: 0, ambiguities: 0 },
+    { kind: "alternative", claims: 0, ambiguities: 0 },
+    { kind: "unknown", claims: 0, ambiguities: 0 },
+    { kind: "unclassified", claims: 0, ambiguities: 0 },
+  ],
+  deduped_indexes: [],
+};
 
 /** 目録に無い曖昧さ 3 件（重大）。3 問を出し、番号・推奨・自由入力を試せるようにする */
 const SURFACE_THREE = {
@@ -201,6 +220,8 @@ function planThenBuildRecording(): ReturnType<typeof createRecordingClient> {
     structured(REVERSE_CHECK_OUTPUT),
     structured(SURFACE_THREE),
     structured(QUESTIONS_THREE),
+    // 差分点検（その往復で増えた要件だけ）の P3 の応答（Issue #434）
+    structured(SURFACE_CLEAR),
     ...recordedRunFromPlan(),
   ]);
 }
@@ -325,6 +346,7 @@ interface PlanCliRecordShape {
     readonly unchecked: number;
     readonly completed: boolean;
     readonly judgments: readonly {
+      readonly check: number;
       readonly question_id: string;
       readonly answer: string;
       readonly confidence: number | null;
@@ -332,6 +354,23 @@ interface PlanCliRecordShape {
       readonly answered_by: string;
     }[];
   };
+  /** 差分点検（各往復の P5 のあと）の記録。値ではなく件数だけ（Issue #434） */
+  readonly diff_reviews: readonly {
+    readonly round: number;
+    readonly added: number;
+    readonly open_issues: number;
+    readonly accepted_unwritable: number;
+    readonly out_of_scope: {
+      readonly scanned: boolean;
+      readonly claims: number;
+      readonly ambiguities: number;
+      readonly deduped: number;
+      readonly rejected_claims: number;
+      readonly rejected_ambiguities: number;
+      readonly kinds: readonly { readonly kind: string; readonly claims: number; readonly ambiguities: number }[];
+      readonly deduped_indexes: readonly number[];
+    };
+  }[];
   readonly spent_usd: number;
   readonly remaining_usd: number;
   readonly budget_usd: number;
@@ -359,6 +398,7 @@ interface PlanSurfaceCheckShape {
   readonly schema_version: string;
   readonly plan_id: string;
   readonly claims: readonly {
+    readonly check: number;
     readonly index: number;
     readonly requirement_id: string;
     readonly part: string;
@@ -638,9 +678,11 @@ describe("答えのファイルの形でも、確認の内容を log に出す�
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_THREE),
       structured(QUESTIONS_THREE),
+      structured(SURFACE_CLEAR),
       ...recordedRunFromPlan(),
     ]);
     const judge = createFakeJudge({
+      ...catalogAnswers(),
       ...catalogUnspecifiedFor({ "R-1": ["period"] }),
       ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]),
     });
@@ -820,6 +862,7 @@ describe("往復の記録に、一緒に閉じた事項と依頼文で閉じた�
       structured(REVERSE_CHECK_OUTPUT),
       structured(GROUPED_SURFACE_TWO),
       structured(GROUPED_QUESTIONS_ONE),
+      structured(SURFACE_CLEAR),
       ...recordedRunFromPlan(),
     ]);
     const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q1-1"]) });
@@ -909,6 +952,8 @@ describe("上限を上げても、Plan のあとの Build の予算と締切の�
       withoutUsage(REVERSE_CHECK_OUTPUT),
       withoutUsage(SURFACE_THREE),
       withoutUsage(QUESTIONS_THREE),
+      // 差分点検（増えた要件）の P3 の応答（Issue #434）。usage の欠けた呼び出しの数え方を試す
+      withoutUsage(SURFACE_CLEAR),
       ...recordedRunFromPlan(),
     ]);
     const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]) });
@@ -1021,7 +1066,10 @@ describe("往復をまたいで質問 ID が重ならない（Issue #405）", ()
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_ONE),
       structured(QUESTIONS_ONE),
+      // 1 往復目は運用の指示で要件が増えない（差分点検の段は呼ばれない）
       structured(QUESTIONS_ONE),
+      // 2 往復目で増えた要件の差分点検（Issue #434）
+      structured(SURFACE_CLEAR),
       ...recordedRunFromPlan(),
     ]);
     const judge = createFakeJudge({
@@ -1443,16 +1491,17 @@ describe("P3 の申告の点検を plan-record.json の surface_check に残す�
     expect(record.surface_check.unchecked).toBe(0);
     // 最後まで点検し終えている
     expect(record.surface_check.completed).toBe(true);
-    // 判定の記録（問いの ID・答え・確信度・モデルの版・adapter）
+    // 判定の記録（点検の番号・問いの ID・答え・確信度・モデルの版・adapter）
     expect(record.surface_check.judgments).toEqual([
-      { question_id: "plan-triage:0", answer: "vocabulary-hole", confidence: 0.9, model: "fake-judge", answered_by: "fake" },
-      { question_id: "plan-support:0", answer: "supports", confidence: 0.95, model: "fake-judge", answered_by: "fake" },
+      { check: 1, question_id: "plan-triage:0", answer: "vocabulary-hole", confidence: 0.9, model: "fake-judge", answered_by: "fake" },
+      { check: 1, question_id: "plan-support:0", answer: "supports", confidence: 0.95, model: "fake-judge", answered_by: "fake" },
     ]);
     // 別ファイルの診断（`plan-surface-check.json`）に、申告 1 件の対応が残る
     const diagnostic = await readSurfaceCheck(dir);
     expect(diagnostic.schema_version).toBe("musunest-factory/plan-surface-check/v1");
     expect(diagnostic.claims).toEqual([
       {
+        check: 1,
         index: 0,
         requirement_id: "R-1",
         part: "部分",
@@ -1526,8 +1575,10 @@ describe("P3 の申告の点検を plan-record.json の surface_check に残す�
     expect(spy).not.toHaveBeenCalled();
     const record = await readPlanRecord(dir);
     expect(record.outcome).toBe("cannot-confirm");
-    // 確定できない理由に、surface-check の理由が残る
-    expect(record.cannot_confirm).toEqual([{ source: "surface-check", code: "not-stated", path: "unwritable[0]" }]);
+    // 確定できない理由に、surface-check の理由（点検の番号つき）が残る
+    expect(record.cannot_confirm).toEqual([
+      { source: "surface-check", code: "not-stated", path: "unwritable[0]", check: 1 },
+    ]);
     expect(record.surface_check.unchecked).toBe(1);
     // 値（部分の文・理由・制約 ID）は、理由にも停止の行にも出ない
     expect(JSON.stringify(record.cannot_confirm)).not.toContain(MARK);
@@ -1666,5 +1717,682 @@ describe("P3 の申告の点検を plan-record.json の surface_check に残す�
       expect.objectContaining({ index: 0, requirement_id: "R-1", stage: "unexecuted", classification: "unexecuted", doc_version: "v1" }),
       expect.objectContaining({ index: 1, requirement_id: "R-2", stage: "unexecuted", classification: "unexecuted", doc_version: "v1" }),
     ]);
+  });
+});
+
+// ── Issue #434：差分点検の記録と、2 往復目に差分の事項が聞かれる道 ───────────────
+
+describe("差分点検の記録を残し、答えのファイルの形で 2 往復目に差分の事項が聞かれる（04 §7・Issue #434）", () => {
+  /** 差分点検の洗い出しが返す、重大な事項 1 件（差分の要件に由来する） */
+  const DIFF_CRITICAL = {
+    ambiguities: [{ id: "OI-diff", requirementId: "R:A:Q1-1", text: "差分で開いた重大な事項", critical: true }],
+    unwritable: [],
+  };
+  /** 2 往復目に聞く、差分の事項への問い（ID はコードが組み直す） */
+  const QUESTIONS_DIFF = {
+    questions: [
+      {
+        id: "Q-1",
+        openIssueId: "OI-diff",
+        text: "差分の事項をどうしますか",
+        choices: [
+          { id: "c1", text: "こちら" },
+          { id: "c2", text: "あちら" },
+        ],
+        recommended: { choiceId: "c1", reason: "依頼に沿う" },
+        allowFreeText: true,
+      },
+    ],
+  };
+
+  it("往復の記録に差分点検の回数と件数が残り、依頼文・答えの目印が出ず、2 往復目に差分の事項が聞かれて確定する", async () => {
+    const sourceMark = "MARK_SOURCE_DIFF";
+    const answerMark = "MARK_ANSWER_DIFF";
+    const source = `${sourceMark}する。件数を合計する。`;
+    const spanOf = (quote: string): { readonly start: number; readonly end: number } => {
+      const start = source.indexOf(quote);
+      return { start, end: start + quote.length };
+    };
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: `${sourceMark}する`, position: spanOf(`${sourceMark}する`) },
+        { id: "R-2", text: "件数を合計できる", quote: "件数を合計する", position: spanOf("件数を合計する") },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      // 1 往復目の差分点検：重大な事項を開く（Issue #434）
+      structured(DIFF_CRITICAL),
+      // 2 往復目：差分の事項への問い
+      structured(QUESTIONS_DIFF),
+      // 2 往復目の差分点検：もう開かない
+      structured(SURFACE_CLEAR),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3", "A:Q2-1"]),
+      // 1 往復目の自由入力（目印つき）は新しい要件——要件の文になる（記録の差分点検には出ない）
+      [freeTextQuestionName("A:Q1-1")]: {
+        kind: "choice",
+        choice: "new-requirement",
+        probabilities: undefined,
+        probability: undefined,
+        confidence: 0.9,
+      },
+    });
+    const dir = `${directory}/diff-review-record`;
+    const answersPath = "diff-review-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) =>
+        path === answersPath ? JSON.stringify({ "Q1-1": { freeText: answerMark } }) : source,
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    // 差分点検の記録（1 往復目は 3 件増えて 1 件開き、2 往復目は 1 件増えた。値ではなく件数）
+    expect(record.diff_reviews).toEqual([
+      { round: 1, added: 3, open_issues: 1, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE },
+      { round: 2, added: 1, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE },
+    ]);
+    // 依頼文・答えの目印は、差分点検の記録に出ない
+    expect(JSON.stringify(record.diff_reviews)).not.toContain(sourceMark);
+    expect(JSON.stringify(record.diff_reviews)).not.toContain(answerMark);
+    // 2 往復目に、差分の事項が聞かれて確定する
+    expect(record.rounds[1]?.questions[0]?.open_issue_id).toBe("OI-diff");
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Issue #434：差分点検でも、途中停止・未点検の記録を plan-record に残す ─────────
+
+describe("差分点検でも、受理・未点検・途中停止の記録を plan-record に残す（Issue #432・#434）", () => {
+  /** 差分の洗い出しが返す、書けない申告 1 件（差分の要件に由来する。制約 ID は文書に実在する） */
+  const DIFF_UNWRITABLE = {
+    ambiguities: [],
+    unwritable: [
+      { id: "U-0", requirementId: "R:A:Q1-1", part: "差分の部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+    ],
+  };
+  /** 差分の洗い出しが返す、書けない申告 2 件 */
+  const DIFF_TWO = {
+    ambiguities: [],
+    unwritable: [
+      { id: "U-0", requirementId: "R:A:Q1-1", part: "部分 0", constraintIds: ["記録"], reason: "理由 0", alternative: "代案 0" },
+      { id: "U-1", requirementId: "R:A:Q1-1", part: "部分 1", constraintIds: ["合計"], reason: "理由 1", alternative: "代案 1" },
+    ],
+  };
+
+  it("差分の点検で受理された申告が、surface_check と診断ファイルに積まれ、Build に進む", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      structured(DIFF_UNWRITABLE),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    const dir = `${directory}/diff-accepted`;
+    const answersPath = "diff-accepted-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    // 差分の受理が surface_check に積まれる（初回は申告 0 件）
+    expect(record.surface_check.accepted).toBe(1);
+    expect(record.surface_check.completed).toBe(true);
+    expect(record.surface_check.judgments.map((judgment) => judgment.question_id)).toEqual([
+      "plan-triage:0",
+      "plan-support:0",
+    ]);
+    expect(record.diff_reviews).toEqual([{ round: 1, added: 3, open_issues: 0, accepted_unwritable: 1, out_of_scope: NO_CLI_OUT_OF_SCOPE }]);
+    // 別ファイルの診断に、差分の申告 1 件が残る
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.claims).toEqual([
+      expect.objectContaining({ index: 0, requirement_id: "R:A:Q1-1", stage: "support", classification: "supports" }),
+    ]);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("差分の点検で未点検が残れば、surface_check に積み、Build を呼ばない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      structured(DIFF_UNWRITABLE),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      // 裏付けが「書いていない」→ 落とし先（Luna）が無いので未点検
+      [surfaceSupportQuestionName(0)]: choice("not-stated", 0.9),
+    });
+    const dir = `${directory}/diff-unchecked`;
+    const answersPath = "diff-unchecked-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("cannot-confirm");
+    expect(record.surface_check.unchecked).toBe(1);
+    expect(record.surface_check.accepted).toBe(0);
+    // 差分点検は 2 回目の点検（初回は申告 0 件）なので、点検の番号は 2
+    expect(record.cannot_confirm).toEqual([
+      { source: "surface-check", code: "unknown", path: "unwritable[0]", check: 2 },
+    ]);
+  });
+
+  it("差分の点検の最初の予約が失敗しても、件数と未実行の診断が plan-record に残る（completed は false）", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      // 差分の洗い出しの応答で予算を使い切る → 差分の申告の点検の最初の予約が失敗する
+      structured(DIFF_UNWRITABLE, hugeUsage),
+    ]);
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]) });
+    const dir = `${directory}/diff-unexecuted`;
+    const answersPath = "diff-unexecuted-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--budget", "1"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.stage).toBe("surface-check");
+    expect(record.failure?.kind).toBe("budget");
+    expect(record.surface_check.completed).toBe(false);
+    expect(record.surface_check.accepted).toBe(0);
+    // 開始時に積んだ差分点検の記録が残る（停止した往復も数える）
+    expect(record.diff_reviews).toEqual([{ round: 1, added: 3, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE }]);
+    // 全申告が「未実行」で別ファイルに残る
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.claims).toEqual([
+      expect.objectContaining({ index: 0, requirement_id: "R:A:Q1-1", stage: "unexecuted", classification: "unexecuted" }),
+    ]);
+  });
+
+  it("差分の点検の裏付けが途中で止まっても、仕分けまでの記録が plan-record に残る（completed は false）", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      structured(DIFF_TWO),
+    ]);
+    const inner = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]) });
+    const triageAnswers: Record<string, JudgeAnswer> = {
+      [surfaceTriageQuestionName(0)]: choice("not-a-problem", 0.9),
+      [surfaceTriageQuestionName(1)]: choice("vocabulary-hole", 0.9),
+    };
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        const hasTriage = Object.keys(request.questions).some((name) => name.startsWith("plan-triage:"));
+        if (!hasTriage) return inner.judge(request);
+        const answers: Record<string, JudgeAnswer> = {};
+        for (const name of Object.keys(request.questions)) answers[name] = triageAnswers[name] ?? choice("supports", 0.9);
+        // 仕分けの呼び出しだけ巨大な usage で予算を使い切る → 裏付けの予約が失敗する
+        return { answers, inputTokens: 0, usage: hugeUsage, model: "judge", answeredBy: "llm" };
+      },
+    };
+    const dir = `${directory}/diff-partial`;
+    const answersPath = "diff-partial-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--budget", "1"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.stage).toBe("surface-check");
+    // 仕分けまでに得た分類と判定が残る（全件 0 と区別できる）
+    expect(record.surface_check.completed).toBe(false);
+    expect(record.surface_check.dropped).toBe(1);
+    expect(record.surface_check.judgments).toHaveLength(2);
+    expect(record.diff_reviews).toEqual([{ round: 1, added: 3, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE }]);
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.claims.map((claim) => claim.classification)).toEqual(["not-a-problem", "vocabulary-hole"]);
+  });
+});
+
+// ── Issue #434：点検の番号を plan-record に残し、どの点検かを一意に引く ──────────
+
+describe("点検の番号を plan-record に残し、判定・診断を一意に引く（Issue #434）", () => {
+  /** 問い 1 つを手で作る（ID は LLM 由来で、コードが `Q<版>-<n>` に組み直す） */
+  function questionOf(openIssueId: string, id: string) {
+    return {
+      id,
+      openIssueId,
+      text: "どうしますか",
+      choices: [
+        { id: "c1", text: "こちら" },
+        { id: "c2", text: "あちら" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    };
+  }
+  /** 初回の洗い出し：曖昧さ 3 件と、書けない申告 1 件（添字 0） */
+  const ISSUES = {
+    ambiguities: [
+      { id: "OI-1", requirementId: "R-1", text: "曖昧 1", critical: true },
+      { id: "OI-2", requirementId: "R-1", text: "曖昧 2", critical: true },
+      { id: "OI-3", requirementId: "R-1", text: "曖昧 3", critical: true },
+    ],
+    unwritable: [
+      { id: "U-0", requirementId: "R-1", part: "初回の部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+    ],
+  };
+  /** 差分の洗い出し：書けない申告 1 件（添字 0） */
+  const DIFF_CLAIM = {
+    ambiguities: [],
+    unwritable: [
+      { id: "U-1", requirementId: "R:A:Q2-1", part: "差分の部分", constraintIds: ["合計"], reason: "理由", alternative: "代案" },
+    ],
+  };
+
+  it("初回と差分が同じ添字 0 を使い、申告 0 件の点検と途中停止を挟んでも、記録の対応が失われない", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      // 初回の洗い出し（点検 1 の申告。添字 0）
+      structured(ISSUES),
+      structured({ questions: [questionOf("OI-1", "Q-1"), questionOf("OI-2", "Q-2"), questionOf("OI-3", "Q-3")] }),
+      // 1 往復目の差分（点検 2。申告 0 件）
+      structured(SURFACE_CLEAR),
+      structured({ questions: [questionOf("OI-2", "Q-1"), questionOf("OI-3", "Q-2")] }),
+      // 2 往復目の差分（点検 3。予算を使い切って、最初の予約が失敗して止まる）
+      structured(DIFF_CLAIM, hugeUsage),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    const dir = `${directory}/check-number`;
+    const answersPath = "check-number-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--budget", "1"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) =>
+        path === answersPath
+          ? JSON.stringify({
+              // 1 往復目：Q1-1 だけ受理し、Q1-2・Q1-3 は存在しない選択肢で断る（事項を開いたまま残す）
+              "Q1-1": { choiceId: "c1" },
+              "Q1-2": { choiceId: "nope" },
+              "Q1-3": { choiceId: "nope" },
+              // 2 往復目：Q2-1 だけ受理し、Q2-2 は断る
+              "Q2-1": { choiceId: "c1" },
+              "Q2-2": { choiceId: "nope" },
+            })
+          : SOURCE_TEXT,
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.stage).toBe("surface-check");
+    expect(record.failure?.kind).toBe("budget");
+    // 判定は、点検の番号（1=初回）つき。同じ問いの名前（添字 0）が点検で区別できる
+    expect(record.surface_check.judgments.map((judgment) => [judgment.check, judgment.question_id])).toEqual([
+      [1, "plan-triage:0"],
+      [1, "plan-support:0"],
+    ]);
+    expect(record.surface_check.completed).toBe(false);
+    // 診断も点検の番号つき。申告 0 件の点検（2）は空、途中停止の点検（3）は未実行
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.claims.map((claim) => [claim.check, claim.index, claim.classification])).toEqual([
+      [1, 0, "supports"],
+      [3, 0, "unexecuted"],
+    ]);
+    // 差分点検の記録は往復ごとに 2 件（停止した往復も数える）
+    expect(record.diff_reviews).toEqual([
+      { round: 1, added: 1, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE },
+      { round: 2, added: 1, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE },
+    ]);
+  });
+});
+
+// ── Issue #434・§3：重複の除外と分類を plan-record に残す（値は転記しない）────────
+
+describe("差分点検・§3：受理済み申告の再申告を除いた記録を保存する（値は転記しない。Issue #434）", () => {
+  /** 問い 1 つを手で作る */
+  function questionOf(openIssueId: string, id: string) {
+    return {
+      id,
+      openIssueId,
+      text: "どうしますか",
+      choices: [
+        { id: "c1", text: "こちら" },
+        { id: "c2", text: "あちら" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    };
+  }
+  const MARK = "MARK_DUP_VALUE";
+  /** 初回に受理される申告（部分・理由・代案に目印を入れる） */
+  const accepted = {
+    id: "U-0",
+    requirementId: "R-1",
+    part: `${MARK}の部分`,
+    constraintIds: ["記録", "合計"],
+    reason: `${MARK}の理由`,
+    alternative: `${MARK}の代案`,
+  };
+  const base = {
+    ambiguities: [{ id: "OI-1", requirementId: "R-1", text: "曖昧", critical: true }],
+    unwritable: [accepted],
+  };
+
+  it("正確な再申告を除いた件数と分類が保存され、値（部分・理由・代案・要件 ID）は転記されない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(base),
+      structured({ questions: [questionOf("OI-1", "Q-1")] }),
+      // 同じ部分・理由・代案の再申告（申告 ID だけ変えてある）
+      structured({ ambiguities: [], unwritable: [{ ...accepted, id: "U-dup" }] }),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswers(["A:Q1-1"]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    const dir = `${directory}/dedup-record`;
+    const answersPath = "dedup-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    expect(record.diff_reviews).toEqual([
+      {
+        round: 1,
+        added: 1,
+        open_issues: 0,
+        accepted_unwritable: 0,
+        out_of_scope: {
+          scanned: true,
+          claims: 1,
+          ambiguities: 0,
+          deduped: 1,
+          rejected_claims: 0,
+          rejected_ambiguities: 0,
+          kinds: [
+            { kind: "source", claims: 1, ambiguities: 0 },
+            { kind: "previous-answer", claims: 0, ambiguities: 0 },
+            { kind: "alternative", claims: 0, ambiguities: 0 },
+            { kind: "unknown", claims: 0, ambiguities: 0 },
+            { kind: "unclassified", claims: 0, ambiguities: 0 },
+          ],
+          deduped_indexes: [0],
+        },
+      },
+    ]);
+    // 値（部分・理由・代案・要件 ID）は、新しい記録（diff_reviews）に転記されない
+    expect(JSON.stringify(record.diff_reviews)).not.toContain(MARK);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("正確な再申告と未知が同時にあるときは、段ごと止まり、識別した重複件数も保存される", async () => {
+    const unknown = { id: "U-x", requirementId: "R:unknown", part: `${MARK}の部分`, constraintIds: ["記録"], reason: "理由", alternative: "代案" };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(base),
+      structured({ questions: [questionOf("OI-1", "Q-1")] }),
+      structured({ ambiguities: [], unwritable: [{ ...accepted, id: "U-dup" }, unknown] }),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswers(["A:Q1-1"]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    const dir = `${directory}/dedup-stop`;
+    const answersPath = "dedup-stop-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const lines: string[] = [];
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: (line) => lines.push(line),
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.stage).toBe("surface");
+    expect(record.failure?.kind).toBe("unmet");
+    const out = record.diff_reviews[0]?.out_of_scope;
+    expect(out?.claims).toBe(2);
+    expect(out?.deduped).toBe(1);
+    expect(out?.rejected_claims).toBe(1);
+    expect(out?.deduped_indexes).toEqual([0]);
+    expect(out?.kinds.find((entry) => entry.kind === "unknown")?.claims).toBe(1);
+    // 値は、記録（diff_reviews）にも停止の行にも出ない
+    expect(JSON.stringify(record.diff_reviews)).not.toContain(MARK);
+    expect(lines.join("\n")).not.toContain(MARK);
+  });
+
+  it("制約検査で止まっても、対象外の集合・分類と識別済みの件数を保存する（D1）", async () => {
+    const empty = { id: "U-empty", requirementId: "R:unknown", part: "部分", constraintIds: [], reason: "理由", alternative: "代案" };
+    const outAmbiguity = { id: "OI-old", requirementId: "R-1", text: "古い曖昧", critical: true };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(base),
+      structured({ questions: [questionOf("OI-1", "Q-1")] }),
+      structured({ ambiguities: [outAmbiguity], unwritable: [{ ...accepted, id: "U-dup" }, empty] }),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswers(["A:Q1-1"]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    const dir = `${directory}/dedup-constraint-stop`;
+    const answersPath = "dedup-constraint-stop-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.stage).toBe("surface");
+    expect(record.failure?.kind).toBe("unmet");
+    expect(record.failure?.problems).toEqual([{ field: "unwritable[1].constraintIds", code: "constraint-id-missing" }]);
+    // 制約検査で止まっても、対象外の集合・分類と、識別済みの重複件数（原添字つき）が保存される
+    const out = record.diff_reviews[0]?.out_of_scope;
+    expect(out?.scanned).toBe(true);
+    expect(out?.claims).toBe(2);
+    expect(out?.ambiguities).toBe(1);
+    expect(out?.deduped).toBe(1);
+    expect(out?.rejected_claims).toBe(1);
+    expect(out?.rejected_ambiguities).toBe(1);
+    expect(out?.deduped_indexes).toEqual([0]);
+    expect(out?.kinds.find((entry) => entry.kind === "source")).toEqual({ kind: "source", claims: 1, ambiguities: 1 });
+    expect(out?.kinds.find((entry) => entry.kind === "unknown")?.claims).toBe(1);
+    // 値は転記されない
+    expect(JSON.stringify(record.diff_reviews)).not.toContain(MARK);
   });
 });
