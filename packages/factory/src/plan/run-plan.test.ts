@@ -5027,4 +5027,33 @@ describe("差分点検：答えから生まれた要件が、答えの解いた�
     const notObserved = await run({ "R:A:Q1-1": [] });
     expect(inherited).toEqual(notObserved);
   });
+
+  it("今回引き継ぐ決定が、当該差分の P3 の参照用文脈（既存の決定）にも入る", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(INHERIT_QUESTIONS),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["aggregation"] }),
+      ...catalogUnspecifiedFor({ "R:A:Q1-1": ["aggregation"] }, ["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST));
+    expect(result.kind).toBe("confirmed");
+    // 差分の P3（2 回目の洗い出し）の要求を取る
+    const surfaceRequests = recording.structured.filter((request) => request.schemaName === SURFACE_SCHEMA_NAME);
+    expect(surfaceRequests).toHaveLength(2);
+    const diffRequest = surfaceRequests[1];
+    // 子の決定（D:inherit:）と、元の解決の値が、参照用文脈に入る
+    const decisionsBlock = dataBlockOf(diffRequest?.input ?? "", "既存の決定");
+    expect(decisionsBlock).toContain("D:inherit:OI:catalog:R:A:Q1-1:aggregation");
+    expect(decisionsBlock).toContain("全員を数える");
+    // 点検の対象・実際に開く事項・仮の既定の構成は Issue 指定のまま（引き継ぐ観点は開く事項に入らない）
+    expect(dataBlockOf(diffRequest?.input ?? "", "要件の一覧")).toContain("R:A:Q1-1");
+    expect(dataBlockOf(diffRequest?.input ?? "", "開いている事項").trim()).toBe("[]");
+    expect(dataBlockOf(diffRequest?.input ?? "", "仮に適用した既定").trim()).toBe("[]");
+  });
 });

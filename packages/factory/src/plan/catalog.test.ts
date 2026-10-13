@@ -728,9 +728,20 @@ describe("答えから生まれた要件の引き継ぎ（04 §3 P4・§6 の 1�
           { id: "D:default:OI:catalog:R-1:include-zero", value: "0 件の見出しも出す" },
           { id: "D:inherit:OI:catalog:R-1:editable-by", value: "直せる人は管理者" },
         ],
-        sourceClosures: [{ issueId: "OI:catalog:R-1:period", value: "期間の条件を足さない" }],
+        sourceClosures: [
+          {
+            issueId: "OI:catalog:R-1:period",
+            decisionId: "D:source:OI:catalog:R-1:period",
+            value: "期間の条件を足さない",
+          },
+        ],
         defaultClosures: [
-          { issueId: "OI:catalog:R-1:include-zero", facetId: "include-zero", value: "0 件の見出しも出す" },
+          {
+            issueId: "OI:catalog:R-1:include-zero",
+            facetId: "include-zero",
+            decisionId: "D:default:OI:catalog:R-1:include-zero",
+            value: "0 件の見出しも出す",
+          },
         ],
         previous: [
           {
@@ -794,7 +805,14 @@ describe("答えから生まれた要件の引き継ぎ（04 §3 P4・§6 の 1�
         { id: "OI:catalog:R-1:period", status: "resolved", resolution: { decision_id: "D:default:OI:catalog:R-1:period" } },
       ],
       decisions: [{ id: "D:default:OI:catalog:R-1:period", value: "期間の条件を足さない" }],
-      defaultClosures: [{ issueId: "OI:catalog:R-1:period", facetId: "period", value: "期間の条件を足さない" }],
+      defaultClosures: [
+        {
+          issueId: "OI:catalog:R-1:period",
+          facetId: "period",
+          decisionId: "D:default:OI:catalog:R-1:period",
+          value: "期間の条件を足さない",
+        },
+      ],
     });
     expect(inheritFacetsForAnswer(input)).toEqual(inheritFacetsForAnswer(input));
   });
@@ -945,7 +963,14 @@ describe("答えから生まれた要件の引き継ぎ（04 §3 P4・§6 の 1�
           { id: "OI:catalog:R-1:period", status: "resolved", resolution: { decision_id: "D:default:OI:catalog:R-1:period" } },
         ],
         decisions: [{ id: "D:default:OI:catalog:R-1:period", value: "期間の値" }],
-        defaultClosures: [{ issueId: "OI:catalog:R-1:period", facetId: "counted-state", value: "期間の値" }],
+        defaultClosures: [
+          {
+            issueId: "OI:catalog:R-1:period",
+            facetId: "counted-state",
+            decisionId: "D:default:OI:catalog:R-1:period",
+            value: "期間の値",
+          },
+        ],
       }),
     );
     expect(result.facets.map((facet) => facet.facetId)).toEqual(["aggregation"]);
@@ -969,5 +994,149 @@ describe("答えから生まれた要件の引き継ぎ（04 §3 P4・§6 の 1�
     expect(result.facets).toEqual([]);
     expect(result.unresolved).toEqual(NO_MISSES);
     expect(result.noParent).toBe(1);
+  });
+
+  // ── F1：参照先の件数と、根拠に対応する決定・記録の一致（Issue #461・レビュー指摘 F1）────
+
+  /** (d) の分類を試す入力の土台：親 R-1 の aggregation を答えが解き、editable-by を引き継ぎの表が解いている */
+  function inheritInputWithPrevious(overrides: Partial<InheritFacetInput> = {}): InheritFacetInput {
+    return inheritInput({
+      // editable-by は**引き継ぎの表**だけが持つ（対応表には入れない。実際の runPlan と同じ）
+      catalogFacets: [
+        { issueId: "OI:catalog:R-1:aggregation", requirementId: "R-1", facetId: "aggregation" },
+      ],
+      issues: [
+        { id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+        {
+          id: "OI:catalog:R-1:editable-by",
+          status: "resolved",
+          resolution: { decision_id: "D:inherit:OI:catalog:R-1:editable-by" },
+        },
+      ],
+      decisions: [{ id: "D:inherit:OI:catalog:R-1:editable-by", value: "直せる人は管理者" }],
+      previous: [
+        {
+          issueId: "OI:catalog:R-1:editable-by",
+          requirementId: "R-1",
+          facetId: "editable-by",
+          decisionId: "D:inherit:OI:catalog:R-1:editable-by",
+          value: "直せる人は管理者",
+        },
+      ],
+      ...overrides,
+    });
+  }
+
+  it("土台：(d) として引き継ぎ、値が decision の値と一致する", () => {
+    const result = inheritFacetsForAnswer(inheritInputWithPrevious());
+    const editable = result.facets.find((facet) => facet.facetId === "editable-by");
+    expect(editable).toMatchObject({ kind: "d", basis: "D:inherit:OI:catalog:R-1:editable-by", value: "直せる人は管理者" });
+    expect(result.unresolved).toEqual(NO_MISSES);
+  });
+
+  it("同じ決定 ID の 2 行があれば、その観点を引き継がず複数として報告する", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInputWithPrevious({
+        decisions: [
+          { id: "D:inherit:OI:catalog:R-1:editable-by", value: "直せる人は管理者" },
+          { id: "D:inherit:OI:catalog:R-1:editable-by", value: "別の値" },
+        ],
+      }),
+    );
+    expect(result.facets.map((facet) => facet.facetId)).toEqual(["aggregation"]);
+    expect(result.unresolved).toEqual([
+      { kind: "missing", count: 0 },
+      { kind: "multiple", count: 1 },
+      { kind: "mismatch", count: 0 },
+    ]);
+  });
+
+  it("同じ事項の既定の記録が 2 行あれば、その観点を引き継がず複数として報告する", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInput({
+        catalogFacets: [
+          { issueId: "OI:catalog:R-1:aggregation", requirementId: "R-1", facetId: "aggregation" },
+          { issueId: "OI:catalog:R-1:include-zero", requirementId: "R-1", facetId: "include-zero" },
+        ],
+        issues: [
+          { id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+          {
+            id: "OI:catalog:R-1:include-zero",
+            status: "resolved",
+            resolution: { decision_id: "D:default:OI:catalog:R-1:include-zero" },
+          },
+        ],
+        decisions: [{ id: "D:default:OI:catalog:R-1:include-zero", value: "0 件の見出しも出す" }],
+        defaultClosures: [
+          {
+            issueId: "OI:catalog:R-1:include-zero",
+            facetId: "include-zero",
+            decisionId: "D:default:OI:catalog:R-1:include-zero",
+            value: "0 件の見出しも出す",
+          },
+          {
+            issueId: "OI:catalog:R-1:include-zero",
+            facetId: "include-zero",
+            decisionId: "D:default:OI:catalog:R-1:include-zero",
+            value: "0 件の見出しも出す",
+          },
+        ],
+      }),
+    );
+    expect(result.facets.map((facet) => facet.facetId)).toEqual(["aggregation"]);
+    expect(result.unresolved).toEqual([
+      { kind: "missing", count: 0 },
+      { kind: "multiple", count: 1 },
+      { kind: "mismatch", count: 0 },
+    ]);
+  });
+
+  it("行の decision_id を別の実在する決定へ変えると、古い previous.value をその別決定の根拠で d として返さない", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInputWithPrevious({
+        issues: [
+          { id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+          { id: "OI:catalog:R-1:editable-by", status: "resolved", resolution: { decision_id: "D:other" } },
+        ],
+        decisions: [
+          { id: "D:inherit:OI:catalog:R-1:editable-by", value: "直せる人は管理者" },
+          { id: "D:other", value: "別の値" },
+        ],
+      }),
+    );
+    // editable-by は引き継がず（不一致）、値も別決定の値で返らない
+    expect(result.facets.map((facet) => facet.facetId)).toEqual(["aggregation"]);
+    expect(result.unresolved).toEqual([
+      { kind: "missing", count: 0 },
+      { kind: "multiple", count: 0 },
+      { kind: "mismatch", count: 1 },
+    ]);
+  });
+
+  it("previous.decisionId の参照先が欠けていれば、引き継がず欠落として報告する", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInputWithPrevious({
+        issues: [
+          { id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+          { id: "OI:catalog:R-1:editable-by", status: "resolved", resolution: { decision_id: "D:absent" } },
+        ],
+        decisions: [],
+        previous: [
+          {
+            issueId: "OI:catalog:R-1:editable-by",
+            requirementId: "R-1",
+            facetId: "editable-by",
+            decisionId: "D:absent",
+            value: "直せる人は管理者",
+          },
+        ],
+      }),
+    );
+    expect(result.facets.map((facet) => facet.facetId)).toEqual(["aggregation"]);
+    expect(result.unresolved).toEqual([
+      { kind: "missing", count: 1 },
+      { kind: "multiple", count: 0 },
+      { kind: "mismatch", count: 0 },
+    ]);
   });
 });

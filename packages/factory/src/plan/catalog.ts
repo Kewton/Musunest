@@ -534,16 +534,21 @@ export interface InheritFacetCatalogEntry {
   readonly facetId: string;
 }
 
-/** 既定で閉じた記録の 1 行（引き継ぎの分類に使う。値はコードの定数。Issue #461） */
+/**
+ * 既定で閉じた記録の 1 行（引き継ぎの分類に使う。値はコードの定数。Issue #461）。**閉じたときに実際に
+ * 作った決定の ID を保持する**——行の根拠が別の決定を指していないかを、記録との対応で確かめるため。
+ */
 export interface InheritFacetDefaultClosure {
   readonly issueId: string;
   readonly facetId: string;
+  readonly decisionId: string;
   readonly value: string;
 }
 
-/** 依頼文で閉じた記録の 1 行（引き継ぎの分類に使う。値は決めた中身。Issue #461） */
+/** 依頼文で閉じた記録の 1 行（引き継ぎの分類に使う。値は決めた中身。実際の決定の ID を保持する。Issue #461） */
 export interface InheritFacetSourceClosure {
   readonly issueId: string;
+  readonly decisionId: string;
   readonly value: string;
 }
 
@@ -635,13 +640,24 @@ export function inheritFacetsForAnswer(input: InheritFacetInput): InheritFacetRe
     if (list === undefined) rowsById.set(row.id, [row]);
     else list.push(row);
   }
-  const catalogByIssue = new Map(input.catalogFacets.map((entry) => [entry.issueId, entry]));
-  const decisionIds = new Set(input.decisions.map((decision) => decision.id));
+  // 対応表は**件数つきで**引く——同じ事項 ID の対応が 2 つ以上あれば、一意に選べない
+  const catalogEntriesById = new Map<string, InheritFacetCatalogEntry[]>();
+  for (const entry of input.catalogFacets) {
+    const list = catalogEntriesById.get(entry.issueId);
+    if (list === undefined) catalogEntriesById.set(entry.issueId, [entry]);
+    else list.push(entry);
+  }
 
   // 親の事項＝問いが指した集合のうち、コード作の目録の事項で、この答えで一意に解けたもの
   const parentEntries: InheritFacetCatalogEntry[] = [];
   for (const issueId of input.issueIds) {
-    const entry = catalogByIssue.get(issueId);
+    const entries = catalogEntriesById.get(issueId) ?? [];
+    if (entries.length > 1) {
+      // 対応が 2 つ以上ある
+      miss.multiple += 1;
+      continue;
+    }
+    const entry = entries[0];
     if (entry === undefined) continue;
     const rows = rowsById.get(issueId) ?? [];
     // 同じ ID の行が 2 行以上なら、一意に選べない（「複数」）
@@ -751,42 +767,63 @@ export function inheritFacetsForAnswer(input: InheritFacetInput): InheritFacetRe
       continue;
     }
     const decisionId = resolution.decision_id as string;
-    if (!decisionIds.has(decisionId)) {
-      // 決定が写像に無い
+    // 決定は**件数つきで**引く——同じ ID の決定が 2 行以上あれば、一意に選べない（値も含めて引く）
+    const decisionValue = uniqueDecisionValue(input.decisions, decisionId);
+    if (decisionValue.kind === "none") {
       miss.missing += 1;
       continue;
     }
-    const def = input.defaultClosures.find((candidate) => candidate.issueId === entry.issueId);
-    const src = input.sourceClosures.find((candidate) => candidate.issueId === entry.issueId);
-    const prev = input.previous.find((candidate) => candidate.issueId === entry.issueId);
-    const matched = [def, src, prev].filter((candidate) => candidate !== undefined).length;
-    if (matched > 1) {
+    if (decisionValue.kind === "many") {
       miss.multiple += 1;
       continue;
     }
+    // 閉じた記録（既定・依頼文・引き継ぎ）は、3 種類を合わせて**ちょうど 1 件**であること
+    const defs = input.defaultClosures.filter((candidate) => candidate.issueId === entry.issueId);
+    const srcs = input.sourceClosures.filter((candidate) => candidate.issueId === entry.issueId);
+    const prevs = input.previous.filter((candidate) => candidate.issueId === entry.issueId);
+    const referenced = defs.length + srcs.length + prevs.length;
+    if (referenced === 0) {
+      // 参照先（決定・記録）が無い
+      miss.missing += 1;
+      continue;
+    }
+    if (referenced > 1) {
+      // 同じ事項の記録が 2 行以上（種類をまたぐ重なりも含む）
+      miss.multiple += 1;
+      continue;
+    }
+    const def = defs[0];
     if (def !== undefined) {
-      // 記録の観点と対応表の観点が違う
-      if (def.facetId !== entry.facetId) {
+      // 記録の観点・決定・値が、行の根拠と一致すること
+      if (def.facetId !== entry.facetId || def.decisionId !== decisionId || def.value !== decisionValue.value) {
         miss.mismatch += 1;
         continue;
       }
-      facets.push({ ...base, kind: "c", basis: decisionId, value: def.value });
+      facets.push({ ...base, kind: "c", basis: decisionId, value: decisionValue.value });
       continue;
     }
+    const src = srcs[0];
     if (src !== undefined) {
-      facets.push({ ...base, kind: "b", basis: decisionId, value: src.value });
-      continue;
-    }
-    if (prev !== undefined) {
-      if (prev.facetId !== entry.facetId) {
+      // 記録の決定・値が、行の根拠と一致すること
+      if (src.decisionId !== decisionId || src.value !== decisionValue.value) {
         miss.mismatch += 1;
         continue;
       }
-      facets.push({ ...base, kind: "d", basis: decisionId, value: prev.value });
+      facets.push({ ...base, kind: "b", basis: decisionId, value: decisionValue.value });
       continue;
     }
-    // 参照先（決定・記録）が無い
-    miss.missing += 1;
+    const prev = prevs[0] as InheritFacetPrevious;
+    // 要件・観点・決定・値が、行の根拠・対応表・別の決定と一致すること
+    if (
+      prev.requirementId !== parentRequirementId ||
+      prev.facetId !== entry.facetId ||
+      prev.decisionId !== decisionId ||
+      prev.value !== decisionValue.value
+    ) {
+      miss.mismatch += 1;
+      continue;
+    }
+    facets.push({ ...base, kind: "d", basis: decisionId, value: decisionValue.value });
   }
 
   return { facets, noParent: 0, multipleParents: 0, unresolved: unresolved() };
@@ -801,4 +838,15 @@ function uniqueRequirementText(
   if (matched.length === 0) return { kind: "none" };
   if (matched.length > 1) return { kind: "many" };
   return { kind: "one", value: matched[0]?.text as string };
+}
+
+/** 同じ ID の決定の値を、ちょうど 1 つ引く（0 件は none、2 件以上は many。Issue #461） */
+function uniqueDecisionValue(
+  decisions: readonly InheritFacetValue[],
+  id: string,
+): { readonly kind: "one"; readonly value: string } | { readonly kind: "none" } | { readonly kind: "many" } {
+  const matched = decisions.filter((decision) => decision.id === id);
+  if (matched.length === 0) return { kind: "none" };
+  if (matched.length > 1) return { kind: "many" };
+  return { kind: "one", value: matched[0]?.value as string };
 }

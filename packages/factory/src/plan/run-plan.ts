@@ -1277,6 +1277,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const answerIssueIds = new Map<string, readonly string[]>();
   // 答え由来の要件（ID は `R:<答えの ID>`。引き継ぎの判定に使う。Issue #461）
   const answerDerivedRequirements: { id: string; text: string }[] = [];
+  // 既定・依頼文で閉じた事項の、**実際に作った決定の ID**（引き継ぎの分類に使う。Issue #461）
+  const closureDecisionIds = new Map<string, string>();
   // それまでの引き継ぎの表（事項 ID → 要件 ID・観点 ID・決定 ID・値。Issue #461）
   const inheritedFacetTable = new Map<
     string,
@@ -1852,6 +1854,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         value: closure.value,
         reason: closure.quote,
       });
+      closureDecisionIds.set(closure.issueId, decisionId);
       openIssues[index] = {
         ...issue,
         status: "resolved",
@@ -1889,6 +1892,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         defaultDecisions.push(decision);
         openIssues[index] = { ...issue, status: "resolved", resolution: { decision_id: decisionId, reason } };
         closedByDefaults.push({ issueId, facetId: facet.facetId, value: applied.value });
+        closureDecisionIds.set(issueId, decisionId);
       }
     };
 
@@ -2057,9 +2061,14 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           defaultClosures: closedByDefaults.map((closure) => ({
             issueId: closure.issueId,
             facetId: closure.facetId,
+            decisionId: closureDecisionIds.get(closure.issueId) ?? "",
             value: closure.value,
           })),
-          sourceClosures: closedBySource.map((closure) => ({ issueId: closure.issueId, value: closure.value })),
+          sourceClosures: closedBySource.map((closure) => ({
+            issueId: closure.issueId,
+            decisionId: closureDecisionIds.get(closure.issueId) ?? "",
+            value: closure.value,
+          })),
           previous: [...inheritedFacetTable.entries()].map(([issueId, entry]) => ({
             issueId,
             requirementId: entry.requirementId,
@@ -2102,6 +2111,17 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       );
       const diffCatalogData = buildCatalogData({ ...diffCatalog, unspecified: effectiveUnspecified });
 
+      // 引き継いだ観点の**根拠の決定**を、この往復の P3 の参照用文脈にも載せる（Issue #461・F2）。
+      // 決定の実体（事項の文・値・理由）はここで組み、diff の点検が終わってから `decisions` と
+      // `openIssues` に足す——**この往復の P3 には参照用の文脈として渡す**（決定そのものはここで 1 つに組む）。
+      const inheritDecisions = appliedInheritance.map(({ facet, diffFacet }) => {
+        const issue = catalogOpenIssue(diffFacet);
+        const decisionId = `${INHERIT_DECISION_PREFIX}${issue.id}`;
+        const reason = `${INHERIT_DECISION_REASON}（親の事項: ${facet.sourceIssueId}）`;
+        const decision: PlanDecision = { id: decisionId, subject: issue.text, value: facet.value, reason };
+        return { facet, diffFacet, issue, decisionId, reason, decision };
+      });
+
       // ── 差分の洗い出し（対象は差分だけ。文脈は参照用のデータで渡す。Issue #434）────
       const diffList: RequirementList = {
         requirements: diff.map((requirement) => ({
@@ -2125,7 +2145,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           text: textOf(requirement),
           origin: requirement.origin.input_id,
         })),
-        decisions: decisions.slice(),
+        decisions: [...decisions, ...inheritDecisions.map((entry) => entry.decision)],
         acceptedUnwritable: acceptedUnwritable.slice(),
         questionsAndAnswers: relatedQuestionsAndAnswers(inputsNow),
       };
@@ -2198,11 +2218,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       // 引き継いだ観点を、確定した仕様に**根拠つきで**残す（既定・依頼文で閉じる処理と同じ型。Issue #461）。
       // 根拠の決定を 1 つ作り（値は元の解決の値そのもの）、事項を状態 resolved で足す。行を足す経路
       // （`addOpenIssue`）を通すので、同じ ID の行が既にあれば畳まず、#460 の衝突として記録される。
-      for (const { facet, diffFacet } of appliedInheritance) {
-        const issue = catalogOpenIssue(diffFacet);
-        const decisionId = `${INHERIT_DECISION_PREFIX}${issue.id}`;
-        const reason = `${INHERIT_DECISION_REASON}（親の事項: ${facet.sourceIssueId}）`;
-        decisions.push({ id: decisionId, subject: issue.text, value: facet.value, reason });
+      for (const { facet, diffFacet, issue, decisionId, reason, decision } of inheritDecisions) {
+        decisions.push(decision);
         inheritedFacetTable.set(issue.id, {
           requirementId: diffFacet.requirementId,
           facetId: facet.facetId,
