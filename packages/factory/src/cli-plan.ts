@@ -337,14 +337,40 @@ export interface PlanCliRoundRecord {
 }
 
 /**
+ * 記録に入れる、対象外の参照の分類別の件数（Issue #434）。分類はコードが内部の対応で決める（モデルに
+ * 選ばせない）。**値ではなく件数**である。
+ */
+export interface PlanCliDiffOutOfScopeKindCount {
+  readonly kind: string;
+  readonly claims: number;
+  readonly ambiguities: number;
+}
+
+/**
+ * 記録に入れる、差分点検 1 回の**対象外の参照の記録**（Issue #434）。原応答で対象外だった件数・コードが
+ * 重複として除いた件数・重複と認めず断った件数を区別して持つ。**値は持たない**。
+ */
+export interface PlanCliDiffOutOfScopeRecord {
+  readonly claims: number;
+  readonly ambiguities: number;
+  readonly deduped: number;
+  readonly rejected_claims: number;
+  readonly rejected_ambiguities: number;
+  readonly kinds: readonly PlanCliDiffOutOfScopeKindCount[];
+  readonly deduped_indexes: readonly number[];
+}
+
+/**
  * 記録に入れる、差分点検 1 回の記録（Issue #434）。**値ではなく件数だけ**である——何往復目の P5 のあとに、
- * その往復で増えた何件の要件を点検し、そこで何件の事項が開き、何件を了承除外に加えたか。
+ * その往復で増えた何件の要件を点検し、そこで何件の事項が開き、何件を了承除外に加え、対象外の参照をどう
+ * 扱ったか。
  */
 export interface PlanCliDiffReviewRecord {
   readonly round: number;
   readonly added: number;
   readonly open_issues: number;
   readonly accepted_unwritable: number;
+  readonly out_of_scope: PlanCliDiffOutOfScopeRecord;
 }
 
 /**
@@ -583,6 +609,19 @@ export function buildPlanCliRecord(input: {
       added: review.added,
       open_issues: review.openIssues,
       accepted_unwritable: review.acceptedUnwritable,
+      out_of_scope: {
+        claims: review.outOfScope.claims,
+        ambiguities: review.outOfScope.ambiguities,
+        deduped: review.outOfScope.deduped,
+        rejected_claims: review.outOfScope.rejectedClaims,
+        rejected_ambiguities: review.outOfScope.rejectedAmbiguities,
+        kinds: review.outOfScope.kinds.map((entry) => ({
+          kind: entry.kind,
+          claims: entry.claims,
+          ambiguities: entry.ambiguities,
+        })),
+        deduped_indexes: review.outOfScope.dedupedIndexes.slice(),
+      },
     })),
     confirmation: input.transcript.confirmation,
     stages: input.result.stages,

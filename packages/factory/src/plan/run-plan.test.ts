@@ -8,7 +8,7 @@
 //   5. 予算が尽きると「止まった」になる。使った額に LLM と判定の費用が入る
 //   6. 段ごとの記録が結果に入る
 import { describe, expect, it } from "vitest";
-import { checkConfirmedPlan, isConfirmationValid, planDigest, type ConfirmedPlan, type PlanOpenIssue, type PlanRequirement } from "@musunest/appspec-schema";
+import { checkConfirmedPlan, isConfirmationValid, planDigest, type ConfirmedPlan, type PlanAcceptedUnwritable, type PlanOpenIssue, type PlanPart, type PlanRequirement } from "@musunest/appspec-schema";
 import { planStopReasonLine } from "../cli-plan.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "../judge.js";
@@ -24,11 +24,13 @@ import type {
 import type { RecordedCall } from "../llm-fake.js";
 import {
   diffChangeKey,
+  isAcceptedUnwritableDuplicate,
   planDiagnosisCode,
   planDiagnosisField,
   runPlan,
   selectDiffRequirements,
   sessionCannotConfirmReason,
+  type AcceptedClaimSnapshot,
   type PlanAnswerRequest,
   type PlanResponder,
   type PlanResult,
@@ -187,6 +189,49 @@ const SURFACE_OUTPUT = {
 
 /** 曖昧さ 0 件の P3 の答え */
 const SURFACE_OUTPUT_CLEAR = { ambiguities: [], unwritable: [] };
+
+/** 対象外の参照が無いときの、差分点検の記録の `outOfScope`（Issue #434） */
+const NO_OUT_OF_SCOPE = {
+  claims: 0,
+  ambiguities: 0,
+  deduped: 0,
+  rejectedClaims: 0,
+  rejectedAmbiguities: 0,
+  kinds: [
+    { kind: "source", claims: 0, ambiguities: 0 },
+    { kind: "previous-answer", claims: 0, ambiguities: 0 },
+    { kind: "alternative", claims: 0, ambiguities: 0 },
+    { kind: "unknown", claims: 0, ambiguities: 0 },
+    { kind: "unclassified", claims: 0, ambiguities: 0 },
+  ],
+  dedupedIndexes: [],
+};
+
+/** 差分点検の記録の `outOfScope` を、指定した件数だけ変えて作る（Issue #434） */
+function diffOutOfScope(
+  overrides: {
+    claims?: number;
+    ambiguities?: number;
+    deduped?: number;
+    rejectedClaims?: number;
+    rejectedAmbiguities?: number;
+    kinds?: Partial<Record<string, { claims?: number; ambiguities?: number }>>;
+    dedupedIndexes?: readonly number[];
+  } = {},
+) {
+  return {
+    claims: overrides.claims ?? 0,
+    ambiguities: overrides.ambiguities ?? 0,
+    deduped: overrides.deduped ?? 0,
+    rejectedClaims: overrides.rejectedClaims ?? 0,
+    rejectedAmbiguities: overrides.rejectedAmbiguities ?? 0,
+    kinds: NO_OUT_OF_SCOPE.kinds.map((entry) => {
+      const extra = overrides.kinds?.[entry.kind];
+      return extra === undefined ? entry : { ...entry, ...extra };
+    }),
+    dedupedIndexes: overrides.dedupedIndexes ?? [],
+  };
+}
 
 /** P4 の答え（未解決の事項 OI-extra 1 つに、選択肢 2 つ・推奨 1 つ・自由入力） */
 const QUESTIONS_OUTPUT = {
@@ -378,7 +423,7 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
       "confirm",
     ]);
     // 差分点検の記録（往復 1・増えた要件 1 件。Issue #434）
-    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0 }]);
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE }]);
     // 申告 0 件なので、判定は呼ばれず、surface-check の段も `ok` である
     expect(result.stages.find((stage) => stage.stage === "surface-check")?.status).toBe("ok");
     expect(result.stages.every((stage) => typeof stage.duration_ms === "number")).toBe(true);
@@ -3077,8 +3122,8 @@ describe("差分点検：その往復で増えた要件だけを点検し、文�
     ]);
     // 差分点検の記録（往復ごとに 1 件。値ではなく件数）
     expect(result.diffReviews).toEqual([
-      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0 },
-      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0 },
+      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
+      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
     ]);
   });
 
@@ -3120,7 +3165,7 @@ describe("差分点検：その往復で増えた要件だけを点検し、文�
 
     expect(result.kind).toBe("confirmed");
     // 差分点検は 2 往復目でだけ走る（1 往復目は増えた要件が 0 件）
-    expect(result.diffReviews).toEqual([{ round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0 }]);
+    expect(result.diffReviews).toEqual([{ round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE }]);
     // 目録の段は初回と 2 往復目でだけ（1 往復目の分は無い）
     expect(result.stages.filter((stage) => stage.stage === "catalog")).toHaveLength(2);
   });
@@ -3162,8 +3207,8 @@ describe("差分点検：新しく開いた重大な事項を、同じ上限の�
     expect(asked[1]?.questions.map((question) => question.openIssueId)).toEqual(["OI-diff"]);
     // 差分点検の記録（1 往復目で事項 1 件を開き、2 往復目の答えでも 1 件増えた）
     expect(result.diffReviews).toEqual([
-      { round: 1, added: 1, openIssues: 1, acceptedUnwritable: 0 },
-      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0 },
+      { round: 1, added: 1, openIssues: 1, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
+      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
     ]);
     expect(result.plan.open_issues.find((issue) => issue.id === "OI-diff")?.status).toBe("resolved");
   });
@@ -3263,7 +3308,7 @@ describe("差分点検：目録の未指定の観点が、既定の適用と上�
     expect(result.closedByDefault).toEqual([
       { issueId: "OI:catalog:R:A:Q1-1:period", facetId: "period", value: "期間の条件を足さない" },
     ]);
-    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 1, acceptedUnwritable: 0 }]);
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 1, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE }]);
     // 2 往復目は無い（既定で閉じたので問いを出さない）
     expect(result.stages.filter((stage) => stage.stage === "questions")).toHaveLength(1);
   });
@@ -3339,7 +3384,7 @@ describe("差分点検：書けない申告を、確認の前に点検する（0
     expect(await isConfirmationValid(result.plan)).toBe(true);
     expect(result.plan.confirmation.sha256).toBe(await planDigest(result.plan));
     // 差分点検の記録に、了承除外に加えた件数が残る
-    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 1 }]);
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 1, outOfScope: NO_OUT_OF_SCOPE }]);
     // 差分の点検の受理が、結果の要約にも積まれる（初回は申告 0 件なので、合計 1 件。Issue #434）
     expect(result.surfaceCheck.accepted).toBe(1);
     expect(result.surfaceCheck.completed).toBe(true);
@@ -3539,9 +3584,20 @@ describe("差分点検：応答が指す要件 ID を、この往復の差分の
     ]);
     expect(JSON.stringify(result.failure)).not.toContain("R:A:Q1-1");
     // 停止した往復（2 往復目）も、差分点検の記録に数えられる（Issue #434）
+    // 2 往復目の対象外の参照（前の往復の要件 R:A:Q1-1 を指す未解決の事項）が、分類つきで残る
     expect(result.diffReviews).toEqual([
-      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0 },
-      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0 },
+      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
+      {
+        round: 2,
+        added: 1,
+        openIssues: 0,
+        acceptedUnwritable: 0,
+        outOfScope: diffOutOfScope({
+          ambiguities: 1,
+          rejectedAmbiguities: 1,
+          kinds: { "previous-answer": { ambiguities: 1 } },
+        }),
+      },
     ]);
     expect(round).toBe(2);
   });
@@ -3593,7 +3649,7 @@ describe("差分点検：途中停止でも進捗を残す（04 §3 P3・Issue #
     expect(result.surfaceCheckDiagnostics).toEqual([
       expect.objectContaining({ index: 0, requirementId: "R:A:Q1-1", stage: "unexecuted", classification: "unexecuted" }),
     ]);
-    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0 }]);
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE }]);
   });
 
   it("差分の点検の裏付けが途中で止まっても、仕分けまでの分類と判定が残る（completed は false）", async () => {
@@ -3645,7 +3701,7 @@ describe("差分点検：途中停止でも進捗を残す（04 §3 P3・Issue #
       "not-a-problem",
       "vocabulary-hole",
     ]);
-    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0 }]);
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE }]);
   });
 });
 
@@ -3819,9 +3875,284 @@ describe("差分点検：点検の番号で、判定・診断・停止理由を�
     expect(result.surfaceCheck.completed).toBe(false);
     // 差分点検の記録は往復ごとに 3 件（停止した往復も数える）
     expect(result.diffReviews).toEqual([
-      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0 },
-      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 1 },
-      { round: 3, added: 1, openIssues: 0, acceptedUnwritable: 0 },
+      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
+      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 1, outOfScope: NO_OUT_OF_SCOPE },
+      { round: 3, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
     ]);
+  });
+});
+
+// ── Issue #434・§3：受理済み申告の再申告だけを重複として除く（A）と、その記録（B）────────
+
+/** 初回に受理される「書けない」の申告（R-1 の部分。制約 ID は 2 つとも文書に実在する） */
+const ACCEPTED_CLAIM = {
+  id: "U-0",
+  requirementId: "R-1",
+  part: "初回の部分",
+  constraintIds: ["記録", "合計"] as readonly string[],
+  reason: "理由",
+  alternative: "代案",
+};
+
+/** 初回の洗い出し：曖昧さ 1 件（往復を作る）と、受理される「書けない」の申告 1 件 */
+const BASE_SURFACE = {
+  ambiguities: [{ id: "OI-1", requirementId: "R-1", text: "曖昧", critical: true }],
+  unwritable: [ACCEPTED_CLAIM],
+};
+
+/** 受理済みの申告の再申告（申告 ID はモデル作なので変えてある——正本にしないことの確認） */
+function duplicateClaim(overrides: Partial<typeof ACCEPTED_CLAIM> = {}): typeof ACCEPTED_CLAIM {
+  return { ...ACCEPTED_CLAIM, id: "U-dup", ...overrides };
+}
+
+describe("差分点検・§3：受理済み申告の正確な再申告だけを重複として除く（Issue #434）", () => {
+  /** 初回で U-0 を受理させ、1 往復目で R:A:Q1-1 を増やしたあとの差分点検に、与えた応答を返す */
+  async function runSingleDiff(diffOutput: unknown, extraJudge: Record<string, JudgeAnswer> = {}): Promise<PlanResult> {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(BASE_SURFACE),
+      structured(questionsFor("OI-1")),
+      structured(diffOutput),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+      ...extraJudge,
+    });
+    return runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED));
+  }
+
+  it("正確な再申告だけを除く（了承除外・代案・要件は増減しない）", async () => {
+    const result = await runSingleDiff({ ambiguities: [], unwritable: [duplicateClaim()] });
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 重複を除いたので、了承除外・代わりの案は初回のぶんだけ（増減しない）
+    expect(result.plan.accepted_unwritable.map((entry) => entry.part_id)).toEqual(["P:U-0"]);
+    const ids = result.plan.requirements.map((requirement) => requirement.id);
+    expect(ids).toContain("R:alt:U-0");
+    expect(ids).not.toContain("R:alt:U-dup");
+    // 記録：原応答で対象外 1 件（申告）、コードで除いた 1 件、分類は原文（source）
+    expect(result.diffReviews).toEqual([
+      {
+        round: 1,
+        added: 1,
+        openIssues: 0,
+        acceptedUnwritable: 0,
+        outOfScope: diffOutOfScope({
+          claims: 1,
+          deduped: 1,
+          kinds: { source: { claims: 1 } },
+          dedupedIndexes: [0],
+        }),
+      },
+    ]);
+  });
+
+  it("正確な再申告と、対象内の申告・重大な事項が混在しても、再申告だけを除き、対象内は F1、重大事項は次の質問へ進む", async () => {
+    const inScope = { id: "U-9", requirementId: "R:A:Q1-1", part: "差分の部分", constraintIds: ["記録"], reason: "差分の理由", alternative: "差分の代案" };
+    const mixed = {
+      ambiguities: [{ id: "OI-new", requirementId: "R:A:Q1-1", text: "新しい曖昧", critical: true }],
+      unwritable: [duplicateClaim(), inScope],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(BASE_SURFACE),
+      structured(questionsFor("OI-1")),
+      structured(mixed),
+      structured(questionsFor("OI-new")),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const asked: PlanAnswerRequest[] = [];
+    const responder: PlanResponder = {
+      async answer(request) {
+        asked.push(request);
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 再申告だけを除き、対象内の申告は F1 に掛かって受理される（了承除外は初回＋対象内の 2 件）
+    expect(result.plan.accepted_unwritable.map((entry) => entry.part_id)).toEqual(["P:U-0", "P:U-9"]);
+    expect(result.plan.requirements.map((requirement) => requirement.id)).not.toContain("R:alt:U-dup");
+    // 重大な事項は、次の往復で聞かれて閉じる
+    expect(asked[1]?.questions.map((question) => question.openIssueId)).toEqual(["OI-new"]);
+    expect(result.plan.open_issues.find((issue) => issue.id === "OI-new")?.status).toBe("resolved");
+    // 記録：1 往復目は対象外 1 件（申告）を除き、重大事項 1 件を開いた
+    expect(result.diffReviews[0]).toEqual({
+      round: 1,
+      added: 1,
+      openIssues: 1,
+      acceptedUnwritable: 1,
+      outOfScope: diffOutOfScope({ claims: 1, deduped: 1, kinds: { source: { claims: 1 } }, dedupedIndexes: [0] }),
+    });
+  });
+
+  it("部分文・要件・理由・代案が違えば、重複と認めず止める（完全一致を広げない）", async () => {
+    const cases: { readonly name: string; readonly claim: typeof ACCEPTED_CLAIM }[] = [
+      { name: "部分文が別", claim: duplicateClaim({ part: "別の部分" }) },
+      { name: "部分文の拡張", claim: duplicateClaim({ part: "初回の部分です" }) },
+      { name: "要件が別", claim: duplicateClaim({ requirementId: "R-2" }) },
+      { name: "理由が違う", claim: duplicateClaim({ reason: "別の理由" }) },
+      { name: "代案が違う", claim: duplicateClaim({ alternative: "別の代案" }) },
+    ];
+    for (const { name, claim } of cases) {
+      const result = await runSingleDiff({ ambiguities: [], unwritable: [claim] });
+      expect(result.kind, name).toBe("stopped");
+      if (result.kind !== "stopped") continue;
+      expect(result.failure?.stage, name).toBe("surface");
+      expect(result.failure?.kind, name).toBe("unmet");
+      // 重複と認めず、対象外 1 件を断った（除いていない）
+      const out = result.diffReviews[0]?.outOfScope;
+      expect(out?.deduped, name).toBe(0);
+      expect(out?.rejectedClaims, name).toBe(1);
+    }
+  });
+
+  it("制約集合は、並び替えだけの同じ全集合を除ける（追加・欠落・空・未知は断る）", async () => {
+    // 正例：並び替えだけ
+    const reordered = await runSingleDiff({ ambiguities: [], unwritable: [duplicateClaim({ constraintIds: ["合計", "記録"] })] });
+    expect(reordered.kind).toBe("confirmed");
+    expect(reordered.diffReviews[0]?.outOfScope.deduped).toBe(1);
+
+    // 負例：追加・欠落・空・未知
+    const negatives: { readonly name: string; readonly constraintIds: readonly string[] }[] = [
+      { name: "追加", constraintIds: ["記録", "合計", "アプリの名前・説明"] },
+      { name: "欠落", constraintIds: ["記録"] },
+      { name: "空", constraintIds: [] },
+      { name: "未知", constraintIds: ["文書に無い ID"] },
+    ];
+    for (const { name, constraintIds } of negatives) {
+      const result = await runSingleDiff({ ambiguities: [], unwritable: [duplicateClaim({ constraintIds })] });
+      expect(result.kind, name).toBe("stopped");
+      expect(result.diffReviews[0]?.outOfScope.deduped, name).toBe(0);
+    }
+  });
+
+  it("曖昧さは重複と認めない（要件・文・critical が違っても、同じ ID でも止める）", async () => {
+    const ambiguities = [
+      { id: "OI-1", requirementId: "R-2", text: "曖昧", critical: true },
+      { id: "OI-1", requirementId: "R-1", text: "別の文", critical: true },
+      { id: "OI-1", requirementId: "R-1", text: "曖昧", critical: false },
+      { id: "OI-2", requirementId: "R-1", text: "新しい要件と矛盾する", critical: true },
+    ];
+    for (const ambiguity of ambiguities) {
+      const result = await runSingleDiff({ ambiguities: [ambiguity], unwritable: [] });
+      expect(result.kind, `${ambiguity.requirementId}/${ambiguity.critical}`).toBe("stopped");
+      if (result.kind !== "stopped") continue;
+      expect(result.failure?.stage).toBe("surface");
+      // 除かず、断った（分類は内部の対応で決まる。R-1 は原文、R-2 も原文）
+      expect(result.diffReviews[0]?.outOfScope.deduped).toBe(0);
+      expect(result.diffReviews[0]?.outOfScope.rejectedAmbiguities).toBe(1);
+      expect(result.diffReviews[0]?.outOfScope.kinds.some((entry) => entry.ambiguities > 0)).toBe(true);
+    }
+  });
+
+  it("正確な重複と、対象外の未知が同時にあるときは、後者で段ごと止め、識別した重複件数も残す", async () => {
+    const unknown = { id: "U-x", requirementId: "R:unknown", part: "部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" };
+    const result = await runSingleDiff({ ambiguities: [], unwritable: [duplicateClaim(), unknown] });
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("surface");
+    expect(result.failure?.kind).toBe("unmet");
+    // 原応答で対象外 2 件（申告）・除いた 1 件・断った 1 件。分類は原文 1・未知 1
+    expect(result.diffReviews[0]?.outOfScope).toEqual(
+      diffOutOfScope({
+        claims: 2,
+        deduped: 1,
+        rejectedClaims: 1,
+        kinds: { source: { claims: 1 }, unknown: { claims: 1 } },
+        dedupedIndexes: [0],
+      }),
+    );
+    // 誤りの文に、要件 ID の値を入れない
+    expect(JSON.stringify(result.failure)).not.toContain("R:unknown");
+  });
+
+  it("対象内の申告は、受理済みの形に似ていても差分の点検を飛ばさない（F1 に掛ける）", async () => {
+    // 対象内（R:A:Q1-1）の申告は、対象外の照合をせず、従来どおり F1 に掛ける
+    const inScope = { id: "U-dup", requirementId: "R:A:Q1-1", part: "初回の部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" };
+    const result = await runSingleDiff({ ambiguities: [], unwritable: [inScope] });
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 従来の F1（仕分け・裏付け）に掛かり、受理されて了承除外が増える
+    expect(result.plan.accepted_unwritable.map((entry) => entry.part_id)).toEqual(["P:U-0", "P:U-dup"]);
+    expect(result.diffReviews[0]?.outOfScope).toEqual(NO_OUT_OF_SCOPE);
+  });
+});
+
+describe("差分点検・§3：重複と認めない構造の条件（Issue #434）", () => {
+  /** 要件 1 つを手で作る */
+  function requirement(id: string, parts: readonly PlanPart[] = []): PlanRequirement {
+    return { id, text: id, kind: "constraining", origin: { input_id: "S-1", quote: id }, parts };
+  }
+  const acceptedPart: PlanPart = { id: "P:U-0", text: "初回の部分", disposition: "accepted_removal" };
+  const entry: PlanAcceptedUnwritable = {
+    part_id: "P:U-0",
+    alternative_id: "R:alt:U-0",
+    basis: { doc_version: "v1", location: "初回の部分", constraint_id: "記録" },
+  };
+  const snapshot: AcceptedClaimSnapshot = {
+    requirementId: "R-1",
+    part: "初回の部分",
+    reason: "理由",
+    alternative: "代案",
+    constraintIds: ["記録"],
+    requirementText: "R-1",
+    changeKey: undefined,
+    docVersion: "v1",
+  };
+  const claim = { id: "U-dup", requirementId: "R-1", part: "初回の部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" };
+  const base = {
+    claim,
+    requirements: [requirement("R-1", [acceptedPart]), requirement("R:alt:U-0")],
+    acceptedUnwritable: [entry],
+    snapshots: [snapshot],
+    docVersion: "v1",
+  };
+
+  it("すべて揃えば、重複と認める", () => {
+    expect(isAcceptedUnwritableDuplicate(base)).toBe(true);
+  });
+
+  it("parts だけ accepted_removal（了承除外の対応が無い）は重複と認めない", () => {
+    expect(isAcceptedUnwritableDuplicate({ ...base, acceptedUnwritable: [] })).toBe(false);
+  });
+
+  it("受理した元申告の控えが無ければ重複と認めない", () => {
+    expect(isAcceptedUnwritableDuplicate({ ...base, snapshots: [] })).toBe(false);
+  });
+
+  it("part_id に了承除外が複数対応すれば重複と認めない", () => {
+    expect(isAcceptedUnwritableDuplicate({ ...base, acceptedUnwritable: [entry, entry] })).toBe(false);
+  });
+
+  it("対応する代案が存在しなければ重複と認めない", () => {
+    expect(isAcceptedUnwritableDuplicate({ ...base, requirements: [requirement("R-1", [acceptedPart])] })).toBe(false);
+  });
+
+  it("要件の文が受理時から変わっていれば重複と認めない", () => {
+    const changed: PlanRequirement = { ...requirement("R-1", [acceptedPart]), text: "変わった文" };
+    expect(isAcceptedUnwritableDuplicate({ ...base, requirements: [changed, requirement("R:alt:U-0")] })).toBe(false);
   });
 });

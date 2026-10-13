@@ -199,13 +199,6 @@ export interface SurfaceInput {
    * 了承除外・関係する問いと答えを、**別々のデータ**として足す（点検の対象は `list` のまま）。
    */
   readonly context?: SurfaceContext;
-  /**
-   * **点検の対象の要件 ID の集合**（Issue #434）。渡すと、応答が指す要件 ID（未解決の事項・書けない
-   * 申告の `requirementId`）が、その集合の内側であることを確かめる。**対象外（参照用に渡した既存の要件・
-   * 前の往復の要件）や未知の参照は受理しない**——`unmet` にして確定させない側に倒す（制約 ID の裏付けと
-   * 同じ扱い）。渡さなければ今までどおり確かめない（初回の経路・既存の道は変えない）。
-   */
-  readonly targetRequirementIds?: ReadonlySet<string>;
 }
 
 function checkAmbiguity(value: unknown, field: string, problems: Problem[]): PlanAmbiguity | undefined {
@@ -346,16 +339,40 @@ export function checkSurfaceConstraints(
   return problems;
 }
 
+/** 対象外の参照 1 つ（点検の対象の外を指した「書けない」の申告・未解決の事項。Issue #434） */
+export type SurfaceOutOfScopeRef =
+  | { readonly kind: "claim"; readonly index: number; readonly claim: PlanUnwritable }
+  | { readonly kind: "ambiguity"; readonly index: number; readonly ambiguity: PlanAmbiguity };
+
+/** 点検の対象の照合の結果（Issue #434） */
+export interface SurfaceTargetResult {
+  /** 断る理由（対象外・未知の参照。空なら通る） */
+  readonly problems: readonly Problem[];
+  /** 点検に残す「書けない」の申告（対象内と、重複として除かなかった対象外） */
+  readonly keptUnwritable: readonly PlanUnwritable[];
+  /** 重複として除いた「書けない」の申告（**原応答の添字**つき） */
+  readonly dropped: readonly { readonly index: number; readonly claim: PlanUnwritable }[];
+  /** 断った対象外の参照（原応答の添字つき。分類と件数は呼ぶ側が記録する） */
+  readonly rejected: readonly SurfaceOutOfScopeRef[];
+}
+
 /**
- * 応答が指す要件 ID が、**点検の対象（この往復の差分）**の内側であるかを確かめる（Issue #434）。
- * 参照用に渡した既存の要件・前の往復の要件・未知の参照を断る。**誤りの文に ID の値は入れない**
- * （欄の名前と分類だけ。止まった記録に漏らさない）。
+ * 応答が指す要件 ID が、**点検の対象（この往復の差分）**の内側であるかを確かめる（Issue #434）。対象外・
+ * 未知の参照は断る（`problems`）。ただし、**対象外の「書けない」の申告**については、`dropClaim` が真を
+ * 返したものだけを**重複として除く**（`dropped`。新しい了承除外・代案・決定は作らず、既存の事項を閉じない）。
+ * **未解決の事項（ambiguities）は除かない**——従来どおり断る（§3 の 5）。**誤りの文に ID の値は入れない**。
+ *
+ * 分類はモデルに選ばせない——呼ぶ側が `rejected` と `dropped` の要件 ID を、内部の対応で有限の分類に写す。
  */
 export function checkSurfaceTargets(
   surface: PlanSurface,
   targetRequirementIds: ReadonlySet<string>,
-): readonly Problem[] {
+  dropClaim?: (claim: PlanUnwritable, index: number) => boolean,
+): SurfaceTargetResult {
   const problems: Problem[] = [];
+  const keptUnwritable: PlanUnwritable[] = [];
+  const dropped: { index: number; claim: PlanUnwritable }[] = [];
+  const rejected: SurfaceOutOfScopeRef[] = [];
   const outOfScope = (field: string): void => {
     problems.push({
       field,
@@ -363,13 +380,25 @@ export function checkSurfaceTargets(
       message: "点検の対象（その往復の差分）に無い要件を指している",
     });
   };
-  surface.ambiguities.forEach((item, index) => {
-    if (!targetRequirementIds.has(item.requirementId)) outOfScope(`ambiguities[${index}].requirementId`);
+  surface.unwritable.forEach((claim, index) => {
+    if (targetRequirementIds.has(claim.requirementId)) {
+      keptUnwritable.push(claim);
+      return;
+    }
+    if (dropClaim?.(claim, index) === true) {
+      dropped.push({ index, claim });
+      return;
+    }
+    keptUnwritable.push(claim);
+    rejected.push({ kind: "claim", index, claim });
+    outOfScope(`unwritable[${index}].requirementId`);
   });
-  surface.unwritable.forEach((item, index) => {
-    if (!targetRequirementIds.has(item.requirementId)) outOfScope(`unwritable[${index}].requirementId`);
+  surface.ambiguities.forEach((ambiguity, index) => {
+    if (targetRequirementIds.has(ambiguity.requirementId)) return;
+    rejected.push({ kind: "ambiguity", index, ambiguity });
+    outOfScope(`ambiguities[${index}].requirementId`);
   });
-  return problems;
+  return { problems, keptUnwritable, dropped, rejected };
 }
 
 /**
@@ -415,13 +444,7 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
   });
   const answer = await callStructuredChecked(input.gateway, { request, check: checkSurfaceOutput });
   if (!answer.ok) return answer;
-  // 応答が指す要件 ID を、点検の対象（この往復の差分）の集合へ照合する（Issue #434）。
-  if (input.targetRequirementIds !== undefined) {
-    const targetProblems = checkSurfaceTargets(answer.value, input.targetRequirementIds);
-    if (targetProblems.length > 0) {
-      return { ok: false, failure: { kind: "unmet", attempts: 1, problems: targetProblems } };
-    }
-  }
+  // 形と、現文書への制約 ID の裏付けを確かめる（**除外で隠さない**。Issue #434・#398）
   const problems = checkSurfaceConstraints(answer.value, input.documents);
   if (problems.length > 0) {
     return { ok: false, failure: { kind: "unmet", attempts: 1, problems } };

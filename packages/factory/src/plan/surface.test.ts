@@ -13,7 +13,7 @@ import {
   createRecordingClient,
   makeGateway,
 } from "../stages/__tests__/prompt.js";
-import { SURFACE_RULES, SURFACE_SCHEMA_NAME, checkSurfaceOutput, runSurface, type SurfaceCatalogData, type SurfaceContext } from "./surface.js";
+import { SURFACE_RULES, SURFACE_SCHEMA_NAME, checkSurfaceOutput, checkSurfaceTargets, runSurface, type PlanSurface, type SurfaceCatalogData, type SurfaceContext } from "./surface.js";
 
 /** 正しい応答（未解決の事項 1 件・書けないこと 1 件） */
 const SURFACE_OUTPUT = {
@@ -409,52 +409,59 @@ describe("差分の洗い出しに、参照用の文脈を別のデータとし�
 // ── Issue #434：応答が指す要件 ID を、点検の対象（その往復の差分）へ照合する ──────
 
 describe("応答が指す要件 ID を、点検の対象（その往復の差分）へ照合する（04 §3 P3・Issue #434）", () => {
-  /** 1 回まわして、送った要求と結果を返す（`targetRequirementIds` は任意） */
-  function runTarget(output: unknown, targetRequirementIds?: ReadonlySet<string>) {
-    const recorded = [
-      { kind: "structured" as const, output, usage: undefined },
-      { kind: "structured" as const, output, usage: undefined },
-    ];
-    const recording = createRecordingClient(recorded);
-    const outcome = runSurface({
-      list: REQUIREMENT_LIST,
-      documents: SAMPLE_DOCUMENTS,
-      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
-      ...(targetRequirementIds === undefined ? {} : { targetRequirementIds }),
-    });
-    return { recording, outcome };
+  /** 正しい応答を、形の検査を通した `PlanSurface` にする */
+  function parsed(): PlanSurface {
+    const checked = checkSurfaceOutput(SURFACE_OUTPUT);
+    if (!checked.ok) throw new Error("題材の応答が不正です");
+    return checked.value;
   }
 
-  it("点検の対象の内側を指す応答は通る", async () => {
-    const result = await runTarget(SURFACE_OUTPUT, new Set(["R-1", "R-2"])).outcome;
-    expect(result.ok).toBe(true);
+  it("点検の対象の内側を指す応答は、断らない", () => {
+    const target = checkSurfaceTargets(parsed(), new Set(["R-1", "R-2"]));
+    expect(target.problems).toEqual([]);
+    expect(target.dropped).toEqual([]);
+    expect(target.keptUnwritable).toHaveLength(1);
   });
 
-  it("点検の対象に無い要件を指す応答は、欄つきで断る（やり直しても通らなければ unmet）", async () => {
-    const result = await runTarget(SURFACE_OUTPUT, new Set(["R:A:Q1-1"])).outcome;
-    expect(result.ok).toBe(false);
-    if (result.ok || result.failure.kind !== "unmet") return;
-    expect(result.failure.problems).toEqual([
-      {
-        field: "ambiguities[0].requirementId",
-        code: "requirement-id-unknown",
-        message: "点検の対象（その往復の差分）に無い要件を指している",
-      },
+  it("点検の対象に無い要件を指す応答は、欄つきで断る（重複として除くものが無ければ）", () => {
+    const target = checkSurfaceTargets(parsed(), new Set(["R:A:Q1-1"]));
+    expect(target.problems).toEqual([
       {
         field: "unwritable[0].requirementId",
         code: "requirement-id-unknown",
         message: "点検の対象（その往復の差分）に無い要件を指している",
       },
+      {
+        field: "ambiguities[0].requirementId",
+        code: "requirement-id-unknown",
+        message: "点検の対象（その往復の差分）に無い要件を指している",
+      },
     ]);
+    expect(target.dropped).toEqual([]);
+    expect(target.rejected).toHaveLength(2);
     // 誤りの文に、要件 ID の値を入れない（止まった記録に漏らさない）
-    for (const problem of result.failure.problems) {
+    for (const problem of target.problems) {
       expect(problem.message).not.toContain("R-1");
       expect(problem.message).not.toContain("R:A:Q1-1");
     }
   });
 
-  it("対象を渡さなければ、今までどおり要件 ID を確かめない", async () => {
-    const result = await runTarget(SURFACE_OUTPUT).outcome;
-    expect(result.ok).toBe(true);
+  it("対象外の「書けない」の申告を、dropClaim が真を返したときだけ重複として除く（曖昧さは除かない）", () => {
+    const target = checkSurfaceTargets(parsed(), new Set(["R:A:Q1-1"]), (claim) => claim.requirementId === "R-2");
+    // 申告だけが除かれ、曖昧さは断られる
+    expect(target.dropped.map((item) => item.index)).toEqual([0]);
+    expect(target.dropped[0]?.claim.requirementId).toBe("R-2");
+    expect(target.keptUnwritable).toEqual([]);
+    expect(target.rejected.map((ref) => ref.kind)).toEqual(["ambiguity"]);
+    expect(target.problems.map((problem) => problem.field)).toEqual(["ambiguities[0].requirementId"]);
+  });
+
+  it("dropClaim が偽を返す申告は、重複として除かず断る", () => {
+    const target = checkSurfaceTargets(parsed(), new Set(["R:A:Q1-1"]), () => false);
+    expect(target.dropped).toEqual([]);
+    expect(target.problems.map((problem) => problem.field)).toEqual([
+      "unwritable[0].requirementId",
+      "ambiguities[0].requirementId",
+    ]);
   });
 });
