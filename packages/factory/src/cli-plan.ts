@@ -337,6 +337,17 @@ export interface PlanCliRoundRecord {
 }
 
 /**
+ * 記録に入れる、差分点検 1 回の記録（Issue #434）。**値ではなく件数だけ**である——何往復目の P5 のあとに、
+ * その往復で増えた何件の要件を点検し、そこで何件の事項が開き、何件を了承除外に加えたか。
+ */
+export interface PlanCliDiffReviewRecord {
+  readonly round: number;
+  readonly added: number;
+  readonly open_issues: number;
+  readonly accepted_unwritable: number;
+}
+
+/**
  * 記録に入れる落ちの件数の内訳（種類ごと・出どころごと。Issue #430）。**件数だけ**を持ち、落ちの文言・
  * 引用・原文の断片・位置は入れない（`02-failure-modes.md` §1）。
  */
@@ -434,6 +445,8 @@ export interface PlanCliRecord {
   readonly requirements_diagnosis: PlanCliRequirementsDiagnosisRecord;
   /** P3 の「書けない」の申告の点検（件数と判定の記録。値は件数と記録だけ。Issue #432） */
   readonly surface_check: PlanCliSurfaceCheckRecord;
+  /** 差分点検（各往復の P5 のあと）の記録。**値ではなく件数だけ**（Issue #434） */
+  readonly diff_reviews: readonly PlanCliDiffReviewRecord[];
   readonly confirmation: "build" | "stop" | null;
   readonly stages: readonly PlanStageRecord[];
   readonly judge: BundleJudgeUsage;
@@ -560,6 +573,12 @@ export function buildPlanCliRecord(input: {
     })),
     requirements_diagnosis: toRequirementsDiagnosisRecord(input.result.requirementsDiagnosis),
     surface_check: toSurfaceCheckRecord(input.result.surfaceCheck),
+    diff_reviews: input.result.diffReviews.map((review) => ({
+      round: review.round,
+      added: review.added,
+      open_issues: review.openIssues,
+      accepted_unwritable: review.acceptedUnwritable,
+    })),
     confirmation: input.transcript.confirmation,
     stages: input.result.stages,
     judge: input.result.judge,

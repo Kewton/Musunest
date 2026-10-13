@@ -98,11 +98,12 @@ function choice(value: string, confidence?: number): JudgeAnswer {
 
 /**
  * 目録の問い（要件ごとの門 + 要件 × 観点 × 2 問）すべてに「当てはまる・決まっている」を返す答え
- * （未指定の観点を作らない）。門にも答える（Issue #384）。
+ * （未指定の観点を作らない）。門にも答える（Issue #384）。**差分点検で増える要件の ID も含める**
+ * （Issue #434。余分な答えは無害）。
  */
 function catalogAnswers(): Record<string, JudgeAnswer> {
   const answers: Record<string, JudgeAnswer> = {};
-  for (const requirementId of ["R-1", "R-2"]) {
+  for (const requirementId of ["R-1", "R-2", "R:A:Q1-1", "R:A:Q1-2", "R:A:Q1-3", "R:A:Q2-1"]) {
     answers[catalogGateQuestionName(requirementId)] = noul(1);
     for (const facet of CATALOG_FACETS) {
       answers[catalogAppliesQuestionName(requirementId, facet.id)] = noul(1);
@@ -201,6 +202,8 @@ function planThenBuildRecording(): ReturnType<typeof createRecordingClient> {
     structured(REVERSE_CHECK_OUTPUT),
     structured(SURFACE_THREE),
     structured(QUESTIONS_THREE),
+    // 差分点検（その往復で増えた要件だけ）の P3 の応答（Issue #434）
+    structured(SURFACE_CLEAR),
     ...recordedRunFromPlan(),
   ]);
 }
@@ -332,6 +335,13 @@ interface PlanCliRecordShape {
       readonly answered_by: string;
     }[];
   };
+  /** 差分点検（各往復の P5 のあと）の記録。値ではなく件数だけ（Issue #434） */
+  readonly diff_reviews: readonly {
+    readonly round: number;
+    readonly added: number;
+    readonly open_issues: number;
+    readonly accepted_unwritable: number;
+  }[];
   readonly spent_usd: number;
   readonly remaining_usd: number;
   readonly budget_usd: number;
@@ -638,9 +648,11 @@ describe("答えのファイルの形でも、確認の内容を log に出す�
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_THREE),
       structured(QUESTIONS_THREE),
+      structured(SURFACE_CLEAR),
       ...recordedRunFromPlan(),
     ]);
     const judge = createFakeJudge({
+      ...catalogAnswers(),
       ...catalogUnspecifiedFor({ "R-1": ["period"] }),
       ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]),
     });
@@ -820,6 +832,7 @@ describe("往復の記録に、一緒に閉じた事項と依頼文で閉じた�
       structured(REVERSE_CHECK_OUTPUT),
       structured(GROUPED_SURFACE_TWO),
       structured(GROUPED_QUESTIONS_ONE),
+      structured(SURFACE_CLEAR),
       ...recordedRunFromPlan(),
     ]);
     const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q1-1"]) });
@@ -909,6 +922,8 @@ describe("上限を上げても、Plan のあとの Build の予算と締切の�
       withoutUsage(REVERSE_CHECK_OUTPUT),
       withoutUsage(SURFACE_THREE),
       withoutUsage(QUESTIONS_THREE),
+      // 差分点検（増えた要件）の P3 の応答（Issue #434）。usage の欠けた呼び出しの数え方を試す
+      withoutUsage(SURFACE_CLEAR),
       ...recordedRunFromPlan(),
     ]);
     const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]) });
@@ -1021,7 +1036,10 @@ describe("往復をまたいで質問 ID が重ならない（Issue #405）", ()
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_ONE),
       structured(QUESTIONS_ONE),
+      // 1 往復目は運用の指示で要件が増えない（差分点検の段は呼ばれない）
       structured(QUESTIONS_ONE),
+      // 2 往復目で増えた要件の差分点検（Issue #434）
+      structured(SURFACE_CLEAR),
       ...recordedRunFromPlan(),
     ]);
     const judge = createFakeJudge({
@@ -1666,5 +1684,110 @@ describe("P3 の申告の点検を plan-record.json の surface_check に残す�
       expect.objectContaining({ index: 0, requirement_id: "R-1", stage: "unexecuted", classification: "unexecuted", doc_version: "v1" }),
       expect.objectContaining({ index: 1, requirement_id: "R-2", stage: "unexecuted", classification: "unexecuted", doc_version: "v1" }),
     ]);
+  });
+});
+
+// ── Issue #434：差分点検の記録と、2 往復目に差分の事項が聞かれる道 ───────────────
+
+describe("差分点検の記録を残し、答えのファイルの形で 2 往復目に差分の事項が聞かれる（04 §7・Issue #434）", () => {
+  /** 差分点検の洗い出しが返す、重大な事項 1 件（差分の要件に由来する） */
+  const DIFF_CRITICAL = {
+    ambiguities: [{ id: "OI-diff", requirementId: "R:A:Q1-1", text: "差分で開いた重大な事項", critical: true }],
+    unwritable: [],
+  };
+  /** 2 往復目に聞く、差分の事項への問い（ID はコードが組み直す） */
+  const QUESTIONS_DIFF = {
+    questions: [
+      {
+        id: "Q-1",
+        openIssueId: "OI-diff",
+        text: "差分の事項をどうしますか",
+        choices: [
+          { id: "c1", text: "こちら" },
+          { id: "c2", text: "あちら" },
+        ],
+        recommended: { choiceId: "c1", reason: "依頼に沿う" },
+        allowFreeText: true,
+      },
+    ],
+  };
+
+  it("往復の記録に差分点検の回数と件数が残り、依頼文・答えの目印が出ず、2 往復目に差分の事項が聞かれて確定する", async () => {
+    const sourceMark = "MARK_SOURCE_DIFF";
+    const answerMark = "MARK_ANSWER_DIFF";
+    const source = `${sourceMark}する。件数を合計する。`;
+    const spanOf = (quote: string): { readonly start: number; readonly end: number } => {
+      const start = source.indexOf(quote);
+      return { start, end: start + quote.length };
+    };
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: `${sourceMark}する`, position: spanOf(`${sourceMark}する`) },
+        { id: "R-2", text: "件数を合計できる", quote: "件数を合計する", position: spanOf("件数を合計する") },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      // 1 往復目の差分点検：重大な事項を開く（Issue #434）
+      structured(DIFF_CRITICAL),
+      // 2 往復目：差分の事項への問い
+      structured(QUESTIONS_DIFF),
+      // 2 往復目の差分点検：もう開かない
+      structured(SURFACE_CLEAR),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3", "A:Q2-1"]),
+      // 1 往復目の自由入力（目印つき）は新しい要件——要件の文になる（記録の差分点検には出ない）
+      [freeTextQuestionName("A:Q1-1")]: {
+        kind: "choice",
+        choice: "new-requirement",
+        probabilities: undefined,
+        probability: undefined,
+        confidence: 0.9,
+      },
+    });
+    const dir = `${directory}/diff-review-record`;
+    const answersPath = "diff-review-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) =>
+        path === answersPath ? JSON.stringify({ "Q1-1": { freeText: answerMark } }) : source,
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    // 差分点検の記録（1 往復目は 3 件増えて 1 件開き、2 往復目は 1 件増えた。値ではなく件数）
+    expect(record.diff_reviews).toEqual([
+      { round: 1, added: 3, open_issues: 1, accepted_unwritable: 0 },
+      { round: 2, added: 1, open_issues: 0, accepted_unwritable: 0 },
+    ]);
+    // 依頼文・答えの目印は、差分点検の記録に出ない
+    expect(JSON.stringify(record.diff_reviews)).not.toContain(sourceMark);
+    expect(JSON.stringify(record.diff_reviews)).not.toContain(answerMark);
+    // 2 往復目に、差分の事項が聞かれて確定する
+    expect(record.rounds[1]?.questions[0]?.open_issue_id).toBe("OI-diff");
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });

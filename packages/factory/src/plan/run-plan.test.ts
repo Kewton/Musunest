@@ -43,6 +43,7 @@ import {
 } from "./catalog.js";
 import { confirmQuestionName } from "./confirm.js";
 import { freeTextQuestionName } from "./answers.js";
+import { SURFACE_SCHEMA_NAME } from "./surface.js";
 import {
   SURFACE_RECHECK_NO_EVIDENCE,
   surfaceRecheckEvidenceQuestionName,
@@ -329,6 +330,8 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_OUTPUT),
       structured(QUESTIONS_OUTPUT),
+      // 差分点検（その往復で増えた要件だけ）の P3 の応答（Issue #434）
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const responder: PlanResponder = {
       async answer(request) {
@@ -339,7 +342,12 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      // 差分点検の目録の答え（増えた要件 R:A:Q1-1。Issue #434）
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -353,7 +361,8 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     const added = result.plan.requirements.find((requirement) => requirement.id === "R:A:Q1-1");
     expect(added?.origin.input_id).toBe("A:Q1-1");
     // 段ごとの記録が結果に入る（生成の段の記録と同じ形）。**目録の段が洗い出しより前**（Issue #419）。
-    // **申告 0 件でも surface-check の段は `surface` の次に `ok` で残る**（Issue #432）
+    // **申告 0 件でも surface-check の段は `surface` の次に `ok` で残る**（Issue #432）。
+    // **往復のあとに、差分点検の catalog・surface・surface-check が並ぶ**（Issue #434）
     expect(result.stages.map((stage) => stage.stage)).toEqual([
       "requirements",
       "catalog",
@@ -361,8 +370,13 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
       "surface-check",
       "questions",
       "answers",
+      "catalog",
+      "surface",
+      "surface-check",
       "confirm",
     ]);
+    // 差分点検の記録（往復 1・増えた要件 1 件。Issue #434）
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0 }]);
     // 申告 0 件なので、判定は呼ばれず、surface-check の段も `ok` である
     expect(result.stages.find((stage) => stage.stage === "surface-check")?.status).toBe("ok");
     expect(result.stages.every((stage) => typeof stage.duration_ms === "number")).toBe(true);
@@ -378,6 +392,7 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_OUTPUT),
       structured(QUESTIONS_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const responder: PlanResponder = {
       async answer() {
@@ -387,7 +402,11 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -514,6 +533,7 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
       structured(REVERSE_CHECK_OUTPUT),
       structured(TEN_ISSUES_SURFACE),
       structured(TEN_QUESTIONS),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const responder: PlanResponder = {
       async answer() {
@@ -525,6 +545,7 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     };
     const judge = createFakeJudge({
       ...catalogAnswers(),
+      ...catalogAnswersFor(Array.from({ length: 10 }, (_value, index) => `R:A:Q1-${index + 1}`)),
       ...coverAnswersFor(Array.from({ length: 10 }, (_value, index) => `A:Q1-${index + 1}`)),
     });
 
@@ -545,6 +566,7 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
       structured(SURFACE_OUTPUT),
       structured(ZERO_QUESTIONS),
       structured(QUESTIONS_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const responder: PlanResponder = {
       async answer() {
@@ -554,7 +576,11 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -572,6 +598,7 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
       structured(REVERSE_CHECK_OUTPUT),
       structured(SAME_ISSUES_SURFACE),
       structured(GROUPED_QUESTIONS),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const responder: PlanResponder = {
       async answer(request) {
@@ -581,7 +608,11 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -600,6 +631,7 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
       structured(REVERSE_CHECK_OUTPUT),
       structured(SAME_ISSUES_SURFACE),
       structured(GROUPED_QUESTIONS),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const responder: PlanResponder = {
       async answer() {
@@ -609,7 +641,11 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -1580,6 +1616,7 @@ describe("質問 ID と答えの ID を往復をまたいで一意にする（Is
       structured(SURFACE_OUTPUT),
       structured(QUESTIONS_OUTPUT),
       structured(QUESTIONS_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     let round = 0;
     const responder: PlanResponder = {
@@ -1599,7 +1636,11 @@ describe("質問 ID と答えの ID を往復をまたいで一意にする（Is
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q2-1") });
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q2-1"]),
+      ...coverAnswers("A:Q2-1"),
+    });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -1620,7 +1661,9 @@ describe("質問 ID と答えの ID を往復をまたいで一意にする（Is
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_MIX),
       structured(ROUND_1_QUESTION),
+      structured(SURFACE_OUTPUT_CLEAR),
       structured(ROUND_2_QUESTION),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const asked: PlanAnswerRequest[] = [];
     const responder: PlanResponder = {
@@ -1633,7 +1676,11 @@ describe("質問 ID と答えの ID を往復をまたいで一意にする（Is
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]) });
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -1666,8 +1713,10 @@ describe("質問 ID と答えの ID を往復をまたいで一意にする（Is
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_MIX),
       structured(ROUND_1_QUESTION),
+      structured(SURFACE_OUTPUT_CLEAR),
       structured(ROUND_2_QUESTION),
       structured(ROUND_2_QUESTION),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     let round = 0;
     const responder: PlanResponder = {
@@ -1694,7 +1743,11 @@ describe("質問 ID と答えの ID を往復をまたいで一意にする（Is
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor(["A:Q1-1", "A:Q3-1"]) });
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q3-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q3-1"]),
+    });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -1715,6 +1768,7 @@ describe("質問 ID と答えの ID を往復をまたいで一意にする（Is
       structured(SURFACE_OUTPUT),
       structured(QUESTIONS_OUTPUT),
       structured(QUESTIONS_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     let round = 0;
     const responder: PlanResponder = {
@@ -1736,7 +1790,11 @@ describe("質問 ID と答えの ID を往復をまたいで一意にする（Is
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q2-1") });
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q2-1"]),
+      ...coverAnswers("A:Q2-1"),
+    });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -1873,6 +1931,7 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_OUTPUT_CLEAR),
       structured(questionsFor("OI:catalog:R-1:aggregation")),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const asked: PlanAnswerRequest[] = [];
     const responder: PlanResponder = {
@@ -1886,6 +1945,7 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
     };
     const judge = createFakeJudge({
       ...catalogUnspecifiedFor({ "R-1": ["aggregation", "period"] }),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
       ...coverAnswersFor(["A:Q1-1"]),
     });
 
@@ -1921,6 +1981,7 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
           ...(questionsFor("OI-p3", "Q-3").questions as readonly object[]),
         ],
       }),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const asked: PlanAnswerRequest[] = [];
     const responder: PlanResponder = {
@@ -1934,6 +1995,7 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
     };
     const judge = createFakeJudge({
       ...catalogUnspecifiedFor({ "R-1": ["editable-by"] }),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q1-2", "R:A:Q1-3"]),
       ...coverAnswersFor(["A:Q1-1", "A:Q1-2", "A:Q1-3"]),
     });
 
@@ -2069,9 +2131,11 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
       structured(REVERSE_CHECK_OUTPUT),
       structured(surface),
       structured(TEN_QUESTIONS),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const judge = createFakeJudge({
       ...catalogUnspecifiedFor({ "R-1": ["period"] }),
+      ...catalogAnswersFor(Array.from({ length: 10 }, (_value, index) => `R:A:Q1-${index + 1}`)),
       ...coverAnswersFor(Array.from({ length: 10 }, (_value, index) => `A:Q1-${index + 1}`)),
     });
 
@@ -2095,10 +2159,12 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
       structured(REVERSE_CHECK_OUTPUT),
       structured(TEN_ISSUES_SURFACE),
       structured(TEN_QUESTIONS),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const responder: PlanResponder = ALL_RECOMMENDED;
     const judge = createFakeJudge({
       ...catalogUnspecifiedFor({ "R-1": ["period"] }),
+      ...catalogAnswersFor(Array.from({ length: 10 }, (_value, index) => `R:A:Q1-${index + 1}`)),
       ...coverAnswersFor(Array.from({ length: 10 }, (_value, index) => `A:Q1-${index + 1}`)),
     });
 
@@ -2265,6 +2331,7 @@ describe("P1/P2 の往復ごとの落ちの内訳を結果に残す（Issue #430
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_OUTPUT),
       structured(QUESTIONS_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const responder: PlanResponder = {
       async answer(request) {
@@ -2274,7 +2341,11 @@ describe("P1/P2 の往復ごとの落ちの内訳を結果に残す（Issue #430
         return "build";
       },
     };
-    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
 
     const result = await runPlan(makePlanInput(recording.client, judge, responder));
 
@@ -2416,6 +2487,7 @@ describe("P3 の「書けない」の申告を判定の口で点検する（04 �
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_THREE_CLAIMS),
       structured(questionsFor("OI:surface-check:2")),
+      structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const asked: PlanAnswerRequest[] = [];
     const responder: PlanResponder = {
@@ -2429,6 +2501,7 @@ describe("P3 の「書けない」の申告を判定の口で点検する（04 �
     };
     const judge = createFakeJudge({
       ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
       ...coverAnswersFor(["A:Q1-1"]),
       [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
       [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
@@ -2888,5 +2961,489 @@ describe("判定も、生成と共有する締切・総呼び出し数の門を�
     if (result.kind !== "cannot-confirm") return;
     expect(result.surfaceCheck.accepted).toBe(0);
     expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]" }]);
+  });
+});
+
+// ── Issue #434：P5 で増えた要件を、確認の前に差分点検に掛ける ──────────────────
+
+/** `<data name="…">…</data>` の中身を取り出す（データの欄ごとに確かめる） */
+const dataBlockOf = (input: string, name: string): string =>
+  input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "";
+
+/** 差分点検の洗い出しが返す、重大な事項 1 件（差分の要件に由来する） */
+const DIFF_CRITICAL = {
+  ambiguities: [{ id: "OI-diff", requirementId: "R:A:Q1-1", text: "差分で開いた重大な事項", critical: true }],
+  unwritable: [],
+};
+
+/** 差分点検の申告の点検へ回す、書けない申告 1 件（差分の要件に由来する。制約 ID は文書に実在する） */
+const DIFF_UNWRITABLE = {
+  ambiguities: [],
+  unwritable: [
+    { id: "U-0", requirementId: "R:A:Q1-1", part: "差分の部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+  ],
+};
+
+describe("差分点検：その往復で増えた要件だけを点検し、文脈は参照用に渡す（04 §3 P3・Issue #434）", () => {
+  it("答えで増えた要件だけが目録・洗い出しの対象になり、別の問いに由来する既存要件と決定は文脈に見え、段の記録に 2 回目の 3 段が並ぶ", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_MIX),
+      structured(ROUND_1_QUESTION),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(ROUND_2_QUESTION),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const requests: JudgeRequest[] = [];
+    const inner = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        requests.push(request);
+        return inner.judge(request);
+      },
+    };
+    const responder: PlanResponder = {
+      async answer(request) {
+        // 各往復とも、提示された最初の問いだけに答える（1 往復目は OI-1、2 往復目は OI-2）
+        return { kind: "answers", answers: [answerTo(request.questions[0])] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+
+    // 1 往復目の差分点検の目録は、増えた要件 R:A:Q1-1 だけを問いの名前にする（既存の R-1 は対象にしない）
+    const first = requests.find((request) => Object.keys(request.questions).includes(catalogGateQuestionName("R:A:Q1-1")));
+    expect(first).toBeDefined();
+    expect(Object.keys(first?.questions ?? {})).toContain(catalogGateQuestionName("R:A:Q1-1"));
+    expect(Object.keys(first?.questions ?? {})).not.toContain(catalogGateQuestionName("R-1"));
+
+    // 2 往復目の差分点検の目録は R:A:Q2-1 だけ（前の往復で増えた R:A:Q1-1 を点検し直さない）
+    const second = requests
+      .filter((request) => Object.keys(request.questions).includes(catalogGateQuestionName("R:A:Q2-1")))
+      .at(-1);
+    expect(second).toBeDefined();
+    expect(Object.keys(second?.questions ?? {})).not.toContain(catalogGateQuestionName("R:A:Q1-1"));
+
+    // 洗い出しは初回 + 差分 2 回。2 回目の差分の要求では、対象（要件の一覧）は R:A:Q2-1 だけである
+    const surfaceRequests = recording.structured.filter((request) => request.schemaName === SURFACE_SCHEMA_NAME);
+    expect(surfaceRequests).toHaveLength(3);
+    const secondDiff = surfaceRequests[2];
+    const target = dataBlockOf(secondDiff?.input ?? "", "要件の一覧");
+    expect(target).toContain("R:A:Q2-1");
+    expect(target).not.toContain("R:A:Q1-1");
+    // 参照用の文脈には、別の問いに由来する既存要件（R:A:Q1-1）と、既存の決定（D-1）が見える
+    const contextAll = dataBlockOf(secondDiff?.input ?? "", "点検時点の全要件");
+    expect(contextAll).toContain("R:A:Q1-1");
+    expect(contextAll).toContain("R-1");
+    const contextDecisions = dataBlockOf(secondDiff?.input ?? "", "既存の決定");
+    expect(contextDecisions).toContain("D-1");
+    // 関係する問いと答えのデータがある
+    expect(dataBlockOf(secondDiff?.input ?? "", "関係する問いと答え")).toContain("A:Q2-1");
+    // 了承除外はまだ無い
+    expect(dataBlockOf(secondDiff?.input ?? "", "了承除外").trim()).toBe("[]");
+
+    // 段の記録に、2 回目の catalog・surface・surface-check が往復のあとに並ぶ
+    expect(result.stages.map((stage) => stage.stage)).toEqual([
+      "requirements",
+      "catalog",
+      "surface",
+      "surface-check",
+      "questions",
+      "answers",
+      "catalog",
+      "surface",
+      "surface-check",
+      "questions",
+      "answers",
+      "catalog",
+      "surface",
+      "surface-check",
+      "confirm",
+    ]);
+    // 差分点検の記録（往復ごとに 1 件。値ではなく件数）
+    expect(result.diffReviews).toEqual([
+      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0 },
+      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0 },
+    ]);
+  });
+
+  it("増えた要件が 0 件の往復では、差分点検の段を呼ばない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    let round = 0;
+    const responder: PlanResponder = {
+      async answer(request) {
+        round += 1;
+        if (round === 1) {
+          // 答えの ID が空 → 採られず、要件が増えない
+          return {
+            kind: "answers",
+            answers: [
+              { id: "", questionId: request.questions[0]?.id ?? "", revision: request.questions[0]?.revision ?? 1, choiceId: "c1" },
+            ],
+          };
+        }
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q2-1"]),
+      ...coverAnswers("A:Q2-1"),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    // 差分点検は 2 往復目でだけ走る（1 往復目は増えた要件が 0 件）
+    expect(result.diffReviews).toEqual([{ round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0 }]);
+    // 目録の段は初回と 2 往復目でだけ（1 往復目の分は無い）
+    expect(result.stages.filter((stage) => stage.stage === "catalog")).toHaveLength(2);
+  });
+});
+
+describe("差分点検：新しく開いた重大な事項を、同じ上限の中で扱う（04 §3 P3・Issue #434）", () => {
+  it("差分の洗い出しが返した重大な事項は、残りの問数に収まれば次の往復で聞かれて確定する", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(DIFF_CRITICAL),
+      structured(questionsFor("OI-diff")),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const asked: PlanAnswerRequest[] = [];
+    const responder: PlanResponder = {
+      async answer(request) {
+        asked.push(request);
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 2 往復目に、差分で開いた重大な事項が聞かれる
+    expect(asked).toHaveLength(2);
+    expect(asked[1]?.questions.map((question) => question.openIssueId)).toEqual(["OI-diff"]);
+    // 差分点検の記録（1 往復目で事項 1 件を開き、2 往復目の答えでも 1 件増えた）
+    expect(result.diffReviews).toEqual([
+      { round: 1, added: 1, openIssues: 1, acceptedUnwritable: 0 },
+      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0 },
+    ]);
+    expect(result.plan.open_issues.find((issue) => issue.id === "OI-diff")?.status).toBe("resolved");
+  });
+
+  it("差分の洗い出しが返した重大な事項が残りの問数に収まらなければ、確定できない（session）", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(TEN_ISSUES_SURFACE),
+      structured(TEN_QUESTIONS),
+      structured(DIFF_CRITICAL),
+    ]);
+    const responder: PlanResponder = ALL_RECOMMENDED;
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(Array.from({ length: 10 }, (_value, index) => `R:A:Q1-${index + 1}`)),
+      ...coverAnswersFor(Array.from({ length: 10 }, (_value, index) => `A:Q1-${index + 1}`)),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 問数の上限に触れたので、残った重大な事項を聞けない
+    expect(result.reasons).toEqual([{ source: "session", code: "question-limit", path: "open_issues" }]);
+    expect(result.openIssues.map((issue) => issue.id)).toContain("OI-diff");
+    // P6 を呼ばない
+    expect(result.stages.some((stage) => stage.stage === "confirm")).toBe(false);
+  });
+
+  it("別の問いから増えた要件どうしの矛盾が重大な事項として返れば、未解決のまま確定しない", async () => {
+    const contradiction = {
+      ambiguities: [{ id: "OI-contra", requirementId: "R:A:Q2-1", text: "差分の要件どうしの矛盾", critical: true }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_MIX),
+      structured(ROUND_1_QUESTION),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(ROUND_2_QUESTION),
+      structured(contradiction),
+      structured(questionsFor("OI-contra")),
+    ]);
+    let round = 0;
+    const responder: PlanResponder = {
+      async answer(request) {
+        round += 1;
+        if (round === 3) {
+          // 3 往復目は答えない → 矛盾の事項が未解決のまま残る
+          return { kind: "answers", answers: [] };
+        }
+        return { kind: "answers", answers: [answerTo(request.questions[0])] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 矛盾の事項が開いたまま残る（聞いても答えが無いので未解決）
+    expect(result.openIssues.map((issue) => issue.id)).toContain("OI-contra");
+    expect(result.reasons).toEqual([{ source: "session", code: "round-trip-limit", path: "open_issues" }]);
+  });
+});
+
+describe("差分点検：目録の未指定の観点が、既定の適用と上限に載る（04 §3・Issue #434）", () => {
+  it("差分の目録が返した重大でない観点は、適用条件に合えば次の既定の適用で閉じ、問数を消費しない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const responder: PlanResponder = ALL_RECOMMENDED;
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogUnspecifiedFor({ "R:A:Q1-1": ["period"] }, ["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 差分の目録が開いた period は、非重大で適用条件に合うので既定で閉じる（問数を消費しない）
+    expect(result.closedByDefault).toEqual([
+      { issueId: "OI:catalog:R:A:Q1-1:period", facetId: "period", value: "期間の条件を足さない" },
+    ]);
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 1, acceptedUnwritable: 0 }]);
+    // 2 往復目は無い（既定で閉じたので問いを出さない）
+    expect(result.stages.filter((stage) => stage.stage === "questions")).toHaveLength(1);
+  });
+
+  it("差分の目録が返した重大な観点は、既定では閉じず、次の往復で聞いて確定する", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(questionsFor("OI:catalog:R:A:Q1-1:aggregation")),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const asked: PlanAnswerRequest[] = [];
+    const responder: PlanResponder = {
+      async answer(request) {
+        asked.push(request);
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogUnspecifiedFor({ "R:A:Q1-1": ["aggregation"] }, ["R:A:Q1-1"]),
+      ...catalogAnswersFor(["R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 重大な観点は、2 往復目に聞かれる
+    expect(asked[1]?.questions.map((question) => question.openIssueId)).toEqual([
+      "OI:catalog:R:A:Q1-1:aggregation",
+    ]);
+    expect(result.closedByDefault).toEqual([]);
+  });
+});
+
+describe("差分点検：書けない申告を、確認の前に点検する（04 §3 P3・Issue #434）", () => {
+  it("点検で受理された申告だけが了承除外と代わりの案になり、確認の SHA がその仕様から計算される", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(DIFF_UNWRITABLE),
+    ]);
+    const responder: PlanResponder = ALL_RECOMMENDED;
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 受理した申告が、了承除外と代わりの案になる
+    expect(result.plan.accepted_unwritable).toHaveLength(1);
+    expect(result.plan.accepted_unwritable[0]?.part_id).toBe("P:U-0");
+    expect(result.plan.accepted_unwritable[0]?.alternative_id).toBe("R:alt:U-0");
+    expect(result.plan.requirements.map((requirement) => requirement.id)).toContain("R:alt:U-0");
+    // 確認の SHA が、点検後の仕様から計算される
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+    expect(await isConfirmationValid(result.plan)).toBe(true);
+    expect(result.plan.confirmation.sha256).toBe(await planDigest(result.plan));
+    // 差分点検の記録に、了承除外に加えた件数が残る
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 1 }]);
+  });
+
+  it("差分の申告の点検が未点検なら、確認も呼ばずに確定できない（surface-check）", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(DIFF_UNWRITABLE),
+    ]);
+    let confirmCalls = 0;
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        confirmCalls += 1;
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      // 裏付けが「書いていない」→ 落とし先（Luna）が無いので未点検
+      [surfaceSupportQuestionName(0)]: choice("not-stated", 0.9),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]" }]);
+    // 確認も P6 も呼ばない
+    expect(confirmCalls).toBe(0);
+    expect(result.stages.some((stage) => stage.stage === "confirm")).toBe(false);
+  });
+});
+
+describe("差分点検：「全部推奨」の後の新しい束と、上限（04 §3・Issue #434）", () => {
+  it("全部推奨の後に差分点検で重大な事項が増えると、残枠があれば 2 往復目に質問し、それまでの答えと消費した問数が保たれる", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(DIFF_CRITICAL),
+      structured(questionsFor("OI-diff")),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const asked: PlanAnswerRequest[] = [];
+    const responder: PlanResponder = {
+      async answer(request) {
+        asked.push(request);
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    expect(asked).toHaveLength(2);
+    // 2 往復目に、差分で開いた事項が聞かれる
+    expect(asked[1]?.questions.map((question) => question.openIssueId)).toEqual(["OI-diff"]);
+    // 消費した問数が保たれ、残りが減っている（1 問答えた後の 2 往復目）
+    expect(asked[1]?.remaining.questions).toBeLessThan(asked[0]?.remaining.questions ?? Infinity);
+    // それまでの答えは保たれる
+    expect(result.plan.open_issues.find((issue) => issue.id === "OI-extra")?.resolution?.answer_id).toBe("A:Q1-1");
+  });
+
+  it("全部推奨の後に差分点検で重大な事項が増え、残枠が無ければ、確認も Build も呼ばない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(TEN_ISSUES_SURFACE),
+      structured(TEN_QUESTIONS),
+      structured(DIFF_CRITICAL),
+    ]);
+    let confirmCalls = 0;
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        confirmCalls += 1;
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(Array.from({ length: 10 }, (_value, index) => `R:A:Q1-${index + 1}`)),
+      ...coverAnswersFor(Array.from({ length: 10 }, (_value, index) => `A:Q1-${index + 1}`)),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("cannot-confirm");
+    expect(confirmCalls).toBe(0);
+    expect(result.stages.some((stage) => stage.stage === "confirm")).toBe(false);
   });
 });

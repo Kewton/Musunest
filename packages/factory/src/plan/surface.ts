@@ -6,6 +6,7 @@
 // 併せて、書けない部分には**代わりの案を 1 つ**出させる（U-P2「文書の語彙で書ける近い形を 1 つ」）。
 //
 // 段の作法（規則とデータの分離・構造化出力・形の確認と 1 回だけのやり直し）は stages/prompt.ts に合わせる。
+import type { PlanAcceptedUnwritable, PlanDecision } from "@musunest/appspec-schema";
 import type { CallGateway } from "../call.js";
 import type { RequirementList } from "../pipeline.js";
 import {
@@ -149,6 +150,40 @@ export interface SurfaceCatalogData {
   readonly defaults: readonly SurfaceAppliedDefault[];
 }
 
+/** 参照用の文脈に入れる、点検時点の要件 1 つ（ID・文・出どころ。Issue #434） */
+export interface SurfaceContextRequirement {
+  readonly id: string;
+  readonly text: string;
+  readonly origin: string;
+}
+
+/** 参照用の文脈に入れる、関係する問いと答え 1 組（Issue #434） */
+export interface SurfaceContextQuestionAnswer {
+  readonly questionId: string;
+  readonly question: string;
+  readonly answerId: string;
+  readonly answer: string;
+}
+
+/**
+ * 差分の洗い出しに渡す、**参照用の文脈**（Issue #434）。**点検の対象ではない**——点検する要件は `list`
+ * （その往復で増えた差分）だけである。判定に要る文脈（点検時点の全要件・既存の決定・了承除外・関係する
+ * 問いと答え）を、点検の対象と混ぜずに、別々の `<data name=` で渡す。
+ *
+ * **代わりの案の採否や過去の合否は入れない**（正解として渡さない）。既存の要件を新しい点検の対象に
+ * 戻さない——文脈として見せるだけである。渡さなければ要求は今までどおりである（初回の経路は変えない）。
+ */
+export interface SurfaceContext {
+  /** 点検時点の全要件（ID・文・出どころ） */
+  readonly requirements: readonly SurfaceContextRequirement[];
+  /** 既存の決定 */
+  readonly decisions: readonly PlanDecision[];
+  /** 了承して除いた部分（代わりの案つき） */
+  readonly acceptedUnwritable: readonly PlanAcceptedUnwritable[];
+  /** 関係する問いと答え */
+  readonly questionsAndAnswers: readonly SurfaceContextQuestionAnswer[];
+}
+
 /** P3 の洗い出しが受け取るもの */
 export interface SurfaceInput {
   readonly list: RequirementList;
@@ -159,6 +194,11 @@ export interface SurfaceInput {
    * 渡すと「目録が点検した対象」「開いている事項」「仮に適用した既定」を**別々のデータ**として足す。
    */
   readonly catalog?: SurfaceCatalogData;
+  /**
+   * 参照用の文脈（Issue #434。差分の洗い出しの道だけ渡す）。渡すと、点検時点の全要件・既存の決定・
+   * 了承除外・関係する問いと答えを、**別々のデータ**として足す（点検の対象は `list` のまま）。
+   */
+  readonly context?: SurfaceContext;
 }
 
 function checkAmbiguity(value: unknown, field: string, problems: Problem[]): PlanAmbiguity | undefined {
@@ -325,6 +365,12 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
     data.push({ name: "目録が点検した対象", text: serializeJson(input.catalog.targets) });
     data.push({ name: "開いている事項", text: serializeJson(input.catalog.openIssues) });
     data.push({ name: "仮に適用した既定", text: serializeJson(input.catalog.defaults) });
+  }
+  if (input.context !== undefined) {
+    data.push({ name: "点検時点の全要件", text: serializeJson(input.context.requirements) });
+    data.push({ name: "既存の決定", text: serializeJson(input.context.decisions) });
+    data.push({ name: "了承除外", text: serializeJson(input.context.acceptedUnwritable) });
+    data.push({ name: "関係する問いと答え", text: serializeJson(input.context.questionsAndAnswers) });
   }
   const request = buildStructuredRequest({
     rules: SURFACE_RULES,
