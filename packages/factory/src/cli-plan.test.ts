@@ -371,6 +371,13 @@ interface PlanCliRecordShape {
       readonly deduped_indexes: readonly number[];
     };
   }[];
+  /** 同じ ID の開いている事項の行の衝突の記録（件数と分類と版だけ。Issue #460） */
+  readonly open_issue_conflicts: {
+    readonly ids: number;
+    readonly rows: readonly { readonly existing: string; readonly added: string; readonly count: number }[];
+    readonly empty_targets: number;
+    readonly round: number | null;
+  };
   readonly spent_usd: number;
   readonly remaining_usd: number;
   readonly budget_usd: number;
@@ -2394,5 +2401,69 @@ describe("差分点検・§3：受理済み申告の再申告を除いた記録�
     expect(out?.kinds.find((entry) => entry.kind === "unknown")?.claims).toBe(1);
     // 値は転記されない
     expect(JSON.stringify(record.diff_reviews)).not.toContain(MARK);
+  });
+});
+
+// ── Issue #460：同じ ID の開いている事項の行の衝突を、値を含めずに plan-record に残す ──────────
+
+describe("同じ ID の開いている事項の行の衝突を、値を含めずに plan-record に残す（Issue #460）", () => {
+  it("衝突した ID の件数・行の件数・0 行の件数・版が残り、duplicate-open-issue が other に消えず、値は転記されない", async () => {
+    const mark = "MARK_CONFLICT_ZZZ";
+    // モデルが、コード作の目録の ID と同じ ID の事項を返す（足す時点で衝突する）
+    const surface = {
+      ambiguities: [{ id: "OI:catalog:R-1:period", requirementId: "R-1", text: `${mark}の事項`, critical: false }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+    ]);
+    const judge = createFakeJudge({ ...catalogUnspecifiedFor({ "R-1": ["period"] }) });
+    const dir = `${directory}/open-issue-conflict`;
+    const answersPath = "conflict-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    // Build を流さない
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("cannot-confirm");
+    // 新しい有限の分類は other に消えない
+    expect(record.cannot_confirm).toEqual([{ source: "session", code: "duplicate-open-issue", path: "open_issues" }]);
+    // 衝突の記録（件数と分類と版だけ。0 行の件数も残る）
+    expect(record.open_issue_conflicts).toEqual({
+      ids: 1,
+      rows: [{ existing: "surface", added: "catalog", count: 1 }],
+      empty_targets: 0,
+      round: 1,
+    });
+    // 新しい記録に、事項 ID・要件 ID・文の目印が出ない
+    const conflictsText = JSON.stringify(record.open_issue_conflicts);
+    expect(conflictsText).not.toContain(mark);
+    expect(conflictsText).not.toContain("OI:catalog");
+    expect(conflictsText).not.toContain("R-1");
+    // もともと値を保存する既存の欄は変えない（問いの事項 ID・一緒に閉じる ID・答えの本文の形はそのまま）
+    expect(record.rounds).toEqual([]);
+    expect(record.closed_by_default).toEqual([]);
+    expect(record.closed_by_source).toEqual([]);
+    expect(record.diff_reviews).toEqual([]);
   });
 });

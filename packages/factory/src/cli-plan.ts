@@ -374,6 +374,25 @@ export interface PlanCliDiffReviewRecord {
   readonly out_of_scope: PlanCliDiffOutOfScopeRecord;
 }
 
+/** 記録に入れる、衝突した行の件数（既存の出どころ × 追加の出どころの組ごと。Issue #460） */
+export interface PlanCliOpenIssueConflictKindCount {
+  readonly existing: string;
+  readonly added: string;
+  readonly count: number;
+}
+
+/**
+ * 記録に入れる、同じ ID の開いている事項の行の衝突の記録（Issue #460）。**値ではなく件数と分類、版だけ**
+ * である。衝突した ID の件数・衝突した行の件数（出どころの組ごと）・解決の対象が 0 行だった件数・衝突を
+ * 検出した往復の版を持つ。事項 ID・要件 ID・文・答えは入れない。
+ */
+export interface PlanCliOpenIssueConflictRecord {
+  readonly ids: number;
+  readonly rows: readonly PlanCliOpenIssueConflictKindCount[];
+  readonly empty_targets: number;
+  readonly round: number | null;
+}
+
 /**
  * 記録に入れる落ちの件数の内訳（種類ごと・出どころごと。Issue #430）。**件数だけ**を持ち、落ちの文言・
  * 引用・原文の断片・位置は入れない（`02-failure-modes.md` §1）。
@@ -477,6 +496,8 @@ export interface PlanCliRecord {
   readonly surface_check: PlanCliSurfaceCheckRecord;
   /** 差分点検（各往復の P5 のあと）の記録。**値ではなく件数だけ**（Issue #434） */
   readonly diff_reviews: readonly PlanCliDiffReviewRecord[];
+  /** 同じ ID の開いている事項の行の衝突の記録（件数と分類と版だけ。Issue #460） */
+  readonly open_issue_conflicts: PlanCliOpenIssueConflictRecord;
   readonly confirmation: "build" | "stop" | null;
   readonly stages: readonly PlanStageRecord[];
   readonly judge: BundleJudgeUsage;
@@ -625,6 +646,16 @@ export function buildPlanCliRecord(input: {
         deduped_indexes: review.outOfScope.dedupedIndexes.slice(),
       },
     })),
+    open_issue_conflicts: {
+      ids: input.result.openIssueConflicts.ids,
+      rows: input.result.openIssueConflicts.rows.map((entry) => ({
+        existing: entry.existing,
+        added: entry.added,
+        count: entry.count,
+      })),
+      empty_targets: input.result.openIssueConflicts.emptyTargets,
+      round: input.result.openIssueConflicts.round,
+    },
     confirmation: input.transcript.confirmation,
     stages: input.result.stages,
     judge: input.result.judge,

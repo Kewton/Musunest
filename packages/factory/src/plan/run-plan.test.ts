@@ -2106,7 +2106,7 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
     expect(result.openIssues.map((issue) => issue.id)).toContain("OI:catalog:R-1:period");
   });
 
-  it("重複した ID の事項は、既定の対象にならない", async () => {
+  it("重複した ID の事項は、既定の対象にならず、P4 を呼ばずに duplicate-open-issue で止まる", async () => {
     const surface = {
       ambiguities: [{ id: "OI:catalog:R-1:period", requirementId: "R-1", text: "重複した事項", critical: false }],
       unwritable: [],
@@ -2115,9 +2115,6 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
       structured(REQUIREMENT_LIST_OUTPUT),
       structured(REVERSE_CHECK_OUTPUT),
       structured(surface),
-      structured(questionsFor("OI:catalog:R-1:period")),
-      structured(questionsFor("OI:catalog:R-1:period")),
-      structured(questionsFor("OI:catalog:R-1:period")),
     ]);
     const judge = createFakeJudge({
       ...catalogUnspecifiedFor({ "R-1": ["period"] }),
@@ -2130,6 +2127,13 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
     if (result.kind !== "cannot-confirm") return;
     // コードが作った事項とモデルが作った事項で ID が重なっているので、既定で閉じない
     expect(result.closedByDefault).toEqual([]);
+    // 既定の適用と P4 の前に、同じ ID の衝突として有限の理由で止まる（Issue #460）
+    expect(result.reasons).toEqual([{ source: "session", code: "duplicate-open-issue", path: "open_issues" }]);
+    expect(result.stages.some((stage) => stage.stage === "questions")).toBe(false);
+    // 衝突の記録（モデル作の事項 × コード作の目録。値は持たない）
+    expect(result.openIssueConflicts.ids).toBe(1);
+    expect(result.openIssueConflicts.round).toBe(1);
+    expect(result.openIssueConflicts.rows).toEqual([{ existing: "surface", added: "catalog", count: 1 }]);
   });
 
   it("「全部推奨」でも、残りの問数に収まる重大でない事項を聞かない応答は、覆いの検査でやり直し、2 回続けば段の失敗になる（Issue #419）", async () => {
@@ -2536,7 +2540,7 @@ describe("P3 の「書けない」の申告を判定の口で点検する（04 �
       structured(REQUIREMENT_LIST_OUTPUT),
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_THREE_CLAIMS),
-      structured(questionsFor("OI:surface-check:2")),
+      structured(questionsFor("OI:surface-check:1:2")),
       structured(SURFACE_OUTPUT_CLEAR),
     ]);
     const asked: PlanAnswerRequest[] = [];
@@ -2571,8 +2575,8 @@ describe("P3 の「書けない」の申告を判定の口で点検する（04 �
     // 落とした申告（U-1）の要件（R-2）はそのまま残る（部分が付かない）
     expect(result.plan.requirements.find((requirement) => requirement.id === "R-2")?.parts).toEqual([]);
     // 曖昧さと判定した申告（U-2）が、重大な開いている事項として P4 に渡って閉じる
-    expect(asked[0]?.questions.map((question) => question.openIssueId)).toEqual(["OI:surface-check:2"]);
-    expect(result.plan.open_issues.find((issue) => issue.id === "OI:surface-check:2")?.status).toBe("resolved");
+    expect(asked[0]?.questions.map((question) => question.openIssueId)).toEqual(["OI:surface-check:1:2"]);
+    expect(result.plan.open_issues.find((issue) => issue.id === "OI:surface-check:1:2")?.status).toBe("resolved");
     // 確定した仕様の検査の誤りが 0
     expect(await checkConfirmedPlan(result.plan)).toEqual([]);
     // 件数の記録（受理 1・落とした 1・曖昧さへ 1・未点検 0）
@@ -4257,5 +4261,322 @@ describe("差分点検・§3：重複と認めない構造の条件（Issue #434
         claim: { ...claim, constraintIds: ["action"] },
       }),
     ).toBe(true);
+  });
+});
+
+// ── Issue #460：同じ ID の開いている事項の行を畳まず、衝突は問いの前に有限の理由で止める ──────────
+
+describe("同じ ID の開いている事項の行を畳まず、衝突は問いの前に有限の理由で止める（Issue #460）", () => {
+  it("新しい分類 duplicate-open-issue は、有限の一覧にあり other に消えない", () => {
+    expect(planDiagnosisCode("duplicate-open-issue")).toBe("duplicate-open-issue");
+    expect(planDiagnosisCode("知らない分類")).toBe("other");
+  });
+
+  /** 同じことを聞く 2 件（OI-a・OI-b）と、別の 1 件（OI-x）を返す P3 の答え */
+  const GROUPED_SURFACE_THREE = {
+    ambiguities: [
+      { id: "OI-a", requirementId: "R-1", text: "同じ問い 1", critical: true },
+      { id: "OI-b", requirementId: "R-1", text: "同じ問い 2", critical: true },
+      { id: "OI-x", requirementId: "R-2", text: "別の問い", critical: true },
+    ],
+    unwritable: [],
+  };
+  /** OI-a と OI-b を 1 問で閉じ、OI-x を別の 1 問で聞く P4 の答え */
+  const GROUPED_QUESTIONS_TWO = {
+    questions: [
+      {
+        id: "Q-1",
+        openIssueId: "OI-a",
+        alsoCloses: ["OI-b"],
+        text: "まとめて聞く",
+        choices: [
+          { id: "c1", text: "こちら" },
+          { id: "c2", text: "あちら" },
+        ],
+        recommended: { choiceId: "c1", reason: "依頼に沿う" },
+        allowFreeText: true,
+      },
+      {
+        id: "Q-2",
+        openIssueId: "OI-x",
+        text: "別に聞く",
+        choices: [
+          { id: "c1", text: "こちら" },
+          { id: "c2", text: "あちら" },
+        ],
+        recommended: { choiceId: "c1", reason: "依頼に沿う" },
+        allowFreeText: true,
+      },
+    ],
+  };
+
+  async function runGroupedTwo(responder: PlanResponder): Promise<PlanResult> {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(GROUPED_SURFACE_THREE),
+      structured(GROUPED_QUESTIONS_TWO),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q1-2"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q1-2"]),
+    });
+    return runPlan(makePlanInput(recording.client, judge, responder));
+  }
+
+  it("主の事項と alsoCloses が同じ答えの ID で閉じ、他の行には触れない（通常の答えと全部推奨の両方）", async () => {
+    const normal: PlanResponder = {
+      async answer(request) {
+        return { kind: "answers", answers: request.questions.map((question) => answerTo(question)) };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    for (const responder of [normal, ALL_RECOMMENDED]) {
+      const result = await runGroupedTwo(responder);
+      expect(result.kind).toBe("confirmed");
+      if (result.kind !== "confirmed") continue;
+      // 主の OI-a と一緒に閉じる OI-b が、同じ（組み直した）答えの ID で閉じる
+      expect(result.plan.open_issues.find((issue) => issue.id === "OI-a")?.resolution?.answer_id).toBe("A:Q1-1");
+      expect(result.plan.open_issues.find((issue) => issue.id === "OI-b")?.resolution?.answer_id).toBe("A:Q1-1");
+      // 別の行（OI-x）は、別の問いの答えで閉じる（一緒に閉じる一覧に触れられない）
+      expect(result.plan.open_issues.find((issue) => issue.id === "OI-x")?.resolution?.answer_id).toBe("A:Q1-2");
+      // 同じ ID の行を増やしていない
+      expect(result.plan.open_issues.filter((issue) => issue.id === "OI-a")).toHaveLength(1);
+      expect(result.openIssueConflicts).toEqual({ ids: 0, rows: [], emptyTargets: 0, round: null });
+      expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+    }
+  });
+
+  /** 4 件の重大な曖昧さ（OI-1〜OI-4）を返す P3 の答え */
+  const SURFACE_FOUR = {
+    ambiguities: Array.from({ length: 4 }, (_value, index) => ({
+      id: `OI-${index + 1}`,
+      requirementId: "R-1",
+      text: `曖昧 ${index + 1}`,
+      critical: true,
+    })),
+    unwritable: [],
+  };
+  /** 4 件の事項に 1 問ずつ（LLM の id はコードが組み直す） */
+  const QUESTIONS_FOUR = {
+    questions: Array.from({ length: 4 }, (_value, index) => ({
+      id: `Q-${index + 1}`,
+      openIssueId: `OI-${index + 1}`,
+      text: `問い ${index + 1}`,
+      choices: [
+        { id: "c1", text: "こちら" },
+        { id: "c2", text: "あちら" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    })),
+  };
+
+  it("不受理の答え（質問に無い・選択肢に無い・古い版・長すぎる自由入力）は何も解決せず、事項は開いたまま次の往復に回る", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_FOUR),
+      // 1 往復目：4 件に問いを出す。答えはどれも不受理（下の responder）
+      structured(QUESTIONS_FOUR),
+      // 2 往復目：まだ開いている 4 件に、もう一度問いを出す
+      structured(QUESTIONS_FOUR),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q2-1", "R:A:Q2-2", "R:A:Q2-3", "R:A:Q2-4"]),
+      ...coverAnswersFor(["A:Q2-1", "A:Q2-2", "A:Q2-3", "A:Q2-4"]),
+    });
+    const asked: PlanAnswerRequest[] = [];
+    let round = 0;
+    const responder: PlanResponder = {
+      async answer(request) {
+        asked.push(request);
+        round += 1;
+        if (round === 1) {
+          // 質問に無い・選択肢に無い・古い版・長すぎる自由入力（どれも要件にならない）
+          return {
+            kind: "answers",
+            answers: [
+              { id: "A-1", questionId: "Q1-1", revision: 1, choiceId: "cX" },
+              { id: "A-2", questionId: "Q1-2", revision: 0, choiceId: "c1" },
+              { id: "A-3", questionId: "Q99-9", revision: 1, choiceId: "c1" },
+              { id: "A-4", questionId: "Q1-4", revision: 1, freeText: "長すぎる自由入力" },
+            ],
+          };
+        }
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder, { freeTextMax: 4 }));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 1 往復目で何も解決せず、同じ 4 件が 2 往復目にも聞かれる（開いたまま次の往復に回る）
+    expect(asked).toHaveLength(2);
+    expect(asked[0]?.questions.map((question) => question.openIssueId)).toEqual(["OI-1", "OI-2", "OI-3", "OI-4"]);
+    expect(asked[1]?.questions.map((question) => question.openIssueId)).toEqual(["OI-1", "OI-2", "OI-3", "OI-4"]);
+    // 入力・要件・resolution のどれも、不受理の答えからは増えていない
+    expect(result.plan.inputs.filter((input) => input.kind === "answer").map((input) => input.id)).toEqual([
+      "A:Q2-1",
+      "A:Q2-2",
+      "A:Q2-3",
+      "A:Q2-4",
+    ]);
+    expect(result.plan.requirements.map((requirement) => requirement.id)).toEqual([
+      "R-1",
+      "R-2",
+      "R:A:Q2-1",
+      "R:A:Q2-2",
+      "R:A:Q2-3",
+      "R:A:Q2-4",
+    ]);
+    const recordText = JSON.stringify(result.plan);
+    expect(recordText).not.toContain("A-1");
+    expect(recordText).not.toContain("Q99-9");
+    // 解決の根拠は、2 往復目の受理された答えだけを指す
+    for (const [index, id] of ["OI-1", "OI-2", "OI-3", "OI-4"].entries()) {
+      expect(result.plan.open_issues.find((issue) => issue.id === id)?.resolution?.answer_id).toBe(`A:Q2-${index + 1}`);
+    }
+  });
+
+  /** 与えた P3 の応答で 1 回流す（P4 に進んだかを見る） */
+  async function runSurface(surface: unknown): Promise<PlanResult> {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+    ]);
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor([]) });
+    return runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+  }
+
+  it("同一応答内の同じ ID の 2 件は、畳まずに 2 行のまま、P4 を呼ばずに duplicate-open-issue で止まる", async () => {
+    const sameContent = {
+      ambiguities: [
+        { id: "OI-dup", requirementId: "R-1", text: "同じ文", critical: true },
+        { id: "OI-dup", requirementId: "R-1", text: "同じ文", critical: true },
+      ],
+      unwritable: [],
+    };
+    const differentRequirement = {
+      ambiguities: [
+        { id: "OI-dup", requirementId: "R-1", text: "同じ文", critical: true },
+        { id: "OI-dup", requirementId: "R-2", text: "同じ文", critical: true },
+      ],
+      unwritable: [],
+    };
+    for (const surface of [sameContent, differentRequirement]) {
+      const result = await runSurface(surface);
+      expect(result.kind).toBe("cannot-confirm");
+      if (result.kind !== "cannot-confirm") continue;
+      expect(result.reasons).toEqual([{ source: "session", code: "duplicate-open-issue", path: "open_issues" }]);
+      // 2 行のまま畳まれない（同じ出どころの組として記録する）
+      expect(result.openIssues.filter((issue) => issue.id === "OI-dup")).toHaveLength(2);
+      expect(result.openIssueConflicts.ids).toBe(1);
+      expect(result.openIssueConflicts.rows).toEqual([{ existing: "surface", added: "surface", count: 1 }]);
+      expect(result.closedByDefault).toEqual([]);
+      expect(result.stages.some((stage) => stage.stage === "questions")).toBe(false);
+    }
+  });
+
+  it("入力の要件の ID が重複して目録が同じ ID の行を 2 行作ると、既定の決定が 0 件のまま duplicate-open-issue で止まる", async () => {
+    const duplicateRequirementList = {
+      requirements: [
+        { id: "R-1", text: "タスクを記録できる", quote: "タスクを記録する", position: { start: 0, end: 8 } },
+        { id: "R-1", text: "件数を合計できる", quote: "件数を合計する", position: { start: 9, end: 16 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(duplicateRequirementList),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["period"] }, ["R-1"]),
+      ...coverAnswersFor([]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 既定の決定は 0 件のまま（目録の行が 2 つあるので既定の対象にしない）
+    expect(result.closedByDefault).toEqual([]);
+    expect(result.reasons).toEqual([{ source: "session", code: "duplicate-open-issue", path: "open_issues" }]);
+    expect(result.openIssueConflicts.ids).toBe(1);
+    expect(result.openIssueConflicts.rows).toEqual([{ existing: "catalog", added: "catalog", count: 1 }]);
+    expect(result.stages.some((stage) => stage.stage === "questions")).toBe(false);
+  });
+
+  it("差分の点検が往復ごとに作る申告点検の曖昧さの ID は衝突せず、既定で閉じる事項も変わらない", async () => {
+    const initialSurface = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-0", requirementId: "R-1", part: "初回の部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+      ],
+    };
+    const diffSurface = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-1", requirementId: "R:A:Q1-1", part: "差分の部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(initialSurface),
+      // 1 往復目：点検 1 の曖昧さ（添字 0）への問い
+      structured(questionsFor("OI:surface-check:1:0")),
+      // 1 往復目の差分点検：点検 2 の曖昧さ（同じ添字 0）
+      structured(diffSurface),
+      // 2 往復目：点検 2 の曖昧さへの問い
+      structured(questionsFor("OI:surface-check:2:0")),
+      // 2 往復目の差分点検：もう開かない
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["period"] }),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+      [surfaceTriageQuestionName(0)]: choice("ambiguity", 0.9),
+    });
+    const responder: PlanResponder = {
+      async answer(request) {
+        return { kind: "answers", answers: request.questions.map((question) => answerTo(question)) };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 初回（点検 1）と差分（点検 2）が同じ添字 0 を使っても、ID が衝突しない
+    expect(
+      result.plan.open_issues.map((issue) => issue.id).filter((id) => id.startsWith("OI:surface-check:")),
+    ).toEqual(["OI:surface-check:1:0", "OI:surface-check:2:0"]);
+    for (const id of ["OI:surface-check:1:0", "OI:surface-check:2:0"]) {
+      expect(result.plan.open_issues.find((issue) => issue.id === id)?.status).toBe("resolved");
+    }
+    // 既定で閉じた事項は、目録の既定のまま（ID の形を変えても変わらない）
+    expect(result.closedByDefault).toEqual([
+      { issueId: "OI:catalog:R-1:period", facetId: "period", value: "期間の条件を足さない" },
+    ]);
+    expect(result.openIssueConflicts).toEqual({ ids: 0, rows: [], emptyTargets: 0, round: null });
   });
 });
