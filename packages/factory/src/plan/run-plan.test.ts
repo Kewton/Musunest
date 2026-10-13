@@ -8,7 +8,7 @@
 //   5. 予算が尽きると「止まった」になる。使った額に LLM と判定の費用が入る
 //   6. 段ごとの記録が結果に入る
 import { describe, expect, it } from "vitest";
-import { checkConfirmedPlan, isConfirmationValid, planDigest, type ConfirmedPlan, type PlanOpenIssue } from "@musunest/appspec-schema";
+import { checkConfirmedPlan, isConfirmationValid, planDigest, type ConfirmedPlan, type PlanOpenIssue, type PlanRequirement } from "@musunest/appspec-schema";
 import { planStopReasonLine } from "../cli-plan.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "../judge.js";
@@ -26,6 +26,7 @@ import {
   planDiagnosisCode,
   planDiagnosisField,
   runPlan,
+  selectDiffRequirements,
   sessionCannotConfirmReason,
   type PlanAnswerRequest,
   type PlanResponder,
@@ -3336,6 +3337,13 @@ describe("差分点検：書けない申告を、確認の前に点検する（0
     expect(result.plan.confirmation.sha256).toBe(await planDigest(result.plan));
     // 差分点検の記録に、了承除外に加えた件数が残る
     expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 1 }]);
+    // 差分の点検の受理が、結果の要約にも積まれる（初回は申告 0 件なので、合計 1 件。Issue #434）
+    expect(result.surfaceCheck.accepted).toBe(1);
+    expect(result.surfaceCheck.completed).toBe(true);
+    expect(result.surfaceCheck.judgments.map((judgment) => judgment.questionId)).toEqual([
+      "plan-triage:0",
+      "plan-support:0",
+    ]);
   });
 
   it("差分の申告の点検が未点検なら、確認も呼ばずに確定できない（surface-check）", async () => {
@@ -3370,6 +3378,10 @@ describe("差分点検：書けない申告を、確認の前に点検する（0
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
     expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]" }]);
+    // 未点検が、結果の要約にも積まれる（0 件に見せない。Issue #434）
+    expect(result.surfaceCheck.unchecked).toBe(1);
+    expect(result.surfaceCheck.accepted).toBe(0);
+    expect(result.surfaceCheck.completed).toBe(true);
     // 確認も P6 も呼ばない
     expect(confirmCalls).toBe(0);
     expect(result.stages.some((stage) => stage.stage === "confirm")).toBe(false);
@@ -3445,5 +3457,238 @@ describe("差分点検：「全部推奨」の後の新しい束と、上限（0
     expect(result.kind).toBe("cannot-confirm");
     expect(confirmCalls).toBe(0);
     expect(result.stages.some((stage) => stage.stage === "confirm")).toBe(false);
+  });
+});
+
+// ── Issue #434：応答が指す要件 ID を、この往復の差分の集合へ照合する ─────────────
+
+describe("差分点検：応答が指す要件 ID を、この往復の差分の集合へ照合する（04 §3 P3・Issue #434）", () => {
+  it("参照用に渡しただけの既存の要件を指す申告は、受理せず確定させない", async () => {
+    const badDiff = {
+      ambiguities: [{ id: "OI-bad", requirementId: "R-1", text: "既存の要件を指す", critical: true }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(badDiff),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("surface");
+    expect(result.failure?.kind).toBe("unmet");
+    expect(result.failure?.problems).toEqual([
+      { field: "ambiguities[0].requirementId", code: "requirement-id-unknown" },
+    ]);
+    // 誤りの文に要件 ID の値を入れない
+    expect(JSON.stringify(result.failure)).not.toContain("R-1");
+  });
+
+  it("前の往復の要件を指す申告は、受理せず確定させない（停止した往復も記録に数える）", async () => {
+    const badDiff = {
+      ambiguities: [{ id: "OI-bad", requirementId: "R:A:Q1-1", text: "前の往復の要件を指す", critical: true }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_MIX),
+      structured(ROUND_1_QUESTION),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(ROUND_2_QUESTION),
+      structured(badDiff),
+    ]);
+    let round = 0;
+    const responder: PlanResponder = {
+      async answer(request) {
+        round += 1;
+        return { kind: "answers", answers: [answerTo(request.questions[0])] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("surface");
+    expect(result.failure?.kind).toBe("unmet");
+    expect(result.failure?.problems).toEqual([
+      { field: "ambiguities[0].requirementId", code: "requirement-id-unknown" },
+    ]);
+    expect(JSON.stringify(result.failure)).not.toContain("R:A:Q1-1");
+    // 停止した往復（2 往復目）も、差分点検の記録に数えられる（Issue #434）
+    expect(result.diffReviews).toEqual([
+      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0 },
+      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0 },
+    ]);
+    expect(round).toBe(2);
+  });
+});
+
+// ── Issue #434：差分点検でも、途中停止の進捗を残す ───────────────────────────
+
+/** 差分の洗い出しが返す、書けない申告 2 件（差分の要件に由来する。制約 ID は文書に実在する） */
+const DIFF_TWO_CLAIMS = {
+  ambiguities: [],
+  unwritable: [
+    { id: "U-0", requirementId: "R:A:Q1-1", part: "部分 0", constraintIds: ["記録"], reason: "理由 0", alternative: "代案 0" },
+    { id: "U-1", requirementId: "R:A:Q1-1", part: "部分 1", constraintIds: ["合計"], reason: "理由 1", alternative: "代案 1" },
+  ],
+};
+
+describe("差分点検：途中停止でも進捗を残す（04 §3 P3・Issue #432・#434）", () => {
+  it("差分の点検の最初の予約が失敗しても、件数と未実行の診断が残る（completed は false）", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      // 差分の洗い出しの応答で予算を使い切る → 差分の申告の点検の最初の予約が失敗する
+      structured(DIFF_UNWRITABLE, hugeUsage),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED, { budgetUsd: 1 }));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("budget");
+    expect(result.failure?.stage).toBe("surface-check");
+    expect(result.failure?.kind).toBe("budget");
+    // 差分の点検の記録（開始時に積む）と、未実行の診断が残る
+    expect(result.surfaceCheck.completed).toBe(false);
+    expect(result.surfaceCheck.accepted).toBe(0);
+    expect(result.surfaceCheckDiagnostics).toEqual([
+      expect.objectContaining({ index: 0, requirementId: "R:A:Q1-1", stage: "unexecuted", classification: "unexecuted" }),
+    ]);
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0 }]);
+  });
+
+  it("差分の点検の裏付けが途中で止まっても、仕分けまでの分類と判定が残る（completed は false）", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(DIFF_TWO_CLAIMS),
+    ]);
+    const inner = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+    const triageAnswers: Record<string, JudgeAnswer> = {
+      [surfaceTriageQuestionName(0)]: choice("not-a-problem", 0.9),
+      [surfaceTriageQuestionName(1)]: choice("vocabulary-hole", 0.9),
+    };
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        const hasTriage = Object.keys(request.questions).some((name) => name.startsWith("plan-triage:"));
+        if (!hasTriage) return inner.judge(request);
+        const answers: Record<string, JudgeAnswer> = {};
+        for (const name of Object.keys(request.questions)) answers[name] = triageAnswers[name] ?? choice("supports", 0.9);
+        // 仕分けの呼び出しだけ巨大な usage で予算を使い切る → 裏付けの予約が失敗する
+        return { answers, inputTokens: 0, usage: hugeUsage, model: "judge", answeredBy: "llm" };
+      },
+    };
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED, { budgetUsd: 1 }));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("budget");
+    expect(result.failure?.stage).toBe("surface-check");
+    // 仕分けまでに得た分類と判定が残る（全件 0 と区別できる）
+    expect(result.surfaceCheck.completed).toBe(false);
+    expect(result.surfaceCheck.dropped).toBe(1);
+    expect(result.surfaceCheck.accepted).toBe(0);
+    expect(result.surfaceCheck.judgments).toHaveLength(2);
+    expect(result.surfaceCheckDiagnostics.map((claim) => claim.classification)).toEqual([
+      "not-a-problem",
+      "vocabulary-hole",
+    ]);
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0 }]);
+  });
+});
+
+// ── Issue #434：差分の対象の選択（変更・削除の参照の解決）────────────────────
+
+describe("差分の対象の選択：変更・削除は元の要件を引く（Issue #434）", () => {
+  /** 要件 1 つを手で作る（`change` は任意） */
+  function requirement(id: string, change?: PlanRequirement["change"]): PlanRequirement {
+    return {
+      id,
+      text: id,
+      kind: "constraining",
+      origin: { input_id: "A:1", quote: id },
+      ...(change === undefined ? {} : { change }),
+      parts: [],
+    };
+  }
+
+  it("added は対象、changed・removed は元の要件を引ければ対象、引けなければ unresolved", () => {
+    const original = requirement("R-1");
+    const added = requirement("R:A:Q1-1", { kind: "added", answer_id: "A:Q1-1" });
+    // 同じ要件の変更（元は R-1）と、削除（元は R-1）
+    const changed = requirement("R:A:Q1-2", { kind: "changed", from_requirement_id: "R-1", answer_id: "A:Q1-2" });
+    const removed = requirement("R:A:Q1-3", { kind: "removed", from_requirement_id: "R-1", answer_id: "A:Q1-3" });
+    // 分割の、増えた分（added）と、元の要件の変更（changed）
+    const splitAdded = requirement("R:A:Q1-4", { kind: "added", answer_id: "A:Q1-4" });
+
+    const all = [original, added, changed, removed, splitAdded];
+    const selection = selectDiffRequirements(all, new Set());
+    expect(selection.kind).toBe("targets");
+    if (selection.kind !== "targets") return;
+    // 変更を持たない要件は対象にしない。増えた・変わった・消えた分が対象になる
+    expect(selection.targets.map((r) => r.id)).toEqual(["R:A:Q1-1", "R:A:Q1-2", "R:A:Q1-3", "R:A:Q1-4"]);
+
+    // 既に点検した要件は、change を持っていても対象にしない
+    const reviewed = selectDiffRequirements(all, new Set(["R:A:Q1-1"]));
+    if (reviewed.kind === "targets") {
+      expect(reviewed.targets.map((r) => r.id)).toEqual(["R:A:Q1-2", "R:A:Q1-3", "R:A:Q1-4"]);
+    }
+
+    // 元の要件を解決できない changed・removed は、確定させない側に倒す
+    const unknownFrom = requirement("R:A:Q1-5", { kind: "changed", from_requirement_id: "R-999", answer_id: "A:Q1-5" });
+    expect(selectDiffRequirements([original, unknownFrom], new Set()).kind).toBe("unresolved");
+    const noFrom = requirement("R:A:Q1-6", { kind: "removed", answer_id: "A:Q1-6" });
+    expect(selectDiffRequirements([original, noFrom], new Set()).kind).toBe("unresolved");
+
+    // 変更が無ければ、対象は空である
+    expect(selectDiffRequirements([original], new Set())).toEqual({ kind: "targets", targets: [] });
   });
 });

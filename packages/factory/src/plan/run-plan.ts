@@ -119,6 +119,8 @@ export const PLAN_DIAGNOSIS_CODES = [
   // 制約 ID の裏付け（P3 洗い出し）
   "constraint-id-missing",
   "constraint-id-unknown",
+  // 差分の洗い出しが指す要件 ID が、点検の対象（その往復の差分）に無い（Issue #434）
+  "requirement-id-unknown",
   // P3 の「書けない」の申告の点検（Issue #432）。未点検の分類（低確信・書いていない・読めない）
   "not-stated",
   "low-confidence",
@@ -196,6 +198,8 @@ const KNOWN_FIELD_NAMES: ReadonlySet<string> = new Set([
   "open_issues",
   "decisions",
   "accepted_unwritable",
+  "ambiguities",
+  "requirementId",
   "confirmation",
   "sha256",
   "confirmed_at",
@@ -671,6 +675,42 @@ function requirementTextOf(answer: ClassifiedAnswer, question: PlanQuestion): st
   return answer.freeText ?? question.text;
 }
 
+/** 差分の点検の対象の選択の結果（Issue #434） */
+export type PlanDiffSelection =
+  | { readonly kind: "targets"; readonly targets: readonly PlanRequirement[] }
+  /** 変更・削除が指す元の要件を解決できなかった（確定させない側に倒す） */
+  | { readonly kind: "unresolved" };
+
+/**
+ * **その往復で増えた・変わった要件**を選ぶ（Issue #434）。点検の対象にするのは、まだ点検していない
+ * `change` 付きの要件だけである。
+ *
+ *   - `added` … その要件自身を対象にする
+ *   - `changed`・`removed` … **元の要件 ID（`change.from_requirement_id`）を引く**。引けても引けなくても
+ *     その要件自身を対象にするが、**引けない（欄が無い・知らない ID）ときは `unresolved`** にして、
+ *     呼ぶ側が確定させない側に倒す（点検の対象を勝手に作らない）
+ *
+ * 既に点検した要件（`reviewed`）は、`change` を持っていても対象にしない。**同じ入力からは同じ結果に
+ * なる純粋な関数**である。
+ */
+export function selectDiffRequirements(
+  requirements: readonly PlanRequirement[],
+  reviewed: ReadonlySet<string>,
+): PlanDiffSelection {
+  const known = new Set(requirements.map((requirement) => requirement.id));
+  const targets: PlanRequirement[] = [];
+  for (const requirement of requirements) {
+    const change = requirement.change;
+    if (change === undefined || reviewed.has(requirement.id)) continue;
+    if (change.kind !== "added") {
+      const from = change.from_requirement_id;
+      if (typeof from !== "string" || from === "" || !known.has(from)) return { kind: "unresolved" };
+    }
+    targets.push(requirement);
+  }
+  return { kind: "targets", targets };
+}
+
 /**
  * 答える役から受け取った答えの ID を、コードが組み直す（`A:<組み直した質問 ID>`。Issue #405）。
  *
@@ -835,17 +875,36 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const closedByDefaults: PlanDefaultClosure[] = [];
   // P1/P2 の往復ごとの逆照合の落ちの内訳（Issue #430）。止まったときは、止まるまでに得た分だけになる。
   let requirementsDiagnosis: ReverseCheckDiagnosis = emptyReverseCheckDiagnosis();
-  // P3 の「書けない」の申告の点検の記録（Issue #432）。申告 0 件・P3 に届かなかったときは 0 のまま。
-  let surfaceCheckSummary: PlanSurfaceCheckSummary = {
-    accepted: 0,
-    dropped: 0,
-    ambiguity: 0,
-    unchecked: 0,
-    judgments: [],
-    completed: false,
+  // P3 の「書けない」の申告の点検の記録（Issue #432・#434）。**点検 1 回ごとに 1 件積む**——初回と、
+  // 各往復の差分の点検である。途中停止・未点検でも、そこまでに終えた分類・判定・診断を残す
+  // （成功や 0 件に見せない）。申告 0 件でも点検は 1 件積み、`completed` を真にする。
+  const surfaceChecks: {
+    accepted: number;
+    dropped: number;
+    ambiguity: number;
+    unchecked: number;
+    judgments: readonly SurfaceJudgment[];
+    diagnostics: readonly SurfaceClaimDiagnostic[];
+    completed: boolean;
+  }[] = [];
+  /** 点検ごとの記録を、結果の要約（件数と判定の記録）に合わせる（Issue #432・#434） */
+  const aggregateSurfaceCheck = (): PlanSurfaceCheckSummary => {
+    if (surfaceChecks.length === 0) {
+      return { accepted: 0, dropped: 0, ambiguity: 0, unchecked: 0, judgments: [], completed: false };
+    }
+    return {
+      accepted: surfaceChecks.reduce((total, check) => total + check.accepted, 0),
+      dropped: surfaceChecks.reduce((total, check) => total + check.dropped, 0),
+      ambiguity: surfaceChecks.reduce((total, check) => total + check.ambiguity, 0),
+      unchecked: surfaceChecks.reduce((total, check) => total + check.unchecked, 0),
+      judgments: surfaceChecks.flatMap((check) => check.judgments),
+      // すべての点検が最後まで終えたときだけ `true`（途中停止・未点検を成功に見せない）
+      completed: surfaceChecks.every((check) => check.completed),
+    };
   };
-  // P3 の申告 1 件ずつの診断（受理・落とした・途中停止のどれも。Issue #432。別の診断ファイルに書く）
-  let surfaceCheckDiagnostics: readonly SurfaceClaimDiagnostic[] = [];
+  /** 点検ごとの診断を、1 本の並びにまとめる（受理・落とした・途中停止のどれも。Issue #432・#434） */
+  const aggregateSurfaceCheckDiagnostics = (): readonly SurfaceClaimDiagnostic[] =>
+    surfaceChecks.flatMap((check) => check.diagnostics);
   // コードが目録から作った事項の対応（事項 ID → 未指定の観点）と、要件ごとの門の判定（Issue #408）
   const catalogIssueFacets = new Map<string, UnspecifiedFacet>();
   const aggregatesByRequirement = new Map<string, boolean | null>();
@@ -1034,8 +1093,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     closedBySource: closedBySource.slice(),
     closedByDefault: closedByDefaults.slice(),
     requirementsDiagnosis,
-    surfaceCheck: surfaceCheckSummary,
-    surfaceCheckDiagnostics,
+    surfaceCheck: aggregateSurfaceCheck(),
+    surfaceCheckDiagnostics: aggregateSurfaceCheckDiagnostics(),
     diffReviews: diffReviews.slice(),
   });
 
@@ -1161,6 +1220,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     // あり、点検は申告を減らす・止める方向にだけ効く。申告が 0 件なら判定を呼ばず、段を `ok` で残す
     // （`runSurfaceCheck` が早期に返す）。判定の予算が尽きれば、既存どおり段 `surface-check` の失敗
     // （`budget`）で止まる（`runStage` が `JudgeBudgetExceededError` を握る）。
+    // 点検 1 回ぶんの記録を、開始時に積む（途中停止でも件数が残る。Issue #434）
+    surfaceChecks.push({ accepted: 0, dropped: 0, ambiguity: 0, unchecked: 0, judgments: [], diagnostics: [], completed: false });
+    const initialCheckIndex = surfaceChecks.length - 1;
     const surfaceCheck = await runStage("surface-check", async () => {
       const value = await runSurfaceCheck({
         surface,
@@ -1175,30 +1237,30 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         // 段の途中までに得た分類・判定・診断を、続く裏付けや再点検の予算が尽きても残す（Issue #432）。
         // 段が止まっても途中までの記録が結果と診断ファイルに載る（`completed` は false のまま）。
         onProgress: (partial) => {
-          surfaceCheckSummary = {
+          surfaceChecks[initialCheckIndex] = {
             accepted: partial.accepted.length,
             dropped: partial.dropped.length,
             ambiguity: partial.ambiguities.length,
             unchecked: partial.unchecked.length,
             judgments: partial.judgments,
+            diagnostics: partial.diagnostics,
             completed: false,
           };
-          surfaceCheckDiagnostics = partial.diagnostics;
         },
       });
       // 再点検のあとにも、生成と共有する締切・総呼び出し数の門を守る（Issue #432）
       checkGate("surface-check");
       return value;
     });
-    surfaceCheckSummary = {
+    surfaceChecks[initialCheckIndex] = {
       accepted: surfaceCheck.accepted.length,
       dropped: surfaceCheck.dropped.length,
       ambiguity: surfaceCheck.ambiguities.length,
       unchecked: surfaceCheck.unchecked.length,
       judgments: surfaceCheck.judgments,
+      diagnostics: surfaceCheck.diagnostics,
       completed: true,
     };
-    surfaceCheckDiagnostics = surfaceCheck.diagnostics;
     // 曖昧さと判定された申告（了承除外になるはずだった部分）は、**重大な**開いている事項にして P4 に渡す。
     // 聞かずに落とさない。
     for (const claim of surfaceCheck.ambiguities) {
@@ -1381,19 +1443,43 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     };
 
     /**
-     * その往復の P5 のあと（「全部推奨で進める」の道を含む）、**その往復で増えた要件だけ**を目録・
-     * 洗い出し・申告の点検に掛ける（Issue #434）。**点検の対象は差分**（`change.kind` が `added` で、
-     * まだ点検していない要件）だけであり、判定に要る文脈（点検時点の全要件・既存の決定・了承除外・
-     * 関係する問いと答え）は**参照用のデータ**として渡す。新しく開いた事項・了承除外は、既存の既定の
+     * その往復の P5 のあと（「全部推奨で進める」の道を含む）、**その往復で増えた・変わった要件だけ**を
+     * 目録・洗い出し・申告の点検に掛ける（Issue #434）。対象は `selectDiffRequirements` で選ぶ
+     * （`changed`・`removed` は元の要件 ID を引く。引けなければ確定させない側に倒す）。判定に要る文脈
+     * （点検時点の全要件・既存の決定・了承除外・関係する問いと答え）は**参照用のデータ**として渡し、
+     * 応答が指す要件 ID は**この往復の差分の集合**へ照合する。新しく開いた事項・了承除外は、既存の既定の
      * 適用と P4 の流れに載る（`turns` に積んだあとに呼ぶ）。未点検の申告が残れば「確定できない」を返す。
-     * **増えた要件が 0 件なら、どの段も呼ばず `undefined`**。
+     * **対象が 0 件なら、どの段も呼ばず `undefined`**。
      */
     const reviewAddedRequirements = async (): Promise<PlanResult | undefined> => {
-      const diff = requirements.filter(
+      const unreviewedChanges = requirements.filter(
         (requirement) => requirement.change !== undefined && !reviewedRequirementIds.has(requirement.id),
       );
-      if (diff.length === 0) return undefined;
+      if (unreviewedChanges.length === 0) return undefined;
+      // 差分点検 1 回ぶんの記録を、**開始時に積む**——途中で止まった往復も数えられる（Issue #434）
+      const reviewRecord = {
+        round: turns.length,
+        added: unreviewedChanges.length,
+        openIssues: 0,
+        acceptedUnwritable: 0,
+      };
+      diffReviews.push(reviewRecord);
+
+      // 対象（この往復で増えた・変わった要件）を選ぶ。変更・削除が指す元の要件を解決できなければ、
+      // 勝手に点検の対象を作らず、確定させない側に倒す（Issue #434）
+      const selection = selectDiffRequirements(requirements, reviewedRequirementIds);
+      if (selection.kind === "unresolved") {
+        return {
+          kind: "cannot-confirm",
+          openIssues: openIssues.filter((issue) => issue.status === "open" && issue.critical),
+          reasons: [{ source: "plan-check", code: "unknown_reference", path: "requirements" }],
+          ...resultBase(),
+        };
+      }
+      const diff = selection.targets;
       for (const requirement of diff) reviewedRequirementIds.add(requirement.id);
+      // この往復の差分の要件 ID の集合（応答が指す要件 ID を照合する。Issue #434）
+      const targetRequirementIds = new Set(diff.map((requirement) => requirement.id));
 
       const inputsNow: readonly PlanInput[] = [...sourceInputs, ...questionInputs, ...answerInputs];
       const textOf = (requirement: PlanRequirement): string =>
@@ -1445,9 +1531,11 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           gateway,
           catalog: diffCatalogData,
           context,
+          // 応答が指す要件 ID を、この往復の差分の集合へ照合する（Issue #434）
+          targetRequirementIds,
         }),
       );
-      const opened = diffSurface.ambiguities.length + diffCatalog.unspecified.length;
+      reviewRecord.openIssues = diffSurface.ambiguities.length + diffCatalog.unspecified.length;
       for (const ambiguity of diffSurface.ambiguities) {
         openIssues.push({ id: ambiguity.id, text: ambiguity.text, critical: ambiguity.critical, status: "open" });
       }
@@ -1459,6 +1547,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       }
 
       // ── 差分の申告の点検（F1 と同じ条件・同じ規則で掛ける。Issue #432・#434）──────
+      // 点検 1 回ぶんの記録を、開始時に積む（途中停止でも件数・診断が残る。Issue #434）
+      surfaceChecks.push({ accepted: 0, dropped: 0, ambiguity: 0, unchecked: 0, judgments: [], diagnostics: [], completed: false });
+      const diffCheckIndex = surfaceChecks.length - 1;
       const diffSurfaceCheck = await runStage("surface-check", async () => {
         const value = await runSurfaceCheck({
           surface: diffSurface,
@@ -1468,10 +1559,32 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           threshold,
           requirements: new Map(requirements.map((requirement) => [requirement.id, requirement.text])),
           docVersion: input.vocabularyVersion,
+          // 段の途中までに得た分類・判定・診断を、裏付けや再点検の予算が尽きても残す（Issue #432・#434）
+          onProgress: (partial) => {
+            surfaceChecks[diffCheckIndex] = {
+              accepted: partial.accepted.length,
+              dropped: partial.dropped.length,
+              ambiguity: partial.ambiguities.length,
+              unchecked: partial.unchecked.length,
+              judgments: partial.judgments,
+              diagnostics: partial.diagnostics,
+              completed: false,
+            };
+          },
         });
         checkGate("surface-check");
         return value;
       });
+      surfaceChecks[diffCheckIndex] = {
+        accepted: diffSurfaceCheck.accepted.length,
+        dropped: diffSurfaceCheck.dropped.length,
+        ambiguity: diffSurfaceCheck.ambiguities.length,
+        unchecked: diffSurfaceCheck.unchecked.length,
+        judgments: diffSurfaceCheck.judgments,
+        diagnostics: diffSurfaceCheck.diagnostics,
+        completed: true,
+      };
+      reviewRecord.openIssues += diffSurfaceCheck.ambiguities.length;
       // 曖昧さと判定された申告は、**重大な**開いている事項にして P4 に渡す（聞かずに落とさない）
       for (const claim of diffSurfaceCheck.ambiguities) {
         openIssues.push({ id: `OI:surface-check:${claim.index}`, text: claim.part, critical: true, status: "open" });
@@ -1486,13 +1599,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         };
       }
       // 受理した申告だけを了承除外と代わりの案にする
-      const acceptedCount = applyAcceptedUnwritable(diffSurfaceCheck.accepted);
-      diffReviews.push({
-        round: turns.length,
-        added: diff.length,
-        openIssues: opened + diffSurfaceCheck.ambiguities.length,
-        acceptedUnwritable: acceptedCount,
-      });
+      reviewRecord.acceptedUnwritable = applyAcceptedUnwritable(diffSurfaceCheck.accepted);
       return undefined;
     };
 

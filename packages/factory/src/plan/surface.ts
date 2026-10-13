@@ -199,6 +199,13 @@ export interface SurfaceInput {
    * 了承除外・関係する問いと答えを、**別々のデータ**として足す（点検の対象は `list` のまま）。
    */
   readonly context?: SurfaceContext;
+  /**
+   * **点検の対象の要件 ID の集合**（Issue #434）。渡すと、応答が指す要件 ID（未解決の事項・書けない
+   * 申告の `requirementId`）が、その集合の内側であることを確かめる。**対象外（参照用に渡した既存の要件・
+   * 前の往復の要件）や未知の参照は受理しない**——`unmet` にして確定させない側に倒す（制約 ID の裏付けと
+   * 同じ扱い）。渡さなければ今までどおり確かめない（初回の経路・既存の道は変えない）。
+   */
+  readonly targetRequirementIds?: ReadonlySet<string>;
 }
 
 function checkAmbiguity(value: unknown, field: string, problems: Problem[]): PlanAmbiguity | undefined {
@@ -340,6 +347,32 @@ export function checkSurfaceConstraints(
 }
 
 /**
+ * 応答が指す要件 ID が、**点検の対象（この往復の差分）**の内側であるかを確かめる（Issue #434）。
+ * 参照用に渡した既存の要件・前の往復の要件・未知の参照を断る。**誤りの文に ID の値は入れない**
+ * （欄の名前と分類だけ。止まった記録に漏らさない）。
+ */
+export function checkSurfaceTargets(
+  surface: PlanSurface,
+  targetRequirementIds: ReadonlySet<string>,
+): readonly Problem[] {
+  const problems: Problem[] = [];
+  const outOfScope = (field: string): void => {
+    problems.push({
+      field,
+      code: "requirement-id-unknown",
+      message: "点検の対象（その往復の差分）に無い要件を指している",
+    });
+  };
+  surface.ambiguities.forEach((item, index) => {
+    if (!targetRequirementIds.has(item.requirementId)) outOfScope(`ambiguities[${index}].requirementId`);
+  });
+  surface.unwritable.forEach((item, index) => {
+    if (!targetRequirementIds.has(item.requirementId)) outOfScope(`unwritable[${index}].requirementId`);
+  });
+  return problems;
+}
+
+/**
  * 書けないことの申告の制約 ID を**正規化した写し**を作る（保存する側。Issue #398）。段は、根拠の照合
  * （`checkSurfaceConstraints`）を通ったあとにこれを返す——下流（Plan の `basis.constraint_id`）へ渡る
  * ID は正規化後になる。確定済みの Plan を読み込むときは書き換えない（読み込みの側では正規化しない）。
@@ -382,6 +415,13 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
   });
   const answer = await callStructuredChecked(input.gateway, { request, check: checkSurfaceOutput });
   if (!answer.ok) return answer;
+  // 応答が指す要件 ID を、点検の対象（この往復の差分）の集合へ照合する（Issue #434）。
+  if (input.targetRequirementIds !== undefined) {
+    const targetProblems = checkSurfaceTargets(answer.value, input.targetRequirementIds);
+    if (targetProblems.length > 0) {
+      return { ok: false, failure: { kind: "unmet", attempts: 1, problems: targetProblems } };
+    }
+  }
   const problems = checkSurfaceConstraints(answer.value, input.documents);
   if (problems.length > 0) {
     return { ok: false, failure: { kind: "unmet", attempts: 1, problems } };

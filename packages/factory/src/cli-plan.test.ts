@@ -1791,3 +1791,240 @@ describe("差分点検の記録を残し、答えのファイルの形で 2 往�
     expect(spy).toHaveBeenCalledTimes(1);
   });
 });
+
+// ── Issue #434：差分点検でも、途中停止・未点検の記録を plan-record に残す ─────────
+
+describe("差分点検でも、受理・未点検・途中停止の記録を plan-record に残す（Issue #432・#434）", () => {
+  /** 差分の洗い出しが返す、書けない申告 1 件（差分の要件に由来する。制約 ID は文書に実在する） */
+  const DIFF_UNWRITABLE = {
+    ambiguities: [],
+    unwritable: [
+      { id: "U-0", requirementId: "R:A:Q1-1", part: "差分の部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+    ],
+  };
+  /** 差分の洗い出しが返す、書けない申告 2 件 */
+  const DIFF_TWO = {
+    ambiguities: [],
+    unwritable: [
+      { id: "U-0", requirementId: "R:A:Q1-1", part: "部分 0", constraintIds: ["記録"], reason: "理由 0", alternative: "代案 0" },
+      { id: "U-1", requirementId: "R:A:Q1-1", part: "部分 1", constraintIds: ["合計"], reason: "理由 1", alternative: "代案 1" },
+    ],
+  };
+
+  it("差分の点検で受理された申告が、surface_check と診断ファイルに積まれ、Build に進む", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      structured(DIFF_UNWRITABLE),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    const dir = `${directory}/diff-accepted`;
+    const answersPath = "diff-accepted-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    // 差分の受理が surface_check に積まれる（初回は申告 0 件）
+    expect(record.surface_check.accepted).toBe(1);
+    expect(record.surface_check.completed).toBe(true);
+    expect(record.surface_check.judgments.map((judgment) => judgment.question_id)).toEqual([
+      "plan-triage:0",
+      "plan-support:0",
+    ]);
+    expect(record.diff_reviews).toEqual([{ round: 1, added: 3, open_issues: 0, accepted_unwritable: 1 }]);
+    // 別ファイルの診断に、差分の申告 1 件が残る
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.claims).toEqual([
+      expect.objectContaining({ index: 0, requirement_id: "R:A:Q1-1", stage: "support", classification: "supports" }),
+    ]);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("差分の点検で未点検が残れば、surface_check に積み、Build を呼ばない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      structured(DIFF_UNWRITABLE),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      // 裏付けが「書いていない」→ 落とし先（Luna）が無いので未点検
+      [surfaceSupportQuestionName(0)]: choice("not-stated", 0.9),
+    });
+    const dir = `${directory}/diff-unchecked`;
+    const answersPath = "diff-unchecked-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("cannot-confirm");
+    expect(record.surface_check.unchecked).toBe(1);
+    expect(record.surface_check.accepted).toBe(0);
+    expect(record.cannot_confirm).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]" }]);
+  });
+
+  it("差分の点検の最初の予約が失敗しても、件数と未実行の診断が plan-record に残る（completed は false）", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      // 差分の洗い出しの応答で予算を使い切る → 差分の申告の点検の最初の予約が失敗する
+      structured(DIFF_UNWRITABLE, hugeUsage),
+    ]);
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]) });
+    const dir = `${directory}/diff-unexecuted`;
+    const answersPath = "diff-unexecuted-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--budget", "1"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.stage).toBe("surface-check");
+    expect(record.failure?.kind).toBe("budget");
+    expect(record.surface_check.completed).toBe(false);
+    expect(record.surface_check.accepted).toBe(0);
+    // 開始時に積んだ差分点検の記録が残る（停止した往復も数える）
+    expect(record.diff_reviews).toEqual([{ round: 1, added: 3, open_issues: 0, accepted_unwritable: 0 }]);
+    // 全申告が「未実行」で別ファイルに残る
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.claims).toEqual([
+      expect.objectContaining({ index: 0, requirement_id: "R:A:Q1-1", stage: "unexecuted", classification: "unexecuted" }),
+    ]);
+  });
+
+  it("差分の点検の裏付けが途中で止まっても、仕分けまでの記録が plan-record に残る（completed は false）", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      structured(DIFF_TWO),
+    ]);
+    const inner = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]) });
+    const triageAnswers: Record<string, JudgeAnswer> = {
+      [surfaceTriageQuestionName(0)]: choice("not-a-problem", 0.9),
+      [surfaceTriageQuestionName(1)]: choice("vocabulary-hole", 0.9),
+    };
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        const hasTriage = Object.keys(request.questions).some((name) => name.startsWith("plan-triage:"));
+        if (!hasTriage) return inner.judge(request);
+        const answers: Record<string, JudgeAnswer> = {};
+        for (const name of Object.keys(request.questions)) answers[name] = triageAnswers[name] ?? choice("supports", 0.9);
+        // 仕分けの呼び出しだけ巨大な usage で予算を使い切る → 裏付けの予約が失敗する
+        return { answers, inputTokens: 0, usage: hugeUsage, model: "judge", answeredBy: "llm" };
+      },
+    };
+    const dir = `${directory}/diff-partial`;
+    const answersPath = "diff-partial-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--budget", "1"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.stage).toBe("surface-check");
+    // 仕分けまでに得た分類と判定が残る（全件 0 と区別できる）
+    expect(record.surface_check.completed).toBe(false);
+    expect(record.surface_check.dropped).toBe(1);
+    expect(record.surface_check.judgments).toHaveLength(2);
+    expect(record.diff_reviews).toEqual([{ round: 1, added: 3, open_issues: 0, accepted_unwritable: 0 }]);
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.claims.map((claim) => claim.classification)).toEqual(["not-a-problem", "vocabulary-hole"]);
+  });
+});
