@@ -15,6 +15,7 @@ import { JobBudget, costOfUsageUsd, estimateMaxCostUsd, type TokenRates } from "
 import {
   CallGateway,
   categorizeCallError,
+  createCallGate,
   estimateInputUpperBoundTokens,
   inputUpperBoundChars,
   isIncompleteResponseError,
@@ -462,6 +463,75 @@ describe("共通の口の道具の累計（02 §1.5・Issue #429）", () => {
     const result = await gateway.callWithTools(TOOL_REQUEST);
     expect(result.kind).toBe("failed");
     expect(gateway.toolCalls).toBe(0);
+  });
+});
+
+// ── 生成と判定で共有する実試行の門（Issue #432）────────────────────
+
+describe("生成と判定で共有する実試行の門（Issue #432）", () => {
+  it("門があれば、生成の実試行（再試行も）を 1 つの数で数え、合算の上限に掛ける", async () => {
+    let attempts = 0;
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        attempts += 1;
+        // 1 回目はやり直してよい誤り（network）で失敗させる
+        if (attempts === 1) return Promise.reject(networkError());
+        return Promise.resolve({ output: { ok: true } as T, usage: USAGE });
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    // すでに判定が 1 試行を使ったところから始める（合算の上限 2）
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 2 });
+    gate.begin();
+    const budget = new JobBudget(1_000);
+    const gateway = new CallGateway({
+      client,
+      budget,
+      rates: RATES,
+      now: () => 0,
+      deadline: 100_000,
+      callTimeoutMs: 100,
+      gate,
+    });
+
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+
+    // 1 回目の生成は通る（合計 2）が、**再試行は合算の上限に掛かって開始できない**
+    expect(result).toEqual({ kind: "limitExceeded", limit: "callCount", max: 2, actual: 2 });
+    expect(attempts).toBe(1);
+    expect(gate.attempts()).toBe(2);
+  });
+
+  it("門の締切を過ぎていれば、生成の実呼び出しをせずに締切切れを返す", async () => {
+    let called = 0;
+    const gate = createCallGate({ now: () => 5_000, deadline: 5_000, limit: 10 });
+    const gateway = new CallGateway({
+      client: spyClient(() => {
+        called += 1;
+      }),
+      budget: new JobBudget(1_000),
+      rates: RATES,
+      now: () => 5_000,
+      deadline: 5_000,
+      gate,
+    });
+
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result.kind).toBe("deadlineExceeded");
+    expect(called).toBe(0);
+    expect(gate.attempts()).toBe(0);
+  });
+
+  it("門は上限ちょうどまで通し、その次の試行は拒否する（開始の可否）", () => {
+    const gate = createCallGate({ now: () => 0, deadline: 1_000, limit: 2 });
+    // 上限の 2 回までは始められる
+    expect(gate.begin()).toBe("ok");
+    expect(gate.begin()).toBe("ok");
+    // 3 回目は上限に達しているので始められない（試行は数えない）
+    expect(gate.begin()).toBe("limit");
+    expect(gate.attempts()).toBe(2);
   });
 });
 

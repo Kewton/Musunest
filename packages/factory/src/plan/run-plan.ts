@@ -38,9 +38,9 @@ import {
 } from "@musunest/appspec-schema";
 import { JobBudget, type TokenRates } from "../budget.js";
 import type { BundleJudgeUsage } from "../bundle.js";
-import { CallGateway } from "../call.js";
+import { CallGateway, createCallGate } from "../call.js";
 import type { Judge } from "../judge.js";
-import { JudgeBudgetExceededError, createBudgetedJudge, type BudgetedJudge } from "../judge-budget.js";
+import { JudgeBudgetExceededError, JudgeCallLimitExceededError, JudgeDeadlineExceededError, createBudgetedJudge, type BudgetedJudge } from "../judge-budget.js";
 import { AGENT_LIMITS, type AgentLimits, type LimitName } from "../limits.js";
 import type { LlmClient } from "../llm.js";
 import type { ReverseCheckMiss, SourceRange } from "../pipeline.js";
@@ -66,12 +66,14 @@ import {
   type PlanTurn,
 } from "./session.js";
 import { runSurface, type SurfaceCatalogData } from "./surface.js";
+import { runSurfaceCheck, type SurfaceClaimDiagnostic, type SurfaceJudgment, type SurfaceUncheckedClaim } from "./surface-check.js";
 
 /** Plan の段（記録の `stage` に使う。生成の段とは別の一覧である） */
 export const PLAN_STAGE_IDS = [
   "requirements", // P1 要件にする・P2 逆照合（`runReverseCheckLoop`）
   "catalog", // P3 目録の点検（`runCatalog`）
   "surface", // P3 洗い出し（`runSurface`）
+  "surface-check", // P3 の「書けない」の申告を判定の口で点検する（`runSurfaceCheck`。Issue #432）
   "questions", // P4 質問を組み立てる（`runQuestions`）
   "answers", // P5 答えを反映する（`runAnswers`）
   "confirm", // P6 照合と確定（`runConfirm`）
@@ -117,6 +119,10 @@ export const PLAN_DIAGNOSIS_CODES = [
   // 制約 ID の裏付け（P3 洗い出し）
   "constraint-id-missing",
   "constraint-id-unknown",
+  // P3 の「書けない」の申告の点検（Issue #432）。未点検の分類（低確信・書いていない・読めない）
+  "not-stated",
+  "low-confidence",
+  "unknown",
   // 質問（P4）
   "question-count",
   "choices-count",
@@ -344,7 +350,7 @@ export interface PlanFailure {
   readonly operation?: PlanOperation;
 }
 
-/** 確定できなかった理由の出どころ（有限の 4 つ。Issue #397） */
+/** 確定できなかった理由の出どころ（有限の 5 つ。Issue #397・#432） */
 export const CANNOT_CONFIRM_SOURCES = [
   /** P6 の覆いの問題（覆われていない原文・使われていない答え） */
   "confirm",
@@ -352,6 +358,8 @@ export const CANNOT_CONFIRM_SOURCES = [
   "plan-check",
   /** 逆照合で落ちが残った */
   "reverse-check",
+  /** P3 の「書けない」の申告に未点検が残った（Issue #432） */
+  "surface-check",
   /** 往復の制御（質問数の上限・往復数の上限・重大な事項があるのに問いが無い） */
   "session",
 ] as const;
@@ -377,6 +385,31 @@ export interface PlanDefaultClosure {
   readonly value: string;
 }
 
+/**
+ * P3 の「書けない」の申告の点検の記録（Issue #432）。**件数（受理・落とした・曖昧さへ・未点検）と、判定の
+ * 記録（問いの ID・答え・確信度・モデルの版・adapter）**だけを持つ——申告の部分の文・理由・制約 ID の
+ * 値は入れない（`02-failure-modes.md` §1）。確定・確定できない・止まったの 3 つの結果に共通で、申告 0 件
+ * なら件数も 0、記録も空である。
+ */
+export interface PlanSurfaceCheckSummary {
+  /** 受理した申告（語彙の穴で裏付けが取れたもの）の件数 */
+  readonly accepted: number;
+  /** 落とした申告（問題ではない・裏付けが反する）の件数 */
+  readonly dropped: number;
+  /** 曖昧さと判定した申告（開いている事項に写した）の件数 */
+  readonly ambiguity: number;
+  /** 未点検の申告（裏付けが書いていない・確信度が閾値未満・答えが読めない）の件数 */
+  readonly unchecked: number;
+  /** 判定の記録（仕分けと裏付けの両方） */
+  readonly judgments: readonly SurfaceJudgment[];
+  /**
+   * 点検の段が最後まで終えたか（Issue #432）。`false` は、仕分けの途中で止まった（判定の予算が尽きた）などで
+   * **全部の申告を点検し終えていない**ことを示す——申告 0 件（`accepted`・`dropped`・`ambiguity`・`unchecked`
+   * がすべて 0・`judgments` も空）と区別する。
+   */
+  readonly completed: boolean;
+}
+
 /** 3 つの結果に共通する記録（使った額・残りの額・段ごとの記録・判定の呼び出し） */
 export interface PlanResultBase {
   /** 段ごとの記録（生成の段の記録と同じ形） */
@@ -397,6 +430,17 @@ export interface PlanResultBase {
    * **値は件数だけ**である（落ちの文言・引用・位置は入れない。`02-failure-modes.md` §1）。
    */
   readonly requirementsDiagnosis: ReverseCheckDiagnosis;
+  /**
+   * P3 の「書けない」の申告の点検の記録（受理・落とした・曖昧さへ・未点検の件数と、判定の記録。Issue #432）。
+   * 値（申告の部分の文・理由・制約 ID）は入れない。**往復の記録（`plan-record.json`）に載せる要約**である。
+   */
+  readonly surfaceCheck: PlanSurfaceCheckSummary;
+  /**
+   * P3 の申告 1 件ずつの診断（申告の添字・要件 ID・部分・理由・制約 ID・文書の版と、点検の段階・分類・
+   * adapter・確信度・根拠 ID。Issue #432）。**受理・落とした・途中停止のどれも**残す——呼ぶ側（`cli.ts`）が
+   * 別の診断ファイルに書く。`plan-record.json`（`surfaceCheck`）には入れない。
+   */
+  readonly surfaceCheckDiagnostics: readonly SurfaceClaimDiagnostic[];
 }
 
 /** 依頼文で閉じた事項から作る `decisions` の ID の頭（確認の画面が「依頼文で決めたこと」を見分ける） */
@@ -462,6 +506,12 @@ export interface PlanRunInput {
   readonly client: LlmClient;
   /** 判定の口（Jev・LLM・偽物。試験は偽物を差し込む） */
   readonly judge: Judge;
+  /**
+   * **再点検専用の Luna の口**（Issue #432）。渡すと、これを同じ Plan 予算で包み、P3 の未確定の申告の
+   * 再点検の宛先にする。渡さなければ `judge.fallback` を使い、それも無ければ再点検しない（未点検に残す）
+   * ——合成した口をもう一度呼ぶと主（Jev）が答え直すだけなので、主を再点検には使わない。
+   */
+  readonly recheckJudge?: Judge;
   /** 答える役の口（端末・ファイル・評価の利用者役は外側に置く） */
   readonly responder: PlanResponder;
   /** Plan の費用の上限（USD。呼ぶ側が Plan と Build で分けて渡す。§8） */
@@ -654,6 +704,19 @@ function reverseCheckReasons(misses: readonly ReverseCheckMiss[]): readonly Cann
   }));
 }
 
+/**
+ * P3 の「書けない」の申告の点検で未点検が残ったことを、確定できなかった理由（`source: surface-check`）に
+ * 写す（Issue #432）。**値の中身（部分の文・理由・制約 ID）を含まない**——`path` は添字つきの欄の名前
+ * （`unwritable[<番号>]`）をコードが組み、`code` は有限の分類（`not-stated`・`low-confidence`・`unknown`）。
+ */
+function surfaceCheckReasons(unchecked: readonly SurfaceUncheckedClaim[]): readonly CannotConfirmReason[] {
+  return unchecked.map((claim) => ({
+    source: "surface-check" as const,
+    code: planDiagnosisCode(claim.code),
+    path: `unwritable[${claim.index}]`,
+  }));
+}
+
 /** P6 の覆いの問題を、確定できなかった理由（`source: confirm`）に写す（Issue #397） */
 function confirmReasons(problems: readonly ConfirmProblem[]): readonly CannotConfirmReason[] {
   return problems.map((problem) => ({
@@ -719,6 +782,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const threshold = input.judgeThreshold ?? DEFAULT_PLAN_JUDGE_THRESHOLD;
   const meter = new UsageMeter();
   const budget = new JobBudget(input.budgetUsd);
+  // 生成と判定で共有する実試行の門（Issue #432）。生成の呼び出し・その再試行・判定の呼び出し・Jev→Luna の
+  // 切り替え・独立した再点検が、**同じ 1 つの数**で締切と総呼び出し数に掛かる。
+  const gate = createCallGate({ now: input.now, deadline: input.deadline, limit: limits.callCount });
   const gateway = new CallGateway({
     client: meter.wrap(input.client),
     budget,
@@ -727,15 +793,20 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     deadline: input.deadline,
     limits,
     effort: input.effort,
+    gate,
     ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
   });
   // 判定の口を、**この Plan の予算に結び付けた包み**で包む（#359）。判定の費用も、段の呼び出しと同じ
   // 予算で予約・精算する。予約できなければ判定を呼ばずに `JudgeBudgetExceededError` になる（止まる）。
+  // **締切と総呼び出し数の門**（生成と同じ `gate`）も掛け、実試行の直前に照らす（Issue #432）。落とし先
+  // （Luna）は**明示の `recheckJudge`** を優先し、無ければ `judge.fallback` を使う（主を再点検に使わない）。
   const judgeBudget: BudgetedJudge = createBudgetedJudge({
     judge: input.judge,
     budget,
     rates: input.rates,
     ...(input.judgeMaxOutputTokens === undefined ? {} : { maxOutputTokens: input.judgeMaxOutputTokens }),
+    ...(input.recheckJudge === undefined ? {} : { recheck: input.recheckJudge }),
+    gate,
   });
   const stages: PlanStageRecord[] = [];
   // 依頼文で閉じた事項（往復の記録に残す。04 §3 P4・Issue #370）
@@ -744,6 +815,17 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const closedByDefaults: PlanDefaultClosure[] = [];
   // P1/P2 の往復ごとの逆照合の落ちの内訳（Issue #430）。止まったときは、止まるまでに得た分だけになる。
   let requirementsDiagnosis: ReverseCheckDiagnosis = emptyReverseCheckDiagnosis();
+  // P3 の「書けない」の申告の点検の記録（Issue #432）。申告 0 件・P3 に届かなかったときは 0 のまま。
+  let surfaceCheckSummary: PlanSurfaceCheckSummary = {
+    accepted: 0,
+    dropped: 0,
+    ambiguity: 0,
+    unchecked: 0,
+    judgments: [],
+    completed: false,
+  };
+  // P3 の申告 1 件ずつの診断（受理・落とした・途中停止のどれも。Issue #432。別の診断ファイルに書く）
+  let surfaceCheckDiagnostics: readonly SurfaceClaimDiagnostic[] = [];
   // コードが目録から作った事項の対応（事項 ID → 未指定の観点）と、要件ごとの門の判定（Issue #408）
   const catalogIssueFacets = new Map<string, UnspecifiedFacet>();
   const aggregatesByRequirement = new Map<string, boolean | null>();
@@ -788,6 +870,14 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         pushRecord(stage, "failed", before, start, "budget");
         throw new PlanStop({ stage, kind: "budget" });
       }
+      if (error instanceof JudgeDeadlineExceededError) {
+        pushRecord(stage, "failed", before, start, "deadline");
+        throw new PlanStop({ stage, kind: "deadline" });
+      }
+      if (error instanceof JudgeCallLimitExceededError) {
+        pushRecord(stage, "failed", before, start, "call-limit");
+        throw new PlanStop({ stage, kind: "call-limit" });
+      }
       pushRecord(stage, "failed", before, start, "unknown");
       throw error;
     }
@@ -820,11 +910,40 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         pushRecord(stage, "failed", before, start, "budget");
         throw new PlanStop({ stage, kind: "budget" });
       }
+      if (error instanceof JudgeDeadlineExceededError) {
+        pushRecord(stage, "failed", before, start, "deadline");
+        throw new PlanStop({ stage, kind: "deadline" });
+      }
+      if (error instanceof JudgeCallLimitExceededError) {
+        pushRecord(stage, "failed", before, start, "call-limit");
+        throw new PlanStop({ stage, kind: "call-limit" });
+      }
       pushRecord(stage, "failed", before, start, "unknown");
       throw error;
     }
     pushRecord(stage, "ok", before, start, null);
     return value;
+  };
+
+  /**
+   * **次の実試行を始めてよいか**の門（Issue #432）。判定の実呼び出しの直前（判定の口の包み）と同じ基準で、
+   * 段の外（再点検のあと・確認へ渡す前）でも照らす——締切を過ぎていれば `deadline`、総呼び出し数の上限に
+   * **達していれば** `call-limit`（これから 1 回始めるので、`attempts >= limit` で拒む）。
+   */
+  const checkGate = (stage: PlanStageId): void => {
+    if (gate.now() >= gate.deadline) throw new PlanStop({ stage, kind: "deadline" });
+    if (gate.attempts() >= gate.limit) throw new PlanStop({ stage, kind: "call-limit" });
+  };
+
+  /**
+   * **終わった時点で上限の内か**の門（Issue #432）。もう実試行を始めない場所（確定を返す前）で使う。
+   * 締切の検査は残す——仕様の検査の間に締切を越えても `confirmed` を返さない。総呼び出し数は、共通の
+   * 上限検査（`checkLimit`。`actual > max` を超過とする）と同じく **`attempts > limit` を超過**とする——
+   * **上限ちょうどで正常に終わった Plan を、上限の停止と誤って報告しない。**
+   */
+  const checkGateAtEnd = (stage: PlanStageId): void => {
+    if (gate.now() >= gate.deadline) throw new PlanStop({ stage, kind: "deadline" });
+    if (gate.attempts() > gate.limit) throw new PlanStop({ stage, kind: "call-limit" });
   };
 
   const resultBase = (): PlanResultBase => ({
@@ -835,6 +954,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     closedBySource: closedBySource.slice(),
     closedByDefault: closedByDefaults.slice(),
     requirementsDiagnosis,
+    surfaceCheck: surfaceCheckSummary,
+    surfaceCheckDiagnostics,
   });
 
   try {
@@ -993,10 +1114,74 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       catalogIssueFacets.set(issue.id, facet);
     }
 
-    // 書けないことを、了承して除く部分（`accepted_unwritable`）に写す（§4・U-P2）。代わりの案は、
+    // ── surface-check（P3 の「書けない」の申告を、確認の前に判定の口で点検する。Issue #432）──
+    // 申告 1 件ずつを仕分け・裏付けし、**裏付けの取れた語彙の穴だけ**を了承除外の候補にする。判定は助言で
+    // あり、点検は申告を減らす・止める方向にだけ効く。申告が 0 件なら判定を呼ばず、段を `ok` で残す
+    // （`runSurfaceCheck` が早期に返す）。判定の予算が尽きれば、既存どおり段 `surface-check` の失敗
+    // （`budget`）で止まる（`runStage` が `JudgeBudgetExceededError` を握る）。
+    const surfaceCheck = await runStage("surface-check", async () => {
+      const value = await runSurfaceCheck({
+        surface,
+        documents: input.documents,
+        judge: judgeBudget,
+        // 再点検の宛先（Luna）は、同じ予算で包んだ落とし先だけを使う（主を再点検に使わない。Issue #432）
+        ...(judgeBudget.fallback === undefined ? {} : { recheckJudge: judgeBudget.fallback }),
+        threshold,
+        // 対象の要件の文（再点検の対象のデータ。Issue #432）
+        requirements: new Map(requirements.map((requirement) => [requirement.id, requirement.text])),
+        docVersion: input.vocabularyVersion,
+        // 段の途中までに得た分類・判定・診断を、続く裏付けや再点検の予算が尽きても残す（Issue #432）。
+        // 段が止まっても途中までの記録が結果と診断ファイルに載る（`completed` は false のまま）。
+        onProgress: (partial) => {
+          surfaceCheckSummary = {
+            accepted: partial.accepted.length,
+            dropped: partial.dropped.length,
+            ambiguity: partial.ambiguities.length,
+            unchecked: partial.unchecked.length,
+            judgments: partial.judgments,
+            completed: false,
+          };
+          surfaceCheckDiagnostics = partial.diagnostics;
+        },
+      });
+      // 再点検のあとにも、生成と共有する締切・総呼び出し数の門を守る（Issue #432）
+      checkGate("surface-check");
+      return value;
+    });
+    surfaceCheckSummary = {
+      accepted: surfaceCheck.accepted.length,
+      dropped: surfaceCheck.dropped.length,
+      ambiguity: surfaceCheck.ambiguities.length,
+      unchecked: surfaceCheck.unchecked.length,
+      judgments: surfaceCheck.judgments,
+      completed: true,
+    };
+    surfaceCheckDiagnostics = surfaceCheck.diagnostics;
+    // 曖昧さと判定された申告（了承除外になるはずだった部分）は、**重大な**開いている事項にして P4 に渡す。
+    // 聞かずに落とさない。
+    for (const claim of surfaceCheck.ambiguities) {
+      openIssues.push({
+        id: `OI:surface-check:${claim.index}`,
+        text: claim.part,
+        critical: true,
+        status: "open",
+      });
+    }
+    // 未点検が 1 件でも残れば、P4・確認に進まず「確定できない」。理由は値の中身を含まない（Issue #432）。
+    if (surfaceCheck.unchecked.length > 0) {
+      return {
+        kind: "cannot-confirm",
+        openIssues: openIssues.filter((issue) => issue.status === "open" && issue.critical),
+        reasons: surfaceCheckReasons(surfaceCheck.unchecked),
+        ...resultBase(),
+      };
+    }
+
+    // 受理した申告（語彙の穴で裏付けが取れたもの）だけを、了承して除く部分（`accepted_unwritable`）に写す
+    // （§4・U-P2）。落とした申告・曖昧さと判定した申告の要件は**そのまま残す**（Build が書く）。代わりの案は、
     // 宣言で書ける近い形を 1 つ出したものなので、要件として残し、部分から代わりの案の ID で指す。
     const acceptedUnwritable: PlanAcceptedUnwritable[] = [];
-    for (const item of surface.unwritable) {
+    for (const item of surfaceCheck.accepted) {
       const index = requirements.findIndex((requirement) => requirement.id === item.requirementId);
       const target = requirements[index];
       if (target === undefined) continue;
@@ -1171,6 +1356,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         };
       }
       if (step.kind === "confirm") {
+        // 確認へ渡す前にも、生成と共有する締切・総呼び出し数の門を守る（Issue #432）
+        checkGate("confirm");
         const decision = await input.responder.confirm(view);
         if (decision === "stop") {
           return { kind: "stopped", reason: "declined", failure: null, ...resultBase() };
@@ -1292,6 +1479,11 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         ...resultBase(),
       };
     }
+    // **確定を返す前にも**、生成と共有する締切の門を守る（Issue #432）。P6 の判定が締切を越えて返る経路は
+    // 包みが止めるが、仕様の検査の間にも時計は進む——締切後に `confirmed` を返さないよう、ここでも照らす。
+    // 総呼び出し数は「終わった時点で上限の内か」で見る（上限ちょうどで正常に終わった Plan を、上限の停止と
+    // 誤って報告しない。次の試行を始めてよいかの判定とは別）。
+    checkGateAtEnd("confirm");
     return { kind: "confirmed", plan: confirmed.plan, ...resultBase() };
   } catch (error) {
     if (error instanceof PlanStop) {

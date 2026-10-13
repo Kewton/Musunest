@@ -44,6 +44,13 @@ import {
 import { confirmQuestionName } from "./confirm.js";
 import { freeTextQuestionName } from "./answers.js";
 import {
+  SURFACE_RECHECK_NO_EVIDENCE,
+  surfaceRecheckEvidenceQuestionName,
+  surfaceRecheckKindQuestionName,
+  surfaceSupportQuestionName,
+  surfaceTriageQuestionName,
+} from "./surface-check.js";
+import {
   createRecordingClient,
   REQUIREMENT_LIST_OUTPUT,
   REVERSE_CHECK_OUTPUT,
@@ -55,6 +62,11 @@ import { structured } from "../__tests__/run.js";
 const RATES = { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputPerToken: 0.000002 };
 
 const noul = (value: number): JudgeAnswer => ({ kind: "noul", noul: value });
+
+/** choice の答えを作る（確信度は任意） */
+function choice(value: string, confidence?: number): JudgeAnswer {
+  return { kind: "choice", choice: value, probabilities: undefined, probability: undefined, confidence };
+}
 
 /**
  * 目録の問い（要件ごとの門 + 要件 × 観点 × 2 問）すべてに「当てはまる・決まっている」を返す答え
@@ -340,15 +352,19 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
     // 答えから増えた要件が、組み直した答えの ID を出どころにしている
     const added = result.plan.requirements.find((requirement) => requirement.id === "R:A:Q1-1");
     expect(added?.origin.input_id).toBe("A:Q1-1");
-    // 段ごとの記録が結果に入る（生成の段の記録と同じ形）。**目録の段が洗い出しより前**（Issue #419）
+    // 段ごとの記録が結果に入る（生成の段の記録と同じ形）。**目録の段が洗い出しより前**（Issue #419）。
+    // **申告 0 件でも surface-check の段は `surface` の次に `ok` で残る**（Issue #432）
     expect(result.stages.map((stage) => stage.stage)).toEqual([
       "requirements",
       "catalog",
       "surface",
+      "surface-check",
       "questions",
       "answers",
       "confirm",
     ]);
+    // 申告 0 件なので、判定は呼ばれず、surface-check の段も `ok` である
+    expect(result.stages.find((stage) => stage.stage === "surface-check")?.status).toBe("ok");
     expect(result.stages.every((stage) => typeof stage.duration_ms === "number")).toBe(true);
     // 使った額に LLM の費用が入る
     expect(result.spentUsd).toBeGreaterThan(0);
@@ -1456,7 +1472,13 @@ async function planWithSymbolConstraint(): Promise<{
       return "build";
     },
   };
-  const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor([]) });
+  const judge = createFakeJudge({
+    ...catalogAnswers(),
+    ...coverAnswersFor([]),
+    // 申告 1 件を、語彙の穴で裏付けありと点検する（Issue #432。点検の答えを足すだけで緑）
+    [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+    [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+  });
   const result = await runPlan(makePlanInput(recording.client, judge, responder));
   return { result, views };
 }
@@ -2372,5 +2394,499 @@ describe("P1/P2 の往復ごとの落ちの内訳を結果に残す（Issue #430
     expect(atRedoReverse.requirementsDiagnosis.rounds).toHaveLength(1);
     expect(atRedoReverse.requirementsDiagnosis.redone).toBe(true);
     expect(atRedoReverse.requirementsDiagnosis.unmet).toEqual(ZERO_MISS_COUNTS);
+  });
+});
+
+// ── Issue #432：P3 の「書けない」の申告を、確認の前に判定の口で独立に点検する ─────────
+
+/** 語彙の穴で裏付けあり・問題ではない・曖昧さ、の 3 件の申告（制約 ID は文書に実在する） */
+const SURFACE_THREE_CLAIMS = {
+  ambiguities: [],
+  unwritable: [
+    { id: "U-0", requirementId: "R-1", part: "部分 0", constraintIds: ["アプリの名前・説明"], reason: "理由 0", alternative: "代案 0" },
+    { id: "U-1", requirementId: "R-2", part: "部分 1", constraintIds: ["記録"], reason: "理由 1", alternative: "代案 1" },
+    { id: "U-2", requirementId: "R-1", part: "部分 2", constraintIds: ["合計"], reason: "理由 2", alternative: "代案 2" },
+  ],
+};
+
+describe("P3 の「書けない」の申告を判定の口で点検する（04 §3 P3・Issue #432）", () => {
+  it("受理した申告だけが了承除外と代わりの案になり、落とした要件はそのまま残り、曖昧さは重大な事項として P4 に渡る", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE_CLAIMS),
+      structured(questionsFor("OI:surface-check:2")),
+    ]);
+    const asked: PlanAnswerRequest[] = [];
+    const responder: PlanResponder = {
+      async answer(request) {
+        asked.push(request);
+        return { kind: "all-recommended" };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswersFor(["A:Q1-1"]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+      [surfaceTriageQuestionName(1)]: choice("not-a-problem", 0.8),
+      [surfaceTriageQuestionName(2)]: choice("ambiguity", 0.9),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 受理した申告（U-0）だけが了承除外と代わりの案になる
+    expect(result.plan.accepted_unwritable).toHaveLength(1);
+    expect(result.plan.accepted_unwritable[0]?.part_id).toBe("P:U-0");
+    expect(result.plan.accepted_unwritable[0]?.alternative_id).toBe("R:alt:U-0");
+    expect(result.plan.requirements.map((requirement) => requirement.id)).toContain("R:alt:U-0");
+    // 落とした申告（U-1）の要件（R-2）はそのまま残る（部分が付かない）
+    expect(result.plan.requirements.find((requirement) => requirement.id === "R-2")?.parts).toEqual([]);
+    // 曖昧さと判定した申告（U-2）が、重大な開いている事項として P4 に渡って閉じる
+    expect(asked[0]?.questions.map((question) => question.openIssueId)).toEqual(["OI:surface-check:2"]);
+    expect(result.plan.open_issues.find((issue) => issue.id === "OI:surface-check:2")?.status).toBe("resolved");
+    // 確定した仕様の検査の誤りが 0
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+    // 件数の記録（受理 1・落とした 1・曖昧さへ 1・未点検 0）
+    expect(result.surfaceCheck.accepted).toBe(1);
+    expect(result.surfaceCheck.dropped).toBe(1);
+    expect(result.surfaceCheck.ambiguity).toBe(1);
+    expect(result.surfaceCheck.unchecked).toBe(0);
+  });
+
+  it("未点検が残れば、P4 も答える役も呼ばれず、理由に値（部分の文・制約 ID）を含めずに確定できない", async () => {
+    const mark = "MARK_SURFACE_CLAIM";
+    const surface = {
+      ambiguities: [],
+      unwritable: [
+        {
+          id: "U-1",
+          requirementId: "R-1",
+          part: `${mark}の部分`,
+          constraintIds: ["記録"],
+          reason: `${mark}の理由`,
+          alternative: `${mark}の代案`,
+        },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+    ]);
+    let answerCalls = 0;
+    let confirmCalls = 0;
+    const responder: PlanResponder = {
+      async answer() {
+        answerCalls += 1;
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        confirmCalls += 1;
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("not-stated", 0.9),
+    });
+    // 「書いていない」を再点検（Luna）に回すが、根拠が取れない → 未点検（根拠不足）のまま
+    const recheckJudge = createFakeJudge({
+      [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceRecheckEvidenceQuestionName(0)]: choice(SURFACE_RECHECK_NO_EVIDENCE, 0.9),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder, { recheckJudge }));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 理由は有限の分類と、添字つきの欄の名前だけ（値の中身を含まない。Issue #432）
+    expect(result.reasons).toEqual([{ source: "surface-check", code: "not-stated", path: "unwritable[0]" }]);
+    // 部分の文・理由・制約 ID の文字列が、理由にも停止の行にも出ない
+    expect(JSON.stringify(result.reasons)).not.toContain(mark);
+    expect(planStopReasonLine(result)).not.toContain(mark);
+    expect(planStopReasonLine(result)).toContain("not-stated");
+    // P4 も答える役も呼ばれない
+    expect(answerCalls).toBe(0);
+    expect(confirmCalls).toBe(0);
+    // surface-check の段は走った（`ok`）が、questions・confirm の段は無い
+    expect(result.stages.some((stage) => stage.stage === "surface-check")).toBe(true);
+    expect(result.stages.some((stage) => stage.stage === "questions")).toBe(false);
+    expect(result.stages.some((stage) => stage.stage === "confirm")).toBe(false);
+    // 件数の記録（未点検 1）
+    expect(result.surfaceCheck.unchecked).toBe(1);
+    expect(result.surfaceCheck.accepted).toBe(0);
+  });
+
+  it("判定の予算が尽きると、段 surface-check が failed（budget）で止まり、申告が通らない", async () => {
+    // surface の段の応答に、予算を使い切る巨大な usage を付ける（判定の予約は呼ぶ前に見るので、
+    // 目録の判定を通したあと、surface-check の判定の予約が残高を超えて止まる）
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    const surface = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-1", requirementId: "R-1", part: "部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface, hugeUsage),
+    ]);
+    const judge = createFakeJudge(catalogAnswers());
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE, { budgetUsd: 1 }));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("budget");
+    expect(result.failure?.stage).toBe("surface-check");
+    expect(result.failure?.kind).toBe("budget");
+    // 段 surface-check が failed（budget）で記録される
+    expect(result.stages.find((stage) => stage.stage === "surface-check")?.status).toBe("failed");
+    expect(result.stages.find((stage) => stage.stage === "surface-check")?.failure_kind).toBe("budget");
+    // 申告が通らない（受理 0）
+    expect(result.surfaceCheck.accepted).toBe(0);
+    // 最初の判定の予約が失敗しても、全申告が未実行の印で診断に残る（Issue #432。申告 0 件と区別できる）
+    expect(result.surfaceCheckDiagnostics).toEqual([
+      expect.objectContaining({
+        index: 0,
+        requirementId: "R-1",
+        stage: "unexecuted",
+        classification: "unexecuted",
+        docVersion: "v1",
+      }),
+    ]);
+  });
+
+  it("仕分けの確信度が閾値未満なら、落とさず（not-a-problem でも）未点検にして確定させない", async () => {
+    const surface = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-1", requirementId: "R-1", part: "部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+    ]);
+    let answerCalls = 0;
+    const responder: PlanResponder = {
+      async answer() {
+        answerCalls += 1;
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      // not-a-problem でも、仕分けの確信度が閾値未満 → 落とさず再点検へ回す
+      [surfaceTriageQuestionName(0)]: choice("not-a-problem", 0.1),
+    });
+    // 再点検も判定不能 → 未点検（確定させない）
+    const recheckJudge = createFakeJudge({
+      [surfaceRecheckKindQuestionName(0)]: choice("undecidable", 0.9),
+      [surfaceRecheckEvidenceQuestionName(0)]: choice(SURFACE_RECHECK_NO_EVIDENCE, 0.9),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder, { recheckJudge }));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]" }]);
+    // P4 も答える役も呼ばれない
+    expect(answerCalls).toBe(0);
+    expect(result.stages.some((stage) => stage.stage === "questions")).toBe(false);
+    expect(result.surfaceCheck.dropped).toBe(0);
+    expect(result.surfaceCheck.unchecked).toBe(1);
+  });
+
+  it("仕分けのあと裏付けの予算が尽きても、仕分けまでに得た分類と判定が結果に残る（completed は false）", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    // 申告 2 件：1 件目は「問題ではない」で落ち、2 件目は語彙の穴で裏付けへ進む（そこで予算が尽きる）
+    const surface = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-0", requirementId: "R-1", part: "部分 0", constraintIds: ["記録"], reason: "理由 0", alternative: "代案 0" },
+        { id: "U-1", requirementId: "R-2", part: "部分 1", constraintIds: ["合計"], reason: "理由 1", alternative: "代案 1" },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+    ]);
+    // 仕分けの判定は答えつつ、巨大な usage（LLM の adapter）で予算を使い切る → 裏付けの予約が失敗する
+    const triageAnswers: Record<string, JudgeAnswer> = {
+      [surfaceTriageQuestionName(0)]: choice("not-a-problem", 0.9),
+      [surfaceTriageQuestionName(1)]: choice("vocabulary-hole", 0.9),
+    };
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        const answers: Record<string, JudgeAnswer> = {};
+        let triage = false;
+        for (const name of Object.keys(request.questions)) {
+          if (name.startsWith("plan-triage:")) triage = true;
+          answers[name] = triageAnswers[name] ?? choice("supports", 0.9);
+        }
+        // 仕分けの呼び出しだけ巨大な usage（LLM の adapter）で予算を使い切る → 裏付けの予約が失敗する
+        return triage
+          ? { answers, inputTokens: 0, usage: hugeUsage, model: "judge", answeredBy: "llm" }
+          : { answers, inputTokens: 0, model: "judge", answeredBy: "fake" };
+      },
+    };
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE, { budgetUsd: 1 }));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("budget");
+    expect(result.failure?.stage).toBe("surface-check");
+    expect(result.failure?.kind).toBe("budget");
+    // 途中までの記録が結果に残る（全件 0 と区別できる）
+    expect(result.surfaceCheck.completed).toBe(false);
+    expect(result.surfaceCheck.dropped).toBe(1);
+    expect(result.surfaceCheck.judgments).toHaveLength(2);
+    expect(result.surfaceCheck.judgments.map((judgment) => judgment.answer)).toEqual([
+      "not-a-problem",
+      "vocabulary-hole",
+    ]);
+    // 受理はまだ 0（裏付けに届いていない）
+    expect(result.surfaceCheck.accepted).toBe(0);
+  });
+});
+
+// ── 判定も、生成と共有する締切・総呼び出し数の門を通る（Issue #432）─────────────
+
+describe("判定も、生成と共有する締切・総呼び出し数の門を通る（Issue #432）", () => {
+  /** 仕分けが確信度不明（閾値未満）で、再点検へ回る 1 件の申告を持つ P3 の出力 */
+  const SURFACE_RECHECK_ONE = {
+    ambiguities: [],
+    unwritable: [
+      { id: "U-0", requirementId: "R-1", part: "部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+    ],
+  };
+
+  it("再点検の間に締切を越えたら、確認へ進まず deadline で止まる", async () => {
+    let clock = 0;
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_RECHECK_ONE),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      // 仕分けは確信度不明 → 再点検へ
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole"),
+    });
+    // 再点検の間に時計が進み、締切を越える
+    const recheckJudge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        clock = 2_000;
+        return createFakeJudge({
+          [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
+          [surfaceRecheckEvidenceQuestionName(0)]: choice("記録", 0.9),
+        }).judge(request);
+      },
+    };
+
+    const result = await runPlan(
+      makePlanInput(recording.client, judge, ANSWER_NONE, { deadline: 1_000, now: () => clock, recheckJudge }),
+    );
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("deadline");
+    expect(result.failure?.stage).toBe("surface-check");
+    expect(result.failure?.kind).toBe("deadline");
+  });
+
+  it("生成で呼び出し上限に達したら、再点検を開始せず call-limit で止まる", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_RECHECK_ONE),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole"),
+    });
+    // 再点検の口を渡す（合算の上限が「実際に再点検できる口」に掛かることを確かめる）
+    let recheckCalls = 0;
+    const recheckJudge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        recheckCalls += 1;
+        return createFakeJudge({
+          [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
+          [surfaceRecheckEvidenceQuestionName(0)]: choice("記録", 0.9),
+        }).judge(request);
+      },
+    };
+
+    const result = await runPlan(
+      makePlanInput(recording.client, judge, ANSWER_NONE, {
+        limits: { ...AGENT_LIMITS, callCount: 5 },
+        recheckJudge,
+      }),
+    );
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("call-limit");
+    expect(result.failure?.stage).toBe("surface-check");
+    expect(result.failure?.kind).toBe("call-limit");
+    // 仕分けは終わっている（その判定の記録が残る）が、再点検は開始していない
+    expect(result.surfaceCheck.judgments.map((judgment) => judgment.questionId)).toEqual(["plan-triage:0"]);
+    expect(recheckCalls).toBe(0);
+    expect(result.surfaceCheck.accepted).toBe(0);
+  });
+
+  it("生成の再試行も、判定と合算した上限に掛かる", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+    ]);
+    const base = recording.client;
+    // 生成側の実呼び出しの 4 回目（P4 の最初の問いの呼び出し）で、やり直してよい誤りを返す
+    let calls = 0;
+    const client: LlmClient = {
+      callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        if (calls === 4) return Promise.reject(Object.assign(new Error("通信の誤り"), { kind: "network" }));
+        return base.callStructured<T>(request);
+      },
+      callWithTools: (request: LlmToolRequest): Promise<LlmToolResponse> => base.callWithTools(request),
+    };
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers("A:Q1-1") });
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+
+    const result = await runPlan(
+      makePlanInput(client, judge, responder, { limits: { ...AGENT_LIMITS, callCount: 5 } }),
+    );
+
+    // 合算の上限（5）に達しているので、生成の再試行は開始できない → 段 questions が call-limit で止まる
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("call-limit");
+    expect(result.failure?.stage).toBe("questions");
+    expect(result.failure?.kind).toBe("call-limit");
+    // 実際に試した生成の呼び出しは 4 回（再試行は開始していない）
+    expect(calls).toBe(4);
+  });
+
+  it("P6 の判定が締切を越えて返ったら、confirmed を返さず deadline で止まる", async () => {
+    let clock = 0;
+    const deadline = 1_000;
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const base = createFakeJudge({
+      ...catalogAnswers(),
+      [confirmQuestionName("S-1")]: noul(0.95),
+      [confirmQuestionName("S-2")]: noul(0.95),
+    });
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        // P6 の覆いの判定で、**締切を越えて**返る（遅い応答）
+        if (Object.keys(request.questions).some((name) => name.startsWith("cover:"))) clock = deadline + 1;
+        return base.judge(request);
+      },
+    };
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+
+    const result = await runPlan(
+      makePlanInput(recording.client, judge, responder, { now: () => clock, deadline }),
+    );
+
+    // 遅い応答を成功にしない——締切後に confirmed を返さない
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("deadline");
+    expect(result.failure?.stage).toBe("confirm");
+    expect(result.failure?.kind).toBe("deadline");
+  });
+
+  it("総呼び出し数の上限ちょうどで正常に終わったら、上限の停止にせず確定を返す", async () => {
+    // 生成 3 回（要件・逆照合・P3）＋目録判定 1 回＋P6 判定 1 回 = 合計 5。上限も 5（ちょうど）
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [confirmQuestionName("S-1")]: noul(0.95),
+      [confirmQuestionName("S-2")]: noul(0.95),
+    });
+
+    const result = await runPlan(
+      makePlanInput(recording.client, judge, ANSWER_NONE, { limits: { ...AGENT_LIMITS, callCount: 5 } }),
+    );
+
+    // 上限ちょうどで終わった Plan を、上限の停止と誤って報告しない（締切も過ぎていない）
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+  });
+
+  it("落とし先（Luna）の口が無い入力では、主（Jev）を再点検に使わず、低確信を受理しない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_RECHECK_ONE),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      // 仕分けは低確信（語彙の穴）→ 再点検へ回したい
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.1),
+      // 主が万一再点検に使われたら受理してしまう答えを持たせておく（使われないことを確かめる）
+      [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceRecheckEvidenceQuestionName(0)]: choice("記録", 0.9),
+    });
+
+    // recheckJudge を渡さない（落とし先が無い）
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.surfaceCheck.accepted).toBe(0);
+    expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]" }]);
   });
 });

@@ -14,6 +14,7 @@ import {
   FREE_TEXT_INPUT,
   PLAN_CLI_RECORD_FILE,
   PLAN_CLI_RECORD_SCHEMA,
+  PLAN_SURFACE_CHECK_FILE,
   RECOMMENDED_INPUT,
   createAnswersFilePlanResponder,
   createInteractivePlanResponder,
@@ -22,13 +23,14 @@ import {
   type Terminal,
 } from "./cli-plan.js";
 import { createFakeJudge } from "./judge-fake.js";
-import type { JudgeAnswer } from "./judge.js";
+import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "./judge.js";
 import type {
   LlmClient,
   LlmStructuredRequest,
   LlmStructuredResponse,
   LlmToolRequest,
   LlmToolResponse,
+  LlmUsage,
 } from "./llm.js";
 import type { RecordedCall } from "./llm-fake.js";
 import {
@@ -40,9 +42,17 @@ import {
 import { confirmQuestionName } from "./plan/confirm.js";
 import { freeTextQuestionName } from "./plan/answers.js";
 import {
+  SURFACE_RECHECK_NO_EVIDENCE,
+  surfaceRecheckEvidenceQuestionName,
+  surfaceRecheckKindQuestionName,
+  surfaceSupportQuestionName,
+  surfaceTriageQuestionName,
+} from "./plan/surface-check.js";
+import {
   createRecordingClient,
   REQUIREMENT_LIST_OUTPUT,
   REVERSE_CHECK_OUTPUT,
+  SAMPLE_DOCUMENTS,
   SOURCE_TEXT,
 } from "./stages/__tests__/prompt.js";
 import { recordedRunFromPlan, structured } from "./__tests__/run.js";
@@ -80,6 +90,11 @@ afterEach(() => {
 // ── 題材（偽物の LLM に再生させる応答・偽物の判定の答え・偽物の端末）────────────
 
 const noul = (value: number): JudgeAnswer => ({ kind: "noul", noul: value });
+
+/** choice の答えを作る（確信度は任意） */
+function choice(value: string, confidence?: number): JudgeAnswer {
+  return { kind: "choice", choice: value, probabilities: undefined, probability: undefined, confidence };
+}
 
 /**
  * 目録の問い（要件ごとの門 + 要件 × 観点 × 2 問）すべてに「当てはまる・決まっている」を返す答え
@@ -302,6 +317,21 @@ interface PlanCliRecordShape {
       readonly uncovered_source: { readonly code: number; readonly conversation: number };
     };
   };
+  /** P3 の「書けない」の申告の点検（件数と判定の記録。Issue #432） */
+  readonly surface_check: {
+    readonly accepted: number;
+    readonly dropped: number;
+    readonly ambiguity: number;
+    readonly unchecked: number;
+    readonly completed: boolean;
+    readonly judgments: readonly {
+      readonly question_id: string;
+      readonly answer: string;
+      readonly confidence: number | null;
+      readonly model: string;
+      readonly answered_by: string;
+    }[];
+  };
   readonly spent_usd: number;
   readonly remaining_usd: number;
   readonly budget_usd: number;
@@ -322,6 +352,29 @@ interface PlanCliRecordShape {
 
 async function readPlanRecord(dir: string): Promise<PlanCliRecordShape> {
   return JSON.parse(await fs.readFile(`${dir}/${PLAN_CLI_RECORD_FILE}`, "utf8")) as PlanCliRecordShape;
+}
+
+/** 別ファイルの診断（`plan-surface-check.json`。Issue #432） */
+interface PlanSurfaceCheckShape {
+  readonly schema_version: string;
+  readonly plan_id: string;
+  readonly claims: readonly {
+    readonly index: number;
+    readonly requirement_id: string;
+    readonly part: string;
+    readonly reason: string;
+    readonly constraint_ids: readonly string[];
+    readonly doc_version: string;
+    readonly stage: string;
+    readonly classification: string;
+    readonly adapter: string;
+    readonly confidence: number | null;
+    readonly evidence_id: string | null;
+  }[];
+}
+
+async function readSurfaceCheck(dir: string): Promise<PlanSurfaceCheckShape> {
+  return JSON.parse(await fs.readFile(`${dir}/${PLAN_SURFACE_CHECK_FILE}`, "utf8")) as PlanSurfaceCheckShape;
 }
 
 // ── 引数の読み取り（--plan・--answers）─────────────────────────────
@@ -1333,5 +1386,285 @@ describe("止まったときの内訳も plan-record に写る（Issue #430 の�
       uncovered_source: { code: 0, conversation: 0 },
     });
     expect(lines.some((line) => line.includes("reverse-check-redo"))).toBe(true);
+  });
+});
+
+// ── P3 の「書けない」の申告の点検を plan-record に残す（Issue #432）──────────────
+
+describe("P3 の申告の点検を plan-record.json の surface_check に残す（Issue #432）", () => {
+  /** 語彙の穴の申告 1 件（制約 ID は文書に実在する） */
+  const SURFACE_ONE_CLAIM = {
+    ambiguities: [],
+    unwritable: [
+      { id: "U-0", requirementId: "R-1", part: "部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+    ],
+  };
+
+  it("受理された申告の件数と判定の記録が残り、Build に進む", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_ONE_CLAIM),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswers([]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    const dir = `${directory}/surface-check`;
+    const answersPath = "surface-check-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    // 件数（受理 1・落とした 0・曖昧さへ 0・未点検 0）
+    expect(record.surface_check.accepted).toBe(1);
+    expect(record.surface_check.dropped).toBe(0);
+    expect(record.surface_check.ambiguity).toBe(0);
+    expect(record.surface_check.unchecked).toBe(0);
+    // 最後まで点検し終えている
+    expect(record.surface_check.completed).toBe(true);
+    // 判定の記録（問いの ID・答え・確信度・モデルの版・adapter）
+    expect(record.surface_check.judgments).toEqual([
+      { question_id: "plan-triage:0", answer: "vocabulary-hole", confidence: 0.9, model: "fake-judge", answered_by: "fake" },
+      { question_id: "plan-support:0", answer: "supports", confidence: 0.95, model: "fake-judge", answered_by: "fake" },
+    ]);
+    // 別ファイルの診断（`plan-surface-check.json`）に、申告 1 件の対応が残る
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.schema_version).toBe("musunest-factory/plan-surface-check/v1");
+    expect(diagnostic.claims).toEqual([
+      {
+        index: 0,
+        requirement_id: "R-1",
+        part: "部分",
+        reason: "理由",
+        constraint_ids: ["記録"],
+        doc_version: "v1",
+        stage: "support",
+        classification: "supports",
+        adapter: "fake",
+        confidence: 0.95,
+        evidence_id: null,
+      },
+    ]);
+    // 確定したので Build が流れる
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("未点検が残れば、Build を呼ばず終了コードが 0 でなく、cannot_confirm に surface-check の理由が残る", async () => {
+    const MARK = "MARK_SURFACE_ZZZ";
+    const surface = {
+      ambiguities: [],
+      unwritable: [
+        {
+          id: "U-0",
+          requirementId: "R-1",
+          part: `${MARK}の部分`,
+          constraintIds: ["記録"],
+          reason: `${MARK}の理由`,
+          alternative: `${MARK}の代案`,
+        },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      // 裏付けが「書いていない」→ 未点検
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("not-stated", 0.9),
+      // 再点検（Luna）も根拠が取れない → 未点検（根拠不足）のまま
+      [surfaceRecheckKindQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceRecheckEvidenceQuestionName(0)]: choice(SURFACE_RECHECK_NO_EVIDENCE, 0.9),
+    });
+    const dir = `${directory}/surface-check-unchecked`;
+    const answersPath = "surface-check-unchecked-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const lines: string[] = [];
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: (line) => lines.push(line),
+    });
+
+    // Build を呼ばず、終了コードは 0 でない
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("cannot-confirm");
+    // 確定できない理由に、surface-check の理由が残る
+    expect(record.cannot_confirm).toEqual([{ source: "surface-check", code: "not-stated", path: "unwritable[0]" }]);
+    expect(record.surface_check.unchecked).toBe(1);
+    // 値（部分の文・理由・制約 ID）は、理由にも停止の行にも出ない
+    expect(JSON.stringify(record.cannot_confirm)).not.toContain(MARK);
+    expect(lines.join("\n")).not.toContain(MARK);
+    expect(lines.some((line) => line.includes("not-stated"))).toBe(true);
+  });
+
+  it("裏付けの予算が尽きても、仕分けまでに得た分類と判定が plan-record に残る（completed は false）", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    const surface = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-0", requirementId: "R-1", part: "部分 0", constraintIds: ["記録"], reason: "理由 0", alternative: "代案 0" },
+        { id: "U-1", requirementId: "R-2", part: "部分 1", constraintIds: ["合計"], reason: "理由 1", alternative: "代案 1" },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+    ]);
+    // 仕分けの判定は答えつつ、巨大な usage（LLM の adapter）で予算を使い切る → 裏付けの予約が失敗する
+    const triageAnswers: Record<string, JudgeAnswer> = {
+      [surfaceTriageQuestionName(0)]: choice("not-a-problem", 0.9),
+      [surfaceTriageQuestionName(1)]: choice("vocabulary-hole", 0.9),
+    };
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        const answers: Record<string, JudgeAnswer> = {};
+        let triage = false;
+        for (const name of Object.keys(request.questions)) {
+          if (name.startsWith("plan-triage:")) triage = true;
+          answers[name] = triageAnswers[name] ?? choice("supports", 0.9);
+        }
+        // 仕分けの呼び出しだけ巨大な usage（LLM の adapter）で予算を使い切る → 裏付けの予約が失敗する
+        return triage
+          ? { answers, inputTokens: 0, usage: hugeUsage, model: "judge", answeredBy: "llm" }
+          : { answers, inputTokens: 0, model: "judge", answeredBy: "fake" };
+      },
+    };
+    const dir = `${directory}/surface-check-partial`;
+    const answersPath = "surface-check-partial-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--budget", "1"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.stage).toBe("surface-check");
+    expect(record.failure?.kind).toBe("budget");
+    // 途中までの分類と判定が記録に残る（全件 0 と区別できる）
+    expect(record.surface_check.completed).toBe(false);
+    expect(record.surface_check.dropped).toBe(1);
+    expect(record.surface_check.judgments).toHaveLength(2);
+    expect(record.surface_check.judgments.map((judgment) => judgment.answer)).toEqual(["not-a-problem", "vocabulary-hole"]);
+    // 途中停止でも、申告 1 件ずつの診断が別ファイルに残る（落とした 1 件目と、裏付けの前に止まった 2 件目）
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.claims).toHaveLength(2);
+    expect(diagnostic.claims[0]).toMatchObject({ index: 0, stage: "triage", classification: "not-a-problem" });
+    expect(diagnostic.claims[1]).toMatchObject({ index: 1, stage: "triage", classification: "vocabulary-hole" });
+  });
+
+  it("最初の判定の予約が失敗しても、診断ファイルに全申告が未実行で残る（申告 0 件と区別できる）", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    const surface = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-0", requirementId: "R-1", part: "部分 0", constraintIds: ["記録"], reason: "理由 0", alternative: "代案 0" },
+        { id: "U-1", requirementId: "R-2", part: "部分 1", constraintIds: ["合計"], reason: "理由 1", alternative: "代案 1" },
+      ],
+    };
+    // surface の応答で予算を使い切る → surface-check の最初の判定の予約が失敗する
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface, hugeUsage),
+    ]);
+    const judge = createFakeJudge(catalogAnswers());
+    const dir = `${directory}/surface-check-unexecuted`;
+    const answersPath = "surface-check-unexecuted-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--budget", "1"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.stage).toBe("surface-check");
+    expect(record.failure?.kind).toBe("budget");
+    // 全申告が「未実行」で別ファイルに残る（申告が無かった場合と区別できる）
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.claims).toEqual([
+      expect.objectContaining({ index: 0, requirement_id: "R-1", stage: "unexecuted", classification: "unexecuted", doc_version: "v1" }),
+      expect.objectContaining({ index: 1, requirement_id: "R-2", stage: "unexecuted", classification: "unexecuted", doc_version: "v1" }),
+    ]);
   });
 });

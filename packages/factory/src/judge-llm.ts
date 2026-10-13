@@ -74,6 +74,8 @@ export function createLlmJudge(options: LlmJudgeOptions): Judge {
         schemaName: ANSWERS_SCHEMA_NAME,
         schema: buildAnswersSchema(request.questions),
         maxOutputTokens,
+        // 締切までの残りで実呼び出しを打ち切る合図を、そのまま client へ渡す（Issue #432）
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
       });
       return {
         answers: parseAnswers(request.questions, response.output),

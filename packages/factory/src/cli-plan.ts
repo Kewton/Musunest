@@ -25,6 +25,7 @@ import {
   type PlanResponder,
   type PlanResult,
   type PlanStageRecord,
+  type PlanSurfaceCheckSummary,
 } from "./plan/run-plan.js";
 import { isRecord } from "./stages/prompt.js";
 import type { ReverseCheckDiagnosis, ReverseCheckMissCounts } from "./stages/reverse-check.js";
@@ -284,6 +285,13 @@ export function createInteractivePlanResponder(
 export const PLAN_CLI_RECORD_FILE = "plan-record.json" as const;
 /** 往復の記録の版 */
 export const PLAN_CLI_RECORD_SCHEMA = "musunest-factory/plan-cli-record/v1" as const;
+/**
+ * P3 の申告の点検の診断を置くファイルの名前（`--out` の直下。`plan-record.json` とは**別**。Issue #432）。
+ * 申告 1 件ずつの対応（受理・落とした・途中停止のどれも）を持ち、`plan-record.json` は今の要約のままにする。
+ */
+export const PLAN_SURFACE_CHECK_FILE = "plan-surface-check.json" as const;
+/** 点検の診断の版 */
+export const PLAN_SURFACE_CHECK_SCHEMA = "musunest-factory/plan-surface-check/v1" as const;
 
 /** 記録に入れる問い（安定した形に写す） */
 export interface PlanCliQuestionRecord {
@@ -354,6 +362,64 @@ export interface PlanCliRequirementsDiagnosisRecord {
   readonly unmet: PlanCliMissCountsRecord;
 }
 
+/**
+ * 記録に入れる、P3 の「書けない」の申告の点検の判定 1 件（問いの ID・答え・確信度・モデルの版・adapter。
+ * 依頼文の全文・申告の文は残さない。Issue #432）。
+ */
+export interface PlanCliSurfaceJudgmentRecord {
+  readonly question_id: string;
+  readonly answer: string;
+  readonly confidence: number | null;
+  readonly model: string;
+  readonly answered_by: string;
+}
+
+/**
+ * 記録に入れる、P3 の申告の点検（件数＝受理・落とした・曖昧さへ・未点検と、判定の記録。Issue #432）。
+ * **値は件数と判定の記録だけ**である（申告の部分の文・理由・制約 ID は入れない）。
+ */
+export interface PlanCliSurfaceCheckRecord {
+  readonly accepted: number;
+  readonly dropped: number;
+  readonly ambiguity: number;
+  readonly unchecked: number;
+  /**
+   * 点検が最後まで終えたか（Issue #432）。`false` は予算切れなどで途中で止まり、**申告 0 件と区別**して
+   * 全部を点検し終えていないことを示す。
+   */
+  readonly completed: boolean;
+  readonly judgments: readonly PlanCliSurfaceJudgmentRecord[];
+}
+
+/**
+ * 別ファイルの診断（`--out` の `plan-surface-check.json`。Issue #432）に載せる、申告 1 件の記録。
+ * 申告の添字・要件 ID・部分・理由・制約 ID・文書の版と、点検の段階・分類・adapter・確信度・根拠 ID を
+ * 結び付ける。**P3 の応答全体や会話の全文は入れない**。
+ */
+export interface PlanCliSurfaceClaimRecord {
+  readonly index: number;
+  readonly requirement_id: string;
+  readonly part: string;
+  readonly reason: string;
+  readonly constraint_ids: readonly string[];
+  readonly doc_version: string;
+  /** 点検の段階（`triage`・`support`・`recheck`） */
+  readonly stage: string;
+  readonly classification: string;
+  /** 答えた adapter（jev・llm・fake。答えが無ければ `none`） */
+  readonly adapter: string;
+  /** 確信度（不明は `null`） */
+  readonly confidence: number | null;
+  readonly evidence_id: string | null;
+}
+
+/** 別ファイルの診断（`--out` の診断。Issue #432）。`plan-record.json` とは別に置く */
+export interface PlanCliSurfaceCheckDiagnostic {
+  readonly schema_version: string;
+  readonly plan_id: string;
+  readonly claims: readonly PlanCliSurfaceClaimRecord[];
+}
+
 /** 往復の記録（`--out` の `plan-record.json`。質問・答え・段の記録・使った額） */
 export interface PlanCliRecord {
   readonly schema_version: string;
@@ -366,6 +432,8 @@ export interface PlanCliRecord {
   readonly closed_by_default: readonly PlanCliDefaultClosureRecord[];
   /** P1/P2 の往復ごとの逆照合の落ちの内訳（種類ごと・出どころごと。値は件数だけ。Issue #430） */
   readonly requirements_diagnosis: PlanCliRequirementsDiagnosisRecord;
+  /** P3 の「書けない」の申告の点検（件数と判定の記録。値は件数と記録だけ。Issue #432） */
+  readonly surface_check: PlanCliSurfaceCheckRecord;
   readonly confirmation: "build" | "stop" | null;
   readonly stages: readonly PlanStageRecord[];
   readonly judge: BundleJudgeUsage;
@@ -422,6 +490,48 @@ function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCl
   };
 }
 
+/** P3 の申告の点検の記録を、記録の形（snake_case。確信度は `null`）に写す（Issue #432） */
+function toSurfaceCheckRecord(summary: PlanSurfaceCheckSummary): PlanCliSurfaceCheckRecord {
+  return {
+    accepted: summary.accepted,
+    dropped: summary.dropped,
+    ambiguity: summary.ambiguity,
+    unchecked: summary.unchecked,
+    completed: summary.completed,
+    judgments: summary.judgments.map((judgment) => ({
+      question_id: judgment.questionId,
+      answer: judgment.answer,
+      confidence: judgment.confidence ?? null,
+      model: judgment.model,
+      answered_by: judgment.answeredBy,
+    })),
+  };
+}
+
+/** P3 の申告の点検の診断を、別ファイルに書く形（snake_case）に組む（Issue #432） */
+export function buildSurfaceCheckDiagnostic(input: {
+  readonly result: PlanResult;
+  readonly planId: string;
+}): PlanCliSurfaceCheckDiagnostic {
+  return {
+    schema_version: PLAN_SURFACE_CHECK_SCHEMA,
+    plan_id: input.planId,
+    claims: input.result.surfaceCheckDiagnostics.map((claim) => ({
+      index: claim.index,
+      requirement_id: claim.requirementId,
+      part: claim.part,
+      reason: claim.reason,
+      constraint_ids: claim.constraintIds,
+      doc_version: claim.docVersion,
+      stage: claim.stage,
+      classification: claim.classification,
+      adapter: claim.adapter,
+      confidence: claim.confidence,
+      evidence_id: claim.evidenceId,
+    })),
+  };
+}
+
 /** 往復の記録を組む（`--out` に書く。納品物には入れない。§7・Issue #336） */
 export function buildPlanCliRecord(input: {
   readonly result: PlanResult;
@@ -449,6 +559,7 @@ export function buildPlanCliRecord(input: {
       value: closure.value,
     })),
     requirements_diagnosis: toRequirementsDiagnosisRecord(input.result.requirementsDiagnosis),
+    surface_check: toSurfaceCheckRecord(input.result.surfaceCheck),
     confirmation: input.transcript.confirmation,
     stages: input.result.stages,
     judge: input.result.judge,
