@@ -375,9 +375,11 @@ export interface PlanCliRequirementsDiagnosisRecord {
 
 /**
  * 記録に入れる、P3 の「書けない」の申告の点検の判定 1 件（問いの ID・答え・確信度・モデルの版・adapter。
- * 依頼文の全文・申告の文は残さない。Issue #432）。
+ * 依頼文の全文・申告の文は残さない。Issue #432）。**点検の番号**（`check`。1 始まり）も残す——同じ問いの
+ * 名前が点検ごとに繰り返すので、どの点検の判定かを一意に引けるようにする（Issue #434）。
  */
 export interface PlanCliSurfaceJudgmentRecord {
+  readonly check: number;
   readonly question_id: string;
   readonly answer: string;
   readonly confidence: number | null;
@@ -408,6 +410,7 @@ export interface PlanCliSurfaceCheckRecord {
  * 結び付ける。**P3 の応答全体や会話の全文は入れない**。
  */
 export interface PlanCliSurfaceClaimRecord {
+  readonly check: number;
   readonly index: number;
   readonly requirement_id: string;
   readonly part: string;
@@ -503,7 +506,7 @@ function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCl
   };
 }
 
-/** P3 の申告の点検の記録を、記録の形（snake_case。確信度は `null`）に写す（Issue #432） */
+/** P3 の申告の点検の記録を、記録の形（snake_case。確信度は `null`）に写す（Issue #432・#434） */
 function toSurfaceCheckRecord(summary: PlanSurfaceCheckSummary): PlanCliSurfaceCheckRecord {
   return {
     accepted: summary.accepted,
@@ -512,6 +515,7 @@ function toSurfaceCheckRecord(summary: PlanSurfaceCheckSummary): PlanCliSurfaceC
     unchecked: summary.unchecked,
     completed: summary.completed,
     judgments: summary.judgments.map((judgment) => ({
+      check: judgment.check,
       question_id: judgment.questionId,
       answer: judgment.answer,
       confidence: judgment.confidence ?? null,
@@ -530,6 +534,7 @@ export function buildSurfaceCheckDiagnostic(input: {
     schema_version: PLAN_SURFACE_CHECK_SCHEMA,
     plan_id: input.planId,
     claims: input.result.surfaceCheckDiagnostics.map((claim) => ({
+      check: claim.check,
       index: claim.index,
       requirement_id: claim.requirementId,
       part: claim.part,

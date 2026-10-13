@@ -23,6 +23,7 @@ import type {
 } from "../llm.js";
 import type { RecordedCall } from "../llm-fake.js";
 import {
+  diffChangeKey,
   planDiagnosisCode,
   planDiagnosisField,
   runPlan,
@@ -2580,8 +2581,10 @@ describe("P3 の「書けない」の申告を判定の口で点検する（04 �
 
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
-    // 理由は有限の分類と、添字つきの欄の名前だけ（値の中身を含まない。Issue #432）
-    expect(result.reasons).toEqual([{ source: "surface-check", code: "not-stated", path: "unwritable[0]" }]);
+    // 理由は有限の分類と、添字つきの欄の名前と点検の番号だけ（値の中身を含まない。Issue #432・#434）
+    expect(result.reasons).toEqual([
+      { source: "surface-check", code: "not-stated", path: "unwritable[0]", check: 1 },
+    ]);
     // 部分の文・理由・制約 ID の文字列が、理由にも停止の行にも出ない
     expect(JSON.stringify(result.reasons)).not.toContain(mark);
     expect(planStopReasonLine(result)).not.toContain(mark);
@@ -2681,7 +2684,7 @@ describe("P3 の「書けない」の申告を判定の口で点検する（04 �
 
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
-    expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]" }]);
+    expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]", check: 1 }]);
     // P4 も答える役も呼ばれない
     expect(answerCalls).toBe(0);
     expect(result.stages.some((stage) => stage.stage === "questions")).toBe(false);
@@ -2961,7 +2964,7 @@ describe("判定も、生成と共有する締切・総呼び出し数の門を�
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
     expect(result.surfaceCheck.accepted).toBe(0);
-    expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]" }]);
+    expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]", check: 1 }]);
   });
 });
 
@@ -3377,7 +3380,8 @@ describe("差分点検：書けない申告を、確認の前に点検する（0
 
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
-    expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]" }]);
+    // 差分点検は 2 回目の点検（初回は申告 0 件）なので、点検の番号は 2
+    expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]", check: 2 }]);
     // 未点検が、結果の要約にも積まれる（0 件に見せない。Issue #434）
     expect(result.surfaceCheck.unchecked).toBe(1);
     expect(result.surfaceCheck.accepted).toBe(0);
@@ -3676,8 +3680,9 @@ describe("差分の対象の選択：変更・削除は元の要件を引く（I
     // 変更を持たない要件は対象にしない。増えた・変わった・消えた分が対象になる
     expect(selection.targets.map((r) => r.id)).toEqual(["R:A:Q1-1", "R:A:Q1-2", "R:A:Q1-3", "R:A:Q1-4"]);
 
-    // 既に点検した要件は、change を持っていても対象にしない
-    const reviewed = selectDiffRequirements(all, new Set(["R:A:Q1-1"]));
+    // 既に点検した要件は、change を持っていても対象にしない（点検済みは ID ではなく変更の鍵で数える）
+    const reviewedKeys = new Set([diffChangeKey(added) ?? ""]);
+    const reviewed = selectDiffRequirements(all, reviewedKeys);
     if (reviewed.kind === "targets") {
       expect(reviewed.targets.map((r) => r.id)).toEqual(["R:A:Q1-2", "R:A:Q1-3", "R:A:Q1-4"]);
     }
@@ -3690,5 +3695,133 @@ describe("差分の対象の選択：変更・削除は元の要件を引く（I
 
     // 変更が無ければ、対象は空である
     expect(selectDiffRequirements([original], new Set())).toEqual({ kind: "targets", targets: [] });
+  });
+
+  it("同じ ID の要件でも、後の答えによる変更・削除は対象にする（ID だけで除外しない）", () => {
+    const original = requirement("R-1");
+    const added = requirement("R:A:Q1-1", { kind: "added", answer_id: "A:Q1-1" });
+    // 先に added を点検済みにする
+    const reviewedKeys = new Set([diffChangeKey(added) ?? ""]);
+
+    // 同じ ID の、後の答えによる変更——鍵が変わるので対象になる
+    const laterChanged = requirement("R:A:Q1-1", { kind: "changed", from_requirement_id: "R-1", answer_id: "A:Q1-2" });
+    const selChanged = selectDiffRequirements([original, added, laterChanged], reviewedKeys);
+    if (selChanged.kind === "targets") expect(selChanged.targets.map((r) => r.id)).toEqual(["R:A:Q1-1"]);
+
+    // 同じ ID の、後の答えによる削除
+    const laterRemoved = requirement("R:A:Q1-1", { kind: "removed", from_requirement_id: "R-1", answer_id: "A:Q1-3" });
+    const selRemoved = selectDiffRequirements([original, added, laterRemoved], reviewedKeys);
+    if (selRemoved.kind === "targets") expect(selRemoved.targets.map((r) => r.id)).toEqual(["R:A:Q1-1"]);
+
+    // 同じ ID・同じ変更・同じ答えは、点検済みとして除外する（同じ変更を繰り返さない）
+    const same = requirement("R:A:Q1-1", { kind: "added", answer_id: "A:Q1-1" });
+    const selSame = selectDiffRequirements([original, same], reviewedKeys);
+    if (selSame.kind === "targets") expect(selSame.targets).toEqual([]);
+
+    // 同じ ID の後の変更でも、元の参照が解決できなければ確定させない
+    const laterUnknown = requirement("R:A:Q1-1", { kind: "changed", from_requirement_id: "R-999", answer_id: "A:Q1-9" });
+    expect(selectDiffRequirements([original, added, laterUnknown], reviewedKeys).kind).toBe("unresolved");
+  });
+});
+
+// ── Issue #434：点検の番号で、判定・診断・停止理由を一意に引く ─────────────────
+
+describe("差分点検：点検の番号で、判定・診断・停止理由を一意に引く（Issue #434）", () => {
+  /** 問い 1 つを手で作る（ID は LLM 由来で、コードが `Q<版>-<n>` に組み直す） */
+  function questionOf(openIssueId: string, id: string) {
+    return {
+      id,
+      openIssueId,
+      text: "どうしますか",
+      choices: [
+        { id: "c1", text: "こちら" },
+        { id: "c2", text: "あちら" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    };
+  }
+  /** 初回の洗い出し：曖昧さ 3 件（3 往復に分ける）と、書けない申告 1 件（添字 0） */
+  const ISSUES = {
+    ambiguities: [
+      { id: "OI-1", requirementId: "R-1", text: "曖昧 1", critical: true },
+      { id: "OI-2", requirementId: "R-1", text: "曖昧 2", critical: true },
+      { id: "OI-3", requirementId: "R-1", text: "曖昧 3", critical: true },
+    ],
+    unwritable: [
+      { id: "U-0", requirementId: "R-1", part: "初回の部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+    ],
+  };
+  /** 差分の洗い出し：書けない申告 1 件（添字 0） */
+  const diffClaim = (requirementId: string, id: string) => ({
+    ambiguities: [],
+    unwritable: [{ id, requirementId, part: "差分の部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" }],
+  });
+
+  it("初回と複数の差分が同じ添字 0 を使っても、点検の番号で一意に引ける（申告 0 件の点検と途中停止を挟む）", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      // 初回の洗い出し（点検 1 の申告。添字 0）
+      structured(ISSUES),
+      structured({ questions: [questionOf("OI-1", "Q-1"), questionOf("OI-2", "Q-2"), questionOf("OI-3", "Q-3")] }),
+      // 1 往復目の差分（点検 2。申告 0 件）
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured({ questions: [questionOf("OI-2", "Q-1"), questionOf("OI-3", "Q-2")] }),
+      // 2 往復目の差分（点検 3。添字 0 の申告）
+      structured(diffClaim("R:A:Q2-1", "U-1")),
+      structured({ questions: [questionOf("OI-3", "Q-1")] }),
+      // 3 往復目の差分（点検 4。予算を使い切って、最初の予約が失敗して止まる）
+      structured(diffClaim("R:A:Q3-1", "U-2"), hugeUsage),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1", "R:A:Q3-1"]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    const responder: PlanResponder = {
+      async answer(request) {
+        // 各往復、提示された最初の問いだけに答える（1 往復に 1 要件ずつ増やす）
+        return { kind: "answers", answers: [answerTo(request.questions[0])] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder, { budgetUsd: 1 }));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("surface-check");
+    expect(result.failure?.kind).toBe("budget");
+    // 判定は、点検の番号（1=初回、3=2 往復目の差分）つき。同じ問いの名前（添字 0）が点検で区別できる
+    expect(result.surfaceCheck.judgments.map((judgment) => [judgment.check, judgment.questionId])).toEqual([
+      [1, "plan-triage:0"],
+      [1, "plan-support:0"],
+      [3, "plan-triage:0"],
+      [3, "plan-support:0"],
+    ]);
+    // 診断も点検の番号つき。申告 0 件の点検（2）は空、途中停止の点検（4）は未実行
+    expect(result.surfaceCheckDiagnostics.map((claim) => [claim.check, claim.index, claim.classification])).toEqual([
+      [1, 0, "supports"],
+      [3, 0, "supports"],
+      [4, 0, "unexecuted"],
+    ]);
+    expect(result.surfaceCheck.judgments.some((judgment) => judgment.check === 2)).toBe(false);
+    expect(result.surfaceCheck.completed).toBe(false);
+    // 差分点検の記録は往復ごとに 3 件（停止した往復も数える）
+    expect(result.diffReviews).toEqual([
+      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0 },
+      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 1 },
+      { round: 3, added: 1, openIssues: 0, acceptedUnwritable: 0 },
+    ]);
   });
 });

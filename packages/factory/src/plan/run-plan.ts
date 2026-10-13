@@ -374,6 +374,12 @@ export interface CannotConfirmReason {
   readonly source: CannotConfirmSource;
   readonly code: string;
   readonly path: string;
+  /**
+   * 申告の点検で確定できなかったときの、**点検の番号**（1 始まり。初回が 1）。同じ問いの名前・局所の
+   * 申告の添字が点検ごとに繰り返すので、どの点検かを一意に引けるようにする（Issue #434）。申告の点検
+   * 以外の理由には付かない。
+   */
+  readonly check?: number;
 }
 
 /** 止まった理由（`declined` は答える役が「やめる」と言ったとき。それ以外は失敗の分類） */
@@ -390,9 +396,28 @@ export interface PlanDefaultClosure {
 }
 
 /**
- * P3 の「書けない」の申告の点検の記録（Issue #432）。**件数（受理・落とした・曖昧さへ・未点検）と、判定の
- * 記録（問いの ID・答え・確信度・モデルの版・adapter）**だけを持つ——申告の部分の文・理由・制約 ID の
- * 値は入れない（`02-failure-modes.md` §1）。確定・確定できない・止まったの 3 つの結果に共通で、申告 0 件
+ * 点検 1 回ぶんの判定の記録（Issue #432・#434）。**点検の番号**（1 始まり。初回が 1）を添える——同じ問いの
+ * 名前（`plan-triage:0` など）が点検ごとに繰り返すので、どの点検の判定かを一意に引けるようにする。
+ */
+export interface PlanSurfaceJudgment extends SurfaceJudgment {
+  /** 点検の番号（1 始まり。初回が 1、各差分で増える） */
+  readonly check: number;
+}
+
+/**
+ * 点検 1 回ぶんの診断（Issue #432・#434）。**点検の番号**を添える——申告の添字（`index`）は点検ごとに
+ * 0 から振られるので、どの点検の申告かを一意に引けるようにする。
+ */
+export interface PlanSurfaceCheckDiagnostic extends SurfaceClaimDiagnostic {
+  /** 点検の番号（1 始まり。初回が 1、各差分で増える） */
+  readonly check: number;
+}
+
+/**
+ * P3 の「書けない」の申告の点検の記録（Issue #432・#434）。**件数（受理・落とした・曖昧さへ・未点検）と、
+ * 判定の記録（問いの ID・答え・確信度・モデルの版・adapter・**点検の番号**）**を持つ——申告の部分の文・
+ * 理由・制約 ID の値は入れない（`02-failure-modes.md` §1）。**初回と各往復の差分の点検を連結**したもので、
+ * 判定は `check` でどの点検かに一意に引ける。確定・確定できない・止まったの 3 つの結果に共通で、申告 0 件
  * なら件数も 0、記録も空である。
  */
 export interface PlanSurfaceCheckSummary {
@@ -404,12 +429,12 @@ export interface PlanSurfaceCheckSummary {
   readonly ambiguity: number;
   /** 未点検の申告（裏付けが書いていない・確信度が閾値未満・答えが読めない）の件数 */
   readonly unchecked: number;
-  /** 判定の記録（仕分けと裏付けの両方） */
-  readonly judgments: readonly SurfaceJudgment[];
+  /** 判定の記録（仕分けと裏付けの両方。点検の番号つき） */
+  readonly judgments: readonly PlanSurfaceJudgment[];
   /**
    * 点検の段が最後まで終えたか（Issue #432）。`false` は、仕分けの途中で止まった（判定の予算が尽きた）などで
    * **全部の申告を点検し終えていない**ことを示す——申告 0 件（`accepted`・`dropped`・`ambiguity`・`unchecked`
-   * がすべて 0・`judgments` も空）と区別する。
+   * がすべて 0・`judgments` も空）と区別する。**すべての点検が終えたときだけ真**である。
    */
   readonly completed: boolean;
 }
@@ -459,7 +484,7 @@ export interface PlanResultBase {
    * adapter・確信度・根拠 ID。Issue #432）。**受理・落とした・途中停止のどれも**残す——呼ぶ側（`cli.ts`）が
    * 別の診断ファイルに書く。`plan-record.json`（`surfaceCheck`）には入れない。
    */
-  readonly surfaceCheckDiagnostics: readonly SurfaceClaimDiagnostic[];
+  readonly surfaceCheckDiagnostics: readonly PlanSurfaceCheckDiagnostic[];
   /**
    * 差分点検（各往復の P5 のあと、その往復で増えた要件だけを掛けた目録・洗い出し・申告の点検）の記録
    * （Issue #434）。往復ごとに 1 件。**値を持たず件数だけ**である。増えた要件が 0 件の往復では積まない。
@@ -682,26 +707,40 @@ export type PlanDiffSelection =
   | { readonly kind: "unresolved" };
 
 /**
+ * 要件の `change` を、**点検済みを数える鍵**に写す（Issue #434）。ID だけでは、同じ ID の要件が後の
+ * 答えで変更・削除されても「点検済み」と見なされてしまう——**答えと変更の関係**（変更の種類・答えの ID・
+ * 元の要件の ID）まで含めて区別する。`change` を持たない要件は `undefined`（点検の対象にならない）。
+ */
+export function diffChangeKey(requirement: PlanRequirement): string | undefined {
+  const change = requirement.change;
+  if (change === undefined) return undefined;
+  const from = change.from_requirement_id ?? "";
+  return `${requirement.id}\u0000${change.kind}\u0000${change.answer_id}\u0000${from}`;
+}
+
+/**
  * **その往復で増えた・変わった要件**を選ぶ（Issue #434）。点検の対象にするのは、まだ点検していない
- * `change` 付きの要件だけである。
+ * `change` 付きの要件だけである。**点検済みは ID ではなく `diffChangeKey` で数える**——同じ ID の要件が
+ * 後の答えで変更・削除されると、鍵が変わるので、また対象になる。
  *
  *   - `added` … その要件自身を対象にする
  *   - `changed`・`removed` … **元の要件 ID（`change.from_requirement_id`）を引く**。引けても引けなくても
  *     その要件自身を対象にするが、**引けない（欄が無い・知らない ID）ときは `unresolved`** にして、
  *     呼ぶ側が確定させない側に倒す（点検の対象を勝手に作らない）
  *
- * 既に点検した要件（`reviewed`）は、`change` を持っていても対象にしない。**同じ入力からは同じ結果に
- * なる純粋な関数**である。
+ * **同じ入力からは同じ結果になる純粋な関数**である。
  */
 export function selectDiffRequirements(
   requirements: readonly PlanRequirement[],
-  reviewed: ReadonlySet<string>,
+  reviewedKeys: ReadonlySet<string>,
 ): PlanDiffSelection {
   const known = new Set(requirements.map((requirement) => requirement.id));
   const targets: PlanRequirement[] = [];
   for (const requirement of requirements) {
     const change = requirement.change;
-    if (change === undefined || reviewed.has(requirement.id)) continue;
+    if (change === undefined) continue;
+    const key = diffChangeKey(requirement);
+    if (key !== undefined && reviewedKeys.has(key)) continue;
     if (change.kind !== "added") {
       const from = change.from_requirement_id;
       if (typeof from !== "string" || from === "" || !known.has(from)) return { kind: "unresolved" };
@@ -766,14 +805,19 @@ function reverseCheckReasons(misses: readonly ReverseCheckMiss[]): readonly Cann
 
 /**
  * P3 の「書けない」の申告の点検で未点検が残ったことを、確定できなかった理由（`source: surface-check`）に
- * 写す（Issue #432）。**値の中身（部分の文・理由・制約 ID）を含まない**——`path` は添字つきの欄の名前
+ * 写す（Issue #432・#434）。**値の中身（部分の文・理由・制約 ID）を含まない**——`path` は添字つきの欄の名前
  * （`unwritable[<番号>]`）をコードが組み、`code` は有限の分類（`not-stated`・`low-confidence`・`unknown`）。
+ * **点検の番号**（`check`。1 始まり）も添えて、どの点検の申告かを一意に引けるようにする。
  */
-function surfaceCheckReasons(unchecked: readonly SurfaceUncheckedClaim[]): readonly CannotConfirmReason[] {
+function surfaceCheckReasons(
+  unchecked: readonly SurfaceUncheckedClaim[],
+  check: number,
+): readonly CannotConfirmReason[] {
   return unchecked.map((claim) => ({
     source: "surface-check" as const,
     code: planDiagnosisCode(claim.code),
     path: `unwritable[${claim.index}]`,
+    check,
   }));
 }
 
@@ -897,19 +941,25 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       dropped: surfaceChecks.reduce((total, check) => total + check.dropped, 0),
       ambiguity: surfaceChecks.reduce((total, check) => total + check.ambiguity, 0),
       unchecked: surfaceChecks.reduce((total, check) => total + check.unchecked, 0),
-      judgments: surfaceChecks.flatMap((check) => check.judgments),
+      // 判定に点検の番号（1 始まり）を添える——同じ問いの名前が点検ごとに繰り返すので、一意に引ける（Issue #434）
+      judgments: surfaceChecks.flatMap((check, index) =>
+        check.judgments.map((judgment) => ({ ...judgment, check: index + 1 })),
+      ),
       // すべての点検が最後まで終えたときだけ `true`（途中停止・未点検を成功に見せない）
       completed: surfaceChecks.every((check) => check.completed),
     };
   };
-  /** 点検ごとの診断を、1 本の並びにまとめる（受理・落とした・途中停止のどれも。Issue #432・#434） */
-  const aggregateSurfaceCheckDiagnostics = (): readonly SurfaceClaimDiagnostic[] =>
-    surfaceChecks.flatMap((check) => check.diagnostics);
+  /** 点検ごとの診断を、1 本の並びにまとめる（受理・落とした・途中停止のどれも。点検の番号つき。Issue #432・#434） */
+  const aggregateSurfaceCheckDiagnostics = (): readonly PlanSurfaceCheckDiagnostic[] =>
+    surfaceChecks.flatMap((check, index) =>
+      check.diagnostics.map((diagnostic) => ({ ...diagnostic, check: index + 1 })),
+    );
   // コードが目録から作った事項の対応（事項 ID → 未指定の観点）と、要件ごとの門の判定（Issue #408）
   const catalogIssueFacets = new Map<string, UnspecifiedFacet>();
   const aggregatesByRequirement = new Map<string, boolean | null>();
-  // 差分点検で点検済みの要件 ID（その往復で増えた要件だけを対象にする。Issue #434）
-  const reviewedRequirementIds = new Set<string>();
+  // 差分点検で点検済みの**変更の鍵**（要件 ID だけでなく、変更の種類・答えの ID・元の要件 ID も含む。
+  // 同じ ID の後の変更・削除を取りこぼさない。Issue #434）
+  const reviewedDiffKeys = new Set<string>();
   // 差分点検 1 回ずつの記録（値を持たず件数だけ。Issue #434）
   const diffReviews: PlanDiffReviewRecord[] = [];
 
@@ -1276,7 +1326,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       return {
         kind: "cannot-confirm",
         openIssues: openIssues.filter((issue) => issue.status === "open" && issue.critical),
-        reasons: surfaceCheckReasons(surfaceCheck.unchecked),
+        reasons: surfaceCheckReasons(surfaceCheck.unchecked, initialCheckIndex + 1),
         ...resultBase(),
       };
     }
@@ -1452,9 +1502,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
      * **対象が 0 件なら、どの段も呼ばず `undefined`**。
      */
     const reviewAddedRequirements = async (): Promise<PlanResult | undefined> => {
-      const unreviewedChanges = requirements.filter(
-        (requirement) => requirement.change !== undefined && !reviewedRequirementIds.has(requirement.id),
-      );
+      const unreviewedChanges = requirements.filter((requirement) => {
+        const key = diffChangeKey(requirement);
+        return key !== undefined && !reviewedDiffKeys.has(key);
+      });
       if (unreviewedChanges.length === 0) return undefined;
       // 差分点検 1 回ぶんの記録を、**開始時に積む**——途中で止まった往復も数えられる（Issue #434）
       const reviewRecord = {
@@ -1467,7 +1518,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
 
       // 対象（この往復で増えた・変わった要件）を選ぶ。変更・削除が指す元の要件を解決できなければ、
       // 勝手に点検の対象を作らず、確定させない側に倒す（Issue #434）
-      const selection = selectDiffRequirements(requirements, reviewedRequirementIds);
+      const selection = selectDiffRequirements(requirements, reviewedDiffKeys);
       if (selection.kind === "unresolved") {
         return {
           kind: "cannot-confirm",
@@ -1477,7 +1528,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         };
       }
       const diff = selection.targets;
-      for (const requirement of diff) reviewedRequirementIds.add(requirement.id);
+      for (const requirement of diff) {
+        const key = diffChangeKey(requirement);
+        if (key !== undefined) reviewedDiffKeys.add(key);
+      }
       // この往復の差分の要件 ID の集合（応答が指す要件 ID を照合する。Issue #434）
       const targetRequirementIds = new Set(diff.map((requirement) => requirement.id));
 
@@ -1589,12 +1643,12 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       for (const claim of diffSurfaceCheck.ambiguities) {
         openIssues.push({ id: `OI:surface-check:${claim.index}`, text: claim.part, critical: true, status: "open" });
       }
-      // 未点検が残れば確定できない（理由は値の中身を含まない。Issue #432）
+      // 未点検が残れば確定できない（理由は値の中身を含まない。点検の番号つき。Issue #432・#434）
       if (diffSurfaceCheck.unchecked.length > 0) {
         return {
           kind: "cannot-confirm",
           openIssues: openIssues.filter((issue) => issue.status === "open" && issue.critical),
-          reasons: surfaceCheckReasons(diffSurfaceCheck.unchecked),
+          reasons: surfaceCheckReasons(diffSurfaceCheck.unchecked, diffCheckIndex + 1),
           ...resultBase(),
         };
       }

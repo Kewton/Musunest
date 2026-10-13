@@ -328,6 +328,7 @@ interface PlanCliRecordShape {
     readonly unchecked: number;
     readonly completed: boolean;
     readonly judgments: readonly {
+      readonly check: number;
       readonly question_id: string;
       readonly answer: string;
       readonly confidence: number | null;
@@ -369,6 +370,7 @@ interface PlanSurfaceCheckShape {
   readonly schema_version: string;
   readonly plan_id: string;
   readonly claims: readonly {
+    readonly check: number;
     readonly index: number;
     readonly requirement_id: string;
     readonly part: string;
@@ -1461,16 +1463,17 @@ describe("P3 の申告の点検を plan-record.json の surface_check に残す�
     expect(record.surface_check.unchecked).toBe(0);
     // 最後まで点検し終えている
     expect(record.surface_check.completed).toBe(true);
-    // 判定の記録（問いの ID・答え・確信度・モデルの版・adapter）
+    // 判定の記録（点検の番号・問いの ID・答え・確信度・モデルの版・adapter）
     expect(record.surface_check.judgments).toEqual([
-      { question_id: "plan-triage:0", answer: "vocabulary-hole", confidence: 0.9, model: "fake-judge", answered_by: "fake" },
-      { question_id: "plan-support:0", answer: "supports", confidence: 0.95, model: "fake-judge", answered_by: "fake" },
+      { check: 1, question_id: "plan-triage:0", answer: "vocabulary-hole", confidence: 0.9, model: "fake-judge", answered_by: "fake" },
+      { check: 1, question_id: "plan-support:0", answer: "supports", confidence: 0.95, model: "fake-judge", answered_by: "fake" },
     ]);
     // 別ファイルの診断（`plan-surface-check.json`）に、申告 1 件の対応が残る
     const diagnostic = await readSurfaceCheck(dir);
     expect(diagnostic.schema_version).toBe("musunest-factory/plan-surface-check/v1");
     expect(diagnostic.claims).toEqual([
       {
+        check: 1,
         index: 0,
         requirement_id: "R-1",
         part: "部分",
@@ -1544,8 +1547,10 @@ describe("P3 の申告の点検を plan-record.json の surface_check に残す�
     expect(spy).not.toHaveBeenCalled();
     const record = await readPlanRecord(dir);
     expect(record.outcome).toBe("cannot-confirm");
-    // 確定できない理由に、surface-check の理由が残る
-    expect(record.cannot_confirm).toEqual([{ source: "surface-check", code: "not-stated", path: "unwritable[0]" }]);
+    // 確定できない理由に、surface-check の理由（点検の番号つき）が残る
+    expect(record.cannot_confirm).toEqual([
+      { source: "surface-check", code: "not-stated", path: "unwritable[0]", check: 1 },
+    ]);
     expect(record.surface_check.unchecked).toBe(1);
     // 値（部分の文・理由・制約 ID）は、理由にも停止の行にも出ない
     expect(JSON.stringify(record.cannot_confirm)).not.toContain(MARK);
@@ -1907,7 +1912,10 @@ describe("差分点検でも、受理・未点検・途中停止の記録を pla
     expect(record.outcome).toBe("cannot-confirm");
     expect(record.surface_check.unchecked).toBe(1);
     expect(record.surface_check.accepted).toBe(0);
-    expect(record.cannot_confirm).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]" }]);
+    // 差分点検は 2 回目の点検（初回は申告 0 件）なので、点検の番号は 2
+    expect(record.cannot_confirm).toEqual([
+      { source: "surface-check", code: "unknown", path: "unwritable[0]", check: 2 },
+    ]);
   });
 
   it("差分の点検の最初の予約が失敗しても、件数と未実行の診断が plan-record に残る（completed は false）", async () => {
@@ -2026,5 +2034,123 @@ describe("差分点検でも、受理・未点検・途中停止の記録を pla
     expect(record.diff_reviews).toEqual([{ round: 1, added: 3, open_issues: 0, accepted_unwritable: 0 }]);
     const diagnostic = await readSurfaceCheck(dir);
     expect(diagnostic.claims.map((claim) => claim.classification)).toEqual(["not-a-problem", "vocabulary-hole"]);
+  });
+});
+
+// ── Issue #434：点検の番号を plan-record に残し、どの点検かを一意に引く ──────────
+
+describe("点検の番号を plan-record に残し、判定・診断を一意に引く（Issue #434）", () => {
+  /** 問い 1 つを手で作る（ID は LLM 由来で、コードが `Q<版>-<n>` に組み直す） */
+  function questionOf(openIssueId: string, id: string) {
+    return {
+      id,
+      openIssueId,
+      text: "どうしますか",
+      choices: [
+        { id: "c1", text: "こちら" },
+        { id: "c2", text: "あちら" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    };
+  }
+  /** 初回の洗い出し：曖昧さ 3 件と、書けない申告 1 件（添字 0） */
+  const ISSUES = {
+    ambiguities: [
+      { id: "OI-1", requirementId: "R-1", text: "曖昧 1", critical: true },
+      { id: "OI-2", requirementId: "R-1", text: "曖昧 2", critical: true },
+      { id: "OI-3", requirementId: "R-1", text: "曖昧 3", critical: true },
+    ],
+    unwritable: [
+      { id: "U-0", requirementId: "R-1", part: "初回の部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+    ],
+  };
+  /** 差分の洗い出し：書けない申告 1 件（添字 0） */
+  const DIFF_CLAIM = {
+    ambiguities: [],
+    unwritable: [
+      { id: "U-1", requirementId: "R:A:Q2-1", part: "差分の部分", constraintIds: ["合計"], reason: "理由", alternative: "代案" },
+    ],
+  };
+
+  it("初回と差分が同じ添字 0 を使い、申告 0 件の点検と途中停止を挟んでも、記録の対応が失われない", async () => {
+    const hugeUsage: LlmUsage = {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 10_000_000,
+      reasoningTokens: 0,
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      // 初回の洗い出し（点検 1 の申告。添字 0）
+      structured(ISSUES),
+      structured({ questions: [questionOf("OI-1", "Q-1"), questionOf("OI-2", "Q-2"), questionOf("OI-3", "Q-3")] }),
+      // 1 往復目の差分（点検 2。申告 0 件）
+      structured(SURFACE_CLEAR),
+      structured({ questions: [questionOf("OI-2", "Q-1"), questionOf("OI-3", "Q-2")] }),
+      // 2 往復目の差分（点検 3。予算を使い切って、最初の予約が失敗して止まる）
+      structured(DIFF_CLAIM, hugeUsage),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    const dir = `${directory}/check-number`;
+    const answersPath = "check-number-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath, "--budget", "1"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) =>
+        path === answersPath
+          ? JSON.stringify({
+              // 1 往復目：Q1-1 だけ受理し、Q1-2・Q1-3 は存在しない選択肢で断る（事項を開いたまま残す）
+              "Q1-1": { choiceId: "c1" },
+              "Q1-2": { choiceId: "nope" },
+              "Q1-3": { choiceId: "nope" },
+              // 2 往復目：Q2-1 だけ受理し、Q2-2 は断る
+              "Q2-1": { choiceId: "c1" },
+              "Q2-2": { choiceId: "nope" },
+            })
+          : SOURCE_TEXT,
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.stage).toBe("surface-check");
+    expect(record.failure?.kind).toBe("budget");
+    // 判定は、点検の番号（1=初回）つき。同じ問いの名前（添字 0）が点検で区別できる
+    expect(record.surface_check.judgments.map((judgment) => [judgment.check, judgment.question_id])).toEqual([
+      [1, "plan-triage:0"],
+      [1, "plan-support:0"],
+    ]);
+    expect(record.surface_check.completed).toBe(false);
+    // 診断も点検の番号つき。申告 0 件の点検（2）は空、途中停止の点検（3）は未実行
+    const diagnostic = await readSurfaceCheck(dir);
+    expect(diagnostic.claims.map((claim) => [claim.check, claim.index, claim.classification])).toEqual([
+      [1, 0, "supports"],
+      [3, 0, "unexecuted"],
+    ]);
+    // 差分点検の記録は往復ごとに 2 件（停止した往復も数える）
+    expect(record.diff_reviews).toEqual([
+      { round: 1, added: 1, open_issues: 0, accepted_unwritable: 0 },
+      { round: 2, added: 1, open_issues: 0, accepted_unwritable: 0 },
+    ]);
   });
 });
