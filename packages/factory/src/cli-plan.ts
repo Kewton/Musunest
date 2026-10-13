@@ -372,6 +372,43 @@ export interface PlanCliDiffReviewRecord {
   readonly open_issues: number;
   readonly accepted_unwritable: number;
   readonly out_of_scope: PlanCliDiffOutOfScopeRecord;
+  /** 引き継いだ観点の記録（件数と有限の分類だけ。Issue #461） */
+  readonly inherit: PlanCliInheritRecord;
+}
+
+/**
+ * 記録に入れる、引き継いだ観点の件数（種類ごと・観点 ID ごと。Issue #461）。**値・事項 ID・要件 ID・文・
+ * 答えは入れない**——有限の種類と観点 ID と件数だけである。
+ */
+export interface PlanCliInheritedFacetCount {
+  readonly kind: string;
+  readonly facet_id: string;
+  readonly count: number;
+}
+
+/** 記録に入れる、根拠が引けず引き継がなかった件数（分類別。Issue #461） */
+export interface PlanCliInheritMissCount {
+  readonly kind: string;
+  readonly count: number;
+}
+
+/** 記録に入れる、新しく開いた事項の出どころ別の件数（Issue #461） */
+export interface PlanCliDiffOpenIssueSourceCount {
+  readonly source: string;
+  readonly count: number;
+}
+
+/**
+ * 記録に入れる、差分点検 1 回の**引き継ぎの記録**（Issue #461）。**値を持たず、件数と有限の分類だけ**で
+ * ある——引き継いだ件数（種類ごと・観点 ID ごと）・親なしの件数・親が複数で (a) だけにした件数・根拠が
+ * 引けず引き継がなかった件数（分類ごと）・新しく開いた事項の出どころ別の件数。
+ */
+export interface PlanCliInheritRecord {
+  readonly facets: readonly PlanCliInheritedFacetCount[];
+  readonly no_parent: number;
+  readonly multiple_parents: number;
+  readonly unresolved: readonly PlanCliInheritMissCount[];
+  readonly open_by_source: readonly PlanCliDiffOpenIssueSourceCount[];
 }
 
 /** 記録に入れる、衝突した行の件数（既存の出どころ × 追加の出どころの組ごと。Issue #460） */
@@ -644,6 +681,17 @@ export function buildPlanCliRecord(input: {
           ambiguities: entry.ambiguities,
         })),
         deduped_indexes: review.outOfScope.dedupedIndexes.slice(),
+      },
+      inherit: {
+        facets: review.inherit.facets.map((entry) => ({
+          kind: entry.kind,
+          facet_id: entry.facetId,
+          count: entry.count,
+        })),
+        no_parent: review.inherit.noParent,
+        multiple_parents: review.inherit.multipleParents,
+        unresolved: review.inherit.unresolved.map((entry) => ({ kind: entry.kind, count: entry.count })),
+        open_by_source: review.inherit.openBySource.map((entry) => ({ source: entry.source, count: entry.count })),
       },
     })),
     open_issue_conflicts: {

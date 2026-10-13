@@ -17,15 +17,19 @@ import {
   CATALOG_AGGREGATION_FACET_IDS,
   CATALOG_FACETS,
   CATALOG_TARGET_STATUSES,
+  INHERIT_FACET_KINDS,
+  INHERIT_FACET_MISSES,
   catalogAppliesQuestionName,
   catalogDefaultOf,
   catalogGateQuestionName,
   catalogOpenIssue,
   catalogQuestionName,
+  inheritFacetsForAnswer,
   runCatalog,
   type CatalogFacet,
   type FacetDefaultMatch,
   type CatalogRequirement,
+  type InheritFacetInput,
 } from "./catalog.js";
 
 const NOUL_THRESHOLD = 0.6;
@@ -634,5 +638,336 @@ describe("目録が点検した対象の一覧（04 §3 P3・Issue #419）", () 
     expect(Object.keys(period ?? {})).toEqual(["requirementId", "facetId", "status"]);
     // 結果は有限の 4 つだけで、「既定で決まっている」のような値は無い
     expect([...CATALOG_TARGET_STATUSES]).toEqual(["当てはまらない", "決まっている", "開いている", "判定不明"]);
+  });
+});
+
+// ── Issue #461：答えから生まれた要件が引き継ぐ観点を、純関数で決める ──────────────
+
+/** 引き継ぎの判定の入力（既定は、答えがコード作の目録の事項 1 つを解いた形） */
+function inheritInput(overrides: Partial<InheritFacetInput> = {}): InheritFacetInput {
+  return {
+    answerId: "A:Q1-1",
+    issueIds: ["OI:catalog:R-1:aggregation"],
+    issues: [{ id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } }],
+    catalogFacets: [{ issueId: "OI:catalog:R-1:aggregation", requirementId: "R-1", facetId: "aggregation" }],
+    answerRequirements: [{ id: "R:A:Q1-1", text: "件数を合計できる" }],
+    decisions: [],
+    defaultClosures: [],
+    sourceClosures: [],
+    previous: [],
+    ...overrides,
+  };
+}
+
+describe("答えから生まれた要件の引き継ぎ（04 §3 P4・§6 の 1・Issue #461）", () => {
+  const NO_MISSES = [
+    { kind: "missing", count: 0 },
+    { kind: "multiple", count: 0 },
+    { kind: "mismatch", count: 0 },
+  ] as const;
+
+  it("種類と分類の一覧が有限で、決めた並びである", () => {
+    expect([...INHERIT_FACET_KINDS]).toEqual(["a", "b", "c", "d"]);
+    expect([...INHERIT_FACET_MISSES]).toEqual(["missing", "multiple", "mismatch"]);
+  });
+
+  it("集合の事項がコード作の目録の事項で、1 行・resolved・答えが一致すれば (a) になり、値は答え由来の要件の文と完全に一致する", () => {
+    const result = inheritFacetsForAnswer(inheritInput());
+    expect(result.facets).toEqual([
+      {
+        parentRequirementId: "R-1",
+        facetId: "aggregation",
+        kind: "a",
+        basis: "A:Q1-1",
+        value: "件数を合計できる",
+        sourceIssueId: "OI:catalog:R-1:aggregation",
+      },
+    ]);
+    expect(result.noParent).toBe(0);
+    expect(result.multipleParents).toBe(0);
+    expect(result.unresolved).toEqual(NO_MISSES);
+  });
+
+  it("主がモデル作でも、alsoCloses にコード作の事項があれば親になり (a) になる", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInput({
+        issueIds: ["OI:extra", "OI:catalog:R-1:aggregation"],
+        issues: [
+          { id: "OI:extra", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+          { id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+        ],
+      }),
+    );
+    expect(result.facets.map((facet) => facet.kind)).toEqual(["a"]);
+    expect(result.facets[0]?.facetId).toBe("aggregation");
+    expect(result.noParent).toBe(0);
+  });
+
+  it("親の要件で resolved の観点が、答え (b)・依頼文 (b)・既定 (c)・引き継ぎ (d) に分類され、値がそれぞれ一致する", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInput({
+        catalogFacets: [
+          { issueId: "OI:catalog:R-1:aggregation", requirementId: "R-1", facetId: "aggregation" },
+          { issueId: "OI:catalog:R-1:counted-state", requirementId: "R-1", facetId: "counted-state" },
+          { issueId: "OI:catalog:R-1:period", requirementId: "R-1", facetId: "period" },
+          { issueId: "OI:catalog:R-1:include-zero", requirementId: "R-1", facetId: "include-zero" },
+        ],
+        issues: [
+          { id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+          { id: "OI:catalog:R-1:counted-state", status: "resolved", resolution: { answer_id: "A:Q0-1" } },
+          { id: "OI:catalog:R-1:period", status: "resolved", resolution: { decision_id: "D:source:OI:catalog:R-1:period" } },
+          { id: "OI:catalog:R-1:include-zero", status: "resolved", resolution: { decision_id: "D:default:OI:catalog:R-1:include-zero" } },
+          { id: "OI:catalog:R-1:editable-by", status: "resolved", resolution: { decision_id: "D:inherit:OI:catalog:R-1:editable-by" } },
+        ],
+        answerRequirements: [
+          { id: "R:A:Q1-1", text: "件数を合計できる" },
+          { id: "R:A:Q0-1", text: "会議を数える" },
+        ],
+        decisions: [
+          { id: "D:source:OI:catalog:R-1:period", value: "期間の条件を足さない" },
+          { id: "D:default:OI:catalog:R-1:include-zero", value: "0 件の見出しも出す" },
+          { id: "D:inherit:OI:catalog:R-1:editable-by", value: "直せる人は管理者" },
+        ],
+        sourceClosures: [{ issueId: "OI:catalog:R-1:period", value: "期間の条件を足さない" }],
+        defaultClosures: [
+          { issueId: "OI:catalog:R-1:include-zero", facetId: "include-zero", value: "0 件の見出しも出す" },
+        ],
+        previous: [
+          {
+            issueId: "OI:catalog:R-1:editable-by",
+            requirementId: "R-1",
+            facetId: "editable-by",
+            decisionId: "D:inherit:OI:catalog:R-1:editable-by",
+            value: "直せる人は管理者",
+          },
+        ],
+      }),
+    );
+    const byFacet = new Map(result.facets.map((facet) => [facet.facetId, facet]));
+    expect(byFacet.get("aggregation")).toMatchObject({ kind: "a", basis: "A:Q1-1", value: "件数を合計できる" });
+    expect(byFacet.get("counted-state")).toMatchObject({ kind: "b", basis: "A:Q0-1", value: "会議を数える" });
+    expect(byFacet.get("period")).toMatchObject({ kind: "b", basis: "D:source:OI:catalog:R-1:period", value: "期間の条件を足さない" });
+    expect(byFacet.get("include-zero")).toMatchObject({ kind: "c", basis: "D:default:OI:catalog:R-1:include-zero", value: "0 件の見出しも出す" });
+    expect(byFacet.get("editable-by")).toMatchObject({ kind: "d", basis: "D:inherit:OI:catalog:R-1:editable-by", value: "直せる人は管理者" });
+    expect(result.unresolved).toEqual(NO_MISSES);
+  });
+
+  it("別の観点が別の答えで解決済みのとき、各観点の値が入れ替わらずそれぞれの答えの値を保つ", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInput({
+        catalogFacets: [
+          { issueId: "OI:catalog:R-1:aggregation", requirementId: "R-1", facetId: "aggregation" },
+          { issueId: "OI:catalog:R-1:counted-state", requirementId: "R-1", facetId: "counted-state" },
+        ],
+        issues: [
+          { id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+          { id: "OI:catalog:R-1:counted-state", status: "resolved", resolution: { answer_id: "A:Q0-1" } },
+        ],
+        answerRequirements: [
+          { id: "R:A:Q1-1", text: "合計の文" },
+          { id: "R:A:Q0-1", text: "状態の文" },
+        ],
+      }),
+    );
+    const byFacet = new Map(result.facets.map((facet) => [facet.facetId, facet]));
+    expect(byFacet.get("aggregation")?.value).toBe("合計の文");
+    expect(byFacet.get("counted-state")?.value).toBe("状態の文");
+    expect(byFacet.get("aggregation")?.value).not.toBe(byFacet.get("counted-state")?.value);
+  });
+
+  it("自由入力を選択肢に分類した答えは、値が選択肢の文（要件に入った文）で、自由入力の原文ではない", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInput({ answerRequirements: [{ id: "R:A:Q1-1", text: "全員を数える" }] }),
+    );
+    expect(result.facets[0]?.value).toBe("全員を数える");
+    expect(result.facets[0]?.value).not.toBe("みんなで数えて");
+  });
+
+  it("同じ入力から同じ結果になる", () => {
+    const input = inheritInput({
+      catalogFacets: [
+        { issueId: "OI:catalog:R-1:aggregation", requirementId: "R-1", facetId: "aggregation" },
+        { issueId: "OI:catalog:R-1:period", requirementId: "R-1", facetId: "period" },
+      ],
+      issues: [
+        { id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+        { id: "OI:catalog:R-1:period", status: "resolved", resolution: { decision_id: "D:default:OI:catalog:R-1:period" } },
+      ],
+      decisions: [{ id: "D:default:OI:catalog:R-1:period", value: "期間の条件を足さない" }],
+      defaultClosures: [{ issueId: "OI:catalog:R-1:period", facetId: "period", value: "期間の条件を足さない" }],
+    });
+    expect(inheritFacetsForAnswer(input)).toEqual(inheritFacetsForAnswer(input));
+  });
+
+  it("集合のどこにもコード作の事項が無ければ、引き継がず親なしで報告する", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInput({
+        issueIds: ["OI:extra"],
+        issues: [{ id: "OI:extra", status: "resolved", resolution: { answer_id: "A:Q1-1" } }],
+        catalogFacets: [],
+      }),
+    );
+    expect(result.facets).toEqual([]);
+    expect(result.noParent).toBe(1);
+    expect(result.multipleParents).toBe(0);
+    expect(result.unresolved).toEqual(NO_MISSES);
+  });
+
+  it("alsoCloses が別の要件のコード作の事項を含むなら、(a) だけを引き継ぎ、親が複数として報告する", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInput({
+        issueIds: ["OI:catalog:R-1:aggregation", "OI:catalog:R-2:aggregation"],
+        issues: [
+          { id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+          { id: "OI:catalog:R-2:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+        ],
+        catalogFacets: [
+          { issueId: "OI:catalog:R-1:aggregation", requirementId: "R-1", facetId: "aggregation" },
+          { issueId: "OI:catalog:R-2:aggregation", requirementId: "R-2", facetId: "aggregation" },
+        ],
+      }),
+    );
+    expect(result.facets.map((facet) => facet.kind)).toEqual(["a", "a"]);
+    expect(result.facets.map((facet) => facet.parentRequirementId)).toEqual(["R-1", "R-2"]);
+    expect(result.multipleParents).toBe(1);
+    expect(result.noParent).toBe(0);
+    expect(result.unresolved).toEqual(NO_MISSES);
+  });
+
+  it("親の事項の同じ ID が 2 行なら、引き継がず複数として報告する", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInput({
+        issues: [
+          { id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+          { id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+        ],
+      }),
+    );
+    expect(result.facets).toEqual([]);
+    expect(result.unresolved).toEqual([
+      { kind: "missing", count: 0 },
+      { kind: "multiple", count: 1 },
+      { kind: "mismatch", count: 0 },
+    ]);
+    expect(result.noParent).toBe(1);
+  });
+
+  it("問いが指した事項の解決が 0 行・別の答えで resolved なら、親にしない（親なし）", () => {
+    const zeroRows = inheritFacetsForAnswer(inheritInput({ issues: [] }));
+    expect(zeroRows.facets).toEqual([]);
+    expect(zeroRows.noParent).toBe(1);
+    expect(zeroRows.unresolved).toEqual(NO_MISSES);
+
+    const otherAnswer = inheritFacetsForAnswer(
+      inheritInput({
+        issues: [{ id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q9-9" } }],
+      }),
+    );
+    expect(otherAnswer.facets).toEqual([]);
+    expect(otherAnswer.noParent).toBe(1);
+    expect(otherAnswer.unresolved).toEqual(NO_MISSES);
+  });
+
+  it("受理一覧に無い答えの ID（R:<答え> が無い）なら、引き継がず欠落として報告する", () => {
+    const result = inheritFacetsForAnswer(inheritInput({ answerRequirements: [] }));
+    expect(result.facets).toEqual([]);
+    expect(result.unresolved).toEqual([
+      { kind: "missing", count: 1 },
+      { kind: "multiple", count: 0 },
+      { kind: "mismatch", count: 0 },
+    ]);
+    expect(result.noParent).toBe(0);
+  });
+
+  it("resolved の行に根拠が無い、または参照先（決定・記録）が無いなら、引き継がず欠落として報告する", () => {
+    const noBasis = inheritFacetsForAnswer(
+      inheritInput({ issues: [{ id: "OI:catalog:R-1:aggregation", status: "resolved" }] }),
+    );
+    expect(noBasis.facets).toEqual([]);
+    expect(noBasis.unresolved).toEqual([
+      { kind: "missing", count: 1 },
+      { kind: "multiple", count: 0 },
+      { kind: "mismatch", count: 0 },
+    ]);
+    expect(noBasis.noParent).toBe(1);
+
+    const noTarget = inheritFacetsForAnswer(
+      inheritInput({
+        catalogFacets: [
+          { issueId: "OI:catalog:R-1:aggregation", requirementId: "R-1", facetId: "aggregation" },
+          { issueId: "OI:catalog:R-1:period", requirementId: "R-1", facetId: "period" },
+        ],
+        issues: [
+          { id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+          { id: "OI:catalog:R-1:period", status: "resolved", resolution: { decision_id: "D:source:OI:catalog:R-1:period" } },
+        ],
+        decisions: [{ id: "D:source:OI:catalog:R-1:period", value: "期間の値" }],
+        // sourceClosures に無い
+      }),
+    );
+    expect(noTarget.facets.map((facet) => facet.facetId)).toEqual(["aggregation"]);
+    expect(noTarget.unresolved).toEqual([
+      { kind: "missing", count: 1 },
+      { kind: "multiple", count: 0 },
+      { kind: "mismatch", count: 0 },
+    ]);
+  });
+
+  it("参照先が 2 つ以上（答えと決定の両方）なら、引き継がず複数として報告する", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInput({
+        issues: [
+          {
+            id: "OI:catalog:R-1:aggregation",
+            status: "resolved",
+            resolution: { answer_id: "A:Q1-1", decision_id: "D:default:OI:catalog:R-1:aggregation" },
+          },
+        ],
+      }),
+    );
+    expect(result.facets).toEqual([]);
+    expect(result.unresolved).toEqual([
+      { kind: "missing", count: 0 },
+      { kind: "multiple", count: 1 },
+      { kind: "mismatch", count: 0 },
+    ]);
+  });
+
+  it("記録の観点と対応表の観点が違うなら、引き継がず不一致として報告する", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInput({
+        catalogFacets: [
+          { issueId: "OI:catalog:R-1:aggregation", requirementId: "R-1", facetId: "aggregation" },
+          { issueId: "OI:catalog:R-1:period", requirementId: "R-1", facetId: "period" },
+        ],
+        issues: [
+          { id: "OI:catalog:R-1:aggregation", status: "resolved", resolution: { answer_id: "A:Q1-1" } },
+          { id: "OI:catalog:R-1:period", status: "resolved", resolution: { decision_id: "D:default:OI:catalog:R-1:period" } },
+        ],
+        decisions: [{ id: "D:default:OI:catalog:R-1:period", value: "期間の値" }],
+        defaultClosures: [{ issueId: "OI:catalog:R-1:period", facetId: "counted-state", value: "期間の値" }],
+      }),
+    );
+    expect(result.facets.map((facet) => facet.facetId)).toEqual(["aggregation"]);
+    expect(result.unresolved).toEqual([
+      { kind: "missing", count: 0 },
+      { kind: "multiple", count: 0 },
+      { kind: "mismatch", count: 1 },
+    ]);
+  });
+
+  it("open の観点・目録が開かなかった観点・対応表に無い観点は、引き継がず件数にも数えない", () => {
+    const result = inheritFacetsForAnswer(
+      inheritInput({
+        issueIds: ["OI:extra", "OI:catalog:R-1:aggregation"],
+        issues: [
+          { id: "OI:extra", status: "open" },
+          { id: "OI:catalog:R-1:aggregation", status: "open" },
+        ],
+      }),
+    );
+    expect(result.facets).toEqual([]);
+    expect(result.unresolved).toEqual(NO_MISSES);
+    expect(result.noParent).toBe(1);
   });
 });

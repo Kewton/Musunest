@@ -236,6 +236,31 @@ function diffOutOfScope(
   };
 }
 
+/** 差分点検の記録の `inherit`（引き継ぎの件数。Issue #461）を、指定した件数で作る */
+function inheritRecord(
+  overrides: {
+    facets?: readonly { readonly kind: string; readonly facetId: string; readonly count: number }[];
+    noParent?: number;
+    multipleParents?: number;
+    unresolved?: Partial<Record<"missing" | "multiple" | "mismatch", number>>;
+    openBySource?: Partial<Record<"catalog" | "surface" | "surface-check", number>>;
+  } = {},
+) {
+  return {
+    facets: overrides.facets ?? [],
+    noParent: overrides.noParent ?? 0,
+    multipleParents: overrides.multipleParents ?? 0,
+    unresolved: (["missing", "multiple", "mismatch"] as const).map((kind) => ({
+      kind,
+      count: overrides.unresolved?.[kind] ?? 0,
+    })),
+    openBySource: (["catalog", "surface", "surface-check"] as const).map((source) => ({
+      source,
+      count: overrides.openBySource?.[source] ?? 0,
+    })),
+  };
+}
+
 /** P4 の答え（未解決の事項 OI-extra 1 つに、選択肢 2 つ・推奨 1 つ・自由入力） */
 const QUESTIONS_OUTPUT = {
   questions: [
@@ -426,7 +451,7 @@ describe("Plan を 1 回流す（04 §2・§3・§6・§8）", () => {
       "confirm",
     ]);
     // 差分点検の記録（往復 1・増えた要件 1 件。Issue #434）
-    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE }]);
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1 }) }]);
     // 申告 0 件なので、判定は呼ばれず、surface-check の段も `ok` である
     expect(result.stages.find((stage) => stage.stage === "surface-check")?.status).toBe("ok");
     expect(result.stages.every((stage) => typeof stage.duration_ms === "number")).toBe(true);
@@ -3129,8 +3154,8 @@ describe("差分点検：その往復で増えた要件だけを点検し、文�
     ]);
     // 差分点検の記録（往復ごとに 1 件。値ではなく件数）
     expect(result.diffReviews).toEqual([
-      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
-      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
+      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1 }) },
+      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1 }) },
     ]);
   });
 
@@ -3172,7 +3197,7 @@ describe("差分点検：その往復で増えた要件だけを点検し、文�
 
     expect(result.kind).toBe("confirmed");
     // 差分点検は 2 往復目でだけ走る（1 往復目は増えた要件が 0 件）
-    expect(result.diffReviews).toEqual([{ round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE }]);
+    expect(result.diffReviews).toEqual([{ round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1 }) }]);
     // 目録の段は初回と 2 往復目でだけ（1 往復目の分は無い）
     expect(result.stages.filter((stage) => stage.stage === "catalog")).toHaveLength(2);
   });
@@ -3214,8 +3239,8 @@ describe("差分点検：新しく開いた重大な事項を、同じ上限の�
     expect(asked[1]?.questions.map((question) => question.openIssueId)).toEqual(["OI-diff"]);
     // 差分点検の記録（1 往復目で事項 1 件を開き、2 往復目の答えでも 1 件増えた）
     expect(result.diffReviews).toEqual([
-      { round: 1, added: 1, openIssues: 1, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
-      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
+      { round: 1, added: 1, openIssues: 1, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1, openBySource: { surface: 1 } }) },
+      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1 }) },
     ]);
     expect(result.plan.open_issues.find((issue) => issue.id === "OI-diff")?.status).toBe("resolved");
   });
@@ -3315,7 +3340,7 @@ describe("差分点検：目録の未指定の観点が、既定の適用と上�
     expect(result.closedByDefault).toEqual([
       { issueId: "OI:catalog:R:A:Q1-1:period", facetId: "period", value: "期間の条件を足さない" },
     ]);
-    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 1, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE }]);
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 1, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1, openBySource: { catalog: 1 } }) }]);
     // 2 往復目は無い（既定で閉じたので問いを出さない）
     expect(result.stages.filter((stage) => stage.stage === "questions")).toHaveLength(1);
   });
@@ -3391,7 +3416,7 @@ describe("差分点検：書けない申告を、確認の前に点検する（0
     expect(await isConfirmationValid(result.plan)).toBe(true);
     expect(result.plan.confirmation.sha256).toBe(await planDigest(result.plan));
     // 差分点検の記録に、了承除外に加えた件数が残る
-    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 1, outOfScope: NO_OUT_OF_SCOPE }]);
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 1, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1 }) }]);
     // 差分の点検の受理が、結果の要約にも積まれる（初回は申告 0 件なので、合計 1 件。Issue #434）
     expect(result.surfaceCheck.accepted).toBe(1);
     expect(result.surfaceCheck.completed).toBe(true);
@@ -3593,7 +3618,7 @@ describe("差分点検：応答が指す要件 ID を、この往復の差分の
     // 停止した往復（2 往復目）も、差分点検の記録に数えられる（Issue #434）
     // 2 往復目の対象外の参照（前の往復の要件 R:A:Q1-1 を指す未解決の事項）が、分類つきで残る
     expect(result.diffReviews).toEqual([
-      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
+      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1 }) },
       {
         round: 2,
         added: 1,
@@ -3604,6 +3629,7 @@ describe("差分点検：応答が指す要件 ID を、この往復の差分の
           rejectedAmbiguities: 1,
           kinds: { "previous-answer": { ambiguities: 1 } },
         }),
+        inherit: inheritRecord({ noParent: 1 }),
       },
     ]);
     expect(round).toBe(2);
@@ -3656,7 +3682,7 @@ describe("差分点検：途中停止でも進捗を残す（04 §3 P3・Issue #
     expect(result.surfaceCheckDiagnostics).toEqual([
       expect.objectContaining({ index: 0, requirementId: "R:A:Q1-1", stage: "unexecuted", classification: "unexecuted" }),
     ]);
-    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE }]);
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1 }) }]);
   });
 
   it("差分の点検の裏付けが途中で止まっても、仕分けまでの分類と判定が残る（completed は false）", async () => {
@@ -3708,7 +3734,7 @@ describe("差分点検：途中停止でも進捗を残す（04 §3 P3・Issue #
       "not-a-problem",
       "vocabulary-hole",
     ]);
-    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE }]);
+    expect(result.diffReviews).toEqual([{ round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1 }) }]);
   });
 });
 
@@ -3882,9 +3908,9 @@ describe("差分点検：点検の番号で、判定・診断・停止理由を�
     expect(result.surfaceCheck.completed).toBe(false);
     // 差分点検の記録は往復ごとに 3 件（停止した往復も数える）
     expect(result.diffReviews).toEqual([
-      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
-      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 1, outOfScope: NO_OUT_OF_SCOPE },
-      { round: 3, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE },
+      { round: 1, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1 }) },
+      { round: 2, added: 1, openIssues: 0, acceptedUnwritable: 1, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1 }) },
+      { round: 3, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1 }) },
     ]);
   });
 });
@@ -3956,6 +3982,7 @@ describe("差分点検・§3：受理済み申告の正確な再申告だけを�
           kinds: { source: { claims: 1 } },
           dedupedIndexes: [0],
         }),
+        inherit: inheritRecord({ noParent: 1 }),
       },
     ]);
   });
@@ -4010,6 +4037,7 @@ describe("差分点検・§3：受理済み申告の正確な再申告だけを�
       openIssues: 1,
       acceptedUnwritable: 1,
       outOfScope: diffOutOfScope({ claims: 1, deduped: 1, kinds: { source: { claims: 1 } }, dedupedIndexes: [0] }),
+      inherit: inheritRecord({ noParent: 1, openBySource: { surface: 1 } }),
     });
   });
 
@@ -4578,5 +4606,425 @@ describe("同じ ID の開いている事項の行を畳まず、衝突は問い
       { issueId: "OI:catalog:R-1:period", facetId: "period", value: "期間の条件を足さない" },
     ]);
     expect(result.openIssueConflicts).toEqual({ ids: 0, rows: [], emptyTargets: 0, round: null });
+  });
+});
+
+// ── Issue #461：答えから生まれた要件が、答えが解いた観点と親で決まった観点を引き継ぐ ──────
+
+/** 親の目録の重大な観点 OI:catalog:R-1:aggregation に答える P4（選択肢の文が要件の値になる） */
+const INHERIT_QUESTIONS = {
+  questions: [
+    {
+      id: "Q-1",
+      openIssueId: "OI:catalog:R-1:aggregation",
+      text: "どう数えますか",
+      choices: [
+        { id: "c1", text: "全員を数える" },
+        { id: "c2", text: "自分のみ数える" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    },
+  ],
+};
+
+/** 主がモデル作・`alsoCloses` にコード作の目録の事項がある P4（選択肢の文が要件の値になる） */
+const INHERIT_GROUPED_QUESTIONS = {
+  questions: [
+    {
+      id: "Q-1",
+      openIssueId: "OI-extra",
+      alsoCloses: ["OI:catalog:R-1:aggregation"],
+      text: "どう数えますか",
+      choices: [
+        { id: "c1", text: "全員を数える" },
+        { id: "c2", text: "自分のみ数える" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    },
+  ],
+};
+
+/** 親の目録の観点 2 つ（aggregation・counted-state）に 1 問ずつ答える P4 */
+const INHERIT_QUESTIONS_TWO = {
+  questions: [
+    {
+      id: "Q-1",
+      openIssueId: "OI:catalog:R-1:aggregation",
+      text: "どう数えますか",
+      choices: [
+        { id: "c1", text: "全員を数える" },
+        { id: "c2", text: "自分のみ数える" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    },
+    {
+      id: "Q-2",
+      openIssueId: "OI:catalog:R-1:counted-state",
+      text: "どの状態を数えますか",
+      choices: [
+        { id: "c1", text: "実施した会議だけ数える" },
+        { id: "c2", text: "予定も数える" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    },
+  ],
+};
+
+/** 別々の要件のコード作の事項（R-1 と R-2）を 1 問で閉じる P4 */
+const INHERIT_TWO_REQUIREMENT_QUESTIONS = {
+  questions: [
+    {
+      id: "Q-1",
+      openIssueId: "OI:catalog:R-1:aggregation",
+      alsoCloses: ["OI:catalog:R-2:aggregation"],
+      text: "どう数えますか",
+      choices: [
+        { id: "c1", text: "全員を数える" },
+        { id: "c2", text: "自分のみ数える" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    },
+  ],
+};
+
+/** 提示された問いに、すべて最初の選択肢で答える答える役 */
+const ANSWER_FIRST: PlanResponder = {
+  async answer(request) {
+    return { kind: "answers", answers: request.questions.map((question) => answerTo(question, "c1")) };
+  },
+  async confirm() {
+    return "build";
+  },
+};
+
+describe("差分点検：答えから生まれた要件が、答えの解いた観点を引き継ぐ（04 §3 P4・§6 の 1・Issue #461）", () => {
+  /** 親の目録の観点に答え、差分の目録が同じ観点を未指定と返す 1 往復の流れを組む */
+  async function runInherit(judgeAnswers: Record<string, JudgeAnswer>, responder: PlanResponder = ANSWER_FIRST) {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(INHERIT_QUESTIONS),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({ ...catalogUnspecifiedFor({ "R-1": ["aggregation"] }), ...judgeAnswers });
+    return runPlan(makePlanInput(recording.client, judge, responder));
+  }
+
+  it("親の目録の重大な観点に答えると、差分の目録が同じ観点を未指定と返しても開かず、questions の段が 1 回のまま確定する（通常の答えと全部推奨の両方）", async () => {
+    for (const responder of [ANSWER_FIRST, ALL_RECOMMENDED]) {
+      const result = await runInherit(
+        {
+          ...catalogUnspecifiedFor({ "R:A:Q1-1": ["aggregation"] }, ["R:A:Q1-1"]),
+          ...coverAnswers("A:Q1-1"),
+        },
+        responder,
+      );
+      expect(result.kind).toBe("confirmed");
+      if (result.kind !== "confirmed") continue;
+      // questions の段は 1 回だけ（差分の観点を開き直して聞かない）
+      expect(result.stages.filter((stage) => stage.stage === "questions")).toHaveLength(1);
+      // 確定した仕様に、引き継いだ観点が resolved で載り、根拠が D:inherit: の決定である
+      const inherited = result.plan.open_issues.find((issue) => issue.id === "OI:catalog:R:A:Q1-1:aggregation");
+      expect(inherited?.status).toBe("resolved");
+      const decisionId = inherited?.resolution?.decision_id ?? "";
+      expect(decisionId).toBe("D:inherit:OI:catalog:R:A:Q1-1:aggregation");
+      expect(result.plan.decisions.find((decision) => decision.id === decisionId)?.value).toBe("全員を数える");
+      // 根拠の決定の理由に、親の事項の ID が入る
+      expect(result.plan.decisions.find((decision) => decision.id === decisionId)?.reason).toContain(
+        "OI:catalog:R-1:aggregation",
+      );
+      // 既定では閉じていない
+      expect(result.closedByDefault).toEqual([]);
+      // 確定した仕様の検査を通る
+      expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+      // 引き継ぎの記録（種類 a・観点 aggregation・親なしは 0）
+      expect(result.diffReviews[0]?.inherit).toMatchObject({
+        facets: [{ kind: "a", facetId: "aggregation", count: 1 }],
+        noParent: 0,
+        multipleParents: 0,
+        openBySource: [
+          { source: "catalog", count: 0 },
+          { source: "surface", count: 0 },
+          { source: "surface-check", count: 0 },
+        ],
+      });
+    }
+  });
+
+  it("主がモデル作の事項で、alsoCloses にコード作の目録の事項がある問いに答えても、同じく引き継ぐ", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(INHERIT_GROUPED_QUESTIONS),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["aggregation"] }),
+      ...catalogUnspecifiedFor({ "R:A:Q1-1": ["aggregation"] }, ["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST));
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    expect(result.stages.filter((stage) => stage.stage === "questions")).toHaveLength(1);
+    expect(result.plan.open_issues.find((issue) => issue.id === "OI:catalog:R:A:Q1-1:aggregation")?.status).toBe(
+      "resolved",
+    );
+    expect(result.diffReviews[0]?.inherit).toMatchObject({
+      facets: [{ kind: "a", facetId: "aggregation", count: 1 }],
+      noParent: 0,
+    });
+  });
+
+  it("親で別の観点が答え・既定で解決済みなら、その観点も開かず、値がそれぞれ元の値と一致する", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(INHERIT_QUESTIONS_TWO),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["aggregation", "counted-state", "period"] }),
+      ...catalogUnspecifiedFor(
+        {
+          "R:A:Q1-1": ["aggregation", "counted-state", "period"],
+          "R:A:Q1-2": ["aggregation", "counted-state", "period"],
+        },
+        ["R:A:Q1-1", "R:A:Q1-2"],
+      ),
+      ...coverAnswersFor(["A:Q1-1", "A:Q1-2"]),
+    });
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST));
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    expect(result.stages.filter((stage) => stage.stage === "questions")).toHaveLength(1);
+    const valueOf = (id: string): string | undefined =>
+      result.plan.decisions.find((decision) => decision.id === id)?.value;
+    // (a) 答えが解いた観点
+    expect(valueOf("D:inherit:OI:catalog:R:A:Q1-1:aggregation")).toBe("全員を数える");
+    expect(valueOf("D:inherit:OI:catalog:R:A:Q1-2:counted-state")).toBe("実施した会議だけ数える");
+    // (b) 別の答えで解けた観点（値が入れ替わらない）
+    expect(valueOf("D:inherit:OI:catalog:R:A:Q1-1:counted-state")).toBe("実施した会議だけ数える");
+    expect(valueOf("D:inherit:OI:catalog:R:A:Q1-2:aggregation")).toBe("全員を数える");
+    // (c) 既定で解けた観点
+    expect(valueOf("D:inherit:OI:catalog:R:A:Q1-1:period")).toBe("期間の条件を足さない");
+    expect(valueOf("D:inherit:OI:catalog:R:A:Q1-2:period")).toBe("期間の条件を足さない");
+    // 既定で閉じた事項は、初回の 1 件のままで増えない
+    expect(result.closedByDefault).toEqual([
+      { issueId: "OI:catalog:R-1:period", facetId: "period", value: "期間の条件を足さない" },
+    ]);
+  });
+
+  it("親の目録が開かなかった観点は開いて次の往復で聞き、親が答え由来なら親の引き継ぎ（d）も引き継ぐ", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(INHERIT_QUESTIONS),
+      structured(SURFACE_OUTPUT_CLEAR),
+      // 2 往復目：差分的に開いた counted-state に問いを出す
+      structured(questionsFor("OI:catalog:R:A:Q1-1:counted-state")),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["aggregation"] }),
+      ...catalogUnspecifiedFor({ "R:A:Q1-1": ["aggregation", "counted-state"] }, ["R:A:Q1-1"]),
+      ...catalogUnspecifiedFor({ "R:A:Q2-1": ["aggregation", "counted-state"] }, ["R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST));
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 1 往復目で counted-state を開いて、2 往復目に聞く
+    expect(result.stages.filter((stage) => stage.stage === "questions")).toHaveLength(2);
+    // 1 往復目：aggregation は引き継ぎ、counted-state は開く
+    expect(result.diffReviews[0]?.inherit).toEqual(
+      inheritRecord({ facets: [{ kind: "a", facetId: "aggregation", count: 1 }], openBySource: { catalog: 1 } }),
+    );
+    // 2 往復目：counted-state は (a)、親が引き継いだ aggregation は (d) として引き継ぐ
+    expect(result.diffReviews[1]?.inherit.facets).toEqual([
+      { kind: "a", facetId: "counted-state", count: 1 },
+      { kind: "d", facetId: "aggregation", count: 1 },
+    ]);
+    const valueOf = (id: string): string | undefined =>
+      result.plan.decisions.find((decision) => decision.id === id)?.value;
+    expect(valueOf("D:inherit:OI:catalog:R:A:Q1-1:aggregation")).toBe("全員を数える");
+    expect(valueOf("D:inherit:OI:catalog:R:A:Q2-1:aggregation")).toBe("全員を数える");
+    expect(valueOf("D:inherit:OI:catalog:R:A:Q2-1:counted-state")).toBe("こちら");
+  });
+
+  it("集合にコード作の事項が無い問い（モデル作の曖昧さだけ）に答えても、引き継がず従来どおり開く", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(questionsFor("OI:catalog:R:A:Q1-1:aggregation")),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const asked: PlanAnswerRequest[] = [];
+    const responder: PlanResponder = {
+      async answer(request) {
+        asked.push(request);
+        return { kind: "answers", answers: request.questions.map((question) => answerTo(question, "c1")) };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({}, ["R-1", "R-2"]),
+      ...catalogUnspecifiedFor({ "R:A:Q1-1": ["aggregation"] }, ["R:A:Q1-1"]),
+      ...catalogUnspecifiedFor({}, ["R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 親なしなので、差分の目録が返した重大な観点は開かれ、次の往復で聞かれる
+    expect(asked[1]?.questions.map((question) => question.openIssueId)).toEqual(["OI:catalog:R:A:Q1-1:aggregation"]);
+    expect(result.diffReviews[0]?.inherit).toMatchObject({ noParent: 1, facets: [] });
+  });
+
+  it("alsoCloses が 2 要件のコード作の事項を含むなら、(a) だけを引き継ぎ、親が複数として報告する", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(INHERIT_TWO_REQUIREMENT_QUESTIONS),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["aggregation"], "R-2": ["aggregation"] }),
+      ...catalogUnspecifiedFor({ "R:A:Q1-1": ["aggregation"] }, ["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST));
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    expect(result.diffReviews[0]?.inherit).toMatchObject({
+      facets: [{ kind: "a", facetId: "aggregation", count: 1 }],
+      multipleParents: 1,
+      noParent: 0,
+    });
+  });
+
+  it("受理されなかった答えでは何も引き継がず、入力・要件・決定のどれも増えない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(INHERIT_QUESTIONS),
+      // 1 往復目は受け付けられない → 新しい要件が増えないので差分点検を呼ばない
+      structured(INHERIT_QUESTIONS),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    let round = 0;
+    const responder: PlanResponder = {
+      async answer(request) {
+        round += 1;
+        const question = request.questions[0];
+        if (round === 1) {
+          // 選択肢に無い答え → 受理されない
+          return { kind: "answers", answers: [{ id: "A-1", questionId: question?.id ?? "", revision: question?.revision ?? 1, choiceId: "cX" }] };
+        }
+        return { kind: "answers", answers: request.questions.map((one) => answerTo(one, "c1")) };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["aggregation"] }),
+      ...catalogUnspecifiedFor({ "R:A:Q2-1": ["aggregation"] }, ["R:A:Q2-1"]),
+      ...coverAnswers("A:Q2-1"),
+    });
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 受理されなかった 1 往復目は、差分点検の記録を積まない（増えた要件が無い）
+    expect(result.diffReviews.map((review) => review.round)).toEqual([2]);
+    // 入力・要件は、受理された 2 往復目の分だけ
+    expect(result.plan.inputs.filter((input) => input.kind === "answer").map((input) => input.id)).toEqual(["A:Q2-1"]);
+    expect(result.plan.requirements.map((requirement) => requirement.id)).toEqual(["R-1", "R-2", "R:A:Q2-1"]);
+    // 受理されなかった答えの ID は、どこにも残らない
+    expect(JSON.stringify(result.plan)).not.toContain("A-1");
+  });
+
+  it("P3 が引き継いだ事項と同じ ID の行を返すと、畳まず 2 行のまま、既定の対象にならず衝突で止まる", async () => {
+    const sameIdAmbiguity = {
+      ambiguities: [
+        { id: "OI:catalog:R:A:Q1-1:aggregation", requirementId: "R:A:Q1-1", text: "同じ ID の曖昧さ", critical: true },
+      ],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(INHERIT_QUESTIONS),
+      structured(sameIdAmbiguity),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["aggregation"] }),
+      ...catalogUnspecifiedFor({ "R:A:Q1-1": ["aggregation"] }, ["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST));
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons).toEqual([{ source: "session", code: "duplicate-open-issue", path: "open_issues" }]);
+    // 引き継いだ行（resolved）と、P3 が返した行（open）が、畳まれず 2 行のまま衝突として記録される
+    expect(result.openIssueConflicts.ids).toBe(1);
+    expect(result.openIssueConflicts.rows).toEqual([{ existing: "surface", added: "catalog", count: 1 }]);
+    expect(result.closedByDefault).toEqual([]);
+  });
+
+  it("引き継ぎの前後で、判定の問いの数と目録の呼び出しの回数が変わらない", async () => {
+    const run = async (diffUnspecifiedForChild: Record<string, readonly string[]>): Promise<{
+      readonly judgeCalls: number;
+      readonly catalogCalls: number;
+      readonly questions: number;
+    }> => {
+      const recording = createRecordingClient([
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(SURFACE_OUTPUT_CLEAR),
+        structured(INHERIT_QUESTIONS),
+        structured(SURFACE_OUTPUT_CLEAR),
+      ]);
+      const requests: JudgeRequest[] = [];
+      const inner = createFakeJudge({
+        ...catalogUnspecifiedFor({ "R-1": ["aggregation"] }),
+        ...catalogUnspecifiedFor(diffUnspecifiedForChild, ["R:A:Q1-1"]),
+        ...coverAnswers("A:Q1-1"),
+      });
+      const judge: Judge = {
+        async judge(request: JudgeRequest): Promise<JudgeResponse> {
+          requests.push(request);
+          return inner.judge(request);
+        },
+      };
+      const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST));
+      expect(result.kind).toBe("confirmed");
+      return {
+        judgeCalls: requests.length,
+        catalogCalls: result.stages.filter((stage) => stage.stage === "catalog").length,
+        questions: result.stages.filter((stage) => stage.stage === "questions").length,
+      };
+    };
+    // 引き継ぐ場合と、差分の目録が同じ観点を未指定と返さない場合で、呼び出しの数は変わらない
+    const inherited = await run({ "R:A:Q1-1": ["aggregation"] });
+    const notObserved = await run({ "R:A:Q1-1": [] });
+    expect(inherited).toEqual(notObserved);
   });
 });

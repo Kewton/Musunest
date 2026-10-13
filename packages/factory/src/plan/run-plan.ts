@@ -55,7 +55,21 @@ import {
   type ReverseCheckOperation,
 } from "../stages/reverse-check.js";
 import { runAnswers, validateAnswer, type ClassifiedAnswer, type PlanAnswerDraft } from "./answers.js";
-import { CATALOG_FACETS, catalogDefaultOf, catalogGateQuestionName, catalogOpenIssue, runCatalog, type CatalogResult, type UnspecifiedFacet } from "./catalog.js";
+import {
+  CATALOG_FACETS,
+  INHERIT_FACET_KINDS,
+  INHERIT_FACET_MISSES,
+  catalogDefaultOf,
+  catalogGateQuestionName,
+  catalogOpenIssue,
+  inheritFacetsForAnswer,
+  runCatalog,
+  type CatalogResult,
+  type InheritFacetKind,
+  type InheritFacetMissKind,
+  type InheritedFacet,
+  type UnspecifiedFacet,
+} from "./catalog.js";
 import { runConfirm, type ConfirmProblem } from "./confirm.js";
 import { alsoClosesOf, assignQuestionIds, runQuestions, type PlanQuestion, type PlanSourceClosure } from "./questions.js";
 import {
@@ -506,6 +520,49 @@ export interface PlanDiffOutOfScopeRecord {
 }
 
 /**
+ * 引き継いだ観点の件数（種類ごと・観点 ID ごと。Issue #461）。**値・事項 ID・要件 ID・文・答えは
+ * 入れない**——有限の種類と観点 ID と件数だけである。
+ */
+export interface PlanInheritedFacetCount {
+  readonly kind: InheritFacetKind;
+  readonly facetId: string;
+  readonly count: number;
+}
+
+/** 根拠が引けず引き継がなかった件数（分類別。Issue #461） */
+export interface PlanInheritMissCount {
+  readonly kind: InheritFacetMissKind;
+  readonly count: number;
+}
+
+/**
+ * 差分点検で新しく開いた事項の出どころの種類（有限。Issue #461）。差分の点検が開く事項の出どころは、
+ * 目録（`runCatalog`）・洗い出し（`runSurface`）・申告の点検（`runSurfaceCheck`）の 3 つである。
+ */
+export const PLAN_DIFF_OPEN_ISSUE_SOURCES = ["catalog", "surface", "surface-check"] as const;
+export type PlanDiffOpenIssueSource = (typeof PLAN_DIFF_OPEN_ISSUE_SOURCES)[number];
+
+/** 出どころ別の、開いた事項の件数（Issue #461） */
+export interface PlanDiffOpenIssueSourceCount {
+  readonly source: PlanDiffOpenIssueSource;
+  readonly count: number;
+}
+
+/**
+ * 差分点検 1 回の、**引き継ぎの記録**（Issue #461）。**値を持たず、件数と有限の分類だけ**である——
+ * 引き継いだ件数（種類ごと・観点 ID ごと）・親なしの件数・親が複数で (a) だけにした件数・根拠が引けず
+ * 引き継がなかった件数（分類ごと）・新しく開いた事項の出どころ別の件数を持つ。事項 ID・要件 ID・文・
+ * 答えは入れない。
+ */
+export interface PlanInheritRecord {
+  readonly facets: readonly PlanInheritedFacetCount[];
+  readonly noParent: number;
+  readonly multipleParents: number;
+  readonly unresolved: readonly PlanInheritMissCount[];
+  readonly openBySource: readonly PlanDiffOpenIssueSourceCount[];
+}
+
+/**
  * 差分点検 1 回の記録（Issue #434）。**値を持たず、件数だけ**である——点検した対象（その往復で増えた
  * 要件）の件数と、そこで新しく開いた事項・了承除外に加えた件数、対象外の参照の記録。往復ごとに 1 件積む。
  */
@@ -520,6 +577,8 @@ export interface PlanDiffReviewRecord {
   readonly acceptedUnwritable: number;
   /** 対象外の参照の記録（値なし） */
   readonly outOfScope: PlanDiffOutOfScopeRecord;
+  /** 引き継いだ観点の記録（件数と有限の分類だけ。Issue #461） */
+  readonly inherit: PlanInheritRecord;
 }
 
 /** 3 つの結果に共通する記録（使った額・残りの額・段ごとの記録・判定の呼び出し） */
@@ -581,6 +640,12 @@ export const DEFAULT_DECISION_PREFIX = "D:default:" as const;
 export function defaultDecisionId(issueId: string): string {
   return `${DEFAULT_DECISION_PREFIX}${issueId}`;
 }
+
+/** 引き継いだ観点の決定の ID の頭（`D:inherit:<事項 ID>`。Issue #461） */
+export const INHERIT_DECISION_PREFIX = "D:inherit:" as const;
+
+/** 引き継いだ観点の決定の理由に置く固定文（親の事項 ID を添える。Issue #461） */
+export const INHERIT_DECISION_REASON = "答えが解いた観点（親の要件で決まっている）を引き継いだ" as const;
 
 /** Plan を 1 回流した結果（3 つの形） */
 export type PlanResult =
@@ -849,6 +914,12 @@ interface MutableDiffReview {
   rejectedAmbiguities: number;
   kinds: Map<DiffOutOfScopeKind, { claims: number; ambiguities: number }>;
   dedupedIndexes: number[];
+  /** 引き継いだ観点の件数（種類 × 観点 ID。Issue #461） */
+  inheritKinds: Map<string, number>;
+  inheritNoParent: number;
+  inheritMultipleParents: number;
+  inheritMisses: Map<InheritFacetMissKind, number>;
+  openBySource: Map<PlanDiffOpenIssueSource, number>;
 }
 
 /** 受理した申告 1 つぶんの控え（重複の照合に使う。Issue #434） */
@@ -960,6 +1031,30 @@ function finalizeDiffReview(review: MutableDiffReview): PlanDiffReviewRecord {
         ambiguities: review.kinds.get(kind)?.ambiguities ?? 0,
       })),
       dedupedIndexes: review.dedupedIndexes.slice(),
+    },
+    // 引き継ぎの記録を、有限の分類ごとに組み直す（種類と観点 ID の順で決まる。Issue #461）
+    inherit: {
+      facets: INHERIT_FACET_KINDS.flatMap((kind) =>
+        [...review.inheritKinds.keys()]
+          .filter((key) => key.startsWith(`${kind}\u0000`))
+          .map((key) => key.slice(kind.length + 1))
+          .sort()
+          .map((facetId) => ({
+            kind,
+            facetId,
+            count: review.inheritKinds.get(`${kind}\u0000${facetId}`) ?? 0,
+          })),
+      ),
+      noParent: review.inheritNoParent,
+      multipleParents: review.inheritMultipleParents,
+      unresolved: INHERIT_FACET_MISSES.map((kind) => ({
+        kind,
+        count: review.inheritMisses.get(kind) ?? 0,
+      })),
+      openBySource: PLAN_DIFF_OPEN_ISSUE_SOURCES.map((source) => ({
+        source,
+        count: review.openBySource.get(source) ?? 0,
+      })),
     },
   };
 }
@@ -1178,6 +1273,15 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const diffReviews: MutableDiffReview[] = [];
   // 受理した「書けない」の申告の控え（重複の照合に使う。Issue #434）
   const acceptedClaimSnapshots: AcceptedClaimSnapshot[] = [];
+  // 答えの ID → 問いが指した事項の ID の集合（主の事項と `alsoCloses`。引き継ぎの判定に使う。Issue #461）
+  const answerIssueIds = new Map<string, readonly string[]>();
+  // 答え由来の要件（ID は `R:<答えの ID>`。引き継ぎの判定に使う。Issue #461）
+  const answerDerivedRequirements: { id: string; text: string }[] = [];
+  // それまでの引き継ぎの表（事項 ID → 要件 ID・観点 ID・決定 ID・値。Issue #461）
+  const inheritedFacetTable = new Map<
+    string,
+    { requirementId: string; facetId: string; decisionId: string; value: string }
+  >();
 
   // ── 開いている事項の行と、その出どころ・衝突の記録（Issue #460）─────────────────
   // `openIssues` と `openIssueSources` は**同じ長さ**である（行を畳まない・並べ替えない。状態の書き換えは
@@ -1727,6 +1831,15 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       for (const id of alsoClosesOf(question)) resolveIssue(id, answerId);
     };
 
+    /**
+     * 答えの、問いが指した事項の集合（主の事項と `alsoCloses`）と、答え由来の要件を控える（Issue #461）。
+     * 引き継ぎの判定は、この控えと、目録の対応・決定・閉じた記録だけを使う。
+     */
+    const recordAnswerContext = (answerId: string, question: PlanQuestion, requirementText: string): void => {
+      answerIssueIds.set(answerId, [question.openIssueId, ...alsoClosesOf(question)]);
+      answerDerivedRequirements.push({ id: `R:${answerId}`, text: requirementText });
+    };
+
     /** 依頼文で閉じた事項を、聞かずに決めたこと（`decisions`）にして閉じる（04 §3 P4・Issue #370） */
     const applySourceClosure = (closure: PlanSourceClosure): void => {
       const index = resolveTargetIndex(closure.issueId);
@@ -1832,6 +1945,11 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         rejectedAmbiguities: 0,
         kinds: new Map(),
         dedupedIndexes: [],
+        inheritKinds: new Map(),
+        inheritNoParent: 0,
+        inheritMultipleParents: 0,
+        inheritMisses: new Map(),
+        openBySource: new Map(),
       };
       diffReviews.push(reviewRecord);
 
@@ -1903,7 +2021,86 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         }),
       );
       recordAggregates(diffCatalog);
-      const diffCatalogData = buildCatalogData(diffCatalog);
+
+      // ── 引き継ぐ観点を決める（Issue #461）──────────────────────────────
+      // 答えから生まれた要件について、その答えが解いた観点と、親の要件で答え・依頼文・既定・引き継ぎで
+      // 決まっている観点を、コードが持つ対応と一意に引けた根拠だけで引き継ぐ。引き継いだ観点は、開いた
+      // 事項として足さず・既定の対応にも入れず・P4 に渡さない（答え直後の連鎖を止める）。根拠が引けない
+      // 観点は今までどおり開く（分類と件数だけ記録に残す）。
+      const appliedInheritance: { facet: InheritedFacet; diffFacet: UnspecifiedFacet }[] = [];
+      const inheritedSkip = new Set<string>();
+      const inheritanceMisses = new Map<InheritFacetMissKind, number>();
+      const inheritanceKinds = new Map<string, number>();
+      let inheritanceNoParent = 0;
+      let inheritanceMultipleParents = 0;
+      for (const requirement of diff) {
+        const change = requirement.change;
+        if (change === undefined || change.kind !== "added") continue;
+        const answerId = change.answer_id;
+        // 答えから生まれた要件（`R:<答えの ID>`）だけを対象にする
+        if (requirement.id !== `R:${answerId}`) continue;
+        const result = inheritFacetsForAnswer({
+          answerId,
+          issueIds: answerIssueIds.get(answerId) ?? [],
+          issues: openIssues.map((issue) => ({
+            id: issue.id,
+            status: issue.status,
+            ...(issue.resolution === undefined ? {} : { resolution: issue.resolution }),
+          })),
+          catalogFacets: [...catalogIssueFacets.entries()].map(([issueId, facet]) => ({
+            issueId,
+            requirementId: facet.requirementId,
+            facetId: facet.facetId,
+          })),
+          answerRequirements: answerDerivedRequirements.slice(),
+          decisions: decisions.map((decision) => ({ id: decision.id, value: decision.value })),
+          defaultClosures: closedByDefaults.map((closure) => ({
+            issueId: closure.issueId,
+            facetId: closure.facetId,
+            value: closure.value,
+          })),
+          sourceClosures: closedBySource.map((closure) => ({ issueId: closure.issueId, value: closure.value })),
+          previous: [...inheritedFacetTable.entries()].map(([issueId, entry]) => ({
+            issueId,
+            requirementId: entry.requirementId,
+            facetId: entry.facetId,
+            decisionId: entry.decisionId,
+            value: entry.value,
+          })),
+        });
+        inheritanceNoParent += result.noParent;
+        inheritanceMultipleParents += result.multipleParents;
+        for (const miss of result.unresolved) {
+          inheritanceMisses.set(miss.kind, (inheritanceMisses.get(miss.kind) ?? 0) + miss.count);
+        }
+        for (const facet of result.facets) {
+          const key = `${requirement.id}\u0000${facet.facetId}`;
+          if (inheritedSkip.has(key)) continue;
+          // 目録が開かなかった観点は、引き継ぐ対象（開き直す事項）が無い
+          const diffFacet = diffCatalog.unspecified.find(
+            (candidate) => candidate.requirementId === requirement.id && candidate.facetId === facet.facetId,
+          );
+          if (diffFacet === undefined) continue;
+          inheritedSkip.add(key);
+          appliedInheritance.push({ facet, diffFacet });
+          inheritanceKinds.set(
+            `${facet.kind}\u0000${facet.facetId}`,
+            (inheritanceKinds.get(`${facet.kind}\u0000${facet.facetId}`) ?? 0) + 1,
+          );
+        }
+      }
+      for (const [kind, count] of inheritanceMisses) {
+        reviewRecord.inheritMisses.set(kind, (reviewRecord.inheritMisses.get(kind) ?? 0) + count);
+      }
+      for (const [key, count] of inheritanceKinds) {
+        reviewRecord.inheritKinds.set(key, (reviewRecord.inheritKinds.get(key) ?? 0) + count);
+      }
+      reviewRecord.inheritNoParent += inheritanceNoParent;
+      reviewRecord.inheritMultipleParents += inheritanceMultipleParents;
+      const effectiveUnspecified = diffCatalog.unspecified.filter(
+        (facet) => !inheritedSkip.has(`${facet.requirementId}\u0000${facet.facetId}`),
+      );
+      const diffCatalogData = buildCatalogData({ ...diffCatalog, unspecified: effectiveUnspecified });
 
       // ── 差分の洗い出し（対象は差分だけ。文脈は参照用のデータで渡す。Issue #434）────
       const diffList: RequirementList = {
@@ -1985,15 +2182,34 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
             : { ...outcome.value, unwritable: targetCheck.keptUnwritable };
         return { ok: true as const, value };
       });
-      reviewRecord.openIssues = diffSurface.ambiguities.length + diffCatalog.unspecified.length;
+      reviewRecord.openIssues = diffSurface.ambiguities.length + effectiveUnspecified.length;
+      reviewRecord.openBySource.set("catalog", effectiveUnspecified.length);
+      reviewRecord.openBySource.set("surface", diffSurface.ambiguities.length);
       for (const ambiguity of diffSurface.ambiguities) {
         addOpenIssue({ id: ambiguity.id, text: ambiguity.text, critical: ambiguity.critical, status: "open" }, "surface");
       }
-      // コードが目録から作った事項を、開いている事項に足す（`catalogIssueFacets` にも入れて既定の対象にする）
-      for (const facet of diffCatalog.unspecified) {
+      // コードが目録から作った事項を、開いている事項に足す（`catalogIssueFacets` にも入れて既定の対象にする）。
+      // **引き継いだ観点はここに入れない**——開いた事項として足さず、既定の対応にも入れない（Issue #461）。
+      for (const facet of effectiveUnspecified) {
         const issue = catalogOpenIssue(facet);
         addOpenIssue(issue, "catalog");
         catalogIssueFacets.set(issue.id, facet);
+      }
+      // 引き継いだ観点を、確定した仕様に**根拠つきで**残す（既定・依頼文で閉じる処理と同じ型。Issue #461）。
+      // 根拠の決定を 1 つ作り（値は元の解決の値そのもの）、事項を状態 resolved で足す。行を足す経路
+      // （`addOpenIssue`）を通すので、同じ ID の行が既にあれば畳まず、#460 の衝突として記録される。
+      for (const { facet, diffFacet } of appliedInheritance) {
+        const issue = catalogOpenIssue(diffFacet);
+        const decisionId = `${INHERIT_DECISION_PREFIX}${issue.id}`;
+        const reason = `${INHERIT_DECISION_REASON}（親の事項: ${facet.sourceIssueId}）`;
+        decisions.push({ id: decisionId, subject: issue.text, value: facet.value, reason });
+        inheritedFacetTable.set(issue.id, {
+          requirementId: diffFacet.requirementId,
+          facetId: facet.facetId,
+          decisionId,
+          value: facet.value,
+        });
+        addOpenIssue({ ...issue, status: "resolved", resolution: { decision_id: decisionId, reason } }, "catalog");
       }
 
       // ── 差分の申告の点検（F1 と同じ条件・同じ規則で掛ける。Issue #432・#434）──────
@@ -2035,6 +2251,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         completed: true,
       };
       reviewRecord.openIssues += diffSurfaceCheck.ambiguities.length;
+      reviewRecord.openBySource.set("surface-check", diffSurfaceCheck.ambiguities.length);
       // 曖昧さと判定された申告は、**重大な**開いている事項にして P4 に渡す（聞かずに落とさない）
       for (const claim of diffSurfaceCheck.ambiguities) {
         addOpenIssue(
@@ -2153,8 +2370,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
             choice_id: recommended.choiceId,
           });
           const choice = question.choices.find((candidate) => candidate.id === recommended.choiceId);
-          requirements.push(answerRequirement(answerId, choice?.text ?? recommended.reason));
+          const requirementText = choice?.text ?? recommended.reason;
+          requirements.push(answerRequirement(answerId, requirementText));
           resolveQuestionIssues(question, answerId);
+          recordAnswerContext(answerId, question, requirementText);
           drafts.push({ id: answerId, questionId: question.id, revision, choiceId: recommended.choiceId });
         }
         turns.push({ questions: asked, answers: drafts });
@@ -2190,6 +2409,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         answerInputs.push(answerInput);
         requirements.push(answerRequirement(draft.id, text));
         resolveQuestionIssues(question, draft.id);
+        recordAnswerContext(draft.id, question, text);
         priorAnswers.push(accepted);
       }
       // 矛盾から組み立てた問いを、次の往復に回す（§6 の 7）。対応する未解決の事項を開いておく
