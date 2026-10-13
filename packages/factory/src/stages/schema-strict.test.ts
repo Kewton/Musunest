@@ -212,4 +212,12 @@ describe("すべての段の schema と道具の引数の schema が、strict �
     expect(ownership.items.properties.basis.enum).toEqual(["stated", "dependency"]);
     expect(ownership.items.properties.reason.type).toEqual(["string", "null"]);
   });
+
+  it("設計（②）の schema は、見出しの元の項目（groupBy）を required に入れ、strict に合う（Issue #433）", () => {
+    expect(strictSchemaProblems(DESIGN_SCHEMA)).toEqual([]);
+    // 役割 ID の表の行に、見出しの元の項目（groupBy）が required で入る
+    expect(DESIGN_SCHEMA.properties.roles.items.required).toEqual(expect.arrayContaining(["groupBy"]));
+    expect(strictSchemaProblems(DESIGN_SCHEMA.properties.roles.items.properties.groupBy)).toEqual([]);
+    expect(DESIGN_SCHEMA.properties.roles.items.properties.groupBy.type).toEqual(["string", "null"]);
+  });
 });

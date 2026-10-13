@@ -873,3 +873,184 @@ describe("所属 entity の対応が無いときは、null の場所で実在と
   });
 });
 
+// ── 宣言の選択肢のキー列と、見出しごとの集計の集計元（Issue #433）──────────────
+
+/** 選択肢の項目と見出しごとの集計を持つ宣言を組む（キー列と集計元を差し替えられる） */
+function choiceSource(options: {
+  readonly enumKeys?: readonly string[];
+  readonly aggregate?: string;
+  readonly type?: string;
+  readonly scopeApp?: boolean;
+} = {}): string {
+  const enumKeys = options.enumKeys ?? ["open", "closed"];
+  const aggregate = options.aggregate ?? "count: record\ngroupBy: record.status";
+  const type = options.type ?? "groups";
+  const enumLines = enumKeys.map((key) => `          ${key}: ${key}`).join("\n");
+  const aggregateLines = aggregate.split("\n").map((line) => `      ${line}`).join("\n");
+  return [
+    "entities:",
+    "  - name: record",
+    "    fields:",
+    "      amount: number",
+    "      date: date",
+    "      kind:",
+    "        type: enum",
+    "        options:",
+    "          a: A",
+    "          b: B",
+    "      status:",
+    "        type: enum",
+    "        options:",
+    enumLines,
+    "  - name: other",
+    "    fields:",
+    "      status:",
+    "        type: enum",
+    "        options:",
+    "          open: 未了",
+    "          closed: 完了",
+    "views:",
+    "  - name: records",
+    "    type: list",
+    "    entity: record",
+    "    show: [status, amount, total]",
+    "actions: []",
+    "validations: []",
+    "computed:",
+    "  - name: total",
+    "    entity: record",
+    "    expression: amount * 2",
+    "    type: number",
+    "  - name: byStatus",
+    ...(options.scopeApp === true ? ["    scope: app"] : []),
+    "    aggregate:",
+    aggregateLines,
+    `    type: ${type}`,
+    "permissions:",
+    "  - name: read",
+    "    subject: minIdentity",
+    "minIdentity:",
+    "  mode: anonymous",
+  ].join("\n");
+}
+
+const CHOICE_APP = await normalized(choiceSource());
+const CHOICE_APP_REVERSED = await normalized(choiceSource({ enumKeys: ["closed", "open"] }));
+const CHOICE_APP_MISSING_KEY = await normalized(choiceSource({ enumKeys: ["open"] }));
+const CHOICE_APP_EXTRA_KEY = await normalized(choiceSource({ enumKeys: ["open", "closed", "extra"] }));
+const CHOICE_APP_OTHER_FIELD = await normalized(choiceSource({ aggregate: "count: record\ngroupBy: record.kind" }));
+const CHOICE_APP_MONTH = await normalized(choiceSource({ aggregate: "count: record\ngroupBy:\n  month: record.date" }));
+const CHOICE_APP_OTHER_ENTITY = await normalized(choiceSource({ aggregate: "count: other\ngroupBy: other.status" }));
+const CHOICE_APP_NO_RELATION = await normalized(
+  choiceSource({ aggregate: "count: record", type: "number", scopeApp: true }),
+);
+
+const CHOICE_ROLES: readonly RoleEntry[] = [
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: false, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.status", kind: "field", entity: "record", name: "status", shared: false, aliasOf: null, options: ["open", "closed"], groupBy: null },
+  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.byStatus", kind: "computation", entity: null, name: "byStatus", shared: false, aliasOf: null, options: null, groupBy: "record.status" },
+];
+
+const CHOICE_MAPPINGS: readonly RoleNameMapping[] = [
+  { roleId: "record", name: "record" },
+  { roleId: "record.status", name: "status" },
+  { roleId: "record.amount", name: "amount" },
+  { roleId: "record.total", name: "total" },
+  { roleId: "record.byStatus", name: "byStatus" },
+];
+
+const CHOICE_TABLE: readonly CorrespondenceEntry[] = [
+  {
+    requirementId: "R-1",
+    locations: [
+      { kind: "entity", entity: null, name: "record" },
+      { kind: "field", entity: "record", name: "status" },
+      { kind: "field", entity: "record", name: "amount" },
+      { kind: "computation", entity: "record", name: "total" },
+      { kind: "computation", entity: null, name: "byStatus" },
+    ],
+  },
+];
+
+const CHOICE_OWNERSHIP: readonly RequirementRoleOwnership[] = [
+  {
+    requirementId: "R-1",
+    ownership: [
+      { roleId: "record", basis: "dependency", reason: "行の所属として参照するため" },
+      { roleId: "record.status", basis: "stated", reason: null },
+      { roleId: "record.amount", basis: "dependency", reason: "入力の行に保存する項目として参照するため" },
+      { roleId: "record.total", basis: "stated", reason: null },
+      { roleId: "record.byStatus", basis: "stated", reason: null },
+    ],
+  },
+];
+
+const choiceMisses = (
+  app: NormalizedAppSpec,
+  roles: readonly RoleEntry[] = CHOICE_ROLES,
+): readonly { readonly requirementId: string; readonly route: string; readonly detail: string }[] =>
+  checkRoleMappings(app, roles, CHOICE_TABLE, CHOICE_MAPPINGS, { ownership: CHOICE_OWNERSHIP });
+
+describe("宣言の選択肢のキーの並びを、表の options と照合する（新契約。Issue #433）", () => {
+  it("キーの集合と順が一致すれば落ちない", () => {
+    expect(choiceMisses(CHOICE_APP)).toEqual([]);
+  });
+
+  it("集合は同じで順が違えば、⑥ 直す（missing-element）の落ちにする", () => {
+    const miss = choiceMisses(CHOICE_APP_REVERSED).find((candidate) => candidate.route === "missing-element");
+    expect(miss).toBeDefined();
+    expect(miss?.detail).toContain("選択肢の項目 status のキーの並び");
+  });
+
+  it("キーが足りなければ落ちにする", () => {
+    expect(choiceMisses(CHOICE_APP_MISSING_KEY).some((candidate) => candidate.route === "missing-element")).toBe(true);
+  });
+
+  it("キーが余れば落ちにする", () => {
+    expect(choiceMisses(CHOICE_APP_EXTRA_KEY).some((candidate) => candidate.route === "missing-element")).toBe(true);
+  });
+
+  it("legacy を明示したときは、選択肢の並びを照合しない", () => {
+    const misses = checkRoleMappings(CHOICE_APP_REVERSED, CHOICE_ROLES, CHOICE_TABLE, CHOICE_MAPPINGS, {
+      ownership: CHOICE_OWNERSHIP,
+      version: LEGACY_DESIGN_CONTRACT,
+    });
+    expect(misses.some((miss) => miss.detail.includes("選択肢の項目"))).toBe(false);
+  });
+});
+
+describe("見出しごとの集計の集計元を、表の groupBy の組と照合する（新契約。Issue #433）", () => {
+  it("分ける元の項目と所属 entity がそろって一致すれば落ちない", () => {
+    expect(choiceMisses(CHOICE_APP)).toEqual([]);
+  });
+
+  it("別の項目で分けていれば、⑥ 直す（missing-element）の落ちにする", () => {
+    const miss = choiceMisses(CHOICE_APP_OTHER_FIELD).find((candidate) => candidate.route === "missing-element");
+    expect(miss).toBeDefined();
+    expect(miss?.detail).toContain("groupBy の組");
+    expect(miss?.requirementId).toBe("R-1");
+  });
+
+  it("月で分けていれば落ちにする", () => {
+    expect(choiceMisses(CHOICE_APP_MONTH).some((candidate) => candidate.route === "missing-element")).toBe(true);
+  });
+
+  it("別 entity の同名かつ同じ options の項目で分けていれば落ちにする", () => {
+    expect(choiceMisses(CHOICE_APP_OTHER_ENTITY).some((candidate) => candidate.route === "missing-element")).toBe(true);
+  });
+
+  it("集計の関係が無ければ落ちにする", () => {
+    expect(choiceMisses(CHOICE_APP_NO_RELATION).some((candidate) => candidate.route === "missing-element")).toBe(true);
+  });
+
+  it("legacy を明示したときは、集計元の組を照合しない", () => {
+    const misses = checkRoleMappings(CHOICE_APP_OTHER_ENTITY, CHOICE_ROLES, CHOICE_TABLE, CHOICE_MAPPINGS, {
+      ownership: CHOICE_OWNERSHIP,
+      version: LEGACY_DESIGN_CONTRACT,
+    });
+    expect(misses.some((miss) => miss.detail.includes("groupBy の組"))).toBe(false);
+  });
+});
+

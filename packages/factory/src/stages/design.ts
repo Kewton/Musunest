@@ -46,10 +46,12 @@ import {
   isRecord,
   normalizeConstraintId,
   normalizeConstraintIds,
+  ruleTexts,
   serializeJson,
   type Problem,
   type PromptData,
   type PromptDocument,
+  type RuleDefinition,
   type ShapeCheck,
   type StageOutcome,
 } from "./prompt.js";
@@ -58,40 +60,171 @@ import {
 export const DESIGN_SCHEMA_NAME = "requirement-design";
 
 /**
- * 作り直し（`redoDesign`）だけに足す規則（Issue #418）。元の全役割の表を**固定の文脈**として渡し、
- * 役割 ID を足し引きさせない（表は呼ぶ側が持つ。応答は対象の要件 1 件の設計だけ）。
+ * 作り直し（`redoDesign`）だけに足す規則の定義（配列の外。Issue #418・#433）。元の全役割の表を
+ * **固定の文脈**として渡し、役割 ID を足し引きさせない（表は呼ぶ側が持つ。応答は対象の要件 1 件の設計だけ）。
  */
-export const REDO_DESIGN_FIXED_TABLE_RULE =
-  "役割 ID の表は固定の文脈である。作り直しでは、役割 ID を足したり変えたりしない（表の行の増減・欄の違い・options の変更をしない）。応答には、対象の要件 1 件の設計だけを返す。";
+export const REDO_DESIGN_FIXED_TABLE_DEFINITION: RuleDefinition = {
+  id: "R-design-redo",
+  text: "役割 ID の表は固定の文脈である。作り直しでは、役割 ID を足したり変えたりしない（表の行の増減・欄の違い・options の変更をしない）。応答には、対象の要件 1 件の設計だけを返す。",
+  why: "作り直しで役割の表を持ち越し、表の増減や欄・options の変更で整合を壊さないため",
+  since: "Issue #418",
+};
+
+/** 作り直しにだけ足す規則（定義の `text`。Issue #418） */
+export const REDO_DESIGN_FIXED_TABLE_RULE: string = REDO_DESIGN_FIXED_TABLE_DEFINITION.text;
 
 /** 作り直しの回数（1 回だけやり直す。§1）。試験の段（`TEST_SUITE_ROUNDS`）と同じ形 */
 export const DESIGN_ROUNDS = 2;
 
-/** ② に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
-export const DESIGN_RULES: readonly string[] = [
-  "要件ごとに、使う語彙と、宣言のどの欄に置くか（placement）を決める。",
-  "書けない部分は、その部分（part）だけを unwritable に挙げる。1 件は「書けない部分（part）・根拠にした制約 ID（constraintIds）・理由（reason）」の組にする。書ける部分は残す（部分的に書けない要件でも、書ける部分は書く）。",
-  "制約 ID は、渡した文書の本文にあるものだけを挙げる——契約の規則の ID（例 `R-TYPE-01`）か、語彙の意味の見出しの文（例 `number`。`#` の記号は付けない）である。文書に無い ID を作らない。",
-  "語彙の穴ではないもの（曖昧さ・決めたこと・不確かさ・要件の言い直し）は unwritable に書かず、notes に書く。notes には書けない部分を書かない。",
-  "文書（契約・語彙の意味・語彙の台帳）に無い語彙・キー・関数は作らない。書けないものを、近い別の意味に書き換えない。",
-  "要件ごとに 1 つの設計を返す。要件 ID は一覧のまま写す。**代わりの案の要件にも 1 つ設計を返す**（一覧の中の `R:alt:` の形の要件 ID も、一覧のまま写して設計を返す）。",
-  "役割 ID の表（roles）を作る。役割 ID は entity の文脈を含む ID（例 member・member.name・session.bookCount）にし、対象の種類（kind）と、所属の entity の役割 ID（entity）を付ける。entity 自身の行は entity を null にする。",
-  "同じ名前の対象を複数の役割 ID にするときは、共有（shared を true）か別名（aliasOf を元の役割 ID）を明示する。明示しなければ、同じ名前の対象を 1 つの役割 ID にまとめる。",
-  "同名の別 entity を同じ役割 ID にしない。別 entity の同名の対象は、別の役割 ID にする。",
-  "要件ごとに、その要件が使う役割の所属（ownership）を挙げる。要件の文が名指しする役割は basis を stated にして reason を null にする。要件の実現に必要な依存（参照・識別・表示・入力の保存など）として使う役割は basis を dependency にして、その必要の根拠（reason）を空でない文で書く。",
-  "名前だけの項目（entity の項目）も、参照・識別・表示に要るなら、その要件に dependency として根拠つきで所属させる。",
-  "根拠の無い役割を役割 ID の表に残さない。どの要件にも所属しない役割があると、その設計は未達になる。",
-  "役割を都合の良い要件へ付け替えない。表の役割は、その役割を実際に使う要件に所属させる。",
-  "選択肢（enum）の項目は、宣言で使う順の、空でない重複の無いキーの並びを options に書く。それ以外の役割の options は null にする。",
-  "要件ごとに、種類（nature）を決める。決まり（条件・計算・検査）を含むなら ruled、在ることだけ（例「名前を持つメンバーを登録できる」）なら existence-only。",
-  "要件ごとに、確かめ方（verification）を決める。固定した試験で確かめるなら fixed-test、構造の条件で確かめるなら structural、いまは確かめられないなら unresolved。fixed-test 以外は reason（理由）を書く。",
-  "確かめ方が structural の要件は、求める構造の検査の中身（checks）を、field-type・action-kind・action-unconditioned・view-shows・aggregate-no-period・write-anonymous から、重ならずに挙げる。挙げられない条件があるなら structural にしない。構造で確かめない要件の checks は空にする。",
-  "対象の操作が在ること・その種類・条件（when）を持たないこと・誰でも行えることだけを求める要件は structural にし、action-kind・action-unconditioned・write-anonymous のうち要るものを checks に挙げる。",
-  "書き換えの結果（set のあとの値）や、保存したあとの状態を求める要件は、この形で structural にしない。",
-  "権限（permissions）と本人確認（minIdentity）は、write-anonymous で確かめる。",
-  "出どころが答えの要件は、その問いが対象にした要件の範囲にだけ当てる。要件に無い操作・項目・画面・計算を役割 ID の表に足さない。",
-  "要件の一覧の「参考の文脈」は、その答えが何についての答えかを知るためだけに使う。参考の文脈に残る、選ばれなかった案・疑問・過去の要求を新しい要件にしない。食い違うときは確定した要件の文と有効な parts を優先する。",
+/**
+ * ② に足す規則の定義（Issue #433）。**送る文は `text` から組む**——段は規則の文を手で持たない。
+ * ID は規則の台帳（`workspace/mvp/m1/agent/methodology/ledger/rules.md`）のものを使う（配列の順と ID の
+ * 順は違ってよい）。`why`・`since` は注釈と Issue 番号から写す（空にしない）。ID の重複・why・since の
+ * 欠落は `ruleDefinitionDefects` で確かめる。
+ */
+export const DESIGN_RULE_DEFINITIONS: readonly RuleDefinition[] = [
+  {
+    id: "R-design-01",
+    text: "要件ごとに、使う語彙と、宣言のどの欄に置くか（placement）を決める。",
+    why: "要件ごとに語彙と置き場所を決めさせる（F-4）",
+    since: "Issue #292",
+  },
+  {
+    id: "R-design-02",
+    text: "書けない部分は、その部分（part）だけを unwritable に挙げる。1 件は「書けない部分（part）・根拠にした制約 ID（constraintIds）・理由（reason）」の組にする。書ける部分は残す（部分的に書けない要件でも、書ける部分は書く）。",
+    why: "誤った「書けない」の申告を、部分・制約 ID・理由の組にして裏を取れるようにする",
+    since: "Issue #332",
+  },
+  {
+    id: "R-design-03",
+    text: "制約 ID は、渡した文書の本文にあるものだけを挙げる——契約の規則の ID（例 `R-TYPE-01`）か、語彙の意味の見出しの文（例 `number`。`#` の記号は付けない）である。文書に無い ID を作らない。",
+    why: "書けない申告の制約 ID を、渡した文書にあるものだけに限る",
+    since: "Issue #332",
+  },
+  {
+    id: "R-design-04",
+    text: "語彙の穴ではないもの（曖昧さ・決めたこと・不確かさ・要件の言い直し）は unwritable に書かず、notes に書く。notes には書けない部分を書かない。",
+    why: "書けないことではないもの（曖昧さ・決めたこと）を notes に分ける",
+    since: "Issue #332",
+  },
+  {
+    id: "R-design-05",
+    text: "文書（契約・語彙の意味・語彙の台帳）に無い語彙・キー・関数は作らない。書けないものを、近い別の意味に書き換えない。",
+    why: "無い語彙・キー・関数を作らせず、近い別の意味への書き換えを禁じる（F-5）",
+    since: "Issue #292",
+  },
+  {
+    id: "R-design-06",
+    text: "要件ごとに 1 つの設計を返す。要件 ID は一覧のまま写す。**代わりの案の要件にも 1 つ設計を返す**（一覧の中の `R:alt:` の形の要件 ID も、一覧のまま写して設計を返す）。",
+    why: "代わりの案の要件にも 1 つ設計を返させる",
+    since: "Issue #407",
+  },
+  {
+    id: "R-design-07",
+    text: "役割 ID の表（roles）を作る。役割 ID は entity の文脈を含む ID（例 member・member.name・session.bookCount）にし、対象の種類（kind）と、所属の entity の役割 ID（entity）を付ける。entity 自身の行は entity を null にする。",
+    why: "役割 ID の表（entity の文脈・種類・所属）を作らせる",
+    since: "Issue #307",
+  },
+  {
+    id: "R-design-08",
+    text: "同じ名前の対象を複数の役割 ID にするときは、共有（shared を true）か別名（aliasOf を元の役割 ID）を明示する。明示しなければ、同じ名前の対象を 1 つの役割 ID にまとめる。",
+    why: "共有か別名を明示させ、同名の対象を勝手に分けさせない（R2-8）",
+    since: "Issue #307",
+  },
+  {
+    id: "R-design-09",
+    text: "同名の別 entity を同じ役割 ID にしない。別 entity の同名の対象は、別の役割 ID にする。",
+    why: "同名の別 entity を同じ役割 ID に潰させない（R2-8）",
+    since: "Issue #307",
+  },
+  {
+    id: "R-design-18",
+    text: "要件ごとに、その要件が使う役割の所属（ownership）を挙げる。要件の文が名指しする役割は basis を stated にして reason を null にする。要件の実現に必要な依存（参照・識別・表示・入力の保存など）として使う役割は basis を dependency にして、その必要の根拠（reason）を空でない文で書く。",
+    why: "要件ごとに使う役割の所属（stated／dependency と根拠）を挙げさせる",
+    since: "Issue #418",
+  },
+  {
+    id: "R-design-19",
+    text: "名前だけの項目（entity の項目）も、参照・識別・表示に要るなら、その要件に dependency として根拠つきで所属させる。",
+    why: "必要な依存として、名前だけの項目にも根拠つきで所属させる",
+    since: "Issue #418",
+  },
+  {
+    id: "R-design-20",
+    text: "根拠の無い役割を役割 ID の表に残さない。どの要件にも所属しない役割があると、その設計は未達になる。",
+    why: "根拠の無い役割を表に残させない（未達にする）",
+    since: "Issue #418",
+  },
+  {
+    id: "R-design-21",
+    text: "役割を都合の良い要件へ付け替えない。表の役割は、その役割を実際に使う要件に所属させる。",
+    why: "点検の省略や付け替えで通させない（所有者の決定）",
+    since: "Issue #418",
+  },
+  {
+    id: "R-design-22",
+    text: "選択肢（enum）の項目は、宣言で使う順の、空でない重複の無いキーの並びを options に書く。それ以外の役割の options は null にする。",
+    why: "選択肢の項目に、宣言で使う順のキー列を書かせる（M-06）",
+    since: "Issue #418",
+  },
+  {
+    id: "R-design-23",
+    text: "見出しごとの集計の計算は、分ける元の選択肢の項目の役割 ID を groupBy に書き、それ以外の役割の groupBy は null にする。（宣言と固定する試験が別々の表現を推測しないため、選択肢の参照表現と集計元の関係を固定して共有する。）",
+    why: "見出しの元の項目を持ち主（②）に持たせ、宣言と期待の推測をなくす",
+    since: "Issue #433",
+  },
+  {
+    id: "R-design-10",
+    text: "要件ごとに、種類（nature）を決める。決まり（条件・計算・検査）を含むなら ruled、在ることだけ（例「名前を持つメンバーを登録できる」）なら existence-only。",
+    why: "要件ごとに種類（決まりを含む／在ることだけ）を決めさせる（F1・R2-3）",
+    since: "Issue #307",
+  },
+  {
+    id: "R-design-11",
+    text: "要件ごとに、確かめ方（verification）を決める。固定した試験で確かめるなら fixed-test、構造の条件で確かめるなら structural、いまは確かめられないなら unresolved。fixed-test 以外は reason（理由）を書く。",
+    why: "確かめ方と、試験を作らないときの理由を決めさせる",
+    since: "Issue #307",
+  },
+  {
+    id: "R-design-12",
+    text: "確かめ方が structural の要件は、求める構造の検査の中身（checks）を、field-type・action-kind・action-unconditioned・view-shows・aggregate-no-period・write-anonymous から、重ならずに挙げる。挙げられない条件があるなら structural にしない。構造で確かめない要件の checks は空にする。",
+    why: "構造で確かめる要件の checks を重ならずに挙げさせる（M-08 関連）",
+    since: "Issue #386",
+  },
+  {
+    id: "R-design-13",
+    text: "対象の操作が在ること・その種類・条件（when）を持たないこと・誰でも行えることだけを求める要件は structural にし、action-kind・action-unconditioned・write-anonymous のうち要るものを checks に挙げる。",
+    why: "操作の在ること・種類・条件の無いこと・誰でも行えることだけを求める要件を構造にする",
+    since: "Issue #386",
+  },
+  {
+    id: "R-design-14",
+    text: "書き換えの結果（set のあとの値）や、保存したあとの状態を求める要件は、この形で structural にしない。",
+    why: "書き換えの結果や保存後の状態を構造で確かめさせない（決定⑦と整合）",
+    since: "Issue #386",
+  },
+  {
+    id: "R-design-15",
+    text: "権限（permissions）と本人確認（minIdentity）は、write-anonymous で確かめる。",
+    why: "権限と本人確認を write-anonymous で確かめさせる",
+    since: "Issue #393",
+  },
+  {
+    id: "R-design-16",
+    text: "出どころが答えの要件は、その問いが対象にした要件の範囲にだけ当てる。要件に無い操作・項目・画面・計算を役割 ID の表に足さない。",
+    why: "答え由来の要件を、問いの対象の範囲にだけ当てさせる",
+    since: "Issue #394",
+  },
+  {
+    id: "R-design-17",
+    text: "要件の一覧の「参考の文脈」は、その答えが何についての答えかを知るためだけに使う。参考の文脈に残る、選ばれなかった案・疑問・過去の要求を新しい要件にしない。食い違うときは確定した要件の文と有効な parts を優先する。",
+    why: "参考の文脈を、答えの対象を知るためだけに使わせる",
+    since: "Issue #394",
+  },
 ];
+
+/** ② に足す規則（共通の規則は buildStructuredRequest が先頭に付ける。定義の `text` から組む） */
+export const DESIGN_RULES: readonly string[] = ruleTexts(DESIGN_RULE_DEFINITIONS);
 
 /** ② の JSON Schema（構造化出力。strict の規則に合わせる） */
 export const DESIGN_SCHEMA = {
@@ -104,7 +237,7 @@ export const DESIGN_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["roleId", "kind", "entity", "name", "shared", "aliasOf", "options"],
+        required: ["roleId", "kind", "entity", "name", "shared", "aliasOf", "options", "groupBy"],
         properties: {
           roleId: { type: "string", description: "役割 ID（entity の文脈を含む。例 member.name）" },
           kind: { type: "string", enum: [...TEST_TARGET_KINDS] },
@@ -116,6 +249,10 @@ export const DESIGN_SCHEMA = {
             type: ["array", "null"],
             description: "選択肢（enum）の項目なら、宣言で使う順の重複の無いキーの並び。それ以外は null",
             items: { type: "string" },
+          },
+          groupBy: {
+            type: ["string", "null"],
+            description: "見出しごとの集計（computation）なら、分ける元の選択肢の項目の役割 ID。それ以外は null",
           },
         },
       },
@@ -296,7 +433,7 @@ function checkRoleEntry(
   value: unknown,
   field: string,
   problems: Problem[],
-  requireOptions: boolean,
+  requireNewFields: boolean,
 ): RoleEntry | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "役割 ID の表の行は写像（object）であること" });
@@ -337,7 +474,7 @@ function checkRoleEntry(
   // 選択肢（enum）のキーの並び（Issue #418）。新契約では必須。欄が無い旧形式の記録は省ける。
   let options: readonly string[] | null | undefined;
   if (value["options"] === undefined) {
-    if (requireOptions) {
+    if (requireNewFields) {
       problems.push({ field: `${field}.options`, message: "選択肢の欄（options）が要る（選択肢の項目でなければ null）" });
       good = false;
     }
@@ -350,6 +487,26 @@ function checkRoleEntry(
     problems.push({ field: `${field}.options`, message: "項目でない役割の選択肢は null であること" });
     good = false;
   }
+  // 見出しの元の項目（Issue #433）。新契約では必須。欄が無い旧形式の記録は省ける。
+  let groupBy: string | null | undefined;
+  if (value["groupBy"] === undefined) {
+    if (requireNewFields) {
+      problems.push({ field: `${field}.groupBy`, message: "見出しの元の項目の欄（groupBy）が要る（計算でなければ null）" });
+      good = false;
+    }
+  } else if (value["groupBy"] === null) {
+    groupBy = null;
+  } else if (typeof value["groupBy"] !== "string" || value["groupBy"] === "") {
+    problems.push({ field: `${field}.groupBy`, message: "見出しの元の項目は空でない文字列か null であること" });
+    good = false;
+  } else {
+    groupBy = value["groupBy"];
+  }
+  // 計算でない役割の groupBy は null でなければならない（Issue #433）
+  if (kindValid && kind !== "computation" && groupBy !== null && groupBy !== undefined) {
+    problems.push({ field: `${field}.groupBy`, message: "計算でない役割の見出しの元の項目は null であること" });
+    good = false;
+  }
   if (!good) return undefined;
   return {
     roleId: roleId as string,
@@ -359,6 +516,7 @@ function checkRoleEntry(
     shared: shared as boolean,
     aliasOf: aliasOf as string | null,
     ...(options === undefined ? {} : { options }),
+    ...(groupBy === undefined ? {} : { groupBy }),
   };
 }
 
@@ -637,6 +795,7 @@ export function checkDesignOutput(output: unknown, version?: DesignContractVersi
   let roles: readonly RoleEntry[] | undefined;
   const rawRoles = output["roles"];
   let rolesWithOptions = 0;
+  let rolesWithGroupBy = 0;
   if (rawRoles === undefined) {
     if (planned) problems.push({ field: "roles", message: "役割 ID の表（roles）が要る" });
   } else if (!Array.isArray(rawRoles)) {
@@ -646,18 +805,23 @@ export function checkDesignOutput(output: unknown, version?: DesignContractVersi
     let good = true;
     rawRoles.forEach((item, index) => {
       if (isRecord(item) && item["options"] !== undefined) rolesWithOptions += 1;
+      if (isRecord(item) && item["groupBy"] !== undefined) rolesWithGroupBy += 1;
       const checked = checkRoleEntry(item, `roles[${index}]`, problems, planned);
       if (checked === undefined) good = false;
       else entries.push(checked);
     });
     if (good) roles = entries;
   }
-  // 混在（一部の設計にだけ所属がある・一部の行にだけ options がある）は、互換でも断る（決定 ⑨）
+  // 混在（一部の設計にだけ所属がある・一部の行にだけ options がある・一部の行にだけ groupBy がある）は、
+  // 互換でも断る（決定 ⑨）
   if (designsWithOwnership > 0 && designsWithOwnership < raw.length) {
     problems.push({ field: "designs", message: "所属（ownership）の有無が設計ごとに混ざっている" });
   }
   if (rawRoles !== undefined && Array.isArray(rawRoles) && rolesWithOptions > 0 && rolesWithOptions < rawRoles.length) {
     problems.push({ field: "roles", message: "選択肢（options）の有無が役割ごとに混ざっている" });
+  }
+  if (rawRoles !== undefined && Array.isArray(rawRoles) && rolesWithGroupBy > 0 && rolesWithGroupBy < rawRoles.length) {
+    problems.push({ field: "roles", message: "見出しの元の項目（groupBy）の有無が役割ごとに混ざっている" });
   }
   if (problems.length > 0) return { ok: false, problems };
   return { ok: true, value: { ...(roles === undefined ? {} : { roles }), designs } };
@@ -714,6 +878,38 @@ function checkRoleTable(roles: readonly RoleEntry[]): readonly Problem[] {
       }
     }
   }
+  return problems;
+}
+
+/**
+ * 見出しの元の項目（`groupBy`）の中身を確かめる（**新契約**。Issue #433）。合わない欄を**すべて**返す。
+ *
+ *   - `groupBy` の先の役割 ID が、役割 ID の表に無い
+ *   - `groupBy` の先の役割が項目（`kind` が `field`）でない
+ *   - `groupBy` の先の項目に選択肢（`options`）が無い（`null`）
+ *
+ * **Problem の `field`・`message` に、役割 ID の値を埋めない**（位置は配列の添字で示す）。
+ */
+export function checkGroupBy(roles: readonly RoleEntry[]): readonly Problem[] {
+  const problems: Problem[] = [];
+  const roleById = new Map<string, RoleEntry>();
+  for (const role of roles) if (!roleById.has(role.roleId)) roleById.set(role.roleId, role);
+  roles.forEach((role, index) => {
+    if (role.kind !== "computation" || role.groupBy === null || role.groupBy === undefined) return;
+    const field = `roles[${index}].groupBy`;
+    const target = roleById.get(role.groupBy);
+    if (target === undefined) {
+      problems.push({ field, message: "見出しの元の項目の役割 ID が役割 ID の表に無い" });
+      return;
+    }
+    if (target.kind !== "field") {
+      problems.push({ field, message: "見出しの元の項目が項目（field）でない" });
+      return;
+    }
+    if (target.options === null || target.options === undefined) {
+      problems.push({ field, message: "見出しの元の項目に選択肢（options）が無い" });
+    }
+  });
   return problems;
 }
 
@@ -866,6 +1062,7 @@ export function checkDesignPlan(
     }
   }
   if (version !== LEGACY_DESIGN_CONTRACT) {
+    problems.push(...checkGroupBy(roles ?? []));
     problems.push(...checkDesignOwnership(design));
   }
   return problems;
@@ -1005,5 +1202,14 @@ function sameRoles(a: readonly RoleEntry[], b: readonly RoleEntry[]): boolean {
 
 /** 役割 1 行の、値の比較のための鍵（options の無い旧形式と null を同じに扱う） */
 function roleKey(role: RoleEntry): string {
-  return JSON.stringify([role.roleId, role.kind, role.entity, role.name, role.shared, role.aliasOf, role.options ?? null]);
+  return JSON.stringify([
+    role.roleId,
+    role.kind,
+    role.entity,
+    role.name,
+    role.shared,
+    role.aliasOf,
+    role.options ?? null,
+    role.groupBy ?? null,
+  ]);
 }

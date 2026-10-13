@@ -243,7 +243,7 @@ describe("migration の適用管理を通した再適用（wrangler d1 migration
 
   it("1回目で全部当たり、2回目は追加の適用が無い（d1_migrations にファイルごとに1件）", () => {
     expect(firstColumn(query("SELECT name FROM d1_migrations ORDER BY id"))).toEqual(migrationFiles());
-  });
+  }, WRANGLER_TIMEOUT_MS);
 
   it("apps・app_instances・identity の 4 表ができ、旧 healthz の問い合わせ（SELECT 1）も成功する", () => {
     expect(
@@ -265,5 +265,5 @@ describe("migration の適用管理を通した再適用（wrangler d1 migration
       ]),
     );
     expect(firstColumn(query("SELECT 1 AS x"))).toEqual([1]);
-  });
+  }, WRANGLER_TIMEOUT_MS * 2);
 });
