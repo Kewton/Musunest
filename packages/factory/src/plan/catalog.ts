@@ -713,19 +713,30 @@ export function inheritFacetsForAnswer(input: InheritFacetInput): InheritFacetRe
   const parentRequirementId = parentEntries[0]?.requirementId as string;
   const aIssueIds = new Set(parentEntries.map((entry) => entry.issueId));
 
-  // 親の要件の、コード作の目録の事項（既に引き継いだ観点も含む）を、観点ごとに根拠から辿る
-  const facetEntries: InheritFacetCatalogEntry[] = [
-    ...input.catalogFacets,
-    ...input.previous.map((entry) => ({
-      issueId: entry.issueId,
-      requirementId: entry.requirementId,
-      facetId: entry.facetId,
-    })),
-  ];
+  // 親の要件の、コード作の目録の事項（既に引き継いだ観点も含む）を、観点ごとに根拠から辿る。
+  // **対応表もここで件数つきに引く**——問いが指す親の選択だけでなく、**親の別観点を辿るこの経路にも
+  // 門を掛ける**（同じ事項 ID の対応が 2 つ以上あれば、その観点は引き継がず分類する。F1 の残り）。
+  const facetEntriesById = new Map<string, InheritFacetCatalogEntry[]>();
+  const addFacetEntry = (entry: InheritFacetCatalogEntry): void => {
+    const list = facetEntriesById.get(entry.issueId);
+    if (list === undefined) facetEntriesById.set(entry.issueId, [entry]);
+    else list.push(entry);
+  };
+  for (const entry of input.catalogFacets) addFacetEntry(entry);
+  for (const entry of input.previous) {
+    addFacetEntry({ issueId: entry.issueId, requirementId: entry.requirementId, facetId: entry.facetId });
+  }
   const facets: InheritedFacet[] = [...aFacets];
-  for (const entry of facetEntries) {
-    if (entry.requirementId !== parentRequirementId) continue;
-    if (aIssueIds.has(entry.issueId)) continue;
+  for (const [issueId, entries] of facetEntriesById) {
+    if (aIssueIds.has(issueId)) continue;
+    // 親の要件の観点だけを辿る（別の要件の事項はここでは見ない）
+    if (!entries.some((candidate) => candidate.requirementId === parentRequirementId)) continue;
+    // 同じ事項 ID の対応が 2 つ以上あれば、一意に選べない（引き継がず複数に分類する）
+    if (entries.length > 1) {
+      miss.multiple += 1;
+      continue;
+    }
+    const entry = entries[0] as InheritFacetCatalogEntry;
     const base = {
       parentRequirementId,
       facetId: entry.facetId,

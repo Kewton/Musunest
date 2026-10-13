@@ -1139,4 +1139,45 @@ describe("答えから生まれた要件の引き継ぎ（04 §3 P4・§6 の 1�
       { kind: "mismatch", count: 0 },
     ]);
   });
+
+  it("親の別観点を辿る経路でも、同じ事項 ID の対応が 2 つ以上あれば、その観点を引き継がず複数として報告する", () => {
+    // 質問が指す事項 M は一意。親の別観点を辿る経路で、同じ事項 X の対応が 2 行（period・counted-state）。
+    const result = inheritFacetsForAnswer({
+      answerId: "A:new",
+      issueIds: ["M"],
+      issues: [
+        { id: "M", status: "resolved", resolution: { answer_id: "A:new" } },
+        { id: "X", status: "resolved", resolution: { answer_id: "A:old" } },
+      ],
+      catalogFacets: [
+        { issueId: "M", requirementId: "R-1", facetId: "aggregation" },
+        { issueId: "X", requirementId: "R-1", facetId: "period" },
+        { issueId: "X", requirementId: "R-1", facetId: "counted-state" },
+      ],
+      answerRequirements: [
+        { id: "R:A:new", text: "V-new" },
+        { id: "R:A:old", text: "V-old" },
+      ],
+      decisions: [],
+      defaultClosures: [],
+      sourceClosures: [],
+      previous: [],
+    });
+    // 曖昧な 1 事項の対応から、2 観点を (b) として解決済みと扱わない（(a) の aggregation だけ）
+    expect(result.facets).toEqual([
+      {
+        parentRequirementId: "R-1",
+        facetId: "aggregation",
+        kind: "a",
+        basis: "A:new",
+        value: "V-new",
+        sourceIssueId: "M",
+      },
+    ]);
+    expect(result.unresolved).toEqual([
+      { kind: "missing", count: 0 },
+      { kind: "multiple", count: 1 },
+      { kind: "mismatch", count: 0 },
+    ]);
+  });
 });
