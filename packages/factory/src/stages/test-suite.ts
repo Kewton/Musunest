@@ -336,6 +336,10 @@ function selectorRoleOf(target: TestTarget): string {
   return target.roleId ?? target.role ?? "";
 }
 
+/**
+ * selector（要件 ID と役割 ID）が一意に決まるかを確かめる。**Problem の `field` は位置（配列の添字と固定の
+ * 欄名）、`message` は固定文**（要件 ID・役割 ID・対象の種類の値を埋めない。§1・②'・Issue #439）。
+ */
 function checkSelectorAmbiguity(list: RequirementList, suite: TestSuite, problems: Problem[]): void {
   const ids = list.requirements.map((requirement) => requirement.id);
   if (new Set(ids).size !== ids.length) {
@@ -352,7 +356,7 @@ function checkSelectorAmbiguity(list: RequirementList, suite: TestSuite, problem
     if (previous !== test.target.kind) {
       problems.push({
         field: `tests[${index}].target`,
-        message: `selector（要件 ${test.target.requirementId}・役割 ${selectorRoleOf(test.target)}）が一意に決まらない（対象の種類が ${previous} と ${test.target.kind} で食い違う）`,
+        message: "selector（要件 ID と役割 ID）が一意に決まらない（対象の種類が食い違う）",
       });
     }
   });
@@ -368,7 +372,7 @@ function checkSuiteBasics(list: RequirementList, suite: TestSuite, problems: Pro
     if (!idSet.has(test.target.requirementId)) {
       problems.push({
         field: `tests[${index}].target.requirementId`,
-        message: `一覧に無い要件 ID: ${test.target.requirementId}`,
+        message: "一覧に無い要件 ID である",
       });
     }
     const overRows = checkLimit("referenceRowsPerTest", test.referenceData.length);
@@ -382,7 +386,11 @@ function checkSuiteBasics(list: RequirementList, suite: TestSuite, problems: Pro
   checkSelectorAmbiguity(list, suite, problems);
 }
 
-/** 要件ごとの試験の数と、種類に応じた種類のそろいを確かめる */
+/**
+ * 要件ごとの試験の数と、種類に応じた種類のそろいを確かめる。**Problem の `field` は位置、`message` は
+ * 分類ごとの固定文**（要件 ID の値を埋めない。要件ごとの問題は `requirements[添字]`、試験ごとの問題は
+ * `tests[添字]` で位置を示す。§1・②'・Issue #439）。
+ */
 function checkKinds(
   list: RequirementList,
   suite: TestSuite,
@@ -390,46 +398,49 @@ function checkKinds(
   problems: Problem[],
   checkedRequirements: ReadonlySet<string>,
 ): void {
-  for (const requirement of list.requirements) {
-    const mine = suite.tests.filter((test) => test.target.requirementId === requirement.id);
+  list.requirements.forEach((requirement, requirementIndex) => {
+    const mine: { readonly test: FixedTest; readonly index: number }[] = [];
+    suite.tests.forEach((test, index) => {
+      if (test.target.requirementId === requirement.id) mine.push({ test, index });
+    });
     if (mine.length === 0) {
-      problems.push({ field: "tests", message: `要件 ${requirement.id} の試験が無い` });
-      continue;
+      problems.push({ field: `requirements[${requirementIndex}]`, message: "要件の試験が無い" });
+      return;
     }
     const overCount = checkLimit("testsPerRequirement", mine.length);
     if (overCount !== undefined) {
       problems.push({
-        field: "tests",
-        message: `要件 ${requirement.id} の試験が上限 ${overCount.max} を超えている（${overCount.actual}）`,
+        field: `requirements[${requirementIndex}]`,
+        message: `要件の試験が上限 ${overCount.max} を超えている（${overCount.actual}）`,
       });
     }
     // 新形式で構造の検査を作る要件は、正常・異常・境界のそろいを求めない（構造の検査が確かめる。Issue #386）
-    if (checkedRequirements.has(requirement.id)) continue;
+    if (checkedRequirements.has(requirement.id)) return;
     const nature = natures.get(requirement.id) ?? "ruled";
     if (nature === "existence-only") {
-      for (const test of mine) {
+      for (const { test, index } of mine) {
         if (test.kind !== "normal") {
           problems.push({
-            field: "tests",
-            message: `要件 ${requirement.id} は在ることだけなので、${test.kind} の試験を作らない`,
+            field: `tests[${index}]`,
+            message: `在ることだけの要件なので、${test.kind} の試験を作らない`,
           });
         }
         if (test.operation === "validate") {
           problems.push({
-            field: "tests",
-            message: `要件 ${requirement.id} は在ることだけなので、検査（validate）の試験を作らない`,
+            field: `tests[${index}]`,
+            message: "在ることだけの要件なので、検査（validate）の試験を作らない",
           });
         }
       }
-      continue;
+      return;
     }
-    const kinds = new Set(mine.map((test) => test.kind));
+    const kinds = new Set(mine.map(({ test }) => test.kind));
     for (const kind of TEST_KINDS) {
       if (!kinds.has(kind)) {
-        problems.push({ field: "tests", message: `要件 ${requirement.id} に ${kind} の試験が無い` });
+        problems.push({ field: `requirements[${requirementIndex}]`, message: `${kind} の試験が無い` });
       }
     }
-  }
+  });
 }
 
 /** 設計の役割 ID の表にある ID の集合 */
@@ -437,7 +448,10 @@ export function roleIdsOf(design: DesignResult): ReadonlySet<string> {
   return new Set((design.roles ?? []).map((entry) => entry.roleId));
 }
 
-/** 試験の対象・参照の行が、設計の役割 ID で指されているか（自由な文の役割だけなら断る） */
+/**
+ * 試験の対象・参照の行が、設計の役割 ID で指されているか（自由な文の役割だけなら断る）。**Problem の
+ * `field` は位置、`message` は固定文**（役割 ID の値を埋めない。§1・②'・Issue #439）。
+ */
 function checkRoleIds(suite: TestSuite, roleIds: ReadonlySet<string>, problems: Problem[]): void {
   const check = (target: TestTarget, field: string): void => {
     if (target.roleId === undefined) {
@@ -450,7 +464,7 @@ function checkRoleIds(suite: TestSuite, roleIds: ReadonlySet<string>, problems: 
     if (!roleIds.has(target.roleId)) {
       problems.push({
         field: `${field}.roleId`,
-        message: `役割 ID ${target.roleId} が設計の役割 ID の表に無い`,
+        message: "役割 ID が設計の役割 ID の表に無い",
       });
     }
   };
@@ -481,10 +495,12 @@ function owningEntityOf(target: TestTarget, roleById: ReadonlyMap<string, RoleEn
  * 値の鍵の並びを、所属 entity の**項目（`kind` が `field`）の役割 ID** に照らす（§1・②'・Issue #409）。
  * 鍵は**まず**所属 entity の項目の役割 ID として見る（正当な項目なら、字面が行 ID に似ていても断らない）。
  * 表に無ければ、別の entity の項目の役割 ID・項目でない役割 ID・裸の `id`・`rowId`・表に無い鍵に分けて断る。
+ *
+ * **Problem の `field` は位置、`message` は分類ごとの固定文**（値の鍵の値・entity の値を埋めない。
+ * 裸の `id`・`rowId` だけは固定の語なので理由に残す。§1・②'・Issue #439）。
  */
 function checkValueKeysAgainstEntity(
   values: Readonly<Record<string, unknown>>,
-  owner: string,
   fieldRoleIds: ReadonlySet<string>,
   roleById: ReadonlyMap<string, RoleEntry>,
   field: string,
@@ -499,18 +515,18 @@ function checkValueKeysAgainstEntity(
         message:
           key === "id" || key === "rowId"
             ? rowIdValueKeyReason(key)
-            : `値の鍵 ${key} は entity ${owner} の項目の役割 ID の表に無い`,
+            : "値の鍵が、所属 entity の項目の役割 ID の表に無い",
       });
       continue;
     }
     if (role.kind === "field") {
       problems.push({
         field,
-        message: `値の鍵 ${key} は entity ${owner} の項目の役割 ID でない（別の entity（${role.entity ?? ""}）の項目の役割 ID）`,
+        message: "値の鍵が、所属 entity の項目の役割 ID でない（別の entity の項目の役割 ID）",
       });
       continue;
     }
-    problems.push({ field, message: `値の鍵 ${key} は項目の役割 ID でない（種類は ${role.kind}）` });
+    problems.push({ field, message: "値の鍵が、項目の役割 ID でない" });
   }
 }
 
@@ -546,7 +562,7 @@ function checkRecordValueKeys(suite: TestSuite, design: DesignResult, problems: 
       // 計算で参照の行を持つ試験は、レコードの入力と確かめられないので入力の鍵を見ない（⑤b に委ねる）
       const referenceEvaluatedComputation = test.target.kind === "computation" && test.referenceData.length > 0;
       if (owner !== null && fieldRoleIds !== undefined && !referenceEvaluatedComputation && isRecord(test.input)) {
-        checkValueKeysAgainstEntity(test.input, owner, fieldRoleIds, roleById, `tests[${index}].input`, problems);
+        checkValueKeysAgainstEntity(test.input, fieldRoleIds, roleById, `tests[${index}].input`, problems);
       }
     }
     test.referenceData.forEach((row, rowIndex) => {
@@ -555,7 +571,6 @@ function checkRecordValueKeys(suite: TestSuite, design: DesignResult, problems: 
       if (owner === null || fieldRoleIds === undefined || !isRecord(row.values)) return;
       checkValueKeysAgainstEntity(
         row.values,
-        owner,
         fieldRoleIds,
         roleById,
         `tests[${index}].referenceData[${rowIndex}].values`,
@@ -770,17 +785,26 @@ export function dropNonstructuralTests(
  *   - 構造の検査の `assertion` が参照する役割（`field-type` の `refEntity`・`view-shows` の `role`）が、
  *     設計の役割 ID の表にあり、種類が合い（entity か、項目か計算か）、対象と同じ entity に属すること
  *   - **新形式**（`checks` を持つ設計）では、`checks` の中身ごとに 1 本以上の構造の検査があること
+ *
+ * **Problem の `field` は位置（配列の添字と固定の欄名）、`message` は分類ごとの固定文**（要件 ID・役割 ID・
+ * entity の値を埋めない。§1・②'・Issue #439）。
  */
-function checkStructuralChecks(suite: TestSuite, design: DesignResult, problems: Problem[]): void {
+function checkStructuralChecks(
+  list: RequirementList,
+  suite: TestSuite,
+  design: DesignResult,
+  problems: Problem[],
+): void {
   const roleById = new Map((design.roles ?? []).map((entry) => [entry.roleId, entry]));
   const designById = new Map(design.designs.map((entry) => [entry.requirementId, entry]));
+  const requirementIndexById = new Map(list.requirements.map((requirement, index) => [requirement.id, index]));
   suite.tests.forEach((test, index) => {
     if (test.operation !== "structure") return;
     const target = designById.get(test.target.requirementId);
     if (target?.verification?.kind !== "structural") {
       problems.push({
         field: `tests[${index}].target`,
-        message: `構造の検査は、確かめ方が構造の要件だけを対象にできる（要件 ${test.target.requirementId} は構造でない）`,
+        message: "構造の検査は、確かめ方が構造の要件だけを対象にできる",
       });
       return;
     }
@@ -791,13 +815,13 @@ function checkStructuralChecks(suite: TestSuite, design: DesignResult, problems:
       const role = assertion.role ?? "";
       const referenced = roleById.get(role);
       if (referenced === undefined) {
-        problems.push({ field: `${field}.role`, message: `参照する役割 ID ${role} が設計の役割 ID の表に無い` });
+        problems.push({ field: `${field}.role`, message: "参照する役割 ID が設計の役割 ID の表に無い" });
         return;
       }
       if (referenced.kind !== "field" && referenced.kind !== "computation") {
         problems.push({
           field: `${field}.role`,
-          message: `view-shows の参照する役割 ${role} は項目か計算でなければならない（種類は ${referenced.kind}）`,
+          message: "view-shows の参照する役割は、項目か計算でなければならない",
         });
         return;
       }
@@ -805,7 +829,7 @@ function checkStructuralChecks(suite: TestSuite, design: DesignResult, problems:
       if (targetRole !== undefined && referenced.entity !== targetRole.entity) {
         problems.push({
           field: `${field}.role`,
-          message: `参照する役割 ${role} が、対象の役割 ${test.target.roleId ?? ""} とは別の entity（${String(referenced.entity)}）に属する`,
+          message: "view-shows の参照する役割が、対象の役割とは別の entity に属する",
         });
       }
       return;
@@ -815,35 +839,37 @@ function checkStructuralChecks(suite: TestSuite, design: DesignResult, problems:
       if (referenced === undefined) {
         problems.push({
           field: `${field}.refEntity`,
-          message: `参照する役割 ID ${assertion.refEntity} が設計の役割 ID の表に無い`,
+          message: "参照する役割 ID が設計の役割 ID の表に無い",
         });
         return;
       }
       if (referenced.kind !== "entity") {
         problems.push({
           field: `${field}.refEntity`,
-          message: `field-type の参照先 ${assertion.refEntity} は entity の役割でなければならない（種類は ${referenced.kind}）`,
+          message: "field-type の参照先は entity の役割でなければならない",
         });
       }
     }
   });
 
   // 新形式（checks を持つ設計）では、checks の中身ごとに 1 本以上の構造の検査が要る
-  for (const entry of design.designs) {
-    if (entry.verification?.kind !== "structural" || entry.checks === undefined) continue;
+  design.designs.forEach((entry, designIndex) => {
+    if (entry.verification?.kind !== "structural" || entry.checks === undefined) return;
     const mine = suite.tests.filter(
       (test) => test.target.requirementId === entry.requirementId && test.operation === "structure",
     );
     const have = new Set(mine.map((test) => test.assertion?.check));
+    const requirementIndex = requirementIndexById.get(entry.requirementId);
+    const field = requirementIndex === undefined ? `designs[${designIndex}]` : `requirements[${requirementIndex}]`;
     for (const check of entry.checks) {
       if (!have.has(check)) {
         problems.push({
-          field: "tests",
-          message: `要件 ${entry.requirementId} の構造の検査 ${check} が無い（checks の中身ごとに 1 本以上が要る）`,
+          field,
+          message: `構造の検査（${check}）が無い（checks の中身ごとに 1 本以上が要る）`,
         });
       }
     }
-  }
+  });
 }
 
 /**
@@ -911,7 +937,7 @@ export function checkSuitePlan(
   checkKinds(list, suite, natures, problems, checked);
   checkRoleIds(suite, roleIdsOf(design), problems);
   checkExpectationKind(suite, problems);
-  checkStructuralChecks(suite, design, problems);
+  checkStructuralChecks(list, suite, design, problems);
   checkRecordValueKeys(suite, design, problems);
   if (version !== LEGACY_DESIGN_CONTRACT) {
     checkOwnedByRequirement(suite, design, problems);
@@ -1273,6 +1299,11 @@ function checkRoleGroupByFields(design: DesignResult): readonly Problem[] {
  * 決まらない）。種類も渡すのは、コードの突き合わせ（`reconcileNatures`）と同じ材料を会話にも見せ、
  * 在ることだけの要件に異常・境界の試験を作らせないためである。
  *
+ * **やり直しでは、前回に実際に検査した試験集合（構造で確かめる要件の実行の試験を外した後）も、
+ * 前回の作り直しの指示とは別のデータとして渡す**（Issue #439）。Problem の `field` は位置を添字で
+ * 示す（`tests[添字]`）が値を文に埋めないので、その添字がどの試験を指すかは、この集合が無いと
+ * 解決できない。`requirements[添字]` は毎回送る要件の一覧に対応するので、この集合は要らない。
+ *
  * **版は呼ぶ側の明示でだけ決める**（欄の有無から推定しない。決定 ⑨・Issue #428）。新契約（`version` を
  * 省いたとき）は、設計の欄（役割 ID の表・種類・確かめ方・所属）が無くても**必ず** 4 つを入れる
  * （黙って省かない。無ければ空の並び）。`legacy` を明示したときだけ `isPlannedDesign` で決め、
@@ -1282,6 +1313,7 @@ function buildData(
   list: RequirementList,
   design: DesignResult | undefined,
   previous: readonly Problem[],
+  previousTests: readonly FixedTest[] | undefined,
   plan: ConfirmedPlan | undefined,
   version: DesignContractVersion | undefined,
 ): readonly PromptData[] {
@@ -1328,6 +1360,11 @@ function buildData(
     });
   }
   if (previous.length > 0) {
+    // 前回に実際に検査した試験集合を、作り直しの指示とは**別のデータ**として渡す（Issue #439）。
+    // 作り直しの指示の `tests[添字]` は、この集合の添字を指す（値を Problem の文に戻さない）。
+    if (previousTests !== undefined) {
+      data.push({ name: "前回の試験", text: serializeJson(previousTests) });
+    }
     data.push({ name: "前回の作り直しの指示", text: serializeJson(previous) });
   }
   return data;
@@ -1387,6 +1424,10 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
             },
           ];
   let previous: readonly Problem[] = [];
+  // **前回に実際に検査した試験集合**（構造で確かめる要件の実行の試験を外した後）。作り直しの指示の
+  // `tests[添字]` の参照先になる。Problem の文に値を戻さずに位置を解決できるように、別のデータとして渡す
+  // （Issue #439）。
+  let previousTests: readonly FixedTest[] | undefined;
   // 食い違った要件の決め方（要件 ID ごと）。やり直しの回をまたいで持ち越す（聞き直さない。Issue #373）
   const decisions = new Map<string, NatureDecision>();
   // 固定の前に外した、構造で確かめる要件の構造の検査でない試験（回ごとに数える。Issue #392）
@@ -1399,7 +1440,7 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
     const request = buildStructuredRequest({
       rules: TEST_SUITE_RULES,
       documents: input.documents,
-      data: buildData(input.list, input.design, previous, input.plan, input.version),
+      data: buildData(input.list, input.design, previous, previousTests, input.plan, input.version),
       schemaName: TEST_SUITE_SCHEMA_NAME,
       schema: TEST_SUITE_SCHEMA,
       maxOutputTokens: input.gateway.maxOutputTokens("test-suite"),
@@ -1446,7 +1487,9 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
     if (problems.length === 0) {
       return { ok: true, value: { suite, rounds: round, discrepancies, dropped: droppedAll } };
     }
+    // 次の回に、作り直しの指示と**その添字の参照先**（実際に検査した試験集合）を渡す（Issue #439）
     previous = problems;
+    previousTests = suite.tests;
   }
   return { ok: false, failure: { kind: "unmet", attempts: TEST_SUITE_ROUNDS, problems: previous } };
 }
