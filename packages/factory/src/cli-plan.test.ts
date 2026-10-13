@@ -164,6 +164,30 @@ const NO_CLI_OUT_OF_SCOPE = {
   deduped_indexes: [],
 };
 
+/** 差分点検の記録の `inherit`（引き継ぎの件数。Issue #461）を、指定した件数で作る */
+function cliInherit(
+  overrides: {
+    no_parent?: number;
+    multiple_parents?: number;
+    open_by_source?: Partial<Record<"catalog" | "surface" | "surface-check", number>>;
+  } = {},
+) {
+  return {
+    facets: [],
+    no_parent: overrides.no_parent ?? 0,
+    multiple_parents: overrides.multiple_parents ?? 0,
+    unresolved: [
+      { kind: "missing", count: 0 },
+      { kind: "multiple", count: 0 },
+      { kind: "mismatch", count: 0 },
+    ],
+    open_by_source: (["catalog", "surface", "surface-check"] as const).map((source) => ({
+      source,
+      count: overrides.open_by_source?.[source] ?? 0,
+    })),
+  };
+}
+
 /** 目録に無い曖昧さ 3 件（重大）。3 問を出し、番号・推奨・自由入力を試せるようにする */
 const SURFACE_THREE = {
   ambiguities: [
@@ -369,6 +393,14 @@ interface PlanCliRecordShape {
       readonly rejected_ambiguities: number;
       readonly kinds: readonly { readonly kind: string; readonly claims: number; readonly ambiguities: number }[];
       readonly deduped_indexes: readonly number[];
+    };
+    /** 引き継いだ観点の記録（件数と有限の分類だけ。Issue #461） */
+    readonly inherit: {
+      readonly facets: readonly { readonly kind: string; readonly facet_id: string; readonly count: number }[];
+      readonly no_parent: number;
+      readonly multiple_parents: number;
+      readonly unresolved: readonly { readonly kind: string; readonly count: number }[];
+      readonly open_by_source: readonly { readonly source: string; readonly count: number }[];
     };
   }[];
   /** 同じ ID の開いている事項の行の衝突の記録（件数と分類と版だけ。Issue #460） */
@@ -1820,8 +1852,8 @@ describe("差分点検の記録を残し、答えのファイルの形で 2 往�
     expect(record.outcome).toBe("confirmed");
     // 差分点検の記録（1 往復目は 3 件増えて 1 件開き、2 往復目は 1 件増えた。値ではなく件数）
     expect(record.diff_reviews).toEqual([
-      { round: 1, added: 3, open_issues: 1, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE },
-      { round: 2, added: 1, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE },
+      { round: 1, added: 3, open_issues: 1, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE, inherit: cliInherit({ no_parent: 3, open_by_source: { surface: 1 } }) },
+      { round: 2, added: 1, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE, inherit: cliInherit({ no_parent: 1 }) },
     ]);
     // 依頼文・答えの目印は、差分点検の記録に出ない
     expect(JSON.stringify(record.diff_reviews)).not.toContain(sourceMark);
@@ -1896,7 +1928,7 @@ describe("差分点検でも、受理・未点検・途中停止の記録を pla
       "plan-triage:0",
       "plan-support:0",
     ]);
-    expect(record.diff_reviews).toEqual([{ round: 1, added: 3, open_issues: 0, accepted_unwritable: 1, out_of_scope: NO_CLI_OUT_OF_SCOPE }]);
+    expect(record.diff_reviews).toEqual([{ round: 1, added: 3, open_issues: 0, accepted_unwritable: 1, out_of_scope: NO_CLI_OUT_OF_SCOPE, inherit: cliInherit({ no_parent: 3 }) }]);
     // 別ファイルの診断に、差分の申告 1 件が残る
     const diagnostic = await readSurfaceCheck(dir);
     expect(diagnostic.claims).toEqual([
@@ -1999,7 +2031,7 @@ describe("差分点検でも、受理・未点検・途中停止の記録を pla
     expect(record.surface_check.completed).toBe(false);
     expect(record.surface_check.accepted).toBe(0);
     // 開始時に積んだ差分点検の記録が残る（停止した往復も数える）
-    expect(record.diff_reviews).toEqual([{ round: 1, added: 3, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE }]);
+    expect(record.diff_reviews).toEqual([{ round: 1, added: 3, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE, inherit: cliInherit({ no_parent: 3 }) }]);
     // 全申告が「未実行」で別ファイルに残る
     const diagnostic = await readSurfaceCheck(dir);
     expect(diagnostic.claims).toEqual([
@@ -2066,7 +2098,7 @@ describe("差分点検でも、受理・未点検・途中停止の記録を pla
     expect(record.surface_check.completed).toBe(false);
     expect(record.surface_check.dropped).toBe(1);
     expect(record.surface_check.judgments).toHaveLength(2);
-    expect(record.diff_reviews).toEqual([{ round: 1, added: 3, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE }]);
+    expect(record.diff_reviews).toEqual([{ round: 1, added: 3, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE, inherit: cliInherit({ no_parent: 3 }) }]);
     const diagnostic = await readSurfaceCheck(dir);
     expect(diagnostic.claims.map((claim) => claim.classification)).toEqual(["not-a-problem", "vocabulary-hole"]);
   });
@@ -2184,8 +2216,8 @@ describe("点検の番号を plan-record に残し、判定・診断を一意に
     ]);
     // 差分点検の記録は往復ごとに 2 件（停止した往復も数える）
     expect(record.diff_reviews).toEqual([
-      { round: 1, added: 1, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE },
-      { round: 2, added: 1, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE },
+      { round: 1, added: 1, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE, inherit: cliInherit({ no_parent: 1 }) },
+      { round: 2, added: 1, open_issues: 0, accepted_unwritable: 0, out_of_scope: NO_CLI_OUT_OF_SCOPE, inherit: cliInherit({ no_parent: 1 }) },
     ]);
   });
 });
@@ -2283,6 +2315,7 @@ describe("差分点検・§3：受理済み申告の再申告を除いた記録�
           ],
           deduped_indexes: [0],
         },
+        inherit: cliInherit({ no_parent: 1 }),
       },
     ]);
     // 値（部分・理由・代案・要件 ID）は、新しい記録（diff_reviews）に転記されない
@@ -2465,5 +2498,109 @@ describe("同じ ID の開いている事項の行の衝突を、値を含めず
     expect(record.closed_by_default).toEqual([]);
     expect(record.closed_by_source).toEqual([]);
     expect(record.diff_reviews).toEqual([]);
+  });
+});
+
+// ── Issue #461：引き継いだ観点の記録を plan-record に残す（値は転記しない）──────────────
+
+describe("差分点検：引き継いだ観点の記録を plan-record に残す（04 §7・Issue #461）", () => {
+  it("引き継いだ件数（種類・観点 ID）・親なし・親が複数・根拠が引けなかった件数（分類別）・開いた事項の出どころが残り、事項 ID・要件 ID・文・答えの目印は出ない", async () => {
+    const sourceMark = "MARK_SOURCE_INHERIT";
+    const answerMark = "MARK_ANSWER_INHERIT";
+    const source = `${sourceMark}する。件数を合計する。`;
+    const spanOf = (quote: string): { readonly start: number; readonly end: number } => {
+      const start = source.indexOf(quote);
+      return { start, end: start + quote.length };
+    };
+    const list = {
+      requirements: [
+        { id: "R-1", text: "印を出せる", quote: `${sourceMark}する`, position: spanOf(`${sourceMark}する`) },
+        { id: "R-2", text: "件数を合計できる", quote: "件数を合計する", position: spanOf("件数を合計する") },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const inheritQuestions = {
+      questions: [
+        {
+          id: "Q-1",
+          openIssueId: "OI:catalog:R-1:aggregation",
+          text: "どう数えますか",
+          choices: [
+            { id: "c1", text: `${answerMark}を数える` },
+            { id: "c2", text: "自分のみ数える" },
+          ],
+          recommended: { choiceId: "c1", reason: "依頼に沿う" },
+          allowFreeText: true,
+        },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_CLEAR),
+      structured(inheritQuestions),
+      structured(SURFACE_CLEAR),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor(
+        { "R-1": ["aggregation"], "R:A:Q1-1": ["aggregation"] },
+        ["R-1", "R-2", "R:A:Q1-1"],
+      ),
+      ...coverAnswers(["A:Q1-1"]),
+    });
+    const dir = `${directory}/inherit-record`;
+    const answersPath = "inherit-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : source),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    expect(record.diff_reviews).toHaveLength(1);
+    // 引き継ぎの記録は、件数と有限の分類だけ（種類・観点 ID・出どころ別の件数）
+    expect(record.diff_reviews[0]?.inherit).toEqual({
+      facets: [{ kind: "a", facet_id: "aggregation", count: 1 }],
+      no_parent: 0,
+      multiple_parents: 0,
+      unresolved: [
+        { kind: "missing", count: 0 },
+        { kind: "multiple", count: 0 },
+        { kind: "mismatch", count: 0 },
+      ],
+      open_by_source: [
+        { source: "catalog", count: 0 },
+        { source: "surface", count: 0 },
+        { source: "surface-check", count: 0 },
+      ],
+    });
+    // 新しい記録に、事項 ID・要件 ID・文・答えの目印が出ない
+    const inheritText = JSON.stringify(record.diff_reviews[0]?.inherit);
+    expect(inheritText).not.toContain("OI:");
+    expect(inheritText).not.toContain("R-1");
+    expect(inheritText).not.toContain("R:A:");
+    expect(inheritText).not.toContain(sourceMark);
+    expect(inheritText).not.toContain(answerMark);
+    // もともと値を持つ既存の欄は対象外——引き継ぎの記録は新しい欄だけに留まる
+    expect(record.rounds).toHaveLength(1);
+    expect(record.closed_by_default).toEqual([]);
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
