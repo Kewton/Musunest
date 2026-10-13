@@ -4,13 +4,14 @@
 // 実行: node --test "workspace/mvp/m1/agent/eval/agent-accept/*.test.mjs"（先に pnpm build で spec-engine の dist を作る）
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { ABSENT_REASONS, ACCEPTANCE_STATUSES, CATALOG_FACET_IDS, CONDITIONS_SCHEMAS, DEFAULT_SET_PATH, EVAL_SET_SCHEMA, JUDGEMENTS, PLAN_SCRIPT_SCHEMA, PLAN_SPEC_SCHEMA, SCORING_FILES, SCRIPT_MODE, SCRIPT_RUN_STATUSES, UNVERIFIED_SOURCES, VERDICT_UNEVALUATED, WRONG_ACCEPTANCE_EVALUATION, acceptanceMatcher, anonymize, applyScript, fingerprintDir, judgeDisposition, loadEvalSet, loadPlan, loadScript, planTexts, questionFacets, readAcceptance, reconcile, scoringFingerprint, scriptSummary, scriptsFingerprint, sha256, validatePlanShape, validatePlanned, validateScript } from "./score-agent.mjs";
-import { DEFAULT_ALLOWED } from "../score-claims.mjs";
+import { DEFAULT_ALLOWED, finalVerdict, scoreClaims } from "../score-claims.mjs";
+import { loadDef, score } from "../engine.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const scoreFile = join(here, "score-agent.mjs");
@@ -260,7 +261,8 @@ test("採点の定義か集計のコードを 1 文字変えると指紋が変�
     const first = scoringFingerprint(copy);
     assert.deepEqual(first, scoringFingerprint(ev), "同じ中身なら同じ指紋");
     assert.deepEqual(first.missing, []);
-    assert.deepEqual(first.files.map((f) => f.path), [...SCORING_FILES, ...["A", "B", "C", "D", "E"].map((s) => `subjects/${s}.json`)]);
+    // subjects/ の全部の定義（開発用 A〜E と回帰用 R1〜R5。#450）が指紋に入る
+    assert.deepEqual(first.files.map((f) => f.path), [...SCORING_FILES, ...["A", "B", "C", "D", "E", "R1", "R2", "R3", "R4", "R5"].map((s) => `subjects/${s}.json`)]);
     appendFileSync(join(copy, "subjects/A.json"), " ");
     const defChanged = scoringFingerprint(copy);
     assert.notEqual(defChanged.fingerprint, first.fingerprint, "題材の定義の 1 文字");
@@ -1459,5 +1461,165 @@ syncBuiltinESMExports();
     const r3 = spawnSync(process.execPath, ["--import", pathToFileURL(preload).href, scoreFile, repo, out], { encoding: "utf8" });
     assert.notEqual(r3.status, 0);
     assert.ok(r3.stderr.includes("EACCES") && r3.stderr.includes(join(out, "score.json")) && r3.stderr.includes("    at "), "匿名でなければ誤りの詳細はそのまま");
+  });
+});
+
+// ── 回帰用の組（regression-r1。#450。README §6）。題材の定義は subjects/R1〜R5.json、正例・負例は cases/regression/
+const REG_SET = join(ev, "sets/regression-r1.json");
+const REG_CASES = join(ev, "cases/regression");
+/** 開発用の題材 → 対応する回帰用の題材（README §6.2 の対応表。判定の組が同じ） */
+const MIRROR = { A: "R1", B: "R2", C: "R3", D: "R4", E: "R5" };
+
+test("回帰用の組（regression-r1）は入口の検査を通り、役割は regression、5 題材 × 2 書き方の 10 本で台本を持たず、本の並びと対象範囲は開発用と同じ位置関係、題材の定義の実体が採点の指紋に入る", () => {
+  const dev = loadEvalSet(join(repo, DEFAULT_SET_PATH));
+  const reg = loadEvalSet(REG_SET);
+  assert.equal(reg.status, "ok", reg.reasons.join("、"));
+  assert.equal(reg.set.id, "regression-r1");
+  assert.equal(reg.set.role, "regression");
+  assert.equal(reg.set.version, 1);
+  assert.deepEqual(Object.keys(reg.set.styles), Object.keys(dev.set.styles), "書き方の ID は開発用と同じ");
+  assert.equal(reg.items.length, 10);
+  assert.deepEqual(reg.subjects, Object.values(MIRROR));
+  assert.equal(reg.scripts.size, 0, "台本は持たない（script: null）");
+  assert.deepEqual(reg.items.map((it) => [it.id, it.style, it.writable]), dev.items.map((it) => [it.id, it.style, it.writable]), "本の ID・書き方・対象範囲の並びは開発用と同じ");
+  assert.deepEqual(reg.items.map((it) => it.subject), dev.items.map((it) => MIRROR[it.subject]), "題材の対応は MIRROR のとおり");
+  for (const it of reg.items) { assert.ok(it.requestText.length > 0, it.id); assert.equal(it.script, null, it.id); assert.ok(existsSync(it.scoringPath), it.id); assert.equal(reg.byId.get(it.id), it); }
+  for (const s of reg.subjects) { const [a, b] = reg.items.filter((it) => it.subject === s); assert.notEqual(a.requestText, b.requestText, `${s}: S1 と S2 は別の文`); }
+  const fp = scoringFingerprint(ev, undefined, reg.definitions);
+  assert.deepEqual(fp.missing, []);
+  for (const s of reg.subjects) assert.deepEqual(fileOf(fp, `definition:${s}`), { path: `definition:${s}`, source: `subjects/${s}.json`, sha256: fileOf(fp, `subjects/${s}.json`).sha256 }, s);
+  assert.match(reg.sha256, HEX64);
+  assert.notEqual(reg.sha256, dev.sha256);
+});
+
+test("回帰用の題材の採点の定義は、対応する開発用の題材と、構造の数・判定の種類と並び・集計の限定・書けない要件の数と鍵が同じ（README §6.2 の対応表を機械で固定する）", () => {
+  for (const [devId, regId] of Object.entries(MIRROR)) {
+    const a = defOf(devId), r = defOf(regId);
+    assert.equal(r.id, regId);
+    assert.deepEqual([r.clock, r.today], [a.clock, a.today], `${regId}: 時計`);
+    assert.equal(r.structures.length, a.structures.length, `${regId}: 構造の数`);
+    a.structures.forEach((sa, i) => {
+      const sr = r.structures[i];
+      assert.deepEqual(sr.checks.map((c) => c.kind), sa.checks.map((c) => c.kind), `${regId}/${sr.id}: 判定の種類と並び`);
+      assert.deepEqual(sr.checks.map((c) => c.aggregateOnly ?? null), sa.checks.map((c) => c.aggregateOnly ?? null), `${regId}/${sr.id}: 集計の限定`);
+      assert.deepEqual(sr.checks.map((c) => c.widgets ?? null), sa.checks.map((c) => c.widgets ?? null), `${regId}/${sr.id}: 部品の種類`);
+      assert.equal(sr.unwritable.length, sa.unwritable.length, `${regId}/${sr.id}: 書けない要件の数`);
+      assert.deepEqual(sr.unwritable.map((u) => u.keys), sa.unwritable.map((u) => u.keys), `${regId}/${sr.id}: 申告の鍵`);
+      assert.deepEqual(sr.unwritable.map((u) => u.optionalIfWritten !== undefined), sa.unwritable.map((u) => u.optionalIfWritten !== undefined), `${regId}/${sr.id}: 書けたら数えない要件`);
+    });
+  }
+});
+
+test("回帰用の題材の定義・依頼文・正例負例に、開発用の題材の言葉（定義の題名の語）が入っていない", () => {
+  // 開発用の題名（subjects/A〜E.json の title）を「の」「と」「・」で区切った語。言葉そのものは試験の文に書かず、データから引く
+  const words = [...new Set(Object.keys(MIRROR).flatMap((s) => defOf(s).title.split(/[のと・]/)).filter((w) => w.length >= 2))];
+  assert.ok(words.length >= 8, "題名の語が少なすぎる");
+  const reg = loadEvalSet(REG_SET);
+  const texts = reg.items.map((it) => [`request:${it.id}`, it.requestText]);
+  for (const s of reg.subjects) texts.push([`subjects/${s}.json`, readFileSync(join(ev, "subjects", `${s}.json`), "utf8")]);
+  texts.push(["sets/regression-r1.json", readFileSync(REG_SET, "utf8")]);
+  for (const f of readdirSync(REG_CASES)) texts.push([`cases/regression/${f}`, readFileSync(join(REG_CASES, f), "utf8")]);
+  for (const [name, text] of texts) for (const w of words) assert.ok(!text.includes(w), `${name} に開発用の題材の語（${words.indexOf(w) + 1} 番目）が入っている`);
+});
+
+test("回帰用の「1 以上」の検査（R1・R3・R4 の両方の構造）は、0 と 1 だけでなく 0 と 1 の間の値を拒否することまで求める（`> 0` の宣言を合格にしない。fix-450 指摘 1）", () => {
+  let found = 0;
+  for (const regId of Object.values(MIRROR)) {
+    for (const st of defOf(regId).structures) {
+      const numberRoles = Object.entries(st.roles).filter(([, r]) => r.field?.type === "number").map(([n]) => n);
+      for (const c of st.checks.filter((c) => c.kind === "validation")) {
+        for (const role of numberRoles) {
+          if (!c.cases.some((k) => k.set[role] === 0 && k.valid === false)) continue; // 下限の検査ではない
+          found += 1;
+          assert.ok(c.cases.some((k) => k.set[role] === 1 && k.valid === true), `${regId}/${st.id}/${c.req}: 1 を通す`);
+          assert.ok(c.cases.some((k) => k.set[role] > 0 && k.set[role] < 1 && k.valid === false), `${regId}/${st.id}/${c.req}: 0 と 1 の間の値を拒否する`);
+        }
+      }
+    }
+  }
+  assert.equal(found, 4, "下限の検査は R1・R3・R4（主の構造と別の構造）の 4 つ");
+});
+
+test("回帰用の人ごとの集計（computedVisible の集計の限定）の sources は、件数と数の項目の合計が一致しない（件数を合計に、合計を件数に取り違えた宣言を落とせる。fix-450 指摘 3）", () => {
+  let found = 0;
+  for (const regId of Object.values(MIRROR)) {
+    for (const st of defOf(regId).structures) {
+      for (const c of st.checks.filter((c) => c.kind === "computedVisible" && c.aggregateOnly === true && c.sources)) {
+        for (const [srcRole, rows] of Object.entries(c.sources)) {
+          const numberRoles = Object.entries(st.roles).filter(([, r]) => r.field?.type === "number" && r.field.of === srcRole).map(([n]) => n);
+          for (const role of numberRoles) for (const p of c.probes) {
+            const hit = rows.filter((row) => Object.values(row.set).some((v) => v === p.recordId || (Array.isArray(v) && v.includes(p.recordId))));
+            const count = hit.length, sum = hit.reduce((s, row) => s + (row.set[role] ?? 1), 0); // 未指定の数は 1（engine.mjs の recordFor と同じ）
+            assert.ok(count > 0, `${regId}/${st.id}/${c.req}: ${p.recordId} に当たる行が無い`);
+            assert.notEqual(count, sum, `${regId}/${st.id}/${c.req}: ${p.recordId} の件数 ${count} と ${role} の合計 ${sum} が同じ（取り違えを検出できない）`);
+            found += 1;
+          }
+        }
+      }
+    }
+  }
+  assert.equal(found, 5, "数の項目を持つ主役の集計は R1（2 人）・R3（1 人）・R4 の主の構造（2 人）");
+});
+
+test("R1 の採点の定義は主役に名前用の string の項目を求める役割を持ち、名前を省いた宣言は役割が見つからず落ちる（fix-450 指摘 2）", () => {
+  const st = defOf("R1").structures[0];
+  const mainRole = Object.entries(st.roles).find(([, r]) => r.entity && !r.entity.hasFieldTypes)?.[0];
+  assert.ok(mainRole, "制約の無い entity の役割（主役）");
+  assert.ok(Object.values(st.roles).some((r) => r.field?.of === mainRole && r.field.type === "string"), "主役の string の項目の役割");
+  const index = JSON.parse(readFileSync(join(REG_CASES, "cases.json"), "utf8"));
+  const c = index.find((c) => c.subject === "R1" && c.structure === null);
+  assert.ok(c, "R1 に役割が見つからない負例がある");
+  assert.deepEqual([c.expect, c.failed], ["FAIL", ["役割が見つかる"]]);
+});
+
+test("回帰用の題材の正例・負例（cases/regression）は、凍結した v5 で索引どおりに採点される：最終の判定だけでなく、当てはまる構造・落ちる判定の集合・静的 NG の診断コード・written・申告の判定と挙げ漏れの数まで一致する。索引とファイルが一致し、どの題材にも正例と負例がある", async () => {
+  const engine = await import(pathToFileURL(join(repo, "packages/spec-engine/dist/index.js")).href);
+  const index = JSON.parse(readFileSync(join(REG_CASES, "cases.json"), "utf8"));
+  assert.deepEqual(readdirSync(REG_CASES).filter((f) => f !== "cases.json").sort(), index.map((c) => c.file).sort(), "索引と置き場所のファイルが一致する");
+  const reg = loadEvalSet(REG_SET);
+  await withOut(async (base) => {
+    const seen = new Map();
+    let alternates = 0;
+    for (const c of index) {
+      assert.ok(reg.subjects.includes(c.subject), `${c.file}: 組に無い題材`);
+      assert.ok(typeof c.why === "string" && c.why.length > 0, `${c.file}: why`);
+      assert.ok(c.structure === null || typeof c.structure === "string", `${c.file}: structure は構造の id か null`);
+      assert.ok(Array.isArray(c.failed) && c.failed.every((k) => typeof k === "string"), `${c.file}: failed は落ちる判定の名前の並び`);
+      assert.ok(c.expect !== "STATIC_NG" || (Array.isArray(c.codes) && c.codes.length > 0), `${c.file}: 静的 NG は診断コードを期待する`);
+      assert.ok(c.expect !== "FAIL" || c.failed.length > 0 || c.claims === "NG", `${c.file}: 負例は落ちる判定か申告 NG のどちらかを期待する`);
+      const data = JSON.parse(readFileSync(join(REG_CASES, c.file), "utf8"));
+      assert.ok(Array.isArray(data.spec) && data.spec.length > 0 && data.spec.every((l) => typeof l === "string"), `${c.file}: spec は宣言の行の配列`);
+      const specPath = join(base, c.file.replace(/\.json$/, ".app.spec.yaml"));
+      writeFileSync(specPath, `${data.spec.join("\n")}\n`);
+      const def = loadDef(join(ev, "subjects", `${c.subject}.json`));
+      const r = await score(engine, specPath, def);
+      const claims = data.log ? scoreClaims(data.log, def, r.structure, r.written) : null;
+      const got = finalVerdict(r, claims);
+      const failed = Object.entries(r.checks).filter(([, ok]) => !ok).map(([k]) => k).sort();
+      assert.equal(got, c.expect, `${c.file}: expect=${c.expect} got=${got} [${r.structure ?? "-"}] ${r.verdict === "STATIC_NG" ? r.codes.join(",") : failed.join("・")}`);
+      assert.equal(r.structure, c.structure, `${c.file}: 当てはまる構造`);
+      assert.deepEqual(failed, [...c.failed].sort(), `${c.file}: 落ちる判定の集合`);
+      assert.deepEqual(r.codes, c.codes ?? [], `${c.file}: 診断コード`);
+      if (c.written !== undefined) assert.deepEqual(r.written, c.written, `${c.file}: written`);
+      if (c.claims !== undefined) { assert.ok(claims, `${c.file}: 申告の期待があるのに log が無い`); assert.equal(claims.verdict, c.claims, `${c.file}: 申告の判定`); }
+      if (c.missed !== undefined) assert.equal(claims?.missed, c.missed, `${c.file}: 申告の挙げ漏れの数`);
+      // 宣言の判定：落ちる判定が無ければ、主の構造は PASS・別の構造は PASS_NEEDS_CLAIM（申告で最終が決まる）
+      if (r.structure !== null) assert.equal(r.verdict, failed.length > 0 ? "FAIL" : r.structure === def.structures[0].id ? "PASS" : "PASS_NEEDS_CLAIM", `${c.file}: 宣言の判定`);
+      if (r.structure !== null && r.structure !== def.structures[0].id) {
+        alternates += 1;
+        assert.ok(r.requiresClaim, `${c.file}: 別の構造は申告が要る`);
+        if (got === "PASS") assert.deepEqual([r.verdict, claims?.missed], ["PASS_NEEDS_CLAIM", 0], `${c.file}: 別の構造の合格は申告で決まる`);
+      }
+      if (!seen.has(c.subject)) seen.set(c.subject, new Set());
+      seen.get(c.subject).add(got);
+    }
+    for (const s of reg.subjects) {
+      assert.ok(seen.get(s)?.has("PASS"), `${s}: 正例が無い`);
+      assert.ok(seen.get(s)?.has("FAIL") || seen.get(s)?.has("STATIC_NG"), `${s}: 負例が無い`);
+    }
+    assert.ok(alternates >= 3, "別の構造の正例と負例（申告なし・下限の誤り）が要る");
+    assert.ok(index.some((c) => c.expect === "STATIC_NG"), "無い語彙を発明した負例が要る");
+    assert.ok(index.some((c) => c.expect === "FAIL" && c.failed.length === 0 && c.claims === "NG" && c.missed === 1), "宣言は全部満たすが申告の挙げ漏れで落ちる負例が要る");
+    assert.ok(index.some((c) => c.expect === "FAIL" && c.failed.length > 0 && c.claims === "OK" && c.written), "申告 OK のまま順位の判定だけが落ちる負例が要る");
   });
 });

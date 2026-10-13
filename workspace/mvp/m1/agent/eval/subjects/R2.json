@@ -1,0 +1,184 @@
+{
+  "id": "R2",
+  "title": "マンションの共用部の点検",
+  "patterns": [
+    "P3",
+    "P4"
+  ],
+  "note": "開発用 B と同じ判定の組（役割の名前と選択肢の表示名だけが違う）。書けない要件も同じ種類（少ない順の並べ替え）。人ごとの件数は未実施を含む担当の記録の数（依頼文に明記。fix-450 指摘 3。sources は既定の状態＝未実施のままなので、実施済みだけを数える宣言は落ちる）。#450",
+  "structures": [
+    {
+      "id": "main",
+      "roles": {
+        "main": {
+          "entity": {}
+        },
+        "member": {
+          "entity": {
+            "hasFieldTypes": [
+              "string"
+            ]
+          }
+        },
+        "who": {
+          "field": {
+            "of": "main",
+            "type": "ref",
+            "to": "member"
+          }
+        },
+        "kind": {
+          "field": {
+            "of": "main",
+            "type": "enum",
+            "labels": [
+              "消火器",
+              "照明",
+              "非常口"
+            ]
+          }
+        },
+        "status": {
+          "field": {
+            "of": "main",
+            "type": "enum",
+            "labels": [
+              "未実施",
+              "実施済み"
+            ]
+          }
+        },
+        "date": {
+          "field": {
+            "of": "main",
+            "type": "date"
+          }
+        }
+      },
+      "checks": [
+        {
+          "req": "登録したときの状態",
+          "kind": "enumDefault",
+          "field": "status",
+          "label": "未実施"
+        },
+        {
+          "req": "状態を進めるボタンと条件",
+          "kind": "advanceAction",
+          "field": "status",
+          "from": "未実施",
+          "to": "実施済み"
+        },
+        {
+          "req": "状態の列のボード",
+          "kind": "boardColumns",
+          "field": "status"
+        },
+        {
+          "req": "人と主役を登録できる",
+          "kind": "creatable",
+          "entities": [
+            "member",
+            "main"
+          ]
+        },
+        {
+          "req": "種類と人で絞り込み",
+          "kind": "listFilters",
+          "entity": "main",
+          "fields": [
+            "kind",
+            "who"
+          ]
+        },
+        {
+          "req": "今日の点検に印",
+          "kind": "highlight",
+          "field": "date",
+          "trueOn": [
+            "2026-10-08"
+          ],
+          "falseOn": [
+            "2026-10-07",
+            "2026-10-09"
+          ]
+        },
+        {
+          "req": "人ごとの件数が見られる",
+          "kind": "computedVisible",
+          "entity": "member",
+          "aggregateOnly": true,
+          "sources": {
+            "main": [
+              {
+                "set": {
+                  "who": "m1"
+                }
+              },
+              {
+                "set": {
+                  "who": "m1"
+                }
+              },
+              {
+                "set": {
+                  "who": "m2"
+                }
+              }
+            ]
+          },
+          "probes": [
+            {
+              "recordId": "m1",
+              "expect": 2
+            },
+            {
+              "recordId": "m2",
+              "expect": 1
+            }
+          ]
+        },
+        {
+          "req": "少ない順を逆向きで書いていない",
+          "kind": "rankingOrder",
+          "target": "member",
+          "sources": {
+            "main": [
+              {
+                "set": {
+                  "who": "m1"
+                }
+              },
+              {
+                "set": {
+                  "who": "m1"
+                }
+              },
+              {
+                "set": {
+                  "who": "m2"
+                }
+              }
+            ]
+          },
+          "fewer": "m2",
+          "more": "m1",
+          "writes": "少ない順"
+        }
+      ],
+      "unwritable": [
+        {
+          "id": "少ない順",
+          "keys": [
+            "少ない",
+            "昇順",
+            "並べ"
+          ],
+          "optionalIfWritten": "少ない順"
+        }
+      ]
+    }
+  ],
+  "clock": "2026-10-08T12:00:00+09:00",
+  "today": "2026-10-08"
+}
