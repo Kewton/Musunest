@@ -15,7 +15,9 @@ import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest, JudgeResponse } f
 import {
   NATURE_JUDGE_THRESHOLD,
   NATURE_JUDGE_THRESHOLD_VERSION,
+  TEST_SUITE_RULE_DEFINITIONS,
   TEST_SUITE_RULES,
+  TEST_SUITE_ROUNDS,
   TEST_SUITE_SCHEMA_NAME,
   checkSuiteAgainstRequirements,
   checkSuitePlan as checkSuitePlanImpl,
@@ -25,6 +27,7 @@ import {
   runTestSuite as runTestSuiteImpl,
   type TestSuiteInput,
 } from "./test-suite.js";
+import { ruleDefinitionDefects, ruleTexts } from "./prompt.js";
 import {
   INJECTED_INSTRUCTION,
   REQUIREMENT_LIST,
@@ -102,12 +105,12 @@ describe("固定する前にコードが断る（02 §1・§1.3）", () => {
 
   it("必要な正常／異常／境界の欠落を断る", () => {
     const problems = checkSuiteAgainstRequirements(REQUIREMENT_LIST, suiteOf(MISSING_BOUNDARY_OUTPUT.tests));
-    expect(problems.some((problem) => problem.message.includes("R-2") && problem.message.includes("boundary"))).toBe(true);
+    expect(problems.some((problem) => problem.field === "requirements[1]" && problem.message.includes("boundary"))).toBe(true);
   });
 
   it("どの要件にも試験が無ければ断る", () => {
     const problems = checkSuiteAgainstRequirements(REQUIREMENT_LIST, suiteOf(R1_TRIPLE));
-    expect(problems.some((problem) => problem.message.includes("R-2") && problem.message.includes("試験が無い"))).toBe(true);
+    expect(problems.some((problem) => problem.field === "requirements[1]" && problem.message.includes("試験が無い"))).toBe(true);
   });
 
   it("一意に決まらない selector を断る", () => {
@@ -329,7 +332,7 @@ describe("役割 ID の表と、要件ごとの種類に照らす（Issue #307�
       expected: { kind: "ok", value: 1 },
     });
     const problems = checkSuitePlan(REQUIREMENT_LIST, suiteOf([...R1_RULED, ...R2_EXISTENCE, abnormal]), PLANNED_DESIGN, RULED_NATURES);
-    expect(problems.some((problem) => problem.message.includes("R-2") && problem.message.includes("在ることだけ") && problem.message.includes("abnormal"))).toBe(true);
+    expect(problems.some((problem) => problem.field === "tests[4]" && problem.message.includes("在ることだけ") && problem.message.includes("abnormal"))).toBe(true);
   });
 
   it("在ることだけの要件に、境界の試験を作ったら断る", () => {
@@ -343,7 +346,7 @@ describe("役割 ID の表と、要件ごとの種類に照らす（Issue #307�
       expected: { kind: "ok", value: 1 },
     });
     const problems = checkSuitePlan(REQUIREMENT_LIST, suiteOf([...R1_RULED, ...R2_EXISTENCE, boundary]), PLANNED_DESIGN, RULED_NATURES);
-    expect(problems.some((problem) => problem.message.includes("R-2") && problem.message.includes("boundary"))).toBe(true);
+    expect(problems.some((problem) => problem.field === "tests[4]" && problem.message.includes("在ることだけ") && problem.message.includes("boundary"))).toBe(true);
   });
 
   it("在ることだけの要件に、検査（validate）の試験を作ったら断る", () => {
@@ -358,7 +361,7 @@ describe("役割 ID の表と、要件ごとの種類に照らす（Issue #307�
     });
     const suite = suiteOf([...R1_RULED, validation]);
     const problems = checkSuitePlan(REQUIREMENT_LIST, suite, PLANNED_DESIGN, RULED_NATURES);
-    expect(problems.some((problem) => problem.message.includes("R-2") && problem.message.includes("validate"))).toBe(true);
+    expect(problems.some((problem) => problem.field === "tests[3]" && problem.message.includes("在ることだけ") && problem.message.includes("validate"))).toBe(true);
   });
 
   it("自由な文の役割だけで指した試験を断る（対象も参照の行も役割 ID で指す）", () => {
@@ -1073,7 +1076,7 @@ describe("構造の検査（Issue #386）", () => {
     const execution = plannedTest({ id: "e1", requirementId: "R-1", roleId: "record.total", kind: "normal", operation: "compute" });
     const suite = suiteOf([execution, ...R2_TRIPLE_PLANNED]);
     const problems = checkSuitePlan(REQUIREMENT_LIST, suite, structuralDesign(["action-kind"]), STRUCTURE_NATURES);
-    expect(problems.some((problem) => problem.message.includes("構造の検査 action-kind が無い"))).toBe(true);
+    expect(problems.some((problem) => problem.message.includes("構造の検査") && problem.message.includes("action-kind") && problem.message.includes("無い"))).toBe(true);
   });
 
   it("構造の検査が、確かめ方が構造でない要件を対象にすると断る", () => {
@@ -1355,7 +1358,7 @@ describe("構造で確かめる要件には、構造の検査だけを固定す�
     if (partialOutcome.failure.kind !== "unmet") return;
     expect(
       partialOutcome.failure.problems.some(
-        (problem) => problem.message.includes("構造の検査 action-unconditioned が無い"),
+        (problem) => problem.message.includes("構造の検査") && problem.message.includes("action-unconditioned") && problem.message.includes("無い"),
       ),
     ).toBe(true);
 
@@ -1379,7 +1382,7 @@ describe("構造で確かめる要件には、構造の検査だけを固定す�
     if (zeroOutcome.failure.kind !== "unmet") return;
     expect(
       zeroOutcome.failure.problems.some(
-        (problem) => problem.message.includes("R-1") && problem.message.includes("試験が無い"),
+        (problem) => problem.field === "requirements[0]" && problem.message.includes("試験が無い"),
       ),
     ).toBe(true);
   });
@@ -1734,10 +1737,10 @@ describe("値の鍵を、所属 entity の項目の役割 ID に照らす（§1�
 
 /** entity・計算 2 つ・画面を持つ役割 ID の表（`record` は 2 要件が使うので共有） */
 const OWNED_ROLES: readonly RoleEntry[] = [
-  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
-  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
-  { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null },
-  { roleId: "record.records", kind: "screen", entity: "record", name: "records", shared: false, aliasOf: null, options: null },
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.records", kind: "screen", entity: "record", name: "records", shared: false, aliasOf: null, options: null, groupBy: null },
 ];
 
 /** 所属を持つ設計（R-1 は `record.total`、R-2 は `record.extra` を使う） */
@@ -1986,6 +1989,807 @@ describe("新契約：版は欄の有無から推定しない（§1・②'・Iss
     expect(request.input.match(/<data name=/g)).toHaveLength(5);
     for (const name of ["役割 ID の表", "要件ごとの種類", "要件ごとの確かめ方", "要件ごとの所属"]) {
       expect(request.input).toContain(name);
+    }
+  });
+});
+
+// ── 選択肢の値と見出しごとの集計の期待（新契約。Issue #433）──────────────────
+
+describe("選択肢の値と見出しごとの集計の期待を、コードで検査する（新契約。Issue #433）", () => {
+  const OPTION_ROLES: readonly RoleEntry[] = [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.status", kind: "field", entity: "record", name: "status", shared: false, aliasOf: null, options: ["open", "closed"], groupBy: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: "record.status" },
+    { roleId: "record.plain", kind: "computation", entity: "record", name: "plain", shared: false, aliasOf: null, options: null, groupBy: null },
+  ];
+
+  const OPTION_DESIGN: DesignResult = {
+    roles: OPTION_ROLES,
+    designs: [
+      {
+        requirementId: "R-1",
+        nature: "ruled",
+        verification: { kind: "fixed-test" },
+        vocabulary: [],
+        placement: [],
+        unwritable: [],
+        ownership: [
+          { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+          { roleId: "record.status", basis: "stated", reason: null },
+          { roleId: "record.total", basis: "stated", reason: null },
+        ],
+      },
+      {
+        requirementId: "R-2",
+        nature: "ruled",
+        verification: { kind: "fixed-test" },
+        vocabulary: [],
+        placement: [],
+        unwritable: [],
+        ownership: [
+          { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+          { roleId: "record.plain", basis: "stated", reason: null },
+        ],
+      },
+    ],
+  };
+
+  const OPTION_NATURES = new Map<string, RequirementNature>([
+    ["R-1", "ruled"],
+    ["R-2", "ruled"],
+  ]);
+
+  const optionTest = (options: {
+    readonly id: string;
+    readonly requirementId: string;
+    readonly roleId: string;
+    readonly kind?: "normal" | "abnormal" | "boundary";
+    readonly operation?: "compute" | "validate" | "action" | "aggregate" | "screen";
+    readonly input?: unknown;
+    readonly referenceData?: readonly unknown[];
+    readonly expected?: unknown;
+  }): Record<string, unknown> => ({
+    id: options.id,
+    target: { requirementId: options.requirementId, kind: "computation", roleId: options.roleId },
+    kind: options.kind ?? "normal",
+    operation: options.operation ?? "compute",
+    clock: CLOCK,
+    input: "input" in options ? options.input : { "record.status": "open" },
+    inputContract: { rowId: `${options.id}-row`, targetRowId: null, emptyEntities: [] },
+    referenceData: options.referenceData ?? [],
+    expected: options.expected ?? { kind: "ok", value: 42 },
+  });
+
+  const optionTriple = (requirementId: string, roleId: string): readonly Record<string, unknown>[] =>
+    (["normal", "abnormal", "boundary"] as const).map((kind, index) =>
+      optionTest({ id: `${requirementId}-${index}`, requirementId, roleId, kind }),
+    );
+
+  const OPTION_VALID = [...optionTriple("R-1", "record.total"), ...optionTriple("R-2", "record.plain")];
+
+  const optionProblems = (
+    tests: readonly unknown[],
+    design: DesignResult = OPTION_DESIGN,
+  ): readonly { readonly field: string; readonly message: string }[] =>
+    checkSuitePlanImpl(REQUIREMENT_LIST, suiteOf(tests), design, OPTION_NATURES);
+
+  const withFirst = (first: Record<string, unknown>): readonly Record<string, unknown>[] => [
+    first,
+    ...OPTION_VALID.slice(1),
+  ];
+
+  it("選択肢の値が options の中なら通る", () => {
+    expect(optionProblems(OPTION_VALID)).toEqual([]);
+  });
+
+  it("正常の入力の、options の外の値を断る", () => {
+    const first = optionTest({
+      id: "R-1-0",
+      requirementId: "R-1",
+      roleId: "record.total",
+      kind: "normal",
+      input: { "record.status": "unknown" },
+    });
+    const problems = optionProblems(withFirst(first));
+    expect(problems.some((problem) => problem.field === "tests[0].input")).toBe(true);
+  });
+
+  it("参照の行の値の、options の外の値を断る", () => {
+    const first = optionTest({
+      id: "R-1-0",
+      requirementId: "R-1",
+      roleId: "record.total",
+      kind: "normal",
+      referenceData: [
+        {
+          rowId: "row-2",
+          target: { requirementId: "R-1", kind: "entity", roleId: "record" },
+          values: { "record.status": "unknown" },
+        },
+      ],
+    });
+    const problems = optionProblems(withFirst(first));
+    expect(problems.some((problem) => problem.field === "tests[0].referenceData[0].values")).toBe(true);
+  });
+
+  it("異常の試験の入力は検査しない", () => {
+    const first = optionTest({
+      id: "R-1-0",
+      requirementId: "R-1",
+      roleId: "record.total",
+      kind: "abnormal",
+      input: { "record.status": "unknown" },
+    });
+    const problems = optionProblems(withFirst(first));
+    expect(problems.some((problem) => problem.field === "tests[0].input")).toBe(false);
+  });
+
+  it("見出しごとの集計の期待が、options の全キーと同じ順なら通る", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-1",
+      roleId: "record.total",
+      operation: "aggregate",
+      expected: { kind: "ok", value: [{ heading: "open", value: 1 }, { heading: "closed", value: 0 }] },
+    });
+    expect(optionProblems([...OPTION_VALID, agg])).toEqual([]);
+  });
+
+  it("見出しの順が違えば断る", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-1",
+      roleId: "record.total",
+      operation: "aggregate",
+      expected: { kind: "ok", value: [{ heading: "closed", value: 0 }, { heading: "open", value: 1 }] },
+    });
+    const problems = optionProblems([...OPTION_VALID, agg]);
+    expect(problems.some((problem) => problem.field.endsWith("expected.value[0].heading"))).toBe(true);
+  });
+
+  it("見出しが欠ければ断る", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-1",
+      roleId: "record.total",
+      operation: "aggregate",
+      expected: { kind: "ok", value: [{ heading: "open", value: 1 }] },
+    });
+    const problems = optionProblems([...OPTION_VALID, agg]);
+    expect(problems.some((problem) => problem.field.endsWith("expected.value"))).toBe(true);
+  });
+
+  it("見出しの組に余計な欄があれば断る", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-1",
+      roleId: "record.total",
+      operation: "aggregate",
+      expected: { kind: "ok", value: [{ heading: "open", value: 1, extra: 2 }, { heading: "closed", value: 0 }] },
+    });
+    const problems = optionProblems([...OPTION_VALID, agg]);
+    expect(problems.some((problem) => problem.field.endsWith("expected.value[0]"))).toBe(true);
+  });
+
+  it("見出しの値が数でも null でもなければ断る", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-1",
+      roleId: "record.total",
+      operation: "aggregate",
+      expected: { kind: "ok", value: [{ heading: "open", value: "x" }, { heading: "closed", value: 0 }] },
+    });
+    const problems = optionProblems([...OPTION_VALID, agg]);
+    expect(problems.some((problem) => problem.field.endsWith("expected.value[0].value"))).toBe(true);
+  });
+
+  it("結果全体が null の期待は通り、見出しを足させない", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-1",
+      roleId: "record.total",
+      operation: "aggregate",
+      expected: { kind: "ok", value: null },
+    });
+    expect(optionProblems([...OPTION_VALID, agg])).toEqual([]);
+  });
+
+  it("groupBy が null の計算には、見出しの検査を掛けない", () => {
+    const agg = optionTest({
+      id: "agg",
+      requirementId: "R-2",
+      roleId: "record.plain",
+      operation: "aggregate",
+      expected: { kind: "ok", value: [{ heading: "anything", value: "x" }] },
+    });
+    const problems = optionProblems([...OPTION_VALID, agg]);
+    expect(problems.some((problem) => problem.field.includes("expected"))).toBe(false);
+  });
+
+  it("1 回目に直れば固定できる（作り直しの枠）", async () => {
+    const bad = optionTest({
+      id: "R-1-0",
+      requirementId: "R-1",
+      roleId: "record.total",
+      kind: "normal",
+      input: { "record.status": "unknown" },
+    });
+    const recording = createRecordingClient([
+      structured({ tests: [bad, ...OPTION_VALID.slice(1)] }),
+      structured({ tests: OPTION_VALID }),
+    ]);
+    const outcome = await runTestSuiteImpl({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: OPTION_DESIGN,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.rounds).toBe(2);
+  });
+
+  it("規則の文に、見出しごとの集計の期待と理由がある", () => {
+    expect(
+      TEST_SUITE_RULES.some(
+        (rule) =>
+          rule.includes("見出しごとの集計") &&
+          rule.includes("options") &&
+          rule.includes("heading") &&
+          rule.includes("宣言と固定する試験が別々の表現を推測しないため"),
+      ),
+    ).toBe(true);
+  });
+
+  it("②' の規則の定義の整合（ID の重複・why と since・配列との一致）", () => {
+    expect(ruleDefinitionDefects(TEST_SUITE_RULE_DEFINITIONS)).toEqual([]);
+    const ids = TEST_SUITE_RULE_DEFINITIONS.map((definition) => definition.id);
+    expect([...ids].sort()).toEqual(
+      Array.from({ length: 14 }, (_, index) => `R-suite-${String(index + 1).padStart(2, "0")}`).sort(),
+    );
+    expect(TEST_SUITE_RULES).toEqual(ruleTexts(TEST_SUITE_RULE_DEFINITIONS));
+    expect(TEST_SUITE_RULES).toHaveLength(TEST_SUITE_RULE_DEFINITIONS.length);
+    for (const definition of TEST_SUITE_RULE_DEFINITIONS) {
+      expect(definition.why.trim(), definition.id).not.toBe("");
+      expect(definition.since.trim(), definition.id).not.toBe("");
+    }
+  });
+});
+
+// ── 新契約の入口が、groupBy の欠けた設計を断る（Issue #433・review 1）──────────────
+
+describe("新契約の入口は、役割ごとの groupBy の欠落・形・参照先の不備を断る（Issue #433・review 1）", () => {
+  /** `groupBy` の欄を丸ごと外した役割（欠落。`null` とは別物である） */
+  const withoutGroupBy = (role: RoleEntry): RoleEntry => {
+    const { groupBy: _omitted, ...rest } = role;
+    return rest;
+  };
+
+  const designWithRoles = (roles: readonly RoleEntry[]): DesignResult => ({ ...OWNED_DESIGN, roles });
+
+  const run = (design: DesignResult, version?: typeof LEGACY_DESIGN_CONTRACT) =>
+    runTestSuiteImpl({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(createRecordingClient([structured({ tests: OWNED_VALID }), structured({ tests: OWNED_VALID })]).client, {
+        maxAttempts: 1,
+      }),
+      design,
+      ...(version === undefined ? {} : { version }),
+    });
+
+  it("新契約で groupBy の欄ごと欠かした設計は、1 回の作り直し後も固定できず unmet", async () => {
+    const outcome = await run(designWithRoles(OWNED_ROLES.map(withoutGroupBy)));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    expect(outcome.failure.attempts).toBe(TEST_SUITE_ROUNDS);
+    expect(outcome.failure.problems.some((problem) => problem.field.endsWith("groupBy"))).toBe(true);
+  });
+
+  it("新契約で groupBy の有無が混ざった設計は unmet", async () => {
+    const roles = OWNED_ROLES.map((role, index) => (index === 0 ? withoutGroupBy(role) : role));
+    const outcome = await run(designWithRoles(roles));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    expect(
+      outcome.failure.problems.some((problem) => problem.message.includes("見出しの元の項目（groupBy）の有無が役割ごとに混ざっている")),
+    ).toBe(true);
+  });
+
+  it("新契約で groupBy の参照先が表に無い・項目でない設計は unmet", async () => {
+    for (const target of ["ghost", "record.records"]) {
+      const roles = OWNED_ROLES.map((role) =>
+        role.roleId === "record.total" ? { ...role, groupBy: target } : role,
+      );
+      const outcome = await run(designWithRoles(roles));
+      expect(outcome.ok, target).toBe(false);
+      if (outcome.ok || outcome.failure.kind !== "unmet") continue;
+      expect(outcome.failure.problems.some((problem) => problem.field.endsWith("groupBy")), target).toBe(true);
+    }
+  });
+
+  it("legacy を明示した旧形式（groupBy の欄ごと無い）は、固定できる", async () => {
+    const outcome = await run(designWithRoles(OWNED_ROLES.map(withoutGroupBy)), LEGACY_DESIGN_CONTRACT);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.suite.tests).toHaveLength(OWNED_VALID.length);
+  });
+
+  it("正しい null（全役割の groupBy が null）は、固定できる", async () => {
+    const outcome = await run(OWNED_DESIGN);
+    expect(outcome.ok).toBe(true);
+  });
+
+  it("断る Problem に、目印を入れた参照先の値が出ない", async () => {
+    const marker = "MARKER433R1";
+    const roles = OWNED_ROLES.map((role) =>
+      role.roleId === "record.total" ? { ...role, groupBy: `ghost-${marker}` } : role,
+    );
+    const outcome = await run(designWithRoles(roles));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    for (const problem of outcome.failure.problems) {
+      expect(`${problem.field} ${problem.message}`).not.toContain(marker);
+    }
+  });
+});
+
+// ── 断る Problem の field と message に、値を埋めない（§1・②'・Issue #439）──────────────
+//
+// #418 は新しい検査だけを固定文にした。それより前（#415 など）の検査は、誤りの文に役割 ID・要件 ID・
+// 値の鍵・entity 名を埋めていた。値は停止の要約と段の失敗の記録に写り、作り直しの指示のデータ
+// （前回の問題）にもそのまま入る。位置は `field`（配列の添字と固定の欄名）で示し、`message` は分類ごとの
+// 固定文にする。ここでは、目印を入れた値で各検査を起こし、断りに目印が出ないことを確かめる。
+
+describe("断る Problem の field と message に、値を埋めない（§1・②'・Issue #439）", () => {
+  const marker = "MARKER439";
+
+  /** 要件 ID に目印を混ぜた要件の一覧（文と引用には目印を入れない） */
+  const markedList = (ids: readonly string[]): RequirementList => ({
+    requirements: ids.map((id, index) => ({
+      id,
+      text: `要件 ${index} の文`,
+      quote: `引用 ${index}`,
+      position: { start: index, end: index + 1 },
+    })),
+    decisions: [],
+    unresolved: [],
+  });
+
+  /** entity 名・項目・計算・画面・操作の役割 ID に目印を混ぜた表 */
+  const markedRoles: readonly RoleEntry[] = [
+    { roleId: `record-${marker}`, kind: "entity", entity: null, name: marker, shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: `record-${marker}.amount`, kind: "field", entity: `record-${marker}`, name: marker, shared: false, aliasOf: null, options: ["open", "closed"], groupBy: null },
+    { roleId: `record-${marker}.total`, kind: "computation", entity: `record-${marker}`, name: marker, shared: false, aliasOf: null, options: null, groupBy: null },
+    { roleId: `record-${marker}.records`, kind: "screen", entity: `record-${marker}`, name: marker, shared: false, aliasOf: null, options: null, groupBy: null },
+    { roleId: `record-${marker}.add`, kind: "operation", entity: `record-${marker}`, name: marker, shared: false, aliasOf: null, options: null, groupBy: null },
+    { roleId: `other-${marker}`, kind: "entity", entity: null, name: marker, shared: false, aliasOf: null, options: null, groupBy: null },
+    { roleId: `other-${marker}.amount`, kind: "field", entity: `other-${marker}`, name: marker, shared: false, aliasOf: null, options: null, groupBy: null },
+    { roleId: `other-${marker}.total`, kind: "computation", entity: `other-${marker}`, name: marker, shared: false, aliasOf: null, options: null, groupBy: null },
+  ];
+
+  /** 目印を混ぜた値の鍵の検査用の設計（R-1 は決まりを含む、R-目印 は構造で確かめる） */
+  const markedDesign = (): DesignResult => ({
+    roles: markedRoles,
+    designs: [
+      {
+        requirementId: "R-1",
+        nature: "ruled",
+        verification: { kind: "fixed-test" },
+        checks: [],
+        vocabulary: [],
+        placement: [],
+        unwritable: [],
+        ownership: [
+          { roleId: `record-${marker}`, basis: "dependency", reason: "行を参照するため" },
+          { roleId: `record-${marker}.total`, basis: "stated", reason: null },
+          { roleId: `record-${marker}.amount`, basis: "stated", reason: null },
+        ],
+      },
+      {
+        requirementId: `R-${marker}`,
+        nature: "existence-only",
+        verification: { kind: "structural", reason: "構造で確かめる" },
+        checks: [],
+        vocabulary: [],
+        placement: [],
+        unwritable: [],
+        ownership: [
+          { roleId: `record-${marker}`, basis: "dependency", reason: "行を参照するため" },
+          { roleId: `record-${marker}.records`, basis: "stated", reason: null },
+        ],
+      },
+    ],
+  });
+
+  /** 構造の検査の検査用の設計（R-1 は構造で確かめる、R-目印 は固定した試験で確かめる） */
+  const markedStructuralDesign = (): DesignResult => ({
+    roles: markedRoles,
+    designs: [
+      {
+        requirementId: "R-1",
+        nature: "existence-only",
+        verification: { kind: "structural", reason: "構造で確かめる" },
+        checks: ["view-shows", "field-type", "action-kind"],
+        vocabulary: [],
+        placement: [],
+        unwritable: [],
+        ownership: [
+          { roleId: `record-${marker}`, basis: "dependency", reason: "行を参照するため" },
+          { roleId: `record-${marker}.records`, basis: "stated", reason: null },
+          { roleId: `record-${marker}.amount`, basis: "stated", reason: null },
+          { roleId: `record-${marker}.add`, basis: "stated", reason: null },
+        ],
+      },
+      {
+        requirementId: `R-${marker}`,
+        nature: "ruled",
+        verification: { kind: "fixed-test" },
+        checks: [],
+        vocabulary: [],
+        placement: [],
+        unwritable: [],
+        ownership: [{ roleId: `record-${marker}`, basis: "dependency", reason: "行を参照するため" }],
+      },
+    ],
+  });
+
+  /** 目印を差し替えられる試験 1 件 */
+  const markedTest = (options: {
+    readonly id: string;
+    readonly requirementId?: string;
+    readonly roleId: string;
+    readonly kind?: "normal" | "abnormal" | "boundary";
+    readonly operation?: "compute" | "validate" | "action" | "aggregate" | "screen" | "structure";
+    readonly targetKind?: "entity" | "field" | "computation" | "operation" | "screen";
+    readonly input?: unknown;
+    readonly referenceData?: readonly unknown[];
+    readonly expected?: unknown;
+    readonly assertion?: Record<string, unknown>;
+  }): Record<string, unknown> => ({
+    id: options.id,
+    target: {
+      requirementId: options.requirementId ?? "R-1",
+      kind: options.targetKind ?? "computation",
+      roleId: options.roleId,
+    },
+    kind: options.kind ?? "normal",
+    operation: options.operation ?? "compute",
+    clock: CLOCK,
+    input: "input" in options ? options.input : {},
+    inputContract: { rowId: `${options.id}-row`, targetRowId: null, emptyEntities: [] },
+    referenceData: options.referenceData ?? [],
+    expected: options.expected ?? { kind: "ok", value: 1 },
+    ...(options.assertion === undefined ? {} : { assertion: options.assertion }),
+  });
+
+  /** 構造の検査 1 件（操作 structure・種類 normal・期待「成り立つ」） */
+  const markedStructureTest = (
+    id: string,
+    requirementId: string,
+    targetKind: "entity" | "field" | "computation" | "operation" | "screen",
+    roleId: string,
+    assertion: Record<string, unknown>,
+  ): Record<string, unknown> =>
+    markedTest({
+      id,
+      requirementId,
+      roleId,
+      targetKind,
+      operation: "structure",
+      expected: { kind: "ok", value: true },
+      assertion,
+    });
+
+  /** 断りのすべてに、目印が出ないこと（1 件以上あることを先に確かめる） */
+  const expectNoMarker = (problems: readonly { readonly field: string; readonly message: string }[]): void => {
+    expect(problems.length).toBeGreaterThan(0);
+    for (const problem of problems) {
+      expect(`${problem.field} ${problem.message}`, problem.field).not.toContain(marker);
+    }
+  };
+
+  /** 要求のデータ（`<data name="…">…</data>`）の中身を取り出す（欄ごとに確かめる） */
+  const dataBlockOf = (input: string, name: string): string => {
+    const open = `<data name="${name}">`;
+    const start = input.indexOf(open);
+    expect(start, name).toBeGreaterThanOrEqual(0);
+    return input.slice(start + open.length, input.indexOf("</data>", start)).trim();
+  };
+
+  it("一意に決まらない selector の断りに、要件 ID・役割 ID の目印が出ない", () => {
+    const suite = suiteOf([
+      markedTest({ id: "s1", roleId: `record-${marker}.total` }),
+      markedTest({ id: "s2", roleId: `record-${marker}.total`, targetKind: "field" }),
+    ]);
+    const problems = checkSuitePlanImpl(markedList(["R-1"]), suite, markedDesign(), naturesOf([["R-1", "ruled"]]));
+    expect(problems.some((problem) => problem.field === "tests[1].target" && problem.message.includes("一意に決まらない"))).toBe(true);
+    expectNoMarker(problems);
+  });
+
+  it("一覧に無い要件 ID の断りに、要件 ID の目印が出ない", () => {
+    const suite = suiteOf([markedTest({ id: "u1", requirementId: `R-${marker}`, roleId: `record-${marker}.total` })]);
+    const problems = checkSuitePlanImpl(markedList(["R-1"]), suite, markedDesign(), naturesOf([["R-1", "ruled"]]));
+    expect(problems.some((problem) => problem.field === "tests[0].target.requirementId")).toBe(true);
+    expectNoMarker(problems);
+  });
+
+  it("要件ごとの試験の欠け・種類の欠けの断りに、要件 ID の目印が出ない", () => {
+    const suite = suiteOf([markedTest({ id: "r1", roleId: `record-${marker}.total` })]);
+    const problems = checkSuitePlanImpl(
+      markedList(["R-1", `R-${marker}`]),
+      suite,
+      markedDesign(),
+      naturesOf([
+        ["R-1", "ruled"],
+        [`R-${marker}`, "existence-only"],
+      ]),
+    );
+    expect(problems.some((problem) => problem.field === "requirements[1]" && problem.message.includes("試験が無い"))).toBe(true);
+    expect(problems.some((problem) => problem.field === "requirements[0]" && problem.message.includes("abnormal"))).toBe(true);
+    expectNoMarker(problems);
+  });
+
+  it("在ることだけの要件の種類・検査の断りに、要件 ID の目印が出ない", () => {
+    // 構造の検査で確かめる要件ではない（checks を持たない）ので、種類に応じたそろいを確かめる
+    const design: DesignResult = {
+      roles: markedRoles,
+      designs: [
+        {
+          requirementId: `R-${marker}`,
+          nature: "existence-only",
+          verification: { kind: "fixed-test" },
+          checks: [],
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [
+            { roleId: `record-${marker}`, basis: "dependency", reason: "行を参照するため" },
+            { roleId: `record-${marker}.total`, basis: "stated", reason: null },
+            { roleId: `record-${marker}.amount`, basis: "stated", reason: null },
+          ],
+        },
+      ],
+    };
+    const suite = suiteOf([
+      markedTest({ id: "e1", requirementId: `R-${marker}`, roleId: `record-${marker}.total` }),
+      markedTest({ id: "e2", requirementId: `R-${marker}`, roleId: `record-${marker}.total`, kind: "abnormal" }),
+      markedTest({
+        id: "e3",
+        requirementId: `R-${marker}`,
+        roleId: `record-${marker}.amount`,
+        targetKind: "field",
+        operation: "validate",
+        expected: { kind: "error", code: "E_X" },
+      }),
+    ]);
+    const problems = checkSuitePlanImpl(markedList([`R-${marker}`]), suite, design, naturesOf([[`R-${marker}`, "existence-only"]]));
+    expect(problems.some((problem) => problem.field === "tests[1]" && problem.message.includes("abnormal"))).toBe(true);
+    expect(problems.some((problem) => problem.field === "tests[2]" && problem.message.includes("validate"))).toBe(true);
+    expectNoMarker(problems);
+  });
+
+  it("役割 ID の表に無い、の断りに、役割 ID の目印が出ない", () => {
+    const suite = suiteOf([markedTest({ id: "g1", roleId: `ghost-${marker}` })]);
+    const problems = checkSuitePlanImpl(markedList(["R-1"]), suite, markedDesign(), naturesOf([["R-1", "ruled"]]));
+    expect(problems.some((problem) => problem.field === "tests[0].target.roleId" && problem.message.includes("役割 ID の表に無い"))).toBe(true);
+    expectNoMarker(problems);
+  });
+
+  it("値の鍵の断りに、値の鍵・entity 名の目印が出ない", () => {
+    const suite = suiteOf([
+      markedTest({ id: "k1", roleId: `record-${marker}.total`, input: { [`ghost-${marker}`]: 1 } }),
+      markedTest({ id: "k2", roleId: `record-${marker}.total`, input: { [`other-${marker}.amount`]: 1 } }),
+      markedTest({
+        id: "k3",
+        roleId: `record-${marker}.total`,
+        referenceData: [
+          {
+            rowId: "row-x",
+            target: { requirementId: "R-1", kind: "entity", roleId: `record-${marker}` },
+            values: { [`ghost-${marker}`]: 1 },
+          },
+        ],
+      }),
+    ]);
+    const problems = checkSuitePlanImpl(markedList(["R-1"]), suite, markedDesign(), naturesOf([["R-1", "ruled"]]));
+    expect(problems.some((problem) => problem.field === "tests[0].input")).toBe(true);
+    expect(problems.some((problem) => problem.field === "tests[1].input" && problem.message.includes("別の entity"))).toBe(true);
+    expect(problems.some((problem) => problem.field === "tests[2].referenceData[0].values")).toBe(true);
+    expectNoMarker(problems);
+  });
+
+  it("選択肢の値の断りに、選択肢の値の目印が出ない", () => {
+    const suite = suiteOf([
+      markedTest({
+        id: "o1",
+        roleId: `record-${marker}.total`,
+        input: { [`record-${marker}.amount`]: `${marker}-value` },
+      }),
+    ]);
+    const problems = checkSuitePlanImpl(markedList(["R-1"]), suite, markedDesign(), naturesOf([["R-1", "ruled"]]));
+    expect(problems.some((problem) => problem.field === "tests[0].input" && problem.message.includes("選択肢"))).toBe(true);
+    expectNoMarker(problems);
+  });
+
+  it("構造の検査の断りに、要件 ID・役割 ID・entity 名の目印が出ない", () => {
+    const suite = suiteOf([
+      markedStructureTest("c0", `R-${marker}`, "field", `record-${marker}.amount`, {
+        check: "field-type",
+        expected: "ref",
+        refEntity: `record-${marker}`,
+      }),
+      markedStructureTest("c1", "R-1", "screen", `record-${marker}.records`, { check: "view-shows", role: `ghost-${marker}` }),
+      markedStructureTest("c2", "R-1", "field", `record-${marker}.amount`, {
+        check: "field-type",
+        expected: "ref",
+        refEntity: `ghost-${marker}`,
+      }),
+      markedStructureTest("c3", "R-1", "field", `record-${marker}.amount`, {
+        check: "field-type",
+        expected: "ref",
+        refEntity: `other-${marker}.amount`,
+      }),
+      markedStructureTest("c4", "R-1", "screen", `record-${marker}.records`, {
+        check: "view-shows",
+        role: `other-${marker}.total`,
+      }),
+    ]);
+    const problems = checkSuitePlanImpl(
+      markedList(["R-1", `R-${marker}`]),
+      suite,
+      markedStructuralDesign(),
+      naturesOf([
+        ["R-1", "existence-only"],
+        [`R-${marker}`, "ruled"],
+      ]),
+    );
+    expect(problems.some((problem) => problem.field === "tests[0].target" && problem.message.includes("確かめ方が構造の要件だけ"))).toBe(true);
+    expect(problems.some((problem) => problem.field === "tests[1].assertion.role" && problem.message.includes("役割 ID の表に無い"))).toBe(true);
+    expect(problems.some((problem) => problem.field === "tests[2].assertion.refEntity" && problem.message.includes("役割 ID の表に無い"))).toBe(true);
+    expect(problems.some((problem) => problem.field === "tests[3].assertion.refEntity" && problem.message.includes("entity の役割でなければならない"))).toBe(true);
+    expect(problems.some((problem) => problem.field === "tests[4].assertion.role" && problem.message.includes("別の entity"))).toBe(true);
+    expect(problems.some((problem) => problem.field === "requirements[0]" && problem.message.includes("構造の検査（action-kind）が無い"))).toBe(true);
+    expectNoMarker(problems);
+  });
+
+  it("作り直しの指示のデータ（前回の問題）にも、値の目印が出ず、位置を解決する参照データを欠かさない", async () => {
+    const bad = { tests: keyWithFirstInput({ [`ghost-${marker}`]: 1 }) };
+    const good = { tests: KEY_VALID };
+    const recording = createRecordingClient([structured(bad), structured(good)]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: keyDesign(KEY_ROLES),
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.rounds).toBe(2);
+    const remake = recording.structured[1];
+    expect(remake).toBeDefined();
+    if (remake === undefined) return;
+    // 目印の非出現は「前回の問題」のブロックに対してだけ見る（要求全体には、参照データの試験が入る）
+    const previousProblems = JSON.parse(dataBlockOf(remake.input, "前回の作り直しの指示")) as readonly {
+      readonly field: string;
+      readonly message: string;
+    }[];
+    for (const entry of previousProblems) {
+      expect(`${entry.field} ${entry.message}`).not.toContain(marker);
+    }
+    // 添字の参照先になる、前回に実際に検査した試験集合を欠かさない
+    const previousTests = JSON.parse(dataBlockOf(remake.input, "前回の試験")) as readonly { readonly id: string }[];
+    expect(previousTests.map((test) => test.id)).toEqual(KEY_VALID.map((test) => test.id));
+  });
+
+  it("作り直しの要求から、Problem の tests[添字] の位置を解決できる（複数要件・複数役割・途中で外す）", async () => {
+    const roles: readonly RoleEntry[] = [
+      { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+      { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null, options: null, groupBy: null },
+      { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: null },
+      { roleId: "record.records", kind: "screen", entity: "record", name: "records", shared: false, aliasOf: null, options: null, groupBy: null },
+    ];
+    const list = markedList(["R-1", "R-2", "R-3"]);
+    const design: DesignResult = {
+      roles,
+      designs: [
+        {
+          requirementId: "R-1",
+          nature: "existence-only",
+          verification: { kind: "structural", reason: "構造で確かめる" },
+          checks: ["view-shows"],
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+            { roleId: "record.records", basis: "stated", reason: null },
+          ],
+        },
+        {
+          requirementId: "R-2",
+          nature: "ruled",
+          verification: { kind: "fixed-test" },
+          checks: [],
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+            { roleId: "record.total", basis: "stated", reason: null },
+          ],
+        },
+        {
+          requirementId: "R-3",
+          nature: "ruled",
+          verification: { kind: "fixed-test" },
+          checks: [],
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+            { roleId: "record.total", basis: "stated", reason: null },
+          ],
+        },
+      ],
+    };
+    const exec = (id: string, requirementId: string, kind: "normal" | "abnormal" | "boundary", input: unknown = {}) =>
+      markedTest({ id, requirementId, roleId: "record.total", kind, input });
+    // 生の応答：R-1 の実行の試験（構造で確かめる要件なので固定の前に外れる）を、指してほしい試験の前に置く
+    const raw = {
+      tests: [
+        exec("d1", "R-1", "normal"),
+        exec("d2", "R-1", "abnormal"),
+        exec("a1", "R-2", "normal"),
+        exec("a2", "R-2", "abnormal", { [`ghost-${marker}`]: 1 }),
+        exec("a3", "R-2", "boundary"),
+        exec("b1", "R-3", "normal"),
+        exec("b2", "R-3", "abnormal"),
+        exec("b3", "R-3", "boundary"),
+      ],
+    };
+    const shape = checkTestSuite(raw.tests);
+    expect(shape.ok).toBe(true);
+    if (!shape.ok) return;
+    // 固定の前に外した後の、**実際に検査する**試験集合が Problem の添字の参照先になる
+    const examined = dropNonstructuralTests(design, shape.suite, 1).suite;
+    expect(examined.tests.map((test) => test.id)).toEqual(["a1", "a2", "a3", "b1", "b2", "b3"]);
+
+    const recording = createRecordingClient([structured(raw), structured(raw)]);
+    const outcome = await runTestSuiteImpl({
+      list,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design,
+    });
+    expect(outcome.ok).toBe(false);
+    expect(recording.structured).toHaveLength(2);
+    const remake = recording.structured[1];
+    expect(remake).toBeDefined();
+    if (remake === undefined) return;
+
+    const previousTests = JSON.parse(dataBlockOf(remake.input, "前回の試験")) as readonly {
+      readonly id: string;
+      readonly target: { readonly requirementId: string; readonly roleId?: string };
+    }[];
+    // 送った前回の試験は、外した後の集合（生の応答の並びではない）
+    expect(previousTests.map((test) => test.id)).toEqual(["a1", "a2", "a3", "b1", "b2", "b3"]);
+
+    const previousProblems = JSON.parse(dataBlockOf(remake.input, "前回の作り直しの指示")) as readonly {
+      readonly field: string;
+      readonly message: string;
+    }[];
+    // 値の鍵の誤りが、添字で指されている（生の応答では 3 番目、外した後は 1 番目）
+    const problem = previousProblems.find((entry) => entry.field === "tests[1].input");
+    expect(problem).toBeDefined();
+    // 送った前回の試験の 1 番目が、指された試験（a2・R-2・record.total）である ＝ 位置を解決できる
+    expect(previousTests[1]?.id).toBe("a2");
+    expect(previousTests[1]?.target.requirementId).toBe("R-2");
+    expect(previousTests[1]?.target.roleId).toBe("record.total");
+    // 目印の非出現は「前回の問題」のブロックに対してだけ見る（参照データには値が入ってよい）
+    for (const entry of previousProblems) {
+      expect(`${entry.field} ${entry.message}`).not.toContain(marker);
     }
   });
 });

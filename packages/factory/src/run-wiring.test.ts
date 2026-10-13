@@ -49,9 +49,9 @@ function readArtifact(
 /** ② の設計（役割 ID の表・選択肢・所属を持つ新契約。Issue #307・#316・#418） */
 const DESIGN_PLANNED = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
-    { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null },
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null, groupBy: null },
   ],
   designs: [
     {
@@ -125,7 +125,10 @@ const TEST_SUITE_PLANNED = {
   ],
 };
 
-/** ⑤a の答え（entity record と、計算 total・extra の場所を挙げる） */
+/**
+ * ⑤a の答え（entity record と、計算 total・extra の場所を挙げる）。R-1・R-2 はどちらも entity
+ * `record` に依存として所属するので、**要件ごとに**両方の要件へ載せる（Issue #431）。
+ */
 const CORRESPONDENCE_PLANNED = {
   entries: [
     {
@@ -135,7 +138,13 @@ const CORRESPONDENCE_PLANNED = {
         { kind: "computation", entity: "record", name: "total" },
       ],
     },
-    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "extra" }] },
+    {
+      requirementId: "R-2",
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "computation", entity: "record", name: "extra" },
+      ],
+    },
   ],
 };
 
@@ -195,6 +204,12 @@ describe("段どうしのつなぎ：各段の任意の入力が走らせる部�
     // ⑤a に、② の役割 ID の表と ③ の提出した対応が渡っている
     expect(correspondenceSpy.mock.calls[0]?.[0]?.roles, "⑤a に役割 ID の表が渡る").toBeDefined();
     expect(correspondenceSpy.mock.calls[0]?.[0]?.mappings, "⑤a に提出された対応が渡る").toBeDefined();
+    // ⑤a に、要件ごとの所属と版（新契約なので省略）が渡る（Issue #431）
+    expect(correspondenceSpy.mock.calls[0]?.[0]?.ownership, "⑤a に要件ごとの所属が渡る").toBeDefined();
+    expect(correspondenceSpy.mock.calls[0]?.[0]?.version).toBeUndefined();
+    // ⑥ にも同じ所属と版が渡る（1 つの段にだけ渡す形にしない。Issue #431）
+    expect(repairSpy.mock.calls[0]?.[0]?.ownership, "⑥ に要件ごとの所属が渡る").toBeDefined();
+    expect(repairSpy.mock.calls[0]?.[0]?.version).toBeUndefined();
 
     // ⑤b に、③ の提出した対応が渡っている
     expect(runTestsSpy.mock.calls[0]?.[0]?.mappings, "⑤b に提出された対応が渡る").toBeDefined();
@@ -252,6 +267,67 @@ describe("段どうしのつなぎ：各段の任意の入力が走らせる部�
     const legacy = designSpy2.mock.calls[0]?.[0]?.version;
     expect(legacy).toBe(LEGACY_DESIGN_CONTRACT);
     expect(testSuiteSpy2.mock.calls[0]?.[0]?.version).toBe(legacy);
+  });
+
+  it("②' のデータの役割 ID の表に、選択肢（options）と見出しの元の項目（groupBy）が入る（Issue #433）", async () => {
+    const recording = createRecordingClient(recordedWiring());
+    const result = await runGeneration(makeRunInput(recording.client));
+    expect(result.outcome.result).toBe("pass");
+    const request = recording.structured.find((candidate) => candidate.schemaName === TEST_SUITE_SCHEMA_NAME);
+    expect(request?.input).toContain("役割 ID の表");
+    expect(request?.input).toContain("options");
+    expect(request?.input).toContain("groupBy");
+  });
+
+  it("⑤a のやり直しにも、同じ所属と版が渡り、前回の落ちに要件 ID と場所が入る（Issue #431）", async () => {
+    const correspondenceSpy = vi.spyOn(correspondenceStage, "runCorrespondence");
+    // 所属だけが誤っている：R-2 も `record.total` に所属するが、⑤a は `total` を R-1 にだけ載せる
+    const wrongOwnershipDesign = {
+      roles: [
+        ...DESIGN_PLANNED.roles.filter((role) => role.roleId !== "record.total"),
+        { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null, options: null, groupBy: null },
+      ],
+      designs: [
+        {
+          ...DESIGN_PLANNED.designs[0],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "記録の行を参照・識別するため" },
+            { roleId: "record.total", basis: "stated", reason: null },
+          ],
+        },
+        {
+          ...DESIGN_PLANNED.designs[1],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "記録の行を参照・識別するため" },
+            { roleId: "record.total", basis: "dependency", reason: "同じ計算を共有するため" },
+            { roleId: "record.extra", basis: "stated", reason: null },
+          ],
+        },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(wrongOwnershipDesign),
+      structured(TEST_SUITE_PLANNED),
+      structured({ declaration: DECLARATION_SOURCE, mappings: GOOD_MAPPINGS }),
+      structured(CORRESPONDENCE_PLANNED), // 初回の ⑤a
+      structured(CORRESPONDENCE_PLANNED), // ⑤a のやり直し（同じ応答なので停滞で止まる）
+    ]);
+    const result = await runGeneration(makeRunInput(recording.client));
+
+    // 停滞で部分案になる（⑤a のコードの落ちだけでも、未解決として ⑦ へ渡る。review 6）
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+    expect(result.summary.stop_reason).toBe("stagnation");
+    // 初回とやり直しの 2 回、⑤a を呼ぶ（段の記録も 2 件）
+    expect(correspondenceSpy.mock.calls).toHaveLength(2);
+    expect(result.record.stages.filter((step) => step.stage === "correspondence")).toHaveLength(2);
+    const retry = correspondenceSpy.mock.calls[1]?.[0];
+    expect(retry?.ownership, "やり直しにも要件ごとの所属が渡る").toBeDefined();
+    expect(retry?.version).toBeUndefined();
+    const previous = retry?.previousMisses ?? [];
+    expect(previous.some((miss) => miss.requirementId === "R-2" && miss.location?.name === "total")).toBe(true);
   });
 });
 

@@ -14,6 +14,7 @@
 // 結び付けても通る R2-1 の誤りを落とせない）。落ちの分類は「実在しない名前・種類違い・対応表の外・
 // 明示しない共有・空の対応の場所」である。空の対応の場所は、旧来の対応表の点検でも落ちにする（R2-2）。
 import {
+  enumKeys,
   isAppComputed,
   isComputedSettle,
   isGroupComputed,
@@ -26,24 +27,29 @@ import {
 import type { CallGateway } from "../call.js";
 import {
   DECLARATION_LOCATION_KINDS,
+  LEGACY_DESIGN_CONTRACT,
   type CorrespondenceEntry,
   type CorrespondenceMiss,
   type CorrespondenceResult,
   type Declaration,
   type DeclarationLocation,
   type DeclarationLocationKind,
+  type DesignContractVersion,
   type RequirementList,
   type RoleEntry,
   type RoleNameMapping,
+  type RoleOwnership,
 } from "../pipeline.js";
 import {
   buildStructuredRequest,
   callStructuredChecked,
   isRecord,
+  ruleTexts,
   serializeJson,
   type Problem,
   type PromptData,
   type PromptDocument,
+  type RuleDefinition,
   type ShapeCheck,
   type StageOutcome,
 } from "./prompt.js";
@@ -51,25 +57,99 @@ import {
 /** ⑤a の JSON Schema の名前 */
 export const CORRESPONDENCE_SCHEMA_NAME = "requirement-correspondence";
 
-/** ⑤a に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
-export const CORRESPONDENCE_RULES: readonly string[] = [
-  "あなたは、作った宣言を、原文と要件の一覧に戻って点検する役である。",
-  "要件ごとに、その要件を満たす宣言の中の場所（要素）を挙げる。",
-  "場所は種類（kind）・名前（name）・それを載せている entity の名前（entity）で指す。",
-  "kind は entity・field・validation・computation・action・view のいずれかである。entity 自身のとき、entity は null にする。",
-  "宣言に実在する名前だけを挙げる。画面から辿れない計算は挙げない。",
-  "要件ごとに 1 つの項目を返す。要件 ID は一覧のまま写す。",
-  "「提出された対応」（③ が提出した役割 ID → 宣言の名前の対応）が与えられたら、原文・要件の一覧・宣言の構造に照らして、その対応を独立に点検する。期待の値と試験の合否は与えられない——それらに寄せずに点検する。",
-  "対応の名前が宣言に実在しない・対象の種類が合わない・その要件について対応表が挙げた場所の外にある・共有や別名を明示せずに同じ場所へ二重に対応している場合は、その旨を点検の結果として扱う。",
+/**
+ * ⑤a の規則の定義（Issue #431）。**送る文は `text` から組む**——段は規則の文を手で持たない。
+ * 7 文目（`R-corr-07`）を、所属と提出された対応を**申告**として独立に点検する旨へ直し、理由を述べる
+ * 9 文目（`R-corr-09`）を足した。ID の重複・why・since の欠落は `ruleDefinitionDefects` で確かめる。
+ */
+export const CORRESPONDENCE_RULE_DEFINITIONS: readonly RuleDefinition[] = [
+  {
+    id: "R-corr-01",
+    text: "あなたは、作った宣言を、原文と要件の一覧に戻って点検する役である。",
+    why: "⑤a の役割（宣言を正本へ戻って点検する）を明示する",
+    since: "Issue #308",
+  },
+  {
+    id: "R-corr-02",
+    text: "要件ごとに、その要件を満たす宣言の中の場所（要素）を挙げる。",
+    why: "要件と宣言の場所の対応を、要件ごとに作らせる",
+    since: "Issue #308",
+  },
+  {
+    id: "R-corr-03",
+    text: "場所は種類（kind）・名前（name）・それを載せている entity の名前（entity）で指す。",
+    why: "場所の指し方を、コードが確かめられる形に固定する",
+    since: "Issue #308",
+  },
+  {
+    id: "R-corr-04",
+    text: "kind は entity・field・validation・computation・action・view のいずれかである。entity 自身のとき、entity は null にする。",
+    why: "場所の種類の語彙を閉じ、entity 自身の扱いを決める",
+    since: "Issue #308",
+  },
+  {
+    id: "R-corr-05",
+    text: "宣言に実在する名前だけを挙げる。画面から辿れない計算は挙げない。",
+    why: "実在しない名前と、画面から辿れない計算を挙げさせない",
+    since: "Issue #308",
+  },
+  {
+    id: "R-corr-06",
+    text: "要件ごとに 1 つの項目を返す。要件 ID は一覧のまま写す。",
+    why: "要件ごとに 1 項目を返させ、ID を写させる",
+    since: "Issue #308",
+  },
+  {
+    id: "R-corr-07",
+    text: "「提出された対応」と「要件ごとの所属」は、点検すべき対応の申告である。確定した仕様（無ければ原文）・要件の一覧・宣言の構造に照らして、その場所がその要件を満たすかを独立に点検する。期待の値と試験の合否は与えられない——それらに寄せずに点検する。実在するという理由だけで場所を挙げない。",
+    why: "所属と提出された対応は申告であり、写すと誤った所属を追認するため、正本へ戻って独立に点検する",
+    since: "Issue #308",
+    modes: ["M-01"],
+  },
+  {
+    id: "R-corr-08",
+    text: "対応の名前が宣言に実在しない・対象の種類が合わない・その要件について対応表が挙げた場所の外にある・共有や別名を明示せずに同じ場所へ二重に対応している場合は、その旨を点検の結果として扱う。",
+    why: "点検で見つけた落ちの分類を決める",
+    since: "Issue #308",
+  },
+  {
+    id: "R-corr-09",
+    text: "申告をそのまま写すと誤った所属を追認するため、正本へ戻って独立に点検する。意味が合わなければその場所を挙げず、合わない旨を結果にする。",
+    why: "独立の点検が要る理由（追認を避ける）を規則そのものに残す",
+    since: "Issue #431",
+    modes: ["M-01", "M-02"],
+  },
 ];
 
-/** ⑤a のやり直しにだけ足す規則（Issue #322）。落ちた場所を、その要件の対応表へ足させる */
-export const CORRESPONDENCE_REDO_RULE =
-  "「前回の対応表の落ち」が与えられたときは、その落ちた場所を該当の要件の対応表へ足して、対応表を出し直す。落ちた場所は宣言に実在するので、その要件を満たす場所として挙げる。";
+/** ⑤a に足す規則（共通の規則は buildStructuredRequest が先頭に付ける。定義の `text` から組む） */
+export const CORRESPONDENCE_RULES: readonly string[] = ruleTexts(CORRESPONDENCE_RULE_DEFINITIONS);
 
-/** 確定した仕様を渡したときだけ足す規則（§5・Issue #334・#391）。**正本は確定した仕様**である */
-export const CORRESPONDENCE_SETTLED_RULE =
-  "「確定した仕様」が与えられたときは、それが**正本**である（要件の一覧の文、とくに「参考の文脈」は補足である）。原文ではなく**確定した仕様の要件と出どころ**を根拠にする。確定した仕様の要件が満たすべきものを、宣言の中で点検する（原文を優先して、利用者が確定した変更を戻さない）。";
+/**
+ * ⑤a のやり直しにだけ足す規則の定義（配列の外。Issue #322・#431）。「落ちた場所は宣言に実在するので、
+ * その要件を満たす場所として挙げる」は**消した**——落ちはデータとして渡し、挙げるかどうかは独立の点検に
+ * 任せる（実在だけで場所を足させない）。
+ */
+export const CORRESPONDENCE_REDO_DEFINITION: RuleDefinition = {
+  id: "R-corr-redo",
+  text: "「前回の対応表の落ち」が与えられたときは、要件ごとに点検し直して対応表を出し直す。落ちは「要件 R に、所属の申告どおりの場所 L が無い」というデータであり、挙げるかどうかは独立の点検に任せる。",
+  why: "落ちた場所を実在だけで足させず、要件ごとの独立の点検に任せるため",
+  since: "Issue #322",
+  modes: ["M-01"],
+};
+
+/** ⑤a のやり直しにだけ足す規則（定義の `text`） */
+export const CORRESPONDENCE_REDO_RULE: string = CORRESPONDENCE_REDO_DEFINITION.text;
+
+/** 確定した仕様を渡したときだけ足す規則の定義（§5・Issue #334・#391）。**正本は確定した仕様**である */
+export const CORRESPONDENCE_SETTLED_DEFINITION: RuleDefinition = {
+  id: "R-corr-settled",
+  text: "「確定した仕様」が与えられたときは、それが**正本**である（要件の一覧の文、とくに「参考の文脈」は補足である）。原文ではなく**確定した仕様の要件と出どころ**を根拠にする。確定した仕様の要件が満たすべきものを、宣言の中で点検する（原文を優先して、利用者が確定した変更を戻さない）。",
+  why: "確定した仕様を正本にし、利用者が確定した変更を戻さないため",
+  since: "Issue #334",
+};
+
+/** 確定した仕様を渡したときだけ足す規則（定義の `text`） */
+export const CORRESPONDENCE_SETTLED_RULE: string = CORRESPONDENCE_SETTLED_DEFINITION.text;
 
 /** ⑤a の JSON Schema（構造化出力） */
 export const CORRESPONDENCE_SCHEMA = {
@@ -136,6 +216,22 @@ export interface CorrespondenceInput {
    * 出どころを根拠**にして点検させる（原文を優先すると、利用者が確定した変更を戻してしまう）。
    */
   readonly plan?: ConfirmedPlan;
+  /**
+   * 要件ごとの所属（② の設計から写す。Issue #431）。**提出された対応とは別の `<data name=`** で渡す。
+   * 新契約では必須。渡されたときだけ、⑤a のコードの点検を**要件ごと**に行う。
+   */
+  readonly ownership?: readonly RequirementRoleOwnership[];
+  /**
+   * 設計の契約の版（決定 ⑨・Issue #418・#431）。**呼ぶ側が明示する**——`legacy` を明示したときだけ、
+   * 従来の**表全体**の点検を保つ。省けば新契約（要件ごとの点検）。所属の欄の有無から版を推定しない。
+   */
+  readonly version?: DesignContractVersion;
+}
+
+/** 要件ごとの所属（要件 ID → 役割 ID と根拠の並び。② の設計から写す。Issue #431） */
+export interface RequirementRoleOwnership {
+  readonly requirementId: string;
+  readonly ownership: readonly RoleOwnership[];
 }
 
 /** 場所の形を確かめる */
@@ -371,7 +467,10 @@ export function checkCorrespondence(
   app: NormalizedAppSpec,
   list: RequirementList,
   entries: readonly CorrespondenceEntry[],
-  options: { readonly roles?: readonly RoleEntry[]; readonly mappings?: readonly RoleNameMapping[] } = {},
+  options: RoleMappingCheckOptions & {
+    readonly roles?: readonly RoleEntry[];
+    readonly mappings?: readonly RoleNameMapping[];
+  } = {},
 ): readonly CorrespondenceMiss[] {
   const misses: CorrespondenceMiss[] = [];
   for (const requirement of list.requirements) {
@@ -392,9 +491,18 @@ export function checkCorrespondence(
     }
   }
   if (options.roles !== undefined && options.mappings !== undefined) {
-    misses.push(...checkRoleMappings(app, options.roles, entries, options.mappings));
+    misses.push(...checkRoleMappings(app, options.roles, entries, options.mappings, options));
   }
   return misses;
+}
+
+/**
+ * `checkRoleMappings` に渡す、版と要件ごとの所属（Issue #431）。**版は呼ぶ側が明示する**——
+ * `version` が `legacy` のときだけ従来の**表全体**の点検を保つ。省けば新契約（要件ごとの点検）。
+ */
+export interface RoleMappingCheckOptions {
+  readonly ownership?: readonly RequirementRoleOwnership[];
+  readonly version?: DesignContractVersion;
 }
 
 /** 役割 ID の対象の種類が、宣言の場所の種類に対応する（§1.2・Issue #308） */
@@ -419,8 +527,12 @@ const locationKey = (location: DeclarationLocation): string =>
 const sameLocation = (a: DeclarationLocation, b: DeclarationLocation): boolean =>
   a.kind === b.kind && (a.entity ?? null) === (b.entity ?? null) && a.name === b.name;
 
-/** 宣言に、その種類・所属・名前の場所が実在するか（画面からの到達は別に見る） */
-function declarationHasLocation(app: NormalizedAppSpec, location: DeclarationLocation): boolean {
+/**
+ * 宣言に、その**種類・所属・名前**の場所が実在するか（画面からの到達は別に見る。Issue #431）。
+ * 名前だけの `declarationHasNamedLocation` と違い、**別の entity の同名を実在と見なさない**——⑤b の
+ * 構造の検査の行き先（`correspondence-redo` か `correspondence-defect` か）を分けるのに使う。
+ */
+export function declarationHasLocation(app: NormalizedAppSpec, location: DeclarationLocation): boolean {
   switch (location.kind) {
     case "entity":
       return app.spec.entities.some((entity) => entity.name === location.name);
@@ -505,13 +617,15 @@ function screenReachable(app: NormalizedAppSpec, location: DeclarationLocation):
  *
  *   - `correspondence-defect` … **③ のやり直し**へ回す「対応の表の不備」（実在しない名前・種類違い・
  *     対応表の外・共有の不備）。対応の表そのものが誤っているので、③ に出し直させる（§1.3.1）
+ *   - `correspondence-redo` … **⑤a のやり直し**へ回す「要件の対応表の外」（場所は宣言に実在するが、
+ *     その要件の対応表が挙げていない）。③ の対応は正しいので ③ をやり直しても直らない（Issue #431）
  *   - `missing-element` … **⑥ 直す**へ回す「要件に要る宣言の要素の欠落」（画面から辿れない場所）。
  *     名前は実在するので、③ をやり直しても直らない。宣言の要素（項目・`show`）を足す ⑥ へ回す
  *
  * 名前は `RoutedFailure` の行き先とそろえてある。落ちには、**もとの要件 ID** を入れる（空にしない）。
  */
 export interface RoleMappingMiss extends CorrespondenceMiss {
-  readonly route: "correspondence-defect" | "missing-element";
+  readonly route: "correspondence-defect" | "correspondence-redo" | "missing-element";
 }
 
 /**
@@ -528,6 +642,40 @@ export interface RoleMappingMiss extends CorrespondenceMiss {
  * 落ちには、その場所を挙げている要件の ID を入れる（空にしない）。
  */
 export function checkRoleMappings(
+  app: NormalizedAppSpec,
+  roles: readonly RoleEntry[],
+  entries: readonly CorrespondenceEntry[],
+  mappings: readonly RoleNameMapping[],
+  options: RoleMappingCheckOptions = {},
+): readonly RoleMappingMiss[] {
+  if (options.version !== LEGACY_DESIGN_CONTRACT) {
+    const ownership = options.ownership ?? [];
+    // 新契約では、**表の全部の役割に、要件ごとの所属があること**を照合の前に確かめ、不備は入力の不備として
+    // 断る（照合なし・一部だけの照合で通さない。Issue #431・レビュー 1）。所属が空なら要件ごとの照合が
+    // 一度も走らず、一部の役割の所属が欠けると、その役割が対応表からも欠けていても落ちを返さない。
+    const ownedRoleIds = new Set(
+      ownership.flatMap((entry) => entry.ownership.map((own) => own.roleId)),
+    );
+    const rolesWithoutOwnership = roles.some((role) => !ownedRoleIds.has(role.roleId));
+    if (ownedRoleIds.size === 0 || rolesWithoutOwnership) {
+      return [
+        {
+          requirementId: "",
+          route: "correspondence-defect",
+          detail: "役割 ID の表の全部の役割に、要件ごとの所属が無い（新契約の入力の不備）",
+        },
+      ];
+    }
+    return checkRoleMappingsPerRequirement(app, roles, entries, mappings, ownership);
+  }
+  return checkRoleMappingsTableWide(app, roles, entries, mappings);
+}
+
+/**
+ * 従来の**表全体**の点検（`legacy` を明示したときだけ。Issue #308）。役割 ID → 宣言の名前の対応を、
+ * 表の全部の場所（`tableLocations`）に照らす。新契約では `checkRoleMappingsPerRequirement` が要件ごとに見る。
+ */
+function checkRoleMappingsTableWide(
   app: NormalizedAppSpec,
   roles: readonly RoleEntry[],
   entries: readonly CorrespondenceEntry[],
@@ -626,7 +774,267 @@ export function checkRoleMappings(
   return misses;
 }
 
-/** ⑤a のデータ（原文・要件の一覧・宣言。§2.2 の「データとして囲んだ入力」にだけ置く） */
+/**
+ * 要件ごとの所属を点検する（新契約。Issue #431）。③ が提出した対応を**表全体**ではなく、**要件ごと**に、
+ * その要件が所属させた役割の場所がその要件の対応表の内側にあるかで見る（門は緩めない）。落ちの分類：
+ *
+ *   - 表の役割の対応の提出漏れ・重複 … 対応の表そのものの不備なので ③ のやり直し（`correspondence-defect`）
+ *   - 所属の場所が**その要件の対応表の外**で、宣言にその種類・所属・名前で実在する … ⑤a のやり直し
+ *     （`correspondence-redo`。要件 ID と場所つき）
+ *   - 所属の場所が実在しない・種類違い … ③ の対応そのものが誤り（`correspondence-defect`）
+ *
+ * 既存の点検（表に無い役割 ID・所属 entity の対応が無い・実在しない名前・種類違い・画面から辿れない＝
+ * `missing-element`・共有や別名の明示）も残す。落ちの要件 ID は、所属から引いて**空にしない**。
+ */
+function checkRoleMappingsPerRequirement(
+  app: NormalizedAppSpec,
+  roles: readonly RoleEntry[],
+  entries: readonly CorrespondenceEntry[],
+  mappings: readonly RoleNameMapping[],
+  ownership: readonly RequirementRoleOwnership[],
+): readonly RoleMappingMiss[] {
+  const misses: RoleMappingMiss[] = [];
+  const roleById = new Map(roles.map((role) => [role.roleId, role]));
+  const nameByRoleId = new Map<string, string>();
+  const countByRoleId = new Map<string, number>();
+  for (const mapping of mappings) {
+    countByRoleId.set(mapping.roleId, (countByRoleId.get(mapping.roleId) ?? 0) + 1);
+    if (!nameByRoleId.has(mapping.roleId)) nameByRoleId.set(mapping.roleId, mapping.name);
+  }
+  /** その役割を所属させた要件 ID の並び（表の順。重複は 1 つに数える） */
+  const ownerIdsOf = (roleId: string): readonly string[] => {
+    const ids: string[] = [];
+    for (const entry of ownership) {
+      if (entry.ownership.some((own) => own.roleId === roleId) && !ids.includes(entry.requirementId)) {
+        ids.push(entry.requirementId);
+      }
+    }
+    return ids;
+  };
+  /** 落ちの要件 ID（所属の先頭。所属が無ければ空。Issue #431） */
+  const firstOwner = (roleId: string): string => ownerIdsOf(roleId)[0] ?? "";
+
+  // 1. 表の**全部の役割**の対応が、ちょうど 1 つあること（提出漏れ・重複は対応の表の不備＝③ のやり直し）
+  for (const role of roles) {
+    const count = countByRoleId.get(role.roleId) ?? 0;
+    if (count === 0) {
+      misses.push({
+        requirementId: firstOwner(role.roleId),
+        route: "correspondence-defect",
+        detail: `役割 ${role.roleId} の対応が提出されていない（対応の表の不備）`,
+      });
+    } else if (count > 1) {
+      misses.push({
+        requirementId: firstOwner(role.roleId),
+        route: "correspondence-defect",
+        detail: `役割 ${role.roleId} の対応が重複している（対応の表の不備）`,
+      });
+    }
+  }
+
+  // 2. 提出された対応の、名前・種類・所属 entity の実在と、画面からの到達（既存の点検。対応表の外は 3.）
+  const resolved: { readonly role: RoleEntry; readonly location: DeclarationLocation }[] = [];
+  for (const mapping of mappings) {
+    const role = roleById.get(mapping.roleId);
+    if (role === undefined) {
+      misses.push({
+        requirementId: "",
+        route: "correspondence-defect",
+        detail: `役割 ID ${mapping.roleId} は設計の役割 ID の表に無い（対応表の外）`,
+      });
+      continue;
+    }
+    const kind = declarationKindOfRole(role.kind);
+    const owner = firstOwner(role.roleId);
+    let entityName: string | null = null;
+    if (role.entity !== null) {
+      const mapped = nameByRoleId.get(role.entity);
+      if (mapped === undefined) {
+        misses.push({
+          requirementId: owner,
+          route: "correspondence-defect",
+          detail: `役割 ${role.roleId} の所属の entity（役割 ID ${role.entity}）の対応が無い`,
+        });
+        continue;
+      }
+      entityName = mapped;
+    }
+    const location: DeclarationLocation = { kind, entity: entityName, name: mapping.name };
+    if (!declarationHasLocation(app, location)) {
+      const kinds = declarationKindsOfName(app, mapping.name, entityName);
+      misses.push({
+        requirementId: owner,
+        route: "correspondence-defect",
+        location,
+        detail:
+          kinds.length > 0
+            ? `役割 ${role.roleId} の名前 ${mapping.name} は宣言に ${kinds.join("・")} としてある（対象の種類 ${kind} と合わない）`
+            : `宣言に ${kind} ${mapping.name} が無い（役割 ${role.roleId} の実在しない名前）`,
+      });
+      continue;
+    }
+    if (!screenReachable(app, location)) {
+      misses.push({
+        requirementId: owner,
+        route: "missing-element",
+        location,
+        detail: `役割 ${role.roleId} の場所（${kind} ${mapping.name}）は画面から辿れない`,
+      });
+      continue;
+    }
+    resolved.push({ role, location });
+  }
+
+  // 3. 要件 R が所属させた役割 X の場所 L が、**R の対応表の項目の中**にあること（新契約。Issue #431）
+  for (const entry of ownership) {
+    const table = entries.find((candidate) => candidate.requirementId === entry.requirementId);
+    for (const own of entry.ownership) {
+      const role = roleById.get(own.roleId);
+      if (role === undefined) continue;
+      const mapping = mappings.find((candidate) => candidate.roleId === own.roleId);
+      if (mapping === undefined) continue; // 1. で、提出されていない落ちにした
+      const kind = declarationKindOfRole(role.kind);
+      // 所属 entity の対応が引けないときは、**場所を未確定**として扱い、null の場所（entity を問わない）を
+      // 組んで correspondence-redo を足さない（Issue #431）。③ の対応そのものの不備は、2. が
+      // correspondence-defect として既に出している。役割自身が entity を持たない場合の null と区別する。
+      let entityName: string | null;
+      if (role.entity === null) {
+        entityName = null;
+      } else {
+        const resolved = nameByRoleId.get(role.entity);
+        if (resolved === undefined) continue;
+        entityName = resolved;
+      }
+      const location: DeclarationLocation = { kind, entity: entityName, name: mapping.name };
+      const inTable = table !== undefined && table.locations.some((candidate) => sameLocation(candidate, location));
+      if (inTable) continue;
+      if (declarationHasLocation(app, location)) {
+        misses.push({
+          requirementId: entry.requirementId,
+          route: "correspondence-redo",
+          location,
+          detail: `要件 ${entry.requirementId} の対応表に ${kind} ${mapping.name} が無い（所属の申告どおりの場所は宣言に実在する）`,
+        });
+      } else {
+        misses.push({
+          requirementId: entry.requirementId,
+          route: "correspondence-defect",
+          location,
+          detail: `要件 ${entry.requirementId} の対応表に ${kind} ${mapping.name} が無く、宣言にも実在しない`,
+        });
+      }
+    }
+  }
+
+  // 4. 共有・別名の明示（既存の点検。resolved から）
+  const groups = new Map<string, { readonly role: RoleEntry; readonly location: DeclarationLocation }[]>();
+  for (const item of resolved) {
+    const key = locationKey(item.location);
+    const list = groups.get(key) ?? [];
+    list.push(item);
+    groups.set(key, list);
+  }
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    const declared = list.some(({ role }) => role.shared || role.aliasOf !== null);
+    if (declared) continue;
+    for (const { role, location } of list) {
+      misses.push({
+        requirementId: firstOwner(role.roleId),
+        route: "correspondence-defect",
+        location,
+        detail: `同じ場所（${location.kind} ${location.name}）に複数の役割 ID が対応しているが、役割 ${role.roleId} は共有（shared）も別名（aliasOf）も明示していない`,
+      });
+    }
+  }
+  // 5. 宣言の選択肢のキーの並びと、見出しごとの集計の集計元（新契約。Issue #433）
+  misses.push(...checkChoiceKeyOrder(app, roles, nameByRoleId, firstOwner));
+  misses.push(...checkGroupByRelation(app, roles, nameByRoleId, firstOwner));
+  return misses;
+}
+
+/**
+ * 宣言の**選択肢（enum）の項目**のキーの並びが、役割 ID の表の `options` と**順まで一致する**かを確かめる
+ * （**新契約**。§1・③・Issue #433）。役割の対応の先が宣言の選択肢の項目であり、キーの集合と順が同じで
+ * なければ `missing-element` にする（宣言の中身の直しであり、対応の表の出し直しでは直らない）。
+ *
+ * 実在しない名前・選択肢でない項目は、ここでは落ちにしない（実在の点検が別に落ちにする）。`detail` に
+ * 期待のキー列を載せる（値の埋め込みの禁止は `Problem` の話であり、落ちの `detail` は人向けである）。
+ */
+function checkChoiceKeyOrder(
+  app: NormalizedAppSpec,
+  roles: readonly RoleEntry[],
+  nameByRoleId: ReadonlyMap<string, string>,
+  requirementIdOf: (roleId: string) => string,
+): readonly RoleMappingMiss[] {
+  const misses: RoleMappingMiss[] = [];
+  for (const role of roles) {
+    if (role.kind !== "field" || role.options === null || role.options === undefined) continue;
+    const name = nameByRoleId.get(role.roleId);
+    if (name === undefined) continue;
+    const entityName = role.entity === null ? null : nameByRoleId.get(role.entity);
+    if (role.entity !== null && entityName === undefined) continue;
+    const entity = findEntity(app, entityName ?? null);
+    const declaration = entity === undefined ? undefined : entity.fields[name];
+    if (declaration === undefined) continue;
+    const declaredKeys = enumKeys(declaration);
+    const expected = role.options;
+    const sameOrder = declaredKeys.length === expected.length && declaredKeys.every((key, index) => key === expected[index]);
+    if (sameOrder) continue;
+    misses.push({
+      requirementId: requirementIdOf(role.roleId),
+      route: "missing-element",
+      location: { kind: "field", entity: entityName ?? null, name },
+      detail: `宣言の選択肢の項目 ${name} のキーの並び（${declaredKeys.join("・")}）が、役割 ${role.roleId} の options（${expected.join("・")}）と合わない`,
+    });
+  }
+  return misses;
+}
+
+/**
+ * 見出しごとの集計の計算が、役割 ID の表の `groupBy` の**組**（分ける元の項目の所属 entity と項目）で
+ * 分けているかを確かめる（**新契約**。§1・③・Issue #433）。参照先の項目の役割から所属 entity の役割を
+ * 引き、双方の提出対応を使って、宣言の `aggregate.entity` と `groupBy.field` がその組に一致し、
+ * `groupBy.month` が false であることを確かめる。集計の関係が無い・月で分ける・別 entity の同名の項目で
+ * 分ける場合は `missing-element` にする。**項目名だけで照合しない**（別 entity の同名に当たらない）。
+ */
+function checkGroupByRelation(
+  app: NormalizedAppSpec,
+  roles: readonly RoleEntry[],
+  nameByRoleId: ReadonlyMap<string, string>,
+  requirementIdOf: (roleId: string) => string,
+): readonly RoleMappingMiss[] {
+  const misses: RoleMappingMiss[] = [];
+  const roleById = new Map(roles.map((role) => [role.roleId, role]));
+  for (const role of roles) {
+    if (role.kind !== "computation" || role.groupBy === null || role.groupBy === undefined) continue;
+    const name = nameByRoleId.get(role.roleId);
+    if (name === undefined) continue;
+    const groupRole = roleById.get(role.groupBy);
+    if (groupRole === undefined || groupRole.kind !== "field") continue;
+    const fieldName = nameByRoleId.get(groupRole.roleId);
+    const entityName = groupRole.entity === null ? null : nameByRoleId.get(groupRole.entity);
+    if (fieldName === undefined || (groupRole.entity !== null && entityName === undefined)) continue;
+    const location: DeclarationLocation = { kind: "computation", entity: null, name };
+    const computed = findComputed(app, location);
+    const grouping = computed !== undefined && isGroupComputed(computed) ? computed.aggregate.groupBy : undefined;
+    const matches =
+      computed !== undefined &&
+      isGroupComputed(computed) &&
+      grouping !== undefined &&
+      grouping.month === false &&
+      grouping.field === fieldName &&
+      computed.aggregate.entity === entityName;
+    if (matches) continue;
+    misses.push({
+      requirementId: requirementIdOf(role.roleId),
+      route: "missing-element",
+      location,
+      detail: `見出しごとの集計 ${name} が、役割 ${role.roleId} の groupBy の組（entity ${String(entityName)} の項目 ${String(fieldName)}）で分けていない`,
+    });
+  }
+  return misses;
+}
 function buildData(input: CorrespondenceInput): readonly PromptData[] {
   // 確定した仕様があるときは、原文ではなくその要件と出どころを根拠にする（§5・Issue #334）
   const basis: PromptData =
@@ -641,6 +1049,10 @@ function buildData(input: CorrespondenceInput): readonly PromptData[] {
   // ③ の提出した対応は、独立に点検させるためにデータとしてだけ渡す（期待の値と試験の合否は渡さない）
   if (input.mappings !== undefined) {
     data.push({ name: "提出された対応", text: serializeJson(input.mappings) });
+  }
+  // 要件ごとの所属は、**提出された対応とは別のデータ**として渡す（申告として独立に点検させる。Issue #431）。
+  if (input.ownership !== undefined) {
+    data.push({ name: "要件ごとの所属", text: serializeJson(input.ownership) });
   }
   // ⑤a のやり直しでは、落ちた場所を伝えて対応表を作り直させる（Issue #322）
   if (input.previousMisses !== undefined && input.previousMisses.length > 0) {
@@ -675,6 +1087,8 @@ export async function runCorrespondence(
   const misses = checkCorrespondence(input.app, input.list, answer.value.entries, {
     ...(input.roles === undefined ? {} : { roles: input.roles }),
     ...(input.mappings === undefined ? {} : { mappings: input.mappings }),
+    ...(input.ownership === undefined ? {} : { ownership: input.ownership }),
+    ...(input.version === undefined ? {} : { version: input.version }),
   });
   return { ok: true, value: { entries: answer.value.entries, misses } };
 }

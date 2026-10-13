@@ -1,0 +1,256 @@
+[
+  {
+    "file": "r1-pos-full.json",
+    "subject": "R1",
+    "structure": "main",
+    "expect": "PASS",
+    "failed": [],
+    "why": "主の構造で全部満たす（list の show に計算を入れていない表＝決定①で全部並ぶ）"
+  },
+  {
+    "file": "r1-neg-filter-without-who.json",
+    "subject": "R1",
+    "structure": "main",
+    "expect": "FAIL",
+    "failed": [
+      "種類と人で絞り込み"
+    ],
+    "why": "一覧の絞り込みに人が無い（種類だけ）"
+  },
+  {
+    "file": "r1-neg-default-packed.json",
+    "subject": "R1",
+    "structure": "main",
+    "expect": "FAIL",
+    "failed": [
+      "登録したときの状態"
+    ],
+    "why": "登録したときの状態が「梱包済み」になっている"
+  },
+  {
+    "file": "r1-neg-no-title.json",
+    "subject": "R1",
+    "structure": null,
+    "expect": "FAIL",
+    "failed": [
+      "役割が見つかる"
+    ],
+    "why": "荷物の名前（主役の string の項目）が無い → 役割が見つからない（指摘 2）"
+  },
+  {
+    "file": "r1-neg-quantity-gt-zero.json",
+    "subject": "R1",
+    "structure": "main",
+    "expect": "FAIL",
+    "failed": [
+      "数は 1 以上"
+    ],
+    "why": "数の下限を > 0 で書いた → 0.5 を通す（指摘 1）"
+  },
+  {
+    "file": "r1-neg-sum-instead-of-count.json",
+    "subject": "R1",
+    "structure": "main",
+    "expect": "FAIL",
+    "failed": [
+      "人ごとの件数が見られる"
+    ],
+    "why": "人ごとの件数を「数」の合計に取り違えた（sources の数 2・5・3 で件数 2 ≠ 合計 7。指摘 3）"
+  },
+  {
+    "file": "r2-pos-table-claimed.json",
+    "subject": "R2",
+    "structure": "main",
+    "expect": "PASS",
+    "failed": [],
+    "written": {
+      "少ない順": false
+    },
+    "claims": "OK",
+    "missed": 0,
+    "why": "書ける要件を全部満たし、少ない順の並べ替えを書けないと正しく申告した"
+  },
+  {
+    "file": "r2-pos-ranked-fewer-first.json",
+    "subject": "R2",
+    "structure": "main",
+    "expect": "PASS",
+    "failed": [],
+    "written": {
+      "少ない順": true
+    },
+    "claims": "OK",
+    "missed": 0,
+    "why": "少ない順を負の数の計算の順位の部品で書いた（rankingOrder が written。申告は不要）"
+  },
+  {
+    "file": "r2-neg-ranking-descending.json",
+    "subject": "R2",
+    "structure": "main",
+    "expect": "FAIL",
+    "failed": [
+      "少ない順を逆向きで書いていない"
+    ],
+    "written": {
+      "少ない順": false
+    },
+    "claims": "OK",
+    "missed": 0,
+    "why": "少ない順を書けないと申告したうえで、順位の部品を件数の降順のまま置いた（多い順）→ 申告は OK のまま、順位の判定だけが落ちる（指摘 5）"
+  },
+  {
+    "file": "r2-neg-highlight-before-today.json",
+    "subject": "R2",
+    "structure": "main",
+    "expect": "FAIL",
+    "failed": [
+      "今日の点検に印"
+    ],
+    "claims": "OK",
+    "missed": 0,
+    "why": "今日の印の式が「今日より前」"
+  },
+  {
+    "file": "r2-neg-invented-sort.json",
+    "subject": "R2",
+    "structure": null,
+    "expect": "STATIC_NG",
+    "failed": [],
+    "codes": [
+      "SHAPE_KEY_UNKNOWN"
+    ],
+    "why": "語彙に無い sort を発明した → 静的 NG"
+  },
+  {
+    "file": "r3-pos-dashboard.json",
+    "subject": "R3",
+    "structure": "main",
+    "expect": "PASS",
+    "failed": [],
+    "why": "主の構造で全部満たす（数値 2・棒・円の部品、直せて消せる、人ごとの合計）"
+  },
+  {
+    "file": "r3-neg-no-delete.json",
+    "subject": "R3",
+    "structure": "main",
+    "expect": "FAIL",
+    "failed": [
+      "収穫を直せて消せる"
+    ],
+    "why": "消す操作が無い"
+  },
+  {
+    "file": "r3-neg-chart-last-12.json",
+    "subject": "R3",
+    "structure": "main",
+    "expect": "FAIL",
+    "failed": [
+      "月ごとの個数のグラフ（直近 6 か月）"
+    ],
+    "why": "月ごとのグラフが直近 12 か月（要件は 6 か月）"
+  },
+  {
+    "file": "r3-neg-quantity-gt-zero.json",
+    "subject": "R3",
+    "structure": "main",
+    "expect": "FAIL",
+    "failed": [
+      "個数は 1 以上"
+    ],
+    "why": "個数の下限を > 0 で書いた → 0.5 を通す（指摘 1）"
+  },
+  {
+    "file": "r4-pos-list-claimed.json",
+    "subject": "R4",
+    "structure": "list",
+    "expect": "PASS",
+    "failed": [],
+    "claims": "OK",
+    "missed": 0,
+    "why": "主の構造（参照の並び）で書ける要件を全部満たし、0 人で登録できないことを正しく申告した"
+  },
+  {
+    "file": "r4-neg-list-without-capacity-check.json",
+    "subject": "R4",
+    "structure": "list",
+    "expect": "FAIL",
+    "failed": [
+      "定員を超えたら登録できない"
+    ],
+    "claims": "OK",
+    "missed": 0,
+    "why": "主の構造で、定員の超過の検査が無い"
+  },
+  {
+    "file": "r4-neg-list-capacity-gt-zero.json",
+    "subject": "R4",
+    "structure": "list",
+    "expect": "FAIL",
+    "failed": [
+      "定員は 1 人以上"
+    ],
+    "claims": "OK",
+    "missed": 0,
+    "why": "主の構造で、定員の下限を > 0 で書いた → 0.5 を通す（指摘 1）"
+  },
+  {
+    "file": "r4-pos-attendance-claimed.json",
+    "subject": "R4",
+    "structure": "attendance",
+    "expect": "PASS",
+    "failed": [],
+    "claims": "OK",
+    "missed": 0,
+    "why": "別の構造（参加の entity）で書ける要件を全部満たし、定員の超過を書けないと正しく申告した（PASS_NEEDS_CLAIM → PASS）。定員の下限は >= 1（指摘 1）"
+  },
+  {
+    "file": "r4-neg-attendance-not-claimed.json",
+    "subject": "R4",
+    "structure": "attendance",
+    "expect": "FAIL",
+    "failed": [],
+    "claims": "NG",
+    "missed": 1,
+    "why": "別の構造で宣言は全部満たす（PASS_NEEDS_CLAIM）が、書けない要件（定員の超過）を申告していない（挙げ漏れ 1）"
+  },
+  {
+    "file": "r4-neg-attendance-capacity-gt-zero.json",
+    "subject": "R4",
+    "structure": "attendance",
+    "expect": "FAIL",
+    "failed": [
+      "定員は 1 人以上"
+    ],
+    "claims": "OK",
+    "missed": 0,
+    "why": "別の構造で、定員の下限を > 0 で書いた → 0.5 を通す（申告は正しい。指摘 1）"
+  },
+  {
+    "file": "r5-pos-full.json",
+    "subject": "R5",
+    "structure": "main",
+    "expect": "PASS",
+    "failed": [],
+    "why": "主の構造で全部満たす（3 つの entity と 2 本の参照、納期超過の印、2 つの回数）"
+  },
+  {
+    "file": "r5-neg-highlight-includes-today.json",
+    "subject": "R5",
+    "structure": "main",
+    "expect": "FAIL",
+    "failed": [
+      "納期を過ぎたものに印"
+    ],
+    "why": "印の式が納期当日も含む（過ぎたものだけに印を付けていない）"
+  },
+  {
+    "file": "r5-neg-device-count-hidden.json",
+    "subject": "R5",
+    "structure": "main",
+    "expect": "FAIL",
+    "failed": [
+      "機器ごとの回数が見られる"
+    ],
+    "why": "機器ごとの回数を画面に出していない"
+  }
+]

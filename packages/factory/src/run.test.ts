@@ -64,6 +64,24 @@ import {
   DESIGN_OUTPUT,
   DESIGN_OUTPUT_MAPPED,
   DESIGN_OUTPUT_PLANNED_PARTIAL,
+  GROUPED_CORRESPONDENCE_OUTPUT,
+  GROUPED_CORRESPONDENCE_OUTPUT_WITHOUT_STATUS,
+  GROUPED_CORRESPONDENCE_OUTPUT_WRONG_TARGET,
+  GROUPED_DECLARATION_MISSING_OPTION,
+  GROUPED_DECLARATION_REVERSED,
+  GROUPED_DECLARATION_REVERSED_LABEL,
+  GROUPED_DECLARATION_SOURCE,
+  GROUPED_DECLARATION_WRONG_TARGET,
+  GROUPED_DESIGN,
+  GROUPED_DESIGN_MISSING_OPTION,
+  GROUPED_DESIGN_WRONG_TARGET,
+  GROUPED_MAPPINGS,
+  GROUPED_MAPPINGS_WRONG_TARGET,
+  GROUPED_PLAN_LABEL,
+  GROUPED_PLAN_OPTION,
+  GROUPED_PLAN_TARGET,
+  GROUPED_TEST_SUITE_OUTPUT,
+  GROUPED_TEST_SUITE_WITHOUT_AGGREGATE,
   INVALID_DECLARATION_SOURCE,
   MAPPING_REDO_OUTPUT,
   RATES,
@@ -78,6 +96,8 @@ import {
   makeRunInput,
   recordedRun,
   recordedRunFour,
+  recordedRunGrouped,
+  recordedRunGroupedFromPlan,
   recordedRunFromPlan,
   structured,
 } from "./__tests__/run.js";
@@ -775,7 +795,9 @@ describe("失敗の行き先で次の一手が変わる（02 §1.3.1・#309）",
         structured(DESIGN_OUTPUT_MAPPED),
         structured(TEST_SUITE_OUTPUT_MAPPED),
         structured({ declaration: DECLARATION_SOURCE, mappings: BAD_MAPPINGS }),
-        structured(CORRESPONDENCE_OUTPUT),
+        // 新契約の fixture（R-1・R-2 の所属の場所を要件ごとに載せる）。③ の対応（record.total →
+        // nonexistent）の不備だけが残るようにして、③ のやり直しへ回す（Issue #431）
+        structured(CORRESPONDENCE_OUTPUT_PLANNED),
         structured(MAPPING_REDO_OUTPUT), // ③ のやり直し（同じ不備を出し直す）
       ],
       { limits: { ...AGENT_LIMITS, correspondenceRedos: 1, stagnationRepeats: 0 } },
@@ -804,6 +826,156 @@ describe("失敗の行き先で次の一手が変わる（02 §1.3.1・#309）",
     // ③ のやり直しへは回さない
     expect(recording.structured.every((request) => request.schemaName !== MAPPING_REDO_SCHEMA_NAME)).toBe(true);
     expect(result.summary.stop_reason).toBe("limit");
+  });
+});
+
+// ── 誤った所属は、要件 ID つきの落ちで ⑤a のやり直しに回る（Issue #431）────────
+
+/**
+ * 所属だけが誤った設計：R-2 が `record.total` にも所属するが、⑤a（偽物）は `total` を R-1 にだけ載せる。
+ * `record.total` は 2 要件に所属するので `shared` を真にする（設計の形は通るが、所属と対応表が食い違う）。
+ */
+const WRONG_OWNERSHIP_DESIGN = {
+  roles: [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.extra", kind: "computation", entity: "record", name: "extra", shared: false, aliasOf: null, options: null, groupBy: null },
+  ],
+  designs: [
+    {
+      ...DESIGN_OUTPUT_MAPPED.designs[0],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "記録の行を参照・識別するため" },
+        { roleId: "record.total", basis: "stated", reason: null },
+      ],
+    },
+    {
+      ...DESIGN_OUTPUT_MAPPED.designs[1],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "記録の行を参照・識別するため" },
+        { roleId: "record.total", basis: "dependency", reason: "同じ計算を共有するため" },
+        { roleId: "record.extra", basis: "stated", reason: null },
+      ],
+    },
+  ],
+};
+
+describe("誤った所属は、要件 ID つきの落ちで ⑤a のやり直しに回る（Issue #431）", () => {
+  it("所属だけを誤らせた設計で、⑤b の試験は通るのに ⑤a のコードの落ちで ⑤a のやり直しに回り、full にならない", async () => {
+    // 試験の対象・期待・宣言・⑤a の応答は、通常の成功例のまま固定する（所属だけを誤らせる）。
+    // これで ⑤b の従来の outside-table ではなく、**⑤a の新しい要件ごとの落ち**が引き金になることを確かめる。
+    const { recording, run } = runWith([
+      ...recordedRun({ design: WRONG_OWNERSHIP_DESIGN }),
+      structured(CORRESPONDENCE_OUTPUT_PLANNED), // ⑤a のやり直し（同じ応答なので停滞で止まる）
+    ]);
+    const result = await run;
+
+    // 停滞で部分案になり、⑥ の失敗には誤って帰属しない（review 6）
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+    expect(result.summary.stop_reason).toBe("stagnation");
+    // ⑤b の試験は通っている（不一致 0・未解決 0）。⑥ 直すへは回らない
+    expect(result.record.stages.some((step) => step.stage === "repair")).toBe(false);
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const verification = verificationOf(result.bundle);
+    expect(verification.test_mismatches).toBe(0);
+    expect(verification.test_unresolved).toBe(0);
+    // 初回とやり直しの 2 回、⑤a を呼ぶ（段の記録も 2 件）
+    expect(result.record.stages.filter((step) => step.stage === "correspondence")).toHaveLength(2);
+    // やり直しの要求のデータに、前回の落ちが要件 ID と場所つきで入る
+    const requests = recording.structured.filter((request) => request.schemaName === CORRESPONDENCE_SCHEMA_NAME);
+    expect(requests).toHaveLength(2);
+    const retry = requests[1]?.input ?? "";
+    expect(retry).toContain("前回の対応表の落ち");
+    expect(retry).toContain("R-2");
+    expect(retry).toContain("total");
+  });
+});
+
+// ── 所属 entity の対応が欠けると、⑤a ではなく ③ のやり直しに回る（レビュー 2）────
+
+describe("所属 entity の対応が欠けると、⑤a ではなく ③ のやり直しに回る（Issue #431）", () => {
+  it("entity の mapping だけ欠けると、⑤a を作り直さず ③ のやり直しを呼ぶ", async () => {
+    // 計算の対応（total・extra）は正しいが、entity `record` の対応だけ欠けている
+    const mappingsNoEntity = [
+      { roleId: "record.total", name: "total" },
+      { roleId: "record.extra", name: "extra" },
+    ];
+    const { run } = runWith(
+      [
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(DESIGN_OUTPUT_MAPPED),
+        structured(TEST_SUITE_OUTPUT_MAPPED),
+        structured({ declaration: DECLARATION_SOURCE, mappings: mappingsNoEntity }),
+        structured(CORRESPONDENCE_OUTPUT_PLANNED),
+        structured(MAPPING_REDO_OUTPUT), // ③ のやり直し
+      ],
+      { limits: { ...AGENT_LIMITS, correspondenceRedos: 1, stagnationRepeats: 0 } },
+    );
+    const result = await run;
+
+    const stages = result.record.stages.map((step) => step.stage);
+    expect(stages).toContain("write"); // ③ のやり直し
+    // ⑤a は作り直さない（null の場所で correspondence-redo を足さない）
+    expect(result.record.stages.filter((step) => step.stage === "correspondence")).toHaveLength(1);
+  });
+});
+
+// ── 構造の検査が対応表の外になると、⑤a のやり直しで結び付く（Issue #431）────────
+
+describe("構造の検査が対応表の外になると、⑤a のやり直しで結び付く（Issue #431）", () => {
+  // R-1 の対応表が操作 add を挙げていない（構造の検査の対象が結び付かない）
+  const OUTSIDE_CORRESPONDENCE = {
+    entries: [
+      { requirementId: "R-1", locations: [{ kind: "entity", entity: null, name: "record" }] },
+      {
+        requirementId: "R-2",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "computation", entity: "record", name: "total" },
+        ],
+      },
+    ],
+  };
+  // やり直し後の対応表（操作 add を R-1 に載せる）
+  const REDONE_CORRESPONDENCE = {
+    entries: [
+      {
+        requirementId: "R-1",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "action", entity: "record", name: "add" },
+        ],
+      },
+      {
+        requirementId: "R-2",
+        locations: [
+          { kind: "entity", entity: null, name: "record" },
+          { kind: "computation", entity: "record", name: "total" },
+        ],
+      },
+    ],
+  };
+
+  it("⑤a のやり直しが呼ばれ、やり直し後の対応表で結び付けば、構造の検査が実行される", async () => {
+    const { run } = runWith([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(STRUCTURAL_CHECKS_DESIGN),
+      structured(STRUCTURAL_CHECKS_SUITE),
+      structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+      structured(OUTSIDE_CORRESPONDENCE), // 初回の ⑤a
+      structured(REDONE_CORRESPONDENCE), // ⑤a のやり直し
+    ]);
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    // 初回とやり直しの 2 回、⑤a を呼ぶ（段の記録も 2 件）
+    expect(result.record.stages.filter((step) => step.stage === "correspondence")).toHaveLength(2);
+    if (result.bundle === null) throw new Error("納品物が無い");
+    expect(verificationOf(result.bundle).structural_checks.find((entry) => entry.test_id === "sc")?.result).toBe("pass");
   });
 });
 
@@ -896,9 +1068,9 @@ const CREATE_DECLARATION = [
 /** ② の設計（R-1 は在ることだけ、R-2 は決まりを含む。役割の表・選択肢・所属を持つ新契約。Issue #418） */
 const CREATE_DESIGN = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
-    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null, options: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: null },
   ],
   designs: [
     {
@@ -999,7 +1171,14 @@ const CREATE_CORRESPONDENCE = {
         { kind: "action", entity: "record", name: "add" },
       ],
     },
-    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "total" }] },
+    {
+      requirementId: "R-2",
+      // R-2 も entity `record` に依存として所属するので、要件ごとに載せる（Issue #431）
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "computation", entity: "record", name: "total" },
+      ],
+    },
   ],
 };
 
@@ -1033,9 +1212,9 @@ describe("裁定で外した試験を除いた組でも、分類を保つ（02 �
 /** ② の設計（R-1 は構造で確かめる（checks 付き）、R-2 は固定した試験。新契約。Issue #418） */
 const STRUCTURAL_CHECKS_DESIGN = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
-    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null, options: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: null },
   ],
   designs: [
     {
@@ -1393,10 +1572,10 @@ describe("構造で確かめる要件には、構造の検査だけを固定す�
 
 /** 画面（record.records）・項目（record.amount）・計算（record.total）を持つ役割 ID の表 */
 const VIEW_SHOWS_ROLES = [
-  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
-  { roleId: "record.records", kind: "screen", entity: "record", name: "records", shared: false, aliasOf: null, options: null },
-  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null, options: null },
-  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
+  { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.records", kind: "screen", entity: "record", name: "records", shared: false, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: false, aliasOf: null, options: null, groupBy: null },
+  { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: null },
 ];
 
 /** ② の設計（R-1 は view-shows で確かめる。実行の試験も混ざる） */
@@ -1533,14 +1712,14 @@ describe("残った view-shows の参照の不備・役割の対応の欠け（0
  */
 const FIELD_DESIGN = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "記録", shared: true, aliasOf: null, options: null },
-    { roleId: "record.a", kind: "field", entity: "record", name: "項目A", shared: true, aliasOf: null, options: null },
-    { roleId: "record.b", kind: "field", entity: "record", name: "項目B", shared: true, aliasOf: null, options: null },
-    { roleId: "record.c", kind: "field", entity: "record", name: "項目C", shared: true, aliasOf: null, options: null },
-    { roleId: "other", kind: "entity", entity: null, name: "その他", shared: true, aliasOf: null, options: null },
-    { roleId: "other.a", kind: "field", entity: "other", name: "項目A", shared: true, aliasOf: null, options: null },
-    { roleId: "other.b", kind: "field", entity: "other", name: "項目B", shared: true, aliasOf: null, options: null },
-    { roleId: "other.c", kind: "field", entity: "other", name: "項目C", shared: true, aliasOf: null, options: null },
+    { roleId: "record", kind: "entity", entity: null, name: "記録", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.a", kind: "field", entity: "record", name: "項目A", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.b", kind: "field", entity: "record", name: "項目B", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.c", kind: "field", entity: "record", name: "項目C", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "other", kind: "entity", entity: null, name: "その他", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "other.a", kind: "field", entity: "other", name: "項目A", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "other.b", kind: "field", entity: "other", name: "項目B", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "other.c", kind: "field", entity: "other", name: "項目C", shared: true, aliasOf: null, options: null, groupBy: null },
   ],
   designs: [
     {
@@ -2229,7 +2408,7 @@ describe("試験の段の種類の食い違いを判定に選ばせる（Issue #
     });
     const design = {
       roles: [
-        { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
+        { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
       ],
       designs: requirements.map((requirement) => ({
         requirementId: requirement.id,
@@ -2401,9 +2580,9 @@ const WRITE_NO_ACTION = WRITE_DECLARATION.replace(
 /** ② の設計（R-1 は「誰でも直せる」を 3 つの構造の検査で確かめる。R-2 は固定した試験） */
 const WRITE_DESIGN = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
-    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null, options: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null },
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.add", kind: "operation", entity: "record", name: "add", shared: false, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: false, aliasOf: null, options: null, groupBy: null },
   ],
   designs: [
     {
@@ -2480,7 +2659,14 @@ const WRITE_CORRESPONDENCE = {
         { kind: "action", entity: "record", name: "add" },
       ],
     },
-    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "total" }] },
+    {
+      requirementId: "R-2",
+      // R-2 も entity `record` に依存として所属するので、要件ごとに載せる（Issue #431）
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "computation", entity: "record", name: "total" },
+      ],
+    },
   ],
 };
 
@@ -2619,7 +2805,14 @@ const ALT_CORRESPONDENCE = {
         { kind: "computation", entity: "record", name: "total" },
       ],
     },
-    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "extra" }] },
+    {
+      requirementId: "R-2",
+      // R-2 も entity `record` に依存として所属するので、要件ごとに載せる（Issue #431）
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "computation", entity: "record", name: "extra" },
+      ],
+    },
   ],
 };
 
@@ -2671,9 +2864,9 @@ describe("設計の段の中身の作り直し（§5・Issue #407）", () => {
 /** entity・項目（record.amount）・計算（record.total）を持つ設計（値の鍵の検査が掛かる） */
 const KEY_RUN_DESIGN = {
   roles: [
-    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
-    { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: true, aliasOf: null, options: null },
-    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null, options: null },
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.amount", kind: "field", entity: "record", name: "amount", shared: true, aliasOf: null, options: null, groupBy: null },
+    { roleId: "record.total", kind: "computation", entity: "record", name: "total", shared: true, aliasOf: null, options: null, groupBy: null },
   ],
   designs: [
     {
@@ -2776,7 +2969,15 @@ const KEY_RUN_CORRESPONDENCE = {
         { kind: "computation", entity: "record", name: "total" },
       ],
     },
-    { requirementId: "R-2", locations: [{ kind: "computation", entity: "record", name: "total" }] },
+    {
+      requirementId: "R-2",
+      // R-2 も entity `record`・項目 `amount`・計算 `total` に所属するので、要件ごとに載せる（Issue #431）
+      locations: [
+        { kind: "entity", entity: null, name: "record" },
+        { kind: "field", entity: "record", name: "amount" },
+        { kind: "computation", entity: "record", name: "total" },
+      ],
+    },
   ],
 };
 
@@ -3437,8 +3638,8 @@ describe("設計の契約：所属と選択肢（Issue #418）", () => {
     const marker = "MARKER418";
     const badDesign = {
       roles: [
-        { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null },
-        { roleId: `record.${marker}`, kind: "field", entity: "record", name: marker, shared: false, aliasOf: null, options: [`${marker}-option`] },
+        { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null, options: null, groupBy: null },
+        { roleId: `record.${marker}`, kind: "field", entity: "record", name: marker, shared: false, aliasOf: null, options: [`${marker}-option`], groupBy: null },
       ],
       designs: [
         {
@@ -3547,5 +3748,294 @@ describe("2 つの直す段にまたがる、道具の累計の上限（02 §1.5
     // 直す段は 2 回走る。道具を実行したのは 1 段目の 20 件だけ（2 段目の 5 件は 1 つも実行しない）
     expect(result.record.stages.filter((stage) => stage.stage === "repair")).toHaveLength(2);
     expect(spy).toHaveBeenCalledTimes(20);
+  });
+});
+
+// ── 見出しごとの集計（選択肢のキー列・見出しの期待・集計元の組。Issue #433）────────
+
+/** 見出しごとの集計の規範の走り（①→①'→②→②'→③→⑤a） */
+const groupedRun = () => runWith(recordedRunGrouped());
+
+describe("選択肢のキー列・見出しの期待・集計元の組が、新契約の fixture で通る（Issue #433）", () => {
+  it("新契約の fixture（groupBy つき）は、最後まで流れて full になる", async () => {
+    const { run } = groupedRun();
+    const result = await run;
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(result.summary.verdict).toBe("full");
+  });
+
+  it("③ が順の違うキーで書いた走りは、⑤a の落ちが ⑥ に回り、③ のやり直しには回らない", async () => {
+    const { recording, run } = runWith(
+      [
+        ...recordedRunGrouped({ declaration: GROUPED_DECLARATION_REVERSED }),
+        // ⑥ 直す（同じ宣言を返し直す。⑤a は同じ版なので作り直さない）
+        toolDone({ declaration: GROUPED_DECLARATION_REVERSED, disputes: [] }),
+        toolDone({ declaration: GROUPED_DECLARATION_REVERSED, disputes: [] }),
+      ],
+      { limits: { ...AGENT_LIMITS, repairRoundTrips: 1, stagnationRepeats: 0 } },
+    );
+    const result = await run;
+    const stages = result.record.stages.map((stage) => stage.stage);
+    expect(stages).toContain("repair"); // ⑥ 直す
+    expect(recording.structured.every((request) => request.schemaName !== MAPPING_REDO_SCHEMA_NAME)).toBe(true);
+    expect(result.summary.stop_reason).toBe("limit");
+  });
+
+  it("②' が見出しを推測した応答は 1 回作り直し、段の記録 test-suite の calls が 2 になる", async () => {
+    const guessed = {
+      tests: GROUPED_TEST_SUITE_OUTPUT.tests.map((test) =>
+        test.id === "t4"
+          ? { ...test, expected: { kind: "ok", value: [{ heading: "open", value: 1 }] } }
+          : test,
+      ),
+    };
+    const { run } = runWith([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(GROUPED_DESIGN),
+      structured(guessed), // 1 回目：見出しを推測した応答
+      structured(GROUPED_TEST_SUITE_OUTPUT), // 2 回目：直した応答
+      structured({ declaration: GROUPED_DECLARATION_SOURCE, mappings: GROUPED_MAPPINGS }),
+      structured(GROUPED_CORRESPONDENCE_OUTPUT),
+    ]);
+    const result = await run;
+    const testSuite = result.record.stages.find((stage) => stage.stage === "test-suite");
+    expect(testSuite?.calls).toBe(2);
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+});
+
+/** 見出しごとの集計の期待だけを差し替えた、②' の応答を組む */
+function groupedSuiteWithAggregate(aggregate: Record<string, unknown>): unknown {
+  return { tests: [...GROUPED_TEST_SUITE_OUTPUT.tests.filter((test) => test.id !== "t4"), aggregate] };
+}
+
+/** 見出しごとの集計の試験 1 件（入力の契約と参照の行は差し替えられる） */
+function groupedAggregateTest(options: {
+  readonly referenceData?: readonly unknown[];
+  readonly emptyEntities?: readonly string[];
+  readonly value: unknown;
+}): Record<string, unknown> {
+  return {
+    id: "t4",
+    target: { requirementId: "R-1", kind: "computation", roleId: "record.byStatus" },
+    kind: "normal",
+    operation: "aggregate",
+    clock: "2026-09-16T12:00:00+09:00",
+    input: {},
+    inputContract: { rowId: "t4-row", targetRowId: null, emptyEntities: options.emptyEntities ?? [] },
+    referenceData: options.referenceData ?? [],
+    expected: { kind: "ok", value: options.value },
+  };
+}
+
+const OPEN_ROW = {
+  rowId: "row-2",
+  target: { requirementId: "R-1", kind: "entity", roleId: "record" },
+  values: { "record.status": "open" },
+};
+
+describe("見出しごとの集計の期待を、⑤b の値と照合する（Issue #433）", () => {
+  it("参照元を指定しない入力で null を期待する試験は、⑤b で一致する", async () => {
+    const { run } = runWith(recordedRunGrouped({ suite: groupedSuiteWithAggregate(groupedAggregateTest({ value: null })) }));
+    const result = await run;
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+
+  it("空の集合を明示した入力では、全見出し（0 を含む）が一致する", async () => {
+    const aggregate = groupedAggregateTest({
+      emptyEntities: ["record"],
+      value: [{ heading: "open", value: 0 }, { heading: "closed", value: 0 }],
+    });
+    const { run } = runWith(recordedRunGrouped({ suite: groupedSuiteWithAggregate(aggregate) }));
+    const result = await run;
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+
+  it("参照行のある入力では、全見出しが一致する", async () => {
+    const aggregate = groupedAggregateTest({
+      referenceData: [OPEN_ROW],
+      value: [{ heading: "open", value: 1 }, { heading: "closed", value: 0 }],
+    });
+    const { run } = runWith(recordedRunGrouped({ suite: groupedSuiteWithAggregate(aggregate) }));
+    const result = await run;
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+
+  it("参照行があるのに null を期待した試験は、不一致のまま残り、期待が書き換えられない", async () => {
+    const aggregate = groupedAggregateTest({ referenceData: [OPEN_ROW], value: null });
+    const { run } = runWith(
+      [...recordedRunGrouped({ suite: groupedSuiteWithAggregate(aggregate) }), toolDone({ declaration: GROUPED_DECLARATION_SOURCE, disputes: [] })],
+      { limits: { ...AGENT_LIMITS, repairRoundTrips: 1, stagnationRepeats: 0 } },
+    );
+    const result = await run;
+    expect(result.outcome.verdict).not.toBe("full");
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const verification = verificationOf(result.bundle);
+    expect(verification.test_mismatches).toBe(1);
+    // 期待は null のまま（直す段は試験の期待を書き換えられない）
+    const material = JSON.parse(fileTextOf(result.bundle, TEST_SUITE_FILE)) as {
+      suite: { tests: readonly { id: string; expected: { value: unknown } }[] };
+    };
+    expect(material.suite.tests.find((test) => test.id === "t4")?.expected.value).toBeNull();
+  });
+});
+
+describe("⑤a・②' へ正本が渡り、期待・集計値・合否は渡さない（Issue #433）", () => {
+  it("確定した仕様を正本にした走りで、⑤a・②' に正本が渡り、⑤a に期待・集計値・合否は渡らない", async () => {
+    const { recording, run } = runWith(recordedRunFromPlan(), { plan: CONFIRMED_PLAN });
+    const result = await run;
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+
+    const correspondence = recording.structured.filter((request) => request.schemaName === CORRESPONDENCE_SCHEMA_NAME);
+    expect(correspondence.length).toBeGreaterThan(0);
+    for (const request of correspondence) {
+      const names = [...request.input.matchAll(/<data name="([^"]+)"/g)].map((match) => match[1]);
+      expect(names, "⑤a に正本が渡る").toContain("確定した仕様");
+      // 期待・集計値・合否は、⑤a へ新たに渡していない（データの欄の名前で確かめる）
+      expect(names).not.toContain("期待");
+      expect(names).not.toContain("集計値");
+      expect(names).not.toContain("合否");
+    }
+
+    const suites = recording.structured.filter((request) => request.schemaName === TEST_SUITE_SCHEMA_NAME);
+    expect(suites.length).toBeGreaterThan(0);
+    for (const request of suites) {
+      expect(request.input).toContain("確定した仕様");
+    }
+  });
+
+  it("設計と宣言の列が一致していても、仕様から独立に固定した試験の誤りは full にならない", async () => {
+    // 見出しのキーと順は正しく、集計の値だけを誤らせる（設計と宣言の列は一致する）
+    const aggregate = groupedAggregateTest({
+      referenceData: [OPEN_ROW],
+      value: [{ heading: "open", value: 99 }, { heading: "closed", value: 0 }],
+    });
+    const { run } = runWith(
+      [
+        ...recordedRunGrouped({ suite: groupedSuiteWithAggregate(aggregate) }),
+        toolDone({ declaration: GROUPED_DECLARATION_SOURCE, disputes: [] }),
+      ],
+      { limits: { ...AGENT_LIMITS, repairRoundTrips: 1, stagnationRepeats: 0 } },
+    );
+    const result = await run;
+    expect(result.outcome.verdict).not.toBe("full");
+    if (result.bundle === null) throw new Error("納品物が無い");
+    expect(verificationOf(result.bundle).test_mismatches).toBe(1);
+  });
+});
+
+// ── 設計の意味だけを誤らせた 3 種（Issue #433・review 2）────────────────────
+
+describe("設計の意味だけを誤らせた 3 種は、それぞれ ③・⑤a まで進んで full にならない（Issue #433・review 2）", () => {
+  /** 正本（確定した仕様）が ②'・⑤a に渡り、期待・集計値・合否が ⑤a へ渡らないことを確かめる */
+  const expectMeaningWiring = (recording: ReturnType<typeof createRecordingClient>, planBody: string): void => {
+    const suites = recording.structured.filter((request) => request.schemaName === TEST_SUITE_SCHEMA_NAME);
+    expect(suites.length).toBeGreaterThan(0);
+    for (const request of suites) expect(request.input, "②' に正本の本文が渡る").toContain(planBody);
+    const correspondences = recording.structured.filter((request) => request.schemaName === CORRESPONDENCE_SCHEMA_NAME);
+    // **⑤a の要求が 1 件以上ある**（③・⑤a まで進んでいる）
+    expect(correspondences.length).toBeGreaterThan(0);
+    for (const request of correspondences) {
+      // 正本の内容（欄名だけでなく本文）が ⑤a に渡る
+      expect(request.input, "⑤a に正本の本文が渡る").toContain(planBody);
+      const names = [...request.input.matchAll(/<data name="([^"]+)"/g)].map((match) => match[1]);
+      expect(names).toContain("確定した仕様");
+      // 期待・集計値・合否は、⑤a へ新たに渡していない（データの欄の名前で確かめる）
+      expect(names).not.toContain("期待");
+      expect(names).not.toContain("集計値");
+      expect(names).not.toContain("合否");
+    }
+  };
+
+  it("選択肢の意味の欠落を設計と宣言が共有しても、③・⑤a まで進んで独立の点検が落ちを残す", async () => {
+    const { recording, run } = runWith(
+      recordedRunGroupedFromPlan({
+        design: GROUPED_DESIGN_MISSING_OPTION,
+        declaration: GROUPED_DECLARATION_MISSING_OPTION,
+        // 見出しの期待は設計の選択肢に合わせる（キーの形は ②' が通り、正本の意味は ⑤a が点検する）
+        suites: [GROUPED_TEST_SUITE_WITHOUT_AGGREGATE],
+        // ⑤a の独立の点検は、状態の項目を満たすと挙げない（作り直しでも消えない）
+        correspondences: [
+          GROUPED_CORRESPONDENCE_OUTPUT_WITHOUT_STATUS,
+          GROUPED_CORRESPONDENCE_OUTPUT_WITHOUT_STATUS,
+        ],
+      }),
+      { plan: GROUPED_PLAN_OPTION },
+    );
+    const result = await run;
+    expect(result.outcome.verdict).not.toBe("full");
+    const stages = result.record.stages.map((stage) => stage.stage);
+    expect(stages).toContain("write");
+    expect(stages).toContain("correspondence");
+    expectMeaningWiring(recording, "状態には未了と完了の 2 つの選択肢が要る");
+  });
+
+  it("ラベルとキーの対応の逆転は、キーの並びを保ったままでも、③・⑤a まで進んで独立の点検が落ちを残す", async () => {
+    const { recording, run } = runWith(
+      recordedRunGroupedFromPlan({
+        // 設計の `options` は変えない（キーの並びの整合は保つ）。宣言のラベルだけを逆にする
+        declaration: GROUPED_DECLARATION_REVERSED_LABEL,
+        suites: [GROUPED_TEST_SUITE_OUTPUT],
+        // ⑤a の独立の点検は、ラベルの意味が逆なので状態の項目を満たすと挙げない
+        correspondences: [
+          GROUPED_CORRESPONDENCE_OUTPUT_WITHOUT_STATUS,
+          GROUPED_CORRESPONDENCE_OUTPUT_WITHOUT_STATUS,
+        ],
+      }),
+      { plan: GROUPED_PLAN_LABEL },
+    );
+    const result = await run;
+    expect(result.outcome.verdict).not.toBe("full");
+    const stages = result.record.stages.map((stage) => stage.stage);
+    expect(stages).toContain("write");
+    expect(stages).toContain("correspondence");
+    // ②' の列の整合（キーの並び）では止まらない
+    expect(result.stopped?.stage).not.toBe("test-suite");
+    expectMeaningWiring(recording, "キー open は未了、キー closed は完了を表す");
+  });
+
+  it("集計対象の誤りを設計と宣言が共有しても、③・⑤a まで進んで ⑤b の値の照合が落ちを残す", async () => {
+    const { recording, run } = runWith(
+      [
+        ...recordedRunGroupedFromPlan({
+          design: GROUPED_DESIGN_WRONG_TARGET,
+          declaration: GROUPED_DECLARATION_WRONG_TARGET,
+          mappings: GROUPED_MAPPINGS_WRONG_TARGET,
+          correspondences: [GROUPED_CORRESPONDENCE_OUTPUT_WRONG_TARGET],
+        }),
+        toolDone({ declaration: GROUPED_DECLARATION_WRONG_TARGET, disputes: [] }),
+      ],
+      { plan: GROUPED_PLAN_TARGET, limits: { ...AGENT_LIMITS, repairRoundTrips: 1, stagnationRepeats: 0 } },
+    );
+    const result = await run;
+    expect(result.outcome.verdict).not.toBe("full");
+    if (result.bundle === null) throw new Error("納品物が無い");
+    // ⑤b の値の不一致が、⑥ の修復・再点検の後も残る
+    expect(verificationOf(result.bundle).test_mismatches).toBeGreaterThanOrEqual(1);
+    expect(result.record.stages.map((stage) => stage.stage)).toContain("repair");
+    expectMeaningWiring(recording, "状態別の件数は項目 status で分ける");
+  });
+});
+
+// ── （別の試験）正本から固定した見出しの期待は、②' の列の整合で止める ──────────────
+//
+// これは**意味の点検の証拠ではない**（キーの形の不一致を ②' が断るだけである）。意味の点検の証拠は、
+// 上の 3 種（③・⑤a まで進むもの）である。
+
+describe("（別の試験）正本から固定した見出しの期待は、②' の列の整合で止める（Issue #433・review 2）", () => {
+  it("選択肢の欠落を設計と宣言が共有しても、正本の見出しを期待する ②' が断る（意味の点検の証拠ではない）", async () => {
+    const { run } = runWith(
+      recordedRunGroupedFromPlan({
+        design: GROUPED_DESIGN_MISSING_OPTION,
+        declaration: GROUPED_DECLARATION_MISSING_OPTION,
+        suites: [GROUPED_TEST_SUITE_OUTPUT, GROUPED_TEST_SUITE_OUTPUT],
+      }),
+      { plan: GROUPED_PLAN_OPTION },
+    );
+    const result = await run;
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.stopped?.stage).toBe("test-suite");
   });
 });

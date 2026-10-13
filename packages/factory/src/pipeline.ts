@@ -266,6 +266,10 @@ export type RequirementVerification =
  *
  * Issue #418 で `options` を足した——選択肢（enum）の項目なら、宣言で使う順の、空でない重複の無い
  * キーの並び。それ以外の役割は `null`。**旧形式の記録では省ける**（工場の中の型では任意）。
+ *
+ * Issue #433 で `groupBy` を足した——見出しごとの集計（`kind` が `computation`）なら、**分ける元の
+ * 選択肢の項目**の役割 ID。それ以外（月で分ける・分けない・計算でない役割）は `null`。**旧形式の記録では
+ * 省ける**（工場の中の型では任意）。
  */
 export interface RoleEntry {
   /** 役割 ID（entity の文脈を含む ID） */
@@ -285,6 +289,11 @@ export interface RoleEntry {
    * それ以外の役割は `null`。旧形式の記録では省ける（工場の中の型では任意）。
    */
   readonly options?: readonly string[] | null;
+  /**
+   * 見出しごとの集計（`kind` が `computation`）なら、**分ける元の選択肢の項目**の役割 ID（Issue #433）。
+   * それ以外（月で分ける・分けない・計算でない役割）は `null`。旧形式の記録では省ける（工場の中の型では任意）。
+   */
+  readonly groupBy?: string | null;
 }
 
 /** 役割の所属の根拠（有限の 2 値。§1・②・Issue #418） */

@@ -8,7 +8,15 @@
 import { describe, expect, it } from "vitest";
 import { checkTestSuite } from "../fixed-test.js";
 import { AGENT_LIMITS } from "../limits.js";
-import type { CorrespondenceEntry, RequirementList, RoleNameMapping, TestSuite } from "../pipeline.js";
+import {
+  LEGACY_DESIGN_CONTRACT,
+  type CorrespondenceEntry,
+  type RequirementList,
+  type RoleEntry,
+  type RoleNameMapping,
+  type TestSuite,
+} from "../pipeline.js";
+import type { RequirementRoleOwnership } from "./correspondence.js";
 import {
   REPAIR_TOOL_NAMES,
   REPAIR_TOOLS,
@@ -218,5 +226,123 @@ describe("⑥ の道具も、提出された対応で結び付ける（02 §1.3.
     const output = await runTool({});
     expect(output.passed).toBe(false);
     expect("unresolved" in output && output.unresolved.map((entry) => entry.testId)).toEqual(["v"]);
+  });
+});
+
+// ── 対応表の確認の道具も、要件ごとの点検をする（Issue #431）──────────────────
+
+/** 一覧が `title` を出す宣言（entity record は create か一覧で辿れる） */
+const PERM_DECLARATION = [
+  "entities:",
+  "  - name: record",
+  "    fields:",
+  "      title: string",
+  "views:",
+  "  - name: records",
+  "    type: list",
+  "    entity: record",
+  "    show: [title]",
+  "actions: []",
+  "validations: []",
+  "computed: []",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+describe("対応表の確認の道具も、要件ごとの点検をする（Issue #431）", () => {
+  const roles: readonly RoleEntry[] = [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null },
+    { roleId: "record.title", kind: "field", entity: "record", name: "title", shared: false, aliasOf: null },
+  ];
+  const mappings: readonly RoleNameMapping[] = [
+    { roleId: "record", name: "record" },
+    { roleId: "record.title", name: "title" },
+  ];
+  const ownership: readonly RequirementRoleOwnership[] = [
+    {
+      requirementId: "R-1",
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "行の所属として参照するため" },
+        { roleId: "record.title", basis: "dependency", reason: "一覧に出す項目として参照するため" },
+      ],
+    },
+  ];
+  // R-1 の対応表は entity record だけを挙げ、項目 title を挙げていない（R-2 は entity record）
+  const correspondences: readonly CorrespondenceEntry[] = [
+    { requirementId: "R-1", locations: [{ kind: "entity", entity: null, name: "record" }] },
+    { requirementId: "R-2", locations: [{ kind: "entity", entity: null, name: "record" }] },
+  ];
+
+  it("所属が渡ると、要件ごとの点検の落ち（要件 ID つき）を返す", async () => {
+    const call = checkToolArguments("check-correspondence", { declaration: PERM_DECLARATION });
+    expect(call.ok).toBe(true);
+    if (!call.ok) return;
+    const output = await executeRepairTool(call.call, {
+      list: LIST,
+      suite: EMPTY_SUITE,
+      correspondences,
+      roles,
+      mappings,
+      ownership,
+    });
+    expect("misses" in output && output.misses.some((miss) => miss.requirementId === "R-1")).toBe(true);
+    expect(output.passed).toBe(false);
+  });
+
+  it("新契約で所属を渡さなければ、入力の不備として断り、照合なしの成功にしない", async () => {
+    const call = checkToolArguments("check-correspondence", { declaration: PERM_DECLARATION });
+    expect(call.ok).toBe(true);
+    if (!call.ok) return;
+    const output = await executeRepairTool(call.call, {
+      list: LIST,
+      suite: EMPTY_SUITE,
+      correspondences,
+      roles,
+      mappings,
+    });
+    expect("misses" in output && output.misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    expect(output.passed).toBe(false);
+  });
+
+  it("legacy を明示したときは、従来どおり表全体の外の落ちにする", async () => {
+    const call = checkToolArguments("check-correspondence", { declaration: PERM_DECLARATION });
+    expect(call.ok).toBe(true);
+    if (!call.ok) return;
+    const output = await executeRepairTool(call.call, {
+      list: LIST,
+      suite: EMPTY_SUITE,
+      correspondences,
+      roles,
+      mappings,
+      version: LEGACY_DESIGN_CONTRACT,
+    });
+    // record.title は宣言に実在するが、表全体（R-1・R-2 は entity record だけ）の挙げていない場所
+    expect("misses" in output && output.misses.some((miss) => miss.detail.includes("対応表の外"))).toBe(true);
+    expect(output.passed).toBe(false);
+  });
+
+  it("所属が一部だけ欠ける入力は、入力の不備として断る（表の役割の全部に所属を要る）", async () => {
+    const call = checkToolArguments("check-correspondence", { declaration: PERM_DECLARATION });
+    expect(call.ok).toBe(true);
+    if (!call.ok) return;
+    // 表の役割 record.title の所属を省く（全体の集合は空ではないので、以前の門を通ってしまっていた）
+    const partialOwnership: readonly RequirementRoleOwnership[] = [
+      {
+        requirementId: "R-1",
+        ownership: [{ roleId: "record", basis: "dependency", reason: "行の所属として参照するため" }],
+      },
+    ];
+    const output = await executeRepairTool(call.call, {
+      list: LIST,
+      suite: EMPTY_SUITE,
+      correspondences,
+      roles,
+      mappings,
+      ownership: partialOwnership,
+    });
+    expect("misses" in output && output.misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
+    expect(output.passed).toBe(false);
   });
 });
