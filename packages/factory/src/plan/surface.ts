@@ -199,6 +199,13 @@ export interface SurfaceInput {
    * 了承除外・関係する問いと答えを、**別々のデータ**として足す（点検の対象は `list` のまま）。
    */
   readonly context?: SurfaceContext;
+  /**
+   * **形が正しい応答**を、制約 ID の裏付けの検査の前に受け取る口（Issue #434。差分の洗い出しの道だけ渡す）。
+   * **失敗を返す前にも、対象外の集合・分類と照合の進捗を記録できる**ようにするためである——制約検査が
+   * 不成立でも、対象外の参照の件数はここで数えられる。渡す値は**保存用に 1 回だけ正規化した**応答である
+   * （正規化はここで 1 回だけ行い、呼ぶ側はもう正規化しない）。
+   */
+  readonly onShapeValid?: (surface: PlanSurface) => void;
 }
 
 function checkAmbiguity(value: unknown, field: string, problems: Problem[]): PlanAmbiguity | undefined {
@@ -444,11 +451,16 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
   });
   const answer = await callStructuredChecked(input.gateway, { request, check: checkSurfaceOutput });
   if (!answer.ok) return answer;
-  // 形と、現文書への制約 ID の裏付けを確かめる（**除外で隠さない**。Issue #434・#398）
+  // 保存用に**1 回だけ**正規化する（Issue #398・#434）。対象外の照合・記録は、この正規化のあとの値で
+  // 行う（もう正規化しない。正規化は一般の文字列で冪等でないため）。
+  const normalized = normalizeSurfaceClaims(answer.value);
+  // 形が正しい応答を、制約検査の前に知らせる——失敗を返す前にも、対象外の集合・分類と照合の進捗を
+  // 記録できるようにする（Issue #434）
+  input.onShapeValid?.(normalized);
+  // 形と、現文書への制約 ID の裏付けを、**生の値**で確かめる（除外で隠さない。Issue #434・#398）
   const problems = checkSurfaceConstraints(answer.value, input.documents);
   if (problems.length > 0) {
     return { ok: false, failure: { kind: "unmet", attempts: 1, problems } };
   }
-  // 根拠の照合を通ったあと、保存する側の ID を正規化する（Issue #398）
-  return { ok: true, value: normalizeSurfaceClaims(answer.value) };
+  return { ok: true, value: normalized };
 }

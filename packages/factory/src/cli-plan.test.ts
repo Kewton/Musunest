@@ -148,6 +148,7 @@ const SURFACE_CLEAR = { ambiguities: [], unwritable: [] };
 
 /** 対象外の参照が無いときの、差分点検の記録の `out_of_scope`（Issue #434） */
 const NO_CLI_OUT_OF_SCOPE = {
+  scanned: true,
   claims: 0,
   ambiguities: 0,
   deduped: 0,
@@ -360,6 +361,7 @@ interface PlanCliRecordShape {
     readonly open_issues: number;
     readonly accepted_unwritable: number;
     readonly out_of_scope: {
+      readonly scanned: boolean;
       readonly claims: number;
       readonly ambiguities: number;
       readonly deduped: number;
@@ -2259,6 +2261,7 @@ describe("差分点検・§3：受理済み申告の再申告を除いた記録�
         open_issues: 0,
         accepted_unwritable: 0,
         out_of_scope: {
+          scanned: true,
           claims: 1,
           ambiguities: 0,
           deduped: 1,
@@ -2332,5 +2335,64 @@ describe("差分点検・§3：受理済み申告の再申告を除いた記録�
     // 値は、記録（diff_reviews）にも停止の行にも出ない
     expect(JSON.stringify(record.diff_reviews)).not.toContain(MARK);
     expect(lines.join("\n")).not.toContain(MARK);
+  });
+
+  it("制約検査で止まっても、対象外の集合・分類と識別済みの件数を保存する（D1）", async () => {
+    const empty = { id: "U-empty", requirementId: "R:unknown", part: "部分", constraintIds: [], reason: "理由", alternative: "代案" };
+    const outAmbiguity = { id: "OI-old", requirementId: "R-1", text: "古い曖昧", critical: true };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(base),
+      structured({ questions: [questionOf("OI-1", "Q-1")] }),
+      structured({ ambiguities: [outAmbiguity], unwritable: [{ ...accepted, id: "U-dup" }, empty] }),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswers(["A:Q1-1"]),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+    const dir = `${directory}/dedup-constraint-stop`;
+    const answersPath = "dedup-constraint-stop-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => SAMPLE_DOCUMENTS,
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.stage).toBe("surface");
+    expect(record.failure?.kind).toBe("unmet");
+    expect(record.failure?.problems).toEqual([{ field: "unwritable[1].constraintIds", code: "constraint-id-missing" }]);
+    // 制約検査で止まっても、対象外の集合・分類と、識別済みの重複件数（原添字つき）が保存される
+    const out = record.diff_reviews[0]?.out_of_scope;
+    expect(out?.scanned).toBe(true);
+    expect(out?.claims).toBe(2);
+    expect(out?.ambiguities).toBe(1);
+    expect(out?.deduped).toBe(1);
+    expect(out?.rejected_claims).toBe(1);
+    expect(out?.rejected_ambiguities).toBe(1);
+    expect(out?.deduped_indexes).toEqual([0]);
+    expect(out?.kinds.find((entry) => entry.kind === "source")).toEqual({ kind: "source", claims: 1, ambiguities: 1 });
+    expect(out?.kinds.find((entry) => entry.kind === "unknown")?.claims).toBe(1);
+    // 値は転記されない
+    expect(JSON.stringify(record.diff_reviews)).not.toContain(MARK);
   });
 });

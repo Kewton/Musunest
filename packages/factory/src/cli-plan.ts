@@ -351,6 +351,7 @@ export interface PlanCliDiffOutOfScopeKindCount {
  * 重複として除いた件数・重複と認めず断った件数を区別して持つ。**値は持たない**。
  */
 export interface PlanCliDiffOutOfScopeRecord {
+  readonly scanned: boolean;
   readonly claims: number;
   readonly ambiguities: number;
   readonly deduped: number;
@@ -610,6 +611,7 @@ export function buildPlanCliRecord(input: {
       open_issues: review.openIssues,
       accepted_unwritable: review.acceptedUnwritable,
       out_of_scope: {
+        scanned: review.outOfScope.scanned,
         claims: review.outOfScope.claims,
         ambiguities: review.outOfScope.ambiguities,
         deduped: review.outOfScope.deduped,

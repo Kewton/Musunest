@@ -46,7 +46,7 @@ import type { LlmClient } from "../llm.js";
 import { requirementTextWithQuestionContext, type RequirementList, type ReverseCheckMiss, type SourceRange } from "../pipeline.js";
 import { UsageMeter, usageDelta, type FailureKind, type StageStatus, type UsageSnapshot } from "../record.js";
 import type { PromptDocument, StageFailure, StageOutcome } from "../stages/prompt.js";
-import { normalizeConstraintId, normalizeConstraintIds } from "../stages/prompt.js";
+import { normalizeConstraintId } from "../stages/prompt.js";
 import {
   emptyReverseCheckDiagnosis,
   runReverseCheckLoopWithOperation,
@@ -65,7 +65,7 @@ import {
   type PlanRemaining,
   type PlanTurn,
 } from "./session.js";
-import { checkSurfaceTargets, runSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceOutOfScopeRef } from "./surface.js";
+import { checkSurfaceTargets, runSurface, type PlanSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceOutOfScopeRef, type SurfaceTargetResult } from "./surface.js";
 import { runSurfaceCheck, type SurfaceClaimDiagnostic, type SurfaceJudgment, type SurfaceUncheckedClaim } from "./surface-check.js";
 
 /** Plan の段（記録の `stage` に使う。生成の段とは別の一覧である） */
@@ -469,6 +469,11 @@ export interface PlanDiffOutOfScopeKindCount {
  * 原応答で対象外だった件数・コードが重複として除いた件数・重複と認めず断った件数を区別して持つ。
  */
 export interface PlanDiffOutOfScopeRecord {
+  /**
+   * **形が正しい応答を走査したか**（Issue #434）。`false` は、応答の形が合わずに対象外の走査に届かなかった
+   * ことを示す——件数の 0 が「未照合」なのか「真に 0 件」なのかを区別する。
+   */
+  readonly scanned: boolean;
   /** 原応答で対象外だった「書けない」の申告の件数 */
   readonly claims: number;
   /** 原応答で対象外だった未解決の事項の件数 */
@@ -807,6 +812,7 @@ interface MutableDiffReview {
   added: number;
   openIssues: number;
   acceptedUnwritable: number;
+  scanned: boolean;
   claims: number;
   ambiguities: number;
   deduped: number;
@@ -819,10 +825,17 @@ interface MutableDiffReview {
 /** 受理した申告 1 つぶんの控え（重複の照合に使う。Issue #434） */
 export interface AcceptedClaimSnapshot {
   readonly requirementId: string;
+  /** 受理して要件に付けた部分の ID（現在の対応と一致することの証明に使う） */
+  readonly partId: string;
   readonly part: string;
   readonly reason: string;
   readonly alternative: string;
-  /** 正規化済みの制約 ID（集合の同値で比べる） */
+  /** 受理して作った代わりの案の要件 ID（現在の対応と一致することの証明に使う） */
+  readonly alternativeId: string;
+  /**
+   * 受理した時点の制約 ID。**保存用に 1 回だけ正規化した値**である（`runSurface` が返す値。呼ぶ側は
+   * もう正規化しない。Issue #434・D2）。
+   */
   readonly constraintIds: readonly string[];
   /** 受理した時点の要件の文（変わっていないことの確認） */
   readonly requirementText: string;
@@ -836,6 +849,9 @@ export interface AcceptedClaimSnapshot {
  * 対象外の「書けない」の申告が、**受理済みの申告の正確な再申告**か（§3 の 2・3。Issue #434）。
  * 完全一致を部分一致・空白除去・意味の推測へ広げない。部分 ID の接頭辞やモデル作の申告 ID を正本にせず、
  * `parts` と `accepted_unwritable` の実際の参照で引く。**純粋な関数**である。
+ *
+ * `claim.constraintIds` は**保存用に 1 回だけ正規化した値**として受け取る（もう正規化しない。D2）。
+ * 正規化は一般の文字列で冪等でないため、二重に正規化すると別の既知集合を同一視してしまう。
  */
 export function isAcceptedUnwritableDuplicate(input: {
   readonly claim: PlanUnwritable;
@@ -857,21 +873,26 @@ export function isAcceptedUnwritableDuplicate(input: {
   if (parts.length !== 1) return false;
   const part = parts[0];
   if (part === undefined) return false;
+  // §3 の 2（D3）：**全要件**を通じて当該 part_id の出現が一意で、それが対象要件の当該部分であること。
+  // ほかの要件・別の部分が同じ part_id を持つなら、重複と認めない。
+  const sameIdParts = requirements.flatMap((one) => one.parts.filter((candidate) => candidate.id === part.id));
+  if (sameIdParts.length !== 1) return false;
   const entries = acceptedUnwritable.filter((entry) => entry.part_id === part.id);
   if (entries.length !== 1) return false;
   const entry = entries[0];
   if (entry === undefined) return false;
   if (requirements.filter((one) => one.id === entry.alternative_id).length !== 1) return false;
   // §3 の 3：受理した元の申告と、部分文・理由・代案は完全一致、要件 ID は一致、制約集合は同値。
-  // 制約 ID は既存の 1 回の正規化を用いた全集合の同値だけを認める（順序・重複は無視）
-  const normalized = normalizeConstraintIds(claim.constraintIds);
+  // **受理した控えの対応（part_id・代わりの案の ID）が、現在の了承除外の対応と一致する**こと（D3）。
   const snapshot = snapshots.find(
     (one) =>
       one.requirementId === claim.requirementId &&
+      one.partId === part.id &&
       one.part === claim.part &&
       one.reason === claim.reason &&
       one.alternative === claim.alternative &&
-      sameStringSet(one.constraintIds, normalized),
+      one.alternativeId === entry.alternative_id &&
+      sameStringSet(one.constraintIds, claim.constraintIds),
   );
   if (snapshot === undefined) return false;
   // 受理時から、要件の内容・変更の版と、文書の版が変わっていないこと
@@ -898,6 +919,7 @@ function finalizeDiffReview(review: MutableDiffReview): PlanDiffReviewRecord {
     openIssues: review.openIssues,
     acceptedUnwritable: review.acceptedUnwritable,
     outOfScope: {
+      scanned: review.scanned,
       claims: review.claims,
       ambiguities: review.ambiguities,
       deduped: review.deduped,
@@ -1527,12 +1549,14 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
             constraint_id: normalizeConstraintId(item.constraintIds[0] ?? ""),
           },
         });
-        // 受理した申告の控えを残す（対象外の再申告を、安全に証明できる重複としてだけ除く。Issue #434）
+        // 受理した申告の控えを残す（対象外の再申告を、安全に証明できる重複としてだけ除く。Issue #434・D3）
         acceptedClaimSnapshots.push({
           requirementId: item.requirementId,
+          partId: part.id,
           part: item.part,
           reason: item.reason,
           alternative: item.alternative,
+          alternativeId,
           constraintIds: item.constraintIds.slice(),
           requirementText: target.text,
           changeKey: diffChangeKey(target),
@@ -1689,6 +1713,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         added: unreviewedChanges.length,
         openIssues: 0,
         acceptedUnwritable: 0,
+        // 形が正しい応答を走査できたときだけ真にする（未照合と真の 0 件を区別する。D1）
+        scanned: false,
         claims: 0,
         ambiguities: 0,
         deduped: 0,
@@ -1796,20 +1822,16 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         acceptedUnwritable: acceptedUnwritable.slice(),
         questionsAndAnswers: relatedQuestionsAndAnswers(inputsNow),
       };
-      const diffSurface = await runStageOutcome("surface", async () => {
-        const outcome = await runSurface({
-          list: diffList,
-          documents: input.documents,
-          gateway,
-          catalog: diffCatalogData,
-          context,
-        });
-        if (!outcome.ok) return outcome;
-        // 応答が指す要件 ID を、この往復の差分の集合へ照合する（Issue #434）。対象外の「書けない」の
-        // 申告は、**受理済みの申告の正確な再申告だけ**を重複として除く（曖昧さは除かない。§3 の 5）
-        const target = checkSurfaceTargets(outcome.value, targetRequirementIds, (claim) =>
+      // 対象外の照合と記録は、**形が正しい応答**について、制約 ID の裏付けの検査より前に済ませる
+      // ——制約検査で失敗を返すときも、対象外の集合・分類・識別済みの件数を記録に残す（D1）。
+      // 対象外の「書けない」の申告は、**受理済みの申告の正確な再申告だけ**を重複として除く
+      // （曖昧さは除かない。§3 の 5）
+      let targetCheck: SurfaceTargetResult | undefined;
+      const evaluateTargets = (surface: PlanSurface): void => {
+        const target = checkSurfaceTargets(surface, targetRequirementIds, (claim) =>
           isAcceptedDuplicateClaim(claim),
         );
+        targetCheck = target;
         for (const ref of target.rejected) {
           const requirementId = ref.kind === "claim" ? ref.claim.requirementId : ref.ambiguity.requirementId;
           bumpKind(classifyOutOfScope(requirementId), ref, 1);
@@ -1827,11 +1849,30 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         }
         reviewRecord.claims = target.dropped.length + target.rejected.filter((ref) => ref.kind === "claim").length;
         reviewRecord.ambiguities = target.rejected.filter((ref) => ref.kind === "ambiguity").length;
-        if (target.problems.length > 0) {
-          return { ok: false as const, failure: { kind: "unmet" as const, attempts: 1, problems: target.problems } };
+        reviewRecord.scanned = true;
+      };
+      const diffSurface = await runStageOutcome("surface", async () => {
+        const outcome = await runSurface({
+          list: diffList,
+          documents: input.documents,
+          gateway,
+          catalog: diffCatalogData,
+          context,
+          onShapeValid: evaluateTargets,
+        });
+        // 形の失敗・制約検査の失敗のどちらも、対象外の記録は evaluateTargets で済んでいる（D1）
+        if (!outcome.ok) return outcome;
+        if (targetCheck === undefined) return outcome;
+        if (targetCheck.problems.length > 0) {
+          return {
+            ok: false as const,
+            failure: { kind: "unmet" as const, attempts: 1, problems: targetCheck.problems },
+          };
         }
         const value =
-          target.dropped.length === 0 ? outcome.value : { ...outcome.value, unwritable: target.keptUnwritable };
+          targetCheck.dropped.length === 0
+            ? outcome.value
+            : { ...outcome.value, unwritable: targetCheck.keptUnwritable };
         return { ok: true as const, value };
       });
       reviewRecord.openIssues = diffSurface.ambiguities.length + diffCatalog.unspecified.length;

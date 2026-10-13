@@ -465,3 +465,32 @@ describe("応答が指す要件 ID を、点検の対象（その往復の差分
     ]);
   });
 });
+
+// ── Issue #434（D2）：制約 ID の正規化は 1 回だけ ─────────────────────────────
+
+describe("制約 ID の正規化は 1 回だけである（Issue #434・D2）", () => {
+  it("接頭辞が 1 つ残る既知 ID は通り、保存する値も 1 回だけ外した形になる", async () => {
+    // `### action` と `### ### ### action` の見出しを持つ文書 → 制約集合は `action` と `### action`
+    const documents = [{ name: "語彙の意味", text: "### action\n説明。\n### ### ### action\n説明。" }];
+    const output = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-1", requirementId: "R-1", part: "部分", constraintIds: ["### ### action"], reason: "理由", alternative: "代わり" },
+      ],
+    };
+    const recorded = [
+      { kind: "structured" as const, output, usage: undefined },
+      { kind: "structured" as const, output, usage: undefined },
+    ];
+    const recording = createRecordingClient(recorded);
+    const result = await runSurface({
+      list: REQUIREMENT_LIST,
+      documents,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 保存する値は、1 回だけ外した `### action`（繰り返し外さない）
+    expect(result.value.unwritable[0]?.constraintIds).toEqual(["### action"]);
+  });
+});

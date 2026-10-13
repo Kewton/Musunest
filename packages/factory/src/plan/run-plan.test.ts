@@ -192,6 +192,7 @@ const SURFACE_OUTPUT_CLEAR = { ambiguities: [], unwritable: [] };
 
 /** 対象外の参照が無いときの、差分点検の記録の `outOfScope`（Issue #434） */
 const NO_OUT_OF_SCOPE = {
+  scanned: true,
   claims: 0,
   ambiguities: 0,
   deduped: 0,
@@ -210,6 +211,7 @@ const NO_OUT_OF_SCOPE = {
 /** 差分点検の記録の `outOfScope` を、指定した件数だけ変えて作る（Issue #434） */
 function diffOutOfScope(
   overrides: {
+    scanned?: boolean;
     claims?: number;
     ambiguities?: number;
     deduped?: number;
@@ -220,6 +222,7 @@ function diffOutOfScope(
   } = {},
 ) {
   return {
+    scanned: overrides.scanned ?? true,
     claims: overrides.claims ?? 0,
     ambiguities: overrides.ambiguities ?? 0,
     deduped: overrides.deduped ?? 0,
@@ -4099,6 +4102,62 @@ describe("差分点検・§3：受理済み申告の正確な再申告だけを�
     expect(result.plan.accepted_unwritable.map((entry) => entry.part_id)).toEqual(["P:U-0", "P:U-dup"]);
     expect(result.diffReviews[0]?.outOfScope).toEqual(NO_OUT_OF_SCOPE);
   });
+
+  it("制約検査で止まっても、対象外の集合・分類と、識別済みの重複件数を保存する（D1）", async () => {
+    // 空の制約を持つ申告（存在しない要件を指す）と、対象外の曖昧さを、正確な再申告に混ぜる
+    const empty = { id: "U-empty", requirementId: "R:unknown", part: "部分", constraintIds: [], reason: "理由", alternative: "代案" };
+    const outAmbiguity = { id: "OI-old", requirementId: "R-1", text: "古い曖昧", critical: true };
+    const result = await runSingleDiff({ ambiguities: [outAmbiguity], unwritable: [duplicateClaim(), empty] });
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("surface");
+    expect(result.failure?.kind).toBe("unmet");
+    // 空の制約は、形と現文書の検査で断る（除外で隠さない）
+    expect(result.failure?.problems).toEqual([{ field: "unwritable[1].constraintIds", code: "constraint-id-missing" }]);
+    // 止まっても、対象外の集合・分類と、識別済みの重複件数（原添字つき）は残る
+    expect(result.diffReviews[0]?.outOfScope).toEqual(
+      diffOutOfScope({
+        scanned: true,
+        claims: 2,
+        ambiguities: 1,
+        deduped: 1,
+        rejectedClaims: 1,
+        rejectedAmbiguities: 1,
+        kinds: { source: { claims: 1, ambiguities: 1 }, unknown: { claims: 1 } },
+        dedupedIndexes: [0],
+      }),
+    );
+  });
+
+  it("正規化しても接頭辞が残る既知 ID の再申告は、別の集合なので重複と認めず止める（D2）", async () => {
+    const documents = [{ name: "語彙の意味", text: "### action\n説明。\n### ### ### action\n説明。" }];
+    const accepted = { id: "U-0", requirementId: "R-1", part: "初回の部分", constraintIds: ["action"], reason: "理由", alternative: "代案" };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured({ ambiguities: [{ id: "OI-1", requirementId: "R-1", text: "曖昧", critical: true }], unwritable: [accepted] }),
+      structured(questionsFor("OI-1")),
+      // 1 回の正規化で `### action` になる（元の集合 `action` とは別の、実在する集合）
+      structured({ ambiguities: [], unwritable: [{ ...accepted, id: "U-dup", constraintIds: ["### ### action"] }] }),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      [surfaceSupportQuestionName(0)]: choice("supports", 0.95),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED, { documents }));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("surface");
+    // 二重に正規化しないので、`### action` と `action` を同一視せず、重複ではなく却下になる
+    expect(result.diffReviews[0]?.outOfScope.deduped).toBe(0);
+    expect(result.diffReviews[0]?.outOfScope.rejectedClaims).toBe(1);
+  });
 });
 
 describe("差分点検・§3：重複と認めない構造の条件（Issue #434）", () => {
@@ -4114,9 +4173,11 @@ describe("差分点検・§3：重複と認めない構造の条件（Issue #434
   };
   const snapshot: AcceptedClaimSnapshot = {
     requirementId: "R-1",
+    partId: "P:U-0",
     part: "初回の部分",
     reason: "理由",
     alternative: "代案",
+    alternativeId: "R:alt:U-0",
     constraintIds: ["記録"],
     requirementText: "R-1",
     changeKey: undefined,
@@ -4154,5 +4215,47 @@ describe("差分点検・§3：重複と認めない構造の条件（Issue #434
   it("要件の文が受理時から変わっていれば重複と認めない", () => {
     const changed: PlanRequirement = { ...requirement("R-1", [acceptedPart]), text: "変わった文" };
     expect(isAcceptedUnwritableDuplicate({ ...base, requirements: [changed, requirement("R:alt:U-0")] })).toBe(false);
+  });
+
+  it("別の要件が同じ part_id を持てば、重複と認めない（D3）", () => {
+    const other = requirement("R-other", [{ id: "P:U-0", text: "別の文", disposition: "accepted_removal" }]);
+    expect(isAcceptedUnwritableDuplicate({ ...base, requirements: [...base.requirements, other] })).toBe(false);
+  });
+
+  it("同じ要件の中に同じ part_id・別の文があれば、重複と認めない（D3）", () => {
+    const r1 = requirement("R-1", [acceptedPart, { id: "P:U-0", text: "別の文", disposition: "accepted_removal" }]);
+    expect(isAcceptedUnwritableDuplicate({ ...base, requirements: [r1, requirement("R:alt:U-0")] })).toBe(false);
+  });
+
+  it("受理した控えの対応（part_id・代わりの案の ID）が入れ替わっていれば、重複と認めない（D3）", () => {
+    expect(isAcceptedUnwritableDuplicate({ ...base, snapshots: [{ ...snapshot, partId: "P:other" }] })).toBe(false);
+    expect(isAcceptedUnwritableDuplicate({ ...base, snapshots: [{ ...snapshot, alternativeId: "R:alt:other" }] })).toBe(false);
+  });
+
+  it("制約集合は、1 回だけ正規化した値をそのまま比べる（接頭辞が残る別集合は同一視しない。D2）", () => {
+    // 別の集合（`action` と `### action`）→ 重複と認めない
+    expect(
+      isAcceptedUnwritableDuplicate({
+        ...base,
+        snapshots: [{ ...snapshot, constraintIds: ["action"] }],
+        claim: { ...claim, constraintIds: ["### action"] },
+      }),
+    ).toBe(false);
+    // どちらも `### action`（正規化後に接頭辞が残る既知 ID）→ 同じ集合なので重複と認める
+    expect(
+      isAcceptedUnwritableDuplicate({
+        ...base,
+        snapshots: [{ ...snapshot, constraintIds: ["### action"] }],
+        claim: { ...claim, constraintIds: ["### action"] },
+      }),
+    ).toBe(true);
+    // どちらも `action` → 重複と認める
+    expect(
+      isAcceptedUnwritableDuplicate({
+        ...base,
+        snapshots: [{ ...snapshot, constraintIds: ["action"] }],
+        claim: { ...claim, constraintIds: ["action"] },
+      }),
+    ).toBe(true);
   });
 });
