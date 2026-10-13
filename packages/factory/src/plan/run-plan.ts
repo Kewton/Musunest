@@ -66,7 +66,17 @@ import {
   type PlanTurn,
 } from "./session.js";
 import { checkSurfaceTargets, runSurface, type PlanSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceOutOfScopeRef, type SurfaceTargetResult } from "./surface.js";
+import {
+  PLAN_OPEN_ISSUE_SOURCES,
+  detectOpenIssueCollisions,
+  resolveTargetOf,
+  surfaceCheckOpenIssueId,
+  type PlanOpenIssueConflicts,
+  type PlanOpenIssueSource,
+} from "./open-issues.js";
 import { runSurfaceCheck, type SurfaceClaimDiagnostic, type SurfaceJudgment, type SurfaceUncheckedClaim } from "./surface-check.js";
+
+export type { PlanOpenIssueConflicts, PlanOpenIssueSource } from "./open-issues.js";
 
 /** Plan の段（記録の `stage` に使う。生成の段とは別の一覧である） */
 export const PLAN_STAGE_IDS = [
@@ -173,6 +183,8 @@ export const PLAN_DIAGNOSIS_CODES = [
   "question-limit",
   "round-trip-limit",
   "critical-no-question",
+  // 同じ ID の開いている事項の行が 2 つ以上ある（問いを出す前に止める。Issue #460）
+  "duplicate-open-issue",
   // 上限のあとに重大でない事項だけが残った（既定の無い観点・自由文など。Issue #408）
   "noncritical-without-default",
   // 一覧に無いもの
@@ -546,6 +558,12 @@ export interface PlanResultBase {
    * （Issue #434）。往復ごとに 1 件。**値を持たず件数だけ**である。増えた要件が 0 件の往復では積まない。
    */
   readonly diffReviews: readonly PlanDiffReviewRecord[];
+  /**
+   * 同じ ID の開いている事項の行の衝突の記録（**値を持たず件数と有限の分類だけ**。Issue #460）。衝突した
+   * ID の件数・衝突した行の件数（既存の出どころ × 追加の出どころの組ごと）・解決の対象が 0 行だった件数・
+   * 衝突を検出した往復の版を持つ。事項 ID・要件 ID・文・答えは入れない。
+   */
+  readonly openIssueConflicts: PlanOpenIssueConflicts;
 }
 
 /** 依頼文で閉じた事項から作る `decisions` の ID の頭（確認の画面が「依頼文で決めたこと」を見分ける） */
@@ -654,6 +672,17 @@ class PlanStop extends Error {
     super(`段 ${failure.stage} で止まりました（${failure.kind}）`);
     this.name = "PlanStop";
     this.failure = failure;
+  }
+}
+
+/**
+ * 同じ ID の open の行が 2 つ以上あるのに解決しようとした合図（Issue #460）。問いを出す前の衝突の停止で
+ * 先に止まる設計なので、ここへ来るのは不変条件の破れである。同じ理由（`duplicate-open-issue`）で止める。
+ */
+class PlanOpenIssueConflictStop extends Error {
+  constructor() {
+    super("同じ ID の開いている事項が 2 つ以上あります");
+    this.name = "PlanOpenIssueConflictStop";
   }
 }
 
@@ -1150,6 +1179,53 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   // 受理した「書けない」の申告の控え（重複の照合に使う。Issue #434）
   const acceptedClaimSnapshots: AcceptedClaimSnapshot[] = [];
 
+  // ── 開いている事項の行と、その出どころ・衝突の記録（Issue #460）─────────────────
+  // `openIssues` と `openIssueSources` は**同じ長さ**である（行を畳まない・並べ替えない。状態の書き換えは
+  // index で行うので、出どころの対応もずれない）。
+  const openIssues: PlanOpenIssue[] = [];
+  const openIssueSources: PlanOpenIssueSource[] = [];
+  // 仕様の版（往復ごとに上がる）。衝突を検出した版の記録にも使う（Issue #460）
+  let revision = 1;
+  // 衝突の記録（値ではなく件数だけ。事項 ID は集合の大きさにしか使わない。Issue #460）
+  const conflictIds = new Set<string>();
+  const conflictRows = new Map<string, number>();
+  let emptyResolveTargets = 0;
+  let conflictRound: number | null = null;
+  /** 衝突した ID を記録する（出どころの組ごとに件数を数える。Issue #460） */
+  const recordConflict = (existing: PlanOpenIssueSource, added: PlanOpenIssueSource, id: string): void => {
+    conflictIds.add(id);
+    const key = `${existing}\u0000${added}`;
+    conflictRows.set(key, (conflictRows.get(key) ?? 0) + 1);
+    if (conflictRound === null) conflictRound = revision;
+  };
+  /**
+   * 開いている事項に行を 1 つ足す（Issue #460）。**渡された形のまま足す**——畳まない・ID を振り直さない。
+   * 同じ ID の行（状態を問わない）が既にあれば、衝突として記録する（止めるのは呼ぶ側）。出どころの種類は
+   * 記録の分類にだけ使う。
+   */
+  const addOpenIssue = (issue: PlanOpenIssue, source: PlanOpenIssueSource): void => {
+    const collision = detectOpenIssueCollisions([...openIssues, issue]).find(
+      (candidate) => candidate.addedIndex === openIssues.length,
+    );
+    if (collision !== undefined) {
+      recordConflict(openIssueSources[collision.existingIndex] ?? "unresolved", source, issue.id);
+    }
+    openIssues.push(issue);
+    openIssueSources.push(source);
+  };
+  /** 衝突の記録を、結果の形（組ごとの件数を組み直す）に写す（Issue #460） */
+  const buildOpenIssueConflicts = (): PlanOpenIssueConflicts => ({
+    ids: conflictIds.size,
+    rows: PLAN_OPEN_ISSUE_SOURCES.flatMap((existing) =>
+      PLAN_OPEN_ISSUE_SOURCES.flatMap((added) => {
+        const count = conflictRows.get(`${existing}\u0000${added}`) ?? 0;
+        return count === 0 ? [] : [{ existing, added, count }];
+      }),
+    ),
+    emptyTargets: emptyResolveTargets,
+    round: conflictRound,
+  });
+
   const pushRecord = (
     stage: PlanStageId,
     status: StageStatus,
@@ -1333,6 +1409,19 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     surfaceCheck: aggregateSurfaceCheck(),
     surfaceCheckDiagnostics: aggregateSurfaceCheckDiagnostics(),
     diffReviews: diffReviews.map(finalizeDiffReview),
+    openIssueConflicts: buildOpenIssueConflicts(),
+  });
+
+  /**
+   * 同じ ID の開いている事項の行の衝突で確定できない結果（Issue #460）。**値の中身を含まない**——理由は
+   * 有限の分類（`session`・`duplicate-open-issue`）と欄の名前だけである。開いている事項は既存の
+   * `cannot-confirm` と同じ形（開いている重大な事項）で載せる。`try` の外にも置けるよう、ここで組む。
+   */
+  const openIssueConflictResult = (): PlanResult => ({
+    kind: "cannot-confirm",
+    openIssues: openIssues.filter((issue) => issue.status === "open" && issue.critical),
+    reasons: [{ source: "session", code: "duplicate-open-issue", path: "open_issues" }],
+    ...resultBase(),
   });
 
   try {
@@ -1390,12 +1479,12 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       value: decision,
       reason: "Plan が既定で決めた（確認の画面で直せる）",
     }));
-    const openIssues: PlanOpenIssue[] = list.unresolved.map((text, index) => ({
-      id: `OI:unresolved:${index + 1}`,
-      text,
-      critical: true,
-      status: "open",
-    }));
+    for (const [index, text] of list.unresolved.entries()) {
+      addOpenIssue(
+        { id: `OI:unresolved:${index + 1}`, text, critical: true, status: "open" },
+        "unresolved",
+      );
+    }
 
     // P1 の逆照合で、引用が原文に無い・1 か所に決まらない要件が残っていれば、Plan を確定させない
     // （Issue #382）。`run.ts` は同じ落ちを未達として数える（⑦ の合否）。ここでも同じ扱いにする。
@@ -1436,19 +1525,22 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       runSurface({ list, documents: input.documents, gateway, catalog: catalogData }),
     );
     for (const ambiguity of surface.ambiguities) {
-      openIssues.push({
-        id: ambiguity.id,
-        text: ambiguity.text,
-        critical: ambiguity.critical,
-        status: "open",
-      });
+      addOpenIssue(
+        {
+          id: ambiguity.id,
+          text: ambiguity.text,
+          critical: ambiguity.critical,
+          status: "open",
+        },
+        "surface",
+      );
     }
     // コードが目録から作った事項を、開いている事項に足す（04 §3・Issue #408）。**ID の接頭辞は解析
     // しない**——モデルが同じ形（`OI:catalog:`）の ID を作っても、この対応には入らないので既定の対象に
     // ならない（後で `applyDefaults` が重複として弾く）。
     for (const facet of catalog.unspecified) {
       const issue = catalogOpenIssue(facet);
-      openIssues.push(issue);
+      addOpenIssue(issue, "catalog");
       catalogIssueFacets.set(issue.id, facet);
     }
 
@@ -1501,12 +1593,15 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     // 曖昧さと判定された申告（了承除外になるはずだった部分）は、**重大な**開いている事項にして P4 に渡す。
     // 聞かずに落とさない。
     for (const claim of surfaceCheck.ambiguities) {
-      openIssues.push({
-        id: `OI:surface-check:${claim.index}`,
-        text: claim.part,
-        critical: true,
-        status: "open",
-      });
+      addOpenIssue(
+        {
+          id: surfaceCheckOpenIssueId(initialCheckIndex + 1, claim.index),
+          text: claim.part,
+          critical: true,
+          status: "open",
+        },
+        "surface-check",
+      );
     }
     // 未点検が 1 件でも残れば、P4・確認に進まず「確定できない」。理由は値の中身を含まない（Issue #432）。
     if (surfaceCheck.unchecked.length > 0) {
@@ -1575,7 +1670,6 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     applyAcceptedUnwritable(surfaceCheck.accepted);
 
     // ── 往復（P4 質問 → 次の一歩 → P5 答えの反映）────────────────────────
-    let revision = 1;
     const turns: PlanTurn[] = [];
     const priorAnswers: ClassifiedAnswer[] = [];
     const askedQuestionIds = new Set<string>();
@@ -1604,10 +1698,26 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       closedByDefault: defaultDecisions.slice(),
     });
 
+    /**
+     * 解決の対象（同じ ID の open の行）を 1 つに取る（Issue #460）。open の行がちょうど 1 行ならその位置を
+     * 返す。0 行なら何も閉じず件数を記録して `undefined`。2 行以上なら ID だけで閉じず（畳まない・
+     * まとめて閉じない）、問いを出す前の停止で先に止まる設計だが、到達したら不変条件の破れとして同じ理由で
+     * 止める（`undefined` を返さずに投げる）。
+     */
+    const resolveTargetIndex = (issueId: string): number | undefined => {
+      const target = resolveTargetOf(openIssues, issueId);
+      if (target.kind === "none") {
+        emptyResolveTargets += 1;
+        return undefined;
+      }
+      if (target.kind === "multiple") throw new PlanOpenIssueConflictStop();
+      return target.index;
+    };
+
     const resolveIssue = (issueId: string, answerId: string): void => {
-      const index = openIssues.findIndex((issue) => issue.id === issueId);
-      const issue = openIssues[index];
-      if (issue === undefined) return;
+      const index = resolveTargetIndex(issueId);
+      const issue = index === undefined ? undefined : openIssues[index];
+      if (index === undefined || issue === undefined) return;
       openIssues[index] = { ...issue, status: "resolved", resolution: { answer_id: answerId } };
     };
 
@@ -1619,9 +1729,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
 
     /** 依頼文で閉じた事項を、聞かずに決めたこと（`decisions`）にして閉じる（04 §3 P4・Issue #370） */
     const applySourceClosure = (closure: PlanSourceClosure): void => {
-      const index = openIssues.findIndex((issue) => issue.id === closure.issueId && issue.status === "open");
-      const issue = openIssues[index];
-      if (issue === undefined) return;
+      const index = resolveTargetIndex(closure.issueId);
+      const issue = index === undefined ? undefined : openIssues[index];
+      if (index === undefined || issue === undefined) return;
       const decisionId = `${SOURCE_CLOSURE_DECISION_PREFIX}${closure.issueId}`;
       decisions.push({
         id: decisionId,
@@ -1877,12 +1987,12 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       });
       reviewRecord.openIssues = diffSurface.ambiguities.length + diffCatalog.unspecified.length;
       for (const ambiguity of diffSurface.ambiguities) {
-        openIssues.push({ id: ambiguity.id, text: ambiguity.text, critical: ambiguity.critical, status: "open" });
+        addOpenIssue({ id: ambiguity.id, text: ambiguity.text, critical: ambiguity.critical, status: "open" }, "surface");
       }
       // コードが目録から作った事項を、開いている事項に足す（`catalogIssueFacets` にも入れて既定の対象にする）
       for (const facet of diffCatalog.unspecified) {
         const issue = catalogOpenIssue(facet);
-        openIssues.push(issue);
+        addOpenIssue(issue, "catalog");
         catalogIssueFacets.set(issue.id, facet);
       }
 
@@ -1927,7 +2037,15 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       reviewRecord.openIssues += diffSurfaceCheck.ambiguities.length;
       // 曖昧さと判定された申告は、**重大な**開いている事項にして P4 に渡す（聞かずに落とさない）
       for (const claim of diffSurfaceCheck.ambiguities) {
-        openIssues.push({ id: `OI:surface-check:${claim.index}`, text: claim.part, critical: true, status: "open" });
+        addOpenIssue(
+          {
+            id: surfaceCheckOpenIssueId(diffCheckIndex + 1, claim.index),
+            text: claim.part,
+            critical: true,
+            status: "open",
+          },
+          "surface-check",
+        );
       }
       // 未点検が残れば確定できない（理由は値の中身を含まない。点検の番号つき。Issue #432・#434）
       if (diffSurfaceCheck.unchecked.length > 0) {
@@ -1944,6 +2062,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     };
 
     for (;;) {
+      // 同じ ID の行の衝突は、**既定の適用と P4 を行う前に**有限の理由で止める（Issue #460）。同じ ID の
+      // 行が 2 つある仕様は確定に至らないので、早く止めても失うものは無い。
+      if (conflictIds.size > 0) return openIssueConflictResult();
       // 表の既定で閉じるのは、**P4 の要否を決める前**（最初の往復を含む。Issue #408）
       applyDefaults();
       const open = openIssues.filter((issue) => issue.status === "open");
@@ -2074,12 +2195,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       // 矛盾から組み立てた問いを、次の往復に回す（§6 の 7）。対応する未解決の事項を開いておく
       for (const followUp of answerResult.followUpQuestions) {
         if (!openIssues.some((issue) => issue.id === followUp.openIssueId)) {
-          openIssues.push({
-            id: followUp.openIssueId,
-            text: followUp.text,
-            critical: true,
-            status: "open",
-          });
+          addOpenIssue(
+            { id: followUp.openIssueId, text: followUp.text, critical: true, status: "open" },
+            "contradiction",
+          );
         }
       }
       followUpQuestions = answerResult.followUpQuestions;
@@ -2131,6 +2250,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     checkGateAtEnd("confirm");
     return { kind: "confirmed", plan: confirmed.plan, ...resultBase() };
   } catch (error) {
+    // 同じ ID の open の行が 2 つ以上あるのに解決しようとした（不変条件の破れ。Issue #460）。
+    // 問いを出す前の衝突の停止と同じ理由で止める。
+    if (error instanceof PlanOpenIssueConflictStop) return openIssueConflictResult();
     if (error instanceof PlanStop) {
       return { kind: "stopped", reason: error.failure.kind, failure: error.failure, ...resultBase() };
     }
