@@ -1567,3 +1567,33 @@ describe("見出しの元の項目（groupBy）の形と中身（Issue #433）",
     expect(checkDesignOutput(legacy, LEGACY_DESIGN_CONTRACT).ok).toBe(true);
   });
 });
+
+// ── 中身・形の再試行の数（Issue #446）──────────────────────────────
+
+describe("② の中身・形の再試行の数（Issue #446）", () => {
+  it("中身の検査に 1 回落ちて 2 回目で通ると、中身 1・形 0", async () => {
+    const recording = createRecordingClient([structured(DESIGN_MISSING_R2), structured(PLANNED_DESIGN)]);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+    const outcome = await runDesign({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
+    expect(outcome.ok).toBe(true);
+    // 形は 1 回目で通り、中身の作り直しだけを 1 回数える
+    expect(gateway.retryCounts).toEqual({ communication: 0, shape: 0, content: 1 });
+  });
+
+  it("1 回目の形が落ちて同じ回で通ると、形 1・中身 0", async () => {
+    const recording = createRecordingClient([structured(MALFORMED_DESIGN), structured(PLANNED_DESIGN)]);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+    const outcome = await runDesign({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
+    expect(outcome.ok).toBe(true);
+    // 形のやり直しを 1 回数え、中身の作り直しは 0（同じ回で通った）
+    expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
+  });
+
+  it("2 回とも中身に合わない（unmet）とき、中身の作り直しは 1", async () => {
+    const recording = createRecordingClient([structured(DESIGN_MISSING_R2), structured(DESIGN_BAD_CONSTRAINT)]);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+    const outcome = await runDesign({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
+    expect(outcome.ok).toBe(false);
+    expect(gateway.retryCounts).toEqual({ communication: 0, shape: 0, content: 1 });
+  });
+});

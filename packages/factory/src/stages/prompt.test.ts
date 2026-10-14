@@ -10,6 +10,7 @@ import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRes
 import { OpenAiIncompleteError } from "../openai.js";
 import {
   DATA_IS_NOT_INSTRUCTIONS_RULE,
+  STEP_ATTEMPTS,
   buildStructuredRequest,
   callStructuredChecked,
   constraintExcerpt,
@@ -146,16 +147,30 @@ describe("規則の定義と、送信用の文の組み立て（Issue #431）", 
 });
 
 describe("形が合わない応答は 1 回だけやり直す（02 §2.2）", () => {
+  it("1 回目の応答が合えば、形の再試行は 0（Issue #446）", async () => {
+    const recording = createRecordingClient([{ kind: "structured", output: { n: 1 }, usage: undefined }]);
+    const gateway = makeGateway(recording.client);
+    const outcome = await callStructuredChecked(gateway, PLAN);
+    expect(outcome.ok).toBe(true);
+    expect(recording.structured).toHaveLength(1);
+    expect(gateway.retryCounts.shape).toBe(0);
+    expect(gateway.retryCounts.content).toBe(0);
+  });
+
   it("形が合わない応答は 1 回だけやり直し、2 回目が合えば通る", async () => {
     const recording = createRecordingClient([
       { kind: "structured", output: { bad: true }, usage: undefined },
       { kind: "structured", output: { n: 7 }, usage: undefined },
     ]);
-    const outcome = await callStructuredChecked(makeGateway(recording.client), PLAN);
+    const gateway = makeGateway(recording.client);
+    const outcome = await callStructuredChecked(gateway, PLAN);
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     expect(outcome.value).toEqual({ n: 7 });
     expect(recording.structured).toHaveLength(2);
+    // 形のやり直しを 1 つ数える（Issue #446）
+    expect(gateway.retryCounts.shape).toBe(1);
+    expect(STEP_ATTEMPTS).toBe(2);
   });
 
   it("形が合わない応答が 2 回続くと段の失敗になる", async () => {
@@ -163,11 +178,14 @@ describe("形が合わない応答は 1 回だけやり直す（02 §2.2）", ()
       { kind: "structured", output: { bad: true }, usage: undefined },
       { kind: "structured", output: { also: "bad" }, usage: undefined },
     ]);
-    const outcome = await callStructuredChecked(makeGateway(recording.client), PLAN);
+    const gateway = makeGateway(recording.client);
+    const outcome = await callStructuredChecked(gateway, PLAN);
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.failure.kind).toBe("malformed");
     expect(recording.structured).toHaveLength(2);
+    // 2 回続けて落ちても、やり直しは 1 回（Issue #446）
+    expect(gateway.retryCounts.shape).toBe(1);
   });
 
   it("問題の型の任意の code は、段の失敗まで保たれる（欄の名前と message の写し方は変えない。Issue #397）", async () => {

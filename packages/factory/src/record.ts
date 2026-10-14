@@ -14,7 +14,13 @@ import {
   HEADLESS_SCHEMA_VERSION,
   type HeadlessSummaryWire,
 } from "@musunest/appspec-schema";
-import { cacheWriteTokensOf, isIncompleteResponseError } from "./call.js";
+import {
+  cacheWriteTokensOf,
+  isIncompleteResponseError,
+  type AttemptCounts,
+  type CallCounts,
+  type RetryCounts,
+} from "./call.js";
 import type {
   LlmClient,
   LlmStructuredRequest,
@@ -130,6 +136,25 @@ export interface UsageSnapshot {
   readonly reasoning_tokens: number;
 }
 
+/**
+ * 試行の終端の計に、段の記録として写す下位の欄（この欄だけを写す。Issue #446）。
+ * 値は `AttemptCounts` と同じ形を取る（段の記録の `attempts`）。
+ */
+export const ATTEMPT_KEYS = [
+  "started",
+  "responded",
+  "errors",
+  "cancelled_deadline",
+  "cancelled_timeout",
+  "not_started",
+] as const;
+
+/** 未着手の理由別の数に、段の記録として写す下位の欄（この欄だけを写す。Issue #446） */
+export const NOT_STARTED_KEYS = ["deadline", "budget", "limit", "timeout"] as const;
+
+/** 再試行の数に、段の記録として写す下位の欄（この欄だけを写す。Issue #446） */
+export const RETRY_KEYS = ["communication", "shape", "content"] as const;
+
 /** 段ごとの記録の欄（この欄だけを持つ） */
 export const STAGE_RECORD_KEYS = [
   "stage",
@@ -143,6 +168,8 @@ export const STAGE_RECORD_KEYS = [
   "cache_write_tokens",
   "output_tokens",
   "reasoning_tokens",
+  "attempts",
+  "retries",
   "failure_kind",
 ] as const;
 export type StageRecordKey = (typeof STAGE_RECORD_KEYS)[number];
@@ -161,6 +188,10 @@ export interface StageRecord {
   readonly cache_write_tokens: number;
   readonly output_tokens: number;
   readonly reasoning_tokens: number;
+  /** 呼び出しの試行の開始・応答・誤り・打ち切り・未着手の数（Issue #446） */
+  readonly attempts: AttemptCounts;
+  /** 通信・形・中身の再試行の数（Issue #446） */
+  readonly retries: RetryCounts;
   readonly failure_kind: FailureKind | null;
 }
 
@@ -183,6 +214,7 @@ export const RUN_RECORD_KEYS = [
   "stages",
   "arbitration",
   "budget_remaining_usd",
+  "budget_reserved_usd",
   "missing_usage_calls",
   "failure",
 ] as const;
@@ -200,6 +232,11 @@ export interface RunRecord {
   readonly stages: readonly StageRecord[];
   readonly arbitration: ArbitrationCounts;
   readonly budget_remaining_usd: number;
+  /**
+   * 未精算の予約額（USD。打ち切った呼び出しの予約は残す。Issue #446）。組み立てで必ず書く欄なので、
+   * 読む側（古い記録や手で書いた仕掛け）は省ける。
+   */
+  readonly budget_reserved_usd?: number;
   readonly missing_usage_calls: number;
   readonly failure: FailureAttribution | null;
 }
@@ -239,14 +276,41 @@ function pickStageOperation(value: unknown): StageOperation | null {
 }
 
 /**
+ * 試行の終端の計から、**列挙した下位の欄だけ**を写す（余分な欄は写さない。Issue #446）。
+ * 渡した `counts` の差は、その段の呼び出しの試行の終端である。
+ */
+function pickAttempts(counts: AttemptCounts): AttemptCounts {
+  return {
+    started: counts.started,
+    responded: counts.responded,
+    errors: counts.errors,
+    cancelled_deadline: counts.cancelled_deadline,
+    cancelled_timeout: counts.cancelled_timeout,
+    not_started: {
+      deadline: counts.not_started.deadline,
+      budget: counts.not_started.budget,
+      limit: counts.not_started.limit,
+      timeout: counts.not_started.timeout,
+    },
+  };
+}
+
+/** 再試行の数から、**列挙した下位の欄だけ**を写す（余分な欄は写さない。Issue #446） */
+function pickRetries(counts: RetryCounts): RetryCounts {
+  return { communication: counts.communication, shape: counts.shape, content: counts.content };
+}
+
+/**
  * 段ごとの記録を組み立てる。**列挙した欄だけ**を名指しで写す（余分な欄は写さない）。
- * 渡した `usage` の差は、その段が使ったトークンである。`operation` は省けば `null`（通常の段）。
+ * 渡した `usage` の差は、その段が使ったトークンである。`counts` の差は、その段の呼び出しの試行の終端と
+ * 再試行である（Issue #446）。`operation` は省けば `null`（通常の段）。
  */
 export function makeStageRecord(
   stage: StageId,
   status: StageStatus,
   durationMs: number,
   usage: UsageSnapshot,
+  counts: CallCounts,
   failureKind: FailureKind | null,
   operation: StageOperation | null = null,
 ): StageRecord {
@@ -262,6 +326,8 @@ export function makeStageRecord(
     cache_write_tokens: usage.cache_write_tokens,
     output_tokens: usage.output_tokens,
     reasoning_tokens: usage.reasoning_tokens,
+    attempts: pickAttempts(counts.attempts),
+    retries: pickRetries(counts.retries),
     failure_kind: failureKind,
   };
 }
@@ -376,7 +442,15 @@ export function buildRunRecord(input: RunRecord): RunRecord {
     spec_engine_version: input.spec_engine_version,
     factory_version: input.factory_version,
     stages: input.stages.map((stage) =>
-      makeStageRecord(stage.stage, stage.status, stage.duration_ms, stage, stage.failure_kind, stage.operation),
+      makeStageRecord(
+        stage.stage,
+        stage.status,
+        stage.duration_ms,
+        stage,
+        { attempts: stage.attempts, retries: stage.retries },
+        stage.failure_kind,
+        stage.operation,
+      ),
     ),
     arbitration: {
       upheld: input.arbitration.upheld,
@@ -384,6 +458,7 @@ export function buildRunRecord(input: RunRecord): RunRecord {
       undecidable: input.arbitration.undecidable,
     },
     budget_remaining_usd: input.budget_remaining_usd,
+    budget_reserved_usd: input.budget_reserved_usd ?? 0,
     missing_usage_calls: input.missing_usage_calls,
     failure: failure === null ? null : pickFailure(failure),
   };
@@ -426,6 +501,7 @@ export function buildSummary(record: RunRecord, base: SummaryBase): Summary {
     stages: picked.stages,
     arbitration: picked.arbitration,
     budget_remaining_usd: picked.budget_remaining_usd,
+    budget_reserved_usd: picked.budget_reserved_usd ?? 0,
     missing_usage_calls: picked.missing_usage_calls,
     failure: picked.failure,
   };

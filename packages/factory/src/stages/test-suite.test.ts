@@ -126,15 +126,18 @@ describe("②' は 1 回だけ作り直す（02 §1）", () => {
       structured(MISSING_BOUNDARY_OUTPUT),
       structured(TEST_SUITE_OUTPUT),
     ]);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
     const outcome = await runTestSuite({
       list: REQUIREMENT_LIST,
       documents: SAMPLE_DOCUMENTS,
-      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      gateway,
     });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     expect(outcome.value.rounds).toBe(2);
     expect(recording.structured).toHaveLength(2);
+    // 中身の作り直しを 1 つ数え、形のやり直しは 0（Issue #446）
+    expect(gateway.retryCounts).toEqual({ communication: 0, shape: 0, content: 1 });
   });
 
   it("作り直しても欠ける要件は未達として返す", async () => {
@@ -142,16 +145,19 @@ describe("②' は 1 回だけ作り直す（02 §1）", () => {
       structured(MISSING_BOUNDARY_OUTPUT),
       structured(MISSING_BOUNDARY_OUTPUT),
     ]);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
     const outcome = await runTestSuite({
       list: REQUIREMENT_LIST,
       documents: SAMPLE_DOCUMENTS,
-      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      gateway,
     });
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.failure.kind).toBe("unmet");
     if (outcome.failure.kind !== "unmet") return;
     expect(outcome.failure.problems.some((problem) => problem.message.includes("boundary"))).toBe(true);
+    // 2 回続けて中身に合わなくても、作り直しは 1 回だけ（Issue #446）
+    expect(gateway.retryCounts).toEqual({ communication: 0, shape: 0, content: 1 });
   });
 });
 

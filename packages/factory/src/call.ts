@@ -323,6 +323,98 @@ export function createCallGate(options: {
   };
 }
 
+/**
+ * 未着手の理由別の数（Issue #446）。**実呼び出しを始めなかった**ことを示す——開始の数は増やさない。
+ * 締切の残りが無い・予約が残高を超える・呼び出しの数の上限・timeout を伸ばせない、の 4 種である。
+ */
+export interface NotStartedCounts {
+  /** 締切の残りが無い */
+  readonly deadline: number;
+  /** 予約が残高を超える（残高切れ） */
+  readonly budget: number;
+  /** 呼び出しの数の上限に触れた */
+  readonly limit: number;
+  /** timeout を伸ばせない（同じ・短い timeout ではやり直さない） */
+  readonly timeout: number;
+}
+
+/**
+ * 呼び出しの**試行の終端**の計（Issue #446）。**1 つの開始につき 1 度だけ**数える——競合（応答と打ち切り）に
+ * 勝った結果で終端を決める。**不変の式**：開始 ＝ 応答 ＋ 誤り ＋ 締切の打ち切り ＋ timeout の打ち切り。
+ * 未着手は開始に数えない。`UsageMeter.snapshot` と同じく、**2 つの時点の差**を取れる。
+ */
+export interface AttemptCounts {
+  /** 開始（予約を取って実呼び出しを始めた数。内部の呼び出しの数と同じ時点） */
+  readonly started: number;
+  /** 応答（値が返った数と、未完了の例外で終わった数。未完了は usage の有無によらず応答 1・誤り 0） */
+  readonly responded: number;
+  /** 誤り（未完了以外の例外。通信・HTTP・拒否・形・不正な要求・分類できない例外） */
+  readonly errors: number;
+  /** 締切の打ち切り（呼んでいる途中でジョブの締切に触れて打ち切った） */
+  readonly cancelled_deadline: number;
+  /** timeout の打ち切り（呼び出しごとの timeout で打ち切った） */
+  readonly cancelled_timeout: number;
+  /** 未着手（実呼び出しを始めなかった。理由別） */
+  readonly not_started: NotStartedCounts;
+}
+
+/**
+ * 再試行の数（種類別。Issue #446）。**通信**は口が自分で行う 2 回目以降。**形**（形の検査に落ちて送る
+ * 2 回目）と**中身**（中身の検査に落ちて回す 2 回目）は口が知らないので、段が**告げる口**
+ * （`CallGateway.noteRetry`）で告げる。
+ */
+export interface RetryCounts {
+  /** 通信（口が自分で行う 2 回目以降） */
+  readonly communication: number;
+  /** 形（形の検査に落ちて送る 2 回目） */
+  readonly shape: number;
+  /** 中身（中身の検査に落ちて回す 2 回目） */
+  readonly content: number;
+}
+
+/** 共通の口の計（試行の終端と再試行。Issue #446）。`UsageMeter.snapshot` と同じく 2 時点の差を取れる */
+export interface CallCounts {
+  readonly attempts: AttemptCounts;
+  readonly retries: RetryCounts;
+}
+
+/** 段が口へ告げる再試行の種類（Issue #446）。通信は口が数えるので、ここには無い */
+export type RetryKind = "shape" | "content";
+
+/** 2 つの時点の差（試行の終端。段の前後で取って差を出す。Issue #446） */
+export function attemptsDelta(before: AttemptCounts, after: AttemptCounts): AttemptCounts {
+  return {
+    started: after.started - before.started,
+    responded: after.responded - before.responded,
+    errors: after.errors - before.errors,
+    cancelled_deadline: after.cancelled_deadline - before.cancelled_deadline,
+    cancelled_timeout: after.cancelled_timeout - before.cancelled_timeout,
+    not_started: {
+      deadline: after.not_started.deadline - before.not_started.deadline,
+      budget: after.not_started.budget - before.not_started.budget,
+      limit: after.not_started.limit - before.not_started.limit,
+      timeout: after.not_started.timeout - before.not_started.timeout,
+    },
+  };
+}
+
+/** 2 つの時点の差（再試行の数。段の前後で取って差を出す。Issue #446） */
+export function retryCountsDelta(before: RetryCounts, after: RetryCounts): RetryCounts {
+  return {
+    communication: after.communication - before.communication,
+    shape: after.shape - before.shape,
+    content: after.content - before.content,
+  };
+}
+
+/** 2 つの時点の差（共通の口の計。段の前後で取って差を出す。Issue #446） */
+export function callCountsDelta(before: CallCounts, after: CallCounts): CallCounts {
+  return {
+    attempts: attemptsDelta(before.attempts, after.attempts),
+    retries: retryCountsDelta(before.retries, after.retries),
+  };
+}
+
 const DEFAULT_MAX_ATTEMPTS = 2;
 
 interface Attempted<T> {
@@ -360,6 +452,19 @@ export class CallGateway {
   #calls = 0;
   #toolCalls = 0;
   #retries = 0;
+  // 試行の終端の計（Issue #446）。**1 つの開始につき 1 度だけ**数える。
+  #attemptsStarted = 0;
+  #attemptsResponded = 0;
+  #attemptsErrors = 0;
+  #attemptsCancelledDeadline = 0;
+  #attemptsCancelledTimeout = 0;
+  #notStartedDeadline = 0;
+  #notStartedBudget = 0;
+  #notStartedLimit = 0;
+  #notStartedTimeout = 0;
+  // 形・中身の再試行（段が告げる。Issue #446）
+  #retriesShape = 0;
+  #retriesContent = 0;
 
   constructor(options: CallGatewayOptions) {
     const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
@@ -405,9 +510,45 @@ export class CallGateway {
     return this.#toolCalls;
   }
 
-  /** 再試行の回数（§2.2） */
+  /** 再試行の回数（§2.2。**通信**の再試行＝口が自分で行う 2 回目以降） */
   get retries(): number {
     return this.#retries;
+  }
+
+  /** 試行の終端の計（いまの計。段の前後で差を取る。Issue #446） */
+  get attempts(): AttemptCounts {
+    return {
+      started: this.#attemptsStarted,
+      responded: this.#attemptsResponded,
+      errors: this.#attemptsErrors,
+      cancelled_deadline: this.#attemptsCancelledDeadline,
+      cancelled_timeout: this.#attemptsCancelledTimeout,
+      not_started: {
+        deadline: this.#notStartedDeadline,
+        budget: this.#notStartedBudget,
+        limit: this.#notStartedLimit,
+        timeout: this.#notStartedTimeout,
+      },
+    };
+  }
+
+  /** 再試行の数の計（種類別。いまの計。段の前後で差を取る。Issue #446） */
+  get retryCounts(): RetryCounts {
+    return { communication: this.#retries, shape: this.#retriesShape, content: this.#retriesContent };
+  }
+
+  /** 共通の口の計（試行の終端と再試行。`UsageMeter.snapshot` と同じく 2 時点の差を取れる。Issue #446） */
+  get counts(): CallCounts {
+    return { attempts: this.attempts, retries: this.retryCounts };
+  }
+
+  /**
+   * 形・中身の再試行を、段が口へ**告げる口**（Issue #446）。**通信**の再試行は口が自分で数えるので、
+   * ここへは来ない。形・中身は口が知らない（形の検査・中身の検査は段にある）ので、段の輪が呼ぶ。
+   */
+  noteRetry(kind: RetryKind): void {
+    if (kind === "shape") this.#retriesShape += 1;
+    else this.#retriesContent += 1;
   }
 
   /** 構造化出力（①'・②'・⑤a・⑥'）を共通の口を通して呼ぶ */
@@ -440,35 +581,52 @@ export class CallGateway {
     let previousTimeoutMs: number | undefined;
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
       const remaining = this.#deadline - this.#now();
-      if (remaining <= 0) return { kind: "deadlineExceeded" };
+      if (remaining <= 0) {
+        this.#notStartedDeadline += 1;
+        return { kind: "deadlineExceeded" };
+      }
       // 総呼び出し数の門。**共有の門があれば、生成の呼び出し・その再試行・判定の呼び出し・切り替え・
       // 再点検の合計**で照らし、この試行を数える（Issue #432）。無ければ、この口の `#calls` だけを見る。
       if (this.#gate !== undefined) {
         const begun = this.#gate.begin();
-        if (begun === "deadline") return { kind: "deadlineExceeded" };
+        if (begun === "deadline") {
+          this.#notStartedDeadline += 1;
+          return { kind: "deadlineExceeded" };
+        }
         if (begun === "limit") {
+          this.#notStartedLimit += 1;
           return { kind: "limitExceeded", limit: "callCount", max: this.#gate.limit, actual: this.#gate.attempts() };
         }
       } else if (this.#calls >= this.#limits.callCount) {
+        this.#notStartedLimit += 1;
         return { kind: "limitExceeded", limit: "callCount", max: this.#limits.callCount, actual: this.#calls };
       }
       // 呼び出しごとの timeout は、effort の基準をやり直しごとに倍へ伸ばし、締切の残りで頭を打つ
       // （#302）。**同じ timeout ではやり直さない**——伸ばせないなら、次の試行はせずに止める。
       const timeoutMs = Math.min(this.#callTimeoutMs * 2 ** (attempt - 1), remaining);
-      if (attempt > 1 && previousTimeoutMs !== undefined && timeoutMs <= previousTimeoutMs) break;
+      if (attempt > 1 && previousTimeoutMs !== undefined && timeoutMs <= previousTimeoutMs) {
+        this.#notStartedTimeout += 1;
+        break;
+      }
       const reserved = this.#budget.reserve(maxCostUsd);
       if (!reserved.reserved) {
+        this.#notStartedBudget += 1;
         return { kind: "budgetExceeded", maxCostUsd, remainingUsd: reserved.remainingUsd };
       }
       this.#calls += 1;
+      this.#attemptsStarted += 1;
       if (attempt > 1) this.#retries += 1;
       attempts = attempt;
       try {
         const outcome = await this.#attempt(invoke, timeoutMs, remaining);
-        if (outcome.kind === "deadline") return { kind: "deadlineExceeded" };
+        if (outcome.kind === "deadline") {
+          this.#attemptsCancelledDeadline += 1;
+          return { kind: "deadlineExceeded" };
+        }
         if (outcome.kind === "timeout") {
           // 呼び出しごとの timeout。usage は分からないので予約は残し、**拒否ではなく** `timeout` として
           // 扱い、やり直してよい誤りに入れる（伸ばせなければ、次の周で止まる。§2.2・#302）。
+          this.#attemptsCancelledTimeout += 1;
           lastKind = "timeout";
           lastStatus = undefined;
           previousTimeoutMs = timeoutMs;
@@ -477,6 +635,7 @@ export class CallGateway {
         if (outcome.result.usage !== undefined) {
           this.#budget.settle(reserved.reservation, outcome.result.usage, this.#rates);
         }
+        this.#attemptsResponded += 1;
         return { kind: "ok", value: outcome.result.value };
       } catch (error) {
         // 未完了の応答は拒否と分け、**同じ要求のままやり直さない**（同じ上限ではまた切れる。§2.2）。
@@ -485,11 +644,14 @@ export class CallGateway {
           if (error.usage !== undefined) {
             this.#budget.settle(reserved.reservation, error.usage, this.#rates);
           }
+          // 未完了は usage の有無によらず**応答**として数える（誤りではない。Issue #446）
+          this.#attemptsResponded += 1;
           return { kind: "incomplete", reason: error.reason, usage: error.usage };
         }
         // 要求そのものが不正な誤り（HTTP 400 など）は、拒否と分け、**同じ要求のままやり直さない**
         // ——やり直しても通らない（§2.2）。誤りの種類（code）だけを返し、本文の全文は残さない。
         if (isInvalidRequestError(error)) {
+          this.#attemptsErrors += 1;
           return { kind: "invalidRequest", code: error.code };
         }
         // adapter の誤りを種類ごとに分類する（#302）。**「拒否」は拒否のときだけ**にする。
@@ -497,6 +659,9 @@ export class CallGateway {
         const classified = categorizeCallError(error);
         lastKind = classified.kind;
         lastStatus = classified.status;
+        // この試行の終端は**誤り**である——やり直してよい誤りでも、この試行は誤りで終わっている
+        // （Issue #446）。やり直すのは次の試行からで、そちらも別に数える。
+        this.#attemptsErrors += 1;
         if (!isRetryableCallError(classified)) {
           return {
             kind: "failed",
@@ -509,6 +674,7 @@ export class CallGateway {
         previousTimeoutMs = timeoutMs;
       }
     }
+    // 使い切った・伸ばせないで止めた。**新しい終端の数は増やさない**——各試行の終端はもう数えてある。
     return {
       kind: "failed",
       errorKind: lastKind,

@@ -55,6 +55,7 @@ import {
   SAMPLE_DOCUMENTS,
   SOURCE_TEXT,
 } from "./stages/__tests__/prompt.js";
+import { ATTEMPT_KEYS, RETRY_KEYS } from "./record.js";
 import { recordedRunFromPlan, structured } from "./__tests__/run.js";
 
 interface NodeFs {
@@ -426,6 +427,12 @@ interface PlanCliRecordShape {
   readonly spent_usd: number;
   readonly remaining_usd: number;
   readonly budget_usd: number;
+  /** 段ごとの記録（試行の終端と再試行の数を含む。Issue #446） */
+  readonly stages: readonly {
+    readonly stage: string;
+    readonly attempts: object;
+    readonly retries: object;
+  }[];
   /** 段の失敗の診断（止まったときだけ。Issue #397） */
   readonly failure?: {
     readonly stage: string;
@@ -1394,6 +1401,12 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
     expect(record.outcome).toBe("cannot-confirm");
     // 版の文字列は今までどおり
     expect(record.schema_version).toBe(PLAN_CLI_RECORD_SCHEMA);
+    // Issue #446：plan-record の stages に、段ごとの試行の終端と再試行の数が入る
+    expect(record.stages.length).toBeGreaterThan(0);
+    for (const stage of record.stages) {
+      expect(Object.keys(stage.attempts).sort(), stage.stage).toEqual([...ATTEMPT_KEYS].sort());
+      expect(Object.keys(stage.retries).sort(), stage.stage).toEqual([...RETRY_KEYS].sort());
+    }
     // 往復は 2（初回 + やり直し）。種類ごと・出どころごとの件数が結果と一致する
     const expected = {
       quote_not_found: 1,

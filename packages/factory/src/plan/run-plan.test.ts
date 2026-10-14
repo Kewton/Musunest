@@ -5291,3 +5291,89 @@ describe("データで見せた事項 ID を使い回した応答を、行を足
     ]);
   });
 });
+
+// ── Plan の段の記録に、試行の終端と再試行の数が入る（Issue #446）──────────────
+
+describe("Plan の段の記録に、試行の終端と再試行の数が入る（Issue #446）", () => {
+  it("P4 の形の再試行は、questions 段の retries.shape に 1 と数える", async () => {
+    const questionOf = (text: string) => ({
+      id: "Q-dup",
+      openIssueId: "OI-extra",
+      text,
+      choices: [
+        { id: "c1", text: "こちら" },
+        { id: "c2", text: "あちら" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    });
+    const duplicated = { questions: [questionOf("a"), questionOf("b")] };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(duplicated), // 1 回目の形の誤り（質問 ID の重複）
+      structured(QUESTIONS_OUTPUT), // 2 回目で通る
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const responder: PlanResponder = {
+      async answer(request) {
+        return { kind: "answers", answers: [answerTo(request.questions[0])] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    const questions = result.stages.find((stage) => stage.stage === "questions");
+    expect(questions).toMatchObject({
+      status: "ok",
+      calls: 2,
+      retries: { communication: 0, shape: 1, content: 0 },
+    });
+  });
+
+  it("Plan の段が呼んでいる途中で締切に触れると、開始 1・応答 0・締切の打ち切り 1", async () => {
+    const hanging: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        return new Promise<never>(() => {
+          request.signal?.addEventListener("abort", () => {});
+        });
+      },
+      async callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    const responder: PlanResponder = {
+      async answer() {
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+
+    const result = await runPlan(
+      makePlanInput(hanging, createFakeJudge({}), responder, { now: () => 60_000 - 1, deadline: 60_000 }),
+    );
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("deadline");
+    const requirements = result.stages.find((stage) => stage.stage === "requirements");
+    expect(requirements).toMatchObject({
+      status: "failed",
+      calls: 0,
+      failure_kind: "deadline",
+      attempts: { started: 1, responded: 0, errors: 0, cancelled_deadline: 1, cancelled_timeout: 0 },
+    });
+  });
+});

@@ -527,8 +527,10 @@ describe("道具の引数と上限を、コードが断る（02 §2.2・§1.5）
 describe("最後の答えの形を決め、合わなければ 1 回だけ直させる（02 §2.2・#304）", () => {
   const stepWith = (recorded: Parameters<typeof createRecordingClient>[0]) => {
     const recording = createRecordingClient(recorded);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
     return {
       recording,
+      gateway,
       run: version(V1).then((current) =>
         runRepairStep({
           source: SOURCE,
@@ -537,7 +539,7 @@ describe("最後の答えの形を決め、合わなければ 1 回だけ直さ�
           current,
           correspondences: CORRESPONDENCES,
           documents: SAMPLE_DOCUMENTS,
-          gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+          gateway,
         }),
       ),
     };
@@ -554,7 +556,7 @@ describe("最後の答えの形を決め、合わなければ 1 回だけ直さ�
   });
 
   it("形が合わなければ、問題を返して 1 回だけ直させ、合えば通る", async () => {
-    const { recording, run } = stepWith([doneMalformed, done(V2)]);
+    const { recording, gateway, run } = stepWith([doneMalformed, done(V2)]);
     const outcome = await run;
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
@@ -567,10 +569,23 @@ describe("最後の答えの形を決め、合わなければ 1 回だけ直さ�
     expect(second).toContain("最後の答えの形の誤り");
     expect(second).toContain("declaration");
     expect(second).toContain("空でない文字列");
+    // 最後の答えの形の誤りで 1 回直させた＝形の再試行 1（Issue #446）
+    expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
+  });
+
+  it("道具の往復だけで通る例では、形の再試行は 0（Issue #446）", async () => {
+    const { gateway, run } = stepWith([
+      toolCalls([{ id: "c1", name: "static-check", arguments: { declaration: V1 } }]),
+      done(V2),
+    ]);
+    const outcome = await run;
+    expect(outcome.ok).toBe(true);
+    // 道具の往復は再試行ではない（Issue #446）
+    expect(gateway.retryCounts).toEqual({ communication: 0, shape: 0, content: 0 });
   });
 
   it("2 回続けて合わなければ、段の失敗になり、問題に欄の名前と種類が入る", async () => {
-    const { recording, run } = stepWith([doneMalformed, doneMalformed]);
+    const { recording, gateway, run } = stepWith([doneMalformed, doneMalformed]);
     const outcome = await run;
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
@@ -579,6 +594,8 @@ describe("最後の答えの形を決め、合わなければ 1 回だけ直さ�
     expect(outcome.failure.attempts).toBe(2);
     expect(outcome.failure.problems.map((problem) => problem.field)).toContain("declaration");
     expect(recording.tools).toHaveLength(2);
+    // やり直しは 1 回だけ（Issue #446）
+    expect(gateway.retryCounts.shape).toBe(1);
   });
 });
 
