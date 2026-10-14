@@ -722,8 +722,35 @@ interface CostOutput {
   readonly attempts_by_adapter: Readonly<Record<string, number>>;
 }
 
+// **固定した合成の組**（要件の文を持つ申告 1 件）を流す。この組から、主・切り替え・再点検の実開始の
+// 期待回数を**すべて独立の定数**で決めて照らす（実行時の数からは導かない）。再生で余計な実開始が 1 つでも
+// 入れば、定数と食い違って落ちる。
+const FIXED_ARGS = ["--claims", "claims.json", "--out", "out.json", "--judge", "fallback", "--forms", "T1"];
+const FIXED_CLAIMS = JSON.stringify({
+  schema_version: CLAIMS_SET_SCHEMA,
+  doc_version: "v1",
+  doc_hash: DOC_HASH,
+  claims: [
+    {
+      id: "c1",
+      run_id: "run-1",
+      index: 0,
+      requirement_id: "R-1",
+      requirement_text: "要件 1",
+      part: "穴の部分",
+      reason: "理由 1",
+      constraint_ids: ["記録"],
+      alternative: "代案 1",
+    },
+  ],
+});
+// 主の実開始＝仕分け（1）＋裏付け（1）＋形 T1 の束（1）＝3。主は毎回失敗するので、切り替えも同数。
+const FIXED_PRIMARY_STARTS = 3;
+// 再点検の実開始＝1（裏付けが「書いていない」の申告 1 件。主の点検のあとに 1 回だけ）。
+const FIXED_RECHECK_STARTS = 1;
+
 describe("出力の attempts_by_adapter が、名乗りのある偽物の実開始の記録と一致する（Issue #473）", () => {
-  it("主の失敗→切り替え・再点検ありの組で、内訳が主・切り替え・再点検の実開始と個別に一致する", async () => {
+  it("固定した組で、主・切り替え・再点検の実開始と台帳が、独立の期待回数に一致する", async () => {
     // 主（Jev）は偽物の fetch で 429 を返して失敗し、切り替え先・再点検先（Luna）は名乗りのある偽物の口が答える
     let jevStarts = 0;
     const jevFetch: JevFetch = async () => {
@@ -746,7 +773,8 @@ describe("出力の attempts_by_adapter が、名乗りのある偽物の実開�
       },
     };
 
-    const harness = await run([...BASE_ARGS, "--judge", "fallback", "--forms", "T1"], {
+    const harness = await run(FIXED_ARGS, {
+      files: { "claims.json": FIXED_CLAIMS },
       env: { JEV_API_KEY: "jev-FAKE" },
       // 主は偽物の fetch の Jev（再送なし＝1 呼び出しにつき fetch 1 回）
       makeJevJudge: () => createJevJudge({ apiKey: "k", fetch: jevFetch, maxAttempts: 1 }),
@@ -754,27 +782,30 @@ describe("出力の attempts_by_adapter が、名乗りのある偽物の実開�
     });
 
     expect(harness.code).toBe(JUDGE_CLAIMS_EXIT_OK);
+
+    // ── 実開始の数（偽物の記録）が、独立の期待回数に**すべて**一致する ─────────
+    expect(jevStarts).toBe(FIXED_PRIMARY_STARTS);
+    expect(switchStarts).toBe(FIXED_PRIMARY_STARTS);
+    expect(recheckStarts).toBe(FIXED_RECHECK_STARTS);
+
+    // ── 台帳が、独立の期待回数に**すべて**一致する ─────────────────────
     const cost = harness.output["cost"] as CostOutput;
-
-    // ── 組から独立に決めた期待回数と照らす ─────────────────────────
-    // 主の実開始＝偽物の fetch の実開始。主は必ず失敗するので、切り替えの実開始は主と同数
-    expect(jevStarts).toBeGreaterThan(0);
-    expect(switchStarts).toBe(jevStarts);
-    // 再点検の実開始は、要件の文のある申告が 1 つ（主の裏付けが not-stated）なので 1
-    expect(recheckStarts).toBe(1);
-
-    // ── 台帳が、fake の実開始の記録と（合計ではなく）内訳ごとに一致する ──────
-    expect(cost.attempts_by_adapter["jev"]).toBe(jevStarts);
-    expect(cost.attempts_by_adapter["llm"]).toBe(switchStarts + recheckStarts);
+    expect(cost.attempts_by_adapter["jev"]).toBe(FIXED_PRIMARY_STARTS);
+    expect(cost.attempts_by_adapter["llm"]).toBe(FIXED_PRIMARY_STARTS + FIXED_RECHECK_STARTS);
     expect(cost.attempts_by_adapter["fake"]).toBe(0);
     expect(cost.attempts_by_adapter["unknown"]).toBe(0);
 
     // ── 記録からの再生は追加 0 ───────────────────────────────────
-    // 再生は `createRecordedJudge` を使い、fake（実開始の記録）も包みも通らない。だから、
-    // 実試行の合計は**実開始の合計**に一致し、それを上回らない。
-    expect(cost.attempts).toBe(jevStarts + switchStarts + recheckStarts);
+    // 再生は `createRecordedJudge` を使い、fake（実開始の記録）も包みも通らない。だから、実試行の合計は
+    // **実開始の合計**（主＋切り替え＋再点検）に一致し、それを上回らない——再生で主→切り替えの余計な
+    // 実開始が入れば、上の定数とこの合計の両方が食い違う。
+    expect(cost.attempts).toBe(FIXED_PRIMARY_STARTS + FIXED_PRIMARY_STARTS + FIXED_RECHECK_STARTS);
     // 成功して返った応答の数（今の欄）は、答えた adapter（Luna）だけ
-    expect(cost.calls_by_adapter).toEqual({ jev: 0, llm: switchStarts + recheckStarts, fake: 0 });
+    expect(cost.calls_by_adapter).toEqual({
+      jev: 0,
+      llm: FIXED_PRIMARY_STARTS + FIXED_RECHECK_STARTS,
+      fake: 0,
+    });
   });
 
   it("名乗りの無い口を注入すると、その実試行は unknown に入る", async () => {
