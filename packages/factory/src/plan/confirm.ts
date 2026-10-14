@@ -70,6 +70,14 @@ export interface ConfirmInput {
    * 要件にしないので、要件の出どころでは覆われないためである。無いときは空の配列として扱う。
    */
   readonly framing?: readonly SourceRange[];
+  /**
+   * 要件 ID → その要件の引用と**重なる原文の文の入力 ID の並び**の対応（Issue #487）。P2 を終えた一覧から
+   * 1 回だけ組んだものを渡す。渡されたときだけ、対応の並びにある文を「覆われている」と数える——引用が
+   * 2 文以上にまたがるとき、P6 が出どころ 1 つ（多対 1）でしか数えないために後ろの文が未使用になるのを
+   * 防ぐ（P2 は範囲の重なりで多対多に数えている）。**確定した仕様の形（§4）・SHA には混ぜず、判定の
+   * 材料にも足さない。** 渡さないときは今までどおりに振る舞う。
+   */
+  readonly sourceCorrespondence?: ReadonlyMap<string, readonly string[]>;
   readonly inputs: readonly PlanInput[];
   readonly requirements: readonly PlanRequirement[];
   readonly openIssues: readonly PlanOpenIssue[];
@@ -125,15 +133,34 @@ interface SentenceCoverage {
  * 原文を文に切り、各文が**要件の出どころ**（`inputs` の `source`）で覆われているかを求める（04 §3 P6）。
  * 文に対応する `source` の入力が無い、またはその入力がどの要件の出どころにもなっていなければ、覆われて
  * いない。ただし**枠の範囲**（`framing`）に重なる文は、覆われていると数える（Issue #372）。
+ *
+ * さらに、**対応**（`correspondence`）が渡されたときだけ、その要件の対応の並びにある文の入力も
+ * 覆われていると数える（Issue #487）。数えてよいのは、**渡した要件の一覧にあり**、出どころの正規化
+ * （`normalizeOrigins`）のあとも出どころが**原文の入力のまま**の要件だけである。対応の要件 ID が一覧に
+ * 無いとき・原文の入力でない ID・実在しない ID は、どの文の入力とも一致しないので数えられない
+ * （黙って捨て、覆いの根拠にしない）。
  */
 export function checkSourceCoverage(
   source: string,
   inputs: readonly PlanInput[],
   requirements: readonly PlanRequirement[],
   framing: readonly SourceRange[] = [],
+  correspondence?: ReadonlyMap<string, readonly string[]>,
 ): readonly SentenceCoverage[] {
   const coveredInputIds = new Set(requirements.map((requirement) => requirement.origin.input_id));
   const sourceInputs = inputs.filter((input): input is PlanSourceInput => input.kind === "source");
+  const sourceInputIds = new Set(sourceInputs.map((input) => input.id));
+  // 対応から、覆いの根拠にしてよい文の入力 ID を集める（Issue #487）。一覧にある要件だけを見て、
+  // 出どころが原文の入力のままの要件に限る（答えへ正規化された要件の対応は数えない）。
+  const coveredByCorrespondence = new Set<string>();
+  if (correspondence !== undefined) {
+    for (const requirement of requirements) {
+      if (!sourceInputIds.has(requirement.origin.input_id)) continue;
+      for (const inputId of correspondence.get(requirement.id) ?? []) {
+        if (sourceInputIds.has(inputId)) coveredByCorrespondence.add(inputId);
+      }
+    }
+  }
   const result: SentenceCoverage[] = [];
   for (const range of splitSourceSentences(source)) {
     const text = source.slice(range.start, range.end);
@@ -142,7 +169,9 @@ export function checkSourceCoverage(
     const byFraming = framing.some((frame) => frame.start < range.end && range.start < frame.end);
     result.push({
       text: trimmed,
-      covered: byFraming || (match !== undefined && coveredInputIds.has(match.id)),
+      covered:
+        byFraming ||
+        (match !== undefined && (coveredInputIds.has(match.id) || coveredByCorrespondence.has(match.id))),
     });
   }
   return result;
@@ -236,8 +265,15 @@ export async function runConfirm(input: ConfirmInput): Promise<ConfirmResult> {
     }
   });
 
-  // 2. 覆われていない原文の文があれば確定しない（枠の範囲も覆われていると数える。Issue #372）
-  checkSourceCoverage(input.source, input.inputs, requirements, input.framing ?? []).forEach((sentence, index) => {
+  // 2. 覆われていない原文の文があれば確定しない（枠の範囲も覆われていると数える。Issue #372。
+  //    対応が渡されたときは、対応の並びにある文も覆われていると数える。Issue #487）
+  checkSourceCoverage(
+    input.source,
+    input.inputs,
+    requirements,
+    input.framing ?? [],
+    input.sourceCorrespondence,
+  ).forEach((sentence, index) => {
     if (!sentence.covered) {
       problems.push({
         code: "uncovered-source",

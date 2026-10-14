@@ -156,6 +156,18 @@ export function splitSourceSentences(source: string): readonly SourceRange[] {
 }
 
 /**
+ * 位置と重なる原文の文を、**文の順にすべて**返す（Issue #487）。重なりの定義は P2 の構造上の覆いと
+ * 同じ（`文の始まり < 位置の終わり` かつ `位置の始まり < 文の終わり`）にする。どの文とも重ならなければ
+ * 空の並びを返す。**純粋な関数**である——P2 の覆いの数え上げと、P6 へ運ぶ対応（要件の範囲 → 文の入力の
+ * 並び）の両方が、この 1 つの定義を使う。
+ */
+export function overlappingSentences(source: string, position: SourceRange): readonly SourceRange[] {
+  return splitSourceSentences(source).filter(
+    (sentence) => position.start < sentence.end && sentence.start < position.end,
+  );
+}
+
+/**
  * 引用が原文に現れる回数（**重なる出現も含む**。Issue #382）。空の引用は 0。
  */
 function quoteOccurrences(source: string, quote: string): number {
@@ -206,9 +218,16 @@ export function checkRequirementCoverage(source: string, list: RequirementList):
     ...list.requirements.map((requirement) => requirement.position),
     ...(list.framing ?? []).map((framing) => framing.position),
   ];
+  // 覆いの数え上げは `overlappingSentences`（Issue #487）と同じ定義にする——P6 へ運ぶ対応と重なりの
+  // 定義がずれないように、1 つの関数で数える（P2 の結果は変えない）。
+  const covered = new Set<string>();
+  for (const position of positions) {
+    for (const sentence of overlappingSentences(source, position)) {
+      covered.add(`${sentence.start}-${sentence.end}`);
+    }
+  }
   for (const sentence of splitSourceSentences(source)) {
-    const covered = positions.some((position) => position.start < sentence.end && sentence.start < position.end);
-    if (!covered) {
+    if (!covered.has(`${sentence.start}-${sentence.end}`)) {
       misses.push({
         kind: "uncovered-source",
         range: sentence,
