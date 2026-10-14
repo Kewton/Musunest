@@ -2907,27 +2907,36 @@ describe("使い回しで断った応答を、plan-record の新しい欄に残�
   });
 });
 
-// ── P6 の確定できない理由に、原文の値と message を写さない（§3 P6・Issue #445）──────────
+// ── 確定できない理由に、原文の値と message を写さない（Issue #445・#487）──────────
+//
+// この試験は、確定できない理由と停止の行に、原文の値・要件 ID・`message` が出ないことを固定する。
+// Issue #487 のあと、覆われていない原文の文はふつう P2 で止まる（#440）ので、**要件 ID が一意で、原文
+// 由来の要件を保つ通常の経路では**、P6 の覆いの理由（`source: confirm`）に全体の走りから届くのは、本文
+// 一致の曖昧さの経路だけである——1 文目と 3 文目が同じ本文で、1 文目が枠の文のとき、P6 の「文 → 入力」
+// の照合は本文が一致する最初の入力（1 文目の S-1）を選ぶ（既知の曖昧さ。範囲の外）。3 文目はその入力に
+// 照合され、S-1 はどの要件の出どころにも対応にも無いので、P6 で覆われていないと数えられる。P2 は位置の
+// 重なりで 3 文目も覆われていると数えるので、P2 は通る。（要件 ID が重複する入口では、対応が後の要件で
+// 上書きされる静的な反例があるが、確定した仕様の検査が重複 ID を断るので門は開かない。重複 ID の入口の
+// 検査はこの Issue の範囲ではない。）
 
-describe("P6 の確定できない理由に、原文の値と message を写さない（§3 P6・Issue #445）", () => {
+describe("確定できない理由に、原文の値と message を写さない（Issue #445・#487）", () => {
   it("目印を含む原文の文が覆われず確定できない走りで、記録の全文と停止の行に目印と message が無く、cannot_confirm は source・code・path だけ", async () => {
     const mark = "MARKER445";
-    const markedSource = `タスクを記録する。合計を出す。${mark}を確かめる。`;
-    const s1 = "タスクを記録する。";
-    const s2 = "合計を出す。";
-    const s3 = `${mark}を確かめる。`;
+    // 1 文目（枠の文）と 3 文目が同じ本文
+    const repeated = `${mark}を確かめる。`;
+    const middle = "合計を出す。";
+    const markedSource = `${repeated}${middle}${repeated}`;
     const span = (quote: string) => {
       const start = markedSource.indexOf(quote);
       return { start, end: start + quote.length };
     };
-    // R-2 は 2 文（s2 と s3）にまたがる。位置の覆い（P2）は通るが、P6 の出どころは最初に重なる文（s2）に
-    // しか結び付かないので、s3 が覆われていないと見なされて確定できない（P2 では止まらない）。
     const markedList = {
       requirements: [
-        { id: "R-1", text: "記録できる", quote: s1, position: span(s1) },
-        { id: "R-2", text: "合計を確かめられる", quote: `${s2}${s3}`, position: span(`${s2}${s3}`) },
+        // 2・3 文目にまたがる引用。位置の重なり（P2）では 3 文目も覆う
+        { id: "R-1", text: "合計を確かめられる", quote: `${middle}${repeated}`, position: span(`${middle}${repeated}`) },
       ],
-      framing: [],
+      // 1 文目（枠の文）。3 文目と同じ本文なので、P6 は 3 文目をこの入力（S-1）に照合する
+      framing: [{ quote: repeated, position: span(repeated) }],
       decisions: [],
       unresolved: [],
     };

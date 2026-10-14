@@ -364,3 +364,199 @@ describe("P6 の理由の code・path を保ち、message に値を埋めない�
     expect(JSON.stringify(result.problems)).not.toContain(mark);
   });
 });
+
+// ── 複数の文にまたがる引用の、原文の文との対応を P6 まで保つ（Issue #487）───────
+
+describe("対応（重なる文の入力 ID）を P6 の覆いに使う（Issue #487）", () => {
+  const TWO_SOURCE = "タスクを記録する。件数を合計する。";
+  const twoInputs: readonly PlanInput[] = [
+    { id: "S-1", kind: "source", text: "タスクを記録する。" },
+    { id: "S-2", kind: "source", text: "件数を合計する。" },
+  ];
+  /** 2 文にまたがる引用を持つ要件 1 つ（出どころは最初の文の入力 `S-1`） */
+  const spanning: readonly PlanRequirement[] = [
+    {
+      id: "R-1",
+      text: "記録して合計できる",
+      kind: "existence",
+      origin: { input_id: "S-1", quote: "タスクを記録する。件数を合計する。" },
+      parts: [],
+    },
+  ];
+  /** 2 文の覆いの問いに「覆われている」を返す偽物の判定 */
+  const twoSentenceJudge = () =>
+    createFakeJudge(
+      { [confirmQuestionName("S-1")]: noul(0.95), [confirmQuestionName("S-2")]: noul(0.95) },
+      { model: "fake-judge" },
+    );
+
+  it("(c) 2 文の原文で、出どころが S-1、対応が S-1・S-2 の要件 1 つなら、覆いの誤りは無く確定できる", async () => {
+    const result = await runConfirm(
+      validInput({
+        source: TWO_SOURCE,
+        inputs: twoInputs,
+        requirements: spanning,
+        openIssues: [],
+        decisions: [],
+        sourceCorrespondence: new Map([["R-1", ["S-1", "S-2"]]]),
+        judge: twoSentenceJudge(),
+      }),
+    );
+    expect(result.problems).toEqual([]);
+    expect(result.confirmed).toBe(true);
+  });
+
+  it("(d) 同じ組で対応を渡さないと、uncovered-source・source[1] の 1 件で確定しない（今の振る舞いの再現）", async () => {
+    const result = await runConfirm(
+      validInput({
+        source: TWO_SOURCE,
+        inputs: twoInputs,
+        requirements: spanning,
+        openIssues: [],
+        decisions: [],
+        judge: twoSentenceJudge(),
+      }),
+    );
+    expect(result.confirmed).toBe(false);
+    expect(result.problems).toEqual([
+      { code: "uncovered-source", path: "source[1]", message: "原文の文がどの要件にも覆われていない" },
+    ]);
+  });
+
+  it("(d2) 有効な対応が第 1・第 2 文だけを覆う 3 文の組では、第 3 文の 1 件が残って確定しない", async () => {
+    const threeInputs: readonly PlanInput[] = [
+      { id: "S-1", kind: "source", text: "タスクを記録する。" },
+      { id: "S-2", kind: "source", text: "件数を合計する。" },
+      { id: "S-3", kind: "source", text: "印を出す。" },
+    ];
+    const result = await runConfirm(
+      validInput({
+        source: "タスクを記録する。件数を合計する。印を出す。",
+        inputs: threeInputs,
+        requirements: spanning,
+        openIssues: [],
+        decisions: [],
+        sourceCorrespondence: new Map([["R-1", ["S-1", "S-2"]]]),
+        judge: createFakeJudge(
+          {
+            [confirmQuestionName("S-1")]: noul(0.95),
+            [confirmQuestionName("S-2")]: noul(0.95),
+            [confirmQuestionName("S-3")]: noul(0.95),
+          },
+          { model: "fake-judge" },
+        ),
+      }),
+    );
+    expect(result.confirmed).toBe(false);
+    expect(result.problems).toEqual([
+      { code: "uncovered-source", path: "source[2]", message: "原文の文がどの要件にも覆われていない" },
+    ]);
+  });
+
+  it("(e) 対応の要件 ID が一覧に無い・原文の入力でない ID・実在しない ID は数えず、uncovered-source が残る", async () => {
+    const result = await runConfirm(
+      validInput({
+        source: TWO_SOURCE,
+        inputs: twoInputs,
+        requirements: spanning,
+        openIssues: [],
+        decisions: [],
+        sourceCorrespondence: new Map([
+          // 要件の一覧に無い ID
+          ["R-not-in-list", ["S-1", "S-2"]],
+          // 一覧にある要件でも、原文の入力でない ID（答え）と実在しない ID は数えない
+          ["R-1", ["A-1", "S-999"]],
+        ]),
+        judge: twoSentenceJudge(),
+      }),
+    );
+    expect(result.confirmed).toBe(false);
+    expect(result.problems).toEqual([
+      { code: "uncovered-source", path: "source[1]", message: "原文の文がどの要件にも覆われていない" },
+    ]);
+  });
+
+  it("(e) 出どころが答えへ正規化された要件の対応は数えず、uncovered-source が残る", async () => {
+    const requirements: readonly PlanRequirement[] = [
+      {
+        id: "R-1",
+        text: "記録できる",
+        kind: "existence",
+        origin: { input_id: "S-1", quote: "タスクを記録する。" },
+        parts: [],
+      },
+      {
+        id: "R-2",
+        text: "合計できる",
+        kind: "constraining",
+        // 答えから増えた要件（`normalizeOrigins` で出どころが `A-1` へ寄る）
+        origin: { input_id: "S-1", quote: "件数を合計する。" },
+        change: { kind: "added", answer_id: "A-1" },
+        parts: [],
+      },
+    ];
+    const result = await runConfirm(
+      validInput({
+        source: TWO_SOURCE,
+        inputs: [
+          ...twoInputs,
+          {
+            id: "Q-1",
+            kind: "question",
+            open_issue_id: "OI-1",
+            text: "誰の分を数えるか",
+            choices: [
+              { id: "c1", text: "全員" },
+              { id: "c2", text: "自分のみ" },
+            ],
+            recommended: { choice_id: "c1", reason: "依頼に沿う" },
+          },
+          { id: "A-1", kind: "answer", question_id: "Q-1", free_text: "自分のみ" },
+        ],
+        requirements,
+        openIssues: [{ id: "OI-1", text: "誰の分を数えるか", critical: true, status: "resolved", resolution: { answer_id: "A-1" } }],
+        decisions: [],
+        // `R-2` の対応は第 2 文を覆うが、出どころが答えへ正規化されるので数えない
+        sourceCorrespondence: new Map([["R-2", ["S-2"]]]),
+        judge: createFakeJudge(
+          {
+            [confirmQuestionName("S-1")]: noul(0.95),
+            [confirmQuestionName("S-2")]: noul(0.95),
+            [confirmQuestionName("A-1")]: noul(0.9),
+          },
+          { model: "fake-judge" },
+        ),
+      }),
+    );
+    expect(result.confirmed).toBe(false);
+    expect(result.problems).toEqual([
+      { code: "uncovered-source", path: "source[1]", message: "原文の文がどの要件にも覆われていない" },
+    ]);
+  });
+
+  it("(f) 対応を渡しても、判定の口へ渡る state と問いの集合、plan（SHA-256 を含む）は渡さないときと等しい", async () => {
+    const options = {
+      source: TWO_SOURCE,
+      inputs: twoInputs,
+      requirements: spanning,
+      openIssues: [],
+      decisions: [],
+    };
+    const withCorrespondence = recordingJudge();
+    const withoutCorrespondence = recordingJudge();
+    const withResult = await runConfirm(
+      validInput({ ...options, judge: withCorrespondence.judge, sourceCorrespondence: new Map([["R-1", ["S-1", "S-2"]]]) }),
+    );
+    const withoutResult = await runConfirm(validInput({ ...options, judge: withoutCorrespondence.judge }));
+
+    expect(withCorrespondence.requests[0]?.state).toEqual(withoutCorrespondence.requests[0]?.state);
+    expect(Object.keys(withCorrespondence.requests[0]?.questions ?? {}).sort()).toEqual(
+      Object.keys(withoutCorrespondence.requests[0]?.questions ?? {}).sort(),
+    );
+    expect(withResult.plan).toEqual(withoutResult.plan);
+    expect(withResult.plan.confirmation.sha256).toBe(withoutResult.plan.confirmation.sha256);
+    // 対応の有無で変わるのは覆いの判定だけである（確定の可否は変わるが、仕様は変わらない）
+    expect(withResult.confirmed).toBe(true);
+    expect(withoutResult.confirmed).toBe(false);
+  });
+});

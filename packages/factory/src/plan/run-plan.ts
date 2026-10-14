@@ -56,6 +56,7 @@ import type { PromptDocument, StageFailure, StageOutcome } from "../stages/promp
 import { normalizeConstraintId } from "../stages/prompt.js";
 import {
   emptyReverseCheckDiagnosis,
+  overlappingSentences,
   runReverseCheckLoopWithOperation,
   splitSourceSentences,
   type ReverseCheckDiagnosis,
@@ -1752,6 +1753,18 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       if (covering !== undefined) return sourceInputs[sentences.indexOf(covering)]?.id;
       return sourceInputs[0]?.id;
     };
+    // 要件 ID → その要件の引用と**重なる原文の文の入力 ID の並び**の対応（Issue #487）。**P2 を終えた
+    // 一覧（`list`）から 1 回だけ**組み、P6 へ運ぶ——対応の持ち主はここ 1 つである（別の箇所で組み直さ
+    // ない）。重なりの定義は P2 の構造上の覆いと同じ（`overlappingSentences`）。**どの文とも重ならない
+    // 要件の並びは空**にする（`S-1` へ寄せない）——寄せた文を覆いの根拠に増やさないためである。
+    const sourceInputIdByStart = new Map(sentences.map((range, index) => [range.start, sourceInputs[index]?.id] as const));
+    const sourceCorrespondence = new Map<string, readonly string[]>();
+    for (const requirement of list.requirements) {
+      const inputIds = overlappingSentences(input.source, requirement.position)
+        .map((range) => sourceInputIdByStart.get(range.start))
+        .filter((id): id is string => id !== undefined);
+      sourceCorrespondence.set(requirement.id, inputIds);
+    }
 
     const questionInputs: PlanQuestionInput[] = [];
     const answerInputs: PlanAnswerInput[] = [];
@@ -2756,6 +2769,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         vocabularyVersion: input.vocabularyVersion,
         source: input.source,
         framing,
+        sourceCorrespondence,
         inputs: [...sourceInputs, ...questionInputs, ...answerInputs],
         requirements,
         openIssues,

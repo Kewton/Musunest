@@ -17,6 +17,7 @@ import {
   REVERSE_CHECK_SCHEMA_NAME,
   checkRequirementCoverage,
   isBlankRange,
+  overlappingSentences,
   runReverseCheck,
   runReverseCheckLoop,
   runReverseCheckLoopWithOperation,
@@ -98,6 +99,53 @@ describe("コードが見つける落ち（02 §1・§1.2）", () => {
 
   it("引用と位置が合い、原文の文が覆われていれば、落ちは無い", () => {
     expect(checkRequirementCoverage(SOURCE_TEXT, REQUIREMENT_LIST)).toEqual([]);
+  });
+});
+
+// ── 位置と重なる文を、文の順にすべて返す（Issue #487）──────────────────────────
+
+describe("位置と重なる文を、文の順にすべて返す（Issue #487）", () => {
+  /** 3 文の原文（文の範囲は {0,9}・{9,17}・{17,22}） */
+  const SOURCE = "タスクを記録する。件数を合計する。印を出す。";
+
+  it("(a) 2 文・3 文にまたがる位置では、文の順の全部を返す", () => {
+    expect(overlappingSentences(SOURCE, { start: 4, end: 12 })).toEqual([
+      { start: 0, end: 9 },
+      { start: 9, end: 17 },
+    ]);
+    expect(overlappingSentences(SOURCE, { start: 4, end: 19 })).toEqual([
+      { start: 0, end: 9 },
+      { start: 9, end: 17 },
+      { start: 17, end: 22 },
+    ]);
+  });
+
+  it("(a) 1 文の中の位置では、その 1 つだけを返す", () => {
+    expect(overlappingSentences(SOURCE, { start: 4, end: 6 })).toEqual([{ start: 0, end: 9 }]);
+    expect(overlappingSentences(SOURCE, { start: 12, end: 14 })).toEqual([{ start: 9, end: 17 }]);
+  });
+
+  it("(a) どの文とも重ならない位置では、空を返す", () => {
+    expect(overlappingSentences(SOURCE, { start: 0, end: 0 })).toEqual([]);
+    expect(overlappingSentences(SOURCE, { start: 9, end: 9 })).toEqual([]);
+    expect(overlappingSentences(SOURCE, { start: 30, end: 40 })).toEqual([]);
+  });
+
+  it("(b) checkRequirementCoverage は、2 文にまたがる引用の要件で、両方の文を覆われていると数える（既存の期待を変えない）", () => {
+    const spanning: RequirementList = {
+      requirements: [
+        {
+          id: "R-1",
+          text: "記録して合計できる",
+          quote: "タスクを記録する。件数を合計する。",
+          position: { start: 0, end: 17 },
+        },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    // 引用が 2 文にまたがっても、重なる文をすべて覆われていると数えるので落ちは無い
+    expect(checkRequirementCoverage(SOURCE_TEXT, spanning)).toEqual([]);
   });
 });
 

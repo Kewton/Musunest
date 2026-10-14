@@ -6116,3 +6116,247 @@ describe("差分点検：対象外の参照を形のやり直しへ返し、試�
   });
 });
 
+// ── 複数の文にまたがる引用の、原文の文との対応を P2 から P6 まで保つ（Issue #487）──
+
+describe("複数の文にまたがる引用の対応を、P2 から P6 まで保つ（Issue #487）", () => {
+  /** 理由に原文の文・要件 ID が混ざらないことを見るための印 */
+  const MARK = "MARK487";
+  /** P1 が 2 文にまたがる引用の要件 1 つを返す一覧（原文は既定の `SOURCE_TEXT`） */
+  const SPANNING_LIST = {
+    requirements: [
+      {
+        id: "R-1",
+        text: "記録して合計できる",
+        quote: "タスクを記録する。件数を合計する。",
+        position: { start: 0, end: 17 },
+      },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+
+  it("(h) P1 が 2 文にまたがる引用の要件を返し、P2 の落ちが 0 の組で、Plan は確定し、要件の数と出どころは P1 のまま", async () => {
+    const recording = createRecordingClient([
+      structured(SPANNING_LIST),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({ ...catalogAnswersFor(["R-1"]), ...coverAnswersFor([]) });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 要件の数は P1 の一覧と同じ（水増ししない）
+    expect(result.plan.requirements.map((requirement) => requirement.id)).toEqual(["R-1"]);
+    // 出どころは最初の文の入力である
+    expect(result.plan.requirements[0]?.origin.input_id).toBe("S-1");
+  });
+
+  /** 枠でも要件でもない 3 文目の文が残る、印つきの 3 文の原文 */
+  const RC_SOURCE = `${MARK}Aを記録する。${MARK}Bを合計する。${MARK}Cを出す。`;
+  /** 前の 2 文だけを覆う一覧（3 文目がコードの落ちとして残る） */
+  const RC_PARTIAL = {
+    requirements: [
+      { id: `R-${MARK}`, text: "記録できる", quote: `${MARK}Aを記録する。`, position: spanOf(RC_SOURCE, `${MARK}Aを記録する。`) },
+      { id: "R-2", text: "合計できる", quote: `${MARK}Bを合計する。`, position: spanOf(RC_SOURCE, `${MARK}Bを合計する。`) },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+
+  it("(i) どの引用とも重ならず枠でもない文が P2 のやり直し後にも 1 文残る組は、cannot-confirm になり、理由に値が出ない", async () => {
+    const recording = createRecordingClient([
+      structured(RC_PARTIAL),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(RC_PARTIAL),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    let answerCalls = 0;
+    let confirmCalls = 0;
+    const responder: PlanResponder = {
+      async answer() {
+        answerCalls += 1;
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        confirmCalls += 1;
+        return "build";
+      },
+    };
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), responder, { source: RC_SOURCE }));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons).toEqual([{ source: "reverse-check", code: "uncovered-source", path: "source[*]" }]);
+    // 目録・P3 以降は実行されない
+    const stageIds = result.stages.map((stage) => stage.stage);
+    expect(stageIds).not.toContain("catalog");
+    expect(stageIds).not.toContain("surface");
+    expect(stageIds).not.toContain("questions");
+    expect(answerCalls).toBe(0);
+    expect(confirmCalls).toBe(0);
+    // 理由に、原文の文・要件 ID が出ない（Issue #445）
+    const text = JSON.stringify(result.reasons);
+    expect(text).not.toContain(MARK);
+    expect(text).not.toContain("R-2");
+  });
+
+  /** 全ての文に引用が重なる、印つきの 2 文の原文 */
+  const RC2_SOURCE = `${MARK}Dを記録する。${MARK}Eを合計する。`;
+  /** 両方の文を覆う一覧（コードの落ちは 0） */
+  const RC_ALL_COVERED = {
+    requirements: [
+      { id: "R-1", text: "記録できる", quote: `${MARK}Dを記録する。`, position: spanOf(RC2_SOURCE, `${MARK}Dを記録する。`) },
+      { id: "R-2", text: "合計できる", quote: `${MARK}Eを合計する。`, position: spanOf(RC2_SOURCE, `${MARK}Eを合計する。`) },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+  /** 会話が挙げる、覆われていない部分（コードの落ちとは重ならない） */
+  const RC_CONVERSATION = { uncovered: [{ start: 0, end: `${MARK}Dを記録する。`.length }] };
+
+  it("(i2) 全ての文に引用が重なる組でも、P2 の会話の申告がやり直し後に残れば、今のとおり P2 で確定を拒否する", async () => {
+    const recording = createRecordingClient([
+      structured(RC_ALL_COVERED),
+      structured(RC_CONVERSATION),
+      structured(RC_ALL_COVERED),
+      structured(RC_CONVERSATION),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE, { source: RC2_SOURCE }));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons).toEqual([{ source: "reverse-check", code: "uncovered-source", path: "source[*]" }]);
+    expect(result.stages.map((stage) => stage.stage)).not.toContain("catalog");
+  });
+
+  /** 3 文の原文（初回は第 3 文が未対応になる） */
+  const REDO_SOURCE = "タスクを記録する。件数を合計する。印を出す。";
+  /** 初回の一覧（第 3 文がどの引用とも重ならない） */
+  const REDO_INITIAL = {
+    requirements: [
+      { id: "R-1", text: "記録できる", quote: "タスクを記録する。", position: spanOf(REDO_SOURCE, "タスクを記録する。") },
+      { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOf(REDO_SOURCE, "件数を合計する。") },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+  /** やり直し後の一覧（要件 2 が第 2・第 3 文を引用する） */
+  const REDO_FINAL = {
+    requirements: [
+      { id: "R-1", text: "記録できる", quote: "タスクを記録する。", position: spanOf(REDO_SOURCE, "タスクを記録する。") },
+      {
+        id: "R-2",
+        text: "合計して印を出せる",
+        quote: "件数を合計する。印を出す。",
+        position: spanOf(REDO_SOURCE, "件数を合計する。印を出す。"),
+      },
+    ],
+    framing: [],
+    decisions: [],
+    unresolved: [],
+  };
+
+  it("(j) 初回は第 3 文が未対応でやり直しとなり、やり直し後の一覧で確定し、最終一覧の対応が運ばれる", async () => {
+    const recording = createRecordingClient([
+      structured(REDO_INITIAL),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(REDO_FINAL),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswersFor(["R-1", "R-2"]),
+      [confirmQuestionName("S-1")]: noul(0.95),
+      [confirmQuestionName("S-2")]: noul(0.95),
+      [confirmQuestionName("S-3")]: noul(0.95),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE, { source: REDO_SOURCE }));
+
+    // 初回の対応（要件 2 → S-2 だけ）を使うと第 3 文の覆いが取れない。最終一覧の対応が運ばれるので確定する
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    expect(result.plan.requirements.map((requirement) => requirement.id)).toEqual(["R-1", "R-2"]);
+    expect(result.plan.requirements[0]?.origin.input_id).toBe("S-1");
+    expect(result.plan.requirements[1]?.origin.input_id).toBe("S-2");
+  });
+
+  /**
+   * 比較元 `6621f7b` で、この試験と同じ固定の入力・偽物の LLM・偽物の判定・時計から `runPlan` を流して
+   * 得た plan と SHA-256（一時 worktree をリポジトリの外に作り、そこで同じ組を流して採った値）。
+   * **変更前の期待値**として固定し、変更後の結果と比べる——現行の plan から SHA を再計算するだけでは、
+   * 要件の本文などが変わって SHA が変わる回帰を見逃す。
+   */
+  const BASELINE_PLAN_487: ConfirmedPlan = {
+    schema_version: "musunest.plan-spec/v1",
+    plan_id: "plan-1",
+    revision: 1,
+    vocabulary_version: "v1",
+    inputs: [
+      { id: "S-1", kind: "source", text: "タスクを記録する。" },
+      { id: "S-2", kind: "source", text: "件数を合計する。" },
+    ],
+    requirements: [
+      {
+        id: "R-1",
+        text: "タスクを記録できる",
+        kind: "existence",
+        origin: { input_id: "S-1", quote: "タスクを記録する" },
+        parts: [],
+      },
+      {
+        id: "R-2",
+        text: "件数を合計できる",
+        kind: "existence",
+        origin: { input_id: "S-2", quote: "件数を合計する" },
+        parts: [],
+      },
+    ],
+    open_issues: [],
+    decisions: [
+      {
+        id: "D-1",
+        subject: "既定で決めた",
+        value: "記録の形は 1 行とした",
+        reason: "Plan が既定で決めた（確認の画面で直せる）",
+      },
+    ],
+    accepted_unwritable: [],
+    confirmation: {
+      sha256: "8618ab7f4fd38bad45a522cde43b56998bc42af7871f80d54580c26d776347c3",
+      confirmed_at: "1970-01-01T00:00:00.000Z",
+      confirmed_by: "tester",
+    },
+  };
+
+  it("(k) 既存の確定する組の plan と SHA-256 は、比較元 6621f7b と同じ（対応は仕様に混ざらない）", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswersFor([]) });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 比較元（変更前）で得た plan 全体と SHA-256 に一致する
+    expect(result.plan).toEqual(BASELINE_PLAN_487);
+    expect(result.plan.confirmation.sha256).toBe(BASELINE_PLAN_487.confirmation.sha256);
+    // 仕様は §4 の欄だけからなる。対応（内部の写像）は混ざらない
+    expect(JSON.stringify(result.plan)).not.toContain("sourceCorrespondence");
+    expect(await checkConfirmedPlan(result.plan)).toEqual([]);
+    expect(await isConfirmationValid(result.plan)).toBe(true);
+    expect(result.plan.confirmation.sha256).toBe(await planDigest(result.plan));
+  });
+});
+
