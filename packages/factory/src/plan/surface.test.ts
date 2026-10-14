@@ -6,14 +6,18 @@
 //   3. 文書に無い制約 ID を使った「書けない」も断る
 //   4. 代わりの案（alternative）が無い「書けない」は形で断る
 import { describe, expect, it } from "vitest";
+import { JobBudget } from "../budget.js";
+import { CallGateway } from "../call.js";
 import { maxOutputTokensForEffort } from "../limits.js";
+import { ENVELOPE_SCHEMA, envelopeStageFor } from "../schema-envelope.js";
+import { COMMON_RULES, serializeJson } from "../stages/prompt.js";
 import {
   REQUIREMENT_LIST,
   SAMPLE_DOCUMENTS,
   createRecordingClient,
   makeGateway,
 } from "../stages/__tests__/prompt.js";
-import { SURFACE_RULES, SURFACE_SCHEMA_NAME, SURFACE_SHOWN_ID_SOURCES, checkSurfaceOutput, checkSurfaceTargets, runSurface, surfaceIdReuseOf, type PlanSurface, type SurfaceCatalogData, type SurfaceContext, type SurfaceShownIdSource, type SurfaceShownIssueIds } from "./surface.js";
+import { SURFACE_DIFF_SCHEMA_NAME, SURFACE_RULES, SURFACE_SCHEMA, SURFACE_SCHEMA_NAME, SURFACE_SHOWN_ID_SOURCES, buildSurfaceDiffSchema, checkSurfaceOutput, checkSurfaceTargets, runSurface, surfaceIdReuseOf, type PlanSurface, type SurfaceCatalogData, type SurfaceContext, type SurfaceShownIdSource, type SurfaceShownIssueIds } from "./surface.js";
 
 /** 正しい応答（未解決の事項 1 件・書けないこと 1 件） */
 const SURFACE_OUTPUT = {
@@ -645,5 +649,213 @@ describe("データで見せた事項 ID を使い回した応答を、形の検
     expect(reuse.bySource.find((entry) => entry.source === "defaults")?.count).toBe(1);
     // 提示元の合計（2）は、異なる数（1）と一致しない
     expect(reuse.bySource.reduce((total, entry) => total + entry.count, 0)).toBe(2);
+  });
+});
+
+// ── Issue #483：差分の洗い出しの要件 ID を、差分からコードで組んだ選択肢（schema の enum）に限る ──────
+
+describe("差分の洗い出しの schema（enum）を、その往復の差分から組む（04 §3 P3・Issue #483）", () => {
+  /** その往復の差分の要件 ID（順どおり・重複なし） */
+  const DIFF_IDS = ["R:A:Q1-1", "R:A:Q1-2"] as const;
+
+  /** 試験と同じ単価（`makeGateway` と同じ値。予約の式を独立に組み立てる） */
+  const RATES = { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputPerToken: 0.000002 };
+
+  /**
+   * 差分の要件 ID を（渡す・渡さないの両方で）1 回まわす。予算は任意で絞れる。**予約の額を読めるように、
+   * `JobBudget` と `CallGateway` をここで直接組む**（`makeGateway` は `JobBudget` を返さない）。
+   * 応答は usage 不明なので、成功しても予約は精算されず `reservedUsd` に残る（§1.5）。
+   */
+  function runWith(options: { targetRequirementIds?: readonly [string, ...string[]]; budgetUsd?: number }) {
+    const recording = createRecordingClient([
+      { kind: "structured" as const, output: SURFACE_OUTPUT, usage: undefined },
+      { kind: "structured" as const, output: SURFACE_OUTPUT, usage: undefined },
+    ]);
+    const budget = new JobBudget(options.budgetUsd ?? 10);
+    const gateway = new CallGateway({
+      client: recording.client,
+      budget,
+      rates: RATES,
+      now: () => 0,
+      deadline: 60_000,
+      maxAttempts: 1,
+    });
+    const outcome = runSurface({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway,
+      ...(options.targetRequirementIds === undefined ? {} : { targetRequirementIds: options.targetRequirementIds }),
+    });
+    return { recording, budget, gateway, outcome };
+  }
+
+  /** `<data name="…">…</data>` の中身を取り出す */
+  const dataBlockOf = (input: string, name: string): string =>
+    input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "";
+
+  /** `requirementId` の欄の `enum` と `description` を落とした写し（形の比較に使う） */
+  function withoutRequirementIdContract(schema: unknown): unknown {
+    const copy = JSON.parse(JSON.stringify(schema)) as {
+      properties: Record<string, { items: { properties: Record<string, Record<string, unknown>> } }>;
+    };
+    for (const section of ["ambiguities", "unwritable"]) {
+      const field = copy.properties[section]?.items.properties.requirementId;
+      if (field !== undefined) {
+        delete field.enum;
+        delete field.description;
+      }
+    }
+    return copy;
+  }
+
+  /** 組んだ schema の、両方の欄の要件 ID の `enum` を直接読む */
+  function enumsOf(built: Record<string, unknown>): {
+    readonly ambiguities: readonly string[] | undefined;
+    readonly unwritable: readonly string[] | undefined;
+  } {
+    const properties = built["properties"] as {
+      readonly ambiguities: { readonly items: { readonly properties: { readonly requirementId: { readonly enum?: readonly string[] } } } };
+      readonly unwritable: { readonly items: { readonly properties: { readonly requirementId: { readonly enum?: readonly string[] } } } };
+    };
+    return {
+      ambiguities: properties.ambiguities.items.properties.requirementId.enum,
+      unwritable: properties.unwritable.items.properties.requirementId.enum,
+    };
+  }
+
+  it("(a) 並びを渡すと、差分専用の名前になり、両方の欄の enum が並びのとおりで、SURFACE_SCHEMA は変わらない", async () => {
+    const { recording, outcome } = runWith({ targetRequirementIds: DIFF_IDS });
+    expect((await outcome).ok).toBe(true);
+    const request = recording.structured[0];
+    expect(request).toBeDefined();
+    if (request === undefined) return;
+    expect(request.schemaName).toBe(SURFACE_DIFF_SCHEMA_NAME);
+    // 組んだ schema は、純粋な関数の結果に一致する
+    expect(request.schema).toEqual(buildSurfaceDiffSchema(DIFF_IDS));
+    const schema = request.schema as {
+      properties: {
+        ambiguities: { items: { properties: { requirementId: { enum: readonly string[] } } } };
+        unwritable: { items: { properties: { requirementId: { enum: readonly string[] } } } };
+      };
+    };
+    expect(schema.properties.ambiguities.items.properties.requirementId.enum).toEqual([...DIFF_IDS]);
+    expect(schema.properties.unwritable.items.properties.requirementId.enum).toEqual([...DIFF_IDS]);
+    // enum と description を除いた schema は、SURFACE_SCHEMA と等しい
+    expect(withoutRequirementIdContract(request.schema)).toEqual(withoutRequirementIdContract(SURFACE_SCHEMA));
+    // SURFACE_SCHEMA そのものは、呼んだあとも変わらない
+    expect(SURFACE_SCHEMA.properties.ambiguities.items.properties.requirementId).toEqual({
+      type: "string",
+      description: "対象の要件 ID",
+    });
+    expect(SURFACE_SCHEMA.properties.unwritable.items.properties.requirementId).toEqual({
+      type: "string",
+      description: "対象の要件 ID",
+    });
+  });
+
+  it("(a2) 並びに重複があっても、両方の欄の enum は最初の出現の順で一意になる（SURFACE_SCHEMA は不変）", () => {
+    // 重複の入力：両方の欄とも、最初の出現の順（R:b → R:a）で一意になる
+    const duplicated = enumsOf(buildSurfaceDiffSchema(["R:b", "R:a", "R:b"] as const));
+    expect(duplicated.ambiguities).toEqual(["R:b", "R:a"]);
+    expect(duplicated.unwritable).toEqual(["R:b", "R:a"]);
+    // 並べ替えない（挿入の順のまま）
+    expect(duplicated.ambiguities).not.toEqual(["R:a", "R:b"]);
+    // 1 件の入力：その 1 件だけ
+    const single = enumsOf(buildSurfaceDiffSchema(["R:a"] as const));
+    expect(single.ambiguities).toEqual(["R:a"]);
+    expect(single.unwritable).toEqual(["R:a"]);
+    // enum と description を除いた形は SURFACE_SCHEMA と等しく、SURFACE_SCHEMA は変わらない（enum を持たない）
+    expect(withoutRequirementIdContract(buildSurfaceDiffSchema(["R:b", "R:a", "R:b"] as const))).toEqual(
+      withoutRequirementIdContract(SURFACE_SCHEMA),
+    );
+    expect("enum" in SURFACE_SCHEMA.properties.ambiguities.items.properties.requirementId).toBe(false);
+    expect("enum" in SURFACE_SCHEMA.properties.unwritable.items.properties.requirementId).toBe(false);
+  });
+
+  it("(b) 並びを渡さないと、要求は変更前と等しく、データの塊の数も変わらない", async () => {
+    const { recording, outcome } = runWith({});
+    expect((await outcome).ok).toBe(true);
+    const request = recording.structured[0];
+    if (request === undefined) return;
+    expect(request.schemaName).toBe(SURFACE_SCHEMA_NAME);
+    // schema は SURFACE_SCHEMA そのもの（写しを作らない）
+    expect(request.schema).toBe(SURFACE_SCHEMA);
+    expect(request.instructions).toBe(COMMON_RULES.join("\n"));
+    expect(request.rules).toEqual(SURFACE_RULES);
+    expect(request.documents).toEqual(SAMPLE_DOCUMENTS.map((document) => `${document.name}\n${document.text}`));
+    expect(request.input).toBe(`<data name="要件の一覧">\n${serializeJson(REQUIREMENT_LIST)}\n</data>`);
+    expect(request.maxOutputTokens).toBe(maxOutputTokensForEffort("high", "surface"));
+    expect(request.input.match(/<data name=/g)).toHaveLength(1);
+  });
+
+  it("(c) 並びを渡すと「出力に許される要件 ID」の塊がちょうど 1 つ増え、instructions・documents・rules は変わらない", async () => {
+    const bare = runWith({});
+    const withList = runWith({ targetRequirementIds: DIFF_IDS });
+    expect((await bare.outcome).ok).toBe(true);
+    expect((await withList.outcome).ok).toBe(true);
+    const without = bare.recording.structured[0];
+    const request = withList.recording.structured[0];
+    if (without === undefined || request === undefined) return;
+    const names = [...request.input.matchAll(/<data name="([^"]+)">/g)].map((match) => match[1]);
+    expect(names.filter((name) => name === "出力に許される要件 ID")).toHaveLength(1);
+    // 「要件の一覧」の直後である
+    expect(names[0]).toBe("要件の一覧");
+    expect(names[1]).toBe("出力に許される要件 ID");
+    // JSON として読むと、渡した並びに等しい
+    expect(JSON.parse(dataBlockOf(request.input, "出力に許される要件 ID"))).toEqual([...DIFF_IDS]);
+    // 渡さないときと、前置きは変わらない
+    expect(request.instructions).toBe(without.instructions);
+    expect(request.documents).toEqual(without.documents);
+    expect(request.rules).toEqual(without.rules);
+    expect(request.maxOutputTokens).toBe(without.maxOutputTokens);
+  });
+
+  it("(d) 差分専用の名前は封筒から引けず、ENVELOPE_SCHEMA は変わらない", () => {
+    expect(envelopeStageFor(SURFACE_DIFF_SCHEMA_NAME)).toBeUndefined();
+    expect(JSON.stringify(ENVELOPE_SCHEMA)).not.toContain(SURFACE_DIFF_SCHEMA_NAME);
+    // 初回の洗い出しの段は、今までどおり封筒に載っている
+    expect(envelopeStageFor(SURFACE_SCHEMA_NAME)?.stage).toBe(SURFACE_SCHEMA_NAME);
+    expect(JSON.stringify(ENVELOPE_SCHEMA)).toContain(SURFACE_SCHEMA_NAME);
+  });
+
+  it("(d2) 実際に予約された額の前後差が、schema とデータの増分（独立に数えたもの）と一致する", async () => {
+    const bare = runWith({});
+    const withList = runWith({ targetRequirementIds: DIFF_IDS });
+    expect((await bare.outcome).ok).toBe(true);
+    expect((await withList.outcome).ok).toBe(true);
+    // usage 不明の成功応答なので、予約は精算されず reservedUsd に残る（§1.5）
+    const reservedWithout = bare.budget.reservedUsd;
+    const reservedWith = withList.budget.reservedUsd;
+    // 実際に予約された額は、並びを渡した方が多い
+    expect(reservedWith).toBeGreaterThan(reservedWithout);
+    // 増分を、schema（の名前・enum・description）とデータの塊（囲みを含む）の文字数から独立に数える
+    const schemaDelta =
+      JSON.stringify({ name: SURFACE_DIFF_SCHEMA_NAME, schema: buildSurfaceDiffSchema(DIFF_IDS) }).length -
+      JSON.stringify({ name: SURFACE_SCHEMA_NAME, schema: SURFACE_SCHEMA }).length;
+    const dataDelta = `\n<data name="出力に許される要件 ID">\n${serializeJson(DIFF_IDS)}\n</data>`.length;
+    // 予約の差は、その増分に対応する分だけである（同じ文書・同じ出力の上限）
+    expect(reservedWith - reservedWithout).toBeCloseTo((schemaDelta + dataDelta) * RATES.inputPerToken, 10);
+  });
+
+  it("(d3) 予算が渡さない要求の予約の分しか無ければ、渡した要求は budget で止まり、渡さない要求は 1 回開始して成功する", async () => {
+    // 渡さない要求の予約の額を、実際の残り（reservedUsd）から測る
+    const measured = runWith({});
+    expect((await measured.outcome).ok).toBe(true);
+    const reservation = measured.budget.reservedUsd;
+    expect(reservation).toBeGreaterThan(0);
+
+    // 対照：同じ残高（予約 = 残高 は通る）で、並びを渡さない方は 1 回開始して成功する
+    const control = runWith({ budgetUsd: reservation });
+    expect((await control.outcome).ok).toBe(true);
+    expect(control.gateway.counts.attempts.started).toBe(1);
+
+    // 本題：並びを渡した方は、同じ残高では予約が通らず budget で止まり、開始は 0
+    const limited = runWith({ targetRequirementIds: DIFF_IDS, budgetUsd: reservation });
+    const result = await limited.outcome;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.kind).toBe("budget");
+    expect(limited.gateway.counts.attempts.started).toBe(0);
+    expect(limited.gateway.counts.attempts.not_started.budget).toBe(1);
   });
 });

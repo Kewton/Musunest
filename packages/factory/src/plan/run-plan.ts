@@ -2165,8 +2165,15 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         const key = diffChangeKey(requirement);
         if (key !== undefined) reviewedDiffKeys.add(key);
       }
+      // この往復の差分の要件 ID（**最初の出現の順・重複なし**。Issue #483）。**持ち主はこの 1 つの並び**
+      // である——照合の集合（`targetRequirementIds`）・データの塊・差分の洗い出しの schema の `enum` の
+      // すべてを、ここから組む（別の箇所で組み直さない。`enum` に重複を残さない）。**行（`diff`）は畳まない**
+      // ——一意にするのは ID の値だけである。対象が 0 件ならこの経路へ来ないので、空でない並びになる。
+      const [firstDiffId, ...restDiffIds] = [...new Set(diff.map((requirement) => requirement.id))];
+      if (firstDiffId === undefined) return undefined;
+      const diffRequirementIds: readonly [string, ...string[]] = [firstDiffId, ...restDiffIds];
       // この往復の差分の要件 ID の集合（応答が指す要件 ID を照合する。Issue #434）
-      const targetRequirementIds = new Set(diff.map((requirement) => requirement.id));
+      const targetRequirementIds = new Set(diffRequirementIds);
 
       /** 対象外の参照を、内部の対応で有限の分類に写す（Issue #434。モデルに選ばせない） */
       const classifyOutOfScope = (requirementId: string): DiffOutOfScopeKind => {
@@ -2392,6 +2399,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           gateway,
           catalog: diffCatalogData,
           context,
+          // その往復の差分の要件 ID を、**照合に使うのと同じ並び**から渡す（Issue #483）
+          targetRequirementIds: diffRequirementIds,
           onShapeValid: evaluateTargets,
           shownIssueIds: diffShownIds,
           onIdReuse: (rejection) => recordIdReuse(diffCheckNumber, rejection),
