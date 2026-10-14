@@ -79,13 +79,17 @@ import {
   type PlanRemaining,
   type PlanTurn,
 } from "./session.js";
-import { checkSurfaceTargets, runSurface, type PlanSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceOutOfScopeRef, type SurfaceTargetResult } from "./surface.js";
+import { checkSurfaceTargets, runSurface, type PlanSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceIdReuseRejection, type SurfaceOutOfScopeRef, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetResult } from "./surface.js";
 import {
   PLAN_OPEN_ISSUE_SOURCES,
+  classifyOpenIssueConflict,
   detectOpenIssueCollisions,
   resolveTargetOf,
   surfaceCheckOpenIssueId,
+  type PlanOpenIssueConflictAttributionCount,
   type PlanOpenIssueConflicts,
+  type PlanOpenIssueOrigin,
+  type PlanOpenIssueRowAttribution,
   type PlanOpenIssueSource,
 } from "./open-issues.js";
 import { runSurfaceCheck, type SurfaceClaimDiagnostic, type SurfaceJudgment, type SurfaceUncheckedClaim } from "./surface-check.js";
@@ -145,6 +149,8 @@ export const PLAN_DIAGNOSIS_CODES = [
   "constraint-id-unknown",
   // 差分の洗い出しが指す要件 ID が、点検の対象（その往復の差分）に無い（Issue #434）
   "requirement-id-unknown",
+  // P3 が、データで見せた事項 ID を新しい事項の ID に使った（形の検査で断る。Issue #464）
+  "issue-id-reused",
   // P3 の「書けない」の申告の点検（Issue #432）。未点検の分類（低確信・書いていない・読めない）
   "not-stated",
   "low-confidence",
@@ -581,6 +587,34 @@ export interface PlanDiffReviewRecord {
   readonly inherit: PlanInheritRecord;
 }
 
+/**
+ * 提示元ごとの、使い回しで断った ID の数（**値は入れない**。Issue #464）
+ */
+export interface PlanSurfaceIdReuseSourceCount {
+  readonly source: SurfaceShownIdSource;
+  readonly count: number;
+}
+
+/**
+ * 使い回しで断った応答 1 つぶんの記録（**値は入れない**。Issue #464）。点検の**版**（初回 1、差分で増える）
+ * と**試行**（1・2）ごとに、**応答の数**・断った ID の**異なる数**・**提示元ごとの ID の数**を持つ。
+ * 1 回断って成功・2 回断って `malformed`・断ったあとの呼び出しの失敗や上限の停止のどの終わり方でも残る。
+ * **1 つの ID が複数の提示元に当たるとき（目録の開いている事項と仮の既定など）は、各提示元に数える**
+ * ——`bySource` の合計は `distinctIds` と一致しないことがある。
+ */
+export interface PlanSurfaceIdReuseEntry {
+  /** 点検の版（初回 1、差分で増える） */
+  readonly check: number;
+  /** この点検での試行（1 始まり。2 回まで） */
+  readonly attempt: number;
+  /** この試行で受けた応答の数（この実装では常に 1） */
+  readonly responses: number;
+  /** 断った ID の異なる数 */
+  readonly distinctIds: number;
+  /** 提示元ごとの、断った ID の数（同じ ID が複数の提示元に当たれば各提示元に数える） */
+  readonly bySource: readonly PlanSurfaceIdReuseSourceCount[];
+}
+
 /** 3 つの結果に共通する記録（使った額・残りの額・段ごとの記録・判定の呼び出し） */
 export interface PlanResultBase {
   /** 段ごとの記録（生成の段の記録と同じ形） */
@@ -623,6 +657,12 @@ export interface PlanResultBase {
    * 衝突を検出した往復の版を持つ。事項 ID・要件 ID・文・答えは入れない。
    */
   readonly openIssueConflicts: PlanOpenIssueConflicts;
+  /**
+   * 使い回しで断った応答の記録（版・試行・応答の数・異なる数・提示元ごとの数。**値は入れない**。
+   * Issue #464）。確定・確定できない・止まったの 3 つの結果に共通で、断った件が無ければ空である。断った
+   * あとに確定・停止したときも、**最終の失敗の欄（`failure`）とは別**に、ここへ残す。
+   */
+  readonly surfaceIdReuse: readonly PlanSurfaceIdReuseEntry[];
 }
 
 /** 依頼文で閉じた事項から作る `decisions` の ID の頭（確認の画面が「依頼文で決めたこと」を見分ける） */
@@ -1285,41 +1325,99 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     { requirementId: string; facetId: string; decisionId: string; value: string }
   >();
 
-  // ── 開いている事項の行と、その出どころ・衝突の記録（Issue #460）─────────────────
-  // `openIssues` と `openIssueSources` は**同じ長さ**である（行を畳まない・並べ替えない。状態の書き換えは
-  // index で行うので、出どころの対応もずれない）。
+  // ── 開いている事項の行と、その出どころ・由来・衝突の記録（Issue #460・#464）────────────
+  // `openIssues`・`openIssueSources`・`openIssueOrigins`・`openIssueCreatedIn` は**同じ長さ**である（行を
+  // 畳まない・並べ替えない。状態の書き換えは index で行うので、対応もずれない）。
   const openIssues: PlanOpenIssue[] = [];
   const openIssueSources: PlanOpenIssueSource[] = [];
+  // 行の**由来**（目録の通常の行と引き継ぎの行を分ける。ID の接頭辞や文から推測しない。Issue #464）
+  const openIssueOrigins: PlanOpenIssueOrigin[] = [];
+  // その行を作った版（`revision`）。衝突の検出時に「今回か以前か」を決める（Issue #464）
+  const openIssueCreatedIn: number[] = [];
   // 仕様の版（往復ごとに上がる）。衝突を検出した版の記録にも使う（Issue #460）
   let revision = 1;
   // 衝突の記録（値ではなく件数だけ。事項 ID は集合の大きさにしか使わない。Issue #460）
   const conflictIds = new Set<string>();
   const conflictRows = new Map<string, number>();
+  // 衝突した 2 行の帰属（由来・状態・今回か以前か）の組ごとの件数（Issue #464）。順序に依存しない鍵で数える
+  const conflictAttribution = new Map<string, { attribution: PlanOpenIssueConflictAttributionCount; order: string }>();
   let emptyResolveTargets = 0;
   let conflictRound: number | null = null;
-  /** 衝突した ID を記録する（出どころの組ごとに件数を数える。Issue #460） */
-  const recordConflict = (existing: PlanOpenIssueSource, added: PlanOpenIssueSource, id: string): void => {
+  /** 使い回しで断った応答の記録（値は入れない。Issue #464） */
+  const surfaceIdReuse: PlanSurfaceIdReuseEntry[] = [];
+  /** 帰属の組を、足した順によらない数え上げの鍵にする（Issue #464） */
+  const attributionKeyOf = (group: { first: PlanOpenIssueRowAttribution; second: PlanOpenIssueRowAttribution }): string =>
+    `${group.first.origin}\u0000${group.first.status}\u0000${group.first.current ? 1 : 0}\u0000${group.second.origin}\u0000${group.second.status}\u0000${group.second.current ? 1 : 0}`;
+  /**
+   * 衝突した ID を記録する（出どころの組と、帰属の組のそれぞれで件数を数える。Issue #460・#464）。
+   * 帰属の組は**足した順によらない**（`classifyOpenIssueConflict` が由来の並びで正規化する）——通常の
+   * 目録の行どうしの衝突と、通常の目録の行と引き継ぎの行の衝突は、別の組になる。
+   */
+  const recordConflict = (
+    existingIndex: number,
+    added: { readonly source: PlanOpenIssueSource; readonly origin: PlanOpenIssueOrigin; readonly status: "open" | "resolved" },
+    id: string,
+  ): void => {
     conflictIds.add(id);
-    const key = `${existing}\u0000${added}`;
+    const existingSource = openIssueSources[existingIndex] ?? "unresolved";
+    const key = `${existingSource}\u0000${added.source}`;
     conflictRows.set(key, (conflictRows.get(key) ?? 0) + 1);
     if (conflictRound === null) conflictRound = revision;
+    const existing: PlanOpenIssueRowAttribution = {
+      origin: openIssueOrigins[existingIndex] ?? existingSource,
+      status: openIssues[existingIndex]?.status ?? "open",
+      current: (openIssueCreatedIn[existingIndex] ?? -1) === revision,
+    };
+    const group = classifyOpenIssueConflict(existing, {
+      origin: added.origin,
+      status: added.status,
+      current: true,
+    });
+    const groupKey = attributionKeyOf(group);
+    const found = conflictAttribution.get(groupKey);
+    if (found === undefined) {
+      conflictAttribution.set(groupKey, {
+        attribution: { first: group.first, second: group.second, count: 1 },
+        order: groupKey,
+      });
+    } else {
+      conflictAttribution.set(groupKey, {
+        attribution: { ...found.attribution, count: found.attribution.count + 1 },
+        order: groupKey,
+      });
+    }
   };
   /**
-   * 開いている事項に行を 1 つ足す（Issue #460）。**渡された形のまま足す**——畳まない・ID を振り直さない。
-   * 同じ ID の行（状態を問わない）が既にあれば、衝突として記録する（止めるのは呼ぶ側）。出どころの種類は
-   * 記録の分類にだけ使う。
+   * 開いている事項に行を 1 つ足す（Issue #460・#464）。**渡された形のまま足す**——畳まない・ID を
+   * 振り直さない。同じ ID の行（状態を問わない）が既にあれば、衝突として記録する（止めるのは呼ぶ側）。
+   * 出どころと由来は記録の分類にだけ使う。`origin` を省くと出どころと同じ由来にする。
    */
-  const addOpenIssue = (issue: PlanOpenIssue, source: PlanOpenIssueSource): void => {
+  const addOpenIssue = (issue: PlanOpenIssue, source: PlanOpenIssueSource, origin?: PlanOpenIssueOrigin): void => {
     const collision = detectOpenIssueCollisions([...openIssues, issue]).find(
       (candidate) => candidate.addedIndex === openIssues.length,
     );
     if (collision !== undefined) {
-      recordConflict(openIssueSources[collision.existingIndex] ?? "unresolved", source, issue.id);
+      recordConflict(collision.existingIndex, { source, origin: origin ?? source, status: issue.status }, issue.id);
     }
     openIssues.push(issue);
     openIssueSources.push(source);
+    openIssueOrigins.push(origin ?? source);
+    openIssueCreatedIn.push(revision);
   };
-  /** 衝突の記録を、結果の形（組ごとの件数を組み直す）に写す（Issue #460） */
+  /**
+   * 使い回しで断った応答を、点検の版（`check`）と試行ごとに記録する（Issue #464）。記録は**値を持たない**
+   * ——件数と提示元の分類だけである。断ったあとに確定・停止しても、結果の別の欄に残る。
+   */
+  const recordIdReuse = (check: number, rejection: SurfaceIdReuseRejection): void => {
+    surfaceIdReuse.push({
+      check,
+      attempt: rejection.attempt,
+      responses: 1,
+      distinctIds: rejection.distinctIds,
+      bySource: rejection.bySource.map((entry) => ({ source: entry.source, count: entry.count })),
+    });
+  };
+  /** 衝突の記録を、結果の形（組ごとの件数を組み直す）に写す（Issue #460・#464） */
   const buildOpenIssueConflicts = (): PlanOpenIssueConflicts => ({
     ids: conflictIds.size,
     rows: PLAN_OPEN_ISSUE_SOURCES.flatMap((existing) =>
@@ -1328,6 +1426,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         return count === 0 ? [] : [{ existing, added, count }];
       }),
     ),
+    // 帰属の組は、足した順によらない鍵の順で決める（記録の並びを安定させる）
+    attribution: [...conflictAttribution.values()]
+      .sort((left, right) => (left.order < right.order ? -1 : left.order > right.order ? 1 : 0))
+      .map((entry) => entry.attribution),
     emptyTargets: emptyResolveTargets,
     round: conflictRound,
   });
@@ -1516,6 +1618,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     surfaceCheckDiagnostics: aggregateSurfaceCheckDiagnostics(),
     diffReviews: diffReviews.map(finalizeDiffReview),
     openIssueConflicts: buildOpenIssueConflicts(),
+    surfaceIdReuse: surfaceIdReuse.slice(),
   });
 
   /**
@@ -1641,8 +1744,23 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     const catalogData: SurfaceCatalogData = buildCatalogData(catalog);
 
     // ── P3 洗い出し（目録に無い曖昧さ）──────────────────────────────
+    // 初回に**データで見せた**事項 ID の集合（目録の開いている事項と、仮に適用した既定の 2 種）。呼ぶ側が
+    // 構造化した対応から作る——文や ID の接頭辞の解析では作らない（Issue #464）。
+    const initialShownIds: SurfaceShownIssueIds = {
+      catalog: catalogData.openIssues.map((issue) => issue.id),
+      defaults: catalogData.defaults.map((entry) => entry.issueId),
+      inherited: [],
+      decisions: [],
+    };
     const surface = await runStageOutcome("surface", () =>
-      runSurface({ list, documents: input.documents, gateway, catalog: catalogData }),
+      runSurface({
+        list,
+        documents: input.documents,
+        gateway,
+        catalog: catalogData,
+        shownIssueIds: initialShownIds,
+        onIdReuse: (rejection) => recordIdReuse(1, rejection),
+      }),
     );
     for (const ambiguity of surface.ambiguities) {
       addOpenIssue(
@@ -2163,6 +2281,21 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         acceptedUnwritable: acceptedUnwritable.slice(),
         questionsAndAnswers: relatedQuestionsAndAnswers(inputsNow),
       };
+      // この往復の P3 に**データで見せた**事項 ID の集合（4 種。Issue #464）。呼ぶ側が構造化した対応から
+      // 作る——文や ID の接頭辞の解析では作らない。目録の開いている事項・仮の既定・今回の引き継ぎ・
+      // 参照用の文脈の既存の決定に `resolution.decision_id` で結ばれた既存の事項である。
+      const decisionIdsInContext = new Set(context.decisions.map((decision) => decision.id));
+      const diffShownIds: SurfaceShownIssueIds = {
+        catalog: diffCatalogData.openIssues.map((issue) => issue.id),
+        defaults: diffCatalogData.defaults.map((entry) => entry.issueId),
+        inherited: inheritDecisions.map((entry) => entry.issue.id),
+        decisions: openIssues.flatMap((issue) => {
+          const decisionId = issue.resolution?.decision_id;
+          return decisionId !== undefined && decisionIdsInContext.has(decisionId) ? [issue.id] : [];
+        }),
+      };
+      // この往復の点検の版（初回 1 に続く番号。`surfaceChecks` は初回の分だけ積んである）
+      const diffCheckNumber = surfaceChecks.length + 1;
       // 対象外の照合と記録は、**形が正しい応答**について、制約 ID の裏付けの検査より前に済ませる
       // ——制約検査で失敗を返すときも、対象外の集合・分類・識別済みの件数を記録に残す（D1）。
       // 対象外の「書けない」の申告は、**受理済みの申告の正確な再申告だけ**を重複として除く
@@ -2200,6 +2333,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           catalog: diffCatalogData,
           context,
           onShapeValid: evaluateTargets,
+          shownIssueIds: diffShownIds,
+          onIdReuse: (rejection) => recordIdReuse(diffCheckNumber, rejection),
         });
         // 形の失敗・制約検査の失敗のどちらも、対象外の記録は evaluateTargets で済んでいる（D1）
         if (!outcome.ok) return outcome;
@@ -2240,7 +2375,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
           decisionId,
           value: facet.value,
         });
-        addOpenIssue({ ...issue, status: "resolved", resolution: { decision_id: decisionId, reason } }, "catalog");
+        addOpenIssue({ ...issue, status: "resolved", resolution: { decision_id: decisionId, reason } }, "catalog", "inherit");
       }
 
       // ── 差分の申告の点検（F1 と同じ条件・同じ規則で掛ける。Issue #432・#434）──────

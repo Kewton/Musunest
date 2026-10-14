@@ -403,13 +403,26 @@ interface PlanCliRecordShape {
       readonly open_by_source: readonly { readonly source: string; readonly count: number }[];
     };
   }[];
-  /** 同じ ID の開いている事項の行の衝突の記録（件数と分類と版だけ。Issue #460） */
+  /** 同じ ID の開いている事項の行の衝突の記録（件数と分類と版だけ。Issue #460・#464） */
   readonly open_issue_conflicts: {
     readonly ids: number;
     readonly rows: readonly { readonly existing: string; readonly added: string; readonly count: number }[];
+    readonly attribution: readonly {
+      readonly first: { readonly origin: string; readonly status: string; readonly current: boolean };
+      readonly second: { readonly origin: string; readonly status: string; readonly current: boolean };
+      readonly count: number;
+    }[];
     readonly empty_targets: number;
     readonly round: number | null;
   };
+  /** 使い回しで断った応答の記録（版・試行・応答の数・異なる数・提示元ごとの数。値は入れない。Issue #464） */
+  readonly surface_id_reuse: readonly {
+    readonly check: number;
+    readonly attempt: number;
+    readonly responses: number;
+    readonly distinct_ids: number;
+    readonly by_source: readonly { readonly source: string; readonly count: number }[];
+  }[];
   readonly spent_usd: number;
   readonly remaining_usd: number;
   readonly budget_usd: number;
@@ -2509,12 +2522,15 @@ describe("差分点検・§3：受理済み申告の再申告を除いた記録�
 
 // ── Issue #460：同じ ID の開いている事項の行の衝突を、値を含めずに plan-record に残す ──────────
 
-describe("同じ ID の開いている事項の行の衝突を、値を含めずに plan-record に残す（Issue #460）", () => {
-  it("衝突した ID の件数・行の件数・0 行の件数・版が残り、duplicate-open-issue が other に消えず、値は転記されない", async () => {
+describe("同じ ID の開いている事項の行の衝突を、値を含めずに plan-record に残す（Issue #460・#464）", () => {
+  it("衝突した ID の件数・行の件数・帰属・0 行の件数・版が残り、duplicate-open-issue が other に消えず、値は転記されない", async () => {
     const mark = "MARK_CONFLICT_ZZZ";
-    // モデルが、コード作の目録の ID と同じ ID の事項を返す（足す時点で衝突する）
+    // モデルが、**見せていない**同じ ID の事項を同一応答内に 2 件返す（足す時点で衝突する）
     const surface = {
-      ambiguities: [{ id: "OI:catalog:R-1:period", requirementId: "R-1", text: `${mark}の事項`, critical: false }],
+      ambiguities: [
+        { id: "OI-dup", requirementId: "R-1", text: `${mark}の事項`, critical: true },
+        { id: "OI-dup", requirementId: "R-1", text: `${mark}の事項 2`, critical: true },
+      ],
       unwritable: [],
     };
     const recording = createRecordingClient([
@@ -2554,15 +2570,25 @@ describe("同じ ID の開いている事項の行の衝突を、値を含めず
     // 衝突の記録（件数と分類と版だけ。0 行の件数も残る）
     expect(record.open_issue_conflicts).toEqual({
       ids: 1,
-      rows: [{ existing: "surface", added: "catalog", count: 1 }],
+      rows: [{ existing: "surface", added: "surface", count: 1 }],
+      // 帰属の組（由来・状態・今回か以前か。足した順によらない）
+      attribution: [
+        {
+          first: { origin: "surface", status: "open", current: true },
+          second: { origin: "surface", status: "open", current: true },
+          count: 1,
+        },
+      ],
       empty_targets: 0,
       round: 1,
     });
     // 新しい記録に、事項 ID・要件 ID・文の目印が出ない
     const conflictsText = JSON.stringify(record.open_issue_conflicts);
     expect(conflictsText).not.toContain(mark);
-    expect(conflictsText).not.toContain("OI:catalog");
+    expect(conflictsText).not.toContain("OI-dup");
     expect(conflictsText).not.toContain("R-1");
+    // 使い回しの記録は、この衝突（見せていない ID）では空
+    expect(record.surface_id_reuse).toEqual([]);
     // もともと値を保存する既存の欄は変えない（問いの事項 ID・一緒に閉じる ID・答えの本文の形はそのまま）
     expect(record.rounds).toEqual([]);
     expect(record.closed_by_default).toEqual([]);
@@ -2672,5 +2698,122 @@ describe("差分点検：引き継いだ観点の記録を plan-record に残す
     expect(record.rounds).toHaveLength(1);
     expect(record.closed_by_default).toEqual([]);
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Issue #464：使い回しで断った応答を、plan-record の新しい欄に残す ──────────────────
+
+describe("使い回しで断った応答を、plan-record の新しい欄に残す（04 §7・Issue #464）", () => {
+  /** 目録の period を未指定にする（コード作の事項 OI:catalog:R-1:period が、P3 に見せた ID になる） */
+  const reuseJudge = () =>
+    createFakeJudge({ ...catalogUnspecifiedFor({ "R-1": ["period"] }), ...coverAnswers([]) });
+
+  /** 見せた ID（目録の開いている事項。仮の既定にも同じ ID が入る）を使い回した応答 */
+  const reuseSurface = (mark = "MARK_REUSE_ZZZ") => ({
+    ambiguities: [{ id: "OI:catalog:R-1:period", requirementId: "R-1", text: `${mark}の事項`, critical: false }],
+    unwritable: [],
+  });
+
+  /** CLI を 1 回回して、plan-record を読む */
+  async function runPlanOnce(dir: string, recording: ReturnType<typeof createRecordingClient>) {
+    const answersPath = "answers.json";
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => reuseJudge(),
+      now: () => 0,
+      log: () => {},
+    });
+    return { code, record: await readPlanRecord(dir) };
+  }
+
+  it("1 回断って成功：断った件の記録（版・試行・応答の数・異なる数・提示元ごとの数）が残り、failure が無い", async () => {
+    const mark = "MARK_REUSE_ZZZ";
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(reuseSurface(mark)),
+      structured(SURFACE_CLEAR),
+      ...recordedRunFromPlan(),
+    ]);
+    const { record } = await runPlanOnce(`${directory}/id-reuse-confirmed`, recording);
+
+    expect(record.outcome).toBe("confirmed");
+    // 確定したので failure が無い
+    expect(record.failure).toBeUndefined();
+    // 版 1・試行 1。同じ ID が目録と仮の既定の両方に当たるので、両方に数える
+    expect(record.surface_id_reuse).toEqual([
+      {
+        check: 1,
+        attempt: 1,
+        responses: 1,
+        distinct_ids: 1,
+        by_source: [
+          { source: "catalog", count: 1 },
+          { source: "defaults", count: 1 },
+          { source: "inherited", count: 0 },
+          { source: "decisions", count: 0 },
+        ],
+      },
+    ]);
+    // 新しい欄に、事項 ID と文の目印が出ない
+    const text = JSON.stringify(record.surface_id_reuse);
+    expect(text).not.toContain(mark);
+    expect(text).not.toContain("OI:catalog");
+    expect(text).not.toContain("R-1");
+  });
+
+  it("2 回断って malformed：outcome は stopped、failure.kind は malformed、problems[].code は issue-id-reused", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(reuseSurface()),
+      structured(reuseSurface()),
+    ]);
+    const { code, record } = await runPlanOnce(`${directory}/id-reuse-malformed`, recording);
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(record.outcome).toBe("stopped");
+    expect(record.failure?.kind).toBe("malformed");
+    expect(record.failure?.problems?.some((problem) => problem.code === "issue-id-reused")).toBe(true);
+    // 版 1・試行 1 と 2 の両方が残る
+    expect(record.surface_id_reuse.map((entry) => entry.attempt)).toEqual([1, 2]);
+    expect(record.surface_id_reuse.every((entry) => entry.check === 1 && entry.distinct_ids === 1)).toBe(true);
+  });
+
+  it("断ったあとに途中で止まったときは、実際の最終の分類（制約の未達）を保ち、issue-id-reused に置き換えない。断った履歴は別の欄に残る", async () => {
+    // 1 回目：使い回しで断る。2 回目：形は正しいが、制約 ID が無い（制約の検査で未達）
+    const badConstraint = {
+      ambiguities: [],
+      unwritable: [
+        { id: "U-1", requirementId: "R-2", part: "部分", constraintIds: [], reason: "理由", alternative: "代わり" },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(reuseSurface()),
+      structured(badConstraint),
+    ]);
+    const { code, record } = await runPlanOnce(`${directory}/id-reuse-stop`, recording);
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(record.outcome).toBe("stopped");
+    // 最終の失敗は、制約の未達（使い回しに置き換えない）
+    expect(record.failure?.kind).toBe("unmet");
+    expect(record.failure?.problems?.some((problem) => problem.code === "constraint-id-missing")).toBe(true);
+    expect(record.failure?.problems?.some((problem) => problem.code === "issue-id-reused")).toBe(false);
+    // 断った履歴は、最終の失敗の欄とは別の欄に残る
+    expect(record.surface_id_reuse).toHaveLength(1);
+    expect(record.surface_id_reuse[0]?.distinct_ids).toBe(1);
   });
 });

@@ -261,6 +261,16 @@ function inheritRecord(
   };
 }
 
+/** 使い回しで断った件の「提示元ごとの数」（Issue #464。既定はすべて 0） */
+function idReuseBySource(
+  overrides: Partial<Record<"catalog" | "defaults" | "inherited" | "decisions", number>> = {},
+) {
+  return (["catalog", "defaults", "inherited", "decisions"] as const).map((source) => ({
+    source,
+    count: overrides[source] ?? 0,
+  }));
+}
+
 /** P4 の答え（未解決の事項 OI-extra 1 つに、選択肢 2 つ・推奨 1 つ・自由入力） */
 const QUESTIONS_OUTPUT = {
   questions: [
@@ -2188,7 +2198,7 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
     expect(result.openIssues.map((issue) => issue.id)).toContain("OI:catalog:R-1:period");
   });
 
-  it("重複した ID の事項は、既定の対象にならず、P4 を呼ばずに duplicate-open-issue で止まる", async () => {
+  it("コードが作った事項と同じ ID を使い回した応答は、行を足す前に C1 で断られ、2 回続けば malformed で止まる（Issue #464）", async () => {
     const surface = {
       ambiguities: [{ id: "OI:catalog:R-1:period", requirementId: "R-1", text: "重複した事項", critical: false }],
       unwritable: [],
@@ -2196,6 +2206,8 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
     const recording = createRecordingClient([
       structured(REQUIREMENT_LIST_OUTPUT),
       structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      // やり直しの 2 回目も同じ応答（使い回しのまま）→ malformed
       structured(surface),
     ]);
     const judge = createFakeJudge({
@@ -2205,17 +2217,19 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
 
     const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
 
-    expect(result.kind).toBe("cannot-confirm");
-    if (result.kind !== "cannot-confirm") return;
-    // コードが作った事項とモデルが作った事項で ID が重なっているので、既定で閉じない
-    expect(result.closedByDefault).toEqual([]);
-    // 既定の適用と P4 の前に、同じ ID の衝突として有限の理由で止まる（Issue #460）
-    expect(result.reasons).toEqual([{ source: "session", code: "duplicate-open-issue", path: "open_issues" }]);
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    // 段の失敗は malformed で、分類は issue-id-reused
+    expect(result.failure?.kind).toBe("malformed");
+    expect(result.failure?.problems?.some((problem) => problem.code === "issue-id-reused")).toBe(true);
+    // 断った件の記録（版 1・試行 1 と 2）。同じ ID が目録と仮の既定の両方に当たる
+    expect(result.surfaceIdReuse).toEqual([
+      { check: 1, attempt: 1, responses: 1, distinctIds: 1, bySource: idReuseBySource({ catalog: 1, defaults: 1 }) },
+      { check: 1, attempt: 2, responses: 1, distinctIds: 1, bySource: idReuseBySource({ catalog: 1, defaults: 1 }) },
+    ]);
+    // 行を足す前に断るので、P4 は呼ばない（衝突の停止にも至らない）
     expect(result.stages.some((stage) => stage.stage === "questions")).toBe(false);
-    // 衝突の記録（モデル作の事項 × コード作の目録。値は持たない）
-    expect(result.openIssueConflicts.ids).toBe(1);
-    expect(result.openIssueConflicts.round).toBe(1);
-    expect(result.openIssueConflicts.rows).toEqual([{ existing: "surface", added: "catalog", count: 1 }]);
+    expect(result.openIssueConflicts.ids).toBe(0);
   });
 
   it("「全部推奨」でも、残りの問数に収まる重大でない事項を聞かない応答は、覆いの検査でやり直し、2 回続けば段の失敗になる（Issue #419）", async () => {
@@ -4428,7 +4442,7 @@ describe("同じ ID の開いている事項の行を畳まず、衝突は問い
       expect(result.plan.open_issues.find((issue) => issue.id === "OI-x")?.resolution?.answer_id).toBe("A:Q1-2");
       // 同じ ID の行を増やしていない
       expect(result.plan.open_issues.filter((issue) => issue.id === "OI-a")).toHaveLength(1);
-      expect(result.openIssueConflicts).toEqual({ ids: 0, rows: [], emptyTargets: 0, round: null });
+      expect(result.openIssueConflicts).toEqual({ ids: 0, rows: [], attribution: [], emptyTargets: 0, round: null });
       expect(await checkConfirmedPlan(result.plan)).toEqual([]);
     }
   });
@@ -4659,7 +4673,7 @@ describe("同じ ID の開いている事項の行を畳まず、衝突は問い
     expect(result.closedByDefault).toEqual([
       { issueId: "OI:catalog:R-1:period", facetId: "period", value: "期間の条件を足さない" },
     ]);
-    expect(result.openIssueConflicts).toEqual({ ids: 0, rows: [], emptyTargets: 0, round: null });
+    expect(result.openIssueConflicts).toEqual({ ids: 0, rows: [], attribution: [], emptyTargets: 0, round: null });
   });
 });
 
@@ -5014,7 +5028,7 @@ describe("差分点検：答えから生まれた要件が、答えの解いた�
     expect(JSON.stringify(result.plan)).not.toContain("A-1");
   });
 
-  it("P3 が引き継いだ事項と同じ ID の行を返すと、畳まず 2 行のまま、既定の対象にならず衝突で止まる", async () => {
+  it("P3 が引き継いだ事項と同じ ID を行として返す応答は、C1（issue-id-reused）で断られ、2 回続けば malformed で止まる", async () => {
     const sameIdAmbiguity = {
       ambiguities: [
         { id: "OI:catalog:R:A:Q1-1:aggregation", requirementId: "R:A:Q1-1", text: "同じ ID の曖昧さ", critical: true },
@@ -5026,6 +5040,8 @@ describe("差分点検：答えから生まれた要件が、答えの解いた�
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_OUTPUT_CLEAR),
       structured(INHERIT_QUESTIONS),
+      // 差分の洗い出し：引き継いだ事項と同じ ID を返す（1 回目・やり直しの 2 回目とも）
+      structured(sameIdAmbiguity),
       structured(sameIdAmbiguity),
     ]);
     const judge = createFakeJudge({
@@ -5034,13 +5050,61 @@ describe("差分点検：答えから生まれた要件が、答えの解いた�
       ...coverAnswers("A:Q1-1"),
     });
     const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST));
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.kind).toBe("malformed");
+    expect(result.failure?.problems?.some((problem) => problem.code === "issue-id-reused")).toBe(true);
+    // 断った件の記録が新しい欄に残る（版 2・試行 1 と 2）。提示元は「今回の引き継ぎ」
+    expect(result.surfaceIdReuse).toEqual([
+      { check: 2, attempt: 1, responses: 1, distinctIds: 1, bySource: idReuseBySource({ inherited: 1 }) },
+      { check: 2, attempt: 2, responses: 1, distinctIds: 1, bySource: idReuseBySource({ inherited: 1 }) },
+    ]);
+    // 断った応答からは、行が足されない（引き継いだ行も足されない）
+    expect(result.openIssueConflicts.ids).toBe(0);
+  });
+
+  it("見せていない既存の行（前の往復の P3 の行）との衝突は、今までどおり #460 の停止になる", async () => {
+    // 初回の P3 が OI-extra を開き、答えで閉じる。差分の P3 が、見せていない OI-extra を再び返す
+    const sameId = {
+      ambiguities: [{ id: "OI-extra", requirementId: "R:A:Q1-1", text: "同じ ID", critical: true }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(questionsFor("OI-extra")),
+      structured(sameId),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+    const responder: PlanResponder = {
+      async answer(request) {
+        return { kind: "answers", answers: request.questions.map((question) => answerTo(question)) };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
     expect(result.reasons).toEqual([{ source: "session", code: "duplicate-open-issue", path: "open_issues" }]);
-    // 引き継いだ行（resolved）と、P3 が返した行（open）が、畳まれず 2 行のまま衝突として記録される
     expect(result.openIssueConflicts.ids).toBe(1);
-    expect(result.openIssueConflicts.rows).toEqual([{ existing: "surface", added: "catalog", count: 1 }]);
-    expect(result.closedByDefault).toEqual([]);
+    expect(result.openIssueConflicts.rows).toEqual([{ existing: "surface", added: "surface", count: 1 }]);
+    // 帰属の組は、前の往復の P3 の行（resolved）と、今回足した P3 の行（open）
+    expect(result.openIssueConflicts.attribution).toEqual([
+      {
+        first: { origin: "surface", status: "open", current: true },
+        second: { origin: "surface", status: "resolved", current: false },
+        count: 1,
+      },
+    ]);
+    // 使い回しとしては断っていない（見せていない ID）
+    expect(result.surfaceIdReuse).toEqual([]);
   });
 
   it("引き継ぎの前後で、判定の問いの数と目録の呼び出しの回数が変わらない", async () => {
@@ -5109,5 +5173,121 @@ describe("差分点検：答えから生まれた要件が、答えの解いた�
     expect(dataBlockOf(diffRequest?.input ?? "", "要件の一覧")).toContain("R:A:Q1-1");
     expect(dataBlockOf(diffRequest?.input ?? "", "開いている事項").trim()).toBe("[]");
     expect(dataBlockOf(diffRequest?.input ?? "", "仮に適用した既定").trim()).toBe("[]");
+  });
+});
+
+// ── Issue #464：データで見せた事項 ID を使い回した応答を、行を足す前に断る ──────────────
+
+describe("データで見せた事項 ID を使い回した応答を、行を足す前に断り、断った件を記録に残す（04 §3 P3・Issue #464）", () => {
+  /** 問いに最初の選択肢で答える答える役（答えの ID はコードが組み直す） */
+  const ANSWER_FIRST_INLINE: PlanResponder = {
+    async answer(request) {
+      return { kind: "answers", answers: request.questions.map((question) => answerTo(question)) };
+    },
+    async confirm() {
+      return "build";
+    },
+  };
+
+  it("初回：使い回しの応答を 1 回断り、受理した 2 回目で進む。断った応答から行は足されず、既存の行は変わらない", async () => {
+    const reuse = {
+      ambiguities: [{ id: "OI:catalog:R-1:period", requirementId: "R-1", text: "使い回し", critical: false }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(reuse),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({ ...catalogUnspecifiedFor({ "R-1": ["period"] }), ...coverAnswersFor([]) });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_NONE));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 断った応答の事項（「使い回し」）は、行として足されない
+    expect(result.plan.open_issues.some((issue) => issue.text === "使い回し")).toBe(false);
+    // 既存の行（目録の period）は変わらない（既定で閉じる）
+    expect(result.closedByDefault).toEqual([
+      { issueId: "OI:catalog:R-1:period", facetId: "period", value: "期間の条件を足さない" },
+    ]);
+    // 断った件の記録（版 1・試行 1）。同じ ID が目録と仮の既定の両方に当たるので、両方に数える
+    expect(result.surfaceIdReuse).toEqual([
+      { check: 1, attempt: 1, responses: 1, distinctIds: 1, bySource: idReuseBySource({ catalog: 1, defaults: 1 }) },
+    ]);
+    // 2 回目の応答は受理され、洗い出しの段は成功する
+    expect(result.stages.find((stage) => stage.stage === "surface")?.status).toBe("ok");
+  });
+
+  it("差分：使い回しの応答を 1 回断り、受理した 2 回目で進む。断った応答から行は足されない", async () => {
+    const diffReuse = {
+      ambiguities: [
+        { id: "OI:catalog:R-1:period", requirementId: "R:A:Q1-1", text: "使い回し", critical: true },
+      ],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(questionsFor("OI-extra")),
+      structured(diffReuse),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["period"] }),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST_INLINE));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 断った応答の事項は、行として足されない
+    expect(result.plan.open_issues.some((issue) => issue.text === "使い回し")).toBe(false);
+    // 断った件の記録（版 2・試行 1）。提示元は「決定に結ばれた既存の事項」（既定で閉じた行）
+    expect(result.surfaceIdReuse).toEqual([
+      { check: 2, attempt: 1, responses: 1, distinctIds: 1, bySource: idReuseBySource({ decisions: 1 }) },
+    ]);
+  });
+
+  it("差分：断ったあとに受理した応答にも、点検の対象の検査が掛かる（対象外なら unmet で止まる）", async () => {
+    const diffReuse = {
+      ambiguities: [
+        { id: "OI:catalog:R-1:period", requirementId: "R:A:Q1-1", text: "使い回し", critical: true },
+      ],
+      unwritable: [],
+    };
+    const outOfScope = {
+      ambiguities: [{ id: "OI:new:x", requirementId: "R-9", text: "対象外", critical: true }],
+      unwritable: [],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(questionsFor("OI-extra")),
+      structured(diffReuse),
+      structured(outOfScope),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["period"] }),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST_INLINE));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    // 最終の失敗は unmet（点検の対象の検査）。使い回しに置き換えない
+    expect(result.failure?.kind).toBe("unmet");
+    expect(result.failure?.problems?.some((problem) => problem.code === "requirement-id-unknown")).toBe(true);
+    // 断った履歴は、最終の失敗の欄とは別の欄に残る
+    expect(result.surfaceIdReuse).toEqual([
+      { check: 2, attempt: 1, responses: 1, distinctIds: 1, bySource: idReuseBySource({ decisions: 1 }) },
+    ]);
   });
 });

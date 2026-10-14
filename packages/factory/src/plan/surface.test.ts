@@ -13,7 +13,7 @@ import {
   createRecordingClient,
   makeGateway,
 } from "../stages/__tests__/prompt.js";
-import { SURFACE_RULES, SURFACE_SCHEMA_NAME, checkSurfaceOutput, checkSurfaceTargets, runSurface, type PlanSurface, type SurfaceCatalogData, type SurfaceContext } from "./surface.js";
+import { SURFACE_RULES, SURFACE_SCHEMA_NAME, SURFACE_SHOWN_ID_SOURCES, checkSurfaceOutput, checkSurfaceTargets, runSurface, surfaceIdReuseOf, type PlanSurface, type SurfaceCatalogData, type SurfaceContext, type SurfaceShownIdSource, type SurfaceShownIssueIds } from "./surface.js";
 
 /** 正しい応答（未解決の事項 1 件・書けないこと 1 件） */
 const SURFACE_OUTPUT = {
@@ -492,5 +492,135 @@ describe("制約 ID の正規化は 1 回だけである（Issue #434・D2）", 
     if (!result.ok) return;
     // 保存する値は、1 回だけ外した `### action`（繰り返し外さない）
     expect(result.value.unwritable[0]?.constraintIds).toEqual(["### action"]);
+  });
+});
+
+// ── Issue #464：データで見せた事項 ID を使い回した応答を、形の検査で断る ──────────────
+
+describe("データで見せた事項 ID を使い回した応答を、形の検査で断る（04 §3 P3・Issue #464）", () => {
+  /** 4 つの提示元すべてに 1 つずつ ID を入れた「見せた ID」（初回の 2 種・差分の 4 種を兼ねる） */
+  const SHOWN: SurfaceShownIssueIds = {
+    catalog: ["OI:catalog:R-1:period"],
+    defaults: ["OI:catalog:R-1:auto"],
+    inherited: ["OI:catalog:R:A:Q1-1:aggregation"],
+    decisions: ["OI:catalog:R-1:asked"],
+  };
+  /** 提示元ごとの代表 ID */
+  const ID_OF_SOURCE: Readonly<Record<SurfaceShownIdSource, string>> = {
+    catalog: "OI:catalog:R-1:period",
+    defaults: "OI:catalog:R-1:auto",
+    inherited: "OI:catalog:R:A:Q1-1:aggregation",
+    decisions: "OI:catalog:R-1:asked",
+  };
+  /** 見せた ID を使った応答（未解決の事項 1 件） */
+  const reuseOutput = (id: string) => ({
+    ambiguities: [{ id, requirementId: "R-1", text: "使い回し", critical: true }],
+    unwritable: [],
+  });
+  /** 見せていない新しい ID の応答 */
+  const NEW_OUTPUT = {
+    ambiguities: [{ id: "OI:new:1", requirementId: "R-1", text: "新しい事項", critical: true }],
+    unwritable: [],
+  };
+
+  it("固定の規則に、新しい事項の ID の文が入る", () => {
+    const text = SURFACE_RULES.join("\n");
+    expect(text).toContain("新しい事項の ID は、データで見せた事項の ID と同じにしない");
+    expect(text).toContain("新しい ID");
+  });
+
+  it("初回の 2 種・差分の 4 種のどの提示元の ID と一致しても、応答全体を issue-id-reused で断る", () => {
+    for (const source of SURFACE_SHOWN_ID_SOURCES) {
+      const checked = checkSurfaceOutput(reuseOutput(ID_OF_SOURCE[source]), SHOWN);
+      expect(checked.ok, source).toBe(false);
+      if (checked.ok) continue;
+      expect(
+        checked.problems.some(
+          (problem) => problem.field === "ambiguities[0].id" && problem.code === "issue-id-reused",
+        ),
+        source,
+      ).toBe(true);
+      // 誤りの文に、事項 ID の値を入れない
+      for (const problem of checked.problems) expect(problem.message).not.toContain("OI:");
+    }
+  });
+
+  it("見せていない ID・新しい ID は受理する", () => {
+    for (const output of [NEW_OUTPUT, reuseOutput("OI:catalog:R-9:period")]) {
+      const checked = checkSurfaceOutput(output, SHOWN);
+      expect(checked.ok).toBe(true);
+    }
+  });
+
+  it("見せた ID を使った応答は、2 回続けば malformed で止まる", async () => {
+    const recording = createRecordingClient([
+      { kind: "structured" as const, output: reuseOutput("OI:catalog:R-1:period"), usage: undefined },
+      { kind: "structured" as const, output: reuseOutput("OI:catalog:R-1:period"), usage: undefined },
+    ]);
+    const result = await runSurface({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      shownIssueIds: SHOWN,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok || result.failure.kind !== "malformed") return;
+    expect(result.failure.attempts).toBe(2);
+    expect(result.failure.problems.some((problem) => problem.code === "issue-id-reused")).toBe(true);
+  });
+
+  it("断ったあとに受理した応答には、制約の検査が掛かる", async () => {
+    // 1 回目：使い回しで断る。2 回目：形は正しいが、制約 ID が無い（制約の検査で断る）
+    const badConstraint = {
+      ambiguities: [],
+      unwritable: [{ id: "U-1", requirementId: "R-2", part: "部分", constraintIds: [], reason: "理由", alternative: "代わり" }],
+    };
+    const recording = createRecordingClient([
+      { kind: "structured" as const, output: reuseOutput("OI:catalog:R-1:period"), usage: undefined },
+      { kind: "structured" as const, output: badConstraint, usage: undefined },
+    ]);
+    const result = await runSurface({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      shownIssueIds: SHOWN,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok || result.failure.kind !== "unmet") return;
+    expect(result.failure.problems.some((problem) => problem.code === "constraint-id-missing")).toBe(true);
+  });
+
+  it("断った件を、試行ごとに onIdReuse で知らせる（値は入れない）", async () => {
+    const rejections: { attempt: number; distinctIds: number; bySource: readonly { source: string; count: number }[] }[] = [];
+    const recording = createRecordingClient([
+      { kind: "structured" as const, output: reuseOutput("OI:catalog:R-1:period"), usage: undefined },
+      { kind: "structured" as const, output: NEW_OUTPUT, usage: undefined },
+    ]);
+    const result = await runSurface({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      shownIssueIds: SHOWN,
+      onIdReuse: (rejection) => rejections.push(rejection),
+    });
+    expect(result.ok).toBe(true);
+    // 1 回目だけ断った（2 回目は受理）
+    expect(rejections).toHaveLength(1);
+    expect(rejections[0]?.attempt).toBe(1);
+    expect(rejections[0]?.distinctIds).toBe(1);
+    expect(rejections[0]?.bySource.find((entry) => entry.source === "catalog")?.count).toBe(1);
+    expect(rejections[0]?.bySource.find((entry) => entry.source === "defaults")?.count).toBe(0);
+    // 値（ID）は渡さない
+    expect(JSON.stringify(rejections)).not.toContain("OI:");
+  });
+
+  it("同じ ID が複数の提示元に当たるときは、各提示元に数える（合計は異なる数と一致しない）", () => {
+    const both = { ...SHOWN, defaults: ["OI:catalog:R-1:period"] };
+    const reuse = surfaceIdReuseOf(reuseOutput("OI:catalog:R-1:period"), both);
+    expect(reuse.distinctIds).toBe(1);
+    expect(reuse.bySource.find((entry) => entry.source === "catalog")?.count).toBe(1);
+    expect(reuse.bySource.find((entry) => entry.source === "defaults")?.count).toBe(1);
+    // 提示元の合計（2）は、異なる数（1）と一致しない
+    expect(reuse.bySource.reduce((total, entry) => total + entry.count, 0)).toBe(2);
   });
 });
