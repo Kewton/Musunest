@@ -918,6 +918,40 @@ describe("誤った所属は、要件 ID つきの落ちで ⑤a のやり直し
     expect(retry).toContain("R-2");
     expect(retry).toContain("total");
   });
+
+  it("② の 1 回目が形に落ち、2 回目が形は通るが所属だけを誤った設計でも、今の負例と同じく ⑤a のやり直しに回り full にならない（Issue #479）", async () => {
+    // ② の 1 回目は形の合わない応答（値は目印。問題の文には写らない）。2 回目は、既存の誤った所属の負例と
+    // **同じ誤り**（所属だけを誤らせた設計）——形は通る。前回の応答をデータで渡しても、意味の独立の点検
+    // （⑤a の要件ごとの落ち）が働き続けることの確認である（モデルへの効力の証明とはしない）。
+    const full = recordedRun({ design: WRONG_OWNERSHIP_DESIGN });
+    const { recording, run } = runWith([
+      ...full.slice(0, 2),
+      structured({ designs: "目印ZZ" }), // ② の 1 回目は形に落ちる
+      ...full.slice(2), // ② の 2 回目は形は通るが所属だけを誤らせた設計
+      structured(CORRESPONDENCE_OUTPUT_PLANNED), // ⑤a のやり直し（同じ応答なので停滞で止まる）
+    ]);
+    const result = await run;
+
+    // 今の負例と同じく、停滞で部分案になり、⑥ 直すへは回らない
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "partial", verdict: "partial" });
+    expect(result.summary.stop_reason).toBe("stagnation");
+    expect(result.record.stages.some((step) => step.stage === "repair")).toBe(false);
+    if (result.bundle === null) throw new Error("納品物が無い");
+    const verification = verificationOf(result.bundle);
+    expect(verification.test_mismatches).toBe(0);
+    expect(verification.test_unresolved).toBe(0);
+    expect(result.record.stages.filter((step) => step.stage === "correspondence")).toHaveLength(2);
+
+    // ② は形のやり直しで 2 回呼ぶ。2 回目だけが「前回の応答」と「前回の形の問題」を持つ
+    const design = result.record.stages.find((stage) => stage.stage === "design");
+    expect(design).toMatchObject({ status: "ok", calls: 2 });
+    const designRequests = recording.structured.filter((request) => request.schemaName === DESIGN_SCHEMA_NAME);
+    expect(designRequests).toHaveLength(2);
+    expect(designRequests[0]?.input).not.toContain("前回の応答");
+    expect(designRequests[1]?.input).toContain("前回の応答");
+    expect(designRequests[1]?.input).toContain("前回の形の問題");
+  });
 });
 
 // ── 所属 entity の対応が欠けると、⑤a ではなく ③ のやり直しに回る（レビュー 2）────

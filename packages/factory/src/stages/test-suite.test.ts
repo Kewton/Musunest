@@ -237,6 +237,50 @@ describe("②' の不正な応答（02 §2.2）", () => {
     // 2 回続けて落ちても、形のやり直しは 1 回だけ（Issue #446）
     expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
   });
+
+  it("中身の作り直しの回で形のやり直しが起きても、前回の試験・前回の作り直しの指示は残り、それとは別に前回の応答の塊が付く（Issue #479）", async () => {
+    /** `<data name="…">…</data>` の中身を取り出す（塊ごとに確かめる） */
+    const blockOf = (input: string, name: string): string =>
+      input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "";
+    // 1 回目は中身に合わない（R-2 の境界が欠ける）、作り直しの 2 回目は形に落ち、そのやり直しで通る
+    const recording = createRecordingClient([
+      structured(MISSING_BOUNDARY_OUTPUT),
+      structured({ tests: "nope" }),
+      structured(TEST_SUITE_OUTPUT),
+    ]);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+    const outcome = await runTestSuite({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.rounds).toBe(2);
+    expect(recording.structured).toHaveLength(3);
+    // 中身の作り直し 1・形のやり直し 1（Issue #446 の期待のまま）
+    expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 1 });
+
+    // 1 回目（作り直しの前）は、どちらの塊も持たない
+    expect(recording.structured[0]?.input).not.toContain("前回の試験");
+    expect(recording.structured[0]?.input).not.toContain("前回の応答");
+
+    // 2 回目（作り直しの 1 回目）は「前回の試験」「前回の作り直しの指示」を持ち、前回の応答はまだ無い
+    const redo = recording.structured[1];
+    expect(redo?.input).toContain("前回の試験");
+    expect(redo?.input).toContain("前回の作り直しの指示");
+    expect(redo?.input).not.toContain("前回の応答");
+
+    // 3 回目（作り直しの回の形のやり直し）は、その 2 つを残したまま、前回の応答と前回の形の問題が付く
+    const shapeRetry = recording.structured[2];
+    const input = shapeRetry?.input ?? "";
+    expect(input).toContain("前回の試験");
+    expect(input).toContain("前回の作り直しの指示");
+    expect(input).toContain("前回の応答");
+    expect(input).toContain("前回の形の問題");
+    // 前回の応答の塊を JSON として読むと、作り直しの回の 1 回目の output と等しい
+    expect(JSON.parse(blockOf(input, "前回の応答"))).toEqual({ tests: "nope" });
+    // 前回の試験の塊は、外した後の集合のまま（R-2 の境界が欠けた組）
+    const previousTests = JSON.parse(blockOf(input, "前回の試験")) as readonly { readonly id: string }[];
+    expect(previousTests.map((test) => test.id)).toEqual(MISSING_BOUNDARY_OUTPUT.tests.map((test) => test.id));
+  });
 });
 
 // ── 役割 ID・入力の契約・種類（Issue #307）──────────────────────
