@@ -321,6 +321,40 @@ describe("① の位置の正規化（Issue #382）", () => {
     expect(redoRequest?.input).toContain("1 か所に決まる引用");
   });
 
+  it("位置の誤り（position-mismatch）の field と message に、引用の値を埋めない（Issue #445）", () => {
+    const marker = "MARKER445";
+    const framingAt = (quote: string, position: { readonly start: number; readonly end: number }) => ({
+      requirements: [],
+      framing: [{ quote, position }],
+      decisions: [],
+      unresolved: [],
+    });
+    const problemsOf = (source: string, quote: string, position: { readonly start: number; readonly end: number }) => {
+      const checked = checkRequirementOutput(framingAt(quote, position), source);
+      expect(checked.ok).toBe(false);
+      if (checked.ok) return [];
+      return checked.problems;
+    };
+
+    // 原文に目印を含み、枠の文の引用にも目印を含める。分類は position-mismatch、位置は framing[添字].position
+    const source = `${marker}。${marker}。`;
+    const cases: readonly { readonly label: string; readonly quote: string; readonly position: { readonly start: number; readonly end: number } }[] = [
+      // 原文に無い引用
+      { label: "not-found", quote: `${marker}zzz`, position: { start: 0, end: 3 } },
+      // 原文に 2 か所ある引用（重なる出現を含む）で、位置が 1 か所に決まらない
+      { label: "ambiguous", quote: marker, position: { start: 1, end: marker.length + 2 } },
+    ];
+    for (const one of cases) {
+      const problems = problemsOf(source, one.quote, one.position);
+      expect(problems.length, one.label).toBeGreaterThan(0);
+      for (const problem of problems) {
+        expect(problem.code, one.label).toBe("position-mismatch");
+        expect(problem.field, one.label).toBe("framing[0].position");
+      }
+      expect(JSON.stringify(problems), one.label).not.toContain(marker);
+    }
+  });
+
   it("空の引用・原文に無い引用は、引用の誤りになる", () => {
     const list: RequirementList = {
       requirements: [

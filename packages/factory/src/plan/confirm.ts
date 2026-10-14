@@ -230,7 +230,7 @@ export async function runConfirm(input: ConfirmInput): Promise<ConfirmResult> {
         problems.push({
           code: "origin-not-answer",
           path: `requirements[${index}].origin.input_id`,
-          message: `${requirement.id}: 答え ${change.answer_id} から増えた要件の出どころが、その答えになっていない`,
+          message: "答えから増えた要件の出どころが、その答えになっていない",
         });
       }
     }
@@ -242,7 +242,7 @@ export async function runConfirm(input: ConfirmInput): Promise<ConfirmResult> {
       problems.push({
         code: "uncovered-source",
         path: `source[${index}]`,
-        message: `原文の「${sentence.text}」がどの要件にも覆われていない`,
+        message: "原文の文がどの要件にも覆われていない",
       });
     }
   });
@@ -252,7 +252,7 @@ export async function runConfirm(input: ConfirmInput): Promise<ConfirmResult> {
     problems.push({
       code: "uncovered-answer",
       path: `inputs.${answerId}`,
-      message: `答え ${answerId} がどの要件にも対応していない`,
+      message: "答えがどの要件にも対応していない",
     });
   }
 

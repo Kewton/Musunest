@@ -278,7 +278,9 @@ describe("役割 ID の表・種類・確かめ方は必須で、旧形式の記
       ],
     };
     const { problems } = planned(bad);
-    expect(problems.some((message) => message.includes("R-2") && message.includes("確かめ方"))).toBe(true);
+    // 問題の文は固定文で、位置は field の添字（requirements[1]）で示す（要件 ID の値を埋めない。Issue #445）
+    expect(problems.some((message) => message.includes("確かめ方"))).toBe(true);
+    expect(problems.some((message) => message.includes("R-2"))).toBe(false);
   });
 
   it("種類（nature）の欠けた要件 ID があれば断る", () => {
@@ -297,7 +299,8 @@ describe("役割 ID の表・種類・確かめ方は必須で、旧形式の記
       ],
     };
     const { problems } = planned(bad);
-    expect(problems.some((message) => message.includes("R-2") && message.includes("種類"))).toBe(true);
+    expect(problems.some((message) => message.includes("種類"))).toBe(true);
+    expect(problems.some((message) => message.includes("R-2"))).toBe(false);
   });
 
   it("役割 ID の表が無ければ、新契約の形の確認で断る", () => {
@@ -375,7 +378,8 @@ describe("同名の対象は、共有と別名を明示したときだけ分け�
       ],
     };
     const { problems } = legacyPlanned(bad);
-    expect(problems.some((message) => message.includes("同じ名前") && message.includes("total"))).toBe(true);
+    expect(problems.some((message) => message.includes("同じ名前"))).toBe(true);
+    expect(problems.some((message) => message.includes("total"))).toBe(false);
   });
 
   it("共有（shared）を明示すれば、同名の対象を複数の役割 ID にできる", () => {
@@ -482,7 +486,9 @@ describe("「書けない」の根拠（制約 ID）と、曖昧さを分ける 
     expect(checked.ok).toBe(true);
     if (!checked.ok) return;
     const problems = checkDesignConstraints(checked.value, SAMPLE_DOCUMENTS);
-    expect(problems.some((problem) => problem.message.includes("R-999"))).toBe(true);
+    // 問題の文は固定文（文書に無い制約 ID の値も埋めない。Issue #445）
+    expect(problems.some((problem) => problem.message === "文書に無い制約 ID である")).toBe(true);
+    expect(problems.some((problem) => problem.message.includes("R-999"))).toBe(false);
 
     const outcome = await designOutcome(bad);
     expect(outcome.ok).toBe(false);
@@ -797,14 +803,17 @@ describe("中身の作り直しを 1 回だけ入れる（02 §1・Issue #407）
     // 1 回目には前回の指示が無く、2 回目にはある
     expect(first?.input).not.toContain("前回の作り直しの指示");
     expect(second?.input).toContain("前回の作り直しの指示");
-    // 目印（モデル由来の要件 ID を含む問題の文）は、データにだけ入る
-    const marker = "要件 R-2 の設計が無い";
-    expect(second?.input).toContain(marker);
+    // 前回の指示は、分類ごとの固定文と field の添字で示す。要件 ID の値は、データにも規則にも入れない
+    // （Issue #445）
+    expect(second?.input).toContain('"message": "要件の設計が無い"');
+    expect(second?.input).toContain('"field": "requirements[1]"');
+    const oldValuePhrase = "R-2 の設計が無い";
+    expect(second?.input).not.toContain(oldValuePhrase);
     for (const request of [first, second]) {
       expect(request?.instructions).not.toContain("前回の作り直しの指示");
-      expect(request?.instructions).not.toContain(marker);
-      for (const rule of request?.rules ?? []) expect(rule).not.toContain(marker);
-      for (const document of request?.documents ?? []) expect(document).not.toContain(marker);
+      expect(request?.instructions).not.toContain(oldValuePhrase);
+      for (const rule of request?.rules ?? []) expect(rule).not.toContain(oldValuePhrase);
+      for (const document of request?.documents ?? []) expect(document).not.toContain(oldValuePhrase);
     }
     // 共通の規則と前置き（instructions・rules・文書）は、1 回目と 2 回目で変わらない
     expect(second?.instructions).toBe(first?.instructions);
@@ -841,9 +850,9 @@ describe("中身の作り直しを 1 回だけ入れる（02 §1・Issue #407）
     expect(outcome.ok).toBe(false);
     if (outcome.ok || outcome.failure.kind !== "unmet") return;
     expect(outcome.failure.attempts).toBe(DESIGN_ROUNDS);
-    // 問題は最後の回（2 回目）のもの。1 回目の「設計が無い」は残らない
-    expect(outcome.failure.problems.some((problem) => problem.message.includes("R-999"))).toBe(true);
-    expect(outcome.failure.problems.some((problem) => problem.message.includes("R-2 の設計が無い"))).toBe(false);
+    // 問題は最後の回（2 回目）のもの。1 回目の「設計が無い」は残らない。文は固定文（値を埋めない）
+    expect(outcome.failure.problems.some((problem) => problem.message === "文書に無い制約 ID である")).toBe(true);
+    expect(outcome.failure.problems.some((problem) => problem.message === "要件の設計が無い")).toBe(false);
   });
 
   it("制約 ID の誤りも同じ枠で 1 回作り直し、直れば ok、直らなければ unmet", async () => {
@@ -868,8 +877,11 @@ describe("中身の作り直しを 1 回だけ入れる（02 §1・Issue #407）
     });
     expect(outcome.ok).toBe(true);
     const second = recording.structured[1];
-    expect(second?.input).toContain("要件 R-2 の設計が無い");
-    expect(second?.input).toContain("R-999");
+    // 欠け（固定文 + 添字）と制約 ID の誤り（固定文）の両方が、前回の指示のデータに入る（Issue #445）
+    expect(second?.input).toContain("要件の設計が無い");
+    expect(second?.input).toContain("文書に無い制約 ID である");
+    expect(second?.input).toContain('"field": "requirements[1]"');
+    expect(second?.input).not.toContain("R-999");
   });
 
   it("形の誤り（malformed）は中身の枠に入らない（2 試行で malformed、3 回目を呼ばない）", async () => {
@@ -993,7 +1005,13 @@ describe("中身の作り直しを 1 回だけ入れる（02 §1・Issue #407）
     if (outcome.ok) return;
     expect(outcome.failure.kind).toBe("unmet");
     if (outcome.failure.kind !== "unmet") return;
-    expect(outcome.failure.problems.some((problem) => problem.message.includes("R:alt:R-9"))).toBe(true);
+    // 代わりの案の要件（一覧の 3 番目）の設計の欠けは、固定文と field の添字で示す（値を埋めない。Issue #445）
+    expect(
+      outcome.failure.problems.some(
+        (problem) => problem.field === "requirements[2]" && problem.message === "要件の設計が無い",
+      ),
+    ).toBe(true);
+    expect(outcome.failure.problems.some((problem) => problem.message.includes("R:alt:R-9"))).toBe(false);
   });
 
   it("規則に、代わりの案の要件にも設計を返す決まりがある", () => {
@@ -1595,5 +1613,165 @@ describe("② の中身・形の再試行の数（Issue #446）", () => {
     const outcome = await runDesign({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
     expect(outcome.ok).toBe(false);
     expect(gateway.retryCounts).toEqual({ communication: 0, shape: 0, content: 1 });
+  });
+});
+
+// ── 断る Problem の field と message に、値を埋めない（§1・②・Issue #445）──────────────
+//
+// #418 は新しい検査（所属・groupBy）を固定文にした。それより前に入った検査（役割の表の重複・一覧に無い
+// 要件・設計の欠け・種類／確かめ方の欠け・文書に無い制約 ID）は、誤りの文（`message`）や欄（`field`）に
+// 役割 ID・名前・entity 名・要件 ID・制約 ID の値を埋めていた。値は停止の要約と段の失敗の記録に写り、
+// 作り直しの指示のデータ（前回の問題）にもそのまま入る。位置は `field` の配列の添字で示し、`message` は
+// 分類ごとの固定文にする。ここでは、目印を入れた値で各検査を起こし、断りに目印が出ないことを確かめる。
+
+describe("断る Problem の field と message に、値を埋めない（§1・②・Issue #445）", () => {
+  const marker = "MARKER445";
+
+  /** `field` と `message` を 1 つの文字列に直列化する（目印の有無を見るため） */
+  const serialized = (problems: readonly { readonly field: string; readonly message: string }[]): string =>
+    problems.map((problem) => `${problem.field} ${problem.message}`).join("\n");
+
+  /** 形を通したうえで、中身の点検（`checkDesignPlan`）の `field`・`message` を返す */
+  const planProblems = (value: unknown): readonly { readonly field: string; readonly message: string }[] => {
+    const checked = checkDesignOutput(value);
+    if (!checked.ok) throw new Error(`前提（形）が壊れた: ${checked.problems.map((problem) => problem.field).join("・")}`);
+    return checkDesignPlan(REQUIREMENT_LIST, checked.value);
+  };
+
+  /** 目印を入れた役割 1 行（新契約の必須の欄を備える。壊したい欄だけ上書きする） */
+  const role = (overrides: Record<string, unknown>): Record<string, unknown> => ({
+    roleId: `record-${marker}`,
+    kind: "entity",
+    entity: null,
+    name: marker,
+    shared: false,
+    aliasOf: null,
+    options: null,
+    groupBy: null,
+    ...overrides,
+  });
+
+  /** 役割の表と設計から、目印を入れた設計（新契約）を組む */
+  const designOf = (options: { readonly roles?: readonly unknown[]; readonly designs?: readonly unknown[] }): unknown => ({
+    roles: options.roles ?? [role({})],
+    designs:
+      options.designs ?? [
+        {
+          requirementId: "R-1",
+          nature: "ruled",
+          verification: { kind: "fixed-test" },
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [{ roleId: `record-${marker}`, basis: "dependency", reason: `${marker}-reason` }],
+        },
+        {
+          requirementId: "R-2",
+          nature: "existence-only",
+          verification: { kind: "structural", reason: "在ることだけ" },
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [],
+        },
+      ],
+  });
+
+  it("役割の表の重複と共有の点検で、役割 ID・名前・entity の値を埋めない（field は添字）", () => {
+    const cases: readonly { readonly label: string; readonly value: unknown }[] = [
+      // 同じ役割 ID を、別の名前の対象に使い回す
+      { label: "reuse", value: designOf({ roles: [role({}), role({ name: `${marker}-2` })] }) },
+      // 同名の別 entity を同じ役割 ID にする
+      {
+        label: "same-name-other-entity",
+        value: designOf({
+          roles: [role({ name: "n" }), role({ name: "n", entity: `e-${marker}` })],
+        }),
+      },
+      // 同じ名前の対象を、共有も別名も明示せずに 2 つの役割 ID にする
+      {
+        label: "same-name-multiple-ids",
+        value: designOf({
+          roles: [role({ roleId: `r1-${marker}`, name: "n" }), role({ roleId: `r2-${marker}`, name: "n" })],
+        }),
+      },
+    ];
+    for (const one of cases) {
+      const problems = planProblems(one.value);
+      expect(problems.length, one.label).toBeGreaterThan(0);
+      expect(serialized(problems), one.label).not.toContain(marker);
+      for (const problem of problems) expect(problem.field, one.label).toContain("[");
+    }
+  });
+
+  it("一覧に無い要件・設計の欠け・種類／確かめ方の欠けで、要件 ID の値を埋めない（field は添字）", () => {
+    // 一覧に無い要件 ID の設計
+    const unknownRequirement = planProblems(
+      designOf({
+        designs: [
+          {
+            requirementId: `R-${marker}`,
+            nature: "ruled",
+            verification: { kind: "fixed-test" },
+            vocabulary: [],
+            placement: [],
+            unwritable: [],
+            ownership: [{ roleId: `record-${marker}`, basis: "dependency", reason: `${marker}-reason` }],
+          },
+        ],
+      }),
+    );
+    // R-1 に種類と確かめ方が無く、R-2 の設計が無い
+    const missing = planProblems(
+      designOf({
+        designs: [
+          { requirementId: "R-1", vocabulary: [], placement: [], unwritable: [], ownership: [{ roleId: `record-${marker}`, basis: "dependency", reason: `${marker}-reason` }] },
+        ],
+      }),
+    );
+    for (const problems of [unknownRequirement, missing]) {
+      expect(problems.length).toBeGreaterThan(0);
+      expect(serialized(problems)).not.toContain(marker);
+      for (const problem of problems) expect(problem.field).toContain("[");
+    }
+    expect(unknownRequirement.some((problem) => problem.field === "designs[0]" && problem.message === "一覧に無い要件 ID である")).toBe(true);
+    expect(missing.some((problem) => problem.field === "requirements[0]" && problem.message === "要件に種類（決まりを含む／在ることだけ）が無い")).toBe(true);
+    expect(missing.some((problem) => problem.field === "requirements[0]" && problem.message === "要件に確かめ方が無い")).toBe(true);
+    expect(missing.some((problem) => problem.field === "requirements[1]" && problem.message === "要件の設計が無い")).toBe(true);
+  });
+
+  it("文書に無い制約 ID の点検で、制約 ID と要件 ID の値を埋めない（field は添字）", () => {
+    const value = designOf({
+      designs: [
+        {
+          requirementId: "R-1",
+          nature: "ruled",
+          verification: { kind: "fixed-test" },
+          vocabulary: [],
+          placement: [],
+          unwritable: [{ part: "部分", constraintIds: [`unknown-${marker}`], reason: "理由" }],
+          ownership: [{ roleId: `record-${marker}`, basis: "dependency", reason: `${marker}-reason` }],
+        },
+        {
+          requirementId: "R-2",
+          nature: "existence-only",
+          verification: { kind: "structural", reason: "在ることだけ" },
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [],
+        },
+      ],
+    });
+    const checked = checkDesignOutput(value);
+    if (!checked.ok) throw new Error("前提（形）が壊れた");
+    const problems = checkDesignConstraints(checked.value, SAMPLE_DOCUMENTS);
+    expect(problems.length).toBeGreaterThan(0);
+    expect(serialized(problems)).not.toContain(marker);
+    expect(
+      problems.some(
+        (problem) => problem.field === "designs[0].unwritable[0].constraintIds" && problem.message === "文書に無い制約 ID である",
+      ),
+    ).toBe(true);
   });
 });

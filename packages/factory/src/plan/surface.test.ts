@@ -213,6 +213,29 @@ describe("P3 の書けないことの裏付け（04 §3 P3・#332）", () => {
     expect(result.failure.problems[0]?.code).toBe("constraint-id-unknown");
   });
 
+  it("目印の制約 ID でも、message に値が出ず、field が添字を持つ（Issue #445）", async () => {
+    const mark = "MARKER445";
+    const output = {
+      ambiguities: [],
+      unwritable: [
+        {
+          id: "U-1",
+          requirementId: "R-1",
+          part: "部分",
+          constraintIds: [`未知-${mark}`],
+          reason: "理由",
+          alternative: "代わり",
+        },
+      ],
+    };
+    const result = await run(output).outcome;
+    expect(result.ok).toBe(false);
+    if (result.ok || result.failure.kind !== "unmet") return;
+    expect(result.failure.problems.some((problem) => problem.code === "constraint-id-unknown")).toBe(true);
+    expect(result.failure.problems[0]?.field).toBe("unwritable[0].constraintIds");
+    expect(JSON.stringify(result.failure.problems)).not.toContain(mark);
+  });
+
   it("文書にある制約 ID（契約の R-… と語彙の ### 見出し）なら通す", async () => {
     const output = {
       ambiguities: [],

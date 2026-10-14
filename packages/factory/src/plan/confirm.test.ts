@@ -130,7 +130,16 @@ describe("P6 の照合と確定（04 §3 P6・§4）", () => {
     );
     expect(result.confirmed).toBe(false);
     expect(result.problems.map((problem) => problem.code)).toContain("uncovered-source");
-    expect(result.problems.some((problem) => problem.message.includes("件数を合計する。"))).toBe(true);
+    // 誤りの文は固定文で、原文の値を埋めない。位置は path の添字で示す（Issue #445）
+    expect(
+      result.problems.some(
+        (problem) =>
+          problem.code === "uncovered-source" &&
+          problem.path === "source[1]" &&
+          problem.message === "原文の文がどの要件にも覆われていない",
+      ),
+    ).toBe(true);
+    expect(result.problems.some((problem) => problem.message.includes("件数を合計する。"))).toBe(false);
   });
 
   it("枠の文は要件にしなくても、枠の範囲で覆われていれば確定できる（Issue #372）", async () => {
@@ -294,5 +303,64 @@ describe("P6 の照合と確定（04 §3 P6・§4）", () => {
     );
     expect(result.confirmed).toBe(true);
     expect(result.plan.accepted_unwritable[0]?.part_id).toBe("P-1");
+  });
+});
+
+// ── P6 の理由の code・path を保ち、message に値を埋めない（§3 P6・Issue #445）──────────
+
+describe("P6 の理由の code・path を保ち、message に値を埋めない（§3 P6・Issue #445）", () => {
+  const mark = "MARKER445";
+
+  it("覆われていない原文の文の目印が、理由の直列化に出ない（code・path は今までどおり）", async () => {
+    const marked = `${mark}。`;
+    const result = await runConfirm(
+      validInput({
+        source: `${marked}タスクを記録する。`,
+        inputs: [
+          { id: "S-1", kind: "source", text: marked },
+          { id: "S-2", kind: "source", text: "タスクを記録する。" },
+        ],
+        requirements: [
+          { id: "R-1", text: "タスクを記録できる", kind: "existence", origin: { input_id: "S-2", quote: "タスクを記録する" }, parts: [] },
+        ],
+        openIssues: [],
+        decisions: [],
+        judge: createFakeJudge(
+          { [confirmQuestionName("S-1")]: noul(0.9), [confirmQuestionName("S-2")]: noul(0.95) },
+          { model: "fake-judge" },
+        ),
+      }),
+    );
+    expect(result.confirmed).toBe(false);
+    const problem = result.problems.find((one) => one.code === "uncovered-source");
+    expect(problem?.path).toBe("source[0]");
+    expect(problem?.message).toBe("原文の文がどの要件にも覆われていない");
+    expect(JSON.stringify(result.problems)).not.toContain(mark);
+  });
+
+  it("要件 ID の目印が、理由の直列化に出ない（code・path は今までどおり）", async () => {
+    const result = await runConfirm(
+      validInput({
+        source: `タスクを記録する。${mark}を出す。`,
+        inputs: [
+          { id: "S-1", kind: "source", text: "タスクを記録する。" },
+          { id: "S-2", kind: "source", text: `${mark}を出す。` },
+        ],
+        requirements: [
+          { id: `R-${mark}`, text: "タスクを記録できる", kind: "existence", origin: { input_id: "S-1", quote: "タスクを記録する" }, parts: [] },
+        ],
+        openIssues: [],
+        decisions: [],
+        judge: createFakeJudge(
+          { [confirmQuestionName("S-1")]: noul(0.95), [confirmQuestionName("S-2")]: noul(0.9) },
+          { model: "fake-judge" },
+        ),
+      }),
+    );
+    expect(result.confirmed).toBe(false);
+    const problem = result.problems.find((one) => one.code === "uncovered-source");
+    expect(problem?.path).toBe("source[1]");
+    // 要件 ID の目印は、理由の直列化（code・path・message）のどこにも出ない
+    expect(JSON.stringify(result.problems)).not.toContain(mark);
   });
 });

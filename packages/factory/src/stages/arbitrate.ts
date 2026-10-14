@@ -136,11 +136,11 @@ export function checkArbitrationOutput(
       return;
     }
     if (!disputed.has(testId)) {
-      problems.push({ field: `${field}.testId`, message: `主張に無い試験 ID は裁定できない: ${testId}` });
+      problems.push({ field: `${field}.testId`, message: "主張に無い試験 ID は裁定できない" });
       return;
     }
     if (decided.has(testId)) {
-      problems.push({ field: `${field}.testId`, message: `試験 ${testId} の判断が重なっている` });
+      problems.push({ field: `${field}.testId`, message: "同じ試験の判断が重なっている" });
       return;
     }
     const verdict = item["verdict"];

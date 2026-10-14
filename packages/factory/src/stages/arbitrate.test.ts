@@ -143,6 +143,39 @@ describe("試験を書き換えさせない（02 §1.3）", () => {
   });
 });
 
+describe("断る Problem の field と message に、試験 ID の値を埋めない（§1.3・Issue #445）", () => {
+  const marker = "MARKER445";
+
+  it("主張に無い試験 ID は裁定できない（値を埋めない。field は添字）", () => {
+    const checked = checkArbitrationOutput(
+      { decisions: [{ testId: `t-${marker}`, verdict: "uphold", reason: "x", quote: "" }] },
+      disputes("t1"),
+      SOURCE_TEXT,
+    );
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(JSON.stringify(checked.problems)).not.toContain(marker);
+    for (const problem of checked.problems) expect(problem.field).toContain("[");
+  });
+
+  it("同じ試験の判断が重なれば断る（値を埋めない。field は添字）", () => {
+    const checked = checkArbitrationOutput(
+      {
+        decisions: [
+          { testId: `t-${marker}`, verdict: "uphold", reason: "x", quote: "" },
+          { testId: `t-${marker}`, verdict: "undecidable", reason: "y", quote: "" },
+        ],
+      },
+      disputes(`t-${marker}`),
+      SOURCE_TEXT,
+    );
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(JSON.stringify(checked.problems)).not.toContain(marker);
+    expect(checked.problems.some((problem) => problem.field === "decisions[1].testId")).toBe(true);
+  });
+});
+
 describe("⑥' が送る要求を観測する（02 §2.2）", () => {
   const answer = { decisions: [{ testId: "t1", verdict: "uphold", reason: "期待は正しい", quote: "" }] };
 
