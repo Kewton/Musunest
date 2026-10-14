@@ -7,7 +7,7 @@
 //   3. 確定した仕様が生成の `plan` に渡り、Build の予算が全体から Plan の使った額を引いた残りになる
 //   4. 確定できないときは Build を流さず、0 でない終了コードになる
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { API_KEY_ENV, EXIT_RUN_FAILED, parseCliArguments, runCli } from "./cli.js";
+import { API_KEY_ENV, EXIT_RUN_FAILED, EXIT_USAGE, parseCliArguments, runCli } from "./cli.js";
 import * as runModule from "./run.js";
 import {
   AUTO_BUILD_LINE,
@@ -41,6 +41,9 @@ import {
 } from "./plan/catalog.js";
 import { confirmQuestionName } from "./plan/confirm.js";
 import { freeTextQuestionName } from "./plan/answers.js";
+import type { PlanQuestion } from "./plan/questions.js";
+import type { PlanAnswerRequest } from "./plan/run-plan.js";
+import type { PlanRemaining } from "./plan/session.js";
 import {
   SURFACE_RECHECK_NO_EVIDENCE,
   surfaceRecheckEvidenceQuestionName,
@@ -318,10 +321,38 @@ function fakeTerminal(lines: readonly string[]): FakeTerminal {
   };
 }
 
+/**
+ * 答える役へ渡す要求を組む（対話の形と答えのファイルの形は、照合の文脈は使わない。Issue #444）。
+ * 台本の形の試験は `plan/script-responder.test.ts` が行う。
+ */
+function answerRequest(questions: readonly PlanQuestion[], remaining: PlanRemaining): PlanAnswerRequest {
+  return {
+    questions,
+    remaining,
+    revision: 1,
+    issues: questions.map((question) => ({
+      question,
+      main: { id: question.openIssueId, text: "", facetId: null, requirement: null },
+      alsoCloses: [],
+    })),
+  };
+}
+
 interface PlanCliRecordShape {
   readonly schema_version: string;
   readonly outcome: string;
   readonly confirmation: string | null;
+  /** 台本の照合の記録（`--script` のときだけ。Issue #444） */
+  readonly script?: {
+    readonly sha256: string;
+    readonly matcher: string;
+    readonly matches: readonly {
+      readonly question_id: string;
+      readonly revision: number;
+      readonly state: string;
+      readonly entry_index: number | null;
+    }[];
+  };
   readonly rounds: readonly {
     readonly questions: readonly {
       readonly id: string;
@@ -510,6 +541,23 @@ describe("--plan・--answers の読み取り（04 §7・Issue #336）", () => {
       error: "--answers は --plan と一緒に指定してください",
     });
   });
+
+  it("--script を付けると scriptFile が入り、--plan と一緒でなければ誤り、--answers とは同時に指定できない（Issue #444）", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--plan", "--script", "script.json"])).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "gpt-6-luna",
+      effort: "high",
+      plan: true,
+      scriptFile: "script.json",
+    });
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--script", "script.json"])).toEqual({
+      error: "--script は --plan と一緒に指定してください",
+    });
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--plan", "--answers", "a.json", "--script", "s.json"]),
+    ).toEqual({ error: "--script と --answers は同時に指定できません" });
+  });
 });
 
 // ── 答えのファイルの読取り ───────────────────────────────────────
@@ -544,7 +592,7 @@ describe("答える役の 2 つの形（04 §7）", () => {
       { id: "Q-3", openIssueId: "OI-3", revision: 1, text: "?", choices: [{ id: "c1", text: "A" }, { id: "c2", text: "B" }], recommended: { choiceId: "c1", reason: "r" }, allowFreeText: true },
     ];
 
-    const outcome = await responder.answer({ questions, remaining: { questions: 7, roundTrips: 2 } });
+    const outcome = await responder.answer(answerRequest(questions, { questions: 7, roundTrips: 2 }));
 
     expect(outcome).toEqual({
       kind: "answers",
@@ -567,7 +615,7 @@ describe("答える役の 2 つの形（04 §7）", () => {
       { id: "Q1-2", openIssueId: "OI-2", revision: 1, text: "?", choices: [{ id: "c1", text: "A" }, { id: "c2", text: "B" }], recommended: { choiceId: "c2", reason: "r" }, allowFreeText: true },
     ];
 
-    const outcome = await responder.answer({ questions, remaining: { questions: 8, roundTrips: 2 } });
+    const outcome = await responder.answer(answerRequest(questions, { questions: 8, roundTrips: 2 }));
 
     expect(outcome).toEqual({
       kind: "answers",
@@ -589,7 +637,7 @@ describe("答える役の 2 つの形（04 §7）", () => {
       { id: "Q1-1", openIssueId: "OI-1", revision: 1, text: "?", choices: [{ id: "c1", text: "A" }, { id: "c2", text: "B" }], recommended: { choiceId: "c2", reason: "r" }, allowFreeText: true },
     ];
 
-    const outcome = await responder.answer({ questions, remaining: { questions: 8, roundTrips: 2 } });
+    const outcome = await responder.answer(answerRequest(questions, { questions: 8, roundTrips: 2 }));
 
     expect(outcome).toEqual({
       kind: "answers",
@@ -2903,5 +2951,148 @@ describe("P6 の確定できない理由に、原文の値と message を写さ�
     expect(recordText).not.toContain("message");
     expect(lines.join("\n")).not.toContain(mark);
     expect(lines.join("\n")).toContain("uncovered-source");
+  });
+});
+
+// ── 台本の引数（04 §9・Issue #444）───────────────────────────────
+//
+// 台本（`musunest-eval/plan-script/v1`）のファイルを `--script` で渡す。往復の記録に、台本の内容の
+// SHA-256・当て方の版・問いごとの照合の結果が残り、**台本の鍵・根拠・事項 ID の目印は残らない**。
+// 不明が残る走りでは確認の役も Build も呼ばれない。答えのファイルと同時には受けない。**実 API は呼ばない。**
+
+/** v1 の台本の文字列を組み立てる（`entries` は項目の配列） */
+function scriptText(entries: readonly unknown[]): string {
+  return JSON.stringify({
+    schema: "musunest-eval/plan-script/v1",
+    subject: "T",
+    version: 1,
+    note: "MARKER-NOTE",
+    entries,
+  });
+}
+
+describe("台本のファイルを渡す（04 §9・Issue #444）", () => {
+  it("台本で答えて確定し、記録に照合状態・質問 ID・版・添字・当て方の版・SHA-256 が残り、鍵・根拠・事項 ID の目印が出ない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(GROUPED_SURFACE_TWO),
+      structured(GROUPED_QUESTIONS_ONE),
+      // 答えから増えた要件の差分点検（Issue #434）
+      structured(SURFACE_CLEAR),
+      ...recordedRunFromPlan(),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...coverAnswers(["A:Q1-1"]),
+    });
+    const dir = `${directory}/script-confirm`;
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const text = scriptText([
+      { id: "MARKER-ENTRY", facet: null, keys: ["誰の分"], answer: { choose: ["自分のみ"] }, basis: "MARKER-BASIS" },
+    ]);
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--script", "script.json"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === "script.json" ? text : SOURCE_TEXT),
+      writeFile: async (path, file) => {
+        await fs.writeFile(path, file, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    // 使い方の誤りではない（台本の形は入口で通った）
+    expect(code).not.toBe(EXIT_USAGE);
+    // 台本で答えたので、確定した仕様が Build に渡る（確定した仕様の門は Plan 側で確かめてある）
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    expect(record.confirmation).toBe("build");
+    // 台本の照合の記録（内容の SHA-256・当て方の版・問いごとの結果）
+    expect(record.script?.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(record.script?.matcher).toBe("v1");
+    expect(record.script?.matches).toEqual([
+      { question_id: "Q1-1", revision: 1, state: "answered", entry_index: 0 },
+    ]);
+    // 台本の鍵・根拠・項目の ID の目印は、記録に写さない
+    const recordText = JSON.stringify(record);
+    expect(recordText).not.toContain("MARKER-");
+    // 台本の照合の記録は、事項 ID を持たない
+    expect(JSON.stringify(record.script)).not.toContain("OI-");
+  });
+
+  it("不明が残る走りでは、確認の役も Build も呼ばれず、問いごとに不明の状態が残る", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      structured(QUESTIONS_THREE),
+      structured(QUESTIONS_THREE),
+    ]);
+    const judge = createFakeJudge(catalogAnswers());
+    const dir = `${directory}/script-unknown`;
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const text = scriptText([
+      { id: "MARKER-ENTRY", facet: null, keys: ["MARKER-KEY"], answer: { choose: ["MARKER-CHOICE"] }, basis: "MARKER-BASIS" },
+    ]);
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--script", "script.json"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === "script.json" ? text : SOURCE_TEXT),
+      writeFile: async (path, file) => {
+        await fs.writeFile(path, file, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    // 不明が残るので Build を流さない。確認の役も呼ばれない（confirmation は null のまま）
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("cannot-confirm");
+    expect(record.confirmation).toBeNull();
+    // 3 往復 × 3 問、いずれも不明
+    expect(record.script?.matches).toHaveLength(9);
+    expect(record.script?.matches.every((match) => match.state === "unknown" && match.entry_index === null)).toBe(true);
+    expect(record.script?.matches.map((match) => match.revision)).toEqual([1, 1, 1, 2, 2, 2, 3, 3, 3]);
+    // 台本の鍵・根拠・項目の ID の目印は、記録に写さない
+    expect(JSON.stringify(record)).not.toContain("MARKER-");
+  });
+
+  it("答えのファイルの引数と台本の引数を同時に渡すと、使い方の誤りで止まる", async () => {
+    const makeClient = vi.fn();
+    const spy = vi.spyOn(runModule, "runGeneration");
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", `${directory}/script-conflict`, "--plan", "--answers", "a.json", "--script", "s.json"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_USAGE);
+    expect(makeClient).not.toHaveBeenCalled();
+    expect(spy).not.toHaveBeenCalled();
   });
 });

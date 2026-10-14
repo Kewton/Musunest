@@ -27,6 +27,7 @@ import {
   type PlanStageRecord,
   type PlanSurfaceCheckSummary,
 } from "./plan/run-plan.js";
+import { SCRIPT_MATCHER_VERSION, type PlanScriptMatch, type ScriptMatchState } from "./plan/script-responder.js";
 import { isRecord } from "./stages/prompt.js";
 import type { ReverseCheckDiagnosis, ReverseCheckMissCounts } from "./stages/reverse-check.js";
 
@@ -61,13 +62,15 @@ export interface PlanTranscriptRound {
  */
 export interface PlanTranscript {
   readonly rounds: PlanTranscriptRound[];
+  /** 台本の答える役が残した、問いごとの照合の結果（台本を使わないときは空。Issue #444） */
+  readonly scriptMatches: PlanScriptMatch[];
   /** 確認の画面への答え（まだなら null） */
   confirmation: "build" | "stop" | null;
 }
 
 /** 空の往復の記録を作る */
 export function createPlanTranscript(): PlanTranscript {
-  return { rounds: [], confirmation: null };
+  return { rounds: [], scriptMatches: [], confirmation: null };
 }
 
 /** 答えのファイルの 1 件（選択肢 ID か自由入力のちょうど一方） */
@@ -336,6 +339,30 @@ export interface PlanCliRoundRecord {
   readonly all_recommended: boolean;
 }
 
+/** 記録に入れる、台本の照合の結果 1 つ（**値を持たない**。Issue #444） */
+export interface PlanCliScriptMatchRecord {
+  /** コードが振った質問 ID */
+  readonly question_id: string;
+  /** その問いを組み立てた仕様の版（往復の版） */
+  readonly revision: number;
+  /** 有限の照合状態（答えた・不明・重複・選択肢が決まらない・古い版） */
+  readonly state: ScriptMatchState;
+  /** 当たった台本の項目の添字（1 件に当たったときだけ。それ以外は `null`） */
+  readonly entry_index: number | null;
+}
+
+/**
+ * 記録に入れる、台本の照合（内容の SHA-256・当て方の版・問いごとの結果。Issue #444）。**台本の鍵・
+ * 根拠の文・事項 ID の文字列は入れない**——識別は、コードが振った質問 ID・往復の版・項目の添字で行う。
+ */
+export interface PlanCliScriptRecord {
+  /** 台本の内容の SHA-256（小文字の 16 進 64 桁） */
+  readonly sha256: string;
+  /** 当て方の版 */
+  readonly matcher: typeof SCRIPT_MATCHER_VERSION;
+  readonly matches: readonly PlanCliScriptMatchRecord[];
+}
+
 /**
  * 記録に入れる、対象外の参照の分類別の件数（Issue #434）。分類はコードが内部の対応で決める（モデルに
  * 選ばせない）。**値ではなく件数**である。
@@ -575,6 +602,8 @@ export interface PlanCliRecord {
   /** 使い回しで断った応答の記録（版・試行・応答の数・異なる数・提示元ごとの数。値は入れない。Issue #464） */
   readonly surface_id_reuse: readonly PlanCliSurfaceIdReuseEntry[];
   readonly confirmation: "build" | "stop" | null;
+  /** 台本の照合の記録（`--script` のときだけ。内容の SHA-256・当て方の版・問いごとの結果。Issue #444） */
+  readonly script?: PlanCliScriptRecord;
   readonly stages: readonly PlanStageRecord[];
   readonly judge: BundleJudgeUsage;
   readonly budget_usd: number;
@@ -674,12 +703,23 @@ export function buildSurfaceCheckDiagnostic(input: {
   };
 }
 
+/**
+ * 文字列（UTF-8）の SHA-256 を、小文字の 16 進 64 桁で返す（台本の内容の指紋。Issue #444）。
+ * `crypto.subtle` を使うので依存を増やさない（`planDigest` と同じ手）。
+ */
+export async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 /** 往復の記録を組む（`--out` に書く。納品物には入れない。§7・Issue #336） */
 export function buildPlanCliRecord(input: {
   readonly result: PlanResult;
   readonly transcript: PlanTranscript;
   readonly budgetUsd: number;
   readonly planId: string;
+  /** 台本を使ったときだけ、その内容の SHA-256（Issue #444） */
+  readonly script?: { readonly sha256: string };
 }): PlanCliRecord {
   return {
     schema_version: PLAN_CLI_RECORD_SCHEMA,
@@ -756,6 +796,21 @@ export function buildPlanCliRecord(input: {
       by_source: entry.bySource.map((source) => ({ source: source.source, count: source.count })),
     })),
     confirmation: input.transcript.confirmation,
+    // 台本の照合の記録（台本を使ったときだけ。内容の SHA-256・当て方の版・問いごとの結果。Issue #444）
+    ...(input.script === undefined
+      ? {}
+      : {
+          script: {
+            sha256: input.script.sha256,
+            matcher: SCRIPT_MATCHER_VERSION,
+            matches: input.transcript.scriptMatches.map((match) => ({
+              question_id: match.questionId,
+              revision: match.revision,
+              state: match.state,
+              entry_index: match.entryIndex,
+            })),
+          },
+        }),
     stages: input.result.stages,
     judge: input.result.judge,
     budget_usd: input.budgetUsd,
