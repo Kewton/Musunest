@@ -2,20 +2,25 @@
 //
 // 「再点検なし」の基準の経路は、点検の関数を**再点検の口なしで**呼ぶ。そのときに主へ送る要求は、
 // 「再点検あり」で実際に送ったものと**同じ**である。だから、主の応答を**要求の内容のハッシュ**で引いて
-// 返す記録の口を作れば、**同じ点検の関数をそのまま**流し直せる——途中報告から作るのではなく、記録した
-// 応答を返すだけである（05 §3・Issue #459）。
+// 返す記録の口を作れば、**同じ点検の関数をそのまま**流し直せる。**成功した応答だけでなく、門・予算の
+// 停止も保存・再生する**——途中で止まった基準と、最後まで進んだ基準を比較できるようにする（F7）。
 //
-//   - **記録に無い要求では止まる**（空の配列を成功とも申告無しとも読ませない）
+//   - **記録に無い要求では止まる**（空の配列を成功とも申告無しとも読ませない）。`RecordedJudgeMissError`
+//     は `stop` の印を持ち、点検の `safeJudge` が握らずに投げ直す（欠落を「unknown」に化けさせない）。
 //   - 記録の口の呼び出しは**実 API の試行にも使用量にも数えない**（ただの `Judge` の実装であって、
-//     予算の包みも門も通らない）
+//     予算の包みも門も通らない）。
 import { sha256Hex } from "@musunest/spec-engine";
 import type { Judge, JudgeRequest, JudgeResponse } from "../judge.js";
+import {
+  JudgeBudgetExceededError,
+  JudgeCallLimitExceededError,
+  JudgeDeadlineExceededError,
+} from "../judge-budget.js";
 
-/** 記録した応答 1 件（要求の内容のハッシュ → 応答） */
-export interface RecordedJudgeEntry {
-  readonly requestHash: string;
-  readonly response: JudgeResponse;
-}
+/** 記録した 1 件（成功した応答か、停止・失敗か） */
+export type RecordedJudgeEntry =
+  | { readonly kind: "response"; readonly requestHash: string; readonly response: JudgeResponse }
+  | { readonly kind: "stop"; readonly requestHash: string; readonly errorName: string; readonly message: string };
 
 /** 要求の内容を、ハッシュの対象に写す（**合図（`signal`）は入れない**——呼ぶ側の都合で変わるため） */
 export function callHashMaterial(request: JudgeRequest): unknown {
@@ -27,32 +32,47 @@ export async function createCallHash(request: JudgeRequest): Promise<string> {
   return sha256Hex(JSON.stringify(callHashMaterial(request)));
 }
 
-/** 記録に無い要求を流したときに投げる誤り（止める） */
+/**
+ * 記録に無い要求を流したときに投げる誤り（止める）。**`stop` の印を持つ**——点検の `safeJudge` が握らずに
+ * 投げ直す（記録の欠落を「unknown」に化けさせない。F7）。
+ */
 export class RecordedJudgeMissError extends Error {
+  readonly stop = true;
   constructor(readonly requestHash: string) {
     super(`記録に無い要求です（${requestHash}）`);
     this.name = "RecordedJudgeMissError";
   }
 }
 
+/** 保存した停止・失敗を、その種類の誤りとして作り直す（点検の `safeJudge` が握らずに投げ直す） */
+function reconstructStop(errorName: string, message: string): Error {
+  if (errorName === "JudgeCallLimitExceededError") return new JudgeCallLimitExceededError(0);
+  if (errorName === "JudgeBudgetExceededError") return new JudgeBudgetExceededError(0, 0);
+  if (errorName === "JudgeDeadlineExceededError") return new JudgeDeadlineExceededError();
+  const error = new Error(message);
+  error.name = errorName;
+  return error;
+}
+
 /**
- * 記録した応答を、要求の内容のハッシュで引いて返す記録の口。**記録に無い要求では投げる**——空の配列を
- * 成功とも申告無しとも読ませない。**実 API は呼ばない**ので、試行にも使用量にも数えない。
+ * 記録した応答・停止を、要求の内容のハッシュで引いて返す記録の口。**記録に無い要求では投げる**——空の
+ * 配列を成功とも申告無しとも読ませない。**実 API は呼ばない**ので、試行にも使用量にも数えない。
  */
 export function createRecordedJudge(entries: readonly RecordedJudgeEntry[]): Judge {
-  const byHash = new Map<string, JudgeResponse>();
-  for (const entry of entries) byHash.set(entry.requestHash, entry.response);
+  const byHash = new Map<string, RecordedJudgeEntry>();
+  for (const entry of entries) byHash.set(entry.requestHash, entry);
   return {
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
       const hash = await createCallHash(request);
-      const response = byHash.get(hash);
-      if (response === undefined) throw new RecordedJudgeMissError(hash);
-      return response;
+      const entry = byHash.get(hash);
+      if (entry === undefined) throw new RecordedJudgeMissError(hash);
+      if (entry.kind === "response") return entry.response;
+      throw reconstructStop(entry.errorName, entry.message);
     },
   };
 }
 
-/** 記録の口の記録先（要求のハッシュと応答を積む） */
+/** 記録の口の記録先（要求のハッシュと、応答か停止を積む） */
 export interface JudgeRecorder {
   readonly entries: RecordedJudgeEntry[];
 }
@@ -63,15 +83,27 @@ export function createJudgeRecorder(): JudgeRecorder {
 }
 
 /**
- * 判定の口を包み、**受け取った要求の内容のハッシュと応答**を記録する。包んだ口は、要求をそのまま
- * 下の口へ渡し、応答をそのまま返す（挙動を変えない）。
+ * 判定の口を包み、**受け取った要求の内容のハッシュと、応答か停止**を記録する（F7）。包んだ口は、要求を
+ * そのまま下の口へ渡し、応答をそのまま返す。**下の口が投げたら停止・失敗も記録してから投げ直す**——
+ * 途中で止まった基準を、記録の口で再現できるようにする。
  */
 export function recordJudge(judge: Judge, recorder: JudgeRecorder): Judge {
   return {
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
-      const response = await judge.judge(request);
-      recorder.entries.push({ requestHash: await createCallHash(request), response });
-      return response;
+      const requestHash = await createCallHash(request);
+      try {
+        const response = await judge.judge(request);
+        recorder.entries.push({ kind: "response", requestHash, response });
+        return response;
+      } catch (error) {
+        recorder.entries.push({
+          kind: "stop",
+          requestHash,
+          errorName: error instanceof Error ? error.name : "Error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
     },
   };
 }

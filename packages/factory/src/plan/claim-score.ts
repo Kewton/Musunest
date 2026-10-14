@@ -2,16 +2,16 @@
 // 出すだけである。
 //
 //   ① **問いへの答えの成績**：仕分けの形（T1〜T3）の答えを、正解の「申告の種類」で採点し、形ごとの
-//      正誤・同じ種類の形の対の同時誤りと不一致・反復の一致率を出す。**裏付けの形の生の答えは今回
-//      採点しない**（分布と、`not-found`・`undecidable` の件数と範囲だけ出す）。
-//   ② **経路の成績**：最終の行き先を正解で採点する。経路は基準（T1＋S1）から、**仕分けを 1 つだけ
-//      替えた**もの（T2＋S1・T3＋S1・T の票＋S1）と、**裏付けを 1 つだけ替えた**もの（T1＋S2・T1＋S3・
-//      T1＋S4・T1＋S の票）である。**異種の T 票と S 票を同じ正誤の対に数えない**。
+//      正誤・同じ種類の形の対の同時誤りと不一致・反復の一致率を出す。**適用できない形は採点に数えない**。
+//      **裏付けの形の生の答えは今回採点しない**（分布と、`not-found`・`undecidable` の件数と範囲だけ出す）。
+//   ② **経路の成績**：最終の行き先を正解で採点する。経路は**基準の 2 本**（再点検あり／なし）と、
+//      仕分けを 1 つだけ替えたもの（T2＋S1・T3＋S1・T の票＋S1）、裏付けを 1 つだけ替えたもの（T1＋S2・
+//      T1＋S3・T1＋S4・T1＋S の票）である。混同表と率は**経路ごと**に出し、元 run・制約 ID・要件の文の
+//      有無で**層別**する。**異種の T 票と S 票を同じ正誤の対に数えない**。
 //
-// `undetermined`（資料不足）は採点の対象外とし、件数だけ出す（分母に入れない）。
-import type { ClaimFormId } from "./claim-forms.js";
-import { isInvalidVote } from "./claim-forms.js";
-import type { ClaimInput } from "./claim-forms.js";
+// `undetermined`（資料不足）と**文脈不足（要件の文が無い）**の申告は採点の対象外とし、分母に入れない。
+import { formAppliesTo, isInvalidVote, type ClaimFormId } from "./claim-forms.js";
+import type { ClaimInput, ClaimVoteValue, FormVoteRecord } from "./claim-forms.js";
 import {
   destinationOf,
   isTriageVote,
@@ -22,7 +22,6 @@ import {
   type TallyRule,
   type TriageTallyState,
 } from "./claim-tally.js";
-import type { FormVoteRecord, ClaimVoteValue } from "./claim-forms.js";
 
 /** 正解の申告の種類（`undetermined` は採点の対象外） */
 export const CLAIM_KIND_LABELS = ["ambiguity", "vocabulary-hole", "not-a-problem", "undetermined"] as const;
@@ -117,15 +116,19 @@ export interface PathResult {
   readonly applicable: boolean;
 }
 
-/** 混同表の 1 セル（正解 → 行き先） */
+/** 混同表の 1 セル（経路 × 正解 → 行き先） */
 export interface ConfusionCell {
+  readonly path: string;
   readonly expected: string;
   readonly actual: string;
   readonly count: number;
 }
 
-/** 分母つきの率 */
+/** 層別した、分母つきの率 */
 export interface Rate {
+  readonly path: string;
+  /** 層（`all`・`run:<ID>`・`constraint:yes|no`・`text:yes|no`） */
+  readonly stratum: string;
   readonly name: string;
   readonly numerator: number;
   readonly denominator: number;
@@ -137,11 +140,13 @@ export interface ClaimScore {
   readonly paths: readonly PathResult[];
   readonly confusion: readonly ConfusionCell[];
   readonly rates: readonly Rate[];
-  /** 採点の対象外（`undetermined`）の件数 */
+  /** 採点の対象外（`undetermined`・文脈不足）の件数 */
   readonly undetermined: number;
+  /** 文脈不足で分母から外した件数 */
+  readonly contextInsufficient: number;
 }
 
-/** 経路の一覧（基準・仕分けを 1 つ替える・裏付けを 1 つ替える） */
+/** 形の経路の一覧（基準から、仕分けを 1 つ替える・裏付けを 1 つ替える） */
 export const SCORE_PATHS = [
   "T1+S1",
   "T2+S1",
@@ -153,6 +158,19 @@ export const SCORE_PATHS = [
   "T1+S-vote",
 ] as const;
 export type ScorePath = (typeof SCORE_PATHS)[number];
+
+/** 基準の 2 経路の名前（点検の結果から作る） */
+export const BASELINE_PATHS = ["baseline:recheck", "baseline:no-recheck"] as const;
+export type BaselinePath = (typeof BASELINE_PATHS)[number];
+
+/** 率の名前（分母の定義とともに固定する） */
+export const RATE_NAMES = {
+  falseHole: "偽の穴の受理",
+  trueHoleMiss: "真の穴の誤った取り落としと最終の未確定",
+  ambiguityMiss: "曖昧さの取りこぼし",
+  holeAsAmbiguity: "語彙の穴を曖昧さとする誤り",
+  recheckReferral: "再点検への回付率",
+} as const;
 
 /** 経路が参照する形 */
 const PATH_FORMS: Readonly<Record<ScorePath, readonly ClaimFormId[]>> = {
@@ -187,15 +205,15 @@ export function pathApplicable(path: ScorePath, forms: ReadonlyMap<ClaimFormId, 
 
 /** 仕分けの集計（T の票）を、存在する T の票から作る */
 function triageVotesOf(forms: ReadonlyMap<ClaimFormId, ClaimVoteValue>): readonly ClaimVoteValue[] {
-  return ["T1", "T2", "T3"]
-    .map((form) => forms.get(form as ClaimFormId))
+  return (["T1", "T2", "T3"] as const)
+    .map((form) => forms.get(form))
     .filter((entry): entry is ClaimVoteValue => entry !== undefined);
 }
 
 /** 裏付けの集計（S の票）を、存在する S2〜S4 の票から作る（S1 は四値でないので入れない） */
 function supportVotesOf(forms: ReadonlyMap<ClaimFormId, ClaimVoteValue>): readonly ClaimVoteValue[] {
-  return ["S2", "S3", "S4"]
-    .map((form) => forms.get(form as ClaimFormId))
+  return (["S2", "S3", "S4"] as const)
+    .map((form) => forms.get(form))
     .filter((entry): entry is ClaimVoteValue => entry !== undefined);
 }
 
@@ -289,7 +307,7 @@ function triageAnswerOf(entry: ClaimVoteValue | undefined): string {
   return "invalid";
 }
 
-/** ① の成績を出す（仕分けの形だけ採点する） */
+/** ① の成績を出す（仕分けの形だけ採点する。**適用できない形は数えない**） */
 function answerScoreOf(
   claims: readonly ClaimInput[],
   forms: ReadonlyMap<string, ReadonlyMap<ClaimFormId, ClaimVoteValue>>,
@@ -302,6 +320,7 @@ function answerScoreOf(
     let incorrect = 0;
     let undetermined = 0;
     for (const claim of claims) {
+      if (!formAppliesTo(form, claim)) continue;
       const label = labels.get(claim.id);
       if (label === undefined || label.kind === "undetermined") {
         undetermined += 1;
@@ -323,6 +342,7 @@ function answerScoreOf(
       let bothWrong = 0;
       let disagree = 0;
       for (const claim of claims) {
+        if (!formAppliesTo(first, claim) || !formAppliesTo(second, claim)) continue;
         const label = labels.get(claim.id);
         if (label === undefined || label.kind === "undetermined") continue;
         const answerA = triageAnswerOf(forms.get(claim.id)?.get(first));
@@ -334,10 +354,8 @@ function answerScoreOf(
     }
   }
 
-  // 反復の一致率（同じ形 × 同じ申告の、反復をまたいだ票の一致）
   const repeatAgreement = repeatAgreementOf(repeatVotes);
 
-  // 裏付けの形の分布（採点しない）
   const support: SupportDistribution[] = (["S1", "S2", "S3", "S4"] as const).map((form) => {
     const counts: Record<string, number> = {};
     let notFound = 0;
@@ -355,20 +373,114 @@ function answerScoreOf(
   return { triage, pairs, repeatAgreement, support };
 }
 
-/** 反復の一致率（同じ形 × 同じ申告で、反復をまたいで票が一致した割合） */
+/** 操作の向き（`forward` か `reverse` か）を、操作の ID から出す */
+function directionOf(operation: string): "forward" | "reverse" {
+  return operation.startsWith("reverse") ? "reverse" : "forward";
+}
+
+/**
+ * 反復の一致率（issue #459・F9）。**同じ形 × 同じ申告 × 同じ向き**の反復を 1 つの群にまとめ、**初回も
+ * 群に含める**。反復（2 回以上）を持つ群だけを数え、**反転と混ぜない**。反復が無ければ `null`。
+ */
 export function repeatAgreementOf(repeatVotes: readonly FormVoteRecord[]): number | null {
   const groups = new Map<string, Set<string>>();
   for (const record of repeatVotes) {
-    if (record.operation === "forward") continue; // forward を基準にする
-    const key = `${record.claimId}\0${record.form}`;
+    const key = `${record.claimId}\0${record.form}\0${directionOf(record.operation)}`;
     const set = groups.get(key) ?? new Set<string>();
     set.add(String(record.vote.vote));
     groups.set(key, set);
   }
-  if (groups.size === 0) return null;
+  // 群の大きさ（反復の回数）は operation の数で数える——同じ (claim, form, 向き) で 2 回以上あるものだけ
+  const counts = new Map<string, number>();
+  for (const record of repeatVotes) {
+    const key = `${record.claimId}\0${record.form}\0${directionOf(record.operation)}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  let total = 0;
   let agree = 0;
-  for (const set of groups.values()) if (set.size === 1) agree += 1;
-  return agree / groups.size;
+  for (const [key, set] of groups) {
+    if ((counts.get(key) ?? 0) < 2) continue;
+    total += 1;
+    if (set.size === 1) agree += 1;
+  }
+  if (total === 0) return null;
+  return agree / total;
+}
+
+/** 層の一覧（`all`・run ごと・制約 ID の有無・要件の文の有無） */
+function strataOf(claims: readonly ClaimInput[]): readonly { readonly key: string; readonly ids: ReadonlySet<string> }[] {
+  const strata: { key: string; ids: ReadonlySet<string> }[] = [
+    { key: "all", ids: new Set(claims.map((claim) => claim.id)) },
+  ];
+  const runs = new Set(claims.map((claim) => claim.runId));
+  for (const runId of runs) {
+    strata.push({ key: `run:${runId}`, ids: new Set(claims.filter((claim) => claim.runId === runId).map((claim) => claim.id)) });
+  }
+  for (const [label, predicate] of [
+    ["constraint:yes", (claim: ClaimInput): boolean => claim.constraintIds.length > 0],
+    ["constraint:no", (claim: ClaimInput): boolean => claim.constraintIds.length === 0],
+    ["text:yes", (claim: ClaimInput): boolean => claim.requirementText !== null],
+    ["text:no", (claim: ClaimInput): boolean => claim.requirementText === null],
+  ] as const) {
+    strata.push({ key: label, ids: new Set(claims.filter(predicate).map((claim) => claim.id)) });
+  }
+  return strata;
+}
+
+/** 分母つきの 5 つの率を、層の中で数える */
+function ratesOf(input: {
+  readonly path: string;
+  readonly stratum: string;
+  readonly claims: readonly ClaimInput[];
+  readonly labels: ReadonlyMap<string, ClaimLabel>;
+  readonly destinationOf: (claimId: string) => ClaimDestination | null;
+}): readonly Rate[] {
+  const { path, stratum, claims, labels } = input;
+  const dest = input.destinationOf;
+  const count = (predicate: (label: ClaimLabel, destination: ClaimDestination) => boolean): number => {
+    let n = 0;
+    for (const claim of claims) {
+      const label = labels.get(claim.id);
+      const destination = dest(claim.id);
+      if (label === undefined || destination === null) continue;
+      if (predicate(label, destination)) n += 1;
+    }
+    return n;
+  };
+  const denom = (predicate: (label: ClaimLabel) => boolean): number =>
+    claims.filter((claim) => {
+      const label = labels.get(claim.id);
+      return label !== undefined && dest(claim.id) !== null && predicate(label);
+    }).length;
+
+  const rate = (name: string, numerator: number, denominator: number): Rate => ({ path, stratum, name, numerator, denominator });
+  return [
+    rate(
+      RATE_NAMES.falseHole,
+      count((label, destination) => label.expressible === "true" && destination === "accept"),
+      denom((label) => label.expressible === "true"),
+    ),
+    rate(
+      RATE_NAMES.trueHoleMiss,
+      count((label, destination) => label.kind === "vocabulary-hole" && label.expressible === "false" && destination !== "accept"),
+      denom((label) => label.kind === "vocabulary-hole" && label.expressible === "false"),
+    ),
+    rate(
+      RATE_NAMES.ambiguityMiss,
+      count((label, destination) => label.kind === "ambiguity" && destination !== "ambiguity"),
+      denom((label) => label.kind === "ambiguity"),
+    ),
+    rate(
+      RATE_NAMES.holeAsAmbiguity,
+      count((label, destination) => label.kind === "vocabulary-hole" && label.expressible !== "undetermined" && destination === "ambiguity"),
+      denom((label) => label.kind === "vocabulary-hole" && label.expressible !== "undetermined"),
+    ),
+    rate(
+      RATE_NAMES.recheckReferral,
+      count((_label, destination) => destination === "unchecked"),
+      denom(() => true),
+    ),
+  ];
 }
 
 /** ② の成績と混同表・率を出す */
@@ -378,76 +490,99 @@ export function scoreClaims(input: {
   readonly repeatVotes?: readonly FormVoteRecord[];
   readonly labels: LabelSet;
   readonly rule: TallyRule;
+  /** 基準の 2 経路の行き先（経路名 → 申告 ID → 行き先） */
+  readonly baselines?: ReadonlyMap<string, ReadonlyMap<string, ClaimDestination>>;
+  /** 文脈不足（要件の文が無い）で分母から外す申告の ID */
+  readonly contextInsufficient?: ReadonlySet<string>;
 }): ClaimScore {
   const forms = votesByClaimForm(input.votes);
   const labels = new Map(input.labels.labels.map((label) => [label.id, label]));
+  const excluded = input.contextInsufficient ?? new Set<string>();
 
+  // 仕分けの答えを採点する申告（文脈不足だけを外す。種類が undetermined の申告は答えの成績で数える）
+  const notExcluded = input.claims.filter((claim) => !excluded.has(claim.id));
+  // 経路・混同表・率に使う申告（文脈不足と、期待の行き先が定まらない申告を外す。F8）
+  const scored = notExcluded.filter((claim) => expectedDestination(labels.get(claim.id)) !== null);
+
+  // 経路ごとの行き先（形の経路 + 基準の 2 経路）
+  const destByPath = new Map<string, Map<string, ClaimDestination>>();
   const paths: PathResult[] = [];
-  for (const claim of input.claims) {
+  for (const claim of scored) {
     const byForm = forms.get(claim.id) ?? new Map<ClaimFormId, ClaimVoteValue>();
-    for (const path of SCORE_PATHS) paths.push(pathResultOf(path, claim, byForm, input.rule));
+    for (const path of SCORE_PATHS) {
+      const result = pathResultOf(path, claim, byForm, input.rule);
+      paths.push(result);
+      if (result.applicable) {
+        const map = destByPath.get(path) ?? new Map<string, ClaimDestination>();
+        map.set(claim.id, result.destination);
+        destByPath.set(path, map);
+      }
+    }
+  }
+  for (const baseline of BASELINE_PATHS) {
+    const map = input.baselines?.get(baseline);
+    if (map === undefined) continue;
+    const kept = new Map<string, ClaimDestination>();
+    for (const [claimId, destination] of map) if (!excluded.has(claimId)) kept.set(claimId, destination);
+    destByPath.set(baseline, kept);
+    for (const claim of scored) {
+      if (kept.has(claim.id)) {
+        paths.push({ path: baseline, claimId: claim.id, destination: kept.get(claim.id) ?? "unchecked", evidenceId: null, applicable: true });
+      }
+    }
   }
 
-  const confusion: ConfusionCell[] = [];
+  // 混同表（経路 × 正解 → 行き先）
   const cellCounts = new Map<string, number>();
   let undetermined = 0;
+  let contextInsufficient = 0;
   for (const claim of input.claims) {
-    const label = labels.get(claim.id);
-    const expected = expectedDestination(label);
+    if (excluded.has(claim.id)) {
+      contextInsufficient += 1;
+      continue;
+    }
+    const expected = expectedDestination(labels.get(claim.id));
     if (expected === null) {
       undetermined += 1;
       continue;
     }
-    for (const result of paths.filter((entry) => entry.claimId === claim.id && entry.applicable)) {
-      const key = `${expected}\0${result.destination}`;
+  }
+  for (const [path, byClaim] of destByPath) {
+    for (const [claimId, destination] of byClaim) {
+      const expected = expectedDestination(labels.get(claimId));
+      if (expected === null) continue;
+      const key = `${path}\0${expected}\0${destination}`;
       cellCounts.set(key, (cellCounts.get(key) ?? 0) + 1);
     }
   }
-  for (const [key, count] of [...cellCounts.entries()].sort()) {
-    const [expected, actual] = key.split("\0");
-    confusion.push({ expected: expected ?? "", actual: actual ?? "", count });
-  }
-
-  // 分母つきの率（経路ごと。ここでは基準の経路 T1+S1 の率を出す）
-  const baseline = "T1+S1";
-  const baselineResults = paths.filter((entry) => entry.path === baseline && entry.applicable);
-  const expressibleClaims = input.claims.filter((claim) => labels.get(claim.id)?.kind === "vocabulary-hole" && labels.get(claim.id)?.expressible === "true");
-  const trueHoles = input.claims.filter(
-    (claim) => labels.get(claim.id)?.kind === "vocabulary-hole" && labels.get(claim.id)?.expressible === "false",
-  );
-  const ambiguities = input.claims.filter((claim) => labels.get(claim.id)?.kind === "ambiguity");
-  // `undetermined`（資料不足）は分母に入れない（採点の対象外）
-  const vocabularyHoles = input.claims.filter((claim) => {
-    const label = labels.get(claim.id);
-    return label?.kind === "vocabulary-hole" && label.expressible !== "undetermined";
+  const confusion: ConfusionCell[] = [...cellCounts.entries()].sort().map(([key, count]) => {
+    const [path, expected, actual] = key.split("\0");
+    return { path: path ?? "", expected: expected ?? "", actual: actual ?? "", count };
   });
 
-  const countDest = (claims: readonly ClaimInput[], destinations: readonly ClaimDestination[]): number =>
-    baselineResults.filter(
-      (entry) => claims.some((claim) => claim.id === entry.claimId) && destinations.includes(entry.destination),
-    ).length;
-
-  const rates: Rate[] = [
-    { name: "偽の穴の受理", numerator: countDest(expressibleClaims, ["accept"]), denominator: expressibleClaims.length },
-    {
-      name: "真の穴の取り落としと未確定",
-      numerator: countDest(trueHoles, ["drop", "unchecked"]),
-      denominator: trueHoles.length,
-    },
-    { name: "曖昧さの取りこぼし", numerator: countDest(ambiguities, ["drop", "unchecked", "accept"]), denominator: ambiguities.length },
-    { name: "語彙の穴を曖昧さとする誤り", numerator: countDest(vocabularyHoles, ["ambiguity"]), denominator: vocabularyHoles.length },
-    {
-      name: "再点検への回付率",
-      numerator: input.claims.filter((claim) => baselineResults.some((entry) => entry.claimId === claim.id && entry.destination === "unchecked")).length,
-      denominator: input.claims.length,
-    },
-  ];
+  // 率（経路ごと・層ごと）
+  const rates: Rate[] = [];
+  for (const [path, byClaim] of destByPath) {
+    for (const stratum of strataOf(scored)) {
+      const claims = scored.filter((claim) => stratum.ids.has(claim.id));
+      rates.push(
+        ...ratesOf({
+          path,
+          stratum: stratum.key,
+          claims,
+          labels,
+          destinationOf: (claimId) => byClaim.get(claimId) ?? null,
+        }),
+      );
+    }
+  }
 
   return {
-    answer: answerScoreOf(input.claims, forms, labels, input.repeatVotes ?? input.votes),
+    answer: answerScoreOf(notExcluded, forms, labels, input.repeatVotes ?? input.votes),
     paths,
     confusion,
     rates,
     undetermined,
+    contextInsufficient,
   };
 }

@@ -7,10 +7,12 @@ import { describe, expect, it } from "vitest";
 import {
   SCORE_PATHS,
   expectedDestination,
+  repeatAgreementOf,
   scoreClaims,
   validateLabels,
   type LabelSet,
 } from "./claim-score.js";
+import type { ClaimDestination } from "./claim-tally.js";
 import type { ClaimFormId, ClaimInput, ClaimVote, FormVoteRecord } from "./claim-forms.js";
 
 const CLAIMS: readonly ClaimInput[] = [
@@ -116,18 +118,94 @@ describe("混同表と率は分母つきで出る（Issue #459）", () => {
     expect(score.confusion.some((cell) => cell.expected === "ambiguity" && cell.actual === "unchecked")).toBe(true);
   });
 
-  it("率に分母が明示される", () => {
-    const byName = new Map(score.rates.map((rate) => [rate.name, rate]));
-    expect(byName.get("真の穴の取り落としと未確定")).toEqual({ name: "真の穴の取り落としと未確定", numerator: 0, denominator: 1 });
-    expect(byName.get("曖昧さの取りこぼし")).toEqual({ name: "曖昧さの取りこぼし", numerator: 1, denominator: 1 });
+  it("率は経路ごと・層ごとに、分母つきで出る（基準の経路 T1＋S1 の all を見る）", () => {
+    const byName = new Map(
+      score.rates.filter((rate) => rate.path === "T1+S1" && rate.stratum === "all").map((rate) => [rate.name, rate]),
+    );
+    expect(byName.get("真の穴の誤った取り落としと最終の未確定")).toMatchObject({ numerator: 0, denominator: 1 });
+    expect(byName.get("曖昧さの取りこぼし")).toMatchObject({ numerator: 1, denominator: 1 });
     // 語彙の穴（資料不足を除く）の分母は 1（c1 だけ）
     expect(byName.get("語彙の穴を曖昧さとする誤り")?.denominator).toBe(1);
-    expect(byName.get("再点検への回付率")?.denominator).toBe(3);
+    // 文脈不足・資料不足の申告は分母に入れない（c1・c2 の 2 件）
+    expect(byName.get("再点検への回付率")?.denominator).toBe(2);
   });
 
   it("undetermined は採点の対象外で、件数だけ出す", () => {
     expect(score.undetermined).toBe(1);
     expect(expectedDestination({ id: "c3", kind: "vocabulary-hole", expressible: "undetermined" })).toBeNull();
+  });
+});
+
+describe("基準の 2 経路を経路として受け取り、混同表・率を層別する（Issue #459・F8）", () => {
+  const baselines = new Map<string, ReadonlyMap<string, ClaimDestination>>([
+    ["baseline:recheck", new Map([["c1", "accept"], ["c2", "unchecked"]])],
+    ["baseline:no-recheck", new Map([["c1", "unchecked"], ["c2", "unchecked"]])],
+  ]);
+
+  it("基準の 2 経路が paths に入り、混同表の鍵に path が入る", () => {
+    const scored = scoreClaims({ claims: CLAIMS, votes: fixedVotes(), labels: LABELS, rule: "majority", baselines });
+    const keys = new Set(scored.paths.map((entry) => `${entry.path}:${entry.claimId}:${entry.destination}`));
+    expect(keys.has("baseline:recheck:c1:accept")).toBe(true);
+    expect(keys.has("baseline:no-recheck:c1:unchecked")).toBe(true);
+    expect(scored.confusion.every((cell) => cell.path.length > 0)).toBe(true);
+    expect(scored.confusion.some((cell) => cell.path === "baseline:recheck")).toBe(true);
+  });
+
+  it("率が経路ごと・層（run・制約 ID・要件の文の有無）ごとに出る", () => {
+    const scored = scoreClaims({ claims: CLAIMS, votes: fixedVotes(), labels: LABELS, rule: "majority", baselines });
+    const strata = new Set(scored.rates.map((rate) => rate.stratum));
+    expect(strata.has("all")).toBe(true);
+    expect(strata.has("text:yes")).toBe(true);
+    expect(strata.has("constraint:yes")).toBe(true);
+    expect([...strata].some((key) => key.startsWith("run:"))).toBe(true);
+    // 経路も複数（基準 + 形の経路）になる
+    expect(new Set(scored.rates.map((rate) => rate.path)).size).toBeGreaterThan(1);
+  });
+
+  it("文脈不足の申告は分母から外す", () => {
+    const scored = scoreClaims({
+      claims: CLAIMS,
+      votes: fixedVotes(),
+      labels: LABELS,
+      rule: "majority",
+      contextInsufficient: new Set(["c2"]),
+    });
+    expect(scored.contextInsufficient).toBe(1);
+    const referral = scored.rates.find(
+      (rate) => rate.path === "T1+S1" && rate.stratum === "all" && rate.name === "再点検への回付率",
+    );
+    // c2 を外すと分母は 1（c1 だけ）
+    expect(referral?.denominator).toBe(1);
+  });
+});
+
+describe("反復の一致率は、初回も含め、反転と混ぜない（Issue #459・F9）", () => {
+  const vote = (operation: string, value: ClaimVote): FormVoteRecord => ({
+    claimId: "c1",
+    claimIndex: 0,
+    form: "T1",
+    operation,
+    vote: { vote: value, evidenceId: null, insideClaimConstraintIds: false },
+  });
+
+  it("初回を捨てない（forward と forward#2 の不一致を 0 にする）", () => {
+    expect(repeatAgreementOf([vote("forward", "vocabulary-hole"), vote("forward#2", "ambiguity")])).toBe(0);
+    expect(repeatAgreementOf([vote("forward", "vocabulary-hole"), vote("forward#2", "vocabulary-hole")])).toBe(1);
+  });
+
+  it("反転だけ（反復なし）では一致率を出さない", () => {
+    expect(repeatAgreementOf([vote("forward", "vocabulary-hole"), vote("reverse", "ambiguity")])).toBeNull();
+  });
+
+  it("反転の反復は、順方向とは別の群として数える", () => {
+    expect(
+      repeatAgreementOf([
+        vote("forward", "vocabulary-hole"),
+        vote("forward#2", "vocabulary-hole"),
+        vote("reverse", "ambiguity"),
+        vote("reverse#2", "ambiguity"),
+      ]),
+    ).toBe(1);
   });
 });
 

@@ -19,6 +19,8 @@ import {
   loadDocumentsFromFiles,
 } from "./cli.js";
 import type { Judge } from "./judge.js";
+import { createJevJudge } from "./judge-jev.js";
+import { createLlmJudge } from "./judge-llm.js";
 import {
   JudgeBudgetExceededError,
   JudgeCallLimitExceededError,
@@ -27,6 +29,7 @@ import {
 } from "./judge-budget.js";
 import { AGENT_LIMITS, type AgentLimits } from "./limits.js";
 import type { LlmClient } from "./llm.js";
+import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL } from "./openai.js";
 import {
   CLAIM_FORMS_VERSION,
   CLAIM_FORM_IDS,
@@ -44,6 +47,7 @@ import {
   createJudgeRecorder,
   createRecordedJudge,
   recordJudge,
+  type RecordedJudgeEntry,
 } from "./plan/claim-recorded-judge.js";
 import {
   scoreClaims,
@@ -71,8 +75,8 @@ export const CLAIMS_SET_SCHEMA = "musunest-factory/claims-set/v1" as const;
 /** 点検の診断の版（`plan-surface-check.json` と同じ） */
 export const CLAIMS_DIAGNOSTIC_SCHEMA = "musunest-factory/plan-surface-check/v1" as const;
 
-/** 既定のモデルの版（閾値の表の鍵） */
-export const DEFAULT_JUDGE_CLAIMS_MODEL = "gpt-6-luna" as const;
+/** 既定のモデルの版（閾値の表の鍵）。`factory:run` と同じ既定のモデルを使う */
+export const DEFAULT_JUDGE_CLAIMS_MODEL = DEFAULT_OPENAI_MODEL;
 /** 既定の集計の規則 */
 export const DEFAULT_TALLY_RULE = "majority" as const;
 
@@ -344,23 +348,53 @@ export interface JudgeClaimsDeps {
   readonly limits?: AgentLimits;
 }
 
-/** 申告の行き先の要約（基準の経路の分類・行き先） */
+/** 申告 1 件の分類（基準の経路の行き先） */
+type ClaimClassification = "accept" | "drop" | "ambiguity" | "unchecked";
+
+/**
+ * 基準の経路の要約。**元の申告 ID と分類の対応**で持つ（配列の位置で番号を作り直さない。Issue #459・F6）。
+ */
 interface SurfaceSummary {
-  readonly accepted: readonly number[];
-  readonly dropped: readonly number[];
-  readonly ambiguities: readonly number[];
-  readonly unchecked: readonly number[];
+  readonly claims: readonly { readonly claim_id: string; readonly classification: ClaimClassification }[];
   readonly judgments: number;
 }
 
-function summarizeSurface(result: SurfaceCheckResult): SurfaceSummary {
+/** 点検の結果を、**申告 ID → 分類**に写す（点検の添字ではなく、申告自身の ID で結ぶ） */
+function summarizeSurface(surface: PlanSurface, result: SurfaceCheckResult): SurfaceSummary {
+  const ids = surface.unwritable.map((claim) => claim.id);
+  const byId = new Map<string, ClaimClassification>();
+  for (const claim of result.accepted) byId.set(claim.id, "accept");
+  for (const entry of result.dropped) byId.set(ids[entry.index] ?? `#${entry.index}`, "drop");
+  for (const entry of result.ambiguities) byId.set(ids[entry.index] ?? `#${entry.index}`, "ambiguity");
+  for (const entry of result.unchecked) byId.set(ids[entry.index] ?? `#${entry.index}`, "unchecked");
   return {
-    accepted: result.accepted.map((_claim, index) => index + 1),
-    dropped: result.dropped.map((entry) => entry.index),
-    ambiguities: result.ambiguities.map((entry) => entry.index),
-    unchecked: result.unchecked.map((entry) => entry.index),
+    claims: ids.map((id) => ({ claim_id: id, classification: byId.get(id) ?? "unchecked" })),
     judgments: result.judgments.length,
   };
+}
+
+/** 要約を、経路ごとの行き先の写像（申告 ID → 分類）にする */
+function destinationsOf(summary: SurfaceSummary): Map<string, ClaimClassification> {
+  return new Map(summary.claims.map((entry) => [entry.claim_id, entry.classification]));
+}
+
+/** 複数の束の要約を 1 つにまとめる（run ごとに分けた束を足し合わせる） */
+function mergeSummaries(parts: readonly SurfaceSummary[]): SurfaceSummary {
+  return {
+    claims: parts.flatMap((part) => part.claims.slice()),
+    judgments: parts.reduce((sum, part) => sum + part.judgments, 0),
+  };
+}
+
+/** 申告を run ごとの束に分ける（run をまたいだ要件 ID の取り違えを避ける。F5） */
+function groupByRun(claims: readonly ClaimInput[]): readonly (readonly ClaimInput[])[] {
+  const byRun = new Map<string, ClaimInput[]>();
+  for (const claim of claims) {
+    const list = byRun.get(claim.runId) ?? [];
+    list.push(claim);
+    byRun.set(claim.runId, list);
+  }
+  return [...byRun.values()];
 }
 
 /** 申告の束を `PlanSurface` に写す */
@@ -385,7 +419,12 @@ function isStopError(error: unknown): boolean {
   );
 }
 
-/** 門（締切・総回数）と予算を掛けた判定の口を作る */
+/** 記録の口の欠落（握らずに投げ直される）か */
+function isRecordedMiss(error: unknown): boolean {
+  return error instanceof Error && error.name === "RecordedJudgeMissError";
+}
+
+/** 門（締切・総回数）と予算を掛けた判定の口。**門も返す**（形の評価で「呼ぶ前」の締切を見るのに使う） */
 function gatedJudge(judge: Judge, input: {
   readonly budgetUsd: number;
   readonly rates: TokenRates;
@@ -393,18 +432,21 @@ function gatedJudge(judge: Judge, input: {
   readonly deadline: number;
   readonly maxCalls: number;
   readonly recheckJudge?: Judge;
-}): ReturnType<typeof createBudgetedJudge> {
+}): { readonly judge: ReturnType<typeof createBudgetedJudge>; readonly gate: CallGate } {
   const gate: CallGate = createCallGate({ now: input.now, deadline: input.deadline, limit: input.maxCalls });
-  return createBudgetedJudge({
-    judge,
-    budget: new JobBudget(input.budgetUsd),
-    rates: input.rates,
+  return {
     gate,
-    ...(input.recheckJudge === undefined ? {} : { recheck: input.recheckJudge }),
-  });
+    judge: createBudgetedJudge({
+      judge,
+      budget: new JobBudget(input.budgetUsd),
+      rates: input.rates,
+      gate,
+      ...(input.recheckJudge === undefined ? {} : { recheck: input.recheckJudge }),
+    }),
+  };
 }
 
-/** 呼び出しの記録を、使用量の印つきで出力の形に写す（**使用量は原値のまま**） */
+/** 呼び出しの記録を、使用量と**生の答え**つきで出力の形に写す（**使用量は原値のまま**。Issue #459・F12） */
 function callRecordToOutput(record: FormCallRecord): Record<string, unknown> {
   const response = record.response;
   const usage = response?.usage;
@@ -423,9 +465,32 @@ function callRecordToOutput(record: FormCallRecord): Record<string, unknown> {
     state: record.state,
     answered_by: record.answeredBy,
     model: record.model,
+    // 生の答え（T2 の生ラベル・S3 の選択・S4 の段落答え・確率を後から検証できるように残す。F12）
+    answers: response === null ? null : (response.answers as unknown),
     input_tokens: response === null ? null : inputTokens,
     usage: usage === undefined ? null : { ...usage },
     usage_unmeasurable: usageMarked,
+  };
+}
+
+/** 基準の経路の呼び出し（主・再点検）を、出力の形に写す（F12） */
+function baselineCallToOutput(
+  entry: RecordedJudgeEntry,
+  role: "primary" | "recheck",
+): Record<string, unknown> {
+  if (entry.kind === "stop") {
+    return { role, request_hash: entry.requestHash, state: "failed", error_name: entry.errorName, answers: null };
+  }
+  const response = entry.response;
+  return {
+    role,
+    request_hash: entry.requestHash,
+    state: "ok",
+    error_name: null,
+    answered_by: response.answeredBy,
+    model: response.model,
+    answers: response.answers as unknown,
+    usage: response.usage === undefined ? null : { ...response.usage },
   };
 }
 
@@ -510,16 +575,17 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
     return JUDGE_CLAIMS_EXIT_STOPPED;
   }
 
-  // ── 3. 判定の口の組み立て ────────────────────────────────────
+  // ── 3. 判定の口の組み立て（`factory:run` と同じ既定の生成関数を使う。F2）────
   const apiKey = deps.env[API_KEY_ENV];
   if (apiKey === undefined || apiKey === "") {
     log(`使い方の誤り: 環境変数 ${API_KEY_ENV} がありません`);
     log(JUDGE_CLAIMS_USAGE);
     return JUDGE_CLAIMS_EXIT_USAGE;
   }
-  const makeClient = deps.makeClient ?? ((): never => {
-    throw new Error("makeClient がありません");
-  });
+  // **注入が無くても実入口が起動できる**よう、既定は本物の生成関数にする（F2）
+  const makeClient = deps.makeClient ?? ((options: { apiKey: string; model: string; effort: string }): LlmClient => createOpenAiLlmClient(options));
+  const makeJevJudge = deps.makeJevJudge ?? ((options: { apiKey: string }): Judge => createJevJudge(options));
+  const makeLlmJudge = deps.makeLlmJudge ?? ((options: { client: LlmClient; model: string }): Judge => createLlmJudge(options));
   const client = makeClient({ apiKey, model: parsed.model, effort: "high" });
   const jevApiKey = deps.env[JEV_API_KEY_ENV];
   let primaryJudge: Judge;
@@ -530,19 +596,15 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
       log(`使い方の誤り: --judge jev には環境変数 ${JEV_API_KEY_ENV} が要ります（LLM では代用しません）`);
       return JUDGE_CLAIMS_EXIT_USAGE;
     }
-    primaryJudge = (deps.makeJevJudge ?? ((): never => {
-      throw new Error("makeJevJudge がありません");
-    }))({ apiKey: jevApiKey });
-    recheckJudge = (deps.makeLlmJudge ?? ((): never => {
-      throw new Error("makeLlmJudge がありません");
-    }))({ client, model: parsed.model });
+    primaryJudge = makeJevJudge({ apiKey: jevApiKey });
+    recheckJudge = makeLlmJudge({ client, model: parsed.model });
   } else {
     const assembled = assembleJudge({
       env: deps.env,
       model: parsed.model,
       client,
-      ...(deps.makeJevJudge === undefined ? {} : { makeJevJudge: deps.makeJevJudge }),
-      ...(deps.makeLlmJudge === undefined ? {} : { makeLlmJudge: deps.makeLlmJudge }),
+      makeJevJudge,
+      makeLlmJudge,
       logError: log,
     });
     primaryJudge = assembled.judge;
@@ -566,7 +628,7 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
   const maxCalls = parsed.maxCalls ?? deps.limits?.callCount ?? AGENT_LIMITS.callCount;
   const rates = deps.rates ?? DEFAULT_RATES;
   const budgetUsd = parsed.budgetUsd ?? deps.budgetUsd ?? 0.3;
-  const budgeted = gatedJudge(primaryJudge, {
+  const { judge: budgeted, gate } = gatedJudge(primaryJudge, {
     budgetUsd,
     rates,
     now,
@@ -577,61 +639,98 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
   const budgetedRecheck: Judge = budgeted.fallback ?? recheckJudge;
 
   const claims = loaded.claims;
-  const withRequirement = claims.filter((claim) => claim.requirementText !== null);
-  const withoutRequirement = claims.filter((claim) => claim.requirementText === null);
-  const requirements = new Map(
-    withRequirement.map((claim) => [claim.requirementId, claim.requirementText ?? ""]),
-  );
+  const contextInsufficientClaims = claims.filter((claim) => claim.requirementText === null);
+  const contextInsufficient = contextInsufficientClaims.map((claim) => claim.id);
 
-  // ── 4. 基準の 2 経路 ─────────────────────────────────────────
-  const recorder = createJudgeRecorder();
-  const recordedPrimary = recordJudge(budgeted, recorder);
-  let withRecheck: SurfaceSummary | null = null;
-  let withoutRecheck: SurfaceSummary | null = null;
-  let contextInsufficient: readonly string[] = [];
-  try {
-    if (withRequirement.length > 0) {
-      const result = await runSurfaceCheck({
-        surface: surfaceOf(withRequirement),
+  // ── 4. 基準の 2 経路（run ごとに束を分ける。F5/F6/F7）─────────────
+  const baselineCalls: Record<string, unknown>[] = [];
+  const withRecheckParts: SurfaceSummary[] = [];
+  const withoutRecheckParts: SurfaceSummary[] = [];
+  let baselineStopped = false;
+  for (const group of groupByRun(claims.filter((claim) => claim.requirementText !== null))) {
+    const surface = surfaceOf(group);
+    // **run と版を含む対応**：束の中の要件 ID → 文（run をまたいだ同じ ID の取り違えを避ける。F5）
+    const requirements = new Map(group.map((claim) => [claim.requirementId, claim.requirementText ?? ""]));
+    const recorder = createJudgeRecorder();
+    const recheckRecorder = createJudgeRecorder();
+    const recordedPrimary = recordJudge(budgeted, recorder);
+    const recordedRecheck = recordJudge(budgetedRecheck, recheckRecorder);
+
+    let partialA: SurfaceCheckResult | null = null;
+    try {
+      partialA = await runSurfaceCheck({
+        surface,
         documents,
         judge: recordedPrimary,
-        recheckJudge: budgetedRecheck,
+        recheckJudge: recordedRecheck,
         threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
         requirements,
         docVersion: loaded.docVersion,
+        onProgress: (entry) => {
+          partialA = entry;
+        },
       });
-      withRecheck = summarizeSurface(result);
-      // 「再点検なし」：記録した応答を、ハッシュの一致で返す記録の口へ流し直す（途中報告を数えない）
-      const replayed = await runSurfaceCheck({
-        surface: surfaceOf(withRequirement),
+    } catch (error) {
+      if (isRecordedMiss(error)) {
+        log("基準の経路で記録の口の欠落により止まりました");
+        return JUDGE_CLAIMS_EXIT_STOPPED;
+      }
+      if (isStopError(error)) baselineStopped = true;
+      else throw error;
+    }
+    if (partialA !== null) withRecheckParts.push(summarizeSurface(surface, partialA));
+    for (const entry of recorder.entries) baselineCalls.push(baselineCallToOutput(entry, "primary"));
+    for (const entry of recheckRecorder.entries) baselineCalls.push(baselineCallToOutput(entry, "recheck"));
+
+    // 「再点検なし」：記録した応答・停止を、ハッシュの一致で返す記録の口へ流し直す。**止まっても流す**（F7）
+    let partialB: SurfaceCheckResult | null = null;
+    try {
+      partialB = await runSurfaceCheck({
+        surface,
         documents,
         judge: createRecordedJudge(recorder.entries),
         threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
         requirements,
         docVersion: loaded.docVersion,
+        onProgress: (entry) => {
+          partialB = entry;
+        },
       });
-      withoutRecheck = summarizeSurface(replayed);
+    } catch (error) {
+      if (isRecordedMiss(error)) {
+        log("基準の経路（再点検なし）で記録の口の欠落により止まりました");
+        return JUDGE_CLAIMS_EXIT_STOPPED;
+      }
+      if (isStopError(error)) baselineStopped = true;
+      else throw error;
     }
-    if (withoutRequirement.length > 0) {
-      // 要件の文が無い申告は、再点検の口なしで流し（空文字を送らない）、文脈不足の層とする
-      const result = await runSurfaceCheck({
-        surface: surfaceOf(withoutRequirement),
+    if (partialB !== null) withoutRecheckParts.push(summarizeSurface(surface, partialB));
+  }
+  for (const group of groupByRun(contextInsufficientClaims)) {
+    // 要件の文が無い申告は、再点検の口なしで流し（空文字を送らない）、文脈不足の層とする
+    const surface = surfaceOf(group);
+    const requirements = new Map(group.map((claim) => [claim.requirementId, ""]));
+    try {
+      await runSurfaceCheck({
+        surface,
         documents,
         judge: budgeted,
         threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
         requirements,
         docVersion: loaded.docVersion,
       });
-      contextInsufficient = withoutRequirement.map((claim) => claim.id);
-      void result;
-    }
-  } catch (error) {
-    if (isStopError(error)) {
-      log("基準の経路で門に止まりました");
-    } else {
-      throw error;
+    } catch (error) {
+      if (isRecordedMiss(error)) {
+        log("文脈不足の経路で記録の口の欠落により止まりました");
+        return JUDGE_CLAIMS_EXIT_STOPPED;
+      }
+      if (isStopError(error)) baselineStopped = true;
+      else throw error;
     }
   }
+  const withRecheck = mergeSummaries(withRecheckParts);
+  const withoutRecheck = mergeSummaries(withoutRecheckParts);
+  if (baselineStopped) log("基準の経路で門に止まりました（途中までを残します）");
 
   // ── 5. 全申告 × 選んだ形 × 操作 ──────────────────────────────
   const operations: readonly ClaimOperation[] = buildOperations(parsed.repeat, parsed.reverseOptions);
@@ -647,6 +746,7 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
       modelVersion: parsed.model,
       operation,
       forms: parsed.forms,
+      gate,
     });
     allVotes.push(...result.votes);
     allCalls.push(...result.calls);
@@ -671,12 +771,19 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
       claims.map((claim) => claim.id),
       actualHash,
     );
+    // 基準の 2 経路を経路として渡し、文脈不足の申告を分母から外す（F8）
+    const baselines = new Map<string, Map<string, ClaimClassification>>([
+      ["baseline:recheck", destinationsOf(withRecheck)],
+      ["baseline:no-recheck", destinationsOf(withoutRecheck)],
+    ]);
     score = scoreClaims({
       claims,
       votes: forwardVotes,
       repeatVotes: allVotes,
       labels: { docVersion: parsedLabels.docVersion, docHash: parsedLabels.docHash, labels: parsedLabels.labels },
       rule: parsed.rule,
+      baselines,
+      contextInsufficient: new Set(contextInsufficient),
     });
   }
 
@@ -703,6 +810,8 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
     })),
     calls: allCalls.map(callRecordToOutput),
     votes: allVotes.map(voteToOutput),
+    // 基準の 2 経路の呼び出し（主・再点検）を、生の答えつきで残す（F12）
+    baseline_calls: baselineCalls,
     baselines: { with_recheck: withRecheck, without_recheck: withoutRecheck },
     context_insufficient: contextInsufficient,
     planned,
@@ -716,6 +825,8 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
       budget_usd: budgetUsd,
       spent_usd: budgeted.spentUsd,
       calls_by_adapter: budgeted.callsByAdapter,
+      // 実試行の数（成功・失敗の合計。adapter ごとの内訳は judge-budget.ts の外）
+      attempts: budgeted.attempts,
     },
   };
 
@@ -725,7 +836,8 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
 
 // ── Node 側（ファイルと環境変数を扱う。動的に読む）────────────────────
 
-interface NodeProcess {
+/** Node の入口が受け取るもの（`process` と同じ形） */
+export interface NodeProcess {
   readonly argv: readonly string[];
   readonly env: Readonly<Record<string, string | undefined>>;
   exitCode?: number;
@@ -750,19 +862,30 @@ function isEntryPoint(proc: NodeProcess): boolean {
   return selfUrl().endsWith(entry);
 }
 
-/** 手元から流す入口（`node dist/cli-claims.js -- ...`） */
-export async function main(): Promise<void> {
-  const proc = (globalThis as unknown as { process?: NodeProcess }).process;
-  if (proc === undefined || !isEntryPoint(proc)) return;
+/**
+ * 実入口の依存を組む（Issue #459・F2）。`factory:run` と同じく、**ファイル・環境変数・鍵・判定の生成関数を
+ * ここで用意する**——`main` がこれを使うので、注入が無くても実入口が起動できる。
+ */
+export async function nodeJudgeClaimsDeps(proc: NodeProcess): Promise<JudgeClaimsDeps> {
   const fs = (await importUntyped("node:fs/promises")) as NodeFs;
-  const code = await runJudgeClaims({
+  return {
     argv: proc.argv.slice(2),
     env: proc.env,
     readFile: (path) => fs.readFile(path, "utf8"),
     writeFile: (path, text) => fs.writeFile(path, text, "utf8"),
+    loadDocuments: loadDocumentsFromFiles,
+    makeClient: (options) => createOpenAiLlmClient(options),
+    makeJevJudge: (options) => createJevJudge(options),
+    makeLlmJudge: (options) => createLlmJudge(options),
     log: (line) => proc.stdout.write(`${line}\n`),
-  });
-  proc.exitCode = code;
+  };
+}
+
+/** 手元から流す入口（`node dist/cli-claims.js -- ...`） */
+export async function main(): Promise<void> {
+  const proc = (globalThis as unknown as { process?: NodeProcess }).process;
+  if (proc === undefined || !isEntryPoint(proc)) return;
+  proc.exitCode = await runJudgeClaims(await nodeJudgeClaimsDeps(proc));
 }
 
 void main();

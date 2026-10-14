@@ -588,6 +588,11 @@ async function safeJudge(judge: Judge, request: Parameters<Judge["judge"]>[0]): 
     ) {
       throw error;
     }
+    // `stop` の印を持つ誤り（記録の口の欠落など）も**握らずに投げ直す**——点検できないものを未確定に
+    // 化けさせず、呼ぶ側が止められるようにする（Issue #459・F7）。
+    if (typeof error === "object" && error !== null && (error as { readonly stop?: unknown }).stop === true) {
+      throw error;
+    }
     return null;
   }
 }

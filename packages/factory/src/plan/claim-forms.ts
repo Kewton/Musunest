@@ -20,6 +20,7 @@
 // 手段が見つからない」であって、表現できない証明ではない**——受理の票にしない。
 //
 // **実 API は呼ばない。** 判定は差し込まれた `Judge` だけを使う（試験は偽物）。
+import type { CallGate } from "../call.js";
 import type { Judge, JudgeAnswer, JudgeChoiceQuestion, JudgeQuestion, JudgeRequest, JudgeResponse } from "../judge.js";
 import { createCallHash } from "./claim-recorded-judge.js";
 import { constraintExcerpt, constraintIdsIn, type PromptDocument } from "../stages/prompt.js";
@@ -355,13 +356,16 @@ function plainVote(vote: ClaimVote): ClaimVoteValue {
   return { vote, evidenceId: null, insideClaimConstraintIds: false };
 }
 
-/** choice の答えから、選んだ値と確率を取り出す */
+/**
+ * choice の答えから、選んだ値と**確率**を取り出す（Issue #459・F10）。**確信度（`confidence`）で代用しない**
+ * ——確率（`probability`）と確信度は別の値であり、確率が返らない答えは `probability-unknown` にする契約である。
+ */
 function choiceAndProbability(answer: JudgeAnswer | undefined): {
   readonly choice: string | undefined;
   readonly probability: number | undefined;
 } {
   if (answer === undefined || answer.kind !== "choice") return { choice: undefined, probability: undefined };
-  return { choice: answer.choice, probability: answer.probability ?? answer.confidence };
+  return { choice: answer.choice, probability: answer.probability };
 }
 
 /**
@@ -425,18 +429,27 @@ export function supportVoteOfChoice(choice: string): SupportVote {
   }
 }
 
-/** S2 の票を、1 つの答えから作る（根拠 ID は申告の制約 ID の内側） */
+/**
+ * S2 の票を、1 つの答えから作る（Issue #459）。`evidenceIds` は根拠に使う節の ID、`claimConstraintIds` は
+ * **申告自身の制約 ID** である。**根拠が申告の内側かの印は、実際に `claimConstraintIds` に含まれるかで
+ * 決める**（S3 は申告の外の節を選びうる。F11）。
+ */
 export function s2VoteOfAnswer(
   answer: JudgeAnswer | undefined,
   threshold: number,
   evidenceIds: readonly string[],
+  claimConstraintIds: readonly string[],
 ): ClaimVoteValue {
   const { choice, probability } = choiceAndProbability(answer);
   const invalid = invalidReasonOf(choice, probability, SUPPORT_CHOICE_SET, threshold);
   if (invalid !== undefined) return plainVote(invalid);
   const vote = supportVoteOfChoice(choice as string);
   const evidenceId = vote === "provides" || vote === "restricts" ? (evidenceIds[0] ?? null) : null;
-  return { vote, evidenceId, insideClaimConstraintIds: evidenceId !== null };
+  return {
+    vote,
+    evidenceId,
+    insideClaimConstraintIds: evidenceId !== null && claimConstraintIds.includes(evidenceId),
+  };
 }
 
 /**
@@ -536,10 +549,13 @@ export interface FormVoteRecord {
   readonly vote: ClaimVoteValue;
 }
 
-/** 問い 1 つがどの申告（と段落）に写るか */
+/**
+ * 問い 1 つがどの申告（と段落）に写るか。**申告自身の一意な ID で結ぶ**（別 run・別点検の申告が同じ局所
+ * 添字を持ちうるので、添字を束全体の鍵にしない。F4）。
+ */
 interface QuestionTarget {
   readonly questionId: string;
-  readonly claimIndex: number;
+  readonly claimId: string;
   readonly paragraph?: number;
 }
 
@@ -565,6 +581,11 @@ export interface EvaluateInput {
   readonly operation: ClaimOperation;
   /** 実試行の門（上限・締切）。偽なら**呼ばずに** `not-run` にする */
   readonly shouldRun?: () => boolean;
+  /**
+   * 実試行の門（共有）。**呼ぶ前**に締切を過ぎていれば `not-run`、**呼んだ後**の締切停止は `failed`
+   * （実施数に数える）にする（Issue #459・F13）。
+   */
+  readonly gate?: CallGate;
   /** 選んだ形（省くと全部）。候補は**全申告 × 選んだ形**である */
   readonly forms?: readonly ClaimFormId[];
   /** 選択肢の上限（S3。既定 255） */
@@ -579,7 +600,7 @@ function answerOf(response: JudgeResponse | null, questionId: string): JudgeAnsw
   return response === null ? undefined : response.answers[questionId];
 }
 
-/** 記録（呼び出し）を 1 つ作る */
+/** 記録（呼び出し）を 1 つ作る（`request` は**実際に送った**要求） */
 async function makeCallRecord(input: {
   readonly id: string;
   readonly form: ClaimFormId;
@@ -588,17 +609,16 @@ async function makeCallRecord(input: {
   readonly request: JudgeRequest;
   readonly contextIds: readonly string[];
   readonly response: JudgeResponse | null;
-  readonly state: "ok" | "failed" | "not-run";
+  readonly state: CallState;
 }): Promise<FormCallRecord> {
-  const effective = applyOperation(input.request, input.operation);
   return {
     id: input.id,
     form: input.form,
     stage: input.stage,
     operation: input.operation.id,
-    requestHash: await createCallHash(effective),
+    requestHash: await createCallHash(input.request),
     contextIds: input.contextIds,
-    questionIds: Object.keys(effective.questions),
+    questionIds: Object.keys(input.request.questions),
     state: input.state,
     answeredBy: input.response === null ? "none" : input.response.answeredBy,
     model: input.response === null ? "" : input.response.model,
@@ -606,25 +626,35 @@ async function makeCallRecord(input: {
   };
 }
 
-/** 1 つの要求を（門を見て）呼ぶ。戻りは答えと記録の状態 */
+/** 呼び出しの状態 */
+type CallState = "ok" | "failed" | "not-run";
+
+/**
+ * 1 つの要求を（門を見て）呼ぶ。**操作（選択肢の反転）はここで実際の要求へ掛ける**——記録だけでなく、
+ * **送る要求そのもの**を反転する（Issue #459・F3）。門の締切は、**呼ぶ前に過ぎていれば** `not-run`
+ * （未実施）、**呼んだ後に検出すれば** `failed`（実施してから止まった。使用量も数に入る）にする（F13）。
+ */
 async function callOnce(
   input: EvaluateInput,
   request: JudgeRequest,
-): Promise<{ readonly response: JudgeResponse | null; readonly state: "ok" | "failed" | "not-run"; readonly error: unknown }> {
+): Promise<{ readonly request: JudgeRequest; readonly response: JudgeResponse | null; readonly state: CallState }> {
+  const effective = applyOperation(request, input.operation);
+  const gate = input.gate;
+  if (gate !== undefined && gate.now() >= gate.deadline) {
+    return { request: effective, response: null, state: "not-run" };
+  }
   if (input.shouldRun !== undefined && !input.shouldRun()) {
-    return { response: null, state: "not-run", error: null };
+    return { request: effective, response: null, state: "not-run" };
   }
   try {
-    const response = await input.judge.judge(request);
-    return { response, state: "ok", error: null };
+    const response = await input.judge.judge(effective);
+    return { request: effective, response, state: "ok" };
   } catch (error) {
-    // 門（上限・締切）や予算で止まったときは `not-run`、それ以外の失敗は `failed`（黙って消さない）
     const name = error instanceof Error ? error.name : "";
-    const stopped =
-      name === "JudgeCallLimitExceededError" ||
-      name === "JudgeBudgetExceededError" ||
-      name === "JudgeDeadlineExceededError";
-    return { response: null, state: stopped ? "not-run" : "failed", error };
+    // 上限・予算は**呼ぶ前に**止まる（未実施）。締切は、呼ぶ前の検査を過ぎているので**実施してから**止まった
+    // ものとして `failed` にする（未実施に数えない。F13）。それ以外の失敗も `failed`（黙って消さない）
+    const notRun = name === "JudgeCallLimitExceededError" || name === "JudgeBudgetExceededError";
+    return { request: effective, response: null, state: notRun ? "not-run" : "failed" };
   }
 }
 
@@ -648,6 +678,30 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
     votes.push({ claimId: claim.id, claimIndex: claim.index, form, operation: input.operation.id, vote: value });
   };
 
+  /** 1 つの要求を（操作を掛けて）呼び、記録を積む */
+  const callAndRecord = async (spec: {
+    readonly id: string;
+    readonly form: ClaimFormId;
+    readonly stage: number;
+    readonly request: JudgeRequest;
+    readonly contextIds: readonly string[];
+  }): Promise<{ readonly response: JudgeResponse | null; readonly state: CallState }> => {
+    const sent = await callOnce(input, spec.request);
+    calls.push(
+      await makeCallRecord({
+        id: spec.id,
+        form: spec.form,
+        stage: spec.stage,
+        operation: input.operation,
+        request: sent.request,
+        contextIds: spec.contextIds,
+        response: sent.response,
+        state: sent.state,
+      }),
+    );
+    return { response: sent.response, state: sent.state };
+  };
+
   // ── T1（今の点検の仕分け。束）────────────────────────────────
   const t1Claims = input.claims.filter((claim) => applies("T1", claim));
   if (t1Claims.length > 0) {
@@ -657,24 +711,18 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
       if (!applies("T1", claim)) continue;
       const name = `claim-t1:${claim.id}`;
       questions[name] = surfaceTriageQuestion(asUnwritable(claim));
-      targets.push({ questionId: name, claimIndex: claim.index });
+      targets.push({ questionId: name, claimId: claim.id });
     }
     const request: JudgeRequest = { state: {}, questions };
-    const result = await callOnce(input, request);
-    calls.push(
-      await makeCallRecord({
-        id: "T1",
-        form: "T1",
-        stage: 0,
-        operation: input.operation,
-        request,
-        contextIds: t1Claims.map((claim) => claim.id),
-        response: result.response,
-        state: result.state,
-      }),
-    );
+    const result = await callAndRecord({
+      id: "T1",
+      form: "T1",
+      stage: 0,
+      request,
+      contextIds: t1Claims.map((claim) => claim.id),
+    });
     for (const target of targets) {
-      const claim = input.claims.find((entry) => entry.index === target.claimIndex);
+      const claim = input.claims.find((entry) => entry.id === target.claimId);
       if (claim === undefined) continue;
       if (result.state !== "ok") {
         pushVote(claim, "T1", plainVote(result.state === "not-run" ? "not-run" : "failed"));
@@ -689,19 +737,13 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
     if (!applies("T2", claim)) continue;
     const name = `${T2_QUESTION_PREFIX}:${claim.id}`;
     const request: JudgeRequest = { state: t2State(claim), questions: { [name]: t2Question() } };
-    const result = await callOnce(input, request);
-    calls.push(
-      await makeCallRecord({
-        id: `T2:${claim.id}`,
-        form: "T2",
-        stage: 0,
-        operation: input.operation,
-        request,
-        contextIds: [claim.id],
-        response: result.response,
-        state: result.state,
-      }),
-    );
+    const result = await callAndRecord({
+      id: `T2:${claim.id}`,
+      form: "T2",
+      stage: 0,
+      request,
+      contextIds: [claim.id],
+    });
     if (result.state !== "ok") {
       pushVote(claim, "T2", plainVote(result.state === "not-run" ? "not-run" : "failed"));
       continue;
@@ -717,24 +759,18 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
     for (const claim of t3Claims) {
       const name = `${T3_QUESTION_PREFIX}:${claim.id}`;
       questions[name] = t3Question(claim);
-      targets.push({ questionId: name, claimIndex: claim.index });
+      targets.push({ questionId: name, claimId: claim.id });
     }
     const request: JudgeRequest = { state: {}, questions };
-    const result = await callOnce(input, request);
-    calls.push(
-      await makeCallRecord({
-        id: "T3",
-        form: "T3",
-        stage: 0,
-        operation: input.operation,
-        request,
-        contextIds: t3Claims.map((claim) => claim.id),
-        response: result.response,
-        state: result.state,
-      }),
-    );
+    const result = await callAndRecord({
+      id: "T3",
+      form: "T3",
+      stage: 0,
+      request,
+      contextIds: t3Claims.map((claim) => claim.id),
+    });
     for (const target of targets) {
-      const claim = input.claims.find((entry) => entry.index === target.claimIndex);
+      const claim = input.claims.find((entry) => entry.id === target.claimId);
       if (claim === undefined) continue;
       if (result.state !== "ok") {
         pushVote(claim, "T3", plainVote(result.state === "not-run" ? "not-run" : "failed"));
@@ -752,24 +788,18 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
     for (const claim of s1Claims) {
       const name = `${S1_QUESTION_PREFIX}:${claim.id}`;
       questions[name] = surfaceSupportQuestion(asUnwritable(claim), input.documents);
-      targets.push({ questionId: name, claimIndex: claim.index });
+      targets.push({ questionId: name, claimId: claim.id });
     }
     const request: JudgeRequest = { state: {}, questions };
-    const result = await callOnce(input, request);
-    calls.push(
-      await makeCallRecord({
-        id: "S1",
-        form: "S1",
-        stage: 0,
-        operation: input.operation,
-        request,
-        contextIds: s1Claims.map((claim) => claim.id),
-        response: result.response,
-        state: result.state,
-      }),
-    );
+    const result = await callAndRecord({
+      id: "S1",
+      form: "S1",
+      stage: 0,
+      request,
+      contextIds: s1Claims.map((claim) => claim.id),
+    });
     for (const target of targets) {
-      const claim = input.claims.find((entry) => entry.index === target.claimIndex);
+      const claim = input.claims.find((entry) => entry.id === target.claimId);
       if (claim === undefined) continue;
       if (result.state !== "ok") {
         pushVote(claim, "S1", plainVote(result.state === "not-run" ? "not-run" : "failed"));
@@ -787,24 +817,18 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
     for (const claim of s2Claims) {
       const name = `${S2_QUESTION_PREFIX}:${claim.id}`;
       questions[name] = s2Question(claim, input.documents);
-      targets.push({ questionId: name, claimIndex: claim.index });
+      targets.push({ questionId: name, claimId: claim.id });
     }
     const request: JudgeRequest = { state: {}, questions };
-    const result = await callOnce(input, request);
-    calls.push(
-      await makeCallRecord({
-        id: "S2",
-        form: "S2",
-        stage: 0,
-        operation: input.operation,
-        request,
-        contextIds: s2Claims.map((claim) => claim.id),
-        response: result.response,
-        state: result.state,
-      }),
-    );
+    const result = await callAndRecord({
+      id: "S2",
+      form: "S2",
+      stage: 0,
+      request,
+      contextIds: s2Claims.map((claim) => claim.id),
+    });
     for (const target of targets) {
-      const claim = input.claims.find((entry) => entry.index === target.claimIndex);
+      const claim = input.claims.find((entry) => entry.id === target.claimId);
       if (claim === undefined) continue;
       if (result.state !== "ok") {
         pushVote(claim, "S2", plainVote(result.state === "not-run" ? "not-run" : "failed"));
@@ -813,7 +837,7 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
       pushVote(
         claim,
         "S2",
-        s2VoteOfAnswer(answerOf(result.response, target.questionId), threshold, claim.constraintIds),
+        s2VoteOfAnswer(answerOf(result.response, target.questionId), threshold, claim.constraintIds, claim.constraintIds),
       );
     }
   }
@@ -844,26 +868,20 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
             },
             criteria: selectCriteria,
           };
-          selectTargets.push({ questionId: name, claimIndex: claim.index });
+          selectTargets.push({ questionId: name, claimId: claim.id });
         }
         const selectRequest: JudgeRequest = { state: {}, questions: selectQuestions };
-        const selectResult = await callOnce(input, selectRequest);
-        calls.push(
-          await makeCallRecord({
-            id: "S3:select",
-            form: "S3",
-            stage: 0,
-            operation: input.operation,
-            request: selectRequest,
-            contextIds: s3Claims.map((claim) => claim.id),
-            response: selectResult.response,
-            state: selectResult.state,
-          }),
-        );
+        const selectResult = await callAndRecord({
+          id: "S3:select",
+          form: "S3",
+          stage: 0,
+          request: selectRequest,
+          contextIds: s3Claims.map((claim) => claim.id),
+        });
         const selectionSet = new Set<string>([...documentIds, S3_NONE_CHOICE]);
         const selections: { readonly claim: ClaimInput; readonly section: string | undefined; readonly invalid: ClaimVoteValue | null }[] = [];
         for (const target of selectTargets) {
-          const claim = input.claims.find((entry) => entry.index === target.claimIndex);
+          const claim = input.claims.find((entry) => entry.id === target.claimId);
           if (claim === undefined) continue;
           if (selectResult.state !== "ok") {
             selections.push({ claim, section: undefined, invalid: plainVote(selectResult.state === "not-run" ? "not-run" : "failed") });
@@ -895,24 +913,18 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
               },
               criteria: { ...SUPPORT_CHOICE_CRITERIA },
             };
-            sectionTargets.push({ questionId: name, claimIndex: entry.claim.index });
+            sectionTargets.push({ questionId: name, claimId: entry.claim.id });
           }
           const sectionRequest: JudgeRequest = { state: {}, questions: sectionQuestions };
-          const sectionResult = await callOnce(input, sectionRequest);
-          calls.push(
-            await makeCallRecord({
-              id: "S3:section",
-              form: "S3",
-              stage: 1,
-              operation: input.operation,
-              request: sectionRequest,
-              contextIds: sectionClaims.map((entry) => entry.claim.id),
-              response: sectionResult.response,
-              state: sectionResult.state,
-            }),
-          );
+          const sectionResult = await callAndRecord({
+            id: "S3:section",
+            form: "S3",
+            stage: 1,
+            request: sectionRequest,
+            contextIds: sectionClaims.map((entry) => entry.claim.id),
+          });
           for (const target of sectionTargets) {
-            const entry = sectionClaims.find((candidate) => candidate.claim.index === target.claimIndex);
+            const entry = sectionClaims.find((candidate) => candidate.claim.id === target.claimId);
             if (entry === undefined) continue;
             if (sectionResult.state !== "ok") {
               pushVote(entry.claim, "S3", plainVote(sectionResult.state === "not-run" ? "not-run" : "failed"));
@@ -922,8 +934,20 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
               answerOf(sectionResult.response, target.questionId),
               threshold,
               entry.section === undefined ? [] : [entry.section],
+              entry.claim.constraintIds,
             );
-            pushVote(entry.claim, "S3", combineS3Vote({ vote: "provides", evidenceId: entry.section ?? null, insideClaimConstraintIds: false }, sectionVote));
+            pushVote(
+              entry.claim,
+              "S3",
+              combineS3Vote(
+                {
+                  vote: "provides",
+                  evidenceId: entry.section ?? null,
+                  insideClaimConstraintIds: entry.section !== undefined && entry.claim.constraintIds.includes(entry.section),
+                },
+                sectionVote,
+              ),
+            );
           }
         }
         // 選択が無効・どれでもない・段 1 が未実行の申告の票
@@ -936,7 +960,7 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
             pushVote(entry.claim, "S3", plainVote("not-found"));
             continue;
           }
-          if (sectionClaims.some((candidate) => candidate.claim.index === entry.claim.index)) continue;
+          if (sectionClaims.some((candidate) => candidate.claim.id === entry.claim.id)) continue;
           pushVote(entry.claim, "S3", plainVote("not-run"));
         }
       }
@@ -947,39 +971,33 @@ export async function evaluateForms(input: EvaluateInput): Promise<EvaluateResul
   const s4Claims = input.claims.filter((claim) => applies("S4", claim));
   if (s4Claims.length > 0) {
     const questions: Record<string, JudgeChoiceQuestion> = {};
-    const targets: { readonly questionId: string; readonly claimIndex: number; readonly paragraph: number }[] = [];
+    const targets: { readonly questionId: string; readonly claimId: string; readonly paragraph: number }[] = [];
     for (const claim of s4Claims) {
       const paragraphs = sectionParagraphs(constraintExcerpt(input.documents, claim.constraintIds));
       const usable = paragraphs.length === 0 ? [constraintExcerpt(input.documents, claim.constraintIds)] : paragraphs;
       usable.forEach((paragraph, index) => {
         const name = `${S4_QUESTION_PREFIX}:${claim.id}:${index}`;
         questions[name] = s4Question(claim, paragraph);
-        targets.push({ questionId: name, claimIndex: claim.index, paragraph: index });
+        targets.push({ questionId: name, claimId: claim.id, paragraph: index });
       });
     }
     const request: JudgeRequest = { state: {}, questions };
-    const result = await callOnce(input, request);
-    calls.push(
-      await makeCallRecord({
-        id: "S4",
-        form: "S4",
-        stage: 0,
-        operation: input.operation,
-        request,
-        contextIds: s4Claims.map((claim) => claim.id),
-        response: result.response,
-        state: result.state,
-      }),
-    );
+    const result = await callAndRecord({
+      id: "S4",
+      form: "S4",
+      stage: 0,
+      request,
+      contextIds: s4Claims.map((claim) => claim.id),
+    });
     for (const claim of s4Claims) {
       if (result.state !== "ok") {
         pushVote(claim, "S4", plainVote(result.state === "not-run" ? "not-run" : "failed"));
         continue;
       }
       const paragraphVotes = targets
-        .filter((target) => target.claimIndex === claim.index)
+        .filter((target) => target.claimId === claim.id)
         .map((target) =>
-          s2VoteOfAnswer(answerOf(result.response, target.questionId), threshold, claim.constraintIds),
+          s2VoteOfAnswer(answerOf(result.response, target.questionId), threshold, claim.constraintIds, claim.constraintIds),
         );
       pushVote(claim, "S4", combineS4Votes(paragraphVotes));
     }

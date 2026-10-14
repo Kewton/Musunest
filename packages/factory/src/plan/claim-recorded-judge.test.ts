@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 import { JobBudget } from "../budget.js";
 import { createCallGate } from "../call.js";
-import { createBudgetedJudge } from "../judge-budget.js";
+import { JudgeCallLimitExceededError, createBudgetedJudge } from "../judge-budget.js";
 import type { Judge, JudgeAnswer, JudgeRequest } from "../judge.js";
 import { SAMPLE_DOCUMENTS } from "../stages/__tests__/prompt.js";
 import type { PlanSurface, PlanUnwritable } from "./surface.js";
@@ -161,6 +161,57 @@ describe("記録の口の呼び出しは、実 API の試行にも使用量に�
     expect(budget.spentUsd).toBe(spent);
     expect(budget.reservedUsd).toBe(reserved);
     expect(budgeted.attempts).toBe(attempts);
+  });
+});
+
+describe("停止・失敗も保存し、記録の口で再生する（Issue #459・F7）", () => {
+  it("門の停止を保存し、再生でも同じところで止まる", async () => {
+    const recorder = createJudgeRecorder();
+    const budget = new JobBudget(10);
+    const budgeted = createBudgetedJudge({
+      judge: answering(ANSWERS),
+      budget,
+      rates: { inputPerToken: 0.001, cachedInputPerToken: 0.0005, outputPerToken: 0.002 },
+      // 1 回だけ通し、2 回目（裏付け）の直前で上限に止める
+      gate: createCallGate({ now: () => 0, deadline: 1_000_000, limit: 1 }),
+    });
+    await expect(
+      runSurfaceCheck({
+        surface: SURFACE,
+        documents: SAMPLE_DOCUMENTS,
+        judge: recordJudge(budgeted, recorder),
+        threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
+        requirements: REQUIREMENTS,
+        docVersion: "v1",
+      }),
+    ).rejects.toBeInstanceOf(JudgeCallLimitExceededError);
+    // 停止も記録に残る
+    expect(recorder.entries.some((entry) => entry.kind === "stop")).toBe(true);
+
+    // 流し直し（再点検なし）でも、同じところで止まる
+    await expect(
+      runSurfaceCheck({
+        surface: SURFACE,
+        documents: SAMPLE_DOCUMENTS,
+        judge: createRecordedJudge(recorder.entries),
+        threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
+        requirements: REQUIREMENTS,
+        docVersion: "v1",
+      }),
+    ).rejects.toBeInstanceOf(JudgeCallLimitExceededError);
+  });
+
+  it("記録の欠落では止まる（握って unknown に化けさせない）", async () => {
+    await expect(
+      runSurfaceCheck({
+        surface: SURFACE,
+        documents: SAMPLE_DOCUMENTS,
+        judge: createRecordedJudge([]),
+        threshold: DEFAULT_PLAN_JUDGE_THRESHOLD,
+        requirements: REQUIREMENTS,
+        docVersion: "v1",
+      }),
+    ).rejects.toBeInstanceOf(RecordedJudgeMissError);
   });
 });
 

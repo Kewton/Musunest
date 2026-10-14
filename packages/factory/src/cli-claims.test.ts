@@ -13,6 +13,7 @@ import {
   JUDGE_CLAIMS_EXIT_STOPPED,
   JUDGE_CLAIMS_EXIT_USAGE,
   convertDiagnostic,
+  nodeJudgeClaimsDeps,
   parseClaimsSet,
   parseJudgeClaimsArguments,
   runJudgeClaims,
@@ -240,6 +241,80 @@ describe("文書のハッシュ不一致で呼ばずに止まる（Issue #459）
   });
 });
 
+describe("実入口には client と判定の生成関数がそろう（Issue #459・F2）", () => {
+  it("nodeJudgeClaimsDeps が、注入なしの既定の生成関数を組む", async () => {
+    const deps = await nodeJudgeClaimsDeps({
+      argv: ["node", "cli-claims.js"],
+      env: {},
+      stdout: { write: () => {} },
+      stderr: { write: () => {} },
+    });
+    expect(typeof deps.makeClient).toBe("function");
+    expect(typeof deps.makeJevJudge).toBe("function");
+    expect(typeof deps.makeLlmJudge).toBe("function");
+    expect(typeof deps.loadDocuments).toBe("function");
+    expect(typeof deps.readFile).toBe("function");
+    expect(typeof deps.writeFile).toBe("function");
+  });
+});
+
+// ── 別 run の同じ要件 ID（Issue #459・F5）────────────────────────────
+
+describe("別 run の同じ要件 ID でも、その申告自身の要件の文で再点検する（Issue #459・F5）", () => {
+  it("run A と run B がどちらも R-1 を持っても、それぞれ自分の文が使われる", async () => {
+    const text = JSON.stringify({
+      schema_version: CLAIMS_SET_SCHEMA,
+      doc_version: "v1",
+      doc_hash: DOC_HASH,
+      claims: [
+        { id: "a", run_id: "run-A", index: 0, requirement_id: "R-1", requirement_text: "A の要件の文", part: "a", reason: "r", constraint_ids: ["記録"], alternative: null },
+        { id: "b", run_id: "run-B", index: 0, requirement_id: "R-1", requirement_text: "B の要件の文", part: "b", reason: "r", constraint_ids: ["記録"], alternative: null },
+      ],
+    });
+    const harness = await run(BASE_ARGS, { files: { "claims.json": text } });
+    const requirements = harness.requests
+      .map((request) => {
+        const name = Object.keys(request.questions).find((key) => key.startsWith("plan-recheck-kind"));
+        const question = name === undefined ? undefined : request.questions[name];
+        const instructions = question?.instructions;
+        return typeof instructions === "object" ? (instructions as { requirement?: string }).requirement : undefined;
+      })
+      .filter((value): value is string => typeof value === "string");
+    expect(requirements).toContain("A の要件の文");
+    expect(requirements).toContain("B の要件の文");
+  });
+});
+
+// ── 基準の要約は元の申告 ID で結ぶ（Issue #459・F6）──────────────────
+
+describe("基準の要約は、配列の位置ではなく元の申告 ID で分類を結ぶ（Issue #459・F6）", () => {
+  it("with_recheck の要約が claim_id と分類の対応になる", async () => {
+    const harness = await run(BASE_ARGS);
+    const baselines = harness.output["baselines"] as {
+      readonly with_recheck: { readonly claims: readonly { readonly claim_id: string; readonly classification: string }[] };
+    };
+    const map = new Map(baselines.with_recheck.claims.map((entry) => [entry.claim_id, entry.classification]));
+    // 文脈不足の c2 は含めず、c1 だけを ID で結ぶ
+    expect([...map.keys()]).toEqual(["c1"]);
+    expect(map.get("c1")).toBe("unchecked");
+  });
+});
+
+// ── 基準の経路が門で止まっても比べられる（Issue #459・F7）──────────
+
+describe("基準の経路が門で止まっても、要約を残して比べられる（Issue #459・F7）", () => {
+  it("上限で止まっても、再点検あり／なしの要約がそろって一致する", async () => {
+    const harness = await run([...BASE_ARGS, "--max-calls", "1"]);
+    const baselines = harness.output["baselines"] as {
+      readonly with_recheck: { readonly claims: readonly unknown[] };
+      readonly without_recheck: { readonly claims: readonly unknown[] };
+    };
+    expect(baselines.with_recheck.claims.length).toBeGreaterThan(0);
+    expect(baselines.without_recheck.claims.length).toBeGreaterThan(0);
+    expect(baselines.without_recheck).toEqual(baselines.with_recheck);
+  });
+});
+
 // ── 文脈不足の層（Issue #459）───────────────────────────────────────
 
 describe("要件の文が無い申告は、文脈不足の層に数えられ、再点検の口に要求が送られない（Issue #459）", () => {
@@ -394,6 +469,44 @@ describe("使用量は原値のまま写る（Issue #459）", () => {
     expect(positiveCalls.filter((call) => call.input_tokens === 5).every((call) => call.usage_unmeasurable === false)).toBe(
       true,
     );
+  });
+});
+
+// ── 生の答えと実試行の内訳（Issue #459・F12）────────────────────────
+
+describe("生の答えと実試行の内訳が出力に残る（Issue #459・F12）", () => {
+  it("呼び出しの生の答え・基準の呼び出し・実試行の数が出力にある", async () => {
+    const harness = await run(BASE_ARGS);
+    const calls = harness.output["calls"] as readonly { readonly answers: unknown }[];
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((call) => typeof call.answers === "object" && call.answers !== null)).toBe(true);
+    const baseline = harness.output["baseline_calls"] as readonly { readonly answers: unknown; readonly role: string }[];
+    expect(baseline.length).toBeGreaterThan(0);
+    expect(baseline.some((entry) => entry.role === "primary")).toBe(true);
+    const cost = harness.output["cost"] as { readonly attempts: number };
+    expect(cost.attempts).toBeGreaterThan(0);
+  });
+});
+
+// ── 実施後の締切停止（Issue #459・F13）──────────────────────────────
+
+describe("実施後の締切停止は、未実施に数えない（Issue #459・F13）", () => {
+  it("判定を呼んだ後に締切を越えたら failed として実施数に数える", async () => {
+    let clock = 0;
+    const judge: Judge = {
+      async judge(request) {
+        // 形の呼び出し（claim-*）でだけ締切を越えさせる（基準の経路は通す）
+        if (Object.keys(request.questions).some((name) => name.startsWith("claim-"))) clock = 10_000;
+        const out: Record<string, JudgeAnswer> = {};
+        for (const name of Object.keys(request.questions)) out[name] = choice("vocabulary-hole");
+        return { answers: out, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+      },
+    };
+    const harness = await run([...BASE_ARGS, "--forms", "T1"], { now: () => clock, deadlineMs: 1000, judge });
+    const calls = harness.output["calls"] as readonly { readonly state: string }[];
+    // 呼んだ後の締切超過は failed（未実施にしない）
+    expect(calls.some((call) => call.state === "failed")).toBe(true);
+    expect(harness.output["executed"] as number).toBeGreaterThan(0);
   });
 });
 

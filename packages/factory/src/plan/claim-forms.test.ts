@@ -286,6 +286,76 @@ describe("全答えが票の値に写る（Issue #459）", () => {
   });
 });
 
+describe("反転は実際に送る要求へ掛かる（Issue #459・F3）", () => {
+  it("--reverse-options は、記録だけでなく送る要求の選択肢の順を逆にする", async () => {
+    const target = claim("U-1");
+    const answers = { "claim-t1:U-1": choice("vocabulary-hole", 0.9) };
+    const forward = evaluate("T1", [target], answers);
+    await forward.result;
+    const reverse = evaluate("T1", [target], answers, {
+      operation: { id: "reverse", reverse: true, repeat: 0 },
+    });
+    await reverse.result;
+    const criteriaOf = (request: JudgeRequest | undefined): readonly string[] => {
+      const question = request?.questions["claim-t1:U-1"];
+      return question?.kind === "choice" ? Object.keys(question.criteria) : [];
+    };
+    const forwardOrder = criteriaOf(forward.requests[0]);
+    const reverseOrder = criteriaOf(reverse.requests[0]);
+    expect(reverseOrder).toEqual([...forwardOrder].reverse());
+    expect(reverseOrder).not.toEqual(forwardOrder);
+  });
+});
+
+describe("票は申告の一意な ID で結ぶ（Issue #459・F4）", () => {
+  it("同じ局所添字（index）を持つ別の申告でも、票が混ざらない", async () => {
+    const first = claim("A", { index: 0, requirementId: "R-1", part: "A の部分" });
+    const second = claim("B", { index: 0, requirementId: "R-2", part: "B の部分" });
+    const { result } = evaluate("T2", [first, second], {
+      "claim-t2:A": choice("vocabulary_gap", 0.9),
+      "claim-t2:B": choice("not_an_issue", 0.9),
+    });
+    const byId = new Map((await result).votes.map((entry) => [entry.claimId, entry.vote.vote]));
+    expect(byId.get("A")).toBe("vocabulary-hole");
+    expect(byId.get("B")).toBe("not-a-problem");
+  });
+});
+
+describe("確率が返らない答えは probability-unknown（Issue #459・F10）", () => {
+  it("確信度が高くても、確率が無ければ有効票にしない", async () => {
+    const answer: JudgeAnswer = {
+      kind: "choice",
+      choice: "vocabulary-hole",
+      probabilities: undefined,
+      probability: undefined,
+      confidence: 0.99,
+    };
+    const { result } = evaluate("T1", [claim("U-1")], { "claim-t1:U-1": answer });
+    expect(voteOf(await result, "T1")).toBe("probability-unknown");
+  });
+});
+
+describe("S3 の根拠が申告の内側かの印（Issue #459・F11）", () => {
+  it("申告の外の節を選んだら inside は false、内側の節なら true", async () => {
+    const outside = claim("U-1", { constraintIds: ["記録"] });
+    const outsideRun = evaluate("S3", [outside], {
+      "claim-s3-select:U-1": choice("合計", 0.9),
+      "claim-s3-section:U-1": choice("restricts", 0.9),
+    });
+    const outsideVote = (await outsideRun.result).votes[0]?.vote;
+    expect(outsideVote?.evidenceId).toBe("合計");
+    expect(outsideVote?.insideClaimConstraintIds).toBe(false);
+
+    const insideRun = evaluate("S3", [outside], {
+      "claim-s3-select:U-1": choice("記録", 0.9),
+      "claim-s3-section:U-1": choice("restricts", 0.9),
+    });
+    const insideVote = (await insideRun.result).votes[0]?.vote;
+    expect(insideVote?.evidenceId).toBe("記録");
+    expect(insideVote?.insideClaimConstraintIds).toBe(true);
+  });
+});
+
 describe("閾値の表に無い組は送る前に止まる（Issue #459）", () => {
   it("登録の無いモデルでは投げる", () => {
     expect(() => requireClaimFormThreshold(CLAIM_FORMS_VERSION, "no-such-model")).toThrow(
