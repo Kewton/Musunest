@@ -7,9 +7,12 @@
 // 決めごと（§1・§4）：
 //   * モデルは既定で **`jev-1.13.0` に固定**する（`jev-latest` は既定にしない）。
 //   * 429・529 は指数の待ちで再試行する（回数の上限あり）。**401・422 は再試行しない**失敗の種類にする。
+//   * 呼び出しごとの合図（`JudgeRequest.signal`）は、**実通信と再送の待機の両方**へ渡す。再送は、共有の
+//     門（`CallGate`）が渡されればその締切・総呼び出し数にも従う（Issue #455）。
 //   * 応答の `model`（答えた版の ID）を結果に残す（§8 U-J3）。
 //   * 使った入力のトークン数を結果に残す（出力は無料。§5）。費用は呼ぶ側が budget.ts の Jev の単価で
 //     予約・精算する（「判定の adapter は費用を数えない」——OpenAI の adapter と同じ。§1.5）。
+import type { CallGate } from "./call.js";
 import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest, JudgeResponse } from "./judge.js";
 
 /** System One の入口（1 か所に固定する。環境変数からは読まない。§1） */
@@ -84,8 +87,15 @@ export interface JevJudgeOptions {
   readonly retryBaseMs?: number;
   /** 待つ処理（試験では待たずに済むよう差し替える。既定は `setTimeout`） */
   readonly sleep?: (ms: number) => Promise<void>;
-  /** 打ち切りの合図（任意） */
+  /** 打ち切りの合図（任意。呼び出しごとの合図は `JudgeRequest.signal` を優先する。Issue #455） */
   readonly signal?: AbortSignal;
+  /**
+   * 生成と判定で共有する**実試行の門**（Issue #455）。渡すと、内部の再送の**各回**を、この門の締切と
+   * 総呼び出し数に照らす——再送の直前に門を掛け、門が止めれば再送しない。**渡さなければ今までどおり**
+   * `maxAttempts` の上限まで再送する。最初の 1 回は呼ぶ側（包み。`createBudgetedJudge`）が門を掛けるので、
+   * ここでは**再送の各回だけ**を数える。
+   */
+  readonly gate?: CallGate;
 }
 
 /**
@@ -104,17 +114,34 @@ export function createJevJudge(options: JevJudgeOptions): Judge {
   }
   const retryBaseMs = options.retryBaseMs ?? DEFAULT_JEV_RETRY_BASE_MS;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const gate = options.gate;
   return {
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
       const body = buildBody(request, model);
+      // 呼び出しごとの中断の合図は、包みが**要求**に載せる（Issue #455）。実通信（fetch）と、再送の待機の
+      // 両方へ渡す——締切で包みが合図を出したら、応答が返らなくても待ち続けない。要求に無ければ、
+      // 作るときに渡された合図を使う（後方のため）。
+      const signal = request.signal ?? options.signal;
       let lastStatus: number | undefined;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-        const response = await send(fetchImpl, body, options.apiKey, options.signal);
+        const response = await send(fetchImpl, body, options.apiKey, signal);
         if (RETRYABLE_STATUSES.includes(response.status)) {
           lastStatus = response.status;
           // 上限まで来たら再試行せず、失敗の種類（unavailable）にして呼ぶ側（落とす組み合わせ）へ渡す
           if (attempt < maxAttempts) {
-            await sleep(retryBaseMs * 2 ** (attempt - 1));
+            await waitBeforeRetry(sleep, retryBaseMs * 2 ** (attempt - 1), signal);
+            // 共有の門（Issue #455）：再送の**直前**に、締切と総呼び出し数を照らす。門が止めれば再送しない
+            // ——上限なら `unavailable`、締切なら `timeout` にする。最初の 1 回は呼ぶ側（包み）が数えるので、
+            // ここでは**再送の各回だけ**を数える（数え過ぎない）。
+            if (gate !== undefined) {
+              const begun = gate.begin();
+              if (begun === "deadline") {
+                throw new JevAdapterError("timeout", "呼び出しが締切で打ち切られました");
+              }
+              if (begun === "limit") {
+                throw new JevAdapterError("unavailable", "再送の呼び出しの上限に達しました", lastStatus);
+              }
+            }
             continue;
           }
           throw new JevAdapterError(
@@ -131,6 +158,47 @@ export function createJevJudge(options: JevJudgeOptions): Judge {
       throw new JevAdapterError("unavailable", "再試行の上限に達しました", lastStatus);
     },
   };
+}
+
+/**
+ * 再送までの待機（Issue #455）。**呼び出しごとの中断の合図**に従う——待っている途中で合図が中断したら、
+ * 待ちを止めて `timeout` にする（締切で包みが合図を出したら、遅い再送の待機を成功にしない）。
+ */
+async function waitBeforeRetry(
+  sleep: (ms: number) => Promise<void>,
+  ms: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (signal === undefined) {
+    await sleep(ms);
+    return;
+  }
+  if (signal.aborted) {
+    throw new JevAdapterError("timeout", "呼び出しが打ち切られました");
+  }
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      reject(new JevAdapterError("timeout", "再送の待機が打ち切られました"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    sleep(ms).then(
+      () => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 // ── 呼び出し（§4）─────────────────────────────────────────────────────

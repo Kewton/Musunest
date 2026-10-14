@@ -924,6 +924,35 @@ describe("誤りの分類（02 §2.2）", () => {
     expect(error.kind).toBe("timeout");
   });
 
+  it("ヘッダーの後に本文が止まっても、中断の合図で待機が終わる（Issue #455）", async () => {
+    // 応答のヘッダーは返すが、本文は止まったままになる fetch（合図の中断で本文を誤らせる）
+    let headersReturned: () => void = () => {};
+    const returned = new Promise<void>((resolve) => {
+      headersReturned = resolve;
+    });
+    const stallingBodyFetch: FetchLike = (_url, init) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init.signal?.addEventListener("abort", () => controller.error(new Error("aborted")));
+        },
+      });
+      headersReturned();
+      return Promise.resolve(
+        new Response(stream, { status: 200, headers: { "content-type": "application/json" } }),
+      );
+    };
+    const client = clientWith(stallingBodyFetch, 5);
+    const controller = new AbortController();
+
+    const pending = client.callStructured({ ...STRUCTURED_REQUEST, signal: controller.signal });
+    // ヘッダーが返ってから合図を出す——ここで合図を外していると、本文の待機が終わらない
+    await returned;
+    controller.abort();
+
+    const error = await captureError(() => pending);
+    expect(error.kind).toBe("timeout");
+  });
+
   it("道具の呼び出しを返す応答は toolCalls にする", async () => {
     const { fetch } = recordingFetch(() =>
       jsonResponse(

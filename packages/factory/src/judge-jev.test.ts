@@ -11,6 +11,7 @@
 //   7. 窓口が記録した本物の応答を読み、送る本文が記録した要求と一致する（#349）
 //   8. score の `criteria` は順序のある配列で送り、2〜10 個の外は送る前に断る。`instructions` は object も許す（#349）
 import { describe, expect, it } from "vitest";
+import { createCallGate } from "./call.js";
 import type { JudgeRequest } from "./judge.js";
 import {
   DEFAULT_JEV_MODEL,
@@ -379,6 +380,104 @@ describe("score の criteria と instructions の object（05 §1・Issue #349�
 function errorFetch(status: number): JevFetch {
   return async () => jsonResponse({ error: "x" }, status);
 }
+
+// ── 中断の合図と、共有の門（05 §1・§4・Issue #455）──────────────────────
+
+/** 応答を返さない fetch（中断の試験用）。打ち切りの合図で拒否する */
+const hangingJevFetch: JevFetch = (_url, init) =>
+  new Promise((_resolve, reject) => {
+    if (init.signal?.aborted === true) {
+      reject(new Error("aborted"));
+      return;
+    }
+    init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+  });
+
+describe("呼び出しごとの中断の合図（05 §1・§4・Issue #455）", () => {
+  it("要求の合図で、実通信を打ち切る（作るときに合図を渡さなくても）", async () => {
+    const controller = new AbortController();
+    const judge = createJevJudge({ apiKey: "k", fetch: hangingJevFetch });
+
+    const pending = judge.judge({ ...REQUEST, signal: controller.signal });
+    controller.abort();
+
+    const error = await captureError(() => pending);
+    expect(error.kind).toBe("timeout");
+  });
+
+  it("要求の合図で、再送の待機も止める（再送しない）", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse({ error: "busy" }, 429));
+    const controller = new AbortController();
+    // 待機に入ったことを知らせたうえで、そのまま待ち続ける sleep
+    let enteredWait: () => void = () => {};
+    const waiting = new Promise<void>((resolve) => {
+      enteredWait = resolve;
+    });
+    const sleep = (): Promise<void> => {
+      enteredWait();
+      return new Promise<void>(() => {});
+    };
+    const judge = createJevJudge({ apiKey: "k", fetch, sleep, maxAttempts: 3, retryBaseMs: 1 });
+
+    const pending = judge.judge({ ...REQUEST, signal: controller.signal });
+    await waiting;
+    controller.abort();
+
+    const error = await captureError(() => pending);
+    expect(error.kind).toBe("timeout");
+    expect(captured).toHaveLength(1);
+  });
+});
+
+describe("内部の再送を共有の門に通す（05 §1・Issue #455）", () => {
+  it("共有の門を渡すと、内部の再送も各回で数えられ、上限で再送しない", async () => {
+    const { fetch, captured } = recordingFetch((call) => jsonResponse({ error: `busy ${call}` }, 429));
+    const { sleep } = recordingSleep();
+    // 呼ぶ側（包み）が最初の 1 回を数えた、という前提（同じ門を共有する）
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 2 });
+    gate.begin();
+
+    const error = await captureError(() =>
+      createJevJudge({ apiKey: "k", fetch, sleep, gate, maxAttempts: 10, retryBaseMs: 100 }).judge(REQUEST),
+    );
+
+    expect(error.kind).toBe("unavailable");
+    // 最初の 1 回（呼ぶ側が数える）＋ 再送 1 回（門が各回で数える）＝ 2 回で、上限に達して再送しない
+    expect(captured).toHaveLength(2);
+    expect(gate.attempts()).toBe(2);
+  });
+
+  it("共有の門を渡すと、締切を過ぎた再送はしない", async () => {
+    let clock = 0;
+    const gate = createCallGate({ now: () => clock, deadline: 5, limit: 10 });
+    gate.begin();
+    const { fetch, captured } = recordingFetch(() => jsonResponse({ error: "busy" }, 429));
+    // 再送の待機で、締切（5ms）を過ぎる
+    const sleep = async (ms: number): Promise<void> => {
+      clock += ms;
+    };
+
+    const error = await captureError(() =>
+      createJevJudge({ apiKey: "k", fetch, sleep, gate, retryBaseMs: 100 }).judge(REQUEST),
+    );
+
+    expect(error.kind).toBe("timeout");
+    expect(captured).toHaveLength(1);
+  });
+
+  it("門を渡さないときは、今までどおり上限まで再送する", async () => {
+    const { fetch, captured } = recordingFetch((call) => jsonResponse({ error: `busy ${call}` }, 429));
+    const { sleep, delays } = recordingSleep();
+
+    const error = await captureError(() =>
+      createJevJudge({ apiKey: "k", fetch, sleep, maxAttempts: 3, retryBaseMs: 100 }).judge(REQUEST),
+    );
+
+    expect(error.kind).toBe("unavailable");
+    expect(captured).toHaveLength(3);
+    expect(delays).toEqual([100, 200]);
+  });
+});
 
 // ── 6. 環境変数を読まない（§4・R-15）────────────────────────────────────
 
