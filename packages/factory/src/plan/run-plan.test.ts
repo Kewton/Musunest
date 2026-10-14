@@ -3863,6 +3863,8 @@ describe("差分点検：応答が指す要件 ID を、この往復の差分の
       structured(REVERSE_CHECK_OUTPUT),
       structured(SURFACE_OUTPUT),
       structured(QUESTIONS_OUTPUT),
+      // 1 試行目が対象の照合で落ち、2 試行目（やり直し）も同じ誤りを返す（Issue #484）
+      structured(badDiff),
       structured(badDiff),
     ]);
     const judge = createFakeJudge({
@@ -3896,6 +3898,8 @@ describe("差分点検：応答が指す要件 ID を、この往復の差分の
       structured(ROUND_1_QUESTION),
       structured(SURFACE_OUTPUT_CLEAR),
       structured(ROUND_2_QUESTION),
+      // 2 往復目の差分の洗い出し：1 試行目と 2 試行目（やり直し）の両方が対象外を指す（Issue #484）
+      structured(badDiff),
       structured(badDiff),
     ]);
     let round = 0;
@@ -4324,6 +4328,9 @@ describe("差分点検・§3：受理済み申告の正確な再申告だけを�
       structured(REVERSE_CHECK_OUTPUT),
       structured(BASE_SURFACE),
       structured(questionsFor("OI-1")),
+      // 差分の洗い出し：1 試行目と、対象の照合で落ちたときのやり直し（2 試行目）の両方に同じ応答を返す
+      // （Issue #484。受理される応答では 2 つ目は使われない）
+      structured(diffOutput),
       structured(diffOutput),
     ]);
     const judge = createFakeJudge({
@@ -4549,6 +4556,8 @@ describe("差分点検・§3：受理済み申告の正確な再申告だけを�
       structured({ ambiguities: [{ id: "OI-1", requirementId: "R-1", text: "曖昧", critical: true }], unwritable: [accepted] }),
       structured(questionsFor("OI-1")),
       // 1 回の正規化で `### action` になる（元の集合 `action` とは別の、実在する集合）
+      // 1 試行目が対象の照合で落ち、2 試行目（やり直し）にも同じ応答を返す（Issue #484）
+      structured({ ambiguities: [], unwritable: [{ ...accepted, id: "U-dup", constraintIds: ["### ### action"] }] }),
       structured({ ambiguities: [], unwritable: [{ ...accepted, id: "U-dup", constraintIds: ["### ### action"] }] }),
     ]);
     const judge = createFakeJudge({
@@ -4564,6 +4573,9 @@ describe("差分点検・§3：受理済み申告の正確な再申告だけを�
     expect(result.kind).toBe("stopped");
     if (result.kind !== "stopped") return;
     expect(result.failure?.stage).toBe("surface");
+    // 2 試行目まで参照のやり直しへ回り、対象外の停止（unmet・requirement-id-unknown）で止まる（Issue #484）
+    expect(result.failure?.kind).toBe("unmet");
+    expect(result.failure?.problems?.some((problem) => problem.code === "requirement-id-unknown")).toBe(true);
     // 二重に正規化しないので、`### action` と `action` を同一視せず、重複ではなく却下になる
     expect(result.diffReviews[0]?.outOfScope.deduped).toBe(0);
     expect(result.diffReviews[0]?.outOfScope.rejectedClaims).toBe(1);
@@ -5917,6 +5929,149 @@ describe("台本の答える役（04 §9・Issue #444）", () => {
 
     // 推奨で埋めていれば OI-extra が閉じて確定するはずである。確定しないことが all-recommended を返さない証拠
     expect(result.kind).toBe("cannot-confirm");
+  });
+});
+
+// ── Issue #484：差分の洗い出しの対象外の参照を、形のやり直し（最大 2 試行）へ返す ──────────
+
+describe("差分点検：対象外の参照を形のやり直しへ返し、試行ごとの結果を残す（04 §3 P3・Issue #484）", () => {
+  /** 分類別の件数の並び（断った参照だけ。既定はすべて 0） */
+  const KIND_ORDER = ["source", "previous-answer", "alternative", "unknown", "unclassified"] as const;
+  function targetKinds(
+    overrides: Partial<Record<(typeof KIND_ORDER)[number], { claims?: number; ambiguities?: number }>> = {},
+  ) {
+    return KIND_ORDER.map((kind) => ({
+      kind,
+      claims: overrides[kind]?.claims ?? 0,
+      ambiguities: overrides[kind]?.ambiguities ?? 0,
+    }));
+  }
+  /** 原文の要件を指す未解決の事項 1 件（対象外） */
+  const badDiff = {
+    ambiguities: [{ id: "OI-bad", requirementId: "R-1", text: "原文を指す", critical: true }],
+    unwritable: [],
+  };
+  /** 点検の対象の内側だけで作った応答（対象の照合を通る） */
+  const goodDiff = { ambiguities: [], unwritable: [] };
+  /** 形で落ちる応答（代わりの案が無い） */
+  const badShape = {
+    ambiguities: [],
+    unwritable: [{ id: "U-1", requirementId: "R:A:Q1-1", part: "部分", constraintIds: ["記録"], reason: "理由" }],
+  };
+
+  /** 初回に OI-extra を開き、全部推奨で R:A:Q1-1 を増やしたあとの差分の洗い出しに、与えた応答を返す */
+  async function runDiffScenario(
+    diffOutputs: readonly unknown[],
+    overrides: Partial<PlanRunInput> = {},
+  ): Promise<PlanResult> {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      ...diffOutputs.map((output) => structured(output)),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+    return runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED, overrides));
+  }
+
+  it("(h) 1 試行目が原文の要件を指し、2 試行目が対象内なら、止まらずに進み、記録は 2 試行目だけで数える", async () => {
+    const result = await runDiffScenario([badDiff, goodDiff]);
+
+    expect(result.kind).toBe("confirmed");
+    // 差分点検の記録の outOfScope は、2 試行目の照合だけで数える（断った数 0）
+    expect(result.diffReviews[0]?.outOfScope).toEqual(NO_OUT_OF_SCOPE);
+    // 新しい欄：試行 1（対象の照合で不成立・分類 source の件数 1）と試行 2（受理）
+    expect(result.surfaceTargetAttempts).toEqual([
+      {
+        check: 2,
+        attempt: 1,
+        result: "target",
+        rejectedClaims: 0,
+        rejectedAmbiguities: 1,
+        kinds: targetKinds({ source: { ambiguities: 1 } }),
+      },
+      { check: 2, attempt: 2, result: "accepted", rejectedClaims: 0, rejectedAmbiguities: 0, kinds: targetKinds() },
+    ]);
+    // 行に値（要件 ID・事項 ID・文）が出ない
+    const text = JSON.stringify(result.surfaceTargetAttempts);
+    expect(text).not.toContain("R-1");
+    expect(text).not.toContain("OI-");
+    expect(text).not.toContain("原文を指す");
+  });
+
+  it("(i) 2 試行とも対象外を指すと、今の負例と同じ止まり方で、新しい欄に 2 行が分かれて残る", async () => {
+    const result = await runDiffScenario([badDiff, badDiff]);
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("surface");
+    expect(result.failure?.kind).toBe("unmet");
+    expect(result.failure?.problems).toEqual([
+      { field: "ambiguities[0].requirementId", code: "requirement-id-unknown" },
+    ]);
+    // 差分点検の記録も、2 試行目の照合だけで数える（原文の曖昧さ 1）
+    expect(result.diffReviews[0]?.outOfScope).toEqual(
+      diffOutOfScope({ ambiguities: 1, rejectedAmbiguities: 1, kinds: { source: { ambiguities: 1 } } }),
+    );
+    expect(result.surfaceTargetAttempts).toEqual([
+      {
+        check: 2,
+        attempt: 1,
+        result: "target",
+        rejectedClaims: 0,
+        rejectedAmbiguities: 1,
+        kinds: targetKinds({ source: { ambiguities: 1 } }),
+      },
+      {
+        check: 2,
+        attempt: 2,
+        result: "target",
+        rejectedClaims: 0,
+        rejectedAmbiguities: 1,
+        kinds: targetKinds({ source: { ambiguities: 1 } }),
+      },
+    ]);
+  });
+
+  it("(j) 呼び出しの上限が 1 試行目までで尽きると、2 試行目を始めず、上限の種類で止まる。新しい欄は 1 行だけ", async () => {
+    // 対照：上限を十分に取って最後まで回し、実際の呼び出しの総数を測る。最後の呼び出しが 2 試行目である
+    // ——共通の門は、生成の呼び出しと判定の呼び出しを**同じ 1 つの数**で数える（Issue #432）
+    const control = await runDiffScenario([badDiff, badDiff]);
+    const judgeCalls = Object.values(control.judge.calls_by_adapter).reduce((sum, calls) => sum + calls, 0);
+    const total = control.stages.reduce((sum, stage) => sum + stage.calls, 0) + judgeCalls;
+    expect(total).toBeGreaterThan(1);
+
+    // 拒否→成功：新しい欄は [対象で不成立, 受理]
+    const ok = await runDiffScenario([badDiff, goodDiff]);
+    expect(ok.kind).toBe("confirmed");
+    expect(ok.surfaceTargetAttempts.map((attempt) => attempt.result)).toEqual(["target", "accepted"]);
+
+    // 拒否→形で不成立：新しい欄は [対象で不成立, 形で不成立]、段の失敗は malformed
+    const shaped = await runDiffScenario([badDiff, badShape]);
+    expect(shaped.kind).toBe("stopped");
+    if (shaped.kind === "stopped") expect(shaped.failure?.kind).toBe("malformed");
+    expect(shaped.surfaceTargetAttempts.map((attempt) => attempt.result)).toEqual(["target", "shape"]);
+
+    // 拒否→未着手：上限を 1 試行目までで尽きるようにして、2 試行目を始めない
+    const limited = await runDiffScenario([badDiff, badDiff], {
+      limits: { ...AGENT_LIMITS, callCount: total - 1 },
+    });
+    expect(limited.kind).toBe("stopped");
+    if (limited.kind !== "stopped") return;
+    expect(limited.failure?.stage).toBe("surface");
+    expect(limited.failure?.kind).toBe("call-limit");
+    // 新しい欄は試行 1 の 1 行だけ（拒否→未着手）
+    expect(limited.surfaceTargetAttempts.map((attempt) => attempt.attempt)).toEqual([1]);
+    expect(limited.surfaceTargetAttempts[0]?.result).toBe("target");
+    // 2 試行目は始めていない（追加の開始 0）
+    const lastSurface = [...limited.stages].reverse().find((stage) => stage.stage === "surface");
+    expect(lastSurface?.attempts.started).toBe(1);
+    expect(lastSurface?.attempts.not_started.limit).toBe(1);
   });
 });
 

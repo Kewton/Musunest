@@ -86,7 +86,7 @@ import {
   type PlanRemaining,
   type PlanTurn,
 } from "./session.js";
-import { checkSurfaceTargets, runSurface, type PlanSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceIdReuseRejection, type SurfaceOutOfScopeRef, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetResult } from "./surface.js";
+import { runSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceIdReuseRejection, type SurfaceOutOfScopeRef, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt, type SurfaceTargetAttemptResult } from "./surface.js";
 import {
   PLAN_OPEN_ISSUE_SOURCES,
   classifyOpenIssueConflict,
@@ -629,6 +629,28 @@ export interface PlanSurfaceIdReuseEntry {
   readonly bySource: readonly PlanSurfaceIdReuseSourceCount[];
 }
 
+/**
+ * 照合まで届いた試行 1 つぶんの記録（**値（要件 ID・事項 ID・文）は入れない**。Issue #484）。点検の
+ * **版**（初回 1、差分で増える）と**試行**（1・2）ごとに、試行の結果（形で不成立／対象の照合で不成立／
+ * 受理）と、断った申告の数・事項の数・分類別の件数を持つ。**形の不成立も記録する**——件数 0 の行は、
+ * 照合に届かなかったこと（未照合）を表す。共通の口の `check` が実行された試行ごとに 1 行で、`check` に
+ * 届かなかった試行と未着手の試行には行を作らない（既存の段の失敗と実試行の記録で区別する）。
+ */
+export interface PlanSurfaceTargetAttempt {
+  /** 点検の版（初回 1、差分で増える） */
+  readonly check: number;
+  /** この点検での試行（1 始まり。2 回まで） */
+  readonly attempt: number;
+  /** 試行の結果（形で不成立／対象の照合で不成立／受理） */
+  readonly result: SurfaceTargetAttemptResult;
+  /** 断った「書けない」の申告の件数 */
+  readonly rejectedClaims: number;
+  /** 断った未解決の事項の件数 */
+  readonly rejectedAmbiguities: number;
+  /** 断った参照の分類別の件数（`DIFF_OUT_OF_SCOPE_KINDS`。存在しない ID の `unknown` と実在の分類を分ける） */
+  readonly kinds: readonly PlanDiffOutOfScopeKindCount[];
+}
+
 /** 3 つの結果に共通する記録（使った額・残りの額・段ごとの記録・判定の呼び出し） */
 export interface PlanResultBase {
   /** 段ごとの記録（生成の段の記録と同じ形） */
@@ -677,6 +699,12 @@ export interface PlanResultBase {
    * あとに確定・停止したときも、**最終の失敗の欄（`failure`）とは別**に、ここへ残す。
    */
   readonly surfaceIdReuse: readonly PlanSurfaceIdReuseEntry[];
+  /**
+   * 照合まで届いた試行 1 つずつの記録（版・試行・結果・断った申告の数・事項の数・分類別の件数。**値は
+   * 入れない**。Issue #484）。照合を渡した点検（差分の洗い出し）の、共通の口の `check` が実行された
+   * 試行ごとに 1 行を残す。照合を渡した点検が無ければ空である。
+   */
+  readonly surfaceTargetAttempts: readonly PlanSurfaceTargetAttempt[];
 }
 
 /** 依頼文で閉じた事項から作る `decisions` の ID の頭（確認の画面が「依頼文で決めたこと」を見分ける） */
@@ -1391,6 +1419,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   let conflictRound: number | null = null;
   /** 使い回しで断った応答の記録（値は入れない。Issue #464） */
   const surfaceIdReuse: PlanSurfaceIdReuseEntry[] = [];
+  /** 照合まで届いた試行 1 つずつの記録（値は入れない。Issue #484） */
+  const surfaceTargetAttempts: PlanSurfaceTargetAttempt[] = [];
   /** 帰属の組を、足した順によらない数え上げの鍵にする（Issue #464） */
   const attributionKeyOf = (group: { first: PlanOpenIssueRowAttribution; second: PlanOpenIssueRowAttribution }): string =>
     `${group.first.origin}\u0000${group.first.status}\u0000${group.first.current ? 1 : 0}\u0000${group.second.origin}\u0000${group.second.status}\u0000${group.second.current ? 1 : 0}`;
@@ -1674,6 +1704,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     diffReviews: diffReviews.map(finalizeDiffReview),
     openIssueConflicts: buildOpenIssueConflicts(),
     surfaceIdReuse: surfaceIdReuse.slice(),
+    surfaceTargetAttempts: surfaceTargetAttempts.slice(),
   });
 
   /**
@@ -2165,15 +2196,13 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         const key = diffChangeKey(requirement);
         if (key !== undefined) reviewedDiffKeys.add(key);
       }
-      // この往復の差分の要件 ID（**最初の出現の順・重複なし**。Issue #483）。**持ち主はこの 1 つの並び**
-      // である——照合の集合（`targetRequirementIds`）・データの塊・差分の洗い出しの schema の `enum` の
-      // すべてを、ここから組む（別の箇所で組み直さない。`enum` に重複を残さない）。**行（`diff`）は畳まない**
-      // ——一意にするのは ID の値だけである。対象が 0 件ならこの経路へ来ないので、空でない並びになる。
+      // この往復の差分の要件 ID（**最初の出現の順・重複なし**。Issue #483・#484）。**持ち主はこの 1 つの
+      // 並び**である——照合の集合・データの塊・差分の洗い出しの schema の `enum` のすべてを、ここから
+      // 組む（別の箇所で組み直さない。`enum` に重複を残さない）。**行（`diff`）は畳まない**——一意に
+      // するのは ID の値だけである。対象が 0 件ならこの経路へ来ないので、空でない並びになる。
       const [firstDiffId, ...restDiffIds] = [...new Set(diff.map((requirement) => requirement.id))];
       if (firstDiffId === undefined) return undefined;
       const diffRequirementIds: readonly [string, ...string[]] = [firstDiffId, ...restDiffIds];
-      // この往復の差分の要件 ID の集合（応答が指す要件 ID を照合する。Issue #434）
-      const targetRequirementIds = new Set(diffRequirementIds);
 
       /** 対象外の参照を、内部の対応で有限の分類に写す（Issue #434。モデルに選ばせない） */
       const classifyOutOfScope = (requirementId: string): DiffOutOfScopeKind => {
@@ -2190,12 +2219,16 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         if (answerInputs.some((answer) => answer.id === inputId)) return "previous-answer";
         return "unclassified";
       };
-      /** 対象外の参照 1 つを、分類別の件数に数える */
-      const bumpKind = (kind: DiffOutOfScopeKind, ref: SurfaceOutOfScopeRef, count: number): void => {
-        const current = reviewRecord.kinds.get(kind) ?? { claims: 0, ambiguities: 0 };
-        if (ref.kind === "claim") current.claims += count;
-        else current.ambiguities += count;
-        reviewRecord.kinds.set(kind, current);
+      /** 対象外の参照 1 つを、分類別の件数（写し）に数える（Issue #434・#484） */
+      const countKind = (
+        kinds: Map<DiffOutOfScopeKind, { claims: number; ambiguities: number }>,
+        kind: DiffOutOfScopeKind,
+        ref: SurfaceOutOfScopeRef,
+      ): void => {
+        const current = kinds.get(kind) ?? { claims: 0, ambiguities: 0 };
+        if (ref.kind === "claim") current.claims += 1;
+        else current.ambiguities += 1;
+        kinds.set(kind, current);
       };
       /**
        * 対象外の「書けない」の申告が、**受理済みの申告の正確な再申告**か（§3 の 2・3。Issue #434）。
@@ -2364,62 +2397,78 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       // この往復の点検の版（初回 1 に続く番号。`surfaceChecks` は初回の分だけ積んである）
       const diffCheckNumber = surfaceChecks.length + 1;
       // 対象外の照合と記録は、**形が正しい応答**について、制約 ID の裏付けの検査より前に済ませる
-      // ——制約検査で失敗を返すときも、対象外の集合・分類・識別済みの件数を記録に残す（D1）。
-      // 対象外の「書けない」の申告は、**受理済みの申告の正確な再申告だけ**を重複として除く
-      // （曖昧さは除かない。§3 の 5）
-      let targetCheck: SurfaceTargetResult | undefined;
-      const evaluateTargets = (surface: PlanSurface): void => {
-        const target = checkSurfaceTargets(surface, targetRequirementIds, (claim) =>
-          isAcceptedDuplicateClaim(claim),
-        );
-        targetCheck = target;
-        for (const ref of target.rejected) {
-          const requirementId = ref.kind === "claim" ? ref.claim.requirementId : ref.ambiguity.requirementId;
-          bumpKind(classifyOutOfScope(requirementId), ref, 1);
-          if (ref.kind === "claim") reviewRecord.rejectedClaims += 1;
-          else reviewRecord.rejectedAmbiguities += 1;
+      // ——制約検査で失敗を返すときも、対象外の集合・分類・識別済みの件数を記録に残す（D1）。対象外の
+      // 「書けない」の申告は、**受理済みの申告の正確な再申告だけ**を重複として除く（曖昧さは除かない。
+      // §3 の 5）。**照合は `runSurface` の `check` の中で掛かる**（Issue #484）——試行ごとの結果を
+      // `onTargetAttempt` で受け、対象外の集合・分類は**最後に照合まで届いた試行**の写しで数える。
+      const recordTargetAttempt = (attempt: SurfaceTargetAttempt): void => {
+        const target = attempt.target;
+        if (target !== undefined) {
+          // 対象外の集合・分類・重複の原添字を、**この試行の写しで置き換える**（試行をまたいで足さない）
+          reviewRecord.kinds = new Map();
+          reviewRecord.rejectedClaims = 0;
+          reviewRecord.rejectedAmbiguities = 0;
+          reviewRecord.deduped = 0;
+          reviewRecord.dedupedIndexes = [];
+          for (const ref of target.rejected) {
+            const requirementId = ref.kind === "claim" ? ref.claim.requirementId : ref.ambiguity.requirementId;
+            countKind(reviewRecord.kinds, classifyOutOfScope(requirementId), ref);
+            if (ref.kind === "claim") reviewRecord.rejectedClaims += 1;
+            else reviewRecord.rejectedAmbiguities += 1;
+          }
+          for (const item of target.dropped) {
+            countKind(
+              reviewRecord.kinds,
+              classifyOutOfScope(item.claim.requirementId),
+              { kind: "claim", index: item.index, claim: item.claim },
+            );
+            reviewRecord.deduped += 1;
+            reviewRecord.dedupedIndexes.push(item.index);
+          }
+          reviewRecord.claims = target.dropped.length + reviewRecord.rejectedClaims;
+          reviewRecord.ambiguities = reviewRecord.rejectedAmbiguities;
+          reviewRecord.scanned = true;
         }
-        for (const item of target.dropped) {
-          bumpKind(
-            classifyOutOfScope(item.claim.requirementId),
-            { kind: "claim", index: item.index, claim: item.claim },
-            1,
-          );
-          reviewRecord.deduped += 1;
-          reviewRecord.dedupedIndexes.push(item.index);
+        // 結果の新しい欄に 1 行を残す（形の不成立も記録する。**値は入れない**。Issue #484）。分類別の
+        // 件数は、**断った参照**だけを数える（存在しない ID の `unknown` と実在の分類を分けたまま）。
+        const rowKinds = new Map<DiffOutOfScopeKind, { claims: number; ambiguities: number }>();
+        if (target !== undefined) {
+          for (const ref of target.rejected) {
+            const requirementId = ref.kind === "claim" ? ref.claim.requirementId : ref.ambiguity.requirementId;
+            countKind(rowKinds, classifyOutOfScope(requirementId), ref);
+          }
         }
-        reviewRecord.claims = target.dropped.length + target.rejected.filter((ref) => ref.kind === "claim").length;
-        reviewRecord.ambiguities = target.rejected.filter((ref) => ref.kind === "ambiguity").length;
-        reviewRecord.scanned = true;
+        surfaceTargetAttempts.push({
+          check: diffCheckNumber,
+          attempt: attempt.attempt,
+          result: attempt.result,
+          rejectedClaims: target === undefined ? 0 : target.rejected.filter((ref) => ref.kind === "claim").length,
+          rejectedAmbiguities: target === undefined ? 0 : target.rejected.filter((ref) => ref.kind === "ambiguity").length,
+          kinds: DIFF_OUT_OF_SCOPE_KINDS.map((kind) => ({
+            kind,
+            claims: rowKinds.get(kind)?.claims ?? 0,
+            ambiguities: rowKinds.get(kind)?.ambiguities ?? 0,
+          })),
+        });
       };
-      const diffSurface = await runStageOutcome("surface", async () => {
-        const outcome = await runSurface({
+      // 差分の洗い出しは、照合（対象の集合）と、正確な再申告を見分ける関数を**渡す**（Issue #484）。
+      // 形の検査の `check` の中で照合が掛かり、対象の照合だけで落ちた試行は既存の形のやり直しへ返る
+      // （2 回続けば `unmet`・`requirement-id-unknown`。制約の誤りは今までどおり制約の停止で優先する）。
+      const diffSurface = await runStageOutcome("surface", () =>
+        runSurface({
           list: diffList,
           documents: input.documents,
           gateway,
           catalog: diffCatalogData,
           context,
-          // その往復の差分の要件 ID を、**照合に使うのと同じ並び**から渡す（Issue #483）
+          // その往復の差分の要件 ID を、**照合に使うのと同じ並び**から渡す（Issue #483・#484）
           targetRequirementIds: diffRequirementIds,
-          onShapeValid: evaluateTargets,
+          dropClaim: (claim) => isAcceptedDuplicateClaim(claim),
+          onTargetAttempt: recordTargetAttempt,
           shownIssueIds: diffShownIds,
           onIdReuse: (rejection) => recordIdReuse(diffCheckNumber, rejection),
-        });
-        // 形の失敗・制約検査の失敗のどちらも、対象外の記録は evaluateTargets で済んでいる（D1）
-        if (!outcome.ok) return outcome;
-        if (targetCheck === undefined) return outcome;
-        if (targetCheck.problems.length > 0) {
-          return {
-            ok: false as const,
-            failure: { kind: "unmet" as const, attempts: 1, problems: targetCheck.problems },
-          };
-        }
-        const value =
-          targetCheck.dropped.length === 0
-            ? outcome.value
-            : { ...outcome.value, unwritable: targetCheck.keptUnwritable };
-        return { ok: true as const, value };
-      });
+        }),
+      );
       reviewRecord.openIssues = diffSurface.ambiguities.length + effectiveUnspecified.length;
       reviewRecord.openBySource.set("catalog", effectiveUnspecified.length);
       reviewRecord.openBySource.set("surface", diffSurface.ambiguities.length);

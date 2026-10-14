@@ -495,6 +495,21 @@ export interface PlanCliSurfaceIdReuseEntry {
 }
 
 /**
+ * 記録に入れる、照合まで届いた試行 1 つぶん（**値（要件 ID・事項 ID・文）は入れない**。Issue #484）。
+ * 点検の版（初回 1、差分で増える）と試行（1・2）ごとに、試行の結果（形で不成立／対象の照合で不成立／
+ * 受理）と、断った申告の数・事項の数・分類別の件数を持つ。形の不成立も残す（件数 0 は未照合を表す）。
+ */
+export interface PlanCliSurfaceTargetAttempt {
+  readonly check: number;
+  readonly attempt: number;
+  /** 試行の結果（`shape`・`target`・`accepted`） */
+  readonly result: string;
+  readonly rejected_claims: number;
+  readonly rejected_ambiguities: number;
+  readonly kinds: readonly PlanCliDiffOutOfScopeKindCount[];
+}
+
+/**
  * 記録に入れる落ちの件数の内訳（種類ごと・出どころごと。Issue #430）。**件数だけ**を持ち、落ちの文言・
  * 引用・原文の断片・位置は入れない（`02-failure-modes.md` §1）。
  */
@@ -601,6 +616,8 @@ export interface PlanCliRecord {
   readonly open_issue_conflicts: PlanCliOpenIssueConflictRecord;
   /** 使い回しで断った応答の記録（版・試行・応答の数・異なる数・提示元ごとの数。値は入れない。Issue #464） */
   readonly surface_id_reuse: readonly PlanCliSurfaceIdReuseEntry[];
+  /** 照合まで届いた試行 1 つずつの記録（版・試行・結果・件数・分類。値は入れない。Issue #484） */
+  readonly surface_target_attempts: readonly PlanCliSurfaceTargetAttempt[];
   readonly confirmation: "build" | "stop" | null;
   /** 台本の照合の記録（`--script` のときだけ。内容の SHA-256・当て方の版・問いごとの結果。Issue #444） */
   readonly script?: PlanCliScriptRecord;
@@ -794,6 +811,14 @@ export function buildPlanCliRecord(input: {
       responses: entry.responses,
       distinct_ids: entry.distinctIds,
       by_source: entry.bySource.map((source) => ({ source: source.source, count: source.count })),
+    })),
+    surface_target_attempts: input.result.surfaceTargetAttempts.map((entry) => ({
+      check: entry.check,
+      attempt: entry.attempt,
+      result: entry.result,
+      rejected_claims: entry.rejectedClaims,
+      rejected_ambiguities: entry.rejectedAmbiguities,
+      kinds: entry.kinds.map((kind) => ({ kind: kind.kind, claims: kind.claims, ambiguities: kind.ambiguities })),
     })),
     confirmation: input.transcript.confirmation,
     // 台本の照合の記録（台本を使ったときだけ。内容の SHA-256・当て方の版・問いごとの結果。Issue #444）

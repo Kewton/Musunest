@@ -285,8 +285,13 @@ export interface SurfaceInput {
    * その往復の差分の要件 ID（Issue #483）。渡すと、出力に許される要件 ID の `enum` を両方の欄に足した
    * 差分専用の schema（`buildSurfaceDiffSchema`）と名前（`SURFACE_DIFF_SCHEMA_NAME`）を使い、データに
    * 「出力に許される要件 ID」の塊を 1 つ足す（「要件の一覧」の直後）。**渡さなければ要求は変更前と byte で
-   * 同じ**である（初回の洗い出しの経路は変えない）。**照合（`checkSurfaceTargets`）と停止の門は、これとは
-   * 別に今のまま掛ける**——`enum` はモデルへの契約であり、コードの照合を省かない。
+   * 同じ**である（初回の洗い出しの経路は変えない）。
+   *
+   * **これと、下の `dropClaim` か `onTargetAttempt` を渡すと、この並びを点検の対象の集合として、形の
+   * 検査の `check` の中で照合（`checkSurfaceTargets`）を掛ける**（Issue #484）——検出した参照の誤りを、
+   * 既存の形のやり直し（最大 2 試行）へ返すためである。形が通った試行にだけ掛け、制約の裏付けが不成立の
+   * 試行では照合の結果にかかわらず制約の誤りを優先する。`enum` はモデルへの契約であり、コードの照合を
+   * 省かない。
    */
   readonly targetRequirementIds?: readonly [string, ...string[]];
   /**
@@ -300,12 +305,20 @@ export interface SurfaceInput {
    */
   readonly context?: SurfaceContext;
   /**
-   * **形が正しい応答**を、制約 ID の裏付けの検査の前に受け取る口（Issue #434。差分の洗い出しの道だけ渡す）。
-   * **失敗を返す前にも、対象外の集合・分類と照合の進捗を記録できる**ようにするためである——制約検査が
-   * 不成立でも、対象外の参照の件数はここで数えられる。渡す値は**保存用に 1 回だけ正規化した**応答である
-   * （正規化はここで 1 回だけ行い、呼ぶ側はもう正規化しない）。
+   * **受理済みの申告の正確な再申告**を見分ける関数（Issue #484。差分の洗い出しの道だけ渡す）。対象外の
+   * 「書けない」の申告について、これが真を返したものだけを**重複として除く**（`checkSurfaceTargets` の
+   * `dropClaim` にそのまま渡す）。**渡さなければ重複として除かない**（対象外は今までどおり断る）。これは
+   * 照合を掛ける目印の 1 つでもある（これか `onTargetAttempt` を渡すと、`targetRequirementIds` を点検の
+   * 対象の集合として `check` の中で照合する）。
    */
-  readonly onShapeValid?: (surface: PlanSurface) => void;
+  readonly dropClaim?: (claim: PlanUnwritable, index: number) => boolean;
+  /**
+   * **照合まで届いた試行ごとの結果**を受け取る口（Issue #484。差分の洗い出しの道だけ渡す）。記録のための
+   * 口であり、**値（要件 ID・事項 ID・文）は入れない**——試行の番号と結果、照合の結果（件数と分類を
+   * 呼ぶ側が組む）だけを渡す。共通の口の `check` が実行された試行ごとに呼び、`check` に届かなかった試行と
+   * 始めなかった試行では呼ばない。
+   */
+  readonly onTargetAttempt?: (attempt: SurfaceTargetAttempt) => void;
   /**
    * P3 に**データで見せた**事項 ID（提示元ごと。Issue #464）。渡すと、`ambiguities[].id` がこの集合と
    * 完全一致する応答を**応答全体で断る**（`issue-id-reused`。既存の形のやり直しに回す）。渡さなければ
@@ -533,6 +546,28 @@ export interface SurfaceTargetResult {
 }
 
 /**
+ * 照合まで届いた試行の結果（有限。Issue #484）。`shape` は形（事項 ID の使い回しを含む）で不成立、
+ * `target` は対象の照合で不成立、`accepted` は共通の口の `check` の受理である。**モデルに選ばせない**
+ * ——コードが決める。
+ */
+export const SURFACE_TARGET_ATTEMPT_RESULTS = ["shape", "target", "accepted"] as const;
+export type SurfaceTargetAttemptResult = (typeof SURFACE_TARGET_ATTEMPT_RESULTS)[number];
+
+/**
+ * 照合まで届いた試行 1 つぶんの結果（**値（要件 ID・事項 ID・文）は入れない**。Issue #484）。呼ぶ側が
+ * 点検の版を添え、結果から断った申告の数・事項の数・分類別の件数を組む。`shape` の行は照合に届いて
+ * いないので `target` を持たない（件数 0 は未照合を表す）。
+ */
+export interface SurfaceTargetAttempt {
+  /** この点検での試行（1 始まり。2 回までで、2 回とも断れば `malformed`） */
+  readonly attempt: number;
+  /** 試行の結果（形で不成立／対象の照合で不成立／受理） */
+  readonly result: SurfaceTargetAttemptResult;
+  /** 形が通り、照合まで届いた試行の照合の結果（形で落ちた試行は `undefined`） */
+  readonly target: SurfaceTargetResult | undefined;
+}
+
+/**
  * 応答が指す要件 ID が、**点検の対象（この往復の差分）**の内側であるかを確かめる（Issue #434）。対象外・
  * 未知の参照は断る（`problems`）。ただし、**対象外の「書けない」の申告**については、`dropClaim` が真を
  * 返したものだけを**重複として除く**（`dropped`。新しい了承除外・代案・決定は作らず、既存の事項を閉じない）。
@@ -627,27 +662,96 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
   });
   // 使い回しの検査の試行（1 始まり）。形のやり直しと同じく 2 回まで（Issue #464）
   let attempt = 0;
+  // 照合を渡されたときだけ、形の検査の `check` の中で対象の照合を掛ける（Issue #484）。検出した参照の
+  // 誤りを、既存の形のやり直し（最大 2 試行）へ返すためである。**新しい呼び出しの枠は作らない。**
+  // 掛けるかどうかは、**照合に要るものを渡したか**で決める——差分の洗い出しの道だけが、点検の対象の
+  // 集合（`targetRequirementIds`）とともに、見分ける関数（`dropClaim`）か結果の口（`onTargetAttempt`）を
+  // 渡す。初回の洗い出しと、schema の `enum` だけを見る道（`targetRequirementIds` 単独）は掛けない
+  // （要求も結果も変えない）。
+  const targetRequirementSet: ReadonlySet<string> | undefined =
+    input.targetRequirementIds === undefined ? undefined : new Set(input.targetRequirementIds);
+  const targetChecking =
+    targetRequirementSet !== undefined && (input.dropClaim !== undefined || input.onTargetAttempt !== undefined);
+  // 最後の `check` が、**純粋な対象の照合だけ**で断ったか（終端を `unmet` へ写すかの判定。Issue #484）
+  let lastRejectionWasTarget = false;
+  // 受理した試行の、保存用の写しと、受理のあとの制約の誤り（Issue #484）
+  let acceptedValue: PlanSurface | undefined;
+  let acceptedProblems: readonly Problem[] = [];
   const answer = await callStructuredChecked(input.gateway, {
     request,
     // 使い回し（`ambiguities[].id` が見せた ID と一致する）は、**応答全体**を断り、既存の形のやり直しに
     // 回す（2 回続けば `malformed`。Issue #464）。断った件は、試行ごとに `onIdReuse` で知らせる。
     check: (output: unknown): ShapeCheck<PlanSurface> => {
       attempt += 1;
+      lastRejectionWasTarget = false;
       const result = checkSurfaceOutput(output, input.shownIssueIds);
-      if (!result.ok && input.shownIssueIds !== undefined) {
-        const reuse = surfaceIdReuseOf(output, input.shownIssueIds);
-        if (reuse.distinctIds > 0) input.onIdReuse?.({ attempt, ...reuse });
+      if (!result.ok) {
+        if (input.shownIssueIds !== undefined) {
+          const reuse = surfaceIdReuseOf(output, input.shownIssueIds);
+          if (reuse.distinctIds > 0) input.onIdReuse?.({ attempt, ...reuse });
+        }
+        // 形（事項 ID の使い回しを含む）で落ちた試行も、結果に 1 行残す（Issue #484）
+        if (targetChecking) input.onTargetAttempt?.({ attempt, result: "shape", target: undefined });
+        return result;
       }
-      return result;
+      // 照合を渡さない道（初回の洗い出し）は、今までどおり形の検査だけを返す（要求も結果も変えない）
+      if (!targetChecking || targetRequirementSet === undefined) return result;
+      // 保存用の写しを、生の応答から**1 回だけ**正規化して作る（Issue #484）。対象の照合・正確な再申告の
+      // 判定・記録は、この写しで行う。採用する写しを再び正規化しない。
+      const normalized = normalizeSurfaceClaims(result.value);
+      // 制約 ID の裏付けは、除外の前の**生の全申告**に掛ける（Issue #484・#434・#398）
+      const constraintProblems = checkSurfaceConstraints(result.value, input.documents);
+      // 対象の照合は、正規化した写しで行う（Issue #484・#434）
+      const target = checkSurfaceTargets(normalized, targetRequirementSet, input.dropClaim);
+      // 採用する写し（重複として除いた申告を落としたもの。除くものが無ければそのまま）
+      const accepted = target.dropped.length === 0 ? normalized : { ...normalized, unwritable: target.keptUnwritable };
+      // 制約の裏付けが不成立なら、対象の照合の結果にかかわらず、今の制約の誤りを優先して `unmet` で止める
+      // （参照のやり直しへ回さない）。**この試行は受理として返し**、受理のあとの今の制約の停止に任せる。
+      if (constraintProblems.length > 0) {
+        acceptedValue = accepted;
+        acceptedProblems = constraintProblems;
+        input.onTargetAttempt?.({ attempt, result: "accepted", target });
+        return { ok: true, value: accepted };
+      }
+      // 制約が成立し、**対象の照合だけが不成立**のときに限り、この試行の `check` を不成立にして、既存の
+      // 形のやり直しへ返す（Issue #484）。誤りの文は `checkSurfaceTargets` の固定文のまま（値を入れない）。
+      if (target.problems.length > 0) {
+        lastRejectionWasTarget = true;
+        input.onTargetAttempt?.({ attempt, result: "target", target });
+        return { ok: false, problems: target.problems };
+      }
+      acceptedValue = accepted;
+      acceptedProblems = [];
+      input.onTargetAttempt?.({ attempt, result: "accepted", target });
+      return { ok: true, value: accepted };
     },
   });
-  if (!answer.ok) return answer;
-  // 保存用に**1 回だけ**正規化する（Issue #398・#434）。対象外の照合・記録は、この正規化のあとの値で
-  // 行う（もう正規化しない。正規化は一般の文字列で冪等でないため）。
+  if (!answer.ok) {
+    // **最後の試行の `check` が純粋な対象の照合で断られたときだけ**、終端を `unmet`・最後の試行の問題
+    // （`requirement-id-unknown`）に写す（Issue #484）。形・事項 ID の使い回しで落ちたとき、adapter の
+    // `malformed`、呼び出しを始めなかった終わり、通信などの失敗は、今の種類のまま返す（前の試行の対象の
+    // 誤りで上書きしない）。adapter の `malformed` は problems が空なので、ここで写さない。
+    if (
+      targetChecking &&
+      lastRejectionWasTarget &&
+      answer.failure.kind === "malformed" &&
+      answer.failure.problems.length > 0
+    ) {
+      return { ok: false, failure: { kind: "unmet", attempts: answer.failure.attempts, problems: answer.failure.problems } };
+    }
+    return answer;
+  }
+  // 照合を渡した道は、`check` の中で正規化・制約の裏付け・対象の照合まで済ませている（再び正規化しない）
+  if (targetChecking) {
+    const value = acceptedValue ?? answer.value;
+    if (acceptedProblems.length > 0) {
+      // 受理のあとの、今の制約の停止（Issue #484・#434）
+      return { ok: false, failure: { kind: "unmet", attempts: attempt, problems: acceptedProblems } };
+    }
+    return { ok: true, value };
+  }
+  // 保存用に**1 回だけ**正規化する（Issue #398・#434）
   const normalized = normalizeSurfaceClaims(answer.value);
-  // 形が正しい応答を、制約検査の前に知らせる——失敗を返す前にも、対象外の集合・分類と照合の進捗を
-  // 記録できるようにする（Issue #434）
-  input.onShapeValid?.(normalized);
   // 形と、現文書への制約 ID の裏付けを、**生の値**で確かめる（除外で隠さない。Issue #434・#398）
   const problems = checkSurfaceConstraints(answer.value, input.documents);
   if (problems.length > 0) {
