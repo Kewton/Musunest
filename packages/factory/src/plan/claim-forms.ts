@@ -582,10 +582,16 @@ export interface EvaluateInput {
   /** 実試行の門（上限・締切）。偽なら**呼ばずに** `not-run` にする */
   readonly shouldRun?: () => boolean;
   /**
-   * 実試行の門（共有）。**呼ぶ前**に締切を過ぎていれば `not-run`、**呼んだ後**の締切停止は `failed`
-   * （実施数に数える）にする（Issue #459・F13）。
+   * 実試行の門（共有）。呼ぶ前に締切を過ぎていれば**呼ばずに**止める（Issue #459・F13/N2）。
    */
   readonly gate?: CallGate;
+  /**
+   * **実際に下の判定の口が呼ばれた回数**（実施の事実。Issue #459・N2）。渡すと、停止した呼び出しを
+   * 「開始しなかった（`not-run`）」と「実施してから止まった（`failed`）」に、**前検査や例外の名前ではなく
+   * 事実で**分ける——門の拒否は下の口を呼ばないので数が増えず、主を実施してから切替の上限に触れたなら
+   * 数が増える。渡さなければ、これまでどおり例外の名前で分ける。
+   */
+  readonly invocations?: () => number;
   /** 選んだ形（省くと全部）。候補は**全申告 × 選んだ形**である */
   readonly forms?: readonly ClaimFormId[];
   /** 選択肢の上限（S3。既定 255） */
@@ -646,13 +652,19 @@ async function callOnce(
   if (input.shouldRun !== undefined && !input.shouldRun()) {
     return { request: effective, response: null, state: "not-run" };
   }
+  const before = input.invocations?.() ?? 0;
   try {
     const response = await input.judge.judge(effective);
     return { request: effective, response, state: "ok" };
   } catch (error) {
+    // **実施の事実**があればそれで分ける（N2）：下の口が呼ばれていれば（数が増えていれば）実施済み＝
+    // `failed`、呼ばれていなければ（門の拒否）未実施＝`not-run`。前検査や例外の名前では推測しない。
+    if (input.invocations !== undefined) {
+      const after = input.invocations();
+      return { request: effective, response: null, state: after > before ? "failed" : "not-run" };
+    }
+    // 事実が無いときの後方互換：上限・予算は呼ぶ前に止まる（未実施）、それ以外は実施済みとして `failed`
     const name = error instanceof Error ? error.name : "";
-    // 上限・予算は**呼ぶ前に**止まる（未実施）。締切は、呼ぶ前の検査を過ぎているので**実施してから**止まった
-    // ものとして `failed` にする（未実施に数えない。F13）。それ以外の失敗も `failed`（黙って消さない）
     const notRun = name === "JudgeCallLimitExceededError" || name === "JudgeBudgetExceededError";
     return { request: effective, response: null, state: notRun ? "not-run" : "failed" };
   }

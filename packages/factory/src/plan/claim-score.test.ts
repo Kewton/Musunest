@@ -10,9 +10,9 @@ import {
   repeatAgreementOf,
   scoreClaims,
   validateLabels,
+  type BaselineInput,
   type LabelSet,
 } from "./claim-score.js";
-import type { ClaimDestination } from "./claim-tally.js";
 import type { ClaimFormId, ClaimInput, ClaimVote, FormVoteRecord } from "./claim-forms.js";
 
 const CLAIMS: readonly ClaimInput[] = [
@@ -137,9 +137,9 @@ describe("混同表と率は分母つきで出る（Issue #459）", () => {
 });
 
 describe("基準の 2 経路を経路として受け取り、混同表・率を層別する（Issue #459・F8）", () => {
-  const baselines = new Map<string, ReadonlyMap<string, ClaimDestination>>([
-    ["baseline:recheck", new Map([["c1", "accept"], ["c2", "unchecked"]])],
-    ["baseline:no-recheck", new Map([["c1", "unchecked"], ["c2", "unchecked"]])],
+  const baselines = new Map<string, BaselineInput>([
+    ["baseline:recheck", { destinations: new Map([["c1", "accept"], ["c2", "unchecked"]]), referred: new Set(["c1"]) }],
+    ["baseline:no-recheck", { destinations: new Map([["c1", "unchecked"], ["c2", "unchecked"]]), referred: new Set() }],
   ]);
 
   it("基準の 2 経路が paths に入り、混同表の鍵に path が入る", () => {
@@ -176,6 +176,34 @@ describe("基準の 2 経路を経路として受け取り、混同表・率を�
     );
     // c2 を外すと分母は 1（c1 だけ）
     expect(referral?.denominator).toBe(1);
+  });
+});
+
+describe("回付率は、実際に回した申告で数える（最終の行き先で代用しない。Issue #459・N3）", () => {
+  it("回付→受理は数え、回付なし→未点検は数えない", () => {
+    const baselines = new Map<string, BaselineInput>([
+      // 回付して受理された c1 を数える（最終の行き先が accept でも 1）
+      ["baseline:recheck", { destinations: new Map([["c1", "accept"], ["c2", "drop"]]), referred: new Set(["c1"]) }],
+      // 回付せずに未点検の c1・c2 は数えない（0）
+      ["baseline:no-recheck", { destinations: new Map([["c1", "unchecked"], ["c2", "unchecked"]]), referred: new Set() }],
+    ]);
+    const scored = scoreClaims({ claims: CLAIMS, votes: fixedVotes(), labels: LABELS, rule: "majority", baselines });
+    const rate = (path: string) =>
+      scored.rates.find((entry) => entry.path === path && entry.stratum === "all" && entry.name === "再点検への回付率");
+    expect(rate("baseline:recheck")).toMatchObject({ numerator: 1, denominator: 2 });
+    expect(rate("baseline:no-recheck")).toMatchObject({ numerator: 0, denominator: 2 });
+  });
+});
+
+describe("選ばなかった形は、誤答にも同時誤りにも数えない（Issue #459・N4）", () => {
+  it("--forms T1 だけなら、T2・T3 の誤答と対が増えない", () => {
+    const scored = scoreClaims({ claims: CLAIMS, votes: fixedVotes(), labels: LABELS, rule: "majority", forms: ["T1"] });
+    expect(scored.answer.triage.find((entry) => entry.form === "T2")).toEqual({ form: "T2", correct: 0, incorrect: 0, undetermined: 0 });
+    expect(scored.answer.triage.find((entry) => entry.form === "T3")).toEqual({ form: "T3", correct: 0, incorrect: 0, undetermined: 0 });
+    for (const pair of scored.answer.pairs) {
+      expect(pair.bothWrong, `${pair.a}/${pair.b}`).toBe(0);
+      expect(pair.disagree, `${pair.a}/${pair.b}`).toBe(0);
+    }
   });
 });
 

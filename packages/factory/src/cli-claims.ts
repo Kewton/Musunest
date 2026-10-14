@@ -52,6 +52,7 @@ import {
 import {
   scoreClaims,
   validateLabels,
+  type BaselineInput,
   type ClaimLabel,
   type ClaimScore,
   type LabelProblems,
@@ -353,9 +354,11 @@ type ClaimClassification = "accept" | "drop" | "ambiguity" | "unchecked";
 
 /**
  * 基準の経路の要約。**元の申告 ID と分類の対応**で持つ（配列の位置で番号を作り直さない。Issue #459・F6）。
+ * `referred` は**実際に再点検へ回した**申告の ID（最終の行き先とは別に持つ。N3）。
  */
 interface SurfaceSummary {
   readonly claims: readonly { readonly claim_id: string; readonly classification: ClaimClassification }[];
+  readonly referred: readonly string[];
   readonly judgments: number;
 }
 
@@ -367,8 +370,18 @@ function summarizeSurface(surface: PlanSurface, result: SurfaceCheckResult): Sur
   for (const entry of result.dropped) byId.set(ids[entry.index] ?? `#${entry.index}`, "drop");
   for (const entry of result.ambiguities) byId.set(ids[entry.index] ?? `#${entry.index}`, "ambiguity");
   for (const entry of result.unchecked) byId.set(ids[entry.index] ?? `#${entry.index}`, "unchecked");
+  // 再点検の段に達した申告＝**実際に回した**申告（低確信・不明・「書いていない」）
+  const referred = [
+    ...new Set(
+      result.diagnostics
+        .filter((entry) => entry.stage === "recheck")
+        .map((entry) => ids[entry.index])
+        .filter((id): id is string => id !== undefined),
+    ),
+  ];
   return {
     claims: ids.map((id) => ({ claim_id: id, classification: byId.get(id) ?? "unchecked" })),
+    referred,
     judgments: result.judgments.length,
   };
 }
@@ -378,23 +391,47 @@ function destinationsOf(summary: SurfaceSummary): Map<string, ClaimClassificatio
   return new Map(summary.claims.map((entry) => [entry.claim_id, entry.classification]));
 }
 
+/** 要約を、実際に再点検へ回した申告の集合にする */
+function referredOf(summary: SurfaceSummary): Set<string> {
+  return new Set(summary.referred);
+}
+
 /** 複数の束の要約を 1 つにまとめる（run ごとに分けた束を足し合わせる） */
 function mergeSummaries(parts: readonly SurfaceSummary[]): SurfaceSummary {
   return {
     claims: parts.flatMap((part) => part.claims.slice()),
+    referred: [...new Set(parts.flatMap((part) => part.referred.slice()))],
     judgments: parts.reduce((sum, part) => sum + part.judgments, 0),
   };
 }
 
-/** 申告を run ごとの束に分ける（run をまたいだ要件 ID の取り違えを避ける。F5） */
-function groupByRun(claims: readonly ClaimInput[]): readonly (readonly ClaimInput[])[] {
-  const byRun = new Map<string, ClaimInput[]>();
+/**
+ * 申告を、**同じ要件 ID に異なる要件の文が混ざらない**束に分ける（Issue #459・N1）。点検は要件 ID
+ * （run を含まない）で文を引くので、run だけで分けても、同じ要件 ID に別の版の文があれば上書きされる。
+ * 版は推測で補わず、文が食い違う申告を別の束にする。
+ */
+function bundleClaims(claims: readonly ClaimInput[]): readonly (readonly ClaimInput[])[] {
+  const bundles: ClaimInput[][] = [];
+  const texts: Map<string, string>[] = [];
   for (const claim of claims) {
-    const list = byRun.get(claim.runId) ?? [];
-    list.push(claim);
-    byRun.set(claim.runId, list);
+    const key = claim.requirementId;
+    const value = claim.requirementText ?? "";
+    let placed = false;
+    for (let index = 0; index < bundles.length; index += 1) {
+      const existing = texts[index]?.get(key);
+      if (existing === undefined || existing === value) {
+        bundles[index]?.push(claim);
+        texts[index]?.set(key, value);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      bundles.push([claim]);
+      texts.push(new Map([[key, value]]));
+    }
   }
-  return [...byRun.values()];
+  return bundles;
 }
 
 /** 申告の束を `PlanSurface` に写す */
@@ -473,24 +510,54 @@ function callRecordToOutput(record: FormCallRecord): Record<string, unknown> {
   };
 }
 
-/** 基準の経路の呼び出し（主・再点検）を、出力の形に写す（F12） */
+/** 問いの ID（`<頭>:<番号>`）から、束の申告 ID を引く（基準の生の答えを元の申告へ結ぶ。N5） */
+function claimIdsOf(questionIds: readonly string[], orderedClaimIds: readonly string[]): readonly string[] {
+  const ids = questionIds
+    .map((name) => {
+      const suffix = name.split(":")[1];
+      const index = suffix === undefined ? Number.NaN : Number(suffix);
+      return Number.isInteger(index) ? orderedClaimIds[index] : undefined;
+    })
+    .filter((id): id is string => typeof id === "string");
+  return [...new Set(ids)];
+}
+
+/**
+ * 基準の経路の呼び出し（主・再点検）を、出力の形に写す（F12/N5）。**run と、束の申告 ID の対応**、
+ * **原値の入力トークン**、使用量の印を残す——Jev は正の使用量を `inputTokens` で返すので、`usage` だけで
+ * 写すと正の値も 0 の印も消える。
+ */
 function baselineCallToOutput(
   entry: RecordedJudgeEntry,
   role: "primary" | "recheck",
+  runId: string,
+  orderedClaimIds: readonly string[],
 ): Record<string, unknown> {
+  const common = {
+    role,
+    run_id: runId,
+    request_hash: entry.requestHash,
+    question_ids: entry.questionIds,
+    claim_ids: claimIdsOf(entry.questionIds, orderedClaimIds),
+  };
   if (entry.kind === "stop") {
-    return { role, request_hash: entry.requestHash, state: "failed", error_name: entry.errorName, answers: null };
+    return { ...common, state: "failed", error_name: entry.errorName, answered_by: "none", input_tokens: null, usage: null, usage_unmeasurable: false, answers: null };
   }
   const response = entry.response;
+  const usage = response.usage;
+  const inputTokens = response.inputTokens;
+  // Jev の入力トークンが 0（または usage が欠けている）ときは、**実測 0 と欠落を区別できない**印を付ける
+  const usageMarked = response.answeredBy === "jev" && usage === undefined && inputTokens === 0;
   return {
-    role,
-    request_hash: entry.requestHash,
+    ...common,
     state: "ok",
     error_name: null,
     answered_by: response.answeredBy,
     model: response.model,
+    input_tokens: inputTokens,
+    usage: usage === undefined ? null : { ...usage },
+    usage_unmeasurable: usageMarked,
     answers: response.answers as unknown,
-    usage: response.usage === undefined ? null : { ...response.usage },
   };
 }
 
@@ -586,6 +653,16 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
   const makeClient = deps.makeClient ?? ((options: { apiKey: string; model: string; effort: string }): LlmClient => createOpenAiLlmClient(options));
   const makeJevJudge = deps.makeJevJudge ?? ((options: { apiKey: string }): Judge => createJevJudge(options));
   const makeLlmJudge = deps.makeLlmJudge ?? ((options: { client: LlmClient; model: string }): Judge => createLlmJudge(options));
+  // **実施の事実**（N2）：下の判定の口が実際に呼ばれた回数を数える。門の拒否は下の口を呼ばないので数えない。
+  const invocations = { count: 0 };
+  const countInvocations = (judge: Judge): Judge => ({
+    async judge(request) {
+      invocations.count += 1;
+      return judge.judge(request);
+    },
+  });
+  const makeJevJudgeCounted = (options: { apiKey: string }): Judge => countInvocations(makeJevJudge(options));
+  const makeLlmJudgeCounted = (options: { client: LlmClient; model: string }): Judge => countInvocations(makeLlmJudge(options));
   const client = makeClient({ apiKey, model: parsed.model, effort: "high" });
   const jevApiKey = deps.env[JEV_API_KEY_ENV];
   let primaryJudge: Judge;
@@ -596,15 +673,15 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
       log(`使い方の誤り: --judge jev には環境変数 ${JEV_API_KEY_ENV} が要ります（LLM では代用しません）`);
       return JUDGE_CLAIMS_EXIT_USAGE;
     }
-    primaryJudge = makeJevJudge({ apiKey: jevApiKey });
-    recheckJudge = makeLlmJudge({ client, model: parsed.model });
+    primaryJudge = makeJevJudgeCounted({ apiKey: jevApiKey });
+    recheckJudge = makeLlmJudgeCounted({ client, model: parsed.model });
   } else {
     const assembled = assembleJudge({
       env: deps.env,
       model: parsed.model,
       client,
-      makeJevJudge,
-      makeLlmJudge,
+      makeJevJudge: makeJevJudgeCounted,
+      makeLlmJudge: makeLlmJudgeCounted,
       logError: log,
     });
     primaryJudge = assembled.judge;
@@ -647,9 +724,11 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
   const withRecheckParts: SurfaceSummary[] = [];
   const withoutRecheckParts: SurfaceSummary[] = [];
   let baselineStopped = false;
-  for (const group of groupByRun(claims.filter((claim) => claim.requirementText !== null))) {
+  for (const group of bundleClaims(claims.filter((claim) => claim.requirementText !== null))) {
     const surface = surfaceOf(group);
-    // **run と版を含む対応**：束の中の要件 ID → 文（run をまたいだ同じ ID の取り違えを避ける。F5）
+    const orderedClaimIds = group.map((claim) => claim.id);
+    const runId = group[0]?.runId ?? "";
+    // **run と版を含む対応**：束の中の要件 ID → 文（run と版をまたいだ同じ ID の取り違えを避ける。F5/N1）
     const requirements = new Map(group.map((claim) => [claim.requirementId, claim.requirementText ?? ""]));
     const recorder = createJudgeRecorder();
     const recheckRecorder = createJudgeRecorder();
@@ -679,8 +758,8 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
       else throw error;
     }
     if (partialA !== null) withRecheckParts.push(summarizeSurface(surface, partialA));
-    for (const entry of recorder.entries) baselineCalls.push(baselineCallToOutput(entry, "primary"));
-    for (const entry of recheckRecorder.entries) baselineCalls.push(baselineCallToOutput(entry, "recheck"));
+    for (const entry of recorder.entries) baselineCalls.push(baselineCallToOutput(entry, "primary", runId, orderedClaimIds));
+    for (const entry of recheckRecorder.entries) baselineCalls.push(baselineCallToOutput(entry, "recheck", runId, orderedClaimIds));
 
     // 「再点検なし」：記録した応答・停止を、ハッシュの一致で返す記録の口へ流し直す。**止まっても流す**（F7）
     let partialB: SurfaceCheckResult | null = null;
@@ -706,7 +785,7 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
     }
     if (partialB !== null) withoutRecheckParts.push(summarizeSurface(surface, partialB));
   }
-  for (const group of groupByRun(contextInsufficientClaims)) {
+  for (const group of bundleClaims(contextInsufficientClaims)) {
     // 要件の文が無い申告は、再点検の口なしで流し（空文字を送らない）、文脈不足の層とする
     const surface = surfaceOf(group);
     const requirements = new Map(group.map((claim) => [claim.requirementId, ""]));
@@ -747,6 +826,8 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
       operation,
       forms: parsed.forms,
       gate,
+      // **実施の事実**で、呼ぶ前の拒否と実施後の停止を分ける（N2）
+      invocations: () => invocations.count,
     });
     allVotes.push(...result.votes);
     allCalls.push(...result.calls);
@@ -771,10 +852,10 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
       claims.map((claim) => claim.id),
       actualHash,
     );
-    // 基準の 2 経路を経路として渡し、文脈不足の申告を分母から外す（F8）
-    const baselines = new Map<string, Map<string, ClaimClassification>>([
-      ["baseline:recheck", destinationsOf(withRecheck)],
-      ["baseline:no-recheck", destinationsOf(withoutRecheck)],
+    // 基準の 2 経路を経路として渡し、**実際に回した**申告を分けて渡す。文脈不足の申告は分母から外す（F8/N3）
+    const baselines = new Map<string, BaselineInput>([
+      ["baseline:recheck", { destinations: destinationsOf(withRecheck), referred: referredOf(withRecheck) }],
+      ["baseline:no-recheck", { destinations: destinationsOf(withoutRecheck), referred: referredOf(withoutRecheck) }],
     ]);
     score = scoreClaims({
       claims,
@@ -782,6 +863,7 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
       repeatVotes: allVotes,
       labels: { docVersion: parsedLabels.docVersion, docHash: parsedLabels.docHash, labels: parsedLabels.labels },
       rule: parsed.rule,
+      forms: parsed.forms,
       baselines,
       contextInsufficient: new Set(contextInsufficient),
     });

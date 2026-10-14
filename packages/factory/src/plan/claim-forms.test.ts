@@ -2,7 +2,11 @@
 //
 // **偽物の判定で回す。実 API は呼ばない。** ここで固定するのは**問いの組み立てと票の写し**である。
 import { describe, expect, it } from "vitest";
-import type { Judge, JudgeAnswer, JudgeRequest } from "../judge.js";
+import { JobBudget } from "../budget.js";
+import { createCallGate } from "../call.js";
+import { createBudgetedJudge } from "../judge-budget.js";
+import { createFallbackJudge } from "../judge.js";
+import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "../judge.js";
 import { SAMPLE_DOCUMENTS, expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
 import type { PromptDocument } from "../stages/prompt.js";
 import {
@@ -353,6 +357,76 @@ describe("S3 の根拠が申告の内側かの印（Issue #459・F11）", () => 
     const insideVote = (await insideRun.result).votes[0]?.vote;
     expect(insideVote?.evidenceId).toBe("記録");
     expect(insideVote?.insideClaimConstraintIds).toBe(true);
+  });
+});
+
+describe("実施の事実で、呼ぶ前の拒否と実施後の停止を分ける（Issue #459・N2）", () => {
+  const RATES = { inputPerToken: 0.001, cachedInputPerToken: 0.0005, outputPerToken: 0.002 };
+  const okResponse: JudgeResponse = { answers: {}, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+
+  it("前検査の後・開始の前に締切へ達したら not-run（実呼出 0）", async () => {
+    let clock = 0;
+    // 前検査は締切前（0）、包みの gate.begin は締切へ達する（1 >= deadline 1）
+    const now = (): number => clock++;
+    const gate = createCallGate({ now, deadline: 1, limit: 100 });
+    let invoked = 0;
+    const judge: Judge = {
+      async judge() {
+        invoked += 1;
+        return okResponse;
+      },
+    };
+    const budgeted = createBudgetedJudge({ judge, budget: new JobBudget(10), rates: RATES, gate });
+    const result = await evaluateForms({
+      claims: [claim("U-1")],
+      documents: SAMPLE_DOCUMENTS,
+      judge: budgeted,
+      threshold: THRESHOLD,
+      modelVersion: "fake-judge",
+      operation: OPERATION,
+      forms: ["T1"],
+      gate,
+      invocations: () => invoked,
+    });
+    expect(invoked).toBe(0);
+    expect(result.calls.every((entry) => entry.state === "not-run")).toBe(true);
+    expect(result.votes.every((entry) => entry.vote.vote === "not-run")).toBe(true);
+  });
+
+  it("主を 1 回実施してから切替の上限に触れたら failed（実施数に数える）", async () => {
+    const gate = createCallGate({ now: () => 0, deadline: 1_000_000, limit: 1 });
+    let invoked = 0;
+    const primary: Judge = {
+      async judge() {
+        invoked += 1;
+        throw new Error("主が失敗した");
+      },
+    };
+    const fallback: Judge = {
+      async judge() {
+        invoked += 1;
+        return okResponse;
+      },
+    };
+    const budgeted = createBudgetedJudge({
+      judge: createFallbackJudge({ primary, fallback }),
+      budget: new JobBudget(10),
+      rates: RATES,
+      gate,
+    });
+    const result = await evaluateForms({
+      claims: [claim("U-1")],
+      documents: SAMPLE_DOCUMENTS,
+      judge: budgeted,
+      threshold: THRESHOLD,
+      modelVersion: "fake-judge",
+      operation: OPERATION,
+      forms: ["T1"],
+      gate,
+      invocations: () => invoked,
+    });
+    expect(invoked).toBe(1);
+    expect(result.calls[0]?.state).toBe("failed");
   });
 });
 

@@ -17,10 +17,24 @@ import {
   JudgeDeadlineExceededError,
 } from "../judge-budget.js";
 
-/** 記録した 1 件（成功した応答か、停止・失敗か） */
+/**
+ * 記録した 1 件（成功した応答か、停止・失敗か）。**問いの ID**も残す——生の答えを、元の run・束の申告
+ * に対応づけられるようにする（Issue #459・N5）。
+ */
 export type RecordedJudgeEntry =
-  | { readonly kind: "response"; readonly requestHash: string; readonly response: JudgeResponse }
-  | { readonly kind: "stop"; readonly requestHash: string; readonly errorName: string; readonly message: string };
+  | {
+      readonly kind: "response";
+      readonly requestHash: string;
+      readonly questionIds: readonly string[];
+      readonly response: JudgeResponse;
+    }
+  | {
+      readonly kind: "stop";
+      readonly requestHash: string;
+      readonly questionIds: readonly string[];
+      readonly errorName: string;
+      readonly message: string;
+    };
 
 /** 要求の内容を、ハッシュの対象に写す（**合図（`signal`）は入れない**——呼ぶ側の都合で変わるため） */
 export function callHashMaterial(request: JudgeRequest): unknown {
@@ -91,14 +105,16 @@ export function recordJudge(judge: Judge, recorder: JudgeRecorder): Judge {
   return {
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
       const requestHash = await createCallHash(request);
+      const questionIds = Object.keys(request.questions);
       try {
         const response = await judge.judge(request);
-        recorder.entries.push({ kind: "response", requestHash, response });
+        recorder.entries.push({ kind: "response", requestHash, questionIds, response });
         return response;
       } catch (error) {
         recorder.entries.push({
           kind: "stop",
           requestHash,
+          questionIds,
           errorName: error instanceof Error ? error.name : "Error",
           message: error instanceof Error ? error.message : String(error),
         });

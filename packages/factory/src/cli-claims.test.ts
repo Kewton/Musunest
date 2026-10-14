@@ -285,6 +285,56 @@ describe("別 run の同じ要件 ID でも、その申告自身の要件の文�
   });
 });
 
+describe("同じ run でも、同じ要件 ID に異なる文があれば束を分ける（Issue #459・N1）", () => {
+  it("run が同じで R-1 の文が食い違っても、各自の文で再点検する", async () => {
+    const text = JSON.stringify({
+      schema_version: CLAIMS_SET_SCHEMA,
+      doc_version: "v1",
+      doc_hash: DOC_HASH,
+      claims: [
+        { id: "a", run_id: "run-1", index: 0, requirement_id: "R-1", requirement_text: "版 A の文", part: "a", reason: "r", constraint_ids: ["記録"], alternative: null },
+        { id: "b", run_id: "run-1", index: 1, requirement_id: "R-1", requirement_text: "版 B の文", part: "b", reason: "r", constraint_ids: ["記録"], alternative: null },
+      ],
+    });
+    const harness = await run(BASE_ARGS, { files: { "claims.json": text } });
+    const requirements = harness.requests
+      .map((request) => {
+        const name = Object.keys(request.questions).find((key) => key.startsWith("plan-recheck-kind"));
+        const question = name === undefined ? undefined : request.questions[name];
+        const instructions = question?.instructions;
+        return typeof instructions === "object" ? (instructions as { requirement?: string }).requirement : undefined;
+      })
+      .filter((value): value is string => typeof value === "string");
+    expect(requirements).toContain("版 A の文");
+    expect(requirements).toContain("版 B の文");
+  });
+});
+
+// ── 基準の記録に原値と対応を残す（Issue #459・N5）──────────────────
+
+describe("基準の記録に、原値の入力トークン・印・run と申告 ID の対応を残す（Issue #459・N5）", () => {
+  it("Jev の正の入力トークンは原値で残り、0 のときは印が付く", async () => {
+    const positive = await run(BASE_ARGS, { judge: answering({ answeredBy: "jev", inputTokens: 5 }) });
+    const primary = (positive.output["baseline_calls"] as readonly {
+      readonly role: string;
+      readonly run_id: string;
+      readonly claim_ids: readonly string[];
+      readonly input_tokens: number | null;
+      readonly usage_unmeasurable: boolean;
+    }[]).filter((entry) => entry.role === "primary");
+    expect(primary.length).toBeGreaterThan(0);
+    expect(primary.some((entry) => entry.input_tokens === 5 && entry.usage_unmeasurable === false)).toBe(true);
+    expect(primary.every((entry) => entry.run_id === "run-1")).toBe(true);
+    expect(primary.some((entry) => entry.claim_ids.includes("c1"))).toBe(true);
+
+    const zero = await run(BASE_ARGS, { judge: answering({ answeredBy: "jev", inputTokens: 0 }) });
+    const zeroPrimary = (zero.output["baseline_calls"] as readonly { readonly role: string; readonly usage_unmeasurable: boolean }[]).filter(
+      (entry) => entry.role === "primary",
+    );
+    expect(zeroPrimary.every((entry) => entry.usage_unmeasurable)).toBe(true);
+  });
+});
+
 // ── 基準の要約は元の申告 ID で結ぶ（Issue #459・F6）──────────────────
 
 describe("基準の要約は、配列の位置ではなく元の申告 ID で分類を結ぶ（Issue #459・F6）", () => {
