@@ -246,6 +246,34 @@ describe("通常の完走（02 §1）", () => {
     expect(verification.evaluations[0]?.test_mismatches).toBe(0);
   });
 
+  it("② の形が 1 回落ちて 2 回目で通る走りでは、2 つ目の ② の要求だけが前回の問題の塊を持つ（Issue #447）", async () => {
+    const full = recordedRun();
+    const { recording, run } = runWith([
+      ...full.slice(0, 2),
+      // ② の 1 回目は形の合わない応答（値は目印。問題の文には写らない）
+      structured({ designs: "目印ZZ" }),
+      ...full.slice(2),
+    ]);
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    // 段の記録の calls は今までどおり（② は形のやり直しで 2 回呼ぶ）
+    const design = result.record.stages.find((stage) => stage.stage === "design");
+    expect(design).toMatchObject({ status: "ok", calls: 2 });
+    // ② の要求は 2 つ。塊を持つのは 2 つ目だけである
+    const designRequests = recording.structured.filter((request) => request.schemaName === DESIGN_SCHEMA_NAME);
+    expect(designRequests).toHaveLength(2);
+    expect(designRequests[0]?.input).not.toContain("前回の形の問題");
+    expect(designRequests[1]?.input).toContain("前回の形の問題");
+    // ほかの段の要求（①・①'・②'・③・⑤a）は、塊を持たない
+    const others = recording.structured.filter((request) => request.schemaName !== DESIGN_SCHEMA_NAME);
+    expect(others).toHaveLength(5);
+    for (const request of others) {
+      expect(request.input).not.toContain("前回の形の問題");
+    }
+  });
+
   it("記録が全段同じ封筒の形（result で包んだもの）でも、合格の道は同じように流れる（#353）", async () => {
     const { run } = runWith(
       [

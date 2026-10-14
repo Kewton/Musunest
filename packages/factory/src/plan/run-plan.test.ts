@@ -36,7 +36,7 @@ import {
   type PlanResult,
   type PlanRunInput,
 } from "./run-plan.js";
-import type { PlanQuestion } from "./questions.js";
+import { QUESTIONS_SCHEMA_NAME, type PlanQuestion } from "./questions.js";
 import type { PlanAnswerDraft } from "./answers.js";
 import type { PlanConfirmationView, PlanTurn } from "./session.js";
 import {
@@ -2329,6 +2329,62 @@ describe("許可の表の既定で、未指定の事項を最初の往復から�
     // 重大な 10 件はそのまま 10 問で聞く（既定の分を足した 11 問にはしない）
     expect(result.plan.inputs.filter((input) => input.kind === "question")).toHaveLength(AGENT_LIMITS.planQuestions);
     expect(result.plan.open_issues.every((issue) => issue.status === "resolved")).toBe(true);
+  });
+});
+
+// ── Issue #447：P4 の形のやり直しに、前回の問題をデータで渡す ─────────────────
+
+describe("P4 の形のやり直しに、前回の問題をデータで渡す（Issue #447）", () => {
+  /** `<data name="…">…</data>` の中身を取り出す（データの欄ごとに確かめる） */
+  const dataBlockOf = (input: string, name: string): string =>
+    input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "";
+
+  it("P4 が覆いの検査に 1 回落ちて 2 回目で通る走りでは、2 つ目の P4 の要求だけが塊を持ち、分類が question-coverage である", async () => {
+    const surface = {
+      ambiguities: [
+        { id: "OI-a", requirementId: "R-1", text: "問い a", critical: true },
+        { id: "OI-b", requirementId: "R-1", text: "問い b", critical: false },
+      ],
+      unwritable: [],
+    };
+    // 2 回目の応答は、重大な OI-a と、残り 10 問に収まる重大でない OI-b の両方を覆う
+    const both = {
+      questions: [
+        ...(questionsFor("OI-a", "Q-1").questions as readonly object[]),
+        ...(questionsFor("OI-b", "Q-2").questions as readonly object[]),
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      // P4 の 1 回目は重大な OI-a だけを聞き、収まるのに覆わない OI-b が残る（覆いの検査に落ちる）
+      structured(questionsFor("OI-a", "Q-1")),
+      structured(both),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q1-2"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q1-2"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED));
+
+    // 2 回目の応答が覆いの検査を通り、走りは確定まで進む（P4 の 2 回落ちの停止にはならない）
+    expect(result.kind).toBe("confirmed");
+    const p4 = recording.structured.filter((request) => request.schemaName === QUESTIONS_SCHEMA_NAME);
+    expect(p4).toHaveLength(2);
+    expect(p4[0]?.input).not.toContain("前回の形の問題");
+    expect(p4[1]?.input).toContain("前回の形の問題");
+    // 塊には、前回の問題の分類（question-coverage）が入る
+    const problems = JSON.parse(dataBlockOf(p4[1]?.input ?? "", "前回の形の問題")) as readonly {
+      readonly field: string;
+      readonly code?: string;
+    }[];
+    expect(problems.some((problem) => problem.field === "questions" && problem.code === "question-coverage")).toBe(true);
+    // 塊を持つ要求は、走り全体で 2 つ目の P4 の要求だけである
+    expect(recording.structured.filter((request) => request.input.includes("前回の形の問題"))).toHaveLength(1);
   });
 });
 

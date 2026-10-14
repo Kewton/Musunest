@@ -10,6 +10,7 @@ import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRes
 import { OpenAiIncompleteError } from "../openai.js";
 import {
   DATA_IS_NOT_INSTRUCTIONS_RULE,
+  SHAPE_PROBLEMS_DATA_NAME,
   STEP_ATTEMPTS,
   buildStructuredRequest,
   callStructuredChecked,
@@ -20,6 +21,7 @@ import {
   normalizeConstraintIds,
   ruleDefinitionDefects,
   ruleTexts,
+  type Problem,
   type PromptDocument,
   type RuleDefinition,
   type ShapeCheck,
@@ -32,6 +34,10 @@ import {
   expectNoAcceptanceMaterial,
   makeGateway,
 } from "./__tests__/prompt.js";
+import { checkReverseCheckOutput } from "./reverse-check.js";
+import { checkWriteOutput } from "./write.js";
+import { checkCorrespondenceOutput } from "./correspondence.js";
+import { checkMappingRedoOutput } from "./repair.js";
 
 const REQUEST: LlmStructuredRequest = {
   instructions: "規則",
@@ -155,6 +161,9 @@ describe("形が合わない応答は 1 回だけやり直す（02 §2.2）", ()
     expect(recording.structured).toHaveLength(1);
     expect(gateway.retryCounts.shape).toBe(0);
     expect(gateway.retryCounts.content).toBe(0);
+    // 1 回目で通る例では塊が無く、1 回目の input は変更前と同じ（Issue #447）
+    expect(recording.structured[0]?.input).toBe(REQUEST.input);
+    expect(recording.structured[0]?.input).not.toContain("<data name=");
   });
 
   it("形が合わない応答は 1 回だけやり直し、2 回目が合えば通る", async () => {
@@ -240,6 +249,241 @@ describe("形が合わない応答は 1 回だけやり直す（02 §2.2）", ()
     if (outcome.ok) return;
     expect(outcome.failure.kind).toBe("unknown");
     expect(calls).toBe(1);
+  });
+});
+
+// ── 形のやり直しに、前回の問題をデータで渡す（Issue #447）────────────────
+
+/** `<data name="…">…</data>` の中身を取り出す（データの塊ごとに確かめる） */
+function dataBlockOf(input: string, name: string): string {
+  const block = input.split(`<data name="${name}">`)[1]?.split("</data>")[0];
+  if (block === undefined) throw new Error(`データの塊が無い: ${name}`);
+  return block;
+}
+
+/** 2 回目の要求が受け取った、前回の形の問題の塊（直列化したまま読む） */
+function shapeProblemsIn(input: string): unknown {
+  return JSON.parse(dataBlockOf(input, SHAPE_PROBLEMS_DATA_NAME)) as unknown;
+}
+
+/** 応答の値に埋める目印。問題の文（`message`）に残ってはならない値である */
+const MARKER = "目印ZZ";
+
+/** 1 回目だけ落ちて、2 回目は `checkN` に委ねる計画（2 回目は通る） */
+function planFailingOnce(problems: readonly Problem[]): StructuredPlan<NValue> {
+  let calls = 0;
+  return {
+    request: REQUEST,
+    check: (output) => {
+      calls += 1;
+      if (calls === 1) return { ok: false, problems };
+      return checkN(output);
+    },
+  };
+}
+
+describe("形のやり直しは、前回の問題をデータの塊で受け取る（Issue #447）", () => {
+  const FIRST_PROBLEMS: readonly Problem[] = [
+    { field: "n", code: "shape", message: "数であること" },
+    { field: "items[2]", message: "空でない文字列であること" },
+  ];
+
+  it("2 回目は、前置きを 1 文字も変えず、1 回目の input の末尾に塊を 1 つだけ足したものになる", async () => {
+    const recording = createRecordingClient([
+      { kind: "structured", output: { bad: true }, usage: undefined },
+      { kind: "structured", output: { n: 7 }, usage: undefined },
+    ]);
+    const outcome = await callStructuredChecked(makeGateway(recording.client), planFailingOnce(FIRST_PROBLEMS));
+
+    expect(outcome.ok).toBe(true);
+    const first = recording.structured[0];
+    const second = recording.structured[1];
+    // 1 回目の input は変更前と同じ（塊は 1 回目には無い）
+    expect(first?.input).toBe(REQUEST.input);
+    expect(first?.input).not.toContain("<data name=");
+    // 前置き（規則・文書・schema・出力の上限）は 1 文字も変えない
+    expect(second?.instructions).toBe(first?.instructions);
+    expect(second?.documents).toEqual(first?.documents);
+    expect(second?.rules).toEqual(first?.rules);
+    expect(second?.schemaName).toBe(first?.schemaName);
+    expect(second?.schema).toEqual(first?.schema);
+    expect(second?.maxOutputTokens).toBe(first?.maxOutputTokens);
+    // input は、1 回目の input の末尾に塊を 1 つだけ足したもの
+    expect(second?.input.match(/<data name=/g)).toHaveLength(1);
+    expect(second?.input?.slice(0, first?.input.length)).toBe(first?.input);
+    expect(shapeProblemsIn(second?.input ?? "")).toEqual(FIRST_PROBLEMS);
+    // 塊に写るのは、欄・分類（あれば）・文だけで、ほかの欄は写らない
+    expect(shapeProblemsIn(second?.input ?? "")).toEqual([
+      { field: "n", code: "shape", message: "数であること" },
+      { field: "items[2]", message: "空でない文字列であること" },
+    ]);
+  });
+
+  it("問題 0 件で落ちる例では、塊を足さない", async () => {
+    let calls = 0;
+    const plan: StructuredPlan<NValue> = {
+      request: REQUEST,
+      check: (output) => {
+        calls += 1;
+        return calls === 1 ? { ok: false, problems: [] } : checkN(output);
+      },
+    };
+    const recording = createRecordingClient([
+      { kind: "structured", output: { bad: true }, usage: undefined },
+      { kind: "structured", output: { n: 7 }, usage: undefined },
+    ]);
+    const outcome = await callStructuredChecked(makeGateway(recording.client), plan);
+
+    expect(outcome.ok).toBe(true);
+    expect(recording.structured).toHaveLength(2);
+    expect(recording.structured[1]?.input).toBe(recording.structured[0]?.input);
+    expect(recording.structured[1]?.input).not.toContain(SHAPE_PROBLEMS_DATA_NAME);
+  });
+
+  it("2 回続けて落ちたときは、最後の問題を持つ malformed（attempts は 2）になる", async () => {
+    const last: readonly Problem[] = [{ field: "n", code: "shape", message: "最後の数であること" }];
+    let calls = 0;
+    const plan: StructuredPlan<NValue> = {
+      request: REQUEST,
+      check: () => {
+        calls += 1;
+        return { ok: false, problems: calls === 1 ? FIRST_PROBLEMS : last };
+      },
+    };
+    const recording = createRecordingClient([
+      { kind: "structured", output: { bad: true }, usage: undefined },
+      { kind: "structured", output: { also: "bad" }, usage: undefined },
+    ]);
+    const outcome = await callStructuredChecked(makeGateway(recording.client), plan);
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure).toEqual({ kind: "malformed", attempts: 2, problems: last });
+    expect(STEP_ATTEMPTS).toBe(2);
+  });
+
+  it("adapter が形の誤りを返した経路では、やり直さず、問題を持たない malformed になる", async () => {
+    let calls = 0;
+    const client: LlmClient = {
+      async callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        throw Object.assign(new Error("形が合いません"), { kind: "malformed" });
+      },
+      async callWithTools(): Promise<LlmToolResponse> {
+        throw new Error("未使用");
+      },
+    };
+    const outcome = await callStructuredChecked(makeGateway(client), PLAN);
+
+    expect(calls).toBe(1);
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure).toEqual({ kind: "malformed", attempts: 1, problems: [] });
+  });
+
+  it("問題の文の目印は、規則の側と文書に出ず、データの塊にだけ出る", async () => {
+    const request: LlmStructuredRequest = { ...REQUEST, rules: ["段の規則"], documents: ["文書"] };
+    const problems: readonly Problem[] = [{ field: "n", code: "shape", message: `${MARKER} を含む文` }];
+    let calls = 0;
+    const plan: StructuredPlan<NValue> = {
+      request,
+      check: (output) => {
+        calls += 1;
+        return calls === 1 ? { ok: false, problems } : checkN(output);
+      },
+    };
+    const recording = createRecordingClient([
+      { kind: "structured", output: { bad: true }, usage: undefined },
+      { kind: "structured", output: { n: 7 }, usage: undefined },
+    ]);
+    const outcome = await callStructuredChecked(makeGateway(recording.client), plan);
+
+    expect(outcome.ok).toBe(true);
+    for (const sent of recording.structured) {
+      expect(sent?.instructions).not.toContain(MARKER);
+      expect((sent?.rules ?? []).join("\n")).not.toContain(MARKER);
+      expect((sent?.documents ?? []).join("\n")).not.toContain(MARKER);
+    }
+    const second = recording.structured[1];
+    // 塊にだけ出て、その中でも 1 か所だけ（問題の文そのもの）
+    expect(second?.input.split(MARKER).length).toBe(2);
+    expect(shapeProblemsIn(second?.input ?? "")).toEqual(problems);
+  });
+
+  it("①' の実際の形の検査に目印の値を持つ応答が 1 回目に落ちても、2 回目の塊に目印は出ない", async () => {
+    const recording = createRecordingClient([
+      { kind: "structured", output: { uncovered: [{ start: MARKER, end: 3 }] }, usage: undefined },
+      { kind: "structured", output: { uncovered: [] }, usage: undefined },
+    ]);
+    const outcome = await callStructuredChecked(makeGateway(recording.client), {
+      request: REQUEST,
+      check: checkReverseCheckOutput,
+    });
+
+    expect(outcome.ok).toBe(true);
+    const second = recording.structured[1];
+    expect(second?.input).not.toContain(MARKER);
+    expect(shapeProblemsIn(second?.input ?? "")).toEqual([
+      { field: "uncovered[0]", code: "shape", message: "部分は 0 以上で start <= end の整数であること" },
+    ]);
+  });
+
+  it("③ の実際の形の検査に目印の値を持つ応答が 1 回目に落ちても、2 回目の塊に目印は出ない", async () => {
+    const recording = createRecordingClient([
+      { kind: "structured", output: { declaration: MARKER, mappings: MARKER }, usage: undefined },
+      { kind: "structured", output: { declaration: "宣言の原文", mappings: [] }, usage: undefined },
+    ]);
+    const outcome = await callStructuredChecked(makeGateway(recording.client), {
+      request: REQUEST,
+      check: checkWriteOutput,
+    });
+
+    expect(outcome.ok).toBe(true);
+    const second = recording.structured[1];
+    expect(second?.input).not.toContain(MARKER);
+    expect(shapeProblemsIn(second?.input ?? "")).toEqual([
+      { field: "mappings", message: "対応（mappings）は並び（array）であること" },
+    ]);
+  });
+
+  it("⑤a の実際の形の検査に目印の値を持つ応答が 1 回目に落ちても、2 回目の塊に目印は出ない", async () => {
+    const recording = createRecordingClient([
+      {
+        kind: "structured",
+        output: { entries: [{ requirementId: MARKER, locations: MARKER }] },
+        usage: undefined,
+      },
+      { kind: "structured", output: { entries: [] }, usage: undefined },
+    ]);
+    const outcome = await callStructuredChecked(makeGateway(recording.client), {
+      request: REQUEST,
+      check: checkCorrespondenceOutput,
+    });
+
+    expect(outcome.ok).toBe(true);
+    const second = recording.structured[1];
+    expect(second?.input).not.toContain(MARKER);
+    expect(shapeProblemsIn(second?.input ?? "")).toEqual([
+      { field: "entries[0].locations", message: "場所の並び（array）であること" },
+    ]);
+  });
+
+  it("⑥ の対応表の出し直しの実際の形の検査も、2 回目の塊に目印を出さない", async () => {
+    const recording = createRecordingClient([
+      { kind: "structured", output: { mappings: [{ roleId: MARKER, name: 7 }] }, usage: undefined },
+      { kind: "structured", output: { mappings: [] }, usage: undefined },
+    ]);
+    const outcome = await callStructuredChecked(makeGateway(recording.client), {
+      request: REQUEST,
+      check: checkMappingRedoOutput,
+    });
+
+    expect(outcome.ok).toBe(true);
+    const second = recording.structured[1];
+    expect(second?.input).not.toContain(MARKER);
+    expect(shapeProblemsIn(second?.input ?? "")).toEqual([
+      { field: "mappings[0].name", message: "宣言での名前は空でない文字列であること" },
+    ]);
   });
 });
 
