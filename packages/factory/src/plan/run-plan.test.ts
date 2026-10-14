@@ -51,6 +51,13 @@ import { confirmQuestionName } from "./confirm.js";
 import { freeTextQuestionName } from "./answers.js";
 import { SURFACE_SCHEMA_NAME } from "./surface.js";
 import {
+  createScriptPlanResponder,
+  parsePlanScript,
+  PLAN_SCRIPT_SCHEMA,
+  type PlanScript,
+  type PlanScriptMatch,
+} from "./script-responder.js";
+import {
   SURFACE_RECHECK_NO_EVIDENCE,
   surfaceRecheckEvidenceQuestionName,
   surfaceRecheckKindQuestionName,
@@ -5507,3 +5514,234 @@ describe("Plan の段の記録に、試行の終端と再試行の数が入る�
     });
   });
 });
+
+// ── 台本の答える役（04 §9・Issue #444）────────────────────────────
+//
+// 台本（`musunest-eval/plan-script/v1`）の答える役で、推奨と違う答えが確定した仕様に入ること、束の一部に
+// だけ答えた往復で答えた事項だけ閉じて残りが次の往復で聞き直され、上限で確定できないこと、照合の文脈に
+// 目録以外の事項と再質問に観点が欠けた値・要件の参照が渡ることを固定する。**実 API は呼ばない。**
+
+/** 項目に `basis` が無ければ補う（当て方の試験の関心ではない。形の検査は `script-responder.test.ts` が試す） */
+function withScriptBasis(entry: unknown): unknown {
+  if (typeof entry === "object" && entry !== null && !Array.isArray(entry)) {
+    const record = entry as Record<string, unknown>;
+    if (record["basis"] === undefined) return { ...record, basis: "basis" };
+  }
+  return entry;
+}
+
+/** v1 の台本を、項目から組み立てる（形の検査を通す） */
+function scriptOf(entries: readonly unknown[]): PlanScript {
+  const parsed = parsePlanScript(
+    JSON.stringify({ schema: PLAN_SCRIPT_SCHEMA, subject: "X", version: 1, entries: entries.map(withScriptBasis) }),
+  );
+  if ("error" in parsed) throw new Error(parsed.error);
+  return parsed;
+}
+
+/** 別々の事項 2 件（重大。目録以外。Issue #444） */
+const SPLIT_SURFACE = {
+  ambiguities: [
+    { id: "OI-a", requirementId: "R-1", text: "数え方", critical: true },
+    { id: "OI-b", requirementId: "R-2", text: "丸め方", critical: true },
+  ],
+  unwritable: [],
+};
+
+/** 事項 2 件に 1 問ずつ（別々の問い）を返す P4 の答え（Issue #444） */
+const SPLIT_QUESTIONS = {
+  questions: [
+    {
+      id: "Q-1",
+      openIssueId: "OI-a",
+      text: "どう数えますか",
+      choices: [
+        { id: "c1", text: "件数" },
+        { id: "c2", text: "合計" },
+      ],
+      recommended: { choiceId: "c1", reason: "依頼に沿う" },
+      allowFreeText: true,
+    },
+    {
+      id: "Q-2",
+      openIssueId: "OI-b",
+      text: "どう丸めますか",
+      choices: [
+        { id: "c1", text: "切り捨て" },
+        { id: "c2", text: "四捨五入" },
+      ],
+      recommended: { choiceId: "c1", reason: "素直" },
+      allowFreeText: true,
+    },
+  ],
+};
+
+/** 残った事項 OI-b にだけ問いを返す P4 の答え（Issue #444） */
+const SPLIT_QUESTION_B = {
+  questions: [
+    {
+      id: "Q-1",
+      openIssueId: "OI-b",
+      text: "どう丸めますか",
+      choices: [
+        { id: "c1", text: "切り捨て" },
+        { id: "c2", text: "四捨五入" },
+      ],
+      recommended: { choiceId: "c1", reason: "素直" },
+      allowFreeText: true,
+    },
+  ],
+};
+
+describe("台本の答える役（04 §9・Issue #444）", () => {
+  it("推奨と違う答えが、確定した仕様に入る", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      // 答えから増えた要件の差分点検（Issue #434）
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    // 台本に無い（SURFACE_OUTPUT の事項の文に当たる）項目を 1 件だけ置く。推奨（c1）と違う c2 を選ぶ
+    const script = scriptOf([{ id: "E1", facet: null, keys: ["誰の分"], answer: { choose: ["自分のみ"] } }]);
+    const matches: PlanScriptMatch[] = [];
+    const responder = createScriptPlanResponder(script, {
+      match: (match) => matches.push(match),
+      confirmation: () => {},
+    });
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    // 推奨（c1）と違う c2 が、そのまま確定した仕様に入る
+    const answer = result.plan.inputs.find((input) => input.kind === "answer" && input.id === "A:Q1-1");
+    expect(answer?.kind === "answer" ? answer.choice_id : undefined).toBe("c2");
+    expect(result.plan.requirements.find((requirement) => requirement.id === "R:A:Q1-1")?.text).toBe("自分のみ");
+    // 事項は、その答えで閉じる
+    expect(result.plan.open_issues.find((issue) => issue.id === "OI-extra")?.resolution?.answer_id).toBe("A:Q1-1");
+    // 照合の記録は answered（コードが振った質問 ID・往復の版・状態・項目の添字）
+    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "answered", entryIndex: 0 }]);
+  });
+
+  it("照合の文脈に、目録以外の事項と再質問に観点が欠けた値・要件の参照が渡る", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SAME_ISSUES_SURFACE),
+      structured(GROUPED_QUESTIONS),
+      structured(GROUPED_QUESTIONS_AFTER_CONTRADICTION),
+      structured(GROUPED_QUESTIONS_AFTER_CONTRADICTION),
+    ]);
+    const asked: PlanAnswerRequest[] = [];
+    let round = 0;
+    const responder: PlanResponder = {
+      async answer(request) {
+        asked.push(request);
+        round += 1;
+        if (round === 1) {
+          const question = request.questions[0];
+          return {
+            kind: "answers",
+            answers: [
+              { id: "A-1", questionId: question?.id ?? "", revision: question?.revision ?? 1, freeText: "全員で数える" },
+            ],
+          };
+        }
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [freeTextQuestionName("A:Q1-1")]: {
+        kind: "choice",
+        choice: "contradiction",
+        probabilities: undefined,
+        probability: undefined,
+        confidence: 0.9,
+      },
+    });
+
+    await runPlan(makePlanInput(recording.client, judge, responder));
+
+    // 1 往復目：主の事項は P3 の洗い出し（目録以外）——観点は欠けた値、参照先の要件は R-1
+    expect(asked[0]?.revision).toBe(1);
+    expect(asked[0]?.issues[0]?.question.id).toBe("Q1-1");
+    expect(asked[0]?.issues[0]?.main).toEqual({
+      id: "OI-a",
+      text: "誰の分を数えるか",
+      facetId: null,
+      requirement: { id: "R-1", text: "タスクを記録できる" },
+    });
+
+    // 2 往復目：矛盾から組み立てた再質問——観点も参照先の要件も欠けた値
+    const context = asked[1]?.issues.find((entry) => entry.question.openIssueId === "OI:contradiction:A:Q1-1");
+    expect(context).toBeDefined();
+    expect(context?.main).toEqual({
+      id: "OI:contradiction:A:Q1-1",
+      text: expect.any(String),
+      facetId: null,
+      requirement: null,
+    });
+  });
+
+  it("束の一部にだけ答えた往復で、答えた事項だけ閉じ、残りが次の往復で聞き直され、上限で確定できない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SPLIT_SURFACE),
+      structured(SPLIT_QUESTIONS),
+      // 答えから増えた要件の差分点検（P4 は毎回妥当な問いを返す固定入力）
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(SPLIT_QUESTION_B),
+      structured(SPLIT_QUESTION_B),
+    ]);
+    // OI-a の事項（「数え方」）にだけ当たる項目。OI-b（「丸め方」）には当たらない
+    const script = scriptOf([{ id: "E1", facet: null, keys: ["数え"], answer: { choose: ["件数"] } }]);
+    const matches: PlanScriptMatch[] = [];
+    const responder = createScriptPlanResponder(script, {
+      match: (match) => matches.push(match),
+      confirmation: () => {},
+    });
+    const judge = createFakeJudge({ ...catalogAnswers(), ...catalogAnswersFor(["R:A:Q1-1"]) });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 答えた OI-a だけが閉じ、OI-b は開いたまま次々と聞き直され、往復の上限で確定できない
+    expect(result.openIssues.map((issue) => issue.id)).toEqual(["OI-b"]);
+    expect(result.reasons).toEqual([{ source: "session", code: "round-trip-limit", path: "open_issues" }]);
+    // 1 往復目の OI-a の問いは答え、OI-b と、その後の聞き直しは答えない（all-recommended は返さない）
+    expect(matches.map((match) => match.state)).toEqual(["answered", "unknown", "unknown", "unknown"]);
+  });
+
+  it("台本に無い問いは開いたまま残り、上限で確定できない（all-recommended を返さない）", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+    ]);
+    const script = scriptOf([{ id: "E1", facet: null, keys: ["該当しない語"], answer: { choose: ["全員"] } }]);
+    const responder = createScriptPlanResponder(script);
+    const judge = createFakeJudge(catalogAnswers());
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    // 推奨で埋めていれば OI-extra が閉じて確定するはずである。確定しないことが all-recommended を返さない証拠
+    expect(result.kind).toBe("cannot-confirm");
+  });
+});
+

@@ -709,10 +709,39 @@ export type PlanResult =
     } & PlanResultBase)
   | ({ readonly kind: "stopped"; readonly reason: PlanStopReason; readonly failure: PlanFailure | null } & PlanResultBase);
 
-/** 答える役に渡す、質問の束と残り */
+/**
+ * 照合に渡す、事項 1 つの文脈（04 §9・Issue #444）。観点（`facetId`）と参照先の要件（`requirement`）は、
+ * **無ければ明示的に `null`** である——ID の字面（`OI:catalog:` などの接頭辞）や問いの文の印象から補わない。
+ */
+export interface PlanAnswerIssueContext {
+  readonly id: string;
+  readonly text: string;
+  /** コードが目録から作った事項だけが持つ観点の ID（無ければ `null`） */
+  readonly facetId: string | null;
+  /** その事項が指す要件（ID と文）。その時点の一覧から引く（無ければ `null`） */
+  readonly requirement: { readonly id: string; readonly text: string } | null;
+}
+
+/** 問い 1 つぶんの照合の文脈（Issue #444）。`main` は主の事項、`alsoCloses` は一緒に閉じる事項 */
+export interface PlanAnswerQuestionContext {
+  /** 照合の対象の問い（問いの版は `question.revision`） */
+  readonly question: PlanQuestion;
+  readonly main: PlanAnswerIssueContext;
+  readonly alsoCloses: readonly PlanAnswerIssueContext[];
+}
+
+/**
+ * 答える役に渡す、質問の束と残り（04 §9・Issue #444）。**照合に要る文脈と版**まで広げた——いまの Plan の
+ * 版（`revision`）と、問いごとの事項の文脈（主の事項・一緒に閉じる事項・観点・参照先の要件）である。
+ * **新しい LLM の呼び出しは足さない**——今の Plan の状態から読める値だけを渡す。
+ */
 export interface PlanAnswerRequest {
   readonly questions: readonly PlanQuestion[];
   readonly remaining: PlanRemaining;
+  /** いまの Plan の版（問いの版と照合して、古い版の問いを断る） */
+  readonly revision: number;
+  /** 問いごとの照合の文脈（`questions` と同じ並び・同じ長さ） */
+  readonly issues: readonly PlanAnswerQuestionContext[];
 }
 
 /** 答える役の答え（問いごとの答え、または「全部推奨で進める」） */
@@ -1317,6 +1346,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   // コードが目録から作った事項の対応（事項 ID → 未指定の観点）と、要件ごとの門の判定（Issue #408）
   const catalogIssueFacets = new Map<string, UnspecifiedFacet>();
   const aggregatesByRequirement = new Map<string, boolean | null>();
+  // P3 の洗い出しの事項の対応（事項 ID → 生成時の要件 ID。Issue #444）。P3 の事項は観点を持たず、
+  // 開いている事項に写すときに要件 ID が落ちるので、**runPlan が別に対応を保持**して答える役へ渡す。
+  const surfaceIssueRequirements = new Map<string, string>();
   // 差分点検で点検済みの**変更の鍵**（要件 ID だけでなく、変更の種類・答えの ID・元の要件 ID も含む。
   // 同じ ID の後の変更・削除を取りこぼさない。Issue #434）
   const reviewedDiffKeys = new Set<string>();
@@ -1792,6 +1824,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         },
         "surface",
       );
+      // 生成時の要件 ID を、答える役へ渡すために対応を残す（Issue #444）
+      surfaceIssueRequirements.set(ambiguity.id, ambiguity.requirementId);
     }
     // コードが目録から作った事項を、開いている事項に足す（04 §3・Issue #408）。**ID の接頭辞は解析
     // しない**——モデルが同じ形（`OI:catalog:`）の ID を作っても、この対応には入らないので既定の対象に
@@ -1851,15 +1885,18 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     // 曖昧さと判定された申告（了承除外になるはずだった部分）は、**重大な**開いている事項にして P4 に渡す。
     // 聞かずに落とさない。
     for (const claim of surfaceCheck.ambiguities) {
+      const id = surfaceCheckOpenIssueId(initialCheckIndex + 1, claim.index);
       addOpenIssue(
         {
-          id: surfaceCheckOpenIssueId(initialCheckIndex + 1, claim.index),
+          id,
           text: claim.part,
           critical: true,
           status: "open",
         },
         "surface-check",
       );
+      // P3 の申告の対象の要件 ID を、答える役へ渡すために対応を残す（Issue #444）
+      surfaceIssueRequirements.set(id, claim.requirementId);
     }
     // 未点検が 1 件でも残れば、P4・確認に進まず「確定できない」。理由は値の中身を含まない（Issue #432）。
     if (surfaceCheck.unchecked.length > 0) {
@@ -2376,6 +2413,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       reviewRecord.openBySource.set("surface", diffSurface.ambiguities.length);
       for (const ambiguity of diffSurface.ambiguities) {
         addOpenIssue({ id: ambiguity.id, text: ambiguity.text, critical: ambiguity.critical, status: "open" }, "surface");
+        // 生成時の要件 ID を、答える役へ渡すために対応を残す（Issue #444）
+        surfaceIssueRequirements.set(ambiguity.id, ambiguity.requirementId);
       }
       // コードが目録から作った事項を、開いている事項に足す（`catalogIssueFacets` にも入れて既定の対象にする）。
       // **引き継いだ観点はここに入れない**——開いた事項として足さず、既定の対応にも入れない（Issue #461）。
@@ -2440,15 +2479,18 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       reviewRecord.openBySource.set("surface-check", diffSurfaceCheck.ambiguities.length);
       // 曖昧さと判定された申告は、**重大な**開いている事項にして P4 に渡す（聞かずに落とさない）
       for (const claim of diffSurfaceCheck.ambiguities) {
+        const id = surfaceCheckOpenIssueId(diffCheckIndex + 1, claim.index);
         addOpenIssue(
           {
-            id: surfaceCheckOpenIssueId(diffCheckIndex + 1, claim.index),
+            id,
             text: claim.part,
             critical: true,
             status: "open",
           },
           "surface-check",
         );
+        // P3 の申告の対象の要件 ID を、答える役へ渡すために対応を残す（Issue #444）
+        surfaceIssueRequirements.set(id, claim.requirementId);
       }
       // 未点検が残れば確定できない（理由は値の中身を含まない。点検の番号つき。Issue #432・#434）
       if (diffSurfaceCheck.unchecked.length > 0) {
@@ -2463,6 +2505,31 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       reviewRecord.acceptedUnwritable = applyAcceptedUnwritable(diffSurfaceCheck.accepted);
       return undefined;
     };
+
+    /**
+     * 照合に渡す、事項 1 つの文脈を組む（04 §9・Issue #444）。観点は**コードが目録から作った事項**だけが
+     * 持ち、参照先の要件はその時点の一覧から引く。どちらも無ければ `null`——ID の字面では補わない。
+     */
+    const answerIssueContext = (issueId: string): PlanAnswerIssueContext => {
+      const issue = openIssues.find((candidate) => candidate.id === issueId);
+      const facet = catalogIssueFacets.get(issueId);
+      const requirementId = facet?.requirementId ?? surfaceIssueRequirements.get(issueId);
+      const requirement =
+        requirementId === undefined ? undefined : requirements.find((candidate) => candidate.id === requirementId);
+      return {
+        id: issueId,
+        text: issue?.text ?? "",
+        facetId: facet?.facetId ?? null,
+        requirement: requirement === undefined ? null : { id: requirement.id, text: requirement.text },
+      };
+    };
+
+    /** 問い 1 つぶんの照合の文脈（主の事項と、一緒に閉じる事項。Issue #444） */
+    const answerQuestionContext = (question: PlanQuestion): PlanAnswerQuestionContext => ({
+      question,
+      main: answerIssueContext(question.openIssueId),
+      alsoCloses: alsoClosesOf(question).map((id) => answerIssueContext(id)),
+    });
 
     for (;;) {
       // 同じ ID の行の衝突は、**既定の適用と P4 を行う前に**有限の理由で止める（Issue #460）。同じ ID の
@@ -2539,7 +2606,12 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         questionInputs.push(toQuestionInput(question));
       }
 
-      const answer = await input.responder.answer({ questions: asked, remaining: step.remaining });
+      const answer = await input.responder.answer({
+        questions: asked,
+        remaining: step.remaining,
+        revision,
+        issues: asked.map(answerQuestionContext),
+      });
 
       if (answer.kind === "all-recommended") {
         // 「全部推奨で進める」——提示した問いをすべて推奨で閉じ、次の往復（差分点検で開いた事項があれば）

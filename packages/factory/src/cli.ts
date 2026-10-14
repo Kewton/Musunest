@@ -25,6 +25,7 @@ import {
   PLAN_SURFACE_CHECK_FILE,
   planBuildCostLine,
   planStopReasonLine,
+  sha256Hex,
   type Terminal,
 } from "./cli-plan.js";
 import { createFallbackJudge, type Judge } from "./judge.js";
@@ -34,6 +35,11 @@ import type { AgentLimits } from "./limits.js";
 import type { LlmClient } from "./llm.js";
 import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL } from "./openai.js";
 import { runPlan, type PlanResponder } from "./plan/run-plan.js";
+import {
+  createScriptPlanResponder,
+  parsePlanScript,
+  type PlanScriptRecordSink,
+} from "./plan/script-responder.js";
 import { runGeneration } from "./run.js";
 import type { PromptDocument } from "./stages/prompt.js";
 
@@ -81,7 +87,7 @@ export const EXIT_USAGE = 2;
 
 /** 使い方の文（誤りを人に見せる） */
 export const USAGE =
-  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル>]]";
+  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>]]";
 
 /** 手元の入口が受け取る引数 */
 export interface CliArguments {
@@ -102,6 +108,11 @@ export interface CliArguments {
   readonly plan?: boolean;
   /** 答えのファイル（`--answers <ファイル>`。付けると対話の代わりにファイルから答える。評価用） */
   readonly answersFile?: string;
+  /**
+   * 台本のファイル（`--script <ファイル>`。付けると対話や答えのファイルの代わりに、点検済みの事項で
+   * 答える台本で答える。評価用。Issue #444）。`--answers` とは同時に指定できない。
+   */
+  readonly scriptFile?: string;
 }
 
 /** 引数を読む。誤りは `error` に人の読む文を入れて返す（例外にしない） */
@@ -116,6 +127,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   let timeoutMs: number | undefined;
   let plan = false;
   let answersFile: string | undefined;
+  let scriptFile: string | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === undefined) continue;
@@ -128,6 +140,13 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
       index += 1;
       if (raw === undefined) return { error: "--answers には答えのファイルを指定してください" };
       answersFile = raw;
+      continue;
+    }
+    if (arg === "--script") {
+      const raw = args[index + 1];
+      index += 1;
+      if (raw === undefined) return { error: "--script には台本のファイルを指定してください" };
+      scriptFile = raw;
       continue;
     }
     if (arg === "--out") {
@@ -187,6 +206,12 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   if (answersFile !== undefined && !plan) {
     return { error: "--answers は --plan と一緒に指定してください" };
   }
+  if (scriptFile !== undefined && !plan) {
+    return { error: "--script は --plan と一緒に指定してください" };
+  }
+  if (scriptFile !== undefined && answersFile !== undefined) {
+    return { error: "--script と --answers は同時に指定できません" };
+  }
   return {
     requestFile,
     outDir,
@@ -197,6 +222,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(plan ? { plan: true } : {}),
     ...(answersFile === undefined ? {} : { answersFile }),
+    ...(scriptFile === undefined ? {} : { scriptFile }),
   };
 }
 
@@ -362,7 +388,31 @@ async function runPlanThenBuild(
 ): Promise<number> {
   const transcript = createPlanTranscript();
   let responder: PlanResponder;
-  if (parsed.answersFile !== undefined) {
+  /** 台本を使ったときだけ、その内容の SHA-256（往復の記録に残す。Issue #444） */
+  let scriptSha256: string | undefined;
+  if (parsed.scriptFile !== undefined) {
+    const scriptText = await deps.readFile(parsed.scriptFile);
+    const script = parsePlanScript(scriptText);
+    if ("error" in script) {
+      log(`使い方の誤り: ${script.error}`);
+      return EXIT_USAGE;
+    }
+    scriptSha256 = await sha256Hex(scriptText);
+    // 照合の結果・往復・確認の答えを、往復の記録へ写す口（値ではなく、コードが振った ID・版・状態・
+    // 添字と、提示した問い・返した答えだけ）
+    const sink: PlanScriptRecordSink = {
+      match: (match) => {
+        transcript.scriptMatches.push(match);
+      },
+      round: (round) => {
+        transcript.rounds.push(round);
+      },
+      confirmation: (decision) => {
+        transcript.confirmation = decision;
+      },
+    };
+    responder = createScriptPlanResponder(script, sink);
+  } else if (parsed.answersFile !== undefined) {
     const answersText = await deps.readFile(parsed.answersFile);
     const answers = parsePlanAnswers(answersText);
     if ("error" in answers) {
@@ -373,7 +423,9 @@ async function runPlanThenBuild(
   } else {
     const terminal = deps.terminal;
     if (terminal === undefined) {
-      log(`使い方の誤り: --plan の対話には端末が要ります（--answers <ファイル> でも渡せます）`);
+      log(
+        `使い方の誤り: --plan の対話には端末が要ります（--answers <ファイル> か --script <ファイル> でも渡せます）`,
+      );
       return EXIT_USAGE;
     }
     responder = createInteractivePlanResponder(terminal, transcript);
@@ -402,7 +454,15 @@ async function runPlanThenBuild(
   await deps.makeDirectory(job.outDir);
   await deps.writeFile(
     joinPath(job.outDir, PLAN_CLI_RECORD_FILE),
-    JSON.stringify(buildPlanCliRecord({ result, transcript, budgetUsd: job.budgetUsd, planId })),
+    JSON.stringify(
+      buildPlanCliRecord({
+        result,
+        transcript,
+        budgetUsd: job.budgetUsd,
+        planId,
+        ...(scriptSha256 === undefined ? {} : { script: { sha256: scriptSha256 } }),
+      }),
+    ),
   );
   // P3 の申告 1 件ずつの診断を、**別のファイル**に置く（受理・落とした・途中停止のどれも。Issue #432）。
   // `plan-record.json` は今の要約のままにする。
