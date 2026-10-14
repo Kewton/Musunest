@@ -90,6 +90,13 @@ export type JudgeAnswer = JudgeChoiceAnswer | JudgeScoreAnswer | JudgeNoulAnswer
 /** 答えた adapter（§4「どちらで答えたかを結果に残す」） */
 export type JudgeSource = "jev" | "llm" | "fake";
 
+/**
+ * 実試行の内訳の欄（Issue #473）。名乗りの無い口を数える `unknown` を足した 4 欄である。**`JudgeSource`
+ * そのもの・応答の `answeredBy`・`callsByAdapter`（3 欄）の型は変えない**——`unknown` は新しい内訳の型
+ * にだけ足す。
+ */
+export type JudgeAttemptSource = JudgeSource | "unknown";
+
 /** 1 回の判定の要求（§1）。1 つの state と、名前を付けた問いの map を渡す */
 export interface JudgeRequest {
   readonly state: Readonly<Record<string, unknown>>;
@@ -109,6 +116,17 @@ export interface JudgeRequest {
    * 優先する。
    */
   readonly gate?: CallGate;
+  /**
+   * **この呼び出しの再送を始める**ことを、adapter が包みへ知らせる通知（Issue #473）。Jev が、既存の再送の
+   * 条件と門の許可を満たして**次の送信を始める時点**で呼ぶ。包み（`createBudgetedJudge`）は、これを名乗り
+   * ごとの実試行の内訳（`attemptsByAdapter`）へ 1 足す。**門の有無を問わず同じ通知を使う**——門全体の差分
+   * は使わない（判定の応答を待つ間に生成側が同じ門を通った増分を、判定の内訳に混ぜないため。F1）。応答が
+   * 保留されている間も、再送を始めた時点で数えられる（成功を待たない。F2）。
+   *
+   * **要求ごとの通知**であり、adapter の共有の状態には持たない——同じ adapter を別の包みで使い回しても、
+   * それぞれの台帳へ数える。無ければ付けない——包みを持たない直接の呼び出し（今の試験）は今までどおり。
+   */
+  readonly onRetryStarted?: () => void;
 }
 
 /**
@@ -151,6 +169,12 @@ export interface JudgeResponse {
 export interface Judge {
   /** 1 つの state と問いの map を渡し、問いごとの答えを返す（§1） */
   judge(request: JudgeRequest): Promise<JudgeResponse>;
+  /**
+   * 判定の口が自分で名乗る adapter の種類（Issue #473）。**Jev・LLM・偽物の口を作る関数が付ける**。
+   * 合成した口（主と落とし先）は名乗らない——包みが主と落とし先を別に包むので、それぞれの名乗りを使う。
+   * 名乗りの無い口の実試行は、包みの内訳で `unknown` に数える（成功応答の `answeredBy` からは補わない）。
+   */
+  readonly source?: JudgeSource;
   /**
    * 合成した口（Jev → Luna）の**主**（Issue #432）。包みは、これと `fallback` を別々に包み直して
    * **実試行ごと**に門・予算を掛ける。合成していない口には無い。

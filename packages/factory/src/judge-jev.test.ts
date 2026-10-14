@@ -129,6 +129,11 @@ describe("要求の組み立て（05 §1・§4）", () => {
     await createJevJudge({ apiKey: "k", model: "jev-1.12.0", fetch }).judge(REQUEST);
     expect(bodyOf(captured).model).toBe("jev-1.12.0");
   });
+
+  it("作った口は、自分の adapter の種類（jev）を名乗る（Issue #473）", () => {
+    const { fetch } = recordingFetch(() => jsonResponse(ANSWER_WIRE));
+    expect(createJevJudge({ apiKey: "k", fetch }).source).toBe("jev");
+  });
 });
 
 // ── 2. 再試行（§1）────────────────────────────────────────────────────
@@ -586,6 +591,80 @@ describe("要求の門で、内部の再送の各回を数える（05 §1・Issu
     expect(captured).toHaveLength(2);
     expect(delays).toEqual([100]);
     expect(gate.attempts()).toBe(1);
+  });
+});
+
+// ── 要求の通知で、再送を始めたことを知らせる（Issue #473）──────────────────
+//
+// 包み（`createBudgetedJudge`）は、要求に「再送を始めた」通知（`onRetryStarted`）を載せる。adapter は、
+// 既存の再送の条件と門の許可を満たして**次の送信を始める時点**で 1 回呼ぶ。門の有無を問わず同じ通知を
+// 使う——門全体の差分は使わない（生成側の増分を混ぜないため）。門・締切で断られた再送では呼ばない。
+
+describe("要求の通知で、再送を始めたことを知らせる（05 §1・Issue #473）", () => {
+  it("再送を始める各回で 1 回呼ぶ（初回は数えない。門なし）", async () => {
+    const { fetch, captured } = recordingFetch((call) =>
+      call < 3 ? jsonResponse({ error: "busy" }, 429) : jsonResponse(ANSWER_WIRE),
+    );
+    const { sleep } = recordingSleep();
+    let notified = 0;
+
+    const result = await createJevJudge({ apiKey: "k", fetch, sleep, maxAttempts: 3, retryBaseMs: 100 }).judge({
+      ...REQUEST,
+      onRetryStarted: () => {
+        notified += 1;
+      },
+    });
+
+    expect(result.answeredBy).toBe("jev");
+    expect(captured).toHaveLength(3);
+    // 初回のあとの再送 2 回でだけ知らせる
+    expect(notified).toBe(2);
+  });
+
+  it("要求の門が上限で再送を断ったら、通知を呼ばない", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse({ error: "busy" }, 429));
+    const { sleep } = recordingSleep();
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 1 });
+    gate.begin(); // 包みが初回を数えた、という前提（同じ門を共有する）
+    let notified = 0;
+
+    const error = await captureError(() =>
+      createJevJudge({ apiKey: "k", fetch, sleep, maxAttempts: 5, retryBaseMs: 100 }).judge({
+        ...REQUEST,
+        gate,
+        onRetryStarted: () => {
+          notified += 1;
+        },
+      }),
+    );
+
+    expect(error.kind).toBe("gateLimit");
+    expect(captured).toHaveLength(1);
+    expect(notified).toBe(0);
+  });
+
+  it("要求の門が締切で再送を断ったら、通知を呼ばない", async () => {
+    let clock = 0;
+    const gate = createCallGate({ now: () => clock, deadline: 1_000, limit: 10 });
+    const { fetch, captured } = recordingFetch(() => jsonResponse({ error: "busy" }, 429));
+    const sleep = async (ms: number): Promise<void> => {
+      clock += ms; // 再送の待機で締切（1000ms）を越える
+    };
+    let notified = 0;
+
+    const error = await captureError(() =>
+      createJevJudge({ apiKey: "k", fetch, sleep, maxAttempts: 5, retryBaseMs: 2_000 }).judge({
+        ...REQUEST,
+        gate,
+        onRetryStarted: () => {
+          notified += 1;
+        },
+      }),
+    );
+
+    expect(error.kind).toBe("gateDeadline");
+    expect(captured).toHaveLength(1);
+    expect(notified).toBe(0);
   });
 });
 

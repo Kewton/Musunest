@@ -678,6 +678,9 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
   // **返った生の応答**も控える（締切後に返った遅い応答の使用量を、失敗の記録に残す。F12/F13）。
   const observed = { count: 0, last: null as JudgeResponse | null };
   const countInvocations = (judge: Judge): Judge => ({
+    // **内側の口の名乗りを引き継ぐ**（Issue #473）——観測の包みで名乗りを失い、包みの実試行の内訳が
+    // `unknown` に寄らないようにする。
+    ...(judge.source === undefined ? {} : { source: judge.source }),
     async judge(request) {
       // **この呼出の応答だけ**を保持する——開始時に前の呼出の値を消す（前の呼出の応答を、応答なしの失敗に
       // 付けない。Issue #459・N7）。締切後に返った応答の原値は、同じ呼出の中で入るので残る。
@@ -940,8 +943,10 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
       budget_usd: budgetUsd,
       spent_usd: budgeted.spentUsd,
       calls_by_adapter: budgeted.callsByAdapter,
-      // 実試行の数（成功・失敗の合計。adapter ごとの内訳は judge-budget.ts の外）
+      // 実試行の数（成功・失敗の合計。adapter ごとの内訳を次に残す。Issue #473）
       attempts: budgeted.attempts,
+      // 実試行の内訳（門を通り、予約に成功して口の呼び出しを始めた回を、名乗りごとに数える。Issue #473）
+      attempts_by_adapter: budgeted.attemptsByAdapter,
     },
   };
 
