@@ -165,6 +165,10 @@ export function createJevJudge(options: JevJudgeOptions): Judge {
                   : new JevAdapterError("gateLimit", "要求の門の上限に達したので再送しません", lastStatus);
               }
             }
+            // 再送を**始める**——包みの内訳（名乗りごとの実試行）へ 1 つ数えてもらう（Issue #473）。門の
+            // 許可まで満たしたこの時点で呼ぶので、門・締切で断られた再送は数えない。**門の有無を問わず**
+            // 同じ通知を使う（門の全体の差分は使わない）。**応答を待たず**、始める時点で数える。
+            request.onRetryStarted?.();
             continue;
           }
           throw new JevAdapterError(

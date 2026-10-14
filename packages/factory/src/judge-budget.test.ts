@@ -301,6 +301,19 @@ function stubJudge(answeredBy: "fake" | "llm" | "jev"): JudgeResponse {
   return { answers: {}, inputTokens: 0, model: "x", answeredBy };
 }
 
+/** 進行を 1 つ進める（保留した応答の途中を観測するのに使う） */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** `REQUEST` の Noul の問い（`q`）に対する、Jev の 200 の応答 */
+function jev200(): Response {
+  return new Response(JSON.stringify({ model: "jev-1.13.0", usage: { input_tokens: 10 }, answers: { q: { noul: 1 } } }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 /**
  * 差し込む `fetch` が状態コードを順に返す、Jev の adapter（門は**作るときに渡さない**）。
  * 200 のときは、要求の問い（Noul）に「はい」を返す。呼ばれた回数も返す。
@@ -650,5 +663,128 @@ describe("adapter ごとの実試行の内訳（05 §5・Issue #473）", () => {
     // 生成側の 2 は入らず、この判定の 1 だけ
     expect(budgeted.attempts).toBe(1);
     expect(gate.attempts()).toBe(3);
+  });
+
+  // ── 独立レビュー F1/F2 の直しを固定する（Issue #473）─────────────────────
+
+  it("(F1) 判定の応答を保留している間に生成側が門を通っても、内訳に足さない", async () => {
+    let release: (response: JudgeResponse) => void = () => {};
+    const judge: Judge = {
+      source: "llm",
+      async judge(): Promise<JudgeResponse> {
+        return await new Promise<JudgeResponse>((resolve) => {
+          release = resolve;
+        });
+      },
+    };
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 10 });
+    const budgeted = createBudgetedJudge({ judge, budget: new JobBudget(10), rates: RATES, gate });
+
+    const pending = budgeted.judge(REQUEST);
+    // 判定の実開始は 1（応答はまだ保留）
+    expect(budgeted.attemptsByAdapter).toEqual({ jev: 0, llm: 1, fake: 0, unknown: 0 });
+    // 判定の応答を待つ間に、生成側が同じ門を通る——門の増分を、判定の内訳に混ぜない
+    gate.begin();
+    expect(budgeted.attemptsByAdapter).toEqual({ jev: 0, llm: 1, fake: 0, unknown: 0 });
+
+    release(stubJudge("llm"));
+    await pending;
+    expect(budgeted.attemptsByAdapter).toEqual({ jev: 0, llm: 1, fake: 0, unknown: 0 });
+  });
+
+  it("(F2) 門の無い包みでも、Jev の再送を初回と合わせて jev 2 と数える", async () => {
+    const jev = jevAdapter({ statuses: [429, 200], maxAttempts: 2 });
+    const { judge: luna } = fixedJudge(stubJudge("llm"), "llm");
+    const composed: Judge = { judge: jev.judge.judge.bind(jev.judge), primary: jev.judge, fallback: luna };
+    // **門を掛けない**——再送は門の差分ではなく、adapter の通知で数える
+    const budgeted = createBudgetedJudge({ judge: composed, budget: new JobBudget(10), rates: RATES });
+
+    const result = await budgeted.judge(REQUEST);
+
+    expect(result.answeredBy).toBe("jev");
+    expect(jev.calls()).toBe(2);
+    expect(budgeted.attempts).toBe(0);
+    expect(budgeted.attemptsByAdapter).toEqual({ jev: 2, llm: 0, fake: 0, unknown: 0 });
+  });
+
+  it("(F2) 2 回目の応答を保留している最中に、内訳が jev 2 になっている", async () => {
+    let calls = 0;
+    let releaseSecond: (response: Response) => void = () => {};
+    const fetchImpl: JevFetch = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(JSON.stringify({ error: "busy" }), {
+          status: 429,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      // 2 回目の応答は保留する（あとで返す）
+      return await new Promise<Response>((resolve) => {
+        releaseSecond = resolve;
+      });
+    };
+    const jevJudge = createJevJudge({ apiKey: "k", fetch: fetchImpl, maxAttempts: 2, sleep: async () => {} });
+    const { judge: luna } = fixedJudge(stubJudge("llm"), "llm");
+    const composed: Judge = { judge: jevJudge.judge.bind(jevJudge), primary: jevJudge, fallback: luna };
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 10 });
+    const budgeted = createBudgetedJudge({ judge: composed, budget: new JobBudget(10), rates: RATES, gate });
+
+    const pending = budgeted.judge(REQUEST);
+    // 2 回目の送信が始まるまで進める
+    for (let i = 0; i < 50 && calls < 2; i += 1) await flush();
+    expect(calls).toBe(2);
+    // 応答はまだ返っていないが、再送を始めた時点で数えられている（成功を待たない）
+    expect(budgeted.attemptsByAdapter).toEqual({ jev: 2, llm: 0, fake: 0, unknown: 0 });
+
+    releaseSecond(jev200());
+    const result = await pending;
+    expect(result.answeredBy).toBe("jev");
+    expect(budgeted.attemptsByAdapter).toEqual({ jev: 2, llm: 0, fake: 0, unknown: 0 });
+  });
+
+  it("(F2) 再送が締切で断られた回は、内訳に足さない", async () => {
+    let clock = 0;
+    const jev = jevAdapter({
+      statuses: [429, 429],
+      maxAttempts: 5,
+      sleep: async (ms) => {
+        clock += ms; // 待機で締切（1000ms）を越える
+      },
+    });
+    const { judge: luna } = fixedJudge(stubJudge("llm"), "llm");
+    const composed: Judge = { judge: jev.judge.judge.bind(jev.judge), primary: jev.judge, fallback: luna };
+    const gate = createCallGate({ now: () => clock, deadline: 1_000, limit: 10 });
+    const budgeted = createBudgetedJudge({ judge: composed, budget: new JobBudget(10), rates: RATES, gate });
+
+    await expect(budgeted.judge(REQUEST)).rejects.toBeInstanceOf(JudgeDeadlineExceededError);
+    expect(jev.calls()).toBe(1);
+    // 断られた再送は足さない（初回の 1 だけ）
+    expect(budgeted.attemptsByAdapter).toEqual({ jev: 1, llm: 0, fake: 0, unknown: 0 });
+  });
+
+  it("(F2) 同じ adapter を別の包みで使い回しても、内訳が混ざらない", async () => {
+    // 常に 429 を返す（どちらの包みでも、同じように初回＋再送 1 で失敗する）
+    const always429: JevFetch = async () =>
+      new Response(JSON.stringify({ error: "busy" }), { status: 429, headers: { "content-type": "application/json" } });
+    const jevJudge = createJevJudge({ apiKey: "k", fetch: always429, maxAttempts: 2, sleep: async () => {} });
+    const { judge: luna } = fixedJudge(stubJudge("llm"), "llm");
+    const wrap = (): ReturnType<typeof createBudgetedJudge> =>
+      createBudgetedJudge({
+        judge: { judge: jevJudge.judge.bind(jevJudge), primary: jevJudge, fallback: luna },
+        budget: new JobBudget(10),
+        rates: RATES,
+      });
+    const first = wrap();
+    const second = wrap();
+
+    await first.judge(REQUEST);
+    expect(first.attemptsByAdapter).toEqual({ jev: 2, llm: 1, fake: 0, unknown: 0 });
+    expect(second.attemptsByAdapter).toEqual({ jev: 0, llm: 0, fake: 0, unknown: 0 });
+
+    await second.judge(REQUEST);
+    // 2 本目も、自分の台帳にだけ数える（通知は要求ごとに届く）
+    expect(second.attemptsByAdapter).toEqual({ jev: 2, llm: 1, fake: 0, unknown: 0 });
+    // 先の包みの数は動かない
+    expect(first.attemptsByAdapter).toEqual({ jev: 2, llm: 1, fake: 0, unknown: 0 });
   });
 });

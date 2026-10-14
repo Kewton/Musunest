@@ -235,18 +235,18 @@ function wrapBudgetedJudge(
       // 門を通した試行の数（最初の 1 回と、adapter が**内部で再送した各回**）を、判定の台帳へ写す
       // （Issue #469）。門は生成と共有で、adapter の再送も同じ門を通る——台帳と門を食い違わせない。
       // **二重に数えない**：門の数の差を取るので、最初の 1 回も含めてちょうど 1 回ずつ入る。
-      //
-      // 名乗りごとの**実試行**（Issue #473）は、**予約に成功して口の呼び出しを始めた回**だけを数える
-      // （`started`）。最初の 1 回は開始の時点で 1 つ数え、adapter の**許された再送**は、#469 と同じ門の
-      // 差（最初の 1 回を引いた分）から数える——**門をもう一度照らさず、成功を待たずに数える**。門・予算が
-      // 断って口を呼ばなかった回は、`started` が立たないので内訳に足さない。
-      let started = false;
       const recordAttempts = (): void => {
         if (gate === undefined || attemptsAtStart === undefined) return;
-        const delta = gate.attempts() - attemptsAtStart;
-        account.attempts += delta;
-        if (started) account.attemptsByAdapter[source] += Math.max(0, delta - 1);
+        account.attempts += gate.attempts() - attemptsAtStart;
         attemptsAtStart = gate.attempts();
+      };
+      // 名乗りごとの**実試行**（Issue #473）は、この呼び出しが**実際に始めた初回**（予約の成功の直後）と、
+      // adapter が**許された再送を始めた通知**（`onRetryStarted`）だけで数える。**門全体の差分は使わない**
+      // ——判定の応答を待つ間に生成側が同じ門を通った増分を、判定の内訳に混ぜないため（F1）。門の有無を
+      // 問わず同じ通知を使い、門をもう一度照らさない。**要求ごとの通知**なので、同じ adapter を別の包みで
+      // 使い回しても混ざらない。
+      const onRetryStarted = (): void => {
+        account.attemptsByAdapter[source] += 1;
       };
       const maxCostUsd = estimateJudgeMaxCostUsd({ request, rates, jevRates, maxOutputTokens });
       const reserved = options.budget.reserve(maxCostUsd);
@@ -255,7 +255,6 @@ function wrapBudgetedJudge(
         throw new JudgeBudgetExceededError(reserved.maxCostUsd, reserved.remainingUsd);
       }
       // 予約できた——ここから口の呼び出しを始める。門の有無を問わず、名乗りごとの実試行を 1 つ数える
-      started = true;
       account.attemptsByAdapter[source] += 1;
       // 締切の残りで実呼び出しを打ち切る（Issue #432）。合図は要求に載せ、adapter（LLM）が実呼び出しへ渡す。
       // **共有の門も要求に載せる**（Issue #469）——Jev の adapter は、内部の再送の各回をこの門に通す。
@@ -266,11 +265,13 @@ function wrapBudgetedJudge(
           : setTimeout(() => controller.abort(), gate.remainingMs());
       let response: JudgeResponse;
       try {
-        response = await judge.judge(
-          controller === undefined || gate === undefined
-            ? request
-            : { ...request, signal: controller.signal, gate },
-        );
+        // 合図・門・**再送の通知**を要求に載せる。通知は門の有無を問わず載せる——adapter（Jev）が内部の
+        // 再送を始める時点で呼び、この呼び出しの内訳へ 1 足す（Issue #473）。
+        response = await judge.judge({
+          ...request,
+          ...(controller === undefined || gate === undefined ? {} : { signal: controller.signal, gate }),
+          onRetryStarted,
+        });
       } catch (error) {
         // 呼び出しが失敗しても、予約は精算する（残高へ戻す。Issue #359）。**失敗しても、始めた実試行と
         // 許された再送は内訳に残る**（成功を待たない。Issue #473）

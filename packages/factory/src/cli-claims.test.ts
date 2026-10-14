@@ -723,7 +723,7 @@ interface CostOutput {
 }
 
 describe("出力の attempts_by_adapter が、名乗りのある偽物の実開始の記録と一致する（Issue #473）", () => {
-  it("主の失敗→切り替え・再点検ありの組で、内訳が偽物の口と偽物の fetch の実開始と一致する", async () => {
+  it("主の失敗→切り替え・再点検ありの組で、内訳が主・切り替え・再点検の実開始と個別に一致する", async () => {
     // 主（Jev）は偽物の fetch で 429 を返して失敗し、切り替え先・再点検先（Luna）は名乗りのある偽物の口が答える
     let jevStarts = 0;
     const jevFetch: JevFetch = async () => {
@@ -734,16 +734,19 @@ describe("出力の attempts_by_adapter が、名乗りのある偽物の実開�
       });
     };
     const luna = answering({ source: "llm", answeredBy: "llm" });
-    let lunaStarts = 0;
+    // 実開始を、**切り替え（落とし先）**と**再点検**に分けて数える（再点検の問い `plan-recheck*` で見分ける）
+    let switchStarts = 0;
+    let recheckStarts = 0;
     const countingLuna: Judge = {
       source: "llm",
       async judge(request) {
-        lunaStarts += 1;
+        if (Object.keys(request.questions).some((name) => name.startsWith("plan-recheck"))) recheckStarts += 1;
+        else switchStarts += 1;
         return luna.judge(request);
       },
     };
 
-    const harness = await run([...BASE_ARGS, "--judge", "fallback"], {
+    const harness = await run([...BASE_ARGS, "--judge", "fallback", "--forms", "T1"], {
       env: { JEV_API_KEY: "jev-FAKE" },
       // 主は偽物の fetch の Jev（再送なし＝1 呼び出しにつき fetch 1 回）
       makeJevJudge: () => createJevJudge({ apiKey: "k", fetch: jevFetch, maxAttempts: 1 }),
@@ -752,15 +755,26 @@ describe("出力の attempts_by_adapter が、名乗りのある偽物の実開�
 
     expect(harness.code).toBe(JUDGE_CLAIMS_EXIT_OK);
     const cost = harness.output["cost"] as CostOutput;
-    // 内訳が、偽物の fetch（主）と偽物の口（Luna）の実開始の記録と一致する
+
+    // ── 組から独立に決めた期待回数と照らす ─────────────────────────
+    // 主の実開始＝偽物の fetch の実開始。主は必ず失敗するので、切り替えの実開始は主と同数
+    expect(jevStarts).toBeGreaterThan(0);
+    expect(switchStarts).toBe(jevStarts);
+    // 再点検の実開始は、要件の文のある申告が 1 つ（主の裏付けが not-stated）なので 1
+    expect(recheckStarts).toBe(1);
+
+    // ── 台帳が、fake の実開始の記録と（合計ではなく）内訳ごとに一致する ──────
     expect(cost.attempts_by_adapter["jev"]).toBe(jevStarts);
-    expect(cost.attempts_by_adapter["llm"]).toBe(lunaStarts);
+    expect(cost.attempts_by_adapter["llm"]).toBe(switchStarts + recheckStarts);
     expect(cost.attempts_by_adapter["fake"]).toBe(0);
     expect(cost.attempts_by_adapter["unknown"]).toBe(0);
-    // 実試行の合計（今の欄）は、実開始の合計と一致する。**記録からの再生は追加 0**（再生は包みを通らない）
-    expect(cost.attempts).toBe(jevStarts + lunaStarts);
+
+    // ── 記録からの再生は追加 0 ───────────────────────────────────
+    // 再生は `createRecordedJudge` を使い、fake（実開始の記録）も包みも通らない。だから、
+    // 実試行の合計は**実開始の合計**に一致し、それを上回らない。
+    expect(cost.attempts).toBe(jevStarts + switchStarts + recheckStarts);
     // 成功して返った応答の数（今の欄）は、答えた adapter（Luna）だけ
-    expect(cost.calls_by_adapter).toEqual({ jev: 0, llm: lunaStarts, fake: 0 });
+    expect(cost.calls_by_adapter).toEqual({ jev: 0, llm: switchStarts + recheckStarts, fake: 0 });
   });
 
   it("名乗りの無い口を注入すると、その実試行は unknown に入る", async () => {
