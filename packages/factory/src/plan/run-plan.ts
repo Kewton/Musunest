@@ -1611,6 +1611,20 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       };
     }
 
+    // 覆われていない原文の落ち（**コードが見つけた分も、会話が挙げた分も**）がやり直し後も残っていれば、
+    // 目録・P3・P4 を呼ばずに確定させない（Issue #440）。P6 の照合でも同じ原文が覆われていないと数えられ、
+    // P3〜P6 の費用を使ってから止まる経路を、P2 で早く止める。理由は引用の落ちと同じ写し方
+    // （`reverseCheckReasons`）で組み、開いている事項は足さない——値（原文の断片・位置）を持ち込まない。
+    const uncoveredMisses = reverse.unmet.filter((miss) => miss.kind === "uncovered-source");
+    if (uncoveredMisses.length > 0) {
+      return {
+        kind: "cannot-confirm",
+        openIssues: [],
+        reasons: reverseCheckReasons(uncoveredMisses),
+        ...resultBase(),
+      };
+    }
+
     // ── P3 目録の点検（語彙の決めどころ）。**P3 の洗い出しより先に回す**（Issue #419）────────
     const catalog = await runStage("catalog", () =>
       runCatalog({
