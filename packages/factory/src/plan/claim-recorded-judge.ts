@@ -26,14 +26,23 @@ export type RecordedJudgeEntry =
       readonly kind: "response";
       readonly requestHash: string;
       readonly questionIds: readonly string[];
+      /** 下の口が実行されたか（応答があるので常に `true`） */
+      readonly started: boolean;
       readonly response: JudgeResponse;
     }
   | {
       readonly kind: "stop";
       readonly requestHash: string;
       readonly questionIds: readonly string[];
+      /** **下の口が実際に開始したか**（門の拒否なら `false`。Issue #459・N2/N3） */
+      readonly started: boolean;
       readonly errorName: string;
       readonly message: string;
+      /**
+       * **開始してから止まった**ときの、下の口が返した生の応答（締切後に返った遅い応答など）。開始して
+       * いなければ `null`。使用量を失わないように残す（Issue #459・F12/F13）。
+       */
+      readonly response: JudgeResponse | null;
     };
 
 /** 要求の内容を、ハッシュの対象に写す（**合図（`signal`）は入れない**——呼ぶ側の都合で変わるため） */
@@ -96,27 +105,40 @@ export function createJudgeRecorder(): JudgeRecorder {
   return { entries: [] };
 }
 
+/** 下の口の実呼出を観測する口（実施の事実と、返った生の応答。Issue #459・F12/F13） */
+export interface JudgeObservation {
+  /** 下の口が実際に呼ばれた回数 */
+  readonly count: () => number;
+  /** 下の口が最後に返した生の応答（無ければ `null`） */
+  readonly lastResponse: () => JudgeResponse | null;
+}
+
 /**
  * 判定の口を包み、**受け取った要求の内容のハッシュと、応答か停止**を記録する（F7）。包んだ口は、要求を
  * そのまま下の口へ渡し、応答をそのまま返す。**下の口が投げたら停止・失敗も記録してから投げ直す**——
- * 途中で止まった基準を、記録の口で再現できるようにする。
+ * 途中で止まった基準を、記録の口で再現できるようにする。`observation` を渡すと、**開始してから止まった**
+ * ときに、下の口が返した生の応答（使用量つき）も残す（締切後に返った遅い応答を失わない。F12/F13）。
  */
-export function recordJudge(judge: Judge, recorder: JudgeRecorder): Judge {
+export function recordJudge(judge: Judge, recorder: JudgeRecorder, observation?: JudgeObservation): Judge {
   return {
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
       const requestHash = await createCallHash(request);
       const questionIds = Object.keys(request.questions);
+      const before = observation?.count() ?? 0;
       try {
         const response = await judge.judge(request);
-        recorder.entries.push({ kind: "response", requestHash, questionIds, response });
+        recorder.entries.push({ kind: "response", requestHash, questionIds, started: true, response });
         return response;
       } catch (error) {
+        const started = observation !== undefined && observation.count() > before;
         recorder.entries.push({
           kind: "stop",
           requestHash,
           questionIds,
+          started,
           errorName: error instanceof Error ? error.name : "Error",
           message: error instanceof Error ? error.message : String(error),
+          response: started ? (observation?.lastResponse() ?? null) : null,
         });
         throw error;
       }

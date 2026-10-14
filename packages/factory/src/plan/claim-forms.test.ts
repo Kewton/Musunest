@@ -430,6 +430,45 @@ describe("実施の事実で、呼ぶ前の拒否と実施後の停止を分け�
   });
 });
 
+describe("締切後に返った応答の使用量を、失敗の記録に残す（Issue #459・F12/F13 の残り）", () => {
+  it("開始してから締切を越えたら failed のまま、返っていた使用量を残す", async () => {
+    let clock = 0;
+    const gate = createCallGate({ now: () => clock, deadline: 100, limit: 100 });
+    const observed = { count: 0, last: null as JudgeResponse | null };
+    const leaf: Judge = {
+      async judge() {
+        observed.count += 1;
+        clock = 200; // 呼び出しの間に締切を越える
+        const response: JudgeResponse = { answers: {}, inputTokens: 7, model: "fake-judge", answeredBy: "fake" };
+        observed.last = response;
+        return response;
+      },
+    };
+    const budgeted = createBudgetedJudge({
+      judge: leaf,
+      budget: new JobBudget(10),
+      rates: { inputPerToken: 0.001, cachedInputPerToken: 0.0005, outputPerToken: 0.002 },
+      gate,
+    });
+    const result = await evaluateForms({
+      claims: [claim("U-1")],
+      documents: SAMPLE_DOCUMENTS,
+      judge: budgeted,
+      threshold: THRESHOLD,
+      modelVersion: "fake-judge",
+      operation: OPERATION,
+      forms: ["T1"],
+      gate,
+      invocations: () => observed.count,
+      observedResponse: () => observed.last,
+    });
+    const call = result.calls[0];
+    expect(call?.state).toBe("failed");
+    // 成功にはしないが、原値の使用量は消さない
+    expect(call?.response?.inputTokens).toBe(7);
+  });
+});
+
 describe("閾値の表に無い組は送る前に止まる（Issue #459）", () => {
   it("登録の無いモデルでは投げる", () => {
     expect(() => requireClaimFormThreshold(CLAIM_FORMS_VERSION, "no-such-model")).toThrow(

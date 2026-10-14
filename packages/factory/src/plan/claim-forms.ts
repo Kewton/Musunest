@@ -592,6 +592,11 @@ export interface EvaluateInput {
    * 数が増える。渡さなければ、これまでどおり例外の名前で分ける。
    */
   readonly invocations?: () => number;
+  /**
+   * **開始してから止まった**ときに、下の口が返した生の応答（使用量つき）を取る口（Issue #459・F12/F13）。
+   * 締切後に返った遅い応答を、成功にはしないが**失敗の記録として残す**（原値を消さない）。
+   */
+  readonly observedResponse?: () => JudgeResponse | null;
   /** 選んだ形（省くと全部）。候補は**全申告 × 選んだ形**である */
   readonly forms?: readonly ClaimFormId[];
   /** 選択肢の上限（S3。既定 255） */
@@ -661,7 +666,11 @@ async function callOnce(
     // `failed`、呼ばれていなければ（門の拒否）未実施＝`not-run`。前検査や例外の名前では推測しない。
     if (input.invocations !== undefined) {
       const after = input.invocations();
-      return { request: effective, response: null, state: after > before ? "failed" : "not-run" };
+      if (after > before) {
+        // 実施してから止まった：**成功にはしない**が、返っていた生の応答（使用量）は残す（F12/F13）
+        return { request: effective, response: input.observedResponse?.() ?? null, state: "failed" };
+      }
+      return { request: effective, response: null, state: "not-run" };
     }
     // 事実が無いときの後方互換：上限・予算は呼ぶ前に止まる（未実施）、それ以外は実施済みとして `failed`
     const name = error instanceof Error ? error.name : "";

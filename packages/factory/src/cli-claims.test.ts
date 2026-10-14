@@ -310,6 +310,81 @@ describe("同じ run でも、同じ要件 ID に異なる文があれば束を�
   });
 });
 
+// ── 再点検なしの実回付（Issue #459・N3 の残り）──────────────────────
+
+describe("再点検なしの実回付を空にし、あり側は実開始で数える（Issue #459・N3 の残り）", () => {
+  it("裏付けが not-stated の 1 申告で、再点検なしは 0/1、ありは 1/1", async () => {
+    const harness = await run([...BASE_ARGS, "--labels", "labels.json"], {
+      files: {
+        "labels.json": JSON.stringify({
+          doc_version: "v1",
+          doc_hash: DOC_HASH,
+          labels: [
+            { id: "c1", kind: "vocabulary-hole", expressible: "false" },
+            { id: "c2", kind: "vocabulary-hole", expressible: "false" },
+          ],
+        }),
+      },
+    });
+    const score = harness.output["score"] as {
+      readonly rates: readonly { readonly path: string; readonly stratum: string; readonly name: string; readonly numerator: number; readonly denominator: number }[];
+    };
+    const rate = (path: string) =>
+      score.rates.find((entry) => entry.path === path && entry.stratum === "all" && entry.name === "再点検への回付率");
+    // Luna を呼ばない「再点検なし」は、実回付が空
+    expect(rate("baseline:no-recheck")).toMatchObject({ numerator: 0, denominator: 1 });
+    // 「再点検あり」は、要求して実際に開始したので 1
+    expect(rate("baseline:recheck")).toMatchObject({ numerator: 1, denominator: 1 });
+  });
+});
+
+// ── 別 run の同じ要件 ID・同じ文（Issue #459・N6）──────────────────
+
+describe("別 run でも同じ要件 ID・同じ文なら、束は run をまたがない（Issue #459・N6）", () => {
+  it("run-A の a と run-B の b は別の束になり、記録の run と申告 ID が一致する", async () => {
+    const text = JSON.stringify({
+      schema_version: CLAIMS_SET_SCHEMA,
+      doc_version: "v1",
+      doc_hash: DOC_HASH,
+      claims: [
+        { id: "a", run_id: "run-A", index: 0, requirement_id: "R-1", requirement_text: "同じ文", part: "a", reason: "r", constraint_ids: ["記録"], alternative: null },
+        { id: "b", run_id: "run-B", index: 0, requirement_id: "R-1", requirement_text: "同じ文", part: "b", reason: "r", constraint_ids: ["記録"], alternative: null },
+      ],
+    });
+    const harness = await run(BASE_ARGS, { files: { "claims.json": text } });
+    const primary = (harness.output["baseline_calls"] as readonly { readonly role: string; readonly run_id: string; readonly claim_ids: readonly string[] }[]).filter(
+      (entry) => entry.role === "primary",
+    );
+    expect(primary.some((entry) => entry.run_id === "run-A" && entry.claim_ids.includes("a"))).toBe(true);
+    expect(primary.some((entry) => entry.run_id === "run-B" && entry.claim_ids.includes("b"))).toBe(true);
+    // run-A の呼び出しに、run-B の申告が混ざらない
+    expect(primary.filter((entry) => entry.run_id === "run-A").every((entry) => !entry.claim_ids.includes("b"))).toBe(true);
+  });
+});
+
+// ── 基準の遅い応答の使用量（Issue #459・F12/F13 の残り）──────────────
+
+describe("基準の遅い応答（締切後）の使用量も、失敗の記録に残す（Issue #459・F12/F13 の残り）", () => {
+  it("開始してから締切を越えた基準の呼び出しが、原値の入力トークンを残す", async () => {
+    let clock = 0;
+    const judge: Judge = {
+      async judge(request) {
+        clock = 10_000; // 呼び出しの間に締切を越える
+        const out: Record<string, JudgeAnswer> = {};
+        for (const name of Object.keys(request.questions)) out[name] = choice("vocabulary-hole");
+        return { answers: out, inputTokens: 9, model: "fake-judge", answeredBy: "jev" };
+      },
+    };
+    const harness = await run(BASE_ARGS, { now: () => clock, deadlineMs: 1000, judge });
+    const baseline = harness.output["baseline_calls"] as readonly {
+      readonly state: string;
+      readonly input_tokens: number | null;
+      readonly answered_by: string;
+    }[];
+    expect(baseline.some((entry) => entry.state === "failed" && entry.input_tokens === 9)).toBe(true);
+  });
+});
+
 // ── 基準の記録に原値と対応を残す（Issue #459・N5）──────────────────
 
 describe("基準の記録に、原値の入力トークン・印・run と申告 ID の対応を残す（Issue #459・N5）", () => {
