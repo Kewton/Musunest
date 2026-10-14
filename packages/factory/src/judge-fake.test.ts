@@ -51,6 +51,14 @@ describe("偽物の判定（05 §4）", () => {
     expect(result.inputTokens).toBe(0);
   });
 
+  it("作った口は、自分の adapter の種類（fake）を名乗る（Issue #473）", () => {
+    const judge = createFakeJudge({
+      kind: { kind: "choice", choice: "a", probabilities: undefined, probability: undefined, confidence: undefined },
+      open: { kind: "noul", noul: 0.5 },
+    });
+    expect(judge.source).toBe("fake");
+  });
+
   it("用意していない問いは誤りにする", async () => {
     const judge = createFakeJudge({
       kind: { kind: "choice", choice: "a", probabilities: undefined, probability: undefined, confidence: undefined },

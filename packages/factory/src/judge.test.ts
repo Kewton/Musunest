@@ -127,6 +127,24 @@ describe("落とし先（Luna）の口を載せる（Issue #432）", () => {
   });
 });
 
+describe("口の名乗り（Issue #473）", () => {
+  it("合成した口は名乗らず、主と落とし先がそれぞれの名乗りを保つ", () => {
+    const primary = failingJev(429);
+    const fallback = llmJudge(fixedLlmClient(LLM_OUTPUT));
+    const judge = createFallbackJudge({ primary, fallback });
+
+    // 合成した口は名乗らない（包みが主と落とし先を別に包み、それぞれの名乗りを使う）
+    expect(judge.source).toBeUndefined();
+    // 主は Jev、落とし先は LLM を名乗ったままである
+    expect(judge.primary?.source).toBe("jev");
+    expect(judge.fallback?.source).toBe("llm");
+  });
+
+  it("LLM だけの口は、その口自身の名乗り（llm）を持つ", () => {
+    expect(llmJudge(fixedLlmClient(LLM_OUTPUT)).source).toBe("llm");
+  });
+});
+
 // ── 合成の口は、要求の門を変えずに渡し、門の拒否では切り替えない（Issue #469）──────────
 
 describe("合成の口と共有の門（05 §4・Issue #469）", () => {

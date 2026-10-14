@@ -125,6 +125,7 @@ export function createJevJudge(options: JevJudgeOptions): Judge {
   const retryBaseMs = options.retryBaseMs ?? DEFAULT_JEV_RETRY_BASE_MS;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   return {
+    source: "jev",
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
       const body = buildBody(request, model);
       // 呼び出しごとの中断の合図は、包みが**要求**に載せる（Issue #455）。実通信（fetch）と、再送の待機の

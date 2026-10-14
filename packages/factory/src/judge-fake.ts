@@ -31,6 +31,7 @@ export function createFakeJudge(
   const model = options.model ?? "fake-judge";
   const inputTokens = options.inputTokens ?? 0;
   return {
+    source: "fake",
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
       const answers: Record<string, JudgeAnswer> = {};
       for (const [name, question] of Object.entries(request.questions)) {

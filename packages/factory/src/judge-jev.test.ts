@@ -129,6 +129,11 @@ describe("要求の組み立て（05 §1・§4）", () => {
     await createJevJudge({ apiKey: "k", model: "jev-1.12.0", fetch }).judge(REQUEST);
     expect(bodyOf(captured).model).toBe("jev-1.12.0");
   });
+
+  it("作った口は、自分の adapter の種類（jev）を名乗る（Issue #473）", () => {
+    const { fetch } = recordingFetch(() => jsonResponse(ANSWER_WIRE));
+    expect(createJevJudge({ apiKey: "k", fetch }).source).toBe("jev");
+  });
 });
 
 // ── 2. 再試行（§1）────────────────────────────────────────────────────

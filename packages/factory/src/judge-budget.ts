@@ -26,7 +26,14 @@
 import { JEV_RATES, estimateMaxCostUsd, type JobBudget, type Reservation, type TokenRates } from "./budget.js";
 import { MAX_TOKENS_PER_CHAR, type CallGate } from "./call.js";
 import { DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS } from "./judge-llm.js";
-import { judgeGateRefusalKindOf, type Judge, type JudgeRequest, type JudgeResponse, type JudgeSource } from "./judge.js";
+import {
+  judgeGateRefusalKindOf,
+  type Judge,
+  type JudgeAttemptSource,
+  type JudgeRequest,
+  type JudgeResponse,
+  type JudgeSource,
+} from "./judge.js";
 import type { LlmUsage } from "./llm.js";
 
 /**
@@ -98,6 +105,12 @@ export interface BudgetedJudge extends Judge {
   /** 答えた adapter（jev・llm・fake）ごとの呼び出しの数 */
   readonly callsByAdapter: Readonly<Record<JudgeSource, number>>;
   /**
+   * 実試行の数（成功・失敗・締切後の応答の合計。Issue #473）。門を通り、**予約に成功したあと、口の
+   * 呼び出しを始めた回**を、口の名乗り（`source`）ごとに数える——名乗りの無い口は `unknown` に入る。
+   * 門・予算が断って口を呼ばなかった回は数えない。**成功応答の `answeredBy` からは補わない。**
+   */
+  readonly attemptsByAdapter: Readonly<Record<JudgeAttemptSource, number>>;
+  /**
    * 判定の落とし先（Luna）も、**同じ予算**に結び付けた口（Issue #432）。独立した再点検を Luna の
    * 別の会話で行うとき、呼び側（`runPlan`）はここを使う——費用と呼び出しの数は主と共有する。
    */
@@ -110,11 +123,13 @@ export interface BudgetedJudge extends Judge {
   readonly attempts: number;
 }
 
-/** 主と落とし先で**共有する**、判定の費用・呼び出しの数・試行の数の台帳（Issue #432）。 */
+/** 主と落とし先で**共有する**、判定の費用・呼び出しの数・試行の数の台帳（Issue #432・#473）。 */
 interface JudgeAccount {
   spentUsd: number;
   attempts: number;
   readonly callsByAdapter: Record<JudgeSource, number>;
+  /** 名乗りごとの実試行の数（名乗りの無い口は `unknown`。Issue #473） */
+  readonly attemptsByAdapter: Record<JudgeAttemptSource, number>;
 }
 
 /**
@@ -126,7 +141,12 @@ interface JudgeAccount {
  * 数え・門に掛ける。落とし先（Luna）は `fallback` に載せ、独立した再点検に使う。
  */
 export function createBudgetedJudge(options: BudgetedJudgeOptions): BudgetedJudge {
-  const account: JudgeAccount = { spentUsd: 0, attempts: 0, callsByAdapter: { jev: 0, llm: 0, fake: 0 } };
+  const account: JudgeAccount = {
+    spentUsd: 0,
+    attempts: 0,
+    callsByAdapter: { jev: 0, llm: 0, fake: 0 },
+    attemptsByAdapter: { jev: 0, llm: 0, fake: 0, unknown: 0 },
+  };
   const judge = options.judge;
   if (judge.primary !== undefined && judge.fallback !== undefined) {
     const primary = wrapBudgetedJudge(judge.primary, options, account, undefined);
@@ -142,6 +162,9 @@ export function createBudgetedJudge(options: BudgetedJudgeOptions): BudgetedJudg
       },
       get callsByAdapter(): Readonly<Record<JudgeSource, number>> {
         return { ...account.callsByAdapter };
+      },
+      get attemptsByAdapter(): Readonly<Record<JudgeAttemptSource, number>> {
+        return { ...account.attemptsByAdapter };
       },
       get attempts(): number {
         return account.attempts;
@@ -182,12 +205,17 @@ function wrapBudgetedJudge(
   const jevRates = options.jevRates ?? JEV_RATES;
   const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS;
   const gate = options.gate;
+  // 包む口の名乗り（無ければ `unknown`。Issue #473）。**成功応答の `answeredBy` からは補わない。**
+  const source: JudgeAttemptSource = judge.source ?? "unknown";
   return {
     get spentUsd(): number {
       return account.spentUsd;
     },
     get callsByAdapter(): Readonly<Record<JudgeSource, number>> {
       return { ...account.callsByAdapter };
+    },
+    get attemptsByAdapter(): Readonly<Record<JudgeAttemptSource, number>> {
+      return { ...account.attemptsByAdapter };
     },
     get attempts(): number {
       return account.attempts;
@@ -198,6 +226,7 @@ function wrapBudgetedJudge(
       if (gate !== undefined) {
         attemptsAtStart = gate.attempts();
         const begun = gate.begin();
+        // 門が断った回は、口を呼ばず、**どの欄にも足さない**（Issue #473）。`attempts` も実試行の内訳も動かさない。
         if (begun === "deadline") throw new JudgeDeadlineExceededError();
         if (begun === "limit") {
           throw new JudgeCallLimitExceededError(Math.max(0, gate.limit - gate.attempts()));
@@ -206,9 +235,17 @@ function wrapBudgetedJudge(
       // 門を通した試行の数（最初の 1 回と、adapter が**内部で再送した各回**）を、判定の台帳へ写す
       // （Issue #469）。門は生成と共有で、adapter の再送も同じ門を通る——台帳と門を食い違わせない。
       // **二重に数えない**：門の数の差を取るので、最初の 1 回も含めてちょうど 1 回ずつ入る。
+      //
+      // 名乗りごとの**実試行**（Issue #473）は、**予約に成功して口の呼び出しを始めた回**だけを数える
+      // （`started`）。最初の 1 回は開始の時点で 1 つ数え、adapter の**許された再送**は、#469 と同じ門の
+      // 差（最初の 1 回を引いた分）から数える——**門をもう一度照らさず、成功を待たずに数える**。門・予算が
+      // 断って口を呼ばなかった回は、`started` が立たないので内訳に足さない。
+      let started = false;
       const recordAttempts = (): void => {
         if (gate === undefined || attemptsAtStart === undefined) return;
-        account.attempts += gate.attempts() - attemptsAtStart;
+        const delta = gate.attempts() - attemptsAtStart;
+        account.attempts += delta;
+        if (started) account.attemptsByAdapter[source] += Math.max(0, delta - 1);
         attemptsAtStart = gate.attempts();
       };
       const maxCostUsd = estimateJudgeMaxCostUsd({ request, rates, jevRates, maxOutputTokens });
@@ -217,6 +254,9 @@ function wrapBudgetedJudge(
         recordAttempts();
         throw new JudgeBudgetExceededError(reserved.maxCostUsd, reserved.remainingUsd);
       }
+      // 予約できた——ここから口の呼び出しを始める。門の有無を問わず、名乗りごとの実試行を 1 つ数える
+      started = true;
+      account.attemptsByAdapter[source] += 1;
       // 締切の残りで実呼び出しを打ち切る（Issue #432）。合図は要求に載せ、adapter（LLM）が実呼び出しへ渡す。
       // **共有の門も要求に載せる**（Issue #469）——Jev の adapter は、内部の再送の各回をこの門に通す。
       const controller = gate === undefined ? undefined : new AbortController();
@@ -232,12 +272,14 @@ function wrapBudgetedJudge(
             : { ...request, signal: controller.signal, gate },
         );
       } catch (error) {
-        // 呼び出しが失敗しても、予約は精算する（残高へ戻す。Issue #359）
+        // 呼び出しが失敗しても、予約は精算する（残高へ戻す。Issue #359）。**失敗しても、始めた実試行と
+        // 許された再送は内訳に残る**（成功を待たない。Issue #473）
         options.budget.release(reserved.reservation);
         recordAttempts();
         if (controller?.signal.aborted === true) throw new JudgeDeadlineExceededError();
         // 要求の門が内部の再送を断ったときは、既存の門の停止へ写す（Issue #469）。**落とし先へ切り替えない**
-        // ——切り替えの判断（`isJudgeStopError`）でそのまま止まる。
+        // ——切り替えの判断（`isJudgeStopError`）でそのまま止まる。断られた再送は門の差に入らないので、
+        // 内訳にも足さない（Issue #473）。
         const refusal = judgeGateRefusalKindOf(error);
         if (refusal !== undefined) {
           throw refusal === "gateDeadline"
@@ -248,7 +290,8 @@ function wrapBudgetedJudge(
       } finally {
         if (timer !== undefined) clearTimeout(timer);
       }
-      // **遅い応答を成功にしない**——締切を越えて返ったら、費用は精算しつつ、締切の停止にする（Issue #432）
+      // **遅い応答を成功にしない**——締切を越えて返ったら、費用は精算しつつ、締切の停止にする（Issue #432）。
+      // その応答の実試行は、開始の時点で既に内訳へ入っている（Issue #473）
       account.spentUsd += settleResponse(options.budget, reserved.reservation, response, rates, jevRates);
       recordAttempts();
       if (gate !== undefined && gate.now() >= gate.deadline) throw new JudgeDeadlineExceededError();

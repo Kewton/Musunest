@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "@musunest/spec-engine";
 import type { Judge, JudgeAnswer, JudgeRequest } from "./judge.js";
+import { createJevJudge, type JevFetch } from "./judge-jev.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse } from "./llm.js";
 import { SAMPLE_DOCUMENTS } from "./stages/__tests__/prompt.js";
 import {
@@ -56,11 +57,13 @@ function choice(value: string, confidence = 0.9): JudgeAnswer {
   return { kind: "choice", choice: value, probabilities: undefined, probability: confidence, confidence };
 }
 
-/** 問いの名前ごとに妥当な答えを返す偽物（主）。応答の `answeredBy` と `inputTokens` は差し替えられる */
+/** 問いの名前ごとに妥当な答えを返す偽物（主）。応答の `answeredBy`・`inputTokens`・名乗りを差し替えられる */
 function answering(
-  overrides: { readonly answeredBy?: "jev" | "llm" | "fake"; readonly inputTokens?: number } = {},
+  overrides: { readonly answeredBy?: "jev" | "llm" | "fake"; readonly inputTokens?: number; readonly source?: "jev" | "llm" | "fake" } = {},
 ): Judge {
   return {
+    // 名乗り（`source`）は任意。渡すと、包みの実試行の内訳がその adapter に入る（Issue #473）
+    ...(overrides.source === undefined ? {} : { source: overrides.source }),
     async judge(request: JudgeRequest) {
       const out: Record<string, JudgeAnswer> = {};
       for (const name of Object.keys(request.questions)) {
@@ -119,6 +122,8 @@ async function run(
   const events: string[] = [];
   const requests: JudgeRequest[] = [];
   const recordedJudge: Judge = {
+    // 注入した口の名乗りを、観測の包みへ引き継ぐ（Issue #473）
+    ...(judge.source === undefined ? {} : { source: judge.source }),
     async judge(request) {
       events.push("judge");
       requests.push(request);
@@ -705,5 +710,66 @@ describe("申告 0 件は no-claims の状態にする（Issue #459）", () => {
     expect(harness.code).toBe(JUDGE_CLAIMS_EXIT_OK);
     expect(harness.output["no_claims"]).toBe(true);
     expect(harness.output["claims"]).toEqual([]);
+  });
+});
+
+// ── 実試行の内訳（Issue #473）───────────────────────────────────────
+
+/** 費用の欄（`cost`）の形（Issue #473 で `attempts_by_adapter` を足した） */
+interface CostOutput {
+  readonly calls_by_adapter: Readonly<Record<string, number>>;
+  readonly attempts: number;
+  readonly attempts_by_adapter: Readonly<Record<string, number>>;
+}
+
+describe("出力の attempts_by_adapter が、名乗りのある偽物の実開始の記録と一致する（Issue #473）", () => {
+  it("主の失敗→切り替え・再点検ありの組で、内訳が偽物の口と偽物の fetch の実開始と一致する", async () => {
+    // 主（Jev）は偽物の fetch で 429 を返して失敗し、切り替え先・再点検先（Luna）は名乗りのある偽物の口が答える
+    let jevStarts = 0;
+    const jevFetch: JevFetch = async () => {
+      jevStarts += 1;
+      return new Response(JSON.stringify({ error: "busy" }), {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    const luna = answering({ source: "llm", answeredBy: "llm" });
+    let lunaStarts = 0;
+    const countingLuna: Judge = {
+      source: "llm",
+      async judge(request) {
+        lunaStarts += 1;
+        return luna.judge(request);
+      },
+    };
+
+    const harness = await run([...BASE_ARGS, "--judge", "fallback"], {
+      env: { JEV_API_KEY: "jev-FAKE" },
+      // 主は偽物の fetch の Jev（再送なし＝1 呼び出しにつき fetch 1 回）
+      makeJevJudge: () => createJevJudge({ apiKey: "k", fetch: jevFetch, maxAttempts: 1 }),
+      judge: countingLuna,
+    });
+
+    expect(harness.code).toBe(JUDGE_CLAIMS_EXIT_OK);
+    const cost = harness.output["cost"] as CostOutput;
+    // 内訳が、偽物の fetch（主）と偽物の口（Luna）の実開始の記録と一致する
+    expect(cost.attempts_by_adapter["jev"]).toBe(jevStarts);
+    expect(cost.attempts_by_adapter["llm"]).toBe(lunaStarts);
+    expect(cost.attempts_by_adapter["fake"]).toBe(0);
+    expect(cost.attempts_by_adapter["unknown"]).toBe(0);
+    // 実試行の合計（今の欄）は、実開始の合計と一致する。**記録からの再生は追加 0**（再生は包みを通らない）
+    expect(cost.attempts).toBe(jevStarts + lunaStarts);
+    // 成功して返った応答の数（今の欄）は、答えた adapter（Luna）だけ
+    expect(cost.calls_by_adapter).toEqual({ jev: 0, llm: lunaStarts, fake: 0 });
+  });
+
+  it("名乗りの無い口を注入すると、その実試行は unknown に入る", async () => {
+    const harness = await run(BASE_ARGS, { judge: answering({ answeredBy: "fake" }) }); // 名乗り無し
+    expect(harness.code).toBe(JUDGE_CLAIMS_EXIT_OK);
+    const cost = harness.output["cost"] as CostOutput;
+    expect(cost.attempts_by_adapter["unknown"]).toBeGreaterThan(0);
+    expect(cost.attempts_by_adapter["jev"]).toBe(0);
+    expect(cost.attempts_by_adapter["llm"]).toBe(0);
+    expect(cost.attempts_by_adapter["fake"]).toBe(0);
   });
 });

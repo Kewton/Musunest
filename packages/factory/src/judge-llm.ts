@@ -65,6 +65,7 @@ export function createLlmJudge(options: LlmJudgeOptions): Judge {
   const documents = options.documents ?? [];
   const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS;
   return {
+    source: "llm",
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
       const response = await options.client.callStructured<LlmJudgeOutput>({
         instructions,
