@@ -4,7 +4,13 @@
 // 同じ ID の行が 2 つ以上あれば（状態・文・重大度・対応する要件に関わらず）衝突と報告することである。
 import { describe, expect, it } from "vitest";
 import type { PlanOpenIssue } from "@musunest/appspec-schema";
-import { detectOpenIssueCollisions, resolveTargetOf } from "./open-issues.js";
+import {
+  classifyOpenIssueConflict,
+  detectOpenIssueCollisions,
+  resolveTargetOf,
+  type PlanOpenIssueOrigin,
+  type PlanOpenIssueRowAttribution,
+} from "./open-issues.js";
 
 /** 同じ ID の行を 1 つ作る（既定は open。欄を上書きして負例を作る） */
 function rowOf(overrides: Partial<PlanOpenIssue> = {}): PlanOpenIssue {
@@ -93,5 +99,51 @@ describe("同じ ID の行が 2 つ以上あれば、状態・文・重大度・
   it("行が 0・1 件なら衝突は無い", () => {
     expect(detectOpenIssueCollisions([])).toEqual([]);
     expect(detectOpenIssueCollisions([rowOf()])).toEqual([]);
+  });
+});
+
+// ── Issue #464：衝突した 2 行の帰属を、足した順によらず組にする ─────────────────────
+
+describe("衝突した 2 行の帰属（由来・状態・今回か以前か）を、足した順によらず組にする（Issue #464）", () => {
+  /** 帰属 1 つを作る（既定は open・以前の往復） */
+  function attr(
+    origin: PlanOpenIssueOrigin,
+    status: "open" | "resolved" = "open",
+    current = false,
+  ): PlanOpenIssueRowAttribution {
+    return { origin, status, current };
+  }
+
+  it("通常の目録の行どうしの衝突と、通常の目録の行と引き継ぎの行の衝突は、別の組になる", () => {
+    const catalogCatalog = classifyOpenIssueConflict(attr("catalog"), attr("catalog"));
+    const catalogInherit = classifyOpenIssueConflict(attr("catalog"), attr("inherit"));
+    // 由来の組が違えば、別の組になる
+    expect(catalogCatalog).not.toEqual(catalogInherit);
+    expect(catalogInherit).toEqual({ first: attr("catalog"), second: attr("inherit") });
+  });
+
+  it("足した順によらない（existing と added を入れ替えても同じ組になる）", () => {
+    const forward = classifyOpenIssueConflict(attr("catalog", "open", false), attr("inherit", "resolved", true));
+    const backward = classifyOpenIssueConflict(attr("inherit", "resolved", true), attr("catalog", "open", false));
+    expect(forward).toEqual(backward);
+    // 状態（open／resolved）と、作った往復が今回か以前かも、組に残る
+    expect(forward).toEqual({ first: attr("catalog", "open", false), second: attr("inherit", "resolved", true) });
+  });
+
+  it("同じ由来でも、状態や今回か以前かが違えば別の組になる", () => {
+    const openBoth = classifyOpenIssueConflict(attr("surface"), attr("surface"));
+    const oneResolved = classifyOpenIssueConflict(attr("surface"), attr("surface", "resolved"));
+    const oneCurrent = classifyOpenIssueConflict(attr("surface"), attr("surface", "open", true));
+    expect(openBoth).not.toEqual(oneResolved);
+    expect(oneResolved).not.toEqual(oneCurrent);
+  });
+
+  it("衝突の検出（detectOpenIssueCollisions）の結果を、そのまま帰属の組に写せる", () => {
+    const rows = [rowOf({ id: "X" }), rowOf({ id: "X" })];
+    const collisions = detectOpenIssueCollisions(rows);
+    expect(collisions).toEqual([{ existingIndex: 0, addedIndex: 1 }]);
+    const group = classifyOpenIssueConflict(attr("catalog"), attr("surface", "open", true));
+    expect(group.first.origin).toBe("catalog");
+    expect(group.second.origin).toBe("surface");
   });
 });

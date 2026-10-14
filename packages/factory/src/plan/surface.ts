@@ -37,6 +37,7 @@ export const SURFACE_RULES: readonly string[] = [
   "書けないことには、根拠にした**制約 ID**（constraintIds）を必須にする——渡した文書の本文にある契約の規則の ID（例 `R-TYPE-01`）か、語彙の意味の見出しの文（例 `number`。`#` の記号は付けない）だけを挙げる。文書に無い ID を作らない。",
   "書けないことには、**代わりの案**（alternative）を 1 つ書く——文書の語彙で書ける、近い形である。代わりの案を採るかどうかは利用者が決める。",
   "曖昧さ（まだ書ける）と、書けないこと（語彙の穴）を混ぜない。要件の言い直しや、すでに決まっていることは挙げない。",
+  "新しい事項の ID は、データで見せた事項の ID と同じにしない。既存の事項が重大・矛盾なら、新しい ID で挙げる。",
 ];
 
 /** P3 の洗い出しの JSON Schema（構造化出力） */
@@ -184,6 +185,44 @@ export interface SurfaceContext {
   readonly questionsAndAnswers: readonly SurfaceContextQuestionAnswer[];
 }
 
+/** P3 に**データで見せた**事項 ID の提示元（有限。Issue #464） */
+export const SURFACE_SHOWN_ID_SOURCES = ["catalog", "defaults", "inherited", "decisions"] as const;
+export type SurfaceShownIdSource = (typeof SURFACE_SHOWN_ID_SOURCES)[number];
+
+/**
+ * P3 に**データで見せた**事項 ID（提示元ごと。Issue #464）。呼ぶ側が**構造化した対応から作る**——文や
+ * ID の接頭辞の解析では作らない。`ambiguities[].id` との**完全一致**で使い回しを断る。
+ *
+ *   - `catalog` … その往復の目録の開いている事項の ID
+ *   - `defaults` … その往復の**仮に適用した既定**の事項の ID
+ *   - `inherited` … その往復で**引き継ぐ観点**の事項の ID
+ *   - `decisions` … 参照用の文脈の既存の決定に `resolution.decision_id` で結ばれた既存の事項の ID
+ */
+export interface SurfaceShownIssueIds {
+  readonly catalog: readonly string[];
+  readonly defaults: readonly string[];
+  readonly inherited: readonly string[];
+  readonly decisions: readonly string[];
+}
+
+/**
+ * 使い回しで断った応答 1 つぶんの記録（**値は入れない**。Issue #464）。**同じ ID が複数の提示元に当たる
+ * とき（目録の開いている事項と仮の既定など）は、各提示元に数える**——`bySource` の合計は `distinctIds` と
+ * 一致しないことがある。
+ */
+export interface SurfaceIdReuse {
+  /** 断った ID の異なる数 */
+  readonly distinctIds: number;
+  /** 提示元ごとの、断った ID の数（同じ ID が複数の提示元に当たれば各提示元に数える） */
+  readonly bySource: readonly { readonly source: SurfaceShownIdSource; readonly count: number }[];
+}
+
+/** 使い回しで断った応答 1 つぶんの記録（試行つき。値は入れない。Issue #464） */
+export interface SurfaceIdReuseRejection extends SurfaceIdReuse {
+  /** この点検での試行（1 始まり。2 回までで、2 回とも断れば `malformed`） */
+  readonly attempt: number;
+}
+
 /** P3 の洗い出しが受け取るもの */
 export interface SurfaceInput {
   readonly list: RequirementList;
@@ -206,6 +245,18 @@ export interface SurfaceInput {
    * （正規化はここで 1 回だけ行い、呼ぶ側はもう正規化しない）。
    */
   readonly onShapeValid?: (surface: PlanSurface) => void;
+  /**
+   * P3 に**データで見せた**事項 ID（提示元ごと。Issue #464）。渡すと、`ambiguities[].id` がこの集合と
+   * 完全一致する応答を**応答全体で断る**（`issue-id-reused`。既存の形のやり直しに回す）。渡さなければ
+   * 使い回しを断らない（既存の道）。
+   */
+  readonly shownIssueIds?: SurfaceShownIssueIds;
+  /**
+   * **使い回しで断った応答**を、試行ごとに受け取る口（Issue #464）。記録のための口であり、**値は入れない**
+   * ——数えた件数（異なる数・提示元ごとの数）だけを渡す。断ったあとに受理した応答は、既存の検査（制約・
+   * 対象・衝突の停止）にそのまま掛かる。
+   */
+  readonly onIdReuse?: (rejection: SurfaceIdReuseRejection) => void;
 }
 
 function checkAmbiguity(value: unknown, field: string, problems: Problem[]): PlanAmbiguity | undefined {
@@ -282,8 +333,54 @@ function checkUnwritable(value: unknown, field: string, problems: Problem[]): Pl
   };
 }
 
-/** P3 の洗い出しの応答の形を確かめる */
-export function checkSurfaceOutput(output: unknown): ShapeCheck<PlanSurface> {
+/**
+ * 応答の `ambiguities[].id` のうち、**見せた ID と完全一致する**ものの添字（純粋な関数。Issue #464）。
+ * `id` が文字列でない・空の欄は対象にしない（形の検査が別に断る）。
+ */
+export function surfaceReusedAmbiguityIndexes(output: unknown, shown: SurfaceShownIssueIds): readonly number[] {
+  if (!isRecord(output)) return [];
+  const raw = output["ambiguities"];
+  if (!Array.isArray(raw)) return [];
+  const shownAll = new Set<string>();
+  for (const source of SURFACE_SHOWN_ID_SOURCES) {
+    for (const id of shown[source]) shownAll.add(id);
+  }
+  const indexes: number[] = [];
+  raw.forEach((item, index) => {
+    if (!isRecord(item)) return;
+    const id = item["id"];
+    if (typeof id === "string" && id !== "" && shownAll.has(id)) indexes.push(index);
+  });
+  return indexes;
+}
+
+/**
+ * 応答で使い回された ID を、提示元ごとに数える（**値は入れない**。純粋な関数。Issue #464）。**同じ ID が
+ * 複数の提示元に当たるときは、各提示元に数える**——`bySource` の合計は `distinctIds` と一致しない。
+ */
+export function surfaceIdReuseOf(output: unknown, shown: SurfaceShownIssueIds): SurfaceIdReuse {
+  const raw = isRecord(output) ? output["ambiguities"] : undefined;
+  const rejected = new Set<string>();
+  if (Array.isArray(raw)) {
+    for (const index of surfaceReusedAmbiguityIndexes(output, shown)) {
+      const item = raw[index];
+      if (isRecord(item) && typeof item["id"] === "string") rejected.add(item["id"]);
+    }
+  }
+  const bySource = SURFACE_SHOWN_ID_SOURCES.map((source) => {
+    const set = new Set(shown[source]);
+    let count = 0;
+    for (const id of rejected) if (set.has(id)) count += 1;
+    return { source, count };
+  });
+  return { distinctIds: rejected.size, bySource };
+}
+
+/**
+ * P3 の洗い出しの応答の形を確かめる。`shown` を渡すと、`ambiguities[].id` が**データで見せた事項 ID**と
+ * 完全一致する応答を**応答全体で断る**（`issue-id-reused`。値は文に埋めない。Issue #464）。
+ */
+export function checkSurfaceOutput(output: unknown, shown?: SurfaceShownIssueIds): ShapeCheck<PlanSurface> {
   if (!isRecord(output)) {
     return { ok: false, problems: [{ field: "", code: "shape", message: "応答は写像（object）であること" }] };
   }
@@ -307,6 +404,17 @@ export function checkSurfaceOutput(output: unknown): ShapeCheck<PlanSurface> {
       const checked = checkUnwritable(item, `unwritable[${index}]`, problems);
       if (checked !== undefined) unwritable.push(checked);
     });
+  }
+  // 使い回し（`ambiguities[].id` が見せた ID と一致する）は、**応答全体**を断る（Issue #464）。
+  // 誤りの文に ID の値を埋めない（固定文）。
+  if (shown !== undefined) {
+    for (const index of surfaceReusedAmbiguityIndexes(output, shown)) {
+      problems.push({
+        field: `ambiguities[${index}].id`,
+        code: "issue-id-reused",
+        message: "新しい事項の ID は、データで見せた事項の ID と同じにしない（既存の事項が重大・矛盾なら、新しい ID で挙げる）",
+      });
+    }
   }
   if (problems.length > 0) {
     return { ok: false, problems: problems.map((problem) => ({ ...problem, code: problem.code ?? "shape" })) };
@@ -449,7 +557,22 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
     schema: SURFACE_SCHEMA,
     maxOutputTokens: input.gateway.maxOutputTokens("surface"),
   });
-  const answer = await callStructuredChecked(input.gateway, { request, check: checkSurfaceOutput });
+  // 使い回しの検査の試行（1 始まり）。形のやり直しと同じく 2 回まで（Issue #464）
+  let attempt = 0;
+  const answer = await callStructuredChecked(input.gateway, {
+    request,
+    // 使い回し（`ambiguities[].id` が見せた ID と一致する）は、**応答全体**を断り、既存の形のやり直しに
+    // 回す（2 回続けば `malformed`。Issue #464）。断った件は、試行ごとに `onIdReuse` で知らせる。
+    check: (output: unknown): ShapeCheck<PlanSurface> => {
+      attempt += 1;
+      const result = checkSurfaceOutput(output, input.shownIssueIds);
+      if (!result.ok && input.shownIssueIds !== undefined) {
+        const reuse = surfaceIdReuseOf(output, input.shownIssueIds);
+        if (reuse.distinctIds > 0) input.onIdReuse?.({ attempt, ...reuse });
+      }
+      return result;
+    },
+  });
   if (!answer.ok) return answer;
   // 保存用に**1 回だけ**正規化する（Issue #398・#434）。対象外の照合・記録は、この正規化のあとの値で
   // 行う（もう正規化しない。正規化は一般の文字列で冪等でないため）。
