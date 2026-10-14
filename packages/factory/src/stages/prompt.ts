@@ -12,6 +12,8 @@
 //   4. **形が合わない応答は 1 回だけやり直し、2 回続いたら段の失敗にする**（§2.2）。形（JSON Schema に
 //      沿うか）は段ごとの `check` で見る。**例外として現れる誤りは、種類ごとにやり直すか決める**
 //      （共通の口＝call.ts。timeout・network・HTTP の 5xx だけをやり直す。拒否はやり直さない。#302）。
+//      やり直しの要求は、**1 文字も変えない前置き**（`instructions`・`documents`・`rules`・schema）に、
+//      `input` の末尾だけを前回の問題（欄・分類・固定文）のデータの塊 1 つで足したものにする（#447）。
 import type { CallErrorKind, CallGateway, CallResult } from "../call.js";
 import type { LimitName } from "../limits.js";
 import type { LlmStructuredRequest } from "../llm.js";
@@ -234,6 +236,36 @@ function mapCallFailure(result: CallFailure): StageFailure {
 /** 1 つの段の答えを取るのに許す試行の回数（2 = 1 回だけやり直す。§2.2） */
 export const STEP_ATTEMPTS = 2;
 
+/**
+ * 形のやり直しで、前回の問題（欄・分類・固定文）をデータで渡す塊の名前（Issue #447）。**全段で同じ
+ * 1 つ**である。規則（`instructions`・`rules`）へは昇格させない——規則が試行ごとに変わると、キャッシュも
+ * 台帳も崩れる（`04-prompt-ledger.md` §1）。
+ */
+export const SHAPE_PROBLEMS_DATA_NAME = "前回の形の問題";
+
+/**
+ * 前回の形の問題を、データの塊 1 つにする（Issue #447）。中身は `field`・`code`（あれば）・`message` の
+ * 並びの、共通の直列化（`serializeJson`）である。**値（引用・原文・役割 ID・要件 ID・名前）は
+ * `message` に入れない**——固定文（#439・#445）と欄の添字だけが入る。
+ */
+function shapeProblemsBlock(problems: readonly Problem[]): string {
+  const rows = problems.map((problem) => ({
+    field: problem.field,
+    ...(problem.code === undefined ? {} : { code: problem.code }),
+    message: problem.message,
+  }));
+  return wrapData({ name: SHAPE_PROBLEMS_DATA_NAME, text: serializeJson(rows) });
+}
+
+/**
+ * 形のやり直しの要求を作る（Issue #447）。**1 回目の要求は変えず**、`input` の末尾へ前回の問題の
+ * データの塊を 1 つだけ足す。前置き（`instructions`・`documents`・`rules`）と schema・
+ * `maxOutputTokens` は 1 文字も変えない（キャッシュの効く部分を保つ。§2）。
+ */
+function withShapeProblems(request: LlmStructuredRequest, problems: readonly Problem[]): LlmStructuredRequest {
+  return { ...request, input: `${request.input}\n${shapeProblemsBlock(problems)}` };
+}
+
 /** 1 つの段の答えを取るための予定（要求と、形の確認） */
 export interface StructuredPlan<T> {
   readonly request: LlmStructuredRequest;
@@ -245,6 +277,12 @@ export interface StructuredPlan<T> {
  * 2 回続けて形が合わなければ `malformed` を返す。**例外として現れる誤りは、共通の口が種類ごとに
  * 分類し**（timeout・network・HTTP の 5xx だけをやり直す）、その種類のまま段の失敗になる（#302）。
  * `ok` のときだけ、形の確認を通った値を返す。
+ *
+ * **やり直しの要求は、前回の問題（欄・分類・固定文）をデータの塊 1 つで受け取る**（Issue #447）——
+ * 2 回目は何が落ちたかを知らないまま同じ要求を送る、という入力の欠落を直す。足すのは `input` の
+ * 末尾だけで、前置き（`instructions`・`documents`・`rules`・schema）は 1 文字も変えない（§2 の
+ * キャッシュを保つ）。**問題が 0 件なら塊を足さない。** 試行の回数・`malformed`・失敗の写し方は
+ * 変えない（#446 の記録も今までどおり）。
  */
 export async function callStructuredChecked<T>(
   gateway: CallGateway,
@@ -252,7 +290,9 @@ export async function callStructuredChecked<T>(
 ): Promise<StageOutcome<T>> {
   let problems: readonly Problem[] = [];
   for (let attempt = 0; attempt < STEP_ATTEMPTS; attempt += 1) {
-    const result = await gateway.callStructured(plan.request);
+    // 1 回目は変更前と byte で同じ要求（問題はまだ無い）。2 回目だけ、前回の問題の塊を末尾に足す。
+    const request = problems.length === 0 ? plan.request : withShapeProblems(plan.request, problems);
+    const result = await gateway.callStructured(request);
     if (result.kind !== "ok") return { ok: false, failure: mapCallFailure(result) };
     const checked = plan.check(result.value.output);
     if (checked.ok) return { ok: true, value: checked.value };
