@@ -391,10 +391,56 @@ export interface ReverseCheckMissCounts {
   };
 }
 
-/** 1 往復の逆照合の診断（Issue #430）。落ちの件数の内訳と、捨てた中身の無い断片の数。 */
+/** 落ちを見つけた側（有限の 2 つ。Issue #488）。 */
+export const REVERSE_CHECK_FOUND_BY = [
+  /** コードが見つけた落ち（引用の実在・位置・覆い） */
+  "code",
+  /** 逆照合の会話が挙げた落ち（覆われていない部分） */
+  "conversation",
+] as const;
+export type ReverseCheckFoundBy = (typeof REVERSE_CHECK_FOUND_BY)[number];
+
+/**
+ * 指摘 1 件の、**番号と有限の分類だけ**の記録（Issue #488）。種類・見つけた側・重なる原文の文の番号・
+ * 関わる候補要件の通し番号を持つ。**引用・原文の断片・文字の位置・要件の ID は入れない**（番号は各往復の
+ * 一覧に限って有効である。`02-failure-modes.md` §1・#445）。
+ */
+export interface ReverseCheckMissEntry {
+  /** 落ちの種類（`quote-not-found`・`position-mismatch`・`uncovered-source`） */
+  readonly kind: ReverseCheckMiss["kind"];
+  /** 見つけた側（コード／会話） */
+  readonly foundBy: ReverseCheckFoundBy;
+  /** 重なる原文の文の番号（原文を `splitSourceSentences` で切った順、1 始まり。無ければ空） */
+  readonly sentences: readonly number[];
+  /** 関わる候補要件の通し番号（その往復の一覧の順、1 始まり。無ければ空） */
+  readonly requirements: readonly number[];
+}
+
+/**
+ * 原文の文 1 つの覆い（Issue #488）。文番号（1 始まり）と、**引用（位置）が重なる候補要件の通し番号**の
+ * 並び、枠と重なるかを持つ。値・ID は入れない。
+ */
+export interface ReverseCheckSentenceCoverage {
+  /** 原文を `splitSourceSentences` で切った順の文番号（1 始まり） */
+  readonly sentence: number;
+  /** 引用（位置）が重なる候補要件の通し番号（その往復の一覧の順、1 始まり） */
+  readonly requirements: readonly number[];
+  /** 枠の範囲と重なるか */
+  readonly framing: boolean;
+}
+
+/** 1 往復の逆照合の診断（Issue #430・#488）。落ちの件数の内訳・捨てた断片の数と、番号による対応。 */
 export interface ReverseCheckRoundDiagnosis {
   readonly misses: ReverseCheckMissCounts;
   readonly droppedBlankMisses: number;
+  /** 原文の文の数 */
+  readonly sentenceCount: number;
+  /** その往復の一覧の候補要件の数 */
+  readonly requirementCount: number;
+  /** 文ごとの覆い（文番号の順） */
+  readonly sentences: readonly ReverseCheckSentenceCoverage[];
+  /** 指摘 1 件ごとの、番号と分類だけの記録（値は入れない） */
+  readonly missEntries: readonly ReverseCheckMissEntry[];
 }
 
 /** 逆照合の往復ごとの診断（Issue #430）。往復の一覧・やり直したか・やり直し後に残った落ちの内訳。 */
@@ -445,6 +491,75 @@ export function countReverseCheckMisses(
     quoteNotFound,
     positionMismatch,
     uncoveredSource: { code: codeUncovered, conversation: uncovered - codeUncovered },
+  };
+}
+
+/**
+ * 1 往復の逆照合の診断を、**番号と有限の分類だけ**で組む（Issue #488）。原文の文の数と一覧の候補要件の
+ * 数、文ごとの覆い（文番号・引用が重なる候補要件の通し番号・枠の有無）、指摘 1 件ごとの記録（種類・
+ * 見つけた側・重なる文番号・関わる候補要件の通し番号）を返す。**引用・原文の断片・文字の位置・要件の ID
+ * は入れない**——番号はこの往復の一覧に限って有効である。
+ *
+ * 見つけた側は、コードの落ち（`checkRequirementCoverage`）を**その往復の中で数え直して**求める（落ちの型を
+ * 変えず、pipeline の型に欄を足さない。`countReverseCheckMisses` と同じ手）。`misses` はコードの落ちと
+ * 会話の申告を合わせた一覧である（コードの落ちが先、会話の申告が後）。
+ */
+export function diagnoseReverseCheckRound(
+  source: string,
+  list: RequirementList,
+  misses: readonly ReverseCheckMiss[],
+  droppedBlankMisses: number,
+): ReverseCheckRoundDiagnosis {
+  const sentences = splitSourceSentences(source);
+  const overlaps = (left: SourceRange, right: SourceRange): boolean =>
+    left.start < right.end && right.start < left.end;
+  const sentenceNumbersOf = (range: SourceRange): readonly number[] =>
+    sentences.flatMap((sentence, index) => (overlaps(sentence, range) ? [index + 1] : []));
+  const requirementNumbersOf = (range: SourceRange): readonly number[] =>
+    list.requirements.flatMap((requirement, index) =>
+      overlaps(requirement.position, range) ? [index + 1] : [],
+    );
+  const coverage: readonly ReverseCheckSentenceCoverage[] = sentences.map((sentence, index) => ({
+    sentence: index + 1,
+    requirements: requirementNumbersOf(sentence),
+    framing: (list.framing ?? []).some((frame) => overlaps(frame.position, sentence)),
+  }));
+  const codeUncoveredCount = checkRequirementCoverage(source, list).filter(
+    (miss) => miss.kind === "uncovered-source",
+  ).length;
+  let uncoveredSeen = 0;
+  const entries: ReverseCheckMissEntry[] = [];
+  for (const miss of misses) {
+    if (miss.kind === "uncovered-source") {
+      uncoveredSeen += 1;
+      entries.push({
+        kind: miss.kind,
+        foundBy: uncoveredSeen <= codeUncoveredCount ? "code" : "conversation",
+        sentences: sentenceNumbersOf(miss.range),
+        requirements: requirementNumbersOf(miss.range),
+      });
+      continue;
+    }
+    const ordinal = list.requirements.findIndex((requirement) => requirement.id === miss.requirementId) + 1;
+    const requirement = list.requirements.find((candidate) => candidate.id === miss.requirementId);
+    entries.push({
+      kind: miss.kind,
+      foundBy: "code",
+      // 引用が原文に無ければ、重なる文は無い（位置は当てにしない）。位置の食い違いは、その要件の位置の文
+      sentences:
+        miss.kind === "quote-not-found" || requirement === undefined
+          ? []
+          : sentenceNumbersOf(requirement.position),
+      requirements: ordinal > 0 ? [ordinal] : [],
+    });
+  }
+  return {
+    misses: countReverseCheckMisses(source, list, misses),
+    droppedBlankMisses,
+    sentenceCount: sentences.length,
+    requirementCount: list.requirements.length,
+    sentences: coverage,
+    missEntries: entries,
   };
 }
 
@@ -540,10 +655,9 @@ export async function runReverseCheckLoopWithOperation(
     gateway: input.gateway,
   });
   if (!initial.ok) return stop(initial.failure, "reverse-check");
-  rounds.push({
-    misses: countReverseCheckMisses(input.source, first.value, initial.value.misses),
-    droppedBlankMisses: initial.value.droppedBlankMisses,
-  });
+  rounds.push(
+    diagnoseReverseCheckRound(input.source, first.value, initial.value.misses, initial.value.droppedBlankMisses),
+  );
   if (initial.value.misses.length === 0) {
     return {
       ok: true,
@@ -572,10 +686,9 @@ export async function runReverseCheckLoopWithOperation(
     gateway: input.gateway,
   });
   if (!second.ok) return stop(second.failure, "reverse-check-redo");
-  rounds.push({
-    misses: countReverseCheckMisses(input.source, redone.value, second.value.misses),
-    droppedBlankMisses: second.value.droppedBlankMisses,
-  });
+  rounds.push(
+    diagnoseReverseCheckRound(input.source, redone.value, second.value.misses, second.value.droppedBlankMisses),
+  );
   return {
     ok: true,
     value: {

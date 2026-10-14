@@ -560,3 +560,112 @@ describe("対応（重なる文の入力 ID）を P6 の覆いに使う（Issue 
     expect(withoutResult.confirmed).toBe(false);
   });
 });
+
+// ── P6 の文ごとの覆いを、番号と有限の分類で残す（Issue #488）────────────────────
+
+describe("P6 の文ごとの覆いを、番号と有限の分類で残す（Issue #488）", () => {
+  const SOURCE4 = "枠の文。出どころの文。対応の文。覆われない文。";
+  const spanOf = (quote: string): { readonly start: number; readonly end: number } => {
+    const start = SOURCE4.indexOf(quote);
+    return { start, end: start + quote.length };
+  };
+  const sourceInputs4: readonly PlanInput[] = [
+    { id: "S-1", kind: "source", text: "枠の文。" },
+    { id: "S-2", kind: "source", text: "出どころの文。" },
+    { id: "S-3", kind: "source", text: "対応の文。" },
+    { id: "S-4", kind: "source", text: "覆われない文。" },
+  ];
+  const requirements4: readonly PlanRequirement[] = [
+    { id: "R-1", text: "枠を出せる", kind: "existence", origin: { input_id: "S-1", quote: "枠の文。" }, parts: [] },
+    { id: "R-2", text: "出どころを出せる", kind: "existence", origin: { input_id: "S-2", quote: "出どころの文。" }, parts: [] },
+  ];
+  /** 枠の範囲（1 文目の「枠の文」） */
+  const framing4 = [spanOf("枠の文")];
+  /** 対応（R-1 は S-1 由来。対応の並びに S-3 を持つ） */
+  const correspondence4 = new Map([["R-1", ["S-3"]]]);
+  /** 4 文への覆いの助言（閾値 0.6 の直前・ちょうど・直後を分ける） */
+  const judge4 = () =>
+    createFakeJudge(
+      {
+        [confirmQuestionName("S-1")]: noul(0.59),
+        [confirmQuestionName("S-2")]: noul(0.6),
+        [confirmQuestionName("S-3")]: noul(0.61),
+        [confirmQuestionName("S-4")]: noul(0.9),
+      },
+      { model: "fake-judge" },
+    );
+
+  it("(e) 枠・出どころ・対応・無しを 1 つずつ持ち、複数の覆いが成立する文は先の分類になり、助言の閾値の前後を分ける", async () => {
+    const result = await runConfirm(
+      validInput({
+        source: SOURCE4,
+        inputs: sourceInputs4,
+        requirements: requirements4,
+        framing: framing4,
+        sourceCorrespondence: correspondence4,
+        openIssues: [],
+        decisions: [],
+        judge: judge4(),
+      }),
+    );
+    expect(result.coverage).toEqual([
+      { sentence: 1, coverage: "framing", correspondence: "false", meetsThreshold: false },
+      { sentence: 2, coverage: "origin", correspondence: "false", meetsThreshold: true },
+      { sentence: 3, coverage: "correspondence", correspondence: "true", meetsThreshold: true },
+      { sentence: 4, coverage: "none", correspondence: "false", meetsThreshold: true },
+    ]);
+    // 既存の `problems`・`confirmed` は欄を足す前と等しい（4 文目だけが覆われていない）
+    expect(result.problems).toEqual([
+      { code: "uncovered-source", path: "source[3]", message: "原文の文がどの要件にも覆われていない" },
+    ]);
+    expect(result.confirmed).toBe(false);
+    // `plan` に新しい欄は混ざらず、確認の SHA-256 も持つ
+    expect(Object.keys(result.plan)).not.toContain("coverage");
+    expect(result.plan.confirmation.sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("(e) 対応を渡さない単独呼び出しでは、対応が未観測になり、対応の文は覆いの根拠にならない", async () => {
+    const result = await runConfirm(
+      validInput({
+        source: SOURCE4,
+        inputs: sourceInputs4,
+        requirements: requirements4,
+        framing: framing4,
+        openIssues: [],
+        decisions: [],
+        judge: judge4(),
+      }),
+    );
+    expect(result.coverage.map((row) => row.correspondence)).toEqual([
+      "unobserved",
+      "unobserved",
+      "unobserved",
+      "unobserved",
+    ]);
+    expect(result.coverage.map((row) => row.coverage)).toEqual(["framing", "origin", "none", "none"]);
+    // 対応が無いので、3 文目・4 文目が覆われていない
+    expect(result.problems.map((problem) => problem.path)).toEqual(["source[2]", "source[3]"]);
+  });
+
+  it("(e) 対応を渡して、当該文を含まなければ、その文の対応は偽になる", async () => {
+    const result = await runConfirm(
+      validInput({
+        source: SOURCE4,
+        inputs: sourceInputs4,
+        requirements: requirements4,
+        framing: framing4,
+        // 対応の並びに S-3 を含まない（3 文目は対応で覆われない）
+        sourceCorrespondence: new Map([["R-1", ["S-2"]]]),
+        openIssues: [],
+        decisions: [],
+        judge: judge4(),
+      }),
+    );
+    expect(result.coverage[2]).toEqual({
+      sentence: 3,
+      coverage: "none",
+      correspondence: "false",
+      meetsThreshold: true,
+    });
+  });
+});

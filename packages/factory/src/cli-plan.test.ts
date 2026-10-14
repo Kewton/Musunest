@@ -388,6 +388,20 @@ interface PlanCliRecordShape {
         readonly uncovered_source: { readonly code: number; readonly conversation: number };
       };
       readonly dropped_blank_misses: number;
+      /** 文ごとの覆い（Issue #488） */
+      readonly sentence_count: number;
+      readonly requirement_count: number;
+      readonly sentences: readonly {
+        readonly sentence: number;
+        readonly requirements: readonly number[];
+        readonly framing: boolean;
+      }[];
+      readonly miss_entries: readonly {
+        readonly kind: string;
+        readonly found_by: string;
+        readonly sentences: readonly number[];
+        readonly requirements: readonly number[];
+      }[];
     }[];
     readonly redone: boolean;
     readonly unmet: {
@@ -465,6 +479,42 @@ interface PlanCliRecordShape {
     readonly rejected_claims: number;
     readonly rejected_ambiguities: number;
     readonly kinds: readonly { readonly kind: string; readonly claims: number; readonly ambiguities: number }[];
+  }[];
+  /** 往復ごとの事項の流れ（件数と有限の分類だけ。Issue #488） */
+  readonly issue_flow: readonly {
+    readonly revision: number;
+    readonly start_open: number;
+    readonly opened: {
+      readonly total: number;
+      readonly initial: number;
+      readonly diff: number;
+      readonly by_origin: readonly { readonly origin: string; readonly count: number }[];
+    };
+    readonly closed: {
+      readonly total: number;
+      readonly answer_main: number;
+      readonly also_closes: number;
+      readonly source: number;
+      readonly default: number;
+    };
+    readonly inherited_resolved: number;
+    readonly end_open: { readonly critical: number; readonly non_critical: number };
+    readonly end: string;
+  }[];
+  /** 終わりに残った（開いている）事項 1 つずつ（値は入れない。Issue #488） */
+  readonly remaining_open_issues: readonly {
+    readonly origin: string;
+    readonly revision: number;
+    readonly critical: boolean;
+    readonly requirement_kind: string;
+    readonly facet_id: string | null;
+  }[];
+  /** P6 の文ごとの覆い（文番号と分類。値は入れない。Issue #488） */
+  readonly confirm_coverage: readonly {
+    readonly sentence: number;
+    readonly coverage: string;
+    readonly correspondence: string;
+    readonly meets_threshold: boolean | null;
   }[];
   readonly spent_usd: number;
   readonly remaining_usd: number;
@@ -1472,11 +1522,24 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
       position_mismatch: 0,
       uncovered_source: { code: 1, conversation: 1 },
     };
-    expect(record.requirements_diagnosis).toEqual({
-      rounds: [
-        { misses: expected, dropped_blank_misses: 0 },
-        { misses: expected, dropped_blank_misses: 0 },
+    // 文ごとの覆いと指摘の行（番号と有限の分類だけ。Issue #488）
+    const expectedRound = {
+      misses: expected,
+      dropped_blank_misses: 0,
+      sentence_count: 2,
+      requirement_count: 2,
+      sentences: [
+        { sentence: 1, requirements: [1], framing: false },
+        { sentence: 2, requirements: [], framing: false },
       ],
+      miss_entries: [
+        { kind: "quote-not-found", found_by: "code", sentences: [], requirements: [2] },
+        { kind: "uncovered-source", found_by: "code", sentences: [2], requirements: [] },
+        { kind: "uncovered-source", found_by: "conversation", sentences: [1], requirements: [1] },
+      ],
+    };
+    expect(record.requirements_diagnosis).toEqual({
+      rounds: [expectedRound, expectedRound],
       redone: true,
       unmet: expected,
     });
@@ -3188,5 +3251,110 @@ describe("台本のファイルを渡す（04 §9・Issue #444）", () => {
     }
     // Build も呼ばない
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+// ── Plan の記録に、事項の流れ・残りの事項・P6 の覆いを残す（04 §7・Issue #488）────
+
+describe("Plan の記録に、事項の流れ・残りの事項・P6 の覆いを残す（04 §7・Issue #488）", () => {
+  it("確定した Plan の記録に新しい欄が出て、番号・分類・件数・往復の版だけを持ち、値（目印・ID）を含まない", async () => {
+    const recording = planThenBuildRecording();
+    const judge = createFakeJudge({ ...catalogAnswers(), ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]) });
+    const dir = `${directory}/issue-flow`;
+    const answersPath = "issue-flow-answers.json";
+
+    await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: () => {},
+    });
+
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("confirmed");
+    // 事項の流れ：版・件数・有限の分類だけを持つ。収支が合う
+    expect(record.issue_flow.length).toBeGreaterThan(0);
+    for (const row of record.issue_flow) {
+      expect(typeof row.revision).toBe("number");
+      expect(typeof row.start_open).toBe("number");
+      expect(row.end).toMatch(/^(judged|stopped)$/);
+      expect(row.end_open.critical + row.end_open.non_critical).toBe(
+        row.start_open + row.opened.total - row.closed.total,
+      );
+      for (const entry of row.opened.by_origin) {
+        expect(typeof entry.origin).toBe("string");
+        expect(typeof entry.count).toBe("number");
+      }
+    }
+    // すべて閉じたので、終わりに残った事項は無い
+    expect(record.remaining_open_issues).toEqual([]);
+    // P6 まで届いたので、文ごとの覆いが出る（文番号と分類だけ）
+    expect(record.confirm_coverage.map((row) => row.coverage)).toEqual(["origin", "origin"]);
+    expect(record.confirm_coverage.map((row) => row.sentence)).toEqual([1, 2]);
+    // 値（事項 ID・要件 ID・依頼文の断片）は、新しい欄に出ない
+    const text = JSON.stringify({
+      issue_flow: record.issue_flow,
+      remaining_open_issues: record.remaining_open_issues,
+      confirm_coverage: record.confirm_coverage,
+    });
+    expect(text).not.toContain("OI:");
+    expect(text).not.toContain("R-");
+    expect(text).not.toContain("R:");
+    expect(text).not.toContain(SOURCE_TEXT.slice(0, 4));
+  });
+
+  it("P6 まで届かない組では、confirm_coverage が空の並びになる", async () => {
+    // 引用が原文に無い要件を返し、やり直しても残る（P2 で確定できない）
+    const paraphrase = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "タスクを登録する", position: { start: 0, end: 8 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する", position: { start: 9, end: 16 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const dir = `${directory}/no-confirm-coverage`;
+    const answersPath = "no-confirm-coverage-answers.json";
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => createFakeJudge({}),
+      now: () => 0,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("cannot-confirm");
+    // P6 まで届かないので、P6 の欄は空の並び
+    expect(record.confirm_coverage).toEqual([]);
+    // P2 の診断は止まるまでの分（初回＋やり直し）を持つ
+    expect(record.requirements_diagnosis.rounds).toHaveLength(2);
   });
 });

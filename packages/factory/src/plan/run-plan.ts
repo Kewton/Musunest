@@ -78,7 +78,7 @@ import {
   type InheritedFacet,
   type UnspecifiedFacet,
 } from "./catalog.js";
-import { runConfirm, type ConfirmProblem } from "./confirm.js";
+import { runConfirm, type ConfirmProblem, type ConfirmSentenceCoverage } from "./confirm.js";
 import { alsoClosesOf, assignQuestionIds, runQuestions, type PlanQuestion, type PlanSourceClosure } from "./questions.js";
 import {
   nextPlanStep,
@@ -89,6 +89,7 @@ import {
 } from "./session.js";
 import { runSurface, type PlanUnwritable, type SurfaceCatalogData, type SurfaceContext, type SurfaceContextQuestionAnswer, type SurfaceIdReuseRejection, type SurfaceOutOfScopeRef, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt, type SurfaceTargetAttemptResult } from "./surface.js";
 import {
+  PLAN_OPEN_ISSUE_ORIGINS,
   PLAN_OPEN_ISSUE_SOURCES,
   classifyOpenIssueConflict,
   detectOpenIssueCollisions,
@@ -652,6 +653,107 @@ export interface PlanSurfaceTargetAttempt {
   readonly kinds: readonly PlanDiffOutOfScopeKindCount[];
 }
 
+/**
+ * 往復 1 つの終わり方（有限の 2 つ。Issue #488）。**次の一歩の判定まで進んだ行**か、**途中で止まった行**
+ * かを示す。
+ */
+export const PLAN_ISSUE_FLOW_ENDS = [
+  /** 次の一歩の判定（`nextPlanStep`）まで進んだ */
+  "judged",
+  /** 判定の前に途中で止まった（段の失敗・予算・締切・差分点検の確定不能など） */
+  "stopped",
+] as const;
+export type PlanIssueFlowEnd = (typeof PLAN_ISSUE_FLOW_ENDS)[number];
+
+/** 由来別の、新しく開いた事項の件数（Issue #488） */
+export interface PlanIssueFlowOriginCount {
+  readonly origin: PlanOpenIssueOrigin;
+  readonly count: number;
+}
+
+/**
+ * 往復 1 つで**新しく open として足した事項の件数**（Issue #488）。合計・初回の点検で開いた件数・差分の
+ * 点検で開いた件数・由来別の件数を持つ。**追加時から resolved の引き継ぎはここに入れない**（別の件数）。
+ */
+export interface PlanIssueFlowOpened {
+  readonly total: number;
+  /** 初回の点検（版 1）で開いた件数 */
+  readonly initial: number;
+  /** 差分の点検（版 2 以降）で開いた件数 */
+  readonly diff: number;
+  readonly byOrigin: readonly PlanIssueFlowOriginCount[];
+}
+
+/** 往復 1 つで**実際に open から resolved へ変えた事項の件数**（閉じ方の別。Issue #488） */
+export interface PlanIssueFlowClosed {
+  readonly total: number;
+  /** 問いの主の事項として閉じた件数 */
+  readonly answerMain: number;
+  /** 問いの「一緒に閉じる」事項として閉じた件数 */
+  readonly alsoCloses: number;
+  /** 依頼文の引用で閉じた件数 */
+  readonly source: number;
+  /** 許可の表の既定で閉じた件数 */
+  readonly default: number;
+}
+
+/** 終了時の、開いている事項の件数（重大・重大でない別。Issue #488） */
+export interface PlanIssueFlowOpenCounts {
+  readonly critical: number;
+  readonly nonCritical: number;
+}
+
+/**
+ * 往復 1 つぶんの事項の流れ（Issue #488）。版（初回 1、差分で増える）ごとに、開始時の開いている件数・
+ * 新しく開いた件数（由来・初回／差分別）・実際に閉じた件数（閉じ方の別）・追加時から resolved の引き継ぎ・
+ * 終了時の開いている件数（重大・重大でない別）・終わり方（判定済み／途中停止）を持つ。**事項 ID・要件 ID・
+ * 文・答えは入れない**。終了時の開いている件数＝開始時の件数＋新しく開いた件数−実際に閉じた件数である。
+ */
+export interface PlanIssueFlowRecord {
+  readonly revision: number;
+  readonly startOpen: number;
+  readonly opened: PlanIssueFlowOpened;
+  readonly closed: PlanIssueFlowClosed;
+  /** 追加時から resolved の引き継ぎの件数（開閉の収支には含めない） */
+  readonly inheritedResolved: number;
+  readonly endOpen: PlanIssueFlowOpenCounts;
+  readonly end: PlanIssueFlowEnd;
+}
+
+/**
+ * 終わりに残った事項の、対象の要件の種類（有限。**`DIFF_OUT_OF_SCOPE_KINDS` と同じ考え方**に、コードが
+ * 対応を持たない `none` を足したもの。Issue #488）。**値・ID は入れない**。
+ */
+export const PLAN_REMAINING_REQUIREMENT_KINDS = [
+  /** 原文に由来する要件 */
+  "source",
+  /** 前の往復の答えに由来する要件 */
+  "previous-answer",
+  /** 了承除外の代わりの案の要件 */
+  "alternative",
+  /** 存在しない要件 ID */
+  "unknown",
+  /** 存在するが、分類できない */
+  "unclassified",
+  /** コードが対象の要件の対応を持たない */
+  "none",
+] as const;
+export type PlanRemainingRequirementKind = (typeof PLAN_REMAINING_REQUIREMENT_KINDS)[number];
+
+/**
+ * 終わりに残った（開いている）事項 1 つぶんの記録（**値は入れない**。Issue #488）。由来・開いた往復の版・
+ * 重大か・対象の要件の種類・目録の観点 ID（目録の行だけ）を持つ。事項 ID・要件 ID・文・答えは入れない。
+ */
+export interface PlanRemainingOpenIssue {
+  readonly origin: PlanOpenIssueOrigin;
+  /** その行を開いた往復の版 */
+  readonly revision: number;
+  readonly critical: boolean;
+  readonly requirementKind: PlanRemainingRequirementKind;
+  /** 目録の行なら観点 ID（目録の一覧から引いた値だけ。それ以外は `null`） */
+  readonly facetId: string | null;
+}
+
 /** 3 つの結果に共通する記録（使った額・残りの額・段ごとの記録・判定の呼び出し） */
 export interface PlanResultBase {
   /** 段ごとの記録（生成の段の記録と同じ形） */
@@ -706,6 +808,21 @@ export interface PlanResultBase {
    * 試行ごとに 1 行を残す。照合を渡した点検が無ければ空である。
    */
   readonly surfaceTargetAttempts: readonly PlanSurfaceTargetAttempt[];
+  /**
+   * 往復ごとの事項の流れ（版ごとの、開いた・閉じた・残りの件数。Issue #488）。確定・確定できない・止まった
+   * の 3 つの結果に共通で、途中で止まった行も観測済みの分を残す。**値は入れず、件数と有限の分類だけ**。
+   */
+  readonly issueFlow: readonly PlanIssueFlowRecord[];
+  /**
+   * 終わりに残った（開いている）事項 1 つずつの記録（由来・開いた往復の版・重大か・対象の要件の種類・
+   * 目録の観点 ID。Issue #488）。**値は入れない**——事項 ID・要件 ID・文・答えは含まない。
+   */
+  readonly remainingOpenIssues: readonly PlanRemainingOpenIssue[];
+  /**
+   * P6 の文ごとの覆いの記録（文番号と覆いの分類。Issue #488）。**P6 まで届かなければ空の並び**である。
+   * 値（原文の文・引用・ID）は入れない。
+   */
+  readonly confirmCoverage: readonly ConfirmSentenceCoverage[];
 }
 
 /** 依頼文で閉じた事項から作る `decisions` の ID の頭（確認の画面が「依頼文で決めたこと」を見分ける） */
@@ -1032,6 +1149,23 @@ interface MutableDiffReview {
   inheritMultipleParents: number;
   inheritMisses: Map<InheritFacetMissKind, number>;
   openBySource: Map<PlanDiffOpenIssueSource, number>;
+}
+
+/** 往復 1 つぶんの事項の流れの、書き込み用の中身（Issue #488）。結果に写すときに分類別に組み直す */
+interface MutableIssueFlowRow {
+  revision: number;
+  startOpen: number;
+  openedTotal: number;
+  openedInitial: number;
+  openedDiff: number;
+  openedByOrigin: Map<PlanOpenIssueOrigin, number>;
+  closedAnswerMain: number;
+  closedAlsoCloses: number;
+  closedSource: number;
+  closedDefault: number;
+  inheritedResolved: number;
+  endOpen: PlanIssueFlowOpenCounts | null;
+  end: PlanIssueFlowEnd | null;
 }
 
 /** 受理した申告 1 つぶんの控え（重複の照合に使う。Issue #434） */
@@ -1422,6 +1556,100 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const surfaceIdReuse: PlanSurfaceIdReuseEntry[] = [];
   /** 照合まで届いた試行 1 つずつの記録（値は入れない。Issue #484） */
   const surfaceTargetAttempts: PlanSurfaceTargetAttempt[] = [];
+
+  // ── 往復ごとの事項の流れの記録（件数と有限の分類だけ。Issue #488）────────────────
+  const issueFlowRows: MutableIssueFlowRow[] = [];
+  let currentIssueFlow: MutableIssueFlowRow | null = null;
+  /** いま開いている事項の件数（重大・重大でない別） */
+  const openIssueCounts = (): PlanIssueFlowOpenCounts => {
+    let critical = 0;
+    let nonCritical = 0;
+    for (const issue of openIssues) {
+      if (issue.status !== "open") continue;
+      if (issue.critical) critical += 1;
+      else nonCritical += 1;
+    }
+    return { critical, nonCritical };
+  };
+  /** 事項の流れの 1 行を始める（開始時の開いている件数を控える） */
+  const beginIssueFlow = (version: number): void => {
+    currentIssueFlow = {
+      revision: version,
+      startOpen: openIssues.filter((issue) => issue.status === "open").length,
+      openedTotal: 0,
+      openedInitial: 0,
+      openedDiff: 0,
+      openedByOrigin: new Map(),
+      closedAnswerMain: 0,
+      closedAlsoCloses: 0,
+      closedSource: 0,
+      closedDefault: 0,
+      inheritedResolved: 0,
+      endOpen: null,
+      end: null,
+    };
+    issueFlowRows.push(currentIssueFlow);
+  };
+  /** 事項の流れの 1 行を終える（終了時の件数と、終わり方を控える。二重に閉じない） */
+  const endIssueFlow = (end: PlanIssueFlowEnd): void => {
+    if (currentIssueFlow === null || currentIssueFlow.end !== null) return;
+    currentIssueFlow.endOpen = openIssueCounts();
+    currentIssueFlow.end = end;
+  };
+  /**
+   * 終わりに残った（開いている）事項 1 つずつの記録（値は入れない。Issue #488）。由来・開いた往復の版・
+   * 重大か・対象の要件の種類・目録の観点 ID（目録の行だけ）を持つ。
+   */
+  const buildRemainingOpenIssues = (): readonly PlanRemainingOpenIssue[] =>
+    openIssues.flatMap((issue, index) => {
+      if (issue.status !== "open") return [];
+      const facet = catalogIssueFacets.get(issue.id);
+      const requirementId = facet?.requirementId ?? surfaceIssueRequirements.get(issue.id);
+      return [
+        {
+          origin: openIssueOrigins[index] ?? openIssueSources[index] ?? "unresolved",
+          revision: openIssueCreatedIn[index] ?? 1,
+          critical: issue.critical,
+          requirementKind: classifyRemainingRequirementKind(requirementId),
+          facetId: facet?.facetId ?? null,
+        },
+      ];
+    });
+  /** 往復ごとの流れを、結果の形（由来別の件数を組み直す）に写す（Issue #488） */
+  const buildIssueFlow = (): readonly PlanIssueFlowRecord[] =>
+    issueFlowRows.map((row) => ({
+      revision: row.revision,
+      startOpen: row.startOpen,
+      opened: {
+        total: row.openedTotal,
+        initial: row.openedInitial,
+        diff: row.openedDiff,
+        byOrigin: PLAN_OPEN_ISSUE_ORIGINS.flatMap((origin) => {
+          const count = row.openedByOrigin.get(origin) ?? 0;
+          return count === 0 ? [] : [{ origin, count }];
+        }),
+      },
+      closed: {
+        total: row.closedAnswerMain + row.closedAlsoCloses + row.closedSource + row.closedDefault,
+        answerMain: row.closedAnswerMain,
+        alsoCloses: row.closedAlsoCloses,
+        source: row.closedSource,
+        default: row.closedDefault,
+      },
+      inheritedResolved: row.inheritedResolved,
+      endOpen: row.endOpen ?? { critical: 0, nonCritical: 0 },
+      end: row.end ?? "stopped",
+    }));
+  /**
+   * 対象の要件の種類を分類する（Issue #488）。要件の対応（`requirements`・`sourceInputs`・`answerInputs`・
+   * `acceptedUnwritable`）を組んだ後で差し替える。差し替える前は `none`。
+   */
+  let classifyRemainingRequirementKind: (
+    requirementId: string | undefined,
+  ) => PlanRemainingRequirementKind = () => "none";
+  /** P6 の文ごとの覆いの記録（P6 まで届かなければ空。Issue #488） */
+  let confirmCoverage: readonly ConfirmSentenceCoverage[] = [];
+
   /** 帰属の組を、足した順によらない数え上げの鍵にする（Issue #464） */
   const attributionKeyOf = (group: { first: PlanOpenIssueRowAttribution; second: PlanOpenIssueRowAttribution }): string =>
     `${group.first.origin}\u0000${group.first.status}\u0000${group.first.current ? 1 : 0}\u0000${group.second.origin}\u0000${group.second.status}\u0000${group.second.current ? 1 : 0}`;
@@ -1480,6 +1708,18 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     openIssueSources.push(source);
     openIssueOrigins.push(origin ?? source);
     openIssueCreatedIn.push(revision);
+    // 事項の流れに、開いた件数（由来・初回／差分別）か、追加時から resolved の引き継ぎを数える（Issue #488）
+    if (currentIssueFlow !== null) {
+      if (issue.status === "open") {
+        currentIssueFlow.openedTotal += 1;
+        if (currentIssueFlow.revision === 1) currentIssueFlow.openedInitial += 1;
+        else currentIssueFlow.openedDiff += 1;
+        const key = origin ?? source;
+        currentIssueFlow.openedByOrigin.set(key, (currentIssueFlow.openedByOrigin.get(key) ?? 0) + 1);
+      } else {
+        currentIssueFlow.inheritedResolved += 1;
+      }
+    }
   };
   /**
    * 使い回しで断った応答を、点検の版（`check`）と試行ごとに記録する（Issue #464）。記録は**値を持たない**
@@ -1692,21 +1932,28 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     }),
   });
 
-  const resultBase = (): PlanResultBase => ({
-    stages: stages.slice(),
-    spentUsd: budget.spentUsd,
-    remainingUsd: budget.remainingUsd,
-    judge: { calls_by_adapter: judgeBudget.callsByAdapter, cost_usd: judgeBudget.spentUsd },
-    closedBySource: closedBySource.slice(),
-    closedByDefault: closedByDefaults.slice(),
-    requirementsDiagnosis,
-    surfaceCheck: aggregateSurfaceCheck(),
-    surfaceCheckDiagnostics: aggregateSurfaceCheckDiagnostics(),
-    diffReviews: diffReviews.map(finalizeDiffReview),
-    openIssueConflicts: buildOpenIssueConflicts(),
-    surfaceIdReuse: surfaceIdReuse.slice(),
-    surfaceTargetAttempts: surfaceTargetAttempts.slice(),
-  });
+  const resultBase = (): PlanResultBase => {
+    // 途中で止まった行も観測済みの分を残す（判定まで進んだ行は既に閉じてある。Issue #488）
+    endIssueFlow("stopped");
+    return {
+      stages: stages.slice(),
+      spentUsd: budget.spentUsd,
+      remainingUsd: budget.remainingUsd,
+      judge: { calls_by_adapter: judgeBudget.callsByAdapter, cost_usd: judgeBudget.spentUsd },
+      closedBySource: closedBySource.slice(),
+      closedByDefault: closedByDefaults.slice(),
+      requirementsDiagnosis,
+      surfaceCheck: aggregateSurfaceCheck(),
+      surfaceCheckDiagnostics: aggregateSurfaceCheckDiagnostics(),
+      diffReviews: diffReviews.map(finalizeDiffReview),
+      openIssueConflicts: buildOpenIssueConflicts(),
+      surfaceIdReuse: surfaceIdReuse.slice(),
+      surfaceTargetAttempts: surfaceTargetAttempts.slice(),
+      issueFlow: buildIssueFlow(),
+      remainingOpenIssues: buildRemainingOpenIssues(),
+      confirmCoverage: confirmCoverage.slice(),
+    };
+  };
 
   /**
    * 同じ ID の開いている事項の行の衝突で確定できない結果（Issue #460）。**値の中身を含まない**——理由は
@@ -1787,6 +2034,27 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       value: decision,
       reason: "Plan が既定で決めた（確認の画面で直せる）",
     }));
+    // 了承して除く部分（受理した申告を写す先。Issue #434）。事項の流れの分類にも使うので早めに置く（#488）
+    const acceptedUnwritable: PlanAcceptedUnwritable[] = [];
+    /**
+     * 対象の要件の種類を、コードの対応から分類する（Issue #488）。`DIFF_OUT_OF_SCOPE_KINDS` と同じ考え方に、
+     * 対応を持たない `none` を足す。要件 ID の字面からは推測しない。
+     */
+    classifyRemainingRequirementKind = (requirementId) => {
+      if (requirementId === undefined) return "none";
+      const matches = requirements.filter((requirement) => requirement.id === requirementId);
+      if (matches.length === 0) return "unknown";
+      if (matches.length !== 1) return "unclassified";
+      if (acceptedUnwritable.some((entry) => entry.alternative_id === requirementId)) return "alternative";
+      const requirement = matches[0];
+      if (requirement === undefined) return "unclassified";
+      const inputId = requirement.origin.input_id;
+      if (sourceInputs.some((source) => source.id === inputId)) return "source";
+      if (answerInputs.some((answer) => answer.id === inputId)) return "previous-answer";
+      return "unclassified";
+    };
+    // 事項の流れの版 1（初回の点検から最初の次の一歩の判定まで）を始める（Issue #488）
+    beginIssueFlow(1);
     for (const [index, text] of list.unresolved.entries()) {
       addOpenIssue(
         { id: `OI:unresolved:${index + 1}`, text, critical: true, status: "open" },
@@ -2008,7 +2276,6 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     // （§4・U-P2）。落とした申告・曖昧さと判定した申告の要件は**そのまま残す**（Build が書く）。代わりの案は、
     // 宣言で書ける近い形を 1 つ出したものなので、要件として残し、部分から代わりの案の ID で指す。
     // **初回と差分で同じ関数**を使う（Issue #434）。
-    const acceptedUnwritable: PlanAcceptedUnwritable[] = [];
     applyAcceptedUnwritable(surfaceCheck.accepted);
 
     // ── 往復（P4 質問 → 次の一歩 → P5 答えの反映）────────────────────────
@@ -2056,17 +2323,22 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       return target.index;
     };
 
-    const resolveIssue = (issueId: string, answerId: string): void => {
+    const resolveIssue = (issueId: string, answerId: string, kind: "main" | "also-closes"): void => {
       const index = resolveTargetIndex(issueId);
       const issue = index === undefined ? undefined : openIssues[index];
       if (index === undefined || issue === undefined) return;
       openIssues[index] = { ...issue, status: "resolved", resolution: { answer_id: answerId } };
+      // 事項の流れに、閉じ方の別（主の事項／一緒に閉じる事項）で数える（Issue #488）
+      if (currentIssueFlow !== null) {
+        if (kind === "main") currentIssueFlow.closedAnswerMain += 1;
+        else currentIssueFlow.closedAlsoCloses += 1;
+      }
     };
 
     /** 問いの主の事項と、一緒に閉じる事項（`alsoCloses`）を、同じ答えの ID で閉じる（04 §3 P4） */
     const resolveQuestionIssues = (question: PlanQuestion, answerId: string): void => {
-      resolveIssue(question.openIssueId, answerId);
-      for (const id of alsoClosesOf(question)) resolveIssue(id, answerId);
+      resolveIssue(question.openIssueId, answerId, "main");
+      for (const id of alsoClosesOf(question)) resolveIssue(id, answerId, "also-closes");
     };
 
     /**
@@ -2096,6 +2368,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         status: "resolved",
         resolution: { decision_id: decisionId, reason: closure.quote },
       };
+      // 事項の流れに、依頼文で閉じた件数を数える（Issue #488）
+      if (currentIssueFlow !== null) currentIssueFlow.closedSource += 1;
     };
 
     /**
@@ -2129,6 +2403,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         openIssues[index] = { ...issue, status: "resolved", resolution: { decision_id: decisionId, reason } };
         closedByDefaults.push({ issueId, facetId: facet.facetId, value: applied.value });
         closureDecisionIds.set(issueId, decisionId);
+        // 事項の流れに、既定で閉じた件数を数える（Issue #488）
+        if (currentIssueFlow !== null) currentIssueFlow.closedDefault += 1;
       }
     };
 
@@ -2651,6 +2927,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         questions,
         view,
       });
+      // この版の事項の流れは、次の一歩の判定まで進んだ（Issue #488）
+      endIssueFlow("judged");
       if (step.kind === "cannot-confirm") {
         return {
           kind: "cannot-confirm",
@@ -2668,6 +2946,10 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         }
         break;
       }
+
+      // 次の版の事項の流れを始める（直前の答えの反映から差分点検・既定と原文の閉鎖を経て次の判定まで。
+      // Issue #488）。答えの反映で閉じる件数と、差分点検で開く件数が、この行に入る。
+      beginIssueFlow(revision + 1);
 
       // ── 質問を出す（P4）。残りの問数の範囲だけを出す ────────────────────
       const asked = step.questions;
@@ -2782,6 +3064,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       }),
     );
     const problems = await checkConfirmedPlan(confirmed.plan);
+    // P6 の文ごとの覆いの記録を、結果に残す（Issue #488）。確定できなかった場合も、P6 まで届いた分を残す
+    confirmCoverage = confirmed.coverage;
     if (!confirmed.confirmed || problems.length > 0) {
       // 確定できなかった理由を全件残す（P6 の覆い・確定した仕様の検査。値の中身は含めない。Issue #397）。
       // `planProblems`（P6 の中の検査）と `problems`（外側の検査）の重なりは、同じ source・code・path
