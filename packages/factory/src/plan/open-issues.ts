@@ -108,14 +108,87 @@ export interface PlanOpenIssueConflictKindCount {
 }
 
 /**
- * 開いている事項の衝突の記録（**値は入れない**。件数と有限の分類と版だけ。Issue #460）。事項 ID・要件 ID・
- * 文・答えは写さない。
+ * 衝突した行の**由来**（有限。Issue #464）。**ID の接頭辞や文からは推測しない**——`runPlan` が内部の
+ * 対応で持つ。**目録の通常の行（`catalog`）と引き継ぎの行（`inherit`）を分ける**（どちらも
+ * `PlanOpenIssueSource` では `catalog` になるが、帰属の記録では別の由来である）。P3 の曖昧さは `surface`、
+ * それ以外の既存の出どころは `unresolved`・`surface-check`・`contradiction` である。
+ */
+export const PLAN_OPEN_ISSUE_ORIGINS = [
+  /** 目録の通常の行（`runCatalog` の未指定の観点） */
+  "catalog",
+  /** 引き継ぎの行（答えが解いた観点を引き継いだ行。Issue #461） */
+  "inherit",
+  /** P3 の曖昧さ */
+  "surface",
+  /** P3 の申告の点検で曖昧さと判定した申告 */
+  "surface-check",
+  /** 要件化（P1）の未解決 */
+  "unresolved",
+  /** 答えの矛盾からの再質問 */
+  "contradiction",
+] as const;
+export type PlanOpenIssueOrigin = (typeof PLAN_OPEN_ISSUE_ORIGINS)[number];
+
+/** 有限の由来の並びの位置（帰属の組を、足した順によらず決めるのに使う） */
+const ORIGIN_ORDER: ReadonlyMap<string, number> = new Map(
+  PLAN_OPEN_ISSUE_ORIGINS.map((origin, index) => [origin, index]),
+);
+
+/**
+ * 衝突した片側の行の帰属（**値は入れない**。Issue #464）——由来・状態（open／resolved）と、その行を
+ * **衝突を検出した往復と同じ往復で作ったか**（`current`。以前なら `false`）。
+ */
+export interface PlanOpenIssueRowAttribution {
+  readonly origin: PlanOpenIssueOrigin;
+  readonly status: "open" | "resolved";
+  readonly current: boolean;
+}
+
+/** 衝突した 2 行の帰属の組（**足した順によらない**。Issue #464） */
+export interface PlanOpenIssueConflictGroup {
+  readonly first: PlanOpenIssueRowAttribution;
+  readonly second: PlanOpenIssueRowAttribution;
+}
+
+/** 帰属 1 つを、足した順によらない比較の鍵にする（由来の並び → 状態 → 今回か以前か） */
+function attributionKey(attribution: PlanOpenIssueRowAttribution): string {
+  const order = ORIGIN_ORDER.get(attribution.origin) ?? PLAN_OPEN_ISSUE_ORIGINS.length;
+  return `${order}\u0000${attribution.status}\u0000${attribution.current ? 1 : 0}`;
+}
+
+/**
+ * 衝突した 2 行を、**足した順によらない**帰属の組に写す（**純粋な関数**。Issue #464）。由来の並びは
+ * `PLAN_OPEN_ISSUE_ORIGINS` の順で決める——**通常の目録の行どうしの衝突と、通常の目録の行と引き継ぎの
+ * 行の衝突は、別の組になる**（どちらの行を先に足しても同じ組になる）。
+ */
+export function classifyOpenIssueConflict(
+  a: PlanOpenIssueRowAttribution,
+  b: PlanOpenIssueRowAttribution,
+): PlanOpenIssueConflictGroup {
+  return attributionKey(a) <= attributionKey(b) ? { first: a, second: b } : { first: b, second: a };
+}
+
+/** 衝突した 2 行の帰属の組ごとの件数（**値は入れない**。Issue #464） */
+export interface PlanOpenIssueConflictAttributionCount {
+  readonly first: PlanOpenIssueRowAttribution;
+  readonly second: PlanOpenIssueRowAttribution;
+  readonly count: number;
+}
+
+/**
+ * 開いている事項の衝突の記録（**値は入れない**。件数と有限の分類と版だけ。Issue #460・#464）。事項 ID・
+ * 要件 ID・文・答えは写さない。
  */
 export interface PlanOpenIssueConflicts {
   /** 同じ ID の行が 2 つ以上あった ID の件数 */
   readonly ids: number;
   /** 衝突した行の件数（既存の出どころ × 追加の出どころの組ごと） */
   readonly rows: readonly PlanOpenIssueConflictKindCount[];
+  /**
+   * 衝突した 2 行の**帰属**（由来・状態・作った往復が今回か以前か）の組ごとの件数（Issue #464）。
+   * 出どころの組（`rows`）より細かく、**目録の通常の行と引き継ぎの行を分ける**。足した順によらない。
+   */
+  readonly attribution: readonly PlanOpenIssueConflictAttributionCount[];
   /** 解決の対象が 0 行だった件数 */
   readonly emptyTargets: number;
   /** 衝突を検出した往復の版（無ければ null） */
