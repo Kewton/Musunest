@@ -13,7 +13,9 @@
 //      沿うか）は段ごとの `check` で見る。**例外として現れる誤りは、種類ごとにやり直すか決める**
 //      （共通の口＝call.ts。timeout・network・HTTP の 5xx だけをやり直す。拒否はやり直さない。#302）。
 //      やり直しの要求は、**1 文字も変えない前置き**（`instructions`・`documents`・`rules`・schema）に、
-//      `input` の末尾だけを前回の問題（欄・分類・固定文）のデータの塊 1 つで足したものにする（#447）。
+//      `input` の末尾だけを「前回の応答」→「前回の問題（欄・分類・固定文）」の順のデータの塊 2 つで
+//      足したものにする（#447・#479）。前回の応答を渡すのは、問題の欄が応答の中の位置を添字で指すのに
+//      その位置の参照先が要るためである（値を文に埋めない決まりは保つ。#439・#445）。
 import type { CallErrorKind, CallGateway, CallResult } from "../call.js";
 import type { LimitName } from "../limits.js";
 import type { LlmStructuredRequest } from "../llm.js";
@@ -258,12 +260,38 @@ function shapeProblemsBlock(problems: readonly Problem[]): string {
 }
 
 /**
- * 形のやり直しの要求を作る（Issue #447）。**1 回目の要求は変えず**、`input` の末尾へ前回の問題の
- * データの塊を 1 つだけ足す。前置き（`instructions`・`documents`・`rules`）と schema・
- * `maxOutputTokens` は 1 文字も変えない（キャッシュの効く部分を保つ。§2）。
+ * 形のやり直しで、前回の応答そのもの（形の検査に掛けた raw の `output`）をデータで渡す塊の名前
+ * （Issue #479）。**全段で同じ 1 つ**である。規則（`instructions`・`rules`）へは昇格させない
+ * （#447 と同じ理由——規則が試行ごとに変わると、キャッシュも台帳も崩れる。`04-prompt-ledger.md` §1）。
  */
-function withShapeProblems(request: LlmStructuredRequest, problems: readonly Problem[]): LlmStructuredRequest {
-  return { ...request, input: `${request.input}\n${shapeProblemsBlock(problems)}` };
+export const PREVIOUS_RESPONSE_DATA_NAME = "前回の応答";
+
+/**
+ * 前回の応答を、データの塊 1 つにする（Issue #479）。共通の直列化（`serializeJson`）で直列化し、そのあと
+ * **この塊に限って** `<` を JSON の Unicode エスケープ（`\u003c`）へ置き換える——応答の文字列に区切り
+ * （`</data>`・`<data name="…">`）が含まれても、塊は 1 つのまま閉じ、JSON として読めば元の値に戻る。
+ * 引用・改行・バックスラッシュは JSON の規則どおりに保たれる。前回の応答は**未採用の答え**であり、
+ * その段が自分で書いた期待・裁定の欄も含めて raw のまま渡す（採用済みの正解として扱う印は付けない）。
+ */
+function previousResponseBlock(output: unknown): string {
+  const text = serializeJson(output).replaceAll("<", "\\u003c");
+  return wrapData({ name: PREVIOUS_RESPONSE_DATA_NAME, text });
+}
+
+/**
+ * 形のやり直しの要求を作る（Issue #447・#479）。**1 回目の要求は変えず**、`input` の末尾へ
+ * 「前回の応答」（#479）→「前回の形の問題」（#447）の順でデータの塊 2 つを足す。前置き（`instructions`・
+ * `documents`・`rules`）と schema・`maxOutputTokens` は 1 文字も変えない（キャッシュの効く部分を保つ。§2）。
+ */
+function withShapeRetry(
+  request: LlmStructuredRequest,
+  previousOutput: unknown,
+  problems: readonly Problem[],
+): LlmStructuredRequest {
+  return {
+    ...request,
+    input: `${request.input}\n${previousResponseBlock(previousOutput)}\n${shapeProblemsBlock(problems)}`,
+  };
 }
 
 /** 1 つの段の答えを取るための予定（要求と、形の確認） */
@@ -278,25 +306,31 @@ export interface StructuredPlan<T> {
  * 分類し**（timeout・network・HTTP の 5xx だけをやり直す）、その種類のまま段の失敗になる（#302）。
  * `ok` のときだけ、形の確認を通った値を返す。
  *
- * **やり直しの要求は、前回の問題（欄・分類・固定文）をデータの塊 1 つで受け取る**（Issue #447）——
- * 2 回目は何が落ちたかを知らないまま同じ要求を送る、という入力の欠落を直す。足すのは `input` の
- * 末尾だけで、前置き（`instructions`・`documents`・`rules`・schema）は 1 文字も変えない（§2 の
- * キャッシュを保つ）。**問題が 0 件なら塊を足さない。** 試行の回数・`malformed`・失敗の写し方は
- * 変えない（#446 の記録も今までどおり）。
+ * **やり直しの要求は、前回の応答と前回の問題（欄・分類・固定文）をデータの塊 2 つで受け取る**
+ * （Issue #447・#479）——2 回目は何が落ちたかも、自分が前回どの位置に何を書いたかも知らないまま同じ要求を
+ * 送る、という入力の欠落を直す。前回の応答は、その段の**未採用の答え**として raw のまま渡し（その段が
+ * 自分で書いた期待・裁定の欄も含む）、問題の欄が指す添字の参照先を解決できるようにする（値を文に埋めない
+ * 決まりは保つ。#439・#445）。足すのは `input` の末尾だけで、前置き（`instructions`・`documents`・
+ * `rules`・schema）は 1 文字も変えない（§2 のキャッシュを保つ）。**問題が 0 件なら塊を足さない。**
+ * 試行の回数・`malformed`・失敗の写し方は変えない（#446 の記録も今までどおり）。
  */
 export async function callStructuredChecked<T>(
   gateway: CallGateway,
   plan: StructuredPlan<T>,
 ): Promise<StageOutcome<T>> {
   let problems: readonly Problem[] = [];
+  // 形の検査に掛けた前回の応答（raw の `output`）。2 回目の要求に、問題の添字の参照先として渡す。
+  let previousOutput: unknown;
   for (let attempt = 0; attempt < STEP_ATTEMPTS; attempt += 1) {
-    // 1 回目は変更前と byte で同じ要求（問題はまだ無い）。2 回目だけ、前回の問題の塊を末尾に足す。
-    const request = problems.length === 0 ? plan.request : withShapeProblems(plan.request, problems);
+    // 1 回目は変更前と byte で同じ要求（問題はまだ無い）。2 回目だけ、前回の応答と前回の問題の塊を末尾に足す。
+    const request =
+      problems.length === 0 ? plan.request : withShapeRetry(plan.request, previousOutput, problems);
     const result = await gateway.callStructured(request);
     if (result.kind !== "ok") return { ok: false, failure: mapCallFailure(result) };
     const checked = plan.check(result.value.output);
     if (checked.ok) return { ok: true, value: checked.value };
     problems = checked.problems;
+    previousOutput = result.value.output;
     // 形が合わなかったので、1 回だけやり直す。この**やり直し**を、共通の口へ告げる（Issue #446）。
     // 最後の試行の形の誤りは、やり直しではないので告げない（`malformed` の終端になる）。
     if (attempt + 1 < STEP_ATTEMPTS) gateway.noteRetry("shape");
