@@ -1,16 +1,18 @@
 // 判定を予算に結び付ける包み（Issue #359）の unit テスト。
 //
 // **実 API は呼ばない。** 差し込んだ偽物の判定（`Judge`）が返す答えと usage、それを受け取る `JobBudget`
-// だけで閉じる。固定したいのは 4 つ。
+// だけで閉じる。固定したいのは 5 つ。
 //   1. **Jev の答えは Jev の単価で精算される**（入力だけ。出力は無料。§5）
 //   2. **LLM の答えは LLM の単価で精算される**（入力・キャッシュ・出力。§5）
 //   3. **予約できないときは判定を呼ばず、誤り（`JudgeBudgetExceededError`）として返す**
 //   4. **呼び出しが失敗しても、予約は精算される**（残高へ戻る。Issue #359）
+//   5. **包みは、共有の門を要求へ載せて Jev の内部の再送へ届ける**（Issue #469）
 import { describe, expect, it } from "vitest";
 import { JEV_RATES, JobBudget, costOfUsageUsd, type TokenRates } from "./budget.js";
 import { JudgeBudgetExceededError, JudgeCallLimitExceededError, JudgeDeadlineExceededError, createBudgetedJudge } from "./judge-budget.js";
-import { createCallGate } from "./call.js";
+import { createCallGate, type CallGate } from "./call.js";
 import type { Judge, JudgeRequest, JudgeResponse } from "./judge.js";
+import { createJevJudge, type JevFetch } from "./judge-jev.js";
 import type { LlmUsage } from "./llm.js";
 
 /** LLM（判定の落とし先）の単価（試験は小さく取る） */
@@ -279,5 +281,172 @@ describe("締切と総呼び出し数の門（生成と共有。Issue #432）", 
     });
 
     await expect(budgeted.judge(REQUEST)).rejects.toBeInstanceOf(JudgeDeadlineExceededError);
+  });
+});
+
+// ── 包みが、共有の門を要求へ載せて Jev の内部の再送へ届ける（Issue #469）────────────
+//
+// 包みは、門を持つとき、中断の合図と一緒に**門**を要求へ載せる。Jev の adapter は、要求の門で内部の
+// 再送の各回を数え、断られたら通常の混み合いと区別できる種類で返す——包みはそれを既存の門の停止
+// （`JudgeCallLimitExceededError`・`JudgeDeadlineExceededError`）に写し、**落とし先へ切り替えない**。
+// 門の拒否でなければ、今までどおり落とし先へ切り替える。
+
+/** 決めた答えを返す偽物の判定（`answeredBy` を選べる） */
+function stubJudge(answeredBy: "fake" | "llm" | "jev"): JudgeResponse {
+  return { answers: {}, inputTokens: 0, model: "x", answeredBy };
+}
+
+/**
+ * 差し込む `fetch` が状態コードを順に返す、Jev の adapter（門は**作るときに渡さない**）。
+ * 200 のときは、要求の問い（Noul）に「はい」を返す。呼ばれた回数も返す。
+ */
+function jevAdapter(options: {
+  readonly statuses: readonly number[];
+  readonly maxAttempts: number;
+  readonly sleep?: (ms: number) => Promise<void>;
+}): { readonly judge: Judge; readonly calls: () => number } {
+  let calls = 0;
+  const fetchImpl: JevFetch = async (_url, init) => {
+    calls += 1;
+    const status = options.statuses[calls - 1] ?? 200;
+    if (status !== 200) {
+      return new Response(JSON.stringify({ error: "busy" }), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    const body = JSON.parse(String(init.body)) as { questions: Record<string, { type: string }> };
+    const answers: Record<string, unknown> = {};
+    for (const [name, question] of Object.entries(body.questions)) {
+      answers[name] = question.type === "noul" ? { noul: 1 } : { choice: "a", probabilities: { a: 1 } };
+    }
+    return new Response(JSON.stringify({ model: "jev-1.13.0", usage: { input_tokens: 10 }, answers }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  return {
+    judge: createJevJudge({
+      apiKey: "k",
+      fetch: fetchImpl,
+      maxAttempts: options.maxAttempts,
+      sleep: options.sleep ?? (async () => {}),
+    }),
+    calls: () => calls,
+  };
+}
+
+describe("包みが、共有の門を要求へ載せる（05 §1.5・Issue #469）", () => {
+  it("門を持つ包みは、要求に門と合図を載せる。門の無い包みは載せない", async () => {
+    const seen: JudgeRequest[] = [];
+    const judge: Judge = {
+      async judge(request): Promise<JudgeResponse> {
+        seen.push(request);
+        return stubJudge("fake");
+      },
+    };
+    const gate = createCallGate({ now: () => 0, deadline: 1_000, limit: 10 });
+
+    await createBudgetedJudge({ judge, budget: new JobBudget(10), rates: RATES, gate }).judge(REQUEST);
+    await createBudgetedJudge({ judge, budget: new JobBudget(10), rates: RATES }).judge(REQUEST);
+
+    // 門を持つ包みは、中断の合図と一緒に門を載せる（同じ参照）
+    expect(seen[0]?.gate).toBe(gate);
+    expect(seen[0]?.signal).toBeInstanceOf(AbortSignal);
+    // 門の無い包みは、門も合図も載せない（今までどおり）
+    expect(seen[1]?.gate).toBeUndefined();
+    expect(seen[1]?.signal).toBeUndefined();
+  });
+
+  it("主・切り替え先・明示の再点検先へ、同じ門の参照が届く", async () => {
+    const seen: (CallGate | undefined)[] = [];
+    const failing: Judge = {
+      async judge(request): Promise<JudgeResponse> {
+        seen.push(request.gate);
+        throw new Error("Jev が止まった");
+      },
+    };
+    const answering = (): Judge => ({
+      async judge(request): Promise<JudgeResponse> {
+        seen.push(request.gate);
+        return stubJudge("fake");
+      },
+    });
+    const composed: Judge = { judge: failing.judge, primary: failing, fallback: answering() };
+    const recheck = answering();
+    const gate = createCallGate({ now: () => 0, deadline: 1_000, limit: 10 });
+
+    const budgeted = createBudgetedJudge({ judge: composed, budget: new JobBudget(10), rates: RATES, gate, recheck });
+    await budgeted.judge(REQUEST); // 主（失敗）→ 切り替え先
+    await budgeted.fallback?.judge(REQUEST); // 明示の再点検先
+
+    expect(seen).toHaveLength(3);
+    expect(seen.every((received) => received === gate)).toBe(true);
+  });
+
+  it("要求の門が再送を断ったら JudgeCallLimitExceededError になり、落とし先の実呼び出しが 0", async () => {
+    const jev = jevAdapter({ statuses: [429, 429], maxAttempts: 2 });
+    const luna = fixedJudge(stubJudge("llm"));
+    const composed: Judge = { judge: jev.judge.judge.bind(jev.judge), primary: jev.judge, fallback: luna.judge };
+    // 上限 1：最初の 1 回で使い切る → 再送は門が断る
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 1 });
+    const budgeted = createBudgetedJudge({ judge: composed, budget: new JobBudget(10), rates: RATES, gate });
+
+    await expect(budgeted.judge(REQUEST)).rejects.toBeInstanceOf(JudgeCallLimitExceededError);
+    // 実呼び出しは Jev の最初の 1 回だけ（再送も Luna も呼ばない）
+    expect(jev.calls()).toBe(1);
+    expect(luna.calls()).toBe(0);
+    expect(budgeted.attempts).toBe(1);
+  });
+
+  it("要求の門が締切で再送を断ったら JudgeDeadlineExceededError になり、落とし先の実呼び出しが 0", async () => {
+    let clock = 0;
+    // 再送の待機で、締切（1000ms）を過ぎる
+    const jev = jevAdapter({
+      statuses: [429, 429],
+      maxAttempts: 2,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+    });
+    const luna = fixedJudge(stubJudge("llm"));
+    const composed: Judge = { judge: jev.judge.judge.bind(jev.judge), primary: jev.judge, fallback: luna.judge };
+    const gate = createCallGate({ now: () => clock, deadline: 1_000, limit: 10 });
+    const budgeted = createBudgetedJudge({ judge: composed, budget: new JobBudget(10), rates: RATES, gate });
+
+    await expect(budgeted.judge(REQUEST)).rejects.toBeInstanceOf(JudgeDeadlineExceededError);
+    expect(jev.calls()).toBe(1);
+    expect(luna.calls()).toBe(0);
+  });
+
+  it("通常の障害で門に余裕があれば切り替え、attempts は初回＋再送＋落とし先の合計になる", async () => {
+    // Jev は初回＋合法な再送 1 の 2 回で失敗し、Luna が答える（＝ 3 試行）
+    const jev = jevAdapter({ statuses: [429, 429], maxAttempts: 2 });
+    const luna = fixedJudge(stubJudge("llm"));
+    const composed: Judge = { judge: jev.judge.judge.bind(jev.judge), primary: jev.judge, fallback: luna.judge };
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 10 });
+    const budgeted = createBudgetedJudge({ judge: composed, budget: new JobBudget(10), rates: RATES, gate });
+
+    const result = await budgeted.judge(REQUEST);
+
+    expect(result.answeredBy).toBe("llm");
+    expect(jev.calls()).toBe(2);
+    expect(luna.calls()).toBe(1);
+    // 初回＋再送 1＋Luna 1
+    expect(budgeted.attempts).toBe(3);
+    expect(gate.attempts()).toBe(3);
+  });
+
+  it("門が上限に達していれば、切り替えの落とし先も呼ばない（Luna 0）", async () => {
+    const jev = jevAdapter({ statuses: [429, 429], maxAttempts: 2 });
+    const luna = fixedJudge(stubJudge("llm"));
+    const composed: Judge = { judge: jev.judge.judge.bind(jev.judge), primary: jev.judge, fallback: luna.judge };
+    // 上限 2：初回＋再送 1 で使い切る → 切り替えの落とし先は門が断る
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 2 });
+    const budgeted = createBudgetedJudge({ judge: composed, budget: new JobBudget(10), rates: RATES, gate });
+
+    await expect(budgeted.judge(REQUEST)).rejects.toBeInstanceOf(JudgeCallLimitExceededError);
+    expect(jev.calls()).toBe(2);
+    expect(luna.calls()).toBe(0);
   });
 });

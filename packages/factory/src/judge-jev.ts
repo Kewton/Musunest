@@ -13,7 +13,7 @@
 //   * 使った入力のトークン数を結果に残す（出力は無料。§5）。費用は呼ぶ側が budget.ts の Jev の単価で
 //     予約・精算する（「判定の adapter は費用を数えない」——OpenAI の adapter と同じ。§1.5）。
 import type { CallGate } from "./call.js";
-import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest, JudgeResponse } from "./judge.js";
+import type { Judge, JudgeAnswer, JudgeGateRefusalKind, JudgeQuestion, JudgeRequest, JudgeResponse } from "./judge.js";
 
 /** System One の入口（1 か所に固定する。環境変数からは読まない。§1） */
 const SYSTEMONE_URL = "https://api.typesafe.ai/v1/systemone";
@@ -57,7 +57,13 @@ export type JevErrorKind =
   /** その他の HTTP の誤り（状態コード付き）。**再試行しない** */
   | "http"
   /** 形が合わない応答（JSON でない・答えが無い） */
-  | "malformed";
+  | "malformed"
+  /**
+   * 要求の門（`JudgeRequest.gate`。包みが載せる共有の門）が、内部の再送を断った種類（Issue #469）。
+   * **通常の混み合い（`unavailable`）・締切の打ち切り（`timeout`）とは区別できる**——包みは、これを
+   * 門の停止（`JudgeCallLimitExceededError`・`JudgeDeadlineExceededError`）に写し、落とし先へ切り替えない。
+   */
+  | JudgeGateRefusalKind;
 
 /** adapter が投げる型付きの誤り（§1）。`kind` で分類し、HTTP の誤りは `status` を持つ */
 export class JevAdapterError extends Error {
@@ -94,6 +100,10 @@ export interface JevJudgeOptions {
    * 総呼び出し数に照らす——再送の直前に門を掛け、門が止めれば再送しない。**渡さなければ今までどおり**
    * `maxAttempts` の上限まで再送する。最初の 1 回は呼ぶ側（包み。`createBudgetedJudge`）が門を掛けるので、
    * ここでは**再送の各回だけ**を数える。
+   *
+   * **要求（`JudgeRequest.gate`）に門があれば、そちらを優先する**（Issue #469）。包みは要求に門を載せる
+   * ので、実経路ではそちらが使われる。要求に門が無い直接の呼び出し（今の試験）は、今までどおりここで
+   * 渡した門を使う（#455 の後方）。
    */
   readonly gate?: CallGate;
 }
@@ -114,7 +124,6 @@ export function createJevJudge(options: JevJudgeOptions): Judge {
   }
   const retryBaseMs = options.retryBaseMs ?? DEFAULT_JEV_RETRY_BASE_MS;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const gate = options.gate;
   return {
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
       const body = buildBody(request, model);
@@ -122,6 +131,11 @@ export function createJevJudge(options: JevJudgeOptions): Judge {
       // 両方へ渡す——締切で包みが合図を出したら、応答が返らなくても待ち続けない。要求に無ければ、
       // 作るときに渡された合図を使う（後方のため）。
       const signal = request.signal ?? options.signal;
+      // 実試行の門も、包みが**要求**に載せる（Issue #469）。要求に門があればそれを、無ければ作るときに
+      // 渡された門を使う（#455 の後方）。**どちらを使ったかで、断られたときの種類を分ける**——要求の門
+      // （共有の門）の断りは、包みが門の停止へ写せるよう `gateLimit`・`gateDeadline` にする。
+      const requestGate = request.gate;
+      const gate = requestGate ?? options.gate;
       let lastStatus: number | undefined;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         const response = await send(fetchImpl, body, options.apiKey, signal);
@@ -130,16 +144,24 @@ export function createJevJudge(options: JevJudgeOptions): Judge {
           // 上限まで来たら再試行せず、失敗の種類（unavailable）にして呼ぶ側（落とす組み合わせ）へ渡す
           if (attempt < maxAttempts) {
             await waitBeforeRetry(sleep, retryBaseMs * 2 ** (attempt - 1), signal);
-            // 共有の門（Issue #455）：再送の**直前**に、締切と総呼び出し数を照らす。門が止めれば再送しない
-            // ——上限なら `unavailable`、締切なら `timeout` にする。最初の 1 回は呼ぶ側（包み）が数えるので、
-            // ここでは**再送の各回だけ**を数える（数え過ぎない）。
+            // 共有の門（Issue #455・#469）：再送の**直前**に、締切と総呼び出し数を照らす。門が止めれば
+            // 再送しない。最初の 1 回は呼ぶ側（包み）が数えるので、ここでは**再送の各回だけ**を数える。
+            //
+            // **要求の門**（包みが載せる共有の門）が断ったときは、通常の混み合い・再送回数の尽きと区別
+            // できる種類（`gateLimit`・`gateDeadline`）にする——包みが、これを門の停止へ写して止まる。
+            // 作るときに渡された門（#455 の後方）が断ったときは、今までどおりの種類（`unavailable`・
+            // `timeout`）のままにする。
             if (gate !== undefined) {
               const begun = gate.begin();
               if (begun === "deadline") {
-                throw new JevAdapterError("timeout", "呼び出しが締切で打ち切られました");
+                throw requestGate === undefined
+                  ? new JevAdapterError("timeout", "呼び出しが締切で打ち切られました")
+                  : new JevAdapterError("gateDeadline", "要求の門の締切を過ぎたので再送しません");
               }
               if (begun === "limit") {
-                throw new JevAdapterError("unavailable", "再送の呼び出しの上限に達しました", lastStatus);
+                throw requestGate === undefined
+                  ? new JevAdapterError("unavailable", "再送の呼び出しの上限に達しました", lastStatus)
+                  : new JevAdapterError("gateLimit", "要求の門の上限に達したので再送しません", lastStatus);
               }
             }
             continue;

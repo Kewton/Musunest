@@ -11,6 +11,7 @@
 // （`answeredBy`）に残す。Jev が止まっても工場は止まらない（§6）。
 //
 // 判定は助言であって門ではない（§4）。答えで合否を開けない。
+import type { CallGate } from "./call.js";
 import type { LlmUsage } from "./llm.js";
 
 /** 問いの種類（§1） */
@@ -98,6 +99,34 @@ export interface JudgeRequest {
    * 合図を実呼び出しへ渡す（LLM）。無ければ付けない——Jev など合図を使わない adapter は無視してよい。
    */
   readonly signal?: AbortSignal;
+  /**
+   * **呼び出しごとの共有の門**（包みが付ける。Issue #469）。生成と判定で共有する実試行の門
+   * （`CallGate`）である。adapter は、内部で再送する**各回**をこの門に通し、門が断れば再送しない——
+   * 最初の 1 回は包みが数えるので、adapter は数え過ぎない。**無ければ付けない**——包みを持たない
+   * 直接の呼び出し（今の試験）は今までどおりである。
+   *
+   * 要求に門があれば、adapter が**作るときに**渡された門（`JevJudgeOptions.gate`。Issue #455）より
+   * 優先する。
+   */
+  readonly gate?: CallGate;
+}
+
+/**
+ * **共有の門が再送を断った**ことを表す誤りの `kind`（Issue #469）。adapter（Jev）が要求の門
+ * （`JudgeRequest.gate`）で再送を断られたときに投げ、包み（`createBudgetedJudge`）が既存の門の停止
+ * （`JudgeCallLimitExceededError`・`JudgeDeadlineExceededError`）に写す。
+ *
+ * **通常の混み合い（`unavailable`）や、締切の合図で実呼び出しを打ち切った `timeout` とは区別できる**
+ * ——区別できないと、包みが落とし先（Luna）へ切り替えてよい（＝通常の障害）か、止めるべき
+ * （＝門の停止）かを決められない。
+ */
+export type JudgeGateRefusalKind = "gateLimit" | "gateDeadline";
+
+/** 誤りが、共有の門の断り（`JudgeGateRefusalKind`）かを `kind` の形で見分ける（Issue #469） */
+export function judgeGateRefusalKindOf(error: unknown): JudgeGateRefusalKind | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const kind = (error as { kind?: unknown }).kind;
+  return kind === "gateLimit" || kind === "gateDeadline" ? kind : undefined;
 }
 
 /** 1 回の判定の答え（§1）。問いごとの答え・使ったトークン数・答えたモデルの版の ID */
@@ -156,7 +185,10 @@ export function createFallbackJudge(options: FallbackJudgeOptions): Judge {
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
       try {
         return await options.primary.judge(request);
-      } catch {
+      } catch (error) {
+        // 要求の門（生成と共有する実試行の門）が再送を断ったときは、落とし先へ切り替えない——切り替えると
+        // 門を越えて実呼び出しを続ける（Issue #469）。要求はそのまま渡すので、門もそのまま届く。
+        if (judgeGateRefusalKindOf(error) !== undefined) throw error;
         return await options.fallback.judge(request);
       }
     },

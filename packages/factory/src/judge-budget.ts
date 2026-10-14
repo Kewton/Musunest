@@ -26,7 +26,7 @@
 import { JEV_RATES, estimateMaxCostUsd, type JobBudget, type Reservation, type TokenRates } from "./budget.js";
 import { MAX_TOKENS_PER_CHAR, type CallGate } from "./call.js";
 import { DEFAULT_LLM_JUDGE_MAX_OUTPUT_TOKENS } from "./judge-llm.js";
-import type { Judge, JudgeRequest, JudgeResponse, JudgeSource } from "./judge.js";
+import { judgeGateRefusalKindOf, type Judge, type JudgeRequest, type JudgeResponse, type JudgeSource } from "./judge.js";
 import type { LlmUsage } from "./llm.js";
 
 /**
@@ -103,8 +103,9 @@ export interface BudgetedJudge extends Judge {
    */
   readonly fallback?: BudgetedJudge;
   /**
-   * 門を通した判定の**試行**の数（主と落とし先の合計。成功・失敗を問わない。Issue #432）。生成側の
-   * 呼び出しの数と足して、総呼び出し数の上限に照らすのに使う。
+   * 門を通した判定の**試行**の数（主と落とし先の合計。成功・失敗を問わない。Issue #432）。**内部で
+   * 再送した各回も 1 つずつ数える**（Issue #469）——生成側の呼び出しの数と足して、総呼び出し数の上限に
+   * 照らすのに使う。台帳（ここ）と共有の門（`CallGate`）を食い違わせない。
    */
   readonly attempts: number;
 }
@@ -193,20 +194,31 @@ function wrapBudgetedJudge(
     },
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
       // 実試行の**直前**に、生成と共有する門を照らす（締切・総呼び出し数。Issue #432）。失敗した試行も数える
+      let attemptsAtStart: number | undefined;
       if (gate !== undefined) {
+        attemptsAtStart = gate.attempts();
         const begun = gate.begin();
         if (begun === "deadline") throw new JudgeDeadlineExceededError();
         if (begun === "limit") {
           throw new JudgeCallLimitExceededError(Math.max(0, gate.limit - gate.attempts()));
         }
-        account.attempts += 1;
       }
+      // 門を通した試行の数（最初の 1 回と、adapter が**内部で再送した各回**）を、判定の台帳へ写す
+      // （Issue #469）。門は生成と共有で、adapter の再送も同じ門を通る——台帳と門を食い違わせない。
+      // **二重に数えない**：門の数の差を取るので、最初の 1 回も含めてちょうど 1 回ずつ入る。
+      const recordAttempts = (): void => {
+        if (gate === undefined || attemptsAtStart === undefined) return;
+        account.attempts += gate.attempts() - attemptsAtStart;
+        attemptsAtStart = gate.attempts();
+      };
       const maxCostUsd = estimateJudgeMaxCostUsd({ request, rates, jevRates, maxOutputTokens });
       const reserved = options.budget.reserve(maxCostUsd);
       if (!reserved.reserved) {
+        recordAttempts();
         throw new JudgeBudgetExceededError(reserved.maxCostUsd, reserved.remainingUsd);
       }
       // 締切の残りで実呼び出しを打ち切る（Issue #432）。合図は要求に載せ、adapter（LLM）が実呼び出しへ渡す。
+      // **共有の門も要求に載せる**（Issue #469）——Jev の adapter は、内部の再送の各回をこの門に通す。
       const controller = gate === undefined ? undefined : new AbortController();
       const timer =
         controller === undefined || gate === undefined
@@ -215,18 +227,30 @@ function wrapBudgetedJudge(
       let response: JudgeResponse;
       try {
         response = await judge.judge(
-          controller === undefined ? request : { ...request, signal: controller.signal },
+          controller === undefined || gate === undefined
+            ? request
+            : { ...request, signal: controller.signal, gate },
         );
       } catch (error) {
         // 呼び出しが失敗しても、予約は精算する（残高へ戻す。Issue #359）
         options.budget.release(reserved.reservation);
+        recordAttempts();
         if (controller?.signal.aborted === true) throw new JudgeDeadlineExceededError();
+        // 要求の門が内部の再送を断ったときは、既存の門の停止へ写す（Issue #469）。**落とし先へ切り替えない**
+        // ——切り替えの判断（`isJudgeStopError`）でそのまま止まる。
+        const refusal = judgeGateRefusalKindOf(error);
+        if (refusal !== undefined) {
+          throw refusal === "gateDeadline"
+            ? new JudgeDeadlineExceededError()
+            : new JudgeCallLimitExceededError(Math.max(0, gate === undefined ? 0 : gate.limit - gate.attempts()));
+        }
         throw error;
       } finally {
         if (timer !== undefined) clearTimeout(timer);
       }
       // **遅い応答を成功にしない**——締切を越えて返ったら、費用は精算しつつ、締切の停止にする（Issue #432）
       account.spentUsd += settleResponse(options.budget, reserved.reservation, response, rates, jevRates);
+      recordAttempts();
       if (gate !== undefined && gate.now() >= gate.deadline) throw new JudgeDeadlineExceededError();
       account.callsByAdapter[response.answeredBy] += 1;
       return response;
