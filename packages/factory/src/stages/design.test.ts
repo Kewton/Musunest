@@ -1450,6 +1450,34 @@ describe("単一要件の作り直しは、表を固定し、1 件を全体へ�
     if (outcome.ok || outcome.failure.kind !== "unmet") return;
     expect(outcome.failure.problems.some((problem) => problem.message.includes("参照先の entity の所属を伴わない"))).toBe(true);
   });
+
+  it("先頭以外の要件を作り直すとき、問題の添字は送った一覧の座標になる（Issue #445・レビュー指摘）", async () => {
+    // 対象は全体の 2 番目（R-2）。送る一覧（`list`）は R-2 の 1 件だけで、点検は全体（`wholeList`）で行う。
+    // 形は通るが空の designs を返すので、次の指示は「R-2 の設計が無い」になる。送った一覧の位置は
+    // `requirements[0]` である（検査した全体の添字 `requirements[1]` をそのまま出すと、送ったデータに無い）。
+    const emptyRedo = { roles: ROLES_418, designs: [] };
+    const recording = createRecordingClient([structured(emptyRedo), structured(emptyRedo)]);
+    const outcome = await runDesign({
+      list: { ...REQUIREMENT_LIST, requirements: REQUIREMENT_LIST.requirements.filter((r) => r.id === "R-2") },
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      redo: { roles: ROLES_418, adopted: [redoR1 as RequirementDesign], wholeList: REQUIREMENT_LIST },
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") return;
+    // 2 回目に送る前回の指示は、送った一覧に在る位置を指す
+    const second = recording.structured[1];
+    expect(second?.input).toContain("前回の作り直しの指示");
+    expect(second?.input).toContain('"field": "requirements[0]"');
+    expect(second?.input).not.toContain('"field": "requirements[1]"');
+    expect(second?.input).toContain("要件の設計が無い");
+    // 未達として返す問題も、送った一覧の座標である
+    expect(
+      outcome.failure.problems.some(
+        (problem) => problem.field === "requirements[0]" && problem.message === "要件の設計が無い",
+      ),
+    ).toBe(true);
+  });
 });
 
 // ── 見出しの元の項目（groupBy。Issue #433）──────────────────────────────

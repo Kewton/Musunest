@@ -1027,6 +1027,8 @@ export function checkDesignOwnership(design: DesignResult): readonly Problem[] {
  *
  * **Problem の `field` は位置、`message` は分類ごとの固定文**（要件 ID の値を埋めない。要件ごとの問題は
  * `requirements[添字]`、応答の設計ごとの問題は `designs[添字]` で位置を示す。§1・②・Issue #445）。
+ * `requirements[添字]` は渡した `list` の添字である——**送ったデータの座標と一致する一覧を渡すのは
+ * 呼ぶ側の責務**である（作り直しでは `inspectionListInSentOrder` がその順を作る。レビュー指摘）。
  */
 export function checkDesignPlan(
   list: RequirementList,
@@ -1075,6 +1077,24 @@ export function checkDesignPlan(
     problems.push(...checkDesignOwnership(design));
   }
   return problems;
+}
+
+/**
+ * 作り直しの点検に渡す一覧の順を、**送った一覧の座標に合わせる**（Issue #445・レビュー指摘）。送った一覧
+ * （`sent`）に含まれる要件を先頭に、その順のまま置き、残りを後ろに置く。これで、要件ごとの Problem の
+ * `requirements[添字]` が送った一覧の添字と一致する——作り直しの要求は対象の要件だけを送る（`run.ts` が
+ * 1 件へ絞る）ので、検査した全体の添字をそのまま出すと、送ったデータに無い位置を指す。要件の集合（`idSet`
+ * の照合）は変えない。
+ */
+function inspectionListInSentOrder(whole: RequirementList, sent: RequirementList): RequirementList {
+  const sentIds = new Set(sent.requirements.map((requirement) => requirement.id));
+  return {
+    ...whole,
+    requirements: [
+      ...whole.requirements.filter((requirement) => sentIds.has(requirement.id)),
+      ...whole.requirements.filter((requirement) => !sentIds.has(requirement.id)),
+    ],
+  };
 }
 
 /**
@@ -1184,7 +1204,12 @@ export async function runDesign(input: DesignInput): Promise<StageOutcome<Design
         roles: input.redo.roles,
         designs: [...input.redo.adopted, ...answer.value.designs],
       };
-      problems.push(...checkDesignPlan(input.redo.wholeList, candidate));
+      // 点検は全体（`wholeList`）で行うが、**問題の添字は送った一覧の座標に合わせる**——作り直しの要求は
+      // 対象の要件だけを送るので、検査した全体の添字をそのまま出すと、送ったデータに無い位置を指す
+      // （Issue #445・レビュー指摘）。
+      problems.push(
+        ...checkDesignPlan(inspectionListInSentOrder(input.redo.wholeList, input.list), candidate),
+      );
     } else if (planned) {
       // 新契約では、中身の点検（所属を含む）を必ず掛ける（決定 ⑨・Issue #418）
       problems.push(...checkDesignPlan(input.list, answer.value));
