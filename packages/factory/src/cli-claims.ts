@@ -679,7 +679,10 @@ export async function runJudgeClaims(deps: JudgeClaimsDeps): Promise<number> {
   const observed = { count: 0, last: null as JudgeResponse | null };
   const countInvocations = (judge: Judge): Judge => ({
     async judge(request) {
+      // **この呼出の応答だけ**を保持する——開始時に前の呼出の値を消す（前の呼出の応答を、応答なしの失敗に
+      // 付けない。Issue #459・N7）。締切後に返った応答の原値は、同じ呼出の中で入るので残る。
       observed.count += 1;
+      observed.last = null;
       const response = await judge.judge(request);
       observed.last = response;
       return response;

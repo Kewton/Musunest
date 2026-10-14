@@ -385,6 +385,67 @@ describe("基準の遅い応答（締切後）の使用量も、失敗の記録�
   });
 });
 
+// ── 成功の次の応答なしの失敗（Issue #459・N7）───────────────────────
+
+describe("成功の次の、応答なしの失敗に、前の呼出の応答を付けない（Issue #459・N7）", () => {
+  it("基準：仕分けが成功した後の、応答なしの裏付けの失敗は、答えも使用量も null", async () => {
+    const judge: Judge = {
+      async judge(request) {
+        const names = Object.keys(request.questions);
+        if (names.some((name) => name.startsWith("plan-support"))) throw new Error("応答なしの失敗");
+        const out: Record<string, JudgeAnswer> = {};
+        for (const name of names) out[name] = choice("vocabulary-hole");
+        return { answers: out, inputTokens: 9, model: "fake-judge", answeredBy: "jev" };
+      },
+    };
+    const harness = await run(BASE_ARGS, { judge });
+    const primary = (harness.output["baseline_calls"] as readonly {
+      readonly role: string;
+      readonly state: string;
+      readonly answered_by: string;
+      readonly input_tokens: number | null;
+      readonly answers: unknown;
+    }[]).filter((entry) => entry.role === "primary");
+    expect(primary.find((entry) => entry.state === "ok")?.input_tokens).toBe(9);
+    const failed = primary.find((entry) => entry.state === "failed");
+    // 前の呼出（仕分け）の応答を、応答なしの失敗に付けない
+    expect(failed?.input_tokens).toBeNull();
+    expect(failed?.answers).toBeNull();
+    expect(failed?.answered_by).toBe("none");
+  });
+
+  it("形：1 つ目の成功の後、2 つ目の応答なしの失敗は、答えも使用量も null", async () => {
+    let claimCalls = 0;
+    const judge: Judge = {
+      async judge(request) {
+        const names = Object.keys(request.questions);
+        if (names.some((name) => name.startsWith("claim-"))) {
+          claimCalls += 1;
+          if (claimCalls === 2) throw new Error("応答なしの失敗");
+        }
+        const out: Record<string, JudgeAnswer> = {};
+        for (const name of names) out[name] = choice("vocabulary-hole");
+        return { answers: out, inputTokens: 9, model: "fake-judge", answeredBy: "jev" };
+      },
+    };
+    const harness = await run([...BASE_ARGS, "--forms", "T1,S1"], { judge });
+    const calls = harness.output["calls"] as readonly {
+      readonly id: string;
+      readonly state: string;
+      readonly input_tokens: number | null;
+      readonly answers: unknown;
+    }[];
+    const t1 = calls.find((call) => call.id === "T1");
+    const s1 = calls.find((call) => call.id === "S1");
+    expect(t1?.state).toBe("ok");
+    expect(t1?.input_tokens).toBe(9);
+    // 失敗は失敗のまま、前の呼出の答え・使用量を付けない
+    expect(s1?.state).toBe("failed");
+    expect(s1?.input_tokens).toBeNull();
+    expect(s1?.answers).toBeNull();
+  });
+});
+
 // ── 基準の記録に原値と対応を残す（Issue #459・N5）──────────────────
 
 describe("基準の記録に、原値の入力トークン・印・run と申告 ID の対応を残す（Issue #459・N5）", () => {
