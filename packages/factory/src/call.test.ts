@@ -1149,6 +1149,38 @@ describe("試行の終端と再試行の数を、理由別に分けて数える�
     }
   });
 
+  it("通信のやり直しは実開始で数える：1 回目が再試行してよい誤りで、2 回目が締切で始まらないと、通信 0・未着手（締切）1（Issue #478）", async () => {
+    let clock = 0;
+    let calls = 0;
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        // 1 回目の応答（誤り）のあと、締切を越える——2 回目の開始は門（締切）で断られる
+        clock = 10_000;
+        return Promise.reject(networkError());
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    const gateway = new CallGateway({
+      client,
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => clock,
+      deadline: 1_000,
+    });
+
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    // 2 回目の実呼び出しは始まっていないので、通信のやり直しは数えない（実開始で数える）
+    expect(result.kind).toBe("deadlineExceeded");
+    expect(calls).toBe(1);
+    expect(gateway.retryCounts.communication).toBe(0);
+    expect(gateway.attempts).toMatchObject({ started: 1, responded: 0, errors: 1 });
+    expect(gateway.attempts.not_started.deadline).toBe(1);
+    expectAttemptInvariant(gateway);
+  });
+
   it("残りが 0 以下 → 未着手（締切）1・開始 0・deadlineExceeded", async () => {
     let called = 0;
     const gateway = new CallGateway({

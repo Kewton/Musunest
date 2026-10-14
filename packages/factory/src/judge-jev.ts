@@ -91,7 +91,11 @@ export interface JevJudgeOptions {
   readonly maxAttempts?: number;
   /** 指数の待ちの基準（ミリ秒。既定 `DEFAULT_JEV_RETRY_BASE_MS`。§1） */
   readonly retryBaseMs?: number;
-  /** 待つ処理（試験では待たずに済むよう差し替える。既定は `setTimeout`） */
+  /**
+   * 待つ処理（試験では待たずに済むよう差し替える。既定は `setTimeout`）。差し替えは待ちの長さだけを
+   * 受け取る（後方。Issue #477）。**合図が中断したら、待ちの結果に関わらず、外側を `timeout` で拒否して
+   * 再送しない**——これは差し替えが合図を知らなくても保つ。
+   */
   readonly sleep?: (ms: number) => Promise<void>;
   /** 打ち切りの合図（任意。呼び出しごとの合図は `JudgeRequest.signal` を優先する。Issue #455） */
   readonly signal?: AbortSignal;
@@ -123,7 +127,11 @@ export function createJevJudge(options: JevJudgeOptions): Judge {
     throw new RangeError("試行の回数は 1 以上の整数であること");
   }
   const retryBaseMs = options.retryBaseMs ?? DEFAULT_JEV_RETRY_BASE_MS;
-  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  // 差し替えの `sleep` は、今までどおり第 1 引数（待ちの長さ）だけを使う（後方。Issue #477）。**既定の
+  // 待ちだけ**が、呼び出しごとの合図で取り消せる（`defaultSleep`）。差し替えが自分で作った資源
+  // （タイマーなど）は、その識別子を adapter から得られないので、片付けは差し替えの持ち主の責任とする。
+  const substituteSleep = options.sleep;
+  const sleep: SleepImpl = substituteSleep === undefined ? defaultSleep : (ms) => substituteSleep(ms);
   return {
     source: "jev",
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
@@ -188,16 +196,52 @@ export function createJevJudge(options: JevJudgeOptions): Judge {
 }
 
 /**
+ * 待ちの内部の形。第 2 引数に合図を渡す——**既定の待ち**（`defaultSleep`）はこれで取り消せる。
+ * 差し替えの口（`JevJudgeOptions.sleep`）は第 1 引数だけを使う（後方。Issue #477）。
+ */
+type SleepImpl = (ms: number, signal: AbortSignal | undefined) => Promise<void>;
+
+/**
+ * 既定の待ち（Issue #477）。**呼び出しごとの中断の合図で取り消せる**——合図が中断したら、`setTimeout` の
+ * タイマーを `clearTimeout` で消してから `timeout` で拒否する。満了したときは、足した listener を外す。
+ * これで、外側の Promise が先に決着しても、資源（タイマー）が満了まで残らない——締切で止まった run の
+ * CLI の終了が、待ちの長さ（`retryBaseMs` の指数）の分だけ遅れるのをやめる。**Node 固有の API
+ * （`unref` など）には頼らない**——手元と Worker の両方で同じに動く（§4）。
+ */
+function defaultSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new JevAdapterError("timeout", "再送の待機が打ち切られました"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
  * 再送までの待機（Issue #455）。**呼び出しごとの中断の合図**に従う——待っている途中で合図が中断したら、
  * 待ちを止めて `timeout` にする（締切で包みが合図を出したら、遅い再送の待機を成功にしない）。
+ *
+ * **資源の片付けは、持ち主で分ける**（Issue #477）：
+ *   * 既定の待ち（`defaultSleep`）のタイマーは、待ちのどの終わり方（中断・満了）でも片付ける——中断の
+ *     ときはタイマーを消し、満了のときは listener を外す。
+ *   * ここで合図に足す listener は、**どの終わり方**（中断・満了・差し替えの Promise の拒否・差し替えの
+ *     同期の throw）でも残さない。`once` は中断で自動的に外れるが、満了・拒否では明示的に外す。差し替え
+ *     が同期に throw しても、listener を足す**前**に呼ぶので残らない（今までは足したあとで外す分岐へ
+ *     届かず残っていた）。
+ *   * **差し替えの `sleep` の呼び出しの中で**同じ合図が同期に中断されることがある——`abort` のイベントは
+ *     listener を足す前に終わっているので、後から足した listener は発火しない。そこで、足したあとに
+ *     `signal.aborted` を確かめ直し、中断済みなら今回足した listener を外して、同じ中断の処理で
+ *     `timeout` にする（未解決の Promise でも待ち続けず、解決済みでも成功にしない）。
+ *   * 差し替えの `sleep` が自分で作った資源は、その差し替えの持ち主の責任とする。
  */
-async function waitBeforeRetry(
-  sleep: (ms: number) => Promise<void>,
-  ms: number,
-  signal: AbortSignal | undefined,
-): Promise<void> {
+async function waitBeforeRetry(sleep: SleepImpl, ms: number, signal: AbortSignal | undefined): Promise<void> {
   if (signal === undefined) {
-    await sleep(ms);
+    await sleep(ms, undefined);
     return;
   }
   if (signal.aborted) {
@@ -210,21 +254,34 @@ async function waitBeforeRetry(
       settled = true;
       reject(new JevAdapterError("timeout", "再送の待機が打ち切られました"));
     };
-    signal.addEventListener("abort", onAbort, { once: true });
-    sleep(ms).then(
-      () => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        resolve();
-      },
-      (error: unknown) => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
+    /** 待ちの決着（解決・拒否）を 1 回だけ通す。足した listener をこの場で外す */
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      finish();
+    };
+    // 差し替えが同期に throw するときは、合図に listener を足す前に呼ぶ——足したあとでは、外す分岐へ
+    // 届かずに残る（Issue #477）。待ちの Promise は確実に握るので、拒否が未処理のまま残らない。
+    let waiting: Promise<void>;
+    try {
+      waiting = sleep(ms, signal);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    // 先に決着を握る——`sleep` の間の中断で、未解決の待ちを待ち続けたり、解決済みを成功にしない。
+    void waiting.then(
+      () => settle(resolve),
+      (error: unknown) => settle(() => reject(error)),
     );
+    signal.addEventListener("abort", onAbort, { once: true });
+    // 足したあとに確かめ直す。`sleep` の呼び出しの中で中断されていれば、`abort` のイベントは既に終わって
+    // いて listener は発火しない——今足した listener を外し、同じ中断の処理（`timeout`）にする。
+    if (signal.aborted) {
+      signal.removeEventListener("abort", onAbort);
+      onAbort();
+    }
   });
 }
 

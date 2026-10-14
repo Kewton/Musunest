@@ -953,6 +953,11 @@ describe("⑥ の道具の累計と 1 回の段の応答の往復の上限（02 
     if (outcome.failure.kind !== "callLimit") return;
     expect(outcome.failure.limit).toBe("repairStepTurns");
     expect(recording.tools).toHaveLength(AGENT_LIMITS.repairStepTurns);
+    // 形の合わない done でやり直しを告げたが、往復の上限（repairStepTurns）が次の呼び出しを共通の口より
+    // 前で断るので、追加の実開始は無い。段の上限は口の門ではないので未着手は増えず、やり直しの数だけが 1（Issue #478）。
+    expect(gateway.retryCounts.shape).toBe(1);
+    expect(gateway.attempts.started).toBe(AGENT_LIMITS.repairStepTurns);
+    expect(gateway.attempts.not_started).toEqual({ deadline: 0, budget: 0, limit: 0, timeout: 0 });
   });
 
   it("形の直しの往復も数え、8 回目が形の合う done なら受け付ける（STEP_ATTEMPTS は 1 回のまま）", async () => {
