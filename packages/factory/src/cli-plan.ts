@@ -418,16 +418,53 @@ export interface PlanCliOpenIssueConflictKindCount {
   readonly count: number;
 }
 
+/** 記録に入れる、衝突した片側の行の帰属（由来・状態・今回か以前か。値は入れない。Issue #464） */
+export interface PlanCliOpenIssueRowAttribution {
+  readonly origin: string;
+  readonly status: string;
+  /** その行を、衝突を検出した往復と同じ往復で作ったか */
+  readonly current: boolean;
+}
+
+/** 記録に入れる、衝突した 2 行の帰属の組ごとの件数（足した順によらない。Issue #464） */
+export interface PlanCliOpenIssueConflictAttributionCount {
+  readonly first: PlanCliOpenIssueRowAttribution;
+  readonly second: PlanCliOpenIssueRowAttribution;
+  readonly count: number;
+}
+
 /**
- * 記録に入れる、同じ ID の開いている事項の行の衝突の記録（Issue #460）。**値ではなく件数と分類、版だけ**
- * である。衝突した ID の件数・衝突した行の件数（出どころの組ごと）・解決の対象が 0 行だった件数・衝突を
- * 検出した往復の版を持つ。事項 ID・要件 ID・文・答えは入れない。
+ * 記録に入れる、同じ ID の開いている事項の行の衝突の記録（Issue #460・#464）。**値ではなく件数と分類、
+ * 版だけ**である。衝突した ID の件数・衝突した行の件数（出どころの組ごと）・衝突した 2 行の帰属
+ * （由来・状態・今回か以前か）の組ごとの件数・解決の対象が 0 行だった件数・衝突を検出した往復の版を持つ。
+ * 事項 ID・要件 ID・文・答えは入れない。
  */
 export interface PlanCliOpenIssueConflictRecord {
   readonly ids: number;
   readonly rows: readonly PlanCliOpenIssueConflictKindCount[];
+  /** 衝突した 2 行の帰属（由来・状態・今回か以前か）の組ごとの件数（足した順によらない。Issue #464） */
+  readonly attribution: readonly PlanCliOpenIssueConflictAttributionCount[];
   readonly empty_targets: number;
   readonly round: number | null;
+}
+
+/** 記録に入れる、提示元ごとの、使い回しで断った ID の数（値は入れない。Issue #464） */
+export interface PlanCliSurfaceIdReuseSourceCount {
+  readonly source: string;
+  readonly count: number;
+}
+
+/**
+ * 記録に入れる、使い回しで断った応答 1 つぶん（**値は入れない**。Issue #464）。点検の版（初回 1、差分で
+ * 増える）と試行（1・2）ごとに、応答の数・断った ID の異なる数・提示元ごとの ID の数を持つ。1 回断って
+ * 成功・2 回断って `malformed`・断ったあとの途中停止のどの終わり方でも残る（最終の失敗の欄とは別）。
+ */
+export interface PlanCliSurfaceIdReuseEntry {
+  readonly check: number;
+  readonly attempt: number;
+  readonly responses: number;
+  readonly distinct_ids: number;
+  readonly by_source: readonly PlanCliSurfaceIdReuseSourceCount[];
 }
 
 /**
@@ -533,8 +570,10 @@ export interface PlanCliRecord {
   readonly surface_check: PlanCliSurfaceCheckRecord;
   /** 差分点検（各往復の P5 のあと）の記録。**値ではなく件数だけ**（Issue #434） */
   readonly diff_reviews: readonly PlanCliDiffReviewRecord[];
-  /** 同じ ID の開いている事項の行の衝突の記録（件数と分類と版だけ。Issue #460） */
+  /** 同じ ID の開いている事項の行の衝突の記録（件数と分類と版だけ。Issue #460・#464） */
   readonly open_issue_conflicts: PlanCliOpenIssueConflictRecord;
+  /** 使い回しで断った応答の記録（版・試行・応答の数・異なる数・提示元ごとの数。値は入れない。Issue #464） */
+  readonly surface_id_reuse: readonly PlanCliSurfaceIdReuseEntry[];
   readonly confirmation: "build" | "stop" | null;
   readonly stages: readonly PlanStageRecord[];
   readonly judge: BundleJudgeUsage;
@@ -701,9 +740,21 @@ export function buildPlanCliRecord(input: {
         added: entry.added,
         count: entry.count,
       })),
+      attribution: input.result.openIssueConflicts.attribution.map((entry) => ({
+        first: { origin: entry.first.origin, status: entry.first.status, current: entry.first.current },
+        second: { origin: entry.second.origin, status: entry.second.status, current: entry.second.current },
+        count: entry.count,
+      })),
       empty_targets: input.result.openIssueConflicts.emptyTargets,
       round: input.result.openIssueConflicts.round,
     },
+    surface_id_reuse: input.result.surfaceIdReuse.map((entry) => ({
+      check: entry.check,
+      attempt: entry.attempt,
+      responses: entry.responses,
+      distinct_ids: entry.distinctIds,
+      by_source: entry.bySource.map((source) => ({ source: source.source, count: source.count })),
+    })),
     confirmation: input.transcript.confirmation,
     stages: input.result.stages,
     judge: input.result.judge,
