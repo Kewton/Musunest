@@ -2830,3 +2830,78 @@ describe("使い回しで断った応答を、plan-record の新しい欄に残�
     expect(record.surface_id_reuse[0]?.distinct_ids).toBe(1);
   });
 });
+
+// ── P6 の確定できない理由に、原文の値と message を写さない（§3 P6・Issue #445）──────────
+
+describe("P6 の確定できない理由に、原文の値と message を写さない（§3 P6・Issue #445）", () => {
+  it("目印を含む原文の文が覆われず確定できない走りで、記録の全文と停止の行に目印と message が無く、cannot_confirm は source・code・path だけ", async () => {
+    const mark = "MARKER445";
+    const markedSource = `タスクを記録する。合計を出す。${mark}を確かめる。`;
+    const s1 = "タスクを記録する。";
+    const s2 = "合計を出す。";
+    const s3 = `${mark}を確かめる。`;
+    const span = (quote: string) => {
+      const start = markedSource.indexOf(quote);
+      return { start, end: start + quote.length };
+    };
+    // R-2 は 2 文（s2 と s3）にまたがる。位置の覆い（P2）は通るが、P6 の出どころは最初に重なる文（s2）に
+    // しか結び付かないので、s3 が覆われていないと見なされて確定できない（P2 では止まらない）。
+    const markedList = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: s1, position: span(s1) },
+        { id: "R-2", text: "合計を確かめられる", quote: `${s2}${s3}`, position: span(`${s2}${s3}`) },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(markedList),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [confirmQuestionName("S-1")]: noul(0.95),
+      [confirmQuestionName("S-2")]: noul(0.95),
+      [confirmQuestionName("S-3")]: noul(0.95),
+    });
+    const dir = `${directory}/confirm-uncovered-source`;
+    const answersPath = "empty-answers.json";
+    const lines: string[] = [];
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : markedSource),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => judge,
+      now: () => 0,
+      log: (line) => lines.push(line),
+    });
+
+    expect(code).not.toBe(0);
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("cannot-confirm");
+    const reasons = record.cannot_confirm ?? [];
+    expect(
+      reasons.some(
+        (reason) => reason.source === "confirm" && reason.code === "uncovered-source" && reason.path === "source[2]",
+      ),
+    ).toBe(true);
+    // 理由は source・code・path だけ（message を持たない）
+    for (const reason of reasons) expect(Object.keys(reason).sort()).toEqual(["code", "path", "source"]);
+    const recordText = JSON.stringify(record);
+    expect(recordText).not.toContain(mark);
+    expect(recordText).not.toContain("message");
+    expect(lines.join("\n")).not.toContain(mark);
+    expect(lines.join("\n")).toContain("uncovered-source");
+  });
+});

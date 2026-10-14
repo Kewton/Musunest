@@ -177,6 +177,10 @@ function decidePosition(source: string, quote: string, position: SourceRange): D
 /**
  * 引用が原文に無い・1 か所に決まらないときの誤りを、`problems` へ足す（Issue #382）。**2 か所以上ある
  * ときは、やり直しの指示で「1 か所に決まる引用にする」と伝える**。
+ *
+ * **Problem の `field` は位置、`message` は分類ごとの固定文**（引用の文字列＝原文の断片を埋めない。
+ * 位置は `field`（`<添字>.position`）の添字と固定の欄名で示す。件数・位置の数値は数である。§1・①・
+ * Issue #445）。
  */
 function addUndecidedProblem(source: string, field: string, quote: string, position: SourceRange, problems: Problem[]): void {
   const count = quoteStarts(source, quote).length;
@@ -184,14 +188,14 @@ function addUndecidedProblem(source: string, field: string, quote: string, posit
     problems.push({
       field: `${field}.position`,
       code: "position-mismatch",
-      message: `引用「${quote}」が原文に ${count} か所あり、位置が 1 か所に決まらない。前後を含めて、原文の中で 1 か所に決まる引用にする`,
+      message: `引用が原文に ${count} か所あり、位置が 1 か所に決まらない。前後を含めて、原文の中で 1 か所に決まる引用にする`,
     });
     return;
   }
   problems.push({
     field: `${field}.position`,
     code: "position-mismatch",
-    message: `引用の位置（${position.start}-${position.end}）が、原文の「${quote}」の位置と一致しない`,
+    message: `引用の位置（${position.start}-${position.end}）が、その引用の位置と一致しない`,
   });
 }
 

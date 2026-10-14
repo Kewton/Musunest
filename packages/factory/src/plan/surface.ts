@@ -447,7 +447,7 @@ export function checkSurfaceConstraints(
       // （Issue #398）。`### ### action` は 1 回だけ外すので `### action` のまま残り、断られる。
       const id = normalizeConstraintId(raw);
       if (id === "" || !known.has(id)) {
-        problems.push({ field, code: "constraint-id-unknown", message: `文書に無い制約 ID: ${id === "" ? raw : id}` });
+        problems.push({ field, code: "constraint-id-unknown", message: "文書に無い制約 ID である" });
       }
     }
   });

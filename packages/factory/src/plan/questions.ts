@@ -459,6 +459,9 @@ export function checkQuestionsOutput(
 /**
  * 質問の束をコードで確かめる（04 §3 P4「コードが形・数・事項との対応・重複を確かめる」）。
  * 合わない箇所を**すべて**挙げて返す。空なら通る。
+ *
+ * **問題の `path` は位置、`message` は分類ごとの固定文**（事項 ID・選択肢 ID の値を埋めない。§1・P4・
+ * Issue #445）。
  */
 export function checkQuestionSet(
   openIssueIds: readonly string[],
@@ -501,7 +504,7 @@ export function checkQuestionSet(
         report("shape", `${path}.choices[${choiceIndex}]`, "選択肢の ID と文は空でないこと");
       }
       if (choiceIds.has(choice.id)) {
-        report("shape", `${path}.choices[${choiceIndex}].id`, `選択肢 ID ${choice.id} が重複している`);
+        report("shape", `${path}.choices[${choiceIndex}].id`, "選択肢 ID が重複している");
       }
       choiceIds.add(choice.id);
     });
@@ -513,11 +516,7 @@ export function checkQuestionSet(
         report("recommendation", `${path}.recommended.reason`, "推奨の理由が空である（1 行書く）");
       }
       if (!choiceIds.has(question.recommended.choiceId)) {
-        report(
-          "recommendation",
-          `${path}.recommended.choiceId`,
-          `推奨 ${question.recommended.choiceId} が選択肢に無い`,
-        );
+        report("recommendation", `${path}.recommended.choiceId`, "推奨が選択肢に無い");
       }
     }
 
@@ -526,16 +525,12 @@ export function checkQuestionSet(
     }
 
     if (!openSet.has(question.openIssueId)) {
-      report("issue-mapping", `${path}.openIssueId`, `${question.openIssueId}: 未解決の事項に無い`);
+      report("issue-mapping", `${path}.openIssueId`, "未解決の事項に無い");
       return;
     }
     const previous = issueToIndex.get(question.openIssueId);
     if (previous !== undefined) {
-      report(
-        "duplicate-issue",
-        `${path}.openIssueId`,
-        `事項 ${question.openIssueId} への問いが重なっている（questions[${previous}] と）`,
-      );
+      report("duplicate-issue", `${path}.openIssueId`, "同じ事項への問いが重なっている");
     } else {
       issueToIndex.set(question.openIssueId, index);
     }
@@ -551,6 +546,8 @@ export function checkQuestionSet(
  * 形の誤りにするもの：一覧に、無い事項・すでに閉じた（依頼文で閉じる）事項の ID がある／同じ一覧の中で
  * 重なる／主の ID を一緒に閉じる一覧に再び書く／1 つの事項が、2 つの問い・一緒に閉じる一覧・依頼文で
  * 閉じる一覧のうち 2 か所以上に出る。
+ *
+ * **問題の `path` は位置、`message` は分類ごとの固定文**（事項 ID の値を埋めない。§1・P4・Issue #445）。
  */
 export function checkQuestionLinks(
   openIssueIds: readonly string[],
@@ -567,10 +564,10 @@ export function checkQuestionLinks(
   closedBySource.forEach((closure, index) => {
     const path = `closedBySource[${index}]`;
     if (!openSet.has(closure.issueId)) {
-      report("source-closure", `${path}.issueId`, `${closure.issueId}: 未解決の事項に無い`);
+      report("source-closure", `${path}.issueId`, "未解決の事項に無い");
     }
     if (closedBySourceIds.has(closure.issueId)) {
-      report("source-closure", `${path}.issueId`, `事項 ${closure.issueId} が依頼文で閉じる一覧に重なっている`);
+      report("source-closure", `${path}.issueId`, "依頼文で閉じる一覧に重なっている");
     }
     closedBySourceIds.add(closure.issueId);
   });
@@ -578,22 +575,22 @@ export function checkQuestionLinks(
   questions.forEach((question, index) => {
     const path = `questions[${index}]`;
     if (!openSet.has(question.openIssueId)) {
-      report("issue-mapping", `${path}.openIssueId`, `${question.openIssueId}: 未解決の事項に無い`);
+      report("issue-mapping", `${path}.openIssueId`, "未解決の事項に無い");
     }
     const seen = new Set<string>();
     alsoClosesOf(question).forEach((id, alsoIndex) => {
       const idPath = `${path}.alsoCloses[${alsoIndex}]`;
       if (!openSet.has(id)) {
-        report("issue-mapping", idPath, `${id}: 未解決の事項に無い`);
+        report("issue-mapping", idPath, "未解決の事項に無い");
       }
       if (closedBySourceIds.has(id)) {
-        report("also-closes", idPath, `${id}: 依頼文で閉じる事項と同じである`);
+        report("also-closes", idPath, "依頼文で閉じる事項と同じである");
       }
       if (id === question.openIssueId) {
-        report("also-closes", idPath, `${id}: 主の事項を一緒に閉じる一覧に書き直している`);
+        report("also-closes", idPath, "主の事項を一緒に閉じる一覧に書き直している");
       }
       if (seen.has(id)) {
-        report("also-closes", idPath, `事項 ${id} が一緒に閉じる一覧の中で重なっている`);
+        report("also-closes", idPath, "一緒に閉じる一覧の中で重なっている");
       }
       seen.add(id);
     });
@@ -609,8 +606,8 @@ export function checkQuestionLinks(
     place(question.openIssueId);
     for (const id of alsoClosesOf(question)) place(id);
   }
-  for (const [id, count] of placement) {
-    if (count >= 2) report("duplicate-issue", "questions", `事項 ${id} が 2 か所以上に出ている（${count} か所）`);
+  for (const count of placement.values()) {
+    if (count >= 2) report("duplicate-issue", "questions", `2 か所以上に出ている（${count} か所）`);
   }
 
   return problems;

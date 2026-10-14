@@ -699,3 +699,98 @@ describe("依頼文で閉じる事項の引用（04 §3 P4・Issue #370）", () 
     expect(rule).toContain("収まらない");
   });
 });
+
+// ── 断る問題の path と message に、事項 ID・選択肢 ID の値を埋めない（§1・P4・Issue #445）──
+
+describe("断る問題の path と message に、事項 ID・選択肢 ID の値を埋めない（§1・P4・Issue #445）", () => {
+  const mark = "MARKER445";
+
+  /** 問題の全欄を 1 つの文字列に直列化する（目印の有無を見るため） */
+  const text = (problems: readonly { readonly code: string; readonly path: string; readonly message: string }[]): string =>
+    problems.map((problem) => `${problem.code} ${problem.path} ${problem.message}`).join("\n");
+
+  it("checkQuestionSet の各検査で、事項 ID・選択肢 ID の値を埋めない", () => {
+    const mapping = checkQuestionSet(["OI-1"], [question({ openIssueId: `OI-${mark}` })]);
+    const duplicate = checkQuestionSet(
+      [`OI-${mark}`],
+      [question({ id: "Q-1", openIssueId: `OI-${mark}` }), question({ id: "Q-2", openIssueId: `OI-${mark}` })],
+    );
+    const recommended = checkQuestionSet(
+      [`OI-${mark}`],
+      [question({ openIssueId: `OI-${mark}`, recommended: { choiceId: `c-${mark}`, reason: "理由" } })],
+    );
+    const duplicatedChoice = checkQuestionSet(
+      [`OI-${mark}`],
+      [question({ openIssueId: `OI-${mark}`, choices: choices(`c-${mark}`, `c-${mark}`) })],
+    );
+    expect(mapping.map((problem) => problem.code)).toContain("issue-mapping");
+    expect(duplicate.map((problem) => problem.code)).toContain("duplicate-issue");
+    expect(recommended.map((problem) => problem.code)).toContain("recommendation");
+    expect(duplicatedChoice.map((problem) => problem.code)).toContain("shape");
+    for (const problems of [mapping, duplicate, recommended, duplicatedChoice]) {
+      expect(problems.length).toBeGreaterThan(0);
+      expect(text(problems)).not.toContain(mark);
+    }
+  });
+
+  it("checkQuestionLinks が出す全部の code に、目印の例があり、値を埋めない", () => {
+    const closed: readonly PlanSourceClosure[] = [
+      { issueId: `OI-${mark}`, quote: "タスクを記録する", value: "記録する" },
+    ];
+    // 未解決の事項に無い（依頼文で閉じる一覧にも無い）
+    const sourceClosure = checkQuestionLinks(["OI-1"], [], closed);
+    // 依頼文で閉じる一覧の中で重なる（同じ事項を 2 回）
+    const sourceClosureDuplicate = checkQuestionLinks(
+      [`OI-${mark}`],
+      [],
+      [
+        { issueId: `OI-${mark}`, quote: "タスクを記録する", value: "記録する" },
+        { issueId: `OI-${mark}`, quote: "件数を合計する", value: "合計する" },
+      ],
+    );
+    // 依頼文で閉じる事項と同じ
+    const alsoCloses = checkQuestionLinks(
+      ["OI-1", `OI-${mark}`],
+      [question({ id: "Q-1", openIssueId: "OI-1", alsoCloses: [`OI-${mark}`] })],
+      closed,
+    );
+    // 一緒に閉じる一覧の中で重なる（同じ事項を 2 回）／主の事項を一緒に閉じる一覧に書き直す
+    const alsoClosesDuplicate = checkQuestionLinks(
+      ["OI-1", `OI-${mark}`],
+      [question({ id: "Q-1", openIssueId: "OI-1", alsoCloses: [`OI-${mark}`, `OI-${mark}`] })],
+    );
+    const alsoClosesMain = checkQuestionLinks(
+      [`OI-${mark}`],
+      [question({ id: "Q-1", openIssueId: `OI-${mark}`, alsoCloses: [`OI-${mark}`] })],
+    );
+    // 問いの主の事項が、未解決の事項に無い
+    const issueMapping = checkQuestionLinks(["OI-1"], [question({ openIssueId: `OI-${mark}` })]);
+    // 主の事項が、別の問いの一緒に閉じる一覧にも載る（個々の一覧では重複しない）
+    const duplicate = checkQuestionLinks(
+      ["OI-1", `OI-${mark}`],
+      [
+        question({ id: "Q-1", openIssueId: "OI-1", alsoCloses: [`OI-${mark}`] }),
+        question({ id: "Q-2", openIssueId: `OI-${mark}` }),
+      ],
+    );
+    expect(sourceClosure.map((problem) => problem.code)).toContain("source-closure");
+    expect(sourceClosureDuplicate.map((problem) => problem.code)).toContain("source-closure");
+    expect(alsoCloses.map((problem) => problem.code)).toContain("also-closes");
+    expect(alsoClosesDuplicate.map((problem) => problem.code)).toContain("also-closes");
+    expect(alsoClosesMain.map((problem) => problem.code)).toContain("also-closes");
+    expect(issueMapping.map((problem) => problem.code)).toContain("issue-mapping");
+    expect(duplicate.map((problem) => problem.code)).toContain("duplicate-issue");
+    for (const problems of [
+      sourceClosure,
+      sourceClosureDuplicate,
+      alsoCloses,
+      alsoClosesDuplicate,
+      alsoClosesMain,
+      issueMapping,
+      duplicate,
+    ]) {
+      expect(problems.length).toBeGreaterThan(0);
+      expect(text(problems)).not.toContain(mark);
+    }
+  });
+});

@@ -833,7 +833,10 @@ export function isPlannedDesign(design: DesignResult): boolean {
   return design.designs.some((entry) => entry.nature !== undefined || entry.verification !== undefined);
 }
 
-/** 役割 ID の表の、同名の対象についての規則（§1・②・Issue #307） */
+/**
+ * 役割 ID の表の、同名の対象についての規則（§1・②・Issue #307）。**Problem の `field` は位置（配列の
+ * 添字）、`message` は分類ごとの固定文**（役割 ID・名前・entity の値を埋めない。§1・②・Issue #445）。
+ */
 function checkRoleTable(roles: readonly RoleEntry[]): readonly Problem[] {
   const problems: Problem[] = [];
   // 同じ役割 ID は 1 つに決まること（同じ役割 ID を別の名前・別の entity に使い回さない）
@@ -847,7 +850,7 @@ function checkRoleTable(roles: readonly RoleEntry[]): readonly Problem[] {
     if (previous.name !== entry.name || previous.entity !== entry.entity) {
       problems.push({
         field: `roles[${index}]`,
-        message: `役割 ID ${entry.roleId} を、別の対象（名前 ${previous.name}・所属 ${String(previous.entity)}）に使い回している（1 つの役割 ID は 1 つの対象にだけ使う）`,
+        message: "役割 ID を、別の対象（名前・所属）に使い回している（1 つの役割 ID は 1 つの対象にだけ使う）",
       });
     }
   });
@@ -861,7 +864,7 @@ function checkRoleTable(roles: readonly RoleEntry[]): readonly Problem[] {
         if (a.roleId === b.roleId) {
           problems.push({
             field: `roles[${j}]`,
-            message: `同名の別 entity（${String(a.entity)} と ${String(b.entity)}）を同じ役割 ID ${a.roleId} にしている`,
+            message: "同名の別 entity を同じ役割 ID にしている",
           });
         }
         continue;
@@ -872,7 +875,7 @@ function checkRoleTable(roles: readonly RoleEntry[]): readonly Problem[] {
         if (!declared) {
           problems.push({
             field: `roles[${j}]`,
-            message: `同じ名前 ${a.name} の対象が、共有も別名も明示せずに ${a.roleId} と ${b.roleId} の 2 つの役割 ID になっている`,
+            message: "同じ名前の対象が、共有も別名も明示せずに 2 つの役割 ID になっている",
           });
         }
       }
@@ -1021,6 +1024,11 @@ export function checkDesignOwnership(design: DesignResult): readonly Problem[] {
  *
  * **新契約**（`version` を省いたとき）では、上の規則に**所属の点検**（`checkDesignOwnership`）を足す。
  * `legacy` を明示したときは、従来どおり所属を求めない（決定 ⑨・Issue #418）。
+ *
+ * **Problem の `field` は位置、`message` は分類ごとの固定文**（要件 ID の値を埋めない。要件ごとの問題は
+ * `requirements[添字]`、応答の設計ごとの問題は `designs[添字]` で位置を示す。§1・②・Issue #445）。
+ * `requirements[添字]` は渡した `list` の添字である——**送ったデータの座標と一致する一覧を渡すのは
+ * 呼ぶ側の責務**である（作り直しでは `inspectionListInSentOrder` がその順を作る。レビュー指摘）。
  */
 export function checkDesignPlan(
   list: RequirementList,
@@ -1036,36 +1044,57 @@ export function checkDesignPlan(
   }
 
   const byId = new Map<string, RequirementDesign>();
-  for (const entry of design.designs) {
+  design.designs.forEach((entry, index) => {
     if (byId.has(entry.requirementId)) {
-      problems.push({ field: "designs", message: `要件 ID ${entry.requirementId} の設計が重なっている` });
+      problems.push({ field: `designs[${index}]`, message: "同じ要件 ID の設計が重なっている" });
     }
     byId.set(entry.requirementId, entry);
-  }
+  });
   const idSet = new Set(list.requirements.map((requirement) => requirement.id));
-  for (const entry of design.designs) {
+  design.designs.forEach((entry, index) => {
     if (!idSet.has(entry.requirementId)) {
-      problems.push({ field: "designs", message: `一覧に無い要件 ID: ${entry.requirementId}` });
+      problems.push({ field: `designs[${index}]`, message: "一覧に無い要件 ID である" });
     }
-  }
-  for (const requirement of list.requirements) {
+  });
+  list.requirements.forEach((requirement, requirementIndex) => {
     const entry = byId.get(requirement.id);
     if (entry === undefined) {
-      problems.push({ field: "designs", message: `要件 ${requirement.id} の設計が無い` });
-      continue;
+      problems.push({ field: `requirements[${requirementIndex}]`, message: "要件の設計が無い" });
+      return;
     }
     if (entry.nature === undefined) {
-      problems.push({ field: "designs", message: `要件 ${requirement.id} に種類（決まりを含む／在ることだけ）が無い` });
+      problems.push({
+        field: `requirements[${requirementIndex}]`,
+        message: "要件に種類（決まりを含む／在ることだけ）が無い",
+      });
     }
     if (entry.verification === undefined) {
-      problems.push({ field: "designs", message: `要件 ${requirement.id} に確かめ方が無い` });
+      problems.push({ field: `requirements[${requirementIndex}]`, message: "要件に確かめ方が無い" });
     }
-  }
+  });
   if (version !== LEGACY_DESIGN_CONTRACT) {
     problems.push(...checkGroupBy(roles ?? []));
     problems.push(...checkDesignOwnership(design));
   }
   return problems;
+}
+
+/**
+ * 作り直しの点検に渡す一覧の順を、**送った一覧の座標に合わせる**（Issue #445・レビュー指摘）。送った一覧
+ * （`sent`）に含まれる要件を先頭に、その順のまま置き、残りを後ろに置く。これで、要件ごとの Problem の
+ * `requirements[添字]` が送った一覧の添字と一致する——作り直しの要求は対象の要件だけを送る（`run.ts` が
+ * 1 件へ絞る）ので、検査した全体の添字をそのまま出すと、送ったデータに無い位置を指す。要件の集合（`idSet`
+ * の照合）は変えない。
+ */
+function inspectionListInSentOrder(whole: RequirementList, sent: RequirementList): RequirementList {
+  const sentIds = new Set(sent.requirements.map((requirement) => requirement.id));
+  return {
+    ...whole,
+    requirements: [
+      ...whole.requirements.filter((requirement) => sentIds.has(requirement.id)),
+      ...whole.requirements.filter((requirement) => !sentIds.has(requirement.id)),
+    ],
+  };
 }
 
 /**
@@ -1075,13 +1104,15 @@ export function checkDesignPlan(
  * `### ` 見出し）に入っていなければならない。**制約 ID の無い申告**と、**文書に無い ID を使った申告**を、
  * 欄つきで断る。旧形式の記録（文字列の `unwritable`）は申告（`unwritableClaims`）を持たないので、
  * ここでは何も断らない。
+ *
+ * **`field` に要件 ID の値を埋めない**（位置は設計の添字と固定の欄名で示す。§1・②・Issue #445）。
  */
 export function checkDesignConstraints(design: DesignOutput, documents: readonly PromptDocument[]): readonly Problem[] {
   const known = constraintIdsIn(documents);
   const problems: Problem[] = [];
-  for (const entry of design.designs) {
+  design.designs.forEach((entry, designIndex) => {
     entry.unwritableClaims.forEach((claim, index) => {
-      const field = `designs.${entry.requirementId}.unwritable[${index}].constraintIds`;
+      const field = `designs[${designIndex}].unwritable[${index}].constraintIds`;
       if (claim.constraintIds.length === 0) {
         problems.push({
           field,
@@ -1094,11 +1125,11 @@ export function checkDesignConstraints(design: DesignOutput, documents: readonly
         // （Issue #398）。`### ### action` は 1 回だけ外すので `### action` のまま残り、断られる。
         const id = normalizeConstraintId(raw);
         if (id === "" || !known.has(id)) {
-          problems.push({ field, message: `文書に無い制約 ID: ${id === "" ? raw : id}` });
+          problems.push({ field, message: "文書に無い制約 ID である" });
         }
       }
     });
-  }
+  });
   return problems;
 }
 
@@ -1173,7 +1204,12 @@ export async function runDesign(input: DesignInput): Promise<StageOutcome<Design
         roles: input.redo.roles,
         designs: [...input.redo.adopted, ...answer.value.designs],
       };
-      problems.push(...checkDesignPlan(input.redo.wholeList, candidate));
+      // 点検は全体（`wholeList`）で行うが、**問題の添字は送った一覧の座標に合わせる**——作り直しの要求は
+      // 対象の要件だけを送るので、検査した全体の添字をそのまま出すと、送ったデータに無い位置を指す
+      // （Issue #445・レビュー指摘）。
+      problems.push(
+        ...checkDesignPlan(inspectionListInSentOrder(input.redo.wholeList, input.list), candidate),
+      );
     } else if (planned) {
       // 新契約では、中身の点検（所属を含む）を必ず掛ける（決定 ⑨・Issue #418）
       problems.push(...checkDesignPlan(input.list, answer.value));

@@ -4166,3 +4166,78 @@ describe("段の記録に、試行の終端と再試行の数・未精算の予�
     expect(result.record.budget_remaining_usd).toBeLessThanOrEqual(10);
   });
 });
+
+// ── 要約と記録の failure.problems に、検査の値（役割 ID・引用）を写さない（§1・Issue #445）──
+
+describe("要約と記録の failure.problems に、検査の値（役割 ID・引用）を写さない（§1・Issue #445）", () => {
+  const marker = "MARKER445";
+
+  it("② が目印の役割 ID で unmet になる走りで、要約の failure.problems の直列化に目印が出ない", async () => {
+    /** 目印の役割 ID を所属させた設計（表に無いので unmet） */
+    const badDesign = {
+      roles: [
+        { roleId: "record", kind: "entity", entity: null, name: "記録", shared: true, aliasOf: null, options: null, groupBy: null },
+        { roleId: "record.total", kind: "computation", entity: "record", name: "合計", shared: false, aliasOf: null, options: null, groupBy: null },
+        { roleId: "record.extra", kind: "computation", entity: "record", name: "補助", shared: false, aliasOf: null, options: null, groupBy: null },
+      ],
+      designs: [
+        {
+          requirementId: "R-1",
+          nature: "ruled",
+          verification: { kind: "fixed-test" },
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "記録の行を参照するため" },
+            { roleId: `ghost-${marker}`, basis: "stated", reason: null },
+          ],
+        },
+        {
+          requirementId: "R-2",
+          nature: "ruled",
+          verification: { kind: "fixed-test" },
+          vocabulary: [],
+          placement: [],
+          unwritable: [],
+          ownership: [
+            { roleId: "record", basis: "dependency", reason: "記録の行を参照するため" },
+            { roleId: "record.extra", basis: "stated", reason: null },
+          ],
+        },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(badDesign),
+      structured(badDesign),
+    ]);
+    const result = await runGeneration(makeRunInput(recording.client));
+    expect(result.stopped?.stage).toBe("design");
+    expect(result.stopped?.kind).toBe("unmet");
+    expect(JSON.stringify(result.stopped)).not.toContain(marker);
+    expect(JSON.stringify(result.summary.failure)).not.toContain(marker);
+    expect(JSON.stringify(result.record.failure)).not.toContain(marker);
+  });
+
+  it("① が目印の引用で malformed になる走りで、要約の failure.problems の直列化に目印が出ない", async () => {
+    const source = `${marker}。${marker}。`;
+    const badRequirements = {
+      requirements: [],
+      // 枠の文の引用に目印を入れ、位置を 1 か所に決められない（2 か所ある）
+      framing: [{ quote: marker, position: { start: 1, end: marker.length + 2 } }],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([structured(badRequirements), structured(badRequirements)]);
+    const result = await runGeneration(makeRunInput(recording.client, { source }));
+    // ① と ①' は同じ段（`reverse-check`）の記録にまとまる。① の形の誤りが 2 回続いて malformed で止まる
+    expect(result.stopped?.stage).toBe("reverse-check");
+    expect(result.stopped?.kind).toBe("malformed");
+    expect(recording.structured).toHaveLength(2);
+    expect(JSON.stringify(result.stopped)).not.toContain(marker);
+    expect(JSON.stringify(result.summary.failure)).not.toContain(marker);
+    expect(JSON.stringify(result.record.failure)).not.toContain(marker);
+  });
+});
