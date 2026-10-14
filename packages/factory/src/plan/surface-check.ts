@@ -26,7 +26,7 @@
 // **実 API は呼ばない。** 判定は差し込まれた `Judge`（試験は偽物）だけを使う。再点検の宛先（Luna）は、
 // 呼ぶ側が**明示的に渡した口**（`recheckJudge`）だけを使う——合成した口をもう一度呼ぶと主（Jev）が
 // 答え直すだけなので、落とし先が無ければ再点検せず未点検に残す。鍵もファイルも環境変数も扱わない。
-import type { Judge, JudgeAnswer, JudgeQuestion, JudgeResponse } from "../judge.js";
+import type { Judge, JudgeAnswer, JudgeChoiceQuestion, JudgeQuestion, JudgeResponse } from "../judge.js";
 import {
   JudgeBudgetExceededError,
   JudgeCallLimitExceededError,
@@ -75,6 +75,53 @@ export function surfaceTriageQuestionName(index: number): string {
 /** 裏付けの問いの ID */
 export function surfaceSupportQuestionName(index: number): string {
   return `${SURFACE_SUPPORT_QUESTION_PREFIX}:${index}`;
+}
+
+/**
+ * 仕分けの問い（T1）。**今の点検の問い**をそのまま組み立てる——比較の道具（`claim-forms.ts`）は、
+ * この関数を呼ぶ（文・criteria・順を変えない。Issue #459）。
+ */
+export function surfaceTriageQuestion(claim: PlanUnwritable): JudgeChoiceQuestion {
+  return {
+    kind: "choice",
+    instructions: {
+      // 対象の申告（部分と理由と制約 ID）を問いの欄に載せる（問いの名前だけでは判定が読めない。Issue #376）
+      part: claim.part,
+      reason: claim.reason,
+      constraintIds: claim.constraintIds,
+      ask: "Which kind of 'cannot write' claim is this? Only a claim that is genuinely unwritable because the vocabulary is missing is a vocabulary-hole.",
+    },
+    criteria: {
+      ambiguity: "曖昧さ・決めたこと・不確かさのメモ（語彙の穴ではない）",
+      "vocabulary-hole": "文書の語彙に無いために書けない（語彙の穴）",
+      "not-a-problem": "問題ではない（要件の言い直しなど。実際には書けている）",
+    },
+  };
+}
+
+/**
+ * 裏付けの問い（S1）。**今の点検の問い**をそのまま組み立てる——比較の道具は、この関数を呼ぶ
+ * （文・criteria・順を変えない。Issue #459）。抜粋は申告の制約 ID の節から取り出す。
+ */
+export function surfaceSupportQuestion(
+  claim: PlanUnwritable,
+  documents: readonly PromptDocument[],
+): JudgeChoiceQuestion {
+  return {
+    kind: "choice",
+    instructions: {
+      // 申告の全部の制約 ID の節の抜粋と、主張（部分と理由）を問いの欄に載せる（Issue #376）
+      part: claim.part,
+      reason: claim.reason,
+      excerpt: constraintExcerpt(documents, claim.constraintIds),
+      ask: "Does the excerpt (the relevant section of the documents) support the claim that this part cannot be written? If the excerpt does not state it, answer not-stated.",
+    },
+    criteria: {
+      supports: "抜粋が主張を裏付ける",
+      contradicts: "抜粋が主張に反する",
+      "not-stated": "抜粋に書いていない",
+    },
+  };
 }
 
 /** 再点検の仕分けの問いの ID */
@@ -298,21 +345,8 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
   // ── 1. 仕分け（曖昧さ／語彙の穴／問題ではない）──────────────────────
   const triageQuestions: Record<string, JudgeQuestion> = {};
   claims.forEach((claim, index) => {
-    triageQuestions[surfaceTriageQuestionName(index)] = {
-      kind: "choice",
-      instructions: {
-        // 対象の申告（部分と理由と制約 ID）を問いの欄に載せる（問いの名前だけでは判定が読めない。Issue #376）
-        part: claim.part,
-        reason: claim.reason,
-        constraintIds: claim.constraintIds,
-        ask: "Which kind of 'cannot write' claim is this? Only a claim that is genuinely unwritable because the vocabulary is missing is a vocabulary-hole.",
-      },
-      criteria: {
-        ambiguity: "曖昧さ・決めたこと・不確かさのメモ（語彙の穴ではない）",
-        "vocabulary-hole": "文書の語彙に無いために書けない（語彙の穴）",
-        "not-a-problem": "問題ではない（要件の言い直しなど。実際には書けている）",
-      },
-    };
+    // 問いの組み立ては**道具と共有する 1 つの関数**（`surfaceTriageQuestion`。Issue #459）
+    triageQuestions[surfaceTriageQuestionName(index)] = surfaceTriageQuestion(claim);
   });
   const classify = await safeJudge(input.judge, { state: {}, questions: triageQuestions });
 
@@ -371,21 +405,8 @@ export async function runSurfaceCheck(input: SurfaceCheckInput): Promise<Surface
   if (holes.length > 0) {
     const supportQuestions: Record<string, JudgeQuestion> = {};
     for (const { claim, index } of holes) {
-      supportQuestions[surfaceSupportQuestionName(index)] = {
-        kind: "choice",
-        instructions: {
-          // 申告の全部の制約 ID の節の抜粋と、主張（部分と理由）を問いの欄に載せる（Issue #376）
-          part: claim.part,
-          reason: claim.reason,
-          excerpt: constraintExcerpt(input.documents, claim.constraintIds),
-          ask: "Does the excerpt (the relevant section of the documents) support the claim that this part cannot be written? If the excerpt does not state it, answer not-stated.",
-        },
-        criteria: {
-          supports: "抜粋が主張を裏付ける",
-          contradicts: "抜粋が主張に反する",
-          "not-stated": "抜粋に書いていない",
-        },
-      };
+      // 問いの組み立ては**道具と共有する 1 つの関数**（`surfaceSupportQuestion`。Issue #459）
+      supportQuestions[surfaceSupportQuestionName(index)] = surfaceSupportQuestion(claim, input.documents);
     }
     const support = await safeJudge(input.judge, { state: {}, questions: supportQuestions });
 
