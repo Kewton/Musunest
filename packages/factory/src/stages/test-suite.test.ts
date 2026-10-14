@@ -211,16 +211,31 @@ describe("②' が送る要求を観測する（02 §2.2・§1.3）", () => {
 });
 
 describe("②' の不正な応答（02 §2.2）", () => {
+  it("形が 1 回だけ落ちて次の応答で通ると、形 1・中身 0（Issue #446）", async () => {
+    const recording = createRecordingClient([structured({ tests: "nope" }), structured(TEST_SUITE_OUTPUT)]);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+    const outcome = await runTestSuite({ list: REQUIREMENT_LIST, documents: [], gateway });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // 1 回目の形の誤りを、同じ回の 2 試行目で通す
+    expect(recording.structured).toHaveLength(2);
+    // 形のやり直しを 1 つ数え、中身の作り直しは 0（形が通ったあとの点検で通った）
+    expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
+  });
+
   it("形が合わない応答は 1 回だけやり直し、2 回続くと失敗になる", async () => {
     const bad = createRecordingClient([structured({ tests: "nope" }), structured({ tests: "nope" })]);
+    const gateway = makeGateway(bad.client);
     const failed = await runTestSuite({
       list: REQUIREMENT_LIST,
       documents: [],
-      gateway: makeGateway(bad.client),
+      gateway,
     });
     expect(failed.ok).toBe(false);
     if (failed.ok) return;
     expect(failed.failure.kind).toBe("malformed");
+    // 2 回続けて落ちても、形のやり直しは 1 回だけ（Issue #446）
+    expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
   });
 });
 
