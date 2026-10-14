@@ -184,12 +184,21 @@ export function createOpenAiLlmClient(options: OpenAiAdapterOptions): LlmClient 
 // ── 呼び出し（fetch と timeout。§1.5・§2.1）────────────────────────────────
 
 /**
- * 1 回の実呼び出し。打ち切りは 2 つの経路で起こる——自分の時計（`timeoutMs`）と、共通の口からの
- * 合図（`signal`）。**合図が渡されたときは自分の時計を持たない**：呼び出しごとの timeout は呼ぶ側
- * （共通の口）が持ち、締切の残りで頭を打ち、やり直しでは長くする（#302）。二重の時計があると、
- * やり直しの timeout を伸ばせない。渡されないとき（adapter を単体で使うとき）だけ、自分で打ち切る。
+ * 1 回の実呼び出しをして、応答を object として返す。HTTP の誤りと、JSON でない本文をここで分類する。
+ *
+ * 打ち切りは 2 つの経路で起こる——自分の時計（`timeoutMs`）と、共通の口からの合図（`signal`）。
+ * **合図が渡されたときは自分の時計を持たない**：呼び出しごとの timeout は呼ぶ側（共通の口）が持ち、
+ * 締切の残りで頭を打ち、やり直しでは長くする（#302）。二重の時計があると、やり直しの timeout を
+ * 伸ばせない。渡されないとき（adapter を単体で使うとき）だけ、自分で打ち切る。
+ *
+ * **合図（中断）は、本文を読み終えるまで保つ**（Issue #455）。ヘッダーを受けた時点で合図を外すと、
+ * そのあと本文が止まったときに締切の中断が届かず、待ち続ける。読み終える（または失敗する）まで外さない。
  */
-async function send(config: WireConfig, body: unknown, signal: AbortSignal | undefined): Promise<Response> {
+async function requestWire(
+  config: WireConfig,
+  body: unknown,
+  signal: AbortSignal | undefined,
+): Promise<Record<string, unknown>> {
   const controller = new AbortController();
   let timedOut = false;
   const timer =
@@ -202,50 +211,44 @@ async function send(config: WireConfig, body: unknown, signal: AbortSignal | und
   const onAbort = () => controller.abort();
   signal?.addEventListener("abort", onAbort);
   try {
-    return await config.fetch(RESPONSES_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (timedOut || signal?.aborted === true) {
-      throw new OpenAiAdapterError("timeout", "呼び出しごとの timeout で打ち切りました");
+    let response: Response;
+    try {
+      response = await config.fetch(RESPONSES_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (timedOut || signal?.aborted === true) {
+        throw new OpenAiAdapterError("timeout", "呼び出しごとの timeout で打ち切りました");
+      }
+      throw new OpenAiAdapterError("network", `fetch が失敗しました: ${messageOf(error)}`);
     }
-    throw new OpenAiAdapterError("network", `fetch が失敗しました: ${messageOf(error)}`);
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (error) {
+      if (timedOut || signal?.aborted === true) {
+        throw new OpenAiAdapterError("timeout", "呼び出しごとの timeout で打ち切りました");
+      }
+      throw new OpenAiAdapterError("network", `応答の本文を読めませんでした: ${messageOf(error)}`);
+    }
+    if (!response.ok) throw httpError(response.status, text);
+    const parsed = tryParseJson(text);
+    if (!parsed.ok) {
+      throw new OpenAiAdapterError("malformed", "応答が JSON として読めません");
+    }
+    if (!isRecord(parsed.value)) {
+      throw new OpenAiAdapterError("malformed", "応答が object ではありません");
+    }
+    return parsed.value;
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
-  }
-}
-
-/** 実呼び出しをして、応答を object として返す。HTTP の誤りと、JSON でない本文をここで分類する */
-async function requestWire(
-  config: WireConfig,
-  body: unknown,
-  signal: AbortSignal | undefined,
-): Promise<Record<string, unknown>> {
-  const response = await send(config, body, signal);
-  const text = await readText(response);
-  if (!response.ok) throw httpError(response.status, text);
-  const parsed = tryParseJson(text);
-  if (!parsed.ok) {
-    throw new OpenAiAdapterError("malformed", "応答が JSON として読めません");
-  }
-  if (!isRecord(parsed.value)) {
-    throw new OpenAiAdapterError("malformed", "応答が object ではありません");
-  }
-  return parsed.value;
-}
-
-async function readText(response: Response): Promise<string> {
-  try {
-    return await response.text();
-  } catch (error) {
-    throw new OpenAiAdapterError("network", `応答の本文を読めませんでした: ${messageOf(error)}`);
   }
 }
 
