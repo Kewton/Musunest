@@ -14,7 +14,7 @@
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex, type Diagnostic } from "@musunest/spec-engine";
 import { JobBudget, type TokenRates } from "./budget.js";
-import { CallGateway } from "./call.js";
+import { CallGateway, callCountsDelta, type CallCounts } from "./call.js";
 import {
   assembleBundle,
   buildDiagnostics,
@@ -542,22 +542,36 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
           }),
     });
 
+  /** 段の前後で取る計（usage と、共通の口の試行の終端。Issue #446） */
+  const meterState = (): { readonly usage: UsageSnapshot; readonly counts: CallCounts } => ({
+    usage: meter.snapshot,
+    counts: gateway.counts,
+  });
+
   const pushRecord = (
     stage: StageId,
     status: StageStatus,
-    before: UsageSnapshot,
+    before: { readonly usage: UsageSnapshot; readonly counts: CallCounts },
     start: number,
     failureKind: FailureKind | null,
     operation: StageOperation | null = null,
   ): void => {
     stages.push(
-      makeStageRecord(stage, status, input.now() - start, usageDelta(before, meter.snapshot), failureKind, operation),
+      makeStageRecord(
+        stage,
+        status,
+        input.now() - start,
+        usageDelta(before.usage, meter.snapshot),
+        callCountsDelta(before.counts, gateway.counts),
+        failureKind,
+        operation,
+      ),
     );
   };
 
   /** 値を返す段（④・⑤b・⑦）を回し、所要時間とトークンを記録する */
   const runStage = async <T>(stage: StageId, fn: () => Promise<T>): Promise<T> => {
-    const before = meter.snapshot;
+    const before = meterState();
     const start = input.now();
     try {
       const value = await fn();
@@ -574,7 +588,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
    * 失敗は `runStage` の内側で判定するので、その段の記録は `failed` になる。
    */
   const runStageOk = async <T>(stage: StageId, fn: () => Promise<StageOutcome<T>>): Promise<T> => {
-    const before = meter.snapshot;
+    const before = meterState();
     const start = input.now();
     let value: T;
     try {
@@ -601,6 +615,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       stages: stages.slice(),
       arbitration: { upheld: upheld.length, overturned: overturned.length, undecidable: unresolved.length },
       budget_remaining_usd: budget.remainingUsd,
+      budget_reserved_usd: budget.reservedUsd,
       missing_usage_calls: meter.snapshot.missing_usage_calls,
       failure,
     });
@@ -663,7 +678,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     } else {
       // ① の入口：依頼文の上限。超えていれば LLM を呼ばずに止める（§1.5）
       if (checkRequestText(input.source) !== undefined) {
-        pushRecord("requirements", "failed", meter.snapshot, input.now(), "limit");
+        pushRecord("requirements", "failed", meterState(), input.now(), "limit");
         throw new RunStop({ stage: "requirements", kind: "limit" });
       }
       // ① → ①'（逆照合。落ちがあれば ① を 1 回だけやり直す。§1）
@@ -714,7 +729,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
             // やり直しの 1 回を、段 `design` の記録（`operation` は `"redo-design"`）として残す
             // （Issue #410）。**戻り方は変えない**——段の失敗は今までどおり `undefined` を返し、例外は
             // 記録を足して投げ直し、外側の既存の catch に委ねる。
-            const before = meter.snapshot;
+            const before = meterState();
             const value = await redoDesignRecorded({
               call: () =>
                 runDesign({
@@ -731,7 +746,8 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
                     "design",
                     status,
                     durationMs,
-                    usageDelta(before, meter.snapshot),
+                    usageDelta(before.usage, meter.snapshot),
+                    callCountsDelta(before.counts, gateway.counts),
                     failureKind,
                     "redo-design",
                   ),

@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from "vitest";
 import { JobBudget, costOfUsageUsd, estimateMaxCostUsd, type TokenRates } from "./budget.js";
 import {
   CallGateway,
+  callCountsDelta,
   categorizeCallError,
   createCallGate,
   estimateInputUpperBoundTokens,
@@ -975,5 +976,399 @@ describe("effort low の timeout は 60 秒で、やり直しで伸び、締切�
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ── 試行の終端と再試行の数（Issue #446）──────────────────────────────
+//
+// 共通の口が、試行の終端を**理由別**に 1 つの開始につき 1 度だけ数える。不変の式：
+// 開始 ＝ 応答 ＋ 誤り ＋ 締切の打ち切り ＋ timeout の打ち切り。未着手は開始に数えない。
+// 競合に敗れた側（打ち切ったあとに遅れて来た値・例外）は、新しい終端の数を変えない。
+
+/** 不変の式を確かめる（すべての例で成り立つ。Issue #446） */
+function expectAttemptInvariant(gateway: CallGateway): void {
+  const attempts = gateway.attempts;
+  expect(attempts.started, "開始 ＝ 応答＋誤り＋締切の打ち切り＋timeout の打ち切り").toBe(
+    attempts.responded + attempts.errors + attempts.cancelled_deadline + attempts.cancelled_timeout,
+  );
+}
+
+/** いつまでも返らない偽物（打ち切りの合図で、打ち切られたことだけ数える） */
+const hangingStructured = (onAbort: () => void): LlmClient => ({
+  callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+    return new Promise<never>(() => {
+      request.signal?.addEventListener("abort", () => {
+        onAbort();
+      });
+    });
+  },
+  callWithTools(): Promise<LlmToolResponse> {
+    return Promise.reject(new Error("使わない"));
+  },
+});
+
+/** 打ち切りの合図を無視して、遅れて決まる偽物（負例。Issue #446） */
+const lateStructured = (settle: "resolve" | "reject", delayMs: number): LlmClient => ({
+  callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+    return new Promise((resolve, reject) => {
+      setTimeout(() => {
+        if (settle === "resolve") resolve({ output: { ok: true } as T, usage: USAGE });
+        else reject(networkError());
+      }, delayMs);
+    });
+  },
+  callWithTools(): Promise<LlmToolResponse> {
+    return Promise.reject(new Error("使わない"));
+  },
+});
+
+describe("試行の終端と再試行の数を、理由別に分けて数える（Issue #446）", () => {
+  it("1 回目で応答 → 開始 1・応答 1・再試行 0", async () => {
+    const gateway = new CallGateway({
+      client: createFakeLlmClient([{ kind: "structured", output: { ok: true }, usage: USAGE }]),
+      budget: new JobBudget(1_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 1_000,
+    });
+
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result.kind).toBe("ok");
+    expect(gateway.attempts).toMatchObject({ started: 1, responded: 1, errors: 0 });
+    expect(gateway.attempts.not_started).toEqual({ deadline: 0, budget: 0, limit: 0, timeout: 0 });
+    expect(gateway.retryCounts).toEqual({ communication: 0, shape: 0, content: 0 });
+    expectAttemptInvariant(gateway);
+  });
+
+  it("timeout のあと応答 → 開始 2・timeout の打ち切り 1・応答 1・通信 1", async () => {
+    vi.useFakeTimers();
+    try {
+      let attempts = 0;
+      let nowMs = 0;
+      const client: LlmClient = {
+        callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+          attempts += 1;
+          if (attempts === 1) {
+            return new Promise<never>(() => {
+              request.signal?.addEventListener("abort", () => {});
+            });
+          }
+          return Promise.resolve({ output: { ok: true } as T, usage: USAGE });
+        },
+        callWithTools(): Promise<LlmToolResponse> {
+          return Promise.reject(new Error("使わない"));
+        },
+      };
+      const gateway = new CallGateway({
+        client,
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => nowMs,
+        deadline: 100_000,
+        maxAttempts: 2,
+        callTimeoutMs: 1_000,
+      });
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      nowMs = 1_000;
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await pending;
+
+      expect(result.kind).toBe("ok");
+      expect(gateway.attempts).toMatchObject({ started: 2, responded: 1, errors: 0, cancelled_timeout: 1 });
+      expect(gateway.retryCounts.communication).toBe(1);
+      expectAttemptInvariant(gateway);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("5xx のあと応答 → 開始 2・誤り 1・応答 1・通信 1", async () => {
+    let attempts = 0;
+    const client: LlmClient = {
+      callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+        attempts += 1;
+        if (attempts === 1) return Promise.reject(errorWithKind("http", { status: 503 }));
+        return Promise.resolve({ output: { ok: true } as T, usage: USAGE });
+      },
+      callWithTools(): Promise<LlmToolResponse> {
+        return Promise.reject(new Error("使わない"));
+      },
+    };
+    const gateway = new CallGateway({
+      client,
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 100_000,
+      maxAttempts: 2,
+      callTimeoutMs: 100,
+    });
+
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result.kind).toBe("ok");
+    expect(gateway.attempts).toMatchObject({ started: 2, responded: 1, errors: 1 });
+    expect(gateway.retryCounts.communication).toBe(1);
+    expectAttemptInvariant(gateway);
+  });
+
+  it("未完了（usage 有り／無し）→ どちらも応答 1・誤り 0", async () => {
+    for (const usage of [USAGE, undefined]) {
+      const gateway = new CallGateway({
+        client: throwingClient(incompleteError(usage)),
+        budget: new JobBudget(1_000),
+        rates: RATES,
+        now: () => 0,
+        deadline: 1_000,
+      });
+      await gateway.callStructured(STRUCTURED_REQUEST);
+      expect(gateway.attempts).toMatchObject({ started: 1, responded: 1, errors: 0 });
+      expectAttemptInvariant(gateway);
+    }
+  });
+
+  it("拒否・形の誤り・不正な要求 → 開始 1・誤り 1・やり直さない", async () => {
+    const cases: readonly unknown[] = [
+      errorWithKind("refusal"),
+      errorWithKind("malformed"),
+      invalidRequestError("invalid_json_schema"),
+    ];
+    for (const error of cases) {
+      const gateway = new CallGateway({
+        client: throwingClient(error),
+        budget: new JobBudget(1_000),
+        rates: RATES,
+        now: () => 0,
+        deadline: 1_000_000,
+      });
+      const result = await gateway.callStructured(STRUCTURED_REQUEST);
+      expect(result.kind === "failed" || result.kind === "invalidRequest").toBe(true);
+      expect(gateway.calls).toBe(1);
+      expect(gateway.attempts).toMatchObject({ started: 1, responded: 0, errors: 1 });
+      expect(gateway.retryCounts.communication).toBe(0);
+      expectAttemptInvariant(gateway);
+    }
+  });
+
+  it("残りが 0 以下 → 未着手（締切）1・開始 0・deadlineExceeded", async () => {
+    let called = 0;
+    const gateway = new CallGateway({
+      client: spyClient(() => {
+        called += 1;
+      }),
+      budget: new JobBudget(1_000),
+      rates: RATES,
+      now: () => 5_000,
+      deadline: 5_000,
+    });
+
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result.kind).toBe("deadlineExceeded");
+    expect(called).toBe(0);
+    expect(gateway.attempts.started).toBe(0);
+    expect(gateway.attempts.not_started.deadline).toBe(1);
+    expectAttemptInvariant(gateway);
+  });
+
+  it("呼んでいる途中で締切 → 開始 1・応答 0・締切の打ち切り 1", async () => {
+    vi.useFakeTimers();
+    try {
+      let aborted = false;
+      const gateway = new CallGateway({
+        client: hangingStructured(() => {
+          aborted = true;
+        }),
+        budget: new JobBudget(1_000),
+        rates: RATES,
+        now: () => 0,
+        deadline: 1_000,
+      });
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await pending;
+
+      expect(result.kind).toBe("deadlineExceeded");
+      expect(aborted).toBe(true);
+      expect(gateway.attempts).toMatchObject({ started: 1, responded: 0, cancelled_deadline: 1 });
+      expectAttemptInvariant(gateway);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("予約できない → 未着手（予算）1", async () => {
+    const maxCostUsd = maxCostOf(structuredInputParts(STRUCTURED_REQUEST), STRUCTURED_REQUEST.maxOutputTokens);
+    let called = 0;
+    const gateway = new CallGateway({
+      client: spyClient(() => {
+        called += 1;
+      }),
+      budget: new JobBudget(maxCostUsd - 1),
+      rates: RATES,
+      now: () => 0,
+      deadline: 1_000,
+    });
+
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result.kind).toBe("budgetExceeded");
+    expect(called).toBe(0);
+    expect(gateway.attempts.started).toBe(0);
+    expect(gateway.attempts.not_started.budget).toBe(1);
+    expectAttemptInvariant(gateway);
+  });
+
+  it("呼び出しの数の上限 → 未着手（上限）1", async () => {
+    const gateway = new CallGateway({
+      client: spyClient(() => {}),
+      budget: new JobBudget(1_000_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 1_000_000,
+      limits: { ...AGENT_LIMITS, callCount: 1 },
+    });
+
+    await gateway.callStructured(STRUCTURED_REQUEST);
+    const result = await gateway.callStructured(STRUCTURED_REQUEST);
+    expect(result.kind).toBe("limitExceeded");
+    expect(gateway.attempts.started).toBe(1);
+    expect(gateway.attempts.not_started.limit).toBe(1);
+    expectAttemptInvariant(gateway);
+  });
+
+  it("timeout を伸ばせない → 未着手（timeout）1", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      let aborts = 0;
+      const gateway = new CallGateway({
+        client: hangingStructured(() => {
+          aborts += 1;
+        }),
+        budget: new JobBudget(1_000_000),
+        rates: RATES,
+        now: () => Date.now(),
+        deadline: 90_000,
+        effort: "low",
+        maxAttempts: 3,
+      });
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await pending;
+
+      expect(result.kind).toBe("failed");
+      expect(aborts).toBe(1);
+      expect(gateway.attempts).toMatchObject({ started: 1, cancelled_timeout: 1 });
+      expect(gateway.attempts.not_started.timeout).toBe(1);
+      expectAttemptInvariant(gateway);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("負例：打ち切ったあとに遅れて成功が来ても、応答は増えない（打ち切り 1 のまま）", async () => {
+    vi.useFakeTimers();
+    try {
+      const budget = new JobBudget(1_000_000);
+      const gateway = new CallGateway({
+        client: lateStructured("resolve", 5_000),
+        budget,
+        rates: RATES,
+        now: () => 0,
+        deadline: 1_000,
+        callTimeoutMs: 1_000,
+      });
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await pending;
+      expect(result.kind).toBe("deadlineExceeded");
+
+      const before = gateway.counts;
+      expect(before.attempts).toMatchObject({ started: 1, responded: 0, errors: 0, cancelled_deadline: 1 });
+      // 打ち切ったあとに、遅れて成功が来る
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(gateway.counts).toEqual(before);
+      expectAttemptInvariant(gateway);
+      // 打ち切った呼び出しの予約は残る（減らない）
+      expect(budget.reservedUsd).toBe(
+        maxCostOf(structuredInputParts(STRUCTURED_REQUEST), STRUCTURED_REQUEST.maxOutputTokens),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("負例：打ち切ったあとに遅れて例外が来ても、誤りは増えない（打ち切り 1 のまま）", async () => {
+    vi.useFakeTimers();
+    try {
+      const budget = new JobBudget(1_000_000);
+      const gateway = new CallGateway({
+        client: lateStructured("reject", 5_000),
+        budget,
+        rates: RATES,
+        now: () => 0,
+        deadline: 1_000,
+        callTimeoutMs: 1_000,
+      });
+      const pending = gateway.callStructured(STRUCTURED_REQUEST);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await pending;
+      expect(result.kind).toBe("deadlineExceeded");
+
+      const before = gateway.counts;
+      expect(before.attempts).toMatchObject({ started: 1, responded: 0, errors: 0, cancelled_deadline: 1 });
+      // 打ち切ったあとに、遅れて例外が来る
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(gateway.counts).toEqual(before);
+      expectAttemptInvariant(gateway);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("告げる口で、形・中身の再試行を 1 つずつ数える（通信は口が自分で数える）", () => {
+    const gateway = new CallGateway({
+      client: spyClient(() => {}),
+      budget: new JobBudget(1_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 1_000,
+    });
+    gateway.noteRetry("shape");
+    gateway.noteRetry("content");
+    gateway.noteRetry("shape");
+    expect(gateway.retryCounts).toEqual({ communication: 0, shape: 2, content: 1 });
+  });
+
+  it("2 時点の差が取れる（計の差を段の記録に写せる）", async () => {
+    const gateway = new CallGateway({
+      client: createFakeLlmClient([
+        { kind: "structured", output: { ok: true }, usage: USAGE },
+        { kind: "structured", output: { ok: true }, usage: USAGE },
+      ]),
+      budget: new JobBudget(1_000),
+      rates: RATES,
+      now: () => 0,
+      deadline: 1_000,
+    });
+    const before = gateway.counts;
+    await gateway.callStructured(STRUCTURED_REQUEST);
+    const mid = gateway.counts;
+    await gateway.callStructured(STRUCTURED_REQUEST);
+    const after = gateway.counts;
+
+    const first = callCountsDelta(before, mid);
+    const second = callCountsDelta(mid, after);
+    expect(first).toEqual(second);
+    expect(first).toEqual({
+      attempts: {
+        started: 1,
+        responded: 1,
+        errors: 0,
+        cancelled_deadline: 0,
+        cancelled_timeout: 0,
+        not_started: { deadline: 0, budget: 0, limit: 0, timeout: 0 },
+      },
+      retries: { communication: 0, shape: 0, content: 0 },
+    });
+    expect(callCountsDelta(before, after).attempts.started).toBe(2);
   });
 });

@@ -38,7 +38,14 @@ import {
 } from "@musunest/appspec-schema";
 import { JobBudget, type TokenRates } from "../budget.js";
 import type { BundleJudgeUsage } from "../bundle.js";
-import { CallGateway, createCallGate } from "../call.js";
+import {
+  CallGateway,
+  callCountsDelta,
+  createCallGate,
+  type AttemptCounts,
+  type CallCounts,
+  type RetryCounts,
+} from "../call.js";
 import type { Judge } from "../judge.js";
 import { JudgeBudgetExceededError, JudgeCallLimitExceededError, JudgeDeadlineExceededError, createBudgetedJudge, type BudgetedJudge } from "../judge-budget.js";
 import { AGENT_LIMITS, type AgentLimits, type LimitName } from "../limits.js";
@@ -129,6 +136,10 @@ export interface PlanStageRecord {
   readonly cache_write_tokens: number;
   readonly output_tokens: number;
   readonly reasoning_tokens: number;
+  /** 呼び出しの試行の開始・応答・誤り・打ち切り・未着手の数（Issue #446） */
+  readonly attempts: AttemptCounts;
+  /** 通信・形・中身の再試行の数（Issue #446） */
+  readonly retries: RetryCounts;
   readonly failure_kind: FailureKind | null;
 }
 
@@ -1434,14 +1445,21 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     round: conflictRound,
   });
 
+  /** 段の前後で取る計（usage と、共通の口の試行の終端。Issue #446） */
+  const meterState = (): { readonly usage: UsageSnapshot; readonly counts: CallCounts } => ({
+    usage: meter.snapshot,
+    counts: gateway.counts,
+  });
+
   const pushRecord = (
     stage: PlanStageId,
     status: StageStatus,
-    before: UsageSnapshot,
+    before: { readonly usage: UsageSnapshot; readonly counts: CallCounts },
     start: number,
     failureKind: FailureKind | null,
   ): void => {
-    const delta = usageDelta(before, meter.snapshot);
+    const delta = usageDelta(before.usage, meter.snapshot);
+    const counts = callCountsDelta(before.counts, gateway.counts);
     stages.push({
       stage,
       status,
@@ -1453,13 +1471,15 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       cache_write_tokens: delta.cache_write_tokens,
       output_tokens: delta.output_tokens,
       reasoning_tokens: delta.reasoning_tokens,
+      attempts: counts.attempts,
+      retries: counts.retries,
       failure_kind: failureKind,
     });
   };
 
   /** 値を返す段（目録の点検・答えの反映・照合と確定）を回し、所要時間とトークンを記録する */
   const runStage = async <T>(stage: PlanStageId, fn: () => Promise<T>): Promise<T> => {
-    const before = meter.snapshot;
+    const before = meterState();
     const start = input.now();
     try {
       const value = await fn();
@@ -1495,7 +1515,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     stage: PlanStageId,
     fn: () => Promise<StageOutcome<T> | { readonly ok: false; readonly failure: StageFailure; readonly operation: ReverseCheckOperation }>,
   ): Promise<T> => {
-    const before = meter.snapshot;
+    const before = meterState();
     const start = input.now();
     let value: T;
     try {

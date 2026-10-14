@@ -257,6 +257,9 @@ export async function callStructuredChecked<T>(
     const checked = plan.check(result.value.output);
     if (checked.ok) return { ok: true, value: checked.value };
     problems = checked.problems;
+    // 形が合わなかったので、1 回だけやり直す。この**やり直し**を、共通の口へ告げる（Issue #446）。
+    // 最後の試行の形の誤りは、やり直しではないので告げない（`malformed` の終端になる）。
+    if (attempt + 1 < STEP_ATTEMPTS) gateway.noteRetry("shape");
   }
   return { ok: false, failure: { kind: "malformed", attempts: STEP_ATTEMPTS, problems } };
 }

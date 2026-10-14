@@ -9,6 +9,7 @@
 // 抽象的なものだけを使い、受入の題材の言葉は使わない。
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runGeneration } from "./run.js";
+import { ATTEMPT_KEYS, RETRY_KEYS } from "./record.js";
 import { DESIGN_FILE, MAPPINGS_FILE, TEST_SUITE_FILE } from "./bundle.js";
 import type { RecordedCall } from "./llm-fake.js";
 import { requirementsFromPlan, LEGACY_DESIGN_CONTRACT } from "./pipeline.js";
@@ -388,5 +389,57 @@ describe("確定した仕様を正本にした道でも、全段が同じ要件�
     // Plan への差し戻しの判断があれば、合格（full）にならず、差し戻しが結果に残る
     expect(result.outcome.verdict).not.toBe("full");
     expect(result.returnToPlan).toBe(true);
+  });
+});
+
+// ── 各段の記録に、試行の終端と再試行の数が入る（Issue #446）──────────────
+
+describe("①〜⑦ の各段の記録に、試行の終端と再試行の数が入る（Issue #446）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("各段に attempts・retries があり、不変の式（開始＝応答＋誤り＋打ち切り）が成り立つ", async () => {
+    const recording = createRecordingClient(recordedWiring());
+    const result = await runGeneration(makeRunInput(recording.client));
+    expect(result.outcome.result).toBe("pass");
+    expect(result.record.stages.length).toBeGreaterThan(0);
+    for (const stage of result.record.stages) {
+      expect(Object.keys(stage.attempts).sort(), stage.stage).toEqual([...ATTEMPT_KEYS].sort());
+      expect(Object.keys(stage.retries).sort(), stage.stage).toEqual([...RETRY_KEYS].sort());
+      expect(stage.attempts.started, stage.stage).toBe(
+        stage.attempts.responded +
+          stage.attempts.errors +
+          stage.attempts.cancelled_deadline +
+          stage.attempts.cancelled_timeout,
+      );
+    }
+  });
+
+  it("1 度通って 1 回で通る段は開始 1・応答 1・再試行 0、LLM を呼ばない段は開始 0・応答 0", async () => {
+    const recording = createRecordingClient(recordedWiring());
+    const result = await runGeneration(makeRunInput(recording.client));
+    expect(result.outcome.result).toBe("pass");
+    const byStage = (id: string): readonly (typeof result.record.stages)[number][] =>
+      result.record.stages.filter((stage) => stage.stage === id);
+
+    // 共通の口を 1 度通って 1 回で通る段（②・②'・③・⑤a・⑥）
+    for (const id of ["design", "test-suite", "write", "correspondence", "repair"]) {
+      for (const stage of byStage(id)) {
+        expect(stage.calls, id).toBe(1);
+        expect(stage.attempts.started, id).toBe(1);
+        expect(stage.attempts.responded, id).toBe(1);
+        expect(stage.retries, id).toEqual({ communication: 0, shape: 0, content: 0 });
+      }
+    }
+
+    // LLM を呼ばない段（コードの静的チェック・試験を流す・終わりの判定）は開始 0・応答 0
+    for (const id of ["static-check", "run-tests", "judge"]) {
+      for (const stage of byStage(id)) {
+        expect(stage.attempts.started, id).toBe(0);
+        expect(stage.attempts.responded, id).toBe(0);
+        expect(stage.attempts.not_started, id).toEqual({ deadline: 0, budget: 0, limit: 0, timeout: 0 });
+      }
+    }
   });
 });

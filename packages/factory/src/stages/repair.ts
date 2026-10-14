@@ -366,6 +366,8 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
         return { ok: false, failure: { kind: "malformed", attempts: answerFailures, problems: checked.problems } };
       }
       // 1 回だけ、問題を返して直させる（予算・回数・締切の上限は、呼ぶたびに共通の口が当てる）。
+      // 最後の答えの形の誤りで**やり直す**ことを、共通の口へ告げる（Issue #446）。
+      input.gateway.noteRetry("shape");
       answerInput = shapeProblemInput(plan.input, checked.problems);
       continue;
     }

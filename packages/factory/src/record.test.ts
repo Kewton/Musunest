@@ -10,6 +10,9 @@ import { describe, expect, it } from "vitest";
 import type { LlmClient } from "./llm.js";
 import { OpenAiIncompleteError, type OpenAiUsage } from "./openai.js";
 import {
+  ATTEMPT_KEYS,
+  NOT_STARTED_KEYS,
+  RETRY_KEYS,
   RUN_RECORD_KEYS,
   STAGE_RECORD_KEYS,
   SUMMARY_KEYS,
@@ -21,6 +24,7 @@ import {
   type RunRecord,
   type StageRecord,
 } from "./record.js";
+import type { CallCounts } from "./call.js";
 
 const USAGE: OpenAiUsage = {
   inputTokens: 10,
@@ -28,6 +32,19 @@ const USAGE: OpenAiUsage = {
   cacheWriteTokens: 3,
   outputTokens: 4,
   reasoningTokens: 1,
+};
+
+/** 段の前後で取った差の計（試行の終端と再試行。Issue #446） */
+const COUNTS: CallCounts = {
+  attempts: {
+    started: 2,
+    responded: 1,
+    errors: 1,
+    cancelled_deadline: 0,
+    cancelled_timeout: 0,
+    not_started: { deadline: 0, budget: 0, limit: 0, timeout: 0 },
+  },
+  retries: { communication: 1, shape: 1, content: 0 },
 };
 
 const stage = () =>
@@ -44,6 +61,7 @@ const stage = () =>
       output_tokens: 4,
       reasoning_tokens: 1,
     },
+    COUNTS,
     null,
   );
 
@@ -58,6 +76,7 @@ const record = (): RunRecord => ({
   stages: [stage()],
   arbitration: { upheld: 1, overturned: 2, undecidable: 3 },
   budget_remaining_usd: 0.05,
+  budget_reserved_usd: 0.02,
   missing_usage_calls: 1,
   failure: { stage: "repair", kind: "unmet" },
 });
@@ -122,17 +141,17 @@ describe("段の記録の operation（Issue #410）", () => {
   });
 
   it("makeStageRecord は、省けば null、redo-design を渡せばその値を写す", () => {
-    expect(makeStageRecord("design", "ok", 12, snapshot, null).operation).toBeNull();
-    expect(makeStageRecord("design", "ok", 12, snapshot, null, "redo-design").operation).toBe("redo-design");
+    expect(makeStageRecord("design", "ok", 12, snapshot, COUNTS, null).operation).toBeNull();
+    expect(makeStageRecord("design", "ok", 12, snapshot, COUNTS, null, "redo-design").operation).toBe("redo-design");
   });
 
   it("上限のある値の並びの外（有限でない値）は写さず null にする", () => {
-    expect(makeStageRecord("design", "ok", 12, snapshot, null, "model-output" as never).operation).toBeNull();
-    expect(makeStageRecord("design", "ok", 12, snapshot, null, 42 as never).operation).toBeNull();
+    expect(makeStageRecord("design", "ok", 12, snapshot, COUNTS, null, "model-output" as never).operation).toBeNull();
+    expect(makeStageRecord("design", "ok", 12, snapshot, COUNTS, null, 42 as never).operation).toBeNull();
   });
 
   it("buildRunRecord で組み直しても値が残り、余分な欄は残らない", () => {
-    const redone = { ...makeStageRecord("design", "ok", 12, snapshot, null, "redo-design"), extra: "余分" };
+    const redone = { ...makeStageRecord("design", "ok", 12, snapshot, COUNTS, null, "redo-design"), extra: "余分" };
     const picked = buildRunRecord({ ...record(), stages: [redone as unknown as StageRecord] });
     expect(picked.stages[0]?.operation).toBe("redo-design");
     expect(Object.keys(picked.stages[0] ?? {}).sort()).toEqual([...STAGE_RECORD_KEYS].sort());
@@ -140,7 +159,7 @@ describe("段の記録の operation（Issue #410）", () => {
   });
 
   it("buildSummary の要約の同じ段にも値が残り、余分な欄は残らず、wire に受け付けられる", () => {
-    const redone = { ...makeStageRecord("design", "ok", 12, snapshot, null, "redo-design"), extra: "余分" };
+    const redone = { ...makeStageRecord("design", "ok", 12, snapshot, COUNTS, null, "redo-design"), extra: "余分" };
     const built = buildSummary(
       { ...record(), stages: [redone as unknown as StageRecord] },
       {
@@ -157,6 +176,81 @@ describe("段の記録の operation（Issue #410）", () => {
     expect(Object.keys(built.stages[0] ?? {}).sort()).toEqual([...STAGE_RECORD_KEYS].sort());
     expect((built.stages[0] as unknown as Record<string, unknown>)["extra"]).toBeUndefined();
     expect(acceptsHeadlessSummaryWire(built)).toBe(true);
+  });
+});
+
+// ── 1c. 試行の終端と再試行、未精算の予約額の欄（Issue #446）──────────
+
+describe("段の記録に attempts・retries、記録に budget_reserved_usd がある（Issue #446）", () => {
+  it("欄の一覧に attempts・retries・budget_reserved_usd がある", () => {
+    expect(STAGE_RECORD_KEYS).toContain("attempts");
+    expect(STAGE_RECORD_KEYS).toContain("retries");
+    expect(RUN_RECORD_KEYS).toContain("budget_reserved_usd");
+  });
+
+  it("attempts の下位の欄は、試行の終端と未着手の 4 種だけである", () => {
+    expect(ATTEMPT_KEYS).toEqual([
+      "started",
+      "responded",
+      "errors",
+      "cancelled_deadline",
+      "cancelled_timeout",
+      "not_started",
+    ]);
+    expect(NOT_STARTED_KEYS).toEqual(["deadline", "budget", "limit", "timeout"]);
+    expect(RETRY_KEYS).toEqual(["communication", "shape", "content"]);
+  });
+
+  it("makeStageRecord は、渡した計の下位の欄だけを写す（余分な下位の欄は残さない）", () => {
+    const rawCounts = {
+      attempts: {
+        ...COUNTS.attempts,
+        extra: "余分",
+        not_started: { ...COUNTS.attempts.not_started, extra: "余分" },
+      },
+      retries: { ...COUNTS.retries, extra: "余分" },
+    } as unknown as CallCounts;
+    const usage = {
+      calls: 1,
+      missing_usage_calls: 0,
+      input_tokens: 10,
+      cached_input_tokens: 2,
+      cache_write_tokens: 3,
+      output_tokens: 4,
+      reasoning_tokens: 1,
+    };
+    const built = makeStageRecord("write", "ok", 12, usage, rawCounts, null);
+    expect(Object.keys(built.attempts).sort()).toEqual([...ATTEMPT_KEYS].sort());
+    expect(Object.keys(built.attempts.not_started).sort()).toEqual([...NOT_STARTED_KEYS].sort());
+    expect(Object.keys(built.retries).sort()).toEqual([...RETRY_KEYS].sort());
+    expect((built.attempts as unknown as Record<string, unknown>)["extra"]).toBeUndefined();
+    expect((built.attempts.not_started as unknown as Record<string, unknown>)["extra"]).toBeUndefined();
+    expect((built.retries as unknown as Record<string, unknown>)["extra"]).toBeUndefined();
+  });
+
+  it("試行の終端と再試行、未精算の予約額が、記録と要約に写る", () => {
+    const picked = buildRunRecord(record());
+    expect(picked.stages[0]?.attempts).toEqual(COUNTS.attempts);
+    expect(picked.stages[0]?.retries).toEqual(COUNTS.retries);
+    expect(picked.budget_reserved_usd).toBe(0.02);
+    const built = summary();
+    expect(built.stages[0]?.attempts).toEqual(COUNTS.attempts);
+    expect(built.stages[0]?.retries).toEqual(COUNTS.retries);
+    expect(built.budget_reserved_usd).toBe(0.02);
+  });
+
+  it("予約額を省いた記録でも、要約の欄は 0 で埋まる", () => {
+    const { budget_reserved_usd: _omit, ...withoutReserved } = record();
+    const built = buildSummary(withoutReserved as RunRecord, {
+      run_id: "run-1",
+      verdict: "none",
+      assurance: "none",
+      duration_secs: 0,
+      provider_cost_usd: 0,
+      stop_class: "completed",
+      exit_code: 1,
+    });
+    expect(built.budget_reserved_usd).toBe(0);
   });
 });
 
@@ -188,6 +282,7 @@ describe("版・裁定の数・予約の残り・usage が欠けた呼び出し�
     expect(built.builder).toBe("musunest-factory");
     expect(built.arbitration).toEqual({ upheld: 1, overturned: 2, undecidable: 3 });
     expect(built.budget_remaining_usd).toBe(0.05);
+    expect(built.budget_reserved_usd).toBe(0.02);
     expect(built.missing_usage_calls).toBe(1);
     expect(built.failure).toEqual({ stage: "repair", kind: "unmet" });
     expect(built.stages).toHaveLength(1);

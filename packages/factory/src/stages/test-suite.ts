@@ -1490,6 +1490,8 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
     // 次の回に、作り直しの指示と**その添字の参照先**（実際に検査した試験集合）を渡す（Issue #439）
     previous = problems;
     previousTests = suite.tests;
+    // 中身の点検に落ちたので作り直す。この**中身のやり直し**を、共通の口へ告げる（Issue #446）。
+    if (round < TEST_SUITE_ROUNDS) input.gateway.noteRetry("content");
   }
   return { ok: false, failure: { kind: "unmet", attempts: TEST_SUITE_ROUNDS, problems: previous } };
 }

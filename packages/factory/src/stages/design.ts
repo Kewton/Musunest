@@ -1190,6 +1190,8 @@ export async function runDesign(input: DesignInput): Promise<StageOutcome<Design
       return { ok: true, value: normalized };
     }
     previous = problems;
+    // 中身の点検に落ちたので作り直す。この**中身のやり直し**を、共通の口へ告げる（Issue #446）。
+    if (round < DESIGN_ROUNDS) input.gateway.noteRetry("content");
   }
   return { ok: false, failure: { kind: "unmet", attempts: DESIGN_ROUNDS, problems: previous } };
 }

@@ -21,6 +21,7 @@ import * as runModule from "./run.js";
 import type { Judge, JudgeRequest } from "./judge.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse } from "./llm.js";
 import { createRecordingClient } from "./stages/__tests__/prompt.js";
+import { ATTEMPT_KEYS, RETRY_KEYS } from "./record.js";
 import { SOURCE_TEXT, recordedRun } from "./__tests__/run.js";
 
 interface NodeFs {
@@ -229,9 +230,23 @@ describe("偽物を差し込んで 1 回の生成を流し、ディレクトリ�
     expect(written.some((path) => path.includes("/diagnostics/"))).toBe(false);
 
     const last = lines.at(-1) ?? "";
-    const summary = JSON.parse(last) as { schema_version: string; verdict: string };
+    const summary = JSON.parse(last) as {
+      schema_version: string;
+      verdict: string;
+      budget_reserved_usd?: number;
+      stages: readonly { readonly attempts: object; readonly retries: object }[];
+    };
     expect(summary.schema_version).toBe("commandagent.headless-summary/v1");
     expect(summary.verdict).toBe("full");
+    // Issue #446：未精算の予約額と、段ごとの試行の終端・再試行の数が要約に入る
+    expect(summary.budget_reserved_usd).toBe(0);
+    expect(summary.stages.length).toBeGreaterThan(0);
+    for (const stage of summary.stages) {
+      expect(Object.keys(stage.attempts).sort()).toEqual([...ATTEMPT_KEYS].sort());
+      expect(Object.keys(stage.retries).sort()).toEqual([...RETRY_KEYS].sort());
+    }
+    // 依頼文の目印の文字列は出ない
+    expect(last).not.toContain("タスクを記録する");
   });
 });
 

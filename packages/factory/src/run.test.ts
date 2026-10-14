@@ -4039,3 +4039,130 @@ describe("（別の試験）正本から固定した見出しの期待は、②'
     expect(result.stopped?.stage).toBe("test-suite");
   });
 });
+
+// ── 段の記録に、試行の終端と再試行の数・未精算の予約額が入る（Issue #446）──────────
+
+describe("段の記録に、試行の終端と再試行の数・未精算の予約額が入る（Issue #446）", () => {
+  /**
+   * 指定の回数目の構造化呼び出しを返した**あとで時計を進め**、それ以降の呼び出しを返さずに待たせる
+   * 偽物（Issue #446）。狙った段の次の試行で、締切の残りを 1ms にして**呼んでいる途中に打ち切る**。
+   * 実 API は呼ばない。
+   */
+  function clientDeadlineDuringSecondCall(
+    recording: { readonly client: LlmClient },
+    jumpAfter: number,
+    clock: { value: number },
+    jumpTo: number,
+  ): LlmClient {
+    let calls = 0;
+    return {
+      async callStructured<T>(request: LlmStructuredRequest) {
+        calls += 1;
+        if (calls <= jumpAfter) {
+          const response = await recording.client.callStructured<T>(request);
+          if (calls === jumpAfter) clock.value = jumpTo;
+          return response;
+        }
+        return new Promise<never>(() => {
+          request.signal?.addEventListener("abort", () => {});
+        });
+      },
+      callWithTools: (request: LlmToolRequest) => recording.client.callWithTools(request),
+    };
+  }
+
+  /** 記録した応答を順に返し、`atCall` 回目の構造化呼び出しだけ決まった誤りにする偽物（実 API は呼ばない） */
+  function failingOnce(
+    recorded: readonly RecordedCall[],
+    atCall: number,
+    error: unknown,
+  ): { readonly client: LlmClient } {
+    const inner = createFakeLlmClient(recorded);
+    let calls = 0;
+    return {
+      client: {
+        async callStructured<T>(request: LlmStructuredRequest) {
+          calls += 1;
+          if (calls === atCall) throw error;
+          return inner.callStructured<T>(request);
+        },
+        async callWithTools(request: LlmToolRequest) {
+          calls += 1;
+          if (calls === atCall) throw error;
+          return inner.callWithTools(request);
+        },
+      },
+    };
+  }
+
+  it("②' の 1 回目が中身に落ち、2 回目の途中で締切に触れると、test-suite は calls 1・開始 2・応答 1・締切の打ち切り 1・中身 1", async () => {
+    const clock = { value: 0 };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(DESIGN_OUTPUT_MAPPED),
+      structured({ tests: [] }),
+    ]);
+    const client = clientDeadlineDuringSecondCall(recording, 4, clock, 60_000 - 1);
+    const result = await runGeneration(makeRunInput(client, { now: () => clock.value, deadline: 60_000 }));
+
+    expect(result.stopped).toEqual({ stage: "test-suite", kind: "deadline" });
+    const testSuite = result.record.stages.find((stage) => stage.stage === "test-suite");
+    expect(testSuite).toMatchObject({
+      status: "failed",
+      calls: 1,
+      missing_usage_calls: 0,
+      failure_kind: "deadline",
+      attempts: { started: 2, responded: 1, errors: 0, cancelled_deadline: 1, cancelled_timeout: 0 },
+      retries: { communication: 0, shape: 0, content: 1 },
+    });
+    // 打ち切った呼び出しの予約は残る（減らない）
+    expect(result.record.budget_reserved_usd).toBeGreaterThan(0);
+  });
+
+  it("② の前に締切が尽きると、design は calls 0・開始 0・未着手（締切）1", async () => {
+    const clock = { value: 0 };
+    const recording = createRecordingClient([structured(REQUIREMENT_LIST_OUTPUT), structured(REVERSE_CHECK_OUTPUT)]);
+    const client = clientWithClockJump(recording, 2, 60_000, clock);
+    const result = await runGeneration(makeRunInput(client, { now: () => clock.value, deadline: 60_000 }));
+
+    expect(result.stopped).toEqual({ stage: "design", kind: "deadline" });
+    const design = result.record.stages.find((stage) => stage.stage === "design");
+    expect(design).toMatchObject({
+      status: "failed",
+      calls: 0,
+      missing_usage_calls: 0,
+      failure_kind: "deadline",
+      attempts: { started: 0, responded: 0, errors: 0, cancelled_deadline: 0, cancelled_timeout: 0 },
+      retries: { communication: 0, shape: 0, content: 0 },
+    });
+    expect(design?.attempts.not_started.deadline).toBe(1);
+  });
+
+  it("redo-design の記録がその往復の分の差を持ち、通信の再試行が retries.communication 1", async () => {
+    const { client } = failingOnce(trackedRedo([structured(REDO_DESIGN_OK)]), 4, kindError("network"));
+    const result = await runGeneration(makeRunInput(client, { judge: redoJudge, callTimeoutMs: 1_000 }));
+    expect(result.stopped).toBeNull();
+
+    const designs = result.record.stages.filter((stage) => stage.stage === "design");
+    expect(designs).toHaveLength(2);
+    expect(designs[1]).toMatchObject({
+      operation: "redo-design",
+      status: "ok",
+      calls: 1,
+      attempts: { started: 2, responded: 1, errors: 1, cancelled_deadline: 0, cancelled_timeout: 0 },
+      retries: { communication: 1, shape: 0, content: 0 },
+    });
+    expect(designs[1]?.attempts.not_started).toEqual({ deadline: 0, budget: 0, limit: 0, timeout: 0 });
+  });
+
+  it("全部精算した走りでは budget_reserved_usd が 0、budget_remaining_usd は今までどおり", async () => {
+    const { run } = runWith(recordedRun());
+    const result = await run;
+    expect(result.stopped).toBeNull();
+    expect(result.record.budget_reserved_usd).toBe(0);
+    // 予約の欄を足しても、残りの予算の意味は変えない
+    expect(result.record.budget_remaining_usd).toBeGreaterThan(0);
+    expect(result.record.budget_remaining_usd).toBeLessThanOrEqual(10);
+  });
+});
