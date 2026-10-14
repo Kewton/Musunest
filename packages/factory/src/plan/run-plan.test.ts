@@ -6289,7 +6289,55 @@ describe("複数の文にまたがる引用の対応を、P2 から P6 まで保
     expect(result.plan.requirements[1]?.origin.input_id).toBe("S-2");
   });
 
-  it("(k) 既存の確定する組の plan と SHA-256 は、この Issue の前後で等しい（対応は仕様に混ざらない）", async () => {
+  /**
+   * 比較元 `6621f7b` で、この試験と同じ固定の入力・偽物の LLM・偽物の判定・時計から `runPlan` を流して
+   * 得た plan と SHA-256（一時 worktree をリポジトリの外に作り、そこで同じ組を流して採った値）。
+   * **変更前の期待値**として固定し、変更後の結果と比べる——現行の plan から SHA を再計算するだけでは、
+   * 要件の本文などが変わって SHA が変わる回帰を見逃す。
+   */
+  const BASELINE_PLAN_487: ConfirmedPlan = {
+    schema_version: "musunest.plan-spec/v1",
+    plan_id: "plan-1",
+    revision: 1,
+    vocabulary_version: "v1",
+    inputs: [
+      { id: "S-1", kind: "source", text: "タスクを記録する。" },
+      { id: "S-2", kind: "source", text: "件数を合計する。" },
+    ],
+    requirements: [
+      {
+        id: "R-1",
+        text: "タスクを記録できる",
+        kind: "existence",
+        origin: { input_id: "S-1", quote: "タスクを記録する" },
+        parts: [],
+      },
+      {
+        id: "R-2",
+        text: "件数を合計できる",
+        kind: "existence",
+        origin: { input_id: "S-2", quote: "件数を合計する" },
+        parts: [],
+      },
+    ],
+    open_issues: [],
+    decisions: [
+      {
+        id: "D-1",
+        subject: "既定で決めた",
+        value: "記録の形は 1 行とした",
+        reason: "Plan が既定で決めた（確認の画面で直せる）",
+      },
+    ],
+    accepted_unwritable: [],
+    confirmation: {
+      sha256: "8618ab7f4fd38bad45a522cde43b56998bc42af7871f80d54580c26d776347c3",
+      confirmed_at: "1970-01-01T00:00:00.000Z",
+      confirmed_by: "tester",
+    },
+  };
+
+  it("(k) 既存の確定する組の plan と SHA-256 は、比較元 6621f7b と同じ（対応は仕様に混ざらない）", async () => {
     const recording = createRecordingClient([
       structured(REQUIREMENT_LIST_OUTPUT),
       structured(REVERSE_CHECK_OUTPUT),
@@ -6301,26 +6349,14 @@ describe("複数の文にまたがる引用の対応を、P2 から P6 まで保
 
     expect(result.kind).toBe("confirmed");
     if (result.kind !== "confirmed") return;
-    // 仕様は §4 の欄だけからなる。対応（内部の写像）は混ざらない——だから SHA-256 も変わらない
-    expect(Object.keys(result.plan).sort()).toEqual([
-      "accepted_unwritable",
-      "confirmation",
-      "decisions",
-      "inputs",
-      "open_issues",
-      "plan_id",
-      "requirements",
-      "revision",
-      "schema_version",
-      "vocabulary_version",
-    ]);
+    // 比較元（変更前）で得た plan 全体と SHA-256 に一致する
+    expect(result.plan).toEqual(BASELINE_PLAN_487);
+    expect(result.plan.confirmation.sha256).toBe(BASELINE_PLAN_487.confirmation.sha256);
+    // 仕様は §4 の欄だけからなる。対応（内部の写像）は混ざらない
     expect(JSON.stringify(result.plan)).not.toContain("sourceCorrespondence");
     expect(await checkConfirmedPlan(result.plan)).toEqual([]);
     expect(await isConfirmationValid(result.plan)).toBe(true);
     expect(result.plan.confirmation.sha256).toBe(await planDigest(result.plan));
-    // 要件の数・ID・出どころは P1 の一覧のまま
-    expect(result.plan.requirements.map((requirement) => requirement.id)).toEqual(["R-1", "R-2"]);
-    expect(result.plan.requirements.map((requirement) => requirement.origin.input_id)).toEqual(["S-1", "S-2"]);
   });
 });
 
