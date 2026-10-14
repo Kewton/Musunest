@@ -5521,9 +5521,20 @@ describe("Plan の段の記録に、試行の終端と再試行の数が入る�
 // だけ答えた往復で答えた事項だけ閉じて残りが次の往復で聞き直され、上限で確定できないこと、照合の文脈に
 // 目録以外の事項と再質問に観点が欠けた値・要件の参照が渡ることを固定する。**実 API は呼ばない。**
 
+/** 項目に `basis` が無ければ補う（当て方の試験の関心ではない。形の検査は `script-responder.test.ts` が試す） */
+function withScriptBasis(entry: unknown): unknown {
+  if (typeof entry === "object" && entry !== null && !Array.isArray(entry)) {
+    const record = entry as Record<string, unknown>;
+    if (record["basis"] === undefined) return { ...record, basis: "basis" };
+  }
+  return entry;
+}
+
 /** v1 の台本を、項目から組み立てる（形の検査を通す） */
 function scriptOf(entries: readonly unknown[]): PlanScript {
-  const parsed = parsePlanScript(JSON.stringify({ schema: PLAN_SCRIPT_SCHEMA, subject: "X", version: 1, entries }));
+  const parsed = parsePlanScript(
+    JSON.stringify({ schema: PLAN_SCRIPT_SCHEMA, subject: "X", version: 1, entries: entries.map(withScriptBasis) }),
+  );
   if ("error" in parsed) throw new Error(parsed.error);
   return parsed;
 }

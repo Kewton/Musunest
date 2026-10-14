@@ -71,9 +71,20 @@ function request(
   return { questions, remaining: { questions: 5, roundTrips: 2 }, revision, issues };
 }
 
+/** 項目に `basis` が無ければ補う（当て方の試験の関心ではない。形の検査は別に試す） */
+function withBasis(entry: unknown): unknown {
+  if (typeof entry === "object" && entry !== null && !Array.isArray(entry)) {
+    const record = entry as Record<string, unknown>;
+    if (record["basis"] === undefined) return { ...record, basis: "basis" };
+  }
+  return entry;
+}
+
 /** v1 の台本を、項目から組み立てる（形の検査を通す） */
 function script(entries: readonly unknown[]): PlanScript {
-  const parsed = parsePlanScript(JSON.stringify({ schema: PLAN_SCRIPT_SCHEMA, subject: "X", version: 1, entries }));
+  const parsed = parsePlanScript(
+    JSON.stringify({ schema: PLAN_SCRIPT_SCHEMA, subject: "X", version: 1, entries: entries.map(withBasis) }),
+  );
   if ("error" in parsed) throw new Error(parsed.error);
   return parsed;
 }
@@ -102,8 +113,8 @@ describe("台本の形の検査（04 §9・Issue #444）", () => {
         subject: "A",
         version: 1,
         entries: [
-          { id: "E1", facet: "aggregation", keys: ["数え"], answer: { choose: ["件数"] } },
-          { id: "E2", facet: null, keys: ["担当"], answer: { recommended: true } },
+          { id: "E1", facet: "aggregation", keys: ["数え"], answer: { choose: ["件数"] }, basis: "b" },
+          { id: "E2", facet: null, keys: ["担当"], answer: { recommended: true }, basis: "b" },
         ],
       }),
     );
@@ -112,29 +123,73 @@ describe("台本の形の検査（04 §9・Issue #444）", () => {
   });
 
   it("形の不正は、位置だけの誤りの文で拒否する（値を埋めない）", () => {
+    /** 台本の外側（`schema`・`subject`・`version`・`entries`）を、指定した値で組む */
+    const envelope = (over: Record<string, unknown> = {}): string =>
+      JSON.stringify({ schema: PLAN_SCRIPT_SCHEMA, subject: "T", version: 1, entries: [], ...over });
+    /** 妥当な項目 1 つを、指定した値で上書きして組む */
+    const entry = (over: Record<string, unknown> = {}): string =>
+      envelope({
+        entries: [{ id: "E", facet: null, keys: ["a"], answer: { recommended: true }, basis: "b", ...over }],
+      });
+
     expect(parsePlanScript("ない")).toEqual({ error: "台本が JSON として読めません" });
     expect(parsePlanScript("[]")).toEqual({ error: "台本は写像（object）であること" });
-    expect(parsePlanScript(JSON.stringify({ schema: "x", entries: [] }))).toEqual({
+    expect(parsePlanScript(envelope({ schema: "x" }))).toEqual({
       error: `台本の版（schema）が ${PLAN_SCRIPT_SCHEMA} ではありません`,
     });
-    expect(parsePlanScript(JSON.stringify({ schema: PLAN_SCRIPT_SCHEMA, entries: "x" }))).toEqual({
+    // subject・version の型・欠落
+    expect(parsePlanScript(envelope({ subject: 1 }))).toEqual({ error: "台本の subject は空でない文字列であること" });
+    expect(parsePlanScript(envelope({ subject: "" }))).toEqual({ error: "台本の subject は空でない文字列であること" });
+    expect(parsePlanScript(envelope({ version: 1.5 }))).toEqual({ error: "台本の version は整数であること" });
+    expect(parsePlanScript(envelope({ version: "1" }))).toEqual({ error: "台本の version は整数であること" });
+    // entries の型
+    expect(parsePlanScript(envelope({ entries: "x" }))).toEqual({
       error: "台本の項目（entries）は並び（array）であること",
     });
+    // 項目の形
+    expect(parsePlanScript(envelope({ entries: [1] }))).toEqual({ error: "entries[0]: 項目は写像（object）であること" });
+    expect(parsePlanScript(entry({ id: "" }))).toEqual({ error: "entries[0].id: 識別子は空でない文字列であること" });
+    // id の重複
     expect(
-      parsePlanScript(JSON.stringify({ schema: PLAN_SCRIPT_SCHEMA, entries: [{ id: "", facet: null, keys: ["a"], answer: { recommended: true } }] })),
-    ).toEqual({ error: "entries[0].id: 識別子は空でない文字列であること" });
-    // 観点の欄が無い（文字列か null でない）のは形の誤り
-    expect(
-      parsePlanScript(JSON.stringify({ schema: PLAN_SCRIPT_SCHEMA, entries: [{ id: "E", keys: ["a"], answer: { recommended: true } }] })),
-    ).toEqual({ error: "entries[0].facet: 観点は空でない文字列か null であること" });
-    // 鍵が正規表現として読めない
-    expect(
-      parsePlanScript(JSON.stringify({ schema: PLAN_SCRIPT_SCHEMA, entries: [{ id: "E", facet: null, keys: ["("], answer: { recommended: true } }] })),
-    ).toEqual({ error: "entries[0].keys[0]: 鍵が正規表現として読めません" });
-    // 答えの形（choose でも recommended でもない）
-    expect(
-      parsePlanScript(JSON.stringify({ schema: PLAN_SCRIPT_SCHEMA, entries: [{ id: "E", facet: null, keys: ["a"], answer: {} }] })),
-    ).toEqual({ error: "entries[0].answer: choose（選択肢の鍵の並び）か recommended（真）のどちらかを書くこと" });
+      parsePlanScript(
+        envelope({
+          entries: [
+            { id: "E", facet: null, keys: ["a"], answer: { recommended: true }, basis: "b" },
+            { id: "E", facet: null, keys: ["a"], answer: { recommended: true }, basis: "b" },
+          ],
+        }),
+      ),
+    ).toEqual({ error: "entries[1].id: 識別子が重複している" });
+    // facet: 欠落・目録に無い観点
+    expect(parsePlanScript(entry({ facet: undefined }))).toEqual({
+      error: "entries[0].facet: 目録の観点 ID か null であること",
+    });
+    expect(parsePlanScript(entry({ facet: "unknown-facet" }))).toEqual({
+      error: "entries[0].facet: 目録の観点 ID か null であること",
+    });
+    // keys: 型違い・0 件・正規表現でない・空文字
+    expect(parsePlanScript(entry({ keys: "a" }))).toEqual({ error: "entries[0].keys: 正規表現の並び（1 件以上）であること" });
+    expect(parsePlanScript(entry({ keys: [] }))).toEqual({ error: "entries[0].keys: 正規表現の並び（1 件以上）であること" });
+    expect(parsePlanScript(entry({ keys: ["("] }))).toEqual({ error: "entries[0].keys[0]: 正規表現として読めません" });
+    expect(parsePlanScript(entry({ keys: [1] }))).toEqual({ error: "entries[0].keys[0]: 空でない文字列であること" });
+    // answer: どちらも無い・両方・recommended が真でない・choose が正規表現の並びでない
+    expect(parsePlanScript(entry({ answer: {} }))).toEqual({
+      error: "entries[0].answer: choose（選択肢の鍵の並び）か recommended（真）のちょうど一方を書くこと",
+    });
+    expect(parsePlanScript(entry({ answer: { choose: ["a"], recommended: true } }))).toEqual({
+      error: "entries[0].answer: choose と recommended のちょうど一方を書くこと（両方は不可）",
+    });
+    expect(parsePlanScript(entry({ answer: { recommended: false } }))).toEqual({
+      error: "entries[0].answer.recommended: 真であること",
+    });
+    expect(parsePlanScript(entry({ answer: { choose: [] } }))).toEqual({
+      error: "entries[0].answer.choose: 正規表現の並び（1 件以上）であること",
+    });
+    // basis: 欠落・空
+    expect(parsePlanScript(entry({ basis: undefined }))).toEqual({
+      error: "entries[0].basis: 根拠は空でない文字列であること",
+    });
+    expect(parsePlanScript(entry({ basis: "" }))).toEqual({ error: "entries[0].basis: 根拠は空でない文字列であること" });
   });
 });
 
@@ -280,6 +335,57 @@ describe("台本の答える役（当て方 v1。Issue #444）", () => {
       answers: [{ id: "A:Q1-1", questionId: "Q1-1", revision: 1, choiceId: "c1" }],
     });
     expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "answered", entryIndex: 0 }]);
+  });
+
+  it("recommended: true は、推奨が先頭でなくても推奨の選択肢を返す（最初の選択肢で代用しない）", async () => {
+    const plan = script([{ id: "E1", facet: "aggregation", keys: ["数え"], answer: { recommended: true } }]);
+    const q = question({ recommended: { choiceId: "c2", reason: "r" } });
+    const { outcome, matches } = await answerWith(
+      plan,
+      request({ questions: [q], issues: [{ question: q, main: issue(), alsoCloses: [] }] }),
+    );
+
+    expect(outcome).toEqual({
+      kind: "answers",
+      answers: [{ id: "A:Q1-1", questionId: "Q1-1", revision: 1, choiceId: "c2" }],
+    });
+    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "answered", entryIndex: 0 }]);
+  });
+
+  it("推奨が無い問いでは、recommended: true に答えない（no-choice）", async () => {
+    const plan = script([{ id: "E1", facet: "aggregation", keys: ["数え"], answer: { recommended: true } }]);
+    // 推奨の欄を持たない問い
+    const q: PlanQuestion = {
+      id: "Q1-1",
+      openIssueId: "OI-1",
+      revision: 1,
+      text: "どうしますか",
+      choices: [
+        { id: "c1", text: "全員分を数える" },
+        { id: "c2", text: "自分の分だけ数える" },
+      ],
+      allowFreeText: true,
+      alsoCloses: [],
+    };
+    const { outcome, matches } = await answerWith(
+      plan,
+      request({ questions: [q], issues: [{ question: q, main: issue(), alsoCloses: [] }] }),
+    );
+
+    expect(outcome).toEqual({ kind: "answers", answers: [] });
+    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "no-choice", entryIndex: 0 }]);
+  });
+
+  it("推奨が問いの選択肢に無いときは、recommended: true に答えない（no-choice）", async () => {
+    const plan = script([{ id: "E1", facet: "aggregation", keys: ["数え"], answer: { recommended: true } }]);
+    const q = question({ recommended: { choiceId: "cX", reason: "r" } });
+    const { outcome, matches } = await answerWith(
+      plan,
+      request({ questions: [q], issues: [{ question: q, main: issue(), alsoCloses: [] }] }),
+    );
+
+    expect(outcome).toEqual({ kind: "answers", answers: [] });
+    expect(matches).toEqual([{ questionId: "Q1-1", revision: 1, state: "no-choice", entryIndex: 0 }]);
   });
 
   it("確認の画面の答えは build（答えのファイルの形と同じ）", async () => {

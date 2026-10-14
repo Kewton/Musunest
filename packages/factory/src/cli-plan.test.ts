@@ -362,9 +362,11 @@ interface PlanCliRecordShape {
     }[];
     readonly answers: readonly {
       readonly id: string;
+      readonly question_id: string;
       readonly choice_id: string | null;
       readonly free_text: string | null;
     }[];
+    readonly all_recommended: boolean;
   }[];
   readonly closed_by_source: readonly {
     readonly issue_id: string;
@@ -3028,6 +3030,13 @@ describe("台本のファイルを渡す（04 §9・Issue #444）", () => {
     expect(recordText).not.toContain("MARKER-");
     // 台本の照合の記録は、事項 ID を持たない
     expect(JSON.stringify(record.script)).not.toContain("OI-");
+    // F1: 提示した問いの束と返した答え（実際に選んだ選択肢）が、往復の記録に残る
+    expect(record.rounds).toHaveLength(1);
+    expect(record.rounds[0]?.all_recommended).toBe(false);
+    expect(record.rounds[0]?.questions.map((question) => question.id)).toEqual(["Q1-1"]);
+    expect(record.rounds[0]?.answers).toEqual([
+      { id: "A:Q1-1", question_id: "Q1-1", choice_id: "c2", free_text: null },
+    ]);
   });
 
   it("不明が残る走りでは、確認の役も Build も呼ばれず、問いごとに不明の状態が残る", async () => {
@@ -3074,6 +3083,12 @@ describe("台本のファイルを渡す（04 §9・Issue #444）", () => {
     expect(record.script?.matches).toHaveLength(9);
     expect(record.script?.matches.every((match) => match.state === "unknown" && match.entry_index === null)).toBe(true);
     expect(record.script?.matches.map((match) => match.revision)).toEqual([1, 1, 1, 2, 2, 2, 3, 3, 3]);
+    // F1: 上限までの往復・問数と、空の答えが、往復の記録に残る
+    expect(record.rounds).toHaveLength(3);
+    expect(record.rounds.every((round) => round.all_recommended === false)).toBe(true);
+    expect(record.rounds.map((round) => round.questions.length)).toEqual([3, 3, 3]);
+    expect(record.rounds.every((round) => round.answers.length === 0)).toBe(true);
+    expect(record.rounds.flatMap((round) => round.questions)).toHaveLength(9);
     // 台本の鍵・根拠・項目の ID の目印は、記録に写さない
     expect(JSON.stringify(record)).not.toContain("MARKER-");
   });
@@ -3093,6 +3108,50 @@ describe("台本のファイルを渡す（04 §9・Issue #444）", () => {
 
     expect(code).toBe(EXIT_USAGE);
     expect(makeClient).not.toHaveBeenCalled();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("台本の形が不正なら、LLM も Build も呼ぶ前に使い方の誤りで止まる", async () => {
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const envelope = (over: Record<string, unknown>): string =>
+      JSON.stringify({ schema: "musunest-eval/plan-script/v1", subject: "T", version: 1, entries: [], ...over });
+    const invalid: readonly string[] = [
+      // 未知の観点
+      envelope({ entries: [{ id: "E", facet: "unknown-facet", keys: ["a"], answer: { recommended: true }, basis: "b" }] }),
+      // 答えが両方
+      envelope({ entries: [{ id: "E", facet: null, keys: ["a"], answer: { choose: ["x"], recommended: true }, basis: "b" }] }),
+      // 根拠が欠落
+      envelope({ entries: [{ id: "E", facet: null, keys: ["a"], answer: { recommended: true } }] }),
+      // id の重複
+      envelope({
+        entries: [
+          { id: "E", facet: null, keys: ["a"], answer: { recommended: true }, basis: "b" },
+          { id: "E", facet: null, keys: ["a"], answer: { recommended: true }, basis: "b" },
+        ],
+      }),
+    ];
+
+    let index = 0;
+    for (const text of invalid) {
+      index += 1;
+      const recording = createRecordingClient([]);
+      const code = await runCli({
+        argv: ["--", "request.txt", "--out", `${directory}/script-invalid-${index}`, "--plan", "--script", "script.json"],
+        env: { [API_KEY_ENV]: "sk-FAKE" },
+        readFile: async (path) => (path === "script.json" ? text : SOURCE_TEXT),
+        writeFile: async () => {},
+        makeDirectory: async () => {},
+        loadDocuments: async () => [],
+        makeClient: () => recording.client,
+        makeLlmJudge: () => createFakeJudge({}),
+        now: () => 0,
+        log: () => {},
+      });
+      expect(code).toBe(EXIT_USAGE);
+      // LLM を 1 回も呼ばない
+      expect(recording.structured).toHaveLength(0);
+    }
+    // Build も呼ばない
     expect(spy).not.toHaveBeenCalled();
   });
 });

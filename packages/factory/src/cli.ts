@@ -398,10 +398,14 @@ async function runPlanThenBuild(
       return EXIT_USAGE;
     }
     scriptSha256 = await sha256Hex(scriptText);
-    // 照合の結果と確認の答えを、往復の記録へ写す口（値ではなく、コードが振った ID・版・状態・添字だけ）
+    // 照合の結果・往復・確認の答えを、往復の記録へ写す口（値ではなく、コードが振った ID・版・状態・
+    // 添字と、提示した問い・返した答えだけ）
     const sink: PlanScriptRecordSink = {
       match: (match) => {
         transcript.scriptMatches.push(match);
+      },
+      round: (round) => {
+        transcript.rounds.push(round);
       },
       confirmation: (decision) => {
         transcript.confirmation = decision;
