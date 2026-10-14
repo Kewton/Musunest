@@ -1,12 +1,15 @@
 // 落とす組み合わせ（Issue #330）の unit テスト。
 //
-// **実 API は呼ばない。** Jev は偽物の `fetch`、LLM は偽物の `LlmClient` で閉じる。固定したいのは 2 つ。
+// **実 API は呼ばない。** Jev は偽物の `fetch`、LLM は偽物の `LlmClient` で閉じる。固定したいのは 4 つ。
 //   1. Jev の adapter が失敗したら、LLM の adapter で答え直す（§4）
 //   2. どちらが答えたかを、結果（`answeredBy`）に残す（§4）
+//   3. 合成した口（Jev → Luna）は、落とし先（Luna）の口を `fallback` に載せる（Issue #432）
+//   4. 合成の口は要求の門を変えずに渡し、門の拒否では落とし先へ切り替えない（Issue #469）
 import { describe, expect, it } from "vitest";
+import { createCallGate, type CallGate } from "./call.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse } from "./llm.js";
-import { createFallbackJudge, type JudgeRequest } from "./judge.js";
-import { createJevJudge, type JevFetch } from "./judge-jev.js";
+import { createFallbackJudge, type Judge, type JudgeRequest } from "./judge.js";
+import { JevAdapterError, createJevJudge, type JevFetch } from "./judge-jev.js";
 import { createLlmJudge } from "./judge-llm.js";
 
 const REQUEST: JudgeRequest = {
@@ -121,5 +124,75 @@ describe("落とし先（Luna）の口を載せる（Issue #432）", () => {
 
   it("LLM だけの口には、落とし先が無い（その口自身が Luna）", () => {
     expect(llmJudge(fixedLlmClient(LLM_OUTPUT)).fallback).toBeUndefined();
+  });
+});
+
+// ── 合成の口は、要求の門を変えずに渡し、門の拒否では切り替えない（Issue #469）──────────
+
+describe("合成の口と共有の門（05 §4・Issue #469）", () => {
+  const gate = createCallGate({ now: () => 0, deadline: 1_000, limit: 10 });
+
+  it("主と落とし先が、要求の門をそのまま（同じ参照で）受け取る", async () => {
+    const seen: (CallGate | undefined)[] = [];
+    const primary: Judge = {
+      async judge(request): Promise<never> {
+        seen.push(request.gate);
+        throw new Error("Jev が止まった");
+      },
+    };
+    const fallback: Judge = {
+      async judge(request) {
+        seen.push(request.gate);
+        return { answers: {}, inputTokens: 0, model: "gpt-test", answeredBy: "llm" };
+      },
+    };
+    const judge = createFallbackJudge({ primary, fallback });
+
+    const result = await judge.judge({ ...REQUEST, gate });
+
+    expect(result.answeredBy).toBe("llm");
+    expect(seen).toEqual([gate, gate]);
+    expect(seen[0]).toBe(gate);
+    expect(seen[1]).toBe(gate);
+  });
+
+  it("主が門の拒否を投げたら、落とし先へ切り替えず、そのまま投げる", async () => {
+    let fallbackCalls = 0;
+    const primary: Judge = {
+      async judge(): Promise<never> {
+        throw new JevAdapterError("gateLimit", "要求の門の上限に達したので再送しません", 429);
+      },
+    };
+    const fallback: Judge = {
+      async judge() {
+        fallbackCalls += 1;
+        return { answers: {}, inputTokens: 0, model: "gpt-test", answeredBy: "llm" };
+      },
+    };
+    const judge = createFallbackJudge({ primary, fallback });
+
+    await expect(judge.judge({ ...REQUEST, gate })).rejects.toMatchObject({ kind: "gateLimit" });
+    expect(fallbackCalls).toBe(0);
+  });
+
+  it("門の拒否でなければ、今までどおり落とし先で答え直す", async () => {
+    let fallbackCalls = 0;
+    const primary: Judge = {
+      async judge(): Promise<never> {
+        throw new JevAdapterError("unavailable", "Jev が混み合っています", 429);
+      },
+    };
+    const fallback: Judge = {
+      async judge() {
+        fallbackCalls += 1;
+        return { answers: {}, inputTokens: 0, model: "gpt-test", answeredBy: "llm" };
+      },
+    };
+    const judge = createFallbackJudge({ primary, fallback });
+
+    const result = await judge.judge({ ...REQUEST, gate });
+
+    expect(result.answeredBy).toBe("llm");
+    expect(fallbackCalls).toBe(1);
   });
 });

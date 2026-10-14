@@ -1,7 +1,7 @@
 // Jev（TypeSafe の System One）の判定の adapter（Issue #330・#349）の unit テスト。
 //
 // **実 API は呼ばない。** 差し込んだ `fetch` が受け取った要求と、手で書いた応答だけで閉じる。
-// ここで固定したいのは 8 つ。
+// ここで固定したいのは 9 つ。
 //   1. 送る本文の形（`state`・`model: jev-1.13.0`・`questions`）と `Authorization: Bearer` の見出し（§1・§4）
 //   2. 429・529 は指数の待ちで再試行し、上限で失敗になる（§1）
 //   3. 401・422 は再試行しない失敗の種類にする（§1）
@@ -10,6 +10,8 @@
 //   6. adapter のソースが環境変数を読まない（§4・R-15）
 //   7. 窓口が記録した本物の応答を読み、送る本文が記録した要求と一致する（#349）
 //   8. score の `criteria` は順序のある配列で送り、2〜10 個の外は送る前に断る。`instructions` は object も許す（#349）
+//   9. 要求の門（包みが載せる共有の門）で、内部の再送の各回だけを数え、上限・締切で再送しない。断りは
+//      通常の混み合いと区別できる。要求の門は、作るときに渡した門より優先する（#469）
 import { describe, expect, it } from "vitest";
 import { createCallGate } from "./call.js";
 import type { JudgeRequest } from "./judge.js";
@@ -476,6 +478,114 @@ describe("内部の再送を共有の門に通す（05 §1・Issue #455）", () 
     expect(error.kind).toBe("unavailable");
     expect(captured).toHaveLength(3);
     expect(delays).toEqual([100, 200]);
+  });
+});
+
+// ── 要求の門で、内部の再送の各回を数える（Issue #469）──────────────────────
+//
+// 包み（`createBudgetedJudge`）は、生成と共有する門を**要求**に載せる。adapter は、要求に門があれば
+// それを使い（無ければ作るときに渡された門）、**再送の各回だけ**を数える（最初の 1 回は包みが数える）。
+// 門が断ったときは、**通常の混み合い・再送回数の尽きと区別できる種類**（`gateLimit`・`gateDeadline`）に
+// して、包みが門の停止へ写せるようにする。
+
+describe("要求の門で、内部の再送の各回を数える（05 §1・Issue #469）", () => {
+  it("要求の門を渡すと、再送の各回だけを数える（最初の 1 回は数えない）", async () => {
+    const { fetch, captured } = recordingFetch((call) => jsonResponse({ error: `busy ${call}` }, 429));
+    const { sleep, delays } = recordingSleep();
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 10 });
+
+    const error = await captureError(() =>
+      createJevJudge({ apiKey: "k", fetch, sleep, maxAttempts: 2, retryBaseMs: 100 }).judge({ ...REQUEST, gate }),
+    );
+
+    expect(error.kind).toBe("unavailable");
+    expect(captured).toHaveLength(2);
+    expect(delays).toEqual([100]);
+    // 最初の 1 回は包みが数えるので、adapter が数えるのは再送の 1 回だけ
+    expect(gate.attempts()).toBe(1);
+  });
+
+  it("要求の門が上限で再送を断ったら gateLimit にし、通常の混み合いと区別できる", async () => {
+    const { fetch, captured } = recordingFetch(() => jsonResponse({ error: "busy" }, 429));
+    const { sleep } = recordingSleep();
+    // 包みが最初の 1 回を数えた、という前提（同じ門を共有する）
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 1 });
+    gate.begin();
+
+    const error = await captureError(() =>
+      createJevJudge({ apiKey: "k", fetch, sleep, maxAttempts: 5, retryBaseMs: 100 }).judge({ ...REQUEST, gate }),
+    );
+
+    // 通常の混み合い（上限まで再送した `unavailable`）ではなく、門の断り（`gateLimit`）である
+    expect(error.kind).toBe("gateLimit");
+    expect(captured).toHaveLength(1);
+    expect(gate.attempts()).toBe(1);
+  });
+
+  it("要求の門が締切で再送を断ったら gateDeadline にし、timeout と区別できる", async () => {
+    let clock = 0;
+    const gate = createCallGate({ now: () => clock, deadline: 1_000, limit: 10 });
+    const { fetch, captured } = recordingFetch(() => jsonResponse({ error: "busy" }, 429));
+    // 再送の待機で、締切（1000ms）を過ぎる
+    const sleep = async (ms: number): Promise<void> => {
+      clock += ms;
+    };
+
+    const error = await captureError(() =>
+      createJevJudge({ apiKey: "k", fetch, sleep, maxAttempts: 5, retryBaseMs: 2_000 }).judge({ ...REQUEST, gate }),
+    );
+
+    expect(error.kind).toBe("gateDeadline");
+    expect(captured).toHaveLength(1);
+  });
+
+  it("要求と作るときの門が両方あれば、要求の門だけが増える", async () => {
+    const { fetch } = recordingFetch((call) => jsonResponse({ error: `busy ${call}` }, 429));
+    const { sleep } = recordingSleep();
+    const requestGate = createCallGate({ now: () => 0, deadline: 100_000, limit: 10 });
+    const creationGate = createCallGate({ now: () => 0, deadline: 100_000, limit: 10 });
+
+    const error = await captureError(() =>
+      createJevJudge({ apiKey: "k", fetch, sleep, gate: creationGate, maxAttempts: 2, retryBaseMs: 100 }).judge({
+        ...REQUEST,
+        gate: requestGate,
+      }),
+    );
+
+    expect(error.kind).toBe("unavailable");
+    expect(requestGate.attempts()).toBe(1);
+    expect(creationGate.attempts()).toBe(0);
+  });
+
+  it("同じ adapter を、別の要求の門 A・B で使い回しても、数が混ざらない", async () => {
+    const { fetch } = recordingFetch((call) => jsonResponse({ error: `busy ${call}` }, 429));
+    const { sleep } = recordingSleep();
+    const judge = createJevJudge({ apiKey: "k", fetch, sleep, maxAttempts: 2, retryBaseMs: 100 });
+    const gateA = createCallGate({ now: () => 0, deadline: 100_000, limit: 10 });
+    const gateB = createCallGate({ now: () => 0, deadline: 100_000, limit: 10 });
+
+    await captureError(() => judge.judge({ ...REQUEST, gate: gateA }));
+    await captureError(() => judge.judge({ ...REQUEST, gate: gateB }));
+
+    // それぞれの要求の門が、自分の再送（1 回ずつ）だけを数える
+    expect(gateA.attempts()).toBe(1);
+    expect(gateB.attempts()).toBe(1);
+  });
+
+  it("要求に門が無く、作るときに門を渡してあれば、それを使う（#455 の後方）", async () => {
+    const { fetch, captured } = recordingFetch((call) => jsonResponse({ error: `busy ${call}` }, 429));
+    const { sleep, delays } = recordingSleep();
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 10 });
+
+    const error = await captureError(() =>
+      createJevJudge({ apiKey: "k", fetch, sleep, gate, maxAttempts: 2, retryBaseMs: 100 }).judge(REQUEST),
+    );
+
+    // 要求に門が無いので、作るときに渡した門を使う。断りの種類は今までどおり（`unavailable`）
+    expect(error.kind).toBe("unavailable");
+    expect(captured).toHaveLength(2);
+    expect(delays).toEqual([100]);
+    expect(gate.attempts()).toBe(1);
   });
 });
 

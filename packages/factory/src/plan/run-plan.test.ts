@@ -1,17 +1,19 @@
 // Plan を 1 回流す口（plan/run-plan.ts）の unit テスト（04-plan-agent.md §2・§3・§6・§8・Issue #363）。
 //
-// **偽物の LLM・偽物の判定・偽物の答える役で回す。実 API は呼ばない。** ここで固定したいのは 6 つ。
+// **偽物の LLM・偽物の判定・偽物の答える役で回す。実 API は呼ばない。** ここで固定したいのは 7 つ。
 //   1. 答える役が答えて、確定した仕様（`checkConfirmedPlan` が誤り 0・確認の SHA-256 が仕様と一致）まで進む
 //   2. 「全部推奨で進める」で、推奨で閉じて確認に進む
 //   3. 質問は往復をまたいで 10 問・3 往復を超えない。上限のあとも重大な未解決の事項が残れば「確定できない」
 //   4. 確認で「やめる」なら「止まった」になり、確定した仕様を返さない
 //   5. 予算が尽きると「止まった」になる。使った額に LLM と判定の費用が入る
 //   6. 段ごとの記録が結果に入る
+//   7. 判定の包みが、共有の門を Jev の内部の再送へ届ける（Issue #469）
 import { describe, expect, it } from "vitest";
 import { checkConfirmedPlan, isConfirmationValid, planDigest, type ConfirmedPlan, type PlanAcceptedUnwritable, type PlanOpenIssue, type PlanPart, type PlanRequirement } from "@musunest/appspec-schema";
 import { planStopReasonLine } from "../cli-plan.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeRequest, JudgeResponse } from "../judge.js";
+import { createJevJudge, type JevFetch } from "../judge-jev.js";
 import { AGENT_LIMITS } from "../limits.js";
 import type {
   LlmClient,
@@ -3166,6 +3168,78 @@ describe("判定も、生成と共有する締切・総呼び出し数の門を�
     if (result.kind !== "cannot-confirm") return;
     expect(result.surfaceCheck.accepted).toBe(0);
     expect(result.reasons).toEqual([{ source: "surface-check", code: "unknown", path: "unwritable[0]", check: 1 }]);
+  });
+});
+
+// ── 判定の包みが、共有の門を Jev の内部の再送へ届ける（04 §2・Issue #469）────────────
+//
+// 実経路では、Jev の adapter は**作るときに門を渡さず**、門は `runPlan` の中で作られる。包み
+// （`createBudgetedJudge`）が門を**要求**に載せるので、Jev が 429・529 のあと内部で再送する各回も、
+// 生成と共有する門の回数に入る。生成 2（P1・P2）のあとに目録の判定（P3）で Jev を呼ぶ経路で、
+// (a) 上限に達したら fetch が上限を越えないこと、(b) 余裕があれば再送が 1 回だけ通ることを固定する。
+
+/** 差し込む `fetch` が状態コードの列を返す、Jev の adapter（門は作るときに渡さない。実経路と同じ） */
+function jevFetch(statuses: readonly number[]): { readonly fetch: JevFetch; readonly calls: () => number } {
+  let calls = 0;
+  const fetchImpl: JevFetch = async (_url, init) => {
+    calls += 1;
+    const status = statuses[calls - 1] ?? 200;
+    if (status !== 200) {
+      return new Response(JSON.stringify({ error: "busy" }), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    // 目録の問いはすべて Noul なので、「はい」を返せば未指定の観点を作らない
+    const body = JSON.parse(String(init.body)) as { questions: Record<string, { type: string }> };
+    const answers: Record<string, unknown> = {};
+    for (const [name, question] of Object.entries(body.questions)) {
+      answers[name] = question.type === "noul" ? { noul: 1 } : { choice: "a", probabilities: { a: 1 } };
+    }
+    return new Response(JSON.stringify({ model: "jev-1.13.0", usage: { input_tokens: 10 }, answers }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  return { fetch: fetchImpl, calls: () => calls };
+}
+
+describe("判定の包みが、共有の門を Jev の内部の再送へ届ける（04 §2・Issue #469）", () => {
+  it("(a) 生成 2＋Jev の初回 1 のあと 429 なら、門が上限に達して fetch 1・再送 0・後段 0 で call-limit に止まる", async () => {
+    const recording = createRecordingClient([structured(REQUIREMENT_LIST_OUTPUT), structured(REVERSE_CHECK_OUTPUT)]);
+    const jev = jevFetch([429, 429, 429, 429]);
+    const judge = createJevJudge({ apiKey: "k", fetch: jev.fetch, maxAttempts: 4, sleep: async () => {} });
+
+    const result = await runPlan(
+      makePlanInput(recording.client, judge, ANSWER_NONE, { limits: { ...AGENT_LIMITS, callCount: 3 } }),
+    );
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("call-limit");
+    // 生成 2（P1・P2）＋ Jev の初回 1 で上限（3）に達し、再送は門が断る → Jev の実呼び出しは 1 回だけ
+    expect(jev.calls()).toBe(1);
+    expect(recording.structured).toHaveLength(2);
+    // 後段の段は走らない
+    expect(result.stages.map((stage) => stage.stage)).not.toContain("surface");
+  });
+
+  it("(b) 429 のあと 200 の組で上限 4 なら、生成 2＋初回 1＋再送 1＝4 で、次の実試行が 0", async () => {
+    const recording = createRecordingClient([structured(REQUIREMENT_LIST_OUTPUT), structured(REVERSE_CHECK_OUTPUT)]);
+    const jev = jevFetch([429, 200]);
+    const judge = createJevJudge({ apiKey: "k", fetch: jev.fetch, maxAttempts: 4, sleep: async () => {} });
+
+    const result = await runPlan(
+      makePlanInput(recording.client, judge, ANSWER_NONE, { limits: { ...AGENT_LIMITS, callCount: 4 } }),
+    );
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("call-limit");
+    // Jev の初回（429）＋合法な再送 1（200）＝ fetch 2。門に余裕があるので再送は通る
+    expect(jev.calls()).toBe(2);
+    // 生成は P1・P2 の 2 回だけ。上限（4）に達したので、次の実試行（洗い出し）は 0
+    expect(recording.structured).toHaveLength(2);
   });
 });
 
