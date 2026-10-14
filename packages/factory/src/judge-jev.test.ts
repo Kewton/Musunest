@@ -12,7 +12,9 @@
 //   8. score の `criteria` は順序のある配列で送り、2〜10 個の外は送る前に断る。`instructions` は object も許す（#349）
 //   9. 要求の門（包みが載せる共有の門）で、内部の再送の各回だけを数え、上限・締切で再送しない。断りは
 //      通常の混み合いと区別できる。要求の門は、作るときに渡した門より優先する（#469）
-import { describe, expect, it } from "vitest";
+//  10. 再送の待ちを、中断の合図で片付ける——合図が中断したら、既定のタイマーを消して `timeout` にし、
+//      合図に足した listener をどの終わり方（中断・満了・拒否・同期の throw）でも残さない（#477）
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCallGate } from "./call.js";
 import type { JudgeRequest } from "./judge.js";
 import {
@@ -433,6 +435,173 @@ describe("呼び出しごとの中断の合図（05 §1・§4・Issue #455）", 
     const error = await captureError(() => pending);
     expect(error.kind).toBe("timeout");
     expect(captured).toHaveLength(1);
+  });
+});
+
+// ── 再送の待ちを、中断の合図で片付ける（05 §1・Issue #477）──────────────────
+//
+// 待ちの資源は持ち主で分ける（#477）。**既定の待ち**が作るタイマーは、中断で `clearTimeout` して消し、
+// 満了では合図の listener を外す。**adapter が合図に足した listener**は、どの終わり方（中断・満了・
+// 差し替えの Promise の拒否・差し替えの同期の throw）でも残さない。差し替えが自分で作った資源は、
+// 差し替えの持ち主の責任とする。
+
+/** 合図に残る listener の数を数える（追加 − 明示の削除 − `once` で発火して外れた数） */
+interface AbortLedger {
+  remaining(): number;
+}
+
+/**
+ * 合図の listener の生死を数える。`addEventListener`/`removeEventListener` を差し替え、`once` の
+ * listener を包んでおく——**プラットフォームが発火で外す分**を数え、明示の削除の回数と混同しないため
+ * （「明示の削除が追加より少ない」だけで失敗にしない。Issue #477・完了条件の注記）。
+ */
+function trackAbortListeners(signal: AbortSignal): AbortLedger {
+  let added = 0;
+  let removed = 0;
+  let autoRemoved = 0;
+  const originalAdd = signal.addEventListener.bind(signal);
+  const originalRemove = signal.removeEventListener.bind(signal);
+  const patched = {
+    addEventListener: (type: string, listener: (event: Event) => void, options?: { readonly once?: boolean }): void => {
+      if (type !== "abort") {
+        originalAdd(type, listener, options);
+        return;
+      }
+      added += 1;
+      if (options?.once === true) {
+        originalAdd(
+          type,
+          (event) => {
+            autoRemoved += 1;
+            listener(event);
+          },
+          options,
+        );
+        return;
+      }
+      originalAdd(type, listener, options);
+    },
+    removeEventListener: (type: string, listener: (event: Event) => void, options?: boolean): void => {
+      if (type === "abort") removed += 1;
+      originalRemove(type, listener, options);
+    },
+  };
+  Object.defineProperty(signal, "addEventListener", { configurable: true, writable: true, value: patched.addEventListener });
+  Object.defineProperty(signal, "removeEventListener", {
+    configurable: true,
+    writable: true,
+    value: patched.removeEventListener,
+  });
+  return { remaining: () => added - removed - autoRemoved };
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("再送の待ちを、中断の合図で片付ける（05 §1・Issue #477）", () => {
+  it("既定の sleep は、中断でタイマーを消して timeout にし、あとで時計を進めても再送しない（#477・a）", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const ledger = trackAbortListeners(controller.signal);
+    const { fetch, captured } = recordingFetch(() => jsonResponse({ error: "busy" }, 429));
+    // 既定の sleep（差し替えない）。retryBaseMs の既定は 1000ms
+    const judge = createJevJudge({ apiKey: "k", fetch });
+
+    const pending = judge.judge({ ...REQUEST, signal: controller.signal });
+    await vi.advanceTimersByTimeAsync(0); // 初回の fetch を解決し、待ちに入る
+    expect(vi.getTimerCount()).toBe(1); // 待ちのタイマーが掛かっている
+
+    controller.abort();
+
+    const error = await captureError(() => pending);
+    expect(error.kind).toBe("timeout");
+    expect(vi.getTimerCount()).toBe(0); // 中断でタイマーが消える
+    expect(ledger.remaining()).toBe(0); // 合図の listener も残らない
+
+    await vi.advanceTimersByTimeAsync(10_000); // 待ちの長さを越えて時計を進める
+    expect(captured).toHaveLength(1); // 再送 0
+  });
+
+  it("既定の sleep は、待ちの満了で再送して成功し、タイマーも listener も残さない（#477・b）", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const ledger = trackAbortListeners(controller.signal);
+    const { fetch, captured } = recordingFetch((call) =>
+      call === 1 ? jsonResponse({ error: "busy" }, 429) : jsonResponse(ANSWER_WIRE),
+    );
+    const judge = createJevJudge({ apiKey: "k", fetch }); // 既定の sleep
+
+    const pending = judge.judge({ ...REQUEST, signal: controller.signal });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000); // 既定の待ち（1000ms）の満了で再送する
+
+    const result = await pending;
+    expect(result.answeredBy).toBe("jev");
+    expect(captured).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(ledger.remaining()).toBe(0);
+  });
+
+  it("差し替えの sleep が Promise を拒否したら、その誤りのまま失敗し、listener を残さない（#477・c）", async () => {
+    const controller = new AbortController();
+    const ledger = trackAbortListeners(controller.signal);
+    const failure = new Error("sleep が拒否した");
+    const { fetch, captured } = recordingFetch(() => jsonResponse({ error: "busy" }, 429));
+    const judge = createJevJudge({ apiKey: "k", fetch, sleep: () => Promise.reject(failure) });
+
+    await expect(judge.judge({ ...REQUEST, signal: controller.signal })).rejects.toBe(failure);
+    expect(captured).toHaveLength(1);
+    expect(ledger.remaining()).toBe(0);
+  });
+
+  it("差し替えの sleep が同期に throw しても、その誤りのまま失敗し、listener を残さない（#477・c2）", async () => {
+    const controller = new AbortController();
+    const ledger = trackAbortListeners(controller.signal);
+    const failure = new Error("sleep が同期に throw した");
+    const { fetch, captured } = recordingFetch(() => jsonResponse({ error: "busy" }, 429));
+    const judge = createJevJudge({
+      apiKey: "k",
+      fetch,
+      sleep: () => {
+        throw failure;
+      },
+    });
+
+    await expect(judge.judge({ ...REQUEST, signal: controller.signal })).rejects.toBe(failure);
+    expect(captured).toHaveLength(1);
+    expect(ledger.remaining()).toBe(0);
+  });
+
+  it("既に中断した合図の要求は、429 のあと待たずに timeout にし、タイマーも再送も作らない（#477・c3）", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    controller.abort(); // 先に中断しておく
+    const ledger = trackAbortListeners(controller.signal);
+    const { fetch, captured } = recordingFetch(() => jsonResponse({ error: "busy" }, 429));
+    const judge = createJevJudge({ apiKey: "k", fetch }); // 既定の sleep
+
+    const error = await captureError(() => judge.judge({ ...REQUEST, signal: controller.signal }));
+
+    expect(error.kind).toBe("timeout");
+    expect(vi.getTimerCount()).toBe(0);
+    expect(ledger.remaining()).toBe(0);
+    expect(captured).toHaveLength(1);
+  });
+
+  it("合図の無い要求は、今のまま待って再送する（待ちの長さの列は今の期待のまま）（#477・d）", async () => {
+    const { fetch, captured } = recordingFetch((call) =>
+      call < 3 ? jsonResponse({ error: "busy" }, 429) : jsonResponse(ANSWER_WIRE),
+    );
+    const { sleep, delays } = recordingSleep();
+
+    const result = await createJevJudge({ apiKey: "k", fetch, sleep, maxAttempts: 3, retryBaseMs: 100 }).judge(REQUEST);
+
+    expect(result.answeredBy).toBe("jev");
+    expect(captured).toHaveLength(3);
+    expect(delays).toEqual([100, 200]);
   });
 });
 
