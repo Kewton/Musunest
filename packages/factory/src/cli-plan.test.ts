@@ -1403,6 +1403,76 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
   });
 });
 
+// ── P2 の覆いの落ちで止まった本を plan-record に残す（Issue #440）────────────
+
+describe("覆われていない原文がやり直し後も残って止まった本を plan-record に残す（Issue #440）", () => {
+  it("plan-record に cannot_confirm の理由と内訳が残り、依頼文の目印が出ず、Build を流さない", async () => {
+    const mark = "MARK_UNCOVERED_SRC";
+    // 3 文の原文。要件が前の 2 文を覆い、最後の 1 文が覆われていない（コードの落ち）
+    const source = `${mark}を記録する。件数を合計する。印を出す。`;
+    const spanOf = (quote: string): { readonly start: number; readonly end: number } => {
+      const start = source.indexOf(quote);
+      return { start, end: start + quote.length };
+    };
+    const list = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: `${mark}を記録する。`, position: spanOf(`${mark}を記録する。`) },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する。", position: spanOf("件数を合計する。") },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(list),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+    const dir = `${directory}/uncovered-source-stop`;
+    const answersPath = "uncovered-source-answers.json";
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const lines: string[] = [];
+
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan", "--answers", answersPath],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === answersPath ? JSON.stringify({}) : source),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => createFakeJudge({}),
+      now: () => 0,
+      log: (line) => lines.push(line),
+    });
+
+    // Build を流さず、終了コードは 0 でない
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const record = await readPlanRecord(dir);
+    expect(record.outcome).toBe("cannot-confirm");
+    // 確定できない理由（値の中身を含まない）
+    expect(record.cannot_confirm).toEqual([
+      { source: "reverse-check", code: "uncovered-source", path: "source[*]" },
+    ]);
+    expect(record.failure).toBeUndefined();
+    // 往復の記録の内訳（G1a）に、覆われていない原文の件数が残る
+    expect(record.requirements_diagnosis.unmet).toEqual({
+      quote_not_found: 0,
+      position_mismatch: 0,
+      uncovered_source: { code: 1, conversation: 0 },
+    });
+    // 値（依頼文の目印・原文の断片）は、理由・内訳・記録のどこにも出ない
+    expect(JSON.stringify(record)).not.toContain(mark);
+    expect(lines.join("\n")).not.toContain(mark);
+  });
+});
+
 // ── 止まったときの内訳も plan-record に写る（Issue #430 の直し）──────────────
 
 describe("止まったときの内訳も plan-record に写る（Issue #430 の直し）", () => {

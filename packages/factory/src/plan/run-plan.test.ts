@@ -1050,11 +1050,6 @@ const THREE_REQUIREMENTS = {
   decisions: [],
   unresolved: [],
 };
-const THREE_COVER: Record<string, JudgeAnswer> = {
-  [confirmQuestionName("S-1")]: noul(0.95),
-  [confirmQuestionName("S-2")]: noul(0.95),
-  [confirmQuestionName("S-3")]: noul(0.95),
-};
 
 describe("Plan が止まった理由を、値を含めずに残す（Issue #397）", () => {
   it("P3 で文書に無い制約 ID・空の制約 ID で止まると、failure.problems に添字つきの欄と分類が残る", async () => {
@@ -1101,24 +1096,86 @@ describe("Plan が止まった理由を、値を含めずに残す（Issue #397�
     expect(result.failure?.problems).toEqual([{ field: "questions", code: "shape" }]);
   });
 
-  it("P6 で覆われていない原文があると、cannot-confirm の理由に source: confirm で残る", async () => {
+  it("P2 のやり直し後に覆われていない原文が残ると、目録・P3・P4 を呼ばずに cannot-confirm になる（Issue #440）", async () => {
+    // 3 文の原文のうち、要件が前の 2 文だけを覆う（最後の 1 文がコードの落ちとして残る）
     const recording = createRecordingClient([
       structured(THREE_REQUIREMENTS),
       structured(REVERSE_CHECK_OUTPUT),
       structured(THREE_REQUIREMENTS),
       structured(REVERSE_CHECK_OUTPUT),
-      structured(SURFACE_OUTPUT_CLEAR),
     ]);
+    let answerCalls = 0;
+    let confirmCalls = 0;
+    const responder: PlanResponder = {
+      async answer() {
+        answerCalls += 1;
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        confirmCalls += 1;
+        return "build";
+      },
+    };
 
     const result = await runPlan(
-      makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...THREE_COVER }), ANSWER_NONE, {
-        source: THREE_SOURCE,
-      }),
+      makePlanInput(recording.client, createFakeJudge(catalogAnswers()), responder, { source: THREE_SOURCE }),
     );
 
     expect(result.kind).toBe("cannot-confirm");
     if (result.kind !== "cannot-confirm") return;
-    expect(result.reasons).toEqual([{ source: "confirm", code: "uncovered-source", path: "source[2]" }]);
+    // 理由は引用の落ちと同じ写し方で、覆われていない原文の落ちとして残る
+    expect(result.reasons).toEqual([{ source: "reverse-check", code: "uncovered-source", path: "source[*]" }]);
+    expect(result.openIssues).toEqual([]);
+    // 目録・P3・P4 は呼ばれない（段の記録に無い）
+    const stageIds = result.stages.map((stage) => stage.stage);
+    expect(stageIds).not.toContain("catalog");
+    expect(stageIds).not.toContain("surface");
+    expect(stageIds).not.toContain("questions");
+    // 答える役も確認の役も呼ばれない
+    expect(answerCalls).toBe(0);
+    expect(confirmCalls).toBe(0);
+    // 往復の記録の内訳（G1a）に、覆われていない原文の件数（コードが見つけた分）が残る
+    expect(result.requirementsDiagnosis.rounds).toHaveLength(2);
+    expect(result.requirementsDiagnosis.unmet).toEqual({
+      quoteNotFound: 0,
+      positionMismatch: 0,
+      uncoveredSource: { code: 1, conversation: 0 },
+    });
+  });
+
+  it("会話が挙げた覆われていない原文だけがやり直し後も残っても、cannot-confirm になる（Issue #440）", async () => {
+    // 要件が原文の 2 文を位置で覆うので、コードの落ちは無い
+    const coveredList = {
+      requirements: [
+        { id: "R-1", text: "タスクを記録できる", quote: "タスクを記録する", position: { start: 0, end: 8 } },
+        { id: "R-2", text: "件数を合計できる", quote: "件数を合計する", position: { start: 9, end: 16 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    // 会話が挙げた、覆われていない部分（コードの落ちとは重ならない）
+    const conversation = { uncovered: [{ start: 0, end: 8 }] };
+    const recording = createRecordingClient([
+      structured(coveredList),
+      structured(conversation),
+      structured(coveredList),
+      structured(conversation),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    expect(result.reasons).toEqual([{ source: "reverse-check", code: "uncovered-source", path: "source[*]" }]);
+    expect(result.openIssues).toEqual([]);
+    expect(result.stages.map((stage) => stage.stage)).not.toContain("catalog");
+    // コードの分は 0、会話が挙げた分だけが残る（案 A）
+    expect(result.requirementsDiagnosis.unmet).toEqual({
+      quoteNotFound: 0,
+      positionMismatch: 0,
+      uncoveredSource: { code: 0, conversation: 1 },
+    });
   });
 
   it("残りの問数に収まる重大でない事項を聞かない応答は、覆いの検査でやり直し、2 回続けば段の失敗になる（Issue #419）", async () => {
@@ -2468,19 +2525,16 @@ describe("P1/P2 の往復ごとの落ちの内訳を結果に残す（Issue #430
     });
   });
 
-  it("確定できない結果（P6 の落ち）でも、往復ごとの内訳が残る", async () => {
+  it("確定できない結果（P2 の覆いの落ち）でも、往復ごとの内訳が残る", async () => {
     const recording = createRecordingClient([
       structured(THREE_REQUIREMENTS),
       structured(REVERSE_CHECK_OUTPUT),
       structured(THREE_REQUIREMENTS),
       structured(REVERSE_CHECK_OUTPUT),
-      structured(SURFACE_OUTPUT_CLEAR),
     ]);
 
     const result = await runPlan(
-      makePlanInput(recording.client, createFakeJudge({ ...catalogAnswers(), ...THREE_COVER }), ANSWER_NONE, {
-        source: THREE_SOURCE,
-      }),
+      makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE, { source: THREE_SOURCE }),
     );
 
     expect(result.kind).toBe("cannot-confirm");
