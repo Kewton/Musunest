@@ -1,7 +1,7 @@
 // ② 設計する（stages/design.ts）の unit テスト（02 §1・F-4・F-5・Issue #307）。
 import { describe, expect, it } from "vitest";
 import { JobBudget, estimateMaxCostUsd } from "../budget.js";
-import { CallGateway, estimateInputUpperBoundTokens, structuredInputParts } from "../call.js";
+import { CallGateway, createCallGate, estimateInputUpperBoundTokens, structuredInputParts } from "../call.js";
 import { maxOutputTokensForEffort } from "../limits.js";
 import type { LlmClient, LlmStructuredRequest } from "../llm.js";
 import type { DesignResult, RequirementDesign, RequirementList, RoleEntry } from "../pipeline.js";
@@ -1641,6 +1641,82 @@ describe("② の中身・形の再試行の数（Issue #446）", () => {
     const outcome = await runDesign({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
     expect(outcome.ok).toBe(false);
     expect(gateway.retryCounts).toEqual({ communication: 0, shape: 0, content: 1 });
+  });
+});
+
+// ── やり直しを決めたが、次の呼び出しが門で始まらないときの記録（Issue #478）──────────────
+//
+// 形・中身のやり直しは、段が**決めた**時点で告げる（`noteRetry`）——次の呼び出しが門（締切・共有の
+// 上限・予算の予約）で始まらなくても、やり直しの数だけは増える。ここでは、その未着手のやり直しを固定する。
+
+describe("② のやり直しが次の呼び出しの前に始まらないときの記録（Issue #478）", () => {
+  it("(a) 1 回目の応答が形に落ち、2 回目の前に締切が尽きると、形 1・開始 1・未着手（締切）1", async () => {
+    // 1 回目の開始だけ締切の内側（偽物の時計。2 回目の開始の前に締切を越える）
+    let checks = 0;
+    const now = () => (checks++ === 0 ? 0 : 10 ** 9);
+    const recording = createRecordingClient([structured(MALFORMED_DESIGN)]);
+    const gateway = new CallGateway({
+      client: recording.client,
+      budget: new JobBudget(10),
+      rates: RATES,
+      now,
+      deadline: 1000,
+      effort: "high",
+    });
+    const outcome = await runDesign({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
+    expect(outcome.ok).toBe(false);
+    // 形に落ちてやり直しを決めたが、2 回目の呼び出しは締切で始まらない
+    expect(gateway.retryCounts.shape).toBe(1);
+    expect(gateway.attempts.started).toBe(1);
+    expect(gateway.attempts.not_started.deadline).toBe(1);
+  });
+
+  it("(b) 中身に落ちて作り直しを決め、次の呼び出しが共有の上限で始まらないと、中身 1・開始 1・未着手（上限）1", async () => {
+    const recording = createRecordingClient([structured(DESIGN_MISSING_R2)]);
+    // 共有の門の上限を 1 にする（1 回目の実試行だけ始められる）
+    const gate = createCallGate({ now: () => 0, deadline: 1000, limit: 1 });
+    const gateway = new CallGateway({
+      client: recording.client,
+      budget: new JobBudget(10),
+      rates: RATES,
+      now: () => 0,
+      deadline: 1000,
+      effort: "high",
+      gate,
+    });
+    const outcome = await runDesign({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
+    expect(outcome.ok).toBe(false);
+    // 中身に落ちて作り直しを決めたが、2 回目の呼び出しは共有の上限で始まらない
+    expect(gateway.retryCounts.content).toBe(1);
+    expect(gateway.attempts.started).toBe(1);
+    expect(gateway.attempts.not_started).toEqual({ deadline: 0, budget: 0, limit: 1, timeout: 0 });
+  });
+
+  it("(c) 1 回目の応答が形に落ち、2 回目の予約が拒否されると、形 1・開始 1・未着手（予算）1・段の失敗は budget", async () => {
+    const firstRequest = buildStructuredRequest({
+      rules: DESIGN_RULES,
+      documents: SAMPLE_DOCUMENTS,
+      data: [{ name: "要件の一覧", text: serializeJson(REQUIREMENT_LIST) }],
+      schemaName: DESIGN_SCHEMA_NAME,
+      schema: DESIGN_SCHEMA,
+      maxOutputTokens: maxOutputTokensForEffort("high", "design"),
+    });
+    const maxCost = estimateMaxCostUsd({
+      inputTokens: estimateInputUpperBoundTokens(structuredInputParts(firstRequest)),
+      maxOutputTokens: firstRequest.maxOutputTokens,
+      rates: RATES,
+    });
+    const recording = createRecordingClient([structured(MALFORMED_DESIGN)]);
+    // 1 回目はちょうど予約できる予算。usage が無いので予約は残り、2 回目（形の問題を含む分だけ大きい要求）は断られる
+    const gateway = makeGateway(recording.client, { budgetUsd: maxCost, maxAttempts: 1 });
+    const outcome = await runDesign({ list: REQUIREMENT_LIST, documents: SAMPLE_DOCUMENTS, gateway });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    // 段の失敗は今の予算の写し方のまま
+    expect(outcome.failure.kind).toBe("budget");
+    expect(gateway.retryCounts.shape).toBe(1);
+    expect(gateway.attempts.started).toBe(1);
+    expect(gateway.attempts.not_started).toEqual({ deadline: 0, budget: 1, limit: 0, timeout: 0 });
   });
 });
 

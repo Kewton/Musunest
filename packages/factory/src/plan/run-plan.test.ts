@@ -3178,6 +3178,52 @@ describe("判定も、生成と共有する締切・総呼び出し数の門を�
   });
 });
 
+// ── 要件にする段のやり直しが、次の呼び出しの前に始まらないときの記録（Issue #478）──────
+//
+// P1（要件にする）の 1 回目の応答が形に落ちると、段はやり直しを決めて告げる（`noteRetry("shape")`）。
+// そのあと 2 回目の呼び出しの前に締切が尽きると、やり直しの数だけが 1 になり、実開始は初回の 1 のまま
+// 止まる。段の記録（`requirements`）で、その未着手のやり直しを固定する。
+
+describe("要件にする段のやり直しが、次の呼び出しの前に始まらないときの記録（Issue #478）", () => {
+  it("1 回目の応答が形に落ち、2 回目の前に締切が尽きると、stopped（deadline）で、段の記録が形 1・開始 1・未着手（締切）1 になる", async () => {
+    let clock = 0;
+    const recording = createRecordingClient([structured({ requirements: "だめ" })]);
+    const base = recording.client;
+    let calls = 0;
+    const client: LlmClient = {
+      callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+        calls += 1;
+        const pending = base.callStructured<T>(request);
+        // 1 回目の応答のあと、締切を越える——2 回目の開始は門（締切）で断られる
+        if (calls === 1) clock = 1_001;
+        return pending;
+      },
+      callWithTools: (request: LlmToolRequest): Promise<LlmToolResponse> => base.callWithTools(request),
+    };
+
+    const result = await runPlan(
+      makePlanInput(client, createFakeJudge({}), ANSWER_NONE, { now: () => clock, deadline: 1_000 }),
+    );
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.reason).toBe("deadline");
+    const requirements = result.stages.find((stage) => stage.stage === "requirements");
+    expect(requirements?.status).toBe("failed");
+    expect(requirements?.failure_kind).toBe("deadline");
+    // 初回は始まって応答があり、形に落ちてやり直しを決めたが、2 回目は締切で始まらない
+    expect(requirements?.attempts).toEqual({
+      started: 1,
+      responded: 1,
+      errors: 0,
+      cancelled_deadline: 0,
+      cancelled_timeout: 0,
+      not_started: { deadline: 1, budget: 0, limit: 0, timeout: 0 },
+    });
+    expect(requirements?.retries).toEqual({ communication: 0, shape: 1, content: 0 });
+  });
+});
+
 // ── 判定の包みが、共有の門を Jev の内部の再送へ届ける（04 §2・Issue #469）────────────
 //
 // 実経路では、Jev の adapter は**作るときに門を渡さず**、門は `runPlan` の中で作られる。包み

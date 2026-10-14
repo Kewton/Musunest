@@ -138,7 +138,10 @@ export interface PlanStageRecord {
   readonly reasoning_tokens: number;
   /** 呼び出しの試行の開始・応答・誤り・打ち切り・未着手の数（Issue #446） */
   readonly attempts: AttemptCounts;
-  /** 通信・形・中身の再試行の数（Issue #446） */
+  /**
+   * 通信・形・中身の再試行の数（欄ごとの意味は `RetryCounts` の注記に同じ——通信は共通の口が実際に
+   * 始めた再送の数、形・中身は検査に落ちてやり直しを決めた数。Issue #446・#478）
+   */
   readonly retries: RetryCounts;
   readonly failure_kind: FailureKind | null;
 }
