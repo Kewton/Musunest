@@ -103,11 +103,14 @@ export const SURFACE_SCHEMA = {
  * 出力に許される要件 ID の `enum`（差分の順・重複なし）を足す。欄の `description` は、点検の対象
  * （出力に許される要件 ID）のどれかであることと、参照用の全要件の ID は書かないことを述べる。
  * **`SURFACE_SCHEMA` そのものは 1 文字も変えない**——渡された並びから新しい写しを組む。
+ *
+ * **重複は `enum` に残さない**——渡された並びを**最初の出現の順**で一意にしてから載せる（Issue #483 の
+ * レビュー）。行（差分の要件）は畳まない。**値だけ**を一意にする。
  */
 export function buildSurfaceDiffSchema(requirementIds: readonly [string, ...string[]]): Record<string, unknown> {
   const requirementId = {
     type: "string",
-    enum: [...requirementIds],
+    enum: [...new Set(requirementIds)],
     description: "点検の対象（出力に許される要件 ID）のどれか。参照用の全要件の ID は書かない",
   };
   return {
