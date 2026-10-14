@@ -28,6 +28,14 @@ import {
 /** P3 の洗い出しの JSON Schema の名前 */
 export const SURFACE_SCHEMA_NAME = "plan-surface";
 
+/**
+ * 差分の洗い出し専用の JSON Schema の名前（**封筒（`STAGE_ENVELOPE_ENTRIES`）に載せない**。Issue #483）。
+ * 差分の要件 ID は往復ごとに変わるので、封筒に入れず要求ごとに組む——adapter は封筒に無い名前の schema を
+ * そのまま送るので、`enum` がモデルへ届く（封筒に載せると、adapter は封筒の固定の schema を送り、`enum` は
+ * 届かない）。**この名前は `envelopeStageFor` から引けない**。
+ */
+export const SURFACE_DIFF_SCHEMA_NAME = "plan-surface-diff";
+
 /** P3 の洗い出しに足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const SURFACE_RULES: readonly string[] = [
   "要件の一覧から、次を挙げる：**未解決の事項**（答えで作るものが変わる。重大か否か）と、**語彙で書けないこと**。",
@@ -87,6 +95,48 @@ export const SURFACE_SCHEMA = {
     },
   },
 } as const;
+
+/**
+ * 差分の洗い出しの JSON Schema を、**その往復の差分の要件 ID** から組む（純粋な関数。Issue #483）。
+ *
+ * `SURFACE_SCHEMA` と同じ形で、`ambiguities[].requirementId` と `unwritable[].requirementId` だけに、
+ * 出力に許される要件 ID の `enum`（差分の順・重複なし）を足す。欄の `description` は、点検の対象
+ * （出力に許される要件 ID）のどれかであることと、参照用の全要件の ID は書かないことを述べる。
+ * **`SURFACE_SCHEMA` そのものは 1 文字も変えない**——渡された並びから新しい写しを組む。
+ */
+export function buildSurfaceDiffSchema(requirementIds: readonly [string, ...string[]]): Record<string, unknown> {
+  const requirementId = {
+    type: "string",
+    enum: [...requirementIds],
+    description: "点検の対象（出力に許される要件 ID）のどれか。参照用の全要件の ID は書かない",
+  };
+  return {
+    ...SURFACE_SCHEMA,
+    properties: {
+      ...SURFACE_SCHEMA.properties,
+      ambiguities: {
+        ...SURFACE_SCHEMA.properties.ambiguities,
+        items: {
+          ...SURFACE_SCHEMA.properties.ambiguities.items,
+          properties: {
+            ...SURFACE_SCHEMA.properties.ambiguities.items.properties,
+            requirementId,
+          },
+        },
+      },
+      unwritable: {
+        ...SURFACE_SCHEMA.properties.unwritable,
+        items: {
+          ...SURFACE_SCHEMA.properties.unwritable.items,
+          properties: {
+            ...SURFACE_SCHEMA.properties.unwritable.items.properties,
+            requirementId,
+          },
+        },
+      },
+    },
+  };
+}
 
 /** 目録に無い未解決の事項 1 つ（04 §4 `open_issues` の候補） */
 export interface PlanAmbiguity {
@@ -228,6 +278,14 @@ export interface SurfaceInput {
   readonly list: RequirementList;
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
+  /**
+   * その往復の差分の要件 ID（Issue #483）。渡すと、出力に許される要件 ID の `enum` を両方の欄に足した
+   * 差分専用の schema（`buildSurfaceDiffSchema`）と名前（`SURFACE_DIFF_SCHEMA_NAME`）を使い、データに
+   * 「出力に許される要件 ID」の塊を 1 つ足す（「要件の一覧」の直後）。**渡さなければ要求は変更前と byte で
+   * 同じ**である（初回の洗い出しの経路は変えない）。**照合（`checkSurfaceTargets`）と停止の門は、これとは
+   * 別に今のまま掛ける**——`enum` はモデルへの契約であり、コードの照合を省かない。
+   */
+  readonly targetRequirementIds?: readonly [string, ...string[]];
   /**
    * 目録の点検の結果（Issue #419）。渡さなければデータは要件の一覧だけである（既存の道）。
    * 渡すと「目録が点検した対象」「開いている事項」「仮に適用した既定」を**別々のデータ**として足す。
@@ -538,6 +596,11 @@ function normalizeSurfaceClaims(surface: PlanSurface): PlanSurface {
  */
 export async function runSurface(input: SurfaceInput): Promise<StageOutcome<PlanSurface>> {
   const data: PromptData[] = [{ name: "要件の一覧", text: serializeJson(input.list) }];
+  // 差分の洗い出しでは、書いてよい要件 ID の集合を契約（schema の `enum`）とデータの両方で伝える
+  // （Issue #483）。**「要件の一覧」の直後**に置く（規則の文にはしない）。
+  if (input.targetRequirementIds !== undefined) {
+    data.push({ name: "出力に許される要件 ID", text: serializeJson(input.targetRequirementIds) });
+  }
   if (input.catalog !== undefined) {
     data.push({ name: "目録が点検した対象", text: serializeJson(input.catalog.targets) });
     data.push({ name: "開いている事項", text: serializeJson(input.catalog.openIssues) });
@@ -549,12 +612,14 @@ export async function runSurface(input: SurfaceInput): Promise<StageOutcome<Plan
     data.push({ name: "了承除外", text: serializeJson(input.context.acceptedUnwritable) });
     data.push({ name: "関係する問いと答え", text: serializeJson(input.context.questionsAndAnswers) });
   }
+  // 差分の要件 ID を渡されたときだけ、差分専用の schema（`enum` つき）と名前を使う（Issue #483）。
+  // 渡されないとき（初回の洗い出し）の要求は、変更前と byte で同じである。
   const request = buildStructuredRequest({
     rules: SURFACE_RULES,
     documents: input.documents,
     data,
-    schemaName: SURFACE_SCHEMA_NAME,
-    schema: SURFACE_SCHEMA,
+    schemaName: input.targetRequirementIds === undefined ? SURFACE_SCHEMA_NAME : SURFACE_DIFF_SCHEMA_NAME,
+    schema: input.targetRequirementIds === undefined ? SURFACE_SCHEMA : buildSurfaceDiffSchema(input.targetRequirementIds),
     maxOutputTokens: input.gateway.maxOutputTokens("surface"),
   });
   // 使い回しの検査の試行（1 始まり）。形のやり直しと同じく 2 回まで（Issue #464）

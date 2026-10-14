@@ -49,7 +49,7 @@ import {
 } from "./catalog.js";
 import { confirmQuestionName } from "./confirm.js";
 import { freeTextQuestionName } from "./answers.js";
-import { SURFACE_SCHEMA_NAME } from "./surface.js";
+import { SURFACE_DIFF_SCHEMA_NAME, SURFACE_SCHEMA, SURFACE_SCHEMA_NAME } from "./surface.js";
 import {
   createScriptPlanResponder,
   parsePlanScript,
@@ -3367,8 +3367,11 @@ describe("差分点検：その往復で増えた要件だけを点検し、文�
     expect(second).toBeDefined();
     expect(Object.keys(second?.questions ?? {})).not.toContain(catalogGateQuestionName("R:A:Q1-1"));
 
-    // 洗い出しは初回 + 差分 2 回。2 回目の差分の要求では、対象（要件の一覧）は R:A:Q2-1 だけである
-    const surfaceRequests = recording.structured.filter((request) => request.schemaName === SURFACE_SCHEMA_NAME);
+    // 洗い出しは初回 + 差分 2 回。2 回目の差分の要求では、対象（要件の一覧）は R:A:Q2-1 だけである。
+    // 拾う条件は「初回の名前か差分専用の名前」に広げる（差分区間は差分専用の名前を使う。Issue #483）。
+    const surfaceRequests = recording.structured.filter(
+      (request) => request.schemaName === SURFACE_SCHEMA_NAME || request.schemaName === SURFACE_DIFF_SCHEMA_NAME,
+    );
     expect(surfaceRequests).toHaveLength(3);
     const secondDiff = surfaceRequests[2];
     const target = dataBlockOf(secondDiff?.input ?? "", "要件の一覧");
@@ -3451,6 +3454,61 @@ describe("差分点検：その往復で増えた要件だけを点検し、文�
     expect(result.diffReviews).toEqual([{ round: 2, added: 1, openIssues: 0, acceptedUnwritable: 0, outOfScope: NO_OUT_OF_SCOPE, inherit: inheritRecord({ noParent: 1 }) }]);
     // 目録の段は初回と 2 往復目でだけ（1 往復目の分は無い）
     expect(result.stages.filter((stage) => stage.stage === "catalog")).toHaveLength(2);
+  });
+});
+
+// ── Issue #483：差分の洗い出しの enum を、その往復の差分から組む ──────────────────
+
+describe("差分点検：差分の洗い出しの enum は、その往復の差分の要件 ID だけである（04 §3 P3・Issue #483）", () => {
+  /** 要求の schema の、要件 ID の欄の `enum` を読む（差分専用の schema だけが持つ） */
+  function enumOf(request: LlmStructuredRequest | undefined): readonly string[] | undefined {
+    const schema = request?.schema as
+      | { properties?: { ambiguities?: { items?: { properties?: { requirementId?: { enum?: readonly string[] } } } } } }
+      | undefined;
+    return schema?.properties?.ambiguities?.items?.properties?.requirementId?.enum;
+  }
+
+  it("初回は SURFACE_SCHEMA のまま、差分の各往復は、その往復の差分の要件 ID だけを enum に持つ", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_MIX),
+      structured(ROUND_1_QUESTION),
+      structured(SURFACE_OUTPUT_CLEAR),
+      structured(ROUND_2_QUESTION),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1", "R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q1-1", "A:Q2-1"]),
+    });
+    const responder: PlanResponder = {
+      async answer(request) {
+        return { kind: "answers", answers: [answerTo(request.questions[0])] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+    expect(result.kind).toBe("confirmed");
+
+    const surfaceRequests = recording.structured.filter(
+      (request) => request.schemaName === SURFACE_SCHEMA_NAME || request.schemaName === SURFACE_DIFF_SCHEMA_NAME,
+    );
+    expect(surfaceRequests).toHaveLength(3);
+    // 初回の洗い出しは、SURFACE_SCHEMA_NAME と SURFACE_SCHEMA のままで、enum を持たない
+    expect(surfaceRequests[0]?.schemaName).toBe(SURFACE_SCHEMA_NAME);
+    expect(surfaceRequests[0]?.schema).toBe(SURFACE_SCHEMA);
+    expect(enumOf(surfaceRequests[0])).toBeUndefined();
+    // 1 往復目の差分は、差分専用の名前で、その往復の差分（R:A:Q1-1）だけを enum に持つ
+    expect(surfaceRequests[1]?.schemaName).toBe(SURFACE_DIFF_SCHEMA_NAME);
+    expect(enumOf(surfaceRequests[1])).toEqual(["R:A:Q1-1"]);
+    // 2 往復目は、その往復の差分（R:A:Q2-1）だけで、1 往復目の差分の ID を含まない
+    expect(surfaceRequests[2]?.schemaName).toBe(SURFACE_DIFF_SCHEMA_NAME);
+    expect(enumOf(surfaceRequests[2])).toEqual(["R:A:Q2-1"]);
   });
 });
 
@@ -3884,6 +3942,75 @@ describe("差分点検：応答が指す要件 ID を、この往復の差分の
       },
     ]);
     expect(round).toBe(2);
+  });
+});
+
+// ── Issue #483：enum を掛けても、制約 ID の裏付けと申告の意味の点検を省かない ────────
+
+describe("差分点検：enum のあとも、制約 ID の裏付けと申告の点検を掛ける（04 §3 P3・Issue #483）", () => {
+  it("対象内の要件 ID を指しても、文書に無い制約 ID を根拠にした申告は constraint-id-unknown で止まる", async () => {
+    const unknownConstraint = {
+      ambiguities: [],
+      unwritable: [
+        {
+          id: "U-0",
+          requirementId: "R:A:Q1-1",
+          part: "差分の部分",
+          constraintIds: ["文書に無い ID"],
+          reason: "理由",
+          alternative: "代案",
+        },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(unknownConstraint),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    expect(result.failure?.stage).toBe("surface");
+    expect(result.failure?.kind).toBe("unmet");
+    expect(result.failure?.problems).toEqual([
+      { field: "unwritable[0].constraintIds", code: "constraint-id-unknown" },
+    ]);
+  });
+
+  it("対象内の要件 ID を指す申告でも、偽物の判定が裏付けを認めなければ、了承除外に入れない", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(DIFF_UNWRITABLE),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+      [surfaceTriageQuestionName(0)]: choice("vocabulary-hole", 0.9),
+      // 抜粋が主張に反する → 落とす（了承除外にしない。意味の独立の点検が働く）
+      [surfaceSupportQuestionName(0)]: choice("contradicts", 0.95),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED));
+
+    expect(result.kind).toBe("confirmed");
+    if (result.kind !== "confirmed") return;
+    expect(result.plan.accepted_unwritable).toEqual([]);
+    expect(result.plan.requirements.map((requirement) => requirement.id)).not.toContain("R:alt:U-0");
+    expect(result.surfaceCheck.dropped).toBe(1);
+    expect(result.surfaceCheck.accepted).toBe(0);
   });
 });
 
@@ -5344,8 +5471,10 @@ describe("差分点検：答えから生まれた要件が、答えの解いた�
     });
     const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST));
     expect(result.kind).toBe("confirmed");
-    // 差分の P3（2 回目の洗い出し）の要求を取る
-    const surfaceRequests = recording.structured.filter((request) => request.schemaName === SURFACE_SCHEMA_NAME);
+    // 差分の P3（2 回目の洗い出し）の要求を取る。拾う条件は「初回の名前か差分専用の名前」に広げる（Issue #483）
+    const surfaceRequests = recording.structured.filter(
+      (request) => request.schemaName === SURFACE_SCHEMA_NAME || request.schemaName === SURFACE_DIFF_SCHEMA_NAME,
+    );
     expect(surfaceRequests).toHaveLength(2);
     const diffRequest = surfaceRequests[1];
     // 子の決定（D:inherit:）と、元の解決の値が、参照用文脈に入る

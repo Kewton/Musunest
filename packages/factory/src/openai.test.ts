@@ -25,7 +25,8 @@ import {
   type OpenAiErrorKind,
   type OpenAiUsage,
 } from "./openai.js";
-import { ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_NAME } from "./schema-envelope.js";
+import { ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_NAME, envelopeStageFor } from "./schema-envelope.js";
+import { SURFACE_DIFF_SCHEMA_NAME, SURFACE_SCHEMA, SURFACE_SCHEMA_NAME, buildSurfaceDiffSchema } from "./plan/surface.js";
 import { REQUIREMENT_LIST_SCHEMA, REQUIREMENTS_SCHEMA_NAME } from "./stages/requirements.js";
 import { REVERSE_CHECK_SCHEMA, REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
 import { TEST_SUITE_SCHEMA, TEST_SUITE_SCHEMA_NAME } from "./stages/test-suite.js";
@@ -578,6 +579,68 @@ describe("構造化出力は、全段で同じ封筒の schema を送る（02 §
     expect(input[1]?.content[0]).toEqual({ type: "input_text", text: "<rules>\n段の規則\n</rules>" });
     // 段の規則の本文は変えず、別の内容の塊として stage の指示を足す
     expect(input[1]?.content[1]?.["text"]).toContain(REQUIREMENTS_SCHEMA_NAME);
+  });
+});
+
+// ── Issue #483：差分専用の schema は封筒の外で送り、enum の外は形の誤りにする ──────────
+
+/** 差分の洗い出しの要求の schema（封筒に載せない。`enum` つき） */
+const DIFF_SCHEMA = buildSurfaceDiffSchema(["R:A:Q1-1", "R:A:Q1-2"]);
+
+describe("差分の洗い出しの schema（enum）を、封筒の外で送る（02 §2・Issue #483）", () => {
+  it("封筒に載っていない差分専用の schema は、名前も schema（enum つき）もそのまま送る", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ ambiguities: [], unwritable: [] })), USAGE_WIRE)),
+    );
+    await clientWith(fetch).callStructured(stageRequest(SURFACE_DIFF_SCHEMA_NAME, DIFF_SCHEMA));
+
+    const format = formatOf(bodyOf(captured));
+    expect(format.name).toBe(SURFACE_DIFF_SCHEMA_NAME);
+    expect(format.schema).toEqual(DIFF_SCHEMA);
+    // enum は schema の中に残っている
+    expect(JSON.stringify(format.schema)).toContain('"R:A:Q1-1"');
+    expect(format.strict).toBe(true);
+  });
+
+  it("封筒に載っている段の要求は、今のまま封筒の schema を送る", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(
+        completed(
+          outputText(JSON.stringify(enveloped(SURFACE_SCHEMA_NAME, { ambiguities: [], unwritable: [] }))),
+          USAGE_WIRE,
+        ),
+      ),
+    );
+    await clientWith(fetch).callStructured(stageRequest(SURFACE_SCHEMA_NAME, SURFACE_SCHEMA));
+
+    const format = formatOf(bodyOf(captured));
+    expect(format.name).toBe(ENVELOPE_SCHEMA_NAME);
+    expect(format.schema).toEqual(ENVELOPE_SCHEMA);
+    expect(format.strict).toBe(true);
+  });
+
+  it("差分専用の schema の enum に無い要件 ID を含む応答は、形の誤り（malformed）になる", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(
+        completed(
+          outputText(
+            JSON.stringify({
+              ambiguities: [{ id: "OI-1", requirementId: "R-9", text: "対象外", critical: true }],
+              unwritable: [],
+            }),
+          ),
+          USAGE_WIRE,
+        ),
+      ),
+    );
+    const error = await captureError(() =>
+      clientWith(fetch).callStructured(stageRequest(SURFACE_DIFF_SCHEMA_NAME, DIFF_SCHEMA)),
+    );
+    expect(error.kind).toBe("malformed");
+  });
+
+  it("差分専用の名前は封筒から引けない（adapter はそのまま送る）", () => {
+    expect(envelopeStageFor(SURFACE_DIFF_SCHEMA_NAME)).toBeUndefined();
   });
 });
 
