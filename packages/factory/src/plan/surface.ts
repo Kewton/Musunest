@@ -314,9 +314,13 @@ export interface SurfaceInput {
   readonly dropClaim?: (claim: PlanUnwritable, index: number) => boolean;
   /**
    * **照合まで届いた試行ごとの結果**を受け取る口（Issue #484。差分の洗い出しの道だけ渡す）。記録のための
-   * 口であり、**値（要件 ID・事項 ID・文）は入れない**——試行の番号と結果、照合の結果（件数と分類を
-   * 呼ぶ側が組む）だけを渡す。共通の口の `check` が実行された試行ごとに呼び、`check` に届かなかった試行と
-   * 始めなかった試行では呼ばない。
+   * 口であり、**共通の口の `check` が実行された試行ごとに呼ぶ**——形で落ちた試行も含む。`check` に届か
+   * なかった試行（adapter の誤り・通信など）と、始めなかった試行（上限・予算・締切）では呼ばない。
+   *
+   * 渡すのは試行の番号と結果、そして**形が通った試行では照合の結果そのもの**（`target`）である。この
+   * 内部通知は**値を含む**——`target` は申告・事項の写し（要件 ID・部分・理由・代案・文）を抱える。呼ぶ側は
+   * 件数と有限の分類だけを組み、**要件 ID・事項 ID・文の値を Plan の結果や記録へ写さない**（Plan の
+   * `surfaceTargetAttempts`・CLI の記録は値を持たない）。**通知をそのまま保存してよい、という意味ではない。**
    */
   readonly onTargetAttempt?: (attempt: SurfaceTargetAttempt) => void;
   /**
@@ -554,9 +558,14 @@ export const SURFACE_TARGET_ATTEMPT_RESULTS = ["shape", "target", "accepted"] as
 export type SurfaceTargetAttemptResult = (typeof SURFACE_TARGET_ATTEMPT_RESULTS)[number];
 
 /**
- * 照合まで届いた試行 1 つぶんの結果（**値（要件 ID・事項 ID・文）は入れない**。Issue #484）。呼ぶ側が
- * 点検の版を添え、結果から断った申告の数・事項の数・分類別の件数を組む。`shape` の行は照合に届いて
- * いないので `target` を持たない（件数 0 は未照合を表す）。
+ * 照合まで届いた試行 1 つぶんの結果（Issue #484）。呼ぶ側が点検の版を添え、結果から断った申告の数・
+ * 事項の数・分類別の件数を組む。`shape` の行は照合に届いていないので `target` を持たない（件数 0 は
+ * 未照合を表す）。
+ *
+ * **`target` は照合の結果そのもので、値（要件 ID・事項 ID・文）を含む**——断った参照・重複として除いた
+ * 申告は、申告・事項の写し（`PlanUnwritable`・`PlanAmbiguity`）を抱える。**この通知は内部の中間であり、
+ * 値を Plan の結果や記録へ写してはならない**（Plan の `surfaceTargetAttempts` と CLI の記録は、件数と
+ * 有限の分類だけを持つ）。
  */
 export interface SurfaceTargetAttempt {
   /** この点検での試行（1 始まり。2 回までで、2 回とも断れば `malformed`） */

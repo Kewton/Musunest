@@ -963,7 +963,9 @@ describe("照合を check の中へ移し、対象外の参照を形のやり直
     const { gateway, outcome } = runTarget([OUT_OF_SCOPE, OUT_OF_SCOPE]);
     const result = await outcome;
     expect(result.ok).toBe(false);
-    if (result.ok || result.failure.kind !== "unmet") return;
+    if (result.ok) return;
+    expect(result.failure.kind).toBe("unmet");
+    if (result.failure.kind !== "unmet") return;
     expect(result.failure.attempts).toBe(2);
     expect(result.failure.problems).toEqual([
       {
@@ -979,7 +981,9 @@ describe("照合を check の中へ移し、対象外の参照を形のやり直
     const { outcome } = runTarget([OUT_OF_SCOPE, BAD_SHAPE]);
     const result = await outcome;
     expect(result.ok).toBe(false);
-    if (result.ok || result.failure.kind !== "malformed") return;
+    if (result.ok) return;
+    expect(result.failure.kind).toBe("malformed");
+    if (result.failure.kind !== "malformed") return;
     expect(result.failure.attempts).toBe(2);
     expect(result.failure.problems.some((problem) => problem.field === "unwritable[0].alternative")).toBe(true);
     expect(result.failure.problems.some((problem) => problem.code === "requirement-id-unknown")).toBe(false);
@@ -994,7 +998,9 @@ describe("照合を check の中へ移し、対象外の参照を形のやり直
     const { gateway, outcome } = runTarget([REUSE, OUT_OF_SCOPE], { shownIssueIds: SHOWN });
     const result = await outcome;
     expect(result.ok).toBe(false);
-    if (result.ok || result.failure.kind !== "unmet") return;
+    if (result.ok) return;
+    expect(result.failure.kind).toBe("unmet");
+    if (result.failure.kind !== "unmet") return;
     expect(result.failure.attempts).toBe(2);
     expect(result.failure.problems.some((problem) => problem.code === "requirement-id-unknown")).toBe(true);
     expect(gateway.counts.retries.shape).toBe(1);
@@ -1021,7 +1027,9 @@ describe("照合を check の中へ移し、対象外の参照を形のやり直
       dropClaim: () => false,
     });
     expect(outcome.ok).toBe(false);
-    if (outcome.ok || outcome.failure.kind !== "malformed") return;
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("malformed");
+    if (outcome.failure.kind !== "malformed") return;
     // adapter の malformed は problems を持たない（対象の誤りに写さない）
     expect(outcome.failure.problems).toEqual([]);
   });
@@ -1037,7 +1045,9 @@ describe("照合を check の中へ移し、対象外の参照を形のやり直
     const rejected = runTarget([OUT_OF_SCOPE_CLAIM, OUT_OF_SCOPE_CLAIM], { dropClaim: () => false });
     const rejectedResult = await rejected.outcome;
     expect(rejectedResult.ok).toBe(false);
-    if (rejectedResult.ok || rejectedResult.failure.kind !== "unmet") return;
+    if (rejectedResult.ok) return;
+    expect(rejectedResult.failure.kind).toBe("unmet");
+    if (rejectedResult.failure.kind !== "unmet") return;
     expect(rejectedResult.failure.problems.some((problem) => problem.code === "requirement-id-unknown")).toBe(true);
   });
 
@@ -1045,7 +1055,9 @@ describe("照合を check の中へ移し、対象外の参照を形のやり直
     const { gateway, outcome } = runTarget([BAD_CONSTRAINT]);
     const result = await outcome;
     expect(result.ok).toBe(false);
-    if (result.ok || result.failure.kind !== "unmet") return;
+    if (result.ok) return;
+    expect(result.failure.kind).toBe("unmet");
+    if (result.failure.kind !== "unmet") return;
     expect(result.failure.attempts).toBe(1);
     expect(result.failure.problems).toEqual([
       { field: "unwritable[0].constraintIds", code: "constraint-id-unknown", message: "文書に無い制約 ID である" },
@@ -1057,7 +1069,9 @@ describe("照合を check の中へ移し、対象外の参照を形のやり直
     const { gateway, outcome } = runTarget([MIXED_CONSTRAINT]);
     const result = await outcome;
     expect(result.ok).toBe(false);
-    if (result.ok || result.failure.kind !== "unmet") return;
+    if (result.ok) return;
+    expect(result.failure.kind).toBe("unmet");
+    if (result.failure.kind !== "unmet") return;
     expect(result.failure.problems.some((problem) => problem.code === "constraint-id-missing")).toBe(true);
     expect(result.failure.problems.some((problem) => problem.code === "requirement-id-unknown")).toBe(false);
     expect(gateway.counts.attempts.started).toBe(1);
@@ -1104,12 +1118,14 @@ describe("照合を check の中へ移し、対象外の参照を形のやり直
       onTargetAttempt: (attempt) => attempts.push(attempt),
     });
     expect(notReached.ok).toBe(false);
+    if (!notReached.ok) expect(notReached.failure.kind).toBe("malformed");
     expect(attempts.map((attempt) => attempt.attempt)).toEqual([1]);
 
     // 始めなかった試行（予算が無い）には行を作らない
     const notStarted = runTarget([OUT_OF_SCOPE], { gateway: makeGateway(createRecordingClient([]).client, { budgetUsd: 0, maxAttempts: 1 }) });
     const notStartedResult = await notStarted.outcome;
     expect(notStartedResult.ok).toBe(false);
+    if (!notStartedResult.ok) expect(notStartedResult.failure.kind).toBe("budget");
     expect(notStarted.attempts).toEqual([]);
   });
 

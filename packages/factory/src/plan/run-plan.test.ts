@@ -4321,17 +4321,26 @@ function duplicateClaim(overrides: Partial<typeof ACCEPTED_CLAIM> = {}): typeof 
 }
 
 describe("差分点検・§3：受理済み申告の正確な再申告だけを重複として除く（Issue #434）", () => {
-  /** 初回で U-0 を受理させ、1 往復目で R:A:Q1-1 を増やしたあとの差分点検に、与えた応答を返す */
-  async function runSingleDiff(diffOutput: unknown, extraJudge: Record<string, JudgeAnswer> = {}): Promise<PlanResult> {
+  /**
+   * 初回で U-0 を受理させ、1 往復目で R:A:Q1-1 を増やしたあとの差分点検に、与えた応答を返す。
+   *
+   * **差分の応答の台本は既定で 1 本だけ**である（Issue #484 の「やること 7」）。対象の照合だけで落ちる
+   * 負例（やり直しの 2 試行目が起きる組）だけが、呼ぶ側で `retry: true` を立てて同じ応答をもう 1 本足す。
+   * 受理される応答、制約の誤りで止まる組（D1）は 2 試行目を始めないので、台本を増やさない——増やすと、
+   * 制約の誤りを誤ってやり直す実装でも期待が通ってしまう。
+   */
+  async function runSingleDiff(
+    diffOutput: unknown,
+    extraJudge: Record<string, JudgeAnswer> = {},
+    options: { readonly retry?: boolean } = {},
+  ): Promise<PlanResult> {
     const recording = createRecordingClient([
       structured(REQUIREMENT_LIST_OUTPUT),
       structured(REVERSE_CHECK_OUTPUT),
       structured(BASE_SURFACE),
       structured(questionsFor("OI-1")),
-      // 差分の洗い出し：1 試行目と、対象の照合で落ちたときのやり直し（2 試行目）の両方に同じ応答を返す
-      // （Issue #484。受理される応答では 2 つ目は使われない）
       structured(diffOutput),
-      structured(diffOutput),
+      ...(options.retry === true ? [structured(diffOutput)] : []),
     ]);
     const judge = createFakeJudge({
       ...catalogAnswers(),
@@ -4435,7 +4444,8 @@ describe("差分点検・§3：受理済み申告の正確な再申告だけを�
       { name: "代案が違う", claim: duplicateClaim({ alternative: "別の代案" }) },
     ];
     for (const { name, claim } of cases) {
-      const result = await runSingleDiff({ ambiguities: [], unwritable: [claim] });
+      // 対象の照合だけで落ちる負例。やり直し（2 試行目）にも同じ応答を返す（Issue #484）
+      const result = await runSingleDiff({ ambiguities: [], unwritable: [claim] }, {}, { retry: true });
       expect(result.kind, name).toBe("stopped");
       if (result.kind !== "stopped") continue;
       expect(result.failure?.stage, name).toBe("surface");
@@ -4453,16 +4463,38 @@ describe("差分点検・§3：受理済み申告の正確な再申告だけを�
     expect(reordered.kind).toBe("confirmed");
     expect(reordered.diffReviews[0]?.outOfScope.deduped).toBe(1);
 
-    // 負例：追加・欠落・空・未知
-    const negatives: { readonly name: string; readonly constraintIds: readonly string[] }[] = [
+    // 負例（対象の照合だけで断る）：追加・欠落。制約の裏付けは通るが、受理済みの再申告とは認めない集合なので
+    // 対象外として断り、やり直し（2 試行目）へ回る。台本は呼ぶ側で 2 本目を明示して足す（Issue #484）
+    const targetNegatives: { readonly name: string; readonly constraintIds: readonly string[] }[] = [
       { name: "追加", constraintIds: ["記録", "合計", "アプリの名前・説明"] },
       { name: "欠落", constraintIds: ["記録"] },
+    ];
+    for (const { name, constraintIds } of targetNegatives) {
+      const result = await runSingleDiff(
+        { ambiguities: [], unwritable: [duplicateClaim({ constraintIds })] },
+        {},
+        { retry: true },
+      );
+      expect(result.kind, name).toBe("stopped");
+      if (result.kind !== "stopped") continue;
+      expect(result.failure?.kind, name).toBe("unmet");
+      expect(result.diffReviews[0]?.outOfScope.deduped, name).toBe(0);
+      // 対象の照合で落ちた試行が 2 行（やり直しへ回った）
+      expect(result.surfaceTargetAttempts.map((attempt) => attempt.result), name).toEqual(["target", "target"]);
+    }
+
+    // 負例（制約の裏付けで断る）：空・未知。対象の照合へ回さず、1 試行目で制約の誤りとして止まる
+    // ——やり直しの台本は**足さない**（足すと、誤ってやり直す実装でも期待が通ってしまう。Issue #484）
+    const constraintNegatives: { readonly name: string; readonly constraintIds: readonly string[] }[] = [
       { name: "空", constraintIds: [] },
       { name: "未知", constraintIds: ["文書に無い ID"] },
     ];
-    for (const { name, constraintIds } of negatives) {
+    for (const { name, constraintIds } of constraintNegatives) {
       const result = await runSingleDiff({ ambiguities: [], unwritable: [duplicateClaim({ constraintIds })] });
       expect(result.kind, name).toBe("stopped");
+      if (result.kind !== "stopped") continue;
+      expect(result.failure?.kind, name).toBe("unmet");
+      expect(result.surfaceTargetAttempts.map((attempt) => attempt.result), name).toEqual(["accepted"]);
       expect(result.diffReviews[0]?.outOfScope.deduped, name).toBe(0);
     }
   });
@@ -4475,10 +4507,12 @@ describe("差分点検・§3：受理済み申告の正確な再申告だけを�
       { id: "OI-2", requirementId: "R-1", text: "新しい要件と矛盾する", critical: true },
     ];
     for (const ambiguity of ambiguities) {
-      const result = await runSingleDiff({ ambiguities: [ambiguity], unwritable: [] });
+      // 対象の照合だけで断る負例。やり直し（2 試行目）にも同じ応答を返す（Issue #484）
+      const result = await runSingleDiff({ ambiguities: [ambiguity], unwritable: [] }, {}, { retry: true });
       expect(result.kind, `${ambiguity.requirementId}/${ambiguity.critical}`).toBe("stopped");
       if (result.kind !== "stopped") continue;
       expect(result.failure?.stage).toBe("surface");
+      expect(result.failure?.kind).toBe("unmet");
       // 除かず、断った（分類は内部の対応で決まる。R-1 は原文、R-2 も原文）
       expect(result.diffReviews[0]?.outOfScope.deduped).toBe(0);
       expect(result.diffReviews[0]?.outOfScope.rejectedAmbiguities).toBe(1);
@@ -4488,7 +4522,8 @@ describe("差分点検・§3：受理済み申告の正確な再申告だけを�
 
   it("正確な重複と、対象外の未知が同時にあるときは、後者で段ごと止め、識別した重複件数も残す", async () => {
     const unknown = { id: "U-x", requirementId: "R:unknown", part: "部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" };
-    const result = await runSingleDiff({ ambiguities: [], unwritable: [duplicateClaim(), unknown] });
+    // 対象外の未知で断る負例。やり直し（2 試行目）にも同じ応答を返す（Issue #484）
+    const result = await runSingleDiff({ ambiguities: [], unwritable: [duplicateClaim(), unknown] }, {}, { retry: true });
 
     expect(result.kind).toBe("stopped");
     if (result.kind !== "stopped") return;
@@ -4545,6 +4580,12 @@ describe("差分点検・§3：受理済み申告の正確な再申告だけを�
         dedupedIndexes: [0],
       }),
     );
+    // 制約の誤りで止まる組は参照のやり直しへ回さない——差分の surface 段の実開始は 1・形のやり直し 0・
+    // 照合の通知 1 行だけ（台本も増やさない）。誤ってやり直す実装なら、台本が尽きて種別が変わり落ちる
+    const lastSurface = [...result.stages].reverse().find((stage) => stage.stage === "surface");
+    expect(lastSurface?.attempts.started).toBe(1);
+    expect(lastSurface?.retries.shape).toBe(0);
+    expect(result.surfaceTargetAttempts.map((attempt) => [attempt.attempt, attempt.result])).toEqual([[1, "accepted"]]);
   });
 
   it("正規化しても接頭辞が残る既知 ID の再申告は、別の集合なので重複と認めず止める（D2）", async () => {
