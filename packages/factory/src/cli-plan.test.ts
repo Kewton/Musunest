@@ -457,6 +457,15 @@ interface PlanCliRecordShape {
     readonly distinct_ids: number;
     readonly by_source: readonly { readonly source: string; readonly count: number }[];
   }[];
+  /** 照合まで届いた試行 1 つずつの記録（版・試行・結果・件数・分類。値は入れない。Issue #484） */
+  readonly surface_target_attempts: readonly {
+    readonly check: number;
+    readonly attempt: number;
+    readonly result: string;
+    readonly rejected_claims: number;
+    readonly rejected_ambiguities: number;
+    readonly kinds: readonly { readonly kind: string; readonly claims: number; readonly ambiguities: number }[];
+  }[];
   readonly spent_usd: number;
   readonly remaining_usd: number;
   readonly budget_usd: number;
@@ -2476,6 +2485,8 @@ describe("差分点検・§3：受理済み申告の再申告を除いた記録�
       structured(REVERSE_CHECK_OUTPUT),
       structured(base),
       structured({ questions: [questionOf("OI-1", "Q-1")] }),
+      // 1 試行目と、対象の照合で落ちたときのやり直し（2 試行目）の両方に同じ応答を返す（Issue #484）
+      structured({ ambiguities: [], unwritable: [{ ...accepted, id: "U-dup" }, unknown] }),
       structured({ ambiguities: [], unwritable: [{ ...accepted, id: "U-dup" }, unknown] }),
     ]);
     const judge = createFakeJudge({
@@ -2518,8 +2529,21 @@ describe("差分点検・§3：受理済み申告の再申告を除いた記録�
     expect(out?.rejected_claims).toBe(1);
     expect(out?.deduped_indexes).toEqual([0]);
     expect(out?.kinds.find((entry) => entry.kind === "unknown")?.claims).toBe(1);
+    // 照合まで届いた試行の記録（版 2・試行 1 と 2。断った申告 1・分類は未知。値は入れない。Issue #484）
+    const unknownKindCounts = [
+      { kind: "source", claims: 0, ambiguities: 0 },
+      { kind: "previous-answer", claims: 0, ambiguities: 0 },
+      { kind: "alternative", claims: 0, ambiguities: 0 },
+      { kind: "unknown", claims: 1, ambiguities: 0 },
+      { kind: "unclassified", claims: 0, ambiguities: 0 },
+    ];
+    expect(record.surface_target_attempts).toEqual([
+      { check: 2, attempt: 1, result: "target", rejected_claims: 1, rejected_ambiguities: 0, kinds: unknownKindCounts },
+      { check: 2, attempt: 2, result: "target", rejected_claims: 1, rejected_ambiguities: 0, kinds: unknownKindCounts },
+    ]);
     // 値は、記録（diff_reviews）にも停止の行にも出ない
     expect(JSON.stringify(record.diff_reviews)).not.toContain(MARK);
+    expect(JSON.stringify(record.surface_target_attempts)).not.toContain(MARK);
     expect(lines.join("\n")).not.toContain(MARK);
   });
 
@@ -2657,6 +2681,8 @@ describe("同じ ID の開いている事項の行の衝突を、値を含めず
     expect(record.closed_by_default).toEqual([]);
     expect(record.closed_by_source).toEqual([]);
     expect(record.diff_reviews).toEqual([]);
+    // 照合を渡した点検（差分の洗い出し）が無ければ、照合の試行の記録は空（Issue #484）
+    expect(record.surface_target_attempts).toEqual([]);
   });
 });
 

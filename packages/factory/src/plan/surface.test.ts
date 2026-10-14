@@ -10,14 +10,15 @@ import { JobBudget } from "../budget.js";
 import { CallGateway } from "../call.js";
 import { maxOutputTokensForEffort } from "../limits.js";
 import { ENVELOPE_SCHEMA, envelopeStageFor } from "../schema-envelope.js";
-import { COMMON_RULES, serializeJson } from "../stages/prompt.js";
+import { COMMON_RULES, PREVIOUS_RESPONSE_DATA_NAME, SHAPE_PROBLEMS_DATA_NAME, serializeJson } from "../stages/prompt.js";
+import type { LlmClient } from "../llm.js";
 import {
   REQUIREMENT_LIST,
   SAMPLE_DOCUMENTS,
   createRecordingClient,
   makeGateway,
 } from "../stages/__tests__/prompt.js";
-import { SURFACE_DIFF_SCHEMA_NAME, SURFACE_RULES, SURFACE_SCHEMA, SURFACE_SCHEMA_NAME, SURFACE_SHOWN_ID_SOURCES, buildSurfaceDiffSchema, checkSurfaceOutput, checkSurfaceTargets, runSurface, surfaceIdReuseOf, type PlanSurface, type SurfaceCatalogData, type SurfaceContext, type SurfaceShownIdSource, type SurfaceShownIssueIds } from "./surface.js";
+import { SURFACE_DIFF_SCHEMA_NAME, SURFACE_RULES, SURFACE_SCHEMA, SURFACE_SCHEMA_NAME, SURFACE_SHOWN_ID_SOURCES, buildSurfaceDiffSchema, checkSurfaceOutput, checkSurfaceTargets, runSurface, surfaceIdReuseOf, type PlanSurface, type SurfaceCatalogData, type SurfaceContext, type SurfaceInput, type SurfaceShownIdSource, type SurfaceShownIssueIds, type SurfaceTargetAttempt } from "./surface.js";
 
 /** 正しい応答（未解決の事項 1 件・書けないこと 1 件） */
 const SURFACE_OUTPUT = {
@@ -857,5 +858,292 @@ describe("差分の洗い出しの schema（enum）を、その往復の差分�
     expect(result.failure.kind).toBe("budget");
     expect(limited.gateway.counts.attempts.started).toBe(0);
     expect(limited.gateway.counts.attempts.not_started.budget).toBe(1);
+  });
+});
+
+// ── Issue #484：照合を check の中へ移し、対象外の参照を形のやり直しへ返す ───────────────
+
+describe("照合を check の中へ移し、対象外の参照を形のやり直しへ返す（04 §3 P3・Issue #484）", () => {
+  /** その往復の差分の要件 ID（点検の対象） */
+  const DIFF_IDS = ["R:A:Q1-1"] as const;
+  /** `<data name="…">…</data>` の中身を取り出す（データの欄ごとに確かめる） */
+  const dataBlockOf = (input: string, name: string): string =>
+    input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "";
+  /** 対象外の要件 ID を指す未解決の事項 1 件 */
+  const OUT_OF_SCOPE = {
+    ambiguities: [{ id: "OI-x", requirementId: "R-1", text: "対象外の事項", critical: true }],
+    unwritable: [],
+  };
+  /** 点検の対象の内側を指す未解決の事項 1 件 */
+  const IN_SCOPE = {
+    ambiguities: [{ id: "OI-y", requirementId: "R:A:Q1-1", text: "対象内の事項", critical: true }],
+    unwritable: [],
+  };
+  /** 対象外の要件 ID を指す「書けない」の申告 1 件 */
+  const OUT_OF_SCOPE_CLAIM = {
+    ambiguities: [],
+    unwritable: [
+      { id: "U-1", requirementId: "R-1", part: "部分", constraintIds: ["記録"], reason: "理由", alternative: "代案" },
+    ],
+  };
+  /** 形で落ちる応答（代わりの案が無い） */
+  const BAD_SHAPE = {
+    ambiguities: [],
+    unwritable: [
+      { id: "U-1", requirementId: "R:A:Q1-1", part: "部分", constraintIds: ["記録"], reason: "理由" },
+    ],
+  };
+  /** 点検の対象の内側だが、文書に無い制約 ID を使う申告 */
+  const BAD_CONSTRAINT = {
+    ambiguities: [],
+    unwritable: [
+      { id: "U-1", requirementId: "R:A:Q1-1", part: "部分", constraintIds: ["文書に無い ID"], reason: "理由", alternative: "代案" },
+    ],
+  };
+  /** 対象外の参照と制約の誤り（空の制約）が同居する応答 */
+  const MIXED_CONSTRAINT = {
+    ambiguities: [{ id: "OI-o", requirementId: "R-1", text: "対象外の事項", critical: true }],
+    unwritable: [
+      { id: "U-1", requirementId: "R:A:Q1-1", part: "部分", constraintIds: [], reason: "理由", alternative: "代案" },
+    ],
+  };
+
+  /** 照合を渡して 1 回まわす（記録・共通の口・試行の結果を返す） */
+  function runTarget(outputs: readonly unknown[], options: Partial<SurfaceInput> = {}) {
+    const recorded = outputs.map((output) => ({ kind: "structured" as const, output, usage: undefined }));
+    const recording = createRecordingClient(recorded);
+    const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+    const attempts: SurfaceTargetAttempt[] = [];
+    const outcome = runSurface({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway,
+      targetRequirementIds: DIFF_IDS,
+      dropClaim: () => false,
+      onTargetAttempt: (attempt) => attempts.push(attempt),
+      ...options,
+    });
+    return { recording, gateway, attempts, outcome };
+  }
+
+  it("(a) 1 試行目が対象外、2 試行目が対象内なら、やり直し 1 回で成功し、2 試行目の input に前回の応答と問題の塊が入る", async () => {
+    const { recording, gateway, outcome } = runTarget([OUT_OF_SCOPE, IN_SCOPE]);
+    const result = await outcome;
+    expect(result.ok).toBe(true);
+    // 呼び出しは 2、形のやり直しの告知は 1（新しい呼び出しの枠を作らない）
+    expect(recording.structured).toHaveLength(2);
+    expect(gateway.counts.attempts.started).toBe(2);
+    expect(gateway.counts.retries.shape).toBe(1);
+    const first = recording.structured[0];
+    const second = recording.structured[1];
+    expect(second).toBeDefined();
+    if (first === undefined || second === undefined) return;
+    // 前回の問題の塊：欄・分類・今の固定文（値を入れない）
+    const problemsBlock = dataBlockOf(second.input, SHAPE_PROBLEMS_DATA_NAME);
+    expect(JSON.parse(problemsBlock)).toEqual([
+      {
+        field: "ambiguities[0].requirementId",
+        code: "requirement-id-unknown",
+        message: "点検の対象（その往復の差分）に無い要件を指している",
+      },
+    ]);
+    // 誤りの文と欄に、要件 ID の値を入れない
+    expect(problemsBlock).not.toContain("R-1");
+    expect(problemsBlock).not.toContain("R:A:Q1-1");
+    // #479 の前回の応答の塊があり、JSON として読むと 1 試行目の output と等しい
+    expect(JSON.parse(dataBlockOf(second.input, PREVIOUS_RESPONSE_DATA_NAME))).toEqual(OUT_OF_SCOPE);
+    // 前置き（instructions・documents・rules・schema）は 1 試行目と等しい
+    expect(second.instructions).toBe(first.instructions);
+    expect(second.documents).toEqual(first.documents);
+    expect(second.rules).toEqual(first.rules);
+    expect(second.schema).toEqual(first.schema);
+  });
+
+  it("(b) 2 試行とも対象外を指すと、unmet・試行 2・最後の試行の問題（requirement-id-unknown）で終わり、呼び出しは 2 のまま", async () => {
+    const { gateway, outcome } = runTarget([OUT_OF_SCOPE, OUT_OF_SCOPE]);
+    const result = await outcome;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.kind).toBe("unmet");
+    if (result.failure.kind !== "unmet") return;
+    expect(result.failure.attempts).toBe(2);
+    expect(result.failure.problems).toEqual([
+      {
+        field: "ambiguities[0].requirementId",
+        code: "requirement-id-unknown",
+        message: "点検の対象（その往復の差分）に無い要件を指している",
+      },
+    ]);
+    expect(gateway.counts.attempts.started).toBe(2);
+  });
+
+  it("(c) 1 試行目が照合で、2 試行目が形の検査で落ちると、malformed・試行 2（前の試行の対象の誤りで上書きしない）", async () => {
+    const { outcome } = runTarget([OUT_OF_SCOPE, BAD_SHAPE]);
+    const result = await outcome;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.kind).toBe("malformed");
+    if (result.failure.kind !== "malformed") return;
+    expect(result.failure.attempts).toBe(2);
+    expect(result.failure.problems.some((problem) => problem.field === "unwritable[0].alternative")).toBe(true);
+    expect(result.failure.problems.some((problem) => problem.code === "requirement-id-unknown")).toBe(false);
+  });
+
+  it("(c2) 1 試行目が事項 ID の使い回し、2 試行目が対象外を指すと、unmet・試行 2・やり直しの告知 1・呼び出し 2（追加の開始なし）", async () => {
+    const SHOWN: SurfaceShownIssueIds = { catalog: ["OI:shown"], defaults: [], inherited: [], decisions: [] };
+    const REUSE = {
+      ambiguities: [{ id: "OI:shown", requirementId: "R:A:Q1-1", text: "使い回し", critical: true }],
+      unwritable: [],
+    };
+    const { gateway, outcome } = runTarget([REUSE, OUT_OF_SCOPE], { shownIssueIds: SHOWN });
+    const result = await outcome;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.kind).toBe("unmet");
+    if (result.failure.kind !== "unmet") return;
+    expect(result.failure.attempts).toBe(2);
+    expect(result.failure.problems.some((problem) => problem.code === "requirement-id-unknown")).toBe(true);
+    expect(gateway.counts.retries.shape).toBe(1);
+    expect(gateway.counts.attempts.started).toBe(2);
+  });
+
+  it("(c3) 1 試行目が対象の照合で落ち、2 試行目の呼び出しを adapter が malformed で返すと、adapter の malformed のまま終わる", async () => {
+    let calls = 0;
+    const client: LlmClient = {
+      async callStructured<T>() {
+        calls += 1;
+        if (calls === 1) return { output: OUT_OF_SCOPE as T, usage: undefined };
+        throw Object.assign(new Error("adapter の形の誤り"), { kind: "malformed" });
+      },
+      async callWithTools() {
+        throw new Error("使わない");
+      },
+    };
+    const outcome = await runSurface({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(client, { maxAttempts: 1 }),
+      targetRequirementIds: DIFF_IDS,
+      dropClaim: () => false,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("malformed");
+    if (outcome.failure.kind !== "malformed") return;
+    // adapter の malformed は problems を持たない（対象の誤りに写さない）
+    expect(outcome.failure.problems).toEqual([]);
+  });
+
+  it("(d) 対象外の申告が受理済みの再申告なら 1 試行目で通り（呼び出し 1）、除かれる。見分けない再申告は断る", async () => {
+    // 重複として除く（1 試行目で通る）
+    const dropped = runTarget([OUT_OF_SCOPE_CLAIM], { dropClaim: () => true });
+    const droppedResult = await dropped.outcome;
+    expect(droppedResult.ok).toBe(true);
+    expect(dropped.recording.structured).toHaveLength(1);
+    if (droppedResult.ok) expect(droppedResult.value.unwritable).toEqual([]);
+    // 重複と認めない（対象外として断り、やり直しの 2 回目も同じなら unmet）
+    const rejected = runTarget([OUT_OF_SCOPE_CLAIM, OUT_OF_SCOPE_CLAIM], { dropClaim: () => false });
+    const rejectedResult = await rejected.outcome;
+    expect(rejectedResult.ok).toBe(false);
+    if (rejectedResult.ok) return;
+    expect(rejectedResult.failure.kind).toBe("unmet");
+    if (rejectedResult.failure.kind !== "unmet") return;
+    expect(rejectedResult.failure.problems.some((problem) => problem.code === "requirement-id-unknown")).toBe(true);
+  });
+
+  it("(e) 照合を通り、制約の裏付けで落ちる応答は、今のとおり unmet・constraint-id-unknown で、呼び出しは増えない", async () => {
+    const { gateway, outcome } = runTarget([BAD_CONSTRAINT]);
+    const result = await outcome;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.kind).toBe("unmet");
+    if (result.failure.kind !== "unmet") return;
+    expect(result.failure.attempts).toBe(1);
+    expect(result.failure.problems).toEqual([
+      { field: "unwritable[0].constraintIds", code: "constraint-id-unknown", message: "文書に無い制約 ID である" },
+    ]);
+    expect(gateway.counts.attempts.started).toBe(1);
+  });
+
+  it("(e2) 対象外の参照と制約の誤りが同居すると、1 試行目で unmet・制約の誤りで止まり、呼び出しは 1（参照のやり直しへ回さない）", async () => {
+    const { gateway, outcome } = runTarget([MIXED_CONSTRAINT]);
+    const result = await outcome;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failure.kind).toBe("unmet");
+    if (result.failure.kind !== "unmet") return;
+    expect(result.failure.problems.some((problem) => problem.code === "constraint-id-missing")).toBe(true);
+    expect(result.failure.problems.some((problem) => problem.code === "requirement-id-unknown")).toBe(false);
+    expect(gateway.counts.attempts.started).toBe(1);
+  });
+
+  it("(f) 結果の口は、check が実行された試行（形で落ちた試行を含む）だけに、試行の番号と結果つきで呼ばれる", async () => {
+    // 形で落ちて、やり直しで受理
+    const shapeThenOk = runTarget([BAD_SHAPE, IN_SCOPE]);
+    expect((await shapeThenOk.outcome).ok).toBe(true);
+    expect(shapeThenOk.attempts.map((attempt) => [attempt.attempt, attempt.result])).toEqual([
+      [1, "shape"],
+      [2, "accepted"],
+    ]);
+    expect(shapeThenOk.attempts[0]?.target).toBeUndefined();
+    expect(shapeThenOk.attempts[1]?.target).toBeDefined();
+
+    // 対象の照合で落ちて、やり直しで受理
+    const targetThenOk = runTarget([OUT_OF_SCOPE, IN_SCOPE]);
+    expect((await targetThenOk.outcome).ok).toBe(true);
+    expect(targetThenOk.attempts.map((attempt) => [attempt.attempt, attempt.result])).toEqual([
+      [1, "target"],
+      [2, "accepted"],
+    ]);
+
+    // check に届かなかった試行（2 試行目を adapter が malformed で返す）には行を作らない
+    let calls = 0;
+    const client: LlmClient = {
+      async callStructured<T>() {
+        calls += 1;
+        if (calls === 1) return { output: OUT_OF_SCOPE as T, usage: undefined };
+        throw Object.assign(new Error("adapter の形の誤り"), { kind: "malformed" });
+      },
+      async callWithTools() {
+        throw new Error("使わない");
+      },
+    };
+    const attempts: SurfaceTargetAttempt[] = [];
+    const notReached = await runSurface({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(client, { maxAttempts: 1 }),
+      targetRequirementIds: DIFF_IDS,
+      dropClaim: () => false,
+      onTargetAttempt: (attempt) => attempts.push(attempt),
+    });
+    expect(notReached.ok).toBe(false);
+    if (!notReached.ok) expect(notReached.failure.kind).toBe("malformed");
+    expect(attempts.map((attempt) => attempt.attempt)).toEqual([1]);
+
+    // 始めなかった試行（予算が無い）には行を作らない
+    const notStarted = runTarget([OUT_OF_SCOPE], { gateway: makeGateway(createRecordingClient([]).client, { budgetUsd: 0, maxAttempts: 1 }) });
+    const notStartedResult = await notStarted.outcome;
+    expect(notStartedResult.ok).toBe(false);
+    if (!notStartedResult.ok) expect(notStartedResult.failure.kind).toBe("budget");
+    expect(notStarted.attempts).toEqual([]);
+  });
+
+  it("(g) 照合を渡さないと、要求・呼び出しの数・結果は今のまま", async () => {
+    const recorded = [
+      { kind: "structured" as const, output: SURFACE_OUTPUT, usage: undefined },
+      { kind: "structured" as const, output: SURFACE_OUTPUT, usage: undefined },
+    ];
+    const recording = createRecordingClient(recorded);
+    const outcome = await runSurface({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+    });
+    expect(outcome.ok).toBe(true);
+    // 呼び出しは 1 回で、データの塊は要件の一覧だけ（要求は変更前と同じ）
+    expect(recording.structured).toHaveLength(1);
+    expect(recording.structured[0]?.input.match(/<data name=/g)).toHaveLength(1);
+    expect(recording.structured[0]?.input).not.toContain(SHAPE_PROBLEMS_DATA_NAME);
   });
 });
