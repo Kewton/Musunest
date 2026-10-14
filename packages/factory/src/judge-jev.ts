@@ -233,6 +233,10 @@ function defaultSleep(ms: number, signal: AbortSignal | undefined): Promise<void
  *     同期の throw）でも残さない。`once` は中断で自動的に外れるが、満了・拒否では明示的に外す。差し替え
  *     が同期に throw しても、listener を足す**前**に呼ぶので残らない（今までは足したあとで外す分岐へ
  *     届かず残っていた）。
+ *   * **差し替えの `sleep` の呼び出しの中で**同じ合図が同期に中断されることがある——`abort` のイベントは
+ *     listener を足す前に終わっているので、後から足した listener は発火しない。そこで、足したあとに
+ *     `signal.aborted` を確かめ直し、中断済みなら今回足した listener を外して、同じ中断の処理で
+ *     `timeout` にする（未解決の Promise でも待ち続けず、解決済みでも成功にしない）。
  *   * 差し替えの `sleep` が自分で作った資源は、その差し替えの持ち主の責任とする。
  */
 async function waitBeforeRetry(sleep: SleepImpl, ms: number, signal: AbortSignal | undefined): Promise<void> {
@@ -250,8 +254,15 @@ async function waitBeforeRetry(sleep: SleepImpl, ms: number, signal: AbortSignal
       settled = true;
       reject(new JevAdapterError("timeout", "再送の待機が打ち切られました"));
     };
+    /** 待ちの決着（解決・拒否）を 1 回だけ通す。足した listener をこの場で外す */
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      finish();
+    };
     // 差し替えが同期に throw するときは、合図に listener を足す前に呼ぶ——足したあとでは、外す分岐へ
-    // 届かずに残る（Issue #477）。待ちの Promise はここで確実に握るので、拒否が未処理のまま残らない。
+    // 届かずに残る（Issue #477）。待ちの Promise は確実に握るので、拒否が未処理のまま残らない。
     let waiting: Promise<void>;
     try {
       waiting = sleep(ms, signal);
@@ -259,21 +270,18 @@ async function waitBeforeRetry(sleep: SleepImpl, ms: number, signal: AbortSignal
       reject(error);
       return;
     }
-    signal.addEventListener("abort", onAbort, { once: true });
-    waiting.then(
-      () => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        resolve();
-      },
-      (error: unknown) => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
+    // 先に決着を握る——`sleep` の間の中断で、未解決の待ちを待ち続けたり、解決済みを成功にしない。
+    void waiting.then(
+      () => settle(resolve),
+      (error: unknown) => settle(() => reject(error)),
     );
+    signal.addEventListener("abort", onAbort, { once: true });
+    // 足したあとに確かめ直す。`sleep` の呼び出しの中で中断されていれば、`abort` のイベントは既に終わって
+    // いて listener は発火しない——今足した listener を外し、同じ中断の処理（`timeout`）にする。
+    if (signal.aborted) {
+      signal.removeEventListener("abort", onAbort);
+      onAbort();
+    }
   });
 }
 
