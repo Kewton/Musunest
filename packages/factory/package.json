@@ -17,7 +17,8 @@
     "typecheck": "tsc -b --pretty",
     "lint": "oxlint src",
     "test": "vitest run --passWithNoTests",
-    "factory:run": "node dist/cli.js"
+    "factory:run": "node dist/cli.js",
+    "factory:judge-claims": "node dist/cli-claims.js"
   },
   "dependencies": {
     "@musunest/appspec-schema": "workspace:*",

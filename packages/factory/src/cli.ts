@@ -250,22 +250,28 @@ function parentOf(path: string): string {
  * 併せて、**再点検専用の Luna の口**（LLM）を返す（Issue #432）——P3 の未確定の申告の再点検を、主（Jev）
  * ではなく Luna の別の会話へ明示的に回すため、呼ぶ側（Plan）へ渡す。Build には使わない。
  */
-function assembleJudge(
-  deps: CliDeps,
-  model: string,
-  client: LlmClient,
-  logError: (line: string) => void,
+export interface AssembleJudgeInput {
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly model: string;
+  readonly client: LlmClient;
+  readonly makeJevJudge?: (options: { apiKey: string }) => Judge;
+  readonly makeLlmJudge?: (options: { client: LlmClient; model: string }) => Judge;
+  readonly logError: (line: string) => void;
+}
+
+export function assembleJudge(
+  input: AssembleJudgeInput,
 ): { readonly judge: Judge; readonly recheckJudge: Judge } {
-  const llmJudge = (deps.makeLlmJudge ?? createLlmJudge)({ client, model });
-  const jevApiKey = deps.env[JEV_API_KEY_ENV];
+  const llmJudge = (input.makeLlmJudge ?? createLlmJudge)({ client: input.client, model: input.model });
+  const jevApiKey = input.env[JEV_API_KEY_ENV];
   if (jevApiKey !== undefined && jevApiKey !== "") {
     const judge = createFallbackJudge({
-      primary: (deps.makeJevJudge ?? createJevJudge)({ apiKey: jevApiKey }),
+      primary: (input.makeJevJudge ?? createJevJudge)({ apiKey: jevApiKey }),
       fallback: llmJudge,
     });
     return { judge, recheckJudge: llmJudge };
   }
-  logError(`環境変数 ${JEV_API_KEY_ENV} が無いので、判定は LLM（${model}）だけを使います`);
+  input.logError(`環境変数 ${JEV_API_KEY_ENV} が無いので、判定は LLM（${input.model}）だけを使います`);
   return { judge: llmJudge, recheckJudge: llmJudge };
 }
 
@@ -445,7 +451,14 @@ export async function runCli(deps: CliDeps): Promise<number> {
   const source = await deps.readFile(parsed.requestFile);
   const documents = await deps.loadDocuments();
   const client = deps.makeClient({ apiKey, model: parsed.model, effort: parsed.effort });
-  const { judge, recheckJudge } = assembleJudge(deps, parsed.model, client, logError);
+  const { judge, recheckJudge } = assembleJudge({
+    env: deps.env,
+    model: parsed.model,
+    client,
+    ...(deps.makeJevJudge === undefined ? {} : { makeJevJudge: deps.makeJevJudge }),
+    ...(deps.makeLlmJudge === undefined ? {} : { makeLlmJudge: deps.makeLlmJudge }),
+    logError,
+  });
 
   const now = deps.now ?? ((): number => Date.now());
   const deadline = now() + (parsed.deadlineMs ?? deps.deadlineMs ?? DEFAULT_DEADLINE_MS);
@@ -501,7 +514,7 @@ async function nodeFs(): Promise<NodeFs> {
 }
 
 /** 契約・語彙の意味・語彙の台帳を、appspec-schema のファイルから読む（§2） */
-async function loadDocumentsFromFiles(): Promise<readonly PromptDocument[]> {
+export async function loadDocumentsFromFiles(): Promise<readonly PromptDocument[]> {
   const fs = await nodeFs();
   const files = (await importUntyped("@musunest/appspec-schema/files")) as SchemaFiles;
   const contractDirectory = files.packageFile(`${files.CONTRACT_DIR}/`);
