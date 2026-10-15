@@ -11,21 +11,31 @@
 //
 // `node:fs` は**動的**に読む（Worker が根（index.ts）から import しても、この経路は呼ばれない限り動かない。
 // appspec-schema の contract.ts と同じやり方）。
-import type { ConfirmedPlan } from "@musunest/appspec-schema";
+import { planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
 import type { TokenRates } from "./budget.js";
 import { bundleFiles } from "./bundle.js";
 import {
+  buildBuildCliRecord,
   buildPlanCliRecord,
+  buildPlanOnlyResult,
   buildSurfaceCheckDiagnostic,
   createAnswersFilePlanResponder,
   createInteractivePlanResponder,
   createPlanTranscript,
   parsePlanAnswers,
+  parsePlanFile,
   PLAN_CLI_RECORD_FILE,
+  PLAN_ONLY_RESULT_FILE,
   PLAN_SURFACE_CHECK_FILE,
   planBuildCostLine,
+  planFileErrorLine,
+  planFileRejectLine,
   planStopReasonLine,
   sha256Hex,
+  validatePlanFile,
+  BUILD_CLI_RECORD_FILE,
+  type PlanCliConditions,
+  type PlanTranscript,
   type Terminal,
 } from "./cli-plan.js";
 import { createFallbackJudge, type Judge } from "./judge.js";
@@ -34,7 +44,7 @@ import { createLlmJudge } from "./judge-llm.js";
 import type { AgentLimits } from "./limits.js";
 import type { LlmClient } from "./llm.js";
 import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL } from "./openai.js";
-import { runPlan, type PlanResponder } from "./plan/run-plan.js";
+import { runPlan, type PlanResponder, type PlanResult } from "./plan/run-plan.js";
 import {
   createScriptPlanResponder,
   parsePlanScript,
@@ -84,10 +94,15 @@ export const EXIT_OK = 0;
 export const EXIT_RUN_FAILED = 1;
 /** 終了コード：使い方の誤り（鍵が無い・引数が足りない） */
 export const EXIT_USAGE = 2;
+/**
+ * 終了コード：`--plan-file` の Build だけの道で、差し戻し（`returnToPlan`）が立った（Issue #495）。
+ * **3 は `--plan-file` の差し戻しにだけ使う**——`--plan`（通し）の差し戻しは今までどおり 0 で終わる。
+ */
+export const EXIT_RETURN_TO_PLAN = 3;
 
 /** 使い方の文（誤りを人に見せる） */
 export const USAGE =
-  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>]]";
+  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル>]";
 
 /** 手元の入口が受け取る引数 */
 export interface CliArguments {
@@ -106,6 +121,16 @@ export interface CliArguments {
   readonly timeoutMs?: number;
   /** `--plan` を付けると、Plan を回してから Build を流す（04 §7・Issue #336） */
   readonly plan?: boolean;
+  /**
+   * `--plan-only` を付けると、Plan だけを回し、確定した仕様とその SHA-256・原文の SHA-256・条件を
+   * `plan-result.json` に書いて止まる（Build は流さない。Issue #495）。`--plan` とは同時に指定できない。
+   */
+  readonly planOnly?: boolean;
+  /**
+   * `--plan-file <ファイル>` を付けると、`plan-result.json` の包みを検査し、確定した仕様を正本にして
+   * Build だけを流す（Plan は流さない。Issue #495）。`--plan`・`--plan-only` とは同時に指定できない。
+   */
+  readonly planFile?: string;
   /** 答えのファイル（`--answers <ファイル>`。付けると対話の代わりにファイルから答える。評価用） */
   readonly answersFile?: string;
   /**
@@ -126,6 +151,8 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   let deadlineMs: number | undefined;
   let timeoutMs: number | undefined;
   let plan = false;
+  let planOnly = false;
+  let planFile: string | undefined;
   let answersFile: string | undefined;
   let scriptFile: string | undefined;
   for (let index = 0; index < args.length; index += 1) {
@@ -133,6 +160,17 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
     if (arg === undefined) continue;
     if (arg === "--plan") {
       plan = true;
+      continue;
+    }
+    if (arg === "--plan-only") {
+      planOnly = true;
+      continue;
+    }
+    if (arg === "--plan-file") {
+      const raw = args[index + 1];
+      index += 1;
+      if (raw === undefined) return { error: "--plan-file には出力ファイルを指定してください" };
+      planFile = raw;
       continue;
     }
     if (arg === "--answers") {
@@ -203,10 +241,25 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   }
   if (requestFile === undefined) return { error: "依頼文のファイルを指定してください" };
   if (outDir === undefined) return { error: "--out で出力のディレクトリを指定してください" };
-  if (answersFile !== undefined && !plan) {
+  if (plan && planOnly) {
+    return { error: "--plan と --plan-only は同時に指定できません" };
+  }
+  if (planOnly && planFile !== undefined) {
+    return { error: "--plan-only と --plan-file は同時に指定できません" };
+  }
+  if (plan && planFile !== undefined) {
+    return { error: "--plan と --plan-file は同時に指定できません" };
+  }
+  if (planFile !== undefined && answersFile !== undefined) {
+    return { error: "--plan-file と --answers は同時に指定できません" };
+  }
+  if (planFile !== undefined && scriptFile !== undefined) {
+    return { error: "--plan-file と --script は同時に指定できません" };
+  }
+  if (answersFile !== undefined && !plan && !planOnly) {
     return { error: "--answers は --plan と一緒に指定してください" };
   }
-  if (scriptFile !== undefined && !plan) {
+  if (scriptFile !== undefined && !plan && !planOnly) {
     return { error: "--script は --plan と一緒に指定してください" };
   }
   if (scriptFile !== undefined && answersFile !== undefined) {
@@ -221,6 +274,8 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
     ...(deadlineMs === undefined ? {} : { deadlineMs }),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(plan ? { plan: true } : {}),
+    ...(planOnly ? { planOnly: true } : {}),
+    ...(planFile === undefined ? {} : { planFile }),
     ...(answersFile === undefined ? {} : { answersFile }),
     ...(scriptFile === undefined ? {} : { scriptFile }),
   };
@@ -326,7 +381,7 @@ async function runBuild(
   deps: CliDeps,
   job: BuildJob & { readonly plan?: ConfirmedPlan },
   log: (line: string) => void,
-): Promise<{ readonly code: number; readonly costUsd: number }> {
+): Promise<{ readonly code: number; readonly costUsd: number; readonly returnToPlan: boolean }> {
   const run = await runGeneration({
     source: job.source,
     documents: job.documents,
@@ -372,32 +427,28 @@ async function runBuild(
   return {
     code: run.bundle === null ? EXIT_RUN_FAILED : EXIT_OK,
     costUsd: run.summary.provider_cost_usd ?? 0,
+    returnToPlan: run.returnToPlan === true,
   };
 }
 
 /**
- * `--plan` の道（Issue #336）。Plan を 1 回流し、確定した仕様を Build に渡す。**予算は Plan と Build で
- * 1 つ**——Build には、全体の予算から Plan で使った額を引いた残りを渡す（§8）。確定できなければ Build を
- * 流さず、理由を 1 行出して 0 でない終了コードで終わる。往復の記録は `--out` に置く（納品物には入れない）。
+ * `--plan`・`--plan-only` が共有する、答える役の用意（04 §7・Issue #495）。`--script`・`--answers`・端末の
+ * どれも同じに選べる。用意に失敗（使い方の誤り）なら `null` を返す（呼ぶ側が 2 で終わる）。
  */
-async function runPlanThenBuild(
+async function createPlanResponder(
   deps: CliDeps,
   parsed: CliArguments,
-  job: BuildJob,
+  transcript: PlanTranscript,
   log: (line: string) => void,
-): Promise<number> {
-  const transcript = createPlanTranscript();
-  let responder: PlanResponder;
-  /** 台本を使ったときだけ、その内容の SHA-256（往復の記録に残す。Issue #444） */
-  let scriptSha256: string | undefined;
+): Promise<{ readonly responder: PlanResponder; readonly scriptSha256?: string } | null> {
   if (parsed.scriptFile !== undefined) {
     const scriptText = await deps.readFile(parsed.scriptFile);
     const script = parsePlanScript(scriptText);
     if ("error" in script) {
       log(`使い方の誤り: ${script.error}`);
-      return EXIT_USAGE;
+      return null;
     }
-    scriptSha256 = await sha256Hex(scriptText);
+    const scriptSha256 = await sha256Hex(scriptText);
     // 照合の結果・往復・確認の答えを、往復の記録へ写す口（値ではなく、コードが振った ID・版・状態・
     // 添字と、提示した問い・返した答えだけ）
     const sink: PlanScriptRecordSink = {
@@ -411,26 +462,70 @@ async function runPlanThenBuild(
         transcript.confirmation = decision;
       },
     };
-    responder = createScriptPlanResponder(script, sink);
-  } else if (parsed.answersFile !== undefined) {
+    return { responder: createScriptPlanResponder(script, sink), scriptSha256 };
+  }
+  if (parsed.answersFile !== undefined) {
     const answersText = await deps.readFile(parsed.answersFile);
     const answers = parsePlanAnswers(answersText);
     if ("error" in answers) {
       log(`使い方の誤り: ${answers.error}`);
-      return EXIT_USAGE;
+      return null;
     }
-    responder = createAnswersFilePlanResponder(answers, transcript, log);
-  } else {
-    const terminal = deps.terminal;
-    if (terminal === undefined) {
-      log(
-        `使い方の誤り: --plan の対話には端末が要ります（--answers <ファイル> か --script <ファイル> でも渡せます）`,
-      );
-      return EXIT_USAGE;
-    }
-    responder = createInteractivePlanResponder(terminal, transcript);
+    return { responder: createAnswersFilePlanResponder(answers, transcript, log) };
   }
+  const terminal = deps.terminal;
+  if (terminal === undefined) {
+    log(
+      `使い方の誤り: --plan の対話には端末が要ります（--answers <ファイル> か --script <ファイル> でも渡せます）`,
+    );
+    return null;
+  }
+  return { responder: createInteractivePlanResponder(terminal, transcript) };
+}
 
+/** Plan の往復の記録と、点検の診断を `--out` に置く（納品物には入れない。§7・Issue #432） */
+async function writePlanRecords(
+  deps: CliDeps,
+  outDir: string,
+  input: {
+    readonly result: PlanResult;
+    readonly transcript: PlanTranscript;
+    readonly budgetUsd: number;
+    readonly planId: string;
+    readonly scriptSha256?: string;
+  },
+): Promise<void> {
+  await deps.makeDirectory(outDir);
+  await deps.writeFile(
+    joinPath(outDir, PLAN_CLI_RECORD_FILE),
+    JSON.stringify(
+      buildPlanCliRecord({
+        result: input.result,
+        transcript: input.transcript,
+        budgetUsd: input.budgetUsd,
+        planId: input.planId,
+        ...(input.scriptSha256 === undefined ? {} : { script: { sha256: input.scriptSha256 } }),
+      }),
+    ),
+  );
+  // P3 の申告 1 件ずつの診断を、**別のファイル**に置く（受理・落とした・途中停止のどれも。Issue #432）。
+  // `plan-record.json` は今の要約のままにする。
+  await deps.writeFile(
+    joinPath(outDir, PLAN_SURFACE_CHECK_FILE),
+    JSON.stringify(buildSurfaceCheckDiagnostic({ result: input.result, planId: input.planId })),
+  );
+}
+
+/** Plan を 1 回流し、往復の記録と点検の診断を書く（`--plan`・`--plan-only` が共有する。Issue #495） */
+async function runPlanOnce(
+  deps: CliDeps,
+  parsed: CliArguments,
+  job: BuildJob,
+  log: (line: string) => void,
+): Promise<{ readonly result: PlanResult; readonly planId: string } | null> {
+  const transcript = createPlanTranscript();
+  const setup = await createPlanResponder(deps, parsed, transcript, log);
+  if (setup === null) return null;
   const planId = `local-plan-${String(job.now())}`;
   const result = await runPlan({
     source: job.source,
@@ -438,7 +533,7 @@ async function runPlanThenBuild(
     client: job.client,
     judge: job.judge,
     recheckJudge: job.recheckJudge,
-    responder,
+    responder: setup.responder,
     budgetUsd: job.budgetUsd,
     rates: deps.rates ?? DEFAULT_RATES,
     now: job.now,
@@ -450,26 +545,30 @@ async function runPlanThenBuild(
     ...(deps.limits === undefined ? {} : { limits: deps.limits }),
     ...(job.timeoutMs === undefined ? {} : { callTimeoutMs: job.timeoutMs }),
   });
+  await writePlanRecords(deps, job.outDir, {
+    result,
+    transcript,
+    budgetUsd: job.budgetUsd,
+    planId,
+    ...(setup.scriptSha256 === undefined ? {} : { scriptSha256: setup.scriptSha256 }),
+  });
+  return { result, planId };
+}
 
-  await deps.makeDirectory(job.outDir);
-  await deps.writeFile(
-    joinPath(job.outDir, PLAN_CLI_RECORD_FILE),
-    JSON.stringify(
-      buildPlanCliRecord({
-        result,
-        transcript,
-        budgetUsd: job.budgetUsd,
-        planId,
-        ...(scriptSha256 === undefined ? {} : { script: { sha256: scriptSha256 } }),
-      }),
-    ),
-  );
-  // P3 の申告 1 件ずつの診断を、**別のファイル**に置く（受理・落とした・途中停止のどれも。Issue #432）。
-  // `plan-record.json` は今の要約のままにする。
-  await deps.writeFile(
-    joinPath(job.outDir, PLAN_SURFACE_CHECK_FILE),
-    JSON.stringify(buildSurfaceCheckDiagnostic({ result, planId })),
-  );
+/**
+ * `--plan` の道（Issue #336）。Plan を 1 回流し、確定した仕様を Build に渡す。**予算は Plan と Build で
+ * 1 つ**——Build には、全体の予算から Plan で使った額を引いた残りを渡す（§8）。確定できなければ Build を
+ * 流さず、理由を 1 行出して 0 でない終了コードで終わる。往復の記録は `--out` に置く（納品物には入れない）。
+ */
+async function runPlanThenBuild(
+  deps: CliDeps,
+  parsed: CliArguments,
+  job: BuildJob,
+  log: (line: string) => void,
+): Promise<number> {
+  const planned = await runPlanOnce(deps, parsed, job, log);
+  if (planned === null) return EXIT_USAGE;
+  const { result } = planned;
 
   if (result.kind !== "confirmed") {
     log(planStopReasonLine(result));
@@ -489,8 +588,131 @@ async function runPlanThenBuild(
 }
 
 /**
- * 1 回の生成を流し、納品物をディレクトリに書く（§3.2）。`--plan` があれば、Plan を回してから Build を流す
- * （Issue #336）。鍵が無ければ **`makeClient` を呼ばずに**使い方の誤りで終わる（API を呼ばない）。
+ * `--plan-only` の道（Issue #495）。Plan を 1 回流し、確定した仕様とその SHA-256・原文の SHA-256・条件を
+ * `plan-result.json` に書く。**Build は流さない**（`runGeneration` を呼ばない）。終了コードは、確定したら 0、
+ * 確定しなければ 1（`runPlan` が停止を返した本を確定に変えない。Plan で予算を使い切って確定した本も 0）。
+ */
+async function runPlanOnly(
+  deps: CliDeps,
+  parsed: CliArguments,
+  job: BuildJob,
+  conditions: PlanCliConditions,
+  log: (line: string) => void,
+): Promise<number> {
+  const planned = await runPlanOnce(deps, parsed, job, log);
+  if (planned === null) return EXIT_USAGE;
+  const { result } = planned;
+
+  const plan = result.kind === "confirmed" ? result.plan : null;
+  const planSha256 = plan === null ? null : await planDigest(plan);
+  const sourceSha256 = await sha256Hex(job.source);
+  await deps.makeDirectory(job.outDir);
+  await deps.writeFile(
+    joinPath(job.outDir, PLAN_ONLY_RESULT_FILE),
+    JSON.stringify(buildPlanOnlyResult({ result, planSha256, sourceSha256, conditions })),
+  );
+
+  if (result.kind !== "confirmed") {
+    log(planStopReasonLine(result));
+    log(planBuildCostLine(result.spentUsd, 0));
+    return EXIT_RUN_FAILED;
+  }
+  log(planBuildCostLine(result.spentUsd, 0));
+  return EXIT_OK;
+}
+
+/**
+ * `--plan-file` の道（Issue #495）。包みを検査し（**client を作る前に**）、通ったときだけ、確定した仕様を
+ * 正本にして Build だけを流す（`runPlan` は呼ばない）。予算は `--budget` の全額、締切は `--deadline` から
+ * 求める（Plan に使った額も時間も引かない）。差し戻しが立ったら、Build だけの記録の欄を真にし、終了コード 3
+ * で終わる（生成の要約と納品物は従来どおり書く）。
+ */
+async function runBuildFromPlanFile(
+  deps: CliDeps,
+  parsed: CliArguments,
+  planFilePath: string,
+  ctx: {
+    readonly now: () => number;
+    readonly budgetUsd: number;
+    readonly deadlineMs: number;
+    readonly conditions: PlanCliConditions;
+  },
+  log: (line: string) => void,
+  logError: (line: string) => void,
+): Promise<number> {
+  const source = await deps.readFile(parsed.requestFile);
+  let text: string;
+  try {
+    text = await deps.readFile(planFilePath);
+  } catch {
+    log(planFileErrorLine("plan-file-read"));
+    return EXIT_USAGE;
+  }
+  const file = parsePlanFile(text);
+  if ("code" in file) {
+    log(planFileErrorLine(file.code));
+    return EXIT_USAGE;
+  }
+  const validation = await validatePlanFile({
+    envelope: file.envelope,
+    source,
+    vocabularyVersion: VOCABULARY_VERSION,
+  });
+  if (validation.kind === "rejected") {
+    log(planFileRejectLine(validation));
+    return EXIT_USAGE;
+  }
+
+  const apiKey = deps.env[API_KEY_ENV];
+  if (apiKey === undefined || apiKey === "") {
+    log(`使い方の誤り: 環境変数 ${API_KEY_ENV} がありません`);
+    log(USAGE);
+    return EXIT_USAGE;
+  }
+  const documents = await deps.loadDocuments();
+  const client = deps.makeClient({ apiKey, model: parsed.model, effort: parsed.effort });
+  const { judge, recheckJudge } = assembleJudge({
+    env: deps.env,
+    model: parsed.model,
+    client,
+    ...(deps.makeJevJudge === undefined ? {} : { makeJevJudge: deps.makeJevJudge }),
+    ...(deps.makeLlmJudge === undefined ? {} : { makeLlmJudge: deps.makeLlmJudge }),
+    logError,
+  });
+  const job: BuildJob = {
+    source,
+    documents,
+    client,
+    judge,
+    recheckJudge,
+    outDir: parsed.outDir,
+    model: parsed.model,
+    effort: parsed.effort,
+    budgetUsd: ctx.budgetUsd,
+    deadline: ctx.now() + ctx.deadlineMs,
+    now: ctx.now,
+    ...(parsed.timeoutMs === undefined ? {} : { timeoutMs: parsed.timeoutMs }),
+  };
+  const build = await runBuild(deps, { ...job, plan: validation.plan }, log);
+  await deps.makeDirectory(job.outDir);
+  await deps.writeFile(
+    joinPath(job.outDir, BUILD_CLI_RECORD_FILE),
+    JSON.stringify(
+      buildBuildCliRecord({
+        conditions: ctx.conditions,
+        planSha256: validation.planSha256,
+        sourceSha256: validation.sourceSha256,
+        returnToPlan: build.returnToPlan,
+      }),
+    ),
+  );
+  return build.returnToPlan ? EXIT_RETURN_TO_PLAN : build.code;
+}
+
+/**
+ * 1 回の生成を流し、納品物をディレクトリに書く（§3.2）。`--plan` があれば Plan を回してから Build を流す
+ * （Issue #336）。`--plan-only` は Plan だけを流し、`--plan-file` は確定した仕様から Build だけを流す
+ * （Issue #495）。鍵が無ければ **`makeClient` を呼ばずに**使い方の誤りで終わる（API を呼ばない）。
  */
 export async function runCli(deps: CliDeps): Promise<number> {
   const log = deps.log ?? ((): void => {});
@@ -501,6 +723,34 @@ export async function runCli(deps: CliDeps): Promise<number> {
     log(USAGE);
     return EXIT_USAGE;
   }
+  const now = deps.now ?? ((): number => Date.now());
+  const budgetUsd = parsed.budgetUsd ?? deps.budgetUsd ?? DEFAULT_BUDGET_USD;
+  const deadlineMs = parsed.deadlineMs ?? deps.deadlineMs ?? DEFAULT_DEADLINE_MS;
+  const conditions: PlanCliConditions = {
+    model: parsed.model,
+    effort: parsed.effort,
+    budget_usd: budgetUsd,
+    deadline_ms: deadlineMs,
+    timeout_ms: parsed.timeoutMs ?? null,
+    vocabulary_version: VOCABULARY_VERSION,
+    prompt_version: PROMPT_VERSION,
+    contract_version: CONTRACT_VERSION,
+    factory_version: FACTORY_VERSION,
+    spec_engine_version: SPEC_ENGINE_VERSION,
+  };
+
+  // `--plan-file`：包みを検査してから client を作る（検査で断れば API を呼ばない。Issue #495）
+  if (parsed.planFile !== undefined) {
+    return runBuildFromPlanFile(
+      deps,
+      parsed,
+      parsed.planFile,
+      { now, budgetUsd, deadlineMs, conditions },
+      log,
+      logError,
+    );
+  }
+
   const apiKey = deps.env[API_KEY_ENV];
   if (apiKey === undefined || apiKey === "") {
     log(`使い方の誤り: 環境変数 ${API_KEY_ENV} がありません`);
@@ -520,8 +770,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
     logError,
   });
 
-  const now = deps.now ?? ((): number => Date.now());
-  const deadline = now() + (parsed.deadlineMs ?? deps.deadlineMs ?? DEFAULT_DEADLINE_MS);
+  const deadline = now() + deadlineMs;
   const job: BuildJob = {
     source,
     documents,
@@ -531,12 +780,13 @@ export async function runCli(deps: CliDeps): Promise<number> {
     outDir: parsed.outDir,
     model: parsed.model,
     effort: parsed.effort,
-    budgetUsd: parsed.budgetUsd ?? deps.budgetUsd ?? DEFAULT_BUDGET_USD,
+    budgetUsd,
     deadline,
     now,
     ...(parsed.timeoutMs === undefined ? {} : { timeoutMs: parsed.timeoutMs }),
   };
 
+  if (parsed.planOnly === true) return runPlanOnly(deps, parsed, job, conditions, log);
   if (parsed.plan === true) return runPlanThenBuild(deps, parsed, job, log);
   const build = await runBuild(deps, job, log);
   return build.code;

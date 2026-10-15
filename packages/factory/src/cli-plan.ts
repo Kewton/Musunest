@@ -11,6 +11,7 @@
 //
 // **端末もファイルも扱わない**——`Terminal` は呼ぶ側（cli.ts）が用意し、答えのファイルは文字列で受け取る。
 // 実 API も本物の端末も使わない（試験は偽物を差し込む。CLAUDE.md の不変条件）。
+import { checkConfirmedPlan, planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
 import type { BundleJudgeUsage } from "./bundle.js";
 import type { PlanAnswerDraft } from "./plan/answers.js";
 import type { PlanQuestion } from "./plan/questions.js";
@@ -1039,5 +1040,270 @@ export function planBuildCostLine(planUsd: number, buildUsd: number): string {
     plan_usd: planUsd,
     build_usd: buildUsd,
     total_usd: planUsd + buildUsd,
+  });
+}
+
+// ── Plan だけを流す口と、確定した仕様から Build だけを流す口（Issue #495）───────
+//
+// 工場の評価を Plan 評価・Build 評価・通し評価に分ける（2026-10-15 所有者の決定）。`--plan-only` は Plan を
+// 1 回流して、確定した仕様とその SHA-256・原文の SHA-256・実際に使った条件をファイルに書き、Build は
+// 流さない。`--plan-file` はそのファイルの包みを検査してから、仕様を正本にして Build だけを流す。
+//
+// 値を持たない分類（止まり方・検査の符号）だけを書き、原文の文・答え・誤りの文は写さない（02 §1）。
+
+/** Plan だけ／Build だけの実行条件（実際に使った値。Issue #495） */
+export interface PlanCliConditions {
+  readonly model: string;
+  readonly effort: string;
+  readonly budget_usd: number;
+  readonly deadline_ms: number;
+  readonly timeout_ms: number | null;
+  readonly vocabulary_version: string;
+  readonly prompt_version: string;
+  readonly contract_version: string;
+  readonly factory_version: string;
+  readonly spec_engine_version: string;
+}
+
+/** Plan だけの結果を置くファイルの名前（`--out` の直下。納品物には入れない。Issue #495） */
+export const PLAN_ONLY_RESULT_FILE = "plan-result.json" as const;
+/** Plan だけの結果の版 */
+export const PLAN_ONLY_RESULT_SCHEMA = "musunest-factory/plan-only-result/v1" as const;
+/** Build だけの記録を置くファイルの名前（`--out` の直下。納品物には入れない。Issue #495） */
+export const BUILD_CLI_RECORD_FILE = "build-record.json" as const;
+/** Build だけの記録の版 */
+export const BUILD_CLI_RECORD_SCHEMA = "musunest-factory/build-cli-record/v1" as const;
+
+/**
+ * 確定しなかったときの、止まり方の分類（**値を持たない**。結果の種類・止めた理由・分類の符号だけ。
+ * 誤りの文・原文の文は写さない。Issue #495）。
+ */
+export interface PlanOnlyStopRecord {
+  readonly kind: "cannot-confirm" | "stopped";
+  /** 止めた理由（`stopped` のときだけ。`cannot-confirm` は `null`） */
+  readonly reason: string | null;
+  /** 確定できない理由・段の失敗の分類の符号（重複を除く） */
+  readonly codes: readonly string[];
+}
+
+/** Plan だけの結果（`--out` の `plan-result.json`。Issue #495） */
+export interface PlanOnlyResult {
+  readonly schema_version: string;
+  readonly outcome: PlanResult["kind"];
+  /** 確定した仕様（確定しなければ `null`） */
+  readonly plan: ConfirmedPlan | null;
+  /** 仕様の SHA-256（`planDigest` の値。確認の SHA に等しい。確定しなければ `null`） */
+  readonly plan_sha256: string | null;
+  /** 原文の SHA-256（`sha256Hex` で求める） */
+  readonly source_sha256: string;
+  readonly conditions: PlanCliConditions;
+  /** 止まり方の分類（確定したときは `null`） */
+  readonly stop: PlanOnlyStopRecord | null;
+}
+
+/** 符号の並びから重複を除く（順は保つ） */
+function uniqueCodes(codes: readonly string[]): readonly string[] {
+  return [...new Set(codes)];
+}
+
+/** 止まり方の分類を組む（**値を持たない**。符号と、止めた理由だけ。Issue #495） */
+export function planOnlyStop(result: PlanResult): PlanOnlyStopRecord | null {
+  if (result.kind === "confirmed") return null;
+  if (result.kind === "cannot-confirm") {
+    return { kind: "cannot-confirm", reason: null, codes: uniqueCodes(result.reasons.map((reason) => reason.code)) };
+  }
+  return { kind: "stopped", reason: result.reason, codes: uniqueCodes(failureCodes(result.failure)) };
+}
+
+/** Plan だけの結果を組む（`--out` に書く。Issue #495） */
+export function buildPlanOnlyResult(input: {
+  readonly result: PlanResult;
+  readonly planSha256: string | null;
+  readonly sourceSha256: string;
+  readonly conditions: PlanCliConditions;
+}): PlanOnlyResult {
+  return {
+    schema_version: PLAN_ONLY_RESULT_SCHEMA,
+    outcome: input.result.kind,
+    plan: input.result.kind === "confirmed" ? input.result.plan : null,
+    plan_sha256: input.result.kind === "confirmed" ? input.planSha256 : null,
+    source_sha256: input.sourceSha256,
+    conditions: input.conditions,
+    stop: planOnlyStop(input.result),
+  };
+}
+
+/** Build だけの記録（`--out` の `build-record.json`。条件・2 つの SHA・差し戻しの欄だけ。Issue #495） */
+export interface BuildCliRecord {
+  readonly schema_version: string;
+  readonly conditions: PlanCliConditions;
+  readonly plan_sha256: string;
+  readonly source_sha256: string;
+  /** 差し戻し（`returnToPlan`）が立ったか */
+  readonly return_to_plan: boolean;
+}
+
+/** Build だけの記録を組む（`--out` に書く。値は写さない。Issue #495） */
+export function buildBuildCliRecord(input: {
+  readonly conditions: PlanCliConditions;
+  readonly planSha256: string;
+  readonly sourceSha256: string;
+  readonly returnToPlan: boolean;
+}): BuildCliRecord {
+  return {
+    schema_version: BUILD_CLI_RECORD_SCHEMA,
+    conditions: input.conditions,
+    plan_sha256: input.planSha256,
+    source_sha256: input.sourceSha256,
+    return_to_plan: input.returnToPlan,
+  };
+}
+
+// ── `--plan-file` の包みの読み取りと検査（Issue #495）────────────────────────
+
+/** 包みの読み取りの失敗の版（値を持たない固定の符号だけを 1 行で出す） */
+export const PLAN_FILE_ERROR_SCHEMA = "musunest-factory/plan-file-error/v1" as const;
+/** 包みの検査で断ったときの版（断った検査の名前と問題の符号だけを出す） */
+export const PLAN_FILE_REJECT_SCHEMA = "musunest-factory/plan-file-reject/v1" as const;
+
+/**
+ * 包みの読み取りの失敗の固定の符号（**区別する**。Issue #495）。例外の文・ファイル名・入力の値は出さない。
+ */
+export const PLAN_FILE_ERROR_CODES = [
+  /** ファイルを読めない（読取の失敗。cli.ts が出す） */
+  "plan-file-read",
+  /** JSON として読めない */
+  "plan-file-json",
+  /** 包みが写像（object）でない */
+  "plan-file-envelope",
+  /** 必須の欄が欠けている */
+  "plan-file-required",
+  /** 欄の型が違う */
+  "plan-file-type",
+] as const;
+export type PlanFileErrorCode = (typeof PLAN_FILE_ERROR_CODES)[number];
+
+/**
+ * `--plan-file` が読む包み（`plan-result.json` の形。Issue #495）。`plan` は確定した仕様（確定しなければ
+ * `null`）。**実行条件は使わない**——Build には今回の `--budget`・`--deadline` を渡す。
+ */
+export interface PlanFileEnvelope {
+  readonly schema_version: string;
+  readonly outcome: string;
+  readonly plan: unknown;
+  readonly plan_sha256: string;
+  readonly source_sha256: string;
+}
+
+/** 包みを読んだ結果（写像と必須欄・型の検査まで） */
+export type PlanFileParse =
+  | { readonly envelope: PlanFileEnvelope }
+  | { readonly code: PlanFileErrorCode };
+
+/**
+ * 包みの文字列を読む（Issue #495）。JSON でない・写像でない・必須欄が欠ける・型が違うときは、**区別する
+ * 固定の符号**を返す（例外の文・入力の値は返さない）。確定した仕様の中身の検査は `validatePlanFile` が行う。
+ */
+export function parsePlanFile(text: string): PlanFileParse {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return { code: "plan-file-json" };
+  }
+  if (!isRecord(value)) return { code: "plan-file-envelope" };
+  const strings: readonly [string, unknown][] = [
+    ["schema_version", value["schema_version"]],
+    ["outcome", value["outcome"]],
+    ["plan_sha256", value["plan_sha256"]],
+    ["source_sha256", value["source_sha256"]],
+  ];
+  const missing = strings.find(([, raw]) => raw === undefined);
+  if (missing !== undefined) return { code: "plan-file-required" };
+  const wrongType = strings.find(([, raw]) => typeof raw !== "string");
+  if (wrongType !== undefined) return { code: "plan-file-type" };
+  if (!("plan" in value)) return { code: "plan-file-required" };
+  const plan = value["plan"];
+  if (plan !== null && !isRecord(plan)) return { code: "plan-file-type" };
+  return {
+    envelope: {
+      schema_version: value["schema_version"] as string,
+      outcome: value["outcome"] as string,
+      plan,
+      plan_sha256: value["plan_sha256"] as string,
+      source_sha256: value["source_sha256"] as string,
+    },
+  };
+}
+
+/** 包みの検査で断った内容（断った検査の名前と問題の符号だけ。Issue #495） */
+export interface PlanFileRejection {
+  readonly check: string;
+  readonly codes: readonly string[];
+}
+
+/** 包みの検査の結果（通れば仕様と 2 つの SHA、断れば検査の名前と符号） */
+export type PlanFileValidation =
+  | {
+      readonly kind: "ok";
+      readonly plan: ConfirmedPlan;
+      readonly planSha256: string;
+      readonly sourceSha256: string;
+    }
+  | ({ readonly kind: "rejected" } & PlanFileRejection);
+
+/**
+ * 包みを検査する（Issue #495）。次の順で照らし、**1 つでも通らなければ、断った検査の名前と問題の符号**を
+ * 返す（`client` を作る前に呼ぶ）。
+ *
+ *   1. 包みの版が `PLAN_ONLY_RESULT_SCHEMA` と一致する（`envelope-version`）
+ *   2. 結果の種類が確定である（`outcome`）
+ *   3. `checkConfirmedPlan` が空を返す（形・参照・了承・解決・確認の失効。`plan`）
+ *   4. `planDigest` の値が包みの `plan_sha256` と一致する（`plan-sha256`）
+ *   5. 依頼文の SHA-256 が `source_sha256` と一致する（`source-sha256`）
+ *   6. 仕様の語彙の版が CLI の語彙の版と一致する（`vocabulary`）
+ */
+export async function validatePlanFile(input: {
+  readonly envelope: PlanFileEnvelope;
+  readonly source: string;
+  readonly vocabularyVersion: string;
+}): Promise<PlanFileValidation> {
+  const { envelope, source, vocabularyVersion } = input;
+  if (envelope.schema_version !== PLAN_ONLY_RESULT_SCHEMA) {
+    return { kind: "rejected", check: "envelope-version", codes: ["mismatch"] };
+  }
+  if (envelope.outcome !== "confirmed") {
+    return { kind: "rejected", check: "outcome", codes: ["not-confirmed"] };
+  }
+  const problems = await checkConfirmedPlan(envelope.plan);
+  if (problems.length > 0) {
+    return { kind: "rejected", check: "plan", codes: uniqueCodes(problems.map((problem) => problem.code)) };
+  }
+  const plan = envelope.plan as ConfirmedPlan;
+  const planSha256 = await planDigest(plan);
+  if (planSha256 !== envelope.plan_sha256) {
+    return { kind: "rejected", check: "plan-sha256", codes: ["mismatch"] };
+  }
+  const sourceSha256 = await sha256Hex(source);
+  if (sourceSha256 !== envelope.source_sha256) {
+    return { kind: "rejected", check: "source-sha256", codes: ["mismatch"] };
+  }
+  if (plan.vocabulary_version !== vocabularyVersion) {
+    return { kind: "rejected", check: "vocabulary", codes: ["mismatch"] };
+  }
+  return { kind: "ok", plan, planSha256, sourceSha256 };
+}
+
+/** 包みの読み取りの失敗を、1 行（固定の符号だけ）にする（Issue #495） */
+export function planFileErrorLine(code: PlanFileErrorCode): string {
+  return JSON.stringify({ schema_version: PLAN_FILE_ERROR_SCHEMA, code });
+}
+
+/** 包みの検査で断ったときの 1 行（断った検査の名前と問題の符号だけ。Issue #495） */
+export function planFileRejectLine(rejection: PlanFileRejection): string {
+  return JSON.stringify({
+    schema_version: PLAN_FILE_REJECT_SCHEMA,
+    check: rejection.check,
+    codes: [...rejection.codes],
   });
 }
