@@ -184,6 +184,9 @@ const spawnLines = (log) => (existsSync(log) ? readFileSync(log, "utf8").trim().
 const sha256 = (data) => createHash("sha256").update(data).digest("hex");
 const HEX64 = /^[0-9a-f]{64}$/;
 
+/** 出力先のファイルの一覧とバイト列（既存の断りの試験で、何も変わらないことを確かめる。#497） */
+function treeOf(root) { const out = {}; const walk = (d) => { for (const n of readdirSync(d).sort()) { const f = join(d, n); if (statSync(f).isDirectory()) walk(f); else out[relative(root, f)] = readFileSync(f).toString("base64"); } }; walk(root); return out; }
+
 async function withRepo(fn) {
   const base = mkdtempSync(join(tmpdir(), "run-agent-test-"));
   try { await fn(base, makeRepo(base)); } finally { rmSync(base, { recursive: true, force: true }); }
@@ -229,10 +232,14 @@ test("前の結果がある出力先では、既定で子プロセスを 1 本�
     const log = join(base, "spawn-prior.log");
     assert.equal(runAgent(repo, out, ["--only", "P1", "--runs", "1"], { FAKE_SPAWN_LOG: log }).status, 0);
     assert.equal(spawnCount(log), 1);
+    const before = treeOf(out);
     const again = runAgent(repo, out, ["--only", "P1", "--runs", "1"], { FAKE_SPAWN_LOG: log });
     assert.notEqual(again.status, 0);
     assert.equal(spawnCount(log), 1);
     assert.match(again.stderr, /断りました/);
+    assert.equal(again.status, 3);
+    assert.ok(again.stderr.includes("[resume:prior-output]"), again.stderr);
+    assert.deepEqual(treeOf(out), before);
   });
 });
 
@@ -242,10 +249,14 @@ test("再開で条件が一致しないと、子プロセスを起こさずに�
     const log = join(base, "spawn-mismatch.log");
     assert.equal(runAgent(repo, out, ["--only", "P1", "--runs", "1", "--effort", "high"], { FAKE_SPAWN_LOG: log }).status, 0);
     assert.equal(spawnCount(log), 1);
+    const before = treeOf(out);
     const resumed = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--effort", "low", "--resume"], { FAKE_SPAWN_LOG: log });
     assert.notEqual(resumed.status, 0);
     assert.equal(spawnCount(log), 1);
     assert.match(resumed.stderr, /条件/);
+    assert.equal(resumed.status, 3);
+    assert.ok(resumed.stderr.includes("[resume:signature]"), resumed.stderr);
+    assert.deepEqual(treeOf(out), before);
   });
 });
 
@@ -285,9 +296,13 @@ test("条件のファイルが無い出力先は断る", async () => {
     const log = join(base, "spawn-nocond.log");
     assert.equal(runAgent(repo, out, ["--only", "P1", "--runs", "1"], { FAKE_SPAWN_LOG: log }).status, 0);
     rmSync(join(out, "conditions.json"));
+    const before = treeOf(out);
     const resumed = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--resume"], { FAKE_SPAWN_LOG: log });
     assert.notEqual(resumed.status, 0);
     assert.equal(spawnCount(log), 1);
+    assert.equal(resumed.status, 3);
+    assert.ok(resumed.stderr.includes("[resume:no-conditions]"), resumed.stderr);
+    assert.deepEqual(treeOf(out), before);
   });
 });
 
@@ -297,10 +312,14 @@ test("全文が欠けた古い出力の出力先は断る", async () => {
     const log = join(base, "spawn-nofull.log");
     assert.equal(runAgent(repo, out, ["--only", "P1", "--runs", "1"], { FAKE_SPAWN_LOG: log }).status, 0);
     rmSync(join(out, "P1-r1", "stdout.log"));
+    const before = treeOf(out);
     const resumed = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--resume"], { FAKE_SPAWN_LOG: log });
     assert.notEqual(resumed.status, 0);
     assert.equal(spawnCount(log), 1);
     assert.match(resumed.stderr, /全文/);
+    assert.equal(resumed.status, 3);
+    assert.ok(resumed.stderr.includes("[resume:no-logs]"), resumed.stderr);
+    assert.deepEqual(treeOf(out), before);
   });
 });
 
@@ -310,10 +329,14 @@ test("要約の無い途中の本がある出力先は断る", async () => {
     const log = join(base, "spawn-partial.log");
     assert.equal(runAgent(repo, out, ["--only", "P1", "--runs", "1"], { FAKE_SPAWN_LOG: log }).status, 0);
     rmSync(join(out, "P1-r1", "summary.line.json"));
+    const before = treeOf(out);
     const resumed = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--resume"], { FAKE_SPAWN_LOG: log });
     assert.notEqual(resumed.status, 0);
     assert.equal(spawnCount(log), 1);
     assert.match(resumed.stderr, /要約/);
+    assert.equal(resumed.status, 3);
+    assert.ok(resumed.stderr.includes("[resume:partial]"), resumed.stderr);
+    assert.deepEqual(treeOf(out), before);
   });
 });
 
@@ -1054,8 +1077,8 @@ test("指摘 1：既知の版の要約と費用の行でも、列挙した欄と
     const summaryLine = {
       schema_version: "commandagent.headless-summary/v1", verdict: "partial", stop_reason: MARK, stop_class: "unmet", provider_cost_usd: 0.12, duration_secs: 3, exit_code: 0, run_id: MARK, next_action: MARK, extra_field: MARK,
       failure: { stage: "write", kind: "unmet", code: MARK, problems: [{ field: MARK, message: MARK }, { field: "f", message: MARK }] },
-      stages: [{ stage: "write", status: "failed", duration_ms: 5, calls: 1, failure_kind: "unmet", attempts: { started: 1, note: MARK, not_started: { budget: 0, [MARK]: 1 } }, retries: { shape: 2 }, extra: MARK }, { stage: MARK, status: MARK, duration_ms: MARK }],
-      arbitration: { upheld: 1, note: MARK },
+      stages: [{ stage: "write", status: "failed", duration_ms: 5, calls: 1, failure_kind: "unmet", attempts: { started: 1, note: MARK, leakmarkertext: 1, not_started: { budget: 0, [MARK]: 1, leakmarkertext: 2 } }, retries: { shape: 2, leakmarkertext: 3 }, extra: MARK }, { stage: MARK, status: MARK, duration_ms: MARK }],
+      arbitration: { upheld: 1, note: MARK, leakmarkertext: 4 },
     };
     const costLine = { schema_version: "musunest-factory/plan-build-cost/v1", plan_usd: 0.02, build_usd: 0.1, total_usd: 0.12, note: MARK };
     const out = join(base, "out-s1");
@@ -1063,13 +1086,14 @@ test("指摘 1：既知の版の要約と費用の行でも、列挙した欄と
     assert.equal(r.status, 0, r.stderr);
     const text = readFileSync(join(out, "P1-r1", "summary.line.json"), "utf8");
     assert.ok(!text.includes(MARK), "要約の記録に目印が出た");
+    assert.ok(!text.includes("leakmarkertext"), "形の正しい未知の鍵が要約の記録に出た");
     assert.ok(!r.stdout.includes(MARK) && !r.stderr.includes(MARK));
     const sl = JSON.parse(text);
     assert.deepEqual([sl.summary.verdict, sl.summary.stop_reason, sl.summary.stop_class, sl.summary.provider_cost_usd, sl.summary.duration_secs], ["partial", "unknown", "unmet", 0.12, 3]);
     assert.deepEqual(sl.summary.failure, { stage: "write", kind: "unmet", code: "present", problems: 2 });
-    assert.deepEqual(sl.summary.stages[0], { stage: "write", operation: null, status: "failed", duration_ms: 5, calls: 1, missing_usage_calls: null, input_tokens: null, cached_input_tokens: null, cache_write_tokens: null, output_tokens: null, reasoning_tokens: null, attempts: { started: 1, not_started: { budget: 0 } }, retries: { shape: 2 }, failure_kind: "unmet" });
+    assert.deepEqual(sl.summary.stages[0], { stage: "write", operation: null, status: "failed", duration_ms: 5, calls: 1, missing_usage_calls: null, input_tokens: null, cached_input_tokens: null, cache_write_tokens: null, output_tokens: null, reasoning_tokens: null, attempts: { started: 1, responded: null, errors: null, cancelled_deadline: null, cancelled_timeout: null, not_started: { deadline: null, budget: 0, limit: null, timeout: null } }, retries: { communication: null, shape: 2, content: null }, failure_kind: "unmet" });
     assert.deepEqual([sl.summary.stages[1].stage, sl.summary.stages[1].status, sl.summary.stages[1].duration_ms], ["unknown", "unknown", null]);
-    assert.deepEqual(sl.summary.arbitration, { upheld: 1 });
+    assert.deepEqual(sl.summary.arbitration, { upheld: 1, overturned: null, undecidable: null });
     assert.equal(sl.summary.run_id, undefined);
     assert.deepEqual(sl.plan_cost, { schema_version: "musunest-factory/plan-build-cost/v1", plan_usd: 0.02, build_usd: 0.1, total_usd: 0.12 });
     assert.match(r.stdout, /P1-r1 .*verdict=partial cost=0\.1200/);
@@ -1096,11 +1120,17 @@ test("指摘 2：既存の断り（--only・定義ファイル）は、改行と
     const setPath = join(base, "custom/marked-id.json");
     mkdirSync(dirname(setPath), { recursive: true });
     const ev = join(repo, "workspace/mvp/m1/agent/eval");
-    writeFileSync(setPath, JSON.stringify({ schema: EVAL_SET_SCHEMA, id: `${MARK}\nx`, version: 1, role: "regression", title: "t", styles: { S1: "s1" }, items: [{ id: "P1", subject: "A", style: "S1", writable: true, scoring: join(ev, "subjects/A.json"), script: null, request: ["行"] }] }));
-    const r3 = runAgent(repo, join(base, "out-s2-id"), ["--only", "P99", "--runs", "1", "--set", setPath], { FAKE_SPAWN_LOG: log });
-    assertRefused(r3, "only:unknown", log, 0, "set-id");
-    oneLine(r3, "set-id");
-    assert.ok(!r3.stderr.includes(MARK));
+    // 組の ID は既知の値（sets/ の組）と一致するときだけ出す：改行入りも、形の正しい目印（leak-marker-text）も出さない
+    for (const [i, id] of [`${MARK}\nx`, MARK].entries()) {
+      writeFileSync(setPath, JSON.stringify({ schema: EVAL_SET_SCHEMA, id, version: 1, role: "regression", title: "t", styles: { S1: "s1" }, items: [{ id: "P1", subject: "A", style: "S1", writable: true, scoring: join(ev, "subjects/A.json"), script: null, request: ["行"] }] }));
+      const outId = join(base, `out-s2-id-${i}`);
+      const r3 = runAgent(repo, outId, ["--only", "P99", "--runs", "1", "--set", setPath], { FAKE_SPAWN_LOG: log });
+      assertRefused(r3, "only:unknown", log, 0, `set-id-${i}`);
+      oneLine(r3, `set-id-${i}`);
+      assert.ok(!r3.stderr.includes(MARK), `set-id-${i}: 組の ID が出た`);
+      assert.match(r3.stderr, /--only に定義ファイル（既知でない組）に無い ID があります: P99/);
+      assertNothingWritten(outId, `set-id-${i}`);
+    }
   });
 });
 

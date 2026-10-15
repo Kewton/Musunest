@@ -70,7 +70,8 @@ const deadlineMin = Number(opt("--deadline-min", String(factory.DEFAULT_DEADLINE
 // 依頼文は定義ファイルの本から組む（行を改行でつなぐ。request.md にはその末尾に改行を 1 つ足す）
 const reqOf = (pid) => evalSet.byId.get(pid).requestText;
 // 組の ID は条件の set.id にも書く識別子で、小文字・数字・ハイフンの形のときだけ出す。--only の ID は P<n> の形のものだけを出し、それ以外は件数だけ
-const setIdShown = /^[a-z0-9][a-z0-9-]{0,63}$/.test(evalSet.set.id) ? evalSet.set.id : "形の違う ID";
+const KNOWN_SET_IDS = ["dev-p1-p10", "regression-r1"]; // sets/ にある組の ID（README §5.6・§6）。これ以外の組の ID は断りの文に出さない
+const setIdShown = KNOWN_SET_IDS.includes(evalSet.set.id) ? evalSet.set.id : "既知でない組";
 if (only && buildFrom === null) {
   const unknown = only.filter((pid) => !evalSet.byId.has(pid)), shaped = unknown.filter((pid) => /^P\d+$/.test(pid)), others = unknown.length - shaped.length;
   if (unknown.length > 0) refuse(`--only に定義ファイル（${setIdShown}）に無い ID があります: ${[...shaped, ...(others > 0 ? [`形の違う ID ${others} 件`] : [])].join(",")}`, "only:unknown");
@@ -273,16 +274,19 @@ const STOP_VALUES = ["completed", "stagnation", "limit", "unresolved", "deadline
 const enumOf = (list, v) => (v === null || v === undefined ? null : list.includes(v) ? v : "unknown");
 const numOf = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const isRec = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
-/** 数だけの木（試行・再試行の数）：鍵は小文字・数字・_ の形だけ、値は有限の数か同じ形の写像（深さ 2 まで） */
-const countsOf = (x, depth = 0) => (!isRec(x) ? null : Object.fromEntries(Object.entries(x).filter(([k]) => /^[a-z][a-z0-9_]{0,40}$/.test(k)).map(([k, v]) => [k, isRec(v) && depth < 1 ? countsOf(v, depth + 1) : numOf(v)]).filter(([, v]) => v !== null)));
+/** 数の写像（試行・再試行・裁定の数）：工場の record.ts の既知の鍵だけを、どの階層でも名指しで写す（値は有限の数か null。未知の鍵は写さない） */
+const NOT_STARTED_KEYS = ["deadline", "budget", "limit", "timeout"], RETRY_KEYS = ["communication", "shape", "content"], ARBITRATION_KEYS = ["upheld", "overturned", "undecidable"];
+const ATTEMPT_NUMBER_KEYS = ["started", "responded", "errors", "cancelled_deadline", "cancelled_timeout"];
+const numsOf = (x, keys) => (!isRec(x) ? null : Object.fromEntries(keys.map((k) => [k, numOf(x[k])])));
+const attemptsOf = (x) => (!isRec(x) ? null : { ...numsOf(x, ATTEMPT_NUMBER_KEYS), not_started: numsOf(x.not_started, NOT_STARTED_KEYS) });
 const STAGE_NUMBERS = ["duration_ms", "calls", "missing_usage_calls", "input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens"];
-const stageOf = (st) => ({ stage: enumOf(STAGE_IDS, st?.stage ?? null) ?? "unknown", operation: enumOf(["redo-design"], st?.operation ?? null), status: enumOf(["ok", "failed"], st?.status ?? null), ...Object.fromEntries(STAGE_NUMBERS.map((k) => [k, numOf(st?.[k])])), attempts: countsOf(st?.attempts), retries: countsOf(st?.retries), failure_kind: enumOf(FAILURE_KINDS, st?.failure_kind ?? null) });
+const stageOf = (st) => ({ stage: enumOf(STAGE_IDS, st?.stage ?? null) ?? "unknown", operation: enumOf(["redo-design"], st?.operation ?? null), status: enumOf(["ok", "failed"], st?.status ?? null), ...Object.fromEntries(STAGE_NUMBERS.map((k) => [k, numOf(st?.[k])])), attempts: attemptsOf(st?.attempts), retries: numsOf(st?.retries, RETRY_KEYS), failure_kind: enumOf(FAILURE_KINDS, st?.failure_kind ?? null) });
 const failureOf = (f) => (!isRec(f) ? null : { stage: enumOf(STAGE_IDS, f.stage ?? null) ?? "unknown", kind: enumOf(FAILURE_KINDS, f.kind ?? null) ?? "unknown", code: f.code === undefined ? null : "present", problems: Array.isArray(f.problems) ? f.problems.length : 0 });
 const SUMMARY_NUMBERS = ["score", "duration_secs", "provider_cost_usd", "directive_round", "exit_code", "budget_remaining_usd", "budget_reserved_usd", "missing_usage_calls"];
 const summaryOf = (s) => ({
   schema_version: "commandagent.headless-summary/v1", verdict: verdictOf(s.verdict), stop_class: enumOf(STOP_VALUES, s.stop_class), stop_reason: enumOf(STOP_VALUES, s.stop_reason),
   ...Object.fromEntries(SUMMARY_NUMBERS.map((k) => [k, numOf(s[k])])),
-  stages: Array.isArray(s.stages) ? s.stages.map(stageOf) : [], arbitration: countsOf(s.arbitration), failure: failureOf(s.failure),
+  stages: Array.isArray(s.stages) ? s.stages.map(stageOf) : [], arbitration: numsOf(s.arbitration, ARBITRATION_KEYS), failure: failureOf(s.failure),
 });
 const planCostOf = (c) => (c === null ? null : { schema_version: "musunest-factory/plan-build-cost/v1", plan_usd: numOf(c.plan_usd), build_usd: numOf(c.build_usd), total_usd: numOf(c.total_usd) });
 
