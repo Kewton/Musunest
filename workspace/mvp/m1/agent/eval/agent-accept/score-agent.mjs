@@ -979,9 +979,13 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
     // 往復の記録は止めずに読む（#498 の独立レビューの指摘 1）：JSON でない記録は既存の行・表では記録なし（null）とし、新しい集計では読めない記録として数える
     const prRead = readJsonSafe(planRecordPath);
     const pr = prRead.status === "ok" ? prRead.value : null;
-    const prRounds = Array.isArray(pr?.rounds) ? pr.rounds : [];
+    // 既存の行の問数・往復は今までの式のまま数える（今まで値が出ていた入力は、形が違っても同じ値。#498 の再確認の指摘 N1）。
+    // 今までの式が例外で止まった形（rounds が写像・往復が null など）だけを 0 に写して続ける（読めない入力の扱い。分類の無害化とは別）
+    const planCounts = (() => {
+      try { return { questions: (pr.rounds ?? []).reduce((n, round) => n + (round.questions ?? []).length, 0), rounds: (pr.rounds ?? []).length }; } catch { return { questions: 0, rounds: 0 }; }
+    })();
     tableInputs.push({ run: d, pr, sl });
-    const plan = pr === null ? null : { outcome: pr.outcome ?? null, questions: prRounds.reduce((n, round) => n + (Array.isArray(round?.questions) ? round.questions.length : 0), 0), rounds: prRounds.length, usd: sl?.plan_cost?.plan_usd ?? pr.spent_usd ?? 0 };
+    const plan = pr === null ? null : { outcome: pr.outcome ?? null, questions: planCounts.questions, rounds: planCounts.rounds, usd: sl?.plan_cost?.plan_usd ?? pr.spent_usd ?? 0 };
     const base = { run: d, pattern: p, subject, style: item.style, writable: item.writable, factory_verdict: s?.verdict ?? null, stop: s?.stop_reason ?? s?.stop_class ?? null, failure: s?.failure ?? null, cost_usd: sl?.plan_cost?.total_usd ?? s?.provider_cost_usd ?? 0, seconds: sl?.wall_s ?? s?.duration_secs ?? 0, plan };
     const def = loadDef(item.scoringPath);
     // 補正後（v2）の分母の既定：主の構造（0 番目）の判定の数。役割が見つからないときに engine.mjs が writable_total に使う値と同じ

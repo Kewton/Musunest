@@ -185,7 +185,8 @@ test("(k) P ごとに開始の最も早い確定した本を採り（同じ時�
     const log = join(base, "spawn-k.log");
     const b = runNode(runAgentFile, [repo, join(base, "build-eval"), "--runs", "1", "--build-from", join(dest, FROZEN_SET_FILE)], { FAKE_SPAWN_LOG: log });
     assert.equal(b.status, 0, b.stderr);
-    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), ["P1-r1", "P2-r1"]);
+    // 子は並列（既定 3）で起き、ログに書く順は終わり方で変わる。見るのは起きた本の集合（順は問わない。#498 の再確認の指摘 N2）
+    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n").sort(), ["P1-r1", "P2-r1"]);
     const bc = readJson(join(base, "build-eval", "conditions.json"));
     assert.deepEqual([bc.params.mode, bc.params.patterns, bc.frozen.missing], ["build-from", ["P1", "P2"], ["P3"]]);
     assert.deepEqual(readFileSync(join(base, "build-eval", "P1-r1", "plan-file.json")), readFileSync(join(dest, fz.adopted[0].envelope.path)));

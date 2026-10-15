@@ -2320,3 +2320,22 @@ test("入れ子の fingerprints.conditions.frozen は 64 桁の 16 進の文字�
     }
   });
 });
+
+test("既存の行の問数・往復は、今まで値が出ていた入力では形が違っても今までの値のまま（今までの式が例外で止まった形だけを 0 に写して続ける）", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    // 今まで値が出ていた形：文字列の questions は長さ、questions の無い往復は 0、length を持つ写像は length
+    addRun498(out, "P1-r1", { record: { outcome: "confirmed", rounds: [{ questions: "abc", answers: [] }] } });
+    addRun498(out, "P1-r2", { record: { outcome: "confirmed", rounds: [{ questions: "abc", answers: [] }, { questions: [1, 2], answers: [] }] } });
+    addRun498(out, "P1-r3", { record: { outcome: "stopped", rounds: [{}] } });
+    addRun498(out, "P1-r4", { record: { outcome: "stopped", rounds: [{ questions: { length: 4 } }] } });
+    // 今までの式が例外で止まった形：rounds が写像・文字列、往復が null
+    addRun498(out, "P1-r5", { record: { outcome: "stopped", rounds: {} } });
+    addRun498(out, "P1-r6", { record: { outcome: "stopped", rounds: "xy" } });
+    addRun498(out, "P1-r7", { record: { outcome: "stopped", rounds: [null] } });
+    cond4(out, runIds("P1", 7), "e2e");
+    scoreRun(out);
+    const full = readScore(out);
+    assert.deepEqual(full.rows.map((x) => [x.run, x.plan.questions, x.plan.rounds]), [["P1-r1", 3, 1], ["P1-r2", 5, 2], ["P1-r3", 0, 1], ["P1-r4", 4, 1], ["P1-r5", 0, 0], ["P1-r6", 0, 0], ["P1-r7", 0, 0]]);
+  });
+});
