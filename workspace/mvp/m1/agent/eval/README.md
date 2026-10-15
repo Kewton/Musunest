@@ -141,20 +141,20 @@ a10d827eff477dda51394bff96faa0f9c42631cb818a1653098446bc979bfe70  subjects/C.jso
 | `evaluation` | `mode`：v4 の条件なら `params.mode`（`build`・`e2e`・`plan-only`・`build-from`。それ以外は `unknown`）、v1〜v3 なら `params.plan` が真で `e2e`・偽で `build`、条件が無ければ `null`。`build_applicable`：`plan-only` のときだけ偽 |
 | `metrics_plan` | Plan の集計（`e2e`・`plan-only` のときだけ。それ以外は `null`）。結果の内訳（`outcomes`：`confirmed`・`cannot-confirm`・`stopped`・`unknown`・`absent`）と確定の率（`confirmed`。数と区間）、止まり方の分類ごとの本数（`stop_classes`。既知の分類だけ。ほかは `unknown`）、問数と往復（`questions`・`rounds`：合計・本ごとの平均・平均の分母）、自由入力（`free_text`：`answers`・`runs`・`unreadable`）、時間（`duration_ms`。本ごとの `stages[].duration_ms` の合計）と費用（`usd`。起動の記録の Plan の額、無ければ往復の記録の使った額）、実行中の台本（`script`。`scripts.mode` が `live` のときだけ）、包みの検査（`envelope`。`plan-only` のときだけ） |
 | `metrics_build` | Build だけの集計（`build-from` のときだけ。それ以外は `null`）。終了の内訳（`exit_classes`：起動の記録の `exit_class` ごと。`ok`・`failed`・`return-to-plan`・`envelope-unreadable`・`envelope-rejected`・`usage-other`・`other`、それ以外は `unknown`）・exit 2 の生の数（`exit_2`）・包みの拒否（`envelope_refusals`）・差し戻し（`return_to_plan`：`count`・`rate`・`inconsistent`・`unrecorded`）・組との照合（`frozen_match`：`checked`・`mismatched`）・工場の verdict（`factory_verdicts`。既知の値・`unknown`・`absent`）・既存の PASS の率（`pass`。既存の行の判定をそのまま読む）・時間（`duration_ms` と段ごとの `by_stage`）と Build の費用（`usd`）・本ごとの行（`rows`） |
-| `fingerprints.frozen`・`fingerprints.frozen_matches_conditions` | 凍結した組のファイル（条件の `frozen.path`）の SHA-256 と、条件の `frozen.sha256` との一致（条件に無ければ `null`。読めなければ指紋は `null` で不一致）。入れ子の `fingerprints.conditions.frozen` は **v4 の条件のときだけ**足し、v1〜v3 では鍵ごと省く（旧版の形のまま） |
+| `fingerprints.frozen`・`fingerprints.frozen_matches_conditions` | 凍結した組のファイル（条件の `frozen.path`）の SHA-256 と、条件の `frozen.sha256` との一致（条件に無ければ `null`。読めなければ指紋は `null` で不一致）。入れ子の `fingerprints.conditions.frozen` は **v4 の条件のときだけ**足し、v1〜v3 では鍵ごと省く（旧版の形のまま）。条件の `frozen.sha256` が 64 桁の 16 進の文字列でなければ、どの mode でも `null`（一致は偽）にし、入力の文字列を写さない |
 
 **数え方の共通の決まり**（新しい欄のすべて）：
 
-- **分母は予定した本**（条件の `child_args`。`--only` で一部の P だけを流した計測なら、その P × 回数）の全部。条件の予定を検証できなければ、採点した本。未実行（ディレクトリが無い）・途中（要約が無い）・記録の欠けた本も分母に残し、成功にも除外にも数えない（`unexecuted`・`incomplete`・`unrecorded` の数として出す）。Plan の集計の `outcomes.absent` は、往復の記録を読めない本（未実行・途中・記録なし）の合計
+- **分母は予定した本**（条件の `child_args`。`--only` で一部の P だけを流した計測なら、その P × 回数）の全部。条件の予定を検証できなければ、採点した本。未実行（ディレクトリが無い）・途中（要約が無い）・記録の欠けた本も分母に残し、成功にも除外にも数えない（`unexecuted`・`incomplete`・`unrecorded` の数として出す）。Plan の集計の `outcomes.absent` は、往復の記録を読めない本（未実行・途中・記録なし）の合計。記録なしのうち、往復の記録はあるが JSON として読めない本は `record_unreadable` に別に数える
 - **時間と費用は `{ observed, missing, total, median }`**。`observed` は値を読めた本の数、`missing` は読めなかった本の数（`observed + missing` ＝ 分母）。実測の 0（空の段の記録・0 の額）は `observed` に入れ、欠測と区別する。中央値は本ごとの値から取り、本の数が偶数なら真ん中 2 つの平均。`observed` が 0 なら `total`・`median` は `null`。単位はミリ秒と USD（小数 6 桁に丸める）。段の記録は、配列でないか有限で 0 以上でない値が 1 つでもあれば、その本は欠測
 - **分類は既知の列挙に写し、知らない値は `unknown`**。一覧は採点の道具に固定して持つ（工場の Plan の段 `PLAN_STAGE_IDS`・生成の段・失敗の種類 `FAILURE_KINDS`・確定できない理由の出どころ `CANNOT_CONFIRM_SOURCES` と符号 `PLAN_DIAGNOSIS_CODES`・verdict・台本の照合の状態・終了の分類）。入力の文字列（符号に見える文字列・契約の検査の message）は通さない
 - **既存の振る舞いを変えない、の例外（無害化）**：これまで英小文字とハイフンの形をした未知の分類がそのまま出ていた、診断の表の止まり方の分類（`tables` の `stop.classes`・`stop_classes` と、その標準出力の行）と段の ID（`stages.by_stage` の鍵）・Build の表の工場の verdict、行の工場の verdict の標準出力（と標準出力の `metrics.factory_verdicts` の鍵）も、上の既知の一覧に写す。既存の試験が使う符号はすべて一覧にあるので、既存の期待は変わらない。`score.json` の `metrics`・`rows` の値と、読む元の記録（生のログ・往復の記録）は書き換えない
 
 **Plan の集計の細目**：
 
-- 問数と往復の平均の分母は、往復の記録の `rounds` が配列の本。自由入力は `rounds[].answers[].free_text` が文字列の答えの数（`null` は数えない）。`rounds` か各往復の `answers` が配列でない記録は `unreadable` に数え、読めて 0 件の本（`answers` に 0 を足すだけ）と区別する
-- 実行中の台本（`script`）：往復の記録の `script.matches[].state` の件数を、`answered`・`unknown`・`duplicate`・`no-choice`・`stale-revision`、それ以外は `unknown-state` に数える。率（`all_answered`）は「問いが 1 つ以上あり、全部が `answered` の本」÷ 往復の記録のある本。0 問の本（`no_questions`）と照合の記録の欠けた本（`unrecorded`）は別に数え、分子に入れない
-- 包みの検査（`envelope`。Plan だけの計測）：本ごとに `bundle/plan-result.json` を読み、版（`envelope-version`）・結果の食い違い（往復の記録の `outcome` と違うか、確定なのに仕様が無い・確定でないのに仕様がある。`outcome-mismatch`）・仕様の SHA（実際の `planDigest` と違うか、確定でないのに値がある。`plan-sha256`）・依頼文の SHA（`source-sha256`）・契約の検査（`checkConfirmedPlan` に問題がある。`contract`）を当てる。通った本と通らない本の数、理由ごとの数、包みの無い本（`absent`）と JSON でない本（`unreadable`）の数を出す
+- 問数と往復の平均の分母は、往復の記録の `rounds` が配列の本。自由入力は `rounds[].answers[].free_text` が文字列の答えの数（`null` は数えない）。`rounds` か各往復の `answers` が配列でない記録と、JSON として読めない記録は `unreadable` に数え、読めて 0 件の本（`answers` に 0 を足すだけ）と区別する。往復の記録は採点を止めずに読み、JSON として読めない記録は既存の行・表では記録なし（`null`）、`rounds` が配列でない記録は既存の行の問数・往復を 0 に写す（今までは例外で止まっていた）
+- 実行中の台本（`script`）：往復の記録の `script.matches[].state` の件数を、`answered`・`unknown`・`duplicate`・`no-choice`・`stale-revision`、それ以外は `unknown-state` に数える。率（`all_answered`）は「問いが 1 つ以上あり、全部が `answered` の本」÷ 往復の記録のある本。照合の記録は問い（質問 ID と版）と 1 対 1 に対応させ、全部の問いにちょうど 1 つずつの記録があり、余りも重なりも無い本だけを分子の候補にする。0 問の本（`no_questions`）と、照合の記録が無い・足りない・空・重なる・余る・問いの ID と版を読めない本（`unrecorded`）は別に数え、分子に入れない（状態ごとの件数には、ある記録をそのまま数える）
+- 包みの検査（`envelope`。Plan だけの計測）：本ごとに `bundle/plan-result.json` を読み、版（`envelope-version`）・結果の食い違い（往復の記録の `outcome` と違うか、確定なのに仕様が無い・確定でないのに仕様がある。`outcome-mismatch`）・仕様の SHA（実際の `planDigest` と違うか、確定でないのに値がある。`plan-sha256`）・依頼文の SHA（`source-sha256`）・契約の検査（`checkConfirmedPlan` に問題がある。`contract`）を当てる。結果は既知の 3 値（`confirmed`・`cannot-confirm`・`stopped`）だけを認め、それ以外（往復の記録と同じ値でも）・型違いは `outcome-mismatch`。確定なら仕様は写像、確定でなければ仕様も `plan_sha256` も厳密に `null`（欄の欠落は `null` とみなさない）。通った本と通らない本の数、理由ごとの数、包みの無い本（`absent`）と JSON でない・写像でない本（`unreadable`）の数を出す
 - **Plan だけの計測の採点**：台本の事後の照合は、確定した仕様を包みから読む（納品物の `plan.json` が無いので）。既存の行・`metrics` は今の定義のまま計算する（宣言が無いので生成失敗に見える）。Build の表は 0 本で、分母の文で Plan 評価と示す。通常の標準出力に「Build の指標は対象外」の 1 行を足す（匿名の標準出力は JSON 1 個のまま）
 
 **Build だけの集計の細目**：
@@ -163,12 +163,13 @@ a10d827eff477dda51394bff96faa0f9c42631cb818a1653098446bc979bfe70  subjects/C.jso
 - 包みの拒否は、exit 2 で起動の記録の分類が `envelope-unreadable`・`envelope-rejected` で、しかも本の `stdout.log` にその構造化された行（工場の読み取りの失敗の行、または既知の検査名を持つ拒否の行）がある本だけを数える
 - 差し戻しの率：分子は、終了コードが 3 で、かつ Build だけの記録（`bundle/build-record.json`）の `return_to_plan` が真の本だけ。分母は予定した本。終了コード 3 で記録が偽の本と、終了コード 0 で記録が真の本は `inconsistent`、終了コード 3 で記録が無いか読めない本は `unrecorded` に数え、どちらも分子に入れない
 - 組との照合：Build だけの記録の `plan_sha256`・`source_sha256` が、条件の `frozen` の採用した P の値と違う本の数（`mismatched`。照合した本の数 `checked`）
-- **断る**（exit 3。採点の出力を書かない）：`build-from` の計測で、条件の `frozen` が無い（`[score:frozen-missing]`）・形が違う（`[score:frozen-invalid]`。パス・SHA-256・採用した P と 2 つの SHA・外した P）。断りの 1 行は固定の文と符号だけで、匿名でも同じ（本の ID・パス・値を出さない）
+- **断る**（exit 3。採点の出力を書かない）：`build-from` の計測で、条件の `frozen` が無い（`[score:frozen-missing]`）・形が違う（`[score:frozen-invalid]`。パスが空でない文字列・SHA-256 が 64 桁の 16 進の文字列・採用した P が一意で 2 つの SHA が同じ形の文字列・外した P が一意で採用した P と重ならない）。断りの 1 行は固定の文と符号だけで、匿名でも同じ（本の ID・パス・値を出さない）
 
 **限界**（#498 で直していないこと）：
 
 - **正解のデータとの照合は無い。** 取りこぼし・水増し・不要な質問は、人の正解ができてから別に扱う。この段の確定率・包みの検査・台本の照合の率で、仕様の品質を判定できるとは言えない
-- 自由入力は答えの数だけを数え、文は読まない。記録の形を読めない本は `unreadable` に数えるだけで、その本に自由入力があったかどうかは分からない（0 件とはみなさない）。往復の記録そのものが JSON として読めない本は、既存の採点の経路が読めずに止まる（匿名なら `失敗しました: 採点できなかった`）
+- 自由入力は答えの数だけを数え、文は読まない。記録の形を読めない本は `unreadable` に数えるだけで、その本に自由入力があったかどうかは分からない（0 件とはみなさない）
+- 採点を止める記録（本の `summary.line.json`・申告の `unwritable.json`・1 回の起動の記録 `run-<時刻>.json`）が JSON として読めないときは、通常・匿名のどちらでも exit 1 で `失敗しました: 記録を読めなかった [score:record-unreadable:<summary｜unwritable｜run-record>]` の 1 行だけを出し、採点の出力を書かない（例外の文は記録の断片を含みうるので出さない）。それ以外の予期しない誤り（依存が無いなど）の扱いは今までどおり
 - **生の記録から写す既存の欄は無害化の保証の外**：`rows` の `failure`・`stop`・`factory_verdict`・`plan.outcome`・`acceptance.plan_outcome` などは、今までどおり記録の値をそのまま写す（score.json の既存の値を変えない、を優先した）。値を読ませたくない組では `--anonymous` を使う
 - 分類の一覧は工場の値を写したもの。工場が値を足せば、ここに足すまで `unknown` に写る（値は漏れない側に倒れる）
 - 包みの拒否と終了の分類は、起動の記録の `exit_class` と本の `stdout.log` を読む。計測の道具（`run-agent.mjs`）が分類を書いた規則と別に、終了コードから分類を作り直してはいない
@@ -179,7 +180,7 @@ a10d827eff477dda51394bff96faa0f9c42631cb818a1653098446bc979bfe70  subjects/C.jso
 
 匿名の出力は**許可した欄だけを組み立てる**（入力の文字列をそのまま通さない）：`metrics` は数と区間の 9 つの指標と、工場の判定の値を既知の列挙（`full`・`partial`・`none`）か `unknown` にまとめた `factory_verdicts`。`completion` は `status`・`label`（既知の値）・数（採点した本数・採点できない本数を含む）と、止まった理由のコード `stop_code`（`budget`・`other`・`null`。文は出さない）。`fingerprints` は 64 桁の 16 進だけを通し（形が違えば `null`）、条件の `schema` と判定の口の構成は既知の値か `unknown`。測定 ID は出さない。
 
-#498 で足した匿名の欄：`evaluation`（`mode` は既知の値か `unknown`、`build_applicable`）。`metrics_plan` は、本数（予定・未実行・途中・記録なし）・結果の内訳・確定の率・問数と往復（合計・平均・分母）・自由入力の数と `unreadable`・実行中の台本の照合の状態ごとの件数と率（`0 問`・照合の記録なし）・包みの検査の数（通った・通らない・無い・読めない）、時間と費用の `observed`・`missing`・`total`・`median`。`metrics_build` は、本数・外した P の数・終了の内訳・exit 2 の生の数・包みの拒否の数・差し戻しの数と率と `inconsistent`・`unrecorded`・組との照合の数・PASS の率・既知の verdict の内訳、時間と費用の同じ 4 つ。`fingerprints.frozen` はハッシュだけ（と一致の真偽）。入れ子の `fingerprints.conditions.frozen` は v4 の条件のときだけ。既知の値の一覧には、条件の版 v4 と台本の当て方 `live` を足した。**止まり方の分類の符号・包みの理由の符号・段の ID・本ごとの値・本の ID は出さない。** 率は数と区間の形の文字列だけを通す。
+#498 で足した匿名の欄：`evaluation`（`mode` は既知の値か `unknown`、`build_applicable`）。`metrics_plan` は、本数（予定・未実行・途中・記録なし・JSON として読めない記録）・結果の内訳・確定の率・問数と往復（合計・平均・分母）・自由入力の数と `unreadable`・実行中の台本の照合の状態ごとの件数と率（`0 問`・照合の記録なし）・包みの検査の数（通った・通らない・無い・読めない）、時間と費用の `observed`・`missing`・`total`・`median`。`metrics_build` は、本数・外した P の数・終了の内訳・exit 2 の生の数・包みの拒否の数・差し戻しの数と率と `inconsistent`・`unrecorded`・組との照合の数・PASS の率・既知の verdict の内訳、時間と費用の同じ 4 つ。`fingerprints.frozen` はハッシュだけ（と一致の真偽）。入れ子の `fingerprints.conditions.frozen` は v4 の条件のときだけ。既知の値の一覧には、条件の版 v4 と台本の当て方 `live` を足した。**止まり方の分類の符号・包みの理由の符号・段の ID・本ごとの値・本の ID は出さない。** 率は数と区間の形の文字列だけを通す。
 
 **`--anonymous` は読み込みと診断の前に伝わり、標準エラーも件数と既知の理由だけにする**（独立レビューの指摘 4）：組に無い ID の本を飛ばしたときは `飛ばしました: 組に無い ID の本 n 本`、断るときは `断りました: 予定の本が採点する組に無い（n 本）`・`断りました: 定義ファイルを読めません: <既知の理由>`（パス・本の ID・組の ID を出さない）。予期しない誤り（例：採点器の依存が無い）でも詳細（パスを含みうる）は出さず `失敗しました: 採点できなかった（…）` で exit 1。匿名でない実行では同じ経路で本の ID・組の ID・パス・誤りの詳細を出す（調べられる）。
 
