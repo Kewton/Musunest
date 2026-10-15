@@ -389,7 +389,7 @@ Plan の質問に、**質問 ID ではなく点検済みの事項（どの要件
 | 符号 | 断る場合 |
 |---|---|
 | `flags:conflict` | 組めない指定の組（§5.7.1） |
-| `script:missing`・`script:changed` | 台本の無い本がある／読み込んだあとに台本が変わった |
+| `script:missing`・`script:changed`・`script:read` | 台本の無い本がある／読み込んだあとに台本が変わった／台本を読めない |
 | `build-from:*` | §5.7.2・§5.7.3 |
 | `resume:prior-output`・`resume:no-conditions`・`resume:unreadable`・`resume:signature`・`resume:partial`・`resume:no-logs` | 既存の再開の断り（#400）。今までの文のあとに符号を添える |
 | `set:invalid`・`only:unknown` | 既存の定義ファイルと `--only` の断り（#427）。今までの文のあとに符号を添える |
@@ -398,7 +398,8 @@ Plan の質問に、**質問 ID ではなく点検済みの事項（どの要件
 #### 5.7.5 本と起動の記録（v4 で足した欄）と無害化
 
 - 本の起動の記録（`summary.line.json`）に、子を起こす直前の `started_at`（ISO、ミリ秒まで）と、終了の分類 `exit_class` を足した。`exit_class` は 0 ＝ `ok`、1 ＝ `failed`、3 ＝ `return-to-plan`。2 は、標準出力に工場の包みの読み取りの失敗の行（既知の版）があれば `envelope-unreadable`、検査で断った行（既知の版と既知の検査名）があれば `envelope-rejected`、どちらも無ければ `usage-other`。それ以外は `other`。exit 2 が出ても計測は止めない。1 回の起動の記録（`run-<時刻>.json`）に分類ごとの件数（`exit_classes`）を足した
-- **無害化**：本のディレクトリの生のログ（`stdout.log`・`stderr.log`・`request.md`・写し）はそのまま残す。記録（`summary.line.json`・起動の記録・条件・組のファイル）と計測の道具の標準出力には値を入れない。`summary.line.json` の `stdout_tail`・`stderr_tail` は子の出力の写しから `{ bytes, known_lines }`（バイト数と既知の版の行の数）に置き換えた。要約（`summary`）の `verdict` と、標準出力の 1 行の `verdict=` は、既知の値（`full`・`partial`・`none`）か `unknown` に写す。生の中身を読むときは生のログを開く
+- **無害化**：本のディレクトリの生のログ（`stdout.log`・`stderr.log`・`request.md`・写し）はそのまま残す。記録（`summary.line.json`・起動の記録・条件・組のファイル）と計測の道具の標準出力には値を入れない。`summary.line.json` の `stdout_tail`・`stderr_tail` は子の出力の写しから `{ bytes, known_lines }`（バイト数と既知の版の行の数）に置き換えた。要約（`summary`）と費用の行（`plan_cost`）は、**列挙した欄と型だけ**を写す：`verdict`（`full`・`partial`・`none` か `unknown`）・`stop_class`・`stop_reason`（工場の止めた理由と失敗の分類の列挙か `unknown`）・有限の数の欄（費用・時間・終了コード・残高など）・`stages[]`（段の ID・`operation`・`status`・`failure_kind` は列挙か `unknown`、数の欄、試行と再試行の数）・`arbitration` の数・`failure`（段と種類は列挙、`code` は有無だけ `present`、`problems` は件数）。費用の行は `plan_usd`・`build_usd`・`total_usd` だけ。それ以外の欄（`run_id`・`next_action`・問題の `message`・追加の欄）は写さない。標準出力の 1 行の `verdict=` も既知の値か `unknown`。生の中身を読むときは生のログを開く
+- 断りの文は 1 行で、入力から来る部分を通さない。既存の断りの文は保つが、定義ファイルのパスは出さず、`--only` の ID は `P<n>` の形のものだけ（それ以外は「形の違う ID n 件」）、組の ID は小文字・数字・ハイフンの形のときだけ出す。在るが読めない包み・台本（ディレクトリなど）は `build-from:envelope-read`・`script:read`・`freeze:envelope-read` で断る
 
 #### 5.7.6 (b) の凍結の道具（`freeze-plan-set.mjs`）
 
@@ -410,7 +411,7 @@ node freeze-plan-set.mjs <repo> <Plan 評価の出力先> <組のディレクト
 - **規則（`earliest-confirmed` v1）**：P ごとに、包みの結果が確定した本のうち `started_at` が最も早い本を採る。同じ時刻なら回の番号の小さい本。Build の記録（要約の verdict・納品物・Build だけの記録）は読まない。本を選ばせる引数は無い
 - 採る前に、包みに §5.7.3 の 3. と同じ工場の検査関数を当てる。包みの条件（モデル・effort）が計測の条件と一致することも確かめる
 - 確定した本が無い P は断らずに組から外し、`missing` に残す（P の ID と、その P の本数）。全部の P に確定が無いときだけ断る
-- 断る（exit 3。組を書かない）：引数が足りない（`freeze:args`）・出力先が空でない（`freeze:out-not-empty`）・条件のファイルが無い・読めない（`freeze:conditions-missing`／`-unreadable`）・v4 でない（`freeze:conditions-schema`）・`params.mode` が `plan-only` でない（`freeze:mode`）・予定の検証が通らない（`freeze:planned`）・`source.dirty` が偽でない（`freeze:dirty`）・commit が無い（`freeze:commit`）・定義ファイルを読めないか SHA-256 が条件と違う（`freeze:set-unreadable`／`freeze:set-sha256`）・照合が完了でない（`freeze:incomplete`）・確定した本の包みが検査を通らない（`freeze:envelope-unreadable[:<符号>]`／`freeze:envelope-rejected:<検査名>`）・包みの条件が違う（`freeze:envelope-conditions`）・`started_at` が無い（`freeze:started-at`）・確定が 1 本も無い（`freeze:none-confirmed`）
+- 断る（exit 3。組を書かない）：引数が足りない（`freeze:args`）・出力先が空でない（`freeze:out-not-empty`）・条件のファイルが無い・読めない（`freeze:conditions-missing`／`-unreadable`）・v4 でない（`freeze:conditions-schema`）・`params.mode` が `plan-only` でない（`freeze:mode`）・予定の検証が通らない（`freeze:planned`）・`source.dirty` が偽でない（`freeze:dirty`）・commit が無い（`freeze:commit`）・定義ファイルを読めないか SHA-256 が条件と違う（`freeze:set-unreadable`／`freeze:set-sha256`）・照合が完了でない（`freeze:incomplete`）・確定した本の包みが検査を通らない（`freeze:envelope-unreadable[:<符号>]`／`freeze:envelope-rejected:<検査名>`）・在るが読めない（`freeze:envelope-read`）・包みの条件が違う（`freeze:envelope-conditions`）・`started_at` が無い（`freeze:started-at`）・確定が 1 本も無い（`freeze:none-confirmed`）
 - 組のファイルの欄：`schema`・組の `id`・組の `version`（整数。引数で渡す）・`origin`（`frozen-plan`）・`rule`（規則の名前と版）・`set`（定義ファイルのパス・SHA-256・ID・版）・`source_measurement`（測定 ID・条件の署名・条件のファイルの SHA-256・Plan の commit・工場の dist の指紋・モデル・effort・予算・締切・答え方・台本の当て方と指紋）・`adopted[]`（P・本・`started_at`・包みの相対パスと SHA-256・`plan_sha256`・`source_sha256`）・`missing[]`。時刻・出力先のパスは書かない（同じ入力からはバイト列まで同じ組になる）
 - 人が作る (a) は同じ組の形で、`origin` を `human`、作った人の印を `author`（`owner`／`scorer`）にする（`rule`・`source_measurement` は `null` でよい）。(a) を作る道具はこの Issue に入れていない
 
@@ -425,7 +426,7 @@ node freeze-plan-set.mjs <repo> <Plan 評価の出力先> <組のディレクト
 #### 5.7.8 限界（#497 で直していないこと）
 
 - 台本の写しは、定義ファイルの読み込みで取った指紋と同じ中身のときだけ写す（読み込みのあとに変われば `script:changed` で断る）。工場が台本の形を受け付けるかは工場の検査に任せる
-- 要約（`summary`）の無害化は `verdict` だけ。工場の要約の他の欄（`stop_reason` など）は工場の版の形のまま写す
+- 要約の列挙（段の ID・失敗の分類・止めた理由）は工場の `record.ts` の値を写したもの。工場が値を足せば、足すまで `unknown` に写る（値は漏れない側に倒れる）
 - `params.plan` は `--plan` の有無のまま（`plan-only`・`build-from` は `false`）。採点の道具の了承後系の対象は、今までどおり本ごとの Plan の記録の有無でも決まる
 - 比較の道具は作っていない。並列の上限を上げる条件（429・529・締切の停止の観測）は別の Issue
 

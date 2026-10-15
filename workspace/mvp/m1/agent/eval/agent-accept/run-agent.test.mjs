@@ -1044,3 +1044,95 @@ test("(l) 漏えい：目印を依頼文・答え（台本）・包みの止ま�
     assert.ok(readFileSync(join(outB, "P1-r1", "stdout.log"), "utf8").includes(MARK));
   });
 });
+
+// ── #497 の独立レビューの指摘 1〜3
+
+const oneLine = (r, label) => assert.equal(r.stderr.trim().split("\n").length, 1, `${label}: 標準エラーが 1 行でない: ${r.stderr}`);
+
+test("指摘 1：既知の版の要約と費用の行でも、列挙した欄と型だけを記録に写す（問題の message・未知の分類・追加の欄の目印は出ない）", async () => {
+  await withRepo(async (base, repo) => {
+    const summaryLine = {
+      schema_version: "commandagent.headless-summary/v1", verdict: "partial", stop_reason: MARK, stop_class: "unmet", provider_cost_usd: 0.12, duration_secs: 3, exit_code: 0, run_id: MARK, next_action: MARK, extra_field: MARK,
+      failure: { stage: "write", kind: "unmet", code: MARK, problems: [{ field: MARK, message: MARK }, { field: "f", message: MARK }] },
+      stages: [{ stage: "write", status: "failed", duration_ms: 5, calls: 1, failure_kind: "unmet", attempts: { started: 1, note: MARK, not_started: { budget: 0, [MARK]: 1 } }, retries: { shape: 2 }, extra: MARK }, { stage: MARK, status: MARK, duration_ms: MARK }],
+      arbitration: { upheld: 1, note: MARK },
+    };
+    const costLine = { schema_version: "musunest-factory/plan-build-cost/v1", plan_usd: 0.02, build_usd: 0.1, total_usd: 0.12, note: MARK };
+    const out = join(base, "out-s1");
+    const r = runAgent(repo, out, ["--only", "P1", "--runs", "1"], { FAKE_LINES: JSON.stringify({ "P1-r1": [JSON.stringify(summaryLine), JSON.stringify(costLine)] }) });
+    assert.equal(r.status, 0, r.stderr);
+    const text = readFileSync(join(out, "P1-r1", "summary.line.json"), "utf8");
+    assert.ok(!text.includes(MARK), "要約の記録に目印が出た");
+    assert.ok(!r.stdout.includes(MARK) && !r.stderr.includes(MARK));
+    const sl = JSON.parse(text);
+    assert.deepEqual([sl.summary.verdict, sl.summary.stop_reason, sl.summary.stop_class, sl.summary.provider_cost_usd, sl.summary.duration_secs], ["partial", "unknown", "unmet", 0.12, 3]);
+    assert.deepEqual(sl.summary.failure, { stage: "write", kind: "unmet", code: "present", problems: 2 });
+    assert.deepEqual(sl.summary.stages[0], { stage: "write", operation: null, status: "failed", duration_ms: 5, calls: 1, missing_usage_calls: null, input_tokens: null, cached_input_tokens: null, cache_write_tokens: null, output_tokens: null, reasoning_tokens: null, attempts: { started: 1, not_started: { budget: 0 } }, retries: { shape: 2 }, failure_kind: "unmet" });
+    assert.deepEqual([sl.summary.stages[1].stage, sl.summary.stages[1].status, sl.summary.stages[1].duration_ms], ["unknown", "unknown", null]);
+    assert.deepEqual(sl.summary.arbitration, { upheld: 1 });
+    assert.equal(sl.summary.run_id, undefined);
+    assert.deepEqual(sl.plan_cost, { schema_version: "musunest-factory/plan-build-cost/v1", plan_usd: 0.02, build_usd: 0.1, total_usd: 0.12 });
+    assert.match(r.stdout, /P1-r1 .*verdict=partial cost=0\.1200/);
+    assert.ok(readFileSync(join(out, "P1-r1", "stdout.log"), "utf8").includes(MARK), "生のログには残る");
+  });
+});
+
+test("指摘 2：既存の断り（--only・定義ファイル）は、改行と目印を含む入力の文字列・パス・組の ID を通さず、標準エラー 1 行で断る", async () => {
+  await withRepo(async (base, repo) => {
+    const log = join(base, "spawn-s2.log");
+    const out1 = join(base, "out-s2-only");
+    const r1 = runAgent(repo, out1, ["--only", `P1,${MARK}\nX,P99`, "--runs", "1"], { FAKE_SPAWN_LOG: log });
+    assertRefused(r1, "only:unknown", log, 0, "only");
+    oneLine(r1, "only");
+    assert.ok(!r1.stderr.includes(MARK));
+    assert.match(r1.stderr, /--only に定義ファイル（dev-p1-p10）に無い ID があります: P99,形の違う ID 1 件/);
+    assertNothingWritten(out1, "only");
+    const markDir = join(base, `${MARK}`);
+    const r2 = runAgent(repo, join(base, "out-s2-set"), ["--only", "P1", "--runs", "1", "--set", join(markDir, "none.json")], { FAKE_SPAWN_LOG: log });
+    assertRefused(r2, "set:invalid", log, 0, "set");
+    oneLine(r2, "set");
+    assert.ok(!r2.stderr.includes(MARK) && !r2.stderr.includes(base), "パスを出さない");
+    assert.match(r2.stderr, /定義ファイルが無い/);
+    const setPath = join(base, "custom/marked-id.json");
+    mkdirSync(dirname(setPath), { recursive: true });
+    const ev = join(repo, "workspace/mvp/m1/agent/eval");
+    writeFileSync(setPath, JSON.stringify({ schema: EVAL_SET_SCHEMA, id: `${MARK}\nx`, version: 1, role: "regression", title: "t", styles: { S1: "s1" }, items: [{ id: "P1", subject: "A", style: "S1", writable: true, scoring: join(ev, "subjects/A.json"), script: null, request: ["行"] }] }));
+    const r3 = runAgent(repo, join(base, "out-s2-id"), ["--only", "P99", "--runs", "1", "--set", setPath], { FAKE_SPAWN_LOG: log });
+    assertRefused(r3, "only:unknown", log, 0, "set-id");
+    oneLine(r3, "set-id");
+    assert.ok(!r3.stderr.includes(MARK));
+  });
+});
+
+test("指摘 3：在るが読めない包み（ディレクトリ）を、新しい計測でも再開でも build-from:envelope-read で断り、何も作らず既存のファイルも変えない", async () => {
+  await withRepo(async (base, repo) => {
+    const log = join(base, "spawn-s3.log");
+    const fzDir = join(base, "fz-s3");
+    const fz = writeFrozen(fzDir, repo, { envelopes: { P1: envelopeOf("P1"), P2: envelopeOf("P2") } });
+    const envPath = join(fzDir, "envelopes/P2.json");
+    const asDir = () => { rmSync(envPath); mkdirSync(envPath); };
+    const asFile = () => { rmSync(envPath, { recursive: true }); writeFileSync(envPath, JSON.stringify(envelopeOf("P2"))); };
+    asDir();
+    const fresh = join(base, "out-s3-fresh");
+    const r = runAgent(repo, fresh, ["--runs", "1", "--build-from", fz], { FAKE_SPAWN_LOG: log });
+    assertRefused(r, "build-from:envelope-read", log, 0, "fresh");
+    oneLine(r, "fresh");
+    assert.ok(!r.stderr.includes(base) && !/EISDIR/.test(r.stderr), "パスと例外を出さない");
+    assert.match(r.stderr, /ids=P2 count=1$/m);
+    assertNothingWritten(fresh, "fresh");
+    asFile();
+    const out = join(base, "out-s3-resume");
+    assert.equal(runAgent(repo, out, ["--runs", "1", "--concurrency", "1", "--build-from", fz], { FAKE_SPAWN_LOG: log }).status, 0);
+    rmSync(join(out, "P2-r1"), { recursive: true, force: true });
+    asDir();
+    const before = snapshot(out);
+    const rr = runAgent(repo, out, ["--runs", "1", "--concurrency", "1", "--build-from", fz, "--resume"], { FAKE_SPAWN_LOG: log });
+    assertRefused(rr, "build-from:envelope-read", log, 2, "resume");
+    oneLine(rr, "resume");
+    assert.deepEqual(snapshot(out), before);
+    // 組のファイルそのものがディレクトリ：形が違う扱い
+    const rd = runAgent(repo, join(base, "out-s3-fzdir"), ["--runs", "1", "--build-from", fzDir], { FAKE_SPAWN_LOG: log });
+    assertRefused(rd, "build-from:frozen-invalid", log, 2, "frozen-dir");
+    oneLine(rd, "frozen-dir");
+  });
+});

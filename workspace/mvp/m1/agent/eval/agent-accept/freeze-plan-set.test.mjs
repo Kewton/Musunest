@@ -210,6 +210,7 @@ test("凍結の断る条件：それぞれ符号つきの exit 3 で、組を書
       ["incomplete", (o) => rmSync(join(o, "P2-r1"), { recursive: true }), "freeze:incomplete"],
       ["envelope-rejected", (o) => edit(join(o, "P1-r1/bundle/plan-result.json"), (e) => { e.plan_sha256 = "0".repeat(64); }), "freeze:envelope-rejected:plan-sha256"],
       ["envelope-unreadable", (o) => writeFileSync(join(o, "P1-r1/bundle/plan-result.json"), "{"), "freeze:envelope-unreadable"],
+      ["envelope-read", (o) => { rmSync(join(o, "P1-r1/bundle/plan-result.json")); mkdirSync(join(o, "P1-r1/bundle/plan-result.json")); }, "freeze:envelope-read"],
       ["envelope-parse", (o) => edit(join(o, "P1-r1/bundle/plan-result.json"), (e) => { delete e.stop; }), "freeze:envelope-unreadable:plan-file-required"],
       ["envelope-conditions", (o) => edit(join(o, "P1-r1/bundle/plan-result.json"), (e) => { e.conditions.model = "other-model"; }), "freeze:envelope-conditions"],
       ["started-at", (o) => edit(join(o, "P1-r1/summary.line.json"), (sl) => { delete sl.started_at; }), "freeze:started-at"],
@@ -222,7 +223,9 @@ test("凍結の断る条件：それぞれ符号つきの exit 3 で、組を書
       const r = freeze(repo, o, dest);
       assert.equal(r.status, 3, `${name}: ${r.stderr}`);
       assert.ok(r.stderr.includes(`[${code}]`), `${name}: ${r.stderr}`);
-      assert.equal(existsSync(join(dest, FROZEN_SET_FILE)), false, name);
+      assert.equal(r.stderr.trim().split("\n").length, 1, `${name}: 標準エラーが 1 行でない`);
+      assert.ok(!r.stderr.includes(base), `${name}: パスを出した`);
+      assert.equal(existsSync(dest), false, name);
     }
     // 全部の P に確定が無い
     const none = join(base, "plan-none");

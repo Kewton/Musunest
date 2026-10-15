@@ -41,7 +41,9 @@ const RUN_ID = /^P\d+(-r\d+)?$/;
 export function refusalLine(code, { ids = null, count = null, text = null } = {}) {
   const shown = Array.isArray(ids) ? ids.filter((id) => typeof id === "string" && RUN_ID.test(id)) : [];
   const n = count ?? (Array.isArray(ids) ? ids.length : null);
-  return `断りました: ${text === null ? "" : `${text} `}[${code}]${shown.length > 0 ? ` ids=${shown.join(",")}` : ""}${n === null ? "" : ` count=${n}`}`;
+  // 1 行に保つ（呼ぶ側は入力の文字列を text に入れない。それでも改行が混じれば空白に写す）
+  const oneLine = text === null ? null : String(text).replace(/[\r\n\u2028\u2029]+/g, " ");
+  return `断りました: ${oneLine === null ? "" : `${oneLine} `}[${code}]${shown.length > 0 ? ` ids=${shown.join(",")}` : ""}${n === null ? "" : ` count=${n}`}`;
 }
 export const refuseWith = (code, opts) => { console.error(refusalLine(code, opts)); process.exit(3); };
 
@@ -126,7 +128,9 @@ export async function freezePlanSet({ repo, outRoot, id, version }) {
     for (let r = 1; r <= cond.params.runs; r++) {
       const run = `${pid}-r${r}`, dir = join(outRoot, run), envPath = join(dir, PLAN_RESULT_PATH);
       if (!existsSync(envPath)) continue; // 包みの無い本（止まった・落ちた）は確定ではない
-      const bytes = readFileSync(envPath);
+      // 在るが読めない包み（ディレクトリなど）は固定の符号で断る（#497 の独立レビューの指摘 3）
+      let bytes;
+      try { bytes = readFileSync(envPath); } catch { return { code: "freeze:envelope-read", ids: [run] }; }
       let raw;
       try { raw = JSON.parse(bytes.toString("utf8")); } catch { return { code: "freeze:envelope-unreadable", ids: [run] }; }
       if (!isObj(raw) || raw.outcome !== "confirmed") continue;
@@ -172,7 +176,9 @@ if (isEntry()) {
   if (repo === undefined || outRoot === undefined || dest === undefined || dest.startsWith("--")) refuseWith("freeze:args");
   const versionText = opt("--version");
   const version = versionText !== undefined && /^\d+$/.test(versionText) ? Number(versionText) : NaN;
-  if (existsSync(dest) && readdirSync(dest).length > 0) refuseWith("freeze:out-not-empty");
+  let destUsed = false;
+  try { destUsed = existsSync(dest) && readdirSync(dest).length > 0; } catch { destUsed = true; } // ディレクトリでない出力先も空でない扱い
+  if (destUsed) refuseWith("freeze:out-not-empty");
   const r = await freezePlanSet({ repo: resolve(repo), outRoot: resolve(outRoot), id: opt("--id"), version });
   if (r.code !== undefined) refuseWith(r.code, { ids: r.ids ?? null, count: r.count ?? null });
   mkdirSync(join(dest, FROZEN_ENVELOPE_DIR), { recursive: true });

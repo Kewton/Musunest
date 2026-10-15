@@ -41,7 +41,8 @@ const refuseCode = (code, opts) => { console.error(refusalLine(code, opts)); pro
 // 評価セットの定義ファイル（#427）。欠けた欄があれば 1 本も起こさずに断る
 const setPath = resolve(opt("--set", join(repo, DEFAULT_SET_PATH)));
 const evalSet = loadEvalSet(setPath);
-if (evalSet.status !== "ok") refuse(`定義ファイルを読めません（${setPath}）: ${evalSet.reasons.join("、")}`, "set:invalid");
+// 断りの文に入力の文字列（パス・任意の ID）を通さない（#497 の独立レビューの指摘 2）。理由は loadEvalSet の固定の文（値を含まない）
+if (evalSet.status !== "ok") refuse(`定義ファイルを読めません: ${evalSet.reasons.join("、")}`, "set:invalid");
 
 // 工場の dist を実際に読んで、既定値と段ごとの出力の上限を得る（条件の値と、子へ渡す値を同じ所から出す）
 const distDir = join(repo, "packages/factory/dist");
@@ -68,7 +69,12 @@ const deadlineMin = Number(opt("--deadline-min", String(factory.DEFAULT_DEADLINE
 
 // 依頼文は定義ファイルの本から組む（行を改行でつなぐ。request.md にはその末尾に改行を 1 つ足す）
 const reqOf = (pid) => evalSet.byId.get(pid).requestText;
-if (only && buildFrom === null) { const unknown = only.filter((pid) => !evalSet.byId.has(pid)); if (unknown.length > 0) refuse(`--only に定義ファイル（${evalSet.set.id}）に無い ID があります: ${unknown.join(",")}`, "only:unknown"); }
+// 組の ID は条件の set.id にも書く識別子で、小文字・数字・ハイフンの形のときだけ出す。--only の ID は P<n> の形のものだけを出し、それ以外は件数だけ
+const setIdShown = /^[a-z0-9][a-z0-9-]{0,63}$/.test(evalSet.set.id) ? evalSet.set.id : "形の違う ID";
+if (only && buildFrom === null) {
+  const unknown = only.filter((pid) => !evalSet.byId.has(pid)), shaped = unknown.filter((pid) => /^P\d+$/.test(pid)), others = unknown.length - shaped.length;
+  if (unknown.length > 0) refuse(`--only に定義ファイル（${setIdShown}）に無い ID があります: ${[...shaped, ...(others > 0 ? [`形の違う ID ${others} 件`] : [])].join(",")}`, "only:unknown");
+}
 
 // --build-from（#497）：組を読み、対象の本（採用した P。--only はその部分集合だけ）を決め、子を起こす前に包みを検査する（組に保存した検査の結果は信頼しない）
 let frozen = null, targets = null;
@@ -96,7 +102,9 @@ if (buildFrom !== null) {
   for (const pid of evalSet.items.map((it) => it.id).filter((p) => targets.includes(p))) {
     const entry = fz.set.adopted.find((a) => a.pattern === pid), envPath = fz.envelopeOf.get(pid);
     if (!existsSync(envPath)) refuseCode("build-from:envelope-missing", { ids: [pid] });
-    const bytes = readFileSync(envPath);
+    // 在るが読めない（ディレクトリなど）も固定の符号で断る（#497 の独立レビューの指摘 3。工場の plan-file-read と同じ扱い）
+    let bytes;
+    try { bytes = readFileSync(envPath); } catch { refuseCode("build-from:envelope-read", { ids: [pid] }); }
     // 写しの SHA-256（組の値）→ 工場の検査（今の依頼文と語彙の版）→ 組の plan_sha256・source_sha256 と包みの値
     if (sha256(bytes) !== entry.envelope.sha256) refuseCode("build-from:envelope-sha256", { ids: [pid] });
     const checked = await checkEnvelope(checks, bytes, reqOf(pid) + "\n");
@@ -121,7 +129,9 @@ if (script) {
   const noScript = pids.filter((pid) => !evalSet.scripts.has(evalSet.byId.get(pid).subject));
   if (noScript.length > 0) refuseCode("script:missing", { ids: noScript });
   for (const pid of pids) {
-    const sc = evalSet.scripts.get(evalSet.byId.get(pid).subject), bytes = readFileSync(sc.path);
+    const sc = evalSet.scripts.get(evalSet.byId.get(pid).subject);
+    let bytes;
+    try { bytes = readFileSync(sc.path); } catch { refuseCode("script:read", { ids: [pid] }); }
     if (sha256(bytes.toString("utf8")) !== sc.sha256) refuseCode("script:changed", { ids: [pid] });
     scriptBytes.set(pid, bytes);
   }
@@ -255,6 +265,26 @@ const exitClassOf = (code, lines) => {
 const KNOWN_LINE_SCHEMAS = ["commandagent.headless-summary/v1", "musunest-factory/plan-build-cost/v1", PLAN_FILE_ERROR_SCHEMA, PLAN_FILE_REJECT_SCHEMA];
 const tailOf = (buf) => ({ bytes: buf.length, known_lines: buf.toString("utf8").split("\n").filter((l) => { try { return KNOWN_LINE_SCHEMAS.includes(JSON.parse(l)?.schema_version); } catch { return false; } }).length });
 const verdictOf = (v) => (v === null || v === undefined ? null : FACTORY_VERDICTS.includes(v) ? v : "unknown");
+// 子の要約と費用の行から記録へ写す欄と型（#497 の独立レビューの指摘 1）。列挙した欄だけを写し、分類は既知の列挙（packages/factory/src/record.ts と同じ値。
+// それ以外は unknown）へ、問題の詳細は件数へ、数は有限の数だけ写す。自由文（message・未知の分類・追加の欄）は写さない。生の中身は stdout.log を開く
+const STAGE_IDS = ["requirements", "reverse-check", "design", "test-suite", "write", "static-check", "correspondence", "run-tests", "repair", "arbitration", "judge", "bundle"];
+const FAILURE_KINDS = ["limit", "deadline", "budget", "call-limit", "timeout", "network", "http", "balance", "malformed", "refused", "tool-arguments", "invalid-request", "unmet", "incomplete", "unknown"];
+const STOP_VALUES = ["completed", "stagnation", "limit", "unresolved", "deadline", ...FAILURE_KINDS];
+const enumOf = (list, v) => (v === null || v === undefined ? null : list.includes(v) ? v : "unknown");
+const numOf = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const isRec = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
+/** 数だけの木（試行・再試行の数）：鍵は小文字・数字・_ の形だけ、値は有限の数か同じ形の写像（深さ 2 まで） */
+const countsOf = (x, depth = 0) => (!isRec(x) ? null : Object.fromEntries(Object.entries(x).filter(([k]) => /^[a-z][a-z0-9_]{0,40}$/.test(k)).map(([k, v]) => [k, isRec(v) && depth < 1 ? countsOf(v, depth + 1) : numOf(v)]).filter(([, v]) => v !== null)));
+const STAGE_NUMBERS = ["duration_ms", "calls", "missing_usage_calls", "input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens"];
+const stageOf = (st) => ({ stage: enumOf(STAGE_IDS, st?.stage ?? null) ?? "unknown", operation: enumOf(["redo-design"], st?.operation ?? null), status: enumOf(["ok", "failed"], st?.status ?? null), ...Object.fromEntries(STAGE_NUMBERS.map((k) => [k, numOf(st?.[k])])), attempts: countsOf(st?.attempts), retries: countsOf(st?.retries), failure_kind: enumOf(FAILURE_KINDS, st?.failure_kind ?? null) });
+const failureOf = (f) => (!isRec(f) ? null : { stage: enumOf(STAGE_IDS, f.stage ?? null) ?? "unknown", kind: enumOf(FAILURE_KINDS, f.kind ?? null) ?? "unknown", code: f.code === undefined ? null : "present", problems: Array.isArray(f.problems) ? f.problems.length : 0 });
+const SUMMARY_NUMBERS = ["score", "duration_secs", "provider_cost_usd", "directive_round", "exit_code", "budget_remaining_usd", "budget_reserved_usd", "missing_usage_calls"];
+const summaryOf = (s) => ({
+  schema_version: "commandagent.headless-summary/v1", verdict: verdictOf(s.verdict), stop_class: enumOf(STOP_VALUES, s.stop_class), stop_reason: enumOf(STOP_VALUES, s.stop_reason),
+  ...Object.fromEntries(SUMMARY_NUMBERS.map((k) => [k, numOf(s[k])])),
+  stages: Array.isArray(s.stages) ? s.stages.map(stageOf) : [], arbitration: countsOf(s.arbitration), failure: failureOf(s.failure),
+});
+const planCostOf = (c) => (c === null ? null : { schema_version: "musunest-factory/plan-build-cost/v1", plan_usd: numOf(c.plan_usd), build_usd: numOf(c.build_usd), total_usd: numOf(c.total_usd) });
 
 const runOne = (job) => new Promise((resolve) => {
   const dir = dirOf(job);
@@ -281,12 +311,13 @@ const runOne = (job) => new Promise((resolve) => {
     const lines = out.split("\n").map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((x) => x !== null);
     const s = lines.filter((x) => x.schema_version === "commandagent.headless-summary/v1").at(-1) ?? null;
     const planCost = lines.filter((x) => x.schema_version === "musunest-factory/plan-build-cost/v1").at(-1) ?? null;
-    const cost = planCost?.total_usd ?? s?.provider_cost_usd ?? 0;
+    const cost = numOf(planCost?.total_usd) ?? numOf(s?.provider_cost_usd) ?? 0;
     const exitClass = exitClassOf(code, lines);
     exitClasses[exitClass] += 1;
     // 記録は無害化する（#497）：子の出力の写しはバイト数と既知の版の行の数だけ、要約の verdict は既知の値か unknown。生の中身は stdout.log・stderr.log を開く
-    const summary = s === null ? null : { ...s, verdict: verdictOf(s.verdict) };
-    writeFileSync(join(dir, "summary.line.json"), JSON.stringify({ exit: code, wall_s: (Date.now() - t0) / 1000, started_at: startedAt, exit_class: exitClass, summary, plan_cost: planCost, stderr_tail: tailOf(errBuf), stdout_tail: s === null ? tailOf(outBuf) : undefined, resumed: job.resumed === true }, null, 1));
+    // 要約と費用の行は列挙した欄と型だけ（summaryOf・planCostOf）
+    const summary = s === null ? null : summaryOf(s);
+    writeFileSync(join(dir, "summary.line.json"), JSON.stringify({ exit: code, wall_s: (Date.now() - t0) / 1000, started_at: startedAt, exit_class: exitClass, summary, plan_cost: planCostOf(planCost), stderr_tail: tailOf(errBuf), stdout_tail: s === null ? tailOf(outBuf) : undefined, resumed: job.resumed === true }, null, 1));
     spent += cost;
     console.log(`${idOf(job)} effort=${effort}${plan ? " plan" : ""}${planOnly ? " plan-only" : ""}${buildFrom !== null ? " build-from" : ""}${job.resumed ? " resume" : ""} exit=${code} verdict=${s === null ? "none" : verdictOf(s.verdict) ?? "none"} cost=${Number(cost).toFixed(4)} ${Math.round((Date.now() - t0) / 1000)}s total=${spent.toFixed(3)}`);
     resolve();
