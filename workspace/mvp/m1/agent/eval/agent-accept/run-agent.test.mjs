@@ -187,6 +187,19 @@ const HEX64 = /^[0-9a-f]{64}$/;
 /** 出力先のファイルの一覧とバイト列（既存の断りの試験で、何も変わらないことを確かめる。#497） */
 function treeOf(root) { const out = {}; const walk = (d) => { for (const n of readdirSync(d).sort()) { const f = join(d, n); if (statSync(f).isDirectory()) walk(f); else out[relative(root, f)] = readFileSync(f).toString("base64"); } }; walk(root); return out; }
 
+/** 再開の断り：exit 3・期待した符号・出力先の一覧とバイト列が断る前と同じ（子の本数は呼ぶ側が確かめる。#497） */
+function assertResumeRefused(r, code, out, before, label = code) {
+  assert.equal(r.status, 3, `${label}: ${r.stderr}`);
+  assert.ok(r.stderr.includes(`[${code}]`), `${label}: 符号が違う: ${r.stderr}`);
+  assert.deepEqual(treeOf(out), before, `${label}: 出力先が変わった`);
+}
+/** 新しい計測の断り：exit 3・期待した符号・出力先を作らない */
+function assertFreshRefused(r, code, out, label = code) {
+  assert.equal(r.status, 3, `${label}: ${r.stderr}`);
+  assert.ok(r.stderr.includes(`[${code}]`), `${label}: 符号が違う: ${r.stderr}`);
+  assert.ok(!existsSync(out) || readdirSync(out).length === 0, `${label}: 出力先に書いた`);
+}
+
 async function withRepo(fn) {
   const base = mkdtempSync(join(tmpdir(), "run-agent-test-"));
   try { await fn(base, makeRepo(base)); } finally { rmSync(base, { recursive: true, force: true }); }
@@ -384,18 +397,22 @@ test("生成に渡す文書か判定の口の構成が変わると条件が一�
     assert.equal(runAgent(repo, out, args, { FAKE_SPAWN_LOG: log }).status, 0);
     rmSync(join(out, "P2-r1"), { recursive: true, force: true });
     appendFileSync(join(repo, "packages/appspec-schema/vocabulary.yaml"), "#\n");
+    const beforeDoc = treeOf(out);
     const resumed = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
     assert.notEqual(resumed.status, 0);
     assert.match(resumed.stderr, /条件/);
     assert.equal(spawnCount(log), 2);
+    assertResumeRefused(resumed, "resume:signature", out, beforeDoc, "vocabulary");
     // 判定の口の構成：LLM だけで始めた計測を、Jev ありで再開することはできない
     const out2 = join(base, "out-judge");
     assert.equal(runAgent(repo, out2, args, { FAKE_SPAWN_LOG: log }).status, 0);
     rmSync(join(out2, "P2-r1"), { recursive: true, force: true });
+    const beforeJudge = treeOf(out2);
     const resumed2 = runAgent(repo, out2, [...args, "--resume"], { FAKE_SPAWN_LOG: log, JEV_API_KEY: "x" });
     assert.notEqual(resumed2.status, 0);
     assert.match(resumed2.stderr, /条件/);
     assert.equal(spawnCount(log), 4);
+    assertResumeRefused(resumed2, "resume:signature", out2, beforeJudge, "judge");
     // spec-engine の dist・契約・語彙の意味のそれぞれの変更も、署名に残るので再開を断る（変更は積み上がるが、新しい計測は毎回その時点の条件で始める）
     let spawned = 4;
     for (const [name, file] of [["spec-engine", "packages/spec-engine/dist/index.js"], ["contract", "packages/appspec-schema/contract/rules.md"], ["semantics", "packages/appspec-schema/docs/semantics.md"]]) {
@@ -404,10 +421,12 @@ test("生成に渡す文書か判定の口の構成が変わると条件が一�
       spawned += 2;
       rmSync(join(outN, "P2-r1"), { recursive: true, force: true });
       appendFileSync(join(repo, file), "\n");
+      const beforeN = treeOf(outN);
       const resumedN = runAgent(repo, outN, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
       assert.notEqual(resumedN.status, 0, name);
       assert.match(resumedN.stderr, /条件/, name);
       assert.equal(spawnCount(log), spawned, name);
+      assertResumeRefused(resumedN, "resume:signature", outN, beforeN, name);
     }
   });
 });
@@ -424,10 +443,12 @@ test("v1 の条件のファイル（#401）の計測を、今の道具で再開�
     const { spec_engine: _se, prompt_documents: _pd, judge: _j, scoring: _s, set: _set, scripts: _sc, started_at: _t, signature: _sig, ...rest } = v2;
     const measured = { ...rest, schema: "musunest-factory/agent-accept-conditions/v1" };
     writeFileSync(join(out, "conditions.json"), JSON.stringify({ ...measured, started_at: v2.started_at, signature: sha256(JSON.stringify(measured)) }, null, 1));
+    const beforeV1 = treeOf(out);
     const resumed = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
     assert.notEqual(resumed.status, 0);
     assert.match(resumed.stderr, /条件/);
     assert.equal(spawnCount(log), 2);
+    assertResumeRefused(resumed, "resume:signature", out, beforeV1, "v1");
     // 採点の道具は v1 の条件のファイルをそのまま照合できる（score-agent.test.mjs の v1 の例と同じ）
     const c = reconcile(out);
     assert.equal(c.status, "incomplete");
@@ -448,10 +469,12 @@ test("v2 の条件のファイル（#425）の計測を、今の道具で再開�
     const measured = { ...generation, schema: "musunest-factory/agent-accept-conditions/v2" };
     const { budget_usd: _b, ...params } = measured.params;
     writeFileSync(join(out, "conditions.json"), JSON.stringify({ ...measured, scoring: v3.scoring, started_at: v3.started_at, signature: sha256(JSON.stringify({ ...measured, params })) }, null, 1));
+    const beforeV2 = treeOf(out);
     const resumed = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
     assert.notEqual(resumed.status, 0);
     assert.match(resumed.stderr, /保存した条件と今の条件が一致しません/);
     assert.equal(spawnCount(log), 2);
+    assertResumeRefused(resumed, "resume:signature", out, beforeV2, "v2");
     // 採点の道具は v2 の条件のファイルをそのまま照合できる（score-agent.test.mjs の v2 の例と同じ）
     const c = reconcile(out);
     assert.equal(c.status, "incomplete");
@@ -603,10 +626,12 @@ test("依頼文は定義ファイルの本から組み、条件のファイル�
     assert.equal(runAgent(repo, out2, args, { FAKE_SPAWN_LOG: log }).status, 0);
     rmSync(join(out2, "P2-r1"), { recursive: true, force: true });
     appendFileSync(setFile, "\n");
+    const beforeSet = treeOf(out2);
     const resumed = runAgent(repo, out2, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
     assert.notEqual(resumed.status, 0);
     assert.match(resumed.stderr, /条件/);
     assert.equal(spawnCount(log), 2);
+    assertResumeRefused(resumed, "resume:signature", out2, beforeSet, "set");
     const out3 = join(base, "out-script-sig");
     assert.equal(runAgent(repo, out3, args, { FAKE_SPAWN_LOG: log }).status, 0);
     const before = JSON.parse(readFileSync(join(out3, "conditions.json"), "utf8"));
@@ -642,14 +667,17 @@ test("欠けた欄のある定義ファイル・定義に無い ID の --only �
       assert.match(r.stderr, pattern, name);
       assert.ok(!r.stderr.includes("MARK_"), `${name}: 理由に入力の値が出ている`);
       assert.equal(existsSync(join(base, `out-${name}`, "conditions.json")), false, `${name}: 条件のファイルを書かない`);
+      assertFreshRefused(r, "set:invalid", join(base, `out-${name}`), name);
     }
     assert.equal(spawnCount(log), 0);
     const missing = runAgent(repo, join(base, "out-missing"), ["--only", "P1", "--runs", "1", "--set", join(setDir, "none.json")], { FAKE_SPAWN_LOG: log });
     assert.equal(missing.status, 3);
     assert.match(missing.stderr, /定義ファイルが無い/);
+    assertFreshRefused(missing, "set:invalid", join(base, "out-missing"), "missing");
     const unknownOnly = runAgent(repo, join(base, "out-only"), ["--only", "P1,P99", "--runs", "1"], { FAKE_SPAWN_LOG: log });
     assert.equal(unknownOnly.status, 3);
     assert.match(unknownOnly.stderr, /--only に定義ファイル（dev-p1-p10）に無い ID があります: P99/);
+    assertFreshRefused(unknownOnly, "only:unknown", join(base, "out-only"), "only");
     assert.equal(spawnCount(log), 0);
   });
 });
@@ -970,8 +998,10 @@ test("(g) --build-from の事前の検査：写し・包み・組・定義ファ
     }
     // 組のファイルが無い・形が違う
     assertRefused(runAgent(repo, join(base, "out-g-none"), ["--runs", "1", "--build-from", join(base, "none.json")], { FAKE_SPAWN_LOG: log }), "build-from:frozen-missing", log, 0);
+    assertNothingWritten(join(base, "out-g-none"), "frozen-missing");
     writeFileSync(join(base, "bad-fz.json"), JSON.stringify({ schema: "musunest-eval/frozen-plan-set/v1" }));
     assertRefused(runAgent(repo, join(base, "out-g-bad"), ["--runs", "1", "--build-from", join(base, "bad-fz.json")], { FAKE_SPAWN_LOG: log }), "build-from:frozen-invalid", log, 0);
+    assertNothingWritten(join(base, "out-g-bad"), "frozen-invalid");
     // 人の包み：conditions が null、出どころ human・作った人の印 owner
     const human = writeFrozen(join(base, "fz-g-human"), repo, { envelopes: { P1: envelopeOf("P1", { conditions: null }) }, origin: "human", author: "owner" });
     const outH = join(base, "out-g-human");
@@ -982,6 +1012,7 @@ test("(g) --build-from の事前の検査：写し・包み・組・定義ファ
     // 作った人の印の無い人の組は形が違う
     const noAuthor = writeFrozen(join(base, "fz-g-noauthor"), repo, { envelopes: { P1: envelopeOf("P1", { conditions: null }) }, origin: "human" });
     assertRefused(runAgent(repo, join(base, "out-g-noauthor"), ["--runs", "1", "--build-from", noAuthor], { FAKE_SPAWN_LOG: log }), "build-from:frozen-invalid", log, 1);
+    assertNothingWritten(join(base, "out-g-noauthor"), "no-author");
   });
 });
 
@@ -1051,11 +1082,13 @@ test("(l) 漏えい：目印を依頼文・答え（台本）・包みの止ま�
     const stale = writeFrozen(join(base, "fz-l-stale"), repo, { envelopes: { P1: envelopeOf("P1", { source: reqP1, plan: { plan_id: MARK, vocabulary_version: "v1", stale: true, body: [MARK] } }) } });
     const rs = runAgent(repo, join(base, "out-l-stale"), ["--runs", "1", "--build-from", stale], env([]));
     assertRefused(rs, "build-from:envelope-rejected:plan", log, 2, "stale");
+    assertNothingWritten(join(base, "out-l-stale"), "stale");
     noMark("stale", rs.stdout, rs.stderr);
     // 読み取りの失敗：JSON でない包み（目印入り）
     const broken = writeFrozen(join(base, "fz-l-broken"), repo, { envelopes: { P1: Buffer.from(`{${MARK}`) } });
     const rb = runAgent(repo, join(base, "out-l-broken"), ["--runs", "1", "--build-from", broken], env([]));
     assertRefused(rb, "build-from:envelope-unreadable:plan-file-json", log, 2, "broken");
+    assertNothingWritten(join(base, "out-l-broken"), "broken");
     noMark("broken", rb.stdout, rb.stderr);
     // 成功の --build-from（仕様の本体に目印。子は exit 2 と未知の行）：条件・記録に出ない。包みの写しには残る
     const okFz = writeFrozen(join(base, "fz-l-ok"), repo, { envelopes: { P1: envelopeOf("P1", { source: reqP1, plan: { plan_id: "p", vocabulary_version: "v1", body: [MARK] } }) } });
@@ -1114,6 +1147,7 @@ test("指摘 2：既存の断り（--only・定義ファイル）は、改行と
     const markDir = join(base, `${MARK}`);
     const r2 = runAgent(repo, join(base, "out-s2-set"), ["--only", "P1", "--runs", "1", "--set", join(markDir, "none.json")], { FAKE_SPAWN_LOG: log });
     assertRefused(r2, "set:invalid", log, 0, "set");
+    assertNothingWritten(join(base, "out-s2-set"), "set");
     oneLine(r2, "set");
     assert.ok(!r2.stderr.includes(MARK) && !r2.stderr.includes(base), "パスを出さない");
     assert.match(r2.stderr, /定義ファイルが無い/);
@@ -1163,6 +1197,7 @@ test("指摘 3：在るが読めない包み（ディレクトリ）を、新し
     // 組のファイルそのものがディレクトリ：形が違う扱い
     const rd = runAgent(repo, join(base, "out-s3-fzdir"), ["--runs", "1", "--build-from", fzDir], { FAKE_SPAWN_LOG: log });
     assertRefused(rd, "build-from:frozen-invalid", log, 2, "frozen-dir");
+    assertNothingWritten(join(base, "out-s3-fzdir"), "frozen-dir");
     oneLine(rd, "frozen-dir");
   });
 });

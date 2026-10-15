@@ -5,9 +5,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { EVAL_SET_SCHEMA, PLAN_SCRIPT_SCHEMA } from "./score-agent.mjs";
@@ -117,6 +117,22 @@ function measure(repo, out, argv, env = {}) {
   return r;
 }
 const freeze = (repo, out, dest, extra = ["--id", "fz-1", "--version", "1"], env = {}) => runNode(freezeFile, [repo, out, dest, ...extra], env);
+/** ディレクトリのファイルの一覧とバイト列（凍結の断りで、入力の出力先が変わらないことを確かめる） */
+function treeOf(root) { const out = {}; if (!existsSync(root)) return out; const walk = (d) => { for (const n of readdirSync(d).sort()) { const f = join(d, n); if (statSync(f).isDirectory()) walk(f); else out[relative(root, f)] = readFileSync(f).toString("base64"); } }; walk(root); return out; }
+/** 凍結の断り：exit 3・期待した符号・標準エラー 1 行・子 0 本（偽物の工場の起動の記録が増えない）・入力の出力先は不変・組のディレクトリは作らないか元のまま */
+function assertFreezeRefused(base, run, code, { input, dest, destBefore = null, label = code }) {
+  const log = join(base, "spawn-freeze.log"), logBefore = existsSync(log) ? readFileSync(log, "utf8") : null;
+  const before = treeOf(input);
+  const r = run({ FAKE_SPAWN_LOG: log });
+  assert.equal(r.status, 3, `${label}: ${r.stderr}`);
+  assert.ok(r.stderr.includes(`[${code}]`), `${label}: 符号が違う: ${r.stderr}`);
+  assert.equal(r.stderr.trim().split("\n").length, 1, `${label}: 標準エラーが 1 行でない`);
+  assert.equal(existsSync(log) ? readFileSync(log, "utf8") : null, logBefore, `${label}: 子を起こした`);
+  assert.deepEqual(treeOf(input), before, `${label}: 入力の出力先が変わった`);
+  if (destBefore === null) assert.equal(existsSync(dest), false, `${label}: 組のディレクトリを作った`);
+  else assert.deepEqual(treeOf(dest), destBefore, `${label}: 組のディレクトリが変わった`);
+  return r;
+}
 
 test("(k) P ごとに開始の最も早い確定した本を採り（同じ時刻なら回の小さい本）、確定の無い P は missing に入る。Build の記録・納品物・verdict を足しても組はバイト列まで同じで、そのまま --build-from の事前の検査を通る", async () => {
   await withBase(async (base) => {
@@ -220,32 +236,21 @@ test("凍結の断る条件：それぞれ符号つきの exit 3 で、組を書
       cpSync(good, o, { recursive: true });
       tweak(o);
       const dest = join(base, `fz-${name}`);
-      const r = freeze(repo, o, dest);
-      assert.equal(r.status, 3, `${name}: ${r.stderr}`);
-      assert.ok(r.stderr.includes(`[${code}]`), `${name}: ${r.stderr}`);
-      assert.equal(r.stderr.trim().split("\n").length, 1, `${name}: 標準エラーが 1 行でない`);
+      const r = assertFreezeRefused(base, (env) => freeze(repo, o, dest, undefined, env), code, { input: o, dest, label: name });
       assert.ok(!r.stderr.includes(base), `${name}: パスを出した`);
-      assert.equal(existsSync(dest), false, name);
     }
     // 全部の P に確定が無い
     const none = join(base, "plan-none");
     measure(repo, none, ["--only", "P1,P2", "--runs", "2", "--concurrency", "1"], { FAKE_PLAN: JSON.stringify({ "P1-r1": "cannot-confirm", "P1-r2": "stopped", "P2-r1": "none", "P2-r2": "cannot-confirm" }) });
-    const rn = freeze(repo, none, join(base, "fz-none"));
-    assert.equal(rn.status, 3);
+    const rn = assertFreezeRefused(base, (env) => freeze(repo, none, join(base, "fz-none"), undefined, env), "freeze:none-confirmed", { input: none, dest: join(base, "fz-none") });
     assert.match(rn.stderr, /\[freeze:none-confirmed\] count=2/);
-    assert.equal(existsSync(join(base, "fz-none")), false);
     // 出力先が空でない・引数が足りない
     mkdirSync(join(base, "fz-full"));
     writeFileSync(join(base, "fz-full", "x"), "");
-    const rf = freeze(repo, good, join(base, "fz-full"));
-    assert.equal(rf.status, 3);
-    assert.ok(rf.stderr.includes("[freeze:out-not-empty]"));
+    assertFreezeRefused(base, (env) => freeze(repo, good, join(base, "fz-full"), undefined, env), "freeze:out-not-empty", { input: good, dest: join(base, "fz-full"), destBefore: { x: "" } });
     assert.deepEqual(readdirSync(join(base, "fz-full")), ["x"]);
     for (const extra of [["--id", "fz-1"], ["--version", "1"], ["--id", "fz-1", "--version", "x"]]) {
-      const ra = freeze(repo, good, join(base, "fz-args"), extra);
-      assert.equal(ra.status, 3);
-      assert.ok(ra.stderr.includes("[freeze:args]"), ra.stderr);
-      assert.equal(existsSync(join(base, "fz-args")), false);
+      assertFreezeRefused(base, (env) => freeze(repo, good, join(base, "fz-args"), extra, env), "freeze:args", { input: good, dest: join(base, "fz-args"), label: extra.join(" ") });
     }
     // 元の出力は凍結で変わらない（写すだけ）
     assert.equal(freeze(repo, good, join(base, "fz-ok")).status, 0);
@@ -266,8 +271,7 @@ test("(l) 漏えい：依頼文・仕様の本体・止まり方の符号・検�
     const bad = join(base, "plan-eval-stale");
     cpSync(out, bad, { recursive: true });
     edit(join(bad, "P1-r2/bundle/plan-result.json"), (e) => { e.plan.stale = true; });
-    const rs = freeze(repo, bad, join(base, "fz-stale"), undefined, { FAKE_MARK: MARK });
-    assert.equal(rs.status, 3);
+    const rs = assertFreezeRefused(base, (env) => freeze(repo, bad, join(base, "fz-stale"), undefined, { ...env, FAKE_MARK: MARK }), "freeze:envelope-rejected:plan", { input: bad, dest: join(base, "fz-stale") });
     assert.ok(rs.stderr.includes("[freeze:envelope-rejected:plan] ids=P1-r2 count=1"), rs.stderr);
     assert.ok(!rs.stdout.includes(MARK) && !rs.stderr.includes(MARK));
   });
