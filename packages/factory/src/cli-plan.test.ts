@@ -3510,7 +3510,7 @@ async function recompile(plan: ConfirmedPlan): Promise<ConfirmedPlan> {
   return { ...plan, confirmation: { ...plan.confirmation, sha256: await planDigest(plan) } };
 }
 
-/** 包みを組む（`plan-result.json` の形。Issue #495） */
+/** 包みを組む（`plan-result.json` の全欄。人が作る包みでは条件を null にする。Issue #495） */
 async function envelopeOf(plan: unknown, overrides: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
   return {
     schema_version: PLAN_ONLY_RESULT_SCHEMA,
@@ -3519,6 +3519,7 @@ async function envelopeOf(plan: unknown, overrides: Record<string, unknown> = {}
     plan_sha256: await planDigest(plan),
     source_sha256: await sha256Hex(SOURCE_TEXT),
     conditions: null,
+    stop: null,
     ...overrides,
   };
 }
@@ -3770,6 +3771,24 @@ describe("Plan だけを流す口（`--plan-only`。Issue #495）", () => {
     expect(result.plan).toBeNull();
     expect(result.plan_sha256).toBeNull();
     expect(result.stop).toEqual({ kind: "stopped", reason: "deadline", codes: [] });
+  });
+
+  it("(f2) runPlan が予算の停止を返す組は、終了コード 1・仕様 null・止まり方は予算", async () => {
+    const dir = `${directory}/plan-only-budget`;
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const { code } = await runPlanOnly({ dir, extraArgs: ["--budget", "0.000001"] });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const result = await readPlanOnlyResult(dir);
+    expect(result.outcome).toBe("stopped");
+    expect(result.plan).toBeNull();
+    expect(result.plan_sha256).toBeNull();
+    expect(result.source_sha256).toBe(await sha256Hex(SOURCE_TEXT));
+    expect(result.stop).toEqual({ kind: "stopped", reason: "budget", codes: ["requirements"] });
+    expect(result.conditions["budget_usd"]).toBe(0.000001);
+    // 納品物は書かない
+    await expect(fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
   });
 
   it("(g) Plan の記録と点検の診断は、同じ偽物で `--plan` を流したときと等しい（仕様の本体は無い）", async () => {
@@ -4070,6 +4089,105 @@ describe("確定した仕様から Build だけを流す口（`--plan-file`。Is
     expect(genSpy).not.toHaveBeenCalled();
   });
 
+  it("(i3) 包みの全必須欄（入れ子の conditions・stop を含む）を、欄ごとに欠落・型違いで断る", async () => {
+    const plan = await confirmedPlan();
+    const conditions: Record<string, unknown> = {
+      model: "gpt-x",
+      effort: "low",
+      budget_usd: 0.3,
+      deadline_ms: 600_000,
+      timeout_ms: null,
+      vocabulary_version: VOCABULARY_VERSION,
+      prompt_version: PROMPT_VERSION,
+      contract_version: CONTRACT_VERSION,
+      factory_version: FACTORY_VERSION,
+      spec_engine_version: SPEC_ENGINE_VERSION,
+    };
+    const stop: Record<string, unknown> = { kind: "stopped", reason: "budget", codes: [] };
+    const base = await envelopeOf(plan, { conditions });
+    const omit = (record: Record<string, unknown>, key: string): Record<string, unknown> => {
+      const copy = { ...record };
+      delete copy[key];
+      return copy;
+    };
+    const cases: { readonly name: string; readonly envelope: Record<string, unknown>; readonly code: string }[] = [];
+    // 最上位の欄
+    for (const key of ["schema_version", "outcome", "plan", "plan_sha256", "source_sha256", "conditions", "stop"]) {
+      cases.push({ name: `${key} の欠落`, envelope: omit(base, key), code: "plan-file-required" });
+      cases.push({ name: `${key} の型違い`, envelope: { ...base, [key]: 123 }, code: "plan-file-type" });
+    }
+    // conditions の中の欄（型違いはどの欄も真偽値にする）
+    for (const key of Object.keys(conditions)) {
+      cases.push({
+        name: `conditions.${key} の欠落`,
+        envelope: { ...base, conditions: omit(conditions, key) },
+        code: "plan-file-required",
+      });
+      cases.push({
+        name: `conditions.${key} の型違い`,
+        envelope: { ...base, conditions: { ...conditions, [key]: true } },
+        code: "plan-file-type",
+      });
+    }
+    // stop の中の欄
+    for (const key of Object.keys(stop)) {
+      cases.push({
+        name: `stop.${key} の欠落`,
+        envelope: { ...base, stop: omit(stop, key) },
+        code: "plan-file-required",
+      });
+      cases.push({
+        name: `stop.${key} の型違い`,
+        envelope: { ...base, stop: { ...stop, [key]: 123 } },
+        code: "plan-file-type",
+      });
+    }
+    cases.push({ name: "stop.codes の要素の型違い", envelope: { ...base, stop: { ...stop, codes: [1] } }, code: "plan-file-type" });
+    cases.push({ name: "stop.kind が分類の外", envelope: { ...base, stop: { ...stop, kind: "other" } }, code: "plan-file-type" });
+
+    const genSpy = vi.spyOn(runModule, "runGeneration");
+    for (const [index, testCase] of cases.entries()) {
+      const dir = `${directory}/plan-file-field-${index}`;
+      const run = await runPlanFile({ dir, planPath: "plan.json", planText: JSON.stringify(testCase.envelope) });
+      expect(run.code, testCase.name).toBe(EXIT_USAGE);
+      const line = errorLine(run.lines);
+      expect(line, testCase.name).toEqual({ schema_version: PLAN_FILE_ERROR_SCHEMA, code: testCase.code });
+      // client を作らない・Build を流さない・納品物を書かない
+      expect(run.makeClient, testCase.name).not.toHaveBeenCalled();
+      await expect(fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
+    }
+    expect(genSpy).not.toHaveBeenCalled();
+
+    // 同じ包みで欄をすべて正しく持てば、読み取りは通って Build が流れる（上の拒否が欄の検査によることの対照）
+    const ok = await runPlanFile({
+      dir: `${directory}/plan-file-field-ok`,
+      planPath: "plan.json",
+      planText: JSON.stringify(base),
+      recording: createRecordingClient(recordedRunFromPlan()).client,
+    });
+    expect(ok.code).toBe(EXIT_OK);
+    expect(ok.makeClient).toHaveBeenCalledTimes(1);
+  });
+
+  it("(i) `--plan-only` が実際に書き出した停止の包みは、型違いではなく outcome の not-confirmed で断る", async () => {
+    const planDir = `${directory}/plan-file-stopped-source`;
+    const planOnlyRun = await runPlanOnly({ dir: planDir, extraArgs: ["--budget", "0.000001"] });
+    expect(planOnlyRun.code).toBe(EXIT_RUN_FAILED);
+    const planText = await fs.readFile(`${planDir}/${PLAN_ONLY_RESULT_FILE}`, "utf8");
+    const written = JSON.parse(planText) as PlanOnlyResultShape;
+    // 書く側は未確定のとき仕様と SHA を null にする
+    expect(written.outcome).toBe("stopped");
+    expect(written.plan).toBeNull();
+    expect(written.plan_sha256).toBeNull();
+
+    const genSpy = vi.spyOn(runModule, "runGeneration");
+    const run = await runPlanFile({ dir: `${directory}/plan-file-stopped`, planPath: "plan.json", planText });
+    expect(run.code).toBe(EXIT_USAGE);
+    expect(rejectLine(run.lines)).toEqual({ check: "outcome", codes: ["not-confirmed"] });
+    expect(run.makeClient).not.toHaveBeenCalled();
+    expect(genSpy).not.toHaveBeenCalled();
+  });
+
   it("(j) 差し戻しが立つ組では、終了コード 3・記録の差し戻し欄が真・要約と納品物は従来どおり", async () => {
     const dir = `${directory}/plan-file-return`;
     const planPath = `${dir}-plan.json`;
@@ -4139,6 +4257,49 @@ describe("確定した仕様から Build だけを流す口（`--plan-file`。Is
     expect(record.plan_sha256).toBe(envelope["plan_sha256"]);
     expect(record.source_sha256).toBe(await sha256Hex(SOURCE_TEXT));
     expect(record.conditions["budget_usd"]).toBe(0.000001);
+    // 止まり方は予算（要約の停止の分類）
+    const summary = JSON.parse(run.lines.at(-1) ?? "{}") as { stop_class: string | null };
+    expect(summary.stop_class).toBe("budget");
+  });
+
+  it("(j2) Build の締切による納品前の停止は 1 で、記録に条件・2 つの SHA・差し戻し false が入る", async () => {
+    const dir = `${directory}/plan-file-deadline`;
+    const planPath = `${dir}-plan.json`;
+    const envelope = await envelopeOf(await confirmedPlan());
+    // 締切を求める 1 回目だけ 0、そのあとは締切（1 分）を越えた時刻を返す
+    let calls = 0;
+    const now = (): number => (calls++ === 0 ? 0 : 60 * 60_000);
+    const run = await runPlanFile({
+      dir,
+      planPath,
+      planText: JSON.stringify(envelope),
+      extraArgs: ["--deadline", "1", "--model", "gpt-d", "--effort", "low"],
+      recording: createRecordingClient(recordedRunFromPlan()).client,
+      now,
+    });
+
+    expect(run.code).toBe(EXIT_RUN_FAILED);
+    expect(run.code).not.toBe(EXIT_RETURN_TO_PLAN);
+    const summary = JSON.parse(run.lines.at(-1) ?? "{}") as { stop_class: string | null };
+    expect(summary.stop_class).toBe("deadline");
+    await expect(fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
+    const record = await readBuildRecord(dir);
+    expect(record.schema_version).toBe(BUILD_CLI_RECORD_SCHEMA);
+    expect(record.return_to_plan).toBe(false);
+    expect(record.plan_sha256).toBe(envelope["plan_sha256"]);
+    expect(record.source_sha256).toBe(await sha256Hex(SOURCE_TEXT));
+    expect(record.conditions).toEqual({
+      model: "gpt-d",
+      effort: "low",
+      budget_usd: 0.3,
+      deadline_ms: 60_000,
+      timeout_ms: null,
+      vocabulary_version: VOCABULARY_VERSION,
+      prompt_version: PROMPT_VERSION,
+      contract_version: CONTRACT_VERSION,
+      factory_version: FACTORY_VERSION,
+      spec_engine_version: SPEC_ENGINE_VERSION,
+    });
   });
 });
 

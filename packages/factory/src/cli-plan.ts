@@ -1185,13 +1185,15 @@ export type PlanFileErrorCode = (typeof PLAN_FILE_ERROR_CODES)[number];
 
 /**
  * `--plan-file` が読む包み（`plan-result.json` の形。Issue #495）。`plan` は確定した仕様（確定しなければ
- * `null`）。**実行条件は使わない**——Build には今回の `--budget`・`--deadline` を渡す。
+ * `null`）。`plan_sha256` も確定しなければ `null`（書く側の `PlanOnlyResult` とそろえる）。
+ * `conditions` は人が作る包みでは `null`、または値の無い欄を `null` にした写像でよい。
+ * **実行条件は使わない**——Build には今回の `--budget`・`--deadline` を渡す。
  */
 export interface PlanFileEnvelope {
   readonly schema_version: string;
   readonly outcome: string;
   readonly plan: unknown;
-  readonly plan_sha256: string;
+  readonly plan_sha256: string | null;
   readonly source_sha256: string;
 }
 
@@ -1200,9 +1202,71 @@ export type PlanFileParse =
   | { readonly envelope: PlanFileEnvelope }
   | { readonly code: PlanFileErrorCode };
 
+/** 欄の型の検査（`undefined` は欠落として先に断るので、ここには来ない） */
+type FieldCheck = (raw: unknown) => boolean;
+
+const isString: FieldCheck = (raw) => typeof raw === "string";
+const isNullableString: FieldCheck = (raw) => raw === null || typeof raw === "string";
+const isNullableNumber: FieldCheck = (raw) => raw === null || (typeof raw === "number" && Number.isFinite(raw));
+
+/** `conditions` の欄（`PlanCliConditions` の全欄。人が作る包みでは値の無い欄を `null` にしてよい） */
+const CONDITION_FIELDS: readonly (readonly [keyof PlanCliConditions, FieldCheck])[] = [
+  ["model", isNullableString],
+  ["effort", isNullableString],
+  ["budget_usd", isNullableNumber],
+  ["deadline_ms", isNullableNumber],
+  ["timeout_ms", isNullableNumber],
+  ["vocabulary_version", isNullableString],
+  ["prompt_version", isNullableString],
+  ["contract_version", isNullableString],
+  ["factory_version", isNullableString],
+  ["spec_engine_version", isNullableString],
+];
+
+/** `stop` の欄（`PlanOnlyStopRecord` の全欄） */
+const STOP_FIELDS: readonly (readonly [keyof PlanOnlyStopRecord, FieldCheck])[] = [
+  ["kind", (raw) => raw === "cannot-confirm" || raw === "stopped"],
+  ["reason", isNullableString],
+  ["codes", (raw) => Array.isArray(raw) && raw.every((code) => typeof code === "string")],
+];
+
+/** 写像の欄を照らす（欠落があれば `plan-file-required`、型違いがあれば `plan-file-type`。欠落を先に見る） */
+function checkFields(
+  value: Readonly<Record<string, unknown>>,
+  fields: readonly (readonly [string, FieldCheck])[],
+): PlanFileErrorCode | null {
+  if (fields.some(([key]) => value[key] === undefined)) return "plan-file-required";
+  if (fields.some(([key, check]) => !check(value[key]))) return "plan-file-type";
+  return null;
+}
+
+/** null か、欄をすべて持つ写像か（入れ子の写像の検査） */
+function nullableRecord(fields: readonly (readonly [string, FieldCheck])[]): (raw: unknown) => PlanFileErrorCode | null {
+  return (raw) => {
+    if (raw === null) return null;
+    if (!isRecord(raw)) return "plan-file-type";
+    return checkFields(raw, fields);
+  };
+}
+
+const checkConditions = nullableRecord(CONDITION_FIELDS);
+const checkStop = nullableRecord(STOP_FIELDS);
+
+/** 包みの最上位の欄（`PlanOnlyResult` の全欄） */
+const ENVELOPE_FIELDS: readonly (readonly [keyof PlanOnlyResult, FieldCheck])[] = [
+  ["schema_version", isString],
+  ["outcome", isString],
+  ["plan", (raw) => raw === null || isRecord(raw)],
+  ["plan_sha256", isNullableString],
+  ["source_sha256", isString],
+  ["conditions", (raw) => raw === null || isRecord(raw)],
+  ["stop", (raw) => raw === null || isRecord(raw)],
+];
+
 /**
  * 包みの文字列を読む（Issue #495）。JSON でない・写像でない・必須欄が欠ける・型が違うときは、**区別する
- * 固定の符号**を返す（例外の文・入力の値は返さない）。確定した仕様の中身の検査は `validatePlanFile` が行う。
+ * 固定の符号**を返す（例外の文・入力の値は返さない）。最上位の欄を先に照らし、そのあと `conditions`・`stop`
+ * の中の欄を照らす（どれも client を作る前）。確定した仕様の中身の検査は `validatePlanFile` が行う。
  */
 export function parsePlanFile(text: string): PlanFileParse {
   let value: unknown;
@@ -1212,25 +1276,14 @@ export function parsePlanFile(text: string): PlanFileParse {
     return { code: "plan-file-json" };
   }
   if (!isRecord(value)) return { code: "plan-file-envelope" };
-  const strings: readonly [string, unknown][] = [
-    ["schema_version", value["schema_version"]],
-    ["outcome", value["outcome"]],
-    ["plan_sha256", value["plan_sha256"]],
-    ["source_sha256", value["source_sha256"]],
-  ];
-  const missing = strings.find(([, raw]) => raw === undefined);
-  if (missing !== undefined) return { code: "plan-file-required" };
-  const wrongType = strings.find(([, raw]) => typeof raw !== "string");
-  if (wrongType !== undefined) return { code: "plan-file-type" };
-  if (!("plan" in value)) return { code: "plan-file-required" };
-  const plan = value["plan"];
-  if (plan !== null && !isRecord(plan)) return { code: "plan-file-type" };
+  const code = checkFields(value, ENVELOPE_FIELDS) ?? checkConditions(value["conditions"]) ?? checkStop(value["stop"]);
+  if (code !== null) return { code };
   return {
     envelope: {
       schema_version: value["schema_version"] as string,
       outcome: value["outcome"] as string,
-      plan,
-      plan_sha256: value["plan_sha256"] as string,
+      plan: value["plan"],
+      plan_sha256: value["plan_sha256"] as string | null,
       source_sha256: value["source_sha256"] as string,
     },
   };
