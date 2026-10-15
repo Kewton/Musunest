@@ -7,19 +7,42 @@
 //   3. 確定した仕様が生成の `plan` に渡り、Build の予算が全体から Plan の使った額を引いた残りになる
 //   4. 確定できないときは Build を流さず、0 でない終了コードになる
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { API_KEY_ENV, EXIT_RUN_FAILED, EXIT_USAGE, parseCliArguments, runCli } from "./cli.js";
+import { checkConfirmedPlan, planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
+import {
+  API_KEY_ENV,
+  CONTRACT_VERSION,
+  EXIT_OK,
+  EXIT_RETURN_TO_PLAN,
+  EXIT_RUN_FAILED,
+  EXIT_USAGE,
+  FACTORY_VERSION,
+  PROMPT_VERSION,
+  SPEC_ENGINE_VERSION,
+  VOCABULARY_VERSION,
+  parseCliArguments,
+  runCli,
+} from "./cli.js";
 import * as runModule from "./run.js";
+import * as planRunModule from "./plan/run-plan.js";
+import { BUNDLE_MANIFEST_FILE, VERIFICATION_FILE } from "./bundle.js";
 import {
   AUTO_BUILD_LINE,
+  BUILD_CLI_RECORD_FILE,
+  BUILD_CLI_RECORD_SCHEMA,
   FREE_TEXT_INPUT,
   PLAN_CLI_RECORD_FILE,
   PLAN_CLI_RECORD_SCHEMA,
+  PLAN_ONLY_RESULT_FILE,
+  PLAN_ONLY_RESULT_SCHEMA,
   PLAN_SURFACE_CHECK_FILE,
+  PLAN_FILE_ERROR_SCHEMA,
+  PLAN_FILE_REJECT_SCHEMA,
   RECOMMENDED_INPUT,
   createAnswersFilePlanResponder,
   createInteractivePlanResponder,
   createPlanTranscript,
   parsePlanAnswers,
+  sha256Hex,
   type Terminal,
 } from "./cli-plan.js";
 import { createFakeJudge } from "./judge-fake.js";
@@ -59,7 +82,7 @@ import {
   SOURCE_TEXT,
 } from "./stages/__tests__/prompt.js";
 import { ATTEMPT_KEYS, RETRY_KEYS } from "./record.js";
-import { recordedRunFromPlan, structured } from "./__tests__/run.js";
+import { CONFIRMED_PLAN, CONFIRMED_PLAN_ACCEPTED, recordedRun, recordedRunFromPlan, structured } from "./__tests__/run.js";
 
 interface NodeFs {
   mkdtemp(prefix: string): Promise<string>;
@@ -3357,5 +3380,977 @@ describe("Plan の記録に、事項の流れ・残りの事項・P6 の覆い�
     expect(record.confirm_coverage).toEqual([]);
     // P2 の診断は止まるまでの分（初回＋やり直し）を持つ
     expect(record.requirements_diagnosis.rounds).toHaveLength(2);
+  });
+});
+
+// ── Plan だけの口（`--plan-only`。Issue #495）────────────────────
+
+/** Plan だけを流す記録（①→①'→P3→P4→差分の P3。Build の記録は無い） */
+function planOnlyRecording(): ReturnType<typeof createRecordingClient> {
+  return createRecordingClient([
+    structured(REQUIREMENT_LIST_OUTPUT),
+    structured(REVERSE_CHECK_OUTPUT),
+    structured(SURFACE_THREE),
+    structured(QUESTIONS_THREE),
+    structured(SURFACE_CLEAR),
+  ]);
+}
+
+/** 3 問に答えて確定する偽物の判定（対話の形で使う） */
+function planOnlyJudge(): Judge {
+  return createFakeJudge({
+    ...catalogAnswers(),
+    ...coverAnswers(["A:Q1-1", "A:Q1-2", "A:Q1-3"]),
+    [freeTextQuestionName("A:Q1-3")]: {
+      kind: "choice",
+      choice: "new-requirement",
+      probabilities: undefined,
+      probability: undefined,
+      confidence: 0.9,
+    },
+  });
+}
+
+/** 端末で 3 問に答え、確認で「これで作る」 */
+const PLAN_ONLY_TERMINAL_LINES = ["1", RECOMMENDED_INPUT, FREE_TEXT_INPUT, "全員で数える", "これで作る"] as const;
+
+/** 問いが出ない組で、確認だけ「これで作る」と答える端末 */
+const CONFIRM_ONLY_TERMINAL_LINES = ["これで作る"] as const;
+
+/** 問いを出さずに確定する Plan の記録（P3 は曖昧さ 0 件。仕様は原文の要件だけを持つ） */
+function planOnlyCleanRecording(): ReturnType<typeof createRecordingClient> {
+  return createRecordingClient([
+    structured(REQUIREMENT_LIST_OUTPUT),
+    structured(REVERSE_CHECK_OUTPUT),
+    structured(SURFACE_CLEAR),
+  ]);
+}
+
+/** 問いを出さずに確定する偽物の判定（目録の問いと、確認の覆いに答える） */
+function cleanJudge(): Judge {
+  return createFakeJudge({ ...catalogAnswers(), ...coverAnswers([]) });
+}
+
+/** 問いを出さずに確定する `--plan`（Plan→Build が通しで完走する） */
+function planThenBuildCleanRecording(): ReturnType<typeof createRecordingClient> {
+  return createRecordingClient([
+    structured(REQUIREMENT_LIST_OUTPUT),
+    structured(REVERSE_CHECK_OUTPUT),
+    structured(SURFACE_CLEAR),
+    ...recordedRunFromPlan(),
+  ]);
+}
+
+interface PlanOnlyResultShape {
+  readonly schema_version: string;
+  readonly outcome: string;
+  readonly plan: ConfirmedPlan | null;
+  readonly plan_sha256: string | null;
+  readonly source_sha256: string;
+  readonly conditions: Record<string, unknown>;
+  readonly stop: { readonly kind: string; readonly reason: string | null; readonly codes: readonly string[] } | null;
+}
+
+async function readPlanOnlyResult(dir: string): Promise<PlanOnlyResultShape> {
+  return JSON.parse(await fs.readFile(`${dir}/${PLAN_ONLY_RESULT_FILE}`, "utf8")) as PlanOnlyResultShape;
+}
+
+interface BuildRecordShape {
+  readonly schema_version: string;
+  readonly conditions: Record<string, unknown>;
+  readonly plan_sha256: string;
+  readonly source_sha256: string;
+  readonly return_to_plan: boolean;
+}
+
+async function readBuildRecord(dir: string): Promise<BuildRecordShape> {
+  return JSON.parse(await fs.readFile(`${dir}/${BUILD_CLI_RECORD_FILE}`, "utf8")) as BuildRecordShape;
+}
+
+/** `--plan-only` を 1 回流す（偽物の LLM・判定・端末で閉じる） */
+async function runPlanOnly(input: {
+  readonly dir: string;
+  readonly extraArgs?: readonly string[];
+  readonly readFile?: (path: string) => Promise<string>;
+  readonly recording?: LlmClient;
+  readonly judge?: Judge;
+  readonly terminal?: FakeTerminal;
+  readonly now?: () => number;
+  readonly deadlineMs?: number;
+}): Promise<{ readonly code: number; readonly lines: readonly string[] }> {
+  const lines: string[] = [];
+  const code = await runCli({
+    argv: ["--", "request.txt", "--out", input.dir, "--plan-only", ...(input.extraArgs ?? [])],
+    env: { [API_KEY_ENV]: "sk-FAKE" },
+    readFile: input.readFile ?? (async () => SOURCE_TEXT),
+    writeFile: async (path, text) => {
+      await fs.writeFile(path, text, "utf8");
+    },
+    makeDirectory: async (path) => {
+      await fs.mkdir(path, { recursive: true });
+    },
+    loadDocuments: async () => [],
+    makeClient: () => (input.recording ?? planOnlyRecording().client),
+    makeLlmJudge: () => input.judge ?? planOnlyJudge(),
+    now: input.now ?? (() => 0),
+    terminal: input.terminal ?? fakeTerminal([...PLAN_ONLY_TERMINAL_LINES]),
+    ...(input.deadlineMs === undefined ? {} : { deadlineMs: input.deadlineMs }),
+    log: (line) => lines.push(line),
+  });
+  return { code, lines };
+}
+
+/** 確定した仕様（確認の SHA を内容に合わせて組んだもの）を作る */
+async function confirmedPlan(): Promise<ConfirmedPlan> {
+  return { ...CONFIRMED_PLAN, confirmation: { ...CONFIRMED_PLAN.confirmation, sha256: await planDigest(CONFIRMED_PLAN) } };
+}
+
+/** 内容が変わった仕様の確認 SHA を、内容に合わせて組み直す（SHA の不一致で逃がさない） */
+async function recompile(plan: ConfirmedPlan): Promise<ConfirmedPlan> {
+  return { ...plan, confirmation: { ...plan.confirmation, sha256: await planDigest(plan) } };
+}
+
+/** 包みを組む（`plan-result.json` の全欄。人が作る包みでは条件を null にする。Issue #495） */
+async function envelopeOf(plan: unknown, overrides: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  return {
+    schema_version: PLAN_ONLY_RESULT_SCHEMA,
+    outcome: "confirmed",
+    plan,
+    plan_sha256: await planDigest(plan),
+    source_sha256: await sha256Hex(SOURCE_TEXT),
+    conditions: null,
+    stop: null,
+    ...overrides,
+  };
+}
+
+/** 包みから 1 つの欄を落とす */
+function without(key: string, plan: ConfirmedPlan): Record<string, unknown> {
+  const copy: Record<string, unknown> = { ...plan };
+  delete copy[key];
+  return copy;
+}
+
+/** 断った検査の名前と問題の符号を、出した行から読む */
+function rejectLine(lines: readonly string[]): { readonly check: string; readonly codes: readonly string[] } {
+  const parsed = lines
+    .map((line) => {
+      try {
+        return JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    })
+    .filter((value): value is Record<string, unknown> => value !== null)
+    .find((value) => value["schema_version"] === PLAN_FILE_REJECT_SCHEMA);
+  if (parsed === undefined) throw new Error("断った検査の行がありません");
+  return { check: String(parsed["check"]), codes: parsed["codes"] as readonly string[] };
+}
+
+/** 包みの読み取りの失敗の行を読む */
+function errorLine(lines: readonly string[]): Record<string, unknown> {
+  const parsed = lines
+    .map((line) => {
+      try {
+        return JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    })
+    .filter((value): value is Record<string, unknown> => value !== null)
+    .find((value) => value["schema_version"] === PLAN_FILE_ERROR_SCHEMA);
+  if (parsed === undefined) throw new Error("読み取りの誤りの行がありません");
+  return parsed;
+}
+
+/** `--plan-file` を 1 回流す（偽物で閉じる） */
+async function runPlanFile(input: {
+  readonly dir: string;
+  readonly planPath: string;
+  readonly planText: string;
+  readonly requestText?: string;
+  readonly extraArgs?: readonly string[];
+  readonly recording?: LlmClient;
+  readonly now?: () => number;
+  readonly readThrows?: string;
+}): Promise<{
+  readonly code: number;
+  readonly lines: readonly string[];
+  readonly makeClient: ReturnType<typeof vi.fn>;
+}> {
+  const lines: string[] = [];
+  const recording = input.recording;
+  const client = vi.fn(() => recording ?? createRecordingClient([]).client);
+  const code = await runCli({
+    argv: ["--", "request.txt", "--out", input.dir, "--plan-file", input.planPath, ...(input.extraArgs ?? [])],
+    env: { [API_KEY_ENV]: "sk-FAKE" },
+    readFile: async (path) => {
+      if (path === input.planPath) {
+        if (input.readThrows !== undefined) throw new Error(input.readThrows);
+        return input.planText;
+      }
+      return input.requestText ?? SOURCE_TEXT;
+    },
+    writeFile: async (path, text) => {
+      await fs.writeFile(path, text, "utf8");
+    },
+    makeDirectory: async (path) => {
+      await fs.mkdir(path, { recursive: true });
+    },
+    loadDocuments: async () => [],
+    makeClient: client,
+    makeLlmJudge: () => createFakeJudge({}),
+    ...(input.now === undefined ? {} : { now: input.now }),
+    log: (line) => lines.push(line),
+  });
+  return { code, lines, makeClient: client };
+}
+
+describe("Plan だけを流す口（`--plan-only`。Issue #495）", () => {
+  it("(d) 確定する組では runGeneration を呼ばず、仕様と 2 つの SHA・使った条件を書く", async () => {
+    const dir = `${directory}/plan-only-confirmed`;
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const { code } = await runPlanOnly({
+      dir,
+      extraArgs: ["--budget", "0.4", "--deadline", "3", "--timeout", "2", "--model", "gpt-x", "--effort", "low"],
+    });
+
+    expect(code).toBe(EXIT_OK);
+    // Build は流さない
+    expect(spy).not.toHaveBeenCalled();
+    // 納品物（manifest）は書かない
+    await expect(fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
+
+    const result = await readPlanOnlyResult(dir);
+    expect(result.schema_version).toBe(PLAN_ONLY_RESULT_SCHEMA);
+    expect(result.outcome).toBe("confirmed");
+    expect(result.stop).toBeNull();
+    const plan = result.plan as ConfirmedPlan;
+    expect(await checkConfirmedPlan(plan)).toEqual([]);
+    expect(result.plan_sha256).toBe(await planDigest(plan));
+    expect(result.plan_sha256).toBe(plan.confirmation.sha256);
+    expect(result.source_sha256).toBe(await sha256Hex(SOURCE_TEXT));
+    expect(result.conditions).toEqual({
+      model: "gpt-x",
+      effort: "low",
+      budget_usd: 0.4,
+      deadline_ms: 3 * 60_000,
+      timeout_ms: 2 * 60_000,
+      vocabulary_version: VOCABULARY_VERSION,
+      prompt_version: PROMPT_VERSION,
+      contract_version: CONTRACT_VERSION,
+      factory_version: FACTORY_VERSION,
+      spec_engine_version: SPEC_ENGINE_VERSION,
+    });
+  });
+
+  it("(e) 確定できない組と止まる組は、終了コード 1・仕様 null・止まり方の分類だけ（値は含まない）", async () => {
+    const badAnswers = JSON.stringify({
+      "Q1-1": { choiceId: "nope" },
+      "Q1-2": { choiceId: "nope" },
+      "Q1-3": { choiceId: "nope" },
+      "Q2-1": { choiceId: "nope" },
+      "Q2-2": { choiceId: "nope" },
+      "Q2-3": { choiceId: "nope" },
+      "Q3-1": { choiceId: "nope" },
+      "Q3-2": { choiceId: "nope" },
+      "Q3-3": { choiceId: "nope" },
+    });
+
+    // 確定できない（受け付けられない答えで上限まで往復する）
+    const cannotDir = `${directory}/plan-only-cannot`;
+    const cannotRecording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured(QUESTIONS_THREE),
+      structured(QUESTIONS_THREE),
+      structured(QUESTIONS_THREE),
+    ]);
+    const cannot = await runPlanOnly({
+      dir: cannotDir,
+      extraArgs: ["--answers", "bad.json"],
+      readFile: async (path) => (path === "bad.json" ? badAnswers : SOURCE_TEXT),
+      recording: cannotRecording.client,
+      judge: createFakeJudge(catalogAnswers()),
+    });
+    expect(cannot.code).toBe(EXIT_RUN_FAILED);
+    const cannotResult = await readPlanOnlyResult(cannotDir);
+    expect(cannotResult.outcome).toBe("cannot-confirm");
+    expect(cannotResult.plan).toBeNull();
+    expect(cannotResult.plan_sha256).toBeNull();
+    expect(cannotResult.stop).toEqual({ kind: "cannot-confirm", reason: null, codes: ["round-trip-limit"] });
+
+    // 段の失敗で止まる
+    const failedDir = `${directory}/plan-only-failed`;
+    const failedRecording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_THREE),
+      structured({ questions: "並びでない" }),
+      structured({ questions: "並びでない" }),
+    ]);
+    const failed = await runPlanOnly({
+      dir: failedDir,
+      extraArgs: ["--answers", "empty.json"],
+      readFile: async (path) => (path === "empty.json" ? JSON.stringify({}) : SOURCE_TEXT),
+      recording: failedRecording.client,
+      judge: createFakeJudge(catalogAnswers()),
+    });
+    expect(failed.code).toBe(EXIT_RUN_FAILED);
+    const failedResult = await readPlanOnlyResult(failedDir);
+    expect(failedResult.outcome).toBe("stopped");
+    expect(failedResult.plan).toBeNull();
+    expect(failedResult.stop).toEqual({ kind: "stopped", reason: "malformed", codes: ["shape"] });
+
+    // 確認で止める
+    const declinedDir = `${directory}/plan-only-declined`;
+    const declined = await runPlanOnly({
+      dir: declinedDir,
+      terminal: fakeTerminal(["1", RECOMMENDED_INPUT, FREE_TEXT_INPUT, "全員で数える", "n"]),
+    });
+    expect(declined.code).toBe(EXIT_RUN_FAILED);
+    const declinedResult = await readPlanOnlyResult(declinedDir);
+    expect(declinedResult.outcome).toBe("stopped");
+    expect(declinedResult.stop).toEqual({ kind: "stopped", reason: "declined", codes: [] });
+
+    // 誤りの文・原文の文を写さない
+    const text = JSON.stringify({
+      cannot: cannotResult,
+      failed: failedResult,
+      declined: declinedResult,
+    });
+    expect(text).not.toContain(SOURCE_TEXT.slice(0, 4));
+    expect(text).not.toContain("並びでない");
+  });
+
+  it("(f) Plan で予算を使い切って確定した組でも、終了コード 0 で仕様を書く", async () => {
+    const dir = `${directory}/plan-only-spent`;
+    const base = planOnlyJudge();
+    // P6 の覆いの判定（最後の判定の呼び出し）で、実際の費用が予約を大きく超える——予算を使い切って残りが負になる
+    const judge: Judge = {
+      async judge(request) {
+        const response = await base.judge(request);
+        if (Object.keys(request.questions).some((name) => name.startsWith("cover:"))) {
+          return {
+            ...response,
+            answeredBy: "llm",
+            usage: { inputTokens: 1_000_000_000, cachedInputTokens: 0, outputTokens: 0, reasoningTokens: 0 },
+          };
+        }
+        return response;
+      },
+    };
+    const { code } = await runPlanOnly({ dir, judge });
+
+    expect(code).toBe(EXIT_OK);
+    const result = await readPlanOnlyResult(dir);
+    expect(result.outcome).toBe("confirmed");
+    expect(result.plan).not.toBeNull();
+    // 予算を使い切っている（残りは 0 以下）
+    const record = await readPlanRecord(dir);
+    expect(record.remaining_usd).toBeLessThanOrEqual(0);
+  });
+
+  it("(f2) runPlan が停止を返す組（確定の直前の締切）は、終了コード 1・仕様 null のまま", async () => {
+    const dir = `${directory}/plan-only-deadline`;
+    let clock = 0;
+    const base = planOnlyJudge();
+    // P6 の覆いの判定（`cover:`）が締切を越えて返る——確定の直前の締切の検査が働く（Issue #432 と同じ）
+    const judge: Judge = {
+      async judge(request) {
+        if (Object.keys(request.questions).some((name) => name.startsWith("cover:"))) clock = 1001;
+        return base.judge(request);
+      },
+    };
+    const { code } = await runPlanOnly({ dir, judge, deadlineMs: 1000, now: () => clock });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    const result = await readPlanOnlyResult(dir);
+    expect(result.outcome).toBe("stopped");
+    expect(result.plan).toBeNull();
+    expect(result.plan_sha256).toBeNull();
+    expect(result.stop).toEqual({ kind: "stopped", reason: "deadline", codes: [] });
+  });
+
+  it("(f2) runPlan が予算の停止を返す組は、終了コード 1・仕様 null・止まり方は予算", async () => {
+    const dir = `${directory}/plan-only-budget`;
+    const spy = vi.spyOn(runModule, "runGeneration");
+    const { code } = await runPlanOnly({ dir, extraArgs: ["--budget", "0.000001"] });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    expect(spy).not.toHaveBeenCalled();
+    const result = await readPlanOnlyResult(dir);
+    expect(result.outcome).toBe("stopped");
+    expect(result.plan).toBeNull();
+    expect(result.plan_sha256).toBeNull();
+    expect(result.source_sha256).toBe(await sha256Hex(SOURCE_TEXT));
+    expect(result.stop).toEqual({ kind: "stopped", reason: "budget", codes: ["requirements"] });
+    expect(result.conditions["budget_usd"]).toBe(0.000001);
+    // 納品物は書かない
+    await expect(fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
+  });
+
+  it("(g) Plan の記録と点検の診断は、同じ偽物で `--plan` を流したときと等しい（仕様の本体は無い）", async () => {
+    const onlyDir = `${directory}/plan-only-record`;
+    const only = await runPlanOnly({ dir: onlyDir });
+    expect(only.code).toBe(EXIT_OK);
+
+    const planDir = `${directory}/plan-record-compare`;
+    const recording = planThenBuildRecording();
+    await runCli({
+      argv: ["--", "request.txt", "--out", planDir, "--plan"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => planOnlyJudge(),
+      now: () => 0,
+      terminal: fakeTerminal([...PLAN_ONLY_TERMINAL_LINES]),
+      log: () => {},
+    });
+
+    const onlyRecordText = await fs.readFile(`${onlyDir}/${PLAN_CLI_RECORD_FILE}`, "utf8");
+    const planRecordText = await fs.readFile(`${planDir}/${PLAN_CLI_RECORD_FILE}`, "utf8");
+    expect(JSON.parse(onlyRecordText)).toEqual(JSON.parse(planRecordText));
+    expect(await fs.readFile(`${onlyDir}/${PLAN_SURFACE_CHECK_FILE}`, "utf8")).toBe(
+      await fs.readFile(`${planDir}/${PLAN_SURFACE_CHECK_FILE}`, "utf8"),
+    );
+    // Plan の記録に、仕様の本体・SHA は無い
+    expect(onlyRecordText).not.toContain("musunest.plan-spec/v1");
+    expect(onlyRecordText).not.toContain("plan_sha256");
+  });
+});
+
+describe("確定した仕様から Build だけを流す口（`--plan-file`。Issue #495）", () => {
+  it("(h) (d) の出力を渡すと runPlan を呼ばず、同じ仕様・全額・締切で Build だけが流れる", async () => {
+    const planDir = `${directory}/plan-file-source`;
+    const planOnlyRun = await runPlanOnly({
+      dir: planDir,
+      recording: planOnlyCleanRecording().client,
+      judge: cleanJudge(),
+      terminal: fakeTerminal([...CONFIRM_ONLY_TERMINAL_LINES]),
+    });
+    const result = await readPlanOnlyResult(planDir);
+    expect(planOnlyRun.code).toBe(EXIT_OK);
+
+    const buildDir = `${directory}/plan-file-build`;
+    const planPath = `${planDir}/${PLAN_ONLY_RESULT_FILE}`;
+    const planSpy = vi.spyOn(planRunModule, "runPlan");
+    const genSpy = vi.spyOn(runModule, "runGeneration");
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", buildDir, "--plan-file", planPath, "--budget", "0.5", "--deadline", "2"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async (path) => (path === planPath ? JSON.stringify(result) : SOURCE_TEXT),
+      writeFile: async (path, text) => {
+        await fs.writeFile(path, text, "utf8");
+      },
+      makeDirectory: async (path) => {
+        await fs.mkdir(path, { recursive: true });
+      },
+      loadDocuments: async () => [],
+      makeClient: () => createRecordingClient(recordedRunFromPlan()).client,
+      makeLlmJudge: () => createFakeJudge({}),
+      now: () => 1000,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_OK);
+    expect(planSpy).not.toHaveBeenCalled();
+    const call = genSpy.mock.calls[0]?.[0];
+    expect(call?.plan).toEqual(result.plan);
+    // 予算は --budget の全額、締切は --deadline から求めたもの（Plan の分を引かない）
+    expect(call?.budgetUsd).toBe(0.5);
+    expect(call?.deadline).toBe(1000 + 2 * 60_000);
+
+    // 納品物の仕様の SHA と manifest の SHA が plan_sha256 に等しい
+    const manifest = JSON.parse(await fs.readFile(`${buildDir}/${BUNDLE_MANIFEST_FILE}`, "utf8")) as Record<string, unknown>;
+    expect(manifest["plan_sha256"]).toBe(result.plan_sha256);
+    const verification = JSON.parse(await fs.readFile(`${buildDir}/${VERIFICATION_FILE}`, "utf8")) as Record<string, unknown>;
+    expect(verification["plan_sha256"]).toBe(result.plan_sha256);
+  });
+
+  it("(h2) 人が作った正しい仕様の包み（条件 null）でも Build だけが流れ、記録に今回の条件が入る", async () => {
+    const dir = `${directory}/plan-file-hand`;
+    const planPath = `${dir}-plan.json`;
+    const envelope = await envelopeOf(await confirmedPlan());
+    const genSpy = vi.spyOn(runModule, "runGeneration");
+    const run = await runPlanFile({
+      dir,
+      planPath,
+      planText: JSON.stringify(envelope),
+      extraArgs: ["--budget", "0.7", "--deadline", "4", "--timeout", "1", "--model", "gpt-h", "--effort", "low"],
+      recording: createRecordingClient(recordedRunFromPlan()).client,
+    });
+
+    expect(run.code).toBe(EXIT_OK);
+    expect(genSpy).toHaveBeenCalledTimes(1);
+    const record = await readBuildRecord(dir);
+    expect(record.schema_version).toBe(BUILD_CLI_RECORD_SCHEMA);
+    expect(record.return_to_plan).toBe(false);
+    expect(record.plan_sha256).toBe(envelope["plan_sha256"]);
+    expect(record.source_sha256).toBe(await sha256Hex(SOURCE_TEXT));
+    expect(record.conditions).toEqual({
+      model: "gpt-h",
+      effort: "low",
+      budget_usd: 0.7,
+      deadline_ms: 4 * 60_000,
+      timeout_ms: 60_000,
+      vocabulary_version: VOCABULARY_VERSION,
+      prompt_version: PROMPT_VERSION,
+      contract_version: CONTRACT_VERSION,
+      factory_version: FACTORY_VERSION,
+      spec_engine_version: SPEC_ENGINE_VERSION,
+    });
+    // (k) 原文の文と答えを含まない
+    expect(JSON.stringify(record)).not.toContain(SOURCE_TEXT.slice(0, 4));
+  });
+
+  it("(i) 包みと仕様の検査に通らない組は、client を作らず 2 で終わり、検査の名前と符号だけを出す", async () => {
+    const plan = await confirmedPlan();
+    const changed = {
+      ...plan,
+      requirements: plan.requirements.map((requirement, index) =>
+        index === 0 ? { ...requirement, text: "確認のあとに変えた" } : requirement,
+      ),
+    };
+    const cases: readonly {
+      readonly name: string;
+      readonly envelope: Record<string, unknown>;
+      readonly check: string;
+      readonly code: string;
+    }[] = [
+      { name: "確認の失効", envelope: await envelopeOf(changed), check: "plan", code: "confirmation_expired" },
+      {
+        name: "plan_sha256 の不一致",
+        envelope: await envelopeOf(plan, { plan_sha256: "0".repeat(64) }),
+        check: "plan-sha256",
+        code: "mismatch",
+      },
+      {
+        name: "依頼文の 1 文字違い",
+        envelope: await envelopeOf(plan, { source_sha256: await sha256Hex(`${SOURCE_TEXT}。`) }),
+        check: "source-sha256",
+        code: "mismatch",
+      },
+      {
+        name: "語彙の版の違い",
+        envelope: await envelopeOf(await recompile({ ...plan, vocabulary_version: "v2" })),
+        check: "vocabulary",
+        code: "mismatch",
+      },
+      {
+        name: "包みの版の違い",
+        envelope: await envelopeOf(plan, { schema_version: "musunest-factory/plan-only-result/v9" }),
+        check: "envelope-version",
+        code: "mismatch",
+      },
+      {
+        name: "確定でない包み",
+        envelope: await envelopeOf(plan, { outcome: "stopped" }),
+        check: "outcome",
+        code: "not-confirmed",
+      },
+    ];
+
+    const genSpy = vi.spyOn(runModule, "runGeneration");
+    for (const testCase of cases) {
+      const run = await runPlanFile({
+        dir: `${directory}/plan-file-reject-${testCase.check}-${testCase.code}`,
+        planPath: "plan.json",
+        planText: JSON.stringify(testCase.envelope),
+      });
+      expect(run.code, testCase.name).toBe(EXIT_USAGE);
+      const rejection = rejectLine(run.lines);
+      expect(rejection.check, testCase.name).toBe(testCase.check);
+      expect(rejection.codes, testCase.name).toContain(testCase.code);
+      // client を作らない（API を呼ばない）
+      expect(run.makeClient, testCase.name).not.toHaveBeenCalled();
+    }
+    expect(genSpy).not.toHaveBeenCalled();
+  });
+
+  it("(i2) 仕様の形・参照・了承・解決・未解決の誤りを拒否し、対応する符号を出す（SHA で逃がさない）", async () => {
+    const plan = await confirmedPlan();
+    const accepted = await recompile(CONFIRMED_PLAN_ACCEPTED);
+    const cases: readonly { readonly name: string; readonly envelope: Record<string, unknown>; readonly code: string }[] = [
+      { name: "確認の欄の欠落", envelope: await envelopeOf(without("confirmation", plan)), code: "shape" },
+      {
+        name: "仕様契約の版の違い",
+        envelope: await envelopeOf(await recompile({ ...plan, schema_version: "musunest.plan-spec/v9" })),
+        code: "shape",
+      },
+      {
+        name: "実在しない参照",
+        envelope: await envelopeOf(
+          await recompile({
+            ...plan,
+            requirements: plan.requirements.map((requirement, index) =>
+              index === 0 ? { ...requirement, origin: { ...requirement.origin, input_id: "nope" } } : requirement,
+            ),
+          }),
+        ),
+        code: "unknown_reference",
+      },
+      {
+        name: "了承した部分の範囲の違い",
+        envelope: await envelopeOf(
+          await recompile({
+            ...accepted,
+            accepted_unwritable: accepted.accepted_unwritable.map((entry) => ({ ...entry, part_id: "nope" })),
+          }),
+        ),
+        code: "accepted_outside_parts",
+      },
+      {
+        name: "解決の根拠の欠落",
+        envelope: await envelopeOf(
+          await recompile({
+            ...plan,
+            open_issues: [{ id: "OI-1", text: "未解決", critical: false, status: "resolved" }],
+          }),
+        ),
+        code: "resolution_without_basis",
+      },
+      {
+        name: "重大な未解決",
+        envelope: await envelopeOf(
+          await recompile({
+            ...plan,
+            open_issues: [{ id: "OI-1", text: "重大", critical: true, status: "open" }],
+          }),
+        ),
+        code: "open_critical",
+      },
+      {
+        name: "重大でない未解決",
+        envelope: await envelopeOf(
+          await recompile({
+            ...plan,
+            open_issues: [{ id: "OI-1", text: "非重大", critical: false, status: "open" }],
+          }),
+        ),
+        code: "open_issue",
+      },
+    ];
+
+    const genSpy = vi.spyOn(runModule, "runGeneration");
+    for (const [index, testCase] of cases.entries()) {
+      const run = await runPlanFile({
+        dir: `${directory}/plan-file-spec-${index}`,
+        planPath: "plan.json",
+        planText: JSON.stringify(testCase.envelope),
+      });
+      expect(run.code, testCase.name).toBe(EXIT_USAGE);
+      const rejection = rejectLine(run.lines);
+      expect(rejection.check, testCase.name).toBe("plan");
+      expect(rejection.codes, testCase.name).toContain(testCase.code);
+      expect(run.makeClient, testCase.name).not.toHaveBeenCalled();
+    }
+    expect(genSpy).not.toHaveBeenCalled();
+  });
+
+  it("(i3) 読めない・JSON でない・写像でない・必須欄の欠け・型の違いを、固定の符号だけで断る", async () => {
+    const envelope = await envelopeOf(await confirmedPlan());
+    const cases: readonly { readonly name: string; readonly planText: string; readonly readThrows?: string; readonly code: string }[] = [
+      { name: "読めない", planText: "", readThrows: "ENOENT: no such file /secret/plan.json", code: "plan-file-read" },
+      { name: "JSON でない", planText: "これは JSON ではない", code: "plan-file-json" },
+      { name: "写像でない", planText: JSON.stringify(["a"]), code: "plan-file-envelope" },
+      {
+        name: "必須欄の欠け",
+        planText: JSON.stringify({ ...envelope, plan_sha256: undefined }),
+        code: "plan-file-required",
+      },
+      { name: "型の違い", planText: JSON.stringify({ ...envelope, plan_sha256: 123 }), code: "plan-file-type" },
+    ];
+
+    const genSpy = vi.spyOn(runModule, "runGeneration");
+    for (const [index, testCase] of cases.entries()) {
+      const planPath = `/nope/plan-${index}.json`;
+      const run = await runPlanFile({
+        dir: `${directory}/plan-file-error-${index}`,
+        planPath,
+        planText: testCase.planText,
+        ...(testCase.readThrows === undefined ? {} : { readThrows: testCase.readThrows }),
+      });
+      expect(run.code, testCase.name).toBe(EXIT_USAGE);
+      const line = errorLine(run.lines);
+      expect(line["code"], testCase.name).toBe(testCase.code);
+      // 固定の符号だけ（例外の文・ファイル名・入力の値を出さない）
+      expect(Object.keys(line).sort(), testCase.name).toEqual(["code", "schema_version"]);
+      const text = run.lines.join("\n");
+      expect(text, testCase.name).not.toContain("ENOENT");
+      expect(text, testCase.name).not.toContain(planPath);
+      expect(text, testCase.name).not.toContain("これは JSON ではない");
+      // API の口の生成・Build の実行・納品物の書き出しが 0 回
+      expect(run.makeClient, testCase.name).not.toHaveBeenCalled();
+      await expect(fs.readFile(`${directory}/plan-file-error-${index}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
+    }
+    expect(genSpy).not.toHaveBeenCalled();
+  });
+
+  it("(i3) 包みの全必須欄（入れ子の conditions・stop を含む）を、欄ごとに欠落・型違いで断る", async () => {
+    const plan = await confirmedPlan();
+    const conditions: Record<string, unknown> = {
+      model: "gpt-x",
+      effort: "low",
+      budget_usd: 0.3,
+      deadline_ms: 600_000,
+      timeout_ms: null,
+      vocabulary_version: VOCABULARY_VERSION,
+      prompt_version: PROMPT_VERSION,
+      contract_version: CONTRACT_VERSION,
+      factory_version: FACTORY_VERSION,
+      spec_engine_version: SPEC_ENGINE_VERSION,
+    };
+    const stop: Record<string, unknown> = { kind: "stopped", reason: "budget", codes: [] };
+    const base = await envelopeOf(plan, { conditions });
+    const omit = (record: Record<string, unknown>, key: string): Record<string, unknown> => {
+      const copy = { ...record };
+      delete copy[key];
+      return copy;
+    };
+    const cases: { readonly name: string; readonly envelope: Record<string, unknown>; readonly code: string }[] = [];
+    // 最上位の欄
+    for (const key of ["schema_version", "outcome", "plan", "plan_sha256", "source_sha256", "conditions", "stop"]) {
+      cases.push({ name: `${key} の欠落`, envelope: omit(base, key), code: "plan-file-required" });
+      cases.push({ name: `${key} の型違い`, envelope: { ...base, [key]: 123 }, code: "plan-file-type" });
+    }
+    // conditions の中の欄（型違いはどの欄も真偽値にする）
+    for (const key of Object.keys(conditions)) {
+      cases.push({
+        name: `conditions.${key} の欠落`,
+        envelope: { ...base, conditions: omit(conditions, key) },
+        code: "plan-file-required",
+      });
+      cases.push({
+        name: `conditions.${key} の型違い`,
+        envelope: { ...base, conditions: { ...conditions, [key]: true } },
+        code: "plan-file-type",
+      });
+    }
+    // stop の中の欄
+    for (const key of Object.keys(stop)) {
+      cases.push({
+        name: `stop.${key} の欠落`,
+        envelope: { ...base, stop: omit(stop, key) },
+        code: "plan-file-required",
+      });
+      cases.push({
+        name: `stop.${key} の型違い`,
+        envelope: { ...base, stop: { ...stop, [key]: 123 } },
+        code: "plan-file-type",
+      });
+    }
+    cases.push({ name: "stop.codes の要素の型違い", envelope: { ...base, stop: { ...stop, codes: [1] } }, code: "plan-file-type" });
+    cases.push({ name: "stop.kind が分類の外", envelope: { ...base, stop: { ...stop, kind: "other" } }, code: "plan-file-type" });
+
+    const genSpy = vi.spyOn(runModule, "runGeneration");
+    for (const [index, testCase] of cases.entries()) {
+      const dir = `${directory}/plan-file-field-${index}`;
+      const run = await runPlanFile({ dir, planPath: "plan.json", planText: JSON.stringify(testCase.envelope) });
+      expect(run.code, testCase.name).toBe(EXIT_USAGE);
+      const line = errorLine(run.lines);
+      expect(line, testCase.name).toEqual({ schema_version: PLAN_FILE_ERROR_SCHEMA, code: testCase.code });
+      // client を作らない・Build を流さない・納品物を書かない
+      expect(run.makeClient, testCase.name).not.toHaveBeenCalled();
+      await expect(fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
+    }
+    expect(genSpy).not.toHaveBeenCalled();
+
+    // 同じ包みで欄をすべて正しく持てば、読み取りは通って Build が流れる（上の拒否が欄の検査によることの対照）
+    const ok = await runPlanFile({
+      dir: `${directory}/plan-file-field-ok`,
+      planPath: "plan.json",
+      planText: JSON.stringify(base),
+      recording: createRecordingClient(recordedRunFromPlan()).client,
+    });
+    expect(ok.code).toBe(EXIT_OK);
+    expect(ok.makeClient).toHaveBeenCalledTimes(1);
+  });
+
+  it("(i) `--plan-only` が実際に書き出した停止の包みは、型違いではなく outcome の not-confirmed で断る", async () => {
+    const planDir = `${directory}/plan-file-stopped-source`;
+    const planOnlyRun = await runPlanOnly({ dir: planDir, extraArgs: ["--budget", "0.000001"] });
+    expect(planOnlyRun.code).toBe(EXIT_RUN_FAILED);
+    const planText = await fs.readFile(`${planDir}/${PLAN_ONLY_RESULT_FILE}`, "utf8");
+    const written = JSON.parse(planText) as PlanOnlyResultShape;
+    // 書く側は未確定のとき仕様と SHA を null にする
+    expect(written.outcome).toBe("stopped");
+    expect(written.plan).toBeNull();
+    expect(written.plan_sha256).toBeNull();
+
+    const genSpy = vi.spyOn(runModule, "runGeneration");
+    const run = await runPlanFile({ dir: `${directory}/plan-file-stopped`, planPath: "plan.json", planText });
+    expect(run.code).toBe(EXIT_USAGE);
+    expect(rejectLine(run.lines)).toEqual({ check: "outcome", codes: ["not-confirmed"] });
+    expect(run.makeClient).not.toHaveBeenCalled();
+    expect(genSpy).not.toHaveBeenCalled();
+  });
+
+  it("(j) 差し戻しが立つ組では、終了コード 3・記録の差し戻し欄が真・要約と納品物は従来どおり", async () => {
+    const dir = `${directory}/plan-file-return`;
+    const planPath = `${dir}-plan.json`;
+    const envelope = await envelopeOf(await confirmedPlan());
+    const real = runModule.runGeneration;
+    vi.spyOn(runModule, "runGeneration").mockImplementation(async (input) => ({
+      ...(await real(input)),
+      returnToPlan: true,
+    }));
+    const run = await runPlanFile({
+      dir,
+      planPath,
+      planText: JSON.stringify(envelope),
+      recording: createRecordingClient(recordedRunFromPlan()).client,
+      now: () => 0,
+    });
+
+    expect(run.code).toBe(EXIT_RETURN_TO_PLAN);
+    const record = await readBuildRecord(dir);
+    expect(record.return_to_plan).toBe(true);
+    // 生成の要約と納品物は従来どおり書かれる
+    const summary = JSON.parse(run.lines.at(-1) ?? "{}") as Record<string, unknown>;
+    expect(summary["schema_version"]).toBe("commandagent.headless-summary/v1");
+    expect(await fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).not.toBe("");
+  });
+
+  it("(j3) 同じ差し戻しの結果を `--plan` の道で受けたとき、終了コードは今と同じ（3 にならない）", async () => {
+    const dir = `${directory}/plan-return`;
+    const real = runModule.runGeneration;
+    vi.spyOn(runModule, "runGeneration").mockImplementation(async (input) => ({
+      ...(await real(input)),
+      returnToPlan: true,
+    }));
+    const recording = planThenBuildCleanRecording();
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => cleanJudge(),
+      now: () => 0,
+      terminal: fakeTerminal([...CONFIRM_ONLY_TERMINAL_LINES]),
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_OK);
+    expect(code).not.toBe(EXIT_RETURN_TO_PLAN);
+  });
+
+  it("(j2) 差し戻しの無い納品は 0、納品前の停止は 1 で、記録に条件・2 つの SHA・差し戻し false が入る", async () => {
+    const dir = `${directory}/plan-file-pre-stop`;
+    const planPath = `${dir}-plan.json`;
+    const envelope = await envelopeOf(await confirmedPlan());
+    const run = await runPlanFile({
+      dir,
+      planPath,
+      planText: JSON.stringify(envelope),
+      extraArgs: ["--budget", "0.000001"],
+      recording: createRecordingClient(recordedRunFromPlan()).client,
+    });
+
+    expect(run.code).toBe(EXIT_RUN_FAILED);
+    expect(run.code).not.toBe(EXIT_RETURN_TO_PLAN);
+    const record = await readBuildRecord(dir);
+    expect(record.return_to_plan).toBe(false);
+    expect(record.plan_sha256).toBe(envelope["plan_sha256"]);
+    expect(record.source_sha256).toBe(await sha256Hex(SOURCE_TEXT));
+    expect(record.conditions["budget_usd"]).toBe(0.000001);
+    // 止まり方は予算（要約の停止の分類）
+    const summary = JSON.parse(run.lines.at(-1) ?? "{}") as { stop_class: string | null };
+    expect(summary.stop_class).toBe("budget");
+  });
+
+  it("(j2) Build の締切による納品前の停止は 1 で、記録に条件・2 つの SHA・差し戻し false が入る", async () => {
+    const dir = `${directory}/plan-file-deadline`;
+    const planPath = `${dir}-plan.json`;
+    const envelope = await envelopeOf(await confirmedPlan());
+    // 締切を求める 1 回目だけ 0、そのあとは締切（1 分）を越えた時刻を返す
+    let calls = 0;
+    const now = (): number => (calls++ === 0 ? 0 : 60 * 60_000);
+    const run = await runPlanFile({
+      dir,
+      planPath,
+      planText: JSON.stringify(envelope),
+      extraArgs: ["--deadline", "1", "--model", "gpt-d", "--effort", "low"],
+      recording: createRecordingClient(recordedRunFromPlan()).client,
+      now,
+    });
+
+    expect(run.code).toBe(EXIT_RUN_FAILED);
+    expect(run.code).not.toBe(EXIT_RETURN_TO_PLAN);
+    const summary = JSON.parse(run.lines.at(-1) ?? "{}") as { stop_class: string | null };
+    expect(summary.stop_class).toBe("deadline");
+    await expect(fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
+    const record = await readBuildRecord(dir);
+    expect(record.schema_version).toBe(BUILD_CLI_RECORD_SCHEMA);
+    expect(record.return_to_plan).toBe(false);
+    expect(record.plan_sha256).toBe(envelope["plan_sha256"]);
+    expect(record.source_sha256).toBe(await sha256Hex(SOURCE_TEXT));
+    expect(record.conditions).toEqual({
+      model: "gpt-d",
+      effort: "low",
+      budget_usd: 0.3,
+      deadline_ms: 60_000,
+      timeout_ms: null,
+      vocabulary_version: VOCABULARY_VERSION,
+      prompt_version: PROMPT_VERSION,
+      contract_version: CONTRACT_VERSION,
+      factory_version: FACTORY_VERSION,
+      spec_engine_version: SPEC_ENGINE_VERSION,
+    });
+  });
+});
+
+// ── 既存の道の固定（Issue #495）─────────────────────────────────
+
+describe("既存の道の固定（Issue #495）", () => {
+  it("(l) 引数なしでは runPlan を呼ばず、仕様を渡さず、新しい 2 つのファイルを書かない", async () => {
+    const dir = `${directory}/plain-build`;
+    const planSpy = vi.spyOn(planRunModule, "runPlan");
+    const genSpy = vi.spyOn(runModule, "runGeneration");
+    const recording = createRecordingClient(recordedRun());
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_OK);
+    expect(planSpy).not.toHaveBeenCalled();
+    expect(genSpy.mock.calls[0]?.[0]?.plan).toBeUndefined();
+    await expect(fs.readFile(`${dir}/${PLAN_ONLY_RESULT_FILE}`, "utf8")).rejects.toThrow();
+    await expect(fs.readFile(`${dir}/${BUILD_CLI_RECORD_FILE}`, "utf8")).rejects.toThrow();
+  });
+
+  it("(m) `--plan` は今と同じに Plan→Build を流し、締切を共有し、新しい 2 つのファイルを書かない", async () => {
+    const dir = `${directory}/plan-unchanged`;
+    const genSpy = vi.spyOn(runModule, "runGeneration");
+    const recording = planThenBuildCleanRecording();
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", dir, "--plan"],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      makeLlmJudge: () => cleanJudge(),
+      now: () => 0,
+      terminal: fakeTerminal([...CONFIRM_ONLY_TERMINAL_LINES]),
+      log: () => {},
+    });
+
+    expect(code).toBe(EXIT_OK);
+    const call = genSpy.mock.calls[0]?.[0];
+    expect(call?.plan).toBeDefined();
+    const record = await readPlanRecord(dir);
+    // 予算は Plan の使った額を引いた残り、締切は Plan と共有（取り直さない）
+    expect(call?.budgetUsd).toBeCloseTo(0.3 - record.spent_usd, 10);
+    expect(call?.deadline).toBe(10 * 60 * 1000);
+    await expect(fs.readFile(`${dir}/${PLAN_ONLY_RESULT_FILE}`, "utf8")).rejects.toThrow();
+    await expect(fs.readFile(`${dir}/${BUILD_CLI_RECORD_FILE}`, "utf8")).rejects.toThrow();
   });
 });

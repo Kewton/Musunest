@@ -84,6 +84,77 @@ describe("引数の読み取り（02 §3.2）", () => {
   });
 });
 
+// ── --plan-only・--plan-file の読み取り（Issue #495）──────────────
+
+describe("--plan-only・--plan-file の読み取り（Issue #495）", () => {
+  it("--plan-only を読む（--answers・--script を一緒に受けられる）", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--plan-only"])).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "gpt-6-luna",
+      effort: "high",
+      planOnly: true,
+    });
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--plan-only", "--answers", "a.json"]),
+    ).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "gpt-6-luna",
+      effort: "high",
+      planOnly: true,
+      answersFile: "a.json",
+    });
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--plan-only", "--script", "s.json"]),
+    ).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "gpt-6-luna",
+      effort: "high",
+      planOnly: true,
+      scriptFile: "s.json",
+    });
+  });
+
+  it("--plan-file を読む", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--plan-file", "plan.json"])).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "gpt-6-luna",
+      effort: "high",
+      planFile: "plan.json",
+    });
+  });
+
+  it("--plan-only と --plan、--plan-only と --plan-file、--plan と --plan-file は誤り", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--plan-only", "--plan"])).toEqual({
+      error: "--plan と --plan-only は同時に指定できません",
+    });
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--plan-only", "--plan-file", "plan.json"]),
+    ).toEqual({ error: "--plan-only と --plan-file は同時に指定できません" });
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--plan", "--plan-file", "plan.json"]),
+    ).toEqual({ error: "--plan と --plan-file は同時に指定できません" });
+  });
+
+  it("--plan-file に値が無ければ誤り", () => {
+    expect(parseCliArguments(["--", "request.txt", "--out", "out", "--plan-file"])).toEqual({
+      error: "--plan-file には出力ファイルを指定してください",
+    });
+  });
+
+  it("--plan-file と --answers・--script は誤り", () => {
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--plan-file", "plan.json", "--answers", "a.json"]),
+    ).toEqual({ error: "--plan-file と --answers は同時に指定できません" });
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--plan-file", "plan.json", "--script", "s.json"]),
+    ).toEqual({ error: "--plan-file と --script は同時に指定できません" });
+  });
+});
+
 // ── 既定の上限と、引数での変更（02 §1.5）─────────────────────────
 
 describe("既定の上限は 0.30 USD・10 分で、引数で変えられる（02 §1.5）", () => {
