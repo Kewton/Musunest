@@ -29,6 +29,9 @@
 //   独立レビューの直し（fix-427）… 採点の指紋に、組が実際に参照する採点の定義の実体（definition:<題材>）を含める。予定の本が採点する組に無ければ
 //              採点せずに断る。照合に採点した本数と採点できない本（組に無い ID）を足し、黙って分母から除かない。--anonymous は読み込みと診断の
 //              前に伝え、標準エラーも件数だけにする
+// #493 で足したもの（既存の行・metrics・匿名の口の欄は変えない）：
+//   tables … 診断の読み方。Plan の表（全本 1 行と合計：結果・止まり方の分類・問数・往復・段ごとの時間・Plan の費用）と、Build の表（Plan が確定した本だけ：
+//            工場の verdict・既存の採点の PASS・段ごとの時間・Build の費用。外した本の数と内訳を添える）。匿名の口には件数と率だけ
 // run-agent.mjs は、ここから指紋の関数と定義ファイルの読み込みを import して条件のファイルに書く（道具は 2 本で 1 組。入口として起動したときだけ採点する）
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -569,6 +572,88 @@ const sum = (xs, f) => xs.reduce((s, r) => s + f(r), 0);
 const pass = (r) => !r.generation_failed && r.verdict === "PASS";
 const relReal = (from, to) => { try { return relative(realpathSync(from), realpathSync(to)); } catch { return relative(from, to); } };
 
+// ── Plan の表と Build の表（#493）：診断の出力（plan-record.json・summary.line.json）を Plan と Build に分けて並べる。
+// 正式な採点の定義・分母・PASS の判定は変えない（Build の表の PASS は既存の行の verdict をそのまま読む）。値（原文・引用・応答の全体）は入れない：
+// 入れるのは結果の既知の値・分類のコード（英小文字・数字・ハイフンだけ。それ以外は unknown）・数・時間・費用だけ
+/** Plan の表の結果の値。absent ＝ 往復の記録（plan-record.json）が無い本、unknown ＝ 記録はあるが結果が既知の値でない */
+export const PLAN_TABLE_OUTCOMES = ["confirmed", "cannot-confirm", "stopped", "unknown", "absent"];
+const CODE = /^[a-z0-9][a-z0-9-]*$/;
+const codeOrUnknown = (x) => (typeof x === "string" && CODE.test(x) ? x : "unknown");
+const nonNegative = (x) => (Number.isFinite(x) && x >= 0 ? x : 0);
+const usdOf = (...xs) => { for (const x of xs) if (Number.isFinite(x)) return x; return 0; };
+/** 段の記録（stages[]）の時間を段ごとに足す。同じ段が往復で繰り返すときは回数と合計の時間（ms）。段の ID はコードだけ通す */
+export function stageTimes(stages) {
+  const by = {};
+  let total = 0;
+  for (const st of Array.isArray(stages) ? stages : []) {
+    const id = codeOrUnknown(st?.stage), ms = nonNegative(st?.duration_ms);
+    by[id] = { count: (by[id]?.count ?? 0) + 1, ms: (by[id]?.ms ?? 0) + ms };
+    total += ms;
+  }
+  return { by_stage: by, total_ms: total };
+}
+const mergeStages = (xs) => {
+  const by = {};
+  for (const x of xs) for (const [id, v] of Object.entries(x.by_stage)) by[id] = { count: (by[id]?.count ?? 0) + v.count, ms: (by[id]?.ms ?? 0) + v.ms };
+  return { by_stage: by, total_ms: sum(xs, (x) => x.total_ms) };
+};
+/** 止まり方の分類：cannot-confirm は理由の source:code（重複を除き並べる）、stopped は失敗の段:種類（失敗の無い停止は declined） */
+function planStop(outcome, pr) {
+  if (outcome === "cannot-confirm") {
+    const reasons = Array.isArray(pr.cannot_confirm) ? pr.cannot_confirm : [];
+    return { kind: outcome, classes: [...new Set(reasons.map((r) => `${codeOrUnknown(r?.source)}:${codeOrUnknown(r?.code)}`))].sort(), reasons: reasons.length };
+  }
+  if (outcome === "stopped") {
+    const f = pr.failure ?? null;
+    return { kind: outcome, classes: [f === null ? "declined" : `${codeOrUnknown(f.stage)}:${codeOrUnknown(f.kind)}`], reasons: 1 };
+  }
+  if (outcome === "unknown") return { kind: outcome, classes: [], reasons: 0 };
+  return null;
+}
+/** Plan の表の 1 行。費用は起動の記録の plan_cost.plan_usd（無ければ往復の記録の spent_usd） */
+export function planTableRow(run, pr, sl) {
+  if (pr === null || pr === undefined) return { run, outcome: "absent", confirmed: false, stop: null, questions: null, rounds: null, stages: null, usd: usdOf(sl?.plan_cost?.plan_usd) };
+  const outcome = PLAN_OUTCOMES.includes(pr.outcome) ? pr.outcome : "unknown";
+  const rounds = Array.isArray(pr.rounds) ? pr.rounds : [];
+  return {
+    run, outcome, confirmed: outcome === "confirmed", stop: planStop(outcome, pr),
+    questions: sum(rounds, (round) => (Array.isArray(round?.questions) ? round.questions.length : 0)), rounds: rounds.length,
+    stages: stageTimes(pr.stages), usd: usdOf(sl?.plan_cost?.plan_usd, pr.spent_usd),
+  };
+}
+/** Build の表の 1 行（Plan が確定した本だけ）。verdict・pass は既存の採点の行のまま。費用は plan_cost.build_usd（無ければ要約の provider_cost_usd） */
+export function buildTableRow(run, sl, row) {
+  const s = sl?.summary ?? null;
+  return { run, factory_verdict: s?.verdict ?? null, verdict: row?.verdict ?? (row?.generation_failed ? "GEN_FAIL" : null), pass: row ? pass(row) : false, stages: stageTimes(s?.stages), usd: usdOf(sl?.plan_cost?.build_usd, s?.provider_cost_usd) };
+}
+const usdTotal = (xs) => sum(xs, (x) => x.usd).toFixed(4);
+/** entries ＝ [{ run, pr（往復の記録か null）, sl（起動の記録か null）, row（既存の採点の行か null） }]。Plan の表は全本、Build の表は Plan が確定した本だけ */
+export function planBuildTables(entries) {
+  const plan = entries.map((e) => planTableRow(e.run, e.pr ?? null, e.sl ?? null));
+  const recorded = plan.filter((r) => r.outcome !== "absent");
+  const stopClasses = {};
+  for (const r of plan) for (const c of r.stop?.classes ?? []) stopClasses[c] = (stopClasses[c] ?? 0) + 1;
+  const planTotal = {
+    runs: plan.length, outcomes: Object.fromEntries(PLAN_TABLE_OUTCOMES.map((k) => [k, plan.filter((r) => r.outcome === k).length])),
+    // 確定の率の分母は往復の記録のある本（記録の無い本は outcomes.absent に数える）
+    confirmed: fmt(recorded.filter((r) => r.confirmed).length, recorded.length), stop_classes: stopClasses,
+    questions: sum(recorded, (r) => r.questions), rounds: sum(recorded, (r) => r.rounds), stages: mergeStages(recorded.map((r) => r.stages)), usd: usdTotal(plan),
+  };
+  const confirmedRuns = new Set(plan.filter((r) => r.confirmed).map((r) => r.run));
+  const build = entries.filter((e) => confirmedRuns.has(e.run)).map((e) => buildTableRow(e.run, e.sl ?? null, e.row ?? null));
+  const verdicts = {};
+  for (const r of build) { const k = r.factory_verdict ?? "none"; verdicts[k] = (verdicts[k] ?? 0) + 1; }
+  const excluded = plan.filter((r) => !r.confirmed);
+  const buildTotal = {
+    runs: build.length,
+    // 分母から外した本（Plan が確定しなかった本と記録の無い本）の数と結果の内訳
+    excluded: excluded.length, excluded_outcomes: Object.fromEntries(PLAN_TABLE_OUTCOMES.filter((k) => k !== "confirmed").map((k) => [k, excluded.filter((r) => r.outcome === k).length])),
+    denominator: `Plan が確定した本 ${build.length} 本（全 ${plan.length} 本から ${excluded.length} 本を外した）`,
+    factory_verdicts: verdicts, pass: fmt(build.filter((r) => r.pass).length, build.length), stages: mergeStages(build.map((r) => r.stages)), usd: usdTotal(build),
+  };
+  return { plan: { rows: plan, total: planTotal }, build: { rows: build, total: buildTotal } };
+}
+
 /** 採点せずに断る誤り（入口が「断りました」と exit 3 にする）。文は opts.anonymous のときパス・本の ID・組の ID を含めない */
 const refusal = (message) => Object.assign(new Error(message), { refused: true });
 /**
@@ -600,6 +685,7 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
   // 了承後系の対象（#426）：計測が Plan を通した（条件のファイルの params.plan）なら全本。そうでなければ Plan の記録（plan-record.json か plan.json）のある本だけ
   const planScope = cond?.params?.plan === true;
   const rows = [];
+  const tableInputs = []; // Plan の表と Build の表の入力（#493）
   for (const d of runDirs(outRoot)) {
     const p = patternOf(d), item = evalSet.byId.get(p), dir = join(outRoot, d);
     if (item === undefined) continue; // 組に無い ID の本（予定外）：照合の unscored に残り、入口が標準エラーに出す
@@ -610,6 +696,7 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
     // --plan の本（#378）：費用は Plan と Build の合計。Plan の結果と質問の数も残す
     const planRecordPath = join(dir, "bundle/plan-record.json");
     const pr = existsSync(planRecordPath) ? readJson(planRecordPath) : null;
+    tableInputs.push({ run: d, pr, sl });
     const plan = pr === null ? null : { outcome: pr.outcome ?? null, questions: (pr.rounds ?? []).reduce((n, round) => n + (round.questions ?? []).length, 0), rounds: (pr.rounds ?? []).length, usd: sl?.plan_cost?.plan_usd ?? pr.spent_usd ?? 0 };
     const base = { run: d, pattern: p, subject, style: item.style, writable: item.writable, factory_verdict: s?.verdict ?? null, stop: s?.stop_reason ?? s?.stop_class ?? null, failure: s?.failure ?? null, cost_usd: sl?.plan_cost?.total_usd ?? s?.provider_cost_usd ?? 0, seconds: sl?.wall_s ?? s?.duration_secs ?? 0, plan };
     const def = loadDef(item.scoringPath);
@@ -732,7 +819,9 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
     set_matches_conditions: matches(set.sha256, cond?.set?.sha256),
     scripts_matches_conditions: matches(scriptsFp.fingerprint, cond?.scripts?.fingerprint),
   };
-  return { rubric: "v5", aggregation_versions: AGGREGATION_VERSIONS, scoring_systems: SCORING_SYSTEMS, set, metrics, metrics_accepted, metrics_script, fulfillment, completion, fingerprints, bySubject, rows };
+  // Plan の表と Build の表（#493）。既存の行・指標とは別の欄に置く
+  const tables = planBuildTables(tableInputs.map((t) => ({ ...t, row: rows.find((r) => r.run === t.run) ?? null })));
+  return { rubric: "v5", aggregation_versions: AGGREGATION_VERSIONS, scoring_systems: SCORING_SYSTEMS, set, metrics, metrics_accepted, metrics_script, fulfillment, completion, fingerprints, bySubject, rows, tables };
 }
 
 // ── 匿名の集計（回帰用・保留用の組）：許可した欄だけを組み立てる。入力の文字列をそのまま通さない
@@ -751,6 +840,16 @@ const countOrNull = (xs) => (Array.isArray(xs) ? xs.length : null);
  * 判定の値は既知の列挙（FACTORY_VERDICTS）か unknown にまとめ、止まった理由はコード（STOP_CODES）に、指紋は 64 桁の 16 進だけを通し、
  * schema と判定の口の構成は既知の値か unknown にする。測定 ID・署名以外の自由な文字列は出ない
  */
+const anonymousTables = (t) => {
+  if (t === undefined || t === null) return null;
+  const p = t.plan?.total ?? {}, b = t.build?.total ?? {};
+  const bv = Object.fromEntries([...FACTORY_VERDICTS, "unknown"].map((k) => [k, 0]));
+  for (const [k, n] of Object.entries(b.factory_verdicts ?? {})) bv[FACTORY_VERDICTS.includes(k) ? k : "unknown"] += Number.isInteger(n) ? n : 0;
+  return {
+    plan: { runs: intOrNull(p.runs), outcomes: Object.fromEntries(PLAN_TABLE_OUTCOMES.map((k) => [k, intOrNull(p.outcomes?.[k])])), confirmed: p.confirmed ?? null, questions: intOrNull(p.questions), rounds: intOrNull(p.rounds) },
+    build: { runs: intOrNull(b.runs), excluded: intOrNull(b.excluded), excluded_outcomes: Object.fromEntries(PLAN_TABLE_OUTCOMES.filter((k) => k !== "confirmed").map((k) => [k, intOrNull(b.excluded_outcomes?.[k])])), factory_verdicts: bv, pass: b.pass ?? null },
+  };
+};
 export function anonymize(full) {
   const c = full.completion, f = full.fingerprints, m = full.metrics, ma = full.metrics_accepted ?? {}, ms = full.metrics_script ?? {}, cond = f.conditions;
   const verdicts = Object.fromEntries([...FACTORY_VERDICTS, "unknown"].map((k) => [k, 0]));
@@ -774,6 +873,8 @@ export function anonymize(full) {
     },
     // 台本の照合（#427）：件数は整数だけ、率は数と区間の文字列だけ、当て方は既知の値だけ。問いの文・事項の ID・台本の件の ID は出さない
     metrics_script: { mode: enumOrUnknown([SCRIPT_MODE], ms.mode ?? null), ...Object.fromEntries(["runs", "questions", "scripted", "agreed", "disagreed", "unknown", "unresolved"].map((k) => [k, intOrNull(ms[k])])), ...Object.fromEntries(["runs_ok", "runs_disagreed", "runs_unanswered"].map((k) => [k, ms[k] ?? null])) },
+    // Plan の表と Build の表（#493）：件数（整数）と率（数と区間の文字列）だけ。行・止まり方の分類のコード・時間・費用は出さない
+    tables: anonymousTables(full.tables),
     // 組（#427）：版と役割と指紋だけ（ID・題名は出さない）
     set: { version: intOrNull(full.set?.version), role: enumOrUnknown(EVAL_SET_ROLES, full.set?.role ?? null), sha256: hashOrNull(full.set?.sha256) },
     fulfillment: Object.fromEntries(["v1", "v2", "accepted"].map((v) => [v, { label: v === "accepted" ? SCORING_SYSTEMS.accepted : AGGREGATION_VERSIONS[v], partial: full.fulfillment[v]?.partial ?? null, writable: full.fulfillment[v]?.writable ?? null, all: full.fulfillment[v]?.all ?? null, ...(v === "accepted" ? { unevaluated: { checks: intOrNull(full.fulfillment.accepted?.unevaluated?.checks), runs: intOrNull(full.fulfillment.accepted?.unevaluated?.runs) } } : {}) }])),
@@ -827,6 +928,12 @@ async function main() {
   console.log(`了承後: 対象 ${ma.runs} 本（確定 ${ma.confirmed}・記録なし ${ma.absent}［未確定 ${ar.plan_not_confirmed}・確定後に仕様なし ${ar.confirmed_without_plan}・不明 ${ar.unknown}］・読めない ${ma.invalid}）・未評価の本 ${fulfillment.accepted.unevaluated.runs}・未検証の有効な要件 ${ma.unverified_requirements} 件（代替先 ${us.accepted_unwritable + us.part}・変更後 ${us.changed}・追加 ${us.added}）・誤った除外 ${ma.wrong_exclusions} 件（判定不能 ${ma.undecided_exclusions} 件）・誤った了承 未評価（証拠 ${wa.evidence} 件・判定不能 ${wa.unmatched + wa.ambiguous} 件・書ける要件の変更 ${wa.unevaluated} 件）・充足 ${fulfillment.accepted.all}（未評価の判定 ${fulfillment.accepted.unevaluated.checks}）`);
   const ms = metrics_script;
   console.log(`台本: 対象 ${ms.runs} 本・問い ${ms.questions}（台本で答えられた ${ms.scripted}［推奨と同じ ${ms.agreed}・違う ${ms.disagreed}］・不明 ${ms.unknown}・決められない ${ms.unresolved}）・本の内訳（一致 ${ms.runs_ok}・不一致 ${ms.runs_disagreed}・不明あり ${ms.runs_unanswered}）`);
+  // Plan の表と Build の表（#493）：1 本 1 行と合計
+  const tp = full.tables.plan, tb = full.tables.build, sec = (ms) => (ms / 1000).toFixed(1);
+  for (const r of tp.rows) console.log(["plan", r.run, r.outcome, r.stop?.classes.join("・") ?? "", `問 ${r.questions ?? "-"}`, `往復 ${r.rounds ?? "-"}`, `${r.stages ? sec(r.stages.total_ms) : "-"}s`, r.usd.toFixed(4)].join("\t"));
+  console.log(`Plan の表: ${tp.total.runs} 本（確定 ${tp.total.confirmed}・確定できない ${tp.total.outcomes["cannot-confirm"]}・止まった ${tp.total.outcomes.stopped}・不明 ${tp.total.outcomes.unknown}・記録なし ${tp.total.outcomes.absent}）・問 ${tp.total.questions}・往復 ${tp.total.rounds}・時間 ${sec(tp.total.stages.total_ms)}s・費用 ${tp.total.usd}`);
+  for (const r of tb.rows) console.log(["build", r.run, r.factory_verdict ?? "-", r.verdict ?? "-", r.pass ? "PASS" : "-", `${sec(r.stages.total_ms)}s`, r.usd.toFixed(4)].join("\t"));
+  console.log(`Build の表: ${tb.total.denominator}・PASS ${tb.total.pass}・工場 ${Object.entries(tb.total.factory_verdicts).map(([k, n]) => `${k} ${n}`).join("・")}・時間 ${sec(tb.total.stages.total_ms)}s・費用 ${tb.total.usd}`);
   const judge = (m) => (m === null ? "条件のファイルに無い" : m ? "条件のファイルと一致" : "条件のファイルと不一致");
   console.log(`指紋: 採点 ${fingerprints.scoring.fingerprint.slice(0, 12)}…（${judge(fingerprints.scoring_matches_conditions)}）・spec-engine ${fingerprints.spec_engine.fingerprint?.slice(0, 12) ?? "-"}…（${judge(fingerprints.spec_engine_matches_conditions)}）・組 ${set.id} v${set.version} ${set.sha256.slice(0, 12)}…（${judge(fingerprints.set_matches_conditions)}）・台本 ${fingerprints.scripts.fingerprint?.slice(0, 12) ?? "-"}…（${judge(fingerprints.scripts_matches_conditions)}）`);
 }

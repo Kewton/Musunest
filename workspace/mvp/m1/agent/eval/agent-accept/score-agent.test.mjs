@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
-import { ABSENT_REASONS, ACCEPTANCE_STATUSES, CATALOG_FACET_IDS, CONDITIONS_SCHEMAS, DEFAULT_SET_PATH, EVAL_SET_SCHEMA, JUDGEMENTS, PLAN_SCRIPT_SCHEMA, PLAN_SPEC_SCHEMA, SCORING_FILES, SCRIPT_MODE, SCRIPT_RUN_STATUSES, UNVERIFIED_SOURCES, VERDICT_UNEVALUATED, WRONG_ACCEPTANCE_EVALUATION, acceptanceMatcher, anonymize, applyScript, fingerprintDir, judgeDisposition, loadEvalSet, loadPlan, loadScript, planTexts, questionFacets, readAcceptance, reconcile, scoringFingerprint, scriptSummary, scriptsFingerprint, sha256, validatePlanShape, validatePlanned, validateScript } from "./score-agent.mjs";
+import { PLAN_TABLE_OUTCOMES, planBuildTables, ABSENT_REASONS, ACCEPTANCE_STATUSES, CATALOG_FACET_IDS, CONDITIONS_SCHEMAS, DEFAULT_SET_PATH, EVAL_SET_SCHEMA, JUDGEMENTS, PLAN_SCRIPT_SCHEMA, PLAN_SPEC_SCHEMA, SCORING_FILES, SCRIPT_MODE, SCRIPT_RUN_STATUSES, UNVERIFIED_SOURCES, VERDICT_UNEVALUATED, WRONG_ACCEPTANCE_EVALUATION, acceptanceMatcher, anonymize, applyScript, fingerprintDir, judgeDisposition, loadEvalSet, loadPlan, loadScript, planTexts, questionFacets, readAcceptance, reconcile, scoringFingerprint, scriptSummary, scriptsFingerprint, sha256, validatePlanShape, validatePlanned, validateScript } from "./score-agent.mjs";
 import { DEFAULT_ALLOWED, finalVerdict, scoreClaims } from "../score-claims.mjs";
 import { loadDef, score } from "../engine.mjs";
 
@@ -1622,4 +1622,113 @@ test("回帰用の題材の正例・負例（cases/regression）は、凍結し�
     assert.ok(index.some((c) => c.expect === "FAIL" && c.failed.length === 0 && c.claims === "NG" && c.missed === 1), "宣言は全部満たすが申告の挙げ漏れで落ちる負例が要る");
     assert.ok(index.some((c) => c.expect === "FAIL" && c.failed.length > 0 && c.claims === "OK" && c.written), "申告 OK のまま順位の判定だけが落ちる負例が要る");
   });
+});
+
+// ── Plan の表と Build の表（#493）
+const stg = (stage, ms, status = "ok") => ({ stage, status, duration_ms: ms });
+/** 診断の出力の本を置く：起動の記録（Build の段と plan_cost）・往復の記録（Plan の段・往復・結果）・宣言（あれば） */
+function addDiagRun(out, id, { spec = null, build = null, planCost, record }) {
+  const dir = join(out, id);
+  mkdirSync(join(dir, "bundle/artifacts"), { recursive: true });
+  const summary = build === null ? null : { schema_version: "commandagent.headless-summary/v1", verdict: build.verdict, stop_reason: build.verdict === "none" ? "unmet" : "completed", provider_cost_usd: build.provider ?? 0, failure: null, stages: build.stages };
+  writeFileSync(join(dir, "summary.line.json"), JSON.stringify({ exit: build?.verdict === "none" || build === null ? 1 : 0, wall_s: 100, summary, plan_cost: { schema_version: "musunest-factory/plan-build-cost/v1", ...planCost, total_usd: planCost.plan_usd + planCost.build_usd }, stderr_tail: "", resumed: false }));
+  writeFileSync(join(dir, "stdout.log"), "");
+  writeFileSync(join(dir, "stderr.log"), "");
+  if (spec !== null) writeFileSync(join(dir, "bundle/artifacts/app.spec.yaml"), spec);
+  writeFileSync(join(dir, "bundle/plan-record.json"), JSON.stringify({ schema_version: "musunest-factory/plan-cli-record/v1", plan_id: "plan-t", spent_usd: 0.5, ...record }));
+}
+const qRound = (n) => ({ questions: Array.from({ length: n }, (_, i) => ({ id: `Q-${i}`, text: "MARK_QUESTION_TEXT" })), answers: [] });
+
+test("Plan の表と Build の表：確定・確定できない・止まった・Build 失敗を混ぜた診断の出力で、1 本 1 行と合計が等しい。Build の表は確定した本だけで、外した本を数で示す。既存の行・指標は変えず、匿名の口には件数と率だけ", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    // 確定 → Build 合格
+    addDiagRun(out, "P1-r1", { spec: PASS_A, build: { verdict: "partial", stages: [stg("design", 1000), stg("write", 300), stg("judge", 0)] }, planCost: { plan_usd: 0.02, build_usd: 0.05 },
+      record: { outcome: "confirmed", rounds: [qRound(2)], stages: [stg("requirements", 4000), stg("questions", 500), stg("answers", 7000), stg("confirm", 10)] } });
+    // 確定 → Build 失敗（宣言が無い）
+    addDiagRun(out, "P1-r2", { build: { verdict: "none", stages: [stg("design", 2000, "failed")] }, planCost: { plan_usd: 0.03, build_usd: 0.01 },
+      record: { outcome: "confirmed", rounds: [qRound(1), qRound(3)], stages: [stg("requirements", 3000), stg("questions", 200), stg("answers", 1000), stg("questions", 300), stg("answers", 2000), stg("confirm", 20)] } });
+    // 確定 → Build は宣言を出したが採点で落ちる
+    addDiagRun(out, "P1-r3", { spec: FAIL_A, build: { verdict: "partial", stages: [stg("design", 500), stg("write", 100)] }, planCost: { plan_usd: 0.01, build_usd: 0.04 },
+      record: { outcome: "confirmed", rounds: [], stages: [stg("requirements", 1000), stg("confirm", 5)] } });
+    // 確定できない（理由の分類は source:code。値でない分類は unknown にまとめる）
+    addDiagRun(out, "P1-r4", { planCost: { plan_usd: 0.015, build_usd: 0 },
+      record: { outcome: "cannot-confirm", rounds: [], stages: [stg("requirements", 2500), stg("surface", 600)], cannot_confirm: [{ source: "surface-check", code: "not-stated", path: "unwritable[0]" }, { source: "surface-check", code: "not-stated", path: "unwritable[1]" }, { source: "confirm", code: "MARK_CODE 原文", path: "x" }] } });
+    // 止まった（失敗あり）・止まった（失敗なし ＝ declined）
+    addDiagRun(out, "P1-r5", { planCost: { plan_usd: 0.005, build_usd: 0 }, record: { outcome: "stopped", rounds: [qRound(1)], stages: [stg("requirements", 900, "failed")], failure: { stage: "requirements", kind: "deadline" } } });
+    addDiagRun(out, "P1-r6", { planCost: { plan_usd: 0.002, build_usd: 0 }, record: { outcome: "stopped", rounds: [], stages: [stg("requirements", 100)], failure: null } });
+    const ids = ["P1-r1", "P1-r2", "P1-r3", "P1-r4", "P1-r5", "P1-r6"];
+    planConditions(out, ids);
+    const r = scoreRun(out);
+    const full = readScore(out);
+    // 既存の行と指標は今のまま（新しい欄は行に入らない。費用は Plan と Build の合計のまま）
+    assert.equal(rowOf(full, "P1-r1").verdict, "PASS");
+    assert.equal(rowOf(full, "P1-r2").generation_failed, true);
+    assert.equal(rowOf(full, "P1-r3").verdict, "FAIL");
+    assert.equal(rowOf(full, "P1-r1").cost_usd, 0.07);
+    for (const row of full.rows) assert.equal("tables" in row, false);
+    startsWith(full.metrics.generated, "2/6（");
+    const { plan, build } = full.tables;
+    // Plan の表：全本 1 行
+    assert.deepEqual(plan.rows.map((x) => [x.run, x.outcome, x.confirmed, x.stop, x.questions, x.rounds, x.stages.total_ms, x.usd]), [
+      ["P1-r1", "confirmed", true, null, 2, 1, 11510, 0.02],
+      ["P1-r2", "confirmed", true, null, 4, 2, 6520, 0.03],
+      ["P1-r3", "confirmed", true, null, 0, 0, 1005, 0.01],
+      ["P1-r4", "cannot-confirm", false, { kind: "cannot-confirm", classes: ["confirm:unknown", "surface-check:not-stated"], reasons: 3 }, 0, 0, 3100, 0.015],
+      ["P1-r5", "stopped", false, { kind: "stopped", classes: ["requirements:deadline"], reasons: 1 }, 1, 1, 900, 0.005],
+      ["P1-r6", "stopped", false, { kind: "stopped", classes: ["declined"], reasons: 1 }, 0, 0, 100, 0.002],
+    ]);
+    // 往復ごとの待ち時間（answers）は段ごとの時間に入り、繰り返す段は回数と合計
+    assert.deepEqual(plan.rows[1].stages.by_stage, { requirements: { count: 1, ms: 3000 }, questions: { count: 2, ms: 500 }, answers: { count: 2, ms: 3000 }, confirm: { count: 1, ms: 20 } });
+    assert.deepEqual({ ...plan.total, confirmed: plan.total.confirmed.split("（")[0] }, {
+      runs: 6, outcomes: { confirmed: 3, "cannot-confirm": 1, stopped: 2, unknown: 0, absent: 0 }, confirmed: "3/6",
+      stop_classes: { "confirm:unknown": 1, "surface-check:not-stated": 1, "requirements:deadline": 1, declined: 1 },
+      questions: 7, rounds: 4,
+      stages: { by_stage: { requirements: { count: 6, ms: 11500 }, questions: { count: 3, ms: 1000 }, answers: { count: 3, ms: 10000 }, confirm: { count: 3, ms: 35 }, surface: { count: 1, ms: 600 } }, total_ms: 23135 },
+      usd: "0.0820",
+    });
+    // Build の表：確定した本だけ。PASS は既存の採点の行のまま
+    assert.deepEqual(build.rows.map((x) => [x.run, x.factory_verdict, x.verdict, x.pass, x.stages.total_ms, x.usd]), [
+      ["P1-r1", "partial", "PASS", true, 1300, 0.05],
+      ["P1-r2", "none", "GEN_FAIL", false, 2000, 0.01],
+      ["P1-r3", "partial", "FAIL", false, 600, 0.04],
+    ]);
+    assert.deepEqual({ ...build.total, pass: build.total.pass.split("（")[0] }, {
+      runs: 3, excluded: 3, excluded_outcomes: { "cannot-confirm": 1, stopped: 2, unknown: 0, absent: 0 },
+      denominator: "Plan が確定した本 3 本（全 6 本から 3 本を外した）",
+      factory_verdicts: { partial: 2, none: 1 }, pass: "1/3",
+      stages: { by_stage: { design: { count: 3, ms: 3500 }, write: { count: 2, ms: 400 }, judge: { count: 1, ms: 0 } }, total_ms: 3900 },
+      usd: "0.1000",
+    });
+    // 値（問いの文・分類でない文字列）は表に入らない。標準出力に表の合計が出る
+    const text = JSON.stringify(full.tables);
+    for (const word of ["MARK_QUESTION_TEXT", "MARK_CODE", "原文"]) assert.ok(!text.includes(word), `表に ${word}`);
+    assert.match(r.stdout, /Plan の表: 6 本（確定 3\/6（/);
+    assert.match(r.stdout, /Build の表: Plan が確定した本 3 本（全 6 本から 3 本を外した）・PASS 1\/3（/);
+    // 匿名の口：件数と率だけ（行・分類のコード・時間・費用は出さない）
+    const a = anonymize(full);
+    assert.deepEqual(a.tables, {
+      plan: { runs: 6, outcomes: { confirmed: 3, "cannot-confirm": 1, stopped: 2, unknown: 0, absent: 0 }, confirmed: plan.total.confirmed, questions: 7, rounds: 4 },
+      build: { runs: 3, excluded: 3, excluded_outcomes: { "cannot-confirm": 1, stopped: 2, unknown: 0, absent: 0 }, factory_verdicts: { full: 0, partial: 2, none: 1, unknown: 0 }, pass: build.total.pass },
+    });
+    const at = JSON.stringify(a.tables);
+    for (const word of [...ids, "deadline", "not-stated", "declined"]) assert.ok(!at.includes(word), `匿名の表に ${word}`);
+    const ar = scoreRun(out, ["--anonymous"]);
+    assert.deepEqual(JSON.parse(ar.stdout).tables, a.tables);
+  });
+});
+
+test("Plan の表と Build の表：往復の記録の無い本は absent として Plan の表に残り、Build の表の分母から外す。結果が既知でない記録は unknown", () => {
+  const t = planBuildTables([
+    { run: "X-r1", pr: null, sl: { plan_cost: null, summary: { verdict: "full", provider_cost_usd: 0.1, stages: [stg("design", 10)] } }, row: { verdict: "PASS" } },
+    { run: "X-r2", pr: { outcome: "MARK_OUTCOME", rounds: [qRound(1)], stages: [stg("requirements", 5)], spent_usd: 0.2 }, sl: null, row: null },
+    { run: "X-r3", pr: { outcome: "confirmed", rounds: [], stages: [], spent_usd: 0.3 }, sl: { plan_cost: null, summary: { verdict: "full", provider_cost_usd: 0.1, stages: [stg("design", 10)] } }, row: { verdict: "PASS" } },
+  ]);
+  assert.deepEqual(t.plan.rows.map((x) => [x.run, x.outcome, x.stop, x.usd]), [["X-r1", "absent", null, 0], ["X-r2", "unknown", { kind: "unknown", classes: [], reasons: 0 }, 0.2], ["X-r3", "confirmed", null, 0.3]]);
+  assert.deepEqual(t.plan.total.outcomes, Object.fromEntries(PLAN_TABLE_OUTCOMES.map((k) => [k, k === "absent" || k === "unknown" || k === "confirmed" ? 1 : 0])));
+  startsWith(t.plan.total.confirmed, "1/2（");
+  assert.equal(t.plan.total.questions, 1);
+  assert.deepEqual(t.build.rows.map((x) => [x.run, x.verdict, x.pass, x.usd]), [["X-r3", "PASS", true, 0.1]]);
+  assert.deepEqual([t.build.total.runs, t.build.total.excluded, t.build.total.excluded_outcomes], [1, 2, { "cannot-confirm": 0, stopped: 0, unknown: 1, absent: 1 }]);
+  assert.ok(!JSON.stringify(t).includes("MARK_OUTCOME"));
 });
