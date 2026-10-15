@@ -19,6 +19,8 @@ import {
   DIAGNOSTICS_DECLARATION_FILE,
   DIAGNOSTICS_DESIGN_FILE,
   DIAGNOSTICS_LISTING_FILE,
+  DIAGNOSTICS_REJECTED_DESIGN_FILE,
+  DIAGNOSTICS_REJECTED_TEST_SUITE_FILE,
   DIAGNOSTICS_STATIC_CHECK_FILE,
   DIAGNOSTICS_TEST_SUITE_FILE,
   MAPPINGS_FILE,
@@ -27,6 +29,8 @@ import {
   VERIFICATION_FILE,
   type BundleMaterialEntry,
   type BundlePartialReasons,
+  type BundleRejectedCandidate,
+  type BundleRejectedSummary,
   type BundleUnwritable,
   type BundleVerification,
 } from "./bundle.js";
@@ -45,6 +49,8 @@ import { CORRESPONDENCE_SCHEMA_NAME } from "./stages/correspondence.js";
 import { REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
 import { REQUIREMENTS_SCHEMA_NAME } from "./stages/requirements.js";
 import { DESIGN_SCHEMA_NAME } from "./stages/design.js";
+import * as designStage from "./stages/design.js";
+import * as testSuiteStage from "./stages/test-suite.js";
 import { NATURE_JUDGE_THRESHOLD_VERSION, TEST_SUITE_SCHEMA_NAME, natureQuestionName } from "./stages/test-suite.js";
 import { WRITE_SCHEMA_NAME } from "./stages/write.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
@@ -3730,7 +3736,36 @@ describe("設計の契約：所属と選択肢（Issue #418）", () => {
     expect(result.stopped).toMatchObject({ stage: "design", kind: "unmet" });
     expect(JSON.stringify(result.summary)).not.toContain(marker);
     expect(JSON.stringify(result.record)).not.toContain(marker);
-    expect(JSON.stringify(result.diagnostics)).not.toContain(marker);
+    // Issue #501：値（目印）は設計の候補のファイルにだけ置く。一覧と、ほかの診断のファイルには出ない
+    for (const artifact of result.diagnostics) {
+      if (artifact.path === DIAGNOSTICS_REJECTED_DESIGN_FILE) continue;
+      expect(artifact.text, artifact.path).not.toContain(marker);
+    }
+    expect(diagnosticTextOf(result.diagnostics, DIAGNOSTICS_LISTING_FILE)).not.toContain(marker);
+    expect(diagnosticTextOf(result.diagnostics, DIAGNOSTICS_REJECTED_DESIGN_FILE)).toContain(marker);
+    // 一覧の rejected に、回 1・2 の行（種類・件数・固定文ごとの件数）がある
+    const listing = JSON.parse(diagnosticTextOf(result.diagnostics, DIAGNOSTICS_LISTING_FILE)) as {
+      rejected: readonly BundleRejectedSummary[];
+    };
+    expect(listing.rejected.map((row) => [row.stage, row.operation, row.call, row.round, row.attempt, row.kind])).toEqual([
+      ["design", null, 1, 1, 1, "content"],
+      ["design", null, 1, 2, 1, "content"],
+    ]);
+    for (const row of listing.rejected) {
+      expect(row.problem_count).toBeGreaterThan(0);
+      expect(row.messages.reduce((sum, entry) => sum + entry.count, 0)).toBe(row.problem_count);
+    }
+    // 最後の行の固定文ごとの件数は、失敗の帰属の問題から数えたものと同じ
+    const lastCounts = new Map<string, number>();
+    for (const problem of result.record.failure?.problems ?? []) {
+      lastCounts.set(problem.message, (lastCounts.get(problem.message) ?? 0) + 1);
+    }
+    expect(new Map(listing.rejected.at(-1)?.messages.map((entry) => [entry.message, entry.count]))).toEqual(lastCounts);
+    // 止め方は今までどおり
+    expect(result.outcome).toEqual({ result: "failed", verdict: "none" });
+    expect(result.summary.exit_code).toBe(1);
+    expect(result.summary.stop_reason).toBe("unmet");
+    expect(result.bundle).toBeNull();
   });
 });
 
@@ -4301,5 +4336,254 @@ describe("要約と記録の failure.problems に、検査の値（役割 ID・�
     expect(JSON.stringify(result.stopped)).not.toContain(marker);
     expect(JSON.stringify(result.summary.failure)).not.toContain(marker);
     expect(JSON.stringify(result.record.failure)).not.toContain(marker);
+  });
+});
+
+// ── ②・②' が断った候補を、診断の候補のファイルに残す（Issue #501）─────────────────────
+
+/** 段の通知の口を外して走らせる（試験の側で外す。製品に切り替えの旗は足さない） */
+function stripRejectionHooks(): void {
+  const originalDesign = designStage.runDesign;
+  const originalSuite = testSuiteStage.runTestSuite;
+  vi.spyOn(designStage, "runDesign").mockImplementation(({ onRejected: _hook, ...rest }) => originalDesign(rest));
+  vi.spyOn(testSuiteStage, "runTestSuite").mockImplementation(({ onRejected: _hook, ...rest }) => originalSuite(rest));
+}
+
+/** 同じ偽物の応答・同じ偽物の時計で、口あり／口なしの 2 回を流す */
+async function runWithAndWithoutHooks(recorded: readonly RecordedCall[], overrides: Partial<GenerationInput> = {}) {
+  const hooked = runWith(recorded, overrides);
+  const withHooks = { recording: hooked.recording, result: await hooked.run };
+  stripRejectionHooks();
+  try {
+    const plain = runWith(recorded, overrides);
+    const withoutHooks = { recording: plain.recording, result: await plain.run };
+    return { withHooks, withoutHooks };
+  } finally {
+    vi.restoreAllMocks();
+  }
+}
+
+/** 診断の候補のファイルから、候補の並びを読む */
+const candidatesOf = (artifacts: readonly { path: string; text: string }[], path: string): readonly BundleRejectedCandidate[] =>
+  (JSON.parse(diagnosticTextOf(artifacts, path)) as { candidates: readonly BundleRejectedCandidate[] }).candidates;
+
+/** 設計の 1 件目が欠けた（R-2 の設計が無い）応答。形は正しく、中身の点検に落ちる */
+const DESIGN_MAPPED_MISSING_R2 = {
+  ...DESIGN_OUTPUT_MAPPED,
+  designs: DESIGN_OUTPUT_MAPPED.designs.slice(0, 1),
+};
+
+/** ② に中身の作り直しが 1 回あって完走する記録 */
+const recordedRunWithDesignRedo = (): readonly RecordedCall[] => {
+  const base = recordedRun();
+  return [base[0]!, base[1]!, structured(DESIGN_MAPPED_MISSING_R2), ...base.slice(2)];
+};
+
+describe("②・②' が断った候補を、診断の候補のファイルに残す（Issue #501）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("②' が 2 回形に落ちる走りで、試験の候補のファイルに形の行が 2 つある", async () => {
+    const malformed = { tests: 123 };
+    const { run } = runWith(
+      [
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(DESIGN_OUTPUT),
+        structured(malformed),
+        structured(malformed),
+      ],
+      { designVersion: LEGACY_DESIGN_CONTRACT },
+    );
+    const result = await run;
+
+    expect(result.stopped).toMatchObject({ stage: "test-suite", kind: "malformed" });
+    expect(result.summary.stop_reason).toBe("malformed");
+    const rows = candidatesOf(result.diagnostics, DIAGNOSTICS_REJECTED_TEST_SUITE_FILE);
+    expect(rows.map((row) => [row.stage, row.call, row.round, row.attempt, row.kind])).toEqual([
+      ["test-suite", 1, 1, 1, "shape"],
+      ["test-suite", 1, 1, 2, "shape"],
+    ]);
+    for (const row of rows) expect(row.response).toEqual(malformed);
+    // ② は 1 回で通っているので、設計の候補のファイルは無い
+    expect(result.diagnostics.map((artifact) => artifact.path)).not.toContain(DIAGNOSTICS_REJECTED_DESIGN_FILE);
+  });
+
+  it("仕分けの作り直しが断られる例で、operation redo-design・通し番号 2 の行がある", async () => {
+    const { run } = runWith(trackedRedo([structured(REDO_DESIGN_UNMET), structured(REDO_DESIGN_UNMET)]), {
+      judge: redoJudge,
+    });
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    const rows = candidatesOf(result.diagnostics, DIAGNOSTICS_REJECTED_DESIGN_FILE);
+    expect(rows.map((row) => [row.operation, row.call, row.round, row.kind])).toEqual([
+      ["redo-design", 2, 1, "content"],
+      ["redo-design", 2, 2, "content"],
+    ]);
+    // 作り直しの対象は採用済み（R-2）を合わせた候補、raw の応答は作り直しの応答そのもの
+    expect(rows[0]?.response).toEqual(REDO_DESIGN_UNMET);
+    const target = rows[0]?.target as { designs: readonly { requirementId: string }[] } | undefined;
+    expect(target?.designs.map((design) => design.requirementId)).toEqual(["R-2"]);
+  });
+
+  it("② に中身の作り直しが 1 回ある完走では、納品物・verdict・manifest・検証の結果は変わらず、diagnostics は設計の候補のファイル 1 つだけ", async () => {
+    const { withHooks, withoutHooks } = await runWithAndWithoutHooks(recordedRunWithDesignRedo());
+    const result = withHooks.result;
+
+    expect(result.stopped).toBeNull();
+    expect(result.bundle).not.toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(result.diagnostics.map((artifact) => artifact.path)).toEqual([DIAGNOSTICS_REJECTED_DESIGN_FILE]);
+    const rows = candidatesOf(result.diagnostics, DIAGNOSTICS_REJECTED_DESIGN_FILE);
+    expect(rows.map((row) => [row.operation, row.call, row.round, row.attempt, row.kind])).toEqual([[null, 1, 1, 1, "content"]]);
+    expect(rows[0]?.response).toEqual(DESIGN_MAPPED_MISSING_R2);
+
+    // 口を外した走りと、manifest の files・検証の結果・納品物の成果物が同じ（候補は納品物に入らない）
+    const bundle = result.bundle!;
+    const plainBundle = withoutHooks.result.bundle!;
+    expect(bundle.manifest.files).toEqual(plainBundle.manifest.files);
+    expect(bundle.manifestText).toBe(plainBundle.manifestText);
+    expect(verificationOf(bundle)).toEqual(verificationOf(plainBundle));
+    expect(bundle.artifacts).toEqual(plainBundle.artifacts);
+    expect(bundle.artifacts.some((artifact) => artifact.path.startsWith("diagnostics/"))).toBe(false);
+    expect(withoutHooks.result.diagnostics).toEqual([]);
+  });
+
+  it("作り直しの無い完走では diagnostics が空", async () => {
+    const { run } = runWith(recordedRun());
+    const result = await run;
+    expect(result.stopped).toBeNull();
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("口あり／なしの対を同じ偽物の応答・偽物の時計で流すと、要求・outcome・stop_reason・exit_code・記録・要約・予算の残り・呼び出しの数が同じ", async () => {
+    const marker = "MARKER501";
+    const badDesign = {
+      ...DESIGN_OUTPUT_MAPPED,
+      designs: [
+        { ...DESIGN_OUTPUT_MAPPED.designs[0], ownership: [{ roleId: `ghost-${marker}`, basis: "dependency", reason: marker }] },
+        ...DESIGN_OUTPUT_MAPPED.designs.slice(1),
+      ],
+    };
+    const base = recordedRun();
+    const scenarios: readonly { readonly recorded: readonly RecordedCall[]; readonly overrides?: Partial<GenerationInput> }[] = [
+      // ② が 2 回 unmet で止まる
+      { recorded: [base[0]!, base[1]!, structured(badDesign), structured(badDesign)] },
+      // ② の作り直し 1 回で完走する
+      { recorded: recordedRunWithDesignRedo() },
+      // ②' が形に 1 回落ちて完走する
+      { recorded: [...base.slice(0, 3), structured({ tests: 123 }), ...base.slice(3)] },
+      // 仕分けの作り直しが 2 回とも断られる
+      {
+        recorded: trackedRedo([structured(REDO_DESIGN_UNMET), structured(REDO_DESIGN_UNMET)]),
+        overrides: { judge: redoJudge },
+      },
+    ];
+    for (const scenario of scenarios) {
+      const { withHooks, withoutHooks } = await runWithAndWithoutHooks(scenario.recorded, scenario.overrides);
+      const a = withHooks.result;
+      const b = withoutHooks.result;
+      // 口ありの走りには候補が残り、口なしの走りには残らない（口を外せていることの確かめ）
+      expect(a.diagnostics.some((artifact) => artifact.path.includes("rejected-"))).toBe(true);
+      expect(b.diagnostics.some((artifact) => artifact.path.includes("rejected-"))).toBe(false);
+      expect(JSON.stringify(withHooks.recording.structured)).toBe(JSON.stringify(withoutHooks.recording.structured));
+      expect(JSON.stringify(withHooks.recording.tools)).toBe(JSON.stringify(withoutHooks.recording.tools));
+      expect(withHooks.recording.structured.length).toBe(withoutHooks.recording.structured.length);
+      expect(a.outcome).toEqual(b.outcome);
+      expect(a.stopped).toEqual(b.stopped);
+      expect(a.summary.stop_reason).toBe(b.summary.stop_reason);
+      expect(a.summary.exit_code).toBe(b.summary.exit_code);
+      expect(a.record).toEqual(b.record);
+      expect(a.summary).toEqual(b.summary);
+      expect(a.record.budget_remaining_usd).toBe(b.record.budget_remaining_usd);
+      expect(a.bundle?.manifestText).toBe(b.bundle?.manifestText);
+      // 要約と記録には、目印（値）が無い
+      expect(JSON.stringify(a.summary)).not.toContain(marker);
+      expect(JSON.stringify(a.record)).not.toContain(marker);
+    }
+  });
+
+  it("初回の ② と 2 回の作り直しが断られる合成例で、候補の行が通し番号・operation・回・試行で段の記録の呼び出しへ一意に結び付き、SHA-256 を計算し直すと一致する", async () => {
+    const designTwoClaims = {
+      roles: CREATE_DESIGN.roles,
+      designs: [
+        {
+          ...CREATE_DESIGN.designs[0],
+          unwritable: [{ part: "記録の並べ替えは書けない", constraintIds: ["記録"], reason: "文書に欄が無い" }],
+          notes: [],
+        },
+        {
+          ...CREATE_DESIGN.designs[1],
+          unwritable: [{ part: "合計の丸め方は書けない", constraintIds: ["記録"], reason: "文書に欄が無い" }],
+          notes: [],
+        },
+      ],
+    };
+    // 初回の ② の 1 回目は R-2 の設計が欠ける（中身に落ちる）
+    const missingR2 = { roles: designTwoClaims.roles, designs: designTwoClaims.designs.slice(0, 1) };
+    const judge = createFakeJudge({
+      "triage:R-1:0": judgeChoice("vocabulary-hole", 0.9),
+      "triage:R-2:0": judgeChoice("vocabulary-hole", 0.9),
+      "support:R-1:0": judgeChoice("contradicts", 0.9),
+      "support:R-2:0": judgeChoice("contradicts", 0.9),
+    });
+    const { run } = runWith(
+      [
+        structured(REQUIREMENT_LIST_OUTPUT),
+        structured(REVERSE_CHECK_OUTPUT),
+        structured(missingR2),
+        structured(designTwoClaims),
+        structured(REDO_DESIGN_UNMET),
+        structured(REDO_DESIGN_UNMET),
+        structured(REDO_DESIGN_UNMET),
+        structured(REDO_DESIGN_UNMET),
+        structured(REDO_PASSING_SUITE),
+        structured({ declaration: CREATE_DECLARATION, mappings: CREATE_MAPPINGS }),
+        structured(CREATE_CORRESPONDENCE),
+      ],
+      { judge },
+    );
+    const result = await run;
+
+    expect(result.stopped).toBeNull();
+    const designRecords = result.record.stages.filter((stage) => stage.stage === "design");
+    expect(designRecords.map((stage) => stage.operation)).toEqual([null, "redo-design", "redo-design"]);
+    const rows = candidatesOf(result.diagnostics, DIAGNOSTICS_REJECTED_DESIGN_FILE);
+    expect(rows.map((row) => [row.operation, row.call, row.round, row.attempt])).toEqual([
+      [null, 1, 1, 1],
+      ["redo-design", 2, 1, 1],
+      ["redo-design", 2, 2, 1],
+      ["redo-design", 3, 1, 1],
+      ["redo-design", 3, 2, 1],
+    ]);
+    // 鍵（通し番号・operation・回・試行・種類）は一意で、通し番号は段の記録の n 件目の ② を指す
+    const keys = rows.map((row) => JSON.stringify([row.call, row.operation, row.round, row.attempt, row.kind]));
+    expect(new Set(keys).size).toBe(rows.length);
+    for (const row of rows) {
+      const record = designRecords[row.call - 1];
+      expect(record?.operation).toBe(row.operation);
+      expect(record?.status).toBe(row.call === 1 ? "ok" : "failed");
+    }
+    // 行が示す試行の数（回ごとの最大の試行の和）は、その段の記録の呼び出しの数の内側にある
+    designRecords.forEach((record, index) => {
+      const own = rows.filter((row) => row.call === index + 1);
+      const rounds = new Map<number, number>();
+      for (const row of own) rounds.set(row.round, Math.max(rounds.get(row.round) ?? 0, row.attempt));
+      const implied = [...rounds.values()].reduce((sum, attempts) => sum + attempts, 0);
+      expect(implied).toBeLessThanOrEqual(record.calls);
+    });
+    // 保存した候補のファイルの JSON から、材料と同じ方式で SHA-256 を計算し直すと行の値と一致する
+    for (const row of rows) {
+      expect(await sha256Hex(JSON.stringify(row.target))).toBe(row.target_sha256);
+      expect(await sha256Hex(JSON.stringify(row.response))).toBe(row.response_sha256);
+      expect(await sha256Hex(JSON.stringify(row.inspection_list))).toBe(row.inspection_list_sha256);
+      for (const problem of row.problems) {
+        expect(problem.reference_sha256).toBe(problem.reference === "target" ? row.target_sha256 : row.response_sha256);
+      }
+    }
+    // 一覧は完走では返さない（候補のファイルだけ）
+    expect(result.diagnostics.map((artifact) => artifact.path)).toEqual([DIAGNOSTICS_REJECTED_DESIGN_FILE]);
   });
 });

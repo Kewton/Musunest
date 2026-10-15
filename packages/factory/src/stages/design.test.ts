@@ -22,7 +22,13 @@ import {
   runDesign,
   type DesignInput,
 } from "./design.js";
-import { buildStructuredRequest, ruleDefinitionDefects, ruleTexts, serializeJson } from "./prompt.js";
+import {
+  buildStructuredRequest,
+  ruleDefinitionDefects,
+  ruleTexts,
+  serializeJson,
+  type RejectedCandidate,
+} from "./prompt.js";
 import {
   DESIGN_OUTPUT,
   INJECTED_INSTRUCTION,
@@ -1877,5 +1883,256 @@ describe("断る Problem の field と message に、値を埋めない（§1・
         (problem) => problem.field === "designs[0].unwritable[0].constraintIds" && problem.message === "文書に無い制約 ID である",
       ),
     ).toBe(true);
+  });
+});
+
+// ── 断った候補を、断った時点で観測用の口へ渡す（Issue #501）──────────────────────
+
+/** データの塊の中身（JSON）を読む */
+function dataBlockOf(input: string, name: string): unknown {
+  const match = new RegExp(`<data name="${name}">\\n([\\s\\S]*?)\\n</data>`).exec(input);
+  if (match === null) throw new Error(`データの塊が無い: ${name}`);
+  return JSON.parse(match[1] ?? "null");
+}
+
+/** 参照元を外した問題（段の失敗・前回の指示と比べるため） */
+const withoutReference = (problems: readonly { readonly reference: string }[]): readonly unknown[] =>
+  problems.map(({ reference: _reference, ...problem }) => problem);
+
+/** 問題の field から、設計の添字を読む（`designs[n]…`） */
+const designIndexOf = (field: string): number => Number(/^designs\[(\d+)\]/.exec(field)?.[1] ?? "-1");
+
+describe("② が断った候補を、断った時点で観測用の口へ渡す（Issue #501）", () => {
+  it("中身に 1 回落ちて 2 回目で通ると、content・回 1 の通知が 1 回あり、対象・raw・問題が検査と前回の指示に等しい", async () => {
+    const seen: RejectedCandidate[] = [];
+    const recording = createRecordingClient([structured(DESIGN_MISSING_R2), structured(PLANNED_DESIGN)]);
+    const outcome = await runDesign({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      onRejected: (candidate) => seen.push(candidate),
+    });
+
+    expect(outcome.ok).toBe(true);
+    expect(seen).toHaveLength(1);
+    const notice = seen[0];
+    if (notice?.kind !== "content") throw new Error("中身の通知でない");
+    expect(notice.round).toBe(1);
+    expect(notice.attempt).toBe(1);
+    // 対象は形の検査を通った値、raw の応答は 1 回目の応答（添字の位置が同じ）
+    const checked = checkDesignOutput(DESIGN_MISSING_R2);
+    if (!checked.ok) throw new Error("前提（形）が壊れた");
+    expect(notice.target).toEqual(checked.value);
+    expect(notice.response).toEqual(DESIGN_MISSING_R2);
+    expect((notice.target as DesignResult).designs.map((entry) => entry.requirementId)).toEqual(
+      DESIGN_MISSING_R2.designs.map((entry) => entry?.requirementId),
+    );
+    expect(notice.inspectionList).toEqual(REQUIREMENT_LIST);
+    // 問題は、2 回目の要求の「前回の作り直しの指示」のデータと等しい
+    expect(withoutReference(notice.problems)).toEqual(
+      dataBlockOf(recording.structured[1]?.input ?? "", "前回の作り直しの指示"),
+    );
+    expect(notice.problems.every((problem) => problem.reference === "target")).toBe(true);
+  });
+
+  it("2 回落ちて unmet なら通知は 2 回（回 1・2）で、最後の通知の問題が失敗の problems と等しい", async () => {
+    const seen: RejectedCandidate[] = [];
+    const recording = createRecordingClient([structured(DESIGN_MISSING_R2), structured(DESIGN_BAD_CONSTRAINT)]);
+    const outcome = await runDesign({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      onRejected: (candidate) => seen.push(candidate),
+    });
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(seen.map((notice) => [notice.kind, notice.round])).toEqual([
+      ["content", 1],
+      ["content", 2],
+    ]);
+    expect(withoutReference(seen.at(-1)?.problems ?? [])).toEqual(outcome.failure.problems);
+    expect(seen[1]?.response).toEqual(DESIGN_BAD_CONSTRAINT);
+  });
+
+  it("形→中身→形→通る合成例で、通知の順は 形(回 1・試行 1)→中身(回 1)→形(回 2・試行 1)の 3 回", async () => {
+    const seen: RejectedCandidate[] = [];
+    const recording = createRecordingClient([
+      structured(MALFORMED_DESIGN),
+      structured(DESIGN_MISSING_R2),
+      structured(MALFORMED_DESIGN),
+      structured(PLANNED_DESIGN),
+    ]);
+    const outcome = await runDesign({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      onRejected: (candidate) => seen.push(candidate),
+    });
+
+    expect(outcome.ok).toBe(true);
+    expect(seen.map((notice) => ({ kind: notice.kind, round: notice.round, attempt: notice.attempt }))).toEqual([
+      { kind: "shape", round: 1, attempt: 1 },
+      { kind: "content", round: 1, attempt: 2 },
+      { kind: "shape", round: 2, attempt: 1 },
+    ]);
+    // 形の候補は raw の応答と形の問題だけを持ち、参照元は raw の応答
+    const shape = seen[0];
+    expect(shape?.response).toEqual(MALFORMED_DESIGN);
+    expect(shape?.problems).toEqual([{ field: "designs", message: "設計の並び（array）であること", reference: "response" }]);
+    expect(shape !== undefined && "target" in shape).toBe(false);
+    // 中身の候補の raw の応答は、形の検査を通った 2 回目の応答
+    expect(seen[1]?.response).toEqual(DESIGN_MISSING_R2);
+  });
+
+  /** R-1 の採用済みの設計（作り直しの固定の文脈） */
+  const adoptedR1: RequirementDesign = {
+    requirementId: "R-1",
+    nature: "ruled",
+    verification: { kind: "fixed-test" },
+    vocabulary: [],
+    placement: [],
+    unwritable: [],
+    ownership: [
+      { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+      { roleId: "record.total", basis: "stated", reason: null },
+    ],
+  };
+  /** 2 番目の要件（R-2）だけを送る作り直しの入力 */
+  const redoR2Input = (responses: readonly unknown[], onRejected?: (candidate: RejectedCandidate) => void) => {
+    const recording = createRecordingClient(responses.map((response) => structured(response)));
+    const input: DesignInput = {
+      list: { ...REQUIREMENT_LIST, requirements: REQUIREMENT_LIST.requirements.filter((r) => r.id === "R-2") },
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      redo: { roles: ROLES_418, adopted: [adoptedR1], wholeList: REQUIREMENT_LIST },
+      ...(onRejected === undefined ? {} : { onRejected }),
+    };
+    return { recording, input };
+  };
+
+  it("単一要件の作り直しで、対象は採用済みを合わせた候補、raw の応答は応答 1 件分、一覧は送った座標の順", async () => {
+    const seen: RejectedCandidate[] = [];
+    const emptyRedo = { roles: ROLES_418, designs: [] };
+    const { input } = redoR2Input([emptyRedo, emptyRedo], (candidate) => seen.push(candidate));
+    const outcome = await runDesign(input);
+
+    expect(outcome.ok).toBe(false);
+    expect(seen).toHaveLength(2);
+    const notice = seen[0];
+    if (notice?.kind !== "content") throw new Error("中身の通知でない");
+    // 対象は、固定の表と、採用済み＋応答の設計を合わせた候補（検査に渡した物）
+    expect(notice.target).toEqual({ roles: ROLES_418, designs: [adoptedR1] });
+    // raw の応答は、作り直しの応答 1 件分
+    expect(notice.response).toEqual(emptyRedo);
+    // 一覧は送った座標の順（送った R-2 が先頭、残りが後ろ）
+    expect(notice.inspectionList.requirements.map((requirement) => requirement.id)).toEqual(["R-2", "R-1"]);
+    expect(
+      notice.problems.some(
+        (problem) =>
+          problem.field === "requirements[0]" && problem.message === "要件の設計が無い" && problem.reference === "target",
+      ),
+    ).toBe(true);
+  });
+
+  it("採用済みが 1 件ある作り直しで所属と制約 ID の問題を同時に起こすと、前者は候補の全体・後者は raw の応答を指し、添字が正しい要件を指す", async () => {
+    const seen: RejectedCandidate[] = [];
+    const redoR2 = {
+      requirementId: "R-2",
+      nature: "existence-only",
+      verification: { kind: "structural", reason: "在ることだけ" },
+      checks: ["field-type"],
+      vocabulary: [],
+      placement: [],
+      unwritable: [{ part: "部分", constraintIds: ["R-999"], reason: "理由" }],
+      notes: [],
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "行を参照するため" },
+        { roleId: "record.extra", basis: "stated", reason: null },
+        { roleId: "ghost", basis: "stated", reason: null },
+      ],
+    };
+    const response = { roles: ROLES_418, designs: [redoR2] };
+    const { input } = redoR2Input([response, response], (candidate) => seen.push(candidate));
+    await runDesign(input);
+
+    const notice = seen[0];
+    if (notice?.kind !== "content") throw new Error("中身の通知でない");
+    const target = notice.target as DesignResult;
+    const raw = notice.response as { readonly designs: readonly { readonly requirementId: string }[] };
+    const ownership = notice.problems.find((problem) => problem.message === "所属の役割 ID が役割 ID の表に無い");
+    const constraint = notice.problems.find((problem) => problem.message === "文書に無い制約 ID である");
+    if (ownership === undefined || constraint === undefined) throw new Error("前提（問題）が起きていない");
+    // 所属の問題は候補の全体を指し、その添字は R-2（採用済みの R-1 の後ろ）
+    expect(ownership.reference).toBe("target");
+    expect(designIndexOf(ownership.field)).toBe(1);
+    expect(target.designs[designIndexOf(ownership.field)]?.requirementId).toBe("R-2");
+    // 制約 ID の問題は raw の応答を指し、その添字は応答の R-2（同じ添字 0 は、全体では R-1 を指す）
+    expect(constraint.reference).toBe("response");
+    expect(designIndexOf(constraint.field)).toBe(0);
+    expect(raw.designs[designIndexOf(constraint.field)]?.requirementId).toBe("R-2");
+    expect(target.designs[0]?.requirementId).toBe("R-1");
+  });
+
+  it("目印を値に入れた候補で、目印は対象に現れ、問題の field・message に出ない", async () => {
+    const marker = "MARKER501";
+    const seen: RejectedCandidate[] = [];
+    const marked = {
+      roles: PLANNED_ROLES,
+      designs: [
+        { ...PLANNED_DESIGN.designs[0], ownership: [{ roleId: `ghost-${marker}`, basis: "dependency", reason: `${marker}-reason` }] },
+        PLANNED_DESIGN.designs[1],
+      ],
+    };
+    const recording = createRecordingClient([structured(marked), structured(marked)]);
+    await runDesign({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      onRejected: (candidate) => seen.push(candidate),
+    });
+
+    expect(seen).toHaveLength(2);
+    for (const notice of seen) {
+      if (notice.kind !== "content") throw new Error("中身の通知でない");
+      expect(JSON.stringify(notice.target)).toContain(marker);
+      expect(notice.problems.length).toBeGreaterThan(0);
+      for (const problem of notice.problems) {
+        expect(problem.field).not.toContain(marker);
+        expect(problem.message).not.toContain(marker);
+      }
+    }
+  });
+
+  it("同じ記録の応答で口の有無の 2 回を流すと、要求・結果・calls・retryCounts が同じ", async () => {
+    const runNormal = async (hook?: (candidate: RejectedCandidate) => void) => {
+      const recording = createRecordingClient([
+        structured(MALFORMED_DESIGN),
+        structured(DESIGN_MISSING_R2),
+        structured(MALFORMED_DESIGN),
+        structured(DESIGN_BAD_CONSTRAINT),
+      ]);
+      const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+      const outcome = await runDesign({
+        list: REQUIREMENT_LIST,
+        documents: SAMPLE_DOCUMENTS,
+        gateway,
+        ...(hook === undefined ? {} : { onRejected: hook }),
+      });
+      return { requests: JSON.stringify(recording.structured), outcome, counts: gateway.counts, retries: gateway.retryCounts };
+    };
+    const runRedo = async (hook?: (candidate: RejectedCandidate) => void) => {
+      const emptyRedo = { roles: ROLES_418, designs: [] };
+      const { recording, input } = redoR2Input([MALFORMED_DESIGN, emptyRedo, emptyRedo], hook);
+      const outcome = await runDesign(input);
+      return { requests: JSON.stringify(recording.structured), outcome, counts: input.gateway.counts, retries: input.gateway.retryCounts };
+    };
+    for (const run of [runNormal, runRedo]) {
+      const seen: RejectedCandidate[] = [];
+      const without = await run();
+      const withHook = await run((candidate) => seen.push(candidate));
+      expect(seen.length).toBeGreaterThan(0);
+      expect(withHook).toEqual(without);
+    }
   });
 });

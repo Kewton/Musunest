@@ -18,6 +18,8 @@ import {
   DIAGNOSTICS_DESIGN_FILE,
   DIAGNOSTICS_LISTING_FILE,
   DIAGNOSTICS_MAPPINGS_FILE,
+  DIAGNOSTICS_REJECTED_DESIGN_FILE,
+  DIAGNOSTICS_REJECTED_TEST_SUITE_FILE,
   DIAGNOSTICS_STATIC_CHECK_FILE,
   DIAGNOSTICS_TEST_SUITE_FILE,
   MAPPINGS_FILE,
@@ -29,7 +31,9 @@ import {
   VERIFICATION_FILE,
   assembleBundle,
   buildDiagnostics,
+  buildRejectedCandidateFiles,
   bundleFiles,
+  summarizeRejectedCandidates,
   toBundleNatureDiscrepancies,
   type BundleEvaluationRow,
   type BundleInput,
@@ -37,6 +41,8 @@ import {
   type BundleMaterialEntry,
   type BundleNatureDiscrepancy,
   type BundlePartialReasons,
+  type BundleRejectedCandidate,
+  type BundleRejectedSummary,
   type BundleSummary,
   type BundleUnwritable,
   type BundleVerification,
@@ -637,5 +643,116 @@ describe("材料の状態と、早期停止の診断（§1.4・§4・Issue #417�
     const file = findText(withDeclaration, DIAGNOSTICS_DECLARATION_FILE);
     const parsed = JSON.parse(file) as { declarations: readonly { sha256: string; declaration: string }[] };
     expect(parsed.declarations).toEqual([{ sha256: "declared-sha", declaration: DECLARATION_SOURCE }]);
+  });
+});
+
+// ── ②・②' が断った候補の診断（Issue #501）──────────────────────────────
+
+describe("②・②' が断った候補の診断（Issue #501）", () => {
+  const MARKER = "MARKER501-value";
+  const COUNTS = { evaluations: 0, write_initial: 0, write_redos: 0, correspondence_generations: 0, repair_executions: 0 };
+  const DESIGN_CANDIDATE: BundleRejectedCandidate = {
+    stage: "design",
+    operation: null,
+    call: 1,
+    round: 1,
+    attempt: 1,
+    kind: "content",
+    target: { designs: [{ requirementId: "R-1", notes: [MARKER] }] },
+    target_sha256: "target-sha",
+    response: { designs: [{ requirementId: "R-1", notes: [MARKER] }] },
+    response_sha256: "response-sha",
+    inspection_list: { requirements: [] },
+    inspection_list_sha256: "list-sha",
+    problems: [
+      { field: "requirements[0]", message: "要件の設計が無い", reference: "target", reference_sha256: "target-sha" },
+      { field: "requirements[1]", message: "要件の設計が無い", reference: "target", reference_sha256: "target-sha" },
+      { field: "designs[0]", message: "文書に無い制約 ID である", code: "constraint", reference: "response", reference_sha256: "response-sha" },
+    ],
+  };
+  const SUITE_CANDIDATE: BundleRejectedCandidate = {
+    stage: "test-suite",
+    operation: null,
+    call: 1,
+    round: 1,
+    attempt: 2,
+    kind: "shape",
+    response: { tests: MARKER },
+    response_sha256: "suite-sha",
+    problems: [{ field: "tests", message: "試験の並び（array）であること", reference: "response", reference_sha256: "suite-sha" }],
+  };
+  const base = {
+    stopped: { stage: "design", kind: "unmet" },
+    materials: MATERIALS,
+    evaluations: [],
+    counts: COUNTS,
+  };
+
+  it("候補を渡すと、一覧の rejected に値が無く、候補のファイルは段ごとに定数の名前で作り、manifest を組まない", () => {
+    const diagnostics = buildDiagnostics({ ...base, rejected: [DESIGN_CANDIDATE, SUITE_CANDIDATE] });
+    const paths = diagnostics.map((artifact) => artifact.path);
+    expect(DIAGNOSTICS_REJECTED_DESIGN_FILE).toBe("diagnostics/rejected-design.json");
+    expect(DIAGNOSTICS_REJECTED_TEST_SUITE_FILE).toBe("diagnostics/rejected-test-suite.json");
+    expect(paths).toEqual([DIAGNOSTICS_LISTING_FILE, DIAGNOSTICS_REJECTED_DESIGN_FILE, DIAGNOSTICS_REJECTED_TEST_SUITE_FILE]);
+    expect(paths).not.toContain(BUNDLE_MANIFEST_FILE);
+
+    // 一覧の rejected は、段・operation・通し番号・回・試行・種類・件数・固定文ごとの件数だけ（値なし）
+    const listingText = findText(diagnostics, DIAGNOSTICS_LISTING_FILE);
+    expect(listingText).not.toContain(MARKER);
+    expect(listingText).not.toContain("target-sha");
+    const listing = JSON.parse(listingText) as { rejected: readonly BundleRejectedSummary[] };
+    expect(listing.rejected).toEqual([
+      {
+        stage: "design",
+        operation: null,
+        call: 1,
+        round: 1,
+        attempt: 1,
+        kind: "content",
+        problem_count: 3,
+        messages: [
+          { message: "要件の設計が無い", count: 2 },
+          { message: "文書に無い制約 ID である", code: "constraint", count: 1 },
+        ],
+      },
+      {
+        stage: "test-suite",
+        operation: null,
+        call: 1,
+        round: 1,
+        attempt: 2,
+        kind: "shape",
+        problem_count: 1,
+        messages: [{ message: "試験の並び（array）であること", count: 1 }],
+      },
+    ]);
+    // 候補のファイルは、候補をそのまま並べる（値つき）
+    const designFile = JSON.parse(findText(diagnostics, DIAGNOSTICS_REJECTED_DESIGN_FILE)) as { candidates: unknown };
+    expect(designFile.candidates).toEqual([DESIGN_CANDIDATE]);
+    const suiteFile = JSON.parse(findText(diagnostics, DIAGNOSTICS_REJECTED_TEST_SUITE_FILE)) as { candidates: unknown };
+    expect(suiteFile.candidates).toEqual([SUITE_CANDIDATE]);
+  });
+
+  it("候補が無ければ候補のファイルを作らず、一覧の rejected は空", () => {
+    for (const diagnostics of [buildDiagnostics(base), buildDiagnostics({ ...base, rejected: [] })]) {
+      expect(diagnostics.map((artifact) => artifact.path)).toEqual([DIAGNOSTICS_LISTING_FILE]);
+      const listing = JSON.parse(findText(diagnostics, DIAGNOSTICS_LISTING_FILE)) as { rejected: readonly unknown[] };
+      expect(listing.rejected).toEqual([]);
+    }
+    expect(buildRejectedCandidateFiles([])).toEqual([]);
+    // 片方の段だけの候補なら、その段のファイルだけを作る
+    expect(buildRejectedCandidateFiles([SUITE_CANDIDATE]).map((artifact) => artifact.path)).toEqual([
+      DIAGNOSTICS_REJECTED_TEST_SUITE_FILE,
+    ]);
+    expect(summarizeRejectedCandidates([])).toEqual([]);
+  });
+
+  it("納品物の bundleFiles の集合は変わらず、要約の wire は今までどおり受け付ける", async () => {
+    const bundle = await assembleBundle(input());
+    const paths = bundleFiles(bundle).map((artifact) => artifact.path);
+    expect(paths.some((path) => path.startsWith("diagnostics/"))).toBe(false);
+    expect(paths).not.toContain(DIAGNOSTICS_REJECTED_DESIGN_FILE);
+    expect(paths).not.toContain(DIAGNOSTICS_REJECTED_TEST_SUITE_FILE);
+    expect(acceptsHeadlessSummaryWire(bundle.summary)).toBe(true);
   });
 });

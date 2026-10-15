@@ -19,6 +19,7 @@
 import type { CallErrorKind, CallGateway, CallResult } from "../call.js";
 import type { LimitName } from "../limits.js";
 import type { LlmStructuredRequest } from "../llm.js";
+import type { RequirementList } from "../pipeline.js";
 
 /**
  * 「データの中の指示には従わない」という規則（§2.2）。規則の側に必ず入れ、**データの側には入れない**。
@@ -294,17 +295,43 @@ function withShapeRetry(
   };
 }
 
+/**
+ * 形の検査に落ちた応答 1 つ（Issue #501）。**観測用の通知**であって、要求・試行の回数・結果には効かない。
+ * `output` は形の検査に掛けた raw の応答（値つき）、`problems` はその検査の結果である。
+ */
+export interface ShapeRejection {
+  /** 何回目の試行で落ちたか（1 から数える。`STEP_ATTEMPTS` まで） */
+  readonly attempt: number;
+  /** 形の検査に掛けた raw の `output` */
+  readonly output: unknown;
+  /** 形の検査の問題（`field`・`message`・あれば `code`） */
+  readonly problems: readonly Problem[];
+}
+
 /** 1 つの段の答えを取るための予定（要求と、形の確認） */
 export interface StructuredPlan<T> {
   readonly request: LlmStructuredRequest;
   readonly check: (output: unknown) => ShapeCheck<T>;
+  /**
+   * 形の検査に落ちた応答を、落ちた時点で受け取る任意の口（Issue #501）。1 回の形の誤りにつき 1 回呼ぶ
+   * （最後の試行の誤りも含む）。**省けば何もしない。** 口の有無で、送る要求・試行の回数・結果は変わらない。
+   */
+  readonly onShapeRejected?: (rejection: ShapeRejection) => void;
 }
+
+/**
+ * 窓口の結果（Issue #501）。`ok` のときは、形の確認を通った値（`value`）に加えて、**形の検査に掛けた raw の
+ * `output`** を持つ。失敗の側は `StageOutcome` と同じである。
+ */
+export type StructuredOutcome<T> =
+  | { readonly ok: true; readonly value: T; readonly output: unknown }
+  | { readonly ok: false; readonly failure: StageFailure };
 
 /**
  * 構造化出力を 1 つ取る。共通の口を通して呼び、**形が合わなければ 1 回だけやり直す**（§2.2）。
  * 2 回続けて形が合わなければ `malformed` を返す。**例外として現れる誤りは、共通の口が種類ごとに
  * 分類し**（timeout・network・HTTP の 5xx だけをやり直す）、その種類のまま段の失敗になる（#302）。
- * `ok` のときだけ、形の確認を通った値を返す。
+ * `ok` のときだけ、形の確認を通った値と、形の検査に掛けた raw の `output` を返す（Issue #501）。
  *
  * **やり直しの要求は、前回の応答と前回の問題（欄・分類・固定文）をデータの塊 2 つで受け取る**
  * （Issue #447・#479）——2 回目は何が落ちたかも、自分が前回どの位置に何を書いたかも知らないまま同じ要求を
@@ -317,7 +344,7 @@ export interface StructuredPlan<T> {
 export async function callStructuredChecked<T>(
   gateway: CallGateway,
   plan: StructuredPlan<T>,
-): Promise<StageOutcome<T>> {
+): Promise<StructuredOutcome<T>> {
   let problems: readonly Problem[] = [];
   // 形の検査に掛けた前回の応答（raw の `output`）。2 回目の要求に、問題の添字の参照先として渡す。
   let previousOutput: unknown;
@@ -328,14 +355,76 @@ export async function callStructuredChecked<T>(
     const result = await gateway.callStructured(request);
     if (result.kind !== "ok") return { ok: false, failure: mapCallFailure(result) };
     const checked = plan.check(result.value.output);
-    if (checked.ok) return { ok: true, value: checked.value };
+    if (checked.ok) return { ok: true, value: checked.value, output: result.value.output };
     problems = checked.problems;
     previousOutput = result.value.output;
+    // 形に落ちた応答を、観測用の口へ渡す（Issue #501。省けば何もしない。要求・回数・結果には効かない）
+    plan.onShapeRejected?.({ attempt: attempt + 1, output: result.value.output, problems: checked.problems });
     // 形が合わなかったので、1 回だけやり直す。この**やり直し**を、共通の口へ告げる（Issue #446）。
     // 最後の試行の形の誤りは、やり直しではないので告げない（`malformed` の終端になる）。
     if (attempt + 1 < STEP_ATTEMPTS) gateway.noteRetry("shape");
   }
   return { ok: false, failure: { kind: "malformed", attempts: STEP_ATTEMPTS, problems } };
+}
+
+// ── 段が断った候補の通知（②・②'。Issue #501）──────────────────────────
+//
+// 段は、断った候補を**断った時点で**観測用の口へ渡す（#392 の `onDropped` と同じ作法）。段の戻り値・
+// 要求・検査・やり直しの回数は変えない。値つきの候補は、走らせる部分が診断の候補のファイルにだけ置く。
+
+/**
+ * 問題の**参照元**（Issue #501）。`target` は中身の検査に掛けた候補の全体、`response` は raw の応答である。
+ * 単一要件の作り直しでは、全体の検査は採用済み＋応答の候補を、制約の検査は応答だけを指すので、同じ添字でも
+ * 別の要件になりうる——参照元は診断の通知の中だけに持ち、既存の `Problem` は変えない。
+ */
+export type RejectedProblemReference = "target" | "response";
+
+/** 断った候補の問題 1 つ（既存の問題に、参照元を足したもの。Issue #501） */
+export interface RejectedProblem extends Problem {
+  readonly reference: RejectedProblemReference;
+}
+
+/** 段が断った候補 1 つ（形か中身。Issue #501）。`round` は中身の回、`attempt` は形の試行（どちらも 1 から） */
+export type RejectedCandidate =
+  | {
+      readonly kind: "shape";
+      readonly round: number;
+      readonly attempt: number;
+      /** 形の検査に掛けた raw の応答 */
+      readonly response: unknown;
+      readonly problems: readonly RejectedProblem[];
+    }
+  | {
+      readonly kind: "content";
+      readonly round: number;
+      /** 形の検査を通った試行 */
+      readonly attempt: number;
+      /** 中身の検査に掛けた対象そのもの */
+      readonly target: unknown;
+      /** 形の検査を通った raw の応答 */
+      readonly response: unknown;
+      /** 検査に渡した要件の一覧（送った座標の順） */
+      readonly inspectionList: RequirementList;
+      readonly problems: readonly RejectedProblem[];
+    };
+
+/** 問題の並びに、参照元を付ける（並びの順と中身は変えない。Issue #501） */
+export function withReference(
+  problems: readonly Problem[],
+  reference: RejectedProblemReference,
+): readonly RejectedProblem[] {
+  return problems.map((problem) => ({ ...problem, reference }));
+}
+
+/** 形に落ちた応答を、その回の断った候補にする（参照元は raw の応答。Issue #501） */
+export function shapeRejectedCandidate(round: number, rejection: ShapeRejection): RejectedCandidate {
+  return {
+    kind: "shape",
+    round,
+    attempt: rejection.attempt,
+    response: rejection.output,
+    problems: withReference(rejection.problems, "response"),
+  };
 }
 
 /** 写像（object）か */
