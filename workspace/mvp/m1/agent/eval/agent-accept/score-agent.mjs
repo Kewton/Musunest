@@ -47,8 +47,8 @@ export const SCORING_SYSTEMS = {
   source: "原文系：凍結した v5 の判定のまま（集計の版 v1・v2）。了承の記録は見ない",
   accepted: "了承後系：確定した仕様（plan.json。契約の検査を通ったもの）の了承の記録で読み替える。了承済みの書けない要件は申告が無くても挙げ漏れにせず、誤った除外・判定不能・未評価を別に数える。分母・分子は v2 と同じ（了承で変わった判定も誤った除外も外さない）。変更後を判定する手段が無い間、誤った了承は未評価、変更が当たった本の判定は UNEVALUATED。生成失敗・静的 NG・記録の無い本は充足 0 で分母に残す",
 };
-/** 条件のファイルの既知の schema（v1 ＝ #401、v2 ＝ #425、v3 ＝ #427。どれも child_args と params.patterns・params.runs を持つ） */
-export const CONDITIONS_SCHEMAS = ["musunest-factory/agent-accept-conditions/v1", "musunest-factory/agent-accept-conditions/v2", "musunest-factory/agent-accept-conditions/v3"];
+/** 条件のファイルの既知の schema（v1 ＝ #401、v2 ＝ #425、v3 ＝ #427、v4 ＝ #497。どれも child_args と params.patterns・params.runs を持つ） */
+export const CONDITIONS_SCHEMAS = ["musunest-factory/agent-accept-conditions/v1", "musunest-factory/agent-accept-conditions/v2", "musunest-factory/agent-accept-conditions/v3", "musunest-factory/agent-accept-conditions/v4"];
 /** 工場の要約の verdict の既知の値（packages/factory の Verdict）。匿名の集計はこれ以外を unknown にまとめる */
 export const FACTORY_VERDICTS = ["full", "partial", "none"];
 /** 判定の口の構成の既知の値（run-agent.mjs が記録する） */
