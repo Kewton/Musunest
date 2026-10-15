@@ -88,12 +88,13 @@ a10d827eff477dda51394bff96faa0f9c42631cb818a1653098446bc979bfe70  subjects/C.jso
 |---|---|
 | `agent-accept/run-agent.mjs` | 計測。評価セットの定義ファイル（既定は `sets/dev-p1-p10.json`。`--set <パス>` で差し替える）の本 × 回数を工場の入口（`packages/factory/dist/cli.js`）で流す（API を呼ぶ。窓口の手元だけ）。出力先に `conditions.json`（計測の条件）・本ごとのディレクトリ・`run-<時刻>.json`（1 回の起動の記録）を残す |
 | `agent-accept/score-agent.mjs` | 採点。条件のファイルに記録された定義ファイル（無ければ既定の `sets/dev-p1-p10.json`。`--set <パス>` で差し替える）を読んで、出力先の本を採点表 v5 で採点し、`score[-label].json` を書く。`--anonymous` なら `score[-label].anonymous.json` だけを書く。Plan を通した本は、原文系と了承後系を別に数え、台本を事後に当てる（§5.5・§5.6） |
-| `agent-accept/run-agent.test.mjs`・`agent-accept/score-agent.test.mjs` | `node --test "workspace/mvp/m1/agent/eval/agent-accept/*.test.mjs"`（API・ネットワーク無し。計測の試験は偽物の工場で、採点の試験は `cases/` の固定の宣言と凍結したエンジンで閉じる。先に `pnpm build`） |
+| `agent-accept/freeze-plan-set.mjs` | (b) の凍結（#497。§5.7）。Plan 評価（`run-agent.mjs --plan-only`）の出力先から、P ごとに規則で 1 本の確定した仕様を選び、組のディレクトリ（リポジトリの外）に凍結した組と包みの写しを置く（API を呼ばない） |
+| `agent-accept/run-agent.test.mjs`・`agent-accept/score-agent.test.mjs`・`agent-accept/freeze-plan-set.test.mjs` | `node --test "workspace/mvp/m1/agent/eval/agent-accept/*.test.mjs"`（API・ネットワーク無し。計測の試験は偽物の工場で、採点の試験は `cases/` の固定の宣言と凍結したエンジンで閉じる。先に `pnpm build`） |
 | `sets/<組の id>.json`・`sets/scripts/<題材>.json` | 評価セットの定義ファイルと、題材ごとの台本（§5.6）。`dev-p1-p10.json` は今の P1〜P10 を同じ形で書き直したもの（依頼文の指紋が `stage1-patterns.md` の表と一致することを試験で確かめる） |
 
 方法論 `methodology/01-eval-sets.md` §2〜§4 の前提のうち、**分母の補正・本数の照合・比較の条件の指紋・匿名の集計**をここで満たす（#425）。**原文と了承後の二系統の採点**は §5.5（#426）。**評価セットの定義ファイルと台本**は §5.6（#427）。**#427 の完了の範囲は「定義ファイルの入口」と「台本の事後の照合（診断）」まで**で、実行中に事項で答える口（工場の変更）は別の Issue（§5.6.3）。
 
-### 5.1 計測の条件（`conditions.json`。schema `musunest-factory/agent-accept-conditions/v3`。v2 は #425、v1 は #401）
+### 5.1 計測の条件（`conditions.json`。schema `musunest-factory/agent-accept-conditions/v4`。v3 は #427、v2 は #425、v1 は #401）
 
 | 欄 | 中身 |
 |---|---|
@@ -102,17 +103,19 @@ a10d827eff477dda51394bff96faa0f9c42631cb818a1653098446bc979bfe70  subjects/C.jso
 | `spec_engine` | spec-engine の `dist` の指紋（工場の生成と採点の両方が読む） |
 | `set` | **読んだ定義ファイル**（§5.6。v3）：パス・SHA-256・`id`・`version`・`role`・本の一覧（`items[]`：ID・題材・書き方・書ける範囲）。署名に入る（依頼文はここから組む） |
 | `document` | 依頼文の出どころの文書（定義ファイルの `source.document`。`dev-p1-p10.json` なら `stage1-patterns.md`）のパスと SHA-256（文書が無ければ `null`）。v2 までは「依頼文の表の SHA-256」で、値は同じ。計測はこの文書を読まない（定義ファイルが写し） |
-| `scripts` | 台本（§5.6。v3）：`mode`（今は `post-hoc`＝採点で事後に当てる）・題材ごとの台本のパスと SHA-256・まとめた指紋。**署名から外す**（`scoring` と同じ理由：今の台本は生成に関わらず、採点の出力が条件と照合する） |
+| `scripts` | 台本（§5.6。v3）：`mode`・題材ごとの台本のパスと SHA-256・まとめた指紋。`mode` は `post-hoc`（採点で事後に当てる。`--script` なし）か `live`（`--script` で実行中に当てる。v4）。**`post-hoc` のときは署名から外す**（`scoring` と同じ理由：台本は生成に関わらず、採点の出力が条件と照合する）。**`live` のときは生成の条件なので署名に入れる** |
+| `frozen` | 凍結した組（v4。`--build-from` のときだけ。それ以外は `null`）：組のファイルのパスと SHA-256・ID・版・出どころ（`frozen-plan`／`human`）・作った人の印（`human` のときだけ）、採用した P ごとの `plan_sha256`・`source_sha256`・包みの SHA-256、外した P（`missing`）。署名に入る。仕様の本体は写さない（§5.7） |
 | `prompt_documents` | 生成に渡す文書。工場の入口が読むものと同じ場所を appspec-schema の `files` から引く：契約（ディレクトリの指紋）・語彙の意味・語彙の台帳（各 SHA-256） |
 | `judge` | 判定の口の構成。`jev-primary-llm-fallback`（Jev の鍵の環境変数が空でない）か `llm-only`。**鍵の値は書かない**（環境変数の名前だけ） |
-| `params`・`child_args` | モデル・effort・Plan の有無・題材と回数・同時数・全体の目安額・工場 1 本の予算と締切・段ごとの出力の上限と、子プロセスへ渡す引数 |
+| `params`・`child_args` | モデル・effort・Plan の有無・題材と回数・同時数・全体の目安額・工場 1 本の予算と締切・段ごとの出力の上限と、子プロセスへ渡す引数。v4 で `params.mode`（`build`＝指定なし／`e2e`＝`--plan`／`plan-only`／`build-from`）を足し、`params.answers_mode` に `script`（`--script`）を足した。`params.plan` の値の決め方は変えない（子の引数に `--plan` があるか） |
 | `scoring` | 採点の定義と集計のコードの指紋（`engine.mjs`・`score-claims.mjs`・`rubric-v5.mjs`・`agent-accept/score-agent.mjs`・`subjects/*.json`。`<repo>` の採点器のもの）に、**組が実際に参照する採点の定義の実体**（`files[]` の `definition:<題材>`。`source` は `eval/` からの相対パス、`sha256` は中身）を足したもの。`subjects/` の外に置いた定義も数えるので、組を変えずに参照先の中身だけを変えても、採点の出力の `scoring_matches_conditions` が不一致になる（独立レビューの指摘 2） |
-| `signature` | `--resume` の一致の判定に使う SHA-256。**`started_at`・`scoring`・`scripts`・`params.budget_usd` を除いた全部** |
+| `signature` | `--resume` の一致の判定に使う SHA-256。**`started_at`・`scoring`・`post-hoc` の `scripts`・`params.budget_usd` を除いた全部**（`schema`・`params.mode`・`frozen`・`live` の `scripts` は入る） |
 
 - **署名が保証するのは生成の条件の一致であって、管理の条件（計測全体の停止の目安 `params.budget_usd`）まで含めた一致ではない。** 再開で変えた目安の額は条件のファイルには書かず（初回の値のまま上書きしない）、起動の記録（下の `run-<時刻>.json`）から読む
 - `scoring` を署名から外すのは、採点は生成のあとに全本へ同じ版を当てるもので、一致は採点の出力（§5.2 の `fingerprints`）で照合するから。**ただし「採点だけ直したあとは再開できる」とは限らない**：`source.commit`・`source.dirty` は署名に残るので、clean な checkout を編集したり、採点だけの commit を積んだりすれば再開は断られる。外す効果があるのは `source` が変わらない場合（すでに未コミットの変更がある作業ツリーで採点の定義だけを直したとき）に限る。挙動は変えない
 - `params.budget_usd`（計測全体の停止の目安）を外すのは、予算で止まった計測を `--budget-usd` を上げて `--resume` で流し切れるようにするため（方法論 `01` §5「予定本数まで流し切る」）。工場 1 本の予算 `factory_budget_usd` は生成の条件なので残す
-- `run-<時刻>.json`：1 回の起動ごとに `mode`（`fresh`／`resume`）・流した本・残りの本・止まった理由（`stop` の文と `stop_code`。`budget` か `null`）・**その起動で有効だった `budget_usd`**・初回の条件の `initial_budget_usd`・変えたかどうか（`budget_changed`）・済みの額（`spent_usd`）を残す。完走した再開でも残すので、同じ署名の計測でも管理の条件の変更履歴を読める。再開のときは従来の `resume-<時刻>.json` も残す（`budget_usd` つき）
+- `run-<時刻>.json`：1 回の起動ごとに `mode`（`fresh`／`resume`）・流した本・残りの本・止まった理由（`stop` の文と `stop_code`。`budget` か `null`）・**その起動で有効だった `budget_usd`**・初回の条件の `initial_budget_usd`・変えたかどうか（`budget_changed`）・済みの額（`spent_usd`）を残す。完走した再開でも残すので、同じ署名の計測でも管理の条件の変更履歴を読める。再開のときは従来の `resume-<時刻>.json` も残す（`budget_usd` つき）。v4 で、その起動で流した本の終了の分類ごとの件数（`exit_classes`。§5.7.5）を足した
+- **v3 以前（#497 より前）の条件のファイルの計測も、この道具で再開できない**（`schema` が署名に入り、v4 は `params.mode`・`frozen` を持つ。`[resume:signature]` で断る）。下の v2 と同じ安全側の拒否で、救済のために `schema` を署名から外さない。指定なしと `--plan` の道では、子へ渡す引数・答えのファイル・既存の欄の値・署名から外す欄・再開の振る舞いは変えていない（変わるのは `schema` の文字列、新しい欄 `params.mode`・`frozen: null`、本と起動の記録の欄だけ）
 - **v2 以前（#427 より前）の条件のファイルの計測は、この道具で再開できない。** `schema` と `set` が署名に入るので、保存した署名と一致せず「保存した条件と今の条件が一致しません」で断る（v1 と同じ扱い。試験 `run-agent.test.mjs` の v2 の例）。混在した計測を止める安全側の拒否なので、**救済のために `schema` や `set` を署名から外さない**。続けるなら、旧い署名が一致する旧版の環境で流すか、別の出力先で新しく計測する。採点の道具は v2 以前の結果をそのまま採点・照合できる（§5.6.4）
 
 ### 5.2 採点の出力（`score[-label].json`）
@@ -347,6 +350,84 @@ Plan の質問に、**質問 ID ではなく点検済みの事項（どの要件
 - 本の ID は `P<n>` の形に固定している（照合の道具 `validatePlanned`・`reconcile` が前提にする）。新しい組も `P<n>` で番号を振る
 - `regress.mjs`・`rescore-baseline.mjs`（v5 の回帰と基準線の採点し直し）は P 番号 → 題材の対応を自分で持ったまま（凍結した採点表の道具。触らない）
 - 定義ファイルの `request` は依頼文の写しで、`source.document` との一致は試験（`run-agent.test.mjs`）が確かめるだけ。計測の道具は文書を読まない
+
+### 5.7 Plan 評価・Build 評価・通し評価の口と、(b) の凍結（#497）
+
+2026-10-15 の所有者の決定（#491。評価を Plan 評価・Build 評価・通し評価に分ける。D4 は (b) の凍結の規則）のうち、計測の道具から工場の 3 つの口（#495）を流す配線と、(b) を規則で凍結する道具。API は使わない（凍結の道具も試験も）。計測の道具と工場の既定の値は変えていない。
+
+#### 5.7.1 3 つの口（`run-agent.mjs`）
+
+| 指定 | `params.mode` | 子へ渡すもの |
+|---|---|---|
+| なし | `build` | 今までどおり |
+| `--plan` | `e2e` | 今までどおり（`--plan --answers <空の答え>`）。`--script` と組めば `--plan --script <写し>` |
+| `--plan-only` | `plan-only` | `--plan-only --answers <空の答え>`。`--script` と組めば `--plan-only --script <写し>`。工場は Plan だけの結果を `bundle/plan-result.json` に書き、Build を流さない |
+| `--build-from <組のファイル>` | `build-from` | `--plan-file <写し>`（組の包みを本のディレクトリの `plan-file.json` に写したもの）。Build だけを流す |
+
+- `--script`：本ごとに定義ファイルの台本を本のディレクトリの `script.json` に写し、子に渡す（`--answers` は渡さない。`params.answers_mode` は `script`、`scripts.mode` は `live` で、台本が署名に入る）。台本の無い本が 1 本でもあれば断る
+- 組めない組は断る：`--plan` と `--plan-only`、`--build-from` と `--plan`・`--plan-only`・`--script`、Plan を流さない `--script`
+
+#### 5.7.2 `--build-from` の対象の本
+
+- 既定は、組が採用した P × `--runs`。`--only` は採用した P の部分集合だけを許す
+- 組が外した P（`missing`）は `build-from:excluded-p`、組にも定義ファイルにも無い P は `build-from:unknown-p`、定義ファイルにはあるが組に無い P は `build-from:not-adopted` で断る
+- 条件の `params.patterns`・`child_args` と採点の照合（`validatePlanned`・`reconcile`）は、この対象 × 回数にそろう
+
+#### 5.7.3 `--build-from` の事前の検査（子を起こす前。出どころが `frozen-plan` でも `human` でも同じ）
+
+1. 組のファイルを読む（無い・JSON でない・形が違う → `build-from:frozen-missing`／`build-from:frozen-invalid`）。組に書いた定義ファイルの SHA-256 と今の定義ファイル（`build-from:set-sha256`）
+2. 対象の P ごとに、写しのバイト列の SHA-256 と組の値（`build-from:envelope-sha256`）
+3. 工場の dist の包みの読み取りと検査の関数（`parsePlanFile`・`validatePlanFile`。純粋な関数）を、写しと今の依頼文と工場の語彙の版（`VOCABULARY_VERSION`）に当てる。工場が `--plan-file` で行う検査（必須欄・入れ子の型・結果の種類・`checkConfirmedPlan`・実際の `planDigest`・包み自身の `source_sha256`・語彙の版）と同じものになる。読み取りの失敗は `build-from:envelope-unreadable:<工場の符号>`、検査の拒否は `build-from:envelope-rejected:<検査名>`。人の包みの `conditions` が `null` なのは許す
+4. 組の `plan_sha256`・`source_sha256` と包みの値（`build-from:plan-sha256`／`build-from:source-sha256`）
+
+組に保存した検査の結果は信頼せず、`--resume` でも毎回この検査を行う。
+
+#### 5.7.4 拒否の符号
+
+計測の道具と凍結の道具の断りは exit 3。標準エラーの 1 行に、固定の拒否の符号（`[...]`）と本の ID・件数だけを出す（`<工場の符号>`・`<検査名>` は既知の列挙に写し、それ以外は `unknown`）。どの断りでも子を 1 本も起こさない。新しい計測の起動前の断りでは `conditions.json`・本のディレクトリ・起動の記録を作らない。再開の断りでは既存のファイルをバイト列まで変えず、新しいファイルを作らない。
+
+| 符号 | 断る場合 |
+|---|---|
+| `flags:conflict` | 組めない指定の組（§5.7.1） |
+| `script:missing`・`script:changed` | 台本の無い本がある／読み込んだあとに台本が変わった |
+| `build-from:*` | §5.7.2・§5.7.3 |
+| `resume:prior-output`・`resume:no-conditions`・`resume:unreadable`・`resume:signature`・`resume:partial`・`resume:no-logs` | 既存の再開の断り（#400）。今までの文のあとに符号を添える |
+| `set:invalid`・`only:unknown` | 既存の定義ファイルと `--only` の断り（#427）。今までの文のあとに符号を添える |
+| `freeze:*` | 凍結の道具の断り（§5.7.6） |
+
+#### 5.7.5 本と起動の記録（v4 で足した欄）と無害化
+
+- 本の起動の記録（`summary.line.json`）に、子を起こす直前の `started_at`（ISO、ミリ秒まで）と、終了の分類 `exit_class` を足した。`exit_class` は 0 ＝ `ok`、1 ＝ `failed`、3 ＝ `return-to-plan`。2 は、標準出力に工場の包みの読み取りの失敗の行（既知の版）があれば `envelope-unreadable`、検査で断った行（既知の版と既知の検査名）があれば `envelope-rejected`、どちらも無ければ `usage-other`。それ以外は `other`。exit 2 が出ても計測は止めない。1 回の起動の記録（`run-<時刻>.json`）に分類ごとの件数（`exit_classes`）を足した
+- **無害化**：本のディレクトリの生のログ（`stdout.log`・`stderr.log`・`request.md`・写し）はそのまま残す。記録（`summary.line.json`・起動の記録・条件・組のファイル）と計測の道具の標準出力には値を入れない。`summary.line.json` の `stdout_tail`・`stderr_tail` は子の出力の写しから `{ bytes, known_lines }`（バイト数と既知の版の行の数）に置き換えた。要約（`summary`）の `verdict` と、標準出力の 1 行の `verdict=` は、既知の値（`full`・`partial`・`none`）か `unknown` に写す。生の中身を読むときは生のログを開く
+
+#### 5.7.6 (b) の凍結の道具（`freeze-plan-set.mjs`）
+
+```bash
+node freeze-plan-set.mjs <repo> <Plan 評価の出力先> <組のディレクトリ> --id <組の ID> --version <整数>
+```
+
+- 入力は比較元の版の Plan 評価（`--plan-only`）の出力先。出力は組のディレクトリで、組のファイル（`frozen-plan-set.json`。`musunest-eval/frozen-plan-set/v1`）と採用した本の包みの写し（`envelopes/<本>.plan-result.json`）を置く。置き場所は計測の出力先と同じくリポジトリの外で、道具は場所を引数で受け取るだけ
+- **規則（`earliest-confirmed` v1）**：P ごとに、包みの結果が確定した本のうち `started_at` が最も早い本を採る。同じ時刻なら回の番号の小さい本。Build の記録（要約の verdict・納品物・Build だけの記録）は読まない。本を選ばせる引数は無い
+- 採る前に、包みに §5.7.3 の 3. と同じ工場の検査関数を当てる。包みの条件（モデル・effort）が計測の条件と一致することも確かめる
+- 確定した本が無い P は断らずに組から外し、`missing` に残す（P の ID と、その P の本数）。全部の P に確定が無いときだけ断る
+- 断る（exit 3。組を書かない）：引数が足りない（`freeze:args`）・出力先が空でない（`freeze:out-not-empty`）・条件のファイルが無い・読めない（`freeze:conditions-missing`／`-unreadable`）・v4 でない（`freeze:conditions-schema`）・`params.mode` が `plan-only` でない（`freeze:mode`）・予定の検証が通らない（`freeze:planned`）・`source.dirty` が偽でない（`freeze:dirty`）・commit が無い（`freeze:commit`）・定義ファイルを読めないか SHA-256 が条件と違う（`freeze:set-unreadable`／`freeze:set-sha256`）・照合が完了でない（`freeze:incomplete`）・確定した本の包みが検査を通らない（`freeze:envelope-unreadable[:<符号>]`／`freeze:envelope-rejected:<検査名>`）・包みの条件が違う（`freeze:envelope-conditions`）・`started_at` が無い（`freeze:started-at`）・確定が 1 本も無い（`freeze:none-confirmed`）
+- 組のファイルの欄：`schema`・組の `id`・組の `version`（整数。引数で渡す）・`origin`（`frozen-plan`）・`rule`（規則の名前と版）・`set`（定義ファイルのパス・SHA-256・ID・版）・`source_measurement`（測定 ID・条件の署名・条件のファイルの SHA-256・Plan の commit・工場の dist の指紋・モデル・effort・予算・締切・答え方・台本の当て方と指紋）・`adopted[]`（P・本・`started_at`・包みの相対パスと SHA-256・`plan_sha256`・`source_sha256`）・`missing[]`。時刻・出力先のパスは書かない（同じ入力からはバイト列まで同じ組になる）
+- 人が作る (a) は同じ組の形で、`origin` を `human`、作った人の印を `author`（`owner`／`scorer`）にする（`rule`・`source_measurement` は `null` でよい）。(a) を作る道具はこの Issue に入れていない
+
+#### 5.7.7 基準として流す条件（計測の道具と工場の既定は変えない）
+
+- **正式な基準と比較では、全段 `--effort high`・`--deadline-min 20`・`--factory-budget-usd 0.30` を明示して渡す。** 工場の既定の締切は 10 分なので、指定しないと基準にならない
+- 比較元と候補は、同じ入力・同じ答え方・同じ並列の数で、同じ時間帯に交互に流し、P ごとの対で読む
+- Build 評価は凍結した組の版をまたいで比べない。Plan を変えた wave の後は組の版を上げて測り直す
+- 並列 10 は、429・529・締切による停止の件数を記録から観測できて、しかも 0 だったときだけ採る。観測できないことを 0 件とみなさない。観測の手段はまだ無いので、並列は 3 のままにする
+- 外した P がある組の成績は、採用した P の数と外した数を添えて読み、全 P の組の成績と同じに扱わない
+
+#### 5.7.8 限界（#497 で直していないこと）
+
+- 台本の写しは、定義ファイルの読み込みで取った指紋と同じ中身のときだけ写す（読み込みのあとに変われば `script:changed` で断る）。工場が台本の形を受け付けるかは工場の検査に任せる
+- 要約（`summary`）の無害化は `verdict` だけ。工場の要約の他の欄（`stop_reason` など）は工場の版の形のまま写す
+- `params.plan` は `--plan` の有無のまま（`plan-only`・`build-from` は `false`）。採点の道具の了承後系の対象は、今までどおり本ごとの Plan の記録の有無でも決まる
+- 比較の道具は作っていない。並列の上限を上げる条件（429・529・締切の停止の観測）は別の Issue
 
 ## 6. 回帰用の組 `regression-r1`（#450）
 
