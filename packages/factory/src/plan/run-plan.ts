@@ -1543,6 +1543,9 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
   const openIssueOrigins: PlanOpenIssueOrigin[] = [];
   // その行を作った版（`revision`）。衝突の検出時に「今回か以前か」を決める（Issue #464）
   const openIssueCreatedIn: number[] = [];
+  // その行を開いた**事項の流れの版**（`issueFlow` の行の版。Issue #488）。矛盾の事項を答えの反映の途中で
+  // 足すとき、仕様の `revision` はまだ古いので、流れの版を別に控える（衝突の版の意味は変えない）。
+  const openIssueFlowRevision: number[] = [];
   // 仕様の版（往復ごとに上がる）。衝突を検出した版の記録にも使う（Issue #460）
   let revision = 1;
   // 衝突の記録（値ではなく件数だけ。事項 ID は集合の大きさにしか使わない。Issue #460）
@@ -1608,7 +1611,7 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
       return [
         {
           origin: openIssueOrigins[index] ?? openIssueSources[index] ?? "unresolved",
-          revision: openIssueCreatedIn[index] ?? 1,
+          revision: openIssueFlowRevision[index] ?? openIssueCreatedIn[index] ?? 1,
           critical: issue.critical,
           requirementKind: classifyRemainingRequirementKind(requirementId),
           facetId: facet?.facetId ?? null,
@@ -1708,6 +1711,8 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
     openIssueSources.push(source);
     openIssueOrigins.push(origin ?? source);
     openIssueCreatedIn.push(revision);
+    // 事項の流れの版（開いた行の版）を控える（Issue #488）。差し替えの前は仕様の `revision` と同じ
+    openIssueFlowRevision.push(currentIssueFlow?.revision ?? revision);
     // 事項の流れに、開いた件数（由来・初回／差分別）か、追加時から resolved の引き継ぎを数える（Issue #488）
     if (currentIssueFlow !== null) {
       if (issue.status === "open") {
@@ -2072,7 +2077,11 @@ export async function runPlan(input: PlanRunInput): Promise<PlanResult> {
         critical: true,
         status: "open",
       }));
+      // 返す一覧（`critical`＋引用の落ち）は今までどおりに組み、その**後に**、同じ行を診断の追跡へも積む
+      // ——最後に残った事項の一覧と流れの件数に、実際に返す未解決事項を載せる（Issue #488）。由来は
+      // 要件化まわりの未解決とする（有限の値。新しい由来は足せない）。結果・理由・止め方は変えない。
       const critical = openIssues.filter((issue) => issue.status === "open" && issue.critical);
+      for (const missIssue of missIssues) addOpenIssue(missIssue, "unresolved");
       return {
         kind: "cannot-confirm",
         openIssues: [...critical, ...missIssues],

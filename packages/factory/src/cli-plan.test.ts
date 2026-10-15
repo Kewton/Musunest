@@ -401,6 +401,7 @@ interface PlanCliRecordShape {
         readonly found_by: string;
         readonly sentences: readonly number[];
         readonly requirements: readonly number[];
+        readonly framing_overlap: boolean;
       }[];
     }[];
     readonly redone: boolean;
@@ -1533,9 +1534,9 @@ describe("P1/P2 の往復ごとの内訳を plan-record に残す（Issue #430�
         { sentence: 2, requirements: [], framing: false },
       ],
       miss_entries: [
-        { kind: "quote-not-found", found_by: "code", sentences: [], requirements: [2] },
-        { kind: "uncovered-source", found_by: "code", sentences: [2], requirements: [] },
-        { kind: "uncovered-source", found_by: "conversation", sentences: [1], requirements: [1] },
+        { kind: "quote-not-found", found_by: "code", sentences: [], requirements: [2], framing_overlap: false },
+        { kind: "uncovered-source", found_by: "code", sentences: [2], requirements: [], framing_overlap: false },
+        { kind: "uncovered-source", found_by: "conversation", sentences: [1], requirements: [1], framing_overlap: false },
       ],
     };
     expect(record.requirements_diagnosis).toEqual({

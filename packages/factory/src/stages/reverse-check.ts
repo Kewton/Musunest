@@ -189,30 +189,49 @@ function quoteOccurrences(source: string, quote: string): number {
  * ないので、やり直しの指示で「前後を含めて、原文の中で 1 か所に決まる引用にする」と伝える（Issue #382）。
  */
 export function checkRequirementCoverage(source: string, list: RequirementList): readonly ReverseCheckMiss[] {
-  const misses: ReverseCheckMiss[] = [];
-  for (const requirement of list.requirements) {
+  return checkRequirementCoverageDetailed(source, list).map((entry) => entry.miss);
+}
+
+/**
+ * 引用・位置の落ちを、**その落ちを出した候補要件の一覧での位置**（`requirementIndex`）と対にして返す
+ * （**値は入れない**。Issue #488）。一覧の候補要件は ID が重複しうる（一意性は仮定しない）ので、通し番号を
+ * ID で引かず、**検出時の位置**を控える。覆いの落ち（`uncovered-source`）は特定の候補に属さないので
+ * `undefined`。並びは `checkRequirementCoverage` と同じである。
+ */
+function checkRequirementCoverageDetailed(
+  source: string,
+  list: RequirementList,
+): readonly { readonly miss: ReverseCheckMiss; readonly requirementIndex: number | undefined }[] {
+  const detailed: { miss: ReverseCheckMiss; requirementIndex: number | undefined }[] = [];
+  list.requirements.forEach((requirement, index) => {
     if (requirement.quote === "" || !source.includes(requirement.quote)) {
-      misses.push({
-        kind: "quote-not-found",
-        requirementId: requirement.id,
-        detail: `引用「${requirement.quote}」が原文に見つからない`,
+      detailed.push({
+        miss: {
+          kind: "quote-not-found",
+          requirementId: requirement.id,
+          detail: `引用「${requirement.quote}」が原文に見つからない`,
+        },
+        requirementIndex: index,
       });
-      continue;
+      return;
     }
     const { start, end } = requirement.position;
     const inBounds = start >= 0 && end <= source.length && start <= end;
     if (!inBounds || source.slice(start, end) !== requirement.quote) {
       const occurrences = quoteOccurrences(source, requirement.quote);
-      misses.push({
-        kind: "position-mismatch",
-        requirementId: requirement.id,
-        detail:
-          occurrences >= 2
-            ? `引用「${requirement.quote}」が原文に ${occurrences} か所あり、位置が 1 か所に決まらない。前後を含めて、原文の中で 1 か所に決まる引用にする`
-            : `引用の位置（${start}-${end}）が、原文の「${requirement.quote}」の位置と一致しない`,
+      detailed.push({
+        miss: {
+          kind: "position-mismatch",
+          requirementId: requirement.id,
+          detail:
+            occurrences >= 2
+              ? `引用「${requirement.quote}」が原文に ${occurrences} か所あり、位置が 1 か所に決まらない。前後を含めて、原文の中で 1 か所に決まる引用にする`
+              : `引用の位置（${start}-${end}）が、原文の「${requirement.quote}」の位置と一致しない`,
+        },
+        requirementIndex: index,
       });
     }
-  }
+  });
   // 枠の文（要件にしない文）の範囲も「覆われている」と数える（Issue #372）
   const positions = [
     ...list.requirements.map((requirement) => requirement.position),
@@ -228,14 +247,17 @@ export function checkRequirementCoverage(source: string, list: RequirementList):
   }
   for (const sentence of splitSourceSentences(source)) {
     if (!covered.has(`${sentence.start}-${sentence.end}`)) {
-      misses.push({
-        kind: "uncovered-source",
-        range: sentence,
-        detail: `原文の「${source.slice(sentence.start, sentence.end)}」がどの要件にも覆われていない`,
+      detailed.push({
+        miss: {
+          kind: "uncovered-source",
+          range: sentence,
+          detail: `原文の「${source.slice(sentence.start, sentence.end)}」がどの要件にも覆われていない`,
+        },
+        requirementIndex: undefined,
       });
     }
   }
-  return misses;
+  return detailed;
 }
 
 /**
@@ -295,6 +317,11 @@ export function checkReverseCheckOutput(output: unknown): ShapeCheck<ReverseChec
 interface MergedUncovered {
   readonly misses: readonly ReverseCheckMiss[];
   readonly droppedBlankMisses: number;
+  /**
+   * 会話が挙げた断片ごとの、**元の範囲が枠と重なっていたか**（差し引く前に求める。Issue #488）。`misses` の
+   * 会話分（`uncovered-source` の会話の行）と同じ並びである。**真偽値だけ**で、元の範囲は持たない。
+   */
+  readonly conversationFramingOverlaps: readonly boolean[];
 }
 
 /**
@@ -314,6 +341,9 @@ function mergeUncovered(
   framing: readonly SourceRange[],
 ): MergedUncovered {
   const misses: ReverseCheckMiss[] = [...codeMisses];
+  // 会話が挙げた断片ごとの、**元の範囲が枠と重なっていたか**（差し引く前に求める。Issue #488）。
+  // `misses` の会話分と同じ並びである。
+  const conversationFramingOverlaps: boolean[] = [];
   const seen = new Set(
     codeMisses
       .filter((miss): miss is Extract<ReverseCheckMiss, { kind: "uncovered-source" }> => miss.kind === "uncovered-source")
@@ -322,6 +352,8 @@ function mergeUncovered(
   let droppedBlankMisses = 0;
   for (const range of reported) {
     if (range.start < 0 || range.end > source.length || range.start >= range.end) continue;
+    // 差し引く前に、元の範囲が枠と一部でも重なったかを求める（残った断片へ真偽値だけを引き継ぐ）
+    const overlappedFraming = framing.some((frame) => frame.start < range.end && range.start < frame.end);
     for (const piece of removeFraming(range, framing)) {
       const trimmed = trimWhitespace(source, piece);
       if (isBlankRange(source, trimmed)) {
@@ -336,16 +368,22 @@ function mergeUncovered(
         range: trimmed,
         detail: `逆照合の会話が挙げた、覆われていない部分「${source.slice(trimmed.start, trimmed.end)}」`,
       });
+      conversationFramingOverlaps.push(overlappedFraming);
     }
   }
-  return { misses, droppedBlankMisses };
+  return { misses, droppedBlankMisses, conversationFramingOverlaps };
 }
 
 /**
- * ①' を 1 回呼ぶ。会話の答えは形だけを確かめ、**落ちはコードが見つけたものを正**として
- * 会話の申告を足す。`quotesValid` は引用の実在と位置の一致の有無である。
+ * ①' を 1 回呼び、その結果と、**往復の診断**を組む（Issue #488）。会話の答えは形だけを確かめ、落ちは
+ * コードが見つけたものを正として会話の申告を足す。診断には、会話の断片ごとの「元の範囲が枠と重なったか」
+ * （差し引く前に求める）まで写す——`ReverseCheckResult`（pipeline の型）には欄を足さない。
+ *
+ * `runReverseCheck`（結果だけを返す）と ①' → ① のループ（結果と診断の両方が要る）が共有する。
  */
-export async function runReverseCheck(input: ReverseCheckInput): Promise<StageOutcome<ReverseCheckResult>> {
+export async function runReverseCheckWithDiagnosis(
+  input: ReverseCheckInput,
+): Promise<StageOutcome<{ readonly result: ReverseCheckResult; readonly round: ReverseCheckRoundDiagnosis }>> {
   const framing = input.list.framing ?? [];
   const framingPositions = framing.map((entry) => entry.position);
   const data: readonly PromptData[] = [
@@ -374,7 +412,24 @@ export async function runReverseCheck(input: ReverseCheckInput): Promise<StageOu
     .filter((miss): miss is Extract<ReverseCheckMiss, { kind: "uncovered-source" }> => miss.kind === "uncovered-source")
     .map((miss) => miss.range);
   const quotesValid = !misses.some((miss) => miss.kind === "quote-not-found" || miss.kind === "position-mismatch");
-  return { ok: true, value: { uncovered, quotesValid, misses, droppedBlankMisses: merged.droppedBlankMisses } };
+  const result: ReverseCheckResult = { uncovered, quotesValid, misses, droppedBlankMisses: merged.droppedBlankMisses };
+  const round = diagnoseReverseCheckRound(
+    input.source,
+    input.list,
+    misses,
+    merged.droppedBlankMisses,
+    merged.conversationFramingOverlaps,
+  );
+  return { ok: true, value: { result, round } };
+}
+
+/**
+ * ①' を 1 回呼ぶ。会話の答えは形だけを確かめ、**落ちはコードが見つけたものを正**として
+ * 会話の申告を足す。`quotesValid` は引用の実在と位置の一致の有無である。
+ */
+export async function runReverseCheck(input: ReverseCheckInput): Promise<StageOutcome<ReverseCheckResult>> {
+  const outcome = await runReverseCheckWithDiagnosis(input);
+  return outcome.ok ? { ok: true, value: outcome.value.result } : outcome;
 }
 
 /**
@@ -414,6 +469,11 @@ export interface ReverseCheckMissEntry {
   readonly sentences: readonly number[];
   /** 関わる候補要件の通し番号（その往復の一覧の順、1 始まり。無ければ空） */
   readonly requirements: readonly number[];
+  /**
+   * 会話が挙げた断片で、**元の範囲が枠と重なっていたか**（差し引く前に求める。Issue #488）。コードの落ちは
+   * `false`。**真偽値だけ**で、元の範囲・位置は持たない。
+   */
+  readonly framingOverlap: boolean;
 }
 
 /**
@@ -497,18 +557,21 @@ export function countReverseCheckMisses(
 /**
  * 1 往復の逆照合の診断を、**番号と有限の分類だけ**で組む（Issue #488）。原文の文の数と一覧の候補要件の
  * 数、文ごとの覆い（文番号・引用が重なる候補要件の通し番号・枠の有無）、指摘 1 件ごとの記録（種類・
- * 見つけた側・重なる文番号・関わる候補要件の通し番号）を返す。**引用・原文の断片・文字の位置・要件の ID
- * は入れない**——番号はこの往復の一覧に限って有効である。
+ * 見つけた側・重なる文番号・関わる候補要件の通し番号・枠をまたいだか）を返す。**引用・原文の断片・文字の
+ * 位置・要件の ID は入れない**——番号はこの往復の一覧に限って有効である。
  *
- * 見つけた側は、コードの落ち（`checkRequirementCoverage`）を**その往復の中で数え直して**求める（落ちの型を
- * 変えず、pipeline の型に欄を足さない。`countReverseCheckMisses` と同じ手）。`misses` はコードの落ちと
- * 会話の申告を合わせた一覧である（コードの落ちが先、会話の申告が後）。
+ * 見つけた側と候補要件の通し番号は、コードの落ち（`checkRequirementCoverageDetailed`）を**その往復の中で
+ * 数え直して**求める（落ちの型を変えず、pipeline の型に欄を足さない）。候補要件の ID は重複しうるので、
+ * 通し番号は ID ではなく**検出時の位置**から取る。`misses` はコードの落ちと会話の申告を合わせた一覧である
+ * （コードの落ちが先、会話の申告が後）。`conversationFramingOverlaps` は会話の断片ごとの、元の範囲が枠と
+ * 重なっていたかである（`misses` の会話分と同じ並び。渡さなければ空として扱う）。
  */
 export function diagnoseReverseCheckRound(
   source: string,
   list: RequirementList,
   misses: readonly ReverseCheckMiss[],
   droppedBlankMisses: number,
+  conversationFramingOverlaps: readonly boolean[] = [],
 ): ReverseCheckRoundDiagnosis {
   const sentences = splitSourceSentences(source);
   const overlaps = (left: SourceRange, right: SourceRange): boolean =>
@@ -524,24 +587,33 @@ export function diagnoseReverseCheckRound(
     requirements: requirementNumbersOf(sentence),
     framing: (list.framing ?? []).some((frame) => overlaps(frame.position, sentence)),
   }));
-  const codeUncoveredCount = checkRequirementCoverage(source, list).filter(
-    (miss) => miss.kind === "uncovered-source",
-  ).length;
+  // コードの落ちを、その落ちを出した候補の位置つきで数え直す（ID の重複に依存しない。Issue #488）
+  const codeMisses = checkRequirementCoverageDetailed(source, list);
+  const codeCount = codeMisses.length;
+  const codeUncoveredCount = codeMisses.filter((entry) => entry.miss.kind === "uncovered-source").length;
   let uncoveredSeen = 0;
   const entries: ReverseCheckMissEntry[] = [];
-  for (const miss of misses) {
+  misses.forEach((miss, index) => {
     if (miss.kind === "uncovered-source") {
       uncoveredSeen += 1;
+      const foundBy = uncoveredSeen <= codeUncoveredCount ? "code" : "conversation";
+      // 会話の断片は、元の範囲が枠と重なっていたかを引き継ぐ（コードの落ちは false）
+      const conversationIndex = uncoveredSeen - codeUncoveredCount - 1;
+      const framingOverlap =
+        foundBy === "conversation" ? conversationFramingOverlaps[conversationIndex] ?? false : false;
       entries.push({
         kind: miss.kind,
-        foundBy: uncoveredSeen <= codeUncoveredCount ? "code" : "conversation",
+        foundBy,
         sentences: sentenceNumbersOf(miss.range),
         requirements: requirementNumbersOf(miss.range),
+        framingOverlap,
       });
-      continue;
+      return;
     }
-    const ordinal = list.requirements.findIndex((requirement) => requirement.id === miss.requirementId) + 1;
-    const requirement = list.requirements.find((candidate) => candidate.id === miss.requirementId);
+    // 引用・位置の落ちは、検出時の候補の位置（`index < codeCount` の対応）から通し番号を取る
+    const detail = index < codeCount ? codeMisses[index] : undefined;
+    const requirementIndex = detail?.requirementIndex;
+    const requirement = requirementIndex === undefined ? undefined : list.requirements[requirementIndex];
     entries.push({
       kind: miss.kind,
       foundBy: "code",
@@ -550,9 +622,10 @@ export function diagnoseReverseCheckRound(
         miss.kind === "quote-not-found" || requirement === undefined
           ? []
           : sentenceNumbersOf(requirement.position),
-      requirements: ordinal > 0 ? [ordinal] : [],
+      requirements: requirementIndex === undefined ? [] : [requirementIndex + 1],
+      framingOverlap: false,
     });
-  }
+  });
   return {
     misses: countReverseCheckMisses(source, list, misses),
     droppedBlankMisses,
@@ -648,22 +721,21 @@ export async function runReverseCheckLoopWithOperation(
     gateway: input.gateway,
   });
   if (!first.ok) return stop(first.failure, "requirements");
-  const initial = await runReverseCheck({
+  const initial = await runReverseCheckWithDiagnosis({
     source: input.source,
     list: first.value,
     documents: input.documents,
     gateway: input.gateway,
   });
   if (!initial.ok) return stop(initial.failure, "reverse-check");
-  rounds.push(
-    diagnoseReverseCheckRound(input.source, first.value, initial.value.misses, initial.value.droppedBlankMisses),
-  );
-  if (initial.value.misses.length === 0) {
+  // 往復の診断は、①' の実行の中で組んだものを使う（会話の断片の枠の重なりまで持つ。Issue #488）
+  rounds.push(initial.value.round);
+  if (initial.value.result.misses.length === 0) {
     return {
       ok: true,
       value: {
         list: first.value,
-        report: initial.value,
+        report: initial.value.result,
         redone: false,
         unmet: [],
         diagnosis: { rounds, redone: false, unmet: emptyReverseCheckMissCounts() },
@@ -674,32 +746,30 @@ export async function runReverseCheckLoopWithOperation(
     source: input.source,
     documents: input.documents,
     gateway: input.gateway,
-    redo: { previous: first.value, misses: initial.value.misses },
+    redo: { previous: first.value, misses: initial.value.result.misses },
   });
   if (!redone.ok) return stop(redone.failure, "requirements-redo");
   // ここから先は、① のやり直しが成功している（2 回目の逆照合で止まっても `redone` を true にする）
   redoCompleted = true;
-  const second = await runReverseCheck({
+  const second = await runReverseCheckWithDiagnosis({
     source: input.source,
     list: redone.value,
     documents: input.documents,
     gateway: input.gateway,
   });
   if (!second.ok) return stop(second.failure, "reverse-check-redo");
-  rounds.push(
-    diagnoseReverseCheckRound(input.source, redone.value, second.value.misses, second.value.droppedBlankMisses),
-  );
+  rounds.push(second.value.round);
   return {
     ok: true,
     value: {
       list: redone.value,
-      report: second.value,
+      report: second.value.result,
       redone: true,
-      unmet: second.value.misses,
+      unmet: second.value.result.misses,
       diagnosis: {
         rounds,
         redone: true,
-        unmet: countReverseCheckMisses(input.source, redone.value, second.value.misses),
+        unmet: countReverseCheckMisses(input.source, redone.value, second.value.result.misses),
       },
     },
   };

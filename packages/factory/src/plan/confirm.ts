@@ -207,13 +207,18 @@ export function checkSourceCoverage(
     }
   }
   const result: SentenceCoverage[] = [];
-  for (const range of splitSourceSentences(source)) {
+  splitSourceSentences(source).forEach((range, index) => {
     const text = source.slice(range.start, range.end);
     const trimmed = text.trim();
-    const match = sourceInputs.find((input) => input.text.trim() === trimmed);
+    // ゲート（`covered`）は今までどおり本文の一致で見る（判定・停止を変えない。Issue #488）。
+    const textMatch = sourceInputs.find((input) => input.text.trim() === trimmed);
+    // 診断は、**文番号と対応する入力**（呼ぶ側は文ごとに 1 つの入力を作る）で見る。同一の本文が繰り返されても
+    // 当該文の入力を取り違えない（Issue #488）。並びが合わないときだけ本文の一致へ退避する。
+    const indexed = sourceInputs[index];
+    const diagMatch = indexed !== undefined && indexed.text.trim() === trimmed ? indexed : textMatch;
     const byFraming = framing.some((frame) => frame.start < range.end && range.start < frame.end);
-    const byOrigin = match !== undefined && coveredInputIds.has(match.id);
-    const byCorrespondence = match !== undefined && coveredByCorrespondence.has(match.id);
+    const byOrigin = diagMatch !== undefined && coveredInputIds.has(diagMatch.id);
+    const byCorrespondence = diagMatch !== undefined && coveredByCorrespondence.has(diagMatch.id);
     // 覆いの分類は、枠・出どころ・対応・無しの順で決める（複数が成立すれば先のもの。Issue #488）
     const coverage: ConfirmCoverageKind = byFraming
       ? "framing"
@@ -227,12 +232,14 @@ export function checkSourceCoverage(
       correspondence === undefined ? "unobserved" : byCorrespondence ? "true" : "false";
     result.push({
       text: trimmed,
-      covered: byFraming || byOrigin || byCorrespondence,
+      covered:
+        byFraming ||
+        (textMatch !== undefined && (coveredInputIds.has(textMatch.id) || coveredByCorrespondence.has(textMatch.id))),
       coverage,
       correspondence: correspondenceState,
-      inputId: match?.id ?? null,
+      inputId: diagMatch?.id ?? null,
     });
-  }
+  });
   return result;
 }
 
@@ -354,6 +361,9 @@ export async function runConfirm(input: ConfirmInput): Promise<ConfirmResult> {
 
   // 4. 判定の口（Noul）に、各部分が覆われるかを助言として聞く（確定はできない）
   const judgments: ConfirmJudgment[] = [];
+  // 問いの名前ごとに、**有効な助言が得られたか**を控える（得られなければ診断は「未観測」＝`null`。Issue #488）。
+  // 既存の `judgments` は今までどおり欠落を 0 として必ず行を作る（値・型・意味は変えない）。
+  const adviceByQuestion = new Map<string, number | null>();
   const coverTargets = [
     ...input.inputs.filter((entry) => entry.kind === "source"),
     ...input.inputs.filter((entry) => entry.kind === "answer"),
@@ -385,7 +395,9 @@ export async function runConfirm(input: ConfirmInput): Promise<ConfirmResult> {
     for (const target of coverTargets) {
       const name = confirmQuestionName(target.id);
       const answer = response.answers[name];
-      const value = answer !== undefined && answer.kind === "noul" ? answer.noul : 0;
+      const observed = answer !== undefined && answer.kind === "noul" ? answer.noul : null;
+      adviceByQuestion.set(name, observed);
+      const value = observed ?? 0;
       judgments.push({
         questionId: name,
         value,
@@ -417,17 +429,17 @@ export async function runConfirm(input: ConfirmInput): Promise<ConfirmResult> {
   // 6. #331 の検査（未解決の事項・実在しない ID・了承の範囲）
   const planProblems = checkPlan(plan);
 
-  // 文ごとの覆いの記録を、判定の助言（結果が得られたときだけ閾値以上か）つきで組む（Issue #488）。
-  // **値（原文の文・引用・ID）は入れない**——文番号・有限の分類・真偽だけである。
-  const judgmentByQuestion = new Map(judgments.map((judgment) => [judgment.questionId, judgment]));
+  // 文ごとの覆いの記録を、判定の助言（**有効な助言が得られたときだけ**閾値以上か）つきで組む（Issue #488）。
+  // **値（原文の文・引用・ID）は入れない**——文番号・有限の分類・真偽だけである。助言が得られなければ
+  // `null`（診断用の控えを見る。既存の `judgments` の 0 補完とは別。Issue #488）。
   const coverage: readonly ConfirmSentenceCoverage[] = sentenceCoverages.map((sentence, index) => {
-    const judgment =
-      sentence.inputId === null ? undefined : judgmentByQuestion.get(confirmQuestionName(sentence.inputId));
+    const advice =
+      sentence.inputId === null ? undefined : adviceByQuestion.get(confirmQuestionName(sentence.inputId));
     return {
       sentence: index + 1,
       coverage: sentence.coverage,
       correspondence: sentence.correspondence,
-      meetsThreshold: judgment === undefined ? null : judgment.meetsThreshold,
+      meetsThreshold: advice === undefined || advice === null ? null : advice >= input.threshold,
     };
   });
 

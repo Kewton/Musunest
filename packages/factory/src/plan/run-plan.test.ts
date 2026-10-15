@@ -6361,8 +6361,8 @@ describe("複数の文にまたがる引用の対応を、P2 から P6 まで保
 
     expect(result.kind).toBe("confirmed");
     if (result.kind !== "confirmed") return;
-    // 比較元（変更前）で得た plan 全体と SHA-256 に一致する
-    expect(result.plan).toEqual(BASELINE_PLAN_487);
+    // 比較元（変更前）で得た plan 全体と SHA-256 に一致する（余分な undefined の欄も見逃さない）
+    expect(result.plan).toStrictEqual(BASELINE_PLAN_487);
     expect(result.plan.confirmation.sha256).toBe(BASELINE_PLAN_487.confirmation.sha256);
     // 仕様は §4 の欄だけからなる。対応（内部の写像）は混ざらない
     expect(JSON.stringify(result.plan)).not.toContain("sourceCorrespondence");
@@ -6722,6 +6722,100 @@ describe("往復ごとの事項の流れと、終わりに残った事項（Issu
     expect(result.requirementsDiagnosis.redone).toBe(true);
     // P6 まで届かないので、P6 の欄は空の並び
     expect(result.confirmCoverage).toEqual([]);
+  });
+
+  it("(指摘3) 矛盾から作る事項は、答えの反映の途中でも、開いた版をその版で記録する", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SAME_ISSUES_SURFACE),
+      structured(GROUPED_QUESTIONS),
+      structured(GROUPED_QUESTIONS_AFTER_CONTRADICTION),
+      structured(GROUPED_QUESTIONS_AFTER_CONTRADICTION),
+    ]);
+    let round = 0;
+    const responder: PlanResponder = {
+      async answer(request) {
+        round += 1;
+        if (round === 1) {
+          const question = request.questions[0];
+          return {
+            kind: "answers",
+            answers: [
+              { id: "A-1", questionId: question?.id ?? "", revision: question?.revision ?? 1, freeText: "全員で数える" },
+            ],
+          };
+        }
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [freeTextQuestionName("A:Q1-1")]: {
+        kind: "choice",
+        choice: "contradiction",
+        probabilities: undefined,
+        probability: undefined,
+        confidence: 0.9,
+      },
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 矛盾の事項は、答えの反映の途中（仕様の `revision` はまだ 1）に開くが、事項の流れの版（2）で記録する
+    expect(result.remainingOpenIssues).toEqual([
+      { origin: "surface", revision: 1, critical: true, requirementKind: "source", facetId: null },
+      { origin: "surface", revision: 1, critical: true, requirementKind: "source", facetId: null },
+      { origin: "contradiction", revision: 2, critical: true, requirementKind: "none", facetId: null },
+    ]);
+    // 開いたのは版 2 の行（由来 contradiction・件数 1 の差分）である
+    const row2 = result.issueFlow.find((row) => row.revision === 2);
+    expect(row2?.opened).toEqual({
+      total: 1,
+      initial: 0,
+      diff: 1,
+      byOrigin: [{ origin: "contradiction", count: 1 }],
+    });
+    // 終わりに残った事項の行数は、開いている事項の数と一致する
+    expect(result.remainingOpenIssues).toHaveLength(result.openIssues.length);
+    expectBalanced(result);
+  });
+
+  it("(指摘4) P2 の引用の落ちで返す未解決事項が、残りの一覧と流れの件数にも載る", async () => {
+    const paraphrase = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "タスクを登録する", position: { start: 0, end: 8 } },
+        { id: "R-2", text: "合計できる", quote: "件数を数える", position: { start: 9, end: 16 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 返す未解決事項（引用の落ち 2 件）が、残りの一覧と流れの残数で一致する
+    expect(result.openIssues.map((issue) => issue.id)).toEqual(["OI:reverse:1", "OI:reverse:2"]);
+    expect(result.remainingOpenIssues).toEqual([
+      { origin: "unresolved", revision: 1, critical: true, requirementKind: "none", facetId: null },
+      { origin: "unresolved", revision: 1, critical: true, requirementKind: "none", facetId: null },
+    ]);
+    const last = result.issueFlow.at(-1);
+    expect((last?.endOpen.critical ?? 0) + (last?.endOpen.nonCritical ?? 0)).toBe(result.openIssues.length);
+    expect(result.remainingOpenIssues).toHaveLength(result.openIssues.length);
+    expectBalanced(result);
   });
 });
 

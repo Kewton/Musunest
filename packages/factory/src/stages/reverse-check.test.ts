@@ -16,12 +16,12 @@ import type { RequirementList } from "../pipeline.js";
 import {
   REVERSE_CHECK_SCHEMA_NAME,
   checkRequirementCoverage,
-  diagnoseReverseCheckRound,
   isBlankRange,
   overlappingSentences,
   runReverseCheck,
   runReverseCheckLoop,
   runReverseCheckLoopWithOperation,
+  runReverseCheckWithDiagnosis,
   splitSourceSentences,
 } from "./reverse-check.js";
 import {
@@ -850,7 +850,7 @@ describe("Plan の記録に、番号・有限の分類で対応を残す（Issue
   /** 1 回の逆照合を回して、往復の診断を組む（やり直しは起こさない） */
   async function diagnoseOnce(source: string, list: RequirementList, uncovered: readonly { start: number; end: number }[]) {
     const recording = createRecordingClient([structured({ uncovered })]);
-    const outcome = await runReverseCheck({
+    const outcome = await runReverseCheckWithDiagnosis({
       source,
       list,
       documents: [],
@@ -858,7 +858,7 @@ describe("Plan の記録に、番号・有限の分類で対応を残す（Issue
     });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return undefined;
-    return diagnoseReverseCheckRound(source, list, outcome.value.misses, outcome.value.droppedBlankMisses);
+    return outcome.value.round;
   }
 
   it("(a) 3 文の原文で、2 文にまたがる候補要件と会話の指摘 1 件の文ごとの覆いと、指摘の行が番号で残る", async () => {
@@ -886,7 +886,7 @@ describe("Plan の記録に、番号・有限の分類で対応を残す（Issue
     ]);
     // 指摘の行は、種類 uncovered-source・見つけた側「会話」・文番号を持つ
     expect(diagnosis.missEntries).toEqual([
-      { kind: "uncovered-source", foundBy: "conversation", sentences: [1], requirements: [1] },
+      { kind: "uncovered-source", foundBy: "conversation", sentences: [1], requirements: [1], framingOverlap: false },
     ]);
     // その文の構造上の覆いは、当該文番号（1 文目）の覆いの行で確かめる
     expect(diagnosis.sentences[0]?.requirements).toEqual([1]);
@@ -907,7 +907,7 @@ describe("Plan の記録に、番号・有限の分類で対応を残す（Issue
     expect(diagnosis).toBeDefined();
     if (diagnosis === undefined) return;
     expect(diagnosis.missEntries).toEqual([
-      { kind: "quote-not-found", foundBy: "code", sentences: [], requirements: [2] },
+      { kind: "quote-not-found", foundBy: "code", sentences: [], requirements: [2], framingOverlap: false },
     ]);
     // 位置が 2 文目を覆っていても、引用が無いので落ちの文番号は空である
     expect(diagnosis.sentences).toEqual([
@@ -979,8 +979,8 @@ describe("Plan の記録に、番号・有限の分類で対応を残す（Issue
       { sentence: 3, requirements: [], framing: false },
     ]);
     expect(diagnosis.missEntries).toEqual([
-      { kind: "position-mismatch", foundBy: "code", sentences: [1, 2], requirements: [3] },
-      { kind: "uncovered-source", foundBy: "code", sentences: [3], requirements: [] },
+      { kind: "position-mismatch", foundBy: "code", sentences: [1, 2], requirements: [3], framingOverlap: false },
+      { kind: "uncovered-source", foundBy: "code", sentences: [3], requirements: [], framingOverlap: false },
     ]);
     // 既存の種類別・検出側別の件数は、行の全体と合う
     expect(diagnosis.misses).toEqual({
@@ -998,13 +998,13 @@ describe("Plan の記録に、番号・有限の分類で対応を残す（Issue
       decisions: [],
       unresolved: [],
     };
-    // 枠（β）を差し引くと {0,1} と {2,5} の 2 断片に分かれる
+    // 枠（β）を差し引くと {0,1} と {2,5} の 2 断片に分かれる。どちらも、元の範囲が枠と重なっていたことを引き継ぐ
     const diagnosis = await diagnoseOnce(source, list, [{ start: 0, end: 5 }]);
     expect(diagnosis).toBeDefined();
     if (diagnosis === undefined) return;
     expect(diagnosis.missEntries).toEqual([
-      { kind: "uncovered-source", foundBy: "conversation", sentences: [1], requirements: [1] },
-      { kind: "uncovered-source", foundBy: "conversation", sentences: [1, 2], requirements: [1] },
+      { kind: "uncovered-source", foundBy: "conversation", sentences: [1], requirements: [1], framingOverlap: true },
+      { kind: "uncovered-source", foundBy: "conversation", sentences: [1, 2], requirements: [1], framingOverlap: true },
     ]);
     expect(diagnosis.droppedBlankMisses).toBe(0);
   });
@@ -1039,5 +1039,70 @@ describe("Plan の記録に、番号・有限の分類で対応を残す（Issue
       uncoveredSource: { code: 1, conversation: 1 },
     });
     expect(diagnosis.droppedBlankMisses).toBe(0);
+  });
+
+  it("(指摘1) 枠をまたぐ元の申告と、同じ断片を個別に申告した組を、枠の重なりの真偽で区別する", async () => {
+    const source = "αXβ";
+    const list: RequirementList = {
+      requirements: [{ id: "R-1", text: "全部", quote: source, position: { start: 0, end: source.length } }],
+      framing: [{ quote: "X", position: { start: 1, end: 2 } }],
+      decisions: [],
+      unresolved: [],
+    };
+    // 枠（X）をまたぐ 1 件の申告（差し引くと {0,1}・{2,3} の 2 断片）
+    const spanning = await diagnoseOnce(source, list, [{ start: 0, end: 3 }]);
+    // まったく同じ 2 断片を、枠と重ならない範囲として個別に申告する
+    const separate = await diagnoseOnce(source, list, [{ start: 0, end: 1 }, { start: 2, end: 3 }]);
+    expect(spanning).toBeDefined();
+    expect(separate).toBeDefined();
+    if (spanning === undefined || separate === undefined) return;
+    // 断片の番号は同じでも、元の申告が枠をまたいだかで行が変わる（元の範囲・位置は出さない）
+    expect(spanning.missEntries).toEqual([
+      { kind: "uncovered-source", foundBy: "conversation", sentences: [1], requirements: [1], framingOverlap: true },
+      { kind: "uncovered-source", foundBy: "conversation", sentences: [1], requirements: [1], framingOverlap: true },
+    ]);
+    expect(separate.missEntries).toEqual([
+      { kind: "uncovered-source", foundBy: "conversation", sentences: [1], requirements: [1], framingOverlap: false },
+      { kind: "uncovered-source", foundBy: "conversation", sentences: [1], requirements: [1], framingOverlap: false },
+    ]);
+    // 件数（既存の欄）は同じである
+    expect(spanning.misses).toEqual(separate.misses);
+    expect(JSON.stringify({ spanning, separate })).not.toContain('"start"');
+  });
+
+  it("(指摘5) 候補要件の ID が重複しても、落ちは検出時の候補の通し番号に結ぶ", async () => {
+    const source = "記録する。合計する。";
+    const list: RequirementList = {
+      requirements: [
+        // 1 番目は正しい引用・位置
+        { id: "R-dup", text: "記録できる", quote: "記録する。", position: { start: 0, end: 5 } },
+        // 2 番目は同じ ID で、引用が原文に無い（位置は 2 文目を覆う）
+        { id: "R-dup", text: "無い", quote: "原文に無い", position: { start: 5, end: 10 } },
+        // 3 番目も同じ ID で、位置がずれる（位置は 1・2 文目に重なる）
+        { id: "R-dup", text: "合計できる", quote: "合計する。", position: { start: 1, end: 6 } },
+      ],
+      framing: [],
+      decisions: [],
+      unresolved: [],
+    };
+    const diagnosis = await diagnoseOnce(source, list, []);
+    expect(diagnosis).toBeDefined();
+    if (diagnosis === undefined) return;
+    // ID で最初の候補へ寄せず、検出時の位置（2 番目・3 番目）の通し番号になる
+    expect(diagnosis.missEntries).toEqual([
+      { kind: "quote-not-found", foundBy: "code", sentences: [], requirements: [2], framingOverlap: false },
+      { kind: "position-mismatch", foundBy: "code", sentences: [1, 2], requirements: [3], framingOverlap: false },
+    ]);
+    // 覆われない文は無い（どの落ちも、削除ではなく候補の番号の問題である）
+    expect(diagnosis.misses).toEqual({
+      quoteNotFound: 1,
+      positionMismatch: 1,
+      uncoveredSource: { code: 0, conversation: 0 },
+    });
+    // 既存の件数の欄も、ID の重複で変わらない
+    expect(checkRequirementCoverage(source, list).map((miss) => miss.kind)).toEqual([
+      "quote-not-found",
+      "position-mismatch",
+    ]);
   });
 });

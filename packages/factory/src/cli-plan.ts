@@ -530,14 +530,16 @@ export interface PlanCliSentenceCoverageRecord {
 }
 
 /**
- * 記録に入れる、指摘 1 件の記録（種類・見つけた側・重なる文番号・関わる候補要件の通し番号。Issue #488）。
- * **引用・原文の断片・文字の位置・要件の ID は入れない**。
+ * 記録に入れる、指摘 1 件の記録（種類・見つけた側・重なる文番号・関わる候補要件の通し番号・枠をまたいだか。
+ * Issue #488）。**引用・原文の断片・文字の位置・要件の ID は入れない**。
  */
 export interface PlanCliMissEntryRecord {
   readonly kind: string;
   readonly found_by: string;
   readonly sentences: readonly number[];
   readonly requirements: readonly number[];
+  /** 会話が挙げた断片で、元の範囲が枠と重なっていたか（コードの落ちは false） */
+  readonly framing_overlap: boolean;
 }
 
 /** 記録に入れる 1 往復の逆照合の診断（Issue #430・#488）。 */
@@ -781,6 +783,7 @@ function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCl
         found_by: entry.foundBy,
         sentences: entry.sentences.slice(),
         requirements: entry.requirements.slice(),
+        framing_overlap: entry.framingOverlap,
       })),
     })),
     redone: diagnosis.redone,

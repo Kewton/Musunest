@@ -16,7 +16,7 @@ import type {
   PlanSourceInput,
 } from "@musunest/appspec-schema";
 import { createFakeJudge } from "../judge-fake.js";
-import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest } from "../judge.js";
+import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest, JudgeResponse } from "../judge.js";
 import { confirmQuestionName, runConfirm, type ConfirmInput } from "./confirm.js";
 
 const noul = (value: number): JudgeAnswer => ({ kind: "noul", noul: value });
@@ -667,5 +667,86 @@ describe("P6 の文ごとの覆いを、番号と有限の分類で残す（Issu
       correspondence: "false",
       meetsThreshold: true,
     });
+  });
+
+  it("(指摘2) 同じ文が2回現れても、診断は文番号の入力を用い、2 文目の対応の重なりを偽にしない", async () => {
+    // 1 文目を枠、2 文目を唯一の候補要件の引用にする（本文は同じ「甲。」）
+    const TWO_SAME = "甲。甲。";
+    const twoSameInputs: readonly PlanInput[] = [
+      { id: "S-1", kind: "source", text: "甲。" },
+      { id: "S-2", kind: "source", text: "甲。" },
+    ];
+    const twoSameRequirements: readonly PlanRequirement[] = [
+      { id: "R-1", text: "記録できる", kind: "existence", origin: { input_id: "S-2", quote: "甲。" }, parts: [] },
+    ];
+    const result = await runConfirm(
+      validInput({
+        source: TWO_SAME,
+        inputs: twoSameInputs,
+        requirements: twoSameRequirements,
+        framing: [{ start: 0, end: 2 }],
+        sourceCorrespondence: new Map([["R-1", ["S-2"]]]),
+        openIssues: [],
+        decisions: [],
+        judge: createFakeJudge(
+          { [confirmQuestionName("S-1")]: noul(0.95), [confirmQuestionName("S-2")]: noul(0.95) },
+          { model: "fake-judge" },
+        ),
+      }),
+    );
+    // 文番号の入力（2 文目＝S-2）で診断する。P2 の対応に S-2 が含まれ、覆いの分類も出どころになる
+    expect(result.coverage).toEqual([
+      { sentence: 1, coverage: "framing", correspondence: "false", meetsThreshold: true },
+      { sentence: 2, coverage: "origin", correspondence: "true", meetsThreshold: true },
+    ]);
+    // ゲート（`covered`・`problems`）は今までどおり本文の一致で見るので、2 文目は覆われていないままである
+    expect(result.problems).toEqual([
+      { code: "uncovered-source", path: "source[1]", message: "原文の文がどの要件にも覆われていない" },
+    ]);
+    expect(result.confirmed).toBe(false);
+  });
+
+  it("(指摘6) 助言が欠けた・種類が違う場合は閾値以上かを未観測にし、実際の 0 と区別する", async () => {
+    const threeInputs: readonly PlanInput[] = [
+      { id: "S-1", kind: "source", text: "枠の文。" },
+      { id: "S-2", kind: "source", text: "対応の文。" },
+      { id: "S-3", kind: "source", text: "印の文。" },
+    ];
+    // S-1 には答えない（欠落）、S-2 には別の種類、S-3 には Noul の 0 を返す
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        const answers: Record<string, JudgeAnswer> = {};
+        for (const name of Object.keys(request.questions)) {
+          if (name === confirmQuestionName("S-2")) {
+            answers[name] = { kind: "choice", choice: "x", probabilities: undefined, probability: undefined, confidence: 0.9 };
+          } else if (name === confirmQuestionName("S-3")) {
+            answers[name] = noul(0);
+          }
+        }
+        return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+      },
+    };
+    const result = await runConfirm(
+      validInput({
+        source: "枠の文。対応の文。印の文。",
+        inputs: threeInputs,
+        requirements: [],
+        openIssues: [],
+        decisions: [],
+        judge,
+      }),
+    );
+    // 有効な助言が無い 1・2 文目は未観測（`null`）、実際に 0 を返した 3 文目だけが閾値未満（偽）になる
+    expect(result.coverage).toEqual([
+      { sentence: 1, coverage: "none", correspondence: "unobserved", meetsThreshold: null },
+      { sentence: 2, coverage: "none", correspondence: "unobserved", meetsThreshold: null },
+      { sentence: 3, coverage: "none", correspondence: "unobserved", meetsThreshold: false },
+    ]);
+    // 既存の `judgments` は、欠落・種類違いも 0 として必ず行を作る（値・型・意味は今までどおり）
+    expect(result.judgments.map((entry) => [entry.questionId, entry.value, entry.meetsThreshold])).toEqual([
+      ["cover:S-1", 0, false],
+      ["cover:S-2", 0, false],
+      ["cover:S-3", 0, false],
+    ]);
   });
 });
