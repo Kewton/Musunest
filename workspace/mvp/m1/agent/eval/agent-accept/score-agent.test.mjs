@@ -10,6 +10,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { PLAN_TABLE_OUTCOMES, planBuildTables, ABSENT_REASONS, ACCEPTANCE_STATUSES, CATALOG_FACET_IDS, CONDITIONS_SCHEMAS, DEFAULT_SET_PATH, EVAL_SET_SCHEMA, JUDGEMENTS, PLAN_SCRIPT_SCHEMA, PLAN_SPEC_SCHEMA, SCORING_FILES, SCRIPT_MODE, SCRIPT_RUN_STATUSES, UNVERIFIED_SOURCES, VERDICT_UNEVALUATED, WRONG_ACCEPTANCE_EVALUATION, acceptanceMatcher, anonymize, applyScript, fingerprintDir, judgeDisposition, loadEvalSet, loadPlan, loadScript, planTexts, questionFacets, readAcceptance, reconcile, scoringFingerprint, scriptSummary, scriptsFingerprint, sha256, validatePlanShape, validatePlanned, validateScript } from "./score-agent.mjs";
+import { BUILD_RECORD_PATH, ENVELOPE_REASONS, checkPlanResult, EXIT_CLASSES, PLAN_ONLY_RESULT_SCHEMA, PLAN_RESULT_PATH, SCRIPT_MATCH_STATES, evaluationOf, frozenProblem, stat4 } from "./score-agent.mjs";
 import { DEFAULT_ALLOWED, finalVerdict, scoreClaims } from "../score-claims.mjs";
 import { loadDef, score } from "../engine.mjs";
 
@@ -1731,4 +1732,610 @@ test("Plan の表と Build の表：往復の記録の無い本は absent とし
   assert.deepEqual(t.build.rows.map((x) => [x.run, x.verdict, x.pass, x.usd]), [["X-r3", "PASS", true, 0.1]]);
   assert.deepEqual([t.build.total.runs, t.build.total.excluded, t.build.total.excluded_outcomes], [1, 2, { "cannot-confirm": 0, stopped: 0, unknown: 1, absent: 1 }]);
   assert.ok(!JSON.stringify(t).includes("MARK_OUTCOME"));
+});
+
+// ── 評価の種類・Plan の集計・Build だけの集計（#498。README §5.2・§5.3）
+const V4 = CONDITIONS_SCHEMAS[3];
+const METRICS_KEYS = ["generated", "final_static", "spec_pass_writable", "missed_partial", "fulfillment_partial", "spec_pass_partial", "false_claim_runs", "within_time_cost", "cost_total_usd", "factory_verdicts"];
+const PLAN_RECORD_SCHEMA = "musunest-factory/plan-cli-record/v1";
+/** 本を 1 つ置く（#498）。sl は起動の記録の欄（既定は exit 0・ok・要約なし）。record・envelope・buildRecord は往復の記録・包み・Build だけの記録（文字列ならそのまま書く） */
+function addRun498(out, id, { sl = {}, record, envelope, buildRecord, stdout = "", spec = null, summary = true } = {}) {
+  const dir = join(out, id);
+  mkdirSync(join(dir, "bundle/artifacts"), { recursive: true });
+  if (summary) {
+    writeFileSync(join(dir, "summary.line.json"), JSON.stringify({ exit: 0, wall_s: 1, exit_class: "ok", summary: null, plan_cost: null, stderr_tail: { bytes: 0, known_lines: 0 }, resumed: false, ...sl }));
+    writeFileSync(join(dir, "stdout.log"), stdout);
+    writeFileSync(join(dir, "stderr.log"), "");
+  }
+  if (spec !== null) writeFileSync(join(dir, "bundle/artifacts/app.spec.yaml"), spec);
+  const put = (rel, v, head = {}) => { if (v !== undefined) writeFileSync(join(dir, rel), typeof v === "string" ? v : JSON.stringify({ ...head, ...v })); };
+  put("bundle/plan-record.json", record, { schema_version: PLAN_RECORD_SCHEMA, plan_id: "plan-t" });
+  put(PLAN_RESULT_PATH, envelope);
+  put(BUILD_RECORD_PATH, buildRecord);
+}
+/** v4 の条件のファイル（params.mode。extra.params で params を差し替える） */
+const cond4 = (out, ids, mode, extra = {}) => { mkdirSync(out, { recursive: true }); conditions(out, ids, { schema: V4, params: { ...paramsFor(ids), plan: mode === "e2e", mode }, scripts: { mode: "post-hoc", fingerprint: null, files: [] }, frozen: null, ...extra }); };
+const PSHA = (p) => sha256(`plan-${p}`), SSHA = (p) => sha256(`source-${p}`);
+/** 凍結した組のファイルを置き、run-agent.mjs が条件に書く frozen の形を返す */
+function frozenOf(base, adopted, missing, name = "frozen-plan-set.json") {
+  const path = writeJson(join(base, "frozen", name), { schema: "musunest-eval/frozen-plan-set/v1", id: "t-frozen", version: 1, adopted: adopted.map((p) => ({ pattern: p })), missing: missing.map((p) => ({ pattern: p })) });
+  return { path, sha256: sha256(readFileSync(path)), id: "t-frozen", version: 1, origin: "frozen-plan", author: null, adopted: adopted.map((p) => ({ pattern: p, plan_sha256: PSHA(p), source_sha256: SSHA(p), envelope_sha256: sha256(`envelope-${p}`) })), missing };
+}
+const buildRec = (p, returnToPlan, over = {}) => ({ schema_version: "musunest-factory/build-cli-record/v1", conditions: null, plan_sha256: PSHA(p), source_sha256: SSHA(p), return_to_plan: returnToPlan, ...over });
+const head = (rate) => rate.split("（")[0];
+const runIds = (p, n) => Array.from({ length: n }, (_, i) => `${p}-r${i + 1}`);
+
+test("評価の種類：v1〜v3 は params.plan から e2e か build、v4 は params.mode（既知でない値は unknown）、条件が無ければ null。build_applicable は plan-only だけ偽", async () => {
+  const [V1x, V2x, V3x] = CONDITIONS_SCHEMAS;
+  for (const schema of [V1x, V2x, V3x]) {
+    assert.deepEqual(evaluationOf({ schema, params: { plan: true } }), { mode: "e2e", build_applicable: true });
+    assert.deepEqual(evaluationOf({ schema, params: { plan: false } }), { mode: "build", build_applicable: true });
+    assert.deepEqual(evaluationOf({ schema, params: { mode: "plan-only" } }), { mode: "build", build_applicable: true }, "v1〜v3 は params.mode を読まない");
+  }
+  for (const mode of ["build", "e2e", "plan-only", "build-from"]) assert.deepEqual(evaluationOf({ schema: V4, params: { mode, plan: true } }), { mode, build_applicable: mode !== "plan-only" });
+  assert.deepEqual(evaluationOf({ schema: V4, params: { mode: "leak-marker-text" } }), { mode: "unknown", build_applicable: true });
+  assert.deepEqual(evaluationOf(null), { mode: null, build_applicable: true });
+  await withOut(async (base) => {
+    // 条件の無い出力先：mode は null、新しい集計は null
+    const out = join(base, "out");
+    addRun(out, "P1-r1", { spec: PASS_A });
+    scoreRun(out);
+    const full = readScore(out);
+    assert.deepEqual(full.evaluation, { mode: null, build_applicable: true });
+    assert.equal(full.metrics_plan, null);
+    assert.equal(full.metrics_build, null);
+    assert.deepEqual(anonymize(full).evaluation, { mode: null, build_applicable: true });
+    // v4 の build の出力先（新しい集計は null）・v2 の Plan を通した出力先（e2e）
+    const out2 = join(base, "out2");
+    addRun(out2, "P1-r1", { spec: PASS_A });
+    cond4(out2, ["P1-r1"], "build");
+    scoreRun(out2);
+    assert.deepEqual([readScore(out2).evaluation.mode, readScore(out2).metrics_plan, readScore(out2).metrics_build], ["build", null, null]);
+    const out3 = join(base, "out3");
+    addRun(out3, "P1-r1", { spec: PASS_A });
+    planConditions(out3, ["P1-r1"]);
+    scoreRun(out3);
+    assert.equal(readScore(out3).evaluation.mode, "e2e");
+    assert.equal(readScore(out3).metrics_plan.runs, 1);
+  });
+});
+
+test("時間と費用の集計：実測の 0 は observed に入り、欠測と区別する。偶数本の中央値は真ん中 2 つの平均。読めた本が 0 なら合計と中央値は null", () => {
+  assert.deepEqual(stat4([0, null, 300, 1500, undefined, 2000, "x"]), { observed: 4, missing: 3, total: 3800, median: 900 });
+  assert.deepEqual(stat4([5, 1, 3]), { observed: 3, missing: 0, total: 9, median: 3 });
+  assert.deepEqual(stat4([null, Number.NaN]), { observed: 0, missing: 2, total: null, median: null });
+  assert.deepEqual(stat4([0.1, 0.2]), { observed: 2, missing: 0, total: 0.3, median: 0.15 });
+});
+
+test("Plan の集計（e2e）：確定・確定できない・止まった・記録なし・途中・未実行を混ぜても、分母は予定した全本。内訳・確定の率・問数と往復の合計と平均・時間と費用の 4 つが期待値と等しく、既存の metrics・tables は変わらない", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    addRun498(out, "P1-r1", { spec: PASS_A, sl: { plan_cost: { plan_usd: 0.02, build_usd: 0.05, total_usd: 0.07 } }, record: { outcome: "confirmed", rounds: [qRound(2)], stages: [stg("requirements", 1000), stg("confirm", 500)], spent_usd: 0.9 } });
+    addRun498(out, "P1-r2", { sl: { exit: 1, exit_class: "failed" }, record: { outcome: "cannot-confirm", rounds: [qRound(1), qRound(3)], stages: [], spent_usd: 0.01, cannot_confirm: [{ source: "session", code: "question-limit", path: "open_issues" }] } });
+    addRun498(out, "P1-r3", { sl: { exit: 1, exit_class: "failed", plan_cost: { plan_usd: 0, build_usd: 0, total_usd: 0 } }, record: { outcome: "stopped", rounds: [], stages: [stg("requirements", 300)], failure: { stage: "requirements", kind: "deadline" } } });
+    addRun498(out, "P1-r4", { spec: FAIL_A }); // 起動の記録はあるが往復の記録が無い（記録なし）
+    addRun498(out, "P1-r6", { summary: false, record: { outcome: "confirmed", rounds: [qRound(9)], stages: [stg("requirements", 9)] } }); // 途中の本（数えない）
+    addRun498(out, "P1-r7", { spec: PASS_A, sl: { plan_cost: { plan_usd: 0.04, build_usd: 0.01, total_usd: 0.05 } }, record: { outcome: "confirmed", rounds: [qRound(1)], stages: [stg("requirements", 2000)] } });
+    const ids = runIds("P1", 7); // P1-r5 は未実行
+    cond4(out, ids, "e2e");
+    const r = scoreRun(out);
+    const full = readScore(out);
+    const mp = full.metrics_plan;
+    assert.deepEqual(full.evaluation, { mode: "e2e", build_applicable: true });
+    assert.equal(full.metrics_build, null);
+    assert.deepEqual([mp.runs, mp.unexecuted, mp.incomplete, mp.unrecorded], [7, 1, 1, 1]);
+    assert.equal(mp.denominator, "予定した本 7 本（未実行 1・途中 1・記録なし 1 を含む）");
+    assert.deepEqual(mp.outcomes, { confirmed: 2, "cannot-confirm": 1, stopped: 1, unknown: 0, absent: 3 });
+    startsWith(mp.confirmed, "2/7（");
+    assert.deepEqual(mp.stop_classes, { "session:question-limit": 1, "requirements:deadline": 1 });
+    assert.deepEqual(mp.questions, { total: 7, mean: 1.75, runs: 4 });
+    assert.deepEqual(mp.rounds, { total: 4, mean: 1, runs: 4 });
+    // 時間：1500・0（実測の 0）・300・2000、欠測 3（記録なし・途中・未実行）。偶数本の中央値は (300 + 1500) / 2
+    assert.deepEqual(mp.duration_ms, { observed: 4, missing: 3, total: 3800, median: 900 });
+    // 費用：起動の記録の Plan の額（0.02・0（実測の 0）・0.04）、無ければ往復の記録の使った額（0.01）
+    assert.deepEqual(mp.usd, { observed: 4, missing: 3, total: 0.07, median: 0.015 });
+    assert.equal(mp.script, null);
+    assert.equal(mp.envelope, null);
+    // 既存の metrics・tables は、条件の無い採点（新しい分岐を通らない）と同じ。metrics の鍵の並びも同じ
+    const plain = join(base, "plain");
+    cpSync(out, plain, { recursive: true });
+    rmSync(join(plain, "conditions.json"));
+    scoreRun(plain);
+    const before = readScore(plain);
+    assert.deepEqual(full.metrics, before.metrics);
+    assert.deepEqual(full.tables, before.tables);
+    assert.deepEqual(full.rows.map((x) => [x.run, x.verdict ?? null, x.plan]), before.rows.map((x) => [x.run, x.verdict ?? null, x.plan]));
+    assert.deepEqual(Object.keys(full.metrics), METRICS_KEYS);
+    startsWith(full.metrics.generated, "3/6（");
+    assert.equal(full.tables.build.total.denominator, "Plan が確定した本 3 本（全 6 本から 3 本を外した）", "表は今と同じ（途中の本も往復の記録があれば数える）");
+    // 匿名の口：件数・率・4 つの集計だけ。止まり方の分類の符号は出さない。metrics の鍵の並びは今と同じ
+    const a = anonymize(full);
+    assert.deepEqual(Object.keys(a.metrics), METRICS_KEYS);
+    assert.deepEqual(a.evaluation, { mode: "e2e", build_applicable: true });
+    assert.equal(mp.record_unreadable, 0);
+    assert.deepEqual(a.metrics_plan, { runs: 7, unexecuted: 1, incomplete: 1, unrecorded: 1, record_unreadable: 0, outcomes: mp.outcomes, confirmed: mp.confirmed, questions: mp.questions, rounds: mp.rounds, free_text: mp.free_text, duration_ms: mp.duration_ms, usd: mp.usd, script: null, envelope: null });
+    assert.equal(a.metrics_build, null);
+    for (const w of ["question-limit", "deadline", "P1-r"]) assert.ok(!JSON.stringify(a).includes(w), `匿名に ${w}`);
+    assert.match(r.stdout, /Plan の集計（e2e）: 予定した本 7 本（未実行 1・途中 1・記録なし 1 を含む）・確定 2\/7（/);
+    const ar = scoreRun(out, ["--anonymous"]);
+    assert.deepEqual(JSON.parse(ar.stdout), a);
+  });
+});
+
+test("Plan の集計の自由入力：文字列の答えだけを数え、null の答えは 0。記録の形（rounds・answers が配列）を読めない本は unreadable で、読めて 0 件の本と区別する", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    const q = Q_HOW();
+    addRun498(out, "P1-r1", { record: { outcome: "confirmed", rounds: [round([q, Q_HOW("Q1-2")], [{ id: "A:1", question_id: q.id, choice_id: null, free_text: "leak-marker-text" }, { id: "A:2", question_id: "Q1-2", choice_id: "c1", free_text: null }])] } });
+    addRun498(out, "P1-r2", { record: { outcome: "confirmed", rounds: [round([q], [{ id: "A:1", question_id: q.id, choice_id: null, free_text: "leakmarkertext" }]), round([], [])] } });
+    addRun498(out, "P1-r3", { record: { outcome: "confirmed", rounds: [round([q], [answered(q, "c1")])] } }); // 読めて 0 件
+    addRun498(out, "P1-r4", { record: { outcome: "stopped", rounds: null } }); // rounds が配列でない
+    addRun498(out, "P1-r5", { record: { outcome: "stopped", rounds: [{ questions: [], answers: "x" }] } }); // answers が配列でない
+    addRun498(out, "P1-r6", { record: { outcome: "stopped", rounds: { leak: "leak-marker-text" } } }); // rounds が写像（既存の行の組み立てでも止まらない）
+    addRun498(out, "P1-r7", { record: "{ leak-marker-text leakmarkertext" }); // JSON でない記録
+    addRun498(out, "P1-r8", { record: { outcome: "stopped", rounds: ["leak-marker-text", null] } }); // 往復が写像でない
+    cond4(out, runIds("P1", 8), "e2e");
+    for (const extra of [[], ["--anonymous"]]) { const rx = scoreRun(out, extra); for (const w of ["leak-marker-text", "leakmarkertext"]) assert.ok(!rx.stdout.includes(w) && !rx.stderr.includes(w), `${extra.join("") || "通常"}の出力に ${w}`); }
+    const r = scoreRun(out);
+    const full = readScore(out);
+    assert.deepEqual(full.metrics_plan.free_text, { answers: 2, runs: 3, unreadable: 5 });
+    assert.equal(full.metrics_plan.record_unreadable, 1);
+    assert.deepEqual(anonymize(full).metrics_plan.free_text, { answers: 2, runs: 3, unreadable: 5 });
+    assert.deepEqual([rowOf(full, "P1-r6").plan.questions, rowOf(full, "P1-r6").plan.rounds, rowOf(full, "P1-r7").plan], [0, 0, null], "既存の行は読めない形を 0・記録なしに写す");
+    assert.deepEqual(full.metrics_plan.questions, { total: 4, mean: 0.8, runs: 5 }, "rounds が配列でない本は問数の平均の分母に入らない");
+    for (const w of ["leak-marker-text", "leakmarkertext"]) {
+      assert.ok(!JSON.stringify([full.metrics_plan, full.tables, full.evaluation]).includes(w), `新しい欄・表に ${w}`);
+      assert.ok(!r.stdout.includes(w) && !r.stderr.includes(w), `標準出力・標準エラーに ${w}`);
+    }
+  });
+});
+
+test("実行中の台本（scripts.mode が live）：照合の状態ごとの件数（知らない状態は unknown-state）と、全問 answered の本の率。0 問の本と照合の記録の欠けた本は別に数え、分子に入れない", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    // 問いは質問 ID と版を持ち、照合の記録は同じ ID と版で 1 対 1 に対応させる
+    const qs = (tag, n, rev = 1) => ({ questions: Array.from({ length: n }, (_, k) => ({ id: `${tag}-${k}`, revision: rev, text: "MARK_QUESTION_TEXT" })), answers: [] });
+    const m = (tag, k, state, rev = 1) => ({ question_id: `${tag}-${k}`, revision: rev, state, entry_index: null });
+    const rec = (outcome, rounds, matches) => ({ outcome, rounds, ...(matches === undefined ? {} : { script: { sha256: sha256("s"), matcher: "v1", matches } }) });
+    addRun498(out, "P1-r1", { record: rec("confirmed", [qs("a", 1), qs("b", 1, 2)], [m("a", 0, "answered"), m("b", 0, "answered", 2)]) }); // 2 往復の全問が answered
+    addRun498(out, "P1-r2", { record: rec("confirmed", [qs("c", 2)], [m("c", 0, "answered"), m("c", 1, "duplicate")]) });
+    addRun498(out, "P1-r3", { record: rec("confirmed", [], []) }); // 0 問
+    addRun498(out, "P1-r4", { record: rec("confirmed", [qs("d", 1)]) }); // 照合の記録が無い
+    addRun498(out, "P1-r5", { record: rec("cannot-confirm", [qs("e", 3)], [m("e", 0, "no-choice"), m("e", 1, "stale-revision"), m("e", 2, "leak-marker-text")]) });
+    addRun498(out, "P1-r6", { record: rec("cannot-confirm", [qs("f", 1)], [m("f", 0, "unknown")]) });
+    addRun498(out, "P1-r7"); // 往復の記録の無い本（台本の分母に入らない）
+    // 対応しない照合の記録（どれも unrecorded。answered の件数には入るが、率の分子に入れない）
+    addRun498(out, "P1-r8", { record: rec("confirmed", [qs("g", 2)], [m("g", 0, "answered")]) }); // 2 問のうち 1 問だけ
+    addRun498(out, "P1-r9", { record: rec("confirmed", [qs("h", 1)], []) }); // 空の照合の配列
+    addRun498(out, "P1-r10", { record: rec("confirmed", [qs("i", 2)], [m("i", 0, "answered"), m("i", 0, "answered")]) }); // 同じ問いが重なり、1 問が欠ける
+    addRun498(out, "P1-r11", { record: rec("confirmed", [qs("j", 1)], [m("j", 0, "answered", 2)]) }); // 版が違う
+    addRun498(out, "P1-r12", { record: rec("confirmed", [qs("k", 1)], [m("k", 0, "answered"), m("k", 1, "answered")]) }); // 余る
+    addRun498(out, "P1-r13", { record: rec("confirmed", [{ questions: [{ id: "l-0", text: "x" }], answers: [] }], [{ question_id: "l-0", state: "answered" }]) }); // 版が読めない
+    cond4(out, runIds("P1", 13), "e2e", { scripts: { mode: "live", fingerprint: null, files: [] } });
+    const r = scoreRun(out);
+    const full = readScore(out);
+    const sc = full.metrics_plan.script;
+    assert.deepEqual({ ...sc, all_answered: head(sc.all_answered) }, { mode: "live", runs: 12, states: { answered: 10, unknown: 1, duplicate: 1, "no-choice": 1, "stale-revision": 1, "unknown-state": 1 }, all_answered: "1/12", no_questions: 1, unrecorded: 7 });
+    assert.deepEqual(Object.keys(sc.states), [...SCRIPT_MATCH_STATES, "unknown-state"]);
+    assert.deepEqual(anonymize(full).metrics_plan.script, sc);
+    assert.ok(!JSON.stringify(full.metrics_plan).includes("leak-marker-text"));
+    assert.ok(!r.stdout.includes("leak-marker-text"));
+    // 事後の台本の集計（metrics_script）は今のまま（mode は post-hoc）。匿名の当て方の既知の値に live が入った
+    assert.equal(full.metrics_script.mode, SCRIPT_MODE);
+    assert.equal(anonymize({ ...full, metrics_script: { ...full.metrics_script, mode: "live" } }).metrics_script.mode, "live");
+  });
+});
+
+/** Plan だけの計測の出力先（#498 の (e)）：台本を持つ組・6 本の包み（1 本は通り、5 本はそれぞれ 1 つの理由で落ちる） */
+async function planOnlyFixture(base, { markers = false } = {}) {
+  const mk = (x) => (markers ? x : "");
+  const scriptA = writeJson(join(base, "set/scripts/A.json"), scriptOf("A", [entry("A:e1", ["MARK_OI"], { choose: ["MARK_C1"] })]));
+  const setPath = writeJson(join(base, "set/t-set.json"), { ...SET_DEFAULTS, items: [itemOf("P1", "A", { script: "scripts/A.json", request: [`MARK_REQ_P1 ${mk("leak-marker-text")}`, `MARK_LINE2 ${mk("leakmarkertext")}`] })] });
+  const loaded = loadEvalSet(setPath);
+  assert.equal(loaded.status, "ok", loaded.reasons.join("、"));
+  assert.ok(existsSync(scriptA));
+  const source = sha256(loaded.byId.get("P1").requestText + "\n");
+  const requirements = markers ? [req("R:1", "leak-marker-text leakmarkertext")] : [];
+  const plan = await planFixture({ requirements });
+  const tampered = await planFixture({ requirements, tamper: (p) => { p.revision += 1; } });
+  const env = async (p, over = {}) => ({ schema_version: PLAN_ONLY_RESULT_SCHEMA, outcome: "confirmed", plan: p, plan_sha256: await planDigest(p), source_sha256: source, conditions: null, stop: null, ...over });
+  // 台本の鍵（MARK_OI）は問いの文に無く、確定した仕様の事項の文（OI:1）にだけある
+  const q = question("Q1-1", "MARK_Q?", [{ id: "c1", text: "MARK_C1" }, { id: "c2", text: "MARK_C2" }], "c1", { open_issue_id: "OI:1" });
+  const rec = (outcome) => ({ outcome, rounds: [round([q], [answered(q, "c1")])], stages: [stg("requirements", 10)] });
+  const out = join(base, "out");
+  addRun498(out, "P1-r1", { sl: { exit: 0, exit_class: "ok" }, record: rec("confirmed"), envelope: await env(plan) });
+  addRun498(out, "P1-r2", { record: rec("confirmed"), envelope: await env(plan, { schema_version: markers ? "leak-marker-text" : "musunest-factory/plan-only-result/v0" }) });
+  addRun498(out, "P1-r3", { record: rec("stopped"), envelope: await env(plan) }); // 往復の記録は止まった、包みは確定
+  addRun498(out, "P1-r4", { record: rec("confirmed"), envelope: await env(plan, { plan_sha256: "0".repeat(64) }) });
+  addRun498(out, "P1-r5", { record: rec("confirmed"), envelope: await env(plan, { source_sha256: sha256("other") }) });
+  addRun498(out, "P1-r6", { record: rec("confirmed"), envelope: await env(tampered) }); // 契約の検査（確認の失効）だけで落ちる
+  addRun498(out, "P1-r7", { record: rec("stopped") }); // 包みが無い
+  addRun498(out, "P1-r8", { record: rec("stopped"), envelope: "{ leak-marker-text" }); // 包みが JSON でない
+  const ids = runIds("P1", 8);
+  cond4(out, ids, "plan-only", { set: { path: setPath, sha256: loaded.sha256, id: "t-set" } });
+  return { out, ids };
+}
+
+test("Plan だけの出力：包みを本ごとに検査し、通らない数と理由ごとの数を出す。Build の指標は対象外（build_applicable が偽・Build の表は 0 本・通常の標準出力に 1 行）で、台本の事後の照合は包みの仕様の文で当たる。匿名の標準出力は JSON 1 個", async () => {
+  await withOut(async (base) => {
+    const { out } = await planOnlyFixture(base);
+    const r = scoreRun(out);
+    const full = readScore(out);
+    assert.deepEqual(full.evaluation, { mode: "plan-only", build_applicable: false });
+    assert.equal(full.metrics_build, null);
+    assert.deepEqual(full.metrics_plan.envelope, { runs: 8, checked: 6, passed: 1, failed: 5, absent: 1, unreadable: 1, reasons: Object.fromEntries(ENVELOPE_REASONS.map((k) => [k, 1])) });
+    assert.equal(r.stdout.split("\n").filter((l) => l.includes("Build の指標は対象外")).length, 1, "通常の標準出力に対象外の 1 行");
+    // 既存の行・metrics は今の定義のまま（宣言が無いので生成失敗）
+    startsWith(full.metrics.generated, "0/8（");
+    assert.deepEqual(Object.keys(full.metrics), METRICS_KEYS);
+    // Build の表は 0 本で、分母の文は Plan 評価
+    assert.deepEqual([full.tables.build.total.runs, full.tables.build.total.excluded, full.tables.build.rows], [0, 0, []]);
+    assert.match(full.tables.build.total.denominator, /^Plan 評価（plan-only）/);
+    assert.equal(full.tables.plan.total.runs, 8, "Plan の表は今と同じ（全本）");
+    // 台本の事後の照合：鍵は確定した仕様（包み）の事項の文にだけある
+    assert.equal(rowOf(full, "P1-r1").script.scripted, 1);
+    assert.equal(rowOf(full, "P1-r1").script.status, "ok");
+    assert.equal(rowOf(full, "P1-r7").script.scripted, 0, "包みが無い本は仕様の文が無く、台本に当たらない");
+    // 匿名：JSON 1 個。包みの検査は数だけ（理由の符号は出さない）
+    const ar = scoreRun(out, ["--anonymous"]);
+    const a = JSON.parse(ar.stdout);
+    assert.equal(a.evaluation.build_applicable, false);
+    assert.equal(a.evaluation.mode, "plan-only");
+    assert.deepEqual(a.metrics_plan.envelope, { runs: 8, checked: 6, passed: 1, failed: 5, absent: 1, unreadable: 1 });
+    for (const w of ENVELOPE_REASONS) assert.ok(!ar.stdout.includes(w), `匿名に包みの理由の符号 ${w}`);
+    assert.ok(!ar.stdout.includes("対象外"));
+  });
+});
+
+test("Build だけの集計（build-from）の分母は予定した本の全部：採用 2 P × 3 回・外した P 1 つ・未実行 1 本なら 6 本で、分母の文に外した P の数。Build の表は予定した 6 本を外さずに含む。--only で 1 P なら 3 本。e2e の --only でも Plan の集計の分母は予定の本数", async () => {
+  await withOut(async (base) => {
+    const frozen = frozenOf(base, ["P1", "P2"], ["P3"]);
+    const out = join(base, "out");
+    const ids = [...runIds("P1", 3), ...runIds("P2", 3)];
+    for (const id of ids.filter((x) => x !== "P2-r3")) addRun498(out, id, { sl: { summary: { verdict: "partial", stages: [stg("design", 10)], provider_cost_usd: 0.01 } }, buildRecord: buildRec(id.split("-")[0], false) });
+    cond4(out, ids, "build-from", { frozen });
+    const r = scoreRun(out);
+    const full = readScore(out);
+    const mb = full.metrics_build;
+    assert.deepEqual(full.evaluation, { mode: "build-from", build_applicable: true });
+    assert.equal(full.metrics_plan, null);
+    assert.deepEqual([mb.runs, mb.frozen_missing, mb.unexecuted, mb.incomplete], [6, 1, 1, 0]);
+    assert.equal(mb.denominator, "凍結した組の本 6 本（予定した本の全部。組が外した P 1 個は含まない）");
+    assert.deepEqual(mb.rows.map((x) => [x.run, x.state]), ids.map((id) => [id, id === "P2-r3" ? "unexecuted" : "executed"]));
+    // Build の表：Plan の記録が無くても外さず、予定した 6 本（未実行の本も）を含む
+    assert.deepEqual(full.tables.build.rows.map((x) => x.run), ids);
+    assert.deepEqual([full.tables.build.total.runs, full.tables.build.total.excluded], [6, 0]);
+    assert.match(full.tables.build.total.denominator, /^凍結した組の本 6 本（.*組が外した P 1 個は含まない）$/);
+    assert.match(r.stdout, /Build だけの集計: 凍結した組の本 6 本/);
+    // --only で 1 P を流した計測（予定 3 本）
+    const out2 = join(base, "out2");
+    for (const id of runIds("P1", 3)) addRun498(out2, id, { sl: { summary: { verdict: "partial", stages: [] } }, buildRecord: buildRec("P1", false) });
+    cond4(out2, runIds("P1", 3), "build-from", { frozen });
+    scoreRun(out2);
+    assert.equal(readScore(out2).metrics_build.runs, 3);
+    assert.equal(readScore(out2).tables.build.total.runs, 3);
+    // e2e の --only（組は P1〜P10。予定は P1 × 3 で、流したのは 2 本）
+    const out3 = join(base, "out3");
+    for (const id of ["P1-r1", "P1-r2"]) addRun498(out3, id, { record: { outcome: "confirmed", rounds: [] } });
+    cond4(out3, runIds("P1", 3), "e2e");
+    scoreRun(out3);
+    assert.deepEqual([readScore(out3).metrics_plan.runs, readScore(out3).metrics_plan.unexecuted], [3, 1]);
+    startsWith(readScore(out3).metrics_plan.confirmed, "2/3（");
+  });
+});
+
+test("Build だけの集計の終了の分類（予定 12 本 ＝ 6 P × 2 回）：exit_class ごとの本数・exit 2 の生の数・包みの拒否（構造化された行のある本だけ）・差し戻しの率と食い違い・記録なし・未実行・途中が期待値と等しい。組との照合と PASS の率は別の 2 本で確かめる", async () => {
+  await withOut(async (base) => {
+    const pids = ["P1", "P2", "P3", "P4", "P5", "P6"];
+    const frozen = frozenOf(base, pids, []);
+    const out = join(base, "out");
+    const errLine = JSON.stringify({ schema_version: "musunest-factory/plan-file-error/v1", code: "plan-file-json" });
+    const rejLine = JSON.stringify({ schema_version: "musunest-factory/plan-file-reject/v1", check: "plan-sha256", codes: ["mismatch"] });
+    const run = (id, exit, exitClass, extra = {}) => addRun498(out, id, { sl: { exit, exit_class: exitClass }, ...extra });
+    run("P1-r1", 0, "ok", { buildRecord: buildRec("P1", false) });
+    run("P1-r2", 1, "failed");
+    run("P2-r1", 3, "return-to-plan", { buildRecord: buildRec("P2", true) });
+    run("P2-r2", 3, "return-to-plan", { buildRecord: buildRec("P2", false) });
+    run("P3-r1", 0, "ok", { buildRecord: buildRec("P3", true) });
+    run("P3-r2", 3, "return-to-plan"); // Build だけの記録が無い
+    run("P4-r1", 2, "envelope-unreadable", { stdout: `${errLine}\n` });
+    run("P4-r2", 2, "envelope-rejected", { stdout: `noise\n${rejLine}\n` });
+    run("P5-r1", 2, "usage-other", { stdout: "usage\n" });
+    run("P5-r2", 5, "other");
+    addRun498(out, "P6-r2", { summary: false }); // 要約の無い途中の本。P6-r1 は未実行
+    const ids = pids.flatMap((p) => runIds(p, 2));
+    cond4(out, ids, "build-from", { frozen });
+    const r = scoreRun(out);
+    const mb = readScore(out).metrics_build;
+    assert.equal(mb.runs, 12);
+    assert.deepEqual(mb.exit_classes, { ok: 2, failed: 1, "return-to-plan": 3, "envelope-unreadable": 1, "envelope-rejected": 1, "usage-other": 1, other: 1, unknown: 0 });
+    assert.deepEqual(Object.keys(mb.exit_classes), [...EXIT_CLASSES, "unknown"]);
+    assert.deepEqual([mb.exit_2, mb.envelope_refusals], [3, 2]);
+    assert.deepEqual({ ...mb.return_to_plan, rate: head(mb.return_to_plan.rate) }, { count: 1, rate: "1/12", inconsistent: 2, unrecorded: 1 });
+    assert.deepEqual([mb.unexecuted, mb.incomplete], [1, 1]);
+    // 3 種類の exit 2 は本ごとに分類を確かめる
+    const row = (id) => mb.rows.find((x) => x.run === id);
+    assert.deepEqual([row("P4-r1").exit_class, row("P4-r1").envelope_refusal], ["envelope-unreadable", true]);
+    assert.deepEqual([row("P4-r2").exit_class, row("P4-r2").envelope_refusal], ["envelope-rejected", true]);
+    assert.deepEqual([row("P5-r1").exit_class, row("P5-r1").envelope_refusal], ["usage-other", false]);
+    assert.deepEqual([row("P6-r1").state, row("P6-r2").state], ["unexecuted", "incomplete"]);
+    assert.deepEqual([row("P2-r1").return_to_plan, row("P2-r2").return_to_plan, row("P3-r2").return_to_plan], [true, false, null]);
+    const a = anonymize(readScore(out)).metrics_build;
+    assert.deepEqual([a.exit_classes, a.exit_2, a.envelope_refusals, a.return_to_plan], [mb.exit_classes, 3, 2, mb.return_to_plan]);
+    assert.equal("rows" in a, false, "匿名に本ごとの値は出さない");
+    assert.match(r.stdout, /exit 2 3（包みの拒否 2）・差し戻し 1\/12（/);
+    // 分類が拒否でも、構造化された行が無ければ包みの拒否に数えない（行が既知の版でも、検査名が既知でなければ数えない）
+    const out1 = join(base, "out1");
+    addRun498(out1, "P1-r1", { sl: { exit: 2, exit_class: "envelope-rejected" }, stdout: "x\n" });
+    addRun498(out1, "P1-r2", { sl: { exit: 2, exit_class: "envelope-rejected" }, stdout: `${JSON.stringify({ schema_version: "musunest-factory/plan-file-reject/v1", check: "leak-marker-text" })}\n` });
+    cond4(out1, runIds("P1", 2), "build-from", { frozen });
+    scoreRun(out1);
+    assert.deepEqual([readScore(out1).metrics_build.exit_2, readScore(out1).metrics_build.envelope_refusals], [2, 0]);
+    // 組との照合と PASS の率：2 本のうち 1 本は組と違う SHA、1 本は PASS
+    const out2 = join(base, "out2");
+    addRun498(out2, "P1-r1", { spec: PASS_A, sl: { summary: { verdict: "full", stages: [stg("design", 100), stg("write", 50)], provider_cost_usd: 0.02 }, plan_cost: { plan_usd: 0, build_usd: 0.03, total_usd: 0.03 } }, buildRecord: buildRec("P1", false) });
+    addRun498(out2, "P1-r2", { spec: FAIL_A, sl: { summary: { verdict: "partial", stages: [stg("design", 300)], provider_cost_usd: 0.01 } }, buildRecord: buildRec("P1", false, { plan_sha256: sha256("other") }) });
+    cond4(out2, runIds("P1", 2), "build-from", { frozen });
+    scoreRun(out2);
+    const m2 = readScore(out2).metrics_build;
+    assert.deepEqual(m2.frozen_match, { checked: 2, mismatched: 1 });
+    assert.deepEqual(m2.rows.map((x) => [x.frozen_match, x.pass, x.factory_verdict]), [[true, true, "full"], [false, false, "partial"]]);
+    startsWith(m2.pass, "1/2（");
+    assert.deepEqual(m2.factory_verdicts, { full: 1, partial: 1, none: 0, unknown: 0, absent: 0 });
+    assert.deepEqual(m2.duration_ms, { observed: 2, missing: 0, total: 450, median: 225 });
+    assert.deepEqual(m2.by_stage, { design: { observed: 2, missing: 0, total: 400, median: 200 }, write: { observed: 2, missing: 0, total: 50, median: 25 } });
+    assert.deepEqual(m2.usd, { observed: 2, missing: 0, total: 0.04, median: 0.02 });
+    assert.equal(readScore(out2).rows.find((x) => x.run === "P1-r1").verdict, "PASS", "PASS は既存の行の判定のまま");
+  });
+});
+
+test("build-from の計測で条件の frozen が無い・形が違う出力は、exit 3 で採点の出力を書かない。匿名でも同じで、標準エラーは 1 行に固定の符号だけ（本の ID・パス・値を出さない）", async () => {
+  await withOut(async (base) => {
+    const good = frozenOf(base, ["P1"], []);
+    const cases = [
+      [null, "frozen-missing", "無い"],
+      [{ ...good, sha256: "leak-marker-text" }, "frozen-invalid", "の形が違う"],
+      [{ ...good, adopted: [{ pattern: "leak-marker-text", plan_sha256: PSHA("P1"), source_sha256: SSHA("P1") }] }, "frozen-invalid", "の形が違う"],
+      [{ ...good, missing: ["leakmarkertext"] }, "frozen-invalid", "の形が違う"],
+      [{ ...good, sha256: [good.sha256] }, "frozen-invalid", "の形が違う"],
+      [{ ...good, adopted: [{ pattern: "P1", plan_sha256: [PSHA("P1")], source_sha256: SSHA("P1") }] }, "frozen-invalid", "の形が違う"],
+      [{ ...good, adopted: [{ pattern: "P1", plan_sha256: PSHA("P1"), source_sha256: [SSHA("P1")] }] }, "frozen-invalid", "の形が違う"],
+      [{ ...good, missing: ["P2", "P2"] }, "frozen-invalid", "の形が違う"],
+      [{ ...good, path: ["leak-marker-text"] }, "frozen-invalid", "の形が違う"],
+      ["leak-marker-text", "frozen-invalid", "の形が違う"],
+    ];
+    for (const [i, [frozen, code, word]] of cases.entries()) {
+      const out = join(base, `out${i}`);
+      addRun498(out, "P1-r1", { sl: { summary: { verdict: "leak-marker-text" } }, buildRecord: buildRec("P1", false) });
+      cond4(out, ["P1-r1"], "build-from", { frozen });
+      for (const extra of [[], ["--anonymous"]]) {
+        const r = spawnSync(process.execPath, [scoreFile, repo, out, ...extra], { encoding: "utf8" });
+        assert.equal(r.status, 3, r.stderr);
+        assert.equal(r.stderr, `断りました: Build だけの計測（build-from）の条件の凍結した組（frozen）が${word} [score:${code}]\n`);
+        assert.equal(r.stdout, "");
+        for (const w of ["P1-r1", base, "leak-marker-text", "leakmarkertext"]) assert.ok(!r.stderr.includes(w), `標準エラーに ${w}`);
+        assert.equal(existsSync(join(out, "score.json")), false);
+        assert.equal(existsSync(join(out, "score.anonymous.json")), false);
+      }
+    }
+    assert.equal(frozenProblem(good), null);
+    assert.equal(frozenProblem(undefined), "missing");
+  });
+});
+
+test("凍結した組の指紋：条件の frozen と組のファイルの SHA-256 を照合し、1 文字変えると不一致。v4 は fingerprints.conditions.frozen を持ち、v1〜v3 は鍵が無い（旧版の形のまま）", async () => {
+  await withOut(async (base) => {
+    const frozen = frozenOf(base, ["P1"], []);
+    const out = join(base, "out");
+    addRun498(out, "P1-r1", { sl: { summary: { verdict: "partial", stages: [] } }, buildRecord: buildRec("P1", false) });
+    cond4(out, ["P1-r1"], "build-from", { frozen });
+    scoreRun(out);
+    let f = readScore(out).fingerprints;
+    assert.deepEqual([f.frozen, f.frozen_matches_conditions, f.conditions.frozen], [frozen.sha256, true, frozen.sha256]);
+    let a = anonymize(readScore(out)).fingerprints;
+    assert.deepEqual([a.frozen, a.frozen_matches_conditions, a.conditions.frozen], [frozen.sha256, true, frozen.sha256]);
+    // 組のファイルを 1 文字変える
+    writeFileSync(frozen.path, readFileSync(frozen.path, "utf8").replace("t-frozen", "t-frozem"));
+    const r = scoreRun(out);
+    f = readScore(out).fingerprints;
+    assert.deepEqual([f.frozen === frozen.sha256, f.frozen_matches_conditions], [false, false]);
+    assert.match(f.frozen, HEX64);
+    assert.match(r.stdout, /凍結した組 [0-9a-f]{12}…（条件のファイルと不一致）/);
+    a = anonymize(readScore(out)).fingerprints;
+    assert.equal(a.frozen_matches_conditions, false);
+    // v4 の e2e（frozen は null）：鍵はあって null、照合は null
+    const out2 = join(base, "out2");
+    addRun498(out2, "P1-r1", { record: { outcome: "confirmed", rounds: [] } });
+    cond4(out2, ["P1-r1"], "e2e");
+    scoreRun(out2);
+    f = readScore(out2).fingerprints;
+    assert.deepEqual([f.frozen, f.frozen_matches_conditions, "frozen" in f.conditions, f.conditions.frozen], [null, null, true, null]);
+    // v1〜v3：入れ子の conditions に frozen の鍵が無い（今の旧版の期待のまま）
+    for (const schema of CONDITIONS_SCHEMAS.slice(0, 3)) {
+      const o = join(base, `old-${CONDITIONS_SCHEMAS.indexOf(schema)}`);
+      addRun(o, "P1-r1", { spec: PASS_A });
+      conditions(o, ["P1-r1"], { schema });
+      scoreRun(o);
+      const full = readScore(o);
+      assert.equal("frozen" in full.fingerprints.conditions, false, schema);
+      assert.deepEqual(Object.keys(anonymize(full).fingerprints.conditions), ["schema", "signature", "factory", "spec_engine", "scoring", "judge", "set", "scripts"]);
+      assert.deepEqual([full.fingerprints.frozen, full.fingerprints.frozen_matches_conditions], [null, null]);
+    }
+  });
+});
+
+test("漏えい：英小文字とハイフンの目印を止まり方の符号・包みの理由・契約の検査に落ちる仕様の文・自由入力・依頼文・未知の段の ID・失敗の種類・確定できない理由・工場の verdict・照合の状態・終了の分類に入れても、成功・断り・読み取りの失敗のどの経路でも匿名の JSON・標準出力・標準エラーに出ない。通常の出力の新しい欄・診断の表・標準出力の行は unknown になる", async () => {
+  await withOut(async (base) => {
+    const MARKS = ["leak-marker-text", "leakmarkertext"];
+    const clean = (text, name) => { for (const w of MARKS) assert.ok(!text.includes(w), `${name} に ${w}`); };
+    // Plan だけ（依頼文・仕様の文・包みの版に目印）に、止まり方・段・自由入力・照合の状態の目印を足す
+    const { out } = await planOnlyFixture(base, { markers: true });
+    const bad = { stage: "leak-marker-text", status: "leakmarkertext", duration_ms: 7 };
+    addRun498(out, "P1-r7", {
+      sl: { exit: 1, exit_class: "leak-marker-text", summary: { verdict: "leakmarkertext", stages: [bad], failure: { stage: "leak-marker-text", kind: "leakmarkertext" } }, plan_cost: { plan_usd: 0.01, build_usd: 0, total_usd: 0.01 } },
+      record: { outcome: "cannot-confirm", rounds: [round([Q_HOW()], [{ id: "A:1", question_id: "Q1-1", choice_id: null, free_text: "leak-marker-text" }])], stages: [bad], cannot_confirm: [{ source: "leak-marker-text", code: "leakmarkertext", path: "x" }, { source: "confirm", code: "leak-marker-text", path: "x" }], script: { matches: [{ state: "leak-marker-text" }] } },
+      envelope: { schema_version: PLAN_ONLY_RESULT_SCHEMA, outcome: "leak-marker-text", plan: null, plan_sha256: null, source_sha256: "leakmarkertext", conditions: null, stop: { kind: "stopped", reason: "leak-marker-text", codes: ["leakmarkertext"] } },
+      stdout: `${JSON.stringify({ schema_version: "musunest-factory/plan-file-reject/v1", check: "leak-marker-text", codes: ["leakmarkertext"] })}\n`,
+    });
+    addRun498(out, "P1-r8", { sl: { summary: { verdict: "leak-marker-text", stages: [{ stage: "leakmarkertext", duration_ms: 1 }] } }, record: { outcome: "stopped", rounds: [], stages: [{ stage: "leakmarkertext", duration_ms: 1 }], failure: { stage: "leakmarkertext", kind: "leak-marker-text" } } });
+    // 匿名の成功の経路
+    const ar = scoreRun(out, ["--anonymous"]);
+    clean(ar.stdout, "匿名の標準出力"); clean(ar.stderr, "匿名の標準エラー");
+    clean(readFileSync(join(out, "score.anonymous.json"), "utf8"), "匿名の JSON");
+    assert.equal(JSON.parse(ar.stdout).metrics_plan.runs, 8);
+    // 通常の出力：新しい欄・診断の表・標準出力は unknown に写す
+    const r = scoreRun(out);
+    clean(r.stdout, "通常の標準出力"); clean(r.stderr, "通常の標準エラー");
+    const full = readScore(out);
+    clean(JSON.stringify([full.evaluation, full.metrics_plan, full.metrics_build, full.tables, full.fingerprints.frozen]), "新しい欄・表");
+    assert.deepEqual(full.tables.plan.rows.find((x) => x.run === "P1-r7").stop.classes, ["confirm:unknown", "unknown:unknown"]);
+    assert.deepEqual(full.tables.plan.rows.find((x) => x.run === "P1-r8").stop.classes, ["unknown:unknown"]);
+    assert.equal(full.tables.plan.total.stop_classes["unknown:unknown"], 2);
+    assert.ok("unknown" in full.tables.plan.rows.find((x) => x.run === "P1-r7").stages.by_stage);
+    assert.equal(full.metrics_plan.stop_classes.unknown, 2);
+    assert.equal(full.metrics_plan.script, null, "post-hoc の計測では実行中の台本を数えない");
+    assert.equal(full.metrics_plan.envelope.reasons["envelope-version"], 1);
+    assert.equal(full.metrics_plan.envelope.reasons["outcome-mismatch"], 2);
+    assert.match(r.stdout, /^P1-r8\tunknown\t/m, "行の工場の verdict は unknown");
+    // 生の記録から写す既存の欄は保証の外（README の限界）：行の工場の verdict はそのまま
+    assert.equal(rowOf(full, "P1-r8").factory_verdict, "leak-marker-text");
+    // live の台本と e2e の止まり方でも同じ（照合の状態の目印）
+    const outL = join(base, "outL");
+    cpSync(out, outL, { recursive: true });
+    const condL = JSON.parse(readFileSync(join(outL, "conditions.json"), "utf8"));
+    writeFileSync(join(outL, "conditions.json"), JSON.stringify({ ...condL, params: { ...condL.params, mode: "e2e", plan: true }, scripts: { mode: "live", fingerprint: null, files: [] } }));
+    const rl = scoreRun(outL), arl = scoreRun(outL, ["--anonymous"]);
+    for (const [t, n] of [[rl.stdout, "live の標準出力"], [arl.stdout, "live の匿名"], [JSON.stringify([readScore(outL).metrics_plan, readScore(outL).tables])]]) clean(t, n ?? "live の新しい欄");
+    assert.equal(readScore(outL).metrics_plan.script.states["unknown-state"], 1);
+    // Build だけ：終了の分類・verdict・段・拒否の行の目印
+    const frozen = frozenOf(base, ["P1"], []);
+    const outB = join(base, "outB");
+    addRun498(outB, "P1-r1", { sl: { exit: 2, exit_class: "leak-marker-text", summary: { verdict: "leakmarkertext", stages: [{ stage: "leak-marker-text", duration_ms: 3 }] } }, stdout: `${JSON.stringify({ schema_version: "musunest-factory/plan-file-reject/v1", check: "leak-marker-text" })}\n`, buildRecord: buildRec("P1", "leak-marker-text", { plan_sha256: "leakmarkertext" }) });
+    addRun498(outB, "P1-r2", { spec: PASS_A, sl: { exit: 0, exit_class: "ok", summary: { verdict: "leak-marker-text", stages: [{ stage: "leakmarkertext", duration_ms: 3 }] } }, buildRecord: "{ leak-marker-text" });
+    cond4(outB, runIds("P1", 2), "build-from", { frozen });
+    const rb = scoreRun(outB), arb = scoreRun(outB, ["--anonymous"]);
+    clean(rb.stdout, "Build の標準出力"); clean(rb.stderr, "Build の標準エラー"); clean(arb.stdout, "Build の匿名"); clean(arb.stderr, "Build の匿名の標準エラー");
+    const fb = readScore(outB);
+    clean(JSON.stringify([fb.metrics_build, fb.tables, fb.evaluation]), "Build の新しい欄・表");
+    assert.deepEqual([fb.metrics_build.exit_classes.unknown, fb.metrics_build.factory_verdicts.unknown, fb.metrics_build.envelope_refusals], [1, 2, 0]);
+    assert.ok("unknown" in fb.metrics_build.by_stage);
+    assert.deepEqual(fb.tables.build.rows.map((x) => x.factory_verdict), ["unknown", "unknown"]);
+    assert.deepEqual(fb.tables.build.total.factory_verdicts, { unknown: 2 });
+    // 断りの経路（匿名）：上の build-from の frozen の試験と同じ 1 行
+    const outR = join(base, "outR");
+    cpSync(outB, outR, { recursive: true });
+    writeFileSync(join(outR, "conditions.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(outB, "conditions.json"), "utf8")), frozen: { ...frozen, path: "leak-marker-text", sha256: "leakmarkertext" } }));
+    const rr = spawnSync(process.execPath, [scoreFile, repo, outR, "--anonymous"], { encoding: "utf8" });
+    assert.equal(rr.status, 3);
+    clean(rr.stdout + rr.stderr, "断り");
+    // 読み取りの失敗の経路：往復の記録が JSON でない（目印を含む）本は止めずに読めない記録として数える。通常・匿名のどちらでも目印は出ない
+    const outF = join(base, "outF");
+    cpSync(out, outF, { recursive: true });
+    writeFileSync(join(outF, "P1-r1/bundle/plan-record.json"), "{ leak-marker-text leakmarkertext");
+    for (const extra of [[], ["--anonymous"]]) {
+      const rf = scoreRun(outF, extra);
+      clean(rf.stdout + rf.stderr, `往復の記録が読めない（${extra.join("") || "通常"}）`);
+    }
+    { const fF = readScore(outF); clean(JSON.stringify([fF.evaluation, fF.metrics_plan, fF.metrics_build, fF.tables, rowOf(fF, "P1-r1")]), "往復の記録が読めない本の新しい欄・表・行"); }
+    clean(readFileSync(join(outF, "score.anonymous.json"), "utf8"), "往復の記録が読めない本の匿名の JSON");
+    assert.deepEqual([readScore(outF).metrics_plan.record_unreadable, readScore(outF).metrics_plan.free_text.unreadable >= 1], [1, true]);
+    // 止める記録（起動の記録・申告・1 回の起動の記録）が JSON でない：通常・匿名のどちらでも exit 1・固定の文と既知の符号だけ・出力なし
+    for (const [rel, kind] of [["P1-r2/summary.line.json", "summary"], ["P1-r2/bundle/artifacts/unwritable.json", "unwritable"], ["run-1000.json", "run-record"]]) {
+      const outX = join(base, `outX-${kind}`);
+      cpSync(out, outX, { recursive: true });
+      for (const n of ["score.json", "score.anonymous.json"]) rmSync(join(outX, n), { force: true });
+      if (kind === "unwritable") writeFileSync(join(outX, "P1-r2/bundle/artifacts/app.spec.yaml"), PASS_A);
+      writeFileSync(join(outX, rel), "{ leak-marker-text leakmarkertext");
+      for (const extra of [[], ["--anonymous"]]) {
+        const rf = spawnSync(process.execPath, [scoreFile, repo, outX, ...extra], { encoding: "utf8" });
+        assert.equal(rf.status, 1, `${kind}: ${rf.stderr}`);
+        assert.equal(rf.stdout, "");
+        assert.equal(rf.stderr, `失敗しました: 記録を読めなかった [score:record-unreadable:${kind}]\n`);
+        assert.equal(existsSync(join(outX, "score.json")) || existsSync(join(outX, "score.anonymous.json")), false);
+      }
+    }
+  });
+});
+
+test("包みの検査は不正な包みを通さない：結果は既知の 3 値だけ、確定でなければ仕様も plan_sha256 も厳密に null。未知の結果（往復の記録と同じ値でも）・型違い・欄の欠落は理由つきで落ちる", async () => {
+  const plan = await planFixture();
+  const source = "MARK_SRC\n";
+  const deps = { sourceText: source, checkConfirmedPlan, planDigest };
+  const env = async (over = {}) => ({ schema_version: PLAN_ONLY_RESULT_SCHEMA, outcome: "confirmed", plan, plan_sha256: await planDigest(plan), source_sha256: sha256(source), conditions: null, stop: null, ...over });
+  const stopped = { outcome: "stopped", plan: null, plan_sha256: null };
+  const check = async (over, recordOutcome = null) => checkPlanResult(over === "raw" ? recordOutcome : await env(over), { ...deps, recordOutcome: over === "raw" ? null : recordOutcome });
+  assert.deepEqual(await check({}, "confirmed"), { status: "checked", reasons: [] });
+  assert.deepEqual(await check(stopped, "stopped"), { status: "checked", reasons: [] }, "確定でない正しい包みは通る");
+  const cases = [
+    [{ outcome: "leak-marker-text", plan: null, plan_sha256: null }, "leak-marker-text", ["outcome-mismatch"]], // 未知の結果が両方で同じ
+    [{ ...stopped, plan: "synthetic" }, "stopped", ["outcome-mismatch"]],
+    [{ ...stopped, plan }, "stopped", ["outcome-mismatch"]],
+    [{ ...stopped, plan: undefined }, "stopped", ["outcome-mismatch"]], // 仕様の欄が欠ける
+    [{ ...stopped, plan_sha256: undefined }, "stopped", ["plan-sha256"]], // plan_sha256 の欄が欠ける
+    [{ ...stopped, plan_sha256: "" }, "stopped", ["plan-sha256"]],
+    [{ outcome: "confirmed", plan: "synthetic" }, "confirmed", ["outcome-mismatch", "plan-sha256"]],
+    [{ outcome: ["confirmed"] }, null, ["outcome-mismatch", "plan-sha256"]], // 型違いの結果
+    [{ source_sha256: 1 }, "confirmed", ["source-sha256"]],
+    [{ source_sha256: undefined }, "confirmed", ["source-sha256"]],
+    [{ schema_version: undefined }, "confirmed", ["envelope-version"]],
+    [{ plan_sha256: [await planDigest(plan)] }, "confirmed", ["plan-sha256"]],
+  ];
+  for (const [over, rec, reasons] of cases) assert.deepEqual(await check(over, rec), { status: "checked", reasons }, JSON.stringify(over));
+  for (const raw of [null, [], "x", 1]) assert.deepEqual(await check("raw", raw), { status: "unreadable", reasons: [] });
+  // CLI：未知の結果を往復の記録と包みの両方に置いた本は、通った数に入らない
+  await withOut(async (base) => {
+    const setPath = writeJson(join(base, "set/t-set.json"), { ...SET_DEFAULTS, items: [itemOf("P1", "A")] });
+    const loaded = loadEvalSet(setPath);
+    const src = sha256(loaded.byId.get("P1").requestText + "\n");
+    const out = join(base, "out");
+    addRun498(out, "P1-r1", { record: { outcome: "leak-marker-text", rounds: [] }, envelope: { schema_version: PLAN_ONLY_RESULT_SCHEMA, outcome: "leak-marker-text", plan: null, plan_sha256: null, source_sha256: src, conditions: null, stop: null } });
+    addRun498(out, "P1-r2", { record: { outcome: "stopped", rounds: [] }, envelope: { schema_version: PLAN_ONLY_RESULT_SCHEMA, outcome: "stopped", plan: "synthetic", plan_sha256: null, source_sha256: src, conditions: null, stop: null } });
+    addRun498(out, "P1-r3", { record: { outcome: "stopped", rounds: [] }, envelope: { schema_version: PLAN_ONLY_RESULT_SCHEMA, outcome: "stopped", plan: null, plan_sha256: null, source_sha256: src, conditions: null, stop: null } });
+    cond4(out, runIds("P1", 3), "plan-only", { set: { path: setPath, sha256: loaded.sha256, id: "t-set" } });
+    const r = scoreRun(out);
+    const e = readScore(out).metrics_plan.envelope;
+    assert.deepEqual([e.checked, e.passed, e.failed, e.reasons["outcome-mismatch"]], [3, 1, 2, 2]);
+    assert.ok(!r.stdout.includes("leak-marker-text"));
+  });
+});
+
+test("入れ子の fingerprints.conditions.frozen は 64 桁の 16 進の文字列だけを通し、それ以外は null（どの mode でも、通常・匿名の JSON に入力の文字列を残さない）", async () => {
+  await withOut(async (base) => {
+    for (const mode of ["build", "e2e", "plan-only"]) {
+      for (const sha of ["leak-marker-text", ["leakmarkertext"], 1]) {
+        const out = join(base, `out-${mode}-${typeof sha}`);
+        addRun498(out, "P1-r1", { spec: PASS_A, record: { outcome: "confirmed", rounds: [] } });
+        cond4(out, ["P1-r1"], mode, { frozen: { path: "leak-marker-text", sha256: sha } });
+        const r = scoreRun(out);
+        const full = readScore(out);
+        assert.deepEqual([full.fingerprints.conditions.frozen, full.fingerprints.frozen, full.fingerprints.frozen_matches_conditions], [null, null, false], `${mode} ${JSON.stringify(sha)}`);
+        const ar = scoreRun(out, ["--anonymous"]);
+        for (const w of ["leak-marker-text", "leakmarkertext"]) {
+          assert.ok(!JSON.stringify(full.fingerprints).includes(w), `${mode}: 通常の指紋に ${w}`);
+          assert.ok(!readFileSync(join(out, "score.anonymous.json"), "utf8").includes(w), `${mode}: 匿名の JSON に ${w}`);
+          assert.ok(!r.stdout.includes(w) && !ar.stdout.includes(w), `${mode}: 標準出力に ${w}`);
+        }
+        assert.equal(JSON.parse(ar.stdout).fingerprints.conditions.frozen, null);
+      }
+    }
+  });
+});
+
+test("既存の行の問数・往復は、今まで値が出ていた入力では形が違っても今までの値のまま（今までの式が例外で止まった形だけを 0 に写して続ける）", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    // 今まで値が出ていた形：文字列の questions は長さ、questions の無い往復は 0、length を持つ写像は length
+    addRun498(out, "P1-r1", { record: { outcome: "confirmed", rounds: [{ questions: "abc", answers: [] }] } });
+    addRun498(out, "P1-r2", { record: { outcome: "confirmed", rounds: [{ questions: "abc", answers: [] }, { questions: [1, 2], answers: [] }] } });
+    addRun498(out, "P1-r3", { record: { outcome: "stopped", rounds: [{}] } });
+    addRun498(out, "P1-r4", { record: { outcome: "stopped", rounds: [{ questions: { length: 4 } }] } });
+    // 今までの式が例外で止まった形：rounds が写像・文字列、往復が null
+    addRun498(out, "P1-r5", { record: { outcome: "stopped", rounds: {} } });
+    addRun498(out, "P1-r6", { record: { outcome: "stopped", rounds: "xy" } });
+    addRun498(out, "P1-r7", { record: { outcome: "stopped", rounds: [null] } });
+    cond4(out, runIds("P1", 7), "e2e");
+    scoreRun(out);
+    const full = readScore(out);
+    assert.deepEqual(full.rows.map((x) => [x.run, x.plan.questions, x.plan.rounds]), [["P1-r1", 3, 1], ["P1-r2", 5, 2], ["P1-r3", 0, 1], ["P1-r4", 4, 1], ["P1-r5", 0, 0], ["P1-r6", 0, 0], ["P1-r7", 0, 0]]);
+  });
 });
