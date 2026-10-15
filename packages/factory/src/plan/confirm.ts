@@ -103,6 +103,45 @@ export interface ConfirmResult {
   readonly judgments: readonly ConfirmJudgment[];
   /** 確定できるか（`problems` と `planProblems` が空のときだけ真） */
   readonly confirmed: boolean;
+  /**
+   * P6 の文ごとの覆いの記録（文番号と覆いの分類。Issue #488）。**値（原文の文・引用・ID）は入れない**。
+   * 覆いの分類は、枠・出どころ・対応・無しの順で決める（複数が成立すれば先のもの）。P2 を終えた一覧の
+   * 引用が重なっていたかは真／偽／未観測で持つ。
+   */
+  readonly coverage: readonly ConfirmSentenceCoverage[];
+}
+
+/** P6 の文ごとの覆いの分類（有限の 4 つ。この順で決める。Issue #488） */
+export const CONFIRM_COVERAGE_KINDS = [
+  /** 枠の範囲と重なる文 */
+  "framing",
+  /** 要件の出どころ（原文の入力）が覆う文 */
+  "origin",
+  /** P2 を終えた一覧の対応（重なる文の入力）が覆う文 */
+  "correspondence",
+  /** どれにも覆われない文 */
+  "none",
+] as const;
+export type ConfirmCoverageKind = (typeof CONFIRM_COVERAGE_KINDS)[number];
+
+/**
+ * 「P2 を終えた一覧の引用が重なっていたか」の状態（有限の 3 つ。Issue #488）。対応（`sourceCorrespondence`）
+ * が渡されなければ**未観測**——引用を検索して対応を組み直さない。渡されたときは、当該文の入力が対応の
+ * 覆いに含まれるかを真／偽で持つ。
+ */
+export const CONFIRM_CORRESPONDENCE_STATES = ["true", "false", "unobserved"] as const;
+export type ConfirmCorrespondenceState = (typeof CONFIRM_CORRESPONDENCE_STATES)[number];
+
+/** P6 の文 1 つの覆いの記録（**値は入れない**。Issue #488） */
+export interface ConfirmSentenceCoverage {
+  /** 原文を `splitSourceSentences` で切った順の文番号（1 始まり） */
+  readonly sentence: number;
+  /** 覆いの分類（枠・出どころ・対応・無し。この順で決める） */
+  readonly coverage: ConfirmCoverageKind;
+  /** P2 を終えた一覧の引用が重なっていたか（真／偽／未観測） */
+  readonly correspondence: ConfirmCorrespondenceState;
+  /** 判定の助言が閾値以上か（結果が得られたときだけ。無ければ `null`。合否には使わない） */
+  readonly meetsThreshold: boolean | null;
 }
 
 /**
@@ -127,6 +166,12 @@ export function normalizeOrigins(
 interface SentenceCoverage {
   readonly text: string;
   readonly covered: boolean;
+  /** 覆いの分類（枠・出どころ・対応・無し。この順で決める。Issue #488） */
+  readonly coverage: ConfirmCoverageKind;
+  /** P2 を終えた一覧の引用が重なっていたか（真／偽／未観測。Issue #488） */
+  readonly correspondence: ConfirmCorrespondenceState;
+  /** 文の本文と一致する原文の入力の ID（無ければ `null`。判定の助言を引くのに使う） */
+  readonly inputId: string | null;
 }
 
 /**
@@ -162,18 +207,39 @@ export function checkSourceCoverage(
     }
   }
   const result: SentenceCoverage[] = [];
-  for (const range of splitSourceSentences(source)) {
+  splitSourceSentences(source).forEach((range, index) => {
     const text = source.slice(range.start, range.end);
     const trimmed = text.trim();
-    const match = sourceInputs.find((input) => input.text.trim() === trimmed);
+    // ゲート（`covered`）は今までどおり本文の一致で見る（判定・停止を変えない。Issue #488）。
+    const textMatch = sourceInputs.find((input) => input.text.trim() === trimmed);
+    // 診断は、**文番号と対応する入力**（呼ぶ側は文ごとに 1 つの入力を作る）で見る。同一の本文が繰り返されても
+    // 当該文の入力を取り違えない（Issue #488）。並びが合わないときだけ本文の一致へ退避する。
+    const indexed = sourceInputs[index];
+    const diagMatch = indexed !== undefined && indexed.text.trim() === trimmed ? indexed : textMatch;
     const byFraming = framing.some((frame) => frame.start < range.end && range.start < frame.end);
+    const byOrigin = diagMatch !== undefined && coveredInputIds.has(diagMatch.id);
+    const byCorrespondence = diagMatch !== undefined && coveredByCorrespondence.has(diagMatch.id);
+    // 覆いの分類は、枠・出どころ・対応・無しの順で決める（複数が成立すれば先のもの。Issue #488）
+    const coverage: ConfirmCoverageKind = byFraming
+      ? "framing"
+      : byOrigin
+        ? "origin"
+        : byCorrespondence
+          ? "correspondence"
+          : "none";
+    // 対応が渡されていなければ未観測（引用を検索して組み直さない。Issue #488）
+    const correspondenceState: ConfirmCorrespondenceState =
+      correspondence === undefined ? "unobserved" : byCorrespondence ? "true" : "false";
     result.push({
       text: trimmed,
       covered:
         byFraming ||
-        (match !== undefined && (coveredInputIds.has(match.id) || coveredByCorrespondence.has(match.id))),
+        (textMatch !== undefined && (coveredInputIds.has(textMatch.id) || coveredByCorrespondence.has(textMatch.id))),
+      coverage,
+      correspondence: correspondenceState,
+      inputId: diagMatch?.id ?? null,
     });
-  }
+  });
   return result;
 }
 
@@ -267,13 +333,14 @@ export async function runConfirm(input: ConfirmInput): Promise<ConfirmResult> {
 
   // 2. 覆われていない原文の文があれば確定しない（枠の範囲も覆われていると数える。Issue #372。
   //    対応が渡されたときは、対応の並びにある文も覆われていると数える。Issue #487）
-  checkSourceCoverage(
+  const sentenceCoverages = checkSourceCoverage(
     input.source,
     input.inputs,
     requirements,
     input.framing ?? [],
     input.sourceCorrespondence,
-  ).forEach((sentence, index) => {
+  );
+  sentenceCoverages.forEach((sentence, index) => {
     if (!sentence.covered) {
       problems.push({
         code: "uncovered-source",
@@ -294,6 +361,9 @@ export async function runConfirm(input: ConfirmInput): Promise<ConfirmResult> {
 
   // 4. 判定の口（Noul）に、各部分が覆われるかを助言として聞く（確定はできない）
   const judgments: ConfirmJudgment[] = [];
+  // 問いの名前ごとに、**有効な助言が得られたか**を控える（得られなければ診断は「未観測」＝`null`。Issue #488）。
+  // 既存の `judgments` は今までどおり欠落を 0 として必ず行を作る（値・型・意味は変えない）。
+  const adviceByQuestion = new Map<string, number | null>();
   const coverTargets = [
     ...input.inputs.filter((entry) => entry.kind === "source"),
     ...input.inputs.filter((entry) => entry.kind === "answer"),
@@ -325,7 +395,9 @@ export async function runConfirm(input: ConfirmInput): Promise<ConfirmResult> {
     for (const target of coverTargets) {
       const name = confirmQuestionName(target.id);
       const answer = response.answers[name];
-      const value = answer !== undefined && answer.kind === "noul" ? answer.noul : 0;
+      const observed = answer !== undefined && answer.kind === "noul" ? answer.noul : null;
+      adviceByQuestion.set(name, observed);
+      const value = observed ?? 0;
       judgments.push({
         questionId: name,
         value,
@@ -357,11 +429,26 @@ export async function runConfirm(input: ConfirmInput): Promise<ConfirmResult> {
   // 6. #331 の検査（未解決の事項・実在しない ID・了承の範囲）
   const planProblems = checkPlan(plan);
 
+  // 文ごとの覆いの記録を、判定の助言（**有効な助言が得られたときだけ**閾値以上か）つきで組む（Issue #488）。
+  // **値（原文の文・引用・ID）は入れない**——文番号・有限の分類・真偽だけである。助言が得られなければ
+  // `null`（診断用の控えを見る。既存の `judgments` の 0 補完とは別。Issue #488）。
+  const coverage: readonly ConfirmSentenceCoverage[] = sentenceCoverages.map((sentence, index) => {
+    const advice =
+      sentence.inputId === null ? undefined : adviceByQuestion.get(confirmQuestionName(sentence.inputId));
+    return {
+      sentence: index + 1,
+      coverage: sentence.coverage,
+      correspondence: sentence.correspondence,
+      meetsThreshold: advice === undefined || advice === null ? null : advice >= input.threshold,
+    };
+  });
+
   return {
     plan,
     problems,
     planProblems,
     judgments,
     confirmed: problems.length === 0 && planProblems.length === 0,
+    coverage,
   };
 }

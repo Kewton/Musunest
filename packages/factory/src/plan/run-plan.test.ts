@@ -2567,7 +2567,19 @@ describe("P1/P2 の往復ごとの落ちの内訳を結果に残す（Issue #430
     expect(result.kind).toBe("confirmed");
     // 落ちが無いので、往復は 1 つだけ、種類ごと・出どころごとに全部 0（Issue #430）
     expect(result.requirementsDiagnosis).toEqual({
-      rounds: [{ misses: ZERO_MISS_COUNTS, droppedBlankMisses: 0 }],
+      rounds: [
+        {
+          misses: ZERO_MISS_COUNTS,
+          droppedBlankMisses: 0,
+          sentenceCount: 2,
+          requirementCount: 2,
+          sentences: [
+            { sentence: 1, requirements: [1], framing: false },
+            { sentence: 2, requirements: [2], framing: false },
+          ],
+          missEntries: [],
+        },
+      ],
       redone: false,
       unmet: ZERO_MISS_COUNTS,
     });
@@ -6349,14 +6361,461 @@ describe("複数の文にまたがる引用の対応を、P2 から P6 まで保
 
     expect(result.kind).toBe("confirmed");
     if (result.kind !== "confirmed") return;
-    // 比較元（変更前）で得た plan 全体と SHA-256 に一致する
-    expect(result.plan).toEqual(BASELINE_PLAN_487);
+    // 比較元（変更前）で得た plan 全体と SHA-256 に一致する（余分な undefined の欄も見逃さない）
+    expect(result.plan).toStrictEqual(BASELINE_PLAN_487);
     expect(result.plan.confirmation.sha256).toBe(BASELINE_PLAN_487.confirmation.sha256);
     // 仕様は §4 の欄だけからなる。対応（内部の写像）は混ざらない
     expect(JSON.stringify(result.plan)).not.toContain("sourceCorrespondence");
     expect(await checkConfirmedPlan(result.plan)).toEqual([]);
     expect(await isConfirmationValid(result.plan)).toBe(true);
     expect(result.plan.confirmation.sha256).toBe(await planDigest(result.plan));
+  });
+});
+
+// ── 往復ごとの事項の流れと、終わりに残った事項（Issue #488）────────────────────
+
+describe("往復ごとの事項の流れと、終わりに残った事項（Issue #488）", () => {
+  /** 重大な事項 3 件（うち OI-c は依頼文の引用で閉じる）を返す P3 の答え */
+  const SURFACE_GROUP3 = {
+    ambiguities: [
+      { id: "OI-a", requirementId: "R-1", text: "誰の分を数えるか", critical: true },
+      { id: "OI-b", requirementId: "R-1", text: "誰の分を数えるか（同じ問い）", critical: true },
+      { id: "OI-c", requirementId: "R-2", text: "依頼文で決まる事項", critical: true },
+    ],
+    unwritable: [],
+  };
+  /** 主の OI-a と、一緒に閉じる OI-b の 1 問。OI-c は依頼文の引用で閉じる */
+  const P4_GROUPED_SOURCE = {
+    questions: [
+      {
+        id: "Q-1",
+        openIssueId: "OI-a",
+        alsoCloses: ["OI-b"],
+        text: "誰の分を数えますか",
+        choices: [
+          { id: "c1", text: "全員" },
+          { id: "c2", text: "自分のみ" },
+        ],
+        recommended: { choiceId: "c1", reason: "依頼に沿う" },
+        allowFreeText: true,
+      },
+    ],
+    closedBySource: [{ issueId: "OI-c", quote: "タスクを記録する", value: "記録する内容を 1 行にする" }],
+  };
+
+  it("(f) 2 往復の組で、往復ごとの行全体と件数の収支が合い、終わりに残った事項が空になる", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_GROUP3),
+      structured(P4_GROUPED_SOURCE),
+      // 2 往復目の差分の洗い出し（新しい曖昧さは無い）
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      // 初回の目録：R-1 の period だけ未指定（重大でないので既定で閉じる）
+      ...catalogUnspecifiedFor({ "R-1": ["period"] }),
+      // 差分の目録：増えた要件の period だけ未指定（こちらも既定で閉じる）
+      ...catalogUnspecifiedFor({ "R:A:Q1-1": ["period"] }, ["R:A:Q1-1"]),
+      ...coverAnswersFor(["A:Q1-1"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED));
+
+    expect(result.kind).toBe("confirmed");
+    expect(result.issueFlow).toEqual([
+      {
+        revision: 1,
+        startOpen: 0,
+        opened: {
+          total: 4,
+          initial: 4,
+          diff: 0,
+          byOrigin: [
+            { origin: "catalog", count: 1 },
+            { origin: "surface", count: 3 },
+          ],
+        },
+        closed: { total: 2, answerMain: 0, alsoCloses: 0, source: 1, default: 1 },
+        inheritedResolved: 0,
+        endOpen: { critical: 2, nonCritical: 0 },
+        end: "judged",
+      },
+      {
+        revision: 2,
+        startOpen: 2,
+        opened: {
+          total: 1,
+          initial: 0,
+          diff: 1,
+          byOrigin: [{ origin: "catalog", count: 1 }],
+        },
+        closed: { total: 3, answerMain: 1, alsoCloses: 1, source: 0, default: 1 },
+        inheritedResolved: 0,
+        endOpen: { critical: 0, nonCritical: 0 },
+        end: "judged",
+      },
+    ]);
+    // 件数の収支が合う：終了時の開いている件数＝開始時＋開いた−閉じた
+    for (const row of result.issueFlow) {
+      const end = row.endOpen.critical + row.endOpen.nonCritical;
+      expect(end, `revision ${row.revision}`).toBe(row.startOpen + row.opened.total - row.closed.total);
+    }
+    // すべて閉じたので、終わりに残った事項は無い
+    expect(result.remainingOpenIssues).toEqual([]);
+    // P6 まで届いたので、文ごとの覆いも残る（値は入れない）
+    expect(result.confirmCoverage.map((row) => row.coverage)).toEqual(["origin", "origin"]);
+  });
+
+  /** 予算を使い切る usage（裏付けの予約を失敗させる） */
+  const BUDGET_USAGE: LlmUsage = {
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 10_000_000,
+    reasoningTokens: 0,
+  };
+  /** 行の収支が合うことを確かめる（終了時の開いている件数＝開始時＋開いた−閉じた） */
+  function expectBalanced(result: PlanResult): void {
+    for (const row of result.issueFlow) {
+      expect(
+        row.endOpen.critical + row.endOpen.nonCritical,
+        `revision ${row.revision}`,
+      ).toBe(row.startOpen + row.opened.total - row.closed.total);
+    }
+  }
+
+  it("(f) 引き継ぎで最初から解決済みの行は、開いた件数に入れず、別の件数に数える", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(INHERIT_GROUPED_QUESTIONS),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogUnspecifiedFor({ "R-1": ["aggregation"] }),
+      ...catalogUnspecifiedFor({ "R:A:Q1-1": ["aggregation"] }, ["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ANSWER_FIRST));
+
+    expect(result.kind).toBe("confirmed");
+    expect(result.issueFlow).toEqual([
+      {
+        revision: 1,
+        startOpen: 0,
+        opened: {
+          total: 2,
+          initial: 2,
+          diff: 0,
+          byOrigin: [
+            { origin: "catalog", count: 1 },
+            { origin: "surface", count: 1 },
+          ],
+        },
+        closed: { total: 0, answerMain: 0, alsoCloses: 0, source: 0, default: 0 },
+        inheritedResolved: 0,
+        endOpen: { critical: 2, nonCritical: 0 },
+        end: "judged",
+      },
+      {
+        revision: 2,
+        startOpen: 2,
+        opened: { total: 0, initial: 0, diff: 0, byOrigin: [] },
+        closed: { total: 2, answerMain: 1, alsoCloses: 1, source: 0, default: 0 },
+        // 引き継ぎで最初から resolved の行は、開閉の収支に含めず別の件数にする
+        inheritedResolved: 1,
+        endOpen: { critical: 0, nonCritical: 0 },
+        end: "judged",
+      },
+    ]);
+    expectBalanced(result);
+    expect(result.remainingOpenIssues).toEqual([]);
+  });
+
+  it("(f) 閉じる件数が 0 の往復があっても、開閉の収支と終わりに残った事項の行数が合う", async () => {
+    // 1 往復目は何も答えず（閉じる件数 0）、2 往復目で答えて閉じる
+    let answers = 0;
+    const responder: PlanResponder = {
+      async answer(request) {
+        answers += 1;
+        return answers === 1
+          ? { kind: "answers", answers: [] }
+          : { kind: "answers", answers: [answerTo(request.questions[0], "c1")] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      structured(SURFACE_OUTPUT_CLEAR),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q2-1"]),
+      ...coverAnswersFor(["A:Q2-1"]),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("confirmed");
+    expect(result.issueFlow).toEqual([
+      {
+        revision: 1,
+        startOpen: 0,
+        opened: { total: 1, initial: 1, diff: 0, byOrigin: [{ origin: "surface", count: 1 }] },
+        closed: { total: 0, answerMain: 0, alsoCloses: 0, source: 0, default: 0 },
+        inheritedResolved: 0,
+        endOpen: { critical: 1, nonCritical: 0 },
+        end: "judged",
+      },
+      // 1 往復目に答えが無く、2 往復目の版も何も閉じない
+      {
+        revision: 2,
+        startOpen: 1,
+        opened: { total: 0, initial: 0, diff: 0, byOrigin: [] },
+        closed: { total: 0, answerMain: 0, alsoCloses: 0, source: 0, default: 0 },
+        inheritedResolved: 0,
+        endOpen: { critical: 1, nonCritical: 0 },
+        end: "judged",
+      },
+      {
+        revision: 3,
+        startOpen: 1,
+        opened: { total: 0, initial: 0, diff: 0, byOrigin: [] },
+        closed: { total: 1, answerMain: 1, alsoCloses: 0, source: 0, default: 0 },
+        inheritedResolved: 0,
+        endOpen: { critical: 0, nonCritical: 0 },
+        end: "judged",
+      },
+    ]);
+    expectBalanced(result);
+    expect(result.remainingOpenIssues).toEqual([]);
+  });
+
+  it("(f) 答えの反映後に差分点検で予算停止しても、収支が合い、終わりに残った事項が空になる", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SURFACE_OUTPUT),
+      structured(QUESTIONS_OUTPUT),
+      // 差分の洗い出しの応答で予算を使い切る → 差分の申告の点検の最初の予約が失敗して止まる
+      structured(DIFF_UNWRITABLE, BUDGET_USAGE),
+    ]);
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      ...catalogAnswersFor(["R:A:Q1-1"]),
+      ...coverAnswers("A:Q1-1"),
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, ALL_RECOMMENDED, { budgetUsd: 1 }));
+
+    expect(result.kind).toBe("stopped");
+    if (result.kind !== "stopped") return;
+    // 終端まで確かめる（止めた段と失敗の種類）
+    expect(result.failure?.stage).toBe("surface-check");
+    expect(result.failure?.kind).toBe("budget");
+    expect(result.issueFlow).toEqual([
+      {
+        revision: 1,
+        startOpen: 0,
+        opened: { total: 1, initial: 1, diff: 0, byOrigin: [{ origin: "surface", count: 1 }] },
+        closed: { total: 0, answerMain: 0, alsoCloses: 0, source: 0, default: 0 },
+        inheritedResolved: 0,
+        endOpen: { critical: 1, nonCritical: 0 },
+        end: "judged",
+      },
+      {
+        revision: 2,
+        startOpen: 1,
+        opened: { total: 0, initial: 0, diff: 0, byOrigin: [] },
+        closed: { total: 1, answerMain: 1, alsoCloses: 0, source: 0, default: 0 },
+        inheritedResolved: 0,
+        endOpen: { critical: 0, nonCritical: 0 },
+        // 停止した行も、観測済みの分を残し、終わり方を「途中停止」で示す
+        end: "stopped",
+      },
+    ]);
+    expectBalanced(result);
+    expect(result.remainingOpenIssues).toEqual([]);
+  });
+
+  it("(g)(i) 往復の上限で確定できないとき、終わりに残った事項が番号・由来・分類だけを持ち、値が出ない", async () => {
+    const surface = {
+      ambiguities: [
+        { id: "OI-a", requirementId: "R-1", text: "問い a", critical: true },
+        { id: "OI-b", requirementId: "R-1", text: "問い b", critical: false },
+      ],
+      unwritable: [],
+    };
+    const questions = {
+      questions: [
+        { id: "Q-a", openIssueId: "OI-a", text: "問い a", choices: [{ id: "c1", text: "こちら" }, { id: "c2", text: "あちら" }], recommended: { choiceId: "c1", reason: "依頼に沿う" }, allowFreeText: true },
+        { id: "Q-b", openIssueId: "OI-b", text: "問い b", choices: [{ id: "c1", text: "こちら" }, { id: "c2", text: "あちら" }], recommended: { choiceId: "c1", reason: "依頼に沿う" }, allowFreeText: true },
+      ],
+    };
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(surface),
+      structured(questions),
+      structured(questions),
+      structured(questions),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge(catalogAnswers()), ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 往復の上限で確定できない
+    expect(result.reasons).toEqual([{ source: "session", code: "round-trip-limit", path: "open_issues" }]);
+    // 終わりに残った事項 1 つずつに、由来・開いた往復の版・重大か・対象の要件の種類が入る
+    expect(result.remainingOpenIssues).toEqual([
+      { origin: "surface", revision: 1, critical: true, requirementKind: "source", facetId: null },
+      { origin: "surface", revision: 1, critical: false, requirementKind: "source", facetId: null },
+    ]);
+    // 行の数は、開いている事項の数と等しい
+    expect(result.remainingOpenIssues).toHaveLength(result.openIssues.length);
+    expectBalanced(result);
+    expect(result.confirmCoverage).toEqual([]);
+    // 新しい欄を JSON にしても、事項 ID・要件 ID・文が出ない
+    const text = JSON.stringify({
+      issueFlow: result.issueFlow,
+      remainingOpenIssues: result.remainingOpenIssues,
+      confirmCoverage: result.confirmCoverage,
+    });
+    expect(text).not.toContain("OI-a");
+    expect(text).not.toContain("OI-b");
+    expect(text).not.toContain("R-1");
+    expect(text).not.toContain("問い");
+    // 止まり方・理由は、欄を足す前と等しい
+    expect(result.openIssues.map((issue) => issue.id).sort()).toEqual(["OI-a", "OI-b"]);
+  });
+
+  it("(h) P2 で止まる組では、往復の診断は止まるまでの分を持ち、P6 の欄は空の並びになる", async () => {
+    const paraphrase = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "タスクを登録する", position: { start: 0, end: 8 } },
+        { id: "R-2", text: "合計できる", quote: "件数を合計する", position: { start: 9, end: 16 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    // 往復の診断は、止まるまでの分（初回＋やり直しの 2）を持つ
+    expect(result.requirementsDiagnosis.rounds).toHaveLength(2);
+    expect(result.requirementsDiagnosis.redone).toBe(true);
+    // P6 まで届かないので、P6 の欄は空の並び
+    expect(result.confirmCoverage).toEqual([]);
+  });
+
+  it("(指摘3) 矛盾から作る事項は、答えの反映の途中でも、開いた版をその版で記録する", async () => {
+    const recording = createRecordingClient([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(SAME_ISSUES_SURFACE),
+      structured(GROUPED_QUESTIONS),
+      structured(GROUPED_QUESTIONS_AFTER_CONTRADICTION),
+      structured(GROUPED_QUESTIONS_AFTER_CONTRADICTION),
+    ]);
+    let round = 0;
+    const responder: PlanResponder = {
+      async answer(request) {
+        round += 1;
+        if (round === 1) {
+          const question = request.questions[0];
+          return {
+            kind: "answers",
+            answers: [
+              { id: "A-1", questionId: question?.id ?? "", revision: question?.revision ?? 1, freeText: "全員で数える" },
+            ],
+          };
+        }
+        return { kind: "answers", answers: [] };
+      },
+      async confirm() {
+        return "build";
+      },
+    };
+    const judge = createFakeJudge({
+      ...catalogAnswers(),
+      [freeTextQuestionName("A:Q1-1")]: {
+        kind: "choice",
+        choice: "contradiction",
+        probabilities: undefined,
+        probability: undefined,
+        confidence: 0.9,
+      },
+    });
+
+    const result = await runPlan(makePlanInput(recording.client, judge, responder));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 矛盾の事項は、答えの反映の途中（仕様の `revision` はまだ 1）に開くが、事項の流れの版（2）で記録する
+    expect(result.remainingOpenIssues).toEqual([
+      { origin: "surface", revision: 1, critical: true, requirementKind: "source", facetId: null },
+      { origin: "surface", revision: 1, critical: true, requirementKind: "source", facetId: null },
+      { origin: "contradiction", revision: 2, critical: true, requirementKind: "none", facetId: null },
+    ]);
+    // 開いたのは版 2 の行（由来 contradiction・件数 1 の差分）である
+    const row2 = result.issueFlow.find((row) => row.revision === 2);
+    expect(row2?.opened).toEqual({
+      total: 1,
+      initial: 0,
+      diff: 1,
+      byOrigin: [{ origin: "contradiction", count: 1 }],
+    });
+    // 終わりに残った事項の行数は、開いている事項の数と一致する
+    expect(result.remainingOpenIssues).toHaveLength(result.openIssues.length);
+    expectBalanced(result);
+  });
+
+  it("(指摘4) P2 の引用の落ちで返す未解決事項が、残りの一覧と流れの件数にも載る", async () => {
+    const paraphrase = {
+      requirements: [
+        { id: "R-1", text: "記録できる", quote: "タスクを登録する", position: { start: 0, end: 8 } },
+        { id: "R-2", text: "合計できる", quote: "件数を数える", position: { start: 9, end: 16 } },
+      ],
+      decisions: [],
+      unresolved: [],
+    };
+    const recording = createRecordingClient([
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(paraphrase),
+      structured(REVERSE_CHECK_OUTPUT),
+    ]);
+
+    const result = await runPlan(makePlanInput(recording.client, createFakeJudge({}), ANSWER_NONE));
+
+    expect(result.kind).toBe("cannot-confirm");
+    if (result.kind !== "cannot-confirm") return;
+    // 返す未解決事項（引用の落ち 2 件）が、残りの一覧と流れの残数で一致する
+    expect(result.openIssues.map((issue) => issue.id)).toEqual(["OI:reverse:1", "OI:reverse:2"]);
+    expect(result.remainingOpenIssues).toEqual([
+      { origin: "unresolved", revision: 1, critical: true, requirementKind: "none", facetId: null },
+      { origin: "unresolved", revision: 1, critical: true, requirementKind: "none", facetId: null },
+    ]);
+    const last = result.issueFlow.at(-1);
+    expect((last?.endOpen.critical ?? 0) + (last?.endOpen.nonCritical ?? 0)).toBe(result.openIssues.length);
+    expect(result.remainingOpenIssues).toHaveLength(result.openIssues.length);
+    expectBalanced(result);
   });
 });
 

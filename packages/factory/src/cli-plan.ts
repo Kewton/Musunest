@@ -522,10 +522,38 @@ export interface PlanCliMissCountsRecord {
   };
 }
 
-/** 記録に入れる 1 往復の逆照合の診断（Issue #430）。落ちの内訳と、捨てた中身の無い断片の数。 */
+/** 記録に入れる、原文の文 1 つの覆いの記録（文番号・引用が重なる候補要件の通し番号・枠の有無。Issue #488） */
+export interface PlanCliSentenceCoverageRecord {
+  readonly sentence: number;
+  readonly requirements: readonly number[];
+  readonly framing: boolean;
+}
+
+/**
+ * 記録に入れる、指摘 1 件の記録（種類・見つけた側・重なる文番号・関わる候補要件の通し番号・枠をまたいだか。
+ * Issue #488）。**引用・原文の断片・文字の位置・要件の ID は入れない**。
+ */
+export interface PlanCliMissEntryRecord {
+  readonly kind: string;
+  readonly found_by: string;
+  readonly sentences: readonly number[];
+  readonly requirements: readonly number[];
+  /** 会話が挙げた断片で、元の範囲が枠と重なっていたか（コードの落ちは false） */
+  readonly framing_overlap: boolean;
+}
+
+/** 記録に入れる 1 往復の逆照合の診断（Issue #430・#488）。 */
 export interface PlanCliRoundDiagnosisRecord {
   readonly misses: PlanCliMissCountsRecord;
   readonly dropped_blank_misses: number;
+  /** 原文の文の数 */
+  readonly sentence_count: number;
+  /** その往復の一覧の候補要件の数 */
+  readonly requirement_count: number;
+  /** 文ごとの覆い（文番号の順） */
+  readonly sentences: readonly PlanCliSentenceCoverageRecord[];
+  /** 指摘 1 件ごとの記録（値は入れない） */
+  readonly miss_entries: readonly PlanCliMissEntryRecord[];
 }
 
 /** 記録に入れる、P1/P2 の往復ごとの逆照合の診断（Issue #430）。 */
@@ -596,6 +624,73 @@ export interface PlanCliSurfaceCheckDiagnostic {
   readonly claims: readonly PlanCliSurfaceClaimRecord[];
 }
 
+/** 記録に入れる、由来別の、新しく開いた事項の件数（Issue #488） */
+export interface PlanCliIssueFlowOriginCount {
+  readonly origin: string;
+  readonly count: number;
+}
+
+/** 記録に入れる、往復で新しく開いた事項の件数（Issue #488） */
+export interface PlanCliIssueFlowOpened {
+  readonly total: number;
+  readonly initial: number;
+  readonly diff: number;
+  readonly by_origin: readonly PlanCliIssueFlowOriginCount[];
+}
+
+/** 記録に入れる、往復で閉じた事項の件数（閉じ方の別。Issue #488） */
+export interface PlanCliIssueFlowClosed {
+  readonly total: number;
+  readonly answer_main: number;
+  readonly also_closes: number;
+  readonly source: number;
+  readonly default: number;
+}
+
+/** 記録に入れる、終了時に開いている事項の件数（重大・重大でない別。Issue #488） */
+export interface PlanCliIssueFlowOpenCounts {
+  readonly critical: number;
+  readonly non_critical: number;
+}
+
+/**
+ * 記録に入れる、往復 1 つぶんの事項の流れ（Issue #488）。**件数と有限の分類だけ**で、事項 ID・要件 ID・
+ * 文・答えは入れない。終了時の開いている件数＝開始時の件数＋新しく開いた件数−閉じた件数である。
+ */
+export interface PlanCliIssueFlowRecord {
+  readonly revision: number;
+  readonly start_open: number;
+  readonly opened: PlanCliIssueFlowOpened;
+  readonly closed: PlanCliIssueFlowClosed;
+  readonly inherited_resolved: number;
+  readonly end_open: PlanCliIssueFlowOpenCounts;
+  readonly end: string;
+}
+
+/**
+ * 記録に入れる、終わりに残った（開いている）事項 1 つぶん（Issue #488）。**値は入れない**——由来・開いた
+ * 往復の版・重大か・対象の要件の種類・目録の観点 ID（目録の行だけ）だけである。
+ */
+export interface PlanCliRemainingOpenIssueRecord {
+  readonly origin: string;
+  readonly revision: number;
+  readonly critical: boolean;
+  readonly requirement_kind: string;
+  readonly facet_id: string | null;
+}
+
+/**
+ * 記録に入れる、P6 の文ごとの覆いの記録（Issue #488）。文番号と、覆いの分類（枠・出どころ・対応・無し）と、
+ * P2 の引用が重なっていたか（真／偽／未観測）と、判定の助言が閾値以上か（無ければ `null`）を持つ。**値
+ * （原文の文・引用・ID）は入れない**。
+ */
+export interface PlanCliConfirmCoverageRecord {
+  readonly sentence: number;
+  readonly coverage: string;
+  readonly correspondence: string;
+  readonly meets_threshold: boolean | null;
+}
+
 /** 往復の記録（`--out` の `plan-record.json`。質問・答え・段の記録・使った額） */
 export interface PlanCliRecord {
   readonly schema_version: string;
@@ -618,6 +713,12 @@ export interface PlanCliRecord {
   readonly surface_id_reuse: readonly PlanCliSurfaceIdReuseEntry[];
   /** 照合まで届いた試行 1 つずつの記録（版・試行・結果・件数・分類。値は入れない。Issue #484） */
   readonly surface_target_attempts: readonly PlanCliSurfaceTargetAttempt[];
+  /** 往復ごとの事項の流れ（件数と有限の分類だけ。Issue #488） */
+  readonly issue_flow: readonly PlanCliIssueFlowRecord[];
+  /** 終わりに残った（開いている）事項 1 つずつ（値は入れない。Issue #488） */
+  readonly remaining_open_issues: readonly PlanCliRemainingOpenIssueRecord[];
+  /** P6 の文ごとの覆い（文番号と分類。値は入れない。P6 まで届かなければ空。Issue #488） */
+  readonly confirm_coverage: readonly PlanCliConfirmCoverageRecord[];
   readonly confirmation: "build" | "stop" | null;
   /** 台本の照合の記録（`--script` のときだけ。内容の SHA-256・当て方の版・問いごとの結果。Issue #444） */
   readonly script?: PlanCliScriptRecord;
@@ -664,12 +765,26 @@ function toMissCountsRecord(counts: ReverseCheckMissCounts): PlanCliMissCountsRe
   };
 }
 
-/** 往復ごとの逆照合の診断を、記録の形（snake_case）に写す（Issue #430） */
+/** 往復ごとの逆照合の診断を、記録の形（snake_case）に写す（Issue #430・#488） */
 function toRequirementsDiagnosisRecord(diagnosis: ReverseCheckDiagnosis): PlanCliRequirementsDiagnosisRecord {
   return {
     rounds: diagnosis.rounds.map((round) => ({
       misses: toMissCountsRecord(round.misses),
       dropped_blank_misses: round.droppedBlankMisses,
+      sentence_count: round.sentenceCount,
+      requirement_count: round.requirementCount,
+      sentences: round.sentences.map((sentence) => ({
+        sentence: sentence.sentence,
+        requirements: sentence.requirements.slice(),
+        framing: sentence.framing,
+      })),
+      miss_entries: round.missEntries.map((entry) => ({
+        kind: entry.kind,
+        found_by: entry.foundBy,
+        sentences: entry.sentences.slice(),
+        requirements: entry.requirements.slice(),
+        framing_overlap: entry.framingOverlap,
+      })),
     })),
     redone: diagnosis.redone,
     unmet: toMissCountsRecord(diagnosis.unmet),
@@ -819,6 +934,42 @@ export function buildPlanCliRecord(input: {
       rejected_claims: entry.rejectedClaims,
       rejected_ambiguities: entry.rejectedAmbiguities,
       kinds: entry.kinds.map((kind) => ({ kind: kind.kind, claims: kind.claims, ambiguities: kind.ambiguities })),
+    })),
+    // 往復ごとの事項の流れ（値ではなく件数と有限の分類だけ。Issue #488）
+    issue_flow: input.result.issueFlow.map((row) => ({
+      revision: row.revision,
+      start_open: row.startOpen,
+      opened: {
+        total: row.opened.total,
+        initial: row.opened.initial,
+        diff: row.opened.diff,
+        by_origin: row.opened.byOrigin.map((entry) => ({ origin: entry.origin, count: entry.count })),
+      },
+      closed: {
+        total: row.closed.total,
+        answer_main: row.closed.answerMain,
+        also_closes: row.closed.alsoCloses,
+        source: row.closed.source,
+        default: row.closed.default,
+      },
+      inherited_resolved: row.inheritedResolved,
+      end_open: { critical: row.endOpen.critical, non_critical: row.endOpen.nonCritical },
+      end: row.end,
+    })),
+    // 終わりに残った事項（値は入れない。Issue #488）
+    remaining_open_issues: input.result.remainingOpenIssues.map((issue) => ({
+      origin: issue.origin,
+      revision: issue.revision,
+      critical: issue.critical,
+      requirement_kind: issue.requirementKind,
+      facet_id: issue.facetId,
+    })),
+    // P6 の文ごとの覆い（P6 まで届かなければ空。値は入れない。Issue #488）
+    confirm_coverage: input.result.confirmCoverage.map((sentence) => ({
+      sentence: sentence.sentence,
+      coverage: sentence.coverage,
+      correspondence: sentence.correspondence,
+      meets_threshold: sentence.meetsThreshold,
     })),
     confirmation: input.transcript.confirmation,
     // 台本の照合の記録（台本を使ったときだけ。内容の SHA-256・当て方の版・問いごとの結果。Issue #444）

@@ -16,7 +16,7 @@ import type {
   PlanSourceInput,
 } from "@musunest/appspec-schema";
 import { createFakeJudge } from "../judge-fake.js";
-import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest } from "../judge.js";
+import type { Judge, JudgeAnswer, JudgeQuestion, JudgeRequest, JudgeResponse } from "../judge.js";
 import { confirmQuestionName, runConfirm, type ConfirmInput } from "./confirm.js";
 
 const noul = (value: number): JudgeAnswer => ({ kind: "noul", noul: value });
@@ -558,5 +558,195 @@ describe("対応（重なる文の入力 ID）を P6 の覆いに使う（Issue 
     // 対応の有無で変わるのは覆いの判定だけである（確定の可否は変わるが、仕様は変わらない）
     expect(withResult.confirmed).toBe(true);
     expect(withoutResult.confirmed).toBe(false);
+  });
+});
+
+// ── P6 の文ごとの覆いを、番号と有限の分類で残す（Issue #488）────────────────────
+
+describe("P6 の文ごとの覆いを、番号と有限の分類で残す（Issue #488）", () => {
+  const SOURCE4 = "枠の文。出どころの文。対応の文。覆われない文。";
+  const spanOf = (quote: string): { readonly start: number; readonly end: number } => {
+    const start = SOURCE4.indexOf(quote);
+    return { start, end: start + quote.length };
+  };
+  const sourceInputs4: readonly PlanInput[] = [
+    { id: "S-1", kind: "source", text: "枠の文。" },
+    { id: "S-2", kind: "source", text: "出どころの文。" },
+    { id: "S-3", kind: "source", text: "対応の文。" },
+    { id: "S-4", kind: "source", text: "覆われない文。" },
+  ];
+  const requirements4: readonly PlanRequirement[] = [
+    { id: "R-1", text: "枠を出せる", kind: "existence", origin: { input_id: "S-1", quote: "枠の文。" }, parts: [] },
+    { id: "R-2", text: "出どころを出せる", kind: "existence", origin: { input_id: "S-2", quote: "出どころの文。" }, parts: [] },
+  ];
+  /** 枠の範囲（1 文目の「枠の文」） */
+  const framing4 = [spanOf("枠の文")];
+  /** 対応（R-1 は S-1 由来。対応の並びに S-3 を持つ） */
+  const correspondence4 = new Map([["R-1", ["S-3"]]]);
+  /** 4 文への覆いの助言（閾値 0.6 の直前・ちょうど・直後を分ける） */
+  const judge4 = () =>
+    createFakeJudge(
+      {
+        [confirmQuestionName("S-1")]: noul(0.59),
+        [confirmQuestionName("S-2")]: noul(0.6),
+        [confirmQuestionName("S-3")]: noul(0.61),
+        [confirmQuestionName("S-4")]: noul(0.9),
+      },
+      { model: "fake-judge" },
+    );
+
+  it("(e) 枠・出どころ・対応・無しを 1 つずつ持ち、複数の覆いが成立する文は先の分類になり、助言の閾値の前後を分ける", async () => {
+    const result = await runConfirm(
+      validInput({
+        source: SOURCE4,
+        inputs: sourceInputs4,
+        requirements: requirements4,
+        framing: framing4,
+        sourceCorrespondence: correspondence4,
+        openIssues: [],
+        decisions: [],
+        judge: judge4(),
+      }),
+    );
+    expect(result.coverage).toEqual([
+      { sentence: 1, coverage: "framing", correspondence: "false", meetsThreshold: false },
+      { sentence: 2, coverage: "origin", correspondence: "false", meetsThreshold: true },
+      { sentence: 3, coverage: "correspondence", correspondence: "true", meetsThreshold: true },
+      { sentence: 4, coverage: "none", correspondence: "false", meetsThreshold: true },
+    ]);
+    // 既存の `problems`・`confirmed` は欄を足す前と等しい（4 文目だけが覆われていない）
+    expect(result.problems).toEqual([
+      { code: "uncovered-source", path: "source[3]", message: "原文の文がどの要件にも覆われていない" },
+    ]);
+    expect(result.confirmed).toBe(false);
+    // `plan` に新しい欄は混ざらず、確認の SHA-256 も持つ
+    expect(Object.keys(result.plan)).not.toContain("coverage");
+    expect(result.plan.confirmation.sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("(e) 対応を渡さない単独呼び出しでは、対応が未観測になり、対応の文は覆いの根拠にならない", async () => {
+    const result = await runConfirm(
+      validInput({
+        source: SOURCE4,
+        inputs: sourceInputs4,
+        requirements: requirements4,
+        framing: framing4,
+        openIssues: [],
+        decisions: [],
+        judge: judge4(),
+      }),
+    );
+    expect(result.coverage.map((row) => row.correspondence)).toEqual([
+      "unobserved",
+      "unobserved",
+      "unobserved",
+      "unobserved",
+    ]);
+    expect(result.coverage.map((row) => row.coverage)).toEqual(["framing", "origin", "none", "none"]);
+    // 対応が無いので、3 文目・4 文目が覆われていない
+    expect(result.problems.map((problem) => problem.path)).toEqual(["source[2]", "source[3]"]);
+  });
+
+  it("(e) 対応を渡して、当該文を含まなければ、その文の対応は偽になる", async () => {
+    const result = await runConfirm(
+      validInput({
+        source: SOURCE4,
+        inputs: sourceInputs4,
+        requirements: requirements4,
+        framing: framing4,
+        // 対応の並びに S-3 を含まない（3 文目は対応で覆われない）
+        sourceCorrespondence: new Map([["R-1", ["S-2"]]]),
+        openIssues: [],
+        decisions: [],
+        judge: judge4(),
+      }),
+    );
+    expect(result.coverage[2]).toEqual({
+      sentence: 3,
+      coverage: "none",
+      correspondence: "false",
+      meetsThreshold: true,
+    });
+  });
+
+  it("(指摘2) 同じ文が2回現れても、診断は文番号の入力を用い、2 文目の対応の重なりを偽にしない", async () => {
+    // 1 文目を枠、2 文目を唯一の候補要件の引用にする（本文は同じ「甲。」）
+    const TWO_SAME = "甲。甲。";
+    const twoSameInputs: readonly PlanInput[] = [
+      { id: "S-1", kind: "source", text: "甲。" },
+      { id: "S-2", kind: "source", text: "甲。" },
+    ];
+    const twoSameRequirements: readonly PlanRequirement[] = [
+      { id: "R-1", text: "記録できる", kind: "existence", origin: { input_id: "S-2", quote: "甲。" }, parts: [] },
+    ];
+    const result = await runConfirm(
+      validInput({
+        source: TWO_SAME,
+        inputs: twoSameInputs,
+        requirements: twoSameRequirements,
+        framing: [{ start: 0, end: 2 }],
+        sourceCorrespondence: new Map([["R-1", ["S-2"]]]),
+        openIssues: [],
+        decisions: [],
+        judge: createFakeJudge(
+          { [confirmQuestionName("S-1")]: noul(0.95), [confirmQuestionName("S-2")]: noul(0.95) },
+          { model: "fake-judge" },
+        ),
+      }),
+    );
+    // 文番号の入力（2 文目＝S-2）で診断する。P2 の対応に S-2 が含まれ、覆いの分類も出どころになる
+    expect(result.coverage).toEqual([
+      { sentence: 1, coverage: "framing", correspondence: "false", meetsThreshold: true },
+      { sentence: 2, coverage: "origin", correspondence: "true", meetsThreshold: true },
+    ]);
+    // ゲート（`covered`・`problems`）は今までどおり本文の一致で見るので、2 文目は覆われていないままである
+    expect(result.problems).toEqual([
+      { code: "uncovered-source", path: "source[1]", message: "原文の文がどの要件にも覆われていない" },
+    ]);
+    expect(result.confirmed).toBe(false);
+  });
+
+  it("(指摘6) 助言が欠けた・種類が違う場合は閾値以上かを未観測にし、実際の 0 と区別する", async () => {
+    const threeInputs: readonly PlanInput[] = [
+      { id: "S-1", kind: "source", text: "枠の文。" },
+      { id: "S-2", kind: "source", text: "対応の文。" },
+      { id: "S-3", kind: "source", text: "印の文。" },
+    ];
+    // S-1 には答えない（欠落）、S-2 には別の種類、S-3 には Noul の 0 を返す
+    const judge: Judge = {
+      async judge(request: JudgeRequest): Promise<JudgeResponse> {
+        const answers: Record<string, JudgeAnswer> = {};
+        for (const name of Object.keys(request.questions)) {
+          if (name === confirmQuestionName("S-2")) {
+            answers[name] = { kind: "choice", choice: "x", probabilities: undefined, probability: undefined, confidence: 0.9 };
+          } else if (name === confirmQuestionName("S-3")) {
+            answers[name] = noul(0);
+          }
+        }
+        return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+      },
+    };
+    const result = await runConfirm(
+      validInput({
+        source: "枠の文。対応の文。印の文。",
+        inputs: threeInputs,
+        requirements: [],
+        openIssues: [],
+        decisions: [],
+        judge,
+      }),
+    );
+    // 有効な助言が無い 1・2 文目は未観測（`null`）、実際に 0 を返した 3 文目だけが閾値未満（偽）になる
+    expect(result.coverage).toEqual([
+      { sentence: 1, coverage: "none", correspondence: "unobserved", meetsThreshold: null },
+      { sentence: 2, coverage: "none", correspondence: "unobserved", meetsThreshold: null },
+      { sentence: 3, coverage: "none", correspondence: "unobserved", meetsThreshold: false },
+    ]);
+    // 既存の `judgments` は、欠落・種類違いも 0 として必ず行を作る（値・型・意味は今までどおり）
+    expect(result.judgments.map((entry) => [entry.questionId, entry.value, entry.meetsThreshold])).toEqual([
+      ["cover:S-1", 0, false],
+      ["cover:S-2", 0, false],
+      ["cover:S-3", 0, false],
+    ]);
   });
 });
