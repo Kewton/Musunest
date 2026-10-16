@@ -9,6 +9,10 @@
 // **ライブラリ（run.ts・bundle.ts・record.ts・段）は、環境変数もファイルも Node 固有の API も持たない。**
 // ここが外側との境目である。鍵が無ければ、API を呼ばずに使い方の誤りで終わる。
 //
+// `--pipeline v1.1a`（既定 v1）を付けると、確定した仕様（`--plan-file`）から v1.1α の経路（`v11a/run.ts`）を流す
+// （`07-architecture-v1.1a.md` §3・Issue #511）。v1.1α は `--plan-file` と組んでだけ受ける。`--pipeline` を省けば
+// v1 の経路で、LLM への要求・納品物・要約・終了コードは今までとバイト列で同じである。
+//
 // `node:fs` は**動的**に読む（Worker が根（index.ts）から import しても、この経路は呼ばれない限り動かない。
 // appspec-schema の contract.ts と同じやり方）。
 import { planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
@@ -44,6 +48,7 @@ import { createLlmJudge } from "./judge-llm.js";
 import type { AgentLimits } from "./limits.js";
 import type { LlmClient } from "./llm.js";
 import { createOpenAiLlmClient, DEFAULT_OPENAI_MODEL } from "./openai.js";
+import type { EnvelopeId } from "./schema-envelope.js";
 import { runPlan, type PlanResponder, type PlanResult } from "./plan/run-plan.js";
 import {
   createScriptPlanResponder,
@@ -51,12 +56,19 @@ import {
   type PlanScriptRecordSink,
 } from "./plan/script-responder.js";
 import { runGeneration } from "./run.js";
+import { runGenerationV11a } from "./v11a/run.js";
 import type { PromptDocument } from "./stages/prompt.js";
 
 /** 工場の識別（要約の `builder`。S-5） */
 export const BUILDER = "musunest-factory" as const;
 /** プロンプトの版（§3・S-5） */
 export const PROMPT_VERSION = "v1" as const;
+/** v1.1α の走りのプロンプトの版（要約と `build-record.json` の `conditions.prompt_version`。Issue #511） */
+export const PROMPT_VERSION_V11A = "v1.1a" as const;
+/** `--pipeline` で選べる経路（既定 v1） */
+export const PIPELINES = ["v1", "v1.1a"] as const;
+/** 経路の型 */
+export type Pipeline = (typeof PIPELINES)[number];
 /** 契約の版（`03-evaluation.md` §1 が v0.2 に固定する） */
 export const CONTRACT_VERSION = "v0.2" as const;
 /** P3 が照らす語彙の版（確定した仕様の `vocabulary_version`。04 §4・Issue #336） */
@@ -102,7 +114,7 @@ export const EXIT_RETURN_TO_PLAN = 3;
 
 /** 使い方の文（誤りを人に見せる） */
 export const USAGE =
-  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル>]";
+  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル> [--pipeline v1|v1.1a]]";
 
 /** 手元の入口が受け取る引数 */
 export interface CliArguments {
@@ -138,6 +150,15 @@ export interface CliArguments {
    * 答える台本で答える。評価用。Issue #444）。`--answers` とは同時に指定できない。
    */
   readonly scriptFile?: string;
+  /**
+   * `--pipeline <v1|v1.1a>`（既定 v1。指定したときだけ持つ）。`v1.1a` は `--plan-file` と一緒にだけ受け、
+   * `--plan`・`--plan-only` とは同時に指定できない（Issue #511）。
+   */
+  readonly pipeline?: Pipeline;
+}
+
+function isPipeline(value: string): value is Pipeline {
+  return (PIPELINES as readonly string[]).includes(value);
 }
 
 /** 引数を読む。誤りは `error` に人の読む文を入れて返す（例外にしない） */
@@ -155,6 +176,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   let planFile: string | undefined;
   let answersFile: string | undefined;
   let scriptFile: string | undefined;
+  let pipeline: Pipeline | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === undefined) continue;
@@ -171,6 +193,15 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
       index += 1;
       if (raw === undefined) return { error: "--plan-file には出力ファイルを指定してください" };
       planFile = raw;
+      continue;
+    }
+    if (arg === "--pipeline") {
+      const raw = args[index + 1];
+      index += 1;
+      if (raw === undefined || !isPipeline(raw)) {
+        return { error: `--pipeline には ${PIPELINES.join(" か ")} を指定してください` };
+      }
+      pipeline = raw;
       continue;
     }
     if (arg === "--answers") {
@@ -265,6 +296,15 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   if (scriptFile !== undefined && answersFile !== undefined) {
     return { error: "--script と --answers は同時に指定できません" };
   }
+  if (pipeline === "v1.1a" && plan) {
+    return { error: "--pipeline v1.1a と --plan は同時に指定できません" };
+  }
+  if (pipeline === "v1.1a" && planOnly) {
+    return { error: "--pipeline v1.1a と --plan-only は同時に指定できません" };
+  }
+  if (pipeline === "v1.1a" && planFile === undefined) {
+    return { error: "--pipeline v1.1a は --plan-file と一緒に指定してください" };
+  }
   return {
     requestFile,
     outDir,
@@ -278,6 +318,7 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
     ...(planFile === undefined ? {} : { planFile }),
     ...(answersFile === undefined ? {} : { answersFile }),
     ...(scriptFile === undefined ? {} : { scriptFile }),
+    ...(pipeline === undefined ? {} : { pipeline }),
   };
 }
 
@@ -289,7 +330,11 @@ export interface CliDeps {
   readonly writeFile: (path: string, text: string) => Promise<void>;
   readonly makeDirectory: (path: string) => Promise<void>;
   readonly loadDocuments: () => Promise<readonly PromptDocument[]>;
-  readonly makeClient: (options: { apiKey: string; model: string; effort: string }) => LlmClient;
+  /**
+   * LLM の adapter を作る。`envelope` は v1.1α の走りでだけ渡る（`"v1.1a"`。Issue #511）——v1 の走りでは
+   * 欄を置かない（v1 の要求のバイト列を変えない）。
+   */
+  readonly makeClient: (options: { apiKey: string; model: string; effort: string; envelope?: EnvelopeId }) => LlmClient;
   /**
    * Jev の判定の adapter を作る（05 §4）。**鍵を読むのは手元の入口だけ**——`JEV_API_KEY` を環境変数
    * から読んで渡す（adapter は環境変数を読まない）。試験は偽物を差し込む（実 API を呼ばない）。
@@ -371,6 +416,8 @@ interface BuildJob {
   readonly deadline: number;
   readonly now: () => number;
   readonly timeoutMs?: number;
+  /** 経路（省けば v1。v1.1α は確定した仕様と組んでだけ流れる。Issue #511） */
+  readonly pipeline?: Pipeline;
 }
 
 /**
@@ -382,7 +429,9 @@ async function runBuild(
   job: BuildJob & { readonly plan?: ConfirmedPlan },
   log: (line: string) => void,
 ): Promise<{ readonly code: number; readonly costUsd: number; readonly returnToPlan: boolean }> {
-  const run = await runGeneration({
+  // v1.1α は確定した仕様と組んでだけ流れる（引数の読み取りが `--plan-file` を要る。Issue #511）
+  const v11aPlan = job.pipeline === "v1.1a" ? job.plan : undefined;
+  const input = {
     source: job.source,
     documents: job.documents,
     client: job.client,
@@ -398,12 +447,15 @@ async function runBuild(
     builder: BUILDER,
     model: job.model,
     effort: job.effort,
-    promptVersion: PROMPT_VERSION,
+    promptVersion: v11aPlan === undefined ? PROMPT_VERSION : PROMPT_VERSION_V11A,
     contractVersion: CONTRACT_VERSION,
     specEngineVersion: SPEC_ENGINE_VERSION,
     factoryVersion: FACTORY_VERSION,
-    ...(job.plan === undefined ? {} : { plan: job.plan }),
-  });
+  };
+  const run =
+    v11aPlan === undefined
+      ? await runGeneration({ ...input, ...(job.plan === undefined ? {} : { plan: job.plan }) })
+      : await runGenerationV11a({ ...input, plan: v11aPlan });
 
   if (run.bundle !== null) {
     await deps.makeDirectory(job.outDir);
@@ -671,7 +723,13 @@ async function runBuildFromPlanFile(
     return EXIT_USAGE;
   }
   const documents = await deps.loadDocuments();
-  const client = deps.makeClient({ apiKey, model: parsed.model, effort: parsed.effort });
+  // v1.1α の走りでだけ、v1.1α の封筒を選ぶ（v1 の走りでは欄を置かない。Issue #511）
+  const client = deps.makeClient({
+    apiKey,
+    model: parsed.model,
+    effort: parsed.effort,
+    ...(parsed.pipeline === "v1.1a" ? { envelope: "v1.1a" as const } : {}),
+  });
   const { judge, recheckJudge } = assembleJudge({
     env: deps.env,
     model: parsed.model,
@@ -693,6 +751,7 @@ async function runBuildFromPlanFile(
     deadline: ctx.now() + ctx.deadlineMs,
     now: ctx.now,
     ...(parsed.timeoutMs === undefined ? {} : { timeoutMs: parsed.timeoutMs }),
+    ...(parsed.pipeline === undefined ? {} : { pipeline: parsed.pipeline }),
   };
   const build = await runBuild(deps, { ...job, plan: validation.plan }, log);
   await deps.makeDirectory(job.outDir);
@@ -734,7 +793,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
     deadline_ms: deadlineMs,
     timeout_ms: parsed.timeoutMs ?? null,
     vocabulary_version: VOCABULARY_VERSION,
-    prompt_version: PROMPT_VERSION,
+    prompt_version: parsed.pipeline === "v1.1a" ? PROMPT_VERSION_V11A : PROMPT_VERSION,
     contract_version: CONTRACT_VERSION,
     factory_version: FACTORY_VERSION,
     spec_engine_version: SPEC_ENGINE_VERSION,
@@ -890,7 +949,8 @@ export async function main(): Promise<void> {
       await fs.mkdir(path, { recursive: true });
     },
     loadDocuments: loadDocumentsFromFiles,
-    makeClient: ({ apiKey, model, effort }) => createOpenAiLlmClient({ apiKey, model, effort }),
+    makeClient: ({ apiKey, model, effort, envelope }) =>
+      createOpenAiLlmClient({ apiKey, model, effort, ...(envelope === undefined ? {} : { envelope }) }),
     terminal: createNodeTerminal(proc),
     log: (line) => proc.stdout.write(`${line}\n`),
     logError: (line) => proc.stderr.write(`${line}\n`),

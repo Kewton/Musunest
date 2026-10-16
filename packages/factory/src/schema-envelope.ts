@@ -11,6 +11,10 @@
 // 枝の並びと中身は**決まった順**にする（同じ入力なら同じバイト列）。封筒は adapter（openai.ts）が送り、
 // 応答から `result` を取り出して段へ渡す。段ごとの指示（どの枝で答えるか）は文書の後ろ＝前置きの外に
 // 置くので、キャッシュは壊れない。
+//
+// v1.1α（`07-architecture-v1.1a.md` §3・D12・Issue #511）の段は、**別の封筒**（`stage-envelope-v11a`）に入れる。
+// v1 の封筒に混ぜると v1 の要求のバイト列が変わるので、v1 の一覧・名前・`ENVELOPE_SCHEMA` の実体は変えず、
+// adapter が封筒の識別子（`ENVELOPE_IDS`）で選ぶ。
 import { QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME } from "./plan/questions.js";
 import { SURFACE_SCHEMA, SURFACE_SCHEMA_NAME } from "./plan/surface.js";
 import { ARBITRATION_SCHEMA, ARBITRATION_SCHEMA_NAME } from "./stages/arbitrate.js";
@@ -21,6 +25,17 @@ import { REQUIREMENT_LIST_SCHEMA, REQUIREMENTS_SCHEMA_NAME } from "./stages/requ
 import { REVERSE_CHECK_SCHEMA, REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
 import { TEST_SUITE_SCHEMA, TEST_SUITE_SCHEMA_NAME } from "./stages/test-suite.js";
 import { DECLARATION_SCHEMA, WRITE_SCHEMA_NAME } from "./stages/write.js";
+import { DECL_CHECK_SCHEMA, DECL_CHECK_SCHEMA_NAME } from "./v11a/stages/decl-check.js";
+import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME } from "./v11a/stages/name-table.js";
+import { SEMANTIC_CHECK_SCHEMA, SEMANTIC_CHECK_SCHEMA_NAME } from "./v11a/stages/semantic-check.js";
+import { TEST_SPEC_SCHEMA, TEST_SPEC_SCHEMA_NAME } from "./v11a/stages/test-spec.js";
+import { DECLARATION_V11A_SCHEMA, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
+
+/** 封筒の識別子（adapter が選ぶ。既定は v1） */
+export const ENVELOPE_IDS = ["v1", "v1.1a"] as const;
+
+/** 封筒の識別子の型 */
+export type EnvelopeId = (typeof ENVELOPE_IDS)[number];
 
 /** 封筒の JSON Schema の名前。**全段で同じ**（`text.format.name`） */
 export const ENVELOPE_SCHEMA_NAME = "stage-envelope";
@@ -114,10 +129,46 @@ export function buildEnvelopeSchema(
 /** 全段で送る封筒の schema（起動時に 1 度だけ組む。全段で**同じ実体**を使う） */
 export const ENVELOPE_SCHEMA: Record<string, unknown> = buildEnvelopeSchema();
 
+/** v1.1α の封筒の JSON Schema の名前（v1.1α の全段で同じ。`text.format.name`） */
+export const ENVELOPE_SCHEMA_NAME_V11A = "stage-envelope-v11a";
+
 /**
- * その schema の名前の段を、封筒から引く（無ければ `undefined`）。
+ * v1.1α の封筒に入れる段の一覧（構造化出力を使う段だけ。決まった順）。
+ *
+ * 段の順は v1.1α の流れに沿う（T1 → T1'' → T2 → B1 → B3' → B5' 裁定）。裁定（⑥'）は v1 と共有する段で、
+ * v1 の封筒にも載る（どちらの封筒で送るかは adapter が選んだ封筒で決まる）。道具付きの段（B5 直す）と、
+ * 問いごとに schema が変わる判定の口（J4 を含む）は入れない。
+ */
+export const STAGE_ENVELOPE_ENTRIES_V11A: readonly StageEnvelopeEntry[] = [
+  { stage: NAME_TABLE_SCHEMA_NAME, schema: NAME_TABLE_SCHEMA },
+  { stage: SEMANTIC_CHECK_SCHEMA_NAME, schema: SEMANTIC_CHECK_SCHEMA },
+  { stage: TEST_SPEC_SCHEMA_NAME, schema: TEST_SPEC_SCHEMA },
+  { stage: WRITE_V11A_SCHEMA_NAME, schema: DECLARATION_V11A_SCHEMA },
+  { stage: DECL_CHECK_SCHEMA_NAME, schema: DECL_CHECK_SCHEMA },
+  { stage: ARBITRATION_SCHEMA_NAME, schema: ARBITRATION_SCHEMA },
+];
+
+/** v1.1α の全段で送る封筒の schema（起動時に 1 度だけ組む） */
+export const ENVELOPE_SCHEMA_V11A: Record<string, unknown> = buildEnvelopeSchema(STAGE_ENVELOPE_ENTRIES_V11A);
+
+/** 1 つの封筒（名前・schema・段の一覧） */
+export interface StageEnvelope {
+  readonly name: string;
+  readonly schema: Record<string, unknown>;
+  readonly entries: readonly StageEnvelopeEntry[];
+}
+
+/** 封筒の識別子から封筒を引く（v1 は今までと同じ名前・同じ実体） */
+export function envelopeOf(envelope: EnvelopeId = "v1"): StageEnvelope {
+  return envelope === "v1.1a"
+    ? { name: ENVELOPE_SCHEMA_NAME_V11A, schema: ENVELOPE_SCHEMA_V11A, entries: STAGE_ENVELOPE_ENTRIES_V11A }
+    : { name: ENVELOPE_SCHEMA_NAME, schema: ENVELOPE_SCHEMA, entries: STAGE_ENVELOPE_ENTRIES };
+}
+
+/**
+ * その schema の名前の段を、選んだ封筒（既定は v1）から引く（無ければ `undefined`）。
  * adapter は、ここで引けたときだけ封筒を送る（引けない schema——判定の口など——は今までどおりそのまま）。
  */
-export function envelopeStageFor(schemaName: string): StageEnvelopeEntry | undefined {
-  return STAGE_ENVELOPE_ENTRIES.find((entry) => entry.stage === schemaName);
+export function envelopeStageFor(schemaName: string, envelope: EnvelopeId = "v1"): StageEnvelopeEntry | undefined {
+  return envelopeOf(envelope).entries.find((entry) => entry.stage === schemaName);
 }

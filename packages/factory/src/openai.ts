@@ -17,6 +17,7 @@
 //   * **構造化出力は、全段で同じ「封筒」の schema を送る**（`schema-envelope.ts`・#353）。出力の schema は
 //     入力より前に置かれるので、段ごとに違うと前置きが別物になり、段をまたいでキャッシュが当たらない。
 //     封筒の枝は `stage` の判別子で選び、応答の `result` を取り出して段へ渡す（`stage` が違えば形の誤り）。
+//     封筒は options の `envelope` で選ぶ（既定 v1。v1.1α の段は別の封筒 `stage-envelope-v11a`。Issue #511）。
 //   * usage を共通の契約の形に直す。無い・壊れている（数でない・負・内訳が合計を超える）ときは
 //     「usage なし」として返し、共通の口に予約を残させる（§1.5・R-6）。
 //   * 誤りは型付きで分類する（`OpenAiAdapterError` の `kind`）。
@@ -36,11 +37,11 @@ import type {
 } from "./llm.js";
 import {
   ENVELOPE_RESULT_KEY,
-  ENVELOPE_SCHEMA,
-  ENVELOPE_SCHEMA_NAME,
   ENVELOPE_STAGE_KEY,
   buildStageBranch,
+  envelopeOf,
   envelopeStageFor,
+  type EnvelopeId,
   type StageEnvelopeEntry,
 } from "./schema-envelope.js";
 
@@ -146,6 +147,11 @@ export interface OpenAiAdapterOptions {
    * 持ち、締切の残りで頭を打つ（#302）。
    */
   readonly timeoutMs?: number;
+  /**
+   * 構造化出力で送る封筒（`schema-envelope.ts`。既定 v1）。v1.1α の走りでは `"v1.1a"` を渡す（Issue #511）。
+   * 選んだ封筒に載っていない schema（判定の口・差分専用の schema）は、今までどおりそのまま送る。
+   */
+  readonly envelope?: EnvelopeId;
 }
 
 interface WireConfig {
@@ -154,6 +160,7 @@ interface WireConfig {
   readonly effort: string | undefined;
   readonly fetch: FetchLike;
   readonly timeoutMs: number;
+  readonly envelope: EnvelopeId;
 }
 
 /**
@@ -173,6 +180,7 @@ export function createOpenAiLlmClient(options: OpenAiAdapterOptions): LlmClient 
     // 合図（signal）が渡されたときは使わない（呼ぶ側が timeout を持つ）。渡されないときの既定は、
     // 固定の 60 秒ではなく effort ごとの値にする（#302）。
     timeoutMs: options.timeoutMs ?? callTimeoutMsForEffort(options.effort ?? ""),
+    envelope: options.envelope ?? "v1",
   };
   return {
     callStructured: <T>(structuredRequest: LlmStructuredRequest) =>
@@ -317,7 +325,8 @@ function baseBody(
  * 今までどおりその要求の schema をそのまま送る。
  */
 function buildStructuredBody(config: WireConfig, request: LlmStructuredRequest): Record<string, unknown> {
-  const entry = envelopeStageFor(request.schemaName);
+  const entry = envelopeStageFor(request.schemaName, config.envelope);
+  const envelope = envelopeOf(config.envelope);
   const body = baseBody(
     config,
     request.instructions,
@@ -332,8 +341,8 @@ function buildStructuredBody(config: WireConfig, request: LlmStructuredRequest):
   body.text = {
     format: {
       type: "json_schema",
-      name: entry === undefined ? request.schemaName : ENVELOPE_SCHEMA_NAME,
-      schema: entry === undefined ? request.schema : ENVELOPE_SCHEMA,
+      name: entry === undefined ? request.schemaName : envelope.name,
+      schema: entry === undefined ? request.schema : envelope.schema,
       strict: true,
     },
   };
@@ -465,7 +474,7 @@ async function callStructuredWire<T>(
   config: WireConfig,
   request: LlmStructuredRequest,
 ): Promise<LlmStructuredResponse<T>> {
-  const entry = envelopeStageFor(request.schemaName);
+  const entry = envelopeStageFor(request.schemaName, config.envelope);
   const wire = await requestWire(config, buildStructuredBody(config, request), request.signal);
   const usage = parseUsage(wire.usage);
   requireCompleted(wire, usage);
