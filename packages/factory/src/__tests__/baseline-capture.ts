@@ -214,3 +214,206 @@ export async function captureBaseline(
   }
   return captures;
 }
+
+// ── 手元の入口の分（v1.1α A6。Issue #511）──────────────────────────────────
+//
+// 同じ作法で、**手元の入口**（`runCli`）を流す。差し込んだ `makeClient` は、その module の**本物の adapter**
+// （`createOpenAiLlmClient`）に偽物の `fetch` を持たせたもの——偽物の `fetch` は、経路の定義に書いた合成の応答を
+// 順に Responses API の形（wire）にして返し、adapter が送った body を写す。観測するのは、adapter が送る body
+// （`text.format` の名前と schema を含む）・入口が書いた全ファイルの SHA-256 と大きさ・manifest・最後の行の
+// 要約・終了コード・`makeClient` に渡った options（鍵を除く）である。**ファイルも環境変数も触らない**——
+// 読み書きは手元の写像で閉じ、時計は 0 に固定し、鍵は固定の偽の値（記録には残さない）を渡す。
+
+/** 道具が使う、工場の module の export（手元の入口の分） */
+export type BaselineCliModule = Pick<typeof FactoryIndex, "runCli" | "createOpenAiLlmClient" | "BUNDLE_MANIFEST_FILE">;
+
+/** 手元の入口の 1 つの経路の定義（合成の応答と、足す引数・`--plan-file` の中身） */
+export interface BaselineCliScenario {
+  readonly name: string;
+  /** 偽物の `fetch` が順に返す、合成の応答（`createFakeLlmClient` の記録と同じ形） */
+  readonly recorded: readonly unknown[];
+  /** 依頼文と `--out` のあとに足す引数（`--plan-file` は `planFile` を渡すと道具が足す） */
+  readonly args?: readonly string[];
+  /** `--plan-file` で渡す包み（JSON の値。渡すと `--plan-file plan.json` を足す） */
+  readonly planFile?: unknown;
+}
+
+/** 手元の入口の経路の定義の全体（依頼文と文書は経路に依らない） */
+export interface BaselineCliScenarios {
+  readonly request: string;
+  readonly documents: readonly { readonly name: string; readonly text: string }[];
+  readonly scenarios: readonly BaselineCliScenario[];
+}
+
+/** 手元の入口の 1 つの経路で観測した値（JSON の値） */
+export interface BaselineCliCapture {
+  readonly name: string;
+  /** `makeClient` に渡った options（鍵の欄を除く。呼ばれた順） */
+  readonly clientOptions: readonly unknown[];
+  /** adapter が `fetch` に渡した body（送った順） */
+  readonly requests: readonly unknown[];
+  /** 入口が書いた全ファイル（`--out` からの相対パス。書いた順） */
+  readonly files: readonly { readonly path: string; readonly sha256: string; readonly sizeBytes: number }[];
+  /** manifest（書かなければ null） */
+  readonly manifest: unknown;
+  /** 最後の行（要約。1 行も出さなければ null） */
+  readonly summary: string | null;
+  readonly exitCode: number;
+}
+
+/** 経路の定義の固定の値（依頼文・包みのパスと、出力のディレクトリ。鍵は記録に残さない偽の値） */
+const CLI_REQUEST_PATH = "request.txt";
+const CLI_PLAN_PATH = "plan.json";
+const CLI_OUT_DIR = "out";
+const CLI_FAKE_KEY = "baseline-fake-key";
+
+type RecordedWire =
+  | { readonly kind: "structured"; readonly output: unknown; readonly usage?: unknown }
+  | { readonly kind: "tools"; readonly response: { readonly kind: string; readonly usage?: unknown } & Record<string, unknown> };
+
+/** 記録の usage（共通の契約の形）を wire の形にする（無ければ欄を置かない） */
+function wireUsage(usage: unknown): Record<string, unknown> {
+  if (typeof usage !== "object" || usage === null) return {};
+  const value = usage as {
+    readonly inputTokens: number;
+    readonly cachedInputTokens: number;
+    readonly cacheWriteTokens?: number;
+    readonly outputTokens: number;
+    readonly reasoningTokens: number;
+  };
+  return {
+    usage: {
+      input_tokens: value.inputTokens,
+      input_tokens_details: {
+        cached_tokens: value.cachedInputTokens,
+        ...(value.cacheWriteTokens === undefined ? {} : { cache_write_tokens: value.cacheWriteTokens }),
+      },
+      output_tokens: value.outputTokens,
+      output_tokens_details: { reasoning_tokens: value.reasoningTokens },
+    },
+  };
+}
+
+/** 封筒を送った要求の、段の指示から枝（stage）を読む（封筒でなければ undefined） */
+function envelopeStageOf(body: Record<string, unknown>): string | undefined {
+  const format = (body["text"] as { readonly format?: { readonly schema?: unknown } } | undefined)?.format;
+  const schema = format?.schema as { readonly properties?: { readonly result?: { readonly anyOf?: unknown } } } | undefined;
+  if (schema?.properties?.result?.anyOf === undefined) return undefined;
+  for (const text of stringsOf(body["input"])) {
+    const match = /result\.stage を "([^"]+)"/u.exec(text);
+    if (match !== null) return match[1];
+  }
+  return undefined;
+}
+
+/** 値の中の文字列を、深さ優先の順に集める */
+function stringsOf(value: unknown): readonly string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(stringsOf);
+  if (typeof value === "object" && value !== null) return Object.values(value).flatMap(stringsOf);
+  return [];
+}
+
+/** 出力のテキスト（助手のメッセージ）の wire の形 */
+function message(text: string): readonly unknown[] {
+  return [{ type: "message", content: [{ type: "output_text", text }] }];
+}
+
+/** 合成の応答 1 件を、要求に合わせて Responses API の形にする */
+function wireResponseOf(recorded: RecordedWire, body: Record<string, unknown>): Record<string, unknown> {
+  if (recorded.kind === "structured") {
+    const stage = envelopeStageOf(body);
+    const output =
+      stage === undefined ? recorded.output : { result: { stage, ...(recorded.output as Record<string, unknown>) } };
+    return { status: "completed", output: message(JSON.stringify(output)), ...wireUsage(recorded.usage) };
+  }
+  const response = recorded.response;
+  if (response.kind === "toolCalls") {
+    const calls = response["toolCalls"] as readonly { readonly id: string; readonly name: string; readonly arguments: unknown }[];
+    return {
+      status: "completed",
+      output: calls.map((call) => ({
+        type: "function_call",
+        call_id: call.id,
+        name: call.name,
+        arguments: JSON.stringify(call.arguments),
+      })),
+      ...wireUsage(response.usage),
+    };
+  }
+  return { status: "completed", output: message(JSON.stringify(response["declaration"])), ...wireUsage(response.usage) };
+}
+
+/** 手元の入口の 1 つの経路を流し、観測した値を返す */
+export async function captureCliScenario(
+  factory: BaselineCliModule,
+  definitions: BaselineCliScenarios,
+  scenario: BaselineCliScenario,
+): Promise<BaselineCliCapture> {
+  const requests: unknown[] = [];
+  const clientOptions: unknown[] = [];
+  let index = 0;
+  const fakeFetch = async (_url: string, init: RequestInit): Promise<Response> => {
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    requests.push(body);
+    const recorded = scenario.recorded[index] as RecordedWire | undefined;
+    index += 1;
+    if (recorded === undefined) {
+      return new Response(JSON.stringify({ error: { code: "server_error" } }), { status: 500 });
+    }
+    return new Response(JSON.stringify(wireResponseOf(recorded, body)), { status: 200 });
+  };
+  const written: { path: string; text: string }[] = [];
+  const lines: string[] = [];
+  const prefix = `${CLI_OUT_DIR}/`;
+  const exitCode = await factory.runCli({
+    argv: [
+      "--",
+      CLI_REQUEST_PATH,
+      "--out",
+      CLI_OUT_DIR,
+      ...(scenario.args ?? []),
+      ...(scenario.planFile === undefined ? [] : ["--plan-file", CLI_PLAN_PATH]),
+    ],
+    env: { OPENAI_API_KEY: CLI_FAKE_KEY },
+    readFile: async (path) => {
+      if (path === CLI_REQUEST_PATH) return definitions.request;
+      if (path === CLI_PLAN_PATH && scenario.planFile !== undefined) return JSON.stringify(scenario.planFile);
+      throw new Error(`読めないパス: ${path}`);
+    },
+    writeFile: async (path, text) => {
+      written.push({ path: path.startsWith(prefix) ? path.slice(prefix.length) : path, text });
+    },
+    makeDirectory: async () => {},
+    loadDocuments: async () => definitions.documents,
+    makeClient: (options) => {
+      clientOptions.push(Object.fromEntries(Object.entries(options).filter(([key]) => key !== "apiKey")));
+      return factory.createOpenAiLlmClient({ ...options, fetch: fakeFetch });
+    },
+    now: () => 0,
+    log: (line) => lines.push(line),
+  });
+  const files = await Promise.all(written.map(async (file) => ({ path: file.path, ...(await digestOf(file.text)) })));
+  const manifestFile = [...written].reverse().find((file) => file.path === factory.BUNDLE_MANIFEST_FILE);
+  return toJsonValue({
+    name: scenario.name,
+    clientOptions,
+    requests,
+    files,
+    manifest: manifestFile === undefined ? null : (JSON.parse(manifestFile.text) as unknown),
+    summary: lines.at(-1) ?? null,
+    exitCode,
+  });
+}
+
+/** 手元の入口の経路の定義の全部を順に流す */
+export async function captureCliBaseline(
+  factory: BaselineCliModule,
+  definitions: BaselineCliScenarios,
+): Promise<readonly BaselineCliCapture[]> {
+  const captures: BaselineCliCapture[] = [];
+  for (const scenario of definitions.scenarios) {
+    captures.push(await captureCliScenario(factory, definitions, scenario));
+  }
+  return captures;
+}

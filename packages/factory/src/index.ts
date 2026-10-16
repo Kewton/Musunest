@@ -60,3 +60,23 @@ export * from "./record.js";
 export * from "./bundle.js";
 export * from "./run.js";
 export * from "./cli.js";
+
+// ── v1.1α（v11a/。`07-architecture-v1.1a.md`・Issue #505〜#511）─────────────
+// 契約（名前の表・v1 の型への写し・id の結び付け・持ち越し・網羅の単位）
+export * from "./v11a/names.js";
+export * from "./v11a/convert.js";
+export * from "./v11a/bind-by-id.js";
+export * from "./v11a/carry-over.js";
+export * from "./v11a/coverage.js";
+// 段（T1・T1''・J4・T2・B1・B3'）
+export * from "./v11a/stages/name-table.js";
+export * from "./v11a/stages/semantic-check.js";
+export * from "./v11a/stages/judge-advice.js";
+export * from "./v11a/stages/test-spec.js";
+export * from "./v11a/stages/write.js";
+export * from "./v11a/stages/decl-check.js";
+// 走らせる部分・名前の照合（B3）・評価口・記録
+export * from "./v11a/name-check.js";
+export * from "./v11a/evaluate.js";
+export * from "./v11a/run.js";
+export * from "./v11a/bundle-v11a.js";
