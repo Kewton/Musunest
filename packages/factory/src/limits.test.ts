@@ -122,6 +122,14 @@ describe("共通の上限（02 §1.5・§2.2）", () => {
 
 // ── 段の出力の上限（effort ごと。§1.5・§2）──────────────────────
 
+/** v1.1α の段の出力の上限（07-architecture-v1.1a.md §3。Issue #505。3 つの effort で同じ） */
+const V11A_STAGE_TABLE = {
+  "name-table": 32_768,
+  "semantic-check": 16_384,
+  "test-spec": 32_768,
+  "decl-check": 16_384,
+} as const;
+
 describe("段の出力の上限は effort ごとに、共通の置き場所が持つ（02 §1.5・§2）", () => {
   it("effort high の上限は、medium 以上である（段ごとに）", () => {
     for (const stage of OUTPUT_STAGES) {
@@ -146,6 +154,7 @@ describe("段の出力の上限は effort ごとに、共通の置き場所が�
     // 2026-10-11 の計測で打ち切りが出た段に余白を取り、Plan の段（surface・questions）を自分の名前で
     // 足した。値は暫定で、3 つの effort は同じである。
     const table: Record<(typeof OUTPUT_STAGES)[number], number> = {
+      ...V11A_STAGE_TABLE,
       requirements: 16_384,
       "reverse-check": 8_192,
       design: 32_768,
@@ -223,5 +232,67 @@ describe("呼び出しごとの timeout は、effort ごとに持つ（02 §1.5�
   it("呼ぶ側の指定（手元の入口の --timeout）は、effort の基準より優先し、締切の残りを超えない", () => {
     expect(effectiveCallTimeoutMs({ effort: "high", remainingMs: 10_000_000, timeoutMs: 1_200 })).toBe(1_200);
     expect(effectiveCallTimeoutMs({ effort: "high", remainingMs: 800, timeoutMs: 1_200 })).toBe(800);
+  });
+});
+
+// ── v1.1α の上限と段（07-architecture-v1.1a.md §1・§3・D16。Issue #505）──────────────
+
+describe("v1.1α の上限と段は、v1 の値を変えずに足す（07 §3・D16・Issue #505）", () => {
+  it("declChecks は 6 で、番人がある（v1 の correspondenceChecks と同じ数）", () => {
+    expect(AGENT_LIMITS.declChecks).toBe(6);
+    expect(AGENT_LIMITS.declChecks).toBe(AGENT_LIMITS.correspondenceChecks);
+    expect(LIMIT_GUARDS.declChecks).toBeTypeOf("string");
+    expect(LIMIT_GUARDS.declChecks.length).toBeGreaterThan(0);
+    expect(checkLimit("declChecks", 6)).toBeUndefined();
+    expect(checkLimit("declChecks", 7)?.limit).toBe("declChecks");
+  });
+
+  it("LIMIT_GUARDS は AGENT_LIMITS の全部の上限を覆い、上限に無い名前を持たない", () => {
+    expect(Object.keys(LIMIT_GUARDS).sort()).toEqual(Object.keys(AGENT_LIMITS).sort());
+  });
+
+  it("v1 の上限の値は変わらない（呼び出し 24 回・直し 6 往復・⑤a の点検 6 回 ほか）", () => {
+    expect(AGENT_LIMITS).toMatchObject({
+      requestTextChars: 4_000,
+      declarationBytes: 65_536,
+      testsPerRequirement: 16,
+      referenceRowsPerTest: 64,
+      recordRows: 256,
+      callCount: 24,
+      toolCalls: 24,
+      repairRoundTrips: 6,
+      repairStepTurns: 8,
+      correspondenceRedos: 2,
+      correspondenceChecks: 6,
+      stagnationRepeats: 2,
+      planQuestions: 10,
+      planRoundTrips: 3,
+      planChoices: 4,
+      planFreeTextChars: 500,
+    });
+  });
+
+  it("新しい 4 段は OUTPUT_STAGES の末尾にあり、既存の段の並びは変わらない", () => {
+    expect(OUTPUT_STAGES.slice(0, 10)).toEqual([
+      "surface",
+      "questions",
+      "requirements",
+      "reverse-check",
+      "design",
+      "test-suite",
+      "write",
+      "correspondence",
+      "repair",
+      "arbitration",
+    ]);
+    expect(OUTPUT_STAGES.slice(10)).toEqual(["name-table", "semantic-check", "test-spec", "decl-check"]);
+  });
+
+  it("新しい 4 段の上限は 3 つの effort で同じで、name-table・test-spec は 32,768、semantic-check・decl-check は 16,384", () => {
+    for (const effort of ["low", "medium", "high"] as const) {
+      for (const [stage, value] of Object.entries(V11A_STAGE_TABLE)) {
+        expect(STAGE_MAX_OUTPUT_TOKENS[effort][stage as keyof typeof V11A_STAGE_TABLE], `${effort}/${stage}`).toBe(value);
+      }
+    }
   });
 });
