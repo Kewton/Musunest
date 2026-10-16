@@ -151,8 +151,8 @@ export interface CliArguments {
    */
   readonly scriptFile?: string;
   /**
-   * `--pipeline <v1|v1.1a>`（既定 v1。指定したときだけ持つ）。`v1.1a` は `--plan-file` と一緒にだけ受け、
-   * `--plan`・`--plan-only` とは同時に指定できない（Issue #511）。
+   * `--pipeline <v1|v1.1a>`（既定 v1。指定したときだけ持つ）。値によらず `--plan`・`--plan-only` とは同時に
+   * 指定できない。`v1.1a` は `--plan-file` と一緒にだけ受ける（Issue #511）。
    */
   readonly pipeline?: Pipeline;
 }
@@ -296,11 +296,11 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   if (scriptFile !== undefined && answersFile !== undefined) {
     return { error: "--script と --answers は同時に指定できません" };
   }
-  if (pipeline === "v1.1a" && plan) {
-    return { error: "--pipeline v1.1a と --plan は同時に指定できません" };
+  if (pipeline !== undefined && plan) {
+    return { error: "--pipeline と --plan は同時に指定できません" };
   }
-  if (pipeline === "v1.1a" && planOnly) {
-    return { error: "--pipeline v1.1a と --plan-only は同時に指定できません" };
+  if (pipeline !== undefined && planOnly) {
+    return { error: "--pipeline と --plan-only は同時に指定できません" };
   }
   if (pipeline === "v1.1a" && planFile === undefined) {
     return { error: "--pipeline v1.1a は --plan-file と一緒に指定してください" };

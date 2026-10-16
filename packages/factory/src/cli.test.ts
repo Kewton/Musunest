@@ -649,12 +649,22 @@ describe("--pipeline の読み取り（Issue #511）", () => {
     {
       name: "--pipeline v1.1a と --plan",
       args: ["--pipeline", "v1.1a", "--plan"],
-      error: "--pipeline v1.1a と --plan は同時に指定できません",
+      error: "--pipeline と --plan は同時に指定できません",
     },
     {
       name: "--pipeline v1.1a と --plan-only",
       args: ["--pipeline", "v1.1a", "--plan-only"],
-      error: "--pipeline v1.1a と --plan-only は同時に指定できません",
+      error: "--pipeline と --plan-only は同時に指定できません",
+    },
+    {
+      name: "--pipeline v1 と --plan",
+      args: ["--pipeline", "v1", "--plan"],
+      error: "--pipeline と --plan は同時に指定できません",
+    },
+    {
+      name: "--pipeline v1 と --plan-only",
+      args: ["--pipeline", "v1", "--plan-only"],
+      error: "--pipeline と --plan-only は同時に指定できません",
     },
     { name: "知らない値", args: ["--pipeline", "v2"], error: "--pipeline には v1 か v1.1a を指定してください" },
     { name: "値が無い", args: ["--pipeline"], error: "--pipeline には v1 か v1.1a を指定してください" },
