@@ -509,7 +509,8 @@ export type ResolveResult =
 /**
  * (f) 下書きに、**一覧の順で**要件 ID を付ける。要件ごとの並びの i 番目は一覧の i 番目の要件であり、
  * その写しが要件の文の先頭 `copyLengthFor` 文字と一致しなければ落とす（入れ替え・取り違え・長さ違い）。
- * 行の出典の写しは、それと一致する要件にちょうど 1 つ当たれば、その要件 ID を付ける。
+ * 行の出典の写しは、それと一致する要件にちょうど 1 つ当たり、**引用がその要件の原文の部分文字列**であれば、
+ * その要件 ID を付ける（引用が別の要件の原文に在っても結び付け直さない）。
  * 全文が同じ要件が一覧にあれば、**表を見る前に**落とす。
  */
 export function resolveNameTableDraft(list: RequirementList, draft: NameTableDraft): ResolveResult {
@@ -536,6 +537,13 @@ export function resolveNameTableDraft(list: RequirementList, draft: NameTableDra
     const [only] = matches;
     if (matches.length !== 1 || only === undefined) {
       problems.push({ field: `rows[${index}].source.copy`, message: "出典の要件の文の写しが一覧のどの要件とも合わない" });
+      return undefined;
+    }
+    // 引用は、写しが指す**その要件の原文**の部分文字列であること。別の要件の原文に在っても結び付け直さない
+    // （推測で別の要件に結び付けない。fail-closed。窓口の判断 2026-10-16・PR #515）
+    const text = list.requirements[only]?.text ?? "";
+    if (row.source.quote === "" || !text.includes(row.source.quote)) {
+      problems.push({ field: `rows[${index}].source.quote`, message: "出典の引用が、写しが指す要件の原文に無い" });
       return undefined;
     }
     return list.requirements[only]?.id;
@@ -661,7 +669,8 @@ function needsEntity(row: NameTableRow): boolean {
  *
  *   (b) `id` の一意
  *   (c) 名前の規則（`NAME_PATTERN`・`RESERVED_NAMES`）と名前空間ごとの一意（entity・計算・操作・画面は種類ごとに
- *       全体、項目は所属 entity の中。別 entity の同名の項目は許す）。同じ（種類・entity・名前）を指す 2 つの `id`
+ *       全体、項目は所属 entity の中。別 entity の同名の項目は許す）。同じ（種類・entity・名前）を指す 2 つの `id`。
+ *       行ごとの計算と同じ entity の項目の同名
  *   (d) 参照（`entity`・`groupBy.field`・`refEntity` が表にあり種類が合う。enum の見出しの元は options を持ち、
  *       月の見出しの元は date）と、型・選択肢・出典の形
  *   (e) 所属の fail-closed（fixed-test・structural は所属 1 件以上、structural は checks ごとに種類の合う所属、
@@ -697,6 +706,14 @@ export function checkNameTable(
     const namespace = row.kind === "field" ? `field\u0000${row.entity ?? ""}\u0000${row.name}` : `${row.kind}\u0000${row.name}`;
     if (namespaceSeen.has(namespace)) problems.push({ field, message: "同じ名前空間に同じ名前の行がある" });
     namespaceSeen.add(namespace);
+    // 行ごとの計算の名前は、同じ entity の項目の名前と重ねない（spec-engine の LOGIC_COMPUTED_NAME_CONFLICT と
+    // 同じ線。別 entity の同名は許す。窓口の判断 2026-10-16・PR #515）
+    if (row.kind === "computation" && row.entity !== null) {
+      const clash = table.rows.some(
+        (other) => other.kind === "field" && other.entity === row.entity && other.name === row.name,
+      );
+      if (clash) problems.push({ field, message: "計算の名前が同じ entity の項目の名前と重なっている" });
+    }
     const entityName = row.entity === null ? "" : (rowById.get(row.entity)?.name ?? `\u0001${row.entity}`);
     const location = `${row.kind}\u0000${entityName}\u0000${row.name}`;
     if (locationSeen.has(location)) {

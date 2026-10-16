@@ -13,8 +13,16 @@
 // 除く範囲（D14）：持ち越しの要件は一覧と所属から除き、**その要件だけが所属させる行**は B3 に渡す役割の表と
 // 恒等の対応からも除く。別の要件も所属させる行（共有する行）は残す。残る要件が 0 なら全件持ち越し（D15）。
 //
+// 除いたあとに、**残る行・残る試験の参照が除いた行を指していれば例外で断る**（黙って進めない。窓口の判断
+// 2026-10-16・PR #515）。参照している行ごと持ち越しへ回す案は採らない——持ち越しの出どころ（4 つ）の外の
+// 理由で要件を増やすことになり、`carry-over.json` の契約が変わるためである。行の参照は所属 entity・
+// 見出しの元の項目（`groupBy.field`）・参照先（`refEntity`）、試験の参照は対象・参照データの対象・空の entity・
+// 構造の検査の `refEntity`・`role`・入力と参照データの値の鍵である。
+//
 // LLM を呼ばない純粋な関数だけを置く（表の SHA-256 を求めるので `deriveCarryOver` は Promise を返す）。
+import type { FixedTest, TestSuite } from "../fixed-test.js";
 import type { RequirementList } from "../pipeline.js";
+import { isRecord } from "../stages/prompt.js";
 import type { CoverageLoss } from "./coverage.js";
 import { toV1, type V1Conversion } from "./convert.js";
 import { nameTableSha256, ownersByRowId, type NameTable } from "./names.js";
@@ -171,6 +179,10 @@ export async function deriveCarryOver(input: CarryOverInput): Promise<CarryOver>
       return rowOwners.length > 0 && rowOwners.every((owner) => carried.has(owner));
     })
     .map((row) => row.id);
+  const dangling = danglingRowReferences(table, new Set(excludedRowIds));
+  if (dangling.length > 0) {
+    throw new Error("持ち越し：残る行の参照（所属 entity・見出しの元・参照先）が除いた行を指している");
+  }
   const remainingRequirementIds = ids.filter((id) => !carried.has(id));
   return {
     entries: ids.flatMap((id) => {
@@ -183,19 +195,77 @@ export async function deriveCarryOver(input: CarryOverInput): Promise<CarryOver>
   };
 }
 
+/** 除いた行を指す参照の位置（`field` は位置、`message` は固定文。値は埋めない） */
+export interface DanglingReference {
+  readonly field: string;
+  readonly message: string;
+}
+
+/** 残る行（除かない行）の参照が、除いた行を指す位置を挙げる（所属 entity・`groupBy.field`・`refEntity`） */
+export function danglingRowReferences(table: NameTable, excluded: ReadonlySet<string>): readonly DanglingReference[] {
+  const found: DanglingReference[] = [];
+  table.rows.forEach((row, index) => {
+    if (excluded.has(row.id)) return;
+    if (row.entity !== null && excluded.has(row.entity)) {
+      found.push({ field: `rows[${index}].entity`, message: "残る行の所属 entity が除いた行を指している" });
+    }
+    if (row.groupBy !== null && excluded.has(row.groupBy.field)) {
+      found.push({ field: `rows[${index}].groupBy.field`, message: "残る行の見出しの元が除いた行を指している" });
+    }
+    if (row.refEntity !== null && excluded.has(row.refEntity)) {
+      found.push({ field: `rows[${index}].refEntity`, message: "残る行の参照先が除いた行を指している" });
+    }
+  });
+  return found;
+}
+
+/** 試験が参照する表の `id`（対象・参照データの対象・空の entity・構造の検査・入力と参照データの値の鍵） */
+function referencedIdsOf(test: FixedTest): readonly string[] {
+  const ids: string[] = [];
+  if (test.target.roleId !== undefined) ids.push(test.target.roleId);
+  for (const row of test.referenceData) {
+    if (row.target.roleId !== undefined) ids.push(row.target.roleId);
+    ids.push(...Object.keys(row.values));
+  }
+  if (test.inputContract !== undefined) ids.push(...test.inputContract.emptyEntities);
+  if (test.assertion?.refEntity !== undefined) ids.push(test.assertion.refEntity);
+  if (test.assertion?.role !== undefined) ids.push(test.assertion.role);
+  if (isRecord(test.input)) ids.push(...Object.keys(test.input));
+  return ids;
+}
+
+/** 残る試験の参照が、除いた行を指す位置を挙げる（`field` は試験の添字） */
+export function danglingTestReferences(suite: TestSuite, excluded: ReadonlySet<string>): readonly DanglingReference[] {
+  const found: DanglingReference[] = [];
+  suite.tests.forEach((test, index) => {
+    if (referencedIdsOf(test).some((id) => excluded.has(id))) {
+      found.push({ field: `tests[${index}]`, message: "残る試験の参照が除いた行を指している" });
+    }
+  });
+  return found;
+}
+
 /** 持ち越しを除いた版（一覧・表・v1 の写し） */
 export interface PrunedForCarryOver {
   readonly list: RequirementList;
   readonly table: NameTable;
   /** 除いた表の v1 の写し（B3 に渡す役割の表・恒等の対応・所属） */
   readonly conversion: V1Conversion;
+  /** 残る要件の試験（試験の組を渡したときだけ） */
+  readonly suite?: TestSuite;
 }
 
 /**
  * 一覧・所属・B3 に渡す役割の表と恒等の対応から、持ち越しの要件と、その要件だけが所属させる行を除いた版を返す
- * （D14。共有する行は残す）。builder に見せる表（全行）は呼ぶ側が別に持つ。
+ * （D14。共有する行は残す）。builder に見せる表（全行）は呼ぶ側が別に持つ。試験の組を渡せば、残る要件の試験に
+ * 絞り、その参照が除いた行を指していれば例外で断る。残る行の参照が除いた行を指していても例外で断る。
  */
-export function pruneForCarryOver(list: RequirementList, table: NameTable, carryOver: CarryOver): PrunedForCarryOver {
+export function pruneForCarryOver(
+  list: RequirementList,
+  table: NameTable,
+  carryOver: CarryOver,
+  suite?: TestSuite,
+): PrunedForCarryOver {
   const carried = new Set(carryOver.entries.map((entry) => entry.requirementId));
   const excluded = new Set(carryOver.excludedRowIds);
   const keep = <T extends { readonly requirementId: string }>(entries: readonly T[]): readonly T[] =>
@@ -209,9 +279,25 @@ export function pruneForCarryOver(list: RequirementList, table: NameTable, carry
     verification: keep(table.verification),
     classification: keep(table.classification),
   };
+  if (danglingRowReferences(table, excluded).length > 0) {
+    throw new Error("持ち越し：残る行の参照（所属 entity・見出しの元・参照先）が除いた行を指している");
+  }
+  const remainingSuite =
+    suite === undefined
+      ? undefined
+      : {
+          tests: suite.tests.filter((test) => !carried.has(test.target.requirementId)),
+          ...(suite.classifications === undefined
+            ? {}
+            : { classifications: suite.classifications.filter((entry) => !carried.has(entry.requirementId)) }),
+        };
+  if (remainingSuite !== undefined && danglingTestReferences(remainingSuite, excluded).length > 0) {
+    throw new Error("持ち越し：残る試験の参照が除いた行を指している");
+  }
   return {
     list: { ...list, requirements: list.requirements.filter((requirement) => !carried.has(requirement.id)) },
     table: pruned,
     conversion: toV1(pruned),
+    ...(remainingSuite === undefined ? {} : { suite: remainingSuite }),
   };
 }

@@ -2,7 +2,9 @@
 import { describe, expect, it } from "vitest";
 import { checkDesignOwnership } from "../stages/design.js";
 import { fixtureList, fixtureTable } from "./__tests__/fixtures.js";
+import type { FixedTest } from "../fixed-test.js";
 import {
+  danglingRowReferences,
   deriveCarryOver,
   pruneForCarryOver,
   type CarryOverInput,
@@ -139,5 +141,61 @@ describe("SHA の合わない結果・不完全な結果は例外で断る（持
         await fullInput({ semantic: [accept("R1"), accept("R2"), accept("R3"), accept("R4"), accept("R5")] }),
       ),
     ).rejects.toThrow(/対象の外/);
+  });
+});
+
+const r2Test = (id: string, referenceRole?: string): FixedTest => ({
+  id,
+  target: { requirementId: "R2", kind: "screen", roleId: "s.members" },
+  kind: "normal",
+  operation: "screen",
+  clock: "2026-09-16T12:00:00+09:00",
+  input: null,
+  referenceData:
+    referenceRole === undefined ? [] : [{ target: { requirementId: "R2", kind: "entity", roleId: referenceRole }, values: {} }],
+  expected: { kind: "ok", value: null },
+});
+
+describe("除いた行を指す参照は黙って進めずに例外で断る（窓口の判断・PR #515）", () => {
+  it("残る行の groupBy が除いた行を指すと deriveCarryOver が断る", async () => {
+    // R1 だけが持ち越し（R5 は unresolved）。R1 だけが所属させる項目 item.kind・item.day を、残る R4 の
+    // 見出しごとの計算（byKind・byMonth）が見出しの元に指している
+    const input = await fullInput({
+      semantic: [reject("R1", "missing-target"), accept("R2"), accept("R3"), accept("R4")],
+      decl: [accept("R2"), accept("R3"), accept("R4")],
+    });
+    await expect(deriveCarryOver({ ...input, coverage: [] })).rejects.toThrow(/除いた行を指している/);
+    const table = fixtureTable();
+    const index = (id: string) => table.rows.findIndex((row) => row.id === id);
+    expect(danglingRowReferences(table, new Set(["f.item.kind", "f.item.day"]))).toEqual([
+      { field: `rows[${index("c.byKind")}].groupBy.field`, message: "残る行の見出しの元が除いた行を指している" },
+      { field: `rows[${index("c.byMonth")}].groupBy.field`, message: "残る行の見出しの元が除いた行を指している" },
+    ]);
+  });
+
+  it("残る行の refEntity が除いた行を指す位置を挙げる", () => {
+    const table = fixtureTable();
+    const owner = table.rows.findIndex((row) => row.id === "f.item.owner");
+    expect(danglingRowReferences(table, new Set(["e.member"]))).toContainEqual({
+      field: `rows[${owner}].refEntity`,
+      message: "残る行の参照先が除いた行を指している",
+    });
+  });
+
+  it("残る試験の参照が除いた行を指すと pruneForCarryOver が断る", async () => {
+    const carry = await deriveCarryOver(await fullInput());
+    expect(carry.excludedRowIds).toContain("f.item.amount");
+    expect(() =>
+      pruneForCarryOver(fixtureList(), fixtureTable(), carry, { tests: [r2Test("bad", "f.item.amount")] }),
+    ).toThrow(/除いた行を指している/);
+  });
+
+  it("参照が残る行だけなら、残る要件の試験に絞って返す", async () => {
+    const carry = await deriveCarryOver(await fullInput());
+    const carriedTest: FixedTest = { ...r2Test("carried"), target: { requirementId: "R4", kind: "screen", roleId: "s.overview" } };
+    const pruned = pruneForCarryOver(fixtureList(), fixtureTable(), carry, {
+      tests: [r2Test("ok", "e.member"), carriedTest],
+    });
+    expect(pruned.suite?.tests.map((test) => test.id)).toEqual(["ok"]);
   });
 });

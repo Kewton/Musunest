@@ -125,6 +125,22 @@ describe("負例は固定文の問題になる（値を埋めない。07 §2.1�
     expectProblem(patchRow(fixtureTable(), at, { name: "amount" }), `rows[${at}].name`, "同じ名前空間に同じ名前の行がある");
   });
 
+  it("同じ entity の中で計算と項目が同じ名前なら落ちる（窓口の判断・PR #515）", () => {
+    const at = rowIndex("c.itemCount");
+    // member に項目 title があるので、member の計算 title は重なる
+    expectProblem(
+      patchRow(fixtureTable(), at, { name: "title" }),
+      `rows[${at}].name`,
+      "計算の名前が同じ entity の項目の名前と重なっている",
+    );
+  });
+
+  it("別 entity の項目と同じ名前の計算は通る（正例）", () => {
+    const at = rowIndex("c.itemCount");
+    // amount は item の項目で、計算は member のもの
+    expect(checkNameTable(list, patchRow(fixtureTable(), at, { name: "amount" }), FIXTURE_DOCUMENTS)).toEqual([]);
+  });
+
   it("同じ場所（種類・entity・名前）を指す 2 つの id は落ちる（別名を書けない）", () => {
     const base = fixtureTable();
     const alias = { ...base.rows[rowIndex("c.itemCount")]!, id: "c.itemCountAlias" };
@@ -340,6 +356,45 @@ describe("要件 ID は一覧の順でコードが付け、写しと照合する
       ok: false,
       problems: [{ field: "requirements[1]", message: "全文が同じ要件が一覧にある（写しで要件を区別できない）" }],
     });
+  });
+
+  it("引用がその位置の要件の原文に無ければ、別の要件の原文に在っても結び付けずに落ちる（窓口の判断・PR #515）", () => {
+    const draft = draftOf(list, fixtureTable());
+    const at = rowIndex("f.item.owner");
+    // 写しは R1 を指すが、引用「担当者の名前」は R1 に無く R2 の原文に在る
+    expect(list.requirements[0]!.text.includes("担当者の名前")).toBe(false);
+    expect(list.requirements[1]!.text.includes("担当者の名前")).toBe(true);
+    const shifted = {
+      ...draft,
+      rows: draft.rows.map((row, index) =>
+        index === at ? { ...row, source: { ...row.source, quote: "担当者の名前" } } : row,
+      ),
+    };
+    const result = resolveNameTableDraft(list, shifted);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toEqual([
+      { field: `rows[${at}].source.quote`, message: "出典の引用が、写しが指す要件の原文に無い" },
+    ]);
+    expectNoValues(result.problems, ["担当者の名前"]);
+    expect(inspectNameTable(list, shifted, FIXTURE_DOCUMENTS).ok).toBe(false);
+  });
+
+  it("要件ごとの並びが一覧より少ないと落ちる（欠落）", () => {
+    const draft = draftOf(list, fixtureTable());
+    const result = resolveNameTableDraft(list, { ...draft, requirements: draft.requirements.slice(0, -1) });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toContainEqual({ field: "requirements", message: "要件ごとの並びの数が一覧の要件の数と合わない" });
+  });
+
+  it("要件ごとの並びが一覧より多いと落ちる（余り）", () => {
+    const draft = draftOf(list, fixtureTable());
+    const extra = draft.requirements[0]!;
+    const result = resolveNameTableDraft(list, { ...draft, requirements: [...draft.requirements, extra] });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.problems).toContainEqual({ field: "requirements", message: "要件ごとの並びの数が一覧の要件の数と合わない" });
   });
 
   it("形の合わない応答は (a) で落ちる（固定文）", () => {
