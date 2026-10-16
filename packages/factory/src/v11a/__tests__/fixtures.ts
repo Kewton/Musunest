@@ -41,6 +41,29 @@ export function fixtureList(): RequirementList {
   };
 }
 
+/**
+ * 依頼文の引用（`quote`）が要件の文と別の文字列である要件の一覧（文は `fixtureList` と同じ。#505・#507 の
+ * T1 の出典の引用の試験に使う）。どの引用も、どの要件の文にも別の要件の引用にも含まれない。
+ */
+export function fixtureListWithRequestQuotes(): RequirementList {
+  const quotes = [
+    "依頼の一つ目：記録の単位をまとめて登録したい",
+    "依頼の二つ目：受け持ちを一覧で見たい",
+    "依頼の三つ目：正の値のものだけを締めたい",
+    "依頼の四つ目：まとめを一つの画面で見たい",
+    "依頼の五つ目：外へ知らせを出したい",
+  ];
+  const base = fixtureList();
+  return {
+    ...base,
+    requirements: base.requirements.map((requirement, index) => ({
+      ...requirement,
+      quote: quotes[index] as string,
+      position: { start: 0, end: (quotes[index] as string).length },
+    })),
+  };
+}
+
 /** 段に渡す文書（制約 ID は `### ` の見出し） */
 export const FIXTURE_DOCUMENTS: readonly PromptDocument[] = [
   { name: "契約", text: "# 契約\n\n### 外部への通知\n\n宣言は外部の仕組みへ通知を送れない。\n" },

@@ -13,8 +13,12 @@
 // 塊として `input` の末尾に足す。前置き（`instructions`・`documents`・`rules`・schema・`maxOutputTokens`）は
 // 1 文字も変えない。中身のやり直しを共通の口へ告げる（`noteRetry("content")`）のも、回す側の仕事である。
 //
-// 要件 ID は**応答に書かせない**（D10）。要件の一覧のデータには要件の文と引用だけを並べ、写しの長さ
-// （`copyLengthFor`）をコードが付ける。応答の要件ごとの並びに、A1 の関数が一覧の順で要件 ID を付ける。
+// 要件 ID は**応答に書かせない**（D10）。要件の一覧のデータには、要件ごとに**コードが切った写し**（`copy`。
+// `requirementCopy(text, copyLengthFor(list))`）・要件の文（`text`）・依頼文の引用（`requestQuote`）を並べ、
+// モデルには写しをそのまま写させる——文字数を数えさせない（v1.1α の比較で、モデルは写しの長さを数えられず
+// 全文や別の長さを写した。#505・#507）。照合は今までどおり完全一致で、応答の要件ごとの並びに、A1 の関数が
+// 一覧の順で要件 ID を付ける。行の出典の引用は、写しが指す要件の文か依頼文の引用の部分文字列なら受ける
+// （A1 の `isSourceQuoteOf`。依頼文の引用は、要件の文の引用と取り違えないよう `requestQuote` の名で載せる）。
 // 要件ごとの分類（`nature`）は**要件の文から**分類させる——確定した仕様のデータから Plan の `kind` を外して
 // 渡す（試験も見せない。T2 が独立に分類し、食い違いは J2 が裁く。§1.1）。
 //
@@ -107,15 +111,15 @@ export const NAME_TABLE_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
   {
     id: "R-nt-05",
-    text: "role は、その行が要件に対して何をするかを 1 文で書く役割の説明である。source は出典で、copy にその行を求める要件の文の写し、quote にその要件の文からそのまま写した引用を書く。",
-    why: "名前と分けて意味を持たせ、T1''・T2 が名前を見ずに点検・試験できるようにする（§2.1・§2.3）",
-    since: "Issue #507",
+    text: "role は、その行が要件に対して何をするかを 1 文で書く役割の説明である。source は出典である。source.copy には、その行を求める要件の、要件の一覧の copy を 1 文字も変えずにそのまま写す。source.quote には、その要件の text か requestQuote の一部を 1 文字も変えずに写す（言い換えない。別の要件の text・requestQuote から写さない）。",
+    why: "名前と分けて意味を持たせ、T1''・T2 が名前を見ずに点検・試験できるようにする（§2.1・§2.3）。写しはコードが渡し、引用は依頼文の引用からも受ける（#505・#507）",
+    since: "Issue #507（写しと引用の受け方は #505・#507 の比較の観測で改めた）",
   },
   {
     id: "R-nt-06",
-    text: "requirements には、要件の一覧の要件ごとに 1 件ずつ、一覧と同じ順で並べる。要件 ID は書かない。各件の copy には、その要件の文の先頭から、一覧の copyLength 文字をそのまま写す（文がそれより短ければ全文）。",
-    why: "要件 ID を書かせず、一覧の順と写しで要件を指させる（D10。写し違い・入れ替えはコードが検知する）",
-    since: "Issue #507",
+    text: "requirements には、要件の一覧の要件ごとに 1 件ずつ、一覧と同じ順で並べる。要件 ID は書かない。各件の copy には、一覧のその要件の copy を 1 文字も変えずにそのまま写す（text の全文や、自分で切った長さを書かない）。",
+    why: "要件 ID を書かせず、一覧の順と写しで要件を指させる（D10。写し違い・入れ替えはコードが検知する）。写しはコードが切って渡し、文字数を数えさせない（#505・#507）",
+    since: "Issue #507（写しの渡し方は #505・#507 の比較の観測で改めた）",
   },
   {
     id: "R-nt-07",
@@ -171,8 +175,8 @@ export const NAME_TABLE_SCHEMA = {
             additionalProperties: false,
             required: ["copy", "quote"],
             properties: {
-              copy: { type: "string", description: "出典の要件の文の写し" },
-              quote: { type: "string", description: "出典の要件の文からの引用" },
+              copy: { type: "string", description: "出典の要件の、要件の一覧の copy をそのまま写したもの" },
+              quote: { type: "string", description: "出典の要件の text か requestQuote の一部をそのまま写した引用" },
             },
           },
           type: {
@@ -210,7 +214,7 @@ export const NAME_TABLE_SCHEMA = {
         additionalProperties: false,
         required: ["copy", "roles", "verification", "nature"],
         properties: {
-          copy: { type: "string", description: "要件の文の先頭 copyLength 文字の写し" },
+          copy: { type: "string", description: "要件の一覧の、この要件の copy をそのまま写したもの" },
           roles: {
             type: "array",
             items: {
@@ -380,8 +384,11 @@ function buildData(input: NameTableInput, length: number): readonly PromptData[]
     {
       name: "要件の一覧",
       text: serializeJson({
-        copyLength: length,
-        requirements: input.list.requirements.map((requirement) => ({ text: requirement.text, quote: requirement.quote })),
+        requirements: input.list.requirements.map((requirement) => ({
+          copy: requirementCopy(requirement.text, length),
+          text: requirement.text,
+          requestQuote: requirement.quote,
+        })),
       }),
     },
     {

@@ -8,12 +8,12 @@
 //   3. 口の有無で偽物が受け取った要求が同じ。規則の定義に不備が無い。題材の言葉を使わない
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { describe, expect, it } from "vitest";
-import type { LlmStructuredRequest } from "../../llm.js";
+import type { LlmClient, LlmStructuredRequest } from "../../llm.js";
 import type { RequirementList } from "../../pipeline.js";
 import { ruleDefinitionDefects, type RejectedCandidate } from "../../stages/prompt.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
-import { FIXTURE_DOCUMENTS, draftOf, fixtureList, fixtureTable } from "../__tests__/fixtures.js";
-import { nameTableSha256, type NameTableDraft } from "../names.js";
+import { FIXTURE_DOCUMENTS, draftOf, fixtureList, fixtureListWithRequestQuotes, fixtureTable } from "../__tests__/fixtures.js";
+import { copyLengthFor, nameTableSha256, requirementCopy, type NameTableDraft } from "../names.js";
 import {
   NAME_TABLE_PREVIOUS_DATA_NAMES,
   NAME_TABLE_ROUNDS,
@@ -144,10 +144,16 @@ describe("T1 の要求", () => {
     expect(blocks.map((block) => block.name)).toEqual(["確定した仕様", "要件の一覧", "文書"]);
     const plan = JSON.parse(blocks[0]!.text) as { requirements: Record<string, unknown>[] };
     expect(plan.requirements.every((requirement) => !("kind" in requirement))).toBe(true);
-    const list = JSON.parse(blocks[1]!.text) as { copyLength: number; requirements: Record<string, unknown>[] };
-    expect(list.copyLength).toBeGreaterThanOrEqual(8);
+    // 写しの長さ（copyLength）は渡さず、コードが切った要件ごとの写しを渡す（#505・#507）
+    const list = JSON.parse(blocks[1]!.text) as { requirements: Record<string, unknown>[] };
+    expect(Object.keys(list)).toEqual(["requirements"]);
     expect(list.requirements.map((requirement) => Object.keys(requirement).sort())).toEqual(
-      LIST.requirements.map(() => ["quote", "text"]),
+      LIST.requirements.map(() => ["copy", "requestQuote", "text"]),
+    );
+    const length = copyLengthFor(LIST)!;
+    expect(length).toBeGreaterThanOrEqual(8);
+    expect(list.requirements.map((requirement) => requirement["copy"])).toEqual(
+      LIST.requirements.map((requirement) => requirementCopy(requirement.text, length)),
     );
     for (const requirement of LIST.requirements) expect(blocks[1]!.text).not.toContain(`"${requirement.id}"`);
     expect(request.schemaName).toBe(NAME_TABLE_SCHEMA_NAME);
@@ -288,5 +294,147 @@ describe("T1 の結果", () => {
     });
     expect(recording.structured).toHaveLength(0);
     expect(outcome).toMatchObject({ ok: false, failure: { kind: "unmet", attempts: 0 } });
+  });
+});
+
+// ── 観測と同じ形の応答（#505・#507）──────────────────────────────────────
+//
+// v1.1α の比較で、T1 のモデルは写しの文字数を数えられず要件の文の全文を写し、要件の一覧の引用（依頼文から
+// の引用）を行の出典の引用に写した。ここでは**数えずに、データにある文字列をそのまま写す**偽物で、その形を
+// 作る：一覧に要件ごとの写し（copy）があればそれを写し、無ければ全文を写す。出典の引用は一覧の依頼文の
+// 引用（requestQuote。無ければ quote）か、要件の文の部分文字列（fixture の表の引用）を写す。
+
+const QUOTED = fixtureListWithRequestQuotes();
+const QUOTED_PLAN = planOf(QUOTED);
+
+/** 要求の「要件の一覧」から、要件ごとに写す文字列（写しが無ければ全文）と依頼文の引用を読む */
+function listedOf(request: LlmStructuredRequest): { readonly copies: string[]; readonly quotes: string[] } {
+  const block = dataBlocks(request.input).find((candidate) => candidate.name === "要件の一覧");
+  if (block === undefined) throw new Error("要件の一覧が無い");
+  const parsed = JSON.parse(block.text) as { requirements: Record<string, unknown>[] };
+  return {
+    copies: parsed.requirements.map((entry) => (typeof entry["copy"] === "string" ? entry["copy"] : (entry["text"] as string))),
+    quotes: parsed.requirements.map((entry) => (entry["requestQuote"] ?? entry["quote"]) as string),
+  };
+}
+
+/** 数えずに写す偽物の LLM（要求ごとに応答を作る） */
+function copyingClient(quoteFrom: "requirement-text" | "request-quote") {
+  const structured: LlmStructuredRequest[] = [];
+  const ids = QUOTED.requirements.map((requirement) => requirement.id);
+  const client: LlmClient = {
+    async callStructured<T>(request: LlmStructuredRequest) {
+      structured.push(request);
+      const { copies, quotes } = listedOf(request);
+      const response = clone(responseOf(draftOf(QUOTED, fixtureTable())));
+      const rows = response["rows"] as Record<string, Record<string, unknown>>[];
+      fixtureTable().rows.forEach((row, index) => {
+        const at = ids.indexOf(row.source.requirementId);
+        rows[index]!["source"] = {
+          copy: copies[at],
+          quote: quoteFrom === "request-quote" ? quotes[at] : row.source.quote,
+        };
+      });
+      (response["requirements"] as Record<string, unknown>[]).forEach((entry, index) => {
+        entry["copy"] = copies[index];
+      });
+      return { output: response as T, usage: undefined };
+    },
+    async callWithTools() {
+      throw new Error("道具は使わない");
+    },
+  };
+  return { client, structured };
+}
+
+async function runQuoted(client: LlmClient) {
+  return runNameTable({ plan: QUOTED_PLAN, list: QUOTED, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(client) });
+}
+
+describe("T1 は要件ごとの写しをコードが渡し、依頼文の引用も出典として受ける（#505・#507）", () => {
+  it("要件の一覧の写しは、コードが一意な長さで切った要件の文の先頭で、写しの長さの指示は無い", async () => {
+    const { client, structured } = copyingClient("requirement-text");
+    await runQuoted(client);
+    const block = dataBlocks(structured[0]!.input).find((candidate) => candidate.name === "要件の一覧")!;
+    const parsed = JSON.parse(block.text) as Record<string, unknown>;
+    expect(Object.keys(parsed)).toEqual(["requirements"]);
+    const length = copyLengthFor(QUOTED)!;
+    expect(parsed["requirements"]).toEqual(
+      QUOTED.requirements.map((requirement) => ({
+        copy: requirementCopy(requirement.text, length),
+        text: requirement.text,
+        requestQuote: requirement.quote,
+      })),
+    );
+    expect(NAME_TABLE_RULES.some((text) => text.includes("copyLength"))).toBe(false);
+  });
+
+  it("数えずに写す応答（要件の文の部分文字列を引用）は通る", async () => {
+    const { client, structured } = copyingClient("requirement-text");
+    const outcome = await runQuoted(client);
+    expect(structured).toHaveLength(1);
+    if (!outcome.ok) throw new Error(JSON.stringify(outcome.failure));
+    expect(outcome.value.table).toEqual(fixtureTable());
+  });
+
+  it("数えずに写し、一覧の依頼文の引用を出典の引用に写した応答は通り、出典はその要件に結ぶ", async () => {
+    const { client, structured } = copyingClient("request-quote");
+    const outcome = await runQuoted(client);
+    expect(structured).toHaveLength(1);
+    if (!outcome.ok) throw new Error(JSON.stringify(outcome.failure));
+    const quoteOf = new Map(QUOTED.requirements.map((requirement) => [requirement.id, requirement.quote] as const));
+    expect(outcome.value.table.rows.map((row) => row.source)).toEqual(
+      fixtureTable().rows.map((row) => ({
+        requirementId: row.source.requirementId,
+        quote: quoteOf.get(row.source.requirementId),
+      })),
+    );
+  });
+
+  it("負例：一覧の写しがあっても全文を写した応答は unmet（写しは今までどおり完全一致）", async () => {
+    const response = clone(responseOf(draftOf(QUOTED, fixtureTable())));
+    (response["requirements"] as Record<string, unknown>[]).forEach((entry, index) => {
+      entry["copy"] = QUOTED.requirements[index]!.text;
+    });
+    const recording = createRecordingClient([structured(response)]);
+    const outcome = await runQuoted(recording.client);
+    if (outcome.ok) throw new Error("落ちるはず");
+    expect(outcome.failure).toMatchObject({ kind: "unmet", attempts: 1 });
+    if (outcome.failure.kind !== "unmet") throw new Error("unmet のはず");
+    expect(outcome.failure.problems).toContainEqual({
+      field: "requirements[0].copy",
+      message: "要件の文の写しが指示した長さと合わない",
+    });
+  });
+
+  it("負例：別の要件の依頼文の引用・言い換えた引用は unmet", async () => {
+    const at = fixtureTable().rows.findIndex((row) => row.id === "f.item.owner");
+    const own = QUOTED.requirements[0]!.quote;
+    for (const quote of [QUOTED.requirements[1]!.quote, own.replace("登録", "記録")]) {
+      const response = clone(responseOf(draftOf(QUOTED, fixtureTable())));
+      const rows = response["rows"] as Record<string, Record<string, unknown>>[];
+      rows[at]!["source"] = { ...rows[at]!["source"], quote };
+      const recording = createRecordingClient([structured(response)]);
+      const outcome = await runQuoted(recording.client);
+      if (outcome.ok) throw new Error("落ちるはず");
+      expect(outcome.failure).toMatchObject({
+        kind: "unmet",
+        attempts: 1,
+        problems: [{ field: `rows[${at}].source.quote`, message: "出典の引用が、写しが指す要件の原文に無い" }],
+      });
+    }
+  });
+
+  it("負例：要件ごとの並びの入れ替えは、写しをコードが渡しても unmet", async () => {
+    const response = clone(responseOf(draftOf(QUOTED, fixtureTable())));
+    const requirements = response["requirements"] as Record<string, unknown>[];
+    [requirements[0], requirements[1]] = [requirements[1]!, requirements[0]!];
+    const outcome = await runQuoted(createRecordingClient([structured(response)]).client);
+    if (outcome.ok) throw new Error("落ちるはず");
+    if (outcome.failure.kind !== "unmet") throw new Error("unmet のはず");
+    expect(outcome.failure.problems).toContainEqual({
+      field: "requirements[0].copy",
+      message: "要件の文の写しが一覧の同じ位置の要件と合わない",
+    });
   });
 });
