@@ -9,12 +9,14 @@
 //
 // 往復の型（`LlmToolDefinition`・`LlmToolRequest`・`LlmToolResponse`）は llm.ts が正本である。ここは
 // 「どの道具があり、引数をどう確かめ、何を返すか」だけを置く。往復の組み立ては repair.ts が行う。
+import type { NormalizedAppSpec } from "@musunest/appspec-schema";
 import type { Diagnostic } from "@musunest/spec-engine";
 import { checkDeclarationBytes, checkLimit, type LimitExceeded } from "../limits.js";
 import type { LlmToolDefinition } from "../llm.js";
 import type {
   CorrespondenceEntry,
   CorrespondenceMiss,
+  CorrespondenceResult,
   Declaration,
   DesignContractVersion,
   RequirementList,
@@ -26,7 +28,7 @@ import type {
 } from "../pipeline.js";
 import { checkCorrespondence, type RequirementRoleOwnership } from "./correspondence.js";
 import { isRecord, type Problem } from "./prompt.js";
-import { runTests } from "./run-tests.js";
+import { runTests, type TestRunReport } from "./run-tests.js";
 import { runStaticCheck } from "./static-check.js";
 import { utf8ByteLength } from "./write.js";
 
@@ -131,6 +133,54 @@ export function checkToolCallBudget(cumulative: number): LimitExceeded | undefin
   return checkLimit("toolCalls", cumulative);
 }
 
+/**
+ * 評価口に渡す、**その呼び出しの時点の**評価の文脈（v1.1α。`07-architecture-v1.1a.md` §3・D11）。
+ * v1 の型だけで組む。修復の輪は裁定のたびに有効な試験の組を作り直す（棄却した試験を外す）ので、
+ * 評価口は初期の組を閉じ込めず、呼ばれるたびにこの文脈を受ける。
+ */
+export interface EvaluationContext {
+  readonly list: RequirementList;
+  /** その時点の有効な試験の組（棄却で外した後の組） */
+  readonly suite: TestSuite;
+  readonly correspondences: readonly CorrespondenceEntry[];
+  readonly ownership?: readonly RequirementRoleOwnership[];
+  readonly version?: DesignContractVersion;
+}
+
+/** 評価口の結果（対応表の確認と、試験の結果） */
+export interface DeclarationEvaluation {
+  readonly correspondence: CorrespondenceResult;
+  readonly testRun: TestRunReport;
+}
+
+/**
+ * 評価口（v1.1α。§3・D11）。**静的チェックを通った**宣言（`app`）と、その原文・文脈を受け、対応表の
+ * 確認と試験の結果を返す。渡せば ⑥ の道具（試験の実行・対応表の確認）と版の再検査は、v1 の
+ * `bindTests`・`checkCorrespondence`・`checkRoleMappings` の代わりにこれを使う。作るのは v1.1α の側。
+ */
+export type DeclarationEvaluator = (
+  app: NormalizedAppSpec,
+  declaration: Declaration,
+  context: EvaluationContext,
+) => DeclarationEvaluation | Promise<DeclarationEvaluation>;
+
+/** 道具の文脈から、評価口へ渡す文脈を組む（v1 の型だけ。その呼び出しの時点の値をそのまま渡す） */
+export function evaluationContextOf(context: {
+  readonly list: RequirementList;
+  readonly suite: TestSuite;
+  readonly correspondences: readonly CorrespondenceEntry[];
+  readonly ownership?: readonly RequirementRoleOwnership[];
+  readonly version?: DesignContractVersion;
+}): EvaluationContext {
+  return {
+    list: context.list,
+    suite: context.suite,
+    correspondences: context.correspondences,
+    ...(context.ownership === undefined ? {} : { ownership: context.ownership }),
+    ...(context.version === undefined ? {} : { version: context.version }),
+  };
+}
+
 /** 道具が触る、直しても変わらない文脈（要件の一覧・固定した試験・対応表の場所。§1.3） */
 export interface RepairToolContext {
   readonly list: RequirementList;
@@ -152,6 +202,11 @@ export interface RepairToolContext {
   readonly ownership?: readonly RequirementRoleOwnership[];
   /** 設計の契約の版（決定 ⑨・Issue #418・#431）。呼ぶ側が明示する */
   readonly version?: DesignContractVersion;
+  /**
+   * 評価口（v1.1α。§3・D11）。渡せば「試験の実行」「対応表の確認」の道具は、この文脈（`suite`・`list`・
+   * `correspondences`・`ownership`・`version`）で評価口を呼んでその結果を返す。**省けば v1 の経路のまま**。
+   */
+  readonly evaluate?: DeclarationEvaluator;
 }
 
 /** 静的チェックの道具の出力 */
@@ -191,6 +246,24 @@ export async function executeRepairTool(
     return { passed: checked.passed, diagnostics: checked.diagnostics };
   }
   if (!checked.passed || checked.app === null) return staticCheckFailed;
+
+  // 評価口があれば、v1.1α の結び付けと名前の照合で評価する（v1 の bindTests・checkCorrespondence・
+  // checkRoleMappings は呼ばない。§3・D11）。文脈はこの呼び出しの時点のもの（棄却で外した後の組）
+  if (context.evaluate !== undefined) {
+    const evaluation = await context.evaluate(checked.app, call.declaration, evaluationContextOf(context));
+    if (call.name === "run-tests") {
+      const testRun = evaluation.testRun;
+      return {
+        passed: testRun.mismatches.length === 0 && testRun.unresolved.length === 0,
+        detail: "",
+        mismatches: testRun.mismatches,
+        unresolved: testRun.unresolved,
+        misses: [],
+      };
+    }
+    const misses = evaluation.correspondence.misses;
+    return { passed: misses.length === 0, detail: "", mismatches: [], unresolved: [], misses };
+  }
 
   if (call.name === "run-tests") {
     const result = runTests({
