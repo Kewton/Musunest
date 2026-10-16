@@ -50,7 +50,11 @@ import {
   serializeJson,
   type Problem,
   type PromptData,
+  shapeRejectedCandidate,
+  withReference,
   type PromptDocument,
+  type RejectedCandidate,
+  type RejectedProblem,
   type RuleDefinition,
   type ShapeCheck,
   type StageOutcome,
@@ -395,6 +399,12 @@ export interface DesignInput {
    * 点検する（全役割の所属・共有の点検）。省けば通常の設計。
    */
   readonly redo?: DesignRedoContext;
+  /**
+   * 断った候補（形と中身）を、**断った時点で 1 候補につき 1 回**受け取る観測用の口（Issue #501。#392 の
+   * `onDropped` と同じ作法）。走らせる部分はここで受け取り、② が最後に失敗しても診断に残す。**省けば
+   * 何もしない**——口の有無で、送る要求・検査・やり直しの回数・結果は変わらない。
+   */
+  readonly onRejected?: (candidate: RejectedCandidate) => void;
 }
 
 /** 選択肢（enum）のキーの並びの形を確かめる（null か、空でない重複の無い文字列の並び。Issue #418） */
@@ -1185,12 +1195,28 @@ export async function runDesign(input: DesignInput): Promise<StageOutcome<Design
       schema: DESIGN_SCHEMA,
       maxOutputTokens: input.gateway.maxOutputTokens("design"),
     });
+    // この回の形の誤りの数（中身の候補の試行は、その次の試行。Issue #501）
+    let shapeRejections = 0;
+    const onRejected = input.onRejected;
     const answer = await callStructuredChecked(input.gateway, {
       request,
       check: (output: unknown) => checkDesignOutput(output, input.version),
+      ...(onRejected === undefined
+        ? {}
+        : {
+            onShapeRejected: (rejection) => {
+              shapeRejections += 1;
+              onRejected(shapeRejectedCandidate(round, rejection));
+            },
+          }),
     });
     if (!answer.ok) return answer;
     const problems: Problem[] = [];
+    // 問題ごとの参照元（Issue #501）。並びは `problems` と同じ。検査の順と問題そのものは変えない
+    const references: RejectedProblem[] = [];
+    // 中身の検査に掛けた対象と、検査に渡した要件の一覧（送った座標の順。Issue #501）
+    let target: DesignResult = answer.value;
+    let inspectionList: RequirementList = input.list;
     if (input.redo !== undefined) {
       // 表は固定。応答の表が元の表と一致しなければ断る（Issue #418）
       if (!sameRoles(answer.value.roles ?? [], input.redo.roles)) {
@@ -1198,33 +1224,55 @@ export async function runDesign(input: DesignInput): Promise<StageOutcome<Design
           field: "roles",
           message: "固定の役割 ID の表と一致しない（行の増減・欄の違い・options の変更）",
         });
+        references.push(...withReference(problems.slice(-1), "response"));
       }
       // 応答 1 件を全体へ差し替えた候補に対して、全役割の所属・共有を点検する（Issue #418）
       const candidate: DesignResult = {
         roles: input.redo.roles,
         designs: [...input.redo.adopted, ...answer.value.designs],
       };
+      target = candidate;
       // 点検は全体（`wholeList`）で行うが、**問題の添字は送った一覧の座標に合わせる**——作り直しの要求は
       // 対象の要件だけを送るので、検査した全体の添字をそのまま出すと、送ったデータに無い位置を指す
       // （Issue #445・レビュー指摘）。
-      problems.push(
-        ...checkDesignPlan(inspectionListInSentOrder(input.redo.wholeList, input.list), candidate),
-      );
+      inspectionList = inspectionListInSentOrder(input.redo.wholeList, input.list);
+      const planProblems = checkDesignPlan(inspectionList, candidate);
+      problems.push(...planProblems);
+      references.push(...withReference(planProblems, "target"));
     } else if (planned) {
       // 新契約では、中身の点検（所属を含む）を必ず掛ける（決定 ⑨・Issue #418）
-      problems.push(...checkDesignPlan(input.list, answer.value));
+      const planProblems = checkDesignPlan(input.list, answer.value);
+      problems.push(...planProblems);
+      references.push(...withReference(planProblems, "target"));
     } else if (isPlannedDesign(answer.value)) {
       // 旧形式の記録（試験の fixture）は、新しい欄を持つときだけ中身の点検を掛ける（後方互換）
-      problems.push(...checkDesignPlan(input.list, answer.value, LEGACY_DESIGN_CONTRACT));
+      const planProblems = checkDesignPlan(input.list, answer.value, LEGACY_DESIGN_CONTRACT);
+      problems.push(...planProblems);
+      references.push(...withReference(planProblems, "target"));
     }
-    // 書けない部分の根拠（制約 ID）は、旧形式では申告が無いので何も断らない（#332）
-    problems.push(...checkDesignConstraints(answer.value, input.documents));
+    // 書けない部分の根拠（制約 ID）は、旧形式では申告が無いので何も断らない（#332）。問題の欄
+    // （`designs[i].unwritable[j].constraintIds`）は応答の欄名のままで、形の検査のあとの対象では
+    // `unwritable` が文字列の並びに変わり申告が `unwritableClaims` へ移るので、通常の生成でも作り直しでも
+    // 参照元は raw の応答になる（Issue #501・レビュー指摘）。
+    const constraintProblems = checkDesignConstraints(answer.value, input.documents);
+    problems.push(...constraintProblems);
+    references.push(...withReference(constraintProblems, "response"));
     if (problems.length === 0) {
       // 根拠の照合を通ったあと、保存する側の ID を正規化する（Issue #398）
       const normalized = normalizeDesignClaims(answer.value);
       if (input.redo !== undefined) return { ok: true, value: { ...normalized, roles: input.redo.roles } };
       return { ok: true, value: normalized };
     }
+    // 中身で断った候補を、観測用の口へ渡す（Issue #501。値は通知の中だけ。要求・回数・結果には効かない）
+    onRejected?.({
+      kind: "content",
+      round,
+      attempt: shapeRejections + 1,
+      target,
+      response: answer.output,
+      inspectionList,
+      problems: references,
+    });
     previous = problems;
     // 中身の点検に落ちたので作り直す。この**中身のやり直し**を、共通の口へ告げる（Issue #446）。
     if (round < DESIGN_ROUNDS) input.gateway.noteRetry("content");

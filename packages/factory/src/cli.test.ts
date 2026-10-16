@@ -16,13 +16,20 @@ import {
   parseCliArguments,
   runCli,
 } from "./cli.js";
-import { BUNDLE_MANIFEST_FILE, DESIGN_FILE, DIAGNOSTICS_LISTING_FILE, MAPPINGS_FILE, TEST_SUITE_FILE } from "./bundle.js";
+import {
+  BUNDLE_MANIFEST_FILE,
+  DESIGN_FILE,
+  DIAGNOSTICS_LISTING_FILE,
+  DIAGNOSTICS_REJECTED_DESIGN_FILE,
+  MAPPINGS_FILE,
+  TEST_SUITE_FILE,
+} from "./bundle.js";
 import * as runModule from "./run.js";
 import type { Judge, JudgeRequest } from "./judge.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse } from "./llm.js";
 import { createRecordingClient } from "./stages/__tests__/prompt.js";
 import { ATTEMPT_KEYS, RETRY_KEYS } from "./record.js";
-import { SOURCE_TEXT, recordedRun } from "./__tests__/run.js";
+import { DESIGN_OUTPUT_MAPPED, SOURCE_TEXT, recordedRun } from "./__tests__/run.js";
 
 interface NodeFs {
   mkdtemp(prefix: string): Promise<string>;
@@ -493,5 +500,97 @@ describe("判定の口を組み立てて生成に渡す（05 §4・Issue #355）
     // 標準エラーに 1 行だけ出す
     expect(logError).toHaveBeenCalledTimes(1);
     expect(String(logError.mock.calls[0]?.[0])).toContain(JEV_API_KEY_ENV);
+  });
+});
+
+// ── ②・②' が断った候補のファイルを、診断の置き場所に書く（Issue #501）──────────────
+
+describe("②・②' が断った候補のファイルを、診断の置き場所に書く（Issue #501）", () => {
+  afterAll(async () => {
+    for (const suffix of ["-rejected-stop", "-rejected-done"]) {
+      if (directory !== "") await fs.rm(`${directory}${suffix}`, { recursive: true, force: true });
+    }
+  });
+
+  /** 書いたパスを残しつつ、本物のファイルに書く依存 */
+  const writingDeps = (written: string[]) => ({
+    readFile: async () => SOURCE_TEXT,
+    writeFile: async (path: string, text: string) => {
+      written.push(path);
+      await fs.writeFile(path, text, "utf8");
+    },
+    makeDirectory: async (path: string) => {
+      await fs.mkdir(path, { recursive: true });
+    },
+  });
+
+  it("② が 2 回 unmet の走りで、設計の候補のファイルが書かれ、manifest と成果物が無く、終了コード 1、要約に目印が無い", async () => {
+    const marker = "MARKER501";
+    const base = recordedRun();
+    const badDesign = {
+      ...DESIGN_OUTPUT_MAPPED,
+      designs: [
+        { ...DESIGN_OUTPUT_MAPPED.designs[0], ownership: [{ roleId: `ghost-${marker}`, basis: "dependency", reason: marker }] },
+        ...DESIGN_OUTPUT_MAPPED.designs.slice(1),
+      ],
+    };
+    const recording = createRecordingClient([
+      base[0]!,
+      base[1]!,
+      { kind: "structured", output: badDesign, usage: undefined },
+      { kind: "structured", output: badDesign, usage: undefined },
+    ]);
+    const out = `${directory}-rejected-stop`;
+    const lines: string[] = [];
+    const written: string[] = [];
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", out],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...writingDeps(written),
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      log: (line) => lines.push(line),
+    });
+
+    expect(code).toBe(EXIT_RUN_FAILED);
+    const candidates = await fs.readFile(`${out}/${DIAGNOSTICS_REJECTED_DESIGN_FILE}`, "utf8");
+    expect(candidates).toContain(marker);
+    expect(await fs.readFile(`${out}/${DIAGNOSTICS_LISTING_FILE}`, "utf8")).not.toContain(marker);
+    await expect(fs.readFile(`${out}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
+    expect(written.some((path) => path.includes("/artifacts/"))).toBe(false);
+    expect(lines.at(-1) ?? "").not.toContain(marker);
+  });
+
+  it("② の作り直し 1 回の完走で、診断の置き場所には候補のファイルだけがあり、納品物の集合と終了コードは今までどおり", async () => {
+    const base = recordedRun();
+    const missingR2 = { ...DESIGN_OUTPUT_MAPPED, designs: DESIGN_OUTPUT_MAPPED.designs.slice(0, 1) };
+    const recording = createRecordingClient([
+      base[0]!,
+      base[1]!,
+      { kind: "structured", output: missingR2, usage: undefined },
+      ...base.slice(2),
+    ]);
+    const out = `${directory}-rejected-done`;
+    const written: string[] = [];
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", out],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...writingDeps(written),
+      loadDocuments: async () => [],
+      makeClient: () => recording.client,
+      log: () => undefined,
+    });
+
+    expect(code).toBe(EXIT_OK);
+    const manifest = JSON.parse(await fs.readFile(`${out}/${BUNDLE_MANIFEST_FILE}`, "utf8")) as {
+      files: readonly { path: string }[];
+    };
+    const bundlePaths = [...manifest.files.map((file) => `${out}/${file.path}`), `${out}/${BUNDLE_MANIFEST_FILE}`];
+    // 診断の置き場所には、設計の候補のファイルだけ（一覧は書かない）
+    const diagnosticsWritten = written.filter((path) => path.includes("/diagnostics/"));
+    expect(diagnosticsWritten).toEqual([`${out}/${DIAGNOSTICS_REJECTED_DESIGN_FILE}`]);
+    // 書いたファイルの集合は、納品物のファイルと候補のファイルだけ。manifest は候補を載せない
+    expect([...written].sort()).toEqual([...bundlePaths, ...diagnosticsWritten].sort());
+    expect(manifest.files.some((file) => file.path.startsWith("diagnostics/"))).toBe(false);
   });
 });

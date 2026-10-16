@@ -27,7 +27,7 @@ import {
   runTestSuite as runTestSuiteImpl,
   type TestSuiteInput,
 } from "./test-suite.js";
-import { ruleDefinitionDefects, ruleTexts } from "./prompt.js";
+import { ruleDefinitionDefects, ruleTexts, type RejectedCandidate } from "./prompt.js";
 import {
   INJECTED_INSTRUCTION,
   REQUIREMENT_LIST,
@@ -2856,5 +2856,147 @@ describe("断る Problem の field と message に、値を埋めない（§1・
     for (const entry of previousProblems) {
       expect(`${entry.field} ${entry.message}`).not.toContain(marker);
     }
+  });
+});
+
+// ── ②' が断った候補を、断った時点で観測用の口へ渡す（Issue #501）─────────────────────
+
+/** データの塊の中身（JSON）を読む */
+function dataBlockOf(input: string, name: string): unknown {
+  const match = new RegExp(`<data name="${name}">\\n([\\s\\S]*?)\\n</data>`).exec(input);
+  if (match === null) throw new Error(`データの塊が無い: ${name}`);
+  return JSON.parse(match[1] ?? "null");
+}
+
+/** 参照元を外した問題（段の失敗・前回の指示と比べるため） */
+const withoutReference = (problems: readonly { readonly reference: string }[]): readonly unknown[] =>
+  problems.map(({ reference: _reference, ...problem }) => problem);
+
+describe("②' が断った候補を、断った時点で観測用の口へ渡す（Issue #501）", () => {
+  /** 1 回目：構造の要件の実行の試験（外す）を含み、R-2 の異常・境界が欠ける。2 回目：通る */
+  const round1 = () => ({
+    tests: [
+      ...structureTestsFor(["action-kind"]),
+      plannedTest({ id: "r1-exec", requirementId: "R-1", roleId: "record.total", operation: "compute" }),
+      R2_TRIPLE_PLANNED[0]!,
+    ],
+  });
+  const round2 = () => ({
+    tests: [
+      ...structureTestsFor(["action-kind"]),
+      plannedTest({ id: "r2-exec", requirementId: "R-1", roleId: "record.total", operation: "compute" }),
+      ...R2_TRIPLE_PLANNED,
+    ],
+  });
+
+  it("中身の候補の対象は、外して種類を書き込んだ後の組（前回の試験と同じ並び）で、raw の応答は外す前の全体を持つ", async () => {
+    const seen: RejectedCandidate[] = [];
+    const dropped: string[] = [];
+    const recording = createRecordingClient([structured(round1()), structured(round2())]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: ruledStructuralDesign(["action-kind"]),
+      onDropped: (entries) => dropped.push(...entries.map((entry) => entry.testId)),
+      onRejected: (candidate) => seen.push(candidate),
+    });
+
+    expect(outcome.ok).toBe(true);
+    // onDropped の既存の期待は変わらない
+    expect(dropped).toEqual(["r1-exec", "r2-exec"]);
+    expect(seen).toHaveLength(1);
+    const notice = seen[0];
+    if (notice?.kind !== "content") throw new Error("中身の通知でない");
+    expect(notice.round).toBe(1);
+    expect(notice.attempt).toBe(1);
+    const target = notice.target as TestSuite;
+    // 対象の試験は、2 回目の要求の「前回の試験」と同じ並びで、外した試験を含まない
+    expect(target.tests).toEqual(dataBlockOf(recording.structured[1]?.input ?? "", "前回の試験"));
+    expect(target.tests.map((test) => test.id)).not.toContain("r1-exec");
+    // raw の応答は、外す前の全体（外した試験を含む）
+    expect(notice.response).toEqual(round1());
+    expect((notice.response as { tests: readonly { id: string }[] }).tests.map((test) => test.id)).toContain("r1-exec");
+    expect(notice.inspectionList).toEqual(REQUIREMENT_LIST);
+    // 問題は「前回の作り直しの指示」と等しく、すべて対象を指す
+    expect(withoutReference(notice.problems)).toEqual(
+      dataBlockOf(recording.structured[1]?.input ?? "", "前回の作り直しの指示"),
+    );
+    expect(notice.problems.every((problem) => problem.reference === "target")).toBe(true);
+  });
+
+  it("2 回落ちて unmet なら通知は 2 回（回 1・2）で、最後の通知の問題が失敗の problems と等しい", async () => {
+    const seen: RejectedCandidate[] = [];
+    const recording = createRecordingClient([structured(round1()), structured(round1())]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: ruledStructuralDesign(["action-kind"]),
+      onRejected: (candidate) => seen.push(candidate),
+    });
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(seen.map((notice) => [notice.kind, notice.round])).toEqual([
+      ["content", 1],
+      ["content", 2],
+    ]);
+    expect(withoutReference(seen.at(-1)?.problems ?? [])).toEqual(outcome.failure.problems);
+  });
+
+  it("形に 2 回落ちると、形の候補が 2 つ（回 1・試行 1・2）で、raw の応答と形の問題だけを持つ", async () => {
+    const invalid = {
+      tests: [{ ...plannedTest({ id: "bad", requirementId: "R-1", roleId: "record.total" }), operation: "nonsense" }],
+    };
+    const seen: RejectedCandidate[] = [];
+    const recording = createRecordingClient([structured(invalid), structured(invalid)]);
+    const outcome = await runTestSuite({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      design: ruledStructuralDesign(["action-kind"]),
+      onRejected: (candidate) => seen.push(candidate),
+    });
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok || outcome.failure.kind !== "malformed") throw new Error("malformed でない");
+    expect(seen.map((notice) => ({ kind: notice.kind, round: notice.round, attempt: notice.attempt }))).toEqual([
+      { kind: "shape", round: 1, attempt: 1 },
+      { kind: "shape", round: 1, attempt: 2 },
+    ]);
+    for (const notice of seen) {
+      expect(notice.response).toEqual(invalid);
+      expect(notice.problems.length).toBeGreaterThan(0);
+      expect(notice.problems.every((problem) => problem.reference === "response")).toBe(true);
+      expect("target" in notice).toBe(false);
+    }
+    // 最後の形の候補の問題は、失敗の problems と等しい
+    expect(withoutReference(seen.at(-1)?.problems ?? [])).toEqual(outcome.failure.problems);
+  });
+
+  it("同じ記録の応答で口の有無の 2 回を流すと、要求・結果・calls・retryCounts が同じ", async () => {
+    const invalid = { tests: 123 };
+    const run = async (hook?: (candidate: RejectedCandidate) => void) => {
+      const recording = createRecordingClient([
+        structured(invalid),
+        structured(round1()),
+        structured(round1()),
+      ]);
+      const gateway = makeGateway(recording.client, { maxAttempts: 1 });
+      const outcome = await runTestSuite({
+        list: REQUIREMENT_LIST,
+        documents: SAMPLE_DOCUMENTS,
+        gateway,
+        design: ruledStructuralDesign(["action-kind"]),
+        ...(hook === undefined ? {} : { onRejected: hook }),
+      });
+      return { requests: JSON.stringify(recording.structured), outcome, counts: gateway.counts, retries: gateway.retryCounts };
+    };
+    const seen: RejectedCandidate[] = [];
+    const without = await run();
+    const withHook = await run((candidate) => seen.push(candidate));
+    expect(seen.map((notice) => notice.kind)).toEqual(["shape", "content", "content"]);
+    expect(withHook).toEqual(without);
   });
 });

@@ -57,7 +57,10 @@ import {
   serializeJson,
   type Problem,
   type PromptData,
+  shapeRejectedCandidate,
+  withReference,
   type PromptDocument,
+  type RejectedCandidate,
   type RuleDefinition,
   type ShapeCheck,
   type StageOutcome,
@@ -329,6 +332,13 @@ export interface TestSuiteInput {
    * 止まっても**要約に残せるようにする（成功の戻り値だけに頼らない）。渡さなければ何もしない。
    */
   readonly onDropped?: (dropped: readonly DroppedNonstructuralTest[]) => void;
+  /**
+   * 断った候補（形と中身）を、**断った時点で 1 候補につき 1 回**受け取る観測用の口（Issue #501。
+   * `onDropped` と同じ作法）。中身の候補の対象は、構造で確かめる要件の構造でない試験を外し、種類を
+   * 書き込んだ後の組（「前回の試験」と同じ対象）、raw の応答は外す前の全体である。**省けば何もしない**
+   * ——口の有無で、送る要求・検査・やり直しの回数・結果は変わらない。
+   */
+  readonly onRejected?: (candidate: RejectedCandidate) => void;
 }
 
 /** selector の鍵（要件 ID と役割 ID。旧形式の自由な文の役割も受ける） */
@@ -1445,7 +1455,21 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
       schema: TEST_SUITE_SCHEMA,
       maxOutputTokens: input.gateway.maxOutputTokens("test-suite"),
     });
-    const answer = await callStructuredChecked(input.gateway, { request, check: checkTestSuiteOutput });
+    // この回の形の誤りの数（中身の候補の試行は、その次の試行。Issue #501）
+    let shapeRejections = 0;
+    const onRejected = input.onRejected;
+    const answer = await callStructuredChecked(input.gateway, {
+      request,
+      check: checkTestSuiteOutput,
+      ...(onRejected === undefined
+        ? {}
+        : {
+            onShapeRejected: (rejection) => {
+              shapeRejections += 1;
+              onRejected(shapeRejectedCandidate(round, rejection));
+            },
+          }),
+    });
     if (!answer.ok) return answer;
     let problems: readonly Problem[];
     let discrepancies: readonly NatureDiscrepancy[] = [];
@@ -1487,6 +1511,17 @@ export async function runTestSuite(input: TestSuiteInput): Promise<StageOutcome<
     if (problems.length === 0) {
       return { ok: true, value: { suite, rounds: round, discrepancies, dropped: droppedAll } };
     }
+    // 中身で断った候補を、観測用の口へ渡す（Issue #501）。対象は実際に検査した組（「前回の試験」と同じ
+    // 対象）で、問題はすべてそれを指す。値は通知の中だけに置き、要求・回数・結果には効かない
+    onRejected?.({
+      kind: "content",
+      round,
+      attempt: shapeRejections + 1,
+      target: suite,
+      response: answer.output,
+      inspectionList: input.list,
+      problems: withReference(problems, "target"),
+    });
     // 次の回に、作り直しの指示と**その添字の参照先**（実際に検査した試験集合）を渡す（Issue #439）
     previous = problems;
     previousTests = suite.tests;

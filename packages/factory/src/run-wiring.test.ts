@@ -16,6 +16,10 @@ import { requirementsFromPlan, LEGACY_DESIGN_CONTRACT } from "./pipeline.js";
 import * as arbitrateStage from "./stages/arbitrate.js";
 import * as correspondenceStage from "./stages/correspondence.js";
 import * as designStage from "./stages/design.js";
+import { DESIGN_SCHEMA_NAME } from "./stages/design.js";
+import * as promptModule from "./stages/prompt.js";
+import { createFakeJudge } from "./judge-fake.js";
+import type { JudgeAnswer } from "./judge.js";
 import * as repairStage from "./stages/repair.js";
 import * as runTestsStage from "./stages/run-tests.js";
 import { TEST_SUITE_SCHEMA_NAME } from "./stages/test-suite.js";
@@ -441,5 +445,76 @@ describe("①〜⑦ の各段の記録に、試行の終端と再試行の数が
         expect(stage.attempts.not_started, id).toEqual({ deadline: 0, budget: 0, limit: 0, timeout: 0 });
       }
     }
+  });
+});
+
+// ── ②・②' に断った候補の通知の口が渡り、ほかの段には形の口が無い（Issue #501）──────────────
+
+/** 判定の答え（choice。確信度 0.9） */
+const choice = (value: string): JudgeAnswer => ({
+  kind: "choice",
+  choice: value,
+  probabilities: undefined,
+  probability: undefined,
+  confidence: 0.9,
+});
+
+describe("②・②' に断った候補の通知の口が渡り、ほかの段の予定に形の口が無い（Issue #501）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** R-1 に語彙の穴の申告を 1 件持つ設計（仕分けが R-1 だけを作り直す） */
+  const designWithClaim = {
+    roles: DESIGN_PLANNED.roles,
+    designs: [
+      {
+        ...DESIGN_PLANNED.designs[0],
+        unwritable: [{ part: "記録の並べ替えは書けない", constraintIds: ["記録"], reason: "文書に欄が無い" }],
+        notes: [],
+      },
+      { ...DESIGN_PLANNED.designs[1], unwritable: [], notes: [] },
+    ],
+  };
+  const judge = createFakeJudge({
+    "triage:R-1:0": choice("vocabulary-hole"),
+    "support:R-1:0": choice("contradicts"),
+  });
+
+  it("①〜⑦ の走りで、初回の ②・作り直しの ②・②' に通知の口が渡り、形の口は ②・②' の予定にだけある", async () => {
+    const designSpy = vi.spyOn(designStage, "runDesign");
+    const testSuiteSpy = vi.spyOn(testSuiteStage, "runTestSuite");
+    const callSpy = vi.spyOn(promptModule, "callStructuredChecked");
+    const base = recordedWiring();
+    const recording = createRecordingClient([
+      base[0]!,
+      base[1]!,
+      structured(designWithClaim),
+      // 作り直し（R-1 の設計だけ。申告は無い）
+      structured({ roles: DESIGN_PLANNED.roles, designs: [DESIGN_PLANNED.designs[0]] }),
+      ...base.slice(3),
+    ]);
+    const result = await runGeneration(makeRunInput(recording.client, { judge }));
+
+    expect(result.stopped).toBeNull();
+    expect(result.outcome.result).toBe("pass");
+    // 初回の ② と作り直しの ② の両方に、通知の口が渡る
+    expect(designSpy.mock.calls).toHaveLength(2);
+    expect(designSpy.mock.calls[0]?.[0]?.redo).toBeUndefined();
+    expect(designSpy.mock.calls[1]?.[0]?.redo).toBeDefined();
+    for (const call of designSpy.mock.calls) expect(typeof call[0]?.onRejected).toBe("function");
+    // ②' にも通知の口が渡る（外した試験の口も今までどおり）
+    expect(typeof testSuiteSpy.mock.calls[0]?.[0]?.onRejected).toBe("function");
+    expect(typeof testSuiteSpy.mock.calls[0]?.[0]?.onDropped).toBe("function");
+    // 共通の窓口の予定に形の口があるのは ②・②' だけ（ほかの段の予定は変えない）
+    const withHook = new Set<string>();
+    const withoutHook = new Set<string>();
+    for (const [, plan] of callSpy.mock.calls) {
+      (plan.onShapeRejected === undefined ? withoutHook : withHook).add(plan.request.schemaName);
+    }
+    expect([...withHook].sort()).toEqual([DESIGN_SCHEMA_NAME, TEST_SUITE_SCHEMA_NAME].sort());
+    expect(withoutHook.has(DESIGN_SCHEMA_NAME)).toBe(false);
+    expect(withoutHook.has(TEST_SUITE_SCHEMA_NAME)).toBe(false);
+    expect(withoutHook.size).toBeGreaterThan(0);
   });
 });

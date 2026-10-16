@@ -18,6 +18,7 @@ import { CallGateway, callCountsDelta, type CallCounts } from "./call.js";
 import {
   assembleBundle,
   buildDiagnostics,
+  buildRejectedCandidateFiles,
   materialCounts,
   toBundleNatureDiscrepancies,
   toDroppedNonstructuralTests,
@@ -28,10 +29,12 @@ import {
   type BundleJudgeUsage,
   type BundleMaterialEntry,
   type BundleNatureDiscrepancy,
+  type BundleRejectedCandidate,
   type BundleSummary,
   type BundleTriageJudgment,
   type InspectionCount,
   type MaterialKind,
+  type RejectedCandidateStage,
   type UnwritableRequirement,
 } from "./bundle.js";
 import type { Judge } from "./judge.js";
@@ -87,7 +90,7 @@ import {
   type RequirementRoleOwnership,
 } from "./stages/correspondence.js";
 import { runDesign } from "./stages/design.js";
-import type { PromptDocument, StageFailure, StageOutcome } from "./stages/prompt.js";
+import type { PromptDocument, RejectedCandidate, StageFailure, StageOutcome } from "./stages/prompt.js";
 import { runUnwritableTriage, type UnwritableTriageResult } from "./stages/unwritable-triage.js";
 import {
   failureSignature,
@@ -176,7 +179,9 @@ export interface GenerationResult {
   readonly stopped: FailureAttribution | null;
   /**
    * 早期停止の診断の成果物（Issue #417）。早期停止では、段が受理した時点で積んだ材料だけから組む
-   * （一覧と、在る材料のファイル）。完走では空。**合否・stop_reason・終了コードの決め方には使わない**。
+   * （一覧と、在る材料のファイル）。②・②' が断った候補があれば、その候補のファイルも足す（Issue #501）。
+   * 完走では、断った候補のファイル**だけ**（一覧は返さない）。候補が無ければ空。
+   * **合否・stop_reason・終了コードの決め方には使わない**。
    */
   readonly diagnostics: readonly BundleArtifact[];
   /**
@@ -361,6 +366,56 @@ interface MutableEvaluationRow {
 /** 材料の JSON の SHA-256（版の値。Issue #417） */
 const materialDigest = (value: unknown): Promise<string> => sha256Hex(JSON.stringify(value));
 
+/** ②・②' が断った候補 1 つと、それを出した段の呼び出し（Issue #501。値は診断の候補のファイルにだけ置く） */
+interface RejectedCandidateSlot {
+  readonly stage: RejectedCandidateStage;
+  readonly operation: StageOperation | null;
+  /** 段の呼び出しの通し番号（初回の ② を 1、作り直しは呼んだ順。②' は 1） */
+  readonly call: number;
+  readonly candidate: RejectedCandidate;
+}
+
+/** JSON にできない `undefined` を `null` にそろえる（SHA-256 と保存の値を一致させる。Issue #501） */
+const jsonValue = (value: unknown): unknown => (value === undefined ? null : value);
+
+/** 断った候補に、対象・raw・一覧の SHA-256 と、問題ごとの参照元の SHA-256 を付ける（Issue #501） */
+async function toBundleRejectedCandidate(slot: RejectedCandidateSlot): Promise<BundleRejectedCandidate> {
+  const { candidate } = slot;
+  const response = jsonValue(candidate.response);
+  const responseSha256 = await materialDigest(response);
+  const head = {
+    stage: slot.stage,
+    operation: slot.operation,
+    call: slot.call,
+    round: candidate.round,
+    attempt: candidate.attempt,
+    kind: candidate.kind,
+  };
+  if (candidate.kind === "shape") {
+    return {
+      ...head,
+      response,
+      response_sha256: responseSha256,
+      problems: candidate.problems.map((problem) => ({ ...problem, reference_sha256: responseSha256 })),
+    };
+  }
+  const target = jsonValue(candidate.target);
+  const targetSha256 = await materialDigest(target);
+  return {
+    ...head,
+    target,
+    target_sha256: targetSha256,
+    response,
+    response_sha256: responseSha256,
+    inspection_list: candidate.inspectionList,
+    inspection_list_sha256: await materialDigest(candidate.inspectionList),
+    problems: candidate.problems.map((problem) => ({
+      ...problem,
+      reference_sha256: problem.reference === "target" ? targetSha256 : responseSha256,
+    })),
+  };
+}
+
 /** 失敗の行き先ごとの件数（試験 ID・文言は持たない。Issue #417） */
 const countRoutes = (routes: readonly { readonly route: string }[]): Record<string, number> => {
   const counts: Record<string, number> = {};
@@ -421,6 +476,22 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
     evaluations: new Map(),
     staticChecks: new Map(),
   };
+
+  /**
+   * ②・②' が断った候補（Issue #501）。受理した材料（`materialStore`）とは別の欄に、断った時点で積む——
+   * 段が最後に失敗しても・後の段で止まっても残す。段の呼び出しの通し番号は、② は呼んだ順（初回を 1）。
+   */
+  const rejectedCandidates: RejectedCandidateSlot[] = [];
+  let designCalls = 0;
+  /** 段の通知の口（Issue #501）。呼び出し 1 回ごとに作り、段・`operation`・通し番号を結ぶ */
+  const rejectionSink =
+    (stage: RejectedCandidateStage, operation: StageOperation | null, call: number) =>
+    (candidate: RejectedCandidate): void => {
+      rejectedCandidates.push({ stage, operation, call, candidate });
+    };
+  /** 断った候補を、SHA-256 つきの診断の行にする（Issue #501） */
+  const rejectedCandidateRows = (): Promise<readonly BundleRejectedCandidate[]> =>
+    Promise.all(rejectedCandidates.map(toBundleRejectedCandidate));
 
   /** 材料を、受理した段の記録の添字と一緒に積む */
   const acceptSlot = async <T>(value: T, stageIndex: number): Promise<MaterialSlot<T>> => ({
@@ -519,7 +590,11 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
   };
 
   /** 診断の成果物を組む（早期停止のとき。積んだ材料だけから。Issue #417） */
-  const diagnosticsFor = (attribution: FailureAttribution, record: RunRecord): readonly BundleArtifact[] =>
+  const diagnosticsFor = (
+    attribution: FailureAttribution,
+    record: RunRecord,
+    rejectedRows: readonly BundleRejectedCandidate[],
+  ): readonly BundleArtifact[] =>
     buildDiagnostics({
       stopped: { stage: attribution.stage, kind: attribution.kind },
       materials: materialEntries(),
@@ -540,6 +615,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
               diagnostics: check.diagnostics,
             })),
           }),
+      ...(rejectedRows.length === 0 ? {} : { rejected: rejectedRows }),
     });
 
   /** 段の前後で取る計（usage と、共通の口の試行の終端。Issue #446） */
@@ -638,7 +714,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
    */
   const droppedTests: DroppedNonstructuralTest[] = [];
 
-  const stopResult = (attribution: FailureAttribution): GenerationResult => {
+  const stopResult = async (attribution: FailureAttribution): Promise<GenerationResult> => {
     const outcome: Outcome = { result: "failed", verdict: "none" };
     const record = buildRecord(attribution);
     const droppedSummary = toDroppedNonstructuralTests(droppedTests);
@@ -663,7 +739,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       summary,
       bundle: null,
       stopped: attribution,
-      diagnostics: diagnosticsFor(attribution, record),
+      diagnostics: diagnosticsFor(attribution, record, await rejectedCandidateRows()),
     };
   };
 
@@ -694,8 +770,17 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       input.designVersion === undefined ? {} : { version: input.designVersion };
 
     // ② 設計する（書けなかった要件の一覧を、⑦ と ⑧ のために組んでおく）
+    designCalls += 1;
+    const initialDesignCall = designCalls;
     const rawDesign = await runStageOk("design", () =>
-      runDesign({ list: requirementList, documents: input.documents, gateway, ...versionField }),
+      runDesign({
+        list: requirementList,
+        documents: input.documents,
+        gateway,
+        ...versionField,
+        // 断った候補を、断った時点で積む（Issue #501。観測用。要求・回数・結果には効かない）
+        onRejected: rejectionSink("design", null, initialDesignCall),
+      }),
     );
 
     // ② の「書けない」の申告を、仕分けて裏を取る（Issue #332）。判定の口（`judge`）が渡されたときだけ
@@ -730,6 +815,8 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
             // （Issue #410）。**戻り方は変えない**——段の失敗は今までどおり `undefined` を返し、例外は
             // 記録を足して投げ直し、外側の既存の catch に委ねる。
             const before = meterState();
+            designCalls += 1;
+            const redoCall = designCalls;
             const value = await redoDesignRecorded({
               call: () =>
                 runDesign({
@@ -738,6 +825,7 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
                   gateway,
                   ...versionField,
                   redo: { roles: rawDesign.roles ?? [], adopted: others, wholeList: requirementList },
+                  onRejected: rejectionSink("design", "redo-design", redoCall),
                 }),
               now: input.now,
               push: (status, durationMs, failureKind) => {
@@ -849,6 +937,8 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
         onDropped: (dropped) => {
           for (const entry of dropped) droppedTests.push(entry);
         },
+        // 断った候補を、断った時点で積む（Issue #501。②' の呼び出しは 1 回だけなので通し番号は 1）
+        onRejected: rejectionSink("test-suite", null, 1),
       }),
     );
     natureDiscrepancies = toBundleNatureDiscrepancies(testSuite.discrepancies);
@@ -1253,17 +1343,20 @@ export async function runGeneration(input: GenerationInput): Promise<GenerationR
       materials: materialEntries(),
       evaluations: [...materialStore.evaluations.values()],
     });
+    // 完走でも、断った候補が 1 つ以上あれば、候補のファイル**だけ**を診断に返す（一覧は返さない。納品物の
+    // 成果物・manifest・検証の結果・要約には入れない。Issue #501）。候補が無ければ今までどおり空。
+    const diagnostics = buildRejectedCandidateFiles(await rejectedCandidateRows());
     return {
       outcome,
       record,
       summary,
       bundle,
       stopped: failure,
-      diagnostics: [],
+      diagnostics,
       ...(returnToPlan ? { returnToPlan: true } : {}),
     };
   } catch (error) {
-    if (error instanceof RunStop) return stopResult(error.attribution);
+    if (error instanceof RunStop) return await stopResult(error.attribution);
     throw error;
   }
 }

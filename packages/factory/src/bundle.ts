@@ -39,7 +39,7 @@ import type {
   TestRunResult,
   TestSuite,
 } from "./pipeline.js";
-import type { StageId, StageRecord, Summary } from "./record.js";
+import type { StageId, StageOperation, StageRecord, Summary } from "./record.js";
 import { utf8ByteLength } from "./stages/write.js";
 import type { DroppedNonstructuralTest } from "./stages/test-suite.js";
 
@@ -203,6 +203,107 @@ export const DIAGNOSTICS_DECLARATION_FILE = `${DIAGNOSTICS_DIR}/declaration.json
 /** 診断に出す、静的チェックの診断（版ごと）の置き場所 */
 export const DIAGNOSTICS_STATIC_CHECK_FILE = `${DIAGNOSTICS_DIR}/static-check.json` as const;
 
+/** 診断に出す、② が断った設計の候補（形と中身。値つき。Issue #501）の置き場所 */
+export const DIAGNOSTICS_REJECTED_DESIGN_FILE = `${DIAGNOSTICS_DIR}/rejected-design.json` as const;
+/** 診断に出す、②' が断った試験の組の候補（形と中身。値つき。Issue #501）の置き場所 */
+export const DIAGNOSTICS_REJECTED_TEST_SUITE_FILE = `${DIAGNOSTICS_DIR}/rejected-test-suite.json` as const;
+
+/** 断った候補を出す段（Issue #501） */
+export type RejectedCandidateStage = "design" | "test-suite";
+
+/** 断った候補の問題 1 つ（参照元と、その参照元の JSON の SHA-256 を結ぶ。Issue #501） */
+export interface BundleRejectedProblem {
+  readonly field: string;
+  readonly message: string;
+  readonly code?: string;
+  /** 参照元（`target` ＝中身の検査に掛けた候補の全体、`response` ＝ raw の応答） */
+  readonly reference: "target" | "response";
+  /** 参照元の JSON の SHA-256 */
+  readonly reference_sha256: string;
+}
+
+/**
+ * 断った候補 1 つ（値つき。診断の候補のファイルにだけ置く。Issue #501）。段・`operation`・段の呼び出しの
+ * 通し番号（`call`）・回（中身の round）・試行（形の attempt）で、段の記録の呼び出しへ結び付く。SHA-256 は
+ * `JSON.stringify` した値の SHA-256（材料の版と同じ計算）である。形の候補は対象と一覧を持たない。
+ */
+export interface BundleRejectedCandidate {
+  readonly stage: RejectedCandidateStage;
+  readonly operation: StageOperation | null;
+  readonly call: number;
+  readonly round: number;
+  readonly attempt: number;
+  readonly kind: "shape" | "content";
+  readonly target?: unknown;
+  readonly target_sha256?: string;
+  readonly response: unknown;
+  readonly response_sha256: string;
+  readonly inspection_list?: unknown;
+  readonly inspection_list_sha256?: string;
+  readonly problems: readonly BundleRejectedProblem[];
+}
+
+/** 固定文（と分類）ごとの件数（値を持たない。Issue #501） */
+export interface BundleRejectedMessageCount {
+  readonly message: string;
+  readonly code?: string;
+  readonly count: number;
+}
+
+/** 一覧に置く、断った候補の要約（値なし。Issue #501） */
+export interface BundleRejectedSummary {
+  readonly stage: RejectedCandidateStage;
+  readonly operation: StageOperation | null;
+  readonly call: number;
+  readonly round: number;
+  readonly attempt: number;
+  readonly kind: "shape" | "content";
+  readonly problem_count: number;
+  readonly messages: readonly BundleRejectedMessageCount[];
+}
+
+/** 断った候補を、値の無い要約にする（分類の鍵は固定文と `code`。現れた順。Issue #501） */
+export function summarizeRejectedCandidates(
+  candidates: readonly BundleRejectedCandidate[],
+): readonly BundleRejectedSummary[] {
+  return candidates.map((candidate) => {
+    const counts: { message: string; code?: string; count: number }[] = [];
+    for (const problem of candidate.problems) {
+      const found = counts.find((entry) => entry.message === problem.message && entry.code === problem.code);
+      if (found === undefined) {
+        counts.push({ message: problem.message, ...(problem.code === undefined ? {} : { code: problem.code }), count: 1 });
+      } else {
+        found.count += 1;
+      }
+    }
+    return {
+      stage: candidate.stage,
+      operation: candidate.operation,
+      call: candidate.call,
+      round: candidate.round,
+      attempt: candidate.attempt,
+      kind: candidate.kind,
+      problem_count: candidate.problems.length,
+      messages: counts,
+    };
+  });
+}
+
+/**
+ * 断った候補のファイルを組む（Issue #501）。設計の候補と試験の候補で**別のファイル 2 つ**にし、候補が
+ * 無い段のファイルは作らない。名前はコードの定数である。**manifest は組まない。**
+ */
+export function buildRejectedCandidateFiles(candidates: readonly BundleRejectedCandidate[]): readonly BundleArtifact[] {
+  const artifacts: BundleArtifact[] = [];
+  const designs = candidates.filter((candidate) => candidate.stage === "design");
+  const suites = candidates.filter((candidate) => candidate.stage === "test-suite");
+  if (designs.length > 0) artifacts.push({ path: DIAGNOSTICS_REJECTED_DESIGN_FILE, text: toJson({ candidates: designs }) });
+  if (suites.length > 0) {
+    artifacts.push({ path: DIAGNOSTICS_REJECTED_TEST_SUITE_FILE, text: toJson({ candidates: suites }) });
+  }
+  return artifacts;
+}
+
 /** 材料・検査の種類（一覧の 1 行ごと。コードの定数） */
 export const MATERIAL_KINDS = [
   "design", // ② の設計（役割 ID の表と要件ごとの設計）
@@ -312,6 +413,8 @@ export interface DiagnosticsInput {
     readonly passed: boolean;
     readonly diagnostics: readonly unknown[];
   }[];
+  /** ②・②' が断った候補（値つき。在るときだけ。Issue #501） */
+  readonly rejected?: readonly BundleRejectedCandidate[];
 }
 
 /**
@@ -328,6 +431,8 @@ export function buildDiagnostics(input: DiagnosticsInput): readonly BundleArtifa
         materials: input.materials,
         evaluations: input.evaluations,
         counts: input.counts,
+        // 断った候補の要約（値なし。Issue #501）。候補の中身は下の候補のファイルにだけ置く
+        rejected: summarizeRejectedCandidates(input.rejected ?? []),
       }),
     },
   ];
@@ -346,6 +451,7 @@ export function buildDiagnostics(input: DiagnosticsInput): readonly BundleArtifa
   if (input.staticChecks !== undefined && input.staticChecks.length > 0) {
     artifacts.push({ path: DIAGNOSTICS_STATIC_CHECK_FILE, text: toJson({ checks: input.staticChecks }) });
   }
+  artifacts.push(...buildRejectedCandidateFiles(input.rejected ?? []));
   return artifacts;
 }
 
