@@ -5,7 +5,7 @@
 //   2. 上限を超える宣言（§1.5）を断ること
 //   3. 上限を超える道具の呼び出しの回数（§1.5）を断ること
 //   4. 道具は**このリポジトリの本物の検査**（静的チェック・試験・対応表）を呼ぶこと
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { checkTestSuite } from "../fixed-test.js";
 import { AGENT_LIMITS } from "../limits.js";
 import {
@@ -16,6 +16,8 @@ import {
   type RoleNameMapping,
   type TestSuite,
 } from "../pipeline.js";
+import * as bindModule from "./bind.js";
+import * as correspondenceModule from "./correspondence.js";
 import type { RequirementRoleOwnership } from "./correspondence.js";
 import {
   REPAIR_TOOL_NAMES,
@@ -23,6 +25,9 @@ import {
   checkToolArguments,
   checkToolCallBudget,
   executeRepairTool,
+  type DeclarationEvaluation,
+  type DeclarationEvaluator,
+  type EvaluationContext,
   type RepairToolContext,
 } from "./tools.js";
 
@@ -344,5 +349,171 @@ describe("対応表の確認の道具も、要件ごとの点検をする（Issu
     });
     expect("misses" in output && output.misses.some((miss) => miss.detail.includes("入力の不備"))).toBe(true);
     expect(output.passed).toBe(false);
+  });
+});
+
+// ── 評価口（v1.1α A6'。07 §3・D11・Issue #506）──────────────────────────────
+
+describe("評価口を渡すと、試験の実行と対応表の確認は評価口の結果を返す（v1.1α・Issue #506）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const screenTest = (id: string) => ({
+    id,
+    target: { requirementId: "R-1", kind: "screen", roleId: "record.records" },
+    kind: "normal",
+    operation: "screen",
+    clock: "2026-09-16T12:00:00+09:00",
+    input: null,
+    referenceData: [],
+    expected: { kind: "ok", value: null },
+  });
+  const fullSuite = suiteOf([screenTest("s1"), screenTest("s2"), screenTest("s3")]);
+  // 棄却で 1 つ外した組（評価口には、外した後の組がそのまま届くこと）
+  const narrowed: TestSuite = { tests: fullSuite.tests.filter((test) => test.id !== "s2") };
+  const roles: readonly RoleEntry[] = [
+    { roleId: "record", kind: "entity", entity: null, name: "record", shared: true, aliasOf: null },
+    { roleId: "record.records", kind: "screen", entity: "record", name: "recordsB", shared: false, aliasOf: null },
+  ];
+  const mappings: readonly RoleNameMapping[] = [
+    { roleId: "record", name: "record" },
+    { roleId: "record.records", name: "recordsB" },
+  ];
+  const ownership: readonly RequirementRoleOwnership[] = [
+    {
+      requirementId: "R-1",
+      ownership: [
+        { roleId: "record", basis: "dependency", reason: "行の所属として参照するため" },
+        { roleId: "record.records", basis: "stated", reason: null },
+      ],
+    },
+  ];
+  const correspondences: readonly CorrespondenceEntry[] = [
+    { requirementId: "R-1", locations: [{ kind: "view", entity: "record", name: "recordsB" }] },
+  ];
+
+  /** 偽物の評価口（受けた引数を残し、決めた結果を返す） */
+  function fakeEvaluator(): { readonly evaluate: DeclarationEvaluator; readonly calls: { app: unknown; source: string; context: EvaluationContext }[] } {
+    const calls: { app: unknown; source: string; context: EvaluationContext }[] = [];
+    const result: DeclarationEvaluation = {
+      correspondence: {
+        entries: correspondences,
+        misses: [{ requirementId: "R-1", detail: "偽物の落ち" }],
+      },
+      testRun: {
+        mismatches: [{ testId: "s3", detail: "偽物の不一致" }],
+        unresolved: [{ testId: "s1", detail: "偽物の未解決" }],
+        routes: [],
+        structural: [],
+      },
+    };
+    return {
+      calls,
+      evaluate: (app, declaration, context) => {
+        calls.push({ app, source: declaration.source, context });
+        return result;
+      },
+    };
+  }
+
+  const contextWith = (evaluate: DeclarationEvaluator | undefined): RepairToolContext => ({
+    list: LIST,
+    suite: narrowed,
+    correspondences,
+    roles,
+    mappings,
+    ownership,
+    version: LEGACY_DESIGN_CONTRACT,
+    ...(evaluate === undefined ? {} : { evaluate }),
+  });
+
+  const callOf = (name: string, declaration: string) => {
+    const call = checkToolArguments(name, { declaration });
+    if (!call.ok) throw new Error("前提が壊れた");
+    return call.call;
+  };
+
+  it("試験の実行と対応表の確認は評価口の結果を返し、bindTests・checkCorrespondence・checkRoleMappings を呼ばない", async () => {
+    const bindSpy = vi.spyOn(bindModule, "bindTests");
+    const correspondenceSpy = vi.spyOn(correspondenceModule, "checkCorrespondence");
+    const roleSpy = vi.spyOn(correspondenceModule, "checkRoleMappings");
+    const { evaluate, calls } = fakeEvaluator();
+
+    const runOutput = await executeRepairTool(callOf("run-tests", VIEWS_DECLARATION), contextWith(evaluate));
+    expect(runOutput).toEqual({
+      passed: false,
+      detail: "",
+      mismatches: [{ testId: "s3", detail: "偽物の不一致" }],
+      unresolved: [{ testId: "s1", detail: "偽物の未解決" }],
+      misses: [],
+    });
+    const checkOutput = await executeRepairTool(callOf("check-correspondence", VIEWS_DECLARATION), contextWith(evaluate));
+    expect(checkOutput).toEqual({
+      passed: false,
+      detail: "",
+      mismatches: [],
+      unresolved: [],
+      misses: [{ requirementId: "R-1", detail: "偽物の落ち" }],
+    });
+    expect(bindSpy).not.toHaveBeenCalled();
+    expect(correspondenceSpy).not.toHaveBeenCalled();
+    expect(roleSpy).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(2);
+    // その版の宣言（静的チェックを通った app と原文）で呼ぶ
+    for (const call of calls) {
+      expect(call.source).toBe(VIEWS_DECLARATION);
+      expect(call.app).toBeTypeOf("object");
+    }
+
+    // 対照：評価口を省けば v1 の部品を呼ぶ
+    await executeRepairTool(callOf("run-tests", VIEWS_DECLARATION), contextWith(undefined));
+    await executeRepairTool(callOf("check-correspondence", VIEWS_DECLARATION), contextWith(undefined));
+    expect(bindSpy).toHaveBeenCalledTimes(1);
+    expect(correspondenceSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("評価口が受けた文脈の suite・list・ownership・correspondences・version は、道具の文脈に渡した値と深く等しい（外した組が届く）", async () => {
+    const { evaluate, calls } = fakeEvaluator();
+    await executeRepairTool(callOf("run-tests", VIEWS_DECLARATION), contextWith(evaluate));
+    await executeRepairTool(callOf("check-correspondence", VIEWS_DECLARATION), contextWith(evaluate));
+    for (const call of calls) {
+      expect(call.context.suite).toEqual(narrowed);
+      expect(call.context.suite.tests.map((test) => test.id)).toEqual(["s1", "s3"]);
+      expect(call.context.list).toEqual(LIST);
+      expect(call.context.ownership).toEqual(ownership);
+      expect(call.context.correspondences).toEqual(correspondences);
+      expect(call.context.version).toBe(LEGACY_DESIGN_CONTRACT);
+      // 文脈は v1 の型だけ（役割の表・提出された対応・評価口そのものを運ばない）
+      expect(Object.keys(call.context).sort()).toEqual(["correspondences", "list", "ownership", "suite", "version"]);
+    }
+  });
+
+  it("静的チェックの道具は評価口の有無で同じ出力になり、評価口を呼ばない", async () => {
+    const { evaluate, calls } = fakeEvaluator();
+    for (const declaration of [VIEWS_DECLARATION, INVALID]) {
+      const withEvaluate = await executeRepairTool(callOf("static-check", declaration), contextWith(evaluate));
+      const without = await executeRepairTool(callOf("static-check", declaration), contextWith(undefined));
+      expect(withEvaluate).toEqual(without);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("静的チェックを通らない宣言では評価口を呼ばず、今までどおり流さない旨を返す", async () => {
+    const { evaluate, calls } = fakeEvaluator();
+    for (const name of ["run-tests", "check-correspondence"]) {
+      const output = await executeRepairTool(callOf(name, INVALID), contextWith(evaluate));
+      expect(output).toEqual(await executeRepairTool(callOf(name, INVALID), contextWith(undefined)));
+      expect(output).toEqual({ passed: false, detail: "静的チェックを通らない", mismatches: [], unresolved: [], misses: [] });
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("評価口が Promise を返しても同じ結果になる", async () => {
+    const { evaluate } = fakeEvaluator();
+    const asyncEvaluate: DeclarationEvaluator = async (app, declaration, context) => evaluate(app, declaration, context);
+    const sync = await executeRepairTool(callOf("run-tests", VIEWS_DECLARATION), contextWith(evaluate));
+    const viaPromise = await executeRepairTool(callOf("run-tests", VIEWS_DECLARATION), contextWith(asyncEvaluate));
+    expect(viaPromise).toEqual(sync);
   });
 });

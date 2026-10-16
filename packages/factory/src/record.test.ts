@@ -11,9 +11,12 @@ import type { LlmClient } from "./llm.js";
 import { OpenAiIncompleteError, type OpenAiUsage } from "./openai.js";
 import {
   ATTEMPT_KEYS,
+  FAILURE_KINDS,
   NOT_STARTED_KEYS,
   RETRY_KEYS,
   RUN_RECORD_KEYS,
+  STAGE_IDS,
+  STAGE_OPERATIONS,
   STAGE_RECORD_KEYS,
   SUMMARY_KEYS,
   UsageMeter,
@@ -446,5 +449,55 @@ describe("形・未達の失敗の帰属に、欄の名前と種類を写す（0
     const picked = buildRunRecord(record());
     expect(picked.failure).toEqual({ stage: "repair", kind: "unmet" });
     expect("problems" in (picked.failure ?? {})).toBe(false);
+  });
+});
+
+describe("段の識別子は v1 の並びを保ち、v1.1α の段を末尾に足す（07 §3・Issue #505）", () => {
+  it("先頭 12 個は今までどおりの並びで、v1.1α の 7 個が末尾にある", () => {
+    expect(STAGE_IDS.slice(0, 12)).toEqual([
+      "requirements",
+      "reverse-check",
+      "design",
+      "test-suite",
+      "write",
+      "static-check",
+      "correspondence",
+      "run-tests",
+      "repair",
+      "arbitration",
+      "judge",
+      "bundle",
+    ]);
+    expect(STAGE_IDS.slice(12)).toEqual([
+      "name-table",
+      "semantic-check",
+      "test-spec",
+      "name-check",
+      "decl-check",
+      "coverage",
+      "carry-over",
+    ]);
+    expect(new Set(STAGE_IDS).size).toBe(STAGE_IDS.length);
+  });
+
+  it("FAILURE_KINDS・STAGE_OPERATIONS の並びは変わらない", () => {
+    expect(FAILURE_KINDS).toEqual([
+      "limit",
+      "deadline",
+      "budget",
+      "call-limit",
+      "timeout",
+      "network",
+      "http",
+      "balance",
+      "malformed",
+      "refused",
+      "tool-arguments",
+      "invalid-request",
+      "unmet",
+      "incomplete",
+      "unknown",
+    ]);
+    expect(STAGE_OPERATIONS).toEqual(["redo-design"]);
   });
 });

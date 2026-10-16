@@ -9,7 +9,7 @@
 //   5. 前半から持ち越した未達（別 file：pipeline.test.ts）と合わせて、⑦ が合格にしないこと
 import type { NormalizedAppSpec } from "@musunest/appspec-schema";
 import { evaluateRecord, fixedClock, normalizeSpec } from "@musunest/spec-engine";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { checkTestSuite, type TestSuite } from "../fixed-test.js";
 import { decideOutcome } from "../outcome.js";
 import {
@@ -25,8 +25,15 @@ import {
   type TestInputContract,
   type TestTarget,
 } from "../pipeline.js";
-import { bindTests } from "./bind.js";
-import { holdsWriteAnonymous, resolveReferenceEntity, runTests } from "./run-tests.js";
+import { bindTests, type BindResult } from "./bind.js";
+import * as bindModule from "./bind.js";
+import {
+  holdsWriteAnonymous,
+  resolveReferenceEntity,
+  runTests,
+  type RunTestsInput,
+  type TestBindings,
+} from "./run-tests.js";
 import { rowIdValueKeyReason } from "./test-suite.js";
 
 const CLOCK = "2026-09-16T12:00:00+09:00";
@@ -1708,3 +1715,285 @@ describe("構造の検査が対応表の外になるときの行き先（02 §1.
 });
 
 
+
+// ── 試験 ID で引く結び付けの表（v1.1α A6'。07 §2.1・§3・D11・Issue #506）──────────────
+
+/** v1 の `bindTests` の結果から、試験 ID で引く表を組む（entity の名前は提出された対応から） */
+function bindingsFromV1(input: RunTestsInput): TestBindings {
+  const results = bindTests({
+    suite: input.suite,
+    correspondence: input.correspondence,
+    ...(input.mappings === undefined ? {} : { mappings: input.mappings }),
+  });
+  return {
+    tests: new Map(results.map((result) => [result.testId, result])),
+    entityNames: new Map((input.mappings ?? []).map((mapping) => [mapping.roleId, mapping.name])),
+  };
+}
+
+/** 別 entity に同名の項目（`amount`）を持つ宣言（抽象的な題材） */
+const SAME_NAME_DECLARATION = [
+  "entities:",
+  "  - name: alpha",
+  "    fields:",
+  "      amount: number",
+  "  - name: beta",
+  "    fields:",
+  "      amount: number",
+  "views:",
+  "  - name: alphas",
+  "    type: list",
+  "    entity: alpha",
+  "    show: [amount]",
+  "  - name: betas",
+  "    type: list",
+  "    entity: beta",
+  "    show: [amount]",
+  "actions: []",
+  "validations: []",
+  "computed: []",
+  "permissions: []",
+  "minIdentity:",
+  "  mode: anonymous",
+  "",
+].join("\n");
+
+const SAME_NAME_APP = await normalized(SAME_NAME_DECLARATION);
+
+describe("試験 ID で引く結び付けの表（v1.1α・D11・Issue #506）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const mappedGroup: RunTestsInput = {
+    app: MAPPED_APP,
+    suite: suiteOf([
+      draft({
+        id: "share",
+        target: roleTarget("R-1", "computation", "member.shareCount"),
+        operation: "compute",
+        input: { "member.name": "A" },
+        inputContract: { rowId: "m1", targetRowId: "m1", emptyEntities: [] },
+        referenceData: [
+          refRoleRow("R-1", "expense", "e1", { "expense.amount": 100, "expense.participants": ["m1", "m2"] }),
+          refRoleRow("R-1", "expense", "e2", { "expense.amount": 200, "expense.participants": ["m1"] }),
+        ],
+        expected: { kind: "ok", value: 2 },
+      }),
+      draft({
+        id: "month",
+        target: roleTarget("R-2", "computation", "monthCount"),
+        operation: "aggregate",
+        referenceData: [
+          refRoleRow("R-2", "expense", "e1", { "expense.spentOn": "2026-09-01" }),
+          refRoleRow("R-2", "expense", "e2", { "expense.spentOn": "2026-08-31" }),
+        ],
+        expected: { kind: "ok", value: 3 },
+      }),
+      draft({
+        id: "empty",
+        target: roleTarget("R-1", "computation", "member.shareCount"),
+        operation: "compute",
+        input: { "member.name": "A" },
+        inputContract: { rowId: "m1", targetRowId: "m1", emptyEntities: ["expense"] },
+        expected: { kind: "ok", value: 0 },
+      }),
+      draft({
+        id: "unmapped-key",
+        target: roleTarget("R-1", "computation", "member.shareCount"),
+        operation: "compute",
+        input: { "member.nickname": "A" },
+        inputContract: { rowId: "m1", targetRowId: "m1", emptyEntities: [] },
+        expected: { kind: "ok", value: 0 },
+      }),
+      draft({
+        id: "outside",
+        target: roleTarget("R-2", "computation", "member.shareCount"),
+        operation: "compute",
+        input: {},
+        expected: { kind: "ok", value: 0 },
+      }),
+      draft({
+        id: "no-role",
+        target: roleTarget("R-2", "computation", "ghost"),
+        operation: "compute",
+        expected: { kind: "ok", value: 0 },
+      }),
+    ]),
+    correspondence: mappedCorrespondence,
+    mappings: mappedMappings,
+  };
+
+  it("表を渡すと bindTests を呼ばず、省けば今までどおり 1 回呼ぶ", () => {
+    const spy = vi.spyOn(bindModule, "bindTests");
+    const bindings = bindingsFromV1(mappedGroup);
+    spy.mockClear();
+    runTests({ ...mappedGroup, bindings });
+    expect(spy).not.toHaveBeenCalled();
+    runTests(mappedGroup);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("v1 の bindTests の結果から組んだ表の結果は、v1 の経路（mappings）の結果と深く等しい", () => {
+    const v1 = runTests(mappedGroup);
+    // 前提：一致・不一致・未解決・行き先がそろって出る組である
+    expect(v1.mismatches.length + v1.unresolved.length).toBeGreaterThan(1);
+    expect(v1.routes.length).toBeGreaterThan(1);
+    expect(runTests({ ...mappedGroup, bindings: bindingsFromV1(mappedGroup) })).toEqual(v1);
+
+    // 構造の検査が対応表の外になる組（所属 entity を引く）と、旧形式の組（role で指す）も同じ
+    const routeGroup: RunTestsInput = {
+      app: APP,
+      suite: suiteOf([routeStructure("record.amount", "number")]),
+      correspondence: outsideTable,
+      mappings: [
+        { roleId: "record", name: "record" },
+        { roleId: "record.amount", name: "amount" },
+      ],
+      roles: ROUTE_ROLES,
+    };
+    expect(runTests({ ...routeGroup, bindings: bindingsFromV1(routeGroup) })).toEqual(runTests(routeGroup));
+    const legacyGroup: RunTestsInput = {
+      app: APP,
+      suite: suiteOf([
+        draft({ id: "a", target: target("R-1", "computation", "合計"), operation: "compute", input: { amount: 21 }, expected: { kind: "ok", value: 42 } }),
+        draft({ id: "b", target: target("R-1", "computation", "合計"), operation: "compute", input: { amount: 1 }, expected: { kind: "ok", value: 3 } }),
+        draft({ id: "c", target: target("R-99", "computation", "無い"), operation: "compute", expected: { kind: "ok", value: 0 } }),
+      ]),
+      correspondence,
+    };
+    expect(runTests({ ...legacyGroup, bindings: bindingsFromV1(legacyGroup) })).toEqual(runTests(legacyGroup));
+  });
+
+  it("試験 ID で引き、並びでは引かない（表の並びを逆にしても結果が同じ）", () => {
+    const bindings = bindingsFromV1(mappedGroup);
+    const reversed: TestBindings = {
+      tests: new Map([...bindings.tests.entries()].reverse()),
+      entityNames: bindings.entityNames,
+    };
+    expect(runTests({ ...mappedGroup, bindings: reversed })).toEqual(runTests(mappedGroup));
+  });
+
+  it("同じ要件が別 entity の同名の項目を 2 つ所有する組で、v1 の経路は ambiguous、表では 2 試験とも結び付く", () => {
+    const fieldTest = (id: string, roleId: string) =>
+      draft({ id, target: roleTarget("R-1", "field", roleId), operation: "screen", expected: { kind: "ok", value: null } });
+    const input: RunTestsInput = {
+      app: SAME_NAME_APP,
+      suite: suiteOf([fieldTest("ta", "alpha.amount"), fieldTest("tb", "beta.amount")]),
+      correspondence: {
+        entries: [
+          entry("R-1", [
+            { kind: "field", entity: "alpha", name: "amount" },
+            { kind: "field", entity: "beta", name: "amount" },
+          ]),
+        ],
+        misses: [],
+      },
+      mappings: [
+        { roleId: "alpha.amount", name: "amount" },
+        { roleId: "beta.amount", name: "amount" },
+      ],
+    };
+    // v1 の経路：名前だけで候補を絞るので、2 つとも ambiguous で未解決になる
+    const v1Bindings = bindTests({ suite: input.suite, correspondence: input.correspondence, mappings: input.mappings ?? [] });
+    expect(v1Bindings.map((result) => (result.kind === "unbound" ? result.cause : "bound"))).toEqual([
+      "ambiguous",
+      "ambiguous",
+    ]);
+    const v1 = runTests(input);
+    expect(v1.unresolved.map((entry) => entry.testId)).toEqual(["ta", "tb"]);
+    expect(v1.routes.map((route) => route.route)).toEqual(["ambiguity", "ambiguity"]);
+
+    // 試験 ID で引く表：別の場所に結び付き、どちらも一致する
+    const byId: TestBindings = {
+      tests: new Map<string, BindResult>([
+        ["tb", { kind: "bound", testId: "tb", location: { kind: "field", entity: "beta", name: "amount" } }],
+        ["ta", { kind: "bound", testId: "ta", location: { kind: "field", entity: "alpha", name: "amount" } }],
+      ]),
+      entityNames: new Map([
+        ["alpha", "alpha"],
+        ["beta", "beta"],
+      ]),
+    };
+    const result = runTests({ ...input, bindings: byId });
+    expect(result).toEqual({ mismatches: [], unresolved: [], routes: [], structural: [] });
+  });
+
+  it("表に無い試験 ID は、未解決（no-mapping。行き先は曖昧さ）になる。構造の検査も同じ", () => {
+    const result = runTests({
+      ...mappedGroup,
+      suite: suiteOf([
+        draft({
+          id: "missing",
+          target: roleTarget("R-2", "computation", "monthCount"),
+          operation: "aggregate",
+          expected: { kind: "ok", value: 0 },
+        }),
+        routeStructure("record.amount", "number"),
+      ]),
+      bindings: { tests: new Map(), entityNames: new Map() },
+    });
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved.map((entry) => entry.testId)).toEqual(["missing", "struct"]);
+    for (const entry of result.unresolved) expect(entry.detail).toContain("結び付けの表に無い");
+    expect(result.routes.map((route) => [route.testId, route.route])).toEqual([
+      ["missing", "ambiguity"],
+      ["struct", "ambiguity"],
+    ]);
+    // v1 の no-mapping と同じ扱い（v1 の経路で対応を欠いた試験と同じ判定・行き先）
+    const v1 = runTests({ ...mappedGroup, suite: suiteOf([routeStructure("record.amount", "number")]), mappings: [] });
+    expect(v1.routes.map((route) => route.route)).toEqual(["ambiguity"]);
+  });
+
+  it("参照データの行の entity と空の集合の entity は entityNames で解ける（提出された対応に entity が無くても）", () => {
+    const withoutEntities = mappedMappings.filter((mapping) => mapping.roleId !== "expense" && mapping.roleId !== "member");
+    const input: RunTestsInput = { ...mappedGroup, mappings: withoutEntities };
+    // v1 の経路では参照データの entity が結び付かず、share・month・empty は一致しない
+    const v1 = runTests(input);
+    const failing = (report: ReturnType<typeof runTests>) =>
+      [...report.mismatches, ...report.unresolved].map((entry) => entry.testId).sort();
+    expect(failing(v1)).toEqual(expect.arrayContaining(["empty", "month", "share"]));
+
+    const bindings: TestBindings = {
+      tests: bindingsFromV1(mappedGroup).tests,
+      entityNames: new Map([
+        ["expense", "expense"],
+        ["member", "member"],
+      ]),
+    };
+    const result = runTests({ ...input, bindings });
+    expect(failing(result)).not.toContain("share");
+    expect(failing(result)).not.toContain("empty");
+    // 表から引いた結果は、entity の対応を持つ v1 の経路と同じ
+    expect(result).toEqual(runTests(mappedGroup));
+
+    expect(resolveReferenceEntity(roleTarget("R-1", "entity", "expense"), { ...input, bindings })).toBe("expense");
+    expect(resolveReferenceEntity(roleTarget("R-1", "entity", "ghost"), { ...input, bindings })).toBeNull();
+  });
+
+  it("結び付かない構造の検査の場所の所属 entity は entityNames で引く", () => {
+    const outsideBinding: BindResult = {
+      kind: "unbound",
+      testId: "struct",
+      cause: "outside-table",
+      detail: "対応表の外",
+    };
+    const input: RunTestsInput = {
+      app: APP,
+      suite: suiteOf([routeStructure("record.amount", "number")]),
+      correspondence: outsideTable,
+      // 所属 entity（record）の対応は提出された対応に無い
+      mappings: [{ roleId: "record.amount", name: "amount" }],
+      roles: ROUTE_ROLES,
+    };
+    // v1 の経路では所属 entity が引けず、場所を組まない（曖昧さ）
+    expect(runTests(input).routes.map((route) => route.route)).toEqual(["ambiguity"]);
+    const result = runTests({
+      ...input,
+      bindings: { tests: new Map([["struct", outsideBinding]]), entityNames: new Map([["record", "record"]]) },
+    });
+    const route = result.routes.find((candidate) => candidate.testId === "struct");
+    expect(route?.route).toBe("correspondence-redo");
+    expect(route?.location).toEqual({ kind: "field", entity: "record", name: "amount" });
+  });
+});

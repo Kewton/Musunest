@@ -30,7 +30,7 @@ import type {
   LlmUsage,
 } from "./llm.js";
 
-/** 段の識別子（02 §1 の段。①〜⑧） */
+/** 段の識別子（02 §1 の段。①〜⑧。v1.1α の段は末尾。07 §3） */
 export const STAGE_IDS = [
   "requirements", // ① 要件にする
   "reverse-check", // ①' 逆照合
@@ -44,6 +44,14 @@ export const STAGE_IDS = [
   "arbitration", // ⑥' 期待の裁定
   "judge", // ⑦ 終わりの判定
   "bundle", // ⑧ 納品物にする
+  // v1.1α の段（07-architecture-v1.1a.md §1・§3。Issue #505）。**末尾に足すだけ**で、上の並びは変えない
+  "name-table", // T1 名前の表（T1' の検査を含む）
+  "semantic-check", // T1'' 表の意味の点検
+  "test-spec", // T2 試験の仕様（T2' の検査を含む）
+  "name-check", // B3 名前の照合
+  "decl-check", // B3' 宣言の意味の点検
+  "coverage", // B6 棄却のあとの網羅
+  "carry-over", // 全件持ち越しの停止（D15）
 ] as const;
 export type StageId = (typeof STAGE_IDS)[number];
 

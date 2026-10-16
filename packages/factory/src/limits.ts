@@ -48,6 +48,12 @@ export const AGENT_LIMITS = {
    */
   correspondenceChecks: 6,
   /**
+   * v1.1α の B3' 宣言の意味の点検の回数（07-architecture-v1.1a.md §1・D16。Issue #505）。B2・B3 を通った
+   * 版ごとに掛け直すので回数に上限を置く。値は v1 の `correspondenceChecks` と同じ 6。**この呼び出しも
+   * 共通の口を通す**。v1 の経路では使わない。
+   */
+  declChecks: 6,
+  /**
    * 停滞と見なす、同じ不一致の続いた回数（§1.3.1・R2-10）。試験 ID・段・誤りの分類が同じ不一致が
    * これだけ続いたら、⑥ はそれ以上直さない（未解決のまま部分案で終える）。
    */
@@ -96,6 +102,7 @@ export const LIMIT_GUARDS = {
   repairStepTurns: "ステージ⑥（直す）の 1 回の段の中の応答の往復",
   correspondenceRedos: "ステージ③（書く）の対応の表の出し直し（§1.3.1）",
   correspondenceChecks: "ステージ⑤a（対応表）の点検。版ごとに作り直す（§1.3.1）",
+  declChecks: "v1.1α のステージ B3'（宣言の意味の点検）。版ごとに掛け直し、B5 を回す前に残りを確かめる（07 D16）",
   stagnationRepeats: "ステージ⑥（直す）の停滞の検知（同じ不一致が続いた回数）",
   planQuestions: "ステージ P4（質問を組み立てる）〜 P5（答えを反映する）。往復をまたいで数える（plan/session.ts）",
   planRoundTrips: "ステージ P4〜P5 の往復（plan/session.ts）。直し・再開で戻さない",
@@ -165,7 +172,7 @@ export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 /** effort を指定しなかったときの既定（§2）。入口の既定（`high`）と同じ側へ倒す */
 export const DEFAULT_REASONING_EFFORT: ReasoningEffort = "high";
 
-/** LLM を呼ぶ段（出力の上限を持つ段。Plan の P3・P4 と、①〜②'・③・⑤a・⑥・⑥'） */
+/** LLM を呼ぶ段（出力の上限を持つ段。Plan の P3・P4 と、①〜②'・③・⑤a・⑥・⑥'、v1.1α の T1・T1''・T2・B3'） */
 export const OUTPUT_STAGES = [
   "surface", // P3 洗い出す（目録に無い曖昧さ・書けないこと）
   "questions", // P4 質問を組み立てる
@@ -177,6 +184,11 @@ export const OUTPUT_STAGES = [
   "correspondence", // ⑤a 対応表
   "repair", // ⑥ 直す
   "arbitration", // ⑥' 期待の裁定
+  // v1.1α の段（07-architecture-v1.1a.md §3。Issue #505）。末尾に足すだけ
+  "name-table", // T1 名前の表
+  "semantic-check", // T1'' 表の意味の点検
+  "test-spec", // T2 試験の仕様
+  "decl-check", // B3' 宣言の意味の点検
 ] as const;
 export type OutputStage = (typeof OUTPUT_STAGES)[number];
 
@@ -209,6 +221,10 @@ export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage
     correspondence: 16_384,
     repair: 32_768,
     arbitration: 16_384,
+    "name-table": 32_768,
+    "semantic-check": 16_384,
+    "test-spec": 32_768,
+    "decl-check": 16_384,
   },
   medium: {
     surface: 32_768,
@@ -221,6 +237,10 @@ export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage
     correspondence: 16_384,
     repair: 32_768,
     arbitration: 16_384,
+    "name-table": 32_768,
+    "semantic-check": 16_384,
+    "test-spec": 32_768,
+    "decl-check": 16_384,
   },
   high: {
     surface: 32_768,
@@ -233,6 +253,10 @@ export const STAGE_MAX_OUTPUT_TOKENS: Record<ReasoningEffort, Record<OutputStage
     correspondence: 16_384,
     repair: 32_768,
     arbitration: 16_384,
+    "name-table": 32_768,
+    "semantic-check": 16_384,
+    "test-spec": 32_768,
+    "decl-check": 16_384,
   },
 };
 
