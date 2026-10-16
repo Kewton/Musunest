@@ -9,7 +9,9 @@
 //
 // 要件 ID は**応答に書かせない**（D10）。T1 の応答（下書き `NameTableDraft`）は要件ごとの並びを**一覧の順**に
 // 持ち、各要素に要件の文の写し（先頭の `copyLengthFor` 文字）を添える。コードが一覧の順で要件 ID を付け、
-// 写しと照合する（入れ替え・取り違えの検知）。行の出典も写しで要件を指す。
+// 写しと照合する（入れ替え・取り違えの検知）。行の出典も写しで要件を指す。写しは**コードが切って T1 の
+// データに載せ**、モデルはそれをそのまま写す（文字数を数えさせない。#505・#507）。行の出典の引用は、写しが
+// 指す要件の文か、その要件の依頼文の引用（`Requirement.quote`）の部分文字列であること（`isSourceQuoteOf`）。
 //
 // `Problem` の `field` は位置（配列の添字）、`message` は**分類ごとの固定文**である——表の ID・名前・
 // 要件 ID の値を埋めない（停止の要約と段の失敗の記録に写るため。v1 の `checkDesignOwnership` と同じ規律）。
@@ -41,7 +43,7 @@ import {
   type StructuralAssertionKind,
   type TestTargetKind,
 } from "../fixed-test.js";
-import { ROLE_OWNERSHIP_BASES, type RequirementList, type RoleOwnershipBasis } from "../pipeline.js";
+import { ROLE_OWNERSHIP_BASES, type Requirement, type RequirementList, type RoleOwnershipBasis } from "../pipeline.js";
 import {
   constraintIdsIn,
   isRecord,
@@ -105,7 +107,10 @@ export const NAME_TABLE_GROUP_BY_KINDS = ["enum", "month"] as const;
 
 // ── 表の型 ────────────────────────────────────────────────────────
 
-/** 出典（要件 ID と、要件の文の中の引用。引用の位置は `sourcePositionOf` がコードで求める） */
+/**
+ * 出典（要件 ID と引用）。引用は、その要件の文か依頼文の引用（`Requirement.quote`）の部分文字列である
+ * （`isSourceQuoteOf`）。要件の文の中の位置は `sourcePositionOf` がコードで求める。
+ */
 export interface NameTableSource {
   readonly requirementId: string;
   readonly quote: string;
@@ -234,6 +239,14 @@ export function copyLengthFor(list: RequirementList): number | null {
     if (new Set(copies).size === copies.length) return Math.max(length, MIN_COPY_LENGTH);
   }
   return Math.max(longest, MIN_COPY_LENGTH);
+}
+
+/**
+ * 出典の引用が、その要件の文か依頼文の引用（`Requirement.quote`）の部分文字列か（#505・#507）。完全一致の
+ * 部分文字列だけを受ける——正規化しない（空白・記号・言い換えを吸収しない）。別の要件の文・引用は見ない。
+ */
+export function isSourceQuoteOf(requirement: Requirement, quote: string): boolean {
+  return quote !== "" && (requirement.text.includes(quote) || requirement.quote.includes(quote));
 }
 
 /** 全文が同じ要件を挙げる（表を見る前に落とす。Plan 側の重複。D10） */
@@ -509,8 +522,8 @@ export type ResolveResult =
 /**
  * (f) 下書きに、**一覧の順で**要件 ID を付ける。要件ごとの並びの i 番目は一覧の i 番目の要件であり、
  * その写しが要件の文の先頭 `copyLengthFor` 文字と一致しなければ落とす（入れ替え・取り違え・長さ違い）。
- * 行の出典の写しは、それと一致する要件にちょうど 1 つ当たり、**引用がその要件の原文の部分文字列**であれば、
- * その要件 ID を付ける（引用が別の要件の原文に在っても結び付け直さない）。
+ * 行の出典の写しは、それと一致する要件にちょうど 1 つ当たり、**引用がその要件の文か依頼文の引用の部分文字列**
+ * であれば（`isSourceQuoteOf`）、その要件 ID を付ける（引用が別の要件の文・引用に在っても結び付け直さない）。
  * 全文が同じ要件が一覧にあれば、**表を見る前に**落とす。
  */
 export function resolveNameTableDraft(list: RequirementList, draft: NameTableDraft): ResolveResult {
@@ -539,10 +552,11 @@ export function resolveNameTableDraft(list: RequirementList, draft: NameTableDra
       problems.push({ field: `rows[${index}].source.copy`, message: "出典の要件の文の写しが一覧のどの要件とも合わない" });
       return undefined;
     }
-    // 引用は、写しが指す**その要件の原文**の部分文字列であること。別の要件の原文に在っても結び付け直さない
-    // （推測で別の要件に結び付けない。fail-closed。窓口の判断 2026-10-16・PR #515）
-    const text = list.requirements[only]?.text ?? "";
-    if (row.source.quote === "" || !text.includes(row.source.quote)) {
+    // 引用は、写しが指す**その要件の原文**（要件の文か依頼文の引用。#505・#507）の部分文字列であること。
+    // 別の要件の原文に在っても結び付け直さない（推測で別の要件に結び付けない。fail-closed。窓口の判断
+    // 2026-10-16・PR #515）
+    const requirement = list.requirements[only];
+    if (requirement === undefined || !isSourceQuoteOf(requirement, row.source.quote)) {
       problems.push({ field: `rows[${index}].source.quote`, message: "出典の引用が、写しが指す要件の原文に無い" });
       return undefined;
     }
@@ -613,7 +627,10 @@ export function sharedRowIds(table: NameTable): ReadonlySet<string> {
   return shared;
 }
 
-/** 出典の引用の位置（要件の文の中の最初の出現。見つからなければ null） */
+/**
+ * 出典の引用の位置（要件の文の中の最初の出現）。要件の文に無ければ null——依頼文の引用だけから写した出典
+ * （`isSourceQuoteOf` は受ける）は、要件の文の中に位置を持たない。
+ */
 export function sourcePositionOf(
   list: RequirementList,
   source: NameTableSource,
@@ -728,10 +745,10 @@ export function checkNameTable(
     const field = `rows[${index}]`;
     checkRowType(row, field, problems);
     if (row.role.trim() === "") problems.push({ field: `${field}.role`, message: "役割の説明が空である" });
-    const sourceText = requirementById.get(row.source.requirementId)?.text;
-    if (sourceText === undefined) {
+    const sourceRequirement = requirementById.get(row.source.requirementId);
+    if (sourceRequirement === undefined) {
       problems.push({ field: `${field}.source.requirementId`, message: "出典の要件 ID が一覧に無い" });
-    } else if (row.source.quote === "" || !sourceText.includes(row.source.quote)) {
+    } else if (!isSourceQuoteOf(sourceRequirement, row.source.quote)) {
       problems.push({ field: `${field}.source.quote`, message: "出典の引用が要件の文に無い" });
     }
 

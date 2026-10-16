@@ -13,6 +13,7 @@ import {
   FIXTURE_DOCUMENTS,
   draftOf,
   fixtureList,
+  fixtureListWithRequestQuotes,
   fixtureRows,
   fixtureTable,
 } from "./__tests__/fixtures.js";
@@ -378,6 +379,96 @@ describe("要件 ID は一覧の順でコードが付け、写しと照合する
     ]);
     expectNoValues(result.problems, ["担当者の名前"]);
     expect(inspectNameTable(list, shifted, FIXTURE_DOCUMENTS).ok).toBe(false);
+  });
+
+  describe("出典の引用は、写しが指す要件の文か依頼文の引用の部分文字列なら受ける（#505・#507）", () => {
+    const quoted = fixtureListWithRequestQuotes();
+    const ownerAt = rowIndex("f.item.owner");
+    /** 行の出典の引用を、その要件の依頼文の引用（全体か一部）に置き換えた下書き */
+    const draftWithRequestQuotes = (pick: (quote: string) => string) => {
+      const draft = draftOf(quoted, fixtureTable());
+      return {
+        ...draft,
+        rows: draft.rows.map((row, index) => {
+          const requirementId = fixtureRows()[index]!.source.requirementId;
+          const quote = quoted.requirements.find((requirement) => requirement.id === requirementId)!.quote;
+          return { ...row, source: { ...row.source, quote: pick(quote) } };
+        }),
+      };
+    };
+
+    it("前提：依頼文の引用はどの要件の文にも、別の要件の引用にも無い", () => {
+      quoted.requirements.forEach((requirement, at) => {
+        for (const other of quoted.requirements) {
+          expect(other.text.includes(requirement.quote)).toBe(false);
+          if (other !== quoted.requirements[at]) expect(other.quote.includes(requirement.quote)).toBe(false);
+        }
+      });
+    });
+
+    it("依頼文の引用の全体・一部を写した出典は通り、表の出典はその引用のまま要件 ID が付く", () => {
+      for (const pick of [(quote: string) => quote, (quote: string) => Array.from(quote).slice(2, 9).join("")]) {
+        const draft = draftWithRequestQuotes(pick);
+        const result = inspectNameTable(quoted, draft, FIXTURE_DOCUMENTS);
+        if (!result.ok) throw new Error(JSON.stringify(result.problems));
+        expect(result.table.rows.map((row) => row.source)).toEqual(
+          fixtureTable().rows.map((row, index) => ({
+            requirementId: row.source.requirementId,
+            quote: draft.rows[index]!.source.quote,
+          })),
+        );
+      }
+    });
+
+    it("要件の文の部分文字列の出典は今までどおり通る", () => {
+      expect(inspectNameTable(quoted, draftOf(quoted, fixtureTable()), FIXTURE_DOCUMENTS)).toEqual({
+        ok: true,
+        table: fixtureTable(),
+      });
+    });
+
+    it("別の要件の依頼文の引用は、写しが指す要件に無いので結び付けずに落ちる", () => {
+      const draft = draftWithRequestQuotes((quote) => quote);
+      const other = quoted.requirements[1]!.quote;
+      const shifted = {
+        ...draft,
+        rows: draft.rows.map((row, index) => (index === ownerAt ? { ...row, source: { ...row.source, quote: other } } : row)),
+      };
+      const result = resolveNameTableDraft(quoted, shifted);
+      expect(result).toEqual({
+        ok: false,
+        problems: [{ field: `rows[${ownerAt}].source.quote`, message: "出典の引用が、写しが指す要件の原文に無い" }],
+      });
+      expectNoValues(result.ok ? [] : result.problems, [other]);
+    });
+
+    it("言い換えた引用（語を言い換えた・区切りに空白を足した・先頭に空白を足した）は正規化せずに落ちる", () => {
+      const own = quoted.requirements[0]!.quote;
+      for (const paraphrased of [own.replace("登録", "記録"), own.replace("：", ": "), ` ${own}`]) {
+        const draft = draftWithRequestQuotes((quote) => quote);
+        const edited = {
+          ...draft,
+          rows: draft.rows.map((row, index) =>
+            index === ownerAt ? { ...row, source: { ...row.source, quote: paraphrased } } : row,
+          ),
+        };
+        expect(resolveNameTableDraft(quoted, edited)).toEqual({
+          ok: false,
+          problems: [{ field: `rows[${ownerAt}].source.quote`, message: "出典の引用が、写しが指す要件の原文に無い" }],
+        });
+      }
+    });
+
+    it("表の検査（T1'）も、依頼文の引用の出典を受け、別の要件の引用を落とす", () => {
+      const fromRequest = patchRow(fixtureTable(), ownerAt, {
+        source: { requirementId: "R1", quote: quoted.requirements[0]!.quote },
+      });
+      expect(checkNameTable(quoted, fromRequest, FIXTURE_DOCUMENTS)).toEqual([]);
+      const fromOther = patchRow(fixtureTable(), ownerAt, {
+        source: { requirementId: "R1", quote: quoted.requirements[1]!.quote },
+      });
+      expectProblem(fromOther, `rows[${ownerAt}].source.quote`, "出典の引用が要件の文に無い", [], quoted);
+    });
   });
 
   it("要件ごとの並びが一覧より少ないと落ちる（欠落）", () => {
