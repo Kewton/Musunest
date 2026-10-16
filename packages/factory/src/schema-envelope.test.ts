@@ -5,15 +5,21 @@
 //   2. **同じ入力なら同じバイト列**——封筒の組み立ては純粋で、枝の並びも決まっている
 //   3. **枝ごとに `stage` の判別子がある**——`enum` が 1 つの文字列
 //   4. **strict の決まりを満たす**——object は `additionalProperties: false`、すべての欄が `required`
+//   5. **v1.1α の段は別の封筒**（`stage-envelope-v11a`。Issue #511）——v1 の一覧・名前・実体は変わらず、
+//      v1 の封筒に v1.1α の段の名前が 1 つも入らない
 //
 // 実 API は呼ばない。封筒は組み立てるだけで、送るのは adapter（openai.ts。試験は openai.test.ts）。
 import { describe, expect, it } from "vitest";
 import {
+  ENVELOPE_IDS,
   ENVELOPE_RESULT_KEY,
   ENVELOPE_SCHEMA,
   ENVELOPE_SCHEMA_NAME,
+  ENVELOPE_SCHEMA_NAME_V11A,
+  ENVELOPE_SCHEMA_V11A,
   ENVELOPE_STAGE_KEY,
   STAGE_ENVELOPE_ENTRIES,
+  STAGE_ENVELOPE_ENTRIES_V11A,
   buildEnvelopeSchema,
   buildStageBranch,
   envelopeStageFor,
@@ -278,5 +284,95 @@ describe("全段で同じ「封筒」の schema（02 §2・#353）", () => {
     // 封筒に載っていない schema（判定の口など）は引けない——adapter は封筒を送らない
     expect(envelopeStageFor("judge-answers")).toBeUndefined();
     expect(envelopeStageFor("out")).toBeUndefined();
+  });
+});
+
+// ── v1.1α の封筒（07-architecture-v1.1a.md §3・D12・Issue #511）────────────────
+
+/** v1.1α の段の名前（決まった順。⑥' の裁定は v1 と共有する） */
+const V11A_STAGES = [
+  "name-table",
+  "semantic-check",
+  "test-spec",
+  "declaration-v11a",
+  "decl-check",
+  "expectation-arbitration",
+] as const;
+
+describe("v1.1α の段は別の封筒に入れ、v1 の封筒は変えない（D12・Issue #511）", () => {
+  it("封筒の識別子は v1 と v1.1a", () => {
+    expect(ENVELOPE_IDS).toEqual(["v1", "v1.1a"]);
+  });
+
+  it("v1 の一覧はちょうど今の 10 段の名前と順で、引数なしの組み立てが ENVELOPE_SCHEMA と深く等しい", () => {
+    expect(STAGE_ENVELOPE_ENTRIES.map((entry) => entry.stage)).toEqual([
+      "plan-surface",
+      "plan-questions",
+      "requirement-list",
+      "reverse-check",
+      "requirement-design",
+      "test-suite",
+      "declaration",
+      "requirement-correspondence",
+      "expectation-arbitration",
+      "role-name-mappings",
+    ]);
+    expect(buildEnvelopeSchema()).toEqual(ENVELOPE_SCHEMA);
+    expect(ENVELOPE_SCHEMA_NAME).toBe("stage-envelope");
+  });
+
+  it("v1 の封筒の JSON に v1.1a の段の名前が 1 つも無い（共有の裁定を除く）", () => {
+    const json = JSON.stringify(ENVELOPE_SCHEMA);
+    for (const stage of V11A_STAGES.filter((name) => name !== "expectation-arbitration")) {
+      expect(json.includes(`"${stage}"`), stage).toBe(false);
+    }
+    expect(json.includes(ENVELOPE_SCHEMA_NAME_V11A)).toBe(false);
+  });
+
+  it("v1.1a の封筒は名前 stage-envelope-v11a で、決まった順の 6 枝", () => {
+    expect(ENVELOPE_SCHEMA_NAME_V11A).toBe("stage-envelope-v11a");
+    expect(STAGE_ENVELOPE_ENTRIES_V11A.map((entry) => entry.stage)).toEqual([...V11A_STAGES]);
+    const result = (ENVELOPE_SCHEMA_V11A["properties"] as Record<string, unknown>)[ENVELOPE_RESULT_KEY] as {
+      readonly anyOf: readonly Record<string, unknown>[];
+    };
+    expect(result.anyOf).toHaveLength(6);
+    expect(ENVELOPE_SCHEMA_V11A["additionalProperties"]).toBe(false);
+    expect(ENVELOPE_SCHEMA_V11A["required"]).toEqual([ENVELOPE_RESULT_KEY]);
+  });
+
+  it("v1.1a の枝ごとに stage の判別子（enum 1 つ）があり、全欄が required で additionalProperties が false", () => {
+    const result = (ENVELOPE_SCHEMA_V11A["properties"] as Record<string, unknown>)[ENVELOPE_RESULT_KEY] as {
+      readonly anyOf: readonly Record<string, unknown>[];
+    };
+    for (const [index, entry] of STAGE_ENVELOPE_ENTRIES_V11A.entries()) {
+      const branch = result.anyOf[index] as Record<string, unknown>;
+      const stage = (branch["properties"] as Record<string, unknown>)[ENVELOPE_STAGE_KEY] as {
+        readonly type: string;
+        readonly enum: readonly string[];
+      };
+      expect(stage.type, entry.stage).toBe("string");
+      expect(stage.enum, entry.stage).toEqual([entry.stage]);
+      expect(branch["additionalProperties"], entry.stage).toBe(false);
+      expect(strictProblems(branch), entry.stage).toEqual([]);
+    }
+  });
+
+  it("v1.1a の封筒も、同じ入力なら同じバイト列", () => {
+    const once = JSON.stringify(buildEnvelopeSchema(STAGE_ENVELOPE_ENTRIES_V11A));
+    expect(JSON.stringify(buildEnvelopeSchema(STAGE_ENVELOPE_ENTRIES_V11A))).toBe(once);
+    expect(JSON.stringify(ENVELOPE_SCHEMA_V11A)).toBe(once);
+  });
+
+  it("envelopeStageFor は既定（v1）で v1.1a の名前を引けず、\"v1.1a\" で引ける", () => {
+    for (const entry of STAGE_ENVELOPE_ENTRIES_V11A) {
+      expect(envelopeStageFor(entry.stage, "v1.1a")?.schema, entry.stage).toBe(entry.schema);
+    }
+    for (const stage of V11A_STAGES.filter((name) => name !== "expectation-arbitration")) {
+      expect(envelopeStageFor(stage), stage).toBeUndefined();
+      expect(envelopeStageFor(stage, "v1"), stage).toBeUndefined();
+    }
+    // v1 だけの段は v1.1a の封筒から引けない（adapter はその schema をそのまま送る）
+    expect(envelopeStageFor("requirement-design", "v1.1a")).toBeUndefined();
+    expect(envelopeStageFor("judge-answers", "v1.1a")).toBeUndefined();
   });
 });
