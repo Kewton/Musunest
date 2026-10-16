@@ -42,6 +42,7 @@ import {
   TEST_SPEC_SCHEMA_NAME,
   checkEvaluability,
   runTestSpec,
+  testSuiteSha256,
   type TestObserves,
   type TestSpecInput,
 } from "./test-spec.js";
@@ -341,6 +342,39 @@ describe("T2 のデータ（名前・T1 の分類・期待・合否・宣言を�
     expect(input).not.toContain("views:");
   });
 
+  it("確定した仕様の要件ごとの kind（existence／constraining）は、データの全塊・前置きのどこにも無い（2 回目も）", async () => {
+    // existence と constraining を混ぜた仕様で、1 回目は落として 2 回目の要求も見る
+    const base = fixturePlan();
+    const plan: ConfirmedPlan = {
+      ...base,
+      requirements: base.requirements.map((requirement, index) => ({
+        ...requirement,
+        kind: index % 2 === 0 ? ("existence" as const) : ("constraining" as const),
+      })),
+    };
+    const round1 = response([...r1Validate(), ...r2Structure(), ...r3Action(["normal", "abnormal"]), ...r4Compute()]);
+    const { recording } = await run([round1, passing()], { plan });
+    expect(recording.structured.length).toBe(2);
+    const planKindPair = /\\?"kind\\?"\s*:\s*\\?"(?:existence|constraining)\\?"/;
+    for (const request of recording.structured) {
+      const shown = dataBlockOf(request.input, "確定した仕様") as { readonly requirements: readonly Record<string, unknown>[] };
+      expect(shown.requirements.length).toBe(plan.requirements.length);
+      for (const requirement of shown.requirements) {
+        expect("kind" in requirement).toBe(false);
+        expect(requirement["text"]).toBeDefined();
+      }
+      for (const text of dataTextsOf(request.input)) {
+        expect(text).not.toMatch(planKindPair);
+        expect(text).not.toContain("constraining");
+      }
+      // 前置き（共通の規則・文書・段の規則・schema）と要求の全文
+      for (const text of [request.instructions, ...(request.documents ?? []), ...(request.rules ?? []), JSON.stringify(request.schema), requestText(request)]) {
+        expect(text).not.toMatch(planKindPair);
+        expect(text).not.toContain("constraining");
+      }
+    }
+  });
+
   it("持ち越した要件が一覧・所属に無く、その要件だけの行が所属に無い", async () => {
     // R5 は表の unresolved、R3 は表の意味の点検の拒否で持ち越し。o.closeItem は R3 だけの行
     const carryOver = await carryOverFor(fixtureTable(), ["R3"]);
@@ -613,6 +647,23 @@ describe("v1 の検査を新契約で呼ぶ・持ち越しの要件の試験は�
     expect(outcome.value.dropped).toEqual([{ round: 1, testId: "r2-exec", requirementId: "R2", operation: "compute" }]);
   });
 
+  it("組の SHA は observes を含む：observes を 1 つ変えると SHA が変わり、同じ組・同じ observes なら 2 回同じ", async () => {
+    const { outcome } = await run([passing()]);
+    if (!outcome.ok) throw new Error("通らない");
+    const { suite, observes, sha256 } = outcome.value;
+    expect(await testSuiteSha256(suite, observes)).toBe(sha256);
+    expect(await testSuiteSha256(suite, new Map(observes))).toBe(sha256);
+    const [firstId, firstObserves] = [...observes][0] ?? [];
+    if (firstId === undefined || firstObserves === undefined) throw new Error("observes が無い");
+    const changed = new Map(observes);
+    changed.set(firstId, firstObserves === "value" ? "validation" : "value");
+    const changedSha = await testSuiteSha256(suite, changed);
+    expect(changedSha).toMatch(/^[0-9a-f]{64}$/);
+    expect(changedSha).not.toBe(sha256);
+    // 組だけの SHA とも違う（observes が測られている）
+    expect(sha256).not.toBe(await sha256Hex(canonicalJson(suite)));
+  });
+
   it("通った組の網羅の単位は A1 の関数の値と等しく、組の SHA は 2 回同じ。observes は FixedTest に入らない", async () => {
     const first = await run([passing()]);
     const second = await run([passing()]);
@@ -628,7 +679,9 @@ describe("v1 の検査を新契約で呼ぶ・持ち越しの要件の試験は�
     );
     expect(value.coverage.length).toBe(10);
     expect(value.sha256).toBe(second.outcome.value.sha256);
-    expect(value.sha256).toBe(await sha256Hex(canonicalJson(value.suite)));
+    expect(value.sha256).toBe(
+      await sha256Hex(canonicalJson({ suite: value.suite, observes: Object.fromEntries(value.observes) })),
+    );
     expect(value.sha256).toMatch(/^[0-9a-f]{64}$/);
     for (const test of value.suite.tests) expect("observes" in test).toBe(false);
     expect([...value.observes.keys()]).toEqual(value.suite.tests.map((test) => test.id));

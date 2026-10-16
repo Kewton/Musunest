@@ -6,7 +6,7 @@
 //
 //   - 試験は表の `id` で対象を指す（D1）。形は v1 の ②' の schema に、試験ごとの**観測する性質**（`observes`）を
 //     足したもの。コードは `observes` を**試験 ID → 性質の写像**に分け、`FixedTest` には入れない
-//   - 要件ごとの種類は T2 が**独立に**分類する（T1 の分類はデータに入れない）。T1 の分類（A1 の写しの
+//   - 要件ごとの種類は T2 が**独立に**分類する（T1 の分類も、確定した仕様の要件ごとの `kind` もデータに入れない）。T1 の分類（A1 の写しの
 //     `nature`）と `reconcileNatures` で突き合わせ、食い違いは J2（`decideDiscrepantNatures`）で裁く。判定が
 //     無い・答えが不正・確率が閾値未満なら `ruled` へ倒す（v1 と同じ。§1.1）
 //   - 持ち越しの要件は一覧と所属から除き、その要件だけが所属させる行も表から除く（A1 の `pruneForCarryOver`。
@@ -370,7 +370,18 @@ function visibleRows(table: NameTable): readonly unknown[] {
 }
 
 /**
- * T2 のデータ。確定した仕様・要件の一覧（持ち越しを除く）・表（名前を除く）・確かめ方・所属（持ち越しの要件と、
+ * T2 に見せる確定した仕様。要件ごとの種類（`kind`：existence／constraining）を除く——T2 の分類（nature）を
+ * Plan の種類から独立に保つ（§1.1。窓口の判断。#508）。ほかの欄はそのまま。
+ */
+function visiblePlan(plan: ConfirmedPlan): unknown {
+  return {
+    ...plan,
+    requirements: plan.requirements.map(({ kind: _kind, ...rest }) => rest),
+  };
+}
+
+/**
+ * T2 のデータ。確定した仕様（要件ごとの種類を除く）・要件の一覧（持ち越しを除く）・表（名前を除く）・確かめ方・所属（持ち越しの要件と、
  * その要件だけの行を除く。導いた entity の所属を含む）の順。**要件ごとの種類（T1 の分類）は入れない**。
  * やり直しでは、前回に実際に検査した試験（外して種類を書き込んだ後の組の試験に、その観測する性質を添えたもの）と
  * 前回の作り直しの指示を末尾に足す（前置きは変えない。#439）。
@@ -384,7 +395,7 @@ function buildData(
 ): readonly PromptData[] {
   const [planName, listName, tableName, verificationName, ownershipName] = TEST_SPEC_DATA_NAMES;
   const data: PromptData[] = [
-    { name: planName, text: serializeJson(plan) },
+    { name: planName, text: serializeJson(visiblePlan(plan)) },
     { name: listName, text: serializeJson(list) },
     { name: tableName, text: serializeJson(visibleRows(table)) },
     {
@@ -437,7 +448,7 @@ export interface TestSpecValue {
   readonly observes: ReadonlyMap<string, TestObserves>;
   /** 網羅の単位（A1 の `coverageUnitsOf`。B6 が同じ関数で掛け直す） */
   readonly coverage: readonly CoverageUnit[];
-  /** 試験の組の SHA-256（正規化した JSON） */
+  /** 試験の組と観測する性質の SHA-256（正規化した JSON。`testSuiteSha256`） */
   readonly sha256: string;
   /** 回数（1 から） */
   readonly rounds: number;
@@ -449,9 +460,12 @@ export interface TestSpecValue {
   readonly dropped: readonly DroppedNonstructuralTest[];
 }
 
-/** 試験の組の SHA-256（キーを並べ替えた正規化 JSON） */
-export function testSuiteSha256(suite: TestSuite): Promise<string> {
-  return sha256Hex(canonicalJson(suite));
+/**
+ * 試験の組の SHA-256（キーを並べ替えた正規化 JSON）。組と、試験 ID → 観測する性質を 1 つの JSON にして測る
+ * （観測する性質は FixedTest の外に持つので、組だけを測ると性質の差し替えを SHA が見逃す。窓口の判断。#508）
+ */
+export function testSuiteSha256(suite: TestSuite, observes: ReadonlyMap<string, TestObserves>): Promise<string> {
+  return sha256Hex(canonicalJson({ suite, observes: Object.fromEntries(observes) }));
 }
 
 /** 採った種類を、組の分類に書き込む（v1 の ②' と同じ扱い） */
@@ -570,7 +584,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
           suite,
           observes,
           coverage,
-          sha256: await testSuiteSha256(suite),
+          sha256: await testSuiteSha256(suite, observes),
           rounds: round,
           natures: reconciled.natures,
           discrepancies: reconciled.discrepancies,
