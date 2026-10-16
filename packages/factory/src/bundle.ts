@@ -207,9 +207,21 @@ export const DIAGNOSTICS_STATIC_CHECK_FILE = `${DIAGNOSTICS_DIR}/static-check.js
 export const DIAGNOSTICS_REJECTED_DESIGN_FILE = `${DIAGNOSTICS_DIR}/rejected-design.json` as const;
 /** 診断に出す、②' が断った試験の組の候補（形と中身。値つき。Issue #501）の置き場所 */
 export const DIAGNOSTICS_REJECTED_TEST_SUITE_FILE = `${DIAGNOSTICS_DIR}/rejected-test-suite.json` as const;
+/** 診断に出す、v1.1α の名前の表（T1）が断った候補の置き場所（`07-architecture-v1.1a.md` §1） */
+export const DIAGNOSTICS_REJECTED_NAME_TABLE_FILE = `${DIAGNOSTICS_DIR}/rejected-name-table.json` as const;
+/** 診断に出す、v1.1α の試験の仕様（T2）が断った候補の置き場所（`07-architecture-v1.1a.md` §1） */
+export const DIAGNOSTICS_REJECTED_TEST_SPEC_FILE = `${DIAGNOSTICS_DIR}/rejected-test-spec.json` as const;
 
-/** 断った候補を出す段（Issue #501） */
-export type RejectedCandidateStage = "design" | "test-suite";
+/** 断った候補を出す段（Issue #501。`name-table`・`test-spec` は v1.1α の段） */
+export type RejectedCandidateStage = "design" | "test-suite" | "name-table" | "test-spec";
+
+/** 断った候補の段ごとのファイル（並びは書く順。v1 の 2 段が先） */
+const REJECTED_CANDIDATE_FILES: readonly { readonly stage: RejectedCandidateStage; readonly path: string }[] = [
+  { stage: "design", path: DIAGNOSTICS_REJECTED_DESIGN_FILE },
+  { stage: "test-suite", path: DIAGNOSTICS_REJECTED_TEST_SUITE_FILE },
+  { stage: "name-table", path: DIAGNOSTICS_REJECTED_NAME_TABLE_FILE },
+  { stage: "test-spec", path: DIAGNOSTICS_REJECTED_TEST_SPEC_FILE },
+];
 
 /** 断った候補の問題 1 つ（参照元と、その参照元の JSON の SHA-256 を結ぶ。Issue #501） */
 export interface BundleRejectedProblem {
@@ -290,16 +302,14 @@ export function summarizeRejectedCandidates(
 }
 
 /**
- * 断った候補のファイルを組む（Issue #501）。設計の候補と試験の候補で**別のファイル 2 つ**にし、候補が
- * 無い段のファイルは作らない。名前はコードの定数である。**manifest は組まない。**
+ * 断った候補のファイルを組む（Issue #501）。**段ごとに別のファイル**にし（設計・試験の組、v1.1α の
+ * 名前の表・試験の仕様）、候補が無い段のファイルは作らない。名前はコードの定数である。**manifest は組まない。**
  */
 export function buildRejectedCandidateFiles(candidates: readonly BundleRejectedCandidate[]): readonly BundleArtifact[] {
   const artifacts: BundleArtifact[] = [];
-  const designs = candidates.filter((candidate) => candidate.stage === "design");
-  const suites = candidates.filter((candidate) => candidate.stage === "test-suite");
-  if (designs.length > 0) artifacts.push({ path: DIAGNOSTICS_REJECTED_DESIGN_FILE, text: toJson({ candidates: designs }) });
-  if (suites.length > 0) {
-    artifacts.push({ path: DIAGNOSTICS_REJECTED_TEST_SUITE_FILE, text: toJson({ candidates: suites }) });
+  for (const { stage, path } of REJECTED_CANDIDATE_FILES) {
+    const ofStage = candidates.filter((candidate) => candidate.stage === stage);
+    if (ofStage.length > 0) artifacts.push({ path, text: toJson({ candidates: ofStage }) });
   }
   return artifacts;
 }
@@ -631,6 +641,29 @@ export interface BundleInput {
   readonly materials: readonly BundleMaterialEntry[];
   /** 版ごとの評価の行（検証の結果に入れる。Issue #417） */
   readonly evaluations: readonly BundleEvaluationRow[];
+  /**
+   * 追加の成果物（v1.1α の `name-table.json` など。`07-architecture-v1.1a.md` §1.4）。**成果物の置き場所
+   * （`artifacts/`）の下**に置き、v1 の成果物の**後ろ**に並べて manifest の `files` に載せる。v1 の成果物と
+   * 同じ path・置き場所の外の path・重複した path は例外で断る（黙って上書きしない）。省くか空なら v1 のまま。
+   */
+  readonly extraArtifacts?: readonly BundleArtifact[];
+}
+
+/**
+ * 追加の成果物の path を確かめる（v1.1α。§1.4）。成果物の置き場所の下にあり、v1 の成果物とも、ほかの
+ * 追加の成果物とも重ならないこと。合わなければ例外で断る（黙って上書きしない）。
+ */
+function checkExtraArtifacts(base: readonly BundleArtifact[], extras: readonly BundleArtifact[]): void {
+  const taken = new Set(base.map((artifact) => artifact.path));
+  for (const extra of extras) {
+    if (!extra.path.startsWith(`${ARTIFACTS_DIR}/`) || extra.path.length === ARTIFACTS_DIR.length + 1) {
+      throw new Error(`追加の成果物 ${extra.path} は成果物の置き場所（${ARTIFACTS_DIR}/）の下にない`);
+    }
+    if (taken.has(extra.path)) {
+      throw new Error(`追加の成果物 ${extra.path} は、既にある成果物と同じ path である（上書きしない）`);
+    }
+    taken.add(extra.path);
+  }
 }
 
 /** 組み立てた納品物（`bundle-manifest.json` を含む。書くのは呼ぶ側） */
@@ -734,7 +767,7 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
   };
   const mappingsMaterial = { declaration_sha256: input.declarationSha256, mappings: input.mappings };
 
-  const artifacts: readonly BundleArtifact[] = [
+  const v1Artifacts: readonly BundleArtifact[] = [
     { path: DECLARATION_FILE, text: input.declaration.source },
     ...(input.plan === undefined ? [] : [{ path: PLAN_FILE, text: toJson(input.plan) }]),
     { path: SUMMARY_FILE, text: toJson(input.summary) },
@@ -749,6 +782,13 @@ export async function assembleBundle(input: BundleInput): Promise<AssembledBundl
     { path: ARBITRATION_FILE, text: toJson(input.arbitration) },
     { path: VERIFICATION_FILE, text: toJson(verification) },
   ];
+  // 追加の成果物は v1 の成果物の後ろに並べる（v1.1α。§1.4）。省くか空なら v1 の並びのまま
+  const extraArtifacts = input.extraArtifacts ?? [];
+  checkExtraArtifacts(v1Artifacts, extraArtifacts);
+  const artifacts: readonly BundleArtifact[] =
+    extraArtifacts.length === 0
+      ? v1Artifacts
+      : [...v1Artifacts, ...extraArtifacts.map((artifact) => ({ path: artifact.path, text: artifact.text }))];
 
   const files: BundleManifestFile[] = [];
   for (const artifact of artifacts) {

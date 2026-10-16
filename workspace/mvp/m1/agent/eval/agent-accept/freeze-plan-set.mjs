@@ -19,8 +19,10 @@ export const FROZEN_ORIGINS = ["frozen-plan", "human"];
 export const FROZEN_AUTHORS = ["owner", "scorer"];
 /** 凍結の規則の名前と版（D4。2026-10-15 所有者の決定） */
 export const FREEZE_RULE = { name: "earliest-confirmed", version: 1 };
-/** 凍結の入力にできる条件の版（params.mode が plan-only の計測） */
+/** 凍結の入力にできる条件の版（params.mode が plan-only の計測）。v5（#513）は v4 に params.pipeline などを足した版で、Plan 計測の読み方は同じ */
 export const CONDITIONS_V4 = "musunest-factory/agent-accept-conditions/v4";
+export const CONDITIONS_V5 = "musunest-factory/agent-accept-conditions/v5";
+export const FREEZABLE_CONDITIONS = [CONDITIONS_V4, CONDITIONS_V5];
 /** 工場が --plan-only で --out の直下に書く Plan だけの結果（packages/factory の PLAN_ONLY_RESULT_FILE。本のディレクトリでは bundle/ の下） */
 export const PLAN_RESULT_PATH = "bundle/plan-result.json";
 // 工場の --plan-file の標準出力の行の版と、値を持たない符号・検査の名前（packages/factory/src/cli-plan.ts と同じ値。ここに無い値は unknown に写す）
@@ -110,7 +112,8 @@ export async function freezePlanSet({ repo, outRoot, id, version }) {
   if (loaded.status === "missing") return { code: "freeze:conditions-missing" };
   if (loaded.status !== "ok") return { code: "freeze:conditions-unreadable" };
   const cond = loaded.cond;
-  if (cond.schema !== CONDITIONS_V4) return { code: "freeze:conditions-schema" };
+  // 条件の schema は組に書き戻さない（組の版は FROZEN_SET_SCHEMA のまま。出どころの計測は conditions_sha256 で指す）
+  if (!FREEZABLE_CONDITIONS.includes(cond.schema)) return { code: "freeze:conditions-schema" };
   if (cond.params?.mode !== "plan-only") return { code: "freeze:mode" };
   if (validatePlanned(cond).length > 0) return { code: "freeze:planned" };
   if (cond.source?.dirty !== false) return { code: "freeze:dirty" };

@@ -34,7 +34,12 @@ import {
   expectNoAcceptanceMaterial,
   makeGateway,
 } from "./__tests__/prompt.js";
+import * as bindModule from "./bind.js";
+import * as correspondenceModule from "./correspondence.js";
+import type { TestRunReport } from "./run-tests.js";
+import type { DeclarationEvaluator, EvaluationContext } from "./tools.js";
 import {
+  DECLARATION_REJECTIONS_DATA_NAME,
   checkDeclarationVersion,
   checkRepairAnswer,
   failureSignature,
@@ -1036,5 +1041,289 @@ describe("⑥ の道具の累計と 1 回の段の応答の往復の上限（02 
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ── 評価口と宣言の意味の点検の拒否（v1.1α A6'。07 §3・D11・Issue #506）──────────────
+
+const V3 = declaration("amount * 2", "amount + 3");
+
+/** 3 件の試験の組（t3 は R-2 の 2 件目）。並びを変えた組も作れるようにする */
+const SUITE3 = suiteOf([
+  ...SUITE.tests,
+  {
+    id: "t3",
+    target: { requirementId: "R-2", kind: "computation", role: "補助の値の計算" },
+    kind: "boundary",
+    operation: "compute",
+    clock: "2026-09-16T12:00:00+09:00",
+    input: { amount: 0 },
+    referenceData: [],
+    expected: { kind: "ok", value: 1 },
+  },
+]);
+
+const OWNERSHIP: readonly RequirementRoleOwnership[] = [
+  { requirementId: "R-1", ownership: [{ roleId: "record.total", basis: "stated", reason: null }] },
+  { requirementId: "R-2", ownership: [{ roleId: "record.extra", basis: "stated", reason: null }] },
+];
+
+/** 宣言ごとに落ちる試験 ID（偽物の評価口の決まり。版 V1 は t1・t2、V2 は t2、V3 は無し） */
+const FAILING_BY_SOURCE = new Map<string, readonly string[]>([
+  [V1, ["t1", "t2"]],
+  [V2, ["t2"]],
+  [V3, []],
+]);
+
+interface EvaluatorCall {
+  readonly source: string;
+  readonly context: EvaluationContext;
+  readonly failing: readonly string[];
+}
+
+/**
+ * 偽物の評価口：文脈の組の**試験 ID** で落ちを決め、不一致と行き先を返す（並びに依らない）。
+ * 受けた宣言と文脈を残す。
+ */
+function fakeEvaluator(): { readonly evaluate: DeclarationEvaluator; readonly calls: EvaluatorCall[] } {
+  const calls: EvaluatorCall[] = [];
+  const evaluate: DeclarationEvaluator = (_app, declaration, context) => {
+    const failingIds = FAILING_BY_SOURCE.get(declaration.source) ?? [];
+    const failing = context.suite.tests.map((test) => test.id).filter((id) => failingIds.includes(id));
+    calls.push({ source: declaration.source, context, failing });
+    const testRun: TestRunReport = {
+      mismatches: failing.map((testId) => ({ testId, detail: "偽物の不一致" })),
+      unresolved: [],
+      routes: failing.map((testId) => ({ testId, route: "missing-element" as const, detail: "偽物の不一致" })),
+      structural: [],
+    };
+    return { correspondence: { entries: context.correspondences, misses: [] }, testRun };
+  };
+  return { evaluate, calls };
+}
+
+/** 要求から締切の合図を外して JSON にする（バイト列で比べる） */
+const bytesOf = (request: LlmToolRequest | undefined): string => {
+  if (request === undefined) throw new Error("要求が無い");
+  const { signal: _signal, ...rest } = request;
+  return JSON.stringify(rest);
+};
+
+describe("宣言の意味の点検の拒否をデータとして足す（v1.1α・Issue #506）", () => {
+  const stepRequest = async (extra: Partial<RepairStepInput>): Promise<LlmToolRequest | undefined> => {
+    const initial = await version(V1);
+    const recording = createRecordingClient([done(V2)]);
+    const outcome = await runRepairStep({
+      source: SOURCE,
+      list: LIST,
+      suite: SUITE,
+      current: initial,
+      correspondences: CORRESPONDENCES,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      ...extra,
+    });
+    expect(outcome.ok).toBe(true);
+    return recording.tools[0];
+  };
+  const rejections = [{ requirementId: "R-1", kind: "expression", quote: "件数を合計する" }];
+
+  it("拒否を省いた要求と空の並びを渡した要求は、既存の要求とバイト列で同じ", async () => {
+    const plain = bytesOf(await stepRequest({}));
+    expect(bytesOf(await stepRequest({ declRejections: [] }))).toBe(plain);
+    // 対照：評価口だけを渡しても要求は変わらない（道具の文脈にだけ効く）
+    expect(bytesOf(await stepRequest({ evaluate: fakeEvaluator().evaluate }))).toBe(plain);
+  });
+
+  it("渡すと入力の末尾に塊が 1 つだけ増え、前置き・規則・文書・道具・schema は同じ", async () => {
+    const plain = await stepRequest({});
+    const withRejections = await stepRequest({ declRejections: rejections });
+    if (plain === undefined || withRejections === undefined) throw new Error("要求が無い");
+    const block = `<data name="${DECLARATION_REJECTIONS_DATA_NAME}">\n${JSON.stringify(rejections, null, 2)}\n</data>`;
+    expect(withRejections.input).toBe(`${plain.input}\n${block}`);
+    expect(withRejections.input.match(/<data name=/g)).toHaveLength((plain.input.match(/<data name=/g) ?? []).length + 1);
+    expect(withRejections.instructions).toBe(plain.instructions);
+    expect(withRejections.rules).toEqual(plain.rules);
+    expect(withRejections.documents).toEqual(plain.documents);
+    expect(withRejections.tools).toEqual(plain.tools);
+    expect(withRejections.schemaName).toBe(plain.schemaName);
+    expect(withRejections.schema).toEqual(plain.schema);
+    expect(withRejections.maxOutputTokens).toBe(plain.maxOutputTokens);
+    expect(withRejections.instructions).not.toContain("件数を合計する");
+    expectNoAcceptanceMaterial([withRejections.input]);
+  });
+});
+
+describe("版の再検査に評価口を渡す（v1.1α・Issue #506）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("版ごとに 1 回、その版の app・宣言・文脈で呼ばれ、routes が評価口の結果と一致し、③・⑤a のやり直しの落ちは空", async () => {
+    const bindSpy = vi.spyOn(bindModule, "bindTests");
+    const roleSpy = vi.spyOn(correspondenceModule, "checkRoleMappings");
+    const correspondenceSpy = vi.spyOn(correspondenceModule, "checkCorrespondence");
+    const { evaluate, calls } = fakeEvaluator();
+    const context = {
+      list: LIST,
+      suite: SUITE3,
+      correspondences: CORRESPONDENCES,
+      ownership: OWNERSHIP,
+      version: LEGACY_DESIGN_CONTRACT,
+      roles: [] as readonly RoleEntry[],
+      mappings: [] as readonly RoleNameMapping[],
+      evaluate,
+    };
+    const first = await checkDeclarationVersion({ source: V1 }, context);
+    const second = await checkDeclarationVersion({ source: V2 }, context);
+    expect(calls.map((call) => call.source)).toEqual([V1, V2]);
+    for (const call of calls) {
+      expect(call.context).toEqual({
+        list: LIST,
+        suite: SUITE3,
+        correspondences: CORRESPONDENCES,
+        ownership: OWNERSHIP,
+        version: LEGACY_DESIGN_CONTRACT,
+      });
+    }
+    expect(first.routes.map((route) => route.testId)).toEqual(["t1", "t2"]);
+    expect(first.routes).toEqual((first.testRun as TestRunReport | null)?.routes);
+    expect(second.routes.map((route) => route.testId)).toEqual(["t2"]);
+    for (const report of [first, second]) {
+      expect(report.defectMisses).toEqual([]);
+      expect(report.redoMisses).toEqual([]);
+      expect(report.correspondence).toEqual({ entries: CORRESPONDENCES, misses: [] });
+    }
+    expect(first.declarationSha256).toBe(await sha256Hex(V1));
+    expect(bindSpy).not.toHaveBeenCalled();
+    expect(roleSpy).not.toHaveBeenCalled();
+    expect(correspondenceSpy).not.toHaveBeenCalled();
+
+    // 静的チェックを通らない版では評価口を呼ばない（流さない）
+    const invalid = await checkDeclarationVersion({ source: V1.replace("amount: number", "amount: nosuchtype") }, context);
+    expect(invalid.staticCheck.passed).toBe(false);
+    expect(invalid.testRun).toBeNull();
+    expect(calls).toHaveLength(2);
+  });
+
+  it("省けば今までどおり v1 の部品（bindTests・checkCorrespondence）で流す", async () => {
+    const bindSpy = vi.spyOn(bindModule, "bindTests");
+    const correspondenceSpy = vi.spyOn(correspondenceModule, "checkCorrespondence");
+    const report = await version(V1);
+    expect(bindSpy).toHaveBeenCalledTimes(1);
+    expect(correspondenceSpy).toHaveBeenCalledTimes(1);
+    expect(report.testRun?.mismatches.map((mismatch) => mismatch.testId)).toEqual(["t1"]);
+  });
+});
+
+describe("修復の輪に評価口を渡す（v1.1α・Issue #506）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** 棄却 1 件を挟む 2 往復の輪を、組 `suite` で流す（偽物の LLM・偽物の評価口） */
+  const loopWith = async (suite: TestSuite) => {
+    const { evaluate, calls } = fakeEvaluator();
+    const context = { list: LIST, suite, correspondences: CORRESPONDENCES, ownership: OWNERSHIP, evaluate };
+    const initial = await checkDeclarationVersion({ source: V1 }, context);
+    const recording = createRecordingClient([
+      // 1 往復目：V2 を返し、t1 の期待に異議を出す → ⑥' が棄却する
+      done(V2, [{ testId: "t1", quote: "件数を合計する" }]),
+      structured({
+        decisions: [{ testId: "t1", verdict: "overturn", reason: "原文の数え方が違う", quote: "件数を合計する" }],
+      }),
+      // 2 往復目：棄却のあとの組で、道具で V3 を試してから V3 を返す
+      toolCalls([{ id: "c2", name: "run-tests", arguments: { declaration: V3 } }]),
+      done(V3),
+    ]);
+    const outcome = await runRepairLoop({
+      source: SOURCE,
+      ...context,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      initial,
+      limits: limits(6),
+    });
+    return { outcome, calls, recording };
+  };
+
+  it("棄却のあとの版の再検査と次の修復の道具では、評価口の文脈の組に棄却した試験が無く、list・ownership はそのまま届く", async () => {
+    const bindSpy = vi.spyOn(bindModule, "bindTests");
+    const { outcome, calls, recording } = await loopWith(SUITE3);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.overturned.map((entry) => entry.testId)).toEqual(["t1"]);
+    expect(outcome.value.rounds).toBe(2);
+    expect(outcome.value.final.declaration.source).toBe(V3);
+    expect(outcome.value.final.testRun?.mismatches).toEqual([]);
+
+    // 呼ばれた順：初期の版・再検査（V2。棄却のあと）・道具（V3）・再検査（V3）
+    expect(calls.map((call) => call.source)).toEqual([V1, V2, V3, V3]);
+    const ids = (call: EvaluatorCall) => call.context.suite.tests.map((test) => test.id);
+    expect(ids(calls[0] as EvaluatorCall)).toEqual(["t1", "t2", "t3"]);
+    for (const call of calls.slice(1)) {
+      expect(ids(call)).not.toContain("t1");
+      expect(ids(call)).toEqual(["t2", "t3"]);
+    }
+    for (const call of calls) {
+      expect(call.context.list).toBe(LIST);
+      expect(call.context.ownership).toBe(OWNERSHIP);
+      expect(call.context.correspondences).toBe(CORRESPONDENCES);
+    }
+    // 版の数だけ再検査で呼ばれ（初期の版を除く）、道具の呼び出しの分を足した数になる
+    const toolCallCount = recording.tools.filter((request) => request.turns.length > 0).length;
+    expect(calls.length - 1).toBe(outcome.value.versions.length - 1 + toolCallCount);
+    // 道具の結果は評価口の結果（2 往復目の道具は棄却のあとの組で t2 だけが落ちない V3）
+    const toolTurn = recording.tools[recording.tools.length - 1]?.turns.at(-1);
+    expect(toolTurn?.role === "tool" ? toolTurn.results[0]?.output : undefined).toEqual({
+      passed: true,
+      detail: "",
+      mismatches: [],
+      unresolved: [],
+      misses: [],
+    });
+    expect(bindSpy).not.toHaveBeenCalled();
+  });
+
+  it("残りの試験の並びを変えても、評価口の結果と輪の結果は試験 ID で同じ", async () => {
+    const reordered: TestSuite = { tests: [...SUITE3.tests].reverse() };
+    const a = await loopWith(SUITE3);
+    const b = await loopWith(reordered);
+    expect(a.outcome.ok && b.outcome.ok).toBe(true);
+    if (!a.outcome.ok || !b.outcome.ok) return;
+    const byId = (calls: readonly EvaluatorCall[]) =>
+      calls.map((call) => ({ source: call.source, failing: [...call.failing].sort(), suite: call.context.suite.tests.map((test) => test.id).sort() }));
+    expect(byId(b.calls)).toEqual(byId(a.calls));
+    const sortedIds = (entries: readonly { readonly testId: string }[] | undefined) =>
+      (entries ?? []).map((entry) => entry.testId).sort();
+    expect(sortedIds(b.outcome.value.final.testRun?.mismatches)).toEqual(sortedIds(a.outcome.value.final.testRun?.mismatches));
+    expect(b.outcome.value.overturned).toEqual(a.outcome.value.overturned);
+    expect(sortedIds(b.outcome.value.regressions)).toEqual(sortedIds(a.outcome.value.regressions));
+    expect(b.outcome.value.versions.map((entry) => entry.declarationSha256)).toEqual(
+      a.outcome.value.versions.map((entry) => entry.declarationSha256),
+    );
+    expect(b.outcome.value.suite.tests.map((test) => test.id).sort()).toEqual(["t2", "t3"]);
+  });
+
+  it("評価口を渡しても、道具の引数の検査は省かない（形の合わない引数は呼ばずに断り、評価口も呼ばない）", async () => {
+    const { evaluate, calls } = fakeEvaluator();
+    const initial = await version(V1);
+    const recording = createRecordingClient([
+      toolCalls([{ id: "c1", name: "run-tests", arguments: { declaration: "" } }]),
+    ]);
+    const outcome = await runRepairStep({
+      source: SOURCE,
+      list: LIST,
+      suite: SUITE,
+      current: initial,
+      correspondences: CORRESPONDENCES,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      evaluate,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.failure.kind).toBe("unmet");
+    expect(calls).toHaveLength(0);
   });
 });

@@ -2339,3 +2339,467 @@ test("既存の行の問数・往復は、今まで値が出ていた入力で�
     assert.deepEqual(full.rows.map((x) => [x.run, x.plan.questions, x.plan.rounds]), [["P1-r1", 3, 1], ["P1-r2", 5, 2], ["P1-r3", 0, 1], ["P1-r4", 4, 1], ["P1-r5", 0, 0], ["P1-r6", 0, 0], ["P1-r7", 0, 0]]);
   });
 });
+
+// ── #513：v1.1α の比較の採点（--compare）・条件の版 v5・停止段と到達数・持ち越し（README の v1.1α の節）
+import { BUILD_STAGE_IDS, CONDITIONS_V5, EXPECTED_STOPS, V11A_STAGE_IDS, conditionsSignature, pairStats, stopValueOf } from "./score-agent.mjs";
+
+const MARK513 = "leak-marker-513";
+const APPROVED513 = { "name-table": 32768, "semantic-check": 16384, "test-spec": 32768, "decl-check": 16384 };
+const PSHA513 = (p) => sha256(`plan-${p}`), SSHA513 = (p) => sha256(`source-${p}`);
+/** 本 1 本の起動の記録（要約は工場の headless-summary の写し） */
+const sl513 = (summary = {}) => JSON.stringify({ exit: 0, wall_s: 1, started_at: "2026-10-16T00:00:00.000Z", exit_class: "ok", summary: { schema_version: "commandagent.headless-summary/v1", verdict: "partial", stop_reason: "completed", provider_cost_usd: 0.05, failure: null, stages: [], ...summary }, plan_cost: null, stderr_tail: { bytes: 0, known_lines: 0 }, resumed: false });
+/**
+ * 比較の出力先を固定の記録で組む（run-agent.mjs --compare と同じ形）。runOf(群, 本の ID) が本ごとの中身：
+ * { state（executed・incomplete・unexecuted）, spec, summary, carry（carry-over の記録。文字列ならそのまま）, verification, stdout }。
+ * 条件の指紋は repoDir の採点の定義・spec-engine の dist・組・台本から計算する（採点のときに一致する）
+ */
+function compareFixture(base, name, { pids = ["P1", "P2"], runs = 3, profile = "official", runOf = () => ({}), repoDir = repo, groupsExtra = {} } = {}) {
+  const out = join(base, name), evDir = join(repoDir, "workspace/mvp/m1/agent/eval");
+  mkdirSync(out, { recursive: true });
+  const frozenPath = join(base, `${name}-frozen.json`);
+  writeFileSync(frozenPath, JSON.stringify({ id: "t", adopted: pids }));
+  const frozenSha = sha256(readFileSync(frozenPath));
+  const pairs = pids.flatMap((pid) => Array.from({ length: runs }, (_, i) => ({ pid, r: i + 1 }))).map((p, i) => ({ ...p, first: i % 2 === 0 ? "v1" : "v1.1a" }));
+  const pairsText = JSON.stringify({ schema: "musunest-eval/compare-pairs/v1", frozen_sha256: frozenSha, groups: ["v1", "v1.1a"], runs, pairs }, null, 1) + "\n";
+  writeFileSync(join(out, "pairs.json"), pairsText);
+  const pairsSha = sha256(pairsText);
+  const recordGroups = {};
+  const set = loadEvalSet(join(repoDir, DEFAULT_SET_PATH));
+  const ids = pairs.map((p) => `${p.pid}-r${p.r}`);
+  for (const g of ["v1", "v1.1a"]) {
+    const dir = join(out, g);
+    mkdirSync(dir, { recursive: true });
+    const cond = {
+      schema: CONDITIONS_V5, measurement_id: name, source: { commit: null, dirty: null }, factory: { fingerprint: sha256(g) }, spec_engine: { fingerprint: fingerprintDir(join(repoDir, "packages/spec-engine/dist")).fingerprint },
+      set: { path: DEFAULT_SET_PATH, sha256: set.sha256 }, scripts: { mode: "post-hoc", fingerprint: scriptsFingerprint(set.scripts).fingerprint }, scoring: { fingerprint: scoringFingerprint(evDir, scoreFile, set.definitions).fingerprint }, judge: { configuration: "llm-only" },
+      params: { ...paramsFor(ids), mode: "build-from", plan: false, effort: "high", pipeline: g, stage_output_limits_v11a: g === "v1" ? null : APPROVED513 },
+      child_args: ids.map((id) => ({ id, argv: [] })),
+      frozen: { path: frozenPath, sha256: frozenSha, id: "t", version: 1, origin: "frozen-plan", author: null, adopted: pids.map((p) => ({ pattern: p, plan_sha256: PSHA513(p), source_sha256: SSHA513(p), envelope_sha256: sha256(p) })), missing: [] },
+      comparison: { pairs_sha256: pairsSha, group: g, role: g === "v1" ? "baseline" : "candidate", profile }, ...(groupsExtra[g] ?? {}),
+    };
+    // 条件の署名は run-agent.mjs と同じ式（conditionsSignature）。groupsExtra で signature を与えたときはその値（食い違いの負例）
+    cond.signature = groupsExtra[g]?.signature ?? conditionsSignature(cond);
+    recordGroups[g] = { role: g === "v1" ? "baseline" : "candidate", pipeline: g, factory: { fingerprint: cond.factory.fingerprint }, conditions_signature: cond.signature };
+    writeFileSync(join(dir, "conditions.json"), JSON.stringify(cond));
+    for (const id of ids) {
+      const x = runOf(g, id);
+      if (x.state === "unexecuted") continue;
+      const rd = join(dir, id);
+      mkdirSync(join(rd, "bundle/artifacts"), { recursive: true });
+      if (x.state === "incomplete") continue;
+      writeFileSync(join(rd, "summary.line.json"), sl513(x.summary));
+      writeFileSync(join(rd, "stdout.log"), x.stdout ?? "");
+      writeFileSync(join(rd, "stderr.log"), x.stdout ?? "");
+      if (x.spec) writeFileSync(join(rd, "bundle/artifacts/app.spec.yaml"), x.spec);
+      if (x.carry !== undefined) writeFileSync(join(rd, "bundle/artifacts/carry-over.json"), typeof x.carry === "string" ? x.carry : JSON.stringify(x.carry));
+      if (x.verification !== undefined) writeFileSync(join(rd, "bundle/artifacts/verification-v11a.json"), JSON.stringify(x.verification));
+    }
+  }
+  writeFileSync(join(out, "comparison.json"), JSON.stringify({ schema: "musunest-eval/compare-record/v1", pairs: { sha256: pairsSha }, groups: recordGroups, profile, profile_mismatches: profile === "official" ? [] : ["deadline_min"], scoring_cost_usd: 0 }));
+  return { out, frozenPath, pairs };
+}
+const scoreCompareRun = (out, extra = [], repoArg = repo) => spawnSync(process.execPath, [scoreFile, repoArg, out, "--compare", ...extra], { encoding: "utf8" });
+const readCompare = (out, name = "score-compare.json") => JSON.parse(readFileSync(join(out, name), "utf8"));
+
+test("#513 (a) BUILD_STAGE_IDS は v1 の 12 段のあとに v1.1α の 7 段（A1 の順）で 19 個。run-agent.mjs は同じ一覧を記録の写像に使う（工場の dist の STAGE_IDS との一致の試験は #505 が入ってから足す）", () => {
+  assert.equal(BUILD_STAGE_IDS.length, 19);
+  assert.deepEqual(BUILD_STAGE_IDS.slice(0, 12), ["requirements", "reverse-check", "design", "test-suite", "write", "static-check", "correspondence", "run-tests", "repair", "arbitration", "judge", "bundle"]);
+  assert.deepEqual(V11A_STAGE_IDS, ["name-table", "semantic-check", "test-spec", "name-check", "decl-check", "coverage", "carry-over"]);
+  assert.deepEqual(BUILD_STAGE_IDS.slice(12), V11A_STAGE_IDS);
+  assert.ok(readFileSync(join(here, "run-agent.mjs"), "utf8").includes("const STAGE_IDS = BUILD_STAGE_IDS;"));
+});
+
+test("#513 (b) 条件の版 v5：evaluationOf が pipeline を返し、v1〜v4 では null（出力の evaluation の欄は今までの形のまま）。v5 の採点の出力の evaluation に pipeline が載る", async () => {
+  assert.equal(CONDITIONS_V5, "musunest-factory/agent-accept-conditions/v5");
+  assert.equal(CONDITIONS_SCHEMAS.at(-1), CONDITIONS_V5);
+  assert.deepEqual(evaluationOf({ schema: CONDITIONS_V5, params: { mode: "build-from", pipeline: "v1.1a" } }), { mode: "build-from", build_applicable: true, pipeline: "v1.1a" });
+  assert.deepEqual(evaluationOf({ schema: CONDITIONS_V5, params: { mode: "build", pipeline: "v1" } }), { mode: "build", build_applicable: true, pipeline: "v1" });
+  assert.deepEqual(evaluationOf({ schema: CONDITIONS_V5, params: { mode: "plan-only", pipeline: MARK513 } }), { mode: "plan-only", build_applicable: false, pipeline: "unknown" });
+  for (const schema of CONDITIONS_SCHEMAS.slice(0, 4)) {
+    const e = evaluationOf({ schema, params: { mode: "build", plan: false, pipeline: "v1.1a" } });
+    assert.equal(e.pipeline, null, schema);
+    assert.deepEqual(Object.keys(e), ["mode", "build_applicable"], `${schema}: 出力の欄は今までの形`);
+  }
+  assert.equal(evaluationOf(null).pipeline, null);
+  await withOut(async (base) => {
+    const f = compareFixture(base, "b", { pids: ["P1"], runs: 1, runOf: () => ({ spec: PASS_A }) });
+    scoreRun(join(f.out, "v1.1a"));
+    const full = readScore(join(f.out, "v1.1a"));
+    assert.deepEqual(full.evaluation, { mode: "build-from", build_applicable: true, pipeline: "v1.1a" });
+    assert.equal(full.fingerprints.conditions.frozen, sha256(readFileSync(f.frozenPath)), "v5 の入れ子の frozen も v4 と同じく出す");
+    assert.deepEqual(anonymize(full).evaluation, { mode: "build-from", build_applicable: true, pipeline: "v1.1a" });
+    // v4 の build-from の出力先：evaluation に pipeline の欄が出ない
+    const o4 = join(base, "b4");
+    cpSync(join(f.out, "v1.1a"), o4, { recursive: true });
+    const c4 = JSON.parse(readFileSync(join(o4, "conditions.json"), "utf8"));
+    c4.schema = CONDITIONS_SCHEMAS[3];
+    delete c4.params.pipeline; delete c4.params.stage_output_limits_v11a; delete c4.comparison;
+    writeFileSync(join(o4, "conditions.json"), JSON.stringify(c4));
+    rmSync(join(o4, "score.json"));
+    scoreRun(o4);
+    assert.deepEqual(readScore(o4).evaluation, { mode: "build-from", build_applicable: true });
+    assert.deepEqual(anonymize(readScore(o4)).evaluation, { mode: "build-from", build_applicable: true });
+  });
+});
+
+test("#513 (c) 停止段：A5 の 5 つと decl-check:limit が別に数えられ、limit は枯渇 1 以上で decl-check:limit・0 で今までどおり、知らない値は unknown。到達数は段の記録と一致し、到達 0 の段は「今回未観測」と分母つき。持ち越しの 4 つの件数と本の数が合い、読めない本は欠測、v1 は null", async () => {
+  // 純粋な関数
+  assert.equal(stopValueOf({ failure: { stage: "name-table", kind: "unmet" }, stop_reason: "unmet" }), "name-table:unmet");
+  assert.equal(stopValueOf({ failure: null, stop_reason: "limit" }, 1), "decl-check:limit");
+  assert.equal(stopValueOf({ failure: null, stop_reason: "limit" }, 0), "limit");
+  assert.equal(stopValueOf({ failure: null, stop_reason: "limit" }, null), "limit");
+  assert.equal(stopValueOf({ failure: null, stop_reason: MARK513 }), "unknown");
+  assert.equal(stopValueOf({ failure: { stage: MARK513, kind: "unmet" } }), "unknown");
+  assert.deepEqual(EXPECTED_STOPS, ["name-table:unmet", "semantic-check:malformed", "test-spec:unmet", "decl-check:malformed", "carry-over:unmet", "decl-check:limit"]);
+  const plan11 = {
+    "P1-r1": { summary: { failure: { stage: "name-table", kind: "unmet" }, stop_reason: "unmet", stages: [{ stage: "name-table" }, { stage: "name-table" }] } },
+    "P1-r2": { summary: { failure: { stage: "semantic-check", kind: "malformed" }, stop_reason: "malformed", stages: [{ stage: "name-table" }, { stage: "semantic-check" }] }, carry: { entries: [], excluded_row_ids: [], remaining_requirement_ids: ["R9"] } },
+    "P1-r3": { summary: { failure: { stage: "test-spec", kind: "unmet" }, stop_reason: "unmet", stages: [{ stage: "name-table" }, { stage: "semantic-check" }, { stage: "test-spec" }] }, carry: { entries: [{ requirementId: "R1", reasons: [{ origin: "name-table", reason: "r" }] }, { requirementId: "R2", reasons: [{ origin: "semantic-check", reason: "r" }, { origin: "semantic-check", reason: "r" }] }], excluded_row_ids: [], remaining_requirement_ids: ["R9"] } },
+    "P1-r4": { summary: { failure: { stage: "decl-check", kind: "malformed" }, stop_reason: "malformed", stages: [{ stage: "name-table" }, { stage: "decl-check" }] }, carry: "{" },
+    "P1-r5": { summary: { failure: { stage: "carry-over", kind: "unmet" }, stop_reason: "unmet", stages: [{ stage: "name-table" }, { stage: "carry-over" }] }, carry: { entries: [{ requirementId: "R1", reasons: [{ origin: "name-table", reason: "r" }] }, { requirementId: "R2", reasons: [{ origin: "decl-check", reason: "r" }, { origin: "coverage", reason: "r" }] }, { requirementId: "R3", reasons: [{ origin: MARK513, reason: "r" }] }], excluded_row_ids: [], remaining_requirement_ids: ["R9"] } },
+    "P1-r6": { summary: { stop_reason: "limit", stages: [{ stage: "name-table" }, { stage: "decl-check" }] }, verification: { table_sha256: "t", test_suite_sha256: "s", declaration_sha256: "d", checked_declaration_sha256s: ["d"], decl_check: { exhausted: 1, malformed: 0, rejected: 2 } }, carry: { entries: [{ requirementId: "R1", reasons: [{ origin: "decl-check", reason: "r" }] }], excluded_row_ids: [], remaining_requirement_ids: ["R9"] } },
+    "P1-r7": { summary: { stop_reason: "limit", stages: [{ stage: "name-table" }] }, verification: { table_sha256: "t", test_suite_sha256: "s", declaration_sha256: "d", checked_declaration_sha256s: ["d"], decl_check: { exhausted: 0, malformed: 0, rejected: 0 } }, carry: { requirements: [] } },
+    "P1-r8": { summary: { stop_reason: MARK513, stages: [{ stage: MARK513 }] } },
+    "P1-r9": { summary: { stop_reason: "completed", stages: [{ stage: "name-table" }, { stage: "bundle" }] }, carry: { entries: [], excluded_row_ids: [], remaining_requirement_ids: ["R9"] } },
+  };
+  await withOut(async (base) => {
+    const f = compareFixture(base, "c", { pids: ["P1"], runs: 9, runOf: (g, id) => (g === "v1" ? { summary: { stages: [{ stage: "design" }, { stage: "write" }] } } : plan11[id]) });
+    const r = scoreCompareRun(f.out);
+    assert.equal(r.status, 0, r.stderr);
+    const g = readCompare(f.out).groups["v1.1a"], g1 = readCompare(f.out).groups.v1;
+    assert.deepEqual(g.stops.expected, { "name-table:unmet": 1, "semantic-check:malformed": 1, "test-spec:unmet": 1, "decl-check:malformed": 1, "carry-over:unmet": 1, "decl-check:limit": 1 });
+    assert.deepEqual(g.stops.values, { "name-table:unmet": 1, "semantic-check:malformed": 1, "test-spec:unmet": 1, "decl-check:malformed": 1, "carry-over:unmet": 1, "decl-check:limit": 1, limit: 1, unknown: 1, completed: 1 });
+    assert.deepEqual([g.stops.planned, g.stops.unexecuted, g.stops.incomplete, g.stops.no_summary], [9, 0, 0, 0]);
+    assert.deepEqual(g1.stops.values, { completed: 9 });
+    // 到達数：段の記録に現れた本の数（同じ本で繰り返しても 1）
+    assert.deepEqual(g.reach["name-table"], { reached: 8, planned: 9, label: "8/9" });
+    assert.deepEqual([g.reach["semantic-check"].reached, g.reach["test-spec"].reached, g.reach["decl-check"].reached, g.reach["carry-over"].reached, g.reach.bundle.reached], [2, 1, 2, 1, 1]);
+    assert.deepEqual(g.reach.coverage, { reached: 0, planned: 9, label: "今回未観測（0/9）" });
+    assert.deepEqual(g1.reach["name-table"], { reached: 0, planned: 9, label: "今回未観測（0/9）" });
+    assert.deepEqual(g1.reach.design, { reached: 9, planned: 9, label: "9/9" });
+    assert.deepEqual(Object.keys(g.reach), BUILD_STAGE_IDS);
+    // 持ち越し：読めた本 5（r2・r3・r5・r6・r9）、欠測 4（記録なし r1・r8、JSON でない r4、欄の形が違う r7）
+    assert.deepEqual(g.carry_over, { runs: 9, observed: 5, missing: 4, runs_with_carry_over: 3, sources: { "name-table": 2, "semantic-check": 1, "decl-check": 2, coverage: 1, unknown: 1 } });
+    assert.equal(g1.carry_over, null);
+    assert.ok(!r.stdout.includes(MARK513) && !readFileSync(join(f.out, "score-compare.json"), "utf8").includes(MARK513), "知らない値をそのまま出さない");
+  });
+});
+
+test("#513 (d) 対の差：対 6（＋1 が 2・0 が 3・−1 が 1）で件数・n・平均・区間が手計算と一致し、候補だけ PASS の対が ＋1。P 別の一覧と平均。締切で止まった本は PASS 0 で分母に残る。n が 1 なら区間 null", async () => {
+  // 手計算：差 [1, 1, 0, 0, 0, -1]、平均 1/6、標本分散 (2·(5/6)² + 3·(1/6)² + (7/6)²) / 5 = 102/180
+  const m = 1 / 6, sd = Math.sqrt(102 / 180), h = (1.96 * sd) / Math.sqrt(6), r6 = (x) => Math.round(x * 1e6) / 1e6;
+  assert.deepEqual(pairStats([1, 1, 0, 0, 0, -1]), { n: 6, counts: { "+1": 2, 0: 3, "-1": 1 }, mean: r6(m), sd: r6(sd), interval: [r6(m - h), r6(m + h)] });
+  assert.deepEqual(pairStats([1]), { n: 1, counts: { "+1": 1, 0: 0, "-1": 0 }, mean: 1, sd: null, interval: null });
+  assert.deepEqual(pairStats([]), { n: 0, counts: { "+1": 0, 0: 0, "-1": 0 }, mean: null, sd: null, interval: null });
+  // 対ごとの宣言：P1-r1・P1-r2 は候補だけ PASS（＋1）、P1-r3 は両方 PASS、P2-r1 は両方 FAIL、P2-r2 は候補が締切で止まり宣言なし・比較元も FAIL（0）、P2-r3 は比較元だけ PASS（−1）
+  const plan = { "P1-r1": [FAIL_A, PASS_A], "P1-r2": [FAIL_A, PASS_A], "P1-r3": [PASS_A, PASS_A], "P2-r1": [FAIL_A, FAIL_A], "P2-r2": [FAIL_A, null], "P2-r3": [PASS_A, FAIL_A] };
+  await withOut(async (base) => {
+    const f = compareFixture(base, "d", { runOf: (g, id) => { const spec = plan[id][g === "v1" ? 0 : 1]; return spec === null ? { summary: { verdict: "none", stop_reason: "deadline", failure: { stage: "write", kind: "deadline" } } } : { spec }; } });
+    const r = scoreCompareRun(f.out);
+    assert.equal(r.status, 0, r.stderr);
+    const p = readCompare(f.out).pairs;
+    assert.deepEqual([p.planned, p.both, p.one_side, p.none, p.n], [6, 6, 0, 0, 6]);
+    assert.deepEqual(p.counts, { "+1": 2, 0: 3, "-1": 1 });
+    assert.deepEqual([p.mean, p.sd, p.interval], [r6(m), r6(sd), [r6(m - h), r6(m + h)]]);
+    assert.deepEqual(p.rows.map((x) => x.diff), [1, 1, 0, 0, 0, -1]);
+    assert.deepEqual(p.rows[0].pass, { v1: 0, "v1.1a": 1 }, "候補だけ PASS の対が ＋1");
+    assert.deepEqual(p.rows[4].pass, { v1: 0, "v1.1a": 0 }, "締切で止まった本は PASS 0 で分母に残る");
+    assert.deepEqual(p.by_pattern, { P1: { diffs: [1, 1, 0], n: 3, mean: r6(2 / 3) }, P2: { diffs: [0, 0, -1], n: 3, mean: r6(-1 / 3) } });
+    const c = readCompare(f.out);
+    assert.equal(c.diff_direction.startsWith("候補（v1.1a）− 比較元（v1）"), true);
+    startsWith(c.groups.v1.pass_executed, "2/6（");
+    startsWith(c.groups["v1.1a"].pass_executed, "3/6（");
+    assert.equal(c.groups["v1.1a"].stops.values["write:deadline"], 1);
+    assert.equal(c.completion.status, "complete");
+    assert.match(r.stdout, /pair\tP1-r1\t先行 v1\tv1 executed PASS=0\tv1\.1a executed PASS=1\t差 \+1/);
+    // n が 1（両方終わった対が 1 つ）なら区間は null
+    const f1 = compareFixture(base, "d1", { pids: ["P1"], runs: 2, runOf: (g, id) => (id === "P1-r2" && g === "v1.1a" ? { state: "unexecuted" } : { spec: PASS_A }) });
+    assert.equal(scoreCompareRun(f1.out).status, 0);
+    const p1 = readCompare(f1.out).pairs;
+    assert.deepEqual([p1.n, p1.one_side, p1.interval, p1.mean], [1, 1, null, 0]);
+    assert.equal(p1.rows[1].diff, null, "片側だけの対は差 null で n に入れない");
+  });
+});
+
+test("#513 (e) 照合：全条件を満たせば complete。片側の対・予算の符号・diagnostic のそれぞれで incomplete・「未完了」・reference_only 真（diagnostic は「診断」も）", async () => {
+  await withOut(async (base) => {
+    const all = () => ({ spec: PASS_A });
+    const ok = compareFixture(base, "e-ok", { runOf: all });
+    assert.equal(scoreCompareRun(ok.out).status, 0);
+    assert.deepEqual((({ status, label, reference_only, reasons }) => ({ status, label, reference_only, reasons }))(readCompare(ok.out).completion), { status: "complete", label: "完了", reference_only: false, reasons: [] });
+    const cases = [
+      ["e-one-side", { runOf: (g, id) => (g === "v1.1a" && id === "P2-r3" ? { state: "unexecuted" } : all()) }, null, "未完了", ["両方が終わっていない対がある", "群の照合が完了でない"]],
+      ["e-incomplete-run", { runOf: (g, id) => (g === "v1" && id === "P1-r1" ? { state: "incomplete" } : all()) }, null, "未完了", ["両方が終わっていない対がある", "群の照合が完了でない"]],
+      ["e-budget", { runOf: all }, (out) => writeFileSync(join(out, "compare-run-1.json"), JSON.stringify({ stop_code: "budget" })), "未完了", ["全体の予算の停止の記録がある"]],
+      ["e-diagnostic", { runOf: all, profile: "diagnostic" }, null, "未完了・診断", ["正式な比較の条件を満たさない（診断）"]],
+    ];
+    for (const [name, opts, tweak, label, reasons] of cases) {
+      const f = compareFixture(base, name, opts);
+      if (tweak) tweak(f.out);
+      const r = scoreCompareRun(f.out);
+      assert.equal(r.status, 0, `${name}: ${r.stderr}`);
+      const c = readCompare(f.out).completion;
+      assert.deepEqual([c.status, c.label, c.reference_only, c.reasons], ["incomplete", label, true, reasons], name);
+      assert.match(r.stdout, new RegExp(`比較: ${label}（参考値。正式な比較基準にしない）`), name);
+    }
+  });
+});
+
+// 計測 → 予算の停止 → 採点：run-agent.mjs --compare を偽物の工場で流して止めた出力先を、そのまま採点する（採点の定義・spec-engine の dist は本物の写しとリンク）
+const fakeFactoryCli513 = String.raw`import { appendFileSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+export const DEFAULT_EFFORT = "high";
+export const DEFAULT_BUDGET_USD = 0.3;
+export const DEFAULT_DEADLINE_MS = 1200000;
+export const API_KEY_ENV = "OPENAI_API_KEY";
+export const JEV_API_KEY_ENV = "JEV_API_KEY";
+export const VOCABULARY_VERSION = "v1";
+const isEntry = () => { try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } };
+if (isEntry()) {
+  const outDir = process.argv[process.argv.indexOf("--out") + 1], runDir = dirname(outDir), id = basename(dirname(runDir)) + "/" + basename(runDir);
+  mkdirSync(outDir, { recursive: true });
+  const delay = JSON.parse(process.env.FAKE_DELAY ?? "{}")[id] ?? 0;
+  setTimeout(() => { if (process.env.FAKE_SPAWN_LOG) appendFileSync(process.env.FAKE_SPAWN_LOG, id + "\n"); process.stdout.write(JSON.stringify({ schema_version: "commandagent.headless-summary/v1", verdict: "partial", stop_reason: "completed", provider_cost_usd: 0.25 }) + "\n"); }, delay);
+}
+`;
+const fakeCliPlan513 = String.raw`import { createHash } from "node:crypto";
+const h = (t) => createHash("sha256").update(t).digest("hex");
+export function parsePlanFile(text) { let v; try { v = JSON.parse(text); } catch { return { code: "plan-file-json" }; } return { envelope: { schema_version: v.schema_version, outcome: v.outcome, plan: v.plan, plan_sha256: v.plan_sha256, source_sha256: v.source_sha256 } }; }
+export async function validatePlanFile({ envelope, source }) {
+  if (envelope.outcome !== "confirmed") return { kind: "rejected", check: "outcome", codes: [] };
+  const planSha256 = h(JSON.stringify(envelope.plan)), sourceSha256 = h(source);
+  if (planSha256 !== envelope.plan_sha256) return { kind: "rejected", check: "plan-sha256", codes: [] };
+  if (sourceSha256 !== envelope.source_sha256) return { kind: "rejected", check: "source-sha256", codes: [] };
+  return { kind: "ok", plan: envelope.plan, planSha256, sourceSha256 };
+}
+`;
+const limits513 = (table) => `export const DEFAULT_REASONING_EFFORT = "high";\nexport const STAGE_MAX_OUTPUT_TOKENS = { high: ${JSON.stringify(table)} };\n`;
+function measureCheckout(base, name, table) {
+  const co = makeCheckout(base, name, { sameAggregator: true }).repo;
+  mkdirSync(join(co, "packages/factory/dist"), { recursive: true });
+  writeFileSync(join(co, "packages/factory/package.json"), JSON.stringify({ type: "module" }));
+  writeFileSync(join(co, "packages/factory/dist/cli.js"), fakeFactoryCli513);
+  writeFileSync(join(co, "packages/factory/dist/cli-plan.js"), fakeCliPlan513);
+  writeFileSync(join(co, "packages/factory/dist/openai.js"), 'export const DEFAULT_OPENAI_MODEL = "fake-model";\n');
+  writeFileSync(join(co, "packages/factory/dist/limits.js"), limits513(table));
+  return co;
+}
+
+test("#513 (e) 計測 → 予算の停止 → 採点：上限 0.60 は n=1・片側 0 対、0.59 は n=0・片側 1 対・差 null で、どちらも断らず incomplete・reference_only 真", async () => {
+  await withOut(async (base) => {
+    const v10 = { surface: 32768, questions: 32768, requirements: 16384, "reverse-check": 8192, design: 32768, "test-suite": 32768, write: 32768, correspondence: 16384, repair: 32768, arbitration: 16384 };
+    const cand = measureCheckout(base, "cand", { ...v10, ...APPROVED513 }), baseCo = measureCheckout(base, "base", v10);
+    // 凍結した組（P1・P2 を採用）：包みは偽物の検査と同じ SHA の取り方
+    const set = loadEvalSet(join(cand, DEFAULT_SET_PATH));
+    const fzDir = join(base, "fz");
+    mkdirSync(join(fzDir, "envelopes"), { recursive: true });
+    const adopted = ["P1", "P2"].map((pid) => {
+      const planBody = { plan_id: `plan-${pid}`, vocabulary_version: "v1" };
+      const env = { schema_version: "musunest-factory/plan-only-result/v1", outcome: "confirmed", plan: planBody, plan_sha256: sha256(JSON.stringify(planBody)), source_sha256: sha256(set.byId.get(pid).requestText + "\n"), conditions: null, stop: null };
+      const bytes = Buffer.from(JSON.stringify(env));
+      writeFileSync(join(fzDir, "envelopes", `${pid}.json`), bytes);
+      return { pattern: pid, envelope: { path: `envelopes/${pid}.json`, sha256: sha256(bytes) }, plan_sha256: env.plan_sha256, source_sha256: env.source_sha256 };
+    });
+    const fz = join(fzDir, "frozen-plan-set.json");
+    writeFileSync(fz, JSON.stringify({ schema: "musunest-eval/frozen-plan-set/v1", id: "t", version: 1, origin: "frozen-plan", rule: null, set: { path: DEFAULT_SET_PATH, sha256: set.sha256, id: set.set.id, version: set.set.version }, adopted, missing: [] }));
+    const runAgentFile = join(here, "run-agent.mjs");
+    const pairs = join(base, "pairs.json");
+    const mp = spawnSync(process.execPath, [runAgentFile, cand, join(base, "unused"), "--make-pairs", pairs, "--build-from", fz, "--runs", "3"], { encoding: "utf8", env: { ...process.env, JEV_API_KEY: "" } });
+    assert.equal(mp.status, 0, mp.stderr);
+    for (const [limit, n, oneSide] of [["0.60", 1, 0], ["0.59", 0, 1]]) {
+      const out = join(base, `out-${limit}`);
+      const m = spawnSync(process.execPath, [runAgentFile, cand, out, "--compare", "--baseline", baseCo, "--pairs", pairs, "--build-from", fz, "--budget-usd", limit, "--factory-budget-usd", "0.30", "--concurrency", "2"], { encoding: "utf8", env: { ...process.env, JEV_API_KEY: "", FAKE_DELAY: JSON.stringify({ "v1/P1-r1": 700 }) } });
+      assert.equal(m.status, 0, m.stderr);
+      for (const g of ["v1", "v1.1a"]) { const cg = JSON.parse(readFileSync(join(out, g, "conditions.json"), "utf8")); assert.equal(conditionsSignature(cg), cg.signature, `${g}: 採点の署名の式が計測の道具と同じ`); }
+      const r = scoreCompareRun(out, [], cand);
+      assert.equal(r.status, 0, `${limit}: ${r.stderr}`);
+      const c = readCompare(out);
+      assert.deepEqual([c.pairs.n, c.pairs.one_side, c.pairs.planned], [n, oneSide, 6], limit);
+      if (n === 0) assert.equal(c.pairs.mean, null);
+      if (oneSide === 1) assert.equal(c.pairs.rows[0].diff, null);
+      assert.deepEqual([c.completion.status, c.completion.reference_only, c.completion.budget_stop], ["incomplete", true, true], limit);
+      assert.ok(c.completion.label.startsWith("未完了"), limit);
+      assert.deepEqual(c.completion.unverified, [], `${limit}: 指紋は一致する`);
+      assert.equal(c.profile, "diagnostic");
+    }
+  });
+});
+
+test("#513 (f) 予定外・食い違いは compare:scoring-mismatch で断る：対のファイルを 1 行変えた・群の params が pipeline と上限の欄以外で違う・片群に予定外の本。pipeline と上限の欄だけの違いは断らない", async () => {
+  await withOut(async (base) => {
+    const all = () => ({ spec: PASS_A });
+    const cases = [
+      ["f-pairs", {}, (out) => { const t = readFileSync(join(out, "pairs.json"), "utf8").split("\n"); t[1] = t[1] + " "; writeFileSync(join(out, "pairs.json"), t.join("\n")); }],
+      ["f-params", { groupsExtra: { v1: { params: { ...paramsFor(["P1-r1", "P1-r2", "P1-r3", "P2-r1", "P2-r2", "P2-r3"]), mode: "build-from", plan: false, effort: "medium", pipeline: "v1", stage_output_limits_v11a: null } } } }, null],
+      ["f-extra", {}, (out) => { mkdirSync(join(out, "v1.1a", "P5-r1"), { recursive: true }); writeFileSync(join(out, "v1.1a", "P5-r1", "summary.line.json"), sl513()); }],
+      ["f-group-pairs", {}, (out) => { const p = join(out, "v1", "conditions.json"), c = JSON.parse(readFileSync(p, "utf8")); c.comparison.pairs_sha256 = "0".repeat(64); writeFileSync(p, JSON.stringify(c)); }],
+      ["f-record", {}, (out) => writeFileSync(join(out, "comparison.json"), JSON.stringify({ pairs: { sha256: "0".repeat(64) }, profile: "official" }))],
+      // 群の同定（独立レビューの指摘 3）：候補の群の条件を比較元の群のもので置き換えた（両方 pipeline=v1）・群の入れ替え・群の複製・比較の記録の署名との食い違い
+      ["f-replaced", {}, (out) => cpSync(join(out, "v1", "conditions.json"), join(out, "v1.1a", "conditions.json"))],
+      ["f-swapped", {}, (out) => { const a = readFileSync(join(out, "v1", "conditions.json")), b = readFileSync(join(out, "v1.1a", "conditions.json")); writeFileSync(join(out, "v1", "conditions.json"), b); writeFileSync(join(out, "v1.1a", "conditions.json"), a); }],
+      ["f-duplicated", {}, (out) => { rmSync(join(out, "v1.1a"), { recursive: true }); cpSync(join(out, "v1"), join(out, "v1.1a"), { recursive: true }); }],
+      ["f-relabeled", {}, (out) => { const p = join(out, "v1.1a", "conditions.json"), c = JSON.parse(readFileSync(p, "utf8")); const v1 = JSON.parse(readFileSync(join(out, "v1", "conditions.json"), "utf8")); writeFileSync(p, JSON.stringify({ ...v1, comparison: { ...v1.comparison, group: "v1.1a", role: "candidate" }, params: { ...v1.params, pipeline: "v1.1a" }, signature: c.signature })); }],
+      ["f-record-signature", {}, (out) => { const p = join(out, "comparison.json"), c = JSON.parse(readFileSync(p, "utf8")); c.groups["v1.1a"].conditions_signature = "0".repeat(64); writeFileSync(p, JSON.stringify(c)); }],
+      ["f-same-signature", { groupsExtra: { v1: { signature: SIG }, "v1.1a": { signature: SIG } } }, null],
+    ];
+    for (const [name, opts, tweak] of cases) {
+      const f = compareFixture(base, name, { runOf: all, ...opts });
+      if (tweak) tweak(f.out);
+      const r = scoreCompareRun(f.out);
+      assert.equal(r.status, 3, `${name}: ${r.stderr}`);
+      assert.match(r.stderr, /\[compare:scoring-mismatch\]/, name);
+      assert.equal(existsSync(join(f.out, "score-compare.json")), false, `${name}: 書いた`);
+    }
+    // 経路と v1.1α の上限の欄だけが違う（今の形）なら断らない
+    const ok = compareFixture(base, "f-ok", { runOf: all, groupsExtra: { "v1.1a": { params: { ...paramsFor(["P1-r1", "P1-r2", "P1-r3", "P2-r1", "P2-r2", "P2-r3"]), mode: "build-from", plan: false, effort: "high", pipeline: "v1.1a", stage_output_limits_v11a: { ...APPROVED513, "decl-check": 1 } } } } });
+    assert.equal(scoreCompareRun(ok.out).status, 0);
+    // 比較の記録が無い
+    rmSync(join(ok.out, "comparison.json"));
+    const rm = scoreCompareRun(ok.out);
+    assert.equal(rm.status, 3);
+    assert.match(rm.stderr, /\[compare:record-missing\]/);
+  });
+});
+
+test("#513 (g) 記録のあとに採点の定義の中身を変えた・凍結した組のファイルを変えた・片群の条件の schema が知らない値、のそれぞれで断らずに unverified・「未照合」・reference_only 真。どの照合が false か null かが出る", async () => {
+  await withOut(async (base) => {
+    const all = () => ({ spec: PASS_A });
+    // 採点の定義：別の checkout（採点器は同じ版）で記録し、そのあと題材の定義を変える
+    const co = makeCheckout(base, "co-g", { sameAggregator: true }).repo;
+    const fs = compareFixture(base, "g-scoring", { runOf: all, repoDir: co });
+    appendFileSync(join(co, "workspace/mvp/m1/agent/eval/subjects/A.json"), "\n");
+    const fz = compareFixture(base, "g-frozen", { runOf: all });
+    appendFileSync(fz.frozenPath, "\n");
+    const fu = compareFixture(base, "g-schema", { runOf: all, groupsExtra: { v1: { schema: `musunest-factory/agent-accept-conditions/${MARK513}` } } });
+    const expected = [
+      [fs.out, co, [{ group: "v1", check: "scoring_matches_conditions", value: false }, { group: "v1.1a", check: "scoring_matches_conditions", value: false }]],
+      [fz.out, repo, [{ group: "v1", check: "frozen_matches_conditions", value: false }, { group: "v1.1a", check: "frozen_matches_conditions", value: false }]],
+      [fu.out, repo, [{ group: "v1", check: "reconcile", value: "unverified" }]],
+    ];
+    for (const [out, repoArg, unverified] of expected) {
+      const r = scoreCompareRun(out, [], repoArg);
+      assert.equal(r.status, 0, r.stderr);
+      const c = readCompare(out).completion;
+      assert.deepEqual([c.status, c.label, c.reference_only], ["unverified", "未照合", true], out);
+      for (const u of unverified) assert.ok(c.unverified.some((x) => x.group === u.group && x.check === u.check && x.value === u.value), `${JSON.stringify(u)} が無い: ${JSON.stringify(c.unverified)}`);
+      assert.match(r.stdout, /比較: 未照合（参考値。正式な比較基準にしない）.*未照合の項目: /);
+      assert.ok(!r.stdout.includes(MARK513), "知らない schema の値を出さない");
+    }
+    // 照合の null（条件に指紋が無い）も未照合
+    const fn = compareFixture(base, "g-null", { runOf: all, groupsExtra: { "v1.1a": { scripts: { mode: "post-hoc" } } } });
+    assert.equal(scoreCompareRun(fn.out).status, 0);
+    assert.ok(readCompare(fn.out).completion.unverified.some((x) => x.group === "v1.1a" && x.check === "scripts_matches_conditions" && x.value === null));
+  });
+});
+
+test("#513 (h) --compare --anonymous の JSON・標準出力・標準エラーに本の ID・パス・目印が出ず、件数・率・区間・既知の値だけ", async () => {
+  await withOut(async (base) => {
+    const f = compareFixture(base, `h-${MARK513}`, { runOf: (g, id) => (id === "P2-r3" && g === "v1.1a" ? { state: "unexecuted" } : { spec: id.startsWith("P1") ? PASS_A : FAIL_A, stdout: `${MARK513} ${id}\n`, summary: { stop_reason: MARK513, stages: [{ stage: "write" }] }, carry: { entries: [{ requirementId: "R1", reasons: [{ origin: MARK513, reason: "r" }] }], excluded_row_ids: [], remaining_requirement_ids: ["R9"] } }) });
+    const r = scoreCompareRun(f.out, ["--anonymous", "--label", "h"]);
+    assert.equal(r.status, 0, r.stderr);
+    const text = readFileSync(join(f.out, "score-compare-h.anonymous.json"), "utf8");
+    assert.equal(existsSync(join(f.out, "score-compare-h.json")), false, "行つきの出力を書かない");
+    for (const t of [text, r.stdout, r.stderr]) {
+      assert.ok(!t.includes(MARK513), "目印が出た");
+      assert.ok(!t.includes(base) && !t.includes("frozen.json"), "パスが出た");
+      assert.ok(!/P\d+-r\d+/.test(t) && !/"P\d+"/.test(t), "本の ID・P の ID が出た");
+    }
+    const a = JSON.parse(text);
+    assert.equal(a.anonymous, true);
+    assert.deepEqual([a.pairs.planned, a.pairs.both, a.pairs.one_side, a.pairs.n], [6, 5, 1, 5]);
+    assert.deepEqual(a.pairs.counts, { "+1": 0, 0: 5, "-1": 0 });
+    assert.deepEqual(a.groups["v1.1a"].stops.values, { unknown: 5 });
+    assert.deepEqual(a.groups["v1.1a"].carry_over.sources, { "name-table": 0, "semantic-check": 0, "decl-check": 0, coverage: 0, unknown: 5 });
+    startsWith(a.groups.v1.pass_executed, "3/6（");
+    assert.equal(a.completion.status, "incomplete");
+    assert.equal(a.completion.reference_only, true);
+    assert.equal("rows" in a.pairs || "by_pattern" in a.pairs, false);
+    assert.equal("fail_keys" in a.groups.v1.accepted, false);
+  });
+});
+
+test("#513 (i) 採点のコードに通信の import（http・https・net・fetch）が無い（採点の費用は 0 と記録する根拠）", () => {
+  const text = readFileSync(scoreFile, "utf8");
+  assert.ok(!/from\s+["'](node:)?(http|https|net|http2|dgram|tls)["']/.test(text), "通信の import がある");
+  assert.ok(!/import\(\s*["'](node:)?(http|https|net|http2|dgram|tls)["']/.test(text), "通信の動的 import がある");
+  assert.ok(!/\bfetch\s*\(/.test(text), "fetch を呼んでいる");
+});
+
+// ── #513 の後段：工場の dist（#505〜#510。先に pnpm build）と採点の道具の定数・記録の形・規則の台帳が一致すること
+import { CARRY_OVER_SOURCES, DECL_CHECK_LIMIT, V11A_APPROVED_LIMITS, V11A_OUTPUT_STAGES, V11A_RECORDS, V1_OUTPUT_STAGES } from "./score-agent.mjs";
+const factoryDist = join(repo, "packages/factory/dist");
+assert.ok(existsSync(join(factoryDist, "record.js")), "工場の dist が無い（pnpm build を先に）");
+const distModule = (rel) => import(pathToFileURL(join(factoryDist, rel)).href);
+
+test("#513 (a) BUILD_STAGE_IDS が工場の dist の STAGE_IDS と同じ並びで 19 個。出力の段・上限・持ち越しの出どころ・記録の場所も dist と同じ", async () => {
+  const record = await distModule("record.js"), limits = await distModule("limits.js");
+  assert.deepEqual(BUILD_STAGE_IDS, [...record.STAGE_IDS]);
+  assert.equal(record.STAGE_IDS.length, 19);
+  assert.deepEqual([...V1_OUTPUT_STAGES, ...V11A_OUTPUT_STAGES], [...limits.OUTPUT_STAGES]);
+  for (const effort of Object.keys(limits.STAGE_MAX_OUTPUT_TOKENS)) for (const k of V11A_OUTPUT_STAGES) assert.equal(limits.STAGE_MAX_OUTPUT_TOKENS[effort][k], V11A_APPROVED_LIMITS[k], `${effort} ${k}`);
+  const carry = await distModule("v11a/carry-over.js"), bundle = await distModule("v11a/bundle-v11a.js");
+  assert.deepEqual(CARRY_OVER_SOURCES, [...carry.CARRY_OVER_ORIGINS]);
+  assert.equal(V11A_RECORDS.verification, `bundle/${bundle.V11A_ARTIFACT_NAMES.verification}`);
+  assert.equal(V11A_RECORDS.carry_over, `bundle/${bundle.V11A_ARTIFACT_NAMES.carryOver}`);
+});
+
+test("#513 (c) 工場の dist が組む実物の記録（verification-v11a.json・carry-over.json）で、decl-check:limit と持ち越しの出どころを数える", async () => {
+  const { buildV11aArtifacts } = await distModule("v11a/bundle-v11a.js");
+  const artifactsOf = ({ exhausted, entries }) => buildV11aArtifacts({
+    nameTable: { table: { rows: [], ownership: [], verification: [], classification: [] }, sha256: "t" }, semanticCheck: [], judgeAdvice: [],
+    testSpec: { suite: { tests: [] }, sha256: "s", observes: new Map(), coverage: [], overturnedTestIds: [], coverageChecks: [] },
+    declCheck: { limit: 6, versions: [] }, carryOver: { entries, excludedRowIds: [], remainingRequirementIds: ["R9"] },
+    verification: { tableSha256: "t", testSuiteSha256: "s", declarationSha256: "d", checkedDeclarationSha256s: ["d"], declCheck: { exhausted, malformed: 0, rejected: 1 } },
+  });
+  const reasons = (...origins) => origins.map((origin) => ({ origin, reason: "r" }));
+  const plan = {
+    "P1-r1": { summary: { stop_reason: "limit" }, art: artifactsOf({ exhausted: 1, entries: [{ requirementId: "R1", reasons: reasons("decl-check") }] }) },
+    "P1-r2": { summary: { stop_reason: "limit" }, art: artifactsOf({ exhausted: 0, entries: [] }) },
+    "P1-r3": { summary: { stop_reason: "completed" }, art: artifactsOf({ exhausted: 0, entries: [{ requirementId: "R1", reasons: reasons("name-table", "semantic-check") }, { requirementId: "R2", reasons: reasons("coverage", "coverage") }] }) },
+  };
+  await withOut(async (base) => {
+    const f = compareFixture(base, "c-dist", { pids: ["P1"], runs: 3, runOf: (g, id) => (g === "v1" ? {} : { summary: plan[id].summary }) });
+    for (const [id, x] of Object.entries(plan)) for (const a of x.art) { const p = join(f.out, "v1.1a", id, "bundle", a.path); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, a.text); }
+    const r = scoreCompareRun(f.out);
+    assert.equal(r.status, 0, r.stderr);
+    const g = readCompare(f.out).groups["v1.1a"];
+    assert.deepEqual(g.stops.values, { [DECL_CHECK_LIMIT]: 1, limit: 1, completed: 1 });
+    assert.deepEqual(g.carry_over, { runs: 3, observed: 3, missing: 0, runs_with_carry_over: 2, sources: { "name-table": 1, "semantic-check": 1, "decl-check": 1, coverage: 1, unknown: 0 } });
+  });
+});
+
+test("#513 規則の台帳：rules.md §5 の 5 つの接頭辞の行の数と ID の集合が工場の dist の RuleDefinition[] と一致し、各行に なぜ（Issue 番号）と契約の根拠がある", async () => {
+  const text = readFileSync(join(repo, "workspace/mvp/m1/agent/methodology/ledger/rules.md"), "utf8");
+  const v11a = text.slice(text.indexOf("## 5. v1.1α の規則"));
+  assert.ok(v11a.length > 0 && text.indexOf("## 5. v1.1α の規則") > 0, "§5 が無い");
+  const rows = v11a.split("\n").filter((l) => /^\| R-(nt|sc|tsp|dc|w11)-\d+ \|/.test(l)).map((l) => l.split("|").slice(1, -1).map((c) => c.trim()));
+  const arrays = [["R-nt", "name-table", "NAME_TABLE"], ["R-sc", "semantic-check", "SEMANTIC_CHECK"], ["R-tsp", "test-spec", "TEST_SPEC"], ["R-dc", "decl-check", "DECL_CHECK"], ["R-w11", "write", "WRITE_V11A"]];
+  let total = 0;
+  for (const [prefix, file, name] of arrays) {
+    const defs = (await distModule(`v11a/stages/${file}.js`))[`${name}_RULE_DEFINITIONS`];
+    const mine = rows.filter((r) => r[0].startsWith(`${prefix}-`));
+    assert.equal(mine.length, defs.length, `${prefix} の行の数`);
+    assert.deepEqual(mine.map((r) => r[0]).sort(), defs.map((d) => d.id).sort(), `${prefix} の ID の集合`);
+    for (const r of mine) {
+      const d = defs.find((x) => x.id === r[0]);
+      assert.ok(r[2].includes(d.since.replace("Issue ", "")), `${r[0]}: なぜに Issue 番号が無い`);
+      assert.match(r[3], /^設計書 07 /, `${r[0]}: 契約の根拠が無い`);
+    }
+    total += defs.length;
+  }
+  assert.equal(rows.length, total, "5 つの接頭辞の外の行がある");
+  assert.ok(text.includes(`v1.1α（比較用の別の経路。設計書 \`../../07-architecture-v1.1a.md\`）の配列の要素は **${total}**`), "§1 の v1.1α の数が配列と合わない");
+});
+
+test("#513 停止の台帳：failure-modes.md に N1〜N8 の 8 行があり、観測の列が「今回未観測」で、主因が「未確定（設計の推定）」", () => {
+  const text = readFileSync(join(repo, "workspace/mvp/m1/agent/methodology/ledger/failure-modes.md"), "utf8");
+  const rows = text.split("\n").filter((l) => /^\| N\d+ \|/.test(l)).map((l) => l.split("|").slice(1, -1).map((c) => c.trim()));
+  assert.deepEqual(rows.map((r) => r[0]), ["N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]);
+  for (const r of rows) {
+    assert.equal(r.length, 9, `${r[0]} の列の数`);
+    assert.equal(r[6], "今回未観測（計測前）", r[0]);
+    assert.match(r[5], /^未確定（設計の推定/, r[0]);
+    assert.ok(!/R\d|P\d|role|\bf\.|\be\./.test(r.join("")), `${r[0]} に値（要件 ID・P・役割 ID）がある`);
+  }
+});

@@ -277,3 +277,37 @@ test("(l) 漏えい：依頼文・仕様の本体・止まり方の符号・検�
     assert.ok(!rs.stdout.includes(MARK) && !rs.stderr.includes(MARK));
   });
 });
+
+test("#513 v5 の Plan 計測（今の run-agent.mjs が書く条件）から凍結でき、保存済みの v4 の条件（params.pipeline・v1.1α の上限の欄・comparison が無い）も今までどおり凍結できる。組に条件の schema を書き戻さない", async () => {
+  await withBase(async (base) => {
+    const repo = makeRepo(base);
+    const out = join(base, "plan-eval-v5");
+    measure(repo, out, ["--only", "P1,P2", "--runs", "2", "--concurrency", "1"], { FAKE_PLAN: JSON.stringify({ "P1-r1": "cannot-confirm", "P2-r2": "stopped" }) });
+    const cond = readJson(join(out, "conditions.json"));
+    assert.equal(cond.schema, "musunest-factory/agent-accept-conditions/v5");
+    assert.deepEqual([cond.params.mode, cond.params.pipeline, cond.comparison], ["plan-only", "v1", null]);
+    const d5 = join(base, "fz-v5");
+    const r5 = freeze(repo, out, d5);
+    assert.equal(r5.status, 0, r5.stderr);
+    const f5 = readJson(join(d5, FROZEN_SET_FILE));
+    assert.equal(f5.schema, FROZEN_SET_SCHEMA);
+    assert.deepEqual(f5.adopted.map((a) => a.run), ["P1-r2", "P2-r1"]);
+    assert.ok(!readFileSync(join(d5, FROZEN_SET_FILE), "utf8").includes("agent-accept-conditions"), "条件の schema を組に書き戻さない");
+    // 保存済みの v4 の条件（#497 の形）に戻した出力先
+    const v4 = join(base, "plan-eval-v4");
+    cpSync(out, v4, { recursive: true });
+    edit(join(v4, "conditions.json"), (c) => { c.schema = "musunest-factory/agent-accept-conditions/v4"; delete c.params.pipeline; delete c.params.stage_output_limits_v11a; delete c.comparison; });
+    const d4 = join(base, "fz-v4");
+    const r4 = freeze(repo, v4, d4);
+    assert.equal(r4.status, 0, r4.stderr);
+    const f4 = readJson(join(d4, FROZEN_SET_FILE));
+    assert.deepEqual([f4.adopted, f4.missing, f4.set, f4.rule], [f5.adopted, f5.missing, f5.set, f5.rule], "採用・外した P・組の出どころは v5 と同じ");
+    assert.equal(f4.source_measurement.conditions_sha256, sha256(readFileSync(join(v4, "conditions.json"))));
+    for (const a of f4.adopted) assert.deepEqual(readFileSync(join(d4, a.envelope.path)), readFileSync(join(d5, a.envelope.path)));
+    // v3 以前と知らない版は今までどおり断る
+    const v6 = join(base, "plan-eval-v6");
+    cpSync(out, v6, { recursive: true });
+    edit(join(v6, "conditions.json"), (c) => { c.schema = "musunest-factory/agent-accept-conditions/v6"; });
+    assertFreezeRefused(base, (env) => freeze(repo, v6, join(base, "fz-v6"), undefined, env), "freeze:conditions-schema", { input: v6, dest: join(base, "fz-v6") });
+  });
+});

@@ -6,12 +6,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { DEFAULT_SET_PATH, EVAL_SET_SCHEMA, PLAN_SCRIPT_SCHEMA, loadEvalSet, reconcile, scoringFingerprint, scriptsFingerprint } from "./score-agent.mjs";
+import { OFFICIAL_COMPARE, compareProfile, launchAllowed } from "./score-agent.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const runAgentFile = join(here, "run-agent.mjs");
@@ -364,7 +365,7 @@ test("条件のファイルに、spec-engine の dist・生成に渡す文書・
     const text = readFileSync(join(out, "conditions.json"), "utf8");
     assert.ok(!text.includes(secret), "鍵の値が条件のファイルに出ている");
     const cond = JSON.parse(text);
-    assert.equal(cond.schema, "musunest-factory/agent-accept-conditions/v4");
+    assert.equal(cond.schema, "musunest-factory/agent-accept-conditions/v5");
     assert.equal(cond.spec_engine.dist_dir, "packages/spec-engine/dist");
     assert.match(cond.spec_engine.fingerprint, HEX64);
     assert.equal(cond.spec_engine.files, 1);
@@ -609,7 +610,7 @@ test("依頼文は定義ファイルの本から組み、条件のファイル�
     for (const p of [1, 2]) assert.equal(readFileSync(join(out, `P${p}-r1`, "request.md"), "utf8"), requestLines(p).join("\n") + "\n", `P${p} の依頼文は行を改行でつなぎ、末尾に改行 1 つ`);
     assert.equal(readFileSync(join(out, "P1-r1", "answers.json"), "utf8"), "{}\n", "台本は実行中に当てない（答えは全部推奨）");
     const cond = JSON.parse(readFileSync(join(out, "conditions.json"), "utf8"));
-    assert.equal(cond.schema, "musunest-factory/agent-accept-conditions/v4");
+    assert.equal(cond.schema, "musunest-factory/agent-accept-conditions/v5");
     assert.equal(cond.params.answers_mode, "recommended");
     const setFile = join(repo, "workspace/mvp/m1/agent/eval/sets/dev-p1-p10.json");
     assert.deepEqual(cond.set, { path: "workspace/mvp/m1/agent/eval/sets/dev-p1-p10.json", sha256: sha256(readFileSync(setFile)), id: "dev-p1-p10", version: 1, role: "development", items: makeSet().items.map(({ id, subject, style, writable }) => ({ id, subject, style, writable })) });
@@ -777,7 +778,7 @@ test("(a) 指定なしと --plan：子の引数と答えのファイルは今ま
       assert.equal(existsSync(join(dir, "answers.json")), mode === "e2e");
       if (mode === "e2e") assert.equal(readFileSync(join(dir, "answers.json"), "utf8"), "{}\n");
       const cond = readJson(join(out, "conditions.json"));
-      assert.equal(cond.schema, "musunest-factory/agent-accept-conditions/v4");
+      assert.equal(cond.schema, "musunest-factory/agent-accept-conditions/v5");
       assert.equal(cond.params.mode, mode);
       assert.equal(cond.frozen, null);
       assert.equal(cond.scripts.mode, "post-hoc");
@@ -1199,5 +1200,366 @@ test("指摘 3：在るが読めない包み（ディレクトリ）を、新し
     assertRefused(rd, "build-from:frozen-invalid", log, 2, "frozen-dir");
     assertNothingWritten(join(base, "out-s3-fzdir"), "frozen-dir");
     oneLine(rd, "frozen-dir");
+  });
+});
+
+// ── #513：v1.1α の経路（--pipeline）・対のファイル（--make-pairs）・対にした交互の計測（--compare）。README の v1.1α の節
+
+const V10_LIMITS = { surface: 32768, questions: 32768, requirements: 16384, "reverse-check": 8192, design: 32768, "test-suite": 32768, write: 32768, correspondence: 16384, repair: 32768, arbitration: 16384 };
+const V14_LIMITS = { ...V10_LIMITS, "name-table": 32768, "semantic-check": 16384, "test-spec": 32768, "decl-check": 16384 };
+const limitsJs = (table) => `export const DEFAULT_REASONING_EFFORT = "high";\nexport const STAGE_MAX_OUTPUT_TOKENS = { low: ${JSON.stringify(table)}, medium: ${JSON.stringify(table)}, high: ${JSON.stringify(table)} };\n`;
+// 比較の偽物の工場の入口：群（本のディレクトリの親の名前）と本の ID を合わせた名前で、開始と終わりの時刻を FAKE_SPAWN_LOG に 1 行ずつ書く。
+// FAKE_DELAY は「群/本」ごとの遅れ、FAKE_COST は 1 本の費用、FAKE_MARK は標準出力・標準エラーに入れる目印。受け取った引数と cwd を本のディレクトリに残す
+const fakeCompareCli = ({ budget = 0.3, deadlineMs = 600000 } = {}) => String.raw`import { appendFileSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+export const DEFAULT_EFFORT = "high";
+export const DEFAULT_BUDGET_USD = ${budget};
+export const DEFAULT_DEADLINE_MS = ${deadlineMs};
+export const API_KEY_ENV = "OPENAI_API_KEY";
+export const JEV_API_KEY_ENV = "JEV_API_KEY";
+export const VOCABULARY_VERSION = "v1";
+const isEntry = () => { try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } };
+const map = (k) => { try { return JSON.parse(process.env[k] ?? "{}"); } catch { return {}; } };
+if (isEntry()) {
+  const start = Date.now();
+  const outDir = process.argv[process.argv.indexOf("--out") + 1], runDir = dirname(outDir), id = basename(dirname(runDir)) + "/" + basename(runDir);
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(join(runDir, "received-argv.json"), JSON.stringify(process.argv.slice(1)));
+  writeFileSync(join(runDir, "received-cwd.json"), JSON.stringify(process.cwd()));
+  const mark = process.env.FAKE_MARK ?? "";
+  setTimeout(() => {
+    if (process.env.FAKE_SPAWN_LOG) appendFileSync(process.env.FAKE_SPAWN_LOG, JSON.stringify({ id, start, end: Date.now() }) + "\n");
+    process.stdout.write(JSON.stringify({ schema_version: "commandagent.headless-summary/v1", verdict: "partial", stop_reason: "completed", provider_cost_usd: Number(process.env.FAKE_COST ?? "0.25"), stages: [{ stage: "write", duration_ms: 1 }] }) + "\n");
+    if (mark) { process.stdout.write(mark + "\n"); process.stderr.write(mark + "\n"); }
+  }, Number(map("FAKE_DELAY")[id] ?? 0));
+}
+`;
+/** 比較の偽物：候補（<repo>）と比較元の checkout（別の偽物のリポジトリ）。上限の表は候補が 14 段・比較元が 10 段。凍結した組は P1・P3 を採用 */
+function makeCompare(base, { baselineName = "baseline-co", baselineCli = {}, candidateLimits = V14_LIMITS, baselineLimits = V10_LIMITS } = {}) {
+  const repo = makeRepo(base);
+  const baseline = makeRepo(join(base, baselineName));
+  writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeCompareCli());
+  writeFileSync(join(baseline, "packages/factory/dist/cli.js"), fakeCompareCli(baselineCli));
+  writeFileSync(join(repo, "packages/factory/dist/limits.js"), limitsJs(candidateLimits));
+  writeFileSync(join(baseline, "packages/factory/dist/limits.js"), limitsJs(baselineLimits));
+  const fz = writeFrozen(join(base, "fz-c"), repo, { envelopes: { P1: envelopeOf("P1"), P3: envelopeOf("P3") }, missing: ["P2"] });
+  return { repo, baseline, fz };
+}
+const compareLog = (log) => (existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+const compareArgs = (c, pairs, extra = []) => ["--compare", "--baseline", c.baseline, "--pairs", pairs, "--build-from", c.fz, ...extra];
+const writePairs = (path, value) => { writeFileSync(path, typeof value === "string" ? value : JSON.stringify(value, null, 1) + "\n"); return path; };
+const makePairsFile = (repo, c, path, runs = 3) => { const r = runAgent(repo, join(dirname(path), "unused-out"), ["--make-pairs", path, "--build-from", c.fz, "--runs", String(runs)]); assert.equal(r.status, 0, r.stderr); return path; };
+/** 比較の断り：exit 3・固定の符号 1 行・子 0 本・出力先に何も書かない */
+function assertCompareRefused(r, code, log, out, label = code) {
+  assert.equal(r.status, 3, `${label}: ${r.stderr}`);
+  assert.ok(r.stderr.includes(`[${code}]`), `${label}: 符号が違う: ${r.stderr}`);
+  assert.equal(r.stderr.trim().split("\n").length, 1, `${label}: 標準エラーが 1 行でない`);
+  assert.equal(compareLog(log).length + spawnCount(log + ".plain"), 0, `${label}: 子を起こした`);
+  assertNothingWritten(out, label);
+}
+
+test("#513 (a) --pipeline：--build-from と v1.1a で子の引数の末尾が --pipeline v1.1a・schema v5・署名が省略時と異なる。省略と v1 は子の引数が今までと同じで署名も同じ。知らない値・組めない組は flags:conflict で子を起こさない", async () => {
+  await withRepo(async (base, repo) => {
+    const log = join(base, "spawn-p.log");
+    const fz = writeFrozen(join(base, "fz-p"), repo, { envelopes: { P1: envelopeOf("P1") } });
+    const run = (name, extra) => { const out = join(base, name); const r = runAgent(repo, out, ["--runs", "1", "--build-from", fz, ...extra], { FAKE_SPAWN_LOG: log }); assert.equal(r.status, 0, r.stderr); return { out, cond: readJson(join(out, "conditions.json")), argv: readJson(join(out, "P1-r1", "received-argv.json")) }; };
+    const omitted = run("out-p-omit", []), v1 = run("out-p-v1", ["--pipeline", "v1"]), v11a = run("out-p-v11a", ["--pipeline", "v1.1a"]);
+    const dirO = join(omitted.out, "P1-r1");
+    assert.deepEqual(omitted.argv, [join(repo, "packages/factory/dist/cli.js"), join(dirO, "request.md"), "--out", join(dirO, "bundle"), "--effort", "high", "--model", "fake-model", "--budget", "0.3", "--deadline", "10", "--plan-file", join(dirO, "plan-file.json")], "省略は今までと同じ引数");
+    assert.deepEqual(v1.argv.map((a) => a.replace(v1.out, omitted.out)), omitted.argv, "--pipeline v1 は省略と同じ引数");
+    assert.deepEqual(v11a.argv.slice(-2), ["--pipeline", "v1.1a"]);
+    assert.deepEqual(v11a.argv.slice(0, -2).map((a) => a.replace(v11a.out, omitted.out)), omitted.argv, "ほかの引数は同じ");
+    for (const x of [omitted, v1, v11a]) assert.equal(x.cond.schema, "musunest-factory/agent-accept-conditions/v5");
+    assert.deepEqual([omitted.cond.params.pipeline, v1.cond.params.pipeline, v11a.cond.params.pipeline], ["v1", "v1", "v1.1a"]);
+    assert.notEqual(v11a.cond.signature, omitted.cond.signature, "v1.1a は署名が違う");
+    // 署名：省略で始めた計測は --pipeline v1 で再開でき（同じ署名）、--pipeline v1.1a では resume:signature で断る
+    const outS = join(base, "out-p-sig"), sigArgs = ["--runs", "2", "--concurrency", "1", "--build-from", fz];
+    assert.equal(runAgent(repo, outS, sigArgs, { FAKE_SPAWN_LOG: log }).status, 0);
+    rmSync(join(outS, "P1-r2"), { recursive: true, force: true });
+    const beforeS = treeOf(outS), n0 = spawnCount(log);
+    assertRefused(runAgent(repo, outS, [...sigArgs, "--pipeline", "v1.1a", "--resume"], { FAKE_SPAWN_LOG: log }), "resume:signature", log, n0, "v1.1a の再開");
+    assert.deepEqual(treeOf(outS), beforeS);
+    const rv1 = runAgent(repo, outS, [...sigArgs, "--pipeline", "v1", "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(rv1.status, 0, rv1.stderr);
+    assert.equal(spawnCount(log), n0 + 1, "省略と v1 は同じ署名なので再開できる");
+    assert.deepEqual(v11a.cond.child_args[0].argv, v11a.argv, "条件の子の引数は渡した引数");
+    // 上限の欄：偽物の dist（1 段だけ）では v1 の欄はそのままの値、v1.1α の欄は null
+    assert.deepEqual(omitted.cond.params.stage_output_limits, { requirements: 16384 });
+    assert.equal(omitted.cond.params.stage_output_limits_v11a, null);
+    // 組めない組と知らない値
+    let spawned = spawnCount(log);
+    for (const [label, extra] of [["no-build-from", ["--runs", "1", "--pipeline", "v1.1a"]], ["unknown", ["--runs", "1", "--build-from", fz, "--pipeline", "v2"]], ["empty", ["--runs", "1", "--build-from", fz, "--pipeline"]], ["flag-value", ["--runs", "1", "--pipeline", "--build-from", fz]], ["plan", ["--runs", "1", "--plan", "--pipeline", "v1.1a"]]]) {
+      const o = join(base, `out-p-${label}`);
+      assertRefused(runAgent(repo, o, extra, { FAKE_SPAWN_LOG: log }), "flags:conflict", log, spawned, label);
+      assertNothingWritten(o, label);
+    }
+  });
+});
+
+test("#513 上限の欄：14 段の表を読むと、比較でない計測でも stage_output_limits は v1 の 10 段（表の並び）だけで、v1.1α の 4 段は stage_output_limits_v11a に入る", async () => {
+  await withRepo(async (base, repo) => {
+    writeFileSync(join(repo, "packages/factory/dist/limits.js"), limitsJs(V14_LIMITS));
+    const out = join(base, "out-lim");
+    assert.equal(runAgent(repo, out, ["--only", "P1", "--runs", "1"]).status, 0);
+    const p = readJson(join(out, "conditions.json")).params;
+    assert.deepEqual(p.stage_output_limits, V10_LIMITS);
+    assert.deepEqual(Object.keys(p.stage_output_limits), Object.keys(V10_LIMITS));
+    assert.deepEqual(p.stage_output_limits_v11a, { "name-table": 32768, "semantic-check": 16384, "test-spec": 32768, "decl-check": 16384 });
+  });
+});
+
+test("#513 (b) --make-pairs：採用 2 P × runs 3 で 6 対を交互の先行順で書き、frozen_sha256 は組のファイルの SHA。2 回で同じバイト列、子を起こさない。出力が既にあれば上書きしない", async () => {
+  await withRepo(async (base, repo) => {
+    const log = join(base, "spawn-mp.log");
+    const c = makeCompare(join(base, "mp"));
+    const a = join(base, "pairs-a.json"), b = join(base, "pairs-b.json");
+    for (const p of [a, b]) assert.equal(runAgent(c.repo, join(base, "unused"), ["--make-pairs", p, "--build-from", c.fz, "--runs", "3"], { FAKE_SPAWN_LOG: log }).status, 0);
+    assert.deepEqual(readFileSync(a), readFileSync(b));
+    const v = readJson(a);
+    assert.deepEqual(v, {
+      schema: "musunest-eval/compare-pairs/v1", frozen_sha256: sha256(readFileSync(c.fz)), groups: ["v1", "v1.1a"], runs: 3,
+      pairs: [["P1", 1], ["P1", 2], ["P1", 3], ["P3", 1], ["P3", 2], ["P3", 3]].map(([pid, r], i) => ({ pid, r, first: i % 2 === 0 ? "v1" : "v1.1a" })),
+    });
+    assert.equal(spawnCount(log), 0);
+    assert.equal(existsSync(join(base, "unused")), false, "出力先を作らない");
+    const again = runAgent(c.repo, join(base, "unused"), ["--make-pairs", a, "--build-from", c.fz, "--runs", "3"], { FAKE_SPAWN_LOG: log });
+    assert.equal(again.status, 3);
+    assert.ok(again.stderr.includes("[compare:pairs-exists]"));
+    assert.deepEqual(readFileSync(a), readFileSync(b));
+    for (const extra of [["--make-pairs", join(base, "x.json")], ["--make-pairs", join(base, "x.json"), "--build-from", c.fz, "--compare"], ["--make-pairs", join(base, "x.json"), "--build-from", c.fz, "--runs", "0"], ["--make-pairs"]]) {
+      const r = runAgent(c.repo, join(base, "unused"), extra, { FAKE_SPAWN_LOG: log });
+      assert.equal(r.status, 3, extra.join(" "));
+      assert.ok(r.stderr.includes("[flags:conflict]"), r.stderr);
+      assert.equal(existsSync(join(base, "x.json")), false);
+    }
+  });
+});
+
+test("#513 (c) 対 6・遅れを与えた偽物で、子を起こす時刻の順が対の順 × 先行順の平らな並びと一致し、同時に走った子が 3（両群の合計）を超えない", async () => {
+  await withRepo(async (base) => {
+    const c = makeCompare(join(base, "c"));
+    const pairs = makePairsFile(c.repo, c, join(base, "pairs-c.json"));
+    const flat = readJson(pairs).pairs.flatMap((p) => [p.first, p.first === "v1" ? "v1.1a" : "v1"].map((g) => `${g}/${p.pid}-r${p.r}`));
+    const delay = Object.fromEntries(flat.map((id, i) => [id, 120 + ((i * 7) % 5) * 90]));
+    const log = join(base, "spawn-c.log"), out = join(base, "out-c");
+    const r = runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "10"]), { FAKE_SPAWN_LOG: log, FAKE_DELAY: JSON.stringify(delay), FAKE_COST: "0.01" });
+    assert.equal(r.status, 0, r.stderr);
+    const started = flat.map((id) => Date.parse(readJson(join(out, id, "summary.line.json")).started_at));
+    for (let i = 1; i < started.length; i++) assert.ok(started[i - 1] <= started[i], `起動の順が平らな並びと違う: ${flat[i - 1]} と ${flat[i]}`);
+    const iv = compareLog(log);
+    assert.equal(iv.length, 12);
+    const maxOverlap = Math.max(...iv.map((x) => iv.filter((y) => y.start <= x.start && x.start < y.end).length));
+    assert.ok(maxOverlap <= 3, `同時に ${maxOverlap} 本`);
+    assert.ok(maxOverlap >= 2, "並列で流れていない");
+    const run = readJson(join(out, readdirSync(out).find((n) => n.startsWith("compare-run-"))));
+    assert.deepEqual(run.pairs.map((p) => p.state), Array(6).fill("both"));
+    assert.equal(run.stop_code, null);
+  });
+});
+
+test("#513 (d) 比較の子：v1 は比較元の入口と cwd で --pipeline 無し、v1.1a は候補の入口で --pipeline v1.1a。ほかの引数と写しは同じ。両群の params は経路と上限の欄以外同じ。比較の記録に指紋と採点の費用 0 があり鍵の値が無い。上限の照合", async () => {
+  await withRepo(async (base) => {
+    const c = makeCompare(join(base, "d"));
+    const pairs = makePairsFile(c.repo, c, join(base, "pairs-d.json"), 1);
+    const out = join(base, "out-d"), secret = "fake-jev-key-value-that-must-not-be-recorded";
+    const r = runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", "5"]), { FAKE_SPAWN_LOG: join(base, "spawn-d.log"), JEV_API_KEY: secret });
+    assert.equal(r.status, 0, r.stderr);
+    for (const pid of ["P1", "P3"]) {
+      const d1 = join(out, "v1", `${pid}-r1`), d2 = join(out, "v1.1a", `${pid}-r1`);
+      const a1 = readJson(join(d1, "received-argv.json")), a2 = readJson(join(d2, "received-argv.json"));
+      assert.equal(a1[0], join(c.baseline, "packages/factory/dist/cli.js"));
+      assert.equal(a2[0], join(c.repo, "packages/factory/dist/cli.js"));
+      assert.equal(readJson(join(d1, "received-cwd.json")), realpathOf(join(c.baseline, "packages/factory")));
+      assert.equal(readJson(join(d2, "received-cwd.json")), realpathOf(join(c.repo, "packages/factory")));
+      assert.ok(!a1.includes("--pipeline"));
+      assert.deepEqual(a2.slice(-2), ["--pipeline", "v1.1a"]);
+      assert.deepEqual(a2.slice(1, -2).map((x) => x.replace(d2, "<dir>")), a1.slice(1).map((x) => x.replace(d1, "<dir>")), "ほかの引数は同じ");
+      for (const f of ["request.md", "plan-file.json"]) assert.deepEqual(readFileSync(join(d1, f)), readFileSync(join(d2, f)), `${f} の写しが同じ`);
+    }
+    const c1 = readJson(join(out, "v1", "conditions.json")), c2 = readJson(join(out, "v1.1a", "conditions.json"));
+    const strip = (p) => { const { pipeline: _p, stage_output_limits_v11a: _l, ...rest } = p; return rest; };
+    assert.deepEqual(strip(c1.params), strip(c2.params));
+    assert.deepEqual([c1.params.pipeline, c2.params.pipeline], ["v1", "v1.1a"]);
+    assert.deepEqual(c1.params.stage_output_limits, V10_LIMITS);
+    assert.deepEqual(c2.params.stage_output_limits, V10_LIMITS);
+    assert.equal(c1.params.stage_output_limits_v11a, null);
+    assert.deepEqual(c2.params.stage_output_limits_v11a, { "name-table": 32768, "semantic-check": 16384, "test-spec": 32768, "decl-check": 16384 });
+    assert.deepEqual([c1.schema, c2.schema], ["musunest-factory/agent-accept-conditions/v5", "musunest-factory/agent-accept-conditions/v5"]);
+    const pairsSha = sha256(readFileSync(pairs));
+    assert.deepEqual(c1.comparison, { pairs_sha256: pairsSha, group: "v1", role: "baseline", profile: "diagnostic" });
+    assert.deepEqual(c2.comparison, { pairs_sha256: pairsSha, group: "v1.1a", role: "candidate", profile: "diagnostic" });
+    assert.deepEqual(readFileSync(join(out, "pairs.json")), readFileSync(pairs), "対のファイルの写し");
+    const recText = readFileSync(join(out, "comparison.json"), "utf8"), rec = JSON.parse(recText);
+    assert.ok(!recText.includes(secret) && !readFileSync(join(out, "v1", "conditions.json"), "utf8").includes(secret), "鍵の値が記録に出た");
+    assert.equal(rec.scoring_cost_usd, 0);
+    assert.equal(rec.pairs.sha256, pairsSha);
+    assert.equal(rec.groups.v1.factory.fingerprint, c1.factory.fingerprint);
+    assert.equal(rec.groups["v1.1a"].factory.fingerprint, c2.factory.fingerprint);
+    assert.notEqual(rec.groups.v1.factory.fingerprint, rec.groups["v1.1a"].factory.fingerprint, "工場の dist は意図した差");
+    assert.equal(rec.groups.v1.spec_engine, rec.groups["v1.1a"].spec_engine);
+    assert.deepEqual([rec.groups.v1.conditions_signature, rec.groups["v1.1a"].conditions_signature], [c1.signature, c2.signature]);
+    assert.equal(rec.shared.judge, "jev-primary-llm-fallback");
+    assert.equal(rec.shared.frozen.sha256, sha256(readFileSync(c.fz)));
+    assert.deepEqual([rec.concurrency, rec.budget_usd, rec.reserve_per_run_usd], [3, 5, 0.3]);
+    assert.equal(rec.profile, "diagnostic", "偽物の計測は diagnostic でも子を起こす");
+    assert.ok(rec.profile_mismatches.includes("baseline_commit") && rec.profile_mismatches.includes("frozen_sha256"));
+    assert.equal(rec.signature, sha256(JSON.stringify((({ signature: _s, ...x }) => x)(rec))));
+    // 共通の段の値を変える → fingerprint-differs。新しい段の値を変える → limits-unapproved
+    const log = join(base, "spawn-d2.log");
+    const c3 = makeCompare(join(base, "d3"), { baselineLimits: { ...V10_LIMITS, design: 16384 } });
+    assertCompareRefused(runAgent(c3.repo, join(base, "out-d3"), compareArgs(c3, makePairsFile(c3.repo, c3, join(base, "pairs-d3.json"), 1), ["--budget-usd", "5"]), { FAKE_SPAWN_LOG: log }), "compare:fingerprint-differs", log, join(base, "out-d3"));
+    const c4 = makeCompare(join(base, "d4"), { candidateLimits: { ...V14_LIMITS, "decl-check": 8192 } });
+    assertCompareRefused(runAgent(c4.repo, join(base, "out-d4"), compareArgs(c4, makePairsFile(c4.repo, c4, join(base, "pairs-d4.json"), 1), ["--budget-usd", "5"]), { FAKE_SPAWN_LOG: log }), "compare:limits-unapproved", log, join(base, "out-d4"));
+    const c5 = makeCompare(join(base, "d5"), { candidateLimits: V10_LIMITS });
+    assertCompareRefused(runAgent(c5.repo, join(base, "out-d5"), compareArgs(c5, makePairsFile(c5.repo, c5, join(base, "pairs-d5.json"), 1), ["--budget-usd", "5"]), { FAKE_SPAWN_LOG: log }), "compare:limits-unapproved", log, join(base, "out-d5"), "no-v11a");
+  });
+});
+const realpathOf = (p) => realpathSync(p);
+
+test("#513 (d) profile の判定は純粋な関数：正式な条件を全部満たせば official、締切だけ 10 分・凍結した組の SHA だけ違う（同じ id・版）なら diagnostic と項目名", () => {
+  const official = { ...OFFICIAL_COMPARE };
+  assert.deepEqual(compareProfile(official), { profile: "official", mismatches: [] });
+  assert.deepEqual(OFFICIAL_COMPARE, {
+    baseline_commit: "2cd1586f856fb1cdecf75ef035826cbffe539e69", baseline_dirty: false, frozen_sha256: "1bed5c0e8cadbc504f3378337b3ea7b8335229ebb135cc7f7760e80ddcd0c9d9",
+    frozen_id: "dev-p1-p10-b-408b202", frozen_version: 1, frozen_adopted: 10, runs: 3, effort: "high", deadline_min: 20, factory_budget_usd: 0.3, concurrency: 3, budget_usd: 5, rubric: "v5",
+  });
+  assert.deepEqual(compareProfile({ ...official, deadline_min: 10 }), { profile: "diagnostic", mismatches: ["deadline_min"] });
+  assert.deepEqual(compareProfile({ ...official, frozen_sha256: "0".repeat(64) }), { profile: "diagnostic", mismatches: ["frozen_sha256"] });
+  assert.deepEqual(compareProfile({ ...official, baseline_dirty: null, concurrency: 6 }).mismatches, ["baseline_dirty", "concurrency"]);
+  assert.equal(compareProfile(null).profile, "diagnostic");
+});
+
+test("#513 (e) 全体の予算の打ち切り：上限 0.6・1 本 0.30・費用 0.25・並列 2・1 本目だけ遅い偽物で、起こすのは 2 本（新しい 1 本の予約を式に入れなければ 3 本目が起きる）。境界 0.60 は 2 本、0.59 は 1 本。比較でない計測は同じ数で 3 本目を起こす", async () => {
+  // 式そのもの：済み 0.25・走行中 1 本で、新しい 1 本の予約を入れると上限を超え、入れなければ超えない
+  assert.equal(launchAllowed({ spentUsd: 0.25, runningCount: 1, reserveUsd: 0.3, budgetUsd: 0.6 }), false);
+  assert.ok(0.25 + 1 * 0.3 <= 0.6, "新しい 1 本の予約を入れない式なら起こしてしまう");
+  assert.equal(launchAllowed({ spentUsd: 0, runningCount: 1, reserveUsd: 0.3, budgetUsd: 0.6 }), true, "ちょうど上限なら起こす");
+  assert.equal(launchAllowed({ spentUsd: 0, runningCount: 1, reserveUsd: 0.3, budgetUsd: 0.59 }), false);
+  await withRepo(async (base) => {
+    const c = makeCompare(join(base, "e"));
+    const pairs = makePairsFile(c.repo, c, join(base, "pairs-e.json"));
+    const flat = readJson(pairs).pairs.flatMap((p) => [p.first, p.first === "v1" ? "v1.1a" : "v1"].map((g) => ({ group: g, run: `${p.pid}-r${p.r}` })));
+    const env = (log) => ({ FAKE_SPAWN_LOG: log, FAKE_COST: "0.25", FAKE_DELAY: JSON.stringify({ "v1/P1-r1": 900 }) });
+    for (const [limit, launched] of [["0.6", 2], ["0.60", 2], ["0.59", 1]]) {
+      const out = join(base, `out-e-${limit}`), log = join(base, `spawn-e-${limit}.log`);
+      const r = runAgent(c.repo, out, compareArgs(c, pairs, ["--budget-usd", limit, "--factory-budget-usd", "0.30", "--concurrency", "2"]), env(log));
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(compareLog(log).length, launched, `${limit}: 起こした本の数`);
+      const run = readJson(join(out, readdirSync(out).find((n) => n.startsWith("compare-run-"))));
+      assert.equal(run.stop_code, "budget");
+      assert.equal(run.launched, launched);
+      assert.deepEqual(run.pairs.map((p) => p.state), launched === 2 ? ["both", ...Array(5).fill("unstarted")] : ["first-only", ...Array(5).fill("unstarted")]);
+      assert.deepEqual(run.not_launched, flat.slice(launched));
+      assert.equal(run.running_at_stop, 1);
+      assert.equal(run.spent_usd, 0.25 * launched);
+      for (const g of ["v1", "v1.1a"]) {
+        const gr = readJson(join(out, g, readdirSync(join(out, g)).find((n) => /^run-\d+\.json$/.test(n))));
+        assert.equal(gr.stop_code, "budget", g);
+        assert.equal(reconcile(join(out, g)).status, "incomplete", `${g}: 予算で止めた群は未完了`);
+      }
+    }
+    // 比較でない計測（--build-from）は今までどおり済みの額だけを見るので、同じ数で 3 本目を起こす
+    const log = join(base, "spawn-e-single.log"), out = join(base, "out-e-single");
+    const r = runAgent(c.repo, out, ["--runs", "3", "--build-from", c.fz, "--budget-usd", "0.6", "--factory-budget-usd", "0.30", "--concurrency", "2"], { FAKE_SPAWN_LOG: log, FAKE_COST: "0.25", FAKE_DELAY: JSON.stringify({ "out-e-single/P1-r1": 900 }) });
+    assert.equal(r.status, 0, r.stderr);
+    // 済み 0.25 で 3 本目、0.5 で 4 本目を起こし、0.75 で止まる（予約を数えない今までの判定。比較でない計測の判定は変えない）
+    assert.ok(compareLog(log).length >= 3, "3 本目を起こす");
+    assert.equal(compareLog(log).length, 4);
+  });
+});
+
+test("#513 (f) 起動の前の断り：対のファイルの負例・組めない引数・--budget-usd 無し・既定の違う dist・spec-engine の dist が違う checkout・読めない比較元・前の結果のある出力先で、子を起こさず exit 3・固定の符号 1 行・何も書かない", async () => {
+  await withRepo(async (base) => {
+    const c = makeCompare(join(base, "f"));
+    const good = readJson(makePairsFile(c.repo, c, join(base, "pairs-f.json")));
+    const log = join(base, "spawn-f.log");
+    const pairCases = [
+      ["unreadable", "{", "compare:pairs-unreadable"],
+      ["schema", { ...good, schema: "musunest-eval/compare-pairs/v0" }, "compare:pairs-schema"],
+      ["groups", { ...good, groups: ["v1.1a", "v1"] }, "compare:pairs-schema"],
+      ["frozen", { ...good, frozen_sha256: "0".repeat(64) }, "compare:pairs-frozen"],
+      ["runs-zero", { ...good, runs: 0 }, "compare:pairs-runs"],
+      ["runs-text", { ...good, runs: "3" }, "compare:pairs-runs"],
+      ["empty", { ...good, pairs: [] }, "compare:pairs-empty"],
+      ["shape", { ...good, pairs: good.pairs.map((p, i) => (i === 2 ? { ...p, first: "v2" } : p)) }, "compare:pairs-shape"],
+      ["duplicate", { ...good, pairs: [...good.pairs.slice(0, 5), { ...good.pairs[0], first: "v1.1a" }] }, "compare:pairs-duplicate"],
+      ["missing", { ...good, pairs: good.pairs.slice(0, 5) }, "compare:pairs-missing"],
+      ["extra", { ...good, pairs: [...good.pairs, { pid: "P1", r: 4, first: "v1" }] }, "compare:pairs-extra"],
+      ["not-adopted", { ...good, pairs: [...good.pairs.slice(0, 5), { pid: "P2", r: 3, first: "v1.1a" }] }, "compare:pairs-missing"],
+      ["alternation", { ...good, pairs: good.pairs.map((p, i) => (i === 1 ? { ...p, first: "v1" } : p)) }, "compare:pairs-alternation"],
+    ];
+    for (const [label, value, code] of pairCases) {
+      const out = join(base, `out-f-${label}`);
+      assertCompareRefused(runAgent(c.repo, out, compareArgs(c, writePairs(join(base, `pairs-f-${label}.json`), value), ["--budget-usd", "5"]), { FAKE_SPAWN_LOG: log }), code, log, out, label);
+    }
+    const pairs = join(base, "pairs-f.json");
+    const conflictCases = [
+      ["only", [...compareArgs(c, pairs), "--budget-usd", "5", "--only", "P1"]], ["runs", [...compareArgs(c, pairs), "--budget-usd", "5", "--runs", "3"]],
+      ["resume", [...compareArgs(c, pairs), "--budget-usd", "5", "--resume"]], ["plan", [...compareArgs(c, pairs), "--budget-usd", "5", "--plan"]],
+      ["plan-only", [...compareArgs(c, pairs), "--budget-usd", "5", "--plan-only"]], ["script", [...compareArgs(c, pairs), "--budget-usd", "5", "--script"]],
+      ["pipeline", [...compareArgs(c, pairs), "--budget-usd", "5", "--pipeline", "v1.1a"]], ["make-pairs", [...compareArgs(c, pairs), "--budget-usd", "5", "--make-pairs", join(base, "mp.json")]],
+      ["no-baseline", ["--compare", "--pairs", pairs, "--build-from", c.fz, "--budget-usd", "5"]], ["no-pairs", ["--compare", "--baseline", c.baseline, "--build-from", c.fz, "--budget-usd", "5"]],
+      ["no-build-from", ["--compare", "--baseline", c.baseline, "--pairs", pairs, "--budget-usd", "5"]], ["baseline-without-compare", ["--baseline", c.baseline, "--runs", "1", "--build-from", c.fz]],
+      ["bad-budget", [...compareArgs(c, pairs), "--budget-usd", "x"]],
+    ];
+    for (const [label, extra] of conflictCases) {
+      const out = join(base, `out-f-${label}`);
+      assertCompareRefused(runAgent(c.repo, out, extra, { FAKE_SPAWN_LOG: log }), "flags:conflict", log, out, label);
+    }
+    assertCompareRefused(runAgent(c.repo, join(base, "out-f-nobudget"), compareArgs(c, pairs), { FAKE_SPAWN_LOG: log }), "compare:budget-required", log, join(base, "out-f-nobudget"));
+    // 既定の違う dist（比較元の締切の既定が違う）
+    const cd = makeCompare(join(base, "fd"), { baselineCli: { deadlineMs: 1200000 } });
+    assertCompareRefused(runAgent(cd.repo, join(base, "out-f-defaults"), compareArgs(cd, makePairsFile(cd.repo, cd, join(base, "pairs-fd.json")), ["--budget-usd", "5"]), { FAKE_SPAWN_LOG: log }), "compare:defaults-differ", log, join(base, "out-f-defaults"));
+    // spec-engine の dist が違う checkout
+    const cs = makeCompare(join(base, "fs"));
+    writeFileSync(join(cs.baseline, "packages/spec-engine/dist/index.js"), "export const version = 2;\n");
+    const rs = runAgent(cs.repo, join(base, "out-f-spec"), compareArgs(cs, makePairsFile(cs.repo, cs, join(base, "pairs-fs.json")), ["--budget-usd", "5"]), { FAKE_SPAWN_LOG: log });
+    assertCompareRefused(rs, "compare:fingerprint-differs", log, join(base, "out-f-spec"));
+    assert.match(rs.stderr, /spec_engine/);
+    // 生成に渡す文書（比較元の契約）が違う checkout
+    const cdoc = makeCompare(join(base, "fdoc"));
+    writeFileSync(join(cdoc.baseline, "packages/appspec-schema/contract/rules.md"), "# 契約 2\n");
+    assertCompareRefused(runAgent(cdoc.repo, join(base, "out-f-doc"), compareArgs(cdoc, makePairsFile(cdoc.repo, cdoc, join(base, "pairs-fdoc.json")), ["--budget-usd", "5"]), { FAKE_SPAWN_LOG: log }), "compare:fingerprint-differs", log, join(base, "out-f-doc"), "contract");
+    // 読めない比較元（工場の dist が無い）
+    mkdirSync(join(base, "empty-checkout"));
+    assertCompareRefused(runAgent(c.repo, join(base, "out-f-nobase"), ["--compare", "--baseline", join(base, "empty-checkout"), "--pairs", pairs, "--build-from", c.fz, "--budget-usd", "5"], { FAKE_SPAWN_LOG: log }), "compare:baseline-unreadable", log, join(base, "out-f-nobase"));
+    // 比較元の工場の検査が包みを断る（比較元の語彙の版が違う）
+    const cv = makeCompare(join(base, "fv"));
+    writeFileSync(join(cv.baseline, "packages/factory/dist/cli.js"), fakeCompareCli().replace('VOCABULARY_VERSION = "v1"', 'VOCABULARY_VERSION = "v0"'));
+    assertCompareRefused(runAgent(cv.repo, join(base, "out-f-vocab"), compareArgs(cv, makePairsFile(cv.repo, cv, join(base, "pairs-fv.json")), ["--budget-usd", "5"]), { FAKE_SPAWN_LOG: log }), "build-from:envelope-rejected:vocabulary", log, join(base, "out-f-vocab"));
+    // 前の結果のある出力先
+    const prior = join(base, "out-f-prior");
+    mkdirSync(prior);
+    writeFileSync(join(prior, "x"), "");
+    const rp = runAgent(c.repo, prior, compareArgs(c, pairs, ["--budget-usd", "5"]), { FAKE_SPAWN_LOG: log });
+    assert.equal(rp.status, 3);
+    assert.ok(rp.stderr.includes("[compare:prior-output]"));
+    assert.deepEqual(readdirSync(prior), ["x"]);
+    assert.equal(compareLog(log).length, 0);
+  });
+});
+
+test("#513 (g) 漏えい：目印を対のファイル・比較元のパス・子の出力に入れても、比較の記録・群の条件と起動の記録・本の要約・標準出力に出ない（生のログと対の写しには残る）", async () => {
+  await withRepo(async (base) => {
+    const c = makeCompare(join(base, "g"), { baselineName: `co-${MARK}` });
+    assert.ok(c.baseline.includes(MARK));
+    const pairsPath = join(base, "pairs-g.json");
+    makePairsFile(c.repo, c, pairsPath, 1);
+    writePairs(pairsPath, { ...readJson(pairsPath), note: MARK });
+    const out = join(base, "out-g");
+    const r = runAgent(c.repo, out, compareArgs(c, pairsPath, ["--budget-usd", "5"]), { FAKE_MARK: MARK, FAKE_SPAWN_LOG: join(base, "spawn-g.log") });
+    assert.equal(r.status, 0, r.stderr);
+    const texts = [r.stdout, r.stderr, readFileSync(join(out, "comparison.json"), "utf8"), readFileSync(join(out, readdirSync(out).find((n) => n.startsWith("compare-run-"))), "utf8")];
+    for (const g of ["v1", "v1.1a"]) {
+      texts.push(readFileSync(join(out, g, "conditions.json"), "utf8"));
+      for (const n of readdirSync(join(out, g))) {
+        if (/^run-\d+\.json$/.test(n)) texts.push(readFileSync(join(out, g, n), "utf8"));
+        if (/^P\d+-r\d+$/.test(n)) texts.push(readFileSync(join(out, g, n, "summary.line.json"), "utf8"));
+      }
+    }
+    texts.forEach((t, i) => assert.ok(!t.includes(MARK), `記録 ${i} に目印が出た`));
+    assert.ok(readFileSync(join(out, "v1", "P1-r1", "stdout.log"), "utf8").includes(MARK), "生の標準出力には残る");
+    assert.ok(readFileSync(join(out, "pairs.json"), "utf8").includes(MARK), "対の写しは生のまま");
   });
 });

@@ -96,6 +96,21 @@ export interface RunTestsInput {
    * 場所（種類・entity・名前）を組むのに使う——別 entity の同名を実在と誤認しないため。省ける。
    */
   readonly roles?: readonly RoleEntry[];
+  /**
+   * **試験 ID で引く**結び付けの表（v1.1α。`07-architecture-v1.1a.md` §2.1・§3・D11）。渡せば `bindTests` を
+   * 呼ばず、試験ごとに試験 ID で引く（並びでは引かない）。表に無い試験 ID は未解決（`no-mapping`）。
+   * 参照データの行の entity と、結び付かない構造の検査の場所の所属 entity は `entityNames` で引く。
+   * 評価（`judgeOne` 以降）と行き先の振り分けは変えない。**省けば v1 の経路のまま**。
+   */
+  readonly bindings?: TestBindings;
+}
+
+/** 試験 ID で引く結び付けの表（v1.1α。D11）。外から差し込む（作るのは v1.1α の側） */
+export interface TestBindings {
+  /** 試験 ID → 結び付けの結果 */
+  readonly tests: ReadonlyMap<string, BindResult>;
+  /** entity の役割 ID → 宣言の entity の名前 */
+  readonly entityNames: ReadonlyMap<string, string>;
 }
 
 /** 失敗の行き先（§1.3.1・Issue #308・#322） */
@@ -204,6 +219,12 @@ function show(value: unknown): string {
  * （旧形式）、対応表が挙げた entity の場所を使う。
  */
 export function resolveReferenceEntity(target: TestTarget, input: RunTestsInput): string | null {
+  // 試験 ID で引く結び付けの表があれば、entity の名前はその表から引く（v1.1α。D11）
+  if (input.bindings !== undefined && target.roleId !== undefined) {
+    const name = input.bindings.entityNames.get(target.roleId);
+    if (name === undefined) return null;
+    return findEntity(input.app, name) === undefined ? null : name;
+  }
   if (input.mappings !== undefined && target.roleId !== undefined) {
     const mapping = input.mappings.find((candidate) => candidate.roleId === target.roleId);
     if (mapping === undefined) return null;
@@ -286,6 +307,18 @@ function resolveEmptyEntities(
 ): { readonly ok: true; readonly names: readonly string[] } | { readonly ok: false; readonly reason: string } {
   const names: string[] = [];
   for (const roleId of roleIds) {
+    // 試験 ID で引く結び付けの表があれば、entity の名前はその表から引く（参照データの entity と同じ。D11）
+    if (input.bindings !== undefined) {
+      const name = input.bindings.entityNames.get(roleId);
+      if (name === undefined) {
+        return { ok: false, reason: `空の集合の entity の役割 ID ${roleId} に提出された対応が無い` };
+      }
+      if (findEntity(input.app, name) === undefined) {
+        return { ok: false, reason: `空の集合の entity の対応（${name}）が宣言に無い` };
+      }
+      names.push(name);
+      continue;
+    }
     if (input.mappings === undefined) {
       if (findEntity(input.app, roleId) !== undefined) {
         names.push(roleId);
@@ -867,10 +900,15 @@ function mappedEntityOf(roleId: string, input: RunTestsInput): string | null | u
   if (input.roles === undefined || input.mappings === undefined) return null;
   const role = input.roles.find((candidate) => candidate.roleId === roleId);
   if (role === undefined || role.entity === null) return null;
-  const entityMapping = input.mappings.find((candidate) => candidate.roleId === role.entity);
+  const entityRoleId = role.entity;
+  // 試験 ID で引く結び付けの表があれば、所属 entity の名前はその表から引く（v1.1α。D11）
+  const entityName =
+    input.bindings !== undefined
+      ? input.bindings.entityNames.get(entityRoleId)
+      : input.mappings.find((candidate) => candidate.roleId === entityRoleId)?.name;
   // 所属 entity の対応が引けないときは **未確定**（`undefined`）。null と区別する（別 entity の同名を
   // 実在と誤認しないため。Issue #431）
-  return entityMapping === undefined ? undefined : entityMapping.name;
+  return entityName;
 }
 
 /**
@@ -993,22 +1031,42 @@ function judgeOne(
 }
 
 /**
+ * 試験ごとの結び付けを引く口を作る。試験 ID で引く表（`bindings`）があれば、**試験 ID で引き**、
+ * 表に無い試験 ID は未解決（`no-mapping`）にする（新しい理由を足さない。D11）。無ければ v1 の
+ * `bindTests` を呼び、並びで引く（v1 の経路のまま）。
+ */
+function bindingsOf(input: RunTestsInput): (test: FixedTest, index: number) => BindResult | undefined {
+  const table = input.bindings;
+  if (table !== undefined) {
+    return (test) =>
+      table.tests.get(test.id) ?? {
+        kind: "unbound",
+        testId: test.id,
+        cause: "no-mapping",
+        detail: `試験 ${test.id} が結び付けの表に無い（1 つに決まらない）`,
+      };
+  }
+  const results = bindTests({
+    suite: input.suite,
+    correspondence: input.correspondence,
+    ...(input.mappings === undefined ? {} : { mappings: input.mappings }),
+  });
+  return (_test, index) => results[index];
+}
+
+/**
  * 固定した試験の組を流し、不一致と未解決、失敗の行き先を返す（§1.3・F-9・Issue #308）。
  * 結び付けられなかった試験も、行き先つきで数える（R-8）。
  */
 export function runTests(input: RunTestsInput): TestRunReport {
   const natures = natureMap(input.suite);
-  const bindings = bindTests({
-    suite: input.suite,
-    correspondence: input.correspondence,
-    ...(input.mappings === undefined ? {} : { mappings: input.mappings }),
-  });
+  const bindings = bindingsOf(input);
   const mismatches: TestMismatch[] = [];
   const unresolved: TestUnresolved[] = [];
   const routes: RoutedFailure[] = [];
   const structural: StructuralCheckOutcome[] = [];
   input.suite.tests.forEach((test, index) => {
-    const judged = judgeOne(test, bindings[index], input, natures);
+    const judged = judgeOne(test, bindings(test, index), input, natures);
     if (judged.verdict.kind === "mismatch") {
       mismatches.push({ testId: test.id, detail: judged.verdict.detail });
     } else if (judged.verdict.kind === "unresolved") {

@@ -25,7 +25,15 @@ import {
   type OpenAiErrorKind,
   type OpenAiUsage,
 } from "./openai.js";
-import { ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_NAME, envelopeStageFor } from "./schema-envelope.js";
+import {
+  ENVELOPE_SCHEMA,
+  ENVELOPE_SCHEMA_NAME,
+  ENVELOPE_SCHEMA_NAME_V11A,
+  ENVELOPE_SCHEMA_V11A,
+  envelopeStageFor,
+} from "./schema-envelope.js";
+import { DESIGN_SCHEMA, DESIGN_SCHEMA_NAME } from "./stages/design.js";
+import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME } from "./v11a/stages/name-table.js";
 import { SURFACE_DIFF_SCHEMA_NAME, SURFACE_SCHEMA, SURFACE_SCHEMA_NAME, buildSurfaceDiffSchema } from "./plan/surface.js";
 import { REQUIREMENT_LIST_SCHEMA, REQUIREMENTS_SCHEMA_NAME } from "./stages/requirements.js";
 import { REVERSE_CHECK_SCHEMA, REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
@@ -579,6 +587,91 @@ describe("構造化出力は、全段で同じ封筒の schema を送る（02 §
     expect(input[1]?.content[0]).toEqual({ type: "input_text", text: "<rules>\n段の規則\n</rules>" });
     // 段の規則の本文は変えず、別の内容の塊として stage の指示を足す
     expect(input[1]?.content[1]?.["text"]).toContain(REQUIREMENTS_SCHEMA_NAME);
+  });
+});
+
+// ── v1.1α の封筒（07-architecture-v1.1a.md §3・D12・Issue #511）─────────────────
+
+describe("封筒は options の envelope で選ぶ（既定 v1。v1.1α は stage-envelope-v11a。Issue #511）", () => {
+  it("envelope を省いた client と \"v1\" を渡した client は、同じ v1 の段の要求に同じ body を送る", async () => {
+    const reply = () =>
+      jsonResponse(completed(outputText(JSON.stringify(enveloped(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_OUTPUT))), USAGE_WIRE));
+    const omitted = recordingFetch(reply);
+    const v1 = recordingFetch(reply);
+    const request = stageRequest(REQUIREMENTS_SCHEMA_NAME, REQUIREMENT_LIST_SCHEMA);
+    await createOpenAiLlmClient({ apiKey: "test-key", fetch: omitted.fetch }).callStructured(request);
+    await createOpenAiLlmClient({ apiKey: "test-key", fetch: v1.fetch, envelope: "v1" }).callStructured(request);
+
+    expect(JSON.stringify(bodyOf(v1.captured))).toBe(JSON.stringify(bodyOf(omitted.captured)));
+    expect(formatOf(bodyOf(omitted.captured)).name).toBe(ENVELOPE_SCHEMA_NAME);
+    expect(formatOf(bodyOf(omitted.captured)).schema).toEqual(ENVELOPE_SCHEMA);
+  });
+
+  it("\"v1.1a\" では name-table の要求に v1.1α の封筒を送り、result を取り出して stage を落とす", async () => {
+    const output = { rows: [], requirements: [] };
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify(enveloped(NAME_TABLE_SCHEMA_NAME, output))), USAGE_WIRE)),
+    );
+    const response = await createOpenAiLlmClient({ apiKey: "test-key", fetch, envelope: "v1.1a" }).callStructured<
+      Record<string, unknown>
+    >(stageRequest(NAME_TABLE_SCHEMA_NAME, NAME_TABLE_SCHEMA));
+
+    const format = formatOf(bodyOf(captured));
+    expect(format.name).toBe(ENVELOPE_SCHEMA_NAME_V11A);
+    expect(format.schema).toEqual(ENVELOPE_SCHEMA_V11A);
+    expect(format.strict).toBe(true);
+    expect(response.output).toEqual(output);
+    expect(response.output).not.toHaveProperty("stage");
+    // 段の指示に、その段の stage が入る
+    expect(inputOf(captured)[1]?.content.at(-1)?.["text"]).toContain(NAME_TABLE_SCHEMA_NAME);
+  });
+
+  it("\"v1.1a\" の client で stage が違う答えは、形の誤り（malformed）", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify(enveloped("test-spec", { rows: [], requirements: [] }))), USAGE_WIRE)),
+    );
+    const error = await captureError(() =>
+      createOpenAiLlmClient({ apiKey: "test-key", fetch, envelope: "v1.1a" }).callStructured(
+        stageRequest(NAME_TABLE_SCHEMA_NAME, NAME_TABLE_SCHEMA),
+      ),
+    );
+    expect(error.kind).toBe("malformed");
+  });
+
+  it("\"v1.1a\" の client に v1 だけの段（requirement-design）を要求すると、その schema をそのまま送る", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ roles: [], designs: [] })), USAGE_WIRE)),
+    );
+    await createOpenAiLlmClient({ apiKey: "test-key", fetch, envelope: "v1.1a" }).callStructured(
+      stageRequest(DESIGN_SCHEMA_NAME, DESIGN_SCHEMA),
+    );
+    const format = formatOf(bodyOf(captured));
+    expect(format.name).toBe(DESIGN_SCHEMA_NAME);
+    expect(format.schema).toEqual(DESIGN_SCHEMA);
+  });
+
+  it("判定の口の schema は、どちらの封筒の client でもそのまま送る", async () => {
+    for (const envelope of ["v1", "v1.1a"] as const) {
+      const { fetch, captured } = recordingFetch(() =>
+        jsonResponse(completed(outputText(JSON.stringify({ items: [] })), USAGE_WIRE)),
+      );
+      await createOpenAiLlmClient({ apiKey: "test-key", fetch, envelope }).callStructured(
+        stageRequest("judge-answers", SCHEMA),
+      );
+      const format = formatOf(bodyOf(captured));
+      expect(format.name, envelope).toBe("judge-answers");
+      expect(format.schema, envelope).toEqual(SCHEMA);
+    }
+  });
+
+  it("v1 の client は、v1.1α の段の名前の要求に封筒を送らない（v1.1α の封筒は v1 の要求に混ざらない）", async () => {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify({ rows: [], requirements: [] })), USAGE_WIRE)),
+    );
+    await clientWith(fetch).callStructured(stageRequest(NAME_TABLE_SCHEMA_NAME, NAME_TABLE_SCHEMA));
+    const format = formatOf(bodyOf(captured));
+    expect(format.name).toBe(NAME_TABLE_SCHEMA_NAME);
+    expect(envelopeStageFor(NAME_TABLE_SCHEMA_NAME)).toBeUndefined();
   });
 });
 
