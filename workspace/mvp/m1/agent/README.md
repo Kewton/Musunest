@@ -39,6 +39,7 @@
 | [`01-requirements.md`](./01-requirements.md) | 何をするか（機能）と、どれだけ良くあるべきか（品質・費用・時間・安全） |
 | [`02-architecture.md`](./02-architecture.md) | どう作るか（段・道具・置き場所・依存の向き・契約） |
 | [`03-evaluation.md`](./03-evaluation.md) | どう測るか（受入の試験・比べ方・過学習の防ぎ方） |
+| [`07-architecture-v1.1a.md`](./07-architecture-v1.1a.md) | 比較用の別の経路 v1.1α（planner → test planner → builder）。名前の表を 1 度だけ固定し、表と宣言の意味を別々に点検する。Jev の活用ポイント（2026-10-16 所有者が承認。#502） |
 | [`99-review.md`](./99-review.md) | Codex のレビューの記録と、その扱い |
 
 ## 4. 進め方（段階）
