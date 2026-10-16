@@ -442,7 +442,7 @@ describe("要件 ID は一覧の順でコードが付け、写しと照合する
       expectNoValues(result.ok ? [] : result.problems, [other]);
     });
 
-    it("言い換えた引用（1 文字を変えた・区切りを足した）は正規化せずに落ちる", () => {
+    it("言い換えた引用（語を言い換えた・区切りに空白を足した・先頭に空白を足した）は正規化せずに落ちる", () => {
       const own = quoted.requirements[0]!.quote;
       for (const paraphrased of [own.replace("登録", "記録"), own.replace("：", ": "), ` ${own}`]) {
         const draft = draftWithRequestQuotes((quote) => quote);
