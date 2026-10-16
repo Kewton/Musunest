@@ -86,15 +86,15 @@ a10d827eff477dda51394bff96faa0f9c42631cb818a1653098446bc979bfe70  subjects/C.jso
 
 | ファイル | 中身 |
 |---|---|
-| `agent-accept/run-agent.mjs` | 計測。評価セットの定義ファイル（既定は `sets/dev-p1-p10.json`。`--set <パス>` で差し替える）の本 × 回数を工場の入口（`packages/factory/dist/cli.js`）で流す（API を呼ぶ。窓口の手元だけ）。出力先に `conditions.json`（計測の条件）・本ごとのディレクトリ・`run-<時刻>.json`（1 回の起動の記録）を残す |
-| `agent-accept/score-agent.mjs` | 採点。条件のファイルに記録された定義ファイル（無ければ既定の `sets/dev-p1-p10.json`。`--set <パス>` で差し替える）を読んで、出力先の本を採点表 v5 で採点し、`score[-label].json` を書く。`--anonymous` なら `score[-label].anonymous.json` だけを書く。Plan を通した本は、原文系と了承後系を別に数え、台本を事後に当てる（§5.5・§5.6） |
+| `agent-accept/run-agent.mjs` | 計測。評価セットの定義ファイル（既定は `sets/dev-p1-p10.json`。`--set <パス>` で差し替える）の本 × 回数を工場の入口（`packages/factory/dist/cli.js`）で流す（API を呼ぶ。窓口の手元だけ）。出力先に `conditions.json`（計測の条件）・本ごとのディレクトリ・`run-<時刻>.json`（1 回の起動の記録）を残す。`--pipeline`・`--make-pairs`・`--compare`（v1 と v1.1α を対にして交互に流す Build 比較）は §5.8（#513） |
+| `agent-accept/score-agent.mjs` | 採点。条件のファイルに記録された定義ファイル（無ければ既定の `sets/dev-p1-p10.json`。`--set <パス>` で差し替える）を読んで、出力先の本を採点表 v5 で採点し、`score[-label].json` を書く。`--anonymous` なら `score[-label].anonymous.json` だけを書く。Plan を通した本は、原文系と了承後系を別に数え、台本を事後に当てる（§5.5・§5.6）。`--compare` は対にした交互の計測の出力先を採点して `score-compare[-label].json` を書く（§5.8） |
 | `agent-accept/freeze-plan-set.mjs` | (b) の凍結（#497。§5.7）。Plan 評価（`run-agent.mjs --plan-only`）の出力先から、P ごとに規則で 1 本の確定した仕様を選び、組のディレクトリ（リポジトリの外）に凍結した組と包みの写しを置く（API を呼ばない） |
 | `agent-accept/run-agent.test.mjs`・`agent-accept/score-agent.test.mjs`・`agent-accept/freeze-plan-set.test.mjs` | `node --test "workspace/mvp/m1/agent/eval/agent-accept/*.test.mjs"`（API・ネットワーク無し。計測の試験は偽物の工場で、採点の試験は `cases/` の固定の宣言と凍結したエンジンで閉じる。先に `pnpm build`） |
 | `sets/<組の id>.json`・`sets/scripts/<題材>.json` | 評価セットの定義ファイルと、題材ごとの台本（§5.6）。`dev-p1-p10.json` は今の P1〜P10 を同じ形で書き直したもの（依頼文の指紋が `stage1-patterns.md` の表と一致することを試験で確かめる） |
 
 方法論 `methodology/01-eval-sets.md` §2〜§4 の前提のうち、**分母の補正・本数の照合・比較の条件の指紋・匿名の集計**をここで満たす（#425）。**原文と了承後の二系統の採点**は §5.5（#426）。**評価セットの定義ファイルと台本**は §5.6（#427）。**#427 の完了の範囲は「定義ファイルの入口」と「台本の事後の照合（診断）」まで**で、実行中に事項で答える口（工場の変更）は別の Issue（§5.6.3）。
 
-### 5.1 計測の条件（`conditions.json`。schema `musunest-factory/agent-accept-conditions/v4`。v3 は #427、v2 は #425、v1 は #401）
+### 5.1 計測の条件（`conditions.json`。schema `musunest-factory/agent-accept-conditions/v5`。v4 は #497、v3 は #427、v2 は #425、v1 は #401）
 
 | 欄 | 中身 |
 |---|---|
@@ -109,6 +109,7 @@ a10d827eff477dda51394bff96faa0f9c42631cb818a1653098446bc979bfe70  subjects/C.jso
 | `judge` | 判定の口の構成。`jev-primary-llm-fallback`（Jev の鍵の環境変数が空でない）か `llm-only`。**鍵の値は書かない**（環境変数の名前だけ） |
 | `params`・`child_args` | モデル・effort・Plan の有無・題材と回数・同時数・全体の目安額・工場 1 本の予算と締切・段ごとの出力の上限と、子プロセスへ渡す引数。v4 で `params.mode`（`build`＝指定なし／`e2e`＝`--plan`／`plan-only`／`build-from`）を足し、`params.answers_mode` に `script`（`--script`）を足した。`params.plan` の値の決め方は変えない（子の引数に `--plan` があるか） |
 | `scoring` | 採点の定義と集計のコードの指紋（`engine.mjs`・`score-claims.mjs`・`rubric-v5.mjs`・`agent-accept/score-agent.mjs`・`subjects/*.json`。`<repo>` の採点器のもの）に、**組が実際に参照する採点の定義の実体**（`files[]` の `definition:<題材>`。`source` は `eval/` からの相対パス、`sha256` は中身）を足したもの。`subjects/` の外に置いた定義も数えるので、組を変えずに参照先の中身だけを変えても、採点の出力の `scoring_matches_conditions` が不一致になる（独立レビューの指摘 2） |
+| `params.pipeline`・`params.stage_output_limits_v11a`・`comparison` | **v5（#513。§5.8）**：工場の経路（`v1`／`v1.1a`。`--pipeline` を省けば `v1`）、v1.1α の 4 段の出力の上限（dist に無ければ `null`）、比較の群の印（`--compare` のときだけ。対のファイルの SHA・群・役割・`profile`。それ以外は `null`）。どれも署名に入る。`params.stage_output_limits` には **v1 の出力の 10 段だけ**を表の並びのまま写す（v1.1α の段を足した dist でも、v1 の欄の値は変わらない） |
 | `signature` | `--resume` の一致の判定に使う SHA-256。**`started_at`・`scoring`・`post-hoc` の `scripts`・`params.budget_usd` を除いた全部**（`schema`・`params.mode`・`frozen`・`live` の `scripts` は入る） |
 
 - **署名が保証するのは生成の条件の一致であって、管理の条件（計測全体の停止の目安 `params.budget_usd`）まで含めた一致ではない。** 再開で変えた目安の額は条件のファイルには書かず（初回の値のまま上書きしない）、起動の記録（下の `run-<時刻>.json`）から読む
@@ -127,8 +128,10 @@ a10d827eff477dda51394bff96faa0f9c42631cb818a1653098446bc979bfe70  subjects/C.jso
 | `aggregation_versions` | v1・v2 の数え方の説明 |
 | `fulfillment.v1` / `fulfillment.v2` | 充足率を版ごとに並べる。`partial`（一部書けない題材 B・D）・`writable`（書ける題材 A・C・E）・`all`。**v1** ＝ 補正前（分母は当てはまった構造の判定の数。生成失敗・静的 NG の本は分母に入らない。`v1.partial` は `metrics.fulfillment_partial` と同じ値）。**v2** ＝ 補正後（分母は題材の採点定義の判定の数。当てはまった構造、無ければ主の構造。生成失敗・静的 NG・役割が見つからない本は充足 0 で分母に残す）。2 つの版は混ぜない。前後の比較は同じ版で読む |
 | `rows[].fulfillment_v2` | 本ごとの v2 の分子・分母と、分母の出どころ（`structure:<id>`／`definition:<主の構造の id>`） |
-| `completion` | 本数の照合。予定した本（`conditions.json` の `child_args`）・実行した本（要約のある本）・**採点した本（`scored`。行に入れた本の数）**・未実行（ディレクトリが無い）・途中（要約が無い）・予定外（予定に無いディレクトリ）・**採点できない本（`unscored`。採点する組に無い ID の本。行に入れない）**と、いちばん新しい起動の記録の止まった理由（文と `stop_code`）・残りの本・有効だった `budget_usd`。1 本でも残れば `status: "incomplete"`・`label: "未完了"`（**正式な比較基準にしない**、の機械の目印）。**照合の前に条件のファイルを検証する**：既知の schema（v1〜v3）・`child_args` が配列・各 ID が `P<n>-r<n>` の文字列・ID の一意性・`params.patterns` × `params.runs` と予定の一覧の一致・予定が 1 本以上。1 つでも落ちれば `unverified`・「未照合」と理由（入力の値は書かない）で、「完了」に丸めない。条件のファイルが無い出力先（#401 より前）・読めない条件も「未照合」。**予定の本が採点する組に無ければ採点せずに断る**（exit 3。§5.6.4。一部の本だけを含む組で採点して、予定した本を分母から黙って除かないため） |
+| `completion` | 本数の照合。予定した本（`conditions.json` の `child_args`）・実行した本（要約のある本）・**採点した本（`scored`。行に入れた本の数）**・未実行（ディレクトリが無い）・途中（要約が無い）・予定外（予定に無いディレクトリ）・**採点できない本（`unscored`。採点する組に無い ID の本。行に入れない）**と、いちばん新しい起動の記録の止まった理由（文と `stop_code`）・残りの本・有効だった `budget_usd`。1 本でも残れば `status: "incomplete"`・`label: "未完了"`（**正式な比較基準にしない**、の機械の目印）。**照合の前に条件のファイルを検証する**：既知の schema（v1〜v5）・`child_args` が配列・各 ID が `P<n>-r<n>` の文字列・ID の一意性・`params.patterns` × `params.runs` と予定の一覧の一致・予定が 1 本以上。1 つでも落ちれば `unverified`・「未照合」と理由（入力の値は書かない）で、「完了」に丸めない。条件のファイルが無い出力先（#401 より前）・読めない条件も「未照合」。**予定の本が採点する組に無ければ採点せずに断る**（exit 3。§5.6.4。一部の本だけを含む組で採点して、予定した本を分母から黙って除かないため） |
 | `fingerprints` | 採点に使った定義とエンジン（`<repo>` から実際に読み込んだもの）と、組が実際に参照する採点の定義の実体（`definition:<題材>`。§5.1 の `scoring`）と、集計のコード（**実行中の `score-agent.mjs`**。`scoring.aggregator` にパスと SHA-256）の指紋（`scoring`）と spec-engine の `dist` の指紋、条件のファイルに記録された値、その一致（`scoring_matches_conditions`・`spec_engine_matches_conditions`。条件に無ければ `null`）。別の checkout を `<repo>` に渡して採点しても、`<repo>` の旧い採点器の指紋を「一致」と出さない |
+
+v5 の条件（#513）では `evaluation.pipeline`（既知の値か `unknown`）を足す。v1〜v4 の条件の出力の `evaluation` は今までの形のまま（`pipeline` の欄を出さない）。照合の 3 段（未照合・未完了・完了）の読み方は、比較の採点（§5.8.5）も同じ言葉を使う。
 
 標準出力には従来の指標と行に加えて、`fulfillment`・`completion` と、照合（`照合: 完了／未完了（予定・実行・採点・未実行・途中・採点できない）`）・指紋の一致の 1 行ずつを出す。
 
@@ -474,6 +477,62 @@ node freeze-plan-set.mjs <repo> <Plan 評価の出力先> <組のディレクト
 - 要約の列挙（段の ID・失敗の分類・止めた理由）は工場の `record.ts` の値を写したもの。工場が値を足せば、足すまで `unknown` に写る（値は漏れない側に倒れる）
 - `params.plan` は `--plan` の有無のまま（`plan-only`・`build-from` は `false`）。採点の道具の了承後系の対象は、今までどおり本ごとの Plan の記録の有無でも決まる
 - 比較の道具は作っていない。並列の上限を上げる条件（429・529・締切の停止の観測）は別の Issue
+
+### 5.8 v1 と v1.1α の Build 比較（#513。設計書 `../07-architecture-v1.1a.md` §4・D7・D17・追加判断 B）
+
+v1（比較元の checkout。main `2cd1586f856fb1cdecf75ef035826cbffe539e69`）と v1.1α（候補の checkout）を、同じ凍結した組から**同じ時間帯に交互に**流し、原文系 PASS の**対の差**で読む。本物の計測は窓口が手元で流す（API を呼ぶ）。試験は偽物の工場の入口と固定の記録で閉じる。
+
+#### 5.8.1 口（`run-agent.mjs`）
+
+| 口 | 中身 |
+|---|---|
+| `--pipeline v1\|v1.1a` | 既定 `v1`。`v1.1a` は `--build-from` と一緒にだけ受け、子の引数の**末尾**に `--pipeline v1.1a` を足す。`v1` と省略は子に何も足さない（今までと同じ引数・同じ署名）。知らない値・値の無い指定・組めない組は `flags:conflict` |
+| `--make-pairs <出力> --build-from <組> [--runs 3]` | 対のファイルを書く（子を起こさない）。採用した P（組の順）× 1〜`runs` を並べ、先行の群を `v1` から交互にする。同じ入力からは同じバイト列。出力が既にあれば `compare:pairs-exists` で上書きしない |
+| `--compare --baseline <比較元の checkout> --pairs <対のファイル> --build-from <組> --budget-usd <上限> [--concurrency 3] [--effort・--deadline-min・--factory-budget-usd・--model]` | 対にした交互の計測。群 `v1` ＝ 比較元の checkout の入口と cwd（`--pipeline` 無し）、群 `v1.1a` ＝ `<repo>` の入口（`--pipeline v1.1a`）。ほかの引数と写し（依頼文・包み）は両群で同じ。`--only`・`--runs`・`--resume`・`--plan`・`--plan-only`・`--script`・`--pipeline`・`--make-pairs` とは組めない（`flags:conflict`）。`--budget-usd` は必須（`compare:budget-required`）。比較は再開しない（前の結果のある出力先は `compare:prior-output`） |
+
+#### 5.8.2 ファイル
+
+| ファイル | 中身 |
+|---|---|
+| 対のファイル（`--pairs`） | schema `musunest-eval/compare-pairs/v1`：`frozen_sha256`（凍結した組のファイル全体の SHA-256）・`groups`（`["v1","v1.1a"]`）・`runs`・`pairs[]`（`pid`・`r`・`first`）。対の順と先行順は起動の前に固定する |
+| `<out>/pairs.json` | 対のファイルのバイト列の写し（採点がこの SHA を照らす。記録には SHA だけを書く） |
+| `<out>/v1/`・`<out>/v1.1a/` | 群ごとの計測。今までと同じ形の `conditions.json`（v5。`comparison`＝対の SHA・群・役割（`baseline`／`candidate`）・`profile`）・本のディレクトリ・`run-<時刻>.json`。群ごとに `score-agent.mjs` でそのまま採点できる。条件の `child_args` は checkout と群のディレクトリからの相対のパスで書く（比較元のパスを記録に写さない。実際に渡す引数は絶対パス） |
+| `<out>/comparison.json`（`COMPARISON_FILE`） | 比較の記録（schema `musunest-eval/compare-record/v1`）：対の SHA・数・回数、群ごとの指紋（工場の dist・`source`・spec-engine・生成に渡す文書・2 つの上限の欄・工場の既定・条件の署名）、共有の指紋（組・採点・台本・判定の口の構成・凍結した組・依頼文の出どころ・effort・model・1 本の予算と締切）、`profile` と違った項目、並列・上限・1 本の予約・採点の費用 0・`signature`。**鍵の値・パス・子の出力は書かない** |
+| `<out>/compare-run-<時刻>.json`（`COMPARE_RUN_PREFIX`） | 比較の起動の記録：対ごとの状態（`both`＝両方／`first-only`＝先行だけ／`unstarted`＝未起動）・起こさなかった本の一覧・起こした本の数・止まった理由と符号（`budget` か `null`）・済みの額・止めたときに走っていた本の数・群ごとの済みの額と終了の分類 |
+
+#### 5.8.3 起動の前の照合と正式な比較の条件
+
+- **意図した差**は工場の dist・commit・dirty・経路・v1.1α の上限の欄だけ。採点・組・台本・判定の構成・凍結した組は `<repo>` の道具の側から取り、両群で共有する（採点は生成のあとに全本へ同じ版を当てるため）。spec-engine の dist・生成に渡す文書・effort・model・予算・締切・**v1 の 10 段の上限**が両群で違えば `compare:fingerprint-differs`（違った欄の名前だけを出す）。工場の既定（effort・1 本の予算・締切・model・推論の既定・語彙の版・鍵の環境変数の名前）が違えば `compare:defaults-differ`
+- 候補の **v1.1α の 4 段**が A1 の承認値（`name-table`・`test-spec` 32,768、`semantic-check`・`decl-check` 16,384）と違えば（無いときも）`compare:limits-unapproved`。包みの検査は両群の dist の関数をそれぞれ当てる（符号は `--build-from` と同じ）
+- 対のファイルの検査：版と群（`compare:pairs-schema`）・凍結した組の SHA（`pairs-frozen`）・`runs` が正の整数（`pairs-runs`）・0 対（`pairs-empty`）・各対の形（`pairs-shape`）・重複（`pairs-duplicate`）・採用 P × 1〜`runs` の欠落（`pairs-missing`）と余り（`pairs-extra`）・ファイルの順に交互（`pairs-alternation`）・読めない（`pairs-unreadable`）。読めない比較元は `compare:baseline-unreadable`。**どの断りでも子を起こさず、exit 3・固定の符号の 1 行で、何も書かない**
+- **正式な比較の条件**（定数 `OFFICIAL_COMPARE`）：比較元の commit が `2cd1586…` で dirty でない・凍結した組 v1 のファイル全体の SHA-256 が `1bed5c0e8cadbc504f3378337b3ea7b8335229ebb135cc7f7760e80ddcd0c9d9`（`id` `dev-p1-p10-b-408b202`・版 1・採用 10 P。同じ id・版で中身が違えば満たさない）・反復 3・effort high・締切 20 分・1 本 0.30 USD・合計の並列 3・全体の上限 5 USD・採点 v5。全部満たせば `profile` は `official`、違えば `diagnostic`（**断らない**。違った項目の名前だけを残す）
+
+#### 5.8.4 起動の順・並列・全体の予算の打ち切り（D17）
+
+- 対の順 × 先行順を 1 本の待ち行列にし、`--concurrency`（既定 3。**両群の合計**）の枠が空くたびに先頭を起こす
+- 起こす直前に「**済みの額＋走行中の本の予約＋新しく起こす 1 本の予約 ≤ 上限**」のときだけ起こす（等しければ起こす。1 本の予約＝`--factory-budget-usd`。100 万分の 1 USD の整数で比べる）。超えればそれ以降を起こさず、走行中の本は終わるまで待つ。済みの額は終わった本の要約の費用（生成と判定を含む今までの欄）。**採点は API を呼ばないので費用 0 と記録する**（採点のコードに通信の import が無いことを試験で確かめる）
+- 各本の締切・予算の停止は終端の結果（延長も流し直しもしない）。比較でない計測の止め方（済みの額だけを見る）は変えない
+
+#### 5.8.5 採点（`score-agent.mjs <repo> <out> --compare [--label x] [--anonymous]`）と読み方
+
+- 両群を今の関数（§5.2 の採点）で採点してから対を組む。**断る（`compare:scoring-mismatch`。exit 3）**：対のファイルの写しの SHA が比較の記録と両群の条件で一致しない・群の `params` が `pipeline` と v1.1α の上限の欄以外で違う・どちらかの群に予定外の本。比較の記録か群のディレクトリが無ければ `compare:record-missing`。**予定の内側の不足**（予算・締切で止めた正常な計測の未実行・途中）は断らない
+- **差の向き**：対ごとに原文系 PASS を 0／1 にして **差＝候補（v1.1a）− 比較元（v1）**。両方が終わった対の数 n、＋1／0／−1 の件数、平均と区間（平均 ± 1.96 × 標本標準偏差 ÷ √n。n < 2 は `null`）。片側だけの対は差 `null` で n に入れない。締切・予算で止まった本は PASS 0 で分母に残る。**区間は参考**で、成績の確定ではない（追加判断 B）
+- **P 別と反復**：`pairs.by_pattern` に P ごとの差の並び（反復は同じ P の下）と平均。各群の率と Wilson の区間（`pass_executed`・`pass_planned`）は実行のばらつきの参考で、**対の差の区間の代わりにならない**。了承後系は群ごとに UNEVALUATED・FAIL の数と、落ちた判定の鍵（匿名の口では出さない）
+- **停止段**（群ごと）：`failure` があれば `段:種類`、無ければ `stop_reason`。`limit` は A5 の `verification-v11a.json` の `decl_check.exhausted` が 1 以上なら `decl-check:limit`。A5 の停止の名前 5 つ（`name-table:unmet`・`semantic-check:malformed`・`test-spec:unmet`・`decl-check:malformed`・`carry-over:unmet`）と `decl-check:limit` は 0 件も並べる。知らない値は `unknown`。**`carry-over:unmet` は全件持ち越しだけでなく、除いた行を参照する行が残ったときにも出る**（工場の判定 none。PR #519 の既知の制限）
+- **到達数**（群ごと）：段ごとに、段の記録に現れた本の数と予定数。**0 件は「今回未観測（0/予定）」**と分母を併記する（観測が無いことと 0 件であることを分ける）
+- **持ち越し**（群ごと。v1 は `null`）：`carry-over.json` の `entries[].reasons[].origin` から出どころ 4 つ（`name-table`・`semantic-check`・`decl-check`・`coverage`）の件数（要件ごとに出どころを 1 回）と、持ち越しのある本の数。記録の無い本・読めない本は欠測に数える
+- **照合**：(i) どちらかの群の照合が「未照合」か、採点のときの指紋の照合（`scoring`・`spec_engine`・`set`・`scripts`・`frozen` の `*_matches_conditions`）に false か null があれば `unverified`・「**未照合**」（どれが false か null かを `completion.unverified` に出す）。(ii) そうでなく、全対が両方終わり・両群の照合が完了・予算の停止の記録が無く・`profile` が `official` のときだけ `complete`・「完了」。(iii) それ以外は `incomplete`・「**未完了**」（`diagnostic` は「未完了・診断」）。**未照合は「比べてよいかが確かめられない」、未完了は「確かめられたが正式な比較の条件を満たさない」。** `complete` 以外は `reference_only` 真（参考値で、正式な比較基準にしない）
+- 出力は `score-compare[-label].json`（`SCORE_COMPARE_FILE`）と標準出力（対ごとの 1 行・P ごとの 1 行・比較の 1 行）。`--anonymous` なら `score-compare[-label].anonymous.json` だけで、件数・率・区間・既知の値だけを出す（本の ID・P の ID・パス・落ちた判定の鍵・知らない値は出さない）
+
+#### 5.8.6 規則と停止の台帳
+
+- v1.1α の規則（`R-nt`・`R-sc`・`R-tsp`・`R-dc`・`R-w11`）は `../methodology/ledger/rules.md` §5 に 1 要素 1 行で写した。行の数と ID の集合は `score-agent.test.mjs` が工場の dist の配列と照らす
+- v1.1α の新しい危険 N1〜N8 は `../methodology/ledger/failure-modes.md` の別の節（計測前。観測は「今回未観測」）
+
+#### 5.8.7 限界（#513 で直していないこと）
+
+- `--pipeline v1.1a` を受ける工場の入口は #511。入る前の工場では候補の群の子が `--pipeline` を受けられないので、本物の比較は #511 が入ってから流す。子の引数は #511 のあとに窓口が実物で確かめる
+- 比較は再開しない。途中で止めた比較は、別の出力先で対のファイルからやり直す（事前に固定した対の順とばらつきの読みを崩さないため、止まった本の流し直しはしない）
 
 ## 6. 回帰用の組 `regression-r1`（#450）
 

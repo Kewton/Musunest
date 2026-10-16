@@ -1295,11 +1295,14 @@ export const DECL_CHECK_LIMIT = "decl-check:limit";
 export const EXPECTED_STOPS = [...V11A_STOP_NAMES, DECL_CHECK_LIMIT];
 /** 要約の stop_reason の既知の値（run-agent.mjs の STOP_VALUES と同じ） */
 export const STOP_REASON_VALUES = ["completed", "stagnation", "limit", "unresolved", "deadline", ...FAILURE_KINDS];
-/** A5 の追加の記録（納品物の artifacts の下。#510 の V11A_ARTIFACT_NAMES）の場所と、採点が読む欄（verification の枯渇の件数・持ち越しの要件の一覧と出どころ） */
+/**
+ * A5 の追加の記録（納品物の artifacts の下。packages/factory/src/v11a/bundle-v11a.ts の V11A_ARTIFACT_NAMES）の場所と、採点が読む欄：
+ * verification-v11a.json の decl_check.exhausted（B3' の枯渇の件数。DeclCheckCounts）、carry-over.json の entries[]（要件ごと）の reasons[].origin（出どころ）
+ */
 export const V11A_RECORDS = { verification: "bundle/artifacts/verification-v11a.json", carry_over: "bundle/artifacts/carry-over.json" };
-export const V11A_EXHAUSTED_FIELD = "exhausted";
-export const CARRY_OVER_ENTRIES_FIELD = "requirements";
-/** 持ち越しの出どころ（#505 の carry-over.ts。設計書 07 §1.2） */
+export const V11A_EXHAUSTED_PATH = ["decl_check", "exhausted"];
+export const CARRY_OVER_ENTRIES_FIELD = "entries";
+/** 持ち越しの出どころ（packages/factory/src/v11a/carry-over.ts の CARRY_OVER_ORIGINS。設計書 07 §1.2） */
 export const CARRY_OVER_SOURCES = ["name-table", "semantic-check", "decl-check", "coverage"];
 
 /** 工場の段ごとの出力の上限の表（effort の 1 行）から、v1 の 10 段（表の並びのまま）と v1.1α の 4 段（無ければ null）を分ける。表が写像でなければ v1 はそのまま */
@@ -1378,7 +1381,8 @@ function groupFacts(dir, plannedIds) {
     const state = runStateOf(dir, id), runDir = join(dir, id);
     const sl = state === "executed" ? readJsonSafe(join(runDir, "summary.line.json")).value : null;
     const ver = state === "executed" ? readJsonSafe(join(runDir, V11A_RECORDS.verification)) : { status: "absent", value: null };
-    const exhausted = isObj(ver.value) && Number.isInteger(ver.value[V11A_EXHAUSTED_FIELD]) ? ver.value[V11A_EXHAUSTED_FIELD] : null;
+    const counts = isObj(ver.value) ? ver.value[V11A_EXHAUSTED_PATH[0]] : null;
+    const exhausted = isObj(counts) && Number.isInteger(counts[V11A_EXHAUSTED_PATH[1]]) ? counts[V11A_EXHAUSTED_PATH[1]] : null;
     return { id, runDir, state, summary: isObj(sl?.summary) ? sl.summary : null, exhausted };
   });
 }
@@ -1400,7 +1404,10 @@ export function reachOf(facts) {
     return [id, { reached, planned: n, label: reached === 0 ? `今回未観測（0/${n}）` : `${reached}/${n}` }];
   }));
 }
-/** 持ち越しの内訳（群ごと。v1 は null）：実行した本のうち carry-over の記録を読めた本・欠測（無い・読めない・形が違う）・持ち越しのある本の数と、出どころ 4 つの件数 */
+/**
+ * 持ち越しの内訳（群ごと。v1 は null）：実行した本のうち carry-over の記録を読めた本・欠測（無い・読めない・形が違う。記録を書く前に止まった本も欠測）・
+ * 持ち越しのある本の数と、出どころ 4 つの件数（要件ごとに、その要件の理由に現れた出どころを 1 回ずつ数える。知らない出どころは unknown）
+ */
 export function carryOverOf(facts, group) {
   if (group === "v1") return null;
   const sources = zeros([...CARRY_OVER_SOURCES, "unknown"]);
@@ -1411,7 +1418,7 @@ export function carryOverOf(facts, group) {
     if (entries === null) { missing += 1; continue; }
     observed += 1;
     if (entries.length > 0) withCarry += 1;
-    for (const e of entries) sources[knownOr(CARRY_OVER_SOURCES, e?.source)] += 1;
+    for (const e of entries) for (const o of new Set((Array.isArray(e?.reasons) ? e.reasons : [null]).map((x) => knownOr(CARRY_OVER_SOURCES, x?.origin)))) sources[o] += 1;
   }
   return { runs: facts.filter((x) => x.state === "executed").length, observed, missing, runs_with_carry_over: withCarry, sources };
 }

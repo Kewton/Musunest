@@ -2449,14 +2449,14 @@ test("#513 (c) 停止段：A5 の 5 つと decl-check:limit が別に数えら�
   assert.deepEqual(EXPECTED_STOPS, ["name-table:unmet", "semantic-check:malformed", "test-spec:unmet", "decl-check:malformed", "carry-over:unmet", "decl-check:limit"]);
   const plan11 = {
     "P1-r1": { summary: { failure: { stage: "name-table", kind: "unmet" }, stop_reason: "unmet", stages: [{ stage: "name-table" }, { stage: "name-table" }] } },
-    "P1-r2": { summary: { failure: { stage: "semantic-check", kind: "malformed" }, stop_reason: "malformed", stages: [{ stage: "name-table" }, { stage: "semantic-check" }] }, carry: { requirements: [] } },
-    "P1-r3": { summary: { failure: { stage: "test-spec", kind: "unmet" }, stop_reason: "unmet", stages: [{ stage: "name-table" }, { stage: "semantic-check" }, { stage: "test-spec" }] }, carry: { requirements: [{ source: "name-table" }, { source: "semantic-check" }] } },
+    "P1-r2": { summary: { failure: { stage: "semantic-check", kind: "malformed" }, stop_reason: "malformed", stages: [{ stage: "name-table" }, { stage: "semantic-check" }] }, carry: { entries: [], excluded_row_ids: [], remaining_requirement_ids: ["R9"] } },
+    "P1-r3": { summary: { failure: { stage: "test-spec", kind: "unmet" }, stop_reason: "unmet", stages: [{ stage: "name-table" }, { stage: "semantic-check" }, { stage: "test-spec" }] }, carry: { entries: [{ requirementId: "R1", reasons: [{ origin: "name-table", reason: "r" }] }, { requirementId: "R2", reasons: [{ origin: "semantic-check", reason: "r" }, { origin: "semantic-check", reason: "r" }] }], excluded_row_ids: [], remaining_requirement_ids: ["R9"] } },
     "P1-r4": { summary: { failure: { stage: "decl-check", kind: "malformed" }, stop_reason: "malformed", stages: [{ stage: "name-table" }, { stage: "decl-check" }] }, carry: "{" },
-    "P1-r5": { summary: { failure: { stage: "carry-over", kind: "unmet" }, stop_reason: "unmet", stages: [{ stage: "name-table" }, { stage: "carry-over" }] }, carry: { requirements: [{ source: "name-table" }, { source: "decl-check" }, { source: "coverage" }, { source: MARK513 }] } },
-    "P1-r6": { summary: { stop_reason: "limit", stages: [{ stage: "name-table" }, { stage: "decl-check" }] }, verification: { exhausted: 1 }, carry: { requirements: [{ source: "decl-check" }] } },
-    "P1-r7": { summary: { stop_reason: "limit", stages: [{ stage: "name-table" }] }, verification: { exhausted: 0 }, carry: { other: [] } },
+    "P1-r5": { summary: { failure: { stage: "carry-over", kind: "unmet" }, stop_reason: "unmet", stages: [{ stage: "name-table" }, { stage: "carry-over" }] }, carry: { entries: [{ requirementId: "R1", reasons: [{ origin: "name-table", reason: "r" }] }, { requirementId: "R2", reasons: [{ origin: "decl-check", reason: "r" }, { origin: "coverage", reason: "r" }] }, { requirementId: "R3", reasons: [{ origin: MARK513, reason: "r" }] }], excluded_row_ids: [], remaining_requirement_ids: ["R9"] } },
+    "P1-r6": { summary: { stop_reason: "limit", stages: [{ stage: "name-table" }, { stage: "decl-check" }] }, verification: { table_sha256: "t", test_suite_sha256: "s", declaration_sha256: "d", checked_declaration_sha256s: ["d"], decl_check: { exhausted: 1, malformed: 0, rejected: 2 } }, carry: { entries: [{ requirementId: "R1", reasons: [{ origin: "decl-check", reason: "r" }] }], excluded_row_ids: [], remaining_requirement_ids: ["R9"] } },
+    "P1-r7": { summary: { stop_reason: "limit", stages: [{ stage: "name-table" }] }, verification: { table_sha256: "t", test_suite_sha256: "s", declaration_sha256: "d", checked_declaration_sha256s: ["d"], decl_check: { exhausted: 0, malformed: 0, rejected: 0 } }, carry: { requirements: [] } },
     "P1-r8": { summary: { stop_reason: MARK513, stages: [{ stage: MARK513 }] } },
-    "P1-r9": { summary: { stop_reason: "completed", stages: [{ stage: "name-table" }, { stage: "bundle" }] }, carry: { requirements: [] } },
+    "P1-r9": { summary: { stop_reason: "completed", stages: [{ stage: "name-table" }, { stage: "bundle" }] }, carry: { entries: [], excluded_row_ids: [], remaining_requirement_ids: ["R9"] } },
   };
   await withOut(async (base) => {
     const f = compareFixture(base, "c", { pids: ["P1"], runs: 9, runOf: (g, id) => (g === "v1" ? { summary: { stages: [{ stage: "design" }, { stage: "write" }] } } : plan11[id]) });
@@ -2683,7 +2683,7 @@ test("#513 (g) 記録のあとに採点の定義の中身を変えた・凍結�
 
 test("#513 (h) --compare --anonymous の JSON・標準出力・標準エラーに本の ID・パス・目印が出ず、件数・率・区間・既知の値だけ", async () => {
   await withOut(async (base) => {
-    const f = compareFixture(base, `h-${MARK513}`, { runOf: (g, id) => (id === "P2-r3" && g === "v1.1a" ? { state: "unexecuted" } : { spec: id.startsWith("P1") ? PASS_A : FAIL_A, stdout: `${MARK513} ${id}\n`, summary: { stop_reason: MARK513, stages: [{ stage: "write" }] }, carry: { requirements: [{ source: MARK513, id: MARK513 }] } }) });
+    const f = compareFixture(base, `h-${MARK513}`, { runOf: (g, id) => (id === "P2-r3" && g === "v1.1a" ? { state: "unexecuted" } : { spec: id.startsWith("P1") ? PASS_A : FAIL_A, stdout: `${MARK513} ${id}\n`, summary: { stop_reason: MARK513, stages: [{ stage: "write" }] }, carry: { entries: [{ requirementId: "R1", reasons: [{ origin: MARK513, reason: "r" }] }], excluded_row_ids: [], remaining_requirement_ids: ["R9"] } }) });
     const r = scoreCompareRun(f.out, ["--anonymous", "--label", "h"]);
     assert.equal(r.status, 0, r.stderr);
     const text = readFileSync(join(f.out, "score-compare-h.anonymous.json"), "utf8");
@@ -2712,4 +2712,82 @@ test("#513 (i) 採点のコードに通信の import（http・https・net・fetc
   assert.ok(!/from\s+["'](node:)?(http|https|net|http2|dgram|tls)["']/.test(text), "通信の import がある");
   assert.ok(!/import\(\s*["'](node:)?(http|https|net|http2|dgram|tls)["']/.test(text), "通信の動的 import がある");
   assert.ok(!/\bfetch\s*\(/.test(text), "fetch を呼んでいる");
+});
+
+// ── #513 の後段：工場の dist（#505〜#510。先に pnpm build）と採点の道具の定数・記録の形・規則の台帳が一致すること
+import { CARRY_OVER_SOURCES, DECL_CHECK_LIMIT, V11A_APPROVED_LIMITS, V11A_OUTPUT_STAGES, V11A_RECORDS, V1_OUTPUT_STAGES } from "./score-agent.mjs";
+const factoryDist = join(repo, "packages/factory/dist");
+assert.ok(existsSync(join(factoryDist, "record.js")), "工場の dist が無い（pnpm build を先に）");
+const distModule = (rel) => import(pathToFileURL(join(factoryDist, rel)).href);
+
+test("#513 (a) BUILD_STAGE_IDS が工場の dist の STAGE_IDS と同じ並びで 19 個。出力の段・上限・持ち越しの出どころ・記録の場所も dist と同じ", async () => {
+  const record = await distModule("record.js"), limits = await distModule("limits.js");
+  assert.deepEqual(BUILD_STAGE_IDS, [...record.STAGE_IDS]);
+  assert.equal(record.STAGE_IDS.length, 19);
+  assert.deepEqual([...V1_OUTPUT_STAGES, ...V11A_OUTPUT_STAGES], [...limits.OUTPUT_STAGES]);
+  for (const effort of Object.keys(limits.STAGE_MAX_OUTPUT_TOKENS)) for (const k of V11A_OUTPUT_STAGES) assert.equal(limits.STAGE_MAX_OUTPUT_TOKENS[effort][k], V11A_APPROVED_LIMITS[k], `${effort} ${k}`);
+  const carry = await distModule("v11a/carry-over.js"), bundle = await distModule("v11a/bundle-v11a.js");
+  assert.deepEqual(CARRY_OVER_SOURCES, [...carry.CARRY_OVER_ORIGINS]);
+  assert.equal(V11A_RECORDS.verification, `bundle/${bundle.V11A_ARTIFACT_NAMES.verification}`);
+  assert.equal(V11A_RECORDS.carry_over, `bundle/${bundle.V11A_ARTIFACT_NAMES.carryOver}`);
+});
+
+test("#513 (c) 工場の dist が組む実物の記録（verification-v11a.json・carry-over.json）で、decl-check:limit と持ち越しの出どころを数える", async () => {
+  const { buildV11aArtifacts } = await distModule("v11a/bundle-v11a.js");
+  const artifactsOf = ({ exhausted, entries }) => buildV11aArtifacts({
+    nameTable: { table: { rows: [], ownership: [], verification: [], classification: [] }, sha256: "t" }, semanticCheck: [], judgeAdvice: [],
+    testSpec: { suite: { tests: [] }, sha256: "s", observes: new Map(), coverage: [], overturnedTestIds: [], coverageChecks: [] },
+    declCheck: { limit: 6, versions: [] }, carryOver: { entries, excludedRowIds: [], remainingRequirementIds: ["R9"] },
+    verification: { tableSha256: "t", testSuiteSha256: "s", declarationSha256: "d", checkedDeclarationSha256s: ["d"], declCheck: { exhausted, malformed: 0, rejected: 1 } },
+  });
+  const reasons = (...origins) => origins.map((origin) => ({ origin, reason: "r" }));
+  const plan = {
+    "P1-r1": { summary: { stop_reason: "limit" }, art: artifactsOf({ exhausted: 1, entries: [{ requirementId: "R1", reasons: reasons("decl-check") }] }) },
+    "P1-r2": { summary: { stop_reason: "limit" }, art: artifactsOf({ exhausted: 0, entries: [] }) },
+    "P1-r3": { summary: { stop_reason: "completed" }, art: artifactsOf({ exhausted: 0, entries: [{ requirementId: "R1", reasons: reasons("name-table", "semantic-check") }, { requirementId: "R2", reasons: reasons("coverage", "coverage") }] }) },
+  };
+  await withOut(async (base) => {
+    const f = compareFixture(base, "c-dist", { pids: ["P1"], runs: 3, runOf: (g, id) => (g === "v1" ? {} : { summary: plan[id].summary }) });
+    for (const [id, x] of Object.entries(plan)) for (const a of x.art) { const p = join(f.out, "v1.1a", id, "bundle", a.path); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, a.text); }
+    const r = scoreCompareRun(f.out);
+    assert.equal(r.status, 0, r.stderr);
+    const g = readCompare(f.out).groups["v1.1a"];
+    assert.deepEqual(g.stops.values, { [DECL_CHECK_LIMIT]: 1, limit: 1, completed: 1 });
+    assert.deepEqual(g.carry_over, { runs: 3, observed: 3, missing: 0, runs_with_carry_over: 2, sources: { "name-table": 1, "semantic-check": 1, "decl-check": 1, coverage: 1, unknown: 0 } });
+  });
+});
+
+test("#513 規則の台帳：rules.md §5 の 5 つの接頭辞の行の数と ID の集合が工場の dist の RuleDefinition[] と一致し、各行に なぜ（Issue 番号）と契約の根拠がある", async () => {
+  const text = readFileSync(join(repo, "workspace/mvp/m1/agent/methodology/ledger/rules.md"), "utf8");
+  const v11a = text.slice(text.indexOf("## 5. v1.1α の規則"));
+  assert.ok(v11a.length > 0 && text.indexOf("## 5. v1.1α の規則") > 0, "§5 が無い");
+  const rows = v11a.split("\n").filter((l) => /^\| R-(nt|sc|tsp|dc|w11)-\d+ \|/.test(l)).map((l) => l.split("|").slice(1, -1).map((c) => c.trim()));
+  const arrays = [["R-nt", "name-table", "NAME_TABLE"], ["R-sc", "semantic-check", "SEMANTIC_CHECK"], ["R-tsp", "test-spec", "TEST_SPEC"], ["R-dc", "decl-check", "DECL_CHECK"], ["R-w11", "write", "WRITE_V11A"]];
+  let total = 0;
+  for (const [prefix, file, name] of arrays) {
+    const defs = (await distModule(`v11a/stages/${file}.js`))[`${name}_RULE_DEFINITIONS`];
+    const mine = rows.filter((r) => r[0].startsWith(`${prefix}-`));
+    assert.equal(mine.length, defs.length, `${prefix} の行の数`);
+    assert.deepEqual(mine.map((r) => r[0]).sort(), defs.map((d) => d.id).sort(), `${prefix} の ID の集合`);
+    for (const r of mine) {
+      const d = defs.find((x) => x.id === r[0]);
+      assert.ok(r[2].includes(d.since.replace("Issue ", "")), `${r[0]}: なぜに Issue 番号が無い`);
+      assert.match(r[3], /^設計書 07 /, `${r[0]}: 契約の根拠が無い`);
+    }
+    total += defs.length;
+  }
+  assert.equal(rows.length, total, "5 つの接頭辞の外の行がある");
+  assert.ok(text.includes(`v1.1α（比較用の別の経路。設計書 \`../../07-architecture-v1.1a.md\`）の配列の要素は **${total}**`), "§1 の v1.1α の数が配列と合わない");
+});
+
+test("#513 停止の台帳：failure-modes.md に N1〜N8 の 8 行があり、観測の列が「今回未観測」で、主因が「未確定（設計の推定）」", () => {
+  const text = readFileSync(join(repo, "workspace/mvp/m1/agent/methodology/ledger/failure-modes.md"), "utf8");
+  const rows = text.split("\n").filter((l) => /^\| N\d+ \|/.test(l)).map((l) => l.split("|").slice(1, -1).map((c) => c.trim()));
+  assert.deepEqual(rows.map((r) => r[0]), ["N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]);
+  for (const r of rows) {
+    assert.equal(r.length, 9, `${r[0]} の列の数`);
+    assert.equal(r[6], "今回未観測（計測前）", r[0]);
+    assert.match(r[5], /^未確定（設計の推定/, r[0]);
+    assert.ok(!/R\d|P\d|role|\bf\.|\be\./.test(r.join("")), `${r[0]} に値（要件 ID・P・役割 ID）がある`);
+  }
 });
