@@ -4363,6 +4363,16 @@ async function runWithAndWithoutHooks(recorded: readonly RecordedCall[], overrid
   }
 }
 
+/** 問題の field（`designs[0].unwritable[0].constraintIds` の形）を、参照元の値からたどる。たどれなければ undefined */
+const resolveField = (root: unknown, field: string): unknown => {
+  let current: unknown = root;
+  for (const token of field.match(/[^.[\]]+/g) ?? []) {
+    if (current === null || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[token];
+  }
+  return current;
+};
+
 /** 診断の候補のファイルから、候補の並びを読む */
 const candidatesOf = (artifacts: readonly { path: string; text: string }[], path: string): readonly BundleRejectedCandidate[] =>
   (JSON.parse(diagnosticTextOf(artifacts, path)) as { candidates: readonly BundleRejectedCandidate[] }).candidates;
@@ -4503,6 +4513,53 @@ describe("②・②' が断った候補を、診断の候補のファイルに�
       expect(JSON.stringify(a.summary)).not.toContain(marker);
       expect(JSON.stringify(a.record)).not.toContain(marker);
     }
+  });
+
+  it("通常の ② で所属が正しく制約 ID だけが不正な走りで、保存した制約の問題は raw の応答を指し、field 全体をたどれ、参照元の SHA が一致する", async () => {
+    const badConstraint = {
+      ...DESIGN_OUTPUT_MAPPED,
+      designs: [
+        {
+          ...DESIGN_OUTPUT_MAPPED.designs[0],
+          unwritable: [{ part: "並べ替えは書けない", constraintIds: ["R-999"], reason: "文書に欄が無い" }],
+        },
+        DESIGN_OUTPUT_MAPPED.designs[1],
+      ],
+    };
+    const { run } = runWith([
+      structured(REQUIREMENT_LIST_OUTPUT),
+      structured(REVERSE_CHECK_OUTPUT),
+      structured(badConstraint),
+      structured(badConstraint),
+    ]);
+    const result = await run;
+
+    expect(result.stopped).toMatchObject({ stage: "design", kind: "unmet" });
+    const rows = candidatesOf(result.diagnostics, DIAGNOSTICS_REJECTED_DESIGN_FILE);
+    expect(rows.map((row) => [row.operation, row.call, row.round, row.attempt, row.kind])).toEqual([
+      [null, 1, 1, 1, "content"],
+      [null, 1, 2, 1, "content"],
+    ]);
+    for (const row of rows) {
+      // 前提：所属は正しく、問題は制約 ID の 1 件だけ
+      expect(row.problems.map((problem) => [problem.field, problem.message])).toEqual([
+        ["designs[0].unwritable[0].constraintIds", "文書に無い制約 ID である"],
+      ]);
+      expect(await sha256Hex(JSON.stringify(row.response))).toBe(row.response_sha256);
+      for (const problem of row.problems) {
+        expect(problem.reference).toBe("response");
+        // 保存した参照元の SHA は、保存した raw の応答を計算し直したものと一致する
+        expect(problem.reference_sha256).toBe(await sha256Hex(JSON.stringify(row.response)));
+        // 設計の添字だけでなく、欄の全体が保存した参照元からたどれる
+        expect(resolveField(row.response, problem.field)).toEqual(["R-999"]);
+        // 形の検査を通った対象では、同じ field はたどれない
+        expect(resolveField(row.target, problem.field)).toBeUndefined();
+      }
+    }
+    // 止め方は今までどおり
+    expect(result.summary.exit_code).toBe(1);
+    expect(result.summary.stop_reason).toBe("unmet");
+    expect(result.bundle).toBeNull();
   });
 
   it("初回の ② と 2 回の作り直しが断られる合成例で、候補の行が通し番号・operation・回・試行で段の記録の呼び出しへ一意に結び付き、SHA-256 を計算し直すと一致する", async () => {

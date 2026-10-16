@@ -1902,6 +1902,16 @@ const withoutReference = (problems: readonly { readonly reference: string }[]): 
 /** 問題の field から、設計の添字を読む（`designs[n]…`） */
 const designIndexOf = (field: string): number => Number(/^designs\[(\d+)\]/.exec(field)?.[1] ?? "-1");
 
+/** 問題の field（`designs[0].unwritable[0].constraintIds` の形）を、参照元の値からたどる。たどれなければ undefined */
+const resolveField = (root: unknown, field: string): unknown => {
+  let current: unknown = root;
+  for (const token of field.match(/[^.[\]]+/g) ?? []) {
+    if (current === null || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[token];
+  }
+  return current;
+};
+
 describe("② が断った候補を、断った時点で観測用の口へ渡す（Issue #501）", () => {
   it("中身に 1 回落ちて 2 回目で通ると、content・回 1 の通知が 1 回あり、対象・raw・問題が検査と前回の指示に等しい", async () => {
     const seen: RejectedCandidate[] = [];
@@ -1983,6 +1993,34 @@ describe("② が断った候補を、断った時点で観測用の口へ渡す
     expect(shape !== undefined && "target" in shape).toBe(false);
     // 中身の候補の raw の応答は、形の検査を通った 2 回目の応答
     expect(seen[1]?.response).toEqual(DESIGN_MISSING_R2);
+  });
+
+  it("通常の生成で所属が正しく制約 ID だけが不正なとき、制約の問題は raw の応答を指し、field 全体を参照元からたどれる", async () => {
+    const seen: RejectedCandidate[] = [];
+    const recording = createRecordingClient([structured(DESIGN_BAD_CONSTRAINT), structured(DESIGN_BAD_CONSTRAINT)]);
+    const outcome = await runDesign({
+      list: REQUIREMENT_LIST,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      onRejected: (candidate) => seen.push(candidate),
+    });
+
+    expect(outcome.ok).toBe(false);
+    expect(seen).toHaveLength(2);
+    for (const notice of seen) {
+      if (notice.kind !== "content") throw new Error("中身の通知でない");
+      // 前提：所属は正しく、問題は制約 ID の 1 件だけ
+      expect(withoutReference(notice.problems)).toEqual([
+        { field: "designs[0].unwritable[0].constraintIds", message: "文書に無い制約 ID である" },
+      ]);
+      for (const problem of notice.problems) {
+        expect(problem.reference).toBe("response");
+        // 設計の添字だけでなく、欄の全体が参照元（raw の応答）から解決できる
+        expect(resolveField(notice.response, problem.field)).toEqual(["R-999"]);
+        // 形の検査を通った対象では申告の欄名が変わるので、同じ field はたどれない（参照元を応答にする理由）
+        expect(resolveField(notice.target, problem.field)).toBeUndefined();
+      }
+    }
   });
 
   /** R-1 の採用済みの設計（作り直しの固定の文脈） */

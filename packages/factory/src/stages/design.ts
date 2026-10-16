@@ -1250,11 +1250,13 @@ export async function runDesign(input: DesignInput): Promise<StageOutcome<Design
       problems.push(...planProblems);
       references.push(...withReference(planProblems, "target"));
     }
-    // 書けない部分の根拠（制約 ID）は、旧形式では申告が無いので何も断らない（#332）。検査するのは応答だけ
-    // なので、作り直しでは参照元が raw の応答になる（通常の生成では、対象＝応答で添字の位置が同じ）。
+    // 書けない部分の根拠（制約 ID）は、旧形式では申告が無いので何も断らない（#332）。問題の欄
+    // （`designs[i].unwritable[j].constraintIds`）は応答の欄名のままで、形の検査のあとの対象では
+    // `unwritable` が文字列の並びに変わり申告が `unwritableClaims` へ移るので、通常の生成でも作り直しでも
+    // 参照元は raw の応答になる（Issue #501・レビュー指摘）。
     const constraintProblems = checkDesignConstraints(answer.value, input.documents);
     problems.push(...constraintProblems);
-    references.push(...withReference(constraintProblems, input.redo === undefined ? "target" : "response"));
+    references.push(...withReference(constraintProblems, "response"));
     if (problems.length === 0) {
       // 根拠の照合を通ったあと、保存する側の ID を正規化する（Issue #398）
       const normalized = normalizeDesignClaims(answer.value);
