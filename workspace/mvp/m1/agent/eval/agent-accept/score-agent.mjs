@@ -1422,6 +1422,15 @@ export function carryOverOf(facts, group) {
   }
   return { runs: facts.filter((x) => x.state === "executed").length, observed, missing, runs_with_carry_over: withCarry, sources };
 }
+/**
+ * 条件の署名（run-agent.mjs の conditionsFor と同じ式）：started_at・signature・scoring・post-hoc の scripts・params.budget_usd を除いた全部の SHA-256。
+ * scripts.mode が live なら scripts を末尾に入れる。比較の採点が、群の条件が書き換えられていないことを確かめるのに使う
+ */
+export function conditionsSignature(cond) {
+  const { scoring: _s, scripts, started_at: _t, signature: _g, ...generation } = cond;
+  const { budget_usd: _b, ...params } = isObj(cond.params) ? cond.params : {};
+  return sha256(JSON.stringify(scripts?.mode === "live" ? { ...generation, params, scripts } : { ...generation, params }));
+}
 /** 照合で見る採点のときの指紋の一致（どれかが false か null なら未照合） */
 export const COMPARE_FINGERPRINT_CHECKS = ["scoring_matches_conditions", "spec_engine_matches_conditions", "set_matches_conditions", "scripts_matches_conditions", "frozen_matches_conditions"];
 const COMPARE_LABELS = { complete: "完了", incomplete: "未完了", unverified: "未照合" };
@@ -1449,8 +1458,16 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
     if (!existsSync(dir)) throw refusal("群のディレクトリが無い [compare:record-missing]");
     const cond = loadConditions(dir).cond;
     if (!isObj(cond) || cond.comparison?.pairs_sha256 !== pairsSha) throw mismatch("対のファイルと群の条件");
+    // 群の同定（#513 の独立レビューの指摘 3）：ディレクトリの群と、条件の群・役割・経路、比較の記録の群ごとの条件の署名を結び付ける。
+    // 候補の群に比較元の条件を置いた・群を入れ替えた・群を複製した出力先を、対の SHA と指紋が一致しても比較として採点しない
+    if (cond.comparison?.group !== g || cond.comparison?.role !== COMPARE_ROLES[g] || cond.params?.pipeline !== g) throw mismatch("群と条件の群・役割・経路");
+    // 条件の署名を中身から計算し直し（run-agent.mjs と同じ式）、比較の記録の群ごとの署名と工場の dist の指紋に照らす（条件を書き換えた・別の群の条件に付け替えた出力先を断る）
+    const recorded = comparison.groups?.[g];
+    if (!isHex64(cond.signature) || conditionsSignature(cond) !== cond.signature) throw mismatch("群の条件の署名が中身と合わない");
+    if (!isObj(recorded) || recorded.role !== COMPARE_ROLES[g] || recorded.pipeline !== g || recorded.conditions_signature !== cond.signature || !isHex64(recorded.factory?.fingerprint) || recorded.factory.fingerprint !== cond.factory?.fingerprint) throw mismatch("群の条件と比較の記録");
     groups[g] = { dir, cond };
   }
+  if (groups.v1.cond.signature === groups["v1.1a"].cond.signature) throw mismatch("両群の条件の署名が同じ");
   const core = (p) => { if (!isObj(p)) return null; const { pipeline: _p, stage_output_limits_v11a: _l, ...rest } = p; return JSON.stringify(rest); };
   if (core(groups.v1.cond.params) === null || core(groups.v1.cond.params) !== core(groups["v1.1a"].cond.params)) throw mismatch("群の params");
   const plannedIds = pv.pairs.map((p) => `${p.pid}-r${p.r}`);

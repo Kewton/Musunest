@@ -2341,7 +2341,7 @@ test("既存の行の問数・往復は、今まで値が出ていた入力で�
 });
 
 // ── #513：v1.1α の比較の採点（--compare）・条件の版 v5・停止段と到達数・持ち越し（README の v1.1α の節）
-import { BUILD_STAGE_IDS, CONDITIONS_V5, EXPECTED_STOPS, V11A_STAGE_IDS, pairStats, stopValueOf } from "./score-agent.mjs";
+import { BUILD_STAGE_IDS, CONDITIONS_V5, EXPECTED_STOPS, V11A_STAGE_IDS, conditionsSignature, pairStats, stopValueOf } from "./score-agent.mjs";
 
 const MARK513 = "leak-marker-513";
 const APPROVED513 = { "name-table": 32768, "semantic-check": 16384, "test-spec": 32768, "decl-check": 16384 };
@@ -2363,7 +2363,7 @@ function compareFixture(base, name, { pids = ["P1", "P2"], runs = 3, profile = "
   const pairsText = JSON.stringify({ schema: "musunest-eval/compare-pairs/v1", frozen_sha256: frozenSha, groups: ["v1", "v1.1a"], runs, pairs }, null, 1) + "\n";
   writeFileSync(join(out, "pairs.json"), pairsText);
   const pairsSha = sha256(pairsText);
-  writeFileSync(join(out, "comparison.json"), JSON.stringify({ schema: "musunest-eval/compare-record/v1", pairs: { sha256: pairsSha }, profile, profile_mismatches: profile === "official" ? [] : ["deadline_min"], scoring_cost_usd: 0 }));
+  const recordGroups = {};
   const set = loadEvalSet(join(repoDir, DEFAULT_SET_PATH));
   const ids = pairs.map((p) => `${p.pid}-r${p.r}`);
   for (const g of ["v1", "v1.1a"]) {
@@ -2375,8 +2375,11 @@ function compareFixture(base, name, { pids = ["P1", "P2"], runs = 3, profile = "
       params: { ...paramsFor(ids), mode: "build-from", plan: false, effort: "high", pipeline: g, stage_output_limits_v11a: g === "v1" ? null : APPROVED513 },
       child_args: ids.map((id) => ({ id, argv: [] })),
       frozen: { path: frozenPath, sha256: frozenSha, id: "t", version: 1, origin: "frozen-plan", author: null, adopted: pids.map((p) => ({ pattern: p, plan_sha256: PSHA513(p), source_sha256: SSHA513(p), envelope_sha256: sha256(p) })), missing: [] },
-      comparison: { pairs_sha256: pairsSha, group: g, role: g === "v1" ? "baseline" : "candidate", profile }, signature: SIG, ...(groupsExtra[g] ?? {}),
+      comparison: { pairs_sha256: pairsSha, group: g, role: g === "v1" ? "baseline" : "candidate", profile }, ...(groupsExtra[g] ?? {}),
     };
+    // 条件の署名は run-agent.mjs と同じ式（conditionsSignature）。groupsExtra で signature を与えたときはその値（食い違いの負例）
+    cond.signature = groupsExtra[g]?.signature ?? conditionsSignature(cond);
+    recordGroups[g] = { role: g === "v1" ? "baseline" : "candidate", pipeline: g, factory: { fingerprint: cond.factory.fingerprint }, conditions_signature: cond.signature };
     writeFileSync(join(dir, "conditions.json"), JSON.stringify(cond));
     for (const id of ids) {
       const x = runOf(g, id);
@@ -2392,6 +2395,7 @@ function compareFixture(base, name, { pids = ["P1", "P2"], runs = 3, profile = "
       if (x.verification !== undefined) writeFileSync(join(rd, "bundle/artifacts/verification-v11a.json"), JSON.stringify(x.verification));
     }
   }
+  writeFileSync(join(out, "comparison.json"), JSON.stringify({ schema: "musunest-eval/compare-record/v1", pairs: { sha256: pairsSha }, groups: recordGroups, profile, profile_mismatches: profile === "official" ? [] : ["deadline_min"], scoring_cost_usd: 0 }));
   return { out, frozenPath, pairs };
 }
 const scoreCompareRun = (out, extra = [], repoArg = repo) => spawnSync(process.execPath, [scoreFile, repoArg, out, "--compare", ...extra], { encoding: "utf8" });
@@ -2607,6 +2611,7 @@ test("#513 (e) 計測 → 予算の停止 → 採点：上限 0.60 は n=1・片
       const out = join(base, `out-${limit}`);
       const m = spawnSync(process.execPath, [runAgentFile, cand, out, "--compare", "--baseline", baseCo, "--pairs", pairs, "--build-from", fz, "--budget-usd", limit, "--factory-budget-usd", "0.30", "--concurrency", "2"], { encoding: "utf8", env: { ...process.env, JEV_API_KEY: "", FAKE_DELAY: JSON.stringify({ "v1/P1-r1": 700 }) } });
       assert.equal(m.status, 0, m.stderr);
+      for (const g of ["v1", "v1.1a"]) { const cg = JSON.parse(readFileSync(join(out, g, "conditions.json"), "utf8")); assert.equal(conditionsSignature(cg), cg.signature, `${g}: 採点の署名の式が計測の道具と同じ`); }
       const r = scoreCompareRun(out, [], cand);
       assert.equal(r.status, 0, `${limit}: ${r.stderr}`);
       const c = readCompare(out);
@@ -2630,6 +2635,13 @@ test("#513 (f) 予定外・食い違いは compare:scoring-mismatch で断る：
       ["f-extra", {}, (out) => { mkdirSync(join(out, "v1.1a", "P5-r1"), { recursive: true }); writeFileSync(join(out, "v1.1a", "P5-r1", "summary.line.json"), sl513()); }],
       ["f-group-pairs", {}, (out) => { const p = join(out, "v1", "conditions.json"), c = JSON.parse(readFileSync(p, "utf8")); c.comparison.pairs_sha256 = "0".repeat(64); writeFileSync(p, JSON.stringify(c)); }],
       ["f-record", {}, (out) => writeFileSync(join(out, "comparison.json"), JSON.stringify({ pairs: { sha256: "0".repeat(64) }, profile: "official" }))],
+      // 群の同定（独立レビューの指摘 3）：候補の群の条件を比較元の群のもので置き換えた（両方 pipeline=v1）・群の入れ替え・群の複製・比較の記録の署名との食い違い
+      ["f-replaced", {}, (out) => cpSync(join(out, "v1", "conditions.json"), join(out, "v1.1a", "conditions.json"))],
+      ["f-swapped", {}, (out) => { const a = readFileSync(join(out, "v1", "conditions.json")), b = readFileSync(join(out, "v1.1a", "conditions.json")); writeFileSync(join(out, "v1", "conditions.json"), b); writeFileSync(join(out, "v1.1a", "conditions.json"), a); }],
+      ["f-duplicated", {}, (out) => { rmSync(join(out, "v1.1a"), { recursive: true }); cpSync(join(out, "v1"), join(out, "v1.1a"), { recursive: true }); }],
+      ["f-relabeled", {}, (out) => { const p = join(out, "v1.1a", "conditions.json"), c = JSON.parse(readFileSync(p, "utf8")); const v1 = JSON.parse(readFileSync(join(out, "v1", "conditions.json"), "utf8")); writeFileSync(p, JSON.stringify({ ...v1, comparison: { ...v1.comparison, group: "v1.1a", role: "candidate" }, params: { ...v1.params, pipeline: "v1.1a" }, signature: c.signature })); }],
+      ["f-record-signature", {}, (out) => { const p = join(out, "comparison.json"), c = JSON.parse(readFileSync(p, "utf8")); c.groups["v1.1a"].conditions_signature = "0".repeat(64); writeFileSync(p, JSON.stringify(c)); }],
+      ["f-same-signature", { groupsExtra: { v1: { signature: SIG }, "v1.1a": { signature: SIG } } }, null],
     ];
     for (const [name, opts, tweak] of cases) {
       const f = compareFixture(base, name, { runOf: all, ...opts });
