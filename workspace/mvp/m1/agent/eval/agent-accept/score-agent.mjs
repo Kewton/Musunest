@@ -37,6 +37,10 @@
 //            分母は予定した本の全部（未実行・途中・記録なしも残す）。時間と費用は { observed, missing, total, median }。分類は既知の列挙へ写し、知らない値は unknown。
 //            fingerprints.frozen・frozen_matches_conditions（組のファイルの SHA-256）。build-from で条件の frozen が無い・形が違えば断る。
 //            無害化：診断の表の止まり方の分類・段の ID・工場の verdict と、その標準出力（行の verdict を含む）も既知の一覧へ写す
+// #513 で足したもの（既存の欄の名前・意味・値は変えない。README の v1.1α の節）：
+//   条件の版 v5（params.pipeline・params.stage_output_limits_v11a・comparison）。evaluation.pipeline は v5 のときだけ出す（v1〜v4 の出力の欄は変えない）。
+//   BUILD_STAGE_IDS に v1.1α の 7 段。--compare … 対にした交互の計測（run-agent.mjs --compare）の出力先を、両群を今の関数で採点してから対で組み、
+//   原文系 PASS の対の差（候補 v1.1a − 比較元 v1）・停止段と到達数・持ち越しの内訳・照合（未照合・未完了・完了）を score-compare[-label].json に書く
 // run-agent.mjs は、ここから指紋の関数と定義ファイルの読み込みを import して条件のファイルに書く（道具は 2 本で 1 組。入口として起動したときだけ採点する）
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -52,8 +56,8 @@ export const SCORING_SYSTEMS = {
   source: "原文系：凍結した v5 の判定のまま（集計の版 v1・v2）。了承の記録は見ない",
   accepted: "了承後系：確定した仕様（plan.json。契約の検査を通ったもの）の了承の記録で読み替える。了承済みの書けない要件は申告が無くても挙げ漏れにせず、誤った除外・判定不能・未評価を別に数える。分母・分子は v2 と同じ（了承で変わった判定も誤った除外も外さない）。変更後を判定する手段が無い間、誤った了承は未評価、変更が当たった本の判定は UNEVALUATED。生成失敗・静的 NG・記録の無い本は充足 0 で分母に残す",
 };
-/** 条件のファイルの既知の schema（v1 ＝ #401、v2 ＝ #425、v3 ＝ #427、v4 ＝ #497。どれも child_args と params.patterns・params.runs を持つ） */
-export const CONDITIONS_SCHEMAS = ["musunest-factory/agent-accept-conditions/v1", "musunest-factory/agent-accept-conditions/v2", "musunest-factory/agent-accept-conditions/v3", "musunest-factory/agent-accept-conditions/v4"];
+/** 条件のファイルの既知の schema（v1 ＝ #401、v2 ＝ #425、v3 ＝ #427、v4 ＝ #497、v5 ＝ #513。どれも child_args と params.patterns・params.runs を持つ） */
+export const CONDITIONS_SCHEMAS = ["musunest-factory/agent-accept-conditions/v1", "musunest-factory/agent-accept-conditions/v2", "musunest-factory/agent-accept-conditions/v3", "musunest-factory/agent-accept-conditions/v4", "musunest-factory/agent-accept-conditions/v5"];
 /** 工場の要約の verdict の既知の値（packages/factory の Verdict）。匿名の集計はこれ以外を unknown にまとめる */
 export const FACTORY_VERDICTS = ["full", "partial", "none"];
 /** 判定の口の構成の既知の値（run-agent.mjs が記録する） */
@@ -590,8 +594,10 @@ export const PLAN_TABLE_OUTCOMES = ["confirmed", "cannot-confirm", "stopped", "u
 // 分類の既知の一覧（#498。工場の値を写して採点の道具に固定して持つ。ここに無い値は unknown に写す。工場が値を足せば、ここに足すまで unknown）
 /** Plan の段（packages/factory の PLAN_STAGE_IDS） */
 export const PLAN_STAGE_IDS = ["requirements", "catalog", "surface", "surface-check", "questions", "answers", "confirm"];
-/** 生成の段（packages/factory の record.ts。run-agent.mjs の STAGE_IDS と同じ値） */
-export const BUILD_STAGE_IDS = ["requirements", "reverse-check", "design", "test-suite", "write", "static-check", "correspondence", "run-tests", "repair", "arbitration", "judge", "bundle"];
+/** v1.1α の段（#505 が packages/factory の record.ts の STAGE_IDS の末尾に足す 7 つ。A1 の順） */
+export const V11A_STAGE_IDS = ["name-table", "semantic-check", "test-spec", "name-check", "decl-check", "coverage", "carry-over"];
+/** 生成の段（packages/factory の record.ts の STAGE_IDS。v1 の 12 段のあとに v1.1α の 7 段。run-agent.mjs はこの一覧を import する） */
+export const BUILD_STAGE_IDS = ["requirements", "reverse-check", "design", "test-suite", "write", "static-check", "correspondence", "run-tests", "repair", "arbitration", "judge", "bundle", ...V11A_STAGE_IDS];
 const STAGE_ID_LIST = [...new Set([...PLAN_STAGE_IDS, ...BUILD_STAGE_IDS])];
 /** 失敗の種類（packages/factory の record.ts の FAILURE_KINDS） */
 export const FAILURE_KINDS = ["limit", "deadline", "budget", "call-limit", "timeout", "network", "http", "balance", "malformed", "refused", "tool-arguments", "invalid-request", "unmet", "incomplete", "unknown"];
@@ -707,6 +713,10 @@ export function planBuildTables(entries, { mode = null, buildEntries = null, fro
 /** 評価の種類（v4 の params.mode。v1〜v3 は params.plan から e2e か build） */
 export const EVALUATION_MODES = ["build", "e2e", "plan-only", "build-from"];
 const CONDITIONS_V4 = CONDITIONS_SCHEMAS[3];
+/** 条件の版 v5（#513）。params.mode の読み方は v4 と同じで、params.pipeline を足した */
+export const CONDITIONS_V5 = CONDITIONS_SCHEMAS[4];
+/** params.mode と frozen を持つ版（v4 と v5） */
+const hasMode = (schema) => schema === CONDITIONS_V4 || schema === CONDITIONS_V5;
 /** 台本の当て方（post-hoc ＝ 採点で事後に当てる。live ＝ 実行中に当てた。v4 の scripts.mode） */
 export const SCRIPT_MODES = [SCRIPT_MODE, "live"];
 /** 実行中の台本の照合の状態（packages/factory の SCRIPT_MATCH_STATES）。それ以外は unknown-state */
@@ -727,10 +737,17 @@ const HEX64_RE = /^[0-9a-f]{64}$/;
 /** 文字列で、しかも 64 桁の小文字の 16 進か（正規表現に文字列でない値を渡して型を変換させない。#498 の独立レビューの指摘 3） */
 const isHex64 = (x) => typeof x === "string" && HEX64_RE.test(x);
 
-/** 評価の種類：v4 なら params.mode（既知の値か unknown）、v1〜v3 なら params.plan が真で e2e・偽で build、条件が無ければ null。build_applicable は plan-only のときだけ偽 */
+/**
+ * 評価の種類：v4・v5 なら params.mode（既知の値か unknown）、v1〜v3 なら params.plan が真で e2e・偽で build、条件が無ければ null。build_applicable は plan-only のときだけ偽。
+ * pipeline（#513）：v5 なら params.pipeline（既知の値か unknown）。v1〜v4・条件なしでは null だが、出力の既存の欄を変えないため列挙しない欄にする
+ * （score.json と匿名の口の evaluation に出るのは v5 のときだけ）
+ */
 export function evaluationOf(cond) {
-  const mode = !isObj(cond) ? null : cond.schema === CONDITIONS_V4 ? knownOr(EVALUATION_MODES, cond.params?.mode) : CONDITIONS_SCHEMAS.includes(cond.schema) ? (cond.params?.plan === true ? "e2e" : "build") : "unknown";
-  return { mode, build_applicable: mode !== "plan-only" };
+  const mode = !isObj(cond) ? null : hasMode(cond.schema) ? knownOr(EVALUATION_MODES, cond.params?.mode) : CONDITIONS_SCHEMAS.includes(cond.schema) ? (cond.params?.plan === true ? "e2e" : "build") : "unknown";
+  const out = { mode, build_applicable: mode !== "plan-only" };
+  if (isObj(cond) && cond.schema === CONDITIONS_V5) out.pipeline = knownOr(PIPELINES, cond.params?.pipeline);
+  else Object.defineProperty(out, "pipeline", { value: null, enumerable: false });
+  return out;
 }
 /** 条件の frozen の形の問題（missing ＝ 無い、invalid ＝ 形が違う、null ＝ 読める）。run-agent.mjs が書く形：path・sha256・adopted[]（pattern と 2 つの SHA）・missing[]（P の ID） */
 export function frozenProblem(frozen) {
@@ -1114,8 +1131,8 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
   if (typeof cond?.frozen?.path === "string" && cond.frozen.path !== "") { try { frozenSha = sha256(readFileSync(resolveFrom(repo, cond.frozen.path))); } catch { frozenSha = null; } }
   fingerprints.frozen = frozenSha;
   fingerprints.frozen_matches_conditions = !isObj(cond?.frozen) ? null : isHex64(cond.frozen.sha256) ? frozenSha === cond.frozen.sha256 : false;
-  // 入れ子の conditions.frozen は v4 の条件のときだけ（v1〜v3 の旧版の形を変えない）
-  if (fingerprints.conditions !== null && cond.schema === CONDITIONS_V4) fingerprints.conditions.frozen = isObj(cond.frozen) && isHex64(cond.frozen.sha256) ? cond.frozen.sha256 : null; // 入力の文字列を通さない（指摘 5）
+  // 入れ子の conditions.frozen は v4・v5 の条件のときだけ（v1〜v3 の旧版の形を変えない）
+  if (fingerprints.conditions !== null && hasMode(cond.schema)) fingerprints.conditions.frozen = isObj(cond.frozen) && isHex64(cond.frozen.sha256) ? cond.frozen.sha256 : null; // 入力の文字列を通さない（指摘 5）
   // 予定した本ごとの記録（#498。分母は予定した本の全部。条件の予定を検証できなければ採点した本）。新しいファイルの読み込みは例外を外に出さない
   const absentRead = { status: "absent", value: null };
   const factIds = planned.length > 0 ? [...planned].sort((a, b) => a.localeCompare(b, "en", { numeric: true })) : runDirs(outRoot).filter((d) => evalSet.byId.has(patternOf(d)));
@@ -1232,8 +1249,300 @@ export function anonymize(full) {
       frozen: hashOrNull(f.frozen ?? null), frozen_matches_conditions: boolOrNull(f.frozen_matches_conditions),
     },
     // 評価の種類と、Plan の集計・Build だけの集計（#498）
-    evaluation: { mode: enumOrUnknown(EVALUATION_MODES, full.evaluation?.mode ?? null), build_applicable: boolOrNull(full.evaluation?.build_applicable) },
+    evaluation: { mode: enumOrUnknown(EVALUATION_MODES, full.evaluation?.mode ?? null), build_applicable: boolOrNull(full.evaluation?.build_applicable), ...(isObj(full.evaluation) && Object.keys(full.evaluation).includes("pipeline") ? { pipeline: enumOrUnknown(PIPELINES, full.evaluation.pipeline) } : {}) },
     metrics_plan: anonymousPlanMetrics(full.metrics_plan), metrics_build: anonymousBuildMetrics(full.metrics_build),
+  };
+}
+
+// ── v1.1α の比較（#513。設計書 07 §4・D7・D17・追加判断 B。README の v1.1α の節）
+// 計測（run-agent.mjs --compare・--make-pairs）と採点（--compare）が同じ定数と純粋な関数を使う（道具は 2 本で 1 組。定数を 2 か所に書かない）。
+// 記録に写すのは既知の値・件数・SHA だけ。対のファイル・比較元のパス・子の出力の中身は写さない
+/** 工場の経路（run-agent.mjs --pipeline。packages/factory の入口の --pipeline と同じ値。#511） */
+export const PIPELINES = ["v1", "v1.1a"];
+/** 比較の群（出力先の下のディレクトリの名前で、群の経路の名前と同じ）と役割。v1 ＝ 比較元の checkout（--pipeline 無し）、v1.1a ＝ 候補の checkout（--pipeline v1.1a） */
+export const COMPARE_GROUPS = ["v1", "v1.1a"];
+export const COMPARE_ROLES = { v1: "baseline", "v1.1a": "candidate" };
+/** 対のファイルの版（--make-pairs が書き、--compare が起動の前に検査する） */
+export const PAIRS_SCHEMA = "musunest-eval/compare-pairs/v1";
+/** 比較の出力先の直下のファイル：比較の記録・比較の起動の記録（接頭辞＋時刻）・対のファイルの写し・採点の出力（接頭辞。--label で -<label> を足す） */
+export const COMPARISON_FILE = "comparison.json";
+export const COMPARISON_SCHEMA = "musunest-eval/compare-record/v1";
+export const COMPARE_RUN_PREFIX = "compare-run-";
+export const COMPARE_RUN_SCHEMA = "musunest-eval/compare-run/v1";
+export const COMPARE_PAIRS_COPY = "pairs.json";
+export const SCORE_COMPARE_FILE = "score-compare";
+export const SCORE_COMPARE_SCHEMA = "musunest-eval/score-compare/v1";
+/** 対ごとの起動の状態（両方・先行だけ・未起動） */
+export const PAIR_STATES = ["both", "first-only", "unstarted"];
+/** 比較の条件の種類：official ＝ 正式な比較の条件（OFFICIAL_COMPARE）を全部満たす、diagnostic ＝ どれかが違う（断らない。違った項目の名前を残す） */
+export const COMPARE_PROFILES = ["official", "diagnostic"];
+/** 正式な比較の条件（設計書 07 §4・D7・D17。2026-10-16 所有者の決定）。比較元の commit・凍結した組 v1 のファイル全体の SHA-256・反復・effort・締切・1 本の予算・合計の並列・全体の上限・採点 */
+export const OFFICIAL_COMPARE = {
+  baseline_commit: "2cd1586f856fb1cdecf75ef035826cbffe539e69", baseline_dirty: false,
+  frozen_sha256: "1bed5c0e8cadbc504f3378337b3ea7b8335229ebb135cc7f7760e80ddcd0c9d9", frozen_id: "dev-p1-p10-b-408b202", frozen_version: 1, frozen_adopted: 10,
+  runs: 3, effort: "high", deadline_min: 20, factory_budget_usd: 0.3, concurrency: 3, budget_usd: 5, rubric: "v5",
+};
+/** 採点は API を呼ばないので、全体の予算に数える採点の費用は 0（採点のコードに通信の import が無いことを試験で確かめる） */
+export const SCORING_COST_USD = 0;
+/** v1 の出力の 10 段（packages/factory の limits.ts の OUTPUT_STAGES の、#505 より前の並び）。条件の params.stage_output_limits にはこの段だけを写す */
+export const V1_OUTPUT_STAGES = ["surface", "questions", "requirements", "reverse-check", "design", "test-suite", "write", "correspondence", "repair", "arbitration"];
+/** v1.1α の出力の 4 段（#505 が OUTPUT_STAGES に足す）と、A1 で承認した上限（3 つの effort で同じ値） */
+export const V11A_OUTPUT_STAGES = ["name-table", "semantic-check", "test-spec", "decl-check"];
+export const V11A_APPROVED_LIMITS = { "name-table": 32768, "semantic-check": 16384, "test-spec": 32768, "decl-check": 16384 };
+/** A5（#510）の停止の名前（段:種類）と、点検の枯渇で止まった本（stop_reason が limit で、verification の記録の枯渇が 1 以上） */
+export const V11A_STOP_NAMES = ["name-table:unmet", "semantic-check:malformed", "test-spec:unmet", "decl-check:malformed", "carry-over:unmet"];
+export const DECL_CHECK_LIMIT = "decl-check:limit";
+export const EXPECTED_STOPS = [...V11A_STOP_NAMES, DECL_CHECK_LIMIT];
+/** 要約の stop_reason の既知の値（run-agent.mjs の STOP_VALUES と同じ） */
+export const STOP_REASON_VALUES = ["completed", "stagnation", "limit", "unresolved", "deadline", ...FAILURE_KINDS];
+/**
+ * A5 の追加の記録（納品物の artifacts の下。packages/factory/src/v11a/bundle-v11a.ts の V11A_ARTIFACT_NAMES）の場所と、採点が読む欄：
+ * verification-v11a.json の decl_check.exhausted（B3' の枯渇の件数。DeclCheckCounts）、carry-over.json の entries[]（要件ごと）の reasons[].origin（出どころ）
+ */
+export const V11A_RECORDS = { verification: "bundle/artifacts/verification-v11a.json", carry_over: "bundle/artifacts/carry-over.json" };
+export const V11A_EXHAUSTED_PATH = ["decl_check", "exhausted"];
+export const CARRY_OVER_ENTRIES_FIELD = "entries";
+/** 持ち越しの出どころ（packages/factory/src/v11a/carry-over.ts の CARRY_OVER_ORIGINS。設計書 07 §1.2） */
+export const CARRY_OVER_SOURCES = ["name-table", "semantic-check", "decl-check", "coverage"];
+
+/** 工場の段ごとの出力の上限の表（effort の 1 行）から、v1 の 10 段（表の並びのまま）と v1.1α の 4 段（無ければ null）を分ける。表が写像でなければ v1 はそのまま */
+export function outputLimitsOf(table) {
+  if (!isObj(table)) return { v1: table, v11a: null };
+  const v1 = Object.fromEntries(Object.entries(table).filter(([k]) => V1_OUTPUT_STAGES.includes(k)));
+  const v11a = V11A_OUTPUT_STAGES.some((k) => k in table) ? Object.fromEntries(V11A_OUTPUT_STAGES.map((k) => [k, Number.isFinite(table[k]) ? table[k] : null])) : null;
+  return { v1, v11a };
+}
+/** v1.1α の 4 段の上限が A1 の承認値と同じか */
+export const limitsApproved = (v11a) => isObj(v11a) && V11A_OUTPUT_STAGES.every((k) => v11a[k] === V11A_APPROVED_LIMITS[k]) && Object.keys(v11a).length === V11A_OUTPUT_STAGES.length;
+/** 正式な比較の条件の判定（純粋な関数）：facts の各項目が OFFICIAL_COMPARE と同じなら official、違えば diagnostic と違った項目の名前（定数の順） */
+export function compareProfile(facts) {
+  const mismatches = Object.keys(OFFICIAL_COMPARE).filter((k) => !isObj(facts) || facts[k] !== OFFICIAL_COMPARE[k]);
+  return { profile: mismatches.length === 0 ? "official" : "diagnostic", mismatches };
+}
+const PAIR_PID = /^P\d+$/;
+/** 対のファイルの中身（--make-pairs）：採用した P（組の順）× 1〜runs を、先行の群を v1 から交互に並べる */
+export function makePairs(adopted, runs, frozenSha256) {
+  const pairs = adopted.flatMap((pid) => Array.from({ length: runs }, (_, i) => ({ pid, r: i + 1 }))).map((p, i) => ({ ...p, first: COMPARE_GROUPS[i % 2] }));
+  return { schema: PAIRS_SCHEMA, frozen_sha256: frozenSha256, groups: [...COMPARE_GROUPS], runs, pairs };
+}
+/** 対のファイルの形だけの検査（版・群・runs・各対の形・重複・交互）。落ちれば符号、通れば null */
+export function pairsShapeProblem(v) {
+  if (!isObj(v) || v.schema !== PAIRS_SCHEMA || !Array.isArray(v.groups) || JSON.stringify(v.groups) !== JSON.stringify(COMPARE_GROUPS) || !Array.isArray(v.pairs)) return "compare:pairs-schema";
+  if (!isHex64(v.frozen_sha256)) return "compare:pairs-frozen";
+  if (!Number.isInteger(v.runs) || v.runs < 1) return "compare:pairs-runs";
+  if (v.pairs.length === 0) return "compare:pairs-empty";
+  if (!v.pairs.every((p) => isObj(p) && typeof p.pid === "string" && PAIR_PID.test(p.pid) && Number.isInteger(p.r) && p.r >= 1 && COMPARE_GROUPS.includes(p.first))) return "compare:pairs-shape";
+  const keys = v.pairs.map((p) => `${p.pid}-r${p.r}`);
+  if (new Set(keys).size !== keys.length) return "compare:pairs-duplicate";
+  if (v.pairs.some((p, i) => i > 0 && p.first === v.pairs[i - 1].first)) return "compare:pairs-alternation";
+  return null;
+}
+/** 対のファイルの起動の前の検査：形・凍結した組のファイルの SHA-256・採用した P × 1〜runs の全体とちょうど一致（欠落・余り） */
+export function pairsProblem(v, { frozenSha256, adopted }) {
+  const shape = pairsShapeProblem(v);
+  if (shape !== null) return shape;
+  if (v.frozen_sha256 !== frozenSha256) return "compare:pairs-frozen";
+  const keys = new Set(v.pairs.map((p) => `${p.pid}-r${p.r}`));
+  const expected = adopted.flatMap((pid) => Array.from({ length: v.runs }, (_, i) => `${pid}-r${i + 1}`));
+  if (expected.some((k) => !keys.has(k))) return "compare:pairs-missing";
+  if (keys.size !== expected.length) return "compare:pairs-extra";
+  return null;
+}
+/** 全体の予算の打ち切り（D17）：済みの額＋走行中の本の予約＋新しく起こす 1 本の予約 ≤ 上限のときだけ起こす（等しければ起こす）。小数の誤差を避けて 100 万分の 1 USD の整数で比べる */
+const microUsd = (x) => Math.round(x * 1e6);
+export const launchAllowed = ({ spentUsd, runningCount, reserveUsd, budgetUsd }) => microUsd(spentUsd) + (runningCount + 1) * microUsd(reserveUsd) <= microUsd(budgetUsd);
+
+/** 停止段の値：failure があれば段:種類（既知の段と種類。どちらかが知らない値なら unknown）、無ければ stop_reason（既知の値か unknown）。
+ * limit は A5 の verification の記録の枯渇が 1 以上なら decl-check:limit（0 か記録が無ければ今までどおり limit） */
+export function stopValueOf(summary, exhausted = null) {
+  if (!isObj(summary)) return null;
+  const f = summary.failure;
+  let v;
+  if (isObj(f)) { const st = knownOr(BUILD_STAGE_IDS, f.stage), k = knownOr(FAILURE_KINDS, f.kind); v = st === "unknown" || k === "unknown" ? "unknown" : `${st}:${k}`; }
+  else v = knownOr(STOP_REASON_VALUES, summary.stop_reason);
+  return v === "limit" && Number.isInteger(exhausted) && exhausted >= 1 ? DECL_CHECK_LIMIT : v;
+}
+/** 停止段の値として出してよい形（既知の stop_reason・既知の段:既知の種類・decl-check:limit・unknown） */
+const knownStopValue = (v) => typeof v === "string" && (v === "unknown" || STOP_REASON_VALUES.includes(v) || v === DECL_CHECK_LIMIT || (v.includes(":") && BUILD_STAGE_IDS.includes(v.split(":")[0]) && FAILURE_KINDS.includes(v.split(":").slice(1).join(":"))));
+/** 対の差の集計：差（−1・0・＋1）の件数・n・平均・区間（平均 ± 1.96 × 標本標準偏差 ÷ √n。n < 2 は null）。区間は参考（設計書 07 §4） */
+export function pairStats(diffs) {
+  const n = diffs.length;
+  const counts = { "+1": diffs.filter((d) => d === 1).length, 0: diffs.filter((d) => d === 0).length, "-1": diffs.filter((d) => d === -1).length };
+  if (n === 0) return { n, counts, mean: null, sd: null, interval: null };
+  const m = diffs.reduce((s, d) => s + d, 0) / n;
+  if (n < 2) return { n, counts, mean: round6(m), sd: null, interval: null };
+  const sd = Math.sqrt(diffs.reduce((s, d) => s + (d - m) ** 2, 0) / (n - 1)), h = (1.96 * sd) / Math.sqrt(n);
+  return { n, counts, mean: round6(m), sd: round6(sd), interval: [round6(m - h), round6(m + h)] };
+}
+const runStateOf = (dir, id) => (!existsSync(join(dir, id)) ? "unexecuted" : !existsSync(join(dir, id, "summary.line.json")) ? "incomplete" : "executed");
+/** 群の本ごとの事実（予定した本の全部。読めない記録は null） */
+function groupFacts(dir, plannedIds) {
+  return plannedIds.map((id) => {
+    const state = runStateOf(dir, id), runDir = join(dir, id);
+    const sl = state === "executed" ? readJsonSafe(join(runDir, "summary.line.json")).value : null;
+    const ver = state === "executed" ? readJsonSafe(join(runDir, V11A_RECORDS.verification)) : { status: "absent", value: null };
+    const counts = isObj(ver.value) ? ver.value[V11A_EXHAUSTED_PATH[0]] : null;
+    const exhausted = isObj(counts) && Number.isInteger(counts[V11A_EXHAUSTED_PATH[1]]) ? counts[V11A_EXHAUSTED_PATH[1]] : null;
+    return { id, runDir, state, summary: isObj(sl?.summary) ? sl.summary : null, exhausted };
+  });
+}
+/** 停止段の内訳（群ごと）：予定・未実行・途中・要約なしと、値ごとの本数。期待する値（A5 の 5 つと decl-check:limit）は 0 件も並べる */
+export function stopsOf(facts) {
+  const executed = facts.filter((f) => f.state === "executed");
+  const values = {};
+  for (const f of executed) { if (f.summary === null) continue; const v = stopValueOf(f.summary, f.exhausted); values[v] = (values[v] ?? 0) + 1; }
+  return {
+    planned: facts.length, unexecuted: facts.filter((f) => f.state === "unexecuted").length, incomplete: facts.filter((f) => f.state === "incomplete").length,
+    no_summary: executed.filter((f) => f.summary === null).length, values, expected: Object.fromEntries(EXPECTED_STOPS.map((k) => [k, values[k] ?? 0])),
+  };
+}
+/** 段ごとの到達数（段の記録に現れた本の数）と予定数。0 件は「今回未観測」と分母を併記 */
+export function reachOf(facts) {
+  const n = facts.length;
+  return Object.fromEntries(BUILD_STAGE_IDS.map((id) => {
+    const reached = facts.filter((f) => f.state === "executed" && Array.isArray(f.summary?.stages) && f.summary.stages.some((st) => st?.stage === id)).length;
+    return [id, { reached, planned: n, label: reached === 0 ? `今回未観測（0/${n}）` : `${reached}/${n}` }];
+  }));
+}
+/**
+ * 持ち越しの内訳（群ごと。v1 は null）：実行した本のうち carry-over の記録を読めた本・欠測（無い・読めない・形が違う。記録を書く前に止まった本も欠測）・
+ * 持ち越しのある本の数と、出どころ 4 つの件数（要件ごとに、その要件の理由に現れた出どころを 1 回ずつ数える。知らない出どころは unknown）
+ */
+export function carryOverOf(facts, group) {
+  if (group === "v1") return null;
+  const sources = zeros([...CARRY_OVER_SOURCES, "unknown"]);
+  let observed = 0, missing = 0, withCarry = 0;
+  for (const f of facts.filter((x) => x.state === "executed")) {
+    const r = readJsonSafe(join(f.runDir, V11A_RECORDS.carry_over));
+    const entries = r.status === "ok" && isObj(r.value) && Array.isArray(r.value[CARRY_OVER_ENTRIES_FIELD]) ? r.value[CARRY_OVER_ENTRIES_FIELD] : null;
+    if (entries === null) { missing += 1; continue; }
+    observed += 1;
+    if (entries.length > 0) withCarry += 1;
+    for (const e of entries) for (const o of new Set((Array.isArray(e?.reasons) ? e.reasons : [null]).map((x) => knownOr(CARRY_OVER_SOURCES, x?.origin)))) sources[o] += 1;
+  }
+  return { runs: facts.filter((x) => x.state === "executed").length, observed, missing, runs_with_carry_over: withCarry, sources };
+}
+/** 照合で見る採点のときの指紋の一致（どれかが false か null なら未照合） */
+export const COMPARE_FINGERPRINT_CHECKS = ["scoring_matches_conditions", "spec_engine_matches_conditions", "set_matches_conditions", "scripts_matches_conditions", "frozen_matches_conditions"];
+const COMPARE_LABELS = { complete: "完了", incomplete: "未完了", unverified: "未照合" };
+
+/**
+ * 対にした交互の計測の採点（--compare）。両群を今の関数（scoreOutput）で採点してから対を組む。
+ * 断る（予定外・食い違い。compare:scoring-mismatch）：対のファイルの写しの SHA が比較の記録と両群の条件で一致しない・群の params が pipeline と
+ * v1.1α の上限の欄以外で違う・どちらかの群に予定外の本。予定の内側の不足（予算・締切で止めた正常な計測の未実行・途中）は断らない
+ */
+export async function scoreCompare(repo, outRoot, opts = {}) {
+  const rec = readJsonSafe(join(outRoot, COMPARISON_FILE));
+  if (rec.status !== "ok" || !isObj(rec.value)) throw refusal("比較の記録が無いか読めない [compare:record-missing]");
+  const comparison = rec.value;
+  const mismatch = (what) => refusal(`比較の採点の前提が食い違う（${what}） [compare:scoring-mismatch]`);
+  let pairsBytes;
+  try { pairsBytes = readFileSync(join(outRoot, COMPARE_PAIRS_COPY)); } catch { throw mismatch("対のファイルの写しを読めない"); }
+  const pairsSha = sha256(pairsBytes);
+  let pv;
+  try { pv = JSON.parse(pairsBytes.toString("utf8")); } catch { throw mismatch("対のファイルの写しが JSON でない"); }
+  if (pairsShapeProblem(pv) !== null) throw mismatch("対のファイルの形");
+  if (comparison.pairs?.sha256 !== pairsSha) throw mismatch("対のファイルと比較の記録");
+  const groups = {};
+  for (const g of COMPARE_GROUPS) {
+    const dir = join(outRoot, g);
+    if (!existsSync(dir)) throw refusal("群のディレクトリが無い [compare:record-missing]");
+    const cond = loadConditions(dir).cond;
+    if (!isObj(cond) || cond.comparison?.pairs_sha256 !== pairsSha) throw mismatch("対のファイルと群の条件");
+    groups[g] = { dir, cond };
+  }
+  const core = (p) => { if (!isObj(p)) return null; const { pipeline: _p, stage_output_limits_v11a: _l, ...rest } = p; return JSON.stringify(rest); };
+  if (core(groups.v1.cond.params) === null || core(groups.v1.cond.params) !== core(groups["v1.1a"].cond.params)) throw mismatch("群の params");
+  const plannedIds = pv.pairs.map((p) => `${p.pid}-r${p.r}`);
+  for (const g of COMPARE_GROUPS) if (runDirs(groups[g].dir).some((d) => !plannedIds.includes(d))) throw mismatch("予定外の本");
+  for (const g of COMPARE_GROUPS) groups[g].full = await scoreOutput(repo, groups[g].dir, { ...opts, anonymous: opts.anonymous === true });
+  // 対：両方の本が終わった（要約がある）対だけ差を取る。締切・予算で止まった本も終わった本で、PASS でなければ 0
+  const passOf = (g, id) => { const row = groups[g].full.rows.find((r) => r.run === id); return row !== undefined && pass(row) ? 1 : 0; };
+  const rows = pv.pairs.map((p) => {
+    const id = `${p.pid}-r${p.r}`, states = Object.fromEntries(COMPARE_GROUPS.map((g) => [g, runStateOf(groups[g].dir, id)]));
+    const both = COMPARE_GROUPS.every((g) => states[g] === "executed");
+    const passes = both ? Object.fromEntries(COMPARE_GROUPS.map((g) => [g, passOf(g, id)])) : null;
+    return { run: id, pid: p.pid, r: p.r, first: p.first, states, pass: passes, diff: both ? passes["v1.1a"] - passes.v1 : null };
+  });
+  const finished = rows.filter((r) => r.diff !== null);
+  const oneSide = rows.filter((r) => r.diff === null && COMPARE_GROUPS.some((g) => r.states[g] === "executed")).length;
+  const byPattern = {};
+  for (const r of rows) { (byPattern[r.pid] ??= { diffs: [] }).diffs.push(r.diff); }
+  for (const v of Object.values(byPattern)) { const xs = v.diffs.filter((d) => d !== null); v.n = xs.length; v.mean = xs.length === 0 ? null : round6(xs.reduce((s, d) => s + d, 0) / xs.length); }
+  // 群ごと：率と Wilson は参考。了承後系の UNEVALUATED・FAIL と落ちた判定の鍵。停止段・到達数・持ち越し
+  const groupOut = {};
+  for (const g of COMPARE_GROUPS) {
+    const full = groups[g].full, facts = groupFacts(groups[g].dir, plannedIds), c = full.completion;
+    const inPlan = full.rows.filter((r) => plannedIds.includes(r.run)), executed = facts.filter((f) => f.state === "executed").map((f) => f.id);
+    const doneRows = inPlan.filter((r) => executed.includes(r.run));
+    const failRows = inPlan.filter((r) => r.verdict_accepted === "FAIL"), failKeys = {};
+    for (const r of failRows) for (const k of r.failed ?? []) failKeys[k] = (failKeys[k] ?? 0) + 1;
+    const verdicts = zeros([...FACTORY_VERDICTS, "unknown", "absent"]);
+    for (const f of facts.filter((x) => x.state === "executed")) verdicts[f.summary === null || f.summary.verdict === null || f.summary.verdict === undefined ? "absent" : knownOr(FACTORY_VERDICTS, f.summary.verdict)] += 1;
+    groupOut[g] = {
+      role: COMPARE_ROLES[g], pipeline: g,
+      completion: { status: c.status, label: c.label, planned: c.planned, executed: c.executed, unexecuted: c.unexecuted?.length ?? null, incomplete: c.incomplete.length, stop_code: c.latest_record?.stop_code ?? null },
+      fingerprints: Object.fromEntries(COMPARE_FINGERPRINT_CHECKS.map((k) => [k, full.fingerprints[k] ?? null])),
+      // 参考：終わった本の原文系 PASS の率（Wilson）と、予定した本を分母にした率。対の差の区間の代わりにならない
+      pass_executed: fmt(doneRows.filter(pass).length, doneRows.length), pass_planned: fmt(doneRows.filter(pass).length, plannedIds.length), factory_verdicts: verdicts,
+      accepted: { unevaluated: inPlan.filter((r) => r.verdict_accepted === VERDICT_UNEVALUATED).length, fail: failRows.length, fail_keys: failKeys },
+      stops: stopsOf(facts), reach: reachOf(facts), carry_over: carryOverOf(facts, g),
+    };
+  }
+  // 照合：(i) 未照合 ＞ (ii) 完了（全対が両方終わり・両群が完了・予算の停止の記録なし・official）＞ (iii) 未完了（diagnostic は「診断」も）
+  const unverified = COMPARE_GROUPS.flatMap((g) => [
+    ...(groups[g].full.completion.status === "unverified" ? [{ group: g, check: "reconcile", value: "unverified" }] : []),
+    ...COMPARE_FINGERPRINT_CHECKS.filter((k) => groups[g].full.fingerprints[k] !== true).map((k) => ({ group: g, check: k, value: groups[g].full.fingerprints[k] === false ? false : null })),
+  ]);
+  const runRecords = readdirSync(outRoot).filter((n) => n.startsWith(COMPARE_RUN_PREFIX) && /^\d+\.json$/.test(n.slice(COMPARE_RUN_PREFIX.length))).sort((a, b) => Number(a.slice(COMPARE_RUN_PREFIX.length, -5)) - Number(b.slice(COMPARE_RUN_PREFIX.length, -5)));
+  const lastRun = runRecords.length === 0 ? null : readJsonSafe(join(outRoot, runRecords.at(-1))).value;
+  const budgetStop = (isObj(lastRun) && lastRun.stop_code === "budget") || COMPARE_GROUPS.some((g) => groups[g].full.completion.latest_record?.stop_code === "budget");
+  const profile = COMPARE_PROFILES.includes(comparison.profile) ? comparison.profile : "unknown";
+  const reasons = [];
+  if (finished.length !== rows.length) reasons.push("両方が終わっていない対がある");
+  if (COMPARE_GROUPS.some((g) => groups[g].full.completion.status !== "complete")) reasons.push("群の照合が完了でない");
+  if (budgetStop) reasons.push("全体の予算の停止の記録がある");
+  if (profile !== "official") reasons.push("正式な比較の条件を満たさない（診断）");
+  const status = unverified.length > 0 ? "unverified" : reasons.length === 0 ? "complete" : "incomplete";
+  const label = status === "incomplete" && profile !== "official" ? `${COMPARE_LABELS.incomplete}・診断` : COMPARE_LABELS[status];
+  return {
+    schema: SCORE_COMPARE_SCHEMA, rubric: "v5", diff_direction: "候補（v1.1a）− 比較元（v1）。対ごとに原文系 PASS を 0／1 にして差を取る",
+    completion: { status, label, reference_only: status !== "complete", reasons: status === "unverified" ? [] : reasons, unverified, budget_stop: budgetStop },
+    profile, profile_mismatches: Array.isArray(comparison.profile_mismatches) ? comparison.profile_mismatches.filter((k) => k in OFFICIAL_COMPARE) : [],
+    pairs: { planned: rows.length, both: finished.length, one_side: oneSide, none: rows.length - finished.length - oneSide, ...pairStats(finished.map((r) => r.diff)), by_pattern: byPattern, rows },
+    groups: groupOut, scoring_cost_usd: SCORING_COST_USD,
+  };
+}
+/** 比較の採点の匿名の口：件数・率（数と区間の形の文字列）・区間の数・既知の値だけ。本の ID・P の ID・パス・落ちた判定の鍵は出さない */
+export function anonymizeCompare(full) {
+  const c = full.completion ?? {}, p = full.pairs ?? {};
+  const status = enumOrUnknown(Object.keys(COMPARE_LABELS), c.status ?? null);
+  const groups = {};
+  for (const g of COMPARE_GROUPS) {
+    const x = full.groups?.[g] ?? {};
+    const vals = {};
+    for (const [k, n] of Object.entries(x.stops?.values ?? {})) { const key = knownStopValue(k) ? k : "unknown"; vals[key] = (vals[key] ?? 0) + (Number.isInteger(n) ? n : 0); }
+    groups[g] = {
+      role: COMPARE_ROLES[g], pipeline: g,
+      completion: { status: enumOrUnknown(Object.keys(COMPARE_LABELS), x.completion?.status ?? null), ...intsOf(x.completion, ["planned", "executed", "unexecuted", "incomplete"]), stop_code: enumOrUnknown(STOP_CODES, x.completion?.stop_code ?? null) },
+      fingerprints: Object.fromEntries(COMPARE_FINGERPRINT_CHECKS.map((k) => [k, boolOrNull(x.fingerprints?.[k])])),
+      pass_executed: rateOrNull(x.pass_executed), pass_planned: rateOrNull(x.pass_planned), factory_verdicts: intsOf(x.factory_verdicts, [...FACTORY_VERDICTS, "unknown", "absent"]),
+      accepted: intsOf(x.accepted, ["unevaluated", "fail"]),
+      stops: { ...intsOf(x.stops, ["planned", "unexecuted", "incomplete", "no_summary"]), values: vals, expected: intsOf(x.stops?.expected, EXPECTED_STOPS) },
+      reach: Object.fromEntries(BUILD_STAGE_IDS.map((id) => { const r = x.reach?.[id]; const reached = intOrNull(r?.reached), planned = intOrNull(r?.planned); return [id, { reached, planned, label: reached === null || planned === null ? null : reached === 0 ? `今回未観測（0/${planned}）` : `${reached}/${planned}` }]; })),
+      carry_over: !isObj(x.carry_over) ? null : { ...intsOf(x.carry_over, ["runs", "observed", "missing", "runs_with_carry_over"]), sources: intsOf(x.carry_over.sources, [...CARRY_OVER_SOURCES, "unknown"]) },
+    };
+  }
+  const interval = Array.isArray(p.interval) && p.interval.length === 2 && p.interval.every((v) => numOrNull(v) !== null) ? [p.interval[0], p.interval[1]] : null;
+  return {
+    schema: SCORE_COMPARE_SCHEMA, rubric: "v5", anonymous: true, diff_direction: full.diff_direction === undefined ? null : "候補（v1.1a）− 比較元（v1）。対ごとに原文系 PASS を 0／1 にして差を取る",
+    completion: {
+      status, label: status === "incomplete" && full.profile !== "official" ? `${COMPARE_LABELS.incomplete}・診断` : COMPARE_LABELS[status] ?? "unknown", reference_only: status !== "complete", budget_stop: boolOrNull(c.budget_stop),
+      unverified: (Array.isArray(c.unverified) ? c.unverified : []).filter((u) => COMPARE_GROUPS.includes(u?.group) && (u.check === "reconcile" || COMPARE_FINGERPRINT_CHECKS.includes(u.check))).map((u) => ({ group: u.group, check: u.check, value: u.check === "reconcile" ? "unverified" : u.value === false ? false : null })),
+    },
+    profile: enumOrUnknown(COMPARE_PROFILES, full.profile ?? null), profile_mismatches: (Array.isArray(full.profile_mismatches) ? full.profile_mismatches : []).filter((k) => typeof k === "string" && k in OFFICIAL_COMPARE),
+    pairs: { ...intsOf(p, ["planned", "both", "one_side", "none", "n"]), counts: intsOf(p.counts, ["+1", "0", "-1"]), mean: numOrNull(p.mean), sd: numOrNull(p.sd), interval },
+    groups, scoring_cost_usd: SCORING_COST_USD,
   };
 }
 
@@ -1246,6 +1555,8 @@ async function main() {
   const anonymous = process.argv.includes("--anonymous");
   const setPath = process.argv.includes("--set") ? process.argv[process.argv.indexOf("--set") + 1] : undefined;
   const name = `score${label ? "-" + label : ""}`;
+  // 対にした交互の計測の採点（#513）。断り・記録の読み取りの失敗・匿名の失敗の扱いは下の通常の採点と同じ
+  if (process.argv.includes("--compare")) return mainCompare(repo, outRoot, { label, anonymous, setPath });
   // 匿名の実行では、採点から匿名化・JSON 化・結果の書き込みまでを 1 つの範囲で守る
   // （予期しない誤りの文・スタックは出力先のパス＝本・組の ID を含みうる。書き込みの失敗が外にあった：fix-427b B1）
   let full, stage = "採点できなかった";
@@ -1302,6 +1613,34 @@ async function main() {
   }
   const judge = (m) => (m === null ? "条件のファイルに無い" : m ? "条件のファイルと一致" : "条件のファイルと不一致");
   console.log(`指紋: 採点 ${fingerprints.scoring.fingerprint.slice(0, 12)}…（${judge(fingerprints.scoring_matches_conditions)}）・spec-engine ${fingerprints.spec_engine.fingerprint?.slice(0, 12) ?? "-"}…（${judge(fingerprints.spec_engine_matches_conditions)}）・組 ${set.id} v${set.version} ${set.sha256.slice(0, 12)}…（${judge(fingerprints.set_matches_conditions)}）・台本 ${fingerprints.scripts.fingerprint?.slice(0, 12) ?? "-"}…（${judge(fingerprints.scripts_matches_conditions)}）${fingerprints.frozen_matches_conditions === null ? "" : `・凍結した組 ${fingerprints.frozen?.slice(0, 12) ?? "-"}…（${judge(fingerprints.frozen_matches_conditions)}）`}`);
+}
+
+/** --compare の入口：score-compare[-label].json（匿名なら .anonymous.json だけ）と標準出力。通常の採点と同じく断りは exit 3、記録を読めなければ exit 1 */
+async function mainCompare(repo, outRoot, { label, anonymous, setPath }) {
+  const name = `${SCORE_COMPARE_FILE}${label ? "-" + label : ""}`;
+  let full, stage = "採点できなかった";
+  try {
+    full = await scoreCompare(repo, outRoot, { ...(setPath === undefined ? {} : { setPath }), anonymous });
+    if (anonymous) {
+      stage = "結果を書けなかった";
+      const text = JSON.stringify(anonymizeCompare(full), null, 1);
+      writeFileSync(join(outRoot, `${name}.anonymous.json`), text);
+      console.log(text);
+      return;
+    }
+  } catch (e) {
+    if (e?.refused === true) { console.error(`断りました: ${e.message}`); process.exit(3); }
+    if (RECORD_KINDS.includes(e?.recordUnreadable)) { console.error(`失敗しました: 記録を読めなかった [score:record-unreadable:${e.recordUnreadable}]`); process.exit(1); }
+    if (anonymous) { console.error(`失敗しました: ${stage}（${KNOWN_FS_CODES.includes(e?.code) ? `理由: ${e.code}。` : ""}匿名の実行では詳細を出さない。匿名でない実行で確かめる）`); process.exit(1); }
+    throw e;
+  }
+  writeFileSync(join(outRoot, `${name}.json`), JSON.stringify(full, null, 1));
+  const { pairs: { rows, by_pattern: byPattern, ...pairs }, ...rest } = full;
+  console.log(JSON.stringify({ ...rest, pairs }, null, 1));
+  for (const r of rows) console.log(["pair", r.run, `先行 ${r.first}`, ...COMPARE_GROUPS.map((g) => `${g} ${r.states[g]}${r.pass === null ? "" : ` PASS=${r.pass[g]}`}`), `差 ${r.diff === null ? "-" : r.diff > 0 ? `+${r.diff}` : r.diff}`].join("\t"));
+  for (const [pid, v] of Object.entries(byPattern)) console.log(["pattern", pid, `差 ${v.diffs.map((d) => (d === null ? "-" : d)).join(",")}`, `平均 ${v.mean ?? "-"}（n ${v.n}）`].join("\t"));
+  const c = full.completion;
+  console.log(`比較: ${c.label}${c.reference_only ? "（参考値。正式な比較基準にしない）" : ""}・対 ${pairs.planned}（両方 ${pairs.both}・片側 ${pairs.one_side}・未起動 ${pairs.none}）・差（${full.diff_direction}）＋1 ${pairs.counts["+1"]}・0 ${pairs.counts["0"]}・−1 ${pairs.counts["-1"]}・平均 ${pairs.mean ?? "-"}・区間 ${pairs.interval === null ? "-" : `${pairs.interval[0]}〜${pairs.interval[1]}`}（n ${pairs.n}。参考）${c.status === "unverified" ? `・未照合の項目: ${c.unverified.map((u) => `${u.group}:${u.check}=${u.value}`).join("、")}` : c.reasons.length > 0 ? `・理由: ${c.reasons.join("、")}` : ""}`);
 }
 
 const isEntry = () => { if (process.argv[1] === undefined) return false; try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } };
