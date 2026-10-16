@@ -11,7 +11,11 @@
 import { BUNDLE_MANIFEST_SCHEMA_VERSION, acceptsHeadlessSummaryWire, planDigest } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
+import { captureBaseline, type BaselineCapture, type BaselineScenarios } from "./__tests__/baseline-capture.js";
+import * as factoryModule from "./index.js";
+import { ACCEPTANCE_MATERIAL_WORDS } from "./stages/__tests__/prompt.js";
 import {
+  ARTIFACTS_DIR,
   BUNDLE_MANIFEST_FILE,
   DESIGN_FILE,
   DIAGNOSTICS_DECLARATION_FILE,
@@ -19,6 +23,8 @@ import {
   DIAGNOSTICS_LISTING_FILE,
   DIAGNOSTICS_MAPPINGS_FILE,
   DIAGNOSTICS_REJECTED_DESIGN_FILE,
+  DIAGNOSTICS_REJECTED_NAME_TABLE_FILE,
+  DIAGNOSTICS_REJECTED_TEST_SPEC_FILE,
   DIAGNOSTICS_REJECTED_TEST_SUITE_FILE,
   DIAGNOSTICS_STATIC_CHECK_FILE,
   DIAGNOSTICS_TEST_SUITE_FILE,
@@ -754,5 +760,203 @@ describe("②・②' が断った候補の診断（Issue #501）", () => {
     expect(paths).not.toContain(DIAGNOSTICS_REJECTED_DESIGN_FILE);
     expect(paths).not.toContain(DIAGNOSTICS_REJECTED_TEST_SUITE_FILE);
     expect(acceptsHeadlessSummaryWire(bundle.summary)).toBe(true);
+  });
+});
+
+// ── 追加の成果物（v1.1α A6'。07 §1.4・Issue #506）──────────────────────────────
+
+describe("追加の成果物の差し込み口（v1.1α・Issue #506）", () => {
+  const EXTRA = [
+    { path: `${ARTIFACTS_DIR}/name-table.json`, text: '{"rows":[]}\n' },
+    { path: `${ARTIFACTS_DIR}/test-spec.json`, text: '{"tests":[],"note":"追加の成果物"}\n' },
+  ];
+
+  it("省いた納品物と空の並びを渡した納品物は、成果物・manifest の本文まで同じ", async () => {
+    const plain = await assembleBundle(input());
+    const empty = await assembleBundle(input({ extraArtifacts: [] }));
+    expect(bundleFiles(empty)).toEqual(bundleFiles(plain));
+    expect(empty.manifestText).toBe(plain.manifestText);
+    expect(empty).toEqual(plain);
+  });
+
+  it("渡すと v1 の成果物の後ろに並び、manifest の files に SHA-256 と大きさで載り、bundleFiles の末尾は manifest のまま", async () => {
+    const plain = await assembleBundle(input());
+    const extended = await assembleBundle(input({ extraArtifacts: EXTRA }));
+    // v1 の成果物は同じ並び・同じ中身で先頭に残る
+    expect(extended.artifacts.slice(0, plain.artifacts.length)).toEqual(plain.artifacts);
+    expect(extended.artifacts.slice(plain.artifacts.length)).toEqual(EXTRA);
+    const files = extended.manifest.files;
+    expect(files.slice(0, plain.manifest.files.length)).toEqual(plain.manifest.files);
+    const added = files.slice(plain.manifest.files.length);
+    expect(added).toEqual(
+      await Promise.all(
+        EXTRA.map(async (artifact) => ({
+          path: artifact.path,
+          sha256: await sha256Hex(artifact.text),
+          size_bytes: byteLength(artifact.text),
+        })),
+      ),
+    );
+    const all = bundleFiles(extended);
+    expect(all.at(-1)?.path).toBe(BUNDLE_MANIFEST_FILE);
+    expect(all.at(-1)?.text).toBe(extended.manifestText);
+    // 検証の結果・要約は v1 のまま（追加の成果物は合否に効かない）
+    expect(findText(extended.artifacts, VERIFICATION_FILE)).toBe(findText(plain.artifacts, VERIFICATION_FILE));
+    expect(extended.manifest.expected_verdict).toBe(plain.manifest.expected_verdict);
+  });
+
+  it("v1 の成果物と同じ path・置き場所の外・重複した path は例外で断る（黙って上書きしない）", async () => {
+    for (const path of [VERIFICATION_FILE, DESIGN_FILE, "artifacts/app.spec.yaml"]) {
+      await expect(assembleBundle(input({ extraArtifacts: [{ path, text: "x" }] }))).rejects.toThrow(/同じ path/);
+    }
+    for (const path of [BUNDLE_MANIFEST_FILE, "diagnostics/name-table.json", "name-table.json", `${ARTIFACTS_DIR}/`]) {
+      await expect(assembleBundle(input({ extraArtifacts: [{ path, text: "x" }] }))).rejects.toThrow(/置き場所/);
+    }
+    const twice = [EXTRA[0], EXTRA[0]].filter((artifact) => artifact !== undefined);
+    await expect(assembleBundle(input({ extraArtifacts: twice }))).rejects.toThrow(/同じ path/);
+  });
+});
+
+describe("v1.1α の段の断った候補（name-table・test-spec。Issue #506）", () => {
+  const candidate = (stage: BundleRejectedCandidate["stage"], attempt: number): BundleRejectedCandidate => ({
+    stage,
+    operation: null,
+    call: 1,
+    round: 1,
+    attempt,
+    kind: "shape",
+    response: { value: `${stage}-${attempt}` },
+    response_sha256: `${stage}-sha`,
+    problems: [{ field: "rows", message: "並び（array）であること", reference: "response", reference_sha256: `${stage}-sha` }],
+  });
+  const v1Candidates = [candidate("design", 1), candidate("test-suite", 1)];
+  const COUNTS = { evaluations: 0, write_initial: 0, write_redos: 0, correspondence_generations: 0, repair_executions: 0 };
+  const base = { stopped: { stage: "name-table", kind: "unmet" }, materials: MATERIALS, evaluations: [], counts: COUNTS };
+
+  it("段 name-table・test-spec の候補は 2 つの新しいファイルに分かれ、v1 の 2 段のファイル名と中身は今までどおり", () => {
+    expect(DIAGNOSTICS_REJECTED_NAME_TABLE_FILE).toBe("diagnostics/rejected-name-table.json");
+    expect(DIAGNOSTICS_REJECTED_TEST_SPEC_FILE).toBe("diagnostics/rejected-test-spec.json");
+    const mixed = [candidate("test-spec", 1), ...v1Candidates, candidate("name-table", 1), candidate("name-table", 2)];
+    const files = buildRejectedCandidateFiles(mixed);
+    expect(files.map((artifact) => artifact.path)).toEqual([
+      DIAGNOSTICS_REJECTED_DESIGN_FILE,
+      DIAGNOSTICS_REJECTED_TEST_SUITE_FILE,
+      DIAGNOSTICS_REJECTED_NAME_TABLE_FILE,
+      DIAGNOSTICS_REJECTED_TEST_SPEC_FILE,
+    ]);
+    // v1 の 2 段のファイルは、v1 の候補だけのときと同じ中身
+    const v1Only = buildRejectedCandidateFiles(v1Candidates);
+    expect(files.slice(0, 2)).toEqual(v1Only);
+    expect(JSON.parse(findText(files, DIAGNOSTICS_REJECTED_NAME_TABLE_FILE))).toEqual({
+      candidates: [candidate("name-table", 1), candidate("name-table", 2)],
+    });
+    expect(JSON.parse(findText(files, DIAGNOSTICS_REJECTED_TEST_SPEC_FILE))).toEqual({
+      candidates: [candidate("test-spec", 1)],
+    });
+  });
+
+  it("一覧の rejected の要約は、v1 の候補の分が今までどおりで、新しい段は段の名前つきで並ぶ", () => {
+    const v1Listing = buildDiagnostics({ ...base, rejected: v1Candidates });
+    const mixedListing = buildDiagnostics({ ...base, rejected: [...v1Candidates, candidate("name-table", 1)] });
+    const rejectedOf = (artifacts: readonly { path: string; text: string }[]) =>
+      (JSON.parse(findText(artifacts, DIAGNOSTICS_LISTING_FILE)) as { rejected: readonly BundleRejectedSummary[] }).rejected;
+    expect(rejectedOf(mixedListing).slice(0, 2)).toEqual(rejectedOf(v1Listing));
+    expect(rejectedOf(mixedListing)[2]?.stage).toBe("name-table");
+    expect(summarizeRejectedCandidates(v1Candidates)).toEqual(rejectedOf(v1Listing));
+    // 新しい段の候補が無ければ、新しいファイルは作らない
+    expect(v1Listing.map((artifact) => artifact.path)).not.toContain(DIAGNOSTICS_REJECTED_NAME_TABLE_FILE);
+    expect(v1Listing.map((artifact) => artifact.path)).not.toContain(DIAGNOSTICS_REJECTED_TEST_SPEC_FILE);
+  });
+});
+
+// ── 比較元のバイトの記録（v1.1α A6'。凍結した main 2cd1586 から取った記録。Issue #506）──────────
+
+/** 記録を読むための最小の file system（Node の型に依らない。run-replay.test.ts と同じ手） */
+interface NodeFileSystem {
+  readFileSync(path: URL, encoding: "utf8"): string;
+}
+const importUntyped = (specifier: string) => import(/* @vite-ignore */ specifier);
+const fs = (await importUntyped("node:fs")) as NodeFileSystem;
+
+/** 記録の fixture（`__fixtures__/baseline-2cd1586/`）を UTF-8 の文字列として読む */
+const baselineText = (name: string): string =>
+  fs.readFileSync(new URL(`./__fixtures__/baseline-2cd1586/${name}`, import.meta.url), "utf8");
+
+interface BaselineLibrary {
+  readonly procedure: readonly string[];
+  readonly baseCommit: string;
+  readonly captures: readonly BaselineCapture[];
+}
+
+describe("比較元のバイトの記録（v1.1α・Issue #506）", () => {
+  const scenariosText = baselineText("scenarios.json");
+  const libraryText = baselineText("library.json");
+  const definitions = JSON.parse(scenariosText) as BaselineScenarios;
+  const library = JSON.parse(libraryText) as BaselineLibrary;
+
+  it("4 経路の記録があり、先頭の欄に取り方の手順と比較元の commit の完全な SHA がある", () => {
+    expect(Object.keys(library)[0]).toBe("procedure");
+    expect(library.baseCommit).toBe("2cd1586f856fb1cdecf75ef035826cbffe539e69");
+    const procedure = library.procedure.join("\n");
+    for (const step of ["checkout", "build", "道具の呼び方", "captureBaseline", library.baseCommit]) {
+      expect(procedure).toContain(step);
+    }
+    expect(definitions.scenarios.map((scenario) => scenario.name)).toEqual([
+      "complete",
+      "repair",
+      "early-stop",
+      "return-to-plan",
+    ]);
+    expect(library.captures.map((capture) => capture.name)).toEqual(definitions.scenarios.map((scenario) => scenario.name));
+    // 経路が意図どおりに分かれている（完走・修復あり・早期停止・差し戻し）
+    const [complete, repair, earlyStop, returnToPlan] = library.captures;
+    expect(complete?.judgment.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(complete?.toolResults).toEqual([]);
+    expect(repair?.toolResults.length).toBeGreaterThan(0);
+    expect(repair?.requests.some((request) => (request as { kind: string }).kind === "tools")).toBe(true);
+    expect(earlyStop?.bundle).toBeNull();
+    expect(earlyStop?.judgment.stopped).not.toBeNull();
+    expect(earlyStop?.diagnostics.length).toBeGreaterThan(0);
+    expect(returnToPlan?.judgment.returnToPlan).toBe(true);
+    for (const capture of library.captures) {
+      expect(capture.requests.length).toBeGreaterThan(0);
+      if (capture.bundle !== null) {
+        expect(capture.bindings).not.toBeNull();
+        expect(capture.bundle.files.at(-1)?.path).toBe(BUNDLE_MANIFEST_FILE);
+      }
+    }
+  });
+
+  it("任意の引数を省いた候補を同じ道具で流すと、4 経路すべてで記録と深く等しい", async () => {
+    const captures = await captureBaseline(factoryModule, definitions);
+    expect(captures).toHaveLength(library.captures.length);
+    captures.forEach((capture, index) => {
+      expect(capture, capture.name).toEqual(library.captures[index]);
+    });
+  });
+
+  it("記録と 1 バイトでも違えば落ちる（要求の 1 文字・ファイルの SHA-256 の 1 文字）", async () => {
+    const captures = await captureBaseline(factoryModule, definitions);
+    const first = captures[0];
+    if (first === undefined) throw new Error("前提が壊れた");
+    const request = first.requests[0] as { request: { input: string } };
+    const changedRequest = structuredClone(first) as BaselineCapture;
+    (changedRequest.requests[0] as { request: { input: string } }).request.input = `${request.request.input} `;
+    expect(changedRequest).not.toEqual(library.captures[0]);
+    const changedFile = structuredClone(first) as unknown as { bundle: { files: { sha256: string }[] } };
+    const file = changedFile.bundle.files[0];
+    if (file === undefined) throw new Error("前提が壊れた");
+    file.sha256 = `${file.sha256.slice(0, -1)}${file.sha256.endsWith("0") ? "1" : "0"}`;
+    expect(changedFile).not.toEqual(library.captures[0]);
+  });
+
+  it("記録と経路の定義に、鍵の値・題材の言葉が無い", () => {
+    for (const text of [scenariosText, libraryText]) {
+      for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(text).not.toContain(word);
+      expect(text).not.toMatch(/sk-[A-Za-z0-9_-]{10,}/);
+      expect(text).not.toContain("OPENAI_API_KEY");
+      expect(text).not.toContain("JEV_API_KEY");
+      expect(text).not.toMatch(/Bearer\s/);
+    }
   });
 });

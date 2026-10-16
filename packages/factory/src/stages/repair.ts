@@ -66,8 +66,10 @@ import { runTests, type RoutedFailure } from "./run-tests.js";
 import {
   checkToolArguments,
   checkToolCallBudget,
+  evaluationContextOf,
   executeRepairTool,
   REPAIR_TOOLS,
+  type DeclarationEvaluator,
   type RepairToolContext,
 } from "./tools.js";
 import { checkRoleNameMappings, utf8ByteLength } from "./write.js";
@@ -216,6 +218,19 @@ function wrapData(block: PromptData): string {
   return `<data name="${block.name}">\n${block.text}\n</data>`;
 }
 
+/**
+ * 宣言の意味の点検（v1.1α の B3'）が拒否した要件 1 件（`07-architecture-v1.1a.md` §1・§1.1）。
+ * 直す段へ**データとして**渡す（規則にしない）。要件 ID・拒否の種類・引用。
+ */
+export interface DeclarationRejection {
+  readonly requirementId: string;
+  readonly kind: string;
+  readonly quote: string;
+}
+
+/** 宣言の意味の点検の拒否を置くデータの塊の名前（入力の末尾に足す。v1.1α） */
+export const DECLARATION_REJECTIONS_DATA_NAME = "宣言の意味の点検の拒否" as const;
+
 /** ⑥ の応答（done）を、共通の口を通して取るための計画 */
 type ToolPlan = Omit<LlmToolRequest, "turns">;
 
@@ -244,6 +259,16 @@ export interface RepairStepInput {
   readonly version?: DesignContractVersion;
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
+  /**
+   * 評価口（v1.1α。§3・D11）。道具の文脈へ渡し、「試験の実行」「対応表の確認」を v1.1α の結び付けと
+   * 名前の照合で評価させる。**省けば v1 の経路のまま**。
+   */
+  readonly evaluate?: DeclarationEvaluator;
+  /**
+   * 宣言の意味の点検（B3'）の拒否（v1.1α）。**空でないときだけ**、データの塊「宣言の意味の点検の拒否」を
+   * 入力の末尾に足す（前置き・規則・道具の定義・schema は変えない）。省くか空なら v1 の要求のまま。
+   */
+  readonly declRejections?: readonly DeclarationRejection[];
 }
 
 /** ⑥ のデータ（その段に渡すと決めた文脈だけ。§2.2） */
@@ -269,6 +294,10 @@ function buildRepairData(input: RepairStepInput): readonly PromptData[] {
   }
   if (input.mappings !== undefined) {
     data.push({ name: "提出された対応", text: serializeJson(input.mappings) });
+  }
+  // 宣言の意味の点検の拒否は、空でないときだけ末尾に足す（v1.1α。省けば v1 の要求のバイト列のまま）
+  if (input.declRejections !== undefined && input.declRejections.length > 0) {
+    data.push({ name: DECLARATION_REJECTIONS_DATA_NAME, text: serializeJson(input.declRejections) });
   }
   return data;
 }
@@ -336,6 +365,7 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
     ...(input.roles === undefined ? {} : { roles: input.roles }),
     ...(input.ownership === undefined ? {} : { ownership: input.ownership }),
     ...(input.version === undefined ? {} : { version: input.version }),
+    ...(input.evaluate === undefined ? {} : { evaluate: input.evaluate }),
   };
 
   let turns: readonly LlmTurn[] = [];
@@ -510,6 +540,12 @@ export interface RerunContext {
   readonly ownership?: readonly RequirementRoleOwnership[];
   /** 設計の契約の版（呼ぶ側が明示する。Issue #418・#431） */
   readonly version?: DesignContractVersion;
+  /**
+   * 評価口（v1.1α。§3・D11）。渡せば、版の再検査は**この呼び出しの文脈**（`suite`・`list`・
+   * `correspondences`・`ownership`・`version`）で評価口を呼び、対応表の確認と試験の結果を作る。
+   * **省けば v1 の経路のまま**。
+   */
+  readonly evaluate?: DeclarationEvaluator;
 }
 
 /**
@@ -535,6 +571,21 @@ export async function checkDeclarationVersion(
       correspondence: null,
       testRun: null,
       routes: [],
+      defectMisses: [],
+      redoMisses: [],
+    };
+  }
+  // 評価口があれば、その版の宣言とこの呼び出しの文脈で評価する（v1.1α。v1 の対応の点検・bindTests は
+  // 呼ばない。③・⑤a のやり直しの落ちは作らない。§3・D11）
+  if (context.evaluate !== undefined) {
+    const evaluation = await context.evaluate(staticCheck.app, declaration, evaluationContextOf(context));
+    return {
+      declaration,
+      declarationSha256,
+      staticCheck,
+      correspondence: evaluation.correspondence,
+      testRun: evaluation.testRun,
+      routes: evaluation.testRun.routes,
       defectMisses: [],
       redoMisses: [],
     };
@@ -668,6 +719,7 @@ export async function runRepairLoop(input: RepairLoopInput): Promise<StageOutcom
       ...(input.roles === undefined ? {} : { roles: input.roles }),
       ...(input.ownership === undefined ? {} : { ownership: input.ownership }),
       ...(input.version === undefined ? {} : { version: input.version }),
+      ...(input.evaluate === undefined ? {} : { evaluate: input.evaluate }),
       documents: input.documents,
       gateway: input.gateway,
     });
@@ -695,6 +747,7 @@ export async function runRepairLoop(input: RepairLoopInput): Promise<StageOutcom
       ...(input.roles === undefined ? {} : { roles: input.roles }),
       ...(input.ownership === undefined ? {} : { ownership: input.ownership }),
       ...(input.version === undefined ? {} : { version: input.version }),
+      ...(input.evaluate === undefined ? {} : { evaluate: input.evaluate }),
     });
     const nowPassing = passingIds(withoutOverturned(), checks.testRun);
     for (const testId of settled) {
