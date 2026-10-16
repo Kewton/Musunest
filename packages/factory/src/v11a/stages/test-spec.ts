@@ -22,6 +22,7 @@ import { sha256Hex } from "@musunest/spec-engine";
 import type { CallGateway } from "../../call.js";
 import type {
   FixedTest,
+  RequirementClassification,
   RequirementNature,
   StructuralAssertionKind,
   TestOperation,
@@ -47,6 +48,7 @@ import {
   type StageOutcome,
 } from "../../stages/prompt.js";
 import {
+  NATURE_JUDGE_THRESHOLD_VERSION,
   TEST_SUITE_SCHEMA,
   checkSuitePlan,
   checkTestSuiteOutput,
@@ -483,6 +485,77 @@ function withAdoptedNatures(suite: TestSuite, adopted: ReadonlyMap<string, Requi
   return { ...suite, classifications: out };
 }
 
+/**
+ * T2 の分類の完全性：残る要件（持ち越しを除いた一覧）の全部に、分類がちょうど 1 件あること（§1.1）。
+ * 欠落・重複・一覧に無い要件 ID を固定文で落とす。共有の `reconcileNatures` は片方の分類しか無ければそれを
+ * 採るので、照合の前にここで断る（T1 の分類だけで種類を決めさせない。レビュー #521 の指摘 1）。
+ */
+export function checkClassificationCompleteness(
+  list: RequirementList,
+  classifications: readonly RequirementClassification[] | undefined,
+): readonly Problem[] {
+  const problems: Problem[] = [];
+  const known = new Set(list.requirements.map((requirement) => requirement.id));
+  const seen = new Set<string>();
+  (classifications ?? []).forEach((entry, index) => {
+    const field = `classifications[${index}].requirementId`;
+    if (!known.has(entry.requirementId)) {
+      problems.push({ field, message: "要件の一覧に無い要件 ID の分類である" });
+      return;
+    }
+    if (seen.has(entry.requirementId)) {
+      problems.push({ field, message: "同じ要件の分類が重なっている" });
+      return;
+    }
+    seen.add(entry.requirementId);
+  });
+  list.requirements.forEach((requirement, index) => {
+    if (!seen.has(requirement.id)) problems.push({ field: `requirements[${index}]`, message: "要件の分類が無い" });
+  });
+  return problems;
+}
+
+/** 一度決めた種類の判断（判断した回の T2 の分類と、judged／fallback） */
+interface DecidedNature {
+  readonly classified: RequirementNature;
+  readonly decision: NatureDecision;
+}
+
+/**
+ * 種類を採る。T1 の分類と食い違ったことのある要件は、**その回の分類が一致しても食い違っても**、一度決めた
+ * 判断（judged なら選んだ種類、fallback なら ruled）を採り、食い違いの記録も判断した回のものを返す
+ * （§1.1「前の判断を保つ」。レビュー #521 の指摘 2）。ほかの要件は共有の `reconcileNatures` に任せる。
+ */
+function adoptNatures(
+  design: DesignResult,
+  classifications: readonly RequirementClassification[] | undefined,
+  decided: ReadonlyMap<string, DecidedNature>,
+): { readonly natures: ReadonlyMap<string, RequirementNature>; readonly discrepancies: readonly NatureDiscrepancy[] } {
+  const natures = new Map(reconcileNatures(design, classifications).natures);
+  const discrepancies: NatureDiscrepancy[] = [];
+  for (const [requirementId, { classified, decision }] of decided) {
+    const entry = design.designs.find((candidate) => candidate.requirementId === requirementId);
+    if (entry?.nature === undefined) continue;
+    if (decision.kind === "judged") {
+      natures.set(requirementId, decision.nature);
+      discrepancies.push({
+        requirementId,
+        design: entry.nature,
+        classified,
+        resolved: decision.nature,
+        resolution: "judged",
+        probability: decision.probability,
+        model: decision.model,
+        thresholdVersion: NATURE_JUDGE_THRESHOLD_VERSION,
+      });
+    } else {
+      natures.set(requirementId, "ruled");
+      discrepancies.push({ requirementId, design: entry.nature, classified, resolved: "ruled", resolution: "fallback" });
+    }
+  }
+  return { natures, discrepancies };
+}
+
 /** 組の試験だけに絞った、試験 ID → 観測する性質 */
 function observesOf(tests: readonly FixedTest[], observes: ReadonlyMap<string, TestObserves>): ReadonlyMap<string, TestObserves> {
   const out = new Map<string, TestObserves>();
@@ -495,7 +568,8 @@ function observesOf(tests: readonly FixedTest[], observes: ReadonlyMap<string, T
 
 /**
  * T2 を回す。形は `callStructuredChecked` が 1 回だけやり直し、コードの検査に合わなければ**1 回だけ作り直させる**。
- * 2 回で落ちれば `unmet`。同じ要件の種類は 1 回の生成の中で 1 度だけ判定に聞く（前の判断を保つ）。
+ * 2 回で落ちれば `unmet`。分類が残る要件にちょうど 1 件ずつでなければ、照合の前に中身の落ちとして作り直させる。
+ * 同じ要件の種類は 1 回の生成の中で 1 度だけ判定に聞き、決めた判断を以後の回でも保つ（その回に一致しても）。
  *
  * 前提（満たさなければ例外。LLM を呼ばない）：残る要件が 1 つ以上ある（全件持ち越しなら T2 を呼ばない。D15）・
  * 持ち越しを除いた行の参照が残る行を指していない（A1 の `pruneForCarryOver`）・残る要件の全部に表の確かめ方と
@@ -520,7 +594,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
 
   let previous: readonly Problem[] = [];
   let previousTests: readonly unknown[] | undefined;
-  const decisions = new Map<string, NatureDecision>();
+  const decided = new Map<string, DecidedNature>();
   const droppedAll: DroppedNonstructuralTest[] = [];
   const onRejected = input.onRejected;
   for (let round = 1; round <= TEST_SPEC_ROUNDS; round += 1) {
@@ -548,49 +622,56 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
     if (!answer.ok) return answer;
     const generated = answer.value.suite;
 
-    // 食い違った要件のうち、まだ決めていないものを 1 回の呼び出しにまとめて判定に聞く（v1 の ②' と同じ）
-    if (input.judge !== undefined) {
-      const pending = reconcileNatures(design, generated.classifications)
-        .discrepancies.map((entry) => entry.requirementId)
-        .filter((requirementId) => !decisions.has(requirementId));
-      if (pending.length > 0) {
-        const verdicts = await decideDiscrepantNatures({ judge: input.judge, list, requirementIds: pending });
-        for (const [requirementId, decision] of verdicts) decisions.set(requirementId, decision);
-      }
-    }
-    const reconciled = reconcileNatures(design, generated.classifications, decisions);
-
     // 構造で確かめる要件の、構造の検査でない試験を、照合と固定の前に外す（v1 の ②' と同じ）
     const dropResult = dropNonstructuralTests(design, generated, round);
     if (dropResult.dropped.length > 0) {
       for (const entry of dropResult.dropped) droppedAll.push(entry);
       input.onDropped?.(dropResult.dropped);
     }
-    const adopted = new Map<string, RequirementNature>();
-    for (const entry of reconciled.discrepancies) adopted.set(entry.requirementId, entry.resolved);
-    const suite = withAdoptedNatures(dropResult.suite, adopted);
-    const observes = observesOf(suite.tests, answer.value.observes);
 
-    // v1 の検査（新契約）＋評価可能性。持ち越しの要件の試験は、除いた一覧で「一覧に無い要件 ID」として落ちる
-    const problems: readonly Problem[] = [
-      ...checkSuitePlan(list, suite, design, reconciled.natures),
-      ...checkEvaluability(suite, observes),
-    ];
-    if (problems.length === 0) {
-      const coverage = coverageUnitsOf({ suite, observes, natures: reconciled.natures });
-      return {
-        ok: true,
-        value: {
-          suite,
-          observes,
-          coverage,
-          sha256: await testSuiteSha256(suite, observes),
-          rounds: round,
-          natures: reconciled.natures,
-          discrepancies: reconciled.discrepancies,
-          dropped: droppedAll,
-        },
-      };
+    // 分類の完全性を照合の前に確かめる。欠ければ判定に聞かず、中身の落ちとして作り直させる
+    const classificationProblems = checkClassificationCompleteness(list, generated.classifications);
+    let suite: TestSuite = dropResult.suite;
+    let observes = observesOf(suite.tests, answer.value.observes);
+    let problems: readonly Problem[] = classificationProblems;
+    if (classificationProblems.length === 0) {
+      // 食い違った要件のうち、まだ決めていないものを 1 回の呼び出しにまとめて判定に聞く（判定の口が無ければ fallback）
+      const fresh = reconcileNatures(design, generated.classifications).discrepancies.filter(
+        (entry) => !decided.has(entry.requirementId),
+      );
+      if (fresh.length > 0) {
+        const verdicts =
+          input.judge === undefined
+            ? new Map<string, NatureDecision>()
+            : await decideDiscrepantNatures({ judge: input.judge, list, requirementIds: fresh.map((entry) => entry.requirementId) });
+        for (const entry of fresh) {
+          decided.set(entry.requirementId, { classified: entry.classified, decision: verdicts.get(entry.requirementId) ?? { kind: "fallback" } });
+        }
+      }
+      const reconciled = adoptNatures(design, generated.classifications, decided);
+      const adopted = new Map<string, RequirementNature>();
+      for (const entry of reconciled.discrepancies) adopted.set(entry.requirementId, entry.resolved);
+      suite = withAdoptedNatures(dropResult.suite, adopted);
+      observes = observesOf(suite.tests, answer.value.observes);
+
+      // v1 の検査（新契約）＋評価可能性。持ち越しの要件の試験は、除いた一覧で「一覧に無い要件 ID」として落ちる
+      problems = [...checkSuitePlan(list, suite, design, reconciled.natures), ...checkEvaluability(suite, observes)];
+      if (problems.length === 0) {
+        const coverage = coverageUnitsOf({ suite, observes, natures: reconciled.natures });
+        return {
+          ok: true,
+          value: {
+            suite,
+            observes,
+            coverage,
+            sha256: await testSuiteSha256(suite, observes),
+            rounds: round,
+            natures: reconciled.natures,
+            discrepancies: reconciled.discrepancies,
+            dropped: droppedAll,
+          },
+        };
+      }
     }
     onRejected?.({
       kind: "content",

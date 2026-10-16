@@ -40,6 +40,7 @@ import {
   TEST_SPEC_RULE_DEFINITIONS,
   TEST_SPEC_SCHEMA,
   TEST_SPEC_SCHEMA_NAME,
+  checkClassificationCompleteness,
   checkEvaluability,
   runTestSpec,
   testSuiteSha256,
@@ -799,6 +800,145 @@ describe("種類の分類と照合（T1 の分類と T2 の分類の食い違い
     expect(outcome.value.discrepancies).toEqual([
       expect.objectContaining({ requirementId: "R1", resolved: "existence-only", resolution: "judged" }),
     ]);
+  });
+});
+
+// ── 分類の完全性（照合の前。レビュー #521 の指摘 1）────────────────────────────
+
+describe("分類の完全性（残る要件にちょうど 1 件。照合の前に断る。§1.1）", () => {
+  const complete = () => [...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()];
+  const missingAll = [0, 1, 2, 3].map((index) => ({ field: `requirements[${index}]`, message: "要件の分類が無い" }));
+
+  it("関数：完全なら問題なし。空配列・未定義は残る要件の全部が欠落", async () => {
+    const table = fixtureTable();
+    const list = pruneForCarryOver(fixtureList(), table, await carryOverFor(table)).list;
+    const ids = list.requirements.map((requirement) => requirement.id);
+    const full = ids.map((requirementId) => ({ requirementId, nature: "ruled" as const }));
+    expect(checkClassificationCompleteness(list, full)).toEqual([]);
+    const allMissing = ids.map((_, index) => ({ field: `requirements[${index}]`, message: "要件の分類が無い" }));
+    expect(checkClassificationCompleteness(list, [])).toEqual(allMissing);
+    expect(checkClassificationCompleteness(list, undefined)).toEqual(allMissing);
+  });
+
+  it("classifications が空配列なら、T1 の分類だけで固定せず 2 回とも落ちて unmet（J2 を呼ばない）", async () => {
+    const recorded = recordingJudge(createFakeJudge({}));
+    const empty = response(complete(), []);
+    const { outcome, recording } = await run([empty, empty], { judge: recorded.judge });
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(outcome.failure.attempts).toBe(TEST_SPEC_ROUNDS);
+    expect(recording.structured).toHaveLength(2);
+    expect(outcome.failure.problems).toEqual(missingAll);
+    expect(recorded.requests).toHaveLength(0);
+  });
+
+  it("判定の口が無くても、空配列は 2 回とも落ちて unmet", async () => {
+    const empty = response(complete(), []);
+    const { outcome } = await run([empty, empty]);
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(outcome.failure.problems).toEqual(missingAll);
+  });
+
+  it("1 回目が空配列でも、2 回目のデータに前回の作り直しの指示があり、完全な分類なら通る", async () => {
+    const { outcome, recording } = await run([response(complete(), []), passing()]);
+    if (!outcome.ok) throw new Error("通らない");
+    expect(outcome.value.rounds).toBe(2);
+    const second = recording.structured[1]?.input ?? "";
+    expect(dataBlockOf(second, TEST_SPEC_RETRY_DATA_NAMES[1])).toEqual(missingAll);
+  });
+
+  it("1 件欠落（R1 の分類が無い）は落ちる", async () => {
+    const missing = response(
+      complete(),
+      T1_NATURES.filter((entry) => entry.requirementId !== "R1"),
+    );
+    const { outcome } = await run([missing, missing]);
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(outcome.failure.problems).toEqual([{ field: "requirements[0]", message: "要件の分類が無い" }]);
+  });
+
+  it("重複（R1 が 2 件。値が違っても同じでも）は落ちる", async () => {
+    for (const nature of ["ruled", "existence-only"] as const) {
+      const duplicated = response(complete(), [...T1_NATURES, { requirementId: "R1", nature }]);
+      const { outcome } = await run([duplicated, duplicated]);
+      if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+      expect(outcome.failure.problems).toEqual([
+        { field: "classifications[4].requirementId", message: "同じ要件の分類が重なっている" },
+      ]);
+    }
+  });
+
+  it("対象外の要件 ID（持ち越しの R5・一覧に無い ID）は落ちる", async () => {
+    for (const requirementId of ["R5", "R9"]) {
+      const outside = response(complete(), [...T1_NATURES, { requirementId, nature: "ruled" }]);
+      const { outcome } = await run([outside, outside]);
+      if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+      expect(outcome.failure.problems).toEqual([
+        { field: "classifications[4].requirementId", message: "要件の一覧に無い要件 ID の分類である" },
+      ]);
+    }
+  });
+});
+
+// ── 判断の保持（再試行の回で一致しても。レビュー #521 の指摘 2）────────────────────
+
+describe("J2 の判断を再試行の回でも保つ（その回に T1 と T2 が一致しても。§1.1）", () => {
+  /** T1 の R1 を existence-only にした表 */
+  const tableR1Existence = (): NameTable => {
+    const base = fixtureTable();
+    return {
+      ...base,
+      classification: base.classification.map((entry) =>
+        entry.requirementId === "R1" ? { requirementId: "R1", nature: "existence-only" as const } : entry,
+      ),
+    };
+  };
+  const agreeing = T1_NATURES.map((entry) =>
+    entry.requirementId === "R1" ? { requirementId: "R1", nature: "existence-only" as const } : entry,
+  );
+  // 1 回目：T2 の R1 は ruled（T1 と食い違う）。別の要件（R3）の境界が欠けて作り直しになる
+  const round1 = () => response([...r1Validate(), ...r2Structure(), ...r3Action(["normal", "abnormal"]), ...r4Compute()]);
+
+  it("T1=existence-only・1 回目 T2=ruled・J2=ruled → 2 回目 T2=existence-only でも R1 は ruled（正常 1 本は網羅で落ちる）", async () => {
+    const recorded = recordingJudge(createFakeJudge({ [natureQuestionName("R1")]: choice("ruled", 0.99) }));
+    const round2 = response([...r1Existence(), ...r2Structure(), ...r3Action(), ...r4Compute()], agreeing);
+    const { outcome } = await run([round1(), round2], { table: tableR1Existence(), judge: recorded.judge });
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(outcome.failure.problems).toContainEqual({ field: "requirements[0]", message: "abnormal の試験が無い" });
+    expect(outcome.failure.problems).toContainEqual({ field: "requirements[0]", message: "boundary の試験が無い" });
+    expect(recorded.requests).toHaveLength(1);
+  });
+
+  it("判定の口が無い fallback（ruled）も、2 回目に一致しても保つ", async () => {
+    const round2 = response([...r1Existence(), ...r2Structure(), ...r3Action(), ...r4Compute()], agreeing);
+    const { outcome } = await run([round1(), round2], { table: tableR1Existence() });
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(outcome.failure.problems).toContainEqual({ field: "requirements[0]", message: "abnormal の試験が無い" });
+  });
+
+  it("2 回目に一致して通るときも、採った種類・組の分類・網羅の単位・食い違いの記録が判断どおり", async () => {
+    const recorded = recordingJudge(createFakeJudge({ [natureQuestionName("R1")]: choice("ruled", 0.99) }));
+    const round2 = response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()], agreeing);
+    const { outcome } = await run([round1(), round2], { table: tableR1Existence(), judge: recorded.judge });
+    if (!outcome.ok) throw new Error("通らない");
+    expect(outcome.value.rounds).toBe(2);
+    expect(recorded.requests).toHaveLength(1);
+    expect(outcome.value.natures.get("R1")).toBe("ruled");
+    expect(outcome.value.suite.classifications?.filter((entry) => entry.requirementId === "R1")).toEqual([
+      { requirementId: "R1", nature: "ruled" },
+    ]);
+    expect(outcome.value.discrepancies).toEqual([
+      expect.objectContaining({
+        requirementId: "R1",
+        design: "existence-only",
+        classified: "ruled",
+        resolved: "ruled",
+        resolution: "judged",
+        probability: 0.99,
+      }),
+    ]);
+    expect(outcome.value.coverage).toEqual(
+      coverageUnitsOf({ suite: outcome.value.suite, observes: outcome.value.observes, natures: outcome.value.natures }),
+    );
   });
 });
 

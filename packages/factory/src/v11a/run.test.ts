@@ -39,6 +39,7 @@ import { NAME_TABLE_PREVIOUS_DATA_NAMES, NAME_TABLE_SCHEMA_NAME } from "./stages
 import * as semanticCheckStage from "./stages/semantic-check.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
 import { TEST_SPEC_SCHEMA_NAME, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
+import { natureQuestionName } from "../stages/test-suite.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -1082,5 +1083,87 @@ describe("持ち越しの関数（A1）が断ったとき", () => {
     expect(result.stopped?.problems?.[0]?.field).toBe("carry-over");
     expect(result.stopped?.problems?.[0]?.message).toMatch(/^持ち越し：/);
     expect(result.outcome.verdict).toBe("none");
+  });
+});
+
+// ── (o) T2 の分類の完全性と J2 の判断の保持（レビュー #521 の指摘 1・2）─────────────────
+
+describe("(o) T2 の分類の完全性と J2 の判断の保持：どちらも full にならない", () => {
+  const ahead = (table: NameTable = TABLE): RecordedCall[] => [structured(draftOf(LIST, table)), structured(acceptAll())];
+
+  it("分類が空配列・1 件欠落・重複・対象外の T2 が 2 回 → 段 test-spec・unmet で止まり、full にならない", async () => {
+    const cases: readonly (readonly NatureRow[])[] = [
+      [],
+      NATURES.filter((entry) => entry.requirementId !== "R1"),
+      [...NATURES, { requirementId: "R1", nature: "ruled" }],
+      [...NATURES, { requirementId: "R9", nature: "ruled" }],
+    ];
+    for (const classifications of cases) {
+      const t2 = { classifications, tests: BASE_TESTS() };
+      const { result, recording } = await runScenario([...ahead(), structured(t2), structured(t2)]);
+      expect(result.stopped?.stage).toBe("test-spec");
+      expect(result.stopped?.kind).toBe("unmet");
+      expect(result.outcome.verdict).not.toBe("full");
+      expect(result.summary.verdict).not.toBe("full");
+      expect(schemaNames(recording.structured)).not.toContain("declaration-v11a");
+    }
+  });
+
+  it("対照：1 回目が空配列でも、2 回目に完全な分類なら full", async () => {
+    const { result } = await runScenario([
+      ...ahead(),
+      structured({ classifications: [], tests: BASE_TESTS() }),
+      structured(t2Response()),
+      structured({ declaration: RUN_YAML }),
+      structured(acceptAll()),
+    ]);
+    expect(result.outcome.verdict).toBe("full");
+  });
+
+  /** T1 の R1 を existence-only にした表 */
+  const TABLE_R1_EXISTENCE: NameTable = {
+    ...TABLE,
+    classification: TABLE.classification.map((entry) =>
+      entry.requirementId === "R1" ? { requirementId: "R1", nature: "existence-only" as const } : entry,
+    ),
+  };
+  const agreeing = NATURES.map((entry) =>
+    entry.requirementId === "R1" ? { requirementId: "R1", nature: "existence-only" as const } : entry,
+  );
+  // 1 回目：T2 の R1 は ruled（T1 と食い違い J2 が ruled）。別の要件（R3）の境界が欠けて作り直しになる
+  const round1 = () => ({
+    classifications: NATURES,
+    tests: [...r1Tests(), ...r2Tests(), ...r3Tests().filter((test) => test["kind"] !== "boundary"), ...r4Tests()],
+  });
+  const ruledJudge = () =>
+    createFakeJudge({
+      [natureQuestionName("R1")]: { kind: "choice", choice: "ruled", probabilities: undefined, probability: 0.99, confidence: undefined },
+    });
+
+  it("T1=existence-only・1 回目 T2=ruled・J2=ruled → 2 回目 T2=existence-only・R1 は正常 1 本：段 test-spec で止まり full にならない", async () => {
+    const round2 = {
+      classifications: agreeing,
+      tests: [...r1Tests().filter((test) => test["kind"] === "normal"), ...r2Tests(), ...r3Tests(), ...r4Tests()],
+    };
+    const { result, recording } = await runScenario([...ahead(TABLE_R1_EXISTENCE), structured(round1()), structured(round2)], {
+      judge: ruledJudge(),
+    });
+    expect(result.stopped?.stage).toBe("test-spec");
+    expect(result.stopped?.kind).toBe("unmet");
+    expect(result.stopped?.problems).toContainEqual({ field: "requirements[0]", message: "abnormal の試験が無い" });
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(schemaNames(recording.structured)).not.toContain("declaration-v11a");
+  });
+
+  it("対照：2 回目に R1 の正常・異常・境界がそろえば full で、要約の食い違いに判断（judged・ruled）が残る", async () => {
+    const round2 = { classifications: agreeing, tests: BASE_TESTS() };
+    const { result } = await runScenario(
+      [...ahead(TABLE_R1_EXISTENCE), structured(round1()), structured(round2), structured({ declaration: RUN_YAML }), structured(acceptAll())],
+      { judge: ruledJudge() },
+    );
+    expect(result.outcome.verdict).toBe("full");
+    expect(result.summary.nature_discrepancies).toEqual([
+      expect.objectContaining({ requirement_id: "R1", design: "existence-only", classified: "ruled", resolved: "ruled", resolution: "judged" }),
+    ]);
   });
 });
