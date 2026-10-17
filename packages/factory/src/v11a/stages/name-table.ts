@@ -62,6 +62,7 @@ import {
   requirementCopy,
   type NameTable,
 } from "../names.js";
+import type { LedgerView } from "../../v12/ledger.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 
 /** T1 の JSON Schema の名前 */
@@ -150,6 +151,28 @@ export const NAME_TABLE_RULE_DEFINITIONS: readonly RuleDefinition[] = [
 
 /** T1 に足す規則（定義の `text` から組む） */
 export const NAME_TABLE_RULES: readonly string[] = ruleTexts(NAME_TABLE_RULE_DEFINITIONS);
+
+/** 性質の台帳の文を差し込む規則（R-nt-08 の既定値の文の位置。Issue #547） */
+export const NAME_TABLE_LEDGER_RULE_ID = "R-nt-08";
+/** R-nt-08 の、台帳の文の前（台帳の外の確かめ方の種類の文） */
+const NAME_TABLE_LEDGER_RULE_HEAD =
+  "verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。構造で確かめるなら kind を structural にし、reason に理由、checks に構造の検査を並べ、検査ごとに合う種類の行を所属させる。宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に根拠にした文書の制約 ID（文書の制約 ID の一覧にあるものだけ）を書く。";
+/** R-nt-08 の、台帳の文の後ろ */
+const NAME_TABLE_LEDGER_RULE_TAIL = "使わない欄は null か空の並びにする。";
+
+/**
+ * T1 の規則の定義（旗 on なら台帳から組む。Issue #547）。省けば今の定数をそのまま返す。渡せば R-nt-08 の文を、台帳の外の
+ * 種類の文 → 台帳の行の T1 の文（台帳の順）→ 末尾の文で組み直す（ID・why・since は変えない）。手 2a では off の定数と
+ * バイト列で同じになる。
+ */
+export function nameTableRuleDefinitionsOf(ledger?: LedgerView): readonly RuleDefinition[] {
+  if (ledger === undefined) return NAME_TABLE_RULE_DEFINITIONS;
+  return NAME_TABLE_RULE_DEFINITIONS.map((definition) =>
+    definition.id === NAME_TABLE_LEDGER_RULE_ID
+      ? { ...definition, text: `${NAME_TABLE_LEDGER_RULE_HEAD}${ledger.t1RuleTexts.join("")}${NAME_TABLE_LEDGER_RULE_TAIL}` }
+      : definition,
+  );
+}
 
 const nullable = (values: readonly string[]) => ({ type: ["string", "null"], enum: [...values, null] });
 
@@ -248,6 +271,38 @@ export const NAME_TABLE_SCHEMA = {
   },
 } as const;
 
+/**
+ * T1 の JSON Schema（旗 on なら確かめ方の kind の enum を台帳の種類の並びにする。Issue #547）。省けば今の定数を返す。
+ * 欄の並びは変えない（off の定数とバイト列で同じ JSON になる）。
+ */
+export function nameTableSchemaOf(ledger?: LedgerView): typeof NAME_TABLE_SCHEMA {
+  if (ledger === undefined) return NAME_TABLE_SCHEMA;
+  const requirements = NAME_TABLE_SCHEMA.properties.requirements;
+  const verification = requirements.items.properties.verification;
+  return {
+    ...NAME_TABLE_SCHEMA,
+    properties: {
+      ...NAME_TABLE_SCHEMA.properties,
+      requirements: {
+        ...requirements,
+        items: {
+          ...requirements.items,
+          properties: {
+            ...requirements.items.properties,
+            verification: {
+              ...verification,
+              properties: {
+                ...verification.properties,
+                kind: { ...verification.properties.kind, enum: [...ledger.verificationKinds] },
+              },
+            },
+          },
+        },
+      },
+    },
+  } as unknown as typeof NAME_TABLE_SCHEMA;
+}
+
 /** T1'' の拒否 1 件（A1 の `SemanticJudgment` の拒否の側） */
 export type SemanticRejection = Extract<SemanticJudgment, { readonly verdict: "reject" }>;
 
@@ -275,6 +330,8 @@ export interface NameTableInput {
    * 何もしない**——口の有無で、送る要求・検査・やり直しの回数・結果は変わらない。
    */
   readonly onRejected?: (candidate: RejectedCandidate) => void;
+  /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけが渡す。省けば今の定数と関数。Issue #547） */
+  readonly ledger?: LedgerView;
 }
 
 /** T1 の結果（表・表の SHA-256・形の検査に掛けた raw の応答） */
@@ -438,12 +495,13 @@ export async function runNameTable(input: NameTableInput): Promise<NameTableOutc
     return { ok: false, failure: { kind: "unmet", attempts: 0, problems: listProblems } };
   }
   const round = input.previous === undefined ? 1 : 2;
+  const ledger = input.ledger;
   const request = buildStructuredRequest({
-    rules: NAME_TABLE_RULES,
+    rules: ledger === undefined ? NAME_TABLE_RULES : ruleTexts(nameTableRuleDefinitionsOf(ledger)),
     documents: input.documents,
     data: buildData(input, length),
     schemaName: NAME_TABLE_SCHEMA_NAME,
-    schema: NAME_TABLE_SCHEMA,
+    schema: nameTableSchemaOf(ledger),
     maxOutputTokens: input.gateway.maxOutputTokens("name-table"),
   });
   let shapeRejections = 0;
@@ -463,7 +521,7 @@ export async function runNameTable(input: NameTableInput): Promise<NameTableOutc
   if (!answer.ok) return answer;
 
   const converted = toNameTableDraftValue(answer.value);
-  const inspected = inspectNameTable(input.list, converted.value, input.documents);
+  const inspected = inspectNameTable(input.list, converted.value, input.documents, ledger === undefined ? {} : { ledger });
   const problems = [...converted.problems, ...(inspected.ok ? [] : inspected.problems)];
   if (inspected.ok && problems.length === 0) {
     return {

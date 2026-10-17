@@ -50,6 +50,11 @@ import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
 import { TEST_SPEC_SCHEMA_NAME, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
 import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./stages/write.js";
 import { natureQuestionName } from "../stages/test-suite.js";
+import { captureBaselineV11a, type BaselineV11aCapture, type BaselineV11aScenarios } from "../__tests__/baseline-capture.js";
+import * as factoryModule from "../index.js";
+import { createFakeLlmClient } from "../llm-fake.js";
+import { V12_PIPELINE_FLAGS, V12_FLAG_NAMES, resolveV12Flags } from "../v12/ledger.js";
+import { buildSized, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -1261,7 +1266,13 @@ describe("(p) 評価口を作る 2 か所の両方に T2 の写像が渡る", ()
 
 // ── (q) 既定値の要件（default-value。Issue #533）────────────────────────────
 
-describe("(q) 既定値の要件：宣言の default が合えば今までの門で full、違えば不一致で full が出ない", () => {
+/** 旗 off（`flags` を省く）と旗 on（`flags.ledger`）。(q) を両方で同じ結果に照らす（Issue #547） */
+const FLAG_CASES: readonly { readonly name: string; readonly flags: Partial<GenerationInputV11a> }[] = [
+  { name: "off", flags: {} },
+  { name: "on", flags: { flags: { ledger: true } } },
+];
+
+describe.each(FLAG_CASES)("(q) 既定値の要件：宣言の default が合えば今までの門で full、違えば不一致で full が出ない（旗 $name）", ({ flags }) => {
   const D_LIST_BASE: RequirementList = {
     ...BASE_LIST,
     requirements: [
@@ -1305,7 +1316,7 @@ describe("(q) 既定値の要件：宣言の default が合えば今までの門
     structured({ declaration: yaml }),
   ];
   async function runD(calls: readonly RecordedCall[], overrides: Partial<GenerationInputV11a> = {}) {
-    return runScenario(calls, { plan: D_PLAN, source: D_SOURCE, ...overrides });
+    return runScenario(calls, { plan: D_PLAN, source: D_SOURCE, ...flags, ...overrides });
   }
   /** 評価口の B4 の結果を記録する（評価口はそのまま） */
   function spyReports() {
@@ -1464,5 +1475,184 @@ describe("段単位の走り：範囲の外の段を呼ばず、納品物を組�
     await expect(runStageRangeV11a({ ...inputOf(recording.client), range: { start: "test-spec", end: "judge" } })).rejects.toThrow();
     await expect(runStageRangeV11a({ ...inputOf(recording.client), range: { start: "write", end: "judge" } })).rejects.toThrow();
     expect(recording.structured).toHaveLength(0);
+  });
+});
+
+// ── 旗（v1.2 の旗 `v12.ledger`。08-architecture-v1.2.md §9 手 2・Issue #547）──────────────────
+
+interface NodeFileSystem {
+  readFileSync(path: URL, encoding: "utf8"): string;
+}
+const importUntyped = (specifier: string) => import(/* @vite-ignore */ specifier);
+const nodeFs = (await importUntyped("node:fs")) as NodeFileSystem;
+/** 手 2p の比較元のバイトの記録（`__fixtures__/baseline-v11a-800411c/`。#546。読むだけ） */
+const baselineJson = <T>(name: string): T =>
+  JSON.parse(nodeFs.readFileSync(new URL(`../__fixtures__/baseline-v11a-800411c/${name}`, import.meta.url), "utf8")) as T;
+const BASELINE_DEFINITIONS = baselineJson<BaselineV11aScenarios>("scenarios.json");
+const BASELINE_LIBRARY = baselineJson<{ readonly captures: readonly BaselineV11aCapture[] }>("library.json");
+
+/** 工場の module の `runGenerationV11a` に旗（と要約に旗を書く印）を足して流す口 */
+const moduleWith = (extra: Partial<GenerationInputV11a>): typeof factoryModule => ({
+  ...factoryModule,
+  runGenerationV11a: (input) => factoryModule.runGenerationV11a({ ...input, ...extra }),
+});
+
+describe("旗を省いた・off の走りは v1.1α の記録（手 2p の library 4 経路）とバイト列で同じ", () => {
+  it("flags を省いた走りと flags.ledger を off にした走りが、4 経路とも記録と深く等しい", async () => {
+    for (const extra of [{}, { flags: {} }, { flags: { ledger: false } }] as const) {
+      const captures = await captureBaselineV11a(moduleWith(extra), BASELINE_DEFINITIONS);
+      expect(captures, JSON.stringify(extra)).toEqual(BASELINE_LIBRARY.captures);
+    }
+  });
+});
+
+describe("旗 on でも要求が同じ：flags.ledger を on にした走りの要求（T1・T1''・T2・B1）・納品物・要約が off とバイト列で同じ", () => {
+  it("手 2p の library 4 経路の記録と、要求の全体・判定の問い・道具の結果・納品物の全ファイル・段の記録・要約が深く等しい", async () => {
+    const captures = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS);
+    expect(captures).toHaveLength(BASELINE_LIBRARY.captures.length);
+    captures.forEach((capture, index) => {
+      const expected = BASELINE_LIBRARY.captures[index]!;
+      expect(capture.requests, capture.name).toEqual(expected.requests);
+      expect(capture.bundle, capture.name).toEqual(expected.bundle);
+      expect(capture.judgment.summary, capture.name).toEqual(expected.judgment.summary);
+      expect(capture.judgment.stages, capture.name).toEqual(expected.judgment.stages);
+      expect(capture, capture.name).toEqual(expected);
+    });
+  });
+
+  it("内外の切り分けの型：負例 (c)①（同じ要件を validation の観測で確かめる経路 3）は on でも「対応表の外」の不一致のまま", async () => {
+    const captures = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS);
+    const stagnation = captures[2]?.testRun as {
+      readonly mismatches: readonly { readonly testId: string; readonly detail: string }[];
+      readonly routes: readonly { readonly testId: string; readonly route: string }[];
+    };
+    expect(stagnation.mismatches.find((entry) => entry.testId === "r1-option-validate")?.detail).toBe("表の ID が指す場所が宣言に無い");
+    expect(stagnation.routes.find((entry) => entry.testId === "r1-option-validate")?.route).toBe("correspondence-defect");
+    expect(captures[2]?.judgment.outcome).toEqual({ result: "partial", verdict: "partial" });
+  });
+
+  it("台帳の導出を段へ渡している（on の T1'・T2'・評価口は台帳の関数を通る。off は通らない）", async () => {
+    const seen: (V11aEvaluatorInput["ledger"] | undefined)[] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      seen.push(input.ledger);
+      return original(input);
+    });
+    await runScenario([...head(), structured(acceptAll())]);
+    await runScenario([...head(), structured(acceptAll())], { flags: { ledger: true } });
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    expect(seen[0]).toBeUndefined();
+    expect(seen.at(-1)?.observes).toContain("default-value");
+  });
+});
+
+describe("呼び出し数の回帰の契約試験（手 2p）の走りが、旗 on・off で同じ数", () => {
+  /** 初回で全段が通る走り（calls.test.ts の (1) と同じ並び） */
+  const cleanCalls = (materials: SizedMaterials): RecordedCall[] => [
+    structured(materials.nameTableResponse()),
+    structured(materials.judgments()),
+    structured(materials.testSpecResponse()),
+    structured({ declaration: materials.declaration() }),
+    structured(materials.judgments()),
+  ];
+  /** やり直しを含む走り（calls.test.ts の (2) と同じ並び。形・中身のやり直し・修復・裁定） */
+  const retryCalls = (materials: SizedMaterials): RecordedCall[] => {
+    const incomplete = { judgments: materials.judgments().judgments.slice(0, -1) };
+    const rejectR1 = materials.judgments({ R1: ["unnecessary-ownership", materials.textOf("R1")] });
+    const dispute = { testId: "t5-normal", quote: materials.textOf("R5") };
+    return [
+      structured({ rows: "x", requirements: "x" }),
+      structured(materials.nameTableResponse()),
+      structured(incomplete),
+      structured(rejectR1),
+      structured(materials.nameTableResponse()),
+      structured(materials.judgments()),
+      structured({ classifications: "x", tests: "x" }),
+      structured(materials.testSpecResponse({ omitAbnormalOf: "R1" })),
+      structured(materials.testSpecResponse()),
+      structured({ declaration: materials.declaration(["R1"]) }),
+      structured(incomplete),
+      structured(materials.judgments()),
+      repairDone(materials.declaration(["R2"]), [dispute]),
+      structured({ decisions: [{ testId: dispute.testId, verdict: "uphold", reason: "", quote: "" }] }),
+      structured(materials.judgments()),
+      repairDone(materials.declaration()),
+      structured(materials.judgments()),
+    ];
+  };
+
+  async function observeWith(materials: SizedMaterials, calls: readonly RecordedCall[], extra: Partial<GenerationInputV11a>) {
+    const inner = createFakeLlmClient(calls);
+    const requests: unknown[] = [];
+    const client: GenerationInputV11a["client"] = {
+      async callStructured(request) {
+        requests.push({ kind: "structured", request });
+        return inner.callStructured(request);
+      },
+      async callWithTools(request) {
+        requests.push({ kind: "tools", request });
+        return inner.callWithTools(request);
+      },
+    };
+    const judged: unknown[] = [];
+    const fake = createFakeJudge(materials.adviceAnswers());
+    const judge: Judge = {
+      source: "fake",
+      async judge(request) {
+        judged.push(Object.keys(request.questions));
+        return fake.judge(request);
+      },
+    };
+    const result = await runGenerationV11a({
+      ...inputOf(client, { source: materials.source, plan: materials.plan, judge, budgetUsd: 1_000, deadline: 86_400_000 }),
+      ...extra,
+    });
+    return { stages: result.record.stages, requests: JSON.stringify(requests), judged, outcome: result.outcome, summary: result.summary };
+  }
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：初回で通る走りとやり直しを含む走りの段の記録（応答・実開始・再試行・門）・要求・判定が同じ", async (size) => {
+    const materials = buildSized(size.requirements, size.tests);
+    for (const calls of [cleanCalls(materials), retryCalls(materials)]) {
+      const off = await observeWith(materials, calls, {});
+      const on = await observeWith(materials, calls, { flags: { ledger: true } });
+      expect(on.stages).toEqual(off.stages);
+      expect(on.requests).toBe(off.requests);
+      expect(on.judged).toEqual(off.judged);
+      expect(on.outcome).toEqual(off.outcome);
+      expect(on.summary).toEqual(off.summary);
+      expect(off.stages.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("旗の組の契約（要約の v12_flags）", () => {
+  it("recordV12Flags が真の走りは、完走でも T1 で止まる走りでも、要約に実効の旗の組 v12_flags がある（納品物の要約にも）", async () => {
+    const extra = { flags: V12_PIPELINE_FLAGS, recordV12Flags: true };
+    const full = await runScenario([...head(), structured(acceptAll())], extra);
+    expect(full.result.outcome.verdict).toBe("full");
+    expect((full.result.summary as unknown as Record<string, unknown>)["v12_flags"]).toEqual(V12_PIPELINE_FLAGS);
+    const summaryFile = full.result.bundle?.artifacts.find((artifact) => artifact.path === "artifacts/summary.json");
+    expect((JSON.parse(summaryFile?.text ?? "{}") as Record<string, unknown>)["v12_flags"]).toEqual(V12_PIPELINE_FLAGS);
+    const bad = draftOf(LIST, TABLE);
+    const broken = { ...bad, requirements: bad.requirements.map((entry, index) => (index === 0 ? { ...entry, copy: "目印の値の写し" } : entry)) };
+    const stopped = await runScenario([structured(broken), structured(broken)], extra);
+    expect(stopped.result.stopped?.stage).toBe("name-table");
+    expect((stopped.result.summary as unknown as Record<string, unknown>)["v12_flags"]).toEqual(V12_PIPELINE_FLAGS);
+  });
+
+  it("recordV12Flags を省いた走り（旗 on でも）・旗を省いた走りの要約に v12_flags が無い", async () => {
+    for (const extra of [{}, { flags: { ledger: true } }] as const) {
+      const { result } = await runScenario([...head(), structured(acceptAll())], extra);
+      expect(result.summary, JSON.stringify(extra)).not.toHaveProperty("v12_flags");
+    }
+  });
+
+  it("正本の旗の組は旗の名前を全部持ち（merge 済みの手の旗は全部 on）、省いた名前は off に解く", () => {
+    expect(Object.keys(V12_PIPELINE_FLAGS)).toEqual([...V12_FLAG_NAMES]);
+    for (const name of V12_FLAG_NAMES) expect(V12_PIPELINE_FLAGS[name]).toBe(true);
+    expect(resolveV12Flags()).toEqual({ ledger: false });
+    expect(resolveV12Flags({})).toEqual({ ledger: false });
+    expect(resolveV12Flags(V12_PIPELINE_FLAGS)).toEqual(V12_PIPELINE_FLAGS);
+    expect(factoryModule.V12_PIPELINE_FLAGS).toBe(V12_PIPELINE_FLAGS);
   });
 });

@@ -37,6 +37,7 @@ import {
 import { deriveCarryOver, pruneForCarryOver, type CarryOver } from "../carry-over.js";
 import { coverageUnitsOf } from "../coverage.js";
 import { canonicalJson, nameTableSha256, type NameTable } from "../names.js";
+import { PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
 import {
   EVALUABLE_COMBINATIONS,
   STRUCTURE_OBSERVES,
@@ -53,11 +54,20 @@ import {
   DEFAULT_VALUE_TEST_MESSAGES,
   checkClassificationCompleteness,
   checkEvaluability,
-  checkTestSpecOutput,
-  defaultValueTargetsOf,
-  exemptDefaultValueProblems,
+  checkEvaluability as checkEvaluabilityOf,
+  checkEvaluabilityByLedger,
+  checkTestSpecOutput as checkTestSpecOutputOf,
+  defaultValueTargetsOf as defaultValueTargetsOfBase,
+  exemptDefaultValueProblems as exemptDefaultValueProblemsBase,
+  exemptLedgerProblems,
+  ledgerTargetsOf,
+  testSpecRuleDefinitionsOf,
+  testSpecSchemaOf,
+  LEDGER_UNREGISTERED_OBSERVES_MESSAGE,
   DEFAULT_VALUE_NOT_ALLOWED_MESSAGE,
   runTestSpec,
+  type DefaultValueTarget,
+  type LedgerTarget,
   testSuiteSha256,
   type TestObserves,
   type TestSpecInput,
@@ -245,6 +255,30 @@ const choice = (value: string, probability: number): JudgeAnswer => ({
 });
 
 /** 段を流す（既定は R5 だけ持ち越し・題材の表） */
+/** 旗 off（台帳を渡さない）と旗 on（台帳の導出を渡す）。評価可能性と #533 の試験を両方で同じ結果に照らす（Issue #547） */
+const LEDGER_CASES: readonly { readonly name: string; readonly ledger: LedgerView | undefined }[] = [
+  { name: "off", ledger: undefined },
+  { name: "on", ledger: PROPERTY_LEDGER_VIEW },
+];
+
+/** 旗に合わせて、段・評価可能性・形の検査・既定値の要件の引き方・免除を選ぶ（on は台帳から導いた関数） */
+function ledgerFunctions(ledger: LedgerView | undefined) {
+  const withLedger = ledger === undefined ? {} : { ledger };
+  return {
+    run: (outputs: readonly unknown[], options: Parameters<typeof run>[1] = {}) => run(outputs, { ...options, ...withLedger }),
+    checkEvaluability: (suite: TestSuite, observes: ReadonlyMap<string, TestObserves>, table?: NameTable) =>
+      ledger === undefined ? checkEvaluabilityOf(suite, observes, table) : checkEvaluabilityByLedger(suite, observes, table, ledger),
+    checkTestSpecOutput: (output: unknown) => checkTestSpecOutputOf(output, ledger),
+    defaultValueTargetsOf: (table: NameTable): ReadonlyMap<string, unknown> =>
+      ledger === undefined ? defaultValueTargetsOfBase(table) : ledgerTargetsOf(table, ledger),
+    exemptDefaultValueProblems: (problems: readonly Problem[], list: RequirementList, targets: ReadonlyMap<string, unknown>) =>
+      ledger === undefined
+        ? exemptDefaultValueProblemsBase(problems, list, targets as ReadonlyMap<string, DefaultValueTarget>)
+        : exemptLedgerProblems(problems, list, targets as ReadonlyMap<string, LedgerTarget>),
+    ruleDefinitions: testSpecRuleDefinitionsOf(ledger),
+  };
+}
+
 async function run(
   outputs: readonly unknown[],
   options: Partial<Omit<TestSpecInput, "gateway">> & { readonly rejected?: readonly string[] } = {},
@@ -470,7 +504,8 @@ const FIXED_MESSAGES: readonly string[] = [
   "（対象の種類・操作・観測する性質）の組が評価の方法の表に無い",
 ];
 
-describe("評価可能性（対象の種類・操作・observes を評価の方法の表に照らす。§2.3 の (i)）", () => {
+describe.each(LEDGER_CASES)("評価可能性（対象の種類・操作・observes を評価の方法の表に照らす。§2.3 の (i)。旗 $name）", ({ ledger }) => {
+  const { run, checkEvaluability } = ledgerFunctions(ledger);
   it("表にある組の全部が通り、表に無い組（未対応の性質を含む）は全部が固定文で落ちる（全組を列挙）", () => {
     const listed = new Set(EVALUABLE_COMBINATIONS.map((entry) => `${entry.targetKind}|${entry.operation}|${entry.observes}`));
     // 8 組に（項目・validate・default-value）を足した 9 組（Issue #533）
@@ -1131,7 +1166,10 @@ describe("onDropped・onRejected は v1 の ②' と同じ回数で呼ばれ、�
 
 // ── 既定値の要件（default-value。Issue #533）─────────────────────────────
 
-describe("既定値の要件：表の確かめ方が default-value の要件にだけ既定値の試験を許す（Issue #533）", () => {
+describe.each(LEDGER_CASES)("既定値の要件：表の確かめ方が default-value の要件にだけ既定値の試験を許す（Issue #533。旗 $name）", ({ ledger }) => {
+  const { run, checkTestSpecOutput, defaultValueTargetsOf, exemptDefaultValueProblems } = ledgerFunctions(ledger);
+  const ruleDefinitions = ledgerFunctions(ledger).ruleDefinitions;
+  const rules = ruleTexts(ruleDefinitions);
   const DLIST = fixtureDefaultValueList();
   const DPLAN = fixturePlan(DLIST);
   const DTABLE = fixtureDefaultValueTable();
@@ -1419,19 +1457,121 @@ describe("既定値の要件：表の確かめ方が default-value の要件に�
     for (const field of ["instructions", "rules", "documents", "schemaName", "schema", "maxOutputTokens"] as const) {
       expect(request[field]).toEqual(baseRequest[field]);
     }
-    expect(request.rules).toEqual(TEST_SPEC_RULES);
+    expect(request.rules).toEqual(rules);
     expectNoAcceptanceMaterial([requestText(request)]);
   });
 
+  it("旗 on と off で、同じ応答の要求（前置き・規則・データ・schema）と結果が深く等しい（1 回で通る・作り直す・判定に聞く）", async () => {
+    const recorded = () => recordingJudge(createFakeJudge({ [natureQuestionName("R4")]: choice("ruled", 0.9) }));
+    const natures = D_NATURES.map((entry) => (entry.requirementId === "R4" ? { ...entry, nature: "existence-only" as const } : entry));
+    const scenarios: readonly (readonly unknown[])[] = [
+      [dResponse()],
+      [dResponse([r6Default({ observes: "validation" })]), dResponse()],
+      [dResponse([r6Default()], natures)],
+      [dResponse([r6Default({ kind: "abnormal" })]), dResponse([r6Default({ kind: "abnormal" })])],
+    ];
+    for (const outputs of scenarios) {
+      const runFor = async (view: LedgerView | undefined) => {
+        const judge = recorded();
+        const table = DTABLE;
+        const result = await ledgerFunctions(view).run(outputs, {
+          plan: DPLAN,
+          list: DLIST,
+          table,
+          carryOver: await carryFor(table),
+          judge: judge.judge,
+        });
+        return { ...result, judgeRequests: judge.requests };
+      };
+      const off = await runFor(undefined);
+      const on = await runFor(PROPERTY_LEDGER_VIEW);
+      expect(JSON.stringify(on.recording.structured)).toBe(JSON.stringify(off.recording.structured));
+      expect(on.outcome).toEqual(off.outcome);
+      expect(on.judgeRequests).toEqual(off.judgeRequests);
+      expect(on.gateway.counts).toEqual(off.gateway.counts);
+    }
+  });
+
   it("規則：R-tsp-02 は default-value の要件を除き、R-tsp-16 は default-value の要件にだけ既定値の試験の形を許す", () => {
-    const text = (id: string) => TEST_SPEC_RULE_DEFINITIONS.find((definition) => definition.id === id)?.text ?? "";
+    const text = (id: string) => ruleDefinitions.find((definition) => definition.id === id)?.text ?? "";
     expect(text("R-tsp-02")).toContain("確かめ方が structural・default-value の要件を除いて");
     const r16 = text("R-tsp-16");
     expect(r16).toContain("確かめ方が default-value の要件にだけ");
     expect(r16).toContain("その要件には異常・境界の試験を作らない");
     expect(r16).toContain("ほかの要件に default-value を書かない");
     expect(r16).toContain("state-after-set）は評価できないので、その試験は作らない");
+    expect(ruleDefinitionDefects(ruleDefinitions)).toEqual([]);
+    expectNoAcceptanceMaterial(rules);
+  });
+});
+
+// ── 旗 on（性質の台帳から導く。Issue #547）──────────────────────────────
+
+describe("旗 on：T2 の規則の文・schema が off とバイト列で同じ（載せ替えだけ）", () => {
+  it("規則の定義は off の定数と深く等しく、送る文の並び・schema の JSON がバイト列で同じ。規則の不備は on・off とも 0", () => {
+    const definitions = testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    expect(definitions).toEqual(TEST_SPEC_RULE_DEFINITIONS);
+    expect(JSON.stringify(ruleTexts(definitions))).toBe(JSON.stringify(TEST_SPEC_RULES));
+    expect(JSON.stringify(testSpecSchemaOf(PROPERTY_LEDGER_VIEW))).toBe(JSON.stringify(TEST_SPEC_SCHEMA));
+    expect(ruleDefinitionDefects(definitions)).toEqual([]);
     expect(ruleDefinitionDefects(TEST_SPEC_RULE_DEFINITIONS)).toEqual([]);
-    expectNoAcceptanceMaterial(TEST_SPEC_RULES);
+    expect(testSpecRuleDefinitionsOf()).toBe(TEST_SPEC_RULE_DEFINITIONS);
+    expect(testSpecSchemaOf()).toBe(TEST_SPEC_SCHEMA);
+  });
+
+  it("二点測定：台帳の形の文・除外の種類・observes の並びを変えると、組んだ規則と schema が off と食い違う", () => {
+    const text = (view: LedgerView, id: string) => testSpecRuleDefinitionsOf(view).find((definition) => definition.id === id)?.text;
+    const offText = (id: string) => TEST_SPEC_RULE_DEFINITIONS.find((definition) => definition.id === id)?.text;
+    expect(text(PROPERTY_LEDGER_VIEW, "R-tsp-02")).toBe(offText("R-tsp-02"));
+    expect(text(PROPERTY_LEDGER_VIEW, "R-tsp-16")).toBe(offText("R-tsp-16"));
+    expect(text({ ...PROPERTY_LEDGER_VIEW, t2ExemptKinds: [] }, "R-tsp-02")).not.toBe(offText("R-tsp-02"));
+    expect(text({ ...PROPERTY_LEDGER_VIEW, t2FormTexts: [] }, "R-tsp-16")).not.toBe(offText("R-tsp-16"));
+    expect(text({ ...PROPERTY_LEDGER_VIEW, t2UnsupportedTexts: [] }, "R-tsp-16")).not.toBe(offText("R-tsp-16"));
+    const [first = "", second = "", ...rest] = PROPERTY_LEDGER_VIEW.observes;
+    const reversed = { ...PROPERTY_LEDGER_VIEW, observes: [second, first, ...rest] };
+    expect(JSON.stringify(testSpecSchemaOf(reversed))).not.toBe(JSON.stringify(TEST_SPEC_SCHEMA));
+  });
+});
+
+describe("旗 on：T2' に台帳に無い観測する性質を直接渡すと固定文で落ちる（未登録の性質の拒否）", () => {
+  const unregistered = ["enum-membership", "empty-aggregate", "other"] as const;
+
+  it("評価可能性：台帳に無い性質は、どの組でも台帳の固定文で落ちる（値を埋めない）。台帳にある性質は off と同じ結果", () => {
+    for (const targetKind of TEST_TARGET_KINDS) {
+      for (const operation of TEST_OPERATIONS) {
+        const test = bareTest("t", targetKind, operation, operation === "structure" ? "view-shows" : undefined);
+        for (const observed of unregistered) {
+          const problems = checkEvaluabilityByLedger({ tests: [test] }, new Map([["t", observed as TestObserves]]), fixtureTable(), PROPERTY_LEDGER_VIEW);
+          expect(problems).toEqual([{ field: "tests[0].observes", message: LEDGER_UNREGISTERED_OBSERVES_MESSAGE }]);
+          expect(LEDGER_UNREGISTERED_OBSERVES_MESSAGE).not.toContain(observed);
+          // off でも落ちる（別の固定文）。on は台帳に無いことを名指しする
+          expect(checkEvaluability({ tests: [test] }, new Map([["t", observed as TestObserves]]), fixtureTable())).toHaveLength(1);
+        }
+        for (const observed of TEST_OBSERVES) {
+          const observes = new Map([["t", observed]]);
+          expect(checkEvaluabilityByLedger({ tests: [test] }, observes, fixtureTable(), PROPERTY_LEDGER_VIEW)).toEqual(
+            checkEvaluability({ tests: [test] }, observes, fixtureTable()),
+          );
+        }
+      }
+    }
+  });
+
+  it("形の検査：schema の enum を迂回した応答の台帳に無い性質は、on でも固定文で落ちる（知っている値は台帳の順）", () => {
+    const output = response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()].map((test, index) => (index === 0 ? { ...test, observes: "enum-membership" } : test)));
+    const checked = checkTestSpecOutputOf(output, PROPERTY_LEDGER_VIEW);
+    expect(checked).toEqual(checkTestSpecOutputOf(output));
+    expect(checked.ok).toBe(false);
+    if (checked.ok) return;
+    expect(checked.problems).toEqual([
+      { field: "tests[0].observes", message: `観測する性質は ${PROPERTY_LEDGER_VIEW.observes.join("・")} のいずれかであること` },
+    ]);
+  });
+
+  it("段：台帳に無い性質を書いた応答は on でも 2 回とも形で落ち、malformed（やり直しの回数は今と同じ）", async () => {
+    const bad = response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()].map((test) => ({ ...test, observes: "enum-membership" })));
+    const { outcome, recording } = await ledgerFunctions(PROPERTY_LEDGER_VIEW).run([bad, bad]);
+    if (outcome.ok || outcome.failure.kind !== "malformed") throw new Error("malformed でない");
+    expect(recording.structured).toHaveLength(2);
   });
 });

@@ -80,3 +80,7 @@ export * from "./v11a/name-check.js";
 export * from "./v11a/evaluate.js";
 export * from "./v11a/run.js";
 export * from "./v11a/bundle-v11a.js";
+
+// ── v1.2（v12/。`08-architecture-v1.2.md`・Issue #547〜）──────────────────
+// 性質の台帳と v1.2 の旗の正本（`V12_PIPELINE_FLAGS`。計測の道具が読む契約）
+export * from "./v12/ledger.js";

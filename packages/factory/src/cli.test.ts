@@ -20,6 +20,7 @@ import {
   EXIT_USAGE,
   JEV_API_KEY_ENV,
   PROMPT_VERSION_V11A,
+  PROMPT_VERSION_V12,
   STAGE_USAGE,
   USAGE,
   parseCliArguments,
@@ -638,6 +639,20 @@ describe("--pipeline の読み取り（Issue #511）", () => {
     });
   });
 
+  it("--pipeline v1.2 --plan-file <ファイル> を読む（Issue #547）", () => {
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--pipeline", "v1.2", "--plan-file", "plan.json"]),
+    ).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "gpt-6-luna",
+      effort: "high",
+      planFile: "plan.json",
+      pipeline: "v1.2",
+    });
+    expect(USAGE).toContain("[--pipeline v1|v1.1a|v1.2]");
+  });
+
   it("--pipeline v1 を読み、--pipeline を省けば欄を持たない（既定は v1）", () => {
     expect(parseCliArguments(["--", "request.txt", "--out", "out", "--pipeline", "v1"])).toEqual({
       requestFile: "request.txt",
@@ -675,8 +690,28 @@ describe("--pipeline の読み取り（Issue #511）", () => {
       args: ["--pipeline", "v1", "--plan-only"],
       error: "--pipeline と --plan-only は同時に指定できません",
     },
-    { name: "知らない値", args: ["--pipeline", "v2"], error: "--pipeline には v1 か v1.1a を指定してください" },
-    { name: "値が無い", args: ["--pipeline"], error: "--pipeline には v1 か v1.1a を指定してください" },
+    { name: "知らない値", args: ["--pipeline", "v2"], error: "--pipeline には v1 か v1.1a か v1.2 を指定してください" },
+    { name: "値が無い", args: ["--pipeline"], error: "--pipeline には v1 か v1.1a か v1.2 を指定してください" },
+    {
+      name: "--pipeline v1.2 だけ（--plan-file が無い）",
+      args: ["--pipeline", "v1.2"],
+      error: "--pipeline v1.2 は --plan-file と一緒に指定してください",
+    },
+    {
+      name: "--pipeline v1.2 と --plan",
+      args: ["--pipeline", "v1.2", "--plan"],
+      error: "--pipeline と --plan は同時に指定できません",
+    },
+    {
+      name: "--pipeline v1.2 と --plan-only",
+      args: ["--pipeline", "v1.2", "--plan-only"],
+      error: "--pipeline と --plan-only は同時に指定できません",
+    },
+    {
+      name: "--pipeline v1.2 と --plan と --plan-file",
+      args: ["--pipeline", "v1.2", "--plan", "--plan-file", "plan.json"],
+      error: "--plan と --plan-file は同時に指定できません",
+    },
   ];
 
   it.each(usageCases)("$name は誤りで 2 を返し、makeClient を呼ばない", async (example) => {
@@ -917,8 +952,8 @@ function v11aJudge() {
   return createFakeJudge(answers);
 }
 
-/** `--pipeline v1.1a --plan-file` を 1 回流す（偽物の LLM・判定・時計で閉じる。ファイルだけ本物） */
-async function runV11aCli(input: { readonly dir: string; readonly calls: readonly RecordedCall[] }) {
+/** `--pipeline v1.1a --plan-file` を 1 回流す（偽物の LLM・判定・時計で閉じる。ファイルだけ本物。`pipeline` で v1.2 も） */
+async function runV11aCli(input: { readonly dir: string; readonly calls: readonly RecordedCall[]; readonly pipeline?: "v1.1a" | "v1.2" }) {
   const planPath = `${input.dir}-plan.json`;
   const planText = JSON.stringify(await v11aEnvelope());
   const recording = createRecordingClient(input.calls);
@@ -926,7 +961,7 @@ async function runV11aCli(input: { readonly dir: string; readonly calls: readonl
   const lines: string[] = [];
   const written: string[] = [];
   const code = await runCli({
-    argv: ["--", "request.txt", "--out", input.dir, "--pipeline", "v1.1a", "--plan-file", planPath],
+    argv: ["--", "request.txt", "--out", input.dir, "--pipeline", input.pipeline ?? "v1.1a", "--plan-file", planPath],
     env: { [API_KEY_ENV]: "sk-FAKE" },
     readFile: async (path) => (path === planPath ? planText : V11A_SOURCE),
     writeFile: async (path, text) => {
@@ -1030,6 +1065,83 @@ describe("v1.1a の走り（`--pipeline v1.1a --plan-file`。Issue #511）", () 
   });
 });
 
+describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("完走で 0：v1.1α の経路で流れ、要求は v1.1a と同じ。条件の記録の pipeline・prompt_version が v1.2、ほかの欄は v1.1a と同じ", async () => {
+    const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
+    const v1Spy = vi.spyOn(runModule, "runGeneration");
+    const calls = [...v11aHead(), structured(v11aJudgments())];
+    const v12 = await runV11aCli({ dir: `${directory}/v12-complete`, calls, pipeline: "v1.2" });
+    const v11a = await runV11aCli({ dir: `${directory}/v12-complete-v11a`, calls });
+
+    expect(v12.code).toBe(EXIT_OK);
+    expect(v1Spy).not.toHaveBeenCalled();
+    expect(v11aSpy).toHaveBeenCalledTimes(2);
+    expect(v12.makeClient.mock.calls[0]).toEqual([{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.1a" }]);
+    // LLM への要求は v1.1a の走りとバイト列で同じ（載せ替えだけ）
+    expect(JSON.stringify(v12.recording.structured)).toBe(JSON.stringify(v11a.recording.structured));
+    expect(v12.summary["verdict"]).toBe("full");
+    expect(v12.summary["prompt_version"]).toBe(PROMPT_VERSION_V12);
+    expect(v12.summary["prompt_version"]).toBe("v1.2");
+    expect(v12.record.conditions["pipeline"]).toBe("v1.2");
+    expect(v12.record.conditions["prompt_version"]).toBe("v1.2");
+    const { pipeline: _pipeline, prompt_version: _v12Prompt, v12_flags: _flags, ...v12Rest } = v12.record.conditions;
+    const { prompt_version: v11aPrompt, ...v11aRest } = v11a.record.conditions;
+    expect(v11aPrompt).toBe("v1.1a");
+    expect(v12Rest).toEqual(v11aRest);
+    // 要約は prompt_version と v12_flags のほかは v1.1a と同じ
+    const { prompt_version: _p1, v12_flags: _f1, ...summaryRest } = v12.summary;
+    const { prompt_version: _p2, ...v11aSummaryRest } = v11a.summary;
+    expect(summaryRest).toEqual(v11aSummaryRest);
+  });
+
+  it("旗の組の契約：export した V12_PIPELINE_FLAGS＝入口が渡した実効の旗＝要約の v12_flags＝条件の記録の v12_flags", async () => {
+    const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
+    const run = await runV11aCli({ dir: `${directory}/v12-flags`, calls: [...v11aHead(), structured(v11aJudgments())], pipeline: "v1.2" });
+    expect(run.code).toBe(EXIT_OK);
+    const passed = v11aSpy.mock.calls[0]?.[0];
+    expect(passed?.flags).toBe(factory.V12_PIPELINE_FLAGS);
+    expect(passed?.recordV12Flags).toBe(true);
+    expect(run.summary["v12_flags"]).toEqual(factory.V12_PIPELINE_FLAGS);
+    expect(run.record.conditions["v12_flags"]).toEqual(factory.V12_PIPELINE_FLAGS);
+    expect(run.summary["v12_flags"]).toEqual(passed?.flags);
+    expect(factory.V12_PIPELINE_FLAGS).toEqual({ ledger: true });
+  });
+
+  it("T1 で止まる走りでも要約と条件の記録に v12_flags がある（終了コード 1・納品物無し）", async () => {
+    const run = await runV11aCli({
+      dir: `${directory}/v12-early-stop`,
+      calls: [structured(v11aBadDraft()), structured(v11aBadDraft())],
+      pipeline: "v1.2",
+    });
+    expect(run.code).toBe(EXIT_RUN_FAILED);
+    expect(run.written).not.toContain(BUNDLE_MANIFEST_FILE);
+    expect(run.summary["stop_reason"]).toBe("unmet");
+    expect(run.summary["prompt_version"]).toBe("v1.2");
+    expect(run.summary["v12_flags"]).toEqual(factory.V12_PIPELINE_FLAGS);
+    expect(run.record.conditions["v12_flags"]).toEqual(factory.V12_PIPELINE_FLAGS);
+  });
+
+  it("--pipeline v1.1a の走りの要約・条件の記録に v12_flags・pipeline が無く、旗を渡さない", async () => {
+    const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
+    const run = await runV11aCli({ dir: `${directory}/v11a-no-flags`, calls: [...v11aHead(), structured(v11aJudgments())] });
+    expect(run.summary).not.toHaveProperty("v12_flags");
+    expect(run.record.conditions).not.toHaveProperty("v12_flags");
+    expect(run.record.conditions).not.toHaveProperty("pipeline");
+    expect(v11aSpy.mock.calls[0]?.[0]).not.toHaveProperty("flags");
+    expect(v11aSpy.mock.calls[0]?.[0]).not.toHaveProperty("recordV12Flags");
+  });
+
+  it("段の旗は v1.2 と組めない（今の段の走りは --pipeline v1.1a だけ。使い方の誤りで 2）", () => {
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-end", "test-spec"]),
+    ).toEqual({ error: "stage-range:pipeline（段の旗は --pipeline v1.1a --plan-file と一緒に指定してください）" });
+  });
+});
+
 describe("--pipeline を省いた走りは v1 のまま（Issue #511）", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -1055,6 +1167,7 @@ describe("--pipeline を省いた走りは v1 のまま（Issue #511）", () => 
     expect(makeClient.mock.calls[0]?.[0]).not.toHaveProperty("envelope");
     const summary = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
     expect(summary["prompt_version"]).toBe("v1");
+    expect(summary).not.toHaveProperty("v12_flags");
   });
 });
 
