@@ -12,7 +12,15 @@ import type { LlmClient, LlmStructuredRequest } from "../../llm.js";
 import type { RequirementList } from "../../pipeline.js";
 import { ruleDefinitionDefects, type RejectedCandidate } from "../../stages/prompt.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
-import { FIXTURE_DOCUMENTS, draftOf, fixtureList, fixtureListWithRequestQuotes, fixtureTable } from "../__tests__/fixtures.js";
+import {
+  FIXTURE_DOCUMENTS,
+  draftOf,
+  fixtureDefaultValueList,
+  fixtureDefaultValueTable,
+  fixtureList,
+  fixtureListWithRequestQuotes,
+  fixtureTable,
+} from "../__tests__/fixtures.js";
 import { copyLengthFor, nameTableSha256, requirementCopy, type NameTableDraft } from "../names.js";
 import {
   NAME_TABLE_PREVIOUS_DATA_NAMES,
@@ -436,5 +444,61 @@ describe("T1 は要件ごとの写しをコードが渡し、依頼文の引用�
       field: "requirements[0].copy",
       message: "要件の文の写しが一覧の同じ位置の要件と合わない",
     });
+  });
+});
+
+describe("T1 の確かめ方 default-value（Issue #533）", () => {
+  it("schema の kind に default-value があり、value は string か null の必須の欄", () => {
+    const verification = NAME_TABLE_SCHEMA.properties.requirements.items.properties.verification;
+    expect(verification.properties.kind.enum).toEqual(["fixed-test", "structural", "unresolved", "default-value"]);
+    expect(verification.properties.value.type).toEqual(["string", "null"]);
+    expect(verification.required).toContain("value");
+    expect(verification.additionalProperties).toBe(false);
+    // 平らな形のまま（種類ごとの枝分けをしない）
+    expect(Object.keys(verification.properties)).toEqual(["kind", "reason", "checks", "constraintIds", "value"]);
+  });
+
+  it("規則 R-nt-08 に既定値の 1 文があり、why・since が埋まっている", () => {
+    const rule = NAME_TABLE_RULE_DEFINITIONS.find((definition) => definition.id === "R-nt-08");
+    expect(rule?.text).toContain("kind を default-value にし、value にそのキー");
+    expect(rule?.text).toContain("その項目だけを所属させる");
+    expect(rule?.text).toContain("条件・計算・検査・操作後の状態を含む要件には default-value を使わない");
+    expect(rule?.since).toContain("#533");
+    expect(rule?.why).toContain("H2");
+    expect(ruleDefinitionDefects(NAME_TABLE_RULE_DEFINITIONS)).toEqual([]);
+    expectNoAcceptanceMaterial(NAME_TABLE_RULES);
+  });
+
+  it("strict の形の応答（ほかの種類は value null）で、default-value の要件の value が表に残る", async () => {
+    const list = fixtureDefaultValueList();
+    const response = responseOf(draftOf(list, fixtureDefaultValueTable()));
+    for (const entry of response["requirements"] as { verification: Record<string, unknown> }[]) {
+      entry.verification = { value: null, ...entry.verification };
+    }
+    const recording = createRecordingClient([structured(response)]);
+    const outcome = await runNameTable({
+      plan: planOf(list),
+      list,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(recording.client),
+    });
+    if (!outcome.ok) throw new Error("通るはず");
+    expect(outcome.value.table).toEqual(fixtureDefaultValueTable());
+    expect(outcome.value.tableSha256).toBe(await nameTableSha256(fixtureDefaultValueTable()));
+  });
+
+  it("負例：options の外の value は T1' で unmet（固定文）", async () => {
+    const list = fixtureDefaultValueList();
+    const recording = createRecordingClient([structured(responseOf(draftOf(list, fixtureDefaultValueTable("gamma"))))]);
+    const outcome = await runNameTable({
+      plan: planOf(list),
+      list,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(recording.client),
+    });
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(outcome.failure.problems).toEqual([
+      { field: "verification[5].value", message: "既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い" },
+    ]);
   });
 });

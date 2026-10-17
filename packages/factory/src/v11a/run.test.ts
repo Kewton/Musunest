@@ -27,12 +27,13 @@ import * as correspondenceStage from "../stages/correspondence.js";
 import { createRecordingClient, expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
 import * as repairStage from "../stages/repair.js";
 import * as runTestsStage from "../stages/run-tests.js";
+import * as staticCheckStage from "../stages/static-check.js";
 import * as triageStage from "../stages/unwritable-triage.js";
 import { makeRunInput, structured } from "../__tests__/run.js";
-import { FIXTURE_DOCUMENTS, FIXTURE_YAML, draftOf, fixtureList, fixtureTable } from "./__tests__/fixtures.js";
+import { DEFAULT_VALUE_REQUIREMENT_TEXT, FIXTURE_DOCUMENTS, FIXTURE_YAML, draftOf, fixtureList, fixtureTable } from "./__tests__/fixtures.js";
 import { V11A_ARTIFACT_NAMES } from "./bundle-v11a.js";
 import * as evaluateModule from "./evaluate.js";
-import { UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
+import { DEFAULT_VALUE_DETAILS, UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
 import { nameTableSha256, type NameTable } from "./names.js";
 import { ALL_CARRIED_PROBLEM, runGenerationV11a, v11aFailureSignature, type GenerationInputV11a } from "./run.js";
 import * as declCheckStage from "./stages/decl-check.js";
@@ -41,6 +42,7 @@ import { NAME_TABLE_PREVIOUS_DATA_NAMES, NAME_TABLE_SCHEMA_NAME } from "./stages
 import * as semanticCheckStage from "./stages/semantic-check.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
 import { TEST_SPEC_SCHEMA_NAME, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
+import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./stages/write.js";
 import { natureQuestionName } from "../stages/test-suite.js";
 
 afterEach(() => {
@@ -1248,5 +1250,173 @@ describe("(p) 評価口を作る 2 か所の両方に T2 の写像が渡る", ()
     spyEvaluatorInputs();
     const { result } = await runScenario([...head(), structured(acceptAll())]);
     expect(result.outcome.verdict).toBe("full");
+  });
+});
+
+// ── (q) 既定値の要件（default-value。Issue #533）────────────────────────────
+
+describe("(q) 既定値の要件：宣言の default が合えば今までの門で full、違えば不一致で full が出ない", () => {
+  const D_LIST_BASE: RequirementList = {
+    ...BASE_LIST,
+    requirements: [
+      ...BASE_LIST.requirements,
+      { id: "R6", text: DEFAULT_VALUE_REQUIREMENT_TEXT, quote: DEFAULT_VALUE_REQUIREMENT_TEXT, position: { start: 0, end: DEFAULT_VALUE_REQUIREMENT_TEXT.length } },
+    ],
+  };
+  const D_PLAN = planOf(D_LIST_BASE);
+  const D_LIST = requirementsFromPlan(D_PLAN);
+  const D_SOURCE = D_LIST_BASE.requirements.map((requirement) => requirement.text).join("");
+  const D_IDS = [...IDS, "R6"] as const;
+  /** 題材の表に、区分の項目の既定値だけを決める R6（default-value・alpha・ruled）を足した表 */
+  const D_TABLE: NameTable = {
+    ...TABLE,
+    ownership: [...TABLE.ownership, { requirementId: "R6", roles: [{ id: "f.item.kind", basis: "stated", reason: null }] }],
+    verification: [...TABLE.verification, { requirementId: "R6", kind: "default-value", value: "alpha" }],
+    classification: [...TABLE.classification, { requirementId: "R6", nature: "ruled" }],
+  };
+  /** 区分の項目に default を足した宣言（key が null なら足さない） */
+  const dYaml = (key: string | null): string =>
+    key === null ? RUN_YAML : replaced(RUN_YAML, "          beta: ベータ\n", `          beta: ベータ\n        default: ${key}\n`);
+  const r6Test = () =>
+    rawTest({
+      id: "r6-default",
+      requirementId: "R6",
+      targetKind: "field",
+      roleId: "f.item.kind",
+      operation: "validate",
+      observes: "default-value",
+      expected: ok(JSON.stringify("alpha")),
+    });
+  const D_NATURES: readonly NatureRow[] = [...NATURES, { requirementId: "R6", nature: "ruled" }];
+  const t2D = (withR6 = true) => ({
+    classifications: withR6 ? D_NATURES : NATURES,
+    tests: [...r1Tests(), ...r2Tests(), ...r3Tests(), ...r4Tests(), ...(withR6 ? [r6Test()] : [])],
+  });
+  const dHead = (yaml: string): RecordedCall[] => [
+    structured(draftOf(D_LIST, D_TABLE)),
+    structured(acceptAll(D_IDS)),
+    structured(t2D()),
+    structured({ declaration: yaml }),
+  ];
+  async function runD(calls: readonly RecordedCall[], overrides: Partial<GenerationInputV11a> = {}) {
+    return runScenario(calls, { plan: D_PLAN, source: D_SOURCE, ...overrides });
+  }
+  /** 評価口の B4 の結果を記録する（評価口はそのまま） */
+  function spyReports() {
+    const reports: { readonly mismatches: readonly { readonly testId: string; readonly detail: string }[] }[] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      const evaluator = original(input);
+      return {
+        ...evaluator,
+        runTests: (app, context, correspondence) => {
+          const report = evaluator.runTests(app, context, correspondence);
+          reports.push(report);
+          return report;
+        },
+      };
+    });
+    return reports;
+  }
+
+  it("(1) default が期待のキーと合えば今までの門で full。B1 の要求の「固定した試験」に observes が渡り、既定値の試験は v1 の runTests に渡らない", async () => {
+    const passed: string[][] = [];
+    const original = runTestsStage.runTests;
+    vi.spyOn(runTestsStage, "runTests").mockImplementation((input) => {
+      passed.push(input.suite.tests.map((test) => test.id));
+      return original(input);
+    });
+    const { result, recording } = await runD([...dHead(dYaml("alpha")), structured(acceptAll(D_IDS))]);
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(result.summary.exit_code).toBe(0);
+    expect(carryEntriesOf(result.bundle)).toEqual([]);
+    const write = recording.structured.find((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME)!;
+    const shown = dataBlockOf(write.input, WRITE_V11A_DATA_NAMES[2]) as { tests: { id: string; observes: string }[] };
+    expect(shown.tests.map((test) => [test.id, test.observes])).toEqual(
+      t2D().tests.map((test) => [test["id"], test["observes"]]),
+    );
+    expect(shown.tests.find((test) => test.id === "r6-default")?.observes).toBe("default-value");
+    expect(passed.length).toBeGreaterThan(0);
+    for (const ids of passed) expect(ids).not.toContain("r6-default");
+    expectNoAcceptanceMaterial(recording.structured.map((request) => JSON.stringify(request)));
+  });
+
+  it("(1) default が期待のキーと違えば不一致に数えられ、full が出ない", async () => {
+    const reports = spyReports();
+    const { result } = await runD([
+      ...dHead(dYaml("beta")),
+      structured(acceptAll(D_IDS)),
+      repairDone(dYaml("beta")),
+      structured(acceptAll(D_IDS)),
+    ]);
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.summary.verdict).not.toBe("full");
+    expect(reports.length).toBeGreaterThan(0);
+    for (const report of reports) {
+      expect(report.mismatches).toContainEqual({ testId: "r6-default", detail: DEFAULT_VALUE_DETAILS.defaultDiffers });
+    }
+    // default を書かない宣言も不一致
+    const missing = spyReports();
+    const none = await runD([...dHead(dYaml(null)), structured(acceptAll(D_IDS)), repairDone(dYaml(null)), structured(acceptAll(D_IDS))]);
+    expect(none.result.outcome.verdict).not.toBe("full");
+    expect(missing.at(-1)?.mismatches).toContainEqual({ testId: "r6-default", detail: DEFAULT_VALUE_DETAILS.defaultMissing });
+  });
+
+  it("(1) options の外の default を書いた宣言は静的チェックで落ち（既存の固定文）、B4 へ進まず full が出ない", async () => {
+    const codes: string[][] = [];
+    const original = staticCheckStage.runStaticCheck;
+    vi.spyOn(staticCheckStage, "runStaticCheck").mockImplementation(async (declaration) => {
+      const checked = await original(declaration);
+      codes.push(checked.diagnostics.map((diagnostic) => diagnostic.code));
+      return checked;
+    });
+    const { result } = await runD([...dHead(dYaml("gamma")), repairDone(dYaml("gamma"))]);
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.summary.verdict).not.toBe("full");
+    expect(stageIds(result)).not.toContain("run-tests");
+    expect(stageIds(result)).not.toContain("decl-check");
+    expect(codes.length).toBeGreaterThan(0);
+    for (const list of codes) expect(list).toContain("DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS");
+  });
+
+  it("(2) 拒否の配線：T1'' が default-value の要件を weak-verification で 2 回とも拒否すれば持ち越し、T2 の一覧と確かめ方に無く、full が出ない", async () => {
+    const rejectR6 = judgments(D_IDS, { R6: ["weak-verification", "未入力なら保存の時点で alpha になる"] });
+    const { result, recording } = await runD([
+      structured(draftOf(D_LIST, D_TABLE)),
+      structured(rejectR6),
+      structured(draftOf(D_LIST, D_TABLE)),
+      structured(rejectR6),
+      structured(t2D(false)),
+      structured({ declaration: dYaml("alpha") }),
+      structured(acceptAll(IDS)),
+    ]);
+    expect(result.stopped).toBeNull();
+    expect(result.outcome.verdict).toBe("partial");
+    expect(carryEntriesOf(result.bundle)).toEqual([
+      { requirementId: "R6", reasons: [{ origin: "semantic-check", reason: "weak-verification" }] },
+    ]);
+    const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)!;
+    const list = dataBlockOf(t2.input, "要件の一覧") as RequirementList;
+    expect(list.requirements.map((requirement) => requirement.id)).toEqual([...IDS]);
+    const verification = dataBlockOf(t2.input, "要件ごとの確かめ方") as readonly { requirementId: string }[];
+    expect(verification.map((entry) => entry.requirementId)).toEqual([...IDS]);
+    expect(t2.input).not.toContain("default-value");
+  });
+
+  it("(2) 残る要件が全部拒否なら T2 を呼ばない（既存）", async () => {
+    const rejectAll = judgments(
+      D_IDS,
+      Object.fromEntries(D_IDS.map((id) => [id, ["weak-verification", "項目"] as const])),
+    );
+    const { result, recording } = await runD([
+      structured(draftOf(D_LIST, D_TABLE)),
+      structured(rejectAll),
+      structured(draftOf(D_LIST, D_TABLE)),
+      structured(rejectAll),
+    ]);
+    expect(result.stopped?.stage).toBe("carry-over");
+    expect(result.outcome.verdict).toBe("none");
+    expect(schemaNames(recording.structured)).not.toContain(TEST_SPEC_SCHEMA_NAME);
   });
 });

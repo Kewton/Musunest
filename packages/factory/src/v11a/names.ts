@@ -150,9 +150,14 @@ export interface NameTableOwnership {
   readonly roles: readonly NameTableRoleOwnership[];
 }
 
+/** 確かめ方の種類（`default-value` は選択肢の項目の既定値だけを決める要件。Issue #533） */
+export const NAME_TABLE_VERIFICATION_KINDS = ["fixed-test", "structural", "unresolved", "default-value"] as const;
+
 /**
- * 要件ごとの確かめ方（fixed-test／structural＋checks／unresolved＋reason＋constraintIds）。
+ * 要件ごとの確かめ方（fixed-test／structural＋checks／unresolved＋reason＋constraintIds／default-value＋value）。
  * structural の `reason` は v1 の `RequirementVerification` と同じ（fixed-test 以外は理由が要る）。
+ * default-value の `value` は、所属させた選択肢の項目の既定値として期待するキー（その項目の `options` のどれか。
+ * T1' が確かめ、T1'' が要件の文の値と合うかを点検する。v1 の型へは `fixed-test` として写す。Issue #533）。
  */
 export type NameTableVerification =
   | { readonly requirementId: string; readonly kind: "fixed-test" }
@@ -167,7 +172,8 @@ export type NameTableVerification =
       readonly kind: "unresolved";
       readonly reason: string;
       readonly constraintIds: readonly string[];
-    };
+    }
+  | { readonly requirementId: string; readonly kind: "default-value"; readonly value: string };
 
 /** 要件ごとの分類（T1 が要件の文から分類する。Plan の `kind` から導かない。T2 の分類と照らす元。§1.1） */
 export interface NameTableClassification {
@@ -431,6 +437,19 @@ function shapeOfVerification(value: unknown, field: string, problems: Problem[])
     return undefined;
   }
   const kind = value["kind"];
+  if (kind === "default-value") {
+    const key = value["value"];
+    if (!isNonEmptyString(key)) {
+      problems.push({ field: `${field}.value`, message: "既定値で確かめる要件の value は空でない文字列（期待する既定値のキー）であること" });
+      return undefined;
+    }
+    return { kind, value: key };
+  }
+  // default-value でない確かめ方は value を持たない（無いか null。黙って捨てない。Issue #533）
+  if (isOneOf(NAME_TABLE_VERIFICATION_KINDS, kind) && value["value"] !== undefined && value["value"] !== null) {
+    problems.push({ field: `${field}.value`, message: "既定値で確かめる要件でない確かめ方の value は null であること" });
+    return undefined;
+  }
   if (kind === "fixed-test") return { kind };
   if (kind === "structural") {
     const before = problems.length;
@@ -456,7 +475,7 @@ function shapeOfVerification(value: unknown, field: string, problems: Problem[])
     if (problems.length !== before) return undefined;
     return { kind, reason: value["reason"] as string, constraintIds: ids as readonly string[] };
   }
-  problems.push({ field: `${field}.kind`, message: "確かめ方の種類は fixed-test・structural・unresolved のいずれかであること" });
+  problems.push({ field: `${field}.kind`, message: `確かめ方の種類は ${NAME_TABLE_VERIFICATION_KINDS.join("・")} のいずれかであること` });
   return undefined;
 }
 
@@ -736,7 +755,8 @@ function needsEntity(row: NameTableRow): boolean {
  *   (d) 参照（`entity`・`groupBy.field`・`refEntity` が表にあり種類が合う。enum の見出しの元は options を持ち、
  *       月の見出しの元は date）と、型・選択肢・出典の形
  *   (e) 所属の fail-closed（fixed-test・structural は所属 1 件以上、structural は checks ごとに種類の合う所属、
- *       unresolved は理由と文書にある制約 ID。どの要件にも所属しない行）
+ *       unresolved は理由と文書にある制約 ID、default-value は選択肢の項目 1 つとその所属 entity だけを所属させ
+ *       value がその項目の options にあり分類が ruled。どの要件にも所属しない行）
  *   (g) 所属・確かめ方・分類が一覧の全要件にちょうど 1 つ（欠落・重複・一覧に無い要件 ID・未知の分類）
  *
  * (a) 応答の形は `checkNameTableDraftShape`、(f) 要件 ID の付け方は `resolveNameTableDraft` が受け持つ。
@@ -947,9 +967,42 @@ function checkNameTableWith(
   const ownedKinds = (requirementId: string): ReadonlySet<NameTableKind> =>
     new Set(ownedRows(requirementId).flatMap((row) => (row.kind === undefined ? [] : [row.kind])));
   const constraintIds = constraintIdsIn(documents);
+  const natureById = new Map(table.classification.map((entry) => [entry.requirementId, entry.nature] as const));
   /** kind が読めない形で落ちた行を所属させた要件は、その行が満たす可能性が残るので、種類に依る不足を出さない */
   const ownsUnknownKindRow = (requirementId: string): boolean =>
     ownedRows(requirementId).some((row) => row.kind === undefined);
+  /**
+   * default-value の要件（Issue #533）：導いた所属が「選択肢（enum）の項目の行 1 つと、その項目の所属 entity の行」
+   * だけで、value がその項目の options にあり、分類が ruled であること。形で落ちた行を所属させた要件は、その行の
+   * 型が読めないので所属の組み合わせを見ない（形の落ちが別に出ている）
+   */
+  const checkDefaultValueVerification = (
+    entry: Extract<NameTableVerification, { readonly kind: "default-value" }>,
+    field: string,
+    roles: readonly NameTableRoleOwnership[],
+    nature: RequirementNature | undefined,
+  ): void => {
+    if (entry.value.trim() === "") {
+      problems.push({ field: `${field}.value`, message: "既定値で確かめる要件の value が空である" });
+    }
+    if (nature !== undefined && nature !== "ruled") {
+      problems.push({ field, message: "既定値で確かめる要件の分類は ruled であること" });
+    }
+    if (roles.some((role) => !rowById.has(role.id))) return;
+    const owned = roles.map((role) => rowById.get(role.id) as NameTableRow);
+    const enumFields = owned.filter((row) => row.kind === "field" && row.type === "enum");
+    const [only] = enumFields;
+    if (enumFields.length !== 1 || only === undefined) {
+      problems.push({ field, message: "既定値で確かめる要件は、選択肢（enum）の項目をちょうど 1 つ所属させること" });
+      return;
+    }
+    if (owned.some((row) => row !== only && row.id !== only.entity)) {
+      problems.push({ field, message: "既定値で確かめる要件は、選択肢の項目とその所属 entity のほかの行を所属させないこと" });
+    }
+    if (!(only.options ?? []).includes(entry.value)) {
+      problems.push({ field: `${field}.value`, message: "既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い" });
+    }
+  };
   table.verification.forEach((entry, index) => {
     const field = `verification[${entryAt(index)}]`;
     if (verificationById.get(entry.requirementId) !== entry) return;
@@ -992,6 +1045,9 @@ function checkNameTableWith(
             problems.push({ field: `${field}.constraintIds[${cIndex}]`, message: "制約 ID が文書に無い" });
           }
         });
+        return;
+      case "default-value":
+        checkDefaultValueVerification(entry, field, derived.get(entry.requirementId)?.roles ?? [], natureById.get(entry.requirementId));
         return;
     }
   });

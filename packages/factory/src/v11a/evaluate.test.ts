@@ -13,7 +13,7 @@ import type { EvaluationContext } from "../stages/tools.js";
 import { FIXTURE_YAML, fixtureList, fixtureTable, normalizedFixture } from "./__tests__/fixtures.js";
 import { bindTestsById, correspondenceFromTable } from "./bind-by-id.js";
 import { identityMappings, toRoleEntries, toV1 } from "./convert.js";
-import { UNMAPPED_OBSERVES_DETAIL, createV11aEvaluator } from "./evaluate.js";
+import { DEFAULT_VALUE_DETAILS, UNMAPPED_OBSERVES_DETAIL, createV11aEvaluator, judgeDefaultValue } from "./evaluate.js";
 import type { TestObserves } from "./stages/test-spec.js";
 
 afterEach(() => {
@@ -331,5 +331,167 @@ describe("観測する性質の写像（observes。必須。Issue #526）", () =
     expect(second).toEqual(first);
     expect(first.testRun?.unresolved.map((entry) => entry.testId)).toEqual(["t-shows", "t-unknown"]);
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("既定値の試験（observes が default-value）は v1 に渡さず、宣言の default と照合する（Issue #533）", () => {
+  /** 区分の項目の既定値を alpha にした宣言（静的チェックを通る） */
+  const withDefault = (key: string | null, source: string = YAML): string => {
+    const from = "          beta: ベータ\n";
+    if (source.split(from).length !== 2) throw new Error("前提が壊れた：置き換えの元が 1 か所でない");
+    return key === null ? source : source.replace(from, `${from}        default: ${key}\n`);
+  };
+  const DYAML = withDefault("alpha");
+
+  function defaultTest(id: string, expected: unknown, roleId = "f.item.kind"): FixedTest {
+    return {
+      id,
+      target: { requirementId: "R6", kind: "field", roleId },
+      kind: "normal",
+      operation: "validate",
+      clock: CLOCK,
+      input: {},
+      inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: expected },
+    };
+  }
+
+  /** 組の途中（3 番目）に既定値の試験を差した組 */
+  const suiteWith = (test: FixedTest): TestSuite => ({ ...SUITE, tests: [...SUITE.tests.slice(0, 2), test, ...SUITE.tests.slice(2)] });
+  const observesWith = (testId: string): ReadonlyMap<string, TestObserves> => new Map([...OBSERVES, [testId, "default-value" as const]]);
+
+  /** 表に、宣言に無い選択肢の項目の行を足したもの（項目が宣言に無い例） */
+  const TABLE_WITH_EXTRA = {
+    ...TABLE,
+    rows: [
+      ...TABLE.rows,
+      { ...TABLE.rows.find((row) => row.id === "f.item.kind")!, id: "f.item.extra", name: "extra" },
+    ],
+  };
+
+  async function evaluateWith(source: string, test: FixedTest, table = TABLE) {
+    const app = await normalizedFixture(source);
+    const suite = suiteWith(test);
+    const context = contextOf(listWithout(), suite);
+    const evaluator = createV11aEvaluator({ table, observes: observesWith(test.id) });
+    const checked = evaluator.nameCheck(app, context);
+    const correspondence = { entries: checked.entries, misses: checked.misses };
+    return { app, suite, context, evaluator, correspondence, report: evaluator.runTests(app, context, correspondence) };
+  }
+
+  it("default が期待のキーと一致なら、既定値の試験の不一致・未解決は 0", async () => {
+    const { report } = await evaluateWith(DYAML, defaultTest("t-default", "alpha"));
+    expect(report.mismatches.filter((entry) => entry.testId === "t-default")).toEqual([]);
+    expect(report.unresolved.filter((entry) => entry.testId === "t-default")).toEqual([]);
+    expect(report.routes.filter((entry) => entry.testId === "t-default")).toEqual([]);
+    expect(report.structural.filter((entry) => entry.testId === "t-default")).toEqual([]);
+  });
+
+  it("default が別のキー・default が無い・項目が選択肢でない・項目が宣言に無い、はそれぞれ不一致（固定文。行き先は v1 の不一致と同じ）", async () => {
+    const cases = [
+      { source: withDefault("beta"), test: defaultTest("t-default", "alpha"), detail: DEFAULT_VALUE_DETAILS.defaultDiffers },
+      { source: YAML, test: defaultTest("t-default", "alpha"), detail: DEFAULT_VALUE_DETAILS.defaultMissing },
+      { source: DYAML, test: defaultTest("t-default", "alpha", "f.item.title"), detail: DEFAULT_VALUE_DETAILS.notEnum },
+      { source: DYAML, test: defaultTest("t-default", "alpha", "f.item.extra"), detail: DEFAULT_VALUE_DETAILS.fieldMissing, table: TABLE_WITH_EXTRA },
+    ];
+    // 対照：v1 の不一致の行き先（t-when-bad は v1 が不一致にする）
+    const v1Mismatch = (await evaluateWith(DYAML, defaultTest("t-default", "alpha"))).report.routes.find(
+      (entry) => entry.testId === "t-when-bad",
+    );
+    expect(v1Mismatch?.route).toBe("missing-element");
+    for (const entry of cases) {
+      const { report } = await evaluateWith(entry.source, entry.test, entry.table);
+      expect(report.mismatches.filter((item) => item.testId === "t-default")).toEqual([{ testId: "t-default", detail: entry.detail }]);
+      expect(report.unresolved.filter((item) => item.testId === "t-default")).toEqual([]);
+      expect(report.routes.filter((item) => item.testId === "t-default")).toEqual([
+        { testId: "t-default", route: v1Mismatch?.route, detail: entry.detail },
+      ]);
+    }
+    // 固定文はキー・名前を埋めない
+    for (const detail of Object.values(DEFAULT_VALUE_DETAILS)) {
+      for (const value of ["alpha", "beta", "kind", "item", "extra", "title"]) expect(detail).not.toContain(value);
+    }
+  });
+
+  it("期待が文字列でない試験は未解決（行き先は v1 の未解決と同じ）", async () => {
+    const v1Unresolved = (await evaluateWith(DYAML, defaultTest("t-default", "alpha"))).report.routes.find(
+      (entry) => entry.testId === "t-unknown",
+    );
+    expect(v1Unresolved?.route).toBe("ambiguity");
+    for (const expected of [1, null, true, ["alpha"]]) {
+      const { report } = await evaluateWith(DYAML, defaultTest("t-default", expected));
+      expect(report.unresolved.filter((item) => item.testId === "t-default")).toEqual([
+        { testId: "t-default", detail: DEFAULT_VALUE_DETAILS.expectedNotString },
+      ]);
+      expect(report.mismatches.filter((item) => item.testId === "t-default")).toEqual([]);
+      expect(report.routes.filter((item) => item.testId === "t-default").map((item) => item.route)).toEqual([v1Unresolved?.route]);
+    }
+    // 期待が誤りコードの試験も文字列のキーでないので未解決
+    const errorTest = { ...defaultTest("t-default", "alpha"), expected: { kind: "error" as const, code: "E" } };
+    const { report } = await evaluateWith(DYAML, errorTest);
+    expect(report.unresolved.filter((item) => item.testId === "t-default").map((item) => item.detail)).toEqual([
+      DEFAULT_VALUE_DETAILS.expectedNotString,
+    ]);
+  });
+
+  it("ほかの試験の結果は、既定値の試験を外した組の v1 の結果と試験 ID ごとに深く等しく、順は組の順。既定値の試験は v1 の runTests に渡らない", async () => {
+    const passed: string[][] = [];
+    const original = runTestsStage.runTests;
+    vi.spyOn(runTestsStage, "runTests").mockImplementation((input) => {
+      passed.push(input.suite.tests.map((test) => test.id));
+      return original(input);
+    });
+    const { app, suite, correspondence, report } = await evaluateWith(withDefault("beta"), defaultTest("t-default", "alpha"));
+    expect(passed).toEqual([SUITE.tests.map((test) => test.id)]);
+    // 対照：既定値の試験を外した組を v1 に表の id の結び付けで直接流す
+    const bound = bindTestsById(app, TABLE, SUITE);
+    const direct = original({
+      app,
+      suite: SUITE,
+      correspondence,
+      mappings: identityMappings(TABLE),
+      roles: toRoleEntries(TABLE),
+      bindings: { tests: bound.bindings, entityNames: bound.entityNames },
+    });
+    const pick = (from: typeof report, testId: string) => ({
+      mismatches: from.mismatches.filter((entry) => entry.testId === testId),
+      unresolved: from.unresolved.filter((entry) => entry.testId === testId),
+      routes: from.routes.filter((entry) => entry.testId === testId),
+      structural: from.structural.filter((entry) => entry.testId === testId),
+    });
+    for (const test of SUITE.tests) expect(pick(report, test.id)).toEqual(pick(direct, test.id));
+    // 順は組の順（既定値の試験は組の 3 番目に合流する）
+    const order = suite.tests.map((test) => test.id);
+    for (const list of [report.mismatches, report.unresolved, report.routes]) {
+      const indices = list.map((entry) => order.indexOf(entry.testId));
+      expect([...indices].sort((a, b) => a - b)).toEqual(indices);
+    }
+    expect(report.mismatches.map((entry) => entry.testId)).toEqual(["t-when-bad", "t-default"]);
+  });
+
+  it("B5 の道具・版の再検査（evaluate・report）が同じ結果で、同じ入力で 2 回同じ結果。bindTests を呼ばない", async () => {
+    const spy = vi.spyOn(bindModule, "bindTests");
+    const { app, context, evaluator, report } = await evaluateWith(withDefault("beta"), defaultTest("t-default", "alpha"));
+    const evaluated = await evaluator.evaluate(app, { source: withDefault("beta") }, context);
+    expect(evaluated.testRun).toEqual(report);
+    const first = await evaluator.report({ source: withDefault("beta") }, context);
+    const second = await evaluator.report({ source: withDefault("beta") }, context);
+    expect(first.testRun).toEqual(report);
+    expect(second).toEqual(first);
+    expect(spy).not.toHaveBeenCalled();
+    // 純粋な関数として 2 回同じ判定
+    const test = defaultTest("t-default", "alpha");
+    expect(judgeDefaultValue(app, TABLE, test)).toEqual(judgeDefaultValue(app, TABLE, test));
+  });
+
+  it("options の外の default は静的チェック（既存の固定文）で落ち、評価に進まない（B4 では照合しない）", async () => {
+    const source = withDefault("gamma");
+    const evaluator = createV11aEvaluator({ table: TABLE, observes: observesWith("t-default") });
+    const report = await evaluator.report({ source }, contextOf(listWithout(), suiteWith(defaultTest("t-default", "gamma"))));
+    expect(report.staticCheck.passed).toBe(false);
+    expect(report.staticCheck.diagnostics.map((diagnostic) => diagnostic.code)).toContain("DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS");
+    expect(report.testRun).toBeNull();
+    expect(report.correspondence).toBeNull();
   });
 });
