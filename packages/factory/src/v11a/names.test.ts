@@ -12,6 +12,8 @@ import {
   FIXTURE_CONSTRAINT_ID,
   FIXTURE_DOCUMENTS,
   draftOf,
+  fixtureDefaultValueList,
+  fixtureDefaultValueTable,
   fixtureList,
   fixtureListWithRequestQuotes,
   fixtureRows,
@@ -848,6 +850,139 @@ describe("形で落ちた行の派生だけを抑える（PR #532 のレビュ�
     it("name だけを壊しても、独立した rows[2] の孤立は報告する", () => {
       // 直す前：[nameShape]（rows[2] の孤立が消えた）
       expect(inspect(misreferenced(42))).toEqual({ ok: false, problems: [nameShape, orphanOther] });
+    });
+  });
+});
+
+describe("既定値の確かめ方 default-value（T1' の所属の fail-closed と下書きの形。Issue #533）", () => {
+  const dlist = fixtureDefaultValueList();
+  /** R6（一覧の 6 番目）の確かめ方の位置 */
+  const R6 = "verification[5]";
+  const withR6 = (patch: { roles?: readonly string[]; value?: string; nature?: "ruled" | "existence-only" }): NameTable => {
+    const table = fixtureDefaultValueTable(patch.value ?? "alpha");
+    return {
+      ...table,
+      ownership: table.ownership.map((entry) =>
+        entry.requirementId === "R6" && patch.roles !== undefined
+          ? { ...entry, roles: patch.roles.map((id) => ({ id, basis: "stated" as const, reason: null })) }
+          : entry,
+      ),
+      classification: table.classification.map((entry) =>
+        entry.requirementId === "R6" && patch.nature !== undefined ? { ...entry, nature: patch.nature } : entry,
+      ),
+    };
+  };
+  const VALUES = ["alpha", "beta", "gamma"];
+
+  it("正例：enum の項目 1 つ（value が options にある）と entity だけを所属させ、分類が ruled なら問題 0", () => {
+    expect(checkNameTable(dlist, fixtureDefaultValueTable(), FIXTURE_DOCUMENTS)).toEqual([]);
+    // 所属 entity を名指しで書いても同じ（entity はコードが足すが、書いてもよい）
+    expect(checkNameTable(dlist, withR6({ roles: ["f.item.kind", "e.item"] }), FIXTURE_DOCUMENTS)).toEqual([]);
+    // 下書きから一覧の順で要件 ID を付けると、value つきの確かめ方に戻る
+    const result = inspectNameTable(dlist, draftOf(dlist, fixtureDefaultValueTable()), FIXTURE_DOCUMENTS);
+    expect(result).toEqual({ ok: true, table: fixtureDefaultValueTable() });
+    if (!result.ok) return;
+    expect(result.table.verification[5]).toEqual({ requirementId: "R6", kind: "default-value", value: "alpha" });
+  });
+
+  it("負例：ほかの行（操作・画面・別の項目）も所属させると落ちる", () => {
+    for (const other of ["o.addItem", "s.items", "f.item.amount"]) {
+      expectProblem(
+        withR6({ roles: ["f.item.kind", other] }),
+        R6,
+        "既定値で確かめる要件は、選択肢の項目とその所属 entity のほかの行を所属させないこと",
+        VALUES,
+        dlist,
+      );
+    }
+  });
+
+  it("負例：enum でない項目だけ・所属が無いと落ちる", () => {
+    for (const roles of [["f.item.amount"], []]) {
+      expectProblem(
+        withR6({ roles }),
+        R6,
+        "既定値で確かめる要件は、選択肢（enum）の項目をちょうど 1 つ所属させること",
+        VALUES,
+        dlist,
+      );
+    }
+  });
+
+  it("負例：value が options に無いと落ちる（キーを埋めない）", () => {
+    expectProblem(
+      withR6({ value: "gamma" }),
+      `${R6}.value`,
+      "既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い",
+      VALUES,
+      dlist,
+    );
+  });
+
+  it("負例：分類が existence-only だと落ちる", () => {
+    expectProblem(withR6({ nature: "existence-only" }), R6, "既定値で確かめる要件の分類は ruled であること", VALUES, dlist);
+  });
+
+  it("負例：value が空の文字列・null・無い下書きは形で落ちる。型付きの表の空の value も落ちる", () => {
+    const draft = draftOf(dlist, fixtureDefaultValueTable());
+    for (const value of ["", "  ", null, undefined]) {
+      const broken = {
+        ...draft,
+        requirements: draft.requirements.map((entry, index) =>
+          index === 5 ? { ...entry, verification: { kind: "default-value", ...(value === undefined ? {} : { value }) } } : entry,
+        ),
+      };
+      const problem = {
+        field: "requirements[5].verification.value",
+        message: "既定値で確かめる要件の value は空でない文字列（期待する既定値のキー）であること",
+      };
+      expect(checkNameTableDraftShape(broken)).toEqual({ ok: false, problems: [problem] });
+      const inspected = inspectNameTable(dlist, broken, FIXTURE_DOCUMENTS);
+      expect(inspected.ok).toBe(false);
+      if (!inspected.ok) expect(inspected.problems).toContainEqual(problem);
+    }
+    expectProblem(withR6({ value: "" }), `${R6}.value`, "既定値で確かめる要件の value が空である", VALUES, dlist);
+  });
+
+  it("ほかの種類で value が null でない下書きは固定文で落ち、null・無しは今までどおり通る", () => {
+    const draft = draftOf(list, fixtureTable());
+    // R1 は fixed-test、R2 は structural、R5 は unresolved
+    for (const index of [0, 1, 4]) {
+      const broken = {
+        ...draft,
+        requirements: draft.requirements.map((entry, at) =>
+          at === index ? { ...entry, verification: { ...entry.verification, value: "alpha" } } : entry,
+        ),
+      };
+      const problem = {
+        field: `requirements[${index}].verification.value`,
+        message: "既定値で確かめる要件でない確かめ方の value は null であること",
+      };
+      expect(checkNameTableDraftShape(broken)).toEqual({ ok: false, problems: [problem] });
+      expectNoValues([problem], VALUES);
+    }
+    // strict の schema の形（ほかの種類も value の欄を null で持つ）は通り、fixture の表に戻る
+    const withNull = {
+      ...draft,
+      requirements: draft.requirements.map((entry) => ({ ...entry, verification: { ...entry.verification, value: null } })),
+    };
+    expect(inspectNameTable(list, withNull, FIXTURE_DOCUMENTS)).toEqual({ ok: true, table: fixtureTable() });
+  });
+
+  it("確かめ方の種類の固定文に default-value が入り、知らない種類は今までどおり落ちる", () => {
+    const draft = draftOf(list, fixtureTable());
+    const broken = {
+      ...draft,
+      requirements: draft.requirements.map((entry, at) => (at === 0 ? { ...entry, verification: { kind: "other" } } : entry)),
+    };
+    expect(checkNameTableDraftShape(broken)).toEqual({
+      ok: false,
+      problems: [
+        {
+          field: "requirements[0].verification.kind",
+          message: "確かめ方の種類は fixed-test・structural・unresolved・default-value のいずれかであること",
+        },
+      ],
     });
   });
 });

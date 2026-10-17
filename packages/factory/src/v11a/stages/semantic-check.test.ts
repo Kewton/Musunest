@@ -10,8 +10,15 @@ import { describe, expect, it } from "vitest";
 import type { RequirementList } from "../../pipeline.js";
 import { ruleDefinitionDefects } from "../../stages/prompt.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
-import { FIXTURE_DOCUMENTS, fixtureList, fixtureTable } from "../__tests__/fixtures.js";
-import { nameTableSha256, type NameTable } from "../names.js";
+import {
+  FIXTURE_DOCUMENTS,
+  fixtureDefaultValueList,
+  fixtureDefaultValueTable,
+  fixtureList,
+  fixtureTable,
+} from "../__tests__/fixtures.js";
+import { deriveCarryOver } from "../carry-over.js";
+import { checkNameTable, nameTableSha256, type NameTable } from "../names.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 import {
   SEMANTIC_CHECK_RULE_DEFINITIONS,
@@ -245,5 +252,89 @@ describe("T1'' の完全性（形の落ち）", () => {
     const { outcome } = await run(fixtureTable(), [{ judgments: TARGETS.map(accept) }]);
     if (!outcome.ok) throw new Error("通るはず");
     expect(outcome.value.judgments.some((judgment) => judgment.requirementId === "R5")).toBe(false);
+  });
+});
+
+describe("T1'' の default-value の受理の条件（拒否の配線の検証。モデルの判定の精度の実証ではない。Issue #533）", () => {
+  /** 既定値のほかに入力の制約を含む要件 R6（形と所属は正しい） */
+  const WITH_CONSTRAINT = "項目の区分は、未入力なら保存の時点で alpha になり、金額が 0 より大きいときだけ beta を選べる。";
+  const CONSTRAINT_QUOTE = "金額が 0 より大きいときだけ beta を選べる";
+  /** 文は alpha、value は beta（形と所属は正しい） */
+  const VALUE_QUOTE = "未入力なら保存の時点で alpha になる";
+  const DEFAULT_TARGETS = [...TARGETS, "R6"];
+
+  async function runDefault(list: RequirementList, table: NameTable, outputs: readonly unknown[]) {
+    const recording = createRecordingClient(outputs.map(structured));
+    const outcome = await runSemanticCheck({
+      plan: planOf(list),
+      list,
+      table,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(recording.client),
+    });
+    return { outcome, requests: recording.structured };
+  }
+
+  const cases = [
+    { name: "既定値のほかに入力の制約を含む要件", list: fixtureDefaultValueList(WITH_CONSTRAINT), value: "alpha", quote: CONSTRAINT_QUOTE },
+    { name: "value が要件の文の値と違う要件", list: fixtureDefaultValueList(), value: "beta", quote: VALUE_QUOTE },
+  ] as const;
+
+  for (const entry of cases) {
+    it(`${entry.name}：形と所属は T1' を通り、送るデータと規則を確かめ、偽物の weak-verification が形の検査を通って持ち越しになる`, async () => {
+      const table = fixtureDefaultValueTable(entry.value);
+      // 前提：形と所属は正しい（T1' は問題 0）
+      expect(checkNameTable(entry.list, table, FIXTURE_DOCUMENTS)).toEqual([]);
+      const rejection = [...DEFAULT_TARGETS.filter((id) => id !== "R6").map(accept), reject("R6", "weak-verification", entry.quote)];
+      const { outcome, requests } = await runDefault(entry.list, table, [{ judgments: rejection }]);
+      expect(requests).toHaveLength(1);
+      const request = requests[0]!;
+      const blocks = dataBlocks(request.input);
+      // 送る要件の文
+      const texts = JSON.parse(blocks.find((block) => block.name === "要件の文と引用")!.text) as { requirementId: string; text: string }[];
+      expect(texts.find((item) => item.requirementId === "R6")?.text).toBe(entry.list.requirements[5]?.text);
+      // 確かめ方（value つき。既存の写し）
+      const verification = JSON.parse(blocks.find((block) => block.name === "確かめ方")!.text) as Record<string, unknown>[];
+      expect(verification.find((item) => item["requirementId"] === "R6")).toEqual({
+        requirementId: "R6",
+        kind: "default-value",
+        value: entry.value,
+      });
+      // 規則の文（ほかの決まりを含む要件・文と違う value は受理しない）
+      const rule = request.rules?.find((text) => text.includes("default-value")) ?? "";
+      expect(rule).toContain("value が要件の文の値と合うときだけ受理する");
+      expect(rule).toContain("既定値のほかの決まり（入力の制約など）を含む要件");
+      expect(rule).toContain("value が要件の文の値と違う要件は受理せず、weak-verification で拒否する");
+      // 偽物の判定の拒否は形の検査を通る
+      if (!outcome.ok) throw new Error("通るはず");
+      expect(outcome.value.targets).toEqual(DEFAULT_TARGETS);
+      expect(outcome.value.judgments.at(-1)).toEqual({ requirementId: "R6", verdict: "reject", kind: "weak-verification", quote: entry.quote });
+      // 拒否は持ち越しへ流れる（共有の区分の項目は R1 も所属させるので除かれない）
+      const carry = await deriveCarryOver({ list: entry.list, table, semanticCheck: { tableSha256: outcome.value.tableSha256, judgments: outcome.value.judgments } });
+      expect(carry.entries.map((item) => item.requirementId)).toEqual(["R5", "R6"]);
+      expect(carry.excludedRowIds).toEqual([]);
+      expectNoAcceptanceMaterial([request.input, ...(request.rules ?? [])]);
+    });
+  }
+
+  it("受理すれば持ち越しにならない。拒否の種類の数は 3 のまま", async () => {
+    const list = fixtureDefaultValueList();
+    const table = fixtureDefaultValueTable();
+    const { outcome } = await runDefault(list, table, [{ judgments: DEFAULT_TARGETS.map(accept) }]);
+    if (!outcome.ok) throw new Error("通るはず");
+    const carry = await deriveCarryOver({ list, table, semanticCheck: { tableSha256: outcome.value.tableSha256, judgments: outcome.value.judgments } });
+    expect(carry.entries.map((item) => item.requirementId)).toEqual(["R5"]);
+    expect(SEMANTIC_REJECTION_KINDS).toHaveLength(3);
+    expect(SEMANTIC_CHECK_SCHEMA.properties.judgments.items.properties.kind.enum).toEqual([...SEMANTIC_REJECTION_KINDS, null]);
+    expect(ruleDefinitionDefects(SEMANTIC_CHECK_RULE_DEFINITIONS)).toEqual([]);
+  });
+
+  it("default-value の要件の判定を欠いた応答は今までどおり形の落ち（2 回で malformed）", async () => {
+    const list = fixtureDefaultValueList();
+    const partial = { judgments: TARGETS.map(accept) };
+    const { outcome } = await runDefault(list, fixtureDefaultValueTable(), [partial, partial]);
+    if (outcome.ok || outcome.failure.kind !== "malformed") throw new Error("malformed でない");
+    // 位置は点検の対象の中の添字（R5 は対象に無いので R6 は 5 番目）
+    expect(outcome.failure.problems).toContainEqual({ field: "requirements[4]", message: "判定が無い要件がある" });
   });
 });

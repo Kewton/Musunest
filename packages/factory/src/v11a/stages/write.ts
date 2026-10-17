@@ -31,6 +31,7 @@ import {
 import { utf8ByteLength } from "../../stages/write.js";
 import { sha256Hex } from "@musunest/spec-engine";
 import type { NameTable } from "../names.js";
+import type { TestObserves } from "./test-spec.js";
 
 /** B1 の JSON Schema の名前 */
 export const WRITE_V11A_SCHEMA_NAME = "declaration-v11a";
@@ -96,6 +97,12 @@ export const WRITE_V11A_RULE_DEFINITIONS: readonly RuleDefinition[] = [
     why: "宣言を declaration 欄に原文で入れさせ、前置きを付けさせない（§2.2）",
     since: "Issue #509",
   },
+  {
+    id: "R-w11-10",
+    text: "固定した試験のうち observes が default-value の試験は、対象の選択肢の項目の default に、その試験の期待（expected.value）のキーを書くことを求める。",
+    why: "既定値の試験は宣言の選択肢の項目の default と照合する（B4）ので、builder に default を書く根拠を試験から渡す（方法論 03 §1 の H2。Issue #533）",
+    since: "Issue #533",
+  },
 ];
 
 /** B1 に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
@@ -122,6 +129,8 @@ export interface WriteV11aInput {
   readonly table: NameTable;
   /** 固定した試験 */
   readonly suite: TestSuite;
+  /** 観測する性質（T2 で固定した試験 ID → 性質の写像。データ「固定した試験」の各試験に添える。必須。Issue #533） */
+  readonly observes: ReadonlyMap<string, TestObserves>;
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
   /** 形に落ちた応答を 1 候補 1 回、落ちた時点で受け取る任意の口（Issue #501 の作法。要求・回数・結果に効かない） */
@@ -166,12 +175,20 @@ function tableRowsForWriter(table: NameTable): readonly unknown[] {
   }));
 }
 
+/**
+ * 固定した試験に、試験ごとの観測する性質を添える（組の欄は変えず、各試験の末尾に `observes` を足す。写像に無い
+ * 試験は null。Issue #533）
+ */
+function suiteWithObserves(suite: TestSuite, observes: ReadonlyMap<string, TestObserves>): unknown {
+  return { ...suite, tests: suite.tests.map((test) => ({ ...test, observes: observes.get(test.id) ?? null })) };
+}
+
 /** B1 のデータ（確定した仕様・名前の表・固定した試験の順） */
 function buildData(input: WriteV11aInput): readonly PromptData[] {
   return [
     { name: WRITE_V11A_DATA_NAMES[0], text: serializeJson(input.list) },
     { name: WRITE_V11A_DATA_NAMES[1], text: serializeJson(tableRowsForWriter(input.table)) },
-    { name: WRITE_V11A_DATA_NAMES[2], text: serializeJson(input.suite) },
+    { name: WRITE_V11A_DATA_NAMES[2], text: serializeJson(suiteWithObserves(input.suite, input.observes)) },
   ];
 }
 

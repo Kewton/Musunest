@@ -17,15 +17,23 @@ import { createFakeJudge } from "../../judge-fake.js";
 import type { Judge, JudgeAnswer, JudgeRequest } from "../../judge.js";
 import type { LlmStructuredRequest } from "../../llm.js";
 import type { RequirementList } from "../../pipeline.js";
-import { ruleDefinitionDefects, ruleTexts, type RejectedCandidate } from "../../stages/prompt.js";
+import { ruleDefinitionDefects, ruleTexts, type Problem, type RejectedCandidate } from "../../stages/prompt.js";
 import {
   NATURE_JUDGE_THRESHOLD,
   TEST_SUITE_RULE_DEFINITIONS,
+  checkSuitePlan,
+  reconcileNatures,
   runTestSuite,
   natureQuestionName,
 } from "../../stages/test-suite.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
-import { FIXTURE_DOCUMENTS, fixtureList, fixtureTable } from "../__tests__/fixtures.js";
+import {
+  FIXTURE_DOCUMENTS,
+  fixtureDefaultValueList,
+  fixtureDefaultValueTable,
+  fixtureList,
+  fixtureTable,
+} from "../__tests__/fixtures.js";
 import { deriveCarryOver, pruneForCarryOver, type CarryOver } from "../carry-over.js";
 import { coverageUnitsOf } from "../coverage.js";
 import { canonicalJson, nameTableSha256, type NameTable } from "../names.js";
@@ -41,8 +49,14 @@ import {
   TEST_SPEC_RULE_DEFINITIONS,
   TEST_SPEC_SCHEMA,
   TEST_SPEC_SCHEMA_NAME,
+  DEFAULT_VALUE_EXEMPT_MESSAGES,
+  DEFAULT_VALUE_TEST_MESSAGES,
   checkClassificationCompleteness,
   checkEvaluability,
+  checkTestSpecOutput,
+  defaultValueTargetsOf,
+  exemptDefaultValueProblems,
+  DEFAULT_VALUE_NOT_ALLOWED_MESSAGE,
   runTestSpec,
   testSuiteSha256,
   type TestObserves,
@@ -452,21 +466,26 @@ function bareTest(id: string, targetKind: string, operation: string, check?: Str
 
 /** 評価可能性の固定文（値を埋めない） */
 const FIXED_MESSAGES: readonly string[] = [
-  "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態・項目の既定値の試験は作らない）",
+  "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態の試験は作らない）",
   "（対象の種類・操作・観測する性質）の組が評価の方法の表に無い",
 ];
 
 describe("評価可能性（対象の種類・操作・observes を評価の方法の表に照らす。§2.3 の (i)）", () => {
   it("表にある組の全部が通り、表に無い組（未対応の性質を含む）は全部が固定文で落ちる（全組を列挙）", () => {
     const listed = new Set(EVALUABLE_COMBINATIONS.map((entry) => `${entry.targetKind}|${entry.operation}|${entry.observes}`));
-    expect(listed.size).toBe(8);
+    // 8 組に（項目・validate・default-value）を足した 9 組（Issue #533）
+    expect(listed.size).toBe(9);
+    expect(listed.has("field|validate|default-value")).toBe(true);
     let passed = 0;
     for (const targetKind of TEST_TARGET_KINDS) {
       for (const operation of TEST_OPERATIONS.filter((candidate) => candidate !== "structure")) {
         for (const observes of TEST_OBSERVES) {
           const test = bareTest("t", targetKind, operation);
           const problems = checkEvaluability({ tests: [test] }, new Map([["t", observes]]));
-          if (listed.has(`${targetKind}|${operation}|${observes}`)) {
+          if (observes === "default-value") {
+            // 表（確かめ方）を渡さなければ、既定値の試験はどの組でも固定文で落ちる（Issue #533）
+            expect(problems).toEqual([{ field: "tests[0].observes", message: DEFAULT_VALUE_NOT_ALLOWED_MESSAGE }]);
+          } else if (listed.has(`${targetKind}|${operation}|${observes}`)) {
             expect(problems).toEqual([]);
             passed += 1;
           } else {
@@ -478,17 +497,23 @@ describe("評価可能性（対象の種類・操作・observes を評価の方�
         }
       }
     }
-    expect(passed).toBe(EVALUABLE_COMBINATIONS.length);
+    // 表を渡さない走査では、既定値の組だけが通らない
+    expect(passed).toBe(EVALUABLE_COMBINATIONS.length - 1);
   });
 
-  it("state-after-set・default-value は、どの組でも未対応の固定文で落ちる", () => {
-    for (const observes of ["state-after-set", "default-value"] as const) {
-      const problems = checkEvaluability({ tests: [bareTest("t", "operation", "action")] }, new Map([["t", observes]]));
-      expect(problems).toEqual([
-        {
-          field: "tests[0].observes",
-          message: "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態・項目の既定値の試験は作らない）",
-        },
+  it("state-after-set はどの組でも未対応の固定文で落ちる。default-value は確かめ方が fixed-test の要件では固定文で落ちる（Issue #533 で読み替え）", () => {
+    const problems = checkEvaluability({ tests: [bareTest("t", "operation", "action")] }, new Map([["t", "state-after-set" as const]]));
+    expect(problems).toEqual([
+      {
+        field: "tests[0].observes",
+        message: "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態の試験は作らない）",
+      },
+    ]);
+    // 題材の表の R1 は確かめ方が fixed-test。その要件の選択肢の項目に既定値の試験を作っても落ちる
+    for (const [targetKind, operation] of [["operation", "action"], ["field", "validate"]] as const) {
+      const test = { ...bareTest("t", targetKind, operation), target: { requirementId: "R1", kind: targetKind, roleId: "f.item.kind" } } as FixedTest;
+      expect(checkEvaluability({ tests: [test] }, new Map([["t", "default-value" as const]]), fixtureTable())).toEqual([
+        { field: "tests[0].observes", message: DEFAULT_VALUE_NOT_ALLOWED_MESSAGE },
       ]);
     }
   });
@@ -537,7 +562,7 @@ describe("評価可能性（対象の種類・操作・observes を評価の方�
     expect(outcome.failure.problems).toEqual([
       {
         field: "tests[4].observes",
-        message: "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態・項目の既定値の試験は作らない）",
+        message: "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態の試験は作らない）",
       },
     ]);
   });
@@ -1101,5 +1126,312 @@ describe("onDropped・onRejected は v1 の ②' と同じ回数で呼ばれ、�
       ["content", 2],
     ]);
     expect(seen.at(-1)?.problems.map(({ reference: _reference, ...problem }) => problem)).toEqual(outcome.failure.problems);
+  });
+});
+
+// ── 既定値の要件（default-value。Issue #533）─────────────────────────────
+
+describe("既定値の要件：表の確かめ方が default-value の要件にだけ既定値の試験を許す（Issue #533）", () => {
+  const DLIST = fixtureDefaultValueList();
+  const DPLAN = fixturePlan(DLIST);
+  const DTABLE = fixtureDefaultValueTable();
+  /** 持ち越しを除いた一覧での R6 の位置（R5 は unresolved で持ち越し） */
+  const R6_AT = "requirements[4]";
+  /** 組の中の R6 の既定値の試験の位置（R1 3 本・R2 1 本・R3 3 本・R4 3 本のあと） */
+  const T_AT = "tests[10]";
+  const UNSUPPORTED =
+    "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態の試験は作らない）";
+
+  /** 持ち越し（R5 は表の unresolved。`rejected` は表の意味の点検の拒否） */
+  async function carryFor(table: NameTable, rejected: readonly string[] = []): Promise<CarryOver> {
+    const tableSha256 = await nameTableSha256(table);
+    const targets = table.verification.filter((entry) => entry.kind !== "unresolved").map((entry) => entry.requirementId);
+    return deriveCarryOver({
+      list: DLIST,
+      table,
+      semanticCheck: {
+        tableSha256,
+        judgments: targets.map((requirementId) =>
+          rejected.includes(requirementId)
+            ? { requirementId, verdict: "reject" as const, kind: "weak-verification", quote: "alpha" }
+            : { requirementId, verdict: "accept" as const },
+        ),
+      },
+    });
+  }
+
+  /** 既定値の試験（正しい形：normal・validate・default-value・期待 ok の JSON の文字列・入力が空・参照データが空） */
+  const r6Default = (patch: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: "r6-default",
+    target: { requirementId: "R6", kind: "field", roleId: "f.item.kind" },
+    kind: "normal",
+    operation: "validate",
+    clock: "2026-09-16T12:00:00+09:00",
+    input: "{}",
+    inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: [] },
+    referenceData: [],
+    expected: { kind: "ok", value: JSON.stringify("alpha"), code: null },
+    assertion: null,
+    observes: "default-value",
+    ...patch,
+  });
+  const D_NATURES: readonly NatureRow[] = [...T1_NATURES, { requirementId: "R6", nature: "ruled" }];
+  const others = (r3 = r3Action()) => [...r1Validate(), ...r2Structure(), ...r3, ...r4Compute()];
+  const dResponse = (r6: readonly Record<string, unknown>[] = [r6Default()], natures: readonly NatureRow[] = D_NATURES, r3 = r3Action()) =>
+    response([...others(r3), ...r6], natures);
+
+  async function runD(outputs: readonly unknown[], options: { table?: NameTable; judge?: Judge; rejected?: readonly string[] } = {}) {
+    const table = options.table ?? DTABLE;
+    return run(outputs, {
+      plan: DPLAN,
+      list: DLIST,
+      table,
+      carryOver: await carryFor(table, options.rejected),
+      ...(options.judge === undefined ? {} : { judge: options.judge }),
+    });
+  }
+
+  /** 2 回とも落として、最後の問題を返す */
+  async function problemsOf(bad: unknown, table?: NameTable) {
+    const { outcome } = await runD([bad, bad], table === undefined ? {} : { table });
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(outcome.failure.attempts).toBe(TEST_SPEC_ROUNDS);
+    return outcome.failure.problems;
+  }
+
+  const fixedTestTable = (): NameTable => ({
+    ...DTABLE,
+    verification: DTABLE.verification.map((entry) => (entry.requirementId === "R6" ? { requirementId: "R6", kind: "fixed-test" as const } : entry)),
+  });
+
+  it("(1) 二点測定の正の側：既定値の試験を 1 本だけ書いた応答が 1 回で通り、網羅の単位にその試験の単位がある", async () => {
+    const { outcome, recording } = await runD([dResponse()]);
+    if (!outcome.ok) throw new Error(`通るはず: ${JSON.stringify(outcome.failure)}`);
+    expect(recording.structured).toHaveLength(1);
+    expect(outcome.value.observes.get("r6-default")).toBe("default-value");
+    expect(outcome.value.natures.get("R6")).toBe("ruled");
+    const key = canonicalJson({
+      basis: "value",
+      requirementId: "R6",
+      targetId: "f.item.kind",
+      kind: "normal",
+      operation: "validate",
+      observes: "default-value",
+    });
+    expect(outcome.value.coverage).toContainEqual({ requirementId: "R6", targetId: "f.item.kind", key });
+    // 既定値の要件の単位はこの 1 つだけ（異常・境界の単位は無い）
+    expect(outcome.value.coverage.filter((unit) => unit.requirementId === "R6")).toHaveLength(1);
+    expect(outcome.value.coverage).toEqual(
+      coverageUnitsOf({ suite: outcome.value.suite, observes: outcome.value.observes, natures: outcome.value.natures }),
+    );
+  });
+
+  it("(2) 負例：確かめ方が fixed-test の要件に既定値の試験を作ると固定文で落ち、異常・境界の不足も免除されない", async () => {
+    const problems = await problemsOf(dResponse(), fixedTestTable());
+    expect(problems).toContainEqual({ field: `${T_AT}.observes`, message: DEFAULT_VALUE_NOT_ALLOWED_MESSAGE });
+    expect(problems).toContainEqual({ field: R6_AT, message: "abnormal の試験が無い" });
+    expect(problems).toContainEqual({ field: R6_AT, message: "boundary の試験が無い" });
+  });
+
+  it("(2) 負例：既定値の要件の試験を省くと「要件の試験が無い」で落ちる（免除は試験の有無で決めない）", async () => {
+    const problems = await problemsOf(dResponse([]));
+    expect(problems).toEqual([{ field: R6_AT, message: "要件の試験が無い" }]);
+  });
+
+  it("(2) 負例：観測が validation の normal だけは固定文で落ちる", async () => {
+    expect(await problemsOf(dResponse([r6Default({ observes: "validation" })]))).toEqual([
+      { field: `${T_AT}.observes`, message: DEFAULT_VALUE_TEST_MESSAGES.observes },
+    ]);
+  });
+
+  it("(2) 負例：abnormal の試験は固定文で落ちる", async () => {
+    const problems = await problemsOf(
+      dResponse([r6Default(), r6Default({ id: "r6-abnormal", kind: "abnormal", expected: { kind: "error", value: null, code: "E_INVALID" } })]),
+    );
+    expect(problems).toContainEqual({ field: "tests[11].kind", message: DEFAULT_VALUE_TEST_MESSAGES.kind });
+    expect(problems).toContainEqual({ field: "tests[11].expected", message: DEFAULT_VALUE_TEST_MESSAGES.expected });
+  });
+
+  it("(2) 負例：期待が value と違う・文字列でない（引用符の無い値・数）・kind が error は固定文で落ちる", async () => {
+    for (const expected of [
+      { kind: "ok", value: JSON.stringify("beta"), code: null },
+      { kind: "ok", value: "alpha", code: null },
+      { kind: "ok", value: "1", code: null },
+      { kind: "ok", value: "null", code: null },
+      { kind: "error", value: null, code: "E_INVALID" },
+    ]) {
+      expect(await problemsOf(dResponse([r6Default({ expected })])), JSON.stringify(expected)).toEqual([
+        { field: `${T_AT}.expected`, message: DEFAULT_VALUE_TEST_MESSAGES.expected },
+      ]);
+    }
+  });
+
+  it("(2) 負例：入力が空でないと固定文で落ちる", async () => {
+    expect(await problemsOf(dResponse([r6Default({ input: JSON.stringify({ "f.item.kind": "beta" }) })]))).toEqual([
+      { field: `${T_AT}.input`, message: DEFAULT_VALUE_TEST_MESSAGES.input },
+    ]);
+  });
+
+  it("(2) 負例：ほかの条件を満たし参照データだけが 1 行ある試験は、参照データの固定文だけで落ちる", async () => {
+    const referenceData = [{ target: { requirementId: "R6", kind: "entity", roleId: "e.item" }, rowId: "item-1", values: "{}" }];
+    expect(await problemsOf(dResponse([r6Default({ referenceData })]))).toEqual([
+      { field: `${T_AT}.referenceData`, message: DEFAULT_VALUE_TEST_MESSAGES.referenceData },
+    ]);
+  });
+
+  it("(2) 負例：state-after-set は今までどおり未対応の固定文で落ちる", async () => {
+    const problems = await problemsOf(dResponse([r6Default({ observes: "state-after-set" })]));
+    expect(problems).toContainEqual({ field: `${T_AT}.observes`, message: UNSUPPORTED });
+    expect(problems).toContainEqual({ field: `${T_AT}.observes`, message: DEFAULT_VALUE_TEST_MESSAGES.observes });
+  });
+
+  it("(2) 負例：ほかの ruled の要件の異常・境界の不足は免除が漏れずに落ちる", async () => {
+    expect(await problemsOf(dResponse([r6Default()], D_NATURES, r3Action(["normal"])))).toEqual([
+      { field: "requirements[2]", message: "abnormal の試験が無い" },
+      { field: "requirements[2]", message: "boundary の試験が無い" },
+    ]);
+  });
+
+  it("(2) 負例：既定値の試験を別の項目（validate の正しい組）に向けても落ちる", async () => {
+    const problems = await problemsOf(dResponse([r6Default({ target: { requirementId: "R6", kind: "field", roleId: "f.item.amount" } })]));
+    expect(problems).toContainEqual({ field: `${T_AT}.observes`, message: DEFAULT_VALUE_NOT_ALLOWED_MESSAGE });
+    expect(problems).toContainEqual({ field: `${T_AT}.target`, message: DEFAULT_VALUE_TEST_MESSAGES.target });
+  });
+
+  // ── (3) 除外の範囲 ─────────────────────────────────────────────
+
+  async function planned(table: NameTable = DTABLE, rejected: readonly string[] = []) {
+    const pruned = pruneForCarryOver(DLIST, table, await carryFor(table, rejected));
+    return { pruned, design: pruned.conversion.design, defaults: defaultValueTargetsOf(pruned.table) };
+  }
+  const suiteOf = (output: unknown): TestSuite => {
+    const checked = checkTestSpecOutput(output);
+    if (!checked.ok) throw new Error("形が通るはず");
+    return checked.value.suite;
+  };
+  const key = (problem: Problem) => `${problem.field}\u0000${problem.message}`;
+  const minus = (a: readonly Problem[], b: readonly Problem[]) => {
+    const kept = new Set(b.map(key));
+    return a.filter((problem) => !kept.has(key(problem)));
+  };
+
+  it("(3) v1 の checkSuitePlan の出力と除外後の出力の差は、既定値の要件の位置の abnormal・boundary の不足の 2 件だけ", async () => {
+    const { pruned, design, defaults } = await planned();
+    const suite = suiteOf(dResponse());
+    const raw = checkSuitePlan(pruned.list, suite, design, reconcileNatures(design, suite.classifications).natures);
+    const exempted = exemptDefaultValueProblems(raw, pruned.list, defaults);
+    expect(minus(raw, exempted)).toEqual([
+      { field: R6_AT, message: "abnormal の試験が無い" },
+      { field: R6_AT, message: "boundary の試験が無い" },
+    ]);
+    expect(exempted).toEqual([]);
+    expect(DEFAULT_VALUE_EXEMPT_MESSAGES).toEqual(["abnormal の試験が無い", "boundary の試験が無い"]);
+  });
+
+  it("(3) 部分一致の文・別の位置・別の文・持ち越しで除かれた要件の位置の問題は外れない", async () => {
+    const { pruned, defaults } = await planned();
+    const kept: readonly Problem[] = [
+      { field: R6_AT, message: "abnormal の試験が無い（追記）" },
+      { field: R6_AT, message: " boundary の試験が無い" },
+      { field: R6_AT, message: "normal の試験が無い" },
+      { field: R6_AT, message: "要件の試験が無い" },
+      { field: "requirements[3]", message: "abnormal の試験が無い" },
+      { field: `${R6_AT}.kind`, message: "boundary の試験が無い" },
+      { field: T_AT, message: "abnormal の試験が無い" },
+    ];
+    expect(exemptDefaultValueProblems(kept, pruned.list, defaults)).toEqual(kept);
+    // R6 が持ち越し（表の意味の点検の拒否）なら、除いた表に既定値の要件は無く、何も外れない
+    const carried = await planned(DTABLE, ["R6"]);
+    expect(carried.defaults.size).toBe(0);
+    const atCarried: readonly Problem[] = [
+      { field: "requirements[5]", message: "abnormal の試験が無い" },
+      { field: R6_AT, message: "boundary の試験が無い" },
+    ];
+    expect(exemptDefaultValueProblems(atCarried, DLIST, carried.defaults)).toEqual(atCarried);
+    expect(exemptDefaultValueProblems(atCarried, carried.pruned.list, carried.defaults)).toEqual(atCarried);
+  });
+
+  it("(3) selector の食い違い・上限・空の組の問題は除外のあとも今までどおり出る", async () => {
+    const { pruned, design, defaults } = await planned();
+    const natures = new Map(pruned.list.requirements.map((requirement) => [requirement.id, "ruled" as const] as const));
+    const check = (output: unknown) =>
+      exemptDefaultValueProblems(checkSuitePlan(pruned.list, suiteOf(output), design, natures), pruned.list, defaults);
+    // 空の組
+    const empty = check(response([], D_NATURES));
+    expect(empty).toContainEqual({ field: "tests", message: "試験の集合が空である" });
+    expect(empty).toContainEqual({ field: R6_AT, message: "要件の試験が無い" });
+    // 上限（要件ごとの試験の数）
+    const many = Array.from({ length: 17 }, (_, index) => r6Default({ id: `r6-${index}` }));
+    expect(check(dResponse(many))).toContainEqual({ field: R6_AT, message: "要件の試験が上限 16 を超えている（17）" });
+    // selector の食い違い（同じ要件と役割 ID で対象の種類が違う）
+    const conflict = check(dResponse([r6Default(), r6Default({ id: "r6-other", target: { requirementId: "R6", kind: "entity", roleId: "f.item.kind" } })]));
+    expect(conflict).toContainEqual({
+      field: "tests[11].target",
+      message: "selector（要件 ID と役割 ID）が一意に決まらない（対象の種類が食い違う）",
+    });
+  });
+
+  // ── (4) 分類 ───────────────────────────────────────────────────
+
+  it("(4) default-value の要件の分類が食い違っても判定を呼ばず（要求 0）ruled で採り、記録は fallback", async () => {
+    const recorded = recordingJudge(createFakeJudge({}));
+    const natures = D_NATURES.map((entry) => (entry.requirementId === "R6" ? { requirementId: "R6", nature: "existence-only" as const } : entry));
+    const { outcome } = await runD([dResponse([r6Default()], natures)], { judge: recorded.judge });
+    if (!outcome.ok) throw new Error(`通るはず: ${JSON.stringify(outcome.failure)}`);
+    expect(recorded.requests).toHaveLength(0);
+    expect(outcome.value.natures.get("R6")).toBe("ruled");
+    expect(outcome.value.discrepancies).toEqual([
+      { requirementId: "R6", design: "ruled", classified: "existence-only", resolved: "ruled", resolution: "fallback" },
+    ]);
+  });
+
+  it("(4) ほかの要件の食い違いは今までどおり判定に聞き、既定値の要件は問いに入らない", async () => {
+    const recorded = recordingJudge(createFakeJudge({ [natureQuestionName("R4")]: choice("ruled", 0.9) }));
+    const natures = D_NATURES.map((entry) =>
+      entry.requirementId === "R6" || entry.requirementId === "R4" ? { ...entry, nature: "existence-only" as const } : entry,
+    );
+    const { outcome } = await runD([dResponse([r6Default()], natures)], { judge: recorded.judge });
+    if (!outcome.ok) throw new Error(`通るはず: ${JSON.stringify(outcome.failure)}`);
+    expect(recorded.requests).toHaveLength(1);
+    expect(Object.keys(recorded.requests[0]?.questions ?? {})).toEqual([natureQuestionName("R4")]);
+    expect(outcome.value.discrepancies.find((entry) => entry.requirementId === "R6")?.resolution).toBe("fallback");
+    expect(outcome.value.discrepancies.find((entry) => entry.requirementId === "R4")?.resolution).toBe("judged");
+  });
+
+  // ── (5) データ ─────────────────────────────────────────────────
+
+  it("(5) 「要件ごとの確かめ方」に default-value の要件だけ value があり、ほかの項目・前置き・規則の並びが今までと同じ", async () => {
+    const { recording } = await runD([dResponse()]);
+    const base = await run([passing()]);
+    const request = recording.structured[0]!;
+    const baseRequest = base.recording.structured[0]!;
+    expect(dataNamesOf(request.input)).toEqual([...TEST_SPEC_DATA_NAMES]);
+    const verification = dataBlockOf(request.input, "要件ごとの確かめ方") as readonly Record<string, unknown>[];
+    expect(verification.find((entry) => entry["requirementId"] === "R6")).toEqual({
+      requirementId: "R6",
+      verificationKind: "default-value",
+      checks: [],
+      value: "alpha",
+    });
+    expect(verification.filter((entry) => "value" in entry).map((entry) => entry["requirementId"])).toEqual(["R6"]);
+    // ほかの要件の項目は、既定値の要件の無い走りの塊と同じ
+    expect(verification.filter((entry) => entry["requirementId"] !== "R6")).toEqual(dataBlockOf(baseRequest.input, "要件ごとの確かめ方"));
+    for (const field of ["instructions", "rules", "documents", "schemaName", "schema", "maxOutputTokens"] as const) {
+      expect(request[field]).toEqual(baseRequest[field]);
+    }
+    expect(request.rules).toEqual(TEST_SPEC_RULES);
+    expectNoAcceptanceMaterial([requestText(request)]);
+  });
+
+  it("規則：R-tsp-02 は default-value の要件を除き、R-tsp-16 は default-value の要件にだけ既定値の試験の形を許す", () => {
+    const text = (id: string) => TEST_SPEC_RULE_DEFINITIONS.find((definition) => definition.id === id)?.text ?? "";
+    expect(text("R-tsp-02")).toContain("確かめ方が structural・default-value の要件を除いて");
+    const r16 = text("R-tsp-16");
+    expect(r16).toContain("確かめ方が default-value の要件にだけ");
+    expect(r16).toContain("その要件には異常・境界の試験を作らない");
+    expect(r16).toContain("ほかの要件に default-value を書かない");
+    expect(r16).toContain("state-after-set）は評価できないので、その試験は作らない");
+    expect(ruleDefinitionDefects(TEST_SPEC_RULE_DEFINITIONS)).toEqual([]);
+    expectNoAcceptanceMaterial(TEST_SPEC_RULES);
   });
 });
