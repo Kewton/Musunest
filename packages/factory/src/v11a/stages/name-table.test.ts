@@ -11,16 +11,21 @@ import { describe, expect, it } from "vitest";
 import type { LlmClient, LlmStructuredRequest } from "../../llm.js";
 import type { RequirementList } from "../../pipeline.js";
 import { ruleDefinitionDefects, ruleTexts, type RejectedCandidate } from "../../stages/prompt.js";
-import { PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
+import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
+  ENUM_MEMBERSHIP_REQUEST_DIFF,
   FIXTURE_DOCUMENTS,
+  LEDGER_VIEW_2A,
   draftOf,
   fixtureDefaultValueList,
   fixtureDefaultValueTable,
   fixtureList,
   fixtureListWithRequestQuotes,
   fixtureTable,
+  jsonDiffPaths,
+  requestDiffsOf,
+  withoutEnumMembership,
 } from "../__tests__/fixtures.js";
 import { copyLengthFor, nameTableSha256, requirementCopy, type NameTableDraft } from "../names.js";
 import {
@@ -460,7 +465,14 @@ describe.each(LEDGER_CASES)("T1 の確かめ方 default-value（Issue #533。旗
   const withLedger = ledger === undefined ? {} : { ledger };
   it("schema の kind に default-value があり、value は string か null の必須の欄", () => {
     const verification = nameTableSchemaOf(ledger).properties.requirements.items.properties.verification;
-    expect(verification.properties.kind.enum).toEqual(["fixed-test", "structural", "unresolved", "default-value"]);
+    // 旗 on は台帳の enum-membership（Issue #548）が末尾に入る
+    expect(verification.properties.kind.enum).toEqual([
+      "fixed-test",
+      "structural",
+      "unresolved",
+      "default-value",
+      ...(ledger === undefined ? [] : ["enum-membership"]),
+    ]);
     expect(verification.properties.value.type).toEqual(["string", "null"]);
     expect(verification.required).toContain("value");
     expect(verification.additionalProperties).toBe(false);
@@ -518,12 +530,12 @@ describe.each(LEDGER_CASES)("T1 の確かめ方 default-value（Issue #533。旗
 
 // ── 旗 on（性質の台帳から組む。Issue #547）──────────────────────────────
 
-describe("旗 on：T1 の規則の文・schema・データの並びが off とバイト列で同じ（載せ替えだけ）", () => {
+describe("旗 on：台帳から enum-membership の行を除いた導出なら、T1 の規則の文・schema・データの並びが off とバイト列で同じ（載せ替えだけ。Issue #547・#548）", () => {
   it("規則の定義は off の定数と深く等しく、送る文の並び・schema の JSON がバイト列で同じ。規則の不備は on・off とも 0", () => {
-    const definitions = nameTableRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    const definitions = nameTableRuleDefinitionsOf(LEDGER_VIEW_2A);
     expect(definitions).toEqual(NAME_TABLE_RULE_DEFINITIONS);
     expect(JSON.stringify(ruleTexts(definitions))).toBe(JSON.stringify(NAME_TABLE_RULES));
-    expect(JSON.stringify(nameTableSchemaOf(PROPERTY_LEDGER_VIEW))).toBe(JSON.stringify(NAME_TABLE_SCHEMA));
+    expect(JSON.stringify(nameTableSchemaOf(LEDGER_VIEW_2A))).toBe(JSON.stringify(NAME_TABLE_SCHEMA));
     expect(ruleDefinitionDefects(definitions)).toEqual([]);
     expect(ruleDefinitionDefects(NAME_TABLE_RULE_DEFINITIONS)).toEqual([]);
     // 旗を省けば今の定数そのもの（新しい分岐を通らない）
@@ -532,11 +544,11 @@ describe("旗 on：T1 の規則の文・schema・データの並びが off と�
   });
 
   it("二点測定：台帳の行の T1 の文を 1 文字変えると、組んだ R-nt-08 が off と食い違う", () => {
-    const changed: LedgerView = { ...PROPERTY_LEDGER_VIEW, t1RuleTexts: PROPERTY_LEDGER_VIEW.t1RuleTexts.map((text) => `${text} `) };
+    const changed: LedgerView = { ...LEDGER_VIEW_2A, t1RuleTexts: LEDGER_VIEW_2A.t1RuleTexts.map((text) => `${text} `) };
     const text = (view: LedgerView) => nameTableRuleDefinitionsOf(view).find((definition) => definition.id === "R-nt-08")?.text;
-    expect(text(PROPERTY_LEDGER_VIEW)).toBe(NAME_TABLE_RULE_DEFINITIONS.find((definition) => definition.id === "R-nt-08")?.text);
-    expect(text(changed)).not.toBe(text(PROPERTY_LEDGER_VIEW));
-    const fewer: LedgerView = { ...PROPERTY_LEDGER_VIEW, verificationKinds: PROPERTY_LEDGER_VIEW.verificationKinds.slice(0, -1) };
+    expect(text(LEDGER_VIEW_2A)).toBe(NAME_TABLE_RULE_DEFINITIONS.find((definition) => definition.id === "R-nt-08")?.text);
+    expect(text(changed)).not.toBe(text(LEDGER_VIEW_2A));
+    const fewer: LedgerView = { ...LEDGER_VIEW_2A, verificationKinds: LEDGER_VIEW_2A.verificationKinds.slice(0, -1) };
     expect(JSON.stringify(nameTableSchemaOf(fewer))).not.toBe(JSON.stringify(NAME_TABLE_SCHEMA));
   });
 
@@ -558,8 +570,54 @@ describe("旗 on：T1 の規則の文・schema・データの並びが off と�
     const previous: NameTablePrevious = { response, problems: [{ field: "rows[0]", message: "前回の指示" }], rejections: [], advice: [] };
     for (const prior of [undefined, previous]) {
       const off = await runWith(undefined, prior);
-      const on = await runWith(PROPERTY_LEDGER_VIEW, prior);
+      const on = await runWith(LEDGER_VIEW_2A, prior);
       expect(JSON.stringify(on.requests)).toBe(JSON.stringify(off.requests));
+      expect(on.outcome).toEqual(off.outcome);
+    }
+  });
+});
+
+describe("旗 on：今の台帳の T1 の要求と off の差は enum-membership の行の分（R-nt-08 の 1 文と schema の kind の enum）だけ（Issue #548）", () => {
+  it("規則の定義は R-nt-08 の文に台帳の T1 の文が default-value の文の次に入るだけで、ほかの定義は off と深く等しい。規則の不備は 0", () => {
+    const row = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
+    const anchor = PROPERTY_LEDGER.find((entry) => entry.id === "default-value")?.rules.t1;
+    if (row?.rules.t1 == null || anchor == null) throw new Error("前提が壊れた");
+    const definitions = nameTableRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    expect(definitions).toEqual(
+      NAME_TABLE_RULE_DEFINITIONS.map((definition) =>
+        definition.id === "R-nt-08" ? { ...definition, text: definition.text.replace(anchor, `${anchor}${row.rules.t1 ?? ""}`) } : definition,
+      ),
+    );
+    expect(ruleDefinitionDefects(definitions)).toEqual([]);
+    expect(definitions.find((definition) => definition.id === "R-nt-08")?.text).toContain("kind を enum-membership にし、その項目だけを所属させ");
+    expect(definitions.find((definition) => definition.id === "R-nt-08")?.text).toContain("value は null にする");
+    expect(jsonDiffPaths(nameTableSchemaOf(PROPERTY_LEDGER_VIEW), NAME_TABLE_SCHEMA)).toEqual([
+      "$.properties.requirements.items.properties.verification.properties.kind.enum",
+    ]);
+    expect(withoutEnumMembership(nameTableSchemaOf(PROPERTY_LEDGER_VIEW))).toEqual(NAME_TABLE_SCHEMA);
+  });
+
+  it("同じ応答で on・off の要求の差は名指しの場所だけで、その分を除けばバイト列で同じ。結果は深く等しい（1 回目と previous つきの 2 回目）", async () => {
+    const list = fixtureDefaultValueList();
+    const response = responseOf(draftOf(list, fixtureDefaultValueTable()));
+    const runWith = async (ledger: LedgerView | undefined, previous?: NameTablePrevious) => {
+      const recording = createRecordingClient([structured(response)]);
+      const outcome = await runNameTable({
+        plan: planOf(list),
+        list,
+        documents: FIXTURE_DOCUMENTS,
+        gateway: makeGateway(recording.client),
+        ...(previous === undefined ? {} : { previous }),
+        ...(ledger === undefined ? {} : { ledger }),
+      });
+      return { outcome, requests: JSON.parse(JSON.stringify(recording.structured)) as unknown[] };
+    };
+    const previous: NameTablePrevious = { response, problems: [{ field: "rows[0]", message: "前回の指示" }], rejections: [], advice: [] };
+    for (const prior of [undefined, previous]) {
+      const off = await runWith(undefined, prior);
+      const on = await runWith(PROPERTY_LEDGER_VIEW, prior);
+      expect(requestDiffsOf(on.requests, off.requests).map((diff) => diff.paths)).toEqual([ENUM_MEMBERSHIP_REQUEST_DIFF[NAME_TABLE_SCHEMA_NAME]]);
+      expect(JSON.stringify(withoutEnumMembership(on.requests))).toBe(JSON.stringify(off.requests));
       expect(on.outcome).toEqual(off.outcome);
     }
   });

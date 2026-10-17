@@ -25,10 +25,16 @@
 // `default-value`（`judgeDefaultValue`）を持つ。台帳に無い性質・登録済み・未対応の性質・表に無い照合の名前は、v1 に
 // 渡さず未解決（固定文。行き先は v1 の未解決と同じ `ambiguity`）。結果は元の組の順で合流する。off は今の関数のまま。
 //
+// **観測する性質が `enum-membership` の試験（旗 on。Issue #548）は、選択肢の集合の関数（`judgeEnumMembership`）で
+// 照合する**：表の行の場所（項目）で宣言の entity と項目を引き、項目が選択肢で、宣言の options のキーの集合が期待
+// （decode 済みの文字列の並び）の集合と一致し長さも同じなら合格。項目が無い・選択肢でない・集合が違う、は不一致
+// （行き先は v1 の不一致と同じ `missing-element`）。期待が文字列の並びでなければ未解決（`ambiguity`）。並びの順は
+// B3 の options の照合が見る（ここでは集合だけを見る）。名前の一致（検査の名前）には頼らない。
+//
 // `report` は版の結果を `VersionReport` の形で返す（`correspondence`＝導いた対応表と B3 の落ち、`testRun`、
 // `routes`。v1.1α は対応の提出が無いので `defectMisses`・`redoMisses` は常に空）。静的チェックに落ちる版は
 // `correspondence`・`testRun` を null にし、版の SHA-256（原文のバイト列）を持つ。
-import { enumDefault, isEnumField, type NormalizedAppSpec } from "@musunest/appspec-schema";
+import { enumDefault, enumKeys, isEnumField, type NormalizedAppSpec } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import type { CorrespondenceResult, Declaration } from "../pipeline.js";
 import type { VersionReport } from "../stages/repair.js";
@@ -62,6 +68,20 @@ export const DEFAULT_VALUE_DETAILS = {
   defaultDiffers: "既定値の試験の項目の宣言の default が、期待のキーと違う",
 } as const;
 
+/** 選択肢の集合の試験の照合の詳細（固定文。名前・キーを埋めない。Issue #548） */
+export const ENUM_MEMBERSHIP_DETAILS = {
+  /** 期待が ok の文字列の並びでない（未解決） */
+  expectedNotStringArray: "選択肢の集合の試験の期待が、文字列の並びでない",
+  /** 対象が表の項目の行（所属 entity つき）に無い（未解決） */
+  targetNotInTable: "選択肢の集合の試験の対象が、名前の表の項目の行に無い",
+  /** 宣言に項目が無い（不一致） */
+  fieldMissing: "選択肢の集合の試験の項目が、宣言に無い",
+  /** 項目が選択肢でない（不一致） */
+  notEnum: "選択肢の集合の試験の項目が、宣言で選択肢（enum）でない",
+  /** options のキーの集合が期待と違う（不一致） */
+  optionsDiffer: "選択肢の集合の試験の項目の宣言の options のキーの集合が、期待と違う",
+} as const;
+
 /** 旗 on の、台帳で振り分けられない試験の未解決の詳細（固定文。試験 ID・性質を埋めない。Issue #547） */
 export const LEDGER_OBSERVES_DETAILS = {
   /** 観測する性質が台帳に無い */
@@ -73,7 +93,7 @@ export const LEDGER_OBSERVES_DETAILS = {
 } as const;
 
 /** 台帳の行の照合の名前（B4。評価口が名前 → 関数の表を持つ。Issue #547） */
-export const V11A_EVALUATION_NAMES = ["v1-run-tests", "default-value"] as const;
+export const V11A_EVALUATION_NAMES = ["v1-run-tests", "default-value", "enum-membership"] as const;
 export type V11aEvaluationName = (typeof V11A_EVALUATION_NAMES)[number];
 
 /** 照合の名前 → 振り分け（`v1`：v1 の `runTests` へ渡す。`judge`：v1 に渡さず、この関数で判定する） */
@@ -86,6 +106,7 @@ export const V11A_EVALUATION_JUDGES: Readonly<
 > = {
   "v1-run-tests": { kind: "v1" },
   "default-value": { kind: "judge", judge: (app, table, test) => judgeDefaultValue(app, table, test) },
+  "enum-membership": { kind: "judge", judge: (app, table, test) => judgeEnumMembership(app, table, test) },
 };
 
 /** 評価口を作る材料（閉包で持つもの） */
@@ -241,6 +262,35 @@ export function judgeDefaultValue(app: NormalizedAppSpec, table: NameTable, test
   const declaredDefault = enumDefault(declared);
   if (declaredDefault === null) return { kind: "mismatch", detail: DEFAULT_VALUE_DETAILS.defaultMissing };
   if (declaredDefault !== expected.value) return { kind: "mismatch", detail: DEFAULT_VALUE_DETAILS.defaultDiffers };
+  return { kind: "match" };
+}
+
+/**
+ * 選択肢の集合の試験 1 件を宣言と照合する（Issue #548。B4・B5 の道具・版の再検査は同じ関数を通る）。対象の表の行
+ * （項目）の所属 entity と項目の名前で宣言の項目を引き、選択肢の項目の options のキー（`enumKeys`）の集合が期待
+ * （decode 済みの文字列の並び）の集合と一致し、長さも同じなら合格。純粋な関数で、同じ入力からは同じ判定になる。
+ */
+export function judgeEnumMembership(app: NormalizedAppSpec, table: NameTable, test: FixedTest): DefaultValueVerdict {
+  const expected = test.expected;
+  const value: unknown = expected.kind === "ok" ? expected.value : undefined;
+  if (!Array.isArray(value) || !value.every((key): key is string => typeof key === "string")) {
+    return { kind: "unresolved", detail: ENUM_MEMBERSHIP_DETAILS.expectedNotStringArray };
+  }
+  const row = table.rows.find((candidate) => candidate.id === test.target.roleId);
+  const entityRow = row?.entity === null || row === undefined ? undefined : table.rows.find((candidate) => candidate.id === row.entity);
+  if (row === undefined || row.kind !== "field" || entityRow === undefined || entityRow.kind !== "entity") {
+    return { kind: "unresolved", detail: ENUM_MEMBERSHIP_DETAILS.targetNotInTable };
+  }
+  const entity = app.spec.entities.find((candidate) => candidate.name === entityRow.name);
+  const declared = entity !== undefined && Object.hasOwn(entity.fields, row.name) ? entity.fields[row.name] : undefined;
+  if (declared === undefined) return { kind: "mismatch", detail: ENUM_MEMBERSHIP_DETAILS.fieldMissing };
+  if (!isEnumField(declared)) return { kind: "mismatch", detail: ENUM_MEMBERSHIP_DETAILS.notEnum };
+  const keys = enumKeys(declared);
+  const declaredSet = new Set(keys);
+  const expectedSet = new Set(value);
+  const same =
+    keys.length === value.length && declaredSet.size === expectedSet.size && [...expectedSet].every((key) => declaredSet.has(key));
+  if (!same) return { kind: "mismatch", detail: ENUM_MEMBERSHIP_DETAILS.optionsDiffer };
   return { kind: "match" };
 }
 

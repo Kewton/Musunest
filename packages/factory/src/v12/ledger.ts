@@ -6,8 +6,9 @@
 //
 // 旗 `v12.ledger`（`V12Flags.ledger`。既定 off）が on の走りでだけ、走らせる部分が `ledgerViewOf` の導出を T1・T1'・T2・
 // T2'・評価口（B4・B5 の道具・版の再検査）へ渡す。off の走りは今の定数と関数をそのまま使い、ここを通らない。
-// 手 2a（この Issue）は**載せ替えだけ**で、on で組んだ規則の文・schema・データの並びは off とバイト列で同じである。
-// T1''・B1 の規則の文の列は記録するが、その段への配線は手 2b で足す。
+// 手 2a（#547）は**載せ替えだけ**で、on で組んだ規則の文・schema・データの並びは off とバイト列で同じだった。
+// 手 2b（#548）で 2 行目の `enum-membership`（選択肢の集合）を足し、T1''（R-sc-02 の受理条件）・B1（R-w11 の末尾）へも
+// 台帳の文を差し込む。台帳から `enum-membership` の行を除いた導出は、今も off の定数とバイト列で同じである。
 //
 // 台帳は LLM を呼ばず、評価口を import しない（B4 の照合は名前で持ち、評価口が名前 → 関数の表を持つ）。
 import { TEST_KINDS, type TestKind, type TestOperation, type TestTargetKind } from "../fixed-test.js";
@@ -67,30 +68,42 @@ export interface PropertyCombination {
 /**
  * T1 の確かめ方と T1' の所属の形（確かめ方の種類に結び付いた性質だけが持つ）。所属は「`row` の種類・型の行を
  * `count` 行ちょうど＋その行の所属 entity（`entityAddedByCode`：コードが足すので書かなくてよい）」だけを許す。
- * `valueField` は確かめ方の欄（その行の options のキー）。`nature` は表の分類に求める値。
+ * `valueField` は確かめ方の欄（その行の options のキー）で、欄を持たない確かめ方は null（`value` は null で書く。
+ * #548）。`optionsNonEmpty` は所属の行の options が空でないことを求める。`nature` は表の分類に求める値。
  */
 export interface PropertyT1 {
   readonly kind: string;
-  readonly valueField: "value";
+  readonly valueField: "value" | null;
   readonly ownership: {
     readonly row: { readonly kind: TestTargetKind; readonly type: string };
     readonly count: number;
     readonly entityAddedByCode: boolean;
     readonly valueInOptions: boolean;
+    readonly optionsNonEmpty: boolean;
   };
   readonly nature: "ruled" | "existence-only";
   /** T1' の固定文（値を埋めない） */
   readonly messages: {
-    /** 下書きの形：欄が空でない文字列でない */
+    /** 下書きの形：欄が空でない文字列でない（欄を持たない確かめ方は、`value` が null でない） */
     readonly valueShape: string;
-    /** 型付きの表：欄が空 */
+    /** 型付きの表：欄が空（欄を持たない確かめ方は、`value` が null でない） */
     readonly valueEmpty: string;
     readonly nature: string;
     readonly count: string;
     readonly others: string;
-    readonly valueNotInOptions: string;
+    /** 欄の値が所属の行の options に無い（`valueInOptions` の行だけ） */
+    readonly valueNotInOptions: string | null;
+    /** 所属の行の options が空（`optionsNonEmpty` の行だけ） */
+    readonly optionsEmpty: string | null;
   };
 }
+
+/**
+ * 期待の型（#548 で `options の並び` を足した）。`verification-value` は確かめ方の欄の値を JSON の文字列で書いた
+ * もの、`target-options` は対象の行の options のキーを表の順に並べた文字列の並び（decode 済みの値で、長さ・順まで照らす）
+ */
+export const EXPECTED_VALUE_SOURCES = ["verification-value", "target-options"] as const;
+export type ExpectedValueSource = (typeof EXPECTED_VALUE_SOURCES)[number];
 
 /** T2 の試験の型（確かめ方の種類に結び付いた性質だけが持つ。ほかの性質は今の検査のまま＝未定義） */
 export interface PropertyT2 {
@@ -99,9 +112,13 @@ export interface PropertyT2 {
   /** 作ってよい（そろえる）kind。ここに無い kind の不足は v1 の網羅の検査から外す */
   readonly requiredKinds: readonly TestKind[];
   /** 期待の型（kind・値の型・何と等しいか） */
-  readonly expected: { readonly kind: "ok"; readonly valueType: "json-string"; readonly equals: "verification-value" };
+  readonly expected: {
+    readonly kind: "ok";
+    readonly valueType: "json-string" | "json-string-array";
+    readonly equals: ExpectedValueSource;
+  };
   /** データ状態ごとの値（自然文の状態 → 期待） */
-  readonly dataStates: readonly { readonly state: string; readonly value: "verification-value" }[];
+  readonly dataStates: readonly { readonly state: string; readonly value: ExpectedValueSource }[];
   /** 参照データの対象の種類（空なら参照データは空の並び） */
   readonly referenceTargets: readonly TestTargetKind[];
   /** 入力の形 */
@@ -181,7 +198,7 @@ const INHERITED = {
 /**
  * 性質の台帳（**並びは今の観測する性質の並び**＝T2 の observes の enum の順）。v1.1α の評価の方法の表の組
  * （value・validation・when・view-structure・existence）は引き継いだ有効の行、`state-after-set` は登録済み・未対応、
- * 最初の新しい行は `default-value`（#533 の列をそのまま写す）。
+ * 最初の新しい行は `default-value`（#533 の列をそのまま写す）、2 つ目は `enum-membership`（選択肢の集合。#548）。
  */
 export const PROPERTY_LEDGER: readonly PropertyRow[] = [
   {
@@ -248,7 +265,13 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
     t1: {
       kind: "default-value",
       valueField: "value",
-      ownership: { row: { kind: "field", type: "enum" }, count: 1, entityAddedByCode: true, valueInOptions: true },
+      ownership: {
+        row: { kind: "field", type: "enum" },
+        count: 1,
+        entityAddedByCode: true,
+        valueInOptions: true,
+        optionsNonEmpty: false,
+      },
       nature: "ruled",
       messages: {
         valueShape: "既定値で確かめる要件の value は空でない文字列（期待する既定値のキー）であること",
@@ -257,6 +280,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
         count: "既定値で確かめる要件は、選択肢（enum）の項目をちょうど 1 つ所属させること",
         others: "既定値で確かめる要件は、選択肢の項目とその所属 entity のほかの行を所属させないこと",
         valueNotInOptions: "既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い",
+        optionsEmpty: null,
       },
     },
     t1Acceptance: "決まりが既定値 1 つだけで、value が要件の文の値と合うときだけ受理する。既定値のほかの決まりを含む要件・値の違う要件は weak-verification で拒否する",
@@ -294,6 +318,69 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       b1: "固定した試験のうち observes が default-value の試験は、対象の選択肢の項目の default に、その試験の期待（expected.value）のキーを書くことを求める。",
     },
   },
+  {
+    id: "enum-membership",
+    since: "Issue #548",
+    why: "選択肢の項目の値が挙げた選択肢のどれかであることだけを決める要件を、表で確定した選択肢の集合と宣言の options の照合で確かめる（名前の一致に頼らない。08 §8.2 の (c)①・M-03）",
+    state: "active",
+    inherited: false,
+    requirementRule: "選択肢の項目の値が、挙げた選択肢のどれかであることだけを決める要件。条件・計算・既定値・入力の制約などほかの決まりを含む要件は当たらない",
+    t1: {
+      kind: "enum-membership",
+      valueField: null,
+      ownership: {
+        row: { kind: "field", type: "enum" },
+        count: 1,
+        entityAddedByCode: true,
+        valueInOptions: false,
+        optionsNonEmpty: true,
+      },
+      nature: "ruled",
+      messages: {
+        valueShape: "選択肢の集合で確かめる要件の value は null であること",
+        valueEmpty: "選択肢の集合で確かめる要件の value は null であること",
+        nature: "選択肢の集合で確かめる要件の分類は ruled であること",
+        count: "選択肢の集合で確かめる要件は、選択肢（enum）の項目をちょうど 1 つ所属させること",
+        others: "選択肢の集合で確かめる要件は、選択肢の項目とその所属 entity のほかの行を所属させないこと",
+        valueNotInOptions: null,
+        optionsEmpty: "選択肢の集合で確かめる要件の、所属させた選択肢の項目の options が空である",
+      },
+    },
+    t1Acceptance: "決まりが選択肢の集合だけで、所属の項目の options が要件の文の選択肢と過不足なく合うときだけ受理する。ほかの決まりを含む要件・選択肢の合わない要件は weak-verification で拒否する",
+    combinations: [{ targetKind: "field", operation: "validate" }],
+    t2: {
+      targetKind: "field",
+      operation: "validate",
+      requiredKinds: ["normal"],
+      expected: { kind: "ok", valueType: "json-string-array", equals: "target-options" },
+      dataStates: [{ state: "選択肢の項目の宣言", value: "target-options" }],
+      referenceTargets: [],
+      input: "empty-record",
+      minTests: 1,
+      expectedWriter: "llm-written-code-checked",
+      messages: {
+        notAllowed: "選択肢の集合（enum-membership）の試験は、確かめ方が enum-membership の要件の、その選択肢の項目だけを対象にできる",
+        kind: "選択肢の集合で確かめる要件の試験は、正常（normal）だけであること",
+        operation: "選択肢の集合で確かめる要件の試験の操作は、検査（validate）であること",
+        target: "選択肢の集合で確かめる要件の試験の対象は、確かめ方の選択肢の項目（field）であること",
+        observes: "選択肢の集合で確かめる要件の試験の観測する性質は、enum-membership であること",
+        expected: "選択肢の集合で確かめる要件の試験の期待は、対象の項目の options のキーを表の順に並べた並びを JSON で書いた ok であること",
+        input: "選択肢の集合で確かめる要件の試験の入力は、空の写像であること",
+        referenceData: "選択肢の集合で確かめる要件の試験の参照データは、空の並びであること",
+      },
+    },
+    coverageKey: ["requirementId", "targetId", "kind", "operation", "observes"],
+    evaluation: "enum-membership",
+    outer: OUTER_NOT_SCORED,
+    unsupportedMessage: null,
+    rules: {
+      t1: "要件の決まりが「選択肢（enum）の項目の値は、挙げた選択肢のどれかである」だけなら kind を enum-membership にし、その項目だけを所属させ（entity はコードが足す）、value は null にする。選択肢はその項目の options で表す。条件・計算・既定値・入力の制約などほかの決まりを含む要件には enum-membership を使わない。",
+      t1Acceptance:
+        "確かめ方が enum-membership の要件は、要件の決まりが選択肢の集合だけで、所属させた選択肢の項目の options が要件の文の選択肢と過不足なく合うときだけ受理する。選択肢のほかの決まり（入力の制約など）を含む要件や、options が要件の文の選択肢と合わない要件は受理せず、weak-verification で拒否する。",
+      t2: "選択肢の集合（enum-membership）の試験は、確かめ方が enum-membership の要件にだけ、次の形で 1 本以上作る：対象（target）はその要件の所属の選択肢の項目（target.kind は field）、kind は normal、operation は validate、observes は enum-membership、入力（input）は空の写像（\"{}\"）、参照データ（referenceData）は空の並び、期待（expected）は kind を ok・value をその項目の表の options のキーを表の順に並べた並びの JSON の文字列（例: キーが k1・k2 なら \"[\\\"k1\\\",\\\"k2\\\"]\"）・code を null。その要件には異常・境界の試験を作らない。ほかの要件に enum-membership を書かない。",
+      b1: "固定した試験のうち observes が enum-membership の試験は、対象の選択肢の項目の options を、名前の表の行の options のキーの順で書くことを求める。",
+    },
+  },
 ];
 
 // ── 台帳の点検 ───────────────────────────────────────────────────
@@ -324,6 +411,16 @@ export function ledgerRowDefects(rows: readonly PropertyRow[]): readonly string[
       if (kinds.has(row.t1.kind)) defects.push(`${at} の確かめ方の種類 ${row.t1.kind} が重なっている`);
       kinds.add(row.t1.kind);
       if (row.t2 === null) defects.push(`${at} は確かめ方の種類を持つのに、試験の型が無い`);
+      const { ownership, messages, valueField } = row.t1;
+      if (ownership.valueInOptions && (valueField === null || messages.valueNotInOptions === null)) {
+        defects.push(`${at} は欄の値を options に照らすのに、欄か固定文が無い`);
+      }
+      if (ownership.optionsNonEmpty && messages.optionsEmpty === null) {
+        defects.push(`${at} は options が空でないことを求めるのに、固定文が無い`);
+      }
+      if (row.t2 !== null && row.t2.expected.equals === "verification-value" && valueField === null) {
+        defects.push(`${at} の期待は確かめ方の欄の値なのに、確かめ方に欄が無い`);
+      }
     }
   });
   return defects;
@@ -352,6 +449,10 @@ export interface LedgerView {
   readonly combinations: readonly LedgerCombination[];
   /** T1 の規則に差し込む文（台帳の順） */
   readonly t1RuleTexts: readonly string[];
+  /** T1'' の規則（R-sc-02 の (3) の末尾）に差し込む受理条件の文（台帳の順。#548） */
+  readonly t1AcceptanceTexts: readonly string[];
+  /** B1 の規則（R-w11 の末尾）に差し込む文（有効・削る候補の行。台帳の順。#548） */
+  readonly b1RuleTexts: readonly string[];
   /** T2 の規則の形の位置に差し込む文（有効・削る候補の行。台帳の順） */
   readonly t2FormTexts: readonly string[];
   /** T2 の規則の末尾に差し込む、未対応の性質の試験を作らせない文（台帳の順） */
@@ -379,6 +480,8 @@ export function deriveLedgerView(rows: readonly PropertyRow[]): LedgerView {
     unsupportedObserves: rows.filter((row) => row.state === "registered-unsupported").map((row) => row.id),
     combinations: evaluable.flatMap((row) => row.combinations.map((entry) => ({ ...entry, observes: row.id }))),
     t1RuleTexts: rows.flatMap((row) => (row.rules.t1 === null ? [] : [row.rules.t1])),
+    t1AcceptanceTexts: rows.flatMap((row) => (row.rules.t1Acceptance === null ? [] : [row.rules.t1Acceptance])),
+    b1RuleTexts: evaluable.flatMap((row) => (row.rules.b1 === null ? [] : [row.rules.b1])),
     t2FormTexts: evaluable.flatMap((row) => (row.rules.t2 === null ? [] : [row.rules.t2])),
     t2UnsupportedTexts: rows
       .filter((row) => row.state === "registered-unsupported")

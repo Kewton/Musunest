@@ -167,10 +167,13 @@ export interface NameTableLedgerOptions {
 export const UNREGISTERED_VERIFICATION_KIND_MESSAGE = "確かめ方の種類が性質の台帳に無い";
 
 /**
- * 要件ごとの確かめ方（fixed-test／structural＋checks／unresolved＋reason＋constraintIds／default-value＋value）。
+ * 要件ごとの確かめ方（fixed-test／structural＋checks／unresolved＋reason＋constraintIds／default-value＋value／
+ * enum-membership）。
  * structural の `reason` は v1 の `RequirementVerification` と同じ（fixed-test 以外は理由が要る）。
  * default-value の `value` は、所属させた選択肢の項目の既定値として期待するキー（その項目の `options` のどれか。
  * T1' が確かめ、T1'' が要件の文の値と合うかを点検する。v1 の型へは `fixed-test` として写す。Issue #533）。
+ * enum-membership（選択肢の集合だけを決める要件）は欄を持たない。選択肢は所属の選択肢の項目の `options` で表し、
+ * 旗 `v12.ledger` が on の走りだけが作れる（off は形で落ちる。v1 の型へは `fixed-test` として写す。Issue #548）。
  */
 export type NameTableVerification =
   | { readonly requirementId: string; readonly kind: "fixed-test" }
@@ -186,7 +189,8 @@ export type NameTableVerification =
       readonly reason: string;
       readonly constraintIds: readonly string[];
     }
-  | { readonly requirementId: string; readonly kind: "default-value"; readonly value: string };
+  | { readonly requirementId: string; readonly kind: "default-value"; readonly value: string }
+  | { readonly requirementId: string; readonly kind: "enum-membership" };
 
 /** 要件ごとの分類（T1 が要件の文から分類する。Plan の `kind` から導かない。T2 の分類と照らす元。§1.1） */
 export interface NameTableClassification {
@@ -500,8 +504,8 @@ function shapeOfVerification(
 
 /**
  * 旗 on の下書きの確かめ方の形（Issue #547）。性質に結び付いた種類は、台帳の行の欄（`valueField`）が空でない文字列で
- * あることを確かめる。台帳の外の種類（fixed-test・structural・unresolved）は今の関数に任せ、どちらにも無い種類は
- * 台帳の種類の一覧の固定文で落とす。
+ * あることを確かめる（欄を持たない種類は `value` が無いか null であること。Issue #548）。台帳の外の種類（fixed-test・
+ * structural・unresolved）は今の関数に任せ、どちらにも無い種類は台帳の種類の一覧の固定文で落とす。
  */
 function shapeOfVerificationByLedger(
   value: Record<string, unknown>,
@@ -512,6 +516,13 @@ function shapeOfVerificationByLedger(
   const kind = value["kind"];
   const t1 = typeof kind === "string" ? ledger.rowByVerificationKind.get(kind)?.t1 : undefined;
   if (t1 !== undefined && t1 !== null) {
+    if (t1.valueField === null) {
+      if (value["value"] !== undefined && value["value"] !== null) {
+        problems.push({ field: `${field}.value`, message: t1.messages.valueShape });
+        return undefined;
+      }
+      return { kind: t1.kind } as NameTableDraftVerification;
+    }
     const key = value[t1.valueField];
     if (!isNonEmptyString(key)) {
       problems.push({ field: `${field}.${t1.valueField}`, message: t1.messages.valueShape });
@@ -1064,7 +1075,8 @@ function checkNameTableWith(
   /**
    * 旗 on：性質に結び付いた確かめ方の所属の形を、台帳の行の記述子（`PropertyT1`）から掛ける（Issue #547）。所属が
    * 「記述子の種類・型の行を `count` 行ちょうどと、その行の所属 entity（コードが足す）」だけで、欄の値がその行の
-   * options にあり、分類が記述子の値であること。固定文は記述子が持つ
+   * options にあり、分類が記述子の値であること。欄を持たない種類は `value` が無いか null で、`optionsNonEmpty` なら
+   * その行の options が空でないこと（Issue #548）。固定文は記述子が持つ
    */
   const checkLedgerVerification = (
     t1: PropertyT1,
@@ -1073,8 +1085,11 @@ function checkNameTableWith(
     roles: readonly NameTableRoleOwnership[],
     nature: RequirementNature | undefined,
   ): void => {
+    const valueField = t1.valueField ?? "value";
     const key = typeof value === "string" ? value : "";
-    if (key.trim() === "") problems.push({ field: `${field}.${t1.valueField}`, message: t1.messages.valueEmpty });
+    if (t1.valueField === null ? value !== undefined && value !== null : key.trim() === "") {
+      problems.push({ field: `${field}.${valueField}`, message: t1.messages.valueEmpty });
+    }
     if (nature !== undefined && nature !== t1.nature) problems.push({ field, message: t1.messages.nature });
     if (roles.some((role) => !rowById.has(role.id))) return;
     const owned = roles.map((role) => rowById.get(role.id) as NameTableRow);
@@ -1087,8 +1102,11 @@ function checkNameTableWith(
       targets.flatMap((row) => [row.id, ...(t1.ownership.entityAddedByCode && row.entity !== null ? [row.entity] : [])]),
     );
     if (owned.some((row) => !allowed.has(row.id))) problems.push({ field, message: t1.messages.others });
+    if (t1.ownership.optionsNonEmpty && targets.some((row) => (row.options ?? []).length === 0)) {
+      problems.push({ field, message: t1.messages.optionsEmpty ?? t1.messages.count });
+    }
     if (t1.ownership.valueInOptions && !targets.some((row) => (row.options ?? []).includes(key))) {
-      problems.push({ field: `${field}.${t1.valueField}`, message: t1.messages.valueNotInOptions });
+      problems.push({ field: `${field}.${valueField}`, message: t1.messages.valueNotInOptions ?? t1.messages.valueEmpty });
     }
   };
   const ledger = options.ledger;
@@ -1103,7 +1121,7 @@ function checkNameTableWith(
       }
       checkLedgerVerification(
         t1,
-        (entry as unknown as Record<string, unknown>)[t1.valueField],
+        (entry as unknown as Record<string, unknown>)[t1.valueField ?? "value"],
         field,
         derived.get(entry.requirementId)?.roles ?? [],
         natureById.get(entry.requirementId),
@@ -1152,6 +1170,10 @@ function checkNameTableWith(
         return;
       case "default-value":
         checkDefaultValueVerification(entry, field, derived.get(entry.requirementId)?.roles ?? [], natureById.get(entry.requirementId));
+        return;
+      case "enum-membership":
+        // 旗 off の走りは台帳の種類を知らない（下書きの形でも落ちる。型付きの表を直に渡しても通さない。Issue #548）
+        problems.push({ field: `${field}.kind`, message: `確かめ方の種類は ${NAME_TABLE_VERIFICATION_KINDS.join("・")} のいずれかであること` });
         return;
     }
   });

@@ -30,7 +30,19 @@ import * as runTestsStage from "../stages/run-tests.js";
 import * as staticCheckStage from "../stages/static-check.js";
 import * as triageStage from "../stages/unwritable-triage.js";
 import { makeRunInput, structured } from "../__tests__/run.js";
-import { DEFAULT_VALUE_REQUIREMENT_TEXT, FIXTURE_DOCUMENTS, FIXTURE_YAML, draftOf, fixtureList, fixtureTable } from "./__tests__/fixtures.js";
+import {
+  DEFAULT_VALUE_REQUIREMENT_TEXT,
+  ENUM_MEMBERSHIP_REQUEST_DIFF,
+  ENUM_MEMBERSHIP_REQUIREMENT_TEXT,
+  FIXTURE_DOCUMENTS,
+  FIXTURE_YAML,
+  draftOf,
+  fixtureList,
+  fixtureTable,
+  jsonDiffPaths,
+  requestDiffsOf,
+  withoutEnumMembership,
+} from "./__tests__/fixtures.js";
 import { V11A_ARTIFACT_NAMES } from "./bundle-v11a.js";
 import * as evaluateModule from "./evaluate.js";
 import { DEFAULT_VALUE_DETAILS, UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
@@ -53,7 +65,7 @@ import { natureQuestionName } from "../stages/test-suite.js";
 import { captureBaselineV11a, type BaselineV11aCapture, type BaselineV11aScenarios } from "../__tests__/baseline-capture.js";
 import * as factoryModule from "../index.js";
 import { createFakeLlmClient } from "../llm-fake.js";
-import { V12_PIPELINE_FLAGS, V12_FLAG_NAMES, resolveV12Flags } from "../v12/ledger.js";
+import { PROPERTY_LEDGER, V12_PIPELINE_FLAGS, V12_FLAG_NAMES, resolveV12Flags } from "../v12/ledger.js";
 import { buildSized, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
 
 afterEach(() => {
@@ -1438,6 +1450,191 @@ describe.each(FLAG_CASES)("(q) 既定値の要件：宣言の default が合え�
   });
 });
 
+// ── (r) 選択肢の集合の要件（旗 on。Issue #548）──────────────────────────────
+
+describe("(r) 選択肢の集合の要件：enum-membership で確かめる走りは宣言の options が表どおりなら今までの門で full（旗 on。内外の切り分けの型。Issue #548）", () => {
+  const flags: Partial<GenerationInputV11a> = { flags: { ledger: true } };
+  const E_LIST_BASE: RequirementList = {
+    ...BASE_LIST,
+    requirements: [
+      ...BASE_LIST.requirements,
+      {
+        id: "R6",
+        text: ENUM_MEMBERSHIP_REQUIREMENT_TEXT,
+        quote: ENUM_MEMBERSHIP_REQUIREMENT_TEXT,
+        position: { start: 0, end: ENUM_MEMBERSHIP_REQUIREMENT_TEXT.length },
+      },
+    ],
+  };
+  const E_PLAN = planOf(E_LIST_BASE);
+  const E_LIST = requirementsFromPlan(E_PLAN);
+  const E_SOURCE = E_LIST_BASE.requirements.map((requirement) => requirement.text).join("");
+  const E_IDS = [...IDS, "R6"] as const;
+  /** 題材の表に、区分の項目の選択肢の集合だけを決める R6（enum-membership・ruled）を足した表 */
+  const E_TABLE: NameTable = {
+    ...TABLE,
+    ownership: [...TABLE.ownership, { requirementId: "R6", roles: [{ id: "f.item.kind", basis: "stated", reason: null }] }],
+    verification: [...TABLE.verification, { requirementId: "R6", kind: "enum-membership" }],
+    classification: [...TABLE.classification, { requirementId: "R6", nature: "ruled" }],
+  };
+  /** 区分の項目の options の順を表と逆にした宣言（B3 の options の照合が落とす） */
+  const REORDERED_YAML = replaced(RUN_YAML, "          alpha: アルファ\n          beta: ベータ\n", "          beta: ベータ\n          alpha: アルファ\n");
+  const r6Test = () =>
+    rawTest({
+      id: "r6-enum",
+      requirementId: "R6",
+      targetKind: "field",
+      roleId: "f.item.kind",
+      operation: "validate",
+      observes: "enum-membership",
+      expected: ok(JSON.stringify(["alpha", "beta"])),
+    });
+  const E_NATURES: readonly NatureRow[] = [...NATURES, { requirementId: "R6", nature: "ruled" }];
+  const t2E = (withR6 = true) => ({
+    classifications: withR6 ? E_NATURES : NATURES,
+    tests: [...r1Tests(), ...r2Tests(), ...r3Tests(), ...r4Tests(), ...(withR6 ? [r6Test()] : [])],
+  });
+  const eHead = (yaml: string): RecordedCall[] => [
+    structured(draftOf(E_LIST, E_TABLE)),
+    structured(acceptAll(E_IDS)),
+    structured(t2E()),
+    structured({ declaration: yaml }),
+  ];
+  async function runE(calls: readonly RecordedCall[], overrides: Partial<GenerationInputV11a> = {}) {
+    return runScenario(calls, { plan: E_PLAN, source: E_SOURCE, ...flags, ...overrides });
+  }
+
+  it("正例：宣言の options が表どおりなら今までの門で full。B1 の規則に台帳の 1 文があり、固定した試験に observes が渡り、選択肢の集合の試験は v1 の runTests に渡らない", async () => {
+    const passed: string[][] = [];
+    const original = runTestsStage.runTests;
+    vi.spyOn(runTestsStage, "runTests").mockImplementation((input) => {
+      passed.push(input.suite.tests.map((test) => test.id));
+      return original(input);
+    });
+    const { result, recording } = await runE([...eHead(RUN_YAML), structured(acceptAll(E_IDS))]);
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(result.summary.exit_code).toBe(0);
+    expect(carryEntriesOf(result.bundle)).toEqual([]);
+    const row = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
+    const write = recording.structured.find((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME)!;
+    expect(write.rules).toContain(row?.rules.b1);
+    const shown = dataBlockOf(write.input, WRITE_V11A_DATA_NAMES[2]) as { tests: { id: string; observes: string }[] };
+    expect(shown.tests.find((test) => test.id === "r6-enum")?.observes).toBe("enum-membership");
+    const semantic = recording.structured.find((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME)!;
+    expect(semantic.rules?.some((text) => text.includes(row?.rules.t1Acceptance ?? "（無い）"))).toBe(true);
+    expect(passed.length).toBeGreaterThan(0);
+    for (const ids of passed) expect(ids).not.toContain("r6-enum");
+    expectNoAcceptanceMaterial(recording.structured.map((request) => JSON.stringify(request)));
+  });
+
+  it("旗 off では同じ表は T1' の形で落ち（台帳に無い種類）、full が出ない（未登録の拒否）", async () => {
+    const { result } = await runScenario([structured(draftOf(E_LIST, E_TABLE)), structured(draftOf(E_LIST, E_TABLE))], {
+      plan: E_PLAN,
+      source: E_SOURCE,
+    });
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(stageIds(result)).not.toContain("semantic-check");
+  });
+
+  it("options の順が表と違う宣言は B3 の落ちで B5 へ行き、直した版で full", async () => {
+    const reports: { readonly mismatches: readonly { readonly testId: string }[] }[] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      const evaluator = original(input);
+      return {
+        ...evaluator,
+        runTests: (app, context, correspondence) => {
+          const report = evaluator.runTests(app, context, correspondence);
+          reports.push(report);
+          return report;
+        },
+      };
+    });
+    const { result, recording } = await runE([...eHead(REORDERED_YAML), repairDone(RUN_YAML), structured(acceptAll(E_IDS))]);
+    expect(recording.tools).toHaveLength(1);
+    const misses = dataBlockOf(recording.tools[0]!.input, "対応表の落ち") as { requirementId: string; detail: string }[];
+    expect(misses.length).toBeGreaterThan(0);
+    // 1 版目は B3 に落ちて B3' を掛けない
+    expect(countStage(result, "decl-check")).toBe(1);
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    for (const report of reports) expect(report.mismatches.map((entry) => entry.testId)).not.toContain("r6-enum");
+  });
+
+  it("負例 (c)①：同じ要件を validation の観測で確かめる試験は、台帳でも今までどおり「対応表の外」の不一致（名前の一致で救わない）で full が出ない", async () => {
+    const reports: { readonly mismatches: readonly { readonly testId: string; readonly detail: string }[]; readonly routes: readonly { readonly testId: string; readonly route: string }[] }[] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      const evaluator = original(input);
+      return {
+        ...evaluator,
+        runTests: (app, context, correspondence) => {
+          const report = evaluator.runTests(app, context, correspondence);
+          reports.push(report);
+          return report;
+        },
+      };
+    });
+    // 確かめ方は fixed-test（validation の観測）で、選択肢の項目の validate を書く（手 2p の経路 (3) の形）
+    const table: NameTable = {
+      ...E_TABLE,
+      verification: E_TABLE.verification.map((entry) => (entry.requirementId === "R6" ? { requirementId: "R6", kind: "fixed-test" as const } : entry)),
+    };
+    const validationTest = (kind: Kind) =>
+      rawTest({
+        id: `r6-option-${kind}`,
+        requirementId: "R6",
+        targetKind: "field",
+        roleId: "f.item.kind",
+        kind,
+        operation: "validate",
+        observes: "validation",
+        input: { "f.item.kind": kind === "abnormal" ? "gamma" : "alpha" },
+        expected: kind === "abnormal" ? { kind: "error", value: null, code: "E_INVALID" } : ok("true"),
+      });
+    const t2 = { classifications: E_NATURES, tests: [...r1Tests(), ...r2Tests(), ...r3Tests(), ...r4Tests(), ...KINDS.map(validationTest)] };
+    const { result } = await runE([
+      structured(draftOf(E_LIST, table)),
+      structured(acceptAll(E_IDS)),
+      structured(t2),
+      structured({ declaration: RUN_YAML }),
+      structured(acceptAll(E_IDS)),
+      repairDone(RUN_YAML),
+      structured(acceptAll(E_IDS)),
+    ]);
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(reports.length).toBeGreaterThan(0);
+    const first = reports[0]!;
+    const routes = first.routes.filter((entry) => entry.testId.startsWith("r6-option-"));
+    expect(routes.length).toBeGreaterThan(0);
+    for (const entry of routes) expect(entry.route).toBe("correspondence-defect");
+    for (const entry of first.mismatches.filter((item) => item.testId.startsWith("r6-option-"))) {
+      expect(entry.detail).toBe("表の ID が指す場所が宣言に無い");
+    }
+  });
+
+  it("拒否の配線：T1'' が enum-membership の要件を weak-verification で 2 回とも拒否すれば持ち越し、T2 の一覧と確かめ方に無く、full が出ない", async () => {
+    const rejectR6 = judgments(E_IDS, { R6: ["weak-verification", "alpha・beta のどれかである"] });
+    const { result, recording } = await runE([
+      structured(draftOf(E_LIST, E_TABLE)),
+      structured(rejectR6),
+      structured(draftOf(E_LIST, E_TABLE)),
+      structured(rejectR6),
+      structured(t2E(false)),
+      structured({ declaration: RUN_YAML }),
+      structured(acceptAll(IDS)),
+    ]);
+    expect(result.stopped).toBeNull();
+    expect(result.outcome.verdict).toBe("partial");
+    expect(carryEntriesOf(result.bundle)).toEqual([
+      { requirementId: "R6", reasons: [{ origin: "semantic-check", reason: "weak-verification" }] },
+    ]);
+    const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)!;
+    const verification = dataBlockOf(t2.input, "要件ごとの確かめ方") as readonly { requirementId: string }[];
+    expect(verification.map((entry) => entry.requirementId)).toEqual([...IDS]);
+  });
+});
+
 // ── 段単位の走り（08-architecture-v1.2.md §8.3。Issue #544）──────────────────────────────
 
 describe("段単位の走り：範囲の外の段を呼ばず、納品物を組まず、境界の材料に B の結果を入れない", () => {
@@ -1506,17 +1703,53 @@ describe("旗を省いた・off の走りは v1.1α の記録（手 2p の libra
   });
 });
 
-describe("旗 on でも要求が同じ：flags.ledger を on にした走りの要求（T1・T1''・T2・B1）・納品物・要約が off とバイト列で同じ", () => {
-  it("手 2p の library 4 経路の記録と、要求の全体・判定の問い・道具の結果・納品物の全ファイル・段の記録・要約が深く等しい", async () => {
+describe("旗 on の要求の差は台帳の enum-membership の行の分だけ：flags.ledger を on にした走りの要求（T1・T1''・T2・B1）の差の場所を固定し、ほかの要求・納品物・要約・記録が off とバイト列で同じ（Issue #547・#548）", () => {
+  it("手 2p の library 4 経路で、要求の差は名指しの場所（R-nt-08・R-sc-02・R-tsp-02・R-tsp-16・R-w11 の並び・schema の enum）だけで、その分を除けば記録と深く等しい。判定の問い・道具の結果・納品物の全ファイル・段の記録・要約は記録と深く等しい", async () => {
     const captures = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS);
     expect(captures).toHaveLength(BASELINE_LIBRARY.captures.length);
     captures.forEach((capture, index) => {
       const expected = BASELINE_LIBRARY.captures[index]!;
-      expect(capture.requests, capture.name).toEqual(expected.requests);
-      expect(capture.bundle, capture.name).toEqual(expected.bundle);
-      expect(capture.judgment.summary, capture.name).toEqual(expected.judgment.summary);
-      expect(capture.judgment.stages, capture.name).toEqual(expected.judgment.stages);
-      expect(capture, capture.name).toEqual(expected);
+      const requestOf = (record: unknown) => (record as { readonly request: unknown }).request;
+      expect(capture.requests, capture.name).toHaveLength(expected.requests.length);
+      const diffs = requestDiffsOf(capture.requests.map(requestOf), expected.requests.map(requestOf));
+      for (const diff of diffs) {
+        expect(diff.paths, `${capture.name} ${diff.schemaName}`).toEqual(ENUM_MEMBERSHIP_REQUEST_DIFF[diff.schemaName] ?? []);
+      }
+      // 要求の外側（kind・hasSignal）は同じで、差の分を除けば記録とバイト列で同じ
+      expect(capture.requests.map((record) => ({ ...(record as object), request: null })), capture.name).toEqual(
+        expected.requests.map((record) => ({ ...(record as object), request: null })),
+      );
+      expect(JSON.stringify(withoutEnumMembership(capture.requests)), capture.name).toBe(JSON.stringify(expected.requests));
+      const { requests: _onRequests, ...rest } = capture;
+      const { requests: _offRequests, ...expectedRest } = expected;
+      expect(rest.bundle, capture.name).toEqual(expectedRest.bundle);
+      expect(rest.judgment.summary, capture.name).toEqual(expectedRest.judgment.summary);
+      expect(rest.judgment.stages, capture.name).toEqual(expectedRest.judgment.stages);
+      expect(rest, capture.name).toEqual(expectedRest);
+    });
+  });
+
+  it("差は空でない：on の T1・T1''・T2・B1 の要求に台帳の enum-membership の文があり、off（記録）には無い", async () => {
+    const captures = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS);
+    const row = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership")!;
+    const full = JSON.stringify(captures[0]!.requests);
+    const recorded = JSON.stringify(BASELINE_LIBRARY.captures[0]!.requests);
+    for (const text of [row.rules.t1, row.rules.t1Acceptance, row.rules.t2, row.rules.b1]) {
+      expect(text).not.toBeNull();
+      expect(full).toContain(JSON.stringify(text).slice(1, -1));
+      expect(recorded).not.toContain(JSON.stringify(text).slice(1, -1));
+    }
+    expect(recorded).not.toContain("enum-membership");
+  });
+
+  it("二点測定：差の場所の外の要求を 1 文字変えると、差の場所の照らしが落ちる（照らしは差の場所を固定している）", () => {
+    const off = { rules: ["a", "b"], schema: { x: 1 }, input: "i" };
+    expect(jsonDiffPaths({ ...off, input: "j" }, off)).toEqual(["$.input"]);
+    expect(jsonDiffPaths({ ...off, rules: ["a", "b", "c"] }, off)).toEqual(["$.rules"]);
+    expect(jsonDiffPaths(off, off)).toEqual([]);
+    expect(withoutEnumMembership({ e: ["default-value", "enum-membership"], t: "structural・default-value・enum-membership" })).toEqual({
+      e: ["default-value"],
+      t: "structural・default-value",
     });
   });
 
@@ -1616,7 +1849,14 @@ describe("呼び出し数の回帰の契約試験（手 2p）の走りが、旗 
       const off = await observeWith(materials, calls, {});
       const on = await observeWith(materials, calls, { flags: { ledger: true } });
       expect(on.stages).toEqual(off.stages);
-      expect(on.requests).toBe(off.requests);
+      // 要求は呼び出しの数と並びが同じで、差は台帳の enum-membership の行の分だけ（Issue #548）
+      expect(JSON.stringify(withoutEnumMembership(JSON.parse(on.requests)))).toBe(off.requests);
+      const onRequests = (JSON.parse(on.requests) as { readonly request: unknown }[]).map((entry) => entry.request);
+      const offRequests = (JSON.parse(off.requests) as { readonly request: unknown }[]).map((entry) => entry.request);
+      expect(onRequests).toHaveLength(offRequests.length);
+      for (const diff of requestDiffsOf(onRequests, offRequests)) {
+        expect(diff.paths, diff.schemaName).toEqual(ENUM_MEMBERSHIP_REQUEST_DIFF[diff.schemaName] ?? []);
+      }
       expect(on.judged).toEqual(off.judged);
       expect(on.outcome).toEqual(off.outcome);
       expect(on.summary).toEqual(off.summary);

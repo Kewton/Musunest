@@ -4,6 +4,10 @@
 // 要件ごとに 3 つを見る：所属の各行はこの要件に必要か／要件を満たすのに必要な対象が表に無いか／確かめ方の
 // 種類と checks は要件の決まりを確かめられるか。判定は受理／拒否（種類つき・引用つき）である。
 //
+// 旗 `v12.ledger` が on の走り（`ledger` を渡したとき。Issue #548）は、R-sc-02 の (3) の末尾の受理条件の文を性質の
+// 台帳の行から台帳の順で組む（default-value の文は今の文とバイト列で同じ）。拒否の種類・schema・完全性と引用の検査・
+// 対象・データは変えない。off は今の定数のまま。
+//
 // **完全性と引用の実在はコードが形として確かめる**（`checkJudgmentsShape`。B3' と共有）：対象の全要件に
 // ちょうど 1 判定。欠落・重複・未知の要件 ID・確定した仕様にも要件の文にも見つからない引用・引用の無い拒否は
 // 形の落ちで、共通の窓口が 1 回やり直し、2 回続けば `malformed`（点検していない状態で先へ進まない）。
@@ -30,6 +34,7 @@ import {
 import type { SemanticCheckResult, SemanticJudgment } from "../carry-over.js";
 import { nameTableSha256, type NameTable } from "../names.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
+import type { LedgerView } from "../../v12/ledger.js";
 
 /** T1'' の JSON Schema の名前 */
 export const SEMANTIC_CHECK_SCHEMA_NAME = "semantic-check";
@@ -74,6 +79,26 @@ export const SEMANTIC_CHECK_RULE_DEFINITIONS: readonly RuleDefinition[] = [
 
 /** T1'' に足す規則（定義の `text` から組む） */
 export const SEMANTIC_CHECK_RULES: readonly string[] = ruleTexts(SEMANTIC_CHECK_RULE_DEFINITIONS);
+
+/** 性質の台帳の受理条件の文を差し込む規則（R-sc-02 の (3) の末尾。Issue #548） */
+export const SEMANTIC_CHECK_LEDGER_RULE_ID = "R-sc-02";
+/** R-sc-02 の、台帳の文の前（3 つの観点。台帳の行に依らない文） */
+const SEMANTIC_CHECK_LEDGER_RULE_HEAD =
+  "要件ごとに 3 つを見る：(1) 所属の各行は、この要件を満たすのに必要か（unnecessary-ownership）。(2) この要件を満たすのに必要な対象（項目・計算・集計・操作・画面）が表に無いか（missing-target）。(3) 確かめ方の種類と checks は、要件の決まりを確かめられるか。決まりを含む要件を、在ることだけを見る構造の検査で確かめていれば弱い（weak-verification）。";
+
+/**
+ * T1'' の規則の定義（旗 on なら台帳から組む。Issue #548）。省けば今の定数をそのまま返す。渡せば R-sc-02 の文を、
+ * 3 つの観点の文 → 台帳の行の受理条件の文（台帳の順）で組み直す（ID・why・since は変えない）。台帳が default-value の
+ * 行だけなら off の定数とバイト列で同じになる。
+ */
+export function semanticCheckRuleDefinitionsOf(ledger?: LedgerView): readonly RuleDefinition[] {
+  if (ledger === undefined) return SEMANTIC_CHECK_RULE_DEFINITIONS;
+  return SEMANTIC_CHECK_RULE_DEFINITIONS.map((definition) =>
+    definition.id === SEMANTIC_CHECK_LEDGER_RULE_ID
+      ? { ...definition, text: `${SEMANTIC_CHECK_LEDGER_RULE_HEAD}${ledger.t1AcceptanceTexts.join("")}` }
+      : definition,
+  );
+}
 
 /** 判定の並びの JSON Schema（拒否の種類だけが段で違う。T1''・B3' で共有） */
 export function judgmentsSchema(kinds: readonly string[]) {
@@ -199,6 +224,8 @@ export interface SemanticCheckInput {
   readonly advice?: readonly JudgeAdviceMarkEntry[];
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
+  /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけが渡す。省けば今の定数。Issue #548） */
+  readonly ledger?: LedgerView;
 }
 
 /** T1'' の結果（表の SHA-256 に結ぶ完全な結果と、点検の対象の要件 ID） */
@@ -226,7 +253,7 @@ export async function runSemanticCheck(input: SemanticCheckInput): Promise<Stage
   const ofTargets = <T extends { readonly requirementId: string }>(entries: readonly T[]): readonly T[] =>
     entries.filter((entry) => targetSet.has(entry.requirementId));
   const request = buildStructuredRequest({
-    rules: SEMANTIC_CHECK_RULES,
+    rules: input.ledger === undefined ? SEMANTIC_CHECK_RULES : ruleTexts(semanticCheckRuleDefinitionsOf(input.ledger)),
     documents: input.documents,
     data: [
       {

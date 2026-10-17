@@ -28,16 +28,23 @@ import {
 } from "../../stages/test-suite.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
+  ENUM_MEMBERSHIP_REQUEST_DIFF,
   FIXTURE_DOCUMENTS,
+  LEDGER_VIEW_2A,
   fixtureDefaultValueList,
   fixtureDefaultValueTable,
+  fixtureEnumMembershipList,
+  fixtureEnumMembershipTable,
   fixtureList,
   fixtureTable,
+  jsonDiffPaths,
+  requestDiffsOf,
+  withoutEnumMembership,
 } from "../__tests__/fixtures.js";
 import { deriveCarryOver, pruneForCarryOver, type CarryOver } from "../carry-over.js";
 import { coverageUnitsOf } from "../coverage.js";
 import { canonicalJson, nameTableSha256, type NameTable } from "../names.js";
-import { PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
+import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
 import {
   EVALUABLE_COMBINATIONS,
   STRUCTURE_OBSERVES,
@@ -1461,7 +1468,7 @@ describe.each(LEDGER_CASES)("既定値の要件：表の確かめ方が default-
     expectNoAcceptanceMaterial([requestText(request)]);
   });
 
-  it("旗 on と off で、同じ応答の要求（前置き・規則・データ・schema）と結果が深く等しい（1 回で通る・作り直す・判定に聞く）", async () => {
+  it("旗 on（手 2a の台帳）と off で、同じ応答の要求（前置き・規則・データ・schema）と結果が深く等しい。今の台帳の on は要求の差が enum-membership の行の分だけ（1 回で通る・作り直す・判定に聞く）", async () => {
     const recorded = () => recordingJudge(createFakeJudge({ [natureQuestionName("R4")]: choice("ruled", 0.9) }));
     const natures = D_NATURES.map((entry) => (entry.requirementId === "R4" ? { ...entry, nature: "existence-only" as const } : entry));
     const scenarios: readonly (readonly unknown[])[] = [
@@ -1484,17 +1491,27 @@ describe.each(LEDGER_CASES)("既定値の要件：表の確かめ方が default-
         return { ...result, judgeRequests: judge.requests };
       };
       const off = await runFor(undefined);
-      const on = await runFor(PROPERTY_LEDGER_VIEW);
+      const on = await runFor(LEDGER_VIEW_2A);
       expect(JSON.stringify(on.recording.structured)).toBe(JSON.stringify(off.recording.structured));
       expect(on.outcome).toEqual(off.outcome);
       expect(on.judgeRequests).toEqual(off.judgeRequests);
       expect(on.gateway.counts).toEqual(off.gateway.counts);
+      // 今の台帳（Issue #548）：要求の差は名指しの場所だけで、その分を除けばバイト列で同じ。結果・判定・呼び出し数は同じ
+      const full = await runFor(PROPERTY_LEDGER_VIEW);
+      const fullRequests = JSON.parse(JSON.stringify(full.recording.structured)) as unknown[];
+      const offRequests = JSON.parse(JSON.stringify(off.recording.structured)) as unknown[];
+      for (const diff of requestDiffsOf(fullRequests, offRequests)) expect(diff.paths).toEqual(ENUM_MEMBERSHIP_REQUEST_DIFF[TEST_SPEC_SCHEMA_NAME]);
+      expect(JSON.stringify(withoutEnumMembership(fullRequests))).toBe(JSON.stringify(offRequests));
+      expect(full.outcome).toEqual(off.outcome);
+      expect(full.judgeRequests).toEqual(off.judgeRequests);
+      expect(full.gateway.counts).toEqual(off.gateway.counts);
     }
   });
 
   it("規則：R-tsp-02 は default-value の要件を除き、R-tsp-16 は default-value の要件にだけ既定値の試験の形を許す", () => {
     const text = (id: string) => ruleDefinitions.find((definition) => definition.id === id)?.text ?? "";
-    expect(text("R-tsp-02")).toContain("確かめ方が structural・default-value の要件を除いて");
+    // 旗 on は台帳の enum-membership（Issue #548）も除く
+    expect(text("R-tsp-02")).toContain(`確かめ方が structural・default-value${ledger === undefined ? "" : "・enum-membership"} の要件を除いて`);
     const r16 = text("R-tsp-16");
     expect(r16).toContain("確かめ方が default-value の要件にだけ");
     expect(r16).toContain("その要件には異常・境界の試験を作らない");
@@ -1507,12 +1524,12 @@ describe.each(LEDGER_CASES)("既定値の要件：表の確かめ方が default-
 
 // ── 旗 on（性質の台帳から導く。Issue #547）──────────────────────────────
 
-describe("旗 on：T2 の規則の文・schema が off とバイト列で同じ（載せ替えだけ）", () => {
+describe("旗 on：手 2a の台帳（enum-membership の行を除いた導出）なら T2 の規則の文・schema が off とバイト列で同じ（載せ替えだけ。Issue #547・#548）", () => {
   it("規則の定義は off の定数と深く等しく、送る文の並び・schema の JSON がバイト列で同じ。規則の不備は on・off とも 0", () => {
-    const definitions = testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    const definitions = testSpecRuleDefinitionsOf(LEDGER_VIEW_2A);
     expect(definitions).toEqual(TEST_SPEC_RULE_DEFINITIONS);
     expect(JSON.stringify(ruleTexts(definitions))).toBe(JSON.stringify(TEST_SPEC_RULES));
-    expect(JSON.stringify(testSpecSchemaOf(PROPERTY_LEDGER_VIEW))).toBe(JSON.stringify(TEST_SPEC_SCHEMA));
+    expect(JSON.stringify(testSpecSchemaOf(LEDGER_VIEW_2A))).toBe(JSON.stringify(TEST_SPEC_SCHEMA));
     expect(ruleDefinitionDefects(definitions)).toEqual([]);
     expect(ruleDefinitionDefects(TEST_SPEC_RULE_DEFINITIONS)).toEqual([]);
     expect(testSpecRuleDefinitionsOf()).toBe(TEST_SPEC_RULE_DEFINITIONS);
@@ -1522,19 +1539,40 @@ describe("旗 on：T2 の規則の文・schema が off とバイト列で同じ�
   it("二点測定：台帳の形の文・除外の種類・observes の並びを変えると、組んだ規則と schema が off と食い違う", () => {
     const text = (view: LedgerView, id: string) => testSpecRuleDefinitionsOf(view).find((definition) => definition.id === id)?.text;
     const offText = (id: string) => TEST_SPEC_RULE_DEFINITIONS.find((definition) => definition.id === id)?.text;
-    expect(text(PROPERTY_LEDGER_VIEW, "R-tsp-02")).toBe(offText("R-tsp-02"));
-    expect(text(PROPERTY_LEDGER_VIEW, "R-tsp-16")).toBe(offText("R-tsp-16"));
-    expect(text({ ...PROPERTY_LEDGER_VIEW, t2ExemptKinds: [] }, "R-tsp-02")).not.toBe(offText("R-tsp-02"));
-    expect(text({ ...PROPERTY_LEDGER_VIEW, t2FormTexts: [] }, "R-tsp-16")).not.toBe(offText("R-tsp-16"));
-    expect(text({ ...PROPERTY_LEDGER_VIEW, t2UnsupportedTexts: [] }, "R-tsp-16")).not.toBe(offText("R-tsp-16"));
-    const [first = "", second = "", ...rest] = PROPERTY_LEDGER_VIEW.observes;
-    const reversed = { ...PROPERTY_LEDGER_VIEW, observes: [second, first, ...rest] };
+    expect(text(LEDGER_VIEW_2A, "R-tsp-02")).toBe(offText("R-tsp-02"));
+    expect(text(LEDGER_VIEW_2A, "R-tsp-16")).toBe(offText("R-tsp-16"));
+    expect(text({ ...LEDGER_VIEW_2A, t2ExemptKinds: [] }, "R-tsp-02")).not.toBe(offText("R-tsp-02"));
+    expect(text({ ...LEDGER_VIEW_2A, t2FormTexts: [] }, "R-tsp-16")).not.toBe(offText("R-tsp-16"));
+    expect(text({ ...LEDGER_VIEW_2A, t2UnsupportedTexts: [] }, "R-tsp-16")).not.toBe(offText("R-tsp-16"));
+    const [first = "", second = "", ...rest] = LEDGER_VIEW_2A.observes;
+    const reversed = { ...LEDGER_VIEW_2A, observes: [second, first, ...rest] };
     expect(JSON.stringify(testSpecSchemaOf(reversed))).not.toBe(JSON.stringify(TEST_SPEC_SCHEMA));
   });
 });
 
+describe("旗 on：今の台帳の T2 の規則・schema と off の差は enum-membership の行の分（R-tsp-02 の除外・R-tsp-16 の形の 1 文・observes の enum）だけ（Issue #548）", () => {
+  it("R-tsp-02 の除外に enum-membership が入り、R-tsp-16 に形の 1 文が default-value の文の次に入る。ほかの定義・schema の位置は off と同じで、規則の不備は 0", () => {
+    const row = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
+    const anchor = PROPERTY_LEDGER.find((entry) => entry.id === "default-value")?.rules.t2;
+    if (row?.rules.t2 == null || anchor == null) throw new Error("前提が壊れた");
+    const definitions = testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    const text = (id: string) => definitions.find((definition) => definition.id === id)?.text ?? "";
+    const offText = (id: string) => TEST_SPEC_RULE_DEFINITIONS.find((definition) => definition.id === id)?.text ?? "";
+    expect(text("R-tsp-02")).toBe(offText("R-tsp-02").replace("structural・default-value の要件", "structural・default-value・enum-membership の要件"));
+    expect(text("R-tsp-16")).toBe(offText("R-tsp-16").replace(anchor, `${anchor}${row.rules.t2}`));
+    expect(text("R-tsp-16")).toContain("k1・k2");
+    expect(definitions.filter((definition) => !["R-tsp-02", "R-tsp-16"].includes(definition.id))).toEqual(
+      TEST_SPEC_RULE_DEFINITIONS.filter((definition) => !["R-tsp-02", "R-tsp-16"].includes(definition.id)),
+    );
+    expect(ruleDefinitionDefects(definitions)).toEqual([]);
+    expect(jsonDiffPaths(testSpecSchemaOf(PROPERTY_LEDGER_VIEW), TEST_SPEC_SCHEMA)).toEqual(["$.properties.tests.items.properties.observes.enum"]);
+    expect(testSpecSchemaOf(PROPERTY_LEDGER_VIEW).properties.tests.items.properties.observes.enum).toEqual([...TEST_OBSERVES, "enum-membership"]);
+    expectNoAcceptanceMaterial(ruleTexts(definitions));
+  });
+});
+
 describe("旗 on：T2' に台帳に無い観測する性質を直接渡すと固定文で落ちる（未登録の性質の拒否）", () => {
-  const unregistered = ["enum-membership", "empty-aggregate", "other"] as const;
+  const unregistered = ["no-such-property", "empty-aggregate", "other"] as const;
 
   it("評価可能性：台帳に無い性質は、どの組でも台帳の固定文で落ちる（値を埋めない）。台帳にある性質は off と同じ結果", () => {
     for (const targetKind of TEST_TARGET_KINDS) {
@@ -1557,21 +1595,293 @@ describe("旗 on：T2' に台帳に無い観測する性質を直接渡すと固
     }
   });
 
-  it("形の検査：schema の enum を迂回した応答の台帳に無い性質は、on でも固定文で落ちる（知っている値は台帳の順）", () => {
-    const output = response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()].map((test, index) => (index === 0 ? { ...test, observes: "enum-membership" } : test)));
+  it("形の検査：schema の enum を迂回した応答の台帳に無い性質は、on でも固定文で落ちる（知っている値は台帳の順。手 2a の台帳なら off と同じ）", () => {
+    for (const observed of ["enum-membership", "no-such-property"]) {
+      const output = response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()].map((test, index) => (index === 0 ? { ...test, observes: observed } : test)));
+      const checked = checkTestSpecOutputOf(output, LEDGER_VIEW_2A);
+      expect(checked).toEqual(checkTestSpecOutputOf(output));
+      expect(checked.ok).toBe(false);
+      if (checked.ok) return;
+      expect(checked.problems).toEqual([
+        { field: "tests[0].observes", message: `観測する性質は ${LEDGER_VIEW_2A.observes.join("・")} のいずれかであること` },
+      ]);
+    }
+    // 今の台帳：enum-membership は登録済みで形を通り、台帳に無い性質は今の台帳の並びの固定文で落ちる
+    const output = response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()].map((test, index) => (index === 0 ? { ...test, observes: "no-such-property" } : test)));
     const checked = checkTestSpecOutputOf(output, PROPERTY_LEDGER_VIEW);
-    expect(checked).toEqual(checkTestSpecOutputOf(output));
-    expect(checked.ok).toBe(false);
-    if (checked.ok) return;
-    expect(checked.problems).toEqual([
-      { field: "tests[0].observes", message: `観測する性質は ${PROPERTY_LEDGER_VIEW.observes.join("・")} のいずれかであること` },
-    ]);
+    expect(checked).toEqual({
+      ok: false,
+      problems: [{ field: "tests[0].observes", message: `観測する性質は ${PROPERTY_LEDGER_VIEW.observes.join("・")} のいずれかであること` }],
+    });
+    expect(withoutEnumMembership(checked)).toEqual(checkTestSpecOutputOf(output));
   });
 
   it("段：台帳に無い性質を書いた応答は on でも 2 回とも形で落ち、malformed（やり直しの回数は今と同じ）", async () => {
-    const bad = response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()].map((test) => ({ ...test, observes: "enum-membership" })));
-    const { outcome, recording } = await ledgerFunctions(PROPERTY_LEDGER_VIEW).run([bad, bad]);
-    if (outcome.ok || outcome.failure.kind !== "malformed") throw new Error("malformed でない");
-    expect(recording.structured).toHaveLength(2);
+    for (const [view, observed] of [
+      [LEDGER_VIEW_2A, "enum-membership"],
+      [PROPERTY_LEDGER_VIEW, "no-such-property"],
+    ] as const) {
+      const bad = response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()].map((test) => ({ ...test, observes: observed })));
+      const { outcome, recording } = await ledgerFunctions(view).run([bad, bad]);
+      if (outcome.ok || outcome.failure.kind !== "malformed") throw new Error("malformed でない");
+      expect(recording.structured).toHaveLength(2);
+    }
+  });
+});
+
+// ── 選択肢の集合 enum-membership（旗 on。Issue #548）──────────────────────────────
+
+describe("旗 on：選択肢の集合の要件は、表の確かめ方が enum-membership の要件にだけ選択肢の集合の試験を許す（Issue #548）", () => {
+  const ROW = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
+  if (ROW?.t2 == null) throw new Error("前提が壊れた：台帳に enum-membership の試験の型が無い");
+  const MESSAGES = ROW.t2.messages;
+  const { run: runOn, checkTestSpecOutput, defaultValueTargetsOf: ledgerTargets, exemptDefaultValueProblems: exempt } =
+    ledgerFunctions(PROPERTY_LEDGER_VIEW);
+  const ELIST = fixtureEnumMembershipList();
+  const EPLAN = fixturePlan(ELIST);
+  const ETABLE = fixtureEnumMembershipTable();
+  const R6_AT = "requirements[4]";
+  const T_AT = "tests[10]";
+
+  async function carryFor(table: NameTable, rejected: readonly string[] = []): Promise<CarryOver> {
+    const tableSha256 = await nameTableSha256(table);
+    const targets = table.verification.filter((entry) => entry.kind !== "unresolved").map((entry) => entry.requirementId);
+    return deriveCarryOver({
+      list: ELIST,
+      table,
+      semanticCheck: {
+        tableSha256,
+        judgments: targets.map((requirementId) =>
+          rejected.includes(requirementId)
+            ? { requirementId, verdict: "reject" as const, kind: "weak-verification", quote: "alpha" }
+            : { requirementId, verdict: "accept" as const },
+        ),
+      },
+    });
+  }
+
+  /** 選択肢の集合の試験（正しい形：normal・validate・enum-membership・期待 ok の options の並びの JSON・入力が空・参照データが空） */
+  const r6Enum = (patch: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: "r6-enum",
+    target: { requirementId: "R6", kind: "field", roleId: "f.item.kind" },
+    kind: "normal",
+    operation: "validate",
+    clock: "2026-09-16T12:00:00+09:00",
+    input: "{}",
+    inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: [] },
+    referenceData: [],
+    expected: { kind: "ok", value: JSON.stringify(["alpha", "beta"]), code: null },
+    assertion: null,
+    observes: "enum-membership",
+    ...patch,
+  });
+  const E_NATURES: readonly NatureRow[] = [...T1_NATURES, { requirementId: "R6", nature: "ruled" }];
+  const others = (r3 = r3Action()) => [...r1Validate(), ...r2Structure(), ...r3, ...r4Compute()];
+  const eResponse = (r6: readonly Record<string, unknown>[] = [r6Enum()], natures: readonly NatureRow[] = E_NATURES, r3 = r3Action()) =>
+    response([...others(r3), ...r6], natures);
+
+  async function runE(
+    outputs: readonly unknown[],
+    options: { table?: NameTable; judge?: Judge; rejected?: readonly string[]; ledger?: LedgerView } = {},
+  ) {
+    const table = options.table ?? ETABLE;
+    const runner = options.ledger === undefined ? runOn : ledgerFunctions(options.ledger).run;
+    return runner(outputs, {
+      plan: EPLAN,
+      list: ELIST,
+      table,
+      carryOver: await carryFor(table, options.rejected),
+      ...(options.judge === undefined ? {} : { judge: options.judge }),
+    });
+  }
+
+  async function problemsOf(bad: unknown, table?: NameTable) {
+    const { outcome } = await runE([bad, bad], table === undefined ? {} : { table });
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error(`unmet でない: ${JSON.stringify(outcome)}`);
+    expect(outcome.failure.attempts).toBe(TEST_SPEC_ROUNDS);
+    return outcome.failure.problems;
+  }
+
+  const fixedTestTable = (): NameTable => ({
+    ...ETABLE,
+    verification: ETABLE.verification.map((entry) => (entry.requirementId === "R6" ? { requirementId: "R6", kind: "fixed-test" as const } : entry)),
+  });
+
+  it("(1) 二点測定：形どおりの試験 1 本を書いた応答が今の台帳で 1 回で通り網羅の単位にその単位があり、手 2a の台帳（性質が未登録）では固定文で落ちる", async () => {
+    const { outcome, recording } = await runE([eResponse()]);
+    if (!outcome.ok) throw new Error(`通るはず: ${JSON.stringify(outcome.failure)}`);
+    expect(recording.structured).toHaveLength(1);
+    expect(outcome.value.observes.get("r6-enum")).toBe("enum-membership");
+    expect(outcome.value.natures.get("R6")).toBe("ruled");
+    const key = canonicalJson({
+      basis: "value",
+      requirementId: "R6",
+      targetId: "f.item.kind",
+      kind: "normal",
+      operation: "validate",
+      observes: "enum-membership",
+    });
+    expect(outcome.value.coverage).toContainEqual({ requirementId: "R6", targetId: "f.item.kind", key });
+    expect(outcome.value.coverage.filter((unit) => unit.requirementId === "R6")).toHaveLength(1);
+    expect(outcome.value.coverage).toEqual(
+      coverageUnitsOf({ suite: outcome.value.suite, observes: outcome.value.observes, natures: outcome.value.natures }),
+    );
+    // 直す前（手 2a の台帳）：観測する性質が未登録で、形の固定文で落ちる（2 回で malformed）
+    const before = await runE([eResponse(), eResponse()], { ledger: LEDGER_VIEW_2A });
+    if (before.outcome.ok || before.outcome.failure.kind !== "malformed") throw new Error("malformed でない");
+    expect(before.outcome.failure.problems).toContainEqual({
+      field: `${T_AT}.observes`,
+      message: `観測する性質は ${LEDGER_VIEW_2A.observes.join("・")} のいずれかであること`,
+    });
+  });
+
+  it("(2) 負例：確かめ方が fixed-test の要件に選択肢の集合の試験を作ると固定文で落ち、異常・境界の不足も免除されない", async () => {
+    const problems = await problemsOf(eResponse(), fixedTestTable());
+    expect(problems).toContainEqual({ field: `${T_AT}.observes`, message: MESSAGES.notAllowed });
+    expect(problems).toContainEqual({ field: R6_AT, message: "abnormal の試験が無い" });
+    expect(problems).toContainEqual({ field: R6_AT, message: "boundary の試験が無い" });
+  });
+
+  it("(2) 負例：期待が options と順が違う・長さが違う・文字列の並びでない・kind が error は固定文で落ちる（値を埋めない）", async () => {
+    for (const expected of [
+      { kind: "ok", value: JSON.stringify(["beta", "alpha"]), code: null },
+      { kind: "ok", value: JSON.stringify(["alpha"]), code: null },
+      { kind: "ok", value: JSON.stringify(["alpha", "beta", "gamma"]), code: null },
+      { kind: "ok", value: JSON.stringify(["alpha", "alpha"]), code: null },
+      { kind: "ok", value: JSON.stringify("alpha"), code: null },
+      { kind: "ok", value: JSON.stringify([1, 2]), code: null },
+      { kind: "ok", value: JSON.stringify({ alpha: true, beta: true }), code: null },
+      { kind: "ok", value: "null", code: null },
+      { kind: "error", value: null, code: "E_INVALID" },
+    ]) {
+      const problems = await problemsOf(eResponse([r6Enum({ expected })]));
+      expect(problems, JSON.stringify(expected)).toEqual([{ field: `${T_AT}.expected`, message: MESSAGES.expected }]);
+      for (const word of ["alpha", "beta", "gamma"]) expect(MESSAGES.expected).not.toContain(word);
+    }
+  });
+
+  it("(2) 負例：abnormal の試験は固定文で落ちる", async () => {
+    const problems = await problemsOf(
+      eResponse([r6Enum(), r6Enum({ id: "r6-abnormal", kind: "abnormal", expected: { kind: "error", value: null, code: "E_INVALID" } })]),
+    );
+    expect(problems).toContainEqual({ field: "tests[11].kind", message: MESSAGES.kind });
+    expect(problems).toContainEqual({ field: "tests[11].expected", message: MESSAGES.expected });
+  });
+
+  it("(2) 負例：入力が空でないと固定文で落ちる", async () => {
+    expect(await problemsOf(eResponse([r6Enum({ input: JSON.stringify({ "f.item.kind": "beta" }) })]))).toEqual([
+      { field: `${T_AT}.input`, message: MESSAGES.input },
+    ]);
+  });
+
+  it("(2) 負例：ほかの条件を満たし参照データだけが 1 行ある試験は、参照データの固定文だけで落ちる", async () => {
+    const referenceData = [{ target: { requirementId: "R6", kind: "entity", roleId: "e.item" }, rowId: "item-1", values: "{}" }];
+    expect(await problemsOf(eResponse([r6Enum({ referenceData })]))).toEqual([{ field: `${T_AT}.referenceData`, message: MESSAGES.referenceData }]);
+  });
+
+  it("(2) 負例：対象が別の項目（validate の正しい組）だと落ちる", async () => {
+    const problems = await problemsOf(eResponse([r6Enum({ target: { requirementId: "R6", kind: "field", roleId: "f.item.amount" } })]));
+    expect(problems).toContainEqual({ field: `${T_AT}.observes`, message: MESSAGES.notAllowed });
+    expect(problems).toContainEqual({ field: `${T_AT}.target`, message: MESSAGES.target });
+  });
+
+  it("(2) 負例：その要件の試験を省くと「要件の試験が無い」で落ちる（免除は試験の有無で決めない）", async () => {
+    expect(await problemsOf(eResponse([]))).toEqual([{ field: R6_AT, message: "要件の試験が無い" }]);
+  });
+
+  it("(2) 負例：観測が validation の normal だけは固定文で落ちる", async () => {
+    expect(await problemsOf(eResponse([r6Enum({ observes: "validation" })]))).toEqual([
+      { field: `${T_AT}.observes`, message: MESSAGES.observes },
+    ]);
+  });
+
+  it("(2) 負例：ほかの ruled の要件の異常・境界の不足は免除が漏れずに落ちる", async () => {
+    expect(await problemsOf(eResponse([r6Enum()], E_NATURES, r3Action(["normal"])))).toEqual([
+      { field: "requirements[2]", message: "abnormal の試験が無い" },
+      { field: "requirements[2]", message: "boundary の試験が無い" },
+    ]);
+  });
+
+  // ── (3) 除外の範囲 ─────────────────────────────────────────────
+
+  async function planned(table: NameTable = ETABLE, rejected: readonly string[] = []) {
+    const pruned = pruneForCarryOver(ELIST, table, await carryFor(table, rejected));
+    return { pruned, design: pruned.conversion.design, targets: ledgerTargets(pruned.table) };
+  }
+  const suiteOf = (output: unknown): TestSuite => {
+    const checked = checkTestSpecOutput(output);
+    if (!checked.ok) throw new Error("形が通るはず");
+    return checked.value.suite;
+  };
+  const key = (problem: Problem) => `${problem.field}\u0000${problem.message}`;
+  const minus = (a: readonly Problem[], b: readonly Problem[]) => {
+    const kept = new Set(b.map(key));
+    return a.filter((problem) => !kept.has(key(problem)));
+  };
+
+  it("(3) v1 の checkSuitePlan の出力と除外後の出力の差は、対象の要件の位置の abnormal・boundary の不足の 2 件だけ", async () => {
+    const { pruned, design, targets } = await planned();
+    const suite = suiteOf(eResponse());
+    const raw = checkSuitePlan(pruned.list, suite, design, reconcileNatures(design, suite.classifications).natures);
+    const exempted = exempt(raw, pruned.list, targets);
+    expect(minus(raw, exempted)).toEqual([
+      { field: R6_AT, message: "abnormal の試験が無い" },
+      { field: R6_AT, message: "boundary の試験が無い" },
+    ]);
+    expect(exempted).toEqual([]);
+  });
+
+  it("(3) 除外は default-value と同じ 3 条件（位置・文の完全一致・持ち越しで除かれていない）：部分一致の文・別の位置・別の文・持ち越しの要件の位置は外れない", async () => {
+    const { pruned, targets } = await planned();
+    const kept: readonly Problem[] = [
+      { field: R6_AT, message: "abnormal の試験が無い（追記）" },
+      { field: R6_AT, message: " boundary の試験が無い" },
+      { field: R6_AT, message: "normal の試験が無い" },
+      { field: R6_AT, message: "要件の試験が無い" },
+      { field: "requirements[3]", message: "abnormal の試験が無い" },
+      { field: `${R6_AT}.kind`, message: "boundary の試験が無い" },
+      { field: T_AT, message: "abnormal の試験が無い" },
+    ];
+    expect(exempt(kept, pruned.list, targets)).toEqual(kept);
+    const carried = await planned(ETABLE, ["R6"]);
+    expect(carried.targets.size).toBe(0);
+    const atCarried: readonly Problem[] = [
+      { field: "requirements[5]", message: "abnormal の試験が無い" },
+      { field: R6_AT, message: "boundary の試験が無い" },
+    ];
+    expect(exempt(atCarried, ELIST, carried.targets)).toEqual(atCarried);
+    expect(exempt(atCarried, carried.pruned.list, carried.targets)).toEqual(atCarried);
+  });
+
+  // ── (4) 分類 ───────────────────────────────────────────────────
+
+  it("(4) 分類が食い違っても判定を呼ばず（要求 0）ruled で採り、記録は fallback", async () => {
+    const recorded = recordingJudge(createFakeJudge({}));
+    const natures = E_NATURES.map((entry) => (entry.requirementId === "R6" ? { requirementId: "R6", nature: "existence-only" as const } : entry));
+    const { outcome } = await runE([eResponse([r6Enum()], natures)], { judge: recorded.judge });
+    if (!outcome.ok) throw new Error(`通るはず: ${JSON.stringify(outcome.failure)}`);
+    expect(recorded.requests).toHaveLength(0);
+    expect(outcome.value.natures.get("R6")).toBe("ruled");
+    expect(outcome.value.discrepancies).toEqual([
+      { requirementId: "R6", design: "ruled", classified: "existence-only", resolved: "ruled", resolution: "fallback" },
+    ]);
+  });
+
+  // ── (5) データと題材の言葉 ──────────────────────────────────────
+
+  it("(5) 「要件ごとの確かめ方」に kind が載り（value は無い）、規則に形の 1 文があり、要求のどこにも題材の言葉が無い", async () => {
+    const { recording } = await runE([eResponse()]);
+    const request = recording.structured[0]!;
+    expect(dataNamesOf(request.input)).toEqual([...TEST_SPEC_DATA_NAMES]);
+    const verification = dataBlockOf(request.input, "要件ごとの確かめ方") as readonly Record<string, unknown>[];
+    expect(verification.find((entry) => entry["requirementId"] === "R6")).toEqual({
+      requirementId: "R6",
+      verificationKind: "enum-membership",
+      checks: [],
+    });
+    expect(verification.some((entry) => "value" in entry)).toBe(false);
+    expect(request.rules).toEqual(ruleTexts(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)));
+    expect(request.rules?.some((text) => text.includes(ROW.rules.t2 ?? "（無い）"))).toBe(true);
+    expectNoAcceptanceMaterial([requestText(request)]);
   });
 });

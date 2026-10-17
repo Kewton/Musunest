@@ -14,19 +14,28 @@ import {
   FIXTURE_DOCUMENTS,
   fixtureDefaultValueList,
   fixtureDefaultValueTable,
+  fixtureEnumMembershipList,
+  fixtureEnumMembershipTable,
   fixtureList,
   fixtureTable,
+  ENUM_MEMBERSHIP_REQUEST_DIFF,
+  LEDGER_VIEW_2A,
+  requestDiffsOf,
+  withoutEnumMembership,
 } from "../__tests__/fixtures.js";
 import { deriveCarryOver } from "../carry-over.js";
 import { checkNameTable, nameTableSha256, type NameTable } from "../names.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
+import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
 import {
+  SEMANTIC_CHECK_LEDGER_RULE_ID,
   SEMANTIC_CHECK_RULE_DEFINITIONS,
   SEMANTIC_CHECK_RULES,
   SEMANTIC_CHECK_SCHEMA,
   SEMANTIC_CHECK_SCHEMA_NAME,
   SEMANTIC_REJECTION_KINDS,
   runSemanticCheck,
+  semanticCheckRuleDefinitionsOf,
   semanticCheckTargets,
 } from "./semantic-check.js";
 
@@ -338,3 +347,137 @@ describe("T1'' の default-value の受理の条件（拒否の配線の検証�
     expect(outcome.failure.problems).toContainEqual({ field: "requirements[4]", message: "判定が無い要件がある" });
   });
 });
+
+// ── 旗 on：受理条件の差し込み（Issue #548）──────────────────────────────
+
+describe("旗 on：R-sc-02 の末尾に台帳の受理条件の文を台帳の順で差し込む（Issue #548）", () => {
+  const ROW = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
+  const DEFAULT_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "default-value");
+  const ruleOf = (ledger?: LedgerView) =>
+    semanticCheckRuleDefinitionsOf(ledger).find((definition) => definition.id === SEMANTIC_CHECK_LEDGER_RULE_ID)?.text ?? "";
+
+  it("off は今の定数。手 2a の台帳で組んだ default-value の文は今の文とバイト列で同じ。今の台帳は末尾に enum-membership の文が増えるだけ", () => {
+    expect(semanticCheckRuleDefinitionsOf()).toBe(SEMANTIC_CHECK_RULE_DEFINITIONS);
+    expect(semanticCheckRuleDefinitionsOf(LEDGER_VIEW_2A)).toEqual(SEMANTIC_CHECK_RULE_DEFINITIONS);
+    expect(ruleOf(LEDGER_VIEW_2A)).toBe(ruleOf());
+    expect(ruleOf()).toContain(DEFAULT_ROW?.rules.t1Acceptance ?? "（無い）");
+    expect(ruleOf().endsWith(DEFAULT_ROW?.rules.t1Acceptance ?? "（無い）")).toBe(true);
+    expect(ruleOf(PROPERTY_LEDGER_VIEW)).toBe(`${ruleOf()}${ROW?.rules.t1Acceptance ?? "（無い）"}`);
+    expect(
+      semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW).filter((definition) => definition.id !== SEMANTIC_CHECK_LEDGER_RULE_ID),
+    ).toEqual(SEMANTIC_CHECK_RULE_DEFINITIONS.filter((definition) => definition.id !== SEMANTIC_CHECK_LEDGER_RULE_ID));
+    for (const ledger of [undefined, LEDGER_VIEW_2A, PROPERTY_LEDGER_VIEW]) {
+      expect(ruleDefinitionDefects(semanticCheckRuleDefinitionsOf(ledger))).toEqual([]);
+    }
+  });
+
+  it("二点測定：台帳の受理条件の文を 1 文字変えると、組んだ R-sc-02 が変わる（台帳から組んでいる）", () => {
+    const changed: LedgerView = { ...PROPERTY_LEDGER_VIEW, t1AcceptanceTexts: PROPERTY_LEDGER_VIEW.t1AcceptanceTexts.map((text) => `${text} `) };
+    expect(ruleOf(changed)).not.toBe(ruleOf(PROPERTY_LEDGER_VIEW));
+  });
+
+  it("同じ応答で on・off の要求の差は R-sc-02 だけで、その分を除けばバイト列で同じ。手 2a の台帳ならバイト列で同じ。結果は深く等しい", async () => {
+    const list = fixtureDefaultValueList();
+    const table = fixtureDefaultValueTable();
+    const runWith = async (ledger?: LedgerView) => {
+      const recording = createRecordingClient([structured({ judgments: [...TARGETS, "R6"].map(accept) })]);
+      const outcome = await runSemanticCheck({
+        plan: planOf(list),
+        list,
+        table,
+        documents: FIXTURE_DOCUMENTS,
+        gateway: makeGateway(recording.client),
+        ...(ledger === undefined ? {} : { ledger }),
+      });
+      return { outcome, requests: JSON.parse(JSON.stringify(recording.structured)) as unknown[] };
+    };
+    const off = await runWith();
+    const twoA = await runWith(LEDGER_VIEW_2A);
+    const on = await runWith(PROPERTY_LEDGER_VIEW);
+    expect(JSON.stringify(twoA.requests)).toBe(JSON.stringify(off.requests));
+    expect(requestDiffsOf(on.requests, off.requests).map((diff) => diff.paths)).toEqual([ENUM_MEMBERSHIP_REQUEST_DIFF[SEMANTIC_CHECK_SCHEMA_NAME]]);
+    expect(JSON.stringify(withoutEnumMembership(on.requests))).toBe(JSON.stringify(off.requests));
+    expect(on.outcome).toEqual(off.outcome);
+    expect(twoA.outcome).toEqual(off.outcome);
+  });
+});
+
+describe("T1'' の enum-membership の受理の条件（旗 on。拒否の配線の検証。モデルの判定の精度の実証ではない。Issue #548）", () => {
+  /** 選択肢のほかに入力の制約を含む要件 R6（形と所属は正しい） */
+  const WITH_CONSTRAINT = "項目の区分は、alpha・beta のどれかで、金額が 0 より大きいときだけ beta を選べる。";
+  const CONSTRAINT_QUOTE = "金額が 0 より大きいときだけ beta を選べる";
+  /** 文の選択肢は alpha・beta・gamma、行の options は alpha・beta（形と所属は正しい） */
+  const MISMATCHED = "項目の区分は、alpha・beta・gamma のどれかである。";
+  const MISMATCHED_QUOTE = "alpha・beta・gamma のどれかである";
+  const ENUM_TARGETS = [...TARGETS, "R6"];
+  const ledger = PROPERTY_LEDGER_VIEW;
+
+  async function runEnum(list: RequirementList, table: NameTable, outputs: readonly unknown[]) {
+    const recording = createRecordingClient(outputs.map(structured));
+    const outcome = await runSemanticCheck({
+      plan: planOf(list),
+      list,
+      table,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(recording.client),
+      ledger,
+    });
+    return { outcome, requests: recording.structured };
+  }
+
+  const cases = [
+    { name: "選択肢のほかに入力の制約を含む要件", list: fixtureEnumMembershipList(WITH_CONSTRAINT), quote: CONSTRAINT_QUOTE },
+    { name: "行の options が文の選択肢と合わない要件", list: fixtureEnumMembershipList(MISMATCHED), quote: MISMATCHED_QUOTE },
+  ] as const;
+
+  for (const entry of cases) {
+    it(`${entry.name}：形と所属は T1' を通り、送るデータと規則を確かめ、偽物の weak-verification が形の検査を通って持ち越しになる`, async () => {
+      const table = fixtureEnumMembershipTable();
+      // 前提：形と所属は正しい（旗 on の T1' は問題 0）
+      expect(checkNameTable(entry.list, table, FIXTURE_DOCUMENTS, { ledger })).toEqual([]);
+      const rejection = [...ENUM_TARGETS.filter((id) => id !== "R6").map(accept), reject("R6", "weak-verification", entry.quote)];
+      const { outcome, requests } = await runEnum(entry.list, table, [{ judgments: rejection }]);
+      expect(requests).toHaveLength(1);
+      const request = requests[0]!;
+      const blocks = dataBlocks(request.input);
+      const texts = JSON.parse(blocks.find((block) => block.name === "要件の文と引用")!.text) as { requirementId: string; text: string }[];
+      expect(texts.find((item) => item.requirementId === "R6")?.text).toBe(entry.list.requirements[5]?.text);
+      // 確かめ方は kind をそのまま載せる（選択肢は表の行の options で見える）
+      const verification = JSON.parse(blocks.find((block) => block.name === "確かめ方")!.text) as Record<string, unknown>[];
+      expect(verification.find((item) => item["requirementId"] === "R6")).toEqual({ requirementId: "R6", kind: "enum-membership" });
+      // 規則の文（ほかの決まりを含む要件・選択肢の合わない要件は受理しない）
+      const rule = request.rules?.find((text) => text.includes("enum-membership")) ?? "";
+      expect(rule).toContain(ROW_ACCEPTANCE);
+      expect(rule).toContain("options が要件の文の選択肢と過不足なく合うときだけ受理する");
+      expect(rule).toContain("選択肢のほかの決まり（入力の制約など）を含む要件");
+      expect(rule).toContain("weak-verification で拒否する");
+      if (!outcome.ok) throw new Error("通るはず");
+      expect(outcome.value.targets).toEqual(ENUM_TARGETS);
+      expect(outcome.value.judgments.at(-1)).toEqual({ requirementId: "R6", verdict: "reject", kind: "weak-verification", quote: entry.quote });
+      const carry = await deriveCarryOver({ list: entry.list, table, semanticCheck: { tableSha256: outcome.value.tableSha256, judgments: outcome.value.judgments } });
+      expect(carry.entries.map((item) => item.requirementId)).toEqual(["R5", "R6"]);
+      expectNoAcceptanceMaterial([request.input, ...(request.rules ?? [])]);
+    });
+  }
+
+  it("受理すれば持ち越しにならない。拒否の種類の数は 3 のまま（schema は on・off で同じ）", async () => {
+    const list = fixtureEnumMembershipList();
+    const table = fixtureEnumMembershipTable();
+    const { outcome, requests } = await runEnum(list, table, [{ judgments: ENUM_TARGETS.map(accept) }]);
+    if (!outcome.ok) throw new Error("通るはず");
+    const carry = await deriveCarryOver({ list, table, semanticCheck: { tableSha256: outcome.value.tableSha256, judgments: outcome.value.judgments } });
+    expect(carry.entries.map((item) => item.requirementId)).toEqual(["R5"]);
+    expect(SEMANTIC_REJECTION_KINDS).toHaveLength(3);
+    expect(JSON.stringify(requests[0]?.schema)).toBe(JSON.stringify(SEMANTIC_CHECK_SCHEMA));
+    expect(requests[0]?.schemaName).toBe(SEMANTIC_CHECK_SCHEMA_NAME);
+  });
+
+  it("enum-membership の要件の判定を欠いた応答は今までどおり形の落ち（2 回で malformed）", async () => {
+    const partial = { judgments: TARGETS.map(accept) };
+    const { outcome } = await runEnum(fixtureEnumMembershipList(), fixtureEnumMembershipTable(), [partial, partial]);
+    if (outcome.ok || outcome.failure.kind !== "malformed") throw new Error("malformed でない");
+    expect(outcome.failure.problems).toContainEqual({ field: "requirements[4]", message: "判定が無い要件がある" });
+  });
+});
+
+const ROW_ACCEPTANCE = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership")?.rules.t1Acceptance ?? "（無い）";

@@ -10,7 +10,7 @@
 import type { NormalizedAppSpec } from "@musunest/appspec-schema";
 import { normalizeSpec } from "@musunest/spec-engine";
 import type { Requirement, RequirementList } from "../../pipeline.js";
-import type { PromptDocument } from "../../stages/prompt.js";
+import type { PromptDocument, RuleDefinition } from "../../stages/prompt.js";
 import {
   copyLengthFor,
   requirementCopy,
@@ -18,6 +18,11 @@ import {
   type NameTableDraft,
   type NameTableRow,
 } from "../names.js";
+import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView } from "../../v12/ledger.js";
+import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
+import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
+import { TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
+import { WRITE_V11A_SCHEMA_NAME } from "../stages/write.js";
 
 const requirement = (id: string, text: string): Requirement => ({
   id,
@@ -205,6 +210,32 @@ export function fixtureDefaultValueTable(value = "alpha"): NameTable {
   };
 }
 
+/**
+ * 選択肢の集合の要件（Issue #548）。区分の項目（`f.item.kind`。options は alpha・beta）の値が挙げた選択肢のどれかで
+ * あることだけを決める要件 R6 の文。抽象的な文で、受入の題材の言葉は使わない。
+ */
+export const ENUM_MEMBERSHIP_REQUIREMENT_TEXT = "項目の区分は、alpha・beta のどれかである。";
+
+/** 題材の一覧に、選択肢の集合の要件 R6 を末尾に足したもの（`fixtureList` の値は変えない。Issue #548） */
+export function fixtureEnumMembershipList(text: string = ENUM_MEMBERSHIP_REQUIREMENT_TEXT): RequirementList {
+  return fixtureDefaultValueList(text);
+}
+
+/**
+ * 題材の表に、選択肢の集合の要件 R6 を足したもの（Issue #548）。R6 は区分の項目だけを名指しで所属させ（entity は
+ * コードが足す）、確かめ方は enum-membership（欄は無し）、分類は ruled。`options` を渡せば区分の項目の options を
+ * その並びに替える（ほかの行は題材の表のまま。`fixtureTable` の値は変えない）。
+ */
+export function fixtureEnumMembershipTable(options?: readonly string[]): NameTable {
+  const base = fixtureTable();
+  return {
+    rows: options === undefined ? base.rows : base.rows.map((entry) => (entry.id === "f.item.kind" ? { ...entry, options } : entry)),
+    ownership: [...base.ownership, { requirementId: "R6", roles: [stated("f.item.kind")] }],
+    verification: [...base.verification, { requirementId: "R6", kind: "enum-membership" }],
+    classification: [...base.classification, { requirementId: "R6", nature: "ruled" }],
+  };
+}
+
 /** 名前の表を T1 の応答の形（下書き。要件 ID を持たず、写しを添える）に戻す */
 export function draftOf(list: RequirementList, table: NameTable): NameTableDraft {
   const length = copyLengthFor(list);
@@ -240,7 +271,12 @@ export interface FixtureYamlOptions {
   readonly validation?: boolean;
   /** 表の操作 `closeItem` を入れるか（外すと表の名前が宣言に無い） */
   readonly closeItem?: boolean;
+  /** 区分の項目 `kind` の options のキーの並び（既定は alpha・beta。Issue #548） */
+  readonly kindOptions?: readonly string[];
 }
+
+/** 区分の項目の options の表示名（キー → 表示名） */
+const KIND_OPTION_LABELS: Readonly<Record<string, string>> = { alpha: "アルファ", beta: "ベータ", gamma: "ガンマ" };
 
 /**
  * 宣言の YAML を組み立てる。既定は表の全要素＋補助の計算 `base`＋検査 `amount`。補助を外すと `rate` の式は
@@ -250,6 +286,7 @@ export function fixtureYaml(options: FixtureYamlOptions = {}): string {
   const helper = options.helper ?? true;
   const validation = options.validation ?? true;
   const closeItem = options.closeItem ?? true;
+  const kindOptions = options.kindOptions ?? ["alpha", "beta"];
   return [
     "entities:",
     "  - name: member",
@@ -270,8 +307,7 @@ export function fixtureYaml(options: FixtureYamlOptions = {}): string {
     "      kind:",
     "        type: enum",
     "        options:",
-    "          alpha: アルファ",
-    "          beta: ベータ",
+    ...kindOptions.map((key) => `          ${key}: ${KIND_OPTION_LABELS[key] ?? key}`),
     "computed:",
     "  - name: itemCount",
     "    entity: member",
@@ -356,3 +392,89 @@ export async function normalizedFixture(source: string = FIXTURE_YAML): Promise<
   }
   return result.app;
 }
+
+// ── 旗 on の要求の差の範囲（Issue #548）──────────────────────────────
+
+const ENUM_MEMBERSHIP_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
+if (ENUM_MEMBERSHIP_ROW === undefined) throw new Error("前提が壊れた：台帳に enum-membership の行が無い");
+/** 台帳の enum-membership の行の、文に差し込む文（T1・T1''・T2） */
+const ENUM_MEMBERSHIP_SENTENCES = [ENUM_MEMBERSHIP_ROW.rules.t1, ENUM_MEMBERSHIP_ROW.rules.t1Acceptance, ENUM_MEMBERSHIP_ROW.rules.t2].filter(
+  (text): text is string => text !== null,
+);
+
+/**
+ * 旗 on の要求（の JSON の値）から、台帳の enum-membership の行の分を除く（Issue #548）。文の中の T1・T1''・T2 の文と
+ * 種類の並びの `・enum-membership`（R-tsp-02 の除外・種類の一覧の固定文）を消し、並びから値 `enum-membership`（schema の
+ * enum）と B1 の文の要素を外す。手 2a の要求とバイト列で同じになることを、旗 on の差の範囲の試験が照らす。
+ */
+export function withoutEnumMembership(value: unknown): unknown {
+  if (typeof value === "string") {
+    return ENUM_MEMBERSHIP_SENTENCES.reduce((text, sentence) => text.split(sentence).join(""), value).split("・enum-membership").join("");
+  }
+  if (Array.isArray(value)) {
+    return value
+      .filter((element) => element !== "enum-membership" && element !== ENUM_MEMBERSHIP_ROW?.rules.b1)
+      .map(withoutEnumMembership);
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, withoutEnumMembership(entry)]));
+  }
+  return value;
+}
+
+/** 2 つの JSON の値の違う場所（葉の位置。並びの長さが違えばその並びの位置）を、見つけた順に返す */
+export function jsonDiffPaths(left: unknown, right: unknown, path = "$"): readonly string[] {
+  if (Array.isArray(left) && Array.isArray(right)) {
+    if (left.length !== right.length) return [path];
+    return left.flatMap((entry, index) => jsonDiffPaths(entry, right[index], `${path}[${String(index)}]`));
+  }
+  if (left !== null && right !== null && typeof left === "object" && typeof right === "object" && !Array.isArray(left) && !Array.isArray(right)) {
+    const keys = [...new Set([...Object.keys(left), ...Object.keys(right)])];
+    return keys.flatMap((key) =>
+      jsonDiffPaths((left as Record<string, unknown>)[key], (right as Record<string, unknown>)[key], `${path}.${key}`),
+    );
+  }
+  return Object.is(left, right) ? [] : [path];
+}
+
+const ruleAt = (definitions: readonly RuleDefinition[], id: string): string => {
+  const index = definitions.findIndex((definition) => definition.id === id);
+  if (index < 0) throw new Error(`前提が壊れた：規則 ${id} が無い`);
+  return `$.rules[${String(index)}]`;
+};
+
+/**
+ * 旗 on の要求が手 2a（off）と違ってよい場所（段の schema の名前 → 要求の中の位置。Issue #548）。T1 は R-nt-08 と
+ * schema の確かめ方の種類の enum、T1'' は R-sc-02、T2 は R-tsp-02・R-tsp-16 と schema の観測する性質の enum、B1 は
+ * 規則の並び（末尾に 1 文増える）。ほかの段・ほかの位置は違ってはいけない。
+ */
+export const ENUM_MEMBERSHIP_REQUEST_DIFF: Readonly<Record<string, readonly string[]>> = {
+  [NAME_TABLE_SCHEMA_NAME]: [
+    ruleAt(NAME_TABLE_RULE_DEFINITIONS, "R-nt-08"),
+    "$.schema.properties.requirements.items.properties.verification.properties.kind.enum",
+  ],
+  [SEMANTIC_CHECK_SCHEMA_NAME]: [ruleAt(SEMANTIC_CHECK_RULE_DEFINITIONS, "R-sc-02")],
+  [TEST_SPEC_SCHEMA_NAME]: [
+    ruleAt(TEST_SPEC_RULE_DEFINITIONS, "R-tsp-02"),
+    ruleAt(TEST_SPEC_RULE_DEFINITIONS, "R-tsp-16"),
+    "$.schema.properties.tests.items.properties.observes.enum",
+  ],
+  [WRITE_V11A_SCHEMA_NAME]: ["$.rules"],
+};
+
+/** 要求の差：on と off の要求の並びの、要求ごとの違う場所（schema の名前つき。道具の要求は `tools`） */
+export function requestDiffsOf(
+  on: readonly unknown[],
+  off: readonly unknown[],
+): readonly { readonly schemaName: string; readonly paths: readonly string[] }[] {
+  return on.map((request, index) => ({
+    schemaName: (request as { readonly schemaName?: string }).schemaName ?? "tools",
+    paths: jsonDiffPaths(request, off[index]),
+  }));
+}
+
+/**
+ * 手 2a（#547）の台帳の導出＝今の台帳から enum-membership の行を除いたもの（Issue #548）。旗 on の段がこれを受けた
+ * 要求・結果は off とバイト列で同じ（載せ替えの不変）。今の台帳との差は `withoutEnumMembership` で除く分だけ。
+ */
+export const LEDGER_VIEW_2A: LedgerView = deriveLedgerView(PROPERTY_LEDGER.filter((entry) => entry.id !== "enum-membership"));

@@ -12,7 +12,16 @@ import {
   makeGateway,
   SAMPLE_DOCUMENTS,
 } from "../../stages/__tests__/prompt.js";
-import { FIXTURE_YAML, fixtureList, fixtureTable } from "../__tests__/fixtures.js";
+import {
+  ENUM_MEMBERSHIP_REQUEST_DIFF,
+  FIXTURE_YAML,
+  LEDGER_VIEW_2A,
+  fixtureList,
+  fixtureTable,
+  requestDiffsOf,
+  withoutEnumMembership,
+} from "../__tests__/fixtures.js";
+import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW } from "../../v12/ledger.js";
 import * as writeModule from "./write.js";
 import {
   DECLARATION_V11A_SCHEMA,
@@ -22,8 +31,10 @@ import {
   WRITE_V11A_SCHEMA_NAME,
   checkWriteV11aOutput,
   runWriteV11a,
+  writeV11aRuleDefinitionsOf,
   type WriteV11aInput,
 } from "./write.js";
+import type { TestObserves } from "./test-spec.js";
 
 const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
 
@@ -258,5 +269,71 @@ describe("B1 のデータ「固定した試験」に試験ごとの observes を
     const shown = blockOf(rb.input, WRITE_V11A_DATA_NAMES[2]) as { tests: Record<string, unknown>[] };
     expect(shown.tests.map((test) => test["observes"])).toEqual(["validation", null]);
     expectNoAcceptanceMaterial([ra.input, ...(ra.rules ?? [])]);
+  });
+});
+
+describe("旗 on：B1 の規則の末尾に台帳の B1 の文を台帳の順で差し込む（Issue #548）", () => {
+  const ROW = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
+  /** 選択肢の集合の試験を含む組（区分の項目の options の並び。形は T2 が固定したものと同じ） */
+  const ENUM_SUITE = {
+    tests: [
+      ...SUITE.tests,
+      {
+        id: "t2",
+        target: { requirementId: "R1", kind: "field", roleId: "f.item.kind" },
+        kind: "normal",
+        operation: "validate",
+        clock: "2026-09-16T12:00:00+09:00",
+        input: {},
+        referenceData: [],
+        expected: { kind: "ok", value: ["alpha", "beta"] },
+      },
+    ],
+  } as unknown as WriteV11aInput["suite"];
+  // 台帳から入る観測する性質（off の型 `TestObserves` の外。走りでは台帳の導出で通る）
+  const OBSERVES = new Map<string, TestObserves>([
+    ["t1", "validation"],
+    ["t2", "enum-membership" as TestObserves],
+  ]);
+  const blockOf = (input: string, name: string): unknown =>
+    JSON.parse(input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "null");
+
+  it("off は今の定数。手 2a の台帳で組んだ R-w11-10 は今の文とバイト列で同じ。今の台帳は R-w11-11 に enum-membership の 1 文が増えるだけ。規則の不備は 0", () => {
+    expect(writeV11aRuleDefinitionsOf()).toBe(WRITE_V11A_RULE_DEFINITIONS);
+    expect(writeV11aRuleDefinitionsOf(LEDGER_VIEW_2A)).toEqual(WRITE_V11A_RULE_DEFINITIONS);
+    const on = writeV11aRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    expect(on.slice(0, WRITE_V11A_RULE_DEFINITIONS.length)).toEqual(WRITE_V11A_RULE_DEFINITIONS);
+    expect(on.map((definition) => definition.id)).toEqual(
+      Array.from({ length: 11 }, (_, index) => `R-w11-${String(index + 1).padStart(2, "0")}`),
+    );
+    expect(on.at(-1)?.text).toBe(ROW?.rules.b1);
+    expect(on.at(-1)?.text).toContain("observes が enum-membership の試験は");
+    expect(on.at(-1)?.text).toContain("名前の表の行の options のキーの順で書く");
+    expect(on.at(-1)?.since).toBe("Issue #548");
+    for (const definitions of [WRITE_V11A_RULE_DEFINITIONS, writeV11aRuleDefinitionsOf(LEDGER_VIEW_2A), on]) {
+      expect(ruleDefinitionDefects(definitions)).toEqual([]);
+    }
+  });
+
+  it("旗 on の要求：規則に enum-membership の 1 文があり、固定した試験に observes が渡る。off は今の文で、差は規則の並びだけ", async () => {
+    const on = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const off = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const twoA = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    expect((await runWriteV11a(inputWith(on.client, { suite: ENUM_SUITE, observes: OBSERVES, ledger: PROPERTY_LEDGER_VIEW }))).ok).toBe(true);
+    expect((await runWriteV11a(inputWith(off.client, { suite: ENUM_SUITE, observes: OBSERVES }))).ok).toBe(true);
+    expect((await runWriteV11a(inputWith(twoA.client, { suite: ENUM_SUITE, observes: OBSERVES, ledger: LEDGER_VIEW_2A }))).ok).toBe(true);
+    const [ron, roff] = [on.structured[0], off.structured[0]];
+    if (ron === undefined || roff === undefined) throw new Error("要求が無い");
+    expect(ron.rules).toContain(ROW?.rules.b1);
+    expect(roff.rules).toEqual(WRITE_V11A_RULES);
+    expect(roff.rules).not.toContain(ROW?.rules.b1);
+    const shown = blockOf(ron.input, WRITE_V11A_DATA_NAMES[2]) as { tests: Record<string, unknown>[] };
+    expect(shown.tests.map((test) => test["observes"])).toEqual(["validation", "enum-membership"]);
+    const onRequests = JSON.parse(JSON.stringify(on.structured)) as unknown[];
+    const offRequests = JSON.parse(JSON.stringify(off.structured)) as unknown[];
+    expect(requestDiffsOf(onRequests, offRequests).map((diff) => diff.paths)).toEqual([ENUM_MEMBERSHIP_REQUEST_DIFF[WRITE_V11A_SCHEMA_NAME]]);
+    expect(JSON.stringify(withoutEnumMembership(onRequests))).toBe(JSON.stringify(offRequests));
+    expect(JSON.stringify(twoA.structured)).toBe(JSON.stringify(off.structured));
+    expectNoAcceptanceMaterial([ron.input, ...(ron.rules ?? [])]);
   });
 });

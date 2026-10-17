@@ -9,6 +9,9 @@
 // `extraElementsOf` が唯一の正本で、B2 のあとに A5 が呼んで B3' に渡す（二重の抽出を置かない）。
 //
 // 共通の口（`CallGateway`）を通してだけ LLM を呼ぶ。v1 の ③ の規則・schema・`runWrite` は変えない。
+//
+// 旗 `v12.ledger` が on の走り（`ledger` を渡したとき。Issue #548）は、性質の台帳の行の B1 の文を R-w11 の末尾に台帳の
+// 順で組む（default-value の R-w11-10 も台帳から組み、今の文とバイト列で同じ）。off は今の定数のまま。
 import type { CallGateway } from "../../call.js";
 import type { TestSuite } from "../../fixed-test.js";
 import { checkDeclarationBytes } from "../../limits.js";
@@ -32,6 +35,7 @@ import { utf8ByteLength } from "../../stages/write.js";
 import { sha256Hex } from "@musunest/spec-engine";
 import type { NameTable } from "../names.js";
 import type { TestObserves } from "./test-spec.js";
+import type { LedgerView } from "../../v12/ledger.js";
 
 /** B1 の JSON Schema の名前 */
 export const WRITE_V11A_SCHEMA_NAME = "declaration-v11a";
@@ -108,6 +112,28 @@ export const WRITE_V11A_RULE_DEFINITIONS: readonly RuleDefinition[] = [
 /** B1 に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const WRITE_V11A_RULES: readonly string[] = ruleTexts(WRITE_V11A_RULE_DEFINITIONS);
 
+/** 性質の台帳の文を差し込む前の、台帳の行に依らない規則の数（R-w11-01〜09。Issue #548） */
+const WRITE_V11A_BASE_RULE_COUNT = 9;
+
+/**
+ * B1 の規則の定義（旗 on なら台帳から組む。Issue #548）。省けば今の定数をそのまま返す。渡せば R-w11-01〜09 の後ろに、
+ * 台帳の行の B1 の文を台帳の順で `R-w11-10` から番号を振って並べる。文が今の定義と同じ規則は、その定義（why・since）
+ * をそのまま使う（default-value の R-w11-10）。
+ */
+export function writeV11aRuleDefinitionsOf(ledger?: LedgerView): readonly RuleDefinition[] {
+  if (ledger === undefined) return WRITE_V11A_RULE_DEFINITIONS;
+  const base = WRITE_V11A_RULE_DEFINITIONS.slice(0, WRITE_V11A_BASE_RULE_COUNT);
+  const added = ledger.b1RuleTexts.map((text, index): RuleDefinition => {
+    const id = `R-w11-${String(WRITE_V11A_BASE_RULE_COUNT + 1 + index).padStart(2, "0")}`;
+    const current = WRITE_V11A_RULE_DEFINITIONS.find((definition) => definition.text === text);
+    const row = ledger.rows.find((candidate) => candidate.rules.b1 === text);
+    return current !== undefined
+      ? { ...current, id }
+      : { id, text, why: `性質の台帳の行 ${row?.id ?? ""} の B1 の文（${row?.why ?? ""}）`, since: row?.since ?? "" };
+  });
+  return [...base, ...added];
+}
+
 /** B1 の JSON Schema（構造化出力）。宣言の原文だけを受ける（`mappings` は無い） */
 export const DECLARATION_V11A_SCHEMA = {
   type: "object",
@@ -135,6 +161,8 @@ export interface WriteV11aInput {
   readonly gateway: CallGateway;
   /** 形に落ちた応答を 1 候補 1 回、落ちた時点で受け取る任意の口（Issue #501 の作法。要求・回数・結果に効かない） */
   readonly onRejected?: (candidate: RejectedCandidate) => void;
+  /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけが渡す。省けば今の定数。Issue #548） */
+  readonly ledger?: LedgerView;
 }
 
 /** B1 の出力 */
@@ -198,7 +226,7 @@ function buildData(input: WriteV11aInput): readonly PromptData[] {
  */
 export async function runWriteV11a(input: WriteV11aInput): Promise<StageOutcome<WrittenDeclarationV11a>> {
   const request = buildStructuredRequest({
-    rules: WRITE_V11A_RULES,
+    rules: input.ledger === undefined ? WRITE_V11A_RULES : ruleTexts(writeV11aRuleDefinitionsOf(input.ledger)),
     documents: input.documents,
     data: buildData(input),
     schemaName: WRITE_V11A_SCHEMA_NAME,
