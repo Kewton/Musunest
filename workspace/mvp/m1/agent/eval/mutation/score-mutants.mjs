@@ -5,8 +5,11 @@
 //
 // 入力は目録（凍結した候補・有効な評価の文脈・版）だけ。道具は目録に載ったファイル（と自分のコード）だけを読み、読む前に SHA-256 を全部照らす。
 // 1 つでも合わなければ何も数えずに断る（終了コード 3・固定の符号。fail-closed）。工場と spec-engine は build 済みの dist を目録の場所から動的に読む。
+// 動的に読む前に、2 つの入口から import の閉包（静的な import・export … from・文字列の import()。bare の指定子は node_modules の
+// package.json の exports で解く。各 .js の形を決める最寄りの package.json も入れる）を、目録に載ったファイルだけを読んで求める。
+// 閉包のファイルが 1 つでも目録に無い・SHA-256 が合わなければ、評価の前に断る（Node が import で読むファイルを目録と結ぶ）。
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CLASS_IDS, OUTPUT_SCHEMA as CLASSIFY_OUTPUT_SCHEMA, loadMarks } from "./classify.mjs";
@@ -40,7 +43,7 @@ export const DEFINITIONS = {
   eligible_rule: "適格な変異＝原本が使え（手 5a）・試験と原本が合い・静的チェックを通り・非同値（確定）の変異。主の検出率の分母・副の検出率の分母・落とせない試験の率の分母にこの集合以外を入れない（判定不能・同値・食い違いを入れない）",
   primary_rate: "主の検出率＝試験で落ちる ÷ 適格な変異",
   secondary_rate: "副の検出率＝（試験で落ちる ＋ 結び付けで落ちる）÷ 適格な変異",
-  uncatchable_rule: "落とせない試験＝対象の要件の適格な変異（変えた場所が、その要件に所属する行に当たる）が 1 つ以上あるのに、1 つも落とさない試験。率＝落とせない試験 ÷ 適格な変異を対象に持つ試験",
+  uncatchable_rule: "落とせない試験＝対象の要件の適格な変異（変えた場所が、その試験の対象の行に当たる。同じ要件の別の行は当たらない）が 1 つ以上あるのに、1 つも落とさない試験。率＝落とせない試験 ÷ 適格な変異を対象に持つ試験",
   conditional_note: "検出率は適格な変異に限る条件付きの率である。判定不能を除く選別のため、外の採点で差の出やすい変異に偏る。変異の全体の検出率ではない",
   classification_denominator: "分類の割合の分母＝原本が使え、試験と原本が合う候補の、静的チェックを通った変異の全部（構文の同値・食い違い・判定不能を含む）。検出率とは別の欄",
   interval_rule: "Wilson の 95% 区間は「参考（独立を仮定）」。変異は同じ原本・同じ試験で相関するので、区間は一般化の根拠にならない。一般化の区間は出さず、候補ごと・P ごとの率とまとまりの数を並べる。率はこの凍結した集合の記述に限る",
@@ -55,6 +58,8 @@ export const MESSAGES = {
   invalid_file: "目録のファイルが読めない、または JSON として読めない",
   hash_mismatch: "目録のファイルの SHA-256 が申告の値と一致しない（何も数えずに断る）",
   entry_unlisted: "dist の入口のファイルが、目録のファイルの一覧に載っていない",
+  dependency_unlisted: "dist の入口から import で読むファイル（依存）が、目録のファイルの一覧に載っていない（評価の前に断る）",
+  dependency_unresolved: "dist の入口から import で読む指定子を、目録の package.json で解けない（評価の前に断る）",
   invalid_output: "手 5a の出力の schema・形が知らない値である",
   origin_missing: "目録の原本が、手 5a の出力に無い",
   origin_sha_mismatch: "手 5a の出力に書かれた原本の SHA-256 が、目録の原本と一致しない",
@@ -137,6 +142,7 @@ function checkInventory(inv) {
   const v = inv.version;
   const dist = (d) => isObj(d) && isStr(d.entry) && Array.isArray(d.files) && d.files.length > 0 && d.files.every(isFileRef);
   if (!isStr(v.factory_commit) || !dist(v.factory_dist) || !dist(v.spec_engine_dist) || !isFileRef(v.scoring_engine)) refuse("invalid_inventory");
+  if (v.dependency_files !== undefined && !(Array.isArray(v.dependency_files) && v.dependency_files.every(isFileRef))) refuse("invalid_inventory");
   for (const d of [v.factory_dist, v.spec_engine_dist]) if (!d.files.some((f) => f.path === d.entry)) refuse("entry_unlisted");
   const ids = new Set();
   for (const c of inv.candidates) {
@@ -195,15 +201,91 @@ const outcomesById = (suite, r) => {
 
 const importDist = (d, base) => import(pathToFileURL(resolve(base, d.entry)).href);
 
+// ── import の閉包（Node が入口から読むファイル）
+const SPECIFIER_PATTERNS = [
+  /\b(?:import|export)\s[^;'"`]*?\bfrom\s*["']([^"']+)["']/g,
+  /\bimport\s*["']([^"']+)["']/g,
+  /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+];
+/** モジュールの原文から指定子（静的な import・export … from・副作用の import・文字列の import()）を取る。注釈の中の例も拾う（多めに取る側に倒す） */
+export function specifiersIn(text) {
+  const out = new Set();
+  for (const re of SPECIFIER_PATTERNS) for (const m of text.matchAll(re)) out.add(m[1]);
+  return [...out].sort();
+}
+const CONDITIONS = ["node", "import", "default"];
+const pickTarget = (v) => {
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) return v.length > 0 ? pickTarget(v[0]) : null;
+  if (isObj(v)) for (const [k, x] of Object.entries(v)) if (CONDITIONS.includes(k)) { const r = pickTarget(x); if (r !== null) return r; }
+  return null;
+};
+/** package.json の exports（無ければ main）から、副パス（"." か "./…"）の行き先を引く。引けなければ null */
+function exportTarget(pkg, sub) {
+  let ex = pkg.exports;
+  if (ex === undefined) return sub === "." ? (typeof pkg.main === "string" ? pkg.main : "index.js") : sub;
+  if (typeof ex === "string" || Array.isArray(ex) || (isObj(ex) && !Object.keys(ex).some((k) => k.startsWith(".")))) ex = { ".": ex };
+  return isObj(ex) && Object.hasOwn(ex, sub) ? pickTarget(ex[sub]) : null;
+}
+const realOf = (p) => { try { return realpathSync(p); } catch { return null; } };
+/** ファイルの最寄りの package.json（Node が .js の形を決めるのに読む）。無ければ null */
+function nearestPackageJson(file) {
+  for (let dir = dirname(file); ; dir = dirname(dir)) {
+    const pj = join(dir, "package.json");
+    if (existsSync(pj)) return realOf(pj);
+    if (dirname(dir) === dir) return null;
+  }
+}
+
+/**
+ * 入口（実パス）から import の閉包を求める。read(実パス) は内容（Buffer）を返す（目録の照合つきの読み取りを渡す）。
+ * 返り値は閉包のファイルの実パス（.js と package.json。名前の昇順）。解けない指定子は dependency_unresolved で断る。
+ */
+export function dependencyClosure(entries, read) {
+  const seen = new Set(), queue = [...entries];
+  const add = (p) => { if (!seen.has(p)) { seen.add(p); queue.push(p); } };
+  const json = (p) => { try { return JSON.parse(read(p).toString("utf8")); } catch (e) { if (e instanceof MutationToolError) throw e; return refuse("dependency_unresolved"); } };
+  for (const e of entries) seen.add(e);
+  while (queue.length > 0) {
+    const file = queue.shift();
+    const buf = read(file);
+    if (file.endsWith("package.json")) continue;
+    const pj = nearestPackageJson(file);
+    if (pj !== null) add(pj);
+    for (const spec of specifiersIn(buf.toString("utf8"))) {
+      if (spec.startsWith("node:")) continue; // 接頭辞の無い組み込みの名前は解けず断る（fail-closed）
+      let target = null;
+      if (spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("/")) target = realOf(resolve(dirname(file), spec));
+      else if (spec.startsWith("file:")) target = realOf(fileURLToPath(spec));
+      else {
+        const name = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0];
+        for (let dir = dirname(file); ; dir = dirname(dir)) {
+          const pkgJson = realOf(join(dir, "node_modules", name, "package.json"));
+          if (pkgJson !== null) {
+            add(pkgJson);
+            const to = exportTarget(json(pkgJson), `.${spec.slice(name.length)}`);
+            target = to === null ? null : realOf(resolve(dirname(pkgJson), to));
+            break;
+          }
+          if (dirname(dir) === dir) break;
+        }
+      }
+      if (target === null) refuse("dependency_unresolved");
+      add(target);
+    }
+  }
+  return [...seen].sort();
+}
+
 /**
  * 試験を変異に掛ける。
  *   inventory … 目録（オブジェクト）　baseDir … 目録のパスの基準（既定は cwd）　readFile … ファイルの読み取り（試験で差し替える。既定は readFileSync。Buffer を返す）
  */
 export async function scoreMutants({ inventory, baseDir = process.cwd(), readFile = (p) => readFileSync(p) }) {
   checkInventory(inventory);
-  const at = (p) => resolve(baseDir, p);
+  const at = (p) => realOf(resolve(baseDir, p)) ?? resolve(baseDir, p);
   const cache = new Map();
-  /** 目録に載ったファイルを読み、SHA-256 を照らす（同じファイルは 1 度だけ） */
+  /** 目録に載ったファイルを読み、SHA-256 を照らす（同じファイルは 1 度だけ。実パスで見分ける） */
   const readChecked = (ref) => {
     const key = at(ref.path);
     if (!cache.has(key)) {
@@ -218,8 +300,15 @@ export async function scoreMutants({ inventory, baseDir = process.cwd(), readFil
   const parse = (buf) => { try { return JSON.parse(buf.toString("utf8")); } catch { return refuse("invalid_file"); } };
   const v = inventory.version;
 
-  // 1. 読む前に SHA-256 を全部照らす（版・候補のファイル）
-  for (const f of [...v.factory_dist.files, ...v.spec_engine_dist.files, v.scoring_engine]) readChecked(f);
+  // 1. 読む前に SHA-256 を全部照らす（版・候補のファイル）。dist の入口からの import の閉包は、目録に載ったファイルだけで求める
+  const depFiles = [...v.factory_dist.files, ...v.spec_engine_dist.files, ...(v.dependency_files ?? [])];
+  for (const f of [...depFiles, v.scoring_engine]) readChecked(f);
+  const listed = new Map(depFiles.map((f) => [at(f.path), f]));
+  const closure = dependencyClosure([at(v.factory_dist.entry), at(v.spec_engine_dist.entry)], (p) => {
+    const ref = listed.get(p);
+    if (!ref) refuse("dependency_unlisted");
+    return readChecked(ref);
+  });
   const loaded = inventory.candidates.map((c) => {
     const subject = readChecked(c.subject), origin = readChecked(c.origin), mutantsBuf = readChecked(c.mutants), ctxBuf = readChecked(c.context);
     const marksBuf = c.marks ? readChecked(c.marks) : null;
@@ -263,7 +352,6 @@ export async function scoreMutants({ inventory, baseDir = process.cwd(), readFil
       originRun = await evaluate(originSource, "origin_unreadable");
       if (originRun.misses + originRun.mismatches + originRun.unresolved > 0) status = "test-origin-mismatch";
     }
-    const owned = new Map(ctx.ownership.map((o) => [o.requirementId, new Set((o.ownership ?? []).map((x) => x.roleId))]));
     const tests = ctx.suite.tests.map((t) => ({ id: t.id, requirement_id: t.target.requirementId, target_role_id: t.target.roleId ?? null, eligible_mutants: 0, killed: 0 }));
     const records = [];
     for (const m of mutants) {
@@ -276,8 +364,8 @@ export async function scoreMutants({ inventory, baseDir = process.cwd(), readFil
         category = run.mismatches > 0 ? "test-fail" : run.misses > 0 ? "binding-fail" : run.unresolved > 0 ? "unresolved-only" : "survived";
         const rows = new Set(rowsOfPlace(m.place, ctx.table, ctx.excluded_row_ids));
         tests.forEach((t, i) => {
-          const scope = owned.get(t.requirement_id) ?? new Set();
-          if ((t.target_role_id !== null && rows.has(t.target_role_id)) || [...rows].some((r) => scope.has(r))) {
+          // 変えた場所が、試験の対象の行（target.roleId）に当たるときだけ（同じ要件の別の行は当たらない）
+          if (t.target_role_id !== null && rows.has(t.target_role_id)) {
             t.eligible_mutants += 1;
             if (run.outcomes[ctx.suite.tests[i].id] === "mismatch") t.killed += 1;
           }
@@ -318,6 +406,8 @@ export async function scoreMutants({ inventory, baseDir = process.cwd(), readFil
       factory_commit: v.factory_commit,
       factory_dist: sha256(v.factory_dist.files.map((f) => `${f.path}\n${f.sha256}\n`).join("")),
       spec_engine_dist: sha256(v.spec_engine_dist.files.map((f) => `${f.path}\n${f.sha256}\n`).join("")),
+      dependency_files: sha256(closure.map((p) => `${listed.get(p).sha256}\n`).join("")),
+      dependency_count: closure.length,
       scoring_engine: v.scoring_engine.sha256,
       inventory: sha256(JSON.stringify(inventory)),
     },

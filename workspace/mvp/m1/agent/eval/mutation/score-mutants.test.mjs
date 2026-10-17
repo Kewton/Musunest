@@ -4,14 +4,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { MARKS_SCHEMA, classifyMutations } from "./classify.mjs";
 import { MutationToolError, generateMutants, sha256 } from "./mutate.mjs";
-import { CATEGORY_IDS, CONTEXT_SCHEMA, INVENTORY_SCHEMA, MESSAGES, OUTPUT_SCHEMA, WILSON_NAME, makeRate, rowsOfPlace, scoreMutants, summarizeRecords, summaryLines, toAnonymous } from "./score-mutants.mjs";
+import { CATEGORY_IDS, CONTEXT_SCHEMA, INVENTORY_SCHEMA, MESSAGES, OUTPUT_SCHEMA, WILSON_NAME, dependencyClosure, makeRate, specifiersIn, rowsOfPlace, scoreMutants, summarizeRecords, summaryLines, toAnonymous } from "./score-mutants.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "../../../../../..");
@@ -28,6 +28,10 @@ const walk = (dir) => readdirSync(dir).flatMap((n) => {
 }).sort();
 const listDist = (entry) => walk(dirname(entry)).map((p) => ({ path: p, sha256: bytesSha(readFileSync(p)) }));
 const factoryFiles = listDist(factoryEntry), engineFiles = listDist(engineEntry);
+// 工場・spec-engine の dist が読む残りの依存（appspec-schema の dist と、各パッケージの package.json）
+const schemaEntry = join(root, "packages/appspec-schema/dist/index.js");
+const fileRef = (p) => ({ path: p, sha256: bytesSha(readFileSync(p)) });
+const dependencyFiles = [...listDist(schemaEntry), ...["factory", "spec-engine", "appspec-schema"].map((n) => fileRef(join(root, "packages", n, "package.json")))];
 
 // ── 宣言（中立な名前）。member に note を足し、一覧の画面（表）から辿れるようにする
 const SRC = `# note
@@ -164,9 +168,11 @@ const base = { kind: "normal", clock: CLOCK, input: {}, referenceData: [], expec
 const actionTest = (id, state, value) => ({ ...base, id, target: { requirementId: "R2", kind: "operation", roleId: "o.finish" }, operation: "action", input: { "f.item.state": state }, inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: [] }, expected: { kind: "ok", value } });
 const defaultTest = (id, key) => ({ ...base, id, target: { requirementId: "R1", kind: "field", roleId: "f.item.state" }, operation: "compute", expected: { kind: "ok", value: key } });
 const showsTest = { ...base, id: "t-shows", target: { requirementId: "R3", kind: "screen", roleId: "s.items" }, operation: "structure", assertion: { check: "view-shows", role: "f.item.title" } };
-const EFFECTIVE_SUITE = { tests: [defaultTest("t-default", "open"), actionTest("t-when-open", "open", true), actionTest("t-when-done", "done", false), showsTest] };
+// 操作の種類だけを見る試験（対象の行 o.finish に当たる when の変異では落ちない）
+const kindTest = { ...base, id: "t-kind", target: { requirementId: "R2", kind: "operation", roleId: "o.finish" }, operation: "structure", assertion: { check: "action-kind", expected: "update" } };
+const EFFECTIVE_SUITE = { tests: [defaultTest("t-default", "open"), actionTest("t-when-open", "open", true), actionTest("t-when-done", "done", false), showsTest, kindTest] };
 const RAW_SUITE = { tests: [...EFFECTIVE_SUITE.tests, defaultTest("t-rejected", "doing")] };
-const OBSERVES = { "t-default": "default-value", "t-when-open": "when", "t-when-done": "when", "t-shows": "view-structure", "t-rejected": "default-value" };
+const OBSERVES = { "t-default": "default-value", "t-when-open": "when", "t-when-done": "when", "t-shows": "view-structure", "t-kind": "existence", "t-rejected": "default-value" };
 const RAW_LIST = { requirements: ["R1", "R2", "R3", "R4", "R5"].map(req), decisions: [], unresolved: [] };
 const EFFECTIVE_LIST = { ...RAW_LIST, requirements: RAW_LIST.requirements.filter((r) => r.id !== "R5") };
 const effectiveOwnership = () => factory.toV1(TABLE).ownership.filter((o) => EFFECTIVE_LIST.requirements.some((r) => r.id === o.requirementId));
@@ -222,6 +228,7 @@ function world({ replace = {}, candidates = ["a", "b"], keepInventorySha = {} } 
       factory_commit: "0123456789abcdef0123456789abcdef01234567",
       factory_dist: { entry: factoryEntry, files: factoryFiles },
       spec_engine_dist: { entry: engineEntry, files: engineFiles },
+      dependency_files: dependencyFiles,
       scoring_engine: { path: scoringEngineFile, sha256: bytesSha(readFileSync(scoringEngineFile)) },
     },
     candidates: candidates.map((k, i) => ({
@@ -271,13 +278,17 @@ test("評価の試験 (a)〜(d)：既定値は試験で落ちる・項目を消�
     assert.equal(out.separate.test_origin_mismatch, b.mutants.length);
     // 1 つの変異は 1 つにだけ入る
     for (const c of out.candidates) assert.equal(Object.values(c.summary.by_category).reduce((x, y) => x + y, 0), c.mutants.length);
-    // 試験ごと：t-shows は対象の要件（R3）の適格な変異（note を消す）があるのに落とさない
+    // 試験ごと：t-kind は対象の行（o.finish）に当たる適格な変異（when の反転・削除）があるのに落とさない。
+    // t-shows の対象の行（s.items）に当たる変異は無い（同じ要件 R3 の別の行 f.member.note を消す変異は当たらない。#571 の指摘 2）
     const shows = a.tests.find((t) => t.id === "t-shows");
-    assert.deepEqual([shows.eligible_mutants, shows.killed, shows.uncatchable], [1, 0, true]);
+    assert.deepEqual([shows.eligible_mutants, shows.killed, shows.uncatchable], [0, 0, false]);
+    const kind = a.tests.find((t) => t.id === "t-kind");
+    assert.deepEqual([kind.eligible_mutants, kind.killed, kind.uncatchable], [2, 0, true]);
+    assert.deepEqual(["t-when-open", "t-when-done"].map((id) => [a.tests.find((t) => t.id === id).eligible_mutants, a.tests.find((t) => t.id === id).killed]), [[2, 1], [2, 1]]);
     assert.equal(a.tests.find((t) => t.id === "t-default").killed, 1);
     const [k, n] = [out.totals.uncatchable.rate.k, out.totals.uncatchable.rate.n];
     assert.equal(k, 1);
-    assert.equal(n, 4, "t-default・t-when-open・t-when-done・t-shows のうち適格な変異を対象に持つ試験");
+    assert.equal(n, 4, "t-default・t-when-open・t-when-done・t-kind が適格な変異を対象に持つ試験（t-shows は持たない）");
   } finally { w.cleanup(); }
 });
 
@@ -374,9 +385,9 @@ test("照合：手 5a の出力をファイルに保存し、道具がそれだ�
   const w = world({ candidates: ["a"] });
   try {
     const listed = new Set([
-      ...w.inventory.version.factory_dist.files, ...w.inventory.version.spec_engine_dist.files, w.inventory.version.scoring_engine,
+      ...w.inventory.version.factory_dist.files, ...w.inventory.version.spec_engine_dist.files, ...w.inventory.version.dependency_files, w.inventory.version.scoring_engine,
       ...w.inventory.candidates.flatMap((c) => [c.subject, c.origin, c.mutants, c.marks, c.context]),
-    ].map((f) => f.path));
+    ].map((f) => realpathSync(f.path)));
     const reads = [];
     const out = await scoreMutants({ inventory: w.inventory, readFile: (p) => { reads.push(p); return readFileSync(p); } });
     assert.ok(out.totals.eligible > 0);
@@ -451,6 +462,91 @@ test("目録の拒否：SHA-256 が 1 つ合わない・手 5a の出力の原�
     try { await refused(scoreMutants({ inventory: w2.inventory }), "invalid_context"); } finally { w2.cleanup(); }
   }
   await refused(scoreMutants({ inventory: { schema: "x" } }), "invalid_inventory");
+});
+
+test("落とせない試験の分母（#571 の指摘 2 の負例）：同じ要件でも試験の対象の外の行を消した変異だけなら、分母 0・率 null", async () => {
+  const only = await classifyMutations({ engineFile: engineEntry, scoringEngineFile, origins: [{ id: "o1", source: SRC, def: DEF }], marks: MARKS, mutants: { o1: [byId(ID.removeNote)] } });
+  assert.equal(only.mutants.length, 1);
+  assert.equal(only.mutants[0].class, "non-equivalent");
+  const w = world({ candidates: ["a"], replace: { "out5a.json": JSON.stringify(only) } });
+  try {
+    const out = await scoreMutants({ inventory: w.inventory });
+    const a = out.candidates[0];
+    assert.equal(a.status, "aligned");
+    assert.equal(cat(a, ID.removeNote), "binding-fail");
+    assert.equal(a.mutants[0].outcomes["t-shows"], "match");
+    const shows = a.tests.find((t) => t.id === "t-shows");
+    assert.deepEqual([shows.eligible_mutants, shows.killed, shows.uncatchable], [0, 0, false]);
+    assert.ok(a.tests.every((t) => t.eligible_mutants === 0));
+    const r = out.totals.uncatchable.rate;
+    assert.deepEqual([r.k, r.n, r.rate, r.wilson95_reference, r.reason_code], [0, 0, null, null, "no-tests-with-eligible-mutants"]);
+    assert.equal(out.totals.uncatchable.with_eligible_mutants, 0);
+  } finally { w.cleanup(); }
+});
+
+// 別のプロセスで入口を起こし、Node の import が読むファイル（file: の URL）を、読み込みの hook で全部記録する
+function runCli(w, inventory, { record = true } = {}) {
+  const invFile = join(w.dir, `inventory-${Math.random().toString(16).slice(2)}.json`), outFile = `${invFile}.out.json`, log = `${invFile}.loads.log`, recorder = join(w.dir, "recorder.mjs");
+  writeFileSync(invFile, JSON.stringify(inventory));
+  writeFileSync(log, "");
+  const hook = `import { appendFileSync } from "node:fs"; export async function load(url, context, next) { if (url.startsWith("file:")) appendFileSync(${JSON.stringify(log)}, url + "\\n"); return next(url, context); }`;
+  writeFileSync(recorder, `import { register } from "node:module";\nregister("data:text/javascript," + encodeURIComponent(${JSON.stringify(hook)}));\n`);
+  const r = spawnSync(process.execPath, [...(record ? ["--import", pathToFileURL(recorder).href] : []), join(here, "score-mutants.mjs"), invFile, "--out", outFile], { encoding: "utf8" });
+  const loads = readFileSync(log, "utf8").split("\n").filter(Boolean).map((u) => realpathSync(fileURLToPath(u)));
+  let written = null;
+  try { written = JSON.parse(readFileSync(outFile, "utf8")); } catch { written = null; }
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr, loads, written, recorder };
+}
+const ownCode = ["score-mutants.mjs", "classify.mjs", "mutate.mjs"].map((n) => realpathSync(join(here, n)));
+
+test("依存の照合（#571 の指摘 1）：別プロセスの入口で、Node の import が読むファイルは目録に載ったものと道具のコードだけ", () => {
+  const w = world({ candidates: ["a"] });
+  try {
+    const listed = new Set([...factoryFiles, ...engineFiles, ...dependencyFiles].map((f) => realpathSync(f.path)));
+    const r = runCli(w, w.inventory);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.written && r.written.totals.eligible > 0);
+    assert.ok(r.loads.some((p) => p.endsWith(join("v11a", "evaluate.js"))), "記録の hook が工場の dist の読み込みを見ている");
+    const outside = r.loads.filter((p) => !listed.has(p) && !ownCode.includes(p) && p !== realpathSync(r.recorder));
+    assert.deepEqual(outside, [], "目録に無いファイルを import で読んだ");
+    assert.ok(r.written.fingerprints.dependency_count > 2);
+  } finally { w.cleanup(); }
+});
+
+test("依存の照合の負例（#571 の再現）：dist の files を入口の 1 件だけにした目録は、評価の前に exit 3 で断り、出力を作らず、dist を import しない", async () => {
+  const w = world({ candidates: ["a"] });
+  try {
+    const only = structuredClone(w.inventory);
+    only.version.factory_dist.files = [fileRef(factoryEntry)];
+    only.version.spec_engine_dist.files = [fileRef(engineEntry)];
+    delete only.version.dependency_files;
+    const r = runCli(w, only);
+    assert.equal(r.status, 3);
+    assert.equal(r.stderr.trim(), `dependency_unlisted ${MESSAGES.dependency_unlisted}`);
+    assert.equal(r.written, null);
+    assert.deepEqual(r.loads.filter((p) => p.includes(`${join("packages")}/`) && p.includes(`${join("dist")}/`)), [], "断る前に dist を import した");
+    // 同じプロセスの API でも（試験が先に dist を import していても）断る
+    await refused(scoreMutants({ inventory: only }), "dependency_unlisted");
+    // 依存（appspec-schema の dist・package.json）だけを外しても断る
+    const noDeps = structuredClone(w.inventory);
+    delete noDeps.version.dependency_files;
+    await refused(scoreMutants({ inventory: noDeps }), "dependency_unlisted");
+    // 依存の SHA-256 が合わない
+    const badDep = structuredClone(w.inventory);
+    badDep.version.dependency_files[0].sha256 = "4".repeat(64);
+    await refused(scoreMutants({ inventory: badDep }), "hash_mismatch");
+    const badPkg = structuredClone(w.inventory);
+    badPkg.version.dependency_files[badPkg.version.dependency_files.length - 1].sha256 = "5".repeat(64);
+    await refused(scoreMutants({ inventory: badPkg }), "hash_mismatch");
+  } finally { w.cleanup(); }
+});
+
+test("import の閉包：入口が再 export して読むファイル（評価口・正規化・appspec-schema・package.json）を含む", () => {
+  const closure = dependencyClosure([realpathSync(factoryEntry), realpathSync(engineEntry)], (p) => readFileSync(p));
+  for (const tail of [join("factory", "dist", "v11a", "evaluate.js"), join("spec-engine", "dist", "index.js"), join("appspec-schema", "dist", "index.js"), join("factory", "package.json"), join("appspec-schema", "package.json")]) {
+    assert.ok(closure.some((p) => p.endsWith(tail)), tail);
+  }
+  assert.deepEqual(specifiersIn(`import a from "./a.js";\nexport * from "../b.js";\nimport "./c.js";\nconst x = await import("@scope/d");\nexport { e } from './e.js';`), ["../b.js", "./a.js", "./c.js", "./e.js", "@scope/d"]);
 });
 
 test("入口：1 つでも合わなければ exit 3 と「符号 固定文」で、出力のファイルを書かない。正常なら要約を標準出力へ", () => {
