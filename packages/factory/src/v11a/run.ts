@@ -850,7 +850,12 @@ export async function runGenerationV11a(input: GenerationInputV11a): Promise<Gen
       tests: testSpec.suite.tests.filter((test) => !overturned.some((entry) => entry.testId === test.id)),
     });
     let pruned: PrunedForCarryOver = await carryOverStep(() => pruneForCarryOver(list, table, carry, withoutOverturned()));
-    let evaluator: V11aEvaluator = createV11aEvaluator({ table, excludedRowIds: carry.excludedRowIds });
+    // 評価口は T2 で固定した観測する性質の写像を閉包で持つ（作り直すときも同じ写像。Issue #526）
+    let evaluator: V11aEvaluator = createV11aEvaluator({
+      table,
+      excludedRowIds: carry.excludedRowIds,
+      observes: testSpec.observes,
+    });
     /** いまの評価の文脈（棄却で外した後の組・持ち越しを除いた一覧と所属） */
     const contextNow = (): EvaluationContext => ({
       list: pruned.list,
@@ -863,7 +868,7 @@ export async function runGenerationV11a(input: GenerationInputV11a): Promise<Gen
       carry = await carryOverStep(() => composeCarryOver(list, table, baseCarry, addedCarry));
       if (carry.allCarried) stopAtCarryOver(ALL_CARRIED_PROBLEM);
       pruned = await carryOverStep(() => pruneForCarryOver(list, table, carry, withoutOverturned()));
-      evaluator = createV11aEvaluator({ table, excludedRowIds: carry.excludedRowIds });
+      evaluator = createV11aEvaluator({ table, excludedRowIds: carry.excludedRowIds, observes: testSpec.observes });
     };
     const addCarry = (requirementId: string, reason: CarryOverReason): void => {
       const listed = addedCarry.get(requirementId) ?? [];

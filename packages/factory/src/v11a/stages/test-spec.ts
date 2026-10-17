@@ -356,6 +356,18 @@ export const TEST_SPEC_DATA_NAMES = ["確定した仕様", "要件の一覧", "�
 /** やり直しで足すデータの塊の名前（#439 と同じ作法） */
 export const TEST_SPEC_RETRY_DATA_NAMES = ["前回の試験", "前回の作り直しの指示"] as const;
 
+/**
+ * やり直しで「前回の作り直しの指示」の後ろに足す、判定（J2）で決めた種類の塊の名前（方法論 03 §1 の H3。Issue #526）。
+ * 決定が `judged` の要件だけを載せる（`fallback` は載せない）。決めた要件が無ければ足さない
+ */
+export const TEST_SPEC_DECIDED_NATURES_DATA_NAME = "判定で決めた種類";
+
+/** 判定で決めた種類の塊の 1 行（要件 ID・種類） */
+interface DecidedNatureRow {
+  readonly requirementId: string;
+  readonly nature: RequirementNature;
+}
+
 /** 表の行のうち T2 に見せる欄（**`name` は見せない**。§2.3） */
 function visibleRows(table: NameTable): readonly unknown[] {
   return table.rows.map((row) => ({
@@ -386,7 +398,7 @@ function visiblePlan(plan: ConfirmedPlan): unknown {
  * T2 のデータ。確定した仕様（要件ごとの種類を除く）・要件の一覧（持ち越しを除く）・表（名前を除く）・確かめ方・所属（持ち越しの要件と、
  * その要件だけの行を除く。導いた entity の所属を含む）の順。**要件ごとの種類（T1 の分類）は入れない**。
  * やり直しでは、前回に実際に検査した試験（外して種類を書き込んだ後の組の試験に、その観測する性質を添えたもの）と
- * 前回の作り直しの指示を末尾に足す（前置きは変えない。#439）。
+ * 前回の作り直しの指示を末尾に足し、判定（J2）で決めた種類があればその後ろに足す（前置きは変えない。#439・#526）。
  */
 function buildData(
   plan: ConfirmedPlan,
@@ -394,6 +406,7 @@ function buildData(
   table: NameTable,
   previous: readonly Problem[],
   previousTests: readonly unknown[] | undefined,
+  decidedNatures: readonly DecidedNatureRow[],
 ): readonly PromptData[] {
   const [planName, listName, tableName, verificationName, ownershipName] = TEST_SPEC_DATA_NAMES;
   const data: PromptData[] = [
@@ -416,6 +429,9 @@ function buildData(
     const [testsName, problemsName] = TEST_SPEC_RETRY_DATA_NAMES;
     if (previousTests !== undefined) data.push({ name: testsName, text: serializeJson(previousTests) });
     data.push({ name: problemsName, text: serializeJson(previous) });
+    if (decidedNatures.length > 0) {
+      data.push({ name: TEST_SPEC_DECIDED_NATURES_DATA_NAME, text: serializeJson(decidedNatures) });
+    }
   }
   return data;
 }
@@ -556,6 +572,18 @@ function adoptNatures(
   return { natures, discrepancies };
 }
 
+/**
+ * 判定（J2）で決めた要件だけの採った種類（決めた順）。判定の失敗・確率不足で `ruled` へ倒した `fallback` は含めない
+ * （Issue #526。決定は 1 回の生成で 1 度だけなので、渡しても分類の独立性は変わらない）
+ */
+function judgedNatures(decided: ReadonlyMap<string, DecidedNature>): readonly DecidedNatureRow[] {
+  const rows: DecidedNatureRow[] = [];
+  for (const [requirementId, { decision }] of decided) {
+    if (decision.kind === "judged") rows.push({ requirementId, nature: decision.nature });
+  }
+  return rows;
+}
+
 /** 組の試験だけに絞った、試験 ID → 観測する性質 */
 function observesOf(tests: readonly FixedTest[], observes: ReadonlyMap<string, TestObserves>): ReadonlyMap<string, TestObserves> {
   const out = new Map<string, TestObserves>();
@@ -601,7 +629,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
     const request = buildStructuredRequest({
       rules: TEST_SPEC_RULES,
       documents: input.documents,
-      data: buildData(input.plan, list, pruned.table, previous, previousTests),
+      data: buildData(input.plan, list, pruned.table, previous, previousTests, judgedNatures(decided)),
       schemaName: TEST_SPEC_SCHEMA_NAME,
       schema: TEST_SPEC_SCHEMA,
       maxOutputTokens: input.gateway.maxOutputTokens("test-spec"),

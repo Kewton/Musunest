@@ -31,6 +31,8 @@ import * as triageStage from "../stages/unwritable-triage.js";
 import { makeRunInput, structured } from "../__tests__/run.js";
 import { FIXTURE_DOCUMENTS, FIXTURE_YAML, draftOf, fixtureList, fixtureTable } from "./__tests__/fixtures.js";
 import { V11A_ARTIFACT_NAMES } from "./bundle-v11a.js";
+import * as evaluateModule from "./evaluate.js";
+import { UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
 import { nameTableSha256, type NameTable } from "./names.js";
 import { ALL_CARRIED_PROBLEM, runGenerationV11a, v11aFailureSignature, type GenerationInputV11a } from "./run.js";
 import * as declCheckStage from "./stages/decl-check.js";
@@ -1165,5 +1167,86 @@ describe("(o) T2 の分類の完全性と J2 の判断の保持：どちらも f
     expect(result.summary.nature_discrepancies).toEqual([
       expect.objectContaining({ requirement_id: "R1", design: "existence-only", classified: "ruled", resolved: "ruled", resolution: "judged" }),
     ]);
+  });
+});
+
+// ── (p) 評価口に観測する性質の写像を渡す（Issue #526）─────────────────────────────
+
+describe("(p) 評価口を作る 2 か所の両方に T2 の写像が渡る", () => {
+  /** 評価口を作る材料を記録する（`alter` で写像を差し替えられる） */
+  function spyEvaluatorInputs(alter: (input: V11aEvaluatorInput) => V11aEvaluatorInput = (input) => input) {
+    const inputs: V11aEvaluatorInput[] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      inputs.push(input);
+      return original(alter(input));
+    });
+    return inputs;
+  }
+
+  it("最初と、棄却で作り直すときの両方で、T2 の observes（記録の写像）が渡る", async () => {
+    const inputs = spyEvaluatorInputs();
+    const tests = [...BASE_TESTS(), r4Test("normal", "r4-normal-2")];
+    const { result } = await runScenario([
+      ...head({ t2: t2Response(tests) }),
+      structured(judgments(IDS, REJECT_R1)),
+      repairDone(RUN_YAML, [dispute("r4-normal")]),
+      arbitration([{ testId: "r4-normal", verdict: "overturn" }]),
+      structured(acceptAll()),
+    ]);
+    expect(result.outcome.verdict).toBe("full");
+    // 最初の 1 回と、棄却のあとの作り直し（refreshCarry）の 1 回以上
+    expect(inputs.length).toBeGreaterThanOrEqual(2);
+    const recorded = artifactOf(result.bundle, V11A_ARTIFACT_NAMES.testSpec)["observes"] as Record<string, TestObserves>;
+    expect(Object.keys(recorded).sort()).toEqual(tests.map((test) => String(test["id"])).sort());
+    for (const input of inputs) expect(Object.fromEntries(input.observes)).toEqual(recorded);
+    // 2 か所は同じ写像を渡す
+    expect(new Set(inputs.map((input) => input.observes)).size).toBe(1);
+  });
+
+  it("写像に無い試験 ID を含む文脈では、その試験が未解決に数えられ full が出ない", async () => {
+    const reports: { readonly unresolved: readonly { readonly testId: string; readonly detail: string }[] }[] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      // 偽物：T2 の写像から r2-shows を外して評価口を作り、B4 の結果を記録する
+      const evaluator = original({ ...input, observes: new Map([...input.observes].filter(([testId]) => testId !== "r2-shows")) });
+      return {
+        ...evaluator,
+        runTests: (app, context, correspondence) => {
+          const report = evaluator.runTests(app, context, correspondence);
+          reports.push(report);
+          return report;
+        },
+      };
+    });
+    const passed: string[][] = [];
+    const runTestsOriginal = runTestsStage.runTests;
+    vi.spyOn(runTestsStage, "runTests").mockImplementation((input) => {
+      passed.push(input.suite.tests.map((test) => test.id));
+      return runTestsOriginal(input);
+    });
+    const { result } = await runScenario([
+      ...head(),
+      structured(acceptAll()),
+      repairDone(RUN_YAML),
+      structured(acceptAll()),
+      repairDone(RUN_YAML),
+      structured(acceptAll()),
+    ]);
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.summary.verdict).not.toBe("full");
+    expect(reports.length).toBeGreaterThan(0);
+    for (const report of reports) {
+      expect(report.unresolved).toEqual([{ testId: "r2-shows", detail: UNMAPPED_OBSERVES_DETAIL }]);
+    }
+    // 写像に無い試験は v1 の runTests に渡らない
+    expect(passed.length).toBeGreaterThan(0);
+    for (const ids of passed) expect(ids).not.toContain("r2-shows");
+  });
+
+  it("対照：写像を差し替えなければ、同じ記録で full", async () => {
+    spyEvaluatorInputs();
+    const { result } = await runScenario([...head(), structured(acceptAll())]);
+    expect(result.outcome.verdict).toBe("full");
   });
 });
