@@ -35,7 +35,13 @@ import { V11A_ARTIFACT_NAMES } from "./bundle-v11a.js";
 import * as evaluateModule from "./evaluate.js";
 import { DEFAULT_VALUE_DETAILS, UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
 import { nameTableSha256, type NameTable } from "./names.js";
-import { ALL_CARRIED_PROBLEM, runGenerationV11a, v11aFailureSignature, type GenerationInputV11a } from "./run.js";
+import {
+  ALL_CARRIED_PROBLEM,
+  runGenerationV11a,
+  runStageRangeV11a,
+  v11aFailureSignature,
+  type GenerationInputV11a,
+} from "./run.js";
 import * as declCheckStage from "./stages/decl-check.js";
 import { DECL_CHECK_SCHEMA_NAME } from "./stages/decl-check.js";
 import { NAME_TABLE_PREVIOUS_DATA_NAMES, NAME_TABLE_SCHEMA_NAME } from "./stages/name-table.js";
@@ -1418,5 +1424,45 @@ describe("(q) 既定値の要件：宣言の default が合えば今までの門
     expect(result.stopped?.stage).toBe("carry-over");
     expect(result.outcome.verdict).toBe("none");
     expect(schemaNames(recording.structured)).not.toContain(TEST_SPEC_SCHEMA_NAME);
+  });
+});
+
+// ── 段単位の走り（08-architecture-v1.2.md §8.3。Issue #544）──────────────────────────────
+
+describe("段単位の走り：範囲の外の段を呼ばず、納品物を組まず、境界の材料に B の結果を入れない", () => {
+  it("終了 T1''：T2 以降を呼ばず、T1''／T2 の境界だけを返す", async () => {
+    const recording = createRecordingClient(head().slice(0, 2));
+    const outcome = await runStageRangeV11a({ ...inputOf(recording.client), range: { start: "name-table", end: "semantic-check" } });
+    expect(outcome.stopped).toBeNull();
+    expect(schemaNames(recording.structured)).toEqual([NAME_TABLE_SCHEMA_NAME, SEMANTIC_CHECK_SCHEMA_NAME]);
+    expect(outcome.boundaries.map((boundary) => boundary.boundary)).toEqual(["t1-t2"]);
+    expect(outcome.stages.map((record) => record.stage)).toEqual(["name-table", "semantic-check"]);
+    expect(outcome.judgeVerdict).toBeNull();
+  });
+
+  it("終了 ⑦：⑧（bundle）を呼ばず、⑦ の判定を別に返す。境界の持ち越しは B3' で増えた分を含まない", async () => {
+    const recording = createRecordingClient([...head(), structured(judgments(IDS, REJECT_R3)), repairDone(RUN_YAML), structured(judgments(IDS, REJECT_R3))]);
+    const outcome = await runStageRangeV11a({ ...inputOf(recording.client), range: { start: "name-table", end: "judge" } });
+    expect(outcome.stopped).toBeNull();
+    expect(outcome.stages.map((record) => record.stage)).not.toContain("bundle");
+    expect(outcome.stages.at(-1)?.stage).toBe("judge");
+    expect(outcome.judgeVerdict).toBe("partial");
+    expect(outcome.finalCarryOver).toEqual([{ requirementId: "R3", reasons: [{ origin: "decl-check", reason: "mismatch" }] }]);
+    expect(outcome.boundaries.map((boundary) => boundary.boundary)).toEqual(["t1-t2", "t2-b1"]);
+    for (const boundary of outcome.boundaries) expect(boundary.carryOver.entries).toEqual([]);
+    expect(outcome).not.toHaveProperty("bundle");
+  });
+
+  it("通常の生成（範囲なし）は今までどおり納品物を組む", async () => {
+    const { result } = await runScenario([...head(), structured(acceptAll())]);
+    expect(result.bundle).not.toBeNull();
+    expect(stageIds(result)).toContain("bundle");
+  });
+
+  it("開始 T2・B1 に再開の材料が無ければ、呼ばずに断る（呼ぶ側の誤り）", async () => {
+    const recording = createRecordingClient([]);
+    await expect(runStageRangeV11a({ ...inputOf(recording.client), range: { start: "test-spec", end: "judge" } })).rejects.toThrow();
+    await expect(runStageRangeV11a({ ...inputOf(recording.client), range: { start: "write", end: "judge" } })).rejects.toThrow();
+    expect(recording.structured).toHaveLength(0);
   });
 });

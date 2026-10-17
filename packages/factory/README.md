@@ -49,6 +49,44 @@ OPENAI_API_KEY=... pnpm --filter @musunest/factory factory:run -- <依頼文の�
   （§4・R-3）。要約は最後の行に 1 行の JSON（`commandagent.headless-summary/v1`）で出す。
 - 鍵が無ければ、**API を呼ばずに**使い方の誤り（終了コード 2）で終わる。単価は入口で渡す（日付付きの既定値）。
 
+### 2.1 段単位の実行口（v1.1α。`08-architecture-v1.2.md` §8.3・Issue #544）
+
+```bash
+# T1〜T2' だけを流し、境界の checkpoint を書く
+... factory:run -- <依頼文> --out a --pipeline v1.1a --plan-file plan.json --stage-end test-spec
+# その T2／B1 の checkpoint から B1〜⑦ だけを流す
+... factory:run -- <依頼文> --out b --pipeline v1.1a --plan-file plan.json --stage-start write --stage-input a/stage-checkpoint-t2-b1.json
+```
+
+- **旗**：`--stage-start <段>`・`--stage-end <段>`・`--stage-input <checkpoint>`。`--pipeline v1.1a --plan-file` と組んで
+  だけ受ける（それ以外は `stage-range:pipeline`）。片方だけなら他方は経路の端（開始 T1・終了 ⑦）。
+  **旗を省けば、v1 と v1.1α の要求・出力・要約・終了コードは今までとバイト列で同じ**（checkpoint も書かない）。
+- **段の表**（定数で閉じる）：開始は `name-table`（T1）・`test-spec`（T2）・`write`（B1）、終了は `semantic-check`
+  （T1'' まで）・`test-spec`（T2' まで）・`judge`（⑦ まで）。表に無い名前は `stage-range:unknown`、開始が終了より後は
+  `stage-range:order`。開始 T1 に入力を付けたら `stage-input:not-needed`、開始 T2・B1 に入力が無ければ
+  `stage-input:missing`（どれも終了コード 2）。
+- **境界の checkpoint（再開の正本）**：範囲の中で通った境界ごとに 1 つ書く。境界は `t1-t2`（持ち越しを導き、T2 を
+  呼ぶ直前）と `t2-b1`（T2' を終え、B1 を始める直前）。中身は確定した仕様と依頼文の SHA・採用した表・採用した T1'' の
+  点検結果・J4 の助言・その時点の持ち越し（`t2-b1` では試験の組・observes・網羅の単位も）と版。**B3'・B6 で足した
+  持ち越し・棄却・網羅の損失は入れない**（B の結果を上流へ戻さない）。中身全部を正規の形で並べた SHA-256 を
+  **出力ダイジェスト**として段の走りの記録（`stage-run.json`）に残す。通常の走りや ⑦ の最終の記録は再開の入力に
+  しない。
+- **再開の入力の照合**（`--stage-input` は前の段の走りが書いた checkpoint。同じディレクトリの `stage-run.json` も
+  読む）。**クライアントを作る前**に照合し、1 つでも合わなければ API を呼ばず、何も書かずに、固定の符号 1 行を
+  標準エラーに出して**終了コード 4** で終わる：`stage-input:unreadable`（読めない）・`boundary`（開始の段の直前の
+  境界の checkpoint でない・記録が宣言していない）・`version`（形・語彙・契約の版。prompt と工場の版は記録だけ）・
+  `digest`（出力ダイジェスト）・`plan-sha256`・`source-sha256`（今の確定した仕様の検査の結果）・`table-sha256`・
+  `semantic-sha256`・`targets`（今の T1'' と同じ関数で導いた対象と判定）・`carry-over`（既存の持ち越しの関数で導き
+  直したもの）・`suite-sha256`（開始 B1。組の SHA・observes・網羅の単位）。
+- **終了コード**：段の通過 0、範囲の中の早期停止 1、使い方の誤り 2、確定した仕様の道の差し戻し 3（今と同じ）、
+  段の入力の照合の失敗 4。**3 と 4 は別の意味**である（3 は走った結果、4 は走る前に入力を断った）。
+- **段の通過と納品の成功は別の指標**である。段の走りの記録の `stage_pass` は「範囲の中に早期停止が無く、終了の段の
+  最後の記録が ok」で、終了 ⑦ のときは ⑦ の判定を `stage_judge_verdict` として別に置く。段の走りは**納品物（manifest
+  と宣言の束）を書かず**、要約の `verdict` も書かない（publish の口へ何も渡さない）。門・合否の規則・上限は変えない。
+- **予算と締切の単位は段の走り 1 本**（`budget_scope: "stage-run"`）。`--budget`・`--deadline` をその走りの始まりから
+  当て、前の走りで使った額と時間は引かない。記録の `conditions` に model・effort・文書の指紋・判定の口の構成（鍵は
+  書かない）・版・予算と締切を残す。
+
 ## 3. LlmClient（§2・§2.1）
 
 呼び出しは 2 つある。①'・②'・⑤a・⑥' の**構造化出力**（JSON Schema）と、⑥ の**道具付き**
