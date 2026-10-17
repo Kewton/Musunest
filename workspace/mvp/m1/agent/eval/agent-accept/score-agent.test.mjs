@@ -2350,10 +2350,10 @@ const PSHA513 = (p) => sha256(`plan-${p}`), SSHA513 = (p) => sha256(`source-${p}
 const sl513 = (summary = {}) => JSON.stringify({ exit: 0, wall_s: 1, started_at: "2026-10-16T00:00:00.000Z", exit_class: "ok", summary: { schema_version: "commandagent.headless-summary/v1", verdict: "partial", stop_reason: "completed", provider_cost_usd: 0.05, failure: null, stages: [], ...summary }, plan_cost: null, stderr_tail: { bytes: 0, known_lines: 0 }, resumed: false });
 /**
  * 比較の出力先を固定の記録で組む（run-agent.mjs --compare と同じ形）。runOf(群, 本の ID) が本ごとの中身：
- * { state（executed・incomplete・unexecuted）, spec, summary, carry（carry-over の記録。文字列ならそのまま）, verification, stdout }。
+ * { state（executed・incomplete・unexecuted）, spec, summary, carry（carry-over の記録。文字列ならそのまま）, verification, ver1（v1 の検証の記録 verification.json。#538）, tests（試験の結果の記録 tests.json。#539）, stdout }。
  * 条件の指紋は repoDir の採点の定義・spec-engine の dist・組・台本から計算する（採点のときに一致する）
  */
-function compareFixture(base, name, { pids = ["P1", "P2"], runs = 3, profile = "official", runOf = () => ({}), repoDir = repo, groupsExtra = {} } = {}) {
+function compareFixture(base, name, { pids = ["P1", "P2"], runs = 3, profile = "official", runOf = () => ({}), repoDir = repo, groupsExtra = {}, setFile = null } = {}) {
   const out = join(base, name), evDir = join(repoDir, "workspace/mvp/m1/agent/eval");
   mkdirSync(out, { recursive: true });
   const frozenPath = join(base, `${name}-frozen.json`);
@@ -2364,14 +2364,14 @@ function compareFixture(base, name, { pids = ["P1", "P2"], runs = 3, profile = "
   writeFileSync(join(out, "pairs.json"), pairsText);
   const pairsSha = sha256(pairsText);
   const recordGroups = {};
-  const set = loadEvalSet(join(repoDir, DEFAULT_SET_PATH));
+  const set = loadEvalSet(setFile ?? join(repoDir, DEFAULT_SET_PATH));
   const ids = pairs.map((p) => `${p.pid}-r${p.r}`);
   for (const g of ["v1", "v1.1a"]) {
     const dir = join(out, g);
     mkdirSync(dir, { recursive: true });
     const cond = {
       schema: CONDITIONS_V5, measurement_id: name, source: { commit: null, dirty: null }, factory: { fingerprint: sha256(g) }, spec_engine: { fingerprint: fingerprintDir(join(repoDir, "packages/spec-engine/dist")).fingerprint },
-      set: { path: DEFAULT_SET_PATH, sha256: set.sha256 }, scripts: { mode: "post-hoc", fingerprint: scriptsFingerprint(set.scripts).fingerprint }, scoring: { fingerprint: scoringFingerprint(evDir, scoreFile, set.definitions).fingerprint }, judge: { configuration: "llm-only" },
+      set: { path: setFile ?? DEFAULT_SET_PATH, sha256: set.sha256 }, scripts: { mode: "post-hoc", fingerprint: scriptsFingerprint(set.scripts).fingerprint }, scoring: { fingerprint: scoringFingerprint(evDir, scoreFile, set.definitions).fingerprint }, judge: { configuration: "llm-only" },
       params: { ...paramsFor(ids), mode: "build-from", plan: false, effort: "high", pipeline: g, stage_output_limits_v11a: g === "v1" ? null : APPROVED513 },
       child_args: ids.map((id) => ({ id, argv: [] })),
       frozen: { path: frozenPath, sha256: frozenSha, id: "t", version: 1, origin: "frozen-plan", author: null, adopted: pids.map((p) => ({ pattern: p, plan_sha256: PSHA513(p), source_sha256: SSHA513(p), envelope_sha256: sha256(p) })), missing: [] },
@@ -2393,6 +2393,8 @@ function compareFixture(base, name, { pids = ["P1", "P2"], runs = 3, profile = "
       if (x.spec) writeFileSync(join(rd, "bundle/artifacts/app.spec.yaml"), x.spec);
       if (x.carry !== undefined) writeFileSync(join(rd, "bundle/artifacts/carry-over.json"), typeof x.carry === "string" ? x.carry : JSON.stringify(x.carry));
       if (x.verification !== undefined) writeFileSync(join(rd, "bundle/artifacts/verification-v11a.json"), JSON.stringify(x.verification));
+      if (x.ver1 !== undefined) writeFileSync(join(rd, "bundle/artifacts/verification.json"), JSON.stringify(x.ver1));
+      if (x.tests !== undefined) writeFileSync(join(rd, "bundle/artifacts/tests.json"), typeof x.tests === "string" ? x.tests : JSON.stringify(x.tests));
     }
   }
   writeFileSync(join(out, "comparison.json"), JSON.stringify({ schema: "musunest-eval/compare-record/v1", pairs: { sha256: pairsSha }, groups: recordGroups, profile, profile_mismatches: profile === "official" ? [] : ["deadline_min"], scoring_cost_usd: 0 }));
@@ -2802,4 +2804,647 @@ test("#513 停止の台帳：failure-modes.md に N1〜N8 の 8 行があり、�
     assert.match(r[5], /^未確定（設計の推定/, r[0]);
     assert.ok(!/R\d|P\d|role|\bf\.|\be\./.test(r.join("")), `${r[0]} に値（要件 ID・P・役割 ID）がある`);
   }
+});
+
+// ── #538：漏斗（段ごとの条件付き通過率）・pass^k・工場の判定の 4 値（unverified の口）。設計書 08 §7・§8.1・§8.4。README §5.9
+import { ACCEPTED_VERDICTS, FACTORY_VERDICTS4, SOURCE_VERDICTS, factoryVerdict4, firstPassOf, funnelOf, passKOf, unverifiedDetailsOf } from "./score-agent.mjs";
+
+const MARK538 = "leak-marker-538";
+const RETRY0 = { communication: 0, shape: 0, content: 0 };
+/** 段の記録 1 つ（工場の StageRecord の形のうち、漏斗が読む欄と失敗の種類だけ） */
+const rec538 = (stage, status, calls, retries = RETRY0, failureKind = null) => ({ stage, operation: null, status, duration_ms: 1, calls, retries, failure_kind: status === "ok" ? null : failureKind ?? "unmet" });
+/**
+ * 段の並びの書き方（"段:記号" を空白で並べる）。1 ＝ 1 回目で通過（ok・calls 1・retries 0）、r ＝ failed のあと ok、c ＝ ok・calls 2（1 回目ではない）、
+ * 0 ＝ コードの段（ok・calls 0）、x ＝ failed を 2 回（その段で止まる）、f ＝ failed を 1 回（その段で止まる）。止まる段の失敗の種類は kind
+ */
+const stages538 = (line, kind = "unmet") => line.split(" ").flatMap((t) => {
+  const [stage, k] = t.split(":");
+  return { 1: [rec538(stage, "ok", 1)], r: [rec538(stage, "failed", 1, RETRY0, kind), rec538(stage, "ok", 1)], c: [rec538(stage, "ok", 2)], 0: [rec538(stage, "ok", 0)], x: [rec538(stage, "failed", 1, RETRY0, kind), rec538(stage, "failed", 1, RETRY0, kind)], f: [rec538(stage, "failed", 1, RETRY0, kind)] }[k];
+});
+/** 止まった本の要約（failure がその段・その種類）と、納品した本の要約（failure なし・stop_class は completed） */
+const stopped538 = (line, stage, kind) => ({ verdict: "none", assurance: "none", stop_reason: kind, stop_class: kind, failure: { stage, kind }, stages: stages538(line, kind) });
+const delivered538 = (line, stopReason, over = {}) => ({ verdict: "partial", assurance: "partial", stop_reason: stopReason, stop_class: "completed", failure: null, stages: stages538(line), ...over });
+/** 試験用の組：P1〜P10 の 10 P が同じ採点の定義（A）を参照する（PASS は cases の正例・負例の宣言で作る） */
+const set538 = (base) => {
+  // 台本は照合の指紋（scripts_matches_conditions）を持たせるためだけに置く（Plan の記録が無いので当てる問いは無い）
+  writeJson(join(base, "set538/scripts/A.json"), scriptOf("A", [entry("A:e1", ["MARK_REQ"], { recommended: true })]));
+  return writeJson(join(base, "set538/t-set.json"), { ...SET_DEFAULTS, items: Array.from({ length: 10 }, (_, i) => itemOf(`P${i + 1}`, "A", { style: i % 2 === 0 ? "S1" : "S2", script: "scripts/A.json" })) });
+};
+const ids538 = Array.from({ length: 10 }, (_, i) => [1, 2, 3].map((r) => `P${i + 1}-r${r}`)).flat().sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
+/** 本を 1 つ置く（要約は sl513 の形。ver1 ＝ verification.json、v11 ＝ verification-v11a.json。summary が null なら要約の無い途中の本） */
+function addRun538(out, id, { summary = {}, spec = null, ver1, v11, tests } = {}) {
+  const rd = join(out, id);
+  mkdirSync(join(rd, "bundle/artifacts"), { recursive: true });
+  if (summary !== null) { writeFileSync(join(rd, "summary.line.json"), sl513(summary)); writeFileSync(join(rd, "stdout.log"), ""); writeFileSync(join(rd, "stderr.log"), ""); }
+  if (spec !== null) writeFileSync(join(rd, "bundle/artifacts/app.spec.yaml"), spec);
+  if (ver1 !== undefined) writeFileSync(join(rd, "bundle/artifacts/verification.json"), JSON.stringify(ver1));
+  if (v11 !== undefined) writeFileSync(join(rd, "bundle/artifacts/verification-v11a.json"), JSON.stringify(v11));
+  if (tests !== undefined) writeFileSync(join(rd, "bundle/artifacts/tests.json"), typeof tests === "string" ? tests : JSON.stringify(tests));
+}
+const entry538 = (summary, over = {}) => ({ state: "executed", summary, verification: null, exhausted: null, ...over });
+/** 直す前の採点の出力の欄の並び（新しい欄はこのあとに足す） */
+const KEYS_BEFORE_538 = ["rubric", "aggregation_versions", "scoring_systems", "set", "metrics", "metrics_accepted", "metrics_script", "fulfillment", "completion", "fingerprints", "bySubject", "rows", "tables", "evaluation", "metrics_plan", "metrics_build"];
+const ANON_KEYS_BEFORE_538 = ["rubric", "anonymous", "aggregation_versions", "scoring_systems", "runs", "metrics", "metrics_accepted", "metrics_script", "tables", "set", "fulfillment", "completion", "fingerprints", "evaluation", "metrics_plan", "metrics_build"];
+const KEYS_538 = ["funnel", "pass_k", "verdicts", "unverified_details"];
+/** #539 が #538 の欄のあとに足す欄（#538 の欄の並びと値は変えない） */
+const KEYS_539 = ["agreement", "test_findings"];
+
+test("#538 漏斗の規則 (a)〜(e)・(g)：1 回目で通過は最初の記録が ok・calls 1・retries 0（retries が無ければ ok と calls 1）。failed のあと ok は通過だが 1 回目ではない。calls 2 は 1 回目ではない。failed だけで failure.stage がその段なら停止。calls 0 の段は 1 回目が null。到達 0 の段は「今回未観測（0/予定）」", () => {
+  // 純粋な規則
+  assert.equal(firstPassOf([rec538("design", "ok", 1)]), true, "(a)");
+  assert.equal(firstPassOf([{ stage: "design", status: "ok", calls: 1 }]), true, "(a) retries が無ければ ok と calls 1");
+  assert.equal(firstPassOf([rec538("design", "ok", 1, { communication: 1, shape: 0, content: 0 })]), true, "通信の再試行は 1 回目の判定に数えない");
+  assert.equal(firstPassOf([rec538("design", "ok", 1, { communication: 0, shape: 1, content: 0 })]), false, "形のやり直し");
+  assert.equal(firstPassOf([rec538("design", "ok", 1, { communication: 0, shape: 0, content: 1 })]), false, "中身のやり直し");
+  assert.equal(firstPassOf([rec538("design", "failed", 1), rec538("design", "ok", 1)]), false, "(b)");
+  assert.equal(firstPassOf([rec538("design", "ok", 2)]), false, "(c)");
+  // 5 本（予定）：
+  //   1 本目 design 1 回目で通過、2 本目 failed のあと ok、3 本目 ok・calls 2、4 本目 failed だけで design で停止、5 本目 未実行。static-check は全部 calls 0
+  const entries = [
+    entry538(delivered538("design:1 static-check:0", "completed")),
+    entry538(delivered538("design:r static-check:0", "completed")),
+    entry538(delivered538("design:c static-check:0", "stagnation")),
+    entry538(stopped538("design:x", "design", "unmet")),
+    { state: "unexecuted", summary: null, verification: null, exhausted: null },
+  ];
+  const fu = funnelOf(entries);
+  assert.deepEqual([fu.planned, fu.executed], [5, 4]);
+  const d = fu.stages.design;
+  assert.deepEqual([d.planned, d.reached, d.first_pass, d.passed, d.stopped, d.code_stage], [5, 4, 1, 3, 1, false], "(a)〜(d)");
+  assert.equal(d.reached_label, "4/5");
+  startsWith(d.rates.first_pass, "1/4（");
+  startsWith(d.rates.passed, "3/4（");
+  startsWith(d.rates.stopped, "1/4（");
+  // (e) calls 0 の段：1 回目は件数も率も null（未到達の 0 と区別する）
+  const sc = fu.stages["static-check"];
+  assert.deepEqual([sc.reached, sc.first_pass, sc.rates.first_pass, sc.passed, sc.code_stage], [3, null, null, 3, true], "(e)");
+  // (g) 到達 0 の段：件数は 0、率は「今回未観測（0/予定）」（1 回目も null ではなく 0）
+  const cv = fu.stages.coverage;
+  assert.deepEqual([cv.reached, cv.first_pass, cv.passed, cv.stopped, cv.code_stage], [0, 0, 0, 0, false], "(g)");
+  assert.deepEqual([cv.reached_label, cv.rates.first_pass, cv.rates.passed, cv.rates.stopped], ["今回未観測（0/5）", "今回未観測（0/5）", "今回未観測（0/5）", "今回未観測（0/5）"], "(g)");
+  assert.deepEqual(Object.keys(fu.stages), BUILD_STAGE_IDS, "段は BUILD_STAGE_IDS の順");
+  // 完走の内訳：stop_class が completed の本を、検証の記録の不一致・未解決の件数で分ける。読めない本は欠測（0 と推測しない）
+  const done = funnelOf([
+    entry538(delivered538("design:1", "completed"), { verification: { test_mismatches: 0, test_unresolved: 0 } }),
+    entry538(delivered538("design:1", "stagnation"), { verification: { test_mismatches: 1, test_unresolved: 0 } }),
+    entry538(delivered538("design:1", "stagnation"), { verification: { test_mismatches: 0, test_unresolved: 2 } }),
+    entry538(delivered538("design:1", "completed")),
+    entry538(delivered538("design:1", "completed"), { verification: { test_mismatches: "0", test_unresolved: 0 } }),
+    entry538(stopped538("design:x", "design", "unmet"), { verification: { test_mismatches: 0, test_unresolved: 0 } }),
+  ]);
+  assert.deepEqual(done.completed, { runs: 5, no_mismatch: 1, with_mismatch: 2, missing: 2 });
+  assert.deepEqual(done.stops, { completed: 3, stagnation: 2, "design:unmet": 1 });
+});
+
+test("#538 漏斗の規則 (f)：未実行・途中の本は到達 0 で予定の分母に残る。採点の出力の funnel は予定した本（条件の child_args）を分母にし、標準出力に漏斗と pass^k の 1 行ずつ（既存の行は変えない）", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    addRun538(out, "P1-r1", { summary: delivered538("design:1 test-suite:1 write:1 static-check:0 judge:0", "completed"), spec: PASS_A, ver1: { test_mismatches: 0, test_unresolved: 0 } });
+    addRun538(out, "P1-r2", { summary: stopped538("design:1 test-suite:x", "test-suite", "unmet") });
+    addRun538(out, "P1-r3", { summary: null, spec: PASS_A }); // 途中（要約が無い。宣言があっても到達 0・PASS 0）
+    // P1-r4 は未実行（ディレクトリが無い）
+    conditions(out, ["P1-r1", "P1-r2", "P1-r3", "P1-r4"]);
+    const r = scoreRun(out);
+    const full = readScore(out);
+    assert.deepEqual(Object.keys(full), [...KEYS_BEFORE_538, ...KEYS_538, ...KEYS_539], "既存の欄の並びはそのままで、新しい欄をあとに足す");
+    const fu = full.funnel;
+    assert.deepEqual([fu.planned, fu.executed], [4, 2], "(f) 予定 4 本（未実行・途中を含む）");
+    assert.deepEqual([fu.stages.design.reached, fu.stages.design.first_pass, fu.stages.design.passed, fu.stages.design.reached_label], [2, 2, 2, "2/4"]);
+    assert.deepEqual([fu.stages["test-suite"].reached, fu.stages["test-suite"].first_pass, fu.stages["test-suite"].passed, fu.stages["test-suite"].stopped], [2, 1, 1, 1]);
+    assert.deepEqual([fu.stages.judge.reached, fu.stages.judge.first_pass], [1, null]);
+    assert.deepEqual(fu.completed, { runs: 1, no_mismatch: 1, with_mismatch: 0, missing: 0 });
+    // pass^k：k は条件の runs（4）。途中・未実行の本は PASS 0
+    assert.deepEqual(full.pass_k, { k: 4, patterns: 1, count: 0, rate: full.pass_k.rate, by_pattern: { P1: [1, 0, 0, 0] } });
+    startsWith(full.pass_k.rate, "0/1（");
+    // 標準出力：既存の行のあとに 1 行ずつ
+    const lines = r.stdout.trimEnd().split("\n");
+    assert.match(lines.at(-2), /^漏斗（予定 4 本・実行 2 本。段：到達／1 回目／通過／停止。適用外は —）: design 2／2／2／0・test-suite 2／1／1／1・write 1／1／1／0・static-check 1／—／1／0・judge 1／—／1／0（未観測 14 段）・完走 1（不一致なし 1・あり 0・欠測 0）$/);
+    assert.match(lines.at(-1), /^pass\^4: 0\/1（.*）（P1 1,0,0,0）$/);
+    assert.match(lines.at(-3), /^指紋: 採点 /, "既存の指紋の行は漏斗の前のまま");
+  });
+});
+
+test("#538 v11a-cmp2 と同じ形の fixture（30 本 × 2 群）で、設計書 08 §8.1・§8.4 の数が出る（漏斗・停止・完走の内訳・pass^3）。比較の照合は完了のまま", async () => {
+  // fixture の作り方（記録から形だけを写す。段の名前・status・calls・retries・停止・判定の値。宣言は cases の正例 PASS_A・負例 FAIL_A、組は 10 P が A を参照する試験用の組）
+  // v1.1α（30 本）：
+  //   納品 11 本（stop_class completed）＝ 名前の表を 1 回目で通過 7 本・やり直しで通過 4 本。どれも 意味の点検 1・試験の仕様 1・書く 1・静的 0・宣言の点検 1・判定 0・束ね 0。
+  //     うち 3 本が completed（不一致 0・未解決 0）、8 本が stagnation（不一致 1）。PASS 10 本（P1-r1・P2-r2・P3-r1・P3-r3・P5-r1〜r3・P6-r3・P7-r1・P7-r3）と FAIL 1 本（P4-r1）
+  //   残り 19 本を ID の順に：repair:call-limit 4 本（名前の表 r・意味の点検 1・試験の仕様 c・書く 1・静的 0・修復 f。先頭の 1 本だけ宣言の点検 1 を通る）、
+  //     test-spec:unmet 8 本（名前の表 r・意味の点検 1・試験の仕様 x）、name-table:unmet 7 本（名前の表 x）。宣言なし（GEN_FAIL）
+  // v1（30 本）：
+  //   納品 9 本（全部 PASS：P4-r3・P5-r3・P6-r1・P7-r2・P7-r3・P8-r1・P9-r1・P9-r3・P10-r3）＝ limit 4 本（設計 1・試験 1）と stagnation 5 本（設計 1・試験 r）。
+  //     どれも 書く 1・静的 0・対応 1・実行 0・修復 1・判定 0。不一致 1（不一致なし 0）
+  //   残り 21 本を ID の順に：correspondence:deadline 4 本（設計 1・試験 r・書く 1・静的 0・対応 f）、test-suite:unmet 3 本（設計 1・試験 x）と 7 本（設計 r・試験 x）、
+  //     test-suite:malformed 1 本（設計 r・試験 x）、design:unmet 4 本（設計 x）、design:network 2 本（設計 x）。宣言なし
+  const v11aPass = ["P1-r1", "P2-r2", "P3-r1", "P3-r3", "P5-r1", "P5-r2", "P5-r3", "P6-r3", "P7-r1", "P7-r3"];
+  const v1Pass = ["P4-r3", "P5-r3", "P6-r1", "P7-r2", "P7-r3", "P8-r1", "P9-r1", "P9-r3", "P10-r3"];
+  const plan = { v1: new Map(), "v1.1a": new Map() };
+  const DONE11 = (nt) => `name-table:${nt} semantic-check:1 test-spec:1 write:1 static-check:0 decl-check:1 judge:0 bundle:0`;
+  [...v11aPass, "P4-r1"].sort((a, b) => a.localeCompare(b, "en", { numeric: true })).forEach((id, i) => plan["v1.1a"].set(id, { summary: delivered538(DONE11(i < 7 ? "1" : "r"), i < 3 ? "completed" : "stagnation"), spec: v11aPass.includes(id) ? PASS_A : FAIL_A, ver1: { test_mismatches: i < 3 ? 0 : 1, test_unresolved: 0 } }));
+  const rest11 = [
+    ...Array.from({ length: 4 }, (_, i) => ({ summary: stopped538(`name-table:r semantic-check:1 test-spec:c write:1 static-check:0${i === 0 ? " decl-check:1" : ""} repair:f`, "repair", "call-limit") })),
+    ...Array.from({ length: 8 }, () => ({ summary: stopped538("name-table:r semantic-check:1 test-spec:x", "test-spec", "unmet") })),
+    ...Array.from({ length: 7 }, () => ({ summary: stopped538("name-table:x", "name-table", "unmet") })),
+  ];
+  ids538.filter((id) => !plan["v1.1a"].has(id)).forEach((id, i) => plan["v1.1a"].set(id, rest11[i]));
+  const DONE1 = (ts) => `design:1 test-suite:${ts} write:1 static-check:0 correspondence:1 run-tests:0 repair:1 judge:0`;
+  [...v1Pass].sort((a, b) => a.localeCompare(b, "en", { numeric: true })).forEach((id, i) => plan.v1.set(id, { summary: i < 4 ? delivered538(DONE1("1"), "limit") : delivered538(DONE1("r"), "stagnation"), spec: PASS_A, ver1: { test_mismatches: 1, test_unresolved: 0 } }));
+  const rest1 = [
+    ...Array.from({ length: 4 }, () => ({ summary: stopped538("design:1 test-suite:r write:1 static-check:0 correspondence:f", "correspondence", "deadline") })),
+    ...Array.from({ length: 3 }, () => ({ summary: stopped538("design:1 test-suite:x", "test-suite", "unmet") })),
+    ...Array.from({ length: 7 }, () => ({ summary: stopped538("design:r test-suite:x", "test-suite", "unmet") })),
+    { summary: stopped538("design:r test-suite:x", "test-suite", "malformed") },
+    ...Array.from({ length: 4 }, () => ({ summary: stopped538("design:x", "design", "unmet") })),
+    ...Array.from({ length: 2 }, () => ({ summary: stopped538("design:x", "design", "network") })),
+  ];
+  ids538.filter((id) => !plan.v1.has(id)).forEach((id, i) => plan.v1.set(id, rest1[i]));
+  assert.deepEqual([plan.v1.size, plan["v1.1a"].size], [30, 30]);
+  await withOut(async (base) => {
+    const f = compareFixture(base, "cmp538", { pids: Array.from({ length: 10 }, (_, i) => `P${i + 1}`), runs: 3, setFile: set538(base), runOf: (g, id) => plan[g].get(id) });
+    const r = scoreCompareRun(f.out);
+    assert.equal(r.status, 0, r.stderr);
+    const c = readCompare(f.out);
+    assert.equal(c.completion.status, "complete", `指紋を今の採点で記録した fixture は完了（照合は直す前と同じ）: ${JSON.stringify(c.completion)}`);
+    assert.deepEqual(c.completion.unverified, []);
+    const row = (g, id) => { const s = c.groups[g].funnel.stages[id]; return [s.reached, s.first_pass, s.passed, s.stopped]; };
+    // v1.1α：名前の表 到達 30・1 回目 7・通過 23／意味の点検 23・23・23／試験の仕様 到達 23・1 回目 11・通過 15／書く 15／宣言の点検 到達 12／判定 11／完走 11 のうち不一致なし 3
+    const a = "v1.1a";
+    assert.deepEqual(row(a, "name-table"), [30, 7, 23, 7]);
+    assert.deepEqual(row(a, "semantic-check"), [23, 23, 23, 0]);
+    assert.deepEqual(row(a, "test-spec"), [23, 11, 15, 8]);
+    assert.equal(c.groups[a].funnel.stages.write.reached, 15);
+    assert.equal(c.groups[a].funnel.stages["decl-check"].reached, 12);
+    assert.deepEqual(row(a, "judge"), [11, null, 11, 0], "判定はコードの段（1 回目は適用外）");
+    assert.deepEqual(c.groups[a].funnel.completed, { runs: 11, no_mismatch: 3, with_mismatch: 8, missing: 0 });
+    assert.deepEqual(c.groups[a].funnel.stops, { completed: 3, stagnation: 8, "repair:call-limit": 4, "test-spec:unmet": 8, "name-table:unmet": 7 });
+    startsWith(c.groups[a].funnel.stages["name-table"].rates.passed, "23/30（76.7%");
+    startsWith(c.groups[a].funnel.stages["test-spec"].rates.passed, "15/23（65.2%");
+    // pass^3 1/10（P5 だけ）
+    assert.deepEqual([c.groups[a].pass_k.k, c.groups[a].pass_k.patterns, c.groups[a].pass_k.count], [3, 10, 1]);
+    startsWith(c.groups[a].pass_k.rate, "1/10（");
+    assert.deepEqual(c.groups[a].pass_k.by_pattern, { P1: [1, 0, 0], P2: [0, 1, 0], P3: [1, 0, 1], P4: [0, 0, 0], P5: [1, 1, 1], P6: [0, 0, 1], P7: [1, 0, 1], P8: [0, 0, 0], P9: [0, 0, 0], P10: [0, 0, 0] });
+    // v1：設計 到達 30・1 回目 16・通過 24／試験 到達 24・1 回目 4・通過 13／書く 13／判定 9／完走 9 のうち不一致なし 0
+    assert.deepEqual(row("v1", "design"), [30, 16, 24, 6]);
+    assert.deepEqual(row("v1", "test-suite"), [24, 4, 13, 11]);
+    assert.equal(c.groups.v1.funnel.stages.write.reached, 13);
+    assert.deepEqual(row("v1", "judge"), [9, null, 9, 0]);
+    assert.deepEqual(c.groups.v1.funnel.completed, { runs: 9, no_mismatch: 0, with_mismatch: 9, missing: 0 });
+    assert.deepEqual(c.groups.v1.funnel.stops, { limit: 4, stagnation: 5, "correspondence:deadline": 4, "test-suite:unmet": 10, "test-suite:malformed": 1, "design:unmet": 4, "design:network": 2 });
+    assert.deepEqual([c.groups.v1.pass_k.count, c.groups.v1.pass_k.patterns], [0, 10], "pass^3 0/10");
+    assert.deepEqual(c.groups.v1.pass_k.by_pattern, { P1: [0, 0, 0], P2: [0, 0, 0], P3: [0, 0, 0], P4: [0, 0, 1], P5: [0, 0, 1], P6: [1, 0, 0], P7: [0, 1, 1], P8: [1, 0, 0], P9: [1, 0, 1], P10: [0, 0, 1] });
+    // 判定の 3 系統（群ごと）：分母は予定 30
+    assert.deepEqual(c.groups[a].verdicts.source.counts, { PASS: 10, FAIL: 1, STATIC_NG: 0, GEN_FAIL: 19, unknown: 0, not_run: 0 });
+    assert.deepEqual(c.groups[a].verdicts.factory.counts, { full: 0, partial: 11, unverified: 0, none: 19, unknown: 0, absent: 0 });
+    startsWith(c.groups[a].verdicts.source.delivered.PASS, "10/11（");
+    assert.deepEqual(c.groups.v1.verdicts.source.counts, { PASS: 9, FAIL: 0, STATIC_NG: 0, GEN_FAIL: 21, unknown: 0, not_run: 0 });
+    // 既存の比較の欄はそのまま：停止段の内訳（stops.values）と漏斗の停止は同じ値、到達数（reach）と漏斗の到達は同じ値
+    assert.deepEqual(c.groups[a].stops.values, c.groups[a].funnel.stops);
+    assert.deepEqual(c.groups.v1.stops.values, c.groups.v1.funnel.stops);
+    for (const g of ["v1", a]) for (const id of BUILD_STAGE_IDS) assert.equal(c.groups[g].reach[id].reached, c.groups[g].funnel.stages[id].reached, `${g} ${id}`);
+    assert.deepEqual(Object.keys(c.groups[a]), ["role", "pipeline", "completion", "fingerprints", "pass_executed", "pass_planned", "factory_verdicts", "accepted", "stops", "reach", "carry_over", "funnel", "pass_k", "verdicts", ...KEYS_539], "既存の群の欄のあとに足す");
+    assert.match(r.stdout, /^v1\.1a 漏斗（予定 30 本・実行 30 本。.*: write 15／15／15／0・.*name-table 30／7／23／7・semantic-check 23／23／23／0・test-spec 23／11／15／8・decl-check 12／12／12／0（未観測 \d+ 段）・完走 11（不一致なし 3・あり 8・欠測 0）$/m);
+    assert.match(r.stdout, /^v1\.1a pass\^3: 1\/10（.*P5 1,1,1・/m);
+    assert.match(r.stdout, /^v1 pass\^3: 0\/10（/m);
+  });
+});
+
+test("#538 工場の判定の 4 値：正本は要約の verdict と assurance（unverified は partial かつ assurance unverified のときだけ）。検証の記録の unverified の内訳からは復元せず、内訳は unverified_details に件数だけ（欠測は null）。既存の factory_verdict・factory_verdicts は変えない。verdicts は 3 系統を別に、予定を分母に数える", async () => {
+  // 純粋な規則 (a)〜(f)
+  assert.equal(factoryVerdict4({ verdict: "partial", assurance: "unverified" }), "unverified", "(a)");
+  assert.equal(factoryVerdict4({ verdict: "partial", assurance: "partial" }), "partial", "(b)〜(d)");
+  assert.equal(factoryVerdict4({ verdict: "full", assurance: "full" }), "full", "(f)");
+  assert.equal(factoryVerdict4({ verdict: "full", assurance: "unverified" }), "full", "unverified は partial の運び方だけ");
+  assert.equal(factoryVerdict4({ verdict: "none", assurance: "none" }), "none");
+  assert.equal(factoryVerdict4({ verdict: MARK538, assurance: "unverified" }), "unknown");
+  assert.equal(factoryVerdict4({ assurance: "unverified" }), "absent");
+  assert.equal(factoryVerdict4(null), "absent");
+  assert.equal(unverifiedDetailsOf({ unverified: [{}, {}] }), 2);
+  assert.equal(unverifiedDetailsOf({ unverified: 2 }), 2);
+  assert.equal(unverifiedDetailsOf({ test_mismatches: 0 }), null, "(e) 欄が無ければ null（0 と推測しない）");
+  assert.equal(unverifiedDetailsOf({ unverified: -1 }), null);
+  assert.equal(unverifiedDetailsOf(null), null);
+  assert.deepEqual(FACTORY_VERDICTS4, ["full", "partial", "unverified", "none", "unknown", "absent"]);
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    const partial = (assurance) => ({ verdict: "partial", assurance });
+    addRun538(out, "P1-r1", { summary: partial("unverified"), spec: PASS_A });                                                                          // (a)
+    addRun538(out, "P1-r2", { summary: partial("partial"), spec: FAIL_A, ver1: { test_mismatches: 0, test_unresolved: 0, unverified: [{ id: "u1" }, { id: "u2" }] } }); // (b)
+    addRun538(out, "P1-r3", { summary: partial("partial"), spec: STATIC_NG, ver1: { test_mismatches: 1, test_unresolved: 0, unverified: 2 } });          // (c) 不一致 1・未検証 2
+    addRun538(out, "P1-r4", { summary: partial("partial"), ver1: { test_mismatches: 0, test_unresolved: 0, unverified: [{ id: "u1" }] }, v11: { decl_check: { exhausted: 0, malformed: 0, rejected: 1 } } }); // (d) 意味の点検の拒否が残り未検証もある
+    addRun538(out, "P1-r5", { summary: partial("unverified"), spec: PASS_A });                                                                          // (e) 内訳の記録なし
+    addRun538(out, "P1-r6", { summary: { verdict: "full", assurance: "full" }, spec: PASS_A });
+    addRun538(out, "P1-r7", { summary: { verdict: "none", assurance: "none", stop_reason: "deadline", failure: { stage: "write", kind: "deadline" } } });
+    addRun538(out, "P1-r8", { summary: { verdict: MARK538, assurance: MARK538 }, spec: FAIL_A });
+    addRun538(out, "P1-r9", { summary: null });                                                                                                       // 途中（要約なし）
+    // P1-r10 は未実行
+    const ids = Array.from({ length: 10 }, (_, i) => `P1-r${i + 1}`);
+    conditions(out, ids);
+    scoreRun(out);
+    const full = readScore(out);
+    assert.deepEqual(full.rows.map((x) => [x.run, x.factory_verdict4, x.unverified_details]), [
+      ["P1-r1", "unverified", null], ["P1-r2", "partial", 2], ["P1-r3", "partial", 2], ["P1-r4", "partial", 1], ["P1-r5", "unverified", null],
+      ["P1-r6", "full", null], ["P1-r7", "none", null], ["P1-r8", "unknown", null], ["P1-r9", "absent", null],
+    ]);
+    // (g) 既存の欄は (a) でも partial のまま
+    assert.equal(rowOf(full, "P1-r1").factory_verdict, "partial");
+    assert.deepEqual(full.metrics.factory_verdicts, { partial: 5, full: 1, none: 2, [MARK538]: 1 }, "(g) 既存の factory_verdicts に unverified は出ない（要約の無い本は今までどおり none）");
+    assert.deepEqual(Object.keys(rowOf(full, "P1-r1")).slice(-2), ["factory_verdict4", "unverified_details"], "行の新しい鍵は既存の鍵のあと");
+    // (h) 3 系統を別に数える。件数の分母は予定 10（未実行 1・途中 1 は not_run・absent）、率は実行 8・納品 6 の中
+    const v = full.verdicts;
+    assert.deepEqual([v.planned, v.executed, v.delivered], [10, 8, 6]);
+    assert.deepEqual(v.source.counts, { PASS: 3, FAIL: 2, STATIC_NG: 1, GEN_FAIL: 2, unknown: 0, not_run: 2 });
+    assert.deepEqual(v.accepted.counts, { PASS: 0, FAIL: 0, UNEVALUATED: 0, STATIC_NG: 0, not_applicable: 8, unknown: 0, not_run: 2 });
+    assert.deepEqual(v.factory.counts, { full: 1, partial: 3, unverified: 2, none: 1, unknown: 1, absent: 2 });
+    startsWith(v.source.executed.PASS, "3/8（");
+    startsWith(v.source.delivered.PASS, "3/6（");
+    startsWith(v.factory.executed.unverified, "2/8（");
+    assert.deepEqual(Object.keys(v.source.executed), SOURCE_VERDICTS.filter((k) => k !== "not_run"));
+    assert.deepEqual(Object.keys(v.accepted.counts), ACCEPTED_VERDICTS);
+    assert.deepEqual(full.unverified_details, { runs: 8, observed: 3, missing: 5, total: 5, runs_with_unverified: 3 });
+    assert.ok(!JSON.stringify({ funnel: full.funnel, verdicts: full.verdicts, v4: full.rows.map((x) => x.factory_verdict4) }).includes(MARK538), "知らない値をそのまま通さない");
+    // 匿名の口：新しい欄は件数と率と段の ID・列挙の値だけ（本の ID・P の ID・目印・パスが無い）
+    const anon = anonymize(full);
+    assert.deepEqual(Object.keys(anon), [...ANON_KEYS_BEFORE_538, ...KEYS_538, ...KEYS_539]);
+    const text = JSON.stringify(KEYS_538.map((k) => anon[k]));
+    assert.ok(!/P\d+/.test(text) && !text.includes(MARK538) && !text.includes(base), text.slice(0, 200));
+    assert.deepEqual(anon.verdicts.factory.counts, v.factory.counts);
+    assert.equal(anon.verdicts.source.executed.PASS, v.source.executed.PASS);
+    assert.deepEqual(anon.pass_k, { k: 10, patterns: 1, count: 0, rate: full.pass_k.rate });
+    assert.deepEqual(anon.unverified_details, full.unverified_details);
+    assert.deepEqual(Object.keys(anon.funnel.stages), BUILD_STAGE_IDS);
+    assert.equal(anon.funnel.stages.coverage.rates.passed, "今回未観測（0/10）");
+    for (const s of Object.values(anon.funnel.stages)) for (const x of Object.values(s.rates)) assert.ok(x === null || /^(\d+\/\d+（.*95% 区間.*）|今回未観測（0\/\d+）)$/.test(x), x);
+  });
+});
+
+test("#538 匿名の口：--anonymous の JSON に funnel・pass_k・verdicts・unverified_details が件数と率だけで載り、--compare --anonymous でも群ごとに載る（本の ID・P の ID・パス・目印が出ない）", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    addRun538(out, "P1-r1", { summary: delivered538("design:1 static-check:0", "completed", { stop_reason: MARK538 }), spec: PASS_A });
+    addRun538(out, "P1-r2", { summary: { ...stopped538("design:x", "design", "unmet"), failure: { stage: MARK538, kind: "unmet" } } });
+    conditions(out, ["P1-r1", "P1-r2"]);
+    const r = scoreRun(out, ["--anonymous"]);
+    const anon = JSON.parse(readFileSync(join(out, "score.anonymous.json"), "utf8"));
+    assert.deepEqual(KEYS_538.map((k) => k in anon), [true, true, true, true]);
+    const all = r.stdout + r.stderr + readFileSync(join(out, "score.anonymous.json"), "utf8");
+    assert.ok(!/P\d+-r\d+/.test(all) && !all.includes(MARK538) && !all.includes(base), "本の ID・目印・パスが出ない");
+    assert.deepEqual(anon.funnel.stops, { unknown: 2 }, "知らない停止段の値は unknown");
+    assert.deepEqual([anon.funnel.stages.design.reached, anon.funnel.stages.design.first_pass, anon.funnel.stages["static-check"].first_pass], [2, 1, null]);
+    // 比較
+    const f = compareFixture(base, "anon538", { pids: ["P1"], runs: 2, runOf: (g, id) => (id === "P1-r1" ? { summary: delivered538("design:1", "completed"), spec: PASS_A } : { summary: stopped538(`design:${g === "v1" ? "x" : "r"} test-suite:f`, "test-suite", "unmet") }) });
+    const rc = scoreCompareRun(f.out, ["--anonymous"]);
+    assert.equal(rc.status, 0, rc.stderr);
+    const ac = JSON.parse(readFileSync(join(f.out, "score-compare.anonymous.json"), "utf8"));
+    for (const g of ["v1", "v1.1a"]) {
+      assert.deepEqual([ac.groups[g].pass_k.k, ac.groups[g].pass_k.count], [2, 0]);
+      assert.equal(ac.groups[g].funnel.planned, 2);
+      assert.equal(ac.groups[g].verdicts.planned, 2);
+    }
+    assert.deepEqual([ac.groups.v1.funnel.stages.design.passed, ac.groups["v1.1a"].funnel.stages.design.passed], [1, 2]);
+    const allc = rc.stdout + rc.stderr + readFileSync(join(f.out, "score-compare.anonymous.json"), "utf8");
+    assert.ok(!/P\d+/.test(allc) && !allc.includes(base), "P の ID・パスが出ない");
+  });
+});
+
+test("#538 指紋：(a) 今の採点の指紋を記録した条件は一致・照合は完了のまま。(b) 旧い採点の指紋（集計のコードが違う）を記録した条件は不一致で、比較は未照合になり、理由に scoring_matches_conditions が出る（黙って一致にしない）", async () => {
+  await withOut(async (base) => {
+    // (a)
+    const out = join(base, "out");
+    addRun538(out, "P1-r1", { summary: delivered538("design:1", "completed"), spec: PASS_A });
+    const now = scoringFingerprint(ev, scoreFile, DEFAULT_DEFINITIONS).fingerprint;
+    conditions(out, ["P1-r1"], { scoring: { fingerprint: now } });
+    scoreRun(out);
+    const full = readScore(out);
+    assert.equal(full.fingerprints.scoring_matches_conditions, true);
+    assert.equal(full.completion.status, "complete");
+    // 旧い採点器（集計のコードが 1 行違う）の指紋
+    const old = join(base, "old-score-agent.mjs");
+    writeFileSync(old, readFileSync(scoreFile, "utf8").replace("// ── 漏斗・pass^k・工場の判定の 4 値（#538。", "// ── （旧い採点器）#538。"));
+    const before = scoringFingerprint(ev, old, DEFAULT_DEFINITIONS).fingerprint;
+    assert.notEqual(before, now, "集計のコードの SHA が変われば採点の総合の指紋も変わる");
+    // (b)
+    const out2 = join(base, "out2");
+    addRun538(out2, "P1-r1", { summary: delivered538("design:1", "completed"), spec: PASS_A });
+    conditions(out2, ["P1-r1"], { scoring: { fingerprint: before } });
+    const r2 = scoreRun(out2);
+    assert.equal(readScore(out2).fingerprints.scoring_matches_conditions, false);
+    assert.match(r2.stdout, /指紋: 採点 [0-9a-f]{12}…（条件のファイルと不一致）/);
+    const f = compareFixture(base, "fp538", { pids: ["P1"], runs: 1, runOf: () => ({ spec: PASS_A }), groupsExtra: { "v1.1a": { scoring: { fingerprint: before } } } });
+    const rc = scoreCompareRun(f.out);
+    assert.equal(rc.status, 0, rc.stderr);
+    const c = readCompare(f.out).completion;
+    assert.equal(c.status, "unverified");
+    assert.deepEqual(c.unverified, [{ group: "v1.1a", check: "scoring_matches_conditions", value: false }]);
+    assert.match(rc.stdout, /未照合の項目: v1\.1a:scoring_matches_conditions=false/);
+  });
+});
+
+// ── #539 内外の表・不一致と未解決の試験の分類・段の役割ごとの対の差・P のまとまり（設計書 08 §8.2・§8.7。README §5.10）
+import { BOOTSTRAP, FINDING_CLASSES, FINDING_PATTERNS, PAIR_NULL_REASONS, STAGE_METRICS, STAGE_ROLES, anonymizeCompare, classifyDetail, clusterStats, testFindingsOf } from "./score-agent.mjs";
+
+const MARK539 = "leak-marker-539";
+/**
+ * 評価器の固定文の全文の例（FINDING_PATTERNS の添字 → 文の並び）。名前の位置は匿名の名前（R1・x1・n1・a1・c1・v1・e1・f1・l1・T1）と数に置き換えた。
+ * 工場の stages/bind.ts・v11a/bind-by-id.ts・stages/run-tests.ts の detail の書き方（空白・括弧）をそのまま写す
+ */
+const DETAILS539 = [
+  ["表の ID が指す場所が宣言に無い"],
+  ["試験の対象の ID が名前の表に無い"],
+  ["selector（R1・x1）の対応（n1）に当たる 項目 の場所が対応表の外にある"],
+  ["selector（R1・x1）に対応表の項目が無い"],
+  ["selector（R1・x1）に提出された対応が無い（1 つに決まらない）"],
+  ["selector（R1・x1）に当たる 項目 の場所が無い"],
+  ["selector（R1・x1）の対応（n1）に当たる 項目 の場所が 2 個あり、1 つに決まらない", "selector（R1・x1）に当たる 計算 の場所が 3 個あり、1 つに決まらない"],
+  ["参照データの対象（要件 R1・役割 x1）が実在の entity に結び付かない", "参照データの対象（要件 R1・役割 ）が実在の entity に結び付かない"],
+  ["試験 T1 が結び付けの表に無い（1 つに決まらない）"],
+  ["参照先の役割 ID x1 に提出された対応が無い", "表示を期待する役割 ID x2 に提出された対応が無い", "空の集合の entity の役割 ID x3 に提出された対応が無い"],
+  ["評価の方法の表で未対応である（対象 entity × 操作 screen）"],
+  ["操作 a1 に条件（when）が無く、実行は評価器で確かめられない"],
+  ["操作の実行（set を当てたあとの状態）は評価器で確かめられない"],
+  ["操作 a1 の条件 の期待は真偽（true / false）であること", "印 c1 の期待は真偽（true / false）であること"],
+  ["入力が写像（object）でない"],
+  ["構造の検査の中身（assertion）が無い"],
+  ["view-shows の表示を期待する役割 ID（role）が無い"],
+  ["計算 c1 が期待と違う（期待 2、実際 3）", "操作 a1 の条件 が期待と違う（期待 true、実際 false）", "アプリ全体の集計 c2 が期待と違う（期待 null、実際 0）"],
+  ["操作 a1 の条件 が成り立った（期待は成り立たないこと）", "印 c1 が成り立った（期待は成り立たないこと）"],
+  ["計算 c1 が値を返した（期待は求められないこと）"],
+  ["検査 v1 が落ちた（期待は通ること）"],
+  ["検査 v1 が落ちなかった（期待は落ちること）"],
+  ["宣言に操作 a1 が無い", "宣言に検査 v1 が無い", "宣言に計算 c1 が無い", "宣言に一覧 l1 が無い", "宣言に entity e1 が無い"],
+  ["entity e1 に項目 f1 が無い"],
+  ["項目 f1 の種類が date（期待 string）"],
+  ["項目 f1 の参照先が e2（期待 e1）", "項目 f1 の参照先が 無し（期待 e1）"],
+  ["一覧 l1 は f1 を表示しない"],
+  ["項目 f1 は画面から辿れない（entity e1 の一覧か表に出ていない）", "項目 f1 は画面から辿れない（entity  の一覧か表に出ていない）"],
+  ["entity e1 に create の操作も、一覧か表の表示も無い"],
+];
+/** 表に無い文（unknown になる）：評価器の別の文・工場が文を変えた場合の例・空 */
+const UNKNOWN539 = ["宣言に n1 という項目も計算も無い", "計算 c1 は集計ではない", "結び付けられない", "表の ID が指す場所が宣言に見当たらない", ""];
+
+test("#539 分類：固定文の表の全パターンに、評価器の全文の名前を匿名にした detail が 1 つ以上あり、期待の分類に当たる。どの文も表の 2 つの形に当たらない（全組み合わせ）。表に無い文・文字列でない値は unknown", () => {
+  assert.equal(DETAILS539.length, FINDING_PATTERNS.length, "全パターンに例がある");
+  assert.deepEqual(FINDING_CLASSES, ["binding-defect", "evaluator-coverage", "test-defect", "needs-human", "unknown"]);
+  assert.deepEqual([...new Set(FINDING_PATTERNS.map((p) => p.class))], FINDING_CLASSES.filter((c) => c !== "unknown"), "表の分類は 4 つ（unknown は当たらないときだけ）");
+  assert.deepEqual(FINDING_PATTERNS.map((p) => p.class), [...Array(10).fill("binding-defect"), ...Array(3).fill("evaluator-coverage"), ...Array(4).fill("test-defect"), ...Array(12).fill("needs-human")]);
+  DETAILS539.forEach((xs, i) => {
+    assert.ok(xs.length >= 1, `${i}: 例が 1 つ以上`);
+    for (const d of xs) {
+      // 全組み合わせ：当たる形はちょうど 1 つで、それがこの例の形
+      const hitIdx = FINDING_PATTERNS.map((p, j) => (p.re.test(d) ? j : -1)).filter((j) => j >= 0);
+      assert.deepEqual(hitIdx, [i], `${JSON.stringify(d)} は形 ${i}（${FINDING_PATTERNS[i].form}）だけに当たる`);
+      assert.equal(classifyDetail(d), FINDING_PATTERNS[i].class, d);
+    }
+  });
+  for (const d of UNKNOWN539) { assert.equal(classifyDetail(d), "unknown", d); assert.ok(FINDING_PATTERNS.every((p) => !p.re.test(d)), d); }
+  for (const x of [null, undefined, 1, { detail: "入力が写像（object）でない" }]) assert.equal(classifyDetail(x), "unknown");
+});
+
+const mm539 = (testId, detail) => ({ testId, detail });
+const ur539 = (test_id, detail) => ({ test_id, detail });
+const ver539 = (unresolved, over = {}) => ({ test_mismatches: 0, test_unresolved: unresolved.length, partial_reasons: { unresolved_tests: unresolved }, ...over });
+
+test("#539 読取元と重複：(a) 両方に同じ試験 ID・同じ理由は 1 件、(b) 片側だけはそれぞれ 1 件（鍵の名前 testId／test_id の違いを吸収）、(c) 同じ ID で理由の文が違えば 1 件＋inconsistent 1（不一致と未解決の種類をまたいでも同じ）、(d) 両方読めなければ欠測", () => {
+  const D1 = "入力が写像（object）でない", D2 = "評価の方法の表で未対応である（対象 entity × 操作 screen）";
+  // (a)
+  const a = testFindingsOf({ mismatches: [], unresolved: [mm539("T1", D1)] }, ver539([ur539("T1", D1)]));
+  assert.deepEqual([a.status, a.unresolved, a.mismatches, a.inconsistent, a.findings.length], ["both", 1, 0, 0, 1]);
+  assert.deepEqual(a.findings[0], { kind: "unresolved", test_id: "T1", detail: D1, class: "test-defect", source: "both" });
+  // (b) tests だけ・verification だけ（片方の記録が無い）・片方にだけある試験（両方の記録がある）
+  const b1 = testFindingsOf({ mismatches: [], unresolved: [mm539("T1", D1)] }, null);
+  const b2 = testFindingsOf(null, ver539([ur539("T1", D1)]));
+  const b3 = testFindingsOf({ mismatches: [], unresolved: [mm539("T1", D1)] }, ver539([ur539("T2", D2)]));
+  assert.deepEqual([b1.status, b1.unresolved, b1.findings[0].source], ["tests", 1, "tests"]);
+  assert.deepEqual([b2.status, b2.unresolved, b2.findings[0].source, b2.findings[0].test_id], ["verification", 1, "verification", "T1"]);
+  assert.deepEqual([b3.status, b3.unresolved, b3.findings.map((f) => `${f.test_id}:${f.source}:${f.class}`)], ["both", 2, ["T1:tests:test-defect", "T2:verification:evaluator-coverage"]]);
+  // (c) 同じ試験 ID で理由の文が違う：1 件（正本 tests の文）と inconsistent 1。黙って別件にしない
+  const c = testFindingsOf({ mismatches: [], unresolved: [mm539("T1", D1)] }, ver539([ur539("T1", D2)]));
+  assert.deepEqual([c.unresolved, c.inconsistent, c.findings[0].detail, c.findings[0].source], [1, 1, D1, "both"]);
+  // 種類をまたぐ同じ試験 ID も 1 件（鍵は試験 ID だけ）。正本 tests の種類（不一致）と文を保ち、verification は補完と食い違いの確認に使う。分類の合計は余分に増えない
+  const DM = "計算 c1 が期待と違う（期待 2、実際 3）";
+  const sum539 = (r) => Object.values(r.classes).reduce((x, y) => x + y, 0);
+  const ms = testFindingsOf({ mismatches: [mm539("T1", DM)], unresolved: [] }, ver539([ur539("T1", DM)]));
+  assert.deepEqual([ms.mismatches, ms.unresolved, ms.findings.length, ms.inconsistent, sum539(ms), ms.classes["needs-human"]], [1, 0, 1, 0, 1, 1], "種類をまたぐ同じ ID・同じ理由");
+  assert.deepEqual(ms.findings[0], { kind: "mismatch", test_id: "T1", detail: DM, class: "needs-human", source: "both" });
+  const md = testFindingsOf({ mismatches: [mm539("T1", DM)], unresolved: [] }, ver539([ur539("T1", D1)]));
+  assert.deepEqual([md.mismatches, md.unresolved, md.findings.length, md.inconsistent, sum539(md), md.classes["needs-human"], md.classes["test-defect"]], [1, 0, 1, 1, 1, 1, 0], "種類をまたぐ同じ ID・違う理由");
+  assert.deepEqual([md.findings[0].kind, md.findings[0].detail, md.findings[0].source], ["mismatch", DM, "both"]);
+  // tests の不一致と未解決に同じ ID があり、verification にもある：1 件（先に読んだ不一致）。食い違いは試験 ID ごとに 1
+  const m = testFindingsOf({ mismatches: [mm539("T1", DM)], unresolved: [mm539("T1", D1)] }, ver539([ur539("T1", D1)]));
+  assert.deepEqual([m.mismatches, m.unresolved, m.findings.length, m.inconsistent, sum539(m), m.classes["needs-human"], m.classes["test-defect"]], [1, 0, 1, 1, 1, 1, 0]);
+  // (d) 両方読めない（無い・形が違う）→ 欠測。要素の形が違うものは malformed で分類しない
+  for (const [t, v] of [[null, null], ["x", { partial_reasons: {} }], [{ mismatches: [] }, { partial_reasons: { unresolved_tests: "x" } }]]) assert.deepEqual([testFindingsOf(t, v).status, testFindingsOf(t, v).findings.length], ["missing", 0]);
+  const bad = testFindingsOf({ mismatches: [{ testId: 1, detail: D1 }], unresolved: [{ testId: "T1" }] }, null);
+  assert.deepEqual([bad.status, bad.malformed, bad.findings.length], ["tests", 2, 0]);
+});
+
+/**
+ * v11a-cmp2 と同じ形の 30 本 × 2 群（#538 の試験の fixture と同じ作り方）に、試験の結果の記録（tests.json）と検証の記録の未解決の試験を足す：
+ * v1 の納品 9 本は不一致 1 件と未解決 4 件（両方の記録に同じ試験 ID・同じ理由。合計 36 件）、v1.1α は P4-r1 だけ未解決 1 件（両方に）。
+ * 不一致の数は #538 の ver1 の test_mismatches と同じ（漏斗の完走の内訳は変わらない）。題材の言葉は入れない（固定文の名前は匿名）
+ */
+const UR539 = ["操作の実行（set を当てたあとの状態）は評価器で確かめられない", "試験 T3 が結び付けの表に無い（1 つに決まらない）", "入力が写像（object）でない", "評価の方法の表で未対応である（対象 entity × 操作 screen）"];
+const MM539 = "計算 c1 が期待と違う（期待 0、実際 1）";
+function plan539() {
+  const v11aPass = ["P1-r1", "P2-r2", "P3-r1", "P3-r3", "P5-r1", "P5-r2", "P5-r3", "P6-r3", "P7-r1", "P7-r3"];
+  const v1Pass = ["P4-r3", "P5-r3", "P6-r1", "P7-r2", "P7-r3", "P8-r1", "P9-r1", "P9-r3", "P10-r3"];
+  const plan = { v1: new Map(), "v1.1a": new Map() };
+  const byId = (a, b) => a.localeCompare(b, "en", { numeric: true });
+  const records = (mismatches, unresolved) => ({
+    tests: { mismatches: mismatches.map((d, k) => mm539(`T-m${k + 1}`, d)), unresolved: unresolved.map((d, k) => mm539(`T-u${k + 1}`, d)), structural: [] },
+    ver1: ver539(unresolved.map((d, k) => ur539(`T-u${k + 1}`, d)), { test_mismatches: mismatches.length }),
+  });
+  const DONE11 = (nt) => `name-table:${nt} semantic-check:1 test-spec:1 write:1 static-check:0 decl-check:1 judge:0 bundle:0`;
+  [...v11aPass, "P4-r1"].sort(byId).forEach((id, i) => plan["v1.1a"].set(id, { summary: delivered538(DONE11(i < 7 ? "1" : "r"), i < 3 ? "completed" : "stagnation"), spec: v11aPass.includes(id) ? PASS_A : FAIL_A, ...records(i < 3 ? [] : [MM539], id === "P4-r1" ? [UR539[1]] : []) }));
+  // 止まった本の割り当ては、段の役割ごとの対の差が完了条件の件数になるように ID で決める（群ごとの件数は #538 の fixture と同じ）：
+  // 試験の段を通った本の重なり 5（納品どうし 2・v1 の締切と候補の納品 2・v1 の納品と候補の call-limit 1）、設計の段で落ちた本の重なり 1（P1-r2）
+  const put = (g, ids, rec) => ids.forEach((id, i) => { assert.ok(!plan[g].has(id), id); plan[g].set(id, rec(i)); });
+  put("v1.1a", ["P4-r3", "P6-r2", "P8-r2", "P8-r3"], (i) => ({ summary: stopped538(`name-table:r semantic-check:1 test-spec:c write:1 static-check:0${i === 0 ? " decl-check:1" : ""} repair:f`, "repair", "call-limit") }));
+  put("v1.1a", ["P1-r3", "P2-r1", "P2-r3", "P3-r2", "P4-r2", "P9-r2", "P10-r1", "P10-r2"], () => ({ summary: stopped538("name-table:r semantic-check:1 test-spec:x", "test-spec", "unmet") }));
+  put("v1.1a", ["P1-r2", "P6-r1", "P7-r2", "P8-r1", "P9-r1", "P9-r3", "P10-r3"], () => ({ summary: stopped538("name-table:x", "name-table", "unmet") }));
+  const DONE1 = (ts) => `design:1 test-suite:${ts} write:1 static-check:0 correspondence:1 run-tests:0 repair:1 judge:0`;
+  [...v1Pass].sort(byId).forEach((id, i) => plan.v1.set(id, { summary: i < 4 ? delivered538(DONE1("1"), "limit") : delivered538(DONE1("r"), "stagnation"), spec: PASS_A, ...records([MM539], UR539) }));
+  put("v1", ["P1-r1", "P2-r1", "P2-r2", "P2-r3"], () => ({ summary: stopped538("design:1 test-suite:r write:1 static-check:0 correspondence:f", "correspondence", "deadline") }));
+  put("v1", ["P1-r3", "P3-r2", "P4-r2"], () => ({ summary: stopped538("design:1 test-suite:x", "test-suite", "unmet") }));
+  put("v1", ["P6-r2", "P6-r3", "P7-r1", "P8-r2", "P8-r3", "P9-r2", "P10-r1"], () => ({ summary: stopped538("design:r test-suite:x", "test-suite", "unmet") }));
+  put("v1", ["P10-r2"], () => ({ summary: stopped538("design:r test-suite:x", "test-suite", "malformed") }));
+  put("v1", ["P1-r2", "P3-r1", "P3-r3", "P4-r1"], () => ({ summary: stopped538("design:x", "design", "unmet") }));
+  put("v1", ["P5-r1", "P5-r2"], () => ({ summary: stopped538("design:x", "design", "network") }));
+  assert.deepEqual([plan.v1.size, plan["v1.1a"].size], [30, 30]);
+  return plan;
+}
+const cmp539 = (base, name = "cmp539", over = {}) => {
+  const plan = plan539();
+  return compareFixture(base, name, { pids: Array.from({ length: 10 }, (_, i) => `P${i + 1}`), runs: 3, setFile: set538(base), runOf: (g, id) => plan[g].get(id), ...over });
+};
+
+test("#539 内外の表・分類・段の役割ごとの対の差（v11a-cmp2 と同じ形の 30 本 × 2 群）：内外の表と分類の合算が二重にならず、通過の差が設計・試験・判定で期待の件数。1 回目で通過は実行と判定で n=0（適用外）、未到達の本は 0 として n に入る。#538 の欄と照合は変わらない", async () => {
+  await withOut(async (base) => {
+    const f = cmp539(base);
+    const r = scoreCompareRun(f.out);
+    assert.equal(r.status, 0, r.stderr);
+    const c = readCompare(f.out);
+    assert.equal(c.completion.status, "complete");
+    const a = "v1.1a";
+    // #538 の欄は変わらない（試験の結果の記録を足しても漏斗の完走の内訳・判定は同じ）
+    assert.deepEqual(c.groups[a].funnel.completed, { runs: 11, no_mismatch: 3, with_mismatch: 8, missing: 0 });
+    assert.deepEqual(c.groups.v1.funnel.completed, { runs: 9, no_mismatch: 0, with_mismatch: 9, missing: 0 });
+    assert.deepEqual(c.groups[a].verdicts.source.counts, { PASS: 10, FAIL: 1, STATIC_NG: 0, GEN_FAIL: 19, unknown: 0, not_run: 0 });
+    // 内外の表（工場×外）
+    assert.deepEqual(c.groups.v1.agreement.source.cells, { "partial×PASS": 9, "none×GEN_FAIL": 21 });
+    assert.deepEqual(c.groups[a].agreement.source.cells, { "partial×PASS": 10, "partial×FAIL": 1, "none×GEN_FAIL": 19 });
+    assert.deepEqual([c.groups.v1.agreement.planned, c.groups.v1.agreement.executed, c.groups.v1.agreement.not_run], [30, 30, 0]);
+    assert.equal(c.groups.v1.agreement.source.table.partial.PASS, 9);
+    assert.deepEqual(c.groups[a].agreement.accepted.cells, { "partial×not_applicable": 11, "none×not_applicable": 19 }, "了承後系は別の表（Plan を通していない計測なので not_applicable）");
+    // 分類：v1 の未解決 36 件（両方の記録にある）・v1.1α の 1 件。合算が二重にならない
+    const t1 = c.groups.v1.test_findings, ta = c.groups[a].test_findings;
+    assert.deepEqual([t1.runs, t1.observed, t1.missing, t1.unresolved, t1.mismatches, t1.findings, t1.inconsistent], [30, 9, 21, 36, 9, 45, 0]);
+    assert.deepEqual(t1.sources, { both: 9, tests: 0, verification: 0, missing: 21 });
+    assert.deepEqual(t1.classes, { "binding-defect": 9, "evaluator-coverage": 18, "test-defect": 9, "needs-human": 9, unknown: 0 });
+    assert.deepEqual([ta.observed, ta.unresolved, ta.mismatches, ta.inconsistent], [11, 1, 8, 0]);
+    assert.deepEqual(ta.classes, { "binding-defect": 1, "evaluator-coverage": 0, "test-defect": 0, "needs-human": 8, unknown: 0 });
+    // 行つきの出力には試験 ID と detail がある
+    const row = ta.by_run.find((x) => x.run === "P4-r1");
+    assert.deepEqual(row.findings.find((x) => x.kind === "unresolved"), { kind: "unresolved", test_id: "T-u1", detail: UR539[1], class: "binding-defect", source: "both" });
+    // 段の役割ごとの対の差（通過）
+    const m = (role, k) => c.stage_pairs.roles[role].metrics[k];
+    assert.deepEqual(m("design", "passed").counts, { "+1": 5, 0: 19, "-1": 6 });
+    assert.deepEqual(m("test", "passed").counts, { "+1": 10, 0: 12, "-1": 8 });
+    assert.deepEqual(m("judge", "passed").counts, { "+1": 9, 0: 14, "-1": 7 });
+    assert.equal(m("design", "passed").n, 30);
+    assert.deepEqual(c.stage_pairs.roles.design.stages, { v1: "design", "v1.1a": "name-table" });
+    // 1 回目で通過：実行（v1 はコードの段・v1.1α は未到達）と判定（両群ともコードの段）は適用外で n=0。平均・区間・P の集計も null
+    for (const role of ["run", "judge"]) {
+      const x = m(role, "first_pass");
+      assert.deepEqual([x.n, x.mean, x.interval, x.clusters.m, x.clusters.mean, x.clusters.sign_flip.p, x.clusters.bootstrap.interval, x.excluded.not_applicable], [0, null, null, 0, null, null, null, 30], role);
+    }
+    // 未到達の本は 0 として n に入る（試験の段に届かない本どうしの対も n に入る）
+    assert.equal(m("test", "first_pass").n, 30);
+    assert.equal(m("test", "reached").n, 30);
+    assert.deepEqual(m("check", "reached").excluded, { one_side: 0, missing: 0, not_applicable: 0 });
+    // 既存の対の差（原文系 PASS）はそのまま。P のまとまりは 10 個
+    assert.equal(c.pairs.n, 30);
+    assert.equal(c.pattern_clusters.pass.m, 10);
+    assert.deepEqual(c.pattern_clusters.discordant, { improved: c.pairs.counts["+1"], regressed: c.pairs.counts["-1"], note: c.pattern_clusters.discordant.note });
+    assert.deepEqual(c.pattern_clusters.pass, clusterStats(Object.fromEntries(Object.entries(c.pairs.by_pattern).map(([p, v]) => [p, v.diffs]))));
+    // 標準出力：既存の行は変えず、群ごとの内外の表の 1 行と P のまとまりの 1 行を足す
+    assert.match(r.stdout, /^v1 内外の表（予定 30 本・実行 30 本・未実行と途中 0 本。工場×外）: 原文系 partial×PASS 9・none×GEN_FAIL 21／了承後系 .*・試験の分類（読めた 9 本・欠測 21 本・45 件）: binding-defect 9・evaluator-coverage 18・test-defect 9・needs-human 9・unknown 0（食い違い 0）$/m);
+    assert.match(r.stdout, /^v1\.1a 内外の表（.*原文系 partial×PASS 10・partial×FAIL 1・none×GEN_FAIL 19／/m);
+    assert.match(r.stdout.trimEnd().split("\n").at(-1), /^P のまとまり（m 10。.*）: PASS の差 平均 -?\d\.\d{3}・p \d\.\d{3}・bootstrap .*・通過の差 設計 平均 .*・判定 平均 /);
+    assert.ok(!/"stage_pairs"|"agreement"/.test(r.stdout), "既存の JSON の行に #539 の欄を足さない");
+  });
+});
+
+test("#539 段の役割ごとの対の差：片側だけの対（未実行・途中）と欠測（段の記録が読めない）は差 null で n に入らず、理由を数える", async () => {
+  await withOut(async (base) => {
+    const runOf = (g, id) => {
+      if (id === "P1-r2" && g === "v1.1a") return { state: "unexecuted" };
+      if (id === "P1-r3" && g === "v1") return { state: "incomplete" };
+      if (id === "P2-r1" && g === "v1") return { summary: { stages: null } };
+      return { summary: delivered538(g === "v1" ? "design:1 test-suite:1" : "name-table:r test-spec:1", "completed"), spec: PASS_A };
+    };
+    const f = compareFixture(base, "null539", { pids: ["P1", "P2"], runs: 3, runOf });
+    const r = scoreCompareRun(f.out);
+    assert.equal(r.status, 0, r.stderr);
+    const c = readCompare(f.out);
+    const d = c.stage_pairs.roles.design.metrics;
+    assert.deepEqual(d.passed.excluded, { one_side: 2, missing: 1, not_applicable: 0 });
+    assert.deepEqual([d.passed.n, d.passed.counts], [3, { "+1": 0, 0: 3, "-1": 0 }]);
+    assert.deepEqual([d.first_pass.n, d.first_pass.counts], [3, { "+1": 0, 0: 0, "-1": 3 }], "候補はやり直しで通過（1 回目ではない）");
+    assert.deepEqual(c.stage_pairs.rows.find((x) => x.run === "P2-r1").diffs.design.passed, { diff: null, reason: "missing" });
+    assert.deepEqual(c.stage_pairs.rows.find((x) => x.run === "P1-r2").diffs.design.passed, { diff: null, reason: "one_side" });
+    assert.deepEqual(PAIR_NULL_REASONS, ["one_side", "missing", "not_applicable"]);
+    assert.deepEqual(STAGE_METRICS, ["reached", "first_pass", "passed"]);
+    assert.deepEqual(Object.fromEntries(Object.entries(STAGE_ROLES).map(([k, v]) => [k, [v.v1, v["v1.1a"]]])), { design: ["design", "name-table"], test: ["test-suite", "test-spec"], write: ["write", "write"], check: ["correspondence", "decl-check"], run: ["run-tests", "run-tests"], judge: ["judge", "judge"] });
+    // P のまとまり：P1 は有効な対 1 本、P2 は 2 本
+    assert.equal(d.passed.clusters.m, 2);
+  });
+});
+
+/** P ごとの対の差の並び（P1〜Pm） */
+const byP539 = (rows) => Object.fromEntries(rows.map((xs, i) => [`P${i + 1}`, xs]));
+test("#539 P のまとまり：P 平均を丸めずに計算し、符号反転の両側 p・P を単位にした bootstrap の区間（同じ入力で同じ値）・参考の t 区間が手計算と一致する。改善 8・回帰 1 が 3 P に集中すれば p 0.25。m=1 は区間と p が null、m=13 は p が null と理由", () => {
+  const xs = byP539([[1, 0, 0], [0, 1, 0], [1, 0, 1], [0, 0, -1], [1, 1, 0], [-1, 0, 1], [1, -1, 0], [-1, 0, 0], [-1, 0, -1], [0, 0, -1]]);
+  const s = clusterStats(xs);
+  assert.equal(s.m, 10);
+  // P 平均は丸めずに計算する（1/3 の和が 1/3 を 3 で割った値にずれない）。平均 1/30 ＝ 0.033・標本標準偏差 0.457
+  assert.equal(s.mean.toFixed(3), "0.033");
+  assert.equal(s.t_reference.sd.toFixed(3), "0.457");
+  assert.equal(s.t_reference.df, 9);
+  assert.deepEqual(s.t_reference.interval.map((x) => x.toFixed(2)), ["-0.29", "0.36"], "参考の t 区間（t(0.975, 9) ＝ 2.262）");
+  // 符号反転：P 平均の絶対値の和 11/3 は奇数/3 なので、どの入れ替えでも |和| ≥ 1/3 ＝ 観測 → p 1.00
+  assert.deepEqual([s.sign_flip.p, s.sign_flip.permutations], [1, 1024]);
+  const [lo, hi] = s.bootstrap.interval;
+  assert.ok(lo < 0 && hi > 0, `bootstrap の区間が 0 を含む: ${lo}〜${hi}`);
+  assert.deepEqual([s.bootstrap.resamples, s.bootstrap.seed], [BOOTSTRAP.resamples, BOOTSTRAP.seed]);
+  assert.deepEqual(clusterStats(xs).bootstrap.interval, s.bootstrap.interval, "同じ入力で 2 回同じ値");
+  assert.equal(s.by_pattern.P1, Math.round((1 / 3) * 1e6) / 1e6);
+  // 改善 8（P1 に 3・P2 に 3・P3 に 2）・回帰 1（P4）。P を単位にした符号反転の両側 p は 4/16 ＝ 0.25。
+  // 独立な対の正確検定（符号検定。改善 8 対 回帰 1 の両側）は 0.039 で、別の値（対が独立でない組では独立な対の算数を主にしない）
+  const conc = clusterStats(byP539([[1, 1, 1], [1, 1, 1], [1, 1, 0], [-1, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]]));
+  assert.deepEqual([conc.m, conc.sign_flip.p], [10, 0.25]);
+  // m=1：区間と p は null（理由つき）
+  const one = clusterStats({ P1: [1, 0, null], P2: [null, null] });
+  assert.deepEqual([one.m, one.sign_flip.p, one.bootstrap.interval, one.t_reference.interval], [1, null, null, null]);
+  assert.ok(typeof one.sign_flip.reason === "string" && one.sign_flip.reason.length > 0);
+  // m=13：p は null と理由（2^m 通りを数えない）。bootstrap と t 区間は出る
+  const many = clusterStats(byP539(Array.from({ length: 13 }, (_, i) => [i % 2 === 0 ? 1 : 0])));
+  assert.deepEqual([many.m, many.sign_flip.p], [13, null]);
+  assert.match(many.sign_flip.reason, /13 が 12 を超える/);
+  assert.ok(Array.isArray(many.bootstrap.interval) && Array.isArray(many.t_reference.interval));
+});
+
+test("#539 内外の表：予定 30 本のうち 1 本を未実行にした出力では別の行（not_run）に 1 が出て、予定の分母 30 は変わらない。標準出力の内外の表の行は指紋・漏斗・pass^k の行の前", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    const plan = plan539().v1;
+    const skipped = "P1-r1"; // 宣言の無い本（none×GEN_FAIL）を 1 本だけ未実行にする
+    assert.equal(plan.get(skipped).spec, undefined);
+    for (const id of ids538) if (id !== skipped) addRun538(out, id, plan.get(id));
+    conditions(out, ids538, { set: { path: set538(base) } });
+    const r = scoreRun(out);
+    assert.equal(r.status, 0, r.stderr);
+    const ag = readScore(out).agreement;
+    assert.deepEqual([ag.planned, ag.executed, ag.not_run], [30, 29, 1]);
+    assert.deepEqual(ag.source.cells, { "partial×PASS": 9, "none×GEN_FAIL": 20 });
+    const lines = r.stdout.trimEnd().split("\n");
+    assert.match(lines.at(-4), /^内外の表（予定 30 本・実行 29 本・未実行と途中 1 本。工場×外）: 原文系 partial×PASS 9・none×GEN_FAIL 20／/);
+    assert.match(lines.at(-3), /^指紋: 採点 /);
+  });
+});
+
+test("#539 匿名の口：--anonymous と --compare --anonymous の新しい欄は件数・平均・区間・p だけで、本の ID・P の ID・試験 ID・detail・目印が無い", async () => {
+  await withOut(async (base) => {
+    // 通常の採点：試験 ID と detail に目印を入れても、匿名の JSON・標準出力に出ない（分類の件数だけ）
+    const out = join(base, "out");
+    addRun538(out, "P1-r1", { summary: delivered538("design:1", "completed"), spec: PASS_A, tests: { mismatches: [mm539(`T-${MARK539}`, `計算 ${MARK539} が期待と違う（期待 1、実際 2）`)], unresolved: [mm539("T-u1", MARK539)] }, ver1: ver539([ur539("T-u1", `${MARK539}-other`)]) });
+    addRun538(out, "P1-r2", { summary: stopped538("design:x", "design", "unmet") });
+    conditions(out, ["P1-r1", "P1-r2"]);
+    const full = (scoreRun(out), readScore(out));
+    assert.deepEqual([full.test_findings.classes["needs-human"], full.test_findings.classes.unknown, full.test_findings.inconsistent, full.test_findings.missing], [1, 1, 1, 1]);
+    assert.ok(JSON.stringify(full.test_findings.by_run).includes(MARK539), "行つきの出力には試験 ID と detail がある");
+    const r = scoreRun(out, ["--anonymous"]);
+    const text = readFileSync(join(out, "score.anonymous.json"), "utf8");
+    const anon = JSON.parse(text);
+    assert.deepEqual(anon.test_findings, { runs: 2, observed: 1, missing: 1, findings: 2, mismatches: 1, unresolved: 1, inconsistent: 1, malformed: 0, sources: { both: 1, tests: 0, verification: 0, missing: 1 }, classes: { "binding-defect": 0, "evaluator-coverage": 0, "test-defect": 0, "needs-human": 1, unknown: 1 } });
+    assert.deepEqual([anon.agreement.planned, anon.agreement.executed, anon.agreement.source.table.partial.PASS, anon.agreement.source.table.none.GEN_FAIL], [2, 2, 1, 1]);
+    const all = r.stdout + r.stderr + text;
+    for (const [what, bad] of [["目印", all.includes(MARK539)], ["P の ID", /P\d+/.test(all)], ["試験 ID", all.includes("T-u1")], ["detail", all.includes('"detail"') || all.includes("期待と違う") || all.includes("by_run")], ["パス", all.includes(base)]]) assert.ok(!bad, `${what}が出ない`);
+    // 比較
+    const f = cmp539(base, "anon539");
+    const rc = scoreCompareRun(f.out, ["--anonymous"]);
+    assert.equal(rc.status, 0, rc.stderr);
+    const tc = readFileSync(join(f.out, "score-compare.anonymous.json"), "utf8");
+    const ac = JSON.parse(tc);
+    assert.deepEqual(ac.groups.v1.test_findings.classes, { "binding-defect": 9, "evaluator-coverage": 18, "test-defect": 9, "needs-human": 9, unknown: 0 });
+    assert.equal(ac.groups["v1.1a"].agreement.source.table.partial.FAIL, 1);
+    assert.deepEqual(ac.stage_pairs.roles.judge.metrics.passed.counts, { "+1": 9, 0: 14, "-1": 7 });
+    assert.equal(ac.stage_pairs.roles.judge.metrics.first_pass.n, 0);
+    assert.equal(ac.pattern_clusters.pass.m, 10);
+    assert.ok(Object.keys(ac.pattern_clusters.pass).every((k) => k !== "by_pattern"), "P ごとの平均は出さない");
+    assert.equal(typeof ac.pattern_clusters.pass.sign_flip.p, "number");
+    const allc = rc.stdout + rc.stderr + tc;
+    assert.ok(!/P\d+/.test(allc) && !allc.includes("T-u") && !allc.includes(base) && !allc.includes("評価器"), "P の ID・試験 ID・detail・パスが出ない");
+    assert.equal(scoreCompareRun(f.out).status, 0);
+    assert.deepEqual(anonymizeCompare(readCompare(f.out)), ac, "匿名の口は通常の出力から許可した欄だけを組み立てたもの");
+  });
 });
