@@ -787,7 +787,7 @@ test("README：試験の点検（変異）の節があり、やることの項�
   const readme = readFileSync(join(here, "../README.md"), "utf8");
   const at = readme.indexOf("### 5.12 試験の点検（変異");
   assert.ok(at > 0);
-  const end = readme.indexOf("\n## 6. ", at);
+  const end = readme.indexOf("\n### 5.13 ", at);
   const section = readme.slice(at, end);
   for (const item of [
     "remove-field", "flip-comparison", "remove-when", "reorder-options", "change-default", "remove-validation", "swap-aggregate",
@@ -797,5 +797,5 @@ test("README：試験の点検（変異）の節があり、やることの項�
   ]) assert.ok(section.includes(item), item);
   const heads = [...readme.matchAll(/^#{2,3} (\d+(?:\.\d+)?)\.? /gm)].map((m) => m[1]);
   const i511 = heads.indexOf("5.11");
-  assert.deepEqual(heads.slice(i511, i511 + 3), ["5.11", "5.12", "6"]);
+  assert.deepEqual(heads.slice(i511, i511 + 4), ["5.11", "5.12", "5.13", "6"]);
 });
