@@ -466,7 +466,7 @@ function bareTest(id: string, targetKind: string, operation: string, check?: Str
 
 /** 評価可能性の固定文（値を埋めない） */
 const FIXED_MESSAGES: readonly string[] = [
-  "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態・項目の既定値の試験は作らない）",
+  "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態の試験は作らない）",
   "（対象の種類・操作・観測する性質）の組が評価の方法の表に無い",
 ];
 
@@ -506,7 +506,7 @@ describe("評価可能性（対象の種類・操作・observes を評価の方�
     expect(problems).toEqual([
       {
         field: "tests[0].observes",
-        message: "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態・項目の既定値の試験は作らない）",
+        message: "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態の試験は作らない）",
       },
     ]);
     // 題材の表の R1 は確かめ方が fixed-test。その要件の選択肢の項目に既定値の試験を作っても落ちる
@@ -562,7 +562,7 @@ describe("評価可能性（対象の種類・操作・observes を評価の方�
     expect(outcome.failure.problems).toEqual([
       {
         field: "tests[4].observes",
-        message: "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態・項目の既定値の試験は作らない）",
+        message: "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態の試験は作らない）",
       },
     ]);
   });
@@ -1140,7 +1140,7 @@ describe("既定値の要件：表の確かめ方が default-value の要件に�
   /** 組の中の R6 の既定値の試験の位置（R1 3 本・R2 1 本・R3 3 本・R4 3 本のあと） */
   const T_AT = "tests[10]";
   const UNSUPPORTED =
-    "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態・項目の既定値の試験は作らない）";
+    "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態の試験は作らない）";
 
   /** 持ち越し（R5 は表の unresolved。`rejected` は表の意味の点検の拒否） */
   async function carryFor(table: NameTable, rejected: readonly string[] = []): Promise<CarryOver> {
