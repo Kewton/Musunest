@@ -1107,16 +1107,19 @@ export function inspectNameTable(
     const entity = rawEntity === null ? null : isNonEmptyString(rawEntity) ? rawEntity : undefined;
     if (!droppedRows.has(id)) droppedRows.set(id, { kind, entity });
   });
+  // 導かれる所属 entity は、表に在る kind が entity の行だけ（`deriveOwnership` と同じ規則。PR #532 の再確認 1）
+  const isDerivableEntity = (id: string | null | undefined): id is string =>
+    typeof id === "string" && tableRows.some((row) => row.id === id && row.kind === "entity");
   // 形で落ちた要件が所属させていた行の所属 entity も、その要件から導かれていた（`deriveOwnership`）
   for (const id of rowIdsOwnedByDropped) {
     const entity = draftRows.find((row) => row?.id === id)?.entity;
-    if (entity !== undefined && entity !== null) rowIdsOwnedByDropped.add(entity);
+    if (isDerivableEntity(entity)) rowIdsOwnedByDropped.add(entity);
   }
   // 所属させた行が形で落ちると、その行から導かれていた所属 entity が消える（PR #532 のレビュー 2）。
   // 元の候補から読める所属（正常な要件と形で落ちた要件の両方）が指す、形で落ちた行の entity だけを抑える
   const ownedIds = new Set([...rowIdsOwnedByDropped, ...ownership.flatMap((entry) => entry.roles.map((role) => role.id))]);
   for (const [id, info] of droppedRows) {
-    if (ownedIds.has(id) && typeof info.entity === "string") rowIdsOwnedByDropped.add(info.entity);
+    if (ownedIds.has(id) && isDerivableEntity(info.entity)) rowIdsOwnedByDropped.add(info.entity);
   }
   const tableProblems = checkNameTableWith(
     list,
