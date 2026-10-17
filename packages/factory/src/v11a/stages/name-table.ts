@@ -271,18 +271,52 @@ export const NAME_TABLE_SCHEMA = {
   },
 } as const;
 
+/** 計算の行の型の `aggregate` の schema（集計の種類の enum は台帳の表の順。Issue #549） */
+function aggregateTypeSchemaOf(kinds: readonly string[]) {
+  return {
+    type: ["object", "null"],
+    additionalProperties: false,
+    required: ["kind", "entity"],
+    properties: {
+      kind: { type: "string", enum: [...kinds] },
+      entity: { type: "string", description: "集計元の entity の行の id" },
+    },
+  };
+}
+
 /**
  * T1 の JSON Schema（旗 on なら確かめ方の kind の enum を台帳の種類の並びにする。Issue #547）。省けば今の定数を返す。
- * 欄の並びは変えない（off の定数とバイト列で同じ JSON になる）。
+ * 欄の並びは変えない（off の定数とバイト列で同じ JSON になる）。台帳が集計の種類を持てば（`empty-aggregate`。Issue #549）、
+ * 行の `type` の末尾に `aggregate`（集計の種類と集計元。種別 aggregate でない計算・計算でない行は null）を足す。
  */
 export function nameTableSchemaOf(ledger?: LedgerView): typeof NAME_TABLE_SCHEMA {
   if (ledger === undefined) return NAME_TABLE_SCHEMA;
   const requirements = NAME_TABLE_SCHEMA.properties.requirements;
   const verification = requirements.items.properties.verification;
+  const rows = NAME_TABLE_SCHEMA.properties.rows;
+  const type = rows.items.properties.type;
   return {
     ...NAME_TABLE_SCHEMA,
     properties: {
       ...NAME_TABLE_SCHEMA.properties,
+      ...(ledger.aggregateKinds.length === 0
+        ? {}
+        : {
+            rows: {
+              ...rows,
+              items: {
+                ...rows.items,
+                properties: {
+                  ...rows.items.properties,
+                  type: {
+                    ...type,
+                    required: [...type.required, "aggregate"],
+                    properties: { ...type.properties, aggregate: aggregateTypeSchemaOf(ledger.aggregateKinds) },
+                  },
+                },
+              },
+            },
+          }),
       requirements: {
         ...requirements,
         items: {
@@ -375,13 +409,22 @@ const TYPE_KEYS_BY_KIND: Readonly<Record<string, readonly string[]>> = {
   screen: ["view"],
 };
 const TYPE_KEYS = ["fieldType", "valueType", "scope", "form", "action", "hasWhen", "view"] as const;
+/** 計算の行だけが持てる、集計の種類と集計元の欄（Issue #549） */
+const AGGREGATE_TYPE_KEY = "aggregate";
 
 /**
  * 応答の `type`（欄を並べた写像）を、行の種類に合う A1 の型へ写す。種類に合わない欄が null でなければ
  * 問題に足す。`type` が写像でない（すでに A1 の形の文字列・null）・種類が知らない値のときは写さない
  * （A1 の検査が形の落ちにする）。
+ *
+ * 計算の行の `aggregate`（Issue #549）は、台帳が集計の種類を持つ走り（`ledger`）なら写す（A1 の検査が形を見る）。
+ * 持たない走り（off を含む）は、null でない値を書いたときだけ写し、A1 の検査が未登録として落とす（null・無しは
+ * 写さない＝今の 3 つ組のまま）。計算でない行の `aggregate` が null でなければ、種類に合わない欄として落とす。
  */
-export function toNameTableDraftValue(output: Record<string, unknown>): {
+export function toNameTableDraftValue(
+  output: Record<string, unknown>,
+  ledger?: LedgerView,
+): {
   readonly value: Record<string, unknown>;
   readonly problems: readonly Problem[];
 } {
@@ -392,7 +435,10 @@ export function toNameTableDraftValue(output: Record<string, unknown>): {
     const type = item["type"];
     const used = typeof kind === "string" ? TYPE_KEYS_BY_KIND[kind] : undefined;
     if (used === undefined || !isRecord(type)) return item;
-    const extra = TYPE_KEYS.some((key) => !used.includes(key) && type[key] !== undefined && type[key] !== null);
+    const aggregate = type[AGGREGATE_TYPE_KEY];
+    const extra =
+      TYPE_KEYS.some((key) => !used.includes(key) && type[key] !== undefined && type[key] !== null) ||
+      (kind !== "computation" && aggregate !== undefined && aggregate !== null);
     if (extra) problems.push({ field: `rows[${index}].type`, message: "行の種類に合わない型の欄が null でない" });
     let converted: unknown;
     switch (kind) {
@@ -404,6 +450,9 @@ export function toNameTableDraftValue(output: Record<string, unknown>): {
         break;
       default:
         converted = Object.fromEntries(used.map((key) => [key, type[key]]));
+        if (kind === "computation" && ((ledger?.aggregateKinds.length ?? 0) > 0 || (aggregate !== undefined && aggregate !== null))) {
+          converted = { ...(converted as Record<string, unknown>), [AGGREGATE_TYPE_KEY]: aggregate };
+        }
     }
     return { ...item, type: converted };
   });
@@ -520,7 +569,7 @@ export async function runNameTable(input: NameTableInput): Promise<NameTableOutc
   });
   if (!answer.ok) return answer;
 
-  const converted = toNameTableDraftValue(answer.value);
+  const converted = toNameTableDraftValue(answer.value, ledger);
   const inspected = inspectNameTable(input.list, converted.value, input.documents, ledger === undefined ? {} : { ledger });
   const problems = [...converted.problems, ...(inspected.ok ? [] : inspected.problems)];
   if (inspected.ok && problems.length === 0) {

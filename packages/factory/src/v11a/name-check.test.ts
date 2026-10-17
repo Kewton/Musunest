@@ -5,7 +5,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RequirementList } from "../pipeline.js";
 import * as correspondenceStage from "../stages/correspondence.js";
-import { FIXTURE_YAML, fixtureList, fixtureTable, normalizedFixture } from "./__tests__/fixtures.js";
+import { FIXTURE_YAML, fixtureList, fixtureTable, normalizedFixture, withAggregates } from "./__tests__/fixtures.js";
 import { checkNames, nameCheckScope } from "./name-check.js";
 import type { NameTable, NameTableRow } from "./names.js";
 
@@ -225,5 +225,46 @@ describe("構成上つねに通る検査（1. 提出漏れ・3. 対応表の内�
     const result = await check(YAML);
     expect(result.misses.some((miss) => miss.detail.includes("提出されていない"))).toBe(false);
     expect(result.misses.some((miss) => miss.detail.includes("対応表に"))).toBe(false);
+  });
+});
+
+describe("集計の種類と集計元（表の計算の行が aggregate を持つとき＝旗 on で台帳が集計の種類を持つ走り。Issue #549）", () => {
+  /** 行ごとの件数（itemCount）を合計に替えた宣言 */
+  const SUM_ITEM_COUNT = replaced(YAML, "    aggregate:\n      count: item\n      where:\n        owner: this\n", "    aggregate:\n      sum: item.amount\n      where:\n        owner: this\n");
+  const details = (misses: readonly { detail: string }[]) => misses.map((miss) => miss.detail);
+
+  it("正例：宣言の集計の種類と集計元が表の行のとおりなら落ち 0（行ごと・見出しごと enum・月）", async () => {
+    expect((await check(YAML, withAggregates(TABLE))).misses).toEqual([]);
+  });
+
+  it("負例：宣言の集計の種類が表と違うと落ちる（固定の文の形・行き先は ⑥）", async () => {
+    const result = await check(SUM_ITEM_COUNT, withAggregates(TABLE));
+    expect(details(result.misses)).toEqual(["計算 itemCount の集計の種類が sum（表は count）"]);
+    expect((result.misses[0] as { readonly route?: string } | undefined)?.route).toBe("missing-element");
+    expect(result.misses[0]?.requirementId).toBe("R2");
+    // 表の側の種類だけを替えても落ちる（見出しごとの集計）
+    const byKind = await check(YAML, withAggregates(TABLE, { "c.byKind": { kind: "avg", entity: "e.item" } }));
+    expect(details(byKind.misses)).toEqual(["計算 byKind の集計の種類が count（表は avg）"]);
+  });
+
+  it("負例：宣言の集計元の entity が表と違うと落ちる", async () => {
+    const result = await check(YAML, withAggregates(TABLE, { "c.itemCount": { kind: "count", entity: "e.member" } }));
+    expect(details(result.misses)).toEqual(["計算 itemCount の集計元が item（表は member）"]);
+  });
+
+  it("旗 off（表の計算の行に aggregate が無い）では見ない：種類の違う宣言も今までどおり落ちない", async () => {
+    expect((await check(SUM_ITEM_COUNT, TABLE)).misses).toEqual([]);
+    // 二点測定：同じ宣言を、aggregate を持つ表で照らすと落ちる
+    expect((await check(SUM_ITEM_COUNT, withAggregates(TABLE))).misses).toHaveLength(1);
+  });
+
+  it("今の型・範囲・種別・月の見出しの照合は変えない（aggregate を持つ表でも同じ落ち）", async () => {
+    const plain = await check(YAML, withRow("c.itemCount", { type: { valueType: "boolean", scope: "row", form: "aggregate" } }));
+    const withAggregate = await check(
+      YAML,
+      withAggregates({ ...TABLE, rows: TABLE.rows.map((row) => (row.id === "c.itemCount" ? { ...row, type: { valueType: "boolean" as const, scope: "row" as const, form: "aggregate" as const } } : row)) }),
+    );
+    expect(details(withAggregate.misses)).toEqual(details(plain.misses));
+    expect(details(plain.misses).length).toBeGreaterThan(0);
   });
 });

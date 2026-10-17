@@ -14,9 +14,13 @@ import { ruleDefinitionDefects, ruleTexts, type RejectedCandidate } from "../../
 import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
+  EMPTY_AGGREGATE_REQUEST_DIFF,
   ENUM_MEMBERSHIP_REQUEST_DIFF,
   FIXTURE_DOCUMENTS,
   LEDGER_VIEW_2A,
+  LEDGER_VIEW_2B,
+  withAggregates,
+  withoutEmptyAggregate,
   draftOf,
   fixtureDefaultValueList,
   fixtureDefaultValueTable,
@@ -27,7 +31,15 @@ import {
   requestDiffsOf,
   withoutEnumMembership,
 } from "../__tests__/fixtures.js";
-import { copyLengthFor, nameTableSha256, requirementCopy, type NameTableDraft } from "../names.js";
+import {
+  COMPUTATION_AGGREGATE_MESSAGES,
+  UNREGISTERED_AGGREGATE_MESSAGE,
+  copyLengthFor,
+  nameTableSha256,
+  requirementCopy,
+  type NameTable,
+  type NameTableDraft,
+} from "../names.js";
 import {
   NAME_TABLE_PREVIOUS_DATA_NAMES,
   NAME_TABLE_ROUNDS,
@@ -463,6 +475,8 @@ const LEDGER_CASES: readonly { readonly name: string; readonly ledger: LedgerVie
 
 describe.each(LEDGER_CASES)("T1 の確かめ方 default-value（Issue #533。旗 $name）", ({ ledger }) => {
   const withLedger = ledger === undefined ? {} : { ledger };
+  /** 旗 on の応答と表は計算の行に集計の種類と集計元を持つ（strict の schema で必須。Issue #549）。off は今の表のまま */
+  const tableFor = (table: NameTable): NameTable => (ledger === undefined ? table : withAggregates(table));
   it("schema の kind に default-value があり、value は string か null の必須の欄", () => {
     const verification = nameTableSchemaOf(ledger).properties.requirements.items.properties.verification;
     // 旗 on は台帳の enum-membership（Issue #548）が末尾に入る
@@ -494,7 +508,7 @@ describe.each(LEDGER_CASES)("T1 の確かめ方 default-value（Issue #533。旗
 
   it("strict の形の応答（ほかの種類は value null）で、default-value の要件の value が表に残る", async () => {
     const list = fixtureDefaultValueList();
-    const response = responseOf(draftOf(list, fixtureDefaultValueTable()));
+    const response = responseOf(draftOf(list, tableFor(fixtureDefaultValueTable())));
     for (const entry of response["requirements"] as { verification: Record<string, unknown> }[]) {
       entry.verification = { value: null, ...entry.verification };
     }
@@ -507,13 +521,13 @@ describe.each(LEDGER_CASES)("T1 の確かめ方 default-value（Issue #533。旗
       ...withLedger,
     });
     if (!outcome.ok) throw new Error("通るはず");
-    expect(outcome.value.table).toEqual(fixtureDefaultValueTable());
-    expect(outcome.value.tableSha256).toBe(await nameTableSha256(fixtureDefaultValueTable()));
+    expect(outcome.value.table).toEqual(tableFor(fixtureDefaultValueTable()));
+    expect(outcome.value.tableSha256).toBe(await nameTableSha256(tableFor(fixtureDefaultValueTable())));
   });
 
   it("負例：options の外の value は T1' で unmet（固定文）", async () => {
     const list = fixtureDefaultValueList();
-    const recording = createRecordingClient([structured(responseOf(draftOf(list, fixtureDefaultValueTable("gamma"))))]);
+    const recording = createRecordingClient([structured(responseOf(draftOf(list, tableFor(fixtureDefaultValueTable("gamma")))))]);
     const outcome = await runNameTable({
       plan: planOf(list),
       list,
@@ -577,12 +591,12 @@ describe("旗 on：台帳から enum-membership の行を除いた導出なら�
   });
 });
 
-describe("旗 on：今の台帳の T1 の要求と off の差は enum-membership の行の分（R-nt-08 の 1 文と schema の kind の enum）だけ（Issue #548）", () => {
+describe("旗 on：#548 の台帳（empty-aggregate の行を除いた導出）の T1 の要求と off の差は enum-membership の行の分（R-nt-08 の 1 文と schema の kind の enum）だけ（Issue #548・#549）", () => {
   it("規則の定義は R-nt-08 の文に台帳の T1 の文が default-value の文の次に入るだけで、ほかの定義は off と深く等しい。規則の不備は 0", () => {
     const row = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
     const anchor = PROPERTY_LEDGER.find((entry) => entry.id === "default-value")?.rules.t1;
     if (row?.rules.t1 == null || anchor == null) throw new Error("前提が壊れた");
-    const definitions = nameTableRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    const definitions = nameTableRuleDefinitionsOf(LEDGER_VIEW_2B);
     expect(definitions).toEqual(
       NAME_TABLE_RULE_DEFINITIONS.map((definition) =>
         definition.id === "R-nt-08" ? { ...definition, text: definition.text.replace(anchor, `${anchor}${row.rules.t1 ?? ""}`) } : definition,
@@ -591,10 +605,10 @@ describe("旗 on：今の台帳の T1 の要求と off の差は enum-membership
     expect(ruleDefinitionDefects(definitions)).toEqual([]);
     expect(definitions.find((definition) => definition.id === "R-nt-08")?.text).toContain("kind を enum-membership にし、その項目だけを所属させ");
     expect(definitions.find((definition) => definition.id === "R-nt-08")?.text).toContain("value は null にする");
-    expect(jsonDiffPaths(nameTableSchemaOf(PROPERTY_LEDGER_VIEW), NAME_TABLE_SCHEMA)).toEqual([
+    expect(jsonDiffPaths(nameTableSchemaOf(LEDGER_VIEW_2B), NAME_TABLE_SCHEMA)).toEqual([
       "$.properties.requirements.items.properties.verification.properties.kind.enum",
     ]);
-    expect(withoutEnumMembership(nameTableSchemaOf(PROPERTY_LEDGER_VIEW))).toEqual(NAME_TABLE_SCHEMA);
+    expect(withoutEnumMembership(nameTableSchemaOf(LEDGER_VIEW_2B))).toEqual(NAME_TABLE_SCHEMA);
   });
 
   it("同じ応答で on・off の要求の差は名指しの場所だけで、その分を除けばバイト列で同じ。結果は深く等しい（1 回目と previous つきの 2 回目）", async () => {
@@ -615,10 +629,149 @@ describe("旗 on：今の台帳の T1 の要求と off の差は enum-membership
     const previous: NameTablePrevious = { response, problems: [{ field: "rows[0]", message: "前回の指示" }], rejections: [], advice: [] };
     for (const prior of [undefined, previous]) {
       const off = await runWith(undefined, prior);
-      const on = await runWith(PROPERTY_LEDGER_VIEW, prior);
+      const on = await runWith(LEDGER_VIEW_2B, prior);
       expect(requestDiffsOf(on.requests, off.requests).map((diff) => diff.paths)).toEqual([ENUM_MEMBERSHIP_REQUEST_DIFF[NAME_TABLE_SCHEMA_NAME]]);
       expect(JSON.stringify(withoutEnumMembership(on.requests))).toBe(JSON.stringify(off.requests));
       expect(on.outcome).toEqual(off.outcome);
     }
+  });
+});
+
+describe("旗 on：今の台帳の T1 の要求と #548 の台帳の差は empty-aggregate の行の分（R-nt-08 の 1 文と schema の行の型の aggregate）だけ（Issue #549）", () => {
+  const ROW = PROPERTY_LEDGER.find((entry) => entry.id === "empty-aggregate");
+  const ENUM_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
+
+  it("規則の定義は R-nt-08 の文に台帳の T1 の文が enum-membership の文の次に入るだけ。schema は行の型の末尾に aggregate（null か種類と集計元。種類の enum は台帳の表の順）が必須の欄として入るだけ", () => {
+    const t1 = ROW?.rules.t1;
+    const anchor = ENUM_ROW?.rules.t1;
+    if (t1 == null || anchor == null) throw new Error("前提が壊れた");
+    const definitions = nameTableRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    expect(definitions).toEqual(
+      nameTableRuleDefinitionsOf(LEDGER_VIEW_2B).map((definition) =>
+        definition.id === "R-nt-08" ? { ...definition, text: definition.text.replace(anchor, `${anchor}${t1}`) } : definition,
+      ),
+    );
+    expect(ruleDefinitionDefects(definitions)).toEqual([]);
+    expectNoAcceptanceMaterial(ruleTexts(definitions));
+    const schema = nameTableSchemaOf(PROPERTY_LEDGER_VIEW);
+    expect(jsonDiffPaths(schema, nameTableSchemaOf(LEDGER_VIEW_2B))).toEqual([
+      "$.properties.rows.items.properties.type.required",
+      "$.properties.rows.items.properties.type.properties.aggregate",
+    ]);
+    const type = schema.properties.rows.items.properties.type as unknown as {
+      readonly required: readonly string[];
+      readonly properties: Record<string, unknown>;
+    };
+    expect(type.required).toEqual(["fieldType", "valueType", "scope", "form", "action", "hasWhen", "view", "aggregate"]);
+    expect(type.properties["aggregate"]).toEqual({
+      type: ["object", "null"],
+      additionalProperties: false,
+      required: ["kind", "entity"],
+      properties: {
+        kind: { type: "string", enum: ["sum", "count", "avg"] },
+        entity: { type: "string", description: "集計元の entity の行の id" },
+      },
+    });
+    expect(withoutEmptyAggregate(schema)).toEqual(nameTableSchemaOf(LEDGER_VIEW_2B));
+    // 旗 off・#548 の台帳の schema に aggregate は無い
+    expect(JSON.stringify(nameTableSchemaOf(LEDGER_VIEW_2B))).not.toContain('"aggregate":');
+    expect(JSON.stringify(NAME_TABLE_SCHEMA)).not.toContain('"aggregate":');
+  });
+
+  it("二点測定：台帳の集計の種類の表の順を変えると、schema の種類の enum の順も変わる（台帳から組んでいる）", () => {
+    const reversed = { ...PROPERTY_LEDGER_VIEW, aggregateKinds: [...PROPERTY_LEDGER_VIEW.aggregateKinds].reverse() };
+    const kindsOf = (view: LedgerView) =>
+      ((nameTableSchemaOf(view).properties.rows.items.properties.type as unknown as { properties: { aggregate: { properties: { kind: { enum: string[] } } } } }).properties.aggregate.properties.kind.enum);
+    expect(kindsOf(PROPERTY_LEDGER_VIEW)).toEqual(["sum", "count", "avg"]);
+    expect(kindsOf(reversed)).toEqual(["avg", "count", "sum"]);
+  });
+
+  it("同じ表の応答（今の台帳の on は計算の行に集計の種類と集計元を持つ）で、要求の差は名指しの場所（と previous の応答の写しの aggregate）だけで、その分を除けばバイト列で同じ。表は aggregate の分だけ違う", async () => {
+    const list = fixtureDefaultValueList();
+    const runWith = async (ledger: LedgerView, table: NameTable, withPrevious: boolean) => {
+      const response = responseOf(draftOf(list, table));
+      const previous: NameTablePrevious = { response, problems: [{ field: "rows[0]", message: "前回の指示" }], rejections: [], advice: [] };
+      const recording = createRecordingClient([structured(response)]);
+      const outcome = await runNameTable({
+        plan: planOf(list),
+        list,
+        documents: FIXTURE_DOCUMENTS,
+        gateway: makeGateway(recording.client),
+        ...(withPrevious ? { previous } : {}),
+        ledger,
+      });
+      return { outcome, requests: JSON.parse(JSON.stringify(recording.structured)) as unknown[] };
+    };
+    for (const withPrevious of [false, true]) {
+      const before = await runWith(LEDGER_VIEW_2B, fixtureDefaultValueTable(), withPrevious);
+      const now = await runWith(PROPERTY_LEDGER_VIEW, withAggregates(fixtureDefaultValueTable()), withPrevious);
+      const expected = [...(EMPTY_AGGREGATE_REQUEST_DIFF[NAME_TABLE_SCHEMA_NAME] ?? [])];
+      // previous の応答の写し（データ）は aggregate の欄の分だけ違う
+      if (withPrevious) expected.splice(1, 0, "$.input");
+      expect(requestDiffsOf(now.requests, before.requests).map((diff) => diff.paths)).toEqual([expected]);
+      expect(JSON.stringify(withoutEmptyAggregate(now.requests))).toBe(JSON.stringify(before.requests));
+      if (!now.outcome.ok || !before.outcome.ok) throw new Error("通るはず");
+      expect(now.outcome.value.table).toEqual(withAggregates(fixtureDefaultValueTable()));
+      expect(before.outcome.value.table).toEqual(fixtureDefaultValueTable());
+    }
+  });
+
+  it("未登録の拒否：旗 off・#548 の台帳で計算の行に aggregate を書いた応答は T1' の形で落ちる（null だけなら今の表に戻る）", async () => {
+    const list = fixtureList();
+    for (const ledger of [undefined, LEDGER_VIEW_2B]) {
+      const recording = createRecordingClient([structured(responseOf(draftOf(list, withAggregates(fixtureTable()))))]);
+      const outcome = await runNameTable({
+        plan: planOf(list),
+        list,
+        documents: FIXTURE_DOCUMENTS,
+        gateway: makeGateway(recording.client),
+        ...(ledger === undefined ? {} : { ledger }),
+      });
+      if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+      expect(outcome.failure.problems.map((problem) => problem.message)).toEqual(Array(3).fill(UNREGISTERED_AGGREGATE_MESSAGE));
+      // 計算でない行に aggregate を書いた応答は、種類に合わない欄として落ちる
+      const response = responseOf(draftOf(list, fixtureTable()));
+      ((response["rows"] as Record<string, Record<string, unknown>>[])[0]!["type"] as Record<string, unknown>)["aggregate"] = { kind: "count", entity: "e.item" };
+      const second = await runNameTable({
+        plan: planOf(list),
+        list,
+        documents: FIXTURE_DOCUMENTS,
+        gateway: makeGateway(createRecordingClient([structured(response)]).client),
+        ...(ledger === undefined ? {} : { ledger }),
+      });
+      if (second.ok || second.failure.kind !== "unmet") throw new Error("unmet でない");
+      expect(second.failure.problems).toContainEqual({ field: "rows[0].type", message: "行の種類に合わない型の欄が null でない" });
+    }
+    const nulls = responseOf(draftOf(list, withAggregates(fixtureTable(), { "c.itemCount": null, "c.byKind": null, "c.byMonth": null })));
+    const outcome = await runNameTable({
+      plan: planOf(list),
+      list,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(createRecordingClient([structured(nulls)]).client),
+    });
+    if (!outcome.ok) throw new Error("通るはず");
+    expect(outcome.value.table).toEqual(fixtureTable());
+  });
+
+  it("旗 on：種別 aggregate で aggregate が null の応答は T1' で unmet（固定文）。今の台帳の応答で aggregate を省くと形で落ちる", async () => {
+    const list = fixtureList();
+    const runOn = async (table: NameTable) => {
+      const recording = createRecordingClient([structured(responseOf(draftOf(list, table)))]);
+      return runNameTable({ plan: planOf(list), list, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(recording.client), ledger: PROPERTY_LEDGER_VIEW });
+    };
+    const missing = await runOn(withAggregates(fixtureTable(), { "c.itemCount": null }));
+    if (missing.ok || missing.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(missing.failure.problems).toEqual([{ field: "rows[8].type.aggregate", message: COMPUTATION_AGGREGATE_MESSAGES.missing }]);
+    const omitted = await runOn(fixtureTable());
+    if (omitted.ok || omitted.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(omitted.failure.problems.map((problem) => problem.field)).toEqual([
+      "rows[8].type.aggregate",
+      "rows[9].type.aggregate",
+      "rows[10].type.aggregate",
+      "rows[11].type.aggregate",
+    ]);
+    const good = await runOn(withAggregates(fixtureTable()));
+    if (!good.ok) throw new Error("通るはず");
+    expect(good.value.table).toEqual(withAggregates(fixtureTable()));
   });
 });

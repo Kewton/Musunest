@@ -9,8 +9,12 @@
 // 手 2a（#547）は**載せ替えだけ**で、on で組んだ規則の文・schema・データの並びは off とバイト列で同じだった。
 // 手 2b（#548）で 2 行目の `enum-membership`（選択肢の集合）を足し、T1''（R-sc-02 の受理条件）・B1（R-w11 の末尾）へも
 // 台帳の文を差し込む。台帳から `enum-membership` の行を除いた導出は、今も off の定数とバイト列で同じである。
+// 手 2c（#549）で 3 行目の `empty-aggregate`（集計の種類 × データ状態の空の値）を足す。確かめ方の種類は増やさず
+// （fixed-test のまま）、T1 の計算の行の型に `aggregate`（集計の種類と集計元）を足し（種類の enum は台帳の表の順）、
+// T2' が集計の試験の期待をこの行の表から導いた値と照らす。台帳からこの行を除いた導出は #548 の導出と同じである。
 //
 // 台帳は LLM を呼ばず、評価口を import しない（B4 の照合は名前で持ち、評価口が名前 → 関数の表を持つ）。
+import type { AggregateKind } from "@musunest/appspec-schema";
 import { TEST_KINDS, type TestKind, type TestOperation, type TestTargetKind } from "../fixed-test.js";
 
 // ── 旗（v1.2 の旗の正本）──────────────────────────────────────────
@@ -140,6 +144,57 @@ export interface PropertyT2 {
   };
 }
 
+/** 集計のデータ状態（`empty` … 集計元を空と明示し行も置かない／`unread` … 空と明示せず行も置かない＝未読。#549） */
+export const AGGREGATE_DATA_STATES = ["empty", "unread"] as const;
+export type AggregateDataState = (typeof AGGREGATE_DATA_STATES)[number];
+
+/** データ状態ごとの値（`zero` … 0。見出しごとは見出しごとに 0／`null` … null。見出しごとは見出しごとに null） */
+export const AGGREGATE_STATE_VALUES = ["zero", "null"] as const;
+export type AggregateStateValue = (typeof AGGREGATE_STATE_VALUES)[number];
+
+/**
+ * 集計の試験の型（集計の種類 × データ状態で期待が決まる性質だけが持つ。#549）。対象は計算の行のうち種別 aggregate で、
+ * 集計の種類と集計元（T1 の計算の行の型の `aggregate`）を持つ行。データ状態は入力の契約の `emptyEntities` に集計元が
+ * あれば `empty`、無ければ `unread`（参照データに集計元の行があればこの型の試験ではない）。期待は ok で、値は
+ * `values` の表から導く。見出しごと（groups）は、`empty` なら見出しごとに同じ値を並べ（enum は options の順の
+ * `{heading, value}`、月は値だけ見る）、`unread` なら並び全体が null（評価器が集計元を読めないときの値）。
+ */
+export interface PropertyAggregateT2 {
+  readonly targetKind: TestTargetKind;
+  readonly operation: Exclude<TestOperation, "structure">;
+  /** データ状態ごとの kind と自然文（並びは台帳の表の順） */
+  readonly states: readonly { readonly state: AggregateDataState; readonly kind: TestKind; readonly label: string }[];
+  /** 集計の種類ごとの、データ状態の値（**並びが T1 の schema の種類の enum の順**） */
+  readonly values: readonly {
+    readonly aggregate: AggregateKind;
+    readonly empty: AggregateStateValue;
+    readonly unread: AggregateStateValue;
+  }[];
+  /** 参照データの対象（集計元の行を含まない） */
+  readonly referenceTargets: readonly TestTargetKind[];
+  /** 入力の形（行ごとの計算なら写像＝この行） */
+  readonly input: "row-record";
+  /**
+   * この型の表で期待を確かめる、ほかの観測する性質（参照データに集計元の行が無い集計の試験だけ。kind は見ない）
+   */
+  readonly alsoObserves: readonly string[];
+  readonly minTests: number;
+  readonly expectedWriter: ExpectedValueWriter;
+  /** T2' の固定文（値を埋めない） */
+  readonly messages: {
+    /** 対象が、集計の種類と集計元を持つ種別 aggregate の計算の行でない */
+    readonly target: string;
+    /** 参照データに集計元の entity の行がある */
+    readonly referenceData: string;
+    /** kind がデータ状態に合わない */
+    readonly kind: string;
+    /** 期待が表から導いた値と違う */
+    readonly expected: string;
+    /** ほかの観測する性質の試験の期待が、表から導いた値と違う */
+    readonly alsoExpected: string;
+  };
+}
+
 /** 規則の文（段ごとに足す 1 文。無ければ null） */
 export interface PropertyRules {
   readonly t1: string | null;
@@ -165,6 +220,8 @@ export interface PropertyRow {
   /** 評価の方法の表の組（構造の検査を除く） */
   readonly combinations: readonly PropertyCombination[];
   readonly t2: PropertyT2 | null;
+  /** 集計の試験の型（集計の種類 × データ状態で期待が決まる性質だけ。ほかは null。#549） */
+  readonly t2Aggregate: PropertyAggregateT2 | null;
   /** 網羅の鍵の欄（`coverage.ts` の `coverageUnitKey` の欄。未定義なら null） */
   readonly coverageKey: readonly string[] | null;
   /** B4 の照合の名前（評価口が名前 → 関数の表を持つ。未対応なら null） */
@@ -188,6 +245,7 @@ const INHERITED = {
   t1: null,
   t1Acceptance: null,
   t2: null,
+  t2Aggregate: null,
   coverageKey: null,
   evaluation: "v1-run-tests",
   outer: null,
@@ -198,7 +256,8 @@ const INHERITED = {
 /**
  * 性質の台帳（**並びは今の観測する性質の並び**＝T2 の observes の enum の順）。v1.1α の評価の方法の表の組
  * （value・validation・when・view-structure・existence）は引き継いだ有効の行、`state-after-set` は登録済み・未対応、
- * 最初の新しい行は `default-value`（#533 の列をそのまま写す）、2 つ目は `enum-membership`（選択肢の集合。#548）。
+ * 最初の新しい行は `default-value`（#533 の列をそのまま写す）、2 つ目は `enum-membership`（選択肢の集合。#548）、3 つ目は
+ * `empty-aggregate`（集計の種類 × データ状態の空の値。#549）。
  */
 export const PROPERTY_LEDGER: readonly PropertyRow[] = [
   {
@@ -306,6 +365,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
         referenceData: "既定値で確かめる要件の試験の参照データは、空の並びであること",
       },
     },
+    t2Aggregate: null,
     coverageKey: ["requirementId", "targetId", "kind", "operation", "observes"],
     evaluation: "default-value",
     outer: "enumDefault",
@@ -369,6 +429,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
         referenceData: "選択肢の集合で確かめる要件の試験の参照データは、空の並びであること",
       },
     },
+    t2Aggregate: null,
     coverageKey: ["requirementId", "targetId", "kind", "operation", "observes"],
     evaluation: "enum-membership",
     outer: OUTER_NOT_SCORED,
@@ -379,6 +440,53 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
         "確かめ方が enum-membership の要件は、要件の決まりが選択肢の集合だけで、所属させた選択肢の項目の options が要件の文の選択肢と過不足なく合うときだけ受理する。選択肢のほかの決まり（入力の制約など）を含む要件や、options が要件の文の選択肢と合わない要件は受理せず、weak-verification で拒否する。",
       t2: "選択肢の集合（enum-membership）の試験は、確かめ方が enum-membership の要件にだけ、次の形で 1 本以上作る：対象（target）はその要件の所属の選択肢の項目（target.kind は field）、kind は normal、operation は validate、observes は enum-membership、入力（input）は空の写像（\"{}\"）、参照データ（referenceData）は空の並び、期待（expected）は kind を ok・value をその項目の表の options のキーを表の順に並べた並びの JSON の文字列（例: キーが k1・k2 なら \"[\\\"k1\\\",\\\"k2\\\"]\"）・code を null。その要件には異常・境界の試験を作らない。ほかの要件に enum-membership を書かない。",
       b1: "固定した試験のうち observes が enum-membership の試験は、対象の選択肢の項目の options を、名前の表の行の options のキーの順で書くことを求める。",
+    },
+  },
+  {
+    id: "empty-aggregate",
+    since: "Issue #549",
+    why: "集計元が空・未読のときの集計の値を、集計の種類 × データ状態の表で試験より前に確定し、「読めない（null）」と「空（0）」の契約を T2 に見せる（一律の「空なら 0」は誤り。08 §5・§8.2 の (a)①）",
+    state: "active",
+    inherited: false,
+    requirementRule: "集計（件数・合計・平均。行ごと・アプリ全体・見出しごと）の要件のうち、集計元が空・未読のときの値",
+    t1: null,
+    t1Acceptance: null,
+    combinations: [{ targetKind: "computation", operation: "aggregate" }],
+    t2: null,
+    t2Aggregate: {
+      targetKind: "computation",
+      operation: "aggregate",
+      states: [
+        { state: "empty", kind: "boundary", label: "集計元を空と明示し行を置かない" },
+        { state: "unread", kind: "abnormal", label: "集計元に触れない" },
+      ],
+      values: [
+        { aggregate: "sum", empty: "zero", unread: "null" },
+        { aggregate: "count", empty: "zero", unread: "null" },
+        { aggregate: "avg", empty: "null", unread: "null" },
+      ],
+      referenceTargets: [],
+      input: "row-record",
+      alsoObserves: ["value"],
+      minTests: 1,
+      expectedWriter: "llm-written-code-checked",
+      messages: {
+        target: "空の集計（empty-aggregate）の試験の対象は、集計の種類と集計元を持つ種別 aggregate の計算の行であること",
+        referenceData: "空の集計（empty-aggregate）の試験の参照データに、集計元の entity の行を置かないこと",
+        kind: "空の集計（empty-aggregate）の試験の kind は、集計元を空と明示するなら boundary、集計元に触れないなら abnormal であること",
+        expected: "空の集計（empty-aggregate）の試験の期待は、集計の種類とデータ状態で決まる値（台帳の表）を書いた ok であること",
+        alsoExpected: "集計元の行が無い集計の試験の期待は、集計の種類とデータ状態で決まる値（台帳の表。空と明示すれば種類の値、しなければ null）であること",
+      },
+    },
+    coverageKey: ["requirementId", "targetId", "kind", "operation", "observes"],
+    evaluation: "v1-run-tests",
+    outer: OUTER_NOT_SCORED,
+    unsupportedMessage: null,
+    rules: {
+      t1: "計算の行の type の aggregate には、種別（form）が aggregate の計算なら、集計の種類（kind：sum は合計・count は件数・avg は平均）と集計元の entity の行の id（entity）を書く。見出しごとの集計の集計元は、見出しの元の項目の所属 entity にする。種別が aggregate でない計算と、計算でない行の aggregate は null にする。",
+      t1Acceptance: null,
+      t2: "集計（計算の行の type の form が aggregate）の要件の境界（boundary）の試験は、集計元を空と明示し（入力の契約の emptyEntities にその行の type.aggregate.entity の id を入れ、参照データにその entity の行を置かない）、期待（expected）の value を集計の種類で決まる値にする：sum・count は 0（見出しごとは、enum の見出しなら options の全キーを順に heading と value 0 で並べ、月の見出しなら各見出しの value を 0 にする）、avg は null（見出しごとは各見出しの value を null にする）。異常（abnormal）の試験は集計元に触れず（emptyEntities に入れず、参照データにその entity の行も置かない）、期待の value を null にする。どちらも対象（target）はその計算の行、operation は aggregate、observes は empty-aggregate、期待の kind は ok・code は null にする。集計元の行を置かずに observes を value にした集計の試験も、期待は同じ値（空と明示すれば種類で決まる値、しなければ null）にする。正常の試験（observes は value）は今までどおり集計元の行を置いて作る。",
+      b1: "名前の表の計算の行の type に aggregate があれば、宣言のその計算の aggregate の種類（sum・count・avg）と集計元の entity を、その行の aggregate の種類と、集計元の entity の行の名前のとおりに書く。",
     },
   },
 ];
@@ -422,6 +530,20 @@ export function ledgerRowDefects(rows: readonly PropertyRow[]): readonly string[
         defects.push(`${at} の期待は確かめ方の欄の値なのに、確かめ方に欄が無い`);
       }
     }
+    if (row.t2Aggregate !== null) {
+      const { states, values, targetKind, operation } = row.t2Aggregate;
+      const stateNames = states.map((entry) => entry.state);
+      if (stateNames.length !== AGGREGATE_DATA_STATES.length || AGGREGATE_DATA_STATES.some((state) => !stateNames.includes(state))) {
+        defects.push(`${at} の集計の試験の型のデータ状態が、空と未読をちょうど 1 つずつ持たない`);
+      }
+      const aggregateKinds = values.map((entry) => entry.aggregate);
+      if (aggregateKinds.length === 0 || new Set(aggregateKinds).size !== aggregateKinds.length) {
+        defects.push(`${at} の集計の試験の型の種類の表が、空か重なっている`);
+      }
+      if (!row.combinations.some((entry) => entry.targetKind === targetKind && entry.operation === operation)) {
+        defects.push(`${at} の集計の試験の型の組が、評価の方法の表の組に無い`);
+      }
+    }
   });
   return defects;
 }
@@ -463,6 +585,13 @@ export interface LedgerView {
   readonly rowByObserves: ReadonlyMap<string, PropertyRow>;
   /** 確かめ方の種類 → 行（確かめ方に結び付いた行だけ） */
   readonly rowByVerificationKind: ReadonlyMap<string, PropertyRow>;
+  /** 集計の試験の型を持つ行（有効・削る候補の行。台帳の順。#549） */
+  readonly aggregateRows: readonly (PropertyRow & { readonly t2Aggregate: PropertyAggregateT2 })[];
+  /**
+   * T1 の計算の行の型の `aggregate` の種類（集計の試験の型の表の順。重なりは 1 つ。空なら `aggregate` は台帳に無く、
+   * T1 の schema に欄を足さず、書いた表は T1' が形で落とす。#549）
+   */
+  readonly aggregateKinds: readonly AggregateKind[];
 }
 
 const isOnlyNormal = (kinds: readonly TestKind[]): boolean => kinds.length === 1 && kinds[0] === "normal";
@@ -473,6 +602,9 @@ export function deriveLedgerView(rows: readonly PropertyRow[]): LedgerView {
   if (defects.length > 0) throw new Error(`性質の台帳：${defects.join("／")}`);
   const evaluable = rows.filter((row) => row.state !== "registered-unsupported");
   const bound = rows.filter((row): row is PropertyRow & { readonly t1: PropertyT1 } => row.t1 !== null);
+  const aggregateRows = evaluable.filter(
+    (row): row is PropertyRow & { readonly t2Aggregate: PropertyAggregateT2 } => row.t2Aggregate !== null,
+  );
   return {
     rows,
     verificationKinds: [...BASE_VERIFICATION_KINDS, ...bound.map((row) => row.t1.kind)],
@@ -489,6 +621,8 @@ export function deriveLedgerView(rows: readonly PropertyRow[]): LedgerView {
     t2ExemptKinds: bound.filter((row) => row.t2 !== null && isOnlyNormal(row.t2.requiredKinds)).map((row) => row.t1.kind),
     rowByObserves: new Map(rows.map((row) => [row.id, row] as const)),
     rowByVerificationKind: new Map(bound.map((row) => [row.t1.kind, row] as const)),
+    aggregateRows,
+    aggregateKinds: [...new Set(aggregateRows.flatMap((row) => row.t2Aggregate.values.map((entry) => entry.aggregate)))],
   };
 }
 
@@ -505,6 +639,21 @@ export function exemptKindMessagesOf(t2: PropertyT2): readonly string[] {
   return TEST_KINDS.filter((kind) => !t2.requiredKinds.includes(kind)).map((kind) => `${kind} の試験が無い`);
 }
 
+/**
+ * 集計の試験の型の表から、1 つの見出し（行ごと・アプリ全体なら値そのもの）の値を導く（LLM を呼ばない。#549）。
+ * 種類が表に無ければ undefined（呼ぶ側が落とす）。見出しごとに並べるのは呼ぶ側（T2'）で、見出しごとの `unread` は並び全体が
+ * null になる（評価器が集計元を読めないときの値）。
+ */
+export function aggregateStateValueOf(
+  t2: PropertyAggregateT2,
+  aggregate: string,
+  state: AggregateDataState,
+): 0 | null | undefined {
+  const entry = t2.values.find((candidate) => candidate.aggregate === aggregate);
+  if (entry === undefined) return undefined;
+  return entry[state] === "zero" ? 0 : null;
+}
+
 // ── 人が読む写し（methodology/ledger/properties.md の表）─────────────
 
 /** 写しの表の見出し（1 行 1 性質） */
@@ -513,8 +662,11 @@ export const PROPERTY_COPY_HEADER = ["id", "状態", "since", "T1 の kind", "T2
 /** 写しの表の 1 行（コードの台帳の 1 行から組む。欄の中の `|` は書かない） */
 export function propertyCopyCells(row: PropertyRow): readonly string[] {
   const state = `${PROPERTY_STATE_LABELS[row.state]}${row.inherited ? "（v1.1α から引き継ぎ・列の一部は未定義）" : ""}`;
+  const aggregate = row.t2Aggregate;
   const shape =
-    row.t2 === null
+    aggregate !== null
+      ? `${aggregate.targetKind} × ${aggregate.operation}・${aggregate.states.map((entry) => `${entry.kind}（${entry.label}）`).join("・")}・期待 ok の種類 × データ状態の値（${aggregate.values.map((entry) => `${entry.aggregate} は空 ${entry.empty}・未読 ${entry.unread}`).join("／")}）・入力 ${aggregate.input}・参照データ 集計元の行なし・${String(aggregate.minTests)} 本以上`
+      : row.t2 === null
       ? row.combinations.length === 0
         ? "—"
         : `未定義（組：${row.combinations.map((entry) => `${entry.targetKind} × ${entry.operation}`).join("・")}）`
@@ -525,7 +677,7 @@ export function propertyCopyCells(row: PropertyRow): readonly string[] {
     row.since,
     row.t1?.kind ?? "—",
     shape,
-    row.t2?.expectedWriter ?? "—",
+    row.t2?.expectedWriter ?? aggregate?.expectedWriter ?? "—",
     row.evaluation ?? "—",
     row.outer ?? "未定義",
     row.why,

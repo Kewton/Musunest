@@ -13,9 +13,13 @@ import {
   SAMPLE_DOCUMENTS,
 } from "../../stages/__tests__/prompt.js";
 import {
+  EMPTY_AGGREGATE_REQUEST_DIFF,
   ENUM_MEMBERSHIP_REQUEST_DIFF,
   FIXTURE_YAML,
   LEDGER_VIEW_2A,
+  LEDGER_VIEW_2B,
+  withAggregates,
+  withoutEmptyAggregate,
   fixtureList,
   fixtureTable,
   requestDiffsOf,
@@ -272,7 +276,7 @@ describe("B1 のデータ「固定した試験」に試験ごとの observes を
   });
 });
 
-describe("旗 on：B1 の規則の末尾に台帳の B1 の文を台帳の順で差し込む（Issue #548）", () => {
+describe("旗 on：B1 の規則の末尾に台帳の B1 の文を台帳の順で差し込む（Issue #548。今の台帳との比べは #548 の台帳＝empty-aggregate の行を除いた導出で。#549）", () => {
   const ROW = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
   /** 選択肢の集合の試験を含む組（区分の項目の options の並び。形は T2 が固定したものと同じ） */
   const ENUM_SUITE = {
@@ -298,10 +302,10 @@ describe("旗 on：B1 の規則の末尾に台帳の B1 の文を台帳の順で
   const blockOf = (input: string, name: string): unknown =>
     JSON.parse(input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "null");
 
-  it("off は今の定数。手 2a の台帳で組んだ R-w11-10 は今の文とバイト列で同じ。今の台帳は R-w11-11 に enum-membership の 1 文が増えるだけ。規則の不備は 0", () => {
+  it("off は今の定数。手 2a の台帳で組んだ R-w11-10 は今の文とバイト列で同じ。#548 の台帳は R-w11-11 に enum-membership の 1 文が増えるだけ。規則の不備は 0", () => {
     expect(writeV11aRuleDefinitionsOf()).toBe(WRITE_V11A_RULE_DEFINITIONS);
     expect(writeV11aRuleDefinitionsOf(LEDGER_VIEW_2A)).toEqual(WRITE_V11A_RULE_DEFINITIONS);
-    const on = writeV11aRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    const on = writeV11aRuleDefinitionsOf(LEDGER_VIEW_2B);
     expect(on.slice(0, WRITE_V11A_RULE_DEFINITIONS.length)).toEqual(WRITE_V11A_RULE_DEFINITIONS);
     expect(on.map((definition) => definition.id)).toEqual(
       Array.from({ length: 11 }, (_, index) => `R-w11-${String(index + 1).padStart(2, "0")}`),
@@ -319,7 +323,7 @@ describe("旗 on：B1 の規則の末尾に台帳の B1 の文を台帳の順で
     const on = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
     const off = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
     const twoA = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
-    expect((await runWriteV11a(inputWith(on.client, { suite: ENUM_SUITE, observes: OBSERVES, ledger: PROPERTY_LEDGER_VIEW }))).ok).toBe(true);
+    expect((await runWriteV11a(inputWith(on.client, { suite: ENUM_SUITE, observes: OBSERVES, ledger: LEDGER_VIEW_2B }))).ok).toBe(true);
     expect((await runWriteV11a(inputWith(off.client, { suite: ENUM_SUITE, observes: OBSERVES }))).ok).toBe(true);
     expect((await runWriteV11a(inputWith(twoA.client, { suite: ENUM_SUITE, observes: OBSERVES, ledger: LEDGER_VIEW_2A }))).ok).toBe(true);
     const [ron, roff] = [on.structured[0], off.structured[0]];
@@ -335,5 +339,39 @@ describe("旗 on：B1 の規則の末尾に台帳の B1 の文を台帳の順で
     expect(JSON.stringify(withoutEnumMembership(onRequests))).toBe(JSON.stringify(offRequests));
     expect(JSON.stringify(twoA.structured)).toBe(JSON.stringify(off.structured));
     expectNoAcceptanceMaterial([ron.input, ...(ron.rules ?? [])]);
+  });
+});
+
+describe("旗 on：今の台帳の B1 の規則は、#548 の台帳の末尾に empty-aggregate の 1 文（R-w11-12）が増えるだけ（Issue #549）", () => {
+  const ROW = PROPERTY_LEDGER.find((entry) => entry.id === "empty-aggregate");
+
+  it("規則に aggregate の 1 文がある（宣言の集計の種類と集計元を表の行のとおりに書く）。off は今の文。規則の不備は 0", () => {
+    const on = writeV11aRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    expect(on.slice(0, -1)).toEqual(writeV11aRuleDefinitionsOf(LEDGER_VIEW_2B));
+    expect(on.at(-1)?.id).toBe("R-w11-12");
+    expect(on.at(-1)?.text).toBe(ROW?.rules.b1);
+    expect(on.at(-1)?.text).toContain("aggregate の種類（sum・count・avg）と集計元の entity");
+    expect(on.at(-1)?.text).toContain("その行の aggregate の種類と、集計元の entity の行の名前のとおりに書く");
+    expect(on.at(-1)?.since).toBe("Issue #549");
+    expect(ruleDefinitionDefects(on)).toEqual([]);
+    expect(writeV11aRuleDefinitionsOf()).toBe(WRITE_V11A_RULE_DEFINITIONS);
+    expect(WRITE_V11A_RULES).not.toContain(ROW?.rules.b1);
+  });
+
+  it("要求：今の台帳と #548 の台帳の差は規則の並び（と、名前の表の計算の行の aggregate の欄）だけ。schema は変えない", async () => {
+    const now = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const before = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    expect((await runWriteV11a(inputWith(now.client, { table: withAggregates(fixtureTable()), ledger: PROPERTY_LEDGER_VIEW }))).ok).toBe(true);
+    expect((await runWriteV11a(inputWith(before.client, { ledger: LEDGER_VIEW_2B }))).ok).toBe(true);
+    const nowRequests = JSON.parse(JSON.stringify(now.structured)) as unknown[];
+    const beforeRequests = JSON.parse(JSON.stringify(before.structured)) as unknown[];
+    const expected = [...(EMPTY_AGGREGATE_REQUEST_DIFF[WRITE_V11A_SCHEMA_NAME] ?? [])];
+    expect(requestDiffsOf(nowRequests, beforeRequests).map((diff) => diff.paths)).toEqual([[...expected, "$.input"]]);
+    expect(JSON.stringify(withoutEmptyAggregate(nowRequests))).toBe(JSON.stringify(beforeRequests));
+    expect(now.structured[0]?.schema).toBe(DECLARATION_V11A_SCHEMA);
+    // 名前の表の塊の計算の行に aggregate が載る
+    const shown = JSON.parse(now.structured[0]!.input.split(`<data name="${WRITE_V11A_DATA_NAMES[1]}">`)[1]?.split("</data>")[0] ?? "null") as unknown;
+    expect(JSON.stringify(shown)).toContain('"aggregate":{"kind":"count","entity":"e.item"}');
+    expectNoAcceptanceMaterial([now.structured[0]!.input, ...(now.structured[0]!.rules ?? [])]);
   });
 });

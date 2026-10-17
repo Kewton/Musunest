@@ -4,8 +4,8 @@
 // 書けない部分は空、写した設計は v1 の `checkDesignOwnership`・`checkGroupBy` で問題 0 であることを固定する。
 import { describe, expect, it } from "vitest";
 import { checkDesignOwnership, checkGroupBy } from "../stages/design.js";
-import { LEDGER_VIEW_2A, fixtureDefaultValueTable, fixtureEnumMembershipTable, fixtureTable } from "./__tests__/fixtures.js";
-import { UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE, identityMappings, toV1 } from "./convert.js";
+import { LEDGER_VIEW_2A, fixtureDefaultValueTable, fixtureEnumMembershipTable, fixtureTable, withAggregates } from "./__tests__/fixtures.js";
+import { UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE, identityMappings, toRoleEntries, toV1 } from "./convert.js";
 import type { NameTable } from "./names.js";
 import { PROPERTY_LEDGER_VIEW } from "../v12/ledger.js";
 
@@ -124,5 +124,19 @@ describe("確かめ方の種類の写しを台帳から導く（Issue #548）", 
       expect(() => toV1(withKind(kind))).toThrow(UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE);
       expect(UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE).not.toContain(kind);
     }
+  });
+});
+
+describe("計算の行の集計の種類と集計元（aggregate。旗 on。Issue #549）は v1 の型への写しに載らない", () => {
+  it("aggregate を持つ表の写しは、持たない表の写しと深く等しい（RoleEntry に欄が無く、表の外に残る）", () => {
+    const plain = fixtureTable();
+    const aggregated = withAggregates(plain);
+    // 前提：表は aggregate の分だけ違う
+    expect(aggregated).not.toEqual(plain);
+    expect(toV1(aggregated)).toEqual(toV1(plain));
+    expect(toV1(aggregated, PROPERTY_LEDGER_VIEW)).toEqual(toV1(plain, PROPERTY_LEDGER_VIEW));
+    expect(toRoleEntries(aggregated)).toEqual(toRoleEntries(plain));
+    expect(JSON.stringify(toV1(aggregated))).not.toContain('"aggregate":{');
+    expect(identityMappings(aggregated)).toEqual(identityMappings(plain));
   });
 });
