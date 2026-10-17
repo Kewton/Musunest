@@ -179,6 +179,32 @@ export function fixtureTable(): NameTable {
   };
 }
 
+/**
+ * 既定値の要件（Issue #533）。区分の項目（`f.item.kind`。options は alpha・beta）の既定値だけを決める要件 R6 の文。
+ * 抽象的な文で、受入の題材の言葉は使わない。
+ */
+export const DEFAULT_VALUE_REQUIREMENT_TEXT = "項目の区分は、未入力なら保存の時点で alpha になる。";
+
+/** 題材の一覧に、既定値の要件 R6 を末尾に足したもの（`fixtureList` の値は変えない。Issue #533） */
+export function fixtureDefaultValueList(text: string = DEFAULT_VALUE_REQUIREMENT_TEXT): RequirementList {
+  const base = fixtureList();
+  return { ...base, requirements: [...base.requirements, requirement("R6", text)] };
+}
+
+/**
+ * 題材の表に、既定値の要件 R6 を足したもの（Issue #533）。R6 は区分の項目だけを名指しで所属させ（entity はコードが
+ * 足す）、確かめ方は default-value（value は `value`）、分類は ruled。行は題材の表のまま（`fixtureTable` の値は変えない）。
+ */
+export function fixtureDefaultValueTable(value = "alpha"): NameTable {
+  const base = fixtureTable();
+  return {
+    rows: base.rows,
+    ownership: [...base.ownership, { requirementId: "R6", roles: [stated("f.item.kind")] }],
+    verification: [...base.verification, { requirementId: "R6", kind: "default-value", value }],
+    classification: [...base.classification, { requirementId: "R6", nature: "ruled" }],
+  };
+}
+
 /** 名前の表を T1 の応答の形（下書き。要件 ID を持たず、写しを添える）に戻す */
 export function draftOf(list: RequirementList, table: NameTable): NameTableDraft {
   const length = copyLengthFor(list);

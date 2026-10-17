@@ -841,7 +841,7 @@ export async function runGenerationV11a(input: GenerationInputV11a): Promise<Gen
 
     // ── B1 書く（表の全行・固定した試験）──────────────────────────────────
     const written = await runStageOk("write", () =>
-      runWriteV11a({ list, table, suite: testSpec.suite, documents: input.documents, gateway }),
+      runWriteV11a({ list, table, suite: testSpec.suite, observes: testSpec.observes, documents: input.documents, gateway }),
     );
 
     // ── 版の輪の状態 ─────────────────────────────────────────────────

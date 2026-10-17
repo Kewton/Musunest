@@ -4,7 +4,7 @@
 // 書けない部分は空、写した設計は v1 の `checkDesignOwnership`・`checkGroupBy` で問題 0 であることを固定する。
 import { describe, expect, it } from "vitest";
 import { checkDesignOwnership, checkGroupBy } from "../stages/design.js";
-import { fixtureTable } from "./__tests__/fixtures.js";
+import { fixtureDefaultValueTable, fixtureTable } from "./__tests__/fixtures.js";
 import { identityMappings, toV1 } from "./convert.js";
 
 describe("名前の表を v1 の型へ写す（07 §2.2）", () => {
@@ -60,5 +60,21 @@ describe("名前の表を v1 の型へ写す（07 §2.2）", () => {
     const { design } = toV1(fixtureTable());
     expect(checkDesignOwnership(design)).toEqual([]);
     expect(checkGroupBy(design.roles ?? [])).toEqual([]);
+  });
+
+  it("default-value は v1 の fixed-test に写り（v1 の型は変えない）、ほかの種類は今までどおり（Issue #533）", () => {
+    const { design } = toV1(fixtureDefaultValueTable());
+    const r6 = design.designs.find((entry) => entry.requirementId === "R6");
+    expect(r6?.verification).toEqual({ kind: "fixed-test" });
+    expect(r6?.checks).toEqual([]);
+    expect(r6?.nature).toBe("ruled");
+    expect(r6?.ownership).toEqual([
+      { roleId: "f.item.kind", basis: "stated", reason: null },
+      { roleId: "e.item", basis: "dependency", reason: "f.item.kind" },
+    ]);
+    // R6 を足しても、ほかの要件の写しは題材の表の写しと同じ
+    const base = toV1(fixtureTable()).design.designs;
+    expect(design.designs.filter((entry) => entry.requirementId !== "R6")).toEqual(base);
+    expect(checkDesignOwnership(design)).toEqual([]);
   });
 });

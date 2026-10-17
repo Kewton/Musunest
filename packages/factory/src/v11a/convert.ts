@@ -8,7 +8,7 @@
 //     から導いた値、`aliasOf`＝null、`groupBy`＝enum なら分ける項目の `id`・month なら null
 //   - `RoleNameMapping` … 恒等の対応（`roleId`＝`id`、`name`＝`name`）を全行
 //   - `RequirementRoleOwnership` … 導いた entity の所属（basis `dependency`・reason）を含む
-//   - `RequirementDesign` … `verification`・`checks`・`nature`（表の分類）。`vocabulary`・`placement`・
+//   - `RequirementDesign` … `verification`（`default-value` は `fixed-test` に写す）・`checks`・`nature`（表の分類）。`vocabulary`・`placement`・
 //     `unwritable` は空の並び
 //
 // 写さない欄（失われる情報。v1.1α の成果物と検査にだけ残る。§2.2 の表）：
@@ -16,6 +16,7 @@
 //   - `type`・`refEntity`（項目の型・参照先、計算の値の型・範囲・種別、操作・画面の種類）… B3 の追加の検査
 //   - `groupBy` の month（`RoleEntry.groupBy` は null になり v1 の検査が掛からない）… B3 の（集計元 entity・
 //     項目・month）の組の検査
+//   - default-value の `value`（期待する既定値のキー）… T2 の検査と B4 の照合が表から読む（Issue #533）
 //   - unresolved の `constraintIds`（v1 の `RequirementVerification` に欄が無い）… `carry-over.json` に残す
 //   - `RoleEntry.name` の意味（v1 では呼び名の欄。ここには宣言の名前が入る）
 //   - 試験の `observes` と網羅の単位（表の外。`coverage.ts`）
@@ -66,6 +67,9 @@ function toVerification(entry: NameTableVerification): RequirementVerification {
       return { kind: "structural", reason: entry.reason };
     case "unresolved":
       return { kind: "unresolved", reason: entry.reason };
+    case "default-value":
+      // v1 の型は変えない（既定値の免除は v1.1α の T2 が表の確かめ方で掛ける。Issue #533）
+      return { kind: "fixed-test" };
   }
 }
 

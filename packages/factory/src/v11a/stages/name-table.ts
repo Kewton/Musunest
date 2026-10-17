@@ -54,6 +54,7 @@ import {
   FIELD_ROW_TYPES,
   NAME_TABLE_GROUP_BY_KINDS,
   NAME_TABLE_KINDS,
+  NAME_TABLE_VERIFICATION_KINDS,
   checkRequirementListForTable,
   copyLengthFor,
   inspectNameTable,
@@ -129,9 +130,9 @@ export const NAME_TABLE_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
   {
     id: "R-nt-08",
-    text: "verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。構造で確かめるなら kind を structural にし、reason に理由、checks に構造の検査を並べ、検査ごとに合う種類の行を所属させる。宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に根拠にした文書の制約 ID（文書の制約 ID の一覧にあるものだけ）を書く。使わない欄は null か空の並びにする。",
-    why: "確かめ方を所属と組で固定し、書けない要件は理由と制約 ID つきで持ち越す（§1.2・C1）",
-    since: "Issue #507",
+    text: "verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。構造で確かめるなら kind を structural にし、reason に理由、checks に構造の検査を並べ、検査ごとに合う種類の行を所属させる。宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に根拠にした文書の制約 ID（文書の制約 ID の一覧にあるものだけ）を書く。要件の決まりが「選択肢の項目の既定値（未入力のとき保存の時点で入る値）がどのキーか」だけなら kind を default-value にし、value にそのキー（その項目の options のキー）を書き、その項目だけを所属させる（entity はコードが足す）。条件・計算・検査・操作後の状態を含む要件には default-value を使わない。default-value でなければ value は null にする。使わない欄は null か空の並びにする。",
+    why: "確かめ方を所属と組で固定し、書けない要件は理由と制約 ID つきで持ち越す（§1.2・C1）。既定値だけを決める要件は、評価できる試験の形を試験より前に表で確定し、T1' と T1'' の点検を通す（方法論 03 §1 の H2・H1。台帳 F5）",
+    since: "Issue #507（既定値の確かめ方 default-value は #533 で足した）",
   },
   {
     id: "R-nt-09",
@@ -231,12 +232,13 @@ export const NAME_TABLE_SCHEMA = {
           verification: {
             type: "object",
             additionalProperties: false,
-            required: ["kind", "reason", "checks", "constraintIds"],
+            required: ["kind", "reason", "checks", "constraintIds", "value"],
             properties: {
-              kind: { type: "string", enum: ["fixed-test", "structural", "unresolved"] },
+              kind: { type: "string", enum: [...NAME_TABLE_VERIFICATION_KINDS] },
               reason: { type: ["string", "null"] },
               checks: { type: "array", items: { type: "string", enum: [...STRUCTURAL_ASSERTIONS] } },
               constraintIds: { type: "array", items: { type: "string" } },
+              value: { type: ["string", "null"], description: "default-value の期待する既定値のキー（ほかの種類は null）" },
             },
           },
           nature: { type: "string", enum: [...REQUIREMENT_NATURES] },
