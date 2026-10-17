@@ -181,7 +181,7 @@ export function checkEvaluability(
     if (UNSUPPORTED_OBSERVES.includes(observed)) {
       problems.push({
         field,
-        message: "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態・項目の既定値の試験は作らない）",
+        message: "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態の試験は作らない）",
       });
       return;
     }
