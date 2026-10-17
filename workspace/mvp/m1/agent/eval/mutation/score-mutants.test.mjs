@@ -11,7 +11,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MARKS_SCHEMA, classifyMutations } from "./classify.mjs";
 import { MutationToolError, generateMutants, sha256 } from "./mutate.mjs";
-import { CATEGORY_IDS, CONTEXT_SCHEMA, INVENTORY_SCHEMA, MESSAGES, OUTPUT_SCHEMA, WILSON_NAME, dependencyClosure, makeRate, specifiersIn, rowsOfPlace, scoreMutants, summarizeRecords, summaryLines, toAnonymous } from "./score-mutants.mjs";
+import { CATEGORY_IDS, CONTEXT_SCHEMA, INVENTORY_SCHEMA, MESSAGES, OUTPUT_SCHEMA, WILSON_NAME, dependencyClosure, forbiddenApisIn, makeRate, specifiersIn, rowsOfPlace, scoreMutants, summarizeRecords, summaryLines, toAnonymous } from "./score-mutants.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "../../../../../..");
@@ -588,6 +588,55 @@ test("実際の読み込みで止める：読み込みの時点で目録の SHA-
     assert.equal(r.stderr.trim(), `hash_mismatch ${MESSAGES.hash_mismatch}`);
     assert.equal(r.stdout, "");
     assert.equal(r.written, null);
+  } finally { w.cleanup(); }
+});
+
+// hook を通らない口で目録に無いファイルを読み・実行する入口（#571 の 3 回目のレビューの再現）。helper は実行されると印のファイルを書く
+function bypassWorld(kind) {
+  const w = world({ candidates: ["a"] });
+  const ran = join(w.dir, "helper-ran.txt"), wrap = join(w.dir, `wrap-${kind}.mjs`);
+  const factoryUrl = JSON.stringify(pathToFileURL(factoryEntry).href);
+  if (kind === "create-require") {
+    writeFileSync(join(w.dir, "helper.cjs"), `globalThis.process.getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(ran)}, "x");\nmodule.exports = 1;\n`);
+    writeFileSync(wrap, `import { createRequire } from "node:module";\nconst load = createRequire(import.meta.url);\nload("./helper.cjs");\nexport * from ${factoryUrl};\n`);
+  } else {
+    const text = join(w.dir, "helper.txt");
+    writeFileSync(text, `globalThis.process.getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(ran)}, "x");\n`);
+    writeFileSync(wrap, `import { readFileSync } from "node:fs";\nnew Function(readFileSync(${JSON.stringify(text)}, "utf8"))();\nexport * from ${factoryUrl};\n`);
+  }
+  const inv = structuredClone(w.inventory);
+  inv.version.factory_dist = { entry: wrap, files: [...factoryFiles, fileRef(wrap)] };
+  return { w, inv, ran };
+}
+
+for (const kind of ["create-require", "read-and-function"]) {
+  test(`目録のコードの走査（#571 の 3 回目の再現 ${kind}）：hook を通らない口で目録に無いファイルを読み・実行する入口は、exit 3・固定文・標準出力空・JSON なし・helper の実行なし`, () => {
+    const { w, inv, ran } = bypassWorld(kind);
+    try {
+      const r = runCli(w, inv);
+      assert.equal(r.status, 3, r.stderr);
+      assert.equal(r.stderr.trim(), `forbidden_api ${MESSAGES.forbidden_api}`);
+      assert.equal(r.stdout, "");
+      assert.equal(r.written, null);
+      assert.throws(() => readFileSync(ran), "helper が実行された");
+      assert.deepEqual(r.loads.filter((p) => p.includes(`${join("packages")}/`) && p.includes(`${join("dist")}/`)), [], "断る前に dist を import した");
+    } finally { w.cleanup(); }
+  });
+}
+
+test("目録のコードの走査：禁じた 6 つの口を見つけ、今の工場・spec-engine・appspec-schema の dist には 1 つも無い（正しい目録は exit 0）", () => {
+  assert.deepEqual(forbiddenApisIn(`const r = require("x");`), ["require"]);
+  assert.deepEqual(forbiddenApisIn(`import { createRequire } from "node:module";`), ["createRequire", "node:module"]);
+  assert.deepEqual(forbiddenApisIn(`import vm from "node:vm";`), ["node:vm"]);
+  assert.deepEqual(forbiddenApisIn(`eval("1")`), ["eval"]);
+  assert.deepEqual(forbiddenApisIn(`new Function("return 1")()`), ["Function"]);
+  assert.deepEqual(forbiddenApisIn(`import { readFileSync } from "node:fs"; readFileSync("a");`), [], "fs は見ない");
+  for (const f of [...factoryFiles, ...engineFiles, ...dependencyFiles].filter((x) => x.path.endsWith(".js"))) assert.deepEqual(forbiddenApisIn(readFileSync(f.path, "utf8")), [], f.path);
+  const w = world({ candidates: ["a"] });
+  try {
+    const r = runCli(w, w.inventory);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.written && r.written.totals.eligible > 0);
   } finally { w.cleanup(); }
 });
 
