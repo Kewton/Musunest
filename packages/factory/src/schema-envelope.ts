@@ -26,10 +26,11 @@ import { REVERSE_CHECK_SCHEMA, REVERSE_CHECK_SCHEMA_NAME } from "./stages/revers
 import { TEST_SUITE_SCHEMA, TEST_SUITE_SCHEMA_NAME } from "./stages/test-suite.js";
 import { DECLARATION_SCHEMA, WRITE_SCHEMA_NAME } from "./stages/write.js";
 import { DECL_CHECK_SCHEMA, DECL_CHECK_SCHEMA_NAME } from "./v11a/stages/decl-check.js";
-import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME } from "./v11a/stages/name-table.js";
+import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./v11a/stages/name-table.js";
 import { SEMANTIC_CHECK_SCHEMA, SEMANTIC_CHECK_SCHEMA_NAME } from "./v11a/stages/semantic-check.js";
-import { TEST_SPEC_SCHEMA, TEST_SPEC_SCHEMA_NAME } from "./v11a/stages/test-spec.js";
+import { TEST_SPEC_SCHEMA, TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
 import { DECLARATION_V11A_SCHEMA, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
+import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
 
 /** 封筒の識別子（adapter が選ぶ。既定は v1） */
 export const ENVELOPE_IDS = ["v1", "v1.1a"] as const;
@@ -171,4 +172,70 @@ export function envelopeOf(envelope: EnvelopeId = "v1"): StageEnvelope {
  */
 export function envelopeStageFor(schemaName: string, envelope: EnvelopeId = "v1"): StageEnvelopeEntry | undefined {
   return envelopeOf(envelope).entries.find((entry) => entry.stage === schemaName);
+}
+
+/**
+ * 旗 `v12.ledger` が on の走りの封筒の段の一覧（Issue #549 の直し）。T1・T2 の枝を台帳から導いた schema
+ * （`nameTableSchemaOf`・`testSpecSchemaOf`）にし、ほかの段は v1.1α と同じ。T1 と T2 は同じ封筒を送る（その間で
+ * キャッシュが当たる）。台帳の導出を持たない段の要求は旗 off と同じ schema なので、adapter は旗を区別できず v1.1α の
+ * 封筒を送る。名前は v1.1α の封筒と同じ（選ぶのは段が渡す schema）。
+ */
+export const STAGE_ENVELOPE_ENTRIES_V12_LEDGER: readonly StageEnvelopeEntry[] = STAGE_ENVELOPE_ENTRIES_V11A.map(
+  (entry) =>
+    entry.stage === NAME_TABLE_SCHEMA_NAME
+      ? { stage: entry.stage, schema: nameTableSchemaOf(PROPERTY_LEDGER_VIEW) }
+      : entry.stage === TEST_SPEC_SCHEMA_NAME
+        ? { stage: entry.stage, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW) }
+        : entry,
+);
+
+/** 旗 `v12.ledger` が on の走りで送る封筒の schema（起動時に 1 度だけ組む） */
+export const ENVELOPE_SCHEMA_V12_LEDGER: Record<string, unknown> = buildEnvelopeSchema(
+  STAGE_ENVELOPE_ENTRIES_V12_LEDGER,
+);
+
+/** 1 つの要求について送る封筒（その段の枝と、封筒の名前・schema） */
+export interface ResolvedStageEnvelope {
+  /** その段の枝の下地（段の名前と、**その要求が渡した schema** と深く等しい schema） */
+  readonly entry: StageEnvelopeEntry;
+  readonly name: string;
+  readonly schema: Record<string, unknown>;
+}
+
+function sameSchema(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * 要求の段の名前と schema から、送る封筒を決める（Issue #549 の直し）。選んだ封筒に載っていない名前は `undefined`
+ * （adapter は今までどおりその schema をそのまま送る）。
+ *
+ * 封筒の枝は**段が渡した schema と深く等しく**なければならない——段は台帳から schema を導く（旗 on の T1・T2）ので、
+ * 起動時に組んだ定数の封筒を送ると、検証の側だけが台帳の形を求め、モデルには届かない。次の順で選ぶ：
+ *
+ *   1. 段の schema が選んだ封筒の枝と等しい … その封筒の実体（旗 off と v1 は今までとバイト列で同じ）
+ *   2. v1.1α の封筒で、段の schema が旗 on の封筒の枝と等しい … 旗 on の封筒（on の全段で同じ）
+ *   3. どちらでもない … 選んだ封筒のその段の枝だけを段の schema に差し替えた封筒（段ごとに組む）
+ */
+export function resolveStageEnvelope(
+  schemaName: string,
+  schema: unknown,
+  envelope: EnvelopeId = "v1",
+): ResolvedStageEnvelope | undefined {
+  const selected = envelopeOf(envelope);
+  const entry = selected.entries.find((candidate) => candidate.stage === schemaName);
+  if (entry === undefined) return undefined;
+  if (sameSchema(entry.schema, schema)) return { entry, name: selected.name, schema: selected.schema };
+  if (envelope === "v1.1a") {
+    const ledgerEntry = STAGE_ENVELOPE_ENTRIES_V12_LEDGER.find((candidate) => candidate.stage === schemaName);
+    if (ledgerEntry !== undefined && sameSchema(ledgerEntry.schema, schema)) {
+      return { entry: ledgerEntry, name: selected.name, schema: ENVELOPE_SCHEMA_V12_LEDGER };
+    }
+  }
+  const replaced: StageEnvelopeEntry = { stage: entry.stage, schema };
+  return {
+    entry: replaced,
+    name: selected.name,
+    schema: buildEnvelopeSchema(selected.entries.map((candidate) => (candidate === entry ? replaced : candidate))),
+  };
 }

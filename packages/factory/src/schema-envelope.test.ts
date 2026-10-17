@@ -17,14 +17,20 @@ import {
   ENVELOPE_SCHEMA_NAME,
   ENVELOPE_SCHEMA_NAME_V11A,
   ENVELOPE_SCHEMA_V11A,
+  ENVELOPE_SCHEMA_V12_LEDGER,
   ENVELOPE_STAGE_KEY,
   STAGE_ENVELOPE_ENTRIES,
   STAGE_ENVELOPE_ENTRIES_V11A,
+  STAGE_ENVELOPE_ENTRIES_V12_LEDGER,
   buildEnvelopeSchema,
   buildStageBranch,
   envelopeStageFor,
+  resolveStageEnvelope,
   type StageEnvelopeEntry,
 } from "./schema-envelope.js";
+import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./v11a/stages/name-table.js";
+import { TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
+import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -374,5 +380,88 @@ describe("v1.1α の段は別の封筒に入れ、v1 の封筒は変えない（
     // v1 だけの段は v1.1a の封筒から引けない（adapter はその schema をそのまま送る）
     expect(envelopeStageFor("requirement-design", "v1.1a")).toBeUndefined();
     expect(envelopeStageFor("judge-answers", "v1.1a")).toBeUndefined();
+  });
+});
+
+describe("要求の schema から送る封筒を決める（封筒の枝＝段が渡した schema。Issue #549 の直し）", () => {
+  it("段の schema が選んだ封筒の枝と等しければ、その封筒の実体（v1・v1.1a の全段。旗 off は今と同じ）", () => {
+    for (const entry of STAGE_ENVELOPE_ENTRIES) {
+      const resolved = resolveStageEnvelope(entry.stage, entry.schema);
+      expect(resolved?.schema, entry.stage).toBe(ENVELOPE_SCHEMA);
+      expect(resolved?.name, entry.stage).toBe(ENVELOPE_SCHEMA_NAME);
+      expect(resolved?.entry, entry.stage).toBe(entry);
+    }
+    for (const entry of STAGE_ENVELOPE_ENTRIES_V11A) {
+      const resolved = resolveStageEnvelope(entry.stage, JSON.parse(JSON.stringify(entry.schema)), "v1.1a");
+      expect(resolved?.schema, entry.stage).toBe(ENVELOPE_SCHEMA_V11A);
+      expect(resolved?.name, entry.stage).toBe(ENVELOPE_SCHEMA_NAME_V11A);
+    }
+  });
+
+  it("旗 on の封筒は T1・T2 の枝だけが台帳から導いた schema で、ほかの枝は v1.1a と同じ", () => {
+    expect(STAGE_ENVELOPE_ENTRIES_V12_LEDGER.map((entry) => entry.stage)).toEqual(
+      STAGE_ENVELOPE_ENTRIES_V11A.map((entry) => entry.stage),
+    );
+    for (const [index, entry] of STAGE_ENVELOPE_ENTRIES_V12_LEDGER.entries()) {
+      const expected =
+        entry.stage === NAME_TABLE_SCHEMA_NAME
+          ? nameTableSchemaOf(PROPERTY_LEDGER_VIEW)
+          : entry.stage === TEST_SPEC_SCHEMA_NAME
+            ? testSpecSchemaOf(PROPERTY_LEDGER_VIEW)
+            : STAGE_ENVELOPE_ENTRIES_V11A[index]?.schema;
+      expect(entry.schema, entry.stage).toEqual(expected);
+    }
+    expect(ENVELOPE_SCHEMA_V12_LEDGER).toEqual(buildEnvelopeSchema(STAGE_ENVELOPE_ENTRIES_V12_LEDGER));
+    expect(ENVELOPE_SCHEMA_V12_LEDGER).not.toEqual(ENVELOPE_SCHEMA_V11A);
+  });
+
+  it("旗 on の T1・T2 の schema（台帳から導いたもの）は、どちらも旗 on の封筒の同じ実体で送る（T1 と T2 の間でキャッシュが当たる）", () => {
+    const t1 = resolveStageEnvelope(NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf(PROPERTY_LEDGER_VIEW), "v1.1a");
+    const t2 = resolveStageEnvelope(TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf(PROPERTY_LEDGER_VIEW), "v1.1a");
+    expect(t1?.schema).toBe(ENVELOPE_SCHEMA_V12_LEDGER);
+    expect(t2?.schema).toBe(ENVELOPE_SCHEMA_V12_LEDGER);
+    expect(t1?.name).toBe(ENVELOPE_SCHEMA_NAME_V11A);
+    expect(t1?.entry.schema).toEqual(nameTableSchemaOf(PROPERTY_LEDGER_VIEW));
+    // 台帳の導出を持たない段は、要求の schema が旗 off と同じなので v1.1a の封筒のまま（adapter は要求から旗を区別できない）
+    for (const entry of STAGE_ENVELOPE_ENTRIES_V12_LEDGER) {
+      if (entry.stage === NAME_TABLE_SCHEMA_NAME || entry.stage === TEST_SPEC_SCHEMA_NAME) continue;
+      expect(resolveStageEnvelope(entry.stage, entry.schema, "v1.1a")?.schema, entry.stage).toBe(ENVELOPE_SCHEMA_V11A);
+    }
+  });
+
+  it("どの封筒の枝とも違う schema は、選んだ封筒のその段の枝だけを差し替える。v1 の封筒では旗 on の封筒を選ばない", () => {
+    const custom = { ...NAME_TABLE_SCHEMA, description: "差し替え" };
+    const resolved = resolveStageEnvelope(NAME_TABLE_SCHEMA_NAME, custom, "v1.1a");
+    expect(resolved?.entry).toEqual({ stage: NAME_TABLE_SCHEMA_NAME, schema: custom });
+    expect(resolved?.schema).toEqual(
+      buildEnvelopeSchema(
+        STAGE_ENVELOPE_ENTRIES_V11A.map((entry) =>
+          entry.stage === NAME_TABLE_SCHEMA_NAME ? { stage: entry.stage, schema: custom } : entry,
+        ),
+      ),
+    );
+    const requirement = STAGE_ENVELOPE_ENTRIES[2] as StageEnvelopeEntry;
+    const changed = { ...(requirement.schema as Record<string, unknown>), description: "差し替え" };
+    const v1 = resolveStageEnvelope(requirement.stage, changed);
+    expect(v1?.name).toBe(ENVELOPE_SCHEMA_NAME);
+    expect(v1?.schema).toEqual(
+      buildEnvelopeSchema(STAGE_ENVELOPE_ENTRIES.map((entry) => (entry === requirement ? { stage: entry.stage, schema: changed } : entry))),
+    );
+  });
+
+  it("選んだ封筒に載っていない名前は undefined（adapter はその schema をそのまま送る）", () => {
+    expect(resolveStageEnvelope("judge-answers", {}, "v1.1a")).toBeUndefined();
+    expect(resolveStageEnvelope(NAME_TABLE_SCHEMA_NAME, NAME_TABLE_SCHEMA)).toBeUndefined();
+    expect(resolveStageEnvelope("requirement-design", {}, "v1.1a")).toBeUndefined();
+  });
+
+  it("旗 on の封筒の枝も strict の規則を満たす", () => {
+    const result = (ENVELOPE_SCHEMA_V12_LEDGER["properties"] as Record<string, unknown>)[ENVELOPE_RESULT_KEY] as {
+      readonly anyOf: readonly Record<string, unknown>[];
+    };
+    for (const [index, branch] of result.anyOf.entries()) {
+      expect(strictProblems(branch), String(index)).toEqual([]);
+      expect(branch).toEqual(buildStageBranch(STAGE_ENVELOPE_ENTRIES_V12_LEDGER[index] as StageEnvelopeEntry));
+    }
   });
 });
