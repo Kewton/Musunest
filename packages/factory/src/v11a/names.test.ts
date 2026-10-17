@@ -767,16 +767,25 @@ describe("形で落ちた行の派生だけを抑える（PR #532 のレビュ�
     groupBy: null,
     refEntity: null,
   });
-  const draft = (options: { readonly name?: unknown; readonly kind?: string; readonly verification?: unknown; readonly extraRows?: readonly unknown[] } = {}) => ({
+  const draft = (
+    options: {
+      readonly name?: unknown;
+      readonly kind?: string;
+      readonly entity?: string;
+      readonly verification?: unknown;
+      readonly extraRows?: readonly unknown[];
+      readonly extraRoles?: readonly string[];
+    } = {},
+  ) => ({
     rows: [
       rowOf("e.record", "entity", null, "record", null),
-      rowOf("f.record.title", options.kind ?? "field", "e.record", options.name ?? "title", "string"),
+      rowOf("f.record.title", options.kind ?? "field", options.entity ?? "e.record", options.name ?? "title", "string"),
       ...(options.extraRows ?? []),
     ],
     requirements: [
       {
         copy,
-        roles: [{ id: "f.record.title", basis: "stated", reason: null }],
+        roles: ["f.record.title", ...(options.extraRoles ?? [])].map((id) => ({ id, basis: "stated", reason: null })),
         verification: options.verification ?? { kind: "fixed-test" },
         nature: "ruled",
       },
@@ -819,5 +828,26 @@ describe("形で落ちた行の派生だけを抑える（PR #532 のレビュ�
 
   it("指摘 1 の対照：本当に kind が読めない行は、満たす可能性が残るので種類の不足を抑える", () => {
     expect(inspect(draft({ kind: "widget", verification: actionKind }))).toEqual({ ok: false, problems: [kindShape] });
+  });
+
+  // PR #532 の再確認の指摘 1：壊れた行の entity が entity でない行を指しても、その行の孤立は消さない
+  // （deriveOwnership が所属を導くのは、表に在る kind が entity の行だけである）
+  describe("壊れた行の entity が entity でない行を指す（PR #532 の再確認 1）", () => {
+    const other = rowOf("f.record.other", "field", "e.record", "other", "string");
+    const misreferenced = (name: unknown) =>
+      draft({ name, entity: "f.record.other", extraRows: [other], extraRoles: ["e.record"] });
+    const orphanOther = { field: "rows[2]", message: "どの要件にも所属しない行がある" };
+
+    it("対照：name が正常なら、参照先の種類違反と rows[2] の孤立が出る", () => {
+      expect(inspect(misreferenced("title"))).toEqual({
+        ok: false,
+        problems: [{ field: "rows[1].entity", message: "所属 entity の ID が表の entity の行に無い" }, orphanOther],
+      });
+    });
+
+    it("name だけを壊しても、独立した rows[2] の孤立は報告する", () => {
+      // 直す前：[nameShape]（rows[2] の孤立が消えた）
+      expect(inspect(misreferenced(42))).toEqual({ ok: false, problems: [nameShape, orphanOther] });
+    });
   });
 });
