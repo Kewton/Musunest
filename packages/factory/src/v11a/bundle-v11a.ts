@@ -121,6 +121,8 @@ export interface V11aRecordsInput {
     readonly entries: readonly CarryOverEntry[];
     readonly excludedRowIds: readonly string[];
     readonly remainingRequirementIds: readonly string[];
+    /** T1'' が受理した要件でない文の要件 ID（1 件も無ければ省く＝欄を書かない。Issue #550） */
+    readonly nonRequirements?: readonly string[];
   };
   readonly verification: {
     readonly tableSha256: string;
@@ -198,6 +200,7 @@ export function buildV11aArtifacts(input: V11aRecordsInput): readonly BundleArti
         entries: carryOver.entries,
         excluded_row_ids: carryOver.excludedRowIds,
         remaining_requirement_ids: carryOver.remainingRequirementIds,
+        ...(carryOver.nonRequirements === undefined ? {} : { non_requirements: carryOver.nonRequirements }),
       }),
     },
     {
@@ -400,6 +403,8 @@ export interface StageCheckpoint {
     readonly entries: readonly CarryOverEntry[];
     readonly excluded_row_ids: readonly string[];
     readonly remaining_requirement_ids: readonly string[];
+    /** T1'' が受理した要件でない文（1 件も無ければ欄を持たない。Issue #550） */
+    readonly non_requirements?: readonly string[];
   };
   readonly test_spec?: {
     readonly suite_sha256: string;
@@ -454,6 +459,7 @@ export function buildStageCheckpoint(input: {
       entries: materials.carryOver.entries,
       excluded_row_ids: materials.carryOver.excludedRowIds,
       remaining_requirement_ids: materials.carryOver.remainingRequirementIds,
+      ...(materials.carryOver.nonRequirements === undefined ? {} : { non_requirements: materials.carryOver.nonRequirements }),
     },
     ...(spec === undefined
       ? {}
@@ -699,6 +705,7 @@ export async function verifyStageInput(input: {
       entries: carryOver.entries,
       excluded_row_ids: carryOver.excludedRowIds,
       remaining_requirement_ids: carryOver.remainingRequirementIds,
+      ...(carryOver.nonRequirements === undefined ? {} : { non_requirements: carryOver.nonRequirements }),
     })
   ) {
     return fail("stage-input:carry-over");

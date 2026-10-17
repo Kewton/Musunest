@@ -61,7 +61,14 @@ import {
 import type { CarryOver } from "../carry-over.js";
 import { pruneForCarryOver } from "../carry-over.js";
 import { coverageUnitsOf, type CoverageUnit } from "../coverage.js";
-import { canonicalJson, deriveOwnership, type ComputationAggregate, type ComputationRowType, type NameTable } from "../names.js";
+import {
+  canonicalJson,
+  deriveOwnership,
+  type ComputationAggregate,
+  type ComputationRowType,
+  type NameTable,
+  type OperationRowType,
+} from "../names.js";
 import {
   aggregateStateValueOf,
   exemptKindMessagesOf,
@@ -335,11 +342,13 @@ export function ledgerTargetsOf(table: NameTable, ledger: LedgerView): ReadonlyM
     const row = ledger.rowByVerificationKind.get(entry.kind);
     if (row === undefined || row.t1 === null || row.t2 === null) continue;
     const t1 = row.t1;
+    const want = t1.ownership.row;
+    if (want === null) continue;
     const value = t1.valueField === null ? null : (entry as unknown as Record<string, unknown>)[t1.valueField];
     if (t1.valueField !== null && typeof value !== "string") continue;
     const fields = (rolesById.get(entry.requirementId) ?? []).filter((role) => {
       const owned = rowById.get(role.id);
-      return owned !== undefined && owned.kind === t1.ownership.row.kind && (owned.type as unknown) === t1.ownership.row.type;
+      return owned !== undefined && owned.kind === want.kind && (owned.type as unknown) === want.type;
     });
     const [only] = fields;
     if (fields.length === t1.ownership.count && only !== undefined) {
@@ -584,6 +593,48 @@ export function checkAggregateTests(
     }
     if (!aggregateExpectedMatches(t2, test, target, state)) {
       problems.push({ field: `${at}.expected`, message: own !== undefined ? t2.messages.expected : t2.messages.alsoExpected });
+    }
+  });
+  return problems;
+}
+
+// ── 旗 on：条件の試験の期待の型の門（台帳の条件の試験の型。08 §5・Issue #550）──────────────────
+
+const isOperationRowType = (type: NameTable["rows"][number]["type"]): type is OperationRowType =>
+  type !== null && typeof type === "object" && "hasWhen" in type;
+
+/**
+ * 条件の試験の期待の型の門（旗 on。Issue #550）。台帳の条件の試験の型を持つ行（when）を観測する試験のうち、対象の種類と
+ * 操作がその型の組（operation × action）のものに、
+ *   (1) 対象が表の操作の行で、型の `targetFlag`（`hasWhen`）が真であること（条件の無い操作に when の試験を作らない。B4 で
+ *       「条件が無く確かめられない」になる前に止める）
+ *   (2) 期待が ok なら decode 済みの値が真偽であること（操作後の状態の写像・文字列・数・null は落とす）。error は v1 の
+ *       評価器のまま（条件が成り立たないこと）
+ * を求め、でなければ行の固定文で落とす（位置は試験の添字と欄名）。組が型と違う試験（操作 × validate など）は評価の方法の表の
+ * 検査が今までどおり落とすので、ここでは見ない。期待の値をコードで書き換えない（書くのは T2 の LLM）。
+ */
+export function checkConditionTests(
+  suite: TestSuite,
+  observes: ReadonlyMap<string, TestObserves>,
+  table: NameTable,
+  ledger: LedgerView,
+): readonly Problem[] {
+  if (ledger.conditionRows.length === 0) return [];
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const problems: Problem[] = [];
+  suite.tests.forEach((test, index) => {
+    const observed: string | undefined = observes.get(test.id);
+    const row = observed === undefined ? undefined : ledger.conditionRows.find((candidate) => candidate.id === observed);
+    if (row === undefined) return;
+    const t2 = row.t2Condition;
+    if (test.target.kind !== t2.targetKind || test.operation !== t2.operation) return;
+    const at = `tests[${index}]`;
+    const owned = test.target.roleId === undefined ? undefined : rowById.get(test.target.roleId);
+    if (owned === undefined || owned.kind !== t2.targetKind || !isOperationRowType(owned.type) || owned.type[t2.targetFlag] !== true) {
+      problems.push({ field: `${at}.target`, message: t2.messages.target });
+    }
+    if (test.expected.kind === "ok" && typeof test.expected.value !== "boolean") {
+      problems.push({ field: `${at}.expected`, message: t2.messages.expected });
     }
   });
   return problems;
@@ -1209,6 +1260,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
               ...checkEvaluabilityByLedger(suite, observes, pruned.table, ledger),
               ...checkLedgerTests(suite, observes, targets, jsonStringExpectedIds(answer.output)),
               ...checkAggregateTests(suite, observes, pruned.table, ledger),
+              ...checkConditionTests(suite, observes, pruned.table, ledger),
             ];
       if (problems.length === 0) {
         const coverage = coverageUnitsOf({ suite, observes, natures: reconciled.natures });

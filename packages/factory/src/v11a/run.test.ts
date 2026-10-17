@@ -48,13 +48,20 @@ import {
   LEDGER_REQUEST_DIFF,
   EMPTY_AGGREGATE_REQUEST_DIFF,
   LEDGER_VIEW_2B,
+  LEDGER_VIEW_2C,
+  NON_REQUIREMENT_TEXT,
+  RULED_AS_NON_REQUIREMENT_QUOTE,
+  RULED_AS_NON_REQUIREMENT_TEXT,
+  WHEN_NON_REQUIREMENT_REQUEST_DIFF,
   withoutEmptyAggregate,
+  withoutWhenAndNonRequirement,
 } from "./__tests__/fixtures.js";
 import { V11A_ARTIFACT_NAMES } from "./bundle-v11a.js";
 import * as evaluateModule from "./evaluate.js";
 import { DEFAULT_VALUE_DETAILS, UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
 import { COMPUTATION_AGGREGATE_MESSAGES, nameTableSha256, type NameTable } from "./names.js";
 import {
+  ALL_CARRIED_OR_NON_REQUIREMENT_PROBLEM,
   ALL_CARRIED_PROBLEM,
   runGenerationV11a,
   runStageRangeV11a,
@@ -1873,6 +1880,219 @@ describe("(s) 空の集計の要件：空の境界・未読の異常を empty-ag
 
 // ── 段単位の走り（08-architecture-v1.2.md §8.3。Issue #544）──────────────────────────────
 
+// ── (t) 操作の条件（when）の試験の期待の型（旗 on。(a)③・(c)② の型。Issue #550）──────────────────────────────
+
+describe("(t) 操作の条件（when）の試験：期待が ok なら真偽・対象は条件を持つ操作の行（旗 on。(a)③・(c)② の型。Issue #550）", () => {
+  const flags: Partial<GenerationInputV11a> = { flags: { ledger: true } };
+  const WHEN_T2 = PROPERTY_LEDGER.find((entry) => entry.id === "when")?.t2Condition;
+  if (WHEN_T2 == null) throw new Error("前提が壊れた：台帳の when に条件の試験の型が無い");
+  /** R3 の正常の試験の期待だけを替えた T2 の応答 */
+  const t2With = (expected: { readonly kind: "ok"; readonly value: string; readonly code: null }) =>
+    t2Response([...r1Tests(), ...r2Tests(), ...r3Tests().map((test) => (test["id"] === "r3-normal" ? { ...test, expected } : test)), ...r4Tests()]);
+  /** 評価口の B4 の結果と、v1 の runTests に渡った試験を記録する（評価口はそのまま） */
+  function spyRuns() {
+    const reports: { readonly mismatches: readonly { readonly testId: string; readonly detail: string }[] }[] = [];
+    const passed: string[][] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      const evaluator = original(input);
+      return {
+        ...evaluator,
+        runTests: (app, context, correspondence) => {
+          const report = evaluator.runTests(app, context, correspondence);
+          reports.push(report);
+          return report;
+        },
+      };
+    });
+    const runTestsOriginal = runTestsStage.runTests;
+    vi.spyOn(runTestsStage, "runTests").mockImplementation((input) => {
+      passed.push(input.suite.tests.map((test) => test.id));
+      return runTestsOriginal(input);
+    });
+    return { reports, passed };
+  }
+
+  it("(4) 正例：条件を持つ操作に期待 true の正常・false の異常・true の境界を書いた走りは、v1 の評価器（runTests）で照合され不一致 0・今までの門で full", async () => {
+    const { reports, passed } = spyRuns();
+    const { result, recording } = await runScenario([...head({ table: TABLE_ON }), structured(acceptAll())], flags);
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(result.summary.exit_code).toBe(0);
+    expect(reports.length).toBeGreaterThan(0);
+    for (const report of reports) expect(report.mismatches).toEqual([]);
+    for (const id of ["r3-normal", "r3-abnormal", "r3-boundary"]) expect(passed.at(-1)).toContain(id);
+    const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)!;
+    expect(t2.rules).toContainEqual(expect.stringContaining(PROPERTY_LEDGER.find((entry) => entry.id === "when")?.rules.t2 ?? "（無い）"));
+    expectNoAcceptanceMaterial(recording.structured.map((request) => JSON.stringify(request)));
+  });
+
+  const negatives = [
+    { name: "期待に操作後の状態（写像）", expected: ok(JSON.stringify({ "f.item.kind": "beta" })) },
+    { name: "期待が文字列", expected: ok(JSON.stringify("closed")) },
+  ] as const;
+  for (const entry of negatives) {
+    it(`(2) 負例：${entry.name}の走りは、旗 on では T2' で 2 回とも落ちて B4 へ進まず full が出ない。旗 off は今までどおり B4 まで流れ「期待は真偽」の不一致`, async () => {
+      const t2 = t2With(entry.expected);
+      const on = await runScenario([structured(draftOf(LIST, TABLE_ON)), structured(acceptAll()), structured(t2), structured(t2)], flags);
+      expect(on.result.stopped?.stage).toBe("test-spec");
+      expect(on.result.outcome.verdict).not.toBe("full");
+      expect(stageIds(on.result)).not.toContain("run-tests");
+      expect(JSON.stringify(diagnosticOf(on.result.diagnostics, DIAGNOSTICS_REJECTED_TEST_SPEC_FILE))).toContain(WHEN_T2.messages.expected);
+      const { reports } = spyRuns();
+      const off = await runScenario([...head({ t2 }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())]);
+      expect(off.result.outcome.verdict).not.toBe("full");
+      expect(reports.length).toBeGreaterThan(0);
+      expect(reports[0]!.mismatches.find((item) => item.testId === "r3-normal")?.detail).toContain("の期待は真偽（true / false）であること");
+    });
+  }
+
+  it("(2) 負例：条件の無い操作（hasWhen 偽）に when の試験を書いた走りは、旗 on では T2' で 2 回とも落ちて B4 へ進まない（B4 の「条件が無く確かめられない」の前に止める）", async () => {
+    const noWhen = rawTest({
+      id: "r1-no-when",
+      requirementId: "R1",
+      targetKind: "operation",
+      roleId: "o.addItem",
+      operation: "action",
+      observes: "when",
+      expected: ok("true"),
+    });
+    const t2 = t2Response([...r1Tests(), noWhen, ...r2Tests(), ...r3Tests(), ...r4Tests()]);
+    const on = await runScenario([structured(draftOf(LIST, TABLE_ON)), structured(acceptAll()), structured(t2), structured(t2)], flags);
+    expect(on.result.stopped?.stage).toBe("test-spec");
+    expect(stageIds(on.result)).not.toContain("run-tests");
+    expect(JSON.stringify(diagnosticOf(on.result.diagnostics, DIAGNOSTICS_REJECTED_TEST_SPEC_FILE))).toContain(WHEN_T2.messages.target);
+  });
+});
+
+// ── (u) 要件でない文（non-requirement。旗 on。§5 の負例。Issue #550）──────────────────────────────
+
+describe("(u) 要件でない文：T1'' が受理した non-requirement の要件だけを残る一覧から除く（旗 on。§5 の負例。Issue #550）", () => {
+  const flags: Partial<GenerationInputV11a> = { flags: { ledger: true } };
+  const requirementOf = (id: string, text: string) => ({ id, text, quote: text, position: { start: 0, end: text.length } });
+  /** 題材の一覧に要件 `id`（文 `text`）を足した一覧・確定した仕様・依頼文と、所属 0 行・non-requirement の表 */
+  const materialsOf = (id: string, text: string) => {
+    const base: RequirementList = { ...BASE_LIST, requirements: [...BASE_LIST.requirements, requirementOf(id, text)] };
+    const plan = planOf(base);
+    const table: NameTable = {
+      ...TABLE_ON,
+      ownership: [...TABLE_ON.ownership, { requirementId: id, roles: [] }],
+      verification: [...TABLE_ON.verification, { requirementId: id, kind: "non-requirement" }],
+      classification: [...TABLE_ON.classification, { requirementId: id, nature: "existence-only" }],
+    };
+    return {
+      plan,
+      list: requirementsFromPlan(plan),
+      source: base.requirements.map((requirement) => requirement.text).join(""),
+      table,
+      ids: [...IDS, id] as const,
+    };
+  };
+  const nonRequirementsOf = (bundle: AssembledBundle | null) => artifactOf(bundle, V11A_ARTIFACT_NAMES.carryOver)["non_requirements"];
+
+  it("(1) 正例：前置き 1 件を non-requirement にし T1'' が受理、ほかの要件が通る走りは今までの門で full。T2 の要求の一覧・確かめ方にその要件が無く、持ち越しの記録の non_requirements にある", async () => {
+    const m = materialsOf("R6", NON_REQUIREMENT_TEXT);
+    const { result, recording } = await runScenario(
+      [structured(draftOf(m.list, m.table)), structured(acceptAll(m.ids)), structured(t2Response()), structured({ declaration: RUN_YAML }), structured(acceptAll())],
+      { ...flags, plan: m.plan, source: m.source },
+    );
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(result.summary.exit_code).toBe(0);
+    expect(carryEntriesOf(result.bundle)).toEqual([]);
+    expect(nonRequirementsOf(result.bundle)).toEqual(["R6"]);
+    expect(artifactOf(result.bundle, V11A_ARTIFACT_NAMES.carryOver)["remaining_requirement_ids"]).toEqual([...IDS]);
+    expect(artifactOf(result.bundle, V11A_ARTIFACT_NAMES.carryOver)["excluded_row_ids"]).toEqual([]);
+    // T1'' の対象のデータに kind つきで載る
+    const semantic = recording.structured.find((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME)!;
+    expect(dataBlockOf(semantic.input, "確かめ方")).toContainEqual({ requirementId: "R6", kind: "non-requirement" });
+    // T2・B3' の要求の一覧・確かめ方に R6 が無い
+    const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)!;
+    expect((dataBlockOf(t2.input, "要件の一覧") as RequirementList).requirements.map((requirement) => requirement.id)).toEqual([...IDS]);
+    expect((dataBlockOf(t2.input, "要件ごとの確かめ方") as readonly { requirementId: string }[]).map((entry) => entry.requirementId)).toEqual([...IDS]);
+    expect(t2.input).not.toContain("non-requirement");
+    const decl = recording.structured.find((request) => request.schemaName === DECL_CHECK_SCHEMA_NAME)!;
+    expect(decl.input).not.toContain('"requirementId": "R6"');
+    expectNoAcceptanceMaterial(recording.structured.map((request) => JSON.stringify(request)));
+  });
+
+  for (const id of ["R6", "R:alt:x1"]) {
+    it(`(2)(3) 負例：決まりのある要件（ID ${id}）を non-requirement に分類した走りは、T1'' の対象のデータに載り、拒否（2 回）で持ち越しになって full が出ない（ID の形で対象から外さない・受理を既定にしない）`, async () => {
+      const m = materialsOf(id, RULED_AS_NON_REQUIREMENT_TEXT);
+      const rejectIt = judgments(m.ids, { [id]: ["weak-verification", RULED_AS_NON_REQUIREMENT_QUOTE] });
+      const { result, recording } = await runScenario(
+        [
+          structured(draftOf(m.list, m.table)),
+          structured(rejectIt),
+          structured(draftOf(m.list, m.table)),
+          structured(rejectIt),
+          structured(t2Response()),
+          structured({ declaration: RUN_YAML }),
+          structured(acceptAll()),
+        ],
+        { ...flags, plan: m.plan, source: m.source },
+      );
+      expect(result.stopped).toBeNull();
+      expect(result.outcome.verdict).toBe("partial");
+      expect(carryEntriesOf(result.bundle)).toEqual([{ requirementId: id, reasons: [{ origin: "semantic-check", reason: "weak-verification" }] }]);
+      expect(nonRequirementsOf(result.bundle)).toBeUndefined();
+      const semantics = recording.structured.filter((request) => request.schemaName === SEMANTIC_CHECK_SCHEMA_NAME);
+      expect(semantics).toHaveLength(2);
+      for (const request of semantics) {
+        expect(dataBlockOf(request.input, "確かめ方")).toContainEqual({ requirementId: id, kind: "non-requirement" });
+        expect((dataBlockOf(request.input, "要件の文と引用") as { requirementId: string }[]).map((entry) => entry.requirementId)).toContain(id);
+      }
+    });
+  }
+
+  it("(4) 負例：了承した代替先の欠落（確定した仕様に R:alt: の要件があるのに、T1 の応答の確かめ方・所属・分類のどれからもその ID ごと抜けた）が 2 回続く走りは、T1' の完全性の検査で落ち、段 name-table・unmet で止まって full が出ない", async () => {
+    const m = materialsOf("R:alt:x1", RULED_AS_NON_REQUIREMENT_TEXT);
+    const draft = draftOf(m.list, m.table);
+    const dropped = { ...draft, requirements: draft.requirements.slice(0, -1) };
+    const { result, recording } = await runScenario([structured(dropped), structured(dropped)], { ...flags, plan: m.plan, source: m.source });
+    expect(result.stopped?.stage).toBe("name-table");
+    expect(result.stopped?.kind).toBe("unmet");
+    expect(result.outcome.verdict).toBe("none");
+    expect(schemaNames(recording.structured)).toEqual([NAME_TABLE_SCHEMA_NAME, NAME_TABLE_SCHEMA_NAME]);
+    const messages = (result.stopped?.problems ?? []).map((problem) => problem.message);
+    expect(messages).toContain("要件の所属が無い");
+    expect(messages).toContain("要件の確かめ方が無い");
+  });
+
+  it("(5) 受理された non-requirement の要件 ID を T2 が試験に書けば「一覧に無い要件 ID」で 2 回とも落ち、段 test-spec で止まる（既存の検査）", async () => {
+    const m = materialsOf("R6", NON_REQUIREMENT_TEXT);
+    const t2 = t2Response([...r1Tests(), ...r2Tests(), ...r3Tests(), ...r4Tests(), rawTest({ id: "r6-x", requirementId: "R6", targetKind: "entity", roleId: "e.item", operation: "screen", observes: "existence", expected: ok("true") })]);
+    const { result } = await runScenario(
+      [structured(draftOf(m.list, m.table)), structured(acceptAll(m.ids)), structured(t2), structured(t2)],
+      { ...flags, plan: m.plan, source: m.source },
+    );
+    expect(result.stopped?.stage).toBe("test-spec");
+    expect(JSON.stringify(diagnosticOf(result.diagnostics, DIAGNOSTICS_REJECTED_TEST_SPEC_FILE))).toContain("一覧に無い要件 ID である");
+  });
+
+  it("持ち越しと要件でない文で全件なら、全件持ち越しと同じ段・種類で止まり、固定文は別（T2 を呼ばない）", async () => {
+    const m = materialsOf("R6", NON_REQUIREMENT_TEXT);
+    const rejectOthers = judgments(m.ids, Object.fromEntries(IDS.map((id) => [id, ["weak-verification", "項目"] as const])));
+    const { result, recording } = await runScenario(
+      [structured(draftOf(m.list, m.table)), structured(rejectOthers), structured(draftOf(m.list, m.table)), structured(rejectOthers)],
+      { ...flags, plan: m.plan, source: m.source },
+    );
+    expect(result.stopped).toEqual({ stage: "carry-over", kind: "unmet", problems: [ALL_CARRIED_OR_NON_REQUIREMENT_PROBLEM] });
+    expect(ALL_CARRIED_OR_NON_REQUIREMENT_PROBLEM.message).not.toBe(ALL_CARRIED_PROBLEM.message);
+    expect(ALL_CARRIED_OR_NON_REQUIREMENT_PROBLEM.field).toBe(ALL_CARRIED_PROBLEM.field);
+    expect(result.outcome.verdict).toBe("none");
+    expect(schemaNames(recording.structured)).not.toContain(TEST_SPEC_SCHEMA_NAME);
+  });
+
+  it("旗 off では同じ表（non-requirement を持つ）は T1' で落ち（未登録の拒否）、full が出ない", async () => {
+    const m = materialsOf("R6", NON_REQUIREMENT_TEXT);
+    const plainTable: NameTable = { ...m.table, rows: TABLE.rows };
+    const { result } = await runScenario([structured(draftOf(m.list, plainTable)), structured(draftOf(m.list, plainTable))], { plan: m.plan, source: m.source });
+    expect(result.stopped?.stage).toBe("name-table");
+    expect(result.outcome.verdict).toBe("none");
+  });
+});
+
 describe("段単位の走り：範囲の外の段を呼ばず、納品物を組まず、境界の材料に B の結果を入れない", () => {
   it("終了 T1''：T2 以降を呼ばず、T1''／T2 の境界だけを返す", async () => {
     const recording = createRecordingClient(head().slice(0, 2));
@@ -1942,6 +2162,9 @@ describe("旗を省いた・off の走りは v1.1α の記録（手 2p の libra
 /** 走りの台帳の導出を #548 の台帳（empty-aggregate の行を除いた導出）にする（#548 までの旗 on を今の候補で再現する。Issue #549） */
 const asLedger2B = () =>
   vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2B : undefined));
+/** 走りの台帳の導出を #549 の台帳（手 2d の前）にする（#549 までの旗 on を今の候補で再現する。Issue #550） */
+const asLedger2C = () =>
+  vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2C : undefined));
 
 /** 手 2p の経路の定義の T1 の応答の計算の行に、集計の種類と集計元を足した写し（今の台帳の旗 on の走りに流す。Issue #549） */
 const BASELINE_DEFINITIONS_ON: BaselineV11aScenarios = {
@@ -2014,9 +2237,12 @@ describe("旗 on の要求の差は台帳に足した行の分だけ：flags.led
     });
   });
 
-  it("今の台帳の on と #548 の台帳の on の差は empty-aggregate の行の分だけ：手 2p の library 4 経路（T1 の応答の計算の行に集計の種類と集計元を足した写し）で、要求の差は名指しの場所（R-nt-08・R-tsp-16・R-w11 の並び・schema の行の型の aggregate・observes の enum・表を載せるデータ）だけで、その分を除けば #548 の on とバイト列で同じ。判定・段の記録・要約・道具の結果・結び付けは同じで、納品物・診断の差は表の aggregate と表の SHA の分だけ", async () => {
+  it("#549 の台帳の on と #548 の台帳の on の差は empty-aggregate の行の分だけ：手 2p の library 4 経路（T1 の応答の計算の行に集計の種類と集計元を足した写し）で、要求の差は名指しの場所（R-nt-08・R-tsp-16・R-w11 の並び・schema の行の型の aggregate・observes の enum・表を載せるデータ）だけで、その分を除けば #548 の on とバイト列で同じ。判定・段の記録・要約・道具の結果・結び付けは同じで、納品物・診断の差は表の aggregate と表の SHA の分だけ", async () => {
     const nowResults: Awaited<ReturnType<typeof runGenerationV11a>>[] = [];
+    // #549 までの旗 on（台帳の when の列が未定義・non-requirement の行が無い）を今の候補で流す（Issue #550）
+    const spy2C = asLedger2C();
     const now = await captureBaselineV11a(moduleCollecting({ flags: { ledger: true } }, nowResults), BASELINE_DEFINITIONS_ON);
+    spy2C.mockRestore();
     const spy = asLedger2B();
     const beforeResults: Awaited<ReturnType<typeof runGenerationV11a>>[] = [];
     const before = await captureBaselineV11a(moduleCollecting({ flags: { ledger: true } }, beforeResults), BASELINE_DEFINITIONS);
@@ -2113,7 +2339,9 @@ describe("旗 on の要求の差は台帳に足した行の分だけ：flags.led
     });
   });
 
-  it("内外の切り分けの型：負例 (c)①（同じ要件を validation の観測で確かめる経路 3）は on でも「対応表の外」の不一致のまま", async () => {
+  it("内外の切り分けの型：負例 (c)①（同じ要件を validation の観測で確かめる経路 3）は #549 の台帳の on でも「対応表の外」の不一致のまま", async () => {
+    // 今の台帳の on は、経路 3 の (a)③ の試験（期待に操作後の状態）を T2' で落とすので B4 へ進まない（下の手 2d の試験。Issue #550）
+    asLedger2C();
     const captures = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS_ON);
     const stagnation = captures[2]?.testRun as {
       readonly mismatches: readonly { readonly testId: string; readonly detail: string }[];
@@ -2136,6 +2364,89 @@ describe("旗 on の要求の差は台帳に足した行の分だけ：flags.led
     expect(seen.length).toBeGreaterThanOrEqual(2);
     expect(seen[0]).toBeUndefined();
     expect(seen.at(-1)?.observes).toContain("default-value");
+  });
+});
+
+describe("手 2d の差：今の台帳の on と #549 の台帳の on の差は when・non-requirement の行の分だけ（Issue #550）", () => {
+  /** 経路 3（carry-over-stagnation）の位置。T2 の応答に (a)③ の試験（期待に操作後の状態を書いた操作の試験）を持つ */
+  const STAGNATION = BASELINE_DEFINITIONS.scenarios.findIndex((scenario) => scenario.name === "carry-over-stagnation");
+  const requestOf = (record: unknown) => (record as { readonly request: unknown }).request;
+
+  it("経路 3 のほか（full・name-table-stop・repair-full）は、要求の差が名指しの場所（R-nt-08・R-sc-02・R-tsp-16・T1 の schema の確かめ方の種類の enum）だけで、その分を除けば #549 の on とバイト列で同じ。判定の問い・道具の結果・試験の結果・納品物・診断・判定は同じ", async () => {
+    expect(STAGNATION).toBeGreaterThanOrEqual(0);
+    const now = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS_ON);
+    asLedger2C();
+    const before = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS_ON);
+    expect(now).toHaveLength(before.length);
+    let compared = 0;
+    now.forEach((capture, index) => {
+      if (index === STAGNATION) return;
+      compared += 1;
+      const expected = before[index]!;
+      expect(capture.requests, capture.name).toHaveLength(expected.requests.length);
+      const diffs = requestDiffsOf(capture.requests.map(requestOf), expected.requests.map(requestOf));
+      for (const diff of diffs) {
+        expect(diff.paths, `${capture.name} ${diff.schemaName}`).toEqual(WHEN_NON_REQUIREMENT_REQUEST_DIFF[diff.schemaName] ?? []);
+      }
+      // T1 を呼ぶ走りでは、T1 の要求に差がある（差は空でない）
+      expect(diffs.some((diff) => diff.paths.length > 0), capture.name).toBe(true);
+      expect(JSON.stringify(withoutWhenAndNonRequirement(capture.requests)), capture.name).toBe(JSON.stringify(expected.requests));
+      const { requests: _now, ...rest } = capture;
+      const { requests: _before, ...expectedRest } = expected;
+      expect(rest, capture.name).toEqual(expectedRest);
+    });
+    expect(compared).toBe(now.length - 1);
+  });
+
+  it("差は空でない：今の台帳の on の T1・T1''・T2 の要求に when の T2 の文と non-requirement の T1・T1'' の文・種類があり、#549 の台帳の on には無い", async () => {
+    const now = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS_ON);
+    asLedger2C();
+    const before = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS_ON);
+    const when = PROPERTY_LEDGER.find((entry) => entry.id === "when")!;
+    const non = PROPERTY_LEDGER.find((entry) => entry.id === "non-requirement")!;
+    const full = JSON.stringify(now[0]!.requests);
+    const previous = JSON.stringify(before[0]!.requests);
+    for (const text of [when.rules.t2, non.rules.t1, non.rules.t1Acceptance]) {
+      expect(text).not.toBeNull();
+      expect(full).toContain(JSON.stringify(text).slice(1, -1));
+      expect(previous).not.toContain(JSON.stringify(text).slice(1, -1));
+    }
+    expect(full).toContain('"non-requirement"');
+    expect(previous).not.toContain("non-requirement");
+  });
+
+  it("(3) (a)③ の型：経路 3 の T2 の応答（期待に操作後の状態を書いた操作の試験 r3-operation-state）を 2 回続けた走りは、旗 on では T2' で落ちて B4 へ進まない。直す前（#549 の台帳の on）は、記録の経路 3 のまま B4 の不一致「期待は真偽」", async () => {
+    const scenario = BASELINE_DEFINITIONS_ON.scenarios[STAGNATION]!;
+    const t2At = (scenario.recorded as readonly { readonly output?: unknown }[]).findIndex(
+      (call) => call.output !== null && typeof call.output === "object" && "tests" in (call.output as object),
+    );
+    expect(t2At).toBeGreaterThan(0);
+    const t2Call = scenario.recorded[t2At]!;
+    const stateTest = ((t2Call as { readonly output: { readonly tests: readonly Record<string, unknown>[] } }).output.tests).find(
+      (test) => test["id"] === "r3-operation-state",
+    );
+    if (stateTest === undefined) throw new Error("前提が壊れた：経路 3 に r3-operation-state が無い");
+    expect(stateTest["observes"]).toBe("when");
+    expect(JSON.parse((stateTest["expected"] as { value: string }).value)).toEqual({ "f.item.kind": "beta" });
+    const twice: BaselineV11aScenarios = {
+      ...BASELINE_DEFINITIONS_ON,
+      scenarios: [{ ...scenario, recorded: [...scenario.recorded.slice(0, t2At + 1), t2Call] }],
+    } as BaselineV11aScenarios;
+    const onResults: Awaited<ReturnType<typeof runGenerationV11a>>[] = [];
+    const [on] = await captureBaselineV11a(moduleCollecting({ flags: { ledger: true } }, onResults), twice);
+    expect(on!.judgment.outcome).toEqual({ result: "failed", verdict: "none" });
+    expect(on!.testRun).toBeNull();
+    expect(on!.requests.map(requestOf).filter((request) => (request as { schemaName?: string }).schemaName === TEST_SPEC_SCHEMA_NAME)).toHaveLength(2);
+    const when = PROPERTY_LEDGER.find((entry) => entry.id === "when")!;
+    expect(onResults[0]?.stopped?.stage).toBe("test-spec");
+    expect(stageIds(onResults[0]!)).not.toContain("run-tests");
+    const rejected = diagnosticOf(onResults[0]!.diagnostics, DIAGNOSTICS_REJECTED_TEST_SPEC_FILE);
+    expect(JSON.stringify(rejected)).toContain(when.t2Condition?.messages.expected ?? "（無い）");
+    // 直す前（#549 の台帳の on）：記録の経路 3 のまま T2 を通り、B4 の不一致に「期待は真偽」が出る
+    asLedger2C();
+    const before = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS_ON);
+    const stagnation = before[STAGNATION]?.testRun as { readonly mismatches: readonly { readonly testId: string; readonly detail: string }[] };
+    expect(stagnation.mismatches.find((entry) => entry.testId === "r3-operation-state")?.detail).toContain("の期待は真偽（true / false）であること");
   });
 });
 

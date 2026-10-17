@@ -22,8 +22,12 @@ import {
   fixtureTable,
   LEDGER_VIEW_2A,
   LEDGER_VIEW_2B,
+  LEDGER_VIEW_2C,
+  fixtureNonRequirementList,
+  fixtureNonRequirementTable,
   withAggregates,
   withoutEnumMembership,
+  withoutWhenAndNonRequirement,
 } from "./__tests__/fixtures.js";
 import {
   MIN_COPY_LENGTH,
@@ -1001,7 +1005,7 @@ describe.each(LEDGER_CASES)("既定値の確かめ方 default-value（T1' の所
     expect(inspectNameTable(list, withNull, FIXTURE_DOCUMENTS)).toEqual({ ok: true, table: tableFor(fixtureTable()) });
   });
 
-  it("確かめ方の種類の固定文に default-value が入り（旗 on は台帳の enum-membership も。Issue #548）、知らない種類は今までどおり落ちる", () => {
+  it("確かめ方の種類の固定文に default-value が入り（旗 on は台帳の enum-membership・non-requirement も。Issue #548・#550）、知らない種類は今までどおり落ちる", () => {
     const draft = draftOf(list, tableFor(fixtureTable()));
     const broken = {
       ...draft,
@@ -1012,7 +1016,7 @@ describe.each(LEDGER_CASES)("既定値の確かめ方 default-value（T1' の所
       problems: [
         {
           field: "requirements[0].verification.kind",
-          message: `確かめ方の種類は fixed-test・structural・unresolved・default-value${options.ledger === undefined ? "" : "・enum-membership"} のいずれかであること`,
+          message: `確かめ方の種類は fixed-test・structural・unresolved・default-value${options.ledger === undefined ? "" : "・enum-membership・non-requirement"} のいずれかであること`,
         },
       ],
     });
@@ -1084,7 +1088,7 @@ describe("旗 on：T1' に台帳に無い確かめ方の種類を直接渡すと
     );
   });
 
-  it("今の台帳の on では、下書きの知らない種類の固定文は off の文に台帳の enum-membership が 1 つ増えるだけ（Issue #548）", () => {
+  it("#549 の台帳の on では、下書きの知らない種類の固定文は off の文に台帳の enum-membership が 1 つ増えるだけ（Issue #548）。今の台帳はさらに non-requirement が 1 つ増えるだけ（Issue #550）", () => {
     const brokenOf = (table: NameTable) => {
       const draft = draftOf(list, table);
       return {
@@ -1093,9 +1097,20 @@ describe("旗 on：T1' に台帳に無い確かめ方の種類を直接渡すと
       };
     };
     // 旗 on の下書きは計算の行に集計の種類と集計元を持つ（Issue #549）
-    const on = checkNameTableDraftShapeOf(brokenOf(withAggregates(fixtureTable())), { ledger: PROPERTY_LEDGER_VIEW });
+    const on = checkNameTableDraftShapeOf(brokenOf(withAggregates(fixtureTable())), { ledger: LEDGER_VIEW_2C });
     const off = checkNameTableDraftShapeOf(brokenOf(fixtureTable()));
     expect(checkNameTableDraftShapeOf(brokenOf(fixtureTable()), { ledger: LEDGER_VIEW_2B })).toEqual(on);
+    const now = checkNameTableDraftShapeOf(brokenOf(withAggregates(fixtureTable())), { ledger: PROPERTY_LEDGER_VIEW });
+    expect(now).toEqual({
+      ok: false,
+      problems: [
+        {
+          field: "requirements[0].verification.kind",
+          message: "確かめ方の種類は fixed-test・structural・unresolved・default-value・enum-membership・non-requirement のいずれかであること",
+        },
+      ],
+    });
+    expect(withoutWhenAndNonRequirement(now)).toEqual(on);
     expect(on).toEqual({
       ok: false,
       problems: [
@@ -1377,5 +1392,112 @@ describe("旗 on：計算の行の型の aggregate（集計の種類と集計元
     if (!shape.ok) expect(shape.problems).toHaveLength(4);
     expect(checkNameTableDraftShapeOf(draftOf(list, withAggregates(fixtureTable())), options).ok).toBe(true);
     expect(check(fixtureTable())).toEqual([]);
+  });
+});
+
+// ── 要件でない文 non-requirement（T1' の所属 0 行。Issue #550）──────────────────────────────
+
+describe("旗 on：要件でない文の確かめ方 non-requirement（所属 0 行・value は null・分類は欄だけ。Issue #550）", () => {
+  const options: NameTableLedgerOptions = { ledger: PROPERTY_LEDGER_VIEW };
+  const nlist = fixtureNonRequirementList();
+  const ntable = (): NameTable => withAggregates(fixtureNonRequirementTable());
+  const NON_ROW = PROPERTY_LEDGER_VIEW.rowByVerificationKind.get("non-requirement");
+  if (NON_ROW?.t1 == null) throw new Error("前提が壊れた：台帳に non-requirement の行が無い");
+  const t1 = NON_ROW.t1;
+  const withR6 = (table: NameTable, patch: (entry: NameTable) => NameTable): NameTable => patch(table);
+
+  it("(1) 正例：所属 0 行・kind non-requirement の要件は問題 0。分類は欄だけ（existence-only でも ruled でも問題 0）。下書きから同じ表に戻る", () => {
+    expect(checkNameTableOf(nlist, ntable(), FIXTURE_DOCUMENTS, options)).toEqual([]);
+    const ruled = withR6(ntable(), (table) => ({
+      ...table,
+      classification: table.classification.map((entry) => (entry.requirementId === "R6" ? { ...entry, nature: "ruled" as const } : entry)),
+    }));
+    expect(checkNameTableOf(nlist, ruled, FIXTURE_DOCUMENTS, options)).toEqual([]);
+    expect(inspectNameTableOf(nlist, draftOf(nlist, ntable()), FIXTURE_DOCUMENTS, options)).toEqual({ ok: true, table: ntable() });
+    // strict の schema の形（value を null で持つ）でも同じ表に戻る
+    const draft = draftOf(nlist, ntable());
+    const withNull = { ...draft, requirements: draft.requirements.map((entry) => ({ ...entry, verification: { ...entry.verification, value: null } })) };
+    expect(inspectNameTableOf(nlist, withNull, FIXTURE_DOCUMENTS, options)).toEqual({ ok: true, table: ntable() });
+  });
+
+  it("(2) 負例：行を 1 つでも所属させた（表に在る行・entity・表に無い ID）は固定文で落ちる", () => {
+    for (const id of ["f.item.title", "e.item"]) {
+      const owned = withR6(ntable(), (table) => ({
+        ...table,
+        ownership: table.ownership.map((entry) => (entry.requirementId === "R6" ? { ...entry, roles: [{ id, basis: "stated" as const, reason: null }] } : entry)),
+      }));
+      expect(checkNameTableOf(nlist, owned, FIXTURE_DOCUMENTS, options), id).toEqual([{ field: "verification[5]", message: t1.messages.count }]);
+    }
+    const unknown = withR6(ntable(), (table) => ({
+      ...table,
+      ownership: table.ownership.map((entry) => (entry.requirementId === "R6" ? { ...entry, roles: [{ id: "f.no.such", basis: "stated" as const, reason: null }] } : entry)),
+    }));
+    expect(checkNameTableOf(nlist, unknown, FIXTURE_DOCUMENTS, options)).toEqual([
+      { field: "ownership[5].roles[0].id", message: "所属の表の ID が表に無い" },
+      { field: "verification[5]", message: t1.messages.count },
+    ]);
+  });
+
+  it("(2) 負例：value が null でない（型付きの表・下書き）は固定文で落ちる", () => {
+    const valued = withR6(ntable(), (table) => ({
+      ...table,
+      verification: table.verification.map((entry) => (entry.requirementId === "R6" ? ({ ...entry, value: "x" } as unknown as typeof entry) : entry)),
+    }));
+    expect(checkNameTableOf(nlist, valued, FIXTURE_DOCUMENTS, options)).toEqual([{ field: "verification[5].value", message: t1.messages.valueEmpty }]);
+    const draft = draftOf(nlist, ntable());
+    const broken = {
+      ...draft,
+      requirements: draft.requirements.map((entry, at) => (at === 5 ? { ...entry, verification: { kind: "non-requirement", value: "x" } } : entry)),
+    };
+    expect(checkNameTableDraftShapeOf(broken, options)).toEqual({
+      ok: false,
+      problems: [{ field: "requirements[5].verification.value", message: t1.messages.valueShape }],
+    });
+  });
+
+  it("未登録の拒否：旗 off・#549 の台帳で kind に non-requirement を書けば落ちる（下書きは種類の一覧の固定文・型付きの表も通さない）", () => {
+    const offShape = checkNameTableDraftShapeOf(draftOf(nlist, fixtureNonRequirementTable()));
+    expect(offShape).toEqual({
+      ok: false,
+      problems: [
+        { field: "requirements[5].verification.kind", message: "確かめ方の種類は fixed-test・structural・unresolved・default-value のいずれかであること" },
+      ],
+    });
+    expect(checkNameTableOf(nlist, fixtureNonRequirementTable(), FIXTURE_DOCUMENTS)).toEqual([
+      { field: "verification[5].kind", message: "確かめ方の種類は fixed-test・structural・unresolved・default-value のいずれかであること" },
+    ]);
+    expect(checkNameTableOf(nlist, ntable(), FIXTURE_DOCUMENTS, { ledger: LEDGER_VIEW_2C })).toEqual([
+      { field: "verification[5].kind", message: UNREGISTERED_VERIFICATION_KIND_MESSAGE },
+    ]);
+  });
+
+  it("完全性は免除しない：non-requirement の要件も所属・確かめ方・分類がちょうど 1 つ要る（分類を欠けば落ちる。旗 on・off とも、要件 ID の形に依らない）", () => {
+    for (const id of ["R6", "R:alt:x1"]) {
+      const list = fixtureNonRequirementList(undefined, id);
+      const table = withAggregates(fixtureNonRequirementTable(id));
+      expect(checkNameTableOf(list, table, FIXTURE_DOCUMENTS, options), id).toEqual([]);
+      const noClass = { ...table, classification: table.classification.filter((entry) => entry.requirementId !== id) };
+      expect(checkNameTableOf(list, noClass, FIXTURE_DOCUMENTS, options), id).toEqual([{ field: "requirements[5]", message: "要件の分類が無い" }]);
+      // 了承した代替先の欠落：確かめ方・所属・分類のどれからもその ID ごと抜けた表
+      const dropped = {
+        ...table,
+        ownership: table.ownership.filter((entry) => entry.requirementId !== id),
+        verification: table.verification.filter((entry) => entry.requirementId !== id),
+        classification: table.classification.filter((entry) => entry.requirementId !== id),
+      };
+      for (const ledger of [PROPERTY_LEDGER_VIEW, undefined]) {
+        const problems = checkNameTableOf(list, ledger === undefined ? fixtureTable() : withAggregates(fixtureTable()), FIXTURE_DOCUMENTS, ledger === undefined ? {} : { ledger });
+        expect(problems, `${id} ${ledger === undefined ? "off" : "on"}`).toEqual([
+          { field: "requirements[5]", message: "要件の所属が無い" },
+          { field: "requirements[5]", message: "要件の確かめ方が無い" },
+          { field: "requirements[5]", message: "要件の分類が無い" },
+        ]);
+      }
+      expect(checkNameTableOf(list, dropped, FIXTURE_DOCUMENTS, options)).toEqual([
+        { field: "requirements[5]", message: "要件の所属が無い" },
+        { field: "requirements[5]", message: "要件の確かめ方が無い" },
+        { field: "requirements[5]", message: "要件の分類が無い" },
+      ]);
+    }
   });
 });
