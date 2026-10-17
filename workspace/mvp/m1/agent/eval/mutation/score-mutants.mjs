@@ -61,6 +61,7 @@ export const MESSAGES = {
   hash_mismatch: "目録のファイルの SHA-256 が申告の値と一致しない（何も数えずに断る）",
   entry_unlisted: "dist の入口のファイルが、目録のファイルの一覧に載っていない",
   dependency_unlisted: "dist の入口から import で読むファイル（依存）が、目録のファイルの一覧に載っていない（評価の前に断る）",
+  forbidden_api: "目録のファイルに、require・createRequire・node:module・node:vm・eval・Function のコンストラクタのどれかがある（評価の前に断る）",
   dependency_unresolved: "dist の入口から import で読む指定子を、目録の package.json で解けない（評価の前に断る）",
   invalid_output: "手 5a の出力の schema・形が知らない値である",
   origin_missing: "目録の原本が、手 5a の出力に無い",
@@ -200,6 +201,24 @@ const outcomesById = (suite, r) => {
   const bad = new Set(r.testRun.mismatches.map((x) => x.testId)), unres = new Set(r.testRun.unresolved.map((x) => x.testId));
   return Object.fromEntries(suite.tests.map((t) => [t.id, bad.has(t.id) ? "mismatch" : unres.has(t.id) ? "unresolved" : "match"]));
 };
+
+// ── 目録のコードの静的な走査（#571 の 3 回目のレビュー）
+// hook は import の読み込みしか見ない。同期の require（createRequire）・vm・eval・Function のコンストラクタは hook を通らずにコードを読み込み・実行し得るので、
+// 目録に載ったコード（.js・.mjs・.cjs）の中身にその口が 1 つでもあれば、評価の前に断る。今の dist（tsc の出力）はどれも持たない。
+// fs は見ない（今の dist は入力のファイルを fs で読む）。fs で読んだ中身をコードとして実行する口は、eval・Function・vm の走査で断る。sandbox ではない。
+const FORBIDDEN_APIS = [
+  { id: "require", re: /\brequire\s*\(/ },
+  { id: "createRequire", re: /\bcreateRequire\b/ },
+  { id: "node:module", re: /["'](?:node:)?module["']/ },
+  { id: "node:vm", re: /["'](?:node:)?vm["']/ },
+  { id: "eval", re: /\beval\s*\(/ },
+  { id: "Function", re: /\bFunction\s*\(/ },
+];
+/** コードの原文に含まれる禁じた口の id（無ければ空） */
+export function forbiddenApisIn(text) {
+  return FORBIDDEN_APIS.filter((a) => a.re.test(text)).map((a) => a.id);
+}
+const isCode = (p) => /\.(?:m|c)?js$/.test(p);
 
 const importDist = (d, base) => import(pathToFileURL(resolve(base, d.entry)).href);
 
@@ -357,6 +376,7 @@ export async function scoreMutants({ inventory, baseDir = process.cwd(), readFil
   // 1. 読む前に SHA-256 を全部照らす（版・候補のファイル）。dist の入口からの import の閉包は、目録に載ったファイルだけで求める
   const depFiles = [...v.factory_dist.files, ...v.spec_engine_dist.files, ...(v.dependency_files ?? [])];
   for (const f of [...depFiles, v.scoring_engine]) readChecked(f);
+  for (const f of depFiles) if (isCode(at(f.path)) && forbiddenApisIn(readChecked(f).toString("utf8")).length > 0) refuse("forbidden_api");
   const listed = new Map(depFiles.map((f) => [at(f.path), f]));
   const closure = dependencyClosure([at(v.factory_dist.entry), at(v.spec_engine_dist.entry)], (p) => {
     const ref = listed.get(p);
