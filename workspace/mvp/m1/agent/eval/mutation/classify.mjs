@@ -52,6 +52,8 @@ export const MESSAGES = {
   marksShape: "印は sha256（64 桁の 16 進）・reviewer_role（空でない文字列）・verdict を持つ一覧で書く",
   marksVerdict: "印の verdict が知らない値である（原本の印は incorrect、変異の印は non-equivalent か equivalent）",
   originsShape: "原本は id・source・def を持つ一覧で書く",
+  mutantSha: "変異の原文の SHA-256 が申告の値と一致しない（印を適用せずに断る）",
+  outputCheck: "出力の検算（7 分類の件数の和・変異ごとの原文の SHA-256）が通らない",
   filePath: "spec-engine と採点のエンジンのパスは文字列で渡す",
 };
 
@@ -126,6 +128,9 @@ export async function classifyMutations({ engineFile, scoringEngineFile, origins
   const markSet = loadMarks(marks);
   if (!Array.isArray(origins) || origins.some((o) => o === null || typeof o !== "object" || typeof o.id !== "string" || typeof o.source !== "string" || o.def === null || typeof o.def !== "object")) throw new MutationToolError("invalid_origins", MESSAGES.originsShape);
 
+  // 外から渡された変異は、印を適用する前に原文の SHA-256 を計算して申告と照合する（計算し直して通さない）
+  if (given !== null) for (const list of Object.values(given)) for (const m of list) if (m === null || typeof m !== "object" || typeof m.source !== "string" || sha256(m.source) !== m.sha256) throw new MutationToolError("mutant_sha_mismatch", MESSAGES.mutantSha);
+
   const tmp = mkdtempSync(join(tmpdir(), "mutation-classify-"));
   const scoreText = async (text, def) => {
     const file = join(tmp, "candidate.app.spec.yaml");
@@ -178,7 +183,7 @@ export async function classifyMutations({ engineFile, scoringEngineFile, origins
     };
     const byClass = emptyByClass();
     for (const m of mutantOut) byClass[m.class] += 1;
-    return {
+    const result = {
       schema: OUTPUT_SCHEMA,
       definitions: { classes: CLASSES, detection_denominator_rule: DENOMINATOR_RULE, priority_rule: "上から順に最初に当てはまる 1 つだけ。1 つの変異は 2 つの分類に入らない" },
       fingerprints: {
@@ -198,6 +203,8 @@ export async function classifyMutations({ engineFile, scoringEngineFile, origins
         ignored_marks: ignored,
       },
     };
+    if (!verifyOutput(result)) throw new MutationToolError("output_check_failed", MESSAGES.outputCheck);
+    return result;
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

@@ -290,3 +290,19 @@ test("知らない値の印・形の違う印は固定文で断る", () => {
   assert.deepEqual(loadMarks(null).mutant_marks, []);
   assert.deepEqual(loadMarks(JSON.stringify(marksOf())).origin_marks, []);
 });
+
+test("原文だけ 1 バイト変えて sha256 を据え置いた変異は断られ、印は適用されない（出力も作られない）", async () => {
+  const m = byId(ID.reorder);
+  const tampered = { ...m, source: m.source.replace("# note", "# Note") };
+  assert.notEqual(tampered.source, m.source);
+  assert.equal(tampered.sha256, m.sha256);
+  await assert.rejects(
+    () => run({ mutants: { o1: [tampered] }, marks: marksOf([markAt(ID.reorder, "non-equivalent")]) }),
+    (e) => e instanceof MutationToolError && e.code === "mutant_sha_mismatch" && e.message === MESSAGES.mutantSha,
+  );
+  // 原文が文字列でない申告も断る
+  await assert.rejects(() => run({ mutants: { o1: [{ ...m, source: null }] } }), (e) => e.code === "mutant_sha_mismatch");
+  // 照合が通る変異は従来どおり印が適用される
+  const ok = await run({ mutants: { o1: [m] }, marks: marksOf([markAt(ID.reorder, "non-equivalent")]) });
+  assert.equal(ok.mutants[0].class, "non-equivalent");
+});
