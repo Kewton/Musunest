@@ -57,7 +57,7 @@
 //   stage_pass_rate（対象予定・入力なし・起動・観測・欠測・通過。率の分母は 予定 − 入力なし で起動前に決まる）を出す。原文系・了承後系の PASS と納品の欄は
 //   計算しない（null と not_computed の理由 stage-run）。漏斗は範囲の中の段だけ。--compare は段だけの対の比較（before・after）で、段の通過の対の差と
 //   P のまとまりの p・bootstrap の区間を今の関数で出す
-// #557 で足したもの（経路 v1.2 の条件と --compare-pipelines の組の採点だけ。v1・v1.1a の条件と比較の欄・値・標準出力は変えない。README §5.12。設計書 08 §8.6・§8.7・§9）：
+// #557 で足したもの（経路 v1.2 の条件と --compare-pipelines の組の採点だけ。v1・v1.1a の条件と比較の欄・値・標準出力は変えない。README §5.13。設計書 08 §8.6・§8.7・§9）：
 //   条件の版 v7（params.pipeline が v1.2 で params.v12_flags を足した。v1.2 のときだけ）。evaluation.pipeline に v1.2、evaluation.v12_flags に条件の旗の組と
 //   照合の結果ごとの本の数。照合は計測が本ごとに残した報告（summary.line.json の v12_flags）を条件の組と名前 → 真偽の集合として照らし直す。起動した本の 1 本でも
 //   一致しなければ照合は未照合（completion.unverified に v12-flags）。未起動の本は今の未実行・途中のまま。
@@ -1775,7 +1775,7 @@ export function pairsProblem(v, { frozenSha256, adopted, groups = COMPARE_GROUPS
   if (keys.size !== expected.length) return "compare:pairs-extra";
   return null;
 }
-// ── 経路 v1.2 と比較の群の組（#557。設計書 08 §8.6・§8.7・§9。README §5.12）
+// ── 経路 v1.2 と比較の群の組（#557。設計書 08 §8.6・§8.7・§9。README §5.13）
 // 旗の組の正本は工場の dist の package の入口の V12_PIPELINE_FLAGS（旗の名前 → 真偽）。計測がそれを読んで条件に写し、ここには旗の名前を書かない
 /** 経路 v1.2 の名前と、v1.2 の条件の版（v5 に params.v12_flags を足した。v1.2 のときだけ書く。v6 は段単位の走り #545） */
 export const V12_PIPELINE = "v1.2";

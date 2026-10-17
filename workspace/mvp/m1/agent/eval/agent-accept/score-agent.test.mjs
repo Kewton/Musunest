@@ -3913,7 +3913,7 @@ test("#545 直し 3：工場の dist の STAGE_STARTS・STAGE_ENDS に出る段�
   assert.ok(stagesInRange("write", "judge").includes("carry-over"), "B 区間に carry-over");
 });
 
-// ── #557：経路 v1.2 の条件（v7）・旗の組の照合・比較の群の組（--compare-pipelines）。README §5.12。題材の言葉を使わない（要件の文は cases/ の宣言だけ）
+// ── #557：経路 v1.2 の条件（v7）・旗の組の照合・比較の群の組（--compare-pipelines）。README §5.13。題材の言葉を使わない（要件の文は cases/ の宣言だけ）
 import { COMPARE_PIPELINE_PAIRS, CONDITIONS_V7, V12_FLAG_STATUSES, V12_PIPELINE, comparePipelinesOf, compareProfileOf, compareRolesOf, diffDirectionOf, groupConditionsProblem, isFlagMap, sameFlags, v12FlagsStatus, v12ReportOf } from "./score-agent.mjs";
 
 const MARK557 = "leak-marker-557";
@@ -4224,11 +4224,11 @@ test("#557 比較の匿名の口：群ごとの経路と、照合を通った旗
   });
 });
 
-test("#557 README：§5.12 の節に経路 v1.2・--compare-pipelines・旗の組の読み方（公開の値・報告との照合・未照合）・schema の版の照合・3 つの組の正式な条件の扱いがある", () => {
+test("#557 README：§5.13 の節に経路 v1.2・--compare-pipelines・旗の組の読み方（公開の値・報告との照合・未照合）・schema の版の照合・3 つの組の正式な条件の扱いがある", () => {
   const text = readFileSync(join(ev, "README.md"), "utf8");
-  const sec = text.slice(text.indexOf("### 5.12 "), text.indexOf("## 6. "));
-  assert.ok(sec.length > 0 && text.indexOf("### 5.12 ") > 0, "§5.12 が無い");
-  for (const w of ["--pipeline v1.2", "--compare-pipelines", "V12_PIPELINE_FLAGS", "pipeline:v1.2-unavailable", "v12-flags", "未照合", "agent-accept-conditions/v7", "compare:conditions-version", "compare:conditions-stage", "v1.1a,v1.2", "v1,v1.2", "pipelines", "diagnostic", "compare:pairs-schema", "compare:limits-unapproved"]) assert.ok(sec.includes(w), `§5.12 に ${w} が無い`);
+  const sec = text.slice(text.indexOf("### 5.13 "), text.indexOf("## 6. "));
+  assert.ok(sec.length > 0 && text.indexOf("### 5.13 ") > 0, "§5.13 が無い");
+  for (const w of ["--pipeline v1.2", "--compare-pipelines", "V12_PIPELINE_FLAGS", "pipeline:v1.2-unavailable", "v12-flags", "未照合", "agent-accept-conditions/v7", "compare:conditions-version", "compare:conditions-stage", "v1.1a,v1.2", "v1,v1.2", "pipelines", "diagnostic", "compare:pairs-schema", "compare:limits-unapproved"]) assert.ok(sec.includes(w), `§5.13 に ${w} が無い`);
 });
 
 test("#557 工場の dist（先に pnpm build）：package の入口の V12_PIPELINE_FLAGS が旗の名前 → 真偽の写像で、入口の経路の一覧が計測と採点の共有の PIPELINES と同じ。条件の記録の場所（BUILD_RECORD_PATH）が dist の BUILD_CLI_RECORD_FILE と同じ", async () => {

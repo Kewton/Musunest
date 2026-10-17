@@ -1937,7 +1937,7 @@ test("#545 直し：境界の checkpoint の宣言が無い記録は、範囲の
   });
 });
 
-// ── #557：経路 v1.2（--pipeline v1.2）と比較の群の組（--compare-pipelines）。README §5.12
+// ── #557：経路 v1.2（--pipeline v1.2）と比較の群の組（--compare-pipelines）。README §5.13
 // 偽物の工場の dist：package の入口（index.js）に V12_PIPELINE_FLAGS を置き、入口（cli.js）は --pipeline v1.2 のとき、その値（FAKE_V12 で本ごとに差し替え。
 // "__absent__" は欄を書かない）を要約の行と条件の記録（bundle/build-record.json の conditions）の v12_flags に書く。起動を FAKE_SPAWN_LOG に 1 行ずつ数える
 const fakeV12Cli = String.raw`import { appendFileSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
