@@ -17,6 +17,9 @@
 //   - 月の見出し（`groupBy.month === true`・分ける項目の名前・**`aggregate.entity` が表の集計元 entity の名前**）
 //   - 操作の種類（省略は create）と `when` の有無
 //   - 画面の種類（`type` を省いた画面はどの種類とも一致しない。fail-closed）
+//   - 集計の種類と集計元（表の計算の行が `aggregate` を持つときだけ＝旗 on で台帳が集計の種類を持つ走り。Issue #549）：
+//     宣言の `aggregate.kind` が表の種類と、`aggregate.entity` が表の集計元の entity の行の名前と同じこと。off の表は
+//     欄を持たない（T1' が形で落とす）ので見ない
 // 落ちはすべて `CorrespondenceMiss`（行き先 `missing-element`）にして、⑥（B5）へ回す。
 //
 // 除く範囲（D14）：持ち越しの要件は一覧から除いて渡し、**一覧のどの要件も所属させない行**（持ち越しの
@@ -160,7 +163,13 @@ const nameOfRow = (table: NameTable, id: string | null): string | null =>
  * 1 行の足す検査。宣言にその（種類・所属 entity の名前・名前）の場所が無い行は検査しない（実在の落ちは v1 の
  * 検査が出す）。合わない欄ごとに 1 つの理由を返す。
  */
-function extraProblems(app: NormalizedAppSpec, table: NameTable, row: NameTableRow, location: DeclarationLocation): readonly string[] {
+function extraProblems(
+  app: NormalizedAppSpec,
+  table: NameTable,
+  row: NameTableRow,
+  location: DeclarationLocation,
+  fullTable: NameTable = table,
+): readonly string[] {
   const problems: string[] = [];
   switch (row.kind) {
     case "entity":
@@ -194,6 +203,18 @@ function extraProblems(app: NormalizedAppSpec, table: NameTable, row: NameTableR
       if (actualScope !== scope) problems.push(`計算 ${location.name} の範囲が ${actualScope}（表は ${scope}）`);
       const actualForm = computedForm(computed);
       if (actualForm !== form) problems.push(`計算 ${location.name} の種別が ${actualForm}（表は ${form}）`);
+      // 集計の種類と集計元（表の行が持つときだけ。種別が集計でない宣言は上の種別の落ちに任せる。Issue #549）
+      const aggregate = row.type.aggregate;
+      if (aggregate !== undefined && aggregate !== null && isComputedAggregate(computed)) {
+        if (computed.aggregate.kind !== aggregate.kind) {
+          problems.push(`計算 ${location.name} の集計の種類が ${computed.aggregate.kind}（表は ${aggregate.kind}）`);
+        }
+        // 集計元の entity の行は照合の範囲の外（持ち越しの要件だけが所属させる行）でも名前を引ける（全行の表から）
+        const expectedEntity = nameOfRow(fullTable, aggregate.entity);
+        if (computed.aggregate.entity !== expectedEntity) {
+          problems.push(`計算 ${location.name} の集計元が ${computed.aggregate.entity}（表は ${expectedEntity ?? "無し"}）`);
+        }
+      }
       if (row.groupBy !== null && row.groupBy.kind === "month") {
         // 月の見出し：（集計元 entity・項目・month）の組で照らす。項目名と month だけでは、別 entity の同名の
         // date 項目へ向けた宣言を通してしまう（見出しごとの集計は自身の entity を持たない。§2.2）
@@ -278,7 +299,7 @@ export function checkNames(input: NameCheckInput): NameCheckResult {
   for (const row of scope.table.rows) {
     const location = rowLocation(scope.table, row.id);
     if (location === undefined || !declarationHasLocation(input.app, location)) continue;
-    for (const detail of extraProblems(input.app, scope.table, row, location)) {
+    for (const detail of extraProblems(input.app, scope.table, row, location, input.table)) {
       extraMisses.push({ requirementId: firstOwner(row.id), location, detail, route: "missing-element" });
     }
   }

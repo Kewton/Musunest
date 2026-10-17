@@ -10,15 +10,39 @@ import * as bindModule from "../stages/bind.js";
 import * as runTestsStage from "../stages/run-tests.js";
 import { runTests } from "../stages/run-tests.js";
 import type { EvaluationContext } from "../stages/tools.js";
-import { FIXTURE_YAML, fixtureList, fixtureTable, normalizedFixture } from "./__tests__/fixtures.js";
+import { FIXTURE_YAML, LEDGER_VIEW_2A, fixtureList, fixtureTable, fixtureYaml, normalizedFixture } from "./__tests__/fixtures.js";
 import { bindTestsById, correspondenceFromTable } from "./bind-by-id.js";
 import { identityMappings, toRoleEntries, toV1 } from "./convert.js";
-import { DEFAULT_VALUE_DETAILS, UNMAPPED_OBSERVES_DETAIL, createV11aEvaluator, judgeDefaultValue } from "./evaluate.js";
+import {
+  DEFAULT_VALUE_DETAILS,
+  ENUM_MEMBERSHIP_DETAILS,
+  LEDGER_OBSERVES_DETAILS,
+  UNMAPPED_OBSERVES_DETAIL,
+  V11A_EVALUATION_JUDGES,
+  V11A_EVALUATION_NAMES,
+  createV11aEvaluator,
+  createV11aEvaluator as createV11aEvaluatorBase,
+  judgeDefaultValue,
+  judgeEnumMembership,
+} from "./evaluate.js";
+import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, deriveLedgerView, type LedgerView } from "../v12/ledger.js";
 import type { TestObserves } from "./stages/test-spec.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+/** 旗 off（台帳を渡さない）と旗 on（台帳の導出を渡す）。評価口の試験を両方で同じ結果に照らす（Issue #547） */
+const LEDGER_CASES: readonly { readonly name: string; readonly ledger: LedgerView | undefined }[] = [
+  { name: "off", ledger: undefined },
+  { name: "on", ledger: PROPERTY_LEDGER_VIEW },
+];
+
+/** 旗に合わせた評価口の作り方（on は台帳の導出を閉包に渡す） */
+const evaluatorFactory =
+  (ledger: LedgerView | undefined): typeof createV11aEvaluatorBase =>
+  (input) =>
+    createV11aEvaluatorBase(ledger === undefined ? input : { ...input, ledger });
 
 const TABLE = fixtureTable();
 const listWithout = (...ids: readonly string[]): RequirementList => ({
@@ -139,7 +163,8 @@ describe("④ に落ちる版", () => {
   });
 });
 
-describe("通る版", () => {
+describe.each(LEDGER_CASES)("通る版（旗 $name）", ({ ledger }) => {
+  const createV11aEvaluator = evaluatorFactory(ledger);
   it("B3 の落ちと、表の id で結び付けて流した結果を持ち、defectMisses・redoMisses は空", async () => {
     const evaluator = createV11aEvaluator({ table: TABLE, observes: OBSERVES });
     // B3 の落ち（画面から辿れない項目）がある宣言
@@ -216,7 +241,8 @@ describe("組・一覧・所属は毎回文脈から取る", () => {
   });
 });
 
-describe("観測する性質の写像（observes。必須。Issue #526）", () => {
+describe.each(LEDGER_CASES)("観測する性質の写像（observes。必須。Issue #526。旗 $name）", ({ ledger }) => {
+  const createV11aEvaluator = evaluatorFactory(ledger);
   /** v1 の runTests を、表の id の結び付けで直接流す（評価口を通さない） */
   async function directRun(source: string, suite: TestSuite, dropBindingOf: readonly string[] = []) {
     const app = await normalizedFixture(source);
@@ -334,7 +360,8 @@ describe("観測する性質の写像（observes。必須。Issue #526）", () =
   });
 });
 
-describe("既定値の試験（observes が default-value）は v1 に渡さず、宣言の default と照合する（Issue #533）", () => {
+describe.each(LEDGER_CASES)("既定値の試験（observes が default-value）は v1 に渡さず、宣言の default と照合する（Issue #533。旗 $name）", ({ ledger }) => {
+  const createV11aEvaluator = evaluatorFactory(ledger);
   /** 区分の項目の既定値を alpha にした宣言（静的チェックを通る） */
   const withDefault = (key: string | null, source: string = YAML): string => {
     const from = "          beta: ベータ\n";
@@ -493,5 +520,245 @@ describe("既定値の試験（observes が default-value）は v1 に渡さず�
     expect(report.staticCheck.diagnostics.map((diagnostic) => diagnostic.code)).toContain("DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS");
     expect(report.testRun).toBeNull();
     expect(report.correspondence).toBeNull();
+  });
+});
+
+// ── 旗 on：台帳の照合の名前で振り分ける（Issue #547）────────────────────────────
+
+describe("旗 on：評価口に台帳に無い・登録済み未対応の観測する性質を渡すと未解決で、v1 の runTests に渡らない", () => {
+  const createV11aEvaluator = evaluatorFactory(PROPERTY_LEDGER_VIEW);
+
+  async function evaluateWith(observes: ReadonlyMap<string, TestObserves>, view: LedgerView = PROPERTY_LEDGER_VIEW) {
+    const passed: string[][] = [];
+    const original = runTestsStage.runTests;
+    vi.spyOn(runTestsStage, "runTests").mockImplementation((input) => {
+      passed.push(input.suite.tests.map((test) => test.id));
+      return original(input);
+    });
+    const app = await normalizedFixture(YAML);
+    const context = contextOf(listWithout());
+    const evaluator = createV11aEvaluatorBase({ table: TABLE, observes, ledger: view });
+    const checked = evaluator.nameCheck(app, context);
+    const report = evaluator.runTests(app, context, { entries: checked.entries, misses: checked.misses });
+    const evaluated = await evaluator.evaluate(app, { source: YAML }, context);
+    const versioned = await evaluator.report({ source: YAML }, context);
+    return { report, passed, evaluated, versioned };
+  }
+  const pick = (report: ReturnType<typeof runTests>, testId: string) => ({
+    mismatches: report.mismatches.filter((entry) => entry.testId === testId),
+    unresolved: report.unresolved.filter((entry) => entry.testId === testId),
+    routes: report.routes.filter((entry) => entry.testId === testId),
+    structural: report.structural.filter((entry) => entry.testId === testId),
+  });
+
+  it("二点測定：台帳にある性質（when）は v1 に渡り、台帳に無い性質・未対応の性質は固定文の未解決（行き先 ambiguity）で v1 に渡らない", async () => {
+    const control = await evaluateWith(OBSERVES);
+    expect(control.passed.every((ids) => ids.includes("t-when-ok"))).toBe(true);
+    for (const [observed, detail, view] of [
+      ["no-such-property", LEDGER_OBSERVES_DETAILS.unregistered, PROPERTY_LEDGER_VIEW],
+      ["other", LEDGER_OBSERVES_DETAILS.unregistered, PROPERTY_LEDGER_VIEW],
+      ["state-after-set", LEDGER_OBSERVES_DETAILS.unsupported, PROPERTY_LEDGER_VIEW],
+      // 手 2a の台帳（enum-membership の行が無い）では未登録（Issue #548）
+      ["enum-membership", LEDGER_OBSERVES_DETAILS.unregistered, LEDGER_VIEW_2A],
+    ] as const) {
+      const observes = new Map([...OBSERVES, ["t-when-ok", observed as TestObserves]]);
+      const { report, passed, evaluated, versioned } = await evaluateWith(observes, view);
+      expect(pick(report, "t-when-ok"), observed).toEqual({
+        mismatches: [],
+        unresolved: [{ testId: "t-when-ok", detail }],
+        routes: [{ testId: "t-when-ok", route: "ambiguity", detail }],
+        structural: [],
+      });
+      expect(passed.length, observed).toBeGreaterThan(0);
+      for (const ids of passed) expect(ids, observed).not.toContain("t-when-ok");
+      // ほかの試験の結果は対照と同じ。B5 の道具・版の再検査も同じ結果
+      for (const test of SUITE.tests.filter((entry) => entry.id !== "t-when-ok")) {
+        expect(pick(report, test.id), test.id).toEqual(pick(control.report, test.id));
+      }
+      expect(evaluated.testRun).toEqual(report);
+      expect(versioned.testRun).toEqual(report);
+      // 固定文は性質の値を埋めない
+      expect(detail).not.toContain(observed);
+    }
+  });
+
+  it("未解決の行き先は、写像に無い試験（今の v1 の no-mapping の未解決）と同じ ambiguity。構造の検査は構造の記録も未解決", async () => {
+    const unmapped = await evaluateWith(observesWithout("t-shows"));
+    const unregistered = await evaluateWith(new Map([...OBSERVES, ["t-shows", "no-such-property" as TestObserves]]));
+    expect(pick(unregistered.report, "t-shows").routes.map((entry) => entry.route)).toEqual(
+      pick(unmapped.report, "t-shows").routes.map((entry) => entry.route),
+    );
+    expect(pick(unregistered.report, "t-shows").structural).toEqual([
+      { testId: "t-shows", requirementId: "R2", check: "view-shows", result: "unresolved", detail: LEDGER_OBSERVES_DETAILS.unregistered },
+    ]);
+  });
+
+  it("台帳の行の照合の名前が評価口の表に無ければ未解決（固定文）で v1 に渡らない", async () => {
+    const rows = PROPERTY_LEDGER.map((row) => (row.id === "when" ? { ...row, evaluation: "no-such-evaluation" } : row));
+    const { report, passed } = await evaluateWith(OBSERVES, deriveLedgerView(rows));
+    for (const testId of ["t-when-ok", "t-when-bad"]) {
+      expect(pick(report, testId).unresolved).toEqual([{ testId, detail: LEDGER_OBSERVES_DETAILS.unknownEvaluation }]);
+      for (const ids of passed) expect(ids).not.toContain(testId);
+    }
+  });
+
+  it("写像に無い試験は on でも今と同じ固定文の未解決", async () => {
+    const { report } = await evaluateWith(observesWithout("t-rate"));
+    expect(pick(report, "t-rate").unresolved).toEqual([{ testId: "t-rate", detail: UNMAPPED_OBSERVES_DETAIL }]);
+  });
+
+  it("評価口の表は台帳の有効の行の照合の名前を全部持ち、v1 の振り分けと既定値の関数を指す", () => {
+    expect(Object.keys(V11A_EVALUATION_JUDGES)).toEqual([...V11A_EVALUATION_NAMES]);
+    expect(V11A_EVALUATION_JUDGES["v1-run-tests"].kind).toBe("v1");
+    expect(V11A_EVALUATION_JUDGES["default-value"].kind).toBe("judge");
+    expect(V11A_EVALUATION_JUDGES["enum-membership"].kind).toBe("judge");
+    for (const row of PROPERTY_LEDGER) if (row.evaluation !== null) expect(V11A_EVALUATION_NAMES as readonly string[]).toContain(row.evaluation);
+    expect(createV11aEvaluator).toBeTypeOf("function");
+  });
+});
+
+// ── 選択肢の集合の照合（observes が enum-membership。旗 on。Issue #548）──────────────────────────────
+
+describe("旗 on：選択肢の集合の試験（observes が enum-membership）は v1 に渡さず、宣言の options のキーの集合と照合する（Issue #548）", () => {
+  const createV11aEvaluator = evaluatorFactory(PROPERTY_LEDGER_VIEW);
+  /** 区分の項目の options を keys にした宣言（静的チェックを通る。項目の一覧に R1 の所属の項目を全部出す） */
+  const yamlWith = (keys: readonly string[]): string =>
+    fixtureYaml({ kindOptions: keys }).replace("show: [title, amount, kind]", "show: [title, owner, amount, day, kind]");
+  const EYAML = yamlWith(["alpha", "beta"]);
+
+  function enumTest(id: string, expected: unknown, roleId = "f.item.kind"): FixedTest {
+    return {
+      id,
+      target: { requirementId: "R6", kind: "field", roleId },
+      kind: "normal",
+      operation: "validate",
+      clock: CLOCK,
+      input: {},
+      inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: expected },
+    };
+  }
+  const suiteWith = (test: FixedTest): TestSuite => ({ ...SUITE, tests: [...SUITE.tests.slice(0, 2), test, ...SUITE.tests.slice(2)] });
+  const observesWith = (testId: string): ReadonlyMap<string, TestObserves> => new Map([...OBSERVES, [testId, "enum-membership" as TestObserves]]);
+  const TABLE_WITH_EXTRA = {
+    ...TABLE,
+    rows: [...TABLE.rows, { ...TABLE.rows.find((row) => row.id === "f.item.kind")!, id: "f.item.extra", name: "extra" }],
+  };
+
+  async function evaluateWith(source: string, test: FixedTest, table = TABLE) {
+    const app = await normalizedFixture(source);
+    const suite = suiteWith(test);
+    const context = contextOf(listWithout(), suite);
+    const evaluator = createV11aEvaluator({ table, observes: observesWith(test.id) });
+    const checked = evaluator.nameCheck(app, context);
+    const correspondence = { entries: checked.entries, misses: checked.misses };
+    return { app, suite, context, evaluator, correspondence, report: evaluator.runTests(app, context, correspondence) };
+  }
+  const pickOf = (report: ReturnType<typeof runTests>, testId: string) => ({
+    mismatches: report.mismatches.filter((entry) => entry.testId === testId),
+    unresolved: report.unresolved.filter((entry) => entry.testId === testId),
+    routes: report.routes.filter((entry) => entry.testId === testId),
+    structural: report.structural.filter((entry) => entry.testId === testId),
+  });
+
+  it("options が表と同じ宣言なら、選択肢の集合の試験の不一致・未解決は 0", async () => {
+    const { report } = await evaluateWith(EYAML, enumTest("t-enum", ["alpha", "beta"]));
+    expect(pickOf(report, "t-enum")).toEqual({ mismatches: [], unresolved: [], routes: [], structural: [] });
+  });
+
+  it("二点測定：options のキーの集合が違う（足りない・余る・別のキー）・長さが違う・項目が選択肢でない・項目が宣言に無い、はそれぞれ不一致（固定文。行き先は v1 の不一致と同じ）", async () => {
+    const cases = [
+      { source: yamlWith(["alpha", "beta", "gamma"]), test: enumTest("t-enum", ["alpha", "beta"]), detail: ENUM_MEMBERSHIP_DETAILS.optionsDiffer },
+      { source: yamlWith(["beta", "gamma"]), test: enumTest("t-enum", ["alpha", "beta"]), detail: ENUM_MEMBERSHIP_DETAILS.optionsDiffer },
+      { source: EYAML, test: enumTest("t-enum", ["alpha"]), detail: ENUM_MEMBERSHIP_DETAILS.optionsDiffer },
+      { source: EYAML, test: enumTest("t-enum", ["alpha", "beta", "beta"]), detail: ENUM_MEMBERSHIP_DETAILS.optionsDiffer },
+      { source: EYAML, test: enumTest("t-enum", ["alpha", "beta"], "f.item.title"), detail: ENUM_MEMBERSHIP_DETAILS.notEnum },
+      { source: EYAML, test: enumTest("t-enum", ["alpha", "beta"], "f.item.extra"), detail: ENUM_MEMBERSHIP_DETAILS.fieldMissing, table: TABLE_WITH_EXTRA },
+    ];
+    const v1Mismatch = (await evaluateWith(EYAML, enumTest("t-enum", ["alpha", "beta"]))).report.routes.find((entry) => entry.testId === "t-when-bad");
+    expect(v1Mismatch?.route).toBe("missing-element");
+    for (const entry of cases) {
+      const { report } = await evaluateWith(entry.source, entry.test, entry.table);
+      expect(pickOf(report, "t-enum").mismatches, entry.detail).toEqual([{ testId: "t-enum", detail: entry.detail }]);
+      expect(pickOf(report, "t-enum").unresolved).toEqual([]);
+      expect(pickOf(report, "t-enum").routes).toEqual([{ testId: "t-enum", route: v1Mismatch?.route, detail: entry.detail }]);
+    }
+    // 順だけが違う宣言は B4 では一致（集合と長さで照らす。順の違いは B3 の options の照合が落とす）
+    const reordered = await evaluateWith(yamlWith(["beta", "alpha"]), enumTest("t-enum", ["alpha", "beta"]));
+    expect(pickOf(reordered.report, "t-enum").mismatches).toEqual([]);
+    for (const detail of Object.values(ENUM_MEMBERSHIP_DETAILS)) {
+      for (const value of ["alpha", "beta", "gamma", "kind", "item", "extra", "title"]) expect(detail).not.toContain(value);
+    }
+  });
+
+  it("期待が文字列の並びでない試験は未解決（固定文。行き先は v1 の未解決と同じ）", async () => {
+    const v1Unresolved = (await evaluateWith(EYAML, enumTest("t-enum", ["alpha", "beta"]))).report.routes.find((entry) => entry.testId === "t-unknown");
+    expect(v1Unresolved?.route).toBe("ambiguity");
+    for (const expected of ["alpha", 1, null, true, [1, 2], ["alpha", 2], { alpha: true }]) {
+      const { report } = await evaluateWith(EYAML, enumTest("t-enum", expected));
+      expect(pickOf(report, "t-enum").unresolved, JSON.stringify(expected)).toEqual([
+        { testId: "t-enum", detail: ENUM_MEMBERSHIP_DETAILS.expectedNotStringArray },
+      ]);
+      expect(pickOf(report, "t-enum").mismatches).toEqual([]);
+      expect(pickOf(report, "t-enum").routes.map((item) => item.route)).toEqual([v1Unresolved?.route]);
+    }
+    const errorTest = { ...enumTest("t-enum", ["alpha", "beta"]), expected: { kind: "error" as const, code: "E" } };
+    const { report } = await evaluateWith(EYAML, errorTest);
+    expect(pickOf(report, "t-enum").unresolved.map((item) => item.detail)).toEqual([ENUM_MEMBERSHIP_DETAILS.expectedNotStringArray]);
+  });
+
+  it("ほかの試験の結果は、選択肢の集合の試験を外した組の v1 の結果と試験 ID ごとに深く等しく、順は組の順。選択肢の集合の試験は v1 の runTests に渡らない", async () => {
+    const passed: string[][] = [];
+    const original = runTestsStage.runTests;
+    vi.spyOn(runTestsStage, "runTests").mockImplementation((input) => {
+      passed.push(input.suite.tests.map((test) => test.id));
+      return original(input);
+    });
+    const source = yamlWith(["beta", "gamma"]);
+    const { app, suite, correspondence, report } = await evaluateWith(source, enumTest("t-enum", ["alpha", "beta"]));
+    expect(passed).toEqual([SUITE.tests.map((test) => test.id)]);
+    const bound = bindTestsById(app, TABLE, SUITE);
+    const direct = original({
+      app,
+      suite: SUITE,
+      correspondence,
+      mappings: identityMappings(TABLE),
+      roles: toRoleEntries(TABLE),
+      bindings: { tests: bound.bindings, entityNames: bound.entityNames },
+    });
+    for (const test of SUITE.tests) expect(pickOf(report, test.id)).toEqual(pickOf(direct, test.id));
+    const order = suite.tests.map((test) => test.id);
+    for (const list of [report.mismatches, report.unresolved, report.routes]) {
+      const indices = list.map((entry) => order.indexOf(entry.testId));
+      expect([...indices].sort((a, b) => a - b)).toEqual(indices);
+    }
+    expect(report.mismatches.map((entry) => entry.testId)).toEqual(["t-when-bad", "t-enum"]);
+  });
+
+  it("B5 の道具・版の再検査（evaluate・report）が同じ結果で、同じ入力で 2 回同じ結果。bindTests を呼ばない", async () => {
+    const spy = vi.spyOn(bindModule, "bindTests");
+    const source = yamlWith(["beta", "gamma"]);
+    const { app, context, evaluator, report } = await evaluateWith(source, enumTest("t-enum", ["alpha", "beta"]));
+    const evaluated = await evaluator.evaluate(app, { source }, context);
+    expect(evaluated.testRun).toEqual(report);
+    const first = await evaluator.report({ source }, context);
+    const second = await evaluator.report({ source }, context);
+    expect(first.testRun).toEqual(report);
+    expect(second).toEqual(first);
+    expect(spy).not.toHaveBeenCalled();
+    const test = enumTest("t-enum", ["alpha", "beta"]);
+    expect(judgeEnumMembership(app, TABLE, test)).toEqual(judgeEnumMembership(app, TABLE, test));
+    expect(judgeEnumMembership(app, TABLE, test)).toEqual({ kind: "mismatch", detail: ENUM_MEMBERSHIP_DETAILS.optionsDiffer });
+  });
+
+  it("手 2a の台帳（enum-membership の行が無い）では同じ試験が台帳に無い性質の未解決になり、照合の関数を通らない（二点測定）", async () => {
+    const app = await normalizedFixture(EYAML);
+    const test = enumTest("t-enum", ["alpha", "beta"]);
+    const context = contextOf(listWithout(), suiteWith(test));
+    const evaluator = createV11aEvaluatorBase({ table: TABLE, observes: observesWith(test.id), ledger: LEDGER_VIEW_2A });
+    const checked = evaluator.nameCheck(app, context);
+    const report = evaluator.runTests(app, context, { entries: checked.entries, misses: checked.misses });
+    expect(pickOf(report, "t-enum").unresolved).toEqual([{ testId: "t-enum", detail: LEDGER_OBSERVES_DETAILS.unregistered }]);
   });
 });

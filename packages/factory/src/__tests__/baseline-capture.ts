@@ -18,6 +18,7 @@
 // この道具を当てて取る（手順は記録の fixture の先頭の欄）。
 import { sha256Hex } from "@musunest/spec-engine";
 import type * as FactoryIndex from "../index.js";
+import type { Judge, JudgeAnswer } from "../judge.js";
 
 /** 道具が使う、工場の module の export（比較元の dist と候補の src のどちらでも同じ名前で引く） */
 export type BaselineFactoryModule = Pick<
@@ -60,6 +61,15 @@ export interface BaselineScenario {
 export interface BaselineScenarios {
   readonly base: BaselineRunBase;
   readonly scenarios: readonly BaselineScenario[];
+}
+
+/**
+ * 偽物の判定（J4・v1.1α の経路）の答えの定義。Noul の問いの名前ごとに値を返し、名前が無ければ `default` を返す。
+ * 他の種類の問い（選択）が来たら誤りにする（この道具の経路は選択の問いを聞かない）。
+ */
+export interface BaselineFakeJudge {
+  readonly default: number;
+  readonly byQuestion?: Readonly<Record<string, number>>;
 }
 
 /** 1 つの経路で観測した値（JSON の値） */
@@ -215,6 +225,142 @@ export async function captureBaseline(
   return captures;
 }
 
+// ── v1.1α の走らせる部分の分（Issue #546）──────────────────────────────────
+//
+// 同じ作法で、**v1.1α の走らせる部分**（`runGenerationV11a`）を流す。v1 と同じ欄（要求の全体・道具の結果・
+// 納品物の全ファイルの SHA-256 と大きさ・manifest・診断・判定）に、偽物の判定（J4）が受けた問いの名前の列を
+// 足す。**結び付け（`bindTests`）は v1.1α の経路が呼ばないので記録しない。** 経路の定義は、合成の確定した仕様
+// （`plan`）・合成の応答・偽物の時計 0・偽物の判定で閉じる（外部の API・鍵・ファイル・環境変数は触らない）。
+
+/** 道具が使う、工場の module の export（v1.1α の走らせる部分の分） */
+export type BaselineV11aModule = Pick<
+  typeof FactoryIndex,
+  "runGenerationV11a" | "createFakeLlmClient" | "bundleFiles" | "AGENT_LIMITS"
+>;
+
+/** v1.1α の 1 つの経路の定義（合成の応答と、偽物の判定の答え） */
+export interface BaselineV11aScenario {
+  readonly name: string;
+  /** 偽物の LlmClient が順に返す、合成の応答 */
+  readonly recorded: readonly unknown[];
+  /** 偽物の判定（J4）の答え */
+  readonly judge: BaselineFakeJudge;
+  /** 上限の一部の上書き（module の `AGENT_LIMITS` に重ねる） */
+  readonly limits?: Readonly<Record<string, number>>;
+}
+
+/** v1.1α の経路の定義の全体（`scenarios.json`）。確定した仕様は経路に依らない */
+export interface BaselineV11aScenarios {
+  readonly base: BaselineRunBase;
+  /** 確定した仕様（合成。JSON の値） */
+  readonly plan: unknown;
+  readonly scenarios: readonly BaselineV11aScenario[];
+}
+
+/** v1.1α の 1 つの経路で観測した値（JSON の値） */
+export interface BaselineV11aCapture {
+  readonly name: string;
+  readonly requests: readonly unknown[];
+  /** 偽物の判定が受けた要求ごとの、問いの名前の列（受けた順） */
+  readonly judgeQuestions: readonly (readonly string[])[];
+  readonly toolResults: readonly unknown[];
+  /** 試験の結果（納品物の `artifacts/tests.json` の中身。不一致・未解決の固定文と行き先を読めるように、SHA-256 に加えて残す。納品物が無ければ null） */
+  readonly testRun: unknown;
+  readonly bundle: BaselineCapture["bundle"];
+  readonly diagnostics: BaselineCapture["diagnostics"];
+  readonly judgment: BaselineCapture["judgment"];
+}
+
+/** 偽物の判定を作る（受けた要求の問いの名前を `questions` に積む）。Noul の問いにだけ答える */
+function fakeJudgeOf(spec: BaselineFakeJudge): { readonly judge: Judge; readonly questions: string[][] } {
+  const questions: string[][] = [];
+  const judge: Judge = {
+    source: "fake",
+    async judge(request) {
+      questions.push(Object.keys(request.questions));
+      const answers: Record<string, JudgeAnswer> = {};
+      for (const [name, question] of Object.entries(request.questions)) {
+        if (question.kind !== "noul") throw new Error(`偽物の判定：${name} は Noul の問いでない`);
+        answers[name] = { kind: "noul", noul: spec.byQuestion?.[name] ?? spec.default };
+      }
+      return { answers, inputTokens: 0, model: "fake-judge", answeredBy: "fake" };
+    },
+  };
+  return { judge, questions };
+}
+
+/** v1.1α の 1 つの経路を流し、観測した値を返す */
+export async function captureScenarioV11a(
+  factory: BaselineV11aModule,
+  definitions: BaselineV11aScenarios,
+  scenario: BaselineV11aScenario,
+): Promise<BaselineV11aCapture> {
+  const inner = factory.createFakeLlmClient(scenario.recorded as readonly RecordedCall[]);
+  const requests: unknown[] = [];
+  const tools: { readonly turns: readonly unknown[] }[] = [];
+  const client: LlmClient = {
+    async callStructured(request) {
+      requests.push(requestRecord("structured", request));
+      return inner.callStructured(request);
+    },
+    async callWithTools(request) {
+      requests.push(requestRecord("tools", request));
+      tools.push({ turns: [...request.turns] });
+      return inner.callWithTools(request);
+    },
+  };
+  const fake = fakeJudgeOf(scenario.judge);
+  const input = {
+    ...definitions.base,
+    client,
+    now: () => 0,
+    plan: definitions.plan,
+    judge: fake.judge,
+    ...(scenario.limits === undefined ? {} : { limits: { ...factory.AGENT_LIMITS, ...scenario.limits } }),
+  } as Parameters<BaselineV11aModule["runGenerationV11a"]>[0];
+  const result = await factory.runGenerationV11a(input);
+
+  const files = result.bundle === null ? null : factory.bundleFiles(result.bundle);
+  const bundle =
+    result.bundle === null || files === null
+      ? null
+      : {
+          files: await Promise.all(files.map(async (file) => ({ path: file.path, ...(await digestOf(file.text)) }))),
+          manifest: result.bundle.manifest,
+        };
+  const diagnostics = await Promise.all(
+    result.diagnostics.map(async (file) => ({ path: file.path, ...(await digestOf(file.text)) })),
+  );
+  return toJsonValue({
+    name: scenario.name,
+    requests,
+    judgeQuestions: fake.questions,
+    toolResults: toolResultsOf(tools),
+    testRun: result.bundle === null ? null : (readJson(result.bundle.artifacts, "artifacts/tests.json") ?? null),
+    bundle,
+    diagnostics,
+    judgment: {
+      outcome: result.outcome,
+      stopped: result.stopped,
+      returnToPlan: result.returnToPlan ?? null,
+      stages: result.record.stages,
+      summary: result.summary,
+    },
+  });
+}
+
+/** v1.1α の経路の定義の全部を順に流す（1 つの経路ごとに新しい偽物の LlmClient・偽物の判定を使う） */
+export async function captureBaselineV11a(
+  factory: BaselineV11aModule,
+  definitions: BaselineV11aScenarios,
+): Promise<readonly BaselineV11aCapture[]> {
+  const captures: BaselineV11aCapture[] = [];
+  for (const scenario of definitions.scenarios) {
+    captures.push(await captureScenarioV11a(factory, definitions, scenario));
+  }
+  return captures;
+}
+
 // ── 手元の入口の分（v1.1α A6。Issue #511）──────────────────────────────────
 //
 // 同じ作法で、**手元の入口**（`runCli`）を流す。差し込んだ `makeClient` は、その module の**本物の adapter**
@@ -236,6 +382,8 @@ export interface BaselineCliScenario {
   readonly args?: readonly string[];
   /** `--plan-file` で渡す包み（JSON の値。渡すと `--plan-file plan.json` を足す） */
   readonly planFile?: unknown;
+  /** 偽物の判定（J4）の答え。渡すと入口の判定の口を、これを返す偽物に差し替える（v1.1α の経路。v1 は省く） */
+  readonly judge?: BaselineFakeJudge;
 }
 
 /** 手元の入口の経路の定義の全体（依頼文と文書は経路に依らない） */
@@ -390,8 +538,10 @@ export async function captureCliScenario(
       clientOptions.push(Object.fromEntries(Object.entries(options).filter(([key]) => key !== "apiKey")));
       return factory.createOpenAiLlmClient({ ...options, fetch: fakeFetch });
     },
+    ...(scenario.judge === undefined ? {} : { makeLlmJudge: () => fakeJudgeOf(scenario.judge as BaselineFakeJudge).judge }),
     now: () => 0,
     log: (line) => lines.push(line),
+    logError: () => {},
   });
   const files = await Promise.all(written.map(async (file) => ({ path: file.path, ...(await digestOf(file.text)) })));
   const manifestFile = [...written].reverse().find((file) => file.path === factory.BUNDLE_MANIFEST_FILE);

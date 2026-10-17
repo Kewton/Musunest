@@ -30,10 +30,16 @@ import {
   ENVELOPE_SCHEMA_NAME,
   ENVELOPE_SCHEMA_NAME_V11A,
   ENVELOPE_SCHEMA_V11A,
+  ENVELOPE_SCHEMA_V12_LEDGER,
+  buildEnvelopeSchema,
+  buildStageBranch,
   envelopeStageFor,
+  STAGE_ENVELOPE_ENTRIES_V11A,
 } from "./schema-envelope.js";
 import { DESIGN_SCHEMA, DESIGN_SCHEMA_NAME } from "./stages/design.js";
-import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME } from "./v11a/stages/name-table.js";
+import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./v11a/stages/name-table.js";
+import { TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
+import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
 import { SURFACE_DIFF_SCHEMA_NAME, SURFACE_SCHEMA, SURFACE_SCHEMA_NAME, buildSurfaceDiffSchema } from "./plan/surface.js";
 import { REQUIREMENT_LIST_SCHEMA, REQUIREMENTS_SCHEMA_NAME } from "./stages/requirements.js";
 import { REVERSE_CHECK_SCHEMA, REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
@@ -672,6 +678,91 @@ describe("封筒は options の envelope で選ぶ（既定 v1。v1.1α は stag
     const format = formatOf(bodyOf(captured));
     expect(format.name).toBe(NAME_TABLE_SCHEMA_NAME);
     expect(envelopeStageFor(NAME_TABLE_SCHEMA_NAME)).toBeUndefined();
+  });
+});
+
+describe("封筒の段の枝は、段が渡した schema で組む（旗 on の台帳の schema がモデルに届く。Issue #549 の直し）", () => {
+  const onTable = nameTableSchemaOf(PROPERTY_LEDGER_VIEW);
+  // 計算の行 1 つの T1 の応答（行の型に集計の種類と集計元を持つ。旗 on の strict の schema で必須の欄）
+  const onDraft = {
+    rows: [
+      {
+        id: "c.total",
+        kind: "computation",
+        entity: null,
+        name: "total",
+        role: "件数を合計する",
+        source: { copy: "件数を合計する", quote: "件数を合計する" },
+        type: {
+          fieldType: null,
+          valueType: "number",
+          scope: "app",
+          form: "aggregate",
+          action: null,
+          hasWhen: null,
+          view: null,
+          aggregate: { kind: "sum", entity: "e.item" },
+        },
+        options: null,
+        groupBy: null,
+        refEntity: null,
+      },
+    ],
+    requirements: [],
+  };
+  const replyWith = (stage: string, output: unknown) => () =>
+    jsonResponse(completed(outputText(JSON.stringify(enveloped(stage, output as Record<string, unknown>))), USAGE_WIRE));
+
+  it("旗 on の T1（台帳の schema）は旗 on の封筒を送り、行の型の aggregate がモデルに届く。T2 も同じ封筒（T1 と T2 で同じバイト列）", async () => {
+    const t1 = recordingFetch(replyWith(NAME_TABLE_SCHEMA_NAME, onDraft));
+    await createOpenAiLlmClient({ apiKey: "test-key", fetch: t1.fetch, envelope: "v1.1a" }).callStructured(
+      stageRequest(NAME_TABLE_SCHEMA_NAME, onTable),
+    );
+    const t2 = recordingFetch(replyWith(TEST_SPEC_SCHEMA_NAME, { classifications: [], tests: [] }));
+    await createOpenAiLlmClient({ apiKey: "test-key", fetch: t2.fetch, envelope: "v1.1a" })
+      .callStructured(stageRequest(TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf(PROPERTY_LEDGER_VIEW)))
+      .catch(() => undefined);
+
+    const format = formatOf(bodyOf(t1.captured));
+    expect(format.name).toBe(ENVELOPE_SCHEMA_NAME_V11A);
+    expect(format.schema).toEqual(ENVELOPE_SCHEMA_V12_LEDGER);
+    expect(format.schema).not.toEqual(ENVELOPE_SCHEMA_V11A);
+    expect(JSON.stringify(formatOf(bodyOf(t2.captured)).schema)).toBe(JSON.stringify(format.schema));
+    const branches = (((format.schema as Record<string, unknown>)["properties"] as Record<string, unknown>)["result"] as { readonly anyOf: readonly unknown[] }).anyOf;
+    expect(branches).toContainEqual(buildStageBranch({ stage: NAME_TABLE_SCHEMA_NAME, schema: onTable }));
+    expect(JSON.stringify(branches)).toContain('"aggregate"');
+  });
+
+  it("応答の取り出しも同じ枝で行う：aggregate を持つ T1 の応答は、旗 on の schema では受け、旗 off の schema では形の誤り", async () => {
+    const on = recordingFetch(replyWith(NAME_TABLE_SCHEMA_NAME, onDraft));
+    const response = await createOpenAiLlmClient({ apiKey: "test-key", fetch: on.fetch, envelope: "v1.1a" }).callStructured<
+      Record<string, unknown>
+    >(stageRequest(NAME_TABLE_SCHEMA_NAME, onTable));
+    expect(response.output).toEqual(onDraft);
+
+    const off = recordingFetch(replyWith(NAME_TABLE_SCHEMA_NAME, onDraft));
+    const error = await captureError(() =>
+      createOpenAiLlmClient({ apiKey: "test-key", fetch: off.fetch, envelope: "v1.1a" }).callStructured(
+        stageRequest(NAME_TABLE_SCHEMA_NAME, NAME_TABLE_SCHEMA),
+      ),
+    );
+    expect(error.kind).toBe("malformed");
+    expect(formatOf(bodyOf(off.captured)).schema).toEqual(ENVELOPE_SCHEMA_V11A);
+  });
+
+  it("どの封筒の枝とも違う段の schema は、その段の枝だけを差し替えた封筒で送る（ほかの枝は選んだ封筒のまま）", async () => {
+    const custom = { ...NAME_TABLE_SCHEMA, description: "差し替えた schema" };
+    const { fetch, captured } = recordingFetch(replyWith(NAME_TABLE_SCHEMA_NAME, { rows: [], requirements: [] }));
+    await createOpenAiLlmClient({ apiKey: "test-key", fetch, envelope: "v1.1a" })
+      .callStructured(stageRequest(NAME_TABLE_SCHEMA_NAME, custom))
+      .catch(() => undefined);
+    expect(formatOf(bodyOf(captured)).schema).toEqual(
+      buildEnvelopeSchema(
+        STAGE_ENVELOPE_ENTRIES_V11A.map((entry) =>
+          entry.stage === NAME_TABLE_SCHEMA_NAME ? { stage: entry.stage, schema: custom } : entry,
+        ),
+      ),
+    );
   });
 });
 

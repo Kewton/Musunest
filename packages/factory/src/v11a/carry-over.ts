@@ -19,6 +19,11 @@
 // 見出しの元の項目（`groupBy.field`）・参照先（`refEntity`）、試験の参照は対象・参照データの対象・空の entity・
 // 構造の検査の `refEntity`・`role`・入力と参照データの値の鍵である。
 //
+// 要件でない文（Issue #550）：確かめ方の種類が台帳の「受理で除く」種類（`non-requirement`）で、T1'' が**受理した**要件は、
+// 残る一覧から除き、**持ち越しに数えない**（`nonRequirements`。所属 0 行なので除く行は増えない）。拒否されれば今までどおり
+// 持ち越し（出どころ semantic-check）。免除は T1'' の受理だけで決め、T1 の分類・要件の出どころ・**要件 ID の形を見ない**。
+// 旗 off の表はこの種類を持てない（T1' が落とす）ので、off の持ち越しは今と同じになる。
+//
 // LLM を呼ばない純粋な関数だけを置く（表の SHA-256 を求めるので `deriveCarryOver` は Promise を返す）。
 import type { FixedTest, TestSuite } from "../fixed-test.js";
 import type { RequirementList } from "../pipeline.js";
@@ -26,6 +31,7 @@ import { isRecord } from "../stages/prompt.js";
 import type { CoverageLoss } from "./coverage.js";
 import { toV1, type V1Conversion } from "./convert.js";
 import { nameTableSha256, ownersByRowId, type NameTable } from "./names.js";
+import { PROPERTY_LEDGER_VIEW, type LedgerView } from "../v12/ledger.js";
 
 /** 持ち越しの出どころ */
 export const CARRY_OVER_ORIGINS = ["name-table", "semantic-check", "decl-check", "coverage"] as const;
@@ -64,6 +70,8 @@ export interface CarryOverInput {
   readonly declCheck?: { readonly declarationSha256: string; readonly result: DeclCheckResult };
   /** B6 の結果（棄却のあとに省かずに渡す。棄却が無ければ空の並び） */
   readonly coverage?: readonly CoverageLoss[];
+  /** 受理で除く確かめ方の種類を引く台帳の導出（省けばコードの台帳。Issue #550） */
+  readonly ledger?: LedgerView;
 }
 
 /** 持ち越しの理由 1 つ（出どころと理由） */
@@ -86,8 +94,13 @@ export interface CarryOver {
   readonly excludedRowIds: readonly string[];
   /** 残る要件（一覧の順） */
   readonly remainingRequirementIds: readonly string[];
-  /** 残る要件が 0 か（全件持ち越し。D15） */
+  /** 残る要件が 0 か（全件持ち越し。持ち越しと要件でない文で全件のときも真。D15） */
   readonly allCarried: boolean;
+  /**
+   * T1'' が受理した要件でない文の要件 ID（一覧の順）。残る一覧にも持ち越しにも入らない。1 件も無ければ欄を持たない
+   * （今の記録とバイト列で同じにする。Issue #550）
+   */
+  readonly nonRequirements?: readonly string[];
 }
 
 /** 判定の完全性：対象の全要件にちょうど 1 判定（欠落・重複・対象の外は例外） */
@@ -138,20 +151,24 @@ export async function deriveCarryOver(input: CarryOverInput): Promise<CarryOver>
     if (verification.kind === "unresolved") add(id, "name-table", verification.reason);
   }
 
-  // semantic-check（T1''。対象は unresolved を除く全要件）
+  // semantic-check（T1''。対象は unresolved を除く全要件）。受理で除く確かめ方の要件は、受理されたときだけ要件でない文
   const semanticTargets = ids.filter((id) => !reasons.has(id));
   assertComplete(input.semanticCheck.judgments, semanticTargets, ["accept", "reject"], "表の意味の点検");
+  const excludedKinds = new Set((input.ledger ?? PROPERTY_LEDGER_VIEW).excludedWhenAcceptedKinds);
+  const nonRequirementSet = new Set<string>();
   for (const judgment of input.semanticCheck.judgments) {
     if (judgment.verdict === "reject") add(judgment.requirementId, "semantic-check", judgment.kind);
+    else if (excludedKinds.has(verificationById.get(judgment.requirementId)?.kind ?? "")) nonRequirementSet.add(judgment.requirementId);
   }
+  const nonRequirements = ids.filter((id) => nonRequirementSet.has(id));
 
-  // decl-check（B3'。対象は T1・T1'' で残った要件）
+  // decl-check（B3'。対象は T1・T1'' で残った要件。要件でない文は対象に入れない）
   if (input.declCheck !== undefined) {
     const { declarationSha256, result } = input.declCheck;
     if (result.declarationSha256 !== declarationSha256) {
       throw new Error("持ち越し：宣言の意味の点検の結果が、採用した宣言の SHA-256 と合わない");
     }
-    const declTargets = ids.filter((id) => !reasons.has(id));
+    const declTargets = ids.filter((id) => !reasons.has(id) && !nonRequirementSet.has(id));
     assertComplete(result.judgments, declTargets, ["accept", "reject", "unmarked"], "宣言の意味の点検");
     for (const judgment of result.judgments) {
       if (judgment.verdict !== "accept") add(judgment.requirementId, "decl-check", reasonOf(judgment));
@@ -160,7 +177,7 @@ export async function deriveCarryOver(input: CarryOverInput): Promise<CarryOver>
 
   // coverage（B6）
   if (input.coverage !== undefined) {
-    const known = new Set(ids);
+    const known = new Set(ids.filter((id) => !nonRequirementSet.has(id)));
     const seen = new Set<string>();
     for (const loss of input.coverage) {
       if (!known.has(loss.requirementId)) throw new Error("持ち越し：網羅の落ちに一覧の外の要件 ID がある");
@@ -183,7 +200,7 @@ export async function deriveCarryOver(input: CarryOverInput): Promise<CarryOver>
   if (dangling.length > 0) {
     throw new Error("持ち越し：残る行の参照（所属 entity・見出しの元・参照先）が除いた行を指している");
   }
-  const remainingRequirementIds = ids.filter((id) => !carried.has(id));
+  const remainingRequirementIds = ids.filter((id) => !carried.has(id) && !nonRequirementSet.has(id));
   return {
     entries: ids.flatMap((id) => {
       const listed = reasons.get(id);
@@ -192,6 +209,7 @@ export async function deriveCarryOver(input: CarryOverInput): Promise<CarryOver>
     excludedRowIds,
     remainingRequirementIds,
     allCarried: remainingRequirementIds.length === 0,
+    ...(nonRequirements.length === 0 ? {} : { nonRequirements }),
   };
 }
 
@@ -257,7 +275,8 @@ export interface PrunedForCarryOver {
 
 /**
  * 一覧・所属・B3 に渡す役割の表と恒等の対応から、持ち越しの要件と、その要件だけが所属させる行を除いた版を返す
- * （D14。共有する行は残す）。builder に見せる表（全行）は呼ぶ側が別に持つ。試験の組を渡せば、残る要件の試験に
+ * （D14。共有する行は残す）。T1'' が受理した要件でない文（`nonRequirements`）も一覧・所属・確かめ方・分類・試験から除く
+ * （所属 0 行なので除く行は増えない。Issue #550）。builder に見せる表（全行）は呼ぶ側が別に持つ。試験の組を渡せば、残る要件の試験に
  * 絞り、その参照が除いた行を指していれば例外で断る。残る行の参照が除いた行を指していても例外で断る。
  */
 export function pruneForCarryOver(
@@ -266,7 +285,10 @@ export function pruneForCarryOver(
   carryOver: CarryOver,
   suite?: TestSuite,
 ): PrunedForCarryOver {
-  const carried = new Set(carryOver.entries.map((entry) => entry.requirementId));
+  const carried = new Set([
+    ...carryOver.entries.map((entry) => entry.requirementId),
+    ...(carryOver.nonRequirements ?? []),
+  ]);
   const excluded = new Set(carryOver.excludedRowIds);
   const keep = <T extends { readonly requirementId: string }>(entries: readonly T[]): readonly T[] =>
     entries.filter((entry) => !carried.has(entry.requirementId));

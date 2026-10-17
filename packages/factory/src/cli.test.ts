@@ -20,6 +20,7 @@ import {
   EXIT_USAGE,
   JEV_API_KEY_ENV,
   PROMPT_VERSION_V11A,
+  PROMPT_VERSION_V12,
   STAGE_USAGE,
   USAGE,
   parseCliArguments,
@@ -30,6 +31,15 @@ import * as factory from "./index.js";
 import { createFakeJudge } from "./judge-fake.js";
 import type { JudgeAnswer } from "./judge.js";
 import type { RecordedCall } from "./llm-fake.js";
+import { createOpenAiLlmClient } from "./openai.js";
+import {
+  ENVELOPE_SCHEMA,
+  ENVELOPE_SCHEMA_NAME,
+  STAGE_ENVELOPE_ENTRIES,
+  STAGE_ENVELOPE_ENTRIES_V11A,
+  buildStageBranch,
+  type EnvelopeId,
+} from "./schema-envelope.js";
 import { requirementsFromPlan, type RequirementList } from "./pipeline.js";
 import { captureCliBaseline, type BaselineCliCapture, type BaselineCliScenarios } from "./__tests__/baseline-capture.js";
 import {
@@ -41,7 +51,24 @@ import {
   type StageInputCode,
 } from "./v11a/bundle-v11a.js";
 import * as v11aRunModule from "./v11a/run.js";
-import { FIXTURE_DOCUMENTS, FIXTURE_YAML, draftOf, fixtureList, fixtureTable } from "./v11a/__tests__/fixtures.js";
+import {
+  ENUM_MEMBERSHIP_REQUEST_DIFF,
+  FIXTURE_DOCUMENTS,
+  FIXTURE_YAML,
+  LEDGER_REQUEST_DIFF,
+  LEDGER_VIEW_2B,
+  LEDGER_VIEW_2C,
+  WHEN_NON_REQUIREMENT_REQUEST_DIFF,
+  draftOf,
+  fixtureList,
+  fixtureTable,
+  requestDiffsOf,
+  withAggregates,
+  withoutEnumMembership,
+  withoutLedgerAdditions,
+  withoutWhenAndNonRequirement,
+} from "./v11a/__tests__/fixtures.js";
+import * as ledgerModule from "./v12/ledger.js";
 import type { NameTable } from "./v11a/names.js";
 import {
   BUNDLE_MANIFEST_FILE,
@@ -638,6 +665,20 @@ describe("--pipeline の読み取り（Issue #511）", () => {
     });
   });
 
+  it("--pipeline v1.2 --plan-file <ファイル> を読む（Issue #547）", () => {
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--pipeline", "v1.2", "--plan-file", "plan.json"]),
+    ).toEqual({
+      requestFile: "request.txt",
+      outDir: "out",
+      model: "gpt-6-luna",
+      effort: "high",
+      planFile: "plan.json",
+      pipeline: "v1.2",
+    });
+    expect(USAGE).toContain("[--pipeline v1|v1.1a|v1.2]");
+  });
+
   it("--pipeline v1 を読み、--pipeline を省けば欄を持たない（既定は v1）", () => {
     expect(parseCliArguments(["--", "request.txt", "--out", "out", "--pipeline", "v1"])).toEqual({
       requestFile: "request.txt",
@@ -675,8 +716,28 @@ describe("--pipeline の読み取り（Issue #511）", () => {
       args: ["--pipeline", "v1", "--plan-only"],
       error: "--pipeline と --plan-only は同時に指定できません",
     },
-    { name: "知らない値", args: ["--pipeline", "v2"], error: "--pipeline には v1 か v1.1a を指定してください" },
-    { name: "値が無い", args: ["--pipeline"], error: "--pipeline には v1 か v1.1a を指定してください" },
+    { name: "知らない値", args: ["--pipeline", "v2"], error: "--pipeline には v1 か v1.1a か v1.2 を指定してください" },
+    { name: "値が無い", args: ["--pipeline"], error: "--pipeline には v1 か v1.1a か v1.2 を指定してください" },
+    {
+      name: "--pipeline v1.2 だけ（--plan-file が無い）",
+      args: ["--pipeline", "v1.2"],
+      error: "--pipeline v1.2 は --plan-file と一緒に指定してください",
+    },
+    {
+      name: "--pipeline v1.2 と --plan",
+      args: ["--pipeline", "v1.2", "--plan"],
+      error: "--pipeline と --plan は同時に指定できません",
+    },
+    {
+      name: "--pipeline v1.2 と --plan-only",
+      args: ["--pipeline", "v1.2", "--plan-only"],
+      error: "--pipeline と --plan-only は同時に指定できません",
+    },
+    {
+      name: "--pipeline v1.2 と --plan と --plan-file",
+      args: ["--pipeline", "v1.2", "--plan", "--plan-file", "plan.json"],
+      error: "--plan と --plan-file は同時に指定できません",
+    },
   ];
 
   it.each(usageCases)("$name は誤りで 2 を返し、makeClient を呼ばない", async (example) => {
@@ -884,6 +945,15 @@ const v11aHead = (): RecordedCall[] => [
   structured({ declaration: V11A_YAML }),
 ];
 
+/**
+ * v1.2（旗 on）の走りの頭。T1 の応答の計算の行に集計の種類と集計元を持つ（今の台帳の strict の schema で必須。Issue #549）。
+ * ほかは `v11aHead` と同じ
+ */
+const v12Head = (): RecordedCall[] => [
+  structured(draftOf(V11A_LIST, withAggregates(V11A_TABLE))),
+  ...v11aHead().slice(1),
+];
+
 /** T1' に落ちる下書き（要件の写しを入れ替える） */
 function v11aBadDraft(): unknown {
   const draft = draftOf(V11A_LIST, V11A_TABLE);
@@ -917,16 +987,20 @@ function v11aJudge() {
   return createFakeJudge(answers);
 }
 
-/** `--pipeline v1.1a --plan-file` を 1 回流す（偽物の LLM・判定・時計で閉じる。ファイルだけ本物） */
-async function runV11aCli(input: { readonly dir: string; readonly calls: readonly RecordedCall[] }) {
+/** `--pipeline v1.1a --plan-file` を 1 回流す（偽物の LLM・判定・時計で閉じる。ファイルだけ本物。`pipeline` で v1.2 も） */
+async function runV11aCli(input: {
+  readonly dir: string;
+  readonly calls: readonly RecordedCall[];
+  readonly pipeline?: "v1.1a" | "v1.2";
+}) {
   const planPath = `${input.dir}-plan.json`;
   const planText = JSON.stringify(await v11aEnvelope());
   const recording = createRecordingClient(input.calls);
-  const makeClient = vi.fn(() => recording.client);
+  const makeClient = vi.fn((_options: { readonly envelope?: EnvelopeId }) => recording.client);
   const lines: string[] = [];
   const written: string[] = [];
   const code = await runCli({
-    argv: ["--", "request.txt", "--out", input.dir, "--pipeline", "v1.1a", "--plan-file", planPath],
+    argv: ["--", "request.txt", "--out", input.dir, "--pipeline", input.pipeline ?? "v1.1a", "--plan-file", planPath],
     env: { [API_KEY_ENV]: "sk-FAKE" },
     readFile: async (path) => (path === planPath ? planText : V11A_SOURCE),
     writeFile: async (path, text) => {
@@ -948,6 +1022,63 @@ async function runV11aCli(input: { readonly dir: string; readonly calls: readonl
     readonly return_to_plan: boolean;
   };
   return { code, summary, record, written, makeClient, recording };
+}
+
+/** 実 adapter に当てた 1 回の構造化出力（段が渡した要求と、実際に送った body） */
+interface WireExchange {
+  readonly request: LlmStructuredRequest;
+  readonly body: Record<string, unknown>;
+}
+
+/**
+ * 段が渡した要求を、実 adapter（`createOpenAiLlmClient`）に偽物の fetch を当てて送り、送信の body を取る
+ * （外部の API は呼ばない。偽物の fetch は body を残して 500 を返すので、adapter の誤りは捨てる。Issue #549 の直し）。
+ * 封筒は、入口が adapter に渡した `envelope` で選ぶ。
+ */
+async function sentExchangesOf(
+  requests: readonly LlmStructuredRequest[],
+  envelope: EnvelopeId | undefined,
+): Promise<WireExchange[]> {
+  const exchanges: WireExchange[] = [];
+  for (const request of requests) {
+    let sent: Record<string, unknown> | undefined;
+    const client = createOpenAiLlmClient({
+      apiKey: "sk-FAKE",
+      fetch: async (_url, init) => {
+        sent = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ error: { code: "server_error" } }), { status: 500 });
+      },
+      ...(envelope === undefined ? {} : { envelope }),
+    });
+    const { signal: _signal, ...unsignalled } = request;
+    await expect(client.callStructured(unsignalled)).rejects.toThrow();
+    expect(sent, request.schemaName).toBeDefined();
+    exchanges.push({ request, body: sent as Record<string, unknown> });
+  }
+  return exchanges;
+}
+
+/** 送った body の封筒から、その段の枝を引く（封筒でなければ text.format.schema そのもの） */
+function sentBranchOf(exchange: WireExchange): unknown {
+  const format = (exchange.body["text"] as { readonly format: { readonly name: string; readonly schema: Record<string, unknown> } }).format;
+  if (format.name === exchange.request.schemaName) return format.schema;
+  const anyOf = (format.schema["properties"] as { readonly result: { readonly anyOf: readonly Record<string, unknown>[] } }).result.anyOf;
+  const branches = anyOf.filter(
+    (branch) => (branch["properties"] as { readonly stage: { readonly enum: readonly string[] } }).stage.enum[0] === exchange.request.schemaName,
+  );
+  expect(branches, exchange.request.schemaName).toHaveLength(1);
+  return branches[0];
+}
+
+/** その要求について、モデルに届く形（封筒ならその段の枝）が、段が渡した schema（封筒なら stage を足した枝）と深く等しいか */
+function expectSentSchemaIsStageSchema(exchange: WireExchange): void {
+  const format = (exchange.body["text"] as { readonly format: { readonly name: string } }).format;
+  const stageSchema = JSON.parse(JSON.stringify(exchange.request.schema)) as unknown;
+  const expected =
+    format.name === exchange.request.schemaName
+      ? stageSchema
+      : buildStageBranch({ stage: exchange.request.schemaName, schema: stageSchema });
+  expect(sentBranchOf(exchange), exchange.request.schemaName).toEqual(expected);
 }
 
 describe("v1.1a の走り（`--pipeline v1.1a --plan-file`。Issue #511）", () => {
@@ -1030,6 +1161,208 @@ describe("v1.1a の走り（`--pipeline v1.1a --plan-file`。Issue #511）", () 
   });
 });
 
+describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("完走で 0：v1.1α の経路で流れ、要求の差は台帳の enum-membership（#548）と empty-aggregate（#549）の行の分だけ（名指しの場所）。条件の記録の pipeline・prompt_version が v1.2、ほかの欄は v1.1a と同じ", async () => {
+    const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
+    const v1Spy = vi.spyOn(runModule, "runGeneration");
+    const calls = [...v11aHead(), structured(v11aJudgments())];
+    const v12 = await runV11aCli({ dir: `${directory}/v12-complete`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    const v11a = await runV11aCli({ dir: `${directory}/v12-complete-v11a`, calls });
+
+    expect(v12.code).toBe(EXIT_OK);
+    expect(v1Spy).not.toHaveBeenCalled();
+    expect(v11aSpy).toHaveBeenCalledTimes(2);
+    expect(v12.makeClient.mock.calls[0]).toEqual([{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.1a" }]);
+    // LLM への要求は、v1.2 の旗で台帳に登録した性質（enum-membership。Issue #548・empty-aggregate。Issue #549）の分を除けば
+    // v1.1a の走りとバイト列で同じ。差は名指しの場所（R-nt-08・R-sc-02・R-tsp-02・R-tsp-16・R-w11 の並び・schema の enum・
+    // T1 の schema の行の型の aggregate、表を載せるデータの計算の行の aggregate）だけで、空でない
+    const onRequests = JSON.parse(JSON.stringify(v12.recording.structured)) as unknown[];
+    const offRequests = JSON.parse(JSON.stringify(v11a.recording.structured)) as unknown[];
+    expect(onRequests).toHaveLength(offRequests.length);
+    const diffs = requestDiffsOf(onRequests, offRequests);
+    const withInput = (paths: readonly string[]): readonly string[] => {
+      const at = paths.findIndex((path) => path.startsWith("$.schema"));
+      return at < 0 ? [...paths, "$.input"] : [...paths.slice(0, at), "$.input", ...paths.slice(at)];
+    };
+    for (const diff of diffs) {
+      const named = LEDGER_REQUEST_DIFF[diff.schemaName] ?? [];
+      // T1''・T2・B1・B3' は名前の表（計算の行の aggregate）を載せるデータが違う。T1 の 1 回目は表を載せない
+      expect(diff.paths, diff.schemaName).toEqual(diff.schemaName === "name-table" ? named : withInput(named));
+    }
+    expect(diffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual([...Object.keys(LEDGER_REQUEST_DIFF), "decl-check"]);
+    expect(JSON.stringify(withoutLedgerAdditions(onRequests))).toBe(JSON.stringify(v11a.recording.structured));
+    // #548 までの旗 on（台帳に empty-aggregate の行が無い）は、同じ応答で差が enum-membership の行の分だけ（今までの期待）
+    const spy = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2B : undefined));
+    const v12Before = await runV11aCli({ dir: `${directory}/v12-complete-2b`, calls, pipeline: "v1.2" });
+    spy.mockRestore();
+    const beforeRequests = JSON.parse(JSON.stringify(v12Before.recording.structured)) as unknown[];
+    const beforeDiffs = requestDiffsOf(beforeRequests, offRequests);
+    for (const diff of beforeDiffs) expect(diff.paths, diff.schemaName).toEqual(ENUM_MEMBERSHIP_REQUEST_DIFF[diff.schemaName] ?? []);
+    expect(beforeDiffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(ENUM_MEMBERSHIP_REQUEST_DIFF));
+    expect(JSON.stringify(withoutEnumMembership(beforeRequests))).toBe(JSON.stringify(v11a.recording.structured));
+    expect(v12Before.summary).toEqual(v12.summary);
+    // #549 までの旗 on（台帳の when の列が未定義・non-requirement の行が無い。Issue #550）は、同じ応答で今の on との差が
+    // when・non-requirement の行の分（R-nt-08・R-sc-02・R-tsp-16・T1 の schema の確かめ方の種類の enum）だけ
+    const spy2C = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2C : undefined));
+    const v12Before2C = await runV11aCli({ dir: `${directory}/v12-complete-2c`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    spy2C.mockRestore();
+    const before2CRequests = JSON.parse(JSON.stringify(v12Before2C.recording.structured)) as unknown[];
+    const diffs2C = requestDiffsOf(onRequests, before2CRequests);
+    for (const diff of diffs2C) expect(diff.paths, diff.schemaName).toEqual(WHEN_NON_REQUIREMENT_REQUEST_DIFF[diff.schemaName] ?? []);
+    expect(diffs2C.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(WHEN_NON_REQUIREMENT_REQUEST_DIFF));
+    expect(JSON.stringify(withoutWhenAndNonRequirement(onRequests))).toBe(JSON.stringify(before2CRequests));
+    expect(v12Before2C.code).toBe(v12.code);
+    expect(v12Before2C.summary).toEqual(v12.summary);
+    expect(v12Before2C.record.conditions).toEqual(v12.record.conditions);
+    expect(v12.summary["verdict"]).toBe("full");
+    expect(v12.summary["prompt_version"]).toBe(PROMPT_VERSION_V12);
+    expect(v12.summary["prompt_version"]).toBe("v1.2");
+    expect(v12.record.conditions["pipeline"]).toBe("v1.2");
+    expect(v12.record.conditions["prompt_version"]).toBe("v1.2");
+    const { pipeline: _pipeline, prompt_version: _v12Prompt, v12_flags: _flags, ...v12Rest } = v12.record.conditions;
+    const { prompt_version: v11aPrompt, ...v11aRest } = v11a.record.conditions;
+    expect(v11aPrompt).toBe("v1.1a");
+    expect(v12Rest).toEqual(v11aRest);
+    // 要約は prompt_version と v12_flags のほかは v1.1a と同じ
+    const { prompt_version: _p1, v12_flags: _f1, ...summaryRest } = v12.summary;
+    const { prompt_version: _p2, ...v11aSummaryRest } = v11a.summary;
+    expect(summaryRest).toEqual(v11aSummaryRest);
+  });
+
+  it("旗の組の契約：export した V12_PIPELINE_FLAGS＝入口が渡した実効の旗＝要約の v12_flags＝条件の記録の v12_flags", async () => {
+    const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
+    const run = await runV11aCli({ dir: `${directory}/v12-flags`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    expect(run.code).toBe(EXIT_OK);
+    const passed = v11aSpy.mock.calls[0]?.[0];
+    expect(passed?.flags).toBe(factory.V12_PIPELINE_FLAGS);
+    expect(passed?.recordV12Flags).toBe(true);
+    expect(run.summary["v12_flags"]).toEqual(factory.V12_PIPELINE_FLAGS);
+    expect(run.record.conditions["v12_flags"]).toEqual(factory.V12_PIPELINE_FLAGS);
+    expect(run.summary["v12_flags"]).toEqual(passed?.flags);
+    expect(factory.V12_PIPELINE_FLAGS).toEqual({ ledger: true });
+  });
+
+  it("T1 で止まる走りでも要約と条件の記録に v12_flags がある（終了コード 1・納品物無し）", async () => {
+    const run = await runV11aCli({
+      dir: `${directory}/v12-early-stop`,
+      calls: [structured(v11aBadDraft()), structured(v11aBadDraft())],
+      pipeline: "v1.2",
+    });
+    expect(run.code).toBe(EXIT_RUN_FAILED);
+    expect(run.written).not.toContain(BUNDLE_MANIFEST_FILE);
+    expect(run.summary["stop_reason"]).toBe("unmet");
+    expect(run.summary["prompt_version"]).toBe("v1.2");
+    expect(run.summary["v12_flags"]).toEqual(factory.V12_PIPELINE_FLAGS);
+    expect(run.record.conditions["v12_flags"]).toEqual(factory.V12_PIPELINE_FLAGS);
+  });
+
+  it("--pipeline v1.1a の走りの要約・条件の記録に v12_flags・pipeline が無く、旗を渡さない", async () => {
+    const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
+    const run = await runV11aCli({ dir: `${directory}/v11a-no-flags`, calls: [...v11aHead(), structured(v11aJudgments())] });
+    expect(run.summary).not.toHaveProperty("v12_flags");
+    expect(run.record.conditions).not.toHaveProperty("v12_flags");
+    expect(run.record.conditions).not.toHaveProperty("pipeline");
+    expect(v11aSpy.mock.calls[0]?.[0]).not.toHaveProperty("flags");
+    expect(v11aSpy.mock.calls[0]?.[0]).not.toHaveProperty("recordV12Flags");
+  });
+
+  it("段の旗は v1.2 と組めない（今の段の走りは --pipeline v1.1a だけ。使い方の誤りで 2）", () => {
+    expect(
+      parseCliArguments(["--", "request.txt", "--out", "out", "--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-end", "test-spec"]),
+    ).toEqual({ error: "stage-range:pipeline（段の旗は --pipeline v1.1a --plan-file と一緒に指定してください）" });
+  });
+});
+
+describe("封筒の枝は段が渡した schema と深く等しい（実 adapter・偽物の fetch。Issue #549 の直し）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // 封筒に載る段は、起動時に組んだ封筒ではなく、その走りの段の schema（旗 on は台帳から導いたもの）で送る。
+  // 段の検証と、モデルに届く形がずれる共通の原因を、送信の body で塞ぐ（旗 off・on・v1 の全段）。
+  const v11aStages = STAGE_ENVELOPE_ENTRIES_V11A.map((entry) => entry.stage);
+
+  const v12ReturnToPlan = (): RecordedCall[] => [structured(draftOf(V11A_LIST, withAggregates(V11A_TABLE))), ...v11aReturnToPlan().slice(1)];
+
+  /** 走りの段の要求を、入口が作った adapter の封筒で送り直した組 */
+  async function exchangesOfRun(run: Awaited<ReturnType<typeof runV11aCli>>): Promise<WireExchange[]> {
+    const options = run.makeClient.mock.calls[0]?.[0];
+    expect(options).toMatchObject({ envelope: "v1.1a" });
+    return sentExchangesOf(run.recording.structured, options?.envelope);
+  }
+
+  for (const pipeline of ["v1.1a", "v1.2"] as const) {
+    it(`${pipeline}：完走と差し戻しの道で、封筒に載る全段の送信の枝が段の schema と等しい`, async () => {
+      const routes = [
+        { name: "complete", calls: [...(pipeline === "v1.2" ? v12Head() : v11aHead()), structured(v11aJudgments())] },
+        { name: "return", calls: pipeline === "v1.2" ? v12ReturnToPlan() : v11aReturnToPlan() },
+      ];
+      const seen = new Set<string>();
+      for (const route of routes) {
+        const run = await runV11aCli({ dir: `${directory}/wire-${pipeline}-${route.name}`, calls: route.calls, pipeline });
+        const exchanges = await exchangesOfRun(run);
+        expect(exchanges.length, route.name).toBeGreaterThan(0);
+        for (const exchange of exchanges) {
+          expectSentSchemaIsStageSchema(exchange);
+          seen.add(exchange.request.schemaName);
+        }
+      }
+      // 封筒に載る v1.1α の全段を照らした
+      expect([...seen].filter((stage) => v11aStages.includes(stage)).sort()).toEqual([...v11aStages].sort());
+    });
+  }
+
+  it("v1.2：送信の body の T1 の枝の行の型に aggregate があり、v1.1a の T1 の枝には無い", async () => {
+    const typeOf = (exchanges: readonly WireExchange[]) => {
+      const exchange = exchanges.find((candidate) => candidate.request.schemaName === "name-table");
+      expect(exchange).toBeDefined();
+      const branch = sentBranchOf(exchange as WireExchange) as {
+        readonly properties: { readonly rows: { readonly items: { readonly properties: { readonly type: { readonly required: readonly string[]; readonly properties: Record<string, unknown> } } } } };
+      };
+      return branch.properties.rows.items.properties.type;
+    };
+    const on = await runV11aCli({ dir: `${directory}/wire-t1-on`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    const onType = typeOf(await exchangesOfRun(on));
+    expect(onType.properties).toHaveProperty("aggregate");
+    expect(onType.required).toContain("aggregate");
+    const off = await runV11aCli({ dir: `${directory}/wire-t1-off`, calls: [...v11aHead(), structured(v11aJudgments())] });
+    const offType = typeOf(await exchangesOfRun(off));
+    expect(offType.properties).not.toHaveProperty("aggregate");
+    expect(offType.required).not.toContain("aggregate");
+  });
+
+  it("v1：封筒に載る段の送信の枝が段の schema と等しく、送る封筒は起動時の定数のまま", async () => {
+    const recording = createRecordingClient(recordedRun());
+    const makeClient = vi.fn((_options: { readonly envelope?: EnvelopeId }) => recording.client);
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", `${directory}/wire-v1`],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient,
+      log: () => undefined,
+    });
+    expect(code).toBe(EXIT_OK);
+    const exchanges = await sentExchangesOf(recording.structured, makeClient.mock.calls[0]?.[0].envelope);
+    const v1Stages = STAGE_ENVELOPE_ENTRIES.map((entry) => entry.stage);
+    const enveloped = exchanges.filter((exchange) => v1Stages.includes(exchange.request.schemaName));
+    expect(enveloped.length).toBeGreaterThan(0);
+    for (const exchange of exchanges) expectSentSchemaIsStageSchema(exchange);
+    for (const exchange of enveloped) {
+      expect((exchange.body["text"] as { readonly format: unknown }).format).toEqual({
+        type: "json_schema",
+        name: ENVELOPE_SCHEMA_NAME,
+        schema: ENVELOPE_SCHEMA,
+        strict: true,
+      });
+    }
+  });
+});
+
 describe("--pipeline を省いた走りは v1 のまま（Issue #511）", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -1055,6 +1388,7 @@ describe("--pipeline を省いた走りは v1 のまま（Issue #511）", () => 
     expect(makeClient.mock.calls[0]?.[0]).not.toHaveProperty("envelope");
     const summary = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
     expect(summary["prompt_version"]).toBe("v1");
+    expect(summary).not.toHaveProperty("v12_flags");
   });
 });
 

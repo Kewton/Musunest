@@ -62,6 +62,7 @@ import {
   requirementCopy,
   type NameTable,
 } from "../names.js";
+import type { LedgerView } from "../../v12/ledger.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 
 /** T1 の JSON Schema の名前 */
@@ -150,6 +151,28 @@ export const NAME_TABLE_RULE_DEFINITIONS: readonly RuleDefinition[] = [
 
 /** T1 に足す規則（定義の `text` から組む） */
 export const NAME_TABLE_RULES: readonly string[] = ruleTexts(NAME_TABLE_RULE_DEFINITIONS);
+
+/** 性質の台帳の文を差し込む規則（R-nt-08 の既定値の文の位置。Issue #547） */
+export const NAME_TABLE_LEDGER_RULE_ID = "R-nt-08";
+/** R-nt-08 の、台帳の文の前（台帳の外の確かめ方の種類の文） */
+const NAME_TABLE_LEDGER_RULE_HEAD =
+  "verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。構造で確かめるなら kind を structural にし、reason に理由、checks に構造の検査を並べ、検査ごとに合う種類の行を所属させる。宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に根拠にした文書の制約 ID（文書の制約 ID の一覧にあるものだけ）を書く。";
+/** R-nt-08 の、台帳の文の後ろ */
+const NAME_TABLE_LEDGER_RULE_TAIL = "使わない欄は null か空の並びにする。";
+
+/**
+ * T1 の規則の定義（旗 on なら台帳から組む。Issue #547）。省けば今の定数をそのまま返す。渡せば R-nt-08 の文を、台帳の外の
+ * 種類の文 → 台帳の行の T1 の文（台帳の順）→ 末尾の文で組み直す（ID・why・since は変えない）。手 2a では off の定数と
+ * バイト列で同じになる。
+ */
+export function nameTableRuleDefinitionsOf(ledger?: LedgerView): readonly RuleDefinition[] {
+  if (ledger === undefined) return NAME_TABLE_RULE_DEFINITIONS;
+  return NAME_TABLE_RULE_DEFINITIONS.map((definition) =>
+    definition.id === NAME_TABLE_LEDGER_RULE_ID
+      ? { ...definition, text: `${NAME_TABLE_LEDGER_RULE_HEAD}${ledger.t1RuleTexts.join("")}${NAME_TABLE_LEDGER_RULE_TAIL}` }
+      : definition,
+  );
+}
 
 const nullable = (values: readonly string[]) => ({ type: ["string", "null"], enum: [...values, null] });
 
@@ -248,6 +271,72 @@ export const NAME_TABLE_SCHEMA = {
   },
 } as const;
 
+/** 計算の行の型の `aggregate` の schema（集計の種類の enum は台帳の表の順。Issue #549） */
+function aggregateTypeSchemaOf(kinds: readonly string[]) {
+  return {
+    type: ["object", "null"],
+    additionalProperties: false,
+    required: ["kind", "entity"],
+    properties: {
+      kind: { type: "string", enum: [...kinds] },
+      entity: { type: "string", description: "集計元の entity の行の id" },
+    },
+  };
+}
+
+/**
+ * T1 の JSON Schema（旗 on なら確かめ方の kind の enum を台帳の種類の並びにする。Issue #547）。省けば今の定数を返す。
+ * 欄の並びは変えない（off の定数とバイト列で同じ JSON になる）。台帳が集計の種類を持てば（`empty-aggregate`。Issue #549）、
+ * 行の `type` の末尾に `aggregate`（集計の種類と集計元。種別 aggregate でない計算・計算でない行は null）を足す。
+ */
+export function nameTableSchemaOf(ledger?: LedgerView): typeof NAME_TABLE_SCHEMA {
+  if (ledger === undefined) return NAME_TABLE_SCHEMA;
+  const requirements = NAME_TABLE_SCHEMA.properties.requirements;
+  const verification = requirements.items.properties.verification;
+  const rows = NAME_TABLE_SCHEMA.properties.rows;
+  const type = rows.items.properties.type;
+  return {
+    ...NAME_TABLE_SCHEMA,
+    properties: {
+      ...NAME_TABLE_SCHEMA.properties,
+      ...(ledger.aggregateKinds.length === 0
+        ? {}
+        : {
+            rows: {
+              ...rows,
+              items: {
+                ...rows.items,
+                properties: {
+                  ...rows.items.properties,
+                  type: {
+                    ...type,
+                    required: [...type.required, "aggregate"],
+                    properties: { ...type.properties, aggregate: aggregateTypeSchemaOf(ledger.aggregateKinds) },
+                  },
+                },
+              },
+            },
+          }),
+      requirements: {
+        ...requirements,
+        items: {
+          ...requirements.items,
+          properties: {
+            ...requirements.items.properties,
+            verification: {
+              ...verification,
+              properties: {
+                ...verification.properties,
+                kind: { ...verification.properties.kind, enum: [...ledger.verificationKinds] },
+              },
+            },
+          },
+        },
+      },
+    },
+  } as unknown as typeof NAME_TABLE_SCHEMA;
+}
+
 /** T1'' の拒否 1 件（A1 の `SemanticJudgment` の拒否の側） */
 export type SemanticRejection = Extract<SemanticJudgment, { readonly verdict: "reject" }>;
 
@@ -275,6 +364,8 @@ export interface NameTableInput {
    * 何もしない**——口の有無で、送る要求・検査・やり直しの回数・結果は変わらない。
    */
   readonly onRejected?: (candidate: RejectedCandidate) => void;
+  /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけが渡す。省けば今の定数と関数。Issue #547） */
+  readonly ledger?: LedgerView;
 }
 
 /** T1 の結果（表・表の SHA-256・形の検査に掛けた raw の応答） */
@@ -318,13 +409,22 @@ const TYPE_KEYS_BY_KIND: Readonly<Record<string, readonly string[]>> = {
   screen: ["view"],
 };
 const TYPE_KEYS = ["fieldType", "valueType", "scope", "form", "action", "hasWhen", "view"] as const;
+/** 計算の行だけが持てる、集計の種類と集計元の欄（Issue #549） */
+const AGGREGATE_TYPE_KEY = "aggregate";
 
 /**
  * 応答の `type`（欄を並べた写像）を、行の種類に合う A1 の型へ写す。種類に合わない欄が null でなければ
  * 問題に足す。`type` が写像でない（すでに A1 の形の文字列・null）・種類が知らない値のときは写さない
  * （A1 の検査が形の落ちにする）。
+ *
+ * 計算の行の `aggregate`（Issue #549）は、台帳が集計の種類を持つ走り（`ledger`）なら写す（A1 の検査が形を見る）。
+ * 持たない走り（off を含む）は、null でない値を書いたときだけ写し、A1 の検査が未登録として落とす（null・無しは
+ * 写さない＝今の 3 つ組のまま）。計算でない行の `aggregate` が null でなければ、種類に合わない欄として落とす。
  */
-export function toNameTableDraftValue(output: Record<string, unknown>): {
+export function toNameTableDraftValue(
+  output: Record<string, unknown>,
+  ledger?: LedgerView,
+): {
   readonly value: Record<string, unknown>;
   readonly problems: readonly Problem[];
 } {
@@ -335,7 +435,10 @@ export function toNameTableDraftValue(output: Record<string, unknown>): {
     const type = item["type"];
     const used = typeof kind === "string" ? TYPE_KEYS_BY_KIND[kind] : undefined;
     if (used === undefined || !isRecord(type)) return item;
-    const extra = TYPE_KEYS.some((key) => !used.includes(key) && type[key] !== undefined && type[key] !== null);
+    const aggregate = type[AGGREGATE_TYPE_KEY];
+    const extra =
+      TYPE_KEYS.some((key) => !used.includes(key) && type[key] !== undefined && type[key] !== null) ||
+      (kind !== "computation" && aggregate !== undefined && aggregate !== null);
     if (extra) problems.push({ field: `rows[${index}].type`, message: "行の種類に合わない型の欄が null でない" });
     let converted: unknown;
     switch (kind) {
@@ -347,6 +450,9 @@ export function toNameTableDraftValue(output: Record<string, unknown>): {
         break;
       default:
         converted = Object.fromEntries(used.map((key) => [key, type[key]]));
+        if (kind === "computation" && ((ledger?.aggregateKinds.length ?? 0) > 0 || (aggregate !== undefined && aggregate !== null))) {
+          converted = { ...(converted as Record<string, unknown>), [AGGREGATE_TYPE_KEY]: aggregate };
+        }
     }
     return { ...item, type: converted };
   });
@@ -438,12 +544,13 @@ export async function runNameTable(input: NameTableInput): Promise<NameTableOutc
     return { ok: false, failure: { kind: "unmet", attempts: 0, problems: listProblems } };
   }
   const round = input.previous === undefined ? 1 : 2;
+  const ledger = input.ledger;
   const request = buildStructuredRequest({
-    rules: NAME_TABLE_RULES,
+    rules: ledger === undefined ? NAME_TABLE_RULES : ruleTexts(nameTableRuleDefinitionsOf(ledger)),
     documents: input.documents,
     data: buildData(input, length),
     schemaName: NAME_TABLE_SCHEMA_NAME,
-    schema: NAME_TABLE_SCHEMA,
+    schema: nameTableSchemaOf(ledger),
     maxOutputTokens: input.gateway.maxOutputTokens("name-table"),
   });
   let shapeRejections = 0;
@@ -462,8 +569,8 @@ export async function runNameTable(input: NameTableInput): Promise<NameTableOutc
   });
   if (!answer.ok) return answer;
 
-  const converted = toNameTableDraftValue(answer.value);
-  const inspected = inspectNameTable(input.list, converted.value, input.documents);
+  const converted = toNameTableDraftValue(answer.value, ledger);
+  const inspected = inspectNameTable(input.list, converted.value, input.documents, ledger === undefined ? {} : { ledger });
   const problems = [...converted.problems, ...(inspected.ok ? [] : inspected.problems)];
   if (inspected.ok && problems.length === 0) {
     return {

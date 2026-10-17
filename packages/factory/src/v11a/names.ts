@@ -21,6 +21,14 @@
 //     導いた行の `id` を添えて足す（`deriveOwnership`）
 //   - `shared` は所属の数（2 以上）から導く（`sharedRowIds`）。`aliasOf` は持たない（同じ場所を指す 2 つの
 //     `id` は検査で落とす）
+//
+// 旗 `v12.ledger` が on で、性質の台帳が集計の種類を持つ走り（`empty-aggregate`。Issue #549）だけ、計算の行の型に
+// `aggregate`（集計の種類と集計元の entity の行の `id`。種別 aggregate でなければ null）を持つ。off・台帳に無い走りで
+// 書いた表は形で落ちる（未登録の拒否）。v1 の型への写し（`RoleEntry`）には欄が無く、表の外に残る。
+//
+// 旗 on の走りだけ、確かめ方の種類 `non-requirement`（決まりも対象の項目も無い説明文。Issue #550）を作れる。所属は 0 行で
+// （1 行でも所属させれば台帳の固定文で落ちる）、分類の欄は完全性の検査のために要るが値は見ない。免除は T1'' の受理だけで
+// 決まり（持ち越しの導出）、ここでは要件の出どころ・要件 ID の形を見ない。off は形で落ちる（未登録の拒否）。
 import {
   ACTION_KINDS,
   COMPUTED_TYPES,
@@ -28,6 +36,7 @@ import {
   RESERVED_NAMES,
   VIEW_TYPES,
   type ActionKind,
+  type AggregateKind,
   type ComputedType,
   type FieldKind,
   type ViewType,
@@ -52,6 +61,7 @@ import {
   type PromptDocument,
   type ShapeCheck,
 } from "../stages/prompt.js";
+import { BASE_VERIFICATION_KINDS, type LedgerView, type PropertyT1 } from "../v12/ledger.js";
 
 // ── 型の値の一覧（D3。B3 の照合先は A5）────────────────────────────────
 
@@ -76,11 +86,21 @@ export type ComputationScope = (typeof COMPUTATION_SCOPES)[number];
 export const COMPUTATION_FORMS = ["expression", "aggregate", "settle"] as const;
 export type ComputationForm = (typeof COMPUTATION_FORMS)[number];
 
-/** 計算の型（値の型・範囲・種別の 3 つ組。§2.1） */
+/** 集計の種類と集計元（計算の行の型の `aggregate`。集計元は表の entity の行の `id`。旗 on。Issue #549） */
+export interface ComputationAggregate {
+  readonly kind: AggregateKind;
+  readonly entity: string;
+}
+
+/**
+ * 計算の型（値の型・範囲・種別の 3 つ組。§2.1）。旗 on で台帳が集計の種類を持つ走りだけ `aggregate` を持つ（種別
+ * aggregate の計算は集計の種類と集計元、ほかは null。Issue #549）。off の表は欄を持たない
+ */
 export interface ComputationRowType {
   readonly valueType: ComputedType;
   readonly scope: ComputationScope;
   readonly form: ComputationForm;
+  readonly aggregate?: ComputationAggregate | null;
 }
 
 /** 操作の型（操作の種類と `when` の有無） */
@@ -154,10 +174,68 @@ export interface NameTableOwnership {
 export const NAME_TABLE_VERIFICATION_KINDS = ["fixed-test", "structural", "unresolved", "default-value"] as const;
 
 /**
- * 要件ごとの確かめ方（fixed-test／structural＋checks／unresolved＋reason＋constraintIds／default-value＋value）。
+ * T1' を性質の台帳の導出で掛ける口（旗 `v12.ledger` が on の走りだけが渡す。08 §5・Issue #547）。省けば今の
+ * 定数と関数で掛ける。渡せば、確かめ方の種類の一覧と、性質に結び付いた確かめ方の所属の形を台帳の行の記述子から
+ * 掛け、台帳に無い種類を固定文で落とす。
+ */
+export interface NameTableLedgerOptions {
+  readonly ledger?: LedgerView;
+}
+
+/** 型付きの表の確かめ方の種類が、性質の台帳（と台帳の外の種類）に無いときの固定文（旗 on。Issue #547） */
+export const UNREGISTERED_VERIFICATION_KIND_MESSAGE = "確かめ方の種類が性質の台帳に無い";
+
+/** 計算の型に `aggregate` を書いたが、性質の台帳に集計の種類が無い（旗 off を含む）ときの固定文（Issue #549） */
+export const UNREGISTERED_AGGREGATE_MESSAGE = "計算の型の aggregate（集計の種類と集計元）は性質の台帳に無い（書けない）";
+
+/** T1' の計算の行の集計の種類と集計元の検査の固定文（旗 on で台帳が集計の種類を持つ走り。Issue #549） */
+export const COMPUTATION_AGGREGATE_MESSAGES = {
+  missing: "種別 aggregate の計算の行に、集計の種類と集計元（aggregate）が無い",
+  extra: "種別 aggregate でない計算の行の aggregate は null であること",
+  entity: "集計元の ID が表の entity の行に無い",
+  groups: "見出しごとの集計の集計元が、見出しの元の項目の所属 entity と違う",
+} as const;
+
+/**
+ * 計算の型の `aggregate` を読む（旗 on。読めなければ問題に足して undefined。台帳に無ければ書いたことを落とす）。
+ * T1 の応答（下書き）は欄が必須（strict の schema と同じ）。型付きで組み立てた表（`required` が偽）は、欄の無い行を
+ * 「書いていない」として通し、集計の検査を掛けない（T2' はその行を集計の対象にしない＝空の集計の試験は落ちる）
+ */
+function shapeOfAggregate(
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  ledger: LedgerView | undefined,
+  required = true,
+): ComputationAggregate | null | undefined {
+  const kinds = ledger?.aggregateKinds ?? [];
+  if (kinds.length === 0) {
+    if (value !== undefined && value !== null) {
+      problems.push({ field, message: UNREGISTERED_AGGREGATE_MESSAGE });
+      return undefined;
+    }
+    return null;
+  }
+  if (value === null || (value === undefined && !required)) return null;
+  if (!isRecord(value) || !isOneOf(kinds, value["kind"]) || !isNonEmptyString(value["entity"])) {
+    problems.push({
+      field,
+      message: `計算の型の aggregate は null か、集計の種類（${kinds.join("・")}）と集計元の entity の行の id の写像であること`,
+    });
+    return undefined;
+  }
+  return { kind: value["kind"], entity: value["entity"] };
+}
+
+/**
+ * 要件ごとの確かめ方（fixed-test／structural＋checks／unresolved＋reason＋constraintIds／default-value＋value／
+ * enum-membership）。
  * structural の `reason` は v1 の `RequirementVerification` と同じ（fixed-test 以外は理由が要る）。
  * default-value の `value` は、所属させた選択肢の項目の既定値として期待するキー（その項目の `options` のどれか。
  * T1' が確かめ、T1'' が要件の文の値と合うかを点検する。v1 の型へは `fixed-test` として写す。Issue #533）。
+ * enum-membership（選択肢の集合だけを決める要件）は欄を持たない。選択肢は所属の選択肢の項目の `options` で表し、
+ * 旗 `v12.ledger` が on の走りだけが作れる（off は形で落ちる。v1 の型へは `fixed-test` として写す。Issue #548）。
+ * non-requirement（決まりも対象の項目も無い説明文）も欄を持たず、所属は 0 行。旗 on の走りだけが作れる（Issue #550）。
  */
 export type NameTableVerification =
   | { readonly requirementId: string; readonly kind: "fixed-test" }
@@ -173,7 +251,9 @@ export type NameTableVerification =
       readonly reason: string;
       readonly constraintIds: readonly string[];
     }
-  | { readonly requirementId: string; readonly kind: "default-value"; readonly value: string };
+  | { readonly requirementId: string; readonly kind: "default-value"; readonly value: string }
+  | { readonly requirementId: string; readonly kind: "enum-membership" }
+  | { readonly requirementId: string; readonly kind: "non-requirement" };
 
 /** 要件ごとの分類（T1 が要件の文から分類する。Plan の `kind` から導かない。T2 の分類と照らす元。§1.1） */
 export interface NameTableClassification {
@@ -275,7 +355,14 @@ const isNonEmptyString = (value: unknown): value is string => typeof value === "
 const isOneOf = <T extends string>(values: readonly T[], value: unknown): value is T =>
   typeof value === "string" && (values as readonly string[]).includes(value);
 
-function shapeOfType(kind: NameTableKind, value: unknown, field: string, problems: Problem[]): NameTableRowType | undefined {
+function shapeOfType(
+  kind: NameTableKind,
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  ledger?: LedgerView,
+  requireAggregate = true,
+): NameTableRowType | undefined {
   switch (kind) {
     case "entity":
       if (value !== null) {
@@ -307,12 +394,16 @@ function shapeOfType(kind: NameTableKind, value: unknown, field: string, problem
         problems.push({ field: `${field}.form`, message: `計算の種別は ${COMPUTATION_FORMS.join("・")} のいずれかであること` });
         good = false;
       }
-      if (!good) return undefined;
-      return {
+      const before = problems.length;
+      const aggregate = shapeOfAggregate(value["aggregate"], `${field}.aggregate`, problems, ledger, requireAggregate);
+      if (!good || problems.length !== before) return undefined;
+      const typed = {
         valueType: value["valueType"] as ComputedType,
         scope: value["scope"] as ComputationScope,
         form: value["form"] as ComputationForm,
       };
+      // 台帳が集計の種類を持つ走りだけ欄を持つ（off の表は今の 3 つ組のまま。Issue #549）
+      return (ledger?.aggregateKinds.length ?? 0) === 0 ? typed : { ...typed, aggregate: aggregate ?? null };
     }
     case "operation": {
       if (!isRecord(value)) {
@@ -368,7 +459,7 @@ function shapeOfNullableId(value: unknown, field: string, problems: Problem[]): 
   return value;
 }
 
-function shapeOfRow(value: unknown, field: string, problems: Problem[]): NameTableDraftRow | undefined {
+function shapeOfRow(value: unknown, field: string, problems: Problem[], ledger?: LedgerView): NameTableDraftRow | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "行は写像（object）であること" });
     return undefined;
@@ -388,7 +479,7 @@ function shapeOfRow(value: unknown, field: string, problems: Problem[]): NameTab
   if (!isRecord(source) || !isNonEmptyString(source["copy"]) || !isNonEmptyString(source["quote"])) {
     problems.push({ field: `${field}.source`, message: "出典は「要件の文の写し・引用」の写像であること" });
   }
-  const type = kindOk ? shapeOfType(kind, value["type"], `${field}.type`, problems) : undefined;
+  const type = kindOk ? shapeOfType(kind, value["type"], `${field}.type`, problems, ledger) : undefined;
   const options = shapeOfOptions(value["options"], `${field}.options`, problems);
   const groupBy = shapeOfGroupBy(value["groupBy"], `${field}.groupBy`, problems);
   const refEntity = shapeOfNullableId(value["refEntity"], `${field}.refEntity`, problems);
@@ -431,11 +522,17 @@ function shapeOfRoleOwnership(value: unknown, field: string, problems: Problem[]
   return { id: id as string, basis: basis as RoleOwnershipBasis, reason: typeof reason === "string" ? reason : null };
 }
 
-function shapeOfVerification(value: unknown, field: string, problems: Problem[]): NameTableDraftVerification | undefined {
+function shapeOfVerification(
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  ledger?: LedgerView,
+): NameTableDraftVerification | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "確かめ方は写像（object）であること" });
     return undefined;
   }
+  if (ledger !== undefined) return shapeOfVerificationByLedger(value, field, problems, ledger);
   const kind = value["kind"];
   if (kind === "default-value") {
     const key = value["value"];
@@ -479,7 +576,45 @@ function shapeOfVerification(value: unknown, field: string, problems: Problem[])
   return undefined;
 }
 
-function shapeOfDraftRequirement(value: unknown, field: string, problems: Problem[]): NameTableDraftRequirement | undefined {
+/**
+ * 旗 on の下書きの確かめ方の形（Issue #547）。性質に結び付いた種類は、台帳の行の欄（`valueField`）が空でない文字列で
+ * あることを確かめる（欄を持たない種類は `value` が無いか null であること。Issue #548）。台帳の外の種類（fixed-test・
+ * structural・unresolved）は今の関数に任せ、どちらにも無い種類は台帳の種類の一覧の固定文で落とす。
+ */
+function shapeOfVerificationByLedger(
+  value: Record<string, unknown>,
+  field: string,
+  problems: Problem[],
+  ledger: LedgerView,
+): NameTableDraftVerification | undefined {
+  const kind = value["kind"];
+  const t1 = typeof kind === "string" ? ledger.rowByVerificationKind.get(kind)?.t1 : undefined;
+  if (t1 !== undefined && t1 !== null) {
+    if (t1.valueField === null) {
+      if (value["value"] !== undefined && value["value"] !== null) {
+        problems.push({ field: `${field}.value`, message: t1.messages.valueShape });
+        return undefined;
+      }
+      return { kind: t1.kind } as NameTableDraftVerification;
+    }
+    const key = value[t1.valueField];
+    if (!isNonEmptyString(key)) {
+      problems.push({ field: `${field}.${t1.valueField}`, message: t1.messages.valueShape });
+      return undefined;
+    }
+    return { kind: t1.kind, value: key } as NameTableDraftVerification;
+  }
+  if (isOneOf(BASE_VERIFICATION_KINDS, kind)) return shapeOfVerification(value, field, problems);
+  problems.push({ field: `${field}.kind`, message: `確かめ方の種類は ${ledger.verificationKinds.join("・")} のいずれかであること` });
+  return undefined;
+}
+
+function shapeOfDraftRequirement(
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  ledger?: LedgerView,
+): NameTableDraftRequirement | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "要件ごとの 1 件は写像（object）であること" });
     return undefined;
@@ -496,7 +631,7 @@ function shapeOfDraftRequirement(value: unknown, field: string, problems: Proble
       if (role !== undefined) roles.push(role);
     });
   }
-  const verification = shapeOfVerification(value["verification"], `${field}.verification`, problems);
+  const verification = shapeOfVerification(value["verification"], `${field}.verification`, problems, ledger);
   const nature = value["nature"];
   if (!isOneOf(REQUIREMENT_NATURES, nature)) {
     problems.push({ field: `${field}.nature`, message: `分類は ${REQUIREMENT_NATURES.join("・")} のいずれかであること` });
@@ -517,7 +652,10 @@ interface DraftShapeScan {
   readonly rawRequirements: readonly unknown[];
 }
 
-function scanNameTableDraftShape(value: unknown): DraftShapeScan | { readonly problems: readonly Problem[] } {
+function scanNameTableDraftShape(
+  value: unknown,
+  ledger?: LedgerView,
+): DraftShapeScan | { readonly problems: readonly Problem[] } {
   const problems: Problem[] = [];
   if (!isRecord(value)) return { problems: [{ field: "", message: "名前の表は写像（object）であること" }] };
   let rows: (NameTableDraftRow | undefined)[] | null = null;
@@ -525,14 +663,16 @@ function scanNameTableDraftShape(value: unknown): DraftShapeScan | { readonly pr
   if (!Array.isArray(rowsRaw) || rowsRaw.length === 0) {
     problems.push({ field: "rows", message: "行は空でない並びであること" });
   } else {
-    rows = rowsRaw.map((item, index) => shapeOfRow(item, `rows[${index}]`, problems));
+    rows = rowsRaw.map((item, index) => shapeOfRow(item, `rows[${index}]`, problems, ledger));
   }
   let requirements: (NameTableDraftRequirement | undefined)[] | null = null;
   const requirementsRaw = value["requirements"];
   if (!Array.isArray(requirementsRaw)) {
     problems.push({ field: "requirements", message: "要件ごとの並びは並び（array）であること" });
   } else {
-    requirements = requirementsRaw.map((item, index) => shapeOfDraftRequirement(item, `requirements[${index}]`, problems));
+    requirements = requirementsRaw.map((item, index) =>
+      shapeOfDraftRequirement(item, `requirements[${index}]`, problems, ledger),
+    );
   }
   return {
     problems,
@@ -543,9 +683,9 @@ function scanNameTableDraftShape(value: unknown): DraftShapeScan | { readonly pr
   };
 }
 
-/** (a) T1 の応答（下書き）の形を確かめる。合わない欄を**すべて**挙げる */
-export function checkNameTableDraftShape(value: unknown): ShapeCheck<NameTableDraft> {
-  const scan = scanNameTableDraftShape(value);
+/** (a) T1 の応答（下書き）の形を確かめる。合わない欄を**すべて**挙げる（`options.ledger` は旗 on の確かめ方の形） */
+export function checkNameTableDraftShape(value: unknown, options: NameTableLedgerOptions = {}): ShapeCheck<NameTableDraft> {
+  const scan = scanNameTableDraftShape(value, options.ledger);
   if (scan.problems.length > 0) return { ok: false, problems: scan.problems };
   const full = scan as DraftShapeScan;
   const rows = (full.rows ?? []).filter((row): row is NameTableDraftRow => row !== undefined);
@@ -691,9 +831,9 @@ const isScreenType = (type: NameTableRowType): type is ScreenRowType =>
   type !== null && typeof type === "object" && "view" in type;
 
 /** 行の型と種類の組（形の再確認。型付きで組み立てた表にも掛ける） */
-function checkRowType(row: NameTableRow, field: string, problems: Problem[]): void {
+function checkRowType(row: NameTableRow, field: string, problems: Problem[], ledger?: LedgerView): void {
   const shapeProblems: Problem[] = [];
-  shapeOfType(row.kind, row.type, `${field}.type`, shapeProblems);
+  shapeOfType(row.kind, row.type, `${field}.type`, shapeProblems, ledger, false);
   problems.push(...shapeProblems);
   if (shapeProblems.length > 0 || !isComputationType(row.type)) return;
   const { valueType, scope, form } = row.type;
@@ -765,8 +905,9 @@ export function checkNameTable(
   list: RequirementList,
   table: NameTable,
   documents: readonly PromptDocument[],
+  options: NameTableLedgerOptions = {},
 ): readonly Problem[] {
-  return checkNameTableWith(list, table, documents, {});
+  return checkNameTableWith(list, table, documents, options.ledger === undefined ? {} : { ledger: options.ledger });
 }
 
 /**
@@ -789,6 +930,8 @@ interface TableCheckOptions {
    * 所属させていた行と、所属させた行が形で落ちたために導かれなくなった所属 entity
    */
   readonly rowIdsOwnedByDropped?: ReadonlySet<string>;
+  /** 性質の台帳の導出（旗 on。Issue #547） */
+  readonly ledger?: LedgerView;
 }
 
 function checkNameTableWith(
@@ -844,11 +987,42 @@ function checkNameTableWith(
     locationSeen.add(location);
   });
 
+  /**
+   * 旗 on で台帳が集計の種類を持つ走り：種別 aggregate ⇔ `aggregate` が null でない・集計元が表の entity の行を指す・
+   * 見出しごとの集計の集計元は見出しの元の項目の所属 entity と同じ（Issue #549。型の形の落ちは `checkRowType` が出す）
+   */
+  const checkComputationAggregate = (row: NameTableRow, field: string): void => {
+    if (row.kind !== "computation" || !isComputationType(row.type)) return;
+    const at = `${field}.type.aggregate`;
+    const aggregate = row.type.aggregate;
+    if (aggregate === undefined) return;
+    if (row.type.form !== "aggregate") {
+      if (aggregate !== null) problems.push({ field: at, message: COMPUTATION_AGGREGATE_MESSAGES.extra });
+      return;
+    }
+    if (aggregate === null) {
+      problems.push({ field: at, message: COMPUTATION_AGGREGATE_MESSAGES.missing });
+      return;
+    }
+    const source = rowById.get(aggregate.entity);
+    if (source === undefined ? !isDroppedRow(aggregate.entity) : source.kind !== "entity") {
+      problems.push({ field: `${at}.entity`, message: COMPUTATION_AGGREGATE_MESSAGES.entity });
+      return;
+    }
+    if (row.type.scope === "groups" && row.groupBy !== null) {
+      const heading = rowById.get(row.groupBy.field);
+      if (heading !== undefined && heading.entity !== aggregate.entity) {
+        problems.push({ field: `${at}.entity`, message: COMPUTATION_AGGREGATE_MESSAGES.groups });
+      }
+    }
+  };
+
   // (d) 参照・型・選択肢・出典
   const requirementById = new Map(list.requirements.map((requirement) => [requirement.id, requirement] as const));
   table.rows.forEach((row, index) => {
     const field = `rows[${rowAt(index)}]`;
-    checkRowType(row, field, problems);
+    checkRowType(row, field, problems, options.ledger);
+    if ((options.ledger?.aggregateKinds.length ?? 0) > 0) checkComputationAggregate(row, field);
     if (row.role.trim() === "") problems.push({ field: `${field}.role`, message: "役割の説明が空である" });
     const sourceRequirement = requirementById.get(row.source.requirementId);
     if (skipSourceRows.has(index)) {
@@ -1003,9 +1177,71 @@ function checkNameTableWith(
       problems.push({ field: `${field}.value`, message: "既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い" });
     }
   };
+  /**
+   * 旗 on：性質に結び付いた確かめ方の所属の形を、台帳の行の記述子（`PropertyT1`）から掛ける（Issue #547）。所属が
+   * 「記述子の種類・型の行を `count` 行ちょうどと、その行の所属 entity（コードが足す）」だけで、欄の値がその行の
+   * options にあり、分類が記述子の値であること。欄を持たない種類は `value` が無いか null で、`optionsNonEmpty` なら
+   * その行の options が空でないこと（Issue #548）。所属 0 行の記述子（行の種類が null）は、1 行でも所属させれば落とし、
+   * 分類の値を見ない記述子（分類が null）は分類を照らさない（Issue #550）。固定文は記述子が持つ
+   */
+  const checkLedgerVerification = (
+    t1: PropertyT1,
+    value: unknown,
+    field: string,
+    roles: readonly NameTableRoleOwnership[],
+    nature: RequirementNature | undefined,
+  ): void => {
+    const valueField = t1.valueField ?? "value";
+    const key = typeof value === "string" ? value : "";
+    if (t1.valueField === null ? value !== undefined && value !== null : key.trim() === "") {
+      problems.push({ field: `${field}.${valueField}`, message: t1.messages.valueEmpty });
+    }
+    if (t1.nature !== null && nature !== undefined && nature !== t1.nature) {
+      problems.push({ field, message: t1.messages.nature ?? t1.messages.count });
+    }
+    if (t1.ownership.row === null && roles.length > 0) {
+      // 所属 0 行の記述子：表に無い ID・形で落ちた行を所属させても、所属させたことだけで落とす
+      problems.push({ field, message: t1.messages.count });
+      return;
+    }
+    if (roles.some((role) => !rowById.has(role.id))) return;
+    const owned = roles.map((role) => rowById.get(role.id) as NameTableRow);
+    const want = t1.ownership.row;
+    const targets = want === null ? [] : owned.filter((row) => row.kind === want.kind && (row.type as unknown) === want.type);
+    if (targets.length !== t1.ownership.count) {
+      problems.push({ field, message: t1.messages.count });
+      return;
+    }
+    const allowed = new Set(
+      targets.flatMap((row) => [row.id, ...(t1.ownership.entityAddedByCode && row.entity !== null ? [row.entity] : [])]),
+    );
+    if (owned.some((row) => !allowed.has(row.id))) problems.push({ field, message: t1.messages.others });
+    if (t1.ownership.optionsNonEmpty && targets.some((row) => (row.options ?? []).length === 0)) {
+      problems.push({ field, message: t1.messages.optionsEmpty ?? t1.messages.count });
+    }
+    if (t1.ownership.valueInOptions && !targets.some((row) => (row.options ?? []).includes(key))) {
+      problems.push({ field: `${field}.${valueField}`, message: t1.messages.valueNotInOptions ?? t1.messages.valueEmpty });
+    }
+  };
+  const ledger = options.ledger;
   table.verification.forEach((entry, index) => {
     const field = `verification[${entryAt(index)}]`;
     if (verificationById.get(entry.requirementId) !== entry) return;
+    if (ledger !== undefined && !isOneOf(BASE_VERIFICATION_KINDS, entry.kind)) {
+      const t1 = ledger.rowByVerificationKind.get(entry.kind)?.t1;
+      if (t1 === undefined || t1 === null) {
+        problems.push({ field: `${field}.kind`, message: UNREGISTERED_VERIFICATION_KIND_MESSAGE });
+        return;
+      }
+      checkLedgerVerification(
+        t1,
+        (entry as unknown as Record<string, unknown>)[t1.valueField ?? "value"],
+        field,
+        derived.get(entry.requirementId)?.roles ?? [],
+        natureById.get(entry.requirementId),
+      );
+      return;
+    }
     const kinds = ownedKinds(entry.requirementId);
     const unknownOwned = ownsUnknownKindRow(entry.requirementId);
     switch (entry.kind) {
@@ -1049,6 +1285,11 @@ function checkNameTableWith(
       case "default-value":
         checkDefaultValueVerification(entry, field, derived.get(entry.requirementId)?.roles ?? [], natureById.get(entry.requirementId));
         return;
+      case "enum-membership":
+      case "non-requirement":
+        // 旗 off の走りは台帳の種類を知らない（下書きの形でも落ちる。型付きの表を直に渡しても通さない。Issue #548・#550）
+        problems.push({ field: `${field}.kind`, message: `確かめ方の種類は ${NAME_TABLE_VERIFICATION_KINDS.join("・")} のいずれかであること` });
+        return;
     }
   });
   const owners = ownersByRowId(table);
@@ -1075,10 +1316,11 @@ export function inspectNameTable(
   list: RequirementList,
   value: unknown,
   documents: readonly PromptDocument[],
+  options: NameTableLedgerOptions = {},
 ): ResolveResult {
   const listProblems = checkRequirementListForTable(list);
   if (listProblems.length > 0) return { ok: false, problems: listProblems };
-  const scan = scanNameTableDraftShape(value);
+  const scan = scanNameTableDraftShape(value, options.ledger);
   // 後段に渡す元が無い（写像でない・行や要件ごとの並びが並びでない）ときは形の問題だけを返す
   if (!("rows" in scan) || scan.rows === null || scan.requirements === null) return { ok: false, problems: scan.problems };
   const { rows: draftRows, requirements: draftRequirements } = scan;
@@ -1181,12 +1423,20 @@ export function inspectNameTable(
     list,
     { rows: tableRows, ownership, verification, classification },
     documents,
-    { rowOrigin, entryOrigin, skipSourceRows, droppedRows, droppedRequirementIds, rowIdsOwnedByDropped },
+    {
+      rowOrigin,
+      entryOrigin,
+      skipSourceRows,
+      droppedRows,
+      droppedRequirementIds,
+      rowIdsOwnedByDropped,
+      ...(options.ledger === undefined ? {} : { ledger: options.ledger }),
+    },
   );
 
   const problems = [...scan.problems, ...copyProblems, ...tableProblems];
   if (problems.length > 0) return { ok: false, problems };
-  const shape = checkNameTableDraftShape(value);
+  const shape = checkNameTableDraftShape(value, options);
   if (!shape.ok) return shape;
   return resolveNameTableDraft(list, shape.value);
 }

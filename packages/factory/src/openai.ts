@@ -39,9 +39,9 @@ import {
   ENVELOPE_RESULT_KEY,
   ENVELOPE_STAGE_KEY,
   buildStageBranch,
-  envelopeOf,
-  envelopeStageFor,
+  resolveStageEnvelope,
   type EnvelopeId,
+  type ResolvedStageEnvelope,
   type StageEnvelopeEntry,
 } from "./schema-envelope.js";
 
@@ -323,10 +323,16 @@ function baseBody(
  * 送る（#353）。これで出力の schema が全段で同じになり、段をまたいで前置きが一致してキャッシュが当たる。
  * どの枝で答えるかは、段ごとの指示（`stageInstruction`）で伝える。封筒に載っていない schema（判定の口など）は、
  * 今までどおりその要求の schema をそのまま送る。
+ *
+ * 封筒の段の枝は、**その要求の schema と深く等しい**ものにする（`resolveStageEnvelope`。Issue #549 の直し）。
+ * 旗 on の段は台帳から schema を導くので、起動時の定数の封筒を送ると台帳の形がモデルに届かない。
  */
-function buildStructuredBody(config: WireConfig, request: LlmStructuredRequest): Record<string, unknown> {
-  const entry = envelopeStageFor(request.schemaName, config.envelope);
-  const envelope = envelopeOf(config.envelope);
+function buildStructuredBody(
+  config: WireConfig,
+  request: LlmStructuredRequest,
+  envelope: ResolvedStageEnvelope | undefined,
+): Record<string, unknown> {
+  const entry = envelope?.entry;
   const body = baseBody(
     config,
     request.instructions,
@@ -341,8 +347,8 @@ function buildStructuredBody(config: WireConfig, request: LlmStructuredRequest):
   body.text = {
     format: {
       type: "json_schema",
-      name: entry === undefined ? request.schemaName : envelope.name,
-      schema: entry === undefined ? request.schema : envelope.schema,
+      name: envelope === undefined ? request.schemaName : envelope.name,
+      schema: envelope === undefined ? request.schema : envelope.schema,
       strict: true,
     },
   };
@@ -474,8 +480,10 @@ async function callStructuredWire<T>(
   config: WireConfig,
   request: LlmStructuredRequest,
 ): Promise<LlmStructuredResponse<T>> {
-  const entry = envelopeStageFor(request.schemaName, config.envelope);
-  const wire = await requestWire(config, buildStructuredBody(config, request), request.signal);
+  // 送る封筒と応答の取り出しは同じ枝で行う（その要求の schema と深く等しい枝。Issue #549 の直し）
+  const envelope = resolveStageEnvelope(request.schemaName, request.schema, config.envelope);
+  const entry = envelope?.entry;
+  const wire = await requestWire(config, buildStructuredBody(config, request, envelope), request.signal);
   const usage = parseUsage(wire.usage);
   requireCompleted(wire, usage);
   requireNoRefusal(wire);

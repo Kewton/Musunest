@@ -1936,3 +1936,309 @@ test("#545 直し：境界の checkpoint の宣言が無い記録は、範囲の
     assert.equal(readJson(pairsOk).pairs.length, 15);
   });
 });
+
+// ── #557：経路 v1.2（--pipeline v1.2）と比較の群の組（--compare-pipelines）。README §5.13
+// 偽物の工場の dist：package の入口（index.js）に V12_PIPELINE_FLAGS を置き、入口（cli.js）は --pipeline v1.2 のとき、その値（FAKE_V12 で本ごとに差し替え。
+// "__absent__" は欄を書かない）を要約の行と条件の記録（bundle/build-record.json の conditions）の v12_flags に書く。起動を FAKE_SPAWN_LOG に 1 行ずつ数える
+const fakeV12Cli = String.raw`import { appendFileSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+export const DEFAULT_EFFORT = "high";
+export const DEFAULT_BUDGET_USD = 0.3;
+export const DEFAULT_DEADLINE_MS = 600000;
+export const API_KEY_ENV = "OPENAI_API_KEY";
+export const JEV_API_KEY_ENV = "JEV_API_KEY";
+export const VOCABULARY_VERSION = "v1";
+const isEntry = () => { try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } };
+const map = (k) => { try { return JSON.parse(process.env[k] ?? "{}"); } catch { return {}; } };
+if (isEntry()) {
+  const outDir = process.argv[process.argv.indexOf("--out") + 1], runDir = dirname(outDir), id = basename(runDir), key = basename(dirname(runDir)) + "/" + id;
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(join(runDir, "received-argv.json"), JSON.stringify(process.argv.slice(1)));
+  if (process.env.FAKE_SPAWN_LOG) appendFileSync(process.env.FAKE_SPAWN_LOG, key + "\n");
+  const i = process.argv.indexOf("--pipeline"), pl = i >= 0 ? process.argv[i + 1] : "v1";
+  let flags;
+  if (pl === "v1.2") { try { flags = (await import(pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "index.js")).href)).V12_PIPELINE_FLAGS; } catch { flags = undefined; } }
+  const over = map("FAKE_V12")[key] ?? map("FAKE_V12")[id] ?? {};
+  const pick = (k) => (Object.hasOwn(over, k) ? over[k] : flags);
+  const summary = { schema_version: "commandagent.headless-summary/v1", verdict: "partial", stop_reason: "completed", provider_cost_usd: 0.01, stages: [{ stage: "write", duration_ms: 1 }] };
+  const conditions = { model: "fake-model", prompt_version: pl };
+  if (pl === "v1.2") { const s = pick("summary"), r = pick("record"); if (s !== "__absent__") summary.v12_flags = s; if (r !== "__absent__") { conditions.pipeline = "v1.2"; conditions.v12_flags = r; } }
+  if (over.noRecord !== true) writeFileSync(join(outDir, "build-record.json"), JSON.stringify({ conditions }));
+  if (over.noSummary !== true) process.stdout.write(JSON.stringify(summary) + "\n");
+}
+`;
+import { pathToFileURL } from "node:url";
+const FLAGS557 = { ledger: true };
+const v12Index = (flags) => `export const V12_PIPELINE_FLAGS = ${JSON.stringify(flags)};\n`;
+/** 偽物の v1.2 のリポジトリ：入口・package の入口（旗の組）・14 段の上限（v1.1α の 4 段は A1 の承認値） */
+function makeV12Repo(base, { index = v12Index(FLAGS557), limits = V14_LIMITS } = {}) {
+  const repo = makeRepo(base);
+  writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeV12Cli);
+  if (index !== null) writeFileSync(join(repo, "packages/factory/dist/index.js"), index);
+  writeFileSync(join(repo, "packages/factory/dist/limits.js"), limitsJs(limits));
+  return repo;
+}
+const PIDS557 = Array.from({ length: 10 }, (_, i) => `P${i + 1}`);
+const frozen557 = (base, repo, name = "fz-557") => writeFrozen(join(base, name), repo, { envelopes: Object.fromEntries(PIDS557.map((p) => [p, envelopeOf(p)])) });
+const lastRunRecord = (out) => readJson(join(out, runRecords(out).at(-1)));
+const V7 = "musunest-factory/agent-accept-conditions/v7", V5 = "musunest-factory/agent-accept-conditions/v5";
+
+test("#557 (a) --pipeline v1.2：子の引数の末尾が --pipeline v1.2・条件の params.pipeline が v1.2・v12_flags が偽物の dist の V12_PIPELINE_FLAGS と深く等しい・schema v7。本ごとの記録に報告と一致、標準出力の行に pipeline=v1.2。省略と v1.1a には新しい欄が無い", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "a")), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const run = (name, extra) => {
+      const out = join(base, name), r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--build-from", fz, ...extra], { FAKE_SPAWN_LOG: log });
+      assert.equal(r.status, 0, r.stderr);
+      return { out, r, cond: readJson(join(out, "conditions.json")), argv: readJson(join(out, "P1-r1", "received-argv.json")), sl: readJson(join(out, "P1-r1", "summary.line.json")), run: lastRunRecord(out) };
+    };
+    const omitted = run("out-omit", []), v11a = run("out-v11a", ["--pipeline", "v1.1a"]), v12 = run("out-v12", ["--pipeline", "v1.2"]);
+    assert.deepEqual(v12.argv.slice(-2), ["--pipeline", "v1.2"]);
+    assert.deepEqual(v12.argv.slice(0, -2).map((a) => a.replace(v12.out, omitted.out)), omitted.argv, "ほかの引数は省略と同じ");
+    assert.equal(v12.cond.schema, V7);
+    assert.equal(v12.cond.params.pipeline, "v1.2");
+    const dist = await import(pathToFileURL(join(repo, "packages/factory/dist/index.js")).href);
+    assert.deepEqual(v12.cond.params.v12_flags, dist.V12_PIPELINE_FLAGS);
+    assert.deepEqual(v12.cond.child_args[0].argv, v12.argv, "条件の子の引数は渡した引数");
+    assert.deepEqual(v12.sl.v12_flags, { status: "match", summary: { state: "present", flags: FLAGS557 }, record: { state: "present", flags: FLAGS557 } });
+    assert.deepEqual(v12.run.v12_flags, { flags: FLAGS557, counts: { match: 1, mismatch: 0, missing: 0, malformed: 0, inconsistent: 0 }, unverified: [] });
+    assert.match(v12.r.stdout, /^P1-r1 effort=high build-from pipeline=v1\.2 exit=0 verdict=partial /m);
+    assert.notEqual(v12.cond.signature, v11a.cond.signature);
+    // 省略と v1.1a：今の版・新しい欄なし・行に pipeline=v1.2 なし
+    for (const x of [omitted, v11a]) {
+      assert.equal(x.cond.schema, V5);
+      assert.ok(!("v12_flags" in x.cond.params) && !("v12_flags" in x.sl) && !("v12_flags" in x.run));
+      assert.ok(!x.r.stdout.includes("pipeline=v1.2"));
+    }
+    assert.ok(!omitted.r.stdout.includes("pipeline="));
+    assert.deepEqual(v11a.argv.slice(-2), ["--pipeline", "v1.1a"]);
+    // 組めない組・知らない値・値の無い指定・段の旗との組（子 0・何も書かない）
+    const spawned = spawnCount(log);
+    for (const [label, extra] of [
+      ["no-build-from", ["--only", "P1", "--runs", "1", "--pipeline", "v1.2"]],
+      ["plan", ["--only", "P1", "--runs", "1", "--plan", "--pipeline", "v1.2"]],
+      ["plan-only", ["--only", "P1", "--runs", "1", "--plan-only", "--pipeline", "v1.2"]],
+      ["unknown", ["--runs", "1", "--build-from", fz, "--pipeline", "v1.3"]],
+      ["empty", ["--runs", "1", "--build-from", fz, "--pipeline"]],
+      ["flag-value", ["--runs", "1", "--pipeline", "--build-from", fz]],
+      ["stage", ["--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "name-table"]],
+      ["stage-end", ["--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--stage-end", "judge"]],
+    ]) {
+      const o = join(base, `out-c-${label}`);
+      assertRefused(runAgent(repo, o, extra, { FAKE_SPAWN_LOG: log }), "flags:conflict", log, spawned, label);
+      assertNothingWritten(o, label);
+    }
+  });
+});
+
+test("#557 (b) 公開の値：export の無い dist・値が真偽でない・空・配列・入口が無い dist は pipeline:v1.2-unavailable（exit 3）で子の起動 0 回・何も書かない（比較でも同じ）。旗を 1 つ増やした dist では、道具を直さずに条件と記録にその旗が載る", async () => {
+  await withRepo(async (base) => {
+    const log = join(base, "spawn.log");
+    const cases = [["no-export", "export const OTHER = { ledger: true };\n"], ["not-bool", v12Index({ ledger: "on" })], ["empty", v12Index({})], ["array", v12Index([true])], ["null", v12Index(null)], ["number", v12Index({ ledger: 1 })], ["no-index", null]];
+    for (const [label, index] of cases) {
+      const repo = makeV12Repo(join(base, label), { index }), fz = frozen557(join(base, label), repo);
+      const o = join(base, `out-${label}`);
+      const r = runAgent(repo, o, ["--runs", "1", "--build-from", fz, "--pipeline", "v1.2"], { FAKE_SPAWN_LOG: log });
+      assertRefused(r, "pipeline:v1.2-unavailable", log, 0, label);
+      assertNothingWritten(o, label);
+      oneLine(r, label);
+      // 比較（候補の群が v1.2）でも子を起こさない
+      const pairs = join(base, `pairs-${label}.json`);
+      assert.equal(runAgent(repo, join(base, "unused"), ["--make-pairs", pairs, "--build-from", fz, "--runs", "1", "--compare-pipelines", "v1.1a,v1.2"]).status, 0, "対のファイルは子を起こさないので書ける");
+      const oc = join(base, `out-cmp-${label}`);
+      assertRefused(runAgent(repo, oc, ["--compare", "--baseline", repo, "--pairs", pairs, "--build-from", fz, "--budget-usd", "5", "--compare-pipelines", "v1.1a,v1.2"], { FAKE_SPAWN_LOG: log }), "pipeline:v1.2-unavailable", log, 0, `cmp-${label}`);
+      assertNothingWritten(oc, `cmp-${label}`);
+    }
+    // 旗を 1 つ増やした偽物の dist と記録：道具を直さずに条件と記録に載る
+    const more = { ledger: true, "search-repair": false };
+    const repo = makeV12Repo(join(base, "more"), { index: v12Index(more) }), fz = frozen557(join(base, "more"), repo);
+    const out = join(base, "out-more");
+    assert.equal(runAgent(repo, out, ["--only", "P2", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2"], { FAKE_SPAWN_LOG: log }).status, 0);
+    assert.deepEqual(readJson(join(out, "conditions.json")).params.v12_flags, more);
+    assert.deepEqual(readJson(join(out, "P2-r1", "summary.line.json")).v12_flags.summary.flags, more);
+    assert.deepEqual(lastRunRecord(out).v12_flags.flags, more);
+    assert.ok(!readFileSync(runAgentFile, "utf8").includes("search-repair") && !readFileSync(runAgentFile, "utf8").includes('"ledger"'), "計測の道具に旗の名前を書かない");
+  });
+});
+
+test("#557 (c) 旗の組を変えた --resume は resume:signature で断る（子 0・出力先は変わらない）。同じ組の再開は通り、起動の記録の照合は飛ばした前回の本を含む。条件の版を知らない値に書き換えた出力先の再開も断る", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "c")), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const out = join(base, "out-r"), args = ["--only", "P1", "--runs", "3", "--concurrency", "1", "--build-from", fz, "--pipeline", "v1.2"];
+    assert.equal(runAgent(repo, out, args, { FAKE_SPAWN_LOG: log }).status, 0);
+    rmSync(join(out, "P1-r3"), { recursive: true, force: true });
+    writeFileSync(join(repo, "packages/factory/dist/index.js"), v12Index({ ledger: true, "search-repair": true }));
+    const before = treeOf(out), n0 = spawnCount(log);
+    assertRefused(runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log }), "resume:signature", log, n0, "旗の組を変えた再開");
+    assert.deepEqual(treeOf(out), before);
+    writeFileSync(join(repo, "packages/factory/dist/index.js"), v12Index({ ledger: false }));
+    assertRefused(runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log }), "resume:signature", log, n0, "真偽を変えた再開");
+    writeFileSync(join(repo, "packages/factory/dist/index.js"), v12Index(FLAGS557));
+    const rr = runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(rr.status, 0, rr.stderr);
+    assert.equal(spawnCount(log), n0 + 1);
+    assert.deepEqual(lastRunRecord(out).v12_flags.counts, { match: 3, mismatch: 0, missing: 0, malformed: 0, inconsistent: 0 }, "飛ばした前回の 2 本も照合に入る");
+    // 条件の版を知らない値に書き換えた出力先
+    rmSync(join(out, "P1-r3"), { recursive: true, force: true });
+    const p = join(out, "conditions.json"), cond = readJson(p);
+    writeFileSync(p, JSON.stringify({ ...cond, schema: "musunest-factory/agent-accept-conditions/v99" }, null, 1));
+    const n1 = spawnCount(log);
+    assertRefused(runAgent(repo, out, [...args, "--resume"], { FAKE_SPAWN_LOG: log }), "resume:signature", log, n1, "知らない版");
+  });
+});
+
+test("#557 (d) 報告の照合：再開の前に起動した 1 本の報告が条件と違う計測・完了した 1 本の報告が無い計測で、起動の記録のその本が不一致・欠測。キーの順だけ違う報告は一致、要約と条件の記録の食い違いと不正形も本ごとに残る", async () => {
+  await withRepo(async (base) => {
+    const two = { ledger: true, "search-repair": false };
+    const repo = makeV12Repo(join(base, "d"), { index: v12Index(two) }), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const args = ["--only", "P1", "--runs", "3", "--concurrency", "1", "--build-from", fz, "--pipeline", "v1.2"];
+    const slOf = (out, id) => readJson(join(out, id, "summary.line.json")).v12_flags;
+    // 再開の前に起動した 1 本の報告が条件と違う
+    const om = join(base, "out-mismatch");
+    assert.equal(runAgent(repo, om, args, { FAKE_SPAWN_LOG: log, FAKE_V12: JSON.stringify({ "P1-r1": { summary: { ledger: false, "search-repair": false }, record: { ledger: false, "search-repair": false } } }) }).status, 0);
+    rmSync(join(om, "P1-r3"), { recursive: true, force: true });
+    assert.equal(runAgent(repo, om, [...args, "--resume"], { FAKE_SPAWN_LOG: log }).status, 0);
+    assert.equal(slOf(om, "P1-r1").status, "mismatch");
+    assert.deepEqual(lastRunRecord(om).v12_flags.unverified, [{ id: "P1-r1", status: "mismatch" }], "再開の起動の記録に前回の本の不一致が残る");
+    // 完了した 1 本の報告が無い（要約の欄が無い・要約の行が無い・条件の記録が無い）
+    const cases = [
+      ["summary-absent", { summary: "__absent__" }, "missing"], ["no-summary-line", { noSummary: true }, "missing"], ["no-record", { noRecord: true }, "missing"],
+      ["key-order", { summary: { "search-repair": false, ledger: true }, record: { "search-repair": false, ledger: true } }, "match"],
+      ["inconsistent", { summary: two, record: { ledger: true, "search-repair": true } }, "inconsistent"],
+      ["malformed", { summary: "on" }, "malformed"], ["malformed-record", { record: [true] }, "malformed"],
+    ];
+    for (const [label, over, status] of cases) {
+      const o = join(base, `out-${label}`);
+      const r = runAgent(repo, o, args, { FAKE_SPAWN_LOG: log, FAKE_V12: JSON.stringify({ "P1-r2": over }) });
+      assert.equal(r.status, 0, `${label}: ${r.stderr}`);
+      assert.equal(slOf(o, "P1-r2").status, status, label);
+      assert.deepEqual(lastRunRecord(o).v12_flags.unverified, status === "match" ? [] : [{ id: "P1-r2", status }], label);
+      assert.equal(slOf(o, "P1-r1").status, "match", label);
+    }
+    // 工場の verdict の写しは照合で変えない
+    assert.equal(readJson(join(om, "P1-r1", "summary.line.json")).summary.verdict, "partial");
+  });
+});
+
+test("#557 (e) 比較の群の選択 v1.1a,v1.2（30 対・同じ checkout を --baseline に渡す）：群のディレクトリが v1.1a・v1.2、役割が baseline・candidate、両群の子の引数の違いが経路だけ、profile が diagnostic で違った項目に pipelines。比較の記録と群の条件に経路と v12_flags", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "e")), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const pairs = join(base, "pairs-e.json");
+    const mp = runAgent(repo, join(base, "unused"), ["--make-pairs", pairs, "--build-from", fz, "--runs", "3", "--compare-pipelines", "v1.1a,v1.2"], { FAKE_SPAWN_LOG: log });
+    assert.equal(mp.status, 0, mp.stderr);
+    const pv = readJson(pairs);
+    assert.equal(pv.pairs.length, 30);
+    assert.deepEqual(pv.groups, ["v1.1a", "v1.2"]);
+    assert.deepEqual(pv.pairs.slice(0, 4).map((p) => p.first), ["v1.1a", "v1.2", "v1.1a", "v1.2"], "先行の群は比較元から交互");
+    assert.equal(spawnCount(log), 0);
+    const out = join(base, "out-e");
+    const r = runAgent(repo, out, ["--compare", "--baseline", repo, "--pairs", pairs, "--build-from", fz, "--budget-usd", "100", "--concurrency", "6", "--compare-pipelines", "v1.1a,v1.2"], { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(spawnCount(log), 60);
+    assert.deepEqual(readdirSync(out).filter((n) => statSync(join(out, n)).isDirectory()).sort(), ["v1.1a", "v1.2"]);
+    const c1 = readJson(join(out, "v1.1a", "conditions.json")), c2 = readJson(join(out, "v1.2", "conditions.json"));
+    assert.deepEqual([c1.schema, c2.schema], [V5, V7]);
+    assert.deepEqual([c1.comparison.group, c1.comparison.role, c2.comparison.group, c2.comparison.role], ["v1.1a", "baseline", "v1.2", "candidate"]);
+    assert.deepEqual([c1.comparison.profile, c2.comparison.profile], ["diagnostic", "diagnostic"]);
+    assert.ok(!("v12_flags" in c1.params));
+    assert.deepEqual(c2.params.v12_flags, FLAGS557);
+    for (const id of ["P1-r1", "P10-r3"]) {
+      const a1 = readJson(join(out, "v1.1a", id, "received-argv.json")), a2 = readJson(join(out, "v1.2", id, "received-argv.json"));
+      assert.deepEqual([a1.slice(-2), a2.slice(-2)], [["--pipeline", "v1.1a"], ["--pipeline", "v1.2"]]);
+      assert.deepEqual(a2.slice(0, -1).map((x) => x.replace(join(out, "v1.2"), "<g>")), a1.slice(0, -1).map((x) => x.replace(join(out, "v1.1a"), "<g>")), "子の引数の違いは経路だけ");
+      assert.equal(readJson(join(out, "v1.2", id, "summary.line.json")).v12_flags.status, "match");
+      assert.ok(!("v12_flags" in readJson(join(out, "v1.1a", id, "summary.line.json"))));
+    }
+    const rec = readJson(join(out, "comparison.json"));
+    assert.equal(rec.profile, "diagnostic");
+    assert.ok(rec.profile_mismatches.includes("pipelines"), JSON.stringify(rec.profile_mismatches));
+    assert.deepEqual(rec.pairs.groups, ["v1.1a", "v1.2"]);
+    assert.deepEqual([rec.groups["v1.1a"].role, rec.groups["v1.1a"].pipeline, rec.groups["v1.2"].role, rec.groups["v1.2"].pipeline], ["baseline", "v1.1a", "candidate", "v1.2"]);
+    assert.deepEqual(rec.groups["v1.2"].v12_flags, FLAGS557);
+    assert.ok(!("v12_flags" in rec.groups["v1.1a"]));
+    assert.equal(rec.groups["v1.1a"].factory.fingerprint, rec.groups["v1.2"].factory.fingerprint, "同じ checkout");
+    assert.match(r.stdout, /profile diagnostic（違う項目: .*pipelines）/);
+    assert.match(r.stdout, /^v1\.2\/P1-r1 effort=high build-from pipeline=v1\.2 /m);
+    assert.deepEqual(readJson(join(out, "v1.2", runRecords(join(out, "v1.2"))[0])).v12_flags.counts.match, 30);
+    const run = readJson(join(out, readdirSync(out).find((n) => n.startsWith("compare-run-"))));
+    assert.deepEqual(run.pairs.map((p) => p.state), Array(30).fill("both"));
+  });
+});
+
+test("#557 (f) v1,v1.2：比較元の群の子に --pipeline が無く、正式な条件は今の定数で判定（pipelines を足さない）。--compare-pipelines v1,v1.1a は省略と同じ子の引数・対のファイル・条件・比較の記録。群の違う対のファイルは compare:pairs-schema、上限が承認値でない v1.2 の群は compare:limits-unapproved（子 0）", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "f")), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const baseline = makeRepo(join(base, "bl"));
+    writeFileSync(join(baseline, "packages/factory/dist/cli.js"), fakeV12Cli);
+    writeFileSync(join(baseline, "packages/factory/dist/limits.js"), limitsJs(V10_LIMITS));
+    const mkPairs = (name, extra) => { const p = join(base, name); const r = runAgent(repo, join(base, "unused"), ["--make-pairs", p, "--build-from", fz, "--runs", "1", ...extra]); assert.equal(r.status, 0, r.stderr); return p; };
+    const p12 = mkPairs("pairs-v1-v12.json", ["--compare-pipelines", "v1,v1.2"]);
+    const cmp = (out, pairs, extra) => runAgent(repo, out, ["--compare", "--baseline", baseline, "--pairs", pairs, "--build-from", fz, "--budget-usd", "100", "--concurrency", "4", ...extra], { FAKE_SPAWN_LOG: log });
+    const out = join(base, "out-f");
+    const r = cmp(out, p12, ["--compare-pipelines", "v1,v1.2"]);
+    assert.equal(r.status, 0, r.stderr);
+    const a1 = readJson(join(out, "v1", "P1-r1", "received-argv.json")), a2 = readJson(join(out, "v1.2", "P1-r1", "received-argv.json"));
+    assert.ok(!a1.includes("--pipeline"), "比較元の群の子に --pipeline が無い");
+    assert.deepEqual(a2.slice(-2), ["--pipeline", "v1.2"]);
+    assert.equal(a1[0], join(baseline, "packages/factory/dist/cli.js"));
+    const rec = readJson(join(out, "comparison.json"));
+    assert.ok(!rec.profile_mismatches.includes("pipelines"));
+    assert.deepEqual([readJson(join(out, "v1", "conditions.json")).schema, readJson(join(out, "v1.2", "conditions.json")).schema], [V5, V7]);
+    // v1,v1.1a の明示と省略：対のファイルのバイト列が同じ。比較の子の引数・群の条件・比較の記録は時刻と出力先を除いて同じ
+    const pOmit = mkPairs("pairs-omit.json", []), pExp = mkPairs("pairs-exp.json", ["--compare-pipelines", "v1,v1.1a"]);
+    assert.deepEqual(readFileSync(pOmit), readFileSync(pExp));
+    const oOmit = join(base, "omit", "same"), oExp = join(base, "exp", "same");
+    assert.equal(cmp(oOmit, pOmit, []).status, 0);
+    assert.equal(cmp(oExp, pExp, ["--compare-pipelines", "v1,v1.1a"]).status, 0);
+    const noTime = ({ started_at: _t, ...x }) => x;
+    for (const g of ["v1", "v1.1a"]) {
+      assert.deepEqual(noTime(readJson(join(oExp, g, "conditions.json"))), noTime(readJson(join(oOmit, g, "conditions.json"))), g);
+      assert.deepEqual(readJson(join(oExp, g, "P1-r1", "received-argv.json")).map((x) => x.replace(oExp, "<o>")), readJson(join(oOmit, g, "P1-r1", "received-argv.json")).map((x) => x.replace(oOmit, "<o>")), g);
+      assert.ok(!("v12_flags" in readJson(join(oExp, g, "P1-r1", "summary.line.json"))));
+    }
+    const recOf = (o) => { const { started_at: _t, signature: _s, ...x } = readJson(join(o, "comparison.json")); return x; };
+    assert.deepEqual(recOf(oExp), recOf(oOmit));
+    assert.equal(readJson(join(oExp, "comparison.json")).pairs.sha256, readJson(join(oOmit, "comparison.json")).pairs.sha256);
+    // 群の違う対のファイル（省略の対のファイルを v1,v1.2 に渡す・v1,v1.2 の対のファイルを省略で渡す）
+    const n0 = spawnCount(log);
+    for (const [label, pairs, extra] of [["omit-pairs-to-v12", pOmit, ["--compare-pipelines", "v1,v1.2"]], ["v12-pairs-to-omit", p12, []], ["v12-pairs-to-v11a-v12", p12, ["--compare-pipelines", "v1.1a,v1.2"]]]) {
+      const o = join(base, `out-schema-${label}`);
+      assertRefused(cmp(o, pairs, extra), "compare:pairs-schema", log, n0, label);
+      assertNothingWritten(o, label);
+    }
+    // 上限が承認値でない v1.2 の群（候補の checkout の decl-check が 8192）
+    const bad = makeV12Repo(join(base, "bad"), { limits: { ...V14_LIMITS, "decl-check": 8192 } }), fzb = frozen557(join(base, "bad"), bad);
+    const pb = join(base, "pairs-bad.json");
+    assert.equal(runAgent(bad, join(base, "unused"), ["--make-pairs", pb, "--build-from", fzb, "--runs", "1", "--compare-pipelines", "v1,v1.2"]).status, 0);
+    const ob = join(base, "out-bad");
+    assertRefused(runAgent(bad, ob, ["--compare", "--baseline", baseline, "--pairs", pb, "--build-from", fzb, "--budget-usd", "100", "--compare-pipelines", "v1,v1.2"], { FAKE_SPAWN_LOG: log }), "compare:limits-unapproved", log, n0, "limits");
+    assertNothingWritten(ob, "limits");
+  });
+});
+
+test("#557 (g) 組めない指定：v1.2,v1.1a・v1.2,v1.2・v1,v1.3・3 つ以上・値の無い指定・--compare も --make-pairs も無い指定・--compare と --pipeline v1.2、3 つの組それぞれで --compare-pipelines と段の旗の併用（--compare・--make-pairs）は flags:conflict で子の起動 0 回", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "g")), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const pairs = join(base, "pairs-g.json");
+    assert.equal(runAgent(repo, join(base, "unused"), ["--make-pairs", pairs, "--build-from", fz, "--runs", "1"]).status, 0);
+    const cmpArgs = (extra) => ["--compare", "--baseline", repo, "--pairs", pairs, "--build-from", fz, "--budget-usd", "5", ...extra];
+    const cases = [
+      ["reversed", cmpArgs(["--compare-pipelines", "v1.2,v1.1a"])], ["same", cmpArgs(["--compare-pipelines", "v1.2,v1.2"])], ["unknown", cmpArgs(["--compare-pipelines", "v1,v1.3"])],
+      ["three", cmpArgs(["--compare-pipelines", "v1,v1.1a,v1.2"])], ["one", cmpArgs(["--compare-pipelines", "v1.2"])], ["empty", cmpArgs(["--compare-pipelines"])], ["flag-value", [...cmpArgs([]).slice(0, -2), "--compare-pipelines", "--budget-usd", "5"]],
+      ["alone", ["--runs", "1", "--build-from", fz, "--compare-pipelines", "v1.1a,v1.2"]], ["alone-pipeline", ["--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--compare-pipelines", "v1.1a,v1.2"]],
+      ["compare-pipeline", cmpArgs(["--pipeline", "v1.2"])], ["make-pairs-pipeline", ["--make-pairs", join(base, "x.json"), "--build-from", fz, "--pipeline", "v1.2"]],
+    ];
+    for (const groups of ["v1,v1.1a", "v1.1a,v1.2", "v1,v1.2"]) {
+      cases.push([`stage-compare-${groups}`, cmpArgs(["--pipeline", "v1.1a", "--stage-start", "name-table", "--compare-pipelines", groups])]);
+      cases.push([`stage-make-pairs-${groups}`, ["--make-pairs", join(base, "y.json"), "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "name-table", "--compare-pipelines", groups]]);
+    }
+    for (const [label, extra] of cases) {
+      const o = join(base, `out-${label}`);
+      const r = runAgent(repo, o, extra, { FAKE_SPAWN_LOG: log });
+      assertRefused(r, "flags:conflict", log, 0, label);
+      oneLine(r, label);
+      assertNothingWritten(o, label);
+    }
+    assert.ok(!existsSync(join(base, "x.json")) && !existsSync(join(base, "y.json")), "対を書いた");
+  });
+});
