@@ -16,9 +16,11 @@ import {
   EXIT_OK,
   EXIT_RETURN_TO_PLAN,
   EXIT_RUN_FAILED,
+  EXIT_STAGE_INPUT,
   EXIT_USAGE,
   JEV_API_KEY_ENV,
   PROMPT_VERSION_V11A,
+  STAGE_USAGE,
   USAGE,
   parseCliArguments,
   runCli,
@@ -30,7 +32,14 @@ import type { JudgeAnswer } from "./judge.js";
 import type { RecordedCall } from "./llm-fake.js";
 import { requirementsFromPlan, type RequirementList } from "./pipeline.js";
 import { captureCliBaseline, type BaselineCliCapture, type BaselineCliScenarios } from "./__tests__/baseline-capture.js";
-import { V11A_ARTIFACT_NAMES } from "./v11a/bundle-v11a.js";
+import {
+  STAGE_INPUT_CODES,
+  STAGE_RUN_RECORD_FILE,
+  stageCheckpointFile,
+  stageOutputDigest,
+  V11A_ARTIFACT_NAMES,
+  type StageInputCode,
+} from "./v11a/bundle-v11a.js";
 import * as v11aRunModule from "./v11a/run.js";
 import { FIXTURE_DOCUMENTS, FIXTURE_YAML, draftOf, fixtureList, fixtureTable } from "./v11a/__tests__/fixtures.js";
 import type { NameTable } from "./v11a/names.js";
@@ -1113,5 +1122,618 @@ describe("--pipeline を省いた入口は、凍結した比較元（2cd1586）�
     for (const capture of captures) {
       for (const options of capture.clientOptions) expect(options, capture.name).not.toHaveProperty("envelope");
     }
+  });
+});
+
+// ── 段単位の実行口（Issue #544）：旗を省いた v1.1α の走りは、直す前の記録とバイト列で同じ ──────────────
+
+/** 直す前の v1.1α の走りの記録の 1 経路 */
+interface V11aBeforeCapture {
+  readonly name: string;
+  /** `makeClient` に渡った options（鍵を除く） */
+  readonly clientOptions: readonly unknown[];
+  /** LLM への要求の列（種別・schema 名・締切の合図を外した要求の JSON の SHA-256） */
+  readonly requests: readonly { readonly kind: string; readonly schemaName: string | null; readonly sha256: string }[];
+  /** 入口が書いた全ファイル（`--out` からの相対パス。書いた順） */
+  readonly files: readonly { readonly path: string; readonly sha256: string; readonly sizeBytes: number }[];
+  /** 出した行（最後の行が要約） */
+  readonly lines: readonly string[];
+  readonly exitCode: number;
+}
+
+/** 直す前の記録を取る経路（合成の応答。題材は v1.1α の共通の題材） */
+const V11A_BEFORE_SCENARIOS: readonly { readonly name: string; readonly calls: () => readonly RecordedCall[] }[] = [
+  { name: "complete", calls: () => [...v11aHead(), structured(v11aJudgments())] },
+  { name: "early-stop", calls: () => [structured(v11aBadDraft()), structured(v11aBadDraft())] },
+  { name: "return-to-plan", calls: () => v11aReturnToPlan() },
+  {
+    name: "stagnation",
+    calls: () => [
+      ...v11aHead(),
+      structured(v11aJudgments({ R3: ["mismatch", "金額が 0 より大きい項目だけ"] })),
+      { kind: "tools", response: { kind: "done", declaration: { declaration: V11A_YAML, disputes: [] }, usage: undefined } },
+      structured(v11aJudgments({ R3: ["mismatch", "金額が 0 より大きい項目だけ"] })),
+    ],
+  },
+];
+
+/** 要求から締切の合図（値を持たない）を外して JSON にする */
+const requestText = (request: object): string => {
+  const { signal: _signal, ...rest } = request as { readonly signal?: unknown };
+  return JSON.stringify(rest);
+};
+
+/** 旗を省いた `--pipeline v1.1a --plan-file` を 1 経路流し、観測した値を返す（ファイルは手元の写像で閉じる） */
+async function captureV11aCli(
+  entry: typeof runCli,
+  scenario: (typeof V11A_BEFORE_SCENARIOS)[number],
+): Promise<V11aBeforeCapture> {
+  const planText = JSON.stringify(await v11aEnvelope());
+  const recording = createRecordingClient(scenario.calls());
+  const order: { readonly kind: "structured" | "tools"; readonly request: object }[] = [];
+  const client: LlmClient = {
+    async callStructured<T>(request: LlmStructuredRequest) {
+      order.push({ kind: "structured", request });
+      return recording.client.callStructured<T>(request);
+    },
+    async callWithTools(request) {
+      order.push({ kind: "tools", request });
+      return recording.client.callWithTools(request);
+    },
+  };
+  const clientOptions: unknown[] = [];
+  const written: { readonly path: string; readonly text: string }[] = [];
+  const lines: string[] = [];
+  const exitCode = await entry({
+    argv: ["--", "request.txt", "--out", "out", "--pipeline", "v1.1a", "--plan-file", "plan.json"],
+    env: { [API_KEY_ENV]: "sk-FAKE" },
+    readFile: async (path) => (path === "plan.json" ? planText : V11A_SOURCE),
+    writeFile: async (path, text) => {
+      written.push({ path: path.slice("out/".length), text });
+    },
+    makeDirectory: async () => {},
+    loadDocuments: async () => FIXTURE_DOCUMENTS,
+    makeClient: (options) => {
+      clientOptions.push(Object.fromEntries(Object.entries(options).filter(([key]) => key !== "apiKey")));
+      return client;
+    },
+    makeLlmJudge: () => v11aJudge(),
+    now: () => 0,
+    log: (line) => lines.push(line),
+  });
+  return {
+    name: scenario.name,
+    clientOptions,
+    requests: await Promise.all(
+      order.map(async ({ kind, request }) => ({
+        kind,
+        schemaName: kind === "structured" ? (request as LlmStructuredRequest).schemaName : null,
+        sha256: await sha256Hex(requestText(request)),
+      })),
+    ),
+    files: await Promise.all(
+      written.map(async (file) => ({
+        path: file.path,
+        sha256: await sha256Hex(file.text),
+        sizeBytes: new TextEncoder().encode(file.text).length,
+      })),
+    ),
+    lines,
+    exitCode,
+  };
+}
+
+interface V11aBeforeFixture {
+  readonly procedure: readonly string[];
+  readonly baseCommit: string;
+  readonly captures: readonly V11aBeforeCapture[];
+}
+
+const v11aBefore = JSON.parse(
+  await fs.readFile(new URL("./__fixtures__/v11a-before-stage-range/run.json", import.meta.url).pathname, "utf8"),
+) as V11aBeforeFixture;
+
+describe("旗を省いた v1.1α の走りは、直す前（fb9e122）の記録とバイト列で同じ（Issue #544）", () => {
+  it("記録に 4 経路（完走・早期停止・差し戻し・停滞）と取り方の手順・直す前の完全な SHA がある", () => {
+    expect(v11aBefore.baseCommit).toBe("fb9e122a81fd35a34d64a22865d7b744ffbcd9c8");
+    expect(v11aBefore.procedure.join("\n")).toContain(v11aBefore.baseCommit);
+    expect(v11aBefore.captures.map((capture) => capture.name)).toEqual(V11A_BEFORE_SCENARIOS.map((scenario) => scenario.name));
+    expect(v11aBefore.captures.map((capture) => capture.exitCode)).toEqual([
+      EXIT_OK,
+      EXIT_RUN_FAILED,
+      EXIT_RETURN_TO_PLAN,
+      EXIT_OK,
+    ]);
+  });
+
+  it("4 経路を候補の入口に流すと、要求の列・全ファイルの SHA-256・出した行・終了コードが記録と深く等しく、checkpoint を書かない", async () => {
+    for (const [index, scenario] of V11A_BEFORE_SCENARIOS.entries()) {
+      const capture = await captureV11aCli(runCli, scenario);
+      const expected = v11aBefore.captures[index]!;
+      expect(capture.clientOptions, scenario.name).toEqual(expected.clientOptions);
+      expect(capture.requests, scenario.name).toEqual(expected.requests);
+      expect(capture.files, scenario.name).toEqual(expected.files);
+      expect(capture.lines, scenario.name).toEqual(expected.lines);
+      expect(capture.exitCode, scenario.name).toBe(expected.exitCode);
+      expect(capture, scenario.name).toEqual(expected);
+      for (const file of capture.files) expect(file.path, scenario.name).not.toMatch(/stage-/);
+    }
+  });
+
+  it("記録の JSON に鍵の値・題材の言葉が無い", async () => {
+    const text = await fs.readFile(
+      new URL("./__fixtures__/v11a-before-stage-range/run.json", import.meta.url).pathname,
+      "utf8",
+    );
+    for (const word of ["sk-FAKE", "Bearer", "持ち寄り", "当番表", "会費", "出欠", "貸し出し"]) {
+      expect(text.includes(word), word).toBe(false);
+    }
+  });
+});
+
+// ── 段単位の実行口（`--stage-start`・`--stage-end`・`--stage-input`。08 §8.3・Issue #544）──────────────
+
+/** 段の走りを 1 回流す（偽物の LLM・判定・時計で閉じる。`--out` と前の走りの出力だけ本物のファイル） */
+async function runStageCli(input: {
+  readonly dir: string;
+  readonly args: readonly string[];
+  readonly calls: readonly RecordedCall[];
+  readonly envelope?: Record<string, unknown>;
+  readonly source?: string;
+}) {
+  const planPath = `${input.dir}-plan.json`;
+  const planText = JSON.stringify(input.envelope ?? (await v11aEnvelope()));
+  const recording = createRecordingClient(input.calls);
+  const order: string[] = [];
+  const client: LlmClient = {
+    async callStructured<T>(request: LlmStructuredRequest) {
+      order.push(requestText(request));
+      return recording.client.callStructured<T>(request);
+    },
+    async callWithTools(request) {
+      order.push(requestText(request));
+      return recording.client.callWithTools(request);
+    },
+  };
+  const makeClient = vi.fn(() => client);
+  const lines: string[] = [];
+  const errors: string[] = [];
+  const written: string[] = [];
+  const directories: string[] = [];
+  const code = await runCli({
+    argv: ["--", "request.txt", "--out", input.dir, "--pipeline", "v1.1a", "--plan-file", planPath, ...input.args],
+    env: { [API_KEY_ENV]: "sk-FAKE" },
+    readFile: async (path) => {
+      if (path === planPath) return planText;
+      if (path === "request.txt") return input.source ?? V11A_SOURCE;
+      return fs.readFile(path, "utf8");
+    },
+    writeFile: async (path, text) => {
+      written.push(path.slice(input.dir.length + 1));
+      await fs.writeFile(path, text, "utf8");
+    },
+    makeDirectory: async (path) => {
+      directories.push(path);
+      await fs.mkdir(path, { recursive: true });
+    },
+    loadDocuments: async () => FIXTURE_DOCUMENTS,
+    makeClient,
+    makeLlmJudge: () => v11aJudge(),
+    now: () => 0,
+    log: (line) => lines.push(line),
+    logError: (line) => errors.push(line),
+  });
+  return { code, lines, errors, written, directories, makeClient, requests: order };
+}
+
+/** 段の走りの記録を読む */
+async function stageRecordOf(dir: string): Promise<Record<string, unknown>> {
+  return JSON.parse(await fs.readFile(`${dir}/${STAGE_RUN_RECORD_FILE}`, "utf8")) as Record<string, unknown>;
+}
+
+/** 旗を省いた通しの走りの要求の列（同じ偽物の応答） */
+async function fullRunRequests(dir: string, calls: readonly RecordedCall[]) {
+  const run = await runStageCli({ dir, args: [], calls });
+  return { ...run, summary: JSON.parse(run.lines.at(-1) ?? "{}") as Record<string, unknown> };
+}
+
+/** 値の中の全部の鍵（深さ優先） */
+function keysOf(value: unknown): readonly string[] {
+  if (Array.isArray(value)) return value.flatMap(keysOf);
+  if (typeof value === "object" && value !== null) {
+    return Object.entries(value).flatMap(([key, inner]) => [key, ...keysOf(inner)]);
+  }
+  return [];
+}
+
+const V11A_REJECT_R3 = { R3: ["mismatch", "金額が 0 より大きい項目だけ"] as const };
+const v11aRepairDone = (): RecordedCall => ({
+  kind: "tools",
+  response: { kind: "done", declaration: { declaration: V11A_YAML, disputes: [] }, usage: undefined },
+});
+/** B3' の拒否が残って停滞し、B が持ち越しを足す経路（T1〜⑦） */
+const v11aStagnation = (): RecordedCall[] => [
+  ...v11aHead(),
+  structured(v11aJudgments(V11A_REJECT_R3)),
+  v11aRepairDone(),
+  structured(v11aJudgments(V11A_REJECT_R3)),
+];
+/** T1'' が R3 を 2 回とも拒否し、R3 を持ち越す T1〜T1'' の経路 */
+const v11aRejectR3Head = (): RecordedCall[] => [
+  structured(draftOf(V11A_LIST, V11A_TABLE)),
+  structured(v11aJudgments({ R3: ["unnecessary-ownership", "締められる"] })),
+  structured(draftOf(V11A_LIST, V11A_TABLE)),
+  structured(v11aJudgments({ R3: ["unnecessary-ownership", "締められる"] })),
+];
+
+describe("段の旗の使い方の誤り（exit 2・固定の符号・API を呼ばない・何も書かない）", () => {
+  const cases: readonly { readonly name: string; readonly argv: readonly string[]; readonly code: string }[] = [
+    {
+      name: "表に無い段",
+      argv: ["--pipeline", "v1.1a", "--plan-file", "plan.json", "--stage-end", "decl-check"],
+      code: "stage-range:unknown",
+    },
+    {
+      name: "開始が終了より後",
+      argv: ["--pipeline", "v1.1a", "--plan-file", "plan.json", "--stage-start", "write", "--stage-end", "test-spec", "--stage-input", "x.json"],
+      code: "stage-range:order",
+    },
+    { name: "v1.1α の経路の旗が無い", argv: ["--plan-file", "plan.json", "--stage-end", "test-spec"], code: "stage-range:pipeline" },
+    { name: "--plan-file が無い", argv: ["--stage-end", "test-spec"], code: "stage-range:pipeline" },
+    {
+      name: "開始 T1 で入力を付けた",
+      argv: ["--pipeline", "v1.1a", "--plan-file", "plan.json", "--stage-start", "name-table", "--stage-input", "x.json"],
+      code: "stage-input:not-needed",
+    },
+    {
+      name: "開始 T2 で入力が無い",
+      argv: ["--pipeline", "v1.1a", "--plan-file", "plan.json", "--stage-start", "test-spec"],
+      code: "stage-input:missing",
+    },
+  ];
+  it.each(cases)("$name → $code", async (example) => {
+    const makeClient = vi.fn();
+    const writeFile = vi.fn(async () => {});
+    const makeDirectory = vi.fn(async () => {});
+    const lines: string[] = [];
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", "out", ...example.argv],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      readFile: async () => V11A_SOURCE,
+      writeFile,
+      makeDirectory,
+      loadDocuments: async () => [],
+      makeClient,
+      log: (line) => lines.push(line),
+    });
+    expect(code).toBe(EXIT_USAGE);
+    expect(lines[0]).toContain(`使い方の誤り: ${example.code}`);
+    expect(lines.slice(1)).toEqual([USAGE, STAGE_USAGE]);
+    expect(makeClient).not.toHaveBeenCalled();
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(makeDirectory).not.toHaveBeenCalled();
+  });
+
+  it("片方だけなら他方は経路の端（--stage-end だけ → 開始 T1、--stage-start だけ → 終了 ⑦）", () => {
+    const base = ["--", "request.txt", "--out", "out", "--pipeline", "v1.1a", "--plan-file", "plan.json"];
+    const endOnly = parseCliArguments([...base, "--stage-end", "test-spec"]);
+    expect("error" in endOnly ? null : endOnly.stageRange).toEqual({ start: "name-table", end: "test-spec" });
+    const startOnly = parseCliArguments([...base, "--stage-start", "write", "--stage-input", "x.json"]);
+    expect("error" in startOnly ? null : startOnly.stageRange).toEqual({ start: "write", end: "judge" });
+    expect("error" in startOnly ? null : startOnly.stageInput).toBe("x.json");
+    // 旗を省けば段の範囲の欄を置かない
+    expect(parseCliArguments(base)).not.toHaveProperty("stageRange");
+  });
+});
+
+describe("分けても同じ（要求の列をつなげると通しの走りと一致し、⑦ の判定が同じ）", () => {
+  it("T2／B1 の境界で分ける：開始 T1・終了 T2' → その checkpoint で開始 B1・終了 ⑦", async () => {
+    const calls = [...v11aHead(), structured(v11aJudgments())];
+    const full = await fullRunRequests(`${directory}/split-b1-full`, calls);
+    const first = await runStageCli({ dir: `${directory}/split-b1-a`, args: ["--stage-end", "test-spec"], calls: calls.slice(0, 3) });
+    expect(first.code).toBe(EXIT_OK);
+    expect(first.written).toEqual([stageCheckpointFile("t1-t2"), stageCheckpointFile("t2-b1"), STAGE_RUN_RECORD_FILE]);
+    const second = await runStageCli({
+      dir: `${directory}/split-b1-b`,
+      args: ["--stage-start", "write", "--stage-input", `${directory}/split-b1-a/${stageCheckpointFile("t2-b1")}`],
+      calls: calls.slice(3),
+    });
+    expect(second.code).toBe(EXIT_OK);
+    expect(second.written).toEqual([STAGE_RUN_RECORD_FILE]);
+    expect([...first.requests, ...second.requests]).toEqual(full.requests);
+    const record = await stageRecordOf(`${directory}/split-b1-b`);
+    expect(record["stage_judge_verdict"]).toBe(full.summary["verdict"]);
+    expect(record["stage_judge_verdict"]).toBe("full");
+  });
+
+  it("T1''／T2 の境界で分ける：開始 T1・終了 T1'' → その checkpoint で開始 T2・終了 ⑦（停滞の経路でも同じ）", async () => {
+    const calls = v11aStagnation();
+    const full = await fullRunRequests(`${directory}/split-t2-full`, calls);
+    const first = await runStageCli({ dir: `${directory}/split-t2-a`, args: ["--stage-end", "semantic-check"], calls: calls.slice(0, 2) });
+    expect(first.code).toBe(EXIT_OK);
+    expect(first.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE]);
+    const second = await runStageCli({
+      dir: `${directory}/split-t2-b`,
+      args: ["--stage-start", "test-spec", "--stage-input", `${directory}/split-t2-a/${stageCheckpointFile("t1-t2")}`],
+      calls: calls.slice(2),
+    });
+    expect(second.code).toBe(EXIT_OK);
+    expect([...first.requests, ...second.requests]).toEqual(full.requests);
+    const record = await stageRecordOf(`${directory}/split-t2-b`);
+    expect(record["stage_judge_verdict"]).toBe(full.summary["verdict"]);
+    expect(record["stage_judge_verdict"]).toBe("partial");
+  });
+});
+
+describe("B の結果を上流へ戻さない", () => {
+  it("B3' で持ち越しが増えた T1〜⑦ の走りの T2／B1 の checkpoint で開始 B1 を流すと、B は T2 の直前の持ち越しを受ける", async () => {
+    const calls = v11aStagnation();
+    const dir = `${directory}/no-return-a`;
+    const whole = await runStageCli({ dir, args: ["--stage-end", "judge"], calls });
+    expect(whole.code).toBe(EXIT_OK);
+    const record = await stageRecordOf(dir);
+    // B3' の拒否が残って R3 が持ち越しに増えた（最終の持ち越しは記録だけ）
+    expect(record["final_carry_over"]).toEqual([{ requirementId: "R3", reasons: [{ origin: "decl-check", reason: "mismatch" }] }]);
+    const t1t2 = JSON.parse(await fs.readFile(`${dir}/${stageCheckpointFile("t1-t2")}`, "utf8")) as Record<string, unknown>;
+    const t2b1 = JSON.parse(await fs.readFile(`${dir}/${stageCheckpointFile("t2-b1")}`, "utf8")) as Record<string, unknown>;
+    expect(t2b1["carry_over"]).toEqual(t1t2["carry_over"]);
+    expect(t2b1["carry_over"]).toEqual({ entries: [], excluded_row_ids: [], remaining_requirement_ids: [...V11A_IDS] });
+
+    const resumed = await runStageCli({
+      dir: `${directory}/no-return-b`,
+      args: ["--stage-start", "write", "--stage-input", `${dir}/${stageCheckpointFile("t2-b1")}`],
+      calls: calls.slice(3),
+    });
+    expect(resumed.code).toBe(EXIT_OK);
+    // B の要求は通しの走りの B の要求と同じ（増えた持ち越し R3 を含まない一覧で B3' が流れる）
+    expect(resumed.requests).toEqual(whole.requests.slice(3));
+    const declCheck = JSON.parse(resumed.requests[1]!) as { input: string };
+    expect(declCheck.input).toContain("R3");
+
+    // 同じ走りの最終の記録を入力にすると、境界の照合で断る
+    const rejected = await runStageCli({
+      dir: `${directory}/no-return-c`,
+      args: ["--stage-start", "write", "--stage-input", `${dir}/${STAGE_RUN_RECORD_FILE}`],
+      calls: [],
+    });
+    expect(rejected.code).toBe(EXIT_STAGE_INPUT);
+    expect(rejected.errors).toEqual(["stage-input:boundary"]);
+  });
+});
+
+describe("段の走りの記録・納品物・終了コード", () => {
+  it("段の通過 0：記録に stage_pass・budget_scope・出力ダイジェストがあり、verdict・pass の名前の欄が無く、納品物を書かない", async () => {
+    const dir = `${directory}/stage-record`;
+    const run = await runStageCli({ dir, args: ["--stage-end", "judge"], calls: [...v11aHead(), structured(v11aJudgments())] });
+    expect(run.code).toBe(EXIT_OK);
+    const record = await stageRecordOf(dir);
+    expect(record["stage_pass"]).toBe(true);
+    expect(record["budget_scope"]).toBe("stage-run");
+    expect(record["stage_judge_verdict"]).toBe("full");
+    expect(record["range"]).toEqual({ start: "name-table", end: "judge" });
+    expect(record["reached_stage"]).toBe("judge");
+    const checkpoints = record["checkpoints"] as readonly { boundary: string; path: string; output_digest: string }[];
+    expect(checkpoints.map((entry) => entry.boundary)).toEqual(["t1-t2", "t2-b1"]);
+    for (const entry of checkpoints) {
+      const checkpoint = JSON.parse(await fs.readFile(`${dir}/${entry.path}`, "utf8")) as unknown;
+      expect(entry.output_digest).toBe(await stageOutputDigest(checkpoint));
+    }
+    const keys = keysOf(record);
+    expect(keys).not.toContain("verdict");
+    expect(keys).not.toContain("pass");
+    // 条件：model・effort・文書の指紋・判定の口の構成（鍵は書かない）・版・1 本の予算と締切
+    const conditions = record["conditions"] as Record<string, unknown>;
+    expect(conditions["judge"]).toEqual({ primary: "llm", fallback: null });
+    expect(conditions["budget_usd"]).toBe(DEFAULT_BUDGET_USD);
+    expect(conditions["deadline_ms"]).toBe(DEFAULT_DEADLINE_MS);
+    expect((conditions["documents"] as readonly unknown[]).length).toBe(FIXTURE_DOCUMENTS.length);
+    expect(JSON.stringify(record)).not.toContain("sk-FAKE");
+    // 要約の verdict を書かない・納品物（manifest と宣言の束）を書かない
+    expect(run.lines.join("\n")).not.toContain("verdict");
+    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), stageCheckpointFile("t2-b1"), STAGE_RUN_RECORD_FILE]);
+    await expect(fs.readFile(`${dir}/${BUNDLE_MANIFEST_FILE}`, "utf8")).rejects.toThrow();
+    await expect(fs.readFile(`${dir}/artifacts/app.spec.yaml`, "utf8")).rejects.toThrow();
+    expect(run.written).not.toContain(BUILD_CLI_RECORD_FILE);
+  });
+
+  it("範囲の中の早期停止 1：通らなかった境界の checkpoint を書かない", async () => {
+    const dir = `${directory}/stage-early-stop`;
+    const run = await runStageCli({ dir, args: ["--stage-end", "test-spec"], calls: [structured(v11aBadDraft()), structured(v11aBadDraft())] });
+    expect(run.code).toBe(EXIT_RUN_FAILED);
+    expect(run.written).toEqual([STAGE_RUN_RECORD_FILE]);
+    const record = await stageRecordOf(dir);
+    expect(record["stage_pass"]).toBe(false);
+    expect(record["stopped"]).toMatchObject({ stage: "name-table", kind: "unmet" });
+    expect(record["checkpoints"]).toEqual([]);
+  });
+
+  it("確定した仕様の道の差し戻しは今と同じ 3", async () => {
+    const run = await runStageCli({ dir: `${directory}/stage-return`, args: ["--stage-end", "judge"], calls: v11aReturnToPlan() });
+    expect(run.code).toBe(EXIT_RETURN_TO_PLAN);
+    expect((await stageRecordOf(`${directory}/stage-return`))["return_to_plan"]).toBe(true);
+  });
+});
+
+describe("予算の単位は段の走り 1 本", () => {
+  it("予算を小さくした開始 B1 の走りは、その走りの中で予算切れで止まり、前の走りの額を引かない", async () => {
+    const dir = `${directory}/budget-a`;
+    const calls = [...v11aHead(), structured(v11aJudgments())];
+    await runStageCli({ dir, args: ["--stage-end", "test-spec"], calls: calls.slice(0, 3) });
+    const args = ["--stage-start", "write", "--stage-input", `${dir}/${stageCheckpointFile("t2-b1")}`, "--budget", "0.0000001"];
+    const small = await runStageCli({ dir: `${directory}/budget-b`, args, calls: calls.slice(3) });
+    expect(small.code).toBe(EXIT_RUN_FAILED);
+    const smallRecord = await stageRecordOf(`${directory}/budget-b`);
+    expect(smallRecord["stopped"]).toMatchObject({ stage: "write", kind: "budget" });
+    // 前の走りの記録に大きな額を書いても、結果は同じ（前の走りの額を引かない）
+    const previous = await stageRecordOf(dir);
+    await fs.writeFile(`${dir}/${STAGE_RUN_RECORD_FILE}`, JSON.stringify({ ...previous, provider_cost_usd: 1000 }), "utf8");
+    const again = await runStageCli({ dir: `${directory}/budget-c`, args, calls: calls.slice(3) });
+    expect(again.code).toBe(EXIT_RUN_FAILED);
+    expect(await stageRecordOf(`${directory}/budget-c`)).toEqual(smallRecord);
+    // 十分な予算なら同じ入力で通る（前の走りの額を引かない）
+    const enough = await runStageCli({ dir: `${directory}/budget-d`, args: args.slice(0, 4), calls: calls.slice(3) });
+    expect(enough.code).toBe(EXIT_OK);
+  });
+});
+
+/** checkpoint を書き換え、出力ダイジェストを記録に書き直すかどうかを選ぶ */
+async function tamper(
+  source: string,
+  target: string,
+  boundary: "t1-t2" | "t2-b1",
+  edit: (checkpoint: Record<string, any>) => void,
+  rewriteDigest: boolean,
+): Promise<string> {
+  await fs.mkdir(target, { recursive: true });
+  const checkpoint = JSON.parse(await fs.readFile(`${source}/${stageCheckpointFile(boundary)}`, "utf8")) as Record<string, any>;
+  edit(checkpoint);
+  const record = await stageRecordOf(source);
+  if (rewriteDigest) {
+    const digest = await stageOutputDigest(checkpoint);
+    record["checkpoints"] = (record["checkpoints"] as { boundary: string; output_digest: string }[]).map((entry) =>
+      entry.boundary === boundary ? { ...entry, output_digest: digest } : entry,
+    );
+  }
+  await fs.writeFile(`${target}/${stageCheckpointFile(boundary)}`, `${JSON.stringify(checkpoint, null, 2)}\n`, "utf8");
+  await fs.writeFile(`${target}/${STAGE_RUN_RECORD_FILE}`, JSON.stringify(record), "utf8");
+  return `${target}/${stageCheckpointFile(boundary)}`;
+}
+
+/** 1 バイト変える（文字列の最後の 1 文字を別の文字に） */
+const flip = (text: string): string => `${text.slice(0, -1)}${text.endsWith("x") ? "y" : "x"}`;
+
+describe("再開の入力の照合（exit 4・固定の符号・クライアントを作らない・何も書かない）", () => {
+  const seen = new Set<StageInputCode>();
+  const sourceB1 = () => `${directory}/verify-src-b1`;
+  const sourceT2 = () => `${directory}/verify-src-t2`;
+
+  beforeAll(async () => {
+    // T1〜T2'（全件受理）と、T1〜T1''（R3 を拒否して持ち越す）の 2 つの前の走り
+    await runStageCli({ dir: sourceB1(), args: ["--stage-end", "test-spec"], calls: v11aHead().slice(0, 3) });
+    await runStageCli({ dir: sourceT2(), args: ["--stage-end", "semantic-check"], calls: v11aRejectR3Head() });
+  });
+
+  afterAll(() => {
+    // 符号が全部 1 回以上出る
+    expect([...seen].sort()).toEqual([...STAGE_INPUT_CODES].sort());
+  });
+
+  async function expectRejected(
+    name: string,
+    start: "test-spec" | "write",
+    input: string,
+    code: StageInputCode,
+    options: { readonly envelope?: Record<string, unknown>; readonly source?: string } = {},
+  ): Promise<void> {
+    const dir = `${directory}/verify-out-${name}`;
+    const run = await runStageCli({ dir, args: ["--stage-start", start, "--stage-input", input], calls: [], ...options });
+    expect(run.code, name).toBe(EXIT_STAGE_INPUT);
+    expect(run.errors, name).toEqual([code]);
+    expect(run.makeClient, name).not.toHaveBeenCalled();
+    expect(run.written, name).toEqual([]);
+    expect(run.directories, name).toEqual([]);
+    await expect(fs.readFile(`${dir}/${STAGE_RUN_RECORD_FILE}`, "utf8"), name).rejects.toThrow();
+    seen.add(code);
+  }
+
+  it("照合を通る入力（対照）：前の走りの checkpoint をそのまま渡せば、開始 B1・開始 T2 とも流れる", async () => {
+    const b1 = await runStageCli({
+      dir: `${directory}/verify-ok-b1`,
+      args: ["--stage-start", "write", "--stage-end", "judge", "--stage-input", `${sourceB1()}/${stageCheckpointFile("t2-b1")}`],
+      calls: [structured({ declaration: V11A_YAML }), structured(v11aJudgments())],
+    });
+    expect(b1.code).toBe(EXIT_OK);
+    const t2 = await runStageCli({
+      dir: `${directory}/verify-ok-t2`,
+      args: ["--stage-start", "test-spec", "--stage-end", "test-spec", "--stage-input", `${sourceT2()}/${stageCheckpointFile("t1-t2")}`],
+      calls: [structured(v11aTestSpec())],
+    });
+    // T2 は持ち越した R3 を除いた一覧で呼ばれる（応答の組は R3 を含むので T2 の検査で止まってよい。照合は通った）
+    expect(t2.makeClient).toHaveBeenCalledTimes(1);
+    expect(t2.errors.filter((line) => line.startsWith("stage-input:"))).toEqual([]);
+  });
+
+  it("読めない入力 → unreadable", async () => {
+    await expectRejected("unreadable", "write", `${directory}/verify-missing/${stageCheckpointFile("t2-b1")}`, "stage-input:unreadable");
+  });
+
+  it("別の境界・最終の記録 → boundary", async () => {
+    await expectRejected("boundary-other", "write", `${sourceB1()}/${stageCheckpointFile("t1-t2")}`, "stage-input:boundary");
+    await expectRejected("boundary-record", "write", `${sourceB1()}/${STAGE_RUN_RECORD_FILE}`, "stage-input:boundary");
+  });
+
+  it("語彙の版を変えた入力 → version（出力ダイジェストを書き直しても）", async () => {
+    const input = await tamper(sourceB1(), `${directory}/verify-vocab`, "t2-b1", (cp) => {
+      cp["versions"]["vocabulary"] = "v0";
+    }, true);
+    await expectRejected("version", "write", input, "stage-input:version");
+  });
+
+  it("表・点検・試験の組の各記録を 1 バイト変えた入力 → digest", async () => {
+    const edits: readonly [string, (cp: Record<string, any>) => void][] = [
+      ["table", (cp) => (cp["name_table"]["rows"][0]["id"] = flip(cp["name_table"]["rows"][0]["id"]))],
+      ["semantic", (cp) => (cp["semantic_check"]["targets"][0] = flip(cp["semantic_check"]["targets"][0]))],
+      ["suite", (cp) => (cp["test_spec"]["suite"]["tests"][0]["id"] = flip(cp["test_spec"]["suite"]["tests"][0]["id"]))],
+    ];
+    for (const [name, edit] of edits) {
+      const input = await tamper(sourceB1(), `${directory}/verify-byte-${name}`, "t2-b1", edit, false);
+      await expectRejected(`digest-${name}`, "write", input, "stage-input:digest");
+    }
+  });
+
+  it("確定した仕様か依頼文を変えた入力 → plan-sha256・source-sha256", async () => {
+    const input = `${sourceB1()}/${stageCheckpointFile("t2-b1")}`;
+    const body = { ...v11aPlanBody(), plan_id: "plan-v11a-cli-other" };
+    const plan = { ...body, confirmation: { ...body.confirmation, sha256: await planDigest(body) } };
+    const envelope = { ...(await v11aEnvelope()), plan, plan_sha256: await planDigest(plan) };
+    await expectRejected("plan", "write", input, "stage-input:plan-sha256", { envelope });
+    const source = `${V11A_SOURCE}。`;
+    const sourceEnvelope = { ...(await v11aEnvelope()), source_sha256: await sha256Hex(source) };
+    await expectRejected("source", "write", input, "stage-input:source-sha256", { envelope: sourceEnvelope, source });
+  });
+
+  it("出力ダイジェストを書き直しても：表 → table-sha256・点検の表の SHA → semantic-sha256・試験の組 → suite-sha256", async () => {
+    const table = await tamper(sourceB1(), `${directory}/verify-table`, "t2-b1", (cp) => {
+      cp["name_table"]["rows"][0]["name"] = flip(String(cp["name_table"]["rows"][0]["name"]));
+    }, true);
+    await expectRejected("table-sha256", "write", table, "stage-input:table-sha256");
+    const semantic = await tamper(sourceB1(), `${directory}/verify-semantic`, "t2-b1", (cp) => {
+      cp["semantic_check"]["table_sha256"] = "0".repeat(64);
+    }, true);
+    await expectRejected("semantic-sha256", "write", semantic, "stage-input:semantic-sha256");
+    const suite = await tamper(sourceB1(), `${directory}/verify-suite`, "t2-b1", (cp) => {
+      cp["test_spec"]["suite"]["tests"][0]["clock"] = "2026-09-17T12:00:00+09:00";
+    }, true);
+    await expectRejected("suite-sha256", "write", suite, "stage-input:suite-sha256");
+    const observes = await tamper(sourceB1(), `${directory}/verify-observes`, "t2-b1", (cp) => {
+      cp["test_spec"]["observes"] = cp["test_spec"]["observes"].slice(1);
+    }, true);
+    await expectRejected("suite-observes", "write", observes, "stage-input:suite-sha256");
+  });
+
+  it("表の SHA を保ったまま判定 1 つを reject から accept に変えた → digest（書き直せば carry-over）", async () => {
+    const toAccept = (cp: Record<string, any>) => {
+      cp["semantic_check"]["judgments"] = cp["semantic_check"]["judgments"].map((judgment: Record<string, unknown>) =>
+        judgment["verdict"] === "reject" ? { requirementId: judgment["requirementId"], verdict: "accept", kind: null, quote: null } : judgment,
+      );
+    };
+    await expectRejected("flip-digest", "test-spec", await tamper(sourceT2(), `${directory}/verify-flip-a`, "t1-t2", toAccept, false), "stage-input:digest");
+    await expectRejected("flip-carry", "test-spec", await tamper(sourceT2(), `${directory}/verify-flip-b`, "t1-t2", toAccept, true), "stage-input:carry-over");
+  });
+
+  it("判定を 1 つ消した → digest（書き直せば targets）", async () => {
+    const drop = (cp: Record<string, any>) => {
+      cp["semantic_check"]["judgments"] = cp["semantic_check"]["judgments"].slice(1);
+    };
+    await expectRejected("drop-digest", "test-spec", await tamper(sourceT2(), `${directory}/verify-drop-a`, "t1-t2", drop, false), "stage-input:digest");
+    await expectRejected("drop-targets", "test-spec", await tamper(sourceT2(), `${directory}/verify-drop-b`, "t1-t2", drop, true), "stage-input:targets");
+  });
+
+  it("持ち越しの 1 件を消した → digest（書き直しても carry-over）", async () => {
+    const drop = (cp: Record<string, any>) => {
+      cp["carry_over"]["entries"] = cp["carry_over"]["entries"].slice(1);
+    };
+    await expectRejected("carry-digest", "test-spec", await tamper(sourceT2(), `${directory}/verify-carry-a`, "t1-t2", drop, false), "stage-input:digest");
+    await expectRejected("carry-rewrite", "test-spec", await tamper(sourceT2(), `${directory}/verify-carry-b`, "t1-t2", drop, true), "stage-input:carry-over");
   });
 });

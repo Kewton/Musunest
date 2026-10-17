@@ -1,0 +1,533 @@
+{
+  "procedure": [
+    "段単位の実行口（Issue #544）の前の v1.1α の走りの記録。手で直さない。取り直さない（直す前の値を固定するためのもの）。",
+    "取り方：commit fb9e122a81fd35a34d64a22865d7b744ffbcd9c8（integration/v12-h2。直す前）の src に、cli.test.ts の captureV11aCli を経路（V11A_BEFORE_SCENARIOS）ごとに当て、{ procedure, baseCommit, captures } を JSON.stringify(値, null, 2) ＋改行で書いた。",
+    "偽物の LLM（記録した応答）・偽物の判定（J4）・時計 0・手元の写像の読み書きで閉じる。本物のモデル・API・鍵は使わない。要求は締切の合図を外した JSON の SHA-256 で残す。",
+    "候補は同じ道具を src の入口に当て、captures と深く等しいことを cli.test.ts（段単位の実行口の節）で確かめる。"
+  ],
+  "baseCommit": "fb9e122a81fd35a34d64a22865d7b744ffbcd9c8",
+  "captures": [
+    {
+      "name": "complete",
+      "clientOptions": [
+        {
+          "model": "gpt-6-luna",
+          "effort": "high",
+          "envelope": "v1.1a"
+        }
+      ],
+      "requests": [
+        {
+          "kind": "structured",
+          "schemaName": "name-table",
+          "sha256": "00e6405fee211f81b7e59d2cd5c8f90b5194cae2117989aad5406a78c69f7857"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "semantic-check",
+          "sha256": "ba23eeafa6637210f1415801a8816992b8678445ec89578149746f99a5c131c6"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "test-spec",
+          "sha256": "a47ca49b9b57538f30940822ba1b63ae9089592a647a2feecd9e40501c760b0c"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "declaration-v11a",
+          "sha256": "ba848af50eb53007151c72d6f0880f972d9aaa812f746c9b171fa0cfa54f3e5d"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "decl-check",
+          "sha256": "bd547a2c853109148114f48efa399321c7bff26badf3fedc72143381b0d0802e"
+        }
+      ],
+      "files": [
+        {
+          "path": "artifacts/app.spec.yaml",
+          "sha256": "c8fe455d81ff59f824563aceac4a41485197df08f46ff71af0ed9c496e75e363",
+          "sizeBytes": 1601
+        },
+        {
+          "path": "artifacts/plan.json",
+          "sha256": "0ff2c269077514ddcd1dfd577552f0943b0848bda08524d71ed87870870309a2",
+          "sizeBytes": 2947
+        },
+        {
+          "path": "artifacts/summary.json",
+          "sha256": "624c36116783119a2807492d0017eb9791f9497641a77c838be5e942b2c46f79",
+          "sizeBytes": 8303
+        },
+        {
+          "path": "artifacts/requirements.json",
+          "sha256": "057b4c7e48db2131aaf4e62c418f77959828e937444bb9f6f35d80fe064327aa",
+          "sizeBytes": 2102
+        },
+        {
+          "path": "artifacts/unwritable.json",
+          "sha256": "7aa99d40265914de1263e06b9057bcfae145c301dcbee43ced959daae51cec93",
+          "sizeBytes": 177
+        },
+        {
+          "path": "artifacts/correspondence.json",
+          "sha256": "0ec4b2bcae430811cbb114484336754ef7326b24543cbaf2103b2eea6c304c64",
+          "sizeBytes": 2491
+        },
+        {
+          "path": "artifacts/tests.json",
+          "sha256": "a41395cf78e146834e2c993d3c1da287e7c4de4e5869fb849c050b4ba5869a32",
+          "sizeBytes": 238
+        },
+        {
+          "path": "artifacts/design.json",
+          "sha256": "57f7797b692e43add66c76e11f0a9a9fcbd9afcdef0e061e37e7868da8c755a4",
+          "sizeBytes": 7827
+        },
+        {
+          "path": "artifacts/test-suite.json",
+          "sha256": "aa0170b1fe98ea51df5590dd55a3b6418332ac9e0791f627523151d26dcc85f6",
+          "sizeBytes": 8612
+        },
+        {
+          "path": "artifacts/mappings.json",
+          "sha256": "bd21c6d5f38a2add0ad01158cf7b082738098b42f86b6177b019e1739e4473c6",
+          "sizeBytes": 1231
+        },
+        {
+          "path": "artifacts/disputes.json",
+          "sha256": "8b6d71437a82a109d91942fe1e7a41a4c5287e7c0047f8b8dbbc1ad2160c547b",
+          "sizeBytes": 39
+        },
+        {
+          "path": "artifacts/arbitration.json",
+          "sha256": "934d0f70c5f8e7a2638e4f8ecd685291435ab62ccdde0da19d67ad402cf85a87",
+          "sizeBytes": 59
+        },
+        {
+          "path": "artifacts/verification.json",
+          "sha256": "891ca9236cd68375c8d338f73ae0848579b46885f936f20664bdfc1e4e442a3e",
+          "sizeBytes": 2345
+        },
+        {
+          "path": "artifacts/name-table.json",
+          "sha256": "0c0049694d95abe1da19a8ad1292dd0a39f077fd8493019be87a8904a0bb3a78",
+          "sizeBytes": 9377
+        },
+        {
+          "path": "artifacts/test-spec.json",
+          "sha256": "af638f5122e4b138c2b504caa78c21ab488cf45a727d9ba60082ba60e574e74a",
+          "sizeBytes": 11362
+        },
+        {
+          "path": "artifacts/semantic-check.json",
+          "sha256": "d0b531730a549ffc752b3038dd47878874dac545dd39eb738dda1f15bd2548e7",
+          "sizeBytes": 609
+        },
+        {
+          "path": "artifacts/decl-check.json",
+          "sha256": "8f8b72d9f0265e5ca711f47b68c68d006bfe17152bbf9cc52fdc2bb9caa700ad",
+          "sizeBytes": 10556
+        },
+        {
+          "path": "artifacts/carry-over.json",
+          "sha256": "2d84a832ac76be55cfecc0faab4171394316b7086faecf00d7bec4a02fe1a0b5",
+          "sizeBytes": 123
+        },
+        {
+          "path": "artifacts/judge-advice.json",
+          "sha256": "1b83bf15a12185af08bc8af8e04e1d2af96dc6c33ab8673f9fb54c779f938350",
+          "sizeBytes": 5743
+        },
+        {
+          "path": "artifacts/verification-v11a.json",
+          "sha256": "44a14de5a19c554e8a075875a4103a0b1c056b236eb1ffec4b87ae3c031d56b4",
+          "sizeBytes": 464
+        },
+        {
+          "path": "bundle-manifest.json",
+          "sha256": "384d09913a2017d0a14c75b5d401277d5fd94d695908df6aee8846f25a3ddc75",
+          "sizeBytes": 3730
+        },
+        {
+          "path": "build-record.json",
+          "sha256": "cb715d13e32dc86524726ce652530970fdbeacdb3dd65d7f2818a12b2090dd9d",
+          "sizeBytes": 485
+        }
+      ],
+      "lines": [
+        "{\"schema_version\":\"commandagent.headless-summary/v1\",\"run_id\":\"local-0\",\"verdict\":\"full\",\"assurance\":\"full\",\"score\":null,\"acceptance_sheet_path\":null,\"artifacts_dir\":\"artifacts\",\"events_path\":null,\"duration_secs\":0,\"provider_cost_usd\":0.00017499999999999997,\"provider_usage_by_role\":{},\"stop_class\":\"completed\",\"directive_round\":null,\"status\":\"completed\",\"gate\":null,\"stop_reason\":\"completed\",\"next_action\":null,\"changed_files\":[],\"verify_commands\":[],\"exit_code\":0,\"builder\":\"musunest-factory\",\"model\":\"gpt-6-luna\",\"effort\":\"high\",\"prompt_version\":\"v1.1a\",\"contract_version\":\"v0.2\",\"spec_engine_version\":\"0.0.0\",\"factory_version\":\"0.0.0\",\"stages\":[{\"stage\":\"name-table\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"semantic-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"test-spec\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"write\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"static-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"name-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"decl-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"run-tests\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"judge\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"bundle\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null}],\"arbitration\":{\"upheld\":0,\"overturned\":0,\"undecidable\":0},\"budget_remaining_usd\":0.299825,\"budget_reserved_usd\":0,\"missing_usage_calls\":0,\"failure\":null,\"judge\":{\"calls_by_adapter\":{\"jev\":0,\"llm\":0,\"fake\":4},\"cost_usd\":0},\"nature_discrepancies\":[]}"
+      ],
+      "exitCode": 0
+    },
+    {
+      "name": "early-stop",
+      "clientOptions": [
+        {
+          "model": "gpt-6-luna",
+          "effort": "high",
+          "envelope": "v1.1a"
+        }
+      ],
+      "requests": [
+        {
+          "kind": "structured",
+          "schemaName": "name-table",
+          "sha256": "00e6405fee211f81b7e59d2cd5c8f90b5194cae2117989aad5406a78c69f7857"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "name-table",
+          "sha256": "ed4b6b774307f23ee0a377351e5e74a5b6455464d947db06bf12a0d4521f0a0b"
+        }
+      ],
+      "files": [
+        {
+          "path": "diagnostics/materials.json",
+          "sha256": "5978bf6bb9e601a8c65ec9fef727764b1e5ad6ea7dc838bdd6640b12a11546a2",
+          "sizeBytes": 1439
+        },
+        {
+          "path": "diagnostics/rejected-name-table.json",
+          "sha256": "aeb43bfde07931ffb15f9e23aba50ec6a7bf82a21f5a6397790678953b38615a",
+          "sizeBytes": 54049
+        },
+        {
+          "path": "build-record.json",
+          "sha256": "cb715d13e32dc86524726ce652530970fdbeacdb3dd65d7f2818a12b2090dd9d",
+          "sizeBytes": 485
+        }
+      ],
+      "lines": [
+        "{\"schema_version\":\"commandagent.headless-summary/v1\",\"run_id\":\"local-0\",\"verdict\":\"none\",\"assurance\":\"none\",\"score\":null,\"acceptance_sheet_path\":null,\"artifacts_dir\":\"artifacts\",\"events_path\":null,\"duration_secs\":0,\"provider_cost_usd\":0.00007,\"provider_usage_by_role\":{},\"stop_class\":\"unmet\",\"directive_round\":null,\"status\":\"completed\",\"gate\":null,\"stop_reason\":\"unmet\",\"next_action\":null,\"changed_files\":[],\"verify_commands\":[],\"exit_code\":1,\"builder\":\"musunest-factory\",\"model\":\"gpt-6-luna\",\"effort\":\"high\",\"prompt_version\":\"v1.1a\",\"contract_version\":\"v0.2\",\"spec_engine_version\":\"0.0.0\",\"factory_version\":\"0.0.0\",\"stages\":[{\"stage\":\"name-table\",\"operation\":null,\"status\":\"failed\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":\"unmet\"},{\"stage\":\"name-table\",\"operation\":null,\"status\":\"failed\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":1},\"failure_kind\":\"unmet\"}],\"arbitration\":{\"upheld\":0,\"overturned\":0,\"undecidable\":0},\"budget_remaining_usd\":0.29993,\"budget_reserved_usd\":0,\"missing_usage_calls\":0,\"failure\":{\"stage\":\"name-table\",\"kind\":\"unmet\",\"problems\":[{\"field\":\"requirements[0].copy\",\"message\":\"要件の文の写しが指示した長さと合わない\"}]},\"judge\":{\"calls_by_adapter\":{\"jev\":0,\"llm\":0,\"fake\":0},\"cost_usd\":0},\"nature_discrepancies\":[]}"
+      ],
+      "exitCode": 1
+    },
+    {
+      "name": "return-to-plan",
+      "clientOptions": [
+        {
+          "model": "gpt-6-luna",
+          "effort": "high",
+          "envelope": "v1.1a"
+        }
+      ],
+      "requests": [
+        {
+          "kind": "structured",
+          "schemaName": "name-table",
+          "sha256": "00e6405fee211f81b7e59d2cd5c8f90b5194cae2117989aad5406a78c69f7857"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "semantic-check",
+          "sha256": "ba23eeafa6637210f1415801a8816992b8678445ec89578149746f99a5c131c6"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "test-spec",
+          "sha256": "a47ca49b9b57538f30940822ba1b63ae9089592a647a2feecd9e40501c760b0c"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "declaration-v11a",
+          "sha256": "ba848af50eb53007151c72d6f0880f972d9aaa812f746c9b171fa0cfa54f3e5d"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "decl-check",
+          "sha256": "bd547a2c853109148114f48efa399321c7bff26badf3fedc72143381b0d0802e"
+        },
+        {
+          "kind": "tools",
+          "schemaName": null,
+          "sha256": "fba44ad6f2a71bdadc83fa174c6018dd33712ba91a74d1c20c24e2b410a435f9"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "expectation-arbitration",
+          "sha256": "f4df1c2cbc1453fafca2e7515a7c37ce2d71faa12335080020f95c4f94c8773e"
+        }
+      ],
+      "files": [
+        {
+          "path": "artifacts/app.spec.yaml",
+          "sha256": "c8fe455d81ff59f824563aceac4a41485197df08f46ff71af0ed9c496e75e363",
+          "sizeBytes": 1601
+        },
+        {
+          "path": "artifacts/plan.json",
+          "sha256": "0ff2c269077514ddcd1dfd577552f0943b0848bda08524d71ed87870870309a2",
+          "sizeBytes": 2947
+        },
+        {
+          "path": "artifacts/summary.json",
+          "sha256": "3293760a65b958147863e12da6b44bdc30128b74b71df14a59f159dfe5bb93f2",
+          "sizeBytes": 9766
+        },
+        {
+          "path": "artifacts/requirements.json",
+          "sha256": "057b4c7e48db2131aaf4e62c418f77959828e937444bb9f6f35d80fe064327aa",
+          "sizeBytes": 2102
+        },
+        {
+          "path": "artifacts/unwritable.json",
+          "sha256": "7aa99d40265914de1263e06b9057bcfae145c301dcbee43ced959daae51cec93",
+          "sizeBytes": 177
+        },
+        {
+          "path": "artifacts/correspondence.json",
+          "sha256": "0ec4b2bcae430811cbb114484336754ef7326b24543cbaf2103b2eea6c304c64",
+          "sizeBytes": 2491
+        },
+        {
+          "path": "artifacts/tests.json",
+          "sha256": "a41395cf78e146834e2c993d3c1da287e7c4de4e5869fb849c050b4ba5869a32",
+          "sizeBytes": 238
+        },
+        {
+          "path": "artifacts/design.json",
+          "sha256": "57f7797b692e43add66c76e11f0a9a9fcbd9afcdef0e061e37e7868da8c755a4",
+          "sizeBytes": 7827
+        },
+        {
+          "path": "artifacts/test-suite.json",
+          "sha256": "aa0170b1fe98ea51df5590dd55a3b6418332ac9e0791f627523151d26dcc85f6",
+          "sizeBytes": 8612
+        },
+        {
+          "path": "artifacts/mappings.json",
+          "sha256": "bd21c6d5f38a2add0ad01158cf7b082738098b42f86b6177b019e1739e4473c6",
+          "sizeBytes": 1231
+        },
+        {
+          "path": "artifacts/disputes.json",
+          "sha256": "43e10e1bd5ddece2c67cfbcef18911921eceaed34f4d0030c2fa3735e20bccf0",
+          "sizeBytes": 113
+        },
+        {
+          "path": "artifacts/arbitration.json",
+          "sha256": "a682f162add31e5d75faf716fc7f14e157be5ce6c3d5d31f372070c6b5f36d71",
+          "sizeBytes": 100
+        },
+        {
+          "path": "artifacts/verification.json",
+          "sha256": "fe2031ae17c864234f54ddcd41f792b6bc046f03bd44c6973c87f6c41b41b58a",
+          "sizeBytes": 2351
+        },
+        {
+          "path": "artifacts/name-table.json",
+          "sha256": "0c0049694d95abe1da19a8ad1292dd0a39f077fd8493019be87a8904a0bb3a78",
+          "sizeBytes": 9377
+        },
+        {
+          "path": "artifacts/test-spec.json",
+          "sha256": "af638f5122e4b138c2b504caa78c21ab488cf45a727d9ba60082ba60e574e74a",
+          "sizeBytes": 11362
+        },
+        {
+          "path": "artifacts/semantic-check.json",
+          "sha256": "d0b531730a549ffc752b3038dd47878874dac545dd39eb738dda1f15bd2548e7",
+          "sizeBytes": 609
+        },
+        {
+          "path": "artifacts/decl-check.json",
+          "sha256": "e21bb008dadb3210a781962aab241d1cd64ffc8670ed2d80223b017f6484228a",
+          "sizeBytes": 10648
+        },
+        {
+          "path": "artifacts/carry-over.json",
+          "sha256": "73499b41816644420179de4317a2834a7ef951c77b496bc99006108928b8bfe9",
+          "sizeBytes": 290
+        },
+        {
+          "path": "artifacts/judge-advice.json",
+          "sha256": "1b83bf15a12185af08bc8af8e04e1d2af96dc6c33ab8673f9fb54c779f938350",
+          "sizeBytes": 5743
+        },
+        {
+          "path": "artifacts/verification-v11a.json",
+          "sha256": "845f0875c3f6aa6207f89aaa524c7e95d79b010cf68704371490e5fff76b20e3",
+          "sizeBytes": 464
+        },
+        {
+          "path": "bundle-manifest.json",
+          "sha256": "a4e802b0462aec9a407954fafa1829d66296cb96fee0833bed8c3d7b4f1b4480",
+          "sizeBytes": 3735
+        },
+        {
+          "path": "build-record.json",
+          "sha256": "afec6949c192b6448f113c5c57d8bee643f845df9dc53c94d609f26287cdd257",
+          "sizeBytes": 484
+        }
+      ],
+      "lines": [
+        "{\"schema_version\":\"commandagent.headless-summary/v1\",\"run_id\":\"local-0\",\"verdict\":\"partial\",\"assurance\":\"partial\",\"score\":null,\"acceptance_sheet_path\":null,\"artifacts_dir\":\"artifacts\",\"events_path\":null,\"duration_secs\":0,\"provider_cost_usd\":0.00020999999999999995,\"provider_usage_by_role\":{},\"stop_class\":\"completed\",\"directive_round\":null,\"status\":\"completed\",\"gate\":null,\"stop_reason\":\"unresolved\",\"next_action\":null,\"changed_files\":[],\"verify_commands\":[],\"exit_code\":0,\"builder\":\"musunest-factory\",\"model\":\"gpt-6-luna\",\"effort\":\"high\",\"prompt_version\":\"v1.1a\",\"contract_version\":\"v0.2\",\"spec_engine_version\":\"0.0.0\",\"factory_version\":\"0.0.0\",\"stages\":[{\"stage\":\"name-table\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"semantic-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"test-spec\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"write\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"static-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"name-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"decl-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"run-tests\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"repair\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":1,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"arbitration\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"judge\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"bundle\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null}],\"arbitration\":{\"upheld\":0,\"overturned\":0,\"undecidable\":0},\"budget_remaining_usd\":0.28172400000000003,\"budget_reserved_usd\":0.018066,\"missing_usage_calls\":1,\"failure\":null,\"judge\":{\"calls_by_adapter\":{\"jev\":0,\"llm\":0,\"fake\":4},\"cost_usd\":0},\"nature_discrepancies\":[]}"
+      ],
+      "exitCode": 3
+    },
+    {
+      "name": "stagnation",
+      "clientOptions": [
+        {
+          "model": "gpt-6-luna",
+          "effort": "high",
+          "envelope": "v1.1a"
+        }
+      ],
+      "requests": [
+        {
+          "kind": "structured",
+          "schemaName": "name-table",
+          "sha256": "00e6405fee211f81b7e59d2cd5c8f90b5194cae2117989aad5406a78c69f7857"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "semantic-check",
+          "sha256": "ba23eeafa6637210f1415801a8816992b8678445ec89578149746f99a5c131c6"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "test-spec",
+          "sha256": "a47ca49b9b57538f30940822ba1b63ae9089592a647a2feecd9e40501c760b0c"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "declaration-v11a",
+          "sha256": "ba848af50eb53007151c72d6f0880f972d9aaa812f746c9b171fa0cfa54f3e5d"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "decl-check",
+          "sha256": "bd547a2c853109148114f48efa399321c7bff26badf3fedc72143381b0d0802e"
+        },
+        {
+          "kind": "tools",
+          "schemaName": null,
+          "sha256": "fba44ad6f2a71bdadc83fa174c6018dd33712ba91a74d1c20c24e2b410a435f9"
+        },
+        {
+          "kind": "structured",
+          "schemaName": "decl-check",
+          "sha256": "bd547a2c853109148114f48efa399321c7bff26badf3fedc72143381b0d0802e"
+        }
+      ],
+      "files": [
+        {
+          "path": "artifacts/app.spec.yaml",
+          "sha256": "c8fe455d81ff59f824563aceac4a41485197df08f46ff71af0ed9c496e75e363",
+          "sizeBytes": 1601
+        },
+        {
+          "path": "artifacts/plan.json",
+          "sha256": "0ff2c269077514ddcd1dfd577552f0943b0848bda08524d71ed87870870309a2",
+          "sizeBytes": 2947
+        },
+        {
+          "path": "artifacts/summary.json",
+          "sha256": "6d248685f4fb6f3a481c9c87db4a5f4719a597cff45213b849ac558908401e6f",
+          "sizeBytes": 11923
+        },
+        {
+          "path": "artifacts/requirements.json",
+          "sha256": "057b4c7e48db2131aaf4e62c418f77959828e937444bb9f6f35d80fe064327aa",
+          "sizeBytes": 2102
+        },
+        {
+          "path": "artifacts/unwritable.json",
+          "sha256": "7aa99d40265914de1263e06b9057bcfae145c301dcbee43ced959daae51cec93",
+          "sizeBytes": 177
+        },
+        {
+          "path": "artifacts/correspondence.json",
+          "sha256": "0ec4b2bcae430811cbb114484336754ef7326b24543cbaf2103b2eea6c304c64",
+          "sizeBytes": 2491
+        },
+        {
+          "path": "artifacts/tests.json",
+          "sha256": "a41395cf78e146834e2c993d3c1da287e7c4de4e5869fb849c050b4ba5869a32",
+          "sizeBytes": 238
+        },
+        {
+          "path": "artifacts/design.json",
+          "sha256": "57f7797b692e43add66c76e11f0a9a9fcbd9afcdef0e061e37e7868da8c755a4",
+          "sizeBytes": 7827
+        },
+        {
+          "path": "artifacts/test-suite.json",
+          "sha256": "aa0170b1fe98ea51df5590dd55a3b6418332ac9e0791f627523151d26dcc85f6",
+          "sizeBytes": 8612
+        },
+        {
+          "path": "artifacts/mappings.json",
+          "sha256": "bd21c6d5f38a2add0ad01158cf7b082738098b42f86b6177b019e1739e4473c6",
+          "sizeBytes": 1231
+        },
+        {
+          "path": "artifacts/disputes.json",
+          "sha256": "8b6d71437a82a109d91942fe1e7a41a4c5287e7c0047f8b8dbbc1ad2160c547b",
+          "sizeBytes": 39
+        },
+        {
+          "path": "artifacts/arbitration.json",
+          "sha256": "934d0f70c5f8e7a2638e4f8ecd685291435ab62ccdde0da19d67ad402cf85a87",
+          "sizeBytes": 59
+        },
+        {
+          "path": "artifacts/verification.json",
+          "sha256": "da5e974c7ef753515834a7a0d28ac6324fda2c27a85425a8853966e5f01da549",
+          "sizeBytes": 2351
+        },
+        {
+          "path": "artifacts/name-table.json",
+          "sha256": "0c0049694d95abe1da19a8ad1292dd0a39f077fd8493019be87a8904a0bb3a78",
+          "sizeBytes": 9377
+        },
+        {
+          "path": "artifacts/test-spec.json",
+          "sha256": "af638f5122e4b138c2b504caa78c21ab488cf45a727d9ba60082ba60e574e74a",
+          "sizeBytes": 11362
+        },
+        {
+          "path": "artifacts/semantic-check.json",
+          "sha256": "d0b531730a549ffc752b3038dd47878874dac545dd39eb738dda1f15bd2548e7",
+          "sizeBytes": 609
+        },
+        {
+          "path": "artifacts/decl-check.json",
+          "sha256": "641a9539787566510a33fd12f32aa5fec6bf712c823d9592fa96342201fab723",
+          "sizeBytes": 21259
+        },
+        {
+          "path": "artifacts/carry-over.json",
+          "sha256": "73499b41816644420179de4317a2834a7ef951c77b496bc99006108928b8bfe9",
+          "sizeBytes": 290
+        },
+        {
+          "path": "artifacts/judge-advice.json",
+          "sha256": "1b83bf15a12185af08bc8af8e04e1d2af96dc6c33ab8673f9fb54c779f938350",
+          "sizeBytes": 5743
+        },
+        {
+          "path": "artifacts/verification-v11a.json",
+          "sha256": "a92d5d1fe06c9f8fa507dd3a9c0bb3d364c5a1cf55aec8842b4d8baa36d5e1e5",
+          "sizeBytes": 464
+        },
+        {
+          "path": "bundle-manifest.json",
+          "sha256": "6666bb8db5eafa1dc5944713e892951da20a1eaaa2f8e71981126c421d8265c5",
+          "sizeBytes": 3734
+        },
+        {
+          "path": "build-record.json",
+          "sha256": "cb715d13e32dc86524726ce652530970fdbeacdb3dd65d7f2818a12b2090dd9d",
+          "sizeBytes": 485
+        }
+      ],
+      "lines": [
+        "{\"schema_version\":\"commandagent.headless-summary/v1\",\"run_id\":\"local-0\",\"verdict\":\"partial\",\"assurance\":\"partial\",\"score\":null,\"acceptance_sheet_path\":null,\"artifacts_dir\":\"artifacts\",\"events_path\":null,\"duration_secs\":0,\"provider_cost_usd\":0.00020999999999999995,\"provider_usage_by_role\":{},\"stop_class\":\"completed\",\"directive_round\":null,\"status\":\"completed\",\"gate\":null,\"stop_reason\":\"stagnation\",\"next_action\":null,\"changed_files\":[],\"verify_commands\":[],\"exit_code\":0,\"builder\":\"musunest-factory\",\"model\":\"gpt-6-luna\",\"effort\":\"high\",\"prompt_version\":\"v1.1a\",\"contract_version\":\"v0.2\",\"spec_engine_version\":\"0.0.0\",\"factory_version\":\"0.0.0\",\"stages\":[{\"stage\":\"name-table\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"semantic-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"test-spec\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"write\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"static-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"name-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"decl-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"run-tests\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"repair\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":1,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"static-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"name-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"decl-check\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":1,\"missing_usage_calls\":0,\"input_tokens\":100,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":50,\"reasoning_tokens\":0,\"attempts\":{\"started\":1,\"responded\":1,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"run-tests\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"judge\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null},{\"stage\":\"bundle\",\"operation\":null,\"status\":\"ok\",\"duration_ms\":0,\"calls\":0,\"missing_usage_calls\":0,\"input_tokens\":0,\"cached_input_tokens\":0,\"cache_write_tokens\":0,\"output_tokens\":0,\"reasoning_tokens\":0,\"attempts\":{\"started\":0,\"responded\":0,\"errors\":0,\"cancelled_deadline\":0,\"cancelled_timeout\":0,\"not_started\":{\"deadline\":0,\"budget\":0,\"limit\":0,\"timeout\":0}},\"retries\":{\"communication\":0,\"shape\":0,\"content\":0},\"failure_kind\":null}],\"arbitration\":{\"upheld\":0,\"overturned\":0,\"undecidable\":0},\"budget_remaining_usd\":0.28172400000000003,\"budget_reserved_usd\":0.018066,\"missing_usage_calls\":1,\"failure\":null,\"judge\":{\"calls_by_adapter\":{\"jev\":0,\"llm\":0,\"fake\":4},\"cost_usd\":0},\"nature_discrepancies\":[]}"
+      ],
+      "exitCode": 0
+    }
+  ]
+}
