@@ -2044,13 +2044,14 @@ export const STAGE_INPUT_DIR = "stage-input";
 export const STAGE_RECORD_MISMATCHES = ["range", "plan-source", "input", "stages"];
 /**
  * 段単位の走りの区間（packages/factory の STAGE_STARTS・STAGE_ENDS の i 番目の組。採点は工場の dist を import しないので写して持ち、試験で dist と照らす）と、
- * 区間の中で記録に出うる段（packages/factory/src/v11a/run.ts の段の記録の名前。区間 0 の carry-over は持ち越しの導出、区間 2 は B の段と ⑦）。
+ * 区間の中で記録に出うる段（packages/factory/src/v11a/run.ts の段の記録の名前。区間 0 の carry-over は持ち越しの導出、区間 2 は B の段と ⑦、
+ * B3'・B6 で全件持ち越し等になったときの carry-over（停止 carry-over・unmet）。工場の dist は区間の端の段しか公開しないので、区間の内側の段は手で写して持つ）。
  * 範囲 開始 i 〜 終了 k の記録に出てよい段は区間 i〜k の段だけ（"stages" の照合と、漏斗の段の範囲）
  */
 export const STAGE_SEGMENTS = [
   { start: "name-table", end: "semantic-check", stages: ["name-table", "semantic-check", "carry-over"] },
   { start: "test-spec", end: "test-spec", stages: ["test-spec"] },
-  { start: "write", end: "judge", stages: ["write", "static-check", "name-check", "decl-check", "run-tests", "repair", "arbitration", "coverage", "judge"] },
+  { start: "write", end: "judge", stages: ["write", "static-check", "name-check", "decl-check", "run-tests", "repair", "arbitration", "coverage", "carry-over", "judge"] },
 ];
 /** 範囲の中の段（開始・終了が区間の表に無いか、開始が終了より後なら空） */
 export function stagesInRange(start, end) {
