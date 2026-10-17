@@ -3,6 +3,9 @@
 // 実行（pnpm build のあと）: node --test workspace/mvp/m1/agent/eval/mutation/classify.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLASSES, CLASS_IDS, DENOMINATOR_RULE, MARKS_SCHEMA, MESSAGES, OUTPUT_SCHEMA, classifyMutations, loadMarks, verifyOutput } from "./classify.mjs";
@@ -305,4 +308,31 @@ test("原文だけ 1 バイト変えて sha256 を据え置いた変異は断ら
   // 照合が通る変異は従来どおり印が適用される
   const ok = await run({ mutants: { o1: [m] }, marks: marksOf([markAt(ID.reorder, "non-equivalent")]) });
   assert.equal(ok.mutants[0].class, "non-equivalent");
+});
+
+test("入口（node classify.mjs <入力の JSON>）：原文だけ 1 バイト変えた変異は exit 3・標準エラーに符号・標準出力は空。照合が通れば exit 0", () => {
+  const dir = mkdtempSync(join(tmpdir(), "classify-cli-"));
+  try {
+    const m = byId(ID.reorder);
+    const input = (mutant) => {
+      const f = join(dir, `in-${Math.random().toString(36).slice(2)}.json`);
+      writeFileSync(f, JSON.stringify({ engineFile, scoringEngineFile, origins: [{ id: "o1", source: SRC, def: DEF }], marks: marksOf([markAt(ID.reorder, "non-equivalent")]), mutants: { o1: [mutant] } }));
+      return f;
+    };
+    const cli = (f) => spawnSync(process.execPath, [join(here, "classify.mjs"), f], { encoding: "utf8" });
+    const bad = cli(input({ ...m, source: m.source.replace("# note", "# Note") }));
+    assert.equal(bad.status, 3);
+    assert.match(bad.stderr, /^mutant_sha_mismatch /);
+    assert.equal(bad.stdout, "");
+    const ok = cli(input(m));
+    assert.equal(ok.status, 0, ok.stderr);
+    const out = JSON.parse(ok.stdout);
+    assert.equal(out.mutants[0].class, "non-equivalent");
+    assert.equal(verifyOutput(out), true);
+    const none = spawnSync(process.execPath, [join(here, "classify.mjs")], { encoding: "utf8" });
+    assert.equal(none.status, 3);
+    assert.equal(none.stdout, "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

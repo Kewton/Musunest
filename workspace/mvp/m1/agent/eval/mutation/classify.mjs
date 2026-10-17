@@ -2,7 +2,7 @@
 // 計測の道具であって工場の門ではない：工場の package を import せず、工場の段からも呼ばれない。API・LLM・通信・時計を使わない。
 // spec-engine（build 済みの dist/index.js）と外の採点のエンジン（eval/engine.mjs。v5）は、ほかの評価の道具と同じく引数のパスで読む。
 // 外の採点は工場の試験とは別の判定である。この道具は工場の判定（verdict）を読まない。
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -214,4 +214,22 @@ export async function classifyMutations({ engineFile, scoringEngineFile, origins
 export function verifyOutput(out) {
   const sum = Object.values(out.counts.by_class).reduce((a, b) => a + b, 0);
   return sum === out.counts.mutants && out.mutants.length === out.counts.mutants && out.mutants.every((m) => sha256(m.source) === m.sha256 && CLASS_IDS.includes(m.class));
+}
+
+// ── 利用の入口（node classify.mjs <入力の JSON のファイル> で直接起動されたときだけ動く。import したときは何も起きない）
+// 入力の JSON：classifyMutations の引数（engineFile・scoringEngineFile・origins・marks・operators・max・mutants）。結果の JSON を標準出力へ。
+// MutationToolError は「符号 固定文」の 1 行を標準エラーに出して exit 3（変異の SHA-256 の不一致・出力の検算の失敗を含む）
+export const EXIT_REFUSED = 3;
+const isEntry = () => { try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } };
+if (isEntry()) {
+  try {
+    const file = process.argv[2];
+    if (!file) throw new MutationToolError("invalid_input", "使い方: node classify.mjs <入力の JSON のファイル>");
+    const out = await classifyMutations(JSON.parse(readFileSync(file, "utf8")));
+    process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
+  } catch (e) {
+    if (!(e instanceof MutationToolError)) throw e;
+    process.stderr.write(`${e.code} ${e.message}\n`);
+    process.exitCode = EXIT_REFUSED;
+  }
 }
