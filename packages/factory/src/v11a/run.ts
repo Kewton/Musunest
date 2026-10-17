@@ -23,6 +23,11 @@
 //     判定の欠落）
 //   - そのほかは v1 と同じ（段の失敗の分類をそのまま写す）
 //
+// 段単位の走り（`runStageRangeV11a`。08-architecture-v1.2.md §8.3・Issue #544）は、同じ回す部分を開始の段と
+// 終了の段で切って流す。開始 T2・B1 は凍結した境界の材料（照合済みの checkpoint）から入り、範囲の外の段は呼ばず、
+// 終了の段のあとで止まる。境界（T1''／T2・T2／B1）を通るたびにその時点の材料を返し、**B の結果は入れない**。
+// ⑦ まで流しても ⑧（納品物）は組まない。範囲を省いた `runGenerationV11a` は今までと同じに振る舞う。
+//
 // 持ち越し（§1.2）の出どころは 4 つ。T1 の unresolved と T1'' の拒否は A1 の `deriveCarryOver` で導く。
 // B3' の文脈なし・点検が尽きるか停滞したあとに残った拒否と、B6 の網羅の落ちは、版の輪の途中で足していく
 // ので `composeCarryOver` で重ねる（`deriveCarryOver` は 4 つの出どころを 1 回で受け、B3' の判定を
@@ -95,10 +100,16 @@ import type { EvaluationContext } from "../stages/tools.js";
 import { correspondenceFromTable, extraElementsOf, markRows } from "./bind-by-id.js";
 import {
   buildV11aArtifacts,
+  type BoundaryMaterials,
   type CoverageCheckRecord,
   type DeclCheckVersionRecord,
+  type FrozenTestSpec,
   type JudgeAdviceRound,
+  type ResumeMaterials,
   type SemanticCheckRound,
+  type StageBoundary,
+  type StageRange,
+  type StageRunOutcome,
 } from "./bundle-v11a.js";
 import {
   danglingRowReferences,
@@ -125,7 +136,6 @@ import {
   NAME_TABLE_ROUNDS,
   runNameTable,
   type NameTableOutcome,
-  type NameTableOutput,
   type NameTablePrevious,
   type SemanticRejection,
 } from "./stages/name-table.js";
@@ -415,11 +425,51 @@ interface VersionState {
   readonly rejections: readonly DeclarationRejection[];
 }
 
+/** 段単位の走りの入力（08-architecture-v1.2.md §8.3。Issue #544） */
+export interface StageRunInputV11a extends GenerationInputV11a {
+  readonly range: StageRange;
+  /** 開始の段の直前の境界の checkpoint から読んだ材料（開始 T1 では省く。照合は呼ぶ側が済ませる） */
+  readonly resume?: ResumeMaterials;
+}
+
+/** 回す部分の結果（通常の生成か、段の走りか） */
+type CoreResult =
+  | { readonly kind: "generation"; readonly result: GenerationResult }
+  | { readonly kind: "stage"; readonly result: StageRunOutcome };
+
 /**
  * v1.1α の 1 回の生成を流す（§1）。早期停止では `bundle` を返さない。完走では、合否・記録・要約・
  * 納品物（v1 の成果物＋v1.1α の 7 つの記録）を返す。**合否はコード（`decideOutcome`）が決める。**
  */
 export async function runGenerationV11a(input: GenerationInputV11a): Promise<GenerationResult> {
+  const core = await runV11a(input, undefined);
+  if (core.kind !== "generation") throw new Error("v1.1α：通常の生成が段の走りの結果を返した（回す部分の前提が壊れた）");
+  return core.result;
+}
+
+/**
+ * v1.1α の経路を段の範囲だけ流す（08 §8.3。Issue #544）。段の中身・順・上限・門・合否の規則は通常の生成と
+ * 同じ関数で、範囲の外の段は呼ばない。開始 T2・B1 は凍結した境界の材料から入り、終了の段のあとで止まる。
+ * **納品物を組まない**（⑦ まで流しても ⑧ を呼ばない）。境界を通るたびに、その材料を返す（B の結果は入れない）。
+ */
+export async function runStageRangeV11a(input: StageRunInputV11a): Promise<StageRunOutcome> {
+  if (input.range.start !== "name-table" && input.resume === undefined) {
+    throw new Error("段の走り：開始 T2・B1 には再開の材料が要る");
+  }
+  if (input.range.start === "write" && input.resume?.testSpec === undefined) {
+    throw new Error("段の走り：開始 B1 には試験の組が要る");
+  }
+  const core = await runV11a(input, { range: input.range, ...(input.resume === undefined ? {} : { resume: input.resume }) });
+  if (core.kind !== "stage") throw new Error("v1.1α：段の走りが通常の生成の結果を返した（回す部分の前提が壊れた）");
+  return core.result;
+}
+
+/** 回す部分（通常の生成は `stage` を省く。省けば今までの振る舞いと同じ） */
+async function runV11a(
+  input: GenerationInputV11a,
+  stageControl: { readonly range: StageRange; readonly resume?: ResumeMaterials } | undefined,
+): Promise<CoreResult> {
+  const resume = stageControl?.resume;
   const limits = input.limits ?? AGENT_LIMITS;
   const meter = new UsageMeter();
   const budget = new JobBudget(input.budgetUsd);
@@ -711,6 +761,29 @@ export async function runGenerationV11a(input: GenerationInputV11a): Promise<Gen
     };
   };
 
+  // 段の走り：通った境界の材料（通った順）と、段の走りの結果
+  const boundaries: BoundaryMaterials[] = [];
+  const stageOutcome = (
+    stopped: FailureAttribution | null,
+    extra: { readonly judgeVerdict?: StageRunOutcome["judgeVerdict"]; readonly finalCarryOver?: StageRunOutcome["finalCarryOver"] } = {},
+  ): CoreResult => ({
+    kind: "stage",
+    result: {
+      stages: buildRecord(stopped).stages,
+      stopped,
+      boundaries: boundaries.slice(),
+      judgeVerdict: extra.judgeVerdict ?? null,
+      finalCarryOver: extra.finalCarryOver ?? null,
+      returnToPlan,
+      costUsd: budget.spentUsd,
+      durationSecs: (input.now() - startedAt) / 1000,
+    },
+  });
+  /** 範囲の中で境界を通ったか（開始の段の直前の境界は入力であって、この走りでは通らない） */
+  const crosses = (boundary: StageBoundary): boolean =>
+    stageControl !== undefined &&
+    (boundary === "t1-t2" ? stageControl.range.start === "name-table" : stageControl.range.start !== "write");
+
   try {
     const list = requirementsFromPlan(input.plan);
 
@@ -718,8 +791,20 @@ export async function runGenerationV11a(input: GenerationInputV11a): Promise<Gen
     const semanticRounds: SemanticCheckRound[] = [];
     const judgeAdviceRounds: JudgeAdviceRound[] = [];
     let previous: NameTablePrevious | undefined;
-    let adopted: { readonly output: NameTableOutput; readonly semantic: SemanticCheckOutput } | undefined;
-    for (let round = 1; round <= NAME_TABLE_ROUNDS; round += 1) {
+    let adopted:
+      | {
+          readonly table: NameTable;
+          readonly tableSha256: string;
+          readonly semantic: Pick<SemanticCheckOutput, "tableSha256" | "targets" | "judgments">;
+          readonly advice: JudgeAdviceRecord;
+        }
+      | undefined =
+      resume === undefined
+        ? undefined
+        : { table: resume.table, tableSha256: resume.tableSha256, semantic: resume.semanticCheck, advice: resume.judgeAdvice };
+    // 開始 T2・B1 は T1〜T1'' を呼ばない（凍結した表と点検結果から入る）
+    const nameTableRounds = resume === undefined ? NAME_TABLE_ROUNDS : 0;
+    for (let round = 1; round <= nameTableRounds; round += 1) {
       const call = round;
       const retry = previous;
       const before = meterState();
@@ -797,12 +882,12 @@ export async function runGenerationV11a(input: GenerationInputV11a): Promise<Gen
         previous = { response: output.response, problems: [], rejections, advice: marks };
         continue;
       }
-      adopted = { output, semantic };
+      adopted = { table: output.table, tableSha256: output.tableSha256, semantic, advice };
       break;
     }
     if (adopted === undefined) throw new Error("名前の表：採用した表が無い（回す部分の前提が壊れた）");
-    const table = adopted.output.table;
-    const tableSha256 = adopted.output.tableSha256;
+    const table = adopted.table;
+    const tableSha256 = adopted.tableSha256;
     const conversion = toV1(table);
     materialStore.design = await acceptSlot(conversion.design, lastOkStageIndex("name-table"));
     materialStore.mappings = await acceptSlot(conversion.mappings, lastOkStageIndex("name-table"));
@@ -820,24 +905,50 @@ export async function runGenerationV11a(input: GenerationInputV11a): Promise<Gen
     if (carry.allCarried) stopAtCarryOver(ALL_CARRIED_PROBLEM);
     await carryOverStep(() => pruneForCarryOver(list, table, carry));
 
-    // ── T2 試験の仕様（除いた一覧と所属で。宣言も名前も見せない）──────────────────
-    const testSpec: TestSpecValue = await runStageOk("test-spec", () =>
-      runTestSpec({
-        plan: input.plan,
-        list,
-        table,
-        carryOver: carry,
-        documents: input.documents,
-        gateway,
-        ...(judgeBudget === undefined ? {} : { judge: judgeBudget }),
-        onDropped: (dropped) => {
-          for (const entry of dropped) droppedTests.push(entry);
-        },
-        onRejected: rejectionSink("test-spec", 1),
-      }),
-    );
-    natureDiscrepancies = toBundleNatureDiscrepancies(testSpec.discrepancies);
-    materialStore.testSuite = await acceptSlot(testSpec.suite, lastOkStageIndex("test-spec"));
+    // 段の走り：T1''／T2 の境界（持ち越しを導き、T2 を呼ぶ直前）。終了 T1'' ならここで止める
+    const adoptedNow = adopted;
+    const boundaryOf = (boundary: StageBoundary, frozen?: FrozenTestSpec): BoundaryMaterials => ({
+      boundary,
+      table,
+      tableSha256,
+      semanticCheck: {
+        tableSha256: adoptedNow.semantic.tableSha256,
+        targets: adoptedNow.semantic.targets,
+        judgments: adoptedNow.semantic.judgments,
+      },
+      judgeAdvice: adoptedNow.advice,
+      carryOver: baseCarry,
+      ...(frozen === undefined ? {} : { testSpec: frozen }),
+    });
+    if (crosses("t1-t2")) boundaries.push(boundaryOf("t1-t2"));
+    if (stageControl?.range.end === "semantic-check") return stageOutcome(null);
+
+    // ── T2 試験の仕様（除いた一覧と所属で。宣言も名前も見せない）。開始 B1 は凍結した組から入る ────────
+    const runTestSpecStage = async (): Promise<FrozenTestSpec> => {
+      const value: TestSpecValue = await runStageOk("test-spec", () =>
+        runTestSpec({
+          plan: input.plan,
+          list,
+          table,
+          carryOver: carry,
+          documents: input.documents,
+          gateway,
+          ...(judgeBudget === undefined ? {} : { judge: judgeBudget }),
+          onDropped: (dropped) => {
+            for (const entry of dropped) droppedTests.push(entry);
+          },
+          onRejected: rejectionSink("test-spec", 1),
+        }),
+      );
+      natureDiscrepancies = toBundleNatureDiscrepancies(value.discrepancies);
+      materialStore.testSuite = await acceptSlot(value.suite, lastOkStageIndex("test-spec"));
+      return value;
+    };
+    const testSpec: FrozenTestSpec =
+      stageControl?.range.start === "write" && resume?.testSpec !== undefined ? resume.testSpec : await runTestSpecStage();
+    // 段の走り：T2／B1 の境界（T2' を終え、B1 を始める直前）。終了 T2' ならここで止める
+    if (crosses("t2-b1")) boundaries.push(boundaryOf("t2-b1", testSpec));
+    if (stageControl?.range.end === "test-spec") return stageOutcome(null);
 
     // ── B1 書く（表の全行・固定した試験）──────────────────────────────────
     const written = await runStageOk("write", () =>
@@ -1128,6 +1239,8 @@ export async function runGenerationV11a(input: GenerationInputV11a): Promise<Gen
       carriedOver: { reverseCheck: [], testSuite: carriedIds },
     };
     const outcome = await runStage("judge", async () => decideOutcome(toStageResults(materials)));
+    // 段の走り：⑦ の判定を別の名前で返し、納品物（⑧）を組まない
+    if (stageControl !== undefined) return stageOutcome(null, { judgeVerdict: outcome.verdict, finalCarryOver: carry.entries });
     const failure: FailureAttribution | null =
       outcome.result === "failed"
         ? final.report.staticCheck.passed
@@ -1228,16 +1341,23 @@ export async function runGenerationV11a(input: GenerationInputV11a): Promise<Gen
     });
     const diagnostics = buildRejectedCandidateFiles(await rejectedCandidateRows());
     return {
-      outcome,
-      record,
-      summary,
-      bundle,
-      stopped: failure,
-      diagnostics,
-      ...(returnToPlan ? { returnToPlan: true } : {}),
+      kind: "generation",
+      result: {
+        outcome,
+        record,
+        summary,
+        bundle,
+        stopped: failure,
+        diagnostics,
+        ...(returnToPlan ? { returnToPlan: true } : {}),
+      },
     };
   } catch (error) {
-    if (error instanceof RunStop) return await stopResult(error.attribution);
+    if (error instanceof RunStop) {
+      return stageControl === undefined
+        ? { kind: "generation", result: await stopResult(error.attribution) }
+        : stageOutcome(error.attribution);
+    }
     throw error;
   }
 }

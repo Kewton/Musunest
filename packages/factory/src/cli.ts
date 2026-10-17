@@ -13,6 +13,12 @@
 // （`07-architecture-v1.1a.md` §3・Issue #511）。v1.1α は `--plan-file` と組んでだけ受ける。`--pipeline` を省けば
 // v1 の経路で、LLM への要求・納品物・要約・終了コードは今までとバイト列で同じである。
 //
+// `--stage-start <段>`・`--stage-end <段>`・`--stage-input <checkpoint>` を付けると、v1.1α の経路を段の範囲だけ
+// 流す（段単位の実行口。`08-architecture-v1.2.md` §8.3・Issue #544）。`--pipeline v1.1a --plan-file` と組んで
+// だけ受ける。再開の入力は**クライアントを作る前に**照合し、合わなければ API を呼ばず、何も書かずに終了コード 4
+// と固定の符号 1 行（標準エラー）で終わる。段の走りは納品物を書かず、境界の checkpoint と段の走りの記録だけを
+// 書く。旗を省けば今までの走りとバイト列で同じである（checkpoint も書かない）。
+//
 // `node:fs` は**動的**に読む（Worker が根（index.ts）から import しても、この経路は呼ばれない限り動かない。
 // appspec-schema の contract.ts と同じやり方）。
 import { planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
@@ -56,7 +62,23 @@ import {
   type PlanScriptRecordSink,
 } from "./plan/script-responder.js";
 import { runGeneration } from "./run.js";
-import { runGenerationV11a } from "./v11a/run.js";
+import {
+  boundaryBefore,
+  buildStageCheckpoint,
+  buildStageRunRecord,
+  resolveStageRange,
+  stageCheckpointFile,
+  stageJsonText,
+  stageOutputDigest,
+  stagePassOf,
+  verifyStageInput,
+  STAGE_BUDGET_SCOPE,
+  STAGE_RUN_RECORD_FILE,
+  type StageBoundary,
+  type StageRange,
+  type StageRunConditions,
+} from "./v11a/bundle-v11a.js";
+import { runGenerationV11a, runStageRangeV11a } from "./v11a/run.js";
 import type { PromptDocument } from "./stages/prompt.js";
 
 /** 工場の識別（要約の `builder`。S-5） */
@@ -111,10 +133,19 @@ export const EXIT_USAGE = 2;
  * **3 は `--plan-file` の差し戻しにだけ使う**——`--plan`（通し）の差し戻しは今までどおり 0 で終わる。
  */
 export const EXIT_RETURN_TO_PLAN = 3;
+/**
+ * 終了コード：段の走りの再開の入力（`--stage-input`）の照合に失敗した（Issue #544）。API を呼ばず、何も書かない。
+ * `--plan-file` の差し戻し（3）とは別の値である。
+ */
+export const EXIT_STAGE_INPUT = 4;
 
 /** 使い方の文（誤りを人に見せる） */
 export const USAGE =
   "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル> [--pipeline v1|v1.1a]]";
+
+/** 段単位の実行口の使い方（段の旗の誤りのときだけ、`USAGE` のあとに出す。Issue #544） */
+export const STAGE_USAGE =
+  "段の走り: factory:run -- <依頼文のファイル> --out <ディレクトリ> --pipeline v1.1a --plan-file <ファイル> [--stage-start name-table|test-spec|write] [--stage-end semantic-check|test-spec|judge] [--stage-input <前の段の走りの checkpoint>]";
 
 /** 手元の入口が受け取る引数 */
 export interface CliArguments {
@@ -155,6 +186,13 @@ export interface CliArguments {
    * 指定できない。`v1.1a` は `--plan-file` と一緒にだけ受ける（Issue #511）。
    */
   readonly pipeline?: Pipeline;
+  /**
+   * 段の範囲（`--stage-start`・`--stage-end`・`--stage-input` のどれかを付けたときだけ持つ。Issue #544）。
+   * `--pipeline v1.1a --plan-file` と組んでだけ受ける。片方だけなら他方は経路の端
+   */
+  readonly stageRange?: StageRange;
+  /** 再開の入力（前の段の走りが書いた、開始の段の直前の境界の checkpoint のファイル） */
+  readonly stageInput?: string;
 }
 
 function isPipeline(value: string): value is Pipeline {
@@ -177,6 +215,10 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   let answersFile: string | undefined;
   let scriptFile: string | undefined;
   let pipeline: Pipeline | undefined;
+  let stageStart: string | undefined;
+  let stageEnd: string | undefined;
+  let stageInput: string | undefined;
+  let stageFlag = false;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === undefined) continue;
@@ -202,6 +244,18 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
         return { error: `--pipeline には ${PIPELINES.join(" か ")} を指定してください` };
       }
       pipeline = raw;
+      continue;
+    }
+    if (arg === "--stage-start" || arg === "--stage-end" || arg === "--stage-input") {
+      const raw = args[index + 1];
+      index += 1;
+      stageFlag = true;
+      if (raw === undefined) {
+        return { error: arg === "--stage-input" ? "stage-input:missing（--stage-input には checkpoint のファイルを指定してください）" : "stage-range:unknown（段の名前を指定してください）" };
+      }
+      if (arg === "--stage-start") stageStart = raw;
+      else if (arg === "--stage-end") stageEnd = raw;
+      else stageInput = raw;
       continue;
     }
     if (arg === "--answers") {
@@ -305,6 +359,19 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   if (pipeline === "v1.1a" && planFile === undefined) {
     return { error: "--pipeline v1.1a は --plan-file と一緒に指定してください" };
   }
+  let stageRange: StageRange | undefined;
+  if (stageFlag) {
+    if (pipeline !== "v1.1a" || planFile === undefined) {
+      return { error: "stage-range:pipeline（段の旗は --pipeline v1.1a --plan-file と一緒に指定してください）" };
+    }
+    const resolved = resolveStageRange({
+      ...(stageStart === undefined ? {} : { start: stageStart }),
+      ...(stageEnd === undefined ? {} : { end: stageEnd }),
+      hasInput: stageInput !== undefined,
+    });
+    if ("code" in resolved) return { error: `${resolved.code}（${STAGE_RANGE_USAGE_MESSAGES[resolved.code]}）` };
+    stageRange = resolved;
+  }
   return {
     requestFile,
     outDir,
@@ -319,8 +386,19 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
     ...(answersFile === undefined ? {} : { answersFile }),
     ...(scriptFile === undefined ? {} : { scriptFile }),
     ...(pipeline === undefined ? {} : { pipeline }),
+    ...(stageRange === undefined ? {} : { stageRange }),
+    ...(stageInput === undefined ? {} : { stageInput }),
   };
 }
+
+/** 段の旗の使い方の誤りの説明（符号のあとに添える） */
+const STAGE_RANGE_USAGE_MESSAGES = {
+  "stage-range:pipeline": "段の旗は --pipeline v1.1a --plan-file と一緒に指定してください",
+  "stage-range:order": "開始の段が終了の段より後です",
+  "stage-range:unknown": "開始は name-table・test-spec・write、終了は semantic-check・test-spec・judge から選んでください",
+  "stage-input:not-needed": "開始 name-table には --stage-input を付けられません",
+  "stage-input:missing": "開始 test-spec・write には --stage-input（前の段の走りの checkpoint）が要ります",
+} as const;
 
 /** 手元の入口の依存（試験は偽物を差し込む） */
 export interface CliDeps {
@@ -431,7 +509,17 @@ async function runBuild(
 ): Promise<{ readonly code: number; readonly costUsd: number; readonly returnToPlan: boolean }> {
   // v1.1α は確定した仕様と組んでだけ流れる（引数の読み取りが `--plan-file` を要る。Issue #511）
   const v11aPlan = job.pipeline === "v1.1a" ? job.plan : undefined;
-  const input = {
+  const input = generationInputOf(deps, job, v11aPlan === undefined ? PROMPT_VERSION : PROMPT_VERSION_V11A);
+  const run =
+    v11aPlan === undefined
+      ? await runGeneration({ ...input, ...(job.plan === undefined ? {} : { plan: job.plan }) })
+      : await runGenerationV11a({ ...input, plan: v11aPlan });
+  return writeBuildRun(deps, job, run, log);
+}
+
+/** 生成の入力のうち、経路に依らない部分（v1・v1.1α・段の走りで同じ） */
+function generationInputOf(deps: CliDeps, job: BuildJob, promptVersion: string) {
+  return {
     source: job.source,
     documents: job.documents,
     client: job.client,
@@ -447,16 +535,20 @@ async function runBuild(
     builder: BUILDER,
     model: job.model,
     effort: job.effort,
-    promptVersion: v11aPlan === undefined ? PROMPT_VERSION : PROMPT_VERSION_V11A,
+    promptVersion,
     contractVersion: CONTRACT_VERSION,
     specEngineVersion: SPEC_ENGINE_VERSION,
     factoryVersion: FACTORY_VERSION,
   };
-  const run =
-    v11aPlan === undefined
-      ? await runGeneration({ ...input, ...(job.plan === undefined ? {} : { plan: job.plan }) })
-      : await runGenerationV11a({ ...input, plan: v11aPlan });
+}
 
+/** 生成の結果（納品物・診断・要約）を書き、終了コードと使った額を返す */
+async function writeBuildRun(
+  deps: CliDeps,
+  job: BuildJob,
+  run: Awaited<ReturnType<typeof runGeneration>>,
+  log: (line: string) => void,
+): Promise<{ readonly code: number; readonly costUsd: number; readonly returnToPlan: boolean }> {
   if (run.bundle !== null) {
     await deps.makeDirectory(job.outDir);
     for (const file of bundleFiles(run.bundle)) {
@@ -715,6 +807,9 @@ async function runBuildFromPlanFile(
     log(planFileRejectLine(validation));
     return EXIT_USAGE;
   }
+  if (parsed.stageRange !== undefined) {
+    return runStageFromPlanFile(deps, parsed, parsed.stageRange, { ...ctx, source, validation }, log, logError);
+  }
 
   const apiKey = deps.env[API_KEY_ENV];
   if (apiKey === undefined || apiKey === "") {
@@ -769,6 +864,178 @@ async function runBuildFromPlanFile(
   return build.returnToPlan ? EXIT_RETURN_TO_PLAN : build.code;
 }
 
+/** パスの親ディレクトリ（`/` の無いパスは `.`） */
+function directoryOf(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index < 0 ? "." : index === 0 ? "/" : path.slice(0, index);
+}
+
+/** パスの最後の名前 */
+function baseNameOf(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/** 読めなければ null（段の入力の照合は、読めないことを固定の符号にする） */
+async function readOrNull(deps: CliDeps, path: string): Promise<string | null> {
+  try {
+    return await deps.readFile(path);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 段の走りの道（`--stage-start`・`--stage-end`・`--stage-input`。08 §8.3・Issue #544）。確定した仕様の検査を
+ * 通ったあとに呼ぶ。再開の入力を**クライアントを作る前に**照合し、断れば固定の符号 1 行を標準エラーに出して
+ * 終了コード 4 で終わる（API を呼ばない・何も書かない）。通れば範囲の段だけを流し、通った境界の checkpoint と
+ * 段の走りの記録を `--out` に書く。**納品物は書かない**（⑦ まで流しても publish の口へ何も渡さない）。予算と
+ * 締切は `--budget`・`--deadline` をこの走りの始まりから当てる（前の走りの額と時間を引かない）。
+ *
+ * 終了コード：段の通過 0、範囲の中の早期停止 1、確定した仕様の道の差し戻し 3、段の入力の照合の失敗 4。
+ */
+async function runStageFromPlanFile(
+  deps: CliDeps,
+  parsed: CliArguments,
+  range: StageRange,
+  ctx: {
+    readonly now: () => number;
+    readonly budgetUsd: number;
+    readonly deadlineMs: number;
+    readonly source: string;
+    readonly validation: { readonly plan: ConfirmedPlan; readonly planSha256: string; readonly sourceSha256: string };
+  },
+  log: (line: string) => void,
+  logError: (line: string) => void,
+): Promise<number> {
+  const { validation } = ctx;
+  let resume: Parameters<typeof runStageRangeV11a>[0]["resume"];
+  let inputRecord: { readonly checkpoint: string; readonly boundary: StageBoundary; readonly output_digest: string } | null =
+    null;
+  if (boundaryBefore(range.start) !== null && parsed.stageInput !== undefined) {
+    const checkpointPath = parsed.stageInput;
+    const verified = await verifyStageInput({
+      start: range.start,
+      checkpointText: await readOrNull(deps, checkpointPath),
+      checkpointFile: baseNameOf(checkpointPath),
+      recordText: await readOrNull(deps, joinPath(directoryOf(checkpointPath), STAGE_RUN_RECORD_FILE)),
+      plan: validation.plan,
+      planSha256: validation.planSha256,
+      sourceSha256: validation.sourceSha256,
+      vocabularyVersion: VOCABULARY_VERSION,
+      contractVersion: CONTRACT_VERSION,
+    });
+    if (!verified.ok) {
+      logError(verified.code);
+      return EXIT_STAGE_INPUT;
+    }
+    resume = verified.resume;
+    inputRecord = verified.input;
+  }
+
+  const apiKey = deps.env[API_KEY_ENV];
+  if (apiKey === undefined || apiKey === "") {
+    log(`使い方の誤り: 環境変数 ${API_KEY_ENV} がありません`);
+    log(USAGE);
+    return EXIT_USAGE;
+  }
+  const documents = await deps.loadDocuments();
+  const client = deps.makeClient({ apiKey, model: parsed.model, effort: parsed.effort, envelope: "v1.1a" });
+  const { judge, recheckJudge } = assembleJudge({
+    env: deps.env,
+    model: parsed.model,
+    client,
+    ...(deps.makeJevJudge === undefined ? {} : { makeJevJudge: deps.makeJevJudge }),
+    ...(deps.makeLlmJudge === undefined ? {} : { makeLlmJudge: deps.makeLlmJudge }),
+    logError,
+  });
+  const job: BuildJob = {
+    source: ctx.source,
+    documents,
+    client,
+    judge,
+    recheckJudge,
+    outDir: parsed.outDir,
+    model: parsed.model,
+    effort: parsed.effort,
+    budgetUsd: ctx.budgetUsd,
+    deadline: ctx.now() + ctx.deadlineMs,
+    now: ctx.now,
+    ...(parsed.timeoutMs === undefined ? {} : { timeoutMs: parsed.timeoutMs }),
+    pipeline: "v1.1a",
+  };
+  const outcome = await runStageRangeV11a({
+    ...generationInputOf(deps, job, PROMPT_VERSION_V11A),
+    plan: validation.plan,
+    range,
+    ...(resume === undefined ? {} : { resume }),
+  });
+
+  await deps.makeDirectory(job.outDir);
+  const checkpoints: { boundary: StageBoundary; path: string; output_digest: string }[] = [];
+  for (const materials of outcome.boundaries) {
+    const checkpoint = buildStageCheckpoint({
+      materials,
+      versions: {
+        vocabulary: VOCABULARY_VERSION,
+        contract: CONTRACT_VERSION,
+        prompt: PROMPT_VERSION_V11A,
+        factory: FACTORY_VERSION,
+      },
+      planSha256: validation.planSha256,
+      sourceSha256: validation.sourceSha256,
+    });
+    const path = stageCheckpointFile(materials.boundary);
+    await deps.writeFile(joinPath(job.outDir, path), stageJsonText(checkpoint));
+    checkpoints.push({ boundary: materials.boundary, path, output_digest: await stageOutputDigest(checkpoint) });
+  }
+  const code =
+    outcome.stopped !== null
+      ? EXIT_RUN_FAILED
+      : outcome.returnToPlan
+        ? EXIT_RETURN_TO_PLAN
+        : stagePassOf(outcome, range.end)
+          ? EXIT_OK
+          : EXIT_RUN_FAILED;
+  const jevApiKey = deps.env[JEV_API_KEY_ENV];
+  const conditions: StageRunConditions = {
+    model: parsed.model,
+    effort: parsed.effort,
+    documents: await Promise.all(
+      documents.map(async (document) => ({ name: document.name, sha256: await sha256Hex(document.text) })),
+    ),
+    judge:
+      jevApiKey !== undefined && jevApiKey !== "" ? { primary: "jev", fallback: "llm" } : { primary: "llm", fallback: null },
+    prompt_version: PROMPT_VERSION_V11A,
+    vocabulary_version: VOCABULARY_VERSION,
+    contract_version: CONTRACT_VERSION,
+    factory_version: FACTORY_VERSION,
+    spec_engine_version: SPEC_ENGINE_VERSION,
+    budget_usd: ctx.budgetUsd,
+    deadline_ms: ctx.deadlineMs,
+    timeout_ms: parsed.timeoutMs ?? null,
+  };
+  const record = buildStageRunRecord({
+    range,
+    input: inputRecord,
+    planSha256: validation.planSha256,
+    sourceSha256: validation.sourceSha256,
+    checkpoints,
+    conditions,
+    outcome,
+    exitCode: code,
+  });
+  await deps.writeFile(joinPath(job.outDir, STAGE_RUN_RECORD_FILE), stageJsonText(record));
+  log(
+    JSON.stringify({
+      stage_pass: record["stage_pass"],
+      reached_stage: record["reached_stage"],
+      budget_scope: STAGE_BUDGET_SCOPE,
+      exit_code: code,
+    }),
+  );
+  return code;
+}
+
 /**
  * 1 回の生成を流し、納品物をディレクトリに書く（§3.2）。`--plan` があれば Plan を回してから Build を流す
  * （Issue #336）。`--plan-only` は Plan だけを流し、`--plan-file` は確定した仕様から Build だけを流す
@@ -781,6 +1048,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
   if ("error" in parsed) {
     log(`使い方の誤り: ${parsed.error}`);
     log(USAGE);
+    if (parsed.error.startsWith("stage-")) log(STAGE_USAGE);
     return EXIT_USAGE;
   }
   const now = deps.now ?? ((): number => Date.now());
