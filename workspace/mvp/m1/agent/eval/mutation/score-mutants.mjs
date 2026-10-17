@@ -206,17 +206,117 @@ const outcomesById = (suite, r) => {
 // hook は import の読み込みしか見ない。同期の require（createRequire）・vm・eval・Function のコンストラクタは hook を通らずにコードを読み込み・実行し得るので、
 // 目録に載ったコード（.js・.mjs・.cjs）の中身にその口が 1 つでもあれば、評価の前に断る。今の dist（tsc の出力）はどれも持たない。
 // fs は見ない（今の dist は入力のファイルを fs で読む）。fs で読んだ中身をコードとして実行する口は、eval・Function・vm の走査で断る。sandbox ではない。
-const FORBIDDEN_APIS = [
-  { id: "require", re: /\brequire\s*\(/ },
-  { id: "createRequire", re: /\bcreateRequire\b/ },
-  { id: "node:module", re: /["'](?:node:)?module["']/ },
-  { id: "node:vm", re: /["'](?:node:)?vm["']/ },
-  { id: "eval", re: /\beval\s*\(/ },
-  { id: "Function", re: /\bFunction\s*\(/ },
-];
-/** コードの原文に含まれる禁じた口の id（無ければ空） */
+// 原文への正規表現ではなく、小さな字句の分け（tokensOf）を通してから照合する：行コメント・ブロックコメントを外し、文字列（' と "）と
+// テンプレート（`）の中身はコードとして見ない。モジュール名の口（node:module・node:vm）は、指定子の位置（from・import・import(・require( の直後）
+// にある文字列の値で照合する。限界：正規表現リテラルは直前の字句から推測して読み飛ばす（推測を誤ると後ろの字句がずれる）。テンプレートの中の式
+// （${…}）はコードとして読むが、式を持つテンプレートの値は照合に使わない。名前を組み立てる難読化は見ない。
+const REGEX_AFTER_WORDS = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do", "else", "yield", "await"]);
+const isIdStart = (ch) => /[A-Za-z_$]/.test(ch) || ch > "\x7f";
+const isIdPart = (ch) => /[A-Za-z0-9_$]/.test(ch) || ch > "\x7f";
+
+/** 原文を字句に分ける：{ type: ident・punct・string・template・number・regex, value }。コメントは出さない。文字列とテンプレートの値は中身（式を持つテンプレートは null） */
+export function tokensOf(text) {
+  const toks = [], stack = [];
+  let i = 0, depth = 0;
+  const n = text.length;
+  const regexAllowed = () => {
+    const p = toks[toks.length - 1];
+    if (p === undefined) return true;
+    if (p.type === "punct") return !/^[)\]}]$/.test(p.value);
+    if (p.type === "ident") return REGEX_AFTER_WORDS.has(p.value);
+    return false;
+  };
+  // テンプレートの中を読む（start は ` か } の次）。` で終われば字句を出し、${ なら式の中へ戻る
+  const template = (start, hasExpr) => {
+    let j = start, v = "";
+    while (j < n) {
+      const ch = text[j];
+      if (ch === "\\") { v += text[j + 1] ?? ""; j += 2; continue; }
+      if (ch === "`") { toks.push({ type: "template", value: hasExpr ? null : v }); return j + 1; }
+      if (ch === "$" && text[j + 1] === "{") { toks.push({ type: "template", value: null }); stack.push(depth); depth += 1; return j + 2; }
+      v += ch;
+      j += 1;
+    }
+    toks.push({ type: "template", value: null });
+    return n;
+  };
+  while (i < n) {
+    const ch = text[i];
+    if (/\s/.test(ch)) { i += 1; continue; }
+    if (ch === "/" && text[i + 1] === "/") { while (i < n && text[i] !== "\n") i += 1; continue; }
+    if (ch === "/" && text[i + 1] === "*") { const e = text.indexOf("*/", i + 2); i = e < 0 ? n : e + 2; continue; }
+    if (ch === "'" || ch === '"') {
+      let j = i + 1, v = "";
+      while (j < n && text[j] !== ch && text[j] !== "\n") { if (text[j] === "\\") { v += text[j + 1] ?? ""; j += 2; continue; } v += text[j]; j += 1; }
+      toks.push({ type: "string", value: v });
+      i = j + 1;
+      continue;
+    }
+    if (ch === "`") { i = template(i + 1, false); continue; }
+    if (ch === "/" && regexAllowed()) {
+      let j = i + 1, inClass = false;
+      while (j < n && text[j] !== "\n") {
+        const c = text[j];
+        if (c === "\\") { j += 2; continue; }
+        if (c === "[") inClass = true;
+        else if (c === "]") inClass = false;
+        else if (c === "/" && !inClass) break;
+        j += 1;
+      }
+      j += 1;
+      while (j < n && isIdPart(text[j])) j += 1;
+      toks.push({ type: "regex", value: null });
+      i = j;
+      continue;
+    }
+    if (isIdStart(ch)) {
+      let j = i + 1;
+      while (j < n && isIdPart(text[j])) j += 1;
+      toks.push({ type: "ident", value: text.slice(i, j) });
+      i = j;
+      continue;
+    }
+    if (/[0-9]/.test(ch)) {
+      let j = i + 1;
+      while (j < n && /[0-9A-Za-z_.]/.test(text[j])) j += 1;
+      toks.push({ type: "number", value: text.slice(i, j) });
+      i = j;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    if (ch === "}") {
+      depth -= 1;
+      if (stack.length > 0 && depth === stack[stack.length - 1]) { stack.pop(); i = template(i + 1, true); continue; }
+    }
+    toks.push({ type: "punct", value: ch });
+    i += 1;
+  }
+  return toks;
+}
+
+const MODULE_NAMES = { "node:module": ["module", "node:module"], "node:vm": ["vm", "node:vm"] };
+/** コードの原文に含まれる禁じた口の id（無ければ空）。コメント・文字列・テンプレートの中の語は口に数えない */
 export function forbiddenApisIn(text) {
-  return FORBIDDEN_APIS.filter((a) => a.re.test(text)).map((a) => a.id);
+  const toks = tokensOf(text).filter((t) => t.type !== "regex");
+  const hit = new Set();
+  const is = (t, type, value) => t !== undefined && t.type === type && t.value === value;
+  toks.forEach((t, k) => {
+    const prev = toks[k - 1], next = toks[k + 1];
+    if (t.type === "ident") {
+      if (t.value === "require" && is(next, "punct", "(")) hit.add("require");
+      if (t.value === "createRequire") hit.add("createRequire");
+      if (t.value === "eval") hit.add("eval");
+      if (t.value === "Function" && (is(next, "punct", "(") || is(prev, "ident", "new"))) hit.add("Function");
+      return;
+    }
+    if ((t.type === "string" || t.type === "template") && t.value !== null) {
+      const atSpecifier = is(prev, "ident", "from") || is(prev, "ident", "import")
+        || (is(prev, "punct", "(") && (is(toks[k - 2], "ident", "import") || is(toks[k - 2], "ident", "require")));
+      if (!atSpecifier) return;
+      for (const [id, names] of Object.entries(MODULE_NAMES)) if (names.includes(t.value)) hit.add(id);
+    }
+  });
+  return ["require", "createRequire", "node:module", "node:vm", "eval", "Function"].filter((id) => hit.has(id));
 }
 const isCode = (p) => /\.(?:m|c)?js$/.test(p);
 
