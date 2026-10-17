@@ -57,6 +57,12 @@
 //   stage_pass_rate（対象予定・入力なし・起動・観測・欠測・通過。率の分母は 予定 − 入力なし で起動前に決まる）を出す。原文系・了承後系の PASS と納品の欄は
 //   計算しない（null と not_computed の理由 stage-run）。漏斗は範囲の中の段だけ。--compare は段だけの対の比較（before・after）で、段の通過の対の差と
 //   P のまとまりの p・bootstrap の区間を今の関数で出す
+// #557 で足したもの（経路 v1.2 の条件と --compare-pipelines の組の採点だけ。v1・v1.1a の条件と比較の欄・値・標準出力は変えない。README §5.12。設計書 08 §8.6・§8.7・§9）：
+//   条件の版 v7（params.pipeline が v1.2 で params.v12_flags を足した。v1.2 のときだけ）。evaluation.pipeline に v1.2、evaluation.v12_flags に条件の旗の組と
+//   照合の結果ごとの本の数。照合は計測が本ごとに残した報告（summary.line.json の v12_flags）を条件の組と名前 → 真偽の集合として照らし直す。起動した本の 1 本でも
+//   一致しなければ照合は未照合（completion.unverified に v12-flags）。未起動の本は今の未実行・途中のまま。
+//   --compare は比較の記録の群の組（v1,v1.1a・v1.1a,v1.2・v1,v1.2）を読み、v1.2 を含む組は群の条件を版ごとに検証してから共通の形で照らす。
+//   差の向きの文は「候補（<候補>）− 比較元（<比較元>）」。段の役割の表は v1.2 を v1.1α の段の名前で引く。profile の違いの理由 pipelines を残す
 // run-agent.mjs は、ここから指紋の関数と定義ファイルの読み込みを import して条件のファイルに書く（道具は 2 本で 1 組。入口として起動したときだけ採点する）
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -147,7 +153,7 @@ export const readConditions = (outRoot) => loadConditions(outRoot).cond;
  */
 export function validatePlanned(cond) {
   const reasons = [];
-  if (!CONDITIONS_SCHEMAS.includes(cond?.schema) && cond?.schema !== CONDITIONS_V6) reasons.push("schema が未知");
+  if (!CONDITIONS_SCHEMAS.includes(cond?.schema) && cond?.schema !== CONDITIONS_V6 && cond?.schema !== CONDITIONS_V7) reasons.push("schema が未知");
   const list = cond?.child_args;
   const isList = Array.isArray(list);
   if (!isList) reasons.push("予定の一覧（child_args）が無いか配列でない");
@@ -735,8 +741,8 @@ export const EVALUATION_MODES = ["build", "e2e", "plan-only", "build-from", "sta
 const CONDITIONS_V4 = CONDITIONS_SCHEMAS[3];
 /** 条件の版 v5（#513）。params.mode の読み方は v4 と同じで、params.pipeline を足した */
 export const CONDITIONS_V5 = CONDITIONS_SCHEMAS[4];
-/** params.mode と frozen を持つ版（v4・v5 と、段単位の走りの v6。#545） */
-const hasMode = (schema) => schema === CONDITIONS_V4 || schema === CONDITIONS_V5 || schema === CONDITIONS_V6;
+/** params.mode と frozen を持つ版（v4・v5 と、段単位の走りの v6。#545。経路 v1.2 の v7。#557） */
+const hasMode = (schema) => schema === CONDITIONS_V4 || schema === CONDITIONS_V5 || schema === CONDITIONS_V6 || schema === CONDITIONS_V7;
 /** 台本の当て方（post-hoc ＝ 採点で事後に当てる。live ＝ 実行中に当てた。v4 の scripts.mode） */
 export const SCRIPT_MODES = [SCRIPT_MODE, "live"];
 /** 実行中の台本の照合の状態（packages/factory の SCRIPT_MATCH_STATES）。それ以外は unknown-state */
@@ -766,7 +772,7 @@ export function evaluationOf(cond) {
   const mode = !isObj(cond) ? null : hasMode(cond.schema) ? knownOr(EVALUATION_MODES, cond.params?.mode) : CONDITIONS_SCHEMAS.includes(cond.schema) ? (cond.params?.plan === true ? "e2e" : "build") : "unknown";
   // 段単位の走り（#545）は納品物を作らないので build_applicable は偽
   const out = { mode, build_applicable: mode !== "plan-only" && mode !== STAGE_RUN_MODE };
-  if (isObj(cond) && (cond.schema === CONDITIONS_V5 || cond.schema === CONDITIONS_V6)) out.pipeline = knownOr(PIPELINES, cond.params?.pipeline);
+  if (isObj(cond) && (cond.schema === CONDITIONS_V5 || cond.schema === CONDITIONS_V6 || cond.schema === CONDITIONS_V7)) out.pipeline = knownOr(PIPELINES, cond.params?.pipeline);
   else Object.defineProperty(out, "pipeline", { value: null, enumerable: false });
   return out;
 }
@@ -1456,7 +1462,7 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
     runs_ok: runsS((st) => st === "ok" || st === "no-questions"), runs_disagreed: runsS((st) => st === "disagreed"), runs_unanswered: runsS((st) => st === "unanswered"),
   };
   const bySubject = Object.fromEntries(evalSet.subjects.map((s) => { const xs = rows.filter((r) => r.subject === s), xa = xs.filter((r) => r.fulfillment_accepted !== null); return [s, { pass: fmt(xs.filter(pass).length, xs.length), S1: `${xs.filter((r) => r.style === "S1" && pass(r)).length}/${xs.filter((r) => r.style === "S1").length}`, S2: `${xs.filter((r) => r.style === "S2" && pass(r)).length}/${xs.filter((r) => r.style === "S2").length}`, pass_accepted: fmt(xa.filter(passAccepted).length, xa.length) }]; }));
-  const completion = reconcile(outRoot, evalSet);
+  let completion = reconcile(outRoot, evalSet);
   // 採点に使った定義とエンジン（<repo> から読み込んだ ev）・組が参照する採点の定義の実体・集計のコード（実行中のこのファイル）・spec-engine の dist の指紋。
   // 条件のファイル（計測の始めに記録）の値と照合する
   const aggregator = fileURLToPath(import.meta.url);
@@ -1513,6 +1519,13 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
       Object.assign(fact, { br: br.value, brStatus: br.status, lines: jsonLines(join(dir, "stdout.log")) });
     }
     facts.push(fact);
+  }
+  // 経路 v1.2 の旗の組の照合（#557。v1.2 の条件のときだけ）：起動した本の報告を条件の組と照らし直し、1 本でも一致しなければ照合を未照合にする（完了に丸めない）
+  if (cond?.schema === CONDITIONS_V7) {
+    const v12 = v12FlagsOf(cond, facts);
+    evaluation.v12_flags = v12;
+    completion = v12.status === "verified" ? { ...completion, unverified: [] }
+      : { ...completion, status: "unverified", label: COMPLETION_LABELS.unverified, reasons: [...completion.reasons, `旗の組の照合が通らない ${v12.launched - v12.counts.match} 本（v12-flags）`], unverified: [V12_UNVERIFIED_CHECK] };
   }
   const metrics_plan = mode === "e2e" || mode === "plan-only" ? planMetrics(facts, { live: cond?.scripts?.mode === "live", planOnly: mode === "plan-only" }) : null;
   const metrics_build = mode === "build-from" ? buildMetrics(facts, cond.frozen) : null;
@@ -1583,7 +1596,7 @@ const anonymousBuildMetrics = (m) => (!isObj(m) ? null : {
 /** 匿名の照合（本数・件数・止まった理由のコードだけ）。段単位の走り（#545）は入力なしの件数を足す */
 const anonymousCompletion = (c) => {
   const status = enumOrUnknown(Object.keys(COMPLETION_LABELS), c.status);
-  return { status, label: COMPLETION_LABELS[status] ?? "unknown", planned: intOrNull(c.planned), executed: intOrNull(c.executed), scored: intOrNull(c.scored), unexecuted: countOrNull(c.unexecuted), incomplete: countOrNull(c.incomplete), extra: countOrNull(c.extra), unscored: countOrNull(c.unscored), stop_code: enumOrUnknown(STOP_CODES, c.latest_record?.stop_code ?? null), ...("stage_input_absent" in c ? { stage_input_absent: intOrNull(c.stage_input_absent) } : {}) };
+  return { status, label: COMPLETION_LABELS[status] ?? "unknown", planned: intOrNull(c.planned), executed: intOrNull(c.executed), scored: intOrNull(c.scored), unexecuted: countOrNull(c.unexecuted), incomplete: countOrNull(c.incomplete), extra: countOrNull(c.extra), unscored: countOrNull(c.unscored), stop_code: enumOrUnknown(STOP_CODES, c.latest_record?.stop_code ?? null), ...("stage_input_absent" in c ? { stage_input_absent: intOrNull(c.stage_input_absent) } : {}), ...("unverified" in c ? { unverified: (Array.isArray(c.unverified) ? c.unverified : []).filter((x) => x === V12_UNVERIFIED_CHECK) } : {}) };
 };
 /** 匿名の指紋（64 桁の 16 進と既知の値と一致だけ）。schemas は条件の版の既知の値（段単位の走りは v6 を足す。#545） */
 const anonymousFingerprints = (f, schemas = CONDITIONS_SCHEMAS) => {
@@ -1626,9 +1639,10 @@ export function anonymize(full) {
     set: { version: intOrNull(full.set?.version), role: enumOrUnknown(EVAL_SET_ROLES, full.set?.role ?? null), sha256: hashOrNull(full.set?.sha256) },
     fulfillment: Object.fromEntries(["v1", "v2", "accepted"].map((v) => [v, { label: v === "accepted" ? SCORING_SYSTEMS.accepted : AGGREGATION_VERSIONS[v], partial: full.fulfillment[v]?.partial ?? null, writable: full.fulfillment[v]?.writable ?? null, all: full.fulfillment[v]?.all ?? null, ...(v === "accepted" ? { unevaluated: { checks: intOrNull(full.fulfillment.accepted?.unevaluated?.checks), runs: intOrNull(full.fulfillment.accepted?.unevaluated?.runs) } } : {}) }])),
     completion: anonymousCompletion(c),
-    fingerprints: anonymousFingerprints(f),
-    // 評価の種類と、Plan の集計・Build だけの集計（#498）
-    evaluation: { mode: enumOrUnknown(EVALUATION_MODES, full.evaluation?.mode ?? null), build_applicable: boolOrNull(full.evaluation?.build_applicable), ...(isObj(full.evaluation) && Object.keys(full.evaluation).includes("pipeline") ? { pipeline: enumOrUnknown(PIPELINES, full.evaluation.pipeline) } : {}) },
+    // v1.2 の条件（#557）は版の既知の値に v7 を足す（それ以外の条件は今までの一覧）
+    fingerprints: anonymousFingerprints(f, f.conditions?.schema === CONDITIONS_V7 ? [...CONDITIONS_SCHEMAS, CONDITIONS_V7] : CONDITIONS_SCHEMAS),
+    // 評価の種類と、Plan の集計・Build だけの集計（#498）。v1.2 の旗の組（#557）は照合を通った旗の名前と真偽と件数だけ
+    evaluation: { mode: enumOrUnknown(EVALUATION_MODES, full.evaluation?.mode ?? null), build_applicable: boolOrNull(full.evaluation?.build_applicable), ...(isObj(full.evaluation) && Object.keys(full.evaluation).includes("pipeline") ? { pipeline: enumOrUnknown(PIPELINES, full.evaluation.pipeline) } : {}), ...(isObj(full.evaluation?.v12_flags) ? { v12_flags: anonymousV12Flags(full.evaluation.v12_flags) } : {}) },
     metrics_plan: anonymousPlanMetrics(full.metrics_plan), metrics_build: anonymousBuildMetrics(full.metrics_build),
     // 漏斗・pass^k・判定の 3 系統・unverified の内訳（#538）：件数と率だけ。段の ID は既知の一覧、P の ID・本の ID は出さない
     ...anonymous538(full),
@@ -1668,8 +1682,8 @@ const anonymous538 = (x) => ({ funnel: anonymousFunnel(x.funnel), pass_k: anonym
 // ── v1.1α の比較（#513。設計書 07 §4・D7・D17・追加判断 B。README の v1.1α の節）
 // 計測（run-agent.mjs --compare・--make-pairs）と採点（--compare）が同じ定数と純粋な関数を使う（道具は 2 本で 1 組。定数を 2 か所に書かない）。
 // 記録に写すのは既知の値・件数・SHA だけ。対のファイル・比較元のパス・子の出力の中身は写さない
-/** 工場の経路（run-agent.mjs --pipeline。packages/factory の入口の --pipeline と同じ値。#511） */
-export const PIPELINES = ["v1", "v1.1a"];
+/** 工場の経路（run-agent.mjs --pipeline。packages/factory の入口の --pipeline と同じ値。#511。v1.2 は #547・#557）。計測と採点が共有する一覧 */
+export const PIPELINES = ["v1", "v1.1a", "v1.2"];
 /** 比較の群（出力先の下のディレクトリの名前で、群の経路の名前と同じ）と役割。v1 ＝ 比較元の checkout（--pipeline 無し）、v1.1a ＝ 候補の checkout（--pipeline v1.1a） */
 export const COMPARE_GROUPS = ["v1", "v1.1a"];
 export const COMPARE_ROLES = { v1: "baseline", "v1.1a": "candidate" };
@@ -1731,10 +1745,10 @@ export function compareProfile(facts) {
   return { profile: mismatches.length === 0 ? "official" : "diagnostic", mismatches };
 }
 const PAIR_PID = /^P\d+$/;
-/** 対のファイルの中身（--make-pairs）：採用した P（組の順）× 1〜runs を、先行の群を v1 から交互に並べる */
-export function makePairs(adopted, runs, frozenSha256) {
-  const pairs = alternatePairs(adopted.flatMap((pid) => Array.from({ length: runs }, (_, i) => ({ pid, r: i + 1 }))), COMPARE_GROUPS);
-  return { schema: PAIRS_SCHEMA, frozen_sha256: frozenSha256, groups: [...COMPARE_GROUPS], runs, pairs };
+/** 対のファイルの中身（--make-pairs）：採用した P（組の順）× 1〜runs を、先行の群を比較元（groups の 0 番目。省略は v1）から交互に並べる */
+export function makePairs(adopted, runs, frozenSha256, groups = COMPARE_GROUPS) {
+  const pairs = alternatePairs(adopted.flatMap((pid) => Array.from({ length: runs }, (_, i) => ({ pid, r: i + 1 }))), groups);
+  return { schema: PAIRS_SCHEMA, frozen_sha256: frozenSha256, groups: [...groups], runs, pairs };
 }
 /** 対の交互の順：並べた対ごとに、先行の群を groups の 0 番目から交互に置く（v1.1α の比較と段だけの対の比較で同じ関数。#545） */
 export const alternatePairs = (keys, groups) => keys.map((p, i) => ({ ...p, first: groups[i % 2] }));
@@ -1751,8 +1765,8 @@ export function pairsShapeProblem(v, { schema = PAIRS_SCHEMA, groups = COMPARE_G
   return null;
 }
 /** 対のファイルの起動の前の検査：形・凍結した組のファイルの SHA-256・採用した P × 1〜runs の全体とちょうど一致（欠落・余り） */
-export function pairsProblem(v, { frozenSha256, adopted }) {
-  const shape = pairsShapeProblem(v);
+export function pairsProblem(v, { frozenSha256, adopted, groups = COMPARE_GROUPS }) {
+  const shape = pairsShapeProblem(v, { groups });
   if (shape !== null) return shape;
   if (v.frozen_sha256 !== frozenSha256) return "compare:pairs-frozen";
   const keys = new Set(v.pairs.map((p) => `${p.pid}-r${p.r}`));
@@ -1761,6 +1775,83 @@ export function pairsProblem(v, { frozenSha256, adopted }) {
   if (keys.size !== expected.length) return "compare:pairs-extra";
   return null;
 }
+// ── 経路 v1.2 と比較の群の組（#557。設計書 08 §8.6・§8.7・§9。README §5.12）
+// 旗の組の正本は工場の dist の package の入口の V12_PIPELINE_FLAGS（旗の名前 → 真偽）。計測がそれを読んで条件に写し、ここには旗の名前を書かない
+/** 経路 v1.2 の名前と、v1.2 の条件の版（v5 に params.v12_flags を足した。v1.2 のときだけ書く。v6 は段単位の走り #545） */
+export const V12_PIPELINE = "v1.2";
+export const CONDITIONS_V7 = "musunest-factory/agent-accept-conditions/v7";
+/** 比較の群の組（--compare-pipelines <比較元>,<候補>）。0 番目は省略と同じ組（COMPARE_GROUPS） */
+export const COMPARE_PIPELINE_PAIRS = [["v1", "v1.1a"], ["v1.1a", "v1.2"], ["v1", "v1.2"]];
+/** 群の組か（比較の記録・対のファイルの groups。順も見る） */
+export const isComparePair = (groups) => Array.isArray(groups) && COMPARE_PIPELINE_PAIRS.some((p) => JSON.stringify(p) === JSON.stringify(groups));
+/** --compare-pipelines の値（「比較元,候補」）を受ける組の写し。同じ値・知らない値・ほかの組・3 つ以上は null */
+export const comparePipelinesOf = (text) => (typeof text === "string" && isComparePair(text.split(",")) ? text.split(",") : null);
+/** 群の役割：比較元 baseline・候補 candidate */
+export const compareRolesOf = (groups) => ({ [groups[0]]: "baseline", [groups[1]]: "candidate" });
+/** 段の役割の対応表（STAGE_ROLES）の列：v1 は v1 の段、v1.1a と v1.2 は v1.1α の段の名前（段を手書きで足さない） */
+export const stageColumnOf = (pipeline) => (pipeline === "v1" ? "v1" : "v1.1a");
+/** 差の向きの文の頭（v1,v1.1a では今までの文と同じ文字列） */
+export const diffDirectionOf = (groups) => `候補（${groups[1]}）− 比較元（${groups[0]}）`;
+/** profile の違いの理由：v1.1a,v1.2 の組は正式な比較（比較元 v1）の組ではない */
+export const PROFILE_PIPELINES_REASON = "pipelines";
+/** 群の組ごとの正式な比較の条件の判定：比較元が v1 の組は今の定数（compareProfile）、それ以外（v1.1a,v1.2）は diagnostic で違った項目に pipelines を足す（断らない） */
+export function compareProfileOf(facts, groups) {
+  const base = compareProfile(facts);
+  return groups[0] === "v1" ? base : { profile: "diagnostic", mismatches: [...base.mismatches, PROFILE_PIPELINES_REASON] };
+}
+/** 旗の組の形：写像で 1 つ以上、名前は小文字・数字・ハイフン（点で区切ってよい）、値は真偽（配列・空・真偽でない値は不正形） */
+const FLAG_NAME = /^[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)*$/;
+export const isFlagMap = (x) => isObj(x) && Object.keys(x).length > 0 && Object.entries(x).every(([k, v]) => FLAG_NAME.test(k) && typeof v === "boolean");
+/** 旗の組を名前 → 真偽の集合として照らす（キーの順だけの違いは一致） */
+export const sameFlags = (a, b) => isFlagMap(a) && isFlagMap(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => Object.hasOwn(b, k) && a[k] === b[k]);
+/** 工場の報告 1 つ（要約か条件の記録の v12_flags）の状態：present ＝ 旗の組の形、absent ＝ 欄が無い（undefined）、malformed ＝ それ以外 */
+export const V12_REPORT_STATES = ["present", "absent", "malformed"];
+/** 本ごとの照合の結果：一致・不一致（条件の組と違う）・欠測・不正形・食い違い（要約と条件の記録で違う） */
+export const V12_FLAG_STATUSES = ["match", "mismatch", "missing", "malformed", "inconsistent"];
+/** 採点の照合の未照合の理由の符号（completion.unverified） */
+export const V12_UNVERIFIED_CHECK = "v12-flags";
+/** 報告の値から、本ごとの記録に残す形（旗の組の形のときだけ写す） */
+export const v12ReportOf = (raw) => (raw === undefined ? { state: "absent", flags: null } : isFlagMap(raw) ? { state: "present", flags: raw } : { state: "malformed", flags: null });
+/** 照合：条件の組 expected と、要約・条件の記録の報告（v12ReportOf の形）。強い順に 不正形 ＞ 欠測 ＞ 食い違い ＞ 不一致 ＞ 一致 */
+export function v12FlagsStatus(expected, summary, record) {
+  const stateOf = (r) => (!isObj(r) ? "absent" : r.state === "present" ? (isFlagMap(r.flags) ? "present" : "malformed") : r.state === "malformed" ? "malformed" : "absent");
+  const states = [stateOf(summary), stateOf(record)];
+  if (!isFlagMap(expected) || states.includes("malformed")) return "malformed";
+  if (states.includes("absent")) return "missing";
+  if (!sameFlags(summary.flags, record.flags)) return "inconsistent";
+  return sameFlags(summary.flags, expected) ? "match" : "mismatch";
+}
+/** 本 1 つの照合：計測が本ごとの記録（summary.line.json）に残した報告を、条件の組と照らし直す（記録に残した結果は信頼しない。報告の欄が無ければ欠測） */
+export const v12RunStatusOf = (sl, expected) => (isObj(sl?.v12_flags) ? v12FlagsStatus(expected, sl.v12_flags.summary, sl.v12_flags.record) : isFlagMap(expected) ? "missing" : "malformed");
+/**
+ * 旗の組の照合の集計（v1.2 の条件。採点の evaluation.v12_flags）：条件の組・起動した本（要約のある本）の数・結果ごとの本の数・一致しない本の ID。
+ * 起動した本が全部一致なら verified、1 本でも違えば unverified。未起動の本（未実行・途中）は数えない（照合の未実行・途中のまま）
+ */
+export function v12FlagsOf(cond, facts) {
+  const expected = cond?.params?.v12_flags;
+  const launched = facts.filter((f) => f.state === "executed");
+  const counts = zeros(V12_FLAG_STATUSES), unverified = [];
+  for (const f of launched) { const st = v12RunStatusOf(f.sl, expected); counts[st] += 1; if (st !== "match") unverified.push({ run: f.run, status: st }); }
+  return { flags: isFlagMap(expected) ? expected : null, status: isFlagMap(expected) && unverified.length === 0 ? "verified" : "unverified", launched: launched.length, counts, unverified_runs: unverified };
+}
+/** 匿名の旗の組：照合を通った旗の名前と真偽（通らなければ null）・状態・件数だけ（本の ID は出さない） */
+const anonymousV12Flags = (x) => {
+  const status = enumOrUnknown(["verified", "unverified"], x?.status ?? null);
+  return { status, flags: status === "verified" && isFlagMap(x.flags) ? { ...x.flags } : null, launched: intOrNull(x?.launched), counts: intsOf(x?.counts, V12_FLAG_STATUSES) };
+};
+/**
+ * 群の条件を版ごとに検証する（v1.2 を含む組の照合の前。計測と採点で同じ関数）：v1.2 の群は v7・build-from・旗の組の形、v1・v1.1a の群は v5。
+ * 段単位の走りの条件（v6）との混在は compare:conditions-stage、知らない版・群と合わない版は compare:conditions-version。通れば null
+ */
+export function groupConditionsProblem(cond, group) {
+  if (!isObj(cond) || !isObj(cond.params)) return "compare:conditions-version";
+  if (cond.schema === CONDITIONS_V6 || cond.params.mode === STAGE_RUN_MODE) return "compare:conditions-stage";
+  if (group === V12_PIPELINE) return cond.schema === CONDITIONS_V7 && cond.params.mode === "build-from" && cond.params.pipeline === group && isFlagMap(cond.params.v12_flags) ? null : "compare:conditions-version";
+  return cond.schema === CONDITIONS_V5 && cond.params.pipeline === group && !("v12_flags" in cond.params) ? null : "compare:conditions-version";
+}
+/** 群の params の共通の比較の形：経路・v1.1α の上限の欄・旗の組（意図した差）を除く */
+export const comparableParams = (p) => { if (!isObj(p)) return null; const { pipeline: _p, stage_output_limits_v11a: _l, v12_flags: _f, ...rest } = p; return rest; };
+
 /** 全体の予算の打ち切り（D17）：済みの額＋走行中の本の予約＋新しく起こす 1 本の予約 ≤ 上限のときだけ起こす（等しければ起こす）。小数の誤差を避けて 100 万分の 1 USD の整数で比べる */
 const microUsd = (x) => Math.round(x * 1e6);
 export const launchAllowed = ({ spentUsd, runningCount, reserveUsd, budgetUsd }) => microUsd(spentUsd) + (runningCount + 1) * microUsd(reserveUsd) <= microUsd(budgetUsd);
@@ -1865,45 +1956,52 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
   const pairsSha = sha256(pairsBytes);
   let pv;
   try { pv = JSON.parse(pairsBytes.toString("utf8")); } catch { throw mismatch("対のファイルの写しが JSON でない"); }
-  if (pairsShapeProblem(pv) !== null) throw mismatch("対のファイルの形");
+  // 群の組（#557）：比較の記録の pairs.groups（無ければ今までの v1,v1.1a）。受ける 3 つの組のどれかで、対のファイルの群と同じ
+  const GROUPS = comparison.pairs?.groups === undefined ? COMPARE_GROUPS : comparison.pairs.groups;
+  if (!isComparePair(GROUPS)) throw mismatch("群の組");
+  const ROLES = compareRolesOf(GROUPS), [baseGroup, candGroup] = GROUPS, withV12 = GROUPS.includes(V12_PIPELINE);
+  if (pairsShapeProblem(pv, { groups: GROUPS }) !== null) throw mismatch("対のファイルの形");
   if (comparison.pairs?.sha256 !== pairsSha) throw mismatch("対のファイルと比較の記録");
   const groups = {};
-  for (const g of COMPARE_GROUPS) {
+  for (const g of GROUPS) {
     const dir = join(outRoot, g);
     if (!existsSync(dir)) throw refusal("群のディレクトリが無い [compare:record-missing]");
     const cond = loadConditions(dir).cond;
     if (!isObj(cond) || cond.comparison?.pairs_sha256 !== pairsSha) throw mismatch("対のファイルと群の条件");
     // 群の同定（#513 の独立レビューの指摘 3）：ディレクトリの群と、条件の群・役割・経路、比較の記録の群ごとの条件の署名を結び付ける。
     // 候補の群に比較元の条件を置いた・群を入れ替えた・群を複製した出力先を、対の SHA と指紋が一致しても比較として採点しない
-    if (cond.comparison?.group !== g || cond.comparison?.role !== COMPARE_ROLES[g] || cond.params?.pipeline !== g) throw mismatch("群と条件の群・役割・経路");
+    if (cond.comparison?.group !== g || cond.comparison?.role !== ROLES[g] || cond.params?.pipeline !== g) throw mismatch("群と条件の群・役割・経路");
+    // v1.2 を含む組（#557）：群の条件を版ごとに検証してから共通の形で照らす（知らない版・段単位の走りの条件との混在は断る）
+    if (withV12) { const problem = groupConditionsProblem(cond, g); if (problem !== null) throw refusal(`比較の群の条件の版が群と合わない [${problem}]`); }
     // 条件の署名を中身から計算し直し（run-agent.mjs と同じ式）、比較の記録の群ごとの署名と工場の dist の指紋に照らす（条件を書き換えた・別の群の条件に付け替えた出力先を断る）
     const recorded = comparison.groups?.[g];
     if (!isHex64(cond.signature) || conditionsSignature(cond) !== cond.signature) throw mismatch("群の条件の署名が中身と合わない");
-    if (!isObj(recorded) || recorded.role !== COMPARE_ROLES[g] || recorded.pipeline !== g || recorded.conditions_signature !== cond.signature || !isHex64(recorded.factory?.fingerprint) || recorded.factory.fingerprint !== cond.factory?.fingerprint) throw mismatch("群の条件と比較の記録");
+    if (!isObj(recorded) || recorded.role !== ROLES[g] || recorded.pipeline !== g || recorded.conditions_signature !== cond.signature || !isHex64(recorded.factory?.fingerprint) || recorded.factory.fingerprint !== cond.factory?.fingerprint) throw mismatch("群の条件と比較の記録");
     groups[g] = { dir, cond };
   }
-  if (groups.v1.cond.signature === groups["v1.1a"].cond.signature) throw mismatch("両群の条件の署名が同じ");
-  const core = (p) => { if (!isObj(p)) return null; const { pipeline: _p, stage_output_limits_v11a: _l, ...rest } = p; return JSON.stringify(rest); };
-  if (core(groups.v1.cond.params) === null || core(groups.v1.cond.params) !== core(groups["v1.1a"].cond.params)) throw mismatch("群の params");
+  if (groups[baseGroup].cond.signature === groups[candGroup].cond.signature) throw mismatch("両群の条件の署名が同じ");
+  // 共通の比較の形（経路・v1.1α の上限の欄・旗の組を除く）
+  const core = (p) => { const rest = comparableParams(p); return rest === null ? null : JSON.stringify(rest); };
+  if (core(groups[baseGroup].cond.params) === null || core(groups[baseGroup].cond.params) !== core(groups[candGroup].cond.params)) throw mismatch("群の params");
   const plannedIds = pv.pairs.map((p) => `${p.pid}-r${p.r}`);
-  for (const g of COMPARE_GROUPS) if (runDirs(groups[g].dir).some((d) => !plannedIds.includes(d))) throw mismatch("予定外の本");
-  for (const g of COMPARE_GROUPS) groups[g].full = await scoreOutput(repo, groups[g].dir, { ...opts, anonymous: opts.anonymous === true });
+  for (const g of GROUPS) if (runDirs(groups[g].dir).some((d) => !plannedIds.includes(d))) throw mismatch("予定外の本");
+  for (const g of GROUPS) groups[g].full = await scoreOutput(repo, groups[g].dir, { ...opts, anonymous: opts.anonymous === true });
   // 対：両方の本が終わった（要約がある）対だけ差を取る。締切・予算で止まった本も終わった本で、PASS でなければ 0
   const passOf = (g, id) => { const row = groups[g].full.rows.find((r) => r.run === id); return row !== undefined && pass(row) ? 1 : 0; };
   const rows = pv.pairs.map((p) => {
-    const id = `${p.pid}-r${p.r}`, states = Object.fromEntries(COMPARE_GROUPS.map((g) => [g, runStateOf(groups[g].dir, id)]));
-    const both = COMPARE_GROUPS.every((g) => states[g] === "executed");
-    const passes = both ? Object.fromEntries(COMPARE_GROUPS.map((g) => [g, passOf(g, id)])) : null;
-    return { run: id, pid: p.pid, r: p.r, first: p.first, states, pass: passes, diff: both ? passes["v1.1a"] - passes.v1 : null };
+    const id = `${p.pid}-r${p.r}`, states = Object.fromEntries(GROUPS.map((g) => [g, runStateOf(groups[g].dir, id)]));
+    const both = GROUPS.every((g) => states[g] === "executed");
+    const passes = both ? Object.fromEntries(GROUPS.map((g) => [g, passOf(g, id)])) : null;
+    return { run: id, pid: p.pid, r: p.r, first: p.first, states, pass: passes, diff: both ? passes[candGroup] - passes[baseGroup] : null };
   });
   const finished = rows.filter((r) => r.diff !== null);
-  const oneSide = rows.filter((r) => r.diff === null && COMPARE_GROUPS.some((g) => r.states[g] === "executed")).length;
+  const oneSide = rows.filter((r) => r.diff === null && GROUPS.some((g) => r.states[g] === "executed")).length;
   const byPattern = {};
   for (const r of rows) { (byPattern[r.pid] ??= { diffs: [] }).diffs.push(r.diff); }
   for (const v of Object.values(byPattern)) { const xs = v.diffs.filter((d) => d !== null); v.n = xs.length; v.mean = xs.length === 0 ? null : round6(xs.reduce((s, d) => s + d, 0) / xs.length); }
   // 群ごと：率と Wilson は参考。了承後系の UNEVALUATED・FAIL と落ちた判定の鍵。停止段・到達数・持ち越し
   const groupOut = {}, factsOf = {};
-  for (const g of COMPARE_GROUPS) {
+  for (const g of GROUPS) {
     const full = groups[g].full, facts = groupFacts(groups[g].dir, plannedIds), c = full.completion;
     factsOf[g] = new Map(facts.map((f) => [f.id, f]));
     const inPlan = full.rows.filter((r) => plannedIds.includes(r.run)), executed = facts.filter((f) => f.state === "executed").map((f) => f.id);
@@ -1913,7 +2011,7 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
     const verdicts = zeros([...FACTORY_VERDICTS, "unknown", "absent"]);
     for (const f of facts.filter((x) => x.state === "executed")) verdicts[f.summary === null || f.summary.verdict === null || f.summary.verdict === undefined ? "absent" : knownOr(FACTORY_VERDICTS, f.summary.verdict)] += 1;
     groupOut[g] = {
-      role: COMPARE_ROLES[g], pipeline: g,
+      role: ROLES[g], pipeline: g,
       completion: { status: c.status, label: c.label, planned: c.planned, executed: c.executed, unexecuted: c.unexecuted?.length ?? null, incomplete: c.incomplete.length, stop_code: c.latest_record?.stop_code ?? null },
       fingerprints: Object.fromEntries(COMPARE_FINGERPRINT_CHECKS.map((k) => [k, full.fingerprints[k] ?? null])),
       // 参考：終わった本の原文系 PASS の率（Wilson）と、予定した本を分母にした率。対の差の区間の代わりにならない
@@ -1924,25 +2022,29 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
       funnel: full.funnel, pass_k: full.pass_k, verdicts: full.verdicts,
       // 内外の表と試験の分類（#539。群ごとの採点の出力の欄そのまま）
       agreement: full.agreement, test_findings: full.test_findings,
+      // 経路 v1.2 の群（#557）：旗の組の照合（群の採点の evaluation.v12_flags）
+      ...(isObj(full.evaluation?.v12_flags) ? { v12_flags: full.evaluation.v12_flags } : {}),
     };
   }
   // 段の役割ごとの対の差（#539。README §5.10.3）：両側で指標が定義されている対だけを n に入れる。片側だけ・欠測・適用外は差 null で理由を残す
   const roleRows = rows.map((r) => {
     const diffs = {};
     for (const [role, def] of Object.entries(STAGE_ROLES)) {
-      const vals = Object.fromEntries(COMPARE_GROUPS.map((g) => [g, r.states[g] !== "executed" ? null : stageValuesOf(factsOf[g].get(r.run)?.summary ?? null, def[g], groups[g].full.funnel.stages[def[g]]?.code_stage === true)]));
+      // 段の名前は群の経路の列（v1.2 は v1.1α の段の名前。#557）
+      const stageOf = (g) => def[stageColumnOf(g)];
+      const vals = Object.fromEntries(GROUPS.map((g) => [g, r.states[g] !== "executed" ? null : stageValuesOf(factsOf[g].get(r.run)?.summary ?? null, stageOf(g), groups[g].full.funnel.stages[stageOf(g)]?.code_stage === true)]));
       diffs[role] = Object.fromEntries(STAGE_METRICS.map((k) => {
-        const reason = COMPARE_GROUPS.some((g) => vals[g] === null) ? "one_side" : COMPARE_GROUPS.some((g) => vals[g].missing) ? "missing" : COMPARE_GROUPS.some((g) => vals[g].values[k] === null) ? "not_applicable" : null;
-        return [k, { diff: reason === null ? vals["v1.1a"].values[k] - vals.v1.values[k] : null, reason }];
+        const reason = GROUPS.some((g) => vals[g] === null) ? "one_side" : GROUPS.some((g) => vals[g].missing) ? "missing" : GROUPS.some((g) => vals[g].values[k] === null) ? "not_applicable" : null;
+        return [k, { diff: reason === null ? vals[candGroup].values[k] - vals[baseGroup].values[k] : null, reason }];
       }));
     }
     return { run: r.run, pid: r.pid, diffs };
   });
   const byPatternOf = (cellOf) => { const out = {}; for (const x of roleRows) (out[x.pid] ??= []).push(cellOf(x).diff); return out; };
   const stage_pairs = {
-    direction: "候補（v1.1a）− 比較元（v1）。対ごとに段の役割の値（到達・1 回目で通過・通過）を 0／1 にして差を取る。未到達は 0（測定値）、適用外・欠測・片側だけの対は null で n に入れない",
+    direction: `${diffDirectionOf(GROUPS)}。対ごとに段の役割の値（到達・1 回目で通過・通過）を 0／1 にして差を取る。未到達は 0（測定値）、適用外・欠測・片側だけの対は null で n に入れない`,
     roles: Object.fromEntries(Object.entries(STAGE_ROLES).map(([role, def]) => [role, {
-      label: def.label, stages: Object.fromEntries(COMPARE_GROUPS.map((g) => [g, def[g]])),
+      label: def.label, stages: Object.fromEntries(GROUPS.map((g) => [g, def[stageColumnOf(g)]])),
       metrics: Object.fromEntries(STAGE_METRICS.map((k) => {
         const cells = roleRows.map((x) => x.diffs[role][k]);
         return [k, { ...pairStats(cells.filter((x) => x.diff !== null).map((x) => x.diff)), excluded: Object.fromEntries(PAIR_NULL_REASONS.map((why) => [why, cells.filter((x) => x.reason === why).length])), clusters: clusterStats(byPatternOf((x) => x.diffs[role][k])) }];
@@ -1959,25 +2061,27 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
     pass: clusterStats(Object.fromEntries(Object.entries(byPattern).map(([pid, v]) => [pid, v.diffs]))),
   };
   // 照合：(i) 未照合 ＞ (ii) 完了（全対が両方終わり・両群が完了・予算の停止の記録なし・official）＞ (iii) 未完了（diagnostic は「診断」も）
-  const unverified = COMPARE_GROUPS.flatMap((g) => [
+  const unverified = GROUPS.flatMap((g) => [
     ...(groups[g].full.completion.status === "unverified" ? [{ group: g, check: "reconcile", value: "unverified" }] : []),
+    // 旗の組の照合（#557。v1.2 の群）
+    ...(groups[g].full.evaluation?.v12_flags?.status === "unverified" ? [{ group: g, check: V12_UNVERIFIED_CHECK, value: "unverified" }] : []),
     ...COMPARE_FINGERPRINT_CHECKS.filter((k) => groups[g].full.fingerprints[k] !== true).map((k) => ({ group: g, check: k, value: groups[g].full.fingerprints[k] === false ? false : null })),
   ]);
   const runRecords = readdirSync(outRoot).filter((n) => n.startsWith(COMPARE_RUN_PREFIX) && /^\d+\.json$/.test(n.slice(COMPARE_RUN_PREFIX.length))).sort((a, b) => Number(a.slice(COMPARE_RUN_PREFIX.length, -5)) - Number(b.slice(COMPARE_RUN_PREFIX.length, -5)));
   const lastRun = runRecords.length === 0 ? null : readJsonSafe(join(outRoot, runRecords.at(-1))).value;
-  const budgetStop = (isObj(lastRun) && lastRun.stop_code === "budget") || COMPARE_GROUPS.some((g) => groups[g].full.completion.latest_record?.stop_code === "budget");
+  const budgetStop = (isObj(lastRun) && lastRun.stop_code === "budget") || GROUPS.some((g) => groups[g].full.completion.latest_record?.stop_code === "budget");
   const profile = COMPARE_PROFILES.includes(comparison.profile) ? comparison.profile : "unknown";
   const reasons = [];
   if (finished.length !== rows.length) reasons.push("両方が終わっていない対がある");
-  if (COMPARE_GROUPS.some((g) => groups[g].full.completion.status !== "complete")) reasons.push("群の照合が完了でない");
+  if (GROUPS.some((g) => groups[g].full.completion.status !== "complete")) reasons.push("群の照合が完了でない");
   if (budgetStop) reasons.push("全体の予算の停止の記録がある");
   if (profile !== "official") reasons.push("正式な比較の条件を満たさない（診断）");
   const status = unverified.length > 0 ? "unverified" : reasons.length === 0 ? "complete" : "incomplete";
   const label = status === "incomplete" && profile !== "official" ? `${COMPARE_LABELS.incomplete}・診断` : COMPARE_LABELS[status];
   return {
-    schema: SCORE_COMPARE_SCHEMA, rubric: "v5", diff_direction: "候補（v1.1a）− 比較元（v1）。対ごとに原文系 PASS を 0／1 にして差を取る",
+    schema: SCORE_COMPARE_SCHEMA, rubric: "v5", diff_direction: `${diffDirectionOf(GROUPS)}。対ごとに原文系 PASS を 0／1 にして差を取る`,
     completion: { status, label, reference_only: status !== "complete", reasons: status === "unverified" ? [] : reasons, unverified, budget_stop: budgetStop },
-    profile, profile_mismatches: Array.isArray(comparison.profile_mismatches) ? comparison.profile_mismatches.filter((k) => k in OFFICIAL_COMPARE) : [],
+    profile, profile_mismatches: Array.isArray(comparison.profile_mismatches) ? comparison.profile_mismatches.filter((k) => k in OFFICIAL_COMPARE || k === PROFILE_PIPELINES_REASON) : [],
     pairs: { planned: rows.length, both: finished.length, one_side: oneSide, none: rows.length - finished.length - oneSide, ...pairStats(finished.map((r) => r.diff)), by_pattern: byPattern, rows },
     groups: groupOut, scoring_cost_usd: SCORING_COST_USD,
     stage_pairs, pattern_clusters,
@@ -1987,13 +2091,15 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
 export function anonymizeCompare(full) {
   const c = full.completion ?? {}, p = full.pairs ?? {};
   const status = enumOrUnknown(Object.keys(COMPARE_LABELS), c.status ?? null);
+  // 群の組（#557）：採点の出力の群の並び（比較元・候補）が受ける組なら、それ。でなければ今までの v1,v1.1a
+  const GROUPS = isObj(full.groups) && isComparePair(Object.keys(full.groups)) ? Object.keys(full.groups) : COMPARE_GROUPS, ROLES = compareRolesOf(GROUPS);
   const groups = {};
-  for (const g of COMPARE_GROUPS) {
+  for (const g of GROUPS) {
     const x = full.groups?.[g] ?? {};
     const vals = {};
     for (const [k, n] of Object.entries(x.stops?.values ?? {})) { const key = knownStopValue(k) ? k : "unknown"; vals[key] = (vals[key] ?? 0) + (Number.isInteger(n) ? n : 0); }
     groups[g] = {
-      role: COMPARE_ROLES[g], pipeline: g,
+      role: ROLES[g], pipeline: g,
       completion: { status: enumOrUnknown(Object.keys(COMPARE_LABELS), x.completion?.status ?? null), ...intsOf(x.completion, ["planned", "executed", "unexecuted", "incomplete"]), stop_code: enumOrUnknown(STOP_CODES, x.completion?.stop_code ?? null) },
       fingerprints: Object.fromEntries(COMPARE_FINGERPRINT_CHECKS.map((k) => [k, boolOrNull(x.fingerprints?.[k])])),
       pass_executed: rateOrNull(x.pass_executed), pass_planned: rateOrNull(x.pass_planned), factory_verdicts: intsOf(x.factory_verdicts, [...FACTORY_VERDICTS, "unknown", "absent"]),
@@ -2003,16 +2109,18 @@ export function anonymizeCompare(full) {
       carry_over: !isObj(x.carry_over) ? null : { ...intsOf(x.carry_over, ["runs", "observed", "missing", "runs_with_carry_over"]), sources: intsOf(x.carry_over.sources, [...CARRY_OVER_SOURCES, "unknown"]) },
       funnel: anonymousFunnel(x.funnel), pass_k: anonymousPassK(x.pass_k), verdicts: anonymousVerdicts(x.verdicts),
       ...anonymous539(x),
+      // 経路 v1.2 の群（#557）：照合を通った旗の名前と真偽と件数だけ
+      ...(isObj(x.v12_flags) ? { v12_flags: anonymousV12Flags(x.v12_flags) } : {}),
     };
   }
   const interval = Array.isArray(p.interval) && p.interval.length === 2 && p.interval.every((v) => numOrNull(v) !== null) ? [p.interval[0], p.interval[1]] : null;
   return {
-    schema: SCORE_COMPARE_SCHEMA, rubric: "v5", anonymous: true, diff_direction: full.diff_direction === undefined ? null : "候補（v1.1a）− 比較元（v1）。対ごとに原文系 PASS を 0／1 にして差を取る",
+    schema: SCORE_COMPARE_SCHEMA, rubric: "v5", anonymous: true, diff_direction: full.diff_direction === undefined ? null : `${diffDirectionOf(GROUPS)}。対ごとに原文系 PASS を 0／1 にして差を取る`,
     completion: {
       status, label: status === "incomplete" && full.profile !== "official" ? `${COMPARE_LABELS.incomplete}・診断` : COMPARE_LABELS[status] ?? "unknown", reference_only: status !== "complete", budget_stop: boolOrNull(c.budget_stop),
-      unverified: (Array.isArray(c.unverified) ? c.unverified : []).filter((u) => COMPARE_GROUPS.includes(u?.group) && (u.check === "reconcile" || COMPARE_FINGERPRINT_CHECKS.includes(u.check))).map((u) => ({ group: u.group, check: u.check, value: u.check === "reconcile" ? "unverified" : u.value === false ? false : null })),
+      unverified: (Array.isArray(c.unverified) ? c.unverified : []).filter((u) => GROUPS.includes(u?.group) && (u.check === "reconcile" || u.check === V12_UNVERIFIED_CHECK || COMPARE_FINGERPRINT_CHECKS.includes(u.check))).map((u) => ({ group: u.group, check: u.check, value: u.check === "reconcile" || u.check === V12_UNVERIFIED_CHECK ? "unverified" : u.value === false ? false : null })),
     },
-    profile: enumOrUnknown(COMPARE_PROFILES, full.profile ?? null), profile_mismatches: (Array.isArray(full.profile_mismatches) ? full.profile_mismatches : []).filter((k) => typeof k === "string" && k in OFFICIAL_COMPARE),
+    profile: enumOrUnknown(COMPARE_PROFILES, full.profile ?? null), profile_mismatches: (Array.isArray(full.profile_mismatches) ? full.profile_mismatches : []).filter((k) => typeof k === "string" && (k in OFFICIAL_COMPARE || k === PROFILE_PIPELINES_REASON)),
     pairs: { ...intsOf(p, ["planned", "both", "one_side", "none", "n"]), counts: intsOf(p.counts, ["+1", "0", "-1"]), mean: numOrNull(p.mean), sd: numOrNull(p.sd), interval },
     groups, scoring_cost_usd: SCORING_COST_USD,
     // 段の役割ごとの対の差と P のまとまり（#539）：件数・n・平均・区間・p だけ（本の ID・P の ID・P ごとの平均は出さない）
@@ -2423,6 +2531,8 @@ async function main() {
   console.log(JSON.stringify({ set, metrics: { ...metrics, factory_verdicts: shownVerdicts }, metrics_accepted, metrics_script, fulfillment, completion, bySubject }, null, 1));
   for (const r of rows) console.log([r.run, verdictOf(r.factory_verdict), r.verdict ?? "GEN_FAIL", (r.failed ?? []).join("・"), r.claims ? `claims ok=${r.claims.correct} miss=${r.claims.missed} false=${r.claims.false_claims.length}` : "", r.cost_usd?.toFixed(3), Math.round(r.seconds), `了承後=${r.verdict_accepted ?? "-"}`].join("\t"));
   console.log(completionText(completion));
+  // 経路 v1.2 の旗の組の照合（#557。v1.2 の条件のときだけ 1 行）
+  if (isObj(full.evaluation?.v12_flags)) console.log(v12FlagsText(full.evaluation.v12_flags));
   const ma = metrics_accepted, ar = ma.absent_reasons, wa = ma.wrong_acceptances, us = ma.unverified_sources;
   console.log(`了承後: 対象 ${ma.runs} 本（確定 ${ma.confirmed}・記録なし ${ma.absent}［未確定 ${ar.plan_not_confirmed}・確定後に仕様なし ${ar.confirmed_without_plan}・不明 ${ar.unknown}］・読めない ${ma.invalid}）・未評価の本 ${fulfillment.accepted.unevaluated.runs}・未検証の有効な要件 ${ma.unverified_requirements} 件（代替先 ${us.accepted_unwritable + us.part}・変更後 ${us.changed}・追加 ${us.added}）・誤った除外 ${ma.wrong_exclusions} 件（判定不能 ${ma.undecided_exclusions} 件）・誤った了承 未評価（証拠 ${wa.evidence} 件・判定不能 ${wa.unmatched + wa.ambiguous} 件・書ける要件の変更 ${wa.unevaluated} 件）・充足 ${fulfillment.accepted.all}（未評価の判定 ${fulfillment.accepted.unevaluated.checks}）`);
   const ms = metrics_script;
@@ -2455,6 +2565,8 @@ async function main() {
 }
 /** 標準出力の照合の 1 行 */
 const completionText = (completion) => `照合: ${completion.label}（予定 ${completion.planned ?? "-"}・実行 ${completion.executed}・採点 ${completion.scored}・未実行 ${completion.unexecuted?.length ?? "-"}・途中 ${completion.incomplete.length}・採点できない ${completion.unscored.length}${completion.latest_record?.stop ? `・止まった理由: ${completion.latest_record.stop}` : ""}${completion.status === "unverified" ? `・理由: ${completion.reasons.join("、")}` : ""}）`;
+/** 標準出力の旗の組の照合の 1 行（#557）：照合・起動した本・結果ごとの本の数・条件の旗の名前と真偽 */
+const v12FlagsText = (x) => `旗の組（v1.2）: ${x.status === "verified" ? "照合 一致" : "未照合（v12-flags）"}・起動 ${x.launched} 本（${V12_FLAG_STATUSES.map((k) => `${k} ${x.counts[k]}`).join("・")}）・条件の組 ${x.flags === null ? "-" : Object.entries(x.flags).map(([k, v]) => `${k}=${v}`).join(",")}`;
 /** 標準出力の指紋の 1 行 */
 function fingerprintText(fingerprints, set) {
   const judge = (m) => (m === null ? "条件のファイルに無い" : m ? "条件のファイルと一致" : "条件のファイルと不一致");
@@ -2504,14 +2616,17 @@ async function mainCompare(repo, outRoot, { label, anonymous, setPath }) {
   const { pairs: { rows, by_pattern: byPattern, ...pairs }, stage_pairs, pattern_clusters, ...rest } = full;
   const groups538 = Object.fromEntries(Object.entries(rest.groups).map(([g, { agreement: _a, test_findings: _t, ...x }]) => [g, x]));
   console.log(JSON.stringify({ ...rest, groups: groups538, pairs }, null, 1));
-  for (const r of rows) console.log(["pair", r.run, `先行 ${r.first}`, ...COMPARE_GROUPS.map((g) => `${g} ${r.states[g]}${r.pass === null ? "" : ` PASS=${r.pass[g]}`}`), `差 ${r.diff === null ? "-" : r.diff > 0 ? `+${r.diff}` : r.diff}`].join("\t"));
+  const GROUPS = Object.keys(rest.groups);
+  for (const r of rows) console.log(["pair", r.run, `先行 ${r.first}`, ...GROUPS.map((g) => `${g} ${r.states[g]}${r.pass === null ? "" : ` PASS=${r.pass[g]}`}`), `差 ${r.diff === null ? "-" : r.diff > 0 ? `+${r.diff}` : r.diff}`].join("\t"));
   for (const [pid, v] of Object.entries(byPattern)) console.log(["pattern", pid, `差 ${v.diffs.map((d) => (d === null ? "-" : d)).join(",")}`, `平均 ${v.mean ?? "-"}（n ${v.n}）`].join("\t"));
   const c = full.completion;
   console.log(`比較: ${c.label}${c.reference_only ? "（参考値。正式な比較基準にしない）" : ""}・対 ${pairs.planned}（両方 ${pairs.both}・片側 ${pairs.one_side}・未起動 ${pairs.none}）・差（${full.diff_direction}）＋1 ${pairs.counts["+1"]}・0 ${pairs.counts["0"]}・−1 ${pairs.counts["-1"]}・平均 ${pairs.mean ?? "-"}・区間 ${pairs.interval === null ? "-" : `${pairs.interval[0]}〜${pairs.interval[1]}`}（n ${pairs.n}。参考）${c.status === "unverified" ? `・未照合の項目: ${c.unverified.map((u) => `${u.group}:${u.check}=${u.value}`).join("、")}` : c.reasons.length > 0 ? `・理由: ${c.reasons.join("、")}` : ""}`);
   // 群ごとの漏斗と pass^k（#538）
-  for (const g of COMPARE_GROUPS) { console.log(`${g} ${funnelText(full.groups[g].funnel)}`); console.log(`${g} ${passKText(full.groups[g].pass_k)}`); }
+  for (const g of GROUPS) { console.log(`${g} ${funnelText(full.groups[g].funnel)}`); console.log(`${g} ${passKText(full.groups[g].pass_k)}`); }
   // 群ごとの内外の表と、P のまとまりの 1 行（#539）
-  for (const g of COMPARE_GROUPS) console.log(`${g} ${agreementText(full.groups[g].agreement, full.groups[g].test_findings)}`);
+  for (const g of GROUPS) console.log(`${g} ${agreementText(full.groups[g].agreement, full.groups[g].test_findings)}`);
+  // 経路 v1.2 の群の旗の組の照合（#557。v1.2 の群だけ）
+  for (const g of GROUPS) if (isObj(full.groups[g].v12_flags)) console.log(`${g} ${v12FlagsText(full.groups[g].v12_flags)}`);
   console.log(clusterText(stage_pairs, pattern_clusters));
 }
 

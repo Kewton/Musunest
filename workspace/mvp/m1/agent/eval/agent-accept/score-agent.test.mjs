@@ -3912,3 +3912,329 @@ test("#545 直し 3：工場の dist の STAGE_STARTS・STAGE_ENDS に出る段�
   for (const x of STAGE_SEGMENTS) for (const st of x.stages) assert.ok(record.STAGE_IDS.includes(st), `dist の STAGE_IDS に無い段: ${st}`);
   assert.ok(stagesInRange("write", "judge").includes("carry-over"), "B 区間に carry-over");
 });
+
+// ── #557：経路 v1.2 の条件（v7）・旗の組の照合・比較の群の組（--compare-pipelines）。README §5.12。題材の言葉を使わない（要件の文は cases/ の宣言だけ）
+import { COMPARE_PIPELINE_PAIRS, CONDITIONS_V7, V12_FLAG_STATUSES, V12_PIPELINE, comparePipelinesOf, compareProfileOf, compareRolesOf, diffDirectionOf, groupConditionsProblem, isFlagMap, sameFlags, v12FlagsStatus, v12ReportOf } from "./score-agent.mjs";
+
+const MARK557 = "leak-marker-557";
+/** 偽物の旗の組（工場の V12_PIPELINE_FLAGS の形。名前は道具が知らない名前でよい） */
+const FLAGS557 = { ledger: true, "probe-x": false };
+/** 本ごとの記録の報告（run-agent.mjs が summary.line.json に残す形）。undefined は欠測、それ以外は値をそのまま報告とする */
+const v12Rec557 = (summary = FLAGS557, record = FLAGS557) => ({ status: "match", summary: v12ReportOf(summary), record: v12ReportOf(record) });
+/** 本 1 本の起動の記録（v12 が undefined なら報告の欄を書かない） */
+const sl557 = (summary, v12) => { const o = JSON.parse(sl513(summary)); if (v12 !== undefined) o.v12_flags = v12; return JSON.stringify(o); };
+/** v1.1α の段の名前の段の記録（v1.1a・v1.2 の群の要約） */
+const STAGES557 = [{ stage: "name-table", status: "ok", calls: 1, retries: { communication: 0, shape: 0, content: 0 } }, { stage: "test-spec", status: "ok", calls: 1 }, { stage: "write", status: "ok", calls: 1 }, { stage: "judge", status: "ok", calls: 0 }];
+/** 条件 1 つ（run-agent.mjs と同じ形。g は経路。v1.2 は v7 と旗の組、それ以外は v5） */
+function cond557({ name, g, ids, pids, repoDir = repo, frozenPath, frozenSha, comparison = null, extra = {} }) {
+  const evDir = join(repoDir, "workspace/mvp/m1/agent/eval"), set = loadEvalSet(join(repoDir, DEFAULT_SET_PATH));
+  const cond = {
+    schema: g === V12_PIPELINE ? CONDITIONS_V7 : CONDITIONS_V5, measurement_id: name, source: { commit: null, dirty: null }, factory: { fingerprint: sha256(`factory-${g}`) }, spec_engine: { fingerprint: fingerprintDir(join(repoDir, "packages/spec-engine/dist")).fingerprint },
+    set: { path: DEFAULT_SET_PATH, sha256: set.sha256 }, scripts: { mode: "post-hoc", fingerprint: scriptsFingerprint(set.scripts).fingerprint }, scoring: { fingerprint: scoringFingerprint(evDir, scoreFile, set.definitions).fingerprint }, judge: { configuration: "llm-only" },
+    params: { ...paramsFor(ids), mode: "build-from", plan: false, effort: "high", pipeline: g, stage_output_limits_v11a: g === "v1" ? null : APPROVED513, ...(g === V12_PIPELINE ? { v12_flags: FLAGS557 } : {}) },
+    child_args: ids.map((id) => ({ id, argv: [] })),
+    frozen: { path: frozenPath, sha256: frozenSha, id: "t", version: 1, origin: "frozen-plan", author: null, adopted: pids.map((p) => ({ pattern: p, plan_sha256: PSHA513(p), source_sha256: SSHA513(p), envelope_sha256: sha256(p) })), missing: [] },
+    comparison, ...extra,
+  };
+  cond.signature = extra.signature ?? conditionsSignature(cond);
+  return cond;
+}
+/** 本を置く（x：state・spec・summary・v12（報告。null なら欄を書かない）） */
+function run557(dir, id, g, x) {
+  if (x.state === "unexecuted") return;
+  const rd = join(dir, id);
+  mkdirSync(join(rd, "bundle/artifacts"), { recursive: true });
+  if (x.state === "incomplete") return;
+  writeFileSync(join(rd, "summary.line.json"), sl557({ stages: g === "v1" ? [{ stage: "design", status: "ok", calls: 1 }] : STAGES557, ...(x.summary ?? {}) }, g !== V12_PIPELINE || x.v12 === null ? undefined : x.v12 ?? v12Rec557()));
+  writeFileSync(join(rd, "stdout.log"), "");
+  writeFileSync(join(rd, "stderr.log"), "");
+  if (x.spec) writeFileSync(join(rd, "bundle/artifacts/app.spec.yaml"), x.spec);
+}
+const frozen557 = (base, name, pids) => { const p = join(base, `${name}-frozen.json`); writeFileSync(p, JSON.stringify({ id: "t", adopted: pids })); return { frozenPath: p, frozenSha: sha256(readFileSync(p)) }; };
+/** 経路 v1.2 の 1 群の出力先（比較でない計測） */
+function single557(base, name, { pids = ["P1", "P2"], runs = 3, runOf = () => ({}), records = [] } = {}) {
+  const out = join(base, name), ids = pids.flatMap((p) => Array.from({ length: runs }, (_, i) => `${p}-r${i + 1}`));
+  mkdirSync(out, { recursive: true });
+  writeFileSync(join(out, "conditions.json"), JSON.stringify(cond557({ name, g: V12_PIPELINE, ids, pids, ...frozen557(base, name, pids) })));
+  for (const id of ids) run557(out, id, V12_PIPELINE, runOf(id));
+  records.forEach((r, i) => writeFileSync(join(out, `${r.kind ?? "run"}-${1000 + i}.json`), JSON.stringify(r.value)));
+  return { out, ids };
+}
+/** 比較の出力先（run-agent.mjs --compare --compare-pipelines と同じ形）。groups ＝ [比較元, 候補] */
+function compareFixture557(base, name, { groups, pids = ["P1", "P2"], runs = 3, runOf = () => ({}), groupsExtra = {}, profile = "diagnostic", mismatches = ["deadline_min", "pipelines"], recordGroups = true } = {}) {
+  const out = join(base, name);
+  mkdirSync(out, { recursive: true });
+  const fz = frozen557(base, name, pids);
+  const pairs = pids.flatMap((pid) => Array.from({ length: runs }, (_, i) => ({ pid, r: i + 1 }))).map((p, i) => ({ ...p, first: groups[i % 2] }));
+  const pairsText = JSON.stringify({ schema: "musunest-eval/compare-pairs/v1", frozen_sha256: fz.frozenSha, groups, runs, pairs }, null, 1) + "\n";
+  writeFileSync(join(out, "pairs.json"), pairsText);
+  const pairsSha = sha256(pairsText), ids = pairs.map((p) => `${p.pid}-r${p.r}`), roles = compareRolesOf(groups), rec = {};
+  for (const g of groups) {
+    const dir = join(out, g);
+    mkdirSync(dir, { recursive: true });
+    const cond = cond557({ name, g, ids, pids, ...fz, comparison: { pairs_sha256: pairsSha, group: g, role: roles[g], profile }, extra: groupsExtra[g] ?? {} });
+    rec[g] = { role: roles[g], pipeline: g, factory: { fingerprint: cond.factory.fingerprint }, conditions_signature: cond.signature, ...(g === V12_PIPELINE ? { v12_flags: FLAGS557 } : {}) };
+    writeFileSync(join(dir, "conditions.json"), JSON.stringify(cond));
+    for (const id of ids) run557(dir, id, g, runOf(g, id));
+  }
+  writeFileSync(join(out, "comparison.json"), JSON.stringify({ schema: "musunest-eval/compare-record/v1", pairs: { sha256: pairsSha, ...(recordGroups ? { groups } : {}) }, groups: rec, profile, profile_mismatches: mismatches, scoring_cost_usd: 0 }));
+  return { out, pairs };
+}
+
+test("#557 純粋な関数：群の組は 3 つだけ（順も見る）・役割・差の向きの文（v1,v1.1a は今の文字列）・旗の組の形・名前 → 真偽の集合の照合（キーの順だけの違いは一致）・照合の強い順・群の条件の版の検証・profile の pipelines", () => {
+  assert.deepEqual(COMPARE_PIPELINE_PAIRS, [["v1", "v1.1a"], ["v1.1a", "v1.2"], ["v1", "v1.2"]]);
+  for (const [text, want] of [["v1,v1.1a", ["v1", "v1.1a"]], ["v1.1a,v1.2", ["v1.1a", "v1.2"]], ["v1,v1.2", ["v1", "v1.2"]], ["v1.2,v1.1a", null], ["v1.2,v1.2", null], ["v1,v1.3", null], ["v1,v1.1a,v1.2", null], ["", null], ["v1", null], [undefined, null]]) assert.deepEqual(comparePipelinesOf(text), want, String(text));
+  assert.deepEqual(compareRolesOf(["v1.1a", "v1.2"]), { "v1.1a": "baseline", "v1.2": "candidate" });
+  assert.equal(`${diffDirectionOf(["v1", "v1.1a"])}。対ごとに原文系 PASS を 0／1 にして差を取る`, "候補（v1.1a）− 比較元（v1）。対ごとに原文系 PASS を 0／1 にして差を取る");
+  assert.equal(diffDirectionOf(["v1.1a", "v1.2"]), "候補（v1.2）− 比較元（v1.1a）");
+  for (const bad of [{}, [], [true], null, "on", { ledger: "on" }, { ledger: 1 }, { "": true }, { [MARK557.toUpperCase()]: true }]) assert.equal(isFlagMap(bad), false, JSON.stringify(bad));
+  assert.equal(isFlagMap(FLAGS557), true);
+  assert.equal(sameFlags({ "probe-x": false, ledger: true }, FLAGS557), true, "キーの順だけの違いは一致");
+  assert.equal(sameFlags({ ledger: true }, FLAGS557), false);
+  assert.equal(sameFlags({ ledger: true, "probe-x": true }, FLAGS557), false);
+  const R = (x) => v12ReportOf(x);
+  assert.equal(v12FlagsStatus(FLAGS557, R(FLAGS557), R({ "probe-x": false, ledger: true })), "match");
+  assert.equal(v12FlagsStatus(FLAGS557, R({ ledger: false, "probe-x": false }), R({ ledger: false, "probe-x": false })), "mismatch");
+  assert.equal(v12FlagsStatus(FLAGS557, R(FLAGS557), R({ ledger: false, "probe-x": false })), "inconsistent");
+  assert.equal(v12FlagsStatus(FLAGS557, R(undefined), R(FLAGS557)), "missing");
+  assert.equal(v12FlagsStatus(FLAGS557, R("on"), R(undefined)), "malformed", "不正形は欠測より強い");
+  assert.equal(v12FlagsStatus(FLAGS557, { state: "present", flags: [true] }, R(FLAGS557)), "malformed", "記録の形が違えば不正形");
+  assert.deepEqual(V12_FLAG_STATUSES, ["match", "mismatch", "missing", "malformed", "inconsistent"]);
+  // 群の条件の版：v1.2 は v7・旗の組、v1・v1.1a は v5。段単位の走り（v6）・知らない版は断る
+  const c = (g, over = {}) => ({ schema: g === "v1.2" ? CONDITIONS_V7 : CONDITIONS_V5, params: { mode: "build-from", pipeline: g, ...(g === "v1.2" ? { v12_flags: FLAGS557 } : {}) }, ...over });
+  assert.equal(groupConditionsProblem(c("v1.2"), "v1.2"), null);
+  assert.equal(groupConditionsProblem(c("v1.1a"), "v1.1a"), null);
+  assert.equal(groupConditionsProblem(c("v1"), "v1"), null);
+  assert.equal(groupConditionsProblem(c("v1.2", { schema: CONDITIONS_V5 }), "v1.2"), "compare:conditions-version");
+  assert.equal(groupConditionsProblem(c("v1.1a", { schema: CONDITIONS_V7 }), "v1.1a"), "compare:conditions-version");
+  assert.equal(groupConditionsProblem(c("v1.1a", { schema: `musunest-factory/agent-accept-conditions/${MARK557}` }), "v1.1a"), "compare:conditions-version");
+  assert.equal(groupConditionsProblem(c("v1.2", { params: { mode: "build-from", pipeline: "v1.2", v12_flags: {} } }), "v1.2"), "compare:conditions-version");
+  assert.equal(groupConditionsProblem(c("v1.1a", { schema: CONDITIONS_V6, params: { mode: "stage-run", pipeline: "v1.1a" } }), "v1.1a"), "compare:conditions-stage");
+  // profile：比較元が v1 の組は今の定数、v1.1a,v1.2 は diagnostic と pipelines
+  assert.deepEqual(compareProfileOf({ ...OFFICIAL_COMPARE }, ["v1", "v1.2"]), { profile: "official", mismatches: [] });
+  assert.deepEqual(compareProfileOf({ ...OFFICIAL_COMPARE }, ["v1.1a", "v1.2"]), { profile: "diagnostic", mismatches: ["pipelines"] });
+  assert.deepEqual(compareProfileOf({ ...OFFICIAL_COMPARE, runs: 1 }, ["v1.1a", "v1.2"]).mismatches, ["runs", "pipelines"]);
+  // 条件の版の番号：#545 の v6 の次（二重に取らない）。既知の一覧（v1〜v5）には足さない
+  assert.equal(CONDITIONS_V7, "musunest-factory/agent-accept-conditions/v7");
+  assert.notEqual(CONDITIONS_V7, CONDITIONS_V6);
+  assert.ok(!CONDITIONS_SCHEMAS.includes(CONDITIONS_V7));
+});
+import { OFFICIAL_COMPARE } from "./score-agent.mjs";
+
+test("#557 採点 v1.2：全部の報告が一致（キーの順だけ違う報告を含む）し再開で完了した計測は照合が今と同じ完了で、evaluation に pipeline v1.2 と旗の組・件数。標準出力に 1 行。v5 の条件の出力に新しい欄が無い", async () => {
+  await withOut(async (base) => {
+    const f = single557(base, "s-ok", { runOf: (id) => ({ spec: PASS_A, ...(id === "P2-r3" ? { v12: v12Rec557({ "probe-x": false, ledger: true }, { "probe-x": false, ledger: true }) } : {}) }), records: [{ value: { stop: null, stop_code: null, pending: [] } }, { kind: "resume", value: { stop: null, stop_code: null, pending: [] } }] });
+    const r = scoreRun(f.out);
+    const s = readScore(f.out);
+    assert.deepEqual([s.completion.status, s.completion.label, s.completion.unverified], ["complete", "完了", []]);
+    assert.equal(s.evaluation.pipeline, "v1.2");
+    assert.deepEqual(s.evaluation.v12_flags, { flags: FLAGS557, status: "verified", launched: 6, counts: { match: 6, mismatch: 0, missing: 0, malformed: 0, inconsistent: 0 }, unverified_runs: [] });
+    assert.equal(s.fingerprints.conditions.schema, CONDITIONS_V7);
+    assert.match(r.stdout, /^旗の組（v1\.2）: 照合 一致・起動 6 本（match 6・mismatch 0・missing 0・malformed 0・inconsistent 0）・条件の組 ledger=true,probe-x=false$/m);
+    // 漏斗は v1.1α の段の名前で数える
+    assert.equal(s.funnel.stages["name-table"].reached, 6);
+    // v5 の条件（v1.1a）の出力には新しい欄が無い
+    const o = join(base, "s-v5"), ids = ["P1-r1"];
+    mkdirSync(o, { recursive: true });
+    writeFileSync(join(o, "conditions.json"), JSON.stringify(cond557({ name: "s-v5", g: "v1.1a", ids, pids: ["P1"], ...frozen557(base, "s-v5", ["P1"]) })));
+    run557(o, "P1-r1", "v1.1a", { spec: PASS_A });
+    const r5 = scoreRun(o), s5 = readScore(o);
+    assert.ok(!("unverified" in s5.completion) && !("v12_flags" in s5.evaluation));
+    assert.ok(!r5.stdout.includes("旗の組"));
+    scoreRun(o, ["--anonymous"]);
+    const a5 = readScore(o, "score.anonymous.json");
+    assert.ok(!("unverified" in a5.completion) && !("v12_flags" in a5.evaluation));
+  });
+});
+
+test("#557 採点 v1.2：完了した 1 本の報告が無い計測と、再開の前に起動した 1 本の報告が条件と違う計測は、それぞれ照合が unverified・「未照合」で completion.unverified に v12-flags。予算で未起動の本は unverified に数えず今の未完了のまま", async () => {
+  await withOut(async (base) => {
+    // (1) 完了した 1 本の報告が無い（本ごとの記録に報告の欄が無い・要約の報告が無い）
+    for (const [name, v12] of [["s-missing-field", null], ["s-missing-summary", { status: "match", summary: v12ReportOf(undefined), record: v12ReportOf(FLAGS557) }]]) {
+      const f = single557(base, name, { runOf: (id) => ({ spec: PASS_A, ...(id === "P1-r2" ? { v12 } : {}) }) });
+      const r = scoreRun(f.out), s = readScore(f.out);
+      assert.deepEqual([s.completion.status, s.completion.label, s.completion.unverified], ["unverified", "未照合", ["v12-flags"]], name);
+      assert.ok(s.completion.reasons.some((x) => x.includes("v12-flags")), name);
+      assert.deepEqual(s.evaluation.v12_flags.unverified_runs, [{ run: "P1-r2", status: "missing" }], name);
+      assert.equal(s.evaluation.v12_flags.counts.missing, 1);
+      assert.match(r.stdout, /照合: 未照合（.*理由: .*v12-flags/);
+      assert.match(r.stdout, /^旗の組（v1\.2）: 未照合（v12-flags）・起動 6 本（match 5・mismatch 0・missing 1・/m);
+    }
+    // (2) 再開の前に起動した 1 本の報告が条件と違う（起動の記録が 2 つ。照合は全部の本の記録から）
+    const fm = single557(base, "s-mismatch", { runOf: (id) => ({ spec: PASS_A, ...(id === "P1-r1" ? { v12: v12Rec557({ ledger: false, "probe-x": false }, { ledger: false, "probe-x": false }) } : {}) }), records: [{ value: { stop: null, stop_code: null, pending: [] } }, { kind: "resume", value: { stop: null, stop_code: null, pending: [] } }] });
+    scoreRun(fm.out);
+    const sm = readScore(fm.out);
+    assert.deepEqual([sm.completion.status, sm.completion.unverified], ["unverified", ["v12-flags"]]);
+    assert.deepEqual(sm.evaluation.v12_flags.unverified_runs, [{ run: "P1-r1", status: "mismatch" }]);
+    // (3) 片群だけ予算で未起動の本がある：未起動の本は unverified でなく今の未完了（incomplete）
+    const fb = single557(base, "s-budget", { runOf: (id) => (["P2-r2", "P2-r3"].includes(id) ? { state: "unexecuted" } : { spec: PASS_A }), records: [{ value: { stop: "予算 1 USD に達した", stop_code: "budget", pending: ["P2-r2", "P2-r3"] } }] });
+    scoreRun(fb.out);
+    const sb = readScore(fb.out);
+    assert.deepEqual([sb.completion.status, sb.completion.label, sb.completion.unverified, sb.completion.unexecuted], ["incomplete", "未完了", [], ["P2-r2", "P2-r3"]]);
+    assert.deepEqual([sb.evaluation.v12_flags.status, sb.evaluation.v12_flags.launched], ["verified", 4]);
+    // (4) 要約と条件の記録の食い違い・不正形も未照合
+    for (const [name, v12, st] of [["s-inconsistent", v12Rec557(FLAGS557, { ledger: false, "probe-x": false }), "inconsistent"], ["s-malformed", v12Rec557("on", FLAGS557), "malformed"]]) {
+      const f = single557(base, name, { runOf: (id) => ({ spec: PASS_A, ...(id === "P2-r1" ? { v12 } : {}) }) });
+      scoreRun(f.out);
+      const s = readScore(f.out);
+      assert.deepEqual([s.completion.status, s.evaluation.v12_flags.unverified_runs], ["unverified", [{ run: "P2-r1", status: st }]], name);
+    }
+    // 工場の判定・PASS は照合で変わらない
+    const same = single557(base, "s-same", { runOf: () => ({ spec: PASS_A }) });
+    scoreRun(same.out);
+    assert.deepEqual(readScore(fm.out).metrics, readScore(same.out).metrics);
+    assert.deepEqual(readScore(fm.out).verdicts, readScore(same.out).verdicts);
+  });
+});
+
+test("#557 匿名の口（採点）：経路と、照合を通った旗の名前・真偽と件数だけがあり、本の ID・P の ID が無い。照合が通らなければ旗は null で件数だけ", async () => {
+  await withOut(async (base) => {
+    const ok = single557(base, `a-ok-${MARK557}`, { runOf: () => ({ spec: PASS_A }) });
+    const ng = single557(base, `a-ng-${MARK557}`, { runOf: (id) => ({ spec: PASS_A, ...(id === "P1-r3" ? { v12: v12Rec557({ ledger: false, "probe-x": false }, { ledger: false, "probe-x": false }) } : {}) }) });
+    for (const [f, flags, status] of [[ok, FLAGS557, "verified"], [ng, null, "unverified"]]) {
+      const r = scoreRun(f.out, ["--anonymous"]);
+      const text = readFileSync(join(f.out, "score.anonymous.json"), "utf8"), a = JSON.parse(text);
+      assert.equal(a.evaluation.pipeline, "v1.2");
+      assert.deepEqual(a.evaluation.v12_flags, { status, flags, launched: 6, counts: status === "verified" ? { match: 6, mismatch: 0, missing: 0, malformed: 0, inconsistent: 0 } : { match: 5, mismatch: 1, missing: 0, malformed: 0, inconsistent: 0 } });
+      assert.equal(a.fingerprints.conditions.schema, CONDITIONS_V7);
+      assert.deepEqual(a.completion.unverified, status === "verified" ? [] : ["v12-flags"]);
+      for (const t of [text, r.stdout, r.stderr]) { assert.ok(!/P\d+-r\d+/.test(t), "本の ID が出た"); assert.ok(!/"P\d+"/.test(t), "P の ID が出た"); assert.ok(!t.includes(MARK557), "目印が出た"); }
+    }
+  });
+});
+
+/** 30 対（P1〜P10 × 3）の原文系 PASS：A の題材（P1・P2）だけ宣言を置く。それ以外は宣言なし（両群とも 0） */
+const PASS557 = { "v1.1a": { P1: [1, 0, 0], P2: [1, 1, 0] }, "v1.2": { P1: [1, 1, 1], P2: [1, 0, 0] }, v1: { P1: [1, 0, 0], P2: [1, 1, 0] } };
+const PIDS557 = Array.from({ length: 10 }, (_, i) => `P${i + 1}`);
+const runOf557 = (g, id) => { const [pid, r] = [id.split("-")[0], Number(id.split("-r")[1])]; const p = PASS557[g][pid]; return p === undefined ? {} : { spec: p[r - 1] === 1 ? PASS_A : FAIL_A }; };
+/** 期待の対の差（候補 − 比較元）と P ごとの並び */
+const diffs557 = (groups) => PIDS557.flatMap((pid) => [1, 2, 3].map((r) => (PASS557[groups[1]][pid]?.[r - 1] ?? 0) - (PASS557[groups[0]][pid]?.[r - 1] ?? 0)));
+const byPattern557 = (groups) => Object.fromEntries(PIDS557.map((pid, i) => [pid, diffs557(groups).slice(i * 3, i * 3 + 3)]));
+
+test("#557 比較の採点 v1.1a,v1.2（30 対）：差の向きの文が「候補（v1.2）− 比較元（v1.1a）」、対の差の件数と P のまとまりの p・区間が手 0b の関数の値と一致、v1.2 の群の漏斗・到達が v1.1α の段の名前で出る。profile の理由 pipelines を残し、群の入れ替え・複製は compare:scoring-mismatch", async () => {
+  await withOut(async (base) => {
+    const groups = ["v1.1a", "v1.2"];
+    const f = compareFixture557(base, "c-30", { groups, pids: PIDS557, runOf: runOf557 });
+    assert.equal(f.pairs.length, 30);
+    const r = scoreCompareRun(f.out);
+    assert.equal(r.status, 0, r.stderr);
+    const c = readCompare(f.out);
+    assert.equal(c.diff_direction, "候補（v1.2）− 比較元（v1.1a）。対ごとに原文系 PASS を 0／1 にして差を取る");
+    assert.ok(c.stage_pairs.direction.startsWith("候補（v1.2）− 比較元（v1.1a）。"));
+    const ps = pairStats(diffs557(groups));
+    assert.deepEqual([c.pairs.n, c.pairs.counts, c.pairs.mean, c.pairs.sd, c.pairs.interval], [30, ps.counts, ps.mean, ps.sd, ps.interval]);
+    assert.deepEqual(c.pairs.counts, { "+1": 2, 0: 27, "-1": 1 });
+    assert.deepEqual(c.pattern_clusters.pass, clusterStats(byPattern557(groups)));
+    assert.deepEqual(Object.keys(c.groups), groups);
+    assert.deepEqual([c.groups["v1.1a"].role, c.groups["v1.2"].role], ["baseline", "candidate"]);
+    // v1.2 の群の漏斗・到達・段の役割は v1.1α の段の名前
+    assert.equal(c.groups["v1.2"].funnel.stages["name-table"].reached, 30);
+    assert.equal(c.groups["v1.2"].reach["test-spec"].reached, 30);
+    assert.deepEqual(c.stage_pairs.roles.design.stages, { "v1.1a": "name-table", "v1.2": "name-table" });
+    assert.notEqual(c.groups["v1.2"].carry_over, null, "v1.2 の群の持ち越しは数える（v1 だけ null）");
+    assert.deepEqual([c.groups["v1.2"].v12_flags.status, c.groups["v1.2"].v12_flags.counts.match], ["verified", 30]);
+    assert.ok(!("v12_flags" in c.groups["v1.1a"]));
+    // 照合は未照合でなく、diagnostic（pipelines）なので未完了・診断
+    assert.deepEqual([c.completion.status, c.completion.label, c.completion.unverified], ["incomplete", "未完了・診断", []]);
+    assert.deepEqual(c.profile_mismatches, ["deadline_min", "pipelines"]);
+    assert.match(r.stdout, /^v1\.2 旗の組（v1\.2）: 照合 一致・起動 30 本/m);
+    assert.match(r.stdout, /^pair\tP1-r2\t先行 v1\.2\tv1\.1a executed PASS=0\tv1\.2 executed PASS=1\t差 \+1$/m);
+    // 群の入れ替え・複製・候補の群の条件を比較元のもので置き換えた出力先は断る
+    const tweaks = [
+      ["c-swapped", (out) => { const a = readFileSync(join(out, "v1.1a", "conditions.json")), b = readFileSync(join(out, "v1.2", "conditions.json")); writeFileSync(join(out, "v1.1a", "conditions.json"), b); writeFileSync(join(out, "v1.2", "conditions.json"), a); }],
+      ["c-duplicated", (out) => { rmSync(join(out, "v1.2"), { recursive: true }); cpSync(join(out, "v1.1a"), join(out, "v1.2"), { recursive: true }); }],
+      ["c-replaced", (out) => cpSync(join(out, "v1.1a", "conditions.json"), join(out, "v1.2", "conditions.json"))],
+      ["c-groups", (out) => { const p = join(out, "comparison.json"), x = JSON.parse(readFileSync(p, "utf8")); x.pairs.groups = ["v1.2", "v1.1a"]; writeFileSync(p, JSON.stringify(x)); }],
+    ];
+    for (const [name, tweak] of tweaks) {
+      const t = compareFixture557(base, name, { groups, runOf: () => ({ spec: PASS_A }) });
+      tweak(t.out);
+      const rt = scoreCompareRun(t.out);
+      assert.equal(rt.status, 3, `${name}: ${rt.stderr}`);
+      assert.match(rt.stderr, /\[compare:scoring-mismatch\]/, name);
+      assert.equal(existsSync(join(t.out, "score-compare.json")), false, name);
+    }
+  });
+});
+
+test("#557 比較の採点 v1,v1.2（旧い版 v5 と新しい版 v7 の混在）が通り、差の向きの文と段の対応が群の組で決まる。知らない版・段単位の走りの条件の混在は断る。v1.2 の群の 1 本の報告が違えば未照合（v12-flags）", async () => {
+  await withOut(async (base) => {
+    const groups = ["v1", "v1.2"];
+    const f = compareFixture557(base, "m-ok", { groups, pids: PIDS557, runOf: runOf557, profile: "official", mismatches: [] });
+    const r = scoreCompareRun(f.out);
+    assert.equal(r.status, 0, r.stderr);
+    const c = readCompare(f.out);
+    assert.equal(c.diff_direction, "候補（v1.2）− 比較元（v1）。対ごとに原文系 PASS を 0／1 にして差を取る");
+    assert.deepEqual(c.stage_pairs.roles.design.stages, { v1: "design", "v1.2": "name-table" });
+    assert.deepEqual(c.pairs.counts, pairStats(diffs557(groups)).counts);
+    assert.equal(c.groups.v1.carry_over, null);
+    assert.deepEqual([c.completion.status, c.completion.label], ["complete", "完了"], "比較元が v1 の組は今の定数で判定（official）");
+    // v1.1a,v1.2 も同じく通る（旧い版 v5 と新しい版 v7）
+    assert.equal(scoreCompareRun(compareFixture557(base, "m-11", { groups: ["v1.1a", "v1.2"], runOf: () => ({ spec: PASS_A }) }).out).status, 0);
+    // 知らない版・群と合わない版・段単位の走りの条件
+    const bad = [
+      ["m-unknown", { "v1.2": { schema: `musunest-factory/agent-accept-conditions/${MARK557}` } }, "compare:conditions-version"],
+      ["m-v12-v5", { "v1.2": { schema: CONDITIONS_V5 } }, "compare:conditions-version"],
+      ["m-base-unknown", { v1: { schema: "musunest-factory/agent-accept-conditions/v9" } }, "compare:conditions-version"],
+      ["m-stage", { v1: { schema: CONDITIONS_V6 } }, "compare:conditions-stage"],
+    ];
+    for (const [name, groupsExtra, code] of bad) {
+      const t = compareFixture557(base, name, { groups, groupsExtra, runOf: () => ({ spec: PASS_A }) });
+      const rt = scoreCompareRun(t.out);
+      assert.equal(rt.status, 3, `${name}: ${rt.stderr}`);
+      assert.ok(rt.stderr.includes(`[${code}]`), `${name}: ${rt.stderr}`);
+      assert.ok(!rt.stderr.includes(MARK557));
+      assert.equal(existsSync(join(t.out, "score-compare.json")), false, name);
+    }
+    // 旗の組の照合が通らない v1.2 の群：比較は未照合で、項目に v12-flags
+    const u = compareFixture557(base, "m-v12", { groups, runOf: (g, id) => ({ spec: PASS_A, ...(g === "v1.2" && id === "P2-r2" ? { v12: v12Rec557({ ledger: false, "probe-x": false }, { ledger: false, "probe-x": false }) } : {}) }) });
+    const ru = scoreCompareRun(u.out);
+    assert.equal(ru.status, 0, ru.stderr);
+    const cu = readCompare(u.out);
+    assert.equal(cu.completion.status, "unverified");
+    assert.ok(cu.completion.unverified.some((x) => x.group === "v1.2" && x.check === "v12-flags" && x.value === "unverified"));
+    assert.ok(cu.completion.unverified.some((x) => x.group === "v1.2" && x.check === "reconcile"));
+    assert.match(ru.stdout, /未照合の項目: .*v1\.2:v12-flags=unverified/);
+  });
+});
+
+test("#557 比較の匿名の口：群ごとの経路と、照合を通った旗の名前・真偽と件数・profile の理由 pipelines・差の向きの文があり、本の ID・P の ID・目印が無い。v1,v1.1a の組の匿名の口は今の形", async () => {
+  await withOut(async (base) => {
+    const f = compareFixture557(base, `an-${MARK557}`, { groups: ["v1.1a", "v1.2"], pids: PIDS557, runOf: runOf557 });
+    const r = scoreCompareRun(f.out, ["--anonymous"]);
+    assert.equal(r.status, 0, r.stderr);
+    const text = readFileSync(join(f.out, "score-compare.anonymous.json"), "utf8"), a = JSON.parse(text);
+    assert.equal(a.diff_direction, "候補（v1.2）− 比較元（v1.1a）。対ごとに原文系 PASS を 0／1 にして差を取る");
+    assert.deepEqual(Object.keys(a.groups), ["v1.1a", "v1.2"]);
+    assert.deepEqual([a.groups["v1.1a"].pipeline, a.groups["v1.1a"].role, a.groups["v1.2"].pipeline, a.groups["v1.2"].role], ["v1.1a", "baseline", "v1.2", "candidate"]);
+    assert.deepEqual(a.groups["v1.2"].v12_flags, { status: "verified", flags: FLAGS557, launched: 30, counts: { match: 30, mismatch: 0, missing: 0, malformed: 0, inconsistent: 0 } });
+    assert.ok(!("v12_flags" in a.groups["v1.1a"]));
+    assert.deepEqual(a.profile_mismatches, ["deadline_min", "pipelines"]);
+    for (const t of [text, r.stdout, r.stderr]) { assert.ok(!/P\d+-r\d+/.test(t), "本の ID が出た"); assert.ok(!/"P\d+"/.test(t), "P の ID が出た"); assert.ok(!t.includes(MARK557), "目印が出た"); }
+    // v1,v1.1a の組（比較の記録に groups の無い今の形と、groups のある形）は今の匿名の口と同じ
+    const old = compareFixture(base, "an-old", { runOf: () => ({ spec: PASS_A }) });
+    const withGroups = compareFixture557(base, "an-v1", { groups: ["v1", "v1.1a"], runOf: () => ({ spec: PASS_A }), profile: "official", mismatches: [] });
+    for (const out of [old.out, withGroups.out]) {
+      assert.equal(scoreCompareRun(out, ["--anonymous"]).status, 0);
+      const x = readCompare(out, "score-compare.anonymous.json");
+      assert.equal(x.diff_direction, "候補（v1.1a）− 比較元（v1）。対ごとに原文系 PASS を 0／1 にして差を取る");
+      assert.deepEqual(Object.keys(x.groups), ["v1", "v1.1a"]);
+      assert.ok(!("v12_flags" in x.groups.v1) && !("v12_flags" in x.groups["v1.1a"]));
+    }
+  });
+});
+
+test("#557 README：§5.12 の節に経路 v1.2・--compare-pipelines・旗の組の読み方（公開の値・報告との照合・未照合）・schema の版の照合・3 つの組の正式な条件の扱いがある", () => {
+  const text = readFileSync(join(ev, "README.md"), "utf8");
+  const sec = text.slice(text.indexOf("### 5.12 "), text.indexOf("## 6. "));
+  assert.ok(sec.length > 0 && text.indexOf("### 5.12 ") > 0, "§5.12 が無い");
+  for (const w of ["--pipeline v1.2", "--compare-pipelines", "V12_PIPELINE_FLAGS", "pipeline:v1.2-unavailable", "v12-flags", "未照合", "agent-accept-conditions/v7", "compare:conditions-version", "compare:conditions-stage", "v1.1a,v1.2", "v1,v1.2", "pipelines", "diagnostic", "compare:pairs-schema", "compare:limits-unapproved"]) assert.ok(sec.includes(w), `§5.12 に ${w} が無い`);
+});
+
+test("#557 工場の dist（先に pnpm build）：package の入口の V12_PIPELINE_FLAGS が旗の名前 → 真偽の写像で、入口の経路の一覧が計測と採点の共有の PIPELINES と同じ。条件の記録の場所（BUILD_RECORD_PATH）が dist の BUILD_CLI_RECORD_FILE と同じ", async () => {
+  const entry = await distModule("index.js"), cli = await distModule("cli.js"), plan = await distModule("cli-plan.js");
+  assert.equal(isFlagMap(entry.V12_PIPELINE_FLAGS), true, JSON.stringify(entry.V12_PIPELINE_FLAGS));
+  assert.deepEqual(PIPELINES, [...cli.PIPELINES]);
+  assert.equal(BUILD_RECORD_PATH, `bundle/${plan.BUILD_CLI_RECORD_FILE}`);
+});
+import { PIPELINES } from "./score-agent.mjs";
