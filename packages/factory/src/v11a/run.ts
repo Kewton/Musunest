@@ -987,9 +987,16 @@ async function runV11a(
     if (stageControl?.range.end === "test-spec") return stageOutcome(null);
 
     // ── B1 書く（表の全行・固定した試験）──────────────────────────────────
+    // 旗 on で T1'' が受理した要件でない文（`nonRequirements`）は、B1 に渡す要件の一覧から除く（T2・B3'・B6・⑦ と同じく
+    // 残る一覧の外。所属 0 行なので表の行は変わらない。Issue #550）。off の一覧は今のまま
+    const nonRequirementIds = new Set(ledger === undefined ? [] : (baseCarry.nonRequirements ?? []));
+    const writeList: RequirementList =
+      nonRequirementIds.size === 0
+        ? list
+        : { ...list, requirements: list.requirements.filter((requirement) => !nonRequirementIds.has(requirement.id)) };
     const written = await runStageOk("write", () =>
       runWriteV11a({
-        list,
+        list: writeList,
         table,
         suite: testSpec.suite,
         observes: testSpec.observes,
