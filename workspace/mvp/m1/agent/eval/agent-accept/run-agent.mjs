@@ -31,6 +31,17 @@
 //          群 v1 ＝ 比較元の checkout の入口（--pipeline 無し）、群 v1.1a ＝ <repo> の入口（--pipeline v1.1a）。対の順 × 先行順を 1 本の待ち行列にし、
 //          両群の合計の並列で起こす。起こす直前に「済みの額＋走行中の予約＋新しく起こす 1 本の予約 ≤ 上限」を確かめ、超えればそれ以降を起こさない（D17）。
 //          --only・--runs・--resume・--plan・--plan-only・--script・--pipeline とは組めない。記録は <out>/v1・<out>/v1.1a（群の計測）と直下の比較の記録・起動の記録
+// #545（段単位の走り。README §5.11。設計書 08 §8.3）：
+//   --stage-start <段> / --stage-end <段> / --stage-from <凍結した上流の計測の出力>：--pipeline v1.1a と --build-from と組んでだけ受ける（それ以外は flags:conflict）。
+//          段の表（開始・終了・境界）と範囲の決め方は工場の dist（v11a/bundle-v11a.js）が公開する定数と関数を読む（別に手書きしない）。開始 T1 は --stage-from を
+//          付けられず、T2・B1 は必須（flags:conflict）。子の引数の末尾に --stage-start・--stage-end（と --stage-input <本のディレクトリの写し>）を足す。
+//          子を起こす前に、本ごとの上流の段の走りの記録と開始の段の直前の境界の checkpoint に工場の dist の照合の関数（verifyStageInput）を当てる
+//          （記録に残した照合の結果は信頼しない）。断れば exit 4 と固定の符号（stage-from:<工場の符号> など）と本の ID の 1 行で、子を 1 本も起こさない。
+//          上流の記録が範囲の中の早期停止で境界に届かなかった本だけを入力なし（stage_input_absent）として起こさず、条件に本の ID と件数を残す。
+//          条件の schema は v6（段単位の走りのときだけ）で、params.mode が stage-run・stage_start・stage_end・budget_scope・stage_from・stage_inputs を足す。
+//          予算と締切は段の走り 1 本ごとに工場へ渡す（--budget・--deadline。計測全体の目安の額の扱いは今と同じ）。--resume は段の欄を含む署名の一致でだけ許す
+//   --compare と段の旗：群は before（--baseline の checkout。凍結した前の候補）と after（<repo>。今の候補）。両群とも v1.1α の経路で、同じ本に同じ上流の入力を渡す。
+//          --make-pairs と段の旗は、上流の入力のある本だけで対を書く（交互の順は今の比較と同じ関数）。起こす直前の額の確かめ（D17）も今の比較と同じ関数
 // 採点は: node score-agent.mjs <repo> <out> [--label high]（リポジトリ・出力先の順で渡す）。比較は score-agent.mjs <repo> <out> --compare
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
@@ -38,6 +49,7 @@ import { basename, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DEFAULT_SET_PATH, FACTORY_VERDICTS, SCRIPT_MODE, fingerprintDir, loadEvalSet, scoringFingerprint, scriptsFingerprint, sha256 } from "./score-agent.mjs";
 import { BUILD_STAGE_IDS, COMPARE_GROUPS, COMPARE_PAIRS_COPY, COMPARE_ROLES, COMPARE_RUN_PREFIX, COMPARE_RUN_SCHEMA, COMPARISON_FILE, COMPARISON_SCHEMA, PIPELINES, SCORING_COST_USD, compareProfile, launchAllowed, limitsApproved, makePairs, outputLimitsOf, pairsProblem } from "./score-agent.mjs";
+import { CONDITIONS_V6, STAGE_COMPARE_GROUPS, STAGE_COMPARE_ROLES, STAGE_COMPARISON_SCHEMA, STAGE_PAIRS_SCHEMA, STAGE_RUN_MODE, conditionsSignature, loadConditions, makeStagePairs, pairsShapeProblem, stagePairsProblem } from "./score-agent.mjs";
 import { PLAN_FILE_CHECKS, PLAN_FILE_ERROR_SCHEMA, PLAN_FILE_REJECT_SCHEMA, checkEnvelope, loadFrozenSet, loadPlanFileChecks, refusalLine } from "./freeze-plan-set.mjs";
 
 const args = process.argv.slice(2);
@@ -46,6 +58,8 @@ const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] :
 // 断り（exit 3）：既存の断り（#400〜#427）は今までの文のあとに符号を添える。#497 で足した断りは符号と本の ID・件数だけ（値を出さない）
 const refuse = (msg, code) => { console.error(refusalLine(code, { text: msg })); process.exit(3); };
 const refuseCode = (code, opts) => { console.error(refusalLine(code, opts)); process.exit(3); };
+// 段単位の走りの上流の照合の断り（#545）：exit 4（工場の段の入力の照合の失敗と同じ値。exit 3 の断りと取り違えない）。符号と本の ID・件数だけ
+const refuseStage = (code, opts) => { console.error(refusalLine(code, opts)); process.exit(4); };
 
 // 評価セットの定義ファイル（#427）。欠けた欄があれば 1 本も起こさずに断る
 const setPath = resolve(opt("--set", join(repo, DEFAULT_SET_PATH)));
@@ -81,18 +95,52 @@ if ((plan && planOnly) || (buildFrom !== null && (plan || planOnly || script)) |
 const valueOf = (flag) => { const i = args.indexOf(flag); if (i < 0) return null; const v = args[i + 1]; return v === undefined || v === "" || v.startsWith("--") ? "" : v; };
 const pipelineArg = valueOf("--pipeline"), pipeline = pipelineArg ?? "v1";
 const compare = args.includes("--compare"), makePairsOut = valueOf("--make-pairs"), baselineArg = valueOf("--baseline"), pairsArg = valueOf("--pairs");
+// #545：段単位の走り。段の旗のどれかがあれば段単位で、v1.1α の経路の旗と凍結した組の旗が要る（比較・対のファイルでも同じ）
+const stageStartArg = valueOf("--stage-start"), stageEndArg = valueOf("--stage-end"), stageFromArg = valueOf("--stage-from");
+const stageMode = stageStartArg !== null || stageEndArg !== null || stageFromArg !== null;
+if ([stageStartArg, stageEndArg, stageFromArg].includes("")) refuseCode("flags:conflict");
+if (stageMode && (pipelineArg !== "v1.1a" || buildFrom === null)) refuseCode("flags:conflict");
 if (!PIPELINES.includes(pipeline) || (pipeline === "v1.1a" && buildFrom === null)) refuseCode("flags:conflict");
 if ([makePairsOut, baselineArg, pairsArg].includes("")) refuseCode("flags:conflict");
-if (makePairsOut !== null && (compare || buildFrom === null || only || resume || pipelineArg !== null || baselineArg !== null || pairsArg !== null)) refuseCode("flags:conflict");
-if (compare && (buildFrom === null || baselineArg === null || pairsArg === null || only || args.includes("--runs") || resume || pipelineArg !== null)) refuseCode("flags:conflict");
+if (makePairsOut !== null && (compare || buildFrom === null || only || resume || (pipelineArg !== null && !stageMode) || baselineArg !== null || pairsArg !== null)) refuseCode("flags:conflict");
+if (compare && (buildFrom === null || baselineArg === null || pairsArg === null || only || args.includes("--runs") || resume || (pipelineArg !== null && !stageMode))) refuseCode("flags:conflict");
 if (!compare && (baselineArg !== null || pairsArg !== null)) refuseCode("flags:conflict");
 if (compare && !args.includes("--budget-usd")) refuseCode("compare:budget-required");
 if (compare && !(Number.isFinite(budget) && budget >= 0 && Number.isInteger(CONC) && CONC >= 1)) refuseCode("flags:conflict");
-/** 条件の params.mode：build（指定なし）・e2e（--plan）・plan-only・build-from */
-const mode = buildFrom !== null ? "build-from" : planOnly ? "plan-only" : plan ? "e2e" : "build";
+/** 条件の params.mode：build（指定なし）・e2e（--plan）・plan-only・build-from・stage-run（段の旗。#545） */
+const mode = stageMode ? STAGE_RUN_MODE : buildFrom !== null ? "build-from" : planOnly ? "plan-only" : plan ? "e2e" : "build";
 const model = opt("--model", openai.DEFAULT_OPENAI_MODEL);
 const perRunBudget = Number(opt("--factory-budget-usd", String(factory.DEFAULT_BUDGET_USD)));
 const deadlineMin = Number(opt("--deadline-min", String(factory.DEFAULT_DEADLINE_MS / 60000)));
+
+// #545：段の表と照合の関数を工場の dist から読む（v11a/bundle-v11a.js。段単位の走りのときだけ読むので、旗を省いた計測は今と同じ）
+const STAGE_LIB_VALUES = ["STAGE_STARTS", "STAGE_ENDS", "STAGE_BOUNDARIES", "STAGE_INPUT_CODES", "STAGE_RUN_RECORD_FILE", "STAGE_RUN_RECORD_SCHEMA", "STAGE_BUDGET_SCOPE"];
+const STAGE_LIB_FUNCTIONS = ["boundaryBefore", "resolveStageRange", "stageCheckpointFile", "verifyStageInput"];
+async function loadStageLib(dir) {
+  let lib;
+  try { lib = await import(pathToFileURL(join(dir, "v11a/bundle-v11a.js")).href); } catch { refuseCode("stage:dist-unreadable"); }
+  if (!STAGE_LIB_VALUES.every((k) => lib[k] !== undefined) || !STAGE_LIB_FUNCTIONS.every((k) => typeof lib[k] === "function")) refuseCode("stage:dist-unreadable");
+  // 段の表の並び：開始 i ≤ 終了 i ＜ 開始 i+1 で、境界 i は開始 i+1 の直前（工場の boundaryBefore と resolveStageRange で確かめる。合わなければ境界の判定を組めない）
+  const { STAGE_STARTS: starts, STAGE_ENDS: ends, STAGE_BOUNDARIES: bounds } = lib;
+  const rangeOk = (start, end) => !("code" in lib.resolveStageRange({ start, end, hasInput: lib.boundaryBefore(start) !== null }));
+  const aligned = ends.length === starts.length && bounds.length === starts.length - 1
+    && starts.every((st, i) => lib.boundaryBefore(st) === (i === 0 ? null : bounds[i - 1]) && rangeOk(st, ends[i]) && (i === 0 || !rangeOk(st, ends[i - 1])));
+  if (!aligned) refuseCode("stage:dist-unreadable");
+  return lib;
+}
+/** 範囲が境界を通るか：開始が境界より前（開始 i ≤ 境界 i）で、終了が境界の後（終了 i ≥ 境界 i）。並びは loadStageLib で dist に照らしてある */
+const passesBoundary = (lib, range, boundary) => { const j = lib.STAGE_BOUNDARIES.indexOf(boundary); return j >= 0 && lib.STAGE_STARTS.indexOf(range.start) >= 0 && lib.STAGE_STARTS.indexOf(range.start) <= j && lib.STAGE_ENDS.indexOf(range.end) >= j; };
+/** 本のディレクトリの中の、上流の入力の写しの置き場所（checkpoint と段の走りの記録を同じディレクトリに置く。工場は checkpoint の隣の記録を読む） */
+const STAGE_INPUT_DIR = "stage-input";
+let stageLib = null, stageRange = null, stageBoundary = null;
+if (stageMode) {
+  stageLib = await loadStageLib(distDir);
+  const resolved = stageLib.resolveStageRange({ ...(stageStartArg === null ? {} : { start: stageStartArg }), ...(stageEndArg === null ? {} : { end: stageEndArg }), hasInput: stageFromArg !== null });
+  // 表に無い段・開始が終了より後・開始 T1 に --stage-from・開始 T2／B1 に --stage-from が無い（工場の符号は使い方の誤り。計測では組めない指定）
+  if ("code" in resolved) refuseCode("flags:conflict");
+  stageRange = { start: resolved.start, end: resolved.end };
+  stageBoundary = stageLib.boundaryBefore(stageRange.start);
+}
 
 // 依頼文は定義ファイルの本から組む（行を改行でつなぐ。request.md にはその末尾に改行を 1 つ足す）
 const reqOf = (pid) => evalSet.byId.get(pid).requestText;
@@ -104,8 +152,9 @@ if (only && buildFrom === null) {
   if (unknown.length > 0) refuse(`--only に定義ファイル（${setIdShown}）に無い ID があります: ${[...shaped, ...(others > 0 ? [`形の違う ID ${others} 件`] : [])].join(",")}`, "only:unknown");
 }
 
-// --make-pairs（#513）：組を読み、採用した P（組の順）× 回数の対を書いて終える。子を起こさない。出力が既にあれば上書きしない
-if (makePairsOut !== null) {
+// --make-pairs（#513）：組を読み、採用した P（組の順）× 回数の対を書いて終える。子を起こさない。出力が既にあれば上書きしない。
+// 段の旗があれば（#545）、上流の照合のあとで上流の入力のある本だけの対を書く（下）
+if (makePairsOut !== null && !stageMode) {
   const fz = loadFrozenSet(resolve(buildFrom));
   if (fz.status === "missing") refuseCode("build-from:frozen-missing");
   if (fz.status !== "ok") refuseCode("build-from:frozen-invalid");
@@ -125,7 +174,7 @@ if (compare) {
 }
 
 // --build-from（#497）：組を読み、対象の本（採用した P。--only はその部分集合だけ）を決め、子を起こす前に包みを検査する（組に保存した検査の結果は信頼しない）
-let frozen = null, targets = null, fzLoaded = null;
+let frozen = null, targets = null, fzLoaded = null, checksList = [];
 const envelopeBytes = new Map();
 if (buildFrom !== null) {
   const fz = loadFrozenSet(resolve(buildFrom));
@@ -148,7 +197,7 @@ if (buildFrom !== null) {
   if (unknownAdopted.length > 0) refuseCode("build-from:unknown-p", { ids: unknownAdopted });
   targets = only ?? adoptedIds;
   // 比較（#513）では、比較元の checkout の工場の検査も同じ写しに当てる（両群の子が同じ包みを受け取れることを起こす前に確かめる）
-  const checksList = [await loadPlanFileChecks(distDir), ...(baseline === null ? [] : [await loadPlanFileChecks(baseline.distDir)])];
+  checksList = [await loadPlanFileChecks(distDir), ...(baseline === null ? [] : [await loadPlanFileChecks(baseline.distDir)])];
   for (const pid of evalSet.items.map((it) => it.id).filter((p) => targets.includes(p))) {
     const entry = fz.set.adopted.find((a) => a.pattern === pid), envPath = fz.envelopeOf.get(pid);
     if (!existsSync(envPath)) refuseCode("build-from:envelope-missing", { ids: [pid] });
@@ -176,12 +225,89 @@ if (buildFrom !== null) {
 let pairsValue = null, pairsBytes = null;
 if (compare) {
   try { pairsBytes = readFileSync(resolve(pairsArg)); pairsValue = JSON.parse(pairsBytes.toString("utf8")); } catch { refuseCode("compare:pairs-unreadable"); }
-  const problem = pairsProblem(pairsValue, { frozenSha256: fzLoaded.sha256, adopted: fzLoaded.set.adopted.map((a) => a.pattern) });
+  // 段だけの対の比較（#545）は、ここでは形だけを見る（上流の入力のある本との一致は上流の照合のあと）
+  const problem = stageMode ? pairsShapeProblem(pairsValue, { schema: STAGE_PAIRS_SCHEMA, groups: STAGE_COMPARE_GROUPS }) : pairsProblem(pairsValue, { frozenSha256: fzLoaded.sha256, adopted: fzLoaded.set.adopted.map((a) => a.pattern) });
   if (problem !== null) refuseCode(problem);
   RUNS = pairsValue.runs;
 }
+const idOf = (job) => `${job.pid}-r${job.r}`;
+const dirOf = (job) => join(outRoot, `${job.pid}-r${job.r}`);
+const isRec = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
 const jobs = [];
 for (const item of evalSet.items) { const pid = item.id; if (targets !== null ? !targets.includes(pid) : only && !only.includes(pid)) continue; for (let r = 1; r <= RUNS; r++) jobs.push({ pid, r }); }
+
+// #545：上流の照合。開始の段の直前の境界があるとき、子を起こす前に、本ごとの上流の段の走りの記録と境界の checkpoint を読み、工場の dist の照合の関数を当てる
+// （比較では両群の checkout の関数を同じ写しに当てる）。記録に残した照合の結果は信頼しない。断れば exit 4 で、子を 1 本も起こさない
+const stageInputs = new Map(); // 本の ID → { checkpointFile, checkpointBytes, recordBytes }（照合を通った上流の入力。子のディレクトリに写す）
+const stageAbsent = []; // 入力なしの本（上流が範囲の中の早期停止で境界に届かなかった本）
+const stageInputRecords = []; // 条件の params.stage_inputs（本ごとの上流の入力の SHA）
+let stageFrom = null; // 条件の params.stage_from（上流の計測の条件の指紋と範囲）
+if (stageMode && stageBoundary !== null) {
+  const root = resolve(stageFromArg);
+  const ctxs = [main, ...(baseline === null ? [] : [baseline])];
+  const libs = [stageLib, ...(baseline === null ? [] : [await loadStageLib(baseline.distDir)])];
+  // 上流の計測の条件：段単位の走りの版で、署名が中身と合い、同じ定義ファイルと凍結した組から流したもの。範囲が開始の段の直前の境界を通る
+  const up = loadConditions(root);
+  if (up.status === "missing") refuseStage("stage-from:conditions-missing");
+  if (up.status !== "ok") refuseStage("stage-from:conditions-unreadable");
+  const upCond = up.cond;
+  if (upCond.schema !== CONDITIONS_V6 || upCond.params?.mode !== STAGE_RUN_MODE || typeof upCond.signature !== "string" || upCond.signature !== conditionsSignature(upCond)) refuseStage("stage-from:conditions-invalid");
+  if (upCond.set?.sha256 !== evalSet.sha256 || upCond.frozen?.sha256 !== frozen.sha256) refuseStage("stage-from:conditions-frozen");
+  const upRange = { start: upCond.params.stage_start, end: upCond.params.stage_end };
+  if (!passesBoundary(stageLib, upRange, stageBoundary)) refuseStage("stage-from:range");
+  stageFrom = { conditions_sha256: sha256(readFileSync(join(root, "conditions.json"))), signature: upCond.signature, range: upRange };
+  const checkpointFile = stageLib.stageCheckpointFile(stageBoundary);
+  // 照合の関数に渡す確定した仕様（包みの検査の関数で読み直す。--build-from の事前の検査を通った写し）
+  const planOf = async (checks, pid) => { const parsed = checks.parsePlanFile(Buffer.from(envelopeBytes.get(pid)).toString("utf8")); const v = await checks.validatePlanFile({ envelope: parsed.envelope, source: reqOf(pid) + "\n", vocabularyVersion: checks.vocabularyVersion }); return v?.plan; };
+  const codeOf = (lib, code) => (Array.isArray(lib.STAGE_INPUT_CODES) && lib.STAGE_INPUT_CODES.includes(code) ? code : "stage-input:unknown");
+  for (const job of jobs) {
+    const id = idOf(job), upDir = join(root, id, "bundle"), entry = frozen.adopted.find((a) => a.pattern === job.pid);
+    // 上流の段の走りの記録：読める・形の版・範囲が上流の条件と同じ・確定した仕様と依頼文の SHA が凍結した組の値と同じ（読めない・壊れた記録は入力なしにしない）
+    let recordBytes = null, record = null;
+    try { recordBytes = readFileSync(join(upDir, stageLib.STAGE_RUN_RECORD_FILE)); record = JSON.parse(recordBytes.toString("utf8")); } catch { record = null; }
+    if (!isRec(record) || !Array.isArray(record.checkpoints)) refuseStage("stage-from:stage-input:unreadable", { ids: [id] });
+    if (record.schema_version !== stageLib.STAGE_RUN_RECORD_SCHEMA) refuseStage("stage-from:stage-input:version", { ids: [id] });
+    if (!isRec(record.range) || record.range.start !== upRange.start || record.range.end !== upRange.end) refuseStage("stage-from:record-range", { ids: [id] });
+    if (record.plan_sha256 !== entry.plan_sha256) refuseStage("stage-from:stage-input:plan-sha256", { ids: [id] });
+    if (record.source_sha256 !== entry.source_sha256) refuseStage("stage-from:stage-input:source-sha256", { ids: [id] });
+    if (!record.checkpoints.some((c) => isRec(c) && c.boundary === stageBoundary)) {
+      // 入力なし：境界の checkpoint を宣言せず、範囲の中の早期停止（停止の記録があり段の通過が偽）を示す本だけ。それ以外の宣言なしは断る
+      if (isRec(record.stopped) && record.stage_pass === false) { stageAbsent.push(id); stageInputRecords.push({ id, absent: true, record_sha256: sha256(recordBytes) }); continue; }
+      refuseStage("stage-from:stage-input:boundary", { ids: [id] });
+    }
+    // 境界に届いて checkpoint を宣言した本：材料が無い・壊れていれば工場の照合が断る（入力なしにしない）
+    let checkpointBytes = null;
+    try { checkpointBytes = readFileSync(join(upDir, checkpointFile)); } catch { checkpointBytes = null; }
+    for (let i = 0; i < libs.length; i++) {
+      const verified = await libs[i].verifyStageInput({
+        start: stageRange.start, checkpointText: checkpointBytes === null ? null : checkpointBytes.toString("utf8"), checkpointFile, recordText: recordBytes.toString("utf8"),
+        plan: await planOf(checksList[i], job.pid), planSha256: entry.plan_sha256, sourceSha256: entry.source_sha256,
+        vocabularyVersion: ctxs[i].factory.VOCABULARY_VERSION, contractVersion: ctxs[i].factory.CONTRACT_VERSION,
+      });
+      if (verified?.ok !== true) refuseStage(`stage-from:${codeOf(libs[i], verified?.code)}`, { ids: [id] });
+    }
+    stageInputs.set(id, { checkpointFile, checkpointBytes, recordBytes });
+    stageInputRecords.push({ id, checkpoint_sha256: sha256(checkpointBytes), record_sha256: sha256(recordBytes) });
+  }
+}
+/** 起こす本（入力なしの本を除く。段単位でない計測では予定した本の全部） */
+const launchJobs = jobs.filter((j) => !stageAbsent.includes(idOf(j)));
+/** 段だけの対の比較の対のファイルが結ぶ範囲と上流の条件の指紋（#545） */
+const stagePairsStage = stageMode ? { start: stageRange.start, end: stageRange.end, stage_from_sha256: stageFrom?.conditions_sha256 ?? null } : null;
+if (compare && stageMode) {
+  const problem = stagePairsProblem(pairsValue, { frozenSha256: fzLoaded.sha256, expected: launchJobs.map(idOf), stage: stagePairsStage });
+  if (problem !== null) refuseCode(problem);
+}
+// --make-pairs と段の旗（#545）：上流の入力のある本（採用した P の順 × 回数）だけで対を書いて終える。子を起こさない
+if (makePairsOut !== null) {
+  if (!Number.isInteger(RUNS) || RUNS < 1) refuseCode("flags:conflict");
+  if (existsSync(makePairsOut)) refuseCode("compare:pairs-exists");
+  const keys = fzLoaded.set.adopted.map((a) => a.pattern).filter((pid) => targets.includes(pid)).flatMap((pid) => Array.from({ length: RUNS }, (_, i) => ({ pid, r: i + 1 }))).filter((k) => !stageAbsent.includes(idOf(k)));
+  const pairsOut = makeStagePairs(keys, RUNS, fzLoaded.sha256, stagePairsStage);
+  writeFileSync(makePairsOut, JSON.stringify(pairsOut, null, 1) + "\n");
+  await new Promise((done) => process.stdout.write(`対を書きました: ${pairsOut.pairs.length} 対（上流の入力のある本。入力なし ${stageAbsent.length} 本は対に入れない）\n`, done));
+  process.exit(0);
+}
 // --script（#497）：流す本の題材の台本を読み、写すバイト列を決める（台本の無い本が 1 本でもあれば断る。定義ファイルの読み込みで取った指紋と同じ中身だけを写す）
 const scriptBytes = new Map();
 if (script) {
@@ -197,14 +323,14 @@ if (script) {
   }
 }
 
-const idOf = (job) => `${job.pid}-r${job.r}`;
-const dirOf = (job) => join(outRoot, `${job.pid}-r${job.r}`);
 // 子プロセスへ渡す引数を 1 か所で組み立て、条件のファイルもここから作る（既定値を別に手書きしない）。v1.1a の経路だけ末尾に --pipeline v1.1a を足す（#513）
 const argvFor = (cli, dir, pl) => {
   const argv = [cli, join(dir, "request.md"), "--out", join(dir, "bundle"), "--effort", effort, "--model", model, "--budget", String(perRunBudget), "--deadline", String(deadlineMin)];
   if (plan || planOnly) argv.push(plan ? "--plan" : "--plan-only", ...(script ? ["--script", join(dir, "script.json")] : ["--answers", join(dir, "answers.json")]));
   if (buildFrom !== null) argv.push("--plan-file", join(dir, "plan-file.json"));
   if (pl === "v1.1a") argv.push("--pipeline", "v1.1a");
+  // 段単位の走り（#545）：工場の開始・終了の段と、開始の段の直前の境界があれば本のディレクトリに写した上流の checkpoint
+  if (stageMode) argv.push("--stage-start", stageRange.start, "--stage-end", stageRange.end, ...(stageBoundary === null ? [] : ["--stage-input", join(dir, STAGE_INPUT_DIR, stageLib.stageCheckpointFile(stageBoundary))]));
   return argv;
 };
 const childArgsFor = (job) => argvFor(cliFile, dirOf(job), pipeline);
@@ -246,7 +372,8 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId })
   const limitTable = ctx.limits.STAGE_MAX_OUTPUT_TOKENS[effort] ?? ctx.limits.STAGE_MAX_OUTPUT_TOKENS[ctx.limits.DEFAULT_REASONING_EFFORT];
   const outputLimits = outputLimitsOf(limitTable);
   const measured = {
-    schema: "musunest-factory/agent-accept-conditions/v5",
+    // 段単位の走り（#545）のときだけ v6。旗を省いた計測は今までどおり v5
+    schema: stageMode ? CONDITIONS_V6 : "musunest-factory/agent-accept-conditions/v5",
     measurement_id: measurementId,
     source: { commit: head === null ? null : head.trim(), dirty: status === null ? null : status.trim().length > 0 },
     factory: { dist_dir: relative(ctx.checkout, ctx.distDir), fingerprint: distInfo.fingerprint, rebuilt: distInfo.mtime_ms !== null && (srcInfo.mtime_ms === null || distInfo.mtime_ms >= srcInfo.mtime_ms) },
@@ -269,8 +396,11 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId })
       stage_output_limits: outputLimits.v1,
       // #513：経路（v1 か v1.1a。省略は v1）と v1.1α の 4 段の上限（dist に無ければ null）
       pipeline: pl, stage_output_limits_v11a: outputLimits.v11a,
+      // #545：段単位の走りのときだけ。範囲・予算と締切の適用の単位（工場の dist の値）・上流の計測の条件の指紋（開始 T1 は null）・本ごとの上流の入力の SHA
+      ...(stageMode ? { stage_start: stageRange.start, stage_end: stageRange.end, budget_scope: stageLib.STAGE_BUDGET_SCOPE, stage_from: stageFrom, stage_inputs: stageInputRecords } : {}),
     },
-    child_args: js.map((j) => ({ id: idOf(j), argv: argvOf(j) })),
+    // 入力なしの本（#545）は起こさないので子の引数は null（予定の一覧には残す）
+    child_args: js.map((j) => ({ id: idOf(j), argv: stageAbsent.includes(idOf(j)) ? null : argvOf(j) })),
     // 採点の定義と集計のコードの指紋（<repo> の採点器と、組が実際に参照する採点の定義の実体）。署名からは外す：採点は生成のあとに全本へ同じ版を当てるもので、
     // 採点の出力が実際に実行した集計のコードの指紋をこの値と照合する（score-agent.mjs）。ただし source.commit・source.dirty は署名に残るので、
     // clean な checkout を編集したり採点だけの commit を積んだりすれば再開は断られる。外す効果があるのは source が変わらない場合に限る
@@ -282,6 +412,8 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId })
     frozen,
     // 比較の群の印（#513。--compare のときだけ。それ以外は null）：対のファイルの SHA・群・役割・profile。署名に入る
     comparison,
+    // 入力なしの本（#545。段単位の走りのときだけ）：子を起こす前に固定する本の ID と件数。署名に入る（採点は分母から黙って除かず別の行に出す）
+    ...(stageMode ? { stage_input_absent: { count: stageAbsent.length, ids: [...stageAbsent] } } : {}),
   };
   // 署名（--resume の一致の判定）から外すもの：started_at（補助）、scoring・post-hoc の scripts（上。live の scripts は入れる）、params.budget_usd（計測全体の停止の目安。
   // 予算で止まった計測を --budget-usd を上げて流し切れるようにする。工場 1 本の予算 factory_budget_usd は生成の条件なので残す）。
@@ -292,7 +424,7 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId })
   return { measured, signature };
 }
 
-const costOfDir = (dir) => { try { const sl = JSON.parse(readFileSync(join(dir, "summary.line.json"), "utf8")); return sl.plan_cost?.total_usd ?? sl.summary?.provider_cost_usd ?? 0; } catch { return 0; } };
+const costOfDir = (dir) => { try { const sl = JSON.parse(readFileSync(join(dir, "summary.line.json"), "utf8")); return sl.plan_cost?.total_usd ?? sl.summary?.provider_cost_usd ?? sl.stage_run?.provider_cost_usd ?? 0; } catch { return 0; } };
 
 let spent = 0, stop = null, stopCode = null, skipped = [], reopened = [], executed = [], runQueue = [];
 // この起動で有効な計測全体の目安の額（budget）と、初回の条件のファイルに記録した額。再開で変えたかどうかを起動の記録に残す
@@ -323,7 +455,6 @@ const FAILURE_KINDS = ["limit", "deadline", "budget", "call-limit", "timeout", "
 const STOP_VALUES = ["completed", "stagnation", "limit", "unresolved", "deadline", ...FAILURE_KINDS];
 const enumOf = (list, v) => (v === null || v === undefined ? null : list.includes(v) ? v : "unknown");
 const numOf = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
-const isRec = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
 /** 数の写像（試行・再試行・裁定の数）：工場の record.ts の既知の鍵だけを、どの階層でも名指しで写す（値は有限の数か null。未知の鍵は写さない） */
 const NOT_STARTED_KEYS = ["deadline", "budget", "limit", "timeout"], RETRY_KEYS = ["communication", "shape", "content"], ARBITRATION_KEYS = ["upheld", "overturned", "undecidable"];
 const ATTEMPT_NUMBER_KEYS = ["started", "responded", "errors", "cancelled_deadline", "cancelled_timeout"];
@@ -339,6 +470,12 @@ const summaryOf = (s) => ({
   stages: Array.isArray(s.stages) ? s.stages.map(stageOf) : [], arbitration: numsOf(s.arbitration, ARBITRATION_KEYS), failure: failureOf(s.failure),
 });
 const planCostOf = (c) => (c === null ? null : { schema_version: "musunest-factory/plan-build-cost/v1", plan_usd: numOf(c.plan_usd), build_usd: numOf(c.build_usd), total_usd: numOf(c.total_usd) });
+/** 段の走りの記録（#545。工場の --out の stage-run.json）から起動の記録へ写す欄：段の通過（真偽）・到達した段・停止（段と種類）・費用・終了コード。読めなければ null */
+const stageRunOf = (rec) => (!isRec(rec) ? null : {
+  stage_pass: typeof rec.stage_pass === "boolean" ? rec.stage_pass : null, reached_stage: enumOf(STAGE_IDS, rec.reached_stage ?? null),
+  stopped: !isRec(rec.stopped) ? null : { stage: enumOf(STAGE_IDS, rec.stopped.stage ?? null) ?? "unknown", kind: enumOf(FAILURE_KINDS, rec.stopped.kind ?? null) ?? "unknown" },
+  provider_cost_usd: numOf(rec.provider_cost_usd), exit_code: numOf(rec.exit_code),
+});
 
 /**
  * 1 本を流す。job.group があれば比較の群の本（#513）：本のディレクトリは <out>/<群>/<本>、入口と cwd はその群の checkout、子の引数は群の経路で組み、
@@ -353,6 +490,13 @@ const runOne = (job) => new Promise((resolve) => {
   if ((plan || planOnly) && !script) writeFileSync(join(dir, "answers.json"), "{}\n");
   if (script) writeFileSync(join(dir, "script.json"), scriptBytes.get(job.pid));
   if (buildFrom !== null) writeFileSync(join(dir, "plan-file.json"), envelopeBytes.get(job.pid));
+  // 段単位の走り（#545）：照合を通った上流の checkpoint と段の走りの記録を、そのままのバイト列で本のディレクトリに写す（工場は checkpoint の隣の記録を読む）
+  const si = stageInputs.get(idOf(job));
+  if (si !== undefined) {
+    mkdirSync(join(dir, STAGE_INPUT_DIR), { recursive: true });
+    writeFileSync(join(dir, STAGE_INPUT_DIR, si.checkpointFile), si.checkpointBytes);
+    writeFileSync(join(dir, STAGE_INPUT_DIR, stageLib.STAGE_RUN_RECORD_FILE), si.recordBytes);
+  }
   const cliArgs = group === null ? childArgsFor(job) : argvFor(group.ctx.cliFile, dir, group.pipeline);
   const t0 = Date.now();
   // 子を起こす直前の時刻（#497。凍結の規則が読む。終わる順に依らない）
@@ -370,16 +514,18 @@ const runOne = (job) => new Promise((resolve) => {
     const lines = out.split("\n").map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((x) => x !== null);
     const s = lines.filter((x) => x.schema_version === "commandagent.headless-summary/v1").at(-1) ?? null;
     const planCost = lines.filter((x) => x.schema_version === "musunest-factory/plan-build-cost/v1").at(-1) ?? null;
-    const cost = numOf(planCost?.total_usd) ?? numOf(s?.provider_cost_usd) ?? 0;
+    // 段単位の走り（#545）：要約の行は無いので、費用は工場の段の走りの記録から読む
+    const stageRun = stageMode ? stageRunOf((() => { try { return JSON.parse(readFileSync(join(dir, "bundle", stageLib.STAGE_RUN_RECORD_FILE), "utf8")); } catch { return null; } })()) : null;
+    const cost = numOf(planCost?.total_usd) ?? numOf(s?.provider_cost_usd) ?? stageRun?.provider_cost_usd ?? 0;
     const exitClass = exitClassOf(code, lines);
     (group === null ? exitClasses : group.exitClasses)[exitClass] += 1;
     // 記録は無害化する（#497）：子の出力の写しはバイト数と既知の版の行の数だけ、要約の verdict は既知の値か unknown。生の中身は stdout.log・stderr.log を開く
     // 要約と費用の行は列挙した欄と型だけ（summaryOf・planCostOf）
     const summary = s === null ? null : summaryOf(s);
-    writeFileSync(join(dir, "summary.line.json"), JSON.stringify({ exit: code, wall_s: (Date.now() - t0) / 1000, started_at: startedAt, exit_class: exitClass, summary, plan_cost: planCostOf(planCost), stderr_tail: tailOf(errBuf), stdout_tail: s === null ? tailOf(outBuf) : undefined, resumed: job.resumed === true }, null, 1));
+    writeFileSync(join(dir, "summary.line.json"), JSON.stringify({ exit: code, wall_s: (Date.now() - t0) / 1000, started_at: startedAt, exit_class: exitClass, summary, plan_cost: planCostOf(planCost), stderr_tail: tailOf(errBuf), stdout_tail: s === null ? tailOf(outBuf) : undefined, resumed: job.resumed === true, ...(stageMode ? { stage_run: stageRun } : {}) }, null, 1));
     spent += cost;
     if (group !== null) group.spent += cost;
-    console.log(`${group === null ? "" : `${job.group}/`}${idOf(job)} effort=${effort}${plan ? " plan" : ""}${planOnly ? " plan-only" : ""}${buildFrom !== null ? " build-from" : ""}${(group === null ? pipeline : group.pipeline) === "v1.1a" ? " pipeline=v1.1a" : ""}${job.resumed ? " resume" : ""} exit=${code} verdict=${s === null ? "none" : verdictOf(s.verdict) ?? "none"} cost=${Number(cost).toFixed(4)} ${Math.round((Date.now() - t0) / 1000)}s total=${spent.toFixed(3)}`);
+    console.log(`${group === null ? "" : `${job.group}/`}${idOf(job)} effort=${effort}${plan ? " plan" : ""}${planOnly ? " plan-only" : ""}${buildFrom !== null ? " build-from" : ""}${(group === null ? pipeline : group.pipeline) === "v1.1a" ? " pipeline=v1.1a" : ""}${stageMode ? ` stage=${stageRange.start}..${stageRange.end}` : ""}${job.resumed ? " resume" : ""} exit=${code} ${stageMode ? `stage_pass=${stageRun?.stage_pass ?? "none"}` : `verdict=${s === null ? "none" : verdictOf(s.verdict) ?? "none"}`} cost=${Number(cost).toFixed(4)} ${Math.round((Date.now() - t0) / 1000)}s total=${spent.toFixed(3)}`);
     resolve(cost);
   });
 });
@@ -411,7 +557,7 @@ async function runSingle() {
     }
     // 終わった本の費用を足してから、残りの本だけを起こす。既存の条件・全文・要約は上書きしない
     const remaining = [];
-    for (const job of jobs) {
+    for (const job of launchJobs) {
       const dir = dirOf(job);
       if (existsSync(join(dir, "summary.line.json"))) { skipped.push(idOf(job)); spent += costOfDir(dir); }
       else remaining.push(job);
@@ -420,7 +566,7 @@ async function runSingle() {
     runQueue = remaining;
   } else {
     writeFileSync(conditionsPath, JSON.stringify({ ...measured, started_at: new Date().toISOString(), signature }, null, 1));
-    runQueue = [...jobs];
+    runQueue = [...launchJobs];
   }
 
   const queue = [...runQueue];
@@ -453,7 +599,11 @@ async function runCompare() {
   // 出力先は新しい場所だけ（比較は再開しない）
   if (existsSync(outRoot) && readdirSync(outRoot).length > 0) refuseCode("compare:prior-output");
   const pairsSha = sha256(pairsBytes);
-  const ctxOf = { v1: baseline, "v1.1a": main };
+  // 群（#545）：段だけの対の比較は before（比較元）・after（候補）で、両群とも v1.1α の経路。それ以外は今までの v1・v1.1a
+  const GROUPS = stageMode ? STAGE_COMPARE_GROUPS : COMPARE_GROUPS, ROLES = stageMode ? STAGE_COMPARE_ROLES : COMPARE_ROLES;
+  const [baseGroup, candGroup] = GROUPS;
+  const pipelineOf = (g) => (stageMode ? "v1.1a" : g);
+  const ctxOf = { [baseGroup]: baseline, [candGroup]: main };
   // 工場の既定（子に渡す値の出どころ。片方だけ違えば、同じ引数でも条件の意味が揃わない）
   const defaultsOf = (ctx) => ({
     effort: ctx.factory.DEFAULT_EFFORT, budget_usd: ctx.factory.DEFAULT_BUDGET_USD, deadline_ms: ctx.factory.DEFAULT_DEADLINE_MS, model: ctx.openai.DEFAULT_OPENAI_MODEL,
@@ -463,7 +613,8 @@ async function runCompare() {
   // 正式な比較の条件（断らない。違った項目の名前だけ残す）。採点 v5 は採点の定義に rubric-v5.mjs があるとき
   const scoring = scoringOf();
   const baseHead = gitOut(baseline.checkout, ["rev-parse", "HEAD"]), baseStatus = gitOut(baseline.checkout, ["status", "--porcelain"]);
-  const { profile, mismatches } = compareProfile({
+  // 段だけの対の比較（#545）には正式な比較の条件（OFFICIAL_COMPARE。v1 と v1.1α の全体の比較）を当てない（profile は null）
+  const { profile, mismatches } = stageMode ? { profile: null, mismatches: [] } : compareProfile({
     baseline_commit: baseHead === null ? null : baseHead.trim(), baseline_dirty: baseStatus === null ? null : baseStatus.trim().length > 0,
     frozen_sha256: frozen.sha256, frozen_id: frozen.id, frozen_version: frozen.version, frozen_adopted: frozen.adopted.length,
     runs: RUNS, effort, deadline_min: deadlineMin, factory_budget_usd: perRunBudget, concurrency: CONC, budget_usd: budget,
@@ -472,44 +623,46 @@ async function runCompare() {
   // 条件に書く子の引数は checkout と出力先からの相対（比較元のパスを記録に写さない。実際の引数は本のディレクトリの絶対パス）
   const relArgvOf = (pl, ctx) => (job) => argvFor(relative(ctx.checkout, ctx.cliFile), idOf(job), pl);
   const conds = {};
-  for (const g of COMPARE_GROUPS) {
-    conds[g] = conditionsFor(ctxOf[g], { jobs, argvOf: relArgvOf(g, ctxOf[g]), pl: g, comparison: { pairs_sha256: pairsSha, group: g, role: COMPARE_ROLES[g], profile }, measurementId: basename(outRoot) });
+  for (const g of GROUPS) {
+    conds[g] = conditionsFor(ctxOf[g], { jobs, argvOf: relArgvOf(pipelineOf(g), ctxOf[g]), pl: pipelineOf(g), comparison: { pairs_sha256: pairsSha, group: g, role: ROLES[g], profile }, measurementId: basename(outRoot) });
   }
   // 照合：意図した差（工場の dist・commit・dirty・経路・v1.1α の上限の欄）を除いて、両群の条件が同じか。違えば項目の名前（固定の欄の名前）だけ出して断る
   const comparable = (c) => {
     const { source: _s, factory: _f, comparison: _c, params, child_args: childArgs, ...rest } = c;
     const { pipeline: _p, stage_output_limits_v11a: _l, ...p } = params;
-    return { ...rest, params: p, child_args: childArgs.map((x) => ({ id: x.id, argv: x.argv.filter((a, i, all) => !(a === "--pipeline" || all[i - 1] === "--pipeline")) })) };
+    return { ...rest, params: p, child_args: childArgs.map((x) => ({ id: x.id, argv: x.argv === null ? null : x.argv.filter((a, i, all) => !(a === "--pipeline" || all[i - 1] === "--pipeline")) })) };
   };
-  const a = comparable(conds.v1.measured), b = comparable(conds["v1.1a"].measured);
+  const a = comparable(conds[baseGroup].measured), b = comparable(conds[candGroup].measured);
   const differs = Object.keys({ ...a, ...b }).flatMap((k) => (k === "params" ? Object.keys({ ...a.params, ...b.params }).filter((pk) => JSON.stringify(a.params[pk]) !== JSON.stringify(b.params[pk])).map((pk) => `params.${pk}`) : JSON.stringify(a[k]) !== JSON.stringify(b[k]) ? [k] : []));
   if (differs.length > 0) refuseCode("compare:fingerprint-differs", { text: `違う項目: ${differs.join("・")}` });
-  // v1.1α の 4 段の上限は A1 の承認値（候補の群）
-  if (!limitsApproved(conds["v1.1a"].measured.params.stage_output_limits_v11a)) refuseCode("compare:limits-unapproved");
+  // v1.1α の 4 段の上限は A1 の承認値（候補の群。段だけの対の比較は両群とも v1.1α の経路なので両群）
+  if (!(stageMode ? GROUPS : [candGroup]).every((g) => limitsApproved(conds[g].measured.params.stage_output_limits_v11a))) refuseCode("compare:limits-unapproved");
 
   // ここから書く：対のファイルの写し・群ごとの条件・比較の記録
   mkdirSync(outRoot, { recursive: true });
   writeFileSync(join(outRoot, COMPARE_PAIRS_COPY), pairsBytes);
   const startedAt = new Date().toISOString();
-  for (const g of COMPARE_GROUPS) {
+  for (const g of GROUPS) {
     const dir = join(outRoot, g);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "conditions.json"), JSON.stringify({ ...conds[g].measured, started_at: startedAt, signature: conds[g].signature }, null, 1));
-    groupCtx[g] = { ctx: ctxOf[g], pipeline: g, dir, exitClasses: Object.fromEntries(EXIT_CLASSES.map((c) => [c, 0])), spent: 0, executed: [] };
+    groupCtx[g] = { ctx: ctxOf[g], pipeline: pipelineOf(g), dir, exitClasses: Object.fromEntries(EXIT_CLASSES.map((c) => [c, 0])), spent: 0, executed: [] };
   }
   const groupRecord = (g) => {
     const m = conds[g].measured;
     return {
-      role: COMPARE_ROLES[g], pipeline: g, source: m.source, factory: { fingerprint: m.factory.fingerprint, rebuilt: m.factory.rebuilt }, spec_engine: m.spec_engine.fingerprint,
+      role: ROLES[g], pipeline: pipelineOf(g), source: m.source, factory: { fingerprint: m.factory.fingerprint, rebuilt: m.factory.rebuilt }, spec_engine: m.spec_engine.fingerprint,
       prompt_documents: { contract: m.prompt_documents.contract.fingerprint, semantics: m.prompt_documents.semantics.sha256, vocabulary: m.prompt_documents.vocabulary.sha256 },
       stage_output_limits: m.params.stage_output_limits, stage_output_limits_v11a: m.params.stage_output_limits_v11a, defaults: defaultsOf(ctxOf[g]), conditions_signature: conds[g].signature,
     };
   };
-  const m1 = conds["v1.1a"].measured;
+  const m1 = conds[candGroup].measured;
   const record = {
-    schema: COMPARISON_SCHEMA, measurement_id: basename(outRoot), started_at: startedAt,
-    pairs: { sha256: pairsSha, count: pairsValue.pairs.length, runs: RUNS, groups: [...COMPARE_GROUPS] },
-    groups: Object.fromEntries(COMPARE_GROUPS.map((g) => [g, groupRecord(g)])),
+    schema: stageMode ? STAGE_COMPARISON_SCHEMA : COMPARISON_SCHEMA, measurement_id: basename(outRoot), started_at: startedAt,
+    // 段だけの対の比較（#545）：範囲・上流の計測の条件の指紋・入力なしの本の件数（本の ID は群の条件に）
+    ...(stageMode ? { stage: { start: stageRange.start, end: stageRange.end, stage_from_sha256: stageFrom?.conditions_sha256 ?? null, input_absent: stageAbsent.length } } : {}),
+    pairs: { sha256: pairsSha, count: pairsValue.pairs.length, runs: RUNS, groups: [...GROUPS] },
+    groups: Object.fromEntries(GROUPS.map((g) => [g, groupRecord(g)])),
     shared: {
       set: { sha256: m1.set.sha256, id: m1.set.id, version: m1.set.version }, scoring: m1.scoring.fingerprint, scripts: m1.scripts.fingerprint, judge: m1.judge.configuration,
       frozen: { sha256: frozen.sha256, id: frozen.id, version: frozen.version, adopted: frozen.adopted.length }, document: m1.document.sha256,
@@ -519,10 +672,10 @@ async function runCompare() {
     concurrency: CONC, budget_usd: budget, reserve_per_run_usd: perRunBudget, scoring_cost_usd: SCORING_COST_USD,
   };
   writeFileSync(join(outRoot, COMPARISON_FILE), JSON.stringify({ ...record, signature: sha256(JSON.stringify(record)) }, null, 1));
-  console.log(`比較: 対 ${pairsValue.pairs.length}・profile ${profile}${mismatches.length > 0 ? `（違う項目: ${mismatches.join("・")}）` : ""}・並列 ${CONC}・上限 ${budget} USD・1 本の予約 ${perRunBudget} USD`);
+  console.log(`比較: 対 ${pairsValue.pairs.length}・${stageMode ? `段 ${stageRange.start}..${stageRange.end}（入力なし ${stageAbsent.length} 本は対に入れない）` : `profile ${profile}`}${mismatches.length > 0 ? `（違う項目: ${mismatches.join("・")}）` : ""}・並列 ${CONC}・上限 ${budget} USD・1 本の予約 ${perRunBudget} USD`);
 
   // 起動の順：対の順 × 先行順を 1 本の待ち行列にし、枠（両群の合計の並列）が空くたびに先頭を起こす。起こす直前に全体の予算を確かめる（D17）
-  const queue = pairsValue.pairs.flatMap((p) => [p.first, COMPARE_GROUPS.find((g) => g !== p.first)].map((g) => ({ pid: p.pid, r: p.r, group: g })));
+  const queue = pairsValue.pairs.flatMap((p) => [p.first, GROUPS.find((g) => g !== p.first)].map((g) => ({ pid: p.pid, r: p.r, group: g })));
   const launched = new Set(), inflight = new Set();
   let runningAtStop = null;
   while (queue.length > 0) {
@@ -539,14 +692,14 @@ async function runCompare() {
   await Promise.all(inflight);
   // 群ごとの起動の記録（今までと同じ形。採点の照合が止まった理由のコードを読む）
   const now = Date.now();
-  for (const g of COMPARE_GROUPS) {
+  for (const g of GROUPS) {
     const gc = groupCtx[g];
-    const pending = jobs.map(idOf).filter((id) => !gc.executed.includes(id));
+    const pending = launchJobs.map(idOf).filter((id) => !gc.executed.includes(id));
     writeFileSync(join(gc.dir, `run-${now}.json`), JSON.stringify({ finished_at: new Date().toISOString(), mode: "fresh", executed: gc.executed, pending, stop, stop_code: stopCode, budget_usd: budget, initial_budget_usd: budget, budget_changed: false, spent_usd: gc.spent, exit_classes: gc.exitClasses }, null, 1));
   }
   // 比較の起動の記録：対ごとの状態（両方・先行だけ・未起動）・起こさなかった本・止まった理由と符号・済みの額・止めたときに走っていた本の数
   const pairStates = pairsValue.pairs.map((p) => {
-    const second = COMPARE_GROUPS.find((g) => g !== p.first), id = idOf(p);
+    const second = GROUPS.find((g) => g !== p.first), id = idOf(p);
     const state = launched.has(`${second}/${id}`) ? "both" : launched.has(`${p.first}/${id}`) ? "first-only" : "unstarted";
     return { pid: p.pid, r: p.r, first: p.first, state };
   });
@@ -554,7 +707,7 @@ async function runCompare() {
   writeFileSync(join(outRoot, `${COMPARE_RUN_PREFIX}${now}.json`), JSON.stringify({
     schema: COMPARE_RUN_SCHEMA, finished_at: new Date().toISOString(), pairs: pairStates, not_launched: notLaunched, launched: launched.size,
     stop, stop_code: stopCode, budget_usd: budget, reserve_per_run_usd: perRunBudget, spent_usd: spent, running_at_stop: runningAtStop,
-    spent_by_group: Object.fromEntries(COMPARE_GROUPS.map((g) => [g, groupCtx[g].spent])), exit_classes: Object.fromEntries(COMPARE_GROUPS.map((g) => [g, groupCtx[g].exitClasses])),
+    spent_by_group: Object.fromEntries(GROUPS.map((g) => [g, groupCtx[g].spent])), exit_classes: Object.fromEntries(GROUPS.map((g) => [g, groupCtx[g].exitClasses])),
   }, null, 1));
   console.log("done", stop ?? "", "spent", spent.toFixed(4));
 }

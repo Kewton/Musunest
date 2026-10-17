@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1561,5 +1561,337 @@ test("#513 (g) 漏えい：目印を対のファイル・比較元のパス・�
     texts.forEach((t, i) => assert.ok(!t.includes(MARK), `記録 ${i} に目印が出た`));
     assert.ok(readFileSync(join(out, "v1", "P1-r1", "stdout.log"), "utf8").includes(MARK), "生の標準出力には残る");
     assert.ok(readFileSync(join(out, "pairs.json"), "utf8").includes(MARK), "対の写しは生のまま");
+  });
+});
+
+// ── #545：段単位の走り（--stage-start・--stage-end・--stage-from）と段だけの対の比較。README §5.11
+// 偽物の工場の dist に、段の表と照合の関数（packages/factory/src/v11a/bundle-v11a.ts の verifyStageInput と同じ順と符号。SHA は JSON の SHA-256 で代える）を置く。
+// 偽物の工場の入口は段の旗を受け、FAKE_STAGE（本の ID → stop）の本は範囲の最初の段で早期停止して checkpoint を書かない。それ以外は範囲の中の境界の checkpoint を書く
+const fakeStageLib = String.raw`import { appendFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+const h = (t) => createHash("sha256").update(t).digest("hex");
+export const STAGE_STARTS = ["name-table", "test-spec", "write"];
+export const STAGE_ENDS = ["semantic-check", "test-spec", "judge"];
+export const STAGE_BOUNDARIES = ["t1-t2", "t2-b1"];
+const POS = { "name-table": 0, "semantic-check": 1, "test-spec": 2, write: 3, judge: 4 };
+export const STAGE_INPUT_CODES = ["stage-input:unreadable", "stage-input:boundary", "stage-input:version", "stage-input:digest", "stage-input:plan-sha256", "stage-input:source-sha256", "stage-input:table-sha256", "stage-input:semantic-sha256", "stage-input:targets", "stage-input:carry-over", "stage-input:suite-sha256"];
+export const STAGE_CHECKPOINT_SCHEMA = "musunest.factory.v11a-stage-checkpoint/v1";
+export const STAGE_RUN_RECORD_SCHEMA = "musunest.factory.v11a-stage-run/v1";
+export const STAGE_RUN_RECORD_FILE = "stage-run.json";
+export const STAGE_BUDGET_SCOPE = "stage-run";
+export const stageCheckpointFile = (b) => "stage-checkpoint-" + b + ".json";
+export function boundaryBefore(start) { return start === "test-spec" ? "t1-t2" : start === "write" ? "t2-b1" : null; }
+export function resolveStageRange({ start = "name-table", end = "judge", hasInput }) {
+  if (!STAGE_STARTS.includes(start) || !STAGE_ENDS.includes(end)) return { code: "stage-range:unknown" };
+  if (POS[start] > POS[end]) return { code: "stage-range:order" };
+  const needed = boundaryBefore(start);
+  if (needed === null && hasInput) return { code: "stage-input:not-needed" };
+  if (needed !== null && !hasInput) return { code: "stage-input:missing" };
+  return { start, end };
+}
+const obj = (t) => { if (t === null) return null; try { const v = JSON.parse(t); return v !== null && typeof v === "object" && !Array.isArray(v) ? v : null; } catch { return null; } };
+const fail = (code) => ({ ok: false, code });
+export async function verifyStageInput(input) {
+  if (process.env.FAKE_VERIFY_LOG) appendFileSync(process.env.FAKE_VERIFY_LOG, import.meta.url + "\n");
+  const needed = boundaryBefore(input.start);
+  if (needed === null) return fail("stage-input:boundary");
+  const cp = obj(input.checkpointText), rec = obj(input.recordText);
+  if (cp === null || rec === null) return fail("stage-input:unreadable");
+  if (cp.boundary !== needed) return fail("stage-input:boundary");
+  const declared = Array.isArray(rec.checkpoints) ? rec.checkpoints.find((e) => e && e.boundary === needed && e.path === input.checkpointFile) : undefined;
+  if (!declared || typeof declared.output_digest !== "string") return fail("stage-input:boundary");
+  if (cp.schema_version !== STAGE_CHECKPOINT_SCHEMA || rec.schema_version !== STAGE_RUN_RECORD_SCHEMA || cp.versions?.vocabulary !== input.vocabularyVersion || cp.versions?.contract !== input.contractVersion) return fail("stage-input:version");
+  if (h(JSON.stringify(cp)) !== declared.output_digest) return fail("stage-input:digest");
+  if (cp.plan_sha256 !== input.planSha256) return fail("stage-input:plan-sha256");
+  if (cp.source_sha256 !== input.sourceSha256) return fail("stage-input:source-sha256");
+  if (input.plan === null || typeof input.plan !== "object") return fail("stage-input:targets");
+  if (h(JSON.stringify(cp.name_table?.rows)) !== cp.name_table?.table_sha256) return fail("stage-input:table-sha256");
+  if (cp.semantic_check?.table_sha256 !== cp.name_table.table_sha256) return fail("stage-input:semantic-sha256");
+  if (input.start === "write" && h(JSON.stringify(cp.test_spec?.suite)) !== cp.test_spec?.suite_sha256) return fail("stage-input:suite-sha256");
+  return { ok: true, resume: {}, input: { checkpoint: input.checkpointFile, boundary: needed, output_digest: declared.output_digest } };
+}
+`;
+const fakeStageCli = String.raw`import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+export const DEFAULT_EFFORT = "high";
+export const DEFAULT_BUDGET_USD = 0.3;
+export const DEFAULT_DEADLINE_MS = 600000;
+export const API_KEY_ENV = "OPENAI_API_KEY";
+export const JEV_API_KEY_ENV = "JEV_API_KEY";
+export const VOCABULARY_VERSION = "v1";
+export const CONTRACT_VERSION = "v0.2";
+const isEntry = () => { try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } };
+const h = (t) => createHash("sha256").update(t).digest("hex");
+const map = (k) => { try { return JSON.parse(process.env[k] ?? "{}"); } catch { return {}; } };
+const val = (flag) => { const i = process.argv.indexOf(flag); return i >= 0 ? process.argv[i + 1] : undefined; };
+if (isEntry()) {
+  const outDir = val("--out"), runDir = dirname(outDir), id = basename(runDir), tag = basename(dirname(runDir)) + "/" + id;
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(join(runDir, "received-argv.json"), JSON.stringify(process.argv.slice(1)));
+  writeFileSync(join(runDir, "received-cwd.json"), JSON.stringify(process.cwd()));
+  if (process.env.FAKE_SPAWN_LOG) appendFileSync(process.env.FAKE_SPAWN_LOG, tag + "\n");
+  const start = val("--stage-start"), end = val("--stage-end");
+  if (start === undefined) {
+    process.stdout.write(JSON.stringify({ schema_version: "commandagent.headless-summary/v1", verdict: "partial", provider_cost_usd: 0.01 }) + "\n");
+  } else {
+    const env = JSON.parse(readFileSync(val("--plan-file"), "utf8"));
+    const stop = map("FAKE_STAGE")[id] === "stop";
+    const rows = [{ id: "R1", name: "n-" + id.split("-")[0] }, { id: "R2", name: "m-" + id.split("-")[0] }];
+    const table_sha256 = h(JSON.stringify(rows));
+    const suite = { tests: [{ id: "T1", target: "R1" }] };
+    const cpOf = (boundary) => ({ schema_version: "musunest.factory.v11a-stage-checkpoint/v1", boundary, versions: { vocabulary: "v1", contract: "v0.2", prompt: "v1.1a", factory: "0.0.0" }, plan_sha256: env.plan_sha256, source_sha256: env.source_sha256, name_table: { table_sha256, rows }, semantic_check: { table_sha256, targets: ["R1"], judgments: [{ requirementId: "R1", verdict: "accept" }] }, ...(boundary === "t2-b1" ? { test_spec: { suite_sha256: h(JSON.stringify(suite)), suite } } : {}) });
+    const crossed = stop ? [] : [...(start === "name-table" ? ["t1-t2"] : []), ...(start !== "write" && end !== "semantic-check" ? ["t2-b1"] : [])];
+    const checkpoints = crossed.map((b) => { const cp = cpOf(b), path = "stage-checkpoint-" + b + ".json"; writeFileSync(join(outDir, path), JSON.stringify(cp, null, 2) + "\n"); return { boundary: b, path, output_digest: h(JSON.stringify(cp)) }; });
+    const record = { schema_version: "musunest.factory.v11a-stage-run/v1", range: { start, end }, input: null, plan_sha256: env.plan_sha256, source_sha256: env.source_sha256, checkpoints, reached_stage: stop ? start : end, budget_scope: "stage-run", provider_cost_usd: Number(process.env.FAKE_COST ?? "0.01"), duration_secs: 1, stages: [{ stage: start, status: stop ? "failed" : "ok", calls: 1, duration_ms: 1 }], stopped: stop ? { stage: start, kind: "unmet" } : null, stage_pass: !stop, return_to_plan: false, exit_code: stop ? 1 : 0 };
+    writeFileSync(join(outDir, "stage-run.json"), JSON.stringify(record, null, 2) + "\n");
+    process.stdout.write(JSON.stringify({ stage_pass: record.stage_pass, reached_stage: record.reached_stage, budget_scope: "stage-run", exit_code: record.exit_code }) + "\n");
+    process.exitCode = record.exit_code;
+  }
+}
+`;
+const PIDS545 = Array.from({ length: 10 }, (_, i) => `P${i + 1}`);
+const IDS545 = PIDS545.flatMap((p) => [1, 2, 3].map((r) => `${p}-r${r}`));
+/** 上流で境界に届かない（範囲の最初の段で早期停止する）本：30 本のうち 15 本（P1〜P5 の全回） */
+const STOPPED545 = IDS545.slice(0, 15);
+/** 段単位の偽物のリポジトリ：段の表と照合の関数・段の旗を受ける入口・v1.1α の 4 段の上限（承認値）。凍結した組は P1〜P10 を採用 */
+function makeStageRepo(base, name = "stage") {
+  const repo = makeRepo(join(base, name));
+  mkdirSync(join(repo, "packages/factory/dist/v11a"), { recursive: true });
+  writeFileSync(join(repo, "packages/factory/dist/v11a/bundle-v11a.js"), fakeStageLib);
+  writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeStageCli);
+  writeFileSync(join(repo, "packages/factory/dist/limits.js"), limitsJs(V14_LIMITS));
+  return repo;
+}
+const frozen545 = (base, repo) => writeFrozen(join(base, "fz-545"), repo, { envelopes: Object.fromEntries(PIDS545.map((p) => [p, envelopeOf(p)])) });
+const stageArgs = (fz, extra) => ["--runs", "3", "--concurrency", "4", "--build-from", fz, "--pipeline", "v1.1a", ...extra];
+/** 上流（開始 T1・終了 T2'）を流す。STOPPED545 の本は早期停止 */
+function runUpstream(repo, out, fz, log) {
+  const r = runAgent(repo, out, stageArgs(fz, ["--stage-start", "name-table", "--stage-end", "test-spec"]), { FAKE_SPAWN_LOG: log, FAKE_STAGE: JSON.stringify(Object.fromEntries(STOPPED545.map((id) => [id, "stop"]))) });
+  assert.equal(r.status, 0, r.stderr);
+  return out;
+}
+/** 段の入力の照合の断り：exit 4・期待した符号と本の ID の 1 行・子 0 本・出力先に何も書かない */
+function assertStageRefused(r, code, ids, log, spawned, out, label = code) {
+  assert.equal(r.status, 4, `${label}: ${r.stderr}`);
+  assert.equal(r.stderr.trim().split("\n").length, 1, `${label}: 標準エラーが 1 行でない`);
+  assert.ok(r.stderr.includes(`[${code}]`), `${label}: 符号が違う: ${r.stderr}`);
+  if (ids !== null) assert.match(r.stderr, new RegExp(` ids=${ids.join(",")} count=${ids.length}$`, "m"), label);
+  assert.equal(spawnCount(log), spawned, `${label}: 子を起こした`);
+  assertNothingWritten(out, label);
+}
+/** 上流の出力を写して 1 本の記録を書き換える（edit(本のディレクトリ) を当てる） */
+function tamperUpstream(up, dest, id, edit) {
+  cpSync(up, dest, { recursive: true });
+  edit(join(dest, id, "bundle"));
+  return dest;
+}
+
+test("#545 子の引数と条件：開始 T1 は子に --stage-start・--stage-end だけを足し（--stage-input 無し）、条件は v6・stage-run・範囲・budget_scope・stage_from null。開始 B1 は上流の入力のある 15 本だけを起こし、子は本のディレクトリに写した上流の checkpoint を --stage-input で受け、条件に本ごとの入力の SHA と入力なし 15", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo(base), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = runUpstream(repo, join(base, "up"), fz, log);
+    assert.equal(spawnCount(log), 30, "上流は 30 本");
+    const upCond = readJson(join(up, "conditions.json"));
+    assert.equal(upCond.schema, "musunest-factory/agent-accept-conditions/v6");
+    assert.deepEqual([upCond.params.mode, upCond.params.stage_start, upCond.params.stage_end, upCond.params.budget_scope, upCond.params.stage_from], ["stage-run", "name-table", "test-spec", "stage-run", null]);
+    assert.deepEqual(upCond.params.stage_inputs, []);
+    assert.deepEqual(upCond.stage_input_absent, { count: 0, ids: [] });
+    const upArgv = readJson(join(up, "P1-r1", "received-argv.json"));
+    assert.deepEqual(upArgv.slice(-6), ["--pipeline", "v1.1a", "--stage-start", "name-table", "--stage-end", "test-spec"]);
+    assert.equal(upCond.params.factory_budget_usd, 0.3, "予算と締切は段の走り 1 本ごとに工場へ渡す");
+    assert.equal(upArgv[upArgv.indexOf("--budget") + 1], "0.3");
+    // 開始 B1
+    const out = join(base, "b1");
+    const r = runAgent(repo, out, stageArgs(fz, ["--stage-start", "write", "--stage-from", up]), { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(spawnCount(log), 45, "上流の入力のある 15 本だけを起こす");
+    const cond = readJson(join(out, "conditions.json"));
+    assert.equal(cond.schema, "musunest-factory/agent-accept-conditions/v6");
+    assert.deepEqual([cond.params.mode, cond.params.stage_start, cond.params.stage_end, cond.params.budget_scope], ["stage-run", "write", "judge", "stage-run"]);
+    assert.equal(cond.stage_input_absent.count, 15);
+    assert.deepEqual(cond.stage_input_absent.ids, STOPPED545);
+    assert.equal(cond.params.stage_from.conditions_sha256, sha256(readFileSync(join(up, "conditions.json"))), "上流の計測の条件の指紋");
+    assert.deepEqual(cond.params.stage_from.range, { start: "name-table", end: "test-spec" });
+    assert.equal(cond.child_args.length, 30, "予定の一覧は 30 本のまま");
+    for (const id of IDS545) {
+      const entry = cond.params.stage_inputs.find((x) => x.id === id), ca = cond.child_args.find((x) => x.id === id);
+      const upRecord = readFileSync(join(up, id, "bundle", "stage-run.json"));
+      assert.equal(entry.record_sha256, sha256(upRecord), id);
+      if (STOPPED545.includes(id)) {
+        assert.equal(entry.absent, true, id);
+        assert.equal(ca.argv, null, `${id}: 入力なしの本の子の引数は null`);
+        assert.ok(!existsSync(join(out, id)), `${id}: 起こさない`);
+        continue;
+      }
+      const upCp = readFileSync(join(up, id, "bundle", "stage-checkpoint-t2-b1.json"));
+      assert.equal(entry.checkpoint_sha256, sha256(upCp), id);
+      const dir = join(out, id), argv = readJson(join(dir, "received-argv.json"));
+      assert.deepEqual(argv.slice(-8), ["--pipeline", "v1.1a", "--stage-start", "write", "--stage-end", "judge", "--stage-input", join(dir, "stage-input", "stage-checkpoint-t2-b1.json")]);
+      assert.ok(readFileSync(join(dir, "stage-input", "stage-checkpoint-t2-b1.json")).equals(upCp), `${id}: checkpoint の写し`);
+      assert.ok(readFileSync(join(dir, "stage-input", "stage-run.json")).equals(upRecord), `${id}: 記録の写し`);
+      const sl = readJson(join(dir, "summary.line.json"));
+      assert.deepEqual(sl.stage_run, { stage_pass: true, reached_stage: "judge", stopped: null, provider_cost_usd: 0.01, exit_code: 0 });
+      assert.equal(sl.summary, null);
+    }
+    assert.match(r.stdout, /P6-r1 effort=high build-from pipeline=v1\.1a stage=write\.\.judge exit=0 stage_pass=true cost=0\.0100/);
+    assert.ok(!/verdict=/.test(r.stdout), "段の通過を verdict の名前で出さない");
+    const run = readJson(join(out, runRecords(out).at(-1)));
+    assert.equal(run.executed.length, 15);
+    assert.deepEqual(run.pending, []);
+  });
+});
+
+test("#545 範囲を変えた --resume は resume:signature で断り（子 0 本・何も変えない）、同じ範囲なら残りだけを起こす", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo(base), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const out = join(base, "out"), common = ["--only", "P1", "--runs", "2", "--concurrency", "1", "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "name-table"];
+    assert.equal(runAgent(repo, out, [...common, "--stage-end", "semantic-check"], { FAKE_SPAWN_LOG: log }).status, 0);
+    rmSync(join(out, "P1-r2"), { recursive: true, force: true });
+    const before = treeOf(out), n0 = spawnCount(log);
+    assertResumeRefused(runAgent(repo, out, [...common, "--stage-end", "test-spec", "--resume"], { FAKE_SPAWN_LOG: log }), "resume:signature", out, before, "範囲を変えた再開");
+    assert.equal(spawnCount(log), n0);
+    const ok = runAgent(repo, out, [...common, "--stage-end", "semantic-check", "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(spawnCount(log), n0 + 1);
+  });
+});
+
+test("#545 照合：上流の 1 本の表の記録を 1 バイト変えた（出力ダイジェストを書き直した）上流は exit 4・stage-from:stage-input:table-sha256 とその本の ID、書き直さなければ digest。届いたのに checkpoint を消した本・記録を壊した本は unreadable で、入力なしに数えない。どれも子 0 本・何も書かない", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo(base), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = runUpstream(repo, join(base, "up"), fz, log);
+    const spawned = spawnCount(log), target = "P7-r2";
+    const flipCp = (rewriteDigest) => (dir) => {
+      const cpPath = join(dir, "stage-checkpoint-t2-b1.json"), cp = readJson(cpPath);
+      const name = cp.name_table.rows[0].name;
+      cp.name_table.rows[0].name = name.slice(0, -1) + (name.endsWith("x") ? "y" : "x");
+      writeFileSync(cpPath, JSON.stringify(cp, null, 2) + "\n");
+      if (rewriteDigest) {
+        const recPath = join(dir, "stage-run.json"), rec = readJson(recPath);
+        rec.checkpoints = rec.checkpoints.map((c) => (c.boundary === "t2-b1" ? { ...c, output_digest: sha256(JSON.stringify(cp)) } : c));
+        writeFileSync(recPath, JSON.stringify(rec, null, 2) + "\n");
+      }
+    };
+    const cases = [
+      ["table-sha256", flipCp(true), "stage-from:stage-input:table-sha256"],
+      ["digest", flipCp(false), "stage-from:stage-input:digest"],
+      ["checkpoint-removed", (dir) => rmSync(join(dir, "stage-checkpoint-t2-b1.json")), "stage-from:stage-input:unreadable"],
+      ["record-broken", (dir) => writeFileSync(join(dir, "stage-run.json"), "{"), "stage-from:stage-input:unreadable"],
+    ];
+    for (const [label, edit, code] of cases) {
+      const tampered = tamperUpstream(up, join(base, `up-${label}`), target, edit);
+      const out = join(base, `out-${label}`);
+      assertStageRefused(runAgent(repo, out, stageArgs(fz, ["--stage-start", "write", "--stage-from", tampered]), { FAKE_SPAWN_LOG: log }), code, [target], log, spawned, out, label);
+    }
+    // 早期停止した本（入力なし）の記録を壊しても、入力なしにせず unreadable で断る
+    const brokenAbsent = tamperUpstream(up, join(base, "up-absent-broken"), STOPPED545[0], (dir) => writeFileSync(join(dir, "stage-run.json"), "[]"));
+    assertStageRefused(runAgent(repo, join(base, "out-ab"), stageArgs(fz, ["--stage-start", "write", "--stage-from", brokenAbsent]), { FAKE_SPAWN_LOG: log }), "stage-from:stage-input:unreadable", [STOPPED545[0]], log, spawned, join(base, "out-ab"), "absent-broken");
+    // 上流の条件：無い・範囲が境界を通らない（終了 T1'' の上流から開始 B1）
+    const noCond = tamperUpstream(up, join(base, "up-nocond"), target, () => {});
+    rmSync(join(noCond, "conditions.json"));
+    assertStageRefused(runAgent(repo, join(base, "out-nc"), stageArgs(fz, ["--stage-start", "write", "--stage-from", noCond]), { FAKE_SPAWN_LOG: log }), "stage-from:conditions-missing", null, log, spawned, join(base, "out-nc"), "conditions-missing");
+    const short = join(base, "up-short");
+    assert.equal(runAgent(repo, short, stageArgs(fz, ["--stage-start", "name-table", "--stage-end", "semantic-check"]), { FAKE_SPAWN_LOG: log }).status, 0);
+    const n1 = spawnCount(log);
+    assertStageRefused(runAgent(repo, join(base, "out-short"), stageArgs(fz, ["--stage-start", "write", "--stage-from", short]), { FAKE_SPAWN_LOG: log }), "stage-from:range", null, log, n1, join(base, "out-short"), "range");
+    // 対照：同じ上流で開始 T2 は t1-t2 の checkpoint を受けて流れる（全 30 本が境界 t1-t2 に… 早期停止の 15 本は t1-t2 も無いので入力なし）
+    const t2 = join(base, "out-t2");
+    const ok = runAgent(repo, t2, stageArgs(fz, ["--stage-start", "test-spec", "--stage-end", "test-spec", "--stage-from", up]), { FAKE_SPAWN_LOG: log });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(spawnCount(log), n1 + 15);
+    assert.equal(readJson(join(t2, "conditions.json")).stage_input_absent.count, 15);
+  });
+});
+
+test("#545 組めない指定は flags:conflict（子 0 本・何も書かない）：開始 T2 で --stage-from が無い・開始 T1 で付いた・v1.1α の経路の旗が無い・凍結した組が無い・表に無い段・開始が終了より後・値の無い旗", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo(base), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = runUpstream(repo, join(base, "up"), fz, log);
+    const spawned = spawnCount(log);
+    const cases = [
+      ["t2-without-from", ["--runs", "3", "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "test-spec"]],
+      ["b1-without-from", ["--runs", "3", "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "write"]],
+      ["t1-with-from", ["--runs", "3", "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "name-table", "--stage-from", up]],
+      ["from-only", ["--runs", "3", "--build-from", fz, "--pipeline", "v1.1a", "--stage-from", up]],
+      ["no-pipeline", ["--runs", "3", "--build-from", fz, "--stage-start", "write", "--stage-from", up]],
+      ["pipeline-v1", ["--runs", "3", "--build-from", fz, "--pipeline", "v1", "--stage-start", "write", "--stage-from", up]],
+      ["no-build-from", ["--runs", "3", "--pipeline", "v1.1a", "--stage-start", "name-table"]],
+      ["unknown-stage", ["--runs", "3", "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "design"]],
+      ["order", ["--runs", "3", "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "write", "--stage-end", "test-spec", "--stage-from", up]],
+      ["empty", ["--runs", "3", "--build-from", fz, "--pipeline", "v1.1a", "--stage-end"]],
+    ];
+    for (const [label, extra] of cases) {
+      const out = join(base, `out-${label}`);
+      assertRefused(runAgent(repo, out, extra, { FAKE_SPAWN_LOG: log }), "flags:conflict", log, spawned, label);
+      assertNothingWritten(out, label);
+    }
+  });
+});
+
+test("#545 旗を省けば今と同じ：段の dist がある checkout でも、段の旗の無い --build-from は条件 v5・段の欄なし・子の引数に段の旗なし・起動の記録に stage_run なし", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo(base), fz = frozen545(base, repo);
+    const out = join(base, "out");
+    const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.1a"]);
+    assert.equal(r.status, 0, r.stderr);
+    const cond = readJson(join(out, "conditions.json"));
+    assert.equal(cond.schema, "musunest-factory/agent-accept-conditions/v5");
+    assert.equal(cond.params.mode, "build-from");
+    for (const k of ["stage_start", "stage_end", "budget_scope", "stage_from", "stage_inputs"]) assert.ok(!(k in cond.params), k);
+    assert.ok(!("stage_input_absent" in cond));
+    const dir = join(out, "P1-r1");
+    assert.deepEqual(readJson(join(dir, "received-argv.json")).slice(-2), ["--pipeline", "v1.1a"]);
+    assert.ok(!("stage_run" in readJson(join(dir, "summary.line.json"))));
+    assert.ok(!existsSync(join(dir, "stage-input")));
+    assert.match(r.stdout, /P1-r1 effort=high build-from pipeline=v1\.1a exit=0 verdict=partial cost=/);
+  });
+});
+
+test("#545 段だけの対の比較：--make-pairs と段の旗は上流の入力のある 15 本だけで対を書き（交互の順）、--compare の群は before（比較元の checkout）・after（<repo>）で両群とも v1.1α の経路。両群の子は同じ本に同じ上流の入力のバイト列を受け、両群の照合の関数を当てる", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo(base, "cand"), baseline = makeStageRepo(base, "base"), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = runUpstream(repo, join(base, "up"), fz, log);
+    const pairsPath = join(base, "pairs.json");
+    const mp = runAgent(repo, join(base, "unused"), ["--make-pairs", pairsPath, "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "write", "--stage-from", up, "--runs", "3"]);
+    assert.equal(mp.status, 0, mp.stderr);
+    const pv = readJson(pairsPath);
+    assert.equal(pv.schema, "musunest-eval/stage-compare-pairs/v1");
+    assert.deepEqual(pv.groups, ["before", "after"]);
+    assert.deepEqual(pv.pairs.map((p) => `${p.pid}-r${p.r}`), IDS545.filter((id) => !STOPPED545.includes(id)));
+    assert.deepEqual(pv.pairs.map((p) => p.first), pv.pairs.map((_, i) => (i % 2 === 0 ? "before" : "after")));
+    assert.deepEqual(pv.stage, { start: "write", end: "judge", stage_from_sha256: sha256(readFileSync(join(up, "conditions.json"))) });
+    const out = join(base, "cmp"), verifyLog = join(base, "verify.log"), n0 = spawnCount(log);
+    const r = runAgent(repo, out, ["--compare", "--baseline", baseline, "--pairs", pairsPath, "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "write", "--stage-from", up, "--budget-usd", "10", "--concurrency", "4"], { FAKE_SPAWN_LOG: log, FAKE_VERIFY_LOG: verifyLog });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(spawnCount(log) - n0, 30, "両群 15 本ずつ");
+    const verified = readFileSync(verifyLog, "utf8").trim().split("\n");
+    assert.equal(verified.length, 30, "入力のある 15 本に両群の照合の関数を当てる");
+    assert.equal(new Set(verified).size, 2);
+    assert.deepEqual(readdirSync(out).filter((n) => !n.includes(".")).sort(), ["after", "before"]);
+    const rec = readJson(join(out, "comparison.json"));
+    assert.equal(rec.schema, "musunest-eval/stage-compare-record/v1");
+    assert.deepEqual(Object.keys(rec.groups), ["before", "after"]);
+    assert.deepEqual([rec.groups.before.role, rec.groups.after.role, rec.groups.before.pipeline, rec.groups.after.pipeline], ["baseline", "candidate", "v1.1a", "v1.1a"]);
+    assert.deepEqual(rec.stage, { start: "write", end: "judge", stage_from_sha256: pv.stage.stage_from_sha256, input_absent: 15 });
+    const cb = readJson(join(out, "before", "conditions.json")), ca = readJson(join(out, "after", "conditions.json"));
+    assert.deepEqual(cb.params.stage_inputs, ca.params.stage_inputs, "同じ上流の入力");
+    assert.deepEqual(cb.stage_input_absent, ca.stage_input_absent);
+    assert.deepEqual([cb.comparison.group, ca.comparison.group], ["before", "after"]);
+    for (const p of pv.pairs) {
+      const id = `${p.pid}-r${p.r}`;
+      const cpB = readFileSync(join(out, "before", id, "stage-input", "stage-checkpoint-t2-b1.json")), cpA = readFileSync(join(out, "after", id, "stage-input", "stage-checkpoint-t2-b1.json"));
+      assert.ok(cpB.equals(cpA) && cpA.equals(readFileSync(join(up, id, "bundle", "stage-checkpoint-t2-b1.json"))), id);
+      assert.equal(realpathSync(readJson(join(out, "before", id, "received-cwd.json"))), realpathSync(join(baseline, "packages/factory")));
+      assert.equal(realpathSync(readJson(join(out, "after", id, "received-cwd.json"))), realpathSync(join(repo, "packages/factory")));
+      for (const g of ["before", "after"]) assert.deepEqual(readJson(join(out, g, id, "received-argv.json")).slice(-6), ["--stage-start", "write", "--stage-end", "judge", "--stage-input", join(out, g, id, "stage-input", "stage-checkpoint-t2-b1.json")]);
+    }
+    // 対のファイルと上流が食い違えば断る（範囲の違う対・入力のある本と違う対）
+    const bad = writePairs(join(base, "pairs-bad.json"), { ...pv, pairs: pv.pairs.slice(1).map((p, i) => ({ ...p, first: i % 2 === 0 ? "before" : "after" })) });
+    const n1 = spawnCount(log);
+    assertRefused(runAgent(repo, join(base, "cmp-bad"), ["--compare", "--baseline", baseline, "--pairs", bad, "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "write", "--stage-from", up, "--budget-usd", "10"], { FAKE_SPAWN_LOG: log }), "compare:pairs-missing", log, n1, "pairs-missing");
+    const badStage = writePairs(join(base, "pairs-stage.json"), { ...pv, stage: { ...pv.stage, end: "test-spec" } });
+    assertRefused(runAgent(repo, join(base, "cmp-stage"), ["--compare", "--baseline", baseline, "--pairs", badStage, "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "write", "--stage-from", up, "--budget-usd", "10"], { FAKE_SPAWN_LOG: log }), "compare:pairs-stage", log, n1, "pairs-stage");
   });
 });
