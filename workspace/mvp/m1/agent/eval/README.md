@@ -534,6 +534,49 @@ v1（比較元の checkout。main `2cd1586f856fb1cdecf75ef035826cbffe539e69`）�
 - `--pipeline v1.1a` を受ける工場の入口は #511。入る前の工場では候補の群の子が `--pipeline` を受けられないので、本物の比較は #511 が入ってから流す。子の引数は #511 のあとに窓口が実物で確かめる
 - 比較は再開しない。途中で止めた比較は、別の出力先で対のファイルからやり直す（事前に固定した対の順とばらつきの読みを崩さないため、止まった本の流し直しはしない）
 
+### 5.9 漏斗・pass^k・工場の判定の 4 値（#538。設計書 `../08-architecture-v1.2.md` §7・§8.1・§8.4。v1.2 の手 0a）
+
+既存の記録（`summary.line.json` の要約・`bundle/artifacts/verification.json`・`verification-v11a.json`）から、どの段で失うか・同じ P で k 回とも通るか・工場が「確かめられなかった」を出した本の数を集計する。**足しただけ**：既存の欄の名前・意味・並び・値と、採点の規則（判定・PASS・分母・集計の版・了承後系・区間の算出）、指紋の算出と照合の方法は変えない。新しい欄は出力のいちばん後ろ（行では既存の鍵のあと）に足す。費用は 0（集計のコードだけ。API を呼ばない）。段単位の実行口（§8.3）と、対の差を段ごとに取る比較は別の Issue。
+
+#### 5.9.1 漏斗（`funnel`）
+
+- 段は `BUILD_STAGE_IDS` の順（v1 の 12 段と v1.1α の 7 段）。**v1 と v1.1α の記録の形に同じ規則を当てる**（段の名前が違うだけ）。段ごとに 4 つを数える：
+  - **到達**（`reached`）：その段の記録が要約の `stages` に 1 つ以上ある本
+  - **1 回目で通過**（`first_pass`）：その段の**最初の記録**が `status` ok・`calls` 1・`retries.shape` 0・`retries.content` 0（`retries` が無い記録は ok と `calls` 1 だけで決める。通信の再送 `retries.communication` は数えない）
+  - **通過**（`passed`）：その段のどれかの記録が ok
+  - **停止**（`stopped`）：要約の `failure.stage` がその段
+- **適用外**：到達した本の記録が全部 `calls` 0 の段（コードの段。静的の検査・試験の実行・判定など）は「1 回目で通過」を `null` にする（件数も率も `null`。`code_stage` 真）。**未到達の 0 とは別**で、到達 0 の段の 1 回目は 0 と「今回未観測」になる
+- **分母は 2 つ並べる**：件数は**予定本数**（条件の `child_args`。未実行・途中の本は到達 0 で分母に残る。`planned`・`reached_label` ＝ 到達／予定）、条件付き率は**到達本数**（`rates`。数と Wilson の区間。到達 0 なら「今回未観測（0/予定）」）。予定を検証できない条件では採点した本を分母にする（§5.2 の `metrics_plan` と同じ）
+- **完走の内訳**（`completed`）：要約の `stop_class` が completed の本（失敗の無い本。stagnation・limit で止まった本を含む）を、`verification.json` の `test_mismatches` と `test_unresolved` がともに 0 の本（`no_mismatch`）とそれ以外（`with_mismatch`）に分ける。記録が無い・欄が整数でない本は欠測（`missing`）に数え、0 と推測しない
+- **停止段の内訳**（`stops`）：§5.8.5 の停止段の値（`段:種類`・`stop_reason`・`decl-check:limit`・知らない値は `unknown`）ごとの本数。比較の群の `stops.values` と同じ値になる
+
+#### 5.9.2 pass^k（`pass_k`）
+
+- P ごとに、その P の全反復（k は条件の `params.runs`。P の一覧は `params.patterns`）が原文系 PASS なら 1。P の数を分母に件数と率（Wilson）。**未実行・途中・締切で止まった本は PASS 0**（途中の本は宣言があっても 0）
+- `by_pattern` に P ごとの 0／1 の並び（反復の順）。標準出力は 1 行（例：`pass^3: 1/10（…）（P1 1,0,0・…）`）
+
+#### 5.9.3 工場の判定の 4 値（`rows[].factory_verdict4`・`rows[].unverified_details`）
+
+- **正本は D1 の明示的な欄**：要約の `verdict` が partial で、要約の `assurance` が `unverified` のときだけ `unverified`。それ以外は `verdict` と同じ（`full`／`partial`／`none`。知らない値は `unknown`、要約か `verdict` が無ければ `absent`）
+- **検証の記録の `unverified` の内訳（件数）から本の判定を復元しない。** 「不一致 1・未検証 2」の本は partial であり、内訳があることは本が unverified である証拠ではない（設計書 §7 は partial の理由が優先）。内訳は `unverified_details` に件数だけを数える（`verification.json` の `unverified` が配列なら要素の数、0 以上の整数ならその値。記録か欄が無ければ `null`。欠測を 0 と推測しない）。集計は `unverified_details`（実行した本・読めた本・欠測・件数の合計・1 件以上の本の数）
+- **既存の `factory_verdict`・`metrics.factory_verdicts`・`tables` の工場の verdict は変えない**（unverified の本も partial のまま）。4 値は別の欄に足す
+- **欄が無ければ従来どおり**：今の工場は `assurance` に `unverified` を載せないので、今の記録（v1・v1.1α）では `unverified` は 0 件で、判定・件数・区間は変わらない
+
+#### 5.9.4 判定の 3 系統（`verdicts`）
+
+- 原文系（PASS／FAIL／STATIC_NG／GEN_FAIL）・了承後系（PASS／FAIL／UNEVALUATED／STATIC_NG／`not_applicable` ＝ 了承後の判定が無い本）・工場の 4 値（と `unknown`・`absent`）を**別に**数え、混ぜない。値は既知の列挙に写し、知らない値は `unknown`
+- 件数（`counts`）の分母は予定本数（原文系・了承後系の未実行・途中の本は `not_run`、工場の 4 値では `absent`）。別に条件付き率を、実行した本の中（`executed`）と納品のある本（宣言がある本）の中（`delivered`）で出す
+
+#### 5.9.5 比較・匿名の口・標準出力
+
+- `--compare` は群ごとに `funnel`・`pass_k`・`verdicts`（各群の採点の出力の欄そのまま）を足す。既存の比較の欄（対の差・停止段・到達数・持ち越し・照合）は変えない。段ごとの対の差は手 0b
+- `--anonymous` には `funnel`・`pass_k`・`verdicts`・`unverified_details` の件数と率だけを足す（段の ID は既知の一覧、停止段は既知の値か `unknown`。`pass_k.by_pattern`・P の ID・本の ID・鍵の値は出さない）。`--compare --anonymous` も群ごとに同じ
+- 標準出力は、既存の行のあとに漏斗の 1 行（到達した段だけ。`段 到達／1 回目／通過／停止`、適用外は「—」、完走の内訳）と pass^k の 1 行を足す（`--compare` は群ごとに 2 行）。既存の行は変えない
+
+#### 5.9.6 採点のコード自身の指紋が変わること
+
+- 採点の指紋（§5.1・§5.2）は集計のコード（このファイル）の SHA-256 を含む。#538 でこのファイルを直したので、**集計のコードの SHA と、それを含む採点の総合の指紋が変わる**。直す前に記録した条件を採点し直すと `scoring_matches_conditions` が偽（「採点の指紋が条件と不一致」）になり、比較の照合はそれで「未照合」になる（`completion.unverified` に `scoring_matches_conditions` が出る）。**旧いハッシュを固定して一致に見せない**（証跡を偽らない）。値が変わってよいのはこの指紋と、そこから導かれる照合の結果だけで、ほかの既存の欄の値は直す前と同じ
+
 ## 6. 回帰用の組 `regression-r1`（#450）
 
 方法論 `01-eval-sets.md` §1 の**回帰用の組の初期の予備セット**。直しの前後で同じ組を数え、壊していないかを見る組で、**落ちの中身は調べない**。開発用（§5.6 の `dev-p1-p10`）と同じ入口の形（`sets/regression-r1.json`。`role: regression`）で、新しい題材 5 つ（`subjects/R1〜R5.json`）を開発用の題材と**同じ判定の組**で持つ。
