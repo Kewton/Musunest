@@ -31,6 +31,15 @@ import * as factory from "./index.js";
 import { createFakeJudge } from "./judge-fake.js";
 import type { JudgeAnswer } from "./judge.js";
 import type { RecordedCall } from "./llm-fake.js";
+import { createOpenAiLlmClient } from "./openai.js";
+import {
+  ENVELOPE_SCHEMA,
+  ENVELOPE_SCHEMA_NAME,
+  STAGE_ENVELOPE_ENTRIES,
+  STAGE_ENVELOPE_ENTRIES_V11A,
+  buildStageBranch,
+  type EnvelopeId,
+} from "./schema-envelope.js";
 import { requirementsFromPlan, type RequirementList } from "./pipeline.js";
 import { captureCliBaseline, type BaselineCliCapture, type BaselineCliScenarios } from "./__tests__/baseline-capture.js";
 import {
@@ -979,11 +988,15 @@ function v11aJudge() {
 }
 
 /** `--pipeline v1.1a --plan-file` を 1 回流す（偽物の LLM・判定・時計で閉じる。ファイルだけ本物。`pipeline` で v1.2 も） */
-async function runV11aCli(input: { readonly dir: string; readonly calls: readonly RecordedCall[]; readonly pipeline?: "v1.1a" | "v1.2" }) {
+async function runV11aCli(input: {
+  readonly dir: string;
+  readonly calls: readonly RecordedCall[];
+  readonly pipeline?: "v1.1a" | "v1.2";
+}) {
   const planPath = `${input.dir}-plan.json`;
   const planText = JSON.stringify(await v11aEnvelope());
   const recording = createRecordingClient(input.calls);
-  const makeClient = vi.fn(() => recording.client);
+  const makeClient = vi.fn((_options: { readonly envelope?: EnvelopeId }) => recording.client);
   const lines: string[] = [];
   const written: string[] = [];
   const code = await runCli({
@@ -1009,6 +1022,63 @@ async function runV11aCli(input: { readonly dir: string; readonly calls: readonl
     readonly return_to_plan: boolean;
   };
   return { code, summary, record, written, makeClient, recording };
+}
+
+/** 実 adapter に当てた 1 回の構造化出力（段が渡した要求と、実際に送った body） */
+interface WireExchange {
+  readonly request: LlmStructuredRequest;
+  readonly body: Record<string, unknown>;
+}
+
+/**
+ * 段が渡した要求を、実 adapter（`createOpenAiLlmClient`）に偽物の fetch を当てて送り、送信の body を取る
+ * （外部の API は呼ばない。偽物の fetch は body を残して 500 を返すので、adapter の誤りは捨てる。Issue #549 の直し）。
+ * 封筒は、入口が adapter に渡した `envelope` で選ぶ。
+ */
+async function sentExchangesOf(
+  requests: readonly LlmStructuredRequest[],
+  envelope: EnvelopeId | undefined,
+): Promise<WireExchange[]> {
+  const exchanges: WireExchange[] = [];
+  for (const request of requests) {
+    let sent: Record<string, unknown> | undefined;
+    const client = createOpenAiLlmClient({
+      apiKey: "sk-FAKE",
+      fetch: async (_url, init) => {
+        sent = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ error: { code: "server_error" } }), { status: 500 });
+      },
+      ...(envelope === undefined ? {} : { envelope }),
+    });
+    const { signal: _signal, ...unsignalled } = request;
+    await expect(client.callStructured(unsignalled)).rejects.toThrow();
+    expect(sent, request.schemaName).toBeDefined();
+    exchanges.push({ request, body: sent as Record<string, unknown> });
+  }
+  return exchanges;
+}
+
+/** 送った body の封筒から、その段の枝を引く（封筒でなければ text.format.schema そのもの） */
+function sentBranchOf(exchange: WireExchange): unknown {
+  const format = (exchange.body["text"] as { readonly format: { readonly name: string; readonly schema: Record<string, unknown> } }).format;
+  if (format.name === exchange.request.schemaName) return format.schema;
+  const anyOf = (format.schema["properties"] as { readonly result: { readonly anyOf: readonly Record<string, unknown>[] } }).result.anyOf;
+  const branches = anyOf.filter(
+    (branch) => (branch["properties"] as { readonly stage: { readonly enum: readonly string[] } }).stage.enum[0] === exchange.request.schemaName,
+  );
+  expect(branches, exchange.request.schemaName).toHaveLength(1);
+  return branches[0];
+}
+
+/** その要求について、モデルに届く形（封筒ならその段の枝）が、段が渡した schema（封筒なら stage を足した枝）と深く等しいか */
+function expectSentSchemaIsStageSchema(exchange: WireExchange): void {
+  const format = (exchange.body["text"] as { readonly format: { readonly name: string } }).format;
+  const stageSchema = JSON.parse(JSON.stringify(exchange.request.schema)) as unknown;
+  const expected =
+    format.name === exchange.request.schemaName
+      ? stageSchema
+      : buildStageBranch({ stage: exchange.request.schemaName, schema: stageSchema });
+  expect(sentBranchOf(exchange), exchange.request.schemaName).toEqual(expected);
 }
 
 describe("v1.1a の走り（`--pipeline v1.1a --plan-file`。Issue #511）", () => {
@@ -1204,6 +1274,92 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(
       parseCliArguments(["--", "request.txt", "--out", "out", "--pipeline", "v1.2", "--plan-file", "plan.json", "--stage-end", "test-spec"]),
     ).toEqual({ error: "stage-range:pipeline（段の旗は --pipeline v1.1a --plan-file と一緒に指定してください）" });
+  });
+});
+
+describe("封筒の枝は段が渡した schema と深く等しい（実 adapter・偽物の fetch。Issue #549 の直し）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // 封筒に載る段は、起動時に組んだ封筒ではなく、その走りの段の schema（旗 on は台帳から導いたもの）で送る。
+  // 段の検証と、モデルに届く形がずれる共通の原因を、送信の body で塞ぐ（旗 off・on・v1 の全段）。
+  const v11aStages = STAGE_ENVELOPE_ENTRIES_V11A.map((entry) => entry.stage);
+
+  const v12ReturnToPlan = (): RecordedCall[] => [structured(draftOf(V11A_LIST, withAggregates(V11A_TABLE))), ...v11aReturnToPlan().slice(1)];
+
+  /** 走りの段の要求を、入口が作った adapter の封筒で送り直した組 */
+  async function exchangesOfRun(run: Awaited<ReturnType<typeof runV11aCli>>): Promise<WireExchange[]> {
+    const options = run.makeClient.mock.calls[0]?.[0];
+    expect(options).toMatchObject({ envelope: "v1.1a" });
+    return sentExchangesOf(run.recording.structured, options?.envelope);
+  }
+
+  for (const pipeline of ["v1.1a", "v1.2"] as const) {
+    it(`${pipeline}：完走と差し戻しの道で、封筒に載る全段の送信の枝が段の schema と等しい`, async () => {
+      const routes = [
+        { name: "complete", calls: [...(pipeline === "v1.2" ? v12Head() : v11aHead()), structured(v11aJudgments())] },
+        { name: "return", calls: pipeline === "v1.2" ? v12ReturnToPlan() : v11aReturnToPlan() },
+      ];
+      const seen = new Set<string>();
+      for (const route of routes) {
+        const run = await runV11aCli({ dir: `${directory}/wire-${pipeline}-${route.name}`, calls: route.calls, pipeline });
+        const exchanges = await exchangesOfRun(run);
+        expect(exchanges.length, route.name).toBeGreaterThan(0);
+        for (const exchange of exchanges) {
+          expectSentSchemaIsStageSchema(exchange);
+          seen.add(exchange.request.schemaName);
+        }
+      }
+      // 封筒に載る v1.1α の全段を照らした
+      expect([...seen].filter((stage) => v11aStages.includes(stage)).sort()).toEqual([...v11aStages].sort());
+    });
+  }
+
+  it("v1.2：送信の body の T1 の枝の行の型に aggregate があり、v1.1a の T1 の枝には無い", async () => {
+    const typeOf = (exchanges: readonly WireExchange[]) => {
+      const exchange = exchanges.find((candidate) => candidate.request.schemaName === "name-table");
+      expect(exchange).toBeDefined();
+      const branch = sentBranchOf(exchange as WireExchange) as {
+        readonly properties: { readonly rows: { readonly items: { readonly properties: { readonly type: { readonly required: readonly string[]; readonly properties: Record<string, unknown> } } } } };
+      };
+      return branch.properties.rows.items.properties.type;
+    };
+    const on = await runV11aCli({ dir: `${directory}/wire-t1-on`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    const onType = typeOf(await exchangesOfRun(on));
+    expect(onType.properties).toHaveProperty("aggregate");
+    expect(onType.required).toContain("aggregate");
+    const off = await runV11aCli({ dir: `${directory}/wire-t1-off`, calls: [...v11aHead(), structured(v11aJudgments())] });
+    const offType = typeOf(await exchangesOfRun(off));
+    expect(offType.properties).not.toHaveProperty("aggregate");
+    expect(offType.required).not.toContain("aggregate");
+  });
+
+  it("v1：封筒に載る段の送信の枝が段の schema と等しく、送る封筒は起動時の定数のまま", async () => {
+    const recording = createRecordingClient(recordedRun());
+    const makeClient = vi.fn((_options: { readonly envelope?: EnvelopeId }) => recording.client);
+    const code = await runCli({
+      argv: ["--", "request.txt", "--out", `${directory}/wire-v1`],
+      env: { [API_KEY_ENV]: "sk-FAKE" },
+      ...realFileDeps(),
+      loadDocuments: async () => [],
+      makeClient,
+      log: () => undefined,
+    });
+    expect(code).toBe(EXIT_OK);
+    const exchanges = await sentExchangesOf(recording.structured, makeClient.mock.calls[0]?.[0].envelope);
+    const v1Stages = STAGE_ENVELOPE_ENTRIES.map((entry) => entry.stage);
+    const enveloped = exchanges.filter((exchange) => v1Stages.includes(exchange.request.schemaName));
+    expect(enveloped.length).toBeGreaterThan(0);
+    for (const exchange of exchanges) expectSentSchemaIsStageSchema(exchange);
+    for (const exchange of enveloped) {
+      expect((exchange.body["text"] as { readonly format: unknown }).format).toEqual({
+        type: "json_schema",
+        name: ENVELOPE_SCHEMA_NAME,
+        schema: ENVELOPE_SCHEMA,
+        strict: true,
+      });
+    }
   });
 });
 
