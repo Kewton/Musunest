@@ -2041,7 +2041,22 @@ export const STAGE_RUN_PATH = "bundle/stage-run.json";
 /** 本のディレクトリの中の、上流の入力の写しの置き場所（run-agent.mjs が checkpoint と段の走りの記録をここに写す。工場は checkpoint の隣の記録を読む） */
 export const STAGE_INPUT_DIR = "stage-input";
 /** 段の走りの記録と条件の食い違いの理由（range ＝ 範囲、plan-source ＝ 確定した仕様と依頼文の SHA、input ＝ 入力の対応） */
-export const STAGE_RECORD_MISMATCHES = ["range", "plan-source", "input"];
+export const STAGE_RECORD_MISMATCHES = ["range", "plan-source", "input", "stages"];
+/**
+ * 段単位の走りの区間（packages/factory の STAGE_STARTS・STAGE_ENDS の i 番目の組。採点は工場の dist を import しないので写して持ち、試験で dist と照らす）と、
+ * 区間の中で記録に出うる段（packages/factory/src/v11a/run.ts の段の記録の名前。区間 0 の carry-over は持ち越しの導出、区間 2 は B の段と ⑦）。
+ * 範囲 開始 i 〜 終了 k の記録に出てよい段は区間 i〜k の段だけ（"stages" の照合と、漏斗の段の範囲）
+ */
+export const STAGE_SEGMENTS = [
+  { start: "name-table", end: "semantic-check", stages: ["name-table", "semantic-check", "carry-over"] },
+  { start: "test-spec", end: "test-spec", stages: ["test-spec"] },
+  { start: "write", end: "judge", stages: ["write", "static-check", "name-check", "decl-check", "run-tests", "repair", "arbitration", "coverage", "judge"] },
+];
+/** 範囲の中の段（開始・終了が区間の表に無いか、開始が終了より後なら空） */
+export function stagesInRange(start, end) {
+  const i = STAGE_SEGMENTS.findIndex((x) => x.start === start), k = STAGE_SEGMENTS.findIndex((x) => x.end === end);
+  return i < 0 || k < i ? [] : STAGE_SEGMENTS.slice(i, k + 1).flatMap((x) => x.stages);
+}
 export const STAGE_RUN_RECORD_SCHEMA = "musunest.factory.v11a-stage-run/v1";
 /** 段単位の採点で計算しない欄（null にし、not_computed に理由 stage-run を添える） */
 export const STAGE_NOT_COMPUTED = ["metrics", "metrics_accepted", "metrics_script", "fulfillment", "bySubject", "tables", "metrics_plan", "metrics_build", "pass_k", "verdicts", "unverified_details", "agreement", "test_findings"];
@@ -2054,7 +2069,7 @@ export const STAGE_COMPARISON_SCHEMA = "musunest-eval/stage-compare-record/v1";
 export const STAGE_SCORE_COMPARE_SCHEMA = "musunest-eval/score-stage-compare/v1";
 /**
  * 本の状態：absent ＝ 入力なし（起こさない）、unlaunched ＝ 起こさなかった（予算の停止など）、missing ＝ 起こしたが段の走りの記録が読めない、
- * mismatch ＝ 記録は読めたが条件（範囲・仕様と依頼文の SHA・入力の対応）と食い違う（通過に数えず、照合は未照合）、observed ＝ 記録が読めて条件と合う
+ * mismatch ＝ 記録は読めたが条件（範囲・仕様と依頼文の SHA・入力の対応・段の履歴と範囲の整合）と食い違う（通過に数えず、照合は未照合）、observed ＝ 記録が読めて条件と合う
  */
 export const STAGE_RUN_STATES = ["absent", "unlaunched", "missing", "mismatch", "observed"];
 /** 段だけの対の差が null の理由（未起動 ＝ どちらかの群で起こさなかった、欠測 ＝ 起こしたが記録が読めないか条件と食い違う） */
@@ -2095,9 +2110,24 @@ export function stageRecordMismatches(record, run, cond, dir) {
     if (!isObj(entry) || entry.absent === true || !isObj(inp) || typeof inp.checkpoint !== "string" || !/^stage-checkpoint-[a-z0-9-]+\.json$/.test(inp.checkpoint) || typeof inp.boundary !== "string") return false;
     const cp = readBytesOrNull(join(dir, STAGE_INPUT_DIR, inp.checkpoint)), rec = readBytesOrNull(join(dir, STAGE_INPUT_DIR, basename(STAGE_RUN_PATH)));
     if (cp === null || rec === null || sha256(cp) !== entry.checkpoint_sha256 || sha256(rec) !== entry.record_sha256) return false;
-    try { const v = JSON.parse(cp.toString("utf8")); return isObj(v) && v.boundary === inp.boundary; } catch { return false; }
+    // checkpoint の境界が記録の入力の境界と同じで、記録の入力の出力ダイジェストが、写した上流の記録のその checkpoint の宣言（境界とファイル名）の値と同じ
+    try {
+      const v = JSON.parse(cp.toString("utf8")), upRecord = JSON.parse(rec.toString("utf8"));
+      const declared = isObj(upRecord) && Array.isArray(upRecord.checkpoints) ? upRecord.checkpoints.filter((c) => isObj(c) && c.boundary === inp.boundary && c.path === inp.checkpoint) : [];
+      return isObj(v) && v.boundary === inp.boundary && declared.length === 1 && isHex64(inp.output_digest) && declared[0].output_digest === inp.output_digest;
+    } catch { return false; }
   })();
   if (!inputOk) reasons.push("input");
+  // 段の履歴・到達の段・停止の段が範囲の中で、段の通過が停止と終了の段の最後の記録に合う（範囲が条件と合うときに見る。範囲違いは range で足りる）
+  if (!reasons.includes("range")) {
+    const inRange = stagesInRange(p.stage_start, p.stage_end), stages = record.stages;
+    const lastEnd = Array.isArray(stages) ? stages.filter((x) => isObj(x) && x.stage === p.stage_end).at(-1) : undefined;
+    const stagesOk = Array.isArray(stages) && stages.every((x) => isObj(x) && inRange.includes(x.stage))
+      && record.reached_stage === (stages.length === 0 ? null : stages.at(-1).stage)
+      && (record.stopped === null || (isObj(record.stopped) && inRange.includes(record.stopped.stage)))
+      && record.stage_pass === (record.stopped === null && isObj(lastEnd) && lastEnd.status === "ok");
+    if (!stagesOk) reasons.push("stages");
+  }
   return reasons;
 }
 /** 予定した本ごとの事実（状態と段の走りの記録）。入力なしの本は記録を読まない。記録は条件と結べたときだけ観測（observed）に数える */
@@ -2156,8 +2186,8 @@ export function stageFunnelOf(facts, range) {
   })));
   const seen = new Set(facts.filter((f) => f.state === "observed" && Array.isArray(f.record.stages)).flatMap((f) => f.record.stages.map((st) => (isObj(st) ? st.stage : null))));
   return {
-    ...fu, range, denominator: `件数の分母は予定から入力なしを除いた本 ${ran.length} 本（未起動・記録なしの本は到達 0）。条件付き率の分母は段ごとの到達本数。段は範囲の中（段の走りの記録に現れた段）だけ`,
-    stages: Object.fromEntries(BUILD_STAGE_IDS.filter((id) => seen.has(id)).map((id) => [id, fu.stages[id]])),
+    ...fu, range, denominator: `件数の分母は予定から入力なしを除いた本 ${ran.length} 本（未起動・記録なしの本は到達 0）。条件付き率の分母は段ごとの到達本数。段は確かめた範囲の中（条件と結べた段の走りの記録に現れ、範囲の区間に入る段）だけ`,
+    stages: Object.fromEntries(BUILD_STAGE_IDS.filter((id) => seen.has(id) && stagesInRange(range?.start, range?.end).includes(id)).map((id) => [id, fu.stages[id]])),
   };
 }
 /** 段単位の採点の行（本ごと。段の通過・到達した段・停止・⑦ の判定・費用） */
