@@ -534,6 +534,192 @@ v1（比較元の checkout。main `2cd1586f856fb1cdecf75ef035826cbffe539e69`）�
 - `--pipeline v1.1a` を受ける工場の入口は #511。入る前の工場では候補の群の子が `--pipeline` を受けられないので、本物の比較は #511 が入ってから流す。子の引数は #511 のあとに窓口が実物で確かめる
 - 比較は再開しない。途中で止めた比較は、別の出力先で対のファイルからやり直す（事前に固定した対の順とばらつきの読みを崩さないため、止まった本の流し直しはしない）
 
+### 5.9 漏斗・pass^k・工場の判定の 4 値（#538。設計書 `../08-architecture-v1.2.md` §7・§8.1・§8.4。v1.2 の手 0a）
+
+既存の記録（`summary.line.json` の要約・`bundle/artifacts/verification.json`・`verification-v11a.json`）から、どの段で失うか・同じ P で k 回とも通るか・工場が「確かめられなかった」を出した本の数を集計する。**足しただけ**：既存の欄の名前・意味・並び・値と、採点の規則（判定・PASS・分母・集計の版・了承後系・区間の算出）、指紋の算出と照合の方法は変えない。新しい欄は出力のいちばん後ろ（行では既存の鍵のあと）に足す。費用は 0（集計のコードだけ。API を呼ばない）。段単位の実行口（§8.3）と、対の差を段ごとに取る比較は別の Issue。
+
+#### 5.9.1 漏斗（`funnel`）
+
+- 段は `BUILD_STAGE_IDS` の順（v1 の 12 段と v1.1α の 7 段）。**v1 と v1.1α の記録の形に同じ規則を当てる**（段の名前が違うだけ）。段ごとに 4 つを数える：
+  - **到達**（`reached`）：その段の記録が要約の `stages` に 1 つ以上ある本
+  - **1 回目で通過**（`first_pass`）：その段の**最初の記録**が `status` ok・`calls` 1・`retries.shape` 0・`retries.content` 0（`retries` が無い記録は ok と `calls` 1 だけで決める。通信の再送 `retries.communication` は数えない）
+  - **通過**（`passed`）：その段のどれかの記録が ok
+  - **停止**（`stopped`）：要約の `failure.stage` がその段
+- **適用外**：到達した本の記録が全部 `calls` 0 の段（コードの段。静的の検査・試験の実行・判定など）は「1 回目で通過」を `null` にする（件数も率も `null`。`code_stage` 真）。**未到達の 0 とは別**で、到達 0 の段の 1 回目は 0 と「今回未観測」になる
+- **分母は 2 つ並べる**：件数は**予定本数**（条件の `child_args`。未実行・途中の本は到達 0 で分母に残る。`planned`・`reached_label` ＝ 到達／予定）、条件付き率は**到達本数**（`rates`。数と Wilson の区間。到達 0 なら「今回未観測（0/予定）」）。予定を検証できない条件では採点した本を分母にする（§5.2 の `metrics_plan` と同じ）
+- **完走の内訳**（`completed`）：要約の `stop_class` が completed の本（失敗の無い本。stagnation・limit で止まった本を含む）を、`verification.json` の `test_mismatches` と `test_unresolved` がともに 0 の本（`no_mismatch`）とそれ以外（`with_mismatch`）に分ける。記録が無い・欄が整数でない本は欠測（`missing`）に数え、0 と推測しない
+- **停止段の内訳**（`stops`）：§5.8.5 の停止段の値（`段:種類`・`stop_reason`・`decl-check:limit`・知らない値は `unknown`）ごとの本数。比較の群の `stops.values` と同じ値になる
+
+#### 5.9.2 pass^k（`pass_k`）
+
+- P ごとに、その P の全反復（k は条件の `params.runs`。P の一覧は `params.patterns`）が原文系 PASS なら 1。P の数を分母に件数と率（Wilson）。**未実行・途中・締切で止まった本は PASS 0**（途中の本は宣言があっても 0）
+- `by_pattern` に P ごとの 0／1 の並び（反復の順）。標準出力は 1 行（例：`pass^3: 1/10（…）（P1 1,0,0・…）`）
+
+#### 5.9.3 工場の判定の 4 値（`rows[].factory_verdict4`・`rows[].unverified_details`）
+
+- **正本は D1 の明示的な欄**：要約の `verdict` が partial で、要約の `assurance` が `unverified` のときだけ `unverified`。それ以外は `verdict` と同じ（`full`／`partial`／`none`。知らない値は `unknown`、要約か `verdict` が無ければ `absent`）
+- **検証の記録の `unverified` の内訳（件数）から本の判定を復元しない。** 「不一致 1・未検証 2」の本は partial であり、内訳があることは本が unverified である証拠ではない（設計書 §7 は partial の理由が優先）。内訳は `unverified_details` に件数だけを数える（`verification.json` の `unverified` が配列なら要素の数、0 以上の整数ならその値。記録か欄が無ければ `null`。欠測を 0 と推測しない）。集計は `unverified_details`（実行した本・読めた本・欠測・件数の合計・1 件以上の本の数）
+- **既存の `factory_verdict`・`metrics.factory_verdicts`・`tables` の工場の verdict は変えない**（unverified の本も partial のまま）。4 値は別の欄に足す
+- **欄が無ければ従来どおり**：今の工場は `assurance` に `unverified` を載せないので、今の記録（v1・v1.1α）では `unverified` は 0 件で、判定・件数・区間は変わらない
+
+#### 5.9.4 判定の 3 系統（`verdicts`）
+
+- 原文系（PASS／FAIL／STATIC_NG／GEN_FAIL）・了承後系（PASS／FAIL／UNEVALUATED／STATIC_NG／`not_applicable` ＝ 了承後の判定が無い本）・工場の 4 値（と `unknown`・`absent`）を**別に**数え、混ぜない。値は既知の列挙に写し、知らない値は `unknown`
+- 件数（`counts`）の分母は予定本数（原文系・了承後系の未実行・途中の本は `not_run`、工場の 4 値では `absent`）。別に条件付き率を、実行した本の中（`executed`）と納品のある本（宣言がある本）の中（`delivered`）で出す
+
+#### 5.9.5 比較・匿名の口・標準出力
+
+- `--compare` は群ごとに `funnel`・`pass_k`・`verdicts`（各群の採点の出力の欄そのまま）を足す。既存の比較の欄（対の差・停止段・到達数・持ち越し・照合）は変えない。段ごとの対の差は手 0b
+- `--anonymous` には `funnel`・`pass_k`・`verdicts`・`unverified_details` の件数と率だけを足す（段の ID は既知の一覧、停止段は既知の値か `unknown`。`pass_k.by_pattern`・P の ID・本の ID・鍵の値は出さない）。`--compare --anonymous` も群ごとに同じ
+- 標準出力は、既存の行のあとに漏斗の 1 行（到達した段だけ。`段 到達／1 回目／通過／停止`、適用外は「—」、完走の内訳）と pass^k の 1 行を足す（`--compare` は群ごとに 2 行）。既存の行は変えない
+
+#### 5.9.6 採点のコード自身の指紋が変わること
+
+- 採点の指紋（§5.1・§5.2）は集計のコード（このファイル）の SHA-256 を含む。#538 でこのファイルを直したので、**集計のコードの SHA と、それを含む採点の総合の指紋が変わる**。直す前に記録した条件を採点し直すと `scoring_matches_conditions` が偽（「採点の指紋が条件と不一致」）になり、比較の照合はそれで「未照合」になる（`completion.unverified` に `scoring_matches_conditions` が出る）。**旧いハッシュを固定して一致に見せない**（証跡を偽らない）。値が変わってよいのはこの指紋と、そこから導かれる照合の結果だけで、ほかの既存の欄の値は直す前と同じ
+
+### 5.10 内外の表・不一致と未解決の試験の分類・段の役割ごとの対の差・P のまとまり（#539。設計書 `../08-architecture-v1.2.md` §8.2・§8.7。v1.2 の手 0b）
+
+工場が partial にした本が外の採点では PASS だったとき、その食い違いの切り分け（§8.2）を毎回の計測で機械で出し、比較を §8.7（D6）の読み方に合わせる。**足しただけ**：既存の欄と §5.9 の欄の名前・意味・並び・値と、採点の規則（判定・PASS・分母・集計の版・了承後系・区間の算出）、指紋の算出と照合の方法は変えない。新しい欄は出力のいちばん後ろに足す（`agreement`・`test_findings`。比較は群ごとに同じ 2 つと、出力の後ろに `stage_pairs`・`pattern_clusters`）。費用は 0（集計のコードだけ。API を呼ばない）。値が変わってよいのは §5.9.6 と同じ例外（採点のコード自身の指紋と、それに由来する照合）だけ。
+
+#### 5.10.1 内外の表（`agreement`）
+
+- 実行した本ごとに（工場の 4 値 × 原文系の判定 PASS／FAIL／STATIC_NG／GEN_FAIL）の組を取り、組ごとの件数の表（`source.table`。行は工場の 4 値と `unknown`・`absent`、列は原文系の値と `unknown`）を出す。0 でない組だけを `source.cells`（鍵は `工場×外`。例：`partial×PASS`）にも並べる
+- 了承後系の判定も同じ形で別の表に出す（`accepted`。列は §5.9.4 の了承後系の値）。2 つの系は混ぜない
+- **分母は予定本数**（`planned`）。未実行・途中の本は表に入れず、別の行（`not_run`）に数える。値の写し方は §5.9.4 の `verdicts` と同じ
+- 比較では群ごとに同じ欄を足す
+
+#### 5.10.2 不一致・未解決の試験の分類（`test_findings`）
+
+- **読取元**：正本は試験の結果の記録（`bundle/artifacts/tests.json` の `mismatches` と `unresolved`。鍵は `testId`）。検証の記録（`verification.json` の `partial_reasons.unresolved_tests`。鍵は `test_id`）は**同じ最終結果の写し**として扱う
+- **重複の排除**：鍵の名前を正規化して、**試験 ID だけを鍵に**突き合わせる（不一致と未解決の種類をまたぐ）。**同じ本・同じ試験・同じ理由は 1 件**（`source` が `both`）。片側だけにある試験はその側で補う（`tests`／`verification`）。**同じ試験 ID で理由の文が違えば 1 件として数え（種類と文は正本のもの）、その試験 ID を `inconsistent` に 1 つ数える**（黙って別件にしない）。正本 `tests` の不一致（`mismatches`）にある試験 ID が検証の記録の `unresolved_tests` にもあれば、不一致の 1 件とし（`source` が `both`）、検証の記録は補完と食い違いの確認にだけ使う。正本の中で不一致と未解決に同じ試験 ID があるときも、先に読む不一致の 1 件とする。要素の形が違う（試験 ID か `detail` が文字列でない）ものは `malformed` に数え、分類しない
+- **欠測**：2 つの記録がどちらも読めない（無い・JSON でない・欄が配列でない）本は欠測（`missing`）。片方だけ読めればその側で数える（`sources` に本の数）。対象は実行した本。v1 と v1.1α で読む欄は同じ
+- **分類**：`detail`（評価器の固定文）を定数の表 `FINDING_PATTERNS`（正規表現の並び）に**上から順に当て、最初に当たったもの**。表の文は評価器の全文を写す（`…` は名前や数が入る位置）。工場のコードと dist は import しない
+
+| 分類 | 固定文の形 |
+|---|---|
+| `binding-defect` | 「表の ID が指す場所が宣言に無い」「試験の対象の ID が名前の表に無い」「selector（…）の対応（…）に当たる … の場所が対応表の外にある」「selector（…）に対応表の項目が無い」「selector（…）に提出された対応が無い（1 つに決まらない）」「selector（…）に当たる … の場所が無い」「… 個あり、1 つに決まらない」「参照データの対象（…）が実在の entity に結び付かない」「試験 … が結び付けの表に無い（1 つに決まらない）」「… に提出された対応が無い」 |
+| `evaluator-coverage` | 「評価の方法の表で未対応である（…）」「操作 … に条件（when）が無く、実行は評価器で確かめられない」「操作の実行（set を当てたあとの状態）は評価器で確かめられない」 |
+| `test-defect` | 「… の期待は真偽（true / false）であること」「入力が写像（object）でない」「構造の検査の中身（assertion）が無い」「view-shows の表示を期待する役割 ID（role）が無い」 |
+| `needs-human`（値の不一致と宣言側の不足。人が見る） | 「… が期待と違う（期待 …、実際 …）」「… が成り立った（期待は成り立たないこと）」「… が値を返した（期待は求められないこと）」「検査 … が落ちた（…）」「検査 … が落ちなかった（…）」「宣言に … が無い」「entity … に項目 … が無い」「項目 … の種類が …（期待 …）」「項目 … の参照先が …（期待 …）」「一覧 … は … を表示しない」「項目 … は画面から辿れない（entity … の一覧か表に出ていない）」「… に create の操作も、一覧か表の表示も無い」 |
+| `unknown` | どれにも当たらない（件数を出す。工場が固定文を変えたら `unknown` が増えて気づける）。**断らない。既存の判定・PASS に使わない** |
+
+- 表のどの文も 2 つの形に当たらない（試験で全組み合わせを確かめる）。「宣言に … が無い」は評価器の書き方（「宣言に操作 … が無い」のように「に」の直後に空白が無い形と、「宣言に entity … が無い」の形）の両方に当たる
+- **出し方**：本ごとに分類ごとの件数（`by_run`。試験 ID と `detail` の原文と `source` はここにだけ残す）、群と全体の合計（`classes`・`findings`・`mismatches`・`unresolved`・`inconsistent`・`malformed`）。**分類は記録の読み方であり、採点の判定・PASS・分母には触れない**
+
+#### 5.10.3 比較：段の役割ごとの対の差（`stage_pairs`）
+
+- **段の役割の対応表**（定数 `STAGE_ROLES`）：設計＝`design`／`name-table`、試験＝`test-suite`／`test-spec`、書く＝`write`、点検＝`correspondence`／`decl-check`、実行＝`run-tests`、判定＝`judge`（比較元 v1／候補 v1.1α）
+- 対ごとに §5.9.1 の「到達」「1 回目で通過」「通過」をそれぞれ 0／1 にし、**差＝候補 − 比較元**を取る。件数（＋1／0／−1）・n・平均・区間は既存の対の差と同じ関数（`pairStats`。区間は参考）で出す
+- **有効な対を指標ごとに定める**：両側で指標が定義されている対だけを n に入れる。次の対は差 `null` で n から除き、理由ごとの数を `excluded` に出す
+  - `not_applicable`（**適用外**）：片側でもその群の漏斗で 1 回目で通過が `null`（コードの段。§5.9.1）。実行（v1 はコードの段、v1.1α は未到達）と判定（両群ともコードの段）の 1 回目で通過は、今の記録では n＝0 で、平均・区間・P の集計も `null`
+  - `missing`（**欠測**）：片側でも要約が読めないか、段の記録（`stages`）が配列でない
+  - `one_side`：片側だけ実行された対（未実行・途中を含む）
+- **未到達の 0 と適用外の `null` を区別する**：段に届かなかった本は 0 の測定値として n に入る（両側とも届かない対は差 0）。適用外は測定値ではない
+- `rows` に対ごとの差と理由を残す（行つきの出力だけ）
+
+#### 5.10.4 比較：P をまとまりにした符号反転と bootstrap（`pattern_clusters`・各指標の `clusters`）
+
+- 原文系 PASS の対の差（既存）と段の役割ごとの差を、**P ごとに平均**する（m 個。m は有効な対のある P の数。丸めずに計算する）。設計書 §8.7 のとおり **P を単位にした区間と検定を主にする**：
+  - **(i) 符号反転の両側 p**（`sign_flip.p`）：P 平均の符号を 2^m 通り全部入れ替え、平均の絶対値が観測以上になる割合。m が 12（`SIGN_FLIP_MAX_CLUSTERS`）を超えれば `null` と理由
+  - **(ii) P を単位にした bootstrap の区間**（`bootstrap.interval`）：P 平均を復元抽出した平均の 2.5・97.5 百分位（線形補間）。回数と乱数の種は定数（`BOOTSTRAP`：10000 回・種 539）で、同じ入力で同じ値
+  - **参考の t 区間**（`t_reference`）：P 平均の平均 ± t(0.975, m−1) × 標本標準偏差 ÷ √m。前提は P 間の独立と P 平均の正規近似で、まとまりが少ないと近似が粗い。**主の読み方には使わない**
+  - m＜2 なら区間と p は `null`（理由つき）
+- **読み方と限界**：P は題材 5 × 書き方 2 で、P 間の独立は仮定である。符号反転は帰無仮説の下で P 平均の符号が交換可能であることを前提にする。まとまりは 10 個しかなく、検出できる差は大きい（同じ「改善 8・回帰 1」でも改善が 3 P に集中すれば P 単位の両側 p は 0.25。独立な対の正確検定なら 0.039）。**非有意は「差が無い」ではなく「検出されず」**
+- 既存の対の差（`pairs` の件数・平均・区間）は**独立な対の参考**としてそのまま並べ、P 単位の結果と区別する（`independent_reference`）。不一致の対の件数（`discordant`：＋1 と −1 の数）も並べるが、**「8 対 1 以上」を確定の信号にする旗は置かない**（記述的な警報）。非有意を同等の証明にしない
+
+#### 5.10.5 匿名の口・標準出力
+
+- `--anonymous` には `agreement` の件数（既知の値の表）と `test_findings` の件数（分類ごと・読みの状態ごと・`inconsistent`・`malformed`・欠測）を足す。`--compare --anonymous` は群ごとに同じ 2 つと、段の役割ごとの差の件数・n・平均・区間・除いた数・P の集計（m・平均・p・区間）を足す。**本の ID・P の ID・P ごとの平均・試験 ID・`detail`・鍵の値は出さない**
+- 標準出力：通常の採点は内外の表と分類の 1 行（`内外の表（予定 … 本・実行 … 本・未実行と途中 … 本。工場×外）: 原文系 …／了承後系 …・試験の分類（…）: …`）を、指紋・漏斗・pass^k の行の前に足す。`--compare` は群ごとの内外の表の 1 行と、P のまとまりの 1 行（PASS の差と、段の役割ごとの通過の差の P 平均の平均・p・bootstrap の区間・参考の t 区間・不一致の対の件数）を最後に足す。既存の行は変えない（`--compare` の JSON の行には #539 の欄を入れない）
+
+### 5.11 段単位の走り（凍結した上流からの N 本・段の通過率・段だけの対の比較。#545。設計書 `../08-architecture-v1.2.md` §8.3・§8.6。v1.2 の手 0d）
+
+門を変えないバグの直しは、独立レビューと**変えた段だけの計測**で merge する（2026-10-17 所有者の決定 C）。工場の段単位の実行口（手 0c。工場の README §2.1）を計測の道具から本ごとに当てて N 本流し、採点で段の通過率を出し、凍結した前の候補と今の候補を同じ上流の入力で対にして比べる。**新しい旗を省けば、計測の子の引数・条件のファイル・採点の JSON・匿名の口・標準出力は今と同じ**（値が変わってよいのは §5.9.6 と同じ例外：採点のコード自身の指紋と、それに由来する照合だけ）。採点の費用は 0。計測の費用の見込みは設計書 §8.3・§8.6（変えた段の前後 各 30 本で 0.4〜2.3 USD × 2）。
+
+#### 5.11.1 旗（`run-agent.mjs`）
+
+- `--stage-start <段>`・`--stage-end <段>`・`--stage-from <凍結した上流の計測の出力先>`。**`--pipeline v1.1a` と `--build-from <組>` と組んでだけ受ける**（それ以外は `flags:conflict`）。段の名前・範囲の決め方・境界は工場の dist（`packages/factory/dist/v11a/bundle-v11a.js`）が公開する定数と関数を読む（道具の中に段の表を持たない）。片方だけ付ければ他方は経路の端（工場と同じ）
+- 開始が T1（`name-table`）なら `--stage-from` を付けられない。T2（`test-spec`）・B1（`write`）なら必須。表に無い段・開始が終了より後も `flags:conflict`
+- 対象の本は `--build-from` と同じ（採用した P × 回数。`--only` は採用した P の部分集合）
+- 子の引数の末尾に `--stage-start <開始> --stage-end <終了>` と、開始の段の直前の境界があれば `--stage-input <本のディレクトリ>/stage-input/stage-checkpoint-<境界>.json` を足す。上流の checkpoint と段の走りの記録は、照合を通ったバイト列のまま本のディレクトリの `stage-input/` に写す（工場は checkpoint の隣の記録を読む）
+- **予算と締切の単位は段の走り 1 本**：`--factory-budget-usd`・`--deadline-min` は今までどおり子ごとに `--budget`・`--deadline` で渡し、工場がその走りの始まりから当てる（前の走りの額と時間を引かない）。計測全体の目安の額（`--budget-usd`）の扱いは今と同じで、済みの額は段の走りの記録の `provider_cost_usd` から足す
+
+#### 5.11.2 上流の照合と符号（子を起こす前。exit 4）
+
+- 上流の計測の条件（`<上流>/conditions.json`）：版 v6・`params.mode` が `stage-run`・署名が中身と合う・定義ファイルと凍結した組の SHA が今と同じ・範囲が開始の段の直前の境界を通る。合わなければ `stage-from:conditions-missing`・`stage-from:conditions-unreadable`・`stage-from:conditions-invalid`・`stage-from:conditions-frozen`・`stage-from:range`
+- 本ごと：上流の段の走りの記録（`<上流>/<本>/bundle/stage-run.json`）が読める（`stage-from:stage-input:unreadable`）・形の版（`stage-from:stage-input:version`）・範囲が上流の条件と同じ（`stage-from:record-range`）・確定した仕様と依頼文の SHA が凍結した組の値と同じ（`stage-from:stage-input:plan-sha256`・`stage-from:stage-input:source-sha256`）
+- 境界の checkpoint を宣言した本には、**工場の dist の照合の関数（`verifyStageInput`）**を checkpoint と記録に当てる（出力ダイジェスト・表・点検・持ち越しの導き直し・試験の組を含む。記録に残した照合の結果は信頼しない）。比較では両群の checkout の関数を同じ写しに当てる。断れば `stage-from:<工場の符号>`（例：`stage-from:stage-input:table-sha256`。工場の符号の一覧に無い値は `stage-from:stage-input:unknown`）
+- どの断りも **exit 4**、標準エラーに `断りました: [<符号>] ids=<本の ID> count=<件数>` の 1 行（値・パスは出さない）で、**子を 1 本も起こさず、出力先に何も書かない**。exit 3（使い方・再開の断り）と取り違えない
+
+#### 5.11.3 入力なしの本（`stage_input_absent`）
+
+- **入力なしにするのは、照合を通った上流の段の走りの記録が、境界の checkpoint を宣言せず、範囲の中で境界へ未到達と確認できる本だけ**：停止（`stopped`）が写像で、段は境界より前の段（上流の範囲の開始の区間から境界の直前の区間までの開始・終了の段と、区間 0 の持ち越しの導出 `carry-over`）・種類は既知の値、`stage_pass` が偽・`exit_code` が 1、段の履歴（`stages`）が全部境界より前の段で、到達した段（`reached_stage`）が履歴の最後と停止の段に一致し、宣言した境界は全部それより前。どれかが合わない宣言なしの記録（境界より後の段まで到達・停止した記録、不正な形の停止など）は壊れた記録として `stage-from:record-inconsistent`（exit 4・子 0 本・何も書かない）で断る。その本は起こさず、条件のファイルの `stage_input_absent`（`count` と `ids`）に残す。子の引数（`child_args[].argv`）は `null` で、予定の一覧には残す（予定は 採用した P × 回数 のまま）
+- 境界に届いて checkpoint を宣言したのに材料が無い・壊れている本、上流の段の走りの記録が読めない・壊れている本、早期停止を示さずに宣言の無い本は**入力なしにしない**（上の符号で断る）
+- 採点は入力なしの本を**黙って分母から除かない**：照合（`completion`）では未実行に数えず `stage_input_absent` に件数を出し、段の通過率では別の行（`input_absent`）に出す
+
+#### 5.11.4 条件のファイル（v6。段単位の走りのときだけ）
+
+- 版は `musunest-factory/agent-accept-conditions/v6`。`params.mode` が `stage-run`、`params` に `stage_start`・`stage_end`・`budget_scope`（`stage-run`。工場の dist の値）・`stage_from`（上流の条件のファイルの SHA-256・署名・範囲。開始 T1 は `null`）・`stage_inputs`（本ごとの上流の checkpoint と記録の SHA-256。入力なしの本は記録の SHA と `absent: true`）を足し、直下に `stage_input_absent` を足す。どれも署名に入る
+- `--resume` は署名の一致でだけ許す（**範囲・上流・本ごとの入力を変えた再開は `resume:signature` で断る**）。入力なしの本は再開でも起こさない
+- 起動の記録（`summary.line.json`）には `stage_run`（`stage_pass`・`reached_stage`・`stopped` の段と種類・`provider_cost_usd`・`exit_code`。既知の値と数だけ）を足す。要約の行が無いので `summary` は `null`。標準出力の 1 本の行は `verdict=` の代わりに `stage=<開始>..<終了> … stage_pass=<真偽>` を出す。段単位の走りは publish しない（工場が納品物を書かない）
+
+#### 5.11.5 採点：段の通過率（`stage_pass_rate`）と納品の成功の違い
+
+- **段の通過は納品の成功ではない**。工場の段の走りの記録の `stage_pass`（範囲の中に早期停止が無く、終了の段の最後の記録が ok）を本ごとに読み、`stage_pass_rate` に出す。PASS・納品の成功・`verdict` の名前で出さない。終了が ⑦ なら ⑦ の判定（`stage_judge_verdict`）の件数を別に出す（`stage_judge_verdicts`）。停止は 段:種類 の件数（`stops`）
+- 件数は別々に出す：**対象予定**（`planned`。採用した P × 回数。子を起こす前に条件のファイルへ固定）・**入力なし**（`input_absent`）・**起動**（`launched`）・**観測**（`observed`。起動して段の走りの記録が読めた）・**欠測**（`missing` ＝ 予定 − 入力なし − 観測。内訳 `missing_breakdown`：未起動 `unlaunched`・記録なし `unreadable`・条件と食い違う `mismatched`。D17 の予算の停止で起こさなかった本は未起動のまま数え、`budget_pending` に件数を出す）・**通過**（`passed`）
+- 記録は条件に結べたときだけ観測に数える：範囲（`range`）が条件の `stage_start`・`stage_end` と同じ、確定した仕様と依頼文の SHA が凍結した組のその P の値と同じ、入力の対応（開始 T1 は記録の `input` が `null` で本ごとの入力の欄が無い。それ以外は記録の `input` が指す本のディレクトリの `stage-input/` の写しの SHA-256 が `stage_inputs` の値と同じで、checkpoint の境界が記録の入力の境界と同じで、記録の入力の出力ダイジェスト `input.output_digest` が、写した上流の記録のその checkpoint の宣言の値と同じ）・段の履歴と範囲の整合（段の履歴・到達の段・停止の段が範囲の区間の段だけで、到達の段が履歴の最後、段の通過が「停止なし・終了の段の最後の記録が ok」と一致。区間の表 `STAGE_SEGMENTS` は工場の dist が区間の端の段しか公開しないので手で写して持ち、B 区間（write..judge）には B3'・B6 で全件持ち越しになったときの `carry-over`（停止 `carry-over`・`unmet`。正当な不通過）を含む。試験で、dist の `STAGE_STARTS`・`STAGE_ENDS` の段と `STAGE_BOUNDARIES` の境界の両側の段が手の表にあること、手の表の段が dist の `STAGE_IDS` の段であること、工場の dist で B6 が全試験を棄却した記録が観測・不通過・照合 complete に数えられ漏斗に `carry-over` が出ることを確かめる）。食い違う記録は通過に数えず欠測の `mismatched` に数え、行の `mismatches`（`range`・`plan-source`・`input`・`stages`）に理由を残し、照合は**未照合**（理由つき）。漏斗も結べた記録だけから作る
+- **率の分母は 予定 − 入力なし**（`denominator`。起動の前に決まる。未起動の本を分母から消さない）。率（`rate`）と Wilson の 95% 区間（`interval`）は同じ分母で、分母が 0 なら `null`
+- 段単位の計測では、原文系・了承後系の PASS と納品の欄（`metrics`・`metrics_accepted`・`fulfillment`・`verdicts`・`pass_k`・`agreement` など）を**計算しない**：`null` にして `not_computed`（理由 `stage-run` と欄の一覧）を添える。`evaluation.build_applicable` は偽
+- 漏斗（§5.9.1）は範囲の中の段（段の走りの記録に現れた段）だけに当て、分母は 予定 − 入力なし
+- **段単位でない条件の採点には新しい欄を置かない**（`stage_pass_rate`・`not_computed`・`stage_run`・照合の `stage_input_absent` が無い）
+
+#### 5.11.6 段だけの対の比較（`--compare` と段の旗）と読み方
+
+- 対のファイル：`run-agent.mjs <repo> <out> --make-pairs <対> --build-from <組> --pipeline v1.1a --stage-start <段> [--stage-end <段>] [--stage-from <上流>] [--runs 3]`。上流の照合（§5.11.2）のあと、**上流の入力のある本だけ**（採用した P の順 × 回数）で対を書く（版 `musunest-eval/stage-compare-pairs/v1`。範囲と上流の条件の SHA を結ぶ）。交互の順は今の比較と同じ関数
+- 計測：`--compare --baseline <凍結した前の候補の checkout> --pairs <対> --build-from <組> --pipeline v1.1a --stage-start … --stage-from … --budget-usd <上限>`。群は **`before`**（`--baseline` の checkout。役割 baseline）と **`after`**（`<repo>`。役割 candidate）で、v1／v1.1α の比較の群とは別の定数。**両群とも v1.1α の経路で、同じ本に同じ上流の入力のバイト列を渡す**。対のファイルが上流の入力のある本・範囲・上流と合わなければ `compare:pairs-missing`・`compare:pairs-extra`・`compare:pairs-stage` で断る。起こす直前の額の確かめ（D17）は今の比較と同じ関数。v1.1α の 4 段の上限は両群で A1 の承認値を確かめる。正式な比較の条件（§5.8.3 の profile）は当てない
+- 採点：`score-agent.mjs <repo> <out> --compare` が比較の記録の版（`musunest-eval/stage-compare-record/v1`）で段だけの対の比較と見分け、`score-compare[-label].json`（版 `musunest-eval/score-stage-compare/v1`）に書く。両群を段単位の採点で採点し、対ごとに段の通過の差（**after − before**）を取る。件数（＋1／0／−1）・n・平均・区間は今の対の差と同じ関数（§5.8.5）、P のまとまりの符号反転の p と bootstrap の区間は手 0b の関数（§5.10.4。t 区間は参考）。片側が未起動・欠測の対は差 `null` で n に入れず、理由ごとの件数（`excluded`）を出す。入力なしの本は対に入らず、件数（`input_absent`）を別に出す
+- **読み方**：段の評価の利点は**上流を固定して効果を局所化すること**であり、「不一致の対が増えて見やすい」ことではない（設計書 §8.3・§8.7）。主は変えた段の通過率の対の差で、全体の PASS の対の差は数 wave ごとにまとめる 30 対の比較で読む。**非有意は「差が無い」ではなく「検出されず」**
+
+#### 5.11.7 匿名の口・標準出力
+
+- `--anonymous`（段単位の採点）は、照合と指紋（今と同じ形。条件の版に v6 を足す）・評価の種類・範囲・`not_computed`・段の通過率の件数・率・区間・停止と ⑦ の判定の件数・範囲の中の漏斗だけ。`--compare --anonymous` は対の差の件数・n・平均・区間・除いた数・P の集計（m・平均・p・区間）と、群ごとの照合・指紋・段の通過率。**本の ID・P の ID・上流の SHA は出さない**
+- 標準出力：段単位の採点は、要約の JSON・本ごとの行・照合の行・段の通過の 1 行（`段の通過（範囲 <開始>..<終了>。納品の成功ではない）: 通過 …／予定 …・入力なし …・起動 …・観測 …・欠測 …（…）・率 …`）・漏斗の行・指紋の行を出す（計算しない欄の行は出さない）。段だけの対の比較は、要約の JSON・対ごとの行・群ごとの段の通過の行と、比較の 1 行を出す。段単位でない採点の行は変えない
+
+### 5.13 経路 v1.2 と比較の群の組（Build 比較の続き。#557。設計書 `../08-architecture-v1.2.md` §8.6・§8.7・§9 の手 2・手 4）
+
+§5.8 の Build 比較に、工場の経路 v1.2（#547。merge 済みの v1.2 の旗を全部 on・prompt_version `v1.2`）と、比較の群の組の選択を足す。**新しい旗（`--pipeline v1.2`・`--compare-pipelines`）を省けば、子の引数・条件・対のファイル・比較の記録・起動の記録・採点の JSON・標準出力・匿名の口は今と同じ**（値が変わってよいのは道具と採点のコード自身の指紋と、それに由来する照合だけ）。試験は偽物の工場の入口と固定の記録で閉じる。
+
+#### 5.13.1 口（`run-agent.mjs`）
+
+| 口 | 中身 |
+|---|---|
+| `--pipeline v1.2` | `v1.1a` と同じく `--build-from` と一緒にだけ受け、子の引数の**末尾**に `--pipeline v1.2` を足す。値の無い指定・知らない値・組めない組（`--plan`・`--plan-only`・`--script`・段単位の走りの旗）は `flags:conflict`。段単位の走りと v1.2 の組み合わせは、工場の段の口が v1.2 を受けることを確かめてから別の Issue で足す。標準出力の本ごとの行には v1.2 のときだけ ` pipeline=v1.2` が付く |
+| `--compare-pipelines <比較元>,<候補>` | 受ける組は `v1,v1.1a`（省略と同じ）・`v1.1a,v1.2`・`v1,v1.2` だけ（同じ値・知らない値・ほかの組・3 つ以上は `flags:conflict`）。`--compare` か `--make-pairs` と一緒にだけ受ける。**段だけの対の比較（§5.11.6）の旗とは、どの組でも一緒に受けない**（`flags:conflict`・子 0）。群の名前は群の経路の名前（`<out>/<経路>`）、役割は比較元 `baseline`・候補 `candidate`。比較元の群は `--baseline` の checkout、候補の群は `<repo>` で流す（**`--baseline` に `<repo>` と同じ checkout を渡してよい**） |
+
+- `--make-pairs` は選んだ群を対のファイルの `groups` に書き、先行の群を比較元から交互にする。`--compare` は対のファイルの `groups` が選んだ群と同じでなければ `compare:pairs-schema` で断る
+- 経路の一覧（`PIPELINES`）と群の組（`COMPARE_PIPELINE_PAIRS`）は `score-agent.mjs` の定数で、計測と採点が共有する（別に手書きしない）
+
+#### 5.13.2 旗の組の読み方（工場の公開の値・報告との照合・未照合）
+
+- **正本は工場の公開の値**：子を起こす前に、工場の dist の package の入口（`packages/factory/dist/index.js`）の `V12_PIPELINE_FLAGS`（旗の名前 → 真偽）を読み、条件の `params.v12_flags` に写す。**計測の側で旗の名前を手書きしない**（後の手の旗は工場が同じ正本に足すので、道具を直さずに条件と記録に載る）。export が無い、または旗の名前 → 真偽の写像でない（値が真偽でない・空・配列など）なら **exit 3・`pipeline:v1.2-unavailable`** で子を 1 本も起こさない。旗の組は条件の署名に入るので、組が変わった `--resume` は `resume:signature` で断る（v1.2 の再開は、保存した条件を v7 として検証し署名を中身から計算し直して照らす。知らない版・書き換えた条件も同じ符号で断る）
+- **報告との照合**：子が終わったら、その本の要約（標準出力の headless-summary の `v12_flags`）と条件の記録（`bundle/build-record.json` の `conditions.v12_flags`）を読み（推定しない）、条件の組と**名前 → 真偽の集合として**照らす（キーの順だけの違いは一致）。本ごとの記録（`summary.line.json` の `v12_flags`）に、2 つの報告（`present`／`absent`／`malformed` と組）と結果を残す。結果は強い順に `malformed`（不正形）＞ `missing`（欠測）＞ `inconsistent`（要約と条件の記録の食い違い）＞ `mismatch`（条件と不一致）＞ `match`（一致）。起動の記録（`run-<時刻>.json`）には、出力先の**全部の本の記録**（`--resume` で飛ばした前回の完了本を含む）から照らし直した件数と一致しない本を残す
+- **未照合**：採点は本ごとの記録の報告を条件の組と照らし直す（記録に残した結果は信頼しない）。**起動した本**のうち 1 本でも一致しなければ照合を `unverified`・「**未照合**」にし、`completion.unverified` に `v12-flags` を出す（`complete` に丸めない）。未起動の本（予算で止めた本など）は今の未実行・途中のまま（未照合に数えない）。未照合は計測の照合の状態で、**工場の verdict と PASS の判定は変えない**
+- 採点の出力：`evaluation.pipeline` に `v1.2`、v1.2 の条件のときだけ `evaluation.v12_flags`（条件の組・`verified`／`unverified`・起動した本の数・結果ごとの本の数・一致しない本）と標準出力の `旗の組（v1.2）: …` の 1 行。漏斗・到達・停止・持ち越し・段の役割ごとの対の差は v1.1α の段の名前と同じ表で数える
+- 匿名の口：経路と、照合を通った旗の名前と真偽（通らなければ `null`）と件数だけ（本の ID・P の ID は出さない）
+
+#### 5.13.3 schema の版の照合
+
+- 条件の schema は **v1.2 のときだけ `musunest-factory/agent-accept-conditions/v7`**（v5 に `params.v12_flags` を足した。v6 は段単位の走り #545 の版）。`v1`・`v1.1a`・省略の条件は今の v5 のまま
+- 群の照合（計測の起動の前と比較の採点）は、v1.2 を含む組では各群の条件を既知の版として個別に検証してから（`v1`・`v1.1a` は v5、`v1.2` は v7 と旗の組の形）、両方から共通の比較の形（経路・v1.1α の上限の欄・旗の組・版を除く）を組んで照らす。保存する条件と署名は元のまま。**知らない版・群と合わない版は `compare:conditions-version`、段単位の走りの条件（v6）との混在は `compare:conditions-stage`** で断る。`v1,v1.1a` の組の扱い（知らない版は照合で未照合）は今のまま
+- 起動の前の照合の**意図した差**に、`v12_flags` と schema の版の差を足す（経路と v1.1α の上限の欄と同じ扱い）。各群の署名と工場の報告の照合からは除かない。両群の条件の署名が同じなら今と同じく断る
+
+#### 5.13.4 3 つの組の正式な条件の扱い
+
+- **v1.1α の 4 段の上限の承認値の検査**は、経路が `v1.1a` か `v1.2` の群すべてに当てる（違えば `compare:limits-unapproved`）
+- **正式な比較の条件（`OFFICIAL_COMPARE`）は変えない。** 比較元が `v1` の組（`v1,v1.1a`・`v1,v1.2`）は今の定数で `official`／`diagnostic` を判定する。`v1.1a,v1.2` の組は `diagnostic`（違った項目に `pipelines`）にして断らない。採点と匿名の口は理由 `pipelines` を残す
+- 比較の記録（`comparison.json`）の群ごとの欄と群の条件に、群の経路と（v1.2 の群は）`v12_flags` を残す。比較の採点は比較の記録の `pairs.groups` から群の組を読み、差の向きの文を「**候補（<候補>）− 比較元（<比較元>）**」に組み立てる（`v1,v1.1a` では今の文と同じ文字列）。段の役割の対応表（§5.10.3）は v1.2 の群を v1.1α の段の名前で引く。群の入れ替え・複製は今と同じく `compare:scoring-mismatch`
+- 段だけの対の比較（§5.11.6。群 `before`・`after`）は今のまま（新しい旗を省いた対・条件・採点は変えない）
+
 ## 6. 回帰用の組 `regression-r1`（#450）
 
 方法論 `01-eval-sets.md` §1 の**回帰用の組の初期の予備セット**。直しの前後で同じ組を数え、壊していないかを見る組で、**落ちの中身は調べない**。開発用（§5.6 の `dev-p1-p10`）と同じ入口の形（`sets/regression-r1.json`。`role: regression`）で、新しい題材 5 つ（`subjects/R1〜R5.json`）を開発用の題材と**同じ判定の組**で持つ。
