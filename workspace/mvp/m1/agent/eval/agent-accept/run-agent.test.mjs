@@ -1895,3 +1895,44 @@ test("#545 段だけの対の比較：--make-pairs と段の旗は上流の入�
     assertRefused(runAgent(repo, join(base, "cmp-stage"), ["--compare", "--baseline", baseline, "--pairs", badStage, "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "write", "--stage-from", up, "--budget-usd", "10"], { FAKE_SPAWN_LOG: log }), "compare:pairs-stage", log, n1, "pairs-stage");
   });
 });
+
+test("#545 直し：境界の checkpoint の宣言が無い記録は、範囲の中で境界へ未到達と確認できるときだけ入力なし。境界より後の段まで到達・停止した記録（宣言の欠け）・不正な形の停止・停止と段の履歴の矛盾は stage-from:record-inconsistent・exit 4・子 0 本・何も書かない（--make-pairs も対を書かない）", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo(base), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = join(base, "up");
+    const r0 = runAgent(repo, up, stageArgs(fz, ["--stage-start", "name-table", "--stage-end", "judge"]), { FAKE_SPAWN_LOG: log, FAKE_STAGE: JSON.stringify(Object.fromEntries(STOPPED545.map((id) => [id, "stop"]))) });
+    assert.equal(r0.status, 0, r0.stderr);
+    const editRecord = (id, edit) => (dir) => { const p = join(dir, "stage-run.json"), rec = readJson(p); edit(rec); writeFileSync(p, JSON.stringify(rec, null, 2) + "\n"); };
+    const cases = [
+      // 指摘の再現：write まで到達し write で停止・段の通過が偽・t2-b1 の宣言を除いた記録
+      ["write-stop", "P7-r2", (rec) => {
+        rec.checkpoints = rec.checkpoints.filter((c) => c.boundary !== "t2-b1");
+        rec.stages = [...rec.stages, { stage: "test-spec", status: "ok", calls: 1, duration_ms: 1 }, { stage: "write", status: "failed", calls: 1, duration_ms: 1 }];
+        rec.reached_stage = "write"; rec.stopped = { stage: "write", kind: "unmet" }; rec.stage_pass = false; rec.exit_code = 1;
+      }],
+      ["stopped-no-kind", STOPPED545[0], (rec) => { rec.stopped = { stage: "name-table" }; }],
+      ["stopped-unknown-kind", STOPPED545[1], (rec) => { rec.stopped = { stage: "name-table", kind: "made-up" }; }],
+      ["stopped-not-object", STOPPED545[2], (rec) => { rec.stopped = "unmet"; }],
+      ["stopped-missing", STOPPED545[3], (rec) => { rec.stopped = null; }],
+      ["history-after-boundary", STOPPED545[4], (rec) => { rec.stages = [...rec.stages, { stage: "write", status: "failed", calls: 1, duration_ms: 1 }]; }],
+      ["reached-mismatch", STOPPED545[5], (rec) => { rec.reached_stage = "judge"; }],
+      ["passed-flag", STOPPED545[6], (rec) => { rec.exit_code = 0; }],
+    ];
+    const spawned = spawnCount(log);
+    for (const [label, id, edit] of cases) {
+      const tampered = tamperUpstream(up, join(base, `up-${label}`), id, editRecord(id, edit));
+      const out = join(base, `out-${label}`);
+      assertStageRefused(runAgent(repo, out, stageArgs(fz, ["--stage-start", "write", "--stage-from", tampered]), { FAKE_SPAWN_LOG: log }), "stage-from:record-inconsistent", [id], log, spawned, out, label);
+      const pairsPath = join(base, `pairs-${label}.json`);
+      const mp = runAgent(repo, join(base, `unused-${label}`), ["--make-pairs", pairsPath, "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "write", "--stage-from", tampered, "--runs", "3"]);
+      assert.equal(mp.status, 4, `${label}: ${mp.stderr}`);
+      assert.ok(mp.stderr.includes("[stage-from:record-inconsistent]"), label);
+      assert.ok(!existsSync(pairsPath), `${label}: 対を書いた`);
+    }
+    // 対照：書き換えない上流なら 15 本が入力なしで 15 対
+    const pairsOk = join(base, "pairs-ok.json");
+    const ok = runAgent(repo, join(base, "unused-ok"), ["--make-pairs", pairsOk, "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "write", "--stage-from", up, "--runs", "3"]);
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(readJson(pairsOk).pairs.length, 15);
+  });
+});

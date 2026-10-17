@@ -60,7 +60,7 @@
 // run-agent.mjs は、ここから指紋の関数と定義ファイルの読み込みを import して条件のファイルに書く（道具は 2 本で 1 組。入口として起動したときだけ採点する）
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const AGGREGATION_VERSIONS = {
@@ -2038,6 +2038,10 @@ export const CONDITIONS_V6 = "musunest-factory/agent-accept-conditions/v6";
 export const STAGE_RUN_MODE = "stage-run";
 /** 工場の段の走りの記録の、本のディレクトリからの場所（packages/factory の STAGE_RUN_RECORD_FILE を --out の下に）と記録の形の版（STAGE_RUN_RECORD_SCHEMA） */
 export const STAGE_RUN_PATH = "bundle/stage-run.json";
+/** 本のディレクトリの中の、上流の入力の写しの置き場所（run-agent.mjs が checkpoint と段の走りの記録をここに写す。工場は checkpoint の隣の記録を読む） */
+export const STAGE_INPUT_DIR = "stage-input";
+/** 段の走りの記録と条件の食い違いの理由（range ＝ 範囲、plan-source ＝ 確定した仕様と依頼文の SHA、input ＝ 入力の対応） */
+export const STAGE_RECORD_MISMATCHES = ["range", "plan-source", "input"];
 export const STAGE_RUN_RECORD_SCHEMA = "musunest.factory.v11a-stage-run/v1";
 /** 段単位の採点で計算しない欄（null にし、not_computed に理由 stage-run を添える） */
 export const STAGE_NOT_COMPUTED = ["metrics", "metrics_accepted", "metrics_script", "fulfillment", "bySubject", "tables", "metrics_plan", "metrics_build", "pass_k", "verdicts", "unverified_details", "agreement", "test_findings"];
@@ -2048,9 +2052,12 @@ export const STAGE_COMPARE_ROLES = { before: "baseline", after: "candidate" };
 export const STAGE_PAIRS_SCHEMA = "musunest-eval/stage-compare-pairs/v1";
 export const STAGE_COMPARISON_SCHEMA = "musunest-eval/stage-compare-record/v1";
 export const STAGE_SCORE_COMPARE_SCHEMA = "musunest-eval/score-stage-compare/v1";
-/** 本の状態：absent ＝ 入力なし（起こさない）、unlaunched ＝ 起こさなかった（予算の停止など）、missing ＝ 起こしたが段の走りの記録が読めない、observed ＝ 記録が読めた */
-export const STAGE_RUN_STATES = ["absent", "unlaunched", "missing", "observed"];
-/** 段だけの対の差が null の理由（未起動 ＝ どちらかの群で起こさなかった、欠測 ＝ 起こしたが記録が読めない） */
+/**
+ * 本の状態：absent ＝ 入力なし（起こさない）、unlaunched ＝ 起こさなかった（予算の停止など）、missing ＝ 起こしたが段の走りの記録が読めない、
+ * mismatch ＝ 記録は読めたが条件（範囲・仕様と依頼文の SHA・入力の対応）と食い違う（通過に数えず、照合は未照合）、observed ＝ 記録が読めて条件と合う
+ */
+export const STAGE_RUN_STATES = ["absent", "unlaunched", "missing", "mismatch", "observed"];
+/** 段だけの対の差が null の理由（未起動 ＝ どちらかの群で起こさなかった、欠測 ＝ 起こしたが記録が読めないか条件と食い違う） */
 export const STAGE_PAIR_NULL_REASONS = ["unlaunched", "missing"];
 /** 段単位の走りの条件（v6 で params.mode が stage-run） */
 export const isStageConditions = (cond) => isObj(cond) && cond.schema === CONDITIONS_V6 && cond.params?.mode === STAGE_RUN_MODE;
@@ -2069,14 +2076,40 @@ const stageStopOf = (stopped) => {
   const st = knownOr(BUILD_STAGE_IDS, stopped.stage), k = knownOr(FAILURE_KINDS, stopped.kind);
   return st === "unknown" || k === "unknown" ? "unknown" : `${st}:${k}`;
 };
-/** 予定した本ごとの事実（状態と段の走りの記録）。入力なしの本は記録を読まない */
-export function stageFactsOf(outRoot, planned, absentIds) {
+const readBytesOrNull = (path) => { try { return readFileSync(path); } catch { return null; } };
+/**
+ * 段の走りの記録を条件に結ぶ（食い違いの理由の一覧。空なら合う）：範囲が条件の stage_start・stage_end と同じ（range）・確定した仕様と依頼文の SHA が
+ * 凍結した組のその P の値と同じ（plan-source）・入力の対応（input）。開始 T1（stage_from が null）なら記録の入力は null で、本ごとの入力の欄も無い。
+ * それ以外は、本ごとの入力の欄（stage_inputs。入力なしでない）があり、記録の入力（checkpoint のファイル名と境界）が指す写し（<本>/stage-input/）の
+ * checkpoint と段の走りの記録の SHA-256 が欄の値と同じで、checkpoint の境界が記録の入力の境界と同じ
+ */
+export function stageRecordMismatches(record, run, cond, dir) {
+  const p = isObj(cond?.params) ? cond.params : {}, reasons = [];
+  if (!isObj(record.range) || record.range.start !== p.stage_start || record.range.end !== p.stage_end) reasons.push("range");
+  const a = Array.isArray(cond?.frozen?.adopted) ? cond.frozen.adopted.find((x) => isObj(x) && x.pattern === patternOf(run)) : undefined;
+  if (!isObj(a) || !isHex64(record.plan_sha256) || record.plan_sha256 !== a.plan_sha256 || record.source_sha256 !== a.source_sha256) reasons.push("plan-source");
+  const entry = Array.isArray(p.stage_inputs) ? p.stage_inputs.find((x) => isObj(x) && x.id === run) : undefined;
+  const inputOk = (() => {
+    const inp = record.input;
+    if (p.stage_from === null || p.stage_from === undefined) return inp === null && entry === undefined;
+    if (!isObj(entry) || entry.absent === true || !isObj(inp) || typeof inp.checkpoint !== "string" || !/^stage-checkpoint-[a-z0-9-]+\.json$/.test(inp.checkpoint) || typeof inp.boundary !== "string") return false;
+    const cp = readBytesOrNull(join(dir, STAGE_INPUT_DIR, inp.checkpoint)), rec = readBytesOrNull(join(dir, STAGE_INPUT_DIR, basename(STAGE_RUN_PATH)));
+    if (cp === null || rec === null || sha256(cp) !== entry.checkpoint_sha256 || sha256(rec) !== entry.record_sha256) return false;
+    try { const v = JSON.parse(cp.toString("utf8")); return isObj(v) && v.boundary === inp.boundary; } catch { return false; }
+  })();
+  if (!inputOk) reasons.push("input");
+  return reasons;
+}
+/** 予定した本ごとの事実（状態と段の走りの記録）。入力なしの本は記録を読まない。記録は条件と結べたときだけ観測（observed）に数える */
+export function stageFactsOf(outRoot, planned, absentIds, cond) {
   return planned.map((run) => {
     if (absentIds.includes(run)) return { run, state: "absent", record: null };
     const dir = join(outRoot, run);
     if (!existsSync(dir)) return { run, state: "unlaunched", record: null };
     const record = stageRecordOf(readJsonSafe(join(dir, STAGE_RUN_PATH)).value);
-    return { run, state: record === null ? "missing" : "observed", record };
+    if (record === null) return { run, state: "missing", record: null };
+    const mismatches = stageRecordMismatches(record, run, cond, dir);
+    return mismatches.length > 0 ? { run, state: "mismatch", record: null, mismatches } : { run, state: "observed", record };
   });
 }
 /**
@@ -2087,7 +2120,7 @@ export function stageFactsOf(outRoot, planned, absentIds) {
  */
 export function stagePassRateOf(facts, { range = null, budgetPending = [] } = {}) {
   const count = (st) => facts.filter((f) => f.state === st).length;
-  const planned = facts.length, inputAbsent = count("absent"), unlaunched = count("unlaunched"), unreadable = count("missing"), observed = count("observed");
+  const planned = facts.length, inputAbsent = count("absent"), unlaunched = count("unlaunched"), unreadable = count("missing"), mismatched = count("mismatch"), observed = count("observed");
   const denominator = planned - inputAbsent;
   const passed = facts.filter((f) => f.state === "observed" && f.record.stage_pass === true).length;
   const [lo, hi] = wilson(passed, denominator);
@@ -2100,8 +2133,9 @@ export function stagePassRateOf(facts, { range = null, budgetPending = [] } = {}
   }
   return {
     label: "段の通過率（範囲の中に早期停止が無く、終了の段の最後の記録が ok。納品の成功ではない）",
-    range, planned, input_absent: inputAbsent, launched: unreadable + observed, observed, missing: denominator - observed,
-    missing_breakdown: { unlaunched, unreadable, budget_pending: facts.filter((f) => f.state === "unlaunched" && budgetPending.includes(f.run)).length },
+    range, planned, input_absent: inputAbsent, launched: unreadable + mismatched + observed, observed, missing: denominator - observed,
+    // 欠測の内訳：未起動・記録なし・条件と食い違う記録（通過に数えない）
+    missing_breakdown: { unlaunched, unreadable, mismatched, budget_pending: facts.filter((f) => f.state === "unlaunched" && budgetPending.includes(f.run)).length },
     passed, denominator, denominator_label: `予定 ${planned} − 入力なし ${inputAbsent}（起動の前に決まる）`,
     rate: denominator === 0 ? null : round6(passed / denominator), interval: denominator === 0 ? null : [round6(lo), round6(hi)], text: denominator === 0 ? null : fmt(passed, denominator),
     stops, stage_judge_verdicts: judge,
@@ -2110,7 +2144,7 @@ export function stagePassRateOf(facts, { range = null, budgetPending = [] } = {}
 /** 標準出力の段の通過の 1 行（範囲・通過／予定・入力なし） */
 export function stagePassText(sp) {
   const r = sp.range ?? {}, m = sp.missing_breakdown;
-  return `段の通過（範囲 ${r.start ?? "-"}..${r.end ?? "-"}。納品の成功ではない）: 通過 ${sp.passed}／予定 ${sp.planned}・入力なし ${sp.input_absent}・起動 ${sp.launched}・観測 ${sp.observed}・欠測 ${sp.missing}（未起動 ${m.unlaunched}［うち予算の停止 ${m.budget_pending}］・記録なし ${m.unreadable}）・率 ${sp.text ?? "-（分母 0）"}（分母 ${sp.denominator_label}）`;
+  return `段の通過（範囲 ${r.start ?? "-"}..${r.end ?? "-"}。納品の成功ではない）: 通過 ${sp.passed}／予定 ${sp.planned}・入力なし ${sp.input_absent}・起動 ${sp.launched}・観測 ${sp.observed}・欠測 ${sp.missing}（未起動 ${m.unlaunched}［うち予算の停止 ${m.budget_pending}］・記録なし ${m.unreadable}・条件と食い違う ${m.mismatched}）・率 ${sp.text ?? "-（分母 0）"}（分母 ${sp.denominator_label}）`;
 }
 /** 範囲の中の漏斗（#538 の funnelOf を、入力なしを除いた本に当てる。段は段の走りの記録に現れた段だけ） */
 export function stageFunnelOf(facts, range) {
@@ -2130,6 +2164,7 @@ export function stageFunnelOf(facts, range) {
 const stageRowOf = (f) => {
   const rec = f.state === "observed" ? f.record : null;
   return {
+    mismatches: f.state === "mismatch" ? f.mismatches.filter((m) => STAGE_RECORD_MISMATCHES.includes(m)) : [],
     run: f.run, pattern: patternOf(f.run), state: f.state, stage_pass: rec === null ? null : rec.stage_pass,
     reached_stage: rec === null || rec.reached_stage === null || rec.reached_stage === undefined ? null : knownOr(BUILD_STAGE_IDS, rec.reached_stage),
     stopped: rec === null ? null : stageStopOf(rec.stopped),
@@ -2140,9 +2175,16 @@ const stageRowOf = (f) => {
 /** 条件の範囲（params.stage_start・stage_end。既知の段の ID か unknown） */
 const stageRangeOf = (cond) => ({ start: knownOr(BUILD_STAGE_IDS, cond?.params?.stage_start), end: knownOr(BUILD_STAGE_IDS, cond?.params?.stage_end) });
 /** 段単位の採点の出力（scoreOutput の段単位の道）。計算しない欄は null で、理由を not_computed に置く */
-function stageOutputOf({ outRoot, cond, planned, stageAbsent, set, evaluation, completion, fingerprints }) {
+function stageOutputOf({ outRoot, cond, planned, stageAbsent, set, evaluation, completion: reconciled, fingerprints }) {
+  let completion = reconciled;
   const range = stageRangeOf(cond);
-  const facts = stageFactsOf(outRoot, planned, stageAbsent);
+  const facts = stageFactsOf(outRoot, planned, stageAbsent, cond);
+  // 条件と食い違う記録が 1 本でもあれば照合は未照合（理由に件数と食い違いの種類。本の ID は行の mismatches に）
+  const mismatched = facts.filter((f) => f.state === "mismatch");
+  if (mismatched.length > 0) {
+    const kinds = STAGE_RECORD_MISMATCHES.filter((k) => mismatched.some((f) => f.mismatches.includes(k)));
+    completion = { ...completion, status: "unverified", label: COMPLETION_LABELS.unverified, reasons: [...completion.reasons, `段の走りの記録が条件と食い違う ${mismatched.length} 本（${kinds.join("・")}）`] };
+  }
   const last = completion.latest_record;
   const budgetPending = last?.stop_code === "budget" && Array.isArray(last.pending) ? last.pending : [];
   const sf = cond.params?.stage_from;
@@ -2159,7 +2201,7 @@ function stageOutputOf({ outRoot, cond, planned, stageAbsent, set, evaluation, c
 /** 匿名の段の通過率：件数・率・区間・既知の値だけ（本の ID・P の ID・上流の SHA は出さない） */
 const anonymousStagePassRate = (s) => (!isObj(s) ? null : {
   range: { start: enumOrUnknown(BUILD_STAGE_IDS, s.range?.start ?? null), end: enumOrUnknown(BUILD_STAGE_IDS, s.range?.end ?? null) },
-  ...intsOf(s, ["planned", "input_absent", "launched", "observed", "missing", "passed", "denominator"]), missing_breakdown: intsOf(s.missing_breakdown, ["unlaunched", "unreadable", "budget_pending"]),
+  ...intsOf(s, ["planned", "input_absent", "launched", "observed", "missing", "passed", "denominator"]), missing_breakdown: intsOf(s.missing_breakdown, ["unlaunched", "unreadable", "mismatched", "budget_pending"]),
   rate: numOrNull(s.rate), interval: numPair(s.interval), text: rateOrNull(s.text),
   stops: (() => { const vals = {}; for (const [k, n] of Object.entries(isObj(s.stops) ? s.stops : {})) { const key = knownStopValue(k) ? k : "unknown"; vals[key] = (vals[key] ?? 0) + (Number.isInteger(n) ? n : 0); } return vals; })(),
   stage_judge_verdicts: isObj(s.stage_judge_verdicts) ? intsOf(s.stage_judge_verdicts, [...FACTORY_VERDICTS, "unknown", "absent"]) : null,
@@ -2233,7 +2275,8 @@ async function scoreStageCompare(repo, outRoot, comparison, opts) {
     const id = `${p.pid}-r${p.r}`, states = Object.fromEntries(STAGE_COMPARE_GROUPS.map((g) => [g, rowOf(g, id)?.state ?? "unlaunched"]));
     const both = STAGE_COMPARE_GROUPS.every((g) => states[g] === "observed");
     const values = both ? Object.fromEntries(STAGE_COMPARE_GROUPS.map((g) => [g, rowOf(g, id).stage_pass ? 1 : 0])) : null;
-    const reason = both ? null : STAGE_COMPARE_GROUPS.some((g) => states[g] !== "observed" && states[g] !== "missing") ? "unlaunched" : "missing";
+    // 条件と食い違う記録（mismatch）は観測でないので欠測に数える
+    const reason = both ? null : STAGE_COMPARE_GROUPS.some((g) => !["observed", "missing", "mismatch"].includes(states[g])) ? "unlaunched" : "missing";
     return { run: id, pid: p.pid, r: p.r, first: p.first, states, stage_pass: values, diff: both ? values[after] - values[before] : null, reason };
   });
   const diffs = rows.filter((r) => r.diff !== null).map((r) => r.diff);

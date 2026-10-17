@@ -653,7 +653,7 @@ v1（比較元の checkout。main `2cd1586f856fb1cdecf75ef035826cbffe539e69`）�
 
 #### 5.11.3 入力なしの本（`stage_input_absent`）
 
-- **入力なしにするのは、照合を通った上流の段の走りの記録が、境界の checkpoint を宣言せず、範囲の中の早期停止（`stopped` があり `stage_pass` が偽）を示す本だけ**。その本は起こさず、条件のファイルの `stage_input_absent`（`count` と `ids`）に残す。子の引数（`child_args[].argv`）は `null` で、予定の一覧には残す（予定は 採用した P × 回数 のまま）
+- **入力なしにするのは、照合を通った上流の段の走りの記録が、境界の checkpoint を宣言せず、範囲の中で境界へ未到達と確認できる本だけ**：停止（`stopped`）が写像で、段は境界より前の段（上流の範囲の開始の区間から境界の直前の区間までの開始・終了の段と、区間 0 の持ち越しの導出 `carry-over`）・種類は既知の値、`stage_pass` が偽・`exit_code` が 1、段の履歴（`stages`）が全部境界より前の段で、到達した段（`reached_stage`）が履歴の最後と停止の段に一致し、宣言した境界は全部それより前。どれかが合わない宣言なしの記録（境界より後の段まで到達・停止した記録、不正な形の停止など）は壊れた記録として `stage-from:record-inconsistent`（exit 4・子 0 本・何も書かない）で断る。その本は起こさず、条件のファイルの `stage_input_absent`（`count` と `ids`）に残す。子の引数（`child_args[].argv`）は `null` で、予定の一覧には残す（予定は 採用した P × 回数 のまま）
 - 境界に届いて checkpoint を宣言したのに材料が無い・壊れている本、上流の段の走りの記録が読めない・壊れている本、早期停止を示さずに宣言の無い本は**入力なしにしない**（上の符号で断る）
 - 採点は入力なしの本を**黙って分母から除かない**：照合（`completion`）では未実行に数えず `stage_input_absent` に件数を出し、段の通過率では別の行（`input_absent`）に出す
 
@@ -666,7 +666,8 @@ v1（比較元の checkout。main `2cd1586f856fb1cdecf75ef035826cbffe539e69`）�
 #### 5.11.5 採点：段の通過率（`stage_pass_rate`）と納品の成功の違い
 
 - **段の通過は納品の成功ではない**。工場の段の走りの記録の `stage_pass`（範囲の中に早期停止が無く、終了の段の最後の記録が ok）を本ごとに読み、`stage_pass_rate` に出す。PASS・納品の成功・`verdict` の名前で出さない。終了が ⑦ なら ⑦ の判定（`stage_judge_verdict`）の件数を別に出す（`stage_judge_verdicts`）。停止は 段:種類 の件数（`stops`）
-- 件数は別々に出す：**対象予定**（`planned`。採用した P × 回数。子を起こす前に条件のファイルへ固定）・**入力なし**（`input_absent`）・**起動**（`launched`）・**観測**（`observed`。起動して段の走りの記録が読めた）・**欠測**（`missing` ＝ 予定 − 入力なし − 観測。内訳 `missing_breakdown`：未起動 `unlaunched`・記録なし `unreadable`。D17 の予算の停止で起こさなかった本は未起動のまま数え、`budget_pending` に件数を出す）・**通過**（`passed`）
+- 件数は別々に出す：**対象予定**（`planned`。採用した P × 回数。子を起こす前に条件のファイルへ固定）・**入力なし**（`input_absent`）・**起動**（`launched`）・**観測**（`observed`。起動して段の走りの記録が読めた）・**欠測**（`missing` ＝ 予定 − 入力なし − 観測。内訳 `missing_breakdown`：未起動 `unlaunched`・記録なし `unreadable`・条件と食い違う `mismatched`。D17 の予算の停止で起こさなかった本は未起動のまま数え、`budget_pending` に件数を出す）・**通過**（`passed`）
+- 記録は条件に結べたときだけ観測に数える：範囲（`range`）が条件の `stage_start`・`stage_end` と同じ、確定した仕様と依頼文の SHA が凍結した組のその P の値と同じ、入力の対応（開始 T1 は記録の `input` が `null` で本ごとの入力の欄が無い。それ以外は記録の `input` が指す本のディレクトリの `stage-input/` の写しの SHA-256 が `stage_inputs` の値と同じで、checkpoint の境界が記録の入力の境界と同じ）。食い違う記録は通過に数えず欠測の `mismatched` に数え、行の `mismatches`（`range`・`plan-source`・`input`）に理由を残し、照合は**未照合**（理由つき）。漏斗も結べた記録だけから作る
 - **率の分母は 予定 − 入力なし**（`denominator`。起動の前に決まる。未起動の本を分母から消さない）。率（`rate`）と Wilson の 95% 区間（`interval`）は同じ分母で、分母が 0 なら `null`
 - 段単位の計測では、原文系・了承後系の PASS と納品の欄（`metrics`・`metrics_accepted`・`fulfillment`・`verdicts`・`pass_k`・`agreement` など）を**計算しない**：`null` にして `not_computed`（理由 `stage-run` と欄の一覧）を添える。`evaluation.build_applicable` は偽
 - 漏斗（§5.9.1）は範囲の中の段（段の走りの記録に現れた段）だけに当て、分母は 予定 − 入力なし

@@ -49,7 +49,7 @@ import { basename, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DEFAULT_SET_PATH, FACTORY_VERDICTS, SCRIPT_MODE, fingerprintDir, loadEvalSet, scoringFingerprint, scriptsFingerprint, sha256 } from "./score-agent.mjs";
 import { BUILD_STAGE_IDS, COMPARE_GROUPS, COMPARE_PAIRS_COPY, COMPARE_ROLES, COMPARE_RUN_PREFIX, COMPARE_RUN_SCHEMA, COMPARISON_FILE, COMPARISON_SCHEMA, PIPELINES, SCORING_COST_USD, compareProfile, launchAllowed, limitsApproved, makePairs, outputLimitsOf, pairsProblem } from "./score-agent.mjs";
-import { CONDITIONS_V6, STAGE_COMPARE_GROUPS, STAGE_COMPARE_ROLES, STAGE_COMPARISON_SCHEMA, STAGE_PAIRS_SCHEMA, STAGE_RUN_MODE, conditionsSignature, loadConditions, makeStagePairs, pairsShapeProblem, stagePairsProblem } from "./score-agent.mjs";
+import { CONDITIONS_V6, FAILURE_KINDS as RECORD_FAILURE_KINDS, STAGE_INPUT_DIR, STAGE_COMPARE_GROUPS, STAGE_COMPARE_ROLES, STAGE_COMPARISON_SCHEMA, STAGE_PAIRS_SCHEMA, STAGE_RUN_MODE, conditionsSignature, loadConditions, makeStagePairs, pairsShapeProblem, stagePairsProblem } from "./score-agent.mjs";
 import { PLAN_FILE_CHECKS, PLAN_FILE_ERROR_SCHEMA, PLAN_FILE_REJECT_SCHEMA, checkEnvelope, loadFrozenSet, loadPlanFileChecks, refusalLine } from "./freeze-plan-set.mjs";
 
 const args = process.argv.slice(2);
@@ -130,8 +130,30 @@ async function loadStageLib(dir) {
 }
 /** 範囲が境界を通るか：開始が境界より前（開始 i ≤ 境界 i）で、終了が境界の後（終了 i ≥ 境界 i）。並びは loadStageLib で dist に照らしてある */
 const passesBoundary = (lib, range, boundary) => { const j = lib.STAGE_BOUNDARIES.indexOf(boundary); return j >= 0 && lib.STAGE_STARTS.indexOf(range.start) >= 0 && lib.STAGE_STARTS.indexOf(range.start) <= j && lib.STAGE_ENDS.indexOf(range.end) >= j; };
-/** 本のディレクトリの中の、上流の入力の写しの置き場所（checkpoint と段の走りの記録を同じディレクトリに置く。工場は checkpoint の隣の記録を読む） */
-const STAGE_INPUT_DIR = "stage-input";
+/**
+ * 境界 boundary より前に走りうる段（上流の範囲の開始の区間から境界の直前の区間まで。区間 i ＝ 開始 i 〜 終了 i。dist の表から導く）。
+ * 持ち越しの導出（carry-over）は T1'' のあと・境界 t1-t2 の前に走る段で、表には無いので区間 0 にだけ足す（packages/factory/src/v11a/run.ts。全件持ち越しの早期停止）
+ */
+const CARRY_OVER_STAGE = "carry-over";
+const stagesBefore = (lib, range, boundary) => {
+  const from = lib.STAGE_STARTS.indexOf(range.start), j = lib.STAGE_BOUNDARIES.indexOf(boundary);
+  const ids = [];
+  for (let i = from; i >= 0 && i <= j; i++) ids.push(lib.STAGE_STARTS[i], ...(i === 0 ? [CARRY_OVER_STAGE] : []), lib.STAGE_ENDS[i]);
+  return [...new Set(ids)];
+};
+/**
+ * 入力なしの記録の整合（境界の checkpoint を宣言しない本）：範囲の中で境界へ未到達と確認できるときだけ真。停止（段は境界より前の段・種類は既知の値）・
+ * 段の通過が偽・終了コード 1・段の履歴が全部境界より前の段で、到達した段が履歴の最後と同じで停止の段と一致・宣言した境界は全部それより前
+ */
+function absentRecordConsistent(lib, record, range, boundary) {
+  const before = stagesBefore(lib, range, boundary), j = lib.STAGE_BOUNDARIES.indexOf(boundary);
+  const st = record.stopped, stages = record.stages;
+  if (!isRec(st) || !before.includes(st.stage) || !RECORD_FAILURE_KINDS.includes(st.kind)) return false;
+  if (record.stage_pass !== false || record.exit_code !== 1 || !Array.isArray(stages) || stages.length === 0) return false;
+  if (!stages.every((x) => isRec(x) && before.includes(x.stage))) return false;
+  if (record.reached_stage !== stages.at(-1).stage || st.stage !== stages.at(-1).stage) return false;
+  return record.checkpoints.every((c) => isRec(c) && lib.STAGE_BOUNDARIES.indexOf(c.boundary) >= 0 && lib.STAGE_BOUNDARIES.indexOf(c.boundary) < j);
+}
 let stageLib = null, stageRange = null, stageBoundary = null;
 if (stageMode) {
   stageLib = await loadStageLib(distDir);
@@ -271,8 +293,12 @@ if (stageMode && stageBoundary !== null) {
     if (record.plan_sha256 !== entry.plan_sha256) refuseStage("stage-from:stage-input:plan-sha256", { ids: [id] });
     if (record.source_sha256 !== entry.source_sha256) refuseStage("stage-from:stage-input:source-sha256", { ids: [id] });
     if (!record.checkpoints.some((c) => isRec(c) && c.boundary === stageBoundary)) {
-      // 入力なし：境界の checkpoint を宣言せず、範囲の中の早期停止（停止の記録があり段の通過が偽）を示す本だけ。それ以外の宣言なしは断る
-      if (isRec(record.stopped) && record.stage_pass === false) { stageAbsent.push(id); stageInputRecords.push({ id, absent: true, record_sha256: sha256(recordBytes) }); continue; }
+      // 入力なし：境界の checkpoint を宣言せず、記録の形と段の履歴から範囲の中で境界へ未到達と確認できる本だけ（absentRecordConsistent）。
+      // 境界より後の段の停止・到達・履歴、不正な形の停止など、宣言の欠けた壊れた記録は入力なしにせず断る。早期停止を示さない宣言なしも断る
+      if (isRec(record.stopped) || record.stage_pass === false) {
+        if (!absentRecordConsistent(stageLib, record, upRange, stageBoundary)) refuseStage("stage-from:record-inconsistent", { ids: [id] });
+        stageAbsent.push(id); stageInputRecords.push({ id, absent: true, record_sha256: sha256(recordBytes) }); continue;
+      }
       refuseStage("stage-from:stage-input:boundary", { ids: [id] });
     }
     // 境界に届いて checkpoint を宣言した本：材料が無い・壊れていれば工場の照合が断る（入力なしにしない）
