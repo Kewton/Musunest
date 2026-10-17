@@ -7,9 +7,11 @@
 // 1 つでも合わなければ何も数えずに断る（終了コード 3・固定の符号。fail-closed）。工場と spec-engine は build 済みの dist を目録の場所から動的に読む。
 // 動的に読む前に、2 つの入口から import の閉包（静的な import・export … from・文字列の import()。bare の指定子は node_modules の
 // package.json の exports で解く。各 .js の形を決める最寄りの package.json も入れる）を、目録に載ったファイルだけを読んで求める。
-// 閉包のファイルが 1 つでも目録に無い・SHA-256 が合わなければ、評価の前に断る（Node が import で読むファイルを目録と結ぶ）。
+// 閉包のファイルが 1 つでも目録に無い・SHA-256 が合わなければ、評価の前に断る（前段の早い断り）。正は実際の読み込み：resolve・load の hook が、
+// Node が読むファイルを目録（と道具のコード・組み込み）に限り、読んだ原文の SHA-256 を照らす（下の「読み込みの hook」）。
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { register } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CLASS_IDS, OUTPUT_SCHEMA as CLASSIFY_OUTPUT_SCHEMA, loadMarks } from "./classify.mjs";
@@ -201,6 +203,58 @@ const outcomesById = (suite, r) => {
 
 const importDist = (d, base) => import(pathToFileURL(resolve(base, d.entry)).href);
 
+// ── 読み込みの hook（実際の読み込みで止める。#571 の再レビューの指摘）
+// 静的な閉包は指定子の書き方（注釈を挟む import など）で取りこぼし得るので、前段の早い断りにとどめる。正は Node の読み込みそのもの：
+// resolve・load の hook で、file: のファイルは目録に載ったもの（load では Node が読んだ原文の SHA-256 が目録と合うもの）か道具のコードだけを通し、
+// node: の組み込みは通し、それ以外（目録に無いファイル・data: など）は断る。ESM はグラフの全部を読み終えてから評価するので、静的な import の
+// 断りはどのモジュールの評価よりも前に起きる。評価の途中の import() も同じ hook を通る（断れば出力を作らない）。
+// hook は data: の URL で登録し、道具の外にファイルを足さない。hook はプロセスに残るので、同じプロセスで 2 回目以降に呼ぶと前の hook も
+// 重なるが、hook は呼び出しごとの見張りの窓（共有の旗）が開いている間だけ働く。すでに読み込まれたモジュールは読み直されないので、
+// 凍結の保証は新しいプロセス（入口）で得る。
+const LOAD_REFUSED = "musunest-mutation-load-refused";
+const OWN_FILES = ["score-mutants.mjs", "classify.mjs", "mutate.mjs"];
+const HOOK_SOURCE = [
+  'import { createHash } from "node:crypto";',
+  "let allowed = new Map(), own = new Set(), marker = \"\", active = null;",
+  "export async function initialize(data) { allowed = new Map(Object.entries(data.allowed)); own = new Set(data.own); marker = data.marker; active = new Int32Array(data.active); }",
+  "const on = () => Atomics.load(active, 0) === 1;",
+  "const deny = (code) => { throw new Error(marker + \":\" + code); };",
+  "const known = (url) => url.startsWith(\"node:\") || own.has(url) || allowed.has(url);",
+  "export async function resolve(specifier, context, next) { const r = await next(specifier, context); if (on() && !known(r.url)) deny(\"dependency_unlisted\"); return r; }",
+  "export async function load(url, context, next) {",
+  "  if (!on() || url.startsWith(\"node:\") || own.has(url)) return next(url, context);",
+  "  const want = allowed.get(url);",
+  "  if (want === undefined) deny(\"dependency_unlisted\");",
+  "  const r = await next(url, context);",
+  "  if (r.source === null || r.source === undefined) deny(\"dependency_unlisted\");",
+  "  const got = createHash(\"sha256\").update(typeof r.source === \"string\" ? Buffer.from(r.source, \"utf8\") : Buffer.from(r.source)).digest(\"hex\");",
+  "  if (got !== want) deny(\"hash_mismatch\");",
+  "  return r;",
+  "}",
+].join("\n");
+/** hook を登録し、見張りの窓を開け閉めする口を返す（窓の外では hook は何もしない。同じプロセスで道具を呼んだあとの import を妨げない） */
+function installLoadGuard(allowed) {
+  const active = new SharedArrayBuffer(4), flag = new Int32Array(active);
+  // 道具のコードと、hook 自身の data: の URL（同じプロセスで重ねて登録するとき、前の hook を通って読まれる）は通す
+  const hookUrl = `data:text/javascript,${encodeURIComponent(HOOK_SOURCE)}`;
+  const own = [...OWN_FILES.map((n) => pathToFileURL(realpathSync(join(here, n))).href), hookUrl];
+  register(hookUrl, { data: { allowed, own, marker: LOAD_REFUSED, active } });
+  return { open: () => Atomics.store(flag, 0, 1), close: () => Atomics.store(flag, 0, 0) };
+}
+/** 見張りの窓を開けて fn を走らせ、hook の断り（印の付いた誤り）を固定の符号の断りに直す。それ以外の誤りはそのまま投げる */
+async function guardLoads(guard, fn) {
+  guard.open();
+  try {
+    return await fn();
+  } catch (e) {
+    const m = new RegExp(`${LOAD_REFUSED}:([a-z_]+)`).exec(String(e?.message ?? ""));
+    if (m && Object.hasOwn(MESSAGES, m[1])) refuse(m[1]);
+    throw e;
+  } finally {
+    guard.close();
+  }
+}
+
 // ── import の閉包（Node が入口から読むファイル）
 const SPECIFIER_PATTERNS = [
   /\b(?:import|export)\s[^;'"`]*?\bfrom\s*["']([^"']+)["']/g,
@@ -334,60 +388,65 @@ export async function scoreMutants({ inventory, baseDir = process.cwd(), readFil
     return { c, rec, mutants, ctx, originSource: origin.toString("utf8") };
   });
 
-  // 3. 評価（工場の build 済みの評価口を、凍結した文脈で作る）
-  const factory = await importDist(v.factory_dist, baseDir), engine = await importDist(v.spec_engine_dist, baseDir);
-  const candidates = [];
-  for (const { c, rec, mutants, ctx, originSource } of prepared) {
-    const evaluator = factory.createV11aEvaluator({ table: ctx.table, excludedRowIds: ctx.excluded_row_ids, observes: new Map(Object.entries(ctx.observes)) });
-    const context = { list: ctx.list, suite: ctx.suite, correspondences: ctx.correspondences ?? [], ownership: ctx.ownership };
-    const evaluate = async (source, unreadable) => {
-      const n = await engine.normalizeSpec(source);
-      if (!n.ok) return refuse(unreadable);
-      const r = await evaluator.evaluate(n.app, { source }, context);
-      return { ...outcomeOf(r), outcomes: outcomesById(ctx.suite, r) };
-    };
-    let status = "aligned", originRun = null;
-    if (!rec.usable) status = "origin-unusable";
-    else {
-      originRun = await evaluate(originSource, "origin_unreadable");
-      if (originRun.misses + originRun.mismatches + originRun.unresolved > 0) status = "test-origin-mismatch";
-    }
-    const tests = ctx.suite.tests.map((t) => ({ id: t.id, requirement_id: t.target.requirementId, target_role_id: t.target.roleId ?? null, eligible_mutants: 0, killed: 0 }));
-    const records = [];
-    for (const m of mutants) {
-      let category, run = null;
-      if (status === "origin-unusable") category = "origin-unusable";
-      else if (status === "test-origin-mismatch") category = "test-origin-mismatch";
-      else if (m.class !== "non-equivalent") category = m.class;
+  // 3. 評価（工場の build 済みの評価口を、凍結した文脈で作る）。読み込みの hook を入れてから dist を import し、
+  //    Node が実際に読むファイルが目録に載ったもの（SHA-256 が合う）か道具のコード・組み込みであることを、読み込みのたびに確かめる
+  const guard = installLoadGuard(Object.fromEntries(depFiles.map((f) => [pathToFileURL(at(f.path)).href, f.sha256])));
+  const candidates = await guardLoads(guard, async () => {
+    const factory = await importDist(v.factory_dist, baseDir), engine = await importDist(v.spec_engine_dist, baseDir);
+    const candidates = [];
+    for (const { c, rec, mutants, ctx, originSource } of prepared) {
+      const evaluator = factory.createV11aEvaluator({ table: ctx.table, excludedRowIds: ctx.excluded_row_ids, observes: new Map(Object.entries(ctx.observes)) });
+      const context = { list: ctx.list, suite: ctx.suite, correspondences: ctx.correspondences ?? [], ownership: ctx.ownership };
+      const evaluate = async (source, unreadable) => {
+        const n = await engine.normalizeSpec(source);
+        if (!n.ok) return refuse(unreadable);
+        const r = await evaluator.evaluate(n.app, { source }, context);
+        return { ...outcomeOf(r), outcomes: outcomesById(ctx.suite, r) };
+      };
+      let status = "aligned", originRun = null;
+      if (!rec.usable) status = "origin-unusable";
       else {
-        run = await evaluate(m.source, "mutant_unreadable");
-        category = run.mismatches > 0 ? "test-fail" : run.misses > 0 ? "binding-fail" : run.unresolved > 0 ? "unresolved-only" : "survived";
-        const rows = new Set(rowsOfPlace(m.place, ctx.table, ctx.excluded_row_ids));
-        tests.forEach((t, i) => {
-          // 変えた場所が、試験の対象の行（target.roleId）に当たるときだけ（同じ要件の別の行は当たらない）
-          if (t.target_role_id !== null && rows.has(t.target_role_id)) {
-            t.eligible_mutants += 1;
-            if (run.outcomes[ctx.suite.tests[i].id] === "mismatch") t.killed += 1;
-          }
+        originRun = await evaluate(originSource, "origin_unreadable");
+        if (originRun.misses + originRun.mismatches + originRun.unresolved > 0) status = "test-origin-mismatch";
+      }
+      const tests = ctx.suite.tests.map((t) => ({ id: t.id, requirement_id: t.target.requirementId, target_role_id: t.target.roleId ?? null, eligible_mutants: 0, killed: 0 }));
+      const records = [];
+      for (const m of mutants) {
+        let category, run = null;
+        if (status === "origin-unusable") category = "origin-unusable";
+        else if (status === "test-origin-mismatch") category = "test-origin-mismatch";
+        else if (m.class !== "non-equivalent") category = m.class;
+        else {
+          run = await evaluate(m.source, "mutant_unreadable");
+          category = run.mismatches > 0 ? "test-fail" : run.misses > 0 ? "binding-fail" : run.unresolved > 0 ? "unresolved-only" : "survived";
+          const rows = new Set(rowsOfPlace(m.place, ctx.table, ctx.excluded_row_ids));
+          tests.forEach((t, i) => {
+            // 変えた場所が、試験の対象の行（target.roleId）に当たるときだけ（同じ要件の別の行は当たらない）
+            if (t.target_role_id !== null && rows.has(t.target_role_id)) {
+              t.eligible_mutants += 1;
+              if (run.outcomes[ctx.suite.tests[i].id] === "mismatch") t.killed += 1;
+            }
+          });
+        }
+        records.push({
+          id: m.id, operator: m.operator, place: m.place, sha256: m.sha256, class: m.class, category,
+          misses: run?.misses ?? null, mismatches: run?.mismatches ?? null, unresolved: run?.unresolved ?? null, outcomes: run?.outcomes ?? null,
         });
       }
-      records.push({
-        id: m.id, operator: m.operator, place: m.place, sha256: m.sha256, class: m.class, category,
-        misses: run?.misses ?? null, mismatches: run?.mismatches ?? null, unresolved: run?.unresolved ?? null, outcomes: run?.outcomes ?? null,
+      const evaluated = status === "aligned";
+      candidates.push({
+        id: c.id, p: String(c.p), iteration: c.iteration, origin_id: rec.id, subject_id: rec.subject_id ?? null,
+        status, origin_run: originRun,
+        generation: { not_built: rec.generation?.not_built ?? 0, truncated: rec.generation?.truncated ?? 0 },
+        context: { ledger_on: ctx.ledger.on, tests: ctx.suite.tests.length, carry_over: ctx.carry_over.entries.length, rejected_tests: ctx.rejected_test_ids.length, non_requirements: ctx.non_requirements.length, excluded_rows: ctx.excluded_row_ids.length },
+        summary: summarizeRecords(records, evaluated ? tests : []),
+        tests: evaluated ? tests.map((t) => ({ ...t, uncatchable: t.eligible_mutants >= 1 && t.killed === 0 })) : [],
+        mutants: records,
       });
     }
-    const evaluated = status === "aligned";
-    candidates.push({
-      id: c.id, p: String(c.p), iteration: c.iteration, origin_id: rec.id, subject_id: rec.subject_id ?? null,
-      status, origin_run: originRun,
-      generation: { not_built: rec.generation?.not_built ?? 0, truncated: rec.generation?.truncated ?? 0 },
-      context: { ledger_on: ctx.ledger.on, tests: ctx.suite.tests.length, carry_over: ctx.carry_over.entries.length, rejected_tests: ctx.rejected_test_ids.length, non_requirements: ctx.non_requirements.length, excluded_rows: ctx.excluded_row_ids.length },
-      summary: summarizeRecords(records, evaluated ? tests : []),
-      tests: evaluated ? tests.map((t) => ({ ...t, uncatchable: t.eligible_mutants >= 1 && t.killed === 0 })) : [],
-      mutants: records,
-    });
-  }
 
+    return candidates;
+  });
   // 4. 集計
   const allMutants = candidates.flatMap((c) => c.mutants);
   const allTests = candidates.flatMap((c) => c.tests);

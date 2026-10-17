@@ -541,6 +541,56 @@ test("依存の照合の負例（#571 の再現）：dist の files を入口の
   } finally { w.cleanup(); }
 });
 
+test("実際の読み込みで止める（#571 の再レビューの再現）：注釈を挟む静的な import で目録に無い helper を読む入口は、exit 3・固定文・標準出力空・JSON なし・helper の評価なし。helper を目録に足すと通る", () => {
+  const w = world({ candidates: ["a"] });
+  try {
+    // 工場の入口を包む一時の入口。注釈を挟んだ静的な import で helper を読む（静的な閉包の正規表現は拾わない書き方）
+    const evaluated = join(w.dir, "helper-evaluated.txt");
+    const helper = join(w.dir, "helper.mjs"), wrap = join(w.dir, "wrap.mjs");
+    writeFileSync(helper, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(evaluated)}, "x");\nexport const value = 1;\n`);
+    writeFileSync(wrap, `import /* ordinary comment */ "./helper.mjs";\nexport * from ${JSON.stringify(pathToFileURL(factoryEntry).href)};\n`);
+    assert.ok(!dependencyClosure([realpathSync(wrap)], (q) => readFileSync(q)).includes(realpathSync(helper)), "前提：静的な閉包は helper を拾わない");
+    const inv = structuredClone(w.inventory);
+    inv.version.factory_dist = { entry: wrap, files: [...factoryFiles, fileRef(wrap)] };
+    const r = runCli(w, inv);
+    assert.equal(r.status, 3, r.stderr);
+    assert.equal(r.stderr.trim(), `dependency_unlisted ${MESSAGES.dependency_unlisted}`);
+    assert.equal(r.stdout, "");
+    assert.equal(r.written, null);
+    assert.throws(() => readFileSync(evaluated), "helper が評価された");
+    // 対照：helper とその SHA-256 を目録に足すと通る
+    const ok = structuredClone(inv);
+    ok.version.dependency_files = [...ok.version.dependency_files, fileRef(helper)];
+    const r2 = runCli(w, ok);
+    assert.equal(r2.status, 0, r2.stderr);
+    assert.ok(r2.written && r2.written.totals.eligible > 0);
+    assert.match(r2.stdout, /主の検出率/);
+    assert.equal(readFileSync(evaluated, "utf8"), "x");
+    // hook を外した見張り（記録の hook だけ）でも、読まれたファイルは目録と道具のコードの内側
+    const listed = new Set([...ok.version.factory_dist.files, ...ok.version.spec_engine_dist.files, ...ok.version.dependency_files].map((f) => realpathSync(f.path)));
+    assert.deepEqual(r2.loads.filter((q) => !listed.has(q) && !ownCode.includes(q) && q !== realpathSync(r2.recorder)), []);
+  } finally { w.cleanup(); }
+});
+
+test("実際の読み込みで止める：読み込みの時点で目録の SHA-256 と合わないファイルは hash_mismatch で断る（静的な照合のあとに入れ替わったもの）", () => {
+  const w = world({ candidates: ["a"] });
+  try {
+    // 静的な照合では目録どおりの helper を見せ、Node が読む時点では別の内容にする：入口の import の閉包の外で、helper を書き換える入口を挟む
+    const helper = join(w.dir, "late.mjs"), swap = join(w.dir, "swap.mjs"), wrap = join(w.dir, "wrap2.mjs");
+    writeFileSync(helper, "export const value = 1;\n");
+    const listedHelper = fileRef(helper);
+    writeFileSync(swap, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(helper)}, "export const value = 2;\\n");\n`);
+    writeFileSync(wrap, `import "./swap.mjs";\nexport * from ${JSON.stringify(pathToFileURL(factoryEntry).href)};\nexport const late = await import(${JSON.stringify(pathToFileURL(helper).href)});\n`);
+    const inv = structuredClone(w.inventory);
+    inv.version.factory_dist = { entry: wrap, files: [...factoryFiles, fileRef(wrap), fileRef(swap), listedHelper] };
+    const r = runCli(w, inv);
+    assert.equal(r.status, 3, r.stderr);
+    assert.equal(r.stderr.trim(), `hash_mismatch ${MESSAGES.hash_mismatch}`);
+    assert.equal(r.stdout, "");
+    assert.equal(r.written, null);
+  } finally { w.cleanup(); }
+});
+
 test("import の閉包：入口が再 export して読むファイル（評価口・正規化・appspec-schema・package.json）を含む", () => {
   const closure = dependencyClosure([realpathSync(factoryEntry), realpathSync(engineEntry)], (p) => readFileSync(p));
   for (const tail of [join("factory", "dist", "v11a", "evaluate.js"), join("spec-engine", "dist", "index.js"), join("appspec-schema", "dist", "index.js"), join("factory", "package.json"), join("appspec-schema", "package.json")]) {
@@ -608,7 +658,10 @@ test("静的な走査：道具に工場の package の import・通信・LLM・�
   assert.doesNotMatch(code, /from\s+["'][^"']*packages\//);
   assert.doesNotMatch(code, /require\(/);
   const imports = [...code.matchAll(/^import .* from "([^"]+)";?$/gm)].map((m) => m[1]);
-  assert.deepEqual([...new Set(imports)].sort(), ["./classify.mjs", "./mutate.mjs", "node:crypto", "node:fs", "node:path", "node:url"]);
+  // node:module は読み込みの hook（register）のため。register に渡すのは道具の中の data: の URL だけ
+  assert.deepEqual([...new Set(imports)].sort(), ["./classify.mjs", "./mutate.mjs", "node:crypto", "node:fs", "node:module", "node:path", "node:url"]);
+  assert.deepEqual([...code.matchAll(/\bregister\(([^)]*)\)/g)].map((m) => m[1].split(",")[0].trim()), ["hookUrl"]);
+  assert.match(code, /const hookUrl = `data:text\/javascript,\$\{encodeURIComponent\(HOOK_SOURCE\)\}`;/);
   assert.doesNotMatch(code, /\bfetch\(|XMLHttpRequest|node:(http|https|net|tls|dgram|child_process)|openai|anthropic|process\.env|new Date\(|Date\.now\(|\bjudge[A-Z(]/i);
   // 工場の側（packages/ の src）のどのファイルもこの道具を参照しない
   const walkSrc = (d) => readdirSync(d).flatMap((n) => {
