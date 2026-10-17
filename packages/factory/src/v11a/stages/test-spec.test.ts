@@ -34,6 +34,7 @@ import {
   STRUCTURE_OBSERVES,
   TEST_OBSERVES,
   TEST_SPEC_DATA_NAMES,
+  TEST_SPEC_DECIDED_NATURES_DATA_NAME,
   TEST_SPEC_RETRY_DATA_NAMES,
   TEST_SPEC_ROUNDS,
   TEST_SPEC_RULES,
@@ -939,6 +940,85 @@ describe("J2 の判断を再試行の回でも保つ（その回に T1 と T2 �
     expect(outcome.value.coverage).toEqual(
       coverageUnitsOf({ suite: outcome.value.suite, observes: outcome.value.observes, natures: outcome.value.natures }),
     );
+  });
+});
+
+// ── やり直しに採った種類を渡す（方法論 03 §1 の H3。Issue #526）────────────────────
+
+describe("2 回目のデータに、J2 で決めた要件だけの採った種類を渡す（Issue #526）", () => {
+  /** R1・R4 を T1 と食い違わせた分類（R1：existence-only、R4：existence-only） */
+  const discrepant = T1_NATURES.map((entry) =>
+    entry.requirementId === "R1" || entry.requirementId === "R4"
+      ? { requirementId: entry.requirementId, nature: "existence-only" as const }
+      : entry,
+  );
+  // 1 回目：R3 の境界が欠けて作り直しになる（R1・R4 は ruled の組）
+  const round1 = () => response([...r1Validate(), ...r2Structure(), ...r3Action(["normal", "abnormal"]), ...r4Compute()], discrepant);
+  const round2 = () => response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()], discrepant);
+
+  it("judged の要件だけが塊にあり、1 回目には無く、前置き・規則・schema が 1 回目と等しい", async () => {
+    // R1 は judged（ruled）、R4 は確率不足で fallback
+    const recorded = recordingJudge(
+      createFakeJudge({
+        [natureQuestionName("R1")]: choice("ruled", 0.95),
+        [natureQuestionName("R4")]: choice("ruled", NATURE_JUDGE_THRESHOLD - 0.01),
+      }),
+    );
+    const { outcome, recording } = await run([round1(), round2()], { judge: recorded.judge });
+    if (!outcome.ok) throw new Error("通らない");
+    expect(outcome.value.rounds).toBe(2);
+    expect(recorded.requests).toHaveLength(1);
+    const [first, second] = recording.structured;
+    if (first === undefined || second === undefined) throw new Error("要求が 2 つ無い");
+    expect(dataNamesOf(first.input)).toEqual([...TEST_SPEC_DATA_NAMES]);
+    expect(dataNamesOf(second.input)).toEqual([
+      ...TEST_SPEC_DATA_NAMES,
+      ...TEST_SPEC_RETRY_DATA_NAMES,
+      TEST_SPEC_DECIDED_NATURES_DATA_NAME,
+    ]);
+    expect(second.instructions).toBe(first.instructions);
+    expect(second.documents).toEqual(first.documents);
+    expect(second.rules).toEqual(first.rules);
+    expect(second.schema).toEqual(first.schema);
+    expect(second.input.startsWith(first.input)).toBe(true);
+    // J2 を呼ばない要件（R2・R3）も、fallback の要件（R4）も塊に無い
+    expect(dataBlockOf(second.input, TEST_SPEC_DECIDED_NATURES_DATA_NAME)).toEqual([{ requirementId: "R1", nature: "ruled" }]);
+    // fallback の R4 は、評価では今までどおり ruled として扱う
+    expect(outcome.value.natures.get("R4")).toBe("ruled");
+    expect(outcome.value.discrepancies).toContainEqual({
+      requirementId: "R4",
+      design: "ruled",
+      classified: "existence-only",
+      resolved: "ruled",
+      resolution: "fallback",
+    });
+    expectNoAcceptanceMaterial(recording.structured.map(requestText));
+  });
+
+  it("判定が失敗した要件・確率が足りなかった要件だけなら塊を足さず、どちらも ruled として扱う（負例）", async () => {
+    const judges: readonly Judge[] = [
+      createFakeJudge({}), // 答えを用意しない（判定が失敗する）
+      createFakeJudge({
+        [natureQuestionName("R1")]: choice("existence-only", 0.1),
+        [natureQuestionName("R4")]: choice("existence-only", NATURE_JUDGE_THRESHOLD - 0.01),
+      }),
+    ];
+    for (const judge of judges) {
+      const { outcome, recording } = await run([round1(), round2()], { judge });
+      if (!outcome.ok) throw new Error("通らない");
+      const second = recording.structured[1]?.input ?? "";
+      expect(dataNamesOf(second)).toEqual([...TEST_SPEC_DATA_NAMES, ...TEST_SPEC_RETRY_DATA_NAMES]);
+      expect(second).not.toContain(TEST_SPEC_DECIDED_NATURES_DATA_NAME);
+      expect(outcome.value.natures.get("R1")).toBe("ruled");
+      expect(outcome.value.natures.get("R4")).toBe("ruled");
+    }
+  });
+
+  it("判定の口が無い（J2 を呼ばない）なら塊を足さない", async () => {
+    const { outcome, recording } = await run([round1(), round2()]);
+    if (!outcome.ok) throw new Error("通らない");
+    const second = recording.structured[1]?.input ?? "";
+    expect(second).not.toContain(TEST_SPEC_DECIDED_NATURES_DATA_NAME);
   });
 });
 
