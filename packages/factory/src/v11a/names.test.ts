@@ -534,3 +534,211 @@ describe("表の SHA-256（分類を含む正規化 JSON）", () => {
     expect(await nameTableSha256(reclassified)).not.toBe(first);
   });
 });
+
+// ── 1 回で全部挙げる（K2）・view-shows の所属・画面の entity の固定文（K5。Issue #527）────────────────
+
+describe("inspectNameTable は形・写し・表の問題を 1 回で全部挙げる（K2）", () => {
+  const base = () => draftOf(list, fixtureTable());
+  const problemsOf = (draft: unknown): readonly Problem[] => {
+    const result = inspectNameTable(list, draft, FIXTURE_DOCUMENTS);
+    expect(result.ok).toBe(false);
+    return result.ok ? [] : result.problems;
+  };
+  const editRow = (draft: ReturnType<typeof base>, id: string, patch: Record<string, unknown>) => ({
+    ...draft,
+    rows: draft.rows.map((row) => (row.id === id ? { ...row, ...patch } : row)),
+  });
+  const editRequirement = (draft: ReturnType<typeof base>, index: number, patch: Record<string, unknown>) => ({
+    ...draft,
+    requirements: draft.requirements.map((entry, at) => (at === index ? { ...entry, ...patch } : entry)),
+  });
+  const copyMismatch = { field: `rows[${rowIndex("f.item.amount")}].source.copy`, message: "出典の要件の文の写しが一覧のどの要件とも合わない" };
+  const entityMissing = {
+    field: `rows[${rowIndex("s.items")}].entity`,
+    message: "所属 entity が無い（entity・アプリ全体の計算・見出しごとの集計・dashboard 以外の行は所属 entity を持つ）",
+  };
+
+  it("(1) 写しが合わず画面の entity が null の下書きは、写しの問題と entity の問題の両方を返す", () => {
+    const draft = editRow(editRow(base(), "f.item.amount", { source: { copy: "どの要件とも違う写し", quote: "金額" } }), "s.items", {
+      entity: null,
+    });
+    // 直す前（写しの段で止まる）は写しの問題だけ
+    expect(resolveNameTableDraft(list, draft)).toEqual({ ok: false, problems: [copyMismatch] });
+    expect(problemsOf(draft)).toEqual([copyMismatch, entityMissing]);
+  });
+
+  it("(2) 形の問題（structural の reason が null）と、別の要件の checks が空の問題の両方を返す", () => {
+    const draft = editRequirement(
+      editRequirement(base(), 1, { verification: { kind: "structural", reason: null, checks: ["view-shows"] } }),
+      3,
+      { verification: { kind: "structural", reason: "画面に出ることだけを求める", checks: [] } },
+    );
+    expect(problemsOf(draft)).toEqual([
+      { field: "requirements[1].verification.reason", message: "構造で確かめる理由は空でない文字列であること" },
+      { field: "verification[3].checks", message: "構造で確かめる要件に checks が無い" },
+    ]);
+  });
+
+  it("(3) 形で落ちた要件・行から生じる派生の問題は出さず、独立した問題は報告する", () => {
+    // R2 は形で落ちる。R2 だけが所属させていた行（member.title・計算・画面）を孤立にしない
+    const r2Broken = editRequirement(base(), 1, { verification: { kind: "structural", reason: null, checks: ["view-shows"] } });
+    expect(problemsOf(r2Broken)).toEqual([
+      { field: "requirements[1].verification.reason", message: "構造で確かめる理由は空でない文字列であること" },
+    ]);
+    // R2 の形の壊れに、独立した孤立した行と未知の参照を重ねると、その 2 つは報告される
+    const orphan = { ...r2Broken.rows[rowIndex("f.item.day")]!, id: "f.item.note", name: "note" };
+    const independent = {
+      ...r2Broken,
+      rows: [...r2Broken.rows, orphan],
+      requirements: r2Broken.requirements.map((entry, at) =>
+        at === 0 ? { ...entry, roles: [...entry.roles, { id: "f.nothing", basis: "stated", reason: null }] } : entry,
+      ),
+    };
+    expect(problemsOf(independent)).toEqual([
+      { field: "requirements[1].verification.reason", message: "構造で確かめる理由は空でない文字列であること" },
+      { field: "ownership[0].roles[6].id", message: "所属の表の ID が表に無い" },
+      { field: `rows[${r2Broken.rows.length}]`, message: "どの要件にも所属しない行がある" },
+    ]);
+    // 行が形で落ちる：その id を参照する所属・見出しの元は「表に無い ID」にしない
+    const rowBroken = editRow(base(), "f.item.day", { kind: "widget" });
+    expect(problemsOf(rowBroken)).toEqual([
+      {
+        field: `rows[${rowIndex("f.item.day")}].kind`,
+        message: "行の種類は entity・field・computation・operation・screen のいずれかであること",
+      },
+    ]);
+    // 形で落ちた entity を指す行の entity も、表に無い ID にしない
+    const entityBroken = editRow(base(), "e.item", { kind: "widget" });
+    expect(problemsOf(entityBroken)).toHaveLength(1);
+  });
+
+  it("(4) 問題の順は形 → 写し → 表で、field の添字は元の候補の位置を指す（形で落ちた行の後ろの行で確かめる）", () => {
+    const shapeAt = rowIndex("f.item.day");
+    const nameAt = rowIndex("c.itemCount");
+    expect(nameAt).toBeGreaterThan(shapeAt);
+    const draft = editRow(
+      editRow(editRow(base(), "c.itemCount", { name: "zz_bad" }), "f.item.amount", { source: { copy: "どの要件とも違う写し", quote: "金額" } }),
+      "f.item.day",
+      { kind: "widget" },
+    );
+    expect(problemsOf(draft)).toEqual([
+      { field: `rows[${shapeAt}].kind`, message: "行の種類は entity・field・computation・operation・screen のいずれかであること" },
+      copyMismatch,
+      { field: `rows[${nameAt}].name`, message: "名前が規則（英字で始まる英数字）に合わない" },
+    ]);
+  });
+
+  it("(5) 問題 0 の下書きは ok で、表は resolveNameTableDraft の結果と深く等しい。問題が残れば仮の表は返らない", () => {
+    const draft = base();
+    const inspected = inspectNameTable(list, draft, FIXTURE_DOCUMENTS);
+    expect(inspected).toEqual(resolveNameTableDraft(list, draft));
+    expect(inspected).toEqual({ ok: true, table: fixtureTable() });
+    const failed = inspectNameTable(
+      list,
+      editRow(draft, "f.item.amount", { source: { copy: "どの要件とも違う写し", quote: "金額" } }),
+      FIXTURE_DOCUMENTS,
+    );
+    expect(failed.ok).toBe(false);
+    expect(failed).not.toHaveProperty("table");
+  });
+
+  it("(6) 写しの入れ替え・別の要件の引用は、写しの問題を今までどおり挙げる（固定文・field は同じ）", () => {
+    const draft = base();
+    const [first, second, ...rest] = draft.requirements;
+    const swapped = { ...draft, requirements: [second!, first!, ...rest] };
+    expect(problemsOf(swapped)).toEqual(
+      expect.arrayContaining([
+        { field: "requirements[0].copy", message: "要件の文の写しが一覧の同じ位置の要件と合わない" },
+        { field: "requirements[1].copy", message: "要件の文の写しが一覧の同じ位置の要件と合わない" },
+      ]),
+    );
+    const at = rowIndex("f.item.owner");
+    const quoteOfOther = editRow(draft, "f.item.owner", { source: { copy: draft.rows[at]!.source.copy, quote: "担当者の名前" } });
+    expect(problemsOf(quoteOfOther)).toEqual([
+      { field: `rows[${at}].source.quote`, message: "出典の引用が、写しが指す要件の原文に無い" },
+    ]);
+  });
+
+  it("形の壊れた並び（rows が空）は形の問題だけを返す", () => {
+    expect(problemsOf({ rows: [], requirements: base().requirements })).toEqual([
+      { field: "rows", message: "行は空でない並びであること" },
+    ]);
+  });
+});
+
+describe("view-shows の所属（K5(a)）", () => {
+  const withRoles = (requirementId: string, ids: readonly string[]): NameTable => {
+    const base = fixtureTable();
+    return {
+      ...base,
+      ownership: base.ownership.map((entry) =>
+        entry.requirementId === requirementId
+          ? { ...entry, roles: ids.map((id) => ({ id, basis: "stated" as const, reason: null })) }
+          : entry,
+      ),
+    };
+  };
+  const viewShowsOn = (table: NameTable, requirementId: string): NameTable => ({
+    ...table,
+    verification: table.verification.map((entry) =>
+      entry.requirementId === requirementId
+        ? { requirementId, kind: "structural" as const, reason: "画面に出ることだけを求める", checks: ["view-shows" as const] }
+        : entry,
+    ),
+  });
+  const message = "view-shows の検査に、画面と同じ entity の項目か計算の所属が無い";
+
+  it("画面と同じ entity の項目を所属させた表は通る（fixture の R2）", () => {
+    expect(checkNameTable(list, fixtureTable(), FIXTURE_DOCUMENTS)).toEqual([]);
+  });
+
+  it("画面だけを所属させた表は落ちる", () => {
+    const table = withRoles("R2", ["s.items"]);
+    expect(checkNameTable(list, table, FIXTURE_DOCUMENTS)).toContainEqual({ field: "verification[1].checks[0]", message });
+  });
+
+  it("別 entity の項目だけを所属させた表は落ちる", () => {
+    const table = withRoles("R2", ["s.items", "f.member.title"]);
+    const problems = checkNameTable(list, table, FIXTURE_DOCUMENTS);
+    expect(problems).toContainEqual({ field: "verification[1].checks[0]", message });
+  });
+
+  it("dashboard とアプリ全体の計算の組は通る", () => {
+    const table = viewShowsOn(withRoles("R4", ["s.overview", "c.rate", "c.byKind", "c.byMonth"]), "R4");
+    expect(checkNameTable(list, table, FIXTURE_DOCUMENTS)).toEqual([]);
+  });
+
+  it("dashboard だけは落ちる", () => {
+    const moved = withRoles("R4", ["s.overview"]);
+    const table = viewShowsOn(
+      {
+        ...moved,
+        ownership: moved.ownership.map((entry) =>
+          entry.requirementId === "R3"
+            ? { ...entry, roles: [...entry.roles, ...["c.rate", "c.byKind", "c.byMonth"].map((id) => ({ id, basis: "stated" as const, reason: null }))] }
+            : entry,
+        ),
+      },
+      "R4",
+    );
+    expect(checkNameTable(list, table, FIXTURE_DOCUMENTS)).toEqual([
+      { field: "verification[3].checks[0]", message },
+    ]);
+  });
+});
+
+describe("画面の entity の固定文（K5(b)）", () => {
+  it("entity が null と、表に無い ID とで固定文が違い、field は同じ", () => {
+    const at = rowIndex("s.items");
+    const asNull = checkNameTable(list, patchRow(fixtureTable(), at, { entity: null }), FIXTURE_DOCUMENTS);
+    const unknown = checkNameTable(list, patchRow(fixtureTable(), at, { entity: "e.nothing" }), FIXTURE_DOCUMENTS);
+    const field = `rows[${at}].entity`;
+    expect(asNull).toContainEqual({
+      field,
+      message: "所属 entity が無い（entity・アプリ全体の計算・見出しごとの集計・dashboard 以外の行は所属 entity を持つ）",
+    });
+    expect(unknown).toContainEqual({ field, message: "所属 entity の ID が表の entity の行に無い" });
+    expect(asNull.filter((problem) => problem.field === field)).toHaveLength(1);
+    expect(unknown.filter((problem) => problem.field === field)).toHaveLength(1);
+  });
+});
