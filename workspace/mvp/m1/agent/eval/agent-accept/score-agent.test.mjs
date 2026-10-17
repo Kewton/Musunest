@@ -3448,3 +3448,258 @@ test("#539 匿名の口：--anonymous と --compare --anonymous の新しい欄�
     assert.deepEqual(anonymizeCompare(readCompare(f.out)), ac, "匿名の口は通常の出力から許可した欄だけを組み立てたもの");
   });
 });
+
+// ── #545：段単位の走りの採点（段の通過率・入力なし・分母・段だけの対の比較・匿名の口）。README §5.11
+// 固定の記録（条件 v6・工場の段の走りの記録 stage-run.json・起動の記録）を一時の出力先に置いて採点する（計測は流さない）
+import { CONDITIONS_V6, STAGE_NOT_COMPUTED, STAGE_RUN_MODE, STAGE_RUN_PATH, STAGE_RUN_RECORD_SCHEMA, STAGE_SCORE_COMPARE_SCHEMA, anonymizeStage, anonymizeStageCompare } from "./score-agent.mjs";
+
+const PIDS545 = Array.from({ length: 10 }, (_, i) => `P${i + 1}`);
+const IDS545 = PIDS545.flatMap((p) => [1, 2, 3].map((r) => `${p}-r${r}`));
+const UP545 = sha256("upstream-conditions-545"), CP545 = (id) => sha256(`checkpoint-${id}`), REC545 = (id) => sha256(`record-${id}`);
+/** 工場の段の走りの記録（開始 B1・終了 ⑦）。pass が偽なら ⑦ で早期停止 */
+const stageRecord545 = (pass = true, judge = "partial") => JSON.stringify({
+  schema_version: STAGE_RUN_RECORD_SCHEMA, range: { start: "write", end: "judge" }, input: { checkpoint: "stage-checkpoint-t2-b1.json", boundary: "t2-b1", output_digest: sha256("d") },
+  plan_sha256: sha256("p"), source_sha256: sha256("s"), checkpoints: [], reached_stage: "judge", conditions: {}, budget_scope: "stage-run", provider_cost_usd: 0.02, duration_secs: 1,
+  stages: [{ stage: "write", status: "ok", calls: 1, duration_ms: 3 }, { stage: "judge", status: pass ? "ok" : "failed", calls: 1, duration_ms: 2 }],
+  stopped: pass ? null : { stage: "judge", kind: "unmet" }, stage_pass: pass, ...(pass ? { stage_judge_verdict: judge } : {}), return_to_plan: false, exit_code: pass ? 0 : 1,
+});
+/**
+ * 段単位の計測の出力先（条件 v6・開始 B1・終了 ⑦）。absent ＝ 入力なしの本、runOf(id) ＝ "pass"｜"fail"｜"unlaunched"｜"missing"（起こしたが記録が読めない）。
+ * pending ＝ 予算の停止で起こさなかった本（起動の記録に stop_code budget で残す）。group を渡せば比較の群の条件（comparison）を足す
+ */
+function stageFixture545(out, { ids = IDS545, absent = [], runOf = () => "pass", pending = null, group = null, pairsSha = null, frozenPath, factoryFp = sha256("factory") } = {}) {
+  mkdirSync(out, { recursive: true });
+  const set = loadEvalSet(join(repo, DEFAULT_SET_PATH)), evDir = join(repo, "workspace/mvp/m1/agent/eval");
+  const pids = [...new Set(ids.map((id) => id.split("-")[0]))];
+  const cond = {
+    schema: CONDITIONS_V6, measurement_id: "m545", source: { commit: null, dirty: null }, factory: { fingerprint: factoryFp }, spec_engine: { fingerprint: fingerprintDir(join(repo, "packages/spec-engine/dist")).fingerprint },
+    set: { path: DEFAULT_SET_PATH, sha256: set.sha256 }, scripts: { mode: "post-hoc", fingerprint: scriptsFingerprint(set.scripts).fingerprint }, scoring: { fingerprint: scoringFingerprint(evDir, scoreFile, set.definitions).fingerprint }, judge: { configuration: "llm-only" },
+    params: {
+      ...paramsFor(ids), mode: STAGE_RUN_MODE, plan: false, effort: "high", pipeline: "v1.1a", stage_output_limits_v11a: APPROVED513,
+      stage_start: "write", stage_end: "judge", budget_scope: "stage-run", stage_from: { conditions_sha256: UP545, signature: sha256("up-signature"), range: { start: "name-table", end: "test-spec" } },
+      stage_inputs: ids.map((id) => (absent.includes(id) ? { id, absent: true, record_sha256: REC545(id) } : { id, checkpoint_sha256: CP545(id), record_sha256: REC545(id) })),
+    },
+    child_args: ids.map((id) => ({ id, argv: absent.includes(id) ? null : ["cli.js", id] })),
+    frozen: { path: frozenPath, sha256: sha256(readFileSync(frozenPath)), id: "t", version: 1, origin: "frozen-plan", author: null, adopted: pids.map((p) => ({ pattern: p, plan_sha256: PSHA513(p), source_sha256: SSHA513(p), envelope_sha256: sha256(p) })), missing: [] },
+    comparison: group === null ? null : { pairs_sha256: pairsSha, group, role: group === "before" ? "baseline" : "candidate", profile: null },
+    stage_input_absent: { count: absent.length, ids: absent },
+  };
+  cond.signature = conditionsSignature(cond);
+  writeFileSync(join(out, "conditions.json"), JSON.stringify(cond));
+  const executed = [];
+  for (const id of ids) {
+    const state = absent.includes(id) ? "absent" : runOf(id);
+    if (state === "absent" || state === "unlaunched") continue;
+    const dir = join(out, id);
+    mkdirSync(join(dir, "bundle"), { recursive: true });
+    executed.push(id);
+    writeFileSync(join(dir, "summary.line.json"), JSON.stringify({ exit: state === "fail" ? 1 : 0, wall_s: 1, started_at: "2026-10-17T00:00:00.000Z", exit_class: state === "fail" ? "failed" : "ok", summary: null, plan_cost: null, stderr_tail: { bytes: 0, known_lines: 0 }, stdout_tail: { bytes: 0, known_lines: 0 }, resumed: false, stage_run: null }));
+    writeFileSync(join(dir, "stdout.log"), ""); writeFileSync(join(dir, "stderr.log"), "");
+    writeFileSync(join(dir, STAGE_RUN_PATH), state === "missing" ? "{" : stageRecord545(state === "pass"));
+  }
+  writeFileSync(join(out, "run-1.json"), JSON.stringify({ finished_at: "2026-10-17T00:00:00.000Z", mode: "fresh", executed, pending: pending ?? [], stop: pending === null ? null : "予算 1 USD に達した", stop_code: pending === null ? null : "budget", budget_usd: 1, initial_budget_usd: 1, budget_changed: false, spent_usd: 0, exit_classes: {} }));
+  return cond;
+}
+const frozenFile545 = (base) => { const p = join(base, "frozen-545.json"); writeFileSync(p, JSON.stringify({ id: "t", adopted: PIDS545 })); return p; };
+/** Wilson の区間（95%。採点の道具とは別に手で書いた式） */
+const wilson545 = (k, n) => { const z = 1.96, ph = k / n, d = 1 + z * z / n, c = ph + z * z / (2 * n), m = z * Math.sqrt(ph * (1 - ph) / n + z * z / (4 * n * n)); return [(c - m) / d, (c + m) / d].map((x) => Math.round(x * 1e6) / 1e6); };
+/** JSON の中の鍵を全部集める（段の通過を PASS・verdict の名前で出していないことを確かめる） */
+const keysDeep = (x) => (x === null || typeof x !== "object" ? [] : Array.isArray(x) ? x.flatMap(keysDeep) : Object.entries(x).flatMap(([k, v]) => [k, ...keysDeep(v)]));
+
+test("#545 入力なし：30 本のうち 15 本だけに上流の入力がある計測（開始 B1）で、対象予定 30・入力なし 15・起動 15 が別に出て、入力なしは未実行に数えない（照合は完了）。段単位の採点に stage_pass_rate があり、原文系・了承後系の PASS と納品の欄は null（理由 stage-run）", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "b1"), absent = IDS545.slice(0, 15), failed = ["P8-r1", "P9-r2", "P10-r3"];
+    stageFixture545(out, { absent, runOf: (id) => (failed.includes(id) ? "fail" : "pass"), frozenPath: frozenFile545(base) });
+    const r = scoreRun(out);
+    const full = readScore(out);
+    const sp = full.stage_pass_rate;
+    assert.deepEqual([sp.planned, sp.input_absent, sp.launched, sp.observed, sp.missing, sp.passed, sp.denominator], [30, 15, 15, 15, 0, 12, 15]);
+    assert.equal(sp.rate, Math.round((12 / 15) * 1e6) / 1e6);
+    assert.deepEqual(sp.interval, wilson545(12, 15));
+    assert.deepEqual(sp.stops, { "judge:unmet": 3 });
+    assert.deepEqual(sp.stage_judge_verdicts, { full: 0, partial: 12, none: 0, unknown: 0, absent: 3 });
+    assert.deepEqual(full.evaluation, { mode: "stage-run", build_applicable: false, pipeline: "v1.1a" });
+    assert.deepEqual(full.not_computed.fields, STAGE_NOT_COMPUTED);
+    assert.equal(full.not_computed.reason, "stage-run");
+    for (const k of STAGE_NOT_COMPUTED) assert.equal(full[k], null, `${k} は計算しない`);
+    for (const k of ["metrics", "metrics_accepted", "fulfillment", "verdicts"]) assert.ok(k in full, k);
+    assert.equal(full.completion.status, "complete", full.completion.reasons.join("、"));
+    assert.equal(full.completion.stage_input_absent, 15);
+    assert.deepEqual(full.completion.unexecuted, []);
+    assert.equal(full.rows.length, 30);
+    assert.deepEqual(full.rows.filter((x) => x.state === "absent").map((x) => x.run), absent);
+    assert.deepEqual(Object.keys(full.funnel.stages), ["write", "judge"], "漏斗は範囲の中の段だけ");
+    assert.equal(full.funnel.stages.judge.reached, 15);
+    // 段の通過を PASS・納品の成功・verdict の名前で出さない
+    const names = keysDeep({ stage_pass_rate: sp, rows: full.rows.map(({ stage_judge_verdict: _j, ...x }) => x) });
+    assert.ok(!names.some((k) => /^(pass|verdict|PASS)$/.test(k) || k === "spec_pass" || k === "delivered"), names.join(","));
+    // 標準出力：段の通過の 1 行（範囲・通過／予定・入力なし）と、照合・漏斗・指紋の行
+    assert.ok(r.stdout.includes("段の通過（範囲 write..judge。納品の成功ではない）: 通過 12／予定 30・入力なし 15・起動 15・観測 15・欠測 0"), r.stdout);
+    assert.match(r.stdout, /^照合: 完了（予定 30・/m);
+    assert.match(r.stdout, /^漏斗（予定 15 本・実行 15 本。/m);
+    assert.match(r.stdout, /^指紋: 採点 /m);
+    assert.ok(!/^Build の表|^了承後: |^pass\^/m.test(r.stdout), "計算しない欄の行は出さない");
+  });
+});
+
+test("#545 分母：上流入力のある 15 本のうち予算の停止で 10 本だけを起こし全部通った計測で、対象予定 30・入力なし 15・起動 10・観測 10・欠測 5（未起動 5・うち予算 5）・通過 10・率 10 ÷ 15（区間も同じ分母）。全本が入力なしなら率と区間は null。起こしたが記録が読めない本は欠測の記録なしに数える", async () => {
+  await withOut(async (base) => {
+    const fzp = frozenFile545(base), absent = IDS545.slice(0, 15), withInput = IDS545.slice(15), pending = withInput.slice(10);
+    const out = join(base, "budget");
+    stageFixture545(out, { absent, runOf: (id) => (pending.includes(id) ? "unlaunched" : "pass"), pending, frozenPath: fzp });
+    scoreRun(out);
+    const sp = readScore(out).stage_pass_rate;
+    assert.deepEqual([sp.planned, sp.input_absent, sp.launched, sp.observed, sp.missing, sp.passed, sp.denominator], [30, 15, 10, 10, 5, 10, 15]);
+    assert.deepEqual(sp.missing_breakdown, { unlaunched: 5, unreadable: 0, budget_pending: 5 });
+    assert.equal(sp.rate, Math.round((10 / 15) * 1e6) / 1e6);
+    assert.deepEqual(sp.interval, wilson545(10, 15));
+    assert.ok(sp.text.startsWith("10/15（66.7%"), sp.text);
+    assert.equal(readScore(out).completion.status, "incomplete");
+    const all = join(base, "all-absent");
+    stageFixture545(all, { absent: [...IDS545], frozenPath: fzp });
+    const ra = scoreRun(all);
+    const spa = readScore(all).stage_pass_rate;
+    assert.deepEqual([spa.planned, spa.input_absent, spa.launched, spa.denominator, spa.rate, spa.interval, spa.text], [30, 30, 0, 0, null, null, null]);
+    assert.ok(ra.stdout.includes("率 -（分母 0）"));
+    const miss = join(base, "missing");
+    stageFixture545(miss, { absent, runOf: (id) => (id === withInput[0] ? "missing" : "pass"), frozenPath: fzp });
+    scoreRun(miss);
+    const spm = readScore(miss).stage_pass_rate;
+    assert.deepEqual([spm.launched, spm.observed, spm.missing, spm.passed, spm.denominator], [15, 14, 1, 14, 15]);
+    assert.deepEqual(spm.missing_breakdown, { unlaunched: 0, unreadable: 1, budget_pending: 0 });
+  });
+});
+
+test("#545 段単位でない条件の採点に stage_pass_rate・not_computed・照合の stage_input_absent が無く（匿名の口も）、条件の入力なしの本が読めない段単位の計測は score:stage-absent-invalid で断る", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "plain"), ids = ["P1-r1", "P2-r1"];
+    mkdirSync(out, { recursive: true });
+    conditions(out, ids);
+    for (const id of ids) addRun(out, id, { spec: PASS_A });
+    scoreRun(out);
+    const full = readScore(out);
+    for (const k of ["stage_pass_rate", "not_computed", "stage_run"]) assert.ok(!(k in full), k);
+    assert.ok(!("stage_input_absent" in full.completion));
+    scoreRun(out, ["--anonymous"]);
+    const anon = readScore(out, "score.anonymous.json");
+    assert.ok(!("stage_pass_rate" in anon) && !("stage_input_absent" in anon.completion));
+    const bad = join(base, "bad");
+    stageFixture545(bad, { absent: ["P1-r1"], frozenPath: frozenFile545(base) });
+    const c = JSON.parse(readFileSync(join(bad, "conditions.json"), "utf8"));
+    c.stage_input_absent = { count: 2, ids: ["P1-r1"] };
+    writeFileSync(join(bad, "conditions.json"), JSON.stringify(c));
+    const r = spawnSync(process.execPath, [scoreFile, repo, bad], { encoding: "utf8" });
+    assert.equal(r.status, 3, r.stderr);
+    assert.ok(r.stderr.includes("[score:stage-absent-invalid]"), r.stderr);
+  });
+});
+
+test("#545 匿名の口：段単位の採点の --anonymous に段の通過率の件数・率・区間があり、本の ID・P の ID・上流の SHA が無い", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "anon"), absent = IDS545.slice(0, 15);
+    stageFixture545(out, { absent, runOf: (id) => (id === "P9-r1" ? "fail" : "pass"), frozenPath: frozenFile545(base) });
+    const r = scoreRun(out, ["--anonymous"]);
+    const text = readFileSync(join(out, "score.anonymous.json"), "utf8"), anon = JSON.parse(text);
+    assert.ok(!existsSync(join(out, "score.json")));
+    assert.deepEqual([anon.stage_pass_rate.planned, anon.stage_pass_rate.input_absent, anon.stage_pass_rate.launched, anon.stage_pass_rate.passed, anon.stage_pass_rate.denominator], [30, 15, 15, 14, 15]);
+    assert.deepEqual(anon.stage_pass_rate.interval, wilson545(14, 15));
+    assert.equal(anon.stage_pass_rate.rate, Math.round((14 / 15) * 1e6) / 1e6);
+    assert.equal(anon.completion.stage_input_absent, 15);
+    assert.equal(anon.fingerprints.conditions.schema, CONDITIONS_V6);
+    assert.deepEqual(anon.not_computed.fields, STAGE_NOT_COMPUTED);
+    for (const t of [text, r.stdout, r.stderr]) {
+      assert.ok(!/P\d+(-r\d+)?/.test(t), "本の ID・P の ID が出ない");
+      for (const sha of [UP545, ...IDS545.map(CP545), ...IDS545.map(REC545)]) assert.ok(!t.includes(sha), "上流の SHA が出ない");
+    }
+    assert.deepEqual(anonymizeStage(readScoreFromFull(out)).stage_pass_rate, anon.stage_pass_rate);
+  });
+});
+/** 匿名でない採点の出力（anonymizeStage の純粋な関数の照合用。別の出力先に写して採点する） */
+function readScoreFromFull(out) {
+  const copy = `${out}-full`;
+  cpSync(out, copy, { recursive: true });
+  rmSync(join(copy, "score.anonymous.json"), { force: true });
+  scoreRun(copy);
+  return readScore(copy);
+}
+
+/** 段だけの対の比較の出力先：対のファイルの写し・比較の記録・群（before・after）の条件と本。valueOf(群, 本) ＝ 1｜0｜"missing"｜"unlaunched" */
+function stageCompareFixture545(base, name, { valueOf, absent = [] }) {
+  const out = join(base, name), fzp = frozenFile545(base);
+  mkdirSync(out, { recursive: true });
+  const keys = IDS545.filter((id) => !absent.includes(id)).map((id) => ({ pid: id.split("-")[0], r: Number(id.split("-r")[1]) }));
+  const stage = { start: "write", end: "judge", stage_from_sha256: UP545 };
+  const pairsText = JSON.stringify({ schema: "musunest-eval/stage-compare-pairs/v1", frozen_sha256: sha256(readFileSync(fzp)), groups: ["before", "after"], runs: 3, stage, pairs: keys.map((k, i) => ({ ...k, first: i % 2 === 0 ? "before" : "after" })) }, null, 1) + "\n";
+  writeFileSync(join(out, "pairs.json"), pairsText);
+  const pairsSha = sha256(pairsText), groups = {};
+  for (const g of ["before", "after"]) {
+    const map = { 1: "pass", 0: "fail", missing: "missing", unlaunched: "unlaunched" };
+    const cond = stageFixture545(join(out, g), { absent, runOf: (id) => map[valueOf(g, id)], group: g, pairsSha, frozenPath: fzp, factoryFp: sha256(`factory-${g}`) });
+    groups[g] = { role: g === "before" ? "baseline" : "candidate", pipeline: "v1.1a", factory: { fingerprint: cond.factory.fingerprint }, conditions_signature: cond.signature };
+  }
+  writeFileSync(join(out, "comparison.json"), JSON.stringify({ schema: "musunest-eval/stage-compare-record/v1", stage: { ...stage, input_absent: absent.length }, pairs: { sha256: pairsSha }, groups, scoring_cost_usd: 0 }));
+  return out;
+}
+
+test("#545 段だけの対の比較：before 30・after 30（同じ上流）で差の件数 ＋1 6・0 20・−1 4、n・平均・区間は今の対の差と同じ関数、P のまとまりの p と bootstrap の区間は手 0b の関数の値と一致。群の名前は before・after。片側が欠測・未起動の対は差 null で n に入らず、理由ごとに数える", async () => {
+  await withOut(async (base) => {
+    // 対の差（after − before）：P1〜P2 は ＋1（6 対）、P3 の 3 対と P4 の 1 対は −1（4 対）、残り 20 対は 0（両方通過 14・両方不通過 6）
+    const diffOf = (id) => (["P1", "P2"].includes(id.split("-")[0]) ? 1 : id.startsWith("P3-") || id === "P4-r1" ? -1 : 0);
+    const bothFail = ["P9-r1", "P9-r2", "P9-r3", "P10-r1", "P10-r2", "P10-r3"];
+    const valueOf = (g, id) => { const d = diffOf(id); if (d === 1) return g === "after" ? 1 : 0; if (d === -1) return g === "after" ? 0 : 1; return bothFail.includes(id) ? 0 : 1; };
+    const out = stageCompareFixture545(base, "cmp", { valueOf });
+    const r = spawnSync(process.execPath, [scoreFile, repo, out, "--compare"], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    const full = readCompare(out);
+    assert.equal(full.schema, STAGE_SCORE_COMPARE_SCHEMA);
+    assert.deepEqual(Object.keys(full.groups), ["before", "after"]);
+    const diffs = IDS545.map(diffOf);
+    const expected = pairStats(diffs);
+    assert.deepEqual(full.pairs.counts, { "+1": 6, 0: 20, "-1": 4 });
+    assert.deepEqual([full.pairs.n, full.pairs.mean, full.pairs.sd, full.pairs.interval], [expected.n, expected.mean, expected.sd, expected.interval]);
+    const byPattern = {};
+    for (const id of IDS545) (byPattern[id.split("-")[0]] ??= []).push(diffOf(id));
+    const cl = clusterStats(byPattern);
+    assert.deepEqual([full.clusters.m, full.clusters.mean, full.clusters.sign_flip, full.clusters.bootstrap, full.clusters.t_reference], [cl.m, cl.mean, cl.sign_flip, cl.bootstrap, cl.t_reference]);
+    assert.equal(full.completion.status, "complete", JSON.stringify(full.completion));
+    assert.equal(full.groups.before.stage_pass_rate.passed, 14 + 4);
+    assert.equal(full.groups.after.stage_pass_rate.passed, 14 + 6);
+    assert.ok(r.stdout.includes("差 ＋1 6・0 20・−1 4"), r.stdout);
+    assert.match(r.stdout, /^before 段の通過（範囲 write\.\.judge/m);
+    // 片側が欠測・未起動の対
+    const out2 = stageCompareFixture545(base, "cmp-gap", { valueOf: (g, id) => (g === "after" && id === "P5-r1" ? "missing" : g === "before" && id === "P6-r2" ? "unlaunched" : valueOf(g, id)) });
+    const r2 = spawnSync(process.execPath, [scoreFile, repo, out2, "--compare"], { encoding: "utf8" });
+    assert.equal(r2.status, 0, r2.stderr);
+    const f2 = readCompare(out2);
+    assert.equal(f2.pairs.n, 28);
+    assert.deepEqual(f2.pairs.excluded, { unlaunched: 1, missing: 1 });
+    for (const id of ["P5-r1", "P6-r2"]) assert.equal(f2.pairs.rows.find((x) => x.run === id).diff, null, id);
+    assert.equal(f2.completion.status, "incomplete");
+    assert.equal(f2.completion.reference_only, true);
+    // 入力なしの本は対に入らず件数を別に出す
+    const out3 = stageCompareFixture545(base, "cmp-absent", { valueOf, absent: IDS545.slice(0, 3) });
+    const r3 = spawnSync(process.execPath, [scoreFile, repo, out3, "--compare"], { encoding: "utf8" });
+    assert.equal(r3.status, 0, r3.stderr);
+    const f3 = readCompare(out3);
+    assert.deepEqual([f3.pairs.planned, f3.pairs.input_absent, f3.pairs.n], [27, 3, 27]);
+    // 匿名の口：件数・平均・区間・p だけ（本の ID・P の ID・上流の SHA が無い）
+    const ra = spawnSync(process.execPath, [scoreFile, repo, out, "--compare", "--anonymous"], { encoding: "utf8" });
+    assert.equal(ra.status, 0, ra.stderr);
+    const text = readFileSync(join(out, "score-compare.anonymous.json"), "utf8"), anon = JSON.parse(text);
+    assert.deepEqual(anon, anonymizeStageCompare(full));
+    assert.deepEqual(anon.pairs.counts, { "+1": 6, 0: 20, "-1": 4 });
+    assert.equal(anon.clusters.sign_flip.p, cl.sign_flip.p);
+    assert.deepEqual(anon.clusters.bootstrap.interval, cl.bootstrap.interval);
+    for (const t of [text, ra.stdout, ra.stderr]) {
+      assert.ok(!/P\d+(-r\d+)?/.test(t), "本の ID・P の ID が出ない");
+      assert.ok(!t.includes(UP545), "上流の SHA が出ない");
+    }
+  });
+});
+
+test("#545 採点が写して持つ段の走りの記録の置き場所・版・予算の単位が工場の dist と同じ", async () => {
+  const lib = await distModule("v11a/bundle-v11a.js");
+  assert.equal(STAGE_RUN_PATH, `bundle/${lib.STAGE_RUN_RECORD_FILE}`);
+  assert.equal(STAGE_RUN_RECORD_SCHEMA, lib.STAGE_RUN_RECORD_SCHEMA);
+  assert.equal(STAGE_RUN_MODE, lib.STAGE_BUDGET_SCOPE);
+});
