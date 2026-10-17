@@ -694,7 +694,7 @@ v1（比較元の checkout。main `2cd1586f856fb1cdecf75ef035826cbffe539e69`）�
 - 演算子は手 5a のもの（変えない）：`remove-field`（項目を消す）・`flip-comparison`（比較を反転）・`remove-when`（when を消す）・`reorder-options`（選択肢の順を替える）・`change-default`（既定値を替える）・`remove-validation`（検査を消す）・`swap-aggregate`（集計の種類を替える）
 - 変異は、**優先順のある排他的な分類**で 1 つにだけ入る。上から：原本不適（手 5a）→ **試験と原本が合わない**（原本に B3 の落ち・B4 の不一致・未解決がある候補。変異は全部ここ）→ 静的に落ちる → 食い違い → 構文の同値 → 同値（人の印）→ 判定不能 → 適格な変異（非同値（確定））の 4 つの結果
 - 適格な変異の結果は **1 つにだけ**入る：**試験で落ちる**（B4 の不一致が 1 件以上）／**結び付けで落ちる**（B3 の落ちがあり、B4 の不一致は 0）／**未解決だけ**（B3 の落ち・B4 の不一致が 0 で、未解決が 1 件以上）／**生き残る**（どれも 0）
-- 試験ごとに、落とした変異（その試験が B4 で不一致になった変異）の数を数える。対象の要件の適格な変異（変えた場所が、その要件に所属する行に当たる。検査は表の行が無いので当たらない）が 1 つ以上あるのに 1 つも落とさない試験を**落とせない試験**に数える
+- 試験ごとに、落とした変異（その試験が B4 で不一致になった変異）の数を数える。対象の要件の適格な変異（変えた場所が、**その試験の対象の行**（`target.roleId`）に当たる。同じ要件に所属する別の行に当たるだけの変異は当たらない。検査は表の行が無いので当たらない）が 1 つ以上あるのに 1 つも落とさない試験を**落とせない試験**に数える
 
 #### 5.12.2 検出率・分母・条件付きであること・選別の偏り
 
@@ -710,9 +710,10 @@ v1（比較元の checkout。main `2cd1586f856fb1cdecf75ef035826cbffe539e69`）�
 
 #### 5.12.4 入力（目録と有効な評価の文脈の凍結）と照合
 
-- 入力は**目録**（schema `musunest-eval/mutation-score-inventory/v1`）だけ。候補ごとに、P の番号・反復の番号・題材の定義・原本の宣言・手 5a の出力（`classify.mjs` の出力のファイル。埋め込まれた変異の原文だけを評価する）・印のファイル（任意）・**有効な評価の文脈**を、場所と SHA-256 で持つ。版は、工場の dist と spec-engine の dist の入口と**ファイルごとの SHA-256 の一覧**・工場の commit・採点のエンジンの SHA-256
+- 入力は**目録**（schema `musunest-eval/mutation-score-inventory/v1`）だけ。候補ごとに、P の番号・反復の番号・題材の定義・原本の宣言・手 5a の出力（`classify.mjs` の出力のファイル。埋め込まれた変異の原文だけを評価する）・印のファイル（任意）・**有効な評価の文脈**を、場所と SHA-256 で持つ。版は、工場の dist と spec-engine の dist の入口と**ファイルごとの SHA-256 の一覧**・ほかの依存のファイル（`dependency_files`。例：appspec-schema の dist・各パッケージの `package.json`）の SHA-256 の一覧・工場の commit・採点のエンジンの SHA-256
 - **有効な評価の文脈**（schema `musunest-eval/mutation-score-context/v1`）は、工場が使ったものを**直接凍結したファイル**：名前の表（`table`。行・所属）・要件の一覧（`list`。持ち越しと要件でない文を除いた有効な一覧）・有効な試験の組（`suite`。棄却で外した後）・所属（`ownership`）・除く行の ID（`excluded_row_ids`）・観測する性質の写像（`observes`）・持ち越しの entries（`carry_over`）・棄却した試験の ID（`rejected_test_ids`）・要件でない文の ID（`non_requirements`。無い版は空の配列と明記）・台帳の旗（`ledger.on`）。有効な組に棄却した試験が残る・一覧に持ち越しの要件か要件でない文が残る、は食い違いとして断る
-- **読む前に SHA-256 を全部照らす**：目録のファイル（版・候補）を読んで照らし、さらに手 5a の出力に書かれた原本・題材の定義・印の指紋と照らす。変異ごとに、埋め込まれた原文から計算した SHA-256 が出力の値と一致することを、評価の前に確かめる。**1 つでも合わなければ何も数えずに断る**（**終了コード 3**・固定の符号。fail-closed）。断りの符号：`hash_mismatch`・`origin_sha_mismatch`・`subject_sha_mismatch`・`marks_mismatch`・`mutant_sha_mismatch`・`context_inconsistent`・`invalid_context`・`invalid_inventory` ほか。標準エラーは「符号 固定文」の 1 行で、入力の値は写さない
+- **読む前に SHA-256 を全部照らす**：目録のファイル（版・候補）を読んで照らし、さらに手 5a の出力に書かれた原本・題材の定義・印の指紋と照らす。変異ごとに、埋め込まれた原文から計算した SHA-256 が出力の値と一致することを、評価の前に確かめる。**1 つでも合わなければ何も数えずに断る**（**終了コード 3**・固定の符号。fail-closed）。断りの符号：`hash_mismatch`・`origin_sha_mismatch`・`subject_sha_mismatch`・`marks_mismatch`・`mutant_sha_mismatch`・`context_inconsistent`・`invalid_context`・`invalid_inventory`・`dependency_unlisted`・`dependency_unresolved` ほか。標準エラーは「符号 固定文」の 1 行で、入力の値は写さない
+- **依存の照合**：dist を動的に読む前に、2 つの入口から **import の閉包**（静的な import・`export … from`・副作用の import・文字列の `import()`。bare の指定子は `node_modules` の `package.json` の `exports` で解き、各 `.js` の形を決める最寄りの `package.json` も含める）を、目録に載ったファイルだけを読んで求める。閉包のファイルが 1 つでも目録に無ければ `dependency_unlisted`、SHA-256 が合わなければ `hash_mismatch`、解けない指定子は `dependency_unresolved` で、**評価の前に**断り出力を作らない（入口だけを列挙した目録も断る）。試験は別プロセスで入口を起こし、Node の読み込みの hook で import が読むファイルが目録と道具のコードだけであることを確かめる。文字列でない `import()`（実行時に指定子を組む）は閉包に入れられないので、評価の経路で読まれないことをこの試験で確かめている
 - **道具は目録に載ったファイルだけを読む**（自分のコードを除く）。評価の規則は写して持たず、工場の dist（`createV11aEvaluator`）を目録の場所から動的に読み、凍結した文脈で作って呼ぶ。工場の package を静的に import しない
 
 #### 5.12.5 出力・匿名の口・使い方
