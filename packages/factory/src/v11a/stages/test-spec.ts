@@ -307,12 +307,16 @@ export const LEDGER_UNREGISTERED_OBSERVES_MESSAGE = "観測する性質が性質
 export interface LedgerTarget {
   readonly row: PropertyRow & { readonly t1: PropertyT1; readonly t2: PropertyT2 };
   readonly fieldId: string;
-  readonly value: string;
+  /** 確かめ方の欄の値（欄を持たない確かめ方は null。Issue #548） */
+  readonly value: string | null;
+  /** 対象の行の options（表の順。Issue #548） */
+  readonly options: readonly string[];
 }
 
 /**
  * 表の確かめ方が台帳の性質に結び付いた要件 → 対象の行の `id` と期待する値（`defaultValueTargetsOf` を台帳の行の
  * 記述子で引いたもの）。対象は所属の中の、記述子の種類・型の行がちょうど `count`（1）行のときだけ載せる（fail-closed）。
+ * 欄を持つ確かめ方は欄が文字列のときだけ載せる。欄を持たない確かめ方（enum-membership）は欄を見ない（Issue #548）。
  */
 export function ledgerTargetsOf(table: NameTable, ledger: LedgerView): ReadonlyMap<string, LedgerTarget> {
   const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
@@ -322,15 +326,16 @@ export function ledgerTargetsOf(table: NameTable, ledger: LedgerView): ReadonlyM
     const row = ledger.rowByVerificationKind.get(entry.kind);
     if (row === undefined || row.t1 === null || row.t2 === null) continue;
     const t1 = row.t1;
-    const value = (entry as unknown as Record<string, unknown>)[t1.valueField];
-    if (typeof value !== "string") continue;
+    const value = t1.valueField === null ? null : (entry as unknown as Record<string, unknown>)[t1.valueField];
+    if (t1.valueField !== null && typeof value !== "string") continue;
     const fields = (rolesById.get(entry.requirementId) ?? []).filter((role) => {
       const owned = rowById.get(role.id);
       return owned !== undefined && owned.kind === t1.ownership.row.kind && (owned.type as unknown) === t1.ownership.row.type;
     });
     const [only] = fields;
     if (fields.length === t1.ownership.count && only !== undefined) {
-      targets.set(entry.requirementId, { row: { ...row, t1, t2: row.t2 }, fieldId: only.id, value });
+      const options = rowById.get(only.id)?.options ?? [];
+      targets.set(entry.requirementId, { row: { ...row, t1, t2: row.t2 }, fieldId: only.id, value: value as string | null, options });
     }
   }
   return targets;
@@ -390,9 +395,29 @@ export function checkEvaluabilityByLedger(
 }
 
 /**
+ * 期待の値が、台帳の行の期待の型に合うか（旗 on）。`verification-value` は ok で、JSON の文字列で書いた値が確かめ方の
+ * 値と等しい。`target-options` は ok で、decode 済みの値が文字列の並びで、対象の行の options と同じ長さ・同じ順
+ * （Issue #548）。
+ */
+function expectedMatches(test: FixedTest, target: LedgerTarget, quoted: ReadonlySet<string>): boolean {
+  const t2 = target.row.t2;
+  const expected = test.expected;
+  if (expected.kind !== t2.expected.kind) return false;
+  const value: unknown = expected.value;
+  if (t2.expected.equals === "target-options") {
+    return (
+      Array.isArray(value) &&
+      value.length === target.options.length &&
+      value.every((key, index) => typeof key === "string" && key === target.options[index])
+    );
+  }
+  return typeof value === "string" && value === target.value && quoted.has(test.id);
+}
+
+/**
  * 確かめ方に結び付いた性質で確かめる要件の試験の形（旗 on。`checkDefaultValueTests` を台帳の行の試験の型から掛けたもの）。
- * その要件の**全試験**が、必須の kind・操作・対象の行・観測する性質・期待の型（ok で、JSON の文字列で書いた値が確かめ方の
- * 値と等しい）・入力の形（空の写像）・参照データ（空の並び）に合わなければ、行の固定文で落とす。
+ * その要件の**全試験**が、必須の kind・操作・対象の行・観測する性質・期待の型（`expectedMatches`）・入力の形（空の写像）・
+ * 参照データ（空の並び）に合わなければ、行の固定文で落とす。
  */
 export function checkLedgerTests(
   suite: TestSuite,
@@ -412,15 +437,7 @@ export function checkLedgerTests(
       problems.push({ field: `${at}.target`, message: t2.messages.target });
     }
     if (observes.get(test.id) !== target.row.id) problems.push({ field: `${at}.observes`, message: t2.messages.observes });
-    const expected = test.expected;
-    if (
-      expected.kind !== t2.expected.kind ||
-      typeof expected.value !== "string" ||
-      expected.value !== target.value ||
-      !quoted.has(test.id)
-    ) {
-      problems.push({ field: `${at}.expected`, message: t2.messages.expected });
-    }
+    if (!expectedMatches(test, target, quoted)) problems.push({ field: `${at}.expected`, message: t2.messages.expected });
     if (!isEmptyRecord(test.input)) problems.push({ field: `${at}.input`, message: t2.messages.input });
     if (t2.referenceTargets.length === 0 && test.referenceData.length !== 0) {
       problems.push({ field: `${at}.referenceData`, message: t2.messages.referenceData });
@@ -786,10 +803,10 @@ function buildData(
   return data;
 }
 
-/** 旗 on：確かめ方に結び付いた性質の欄（無ければ空の写像） */
+/** 旗 on：確かめ方に結び付いた性質の欄（無ければ空の写像。欄を持たない確かめ方も空の写像。Issue #548） */
 function ledgerValueOf(ledger: LedgerView, entry: NameTable["verification"][number]): Record<string, unknown> {
   const t1 = ledger.rowByVerificationKind.get(entry.kind)?.t1;
-  if (t1 === undefined || t1 === null) return {};
+  if (t1 === undefined || t1 === null || t1.valueField === null) return {};
   return { [t1.valueField]: (entry as unknown as Record<string, unknown>)[t1.valueField] };
 }
 

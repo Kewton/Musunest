@@ -4,8 +4,10 @@
 // 書けない部分は空、写した設計は v1 の `checkDesignOwnership`・`checkGroupBy` で問題 0 であることを固定する。
 import { describe, expect, it } from "vitest";
 import { checkDesignOwnership, checkGroupBy } from "../stages/design.js";
-import { fixtureDefaultValueTable, fixtureTable } from "./__tests__/fixtures.js";
-import { identityMappings, toV1 } from "./convert.js";
+import { LEDGER_VIEW_2A, fixtureDefaultValueTable, fixtureEnumMembershipTable, fixtureTable } from "./__tests__/fixtures.js";
+import { UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE, identityMappings, toV1 } from "./convert.js";
+import type { NameTable } from "./names.js";
+import { PROPERTY_LEDGER_VIEW } from "../v12/ledger.js";
 
 describe("名前の表を v1 の型へ写す（07 §2.2）", () => {
   it("写しは決定的（2 回深く等しい）", () => {
@@ -76,5 +78,51 @@ describe("名前の表を v1 の型へ写す（07 §2.2）", () => {
     const base = toV1(fixtureTable()).design.designs;
     expect(design.designs.filter((entry) => entry.requirementId !== "R6")).toEqual(base);
     expect(checkDesignOwnership(design)).toEqual([]);
+  });
+});
+
+describe("確かめ方の種類の写しを台帳から導く（Issue #548）", () => {
+  it("enum-membership は v1 の fixed-test に写り（v1 の型は変えない）、ほかの要件の写しは題材の表と深く等しい", () => {
+    const design = toV1(fixtureEnumMembershipTable()).design;
+    const r6 = design.designs.find((entry) => entry.requirementId === "R6");
+    expect(r6?.verification).toEqual({ kind: "fixed-test" });
+    expect(r6?.nature).toBe("ruled");
+    expect(r6?.checks).toEqual([]);
+    expect(design.designs.filter((entry) => entry.requirementId !== "R6")).toEqual(toV1(fixtureTable()).design.designs);
+    expect(checkDesignOwnership(design)).toEqual([]);
+  });
+
+  it("既知の種類（fixed-test・structural・unresolved・default-value）の写しは今と深く等しい（台帳を省く・手 2a の台帳・今の台帳で同じ）", () => {
+    for (const table of [fixtureTable(), fixtureDefaultValueTable()]) {
+      const now = toV1(table);
+      expect(toV1(table, PROPERTY_LEDGER_VIEW)).toEqual(now);
+      expect(toV1(table, LEDGER_VIEW_2A)).toEqual(now);
+    }
+    expect(toV1(fixtureDefaultValueTable()).design.designs.map((entry) => entry.verification)).toEqual([
+      { kind: "fixed-test" },
+      { kind: "structural", reason: "画面に出ることだけを求める" },
+      { kind: "fixed-test" },
+      { kind: "fixed-test" },
+      { kind: "unresolved", reason: "宣言で書けない" },
+      { kind: "fixed-test" },
+    ]);
+  });
+
+  it("二点測定：台帳に無い種類は写さず固定文の例外で落ちる（enum-membership も手 2a の台帳では落ちる。値を埋めない）", () => {
+    const withKind = (kind: string): NameTable => {
+      const table = fixtureEnumMembershipTable();
+      return {
+        ...table,
+        verification: table.verification.map((entry) =>
+          entry.requirementId === "R6" ? ({ requirementId: "R6", kind } as unknown as NameTable["verification"][number]) : entry,
+        ),
+      };
+    };
+    expect(() => toV1(fixtureEnumMembershipTable(), LEDGER_VIEW_2A)).toThrow(UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE);
+    expect(() => toV1(fixtureEnumMembershipTable(), PROPERTY_LEDGER_VIEW)).not.toThrow();
+    for (const kind of ["no-such-kind", "state-after-set"]) {
+      expect(() => toV1(withKind(kind))).toThrow(UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE);
+      expect(UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE).not.toContain(kind);
+    }
   });
 });

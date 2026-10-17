@@ -8,8 +8,10 @@
 //     から導いた値、`aliasOf`＝null、`groupBy`＝enum なら分ける項目の `id`・month なら null
 //   - `RoleNameMapping` … 恒等の対応（`roleId`＝`id`、`name`＝`name`）を全行
 //   - `RequirementRoleOwnership` … 導いた entity の所属（basis `dependency`・reason）を含む
-//   - `RequirementDesign` … `verification`（`default-value` は `fixed-test` に写す）・`checks`・`nature`（表の分類）。`vocabulary`・`placement`・
-//     `unwritable` は空の並び
+//   - `RequirementDesign` … `verification`・`checks`・`nature`（表の分類）。`vocabulary`・`placement`・`unwritable` は空の並び。
+//     台帳の外の種類（fixed-test・structural・unresolved）は固定の分岐で写し、**性質の台帳の確かめ方の種類**
+//     （default-value・enum-membership）は台帳から導いて `fixed-test` に写す（免除は v1.1α の T2 が表の確かめ方で掛ける。
+//     Issue #548）。台帳にも無い種類は写さず、固定文の例外で断る
 //
 // 写さない欄（失われる情報。v1.1α の成果物と検査にだけ残る。§2.2 の表）：
 //   - `role`・`source`（役割の説明と出典）… `name-table.json` に残す
@@ -29,6 +31,10 @@ import type {
   RoleNameMapping,
 } from "../pipeline.js";
 import { deriveOwnership, sharedRowIds, type NameTable, type NameTableVerification } from "./names.js";
+import { PROPERTY_LEDGER_VIEW, type LedgerView } from "../v12/ledger.js";
+
+/** 確かめ方の種類が台帳の外の種類にも性質の台帳にも無いときの固定文（写さずに断る。Issue #548） */
+export const UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE = "v1 の型への写し：確かめ方の種類が性質の台帳に無い";
 
 /** v1 の型への写し */
 export interface V1Conversion {
@@ -59,7 +65,7 @@ export function identityMappings(table: NameTable): readonly RoleNameMapping[] {
   return table.rows.map((row) => ({ roleId: row.id, name: row.name }));
 }
 
-function toVerification(entry: NameTableVerification): RequirementVerification {
+function toVerification(entry: NameTableVerification, ledger: LedgerView): RequirementVerification {
   switch (entry.kind) {
     case "fixed-test":
       return { kind: "fixed-test" };
@@ -67,14 +73,18 @@ function toVerification(entry: NameTableVerification): RequirementVerification {
       return { kind: "structural", reason: entry.reason };
     case "unresolved":
       return { kind: "unresolved", reason: entry.reason };
-    case "default-value":
-      // v1 の型は変えない（既定値の免除は v1.1α の T2 が表の確かめ方で掛ける。Issue #533）
-      return { kind: "fixed-test" };
   }
+  // 性質の台帳の確かめ方の種類は、v1 の型を変えずに fixed-test へ写す（免除は v1.1α の T2 が表の確かめ方で掛ける。
+  // Issue #533・#548）。台帳に無い種類は写さない
+  if (ledger.rowByVerificationKind.has(entry.kind)) return { kind: "fixed-test" };
+  throw new Error(UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE);
 }
 
-/** 名前の表を v1 の型へ写す（決定的。§2.2） */
-export function toV1(table: NameTable): V1Conversion {
+/**
+ * 名前の表を v1 の型へ写す（決定的。§2.2）。`ledger` は確かめ方の種類を引く台帳の導出で、省けばコードの台帳
+ * （旗に依らない。台帳の外の種類と default-value の写しは旗 off の今とバイト列で同じ）。
+ */
+export function toV1(table: NameTable, ledger: LedgerView = PROPERTY_LEDGER_VIEW): V1Conversion {
   const ownership: readonly RequirementRoleOwnership[] = deriveOwnership(table).map((entry) => ({
     requirementId: entry.requirementId,
     ownership: entry.roles.map((role) => ({ roleId: role.id, basis: role.basis, reason: role.reason })),
@@ -86,7 +96,7 @@ export function toV1(table: NameTable): V1Conversion {
     return {
       requirementId: entry.requirementId,
       ...(nature === undefined ? {} : { nature }),
-      verification: toVerification(entry),
+      verification: toVerification(entry, ledger),
       checks: entry.kind === "structural" ? entry.checks : [],
       vocabulary: [],
       placement: [],

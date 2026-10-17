@@ -14,10 +14,14 @@ import {
   draftOf,
   fixtureDefaultValueList,
   fixtureDefaultValueTable,
+  fixtureEnumMembershipList,
+  fixtureEnumMembershipTable,
   fixtureList,
   fixtureListWithRequestQuotes,
   fixtureRows,
   fixtureTable,
+  LEDGER_VIEW_2A,
+  withoutEnumMembership,
 } from "./__tests__/fixtures.js";
 import {
   MIN_COPY_LENGTH,
@@ -988,7 +992,7 @@ describe.each(LEDGER_CASES)("既定値の確かめ方 default-value（T1' の所
     expect(inspectNameTable(list, withNull, FIXTURE_DOCUMENTS)).toEqual({ ok: true, table: fixtureTable() });
   });
 
-  it("確かめ方の種類の固定文に default-value が入り、知らない種類は今までどおり落ちる", () => {
+  it("確かめ方の種類の固定文に default-value が入り（旗 on は台帳の enum-membership も。Issue #548）、知らない種類は今までどおり落ちる", () => {
     const draft = draftOf(list, fixtureTable());
     const broken = {
       ...draft,
@@ -999,7 +1003,7 @@ describe.each(LEDGER_CASES)("既定値の確かめ方 default-value（T1' の所
       problems: [
         {
           field: "requirements[0].verification.kind",
-          message: "確かめ方の種類は fixed-test・structural・unresolved・default-value のいずれかであること",
+          message: `確かめ方の種類は fixed-test・structural・unresolved・default-value${options.ledger === undefined ? "" : "・enum-membership"} のいずれかであること`,
         },
       ],
     });
@@ -1024,17 +1028,25 @@ describe("旗 on：T1' に台帳に無い確かめ方の種類を直接渡すと
   it("二点測定：台帳にある default-value は問題 0、台帳に無い種類は位置 verification[5].kind・固定文（値を埋めない）で落ちる", () => {
     const options = { ledger: PROPERTY_LEDGER_VIEW };
     expect(checkNameTableOf(dlist, fixtureDefaultValueTable(), FIXTURE_DOCUMENTS, options)).toEqual([]);
-    for (const kind of ["enum-membership", "state-after-set", "other"]) {
+    for (const kind of ["no-such-kind", "state-after-set", "other"]) {
       const problems = checkNameTableOf(dlist, unregistered(kind), FIXTURE_DOCUMENTS, options);
       expect(problems, kind).toEqual([{ field: "verification[5].kind", message: UNREGISTERED_VERIFICATION_KIND_MESSAGE }]);
       expect(UNREGISTERED_VERIFICATION_KIND_MESSAGE).not.toContain(kind);
     }
   });
 
+  it("二点測定（Issue #548）：enum-membership は手 2a の台帳（その行が無い）では台帳に無い種類で落ち、今の台帳では所属の形が合えば問題 0", () => {
+    const elist = fixtureEnumMembershipList();
+    expect(checkNameTableOf(elist, fixtureEnumMembershipTable(), FIXTURE_DOCUMENTS, { ledger: LEDGER_VIEW_2A })).toEqual([
+      { field: "verification[5].kind", message: UNREGISTERED_VERIFICATION_KIND_MESSAGE },
+    ]);
+    expect(checkNameTableOf(elist, fixtureEnumMembershipTable(), FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW })).toEqual([]);
+  });
+
   it("台帳から確かめ方に結び付いた行を外すと、default-value も台帳に無い種類として落ちる（台帳の行から掛けている）", () => {
     const withoutDefault: LedgerView = {
-      ...PROPERTY_LEDGER_VIEW,
-      verificationKinds: PROPERTY_LEDGER_VIEW.verificationKinds.filter((kind) => kind !== "default-value"),
+      ...LEDGER_VIEW_2A,
+      verificationKinds: LEDGER_VIEW_2A.verificationKinds.filter((kind) => kind !== "default-value"),
       rowByVerificationKind: new Map(),
     };
     expect(checkNameTableOf(dlist, fixtureDefaultValueTable(), FIXTURE_DOCUMENTS, { ledger: withoutDefault })).toEqual([
@@ -1050,16 +1062,36 @@ describe("旗 on：T1' に台帳に無い確かめ方の種類を直接渡すと
     });
   });
 
-  it("下書きの知らない種類は、on でも off と同じ固定文（種類の一覧は台帳から導いて同じ並び）", () => {
+  it("下書きの知らない種類は、手 2a の台帳の on でも off と同じ固定文（種類の一覧は台帳から導いて同じ並び）", () => {
     const draft = draftOf(list, fixtureTable());
     const broken = {
       ...draft,
       requirements: draft.requirements.map((entry, at) => (at === 0 ? { ...entry, verification: { kind: "enum-membership" } } : entry)),
     };
-    expect(checkNameTableDraftShapeOf(broken, { ledger: PROPERTY_LEDGER_VIEW })).toEqual(checkNameTableDraftShapeOf(broken));
-    expect(inspectNameTableOf(list, broken, FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW })).toEqual(
+    expect(checkNameTableDraftShapeOf(broken, { ledger: LEDGER_VIEW_2A })).toEqual(checkNameTableDraftShapeOf(broken));
+    expect(inspectNameTableOf(list, broken, FIXTURE_DOCUMENTS, { ledger: LEDGER_VIEW_2A })).toEqual(
       inspectNameTableOf(list, broken, FIXTURE_DOCUMENTS),
     );
+  });
+
+  it("今の台帳の on では、下書きの知らない種類の固定文は off の文に台帳の enum-membership が 1 つ増えるだけ（Issue #548）", () => {
+    const draft = draftOf(list, fixtureTable());
+    const broken = {
+      ...draft,
+      requirements: draft.requirements.map((entry, at) => (at === 0 ? { ...entry, verification: { kind: "no-such-kind" } } : entry)),
+    };
+    const on = checkNameTableDraftShapeOf(broken, { ledger: PROPERTY_LEDGER_VIEW });
+    const off = checkNameTableDraftShapeOf(broken);
+    expect(on).toEqual({
+      ok: false,
+      problems: [
+        {
+          field: "requirements[0].verification.kind",
+          message: "確かめ方の種類は fixed-test・structural・unresolved・default-value・enum-membership のいずれかであること",
+        },
+      ],
+    });
+    expect(withoutEnumMembership(on)).toEqual(off);
   });
 
   it("今の題材の表（default-value の無い表）も on と off で同じ結果", () => {
@@ -1068,5 +1100,115 @@ describe("旗 on：T1' に台帳に無い確かめ方の種類を直接渡すと
     expect(inspectNameTableOf(list, draft, FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW })).toEqual(
       inspectNameTableOf(list, draft, FIXTURE_DOCUMENTS),
     );
+  });
+});
+
+// ── 選択肢の集合 enum-membership（T1' の所属の形。Issue #548）──────────────────────────────
+
+describe("旗 on：選択肢の集合の確かめ方 enum-membership（T1' の所属の形は default-value と同じ記述子から value の照合を除いたもの。Issue #548）", () => {
+  const options: NameTableLedgerOptions = { ledger: PROPERTY_LEDGER_VIEW };
+  const elist = fixtureEnumMembershipList();
+  const R6 = "verification[5]";
+  const VALUES = ["alpha", "beta", "gamma"];
+  const check = (table: NameTable) => checkNameTableOf(elist, table, FIXTURE_DOCUMENTS, options);
+  const withR6 = (patch: { roles?: readonly string[]; nature?: "ruled" | "existence-only"; value?: unknown; options?: readonly string[] }): NameTable => {
+    const table = fixtureEnumMembershipTable(patch.options);
+    return {
+      ...table,
+      ownership: table.ownership.map((entry) =>
+        entry.requirementId === "R6" && patch.roles !== undefined
+          ? { ...entry, roles: patch.roles.map((id) => ({ id, basis: "stated" as const, reason: null })) }
+          : entry,
+      ),
+      verification: table.verification.map((entry) =>
+        entry.requirementId === "R6" && patch.value !== undefined ? ({ ...entry, value: patch.value } as unknown as typeof entry) : entry,
+      ),
+      classification: table.classification.map((entry) =>
+        entry.requirementId === "R6" && patch.nature !== undefined ? { ...entry, nature: patch.nature } : entry,
+      ),
+    };
+  };
+  const expectOnly = (table: NameTable, problem: Problem) => {
+    const problems = check(table);
+    expect(problems).toContainEqual(problem);
+    expectNoValues(problems, VALUES);
+  };
+
+  it("正例：enum の項目 1 つと entity だけを所属させ、分類が ruled なら問題 0。下書きから value の無い確かめ方に戻る", () => {
+    expect(check(fixtureEnumMembershipTable())).toEqual([]);
+    expect(check(withR6({ roles: ["f.item.kind", "e.item"] }))).toEqual([]);
+    const result = inspectNameTableOf(elist, draftOf(elist, fixtureEnumMembershipTable()), FIXTURE_DOCUMENTS, options);
+    expect(result).toEqual({ ok: true, table: fixtureEnumMembershipTable() });
+    if (!result.ok) return;
+    expect(result.table.verification[5]).toEqual({ requirementId: "R6", kind: "enum-membership" });
+    // strict の schema の形（value の欄を null で持つ）も同じ表に戻る
+    const draft = draftOf(elist, fixtureEnumMembershipTable());
+    const withNull = { ...draft, requirements: draft.requirements.map((entry) => ({ ...entry, verification: { ...entry.verification, value: null } })) };
+    expect(inspectNameTableOf(elist, withNull, FIXTURE_DOCUMENTS, options)).toEqual({ ok: true, table: fixtureEnumMembershipTable() });
+  });
+
+  it("負例：ほかの行（操作・画面・別の項目）も所属させると固定文で落ちる", () => {
+    for (const other of ["o.addItem", "s.items", "f.item.amount"]) {
+      expectOnly(withR6({ roles: ["f.item.kind", other] }), {
+        field: R6,
+        message: "選択肢の集合で確かめる要件は、選択肢の項目とその所属 entity のほかの行を所属させないこと",
+      });
+    }
+  });
+
+  it("負例：enum でない項目だけ・所属が無いと固定文で落ちる", () => {
+    for (const roles of [["f.item.amount"], ["f.item.title"], []]) {
+      expectOnly(withR6({ roles }), { field: R6, message: "選択肢の集合で確かめる要件は、選択肢（enum）の項目をちょうど 1 つ所属させること" });
+    }
+  });
+
+  it("負例：所属させた選択肢の項目の options が空なら固定文で落ちる", () => {
+    expectOnly(withR6({ options: [] }), { field: R6, message: "選択肢の集合で確かめる要件の、所属させた選択肢の項目の options が空である" });
+  });
+
+  it("負例：分類が existence-only だと固定文で落ちる", () => {
+    expectOnly(withR6({ nature: "existence-only" }), { field: R6, message: "選択肢の集合で確かめる要件の分類は ruled であること" });
+  });
+
+  it("負例：value が null でない（型付きの表・下書き）と固定文で落ちる（値を埋めない）", () => {
+    for (const value of ["alpha", "", 1]) {
+      expectOnly(withR6({ value }), { field: `${R6}.value`, message: "選択肢の集合で確かめる要件の value は null であること" });
+    }
+    const draft = draftOf(elist, fixtureEnumMembershipTable());
+    const broken = {
+      ...draft,
+      requirements: draft.requirements.map((entry, index) => (index === 5 ? { ...entry, verification: { kind: "enum-membership", value: "alpha" } } : entry)),
+    };
+    const problem = { field: "requirements[5].verification.value", message: "選択肢の集合で確かめる要件の value は null であること" };
+    expect(checkNameTableDraftShapeOf(broken, options)).toEqual({ ok: false, problems: [problem] });
+    expectNoValues([problem], VALUES);
+  });
+
+  it("既存の負例と正例は今までどおり（default-value の表・題材の表は on で今と同じ結果）", () => {
+    expect(checkNameTableOf(list, fixtureTable(), FIXTURE_DOCUMENTS, options)).toEqual([]);
+    const dlist = fixtureDefaultValueList();
+    expect(checkNameTableOf(dlist, fixtureDefaultValueTable(), FIXTURE_DOCUMENTS, options)).toEqual([]);
+    expect(checkNameTableOf(dlist, fixtureDefaultValueTable("gamma"), FIXTURE_DOCUMENTS, options)).toEqual(
+      checkNameTableOf(dlist, fixtureDefaultValueTable("gamma"), FIXTURE_DOCUMENTS),
+    );
+  });
+
+  it("旗 off で kind に enum-membership を書くと、下書きは schema の enum に無く形で落ち、型付きの表も固定文で落ちる（未登録の拒否）", () => {
+    const draft = draftOf(elist, fixtureEnumMembershipTable());
+    expect(checkNameTableDraftShapeOf(draft)).toEqual({
+      ok: false,
+      problems: [
+        {
+          field: "requirements[5].verification.kind",
+          message: "確かめ方の種類は fixed-test・structural・unresolved・default-value のいずれかであること",
+        },
+      ],
+    });
+    const inspected = inspectNameTableOf(elist, draft, FIXTURE_DOCUMENTS);
+    expect(inspected.ok).toBe(false);
+    expect(checkNameTableOf(elist, fixtureEnumMembershipTable(), FIXTURE_DOCUMENTS)).toContainEqual({
+      field: "verification[5].kind",
+      message: "確かめ方の種類は fixed-test・structural・unresolved・default-value のいずれかであること",
+    });
   });
 });

@@ -42,7 +42,16 @@ import {
   type StageInputCode,
 } from "./v11a/bundle-v11a.js";
 import * as v11aRunModule from "./v11a/run.js";
-import { FIXTURE_DOCUMENTS, FIXTURE_YAML, draftOf, fixtureList, fixtureTable } from "./v11a/__tests__/fixtures.js";
+import {
+  ENUM_MEMBERSHIP_REQUEST_DIFF,
+  FIXTURE_DOCUMENTS,
+  FIXTURE_YAML,
+  draftOf,
+  fixtureList,
+  fixtureTable,
+  requestDiffsOf,
+  withoutEnumMembership,
+} from "./v11a/__tests__/fixtures.js";
 import type { NameTable } from "./v11a/names.js";
 import {
   BUNDLE_MANIFEST_FILE,
@@ -1070,7 +1079,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     vi.restoreAllMocks();
   });
 
-  it("完走で 0：v1.1α の経路で流れ、要求は v1.1a と同じ。条件の記録の pipeline・prompt_version が v1.2、ほかの欄は v1.1a と同じ", async () => {
+  it("完走で 0：v1.1α の経路で流れ、要求の差は台帳の enum-membership の行の分だけ（名指しの場所）。条件の記録の pipeline・prompt_version が v1.2、ほかの欄は v1.1a と同じ", async () => {
     const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
     const v1Spy = vi.spyOn(runModule, "runGeneration");
     const calls = [...v11aHead(), structured(v11aJudgments())];
@@ -1081,8 +1090,15 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(v1Spy).not.toHaveBeenCalled();
     expect(v11aSpy).toHaveBeenCalledTimes(2);
     expect(v12.makeClient.mock.calls[0]).toEqual([{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.1a" }]);
-    // LLM への要求は v1.1a の走りとバイト列で同じ（載せ替えだけ）
-    expect(JSON.stringify(v12.recording.structured)).toBe(JSON.stringify(v11a.recording.structured));
+    // LLM への要求は、v1.2 の旗で台帳に登録した性質（enum-membership。Issue #548）の分を除けば v1.1a の走りとバイト列で
+    // 同じ。差は名指しの場所（R-nt-08・R-sc-02・R-tsp-02・R-tsp-16・R-w11 の並び・schema の enum）だけで、空でない
+    const onRequests = JSON.parse(JSON.stringify(v12.recording.structured)) as unknown[];
+    const offRequests = JSON.parse(JSON.stringify(v11a.recording.structured)) as unknown[];
+    expect(onRequests).toHaveLength(offRequests.length);
+    const diffs = requestDiffsOf(onRequests, offRequests);
+    for (const diff of diffs) expect(diff.paths, diff.schemaName).toEqual(ENUM_MEMBERSHIP_REQUEST_DIFF[diff.schemaName] ?? []);
+    expect(diffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(ENUM_MEMBERSHIP_REQUEST_DIFF));
+    expect(JSON.stringify(withoutEnumMembership(onRequests))).toBe(JSON.stringify(v11a.recording.structured));
     expect(v12.summary["verdict"]).toBe("full");
     expect(v12.summary["prompt_version"]).toBe(PROMPT_VERSION_V12);
     expect(v12.summary["prompt_version"]).toBe("v1.2");

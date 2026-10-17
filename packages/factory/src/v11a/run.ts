@@ -30,7 +30,7 @@
 //
 // 旗（`flags`。08-architecture-v1.2.md §9・Issue #547）：省けば全部 off で、今の v1.1α とバイト列で同じに流れる。
 // `flags.ledger` が on なら、性質の台帳の導出（`v12/ledger.ts`）を T1（T1' を含む）・T2（T2' を含む）・評価口（B4・
-// B5 の道具・版の再検査）へ渡す。T1''・B1 へは渡さない（手 2b）。`recordV12Flags` が真の走り（`--pipeline v1.2`）だけ、
+// B5 の道具・版の再検査）へ渡し、手 2b（Issue #548）から T1''・B1 へも渡す。`recordV12Flags` が真の走り（`--pipeline v1.2`）だけ、
 // 要約に実効の旗の組を `v12_flags` で書く（早期停止の要約にも）。
 //
 // 持ち越し（§1.2）の出どころは 4 つ。T1 の unresolved と T1'' の拒否は A1 の `deriveCarryOver` で導く。
@@ -873,6 +873,7 @@ async function runV11a(
           advice: marks,
           documents: input.documents,
           gateway,
+          ...withLedger,
         });
         if (!checked.ok) return checked;
         const problems: Problem[] = [];
@@ -970,7 +971,15 @@ async function runV11a(
 
     // ── B1 書く（表の全行・固定した試験）──────────────────────────────────
     const written = await runStageOk("write", () =>
-      runWriteV11a({ list, table, suite: testSpec.suite, observes: testSpec.observes, documents: input.documents, gateway }),
+      runWriteV11a({
+        list,
+        table,
+        suite: testSpec.suite,
+        observes: testSpec.observes,
+        documents: input.documents,
+        gateway,
+        ...withLedger,
+      }),
     );
 
     // ── 版の輪の状態 ─────────────────────────────────────────────────
