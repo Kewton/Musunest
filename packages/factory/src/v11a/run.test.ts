@@ -53,7 +53,7 @@ import {
 import { V11A_ARTIFACT_NAMES } from "./bundle-v11a.js";
 import * as evaluateModule from "./evaluate.js";
 import { DEFAULT_VALUE_DETAILS, UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
-import { nameTableSha256, type NameTable } from "./names.js";
+import { COMPUTATION_AGGREGATE_MESSAGES, nameTableSha256, type NameTable } from "./names.js";
 import {
   ALL_CARRIED_PROBLEM,
   runGenerationV11a,
@@ -1797,6 +1797,69 @@ describe("(s) 空の集計の要件：空の境界・未読の異常を empty-ag
       structured(acceptAll()),
     ]);
     expect(off.result.outcome.verdict).not.toBe("full");
+    expect(reports.length).toBeGreaterThan(0);
+    expect(reports[0]!.mismatches.map((entry) => entry.testId)).toContain("r4-empty-null");
+  });
+
+  it("(a) 旗 on の実際の経路：計算の行の aggregate の欄が欠けた T1 の応答は形（schema の必須の欄）で落ち、T1' の集計の検査に届かない。2 回とも欠ければ T1 で止まり full が出ない", async () => {
+    const { result, recording } = await runScenario([structured(draftOf(LIST, S_TABLE_PLAIN)), structured(draftOf(LIST, S_TABLE_PLAIN))], flags);
+    expect(result.stopped?.stage).toBe("name-table");
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(schemaNames(recording.structured)).toEqual([NAME_TABLE_SCHEMA_NAME, NAME_TABLE_SCHEMA_NAME]);
+    const candidates = diagnosticOf(result.diagnostics, DIAGNOSTICS_REJECTED_NAME_TABLE_FILE)["candidates"] as readonly {
+      readonly problems: readonly { readonly field: string; readonly message: string }[];
+    }[];
+    expect(candidates).toHaveLength(2);
+    // 計算の行（6 行）ごとに形の落ちが 1 つずつ。T1' の表の検査の固定文（種別との対応・集計元・見出しの元）は出ない
+    const shapeMessage = "計算の型の aggregate は null か、集計の種類（sum・count・avg）と集計元の entity の行の id の写像であること";
+    const computationRows = S_TABLE_PLAIN.rows.flatMap((row, index) => (row.kind === "computation" ? [index] : []));
+    for (const candidate of candidates) {
+      const aggregateProblems = candidate.problems
+        .filter((problem) => problem.field.endsWith(".type.aggregate") || problem.field.endsWith(".type.aggregate.entity"))
+        .map((problem) => ({ field: problem.field, message: problem.message }));
+      expect(aggregateProblems).toEqual(computationRows.map((index) => ({ field: `rows[${String(index)}].type.aggregate`, message: shapeMessage })));
+      for (const message of Object.values(COMPUTATION_AGGREGATE_MESSAGES)) {
+        expect(candidate.problems.map((problem) => problem.message)).not.toContain(message);
+      }
+    }
+    // 対照：同じ表に欄を足した応答は T1' を通る（落ちは欄が欠けたことだけによる）
+    const fixed = await runScenario([...sHead(S_YAML), structured(acceptAll())], flags);
+    expect(fixed.result.outcome.verdict).toBe("full");
+  });
+
+  it("(b) 集計の検査の省略は門の免除にならない：LLM を経ずにコードが組んだ表（計算の行に aggregate の欄が無い）から再開した旗 on の走りで、empty-aggregate の試験は T2' で 2 回とも落ちて B4 へ進まず、value の観測で空に null を期待した試験は T2' を通っても B4 の不一致で full が出ない", async () => {
+    // 境界 T1''／T2 の材料を、欄の無い表（旗 off の走り＝コードが組む表と同じ形）から取る
+    const first = await runStageRangeV11a({
+      ...inputOf(createRecordingClient([structured(draftOf(LIST, S_TABLE_PLAIN)), structured(acceptAll())]).client),
+      range: { start: "name-table", end: "semantic-check" },
+    });
+    expect(first.stopped).toBeNull();
+    const boundary = first.boundaries[0];
+    if (boundary === undefined) throw new Error("前提が壊れた：境界が無い");
+    const { boundary: _boundary, ...resume } = boundary;
+    expect(resume.table).toEqual(S_TABLE_PLAIN);
+    // empty-aggregate の試験（形は正しい：空の合計に 0・未読に null）でも、表に集計の種類と集計元が無いので対象の落ち
+    const t2 = t2S(emptyAggregateTests().slice(0, 2));
+    const rejectedRecording = createRecordingClient([structured(t2), structured(t2)]);
+    const rejected = await runStageRangeV11a({ ...inputOf(rejectedRecording.client), ...flags, range: { start: "test-spec", end: "judge" }, resume });
+    expect(rejected.stopped?.stage).toBe("test-spec");
+    expect(rejected.stages.map((record) => record.stage)).not.toContain("run-tests");
+    expect(rejected.judgeVerdict).toBeNull();
+    expect(schemaNames(rejectedRecording.structured)).toEqual([TEST_SPEC_SCHEMA_NAME, TEST_SPEC_SCHEMA_NAME]);
+    const row = PROPERTY_LEDGER.find((entry) => entry.id === "empty-aggregate");
+    const previous = dataBlockOf(rejectedRecording.structured[1]!.input, "前回の作り直しの指示") as { field: string; message: string }[];
+    expect(previous).toContainEqual({ field: "tests[10].target", message: row?.t2Aggregate?.messages.target ?? "（無い）" });
+    // value の観測で空に null を期待した試験は、表から集計元を引けないので T2' の期待の照合は掛からないが、B4（v1 の評価器）が
+    // 不一致に数え、full は出ない（門は B4 に残る）
+    const { reports } = spyRuns();
+    const aOne = aggTest("r4-empty-null", "c.base", "boundary", ["e.item"], null, "value");
+    const passed = await runStageRangeV11a({
+      ...inputOf(createRecordingClient([structured(t2S([aOne])), structured({ declaration: S_YAML }), structured(acceptAll()), repairDone(S_YAML), structured(acceptAll())]).client),
+      ...flags,
+      range: { start: "test-spec", end: "judge" },
+      resume,
+    });
+    expect(passed.judgeVerdict).not.toBe("full");
     expect(reports.length).toBeGreaterThan(0);
     expect(reports[0]!.mismatches.map((entry) => entry.testId)).toContain("r4-empty-null");
   });
