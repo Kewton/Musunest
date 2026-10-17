@@ -4,7 +4,8 @@
 //   1. **全段の schema から封筒を作る**——構造化出力を使う段がすべて枝として入る
 //   2. **同じ入力なら同じバイト列**——封筒の組み立ては純粋で、枝の並びも決まっている
 //   3. **枝ごとに `stage` の判別子がある**——`enum` が 1 つの文字列
-//   4. **strict の決まりを満たす**——object は `additionalProperties: false`、すべての欄が `required`
+//   4. **strict の決まりを満たす**——object は `additionalProperties: false`、すべての欄が `required`。
+//      `anyOf`・`oneOf`・`allOf` だけを持つ組み合わせのノードは枝へ降りて同じ決まりで確かめる（#528）
 //   5. **v1.1α の段は別の封筒**（`stage-envelope-v11a`。Issue #511）——v1 の一覧・名前・実体は変わらず、
 //      v1 の封筒に v1.1α の段の名前が 1 つも入らない
 //
@@ -30,6 +31,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const COMBINATION_KEYS = ["anyOf", "oneOf", "allOf"] as const;
+
 /**
  * 1 つの schema を再帰的に走査し、strict の決まりに反する箇所を集める（`stages/schema-strict.test.ts`
  * と同じ規則。対象は**枝**——封筒の `result` は `anyOf` の入れ物なので、ここには掛けない）。
@@ -43,7 +46,12 @@ function strictProblems(schema: unknown): readonly string[] {
     }
     const type = node["type"];
     const types = Array.isArray(type) ? type : typeof type === "string" ? [type] : undefined;
-    if (types === undefined) problems.push(`${path}: type が無い`);
+    // `anyOf`・`oneOf`・`allOf` だけを持つ組み合わせのノード（説明は持ってよい）は、枝へ降りて検査する（#528）
+    const combination =
+      types === undefined &&
+      COMBINATION_KEYS.some((key) => Array.isArray(node[key])) &&
+      Object.keys(node).every((key) => (COMBINATION_KEYS as readonly string[]).includes(key) || key === "description");
+    if (types === undefined && !combination) problems.push(`${path}: type が無い`);
     if (types?.includes("object")) {
       if (node["additionalProperties"] !== false) {
         problems.push(`${path}: object の additionalProperties が false でない`);
@@ -77,7 +85,7 @@ function strictProblems(schema: unknown): readonly string[] {
         walk(items, `${path}/items`);
       }
     }
-    for (const branch of ["anyOf", "oneOf", "allOf"]) {
+    for (const branch of COMBINATION_KEYS) {
       const list = node[branch];
       if (Array.isArray(list)) list.forEach((child, index) => walk(child, `${path}/${branch}/${index}`));
     }
@@ -374,5 +382,58 @@ describe("v1.1α の段は別の封筒に入れ、v1 の封筒は変えない（
     // v1 だけの段は v1.1a の封筒から引けない（adapter はその schema をそのまま送る）
     expect(envelopeStageFor("requirement-design", "v1.1a")).toBeUndefined();
     expect(envelopeStageFor("judge-answers", "v1.1a")).toBeUndefined();
+  });
+});
+
+// ── strict の走査の決まり（#528）──────────────────────────────────────────
+
+describe("strict の走査は組み合わせのノードの枝へ降り、object の決まりを保つ（#528）", () => {
+  const good = { type: "object", additionalProperties: false, required: ["a"], properties: { a: { type: "string" } } };
+
+  it("v1.1a の name-table の枝は、行と確かめ方の anyOf の枝まで降りて問題 0", () => {
+    const entry = STAGE_ENVELOPE_ENTRIES_V11A.find((candidate) => candidate.stage === "name-table");
+    expect(entry).toBeDefined();
+    if (entry === undefined) return;
+    const branch = buildStageBranch(entry);
+    expect(strictProblems(branch)).toEqual([]);
+    const rows = (branch["properties"] as Record<string, Record<string, unknown>>)["rows"]!;
+    expect(((rows["items"] as Record<string, unknown>)["anyOf"] as readonly unknown[]).length).toBe(5);
+  });
+
+  it("anyOf・oneOf・allOf だけのノードは問題 0 で、枝の object の負例は今までどおり落ちる", () => {
+    for (const key of ["anyOf", "oneOf", "allOf"]) {
+      expect(strictProblems({ [key]: [good, { type: "null" }] }), key).toEqual([]);
+      expect(strictProblems({ [key]: [{ ...good, additionalProperties: true }] }), key).toEqual([
+        `#/${key}/0: object の additionalProperties が false でない`,
+      ]);
+      expect(strictProblems({ [key]: [{ ...good, required: [] }] }), key).toEqual([`#/${key}/0: 欄 a が required に無い`]);
+      expect(strictProblems({ [key]: [{}] }), key).toEqual([`#/${key}/0: type が無い`]);
+    }
+  });
+
+  it("入れ子の枝の中の object の負例も落ちる", () => {
+    const nested = {
+      type: "object",
+      additionalProperties: false,
+      required: ["x"],
+      properties: { x: { anyOf: [{ ...good, properties: { a: { type: "object", properties: {} } } }] } },
+    };
+    expect(strictProblems(nested)).toEqual([
+      "#/properties/x/anyOf/0/properties/a: object の additionalProperties が false でない",
+    ]);
+  });
+
+  it("通常の object の required・additionalProperties の負例と、type も組み合わせも無い空のノードは今までどおり落ちる", () => {
+    expect(strictProblems(good)).toEqual([]);
+    expect(strictProblems({ ...good, additionalProperties: undefined })).toEqual([
+      "#: object の additionalProperties が false でない",
+    ]);
+    expect(strictProblems({ ...good, required: [] })).toEqual(["#: 欄 a が required に無い"]);
+    expect(strictProblems({})).toEqual(["#: type が無い"]);
+    expect(strictProblems({ ...good, properties: { a: {} } })).toEqual(["#/properties/a: type が無い"]);
+    // 組み合わせのほかに欄を持つノード（type が無い）は組み合わせとして扱わない
+    expect(strictProblems({ anyOf: [good], properties: {} })).toEqual(["#: type が無い"]);
+    // 組み合わせの値が並びでないノードも組み合わせとして扱わない
+    expect(strictProblems({ anyOf: good })).toEqual(["#: type が無い"]);
   });
 });

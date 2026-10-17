@@ -6,13 +6,15 @@
 //   2. 要件 ID は応答に無くても一覧の順で付く。写しが合わない・分類が欠けた・未知の分類・A1 の負例は `unmet`
 //      （`attempts` 1）。形に 1 回落ちれば `calls` 2・口が 1 回
 //   3. 口の有無で偽物が受け取った要求が同じ。規則の定義に不備が無い。題材の言葉を使わない
+//   4. 行と確かめ方の schema は種類ごとの枝（anyOf）で、枝に要る欄は非 null の必須（#528）。枝の形の応答が
+//      通り、要る欄の null・枝に無い欄（null でも）・空の理由と並びは unmet。前の平らな写像は変換だけが受ける
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { describe, expect, it } from "vitest";
 import type { LlmClient, LlmStructuredRequest } from "../../llm.js";
 import type { RequirementList } from "../../pipeline.js";
 import { ruleDefinitionDefects, type RejectedCandidate } from "../../stages/prompt.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
-import { FIXTURE_DOCUMENTS, draftOf, fixtureList, fixtureListWithRequestQuotes, fixtureTable } from "../__tests__/fixtures.js";
+import { FIXTURE_CONSTRAINT_ID, FIXTURE_DOCUMENTS, draftOf, fixtureList, fixtureListWithRequestQuotes, fixtureTable } from "../__tests__/fixtures.js";
 import { copyLengthFor, nameTableSha256, requirementCopy, type NameTableDraft } from "../names.js";
 import {
   NAME_TABLE_PREVIOUS_DATA_NAMES,
@@ -51,8 +53,16 @@ function planOf(list: RequirementList): ConfirmedPlan {
 
 const TYPE_KEYS = ["fieldType", "valueType", "scope", "form", "action", "hasWhen", "view"] as const;
 
-/** A1 の下書きを、T1 の応答の形（`type` を欄を並べた写像にしたもの）にする */
+/** A1 の下書きを、T1 の応答の形（枝の形。項目の `type` は `{fieldType}`）にする */
 function responseOf(draft: NameTableDraft): Record<string, unknown> {
+  return {
+    rows: draft.rows.map((row) => ({ ...row, type: typeof row.type === "string" ? { fieldType: row.type } : row.type })),
+    requirements: draft.requirements.map((entry) => ({ ...entry, verification: { ...entry.verification } })),
+  };
+}
+
+/** A1 の下書きを、前の平らな写像の応答（`type` を 7 欄の写像、確かめ方を全欄の写像）にする */
+function legacyResponseOf(draft: NameTableDraft): Record<string, unknown> {
   return {
     rows: draft.rows.map((row) => {
       const type: Record<string, unknown> = Object.fromEntries(TYPE_KEYS.map((key) => [key, null]));
@@ -72,9 +82,50 @@ function responseOf(draft: NameTableDraft): Record<string, unknown> {
   };
 }
 
+/**
+ * schema の最小の照合（この試験の schema が使う語だけ：type・enum・required・properties・
+ * additionalProperties・items・anyOf）。合えば空、合わなければ最初の不一致の場所
+ */
+function schemaMismatch(schema: unknown, value: unknown, path = "#"): string | undefined {
+  const node = schema as Record<string, unknown>;
+  const anyOf = node["anyOf"] as readonly unknown[] | undefined;
+  if (anyOf !== undefined && !anyOf.some((branch) => schemaMismatch(branch, value, path) === undefined)) return `${path}: anyOf`;
+  const type = node["type"];
+  if (type !== undefined) {
+    const types = (Array.isArray(type) ? type : [type]) as string[];
+    const actual =
+      value === null ? "null" : Array.isArray(value) ? "array" : typeof value === "object" ? "object" : typeof value;
+    if (!types.includes(actual)) return `${path}: type`;
+  }
+  const values = node["enum"] as readonly unknown[] | undefined;
+  if (values !== undefined && !values.includes(value as never)) return `${path}: enum`;
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    const properties = (node["properties"] ?? {}) as Record<string, unknown>;
+    for (const key of (node["required"] ?? []) as string[]) if (!(key in record)) return `${path}/${key}: required`;
+    if (node["additionalProperties"] === false) {
+      for (const key of Object.keys(record)) if (!(key in properties)) return `${path}/${key}: additional`;
+    }
+    for (const [key, child] of Object.entries(properties)) {
+      if (key in record) {
+        const mismatch = schemaMismatch(child, record[key], `${path}/${key}`);
+        if (mismatch !== undefined) return mismatch;
+      }
+    }
+  }
+  if (Array.isArray(value) && node["items"] !== undefined) {
+    for (const [index, item] of value.entries()) {
+      const mismatch = schemaMismatch(node["items"], item, `${path}/${index}`);
+      if (mismatch !== undefined) return mismatch;
+    }
+  }
+  return undefined;
+}
+
 const LIST = fixtureList();
 const PLAN = planOf(LIST);
 const GOOD_RESPONSE = responseOf(draftOf(LIST, fixtureTable()));
+const LEGACY_RESPONSE = legacyResponseOf(draftOf(LIST, fixtureTable()));
 
 async function run(outputs: readonly unknown[], extra: { previous?: NameTablePrevious; observe?: boolean } = {}) {
   const recording = createRecordingClient(outputs.map(structured));
@@ -250,8 +301,8 @@ describe("T1 の結果", () => {
     expect(rejected[0]).toMatchObject({ kind: "content", round: 1, attempt: 1, response: duplicated, inspectionList: LIST });
   });
 
-  it("行の種類に合わない型の欄が null でなければ unmet", async () => {
-    const response = clone(GOOD_RESPONSE);
+  it("前の平らな写像で、行の種類に合わない型の欄が null でなければ unmet", async () => {
+    const response = clone(LEGACY_RESPONSE);
     const rows = response["rows"] as Record<string, Record<string, unknown>>[];
     rows[2]!["type"] = { ...rows[2]!["type"], view: "table" };
     const { outcome } = await run([response]);
@@ -436,5 +487,244 @@ describe("T1 は要件ごとの写しをコードが渡し、依頼文の引用�
       field: "requirements[0].copy",
       message: "要件の文の写しが一覧の同じ位置の要件と合わない",
     });
+  });
+});
+
+// ── 種類ごとの枝の schema（#528）────────────────────────────────────────
+//
+// 平らな写像で全部を null 可にした schema では、モデルは種類に要る欄（操作の hasWhen・項目の fieldType・
+// 構造の reason）を null で返した。schema を種類ごとの枝にし、枝に要る欄を非 null の必須にする。schema で
+// 防げない空の値（理由・checks・constraintIds）は、今までどおり A1 の検査（T1'）が落とす。
+
+type SchemaNode = Record<string, unknown>;
+const ROW_BRANCHES = (NAME_TABLE_SCHEMA.properties.rows.items as unknown as { anyOf: readonly SchemaNode[] }).anyOf;
+const VERIFICATION_BRANCHES = (
+  NAME_TABLE_SCHEMA.properties.requirements.items.properties.verification as unknown as { anyOf: readonly SchemaNode[] }
+).anyOf;
+const propertiesOf = (node: SchemaNode) => node["properties"] as Record<string, SchemaNode>;
+const typesOf = (node: SchemaNode) => [node["type"]].flat();
+
+/** schema の中の object をすべて集める */
+function objectsIn(node: unknown, found: SchemaNode[] = []): SchemaNode[] {
+  if (node === null || typeof node !== "object") return found;
+  if (Array.isArray(node)) {
+    for (const child of node) objectsIn(child, found);
+    return found;
+  }
+  const record = node as SchemaNode;
+  if (typesOf(record).includes("object")) found.push(record);
+  for (const child of Object.values(record)) objectsIn(child, found);
+  return found;
+}
+
+const rowIndexOf = (id: string) => fixtureTable().rows.findIndex((row) => row.id === id);
+const FIELD_AT = rowIndexOf("f.item.title");
+const OPERATION_AT = rowIndexOf("o.addItem");
+const STRUCTURAL_AT = fixtureTable().verification.findIndex((entry) => entry.kind === "structural");
+const UNRESOLVED_AT = fixtureTable().verification.findIndex((entry) => entry.kind === "unresolved");
+
+/** 応答の行の 1 つを書き換えた応答 */
+function withRow(base: Record<string, unknown>, index: number, edit: (row: Record<string, unknown>) => Record<string, unknown>) {
+  const response = clone(base);
+  const rows = response["rows"] as Record<string, unknown>[];
+  rows[index] = edit(rows[index] as Record<string, unknown>);
+  return response;
+}
+
+/** 応答の確かめ方の 1 つを書き換えた応答 */
+const withVerification = (index: number, verification: Record<string, unknown>) =>
+  withRequirement(index, (entry) => ({ ...entry, verification }));
+
+const ruleText = (id: string) => NAME_TABLE_RULE_DEFINITIONS.find((definition) => definition.id === id)!.text;
+
+async function unmetProblems(response: unknown) {
+  const { outcome, requests } = await run([response]);
+  expect(requests).toHaveLength(1);
+  if (outcome.ok) throw new Error("落ちるはず");
+  expect(outcome.failure).toMatchObject({ kind: "unmet", attempts: 1 });
+  if (outcome.failure.kind !== "unmet") throw new Error("unmet のはず");
+  expect(outcome.response).toEqual(response);
+  return outcome.failure.problems;
+}
+
+describe("T1 の schema は行と確かめ方の種類ごとの枝（#528）", () => {
+  it("行の並びの要素は 5 枝の anyOf で、枝ごとに kind が 1 値の enum、type は種類の形", () => {
+    expect(ROW_BRANCHES.map((branch) => propertiesOf(branch)["kind"])).toEqual(
+      ["entity", "field", "computation", "operation", "screen"].map((kind) => ({ type: "string", enum: [kind] })),
+    );
+    const typeOf = (index: number) => propertiesOf(ROW_BRANCHES[index]!)["type"]!;
+    expect(typeOf(0)).toEqual({ type: "null" });
+    const typeProperties = (index: number) => propertiesOf(typeOf(index));
+    expect(Object.keys(typeProperties(1))).toEqual(["fieldType"]);
+    expect(Object.keys(typeProperties(2))).toEqual(["valueType", "scope", "form"]);
+    expect(Object.keys(typeProperties(3))).toEqual(["action", "hasWhen"]);
+    expect(Object.keys(typeProperties(4))).toEqual(["view"]);
+    expect(typeProperties(3)["hasWhen"]).toEqual({ type: "boolean" });
+    for (const index of [1, 2, 3, 4]) {
+      for (const [key, child] of Object.entries(typeProperties(index))) {
+        expect(typesOf(child), key).not.toContain("null");
+        if (key !== "hasWhen") {
+          expect(child["type"], key).toBe("string");
+          expect(child["enum"] as unknown[], key).not.toContain(null);
+          expect((child["enum"] as unknown[]).length, key).toBeGreaterThan(0);
+        }
+      }
+    }
+    // 種類に依らない欄は全枝で同じ定義
+    const common = ["id", "entity", "name", "role", "source", "options", "groupBy", "refEntity"];
+    for (const branch of ROW_BRANCHES) {
+      expect(Object.keys(propertiesOf(branch))).toEqual(["id", "kind", "entity", "name", "role", "source", "type", "options", "groupBy", "refEntity"]);
+      for (const key of common) expect(propertiesOf(branch)[key], key).toEqual(propertiesOf(ROW_BRANCHES[0]!)[key]);
+    }
+  });
+
+  it("確かめ方は 3 枝の anyOf で、structural・unresolved の reason は string、fixed-test は kind だけ", () => {
+    expect(VERIFICATION_BRANCHES.map((branch) => propertiesOf(branch)["kind"])).toEqual(
+      ["fixed-test", "structural", "unresolved"].map((kind) => ({ type: "string", enum: [kind] })),
+    );
+    expect(Object.keys(propertiesOf(VERIFICATION_BRANCHES[0]!))).toEqual(["kind"]);
+    expect(Object.keys(propertiesOf(VERIFICATION_BRANCHES[1]!))).toEqual(["kind", "reason", "checks"]);
+    expect(Object.keys(propertiesOf(VERIFICATION_BRANCHES[2]!))).toEqual(["kind", "reason", "constraintIds"]);
+    for (const index of [1, 2]) expect(propertiesOf(VERIFICATION_BRANCHES[index]!)["reason"]).toEqual({ type: "string" });
+  });
+
+  it("枝のすべての object は additionalProperties が false で全欄が required", () => {
+    const objects = objectsIn([...ROW_BRANCHES, ...VERIFICATION_BRANCHES]);
+    // 行の枝 5・行の type 4・出典 5・見出しの元 5・確かめ方の枝 3
+    expect(objects).toHaveLength(22);
+    for (const object of objects) {
+      expect(object["additionalProperties"]).toBe(false);
+      const required = object["required"] as string[];
+      expect(required).toHaveLength(Object.keys(propertiesOf(object)).length);
+      expect(new Set(required)).toEqual(new Set(Object.keys(propertiesOf(object))));
+    }
+  });
+
+  it("枝の形の応答は schema に合い、前の平らな写像と要る欄の null は schema に合わない", () => {
+    expect(schemaMismatch(NAME_TABLE_SCHEMA, GOOD_RESPONSE)).toBeUndefined();
+    expect(schemaMismatch(NAME_TABLE_SCHEMA, LEGACY_RESPONSE)).toBe("#/rows/0: anyOf");
+    const nullHasWhen = withRow(GOOD_RESPONSE, OPERATION_AT, (row) => ({ ...row, type: { action: "create", hasWhen: null } }));
+    expect(schemaMismatch(NAME_TABLE_SCHEMA, nullHasWhen)).toBe(`#/rows/${OPERATION_AT}: anyOf`);
+    const nullReason = withVerification(STRUCTURAL_AT, { kind: "structural", reason: null, checks: ["view-shows"] });
+    expect(schemaMismatch(NAME_TABLE_SCHEMA, nullReason)).toBe(`#/requirements/${STRUCTURAL_AT}/verification: anyOf`);
+  });
+});
+
+describe("T1 は枝の形の応答を A1 の型へ写し、枝に合わない値を unmet にする（#528）", () => {
+  it("正例：枝の形の応答が通り、表の type が A1 の型になる", async () => {
+    const { outcome } = await run([GOOD_RESPONSE]);
+    if (!outcome.ok) throw new Error(JSON.stringify(outcome.failure));
+    expect(outcome.value.table).toEqual(fixtureTable());
+    expect(outcome.value.table.rows[FIELD_AT]!.type).toBe("string");
+    expect(outcome.value.table.rows[OPERATION_AT]!.type).toEqual({ action: "create", hasWhen: false });
+    expect(outcome.value.table.rows[rowIndexOf("e.item")]!.type).toBeNull();
+    expect(outcome.value.tableSha256).toBe(await nameTableSha256(fixtureTable()));
+  });
+
+  it("正例：前の平らな写像（使わない欄が null・空の並び）は今までどおり通り、同じ表になる", async () => {
+    const { outcome } = await run([LEGACY_RESPONSE]);
+    if (!outcome.ok) throw new Error(JSON.stringify(outcome.failure));
+    expect(outcome.value.table).toEqual(fixtureTable());
+  });
+
+  it("操作の hasWhen が null・項目の fieldType が null は unmet（A1 の固定文）", async () => {
+    const nullHasWhen = withRow(GOOD_RESPONSE, OPERATION_AT, (row) => ({ ...row, type: { action: "create", hasWhen: null } }));
+    expect(await unmetProblems(nullHasWhen)).toEqual([
+      { field: `rows[${OPERATION_AT}].type.hasWhen`, message: "when の有無は真偽であること" },
+    ]);
+    const nullFieldType = withRow(GOOD_RESPONSE, FIELD_AT, (row) => ({ ...row, type: { fieldType: null } }));
+    expect(await unmetProblems(nullFieldType)).toEqual([
+      { field: `rows[${FIELD_AT}].type`, message: expect.stringMatching(/^項目の型は .+ のいずれかであること$/) },
+    ]);
+  });
+
+  it("操作の行に項目の枝の形の type は unmet（枝に無い欄と、操作の欄の欠け）", async () => {
+    const swapped = withRow(GOOD_RESPONSE, OPERATION_AT, (row) => ({ ...row, type: { fieldType: "string" } }));
+    expect(await unmetProblems(swapped)).toEqual([
+      { field: `rows[${OPERATION_AT}].type`, message: "行の種類の枝に無い型の欄がある" },
+      { field: `rows[${OPERATION_AT}].type.action`, message: expect.stringMatching(/^操作の種類は .+ のいずれかであること$/) },
+      { field: `rows[${OPERATION_AT}].type.hasWhen`, message: "when の有無は真偽であること" },
+    ]);
+  });
+
+  it("枝の形で、枝に無い欄が null で在れば unmet（行の type と確かめ方）", async () => {
+    const extraNull = withRow(GOOD_RESPONSE, OPERATION_AT, (row) => ({
+      ...row,
+      type: { action: "create", hasWhen: false, view: null },
+    }));
+    expect(await unmetProblems(extraNull)).toEqual([
+      { field: `rows[${OPERATION_AT}].type`, message: "行の種類の枝に無い型の欄がある" },
+    ]);
+    const fixedAt = fixtureTable().verification.findIndex((entry) => entry.kind === "fixed-test");
+    for (const verification of [
+      { kind: "fixed-test", reason: null },
+      { kind: "fixed-test", checks: [] },
+      { kind: "structural", reason: "画面に出ることだけを求める", checks: ["view-shows"], note: null },
+      { kind: "unresolved", reason: "宣言で書けない", constraintIds: [FIXTURE_CONSTRAINT_ID], note: null },
+    ]) {
+      const at = verification.kind === "fixed-test" ? fixedAt : verification.kind === "structural" ? STRUCTURAL_AT : UNRESOLVED_AT;
+      expect(await unmetProblems(withVerification(at, verification))).toEqual([
+        { field: `requirements[${at}].verification`, message: "確かめ方の種類の枝に無い欄がある" },
+      ]);
+    }
+  });
+
+  it("前の写像の確かめ方で、使わない欄が null か空の並びでなければ unmet", async () => {
+    const fixedAt = fixtureTable().verification.findIndex((entry) => entry.kind === "fixed-test");
+    for (const verification of [
+      { kind: "fixed-test", reason: "理由", checks: [], constraintIds: [] },
+      { kind: "structural", reason: "画面に出ることだけを求める", checks: ["view-shows"], constraintIds: ["C-x"] },
+    ]) {
+      const at = verification.kind === "fixed-test" ? fixedAt : STRUCTURAL_AT;
+      expect(await unmetProblems(withVerification(at, verification))).toEqual([
+        { field: `requirements[${at}].verification`, message: "確かめ方の種類に合わない欄が null か空の並びでない" },
+      ]);
+    }
+  });
+
+  it("前の平らな写像で、種類に合わない欄が null でなければ unmet", async () => {
+    const response = withRow(LEGACY_RESPONSE, OPERATION_AT, (row) => ({
+      ...row,
+      type: { ...(row["type"] as Record<string, unknown>), fieldType: "string" },
+    }));
+    expect(await unmetProblems(response)).toEqual([
+      { field: `rows[${OPERATION_AT}].type`, message: "行の種類に合わない型の欄が null でない" },
+    ]);
+  });
+
+  it("空の reason・空の checks・空の constraintIds・文書に無い制約 ID は A1 の検査が unmet にする", async () => {
+    const reason = "画面に出ることだけを求める";
+    expect(await unmetProblems(withVerification(STRUCTURAL_AT, { kind: "structural", reason: "", checks: ["view-shows"] }))).toEqual([
+      { field: `requirements[${STRUCTURAL_AT}].verification.reason`, message: "構造で確かめる理由は空でない文字列であること" },
+    ]);
+    expect(await unmetProblems(withVerification(STRUCTURAL_AT, { kind: "structural", reason, checks: [] }))).toEqual([
+      { field: `verification[${STRUCTURAL_AT}].checks`, message: "構造で確かめる要件に checks が無い" },
+    ]);
+    expect(
+      await unmetProblems(withVerification(UNRESOLVED_AT, { kind: "unresolved", reason: "宣言で書けない", constraintIds: [] })),
+    ).toEqual([{ field: `verification[${UNRESOLVED_AT}].constraintIds`, message: "未解決の要件に制約 ID が無い" }]);
+    expect(
+      await unmetProblems(withVerification(UNRESOLVED_AT, { kind: "unresolved", reason: "", constraintIds: ["C-x"] })),
+    ).toEqual(
+      expect.arrayContaining([
+        { field: `verification[${UNRESOLVED_AT}].reason`, message: "未解決の理由が空である" },
+        { field: `verification[${UNRESOLVED_AT}].constraintIds[0]`, message: "制約 ID が文書に無い" },
+      ]),
+    );
+  });
+
+  it("規則は種類ごとに要る欄と確かめ方の種類ごとの欄・view-shows の所属を書き、null で埋める指示を持たない", () => {
+    expect(ruleText("R-nt-03")).toContain("種類ごとに要る欄");
+    expect(ruleText("R-nt-08")).toContain("fixed-test は kind だけ、structural は kind・reason・checks、unresolved は kind・reason・constraintIds");
+    expect(ruleText("R-nt-08")).toContain("view-shows を checks に書くなら、画面と同じ entity の項目か計算を所属させる");
+    for (const text of NAME_TABLE_RULES) {
+      expect(text).not.toContain("ほかの欄は null にする");
+      expect(text).not.toContain("使わない欄は null か空の並びにする");
+    }
+    expect(NAME_TABLE_RULE_DEFINITIONS.map((definition) => definition.id)).toEqual(
+      Array.from({ length: 10 }, (_, index) => `R-nt-${String(index + 1).padStart(2, "0")}`),
+    );
+    expect(ruleDefinitionDefects(NAME_TABLE_RULE_DEFINITIONS)).toEqual([]);
+    expectNoAcceptanceMaterial([...NAME_TABLE_RULES, JSON.stringify(NAME_TABLE_SCHEMA)]);
   });
 });

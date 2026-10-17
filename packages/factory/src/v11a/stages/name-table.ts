@@ -22,9 +22,11 @@
 // 要件ごとの分類（`nature`）は**要件の文から**分類させる——確定した仕様のデータから Plan の `kind` を外して
 // 渡す（試験も見せない。T2 が独立に分類し、食い違いは J2 が裁く。§1.1）。
 //
-// 応答の `type` は、strict の schema に載せるため**欄を並べた写像**（`fieldType`・`valueType`・`scope`・
-// `form`・`action`・`hasWhen`・`view`）で受け、行の種類に合う欄だけを A1 の型（`NameTableRowType`）へ写して
-// から T1' に掛ける。種類に合わない欄が null でなければ T1' の落ちに足す（黙って捨てない）。
+// 行と確かめ方の schema は**種類ごとの枝**（`anyOf`。枝ごとに `kind` が 1 値の enum）で、枝の中で種類に要る欄を
+// 非 null の必須にする（#528。平らな写像で全部を null 可にすると、モデルは要る欄を null で返した）。応答の
+// `type`（枝の写像）は A1 の型（`NameTableRowType`）へ写してから T1' に掛け、枝に無い欄が在れば null でも
+// T1' の落ちに足す（黙って捨てない）。前の平らな写像（7 欄）は変換だけが受ける（種類に合わない欄が null で
+// なければ落とす）。空の `reason`・`checks`・`constraintIds` は schema では防げないので、A1 の検査が落とす。
 import { ACTION_KINDS, VIEW_TYPES, type ConfirmedPlan } from "@musunest/appspec-schema";
 import type { CallGateway } from "../../call.js";
 import { REQUIREMENT_NATURES, STRUCTURAL_ASSERTIONS } from "../../fixed-test.js";
@@ -60,6 +62,7 @@ import {
   nameTableSha256,
   requirementCopy,
   type NameTable,
+  type NameTableKind,
 } from "../names.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 
@@ -99,9 +102,9 @@ export const NAME_TABLE_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
   {
     id: "R-nt-03",
-    text: "type は行の種類に合う欄だけを埋め、ほかの欄は null にする。項目は fieldType（項目の種類）。計算は valueType（値の型）・scope（row＝行ごと／app＝アプリ全体／groups＝見出しごと）・form（expression＝式／aggregate＝集計／settle＝精算）の 3 つ組。操作は action（操作の種類）と hasWhen（when の有無）。画面は view（画面の種類）。entity は全部の欄を null にする。",
-    why: "型を宣言の欄に 1 対 1 で写せる形で固定し、B3 で照合できるようにする（§2.1・D3）",
-    since: "Issue #507",
+    text: "type は行の種類ごとに要る欄だけを持つ。項目は {fieldType}（項目の種類）。計算は {valueType, scope, form} の 3 つ組（valueType は値の型、scope は row＝行ごと／app＝アプリ全体／groups＝見出しごと、form は expression＝式／aggregate＝集計／settle＝精算）。操作は {action, hasWhen}（action は操作の種類、hasWhen は when の有無で true か false）。画面は {view}（画面の種類）。entity は type を null にする。種類ごとに要る欄は null にせず、ほかの種類の欄を書かない。",
+    why: "型を宣言の欄に 1 対 1 で写せる形で固定し、B3 で照合できるようにする（§2.1・D3）。種類ごとの枝の schema と同じ形で書かせ、要る欄を null で返させない（#528）",
+    since: "Issue #507（種類ごとの欄は #528 で schema の枝に合わせて改めた）",
   },
   {
     id: "R-nt-04",
@@ -129,9 +132,9 @@ export const NAME_TABLE_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
   {
     id: "R-nt-08",
-    text: "verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。構造で確かめるなら kind を structural にし、reason に理由、checks に構造の検査を並べ、検査ごとに合う種類の行を所属させる。宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に根拠にした文書の制約 ID（文書の制約 ID の一覧にあるものだけ）を書く。使わない欄は null か空の並びにする。",
-    why: "確かめ方を所属と組で固定し、書けない要件は理由と制約 ID つきで持ち越す（§1.2・C1）",
-    since: "Issue #507",
+    text: "verification は要件の確かめ方で、種類ごとに書く欄が決まる（fixed-test は kind だけ、structural は kind・reason・checks、unresolved は kind・reason・constraintIds）。固定した試験で確かめるなら kind を fixed-test にする。構造で確かめるなら kind を structural にし、reason に理由、checks に構造の検査を並べ、検査ごとに合う種類の行を所属させる。view-shows を checks に書くなら、画面と同じ entity の項目か計算を所属させる。宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に根拠にした文書の制約 ID（文書の制約 ID の一覧にあるものだけ）を書く。",
+    why: "確かめ方を所属と組で固定し、書けない要件は理由と制約 ID つきで持ち越す（§1.2・C1）。種類ごとの枝の schema と同じ形で書かせ、理由を null で返させない（#528）",
+    since: "Issue #507（種類ごとの欄と view-shows の所属は #528 で改めた）",
   },
   {
     id: "R-nt-09",
@@ -150,9 +153,75 @@ export const NAME_TABLE_RULE_DEFINITIONS: readonly RuleDefinition[] = [
 /** T1 に足す規則（定義の `text` から組む） */
 export const NAME_TABLE_RULES: readonly string[] = ruleTexts(NAME_TABLE_RULE_DEFINITIONS);
 
-const nullable = (values: readonly string[]) => ({ type: ["string", "null"], enum: [...values, null] });
+/** 欄をすべて必須にした strict の object（枝の中の写像） */
+const strictObject = <P extends Record<string, unknown>>(properties: P) =>
+  ({
+    type: "object",
+    additionalProperties: false,
+    required: Object.keys(properties) as (keyof P & string)[],
+    properties,
+  }) as const;
 
-/** T1 の JSON Schema（構造化出力。strict の規則に合わせる。要件ごとの分類 `nature` は必須） */
+const oneKind = <K extends string>(kind: K) => ({ type: "string", enum: [kind] }) as const;
+
+/** 行の種類ごとの `type` の schema（枝に要る欄は非 null の必須。entity は null） */
+const ROW_TYPE_SCHEMAS = {
+  entity: { type: "null" },
+  field: strictObject({ fieldType: { type: "string", enum: [...FIELD_ROW_TYPES] } }),
+  computation: strictObject({
+    valueType: { type: "string", enum: [...COMPUTATION_VALUE_TYPES] },
+    scope: { type: "string", enum: [...COMPUTATION_SCOPES] },
+    form: { type: "string", enum: [...COMPUTATION_FORMS] },
+  }),
+  operation: strictObject({ action: { type: "string", enum: [...ACTION_KINDS] }, hasWhen: { type: "boolean" } }),
+  screen: strictObject({ view: { type: "string", enum: [...VIEW_TYPES] } }),
+} as const satisfies Record<NameTableKind, unknown>;
+
+/** 行の枝 1 つ（`kind` を 1 値の enum にして `type` の形と結ぶ。ほかの欄は全枝で同じ定義） */
+const rowBranch = <K extends NameTableKind>(kind: K) =>
+  strictObject({
+    id: { type: "string", description: "表の ID（表の中で一意）" },
+    kind: oneKind(kind),
+    entity: { type: ["string", "null"], description: "所属する entity の行の id（持たない行は null）" },
+    name: { type: "string", description: "宣言で使う名前" },
+    role: { type: "string", description: "役割の説明（1 文）" },
+    source: strictObject({
+      copy: { type: "string", description: "出典の要件の、要件の一覧の copy をそのまま写したもの" },
+      quote: { type: "string", description: "出典の要件の text か requestQuote の一部をそのまま写した引用" },
+    }),
+    type: ROW_TYPE_SCHEMAS[kind],
+    options: { type: ["array", "null"], items: { type: "string" } },
+    groupBy: {
+      type: ["object", "null"],
+      additionalProperties: false,
+      required: ["kind", "field"],
+      properties: {
+        kind: { type: "string", enum: [...NAME_TABLE_GROUP_BY_KINDS] },
+        field: { type: "string", description: "見出しの元の項目の id" },
+      },
+    },
+    refEntity: { type: ["string", "null"], description: "参照先の entity の id" },
+  });
+
+/** 確かめ方の種類ごとの枝（`kind` は 1 値の enum。枝に要る欄だけを持つ） */
+const VERIFICATION_BRANCHES = [
+  strictObject({ kind: oneKind("fixed-test") }),
+  strictObject({
+    kind: oneKind("structural"),
+    reason: { type: "string" },
+    checks: { type: "array", items: { type: "string", enum: [...STRUCTURAL_ASSERTIONS] } },
+  }),
+  strictObject({
+    kind: oneKind("unresolved"),
+    reason: { type: "string" },
+    constraintIds: { type: "array", items: { type: "string" } },
+  }),
+] as const;
+
+/**
+ * T1 の JSON Schema（構造化出力。strict の規則に合わせる。要件ごとの分類 `nature` は必須）。行と確かめ方は
+ * 種類ごとの枝の `anyOf`（#528）。
+ */
 export const NAME_TABLE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -160,52 +229,7 @@ export const NAME_TABLE_SCHEMA = {
   properties: {
     rows: {
       type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["id", "kind", "entity", "name", "role", "source", "type", "options", "groupBy", "refEntity"],
-        properties: {
-          id: { type: "string", description: "表の ID（表の中で一意）" },
-          kind: { type: "string", enum: [...NAME_TABLE_KINDS] },
-          entity: { type: ["string", "null"], description: "所属する entity の行の id（持たない行は null）" },
-          name: { type: "string", description: "宣言で使う名前" },
-          role: { type: "string", description: "役割の説明（1 文）" },
-          source: {
-            type: "object",
-            additionalProperties: false,
-            required: ["copy", "quote"],
-            properties: {
-              copy: { type: "string", description: "出典の要件の、要件の一覧の copy をそのまま写したもの" },
-              quote: { type: "string", description: "出典の要件の text か requestQuote の一部をそのまま写した引用" },
-            },
-          },
-          type: {
-            type: "object",
-            additionalProperties: false,
-            required: ["fieldType", "valueType", "scope", "form", "action", "hasWhen", "view"],
-            properties: {
-              fieldType: nullable(FIELD_ROW_TYPES),
-              valueType: nullable(COMPUTATION_VALUE_TYPES),
-              scope: nullable(COMPUTATION_SCOPES),
-              form: nullable(COMPUTATION_FORMS),
-              action: nullable(ACTION_KINDS),
-              hasWhen: { type: ["boolean", "null"] },
-              view: nullable(VIEW_TYPES),
-            },
-          },
-          options: { type: ["array", "null"], items: { type: "string" } },
-          groupBy: {
-            type: ["object", "null"],
-            additionalProperties: false,
-            required: ["kind", "field"],
-            properties: {
-              kind: { type: "string", enum: [...NAME_TABLE_GROUP_BY_KINDS] },
-              field: { type: "string", description: "見出しの元の項目の id" },
-            },
-          },
-          refEntity: { type: ["string", "null"], description: "参照先の entity の id" },
-        },
-      },
+      items: { anyOf: NAME_TABLE_KINDS.map((kind) => rowBranch(kind)) },
     },
     requirements: {
       type: "array",
@@ -228,17 +252,7 @@ export const NAME_TABLE_SCHEMA = {
               },
             },
           },
-          verification: {
-            type: "object",
-            additionalProperties: false,
-            required: ["kind", "reason", "checks", "constraintIds"],
-            properties: {
-              kind: { type: "string", enum: ["fixed-test", "structural", "unresolved"] },
-              reason: { type: ["string", "null"] },
-              checks: { type: "array", items: { type: "string", enum: [...STRUCTURAL_ASSERTIONS] } },
-              constraintIds: { type: "array", items: { type: "string" } },
-            },
-          },
+          verification: { anyOf: VERIFICATION_BRANCHES },
           nature: { type: "string", enum: [...REQUIREMENT_NATURES] },
         },
       },
@@ -307,7 +321,7 @@ export function checkNameTableResponseShape(output: unknown): ShapeCheck<Record<
   return problems.length > 0 ? { ok: false, problems } : { ok: true, value: output };
 }
 
-/** 行の種類ごとに、応答の `type` の写像から使う欄 */
+/** 行の種類ごとに、応答の `type` の写像から使う欄（枝の欄） */
 const TYPE_KEYS_BY_KIND: Readonly<Record<string, readonly string[]>> = {
   entity: [],
   field: ["fieldType"],
@@ -315,40 +329,89 @@ const TYPE_KEYS_BY_KIND: Readonly<Record<string, readonly string[]>> = {
   operation: ["action", "hasWhen"],
   screen: ["view"],
 };
+/** 前の平らな写像（7 欄）の欄。全部を持つ写像だけを前の形として受ける */
 const TYPE_KEYS = ["fieldType", "valueType", "scope", "form", "action", "hasWhen", "view"] as const;
 
+/** 確かめ方の種類ごとに、枝の欄（`kind` を除く） */
+const VERIFICATION_KEYS_BY_KIND: Readonly<Record<string, readonly string[]>> = {
+  "fixed-test": [],
+  structural: ["reason", "checks"],
+  unresolved: ["reason", "constraintIds"],
+};
+/** 前の写像（確かめ方の欄を全部持つ形）の欄 */
+const VERIFICATION_KEYS = ["reason", "checks", "constraintIds"] as const;
+
+const hasAllKeys = (value: Record<string, unknown>, keys: readonly string[]) => keys.every((key) => key in value);
+const isNullOrEmpty = (value: unknown) => value === null || (Array.isArray(value) && value.length === 0);
+
+/** 行の `type` を A1 の型へ写す。枝（または前の形）に合わない欄があれば問題に足す */
+function convertRowType(item: Record<string, unknown>, field: string, problems: Problem[]): Record<string, unknown> {
+  const kind = item["kind"];
+  const type = item["type"];
+  const used = typeof kind === "string" ? TYPE_KEYS_BY_KIND[kind] : undefined;
+  if (used === undefined || !isRecord(type)) return item;
+  if (hasAllKeys(type, TYPE_KEYS)) {
+    // 前の平らな写像：種類に合わない欄は null なら受ける
+    const extra = TYPE_KEYS.some((key) => !used.includes(key) && type[key] !== undefined && type[key] !== null);
+    if (extra) problems.push({ field, message: "行の種類に合わない型の欄が null でない" });
+  } else if (Object.keys(type).some((key) => !used.includes(key))) {
+    // 枝の写像：枝に無い欄は null でも落とす
+    problems.push({ field, message: "行の種類の枝に無い型の欄がある" });
+  }
+  let converted: unknown;
+  switch (kind) {
+    case "entity":
+      converted = null;
+      break;
+    case "field":
+      converted = type["fieldType"];
+      break;
+    default:
+      converted = Object.fromEntries(used.map((key) => [key, type[key]]));
+  }
+  return { ...item, type: converted };
+}
+
 /**
- * 応答の `type`（欄を並べた写像）を、行の種類に合う A1 の型へ写す。種類に合わない欄が null でなければ
- * 問題に足す。`type` が写像でない（すでに A1 の形の文字列・null）・種類が知らない値のときは写さない
- * （A1 の検査が形の落ちにする）。
+ * 確かめ方を A1 の下書きの形（種類の枝の欄だけ）へ写す。枝の形で枝に無い欄があれば null・空の並びでも、
+ * 前の形（`reason`・`checks`・`constraintIds` を全部持つ写像）で使わない欄が null・空の並びでなければ、
+ * 問題に足す。写像でない・種類が知らない値のときは写さない（A1 の検査が形の落ちにする）。
+ */
+function convertVerification(item: Record<string, unknown>, field: string, problems: Problem[]): Record<string, unknown> {
+  const verification = item["verification"];
+  if (!isRecord(verification)) return item;
+  const kind = verification["kind"];
+  const used = typeof kind === "string" ? VERIFICATION_KEYS_BY_KIND[kind] : undefined;
+  if (used === undefined) return item;
+  const unused = Object.keys(verification).filter((key) => key !== "kind" && !used.includes(key));
+  if (hasAllKeys(verification, VERIFICATION_KEYS)) {
+    if (unused.some((key) => !isNullOrEmpty(verification[key]))) {
+      problems.push({ field, message: "確かめ方の種類に合わない欄が null か空の並びでない" });
+    }
+  } else if (unused.length > 0) {
+    problems.push({ field, message: "確かめ方の種類の枝に無い欄がある" });
+  }
+  return { ...item, verification: Object.fromEntries(["kind", ...used].map((key) => [key, verification[key]])) };
+}
+
+/**
+ * 応答（枝の形。前の平らな写像も受ける）を、A1 の下書きの形へ写す。行の `type` は種類に合う A1 の型へ
+ * 写し、枝に無い欄（前の形では、種類に合わない null でない欄）があれば問題に足す。`type` が写像でない
+ * （すでに A1 の形の文字列・null）・種類が知らない値のときは写さない（A1 の検査が形の落ちにする）。
+ * 確かめ方も種類の枝の欄だけへ写す（`convertVerification`）。
  */
 export function toNameTableDraftValue(output: Record<string, unknown>): {
   readonly value: Record<string, unknown>;
   readonly problems: readonly Problem[];
 } {
   const problems: Problem[] = [];
-  const rows = (output["rows"] as readonly unknown[]).map((item, index) => {
-    if (!isRecord(item)) return item;
-    const kind = item["kind"];
-    const type = item["type"];
-    const used = typeof kind === "string" ? TYPE_KEYS_BY_KIND[kind] : undefined;
-    if (used === undefined || !isRecord(type)) return item;
-    const extra = TYPE_KEYS.some((key) => !used.includes(key) && type[key] !== undefined && type[key] !== null);
-    if (extra) problems.push({ field: `rows[${index}].type`, message: "行の種類に合わない型の欄が null でない" });
-    let converted: unknown;
-    switch (kind) {
-      case "entity":
-        converted = null;
-        break;
-      case "field":
-        converted = type["fieldType"];
-        break;
-      default:
-        converted = Object.fromEntries(used.map((key) => [key, type[key]]));
-    }
-    return { ...item, type: converted };
-  });
-  return { value: { ...output, rows }, problems };
+  const rows = (output["rows"] as readonly unknown[]).map((item, index) =>
+    isRecord(item) ? convertRowType(item, `rows[${index}].type`, problems) : item,
+  );
+  const requirements = (output["requirements"] as readonly unknown[]).map((item, index) =>
+    isRecord(item) ? convertVerification(item, `requirements[${index}].verification`, problems) : item,
+  );
+  return { value: { ...output, rows, requirements }, problems };
 }
 
 /** 確定した仕様から、要件の Plan の `kind` を外す（分類を要件の文から作らせる。§1.1） */
