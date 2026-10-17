@@ -3203,7 +3203,7 @@ const mm539 = (testId, detail) => ({ testId, detail });
 const ur539 = (test_id, detail) => ({ test_id, detail });
 const ver539 = (unresolved, over = {}) => ({ test_mismatches: 0, test_unresolved: unresolved.length, partial_reasons: { unresolved_tests: unresolved }, ...over });
 
-test("#539 読取元と重複：(a) 両方に同じ試験 ID・同じ理由は 1 件、(b) 片側だけはそれぞれ 1 件（鍵の名前 testId／test_id の違いを吸収）、(c) 同じ ID で理由の文が違えば 1 件＋inconsistent 1、(d) 両方読めなければ欠測", () => {
+test("#539 読取元と重複：(a) 両方に同じ試験 ID・同じ理由は 1 件、(b) 片側だけはそれぞれ 1 件（鍵の名前 testId／test_id の違いを吸収）、(c) 同じ ID で理由の文が違えば 1 件＋inconsistent 1（不一致と未解決の種類をまたいでも同じ）、(d) 両方読めなければ欠測", () => {
   const D1 = "入力が写像（object）でない", D2 = "評価の方法の表で未対応である（対象 entity × 操作 screen）";
   // (a)
   const a = testFindingsOf({ mismatches: [], unresolved: [mm539("T1", D1)] }, ver539([ur539("T1", D1)]));
@@ -3219,9 +3219,18 @@ test("#539 読取元と重複：(a) 両方に同じ試験 ID・同じ理由は 1
   // (c) 同じ試験 ID で理由の文が違う：1 件（正本 tests の文）と inconsistent 1。黙って別件にしない
   const c = testFindingsOf({ mismatches: [], unresolved: [mm539("T1", D1)] }, ver539([ur539("T1", D2)]));
   assert.deepEqual([c.unresolved, c.inconsistent, c.findings[0].detail, c.findings[0].source], [1, 1, D1, "both"]);
-  // 不一致（mismatches）は tests だけにある。同じ試験 ID の未解決とは別の種類として数える
-  const m = testFindingsOf({ mismatches: [mm539("T1", "計算 c1 が期待と違う（期待 2、実際 3）")], unresolved: [mm539("T1", D1)] }, ver539([ur539("T1", D1)]));
-  assert.deepEqual([m.mismatches, m.unresolved, m.classes["needs-human"], m.classes["test-defect"]], [1, 1, 1, 1]);
+  // 種類をまたぐ同じ試験 ID も 1 件（鍵は試験 ID だけ）。正本 tests の種類（不一致）と文を保ち、verification は補完と食い違いの確認に使う。分類の合計は余分に増えない
+  const DM = "計算 c1 が期待と違う（期待 2、実際 3）";
+  const sum539 = (r) => Object.values(r.classes).reduce((x, y) => x + y, 0);
+  const ms = testFindingsOf({ mismatches: [mm539("T1", DM)], unresolved: [] }, ver539([ur539("T1", DM)]));
+  assert.deepEqual([ms.mismatches, ms.unresolved, ms.findings.length, ms.inconsistent, sum539(ms), ms.classes["needs-human"]], [1, 0, 1, 0, 1, 1], "種類をまたぐ同じ ID・同じ理由");
+  assert.deepEqual(ms.findings[0], { kind: "mismatch", test_id: "T1", detail: DM, class: "needs-human", source: "both" });
+  const md = testFindingsOf({ mismatches: [mm539("T1", DM)], unresolved: [] }, ver539([ur539("T1", D1)]));
+  assert.deepEqual([md.mismatches, md.unresolved, md.findings.length, md.inconsistent, sum539(md), md.classes["needs-human"], md.classes["test-defect"]], [1, 0, 1, 1, 1, 1, 0], "種類をまたぐ同じ ID・違う理由");
+  assert.deepEqual([md.findings[0].kind, md.findings[0].detail, md.findings[0].source], ["mismatch", DM, "both"]);
+  // tests の不一致と未解決に同じ ID があり、verification にもある：1 件（先に読んだ不一致）。食い違いは試験 ID ごとに 1
+  const m = testFindingsOf({ mismatches: [mm539("T1", DM)], unresolved: [mm539("T1", D1)] }, ver539([ur539("T1", D1)]));
+  assert.deepEqual([m.mismatches, m.unresolved, m.findings.length, m.inconsistent, sum539(m), m.classes["needs-human"], m.classes["test-defect"]], [1, 0, 1, 1, 1, 1, 0]);
   // (d) 両方読めない（無い・形が違う）→ 欠測。要素の形が違うものは malformed で分類しない
   for (const [t, v] of [[null, null], ["x", { partial_reasons: {} }], [{ mismatches: [] }, { partial_reasons: { unresolved_tests: "x" } }]]) assert.deepEqual([testFindingsOf(t, v).status, testFindingsOf(t, v).findings.length], ["missing", 0]);
   const bad = testFindingsOf({ mismatches: [{ testId: 1, detail: D1 }], unresolved: [{ testId: "T1" }] }, null);

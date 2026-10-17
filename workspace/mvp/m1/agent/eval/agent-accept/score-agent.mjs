@@ -1123,30 +1123,31 @@ export const FINDING_SOURCES = ["both", "tests", "verification", "missing"];
 /**
  * 本 1 つの不一致・未解決の試験（README §5.10.2）。正本は試験の結果の記録（tests の mismatches と unresolved。鍵 testId）。
  * 検証の記録の partial_reasons.unresolved_tests（鍵 test_id）は同じ最終結果の写しとして、未解決の試験 ID で突き合わせる：
- * 同じ試験・同じ理由は 1 件、片側だけの試験はその側で補う、同じ試験 ID で理由の文が違えば 1 件（正本の文）として数え inconsistent を 1 足す。
- * 同じ記録の中で同じ試験 ID が重なったときも同じ規則。要素の形が違う（試験 ID か detail が文字列でない）ものは malformed に数え、分類しない
+ * 鍵は試験 ID だけ（種類をまたぐ）。同じ試験・同じ理由は 1 件、片側だけの試験はその側で補う、同じ試験 ID で理由の文が違えば 1 件（正本の種類と文）として数え、
+ * その試験 ID ごとに inconsistent を 1 足す。tests の不一致と未解決に同じ試験 ID があるとき・同じ記録の中で重なったときも同じ規則（先に読んだ不一致を正本にする）。
+ * 要素の形が違う（試験 ID か detail が文字列でない）ものは malformed に数え、分類しない
  */
 export function testFindingsOf(tests, verification) {
   const testsOk = isObj(tests) && Array.isArray(tests.mismatches) && Array.isArray(tests.unresolved);
   const verOk = isObj(verification) && isObj(verification.partial_reasons) && Array.isArray(verification.partial_reasons.unresolved_tests);
   const status = testsOk && verOk ? "both" : testsOk ? "tests" : verOk ? "verification" : "missing";
   const findings = [];
-  let inconsistent = 0, malformed = 0;
-  const byKey = new Map();
+  let malformed = 0;
+  const byId = new Map(), differs = new Set();
   const add = (kind, list, idKey, source) => {
     for (const x of list) {
       if (!isObj(x) || typeof x[idKey] !== "string" || typeof x.detail !== "string") { malformed += 1; continue; }
-      const key = `${kind}\0${x[idKey]}`, prior = byKey.get(key);
-      if (prior === undefined) { const f = { kind, test_id: x[idKey], detail: x.detail, class: classifyDetail(x.detail), source }; byKey.set(key, f); findings.push(f); continue; }
+      const prior = byId.get(x[idKey]);
+      if (prior === undefined) { const f = { kind, test_id: x[idKey], detail: x.detail, class: classifyDetail(x.detail), source }; byId.set(x[idKey], f); findings.push(f); continue; }
       if (prior.source !== source && prior.source !== "both") prior.source = "both";
-      if (prior.detail !== x.detail) inconsistent += 1;
+      if (prior.detail !== x.detail) differs.add(x[idKey]);
     }
   };
   if (testsOk) { add("mismatch", tests.mismatches, "testId", "tests"); add("unresolved", tests.unresolved, "testId", "tests"); }
   if (verOk) add("unresolved", verification.partial_reasons.unresolved_tests, "test_id", "verification");
   const classes = zeros(FINDING_CLASSES);
   for (const f of findings) classes[f.class] += 1;
-  return { status, mismatches: findings.filter((f) => f.kind === "mismatch").length, unresolved: findings.filter((f) => f.kind === "unresolved").length, inconsistent, malformed, classes, findings: status === "missing" ? [] : findings };
+  return { status, mismatches: findings.filter((f) => f.kind === "mismatch").length, unresolved: findings.filter((f) => f.kind === "unresolved").length, inconsistent: differs.size, malformed, classes, findings: status === "missing" ? [] : findings };
 }
 /** 実行した本ごとの分類と、合計（実行した本・読めた本・欠測・記録の読みの状態ごとの本数・件数・分類ごとの件数）。facts の tests・verification を読む */
 export function testFindingsSummary(facts) {
