@@ -1,0 +1,4361 @@
+{
+  "about": "v1.1α の比較元のバイトの記録の経路の定義（Issue #546）。確定した仕様・応答・偽物の判定の答えはすべて合成（抽象的な題材。凍結した組・本物の応答の写しは使わない）。手で直さない。",
+  "base": {
+    "source": "項目を題名・金額・日付・区分・担当者つきで登録できる。担当者の名前と担当する項目の数、項目の題名を一覧で見られる。金額が 0 より大きい項目だけを締められる。区分ごとの件数と月ごとの金額の合計、全体の率をまとめの画面で見られる。",
+    "documents": [
+      {
+        "name": "契約",
+        "text": "# 契約\n\n### 外部への通知\n\n宣言は外部の仕組みへ通知を送れない。\n"
+      }
+    ],
+    "budgetUsd": 10,
+    "rates": {
+      "inputPerToken": 0.000001,
+      "cachedInputPerToken": 5e-7,
+      "outputPerToken": 0.000002
+    },
+    "deadline": 60000,
+    "runId": "run-test",
+    "storageUnit": "test-unit",
+    "builder": "musunest-factory",
+    "model": "gpt-test",
+    "effort": "high",
+    "promptVersion": "v1.1a",
+    "contractVersion": "v0.2",
+    "specEngineVersion": "0.0.0",
+    "factoryVersion": "0.0.0"
+  },
+  "plan": {
+    "schema_version": "musunest.plan-spec/v1",
+    "plan_id": "plan-v11a-baseline",
+    "revision": 1,
+    "vocabulary_version": "v1",
+    "inputs": [
+      {
+        "id": "in-1",
+        "kind": "source",
+        "text": "項目を題名・金額・日付・区分・担当者つきで登録できる。担当者の名前と担当する項目の数、項目の題名を一覧で見られる。金額が 0 より大きい項目だけを締められる。区分ごとの件数と月ごとの金額の合計、全体の率をまとめの画面で見られる。"
+      }
+    ],
+    "requirements": [
+      {
+        "id": "R1",
+        "text": "項目を題名・金額・日付・区分・担当者つきで登録できる。",
+        "kind": "constraining",
+        "origin": {
+          "input_id": "in-1",
+          "quote": "項目を題名・金額・日付・区分・担当者つきで登録できる。"
+        },
+        "parts": [
+          {
+            "id": "R1-p1",
+            "text": "項目を題名・金額・日付・区分・担当者つきで登録できる。",
+            "disposition": "met"
+          }
+        ]
+      },
+      {
+        "id": "R2",
+        "text": "担当者の名前と担当する項目の数、項目の題名を一覧で見られる。",
+        "kind": "constraining",
+        "origin": {
+          "input_id": "in-1",
+          "quote": "担当者の名前と担当する項目の数、項目の題名を一覧で見られる。"
+        },
+        "parts": [
+          {
+            "id": "R2-p1",
+            "text": "担当者の名前と担当する項目の数、項目の題名を一覧で見られる。",
+            "disposition": "met"
+          }
+        ]
+      },
+      {
+        "id": "R3",
+        "text": "金額が 0 より大きい項目だけを締められる。",
+        "kind": "constraining",
+        "origin": {
+          "input_id": "in-1",
+          "quote": "金額が 0 より大きい項目だけを締められる。"
+        },
+        "parts": [
+          {
+            "id": "R3-p1",
+            "text": "金額が 0 より大きい項目だけを締められる。",
+            "disposition": "met"
+          }
+        ]
+      },
+      {
+        "id": "R4",
+        "text": "区分ごとの件数と月ごとの金額の合計、全体の率をまとめの画面で見られる。",
+        "kind": "constraining",
+        "origin": {
+          "input_id": "in-1",
+          "quote": "区分ごとの件数と月ごとの金額の合計、全体の率をまとめの画面で見られる。"
+        },
+        "parts": [
+          {
+            "id": "R4-p1",
+            "text": "区分ごとの件数と月ごとの金額の合計、全体の率をまとめの画面で見られる。",
+            "disposition": "met"
+          }
+        ]
+      }
+    ],
+    "open_issues": [],
+    "decisions": [],
+    "accepted_unwritable": [],
+    "confirmation": {
+      "sha256": "dd0d47198b6ab0c7f950484252ca408eb03fa2e1d5b4de381a530b16ac81e7c5",
+      "confirmed_at": "2026-09-16T12:00:00+09:00",
+      "confirmed_by": "tester"
+    }
+  },
+  "scenarios": [
+    {
+      "name": "full",
+      "recorded": [
+        {
+          "kind": "structured",
+          "output": {
+            "rows": [
+              {
+                "id": "e.member",
+                "kind": "entity",
+                "entity": null,
+                "name": "member",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当者"
+                },
+                "type": null,
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "e.item",
+                "kind": "entity",
+                "entity": null,
+                "name": "item",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "項目"
+                },
+                "type": null,
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.member.title",
+                "kind": "field",
+                "entity": "e.member",
+                "name": "title",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当者の名前"
+                },
+                "type": "string",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.title",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "title",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "題名"
+                },
+                "type": "string",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.owner",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "owner",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "担当者"
+                },
+                "type": "ref",
+                "options": null,
+                "groupBy": null,
+                "refEntity": "e.member"
+              },
+              {
+                "id": "f.item.amount",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "amount",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "金額"
+                },
+                "type": "number",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.day",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "day",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "日付"
+                },
+                "type": "date",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.kind",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "kind",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "区分"
+                },
+                "type": "enum",
+                "options": [
+                  "alpha",
+                  "beta"
+                ],
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.itemCount",
+                "kind": "computation",
+                "entity": "e.member",
+                "name": "itemCount",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当する項目の数"
+                },
+                "type": {
+                  "valueType": "number",
+                  "scope": "row",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.rate",
+                "kind": "computation",
+                "entity": null,
+                "name": "rate",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "全体の率"
+                },
+                "type": {
+                  "valueType": "number",
+                  "scope": "app",
+                  "form": "expression"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.byKind",
+                "kind": "computation",
+                "entity": null,
+                "name": "byKind",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "区分ごとの件数"
+                },
+                "type": {
+                  "valueType": "groups",
+                  "scope": "groups",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": {
+                  "kind": "enum",
+                  "field": "f.item.kind"
+                },
+                "refEntity": null
+              },
+              {
+                "id": "c.byMonth",
+                "kind": "computation",
+                "entity": null,
+                "name": "byMonth",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "月ごとの金額の合計"
+                },
+                "type": {
+                  "valueType": "groups",
+                  "scope": "groups",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": {
+                  "kind": "month",
+                  "field": "f.item.day"
+                },
+                "refEntity": null
+              },
+              {
+                "id": "o.addItem",
+                "kind": "operation",
+                "entity": "e.item",
+                "name": "addItem",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "登録できる"
+                },
+                "type": {
+                  "action": "create",
+                  "hasWhen": false
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "o.closeItem",
+                "kind": "operation",
+                "entity": "e.item",
+                "name": "closeItem",
+                "role": "要件 R3 が使う対象",
+                "source": {
+                  "copy": "金額が 0 より",
+                  "quote": "締められる"
+                },
+                "type": {
+                  "action": "update",
+                  "hasWhen": true
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.items",
+                "kind": "screen",
+                "entity": "e.item",
+                "name": "items",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "一覧で見られる"
+                },
+                "type": {
+                  "view": "table"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.members",
+                "kind": "screen",
+                "entity": "e.member",
+                "name": "members",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "一覧で見られる"
+                },
+                "type": {
+                  "view": "table"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.overview",
+                "kind": "screen",
+                "entity": null,
+                "name": "overview",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "まとめの画面"
+                },
+                "type": {
+                  "view": "dashboard"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              }
+            ],
+            "requirements": [
+              {
+                "copy": "項目を題名・金額",
+                "roles": [
+                  {
+                    "id": "f.item.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.amount",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.day",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.kind",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.owner",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "o.addItem",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              },
+              {
+                "copy": "担当者の名前と担",
+                "roles": [
+                  {
+                    "id": "f.member.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.itemCount",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.members",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.items",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "structural",
+                  "reason": "画面に出ることだけを求める",
+                  "checks": [
+                    "view-shows"
+                  ]
+                },
+                "nature": "existence-only"
+              },
+              {
+                "copy": "金額が 0 より",
+                "roles": [
+                  {
+                    "id": "o.closeItem",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.amount",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              },
+              {
+                "copy": "区分ごとの件数と",
+                "roles": [
+                  {
+                    "id": "c.byKind",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.byMonth",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.rate",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.overview",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "judgments": [
+              {
+                "requirementId": "R1",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R2",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R3",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R4",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "classifications": [
+              {
+                "requirementId": "R1",
+                "nature": "ruled"
+              },
+              {
+                "requirementId": "R2",
+                "nature": "existence-only"
+              },
+              {
+                "requirementId": "R3",
+                "nature": "ruled"
+              },
+              {
+                "requirementId": "R4",
+                "nature": "ruled"
+              }
+            ],
+            "tests": [
+              {
+                "id": "r1-normal",
+                "target": {
+                  "requirementId": "R1",
+                  "kind": "field",
+                  "roleId": "f.item.amount"
+                },
+                "kind": "normal",
+                "operation": "validate",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":5}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "validation"
+              },
+              {
+                "id": "r1-abnormal",
+                "target": {
+                  "requirementId": "R1",
+                  "kind": "field",
+                  "roleId": "f.item.amount"
+                },
+                "kind": "abnormal",
+                "operation": "validate",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":-1}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "error",
+                  "value": null,
+                  "code": "E_INVALID"
+                },
+                "assertion": null,
+                "observes": "validation"
+              },
+              {
+                "id": "r1-boundary",
+                "target": {
+                  "requirementId": "R1",
+                  "kind": "field",
+                  "roleId": "f.item.amount"
+                },
+                "kind": "boundary",
+                "operation": "validate",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":1}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "validation"
+              },
+              {
+                "id": "r2-shows",
+                "target": {
+                  "requirementId": "R2",
+                  "kind": "screen",
+                  "roleId": "s.members"
+                },
+                "kind": "normal",
+                "operation": "structure",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": {
+                  "check": "view-shows",
+                  "expected": null,
+                  "refEntity": null,
+                  "role": "f.member.title"
+                },
+                "observes": "view-structure"
+              },
+              {
+                "id": "r3-normal",
+                "target": {
+                  "requirementId": "R3",
+                  "kind": "operation",
+                  "roleId": "o.closeItem"
+                },
+                "kind": "normal",
+                "operation": "action",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":3}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "when"
+              },
+              {
+                "id": "r3-abnormal",
+                "target": {
+                  "requirementId": "R3",
+                  "kind": "operation",
+                  "roleId": "o.closeItem"
+                },
+                "kind": "abnormal",
+                "operation": "action",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":-1}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "false",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "when"
+              },
+              {
+                "id": "r3-boundary",
+                "target": {
+                  "requirementId": "R3",
+                  "kind": "operation",
+                  "roleId": "o.closeItem"
+                },
+                "kind": "boundary",
+                "operation": "action",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":1}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "when"
+              },
+              {
+                "id": "r4-normal",
+                "target": {
+                  "requirementId": "R4",
+                  "kind": "computation",
+                  "roleId": "c.rate"
+                },
+                "kind": "normal",
+                "operation": "compute",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-1",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-2",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-3",
+                    "values": "{\"f.item.amount\":1}"
+                  }
+                ],
+                "expected": {
+                  "kind": "ok",
+                  "value": "6",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "value"
+              },
+              {
+                "id": "r4-abnormal",
+                "target": {
+                  "requirementId": "R4",
+                  "kind": "computation",
+                  "roleId": "c.rate"
+                },
+                "kind": "abnormal",
+                "operation": "compute",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-1",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-2",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-3",
+                    "values": "{\"f.item.amount\":1}"
+                  }
+                ],
+                "expected": {
+                  "kind": "ok",
+                  "value": "6",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "value"
+              },
+              {
+                "id": "r4-boundary",
+                "target": {
+                  "requirementId": "R4",
+                  "kind": "computation",
+                  "roleId": "c.rate"
+                },
+                "kind": "boundary",
+                "operation": "compute",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-1",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-2",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-3",
+                    "values": "{\"f.item.amount\":1}"
+                  }
+                ],
+                "expected": {
+                  "kind": "ok",
+                  "value": "6",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "value"
+              },
+              {
+                "id": "r4-empty-aggregate",
+                "target": {
+                  "requirementId": "R4",
+                  "kind": "computation",
+                  "roleId": "c.rate"
+                },
+                "kind": "normal",
+                "operation": "compute",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": [
+                    "e.item"
+                  ]
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "0",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "value"
+              },
+              {
+                "id": "r3-operation-state",
+                "target": {
+                  "requirementId": "R3",
+                  "kind": "operation",
+                  "roleId": "o.closeItem"
+                },
+                "kind": "normal",
+                "operation": "action",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":3}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "when"
+              },
+              {
+                "id": "r1-option-validate",
+                "target": {
+                  "requirementId": "R1",
+                  "kind": "field",
+                  "roleId": "f.item.amount"
+                },
+                "kind": "normal",
+                "operation": "validate",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":4}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "validation"
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "declaration": "entities:\n  - name: member\n    fields:\n      title:\n        type: string\n  - name: item\n    fields:\n      title:\n        type: string\n      owner:\n        type: ref\n        to: member\n      amount:\n        type: number\n      day:\n        type: date\n      kind:\n        type: enum\n        options:\n          alpha: アルファ\n          beta: ベータ\ncomputed:\n  - name: itemCount\n    entity: member\n    aggregate:\n      count: item\n      where:\n        owner: this\n    type: number\n  - name: base\n    scope: app\n    aggregate:\n      sum: item.amount\n    type: number\n  - name: rate\n    scope: app\n    expression: base * 2\n    type: number\n  - name: byKind\n    aggregate:\n      count: item\n      groupBy: item.kind\n    type: groups\n  - name: byMonth\n    aggregate:\n      sum: item.amount\n      groupBy:\n        month: item.day\n      last: 6\n    type: groups\nviews:\n  - name: items\n    type: table\n    entity: item\n    show: [title, owner, amount, day, kind]\n  - name: members\n    type: table\n    entity: member\n    show: [title, itemCount]\n  - name: overview\n    type: dashboard\n    widgets:\n      - type: number\n        value: rate\n      - type: number\n        value: base\n      - type: bar\n        value: byMonth\n      - type: pie\n        value: byKind\nactions:\n  - name: addItem\n    entity: item\n  - name: closeItem\n    entity: item\n    kind: update\n    set:\n      kind: beta\n    when: amount > 0\nvalidations:\n  - name: amount\n    entity: item\n    expression: amount > 0\npermissions:\n  - name: read\n    subject: minIdentity\n  - name: write\n    subject: minIdentity\nminIdentity:\n  mode: anonymous\n"
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "judgments": [
+              {
+                "requirementId": "R1",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R2",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R3",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R4",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        }
+      ],
+      "judge": {
+        "default": 0.9
+      }
+    },
+    {
+      "name": "name-table-stop",
+      "recorded": [
+        {
+          "kind": "structured",
+          "output": {
+            "rows": [
+              {
+                "id": "e.member",
+                "kind": "entity",
+                "entity": null,
+                "name": "member",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当者"
+                },
+                "type": null,
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "e.item",
+                "kind": "entity",
+                "entity": null,
+                "name": "item",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "項目"
+                },
+                "type": null,
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.member.title",
+                "kind": "field",
+                "entity": "e.member",
+                "name": "title",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当者の名前"
+                },
+                "type": "string",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.title",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "title",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "題名"
+                },
+                "type": "string",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.owner",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "owner",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "担当者"
+                },
+                "type": "ref",
+                "options": null,
+                "groupBy": null,
+                "refEntity": "e.member"
+              },
+              {
+                "id": "f.item.amount",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "amount",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "金額"
+                },
+                "type": "number",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.day",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "day",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "日付"
+                },
+                "type": "date",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.kind",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "kind",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "区分"
+                },
+                "type": "enum",
+                "options": [
+                  "alpha",
+                  "beta"
+                ],
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.itemCount",
+                "kind": "computation",
+                "entity": "e.member",
+                "name": "itemCount",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当する項目の数"
+                },
+                "type": {
+                  "valueType": "number",
+                  "scope": "row",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.rate",
+                "kind": "computation",
+                "entity": null,
+                "name": "rate",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "全体の率"
+                },
+                "type": {
+                  "valueType": "number",
+                  "scope": "app",
+                  "form": "expression"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.byKind",
+                "kind": "computation",
+                "entity": null,
+                "name": "byKind",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "区分ごとの件数"
+                },
+                "type": {
+                  "valueType": "groups",
+                  "scope": "groups",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": {
+                  "kind": "enum",
+                  "field": "f.item.kind"
+                },
+                "refEntity": null
+              },
+              {
+                "id": "c.byMonth",
+                "kind": "computation",
+                "entity": null,
+                "name": "byMonth",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "月ごとの金額の合計"
+                },
+                "type": {
+                  "valueType": "groups",
+                  "scope": "groups",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": {
+                  "kind": "month",
+                  "field": "f.item.day"
+                },
+                "refEntity": null
+              },
+              {
+                "id": "o.addItem",
+                "kind": "operation",
+                "entity": "e.item",
+                "name": "addItem",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "登録できる"
+                },
+                "type": {
+                  "action": "create",
+                  "hasWhen": false
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "o.closeItem",
+                "kind": "operation",
+                "entity": "e.item",
+                "name": "closeItem",
+                "role": "要件 R3 が使う対象",
+                "source": {
+                  "copy": "金額が 0 より",
+                  "quote": "締められる"
+                },
+                "type": {
+                  "action": "update",
+                  "hasWhen": true
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.items",
+                "kind": "screen",
+                "entity": "e.item",
+                "name": "items",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "一覧で見られる"
+                },
+                "type": {
+                  "view": "table"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.members",
+                "kind": "screen",
+                "entity": "e.member",
+                "name": "members",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "一覧で見られる"
+                },
+                "type": {
+                  "view": "table"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.overview",
+                "kind": "screen",
+                "entity": null,
+                "name": "overview",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "まとめの画面"
+                },
+                "type": {
+                  "view": "dashboard"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              }
+            ],
+            "requirements": [
+              {
+                "copy": "目印の値の写し",
+                "roles": [
+                  {
+                    "id": "f.item.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.amount",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.day",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.kind",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.owner",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "o.addItem",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              },
+              {
+                "copy": "担当者の名前と担",
+                "roles": [
+                  {
+                    "id": "f.member.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.itemCount",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.members",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.items",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "structural",
+                  "reason": "画面に出ることだけを求める",
+                  "checks": [
+                    "view-shows"
+                  ]
+                },
+                "nature": "existence-only"
+              },
+              {
+                "copy": "金額が 0 より",
+                "roles": [
+                  {
+                    "id": "o.closeItem",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.amount",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              },
+              {
+                "copy": "区分ごとの件数と",
+                "roles": [
+                  {
+                    "id": "c.byKind",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.byMonth",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.rate",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.overview",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "rows": [
+              {
+                "id": "e.member",
+                "kind": "entity",
+                "entity": null,
+                "name": "member",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当者"
+                },
+                "type": null,
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "e.item",
+                "kind": "entity",
+                "entity": null,
+                "name": "item",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "項目"
+                },
+                "type": null,
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.member.title",
+                "kind": "field",
+                "entity": "e.member",
+                "name": "title",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当者の名前"
+                },
+                "type": "string",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.title",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "title",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "題名"
+                },
+                "type": "string",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.owner",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "owner",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "担当者"
+                },
+                "type": "ref",
+                "options": null,
+                "groupBy": null,
+                "refEntity": "e.member"
+              },
+              {
+                "id": "f.item.amount",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "amount",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "金額"
+                },
+                "type": "number",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.day",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "day",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "日付"
+                },
+                "type": "date",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.kind",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "kind",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "区分"
+                },
+                "type": "enum",
+                "options": [
+                  "alpha",
+                  "beta"
+                ],
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.itemCount",
+                "kind": "computation",
+                "entity": "e.member",
+                "name": "itemCount",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当する項目の数"
+                },
+                "type": {
+                  "valueType": "number",
+                  "scope": "row",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.rate",
+                "kind": "computation",
+                "entity": null,
+                "name": "rate",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "全体の率"
+                },
+                "type": {
+                  "valueType": "number",
+                  "scope": "app",
+                  "form": "expression"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.byKind",
+                "kind": "computation",
+                "entity": null,
+                "name": "byKind",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "区分ごとの件数"
+                },
+                "type": {
+                  "valueType": "groups",
+                  "scope": "groups",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": {
+                  "kind": "enum",
+                  "field": "f.item.kind"
+                },
+                "refEntity": null
+              },
+              {
+                "id": "c.byMonth",
+                "kind": "computation",
+                "entity": null,
+                "name": "byMonth",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "月ごとの金額の合計"
+                },
+                "type": {
+                  "valueType": "groups",
+                  "scope": "groups",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": {
+                  "kind": "month",
+                  "field": "f.item.day"
+                },
+                "refEntity": null
+              },
+              {
+                "id": "o.addItem",
+                "kind": "operation",
+                "entity": "e.item",
+                "name": "addItem",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "登録できる"
+                },
+                "type": {
+                  "action": "create",
+                  "hasWhen": false
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "o.closeItem",
+                "kind": "operation",
+                "entity": "e.item",
+                "name": "closeItem",
+                "role": "要件 R3 が使う対象",
+                "source": {
+                  "copy": "金額が 0 より",
+                  "quote": "締められる"
+                },
+                "type": {
+                  "action": "update",
+                  "hasWhen": true
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.items",
+                "kind": "screen",
+                "entity": "e.item",
+                "name": "items",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "一覧で見られる"
+                },
+                "type": {
+                  "view": "table"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.members",
+                "kind": "screen",
+                "entity": "e.member",
+                "name": "members",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "一覧で見られる"
+                },
+                "type": {
+                  "view": "table"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.overview",
+                "kind": "screen",
+                "entity": null,
+                "name": "overview",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "まとめの画面"
+                },
+                "type": {
+                  "view": "dashboard"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              }
+            ],
+            "requirements": [
+              {
+                "copy": "目印の値の写し",
+                "roles": [
+                  {
+                    "id": "f.item.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.amount",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.day",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.kind",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.owner",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "o.addItem",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              },
+              {
+                "copy": "担当者の名前と担",
+                "roles": [
+                  {
+                    "id": "f.member.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.itemCount",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.members",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.items",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "structural",
+                  "reason": "画面に出ることだけを求める",
+                  "checks": [
+                    "view-shows"
+                  ]
+                },
+                "nature": "existence-only"
+              },
+              {
+                "copy": "金額が 0 より",
+                "roles": [
+                  {
+                    "id": "o.closeItem",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.amount",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              },
+              {
+                "copy": "区分ごとの件数と",
+                "roles": [
+                  {
+                    "id": "c.byKind",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.byMonth",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.rate",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.overview",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        }
+      ],
+      "judge": {
+        "default": 0.9
+      }
+    },
+    {
+      "name": "carry-over-stagnation",
+      "recorded": [
+        {
+          "kind": "structured",
+          "output": {
+            "rows": [
+              {
+                "id": "e.member",
+                "kind": "entity",
+                "entity": null,
+                "name": "member",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当者"
+                },
+                "type": null,
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "e.item",
+                "kind": "entity",
+                "entity": null,
+                "name": "item",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "項目"
+                },
+                "type": null,
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.member.title",
+                "kind": "field",
+                "entity": "e.member",
+                "name": "title",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当者の名前"
+                },
+                "type": "string",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.title",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "title",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "題名"
+                },
+                "type": "string",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.owner",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "owner",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "担当者"
+                },
+                "type": "ref",
+                "options": null,
+                "groupBy": null,
+                "refEntity": "e.member"
+              },
+              {
+                "id": "f.item.amount",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "amount",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "金額"
+                },
+                "type": "number",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.day",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "day",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "日付"
+                },
+                "type": "date",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.kind",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "kind",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "区分"
+                },
+                "type": "enum",
+                "options": [
+                  "alpha",
+                  "beta"
+                ],
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.itemCount",
+                "kind": "computation",
+                "entity": "e.member",
+                "name": "itemCount",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当する項目の数"
+                },
+                "type": {
+                  "valueType": "number",
+                  "scope": "row",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.rate",
+                "kind": "computation",
+                "entity": null,
+                "name": "rate",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "全体の率"
+                },
+                "type": {
+                  "valueType": "number",
+                  "scope": "app",
+                  "form": "expression"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.byKind",
+                "kind": "computation",
+                "entity": null,
+                "name": "byKind",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "区分ごとの件数"
+                },
+                "type": {
+                  "valueType": "groups",
+                  "scope": "groups",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": {
+                  "kind": "enum",
+                  "field": "f.item.kind"
+                },
+                "refEntity": null
+              },
+              {
+                "id": "c.byMonth",
+                "kind": "computation",
+                "entity": null,
+                "name": "byMonth",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "月ごとの金額の合計"
+                },
+                "type": {
+                  "valueType": "groups",
+                  "scope": "groups",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": {
+                  "kind": "month",
+                  "field": "f.item.day"
+                },
+                "refEntity": null
+              },
+              {
+                "id": "o.addItem",
+                "kind": "operation",
+                "entity": "e.item",
+                "name": "addItem",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "登録できる"
+                },
+                "type": {
+                  "action": "create",
+                  "hasWhen": false
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "o.closeItem",
+                "kind": "operation",
+                "entity": "e.item",
+                "name": "closeItem",
+                "role": "要件 R3 が使う対象",
+                "source": {
+                  "copy": "金額が 0 より",
+                  "quote": "締められる"
+                },
+                "type": {
+                  "action": "update",
+                  "hasWhen": true
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.items",
+                "kind": "screen",
+                "entity": "e.item",
+                "name": "items",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "一覧で見られる"
+                },
+                "type": {
+                  "view": "table"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.members",
+                "kind": "screen",
+                "entity": "e.member",
+                "name": "members",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "一覧で見られる"
+                },
+                "type": {
+                  "view": "table"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.overview",
+                "kind": "screen",
+                "entity": null,
+                "name": "overview",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "まとめの画面"
+                },
+                "type": {
+                  "view": "dashboard"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              }
+            ],
+            "requirements": [
+              {
+                "copy": "項目を題名・金額",
+                "roles": [
+                  {
+                    "id": "f.item.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.amount",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.day",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.kind",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.owner",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "o.addItem",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "e.member",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              },
+              {
+                "copy": "担当者の名前と担",
+                "roles": [
+                  {
+                    "id": "f.member.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.itemCount",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.members",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.items",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "structural",
+                  "reason": "画面に出ることだけを求める",
+                  "checks": [
+                    "view-shows"
+                  ]
+                },
+                "nature": "existence-only"
+              },
+              {
+                "copy": "金額が 0 より",
+                "roles": [
+                  {
+                    "id": "o.closeItem",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.amount",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              },
+              {
+                "copy": "区分ごとの件数と",
+                "roles": [
+                  {
+                    "id": "c.byKind",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.byMonth",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.rate",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.overview",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "judgments": [
+              {
+                "requirementId": "R1",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R2",
+                "verdict": "reject",
+                "kind": "unnecessary-ownership",
+                "quote": "一覧で見られる"
+              },
+              {
+                "requirementId": "R3",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R4",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "rows": [
+              {
+                "id": "e.member",
+                "kind": "entity",
+                "entity": null,
+                "name": "member",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当者"
+                },
+                "type": null,
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "e.item",
+                "kind": "entity",
+                "entity": null,
+                "name": "item",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "項目"
+                },
+                "type": null,
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.member.title",
+                "kind": "field",
+                "entity": "e.member",
+                "name": "title",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当者の名前"
+                },
+                "type": "string",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.title",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "title",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "題名"
+                },
+                "type": "string",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.owner",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "owner",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "担当者"
+                },
+                "type": "ref",
+                "options": null,
+                "groupBy": null,
+                "refEntity": "e.member"
+              },
+              {
+                "id": "f.item.amount",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "amount",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "金額"
+                },
+                "type": "number",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.day",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "day",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "日付"
+                },
+                "type": "date",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.kind",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "kind",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "区分"
+                },
+                "type": "enum",
+                "options": [
+                  "alpha",
+                  "beta"
+                ],
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.itemCount",
+                "kind": "computation",
+                "entity": "e.member",
+                "name": "itemCount",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当する項目の数"
+                },
+                "type": {
+                  "valueType": "number",
+                  "scope": "row",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.rate",
+                "kind": "computation",
+                "entity": null,
+                "name": "rate",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "全体の率"
+                },
+                "type": {
+                  "valueType": "number",
+                  "scope": "app",
+                  "form": "expression"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.byKind",
+                "kind": "computation",
+                "entity": null,
+                "name": "byKind",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "区分ごとの件数"
+                },
+                "type": {
+                  "valueType": "groups",
+                  "scope": "groups",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": {
+                  "kind": "enum",
+                  "field": "f.item.kind"
+                },
+                "refEntity": null
+              },
+              {
+                "id": "c.byMonth",
+                "kind": "computation",
+                "entity": null,
+                "name": "byMonth",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "月ごとの金額の合計"
+                },
+                "type": {
+                  "valueType": "groups",
+                  "scope": "groups",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": {
+                  "kind": "month",
+                  "field": "f.item.day"
+                },
+                "refEntity": null
+              },
+              {
+                "id": "o.addItem",
+                "kind": "operation",
+                "entity": "e.item",
+                "name": "addItem",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "登録できる"
+                },
+                "type": {
+                  "action": "create",
+                  "hasWhen": false
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "o.closeItem",
+                "kind": "operation",
+                "entity": "e.item",
+                "name": "closeItem",
+                "role": "要件 R3 が使う対象",
+                "source": {
+                  "copy": "金額が 0 より",
+                  "quote": "締められる"
+                },
+                "type": {
+                  "action": "update",
+                  "hasWhen": true
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.items",
+                "kind": "screen",
+                "entity": "e.item",
+                "name": "items",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "一覧で見られる"
+                },
+                "type": {
+                  "view": "table"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.members",
+                "kind": "screen",
+                "entity": "e.member",
+                "name": "members",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "一覧で見られる"
+                },
+                "type": {
+                  "view": "table"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.overview",
+                "kind": "screen",
+                "entity": null,
+                "name": "overview",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "まとめの画面"
+                },
+                "type": {
+                  "view": "dashboard"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              }
+            ],
+            "requirements": [
+              {
+                "copy": "項目を題名・金額",
+                "roles": [
+                  {
+                    "id": "f.item.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.amount",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.day",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.kind",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.owner",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "o.addItem",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "e.member",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              },
+              {
+                "copy": "担当者の名前と担",
+                "roles": [
+                  {
+                    "id": "f.member.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.itemCount",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.members",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.items",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "structural",
+                  "reason": "画面に出ることだけを求める",
+                  "checks": [
+                    "view-shows"
+                  ]
+                },
+                "nature": "existence-only"
+              },
+              {
+                "copy": "金額が 0 より",
+                "roles": [
+                  {
+                    "id": "o.closeItem",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.amount",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              },
+              {
+                "copy": "区分ごとの件数と",
+                "roles": [
+                  {
+                    "id": "c.byKind",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.byMonth",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.rate",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.overview",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "judgments": [
+              {
+                "requirementId": "R1",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R2",
+                "verdict": "reject",
+                "kind": "unnecessary-ownership",
+                "quote": "一覧で見られる"
+              },
+              {
+                "requirementId": "R3",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R4",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "classifications": [
+              {
+                "requirementId": "R1",
+                "nature": "ruled"
+              },
+              {
+                "requirementId": "R3",
+                "nature": "ruled"
+              },
+              {
+                "requirementId": "R4",
+                "nature": "ruled"
+              }
+            ],
+            "tests": [
+              {
+                "id": "r1-normal",
+                "target": {
+                  "requirementId": "R1",
+                  "kind": "field",
+                  "roleId": "f.item.amount"
+                },
+                "kind": "normal",
+                "operation": "validate",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":5}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "validation"
+              },
+              {
+                "id": "r1-abnormal",
+                "target": {
+                  "requirementId": "R1",
+                  "kind": "field",
+                  "roleId": "f.item.amount"
+                },
+                "kind": "abnormal",
+                "operation": "validate",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":-1}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "error",
+                  "value": null,
+                  "code": "E_INVALID"
+                },
+                "assertion": null,
+                "observes": "validation"
+              },
+              {
+                "id": "r1-boundary",
+                "target": {
+                  "requirementId": "R1",
+                  "kind": "field",
+                  "roleId": "f.item.amount"
+                },
+                "kind": "boundary",
+                "operation": "validate",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":1}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "validation"
+              },
+              {
+                "id": "r3-normal",
+                "target": {
+                  "requirementId": "R3",
+                  "kind": "operation",
+                  "roleId": "o.closeItem"
+                },
+                "kind": "normal",
+                "operation": "action",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":3}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "when"
+              },
+              {
+                "id": "r3-abnormal",
+                "target": {
+                  "requirementId": "R3",
+                  "kind": "operation",
+                  "roleId": "o.closeItem"
+                },
+                "kind": "abnormal",
+                "operation": "action",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":-1}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "false",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "when"
+              },
+              {
+                "id": "r3-boundary",
+                "target": {
+                  "requirementId": "R3",
+                  "kind": "operation",
+                  "roleId": "o.closeItem"
+                },
+                "kind": "boundary",
+                "operation": "action",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":1}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "when"
+              },
+              {
+                "id": "r4-normal",
+                "target": {
+                  "requirementId": "R4",
+                  "kind": "computation",
+                  "roleId": "c.rate"
+                },
+                "kind": "normal",
+                "operation": "compute",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-1",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-2",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-3",
+                    "values": "{\"f.item.amount\":1}"
+                  }
+                ],
+                "expected": {
+                  "kind": "ok",
+                  "value": "6",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "value"
+              },
+              {
+                "id": "r4-abnormal",
+                "target": {
+                  "requirementId": "R4",
+                  "kind": "computation",
+                  "roleId": "c.rate"
+                },
+                "kind": "abnormal",
+                "operation": "compute",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-1",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-2",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-3",
+                    "values": "{\"f.item.amount\":1}"
+                  }
+                ],
+                "expected": {
+                  "kind": "ok",
+                  "value": "6",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "value"
+              },
+              {
+                "id": "r4-boundary",
+                "target": {
+                  "requirementId": "R4",
+                  "kind": "computation",
+                  "roleId": "c.rate"
+                },
+                "kind": "boundary",
+                "operation": "compute",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-1",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-2",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-3",
+                    "values": "{\"f.item.amount\":1}"
+                  }
+                ],
+                "expected": {
+                  "kind": "ok",
+                  "value": "6",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "value"
+              },
+              {
+                "id": "r4-empty-aggregate",
+                "target": {
+                  "requirementId": "R4",
+                  "kind": "computation",
+                  "roleId": "c.rate"
+                },
+                "kind": "normal",
+                "operation": "compute",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": [
+                    "e.item"
+                  ]
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "null",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "value"
+              },
+              {
+                "id": "r3-operation-state",
+                "target": {
+                  "requirementId": "R3",
+                  "kind": "operation",
+                  "roleId": "o.closeItem"
+                },
+                "kind": "normal",
+                "operation": "action",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":3}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "{\"f.item.kind\":\"beta\"}",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "when"
+              },
+              {
+                "id": "r1-option-validate",
+                "target": {
+                  "requirementId": "R1",
+                  "kind": "field",
+                  "roleId": "f.item.kind"
+                },
+                "kind": "normal",
+                "operation": "validate",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.kind\":\"alpha\"}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "validation"
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "declaration": "entities:\n  - name: member\n    fields:\n      title:\n        type: string\n  - name: item\n    fields:\n      title:\n        type: string\n      owner:\n        type: ref\n        to: member\n      amount:\n        type: number\n      day:\n        type: date\n      kind:\n        type: enum\n        options:\n          alpha: アルファ\n          beta: ベータ\ncomputed:\n  - name: itemCount\n    entity: member\n    aggregate:\n      count: item\n      where:\n        owner: this\n    type: number\n  - name: base\n    scope: app\n    aggregate:\n      sum: item.amount\n    type: number\n  - name: rate\n    scope: app\n    expression: base * 2\n    type: number\n  - name: byKind\n    aggregate:\n      count: item\n      groupBy: item.kind\n    type: groups\n  - name: byMonth\n    aggregate:\n      sum: item.amount\n      groupBy:\n        month: item.day\n      last: 6\n    type: groups\nviews:\n  - name: items\n    type: table\n    entity: item\n    show: [title, owner, amount, day, kind]\n  - name: members\n    type: table\n    entity: member\n    show: [title, itemCount]\n  - name: overview\n    type: dashboard\n    widgets:\n      - type: number\n        value: rate\n      - type: number\n        value: base\n      - type: bar\n        value: byMonth\n      - type: pie\n        value: byKind\nactions:\n  - name: addItem\n    entity: item\n  - name: closeItem\n    entity: item\n    kind: update\n    set:\n      kind: beta\n    when: amount > 0\nvalidations:\n  - name: amount\n    entity: item\n    expression: amount > 0\npermissions:\n  - name: read\n    subject: minIdentity\n  - name: write\n    subject: minIdentity\nminIdentity:\n  mode: anonymous\n"
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "judgments": [
+              {
+                "requirementId": "R1",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R3",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R4",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "tools",
+          "response": {
+            "kind": "done",
+            "declaration": {
+              "declaration": "entities:\n  - name: member\n    fields:\n      title:\n        type: string\n  - name: item\n    fields:\n      title:\n        type: string\n      owner:\n        type: ref\n        to: member\n      amount:\n        type: number\n      day:\n        type: date\n      kind:\n        type: enum\n        options:\n          alpha: アルファ\n          beta: ベータ\ncomputed:\n  - name: itemCount\n    entity: member\n    aggregate:\n      count: item\n      where:\n        owner: this\n    type: number\n  - name: base\n    scope: app\n    aggregate:\n      sum: item.amount\n    type: number\n  - name: rate\n    scope: app\n    expression: base * 2\n    type: number\n  - name: byKind\n    aggregate:\n      count: item\n      groupBy: item.kind\n    type: groups\n  - name: byMonth\n    aggregate:\n      sum: item.amount\n      groupBy:\n        month: item.day\n      last: 6\n    type: groups\nviews:\n  - name: items\n    type: table\n    entity: item\n    show: [title, owner, amount, day, kind]\n  - name: members\n    type: table\n    entity: member\n    show: [title, itemCount]\n  - name: overview\n    type: dashboard\n    widgets:\n      - type: number\n        value: rate\n      - type: number\n        value: base\n      - type: bar\n        value: byMonth\n      - type: pie\n        value: byKind\nactions:\n  - name: addItem\n    entity: item\n  - name: closeItem\n    entity: item\n    kind: update\n    set:\n      kind: beta\n    when: amount > 0\nvalidations:\n  - name: amount\n    entity: item\n    expression: amount > 0\npermissions:\n  - name: read\n    subject: minIdentity\n  - name: write\n    subject: minIdentity\nminIdentity:\n  mode: anonymous\n",
+              "disputes": []
+            }
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "judgments": [
+              {
+                "requirementId": "R1",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R3",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R4",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        }
+      ],
+      "judge": {
+        "default": 0.9,
+        "byQuestion": {
+          "need:R2:s.items": 0.1
+        }
+      }
+    },
+    {
+      "name": "repair-full",
+      "recorded": [
+        {
+          "kind": "structured",
+          "output": {
+            "rows": [
+              {
+                "id": "e.member",
+                "kind": "entity",
+                "entity": null,
+                "name": "member",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当者"
+                },
+                "type": null,
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "e.item",
+                "kind": "entity",
+                "entity": null,
+                "name": "item",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "項目"
+                },
+                "type": null,
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.member.title",
+                "kind": "field",
+                "entity": "e.member",
+                "name": "title",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当者の名前"
+                },
+                "type": "string",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.title",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "title",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "題名"
+                },
+                "type": "string",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.owner",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "owner",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "担当者"
+                },
+                "type": "ref",
+                "options": null,
+                "groupBy": null,
+                "refEntity": "e.member"
+              },
+              {
+                "id": "f.item.amount",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "amount",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "金額"
+                },
+                "type": "number",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.day",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "day",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "日付"
+                },
+                "type": "date",
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "f.item.kind",
+                "kind": "field",
+                "entity": "e.item",
+                "name": "kind",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "区分"
+                },
+                "type": "enum",
+                "options": [
+                  "alpha",
+                  "beta"
+                ],
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.itemCount",
+                "kind": "computation",
+                "entity": "e.member",
+                "name": "itemCount",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "担当する項目の数"
+                },
+                "type": {
+                  "valueType": "number",
+                  "scope": "row",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.rate",
+                "kind": "computation",
+                "entity": null,
+                "name": "rate",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "全体の率"
+                },
+                "type": {
+                  "valueType": "number",
+                  "scope": "app",
+                  "form": "expression"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "c.byKind",
+                "kind": "computation",
+                "entity": null,
+                "name": "byKind",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "区分ごとの件数"
+                },
+                "type": {
+                  "valueType": "groups",
+                  "scope": "groups",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": {
+                  "kind": "enum",
+                  "field": "f.item.kind"
+                },
+                "refEntity": null
+              },
+              {
+                "id": "c.byMonth",
+                "kind": "computation",
+                "entity": null,
+                "name": "byMonth",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "月ごとの金額の合計"
+                },
+                "type": {
+                  "valueType": "groups",
+                  "scope": "groups",
+                  "form": "aggregate"
+                },
+                "options": null,
+                "groupBy": {
+                  "kind": "month",
+                  "field": "f.item.day"
+                },
+                "refEntity": null
+              },
+              {
+                "id": "o.addItem",
+                "kind": "operation",
+                "entity": "e.item",
+                "name": "addItem",
+                "role": "要件 R1 が使う対象",
+                "source": {
+                  "copy": "項目を題名・金額",
+                  "quote": "登録できる"
+                },
+                "type": {
+                  "action": "create",
+                  "hasWhen": false
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "o.closeItem",
+                "kind": "operation",
+                "entity": "e.item",
+                "name": "closeItem",
+                "role": "要件 R3 が使う対象",
+                "source": {
+                  "copy": "金額が 0 より",
+                  "quote": "締められる"
+                },
+                "type": {
+                  "action": "update",
+                  "hasWhen": true
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.items",
+                "kind": "screen",
+                "entity": "e.item",
+                "name": "items",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "一覧で見られる"
+                },
+                "type": {
+                  "view": "table"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.members",
+                "kind": "screen",
+                "entity": "e.member",
+                "name": "members",
+                "role": "要件 R2 が使う対象",
+                "source": {
+                  "copy": "担当者の名前と担",
+                  "quote": "一覧で見られる"
+                },
+                "type": {
+                  "view": "table"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              },
+              {
+                "id": "s.overview",
+                "kind": "screen",
+                "entity": null,
+                "name": "overview",
+                "role": "要件 R4 が使う対象",
+                "source": {
+                  "copy": "区分ごとの件数と",
+                  "quote": "まとめの画面"
+                },
+                "type": {
+                  "view": "dashboard"
+                },
+                "options": null,
+                "groupBy": null,
+                "refEntity": null
+              }
+            ],
+            "requirements": [
+              {
+                "copy": "項目を題名・金額",
+                "roles": [
+                  {
+                    "id": "f.item.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.amount",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.day",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.kind",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.owner",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "o.addItem",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              },
+              {
+                "copy": "担当者の名前と担",
+                "roles": [
+                  {
+                    "id": "f.member.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.title",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.itemCount",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.members",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.items",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "structural",
+                  "reason": "画面に出ることだけを求める",
+                  "checks": [
+                    "view-shows"
+                  ]
+                },
+                "nature": "existence-only"
+              },
+              {
+                "copy": "金額が 0 より",
+                "roles": [
+                  {
+                    "id": "o.closeItem",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "f.item.amount",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              },
+              {
+                "copy": "区分ごとの件数と",
+                "roles": [
+                  {
+                    "id": "c.byKind",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.byMonth",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "c.rate",
+                    "basis": "stated",
+                    "reason": null
+                  },
+                  {
+                    "id": "s.overview",
+                    "basis": "stated",
+                    "reason": null
+                  }
+                ],
+                "verification": {
+                  "kind": "fixed-test"
+                },
+                "nature": "ruled"
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "judgments": [
+              {
+                "requirementId": "R1",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R2",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R3",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R4",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "classifications": [
+              {
+                "requirementId": "R1",
+                "nature": "ruled"
+              },
+              {
+                "requirementId": "R2",
+                "nature": "existence-only"
+              },
+              {
+                "requirementId": "R3",
+                "nature": "ruled"
+              },
+              {
+                "requirementId": "R4",
+                "nature": "ruled"
+              }
+            ],
+            "tests": [
+              {
+                "id": "r1-normal",
+                "target": {
+                  "requirementId": "R1",
+                  "kind": "field",
+                  "roleId": "f.item.amount"
+                },
+                "kind": "normal",
+                "operation": "validate",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":5}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "validation"
+              },
+              {
+                "id": "r1-abnormal",
+                "target": {
+                  "requirementId": "R1",
+                  "kind": "field",
+                  "roleId": "f.item.amount"
+                },
+                "kind": "abnormal",
+                "operation": "validate",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":-1}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "error",
+                  "value": null,
+                  "code": "E_INVALID"
+                },
+                "assertion": null,
+                "observes": "validation"
+              },
+              {
+                "id": "r1-boundary",
+                "target": {
+                  "requirementId": "R1",
+                  "kind": "field",
+                  "roleId": "f.item.amount"
+                },
+                "kind": "boundary",
+                "operation": "validate",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":1}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "validation"
+              },
+              {
+                "id": "r2-shows",
+                "target": {
+                  "requirementId": "R2",
+                  "kind": "screen",
+                  "roleId": "s.members"
+                },
+                "kind": "normal",
+                "operation": "structure",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": {
+                  "check": "view-shows",
+                  "expected": null,
+                  "refEntity": null,
+                  "role": "f.member.title"
+                },
+                "observes": "view-structure"
+              },
+              {
+                "id": "r3-normal",
+                "target": {
+                  "requirementId": "R3",
+                  "kind": "operation",
+                  "roleId": "o.closeItem"
+                },
+                "kind": "normal",
+                "operation": "action",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":3}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "when"
+              },
+              {
+                "id": "r3-abnormal",
+                "target": {
+                  "requirementId": "R3",
+                  "kind": "operation",
+                  "roleId": "o.closeItem"
+                },
+                "kind": "abnormal",
+                "operation": "action",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":-1}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "false",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "when"
+              },
+              {
+                "id": "r3-boundary",
+                "target": {
+                  "requirementId": "R3",
+                  "kind": "operation",
+                  "roleId": "o.closeItem"
+                },
+                "kind": "boundary",
+                "operation": "action",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{\"f.item.amount\":1}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [],
+                "expected": {
+                  "kind": "ok",
+                  "value": "true",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "when"
+              },
+              {
+                "id": "r4-normal",
+                "target": {
+                  "requirementId": "R4",
+                  "kind": "computation",
+                  "roleId": "c.rate"
+                },
+                "kind": "normal",
+                "operation": "compute",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-1",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-2",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-3",
+                    "values": "{\"f.item.amount\":1}"
+                  }
+                ],
+                "expected": {
+                  "kind": "ok",
+                  "value": "6",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "value"
+              },
+              {
+                "id": "r4-abnormal",
+                "target": {
+                  "requirementId": "R4",
+                  "kind": "computation",
+                  "roleId": "c.rate"
+                },
+                "kind": "abnormal",
+                "operation": "compute",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-1",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-2",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-3",
+                    "values": "{\"f.item.amount\":1}"
+                  }
+                ],
+                "expected": {
+                  "kind": "ok",
+                  "value": "6",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "value"
+              },
+              {
+                "id": "r4-boundary",
+                "target": {
+                  "requirementId": "R4",
+                  "kind": "computation",
+                  "roleId": "c.rate"
+                },
+                "kind": "boundary",
+                "operation": "compute",
+                "clock": "2026-09-16T12:00:00+09:00",
+                "input": "{}",
+                "inputContract": {
+                  "rowId": "row-1",
+                  "targetRowId": null,
+                  "emptyEntities": []
+                },
+                "referenceData": [
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-1",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-2",
+                    "values": "{\"f.item.amount\":1}"
+                  },
+                  {
+                    "target": {
+                      "requirementId": "R4",
+                      "kind": "entity",
+                      "roleId": "e.item"
+                    },
+                    "rowId": "item-3",
+                    "values": "{\"f.item.amount\":1}"
+                  }
+                ],
+                "expected": {
+                  "kind": "ok",
+                  "value": "6",
+                  "code": null
+                },
+                "assertion": null,
+                "observes": "value"
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "declaration": "entities:\n  - name: member\n    fields:\n      title:\n        type: string\n  - name: item\n    fields:\n      title:\n        type: string\n      owner:\n        type: ref\n        to: member\n      amount:\n        type: number\n      day:\n        type: date\n      kind:\n        type: enum\n        options:\n          alpha: アルファ\n          beta: ベータ\ncomputed:\n  - name: itemCount\n    entity: member\n    aggregate:\n      count: item\n      where:\n        owner: this\n    type: number\n  - name: base\n    scope: app\n    aggregate:\n      sum: item.amount\n    type: number\n  - name: rate\n    scope: app\n    expression: base * 3\n    type: number\n  - name: byKind\n    aggregate:\n      count: item\n      groupBy: item.kind\n    type: groups\n  - name: byMonth\n    aggregate:\n      sum: item.amount\n      groupBy:\n        month: item.day\n      last: 6\n    type: groups\nviews:\n  - name: items\n    type: table\n    entity: item\n    show: [title, owner, amount, day, kind]\n  - name: members\n    type: table\n    entity: member\n    show: [title, itemCount]\n  - name: overview\n    type: dashboard\n    widgets:\n      - type: number\n        value: rate\n      - type: number\n        value: base\n      - type: bar\n        value: byMonth\n      - type: pie\n        value: byKind\nactions:\n  - name: addItem\n    entity: item\n  - name: closeItem\n    entity: item\n    kind: update\n    set:\n      kind: beta\n    when: amount > 0\nvalidations:\n  - name: amount\n    entity: item\n    expression: amount > 0\npermissions:\n  - name: read\n    subject: minIdentity\n  - name: write\n    subject: minIdentity\nminIdentity:\n  mode: anonymous\n"
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "judgments": [
+              {
+                "requirementId": "R1",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R2",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R3",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R4",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        },
+        {
+          "kind": "tools",
+          "response": {
+            "kind": "done",
+            "declaration": {
+              "declaration": "entities:\n  - name: member\n    fields:\n      title:\n        type: string\n  - name: item\n    fields:\n      title:\n        type: string\n      owner:\n        type: ref\n        to: member\n      amount:\n        type: number\n      day:\n        type: date\n      kind:\n        type: enum\n        options:\n          alpha: アルファ\n          beta: ベータ\ncomputed:\n  - name: itemCount\n    entity: member\n    aggregate:\n      count: item\n      where:\n        owner: this\n    type: number\n  - name: base\n    scope: app\n    aggregate:\n      sum: item.amount\n    type: number\n  - name: rate\n    scope: app\n    expression: base * 2\n    type: number\n  - name: byKind\n    aggregate:\n      count: item\n      groupBy: item.kind\n    type: groups\n  - name: byMonth\n    aggregate:\n      sum: item.amount\n      groupBy:\n        month: item.day\n      last: 6\n    type: groups\nviews:\n  - name: items\n    type: table\n    entity: item\n    show: [title, owner, amount, day, kind]\n  - name: members\n    type: table\n    entity: member\n    show: [title, itemCount]\n  - name: overview\n    type: dashboard\n    widgets:\n      - type: number\n        value: rate\n      - type: number\n        value: base\n      - type: bar\n        value: byMonth\n      - type: pie\n        value: byKind\nactions:\n  - name: addItem\n    entity: item\n  - name: closeItem\n    entity: item\n    kind: update\n    set:\n      kind: beta\n    when: amount > 0\nvalidations:\n  - name: amount\n    entity: item\n    expression: amount > 0\npermissions:\n  - name: read\n    subject: minIdentity\n  - name: write\n    subject: minIdentity\nminIdentity:\n  mode: anonymous\n",
+              "disputes": []
+            }
+          }
+        },
+        {
+          "kind": "structured",
+          "output": {
+            "judgments": [
+              {
+                "requirementId": "R1",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R2",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R3",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              },
+              {
+                "requirementId": "R4",
+                "verdict": "accept",
+                "kind": null,
+                "quote": null
+              }
+            ]
+          },
+          "usage": {
+            "inputTokens": 100,
+            "cachedInputTokens": 0,
+            "outputTokens": 50,
+            "reasoningTokens": 0
+          }
+        }
+      ],
+      "judge": {
+        "default": 0.9
+      }
+    }
+  ]
+}
