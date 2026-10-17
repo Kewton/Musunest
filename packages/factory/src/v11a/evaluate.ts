@@ -20,6 +20,11 @@
 // あることは照合しない——静的チェック（`DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS` ほか）が断ち、落ちた版はここへ来ない。
 // 結果は元の組の順で合流する。
 //
+// **旗 `v12.ledger` が on の走り（`ledger` を渡したとき。Issue #547）は、試験ごとに観測する性質の台帳の行の照合の名前
+// で振り分ける**：名前 → 関数の表（`V11A_EVALUATION_JUDGES`）が `v1-run-tests`（v1 の `runTests` へ渡す）と
+// `default-value`（`judgeDefaultValue`）を持つ。台帳に無い性質・登録済み・未対応の性質・表に無い照合の名前は、v1 に
+// 渡さず未解決（固定文。行き先は v1 の未解決と同じ `ambiguity`）。結果は元の組の順で合流する。off は今の関数のまま。
+//
 // `report` は版の結果を `VersionReport` の形で返す（`correspondence`＝導いた対応表と B3 の落ち、`testRun`、
 // `routes`。v1.1α は対応の提出が無いので `defectMisses`・`redoMisses` は常に空）。静的チェックに落ちる版は
 // `correspondence`・`testRun` を null にし、版の SHA-256（原文のバイト列）を持つ。
@@ -36,6 +41,7 @@ import { identityMappings, toRoleEntries } from "./convert.js";
 import type { NameTable } from "./names.js";
 import { checkNames, type NameCheckResult } from "./name-check.js";
 import type { TestObserves } from "./stages/test-spec.js";
+import type { LedgerView } from "../v12/ledger.js";
 
 /** 観測する性質の写像に無い試験の、未解決の詳細（固定文。試験 ID・性質を埋めない） */
 export const UNMAPPED_OBSERVES_DETAIL = "試験の観測する性質が、試験の仕様の写像に無い";
@@ -56,6 +62,32 @@ export const DEFAULT_VALUE_DETAILS = {
   defaultDiffers: "既定値の試験の項目の宣言の default が、期待のキーと違う",
 } as const;
 
+/** 旗 on の、台帳で振り分けられない試験の未解決の詳細（固定文。試験 ID・性質を埋めない。Issue #547） */
+export const LEDGER_OBSERVES_DETAILS = {
+  /** 観測する性質が台帳に無い */
+  unregistered: "試験の観測する性質が、性質の台帳に無い",
+  /** 観測する性質が台帳で登録済み・未対応 */
+  unsupported: "試験の観測する性質が、性質の台帳で未対応である",
+  /** 台帳の行の照合の名前が評価口の表に無い */
+  unknownEvaluation: "試験の観測する性質の照合の名前が、評価口の表に無い",
+} as const;
+
+/** 台帳の行の照合の名前（B4。評価口が名前 → 関数の表を持つ。Issue #547） */
+export const V11A_EVALUATION_NAMES = ["v1-run-tests", "default-value"] as const;
+export type V11aEvaluationName = (typeof V11A_EVALUATION_NAMES)[number];
+
+/** 照合の名前 → 振り分け（`v1`：v1 の `runTests` へ渡す。`judge`：v1 に渡さず、この関数で判定する） */
+export const V11A_EVALUATION_JUDGES: Readonly<
+  Record<
+    V11aEvaluationName,
+    | { readonly kind: "v1" }
+    | { readonly kind: "judge"; readonly judge: (app: NormalizedAppSpec, table: NameTable, test: FixedTest) => DefaultValueVerdict }
+  >
+> = {
+  "v1-run-tests": { kind: "v1" },
+  "default-value": { kind: "judge", judge: (app, table, test) => judgeDefaultValue(app, table, test) },
+};
+
 /** 評価口を作る材料（閉包で持つもの） */
 export interface V11aEvaluatorInput {
   /** 名前の表（builder に見せた全行。結び付けと B3 の場所はこの表で引く） */
@@ -64,6 +96,8 @@ export interface V11aEvaluatorInput {
   readonly excludedRowIds?: readonly string[];
   /** 観測する性質（T2 で固定した試験 ID → 性質の写像。必須。写像に無い試験は B4 で未解決に数える） */
   readonly observes: ReadonlyMap<string, TestObserves>;
+  /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけが渡す。省けば今の関数で振り分ける。Issue #547） */
+  readonly ledger?: LedgerView;
 }
 
 /** v1.1α の評価口（B3・B4 と、その組み合わせ） */
@@ -80,7 +114,7 @@ export interface V11aEvaluator {
 
 /** 評価口を作る。表と除いた行は閉包で持ち、組・一覧・所属は呼ぶたびに文脈から取る */
 export function createV11aEvaluator(input: V11aEvaluatorInput): V11aEvaluator {
-  const { table, observes } = input;
+  const { table, observes, ledger } = input;
   const excludedRowIds = input.excludedRowIds ?? [];
   const mappings = identityMappings(table);
   const roles = toRoleEntries(table);
@@ -99,6 +133,7 @@ export function createV11aEvaluator(input: V11aEvaluatorInput): V11aEvaluator {
     context: EvaluationContext,
     correspondence: CorrespondenceResult,
   ): TestRunReport => {
+    if (ledger !== undefined) return runTestsByLedger(app, context, correspondence, ledger);
     // 写像にあり既定値の試験でないものだけを v1 の `runTests` に渡す（分類はそのまま。並びは組のまま）
     const mapped = context.suite.tests.filter((test) => observes.has(test.id) && observes.get(test.id) !== "default-value");
     const suite = { ...context.suite, tests: mapped };
@@ -113,6 +148,32 @@ export function createV11aEvaluator(input: V11aEvaluatorInput): V11aEvaluator {
     });
     if (mapped.length === context.suite.tests.length) return report;
     return mergeReports(context.suite.tests, report, observes, (test) => judgeDefaultValue(app, table, test));
+  };
+
+  /** 旗 on：台帳の行の照合の名前で振り分け、v1 に渡す試験だけを v1 の `runTests` に渡して、組の順で合流する */
+  const runTestsByLedger = (
+    app: NormalizedAppSpec,
+    context: EvaluationContext,
+    correspondence: CorrespondenceResult,
+    view: LedgerView,
+  ): TestRunReport => {
+    const routing = new Map(context.suite.tests.map((test) => [test.id, routeByLedger(view, observes, test)] as const));
+    const mapped = context.suite.tests.filter((test) => routing.get(test.id)?.kind === "v1");
+    const suite = { ...context.suite, tests: mapped };
+    const bound = bindTestsById(app, table, suite);
+    const report = runTests({
+      app,
+      suite,
+      correspondence,
+      mappings,
+      roles,
+      bindings: { tests: bound.bindings, entityNames: bound.entityNames },
+    });
+    if (mapped.length === context.suite.tests.length) return report;
+    return mergeReportsByRoute(context.suite.tests, report, (test) => {
+      const route = routing.get(test.id) ?? { kind: "unresolved", detail: UNMAPPED_OBSERVES_DETAIL };
+      return route.kind === "judge" ? { kind: "verdict", verdict: route.judge(app, table, test) } : route;
+    });
   };
 
   const evaluate: DeclarationEvaluator = (app, _declaration, context): DeclarationEvaluation => {
@@ -236,6 +297,94 @@ function mergeReports(
         check: test.assertion.check,
         result: "unresolved",
         detail: UNMAPPED_OBSERVES_DETAIL,
+      });
+    }
+  }
+  return { mismatches, unresolved, routes, structural };
+}
+
+/** 旗 on の試験 1 件の振り分け（v1 へ渡す・判定の関数で判定する・未解決） */
+type LedgerRoute =
+  | { readonly kind: "v1" }
+  | {
+      readonly kind: "judge";
+      readonly judge: (app: NormalizedAppSpec, table: NameTable, test: FixedTest) => DefaultValueVerdict;
+    }
+  | { readonly kind: "unresolved"; readonly detail: string };
+
+/** 試験の観測する性質を台帳で引き、照合の名前で振り分ける（写像に無い・台帳に無い・未対応・表に無い名前は未解決） */
+function routeByLedger(view: LedgerView, observes: ReadonlyMap<string, TestObserves>, test: FixedTest): LedgerRoute {
+  const observed = observes.get(test.id);
+  if (observed === undefined) return { kind: "unresolved", detail: UNMAPPED_OBSERVES_DETAIL };
+  const row = view.rowByObserves.get(observed);
+  if (row === undefined) return { kind: "unresolved", detail: LEDGER_OBSERVES_DETAILS.unregistered };
+  if (row.state === "registered-unsupported") return { kind: "unresolved", detail: LEDGER_OBSERVES_DETAILS.unsupported };
+  const name = row.evaluation;
+  const entry =
+    name !== null && (V11A_EVALUATION_NAMES as readonly string[]).includes(name)
+      ? V11A_EVALUATION_JUDGES[name as V11aEvaluationName]
+      : undefined;
+  if (entry === undefined) return { kind: "unresolved", detail: LEDGER_OBSERVES_DETAILS.unknownEvaluation };
+  return entry;
+}
+
+/**
+ * 旗 on：v1 の `runTests` の結果に、v1 に渡さなかった試験の結果を組の並びで差し込む（`mergeReports` と同じ形）。
+ * 判定の関数の不一致は v1 の不一致（`missing-element`）、未解決は v1 の未解決（`ambiguity`）と同じ形で足し、
+ * 振り分けの未解決は写像に無い試験と同じ形（構造の検査なら構造の記録も）で足す。v1 に渡した試験の結果は変えない。
+ */
+function mergeReportsByRoute(
+  tests: readonly FixedTest[],
+  report: TestRunReport,
+  outcomeOf: (
+    test: FixedTest,
+  ) =>
+    | { readonly kind: "v1" }
+    | { readonly kind: "verdict"; readonly verdict: DefaultValueVerdict }
+    | { readonly kind: "unresolved"; readonly detail: string },
+): TestRunReport {
+  const mismatches: TestRunReport["mismatches"][number][] = [];
+  const unresolved: TestRunReport["unresolved"][number][] = [];
+  const routes: TestRunReport["routes"][number][] = [];
+  const structural: TestRunReport["structural"][number][] = [];
+  const at = { mismatches: 0, unresolved: 0, routes: 0, structural: 0 };
+  // v1 の結果は v1 に渡した試験の並びどおりで、1 件の試験から各欄に高々 1 件ずつ出る
+  const take = <T extends { readonly testId: string }>(from: readonly T[], key: keyof typeof at, to: T[], testId: string): void => {
+    const entry = from[at[key]];
+    if (entry !== undefined && entry.testId === testId) {
+      to.push(entry);
+      at[key] += 1;
+    }
+  };
+  for (const test of tests) {
+    const outcome = outcomeOf(test);
+    if (outcome.kind === "v1") {
+      take(report.mismatches, "mismatches", mismatches, test.id);
+      take(report.unresolved, "unresolved", unresolved, test.id);
+      take(report.routes, "routes", routes, test.id);
+      take(report.structural, "structural", structural, test.id);
+      continue;
+    }
+    if (outcome.kind === "verdict") {
+      const verdict = outcome.verdict;
+      if (verdict.kind === "mismatch") {
+        mismatches.push({ testId: test.id, detail: verdict.detail });
+        routes.push({ testId: test.id, route: "missing-element", detail: verdict.detail });
+      } else if (verdict.kind === "unresolved") {
+        unresolved.push({ testId: test.id, detail: verdict.detail });
+        routes.push({ testId: test.id, route: "ambiguity", detail: verdict.detail });
+      }
+      continue;
+    }
+    unresolved.push({ testId: test.id, detail: outcome.detail });
+    routes.push({ testId: test.id, route: "ambiguity", detail: outcome.detail });
+    if (test.operation === "structure" && test.assertion !== undefined) {
+      structural.push({
+        testId: test.id,
+        requirementId: test.target.requirementId,
+        check: test.assertion.check,
+        result: "unresolved",
+        detail: outcome.detail,
       });
     }
   }

@@ -13,12 +13,34 @@ import type { EvaluationContext } from "../stages/tools.js";
 import { FIXTURE_YAML, fixtureList, fixtureTable, normalizedFixture } from "./__tests__/fixtures.js";
 import { bindTestsById, correspondenceFromTable } from "./bind-by-id.js";
 import { identityMappings, toRoleEntries, toV1 } from "./convert.js";
-import { DEFAULT_VALUE_DETAILS, UNMAPPED_OBSERVES_DETAIL, createV11aEvaluator, judgeDefaultValue } from "./evaluate.js";
+import {
+  DEFAULT_VALUE_DETAILS,
+  LEDGER_OBSERVES_DETAILS,
+  UNMAPPED_OBSERVES_DETAIL,
+  V11A_EVALUATION_JUDGES,
+  V11A_EVALUATION_NAMES,
+  createV11aEvaluator,
+  createV11aEvaluator as createV11aEvaluatorBase,
+  judgeDefaultValue,
+} from "./evaluate.js";
+import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, deriveLedgerView, type LedgerView } from "../v12/ledger.js";
 import type { TestObserves } from "./stages/test-spec.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+/** 旗 off（台帳を渡さない）と旗 on（台帳の導出を渡す）。評価口の試験を両方で同じ結果に照らす（Issue #547） */
+const LEDGER_CASES: readonly { readonly name: string; readonly ledger: LedgerView | undefined }[] = [
+  { name: "off", ledger: undefined },
+  { name: "on", ledger: PROPERTY_LEDGER_VIEW },
+];
+
+/** 旗に合わせた評価口の作り方（on は台帳の導出を閉包に渡す） */
+const evaluatorFactory =
+  (ledger: LedgerView | undefined): typeof createV11aEvaluatorBase =>
+  (input) =>
+    createV11aEvaluatorBase(ledger === undefined ? input : { ...input, ledger });
 
 const TABLE = fixtureTable();
 const listWithout = (...ids: readonly string[]): RequirementList => ({
@@ -139,7 +161,8 @@ describe("④ に落ちる版", () => {
   });
 });
 
-describe("通る版", () => {
+describe.each(LEDGER_CASES)("通る版（旗 $name）", ({ ledger }) => {
+  const createV11aEvaluator = evaluatorFactory(ledger);
   it("B3 の落ちと、表の id で結び付けて流した結果を持ち、defectMisses・redoMisses は空", async () => {
     const evaluator = createV11aEvaluator({ table: TABLE, observes: OBSERVES });
     // B3 の落ち（画面から辿れない項目）がある宣言
@@ -216,7 +239,8 @@ describe("組・一覧・所属は毎回文脈から取る", () => {
   });
 });
 
-describe("観測する性質の写像（observes。必須。Issue #526）", () => {
+describe.each(LEDGER_CASES)("観測する性質の写像（observes。必須。Issue #526。旗 $name）", ({ ledger }) => {
+  const createV11aEvaluator = evaluatorFactory(ledger);
   /** v1 の runTests を、表の id の結び付けで直接流す（評価口を通さない） */
   async function directRun(source: string, suite: TestSuite, dropBindingOf: readonly string[] = []) {
     const app = await normalizedFixture(source);
@@ -334,7 +358,8 @@ describe("観測する性質の写像（observes。必須。Issue #526）", () =
   });
 });
 
-describe("既定値の試験（observes が default-value）は v1 に渡さず、宣言の default と照合する（Issue #533）", () => {
+describe.each(LEDGER_CASES)("既定値の試験（observes が default-value）は v1 に渡さず、宣言の default と照合する（Issue #533。旗 $name）", ({ ledger }) => {
+  const createV11aEvaluator = evaluatorFactory(ledger);
   /** 区分の項目の既定値を alpha にした宣言（静的チェックを通る） */
   const withDefault = (key: string | null, source: string = YAML): string => {
     const from = "          beta: ベータ\n";
@@ -493,5 +518,95 @@ describe("既定値の試験（observes が default-value）は v1 に渡さず�
     expect(report.staticCheck.diagnostics.map((diagnostic) => diagnostic.code)).toContain("DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS");
     expect(report.testRun).toBeNull();
     expect(report.correspondence).toBeNull();
+  });
+});
+
+// ── 旗 on：台帳の照合の名前で振り分ける（Issue #547）────────────────────────────
+
+describe("旗 on：評価口に台帳に無い・登録済み未対応の観測する性質を渡すと未解決で、v1 の runTests に渡らない", () => {
+  const createV11aEvaluator = evaluatorFactory(PROPERTY_LEDGER_VIEW);
+
+  async function evaluateWith(observes: ReadonlyMap<string, TestObserves>, view: LedgerView = PROPERTY_LEDGER_VIEW) {
+    const passed: string[][] = [];
+    const original = runTestsStage.runTests;
+    vi.spyOn(runTestsStage, "runTests").mockImplementation((input) => {
+      passed.push(input.suite.tests.map((test) => test.id));
+      return original(input);
+    });
+    const app = await normalizedFixture(YAML);
+    const context = contextOf(listWithout());
+    const evaluator = createV11aEvaluatorBase({ table: TABLE, observes, ledger: view });
+    const checked = evaluator.nameCheck(app, context);
+    const report = evaluator.runTests(app, context, { entries: checked.entries, misses: checked.misses });
+    const evaluated = await evaluator.evaluate(app, { source: YAML }, context);
+    const versioned = await evaluator.report({ source: YAML }, context);
+    return { report, passed, evaluated, versioned };
+  }
+  const pick = (report: ReturnType<typeof runTests>, testId: string) => ({
+    mismatches: report.mismatches.filter((entry) => entry.testId === testId),
+    unresolved: report.unresolved.filter((entry) => entry.testId === testId),
+    routes: report.routes.filter((entry) => entry.testId === testId),
+    structural: report.structural.filter((entry) => entry.testId === testId),
+  });
+
+  it("二点測定：台帳にある性質（when）は v1 に渡り、台帳に無い性質・未対応の性質は固定文の未解決（行き先 ambiguity）で v1 に渡らない", async () => {
+    const control = await evaluateWith(OBSERVES);
+    expect(control.passed.every((ids) => ids.includes("t-when-ok"))).toBe(true);
+    for (const [observed, detail] of [
+      ["enum-membership", LEDGER_OBSERVES_DETAILS.unregistered],
+      ["other", LEDGER_OBSERVES_DETAILS.unregistered],
+      ["state-after-set", LEDGER_OBSERVES_DETAILS.unsupported],
+    ] as const) {
+      const observes = new Map([...OBSERVES, ["t-when-ok", observed as TestObserves]]);
+      const { report, passed, evaluated, versioned } = await evaluateWith(observes);
+      expect(pick(report, "t-when-ok"), observed).toEqual({
+        mismatches: [],
+        unresolved: [{ testId: "t-when-ok", detail }],
+        routes: [{ testId: "t-when-ok", route: "ambiguity", detail }],
+        structural: [],
+      });
+      expect(passed.length, observed).toBeGreaterThan(0);
+      for (const ids of passed) expect(ids, observed).not.toContain("t-when-ok");
+      // ほかの試験の結果は対照と同じ。B5 の道具・版の再検査も同じ結果
+      for (const test of SUITE.tests.filter((entry) => entry.id !== "t-when-ok")) {
+        expect(pick(report, test.id), test.id).toEqual(pick(control.report, test.id));
+      }
+      expect(evaluated.testRun).toEqual(report);
+      expect(versioned.testRun).toEqual(report);
+      // 固定文は性質の値を埋めない
+      expect(detail).not.toContain(observed);
+    }
+  });
+
+  it("未解決の行き先は、写像に無い試験（今の v1 の no-mapping の未解決）と同じ ambiguity。構造の検査は構造の記録も未解決", async () => {
+    const unmapped = await evaluateWith(observesWithout("t-shows"));
+    const unregistered = await evaluateWith(new Map([...OBSERVES, ["t-shows", "enum-membership" as TestObserves]]));
+    expect(pick(unregistered.report, "t-shows").routes.map((entry) => entry.route)).toEqual(
+      pick(unmapped.report, "t-shows").routes.map((entry) => entry.route),
+    );
+    expect(pick(unregistered.report, "t-shows").structural).toEqual([
+      { testId: "t-shows", requirementId: "R2", check: "view-shows", result: "unresolved", detail: LEDGER_OBSERVES_DETAILS.unregistered },
+    ]);
+  });
+
+  it("台帳の行の照合の名前が評価口の表に無ければ未解決（固定文）で v1 に渡らない", async () => {
+    const rows = PROPERTY_LEDGER.map((row) => (row.id === "when" ? { ...row, evaluation: "no-such-evaluation" } : row));
+    const { report, passed } = await evaluateWith(OBSERVES, deriveLedgerView(rows));
+    for (const testId of ["t-when-ok", "t-when-bad"]) {
+      expect(pick(report, testId).unresolved).toEqual([{ testId, detail: LEDGER_OBSERVES_DETAILS.unknownEvaluation }]);
+      for (const ids of passed) expect(ids).not.toContain(testId);
+    }
+  });
+
+  it("写像に無い試験は on でも今と同じ固定文の未解決", async () => {
+    const { report } = await evaluateWith(observesWithout("t-rate"));
+    expect(pick(report, "t-rate").unresolved).toEqual([{ testId: "t-rate", detail: UNMAPPED_OBSERVES_DETAIL }]);
+  });
+
+  it("評価口の表は台帳の有効の行の照合の名前を全部持ち、v1 の振り分けと既定値の関数を指す", () => {
+    expect(Object.keys(V11A_EVALUATION_JUDGES)).toEqual([...V11A_EVALUATION_NAMES]);
+    expect(V11A_EVALUATION_JUDGES["v1-run-tests"].kind).toBe("v1");
+    expect(V11A_EVALUATION_JUDGES["default-value"].kind).toBe("judge");
+    expect(createV11aEvaluator).toBeTypeOf("function");
   });
 });

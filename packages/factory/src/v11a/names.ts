@@ -52,6 +52,7 @@ import {
   type PromptDocument,
   type ShapeCheck,
 } from "../stages/prompt.js";
+import { BASE_VERIFICATION_KINDS, type LedgerView, type PropertyT1 } from "../v12/ledger.js";
 
 // ── 型の値の一覧（D3。B3 の照合先は A5）────────────────────────────────
 
@@ -152,6 +153,18 @@ export interface NameTableOwnership {
 
 /** 確かめ方の種類（`default-value` は選択肢の項目の既定値だけを決める要件。Issue #533） */
 export const NAME_TABLE_VERIFICATION_KINDS = ["fixed-test", "structural", "unresolved", "default-value"] as const;
+
+/**
+ * T1' を性質の台帳の導出で掛ける口（旗 `v12.ledger` が on の走りだけが渡す。08 §5・Issue #547）。省けば今の
+ * 定数と関数で掛ける。渡せば、確かめ方の種類の一覧と、性質に結び付いた確かめ方の所属の形を台帳の行の記述子から
+ * 掛け、台帳に無い種類を固定文で落とす。
+ */
+export interface NameTableLedgerOptions {
+  readonly ledger?: LedgerView;
+}
+
+/** 型付きの表の確かめ方の種類が、性質の台帳（と台帳の外の種類）に無いときの固定文（旗 on。Issue #547） */
+export const UNREGISTERED_VERIFICATION_KIND_MESSAGE = "確かめ方の種類が性質の台帳に無い";
 
 /**
  * 要件ごとの確かめ方（fixed-test／structural＋checks／unresolved＋reason＋constraintIds／default-value＋value）。
@@ -431,11 +444,17 @@ function shapeOfRoleOwnership(value: unknown, field: string, problems: Problem[]
   return { id: id as string, basis: basis as RoleOwnershipBasis, reason: typeof reason === "string" ? reason : null };
 }
 
-function shapeOfVerification(value: unknown, field: string, problems: Problem[]): NameTableDraftVerification | undefined {
+function shapeOfVerification(
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  ledger?: LedgerView,
+): NameTableDraftVerification | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "確かめ方は写像（object）であること" });
     return undefined;
   }
+  if (ledger !== undefined) return shapeOfVerificationByLedger(value, field, problems, ledger);
   const kind = value["kind"];
   if (kind === "default-value") {
     const key = value["value"];
@@ -479,7 +498,38 @@ function shapeOfVerification(value: unknown, field: string, problems: Problem[])
   return undefined;
 }
 
-function shapeOfDraftRequirement(value: unknown, field: string, problems: Problem[]): NameTableDraftRequirement | undefined {
+/**
+ * 旗 on の下書きの確かめ方の形（Issue #547）。性質に結び付いた種類は、台帳の行の欄（`valueField`）が空でない文字列で
+ * あることを確かめる。台帳の外の種類（fixed-test・structural・unresolved）は今の関数に任せ、どちらにも無い種類は
+ * 台帳の種類の一覧の固定文で落とす。
+ */
+function shapeOfVerificationByLedger(
+  value: Record<string, unknown>,
+  field: string,
+  problems: Problem[],
+  ledger: LedgerView,
+): NameTableDraftVerification | undefined {
+  const kind = value["kind"];
+  const t1 = typeof kind === "string" ? ledger.rowByVerificationKind.get(kind)?.t1 : undefined;
+  if (t1 !== undefined && t1 !== null) {
+    const key = value[t1.valueField];
+    if (!isNonEmptyString(key)) {
+      problems.push({ field: `${field}.${t1.valueField}`, message: t1.messages.valueShape });
+      return undefined;
+    }
+    return { kind: t1.kind, value: key } as NameTableDraftVerification;
+  }
+  if (isOneOf(BASE_VERIFICATION_KINDS, kind)) return shapeOfVerification(value, field, problems);
+  problems.push({ field: `${field}.kind`, message: `確かめ方の種類は ${ledger.verificationKinds.join("・")} のいずれかであること` });
+  return undefined;
+}
+
+function shapeOfDraftRequirement(
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  ledger?: LedgerView,
+): NameTableDraftRequirement | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "要件ごとの 1 件は写像（object）であること" });
     return undefined;
@@ -496,7 +546,7 @@ function shapeOfDraftRequirement(value: unknown, field: string, problems: Proble
       if (role !== undefined) roles.push(role);
     });
   }
-  const verification = shapeOfVerification(value["verification"], `${field}.verification`, problems);
+  const verification = shapeOfVerification(value["verification"], `${field}.verification`, problems, ledger);
   const nature = value["nature"];
   if (!isOneOf(REQUIREMENT_NATURES, nature)) {
     problems.push({ field: `${field}.nature`, message: `分類は ${REQUIREMENT_NATURES.join("・")} のいずれかであること` });
@@ -517,7 +567,10 @@ interface DraftShapeScan {
   readonly rawRequirements: readonly unknown[];
 }
 
-function scanNameTableDraftShape(value: unknown): DraftShapeScan | { readonly problems: readonly Problem[] } {
+function scanNameTableDraftShape(
+  value: unknown,
+  ledger?: LedgerView,
+): DraftShapeScan | { readonly problems: readonly Problem[] } {
   const problems: Problem[] = [];
   if (!isRecord(value)) return { problems: [{ field: "", message: "名前の表は写像（object）であること" }] };
   let rows: (NameTableDraftRow | undefined)[] | null = null;
@@ -532,7 +585,9 @@ function scanNameTableDraftShape(value: unknown): DraftShapeScan | { readonly pr
   if (!Array.isArray(requirementsRaw)) {
     problems.push({ field: "requirements", message: "要件ごとの並びは並び（array）であること" });
   } else {
-    requirements = requirementsRaw.map((item, index) => shapeOfDraftRequirement(item, `requirements[${index}]`, problems));
+    requirements = requirementsRaw.map((item, index) =>
+      shapeOfDraftRequirement(item, `requirements[${index}]`, problems, ledger),
+    );
   }
   return {
     problems,
@@ -543,9 +598,9 @@ function scanNameTableDraftShape(value: unknown): DraftShapeScan | { readonly pr
   };
 }
 
-/** (a) T1 の応答（下書き）の形を確かめる。合わない欄を**すべて**挙げる */
-export function checkNameTableDraftShape(value: unknown): ShapeCheck<NameTableDraft> {
-  const scan = scanNameTableDraftShape(value);
+/** (a) T1 の応答（下書き）の形を確かめる。合わない欄を**すべて**挙げる（`options.ledger` は旗 on の確かめ方の形） */
+export function checkNameTableDraftShape(value: unknown, options: NameTableLedgerOptions = {}): ShapeCheck<NameTableDraft> {
+  const scan = scanNameTableDraftShape(value, options.ledger);
   if (scan.problems.length > 0) return { ok: false, problems: scan.problems };
   const full = scan as DraftShapeScan;
   const rows = (full.rows ?? []).filter((row): row is NameTableDraftRow => row !== undefined);
@@ -765,8 +820,9 @@ export function checkNameTable(
   list: RequirementList,
   table: NameTable,
   documents: readonly PromptDocument[],
+  options: NameTableLedgerOptions = {},
 ): readonly Problem[] {
-  return checkNameTableWith(list, table, documents, {});
+  return checkNameTableWith(list, table, documents, options.ledger === undefined ? {} : { ledger: options.ledger });
 }
 
 /**
@@ -789,6 +845,8 @@ interface TableCheckOptions {
    * 所属させていた行と、所属させた行が形で落ちたために導かれなくなった所属 entity
    */
   readonly rowIdsOwnedByDropped?: ReadonlySet<string>;
+  /** 性質の台帳の導出（旗 on。Issue #547） */
+  readonly ledger?: LedgerView;
 }
 
 function checkNameTableWith(
@@ -1003,9 +1061,55 @@ function checkNameTableWith(
       problems.push({ field: `${field}.value`, message: "既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い" });
     }
   };
+  /**
+   * 旗 on：性質に結び付いた確かめ方の所属の形を、台帳の行の記述子（`PropertyT1`）から掛ける（Issue #547）。所属が
+   * 「記述子の種類・型の行を `count` 行ちょうどと、その行の所属 entity（コードが足す）」だけで、欄の値がその行の
+   * options にあり、分類が記述子の値であること。固定文は記述子が持つ
+   */
+  const checkLedgerVerification = (
+    t1: PropertyT1,
+    value: unknown,
+    field: string,
+    roles: readonly NameTableRoleOwnership[],
+    nature: RequirementNature | undefined,
+  ): void => {
+    const key = typeof value === "string" ? value : "";
+    if (key.trim() === "") problems.push({ field: `${field}.${t1.valueField}`, message: t1.messages.valueEmpty });
+    if (nature !== undefined && nature !== t1.nature) problems.push({ field, message: t1.messages.nature });
+    if (roles.some((role) => !rowById.has(role.id))) return;
+    const owned = roles.map((role) => rowById.get(role.id) as NameTableRow);
+    const targets = owned.filter((row) => row.kind === t1.ownership.row.kind && (row.type as unknown) === t1.ownership.row.type);
+    if (targets.length !== t1.ownership.count) {
+      problems.push({ field, message: t1.messages.count });
+      return;
+    }
+    const allowed = new Set(
+      targets.flatMap((row) => [row.id, ...(t1.ownership.entityAddedByCode && row.entity !== null ? [row.entity] : [])]),
+    );
+    if (owned.some((row) => !allowed.has(row.id))) problems.push({ field, message: t1.messages.others });
+    if (t1.ownership.valueInOptions && !targets.some((row) => (row.options ?? []).includes(key))) {
+      problems.push({ field: `${field}.${t1.valueField}`, message: t1.messages.valueNotInOptions });
+    }
+  };
+  const ledger = options.ledger;
   table.verification.forEach((entry, index) => {
     const field = `verification[${entryAt(index)}]`;
     if (verificationById.get(entry.requirementId) !== entry) return;
+    if (ledger !== undefined && !isOneOf(BASE_VERIFICATION_KINDS, entry.kind)) {
+      const t1 = ledger.rowByVerificationKind.get(entry.kind)?.t1;
+      if (t1 === undefined || t1 === null) {
+        problems.push({ field: `${field}.kind`, message: UNREGISTERED_VERIFICATION_KIND_MESSAGE });
+        return;
+      }
+      checkLedgerVerification(
+        t1,
+        (entry as unknown as Record<string, unknown>)[t1.valueField],
+        field,
+        derived.get(entry.requirementId)?.roles ?? [],
+        natureById.get(entry.requirementId),
+      );
+      return;
+    }
     const kinds = ownedKinds(entry.requirementId);
     const unknownOwned = ownsUnknownKindRow(entry.requirementId);
     switch (entry.kind) {
@@ -1075,10 +1179,11 @@ export function inspectNameTable(
   list: RequirementList,
   value: unknown,
   documents: readonly PromptDocument[],
+  options: NameTableLedgerOptions = {},
 ): ResolveResult {
   const listProblems = checkRequirementListForTable(list);
   if (listProblems.length > 0) return { ok: false, problems: listProblems };
-  const scan = scanNameTableDraftShape(value);
+  const scan = scanNameTableDraftShape(value, options.ledger);
   // 後段に渡す元が無い（写像でない・行や要件ごとの並びが並びでない）ときは形の問題だけを返す
   if (!("rows" in scan) || scan.rows === null || scan.requirements === null) return { ok: false, problems: scan.problems };
   const { rows: draftRows, requirements: draftRequirements } = scan;
@@ -1181,12 +1286,20 @@ export function inspectNameTable(
     list,
     { rows: tableRows, ownership, verification, classification },
     documents,
-    { rowOrigin, entryOrigin, skipSourceRows, droppedRows, droppedRequirementIds, rowIdsOwnedByDropped },
+    {
+      rowOrigin,
+      entryOrigin,
+      skipSourceRows,
+      droppedRows,
+      droppedRequirementIds,
+      rowIdsOwnedByDropped,
+      ...(options.ledger === undefined ? {} : { ledger: options.ledger }),
+    },
   );
 
   const problems = [...scan.problems, ...copyProblems, ...tableProblems];
   if (problems.length > 0) return { ok: false, problems };
-  const shape = checkNameTableDraftShape(value);
+  const shape = checkNameTableDraftShape(value, options);
   if (!shape.ok) return shape;
   return resolveNameTableDraft(list, shape.value);
 }

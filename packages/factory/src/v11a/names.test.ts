@@ -22,18 +22,24 @@ import {
 import {
   MIN_COPY_LENGTH,
   checkNameTable,
+  checkNameTable as checkNameTableOf,
   checkNameTableDraftShape,
+  checkNameTableDraftShape as checkNameTableDraftShapeOf,
   copyLengthFor,
   deriveOwnership,
   inspectNameTable,
+  inspectNameTable as inspectNameTableOf,
   nameTableSha256,
   requirementCopy,
   resolveNameTableDraft,
   sharedRowIds,
   sourcePositionOf,
+  UNREGISTERED_VERIFICATION_KIND_MESSAGE,
   type NameTable,
+  type NameTableLedgerOptions,
   type NameTableRow,
 } from "./names.js";
+import { PROPERTY_LEDGER_VIEW, type LedgerView } from "../v12/ledger.js";
 
 const list = fixtureList();
 
@@ -53,14 +59,16 @@ function expectNoValues(problems: readonly Problem[], extra: readonly string[] =
 }
 
 /** 表を書き換えて検査し、名指しの問題があることと値を埋めないことを確かめる */
+const expectProblemOf = (...args: Parameters<typeof expectProblem>): readonly Problem[] => expectProblem(...args);
 function expectProblem(
   table: NameTable,
   field: string,
   message: string,
   extra: readonly string[] = [],
   against: RequirementList = list,
+  options: NameTableLedgerOptions = {},
 ): readonly Problem[] {
-  const problems = checkNameTable(against, table, FIXTURE_DOCUMENTS);
+  const problems = checkNameTable(against, table, FIXTURE_DOCUMENTS, options);
   expect(problems).toContainEqual({ field, message });
   expectNoValues(problems, extra);
   return problems;
@@ -854,7 +862,18 @@ describe("形で落ちた行の派生だけを抑える（PR #532 のレビュ�
   });
 });
 
-describe("既定値の確かめ方 default-value（T1' の所属の fail-closed と下書きの形。Issue #533）", () => {
+/** 旗 off（台帳を渡さない）と旗 on（台帳の導出を渡す）。#533 の T1' の試験を両方で同じ結果に照らす（Issue #547） */
+const LEDGER_CASES: readonly { readonly name: string; readonly options: NameTableLedgerOptions }[] = [
+  { name: "off", options: {} },
+  { name: "on", options: { ledger: PROPERTY_LEDGER_VIEW } },
+];
+
+describe.each(LEDGER_CASES)("既定値の確かめ方 default-value（T1' の所属の fail-closed と下書きの形。Issue #533。旗 $name）", ({ options }) => {
+  const checkNameTable: typeof checkNameTableOf = (l, t, d) => checkNameTableOf(l, t, d, options);
+  const inspectNameTable: typeof inspectNameTableOf = (l, v, d) => inspectNameTableOf(l, v, d, options);
+  const checkNameTableDraftShape: typeof checkNameTableDraftShapeOf = (v) => checkNameTableDraftShapeOf(v, options);
+  const expectProblem: typeof expectProblemOf = (table, field, message, extra, against) =>
+    expectProblemOf(table, field, message, extra, against, options);
   const dlist = fixtureDefaultValueList();
   /** R6（一覧の 6 番目）の確かめ方の位置 */
   const R6 = "verification[5]";
@@ -984,5 +1003,70 @@ describe("既定値の確かめ方 default-value（T1' の所属の fail-closed 
         },
       ],
     });
+  });
+});
+
+// ── 旗 on：台帳に無い確かめ方の種類（Issue #547）────────────────────────────────
+
+describe("旗 on：T1' に台帳に無い確かめ方の種類を直接渡すと固定文で落ちる（未登録の性質の拒否）", () => {
+  const dlist = fixtureDefaultValueList();
+  /** R6 の確かめ方の種類だけを、台帳に無い種類に差し替えた表（形の検査を迂回して型付きの表で直接渡す） */
+  const unregistered = (kind: string): NameTable => {
+    const table = fixtureDefaultValueTable();
+    return {
+      ...table,
+      verification: table.verification.map((entry) =>
+        entry.requirementId === "R6" ? ({ requirementId: "R6", kind, value: "alpha" } as unknown as NameTable["verification"][number]) : entry,
+      ),
+    };
+  };
+
+  it("二点測定：台帳にある default-value は問題 0、台帳に無い種類は位置 verification[5].kind・固定文（値を埋めない）で落ちる", () => {
+    const options = { ledger: PROPERTY_LEDGER_VIEW };
+    expect(checkNameTableOf(dlist, fixtureDefaultValueTable(), FIXTURE_DOCUMENTS, options)).toEqual([]);
+    for (const kind of ["enum-membership", "state-after-set", "other"]) {
+      const problems = checkNameTableOf(dlist, unregistered(kind), FIXTURE_DOCUMENTS, options);
+      expect(problems, kind).toEqual([{ field: "verification[5].kind", message: UNREGISTERED_VERIFICATION_KIND_MESSAGE }]);
+      expect(UNREGISTERED_VERIFICATION_KIND_MESSAGE).not.toContain(kind);
+    }
+  });
+
+  it("台帳から確かめ方に結び付いた行を外すと、default-value も台帳に無い種類として落ちる（台帳の行から掛けている）", () => {
+    const withoutDefault: LedgerView = {
+      ...PROPERTY_LEDGER_VIEW,
+      verificationKinds: PROPERTY_LEDGER_VIEW.verificationKinds.filter((kind) => kind !== "default-value"),
+      rowByVerificationKind: new Map(),
+    };
+    expect(checkNameTableOf(dlist, fixtureDefaultValueTable(), FIXTURE_DOCUMENTS, { ledger: withoutDefault })).toEqual([
+      { field: "verification[5].kind", message: UNREGISTERED_VERIFICATION_KIND_MESSAGE },
+    ]);
+    // 下書きの形も、台帳の種類の一覧の固定文で落ちる
+    const shape = checkNameTableDraftShapeOf(draftOf(dlist, fixtureDefaultValueTable()), { ledger: withoutDefault });
+    expect(shape).toEqual({
+      ok: false,
+      problems: [
+        { field: "requirements[5].verification.kind", message: "確かめ方の種類は fixed-test・structural・unresolved のいずれかであること" },
+      ],
+    });
+  });
+
+  it("下書きの知らない種類は、on でも off と同じ固定文（種類の一覧は台帳から導いて同じ並び）", () => {
+    const draft = draftOf(list, fixtureTable());
+    const broken = {
+      ...draft,
+      requirements: draft.requirements.map((entry, at) => (at === 0 ? { ...entry, verification: { kind: "enum-membership" } } : entry)),
+    };
+    expect(checkNameTableDraftShapeOf(broken, { ledger: PROPERTY_LEDGER_VIEW })).toEqual(checkNameTableDraftShapeOf(broken));
+    expect(inspectNameTableOf(list, broken, FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW })).toEqual(
+      inspectNameTableOf(list, broken, FIXTURE_DOCUMENTS),
+    );
+  });
+
+  it("今の題材の表（default-value の無い表）も on と off で同じ結果", () => {
+    expect(checkNameTableOf(list, fixtureTable(), FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW })).toEqual([]);
+    const draft = draftOf(list, fixtureTable());
+    expect(inspectNameTableOf(list, draft, FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW })).toEqual(
+      inspectNameTableOf(list, draft, FIXTURE_DOCUMENTS),
+    );
   });
 });
