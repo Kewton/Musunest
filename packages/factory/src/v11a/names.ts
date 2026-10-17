@@ -689,11 +689,26 @@ function checkRowType(row: NameTableRow, field: string, problems: Problem[]): vo
   }
 }
 
-/** view-shows の検査が求める所属：画面 S と、S と同じ entity（dashboard は entity 無し）の項目か計算 R の両方 */
-function hasViewShowsPair(owned: readonly NameTableRow[]): boolean {
+/**
+ * 形で落ちた行から、元の候補で個別に読めた欄（診断用だけ。採用表・返す表には流さない）。
+ * `undefined` は読めなかったこと（`entity` の `null` は「所属 entity 無し」と読めたこと）。
+ */
+interface DroppedRowInfo {
+  readonly kind: NameTableKind | undefined;
+  readonly entity: string | null | undefined;
+}
+
+/**
+ * view-shows の検査が求める所属：画面 S と、S と同じ entity（dashboard は entity 無し）の項目か計算 R の両方。
+ * 形で落ちた行の `entity` が読めなかったとき（`undefined`）は、どの entity とも組めるものとして数える
+ * （満たす可能性が残るので不足にしない）。
+ */
+function hasViewShowsPair(owned: readonly Pick<DroppedRowInfo, "kind" | "entity">[]): boolean {
   const screens = owned.filter((row) => row.kind === "screen");
   const sources = owned.filter((row) => row.kind === "field" || row.kind === "computation");
-  return screens.some((screen) => sources.some((source) => source.entity === screen.entity));
+  return screens.some((screen) =>
+    sources.some((source) => source.entity === undefined || screen.entity === undefined || source.entity === screen.entity),
+  );
 }
 
 /** 所属 entity を持つべき行か（null であるべきなら false） */
@@ -745,11 +760,14 @@ interface TableCheckOptions {
   readonly entryOrigin?: readonly number[];
   /** 出典の検査（要件 ID の実在・引用）を飛ばす行（表の行の添字。写しの段で問題にした行） */
   readonly skipSourceRows?: ReadonlySet<number>;
-  /** 形で落ちた行の id（元の候補から読めた分） */
-  readonly droppedRowIds?: ReadonlySet<string>;
+  /** 形で落ちた行の id（元の候補から読めた分）→ 個別に読めた kind・entity（診断用だけ） */
+  readonly droppedRows?: ReadonlyMap<string, DroppedRowInfo>;
   /** 形で落ちた要件の ID（一覧の ID）。所属・確かめ方・分類が無いことを問題にしない */
   readonly droppedRequirementIds?: ReadonlySet<string>;
-  /** 形で落ちた要件が所属させていた行の id（元の候補から読めた分）。孤立した行にしない */
+  /**
+   * 形で落ちた要素を経由して所属していた行の id（元の候補から読めた分）。孤立した行にしない——形で落ちた要件が
+   * 所属させていた行と、所属させた行が形で落ちたために導かれなくなった所属 entity
+   */
   readonly rowIdsOwnedByDropped?: ReadonlySet<string>;
 }
 
@@ -767,7 +785,9 @@ function checkNameTableWith(
   const droppedRequirementIds = options.droppedRequirementIds ?? new Set<string>();
   const rowIdsOwnedByDropped = options.rowIdsOwnedByDropped ?? new Set<string>();
   /** 形で落ちた行を指す ID か（表に在る行は落ちた行ではない） */
-  const isDroppedRow = (id: string): boolean => !rowById.has(id) && (options.droppedRowIds?.has(id) ?? false);
+  const droppedRowOf = (id: string): DroppedRowInfo | undefined =>
+    rowById.has(id) ? undefined : options.droppedRows?.get(id);
+  const isDroppedRow = (id: string): boolean => droppedRowOf(id) !== undefined;
 
   // (b) id の一意
   table.rows.forEach((row, index) => {
@@ -915,27 +935,26 @@ function checkNameTableWith(
     });
   });
   const derived = new Map(deriveOwnership(table).map((entry) => [entry.requirementId, entry] as const));
-  const ownedKinds = (requirementId: string): ReadonlySet<NameTableKind> =>
-    new Set(
-      (derived.get(requirementId)?.roles ?? []).flatMap((role) => {
-        const row = rowById.get(role.id);
-        return row === undefined ? [] : [row.kind];
-      }),
-    );
-  const constraintIds = constraintIdsIn(documents);
-  /** 形で落ちた行を所属させた要件は、その行の種類が分からないので、種類に依る問いを掛けない */
-  const ownsDroppedRow = (requirementId: string): boolean =>
-    (derived.get(requirementId)?.roles ?? []).some((role) => isDroppedRow(role.id));
-  const ownedRows = (requirementId: string): readonly NameTableRow[] =>
+  /**
+   * 要件が所属させた行の kind・entity。形で落ちた行は、元の候補で読めた kind・entity で数える（診断用だけ）。
+   * 読めた kind で満たせない不足は、その行を直しても補えないので報告する（PR #532 のレビュー 1）
+   */
+  const ownedRows = (requirementId: string): readonly Pick<DroppedRowInfo, "kind" | "entity">[] =>
     (derived.get(requirementId)?.roles ?? []).flatMap((role) => {
-      const row = rowById.get(role.id);
+      const row = rowById.get(role.id) ?? droppedRowOf(role.id);
       return row === undefined ? [] : [row];
     });
+  const ownedKinds = (requirementId: string): ReadonlySet<NameTableKind> =>
+    new Set(ownedRows(requirementId).flatMap((row) => (row.kind === undefined ? [] : [row.kind])));
+  const constraintIds = constraintIdsIn(documents);
+  /** kind が読めない形で落ちた行を所属させた要件は、その行が満たす可能性が残るので、種類に依る不足を出さない */
+  const ownsUnknownKindRow = (requirementId: string): boolean =>
+    ownedRows(requirementId).some((row) => row.kind === undefined);
   table.verification.forEach((entry, index) => {
     const field = `verification[${entryAt(index)}]`;
     if (verificationById.get(entry.requirementId) !== entry) return;
     const kinds = ownedKinds(entry.requirementId);
-    const unknownOwned = ownsDroppedRow(entry.requirementId);
+    const unknownOwned = ownsUnknownKindRow(entry.requirementId);
     switch (entry.kind) {
       case "fixed-test":
         if (kinds.size === 0 && !unknownOwned) problems.push({ field, message: "固定した試験で確かめる要件に所属が無い" });
@@ -1077,21 +1096,33 @@ export function inspectNameTable(
     verification.push({ ...entry.verification, requirementId });
     classification.push({ requirementId, nature: entry.nature });
   });
+  // 形で落ちた行から、個別に読める kind・entity を診断用にだけ持つ（採用表・返す表には流さない）
+  const droppedRows = new Map<string, DroppedRowInfo>();
+  draftRows.forEach((row, index) => {
+    const raw = scan.rawRows[index];
+    const id = row === undefined ? readableId(raw) : undefined;
+    if (id === undefined || !isRecord(raw)) return;
+    const kind = isOneOf(NAME_TABLE_KINDS, raw["kind"]) ? raw["kind"] : undefined;
+    const rawEntity = raw["entity"];
+    const entity = rawEntity === null ? null : isNonEmptyString(rawEntity) ? rawEntity : undefined;
+    if (!droppedRows.has(id)) droppedRows.set(id, { kind, entity });
+  });
   // 形で落ちた要件が所属させていた行の所属 entity も、その要件から導かれていた（`deriveOwnership`）
   for (const id of rowIdsOwnedByDropped) {
     const entity = draftRows.find((row) => row?.id === id)?.entity;
     if (entity !== undefined && entity !== null) rowIdsOwnedByDropped.add(entity);
   }
-  const droppedRowIds = new Set<string>();
-  draftRows.forEach((row, index) => {
-    const id = row === undefined ? readableId(scan.rawRows[index]) : undefined;
-    if (id !== undefined) droppedRowIds.add(id);
-  });
+  // 所属させた行が形で落ちると、その行から導かれていた所属 entity が消える（PR #532 のレビュー 2）。
+  // 元の候補から読める所属（正常な要件と形で落ちた要件の両方）が指す、形で落ちた行の entity だけを抑える
+  const ownedIds = new Set([...rowIdsOwnedByDropped, ...ownership.flatMap((entry) => entry.roles.map((role) => role.id))]);
+  for (const [id, info] of droppedRows) {
+    if (ownedIds.has(id) && typeof info.entity === "string") rowIdsOwnedByDropped.add(info.entity);
+  }
   const tableProblems = checkNameTableWith(
     list,
     { rows: tableRows, ownership, verification, classification },
     documents,
-    { rowOrigin, entryOrigin, skipSourceRows, droppedRowIds, droppedRequirementIds, rowIdsOwnedByDropped },
+    { rowOrigin, entryOrigin, skipSourceRows, droppedRows, droppedRequirementIds, rowIdsOwnedByDropped },
   );
 
   const problems = [...scan.problems, ...copyProblems, ...tableProblems];

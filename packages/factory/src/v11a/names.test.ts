@@ -742,3 +742,82 @@ describe("画面の entity の固定文（K5(b)）", () => {
     expect(unknown.filter((problem) => problem.field === field)).toHaveLength(1);
   });
 });
+
+// ── 形で落ちた行の派生だけを抑え、独立した不足・孤立は報告する（PR #532 のレビューの指摘 1・2。#527）─────────
+//
+// 最小の表：entity `e.record` と、その項目 `f.record.title` の 2 行。R1 は項目だけを名指しで所属させる。
+// 直す前は、(指摘 1) 項目の name だけが壊れると kind が読めるのに要件ごと種類の問いを抑え、操作の不足が消えた。
+// (指摘 2) 項目が形で落ちると、項目から導かれていた e.record の所属が消え、e.record を孤立した行と返した。
+describe("形で落ちた行の派生だけを抑える（PR #532 のレビュー 1・2）", () => {
+  const single: RequirementList = {
+    requirements: [{ id: "R1", text: "記録を題名つきで登録できる。", quote: "記録を題名つきで登録できる。", position: { start: 0, end: 14 } }],
+    decisions: [],
+    unresolved: [],
+  };
+  const copy = requirementCopy(single.requirements[0]!.text, copyLengthFor(single)!);
+  const rowOf = (id: string, kind: string, entity: string | null, name: unknown, type: unknown) => ({
+    id,
+    kind,
+    entity,
+    name,
+    role: "要件 R1 が使う対象",
+    source: { copy, quote: "記録" },
+    type,
+    options: null,
+    groupBy: null,
+    refEntity: null,
+  });
+  const draft = (options: { readonly name?: unknown; readonly kind?: string; readonly verification?: unknown; readonly extraRows?: readonly unknown[] } = {}) => ({
+    rows: [
+      rowOf("e.record", "entity", null, "record", null),
+      rowOf("f.record.title", options.kind ?? "field", "e.record", options.name ?? "title", "string"),
+      ...(options.extraRows ?? []),
+    ],
+    requirements: [
+      {
+        copy,
+        roles: [{ id: "f.record.title", basis: "stated", reason: null }],
+        verification: options.verification ?? { kind: "fixed-test" },
+        nature: "ruled",
+      },
+    ],
+  });
+  const inspect = (value: unknown) => inspectNameTable(single, value, FIXTURE_DOCUMENTS);
+  const nameShape = { field: "rows[1].name", message: "名前は文字列であること" };
+  const kindShape = { field: "rows[1].kind", message: "行の種類は entity・field・computation・operation・screen のいずれかであること" };
+  const actionKind = { kind: "structural", reason: "操作の種類だけを求める", checks: ["action-kind"] };
+  const kindMissing = { field: "verification[0].checks[0]", message: "checks の検査に合う種類の所属が無い" };
+
+  it("前提：正常な最小の表は ok", () => {
+    expect(inspect(draft()).ok).toBe(true);
+  });
+
+  it("指摘 2：所属させた項目が形で落ちても、その項目から導かれていた entity を孤立にしない", () => {
+    // 直す前：[nameShape, { field: "rows[0]", message: "どの要件にも所属しない行がある" }]
+    expect(inspect(draft({ name: 42 }))).toEqual({ ok: false, problems: [nameShape] });
+  });
+
+  it("指摘 2 の対照：元から独立した孤立 entity は報告する", () => {
+    const other = rowOf("e.other", "entity", null, "other", null);
+    expect(inspect(draft({ name: 42, extraRows: [other] }))).toEqual({
+      ok: false,
+      problems: [nameShape, { field: "rows[2]", message: "どの要件にも所属しない行がある" }],
+    });
+  });
+
+  it("指摘 1：kind が読める壊れた行は、その kind で数え、なお足りない種類の不足は報告する", () => {
+    // 対照：name が正常なら種類の不足が出る
+    expect(inspect(draft({ verification: actionKind }))).toEqual({ ok: false, problems: [kindMissing] });
+    // 直す前：[nameShape, { field: "rows[0]", message: "どの要件にも所属しない行がある" }]（種類の不足が消えた）
+    expect(inspect(draft({ name: 42, verification: actionKind }))).toEqual({ ok: false, problems: [nameShape, kindMissing] });
+  });
+
+  it("指摘 1 の対照：既知の kind で満たせる checks は不足にしない", () => {
+    const fieldType = { kind: "structural", reason: "項目の型だけを求める", checks: ["field-type"] };
+    expect(inspect(draft({ name: 42, verification: fieldType }))).toEqual({ ok: false, problems: [nameShape] });
+  });
+
+  it("指摘 1 の対照：本当に kind が読めない行は、満たす可能性が残るので種類の不足を抑える", () => {
+    expect(inspect(draft({ kind: "widget", verification: actionKind }))).toEqual({ ok: false, problems: [kindShape] });
+  });
+});
