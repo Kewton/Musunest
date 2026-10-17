@@ -2016,6 +2016,47 @@ describe("(u) 要件でない文：T1'' が受理した non-requirement の要�
     expectNoAcceptanceMaterial(recording.structured.map((request) => JSON.stringify(request)));
   });
 
+  it("(1') B1 の要件の一覧（PR #582 の独立レビュー F1）：T1'' が全件受理・B3' が残る 4 件を受理した走りで、B1 の要求の確定した仕様に R6 が無い。T2・B3'・B4（B6 と同じ評価の文脈）の一覧にも無く、⑦ は持ち越し 0 で full。旗 off の B1 の一覧は今までどおり全件", async () => {
+    const m = materialsOf("R6", NON_REQUIREMENT_TEXT);
+    const contexts: string[][] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      const evaluator = original(input);
+      return {
+        ...evaluator,
+        runTests: (app, context, correspondence) => {
+          contexts.push(context.list.requirements.map((requirement) => requirement.id));
+          return evaluator.runTests(app, context, correspondence);
+        },
+      };
+    });
+    const { result, recording } = await runScenario(
+      [structured(draftOf(m.list, m.table)), structured(acceptAll(m.ids)), structured(t2Response()), structured({ declaration: RUN_YAML }), structured(acceptAll())],
+      { ...flags, plan: m.plan, source: m.source },
+    );
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(nonRequirementsOf(result.bundle)).toEqual(["R6"]);
+    const idsOf = (input: string, name: string) => (dataBlockOf(input, name) as RequirementList).requirements.map((requirement) => requirement.id);
+    const write = recording.structured.find((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME)!;
+    const b1Ids = idsOf(write.input, WRITE_V11A_DATA_NAMES[0]);
+    expect(b1Ids).toEqual([...IDS]);
+    expect(write.input).not.toContain(NON_REQUIREMENT_TEXT);
+    const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)!;
+    expect(idsOf(t2.input, "要件の一覧")).toEqual([...IDS]);
+    const decl = recording.structured.find((request) => request.schemaName === DECL_CHECK_SCHEMA_NAME)!;
+    expect(decl.input).not.toContain('"requirementId": "R6"');
+    expect(contexts.length).toBeGreaterThan(0);
+    for (const ids of contexts) expect(ids).toEqual([...IDS]);
+    expect(carryEntriesOf(result.bundle)).toEqual([]);
+    // B1 の表の行は全行のまま（所属 0 行なので R6 の分の行は無い）
+    const rows = dataBlockOf(write.input, WRITE_V11A_DATA_NAMES[1]) as readonly { id: string }[];
+    expect(rows.map((row) => row.id)).toEqual(m.table.rows.map((row) => row.id));
+    // 旗 off：B1 の一覧は確定した仕様の全件のまま（題材の一覧で、持ち越しの R を含めて渡す今の契約）
+    const off = await runScenario([...head(), structured(acceptAll())]);
+    const offWrite = off.recording.structured.find((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME)!;
+    expect(idsOf(offWrite.input, WRITE_V11A_DATA_NAMES[0])).toEqual(LIST.requirements.map((requirement) => requirement.id));
+  });
+
   for (const id of ["R6", "R:alt:x1"]) {
     it(`(2)(3) 負例：決まりのある要件（ID ${id}）を non-requirement に分類した走りは、T1'' の対象のデータに載り、拒否（2 回）で持ち越しになって full が出ない（ID の形で対象から外さない・受理を既定にしない）`, async () => {
       const m = materialsOf(id, RULED_AS_NON_REQUIREMENT_TEXT);
