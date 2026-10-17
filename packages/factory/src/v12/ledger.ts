@@ -12,6 +12,10 @@
 // 手 2c（#549）で 3 行目の `empty-aggregate`（集計の種類 × データ状態の空の値）を足す。確かめ方の種類は増やさず
 // （fixed-test のまま）、T1 の計算の行の型に `aggregate`（集計の種類と集計元）を足し（種類の enum は台帳の表の順）、
 // T2' が集計の試験の期待をこの行の表から導いた値と照らす。台帳からこの行を除いた導出は #548 の導出と同じである。
+// 手 2d（#550）で、引き継いだ `when` の行の未定義の列（要件の決まりの型・T2 の試験の型・外の対応・T2 の規則の文）を埋め、
+// T2' が操作の条件の試験の期待の型（ok なら真偽）と対象（条件を持つ操作の行）を照らす。あわせて 4 行目の
+// `non-requirement`（決まりも対象の項目も無い説明文）を足す。確かめ方の種類は増えるが試験は作らず（観測する性質の一覧に
+// 入れない）、T1''（独立の点検）が受理した要件だけを、持ち越しの導出が要件でない文として残る一覧から除く。
 //
 // 台帳は LLM を呼ばず、評価口を import しない（B4 の照合は名前で持ち、評価口が名前 → 関数の表を持つ）。
 import type { AggregateKind } from "@musunest/appspec-schema";
@@ -79,20 +83,28 @@ export interface PropertyT1 {
   readonly kind: string;
   readonly valueField: "value" | null;
   readonly ownership: {
-    readonly row: { readonly kind: TestTargetKind; readonly type: string };
+    /** 所属させる行の種類・型（所属 0 行の確かめ方は null＝どの行も所属させない。#550） */
+    readonly row: { readonly kind: TestTargetKind; readonly type: string } | null;
     readonly count: number;
     readonly entityAddedByCode: boolean;
     readonly valueInOptions: boolean;
     readonly optionsNonEmpty: boolean;
   };
-  readonly nature: "ruled" | "existence-only";
+  /** 表の分類に求める値（null は分類の値を見ない＝欄は完全性の検査のために要るが値は使わない。#550） */
+  readonly nature: "ruled" | "existence-only" | null;
+  /**
+   * 真なら、T1''（独立の点検）が受理した要件を、持ち越しの導出が要件でない文として残る一覧から除く（持ち越しに数えない・
+   * 試験を作らない）。拒否されれば今までどおり持ち越し。T1 の分類・出どころ・要件 ID の形では除かない（#550）
+   */
+  readonly excludeWhenAccepted: boolean;
   /** T1' の固定文（値を埋めない） */
   readonly messages: {
     /** 下書きの形：欄が空でない文字列でない（欄を持たない確かめ方は、`value` が null でない） */
     readonly valueShape: string;
     /** 型付きの表：欄が空（欄を持たない確かめ方は、`value` が null でない） */
     readonly valueEmpty: string;
-    readonly nature: string;
+    /** 分類が記述子の値でない（分類の値を見ない記述子は null） */
+    readonly nature: string | null;
     readonly count: string;
     readonly others: string;
     /** 欄の値が所属の行の options に無い（`valueInOptions` の行だけ） */
@@ -195,6 +207,34 @@ export interface PropertyAggregateT2 {
   };
 }
 
+/**
+ * 条件の試験の型（操作の条件のように、期待が真偽で決まる性質だけが持つ。#550）。対象は `targetKind` の行のうち型の
+ * `targetFlag` が真の行（条件を持つ操作）。kind は `kinds` のどれでもよく、期待は ok なら decode 済みの値が真偽、error なら
+ * 条件が成り立たないこと（v1 の評価器と同じ）。値は T2 の LLM が書き、T2' は型と対象だけを照らす。
+ */
+export interface PropertyConditionT2 {
+  readonly targetKind: TestTargetKind;
+  readonly operation: Exclude<TestOperation, "structure">;
+  /** 対象の行の型の真偽の欄（真の行だけを対象にできる） */
+  readonly targetFlag: "hasWhen";
+  /** T1 の確かめ方（台帳の外の種類） */
+  readonly t1Kind: "fixed-test";
+  readonly kinds: readonly TestKind[];
+  /** 期待の型（ok は真偽・error は条件が成り立たないこと） */
+  readonly expected: { readonly ok: "boolean"; readonly error: "condition-fails" };
+  /** 入力の形（写像）と参照データ（任意） */
+  readonly input: "record";
+  readonly referenceData: "any";
+  readonly expectedWriter: ExpectedValueWriter;
+  /** T2' の固定文（値を埋めない） */
+  readonly messages: {
+    /** 対象が、条件を持つ（`targetFlag` が真の）行でない */
+    readonly target: string;
+    /** 期待が ok なのに、decode 済みの値が真偽でない（写像・文字列・数・null） */
+    readonly expected: string;
+  };
+}
+
 /** 規則の文（段ごとに足す 1 文。無ければ null） */
 export interface PropertyRules {
   readonly t1: string | null;
@@ -222,6 +262,8 @@ export interface PropertyRow {
   readonly t2: PropertyT2 | null;
   /** 集計の試験の型（集計の種類 × データ状態で期待が決まる性質だけ。ほかは null。#549） */
   readonly t2Aggregate: PropertyAggregateT2 | null;
+  /** 条件の試験の型（期待が真偽で決まる性質だけ。ほかは null。#550） */
+  readonly t2Condition: PropertyConditionT2 | null;
   /** 網羅の鍵の欄（`coverage.ts` の `coverageUnitKey` の欄。未定義なら null） */
   readonly coverageKey: readonly string[] | null;
   /** B4 の照合の名前（評価口が名前 → 関数の表を持つ。未対応なら null） */
@@ -246,6 +288,7 @@ const INHERITED = {
   t1Acceptance: null,
   t2: null,
   t2Aggregate: null,
+  t2Condition: null,
   coverageKey: null,
   evaluation: "v1-run-tests",
   outer: null,
@@ -257,14 +300,39 @@ const INHERITED = {
  * 性質の台帳（**並びは今の観測する性質の並び**＝T2 の observes の enum の順）。v1.1α の評価の方法の表の組
  * （value・validation・when・view-structure・existence）は引き継いだ有効の行、`state-after-set` は登録済み・未対応、
  * 最初の新しい行は `default-value`（#533 の列をそのまま写す）、2 つ目は `enum-membership`（選択肢の集合。#548）、3 つ目は
- * `empty-aggregate`（集計の種類 × データ状態の空の値。#549）。
+ * `empty-aggregate`（集計の種類 × データ状態の空の値。#549）、4 つ目は `non-requirement`（要件でない説明文。#550）。
+ * 引き継いだ `when` の行は、手 2d（#550）で未定義の列（網羅の鍵を除く）を埋めた。
  */
 export const PROPERTY_LEDGER: readonly PropertyRow[] = [
   {
     ...INHERITED,
     id: "when",
+    since: "Issue #508（台帳への集約は #547・列の定義は #550）",
     why: "操作の条件（when）を、操作 × action の試験の真偽で確かめる（v1.1α の評価の方法の表。02 §1.3・07 §2.3）",
+    requirementRule: "操作ができる条件（いつ実行できるか）を決める要件",
     combinations: [{ targetKind: "operation", operation: "action" }],
+    t2Condition: {
+      targetKind: "operation",
+      operation: "action",
+      targetFlag: "hasWhen",
+      t1Kind: "fixed-test",
+      kinds: TEST_KINDS,
+      expected: { ok: "boolean", error: "condition-fails" },
+      input: "record",
+      referenceData: "any",
+      expectedWriter: "llm-written-code-checked",
+      messages: {
+        target: "操作の条件（when）の試験の対象は、条件（when）を持つ操作の行であること",
+        expected: "操作の条件（when）の試験の期待は、ok なら真偽（true・false）であること（操作後の状態を書かない）",
+      },
+    },
+    outer: "advanceAction",
+    rules: {
+      t1: null,
+      t1Acceptance: null,
+      t2: "操作 × action の試験（observes は when）の期待（expected）は、操作の条件（when）が成り立つなら kind を ok・value を true、成り立たないなら kind を ok・value を false（か kind を error）にする。操作後の状態（写像・文字列・数）を期待に書かない。条件（when）の無い操作（表の type の hasWhen が false の行）に action の試験を作らない（その要件は構造の検査か別の対象で確かめる）。",
+      b1: null,
+    },
   },
   {
     ...INHERITED,
@@ -332,6 +400,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
         optionsNonEmpty: false,
       },
       nature: "ruled",
+      excludeWhenAccepted: false,
       messages: {
         valueShape: "既定値で確かめる要件の value は空でない文字列（期待する既定値のキー）であること",
         valueEmpty: "既定値で確かめる要件の value が空である",
@@ -366,6 +435,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       },
     },
     t2Aggregate: null,
+    t2Condition: null,
     coverageKey: ["requirementId", "targetId", "kind", "operation", "observes"],
     evaluation: "default-value",
     outer: "enumDefault",
@@ -396,6 +466,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
         optionsNonEmpty: true,
       },
       nature: "ruled",
+      excludeWhenAccepted: false,
       messages: {
         valueShape: "選択肢の集合で確かめる要件の value は null であること",
         valueEmpty: "選択肢の集合で確かめる要件の value は null であること",
@@ -430,6 +501,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       },
     },
     t2Aggregate: null,
+    t2Condition: null,
     coverageKey: ["requirementId", "targetId", "kind", "operation", "observes"],
     evaluation: "enum-membership",
     outer: OUTER_NOT_SCORED,
@@ -478,6 +550,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
         alsoExpected: "集計元の行が無い集計の試験の期待は、集計の種類とデータ状態で決まる値（台帳の表。空と明示すれば種類の値、しなければ null）であること",
       },
     },
+    t2Condition: null,
     coverageKey: ["requirementId", "targetId", "kind", "operation", "observes"],
     evaluation: "v1-run-tests",
     outer: OUTER_NOT_SCORED,
@@ -487,6 +560,52 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       t1Acceptance: null,
       t2: "集計（計算の行の type の form が aggregate）の要件の境界（boundary）の試験は、集計元を空と明示し（入力の契約の emptyEntities にその行の type.aggregate.entity の id を入れ、参照データにその entity の行を置かない）、期待（expected）の value を集計の種類で決まる値にする：sum・count は 0（見出しごとは、enum の見出しなら options の全キーを順に heading と value 0 で並べ、月の見出しなら各見出しの value を 0 にする）、avg は null（見出しごとは各見出しの value を null にする）。異常（abnormal）の試験は集計元に触れず（emptyEntities に入れず、参照データにその entity の行も置かない）、期待の value を null にする。どちらも対象（target）はその計算の行、operation は aggregate、observes は empty-aggregate、期待の kind は ok・code は null にする。集計元の行を置かずに observes を value にした集計の試験も、期待は同じ値（空と明示すれば種類で決まる値、しなければ null）にする。正常の試験（observes は value）は今までどおり集計元の行を置いて作る。",
       b1: "名前の表の計算の行の type に aggregate があれば、宣言のその計算の aggregate の種類（sum・count・avg）と集計元の entity を、その行の aggregate の種類と、集計元の entity の行の名前のとおりに書く。",
+    },
+  },
+  {
+    id: "non-requirement",
+    since: "Issue #550",
+    why: "目的を述べる前置きのように決まりも対象の項目も無い文を、試験を作らずに扱う。免除は T1''（独立の点検）の受理だけで決め、受理されなければ持ち越す（出どころや要件 ID の形では免除しない。08 §5・§8.2）",
+    state: "active",
+    inherited: false,
+    requirementRule: "決まりも対象の項目も無い説明文（目的を述べる前置きなど）",
+    t1: {
+      kind: "non-requirement",
+      valueField: null,
+      ownership: {
+        row: null,
+        count: 0,
+        entityAddedByCode: false,
+        valueInOptions: false,
+        optionsNonEmpty: false,
+      },
+      nature: null,
+      excludeWhenAccepted: true,
+      messages: {
+        valueShape: "要件でない文（non-requirement）の value は null であること",
+        valueEmpty: "要件でない文（non-requirement）の value は null であること",
+        nature: null,
+        count: "要件でない文（non-requirement）には行を所属させないこと",
+        others: "要件でない文（non-requirement）には行を所属させないこと",
+        valueNotInOptions: null,
+        optionsEmpty: null,
+      },
+    },
+    t1Acceptance: "文に決まりも対象（項目・計算・集計・操作・画面）も無いときだけ受理する。決まりか対象があれば weak-verification で拒否する",
+    combinations: [],
+    t2: null,
+    t2Aggregate: null,
+    t2Condition: null,
+    coverageKey: null,
+    evaluation: null,
+    outer: OUTER_NOT_SCORED,
+    unsupportedMessage: null,
+    rules: {
+      t1: "決まりも対象の項目も無い説明文（目的を述べる前置きなど）だけ kind を non-requirement にし、行を所属させず（roles は空の並び）、value は null にする。要件の出どころ（答えから来た・了承した代替先）では決めない。決まり（条件・計算・検査・既定値・選択肢）か対象（項目・計算・集計・操作・画面）を含む文には non-requirement を使わない。",
+      t1Acceptance:
+        "確かめ方が non-requirement の要件は、要件の文に決まりも対象（項目・計算・集計・操作・画面）も無いときだけ受理する。決まりか対象を含む要件は受理せず、weak-verification で拒否する。要件の出どころや要件 ID の形を受理の理由にしない。",
+      t2: null,
+      b1: null,
     },
   },
 ];
@@ -512,14 +631,27 @@ export function ledgerRowDefects(rows: readonly PropertyRow[]): readonly string[
     if (row.state === "registered-unsupported") {
       if (row.unsupportedMessage === null) defects.push(`${at} は未対応なのに、落とす固定文が無い`);
       if (row.evaluation !== null) defects.push(`${at} は未対応なのに、照合の名前がある`);
-    } else if (row.evaluation === null) {
+    } else if (row.evaluation === null && row.t1?.excludeWhenAccepted !== true) {
       defects.push(`${at} は有効なのに、照合の名前が無い`);
     }
     if (row.t1 !== null) {
       if (kinds.has(row.t1.kind)) defects.push(`${at} の確かめ方の種類 ${row.t1.kind} が重なっている`);
       kinds.add(row.t1.kind);
-      if (row.t2 === null) defects.push(`${at} は確かめ方の種類を持つのに、試験の型が無い`);
+      if (row.t2 === null && !row.t1.excludeWhenAccepted) defects.push(`${at} は確かめ方の種類を持つのに、試験の型が無い`);
       const { ownership, messages, valueField } = row.t1;
+      if (row.t1.nature !== null && messages.nature === null) defects.push(`${at} は分類を求めるのに、固定文が無い`);
+      if ((ownership.row === null) !== (ownership.count === 0)) {
+        defects.push(`${at} の所属の形が、行の種類の無いことと所属 0 行で食い違う`);
+      }
+      if (row.t1.excludeWhenAccepted) {
+        // 受理で除く確かめ方（要件でない文。#550）：所属 0 行・試験を作らない・照合しない・受理条件の文がある
+        if (ownership.count !== 0) defects.push(`${at} は受理で除くのに、行を所属させる`);
+        if (row.t2 !== null || row.t2Aggregate !== null || row.t2Condition !== null || row.combinations.length > 0) {
+          defects.push(`${at} は受理で除くのに、試験の型か評価の方法の表の組がある`);
+        }
+        if (row.evaluation !== null) defects.push(`${at} は受理で除くのに、照合の名前がある`);
+        if (row.t1Acceptance === null || row.rules.t1Acceptance === null) defects.push(`${at} は受理で除くのに、受理条件が無い`);
+      }
       if (ownership.valueInOptions && (valueField === null || messages.valueNotInOptions === null)) {
         defects.push(`${at} は欄の値を options に照らすのに、欄か固定文が無い`);
       }
@@ -544,6 +676,15 @@ export function ledgerRowDefects(rows: readonly PropertyRow[]): readonly string[
         defects.push(`${at} の集計の試験の型の組が、評価の方法の表の組に無い`);
       }
     }
+    if (row.t2Condition !== null) {
+      const { kinds: conditionKinds, targetKind, operation } = row.t2Condition;
+      if (conditionKinds.length === 0 || new Set(conditionKinds).size !== conditionKinds.length) {
+        defects.push(`${at} の条件の試験の型の kind が、空か重なっている`);
+      }
+      if (!row.combinations.some((entry) => entry.targetKind === targetKind && entry.operation === operation)) {
+        defects.push(`${at} の条件の試験の型の組が、評価の方法の表の組に無い`);
+      }
+    }
   });
   return defects;
 }
@@ -563,7 +704,7 @@ export interface LedgerView {
   readonly rows: readonly PropertyRow[];
   /** 確かめ方の種類（台帳の外の種類＋台帳の行の種類。台帳の順） */
   readonly verificationKinds: readonly string[];
-  /** 観測する性質（台帳の全行。台帳の順） */
+  /** 観測する性質（台帳の全行のうち、受理で除く確かめ方の行＝試験を作らない行を除く。台帳の順。#550） */
   readonly observes: readonly string[];
   /** 未対応の性質（台帳の順） */
   readonly unsupportedObserves: readonly string[];
@@ -585,6 +726,10 @@ export interface LedgerView {
   readonly rowByObserves: ReadonlyMap<string, PropertyRow>;
   /** 確かめ方の種類 → 行（確かめ方に結び付いた行だけ） */
   readonly rowByVerificationKind: ReadonlyMap<string, PropertyRow>;
+  /** T1'' が受理すれば要件でない文として残る一覧から除く確かめ方の種類（台帳の順。#550） */
+  readonly excludedWhenAcceptedKinds: readonly string[];
+  /** 条件の試験の型を持つ行（有効・削る候補の行。台帳の順。#550） */
+  readonly conditionRows: readonly (PropertyRow & { readonly t2Condition: PropertyConditionT2 })[];
   /** 集計の試験の型を持つ行（有効・削る候補の行。台帳の順。#549） */
   readonly aggregateRows: readonly (PropertyRow & { readonly t2Aggregate: PropertyAggregateT2 })[];
   /**
@@ -605,10 +750,12 @@ export function deriveLedgerView(rows: readonly PropertyRow[]): LedgerView {
   const aggregateRows = evaluable.filter(
     (row): row is PropertyRow & { readonly t2Aggregate: PropertyAggregateT2 } => row.t2Aggregate !== null,
   );
+  // 受理で除く確かめ方の行は試験を作らないので、観測する性質に入れない（T2 の schema の enum・T2' の台帳の引きの外。#550）
+  const observable = rows.filter((row) => row.t1?.excludeWhenAccepted !== true);
   return {
     rows,
     verificationKinds: [...BASE_VERIFICATION_KINDS, ...bound.map((row) => row.t1.kind)],
-    observes: rows.map((row) => row.id),
+    observes: observable.map((row) => row.id),
     unsupportedObserves: rows.filter((row) => row.state === "registered-unsupported").map((row) => row.id),
     combinations: evaluable.flatMap((row) => row.combinations.map((entry) => ({ ...entry, observes: row.id }))),
     t1RuleTexts: rows.flatMap((row) => (row.rules.t1 === null ? [] : [row.rules.t1])),
@@ -619,8 +766,12 @@ export function deriveLedgerView(rows: readonly PropertyRow[]): LedgerView {
       .filter((row) => row.state === "registered-unsupported")
       .flatMap((row) => (row.rules.t2 === null ? [] : [row.rules.t2])),
     t2ExemptKinds: bound.filter((row) => row.t2 !== null && isOnlyNormal(row.t2.requiredKinds)).map((row) => row.t1.kind),
-    rowByObserves: new Map(rows.map((row) => [row.id, row] as const)),
+    rowByObserves: new Map(observable.map((row) => [row.id, row] as const)),
     rowByVerificationKind: new Map(bound.map((row) => [row.t1.kind, row] as const)),
+    excludedWhenAcceptedKinds: bound.filter((row) => row.t1.excludeWhenAccepted).map((row) => row.t1.kind),
+    conditionRows: evaluable.filter(
+      (row): row is PropertyRow & { readonly t2Condition: PropertyConditionT2 } => row.t2Condition !== null,
+    ),
     aggregateRows,
     aggregateKinds: [...new Set(aggregateRows.flatMap((row) => row.t2Aggregate.values.map((entry) => entry.aggregate)))],
   };
@@ -663,8 +814,13 @@ export const PROPERTY_COPY_HEADER = ["id", "状態", "since", "T1 の kind", "T2
 export function propertyCopyCells(row: PropertyRow): readonly string[] {
   const state = `${PROPERTY_STATE_LABELS[row.state]}${row.inherited ? "（v1.1α から引き継ぎ・列の一部は未定義）" : ""}`;
   const aggregate = row.t2Aggregate;
+  const condition = row.t2Condition;
   const shape =
-    aggregate !== null
+    condition !== null
+      ? `${condition.targetKind} × ${condition.operation}（${condition.targetFlag} が真の行）・${condition.kinds.join("・")}・期待 ok は真偽・error は条件が成り立たない・入力 ${condition.input}・参照データ ${condition.referenceData}`
+      : row.t1?.excludeWhenAccepted === true
+      ? "無し（試験を作らない。T1'' が受理すれば要件でない文として残る一覧から除く）"
+      : aggregate !== null
       ? `${aggregate.targetKind} × ${aggregate.operation}・${aggregate.states.map((entry) => `${entry.kind}（${entry.label}）`).join("・")}・期待 ok の種類 × データ状態の値（${aggregate.values.map((entry) => `${entry.aggregate} は空 ${entry.empty}・未読 ${entry.unread}`).join("／")}）・入力 ${aggregate.input}・参照データ 集計元の行なし・${String(aggregate.minTests)} 本以上`
       : row.t2 === null
       ? row.combinations.length === 0
@@ -675,9 +831,9 @@ export function propertyCopyCells(row: PropertyRow): readonly string[] {
     row.id,
     state,
     row.since,
-    row.t1?.kind ?? "—",
+    row.t1?.kind ?? condition?.t1Kind ?? "—",
     shape,
-    row.t2?.expectedWriter ?? aggregate?.expectedWriter ?? "—",
+    row.t2?.expectedWriter ?? aggregate?.expectedWriter ?? condition?.expectedWriter ?? "—",
     row.evaluation ?? "—",
     row.outer ?? "未定義",
     row.why,

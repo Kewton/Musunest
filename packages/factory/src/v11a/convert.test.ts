@@ -4,7 +4,15 @@
 // 書けない部分は空、写した設計は v1 の `checkDesignOwnership`・`checkGroupBy` で問題 0 であることを固定する。
 import { describe, expect, it } from "vitest";
 import { checkDesignOwnership, checkGroupBy } from "../stages/design.js";
-import { LEDGER_VIEW_2A, fixtureDefaultValueTable, fixtureEnumMembershipTable, fixtureTable, withAggregates } from "./__tests__/fixtures.js";
+import {
+  LEDGER_VIEW_2A,
+  LEDGER_VIEW_2C,
+  fixtureDefaultValueTable,
+  fixtureEnumMembershipTable,
+  fixtureNonRequirementTable,
+  fixtureTable,
+  withAggregates,
+} from "./__tests__/fixtures.js";
 import { UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE, identityMappings, toRoleEntries, toV1 } from "./convert.js";
 import type { NameTable } from "./names.js";
 import { PROPERTY_LEDGER_VIEW } from "../v12/ledger.js";
@@ -138,5 +146,22 @@ describe("計算の行の集計の種類と集計元（aggregate。旗 on。Issu
     expect(toRoleEntries(aggregated)).toEqual(toRoleEntries(plain));
     expect(JSON.stringify(toV1(aggregated))).not.toContain('"aggregate":{');
     expect(identityMappings(aggregated)).toEqual(identityMappings(plain));
+  });
+});
+
+describe("要件でない文（non-requirement。旗 on。Issue #550）の v1 の型への写し", () => {
+  it("確かめ方は fixed-test として写り（台帳から入る。v1 の型は変えない）、所属は 0 行のまま。ほかの要件の写しは題材の表と同じ", () => {
+    const table = fixtureNonRequirementTable();
+    const converted = toV1(table, PROPERTY_LEDGER_VIEW);
+    const design = converted.design.designs.find((entry) => entry.requirementId === "R6");
+    expect(design?.verification).toEqual({ kind: "fixed-test" });
+    expect(converted.ownership.find((entry) => entry.requirementId === "R6")?.ownership ?? []).toEqual([]);
+    expect(converted.design.designs.filter((entry) => entry.requirementId !== "R6")).toEqual(toV1(fixtureTable()).design.designs);
+    expect(converted.mappings).toEqual(toV1(fixtureTable()).mappings);
+  });
+
+  it("二点測定：#549 の台帳（non-requirement が無い）では写さず固定文の例外で落ちる", () => {
+    expect(() => toV1(fixtureNonRequirementTable(), LEDGER_VIEW_2C)).toThrow(UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE);
+    expect(() => toV1(fixtureNonRequirementTable(), PROPERTY_LEDGER_VIEW)).not.toThrow();
   });
 });

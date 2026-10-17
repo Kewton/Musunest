@@ -19,7 +19,7 @@ import {
   type NameTableDraft,
   type NameTableRow,
 } from "../names.js";
-import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView } from "../../v12/ledger.js";
+import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } from "../../v12/ledger.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
 import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
 import { TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
@@ -237,6 +237,39 @@ export function fixtureEnumMembershipTable(options?: readonly string[]): NameTab
   };
 }
 
+/**
+ * 要件でない文（Issue #550）。決まりも対象の項目も無い、目的を述べる前置きの文。抽象的な文で、受入の題材の言葉は使わない。
+ */
+export const NON_REQUIREMENT_TEXT = "この仕組みは、記録を一か所にまとめて見通しをよくするためのものである。";
+
+/** 決まりと対象（項目の金額）を含むのに、要件でない文に分類されうる文（T1'' が拒否する側。Issue #550） */
+export const RULED_AS_NON_REQUIREMENT_TEXT = "この仕組みでは、項目の金額は必ず 0 より大きくする。";
+/** `RULED_AS_NON_REQUIREMENT_TEXT` の決まりの部分（拒否の引用） */
+export const RULED_AS_NON_REQUIREMENT_QUOTE = "項目の金額は必ず 0 より大きくする";
+
+/**
+ * 題材の一覧に、要件でない文の要件を末尾に足したもの（Issue #550。`fixtureList` の値は変えない）。要件 ID は既定で R6。
+ * 了承した代替先の形の ID（`R:alt:` で始まる）も渡せる——コードは要件 ID の形を見ないので、経路は同じでなければならない。
+ */
+export function fixtureNonRequirementList(text: string = NON_REQUIREMENT_TEXT, id = "R6"): RequirementList {
+  const base = fixtureList();
+  return { ...base, requirements: [...base.requirements, requirement(id, text)] };
+}
+
+/**
+ * 題材の表に、要件でない文の要件を足したもの（Issue #550）。所属は 0 行、確かめ方は non-requirement（欄は無し）、分類は
+ * 完全性の検査のための欄（値は使わない。ここでは existence-only）。行は題材の表のまま（`fixtureTable` の値は変えない）。
+ */
+export function fixtureNonRequirementTable(id = "R6"): NameTable {
+  const base = fixtureTable();
+  return {
+    rows: base.rows,
+    ownership: [...base.ownership, { requirementId: id, roles: [] }],
+    verification: [...base.verification, { requirementId: id, kind: "non-requirement" }],
+    classification: [...base.classification, { requirementId: id, nature: "existence-only" }],
+  };
+}
+
 /** 名前の表を T1 の応答の形（下書き。要件 ID を持たず、写しを添える）に戻す */
 export function draftOf(list: RequirementList, table: NameTable): NameTableDraft {
   const length = copyLengthFor(list);
@@ -394,6 +427,24 @@ export async function normalizedFixture(source: string = FIXTURE_YAML): Promise<
   return result.app;
 }
 
+// ── #549 までの台帳（手 2d の前。Issue #550）──────────────────────────────
+
+const WHEN_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "when");
+if (WHEN_ROW === undefined) throw new Error("前提が壊れた：台帳に when の行が無い");
+const NON_REQUIREMENT_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "non-requirement");
+if (NON_REQUIREMENT_ROW === undefined) throw new Error("前提が壊れた：台帳に non-requirement の行が無い");
+
+/**
+ * #549 の台帳の行＝今の台帳から non-requirement の行を除き、when の行を手 2d の前（v1.1α から引き継いだまま。要件の決まりの
+ * 型・条件の試験の型・外の対応・規則の文が未定義）に戻したもの（Issue #550）。手 2a〜2c の導出はここから組む。
+ */
+export const LEDGER_ROWS_2C: readonly PropertyRow[] = PROPERTY_LEDGER.filter((entry) => entry.id !== "non-requirement").map(
+  (entry): PropertyRow =>
+    entry.id === "when"
+      ? { ...entry, requirementRule: null, t2Condition: null, outer: null, rules: { t1: null, t1Acceptance: null, t2: null, b1: null } }
+      : entry,
+);
+
 // ── 旗 on の要求の差の範囲（Issue #548）──────────────────────────────
 
 const ENUM_MEMBERSHIP_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
@@ -480,7 +531,7 @@ export function requestDiffsOf(
  * `withoutLedgerAdditions` で除く分だけ。
  */
 export const LEDGER_VIEW_2A: LedgerView = deriveLedgerView(
-  PROPERTY_LEDGER.filter((entry) => entry.id !== "enum-membership" && entry.id !== "empty-aggregate"),
+  LEDGER_ROWS_2C.filter((entry) => entry.id !== "enum-membership" && entry.id !== "empty-aggregate"),
 );
 
 // ── 集計の種類と集計元（旗 on の T1 の計算の行の型の `aggregate`。Issue #549）──────────────────
@@ -615,13 +666,60 @@ export const LEDGER_REQUEST_DIFF: Readonly<Record<string, readonly string[]>> = 
   [WRITE_V11A_SCHEMA_NAME]: ["$.rules"],
 };
 
-/** 今の台帳の on の要求から、台帳に足した行（enum-membership・empty-aggregate）の分を除く（手 2a の要求と比べる） */
+/**
+ * 今の台帳の on の要求から、台帳に足した行（enum-membership・empty-aggregate・non-requirement）と埋めた列（when。Issue #550）の
+ * 分を除く（手 2a の要求と比べる）
+ */
 export function withoutLedgerAdditions(value: unknown): unknown {
-  return withoutEnumMembership(withoutEmptyAggregate(value));
+  return withoutEnumMembership(withoutEmptyAggregate(withoutWhenAndNonRequirement(value)));
 }
 
 /**
  * #548 の台帳の導出＝今の台帳から empty-aggregate の行を除いたもの（Issue #549）。旗 on の段がこれを受けた要求・結果は、
  * #548 までの旗 on と同じ。今の台帳との差は `withoutEmptyAggregate` で除く分だけ。
  */
-export const LEDGER_VIEW_2B: LedgerView = deriveLedgerView(PROPERTY_LEDGER.filter((entry) => entry.id !== "empty-aggregate"));
+export const LEDGER_VIEW_2B: LedgerView = deriveLedgerView(LEDGER_ROWS_2C.filter((entry) => entry.id !== "empty-aggregate"));
+
+// ── 旗 on の要求の差の範囲（Issue #550）──────────────────────────────
+
+/**
+ * #549 の台帳の導出（`LEDGER_ROWS_2C`）。旗 on の段がこれを受けた要求・結果は、#549 までの旗 on と同じ。今の台帳との差は
+ * `withoutWhenAndNonRequirement` で除く分だけ。
+ */
+export const LEDGER_VIEW_2C: LedgerView = deriveLedgerView(LEDGER_ROWS_2C);
+
+/** 台帳の when・non-requirement の行の、文に差し込む文（when の T2、non-requirement の T1・T1''） */
+const WHEN_NON_REQUIREMENT_SENTENCES = [WHEN_ROW.rules.t2, NON_REQUIREMENT_ROW.rules.t1, NON_REQUIREMENT_ROW.rules.t1Acceptance].filter(
+  (text): text is string => text !== null,
+);
+
+/**
+ * 旗 on の要求（の JSON の値）から、手 2d の分（when の行の T2 の文と、non-requirement の行の T1・T1'' の文・確かめ方の種類）を
+ * 除く（Issue #550）。文の中の 3 つの文と種類の並びの `・non-requirement` を消し、並びから値 `non-requirement`（T1 の schema
+ * の確かめ方の種類の enum）を外す。#549 の台帳（`LEDGER_VIEW_2C`）の要求とバイト列で同じになることを、旗 on の差の範囲の
+ * 試験が照らす。
+ */
+export function withoutWhenAndNonRequirement(value: unknown): unknown {
+  if (typeof value === "string") {
+    return WHEN_NON_REQUIREMENT_SENTENCES.reduce((text, sentence) => text.split(sentence).join(""), value).split("・non-requirement").join("");
+  }
+  if (Array.isArray(value)) return value.filter((element) => element !== "non-requirement").map(withoutWhenAndNonRequirement);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, withoutWhenAndNonRequirement(entry)]));
+  }
+  return value;
+}
+
+/**
+ * 旗 on の要求が #549 の台帳（`LEDGER_VIEW_2C`）と違ってよい場所（段の schema の名前 → 要求の中の位置。Issue #550）。T1 は
+ * R-nt-08 と schema の確かめ方の種類の enum、T1'' は R-sc-02、T2 は R-tsp-16。B1 と、ほかの段・ほかの位置は違ってはいけない
+ * （観測する性質の enum は変わらない＝non-requirement は試験を作らない）。表に要件でない文があれば、表を載せるデータも違う。
+ */
+export const WHEN_NON_REQUIREMENT_REQUEST_DIFF: Readonly<Record<string, readonly string[]>> = {
+  [NAME_TABLE_SCHEMA_NAME]: [
+    ruleAt(NAME_TABLE_RULE_DEFINITIONS, "R-nt-08"),
+    "$.schema.properties.requirements.items.properties.verification.properties.kind.enum",
+  ],
+  [SEMANTIC_CHECK_SCHEMA_NAME]: [ruleAt(SEMANTIC_CHECK_RULE_DEFINITIONS, "R-sc-02")],
+  [TEST_SPEC_SCHEMA_NAME]: [ruleAt(TEST_SPEC_RULE_DEFINITIONS, "R-tsp-16")],
+};

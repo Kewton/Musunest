@@ -9,6 +9,8 @@
 //   6. 手 2b（#548）：台帳から enum-membership の行を除いた導出は今の定数と同じで、今の台帳との差はその行の分だけ
 //   7. 手 2c（#549）：台帳から empty-aggregate の行を除いた導出は #548 の導出と同じで、今の台帳との差はその行の分だけ。
 //      集計の種類 × データ状態の表（一律の「空なら 0」でない）と、T1 の集計の種類の enum が表の順であること
+//   8. 手 2d（#550）：when の行の列を埋め、non-requirement の行を足した。#549 の台帳（`LEDGER_ROWS_2C`）との差はこの 2 行の分
+//      だけ（観測する性質は増えない・確かめ方の種類が 1 つ増える）。台帳の点検が受理で除く確かめ方の形を見ること
 //
 // LLM を呼ばない。外部の API を呼ばない。受入の題材の言葉は使わない。
 import { describe, expect, it } from "vitest";
@@ -31,6 +33,7 @@ import {
   testSpecRuleDefinitionsOf,
 } from "../v11a/stages/test-spec.js";
 import { WRITE_V11A_RULE_DEFINITIONS, writeV11aRuleDefinitionsOf } from "../v11a/stages/write.js";
+import { LEDGER_ROWS_2C } from "../v11a/__tests__/fixtures.js";
 import {
   PROPERTY_COPY_HEADER,
   PROPERTY_LEDGER,
@@ -71,14 +74,18 @@ const rowOf = (id: string): PropertyRow => {
 const DEFAULT_VALUE = rowOf("default-value");
 const ENUM_MEMBERSHIP = rowOf("enum-membership");
 const EMPTY_AGGREGATE = rowOf("empty-aggregate");
+const WHEN = rowOf("when");
+const NON_REQUIREMENT = rowOf("non-requirement");
 /**
- * 手 2a（#547）の台帳＝今の台帳から enum-membership の行（と手 2c の empty-aggregate の行。#549）を除いたもの。その導出は
- * 今の定数と同じ（載せ替えの不変）
+ * 手 2a（#547）の台帳＝#549 の台帳（`LEDGER_ROWS_2C`。今の台帳から手 2d の分を戻したもの。#550）から enum-membership の行
+ * （と手 2c の empty-aggregate の行。#549）を除いたもの。その導出は今の定数と同じ（載せ替えの不変）
  */
-const LEDGER_2A = PROPERTY_LEDGER.filter((row) => row.id !== "enum-membership" && row.id !== "empty-aggregate");
+const LEDGER_2A = LEDGER_ROWS_2C.filter((row) => row.id !== "enum-membership" && row.id !== "empty-aggregate");
 const VIEW_2A = deriveLedgerView(LEDGER_2A);
-/** #548 の台帳＝今の台帳から empty-aggregate の行を除いたもの（Issue #549） */
-const VIEW_2B = deriveLedgerView(PROPERTY_LEDGER.filter((row) => row.id !== "empty-aggregate"));
+/** #548 の台帳＝#549 の台帳から empty-aggregate の行を除いたもの（Issue #549） */
+const VIEW_2B = deriveLedgerView(LEDGER_ROWS_2C.filter((row) => row.id !== "empty-aggregate"));
+/** #549 の台帳（手 2d の前。Issue #550） */
+const VIEW_2C = deriveLedgerView(LEDGER_ROWS_2C);
 
 // ── 1. 行の欄と id の一意 ─────────────────────────────────────────
 
@@ -210,9 +217,13 @@ describe("台帳から導いたものが今の定数と同じ（旗 on の載せ
     expect(VIEW_2B.unsupportedObserves).toEqual([...UNSUPPORTED_OBSERVES]);
     expect(VIEW_2B.verificationKinds).toEqual([...NAME_TABLE_VERIFICATION_KINDS, "enum-membership"]);
     // 手 2c（#549）：観測する性質が末尾に 1 つ増える。確かめ方の種類は増えない（fixed-test のまま）
-    expect(PROPERTY_LEDGER_VIEW.observes).toEqual([...TEST_OBSERVES, "enum-membership", "empty-aggregate"]);
+    expect(VIEW_2C.observes).toEqual([...TEST_OBSERVES, "enum-membership", "empty-aggregate"]);
+    expect(VIEW_2C.unsupportedObserves).toEqual([...UNSUPPORTED_OBSERVES]);
+    expect(VIEW_2C.verificationKinds).toEqual(VIEW_2B.verificationKinds);
+    // 手 2d（#550）：観測する性質は増えない（non-requirement は試験を作らない）。確かめ方の種類は末尾に 1 つ増える
+    expect(PROPERTY_LEDGER_VIEW.observes).toEqual(VIEW_2C.observes);
     expect(PROPERTY_LEDGER_VIEW.unsupportedObserves).toEqual([...UNSUPPORTED_OBSERVES]);
-    expect(PROPERTY_LEDGER_VIEW.verificationKinds).toEqual(VIEW_2B.verificationKinds);
+    expect(PROPERTY_LEDGER_VIEW.verificationKinds).toEqual([...VIEW_2C.verificationKinds, "non-requirement"]);
   });
 
   it("評価の方法の表の組の数が 9 で、今の表と同じ組の集合（照らす側は `some` で引くので並びは振る舞いに効かない）。今の台帳は field × validate × enum-membership の 1 組だけ多い", () => {
@@ -223,10 +234,12 @@ describe("台帳から導いたものが今の定数と同じ（旗 on の載せ
     expect(VIEW_2B.combinations).toHaveLength(10);
     expect(new Set(VIEW_2B.combinations.map(key))).toEqual(new Set([...EVALUABLE_COMBINATIONS.map(key), "field|validate|enum-membership"]));
     // 手 2c（#549）：computation × aggregate × empty-aggregate の 1 組だけ多い
-    expect(PROPERTY_LEDGER_VIEW.combinations).toHaveLength(11);
-    expect(new Set(PROPERTY_LEDGER_VIEW.combinations.map(key))).toEqual(
+    expect(VIEW_2C.combinations).toHaveLength(11);
+    expect(new Set(VIEW_2C.combinations.map(key))).toEqual(
       new Set([...EVALUABLE_COMBINATIONS.map(key), "field|validate|enum-membership", "computation|aggregate|empty-aggregate"]),
     );
+    // 手 2d（#550）：組は増えない（when の組は引き継いだまま・non-requirement は組を持たない）
+    expect(PROPERTY_LEDGER_VIEW.combinations).toEqual(VIEW_2C.combinations);
   });
 
   it("除外する確かめ方の種類・外す v1 の文が、今の R-tsp-02 の除外と免除の文と同じ（enum-membership も同じ免除の文）", () => {
@@ -340,7 +353,7 @@ describe("規則の文：台帳の行の文が今の段の規則の文と同じ�
     }
   });
 
-  it("今の台帳で組んだ規則と #548 の台帳の差は empty-aggregate の文だけ（R-nt-08・R-tsp-16 の文と R-w11-12 の 1 行。T1'' は同じ）で、規則の不備は 0（Issue #549）", () => {
+  it("#549 の台帳で組んだ規則と #548 の台帳の差は empty-aggregate の文だけ（R-nt-08・R-tsp-16 の文と R-w11-12 の 1 行。T1'' は同じ）で、規則の不備は 0（Issue #549）", () => {
     const { t1, t1Acceptance, t2, b1 } = EMPTY_AGGREGATE.rules;
     if (t1 === null || t2 === null || b1 === null) throw new Error("前提が壊れた");
     expect(t1Acceptance).toBeNull();
@@ -350,19 +363,19 @@ describe("規則の文：台帳の行の文が今の段の規則の文と同じ�
         if (anchor === null || !definition.text.includes(anchor)) throw new Error("前提が壊れた");
         return { ...definition, text: definition.text.replace(anchor, `${anchor}${added}`) };
       });
-    expect(nameTableRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)).toEqual(
+    expect(nameTableRuleDefinitionsOf(VIEW_2C)).toEqual(
       appended(nameTableRuleDefinitionsOf(VIEW_2B), "R-nt-08", ENUM_MEMBERSHIP.rules.t1, t1),
     );
-    expect(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)).toEqual(semanticCheckRuleDefinitionsOf(VIEW_2B));
-    expect(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)).toEqual(
+    expect(semanticCheckRuleDefinitionsOf(VIEW_2C)).toEqual(semanticCheckRuleDefinitionsOf(VIEW_2B));
+    expect(testSpecRuleDefinitionsOf(VIEW_2C)).toEqual(
       appended(testSpecRuleDefinitionsOf(VIEW_2B), "R-tsp-16", ENUM_MEMBERSHIP.rules.t2, t2),
     );
-    const write = writeV11aRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    const write = writeV11aRuleDefinitionsOf(VIEW_2C);
     expect(write.slice(0, -1)).toEqual(writeV11aRuleDefinitionsOf(VIEW_2B));
     expect(write.at(-1)).toEqual({ id: "R-w11-12", text: b1, why: `性質の台帳の行 empty-aggregate の B1 の文（${EMPTY_AGGREGATE.why}）`, since: "Issue #549" });
     // R-tsp-02 の除外は変わらない（免除は無い：boundary・abnormal を empty-aggregate で満たす）
-    expect(PROPERTY_LEDGER_VIEW.t2ExemptKinds).toEqual(VIEW_2B.t2ExemptKinds);
-    for (const definitions of [nameTableRuleDefinitionsOf(PROPERTY_LEDGER_VIEW), testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW), write]) {
+    expect(VIEW_2C.t2ExemptKinds).toEqual(VIEW_2B.t2ExemptKinds);
+    for (const definitions of [nameTableRuleDefinitionsOf(VIEW_2C), testSpecRuleDefinitionsOf(VIEW_2C), write]) {
       expect(ruleDefinitionDefects(definitions)).toEqual([]);
     }
   });
@@ -371,8 +384,11 @@ describe("規則の文：台帳の行の文が今の段の規則の文と同じ�
     expect(VIEW_2B.t1AcceptanceTexts).toEqual([DEFAULT_VALUE.rules.t1Acceptance, ENUM_MEMBERSHIP.rules.t1Acceptance]);
     expect(VIEW_2B.b1RuleTexts).toEqual([DEFAULT_VALUE.rules.b1, ENUM_MEMBERSHIP.rules.b1]);
     // 手 2c（#549）：T1'' の受理条件は増えず、B1 の文は末尾に empty-aggregate の 1 文が増える
-    expect(PROPERTY_LEDGER_VIEW.t1AcceptanceTexts).toEqual(VIEW_2B.t1AcceptanceTexts);
-    expect(PROPERTY_LEDGER_VIEW.b1RuleTexts).toEqual([DEFAULT_VALUE.rules.b1, ENUM_MEMBERSHIP.rules.b1, EMPTY_AGGREGATE.rules.b1]);
+    expect(VIEW_2C.t1AcceptanceTexts).toEqual(VIEW_2B.t1AcceptanceTexts);
+    expect(VIEW_2C.b1RuleTexts).toEqual([DEFAULT_VALUE.rules.b1, ENUM_MEMBERSHIP.rules.b1, EMPTY_AGGREGATE.rules.b1]);
+    // 手 2d（#550）：T1'' の受理条件の文は末尾に non-requirement の 1 文が増え、B1 の文は増えない
+    expect(PROPERTY_LEDGER_VIEW.t1AcceptanceTexts).toEqual([...VIEW_2C.t1AcceptanceTexts, NON_REQUIREMENT.rules.t1Acceptance]);
+    expect(PROPERTY_LEDGER_VIEW.b1RuleTexts).toEqual(VIEW_2C.b1RuleTexts);
     expect(VIEW_2A.t1AcceptanceTexts).toEqual([DEFAULT_VALUE.rules.t1Acceptance]);
     expect(VIEW_2A.b1RuleTexts).toEqual([DEFAULT_VALUE.rules.b1]);
   });
@@ -382,6 +398,44 @@ describe("規則の文：台帳の行の文が今の段の規則の文と同じ�
     const view = deriveLedgerView(changed);
     expect(writeV11aRuleDefinitionsOf(view).find((definition) => definition.id === "R-w11-11")?.text).toBe(`${ENUM_MEMBERSHIP.rules.b1 ?? ""}。`);
     expect(semanticCheckRuleDefinitionsOf(view)).toEqual(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW));
+  });
+
+  it("今の台帳で組んだ規則と #549 の台帳の差は when・non-requirement の文だけ（R-nt-08・R-sc-02・R-tsp-16 の文。B1・R-tsp-02 は同じ）で、規則の不備は 0（Issue #550）", () => {
+    const whenT2 = WHEN.rules.t2;
+    const { t1, t1Acceptance, t2, b1 } = NON_REQUIREMENT.rules;
+    if (whenT2 === null || t1 === null || t1Acceptance === null) throw new Error("前提が壊れた");
+    expect(t2).toBeNull();
+    expect(b1).toBeNull();
+    const withRule = (definitions: readonly { id: string; text: string }[], id: string, text: (before: string) => string) =>
+      definitions.map((definition) => (definition.id === id ? { ...definition, text: text(definition.text) } : definition));
+    const appended = (anchor: string | null, added: string) => (text: string): string => {
+      if (anchor === null || !text.includes(anchor)) throw new Error("前提が壊れた");
+      return text.replace(anchor, `${anchor}${added}`);
+    };
+    // T1：R-nt-08 の台帳の文の末尾（empty-aggregate の文の次）に non-requirement の文
+    expect(nameTableRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)).toEqual(
+      withRule(nameTableRuleDefinitionsOf(VIEW_2C), "R-nt-08", appended(EMPTY_AGGREGATE.rules.t1, t1)),
+    );
+    // T1''：R-sc-02 の末尾に non-requirement の受理条件の文
+    expect(semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)).toEqual(
+      withRule(semanticCheckRuleDefinitionsOf(VIEW_2C), "R-sc-02", (text) => `${text}${t1Acceptance}`),
+    );
+    // T2：R-tsp-16 の台帳の文の頭（when は台帳の 1 行目）に when の文。R-tsp-02 の除外は変わらない
+    const head = TEST_SPEC_RULE_DEFINITIONS.find((definition) => definition.id === "R-tsp-16")?.text.split(DEFAULT_VALUE.rules.t2 ?? "（無い）")[0] ?? "";
+    expect(head).not.toBe("");
+    expect(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)).toEqual(
+      withRule(testSpecRuleDefinitionsOf(VIEW_2C), "R-tsp-16", appended(head, whenT2)),
+    );
+    expect(writeV11aRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)).toEqual(writeV11aRuleDefinitionsOf(VIEW_2C));
+    expect(PROPERTY_LEDGER_VIEW.t2ExemptKinds).toEqual(VIEW_2C.t2ExemptKinds);
+    for (const definitions of [
+      nameTableRuleDefinitionsOf(PROPERTY_LEDGER_VIEW),
+      semanticCheckRuleDefinitionsOf(PROPERTY_LEDGER_VIEW),
+      testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW),
+      writeV11aRuleDefinitionsOf(PROPERTY_LEDGER_VIEW),
+    ]) {
+      expect(ruleDefinitionDefects(definitions)).toEqual([]);
+    }
   });
 
   it("台帳の文・欄に受入の題材の言葉が無い", () => {
@@ -555,5 +609,153 @@ describe("empty-aggregate の行：集計の種類 × データ状態の表（�
     // 写しの説明に値の表がある（人が読む）
     expect(COPY_TEXT).toContain("〔avg／空〕null");
     expect(COPY_TEXT).toContain("〔どの種類も／未読〕null");
+  });
+});
+
+// ── 8. 手 2d：when（操作の条件）と non-requirement（要件でない文。Issue #550）──────────────────
+
+describe("when の行：引き継いだ行の未定義の列を埋める（期待は真偽・対象は条件を持つ操作の行）", () => {
+  it("行の欄：新しい行は足さず（id は 1 つ）、有効・引き継ぎのまま、要件の決まりの型・T2 の試験の型・外の対応・T2 の規則の文が埋まり、網羅の鍵・T1'' の受理条件は今のまま", () => {
+    expect(PROPERTY_LEDGER.filter((row) => row.id === "when")).toHaveLength(1);
+    expect(WHEN.state).toBe("active");
+    expect(WHEN.inherited).toBe(true);
+    expect(WHEN.requirementRule).toBe("操作ができる条件（いつ実行できるか）を決める要件");
+    expect(WHEN.t1).toBeNull();
+    expect(WHEN.t1Acceptance).toBeNull();
+    expect(WHEN.t2).toBeNull();
+    expect(WHEN.t2Aggregate).toBeNull();
+    expect(WHEN.t2Condition).toEqual({
+      targetKind: "operation",
+      operation: "action",
+      targetFlag: "hasWhen",
+      t1Kind: "fixed-test",
+      kinds: ["normal", "abnormal", "boundary"],
+      expected: { ok: "boolean", error: "condition-fails" },
+      input: "record",
+      referenceData: "any",
+      expectedWriter: "llm-written-code-checked",
+      messages: WHEN.t2Condition?.messages,
+    });
+    expect(WHEN.combinations).toEqual([{ targetKind: "operation", operation: "action" }]);
+    expect(WHEN.coverageKey).toBeNull();
+    expect(WHEN.evaluation).toBe("v1-run-tests");
+    expect(WHEN.outer).toBe("advanceAction");
+    expect(WHEN.rules.t1).toBeNull();
+    expect(WHEN.rules.t1Acceptance).toBeNull();
+    expect(WHEN.rules.b1).toBeNull();
+    expect(WHEN.rules.t2).toContain("value を true");
+    expect(WHEN.rules.t2).toContain("value を false");
+    expect(WHEN.rules.t2).toContain("操作後の状態");
+    expect(WHEN.rules.t2).toContain("hasWhen が false の行）に action の試験を作らない");
+    // state-after-set は登録済み・未対応のまま
+    expect(rowOf("state-after-set").state).toBe("registered-unsupported");
+    // 導出：条件の試験の型を持つ行は when だけ。#549 の台帳には無い
+    expect(PROPERTY_LEDGER_VIEW.conditionRows.map((row) => row.id)).toEqual(["when"]);
+    expect(VIEW_2C.conditionRows).toEqual([]);
+    const text = JSON.stringify(WHEN);
+    for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(text).not.toContain(word);
+  });
+
+  it("二点測定：条件の試験の型が組・kind と食い違う行は不備になる（今の台帳は通る）", () => {
+    const t2 = WHEN.t2Condition;
+    if (t2 === null) throw new Error("前提が壊れた");
+    const patched = (patch: Partial<PropertyRow>) => ledgerRowDefects(PROPERTY_LEDGER.map((row) => (row.id === "when" ? { ...row, ...patch } : row)));
+    expect(patched({})).toEqual([]);
+    expect(patched({ t2Condition: { ...t2, kinds: [] } })).toEqual(["性質 when の条件の試験の型の kind が、空か重なっている"]);
+    expect(patched({ t2Condition: { ...t2, kinds: ["normal", "normal"] } })).toEqual(["性質 when の条件の試験の型の kind が、空か重なっている"]);
+    expect(patched({ combinations: [{ targetKind: "field", operation: "validate" }] })).toEqual([
+      "性質 when の条件の試験の型の組が、評価の方法の表の組に無い",
+    ]);
+  });
+});
+
+describe("non-requirement の行：決まりも対象の項目も無い説明文。T1'' の受理だけで有効になる", () => {
+  it("行の欄：確かめ方の種類 non-requirement（欄なし）・所属 0 行・分類の値は見ない・受理で除く、受理条件の文がある、試験の型・組・網羅・B4 は無い、外は見ない", () => {
+    expect(PROPERTY_LEDGER.at(-1)?.id).toBe("non-requirement");
+    expect(NON_REQUIREMENT.state).toBe("active");
+    expect(NON_REQUIREMENT.inherited).toBe(false);
+    expect(NON_REQUIREMENT.since).toBe("Issue #550");
+    expect(NON_REQUIREMENT.requirementRule).toBe("決まりも対象の項目も無い説明文（目的を述べる前置きなど）");
+    expect(NON_REQUIREMENT.t1?.kind).toBe("non-requirement");
+    expect(NON_REQUIREMENT.t1?.valueField).toBeNull();
+    expect(NON_REQUIREMENT.t1?.nature).toBeNull();
+    expect(NON_REQUIREMENT.t1?.excludeWhenAccepted).toBe(true);
+    expect(NON_REQUIREMENT.t1?.ownership).toEqual({ row: null, count: 0, entityAddedByCode: false, valueInOptions: false, optionsNonEmpty: false });
+    expect(NON_REQUIREMENT.t1Acceptance).toContain("決まりも対象（項目・計算・集計・操作・画面）も無いときだけ受理する");
+    expect(NON_REQUIREMENT.t1Acceptance).toContain("weak-verification");
+    expect(NON_REQUIREMENT.t2).toBeNull();
+    expect(NON_REQUIREMENT.t2Aggregate).toBeNull();
+    expect(NON_REQUIREMENT.t2Condition).toBeNull();
+    expect(NON_REQUIREMENT.combinations).toEqual([]);
+    expect(NON_REQUIREMENT.coverageKey).toBeNull();
+    expect(NON_REQUIREMENT.evaluation).toBeNull();
+    expect(NON_REQUIREMENT.outer).toBe(OUTER_NOT_SCORED);
+    expect(NON_REQUIREMENT.rules.t1).toContain("kind を non-requirement にし、行を所属させず");
+    expect(NON_REQUIREMENT.rules.t1).toContain("要件の出どころ（答えから来た・了承した代替先）では決めない");
+    expect(NON_REQUIREMENT.rules.t1Acceptance).toContain("要件 ID の形を受理の理由にしない");
+    const text = JSON.stringify(NON_REQUIREMENT);
+    for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(text).not.toContain(word);
+  });
+
+  it("導出：確かめ方の種類に入り、観測する性質・評価の方法の表・T2 の除外には入らない（試験を作らない＝一覧から除く）", () => {
+    expect(PROPERTY_LEDGER_VIEW.verificationKinds.at(-1)).toBe("non-requirement");
+    expect(PROPERTY_LEDGER_VIEW.rowByVerificationKind.get("non-requirement")).toBe(NON_REQUIREMENT);
+    expect(PROPERTY_LEDGER_VIEW.excludedWhenAcceptedKinds).toEqual(["non-requirement"]);
+    expect(VIEW_2C.excludedWhenAcceptedKinds).toEqual([]);
+    expect(PROPERTY_LEDGER_VIEW.observes).not.toContain("non-requirement");
+    expect(PROPERTY_LEDGER_VIEW.rowByObserves.has("non-requirement")).toBe(false);
+    expect(PROPERTY_LEDGER_VIEW.combinations.some((entry) => entry.observes === "non-requirement")).toBe(false);
+    expect(PROPERTY_LEDGER_VIEW.t2ExemptKinds).not.toContain("non-requirement");
+    expect(PROPERTY_LEDGER_VIEW.t1RuleTexts.at(-1)).toBe(NON_REQUIREMENT.rules.t1);
+    expect(PROPERTY_LEDGER_VIEW.t1AcceptanceTexts.at(-1)).toBe(NON_REQUIREMENT.rules.t1Acceptance);
+  });
+
+  it("二点測定：受理で除く確かめ方の行が、行を所属させる・試験の型か組を持つ・照合の名前を持つ・受理条件が無いと不備になる（今の台帳は通る）", () => {
+    const t1 = NON_REQUIREMENT.t1;
+    if (t1 === null || DEFAULT_VALUE.t2 === null) throw new Error("前提が壊れた");
+    const patched = (patch: Partial<PropertyRow>) =>
+      ledgerRowDefects(PROPERTY_LEDGER.map((row) => (row.id === "non-requirement" ? { ...row, ...patch } : row)));
+    expect(patched({})).toEqual([]);
+    expect(patched({ t1: { ...t1, ownership: { ...t1.ownership, row: { kind: "field", type: "enum" }, count: 1 } } })).toEqual([
+      "性質 non-requirement は受理で除くのに、行を所属させる",
+    ]);
+    expect(patched({ t1: { ...t1, ownership: { ...t1.ownership, count: 1 } } })).toEqual([
+      "性質 non-requirement の所属の形が、行の種類の無いことと所属 0 行で食い違う",
+      "性質 non-requirement は受理で除くのに、行を所属させる",
+    ]);
+    expect(patched({ t2: DEFAULT_VALUE.t2 })).toEqual([
+      "性質 non-requirement は受理で除くのに、試験の型か評価の方法の表の組がある",
+      "性質 non-requirement の期待は確かめ方の欄の値なのに、確かめ方に欄が無い",
+    ]);
+    expect(patched({ combinations: [{ targetKind: "field", operation: "validate" }] })).toEqual([
+      "性質 non-requirement は受理で除くのに、試験の型か評価の方法の表の組がある",
+    ]);
+    expect(patched({ evaluation: "v1-run-tests" })).toEqual(["性質 non-requirement は受理で除くのに、照合の名前がある"]);
+    expect(patched({ t1Acceptance: null })).toEqual(["性質 non-requirement は受理で除くのに、受理条件が無い"]);
+    expect(patched({ rules: { ...NON_REQUIREMENT.rules, t1Acceptance: null } })).toEqual(["性質 non-requirement は受理で除くのに、受理条件が無い"]);
+    // 受理で除かない確かめ方は、試験の型と照合の名前が無ければ今までどおり不備
+    expect(patched({ t1: { ...t1, excludeWhenAccepted: false } })).toEqual([
+      "性質 non-requirement は有効なのに、照合の名前が無い",
+      "性質 non-requirement は確かめ方の種類を持つのに、試験の型が無い",
+    ]);
+    // 分類を求める記述子に固定文が無い
+    expect(patched({ t1: { ...t1, nature: "ruled" } })).toEqual(["性質 non-requirement は分類を求めるのに、固定文が無い"]);
+  });
+
+  it("二点測定：写しから when・non-requirement の行を消すと落ち、写しの値の欄を変えても落ちる。行の数は 2c より 1 多い（2a より 3 多い）", () => {
+    expect(PROPERTY_LEDGER).toHaveLength(LEDGER_ROWS_2C.length + 1);
+    expect(PROPERTY_LEDGER).toHaveLength(LEDGER_2A.length + 3);
+    for (const id of ["when", "non-requirement"]) {
+      const line = COPY_TEXT.split("\n").find((candidate) => candidate.startsWith(`| ${id} |`));
+      if (line === undefined) throw new Error("前提が壊れた");
+      expect(copyDefects(COPY_TEXT.replace(`${line}\n`, ""), PROPERTY_LEDGER)).toContain(`写しに ${id} の行が無い`);
+    }
+    expect(copyDefects(COPY_TEXT.replace("| advanceAction |", "| 未定義 |"), PROPERTY_LEDGER)).toEqual(["写しの when の行がコードと違う"]);
+    expect(copyDefects(COPY_TEXT, LEDGER_ROWS_2C)).toEqual([
+      "写しの when の行がコードと違う",
+      "写しに台帳に無い non-requirement の行がある",
+      "写しの行の並びが台帳の順と違う",
+    ]);
+    expect(COPY_TEXT).toContain("**有効になるのは T1''（独立の点検）が受理したときだけ**");
   });
 });

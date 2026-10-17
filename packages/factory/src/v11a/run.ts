@@ -165,6 +165,19 @@ export const ALL_CARRIED_PROBLEM: Problem = {
   message: "残る要件が 0 である（全要件を持ち越した）",
 };
 
+/**
+ * 持ち越しと要件でない文（T1'' が受理した non-requirement）で全件のときの停止の問題（固定文。全要件を持ち越した、とは
+ * 別の文。段・種類は全件持ち越しと同じ。Issue #550）
+ */
+export const ALL_CARRIED_OR_NON_REQUIREMENT_PROBLEM: Problem = {
+  field: "requirements",
+  message: "残る要件が 0 である（持ち越しと要件でない文で全要件）",
+};
+
+/** 残る要件が 0 の停止の問題（要件でない文があれば別の固定文） */
+const allCarriedProblemOf = (carry: CarryOver): Problem =>
+  (carry.nonRequirements ?? []).length > 0 ? ALL_CARRIED_OR_NON_REQUIREMENT_PROBLEM : ALL_CARRIED_PROBLEM;
+
 /** 早期停止を、段の外へ伝えるための合図（この file の中でだけ使う） */
 class RunStop extends Error {
   readonly attribution: FailureAttribution;
@@ -321,7 +334,8 @@ export function v11aFailureSignature(
 /**
  * 持ち越しに、版の輪の途中で足す出どころ（B3' の文脈なし・残った拒否、B6 の網羅の落ち）を重ねる（§1.2）。
  * 除く行は A1 と同じ規則（所属させた要件が全部持ち越しの行。共有する行は残す）で導き、残る行の参照が
- * 除いた行を指せば例外で断る（A1 の固定文）。要件の並びは一覧の順、理由は基の理由のあとに足した順。
+ * 除いた行を指せば例外で断る（A1 の固定文）。要件の並びは一覧の順、理由は基の理由のあとに足した順。基の要件でない文
+ * （`nonRequirements`）はそのまま引き継ぎ、残る要件に入れない（Issue #550）。
  */
 export function composeCarryOver(
   list: RequirementList,
@@ -343,7 +357,8 @@ export function composeCarryOver(
     throw new Error("持ち越し：残る行の参照（所属 entity・見出しの元・参照先）が除いた行を指している");
   }
   const ids = list.requirements.map((requirement) => requirement.id);
-  const remainingRequirementIds = ids.filter((id) => !carried.has(id));
+  const nonRequirements = new Set(base.nonRequirements ?? []);
+  const remainingRequirementIds = ids.filter((id) => !carried.has(id) && !nonRequirements.has(id));
   return {
     entries: ids.flatMap((id) => {
       const listed = reasons.get(id);
@@ -352,6 +367,7 @@ export function composeCarryOver(
     excludedRowIds,
     remainingRequirementIds,
     allCarried: remainingRequirementIds.length === 0,
+    ...(base.nonRequirements === undefined ? {} : { nonRequirements: base.nonRequirements }),
   };
 }
 
@@ -916,11 +932,12 @@ async function runV11a(
         list,
         table,
         semanticCheck: { tableSha256: adopted.semantic.tableSha256, judgments: adopted.semantic.judgments },
+        ...withLedger,
       }),
     );
     const addedCarry = new Map<string, CarryOverReason[]>();
     let carry: CarryOver = baseCarry;
-    if (carry.allCarried) stopAtCarryOver(ALL_CARRIED_PROBLEM);
+    if (carry.allCarried) stopAtCarryOver(allCarriedProblemOf(carry));
     await carryOverStep(() => pruneForCarryOver(list, table, carry));
 
     // 段の走り：T1''／T2 の境界（持ち越しを導き、T2 を呼ぶ直前）。終了 T1'' ならここで止める
@@ -1005,7 +1022,7 @@ async function runV11a(
     /** 持ち越しか棄却が変わったら、除く範囲・文脈・評価口を作り直す。全件持ち越しなら止める（D15） */
     const refreshCarry = async (): Promise<void> => {
       carry = await carryOverStep(() => composeCarryOver(list, table, baseCarry, addedCarry));
-      if (carry.allCarried) stopAtCarryOver(ALL_CARRIED_PROBLEM);
+      if (carry.allCarried) stopAtCarryOver(allCarriedProblemOf(carry));
       pruned = await carryOverStep(() => pruneForCarryOver(list, table, carry, withoutOverturned()));
       evaluator = createV11aEvaluator({ table, excludedRowIds: carry.excludedRowIds, observes: testSpec.observes, ...withLedger });
     };
@@ -1296,6 +1313,7 @@ async function runV11a(
           entries: carry.entries,
           excludedRowIds: carry.excludedRowIds,
           remainingRequirementIds: carry.remainingRequirementIds,
+          ...(carry.nonRequirements === undefined ? {} : { nonRequirements: carry.nonRequirements }),
         },
         verification: {
           tableSha256: await nameTableSha256(table),

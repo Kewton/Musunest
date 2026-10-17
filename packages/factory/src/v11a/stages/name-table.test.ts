@@ -19,6 +19,12 @@ import {
   FIXTURE_DOCUMENTS,
   LEDGER_VIEW_2A,
   LEDGER_VIEW_2B,
+  LEDGER_VIEW_2C,
+  NON_REQUIREMENT_TEXT,
+  WHEN_NON_REQUIREMENT_REQUEST_DIFF,
+  fixtureNonRequirementList,
+  fixtureNonRequirementTable,
+  withoutWhenAndNonRequirement,
   withAggregates,
   withoutEmptyAggregate,
   draftOf,
@@ -479,13 +485,13 @@ describe.each(LEDGER_CASES)("T1 の確かめ方 default-value（Issue #533。旗
   const tableFor = (table: NameTable): NameTable => (ledger === undefined ? table : withAggregates(table));
   it("schema の kind に default-value があり、value は string か null の必須の欄", () => {
     const verification = nameTableSchemaOf(ledger).properties.requirements.items.properties.verification;
-    // 旗 on は台帳の enum-membership（Issue #548）が末尾に入る
+    // 旗 on は台帳の enum-membership（Issue #548）と non-requirement（Issue #550）が末尾に入る
     expect(verification.properties.kind.enum).toEqual([
       "fixed-test",
       "structural",
       "unresolved",
       "default-value",
-      ...(ledger === undefined ? [] : ["enum-membership"]),
+      ...(ledger === undefined ? [] : ["enum-membership", "non-requirement"]),
     ]);
     expect(verification.properties.value.type).toEqual(["string", "null"]);
     expect(verification.required).toContain("value");
@@ -637,7 +643,7 @@ describe("旗 on：#548 の台帳（empty-aggregate の行を除いた導出）�
   });
 });
 
-describe("旗 on：今の台帳の T1 の要求と #548 の台帳の差は empty-aggregate の行の分（R-nt-08 の 1 文と schema の行の型の aggregate）だけ（Issue #549）", () => {
+describe("旗 on：#549 の台帳の T1 の要求と #548 の台帳の差は empty-aggregate の行の分（R-nt-08 の 1 文と schema の行の型の aggregate）だけ（Issue #549）", () => {
   const ROW = PROPERTY_LEDGER.find((entry) => entry.id === "empty-aggregate");
   const ENUM_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
 
@@ -645,7 +651,7 @@ describe("旗 on：今の台帳の T1 の要求と #548 の台帳の差は empty
     const t1 = ROW?.rules.t1;
     const anchor = ENUM_ROW?.rules.t1;
     if (t1 == null || anchor == null) throw new Error("前提が壊れた");
-    const definitions = nameTableRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    const definitions = nameTableRuleDefinitionsOf(LEDGER_VIEW_2C);
     expect(definitions).toEqual(
       nameTableRuleDefinitionsOf(LEDGER_VIEW_2B).map((definition) =>
         definition.id === "R-nt-08" ? { ...definition, text: definition.text.replace(anchor, `${anchor}${t1}`) } : definition,
@@ -653,7 +659,7 @@ describe("旗 on：今の台帳の T1 の要求と #548 の台帳の差は empty
     );
     expect(ruleDefinitionDefects(definitions)).toEqual([]);
     expectNoAcceptanceMaterial(ruleTexts(definitions));
-    const schema = nameTableSchemaOf(PROPERTY_LEDGER_VIEW);
+    const schema = nameTableSchemaOf(LEDGER_VIEW_2C);
     expect(jsonDiffPaths(schema, nameTableSchemaOf(LEDGER_VIEW_2B))).toEqual([
       "$.properties.rows.items.properties.type.required",
       "$.properties.rows.items.properties.type.properties.aggregate",
@@ -686,7 +692,7 @@ describe("旗 on：今の台帳の T1 の要求と #548 の台帳の差は empty
     expect(kindsOf(reversed)).toEqual(["avg", "count", "sum"]);
   });
 
-  it("同じ表の応答（今の台帳の on は計算の行に集計の種類と集計元を持つ）で、要求の差は名指しの場所（と previous の応答の写しの aggregate）だけで、その分を除けばバイト列で同じ。表は aggregate の分だけ違う", async () => {
+  it("同じ表の応答（#549 の台帳の on は計算の行に集計の種類と集計元を持つ）で、要求の差は名指しの場所（と previous の応答の写しの aggregate）だけで、その分を除けばバイト列で同じ。表は aggregate の分だけ違う", async () => {
     const list = fixtureDefaultValueList();
     const runWith = async (ledger: LedgerView, table: NameTable, withPrevious: boolean) => {
       const response = responseOf(draftOf(list, table));
@@ -704,7 +710,7 @@ describe("旗 on：今の台帳の T1 の要求と #548 の台帳の差は empty
     };
     for (const withPrevious of [false, true]) {
       const before = await runWith(LEDGER_VIEW_2B, fixtureDefaultValueTable(), withPrevious);
-      const now = await runWith(PROPERTY_LEDGER_VIEW, withAggregates(fixtureDefaultValueTable()), withPrevious);
+      const now = await runWith(LEDGER_VIEW_2C, withAggregates(fixtureDefaultValueTable()), withPrevious);
       const expected = [...(EMPTY_AGGREGATE_REQUEST_DIFF[NAME_TABLE_SCHEMA_NAME] ?? [])];
       // previous の応答の写し（データ）は aggregate の欄の分だけ違う
       if (withPrevious) expected.splice(1, 0, "$.input");
@@ -773,5 +779,94 @@ describe("旗 on：今の台帳の T1 の要求と #548 の台帳の差は empty
     const good = await runOn(withAggregates(fixtureTable()));
     if (!good.ok) throw new Error("通るはず");
     expect(good.value.table).toEqual(withAggregates(fixtureTable()));
+  });
+});
+
+describe("旗 on：今の台帳の T1 の要求と #549 の台帳の差は non-requirement の行の分（R-nt-08 の 1 文と schema の確かめ方の種類の enum）だけ（Issue #550）", () => {
+  const ROW = PROPERTY_LEDGER.find((entry) => entry.id === "non-requirement");
+  const AGGREGATE_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "empty-aggregate");
+
+  const runWith = async (list: RequirementList, table: NameTable, ledger: LedgerView | undefined, previous?: NameTablePrevious) => {
+    const recording = createRecordingClient([structured(responseOf(draftOf(list, table)))]);
+    const outcome = await runNameTable({
+      plan: planOf(list),
+      list,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(recording.client),
+      ...(previous === undefined ? {} : { previous }),
+      ...(ledger === undefined ? {} : { ledger }),
+    });
+    return { outcome, requests: JSON.parse(JSON.stringify(recording.structured)) as unknown[] };
+  };
+
+  it("規則の定義は R-nt-08 の文に台帳の T1 の文が empty-aggregate の文の次に入るだけ。schema は確かめ方の種類の enum の末尾に non-requirement が入るだけ", () => {
+    const t1 = ROW?.rules.t1;
+    const anchor = AGGREGATE_ROW?.rules.t1;
+    if (t1 == null || anchor == null) throw new Error("前提が壊れた");
+    const definitions = nameTableRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    expect(definitions).toEqual(
+      nameTableRuleDefinitionsOf(LEDGER_VIEW_2C).map((definition) =>
+        definition.id === "R-nt-08" ? { ...definition, text: definition.text.replace(anchor, `${anchor}${t1}`) } : definition,
+      ),
+    );
+    expect(ruleDefinitionDefects(definitions)).toEqual([]);
+    expectNoAcceptanceMaterial(ruleTexts(definitions));
+    const schema = nameTableSchemaOf(PROPERTY_LEDGER_VIEW);
+    expect(jsonDiffPaths(schema, nameTableSchemaOf(LEDGER_VIEW_2C))).toEqual([
+      "$.properties.requirements.items.properties.verification.properties.kind.enum",
+    ]);
+    expect(schema.properties.requirements.items.properties.verification.properties.kind.enum.at(-1)).toBe("non-requirement");
+    expect(withoutWhenAndNonRequirement(schema)).toEqual(nameTableSchemaOf(LEDGER_VIEW_2C));
+    // 旗 off の schema の enum に non-requirement は無い
+    expect(NAME_TABLE_SCHEMA.properties.requirements.items.properties.verification.properties.kind.enum).not.toContain("non-requirement");
+  });
+
+  it("同じ表の応答で、要求の差は名指しの場所だけで、その分を除けばバイト列で同じ。表は同じ（1 回目と previous つきの 2 回目）", async () => {
+    const list = fixtureDefaultValueList();
+    const table = withAggregates(fixtureDefaultValueTable());
+    const previous: NameTablePrevious = { response: responseOf(draftOf(list, table)), problems: [{ field: "rows[0]", message: "前回の指示" }], rejections: [], advice: [] };
+    for (const prior of [undefined, previous]) {
+      const before = await runWith(list, table, LEDGER_VIEW_2C, prior);
+      const now = await runWith(list, table, PROPERTY_LEDGER_VIEW, prior);
+      expect(requestDiffsOf(now.requests, before.requests).map((diff) => diff.paths)).toEqual([WHEN_NON_REQUIREMENT_REQUEST_DIFF[NAME_TABLE_SCHEMA_NAME]]);
+      expect(JSON.stringify(withoutWhenAndNonRequirement(now.requests))).toBe(JSON.stringify(before.requests));
+      expect(now.outcome).toEqual(before.outcome);
+    }
+  });
+
+  it("正例：所属 0 行・kind non-requirement の要件を持つ応答は旗 on で通り、表に kind が載る（分類は欄だけ）", async () => {
+    const list = fixtureNonRequirementList();
+    const table = withAggregates(fixtureNonRequirementTable());
+    for (const nature of ["existence-only", "ruled"] as const) {
+      const classified = { ...table, classification: table.classification.map((entry) => (entry.requirementId === "R6" ? { ...entry, nature } : entry)) };
+      const { outcome } = await runWith(list, classified, PROPERTY_LEDGER_VIEW);
+      if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome)}`);
+      expect(outcome.value.table).toEqual(classified);
+    }
+    expect(NON_REQUIREMENT_TEXT).not.toBe("");
+  });
+
+  it("負例：行を 1 つでも所属させた・value が null でない応答は T1' で unmet（固定文）。旗 off・#549 の台帳では kind が未登録で落ちる", async () => {
+    const t1 = ROW?.t1;
+    if (t1 == null) throw new Error("前提が壊れた");
+    const list = fixtureNonRequirementList();
+    const base = withAggregates(fixtureNonRequirementTable());
+    const owned = { ...base, ownership: base.ownership.map((entry) => (entry.requirementId === "R6" ? { ...entry, roles: [{ id: "f.item.title", basis: "stated" as const, reason: null }] } : entry)) };
+    const ownedRun = await runWith(list, owned, PROPERTY_LEDGER_VIEW);
+    if (ownedRun.outcome.ok || ownedRun.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(ownedRun.outcome.failure.problems).toEqual([{ field: "verification[5]", message: t1.messages.count }]);
+    const valued = responseOf(draftOf(list, base));
+    ((valued["requirements"] as Record<string, Record<string, unknown>>[])[5]!["verification"] as Record<string, unknown>)["value"] = "x";
+    const recording = createRecordingClient([structured(valued)]);
+    const valuedRun = await runNameTable({ plan: planOf(list), list, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(recording.client), ledger: PROPERTY_LEDGER_VIEW });
+    if (valuedRun.ok || valuedRun.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(valuedRun.failure.problems).toEqual([{ field: "requirements[5].verification.value", message: t1.messages.valueShape }]);
+    // 未登録の拒否：旗 off・#549 の台帳では kind の一覧に無い（形で落ちる）
+    for (const [ledger, table] of [[undefined, fixtureNonRequirementTable()], [LEDGER_VIEW_2C, base]] as const) {
+      const { outcome } = await runWith(list, table, ledger);
+      if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+      expect(outcome.failure.problems.map((problem) => problem.field)).toEqual(["requirements[5].verification.kind"]);
+      expect(outcome.failure.problems[0]?.message).not.toContain("non-requirement");
+    }
   });
 });

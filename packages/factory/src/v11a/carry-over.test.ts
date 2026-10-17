@@ -1,7 +1,13 @@
 // 持ち越しの集合と除く範囲（v11a/carry-over.ts）の unit テスト（07-architecture-v1.1a.md §1.2・D14・D15。Issue #505）。
 import { describe, expect, it } from "vitest";
 import { checkDesignOwnership } from "../stages/design.js";
-import { fixtureList, fixtureTable } from "./__tests__/fixtures.js";
+import {
+  LEDGER_VIEW_2C,
+  fixtureList,
+  fixtureNonRequirementList,
+  fixtureNonRequirementTable,
+  fixtureTable,
+} from "./__tests__/fixtures.js";
 import type { FixedTest } from "../fixed-test.js";
 import {
   danglingRowReferences,
@@ -197,5 +203,101 @@ describe("除いた行を指す参照は黙って進めずに例外で断る（�
       tests: [r2Test("ok", "e.member"), carriedTest],
     });
     expect(pruned.suite?.tests.map((test) => test.id)).toEqual(["ok"]);
+  });
+});
+
+// ── 要件でない文（non-requirement。T1'' が受理したものだけ。Issue #550）──────────────────────────────
+
+describe("要件でない文：T1'' が受理した non-requirement の要件は持ち越しに数えず、残る一覧から除く（除く行は増えない）", () => {
+  const ids = ["R1", "R2", "R3", "R4"];
+  async function nonInput(id: string, judgment: SemanticJudgment, extra: Partial<CarryOverInput> = {}): Promise<CarryOverInput> {
+    const table = fixtureNonRequirementTable(id);
+    return {
+      list: fixtureNonRequirementList(undefined, id),
+      table,
+      semanticCheck: { tableSha256: await nameTableSha256(table), judgments: [...ids.map(accept), judgment] },
+      ...extra,
+    };
+  }
+  const plainCarry = async () =>
+    deriveCarryOver({
+      list: fixtureList(),
+      table: fixtureTable(),
+      semanticCheck: { tableSha256: await nameTableSha256(fixtureTable()), judgments: ids.map(accept) },
+    });
+
+  for (const id of ["R6", "R:alt:x1"]) {
+    it(`受理された non-requirement（ID ${id}）は残る一覧にも持ち越しの項目にも無く、除く行が増えない。記録の nonRequirements にあり、ほかの欄は今のまま`, async () => {
+      const carry = await deriveCarryOver(await nonInput(id, accept(id)));
+      const plain = await plainCarry();
+      expect(carry.entries).toEqual(plain.entries);
+      expect(carry.remainingRequirementIds).toEqual(plain.remainingRequirementIds);
+      expect(carry.excludedRowIds).toEqual(plain.excludedRowIds);
+      expect(carry.allCarried).toBe(false);
+      expect(carry.nonRequirements).toEqual([id]);
+      expect(Object.keys(carry)).toEqual(["entries", "excludedRowIds", "remainingRequirementIds", "allCarried", "nonRequirements"]);
+      // 除いた版：一覧・所属・確かめ方・分類から除く
+      const pruned = pruneForCarryOver(fixtureNonRequirementList(undefined, id), fixtureNonRequirementTable(id), carry);
+      expect(pruned.list.requirements.map((requirement) => requirement.id)).toEqual(ids);
+      for (const entries of [pruned.table.ownership, pruned.table.verification, pruned.table.classification]) {
+        expect(entries.map((entry) => entry.requirementId)).toEqual(ids);
+      }
+      expect(pruned.table.rows).toEqual(fixtureTable().rows);
+    });
+
+    it(`拒否された non-requirement（ID ${id}）は今までどおり持ち越し（出どころ semantic-check）で、nonRequirements の欄を持たない`, async () => {
+      const carry = await deriveCarryOver(await nonInput(id, reject(id, "weak-verification")));
+      expect(carry.entries.map((entry) => entry.requirementId)).toEqual(["R5", id]);
+      expect(carry.entries.at(-1)?.reasons).toEqual([{ origin: "semantic-check", reason: "weak-verification" }]);
+      expect(carry.remainingRequirementIds).toEqual(ids);
+      expect(carry.nonRequirements).toBeUndefined();
+      expect("nonRequirements" in carry).toBe(false);
+    });
+  }
+
+  it("持ち越しと要件でない文で全件なら全件持ち越しと同じく allCarried（段・種類は同じ。固定文は走らせる部分が分ける）", async () => {
+    const table = fixtureNonRequirementTable();
+    const carry = await deriveCarryOver({
+      list: fixtureNonRequirementList(),
+      table,
+      semanticCheck: { tableSha256: await nameTableSha256(table), judgments: [...ids.map((id) => reject(id, "weak-verification")), accept("R6")] },
+    });
+    expect(carry.remainingRequirementIds).toEqual([]);
+    expect(carry.allCarried).toBe(true);
+    expect(carry.nonRequirements).toEqual(["R6"]);
+  });
+
+  it("要件でない文は B3' の対象に入らない（判定があれば対象の外として断る）・網羅の落ちにあれば一覧の外として断る", async () => {
+    const base = await nonInput("R6", accept("R6"));
+    const declOf = (judgments: readonly DeclJudgment[]): Partial<CarryOverInput> => ({
+      declCheck: { declarationSha256: DECL_SHA, result: { declarationSha256: DECL_SHA, judgments } },
+    });
+    await expect(deriveCarryOver({ ...base, ...declOf(ids.map(accept)) })).resolves.toMatchObject({ nonRequirements: ["R6"] });
+    await expect(deriveCarryOver({ ...base, ...declOf([...ids.map(accept), accept("R6")]) })).rejects.toThrow("対象の外の要件 ID の判定がある");
+    await expect(
+      deriveCarryOver({ ...base, coverage: [{ requirementId: "R6", units: [{ requirementId: "R6", targetId: "e.item", key: "k" }] }] }),
+    ).rejects.toThrow("網羅の落ちに一覧の外の要件 ID がある");
+  });
+
+  it("受理で除くかは台帳の確かめ方の種類で決める（要件 ID の形・文では決めない）。#549 の台帳では受理されても要件でない文にならない（二点測定）", async () => {
+    const input = await nonInput("R6", accept("R6"));
+    expect((await deriveCarryOver(input)).nonRequirements).toEqual(["R6"]);
+    const before = await deriveCarryOver({ ...input, ledger: LEDGER_VIEW_2C });
+    expect(before.nonRequirements).toBeUndefined();
+    expect(before.remainingRequirementIds).toEqual([...ids, "R6"]);
+    // 確かめ方が fixed-test なら、R:alt: の ID でも要件でない文にならない
+    const table = fixtureNonRequirementTable("R:alt:x1");
+    const fixed = {
+      ...table,
+      ownership: table.ownership.map((entry) => (entry.requirementId === "R:alt:x1" ? { ...entry, roles: [{ id: "e.item", basis: "stated" as const, reason: null }] } : entry)),
+      verification: table.verification.map((entry) => (entry.requirementId === "R:alt:x1" ? { requirementId: entry.requirementId, kind: "fixed-test" as const } : entry)),
+    };
+    const carry = await deriveCarryOver({
+      list: fixtureNonRequirementList(undefined, "R:alt:x1"),
+      table: fixed,
+      semanticCheck: { tableSha256: await nameTableSha256(fixed), judgments: [...ids.map(accept), accept("R:alt:x1")] },
+    });
+    expect(carry.nonRequirements).toBeUndefined();
+    expect(carry.remainingRequirementIds).toEqual([...ids, "R:alt:x1"]);
   });
 });

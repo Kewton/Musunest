@@ -48,6 +48,8 @@ import {
   FIXTURE_YAML,
   LEDGER_REQUEST_DIFF,
   LEDGER_VIEW_2B,
+  LEDGER_VIEW_2C,
+  WHEN_NON_REQUIREMENT_REQUEST_DIFF,
   draftOf,
   fixtureList,
   fixtureTable,
@@ -55,6 +57,7 @@ import {
   withAggregates,
   withoutEnumMembership,
   withoutLedgerAdditions,
+  withoutWhenAndNonRequirement,
 } from "./v11a/__tests__/fixtures.js";
 import * as ledgerModule from "./v12/ledger.js";
 import type { NameTable } from "./v11a/names.js";
@@ -1132,6 +1135,19 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(beforeDiffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(ENUM_MEMBERSHIP_REQUEST_DIFF));
     expect(JSON.stringify(withoutEnumMembership(beforeRequests))).toBe(JSON.stringify(v11a.recording.structured));
     expect(v12Before.summary).toEqual(v12.summary);
+    // #549 までの旗 on（台帳の when の列が未定義・non-requirement の行が無い。Issue #550）は、同じ応答で今の on との差が
+    // when・non-requirement の行の分（R-nt-08・R-sc-02・R-tsp-16・T1 の schema の確かめ方の種類の enum）だけ
+    const spy2C = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2C : undefined));
+    const v12Before2C = await runV11aCli({ dir: `${directory}/v12-complete-2c`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    spy2C.mockRestore();
+    const before2CRequests = JSON.parse(JSON.stringify(v12Before2C.recording.structured)) as unknown[];
+    const diffs2C = requestDiffsOf(onRequests, before2CRequests);
+    for (const diff of diffs2C) expect(diff.paths, diff.schemaName).toEqual(WHEN_NON_REQUIREMENT_REQUEST_DIFF[diff.schemaName] ?? []);
+    expect(diffs2C.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(WHEN_NON_REQUIREMENT_REQUEST_DIFF));
+    expect(JSON.stringify(withoutWhenAndNonRequirement(onRequests))).toBe(JSON.stringify(before2CRequests));
+    expect(v12Before2C.code).toBe(v12.code);
+    expect(v12Before2C.summary).toEqual(v12.summary);
+    expect(v12Before2C.record.conditions).toEqual(v12.record.conditions);
     expect(v12.summary["verdict"]).toBe("full");
     expect(v12.summary["prompt_version"]).toBe(PROMPT_VERSION_V12);
     expect(v12.summary["prompt_version"]).toBe("v1.2");

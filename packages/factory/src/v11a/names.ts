@@ -25,6 +25,10 @@
 // 旗 `v12.ledger` が on で、性質の台帳が集計の種類を持つ走り（`empty-aggregate`。Issue #549）だけ、計算の行の型に
 // `aggregate`（集計の種類と集計元の entity の行の `id`。種別 aggregate でなければ null）を持つ。off・台帳に無い走りで
 // 書いた表は形で落ちる（未登録の拒否）。v1 の型への写し（`RoleEntry`）には欄が無く、表の外に残る。
+//
+// 旗 on の走りだけ、確かめ方の種類 `non-requirement`（決まりも対象の項目も無い説明文。Issue #550）を作れる。所属は 0 行で
+// （1 行でも所属させれば台帳の固定文で落ちる）、分類の欄は完全性の検査のために要るが値は見ない。免除は T1'' の受理だけで
+// 決まり（持ち越しの導出）、ここでは要件の出どころ・要件 ID の形を見ない。off は形で落ちる（未登録の拒否）。
 import {
   ACTION_KINDS,
   COMPUTED_TYPES,
@@ -231,6 +235,7 @@ function shapeOfAggregate(
  * T1' が確かめ、T1'' が要件の文の値と合うかを点検する。v1 の型へは `fixed-test` として写す。Issue #533）。
  * enum-membership（選択肢の集合だけを決める要件）は欄を持たない。選択肢は所属の選択肢の項目の `options` で表し、
  * 旗 `v12.ledger` が on の走りだけが作れる（off は形で落ちる。v1 の型へは `fixed-test` として写す。Issue #548）。
+ * non-requirement（決まりも対象の項目も無い説明文）も欄を持たず、所属は 0 行。旗 on の走りだけが作れる（Issue #550）。
  */
 export type NameTableVerification =
   | { readonly requirementId: string; readonly kind: "fixed-test" }
@@ -247,7 +252,8 @@ export type NameTableVerification =
       readonly constraintIds: readonly string[];
     }
   | { readonly requirementId: string; readonly kind: "default-value"; readonly value: string }
-  | { readonly requirementId: string; readonly kind: "enum-membership" };
+  | { readonly requirementId: string; readonly kind: "enum-membership" }
+  | { readonly requirementId: string; readonly kind: "non-requirement" };
 
 /** 要件ごとの分類（T1 が要件の文から分類する。Plan の `kind` から導かない。T2 の分類と照らす元。§1.1） */
 export interface NameTableClassification {
@@ -1175,7 +1181,8 @@ function checkNameTableWith(
    * 旗 on：性質に結び付いた確かめ方の所属の形を、台帳の行の記述子（`PropertyT1`）から掛ける（Issue #547）。所属が
    * 「記述子の種類・型の行を `count` 行ちょうどと、その行の所属 entity（コードが足す）」だけで、欄の値がその行の
    * options にあり、分類が記述子の値であること。欄を持たない種類は `value` が無いか null で、`optionsNonEmpty` なら
-   * その行の options が空でないこと（Issue #548）。固定文は記述子が持つ
+   * その行の options が空でないこと（Issue #548）。所属 0 行の記述子（行の種類が null）は、1 行でも所属させれば落とし、
+   * 分類の値を見ない記述子（分類が null）は分類を照らさない（Issue #550）。固定文は記述子が持つ
    */
   const checkLedgerVerification = (
     t1: PropertyT1,
@@ -1189,10 +1196,18 @@ function checkNameTableWith(
     if (t1.valueField === null ? value !== undefined && value !== null : key.trim() === "") {
       problems.push({ field: `${field}.${valueField}`, message: t1.messages.valueEmpty });
     }
-    if (nature !== undefined && nature !== t1.nature) problems.push({ field, message: t1.messages.nature });
+    if (t1.nature !== null && nature !== undefined && nature !== t1.nature) {
+      problems.push({ field, message: t1.messages.nature ?? t1.messages.count });
+    }
+    if (t1.ownership.row === null && roles.length > 0) {
+      // 所属 0 行の記述子：表に無い ID・形で落ちた行を所属させても、所属させたことだけで落とす
+      problems.push({ field, message: t1.messages.count });
+      return;
+    }
     if (roles.some((role) => !rowById.has(role.id))) return;
     const owned = roles.map((role) => rowById.get(role.id) as NameTableRow);
-    const targets = owned.filter((row) => row.kind === t1.ownership.row.kind && (row.type as unknown) === t1.ownership.row.type);
+    const want = t1.ownership.row;
+    const targets = want === null ? [] : owned.filter((row) => row.kind === want.kind && (row.type as unknown) === want.type);
     if (targets.length !== t1.ownership.count) {
       problems.push({ field, message: t1.messages.count });
       return;
@@ -1271,7 +1286,8 @@ function checkNameTableWith(
         checkDefaultValueVerification(entry, field, derived.get(entry.requirementId)?.roles ?? [], natureById.get(entry.requirementId));
         return;
       case "enum-membership":
-        // 旗 off の走りは台帳の種類を知らない（下書きの形でも落ちる。型付きの表を直に渡しても通さない。Issue #548）
+      case "non-requirement":
+        // 旗 off の走りは台帳の種類を知らない（下書きの形でも落ちる。型付きの表を直に渡しても通さない。Issue #548・#550）
         problems.push({ field: `${field}.kind`, message: `確かめ方の種類は ${NAME_TABLE_VERIFICATION_KINDS.join("・")} のいずれかであること` });
         return;
     }
