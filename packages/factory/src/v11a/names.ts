@@ -21,6 +21,10 @@
 //     導いた行の `id` を添えて足す（`deriveOwnership`）
 //   - `shared` は所属の数（2 以上）から導く（`sharedRowIds`）。`aliasOf` は持たない（同じ場所を指す 2 つの
 //     `id` は検査で落とす）
+//
+// 旗 `v12.ledger` が on で、性質の台帳が集計の種類を持つ走り（`empty-aggregate`。Issue #549）だけ、計算の行の型に
+// `aggregate`（集計の種類と集計元の entity の行の `id`。種別 aggregate でなければ null）を持つ。off・台帳に無い走りで
+// 書いた表は形で落ちる（未登録の拒否）。v1 の型への写し（`RoleEntry`）には欄が無く、表の外に残る。
 import {
   ACTION_KINDS,
   COMPUTED_TYPES,
@@ -28,6 +32,7 @@ import {
   RESERVED_NAMES,
   VIEW_TYPES,
   type ActionKind,
+  type AggregateKind,
   type ComputedType,
   type FieldKind,
   type ViewType,
@@ -77,11 +82,21 @@ export type ComputationScope = (typeof COMPUTATION_SCOPES)[number];
 export const COMPUTATION_FORMS = ["expression", "aggregate", "settle"] as const;
 export type ComputationForm = (typeof COMPUTATION_FORMS)[number];
 
-/** 計算の型（値の型・範囲・種別の 3 つ組。§2.1） */
+/** 集計の種類と集計元（計算の行の型の `aggregate`。集計元は表の entity の行の `id`。旗 on。Issue #549） */
+export interface ComputationAggregate {
+  readonly kind: AggregateKind;
+  readonly entity: string;
+}
+
+/**
+ * 計算の型（値の型・範囲・種別の 3 つ組。§2.1）。旗 on で台帳が集計の種類を持つ走りだけ `aggregate` を持つ（種別
+ * aggregate の計算は集計の種類と集計元、ほかは null。Issue #549）。off の表は欄を持たない
+ */
 export interface ComputationRowType {
   readonly valueType: ComputedType;
   readonly scope: ComputationScope;
   readonly form: ComputationForm;
+  readonly aggregate?: ComputationAggregate | null;
 }
 
 /** 操作の型（操作の種類と `when` の有無） */
@@ -165,6 +180,48 @@ export interface NameTableLedgerOptions {
 
 /** 型付きの表の確かめ方の種類が、性質の台帳（と台帳の外の種類）に無いときの固定文（旗 on。Issue #547） */
 export const UNREGISTERED_VERIFICATION_KIND_MESSAGE = "確かめ方の種類が性質の台帳に無い";
+
+/** 計算の型に `aggregate` を書いたが、性質の台帳に集計の種類が無い（旗 off を含む）ときの固定文（Issue #549） */
+export const UNREGISTERED_AGGREGATE_MESSAGE = "計算の型の aggregate（集計の種類と集計元）は性質の台帳に無い（書けない）";
+
+/** T1' の計算の行の集計の種類と集計元の検査の固定文（旗 on で台帳が集計の種類を持つ走り。Issue #549） */
+export const COMPUTATION_AGGREGATE_MESSAGES = {
+  missing: "種別 aggregate の計算の行に、集計の種類と集計元（aggregate）が無い",
+  extra: "種別 aggregate でない計算の行の aggregate は null であること",
+  entity: "集計元の ID が表の entity の行に無い",
+  groups: "見出しごとの集計の集計元が、見出しの元の項目の所属 entity と違う",
+} as const;
+
+/**
+ * 計算の型の `aggregate` を読む（旗 on。読めなければ問題に足して undefined。台帳に無ければ書いたことを落とす）。
+ * T1 の応答（下書き）は欄が必須（strict の schema と同じ）。型付きで組み立てた表（`required` が偽）は、欄の無い行を
+ * 「書いていない」として通し、集計の検査を掛けない（T2' はその行を集計の対象にしない＝空の集計の試験は落ちる）
+ */
+function shapeOfAggregate(
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  ledger: LedgerView | undefined,
+  required = true,
+): ComputationAggregate | null | undefined {
+  const kinds = ledger?.aggregateKinds ?? [];
+  if (kinds.length === 0) {
+    if (value !== undefined && value !== null) {
+      problems.push({ field, message: UNREGISTERED_AGGREGATE_MESSAGE });
+      return undefined;
+    }
+    return null;
+  }
+  if (value === null || (value === undefined && !required)) return null;
+  if (!isRecord(value) || !isOneOf(kinds, value["kind"]) || !isNonEmptyString(value["entity"])) {
+    problems.push({
+      field,
+      message: `計算の型の aggregate は null か、集計の種類（${kinds.join("・")}）と集計元の entity の行の id の写像であること`,
+    });
+    return undefined;
+  }
+  return { kind: value["kind"], entity: value["entity"] };
+}
 
 /**
  * 要件ごとの確かめ方（fixed-test／structural＋checks／unresolved＋reason＋constraintIds／default-value＋value／
@@ -292,7 +349,14 @@ const isNonEmptyString = (value: unknown): value is string => typeof value === "
 const isOneOf = <T extends string>(values: readonly T[], value: unknown): value is T =>
   typeof value === "string" && (values as readonly string[]).includes(value);
 
-function shapeOfType(kind: NameTableKind, value: unknown, field: string, problems: Problem[]): NameTableRowType | undefined {
+function shapeOfType(
+  kind: NameTableKind,
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  ledger?: LedgerView,
+  requireAggregate = true,
+): NameTableRowType | undefined {
   switch (kind) {
     case "entity":
       if (value !== null) {
@@ -324,12 +388,16 @@ function shapeOfType(kind: NameTableKind, value: unknown, field: string, problem
         problems.push({ field: `${field}.form`, message: `計算の種別は ${COMPUTATION_FORMS.join("・")} のいずれかであること` });
         good = false;
       }
-      if (!good) return undefined;
-      return {
+      const before = problems.length;
+      const aggregate = shapeOfAggregate(value["aggregate"], `${field}.aggregate`, problems, ledger, requireAggregate);
+      if (!good || problems.length !== before) return undefined;
+      const typed = {
         valueType: value["valueType"] as ComputedType,
         scope: value["scope"] as ComputationScope,
         form: value["form"] as ComputationForm,
       };
+      // 台帳が集計の種類を持つ走りだけ欄を持つ（off の表は今の 3 つ組のまま。Issue #549）
+      return (ledger?.aggregateKinds.length ?? 0) === 0 ? typed : { ...typed, aggregate: aggregate ?? null };
     }
     case "operation": {
       if (!isRecord(value)) {
@@ -385,7 +453,7 @@ function shapeOfNullableId(value: unknown, field: string, problems: Problem[]): 
   return value;
 }
 
-function shapeOfRow(value: unknown, field: string, problems: Problem[]): NameTableDraftRow | undefined {
+function shapeOfRow(value: unknown, field: string, problems: Problem[], ledger?: LedgerView): NameTableDraftRow | undefined {
   if (!isRecord(value)) {
     problems.push({ field, message: "行は写像（object）であること" });
     return undefined;
@@ -405,7 +473,7 @@ function shapeOfRow(value: unknown, field: string, problems: Problem[]): NameTab
   if (!isRecord(source) || !isNonEmptyString(source["copy"]) || !isNonEmptyString(source["quote"])) {
     problems.push({ field: `${field}.source`, message: "出典は「要件の文の写し・引用」の写像であること" });
   }
-  const type = kindOk ? shapeOfType(kind, value["type"], `${field}.type`, problems) : undefined;
+  const type = kindOk ? shapeOfType(kind, value["type"], `${field}.type`, problems, ledger) : undefined;
   const options = shapeOfOptions(value["options"], `${field}.options`, problems);
   const groupBy = shapeOfGroupBy(value["groupBy"], `${field}.groupBy`, problems);
   const refEntity = shapeOfNullableId(value["refEntity"], `${field}.refEntity`, problems);
@@ -589,7 +657,7 @@ function scanNameTableDraftShape(
   if (!Array.isArray(rowsRaw) || rowsRaw.length === 0) {
     problems.push({ field: "rows", message: "行は空でない並びであること" });
   } else {
-    rows = rowsRaw.map((item, index) => shapeOfRow(item, `rows[${index}]`, problems));
+    rows = rowsRaw.map((item, index) => shapeOfRow(item, `rows[${index}]`, problems, ledger));
   }
   let requirements: (NameTableDraftRequirement | undefined)[] | null = null;
   const requirementsRaw = value["requirements"];
@@ -757,9 +825,9 @@ const isScreenType = (type: NameTableRowType): type is ScreenRowType =>
   type !== null && typeof type === "object" && "view" in type;
 
 /** 行の型と種類の組（形の再確認。型付きで組み立てた表にも掛ける） */
-function checkRowType(row: NameTableRow, field: string, problems: Problem[]): void {
+function checkRowType(row: NameTableRow, field: string, problems: Problem[], ledger?: LedgerView): void {
   const shapeProblems: Problem[] = [];
-  shapeOfType(row.kind, row.type, `${field}.type`, shapeProblems);
+  shapeOfType(row.kind, row.type, `${field}.type`, shapeProblems, ledger, false);
   problems.push(...shapeProblems);
   if (shapeProblems.length > 0 || !isComputationType(row.type)) return;
   const { valueType, scope, form } = row.type;
@@ -913,11 +981,42 @@ function checkNameTableWith(
     locationSeen.add(location);
   });
 
+  /**
+   * 旗 on で台帳が集計の種類を持つ走り：種別 aggregate ⇔ `aggregate` が null でない・集計元が表の entity の行を指す・
+   * 見出しごとの集計の集計元は見出しの元の項目の所属 entity と同じ（Issue #549。型の形の落ちは `checkRowType` が出す）
+   */
+  const checkComputationAggregate = (row: NameTableRow, field: string): void => {
+    if (row.kind !== "computation" || !isComputationType(row.type)) return;
+    const at = `${field}.type.aggregate`;
+    const aggregate = row.type.aggregate;
+    if (aggregate === undefined) return;
+    if (row.type.form !== "aggregate") {
+      if (aggregate !== null) problems.push({ field: at, message: COMPUTATION_AGGREGATE_MESSAGES.extra });
+      return;
+    }
+    if (aggregate === null) {
+      problems.push({ field: at, message: COMPUTATION_AGGREGATE_MESSAGES.missing });
+      return;
+    }
+    const source = rowById.get(aggregate.entity);
+    if (source === undefined ? !isDroppedRow(aggregate.entity) : source.kind !== "entity") {
+      problems.push({ field: `${at}.entity`, message: COMPUTATION_AGGREGATE_MESSAGES.entity });
+      return;
+    }
+    if (row.type.scope === "groups" && row.groupBy !== null) {
+      const heading = rowById.get(row.groupBy.field);
+      if (heading !== undefined && heading.entity !== aggregate.entity) {
+        problems.push({ field: `${at}.entity`, message: COMPUTATION_AGGREGATE_MESSAGES.groups });
+      }
+    }
+  };
+
   // (d) 参照・型・選択肢・出典
   const requirementById = new Map(list.requirements.map((requirement) => [requirement.id, requirement] as const));
   table.rows.forEach((row, index) => {
     const field = `rows[${rowAt(index)}]`;
-    checkRowType(row, field, problems);
+    checkRowType(row, field, problems, options.ledger);
+    if ((options.ledger?.aggregateKinds.length ?? 0) > 0) checkComputationAggregate(row, field);
     if (row.role.trim() === "") problems.push({ field: `${field}.role`, message: "役割の説明が空である" });
     const sourceRequirement = requirementById.get(row.source.requirementId);
     if (skipSourceRows.has(index)) {

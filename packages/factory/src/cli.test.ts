@@ -46,12 +46,17 @@ import {
   ENUM_MEMBERSHIP_REQUEST_DIFF,
   FIXTURE_DOCUMENTS,
   FIXTURE_YAML,
+  LEDGER_REQUEST_DIFF,
+  LEDGER_VIEW_2B,
   draftOf,
   fixtureList,
   fixtureTable,
   requestDiffsOf,
+  withAggregates,
   withoutEnumMembership,
+  withoutLedgerAdditions,
 } from "./v11a/__tests__/fixtures.js";
+import * as ledgerModule from "./v12/ledger.js";
 import type { NameTable } from "./v11a/names.js";
 import {
   BUNDLE_MANIFEST_FILE,
@@ -928,6 +933,15 @@ const v11aHead = (): RecordedCall[] => [
   structured({ declaration: V11A_YAML }),
 ];
 
+/**
+ * v1.2（旗 on）の走りの頭。T1 の応答の計算の行に集計の種類と集計元を持つ（今の台帳の strict の schema で必須。Issue #549）。
+ * ほかは `v11aHead` と同じ
+ */
+const v12Head = (): RecordedCall[] => [
+  structured(draftOf(V11A_LIST, withAggregates(V11A_TABLE))),
+  ...v11aHead().slice(1),
+];
+
 /** T1' に落ちる下書き（要件の写しを入れ替える） */
 function v11aBadDraft(): unknown {
   const draft = draftOf(V11A_LIST, V11A_TABLE);
@@ -1079,26 +1093,45 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     vi.restoreAllMocks();
   });
 
-  it("完走で 0：v1.1α の経路で流れ、要求の差は台帳の enum-membership の行の分だけ（名指しの場所）。条件の記録の pipeline・prompt_version が v1.2、ほかの欄は v1.1a と同じ", async () => {
+  it("完走で 0：v1.1α の経路で流れ、要求の差は台帳の enum-membership（#548）と empty-aggregate（#549）の行の分だけ（名指しの場所）。条件の記録の pipeline・prompt_version が v1.2、ほかの欄は v1.1a と同じ", async () => {
     const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
     const v1Spy = vi.spyOn(runModule, "runGeneration");
     const calls = [...v11aHead(), structured(v11aJudgments())];
-    const v12 = await runV11aCli({ dir: `${directory}/v12-complete`, calls, pipeline: "v1.2" });
+    const v12 = await runV11aCli({ dir: `${directory}/v12-complete`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
     const v11a = await runV11aCli({ dir: `${directory}/v12-complete-v11a`, calls });
 
     expect(v12.code).toBe(EXIT_OK);
     expect(v1Spy).not.toHaveBeenCalled();
     expect(v11aSpy).toHaveBeenCalledTimes(2);
     expect(v12.makeClient.mock.calls[0]).toEqual([{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.1a" }]);
-    // LLM への要求は、v1.2 の旗で台帳に登録した性質（enum-membership。Issue #548）の分を除けば v1.1a の走りとバイト列で
-    // 同じ。差は名指しの場所（R-nt-08・R-sc-02・R-tsp-02・R-tsp-16・R-w11 の並び・schema の enum）だけで、空でない
+    // LLM への要求は、v1.2 の旗で台帳に登録した性質（enum-membership。Issue #548・empty-aggregate。Issue #549）の分を除けば
+    // v1.1a の走りとバイト列で同じ。差は名指しの場所（R-nt-08・R-sc-02・R-tsp-02・R-tsp-16・R-w11 の並び・schema の enum・
+    // T1 の schema の行の型の aggregate、表を載せるデータの計算の行の aggregate）だけで、空でない
     const onRequests = JSON.parse(JSON.stringify(v12.recording.structured)) as unknown[];
     const offRequests = JSON.parse(JSON.stringify(v11a.recording.structured)) as unknown[];
     expect(onRequests).toHaveLength(offRequests.length);
     const diffs = requestDiffsOf(onRequests, offRequests);
-    for (const diff of diffs) expect(diff.paths, diff.schemaName).toEqual(ENUM_MEMBERSHIP_REQUEST_DIFF[diff.schemaName] ?? []);
-    expect(diffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(ENUM_MEMBERSHIP_REQUEST_DIFF));
-    expect(JSON.stringify(withoutEnumMembership(onRequests))).toBe(JSON.stringify(v11a.recording.structured));
+    const withInput = (paths: readonly string[]): readonly string[] => {
+      const at = paths.findIndex((path) => path.startsWith("$.schema"));
+      return at < 0 ? [...paths, "$.input"] : [...paths.slice(0, at), "$.input", ...paths.slice(at)];
+    };
+    for (const diff of diffs) {
+      const named = LEDGER_REQUEST_DIFF[diff.schemaName] ?? [];
+      // T1''・T2・B1・B3' は名前の表（計算の行の aggregate）を載せるデータが違う。T1 の 1 回目は表を載せない
+      expect(diff.paths, diff.schemaName).toEqual(diff.schemaName === "name-table" ? named : withInput(named));
+    }
+    expect(diffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual([...Object.keys(LEDGER_REQUEST_DIFF), "decl-check"]);
+    expect(JSON.stringify(withoutLedgerAdditions(onRequests))).toBe(JSON.stringify(v11a.recording.structured));
+    // #548 までの旗 on（台帳に empty-aggregate の行が無い）は、同じ応答で差が enum-membership の行の分だけ（今までの期待）
+    const spy = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2B : undefined));
+    const v12Before = await runV11aCli({ dir: `${directory}/v12-complete-2b`, calls, pipeline: "v1.2" });
+    spy.mockRestore();
+    const beforeRequests = JSON.parse(JSON.stringify(v12Before.recording.structured)) as unknown[];
+    const beforeDiffs = requestDiffsOf(beforeRequests, offRequests);
+    for (const diff of beforeDiffs) expect(diff.paths, diff.schemaName).toEqual(ENUM_MEMBERSHIP_REQUEST_DIFF[diff.schemaName] ?? []);
+    expect(beforeDiffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(ENUM_MEMBERSHIP_REQUEST_DIFF));
+    expect(JSON.stringify(withoutEnumMembership(beforeRequests))).toBe(JSON.stringify(v11a.recording.structured));
+    expect(v12Before.summary).toEqual(v12.summary);
     expect(v12.summary["verdict"]).toBe("full");
     expect(v12.summary["prompt_version"]).toBe(PROMPT_VERSION_V12);
     expect(v12.summary["prompt_version"]).toBe("v1.2");
@@ -1116,7 +1149,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
 
   it("旗の組の契約：export した V12_PIPELINE_FLAGS＝入口が渡した実効の旗＝要約の v12_flags＝条件の記録の v12_flags", async () => {
     const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
-    const run = await runV11aCli({ dir: `${directory}/v12-flags`, calls: [...v11aHead(), structured(v11aJudgments())], pipeline: "v1.2" });
+    const run = await runV11aCli({ dir: `${directory}/v12-flags`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
     expect(run.code).toBe(EXIT_OK);
     const passed = v11aSpy.mock.calls[0]?.[0];
     expect(passed?.flags).toBe(factory.V12_PIPELINE_FLAGS);

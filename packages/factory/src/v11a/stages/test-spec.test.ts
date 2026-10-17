@@ -28,9 +28,13 @@ import {
 } from "../../stages/test-suite.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
+  EMPTY_AGGREGATE_REQUEST_DIFF,
   ENUM_MEMBERSHIP_REQUEST_DIFF,
   FIXTURE_DOCUMENTS,
   LEDGER_VIEW_2A,
+  LEDGER_VIEW_2B,
+  withAggregates,
+  withoutEmptyAggregate,
   fixtureDefaultValueList,
   fixtureDefaultValueTable,
   fixtureEnumMembershipList,
@@ -1468,7 +1472,7 @@ describe.each(LEDGER_CASES)("既定値の要件：表の確かめ方が default-
     expectNoAcceptanceMaterial([requestText(request)]);
   });
 
-  it("旗 on（手 2a の台帳）と off で、同じ応答の要求（前置き・規則・データ・schema）と結果が深く等しい。今の台帳の on は要求の差が enum-membership の行の分だけ（1 回で通る・作り直す・判定に聞く）", async () => {
+  it("旗 on（手 2a の台帳）と off で、同じ応答の要求（前置き・規則・データ・schema）と結果が深く等しい。#548 の台帳の on は要求の差が enum-membership の行の分だけ、今の台帳はさらに empty-aggregate の行の分だけ（1 回で通る・作り直す・判定に聞く）", async () => {
     const recorded = () => recordingJudge(createFakeJudge({ [natureQuestionName("R4")]: choice("ruled", 0.9) }));
     const natures = D_NATURES.map((entry) => (entry.requirementId === "R4" ? { ...entry, nature: "existence-only" as const } : entry));
     const scenarios: readonly (readonly unknown[])[] = [
@@ -1496,12 +1500,21 @@ describe.each(LEDGER_CASES)("既定値の要件：表の確かめ方が default-
       expect(on.outcome).toEqual(off.outcome);
       expect(on.judgeRequests).toEqual(off.judgeRequests);
       expect(on.gateway.counts).toEqual(off.gateway.counts);
-      // 今の台帳（Issue #548）：要求の差は名指しの場所だけで、その分を除けばバイト列で同じ。結果・判定・呼び出し数は同じ
+      // #548 の台帳（Issue #548）：要求の差は名指しの場所だけで、その分を除けばバイト列で同じ。結果・判定・呼び出し数は同じ
+      const twoB = await runFor(LEDGER_VIEW_2B);
+      const twoBRequests = JSON.parse(JSON.stringify(twoB.recording.structured)) as unknown[];
+      const offRequests = JSON.parse(JSON.stringify(off.recording.structured)) as unknown[];
+      for (const diff of requestDiffsOf(twoBRequests, offRequests)) expect(diff.paths).toEqual(ENUM_MEMBERSHIP_REQUEST_DIFF[TEST_SPEC_SCHEMA_NAME]);
+      expect(JSON.stringify(withoutEnumMembership(twoBRequests))).toBe(JSON.stringify(offRequests));
+      expect(twoB.outcome).toEqual(off.outcome);
+      expect(twoB.judgeRequests).toEqual(off.judgeRequests);
+      expect(twoB.gateway.counts).toEqual(off.gateway.counts);
+      // 今の台帳（Issue #549）：#548 の台帳との差は empty-aggregate の行の分（R-tsp-16 の文・observes の enum）だけ。
+      // 表の計算の行は集計の種類と集計元を持たない（型付きの表）ので、データは同じ。結果・判定・呼び出し数は同じ
       const full = await runFor(PROPERTY_LEDGER_VIEW);
       const fullRequests = JSON.parse(JSON.stringify(full.recording.structured)) as unknown[];
-      const offRequests = JSON.parse(JSON.stringify(off.recording.structured)) as unknown[];
-      for (const diff of requestDiffsOf(fullRequests, offRequests)) expect(diff.paths).toEqual(ENUM_MEMBERSHIP_REQUEST_DIFF[TEST_SPEC_SCHEMA_NAME]);
-      expect(JSON.stringify(withoutEnumMembership(fullRequests))).toBe(JSON.stringify(offRequests));
+      for (const diff of requestDiffsOf(fullRequests, twoBRequests)) expect(diff.paths).toEqual(EMPTY_AGGREGATE_REQUEST_DIFF[TEST_SPEC_SCHEMA_NAME]);
+      expect(JSON.stringify(withoutEmptyAggregate(fullRequests))).toBe(JSON.stringify(twoBRequests));
       expect(full.outcome).toEqual(off.outcome);
       expect(full.judgeRequests).toEqual(off.judgeRequests);
       expect(full.gateway.counts).toEqual(off.gateway.counts);
@@ -1550,12 +1563,12 @@ describe("旗 on：手 2a の台帳（enum-membership の行を除いた導出�
   });
 });
 
-describe("旗 on：今の台帳の T2 の規則・schema と off の差は enum-membership の行の分（R-tsp-02 の除外・R-tsp-16 の形の 1 文・observes の enum）だけ（Issue #548）", () => {
+describe("旗 on：#548 の台帳（empty-aggregate の行を除いた導出）の T2 の規則・schema と off の差は enum-membership の行の分（R-tsp-02 の除外・R-tsp-16 の形の 1 文・observes の enum）だけ（Issue #548・#549）", () => {
   it("R-tsp-02 の除外に enum-membership が入り、R-tsp-16 に形の 1 文が default-value の文の次に入る。ほかの定義・schema の位置は off と同じで、規則の不備は 0", () => {
     const row = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");
     const anchor = PROPERTY_LEDGER.find((entry) => entry.id === "default-value")?.rules.t2;
     if (row?.rules.t2 == null || anchor == null) throw new Error("前提が壊れた");
-    const definitions = testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    const definitions = testSpecRuleDefinitionsOf(LEDGER_VIEW_2B);
     const text = (id: string) => definitions.find((definition) => definition.id === id)?.text ?? "";
     const offText = (id: string) => TEST_SPEC_RULE_DEFINITIONS.find((definition) => definition.id === id)?.text ?? "";
     expect(text("R-tsp-02")).toBe(offText("R-tsp-02").replace("structural・default-value の要件", "structural・default-value・enum-membership の要件"));
@@ -1565,14 +1578,35 @@ describe("旗 on：今の台帳の T2 の規則・schema と off の差は enum-
       TEST_SPEC_RULE_DEFINITIONS.filter((definition) => !["R-tsp-02", "R-tsp-16"].includes(definition.id)),
     );
     expect(ruleDefinitionDefects(definitions)).toEqual([]);
-    expect(jsonDiffPaths(testSpecSchemaOf(PROPERTY_LEDGER_VIEW), TEST_SPEC_SCHEMA)).toEqual(["$.properties.tests.items.properties.observes.enum"]);
-    expect(testSpecSchemaOf(PROPERTY_LEDGER_VIEW).properties.tests.items.properties.observes.enum).toEqual([...TEST_OBSERVES, "enum-membership"]);
+    expect(jsonDiffPaths(testSpecSchemaOf(LEDGER_VIEW_2B), TEST_SPEC_SCHEMA)).toEqual(["$.properties.tests.items.properties.observes.enum"]);
+    expect(testSpecSchemaOf(LEDGER_VIEW_2B).properties.tests.items.properties.observes.enum).toEqual([...TEST_OBSERVES, "enum-membership"]);
+    expectNoAcceptanceMaterial(ruleTexts(definitions));
+  });
+});
+
+describe("旗 on：今の台帳の T2 の規則・schema と #548 の台帳の差は empty-aggregate の行の分（R-tsp-16 の形の 1 文・observes の enum）だけ（Issue #549）", () => {
+  it("R-tsp-16 に形の 1 文が enum-membership の文の次に入り、observes の enum の末尾に empty-aggregate が入る。R-tsp-02 の除外は変わらない（免除は無い）。規則の不備は 0", () => {
+    const row = PROPERTY_LEDGER.find((entry) => entry.id === "empty-aggregate");
+    const anchor = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership")?.rules.t2;
+    if (row?.rules.t2 == null || anchor == null) throw new Error("前提が壊れた");
+    const definitions = testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    const before = testSpecRuleDefinitionsOf(LEDGER_VIEW_2B);
+    expect(definitions).toEqual(
+      before.map((definition) =>
+        definition.id === "R-tsp-16" ? { ...definition, text: definition.text.replace(anchor, `${anchor}${row.rules.t2 ?? ""}`) } : definition,
+      ),
+    );
+    expect(ruleDefinitionDefects(definitions)).toEqual([]);
+    expect(jsonDiffPaths(testSpecSchemaOf(PROPERTY_LEDGER_VIEW), testSpecSchemaOf(LEDGER_VIEW_2B))).toEqual(["$.properties.tests.items.properties.observes.enum"]);
+    expect(testSpecSchemaOf(PROPERTY_LEDGER_VIEW).properties.tests.items.properties.observes.enum).toEqual([...TEST_OBSERVES, "enum-membership", "empty-aggregate"]);
+    expect(withoutEmptyAggregate(testSpecSchemaOf(PROPERTY_LEDGER_VIEW))).toEqual(testSpecSchemaOf(LEDGER_VIEW_2B));
     expectNoAcceptanceMaterial(ruleTexts(definitions));
   });
 });
 
 describe("旗 on：T2' に台帳に無い観測する性質を直接渡すと固定文で落ちる（未登録の性質の拒否）", () => {
-  const unregistered = ["no-such-property", "empty-aggregate", "other"] as const;
+  // empty-aggregate は手 2c（Issue #549）で登録した。#548 の台帳では台帳に無い性質として落ちる（下の二点測定）
+  const unregistered = ["no-such-property", "other"] as const;
 
   it("評価可能性：台帳に無い性質は、どの組でも台帳の固定文で落ちる（値を埋めない）。台帳にある性質は off と同じ結果", () => {
     for (const targetKind of TEST_TARGET_KINDS) {
@@ -1591,6 +1625,15 @@ describe("旗 on：T2' に台帳に無い観測する性質を直接渡すと固
             checkEvaluability({ tests: [test] }, observes, fixtureTable()),
           );
         }
+        // 二点測定（Issue #549）：empty-aggregate は #548 の台帳では台帳に無い性質で落ち、今の台帳では組が合えば台帳の組に照らす
+        const emptyAggregate = new Map([["t", "empty-aggregate" as TestObserves]]);
+        expect(checkEvaluabilityByLedger({ tests: [test] }, emptyAggregate, fixtureTable(), LEDGER_VIEW_2B)).toEqual([
+          { field: "tests[0].observes", message: LEDGER_UNREGISTERED_OBSERVES_MESSAGE },
+        ]);
+        const listed = targetKind === "computation" && operation === "aggregate";
+        expect(checkEvaluabilityByLedger({ tests: [test] }, emptyAggregate, fixtureTable(), PROPERTY_LEDGER_VIEW).length, `${targetKind} ${operation}`).toBe(
+          listed ? 0 : 1,
+        );
       }
     }
   });
@@ -1613,7 +1656,7 @@ describe("旗 on：T2' に台帳に無い観測する性質を直接渡すと固
       ok: false,
       problems: [{ field: "tests[0].observes", message: `観測する性質は ${PROPERTY_LEDGER_VIEW.observes.join("・")} のいずれかであること` }],
     });
-    expect(withoutEnumMembership(checked)).toEqual(checkTestSpecOutputOf(output));
+    expect(withoutEnumMembership(withoutEmptyAggregate(checked))).toEqual(checkTestSpecOutputOf(output));
   });
 
   it("段：台帳に無い性質を書いた応答は on でも 2 回とも形で落ち、malformed（やり直しの回数は今と同じ）", async () => {
@@ -1883,5 +1926,224 @@ describe("旗 on：選択肢の集合の要件は、表の確かめ方が enum-m
     expect(request.rules).toEqual(ruleTexts(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)));
     expect(request.rules?.some((text) => text.includes(ROW.rules.t2 ?? "（無い）"))).toBe(true);
     expectNoAcceptanceMaterial([requestText(request)]);
+  });
+});
+
+// ── 空の集計 empty-aggregate（集計の種類 × データ状態の期待の形の門。旗 on。Issue #549）──────────────────
+
+describe("旗 on：空の集計の要件の試験は、集計の種類 × データ状態の台帳の表で期待を確かめる（(a)① の型。Issue #549）", () => {
+  const ROW = PROPERTY_LEDGER.find((entry) => entry.id === "empty-aggregate");
+  if (ROW?.t2Aggregate == null) throw new Error("前提が壊れた：台帳に empty-aggregate の集計の試験の型が無い");
+  const MESSAGES = ROW.t2Aggregate.messages;
+  /** アプリ全体の集計の行（金額の合計・件数・平均。どれも集計元は項目の entity。R4 が所属させる） */
+  const appRow = (id: string, name: string, quote: string) => ({
+    id,
+    kind: "computation" as const,
+    entity: null,
+    name,
+    role: "要件 R4 が使う対象",
+    source: { requirementId: "R4", quote },
+    type: { valueType: "number" as const, scope: "app" as const, form: "aggregate" as const },
+    options: null,
+    groupBy: null,
+    refEntity: null,
+  });
+  /** 題材の表（計算の行に集計の種類と集計元を持つ）に、アプリ全体の集計の 3 行を足した表。`extra` で集計を差し替える */
+  const aggTable = (extra: Parameters<typeof withAggregates>[1] = {}): NameTable => {
+    const base = fixtureTable();
+    const rows = [...base.rows, appRow("c.sumAll", "sumAll", "金額の合計"), appRow("c.countAll", "countAll", "区分ごとの件数"), appRow("c.avgAll", "avgAll", "全体の率")];
+    return withAggregates(
+      {
+        ...base,
+        rows,
+        ownership: base.ownership.map((entry) =>
+          entry.requirementId === "R4"
+            ? { ...entry, roles: [...entry.roles, ...["c.sumAll", "c.countAll", "c.avgAll"].map((id) => ({ id, basis: "stated" as const, reason: null }))] }
+            : entry,
+        ),
+      },
+      { "c.sumAll": { kind: "sum", entity: "e.item" }, "c.countAll": { kind: "count", entity: "e.item" }, "c.avgAll": { kind: "avg", entity: "e.item" }, ...extra },
+    );
+  };
+  /** 項目の行（集計元の行）3 つ */
+  const ITEM_ROWS = [1, 2, 3].map((index) => ({
+    target: { requirementId: "R4", kind: "entity", roleId: "e.item" },
+    rowId: `item-${String(index)}`,
+    values: JSON.stringify({ "f.item.amount": 1 }),
+  }));
+  interface AggOptions {
+    readonly id?: string;
+    readonly roleId?: string;
+    readonly kind?: "normal" | "abnormal" | "boundary";
+    readonly operation?: string;
+    readonly observes?: string;
+    readonly empty?: readonly string[];
+    readonly value: unknown;
+    readonly referenceData?: readonly Record<string, unknown>[];
+  }
+  /** 集計の試験 1 件（既定は空の集計・アプリ全体の合計・集計元を空と明示した境界） */
+  const aggTest = (options: AggOptions): Record<string, unknown> => ({
+    id: options.id ?? "r4-empty",
+    target: { requirementId: "R4", kind: "computation", roleId: options.roleId ?? "c.sumAll" },
+    kind: options.kind ?? "boundary",
+    operation: options.operation ?? "aggregate",
+    clock: "2026-09-16T12:00:00+09:00",
+    input: "{}",
+    inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: options.empty ?? ["e.item"] },
+    referenceData: options.referenceData ?? [],
+    expected: { kind: "ok", value: JSON.stringify(options.value), code: null },
+    assertion: null,
+    observes: options.observes ?? "empty-aggregate",
+  });
+  /** 空の境界（集計元を空と明示）と未読の異常（集計元に触れない）の 2 本 */
+  const pair = (roleId: string, empty: unknown, unread: unknown = null, prefix = roleId) => [
+    aggTest({ id: `${prefix}-empty`, roleId, kind: "boundary", empty: ["e.item"], value: empty }),
+    aggTest({ id: `${prefix}-unread`, roleId, kind: "abnormal", empty: [], value: unread }),
+  ];
+  const aResponse = (extra: readonly Record<string, unknown>[]) => response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute(), ...extra]);
+  const runA = (outputs: readonly unknown[], options: { table?: NameTable; ledger?: LedgerView } = {}) =>
+    run(outputs, { table: options.table ?? aggTable(), ledger: options.ledger ?? PROPERTY_LEDGER_VIEW });
+  /** 1 回目の応答で落ちた問題（作り直しの指示。2 回目は同じ応答） */
+  async function problemsOf(extra: readonly Record<string, unknown>[], table?: NameTable): Promise<readonly Problem[]> {
+    const bad = aResponse(extra);
+    const { outcome } = await runA([bad, bad], table === undefined ? {} : { table });
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    return outcome.failure.problems;
+  }
+  /** 追加の試験の位置（r1・r2・r3・r4 の 10 本のあと） */
+  const AT = (offset = 0) => `tests[${String(10 + offset)}]`;
+  const ENUM_ZEROS = [
+    { heading: "alpha", value: 0 },
+    { heading: "beta", value: 0 },
+  ];
+
+  it("(1) 二点測定：sum のアプリ全体の集計に、空を明示して 0 の boundary と、触れずに null の abnormal（どちらも empty-aggregate）を書いた応答は通り、網羅の単位にある。#548 の台帳では観測する性質が未登録で落ちる", async () => {
+    const good = aResponse(pair("c.sumAll", 0));
+    const { outcome, recording } = await runA([good]);
+    if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
+    expect(recording.structured).toHaveLength(1);
+    expect(outcome.value.observes.get("c.sumAll-empty")).toBe("empty-aggregate");
+    const units = outcome.value.coverage.filter((unit) => unit.targetId === "c.sumAll").map((unit) => JSON.parse(unit.key) as Record<string, unknown>);
+    expect(units.map((unit) => [unit["kind"], unit["operation"], unit["observes"]])).toEqual([
+      ["boundary", "aggregate", "empty-aggregate"],
+      ["abnormal", "aggregate", "empty-aggregate"],
+    ]);
+    // 直す前（#548 の台帳）：観測する性質が台帳に無く、形で 2 回落ちる
+    const before = await runA([good, good], { ledger: LEDGER_VIEW_2B });
+    if (before.outcome.ok || before.outcome.failure.kind !== "malformed") throw new Error("malformed でない");
+    expect(before.outcome.failure.problems).toContainEqual({
+      field: `${AT()}.observes`,
+      message: `観測する性質は ${LEDGER_VIEW_2B.observes.join("・")} のいずれかであること`,
+    });
+  });
+
+  it("(1) 正例：avg × 空は null、count × 空は 0、見出しごと × enum × 空は options の順の 0 の並び、見出しごと × avg × 空は null の並び、月 × 空は各 value が 0 の並び、見出しごとの未読は null", async () => {
+    const cases: readonly { readonly name: string; readonly tests: readonly Record<string, unknown>[]; readonly table?: NameTable }[] = [
+      { name: "avg", tests: pair("c.avgAll", null) },
+      { name: "count", tests: pair("c.countAll", 0) },
+      { name: "groups enum count", tests: pair("c.byKind", ENUM_ZEROS) },
+      {
+        name: "groups enum avg",
+        tests: pair("c.byKind", [
+          { heading: "alpha", value: null },
+          { heading: "beta", value: null },
+        ]),
+        table: aggTable({ "c.byKind": { kind: "avg", entity: "e.item" } }),
+      },
+      {
+        name: "groups month sum",
+        tests: pair("c.byMonth", [
+          { heading: "2026-08", value: 0 },
+          { heading: "2026-09", value: 0 },
+        ]),
+      },
+    ];
+    for (const entry of cases) {
+      const { outcome } = await runA([aResponse(entry.tests)], entry.table === undefined ? {} : { table: entry.table });
+      expect(outcome.ok, `${entry.name}：${outcome.ok ? "" : JSON.stringify(outcome.failure)}`).toBe(true);
+    }
+  });
+
+  it("(2) 負例：空を明示して null を期待（sum・count）は固定文で落ちる", async () => {
+    for (const roleId of ["c.sumAll", "c.countAll"]) {
+      expect(await problemsOf([aggTest({ roleId, value: null })]), roleId).toEqual([{ field: `${AT()}.expected`, message: MESSAGES.expected }]);
+    }
+  });
+
+  it("(2) 負例：空と明示せず 0 の並びを期待（見出しごとの未読）・0 を期待（未読）は固定文で落ちる", async () => {
+    expect(await problemsOf([aggTest({ roleId: "c.byKind", kind: "abnormal", empty: [], value: ENUM_ZEROS })])).toEqual([
+      { field: `${AT()}.expected`, message: MESSAGES.expected },
+    ]);
+    expect(await problemsOf([aggTest({ kind: "abnormal", empty: [], value: 0 })])).toEqual([{ field: `${AT()}.expected`, message: MESSAGES.expected }]);
+  });
+
+  it("(2) 負例：avg × 空に 0、見出しの順が options と違う・見出しが足りない・余計な欄がある並びは固定文で落ちる", async () => {
+    expect(await problemsOf([aggTest({ roleId: "c.avgAll", value: 0 })])).toEqual([{ field: `${AT()}.expected`, message: MESSAGES.expected }]);
+    for (const value of [
+      [...ENUM_ZEROS].reverse(),
+      ENUM_ZEROS.slice(0, 1),
+      ENUM_ZEROS.map((item) => ({ ...item, label: "x" })),
+      ENUM_ZEROS.map((item) => item.value),
+      { alpha: 0, beta: 0 },
+    ]) {
+      // 順の違いは v1 の見出しの順の検査も挙げる（その分は今までどおり）
+      expect(await problemsOf([aggTest({ roleId: "c.byKind", value })]), JSON.stringify(value)).toContainEqual({ field: `${AT()}.expected`, message: MESSAGES.expected });
+    }
+    // 月の見出しの並びの value が 0 でない・空の並び
+    for (const value of [[{ heading: "2026-09", value: null }], []]) {
+      expect(await problemsOf([aggTest({ roleId: "c.byMonth", value })]), JSON.stringify(value)).toEqual([{ field: `${AT()}.expected`, message: MESSAGES.expected }]);
+    }
+  });
+
+  it("(2) 負例：集計元でない entity だけを空と明示して 0（未読なので null が要る）は固定文で落ちる", async () => {
+    const problems = await problemsOf([aggTest({ kind: "abnormal", empty: ["e.member"], value: 0 })]);
+    expect(problems).toEqual([{ field: `${AT()}.expected`, message: MESSAGES.expected }]);
+  });
+
+  it("(2) 負例：参照データに集計元の行があるのに empty-aggregate、kind が状態に合わない（空に abnormal・未読に boundary）は固定文で落ちる", async () => {
+    expect(await problemsOf([aggTest({ value: 0, referenceData: ITEM_ROWS })])).toEqual([{ field: `${AT()}.referenceData`, message: MESSAGES.referenceData }]);
+    expect(await problemsOf([aggTest({ kind: "abnormal", value: 0 })])).toEqual([{ field: `${AT()}.kind`, message: MESSAGES.kind }]);
+    expect(await problemsOf([aggTest({ kind: "boundary", empty: [], value: null })])).toEqual([{ field: `${AT()}.kind`, message: MESSAGES.kind }]);
+  });
+
+  it("(2) 負例：対象が集計の行でない（式の計算・集計元の無い表）empty-aggregate は固定文で落ちる", async () => {
+    expect(await problemsOf([aggTest({ roleId: "c.rate", value: 0 })])).toEqual([{ field: `${AT()}.target`, message: MESSAGES.target }]);
+    // 計算の行に集計の種類と集計元が無い表（型付きの表）では、集計の行も対象にならない（fail-closed）
+    expect(await problemsOf([aggTest({ roleId: "c.byKind", value: ENUM_ZEROS })], fixtureTable())).toEqual([
+      { field: `${AT()}.target`, message: MESSAGES.target },
+    ]);
+  });
+
+  it("(2) 負例：observes が value で集計元の行が無い集計の試験は、空と明示すれば種類の値、しなければ null でなければ固定文で落ちる", async () => {
+    expect(await problemsOf([aggTest({ kind: "normal", observes: "value", value: 5 })])).toEqual([{ field: `${AT()}.expected`, message: MESSAGES.alsoExpected }]);
+    expect(await problemsOf([aggTest({ kind: "normal", observes: "value", empty: [], value: 0 })])).toEqual([
+      { field: `${AT()}.expected`, message: MESSAGES.alsoExpected },
+    ]);
+    // 合えば通る（kind は見ない）
+    for (const test of [aggTest({ kind: "normal", observes: "value", value: 0 }), aggTest({ kind: "normal", observes: "value", empty: [], value: null })]) {
+      const { outcome } = await runA([aResponse([test])]);
+      expect(outcome.ok).toBe(true);
+    }
+  });
+
+  it("(3) 既存の value の正常の試験（集計元の行あり）は今までどおり通り、門に掛からない", async () => {
+    const normal = aggTest({ kind: "normal", observes: "value", empty: [], value: 3, referenceData: ITEM_ROWS });
+    const { outcome } = await runA([aResponse([normal])]);
+    expect(outcome.ok, outcome.ok ? "" : JSON.stringify(outcome.failure)).toBe(true);
+    // 旗 off（集計の種類と集計元の無い表）では同じ試験の形でも門は無い
+    const off = await run([aResponse([aggTest({ kind: "normal", observes: "value", roleId: "c.byKind", value: [{ heading: "alpha", value: 5 }, { heading: "beta", value: 5 }] })])], { table: fixtureTable() });
+    expect(off.outcome.ok, off.outcome.ok ? "" : JSON.stringify(off.outcome.failure)).toBe(true);
+  });
+
+  it("(4) 要求に題材の言葉が無く、R-tsp-16 に台帳の文があり、データの対象の表の計算の行に aggregate が載る", async () => {
+    const { recording } = await runA([aResponse(pair("c.sumAll", 0))]);
+    const request = recording.structured[0]!;
+    expectNoAcceptanceMaterial([requestText(request)]);
+    expect(request.rules?.some((text) => text.includes(ROW.rules.t2 ?? "（無い）"))).toBe(true);
+    const rows = dataBlockOf(request.input, TEST_SPEC_DATA_NAMES[2]) as { id: string; type: Record<string, unknown> | null }[];
+    expect(rows.find((row) => row.id === "c.sumAll")?.type).toEqual({ valueType: "number", scope: "app", form: "aggregate", aggregate: { kind: "sum", entity: "e.item" } });
+    expect(rows.find((row) => row.id === "c.rate")?.type).toEqual({ valueType: "number", scope: "app", form: "expression", aggregate: null });
+    // 名前は見せない（今までどおり）
+    expect(rows.every((row) => !("name" in row))).toBe(true);
   });
 });

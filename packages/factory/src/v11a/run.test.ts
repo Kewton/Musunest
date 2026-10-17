@@ -41,7 +41,14 @@ import {
   fixtureTable,
   jsonDiffPaths,
   requestDiffsOf,
+  withAggregateResponses,
+  withAggregates,
   withoutEnumMembership,
+  withoutLedgerAdditions,
+  LEDGER_REQUEST_DIFF,
+  EMPTY_AGGREGATE_REQUEST_DIFF,
+  LEDGER_VIEW_2B,
+  withoutEmptyAggregate,
 } from "./__tests__/fixtures.js";
 import { V11A_ARTIFACT_NAMES } from "./bundle-v11a.js";
 import * as evaluateModule from "./evaluate.js";
@@ -66,6 +73,7 @@ import { captureBaselineV11a, type BaselineV11aCapture, type BaselineV11aScenari
 import * as factoryModule from "../index.js";
 import { createFakeLlmClient } from "../llm-fake.js";
 import { PROPERTY_LEDGER, V12_PIPELINE_FLAGS, V12_FLAG_NAMES, resolveV12Flags } from "../v12/ledger.js";
+import * as ledgerModule from "../v12/ledger.js";
 import { buildSized, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
 
 afterEach(() => {
@@ -118,6 +126,12 @@ const TABLE: NameTable = (() => {
     classification: without5(table.classification),
   };
 })();
+
+/**
+ * 旗 on の走りの名前の表（題材の表の計算の行に、集計の種類と集計元を足したもの。strict の schema で必須。Issue #549）。
+ * off の走りには渡さない（未登録で落ちる）
+ */
+const TABLE_ON: NameTable = withAggregates(TABLE);
 
 /**
  * R1 も担当者の entity（e.member）を所属させる表。R2 を持ち越しても e.member は共有の行として残るので、R1 の
@@ -1285,6 +1299,8 @@ const FLAG_CASES: readonly { readonly name: string; readonly flags: Partial<Gene
 ];
 
 describe.each(FLAG_CASES)("(q) 既定値の要件：宣言の default が合えば今までの門で full、違えば不一致で full が出ない（旗 $name）", ({ flags }) => {
+  /** 旗 on の T1 の応答は計算の行に集計の種類と集計元を持つ（Issue #549） */
+  const tableFor = (table: NameTable): NameTable => (flags.flags?.ledger === true ? withAggregates(table) : table);
   const D_LIST_BASE: RequirementList = {
     ...BASE_LIST,
     requirements: [
@@ -1297,12 +1313,12 @@ describe.each(FLAG_CASES)("(q) 既定値の要件：宣言の default が合え�
   const D_SOURCE = D_LIST_BASE.requirements.map((requirement) => requirement.text).join("");
   const D_IDS = [...IDS, "R6"] as const;
   /** 題材の表に、区分の項目の既定値だけを決める R6（default-value・alpha・ruled）を足した表 */
-  const D_TABLE: NameTable = {
+  const D_TABLE: NameTable = tableFor({
     ...TABLE,
     ownership: [...TABLE.ownership, { requirementId: "R6", roles: [{ id: "f.item.kind", basis: "stated", reason: null }] }],
     verification: [...TABLE.verification, { requirementId: "R6", kind: "default-value", value: "alpha" }],
     classification: [...TABLE.classification, { requirementId: "R6", nature: "ruled" }],
-  };
+  });
   /** 区分の項目に default を足した宣言（key が null なら足さない） */
   const dYaml = (key: string | null): string =>
     key === null ? RUN_YAML : replaced(RUN_YAML, "          beta: ベータ\n", `          beta: ベータ\n        default: ${key}\n`);
@@ -1471,12 +1487,14 @@ describe("(r) 選択肢の集合の要件：enum-membership で確かめる走�
   const E_SOURCE = E_LIST_BASE.requirements.map((requirement) => requirement.text).join("");
   const E_IDS = [...IDS, "R6"] as const;
   /** 題材の表に、区分の項目の選択肢の集合だけを決める R6（enum-membership・ruled）を足した表 */
-  const E_TABLE: NameTable = {
+  const E_TABLE_PLAIN: NameTable = {
     ...TABLE,
     ownership: [...TABLE.ownership, { requirementId: "R6", roles: [{ id: "f.item.kind", basis: "stated", reason: null }] }],
     verification: [...TABLE.verification, { requirementId: "R6", kind: "enum-membership" }],
     classification: [...TABLE.classification, { requirementId: "R6", nature: "ruled" }],
   };
+  /** 旗 on の T1 の応答は計算の行に集計の種類と集計元を持つ（Issue #549） */
+  const E_TABLE: NameTable = withAggregates(E_TABLE_PLAIN);
   /** 区分の項目の options の順を表と逆にした宣言（B3 の options の照合が落とす） */
   const REORDERED_YAML = replaced(RUN_YAML, "          alpha: アルファ\n          beta: ベータ\n", "          beta: ベータ\n          alpha: アルファ\n");
   const r6Test = () =>
@@ -1529,7 +1547,7 @@ describe("(r) 選択肢の集合の要件：enum-membership で確かめる走�
   });
 
   it("旗 off では同じ表は T1' の形で落ち（台帳に無い種類）、full が出ない（未登録の拒否）", async () => {
-    const { result } = await runScenario([structured(draftOf(E_LIST, E_TABLE)), structured(draftOf(E_LIST, E_TABLE))], {
+    const { result } = await runScenario([structured(draftOf(E_LIST, E_TABLE_PLAIN)), structured(draftOf(E_LIST, E_TABLE_PLAIN))], {
       plan: E_PLAN,
       source: E_SOURCE,
     });
@@ -1635,6 +1653,161 @@ describe("(r) 選択肢の集合の要件：enum-membership で確かめる走�
   });
 });
 
+// ── (s) 空の集計の要件（旗 on。Issue #549）──────────────────────────────
+
+describe("(s) 空の集計の要件：空の境界・未読の異常を empty-aggregate で持つ集計の要件の走りは、宣言の集計が表どおりなら v1 の評価器で不一致 0・今までの門で full（旗 on。(a)① の型。Issue #549）", () => {
+  const flags: Partial<GenerationInputV11a> = { flags: { ledger: true } };
+  /** アプリ全体の集計の行（宣言の補助の計算 base＝金額の合計と、足した平均 avgAmount。R4 が所属させる） */
+  const appRow = (id: string, name: string, quote: string): NameTable["rows"][number] => ({
+    id,
+    kind: "computation",
+    entity: null,
+    name,
+    role: "要件 R4 が使う対象",
+    source: { requirementId: "R4", quote },
+    type: { valueType: "number", scope: "app", form: "aggregate" },
+    options: null,
+    groupBy: null,
+    refEntity: null,
+  });
+  /** 題材の表に、アプリ全体の合計・平均の行を足した表（集計の種類と集計元は持たない） */
+  const S_TABLE_PLAIN: NameTable = {
+    ...TABLE,
+    rows: [...TABLE.rows, appRow("c.base", "base", "金額の合計"), appRow("c.avgAmount", "avgAmount", "全体の率")],
+    ownership: TABLE.ownership.map((entry) =>
+      entry.requirementId === "R4"
+        ? { ...entry, roles: [...entry.roles, ...["c.base", "c.avgAmount"].map((id) => ({ id, basis: "stated" as const, reason: null }))] }
+        : entry,
+    ),
+  };
+  /** 旗 on の表（計算の行に集計の種類と集計元を持つ） */
+  const S_TABLE: NameTable = withAggregates(S_TABLE_PLAIN, {
+    "c.base": { kind: "sum", entity: "e.item" },
+    "c.avgAmount": { kind: "avg", entity: "e.item" },
+  });
+  /** 宣言（平均の計算 avgAmount をアプリ全体に足し、まとめの画面に出す） */
+  const S_YAML = replaced(
+    replaced(RUN_YAML, "  - name: rate\n", "  - name: avgAmount\n    scope: app\n    aggregate:\n      avg: item.amount\n    type: number\n  - name: rate\n"),
+    "      - type: bar\n",
+    "      - type: number\n        value: avgAmount\n      - type: bar\n",
+  );
+  /** 見出しごとの集計の種類を件数から合計に替えた宣言（表は件数。B3 の集計の種類の照合が落とす） */
+  const WRONG_KIND_YAML = replaced(S_YAML, "    aggregate:\n      count: item\n      groupBy: item.kind\n", "    aggregate:\n      sum: item.amount\n      groupBy: item.kind\n");
+  /** 集計の試験 1 件（入力の契約の空の集合を指定する） */
+  const aggTest = (id: string, roleId: string, kind: Kind, empty: readonly string[], value: unknown, observes = "empty-aggregate"): Record<string, unknown> => ({
+    ...rawTest({ id, requirementId: "R4", targetKind: "computation", roleId, kind, operation: "aggregate", observes, expected: ok(JSON.stringify(value)) }),
+    inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: empty },
+  });
+  const MONTHS = ["2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"];
+  /** 空の境界（集計元を空と明示）と未読の異常（集計元に触れない）。sum・count は 0、avg は null、見出しごとは並び */
+  const emptyAggregateTests = () => [
+    aggTest("r4-base-empty", "c.base", "boundary", ["e.item"], 0),
+    aggTest("r4-base-unread", "c.base", "abnormal", [], null),
+    aggTest("r4-avg-empty", "c.avgAmount", "boundary", ["e.item"], null),
+    aggTest("r4-avg-unread", "c.avgAmount", "abnormal", [], null),
+    aggTest("r4-kind-empty", "c.byKind", "boundary", ["e.item"], [
+      { heading: "alpha", value: 0 },
+      { heading: "beta", value: 0 },
+    ]),
+    aggTest("r4-kind-unread", "c.byKind", "abnormal", [], null),
+    aggTest("r4-month-empty", "c.byMonth", "boundary", ["e.item"], MONTHS.map((heading) => ({ heading, value: 0 }))),
+    aggTest("r4-month-unread", "c.byMonth", "abnormal", [], null),
+  ];
+  const t2S = (extra = emptyAggregateTests()) => t2Response([...r1Tests(), ...r2Tests(), ...r3Tests(), ...r4Tests(), ...extra]);
+  const sHead = (yaml: string, table: NameTable = S_TABLE, t2: unknown = t2S()): RecordedCall[] => [
+    structured(draftOf(LIST, table)),
+    structured(acceptAll()),
+    structured(t2),
+    structured({ declaration: yaml }),
+  ];
+  /** 評価口の B4 の結果と、v1 の runTests に渡った試験を記録する（評価口はそのまま） */
+  function spyRuns() {
+    const reports: { readonly mismatches: readonly { readonly testId: string; readonly detail: string }[]; readonly unresolved: readonly { readonly testId: string }[] }[] = [];
+    const passed: string[][] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      const evaluator = original(input);
+      return {
+        ...evaluator,
+        runTests: (app, context, correspondence) => {
+          const report = evaluator.runTests(app, context, correspondence);
+          reports.push(report);
+          return report;
+        },
+      };
+    });
+    const runTestsOriginal = runTestsStage.runTests;
+    vi.spyOn(runTestsStage, "runTests").mockImplementation((input) => {
+      passed.push(input.suite.tests.map((test) => test.id));
+      return runTestsOriginal(input);
+    });
+    return { reports, passed };
+  }
+
+  it("(1) 正例：宣言の集計が表どおりなら v1 の評価器で不一致 0・今までの門で full（sum の空は 0、avg の空は null、見出しごとは並び、未読は null）。空の集計の試験は v1 の runTests に渡る", async () => {
+    const { reports, passed } = spyRuns();
+    const { result, recording } = await runScenario([...sHead(S_YAML), structured(acceptAll())], flags);
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(result.summary.exit_code).toBe(0);
+    expect(reports.length).toBeGreaterThan(0);
+    for (const report of reports) {
+      expect(report.mismatches).toEqual([]);
+      expect(report.unresolved).toEqual([]);
+    }
+    const ids = emptyAggregateTests().map((test) => test["id"]);
+    expect(passed.length).toBeGreaterThan(0);
+    for (const id of ids) expect(passed.at(-1)).toContain(id);
+    // B1 の規則に台帳の 1 文があり、固定した試験に observes が渡り、名前の表の計算の行に aggregate が載る
+    const row = PROPERTY_LEDGER.find((entry) => entry.id === "empty-aggregate");
+    const write = recording.structured.find((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME)!;
+    expect(write.rules).toContain(row?.rules.b1);
+    const shown = dataBlockOf(write.input, WRITE_V11A_DATA_NAMES[2]) as { tests: { id: string; observes: string }[] };
+    expect(shown.tests.find((test) => test.id === "r4-base-empty")?.observes).toBe("empty-aggregate");
+    expectNoAcceptanceMaterial(recording.structured.map((request) => JSON.stringify(request)));
+  });
+
+  it("(2) (c)② の型：宣言の集計の種類が表と違えば B3 の落ちで B5 へ行き、直した版で full", async () => {
+    const { result, recording } = await runScenario([...sHead(WRONG_KIND_YAML), repairDone(S_YAML), structured(acceptAll())], flags);
+    expect(recording.tools).toHaveLength(1);
+    const misses = dataBlockOf(recording.tools[0]!.input, "対応表の落ち") as { requirementId: string; detail: string }[];
+    expect(misses.map((miss) => miss.detail)).toContain("計算 byKind の集計の種類が sum（表は count）");
+    // 1 版目は B3 に落ちて B3' を掛けない
+    expect(countStage(result, "decl-check")).toBe(1);
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+
+  it("(3) (a)① の型（手 2p の経路 (3) の、空と明示して null を期待する試験の形を集計の行に書いたもの）：旗 on では T2' で落ちて B4 へ進まない。直す前（旗 off）は B4 の不一致", async () => {
+    const aOne = aggTest("r4-empty-null", "c.base", "boundary", ["e.item"], null, "value");
+    const t2 = t2S([aOne]);
+    // 旗 on：T2' が 2 回とも落とし、段 test-spec で止まる（B4 へ進まない）
+    const on = await runScenario([structured(draftOf(LIST, S_TABLE)), structured(acceptAll()), structured(t2), structured(t2)], flags);
+    expect(on.result.stopped?.stage).toBe("test-spec");
+    expect(on.result.outcome.verdict).not.toBe("full");
+    expect(stageIds(on.result)).not.toContain("run-tests");
+    const rejected = diagnosticOf(on.result.diagnostics, DIAGNOSTICS_REJECTED_TEST_SPEC_FILE) as { candidates?: { problems?: { field: string; message: string }[] }[] };
+    const row = PROPERTY_LEDGER.find((entry) => entry.id === "empty-aggregate");
+    expect(JSON.stringify(rejected)).toContain(row?.t2Aggregate?.messages.alsoExpected ?? "（無い）");
+    // 直す前（旗 off。表は aggregate を持たない）：T2 を通り、B4 の不一致（空の合計は 0 で、期待は null）
+    const { reports } = spyRuns();
+    const off = await runScenario([
+      ...sHead(S_YAML, S_TABLE_PLAIN, t2),
+      structured(acceptAll()),
+      repairDone(S_YAML),
+      structured(acceptAll()),
+    ]);
+    expect(off.result.outcome.verdict).not.toBe("full");
+    expect(reports.length).toBeGreaterThan(0);
+    expect(reports[0]!.mismatches.map((entry) => entry.testId)).toContain("r4-empty-null");
+  });
+
+  it("旗 off では同じ表（計算の行に aggregate を持つ）は T1' の形で落ち（未登録の拒否）、full が出ない", async () => {
+    const { result } = await runScenario([structured(draftOf(LIST, S_TABLE)), structured(draftOf(LIST, S_TABLE))]);
+    expect(result.stopped?.stage).toBe("name-table");
+    expect(result.outcome.verdict).not.toBe("full");
+  });
+});
+
 // ── 段単位の走り（08-architecture-v1.2.md §8.3。Issue #544）──────────────────────────────
 
 describe("段単位の走り：範囲の外の段を呼ばず、納品物を組まず、境界の材料に B の結果を入れない", () => {
@@ -1703,8 +1876,57 @@ describe("旗を省いた・off の走りは v1.1α の記録（手 2p の libra
   });
 });
 
-describe("旗 on の要求の差は台帳の enum-membership の行の分だけ：flags.ledger を on にした走りの要求（T1・T1''・T2・B1）の差の場所を固定し、ほかの要求・納品物・要約・記録が off とバイト列で同じ（Issue #547・#548）", () => {
-  it("手 2p の library 4 経路で、要求の差は名指しの場所（R-nt-08・R-sc-02・R-tsp-02・R-tsp-16・R-w11 の並び・schema の enum）だけで、その分を除けば記録と深く等しい。判定の問い・道具の結果・納品物の全ファイル・段の記録・要約は記録と深く等しい", async () => {
+/** 走りの台帳の導出を #548 の台帳（empty-aggregate の行を除いた導出）にする（#548 までの旗 on を今の候補で再現する。Issue #549） */
+const asLedger2B = () =>
+  vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2B : undefined));
+
+/** 手 2p の経路の定義の T1 の応答の計算の行に、集計の種類と集計元を足した写し（今の台帳の旗 on の走りに流す。Issue #549） */
+const BASELINE_DEFINITIONS_ON: BaselineV11aScenarios = {
+  ...BASELINE_DEFINITIONS,
+  scenarios: BASELINE_DEFINITIONS.scenarios.map((scenario) => ({ ...scenario, recorded: withAggregateResponses(scenario.recorded) })),
+} as BaselineV11aScenarios;
+
+/**
+ * 今の台帳の旗 on の走りと #548 の台帳の旗 on の走りで違ってよい納品物のファイル（表の計算の行の aggregate と、表の SHA を
+ * 持つもの・その SHA を並べる manifest。Issue #549）
+ */
+const EMPTY_AGGREGATE_BUNDLE_DIFF = [
+  "artifacts/name-table.json",
+  "artifacts/semantic-check.json",
+  "artifacts/judge-advice.json",
+  "artifacts/verification-v11a.json",
+  "bundle-manifest.json",
+] as const;
+/** 同じく違ってよい診断のファイル（断った表の候補） */
+const EMPTY_AGGREGATE_DIAGNOSTICS_DIFF = ["diagnostics/rejected-name-table.json"] as const;
+/** 表を載せるデータを持つ要求（今の台帳の on は、計算の行の aggregate の分だけデータ `$.input` が違ってよい） */
+const TABLE_DATA_SCHEMAS: readonly string[] = [
+  NAME_TABLE_SCHEMA_NAME,
+  SEMANTIC_CHECK_SCHEMA_NAME,
+  TEST_SPEC_SCHEMA_NAME,
+  WRITE_V11A_SCHEMA_NAME,
+  DECL_CHECK_SCHEMA_NAME,
+];
+/** 名指しの場所に、データ（`$.input`）の位置を足す（規則の後・schema の前。`jsonDiffPaths` の順） */
+const withInputPath = (paths: readonly string[]): readonly string[] => {
+  const at = paths.findIndex((path) => path.startsWith("$.schema"));
+  return at < 0 ? [...paths, "$.input"] : [...paths.slice(0, at), "$.input", ...paths.slice(at)];
+};
+
+/** 工場の module の `runGenerationV11a` の結果を集める口（納品物と診断の中身を比べる） */
+const moduleCollecting = (extra: Partial<GenerationInputV11a>, results: Awaited<ReturnType<typeof runGenerationV11a>>[]): typeof factoryModule => ({
+  ...factoryModule,
+  runGenerationV11a: async (input) => {
+    const result = await factoryModule.runGenerationV11a({ ...input, ...extra });
+    results.push(result);
+    return result;
+  },
+});
+
+describe("旗 on の要求の差は台帳に足した行の分だけ：flags.ledger を on にした走りの要求（T1・T1''・T2・B1）の差の場所を固定し、ほかの要求・納品物・要約・記録が同じ（Issue #547・#548・#549）", () => {
+  it("#548 の台帳の on：手 2p の library 4 経路で、要求の差は名指しの場所（R-nt-08・R-sc-02・R-tsp-02・R-tsp-16・R-w11 の並び・schema の enum）だけで、その分を除けば記録と深く等しい。判定の問い・道具の結果・納品物の全ファイル・段の記録・要約は記録と深く等しい", async () => {
+    // #548 までの旗 on（台帳に empty-aggregate の行が無い）を今の候補で流す（Issue #549）
+    asLedger2B();
     const captures = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS);
     expect(captures).toHaveLength(BASELINE_LIBRARY.captures.length);
     captures.forEach((capture, index) => {
@@ -1729,8 +1951,83 @@ describe("旗 on の要求の差は台帳の enum-membership の行の分だけ�
     });
   });
 
+  it("今の台帳の on と #548 の台帳の on の差は empty-aggregate の行の分だけ：手 2p の library 4 経路（T1 の応答の計算の行に集計の種類と集計元を足した写し）で、要求の差は名指しの場所（R-nt-08・R-tsp-16・R-w11 の並び・schema の行の型の aggregate・observes の enum・表を載せるデータ）だけで、その分を除けば #548 の on とバイト列で同じ。判定・段の記録・要約・道具の結果・結び付けは同じで、納品物・診断の差は表の aggregate と表の SHA の分だけ", async () => {
+    const nowResults: Awaited<ReturnType<typeof runGenerationV11a>>[] = [];
+    const now = await captureBaselineV11a(moduleCollecting({ flags: { ledger: true } }, nowResults), BASELINE_DEFINITIONS_ON);
+    const spy = asLedger2B();
+    const beforeResults: Awaited<ReturnType<typeof runGenerationV11a>>[] = [];
+    const before = await captureBaselineV11a(moduleCollecting({ flags: { ledger: true } }, beforeResults), BASELINE_DEFINITIONS);
+    spy.mockRestore();
+    expect(now).toHaveLength(before.length);
+    now.forEach((capture, index) => {
+      const expected = before[index]!;
+      const requestOf = (record: unknown) => (record as { readonly request: unknown }).request;
+      expect(capture.requests, capture.name).toHaveLength(expected.requests.length);
+      for (const diff of requestDiffsOf(capture.requests.map(requestOf), expected.requests.map(requestOf))) {
+        const named = EMPTY_AGGREGATE_REQUEST_DIFF[diff.schemaName] ?? [];
+        const allowed = TABLE_DATA_SCHEMAS.includes(diff.schemaName) && diff.paths.includes("$.input") ? withInputPath(named) : named;
+        expect(diff.paths, `${capture.name} ${diff.schemaName}`).toEqual(allowed);
+      }
+      expect(JSON.stringify(withoutEmptyAggregate(capture.requests)), capture.name).toBe(JSON.stringify(expected.requests));
+      expect(capture.judgment, capture.name).toEqual(expected.judgment);
+      expect(capture.toolResults, capture.name).toEqual(expected.toolResults);
+      // 納品物・診断：ファイルの並びは同じで、違ってよいのは名指しのファイルだけ
+      const changed = (files: readonly { readonly path: string; readonly sha256: string }[], others: readonly { readonly path: string; readonly sha256: string }[]) =>
+        files.filter((file, at) => file.sha256 !== others[at]?.sha256).map((file) => file.path);
+      expect(capture.bundle?.files.map((file) => file.path), capture.name).toEqual(expected.bundle?.files.map((file) => file.path));
+      for (const path of changed(capture.bundle?.files ?? [], expected.bundle?.files ?? [])) expect(EMPTY_AGGREGATE_BUNDLE_DIFF, capture.name).toContain(path);
+      expect(capture.diagnostics.map((file) => file.path), capture.name).toEqual(expected.diagnostics.map((file) => file.path));
+      for (const path of changed(capture.diagnostics, expected.diagnostics)) expect(EMPTY_AGGREGATE_DIAGNOSTICS_DIFF, capture.name).toContain(path);
+    });
+    // 中身：表の計算の行の aggregate の欄を除き、表の SHA を #548 の on の表の SHA に置き換えれば、manifest のほかの全ファイルと
+    // 診断がバイト列で同じ（差は表の aggregate の分だけ）
+    expect(nowResults).toHaveLength(beforeResults.length);
+    nowResults.forEach((result, index) => {
+      const other = beforeResults[index]!;
+      const tableShaOf = (files: readonly { readonly path: string; readonly text: string }[]) =>
+        (JSON.parse(files.find((file) => file.path === "artifacts/name-table.json")?.text ?? "{}") as { table_sha256?: string }).table_sha256;
+      const nowSha = tableShaOf(result.bundle?.artifacts ?? []);
+      const beforeSha = tableShaOf(other.bundle?.artifacts ?? []);
+      const normalized = (text: string) => {
+        const stripped = withoutEmptyAggregate(text) as string;
+        return nowSha === undefined || beforeSha === undefined ? stripped : stripped.split(nowSha).join(beforeSha);
+      };
+      const filesOf = (files: readonly { readonly path: string; readonly text: string }[]) => files.filter((file) => file.path !== "bundle-manifest.json");
+      expect(filesOf(result.bundle?.artifacts ?? []).map((file) => [file.path, normalized(file.text)])).toEqual(
+        filesOf(other.bundle?.artifacts ?? []).map((file) => [file.path, file.text]),
+      );
+      // 診断の断った候補は候補そのものの SHA を持つ（aggregate の分だけ違う）ので、SHA の値は伏せて比べる
+      const masked = (text: string) => text.replace(/[0-9a-f]{64}/g, "<sha256>");
+      expect(result.diagnostics.map((file) => [file.path, masked(normalized(file.text))])).toEqual(
+        other.diagnostics.map((file) => [file.path, masked(file.text)]),
+      );
+      if (result.bundle !== null) expect(nowSha).not.toBe(beforeSha);
+    });
+  });
+
+  it("差は空でない（Issue #549）：今の台帳の on の T1・T2・B1 の要求に台帳の empty-aggregate の文と schema の aggregate・表の計算の行の aggregate があり、#548 の台帳の on・off（記録）には無い", async () => {
+    const now = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS_ON);
+    asLedger2B();
+    const before = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS);
+    const row = PROPERTY_LEDGER.find((entry) => entry.id === "empty-aggregate")!;
+    const full = JSON.stringify(now[0]!.requests);
+    const previous = JSON.stringify(before[0]!.requests);
+    const recorded = JSON.stringify(BASELINE_LIBRARY.captures[0]!.requests);
+    for (const text of [row.rules.t1, row.rules.t2, row.rules.b1]) {
+      expect(text).not.toBeNull();
+      expect(full).toContain(JSON.stringify(text).slice(1, -1));
+      expect(previous).not.toContain(JSON.stringify(text).slice(1, -1));
+      expect(recorded).not.toContain(JSON.stringify(text).slice(1, -1));
+    }
+    for (const text of ['"enum-membership","empty-aggregate"]', '"aggregate":{"type":["object","null"]', '\\"aggregate\\": {']) {
+      expect(full, text).toContain(text);
+      expect(previous, text).not.toContain(text);
+      expect(recorded, text).not.toContain(text);
+    }
+  });
+
   it("差は空でない：on の T1・T1''・T2・B1 の要求に台帳の enum-membership の文があり、off（記録）には無い", async () => {
-    const captures = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS);
+    const captures = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS_ON);
     const row = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership")!;
     const full = JSON.stringify(captures[0]!.requests);
     const recorded = JSON.stringify(BASELINE_LIBRARY.captures[0]!.requests);
@@ -1754,7 +2051,7 @@ describe("旗 on の要求の差は台帳の enum-membership の行の分だけ�
   });
 
   it("内外の切り分けの型：負例 (c)①（同じ要件を validation の観測で確かめる経路 3）は on でも「対応表の外」の不一致のまま", async () => {
-    const captures = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS);
+    const captures = await captureBaselineV11a(moduleWith({ flags: { ledger: true } }), BASELINE_DEFINITIONS_ON);
     const stagnation = captures[2]?.testRun as {
       readonly mismatches: readonly { readonly testId: string; readonly detail: string }[];
       readonly routes: readonly { readonly testId: string; readonly route: string }[];
@@ -1772,7 +2069,7 @@ describe("旗 on の要求の差は台帳の enum-membership の行の分だけ�
       return original(input);
     });
     await runScenario([...head(), structured(acceptAll())]);
-    await runScenario([...head(), structured(acceptAll())], { flags: { ledger: true } });
+    await runScenario([...head({ table: TABLE_ON }), structured(acceptAll())], { flags: { ledger: true } });
     expect(seen.length).toBeGreaterThanOrEqual(2);
     expect(seen[0]).toBeUndefined();
     expect(seen.at(-1)?.observes).toContain("default-value");
@@ -1849,13 +2146,14 @@ describe("呼び出し数の回帰の契約試験（手 2p）の走りが、旗 
       const off = await observeWith(materials, calls, {});
       const on = await observeWith(materials, calls, { flags: { ledger: true } });
       expect(on.stages).toEqual(off.stages);
-      // 要求は呼び出しの数と並びが同じで、差は台帳の enum-membership の行の分だけ（Issue #548）
-      expect(JSON.stringify(withoutEnumMembership(JSON.parse(on.requests)))).toBe(off.requests);
+      // 要求は呼び出しの数と並びが同じで、差は台帳の enum-membership（Issue #548）・empty-aggregate（Issue #549）の行の分だけ
+      // （この組の名前の表に計算の行は無いので、表を載せるデータは同じ）
+      expect(JSON.stringify(withoutLedgerAdditions(JSON.parse(on.requests)))).toBe(off.requests);
       const onRequests = (JSON.parse(on.requests) as { readonly request: unknown }[]).map((entry) => entry.request);
       const offRequests = (JSON.parse(off.requests) as { readonly request: unknown }[]).map((entry) => entry.request);
       expect(onRequests).toHaveLength(offRequests.length);
       for (const diff of requestDiffsOf(onRequests, offRequests)) {
-        expect(diff.paths, diff.schemaName).toEqual(ENUM_MEMBERSHIP_REQUEST_DIFF[diff.schemaName] ?? []);
+        expect(diff.paths, diff.schemaName).toEqual(LEDGER_REQUEST_DIFF[diff.schemaName] ?? []);
       }
       expect(on.judged).toEqual(off.judged);
       expect(on.outcome).toEqual(off.outcome);
@@ -1868,7 +2166,7 @@ describe("呼び出し数の回帰の契約試験（手 2p）の走りが、旗 
 describe("旗の組の契約（要約の v12_flags）", () => {
   it("recordV12Flags が真の走りは、完走でも T1 で止まる走りでも、要約に実効の旗の組 v12_flags がある（納品物の要約にも）", async () => {
     const extra = { flags: V12_PIPELINE_FLAGS, recordV12Flags: true };
-    const full = await runScenario([...head(), structured(acceptAll())], extra);
+    const full = await runScenario([...head({ table: TABLE_ON }), structured(acceptAll())], extra);
     expect(full.result.outcome.verdict).toBe("full");
     expect((full.result.summary as unknown as Record<string, unknown>)["v12_flags"]).toEqual(V12_PIPELINE_FLAGS);
     const summaryFile = full.result.bundle?.artifacts.find((artifact) => artifact.path === "artifacts/summary.json");
@@ -1882,7 +2180,7 @@ describe("旗の組の契約（要約の v12_flags）", () => {
 
   it("recordV12Flags を省いた走り（旗 on でも）・旗を省いた走りの要約に v12_flags が無い", async () => {
     for (const extra of [{}, { flags: { ledger: true } }] as const) {
-      const { result } = await runScenario([...head(), structured(acceptAll())], extra);
+      const { result } = await runScenario([...head(extra.flags === undefined ? {} : { table: TABLE_ON }), structured(acceptAll())], extra);
       expect(result.summary, JSON.stringify(extra)).not.toHaveProperty("v12_flags");
     }
   });

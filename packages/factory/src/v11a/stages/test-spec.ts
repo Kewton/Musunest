@@ -61,8 +61,17 @@ import {
 import type { CarryOver } from "../carry-over.js";
 import { pruneForCarryOver } from "../carry-over.js";
 import { coverageUnitsOf, type CoverageUnit } from "../coverage.js";
-import { canonicalJson, deriveOwnership, type NameTable } from "../names.js";
-import { exemptKindMessagesOf, type LedgerView, type PropertyRow, type PropertyT1, type PropertyT2 } from "../../v12/ledger.js";
+import { canonicalJson, deriveOwnership, type ComputationAggregate, type ComputationRowType, type NameTable } from "../names.js";
+import {
+  aggregateStateValueOf,
+  exemptKindMessagesOf,
+  type AggregateDataState,
+  type LedgerView,
+  type PropertyAggregateT2,
+  type PropertyRow,
+  type PropertyT1,
+  type PropertyT2,
+} from "../../v12/ledger.js";
 
 /** T2 の JSON Schema の名前 */
 export const TEST_SPEC_SCHEMA_NAME = "test-spec";
@@ -462,6 +471,122 @@ export function exemptLedgerProblems(
   });
   if (exempt.size === 0) return problems;
   return problems.filter((problem) => !(exempt.get(problem.field) ?? []).includes(problem.message));
+}
+
+// ── 旗 on：集計の試験の期待の形の門（台帳の集計の試験の型。08 §5・Issue #549）──────────────────
+
+/** 集計の試験の型で期待を確かめる対象（表の計算の行のうち、種別 aggregate で集計の種類と集計元を持つ行） */
+export interface AggregateTarget {
+  readonly aggregate: ComputationAggregate;
+  /** 見出しごとの集計の見出し（enum は見出しの元の項目の options の順のキー、月は値だけ見る。行ごと・アプリ全体は null） */
+  readonly groups: { readonly kind: "enum"; readonly headings: readonly string[] } | { readonly kind: "month" } | null;
+}
+
+const isComputationRowType = (type: NameTable["rows"][number]["type"]): type is ComputationRowType =>
+  type !== null && typeof type === "object" && "valueType" in type;
+
+/**
+ * 表の計算の行の `id` → 集計の試験の型で期待を確かめる対象。種別 aggregate で `aggregate` を持つ行だけを載せる（旗 on で台帳が
+ * 集計の種類を持つ走りの表。T1' が形・集計元・見出しの元を確かめ済み）。見出しの元の項目が表に無い見出しごとの集計は載せない
+ * （fail-closed。その行の空の集計の試験は対象の落ちになる）。
+ */
+export function aggregateTargetsOf(table: NameTable): ReadonlyMap<string, AggregateTarget> {
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const targets = new Map<string, AggregateTarget>();
+  for (const row of table.rows) {
+    if (row.kind !== "computation" || !isComputationRowType(row.type) || row.type.form !== "aggregate") continue;
+    const aggregate = row.type.aggregate;
+    if (aggregate === undefined || aggregate === null) continue;
+    if (row.groupBy === null) {
+      targets.set(row.id, { aggregate, groups: null });
+      continue;
+    }
+    if (row.groupBy.kind === "month") {
+      targets.set(row.id, { aggregate, groups: { kind: "month" } });
+      continue;
+    }
+    const options = rowById.get(row.groupBy.field)?.options;
+    if (options !== undefined && options !== null) targets.set(row.id, { aggregate, groups: { kind: "enum", headings: options } });
+  }
+  return targets;
+}
+
+/** 見出しごとの 1 組が `{heading, value}` だけを持ち、value が `value` と等しいか */
+const isHeadingEntry = (entry: unknown, value: 0 | null): entry is { readonly heading: string; readonly value: unknown } =>
+  isRecord(entry) &&
+  Object.keys(entry).length === 2 &&
+  typeof entry["heading"] === "string" &&
+  Object.hasOwn(entry, "value") &&
+  entry["value"] === value;
+
+/**
+ * 期待（decode 済み）が、集計の試験の型の表から導いた値と深く等しいか。行ごと・アプリ全体は値そのもの。見出しごとは、
+ * 未読なら並び全体が null、空なら見出しごとに同じ値の並び（enum は options の順の `{heading, value}`、月は各 value だけ）。
+ */
+function aggregateExpectedMatches(
+  t2: PropertyAggregateT2,
+  test: FixedTest,
+  target: AggregateTarget,
+  state: AggregateDataState,
+): boolean {
+  const base = aggregateStateValueOf(t2, target.aggregate.kind, state);
+  if (base === undefined || test.expected.kind !== "ok") return false;
+  const value: unknown = test.expected.value;
+  if (target.groups === null || state === "unread") return value === base;
+  if (!Array.isArray(value)) return false;
+  if (target.groups.kind === "month") return value.length > 0 && value.every((entry) => isHeadingEntry(entry, base));
+  const headings = target.groups.headings;
+  return (
+    value.length === headings.length &&
+    value.every((entry, index) => isHeadingEntry(entry, base) && entry.heading === headings[index])
+  );
+}
+
+/**
+ * 集計の試験の期待の形の門（旗 on。Issue #549）。台帳の集計の試験の型を持つ行ごとに、
+ *   (1) 観測する性質がその行の試験：対象が集計の種類と集計元を持つ種別 aggregate の計算の行で、参照データに集計元の行が
+ *       無く、kind がデータ状態（`emptyEntities` に集計元があれば空、無ければ未読）に合い、期待が表から導いた値と深く等しい
+ *   (2) 観測する性質がその行の `alsoObserves`（value）で、対象が (1) の行の試験：参照データに集計元の行が無ければ、期待が
+ *       表から導いた値と深く等しい（kind は見ない。集計元の行があれば今までどおり見ない）
+ * でなければ、行の固定文で落とす（位置は試験の添字と欄名）。期待の値をコードで書き換えない（書くのは T2 の LLM）。
+ */
+export function checkAggregateTests(
+  suite: TestSuite,
+  observes: ReadonlyMap<string, TestObserves>,
+  table: NameTable,
+  ledger: LedgerView,
+): readonly Problem[] {
+  if (ledger.aggregateRows.length === 0) return [];
+  const targets = aggregateTargetsOf(table);
+  const problems: Problem[] = [];
+  suite.tests.forEach((test, index) => {
+    const observed: string | undefined = observes.get(test.id);
+    if (observed === undefined) return;
+    const own = ledger.aggregateRows.find((row) => row.id === observed);
+    const also = own === undefined ? ledger.aggregateRows.find((row) => row.t2Aggregate.alsoObserves.includes(observed)) : undefined;
+    const row = own ?? also;
+    if (row === undefined) return;
+    const t2 = row.t2Aggregate;
+    const at = `tests[${index}]`;
+    const target = test.target.kind === t2.targetKind && test.target.roleId !== undefined ? targets.get(test.target.roleId) : undefined;
+    if (target === undefined) {
+      if (own !== undefined) problems.push({ field: `${at}.target`, message: t2.messages.target });
+      return;
+    }
+    const source = target.aggregate.entity;
+    if (test.referenceData.some((reference) => reference.target.roleId === source)) {
+      if (own !== undefined) problems.push({ field: `${at}.referenceData`, message: t2.messages.referenceData });
+      return;
+    }
+    const state: AggregateDataState = (test.inputContract?.emptyEntities ?? []).includes(source) ? "empty" : "unread";
+    if (own !== undefined && t2.states.find((entry) => entry.state === state)?.kind !== test.kind) {
+      problems.push({ field: `${at}.kind`, message: t2.messages.kind });
+    }
+    if (!aggregateExpectedMatches(t2, test, target, state)) {
+      problems.push({ field: `${at}.expected`, message: own !== undefined ? t2.messages.expected : t2.messages.alsoExpected });
+    }
+  });
+  return problems;
 }
 
 // ── 規則（R-tsp-nn。②' の定義を元にする。v1 の TEST_SUITE_RULE_DEFINITIONS は変えない）──────
@@ -1083,6 +1208,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
               ...exemptLedgerProblems(checkSuitePlan(list, suite, design, reconciled.natures), list, targets),
               ...checkEvaluabilityByLedger(suite, observes, pruned.table, ledger),
               ...checkLedgerTests(suite, observes, targets, jsonStringExpectedIds(answer.output)),
+              ...checkAggregateTests(suite, observes, pruned.table, ledger),
             ];
       if (problems.length === 0) {
         const coverage = coverageUnitsOf({ suite, observes, natures: reconciled.natures });

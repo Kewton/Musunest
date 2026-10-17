@@ -14,6 +14,7 @@ import type { PromptDocument, RuleDefinition } from "../../stages/prompt.js";
 import {
   copyLengthFor,
   requirementCopy,
+  type ComputationAggregate,
   type NameTable,
   type NameTableDraft,
   type NameTableRow,
@@ -474,7 +475,153 @@ export function requestDiffsOf(
 }
 
 /**
- * 手 2a（#547）の台帳の導出＝今の台帳から enum-membership の行を除いたもの（Issue #548）。旗 on の段がこれを受けた
- * 要求・結果は off とバイト列で同じ（載せ替えの不変）。今の台帳との差は `withoutEnumMembership` で除く分だけ。
+ * 手 2a（#547）の台帳の導出＝今の台帳から enum-membership の行（と、手 2c で足した empty-aggregate の行。Issue #549）を
+ * 除いたもの（Issue #548）。旗 on の段がこれを受けた要求・結果は off とバイト列で同じ（載せ替えの不変）。今の台帳との差は
+ * `withoutLedgerAdditions` で除く分だけ。
  */
-export const LEDGER_VIEW_2A: LedgerView = deriveLedgerView(PROPERTY_LEDGER.filter((entry) => entry.id !== "enum-membership"));
+export const LEDGER_VIEW_2A: LedgerView = deriveLedgerView(
+  PROPERTY_LEDGER.filter((entry) => entry.id !== "enum-membership" && entry.id !== "empty-aggregate"),
+);
+
+// ── 集計の種類と集計元（旗 on の T1 の計算の行の型の `aggregate`。Issue #549）──────────────────
+
+/**
+ * 題材の表の計算の行の、集計の種類と集計元（宣言 `FIXTURE_YAML` の集計と同じ）。種別 aggregate でない計算は null。
+ * 旗 on で台帳が集計の種類を持つ走りの T1 の応答は、計算の行ごとにこの欄を持つ（strict の schema で必須）。
+ */
+export const FIXTURE_AGGREGATES: Readonly<Record<string, ComputationAggregate | null>> = {
+  "c.itemCount": { kind: "count", entity: "e.item" },
+  "c.rate": null,
+  "c.byKind": { kind: "count", entity: "e.item" },
+  "c.byMonth": { kind: "sum", entity: "e.item" },
+};
+
+/** 計算の行に `aggregate` を足した行（表に無い計算の行は、種別 aggregate なら置き換えずに残す＝呼ぶ側が渡す） */
+function rowWithAggregate(entry: NameTableRow, aggregates: Readonly<Record<string, ComputationAggregate | null>>): NameTableRow {
+  if (entry.kind !== "computation" || entry.type === null || typeof entry.type !== "object" || !("valueType" in entry.type)) return entry;
+  if (!Object.hasOwn(aggregates, entry.id)) return entry;
+  return { ...entry, type: { ...entry.type, aggregate: aggregates[entry.id] ?? null } };
+}
+
+/**
+ * 表の計算の行に、集計の種類と集計元（`FIXTURE_AGGREGATES` に `extra` を重ねたもの）を足した表（Issue #549）。旗 on で
+ * 台帳が集計の種類を持つ走りの T1 の応答・表に使う（題材の表の値は変えない。off の走りには渡さない＝未登録で落ちる）。
+ */
+export function withAggregates(
+  table: NameTable,
+  extra: Readonly<Record<string, ComputationAggregate | null>> = {},
+): NameTable {
+  const aggregates = { ...FIXTURE_AGGREGATES, ...extra };
+  return { ...table, rows: table.rows.map((entry) => rowWithAggregate(entry, aggregates)) };
+}
+
+/**
+ * 記録した T1 の応答（行の並びを持つ構造化出力）の計算の行に、集計の種類と集計元を足す（Issue #549。記録の値は変えず、
+ * 写しを返す）。旗 on の走りで手 2p の記録の経路を流すときに使う（行の id は題材の表と同じ）。
+ */
+export function withAggregateResponses<T>(recorded: readonly T[]): readonly T[] {
+  return recorded.map((call) => {
+    const output = (call as { readonly output?: unknown }).output;
+    if (output === null || typeof output !== "object" || !Array.isArray((output as { rows?: unknown }).rows)) return call;
+    const rows = ((output as { rows: unknown[] }).rows).map((entry) => {
+      const raw = entry as { id?: unknown; kind?: unknown; type?: unknown };
+      if (raw.kind !== "computation" || typeof raw.id !== "string" || raw.type === null || typeof raw.type !== "object") return entry;
+      return { ...raw, type: { ...(raw.type as object), aggregate: FIXTURE_AGGREGATES[raw.id] ?? null } };
+    });
+    return { ...call, output: { ...(output as object), rows } };
+  });
+}
+
+// ── 旗 on の要求の差の範囲（Issue #549）──────────────────────────────
+
+const EMPTY_AGGREGATE_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "empty-aggregate");
+if (EMPTY_AGGREGATE_ROW === undefined) throw new Error("前提が壊れた：台帳に empty-aggregate の行が無い");
+/** 台帳の empty-aggregate の行の、文に差し込む文（T1・T2） */
+const EMPTY_AGGREGATE_SENTENCES = [EMPTY_AGGREGATE_ROW.rules.t1, EMPTY_AGGREGATE_ROW.rules.t2].filter(
+  (text): text is string => text !== null,
+);
+/** JSON の文字列の中の、計算の行の型の `aggregate` の欄（null か、種類と集計元だけの写像。前の `,` ごと） */
+const AGGREGATE_FIELD_PATTERN =
+  /,\s*\\?"aggregate\\?":\s*(?:null|\{\s*\\?"kind\\?":\s*\\?"(?:sum|count|avg)\\?",\s*\\?"entity\\?":\s*\\?"[^"\\]*\\?"\s*\})/g;
+
+/**
+ * 旗 on の要求（の JSON の値）から、台帳の empty-aggregate の行の分を除く（Issue #549）。文の中の T1・T2 の文・観測する
+ * 性質の並びの `・empty-aggregate` と、データの JSON の文字列の中の計算の行の `aggregate` の欄を消し、並びから値
+ * `empty-aggregate`（schema の observes の enum）と B1 の文の要素を外し、T1 の schema の行の型から `aggregate` の欄
+ * （properties と required）を外す。#548 の台帳（`LEDGER_VIEW_2B`）の要求とバイト列で同じになることを、
+ * 旗 on の差の範囲の試験が照らす。
+ */
+export function withoutEmptyAggregate(value: unknown): unknown {
+  if (typeof value === "string") {
+    return EMPTY_AGGREGATE_SENTENCES.reduce((text, sentence) => text.split(sentence).join(""), value)
+      .replace(AGGREGATE_FIELD_PATTERN, "")
+      .split("・empty-aggregate")
+      .join("");
+  }
+  if (Array.isArray(value)) {
+    return value
+      .filter((element) => element !== "empty-aggregate" && element !== EMPTY_AGGREGATE_ROW?.rules.b1)
+      .map(withoutEmptyAggregate);
+  }
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const properties = record["properties"] as Record<string, unknown> | undefined;
+    const isRowType = properties !== undefined && properties !== null && typeof properties === "object" && "fieldType" in properties && "aggregate" in properties;
+    const entries = Object.entries(record).map(([key, entry]): [string, unknown] => {
+      if (isRowType && key === "properties") {
+        const { aggregate: _omit, ...rest } = entry as Record<string, unknown>;
+        return [key, withoutEmptyAggregate(rest)];
+      }
+      if (isRowType && key === "required" && Array.isArray(entry)) return [key, entry.filter((name) => name !== "aggregate")];
+      return [key, withoutEmptyAggregate(entry)];
+    });
+    return Object.fromEntries(entries);
+  }
+  return value;
+}
+
+/**
+ * 旗 on の要求が #548 の台帳（`LEDGER_VIEW_2B`）と違ってよい場所のうち、表のデータに依らない場所（段の schema の名前 → 要求の
+ * 中の位置。Issue #549）。T1 は R-nt-08 と schema の行の型（required の並びと aggregate の欄）、T2 は R-tsp-16 と schema の
+ * 観測する性質の enum、B1 は規則の並び（末尾に 1 文増える）。表の計算の行が `aggregate` を持つ走りは、表を載せるデータ（`$.input`）も違う（試験ごとに名指しする）。
+ */
+export const EMPTY_AGGREGATE_REQUEST_DIFF: Readonly<Record<string, readonly string[]>> = {
+  [NAME_TABLE_SCHEMA_NAME]: [
+    ruleAt(NAME_TABLE_RULE_DEFINITIONS, "R-nt-08"),
+    "$.schema.properties.rows.items.properties.type.required",
+    "$.schema.properties.rows.items.properties.type.properties.aggregate",
+  ],
+  [TEST_SPEC_SCHEMA_NAME]: [ruleAt(TEST_SPEC_RULE_DEFINITIONS, "R-tsp-16"), "$.schema.properties.tests.items.properties.observes.enum"],
+  [WRITE_V11A_SCHEMA_NAME]: ["$.rules"],
+};
+
+/**
+ * 今の台帳の on の要求が off（手 2a）と違ってよい場所（表のデータに依らない場所。Issue #548・#549）。`ENUM_MEMBERSHIP_REQUEST_DIFF`
+ * と `EMPTY_AGGREGATE_REQUEST_DIFF` を、要求の中で見つかる順（`jsonDiffPaths` の順）に合わせたもの。
+ */
+export const LEDGER_REQUEST_DIFF: Readonly<Record<string, readonly string[]>> = {
+  [NAME_TABLE_SCHEMA_NAME]: [
+    ruleAt(NAME_TABLE_RULE_DEFINITIONS, "R-nt-08"),
+    "$.schema.properties.rows.items.properties.type.required",
+    "$.schema.properties.rows.items.properties.type.properties.aggregate",
+    "$.schema.properties.requirements.items.properties.verification.properties.kind.enum",
+  ],
+  [SEMANTIC_CHECK_SCHEMA_NAME]: [ruleAt(SEMANTIC_CHECK_RULE_DEFINITIONS, "R-sc-02")],
+  [TEST_SPEC_SCHEMA_NAME]: [
+    ruleAt(TEST_SPEC_RULE_DEFINITIONS, "R-tsp-02"),
+    ruleAt(TEST_SPEC_RULE_DEFINITIONS, "R-tsp-16"),
+    "$.schema.properties.tests.items.properties.observes.enum",
+  ],
+  [WRITE_V11A_SCHEMA_NAME]: ["$.rules"],
+};
+
+/** 今の台帳の on の要求から、台帳に足した行（enum-membership・empty-aggregate）の分を除く（手 2a の要求と比べる） */
+export function withoutLedgerAdditions(value: unknown): unknown {
+  return withoutEnumMembership(withoutEmptyAggregate(value));
+}
+
+/**
+ * #548 の台帳の導出＝今の台帳から empty-aggregate の行を除いたもの（Issue #549）。旗 on の段がこれを受けた要求・結果は、
+ * #548 までの旗 on と同じ。今の台帳との差は `withoutEmptyAggregate` で除く分だけ。
+ */
+export const LEDGER_VIEW_2B: LedgerView = deriveLedgerView(PROPERTY_LEDGER.filter((entry) => entry.id !== "empty-aggregate"));

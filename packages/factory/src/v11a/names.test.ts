@@ -21,6 +21,8 @@ import {
   fixtureRows,
   fixtureTable,
   LEDGER_VIEW_2A,
+  LEDGER_VIEW_2B,
+  withAggregates,
   withoutEnumMembership,
 } from "./__tests__/fixtures.js";
 import {
@@ -38,7 +40,9 @@ import {
   resolveNameTableDraft,
   sharedRowIds,
   sourcePositionOf,
+  UNREGISTERED_AGGREGATE_MESSAGE,
   UNREGISTERED_VERIFICATION_KIND_MESSAGE,
+  COMPUTATION_AGGREGATE_MESSAGES,
   type NameTable,
   type NameTableLedgerOptions,
   type NameTableRow,
@@ -878,6 +882,11 @@ describe.each(LEDGER_CASES)("既定値の確かめ方 default-value（T1' の所
   const checkNameTableDraftShape: typeof checkNameTableDraftShapeOf = (v) => checkNameTableDraftShapeOf(v, options);
   const expectProblem: typeof expectProblemOf = (table, field, message, extra, against) =>
     expectProblemOf(table, field, message, extra, against, options);
+  /**
+   * 旗 on の T1 の応答（下書き）と、そこから戻る表は計算の行に集計の種類と集計元を持つ（strict の schema で必須。Issue #549）。
+   * off は今の表のまま
+   */
+  const tableFor = (table: NameTable): NameTable => (options.ledger === undefined ? table : withAggregates(table));
   const dlist = fixtureDefaultValueList();
   /** R6（一覧の 6 番目）の確かめ方の位置 */
   const R6 = "verification[5]";
@@ -902,8 +911,8 @@ describe.each(LEDGER_CASES)("既定値の確かめ方 default-value（T1' の所
     // 所属 entity を名指しで書いても同じ（entity はコードが足すが、書いてもよい）
     expect(checkNameTable(dlist, withR6({ roles: ["f.item.kind", "e.item"] }), FIXTURE_DOCUMENTS)).toEqual([]);
     // 下書きから一覧の順で要件 ID を付けると、value つきの確かめ方に戻る
-    const result = inspectNameTable(dlist, draftOf(dlist, fixtureDefaultValueTable()), FIXTURE_DOCUMENTS);
-    expect(result).toEqual({ ok: true, table: fixtureDefaultValueTable() });
+    const result = inspectNameTable(dlist, draftOf(dlist, tableFor(fixtureDefaultValueTable())), FIXTURE_DOCUMENTS);
+    expect(result).toEqual({ ok: true, table: tableFor(fixtureDefaultValueTable()) });
     if (!result.ok) return;
     expect(result.table.verification[5]).toEqual({ requirementId: "R6", kind: "default-value", value: "alpha" });
   });
@@ -947,7 +956,7 @@ describe.each(LEDGER_CASES)("既定値の確かめ方 default-value（T1' の所
   });
 
   it("負例：value が空の文字列・null・無い下書きは形で落ちる。型付きの表の空の value も落ちる", () => {
-    const draft = draftOf(dlist, fixtureDefaultValueTable());
+    const draft = draftOf(dlist, tableFor(fixtureDefaultValueTable()));
     for (const value of ["", "  ", null, undefined]) {
       const broken = {
         ...draft,
@@ -968,7 +977,7 @@ describe.each(LEDGER_CASES)("既定値の確かめ方 default-value（T1' の所
   });
 
   it("ほかの種類で value が null でない下書きは固定文で落ち、null・無しは今までどおり通る", () => {
-    const draft = draftOf(list, fixtureTable());
+    const draft = draftOf(list, tableFor(fixtureTable()));
     // R1 は fixed-test、R2 は structural、R5 は unresolved
     for (const index of [0, 1, 4]) {
       const broken = {
@@ -989,11 +998,11 @@ describe.each(LEDGER_CASES)("既定値の確かめ方 default-value（T1' の所
       ...draft,
       requirements: draft.requirements.map((entry) => ({ ...entry, verification: { ...entry.verification, value: null } })),
     };
-    expect(inspectNameTable(list, withNull, FIXTURE_DOCUMENTS)).toEqual({ ok: true, table: fixtureTable() });
+    expect(inspectNameTable(list, withNull, FIXTURE_DOCUMENTS)).toEqual({ ok: true, table: tableFor(fixtureTable()) });
   });
 
   it("確かめ方の種類の固定文に default-value が入り（旗 on は台帳の enum-membership も。Issue #548）、知らない種類は今までどおり落ちる", () => {
-    const draft = draftOf(list, fixtureTable());
+    const draft = draftOf(list, tableFor(fixtureTable()));
     const broken = {
       ...draft,
       requirements: draft.requirements.map((entry, at) => (at === 0 ? { ...entry, verification: { kind: "other" } } : entry)),
@@ -1054,6 +1063,7 @@ describe("旗 on：T1' に台帳に無い確かめ方の種類を直接渡すと
     ]);
     // 下書きの形も、台帳の種類の一覧の固定文で落ちる
     const shape = checkNameTableDraftShapeOf(draftOf(dlist, fixtureDefaultValueTable()), { ledger: withoutDefault });
+    // （手 2a の台帳には集計の種類が無いので、下書きの計算の行は今の 3 つ組のまま。Issue #549）
     expect(shape).toEqual({
       ok: false,
       problems: [
@@ -1075,13 +1085,17 @@ describe("旗 on：T1' に台帳に無い確かめ方の種類を直接渡すと
   });
 
   it("今の台帳の on では、下書きの知らない種類の固定文は off の文に台帳の enum-membership が 1 つ増えるだけ（Issue #548）", () => {
-    const draft = draftOf(list, fixtureTable());
-    const broken = {
-      ...draft,
-      requirements: draft.requirements.map((entry, at) => (at === 0 ? { ...entry, verification: { kind: "no-such-kind" } } : entry)),
+    const brokenOf = (table: NameTable) => {
+      const draft = draftOf(list, table);
+      return {
+        ...draft,
+        requirements: draft.requirements.map((entry, at) => (at === 0 ? { ...entry, verification: { kind: "no-such-kind" } } : entry)),
+      };
     };
-    const on = checkNameTableDraftShapeOf(broken, { ledger: PROPERTY_LEDGER_VIEW });
-    const off = checkNameTableDraftShapeOf(broken);
+    // 旗 on の下書きは計算の行に集計の種類と集計元を持つ（Issue #549）
+    const on = checkNameTableDraftShapeOf(brokenOf(withAggregates(fixtureTable())), { ledger: PROPERTY_LEDGER_VIEW });
+    const off = checkNameTableDraftShapeOf(brokenOf(fixtureTable()));
+    expect(checkNameTableDraftShapeOf(brokenOf(fixtureTable()), { ledger: LEDGER_VIEW_2B })).toEqual(on);
     expect(on).toEqual({
       ok: false,
       problems: [
@@ -1094,12 +1108,18 @@ describe("旗 on：T1' に台帳に無い確かめ方の種類を直接渡すと
     expect(withoutEnumMembership(on)).toEqual(off);
   });
 
-  it("今の題材の表（default-value の無い表）も on と off で同じ結果", () => {
+  it("今の題材の表（default-value の無い表）も on と off で同じ結果（on は計算の行の集計の種類と集計元の分だけ違う。Issue #549）", () => {
     expect(checkNameTableOf(list, fixtureTable(), FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW })).toEqual([]);
+    expect(checkNameTableOf(list, withAggregates(fixtureTable()), FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW })).toEqual([]);
     const draft = draftOf(list, fixtureTable());
-    expect(inspectNameTableOf(list, draft, FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW })).toEqual(
-      inspectNameTableOf(list, draft, FIXTURE_DOCUMENTS),
-    );
+    // #548 の台帳の on は off と同じ結果
+    expect(inspectNameTableOf(list, draft, FIXTURE_DOCUMENTS, { ledger: LEDGER_VIEW_2B })).toEqual(inspectNameTableOf(list, draft, FIXTURE_DOCUMENTS));
+    expect(inspectNameTableOf(list, draft, FIXTURE_DOCUMENTS)).toEqual({ ok: true, table: fixtureTable() });
+    // 今の台帳の on は、計算の行に集計の種類と集計元を持つ下書きから、それを持つ表に戻る
+    expect(inspectNameTableOf(list, draftOf(list, withAggregates(fixtureTable())), FIXTURE_DOCUMENTS, { ledger: PROPERTY_LEDGER_VIEW })).toEqual({
+      ok: true,
+      table: withAggregates(fixtureTable()),
+    });
   });
 });
 
@@ -1137,14 +1157,16 @@ describe("旗 on：選択肢の集合の確かめ方 enum-membership（T1' の�
   it("正例：enum の項目 1 つと entity だけを所属させ、分類が ruled なら問題 0。下書きから value の無い確かめ方に戻る", () => {
     expect(check(fixtureEnumMembershipTable())).toEqual([]);
     expect(check(withR6({ roles: ["f.item.kind", "e.item"] }))).toEqual([]);
-    const result = inspectNameTableOf(elist, draftOf(elist, fixtureEnumMembershipTable()), FIXTURE_DOCUMENTS, options);
-    expect(result).toEqual({ ok: true, table: fixtureEnumMembershipTable() });
+    // 旗 on の下書きは計算の行に集計の種類と集計元を持つ（Issue #549）
+    const table = withAggregates(fixtureEnumMembershipTable());
+    const result = inspectNameTableOf(elist, draftOf(elist, table), FIXTURE_DOCUMENTS, options);
+    expect(result).toEqual({ ok: true, table });
     if (!result.ok) return;
     expect(result.table.verification[5]).toEqual({ requirementId: "R6", kind: "enum-membership" });
     // strict の schema の形（value の欄を null で持つ）も同じ表に戻る
-    const draft = draftOf(elist, fixtureEnumMembershipTable());
+    const draft = draftOf(elist, table);
     const withNull = { ...draft, requirements: draft.requirements.map((entry) => ({ ...entry, verification: { ...entry.verification, value: null } })) };
-    expect(inspectNameTableOf(elist, withNull, FIXTURE_DOCUMENTS, options)).toEqual({ ok: true, table: fixtureEnumMembershipTable() });
+    expect(inspectNameTableOf(elist, withNull, FIXTURE_DOCUMENTS, options)).toEqual({ ok: true, table });
   });
 
   it("負例：ほかの行（操作・画面・別の項目）も所属させると固定文で落ちる", () => {
@@ -1174,7 +1196,7 @@ describe("旗 on：選択肢の集合の確かめ方 enum-membership（T1' の�
     for (const value of ["alpha", "", 1]) {
       expectOnly(withR6({ value }), { field: `${R6}.value`, message: "選択肢の集合で確かめる要件の value は null であること" });
     }
-    const draft = draftOf(elist, fixtureEnumMembershipTable());
+    const draft = draftOf(elist, withAggregates(fixtureEnumMembershipTable()));
     const broken = {
       ...draft,
       requirements: draft.requirements.map((entry, index) => (index === 5 ? { ...entry, verification: { kind: "enum-membership", value: "alpha" } } : entry)),
@@ -1210,5 +1232,150 @@ describe("旗 on：選択肢の集合の確かめ方 enum-membership（T1' の�
       field: "verification[5].kind",
       message: "確かめ方の種類は fixed-test・structural・unresolved・default-value のいずれかであること",
     });
+  });
+});
+
+// ── 集計の種類と集計元（計算の行の型の aggregate。旗 on。Issue #549）──────────────────────────────
+
+describe("旗 on：計算の行の型の aggregate（集計の種類と集計元。T1' の形・種別との対応・集計元・見出しの元。Issue #549）", () => {
+  const options: NameTableLedgerOptions = { ledger: PROPERTY_LEDGER_VIEW };
+  const check = (table: NameTable) => checkNameTableOf(list, table, FIXTURE_DOCUMENTS, options);
+  /** アプリ全体の集計の行 `c.base`（金額の合計。R4 が所属させる）を足した表（行ごと・アプリ全体・見出しごとの集計を全部持つ） */
+  const withAppAggregate = (aggregate: { readonly kind: "sum" | "count" | "avg"; readonly entity: string } | null = { kind: "sum", entity: "e.item" }): NameTable => {
+    const table = withAggregates(fixtureTable());
+    const base: NameTableRow = {
+      id: "c.base",
+      kind: "computation",
+      entity: null,
+      name: "base",
+      role: "要件 R4 が使う対象",
+      source: { requirementId: "R4", quote: "金額の合計" },
+      type: { valueType: "number", scope: "app", form: "aggregate", aggregate },
+      options: null,
+      groupBy: null,
+      refEntity: null,
+    };
+    return {
+      ...table,
+      rows: [...table.rows, base],
+      ownership: table.ownership.map((entry) =>
+        entry.requirementId === "R4" ? { ...entry, roles: [...entry.roles, { id: "c.base", basis: "stated" as const, reason: null }] } : entry,
+      ),
+    };
+  };
+  const BASE_AT = fixtureRows().length;
+  const patchAggregate = (table: NameTable, id: string, aggregate: unknown): NameTable => ({
+    ...table,
+    rows: table.rows.map((row) =>
+      row.id === id && row.type !== null && typeof row.type === "object" ? ({ ...row, type: { ...row.type, aggregate } } as NameTableRow) : row,
+    ),
+  });
+  const at = (id: string) => `rows[${String(rowIndex(id))}].type.aggregate`;
+
+  it("(1) 正例：行ごと・アプリ全体・見出しごと（enum・月）の集計の行に種類と集計元を書いた表は問題 0。下書きからそのまま表に戻る", () => {
+    expect(check(withAppAggregate())).toEqual([]);
+    for (const kind of ["sum", "count", "avg"] as const) expect(check(withAppAggregate({ kind, entity: "e.item" })), kind).toEqual([]);
+    const result = inspectNameTableOf(list, draftOf(list, withAppAggregate()), FIXTURE_DOCUMENTS, options);
+    expect(result).toEqual({ ok: true, table: withAppAggregate() });
+    if (!result.ok) return;
+    const base = result.table.rows.find((row) => row.id === "c.base");
+    expect(base?.type).toEqual({ valueType: "number", scope: "app", form: "aggregate", aggregate: { kind: "sum", entity: "e.item" } });
+  });
+
+  it("(2) 負例：種別 aggregate で aggregate が null は固定文で落ちる（行ごと・アプリ全体・見出しごと）", () => {
+    for (const id of ["c.itemCount", "c.byKind", "c.byMonth"]) {
+      expect(check(patchAggregate(withAggregates(fixtureTable()), id, null)), id).toEqual([{ field: at(id), message: COMPUTATION_AGGREGATE_MESSAGES.missing }]);
+    }
+    expect(check(withAppAggregate(null))).toEqual([{ field: `rows[${String(BASE_AT)}].type.aggregate`, message: COMPUTATION_AGGREGATE_MESSAGES.missing }]);
+    // 下書きでも同じ（形は通り、表の検査で落ちる）
+    const inspected = inspectNameTableOf(list, draftOf(list, patchAggregate(withAggregates(fixtureTable()), "c.itemCount", null)), FIXTURE_DOCUMENTS, options);
+    expect(inspected).toEqual({ ok: false, problems: [{ field: at("c.itemCount"), message: COMPUTATION_AGGREGATE_MESSAGES.missing }] });
+  });
+
+  it("(2) 負例：種別 expression で aggregate があると固定文で落ちる", () => {
+    const problems = check(patchAggregate(withAggregates(fixtureTable()), "c.rate", { kind: "sum", entity: "e.item" }));
+    expect(problems).toEqual([{ field: at("c.rate"), message: COMPUTATION_AGGREGATE_MESSAGES.extra }]);
+    expectNoValues(problems);
+  });
+
+  it("(2) 負例：集計元が entity でない行・表に無い id は固定文で落ちる（値を埋めない）", () => {
+    for (const entity of ["f.item.amount", "s.items", "e.none"]) {
+      const problems = check(patchAggregate(withAggregates(fixtureTable()), "c.itemCount", { kind: "count", entity }));
+      expect(problems, entity).toEqual([{ field: `${at("c.itemCount")}.entity`, message: COMPUTATION_AGGREGATE_MESSAGES.entity }]);
+      expectNoValues(problems, ["e.none"]);
+    }
+  });
+
+  it("(2) 負例：見出しごとの集計の集計元が、見出しの元の項目の所属 entity と違うと固定文で落ちる（enum・月）", () => {
+    for (const id of ["c.byKind", "c.byMonth"]) {
+      const problems = check(patchAggregate(withAggregates(fixtureTable()), id, { kind: "count", entity: "e.member" }));
+      expect(problems, id).toEqual([{ field: `${at(id)}.entity`, message: COMPUTATION_AGGREGATE_MESSAGES.groups }]);
+    }
+  });
+
+  it("(2) 負例：下書きの aggregate の形（無い・知らない種類・集計元が空・写像でない）は形で落ちる。種類の一覧は台帳の表の順", () => {
+    const draft = draftOf(list, withAggregates(fixtureTable()));
+    const index = rowIndex("c.itemCount");
+    const message = "計算の型の aggregate は null か、集計の種類（sum・count・avg）と集計元の entity の行の id の写像であること";
+    for (const aggregate of [undefined, { kind: "max", entity: "e.item" }, { kind: "sum", entity: "" }, "count", { kind: "count" }]) {
+      const broken = {
+        ...draft,
+        rows: draft.rows.map((row, at2) => {
+          if (at2 !== index || row.type === null || typeof row.type !== "object") return row;
+          const { aggregate: _omit, ...rest } = row.type as unknown as Record<string, unknown>;
+          return { ...row, type: aggregate === undefined ? rest : { ...rest, aggregate } };
+        }),
+      };
+      expect(checkNameTableDraftShapeOf(broken, options), JSON.stringify(aggregate)).toEqual({
+        ok: false,
+        problems: [{ field: `rows[${String(index)}].type.aggregate`, message }],
+      });
+    }
+  });
+
+  it("(3) 既存の負例と正例は今までどおり（題材の表・既定値の表・選択肢の集合の表は、集計の種類と集計元を足しても同じ結果）", () => {
+    expect(check(withAggregates(fixtureTable()))).toEqual([]);
+    const dlist = fixtureDefaultValueList();
+    expect(checkNameTableOf(dlist, withAggregates(fixtureDefaultValueTable()), FIXTURE_DOCUMENTS, options)).toEqual([]);
+    expect(checkNameTableOf(dlist, withAggregates(fixtureDefaultValueTable("gamma")), FIXTURE_DOCUMENTS, options)).toEqual(
+      checkNameTableOf(dlist, fixtureDefaultValueTable("gamma"), FIXTURE_DOCUMENTS),
+    );
+    const elist = fixtureEnumMembershipList();
+    expect(checkNameTableOf(elist, withAggregates(fixtureEnumMembershipTable([])), FIXTURE_DOCUMENTS, options)).toEqual(
+      checkNameTableOf(elist, fixtureEnumMembershipTable([]), FIXTURE_DOCUMENTS, options),
+    );
+    // 既存の負例（見出しの元の項目に options が無い）も同じ固定文
+    const noOptions = patchRow(withAggregates(fixtureTable()), rowIndex("f.item.kind"), { options: null, type: "string" });
+    expect(check(noOptions)).toContainEqual({ field: `rows[${String(rowIndex("c.byKind"))}].groupBy.field`, message: "見出しの元の項目に選択肢（options）が無い" });
+  });
+
+  it("未登録の拒否：旗 off・#548 の台帳で aggregate を書いた下書きと型付きの表は形で落ちる（null・無しは今までどおり通る）", () => {
+    const aggregated = withAggregates(fixtureTable());
+    const draft = draftOf(list, aggregated);
+    const index = rowIndex("c.itemCount");
+    for (const ledgerOptions of [{}, { ledger: LEDGER_VIEW_2B }, { ledger: LEDGER_VIEW_2A }] as const) {
+      const shape = checkNameTableDraftShapeOf(draft, ledgerOptions);
+      expect(shape.ok).toBe(false);
+      if (!shape.ok) {
+        expect(shape.problems).toContainEqual({ field: `rows[${String(index)}].type.aggregate`, message: UNREGISTERED_AGGREGATE_MESSAGE });
+        // 種別 aggregate の 3 行だけ（c.rate は null なので落ちない）
+        expect(shape.problems.map((problem) => problem.message)).toEqual(Array(3).fill(UNREGISTERED_AGGREGATE_MESSAGE));
+      }
+      expect(checkNameTableOf(list, aggregated, FIXTURE_DOCUMENTS, ledgerOptions)).toContainEqual({
+        field: `rows[${String(index)}].type.aggregate`,
+        message: UNREGISTERED_AGGREGATE_MESSAGE,
+      });
+    }
+    // null だけを書いた下書きは off でも今の表に戻る（欄を持たない）
+    const nulls = draftOf(list, withAggregates(fixtureTable(), { "c.itemCount": null, "c.byKind": null, "c.byMonth": null }));
+    expect(inspectNameTableOf(list, nulls, FIXTURE_DOCUMENTS)).toEqual({ ok: true, table: fixtureTable() });
+  });
+
+  it("二点測定：旗 on の下書きで aggregate を省くと形で落ち（strict の schema で必須）、型付きの表で省いた行は集計の検査を掛けない", () => {
+    const shape = checkNameTableDraftShapeOf(draftOf(list, fixtureTable()), options);
+    expect(shape.ok).toBe(false);
+    if (!shape.ok) expect(shape.problems).toHaveLength(4);
+    expect(checkNameTableDraftShapeOf(draftOf(list, withAggregates(fixtureTable())), options).ok).toBe(true);
+    expect(check(fixtureTable())).toEqual([]);
   });
 });
