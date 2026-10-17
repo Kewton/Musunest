@@ -2,7 +2,7 @@
 // 計測の道具であって工場の門ではない：工場の package を import せず、工場の段からも呼ばれない。API・LLM・通信・時計を使わない。
 // spec-engine（build 済みの dist/index.js）と外の採点のエンジン（eval/engine.mjs。v5）は、ほかの評価の道具と同じく引数のパスで読む。
 // 外の採点は工場の試験とは別の判定である。この道具は工場の判定（verdict）を読まない。
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -52,6 +52,8 @@ export const MESSAGES = {
   marksShape: "印は sha256（64 桁の 16 進）・reviewer_role（空でない文字列）・verdict を持つ一覧で書く",
   marksVerdict: "印の verdict が知らない値である（原本の印は incorrect、変異の印は non-equivalent か equivalent）",
   originsShape: "原本は id・source・def を持つ一覧で書く",
+  mutantSha: "変異の原文の SHA-256 が申告の値と一致しない（印を適用せずに断る）",
+  outputCheck: "出力の検算（7 分類の件数の和・変異ごとの原文の SHA-256）が通らない",
   filePath: "spec-engine と採点のエンジンのパスは文字列で渡す",
 };
 
@@ -126,6 +128,9 @@ export async function classifyMutations({ engineFile, scoringEngineFile, origins
   const markSet = loadMarks(marks);
   if (!Array.isArray(origins) || origins.some((o) => o === null || typeof o !== "object" || typeof o.id !== "string" || typeof o.source !== "string" || o.def === null || typeof o.def !== "object")) throw new MutationToolError("invalid_origins", MESSAGES.originsShape);
 
+  // 外から渡された変異は、印を適用する前に原文の SHA-256 を計算して申告と照合する（計算し直して通さない）
+  if (given !== null) for (const list of Object.values(given)) for (const m of list) if (m === null || typeof m !== "object" || typeof m.source !== "string" || sha256(m.source) !== m.sha256) throw new MutationToolError("mutant_sha_mismatch", MESSAGES.mutantSha);
+
   const tmp = mkdtempSync(join(tmpdir(), "mutation-classify-"));
   const scoreText = async (text, def) => {
     const file = join(tmp, "candidate.app.spec.yaml");
@@ -178,7 +183,7 @@ export async function classifyMutations({ engineFile, scoringEngineFile, origins
     };
     const byClass = emptyByClass();
     for (const m of mutantOut) byClass[m.class] += 1;
-    return {
+    const result = {
       schema: OUTPUT_SCHEMA,
       definitions: { classes: CLASSES, detection_denominator_rule: DENOMINATOR_RULE, priority_rule: "上から順に最初に当てはまる 1 つだけ。1 つの変異は 2 つの分類に入らない" },
       fingerprints: {
@@ -198,6 +203,8 @@ export async function classifyMutations({ engineFile, scoringEngineFile, origins
         ignored_marks: ignored,
       },
     };
+    if (!verifyOutput(result)) throw new MutationToolError("output_check_failed", MESSAGES.outputCheck);
+    return result;
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -207,4 +214,22 @@ export async function classifyMutations({ engineFile, scoringEngineFile, origins
 export function verifyOutput(out) {
   const sum = Object.values(out.counts.by_class).reduce((a, b) => a + b, 0);
   return sum === out.counts.mutants && out.mutants.length === out.counts.mutants && out.mutants.every((m) => sha256(m.source) === m.sha256 && CLASS_IDS.includes(m.class));
+}
+
+// ── 利用の入口（node classify.mjs <入力の JSON のファイル> で直接起動されたときだけ動く。import したときは何も起きない）
+// 入力の JSON：classifyMutations の引数（engineFile・scoringEngineFile・origins・marks・operators・max・mutants）。結果の JSON を標準出力へ。
+// MutationToolError は「符号 固定文」の 1 行を標準エラーに出して exit 3（変異の SHA-256 の不一致・出力の検算の失敗を含む）
+export const EXIT_REFUSED = 3;
+const isEntry = () => { try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } };
+if (isEntry()) {
+  try {
+    const file = process.argv[2];
+    if (!file) throw new MutationToolError("invalid_input", "使い方: node classify.mjs <入力の JSON のファイル>");
+    const out = await classifyMutations(JSON.parse(readFileSync(file, "utf8")));
+    process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
+  } catch (e) {
+    if (!(e instanceof MutationToolError)) throw e;
+    process.stderr.write(`${e.code} ${e.message}\n`);
+    process.exitCode = EXIT_REFUSED;
+  }
 }
