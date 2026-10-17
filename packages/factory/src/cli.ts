@@ -12,6 +12,10 @@
 // `--pipeline v1.1a`（既定 v1）を付けると、確定した仕様（`--plan-file`）から v1.1α の経路（`v11a/run.ts`）を流す
 // （`07-architecture-v1.1a.md` §3・Issue #511）。v1.1α は `--plan-file` と組んでだけ受ける。`--pipeline` を省けば
 // v1 の経路で、LLM への要求・納品物・要約・終了コードは今までとバイト列で同じである。
+// `--pipeline v1.2` は、v1.1α の経路に merge 済みの手の旗を全部 on（`V12_PIPELINE_FLAGS`。今は性質の台帳だけ）で流す
+// （`08-architecture-v1.2.md` §9・Issue #547）。受け方は `v1.1a` と同じ（`--plan-file` と組んでだけ。封筒は v1.1a）で、
+// 要約と条件の記録の `prompt_version` は `v1.2`、条件の記録には `pipeline` と実効の旗の組 `v12_flags` を足し、要約にも
+// `v12_flags` を書く。`v1.1a` は旗を全部 off で流し、新しい欄を出さない。
 //
 // `--stage-start <段>`・`--stage-end <段>`・`--stage-input <checkpoint>` を付けると、v1.1α の経路を段の範囲だけ
 // 流す（段単位の実行口。`08-architecture-v1.2.md` §8.3・Issue #544）。`--pipeline v1.1a --plan-file` と組んで
@@ -79,6 +83,7 @@ import {
   type StageRunConditions,
 } from "./v11a/bundle-v11a.js";
 import { runGenerationV11a, runStageRangeV11a } from "./v11a/run.js";
+import { V12_PIPELINE_FLAGS, type V12Flags } from "./v12/ledger.js";
 import type { PromptDocument } from "./stages/prompt.js";
 
 /** 工場の識別（要約の `builder`。S-5） */
@@ -87,8 +92,10 @@ export const BUILDER = "musunest-factory" as const;
 export const PROMPT_VERSION = "v1" as const;
 /** v1.1α の走りのプロンプトの版（要約と `build-record.json` の `conditions.prompt_version`。Issue #511） */
 export const PROMPT_VERSION_V11A = "v1.1a" as const;
+/** v1.2 の走りのプロンプトの版（要約と `build-record.json` の `conditions.prompt_version`。Issue #547） */
+export const PROMPT_VERSION_V12 = "v1.2" as const;
 /** `--pipeline` で選べる経路（既定 v1） */
-export const PIPELINES = ["v1", "v1.1a"] as const;
+export const PIPELINES = ["v1", "v1.1a", "v1.2"] as const;
 /** 経路の型 */
 export type Pipeline = (typeof PIPELINES)[number];
 /** 契約の版（`03-evaluation.md` §1 が v0.2 に固定する） */
@@ -141,7 +148,7 @@ export const EXIT_STAGE_INPUT = 4;
 
 /** 使い方の文（誤りを人に見せる） */
 export const USAGE =
-  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル> [--pipeline v1|v1.1a]]";
+  "使い方: factory:run -- <依頼文のファイル> --out <ディレクトリ> [--model <名前>] [--effort <値>] [--budget <USD>] [--deadline <分>] [--timeout <分>] [--plan [--answers <ファイル> | --script <ファイル>] | --plan-only [--answers <ファイル> | --script <ファイル>] | --plan-file <ファイル> [--pipeline v1|v1.1a|v1.2]]";
 
 /** 段単位の実行口の使い方（段の旗の誤りのときだけ、`USAGE` のあとに出す。Issue #544） */
 export const STAGE_USAGE =
@@ -182,8 +189,8 @@ export interface CliArguments {
    */
   readonly scriptFile?: string;
   /**
-   * `--pipeline <v1|v1.1a>`（既定 v1。指定したときだけ持つ）。値によらず `--plan`・`--plan-only` とは同時に
-   * 指定できない。`v1.1a` は `--plan-file` と一緒にだけ受ける（Issue #511）。
+   * `--pipeline <v1|v1.1a|v1.2>`（既定 v1。指定したときだけ持つ）。値によらず `--plan`・`--plan-only` とは同時に
+   * 指定できない。`v1.1a`・`v1.2` は `--plan-file` と一緒にだけ受ける（Issue #511・#547）。
    */
   readonly pipeline?: Pipeline;
   /**
@@ -197,6 +204,21 @@ export interface CliArguments {
 
 function isPipeline(value: string): value is Pipeline {
   return (PIPELINES as readonly string[]).includes(value);
+}
+
+/** v1.1α の経路で流す経路か（`v1.1a` と `v1.2`。確定した仕様と組んでだけ流れる） */
+function isV11aPath(pipeline: Pipeline | undefined): pipeline is "v1.1a" | "v1.2" {
+  return pipeline === "v1.1a" || pipeline === "v1.2";
+}
+
+/** 経路のプロンプトの版 */
+function promptVersionOf(pipeline: Pipeline | undefined): string {
+  return pipeline === "v1.2" ? PROMPT_VERSION_V12 : pipeline === "v1.1a" ? PROMPT_VERSION_V11A : PROMPT_VERSION;
+}
+
+/** 経路の旗（`v1.2` だけが持つ。正本 `V12_PIPELINE_FLAGS` をそのまま渡す。Issue #547） */
+function v12FlagsOf(pipeline: Pipeline | undefined): Readonly<V12Flags> | undefined {
+  return pipeline === "v1.2" ? V12_PIPELINE_FLAGS : undefined;
 }
 
 /** 引数を読む。誤りは `error` に人の読む文を入れて返す（例外にしない） */
@@ -359,6 +381,9 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   if (pipeline === "v1.1a" && planFile === undefined) {
     return { error: "--pipeline v1.1a は --plan-file と一緒に指定してください" };
   }
+  if (pipeline === "v1.2" && planFile === undefined) {
+    return { error: "--pipeline v1.2 は --plan-file と一緒に指定してください" };
+  }
   let stageRange: StageRange | undefined;
   if (stageFlag) {
     if (pipeline !== "v1.1a" || planFile === undefined) {
@@ -507,13 +532,19 @@ async function runBuild(
   job: BuildJob & { readonly plan?: ConfirmedPlan },
   log: (line: string) => void,
 ): Promise<{ readonly code: number; readonly costUsd: number; readonly returnToPlan: boolean }> {
-  // v1.1α は確定した仕様と組んでだけ流れる（引数の読み取りが `--plan-file` を要る。Issue #511）
-  const v11aPlan = job.pipeline === "v1.1a" ? job.plan : undefined;
-  const input = generationInputOf(deps, job, v11aPlan === undefined ? PROMPT_VERSION : PROMPT_VERSION_V11A);
+  // v1.1α は確定した仕様と組んでだけ流れる（引数の読み取りが `--plan-file` を要る。Issue #511）。v1.2 は同じ経路に
+  // 旗の組を渡し、要約に旗の組を書かせる（Issue #547）
+  const v11aPlan = isV11aPath(job.pipeline) ? job.plan : undefined;
+  const input = generationInputOf(deps, job, v11aPlan === undefined ? PROMPT_VERSION : promptVersionOf(job.pipeline));
+  const flags = v12FlagsOf(job.pipeline);
   const run =
     v11aPlan === undefined
       ? await runGeneration({ ...input, ...(job.plan === undefined ? {} : { plan: job.plan }) })
-      : await runGenerationV11a({ ...input, plan: v11aPlan });
+      : await runGenerationV11a({
+          ...input,
+          plan: v11aPlan,
+          ...(flags === undefined ? {} : { flags, recordV12Flags: true }),
+        });
   return writeBuildRun(deps, job, run, log);
 }
 
@@ -818,12 +849,12 @@ async function runBuildFromPlanFile(
     return EXIT_USAGE;
   }
   const documents = await deps.loadDocuments();
-  // v1.1α の走りでだけ、v1.1α の封筒を選ぶ（v1 の走りでは欄を置かない。Issue #511）
+  // v1.1α の走り（v1.2 を含む）でだけ、v1.1α の封筒を選ぶ（v1 の走りでは欄を置かない。Issue #511・#547）
   const client = deps.makeClient({
     apiKey,
     model: parsed.model,
     effort: parsed.effort,
-    ...(parsed.pipeline === "v1.1a" ? { envelope: "v1.1a" as const } : {}),
+    ...(isV11aPath(parsed.pipeline) ? { envelope: "v1.1a" as const } : {}),
   });
   const { judge, recheckJudge } = assembleJudge({
     env: deps.env,
@@ -1061,11 +1092,15 @@ export async function runCli(deps: CliDeps): Promise<number> {
     deadline_ms: deadlineMs,
     timeout_ms: parsed.timeoutMs ?? null,
     vocabulary_version: VOCABULARY_VERSION,
-    prompt_version: parsed.pipeline === "v1.1a" ? PROMPT_VERSION_V11A : PROMPT_VERSION,
+    prompt_version: promptVersionOf(parsed.pipeline),
     contract_version: CONTRACT_VERSION,
     factory_version: FACTORY_VERSION,
     spec_engine_version: SPEC_ENGINE_VERSION,
   };
+  // v1.2 の走りだけ、条件の記録に経路と実効の旗の組を足す（v1・v1.1α の記録には新しい欄を出さない。Issue #547）
+  const v12Flags = v12FlagsOf(parsed.pipeline);
+  const v12Conditions = v12Flags === undefined ? undefined : { pipeline: "v1.2", v12_flags: v12Flags };
+  const recordConditions: PlanCliConditions = v12Conditions === undefined ? conditions : { ...conditions, ...v12Conditions };
 
   // `--plan-file`：包みを検査してから client を作る（検査で断れば API を呼ばない。Issue #495）
   if (parsed.planFile !== undefined) {
@@ -1073,7 +1108,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
       deps,
       parsed,
       parsed.planFile,
-      { now, budgetUsd, deadlineMs, conditions },
+      { now, budgetUsd, deadlineMs, conditions: recordConditions },
       log,
       logError,
     );

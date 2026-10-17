@@ -28,6 +28,11 @@
 // 終了の段のあとで止まる。境界（T1''／T2・T2／B1）を通るたびにその時点の材料を返し、**B の結果は入れない**。
 // ⑦ まで流しても ⑧（納品物）は組まない。範囲を省いた `runGenerationV11a` は今までと同じに振る舞う。
 //
+// 旗（`flags`。08-architecture-v1.2.md §9・Issue #547）：省けば全部 off で、今の v1.1α とバイト列で同じに流れる。
+// `flags.ledger` が on なら、性質の台帳の導出（`v12/ledger.ts`）を T1（T1' を含む）・T2（T2' を含む）・評価口（B4・
+// B5 の道具・版の再検査）へ渡す。T1''・B1 へは渡さない（手 2b）。`recordV12Flags` が真の走り（`--pipeline v1.2`）だけ、
+// 要約に実効の旗の組を `v12_flags` で書く（早期停止の要約にも）。
+//
 // 持ち越し（§1.2）の出どころは 4 つ。T1 の unresolved と T1'' の拒否は A1 の `deriveCarryOver` で導く。
 // B3' の文脈なし・点検が尽きるか停滞したあとに残った拒否と、B6 の網羅の落ちは、版の輪の途中で足していく
 // ので `composeCarryOver` で重ねる（`deriveCarryOver` は 4 つの出どころを 1 回で受け、B3' の判定を
@@ -142,11 +147,16 @@ import {
 import { runSemanticCheck, semanticCheckTargets, type SemanticCheckOutput } from "./stages/semantic-check.js";
 import { runTestSpec, type TestSpecValue } from "./stages/test-spec.js";
 import { runWriteV11a } from "./stages/write.js";
+import { ledgerViewOf, resolveV12Flags, type V12Flags } from "../v12/ledger.js";
 
 /** v1.1α の入力（v1 の `GenerationInput` と同じ形で、確定した仕様を必須にしたもの） */
 export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
   /** 確定した仕様（全段の正本。planner は流さない） */
   readonly plan: ConfirmedPlan;
+  /** v1.2 の旗（省いた名前は off。全部省けば今の v1.1α。Issue #547） */
+  readonly flags?: Partial<V12Flags>;
+  /** 真なら、要約に実効の旗の組を `v12_flags` で書く（`--pipeline v1.2` の走り。省けば書かない。Issue #547） */
+  readonly recordV12Flags?: boolean;
 }
 
 /** 全件持ち越しの停止の問題（固定文。値を埋めない） */
@@ -470,6 +480,11 @@ async function runV11a(
   stageControl: { readonly range: StageRange; readonly resume?: ResumeMaterials } | undefined,
 ): Promise<CoreResult> {
   const resume = stageControl?.resume;
+  // 実効の旗と、旗で選んだ台帳の導出（off なら undefined。段へは渡さない＝今の定数と関数。Issue #547）
+  const flags = resolveV12Flags(input.flags);
+  const ledger = ledgerViewOf(flags);
+  const withLedger = ledger === undefined ? {} : { ledger };
+  const flagsRecord = input.recordV12Flags === true ? { v12_flags: flags } : {};
   const limits = input.limits ?? AGENT_LIMITS;
   const meter = new UsageMeter();
   const budget = new JobBudget(input.budgetUsd);
@@ -750,6 +765,7 @@ async function runV11a(
       judge: judgeUsageOf(),
       nature_discrepancies: natureDiscrepancies,
       ...(droppedSummary === undefined ? {} : { dropped_nonstructural_tests: droppedSummary }),
+      ...flagsRecord,
     };
     return {
       outcome,
@@ -820,6 +836,7 @@ async function runV11a(
           gateway,
           ...(retry === undefined ? {} : { previous: retry }),
           onRejected: rejectionSink("name-table", call),
+          ...withLedger,
         });
       } catch (error) {
         pushRecord("name-table", "failed", before, start, null);
@@ -938,6 +955,7 @@ async function runV11a(
             for (const entry of dropped) droppedTests.push(entry);
           },
           onRejected: rejectionSink("test-spec", 1),
+          ...withLedger,
         }),
       );
       natureDiscrepancies = toBundleNatureDiscrepancies(value.discrepancies);
@@ -966,6 +984,7 @@ async function runV11a(
       table,
       excludedRowIds: carry.excludedRowIds,
       observes: testSpec.observes,
+      ...withLedger,
     });
     /** いまの評価の文脈（棄却で外した後の組・持ち越しを除いた一覧と所属） */
     const contextNow = (): EvaluationContext => ({
@@ -979,7 +998,7 @@ async function runV11a(
       carry = await carryOverStep(() => composeCarryOver(list, table, baseCarry, addedCarry));
       if (carry.allCarried) stopAtCarryOver(ALL_CARRIED_PROBLEM);
       pruned = await carryOverStep(() => pruneForCarryOver(list, table, carry, withoutOverturned()));
-      evaluator = createV11aEvaluator({ table, excludedRowIds: carry.excludedRowIds, observes: testSpec.observes });
+      evaluator = createV11aEvaluator({ table, excludedRowIds: carry.excludedRowIds, observes: testSpec.observes, ...withLedger });
     };
     const addCarry = (requirementId: string, reason: CarryOverReason): void => {
       const listed = addedCarry.get(requirementId) ?? [];
@@ -1302,6 +1321,7 @@ async function runV11a(
       judge: judgeUsageOf(),
       nature_discrepancies: natureDiscrepancies,
       ...(droppedSummary === undefined ? {} : { dropped_nonstructural_tests: droppedSummary }),
+      ...flagsRecord,
     };
     const bundle = await assembleBundle({
       runId: input.runId,

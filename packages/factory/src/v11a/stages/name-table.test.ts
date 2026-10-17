@@ -10,7 +10,8 @@ import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { describe, expect, it } from "vitest";
 import type { LlmClient, LlmStructuredRequest } from "../../llm.js";
 import type { RequirementList } from "../../pipeline.js";
-import { ruleDefinitionDefects, type RejectedCandidate } from "../../stages/prompt.js";
+import { ruleDefinitionDefects, ruleTexts, type RejectedCandidate } from "../../stages/prompt.js";
+import { PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
   FIXTURE_DOCUMENTS,
@@ -29,6 +30,8 @@ import {
   NAME_TABLE_RULES,
   NAME_TABLE_SCHEMA,
   NAME_TABLE_SCHEMA_NAME,
+  nameTableRuleDefinitionsOf,
+  nameTableSchemaOf,
   runNameTable,
   type NameTablePrevious,
 } from "./name-table.js";
@@ -447,9 +450,16 @@ describe("T1 は要件ごとの写しをコードが渡し、依頼文の引用�
   });
 });
 
-describe("T1 の確かめ方 default-value（Issue #533）", () => {
+/** 旗 off（台帳を渡さない）と旗 on（台帳の導出を渡す）の 2 通り。#533 の試験を両方で同じ結果に照らす（Issue #547） */
+const LEDGER_CASES: readonly { readonly name: string; readonly ledger: LedgerView | undefined }[] = [
+  { name: "off", ledger: undefined },
+  { name: "on", ledger: PROPERTY_LEDGER_VIEW },
+];
+
+describe.each(LEDGER_CASES)("T1 の確かめ方 default-value（Issue #533。旗 $name）", ({ ledger }) => {
+  const withLedger = ledger === undefined ? {} : { ledger };
   it("schema の kind に default-value があり、value は string か null の必須の欄", () => {
-    const verification = NAME_TABLE_SCHEMA.properties.requirements.items.properties.verification;
+    const verification = nameTableSchemaOf(ledger).properties.requirements.items.properties.verification;
     expect(verification.properties.kind.enum).toEqual(["fixed-test", "structural", "unresolved", "default-value"]);
     expect(verification.properties.value.type).toEqual(["string", "null"]);
     expect(verification.required).toContain("value");
@@ -459,14 +469,15 @@ describe("T1 の確かめ方 default-value（Issue #533）", () => {
   });
 
   it("規則 R-nt-08 に既定値の 1 文があり、why・since が埋まっている", () => {
-    const rule = NAME_TABLE_RULE_DEFINITIONS.find((definition) => definition.id === "R-nt-08");
+    const definitions = nameTableRuleDefinitionsOf(ledger);
+    const rule = definitions.find((definition) => definition.id === "R-nt-08");
     expect(rule?.text).toContain("kind を default-value にし、value にそのキー");
     expect(rule?.text).toContain("その項目だけを所属させる");
     expect(rule?.text).toContain("条件・計算・検査・操作後の状態を含む要件には default-value を使わない");
     expect(rule?.since).toContain("#533");
     expect(rule?.why).toContain("H2");
-    expect(ruleDefinitionDefects(NAME_TABLE_RULE_DEFINITIONS)).toEqual([]);
-    expectNoAcceptanceMaterial(NAME_TABLE_RULES);
+    expect(ruleDefinitionDefects(definitions)).toEqual([]);
+    expectNoAcceptanceMaterial(ruleTexts(definitions));
   });
 
   it("strict の形の応答（ほかの種類は value null）で、default-value の要件の value が表に残る", async () => {
@@ -481,6 +492,7 @@ describe("T1 の確かめ方 default-value（Issue #533）", () => {
       list,
       documents: FIXTURE_DOCUMENTS,
       gateway: makeGateway(recording.client),
+      ...withLedger,
     });
     if (!outcome.ok) throw new Error("通るはず");
     expect(outcome.value.table).toEqual(fixtureDefaultValueTable());
@@ -495,10 +507,60 @@ describe("T1 の確かめ方 default-value（Issue #533）", () => {
       list,
       documents: FIXTURE_DOCUMENTS,
       gateway: makeGateway(recording.client),
+      ...withLedger,
     });
     if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
     expect(outcome.failure.problems).toEqual([
       { field: "verification[5].value", message: "既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い" },
     ]);
+  });
+});
+
+// ── 旗 on（性質の台帳から組む。Issue #547）──────────────────────────────
+
+describe("旗 on：T1 の規則の文・schema・データの並びが off とバイト列で同じ（載せ替えだけ）", () => {
+  it("規則の定義は off の定数と深く等しく、送る文の並び・schema の JSON がバイト列で同じ。規則の不備は on・off とも 0", () => {
+    const definitions = nameTableRuleDefinitionsOf(PROPERTY_LEDGER_VIEW);
+    expect(definitions).toEqual(NAME_TABLE_RULE_DEFINITIONS);
+    expect(JSON.stringify(ruleTexts(definitions))).toBe(JSON.stringify(NAME_TABLE_RULES));
+    expect(JSON.stringify(nameTableSchemaOf(PROPERTY_LEDGER_VIEW))).toBe(JSON.stringify(NAME_TABLE_SCHEMA));
+    expect(ruleDefinitionDefects(definitions)).toEqual([]);
+    expect(ruleDefinitionDefects(NAME_TABLE_RULE_DEFINITIONS)).toEqual([]);
+    // 旗を省けば今の定数そのもの（新しい分岐を通らない）
+    expect(nameTableRuleDefinitionsOf()).toBe(NAME_TABLE_RULE_DEFINITIONS);
+    expect(nameTableSchemaOf()).toBe(NAME_TABLE_SCHEMA);
+  });
+
+  it("二点測定：台帳の行の T1 の文を 1 文字変えると、組んだ R-nt-08 が off と食い違う", () => {
+    const changed: LedgerView = { ...PROPERTY_LEDGER_VIEW, t1RuleTexts: PROPERTY_LEDGER_VIEW.t1RuleTexts.map((text) => `${text} `) };
+    const text = (view: LedgerView) => nameTableRuleDefinitionsOf(view).find((definition) => definition.id === "R-nt-08")?.text;
+    expect(text(PROPERTY_LEDGER_VIEW)).toBe(NAME_TABLE_RULE_DEFINITIONS.find((definition) => definition.id === "R-nt-08")?.text);
+    expect(text(changed)).not.toBe(text(PROPERTY_LEDGER_VIEW));
+    const fewer: LedgerView = { ...PROPERTY_LEDGER_VIEW, verificationKinds: PROPERTY_LEDGER_VIEW.verificationKinds.slice(0, -1) };
+    expect(JSON.stringify(nameTableSchemaOf(fewer))).not.toBe(JSON.stringify(NAME_TABLE_SCHEMA));
+  });
+
+  it("同じ応答で on・off の要求（前置き・規則・データ・schema）と結果が深く等しい（1 回目と previous つきの 2 回目）", async () => {
+    const list = fixtureDefaultValueList();
+    const response = responseOf(draftOf(list, fixtureDefaultValueTable()));
+    const runWith = async (ledger: LedgerView | undefined, previous?: NameTablePrevious) => {
+      const recording = createRecordingClient([structured(response)]);
+      const outcome = await runNameTable({
+        plan: planOf(list),
+        list,
+        documents: FIXTURE_DOCUMENTS,
+        gateway: makeGateway(recording.client),
+        ...(previous === undefined ? {} : { previous }),
+        ...(ledger === undefined ? {} : { ledger }),
+      });
+      return { outcome, requests: recording.structured };
+    };
+    const previous: NameTablePrevious = { response, problems: [{ field: "rows[0]", message: "前回の指示" }], rejections: [], advice: [] };
+    for (const prior of [undefined, previous]) {
+      const off = await runWith(undefined, prior);
+      const on = await runWith(PROPERTY_LEDGER_VIEW, prior);
+      expect(JSON.stringify(on.requests)).toBe(JSON.stringify(off.requests));
+      expect(on.outcome).toEqual(off.outcome);
+    }
   });
 });
