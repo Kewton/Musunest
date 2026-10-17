@@ -3451,16 +3451,19 @@ test("#539 匿名の口：--anonymous と --compare --anonymous の新しい欄�
 
 // ── #545：段単位の走りの採点（段の通過率・入力なし・分母・段だけの対の比較・匿名の口）。README §5.11
 // 固定の記録（条件 v6・工場の段の走りの記録 stage-run.json・起動の記録）を一時の出力先に置いて採点する（計測は流さない）
-import { CONDITIONS_V6, STAGE_NOT_COMPUTED, STAGE_RUN_MODE, STAGE_RUN_PATH, STAGE_RUN_RECORD_SCHEMA, STAGE_SCORE_COMPARE_SCHEMA, anonymizeStage, anonymizeStageCompare } from "./score-agent.mjs";
+import { CONDITIONS_V6, STAGE_NOT_COMPUTED, STAGE_SEGMENTS, stagesInRange, STAGE_RUN_MODE, STAGE_RUN_PATH, STAGE_RUN_RECORD_SCHEMA, STAGE_SCORE_COMPARE_SCHEMA, anonymizeStage, anonymizeStageCompare } from "./score-agent.mjs";
 
 const PIDS545 = Array.from({ length: 10 }, (_, i) => `P${i + 1}`);
 const IDS545 = PIDS545.flatMap((p) => [1, 2, 3].map((r) => `${p}-r${r}`));
 /** 本のディレクトリに写した上流の入力（checkpoint と段の走りの記録）のバイト列と、条件の stage_inputs に書く SHA-256 */
-const cpBytes545 = (id) => Buffer.from(JSON.stringify({ boundary: "t2-b1", note: `checkpoint-${id}` })), recBytes545 = (id) => Buffer.from(`record-${id}`);
+const cpBytes545 = (id) => Buffer.from(JSON.stringify({ boundary: "t2-b1", note: `checkpoint-${id}` }));
+/** 上流の checkpoint の出力ダイジェスト（上流の記録が宣言し、出力の記録の input.output_digest と照らす） */
+const DIG545 = (id) => sha256(`digest-${id}`);
+const recBytes545 = (id) => Buffer.from(JSON.stringify({ schema_version: STAGE_RUN_RECORD_SCHEMA, checkpoints: [{ boundary: "t2-b1", path: "stage-checkpoint-t2-b1.json", output_digest: DIG545(id) }] }));
 const UP545 = sha256("upstream-conditions-545"), CP545 = (id) => sha256(cpBytes545(id)), REC545 = (id) => sha256(recBytes545(id));
 /** 工場の段の走りの記録（開始 B1・終了 ⑦）。pass が偽なら ⑦ で早期停止。over で欄を差し替える（食い違いの負例） */
 const stageRecord545 = (id, pass = true, judge = "partial", over = {}) => JSON.stringify({
-  schema_version: STAGE_RUN_RECORD_SCHEMA, range: { start: "write", end: "judge" }, input: { checkpoint: "stage-checkpoint-t2-b1.json", boundary: "t2-b1", output_digest: sha256("d") },
+  schema_version: STAGE_RUN_RECORD_SCHEMA, range: { start: "write", end: "judge" }, input: { checkpoint: "stage-checkpoint-t2-b1.json", boundary: "t2-b1", output_digest: DIG545(id) },
   plan_sha256: PSHA513(id.split("-")[0]), source_sha256: SSHA513(id.split("-")[0]), checkpoints: [], reached_stage: "judge", conditions: {}, budget_scope: "stage-run", provider_cost_usd: 0.02, duration_secs: 1,
   stages: [{ stage: "write", status: "ok", calls: 1, duration_ms: 3 }, { stage: "judge", status: pass ? "ok" : "failed", calls: 1, duration_ms: 2 }],
   stopped: pass ? null : { stage: "judge", kind: "unmet" }, stage_pass: pass, ...(pass ? { stage_judge_verdict: judge } : {}), return_to_plan: false, exit_code: pass ? 0 : 1, ...over,
@@ -3751,4 +3754,55 @@ test("#545 直し：段の走りの記録を条件の範囲・凍結した仕様
     assert.equal(anon.stage_pass_rate.missing_breakdown.mismatched, 3);
     assert.equal(anon.completion.status, "unverified");
   });
+});
+
+test("#545 直し 2：(1) 出力の記録の input.output_digest を、写した上流の記録のその checkpoint の宣言と照らす。先頭 1 文字だけを変えた記録は通過に数えず input の未照合。(2) 段の履歴・到達の段・停止の段・段の通過が範囲と整合しない記録（範囲の外の name-table を 1 件足す など）は stages の未照合で、漏斗は確かめた範囲の段だけ", async () => {
+  await withOut(async (base) => {
+    const fzp = frozenFile545(base), id = "P6-r1";
+    const one = (name, recordOf) => { const out = join(base, name); stageFixture545(out, { ids: [id], recordOf, frozenPath: fzp }); const r = scoreRun(out); return { full: readScore(out), stdout: r.stdout }; };
+    // 対照：正しい checkpoint・そのダイジェストを宣言する上流の記録・条件に両ファイルの SHA
+    const ok = one("ok", null).full;
+    assert.equal(ok.completion.status, "complete", ok.completion.reasons.join("、"));
+    assert.deepEqual([ok.stage_pass_rate.observed, ok.stage_pass_rate.passed], [1, 1]);
+    assert.deepEqual(ok.rows[0].mismatches, []);
+    // (1) 出力の記録の input.output_digest の先頭 1 文字だけを変える（入力ファイル・条件は同じ）
+    const flipped = DIG545(id).replace(/^./, (c) => (c === "0" ? "1" : "0"));
+    const d = one("digest", (x) => stageRecord545(x, true, "partial", { input: { checkpoint: "stage-checkpoint-t2-b1.json", boundary: "t2-b1", output_digest: flipped } })).full;
+    assert.deepEqual([d.stage_pass_rate.observed, d.stage_pass_rate.passed, d.stage_pass_rate.missing_breakdown.mismatched], [0, 0, 1]);
+    assert.deepEqual(d.rows[0].mismatches, ["input"]);
+    assert.equal(d.completion.status, "unverified");
+    // (2) 正常な入力と range write..judge を保ち、段の履歴に範囲の外の name-table を 1 件足す
+    const stagesIn = [{ stage: "name-table", status: "ok", calls: 1, duration_ms: 1 }, { stage: "write", status: "ok", calls: 1, duration_ms: 3 }, { stage: "judge", status: "ok", calls: 1, duration_ms: 2 }];
+    const s2 = one("stages", (x) => stageRecord545(x, true, "partial", { stages: stagesIn }));
+    assert.deepEqual([s2.full.stage_pass_rate.observed, s2.full.stage_pass_rate.passed], [0, 0]);
+    assert.deepEqual(s2.full.rows[0].mismatches, ["stages"]);
+    assert.equal(s2.full.completion.status, "unverified");
+    assert.ok(s2.full.completion.reasons.some((x) => x.includes("stages")), s2.full.completion.reasons.join("、"));
+    assert.deepEqual(Object.keys(s2.full.funnel.stages), [], "範囲の外の段を漏斗に出さない");
+    assert.ok(!/name-table/.test(s2.stdout.split("\n").find((l) => l.startsWith("漏斗")) ?? ""));
+    // 到達の段・停止の段・段の通過の不整合
+    const bads = {
+      reached: { reached_stage: "write" },
+      "stop-outside": { stopped: { stage: "test-spec", kind: "unmet" }, stage_pass: false },
+      "pass-with-stop": { stopped: { stage: "judge", kind: "unmet" } },
+      "pass-without-ok-end": { stages: [{ stage: "write", status: "ok", calls: 1, duration_ms: 1 }], reached_stage: "write" },
+    };
+    for (const [label, over] of Object.entries(bads)) {
+      const b = one(`bad-${label}`, (x) => stageRecord545(x, true, "partial", over)).full;
+      assert.deepEqual([b.stage_pass_rate.observed, b.stage_pass_rate.passed], [0, 0], label);
+      assert.deepEqual(b.rows[0].mismatches, ["stages"], label);
+    }
+    // 範囲の中の早期停止（⑦ で停止・段の通過が偽）は整合し、観測・不通過に数える
+    const f = one("fail", (x) => stageRecord545(x, false)).full;
+    assert.deepEqual([f.stage_pass_rate.observed, f.stage_pass_rate.passed, f.completion.status], [1, 0, "complete"]);
+  });
+});
+
+test("#545 直し 2：採点が写して持つ段の区間（STAGE_SEGMENTS の開始・終了）が工場の dist の STAGE_STARTS・STAGE_ENDS の並びと同じで、区間の段は既知の段", async () => {
+  const lib = await distModule("v11a/bundle-v11a.js");
+  assert.deepEqual(STAGE_SEGMENTS.map((x) => x.start), [...lib.STAGE_STARTS]);
+  assert.deepEqual(STAGE_SEGMENTS.map((x) => x.end), [...lib.STAGE_ENDS]);
+  for (const x of STAGE_SEGMENTS) assert.ok(x.stages.includes(x.start) && x.stages.includes(x.end) && x.stages.every((st) => BUILD_STAGE_IDS.includes(st)), x.start);
+  assert.deepEqual(stagesInRange("write", "judge"), STAGE_SEGMENTS[2].stages);
+  assert.deepEqual(stagesInRange("write", "test-spec"), []);
 });
