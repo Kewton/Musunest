@@ -214,10 +214,13 @@ const r2Execution = (id = "r2-exec") =>
   rawTest({ id, requirementId: "R2", targetKind: "computation", roleId: "c.itemCount", operation: "compute", observes: "value" });
 
 /**
- * R3：操作の条件の正常・異常・境界（`kinds` で欠けを作る）。期待は条件の真偽（金額が 0 の異常は false、ほかは true。手 2p の
- * 記録の操作の試験と同じ形。旗 on の T2' が期待の型を真偽に限るので、Issue #550 で数の期待から直した）
+ * R3 の操作の試験の期待の形（Issue #550）。`number` … 今までの既定（rawTest の既定の期待＝数 1）。`boolean` … 条件の真偽
+ * （金額が 0 の異常は false、ほかは true。手 2p の記録の操作の試験と同じ形。旗 on の T2' は期待の型を真偽に限る）
  */
-const r3Action = (kinds: readonly ("normal" | "abnormal" | "boundary")[] = KINDS, roleId = "o.closeItem") =>
+type R3Expectation = "number" | "boolean";
+
+/** R3：操作の条件の正常・異常・境界（`kinds` で欠けを作る。`expectation` で期待の形を選ぶ。既定は今までの数） */
+const r3Action = (kinds: readonly ("normal" | "abnormal" | "boundary")[] = KINDS, roleId = "o.closeItem", expectation: R3Expectation = "number") =>
   kinds.map((kind) =>
     rawTest({
       id: `r3-${kind}`,
@@ -228,9 +231,12 @@ const r3Action = (kinds: readonly ("normal" | "abnormal" | "boundary")[] = KINDS
       operation: "action",
       observes: "when",
       input: { "f.item.amount": kind === "abnormal" ? 0 : 3 },
-      expected: { kind: "ok", value: kind === "abnormal" ? "false" : "true", code: null },
+      ...(expectation === "boolean" ? { expected: { kind: "ok", value: kind === "abnormal" ? "false" : "true", code: null } } : {}),
     }),
   );
+
+/** R3：期待が条件の真偽の操作の試験（旗 on の走りに使う。Issue #550） */
+const r3When = (kinds: readonly ("normal" | "abnormal" | "boundary")[] = KINDS, roleId = "o.closeItem") => r3Action(kinds, roleId, "boolean");
 
 /** R4：アプリ全体の計算の正常・異常・境界（`kinds` で数を変える） */
 const r4Compute = (kinds: readonly ("normal" | "abnormal" | "boundary")[] = KINDS) =>
@@ -252,8 +258,8 @@ const response = (tests: readonly Record<string, unknown>[], classifications: re
   tests,
 });
 
-/** 通る応答（R5 だけ持ち越し） */
-const passing = () => response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()]);
+/** 通る応答（R5 だけ持ち越し。`r3` で R3 の試験を選ぶ。既定は今までの数の期待） */
+const passing = (r3: readonly Record<string, unknown>[] = r3Action()) => response([...r1Validate(), ...r2Structure(), ...r3, ...r4Compute()]);
 
 /** 判定の口（偽物）の要求を記録する包み */
 function recordingJudge(inner: Judge): { readonly judge: Judge; readonly requests: JudgeRequest[] } {
@@ -529,6 +535,8 @@ const FIXED_MESSAGES: readonly string[] = [
 ];
 
 describe.each(LEDGER_CASES)("評価可能性（対象の種類・操作・observes を評価の方法の表に照らす。§2.3 の (i)。旗 $name）", ({ ledger }) => {
+  /** 旗 on の走りは期待が真偽の R3 の操作の試験、off は今までの数の期待（Issue #550） */
+  const r3For = ledger === undefined ? r3Action : r3When;
   const { run, checkEvaluability } = ledgerFunctions(ledger);
   it("表にある組の全部が通り、表に無い組（未対応の性質を含む）は全部が固定文で落ちる（全組を列挙）", () => {
     const listed = new Set(EVALUABLE_COMBINATIONS.map((entry) => `${entry.targetKind}|${entry.operation}|${entry.observes}`));
@@ -608,7 +616,7 @@ describe.each(LEDGER_CASES)("評価可能性（対象の種類・操作・observ
     const bad = response([
       ...r1Validate(),
       ...r2Structure(),
-      ...r3Action().map((test, index) => (index === 0 ? { ...test, observes: "state-after-set" } : test)),
+      ...r3For().map((test, index) => (index === 0 ? { ...test, observes: "state-after-set" } : test)),
       ...r4Compute(),
     ]);
     const { outcome, recording, gateway } = await run([bad, bad]);
@@ -630,7 +638,7 @@ describe.each(LEDGER_CASES)("評価可能性（対象の種類・操作・observ
     const bad = response([
       ...r1Validate(),
       ...r2Structure(),
-      ...r3Action().map((test) => ({ ...test, observes: "value" })),
+      ...r3For().map((test) => ({ ...test, observes: "value" })),
       ...r4Compute(),
     ]);
     const { outcome } = await run([bad, bad]);
@@ -641,7 +649,7 @@ describe.each(LEDGER_CASES)("評価可能性（対象の種類・操作・observ
   });
 
   it("知らない observes は形の落ち（共通の窓口が 1 回やり直し、2 回で malformed）", async () => {
-    const bad = response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()].map((test) => ({ ...test, observes: "other" })));
+    const bad = response([...r1Validate(), ...r2Structure(), ...r3For(), ...r4Compute()].map((test) => ({ ...test, observes: "other" })));
     const { outcome, recording } = await run([bad, bad]);
     if (outcome.ok || outcome.failure.kind !== "malformed") throw new Error("malformed でない");
     expect(recording.structured).toHaveLength(2);
@@ -649,7 +657,7 @@ describe.each(LEDGER_CASES)("評価可能性（対象の種類・操作・observ
   });
 
   it("試験 ID の重なりは形の落ち", async () => {
-    const tests = [...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()];
+    const tests = [...r1Validate(), ...r2Structure(), ...r3For(), ...r4Compute()];
     const bad = response([...tests, { ...tests[0] }]);
     const { outcome } = await run([bad, bad]);
     if (outcome.ok || outcome.failure.kind !== "malformed") throw new Error("malformed でない");
@@ -1191,6 +1199,8 @@ describe("onDropped・onRejected は v1 の ②' と同じ回数で呼ばれ、�
 // ── 既定値の要件（default-value。Issue #533）─────────────────────────────
 
 describe.each(LEDGER_CASES)("既定値の要件：表の確かめ方が default-value の要件にだけ既定値の試験を許す（Issue #533。旗 $name）", ({ ledger }) => {
+  /** 旗 on の走りは期待が真偽の R3 の操作の試験、off は今までの数の期待（Issue #550） */
+  const r3For = ledger === undefined ? r3Action : r3When;
   const { run, checkTestSpecOutput, defaultValueTargetsOf, exemptDefaultValueProblems } = ledgerFunctions(ledger);
   const ruleDefinitions = ledgerFunctions(ledger).ruleDefinitions;
   const rules = ruleTexts(ruleDefinitions);
@@ -1238,8 +1248,8 @@ describe.each(LEDGER_CASES)("既定値の要件：表の確かめ方が default-
     ...patch,
   });
   const D_NATURES: readonly NatureRow[] = [...T1_NATURES, { requirementId: "R6", nature: "ruled" }];
-  const others = (r3 = r3Action()) => [...r1Validate(), ...r2Structure(), ...r3, ...r4Compute()];
-  const dResponse = (r6: readonly Record<string, unknown>[] = [r6Default()], natures: readonly NatureRow[] = D_NATURES, r3 = r3Action()) =>
+  const others = (r3 = r3For()) => [...r1Validate(), ...r2Structure(), ...r3, ...r4Compute()];
+  const dResponse = (r6: readonly Record<string, unknown>[] = [r6Default()], natures: readonly NatureRow[] = D_NATURES, r3 = r3For()) =>
     response([...others(r3), ...r6], natures);
 
   async function runD(outputs: readonly unknown[], options: { table?: NameTable; judge?: Judge; rejected?: readonly string[] } = {}) {
@@ -1348,7 +1358,7 @@ describe.each(LEDGER_CASES)("既定値の要件：表の確かめ方が default-
   });
 
   it("(2) 負例：ほかの ruled の要件の異常・境界の不足は免除が漏れずに落ちる", async () => {
-    expect(await problemsOf(dResponse([r6Default()], D_NATURES, r3Action(["normal"])))).toEqual([
+    expect(await problemsOf(dResponse([r6Default()], D_NATURES, r3For(["normal"])))).toEqual([
       { field: "requirements[2]", message: "abnormal の試験が無い" },
       { field: "requirements[2]", message: "boundary の試験が無い" },
     ]);
@@ -1464,7 +1474,7 @@ describe.each(LEDGER_CASES)("既定値の要件：表の確かめ方が default-
 
   it("(5) 「要件ごとの確かめ方」に default-value の要件だけ value があり、ほかの項目・前置き・規則の並びが今までと同じ", async () => {
     const { recording } = await runD([dResponse()]);
-    const base = await run([passing()]);
+    const base = await run([passing(r3For())]);
     const request = recording.structured[0]!;
     const baseRequest = base.recording.structured[0]!;
     expect(dataNamesOf(request.input)).toEqual([...TEST_SPEC_DATA_NAMES]);
@@ -1488,11 +1498,13 @@ describe.each(LEDGER_CASES)("既定値の要件：表の確かめ方が default-
   it("旗 on（手 2a の台帳）と off で、同じ応答の要求（前置き・規則・データ・schema）と結果が深く等しい。#548 の台帳の on は要求の差が enum-membership の行の分だけ、今の台帳はさらに empty-aggregate の行の分だけ（1 回で通る・作り直す・判定に聞く）", async () => {
     const recorded = () => recordingJudge(createFakeJudge({ [natureQuestionName("R4")]: choice("ruled", 0.9) }));
     const natures = D_NATURES.map((entry) => (entry.requirementId === "R4" ? { ...entry, nature: "existence-only" as const } : entry));
+    // 今の台帳の on とも同じ応答で比べるので、R3 は期待が真偽の操作の試験（off の結果も同じ。Issue #550）
+    const dWhen = (r6: readonly Record<string, unknown>[] = [r6Default()], dNatures: readonly NatureRow[] = D_NATURES) => dResponse(r6, dNatures, r3When());
     const scenarios: readonly (readonly unknown[])[] = [
-      [dResponse()],
-      [dResponse([r6Default({ observes: "validation" })]), dResponse()],
-      [dResponse([r6Default()], natures)],
-      [dResponse([r6Default({ kind: "abnormal" })]), dResponse([r6Default({ kind: "abnormal" })])],
+      [dWhen()],
+      [dWhen([r6Default({ observes: "validation" })]), dWhen()],
+      [dWhen([r6Default()], natures)],
+      [dWhen([r6Default({ kind: "abnormal" })]), dWhen([r6Default({ kind: "abnormal" })])],
     ];
     for (const outputs of scenarios) {
       const runFor = async (view: LedgerView | undefined) => {
@@ -1685,7 +1697,7 @@ describe("旗 on：T2' に台帳に無い観測する性質を直接渡すと固
 
   it("形の検査：schema の enum を迂回した応答の台帳に無い性質は、on でも固定文で落ちる（知っている値は台帳の順。手 2a の台帳なら off と同じ）", () => {
     for (const observed of ["enum-membership", "no-such-property"]) {
-      const output = response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()].map((test, index) => (index === 0 ? { ...test, observes: observed } : test)));
+      const output = response([...r1Validate(), ...r2Structure(), ...r3When(), ...r4Compute()].map((test, index) => (index === 0 ? { ...test, observes: observed } : test)));
       const checked = checkTestSpecOutputOf(output, LEDGER_VIEW_2A);
       expect(checked).toEqual(checkTestSpecOutputOf(output));
       expect(checked.ok).toBe(false);
@@ -1695,7 +1707,7 @@ describe("旗 on：T2' に台帳に無い観測する性質を直接渡すと固
       ]);
     }
     // 今の台帳：enum-membership は登録済みで形を通り、台帳に無い性質は今の台帳の並びの固定文で落ちる
-    const output = response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()].map((test, index) => (index === 0 ? { ...test, observes: "no-such-property" } : test)));
+    const output = response([...r1Validate(), ...r2Structure(), ...r3When(), ...r4Compute()].map((test, index) => (index === 0 ? { ...test, observes: "no-such-property" } : test)));
     const checked = checkTestSpecOutputOf(output, PROPERTY_LEDGER_VIEW);
     expect(checked).toEqual({
       ok: false,
@@ -1709,7 +1721,7 @@ describe("旗 on：T2' に台帳に無い観測する性質を直接渡すと固
       [LEDGER_VIEW_2A, "enum-membership"],
       [PROPERTY_LEDGER_VIEW, "no-such-property"],
     ] as const) {
-      const bad = response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute()].map((test) => ({ ...test, observes: observed })));
+      const bad = response([...r1Validate(), ...r2Structure(), ...r3When(), ...r4Compute()].map((test) => ({ ...test, observes: observed })));
       const { outcome, recording } = await ledgerFunctions(view).run([bad, bad]);
       if (outcome.ok || outcome.failure.kind !== "malformed") throw new Error("malformed でない");
       expect(recording.structured).toHaveLength(2);
@@ -1764,8 +1776,8 @@ describe("旗 on：選択肢の集合の要件は、表の確かめ方が enum-m
     ...patch,
   });
   const E_NATURES: readonly NatureRow[] = [...T1_NATURES, { requirementId: "R6", nature: "ruled" }];
-  const others = (r3 = r3Action()) => [...r1Validate(), ...r2Structure(), ...r3, ...r4Compute()];
-  const eResponse = (r6: readonly Record<string, unknown>[] = [r6Enum()], natures: readonly NatureRow[] = E_NATURES, r3 = r3Action()) =>
+  const others = (r3 = r3When()) => [...r1Validate(), ...r2Structure(), ...r3, ...r4Compute()];
+  const eResponse = (r6: readonly Record<string, unknown>[] = [r6Enum()], natures: readonly NatureRow[] = E_NATURES, r3 = r3When()) =>
     response([...others(r3), ...r6], natures);
 
   async function runE(
@@ -1884,7 +1896,7 @@ describe("旗 on：選択肢の集合の要件は、表の確かめ方が enum-m
   });
 
   it("(2) 負例：ほかの ruled の要件の異常・境界の不足は免除が漏れずに落ちる", async () => {
-    expect(await problemsOf(eResponse([r6Enum()], E_NATURES, r3Action(["normal"])))).toEqual([
+    expect(await problemsOf(eResponse([r6Enum()], E_NATURES, r3When(["normal"])))).toEqual([
       { field: "requirements[2]", message: "abnormal の試験が無い" },
       { field: "requirements[2]", message: "boundary の試験が無い" },
     ]);
@@ -2045,7 +2057,7 @@ describe("旗 on：空の集計の要件の試験は、集計の種類 × デー
     aggTest({ id: `${prefix}-empty`, roleId, kind: "boundary", empty: ["e.item"], value: empty }),
     aggTest({ id: `${prefix}-unread`, roleId, kind: "abnormal", empty: [], value: unread }),
   ];
-  const aResponse = (extra: readonly Record<string, unknown>[]) => response([...r1Validate(), ...r2Structure(), ...r3Action(), ...r4Compute(), ...extra]);
+  const aResponse = (extra: readonly Record<string, unknown>[]) => response([...r1Validate(), ...r2Structure(), ...r3When(), ...r4Compute(), ...extra]);
   const runA = (outputs: readonly unknown[], options: { table?: NameTable; ledger?: LedgerView } = {}) =>
     run(outputs, { table: options.table ?? aggTable(), ledger: options.ledger ?? PROPERTY_LEDGER_VIEW });
   /** 1 回目の応答で落ちた問題（作り直しの指示。2 回目は同じ応答） */
@@ -2205,16 +2217,16 @@ describe("旗 on：操作の条件（when）の試験は、期待が ok なら�
     response([...r1Validate(), ...extra, ...r2Structure(), ...r3, ...r4Compute()]);
   /** R3 の正常の試験の期待だけを替えた応答 */
   const normalExpecting = (expected: Record<string, unknown>) =>
-    withR3(r3Action().map((test) => (test["id"] === "r3-normal" ? { ...test, expected } : test)));
+    withR3(r3When().map((test) => (test["id"] === "r3-normal" ? { ...test, expected } : test)));
   const indexOf = (output: { readonly tests: readonly Record<string, unknown>[] }, id: string) =>
     output.tests.findIndex((test) => test["id"] === id);
 
   it("(1) 正例：条件を持つ操作に期待 true の正常・期待 false の異常（か error）・true の境界を書いた応答は旗 on で 1 回で通る", async () => {
-    const errorAbnormal = r3Action().map((test) =>
+    const errorAbnormal = r3When().map((test) =>
       test["id"] === "r3-abnormal" ? { ...test, expected: { kind: "error", value: null, code: "E_CONDITION" } } : test,
     );
     for (const [r3, values] of [
-      [r3Action(), [true, false, true]],
+      [r3When(), [true, false, true]],
       [errorAbnormal, [true, "error", true]],
     ] as const) {
       const { outcome, recording } = await run([withR3(r3)], { ledger });
@@ -2224,7 +2236,7 @@ describe("旗 on：操作の条件（when）の試験は、期待が ok なら�
       expect(tests.map((test) => (test.expected.kind === "ok" ? test.expected.value : test.expected.kind))).toEqual(values);
     }
     // 門の関数は通る応答に問題を出さない
-    const { outcome } = await run([withR3(r3Action())], { ledger });
+    const { outcome } = await run([withR3(r3When())], { ledger });
     if (!outcome.ok) throw new Error("通るはず");
     expect(checkConditionTests(outcome.value.suite, outcome.value.observes, fixtureTable(), ledger)).toEqual([]);
   });
@@ -2247,6 +2259,20 @@ describe("旗 on：操作の条件（when）の試験は、期待が ok なら�
     });
   }
 
+  it("(2) 負例：今までの既定の R3（r3Action。期待は数 1）の応答は、旗 on では T2' で 3 本とも固定文で落ち（2 回で unmet）、旗 off は今までどおり 1 回で通る", async () => {
+    const output = passing(r3Action());
+    const on = await run([output, output], { ledger });
+    if (on.outcome.ok || on.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(on.outcome.failure.problems).toEqual(
+      ["r3-normal", "r3-abnormal", "r3-boundary"].map((id) => ({ field: `tests[${String(indexOf(output, id))}].expected`, message: messages.expected })),
+    );
+    const off = await run([output]);
+    if (!off.outcome.ok) throw new Error("off は通るはず");
+    expect(off.recording.structured).toHaveLength(1);
+    // 期待が真偽の R3（r3When）にすれば旗 on でも通る
+    expect((await run([passing(r3When())], { ledger })).outcome.ok).toBe(true);
+  });
+
   it("(2) 負例：条件の無い操作（hasWhen 偽）に when の試験を作ると旗 on の T2' で固定文で落ち、旗 off は今までどおり T2 を通る", async () => {
     // R1 が所属させる o.addItem は条件（when）を持たない
     const noWhen = rawTest({
@@ -2258,7 +2284,7 @@ describe("旗 on：操作の条件（when）の試験は、期待が ok なら�
       observes: "when",
       expected: { kind: "ok", value: "true", code: null },
     });
-    const output = withR3(r3Action(), [noWhen]);
+    const output = withR3(r3When(), [noWhen]);
     const on = await run([output, output], { ledger });
     if (on.outcome.ok || on.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
     expect(on.outcome.failure.problems).toEqual([{ field: `tests[${String(indexOf(output, "r1-no-when"))}].target`, message: messages.target }]);
@@ -2268,7 +2294,7 @@ describe("旗 on：操作の条件（when）の試験は、期待が ok なら�
 
   it("(2) 負例：操作に validate を当てた when の試験は今までどおり組が表に無い（旗 on・off とも。条件の門の文は出ない）", async () => {
     const validate = rawTest({ id: "r3-validate", requirementId: "R3", targetKind: "operation", roleId: "o.closeItem", operation: "validate", observes: "when" });
-    const output = withR3([...r3Action(), validate]);
+    const output = withR3([...r3When(), validate]);
     for (const withLedger of [{ ledger }, {}]) {
       const { outcome } = await run([output, output], withLedger);
       if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
@@ -2329,7 +2355,7 @@ describe("旗 on：T1'' が受理した non-requirement の要件は、T2 の要
   });
 
   it("通る応答（R6 の試験も分類も無い）は 1 回で通り、要求の一覧・確かめ方・所属に R6 が無い", async () => {
-    const { outcome, recording } = await runNon([passing()]);
+    const { outcome, recording } = await runNon([passing(r3When())]);
     if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
     const input = recording.structured[0]?.input ?? "";
     const [, listName, , verificationName, ownershipName] = TEST_SPEC_DATA_NAMES;
@@ -2344,13 +2370,13 @@ describe("旗 on：T1'' が受理した non-requirement の要件は、T2 の要
 
   it("(5) R6 の試験を書けば「一覧に無い要件 ID」で落ち、R6 の分類を書いても分類の完全性で落ちる（既存の検査）", async () => {
     const withTest = response([
-      ...passing().tests,
+      ...passing(r3When()).tests,
       rawTest({ id: "r6-x", requirementId: "R6", targetKind: "entity", roleId: "e.item", operation: "screen", observes: "existence" }),
     ]);
     const tested = await runNon([withTest, withTest]);
     if (tested.outcome.ok || tested.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
     expect(tested.outcome.failure.problems.map((problem) => problem.message)).toContain("一覧に無い要件 ID である");
-    const classified = response(passing().tests, [...T1_NATURES, { requirementId: "R6", nature: "existence-only" }]);
+    const classified = response(passing(r3When()).tests, [...T1_NATURES, { requirementId: "R6", nature: "existence-only" }]);
     const extra = await runNon([classified, classified]);
     if (extra.outcome.ok || extra.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
     expect(extra.outcome.failure.problems.map((problem) => problem.message)).toEqual(["要件の一覧に無い要件 ID の分類である"]);
