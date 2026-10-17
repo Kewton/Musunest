@@ -599,17 +599,23 @@ function bypassWorld(kind) {
   if (kind === "create-require") {
     writeFileSync(join(w.dir, "helper.cjs"), `globalThis.process.getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(ran)}, "x");\nmodule.exports = 1;\n`);
     writeFileSync(wrap, `import { createRequire } from "node:module";\nconst load = createRequire(import.meta.url);\nload("./helper.cjs");\nexport * from ${factoryUrl};\n`);
+  } else if (kind === "create-require-comment") {
+    // 注釈を挟む createRequire の呼び出し（import の名前ではなく組み込みから取る）
+    writeFileSync(join(w.dir, "helper.cjs"), `globalThis.process.getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(ran)}, "x");\nmodule.exports = 1;\n`);
+    writeFileSync(wrap, `const load = globalThis.process.getBuiltinModule("node:module").createRequire /* ordinary comment */ (import.meta.url);\nload("./helper.cjs");\nexport * from ${factoryUrl};\n`);
   } else {
     const text = join(w.dir, "helper.txt");
     writeFileSync(text, `globalThis.process.getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(ran)}, "x");\n`);
-    writeFileSync(wrap, `import { readFileSync } from "node:fs";\nnew Function(readFileSync(${JSON.stringify(text)}, "utf8"))();\nexport * from ${factoryUrl};\n`);
+    const call = { "read-and-function": "new Function(", "function-comment": "Function /* ordinary comment */ (", "new-function-comment": "new Function /* ordinary comment */ (" }[kind];
+    writeFileSync(wrap, `import { readFileSync } from "node:fs";\n${call}readFileSync(${JSON.stringify(text)}, "utf8"))();\nexport * from ${factoryUrl};\n`);
   }
   const inv = structuredClone(w.inventory);
   inv.version.factory_dist = { entry: wrap, files: [...factoryFiles, fileRef(wrap)] };
   return { w, inv, ran };
 }
 
-for (const kind of ["create-require", "read-and-function"]) {
+// create-require・read-and-function は 3 回目の再現、注釈を挟む 3 つは 4 回目の再現
+for (const kind of ["create-require", "read-and-function", "function-comment", "new-function-comment", "create-require-comment"]) {
   test(`目録のコードの走査（#571 の 3 回目の再現 ${kind}）：hook を通らない口で目録に無いファイルを読み・実行する入口は、exit 3・固定文・標準出力空・JSON なし・helper の実行なし`, () => {
     const { w, inv, ran } = bypassWorld(kind);
     try {
@@ -637,6 +643,51 @@ test("目録のコードの走査：禁じた 6 つの口を見つけ、今の�
     const r = runCli(w, w.inventory);
     assert.equal(r.status, 0, r.stderr);
     assert.ok(r.written && r.written.totals.eligible > 0);
+  } finally { w.cleanup(); }
+});
+
+test("字句の分け：注釈を挟む呼び出しは口に数え、注釈・文字列・テンプレート・正規表現リテラルの中の語は数えない", () => {
+  assert.deepEqual(forbiddenApisIn("Function /* c */ (x)()"), ["Function"]);
+  assert.deepEqual(forbiddenApisIn("new Function /* c */ (x)"), ["Function"]);
+  assert.deepEqual(forbiddenApisIn("new Function\n// c\n(x)"), ["Function"]);
+  assert.deepEqual(forbiddenApisIn("const r = createRequire /* c */ (import.meta.url);"), ["createRequire"]);
+  assert.deepEqual(forbiddenApisIn("require /* c */ (\"x\")"), ["require"]);
+  assert.deepEqual(forbiddenApisIn("const v = eval /* c */ (\"1\")"), ["eval"]);
+  assert.deepEqual(forbiddenApisIn("import vm from /* c */ 'node:vm';"), ["node:vm"]);
+  assert.deepEqual(forbiddenApisIn("const m = await import(`node:module`);"), ["node:module"]);
+  assert.deepEqual(forbiddenApisIn("const t = `a${`b${eval}`}c`;"), ["eval"], "テンプレートの中の式はコードとして読む");
+  // 無害な記述（口の語は注釈・文字列・テンプレート・正規表現リテラルの中だけ）
+  for (const harmless of [
+    "// An example: require(\"x\") and createRequire(import.meta.url)",
+    "/* new Function(\"x\") eval(\"1\") import vm from \"node:vm\" */",
+    "export const description = \"Function(\";",
+    "export const note = 'eval( require( createRequire node:module';",
+    "export const names = [\"node:vm\", \"node:module\", \"module\"];",
+    "export const doc = `call Function( or eval( here`;",
+    "export const re = /require\\(|Function\\(/g; export const half = 1 / 2 / 3;",
+    "export const obj = { type: \"module\" };",
+  ]) assert.deepEqual(forbiddenApisIn(harmless), [], harmless);
+});
+
+test("字句の分けの正例：注釈や文字列の中に 6 つの語がある無害なファイルを目録に載せて読んでも断られない（exit 0）", () => {
+  const w = world({ candidates: ["a"] });
+  try {
+    const harmless = join(w.dir, "harmless.mjs"), wrap = join(w.dir, "wrap-harmless.mjs");
+    writeFileSync(harmless, [
+      "// An example: require(\"x\"), createRequire(import.meta.url), eval(\"1\"), new Function(\"x\")",
+      "/* import vm from \"node:vm\"; import { createRequire } from \"node:module\"; */",
+      "export const description = \"Function( eval( require( createRequire\";",
+      "export const names = [\"node:vm\", \"node:module\"];",
+      "export const doc = `Function( and eval( in a template`;",
+      "",
+    ].join("\n"));
+    writeFileSync(wrap, `import "./harmless.mjs";\nexport * from ${JSON.stringify(pathToFileURL(factoryEntry).href)};\n`);
+    const inv = structuredClone(w.inventory);
+    inv.version.factory_dist = { entry: wrap, files: [...factoryFiles, fileRef(wrap), fileRef(harmless)] };
+    const r = runCli(w, inv);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.written && r.written.totals.eligible > 0);
+    assert.ok(r.loads.includes(realpathSync(harmless)), "無害なファイルが読まれた");
   } finally { w.cleanup(); }
 });
 
