@@ -72,8 +72,9 @@ export const TEST_SPEC_ROUNDS = 2;
 // ── 観測する性質と評価の方法の表（02 §1.3・07 §2.3）──────────────────────
 
 /**
- * 試験が観測する性質。`state-after-set`（操作に set を当てたあとの状態）と `default-value`（項目の既定値）は
- * 評価の方法の表で**未対応**であり、作れば落ちる（v1 は作ってから ⑤b で未解決にしていた）。
+ * 試験が観測する性質。`state-after-set`（操作に set を当てたあとの状態）は評価の方法の表で**未対応**であり、作れば
+ * 落ちる（v1 は作ってから ⑤b で未解決にしていた）。`default-value`（項目の既定値）は、**表の確かめ方が
+ * `default-value` の要件の、その選択肢の項目**にだけ作れる（ほかは落ちる。B4 が宣言の `default` と照合する。Issue #533）。
  */
 export const TEST_OBSERVES = [
   "when",
@@ -87,7 +88,7 @@ export const TEST_OBSERVES = [
 export type TestObserves = (typeof TEST_OBSERVES)[number];
 
 /** 評価の方法の表で未対応の性質 */
-export const UNSUPPORTED_OBSERVES: readonly TestObserves[] = ["state-after-set", "default-value"];
+export const UNSUPPORTED_OBSERVES: readonly TestObserves[] = ["state-after-set"];
 
 const isTestObserves = (value: unknown): value is TestObserves =>
   typeof value === "string" && (TEST_OBSERVES as readonly string[]).includes(value);
@@ -109,6 +110,8 @@ export const EVALUABLE_COMBINATIONS: readonly EvaluableCombination[] = [
   { targetKind: "screen", operation: "screen", observes: "view-structure" },
   { targetKind: "field", operation: "screen", observes: "view-structure" },
   { targetKind: "entity", operation: "screen", observes: "existence" },
+  // 項目の既定値（表の確かめ方が default-value の要件の、その選択肢の項目だけ。`checkEvaluability`。Issue #533）
+  { targetKind: "field", operation: "validate", observes: "default-value" },
 ];
 
 /**
@@ -124,12 +127,50 @@ export const STRUCTURE_OBSERVES: Readonly<Record<StructuralAssertionKind, TestOb
   "write-anonymous": "existence",
 };
 
+/** 既定値で確かめる要件の確かめ方（表から引いた、対象の選択肢の項目の `id` と期待するキー。Issue #533） */
+export interface DefaultValueTarget {
+  readonly fieldId: string;
+  readonly value: string;
+}
+
+/**
+ * 表の確かめ方が `default-value` の要件 → その選択肢の項目の `id` と期待するキー（Issue #533）。項目は所属の中の
+ * 選択肢（enum）の項目の行（T1' がちょうど 1 つと確かめ済み）。1 つに決まらない要件は載せない（その要件の既定値の
+ * 試験は評価可能性で落ちる。fail-closed）。持ち越しを除いた表を渡せば、持ち越しの要件は載らない。
+ */
+export function defaultValueTargetsOf(table: NameTable): ReadonlyMap<string, DefaultValueTarget> {
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const rolesById = new Map(table.ownership.map((entry) => [entry.requirementId, entry.roles] as const));
+  const targets = new Map<string, DefaultValueTarget>();
+  for (const entry of table.verification) {
+    if (entry.kind !== "default-value") continue;
+    const fields = (rolesById.get(entry.requirementId) ?? []).filter((role) => {
+      const row = rowById.get(role.id);
+      return row !== undefined && row.kind === "field" && row.type === "enum";
+    });
+    const [only] = fields;
+    if (fields.length === 1 && only !== undefined) targets.set(entry.requirementId, { fieldId: only.id, value: entry.value });
+  }
+  return targets;
+}
+
+/** 既定値の試験を、確かめ方が default-value でない要件・その項目でない対象に作ったときの固定文 */
+export const DEFAULT_VALUE_NOT_ALLOWED_MESSAGE =
+  "項目の既定値（default-value）の試験は、確かめ方が default-value の要件の、その選択肢の項目だけを対象にできる";
+
 /**
  * 評価可能性：試験ごとの（対象の種類・操作・観測する性質）の組を、評価の方法の表に照らす（§2.3 の (i)）。
  * 未対応の性質・表に無い組・構造の検査の中身に合わない性質・性質の引けない試験を、固定文で落とす。
+ * `default-value` の試験は、表（`table`。持ち越しを除いた表）の確かめ方が `default-value` の要件の、その選択肢の
+ * 項目を対象にするときだけ表の組に照らす。ほかは固定文で落とす（表を渡さなければ全部落ちる。Issue #533）。
  */
-export function checkEvaluability(suite: TestSuite, observes: ReadonlyMap<string, TestObserves>): readonly Problem[] {
+export function checkEvaluability(
+  suite: TestSuite,
+  observes: ReadonlyMap<string, TestObserves>,
+  table?: NameTable,
+): readonly Problem[] {
   const problems: Problem[] = [];
+  const defaults = table === undefined ? new Map<string, DefaultValueTarget>() : defaultValueTargetsOf(table);
   suite.tests.forEach((test, index) => {
     const field = `tests[${index}].observes`;
     const observed = observes.get(test.id);
@@ -140,8 +181,12 @@ export function checkEvaluability(suite: TestSuite, observes: ReadonlyMap<string
     if (UNSUPPORTED_OBSERVES.includes(observed)) {
       problems.push({
         field,
-        message: "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態・項目の既定値の試験は作らない）",
+        message: "観測する性質が評価の方法の表で未対応である（操作に set を当てたあとの状態の試験は作らない）",
       });
+      return;
+    }
+    if (observed === "default-value" && defaults.get(test.target.requirementId)?.fieldId !== test.target.roleId) {
+      problems.push({ field, message: DEFAULT_VALUE_NOT_ALLOWED_MESSAGE });
       return;
     }
     if (test.operation === "structure") {
@@ -162,6 +207,99 @@ export function checkEvaluability(suite: TestSuite, observes: ReadonlyMap<string
   return problems;
 }
 
+/** 既定値の要件の試験の形の固定文（値を埋めない。Issue #533） */
+export const DEFAULT_VALUE_TEST_MESSAGES = {
+  kind: "既定値で確かめる要件の試験は、正常（normal）だけであること",
+  operation: "既定値で確かめる要件の試験の操作は、検査（validate）であること",
+  target: "既定値で確かめる要件の試験の対象は、確かめ方の選択肢の項目（field）であること",
+  observes: "既定値で確かめる要件の試験の観測する性質は、default-value であること",
+  expected: "既定値で確かめる要件の試験の期待は、確かめ方のキーを JSON の文字列で書いた ok であること",
+  input: "既定値で確かめる要件の試験の入力は、空の写像であること",
+  referenceData: "既定値で確かめる要件の試験の参照データは、空の並びであること",
+} as const;
+
+const isEmptyRecord = (value: unknown): boolean => isRecord(value) && Object.keys(value).length === 0;
+
+/**
+ * 応答（raw）で、期待の値が **JSON の文字列**（引用符つきで読み直すと文字列になる JSON の文字列）の試験 ID。v1 の形の
+ * 検査は JSON として読めない値をそのままの文字列で残すので、decode 済みの値だけでは「引用符の無い値」を見分けられない。
+ * 既定値の要件の試験の検査は、ここに無い試験を期待の不備として落とす（Issue #533）
+ */
+export function jsonStringExpectedIds(output: unknown): ReadonlySet<string> {
+  const ids = new Set<string>();
+  if (!isRecord(output) || !Array.isArray(output["tests"])) return ids;
+  for (const raw of output["tests"] as readonly unknown[]) {
+    if (!isRecord(raw) || typeof raw["id"] !== "string") continue;
+    const expected = raw["expected"];
+    if (!isRecord(expected) || typeof expected["value"] !== "string") continue;
+    try {
+      if (typeof JSON.parse(expected["value"]) === "string") ids.add(raw["id"]);
+    } catch {
+      // JSON として読めない値（引用符の無い値）は JSON の文字列でない
+    }
+  }
+  return ids;
+}
+
+/**
+ * 既定値の要件の試験の検査（Issue #533）。確かめ方が default-value の要件（`defaults`。持ち越しを除いた表から引く）の
+ * **全試験**が、kind normal・operation validate・対象が確かめ方の項目・observes default-value・期待が ok で decode 済みの
+ * 文字列が確かめ方の value と等しい・入力が空の写像・参照データが空の並び、でなければ固定文で落とす（位置は試験の
+ * 添字と欄名）。期待の値は応答で JSON の文字列であること（`quoted`。`jsonStringExpectedIds` の値）。試験が無いことは
+ * v1 の `checkSuitePlan` の「要件の試験が無い」が落とす（ここでは見ない）。
+ */
+export function checkDefaultValueTests(
+  suite: TestSuite,
+  observes: ReadonlyMap<string, TestObserves>,
+  defaults: ReadonlyMap<string, DefaultValueTarget>,
+  quoted: ReadonlySet<string>,
+): readonly Problem[] {
+  const problems: Problem[] = [];
+  suite.tests.forEach((test, index) => {
+    const target = defaults.get(test.target.requirementId);
+    if (target === undefined) return;
+    const at = `tests[${index}]`;
+    if (test.kind !== "normal") problems.push({ field: `${at}.kind`, message: DEFAULT_VALUE_TEST_MESSAGES.kind });
+    if (test.operation !== "validate") problems.push({ field: `${at}.operation`, message: DEFAULT_VALUE_TEST_MESSAGES.operation });
+    if (test.target.kind !== "field" || test.target.roleId !== target.fieldId) {
+      problems.push({ field: `${at}.target`, message: DEFAULT_VALUE_TEST_MESSAGES.target });
+    }
+    if (observes.get(test.id) !== "default-value") problems.push({ field: `${at}.observes`, message: DEFAULT_VALUE_TEST_MESSAGES.observes });
+    const expected = test.expected;
+    if (expected.kind !== "ok" || typeof expected.value !== "string" || expected.value !== target.value || !quoted.has(test.id)) {
+      problems.push({ field: `${at}.expected`, message: DEFAULT_VALUE_TEST_MESSAGES.expected });
+    }
+    if (!isEmptyRecord(test.input)) problems.push({ field: `${at}.input`, message: DEFAULT_VALUE_TEST_MESSAGES.input });
+    if (test.referenceData.length !== 0) {
+      problems.push({ field: `${at}.referenceData`, message: DEFAULT_VALUE_TEST_MESSAGES.referenceData });
+    }
+  });
+  return problems;
+}
+
+/** v1 の `checkSuitePlan` の、正常・異常・境界のそろいの不足の固定文のうち、既定値の要件で外す 2 つ（Issue #533） */
+export const DEFAULT_VALUE_EXEMPT_MESSAGES: readonly string[] = ["abnormal の試験が無い", "boundary の試験が無い"];
+
+/**
+ * v1 の `checkSuitePlan` が返した問題から、既定値の要件の異常・境界の不足だけを外す（Issue #533）。外すのは、
+ * **残る一覧の要件 ID → その要件の確かめ方（持ち越しを除いた表）が default-value → `field` がその要件の添字の位置
+ * （`requirements[添字]`）と正確に一致し、`message` が 2 つの固定文のどちらかと完全一致**、の 3 条件をすべて満たす
+ * 問題だけ。部分一致・別の位置・別の文は外さない。免除は表の確かめ方で決め、生成した試験の有無・数では決めない。
+ */
+export function exemptDefaultValueProblems(
+  problems: readonly Problem[],
+  list: RequirementList,
+  defaults: ReadonlyMap<string, DefaultValueTarget>,
+): readonly Problem[] {
+  const exemptFields = new Set(
+    list.requirements.flatMap((requirement, index) => (defaults.has(requirement.id) ? [`requirements[${index}]`] : [])),
+  );
+  if (exemptFields.size === 0) return problems;
+  return problems.filter(
+    (problem) => !(exemptFields.has(problem.field) && DEFAULT_VALUE_EXEMPT_MESSAGES.includes(problem.message)),
+  );
+}
+
 // ── 規則（R-tsp-nn。②' の定義を元にする。v1 の TEST_SUITE_RULE_DEFINITIONS は変えない）──────
 
 /**
@@ -178,9 +316,9 @@ export const TEST_SPEC_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
   {
     id: "R-tsp-02",
-    text: "確かめ方が structural の要件を除いて、決まりを含む要件は、決まりの対象ごとに、正常・異常・境界の 3 種類の試験を、入力と期待つきで作る。",
-    why: "決まりを含む要件に正常・異常・境界の試験を作らせる（R-suite-02 を元にする）",
-    since: "Issue #508",
+    text: "確かめ方が structural・default-value の要件を除いて、決まりを含む要件は、決まりの対象ごとに、正常・異常・境界の 3 種類の試験を、入力と期待つきで作る。",
+    why: "決まりを含む要件に正常・異常・境界の試験を作らせる（R-suite-02 を元にする）。既定値だけを決める要件は R-tsp-16 の形だけで確かめる（Issue #533）",
+    since: "Issue #508（default-value の除外は #533 で足した）",
   },
   {
     id: "R-tsp-03",
@@ -262,9 +400,9 @@ export const TEST_SPEC_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
   {
     id: "R-tsp-16",
-    text: "試験ごとに、観測する性質（observes）を 1 つ書く。組は次のどれかに限る：計算 × compute・aggregate は value、項目・entity × validate は validation、操作 × action は when、画面 × screen は view-structure、項目 × screen は view-structure、entity × screen は existence、構造の検査（structure）は view-shows なら view-structure・ほかの中身なら existence。操作に set を当てたあとの状態（state-after-set）と項目の既定値（default-value）は評価できないので、その試験は作らない。",
-    why: "試験が観測する性質を評価の方法の表に照らせるようにし、評価できない試験を作らせない（07 §2.3・02 §1.3）",
-    since: "Issue #508",
+    text: "試験ごとに、観測する性質（observes）を 1 つ書く。組は次のどれかに限る：計算 × compute・aggregate は value、項目・entity × validate は validation、操作 × action は when、画面 × screen は view-structure、項目 × screen は view-structure、entity × screen は existence、構造の検査（structure）は view-shows なら view-structure・ほかの中身なら existence。項目の既定値（default-value）の試験は、確かめ方が default-value の要件にだけ、次の形で 1 本以上作る：対象（target）はその要件の所属の選択肢の項目（target.kind は field）、kind は normal、operation は validate、observes は default-value、入力（input）は空の写像（\"{}\"）、参照データ（referenceData）は空の並び、期待（expected）は kind を ok・value を確かめ方の value のキーの JSON の文字列（例: キーが k1 なら \"\\\"k1\\\"\"）・code を null。その要件には異常・境界の試験を作らない。ほかの要件に default-value を書かない。操作に set を当てたあとの状態（state-after-set）は評価できないので、その試験は作らない。",
+    why: "試験が観測する性質を評価の方法の表に照らせるようにし、評価できない試験を作らせない（07 §2.3・02 §1.3）。既定値の試験は、表で確定した確かめ方の要件にだけ、宣言の default と照合できる形で作らせる（方法論 03 §1 の H2。Issue #533）",
+    since: "Issue #508（default-value の試験の形は #533 で足した）",
   },
 ];
 
@@ -356,6 +494,18 @@ export const TEST_SPEC_DATA_NAMES = ["確定した仕様", "要件の一覧", "�
 /** やり直しで足すデータの塊の名前（#439 と同じ作法） */
 export const TEST_SPEC_RETRY_DATA_NAMES = ["前回の試験", "前回の作り直しの指示"] as const;
 
+/**
+ * やり直しで「前回の作り直しの指示」の後ろに足す、判定（J2）で決めた種類の塊の名前（方法論 03 §1 の H3。Issue #526）。
+ * 決定が `judged` の要件だけを載せる（`fallback` は載せない）。決めた要件が無ければ足さない
+ */
+export const TEST_SPEC_DECIDED_NATURES_DATA_NAME = "判定で決めた種類";
+
+/** 判定で決めた種類の塊の 1 行（要件 ID・種類） */
+interface DecidedNatureRow {
+  readonly requirementId: string;
+  readonly nature: RequirementNature;
+}
+
 /** 表の行のうち T2 に見せる欄（**`name` は見せない**。§2.3） */
 function visibleRows(table: NameTable): readonly unknown[] {
   return table.rows.map((row) => ({
@@ -386,7 +536,7 @@ function visiblePlan(plan: ConfirmedPlan): unknown {
  * T2 のデータ。確定した仕様（要件ごとの種類を除く）・要件の一覧（持ち越しを除く）・表（名前を除く）・確かめ方・所属（持ち越しの要件と、
  * その要件だけの行を除く。導いた entity の所属を含む）の順。**要件ごとの種類（T1 の分類）は入れない**。
  * やり直しでは、前回に実際に検査した試験（外して種類を書き込んだ後の組の試験に、その観測する性質を添えたもの）と
- * 前回の作り直しの指示を末尾に足す（前置きは変えない。#439）。
+ * 前回の作り直しの指示を末尾に足し、判定（J2）で決めた種類があればその後ろに足す（前置きは変えない。#439・#526）。
  */
 function buildData(
   plan: ConfirmedPlan,
@@ -394,6 +544,7 @@ function buildData(
   table: NameTable,
   previous: readonly Problem[],
   previousTests: readonly unknown[] | undefined,
+  decidedNatures: readonly DecidedNatureRow[],
 ): readonly PromptData[] {
   const [planName, listName, tableName, verificationName, ownershipName] = TEST_SPEC_DATA_NAMES;
   const data: PromptData[] = [
@@ -407,6 +558,8 @@ function buildData(
           requirementId: entry.requirementId,
           verificationKind: entry.kind,
           checks: entry.kind === "structural" ? entry.checks : [],
+          // 既定値の要件にだけ、期待するキーを添える（ほかの項目は今までどおり。Issue #533）
+          ...(entry.kind === "default-value" ? { value: entry.value } : {}),
         })),
       ),
     },
@@ -416,6 +569,9 @@ function buildData(
     const [testsName, problemsName] = TEST_SPEC_RETRY_DATA_NAMES;
     if (previousTests !== undefined) data.push({ name: testsName, text: serializeJson(previousTests) });
     data.push({ name: problemsName, text: serializeJson(previous) });
+    if (decidedNatures.length > 0) {
+      data.push({ name: TEST_SPEC_DECIDED_NATURES_DATA_NAME, text: serializeJson(decidedNatures) });
+    }
   }
   return data;
 }
@@ -556,6 +712,18 @@ function adoptNatures(
   return { natures, discrepancies };
 }
 
+/**
+ * 判定（J2）で決めた要件だけの採った種類（決めた順）。判定の失敗・確率不足で `ruled` へ倒した `fallback` は含めない
+ * （Issue #526。決定は 1 回の生成で 1 度だけなので、渡しても分類の独立性は変わらない）
+ */
+function judgedNatures(decided: ReadonlyMap<string, DecidedNature>): readonly DecidedNatureRow[] {
+  const rows: DecidedNatureRow[] = [];
+  for (const [requirementId, { decision }] of decided) {
+    if (decision.kind === "judged") rows.push({ requirementId, nature: decision.nature });
+  }
+  return rows;
+}
+
 /** 組の試験だけに絞った、試験 ID → 観測する性質 */
 function observesOf(tests: readonly FixedTest[], observes: ReadonlyMap<string, TestObserves>): ReadonlyMap<string, TestObserves> {
   const out = new Map<string, TestObserves>();
@@ -592,6 +760,9 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
     }
   }
 
+  // 既定値で確かめる要件（持ち越しを除いた表の確かめ方から引く。免除・評価可能性・試験の形の検査に使う。Issue #533）
+  const defaults = defaultValueTargetsOf(pruned.table);
+
   let previous: readonly Problem[] = [];
   let previousTests: readonly unknown[] | undefined;
   const decided = new Map<string, DecidedNature>();
@@ -601,7 +772,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
     const request = buildStructuredRequest({
       rules: TEST_SPEC_RULES,
       documents: input.documents,
-      data: buildData(input.plan, list, pruned.table, previous, previousTests),
+      data: buildData(input.plan, list, pruned.table, previous, previousTests, judgedNatures(decided)),
       schemaName: TEST_SPEC_SCHEMA_NAME,
       schema: TEST_SPEC_SCHEMA,
       maxOutputTokens: input.gateway.maxOutputTokens("test-spec"),
@@ -640,10 +811,12 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
         (entry) => !decided.has(entry.requirementId),
       );
       if (fresh.length > 0) {
+        // 既定値で確かめる要件は判定に聞かず、既存の fallback（ruled）で採る（表の分類は T1' が ruled と確かめ済み。Issue #533）
+        const asked = fresh.filter((entry) => !defaults.has(entry.requirementId)).map((entry) => entry.requirementId);
         const verdicts =
-          input.judge === undefined
+          input.judge === undefined || asked.length === 0
             ? new Map<string, NatureDecision>()
-            : await decideDiscrepantNatures({ judge: input.judge, list, requirementIds: fresh.map((entry) => entry.requirementId) });
+            : await decideDiscrepantNatures({ judge: input.judge, list, requirementIds: asked });
         for (const entry of fresh) {
           decided.set(entry.requirementId, { classified: entry.classified, decision: verdicts.get(entry.requirementId) ?? { kind: "fallback" } });
         }
@@ -655,7 +828,12 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
       observes = observesOf(suite.tests, answer.value.observes);
 
       // v1 の検査（新契約）＋評価可能性。持ち越しの要件の試験は、除いた一覧で「一覧に無い要件 ID」として落ちる
-      problems = [...checkSuitePlan(list, suite, design, reconciled.natures), ...checkEvaluability(suite, observes)];
+      // v1 の検査は組全体と残る一覧で 1 回だけ呼び、既定値の要件の異常・境界の不足の 2 文だけを外す（Issue #533）
+      problems = [
+        ...exemptDefaultValueProblems(checkSuitePlan(list, suite, design, reconciled.natures), list, defaults),
+        ...checkEvaluability(suite, observes, pruned.table),
+        ...checkDefaultValueTests(suite, observes, defaults, jsonStringExpectedIds(answer.output)),
+      ];
       if (problems.length === 0) {
         const coverage = coverageUnitsOf({ suite, observes, natures: reconciled.natures });
         return {

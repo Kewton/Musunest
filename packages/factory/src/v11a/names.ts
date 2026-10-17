@@ -150,9 +150,14 @@ export interface NameTableOwnership {
   readonly roles: readonly NameTableRoleOwnership[];
 }
 
+/** 確かめ方の種類（`default-value` は選択肢の項目の既定値だけを決める要件。Issue #533） */
+export const NAME_TABLE_VERIFICATION_KINDS = ["fixed-test", "structural", "unresolved", "default-value"] as const;
+
 /**
- * 要件ごとの確かめ方（fixed-test／structural＋checks／unresolved＋reason＋constraintIds）。
+ * 要件ごとの確かめ方（fixed-test／structural＋checks／unresolved＋reason＋constraintIds／default-value＋value）。
  * structural の `reason` は v1 の `RequirementVerification` と同じ（fixed-test 以外は理由が要る）。
+ * default-value の `value` は、所属させた選択肢の項目の既定値として期待するキー（その項目の `options` のどれか。
+ * T1' が確かめ、T1'' が要件の文の値と合うかを点検する。v1 の型へは `fixed-test` として写す。Issue #533）。
  */
 export type NameTableVerification =
   | { readonly requirementId: string; readonly kind: "fixed-test" }
@@ -167,7 +172,8 @@ export type NameTableVerification =
       readonly kind: "unresolved";
       readonly reason: string;
       readonly constraintIds: readonly string[];
-    };
+    }
+  | { readonly requirementId: string; readonly kind: "default-value"; readonly value: string };
 
 /** 要件ごとの分類（T1 が要件の文から分類する。Plan の `kind` から導かない。T2 の分類と照らす元。§1.1） */
 export interface NameTableClassification {
@@ -431,6 +437,19 @@ function shapeOfVerification(value: unknown, field: string, problems: Problem[])
     return undefined;
   }
   const kind = value["kind"];
+  if (kind === "default-value") {
+    const key = value["value"];
+    if (!isNonEmptyString(key)) {
+      problems.push({ field: `${field}.value`, message: "既定値で確かめる要件の value は空でない文字列（期待する既定値のキー）であること" });
+      return undefined;
+    }
+    return { kind, value: key };
+  }
+  // default-value でない確かめ方は value を持たない（無いか null。黙って捨てない。Issue #533）
+  if (isOneOf(NAME_TABLE_VERIFICATION_KINDS, kind) && value["value"] !== undefined && value["value"] !== null) {
+    problems.push({ field: `${field}.value`, message: "既定値で確かめる要件でない確かめ方の value は null であること" });
+    return undefined;
+  }
   if (kind === "fixed-test") return { kind };
   if (kind === "structural") {
     const before = problems.length;
@@ -456,7 +475,7 @@ function shapeOfVerification(value: unknown, field: string, problems: Problem[])
     if (problems.length !== before) return undefined;
     return { kind, reason: value["reason"] as string, constraintIds: ids as readonly string[] };
   }
-  problems.push({ field: `${field}.kind`, message: "確かめ方の種類は fixed-test・structural・unresolved のいずれかであること" });
+  problems.push({ field: `${field}.kind`, message: `確かめ方の種類は ${NAME_TABLE_VERIFICATION_KINDS.join("・")} のいずれかであること` });
   return undefined;
 }
 
@@ -486,31 +505,54 @@ function shapeOfDraftRequirement(value: unknown, field: string, problems: Proble
   return { copy: value["copy"] as string, roles, verification, nature: nature as RequirementNature };
 }
 
-/** (a) T1 の応答（下書き）の形を確かめる。合わない欄を**すべて**挙げる */
-export function checkNameTableDraftShape(value: unknown): ShapeCheck<NameTableDraft> {
+/**
+ * 下書きの形を、**元の添字のまま**走査する（形で落ちた行・要件は `undefined`）。`rows`・`requirements` が
+ * 並びとして使えない（後段に渡す元が無い）ときは `null`。
+ */
+interface DraftShapeScan {
+  readonly problems: readonly Problem[];
+  readonly rows: readonly (NameTableDraftRow | undefined)[] | null;
+  readonly requirements: readonly (NameTableDraftRequirement | undefined)[] | null;
+  readonly rawRows: readonly unknown[];
+  readonly rawRequirements: readonly unknown[];
+}
+
+function scanNameTableDraftShape(value: unknown): DraftShapeScan | { readonly problems: readonly Problem[] } {
   const problems: Problem[] = [];
-  if (!isRecord(value)) return { ok: false, problems: [{ field: "", message: "名前の表は写像（object）であること" }] };
-  const rows: NameTableDraftRow[] = [];
+  if (!isRecord(value)) return { problems: [{ field: "", message: "名前の表は写像（object）であること" }] };
+  let rows: (NameTableDraftRow | undefined)[] | null = null;
   const rowsRaw = value["rows"];
   if (!Array.isArray(rowsRaw) || rowsRaw.length === 0) {
     problems.push({ field: "rows", message: "行は空でない並びであること" });
   } else {
-    rowsRaw.forEach((item, index) => {
-      const row = shapeOfRow(item, `rows[${index}]`, problems);
-      if (row !== undefined) rows.push(row);
-    });
+    rows = rowsRaw.map((item, index) => shapeOfRow(item, `rows[${index}]`, problems));
   }
-  const requirements: NameTableDraftRequirement[] = [];
+  let requirements: (NameTableDraftRequirement | undefined)[] | null = null;
   const requirementsRaw = value["requirements"];
   if (!Array.isArray(requirementsRaw)) {
     problems.push({ field: "requirements", message: "要件ごとの並びは並び（array）であること" });
   } else {
-    requirementsRaw.forEach((item, index) => {
-      const requirement = shapeOfDraftRequirement(item, `requirements[${index}]`, problems);
-      if (requirement !== undefined) requirements.push(requirement);
-    });
+    requirements = requirementsRaw.map((item, index) => shapeOfDraftRequirement(item, `requirements[${index}]`, problems));
   }
-  return problems.length > 0 ? { ok: false, problems } : { ok: true, value: { rows, requirements } };
+  return {
+    problems,
+    rows,
+    requirements,
+    rawRows: Array.isArray(rowsRaw) ? rowsRaw : [],
+    rawRequirements: Array.isArray(requirementsRaw) ? requirementsRaw : [],
+  };
+}
+
+/** (a) T1 の応答（下書き）の形を確かめる。合わない欄を**すべて**挙げる */
+export function checkNameTableDraftShape(value: unknown): ShapeCheck<NameTableDraft> {
+  const scan = scanNameTableDraftShape(value);
+  if (scan.problems.length > 0) return { ok: false, problems: scan.problems };
+  const full = scan as DraftShapeScan;
+  const rows = (full.rows ?? []).filter((row): row is NameTableDraftRow => row !== undefined);
+  const requirements = (full.requirements ?? []).filter(
+    (requirement): requirement is NameTableDraftRequirement => requirement !== undefined,
+  );
+  return { ok: true, value: { rows, requirements } };
 }
 
 // ── (f) 要件 ID を付ける（D10）────────────────────────────────────────
@@ -666,6 +708,28 @@ function checkRowType(row: NameTableRow, field: string, problems: Problem[]): vo
   }
 }
 
+/**
+ * 形で落ちた行から、元の候補で個別に読めた欄（診断用だけ。採用表・返す表には流さない）。
+ * `undefined` は読めなかったこと（`entity` の `null` は「所属 entity 無し」と読めたこと）。
+ */
+interface DroppedRowInfo {
+  readonly kind: NameTableKind | undefined;
+  readonly entity: string | null | undefined;
+}
+
+/**
+ * view-shows の検査が求める所属：画面 S と、S と同じ entity（dashboard は entity 無し）の項目か計算 R の両方。
+ * 形で落ちた行の `entity` が読めなかったとき（`undefined`）は、どの entity とも組めるものとして数える
+ * （満たす可能性が残るので不足にしない）。
+ */
+function hasViewShowsPair(owned: readonly Pick<DroppedRowInfo, "kind" | "entity">[]): boolean {
+  const screens = owned.filter((row) => row.kind === "screen");
+  const sources = owned.filter((row) => row.kind === "field" || row.kind === "computation");
+  return screens.some((screen) =>
+    sources.some((source) => source.entity === undefined || screen.entity === undefined || source.entity === screen.entity),
+  );
+}
+
 /** 所属 entity を持つべき行か（null であるべきなら false） */
 function needsEntity(row: NameTableRow): boolean {
   switch (row.kind) {
@@ -691,7 +755,8 @@ function needsEntity(row: NameTableRow): boolean {
  *   (d) 参照（`entity`・`groupBy.field`・`refEntity` が表にあり種類が合う。enum の見出しの元は options を持ち、
  *       月の見出しの元は date）と、型・選択肢・出典の形
  *   (e) 所属の fail-closed（fixed-test・structural は所属 1 件以上、structural は checks ごとに種類の合う所属、
- *       unresolved は理由と文書にある制約 ID。どの要件にも所属しない行）
+ *       unresolved は理由と文書にある制約 ID、default-value は選択肢の項目 1 つとその所属 entity だけを所属させ
+ *       value がその項目の options にあり分類が ruled。どの要件にも所属しない行）
  *   (g) 所属・確かめ方・分類が一覧の全要件にちょうど 1 つ（欠落・重複・一覧に無い要件 ID・未知の分類）
  *
  * (a) 応答の形は `checkNameTableDraftShape`、(f) 要件 ID の付け方は `resolveNameTableDraft` が受け持つ。
@@ -701,12 +766,52 @@ export function checkNameTable(
   table: NameTable,
   documents: readonly PromptDocument[],
 ): readonly Problem[] {
+  return checkNameTableWith(list, table, documents, {});
+}
+
+/**
+ * 形・写しの段で落ちた要素を飛ばして表を検査するための口（`inspectNameTable` だけが使う。K2）。
+ * 渡す表は形の通った行・要件だけの**仮の結び付け**の表で、`field` の添字は元の候補の位置へ戻す。
+ */
+interface TableCheckOptions {
+  /** 表の行 i → 元の候補の行の添字 */
+  readonly rowOrigin?: readonly number[];
+  /** 所属・確かめ方・分類の i → 元の候補の要件ごとの並びの添字 */
+  readonly entryOrigin?: readonly number[];
+  /** 出典の検査（要件 ID の実在・引用）を飛ばす行（表の行の添字。写しの段で問題にした行） */
+  readonly skipSourceRows?: ReadonlySet<number>;
+  /** 形で落ちた行の id（元の候補から読めた分）→ 個別に読めた kind・entity（診断用だけ） */
+  readonly droppedRows?: ReadonlyMap<string, DroppedRowInfo>;
+  /** 形で落ちた要件の ID（一覧の ID）。所属・確かめ方・分類が無いことを問題にしない */
+  readonly droppedRequirementIds?: ReadonlySet<string>;
+  /**
+   * 形で落ちた要素を経由して所属していた行の id（元の候補から読めた分）。孤立した行にしない——形で落ちた要件が
+   * 所属させていた行と、所属させた行が形で落ちたために導かれなくなった所属 entity
+   */
+  readonly rowIdsOwnedByDropped?: ReadonlySet<string>;
+}
+
+function checkNameTableWith(
+  list: RequirementList,
+  table: NameTable,
+  documents: readonly PromptDocument[],
+  options: TableCheckOptions,
+): readonly Problem[] {
   const problems: Problem[] = [];
   const rowById = new Map<string, NameTableRow>();
+  const rowAt = (index: number): number => options.rowOrigin?.[index] ?? index;
+  const entryAt = (index: number): number => options.entryOrigin?.[index] ?? index;
+  const skipSourceRows = options.skipSourceRows ?? new Set<number>();
+  const droppedRequirementIds = options.droppedRequirementIds ?? new Set<string>();
+  const rowIdsOwnedByDropped = options.rowIdsOwnedByDropped ?? new Set<string>();
+  /** 形で落ちた行を指す ID か（表に在る行は落ちた行ではない） */
+  const droppedRowOf = (id: string): DroppedRowInfo | undefined =>
+    rowById.has(id) ? undefined : options.droppedRows?.get(id);
+  const isDroppedRow = (id: string): boolean => droppedRowOf(id) !== undefined;
 
   // (b) id の一意
   table.rows.forEach((row, index) => {
-    if (rowById.has(row.id)) problems.push({ field: `rows[${index}].id`, message: "表の ID が重なっている" });
+    if (rowById.has(row.id)) problems.push({ field: `rows[${rowAt(index)}].id`, message: "表の ID が重なっている" });
     else rowById.set(row.id, row);
   });
 
@@ -714,7 +819,7 @@ export function checkNameTable(
   const namespaceSeen = new Set<string>();
   const locationSeen = new Set<string>();
   table.rows.forEach((row, index) => {
-    const field = `rows[${index}].name`;
+    const field = `rows[${rowAt(index)}].name`;
     if (!NAME_PATTERN.test(row.name)) {
       problems.push({ field, message: "名前が規則（英字で始まる英数字）に合わない" });
     } else if ((RESERVED_NAMES as readonly string[]).includes(row.name)) {
@@ -734,7 +839,7 @@ export function checkNameTable(
     const entityName = row.entity === null ? "" : (rowById.get(row.entity)?.name ?? `\u0001${row.entity}`);
     const location = `${row.kind}\u0000${entityName}\u0000${row.name}`;
     if (locationSeen.has(location)) {
-      problems.push({ field: `rows[${index}]`, message: "同じ場所（種類・entity・名前）を指す ID が 2 つある（別名は書けない）" });
+      problems.push({ field: `rows[${rowAt(index)}]`, message: "同じ場所（種類・entity・名前）を指す ID が 2 つある（別名は書けない）" });
     }
     locationSeen.add(location);
   });
@@ -742,18 +847,25 @@ export function checkNameTable(
   // (d) 参照・型・選択肢・出典
   const requirementById = new Map(list.requirements.map((requirement) => [requirement.id, requirement] as const));
   table.rows.forEach((row, index) => {
-    const field = `rows[${index}]`;
+    const field = `rows[${rowAt(index)}]`;
     checkRowType(row, field, problems);
     if (row.role.trim() === "") problems.push({ field: `${field}.role`, message: "役割の説明が空である" });
     const sourceRequirement = requirementById.get(row.source.requirementId);
-    if (sourceRequirement === undefined) {
+    if (skipSourceRows.has(index)) {
+      // 写しの段で問題にした行。結び付けが仮なので、出典の検査は掛けない
+    } else if (sourceRequirement === undefined) {
       problems.push({ field: `${field}.source.requirementId`, message: "出典の要件 ID が一覧に無い" });
     } else if (!isSourceQuoteOf(sourceRequirement, row.source.quote)) {
       problems.push({ field: `${field}.source.quote`, message: "出典の引用が要件の文に無い" });
     }
 
     if (needsEntity(row)) {
-      if (row.entity === null || rowById.get(row.entity)?.kind !== "entity") {
+      if (row.entity === null) {
+        problems.push({
+          field: `${field}.entity`,
+          message: "所属 entity が無い（entity・アプリ全体の計算・見出しごとの集計・dashboard 以外の行は所属 entity を持つ）",
+        });
+      } else if (rowById.get(row.entity)?.kind !== "entity" && !isDroppedRow(row.entity)) {
         problems.push({ field: `${field}.entity`, message: "所属 entity の ID が表の entity の行に無い" });
       }
     } else if (row.entity !== null) {
@@ -762,10 +874,10 @@ export function checkNameTable(
 
     const isEnumField = row.kind === "field" && row.type === "enum";
     if (isEnumField) {
-      const options = row.options;
-      if (options === null || options.length === 0) {
+      const keys = row.options;
+      if (keys === null || keys.length === 0) {
         problems.push({ field: `${field}.options`, message: "選択肢の項目に options が無い" });
-      } else if (new Set(options).size !== options.length || options.some((key) => key.trim() === "")) {
+      } else if (new Set(keys).size !== keys.length || keys.some((key) => key.trim() === "")) {
         problems.push({ field: `${field}.options`, message: "options は空でない重複の無いキーの並びであること" });
       }
     } else if (row.options !== null) {
@@ -777,11 +889,11 @@ export function checkNameTable(
         problems.push({ field: `${field}.groupBy`, message: "見出しの元を持てるのは計算の行だけである" });
       } else {
         const target = rowById.get(row.groupBy.field);
-        if (target === undefined || target.kind !== "field") {
+        if (target === undefined ? !isDroppedRow(row.groupBy.field) : target.kind !== "field") {
           problems.push({ field: `${field}.groupBy.field`, message: "見出しの元の項目の ID が表の項目の行に無い" });
-        } else if (row.groupBy.kind === "enum" && (target.options === null || target.options.length === 0)) {
+        } else if (target !== undefined && row.groupBy.kind === "enum" && (target.options === null || target.options.length === 0)) {
           problems.push({ field: `${field}.groupBy.field`, message: "見出しの元の項目に選択肢（options）が無い" });
-        } else if (row.groupBy.kind === "month" && target.type !== "date") {
+        } else if (target !== undefined && row.groupBy.kind === "month" && target.type !== "date") {
           problems.push({ field: `${field}.groupBy.field`, message: "月の見出しの元の項目が日付（date）でない" });
         }
       }
@@ -791,7 +903,7 @@ export function checkNameTable(
     if (row.refEntity !== null) {
       if (!takesRef) {
         problems.push({ field: `${field}.refEntity`, message: "参照先を持てるのは参照の項目と参照の並びだけである" });
-      } else if (rowById.get(row.refEntity)?.kind !== "entity") {
+      } else if (rowById.get(row.refEntity)?.kind !== "entity" && !isDroppedRow(row.refEntity)) {
         problems.push({ field: `${field}.refEntity`, message: "参照先の ID が表の entity の行に無い" });
       }
     } else if (row.kind === "field" && row.type === "ref") {
@@ -804,15 +916,17 @@ export function checkNameTable(
     const byId = new Map<string, T>();
     entries.forEach((entry, index) => {
       if (!requirementById.has(entry.requirementId)) {
-        problems.push({ field: `${name}[${index}].requirementId`, message: "一覧に無い要件 ID である" });
+        problems.push({ field: `${name}[${entryAt(index)}].requirementId`, message: "一覧に無い要件 ID である" });
       } else if (byId.has(entry.requirementId)) {
-        problems.push({ field: `${name}[${index}].requirementId`, message: "同じ要件の項目が重なっている" });
+        problems.push({ field: `${name}[${entryAt(index)}].requirementId`, message: "同じ要件の項目が重なっている" });
       } else {
         byId.set(entry.requirementId, entry);
       }
     });
     list.requirements.forEach((requirement, index) => {
-      if (!byId.has(requirement.id)) problems.push({ field: `requirements[${index}]`, message: missing });
+      if (!byId.has(requirement.id) && !droppedRequirementIds.has(requirement.id)) {
+        problems.push({ field: `requirements[${index}]`, message: missing });
+      }
     });
     return byId;
   };
@@ -821,7 +935,7 @@ export function checkNameTable(
   once(table.classification, "classification", "要件の分類が無い");
   table.classification.forEach((entry, index) => {
     if (!isOneOf(REQUIREMENT_NATURES, entry.nature)) {
-      problems.push({ field: `classification[${index}].nature`, message: `分類の値は ${REQUIREMENT_NATURES.join("・")} のいずれかであること` });
+      problems.push({ field: `classification[${entryAt(index)}].nature`, message: `分類の値は ${REQUIREMENT_NATURES.join("・")} のいずれかであること` });
     }
   });
 
@@ -829,8 +943,10 @@ export function checkNameTable(
   table.ownership.forEach((entry, oIndex) => {
     const seen = new Set<string>();
     entry.roles.forEach((role, rIndex) => {
-      const field = `ownership[${oIndex}].roles[${rIndex}]`;
-      if (!rowById.has(role.id)) problems.push({ field: `${field}.id`, message: "所属の表の ID が表に無い" });
+      const field = `ownership[${entryAt(oIndex)}].roles[${rIndex}]`;
+      if (!rowById.has(role.id)) {
+        if (!isDroppedRow(role.id)) problems.push({ field: `${field}.id`, message: "所属の表の ID が表に無い" });
+      }
       else if (seen.has(role.id)) problems.push({ field: `${field}.id`, message: "同じ要件の中で所属が重なっている" });
       seen.add(role.id);
       const shapeProblems: Problem[] = [];
@@ -839,25 +955,66 @@ export function checkNameTable(
     });
   });
   const derived = new Map(deriveOwnership(table).map((entry) => [entry.requirementId, entry] as const));
+  /**
+   * 要件が所属させた行の kind・entity。形で落ちた行は、元の候補で読めた kind・entity で数える（診断用だけ）。
+   * 読めた kind で満たせない不足は、その行を直しても補えないので報告する（PR #532 のレビュー 1）
+   */
+  const ownedRows = (requirementId: string): readonly Pick<DroppedRowInfo, "kind" | "entity">[] =>
+    (derived.get(requirementId)?.roles ?? []).flatMap((role) => {
+      const row = rowById.get(role.id) ?? droppedRowOf(role.id);
+      return row === undefined ? [] : [row];
+    });
   const ownedKinds = (requirementId: string): ReadonlySet<NameTableKind> =>
-    new Set(
-      (derived.get(requirementId)?.roles ?? []).flatMap((role) => {
-        const row = rowById.get(role.id);
-        return row === undefined ? [] : [row.kind];
-      }),
-    );
+    new Set(ownedRows(requirementId).flatMap((row) => (row.kind === undefined ? [] : [row.kind])));
   const constraintIds = constraintIdsIn(documents);
+  const natureById = new Map(table.classification.map((entry) => [entry.requirementId, entry.nature] as const));
+  /** kind が読めない形で落ちた行を所属させた要件は、その行が満たす可能性が残るので、種類に依る不足を出さない */
+  const ownsUnknownKindRow = (requirementId: string): boolean =>
+    ownedRows(requirementId).some((row) => row.kind === undefined);
+  /**
+   * default-value の要件（Issue #533）：導いた所属が「選択肢（enum）の項目の行 1 つと、その項目の所属 entity の行」
+   * だけで、value がその項目の options にあり、分類が ruled であること。形で落ちた行を所属させた要件は、その行の
+   * 型が読めないので所属の組み合わせを見ない（形の落ちが別に出ている）
+   */
+  const checkDefaultValueVerification = (
+    entry: Extract<NameTableVerification, { readonly kind: "default-value" }>,
+    field: string,
+    roles: readonly NameTableRoleOwnership[],
+    nature: RequirementNature | undefined,
+  ): void => {
+    if (entry.value.trim() === "") {
+      problems.push({ field: `${field}.value`, message: "既定値で確かめる要件の value が空である" });
+    }
+    if (nature !== undefined && nature !== "ruled") {
+      problems.push({ field, message: "既定値で確かめる要件の分類は ruled であること" });
+    }
+    if (roles.some((role) => !rowById.has(role.id))) return;
+    const owned = roles.map((role) => rowById.get(role.id) as NameTableRow);
+    const enumFields = owned.filter((row) => row.kind === "field" && row.type === "enum");
+    const [only] = enumFields;
+    if (enumFields.length !== 1 || only === undefined) {
+      problems.push({ field, message: "既定値で確かめる要件は、選択肢（enum）の項目をちょうど 1 つ所属させること" });
+      return;
+    }
+    if (owned.some((row) => row !== only && row.id !== only.entity)) {
+      problems.push({ field, message: "既定値で確かめる要件は、選択肢の項目とその所属 entity のほかの行を所属させないこと" });
+    }
+    if (!(only.options ?? []).includes(entry.value)) {
+      problems.push({ field: `${field}.value`, message: "既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い" });
+    }
+  };
   table.verification.forEach((entry, index) => {
-    const field = `verification[${index}]`;
+    const field = `verification[${entryAt(index)}]`;
     if (verificationById.get(entry.requirementId) !== entry) return;
     const kinds = ownedKinds(entry.requirementId);
+    const unknownOwned = ownsUnknownKindRow(entry.requirementId);
     switch (entry.kind) {
       case "fixed-test":
-        if (kinds.size === 0) problems.push({ field, message: "固定した試験で確かめる要件に所属が無い" });
+        if (kinds.size === 0 && !unknownOwned) problems.push({ field, message: "固定した試験で確かめる要件に所属が無い" });
         return;
       case "structural": {
         if (entry.reason.trim() === "") problems.push({ field: `${field}.reason`, message: "構造で確かめる理由が空である" });
-        if (kinds.size === 0) problems.push({ field, message: "構造で確かめる要件に所属が無い" });
+        if (kinds.size === 0 && !unknownOwned) problems.push({ field, message: "構造で確かめる要件に所属が無い" });
         if (entry.checks.length === 0) problems.push({ field: `${field}.checks`, message: "構造で確かめる要件に checks が無い" });
         const seen = new Set<StructuralAssertionKind>();
         entry.checks.forEach((check, cIndex) => {
@@ -865,7 +1022,15 @@ export function checkNameTable(
           seen.add(check);
           const want = STRUCTURAL_TARGET_KINDS[check];
           if (want !== undefined && !kinds.has(want)) {
-            problems.push({ field: `${field}.checks[${cIndex}]`, message: "checks の検査に合う種類の所属が無い" });
+            if (!unknownOwned) {
+              problems.push({ field: `${field}.checks[${cIndex}]`, message: "checks の検査に合う種類の所属が無い" });
+            }
+          } else if (check === "view-shows" && !unknownOwned && !hasViewShowsPair(ownedRows(entry.requirementId))) {
+            // T2' の構造の検査（v1）が求める条件を、表の段で先に求める（fail-closed の強化。K5(a)）
+            problems.push({
+              field: `${field}.checks[${cIndex}]`,
+              message: "view-shows の検査に、画面と同じ entity の項目か計算の所属が無い",
+            });
           }
         });
         return;
@@ -881,16 +1046,31 @@ export function checkNameTable(
           }
         });
         return;
+      case "default-value":
+        checkDefaultValueVerification(entry, field, derived.get(entry.requirementId)?.roles ?? [], natureById.get(entry.requirementId));
+        return;
     }
   });
   const owners = ownersByRowId(table);
   table.rows.forEach((row, index) => {
-    if (!owners.has(row.id)) problems.push({ field: `rows[${index}]`, message: "どの要件にも所属しない行がある" });
+    if (!owners.has(row.id) && !rowIdsOwnedByDropped.has(row.id)) problems.push({ field: `rows[${rowAt(index)}]`, message: "どの要件にも所属しない行がある" });
   });
   return problems;
 }
 
-/** (a)・(f)・(b)〜(g) をまとめて掛ける（T1' の入口） */
+/** 元の候補から読める、空でない文字列の `id`（形で落ちた要素の識別に使う） */
+const readableId = (value: unknown): string | undefined =>
+  isRecord(value) && isNonEmptyString(value["id"]) ? value["id"] : undefined;
+
+/**
+ * (a)・(f)・(b)〜(g) を**同じ呼び出しで全部**掛ける（T1' の入口。K2）。問題は形 → 写し → 表の順に連結して返す。
+ *
+ * 前の段が落ちても後の段を掛ける。そのために、形で落ちた行・要件を後段の対象から外し（元の添字は保つ）、
+ * 外したことで生じる派生の問題（その要件の所属・確かめ方・分類が無い、その行を指す ID が表に無い、
+ * その要件だけが所属させていた行が孤立する）を出さない。写しが合わない要件・行は、要件ごとの並びの i 番目を
+ * 一覧の i 番目に**仮に**結んで表の検査を続ける（行の出典の検査だけは飛ばす）。仮の表は採用しない——
+ * `ok` は 3 段とも問題 0 のときだけで、返す表は `resolveNameTableDraft` の結果である。
+ */
 export function inspectNameTable(
   list: RequirementList,
   value: unknown,
@@ -898,12 +1078,117 @@ export function inspectNameTable(
 ): ResolveResult {
   const listProblems = checkRequirementListForTable(list);
   if (listProblems.length > 0) return { ok: false, problems: listProblems };
+  const scan = scanNameTableDraftShape(value);
+  // 後段に渡す元が無い（写像でない・行や要件ごとの並びが並びでない）ときは形の問題だけを返す
+  if (!("rows" in scan) || scan.rows === null || scan.requirements === null) return { ok: false, problems: scan.problems };
+  const { rows: draftRows, requirements: draftRequirements } = scan;
+
+  const length = copyLengthFor(list);
+  if (length === null) return { ok: false, problems: scan.problems };
+  const copies = list.requirements.map((requirement) => requirementCopy(requirement.text, length));
+  const ids = list.requirements.map((requirement) => requirement.id);
+
+  // 写しの段（resolveNameTableDraft と同じ判定・同じ固定文。形で落ちた要素は飛ばす）
+  const copyProblems: Problem[] = [];
+  if (draftRequirements.length !== list.requirements.length) {
+    copyProblems.push({ field: "requirements", message: "要件ごとの並びの数が一覧の要件の数と合わない" });
+  }
+  draftRequirements.forEach((entry, index) => {
+    const expected = copies[index];
+    if (entry === undefined || expected === undefined) return;
+    if (codePoints(entry.copy).length !== codePoints(expected).length) {
+      copyProblems.push({ field: `requirements[${index}].copy`, message: "要件の文の写しが指示した長さと合わない" });
+    } else if (entry.copy !== expected) {
+      copyProblems.push({ field: `requirements[${index}].copy`, message: "要件の文の写しが一覧の同じ位置の要件と合わない" });
+    }
+  });
+  const matched = draftRows.map((row, index) => {
+    if (row === undefined) return undefined;
+    const matches = copies.flatMap((copy, at) => (copy === row.source.copy ? [at] : []));
+    const [only] = matches;
+    if (matches.length !== 1 || only === undefined) {
+      copyProblems.push({ field: `rows[${index}].source.copy`, message: "出典の要件の文の写しが一覧のどの要件とも合わない" });
+      return undefined;
+    }
+    const requirement = list.requirements[only];
+    if (requirement === undefined || !isSourceQuoteOf(requirement, row.source.quote)) {
+      copyProblems.push({ field: `rows[${index}].source.quote`, message: "出典の引用が、写しが指す要件の原文に無い" });
+      return undefined;
+    }
+    return requirement.id;
+  });
+
+  // 表の段：形の通った行・要件だけで仮の表を組む（採用しない。添字は元の候補の位置へ戻す）
+  const rowOrigin: number[] = [];
+  const skipSourceRows = new Set<number>();
+  const tableRows: NameTableRow[] = [];
+  draftRows.forEach((row, index) => {
+    if (row === undefined) return;
+    if (matched[index] === undefined) skipSourceRows.add(tableRows.length);
+    rowOrigin.push(index);
+    tableRows.push({ ...row, source: { requirementId: matched[index] ?? "", quote: row.source.quote } });
+  });
+  const entryOrigin: number[] = [];
+  const ownership: NameTableOwnership[] = [];
+  const verification: NameTableVerification[] = [];
+  const classification: NameTableClassification[] = [];
+  const droppedRequirementIds = new Set<string>();
+  const rowIdsOwnedByDropped = new Set<string>();
+  draftRequirements.forEach((entry, index) => {
+    const requirementId = ids[index];
+    if (requirementId === undefined) return;
+    if (entry === undefined) {
+      droppedRequirementIds.add(requirementId);
+      const raw = scan.rawRequirements[index];
+      const roles = isRecord(raw) && Array.isArray(raw["roles"]) ? raw["roles"] : [];
+      for (const role of roles) {
+        const id = readableId(role);
+        if (id !== undefined) rowIdsOwnedByDropped.add(id);
+      }
+      return;
+    }
+    entryOrigin.push(index);
+    ownership.push({ requirementId, roles: entry.roles });
+    verification.push({ ...entry.verification, requirementId });
+    classification.push({ requirementId, nature: entry.nature });
+  });
+  // 形で落ちた行から、個別に読める kind・entity を診断用にだけ持つ（採用表・返す表には流さない）
+  const droppedRows = new Map<string, DroppedRowInfo>();
+  draftRows.forEach((row, index) => {
+    const raw = scan.rawRows[index];
+    const id = row === undefined ? readableId(raw) : undefined;
+    if (id === undefined || !isRecord(raw)) return;
+    const kind = isOneOf(NAME_TABLE_KINDS, raw["kind"]) ? raw["kind"] : undefined;
+    const rawEntity = raw["entity"];
+    const entity = rawEntity === null ? null : isNonEmptyString(rawEntity) ? rawEntity : undefined;
+    if (!droppedRows.has(id)) droppedRows.set(id, { kind, entity });
+  });
+  // 導かれる所属 entity は、表に在る kind が entity の行だけ（`deriveOwnership` と同じ規則。PR #532 の再確認 1）
+  const isDerivableEntity = (id: string | null | undefined): id is string =>
+    typeof id === "string" && tableRows.some((row) => row.id === id && row.kind === "entity");
+  // 形で落ちた要件が所属させていた行の所属 entity も、その要件から導かれていた（`deriveOwnership`）
+  for (const id of rowIdsOwnedByDropped) {
+    const entity = draftRows.find((row) => row?.id === id)?.entity;
+    if (isDerivableEntity(entity)) rowIdsOwnedByDropped.add(entity);
+  }
+  // 所属させた行が形で落ちると、その行から導かれていた所属 entity が消える（PR #532 のレビュー 2）。
+  // 元の候補から読める所属（正常な要件と形で落ちた要件の両方）が指す、形で落ちた行の entity だけを抑える
+  const ownedIds = new Set([...rowIdsOwnedByDropped, ...ownership.flatMap((entry) => entry.roles.map((role) => role.id))]);
+  for (const [id, info] of droppedRows) {
+    if (ownedIds.has(id) && isDerivableEntity(info.entity)) rowIdsOwnedByDropped.add(info.entity);
+  }
+  const tableProblems = checkNameTableWith(
+    list,
+    { rows: tableRows, ownership, verification, classification },
+    documents,
+    { rowOrigin, entryOrigin, skipSourceRows, droppedRows, droppedRequirementIds, rowIdsOwnedByDropped },
+  );
+
+  const problems = [...scan.problems, ...copyProblems, ...tableProblems];
+  if (problems.length > 0) return { ok: false, problems };
   const shape = checkNameTableDraftShape(value);
   if (!shape.ok) return shape;
-  const resolved = resolveNameTableDraft(list, shape.value);
-  if (!resolved.ok) return resolved;
-  const problems = checkNameTable(list, resolved.table, documents);
-  return problems.length > 0 ? { ok: false, problems } : resolved;
+  return resolveNameTableDraft(list, shape.value);
 }
 
 // ── SHA-256 ───────────────────────────────────────────────────────────

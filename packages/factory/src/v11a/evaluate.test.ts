@@ -7,11 +7,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FixedTest, TestKind, TestSuite } from "../fixed-test.js";
 import type { RequirementList } from "../pipeline.js";
 import * as bindModule from "../stages/bind.js";
+import * as runTestsStage from "../stages/run-tests.js";
+import { runTests } from "../stages/run-tests.js";
 import type { EvaluationContext } from "../stages/tools.js";
 import { FIXTURE_YAML, fixtureList, fixtureTable, normalizedFixture } from "./__tests__/fixtures.js";
-import { correspondenceFromTable } from "./bind-by-id.js";
-import { toV1 } from "./convert.js";
-import { createV11aEvaluator } from "./evaluate.js";
+import { bindTestsById, correspondenceFromTable } from "./bind-by-id.js";
+import { identityMappings, toRoleEntries, toV1 } from "./convert.js";
+import { DEFAULT_VALUE_DETAILS, UNMAPPED_OBSERVES_DETAIL, createV11aEvaluator, judgeDefaultValue } from "./evaluate.js";
+import type { TestObserves } from "./stages/test-spec.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -86,6 +89,19 @@ const SUITE: TestSuite = {
   ],
 };
 
+/** SUITE の観測する性質（T2 で固定した写像の写し） */
+const OBSERVES: ReadonlyMap<string, TestObserves> = new Map<string, TestObserves>([
+  ["t-when-ok", "when"],
+  ["t-when-bad", "when"],
+  ["t-shows", "view-structure"],
+  ["t-rate", "value"],
+  ["t-unknown", "view-structure"],
+]);
+
+/** 写像から試験 ID を除いたもの */
+const observesWithout = (...ids: readonly string[]): ReadonlyMap<string, TestObserves> =>
+  new Map([...OBSERVES].filter(([testId]) => !ids.includes(testId)));
+
 function contextOf(list: RequirementList, suite: TestSuite = SUITE): EvaluationContext {
   const table = {
     ...TABLE,
@@ -110,7 +126,7 @@ function outcomesById(testRun: { mismatches: readonly { testId: string }[]; unre
 
 describe("④ に落ちる版", () => {
   it("correspondence・testRun が null で、版の SHA-256 を持つ", async () => {
-    const evaluator = createV11aEvaluator({ table: TABLE });
+    const evaluator = createV11aEvaluator({ table: TABLE, observes: OBSERVES });
     const source = YAML.replace("type: number\n  - name: rate", "type: nosuchtype\n  - name: rate");
     expect(source).not.toBe(YAML);
     const report = await evaluator.report({ source }, contextOf(listWithout()));
@@ -125,7 +141,7 @@ describe("④ に落ちる版", () => {
 
 describe("通る版", () => {
   it("B3 の落ちと、表の id で結び付けて流した結果を持ち、defectMisses・redoMisses は空", async () => {
-    const evaluator = createV11aEvaluator({ table: TABLE });
+    const evaluator = createV11aEvaluator({ table: TABLE, observes: OBSERVES });
     // B3 の落ち（画面から辿れない項目）がある宣言
     const report = await evaluator.report({ source: FIXTURE_YAML }, contextOf(listWithout()));
     expect(report.staticCheck.passed).toBe(true);
@@ -147,7 +163,7 @@ describe("通る版", () => {
   });
 
   it("同じ宣言と文脈で 2 回同じ結果", async () => {
-    const evaluator = createV11aEvaluator({ table: TABLE });
+    const evaluator = createV11aEvaluator({ table: TABLE, observes: OBSERVES });
     const context = contextOf(listWithout());
     const first = await evaluator.report({ source: YAML }, context);
     const second = await evaluator.report({ source: YAML }, context);
@@ -156,7 +172,7 @@ describe("通る版", () => {
 
   it("bindTests を呼ばない", async () => {
     const spy = vi.spyOn(bindModule, "bindTests");
-    const evaluator = createV11aEvaluator({ table: TABLE });
+    const evaluator = createV11aEvaluator({ table: TABLE, observes: OBSERVES });
     await evaluator.report({ source: YAML }, contextOf(listWithout()));
     const app = await normalizedFixture(YAML);
     await evaluator.evaluate(app, { source: YAML }, contextOf(listWithout()));
@@ -166,7 +182,7 @@ describe("通る版", () => {
 
 describe("組・一覧・所属は毎回文脈から取る", () => {
   it("文脈の組から試験を 1 つ外すと、外した試験を流さず、残りの結果が試験 ID で一致する（並びの変化で結果がずれない）", async () => {
-    const evaluator = createV11aEvaluator({ table: TABLE });
+    const evaluator = createV11aEvaluator({ table: TABLE, observes: OBSERVES });
     const app = await normalizedFixture(YAML);
     const full = await evaluator.evaluate(app, { source: YAML }, contextOf(listWithout()));
     const reduced: TestSuite = { ...SUITE, tests: SUITE.tests.filter((test) => test.id !== "t-when-ok") };
@@ -181,7 +197,7 @@ describe("組・一覧・所属は毎回文脈から取る", () => {
   });
 
   it("文脈の一覧から要件を除くと、その要件だけの行は B3 で検査されず、共有の行は検査される", async () => {
-    const evaluator = createV11aEvaluator({ table: TABLE });
+    const evaluator = createV11aEvaluator({ table: TABLE, observes: OBSERVES });
     const app = await normalizedFixture(YAML.replace("    when: amount > 0\n", ""));
     const all = evaluator.nameCheck(app, contextOf(listWithout()));
     expect(all.checkedRowIds).toContain("o.closeItem");
@@ -193,9 +209,289 @@ describe("組・一覧・所属は毎回文脈から取る", () => {
   });
 
   it("閉包の除く行は、文脈の一覧に所属させる要件があっても除く", async () => {
-    const evaluator = createV11aEvaluator({ table: TABLE, excludedRowIds: ["o.closeItem"] });
+    const evaluator = createV11aEvaluator({ table: TABLE, excludedRowIds: ["o.closeItem"], observes: OBSERVES });
     const app = await normalizedFixture(YAML);
     const result = evaluator.nameCheck(app, contextOf(listWithout()));
     expect(result.checkedRowIds).not.toContain("o.closeItem");
+  });
+});
+
+describe("観測する性質の写像（observes。必須。Issue #526）", () => {
+  /** v1 の runTests を、表の id の結び付けで直接流す（評価口を通さない） */
+  async function directRun(source: string, suite: TestSuite, dropBindingOf: readonly string[] = []) {
+    const app = await normalizedFixture(source);
+    const context = contextOf(listWithout(), suite);
+    const checked = createV11aEvaluator({ table: TABLE, observes: OBSERVES }).nameCheck(app, context);
+    const correspondence = { entries: checked.entries, misses: checked.misses };
+    const bound = bindTestsById(app, TABLE, suite);
+    const tests = new Map([...bound.bindings].filter(([testId]) => !dropBindingOf.includes(testId)));
+    return {
+      app,
+      context,
+      correspondence,
+      report: runTests({
+        app,
+        suite,
+        correspondence,
+        mappings: identityMappings(TABLE),
+        roles: toRoleEntries(TABLE),
+        bindings: { tests, entityNames: bound.entityNames },
+      }),
+    };
+  }
+
+  /** 試験 ID → その試験の結果（不一致・未解決・行き先・構造の検査） */
+  function byTestId(report: ReturnType<typeof runTests>, suite: TestSuite) {
+    return Object.fromEntries(
+      suite.tests.map((test) => [
+        test.id,
+        {
+          mismatches: report.mismatches.filter((entry) => entry.testId === test.id),
+          unresolved: report.unresolved.filter((entry) => entry.testId === test.id),
+          routes: report.routes.filter((entry) => entry.testId === test.id),
+          structural: report.structural.filter((entry) => entry.testId === test.id),
+        },
+      ]),
+    );
+  }
+
+  it("observes を省いた材料では評価口を作れない（型）", () => {
+    // 呼ばない（型の検査だけ）。observes を省けば型で落ちる
+    const build = () =>
+      // @ts-expect-error observes は必須
+      createV11aEvaluator({ table: TABLE });
+    expect(typeof build).toBe("function");
+  });
+
+  it("写像が組を覆えば、B4 の結果は v1 の runTests を表の id の結び付けで直接流した結果と試験 ID ごとに深く等しい", async () => {
+    const { app, context, correspondence, report } = await directRun(YAML, SUITE);
+    const evaluator = createV11aEvaluator({ table: TABLE, observes: OBSERVES });
+    const viaEvaluator = evaluator.runTests(app, context, correspondence);
+    expect(byTestId(viaEvaluator, SUITE)).toEqual(byTestId(report, SUITE));
+    expect(viaEvaluator).toEqual(report);
+    // 同じ関数が ⑥ の道具・版の再検査に渡る（材料に足す以外の配線は要らない）
+    const evaluated = await evaluator.evaluate(app, { source: YAML }, context);
+    expect(evaluated.testRun).toEqual(report);
+  });
+
+  it("写像に無い試験 ID を 1 つ含む文脈では、その試験だけが未解決（行き先は no-mapping と同じ）で、ほかの結果は変わらない", async () => {
+    for (const missing of ["t-when-ok", "t-shows"]) {
+      const { app, context, correspondence, report } = await directRun(YAML, SUITE);
+      // 対照：v1 の no-mapping（結び付けの表に無い）の未解決
+      const noMapping = (await directRun(YAML, SUITE, [missing])).report;
+      const evaluator = createV11aEvaluator({ table: TABLE, observes: observesWithout(missing) });
+      const viaEvaluator = evaluator.runTests(app, context, correspondence);
+      const expected = byTestId(report, SUITE);
+      const actual = byTestId(viaEvaluator, SUITE);
+      for (const test of SUITE.tests) {
+        if (test.id !== missing) expect(actual[test.id]).toEqual(expected[test.id]);
+      }
+      const reference = byTestId(noMapping, SUITE)[missing];
+      expect(actual[missing]?.mismatches).toEqual([]);
+      expect(actual[missing]?.unresolved).toEqual([{ testId: missing, detail: UNMAPPED_OBSERVES_DETAIL }]);
+      expect(reference?.unresolved).toHaveLength(1);
+      expect(actual[missing]?.routes.map((entry) => entry.route)).toEqual(reference?.routes.map((entry) => entry.route));
+      expect(actual[missing]?.routes).toEqual([{ testId: missing, route: "ambiguity", detail: UNMAPPED_OBSERVES_DETAIL }]);
+      expect(actual[missing]?.structural.map((entry) => entry.result)).toEqual(
+        reference?.structural.map((entry) => entry.result),
+      );
+      // 並びは組のまま（未解決は組の並びに差し込む）
+      const order = SUITE.tests.map((test) => test.id);
+      const indices = viaEvaluator.unresolved.map((entry) => order.indexOf(entry.testId));
+      expect([...indices].sort((a, b) => a - b)).toEqual(indices);
+      // 版の再検査・道具に渡る関数も同じ結果
+      const evaluated = await evaluator.evaluate(app, { source: YAML }, context);
+      expect(evaluated.testRun).toEqual(viaEvaluator);
+    }
+  });
+
+  it("写像に無い試験は v1 の runTests に渡さず、文脈の組から外した試験も流さない", async () => {
+    const suites: string[][] = [];
+    const original = runTestsStage.runTests;
+    vi.spyOn(runTestsStage, "runTests").mockImplementation((input) => {
+      suites.push(input.suite.tests.map((test) => test.id));
+      return original(input);
+    });
+    const app = await normalizedFixture(YAML);
+    const evaluator = createV11aEvaluator({ table: TABLE, observes: observesWithout("t-rate") });
+    const reduced: TestSuite = { ...SUITE, tests: SUITE.tests.filter((test) => test.id !== "t-when-ok") };
+    const result = await evaluator.evaluate(app, { source: YAML }, contextOf(listWithout(), reduced));
+    expect(suites).toEqual([["t-when-bad", "t-shows", "t-unknown"]]);
+    const outcomes = outcomesById(result.testRun, reduced);
+    expect(outcomes.has("t-when-ok")).toBe(false);
+    expect(outcomes.get("t-rate")).toBe("unresolved");
+  });
+
+  it("写像に無い試験を含む文脈でも、同じ入力で 2 回同じ結果で、bindTests を呼ばない", async () => {
+    const spy = vi.spyOn(bindModule, "bindTests");
+    const evaluator = createV11aEvaluator({ table: TABLE, observes: observesWithout("t-shows") });
+    const context = contextOf(listWithout());
+    const first = await evaluator.report({ source: YAML }, context);
+    const second = await evaluator.report({ source: YAML }, context);
+    expect(second).toEqual(first);
+    expect(first.testRun?.unresolved.map((entry) => entry.testId)).toEqual(["t-shows", "t-unknown"]);
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("既定値の試験（observes が default-value）は v1 に渡さず、宣言の default と照合する（Issue #533）", () => {
+  /** 区分の項目の既定値を alpha にした宣言（静的チェックを通る） */
+  const withDefault = (key: string | null, source: string = YAML): string => {
+    const from = "          beta: ベータ\n";
+    if (source.split(from).length !== 2) throw new Error("前提が壊れた：置き換えの元が 1 か所でない");
+    return key === null ? source : source.replace(from, `${from}        default: ${key}\n`);
+  };
+  const DYAML = withDefault("alpha");
+
+  function defaultTest(id: string, expected: unknown, roleId = "f.item.kind"): FixedTest {
+    return {
+      id,
+      target: { requirementId: "R6", kind: "field", roleId },
+      kind: "normal",
+      operation: "validate",
+      clock: CLOCK,
+      input: {},
+      inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: expected },
+    };
+  }
+
+  /** 組の途中（3 番目）に既定値の試験を差した組 */
+  const suiteWith = (test: FixedTest): TestSuite => ({ ...SUITE, tests: [...SUITE.tests.slice(0, 2), test, ...SUITE.tests.slice(2)] });
+  const observesWith = (testId: string): ReadonlyMap<string, TestObserves> => new Map([...OBSERVES, [testId, "default-value" as const]]);
+
+  /** 表に、宣言に無い選択肢の項目の行を足したもの（項目が宣言に無い例） */
+  const TABLE_WITH_EXTRA = {
+    ...TABLE,
+    rows: [
+      ...TABLE.rows,
+      { ...TABLE.rows.find((row) => row.id === "f.item.kind")!, id: "f.item.extra", name: "extra" },
+    ],
+  };
+
+  async function evaluateWith(source: string, test: FixedTest, table = TABLE) {
+    const app = await normalizedFixture(source);
+    const suite = suiteWith(test);
+    const context = contextOf(listWithout(), suite);
+    const evaluator = createV11aEvaluator({ table, observes: observesWith(test.id) });
+    const checked = evaluator.nameCheck(app, context);
+    const correspondence = { entries: checked.entries, misses: checked.misses };
+    return { app, suite, context, evaluator, correspondence, report: evaluator.runTests(app, context, correspondence) };
+  }
+
+  it("default が期待のキーと一致なら、既定値の試験の不一致・未解決は 0", async () => {
+    const { report } = await evaluateWith(DYAML, defaultTest("t-default", "alpha"));
+    expect(report.mismatches.filter((entry) => entry.testId === "t-default")).toEqual([]);
+    expect(report.unresolved.filter((entry) => entry.testId === "t-default")).toEqual([]);
+    expect(report.routes.filter((entry) => entry.testId === "t-default")).toEqual([]);
+    expect(report.structural.filter((entry) => entry.testId === "t-default")).toEqual([]);
+  });
+
+  it("default が別のキー・default が無い・項目が選択肢でない・項目が宣言に無い、はそれぞれ不一致（固定文。行き先は v1 の不一致と同じ）", async () => {
+    const cases = [
+      { source: withDefault("beta"), test: defaultTest("t-default", "alpha"), detail: DEFAULT_VALUE_DETAILS.defaultDiffers },
+      { source: YAML, test: defaultTest("t-default", "alpha"), detail: DEFAULT_VALUE_DETAILS.defaultMissing },
+      { source: DYAML, test: defaultTest("t-default", "alpha", "f.item.title"), detail: DEFAULT_VALUE_DETAILS.notEnum },
+      { source: DYAML, test: defaultTest("t-default", "alpha", "f.item.extra"), detail: DEFAULT_VALUE_DETAILS.fieldMissing, table: TABLE_WITH_EXTRA },
+    ];
+    // 対照：v1 の不一致の行き先（t-when-bad は v1 が不一致にする）
+    const v1Mismatch = (await evaluateWith(DYAML, defaultTest("t-default", "alpha"))).report.routes.find(
+      (entry) => entry.testId === "t-when-bad",
+    );
+    expect(v1Mismatch?.route).toBe("missing-element");
+    for (const entry of cases) {
+      const { report } = await evaluateWith(entry.source, entry.test, entry.table);
+      expect(report.mismatches.filter((item) => item.testId === "t-default")).toEqual([{ testId: "t-default", detail: entry.detail }]);
+      expect(report.unresolved.filter((item) => item.testId === "t-default")).toEqual([]);
+      expect(report.routes.filter((item) => item.testId === "t-default")).toEqual([
+        { testId: "t-default", route: v1Mismatch?.route, detail: entry.detail },
+      ]);
+    }
+    // 固定文はキー・名前を埋めない
+    for (const detail of Object.values(DEFAULT_VALUE_DETAILS)) {
+      for (const value of ["alpha", "beta", "kind", "item", "extra", "title"]) expect(detail).not.toContain(value);
+    }
+  });
+
+  it("期待が文字列でない試験は未解決（行き先は v1 の未解決と同じ）", async () => {
+    const v1Unresolved = (await evaluateWith(DYAML, defaultTest("t-default", "alpha"))).report.routes.find(
+      (entry) => entry.testId === "t-unknown",
+    );
+    expect(v1Unresolved?.route).toBe("ambiguity");
+    for (const expected of [1, null, true, ["alpha"]]) {
+      const { report } = await evaluateWith(DYAML, defaultTest("t-default", expected));
+      expect(report.unresolved.filter((item) => item.testId === "t-default")).toEqual([
+        { testId: "t-default", detail: DEFAULT_VALUE_DETAILS.expectedNotString },
+      ]);
+      expect(report.mismatches.filter((item) => item.testId === "t-default")).toEqual([]);
+      expect(report.routes.filter((item) => item.testId === "t-default").map((item) => item.route)).toEqual([v1Unresolved?.route]);
+    }
+    // 期待が誤りコードの試験も文字列のキーでないので未解決
+    const errorTest = { ...defaultTest("t-default", "alpha"), expected: { kind: "error" as const, code: "E" } };
+    const { report } = await evaluateWith(DYAML, errorTest);
+    expect(report.unresolved.filter((item) => item.testId === "t-default").map((item) => item.detail)).toEqual([
+      DEFAULT_VALUE_DETAILS.expectedNotString,
+    ]);
+  });
+
+  it("ほかの試験の結果は、既定値の試験を外した組の v1 の結果と試験 ID ごとに深く等しく、順は組の順。既定値の試験は v1 の runTests に渡らない", async () => {
+    const passed: string[][] = [];
+    const original = runTestsStage.runTests;
+    vi.spyOn(runTestsStage, "runTests").mockImplementation((input) => {
+      passed.push(input.suite.tests.map((test) => test.id));
+      return original(input);
+    });
+    const { app, suite, correspondence, report } = await evaluateWith(withDefault("beta"), defaultTest("t-default", "alpha"));
+    expect(passed).toEqual([SUITE.tests.map((test) => test.id)]);
+    // 対照：既定値の試験を外した組を v1 に表の id の結び付けで直接流す
+    const bound = bindTestsById(app, TABLE, SUITE);
+    const direct = original({
+      app,
+      suite: SUITE,
+      correspondence,
+      mappings: identityMappings(TABLE),
+      roles: toRoleEntries(TABLE),
+      bindings: { tests: bound.bindings, entityNames: bound.entityNames },
+    });
+    const pick = (from: typeof report, testId: string) => ({
+      mismatches: from.mismatches.filter((entry) => entry.testId === testId),
+      unresolved: from.unresolved.filter((entry) => entry.testId === testId),
+      routes: from.routes.filter((entry) => entry.testId === testId),
+      structural: from.structural.filter((entry) => entry.testId === testId),
+    });
+    for (const test of SUITE.tests) expect(pick(report, test.id)).toEqual(pick(direct, test.id));
+    // 順は組の順（既定値の試験は組の 3 番目に合流する）
+    const order = suite.tests.map((test) => test.id);
+    for (const list of [report.mismatches, report.unresolved, report.routes]) {
+      const indices = list.map((entry) => order.indexOf(entry.testId));
+      expect([...indices].sort((a, b) => a - b)).toEqual(indices);
+    }
+    expect(report.mismatches.map((entry) => entry.testId)).toEqual(["t-when-bad", "t-default"]);
+  });
+
+  it("B5 の道具・版の再検査（evaluate・report）が同じ結果で、同じ入力で 2 回同じ結果。bindTests を呼ばない", async () => {
+    const spy = vi.spyOn(bindModule, "bindTests");
+    const { app, context, evaluator, report } = await evaluateWith(withDefault("beta"), defaultTest("t-default", "alpha"));
+    const evaluated = await evaluator.evaluate(app, { source: withDefault("beta") }, context);
+    expect(evaluated.testRun).toEqual(report);
+    const first = await evaluator.report({ source: withDefault("beta") }, context);
+    const second = await evaluator.report({ source: withDefault("beta") }, context);
+    expect(first.testRun).toEqual(report);
+    expect(second).toEqual(first);
+    expect(spy).not.toHaveBeenCalled();
+    // 純粋な関数として 2 回同じ判定
+    const test = defaultTest("t-default", "alpha");
+    expect(judgeDefaultValue(app, TABLE, test)).toEqual(judgeDefaultValue(app, TABLE, test));
+  });
+
+  it("options の外の default は静的チェック（既存の固定文）で落ち、評価に進まない（B4 では照合しない）", async () => {
+    const source = withDefault("gamma");
+    const evaluator = createV11aEvaluator({ table: TABLE, observes: observesWith("t-default") });
+    const report = await evaluator.report({ source }, contextOf(listWithout(), suiteWith(defaultTest("t-default", "gamma"))));
+    expect(report.staticCheck.passed).toBe(false);
+    expect(report.staticCheck.diagnostics.map((diagnostic) => diagnostic.code)).toContain("DATA_FIELD_ENUM_DEFAULT_NOT_IN_OPTIONS");
+    expect(report.testRun).toBeNull();
+    expect(report.correspondence).toBeNull();
   });
 });

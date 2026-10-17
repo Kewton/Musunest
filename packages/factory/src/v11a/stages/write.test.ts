@@ -49,6 +49,7 @@ const inputWith = (
   list: fixtureList(),
   table: fixtureTable(),
   suite: SUITE,
+  observes: new Map([["t1", "validation"]]),
   documents: SAMPLE_DOCUMENTS,
   gateway: makeGateway(client),
   ...extra,
@@ -187,5 +188,75 @@ describe("B1 の戻り値と、追加の要素の一覧を持たないこと", (
   it("このファイルは追加の要素を抽出する関数を持たない（A1 の extraElementsOf・同名の関数を公開しない）", () => {
     const exported = Object.keys(writeModule);
     expect(exported.filter((name) => /extra|declarationElements/i.test(name))).toEqual([]);
+  });
+});
+
+describe("B1 のデータ「固定した試験」に試験ごとの observes を添える（Issue #533）", () => {
+  /** 既定値の試験を含む組（区分の項目の既定値。形は T2 が固定したものと同じ） */
+  const DEFAULT_SUITE = {
+    tests: [
+      ...SUITE.tests,
+      {
+        id: "t2",
+        target: { requirementId: "R1", kind: "field", roleId: "f.item.kind" },
+        kind: "normal",
+        operation: "validate",
+        clock: "2026-09-16T12:00:00+09:00",
+        input: {},
+        referenceData: [],
+        expected: { kind: "ok", value: "alpha" },
+      },
+    ],
+  } as unknown as WriteV11aInput["suite"];
+  const OBSERVES = new Map([
+    ["t1", "validation" as const],
+    ["t2", "default-value" as const],
+  ]);
+
+  const blockOf = (input: string, name: string): unknown =>
+    JSON.parse(input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "null");
+
+  it("各試験に observes があり、observes を除いた組は固定した組と同じ", async () => {
+    const recording = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const outcome = await runWriteV11a(inputWith(recording.client, { suite: DEFAULT_SUITE, observes: OBSERVES }));
+    expect(outcome.ok).toBe(true);
+    const request = recording.structured[0];
+    if (request === undefined) throw new Error("要求が無い");
+    const shown = blockOf(request.input, WRITE_V11A_DATA_NAMES[2]) as { tests: Record<string, unknown>[] };
+    expect(shown.tests.map((test) => test["observes"])).toEqual(["validation", "default-value"]);
+    const withoutObserves = {
+      ...shown,
+      tests: shown.tests.map(({ observes: _observes, ...rest }) => rest),
+    };
+    expect(withoutObserves).toEqual(JSON.parse(JSON.stringify(DEFAULT_SUITE)));
+  });
+
+  it("規則に default の 1 文があり、schema・前置き・ほかの規則は今までどおり", async () => {
+    const rule = WRITE_V11A_RULE_DEFINITIONS.find((definition) => definition.id === "R-w11-10");
+    expect(rule?.text).toContain("default-value");
+    expect(rule?.text).toContain("default に");
+    expect(rule?.since).toBe("Issue #533");
+    // 足したのは末尾の 1 つだけ（ほかの規則の並び・文は変えない）
+    expect(WRITE_V11A_RULE_DEFINITIONS.map((definition) => definition.id)).toEqual(
+      Array.from({ length: 10 }, (_, index) => `R-w11-${String(index + 1).padStart(2, "0")}`),
+    );
+    expect(DECLARATION_V11A_SCHEMA.required).toEqual(["declaration"]);
+    // 同じ組で observes だけを変えても、データの「固定した試験」の塊のほかは変わらない
+    const a = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const b = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    await runWriteV11a(inputWith(a.client, { suite: DEFAULT_SUITE, observes: OBSERVES }));
+    await runWriteV11a(inputWith(b.client, { suite: DEFAULT_SUITE, observes: new Map([["t1", "validation"]]) }));
+    const [ra, rb] = [a.structured[0], b.structured[0]];
+    if (ra === undefined || rb === undefined) throw new Error("要求が無い");
+    expect(ra.instructions).toBe(rb.instructions);
+    expect(ra.rules).toEqual(rb.rules);
+    expect(ra.documents).toEqual(rb.documents);
+    expect(ra.schema).toBe(rb.schema);
+    expect(blockOf(ra.input, WRITE_V11A_DATA_NAMES[0])).toEqual(blockOf(rb.input, WRITE_V11A_DATA_NAMES[0]));
+    expect(blockOf(ra.input, WRITE_V11A_DATA_NAMES[1])).toEqual(blockOf(rb.input, WRITE_V11A_DATA_NAMES[1]));
+    // 写像に無い試験は null を添える（組から落とさない）
+    const shown = blockOf(rb.input, WRITE_V11A_DATA_NAMES[2]) as { tests: Record<string, unknown>[] };
+    expect(shown.tests.map((test) => test["observes"])).toEqual(["validation", null]);
+    expectNoAcceptanceMaterial([ra.input, ...(ra.rules ?? [])]);
   });
 });
