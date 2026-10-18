@@ -1333,11 +1333,14 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(run.record.conditions["v12_flags"]).toEqual({ ledger: true, "search-repair": true, ids: true });
   });
 
-  it("ids on の v1.2 の走りの条件の記録の v12_call_limits は V12_CALL_LIMITS と深く等しい（Issue #616）", async () => {
+  it("ids on の v1.2 の走りの条件の記録の v12_call_limits の 3 つの値は V12_CALL_LIMITS の値と欄ごとに等しい（Issue #616）", async () => {
     const run = await runV11aCli({ dir: `${directory}/v12-call-limits`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
     expect(run.code).toBe(EXIT_OK);
-    expect(run.record.conditions["v12_call_limits"]).toEqual(V12_CALL_LIMITS);
-    expect(run.record.conditions["v12_call_limits"]).toEqual({ logicalCalls: 72, realAttempts: 144, judgeBranch: 80 });
+    const limits = run.record.conditions["v12_call_limits"] as Record<string, unknown>;
+    expect(Object.keys(limits).sort()).toEqual(["judge_branch", "logical_calls", "real_attempts"]);
+    expect(limits["logical_calls"]).toBe(V12_CALL_LIMITS.logicalCalls);
+    expect(limits["real_attempts"]).toBe(V12_CALL_LIMITS.realAttempts);
+    expect(limits["judge_branch"]).toBe(V12_CALL_LIMITS.judgeBranch);
     // 要約の v12_calls は変えない
     expect(run.summary["v12_calls"]).toEqual({ real_attempts: { limit: 144, used: 12 }, judge_branch: { limit: 80, used: 4 } });
   });

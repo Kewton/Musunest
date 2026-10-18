@@ -1115,7 +1115,15 @@ export async function runCli(deps: CliDeps): Promise<number> {
       : {
           pipeline: "v1.2",
           v12_flags: v12Flags,
-          ...(v12Flags.ids ? { v12_call_limits: { ...V12_CALL_LIMITS } } : {}),
+          ...(v12Flags.ids
+            ? {
+                v12_call_limits: {
+                  logical_calls: V12_CALL_LIMITS.logicalCalls,
+                  real_attempts: V12_CALL_LIMITS.realAttempts,
+                  judge_branch: V12_CALL_LIMITS.judgeBranch,
+                },
+              }
+            : {}),
         };
   const recordConditions: PlanCliConditions = v12Conditions === undefined ? conditions : { ...conditions, ...v12Conditions };
 
