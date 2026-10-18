@@ -12,8 +12,12 @@ import type { LlmClient, LlmStructuredRequest } from "../../llm.js";
 import type { RequirementList } from "../../pipeline.js";
 import { ruleDefinitionDefects, ruleTexts, type RejectedCandidate } from "../../stages/prompt.js";
 import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
-import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
+import { expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
+  createCheckedRecordingClient,
+  negative,
+  recordedStructured,
+  t1ResponseOf,
   EMPTY_AGGREGATE_REQUEST_DIFF,
   ENUM_MEMBERSHIP_REQUEST_DIFF,
   FIXTURE_DOCUMENTS,
@@ -44,7 +48,6 @@ import {
   nameTableSha256,
   requirementCopy,
   type NameTable,
-  type NameTableDraft,
 } from "../names.js";
 import {
   NAME_TABLE_PREVIOUS_DATA_NAMES,
@@ -59,7 +62,7 @@ import {
   type NameTablePrevious,
 } from "./name-table.js";
 
-const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
+const structured = recordedStructured;
 
 /** 確定した仕様（抽象的な題材。要件は一覧と同じ） */
 function planOf(list: RequirementList): ConfirmedPlan {
@@ -83,35 +86,14 @@ function planOf(list: RequirementList): ConfirmedPlan {
   };
 }
 
-const TYPE_KEYS = ["fieldType", "valueType", "scope", "form", "action", "hasWhen", "view"] as const;
-
-/** A1 の下書きを、T1 の応答の形（`type` を欄を並べた写像にしたもの）にする */
-function responseOf(draft: NameTableDraft): Record<string, unknown> {
-  return {
-    rows: draft.rows.map((row) => {
-      const type: Record<string, unknown> = Object.fromEntries(TYPE_KEYS.map((key) => [key, null]));
-      if (typeof row.type === "string") type["fieldType"] = row.type;
-      else if (row.type !== null) Object.assign(type, row.type);
-      return { ...row, type };
-    }),
-    requirements: draft.requirements.map((entry) => ({
-      ...entry,
-      verification: {
-        reason: null,
-        checks: [],
-        constraintIds: [],
-        ...entry.verification,
-      },
-    })),
-  };
-}
+const responseOf = t1ResponseOf;
 
 const LIST = fixtureList();
 const PLAN = planOf(LIST);
 const GOOD_RESPONSE = responseOf(draftOf(LIST, fixtureTable()));
 
 async function run(outputs: readonly unknown[], extra: { previous?: NameTablePrevious; observe?: boolean } = {}) {
-  const recording = createRecordingClient(outputs.map(structured));
+  const recording = createCheckedRecordingClient(outputs.map(structured));
   const rejected: RejectedCandidate[] = [];
   const outcome = await runNameTable({
     plan: PLAN,
@@ -259,7 +241,7 @@ describe("T1 の結果", () => {
     const missing = withRequirement(2, ({ nature: _nature, ...rest }) => rest);
     const unknown = withRequirement(2, (entry) => ({ ...entry, nature: "other" }));
     for (const response of [missing, unknown]) {
-      const { outcome, requests } = await run([response]);
+      const { outcome, requests } = await run([negative(response, "分類が欠けた・未知の値の応答。strict の schema では出ないが、形の検査の固定文を観測する負例")]);
       expect(requests).toHaveLength(1);
       if (outcome.ok) throw new Error("落ちるはず");
       expect(outcome.failure).toMatchObject({ kind: "unmet", attempts: 1 });
@@ -299,8 +281,9 @@ describe("T1 の結果", () => {
 
   it("形に 1 回落ちて通る例で calls 2・口が 1 回（試行 1）。口の有無で偽物が受け取った要求が同じ", async () => {
     const bad = { rows: "x", requirements: [] };
-    const observed = await run([bad, GOOD_RESPONSE], { observe: true });
-    const silent = await run([bad, GOOD_RESPONSE]);
+    const badRecord = negative(bad, "rows が並びでない応答。strict の schema では出ないが、形の検査の落ちとやり直しを観測する負例");
+    const observed = await run([badRecord, GOOD_RESPONSE], { observe: true });
+    const silent = await run([badRecord, GOOD_RESPONSE]);
     expect(observed.outcome.ok).toBe(true);
     expect(observed.requests).toHaveLength(2);
     expect(observed.rejected).toEqual([
@@ -312,14 +295,14 @@ describe("T1 の結果", () => {
   });
 
   it("形に 2 回続けて落ちれば malformed（calls 2）", async () => {
-    const { outcome, requests } = await run([[], []]);
+    const { outcome, requests } = await run([negative([], "object でない応答（形の落ちが 2 回続く負例）"), negative([], "object でない応答（形の落ちが 2 回続く負例）")]);
     expect(requests).toHaveLength(2);
     expect(outcome).toMatchObject({ ok: false, failure: { kind: "malformed", attempts: 2 } });
   });
 
   it("全文が同じ要件が一覧にあれば呼ばずに unmet（attempts 0）", async () => {
     const list: RequirementList = { ...LIST, requirements: [LIST.requirements[0]!, { ...LIST.requirements[0]!, id: "R9" }] };
-    const recording = createRecordingClient([]);
+    const recording = createCheckedRecordingClient([]);
     const outcome = await runNameTable({
       plan: planOf(list),
       list,
@@ -430,7 +413,7 @@ describe("T1 は要件ごとの写しをコードが渡し、依頼文の引用�
     (response["requirements"] as Record<string, unknown>[]).forEach((entry, index) => {
       entry["copy"] = QUOTED.requirements[index]!.text;
     });
-    const recording = createRecordingClient([structured(response)]);
+    const recording = createCheckedRecordingClient([structured(response)]);
     const outcome = await runQuoted(recording.client);
     if (outcome.ok) throw new Error("落ちるはず");
     expect(outcome.failure).toMatchObject({ kind: "unmet", attempts: 1 });
@@ -448,7 +431,7 @@ describe("T1 は要件ごとの写しをコードが渡し、依頼文の引用�
       const response = clone(responseOf(draftOf(QUOTED, fixtureTable())));
       const rows = response["rows"] as Record<string, Record<string, unknown>>[];
       rows[at]!["source"] = { ...rows[at]!["source"], quote };
-      const recording = createRecordingClient([structured(response)]);
+      const recording = createCheckedRecordingClient([structured(response)]);
       const outcome = await runQuoted(recording.client);
       if (outcome.ok) throw new Error("落ちるはず");
       expect(outcome.failure).toMatchObject({
@@ -463,7 +446,7 @@ describe("T1 は要件ごとの写しをコードが渡し、依頼文の引用�
     const response = clone(responseOf(draftOf(QUOTED, fixtureTable())));
     const requirements = response["requirements"] as Record<string, unknown>[];
     [requirements[0], requirements[1]] = [requirements[1]!, requirements[0]!];
-    const outcome = await runQuoted(createRecordingClient([structured(response)]).client);
+    const outcome = await runQuoted(createCheckedRecordingClient([structured(response)]).client);
     if (outcome.ok) throw new Error("落ちるはず");
     if (outcome.failure.kind !== "unmet") throw new Error("unmet のはず");
     expect(outcome.failure.problems).toContainEqual({
@@ -514,11 +497,8 @@ describe.each(LEDGER_CASES)("T1 の確かめ方 default-value（Issue #533。旗
 
   it("strict の形の応答（ほかの種類は value null）で、default-value の要件の value が表に残る", async () => {
     const list = fixtureDefaultValueList();
-    const response = responseOf(draftOf(list, tableFor(fixtureDefaultValueTable())));
-    for (const entry of response["requirements"] as { verification: Record<string, unknown> }[]) {
-      entry.verification = { value: null, ...entry.verification };
-    }
-    const recording = createRecordingClient([structured(response)]);
+    const response = responseOf(draftOf(list, tableFor(fixtureDefaultValueTable())), ledger);
+    const recording = createCheckedRecordingClient([structured(response)]);
     const outcome = await runNameTable({
       plan: planOf(list),
       list,
@@ -533,7 +513,7 @@ describe.each(LEDGER_CASES)("T1 の確かめ方 default-value（Issue #533。旗
 
   it("負例：options の外の value は T1' で unmet（固定文）", async () => {
     const list = fixtureDefaultValueList();
-    const recording = createRecordingClient([structured(responseOf(draftOf(list, tableFor(fixtureDefaultValueTable("gamma")))))]);
+    const recording = createCheckedRecordingClient([structured(responseOf(draftOf(list, tableFor(fixtureDefaultValueTable("gamma"))), ledger))]);
     const outcome = await runNameTable({
       plan: planOf(list),
       list,
@@ -576,7 +556,7 @@ describe("旗 on：台帳から enum-membership の行を除いた導出なら�
     const list = fixtureDefaultValueList();
     const response = responseOf(draftOf(list, fixtureDefaultValueTable()));
     const runWith = async (ledger: LedgerView | undefined, previous?: NameTablePrevious) => {
-      const recording = createRecordingClient([structured(response)]);
+      const recording = createCheckedRecordingClient([structured(response)]);
       const outcome = await runNameTable({
         plan: planOf(list),
         list,
@@ -621,7 +601,7 @@ describe("旗 on：#548 の台帳（empty-aggregate の行を除いた導出）�
     const list = fixtureDefaultValueList();
     const response = responseOf(draftOf(list, fixtureDefaultValueTable()));
     const runWith = async (ledger: LedgerView | undefined, previous?: NameTablePrevious) => {
-      const recording = createRecordingClient([structured(response)]);
+      const recording = createCheckedRecordingClient([structured(response)]);
       const outcome = await runNameTable({
         plan: planOf(list),
         list,
@@ -695,9 +675,9 @@ describe("旗 on：#549 の台帳の T1 の要求と #548 の台帳の差は emp
   it("同じ表の応答（#549 の台帳の on は計算の行に集計の種類と集計元を持つ）で、要求の差は名指しの場所（と previous の応答の写しの aggregate）だけで、その分を除けばバイト列で同じ。表は aggregate の分だけ違う", async () => {
     const list = fixtureDefaultValueList();
     const runWith = async (ledger: LedgerView, table: NameTable, withPrevious: boolean) => {
-      const response = responseOf(draftOf(list, table));
+      const response = responseOf(draftOf(list, table), ledger);
       const previous: NameTablePrevious = { response, problems: [{ field: "rows[0]", message: "前回の指示" }], rejections: [], advice: [] };
-      const recording = createRecordingClient([structured(response)]);
+      const recording = createCheckedRecordingClient([structured(response)]);
       const outcome = await runNameTable({
         plan: planOf(list),
         list,
@@ -725,7 +705,12 @@ describe("旗 on：#549 の台帳の T1 の要求と #548 の台帳の差は emp
   it("未登録の拒否：旗 off・#548 の台帳で計算の行に aggregate を書いた応答は T1' の形で落ちる（null だけなら今の表に戻る）", async () => {
     const list = fixtureList();
     for (const ledger of [undefined, LEDGER_VIEW_2B]) {
-      const recording = createRecordingClient([structured(responseOf(draftOf(list, withAggregates(fixtureTable()))))]);
+      // 旗 off・#548 の台帳の schema は行の型に aggregate の欄を持たない。未登録の拒否は、strict では出ない応答を形の検査が断る負例
+      const unregistered = negative(
+        responseOf(draftOf(list, withAggregates(fixtureTable()))),
+        "旗 off・#548 の台帳の schema は aggregate の欄を持たない。段の未登録の拒否を観測する負例",
+      );
+      const recording = createCheckedRecordingClient([structured(unregistered)]);
       const outcome = await runNameTable({
         plan: planOf(list),
         list,
@@ -736,24 +721,31 @@ describe("旗 on：#549 の台帳の T1 の要求と #548 の台帳の差は emp
       if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
       expect(outcome.failure.problems.map((problem) => problem.message)).toEqual(Array(3).fill(UNREGISTERED_AGGREGATE_MESSAGE));
       // 計算でない行に aggregate を書いた応答は、種類に合わない欄として落ちる
-      const response = responseOf(draftOf(list, fixtureTable()));
+      const response = responseOf(draftOf(list, fixtureTable()), ledger);
       ((response["rows"] as Record<string, Record<string, unknown>>[])[0]!["type"] as Record<string, unknown>)["aggregate"] = { kind: "count", entity: "e.item" };
       const second = await runNameTable({
         plan: planOf(list),
         list,
         documents: FIXTURE_DOCUMENTS,
-        gateway: makeGateway(createRecordingClient([structured(response)]).client),
+        gateway: makeGateway(
+          createCheckedRecordingClient([
+            structured(negative(response, "計算でない行の型に集計の種類と集計元を書いた応答。schema は entity の行の aggregate に null か（台帳が持つ走り）種類と集計元を許すが、旗 off・#548 の台帳では欄が無い")),
+          ]).client,
+        ),
         ...(ledger === undefined ? {} : { ledger }),
       });
       if (second.ok || second.failure.kind !== "unmet") throw new Error("unmet でない");
       expect(second.failure.problems).toContainEqual({ field: "rows[0].type", message: "行の種類に合わない型の欄が null でない" });
     }
-    const nulls = responseOf(draftOf(list, withAggregates(fixtureTable(), { "c.itemCount": null, "c.byKind": null, "c.byMonth": null })));
+    const nulls = negative(
+      responseOf(draftOf(list, withAggregates(fixtureTable(), { "c.itemCount": null, "c.byKind": null, "c.byMonth": null }))),
+      "旗 off の schema は aggregate の欄を持たない。null だけなら今の表に戻ることを観測する負例",
+    );
     const outcome = await runNameTable({
       plan: planOf(list),
       list,
       documents: FIXTURE_DOCUMENTS,
-      gateway: makeGateway(createRecordingClient([structured(nulls)]).client),
+      gateway: makeGateway(createCheckedRecordingClient([structured(nulls)]).client),
     });
     if (!outcome.ok) throw new Error("通るはず");
     expect(outcome.value.table).toEqual(fixtureTable());
@@ -761,14 +753,17 @@ describe("旗 on：#549 の台帳の T1 の要求と #548 の台帳の差は emp
 
   it("旗 on：種別 aggregate で aggregate が null の応答は T1' で unmet（固定文）。今の台帳の応答で aggregate を省くと形で落ちる", async () => {
     const list = fixtureList();
-    const runOn = async (table: NameTable) => {
-      const recording = createRecordingClient([structured(responseOf(draftOf(list, table)))]);
+    const runOn = async (table: NameTable, omitKey = false) => {
+      const response = omitKey
+        ? negative(responseOf(draftOf(list, table)), "aggregate の欄を省いた応答。strict の schema は必須にするので出ないが、段の形の検査が断ることを観測する負例")
+        : responseOf(draftOf(list, table), PROPERTY_LEDGER_VIEW);
+      const recording = createCheckedRecordingClient([structured(response)]);
       return runNameTable({ plan: planOf(list), list, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(recording.client), ledger: PROPERTY_LEDGER_VIEW });
     };
     const missing = await runOn(withAggregates(fixtureTable(), { "c.itemCount": null }));
     if (missing.ok || missing.failure.kind !== "unmet") throw new Error("unmet でない");
     expect(missing.failure.problems).toEqual([{ field: "rows[8].type.aggregate", message: COMPUTATION_AGGREGATE_MESSAGES.missing }]);
-    const omitted = await runOn(fixtureTable());
+    const omitted = await runOn(fixtureTable(), true);
     if (omitted.ok || omitted.failure.kind !== "unmet") throw new Error("unmet でない");
     expect(omitted.failure.problems.map((problem) => problem.field)).toEqual([
       "rows[8].type.aggregate",
@@ -786,8 +781,11 @@ describe("旗 on：今の台帳の T1 の要求と #549 の台帳の差は non-r
   const ROW = PROPERTY_LEDGER.find((entry) => entry.id === "non-requirement");
   const AGGREGATE_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "empty-aggregate");
 
-  const runWith = async (list: RequirementList, table: NameTable, ledger: LedgerView | undefined, previous?: NameTablePrevious) => {
-    const recording = createRecordingClient([structured(responseOf(draftOf(list, table)))]);
+  const runWith = async (list: RequirementList, table: NameTable, ledger: LedgerView | undefined, previous?: NameTablePrevious, unregisteredKind = false) => {
+    const response = responseOf(draftOf(list, table), ledger);
+    const recording = createCheckedRecordingClient([
+      structured(unregisteredKind ? negative(response, "確かめ方の kind に non-requirement が無い schema（旗 off・#549 の台帳）。未登録の拒否を観測する負例") : response),
+    ]);
     const outcome = await runNameTable({
       plan: planOf(list),
       list,
@@ -855,15 +853,15 @@ describe("旗 on：今の台帳の T1 の要求と #549 の台帳の差は non-r
     const ownedRun = await runWith(list, owned, PROPERTY_LEDGER_VIEW);
     if (ownedRun.outcome.ok || ownedRun.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
     expect(ownedRun.outcome.failure.problems).toEqual([{ field: "verification[5]", message: t1.messages.count }]);
-    const valued = responseOf(draftOf(list, base));
+    const valued = responseOf(draftOf(list, base), PROPERTY_LEDGER_VIEW);
     ((valued["requirements"] as Record<string, Record<string, unknown>>[])[5]!["verification"] as Record<string, unknown>)["value"] = "x";
-    const recording = createRecordingClient([structured(valued)]);
+    const recording = createCheckedRecordingClient([structured(valued)]);
     const valuedRun = await runNameTable({ plan: planOf(list), list, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(recording.client), ledger: PROPERTY_LEDGER_VIEW });
     if (valuedRun.ok || valuedRun.failure.kind !== "unmet") throw new Error("unmet でない");
     expect(valuedRun.failure.problems).toEqual([{ field: "requirements[5].verification.value", message: t1.messages.valueShape }]);
     // 未登録の拒否：旗 off・#549 の台帳では kind の一覧に無い（形で落ちる）
     for (const [ledger, table] of [[undefined, fixtureNonRequirementTable()], [LEDGER_VIEW_2C, base]] as const) {
-      const { outcome } = await runWith(list, table, ledger);
+      const { outcome } = await runWith(list, table, ledger, undefined, true);
       if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
       expect(outcome.failure.problems.map((problem) => problem.field)).toEqual(["requirements[5].verification.kind"]);
       expect(outcome.failure.problems[0]?.message).not.toContain("non-requirement");

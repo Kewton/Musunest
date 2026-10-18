@@ -15,6 +15,10 @@
 // v1.1α（`07-architecture-v1.1a.md` §3・D12・Issue #511）の段は、**別の封筒**（`stage-envelope-v11a`）に入れる。
 // v1 の封筒に混ぜると v1 の要求のバイト列が変わるので、v1 の一覧・名前・`ENVELOPE_SCHEMA` の実体は変えず、
 // adapter が封筒の識別子（`ENVELOPE_IDS`）で選ぶ。
+//
+// 経路 v1.2（`08-architecture-v1.2.md` §4.1・Issue #588）の段は、**さらに別の封筒**（`stage-envelope-v12`）に入れる。
+// 一覧は `--pipeline v1.2` の旗の組（`V12_PIPELINE_FLAGS`）から導き、旗 on の段も台帳の導出を持たない段も同じ実体を
+// 送る（1 本の走りの中で前置きを 1 種類にする）。後の手の段はこの一覧に足す（v1.1α の一覧には足さない）。
 import { QUESTIONS_SCHEMA, QUESTIONS_SCHEMA_NAME } from "./plan/questions.js";
 import { SURFACE_SCHEMA, SURFACE_SCHEMA_NAME } from "./plan/surface.js";
 import { ARBITRATION_SCHEMA, ARBITRATION_SCHEMA_NAME } from "./stages/arbitrate.js";
@@ -30,10 +34,10 @@ import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./
 import { SEMANTIC_CHECK_SCHEMA, SEMANTIC_CHECK_SCHEMA_NAME } from "./v11a/stages/semantic-check.js";
 import { TEST_SPEC_SCHEMA, TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
 import { DECLARATION_V11A_SCHEMA, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
-import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
+import { fromPublicV12Flags, ledgerViewOf, V12_PIPELINE_FLAGS, type V12Flags } from "./v12/ledger.js";
 
 /** 封筒の識別子（adapter が選ぶ。既定は v1） */
-export const ENVELOPE_IDS = ["v1", "v1.1a"] as const;
+export const ENVELOPE_IDS = ["v1", "v1.1a", "v1.2"] as const;
 
 /** 封筒の識別子の型 */
 export type EnvelopeId = (typeof ENVELOPE_IDS)[number];
@@ -159,11 +163,41 @@ export interface StageEnvelope {
   readonly entries: readonly StageEnvelopeEntry[];
 }
 
+/** v1.2 の封筒の JSON Schema の名前（`--pipeline v1.2` の全段で同じ。`text.format.name`。Issue #588） */
+export const ENVELOPE_SCHEMA_NAME_V12 = "stage-envelope-v12";
+
+/**
+ * 旗の組から v1.2 の封筒の段の一覧を導く（純粋。Issue #588）。段の並びは v1.1α と同じで、旗 `v12.ledger` が on なら
+ * T1・T2 の枝を台帳から導いた schema（`nameTableSchemaOf`・`testSpecSchemaOf`。段が渡すものと同じ導出）にする。
+ * ほかの段は v1.1α と同じ枝。後の手の段は、その旗が on のときここで足す。
+ */
+export function stageEnvelopeEntriesV12Of(flags: Pick<V12Flags, "ledger">): readonly StageEnvelopeEntry[] {
+  const ledger = ledgerViewOf(flags);
+  if (ledger === undefined) return STAGE_ENVELOPE_ENTRIES_V11A;
+  return STAGE_ENVELOPE_ENTRIES_V11A.map((entry) =>
+    entry.stage === NAME_TABLE_SCHEMA_NAME
+      ? { stage: entry.stage, schema: nameTableSchemaOf(ledger) }
+      : entry.stage === TEST_SPEC_SCHEMA_NAME
+        ? { stage: entry.stage, schema: testSpecSchemaOf(ledger) }
+        : entry,
+  );
+}
+
+/** v1.2 の封筒に入れる段の一覧（`--pipeline v1.2` の旗の組 `V12_PIPELINE_FLAGS` から導く。Issue #588） */
+export const STAGE_ENVELOPE_ENTRIES_V12: readonly StageEnvelopeEntry[] = stageEnvelopeEntriesV12Of(
+  fromPublicV12Flags(V12_PIPELINE_FLAGS),
+);
+
+/** v1.2 の全段で送る封筒の schema（起動時に 1 度だけ組む。全段で**同じ実体**を使う） */
+export const ENVELOPE_SCHEMA_V12: Record<string, unknown> = buildEnvelopeSchema(STAGE_ENVELOPE_ENTRIES_V12);
+
 /** 封筒の識別子から封筒を引く（v1 は今までと同じ名前・同じ実体） */
 export function envelopeOf(envelope: EnvelopeId = "v1"): StageEnvelope {
-  return envelope === "v1.1a"
-    ? { name: ENVELOPE_SCHEMA_NAME_V11A, schema: ENVELOPE_SCHEMA_V11A, entries: STAGE_ENVELOPE_ENTRIES_V11A }
-    : { name: ENVELOPE_SCHEMA_NAME, schema: ENVELOPE_SCHEMA, entries: STAGE_ENVELOPE_ENTRIES };
+  return envelope === "v1.2"
+    ? { name: ENVELOPE_SCHEMA_NAME_V12, schema: ENVELOPE_SCHEMA_V12, entries: STAGE_ENVELOPE_ENTRIES_V12 }
+    : envelope === "v1.1a"
+      ? { name: ENVELOPE_SCHEMA_NAME_V11A, schema: ENVELOPE_SCHEMA_V11A, entries: STAGE_ENVELOPE_ENTRIES_V11A }
+      : { name: ENVELOPE_SCHEMA_NAME, schema: ENVELOPE_SCHEMA, entries: STAGE_ENVELOPE_ENTRIES };
 }
 
 /**
@@ -175,24 +209,14 @@ export function envelopeStageFor(schemaName: string, envelope: EnvelopeId = "v1"
 }
 
 /**
- * 旗 `v12.ledger` が on の走りの封筒の段の一覧（Issue #549 の直し）。T1・T2 の枝を台帳から導いた schema
- * （`nameTableSchemaOf`・`testSpecSchemaOf`）にし、ほかの段は v1.1α と同じ。T1 と T2 は同じ封筒を送る（その間で
- * キャッシュが当たる）。台帳の導出を持たない段の要求は旗 off と同じ schema なので、adapter は旗を区別できず v1.1α の
- * 封筒を送る。名前は v1.1α の封筒と同じ（選ぶのは段が渡す schema）。
+ * 旗 `v12.ledger` が on の走りの封筒の段の一覧（Issue #549 の直し）。Issue #588 からは v1.2 の封筒の一覧
+ * （`STAGE_ENVELOPE_ENTRIES_V12`）そのもの。識別子 `v1.1a` の要求で、段の schema が旗 on の枝と等しいときに使う
+ * （library の呼び手が `v1.1a` を渡したときの振る舞い。名前は v1.1α の封筒と同じ）。
  */
-export const STAGE_ENVELOPE_ENTRIES_V12_LEDGER: readonly StageEnvelopeEntry[] = STAGE_ENVELOPE_ENTRIES_V11A.map(
-  (entry) =>
-    entry.stage === NAME_TABLE_SCHEMA_NAME
-      ? { stage: entry.stage, schema: nameTableSchemaOf(PROPERTY_LEDGER_VIEW) }
-      : entry.stage === TEST_SPEC_SCHEMA_NAME
-        ? { stage: entry.stage, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW) }
-        : entry,
-);
+export const STAGE_ENVELOPE_ENTRIES_V12_LEDGER: readonly StageEnvelopeEntry[] = STAGE_ENVELOPE_ENTRIES_V12;
 
-/** 旗 `v12.ledger` が on の走りで送る封筒の schema（起動時に 1 度だけ組む） */
-export const ENVELOPE_SCHEMA_V12_LEDGER: Record<string, unknown> = buildEnvelopeSchema(
-  STAGE_ENVELOPE_ENTRIES_V12_LEDGER,
-);
+/** 旗 `v12.ledger` が on の走りで送る封筒の schema（v1.2 の封筒と同じ実体。Issue #588） */
+export const ENVELOPE_SCHEMA_V12_LEDGER: Record<string, unknown> = ENVELOPE_SCHEMA_V12;
 
 /** 1 つの要求について送る封筒（その段の枝と、封筒の名前・schema） */
 export interface ResolvedStageEnvelope {
@@ -213,8 +237,10 @@ function sameSchema(a: unknown, b: unknown): boolean {
  * 封筒の枝は**段が渡した schema と深く等しく**なければならない——段は台帳から schema を導く（旗 on の T1・T2）ので、
  * 起動時に組んだ定数の封筒を送ると、検証の側だけが台帳の形を求め、モデルには届かない。次の順で選ぶ：
  *
- *   1. 段の schema が選んだ封筒の枝と等しい … その封筒の実体（旗 off と v1 は今までとバイト列で同じ）
- *   2. v1.1α の封筒で、段の schema が旗 on の封筒の枝と等しい … 旗 on の封筒（on の全段で同じ）
+ *   1. 段の schema が選んだ封筒の枝と等しい … その封筒の実体（旗 off と v1 は今までとバイト列で同じ。v1.2 は
+ *      旗の組から導いた一覧なので、`--pipeline v1.2` の全段が同じ実体になる。Issue #588）
+ *   2. v1.1α の封筒で、段の schema が旗 on の封筒の枝と等しい … 旗 on の封筒（library の呼び手が `v1.1a` を渡した
+ *      ときの振る舞い。入口の v1.2 の走りは識別子 `v1.2` を渡すので、ここを通らない）
  *   3. どちらでもない … 選んだ封筒のその段の枝だけを段の schema に差し替えた封筒（段ごとに組む）
  */
 export function resolveStageEnvelope(

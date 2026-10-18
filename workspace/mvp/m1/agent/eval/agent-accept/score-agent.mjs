@@ -621,10 +621,15 @@ export const PLAN_TABLE_OUTCOMES = ["confirmed", "cannot-confirm", "stopped", "u
 /** Plan の段（packages/factory の PLAN_STAGE_IDS） */
 export const PLAN_STAGE_IDS = ["requirements", "catalog", "surface", "surface-check", "questions", "answers", "confirm"];
 /** v1.1α の段（#505 が packages/factory の record.ts の STAGE_IDS の末尾に足す 7 つ。A1 の順） */
-export const V11A_STAGE_IDS = ["name-table", "semantic-check", "test-spec", "name-check", "decl-check", "coverage", "carry-over"];
+/** 工場が手 3a で足す段（C1 の vocabulary・C2 の mapping。採点を先に足す。工場の STAGE_IDS に入ったら外す＝#593）。照合の試験はこの定数のうち dist に無いものだけを許す */
+export const FACTORY_PENDING_STAGE_IDS = ["vocabulary", "mapping"];
+export const V11A_STAGE_IDS = ["name-table", "semantic-check", "test-spec", "name-check", "decl-check", "coverage", "carry-over", ...FACTORY_PENDING_STAGE_IDS];
 /** 生成の段（packages/factory の record.ts の STAGE_IDS。v1 の 12 段のあとに v1.1α の 7 段。run-agent.mjs はこの一覧を import する） */
 export const BUILD_STAGE_IDS = ["requirements", "reverse-check", "design", "test-suite", "write", "static-check", "correspondence", "run-tests", "repair", "arbitration", "judge", "bundle", ...V11A_STAGE_IDS];
 const STAGE_ID_LIST = [...new Set([...PLAN_STAGE_IDS, ...BUILD_STAGE_IDS])];
+/** 要約の段の記録のどれかに新しい段（FACTORY_PENDING_STAGE_IDS）があるか。出力する行の集合は、あるときだけ新しい段を足す（無い記録の出力を変えない） */
+const hasPendingStage = (summaries) => summaries.some((s) => isObj(s) && Array.isArray(s.stages) && s.stages.some((st) => isObj(st) && FACTORY_PENDING_STAGE_IDS.includes(st.stage)));
+const rowStageIds = (withPending) => BUILD_STAGE_IDS.filter((id) => withPending || !FACTORY_PENDING_STAGE_IDS.includes(id));
 /** 失敗の種類（packages/factory の record.ts の FAILURE_KINDS） */
 export const FAILURE_KINDS = ["limit", "deadline", "budget", "call-limit", "timeout", "network", "http", "balance", "malformed", "refused", "tool-arguments", "invalid-request", "unmet", "incomplete", "unknown"];
 /** 確定できない理由の出どころ（packages/factory の CANNOT_CONFIRM_SOURCES） */
@@ -1005,6 +1010,8 @@ export function firstPassOf(records) {
   if (r.retries === undefined || r.retries === null) return true;
   return isObj(r.retries) && r.retries.shape === 0 && r.retries.content === 0;
 }
+/** 全記録が 1 回目で通過（新しい段の集約。記録ごとに firstPassOf） */
+export const allFirstPassOf = (records) => records.length > 0 && records.every((r) => firstPassOf([r]));
 const unobservedLabel = (n) => `今回未観測（0/${n}）`;
 /**
  * 漏斗（段ごとの条件付き通過率。設計書 08 §8.1）。entries ＝ 予定した本ごとの [{ state, summary（要約か null）, verification（検証の記録か null）, exhausted }]。
@@ -1017,11 +1024,13 @@ export function funnelOf(entries) {
   const n = entries.length;
   const ran = entries.filter((e) => e.state === "executed" && isObj(e.summary));
   const recordsOf = (e, id) => (Array.isArray(e.summary.stages) ? e.summary.stages.filter((st) => isObj(st) && st.stage === id) : []);
-  const stages = Object.fromEntries(BUILD_STAGE_IDS.map((id) => {
+  const pending = hasPendingStage(ran.map((e) => e.summary));
+  const stages = Object.fromEntries(rowStageIds(pending).map((id) => {
     const per = ran.map((e) => recordsOf(e, id)).filter((xs) => xs.length > 0);
     const reached = per.length;
     const codeStage = reached > 0 && per.every((xs) => xs.every((st) => st.calls === 0));
-    const firstPass = codeStage ? null : per.filter(firstPassOf).length;
+    // 新しい段は束ごとに複数の記録になるので、1 回目で通過は全記録で集約する（既存の段は最初の記録だけ）
+    const firstPass = codeStage ? null : per.filter(FACTORY_PENDING_STAGE_IDS.includes(id) ? allFirstPassOf : firstPassOf).length;
     const passed = per.filter((xs) => xs.some((st) => st.status === "ok")).length;
     const stopped = ran.filter((e) => isObj(e.summary.failure) && e.summary.failure.stage === id).length;
     const rate = (k) => (k === null ? null : reached === 0 ? unobservedLabel(n) : fmt(k, reached));
@@ -1229,6 +1238,16 @@ export const PAIR_NULL_REASONS = ["one_side", "missing", "not_applicable"];
 export function stageValuesOf(summary, stage, codeStage) {
   if (!isObj(summary) || !Array.isArray(summary.stages)) return { missing: true, values: Object.fromEntries(STAGE_METRICS.map((k) => [k, null])) };
   const xs = summary.stages.filter((st) => isObj(st) && st.stage === stage);
+  // 設計の役割（v1.1α の段の名前で引く群）：name-table が無く vocabulary が 1 つ以上ある本は C1・C2 の記録で読む。
+  // 到達 ＝ vocabulary の記録、通過 ＝ semantic-check の記録（C3 に渡った印）、1 回目で通過 ＝ 通過かつ vocabulary・mapping の全記録が 1 回目で通過
+  if (stage === "name-table" && xs.length === 0) {
+    const of = (id) => summary.stages.filter((st) => isObj(st) && st.stage === id);
+    const vocab = of("vocabulary");
+    if (vocab.length > 0) {
+      const passed = of("semantic-check").length > 0;
+      return { missing: false, values: { reached: 1, first_pass: codeStage ? null : passed && allFirstPassOf([...vocab, ...of("mapping")]) ? 1 : 0, passed: passed ? 1 : 0 } };
+    }
+  }
   const reached = xs.length > 0;
   return { missing: false, values: { reached: reached ? 1 : 0, first_pass: codeStage ? null : reached && firstPassOf(xs) ? 1 : 0, passed: xs.some((st) => st.status === "ok") ? 1 : 0 } };
 }
@@ -1654,7 +1673,7 @@ export function anonymize(full) {
 const UNOBSERVED = /^今回未観測（0\/\d+）$/;
 const rateOrLabel = (x) => rateOrNull(x) ?? (typeof x === "string" && UNOBSERVED.test(x) ? x : null);
 const REACHED = /^\d+\/\d+$/;
-const anonymousFunnel = (f, ids = BUILD_STAGE_IDS) => (!isObj(f) ? null : {
+const anonymousFunnel = (f, ids = rowStageIds(FACTORY_PENDING_STAGE_IDS.some((id) => isObj(f?.stages?.[id])))) => (!isObj(f) ? null : {
   ...intsOf(f, ["planned", "executed"]),
   stages: Object.fromEntries(ids.map((id) => {
     const s = f.stages?.[id];
@@ -1718,6 +1737,8 @@ export const V11A_APPROVED_LIMITS = { "name-table": 32768, "semantic-check": 163
 export const V11A_STOP_NAMES = ["name-table:unmet", "semantic-check:malformed", "test-spec:unmet", "decl-check:malformed", "carry-over:unmet"];
 export const DECL_CHECK_LIMIT = "decl-check:limit";
 export const EXPECTED_STOPS = [...V11A_STOP_NAMES, DECL_CHECK_LIMIT];
+/** 新しい段の停止の名前。0 件の行は、新しい段の記録がある入力でだけ EXPECTED_STOPS の後ろに足す */
+export const PENDING_STOP_NAMES = ["vocabulary:unmet", "mapping:unmet"];
 /** 要約の stop_reason の既知の値（run-agent.mjs の STOP_VALUES と同じ） */
 export const STOP_REASON_VALUES = ["completed", "stagnation", "limit", "unresolved", "deadline", ...FAILURE_KINDS];
 /**
@@ -1892,18 +1913,19 @@ function groupFacts(dir, plannedIds) {
 }
 /** 停止段の内訳（群ごと）：予定・未実行・途中・要約なしと、値ごとの本数。期待する値（A5 の 5 つと decl-check:limit）は 0 件も並べる */
 export function stopsOf(facts) {
+  const expectedNames = hasPendingStage(facts.filter((f) => f.state === "executed").map((f) => f.summary)) ? [...EXPECTED_STOPS, ...PENDING_STOP_NAMES] : EXPECTED_STOPS;
   const executed = facts.filter((f) => f.state === "executed");
   const values = {};
   for (const f of executed) { if (f.summary === null) continue; const v = stopValueOf(f.summary, f.exhausted); values[v] = (values[v] ?? 0) + 1; }
   return {
     planned: facts.length, unexecuted: facts.filter((f) => f.state === "unexecuted").length, incomplete: facts.filter((f) => f.state === "incomplete").length,
-    no_summary: executed.filter((f) => f.summary === null).length, values, expected: Object.fromEntries(EXPECTED_STOPS.map((k) => [k, values[k] ?? 0])),
+    no_summary: executed.filter((f) => f.summary === null).length, values, expected: Object.fromEntries(expectedNames.map((k) => [k, values[k] ?? 0])),
   };
 }
 /** 段ごとの到達数（段の記録に現れた本の数）と予定数。0 件は「今回未観測」と分母を併記 */
 export function reachOf(facts) {
   const n = facts.length;
-  return Object.fromEntries(BUILD_STAGE_IDS.map((id) => {
+  return Object.fromEntries(rowStageIds(hasPendingStage(facts.filter((f) => f.state === "executed").map((f) => f.summary))).map((id) => {
     const reached = facts.filter((f) => f.state === "executed" && Array.isArray(f.summary?.stages) && f.summary.stages.some((st) => st?.stage === id)).length;
     return [id, { reached, planned: n, label: reached === 0 ? `今回未観測（0/${n}）` : `${reached}/${n}` }];
   }));
@@ -2104,8 +2126,8 @@ export function anonymizeCompare(full) {
       fingerprints: Object.fromEntries(COMPARE_FINGERPRINT_CHECKS.map((k) => [k, boolOrNull(x.fingerprints?.[k])])),
       pass_executed: rateOrNull(x.pass_executed), pass_planned: rateOrNull(x.pass_planned), factory_verdicts: intsOf(x.factory_verdicts, [...FACTORY_VERDICTS, "unknown", "absent"]),
       accepted: intsOf(x.accepted, ["unevaluated", "fail"]),
-      stops: { ...intsOf(x.stops, ["planned", "unexecuted", "incomplete", "no_summary"]), values: vals, expected: intsOf(x.stops?.expected, EXPECTED_STOPS) },
-      reach: Object.fromEntries(BUILD_STAGE_IDS.map((id) => { const r = x.reach?.[id]; const reached = intOrNull(r?.reached), planned = intOrNull(r?.planned); return [id, { reached, planned, label: reached === null || planned === null ? null : reached === 0 ? `今回未観測（0/${planned}）` : `${reached}/${planned}` }]; })),
+      stops: { ...intsOf(x.stops, ["planned", "unexecuted", "incomplete", "no_summary"]), values: vals, expected: intsOf(x.stops?.expected, [...EXPECTED_STOPS, ...PENDING_STOP_NAMES.filter((k) => isObj(x.stops?.expected) && k in x.stops.expected)]) },
+      reach: Object.fromEntries(rowStageIds(FACTORY_PENDING_STAGE_IDS.some((id) => isObj(x.reach?.[id]))).map((id) => { const r = x.reach?.[id]; const reached = intOrNull(r?.reached), planned = intOrNull(r?.planned); return [id, { reached, planned, label: reached === null || planned === null ? null : reached === 0 ? `今回未観測（0/${planned}）` : `${reached}/${planned}` }]; })),
       carry_over: !isObj(x.carry_over) ? null : { ...intsOf(x.carry_over, ["runs", "observed", "missing", "runs_with_carry_over"]), sources: intsOf(x.carry_over.sources, [...CARRY_OVER_SOURCES, "unknown"]) },
       funnel: anonymousFunnel(x.funnel), pass_k: anonymousPassK(x.pass_k), verdicts: anonymousVerdicts(x.verdicts),
       ...anonymous539(x),
@@ -2157,7 +2179,7 @@ export const STAGE_RECORD_MISMATCHES = ["range", "plan-source", "input", "stages
  * 範囲 開始 i 〜 終了 k の記録に出てよい段は区間 i〜k の段だけ（"stages" の照合と、漏斗の段の範囲）
  */
 export const STAGE_SEGMENTS = [
-  { start: "name-table", end: "semantic-check", stages: ["name-table", "semantic-check", "carry-over"] },
+  { start: "name-table", end: "semantic-check", stages: ["name-table", "semantic-check", "carry-over", ...FACTORY_PENDING_STAGE_IDS] },
   { start: "test-spec", end: "test-spec", stages: ["test-spec"] },
   { start: "write", end: "judge", stages: ["write", "static-check", "name-check", "decl-check", "run-tests", "repair", "arbitration", "coverage", "carry-over", "judge"] },
 ];

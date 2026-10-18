@@ -6,13 +6,19 @@
 import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-schema";
 import { describe, expect, it } from "vitest";
 import { requirementsFromPlan } from "../pipeline.js";
-import type { StageRecord } from "../record.js";
+import { STAGE_IDS, type StageRecord } from "../record.js";
 import { fixtureList, fixtureTable } from "./__tests__/fixtures.js";
 import {
   buildStageCheckpoint,
   buildStageRunRecord,
   resolveStageRange,
   stageJsonText,
+  boundaryBefore,
+  stagesInRange,
+  STAGE_BOUNDARIES,
+  STAGE_ENDS,
+  STAGE_SEGMENTS,
+  STAGE_STARTS,
   stageOutputDigest,
   stagePassOf,
   verifyStageInput,
@@ -261,5 +267,81 @@ describe("段の通過（stage_pass）と記録の名前", () => {
     expect(record["stage_judge_verdict"]).toBe("partial");
     expect(Object.keys(record)).not.toContain("verdict");
     expect(Object.keys(record)).not.toContain("pass");
+  });
+});
+
+// ── 区間の表（段の名前の正本） ───────────────────────────────────────
+
+describe("区間の表（STAGE_SEGMENTS）と範囲の段", () => {
+  it("区間は 3 つで、i 番目の開始・終了・境界が既存の定数の i 番目と同じ", () => {
+    expect(STAGE_SEGMENTS).toHaveLength(3);
+    expect(STAGE_SEGMENTS.map((x) => x.start)).toEqual([...STAGE_STARTS]);
+    expect(STAGE_SEGMENTS.map((x) => x.end)).toEqual([...STAGE_ENDS]);
+    expect(STAGE_SEGMENTS.map((x) => x.boundary)).toEqual(STAGE_STARTS.map((start) => boundaryBefore(start)));
+    expect(STAGE_SEGMENTS.map((x) => x.boundary).filter((b) => b !== null)).toEqual([...STAGE_BOUNDARIES]);
+  });
+
+  it("区間の段はすべて段の識別子の一覧にあり、開始・終了を含み、持ち越しの停止のほか区間をまたいで重ならない", () => {
+    const seen = new Map<string, number>();
+    for (const segment of STAGE_SEGMENTS) {
+      expect(segment.stages).toContain(segment.start);
+      expect(segment.stages).toContain(segment.end);
+      expect(new Set(segment.stages).size).toBe(segment.stages.length);
+      for (const stage of segment.stages) {
+        expect(STAGE_IDS as readonly string[]).toContain(stage);
+        seen.set(stage, (seen.get(stage) ?? 0) + 1);
+      }
+    }
+    expect([...seen].filter(([, count]) => count > 1)).toEqual([["carry-over", 2]]);
+    expect(STAGE_SEGMENTS[0]?.stages).toContain("carry-over");
+    expect(STAGE_SEGMENTS[2]?.stages).toContain("carry-over");
+    expect(STAGE_SEGMENTS[1]?.stages).not.toContain("carry-over");
+  });
+
+  it("範囲の関数：T1〜⑦ は 3 区間の段を順につなぎ、逆順・表に無い名前は空", () => {
+    expect(stagesInRange("name-table", "judge")).toEqual(STAGE_SEGMENTS.flatMap((x) => [...x.stages]));
+    expect(stagesInRange("write", "judge")).toEqual(STAGE_SEGMENTS[2]?.stages);
+    expect(stagesInRange("test-spec", "test-spec")).toEqual(["test-spec"]);
+    expect(stagesInRange("test-spec", "semantic-check")).toEqual([]);
+    expect(stagesInRange("write", "test-spec")).toEqual([]);
+    expect(stagesInRange("decl-check", "judge")).toEqual([]);
+    expect(stagesInRange("name-table", "write")).toEqual([]);
+  });
+
+  it.each([
+    [{ start: "name-table", end: "semantic-check" }, ["name-table", "semantic-check"]],
+    [{ start: "test-spec", end: "test-spec" }, ["test-spec"]],
+    [{ start: "write", end: "judge" }, ["write", "static-check", "judge"]],
+    [{ start: "name-table", end: "judge" }, ["name-table", "semantic-check", "test-spec", "write", "judge"]],
+  ] as const)("既存の段の走り %j の記録の段は範囲の段の並びの内側", (range, ran) => {
+    const resolved = resolveStageRange({ ...range, hasInput: range.start !== "name-table" });
+    expect("code" in resolved).toBe(false);
+    const allowed = stagesInRange(range.start, range.end);
+    const record = buildStageRunRecord({
+      range,
+      input: null,
+      planSha256: PLAN_SHA,
+      sourceSha256: SOURCE_SHA,
+      checkpoints: [],
+      conditions: {
+        model: "m",
+        effort: "high",
+        documents: [],
+        judge: { primary: "llm", fallback: null },
+        prompt_version: "v1.1a",
+        vocabulary_version: "v1",
+        contract_version: "v0.2",
+        factory_version: "0.0.0",
+        spec_engine_version: "0.0.0",
+        budget_usd: 0.3,
+        deadline_ms: 600_000,
+        timeout_ms: null,
+      },
+      outcome: outcomeOf({ stages: ran.map((stage) => stageRecord(stage, "ok")) }),
+      exitCode: 0,
+    });
+    const recorded = (record["stages"] as readonly { stage: string }[]).map((x) => x.stage);
+    expect(recorded).toEqual([...ran]);
+    for (const stage of recorded) expect(allowed as readonly string[]).toContain(stage);
   });
 });

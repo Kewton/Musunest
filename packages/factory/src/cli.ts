@@ -14,7 +14,8 @@
 // v1 の経路で、LLM への要求・納品物・要約・終了コードは今までとバイト列で同じである。
 // `--pipeline v1.2` は、v1.1α の経路に merge 済みの手の旗を全部 on（`V12_PIPELINE_FLAGS`。今は性質の台帳と探索型の直し。
 // 公開の鍵で書いた組を `fromPublicV12Flags` で実効の旗にして渡す。Issue #551）で流す
-// （`08-architecture-v1.2.md` §9・Issue #547）。受け方は `v1.1a` と同じ（`--plan-file` と組んでだけ。封筒は v1.1a）で、
+// （`08-architecture-v1.2.md` §9・Issue #547）。受け方は `v1.1a` と同じ（`--plan-file` と組んでだけ）で、封筒は v1.2 の封筒
+// （`stage-envelope-v12`。旗の組から導き、全段で同じ。Issue #588）、
 // 要約と条件の記録の `prompt_version` は `v1.2`、条件の記録には `pipeline` と実効の旗の組 `v12_flags` を足し、要約にも
 // `v12_flags` を書く。`v1.1a` は旗を全部 off で流し、新しい欄を出さない。
 //
@@ -210,6 +211,11 @@ function isPipeline(value: string): value is Pipeline {
 /** v1.1α の経路で流す経路か（`v1.1a` と `v1.2`。確定した仕様と組んでだけ流れる） */
 function isV11aPath(pipeline: Pipeline | undefined): pipeline is "v1.1a" | "v1.2" {
   return pipeline === "v1.1a" || pipeline === "v1.2";
+}
+
+/** 経路の封筒の識別子（v1 は欄を置かないので `undefined`。Issue #588） */
+function envelopeIdOf(pipeline: Pipeline | undefined): EnvelopeId | undefined {
+  return pipeline === "v1.2" ? "v1.2" : pipeline === "v1.1a" ? "v1.1a" : undefined;
 }
 
 /** 経路のプロンプトの版 */
@@ -435,8 +441,8 @@ export interface CliDeps {
   readonly makeDirectory: (path: string) => Promise<void>;
   readonly loadDocuments: () => Promise<readonly PromptDocument[]>;
   /**
-   * LLM の adapter を作る。`envelope` は v1.1α の走りでだけ渡る（`"v1.1a"`。Issue #511）——v1 の走りでは
-   * 欄を置かない（v1 の要求のバイト列を変えない）。
+   * LLM の adapter を作る。`envelope` は v1.1α の走り（段の走りを含む）で `"v1.1a"`、v1.2 の走りで `"v1.2"` が渡る
+   * （Issue #511・#588）——v1 の走りでは欄を置かない（v1 の要求のバイト列を変えない）。
    */
   readonly makeClient: (options: { apiKey: string; model: string; effort: string; envelope?: EnvelopeId }) => LlmClient;
   /**
@@ -850,12 +856,13 @@ async function runBuildFromPlanFile(
     return EXIT_USAGE;
   }
   const documents = await deps.loadDocuments();
-  // v1.1α の走り（v1.2 を含む）でだけ、v1.1α の封筒を選ぶ（v1 の走りでは欄を置かない。Issue #511・#547）
+  // v1.1α の走りは v1.1α の封筒、v1.2 の走りは v1.2 の封筒を選ぶ（v1 の走りでは欄を置かない。Issue #511・#588）
+  const envelope = envelopeIdOf(parsed.pipeline);
   const client = deps.makeClient({
     apiKey,
     model: parsed.model,
     effort: parsed.effort,
-    ...(isV11aPath(parsed.pipeline) ? { envelope: "v1.1a" as const } : {}),
+    ...(envelope === undefined ? {} : { envelope }),
   });
   const { judge, recheckJudge } = assembleJudge({
     env: deps.env,

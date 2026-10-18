@@ -39,6 +39,12 @@
 // 一番良い版をコードの検査だけで数え直す）。最終の版は一番良い版で、納品物に探索の記録（`search-repair.json`）を足す。
 // off なら今のループをそのまま通る。
 //
+// `flags.ids` が on なら（手 3p。Issue #592）、08 §4.1 の呼び出しの枠を置く（`v12/limits.ts`）：生成と判定で共有する実試行の門
+// （Plan と同じ `CallGate`。上限 144・締切は今の値）を作り、共通の口と判定の包みの両方に渡す。門が尽きれば生成は `call-limit` で
+// 止まる。判定の包みには判定の枝（上限 80）を足し、尽きれば判定を呼ばない（J4 は未判定 `gate`・J2 は `ruled`。本は止めない）。
+// 要約には門と枝の上限と使った数を `v12_calls` で書く。off なら門を作らず、今の配線（共通の口の `#calls` を `callCount` に
+// 照らす・判定は門に数えない）をそのまま通る。
+//
 // 持ち越し（§1.2）の出どころは 4 つ。T1 の unresolved と T1'' の拒否は A1 の `deriveCarryOver` で導く。
 // B3' の文脈なし・点検が尽きるか停滞したあとに残った拒否と、B6 の網羅の落ちは、版の輪の途中で足していく
 // ので `composeCarryOver` で重ねる（`deriveCarryOver` は 4 つの出どころを 1 回で受け、B3' の判定を
@@ -66,7 +72,7 @@ import {
   type MaterialKind,
   type RejectedCandidateStage,
 } from "../bundle.js";
-import { CallGateway, callCountsDelta, type CallCounts } from "../call.js";
+import { CallGateway, callCountsDelta, createCallGate, type CallCounts, type CallGate } from "../call.js";
 import type { TestSuite } from "../fixed-test.js";
 import { createBudgetedJudge, type BudgetedJudge } from "../judge-budget.js";
 import { AGENT_LIMITS } from "../limits.js";
@@ -171,6 +177,7 @@ import {
   withSearchRounds,
 } from "../v12/search-repair.js";
 import { canRepairFields, locateFailures } from "../v12/locate.js";
+import { V12_CALL_LIMITS, type V12CallLimits } from "../v12/limits.js";
 import { mergeReplacements, runFieldRepair } from "../v12/stages/field-repair.js";
 
 /** v1.1α の入力（v1 の `GenerationInput` と同じ形で、確定した仕様を必須にしたもの） */
@@ -181,6 +188,11 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
   readonly flags?: Partial<V12Flags>;
   /** 真なら、要約に実効の旗の組を `v12_flags` で書く（`--pipeline v1.2` の走り。省けば書かない。Issue #547） */
   readonly recordV12Flags?: boolean;
+  /**
+   * 旗 `v12.ids` の走りの本全体の上限（省いた欄は `V12_CALL_LIMITS`。試験が門・枝を差し替えるときだけ渡す。旗 off の走りは
+   * 見ない。Issue #592）
+   */
+  readonly v12CallLimits?: Partial<V12CallLimits>;
 }
 
 /** 全件持ち越しの停止の問題（固定文。値を埋めない） */
@@ -543,6 +555,10 @@ async function runV11a(
   const limits = input.limits ?? AGENT_LIMITS;
   const meter = new UsageMeter();
   const budget = new JobBudget(input.budgetUsd);
+  // 旗 `v12.ids` の走りだけ、生成と判定で共有する実試行の門と判定の枝を置く（off は門を作らない＝今の配線。Issue #592）
+  const callLimits: V12CallLimits | undefined = flags.ids ? { ...V12_CALL_LIMITS, ...input.v12CallLimits } : undefined;
+  const callGate: CallGate | undefined =
+    callLimits === undefined ? undefined : createCallGate({ now: input.now, deadline: input.deadline, limit: callLimits.realAttempts });
   const gateway = new CallGateway({
     client: meter.wrap(input.client),
     budget,
@@ -552,10 +568,29 @@ async function runV11a(
     limits,
     effort: input.effort,
     ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
+    ...(callGate === undefined ? {} : { gate: callGate }),
   });
-  // 判定の口（渡されたときだけ）を、この生成の予算に結び付けた包みで包む（v1 と同じ）。J4・J2 に渡す
+  // 判定の口（渡されたときだけ）を、この生成の予算に結び付けた包みで包む（v1 と同じ）。J4・J2 に渡す。旗 `v12.ids` の走りは
+  // 共有の門と判定の枝も渡す
   const judgeBudget: BudgetedJudge | undefined =
-    input.judge === undefined ? undefined : createBudgetedJudge({ judge: input.judge, budget, rates: input.rates });
+    input.judge === undefined
+      ? undefined
+      : createBudgetedJudge({
+          judge: input.judge,
+          budget,
+          rates: input.rates,
+          ...(callGate === undefined || callLimits === undefined ? {} : { gate: callGate, judgeLimit: callLimits.judgeBranch }),
+        });
+  // 要約の門と枝の欄（旗 `v12.ids` の走りだけ。判定の口が無い走りの枝は 0 本使った）
+  const callsRecord = (): { readonly v12_calls?: unknown } =>
+    callGate === undefined || callLimits === undefined
+      ? {}
+      : {
+          v12_calls: {
+            real_attempts: { limit: callGate.limit, used: callGate.attempts() },
+            judge_branch: { limit: callLimits.judgeBranch, used: judgeBudget?.branch?.used ?? 0 },
+          },
+        };
   const startedAt = input.now();
   const stages: StageRecord[] = [];
   const upheld: string[] = [];
@@ -825,6 +860,7 @@ async function runV11a(
       nature_discrepancies: natureDiscrepancies,
       ...(droppedSummary === undefined ? {} : { dropped_nonstructural_tests: droppedSummary }),
       ...flagsRecord,
+      ...callsRecord(),
     };
     return {
       outcome,
@@ -1675,6 +1711,7 @@ async function runV11a(
       nature_discrepancies: natureDiscrepancies,
       ...(droppedSummary === undefined ? {} : { dropped_nonstructural_tests: droppedSummary }),
       ...flagsRecord,
+      ...callsRecord(),
     };
     const bundle = await assembleBundle({
       runId: input.runId,

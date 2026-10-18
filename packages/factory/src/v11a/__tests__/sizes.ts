@@ -14,12 +14,17 @@
 //     `view<i>`。試験は `view-shows` の 1 件
 // 試験の数 M が少なく、3N に満たないときは、足りない分だけ後ろの要件を構造で確かめる要件にする
 // （構造の要件は 1 件で済む）。M < N（要件ごとに最低 1 件）は作れないので例外にする。
+//
+// 旗の組（`flags`。省けば全部 off）を渡すと、その走りの段の schema に合う応答を組む（Issue #592）：旗 `v12.ledger` が on なら
+// T1 の応答は台帳の導出の schema（行の型に `aggregate` を持つ。確かめ方は台帳の種類のうち fixed-test・structural）に合わせる。
+// 表・判定・試験・宣言は旗によらず同じ値である。
 import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-schema";
 import { AGENT_LIMITS } from "../../limits.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
 import type { JudgeAnswer } from "../../judge.js";
-import { draftOf } from "./fixtures.js";
-import type { NameTable, NameTableDraft, NameTableRow } from "../names.js";
+import { draftOf, t1ResponseOf } from "./fixtures.js";
+import type { NameTable, NameTableRow } from "../names.js";
+import { ledgerViewOf, resolveV12Flags, type V12Flags } from "../../v12/ledger.js";
 
 /** 中央値（要件 15・試験 39）と観測した最大（要件 25・試験 68）。Issue #546 */
 export const MEDIAN_SIZE = { requirements: 15, tests: 39 } as const;
@@ -35,6 +40,8 @@ export type RejectionSpec = readonly [kind: string, quote: string];
 export interface SizedMaterials {
   readonly requirementCount: number;
   readonly testCount: number;
+  /** 組んだ旗の組（省いた名前は off） */
+  readonly flags: V12Flags;
   /** 構造で確かめる要件の数 */
   readonly structuralCount: number;
   /** 要件の ID（R1〜RN） */
@@ -44,7 +51,7 @@ export interface SizedMaterials {
   readonly list: RequirementList;
   readonly table: NameTable;
   /** T1 の応答（下書きの形。要件 ID を持たず写しを添える） */
-  readonly nameTableResponse: () => NameTableDraft;
+  readonly nameTableResponse: () => Record<string, unknown>;
   /** J4 の偽物の判定の答え（所属の組ごと。印なし＝値 0.9） */
   readonly adviceAnswers: () => Readonly<Record<string, JudgeAnswer>>;
   /** T1'' と B3' の判定（`rejects` の要件だけ拒否。省けば全部受理） */
@@ -61,8 +68,10 @@ function requirementOf(id: string, text: string): Requirement {
   return { id, text, quote: text, position: { start: 0, end: text.length } };
 }
 
-/** 材料を組む。N 件の要件・M 件の試験（N ≤ M ≤ N × 16） */
-export function buildSized(requirementCount: number, testCount: number): SizedMaterials {
+/** 材料を組む。N 件の要件・M 件の試験（N ≤ M ≤ N × 16）。旗の組を渡せば、その走りの schema に合う応答を組む */
+export function buildSized(requirementCount: number, testCount: number, flags?: Partial<V12Flags>): SizedMaterials {
+  const resolvedFlags = resolveV12Flags(flags);
+  const ledger = ledgerViewOf(resolvedFlags);
   if (!Number.isInteger(requirementCount) || requirementCount < 1) throw new RangeError("要件の数は 1 以上の整数であること");
   if (!Number.isInteger(testCount) || testCount < requirementCount) throw new RangeError("試験の数は要件の数以上であること");
   // 構造の要件の数：3 × (N − s) + s ≤ M を満たす最小の s（余りは正常の試験を足して配る）
@@ -248,13 +257,14 @@ export function buildSized(requirementCount: number, testCount: number): SizedMa
   return {
     requirementCount,
     testCount,
+    flags: resolvedFlags,
     structuralCount,
     ids,
     source,
     plan,
     list,
     table,
-    nameTableResponse: () => draftOf(list, table),
+    nameTableResponse: () => t1ResponseOf(draftOf(list, table), ledger),
     adviceAnswers: () => {
       const answers: Record<string, JudgeAnswer> = {};
       for (const entry of table.ownership) {

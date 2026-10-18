@@ -12,6 +12,8 @@
 //     あとにもう一度停滞したら止める（`stagnation`）
 //   - 予算の行（`SEARCH_REPAIR_BUDGET`。§4.1）：往復 6・作り直し 1 回（形のやり直し 1 を含む）。**v1 の上限の表
 //     （`AGENT_LIMITS`）には足さない**。共通の口の実試行の門・締切・予算・B3' の点検 6 回はそのまま掛かる
+//     v1.2 の呼び出しの上限の表（段ごとの論理の枠・実試行の門・判定の枝。旗 `v12.ids`。Issue #592）は `v12/limits.ts` に置き、
+//     ループと作り直しの行はここの値から写す
 //   - 作り直しに渡す名前付きの失敗の一覧（`namedFailuresOf`。試験 ID・要件 ID・種類と、種類ごとの固定文だけ）
 //   - 探索の記録の形（`SearchRepairRecord`。納品物の `search-repair.json` に書くのは `v11a/bundle-v11a.ts`）
 import type { RuleDefinition } from "../stages/prompt.js";

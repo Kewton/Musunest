@@ -23,6 +23,7 @@ export * from "./limits.js";
 
 // ── adapter（Issue #284。`fetch` だけを使う。`openai.ts` は外部の入口を持つ唯一の library の file）──
 export * from "./openai.js";
+export * from "./schema-check.js";
 
 // ── 判定の口（Issue #330。Jev の adapter・LLM の adapter・偽物。`judge-jev.ts` が Jev の入口を持つ）──
 export * from "./judge.js";
@@ -89,3 +90,5 @@ export * from "./v12/search-repair.js";
 // 失敗の場所と欄だけの直し（旗 `v12.search-repair` の直す手。手 4b・Issue #553）
 export * from "./v12/locate.js";
 export * from "./v12/stages/field-repair.js";
+// v1.2 の呼び出しの上限の表（段ごとの論理の枠・実試行の門・判定の枝。旗 `v12.ids`。手 3p・Issue #592）
+export * from "./v12/limits.js";

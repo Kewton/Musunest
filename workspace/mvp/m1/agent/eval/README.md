@@ -546,6 +546,7 @@ v1（比較元の checkout。main `2cd1586f856fb1cdecf75ef035826cbffe539e69`）�
   - **通過**（`passed`）：その段のどれかの記録が ok
   - **停止**（`stopped`）：要約の `failure.stage` がその段
 - **適用外**：到達した本の記録が全部 `calls` 0 の段（コードの段。静的の検査・試験の実行・判定など）は「1 回目で通過」を `null` にする（件数も率も `null`。`code_stage` 真）。**未到達の 0 とは別**で、到達 0 の段の 1 回目は 0 と「今回未観測」になる
+- **v1.2 手 3 の新しい 2 段**（`vocabulary`＝C1・`mapping`＝C2。`BUILD_STAGE_IDS` の末尾）：束ごとに 1 記録になるので、**1 回目で通過は全記録を集約**する（全記録が §上の条件を満たすとき 1。既存の段は今までどおり最初の記録だけ）。**2 段の行は、採点する本のどれかの記録に新しい段があるときだけ**漏斗・停止の 0 件の行（`vocabulary:unmet`・`mapping:unmet`）・到達・匿名の既知の段に足す。無い入力の出力は今までとバイト列で同じ
 - **分母は 2 つ並べる**：件数は**予定本数**（条件の `child_args`。未実行・途中の本は到達 0 で分母に残る。`planned`・`reached_label` ＝ 到達／予定）、条件付き率は**到達本数**（`rates`。数と Wilson の区間。到達 0 なら「今回未観測（0/予定）」）。予定を検証できない条件では採点した本を分母にする（§5.2 の `metrics_plan` と同じ）
 - **完走の内訳**（`completed`）：要約の `stop_class` が completed の本（失敗の無い本。stagnation・limit で止まった本を含む）を、`verification.json` の `test_mismatches` と `test_unresolved` がともに 0 の本（`no_mismatch`）とそれ以外（`with_mismatch`）に分ける。記録が無い・欄が整数でない本は欠測（`missing`）に数え、0 と推測しない
 - **停止段の内訳**（`stops`）：§5.8.5 の停止段の値（`段:種類`・`stop_reason`・`decl-check:limit`・知らない値は `unknown`）ごとの本数。比較の群の `stops.values` と同じ値になる
@@ -609,6 +610,7 @@ v1（比較元の checkout。main `2cd1586f856fb1cdecf75ef035826cbffe539e69`）�
 #### 5.10.3 比較：段の役割ごとの対の差（`stage_pairs`）
 
 - **段の役割の対応表**（定数 `STAGE_ROLES`）：設計＝`design`／`name-table`、試験＝`test-suite`／`test-spec`、書く＝`write`、点検＝`correspondence`／`decl-check`、実行＝`run-tests`、判定＝`judge`（比較元 v1／候補 v1.1α）
+- **設計の役割の新しい読み方**（v1.1α の段の名前で引く群＝v1.1a・v1.2）：本の要約の段の記録に `name-table` が無く `vocabulary` が 1 つ以上あれば、**到達＝`vocabulary` の記録が 1 つ以上／通過＝`semantic-check` の記録がある（C1・C2 の全束を通って C3 に渡った印。`mapping` のどれかが ok でも C3 に届かなければ通過でない）／1 回目で通過＝通過かつ `vocabulary`・`mapping` の全記録が 1 回目で通過**。`name-table` だけの本・両方ある本・どちらも無い本は今までの規則
 - 対ごとに §5.9.1 の「到達」「1 回目で通過」「通過」をそれぞれ 0／1 にし、**差＝候補 − 比較元**を取る。件数（＋1／0／−1）・n・平均・区間は既存の対の差と同じ関数（`pairStats`。区間は参考）で出す
 - **有効な対を指標ごとに定める**：両側で指標が定義されている対だけを n に入れる。次の対は差 `null` で n から除き、理由ごとの数を `excluded` に出す
   - `not_applicable`（**適用外**）：片側でもその群の漏斗で 1 回目で通過が `null`（コードの段。§5.9.1）。実行（v1 はコードの段、v1.1α は未到達）と判定（両群ともコードの段）の 1 回目で通過は、今の記録では n＝0 で、平均・区間・P の集計も `null`
@@ -640,6 +642,7 @@ v1（比較元の checkout。main `2cd1586f856fb1cdecf75ef035826cbffe539e69`）�
 
 - `--stage-start <段>`・`--stage-end <段>`・`--stage-from <凍結した上流の計測の出力先>`。**`--pipeline v1.1a` と `--build-from <組>` と組んでだけ受ける**（それ以外は `flags:conflict`）。段の名前・範囲の決め方・境界は工場の dist（`packages/factory/dist/v11a/bundle-v11a.js`）が公開する定数と関数を読む（道具の中に段の表を持たない）。片方だけ付ければ他方は経路の端（工場と同じ）
 - 開始が T1（`name-table`）なら `--stage-from` を付けられない。T2（`test-spec`）・B1（`write`）なら必須。表に無い段・開始が終了より後も `flags:conflict`
+- 区間 0（開始 T1・終了 T1''）の段の表に `vocabulary`・`mapping` を足した（`name-table`・`semantic-check`・`carry-over` はそのまま）。区間 1 以降の記録に出れば「段の履歴が範囲と合わない」。工場の dist との照合の試験は、dist に無い段のうち採点が先に足した定数（`FACTORY_PENDING_STAGE_IDS`）だけを許す（工場が足したら外す）
 - 対象の本は `--build-from` と同じ（採用した P × 回数。`--only` は採用した P の部分集合）
 - 子の引数の末尾に `--stage-start <開始> --stage-end <終了>` と、開始の段の直前の境界があれば `--stage-input <本のディレクトリ>/stage-input/stage-checkpoint-<境界>.json` を足す。上流の checkpoint と段の走りの記録は、照合を通ったバイト列のまま本のディレクトリの `stage-input/` に写す（工場は checkpoint の隣の記録を読む）
 - **予算と締切の単位は段の走り 1 本**：`--factory-budget-usd`・`--deadline-min` は今までどおり子ごとに `--budget`・`--deadline` で渡し、工場がその走りの始まりから当てる（前の走りの額と時間を引かない）。計測全体の目安の額（`--budget-usd`）の扱いは今と同じで、済みの額は段の走りの記録の `provider_cost_usd` から足す

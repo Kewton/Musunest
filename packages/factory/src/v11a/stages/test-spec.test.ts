@@ -28,6 +28,9 @@ import {
 } from "../../stages/test-suite.js";
 import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
+  createCheckedRecordingClient,
+  negative,
+  recordedStructured,
   EMPTY_AGGREGATE_REQUEST_DIFF,
   ENUM_MEMBERSHIP_REQUEST_DIFF,
   FIXTURE_DOCUMENTS,
@@ -93,7 +96,7 @@ import {
 
 // ── 題材 ──────────────────────────────────────────────────────────
 
-const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
+const structured = recordedStructured;
 
 /** 確定した仕様（題材の要件の一覧と同じ要件。抽象的な文） */
 function fixturePlan(list: RequirementList = fixtureList()): ConfirmedPlan {
@@ -315,7 +318,7 @@ async function run(
 ) {
   const table = options.table ?? fixtureTable();
   const carryOver = options.carryOver ?? (await carryOverFor(table, options.rejected));
-  const recording = createRecordingClient(outputs.map(structured));
+  const recording = createCheckedRecordingClient(outputs.map(structured));
   const gateway = makeGateway(recording.client, { maxAttempts: 1 });
   const { rejected: _rejected, ...rest } = options;
   const outcome = await runTestSpec({
@@ -487,7 +490,7 @@ describe("T2 のデータ（名前・T1 の分類・期待・合否・宣言を�
   });
 
   it("全件が持ち越しなら LLM を呼ばずに断る（D15）", async () => {
-    const recording = createRecordingClient([]);
+    const recording = createCheckedRecordingClient([]);
     const carryOver: CarryOver = {
       entries: fixtureList().requirements.map((requirement) => ({
         requirementId: requirement.id,
@@ -649,7 +652,10 @@ describe.each(LEDGER_CASES)("評価可能性（対象の種類・操作・observ
   });
 
   it("知らない observes は形の落ち（共通の窓口が 1 回やり直し、2 回で malformed）", async () => {
-    const bad = response([...r1Validate(), ...r2Structure(), ...r3For(), ...r4Compute()].map((test) => ({ ...test, observes: "other" })));
+    const bad = negative(
+      response([...r1Validate(), ...r2Structure(), ...r3For(), ...r4Compute()].map((test) => ({ ...test, observes: "other" }))),
+      "observes が enum の外の応答。strict の schema では出ないが、形の検査の落ちを観測する負例",
+    );
     const { outcome, recording } = await run([bad, bad]);
     if (outcome.ok || outcome.failure.kind !== "malformed") throw new Error("malformed でない");
     expect(recording.structured).toHaveLength(2);
@@ -1124,7 +1130,7 @@ describe("onDropped・onRejected は v1 の ②' と同じ回数で呼ばれ、�
   const round1 = () =>
     response([...r1Validate(), r2Execution("r2-exec-1"), ...r2Structure(), ...r3Action(["normal", "abnormal"]), ...r4Compute()]);
   const round2 = () => response([...r1Validate(), r2Execution("r2-exec-2"), ...r2Structure(), ...r3Action(), ...r4Compute()]);
-  const invalid = { tests: 123 };
+  const invalid = negative({ tests: 123 }, "tests が並びでない応答。strict の schema では出ないが、形の検査の落ちの通知を観測する負例");
 
   it("v1 の ②' に同じ応答を流したときと、通知の回数・種類・回が等しい", async () => {
     const outputs = [invalid, round1(), round2()];
@@ -1141,6 +1147,8 @@ describe("onDropped・onRejected は v1 の ②' と同じ回数で呼ばれ、�
     const pruned = pruneForCarryOver(fixtureList(), table, await carryOverFor(table));
     const v1Dropped: number[] = [];
     const v1Seen: RejectedCandidate[] = [];
+    // v1 の ②' の schema（test-suite）は observes の欄を持たない。T2' の応答を v1 に流して通知を比べる試験なので、
+    // この v1 側だけは照合なしの client を使う（v1 の段・schema は凍結した比較元）
     const recording = createRecordingClient(outputs.map(structured));
     const v1 = await runTestSuite({
       list: pruned.list,
@@ -1721,7 +1729,10 @@ describe("旗 on：T2' に台帳に無い観測する性質を直接渡すと固
       [LEDGER_VIEW_2A, "enum-membership"],
       [PROPERTY_LEDGER_VIEW, "no-such-property"],
     ] as const) {
-      const bad = response([...r1Validate(), ...r2Structure(), ...r3When(), ...r4Compute()].map((test) => ({ ...test, observes: observed })));
+      const bad = negative(
+        response([...r1Validate(), ...r2Structure(), ...r3When(), ...r4Compute()].map((test) => ({ ...test, observes: observed }))),
+        "台帳に無い性質を書いた応答。その台帳から導いた schema の observes の enum に無いので strict では出ないが、段の未登録の拒否を観測する負例",
+      );
       const { outcome, recording } = await ledgerFunctions(view).run([bad, bad]);
       if (outcome.ok || outcome.failure.kind !== "malformed") throw new Error("malformed でない");
       expect(recording.structured).toHaveLength(2);
@@ -1827,7 +1838,8 @@ describe("旗 on：選択肢の集合の要件は、表の確かめ方が enum-m
       coverageUnitsOf({ suite: outcome.value.suite, observes: outcome.value.observes, natures: outcome.value.natures }),
     );
     // 直す前（手 2a の台帳）：観測する性質が未登録で、形の固定文で落ちる（2 回で malformed）
-    const before = await runE([eResponse(), eResponse()], { ledger: LEDGER_VIEW_2A });
+    const unregisteredE = negative(eResponse(), "手 2a の台帳の schema の observes の enum に enum-membership が無い。段の未登録の拒否を観測する負例");
+    const before = await runE([unregisteredE, unregisteredE], { ledger: LEDGER_VIEW_2A });
     if (before.outcome.ok || before.outcome.failure.kind !== "malformed") throw new Error("malformed でない");
     expect(before.outcome.failure.problems).toContainEqual({
       field: `${T_AT}.observes`,
@@ -2086,7 +2098,8 @@ describe("旗 on：空の集計の要件の試験は、集計の種類 × デー
       ["abnormal", "aggregate", "empty-aggregate"],
     ]);
     // 直す前（#548 の台帳）：観測する性質が台帳に無く、形で 2 回落ちる
-    const before = await runA([good, good], { ledger: LEDGER_VIEW_2B });
+    const unregisteredA = negative(good, "#548 の台帳の schema の observes の enum に empty-aggregate が無い。段の未登録の拒否を観測する負例");
+    const before = await runA([unregisteredA, unregisteredA], { ledger: LEDGER_VIEW_2B });
     if (before.outcome.ok || before.outcome.failure.kind !== "malformed") throw new Error("malformed でない");
     expect(before.outcome.failure.problems).toContainEqual({
       field: `${AT()}.observes`,
@@ -2333,7 +2346,7 @@ describe("旗 on：T1'' が受理した non-requirement の要件は、T2 の要
       ledger,
     });
   const runNon = async (outputs: readonly unknown[]) => {
-    const recording = createRecordingClient(outputs.map(structured));
+    const recording = createCheckedRecordingClient(outputs.map(structured));
     const outcome = await runTestSpec({
       plan: fixturePlan(nlist),
       list: nlist,

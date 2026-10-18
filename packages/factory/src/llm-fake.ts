@@ -10,19 +10,40 @@
 import { AGENT_LIMITS } from "./limits.js";
 import type {
   LlmClient,
+  LlmStructuredRequest,
   LlmStructuredResponse,
   LlmToolRequest,
   LlmToolResponse,
   LlmTurn,
   LlmUsage,
 } from "./llm.js";
+import { validateSchema } from "./schema-check.js";
 import { ENVELOPE_RESULT_KEY, ENVELOPE_STAGE_KEY } from "./schema-envelope.js";
+
+declare const uncheckedBrand: unique symbol;
+
+/** 照合を外す理由（空でない文字列）。`uncheckedBecause` でしか作れない（理由の無い `unchecked` を型で作らせない） */
+export interface UncheckedReason {
+  readonly [uncheckedBrand]: true;
+  readonly reason: string;
+}
+
+/**
+ * 負例の記録（形の検査を落とすための、わざと schema に合わない応答）が、照合を外す理由を作る。
+ * 空の理由は作れない。
+ */
+export function uncheckedBecause(reason: string): UncheckedReason {
+  if (reason.trim() === "") throw new RangeError("照合を外す理由が空です");
+  return { reason } as unknown as UncheckedReason;
+}
 
 /** 記録した構造化出力の 1 回 */
 export interface RecordedStructuredCall {
   readonly kind: "structured";
   readonly output: unknown;
   readonly usage: LlmUsage | undefined;
+  /** 照合ありの偽物でも、この記録は schema に照らさない（負例用。理由が要る） */
+  readonly unchecked?: UncheckedReason;
 }
 
 /** 記録した道具付きの 1 回（応答は「続く」か「終わる」のどちらか） */
@@ -40,6 +61,27 @@ export class FakeLlmExhaustedError extends Error {
     super(message);
     this.name = "FakeLlmExhaustedError";
   }
+}
+
+/**
+ * 照合ありの偽物が、記録した応答が要求の schema に合わないときに投げる誤り。記録の添字・schema の名前・
+ * 合わない箇所の 1 文だけを持つ（**応答の中身は写さない**）。
+ */
+export class FakeLlmSchemaMismatchError extends Error {
+  constructor(
+    readonly recordIndex: number,
+    readonly schemaName: string,
+    readonly detail: string,
+  ) {
+    super(`記録 ${recordIndex} 件目の応答が要求の schema（${schemaName}）に合いません: ${detail}`);
+    this.name = "FakeLlmSchemaMismatchError";
+  }
+}
+
+/** 偽物の LLM の選択肢 */
+export interface FakeLlmOptions {
+  /** true なら、構造化出力の記録を返す前に要求の schema に照らす（既定 false＝今までどおり照らさない） */
+  readonly validateAgainstSchema?: boolean;
 }
 
 /** 記録と違う順・違う種別の要求が来たときに投げる誤り（往復の再生が崩れた合図） */
@@ -72,6 +114,16 @@ function unwrapRecordedOutput(output: unknown): unknown {
   const unwrapped: Record<string, unknown> = { ...result };
   delete unwrapped[ENVELOPE_STAGE_KEY];
   return unwrapped;
+}
+
+/** 封筒の形の記録なら、`stage` が要求の schema の名前と同じことを照らす（違えば専用の誤り） */
+function checkEnvelopeStage(output: unknown, schemaName: string, recordIndex: number): void {
+  if (!isRecord(output) || !(ENVELOPE_RESULT_KEY in output)) return;
+  const result = output[ENVELOPE_RESULT_KEY];
+  if (!isRecord(result)) return;
+  if (result[ENVELOPE_STAGE_KEY] !== schemaName) {
+    throw new FakeLlmSchemaMismatchError(recordIndex, schemaName, "封筒の stage が要求の schema の名前と違います");
+  }
 }
 
 /**
@@ -109,7 +161,8 @@ function checkTurnOrder(turns: readonly LlmTurn[], expectedTurns: number, lastId
  * 記録が尽きたら `FakeLlmExhaustedError`、記録と違う順・種別なら `FakeLlmOrderError` を投げる。
  * 記録の行数は上限（`recordRows`）を超えられない（§2.1・§1.5）。
  */
-export function createFakeLlmClient(recorded: readonly RecordedCall[]): LlmClient {
+export function createFakeLlmClient(recorded: readonly RecordedCall[], options?: FakeLlmOptions): LlmClient {
+  const validate = options?.validateAgainstSchema === true;
   if (recorded.length > AGENT_LIMITS.recordRows) {
     throw new RangeError(
       `記録の行数が上限を超えています（上限 ${AGENT_LIMITS.recordRows}、記録 ${recorded.length}）`,
@@ -119,12 +172,19 @@ export function createFakeLlmClient(recorded: readonly RecordedCall[]): LlmClien
   let expectedTurns = 0;
   let lastToolCallIds: readonly string[] = [];
   return {
-    async callStructured<T>(): Promise<LlmStructuredResponse<T>> {
+    async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
       const call = recorded[index];
       if (call === undefined) throw exhausted(index);
       if (call.kind !== "structured") throw kindMismatch("structured", call.kind);
+      const recordIndex = index;
       index += 1;
-      return { output: unwrapRecordedOutput(call.output) as T, usage: call.usage };
+      const output = unwrapRecordedOutput(call.output);
+      if (validate && call.unchecked === undefined) {
+        checkEnvelopeStage(call.output, request.schemaName, recordIndex);
+        const detail = validateSchema(request.schema, output);
+        if (detail !== undefined) throw new FakeLlmSchemaMismatchError(recordIndex, request.schemaName, detail);
+      }
+      return { output: output as T, usage: call.usage };
     },
     async callWithTools(request: LlmToolRequest): Promise<LlmToolResponse> {
       const call = recorded[index];
