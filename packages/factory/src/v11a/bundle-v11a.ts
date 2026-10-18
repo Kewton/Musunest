@@ -15,6 +15,10 @@
 // （4 つの出どころ）は ⑦ で未解決に数えるが、その理由と出どころは `carry-over.json` にだけ置く——部分案の
 // 理由を読むときは、`partial_reasons` と `carry-over.json` の両方を読む。
 //
+// 旗 `v12.search-repair` が on の走りだけ、8 つ目に探索の記録 `search-repair.json`（版ごとの宣言の SHA-256・違反の数の
+// 内訳・採否・捨てた候補の状態の要約・一番良い版の SHA-256・作り直しの有無）を末尾に足す（`V12_SEARCH_REPAIR_ARTIFACT_NAME`。
+// Issue #551）。旗 off の走りは渡さないので、7 つの記録とバイト列で同じである。
+//
 // **純粋な関数**で、同じ入力からは同じバイト列になる（決まった字下げの JSON。末尾に改行 1 つ）。
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
@@ -36,6 +40,7 @@ import { canonicalJson, nameTableSha256, type NameTable } from "./names.js";
 import type { JudgeAdviceMarkEntry, JudgeAdviceRecord } from "./stages/judge-advice.js";
 import { semanticCheckTargets } from "./stages/semantic-check.js";
 import { testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
+import type { SearchRepairRecord, VersionViolations } from "../v12/search-repair.js";
 
 /** v1.1α の記録の置き場所（成果物の置き場所の下。v1 の成果物と重ならない） */
 export const V11A_ARTIFACT_NAMES = {
@@ -47,6 +52,9 @@ export const V11A_ARTIFACT_NAMES = {
   judgeAdvice: `${ARTIFACTS_DIR}/judge-advice.json`,
   verification: `${ARTIFACTS_DIR}/verification-v11a.json`,
 } as const;
+
+/** 探索の記録の置き場所（旗 `v12.search-repair` が on の走りだけ。v1.1α の 7 つの記録と重ならない。Issue #551） */
+export const V12_SEARCH_REPAIR_ARTIFACT_NAME = `${ARTIFACTS_DIR}/search-repair.json` as const;
 
 /** T1'' の 1 回の記録 */
 export interface SemanticCheckRound {
@@ -133,6 +141,8 @@ export interface V11aRecordsInput {
     readonly checkedDeclarationSha256s: readonly string[];
     readonly declCheck: DeclCheckCounts;
   };
+  /** 探索の記録（旗 `v12.search-repair` が on の走りだけが渡す。省けば記録を足さない。Issue #551） */
+  readonly searchRepair?: SearchRepairRecord;
 }
 
 /** 決まった字下げで JSON にする（同じ入力からは同じバイト列。末尾に改行 1 つ。v1 の成果物と同じ） */
@@ -140,7 +150,47 @@ function toJson(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
-/** v1.1α の 7 つの記録を組む（純粋。並びは `V11A_ARTIFACT_NAMES` の順） */
+/** 違反の数を記録の JSON の形にする（欄の名前は snake_case） */
+function violationsJson(violations: VersionViolations): unknown {
+  if (violations.kind === "static-check-failed") {
+    return { kind: violations.kind, declaration_sha256: violations.declarationSha256 };
+  }
+  return {
+    kind: violations.kind,
+    declaration_sha256: violations.declarationSha256,
+    breakdown: violations.breakdown,
+    known_total: violations.knownTotal,
+    unknown:
+      violations.unknown === null
+        ? null
+        : { reason: violations.unknown.reason, declaration_sha256: violations.unknown.declarationSha256 },
+  };
+}
+
+/** 探索の記録（`search-repair.json`）を組む（純粋。Issue #551） */
+export function buildSearchRepairArtifact(record: SearchRepairRecord): BundleArtifact {
+  return {
+    path: V12_SEARCH_REPAIR_ARTIFACT_NAME,
+    text: toJson({
+      versions: record.versions.map((version) => ({
+        origin: version.origin,
+        declaration_sha256: version.declarationSha256,
+        violations: violationsJson(version.violations),
+        adopted: version.adopted,
+        discarded: version.discarded,
+      })),
+      recounts: record.recounts.map((recount) => ({
+        cause: recount.cause,
+        declaration_sha256: recount.declarationSha256,
+        violations: violationsJson(recount.violations),
+      })),
+      best_declaration_sha256: record.bestDeclarationSha256,
+      rewritten: record.rewritten,
+    }),
+  };
+}
+
+/** v1.1α の 7 つの記録を組む（純粋。並びは `V11A_ARTIFACT_NAMES` の順。探索の記録を渡せば末尾に足す） */
 export function buildV11aArtifacts(input: V11aRecordsInput): readonly BundleArtifact[] {
   const { nameTable, testSpec, declCheck, carryOver, verification } = input;
   return [
@@ -224,6 +274,7 @@ export function buildV11aArtifacts(input: V11aRecordsInput): readonly BundleArti
         decl_check: verification.declCheck,
       }),
     },
+    ...(input.searchRepair === undefined ? [] : [buildSearchRepairArtifact(input.searchRepair)]),
   ];
 }
 

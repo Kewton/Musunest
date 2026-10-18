@@ -84,3 +84,8 @@ export * from "./v11a/bundle-v11a.js";
 // ── v1.2（v12/。`08-architecture-v1.2.md`・Issue #547〜）──────────────────
 // 性質の台帳と v1.2 の旗の正本（`V12_PIPELINE_FLAGS`。計測の道具が読む契約）
 export * from "./v12/ledger.js";
+// 探索型の直しの部品（旗 `v12.search-repair`。手 4a・Issue #551）
+export * from "./v12/search-repair.js";
+// 失敗の場所と欄だけの直し（旗 `v12.search-repair` の直す手。手 4b・Issue #553）
+export * from "./v12/locate.js";
+export * from "./v12/stages/field-repair.js";

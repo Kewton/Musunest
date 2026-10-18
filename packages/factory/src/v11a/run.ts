@@ -31,7 +31,13 @@
 // 旗（`flags`。08-architecture-v1.2.md §9・Issue #547）：省けば全部 off で、今の v1.1α とバイト列で同じに流れる。
 // `flags.ledger` が on なら、性質の台帳の導出（`v12/ledger.ts`）を T1（T1' を含む）・T2（T2' を含む）・評価口（B4・
 // B5 の道具・版の再検査）へ渡し、手 2b（Issue #548）から T1''・B1 へも渡す。`recordV12Flags` が真の走り（`--pipeline v1.2`）だけ、
-// 要約に実効の旗の組を `v12_flags` で書く（早期停止の要約にも）。
+// 要約に実効の旗の組を `v12_flags` で書く（早期停止の要約にも）。`v12_flags` の鍵は公開の鍵（`search-repair` の形。Issue #551）。
+//
+// `flags.searchRepair` が on なら（手 4a。Issue #551）、B5 のループを探索型にする（`v12/search-repair.ts` の部品）：一番良い版を
+// 保ち、違反の数が厳密に減った候補だけを採り、直す段には一番良い版とその失敗だけを渡し、採れない候補が 2 つ続けば空の文脈で
+// B1 を 1 回作り直す。候補の評価で生じた B3' の unmarked の持ち越しは候補の内に置き、採ったときだけ確定へ移す（移したら
+// 一番良い版をコードの検査だけで数え直す）。最終の版は一番良い版で、納品物に探索の記録（`search-repair.json`）を足す。
+// off なら今のループをそのまま通る。
 //
 // 持ち越し（§1.2）の出どころは 4 つ。T1 の unresolved と T1'' の拒否は A1 の `deriveCarryOver` で導く。
 // B3' の文脈なし・点検が尽きるか停滞したあとに残った拒否と、B6 の網羅の落ちは、版の輪の途中で足していく
@@ -115,6 +121,7 @@ import {
   type StageBoundary,
   type StageRange,
   type StageRunOutcome,
+  V12_SEARCH_REPAIR_ARTIFACT_NAME,
 } from "./bundle-v11a.js";
 import {
   danglingRowReferences,
@@ -147,7 +154,24 @@ import {
 import { runSemanticCheck, semanticCheckTargets, type SemanticCheckOutput } from "./stages/semantic-check.js";
 import { runTestSpec, type TestSpecValue } from "./stages/test-spec.js";
 import { runWriteV11a } from "./stages/write.js";
-import { ledgerViewOf, resolveV12Flags, type V12Flags } from "../v12/ledger.js";
+import { ledgerViewOf, resolveV12Flags, toPublicV12Flags, type V12Flags } from "../v12/ledger.js";
+import {
+  countViolations,
+  isStrictlyBetter,
+  namedFailuresOf,
+  notAdoptedAfter,
+  SEARCH_REPAIR_BUDGET,
+  stagnationAction,
+  type SearchRecountRecord,
+  type SearchRepairRecord,
+  type SearchVersionOrigin,
+  type SearchVersionRecord,
+  type SearchRoundRecord,
+  type VersionFacts,
+  withSearchRounds,
+} from "../v12/search-repair.js";
+import { canRepairFields, locateFailures } from "../v12/locate.js";
+import { mergeReplacements, runFieldRepair } from "../v12/stages/field-repair.js";
 
 /** v1.1α の入力（v1 の `GenerationInput` と同じ形で、確定した仕様を必須にしたもの） */
 export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
@@ -332,6 +356,19 @@ export function v11aFailureSignature(
 }
 
 /**
+ * 一番良い版を数え直すときの静的チェック（旗 `v12.search-repair`。Issue #551）。宣言の原文の SHA-256 が、静的チェックを
+ * 掛けた版の SHA-256 と**バイト列で同じときだけ**結果を引き継ぐ。違えば `rerun` で静的チェックを流し直す（引き継がない）。
+ */
+export async function staticCheckForRecount(
+  report: Pick<VersionReport, "declaration" | "declarationSha256" | "staticCheck">,
+  rerun: (declaration: Declaration) => Promise<StaticCheckResult>,
+): Promise<{ readonly declarationSha256: string; readonly staticCheck: StaticCheckResult; readonly rerun: boolean }> {
+  const declarationSha256 = await sha256Hex(report.declaration.source);
+  if (declarationSha256 === report.declarationSha256) return { declarationSha256, staticCheck: report.staticCheck, rerun: false };
+  return { declarationSha256, staticCheck: await rerun(report.declaration), rerun: true };
+}
+
+/**
  * 持ち越しに、版の輪の途中で足す出どころ（B3' の文脈なし・残った拒否、B6 の網羅の落ち）を重ねる（§1.2）。
  * 除く行は A1 と同じ規則（所属させた要件が全部持ち越しの行。共有する行は残す）で導き、残る行の参照が
  * 除いた行を指せば例外で断る（A1 の固定文）。要件の並びは一覧の順、理由は基の理由のあとに足した順。基の要件でない文
@@ -449,6 +486,8 @@ interface VersionState {
   readonly decl: DeclState;
   /** この版の B3' の拒否（要件 ID・種類・引用） */
   readonly rejections: readonly DeclarationRejection[];
+  /** 確定へ移していない B3' の unmarked（旗 `v12.search-repair` の候補の状態だけ。off は即座に持ち越すので空。Issue #551） */
+  readonly unmarked: readonly string[];
 }
 
 /** 段単位の走りの入力（08-architecture-v1.2.md §8.3。Issue #544） */
@@ -500,7 +539,7 @@ async function runV11a(
   const flags = resolveV12Flags(input.flags);
   const ledger = ledgerViewOf(flags);
   const withLedger = ledger === undefined ? {} : { ledger };
-  const flagsRecord = input.recordV12Flags === true ? { v12_flags: flags } : {};
+  const flagsRecord = input.recordV12Flags === true ? { v12_flags: toPublicV12Flags(flags) } : {};
   const limits = input.limits ?? AGENT_LIMITS;
   const meter = new UsageMeter();
   const budget = new JobBudget(input.budgetUsd);
@@ -543,6 +582,9 @@ async function runV11a(
     staticChecks: new Map(),
   };
 
+  // 旗 `v12.search-repair` の一番良い版の宣言の SHA-256（材料の状態の宣言の版。off は null のまま＝今の選び方。Issue #551）
+  let searchBestSha256: string | null = null;
+
   // T1・T2 が断った候補（#501 と同じ作法）。断った時点で積む。T1 の通し番号は呼んだ順（初回を 1）
   const rejectedCandidates: RejectedCandidateSlot[] = [];
   const rejectionSink =
@@ -576,7 +618,8 @@ async function runV11a(
         ? { material, state: ran(stage) ? "unaccepted" : "unexecuted" }
         : { material, state: "accepted", version: { stage_index: value.stageIndex, sha256: value.sha256 } };
     const passed = materialStore.declarations.filter((entry) => entry.staticCheckPassed);
-    const declaration = passed.at(-1) ?? materialStore.declarations.at(-1);
+    const best = searchBestSha256 === null ? undefined : materialStore.declarations.find((entry) => entry.sha256 === searchBestSha256);
+    const declaration = best ?? passed.at(-1) ?? materialStore.declarations.at(-1);
     return [
       slot("design", materialStore.design, "name-table"),
       slot("test_suite", materialStore.testSuite, "test-spec"),
@@ -1047,8 +1090,11 @@ async function runV11a(
     const coverageChecks: CoverageCheckRecord[] = [];
     const checkedDeclarationSha256s: string[] = [];
 
-    /** ある版に ④ → B3 → B3'（点検を 1 消費）→ B4 を流す */
-    const evaluateVersion = async (declaration: Declaration): Promise<VersionState> => {
+    /**
+     * ある版に ④ → B3 → B3'（点検を 1 消費）→ B4 を流す。`deferUnmarked` が真なら（旗 `v12.search-repair`）、B3' の unmarked を
+     * 持ち越しへ入れず、版の状態に残す（B4 は確定した文脈で流す。Issue #551）
+     */
+    const evaluateVersion = async (declaration: Declaration, deferUnmarked = false): Promise<VersionState> => {
       const staticCheck = await runStage("static-check", () => runStaticCheck(declaration));
       const declarationSha256 = await sha256Hex(declaration.source);
       if (!checkedDeclarationSha256s.includes(declarationSha256)) checkedDeclarationSha256s.push(declarationSha256);
@@ -1068,6 +1114,7 @@ async function runV11a(
           },
           decl: { ran: false, reason: "static-check" },
           rejections: [],
+          unmarked: [],
         };
       }
       const app = staticCheck.app;
@@ -1077,6 +1124,7 @@ async function runV11a(
 
       let decl: DeclState = { ran: false, reason: "name-check" };
       let rejections: readonly DeclarationRejection[] = [];
+      let unmarked: readonly string[] = [];
       if (named.misses.length === 0) {
         if (declChecksUsed >= limits.declChecks) {
           // 点検が尽きた版（通常は B5 の前に止めるので来ない）。受理を作らず、点検していない版として扱う
@@ -1125,8 +1173,10 @@ async function runV11a(
               ? [{ requirementId: judgment.requirementId, kind: judgment.kind, quote: judgment.quote }]
               : [],
           );
-          // 文脈（該当箇所・参照先）を引き当てられない要件は受理せず持ち越す
-          if (output.unmarked.length > 0) {
+          // 文脈（該当箇所・参照先）を引き当てられない要件は受理せず持ち越す（旗 `v12.search-repair` は候補の内に置く）
+          if (deferUnmarked) {
+            unmarked = output.unmarked;
+          } else if (output.unmarked.length > 0) {
             for (const requirementId of output.unmarked) addCarry(requirementId, { origin: "decl-check", reason: "unmarked" });
             await refreshCarry();
           }
@@ -1151,6 +1201,7 @@ async function runV11a(
         },
         decl,
         rejections,
+        unmarked,
       };
     };
 
@@ -1165,100 +1216,362 @@ async function runV11a(
       state.report.testRun.unresolved.length === 0 &&
       unresolved.length === 0;
 
-    let current = await evaluateVersion({ source: written.declaration });
-    let lastPassed: VersionState | null = current.report.staticCheck.passed ? current : null;
-    let rounds = 0;
     let limitReached = false;
     let stopReason: StopReason = "completed";
     let stagnant = false;
-    const history: string[] = [v11aFailureSignature(current.report, current.rejections)];
+    /** 最終の版（⑦ の材料・納品物の宣言） */
+    let final: VersionState;
+    /** 停滞で止めたとき、残った不一致を未解決に数える版 */
+    let stalledFrom: VersionState;
+    /** 探索の記録（旗 `v12.search-repair` が on の走りだけ） */
+    let searchRecord: SearchRepairRecord | undefined;
 
-    // B5（⑥）→ 流し直し（④・B3・B3'・B4）→ B5'（⑥'）→ B6 を、上限まで回す
-    while (!isSettled(current)) {
-      // 停滞：同じ落ち（v1 の署名＋B3' の拒否の要件 ID と種類）が続いたら、それ以上直さない
-      if (isStagnant(history, limits.stagnationRepeats)) {
-        stagnant = true;
-        stopReason = "stagnation";
-        break;
-      }
-      // B5 を回す前に残りの点検を確かめる。0 なら次の版を作らず止める（D16。今の版の拒否・不一致は未解決）
-      if (declChecksUsed >= limits.declChecks) {
-        declExhausted += 1;
-        limitReached = true;
-        stopReason = "limit";
-        break;
-      }
-      if (rounds >= limits.repairRoundTrips) {
-        limitReached = true;
-        stopReason = "limit";
-        break;
-      }
-      rounds += 1;
-      const context = contextNow();
-      const step = await runStageOk("repair", () =>
-        runRepairStep({
-          source: input.source,
-          list: context.list,
-          suite: context.suite,
-          current: current.report,
-          correspondences: current.report.correspondence?.entries ?? [],
-          ...(context.ownership === undefined ? {} : { ownership: context.ownership }),
-          documents: input.documents,
-          gateway,
-          // 道具と版の再検査は、評価口から v1.1α の結び付けと B3 を使う（その時点の文脈で。D11）
-          evaluate: evaluator.evaluate,
-          ...(current.rejections.length === 0 ? {} : { declRejections: current.rejections }),
-        }),
-      );
-      for (const dispute of step.disputes) disputes.push(dispute);
-      for (const item of step.rejected) rejected.push(item);
-      if (step.disputes.length > 0) {
-        const overturnedBefore = overturned.length;
-        const arbitration = await runStageOk("arbitration", () =>
-          runArbitration({
+    if (!flags.searchRepair) {
+      let current = await evaluateVersion({ source: written.declaration });
+      let lastPassed: VersionState | null = current.report.staticCheck.passed ? current : null;
+      let rounds = 0;
+      const history: string[] = [v11aFailureSignature(current.report, current.rejections)];
+
+      // B5（⑥）→ 流し直し（④・B3・B3'・B4）→ B5'（⑥'）→ B6 を、上限まで回す
+      while (!isSettled(current)) {
+        // 停滞：同じ落ち（v1 の署名＋B3' の拒否の要件 ID と種類）が続いたら、それ以上直さない
+        if (isStagnant(history, limits.stagnationRepeats)) {
+          stagnant = true;
+          stopReason = "stagnation";
+          break;
+        }
+        // B5 を回す前に残りの点検を確かめる。0 なら次の版を作らず止める（D16。今の版の拒否・不一致は未解決）
+        if (declChecksUsed >= limits.declChecks) {
+          declExhausted += 1;
+          limitReached = true;
+          stopReason = "limit";
+          break;
+        }
+        if (rounds >= limits.repairRoundTrips) {
+          limitReached = true;
+          stopReason = "limit";
+          break;
+        }
+        rounds += 1;
+        const context = contextNow();
+        const step = await runStageOk("repair", () =>
+          runRepairStep({
             source: input.source,
             list: context.list,
             suite: context.suite,
-            declaration: step.declaration,
-            disputes: step.disputes,
+            current: current.report,
+            correspondences: current.report.correspondence?.entries ?? [],
+            ...(context.ownership === undefined ? {} : { ownership: context.ownership }),
             documents: input.documents,
             gateway,
-            plan: input.plan,
+            // 道具と版の再検査は、評価口から v1.1α の結び付けと B3 を使う（その時点の文脈で。D11）
+            evaluate: evaluator.evaluate,
+            ...(current.rejections.length === 0 ? {} : { declRejections: current.rejections }),
           }),
         );
-        collectArbitration(arbitration, upheld, overturned, unresolved);
-        // 確定した仕様そのものと食い違う主張があれば、裁定せず Plan に戻して止める（v1 と同じ）
-        if (arbitration.returnToPlan !== undefined && arbitration.returnToPlan.length > 0) {
-          returnToPlan = true;
-          for (const testId of arbitration.returnToPlan) if (!returnedToPlan.includes(testId)) returnedToPlan.push(testId);
-          stopReason = "unresolved";
-          break;
-        }
-        // B6：棄却のたびに、保存した全単位を残った組に掛け直し、単位を失った要件を持ち越す
-        if (overturned.length > overturnedBefore) {
-          const losses = await runStage("coverage", async () =>
-            lostCoverage(testSpec.coverage, {
-              suite: withoutOverturned(),
-              observes: testSpec.observes,
-              natures: testSpec.natures,
+        for (const dispute of step.disputes) disputes.push(dispute);
+        for (const item of step.rejected) rejected.push(item);
+        if (step.disputes.length > 0) {
+          const overturnedBefore = overturned.length;
+          const arbitration = await runStageOk("arbitration", () =>
+            runArbitration({
+              source: input.source,
+              list: context.list,
+              suite: context.suite,
+              declaration: step.declaration,
+              disputes: step.disputes,
+              documents: input.documents,
+              gateway,
+              plan: input.plan,
             }),
           );
-          coverageChecks.push({ overturnedTestIds: overturned.map((entry) => entry.testId), losses });
-          for (const loss of losses) addCarry(loss.requirementId, { origin: "coverage", reason: "lost-coverage-units" });
-          await refreshCarry();
+          collectArbitration(arbitration, upheld, overturned, unresolved);
+          // 確定した仕様そのものと食い違う主張があれば、裁定せず Plan に戻して止める（v1 と同じ）
+          if (arbitration.returnToPlan !== undefined && arbitration.returnToPlan.length > 0) {
+            returnToPlan = true;
+            for (const testId of arbitration.returnToPlan) if (!returnedToPlan.includes(testId)) returnedToPlan.push(testId);
+            stopReason = "unresolved";
+            break;
+          }
+          // B6：棄却のたびに、保存した全単位を残った組に掛け直し、単位を失った要件を持ち越す
+          if (overturned.length > overturnedBefore) {
+            const losses = await runStage("coverage", async () =>
+              lostCoverage(testSpec.coverage, {
+                suite: withoutOverturned(),
+                observes: testSpec.observes,
+                natures: testSpec.natures,
+              }),
+            );
+            coverageChecks.push({ overturnedTestIds: overturned.map((entry) => entry.testId), losses });
+            for (const loss of losses) addCarry(loss.requirementId, { origin: "coverage", reason: "lost-coverage-units" });
+            await refreshCarry();
+          }
         }
+        const next = await evaluateVersion(step.declaration);
+        current = next;
+        if (current.report.staticCheck.passed) lastPassed = current;
+        history.push(v11aFailureSignature(current.report, current.rejections));
       }
-      const next = await evaluateVersion(step.declaration);
-      current = next;
-      if (current.report.staticCheck.passed) lastPassed = current;
-      history.push(v11aFailureSignature(current.report, current.rejections));
-    }
+      final = lastPassed ?? current;
+      stalledFrom = current;
+    } else {
+      // ── 探索型の直し（旗 `v12.search-repair`。Issue #551）─────────────────────────
+      const versions: SearchVersionRecord[] = [];
+      const recounts: SearchRecountRecord[] = [];
+      const roundRecords: SearchRoundRecord[] = [];
+      const carriedIds = (): ReadonlySet<string> => new Set(carry.entries.map((entry) => entry.requirementId));
+      const requirementOfTest = (testId: string): string | null =>
+        testSpec.suite.tests.find((test) => test.id === testId)?.target.requirementId ?? null;
+      const factsOf = (state: VersionState): VersionFacts => ({
+        declarationSha256: state.report.declarationSha256,
+        staticCheckPassed: state.report.staticCheck.passed,
+        correspondenceMisses: state.report.correspondence?.misses.length ?? 0,
+        decl: state.decl.ran
+          ? { ran: true, rejections: state.rejections.length, unmarked: state.unmarked.length }
+          : { ran: false, reason: state.decl.reason },
+        testMismatches: state.report.testRun?.mismatches.length ?? 0,
+        testUnresolved: state.report.testRun?.unresolved.length ?? 0,
+      });
+      const violationsOf = (state: VersionState) => countViolations(factsOf(state));
+      /** 一番良い版の違反の数を、確定した文脈でコードの検査（B3・B4）だけで数え直す（判定・点検を呼ばない） */
+      const recount = async (state: VersionState, cause: SearchRecountRecord["cause"]): Promise<VersionState> => {
+        // 静的チェックの結果は、宣言のバイト列が同じときだけ引き継ぐ（違えば流し直す）
+        const checked = await staticCheckForRecount(state.report, (declaration) =>
+          runStage("static-check", async () => runStaticCheck(declaration)),
+        );
+        const app = checked.staticCheck.app;
+        let next: VersionState = checked.rerun
+          ? {
+              report: {
+                ...state.report,
+                declarationSha256: checked.declarationSha256,
+                staticCheck: checked.staticCheck,
+                correspondence: null,
+                testRun: null,
+                routes: [],
+              },
+              decl: { ran: false, reason: "static-check" },
+              rejections: [],
+              unmarked: [],
+            }
+          : state;
+        if (checked.staticCheck.passed && app !== null) {
+          const context = contextNow();
+          const named = await runStage("name-check", async () => evaluator.nameCheck(app, context));
+          const correspondence = { entries: named.entries, misses: named.misses };
+          const testRun = await runStage("run-tests", async () => evaluator.runTests(app, context, correspondence));
+          const carried = carriedIds();
+          next = {
+            report: { ...next.report, correspondence, testRun, routes: testRun.routes },
+            // 流し直した版は B3' を流していない（不明。fail-closed）
+            decl: checked.rerun ? { ran: false, reason: "name-check" } : state.decl,
+            // B3' の拒否は、持ち越しになった要件の分を除いて引き継ぐ（呼び出しを足さない）
+            rejections: checked.rerun ? [] : state.rejections.filter((rejection) => !carried.has(rejection.requirementId)),
+            unmarked: checked.rerun ? [] : state.unmarked.filter((requirementId) => !carried.has(requirementId)),
+          };
+        }
+        recounts.push({ cause, declarationSha256: next.report.declarationSha256, violations: violationsOf(next) });
+        return next;
+      };
+      /** 候補を採る：候補の内の unmarked を確定へ移し、文脈が変われば一番良い版を数え直す */
+      const commit = async (state: VersionState): Promise<VersionState> => {
+        searchBestSha256 = state.report.declarationSha256;
+        if (state.unmarked.length === 0) return state;
+        for (const requirementId of state.unmarked) addCarry(requirementId, { origin: "decl-check", reason: "unmarked" });
+        await refreshCarry();
+        return recount(state, "adopted");
+      };
+      const recordVersion = (origin: SearchVersionOrigin, state: VersionState, adopted: boolean): void => {
+        versions.push({
+          origin,
+          declarationSha256: state.report.declarationSha256,
+          violations: violationsOf(state),
+          adopted,
+          discarded: adopted ? null : { unmarked: [...state.unmarked], rejections: state.rejections.length },
+        });
+      };
 
-    const final = lastPassed ?? current;
+      // B1 の版は比べる相手が無いので一番良い版になる（その unmarked も確定へ移す）
+      const first = await evaluateVersion({ source: written.declaration }, true);
+      recordVersion("write", first, true);
+      let best = await commit(first);
+      let rounds = 0;
+      let rewritesUsed = 0;
+      let notAdopted = 0;
+      let rewritten = false;
+      /** 候補を一番良い版と同じ確定の文脈の数で比べ、厳密に良ければ採る。採れなければ捨てる（状態は確定へ移さない） */
+      const consider = async (origin: SearchVersionOrigin, candidate: VersionState): Promise<void> => {
+        const adopted = isStrictlyBetter(violationsOf(candidate), violationsOf(best));
+        recordVersion(origin, candidate, adopted);
+        notAdopted = notAdoptedAfter(notAdopted, adopted);
+        if (adopted) best = await commit(candidate);
+      };
+
+      while (!isSettled(best)) {
+        const action = stagnationAction(notAdopted, rewritesUsed, {
+          stagnationRepeats: limits.stagnationRepeats,
+          rewrites: SEARCH_REPAIR_BUDGET.rewrites,
+        });
+        // 作り直しを使い切ったあとの停滞は止める（B1 を呼ばない）
+        if (action === "stop") {
+          stagnant = true;
+          stopReason = "stagnation";
+          break;
+        }
+        // 次の版を作る前に残りの点検を確かめる（D16。今までどおり）
+        if (declChecksUsed >= limits.declChecks) {
+          declExhausted += 1;
+          limitReached = true;
+          stopReason = "limit";
+          break;
+        }
+        if (action === "rewrite") {
+          // 空の文脈で B1 をもう 1 回（データは最初の B1 と同じ入力と、一番良い版に残った名前付きの失敗の一覧だけ）
+          rewritesUsed += 1;
+          notAdopted = 0;
+          rewritten = true;
+          const failures = namedFailuresOf({
+            staticCheckPassed: best.report.staticCheck.passed,
+            correspondenceMisses: best.report.correspondence?.misses ?? [],
+            rejections: best.rejections,
+            unmarked: best.unmarked,
+            mismatches: best.report.testRun?.mismatches ?? [],
+            unresolved: best.report.testRun?.unresolved ?? [],
+            requirementOfTest,
+          });
+          const rewrite = await runStageOk("write", () =>
+            runWriteV11a({
+              list: writeList,
+              table,
+              suite: testSpec.suite,
+              observes: testSpec.observes,
+              documents: input.documents,
+              gateway,
+              ...withLedger,
+              rewrite: { failures },
+            }),
+          );
+          await consider("rewrite", await evaluateVersion({ source: rewrite.declaration }, true));
+          continue;
+        }
+        if (rounds >= Math.min(limits.repairRoundTrips, SEARCH_REPAIR_BUDGET.repairRoundTrips)) {
+          limitReached = true;
+          stopReason = "limit";
+          break;
+        }
+        rounds += 1;
+        const context = contextNow();
+        /** 主張を B5' へ渡し、棄却なら B6（今までどおり）。確定した仕様と食い違えば Plan に戻して止める（真を返す） */
+        const arbitrate = async (stepDisputes: readonly Dispute[], declaration: Declaration): Promise<boolean> => {
+          if (stepDisputes.length === 0) return false;
+          const overturnedBefore = overturned.length;
+          const arbitration = await runStageOk("arbitration", () =>
+            runArbitration({
+              source: input.source,
+              list: context.list,
+              suite: context.suite,
+              declaration,
+              disputes: stepDisputes,
+              documents: input.documents,
+              gateway,
+              plan: input.plan,
+            }),
+          );
+          collectArbitration(arbitration, upheld, overturned, unresolved);
+          if (arbitration.returnToPlan !== undefined && arbitration.returnToPlan.length > 0) {
+            returnToPlan = true;
+            for (const testId of arbitration.returnToPlan) if (!returnedToPlan.includes(testId)) returnedToPlan.push(testId);
+            stopReason = "unresolved";
+            return true;
+          }
+          // B5' の棄却と B6 の網羅の持ち越しは今までどおり（候補の採否に依らず確定）。文脈が変われば一番良い版を数え直す
+          if (overturned.length > overturnedBefore) {
+            const losses = await runStage("coverage", async () =>
+              lostCoverage(testSpec.coverage, {
+                suite: withoutOverturned(),
+                observes: testSpec.observes,
+                natures: testSpec.natures,
+              }),
+            );
+            coverageChecks.push({ overturnedTestIds: overturned.map((entry) => entry.testId), losses });
+            for (const loss of losses) addCarry(loss.requirementId, { origin: "coverage", reason: "lost-coverage-units" });
+            await refreshCarry();
+            best = await recount(best, "coverage");
+          }
+          return false;
+        };
+        // 一番良い版の失敗を宣言の要素の場所に写す（手 4b。Issue #553）。全部写せれば欄だけの直し、場所なしが 1 件でもあれば手 4a の直す手
+        const located = locateFailures({
+          source: best.report.declaration.source,
+          table,
+          suite: context.suite,
+          staticCheckPassed: best.report.staticCheck.passed,
+          diagnostics: best.report.staticCheck.diagnostics,
+          correspondenceMisses: best.report.correspondence?.misses ?? [],
+          rejections: best.rejections,
+          unmarked: best.unmarked,
+          mismatches: best.report.testRun?.mismatches ?? [],
+          unresolved: best.report.testRun?.unresolved ?? [],
+        });
+        if (canRepairFields(located)) {
+          const answer = await runStageOk("repair", () =>
+            runFieldRepair({
+              source: input.source,
+              list: context.list,
+              suite: context.suite,
+              declaration: best.report.declaration.source,
+              failures: located,
+              documents: input.documents,
+              gateway,
+            }),
+          );
+          for (const dispute of answer.disputes) disputes.push(dispute);
+          for (const item of answer.rejected) rejected.push(item);
+          const merged = mergeReplacements(best.report.declaration.source, answer.replacements, located.spans);
+          roundRecords.push({
+            hand: "field-repair",
+            locations: located.locations.length,
+            unlocated: 0,
+            refused: merged.ok ? null : merged.refusal,
+          });
+          if (await arbitrate(answer.disputes, merged.ok ? { source: merged.source } : best.report.declaration)) break;
+          if (merged.ok) {
+            await consider("repair", await evaluateVersion({ source: merged.source }, true));
+          } else {
+            // 断ったマージは採れない版に数える（版を作らない）
+            notAdopted = notAdoptedAfter(notAdopted, false);
+          }
+          continue;
+        }
+        roundRecords.push({ hand: "repair", locations: located.locations.length, unlocated: located.unlocated.length, refused: null });
+        // 直す段の入力の宣言・結果・B3' の拒否は一番良い版のもの
+        const step = await runStageOk("repair", () =>
+          runRepairStep({
+            source: input.source,
+            list: context.list,
+            suite: context.suite,
+            current: best.report,
+            correspondences: best.report.correspondence?.entries ?? [],
+            ...(context.ownership === undefined ? {} : { ownership: context.ownership }),
+            documents: input.documents,
+            gateway,
+            evaluate: evaluator.evaluate,
+            ...(best.rejections.length === 0 ? {} : { declRejections: best.rejections }),
+          }),
+        );
+        for (const dispute of step.disputes) disputes.push(dispute);
+        for (const item of step.rejected) rejected.push(item);
+        if (await arbitrate(step.disputes, step.declaration)) break;
+        await consider("repair", await evaluateVersion(step.declaration, true));
+      }
+      final = best;
+      stalledFrom = best;
+      searchRecord = { versions, recounts, bestDeclarationSha256: best.report.declarationSha256, rewritten, rounds: roundRecords };
+    }
 
     // 停滞で止めたら、残った不一致を未解決に数える（v1 と同じ）
     if (stagnant) {
-      for (const route of current.report.routes) if (!unresolved.includes(route.testId)) unresolved.push(route.testId);
+      for (const route of stalledFrom.report.routes) if (!unresolved.includes(route.testId)) unresolved.push(route.testId);
     }
     const stalledCorrespondenceMisses = stagnant ? (final.report.correspondence?.misses.length ?? 0) : 0;
 
@@ -1336,7 +1649,13 @@ async function runV11a(
             ),
           },
         },
-      }),
+        ...(searchRecord === undefined ? {} : { searchRepair: searchRecord }),
+      }).map((artifact) =>
+        // 探索の記録に往復ごとの直す手を足す（旗 on の走りだけ。Issue #553）
+        artifact.path === V12_SEARCH_REPAIR_ARTIFACT_NAME && searchRecord?.rounds !== undefined
+          ? { ...artifact, text: withSearchRounds(artifact.text, searchRecord.rounds) }
+          : artifact,
+      ),
     );
 
     const record = buildRecord(failure);

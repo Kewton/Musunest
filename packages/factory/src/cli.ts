@@ -12,7 +12,8 @@
 // `--pipeline v1.1a`（既定 v1）を付けると、確定した仕様（`--plan-file`）から v1.1α の経路（`v11a/run.ts`）を流す
 // （`07-architecture-v1.1a.md` §3・Issue #511）。v1.1α は `--plan-file` と組んでだけ受ける。`--pipeline` を省けば
 // v1 の経路で、LLM への要求・納品物・要約・終了コードは今までとバイト列で同じである。
-// `--pipeline v1.2` は、v1.1α の経路に merge 済みの手の旗を全部 on（`V12_PIPELINE_FLAGS`。今は性質の台帳だけ）で流す
+// `--pipeline v1.2` は、v1.1α の経路に merge 済みの手の旗を全部 on（`V12_PIPELINE_FLAGS`。今は性質の台帳と探索型の直し。
+// 公開の鍵で書いた組を `fromPublicV12Flags` で実効の旗にして渡す。Issue #551）で流す
 // （`08-architecture-v1.2.md` §9・Issue #547）。受け方は `v1.1a` と同じ（`--plan-file` と組んでだけ。封筒は v1.1a）で、
 // 要約と条件の記録の `prompt_version` は `v1.2`、条件の記録には `pipeline` と実効の旗の組 `v12_flags` を足し、要約にも
 // `v12_flags` を書く。`v1.1a` は旗を全部 off で流し、新しい欄を出さない。
@@ -83,7 +84,7 @@ import {
   type StageRunConditions,
 } from "./v11a/bundle-v11a.js";
 import { runGenerationV11a, runStageRangeV11a } from "./v11a/run.js";
-import { V12_PIPELINE_FLAGS, type V12Flags } from "./v12/ledger.js";
+import { fromPublicV12Flags, V12_PIPELINE_FLAGS, type V12PublicFlags } from "./v12/ledger.js";
 import type { PromptDocument } from "./stages/prompt.js";
 
 /** 工場の識別（要約の `builder`。S-5） */
@@ -216,8 +217,8 @@ function promptVersionOf(pipeline: Pipeline | undefined): string {
   return pipeline === "v1.2" ? PROMPT_VERSION_V12 : pipeline === "v1.1a" ? PROMPT_VERSION_V11A : PROMPT_VERSION;
 }
 
-/** 経路の旗（`v1.2` だけが持つ。正本 `V12_PIPELINE_FLAGS` をそのまま渡す。Issue #547） */
-function v12FlagsOf(pipeline: Pipeline | undefined): Readonly<V12Flags> | undefined {
+/** 経路の旗の公開の組（`v1.2` だけが持つ。正本 `V12_PIPELINE_FLAGS` をそのまま使う。Issue #547・#551） */
+function v12FlagsOf(pipeline: Pipeline | undefined): Readonly<V12PublicFlags> | undefined {
   return pipeline === "v1.2" ? V12_PIPELINE_FLAGS : undefined;
 }
 
@@ -543,7 +544,7 @@ async function runBuild(
       : await runGenerationV11a({
           ...input,
           plan: v11aPlan,
-          ...(flags === undefined ? {} : { flags, recordV12Flags: true }),
+          ...(flags === undefined ? {} : { flags: fromPublicV12Flags(flags), recordV12Flags: true }),
         });
   return writeBuildRun(deps, job, run, log);
 }

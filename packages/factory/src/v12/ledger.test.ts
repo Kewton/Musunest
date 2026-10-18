@@ -42,6 +42,10 @@ import {
   OUTER_NOT_SCORED,
   V12_FLAGS_OFF,
   V12_FLAG_NAMES,
+  V12_FLAG_PUBLIC_NAMES,
+  V12_PUBLIC_FLAG_NAMES,
+  fromPublicV12Flags,
+  toPublicV12Flags,
   V12_PIPELINE_FLAGS,
   AGGREGATE_DATA_STATES,
   aggregateStateValueOf,
@@ -52,6 +56,7 @@ import {
   propertyCopyCells,
   resolveV12Flags,
   type PropertyRow,
+  type V12Flags,
 } from "./ledger.js";
 
 interface NodeFileSystem {
@@ -280,8 +285,33 @@ describe("台帳から導いたものが今の定数と同じ（旗 on の載せ
     expect(ledgerViewOf({ ledger: false })).toBeUndefined();
     expect(ledgerViewOf(resolveV12Flags())).toBeUndefined();
     expect(resolveV12Flags()).toEqual(V12_FLAGS_OFF);
-    expect(Object.keys(V12_PIPELINE_FLAGS)).toEqual([...V12_FLAG_NAMES]);
-    expect(V12_PIPELINE_FLAGS).toEqual({ ledger: true });
+    expect(Object.keys(V12_PIPELINE_FLAGS)).toEqual(V12_FLAG_NAMES.map((name) => V12_FLAG_PUBLIC_NAMES[name]));
+    expect(V12_PIPELINE_FLAGS).toEqual({ ledger: true, "search-repair": true });
+  });
+
+  it("内部の鍵と公開の鍵の対応（1 か所の定数）：全部の旗が両方向に写り、公開の鍵は小文字・数字・ハイフン・点の形で重ならない（Issue #551）", () => {
+    // 計測の道具の照合の形（score-agent.mjs の isFlagMap の旗の名前の形）
+    const FLAG_NAME = /^[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)*$/;
+    expect(Object.keys(V12_FLAG_PUBLIC_NAMES)).toEqual([...V12_FLAG_NAMES]);
+    expect(V12_FLAG_PUBLIC_NAMES).toEqual({ ledger: "ledger", searchRepair: "search-repair" });
+    expect(V12_PUBLIC_FLAG_NAMES).toEqual(["ledger", "search-repair"]);
+    expect(new Set(V12_PUBLIC_FLAG_NAMES).size).toBe(V12_FLAG_NAMES.length);
+    for (const name of V12_PUBLIC_FLAG_NAMES) expect(name).toMatch(FLAG_NAME);
+    for (const name of Object.keys(V12_PIPELINE_FLAGS)) expect(name).toMatch(FLAG_NAME);
+    // 1 つだけ on の組を、内部 → 公開 → 内部・公開 → 内部 → 公開の両方向に写す
+    for (const name of V12_FLAG_NAMES) {
+      const only = { ...V12_FLAGS_OFF, [name]: true };
+      const published = toPublicV12Flags(only);
+      expect(Object.entries(published).filter(([, on]) => on).map(([key]) => key)).toEqual([V12_FLAG_PUBLIC_NAMES[name]]);
+      expect(fromPublicV12Flags(published)).toEqual(only);
+      expect(toPublicV12Flags(fromPublicV12Flags({ [V12_FLAG_PUBLIC_NAMES[name]]: true }))).toEqual(published);
+    }
+    expect(toPublicV12Flags(V12_FLAGS_OFF)).toEqual({ ledger: false, "search-repair": false });
+    expect(fromPublicV12Flags({})).toEqual(V12_FLAGS_OFF);
+    expect(fromPublicV12Flags(V12_PIPELINE_FLAGS)).toEqual({ ledger: true, searchRepair: true });
+    expect(toPublicV12Flags(fromPublicV12Flags(V12_PIPELINE_FLAGS))).toEqual(V12_PIPELINE_FLAGS);
+    // 公開の鍵はコードの内部の鍵としては読まない（resolveV12Flags は内部の鍵だけを読む）
+    expect(resolveV12Flags(V12_PIPELINE_FLAGS as unknown as Partial<V12Flags>)).toEqual({ ledger: true, searchRepair: false });
   });
 });
 
