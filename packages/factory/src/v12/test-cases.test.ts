@@ -404,23 +404,37 @@ describe("T2 の束（手 3f・Issue #626。束の中で閉じる条件だけ）
     expect(() => bundleRequirementIds(ids(3), 0)).toThrow(RangeError);
   });
 
-  it("束の完全性：欠落・重複・束に無い要件 ID・一覧に無い要件 ID・場合の要件 ID を、それぞれ固定文で落とす", () => {
+  it("束の完全性：欠落・重複・別の束の要件 ID・一覧に無い要件 ID を、分類と場合のそれぞれで固定文で落とす", () => {
     const all = ids(10);
     const bundle = all.slice(5, 10);
-    expect(checkBundleCompleteness(outputOf(bundle, ["R6", "R10"]), bundle, all)).toEqual([]);
-    expect(checkBundleCompleteness(outputOf(["R6", "R7", "R8", "R9"], []), bundle, all)).toEqual([
+    expect(checkBundleCompleteness(outputOf(bundle, ["R6", "R10"]), bundle, all, all)).toEqual([]);
+    expect(checkBundleCompleteness(outputOf(["R6", "R7", "R8", "R9"], []), bundle, all, all)).toEqual([
       { field: "requirements[4]", message: TEST_CASE_BUNDLE_MESSAGES.missing },
     ]);
-    expect(checkBundleCompleteness(outputOf([...bundle, "R6"], []), bundle, all)).toEqual([
+    expect(checkBundleCompleteness(outputOf([...bundle, "R6"], []), bundle, all, all)).toEqual([
       { field: "classifications[5].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.duplicate },
     ]);
-    expect(checkBundleCompleteness(outputOf([...bundle, "R1"], []), bundle, all)).toEqual([
+    expect(checkBundleCompleteness(outputOf([...bundle, "R1"], []), bundle, all, all)).toEqual([
       { field: "classifications[5].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.outside },
     ]);
-    expect(checkBundleCompleteness(outputOf([...bundle, "R99"], []), bundle, all)).toEqual([
+    expect(checkBundleCompleteness(outputOf([...bundle, "R99"], []), bundle, all, all)).toEqual([
       { field: "classifications[5].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.unknown },
     ]);
-    expect(checkBundleCompleteness(outputOf(bundle, ["R6", "R2"]), bundle, all)).toEqual([
+    expect(checkBundleCompleteness(outputOf(bundle, ["R6", "R2"]), bundle, all, all)).toEqual([
+      { field: "cases[1].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.caseOutside },
+    ]);
+    expect(checkBundleCompleteness(outputOf(bundle, ["R6", "R99"]), bundle, all, all)).toEqual([
+      { field: "cases[1].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.caseUnknown },
+    ]);
+  });
+
+  it("一覧にあるがどの束にも無い要件（コードの試験だけで確かめる要件）の分類・場合は、束では断らず合併後の検査へ渡す", () => {
+    const known = ids(7);
+    const requested = known.slice(0, 5);
+    expect(checkBundleCompleteness(outputOf([...requested, "R6"], ["R1", "R7"]), requested, requested, known)).toEqual([]);
+    // 二点測定：要求の一覧に入れれば別の束の要件として断る
+    expect(checkBundleCompleteness(outputOf([...requested, "R6"], ["R1", "R7"]), requested, known, known)).toEqual([
+      { field: "classifications[5].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.outside },
       { field: "cases[1].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.caseOutside },
     ]);
   });

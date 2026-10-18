@@ -73,6 +73,42 @@ export const V12_CALL_LIMIT_DEFINITIONS: readonly V12LimitDefinition[] = [
   },
 ];
 
+// ── 旗 `v12.ids` の T2 の束（手 3f・Issue #626）──────────────────────────
+
+/**
+ * T2（C4）の束の大きさと同時数。残る要件の一覧を一覧の順で `size` 件ごとに切り（最後の束は `size` 未満でよい）、束の呼び出しを
+ * `concurrency` 本まで同時に始める（超えた分は待つ）。値ごとの理由と見直す条件は `V12_T2_BUNDLE_DEFINITIONS`
+ */
+export const V12_T2_BUNDLE = {
+  /** 1 束の要件の数（手 3b の C2 の束と同じ 5） */
+  size: 5,
+  /** 同時に始める束の数の上限（観測した最大の要件 25 で束 5） */
+  concurrency: 5,
+} as const;
+
+/** T2 の束の定数の定義（値ごとに `why`・`since`・見直す条件） */
+export const V12_T2_BUNDLE_DEFINITIONS: readonly (RuleDefinition & {
+  readonly key: keyof typeof V12_T2_BUNDLE;
+  readonly review: string;
+})[] = [
+  {
+    id: "B-v12-t2-size",
+    key: "size",
+    text: `T2 は残る要件を一覧の順で ${String(V12_T2_BUNDLE.size)} 件ごとの束に切り、束ごとに 1 つの論理呼び出しにする。`,
+    why: "1 回の応答が大きいほど 1 回が長く、やり直しが全部を動かす（手 3b の C2 と同じ構造）。束の大きさは C2 の束と同じ 5",
+    since: "Issue #626",
+    review: "束ごとの推論の固定分で出力トークンが 1.6 倍を超えれば束を大きくする。束で 1 回目の通過率が下がれば小さくする",
+  },
+  {
+    id: "B-v12-t2-concurrency",
+    key: "concurrency",
+    text: `T2 の束の呼び出しは ${String(V12_T2_BUNDLE.concurrency)} 本まで同時に始め、超えた束は先の束の終わりを待つ。`,
+    why: "観測した最大の要件 25 で束 5 を 1 度に始め、壁の時間を 1 束分に近づける（逐次の合計にしない）",
+    since: "Issue #626",
+    review: "計測で提供側の同時数の制限による待ち・再送が出れば、この値を下げる（再送の口は変えない）",
+  },
+];
+
 // ── 段ごとの論理の枠（§4.1 の列）─────────────────────────────────────
 
 /** 枠の単位（束ごと／段全体／版ごと／往復ごと） */
@@ -127,7 +163,13 @@ export const V12_STAGE_FRAMES: readonly V12StageFrame[] = [
     content: { count: 1, unit: "stage" },
     maxUnits: null,
   },
-  { stage: "C4", initial: { count: 1, unit: "bundle" }, shape: { count: 1, unit: "bundle" }, content: null, maxUnits: null },
+  {
+    stage: "C4",
+    initial: { count: 1, unit: "bundle" },
+    shape: { count: 1, unit: "bundle" },
+    content: { count: 1, unit: "bundle" },
+    maxUnits: null,
+  },
   {
     stage: "C6",
     initial: { count: 1, unit: "version" },
@@ -169,7 +211,13 @@ export const V12_STAGE_FRAME_DEFINITIONS: readonly (RuleDefinition & { readonly 
     why: "08 §4.1 の C3 の行（T1'' と同じ）",
     since: "Issue #592",
   },
-  { id: "F-v12-c4", stage: "C4", text: "C4（試験）は束ごとに初回 1・形のやり直し 1。", why: "08 §4.1 の C4 の行（値が要る試験 13 件ごとの束）", since: "Issue #592" },
+  {
+    id: "F-v12-c4",
+    stage: "C4",
+    text: "C4（試験）は束ごとに初回 1・形のやり直し 1（束の全 round で通算）・中身のやり直し 1（合併後の問題が帰属する束だけ）。束は同時に呼ぶ。",
+    why: "08 §4.1 の C4 の行を、要件 5 件ごとの束（同時に呼ぶ）に合わせた。今までの表は中身のやり直しを — としていたが、T2 の中身のやり直しは今もあるので実態に合わせる",
+    since: "Issue #592（束の形・中身のやり直し・同時は Issue #626）",
+  },
   {
     id: "F-v12-c6",
     stage: "C6",
@@ -216,7 +264,7 @@ export const V12_V11A_FRAME_MAP: readonly {
 ];
 
 /**
- * 旗 `v12.ids` の段（手 3a。Issue #593）が、枠のどの行に写るか。C1 は束 3 つ（`units`）で、束ごとに初回 1・形のやり直し 1
+ * 旗 `v12.ids` の段（手 3a。Issue #593。T2 の束は手 3f・Issue #626）が、枠のどの行に写るか。C1 は束 3 つ（`units`）で、束ごとに初回 1・形のやり直し 1
  * （`shapeAttempts` 2）。C2 は束 1 つ（全要件を 1 回で写す。手 3b の要件 5 件ごとの束は Issue #627 で戻した）で、初回の形の
  * やり直し 1・C3 の拒否のあとの 2 回目 1（`rounds` 2。2 回目は形の再試行を持たない）。値は段のコードの定数と同じで、試験が照らす
  * （ここで値を変えない）。
@@ -232,40 +280,13 @@ export const V12_IDS_FRAME_MAP: readonly {
 }[] = [
   { stage: "vocabulary", frame: "C1", rounds: 1, shapeAttempts: 2, units: 3, maxLogical: 6 },
   { stage: "mapping", frame: "C2", rounds: 2, shapeAttempts: 2, units: 1, maxLogical: 3 },
-];
-
-// ── 旗 `v12.ids` の T2 の束（手 3f・Issue #626）──────────────────────────
-
-/**
- * T2（C4）の束の大きさと同時数。残る要件の一覧を一覧の順で `size` 件ごとに切り（最後の束は `size` 未満でよい）、束の呼び出しを
- * `concurrency` 本まで同時に始める（超えた分は待つ）。値ごとの理由と見直す条件は `V12_T2_BUNDLE_DEFINITIONS`
- */
-export const V12_T2_BUNDLE = {
-  /** 1 束の要件の数（手 3b の C2 の束と同じ 5） */
-  size: 5,
-  /** 同時に始める束の数の上限（観測した最大の要件 25 で束 5） */
-  concurrency: 5,
-} as const;
-
-/** T2 の束の定数の定義（値ごとに `why`・`since`・見直す条件） */
-export const V12_T2_BUNDLE_DEFINITIONS: readonly (RuleDefinition & {
-  readonly key: keyof typeof V12_T2_BUNDLE;
-  readonly review: string;
-})[] = [
+  // T2（手 3f。Issue #626）：要件 5 件ごとの束（観測した最大の要件 25 で束 5）。束ごとに初回 1・形 1（全 round で通算）・中身 1 で総回数 3
   {
-    id: "B-v12-t2-size",
-    key: "size",
-    text: `T2 は残る要件を一覧の順で ${String(V12_T2_BUNDLE.size)} 件ごとの束に切り、束ごとに 1 つの論理呼び出しにする。`,
-    why: "1 回の応答が大きいほど 1 回が長く、やり直しが全部を動かす（手 3b の C2 と同じ構造）。束の大きさは C2 の束と同じ 5",
-    since: "Issue #626",
-    review: "束ごとの推論の固定分で出力トークンが 1.6 倍を超えれば束を大きくする。束で 1 回目の通過率が下がれば小さくする",
-  },
-  {
-    id: "B-v12-t2-concurrency",
-    key: "concurrency",
-    text: `T2 の束の呼び出しは ${String(V12_T2_BUNDLE.concurrency)} 本まで同時に始め、超えた束は先の束の終わりを待つ。`,
-    why: "観測した最大の要件 25 で束 5 を 1 度に始め、壁の時間を 1 束分に近づける（逐次の合計にしない）",
-    since: "Issue #626",
-    review: "計測で提供側の同時数の制限による待ち・再送が出れば、この値を下げる（再送の口は変えない）",
+    stage: "test-spec",
+    frame: "C4",
+    rounds: 2,
+    shapeAttempts: 2,
+    units: Math.ceil(25 / V12_T2_BUNDLE.size),
+    maxLogical: 3 * Math.ceil(25 / V12_T2_BUNDLE.size),
   },
 ];

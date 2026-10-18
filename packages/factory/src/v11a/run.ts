@@ -56,6 +56,7 @@
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex, type Diagnostic } from "@musunest/spec-engine";
 import { JobBudget } from "../budget.js";
+import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest, LlmToolResponse } from "../llm.js";
 import {
   assembleBundle,
   buildDiagnostics,
@@ -160,7 +161,7 @@ import {
   type SemanticRejection,
 } from "./stages/name-table.js";
 import { runSemanticCheck, semanticCheckTargets, type SemanticCheckOutput } from "./stages/semantic-check.js";
-import { runTestSpec, type TestSpecValue } from "./stages/test-spec.js";
+import { runTestSpec, type TestSpecRejectedBundle, type TestSpecValue } from "./stages/test-spec.js";
 import { runWriteV11a } from "./stages/write.js";
 import { ledgerViewOf, resolveV12Flags, toPublicV12Flags, type V12Flags } from "../v12/ledger.js";
 import {
@@ -179,7 +180,7 @@ import {
   withSearchRounds,
 } from "../v12/search-repair.js";
 import { canRepairFields, locateFailures } from "../v12/locate.js";
-import { V12_CALL_LIMITS, type V12CallLimits } from "../v12/limits.js";
+import { V12_CALL_LIMITS, V12_T2_BUNDLE, type V12CallLimits } from "../v12/limits.js";
 import { mergeReplacements, runFieldRepair } from "../v12/stages/field-repair.js";
 import { VOCABULARY_BUNDLES, type ReferenceCounts } from "../v12/ids.js";
 import { isGeneratedTestId } from "../v12/generated-tests.js";
@@ -199,6 +200,11 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
    * 見ない。Issue #592）
    */
   readonly v12CallLimits?: Partial<V12CallLimits>;
+  /**
+   * 旗 `v12.ids` の T2 の束を同時に始める数の上限（省けば `V12_T2_BUNDLE.concurrency`。試験が 1 にして順序に依らないことを
+   * 確かめるときだけ渡す。旗 off の走りは見ない。Issue #626）
+   */
+  readonly v12T2Concurrency?: number;
 }
 
 /** 全件持ち越しの停止の問題（固定文。値を埋めない） */
@@ -320,6 +326,8 @@ interface RejectedCandidateSlot {
   readonly operation: StageOperation | null;
   readonly call: number;
   readonly candidate: RejectedCandidate;
+  /** 旗 `v12.ids` の T2 の束の形の候補だけ：束の添字（0 から）と束の要件の数（ID の値は持たない。Issue #626） */
+  readonly bundle?: TestSpecRejectedBundle;
 }
 
 /** 断った候補に、対象・raw・一覧の SHA-256 と、問題ごとの参照元の SHA-256 を付ける（v1 と同じ形） */
@@ -334,6 +342,7 @@ async function toBundleRejectedCandidate(slot: RejectedCandidateSlot): Promise<B
     round: candidate.round,
     attempt: candidate.attempt,
     kind: candidate.kind,
+    ...(slot.bundle === undefined ? {} : { bundle: { index: slot.bundle.index, requirements: slot.bundle.requirements } }),
   };
   if (candidate.kind === "shape") {
     return {
@@ -633,8 +642,8 @@ async function runV11a(
   const rejectedCandidates: RejectedCandidateSlot[] = [];
   const rejectionSink =
     (stage: RejectedCandidateStage, call: number) =>
-    (candidate: RejectedCandidate): void => {
-      rejectedCandidates.push({ stage, operation: null, call, candidate });
+    (candidate: RejectedCandidate, bundle?: TestSpecRejectedBundle): void => {
+      rejectedCandidates.push({ stage, operation: null, call, candidate, ...(bundle === undefined ? {} : { bundle }) });
     };
   const rejectedCandidateRows = (): Promise<readonly BundleRejectedCandidate[]> =>
     Promise.all(rejectedCandidates.map(toBundleRejectedCandidate));
@@ -1161,25 +1170,95 @@ async function runV11a(
     if (stageControl?.range.end === "semantic-check") return stageOutcome(null);
 
     // ── T2 試験の仕様（除いた一覧と所属で。宣言も名前も見せない）。開始 B1 は凍結した組から入る ────────
-    const runTestSpecStage = async (): Promise<FrozenTestSpec> => {
-      const value: TestSpecValue = await runStageOk("test-spec", () =>
-        runTestSpec({
-          plan: input.plan,
-          list,
-          table,
-          carryOver: carry,
-          documents: input.documents,
-          gateway,
-          ...(judgeBudget === undefined ? {} : { judge: judgeBudget }),
-          onDropped: (dropped) => {
-            for (const entry of dropped) droppedTests.push(entry);
+    /**
+     * 旗 `v12.ids` の T2（束を同時に呼ぶ。Issue #626）。束ごとに、予算・門・締切・時計・単価・effort・timeout を共有した口と、全体の
+     * 計量の内側に重ねた束の計量を作り、段の記録を束ごとに 1 つ積む（値はその束の口の計・束の計量・束の開始と終了から組む。
+     * 同時に走ると全体の計量と親の口の前後差が混ざるので使わない）
+     */
+    const runTestSpecBundled = async (
+      run: (bundleGateway: (bundle: number) => CallGateway, concurrency: number) => Promise<StageOutcome<TestSpecValue>>,
+    ): Promise<TestSpecValue> => {
+      const concurrency = input.v12T2Concurrency ?? V12_T2_BUNDLE.concurrency;
+      const runs: { readonly gateway: CallGateway; readonly meter: UsageMeter; readonly start: number; readonly end: () => number }[] = [];
+      const bundleGateway = (bundle: number): CallGateway => {
+        const bundleMeter = new UsageMeter();
+        const start = input.now();
+        // 束の終了＝その束の最後の呼び出しが返った時刻（呼ばなければ開始と同じ）
+        let end = start;
+        const metered = bundleMeter.wrap(meter.wrap(input.client));
+        const timed: LlmClient = {
+          callStructured: async <T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> => {
+            try {
+              return await metered.callStructured<T>(request);
+            } finally {
+              end = input.now();
+            }
           },
-          onRejected: rejectionSink("test-spec", 1),
-          ...withLedger,
-          // 旗 `v12.ids`：台帳の型だけで値が決まる試験をコードが作る（off は渡さない＝今のまま。Issue #595）
-          ...(flags.ids ? { ids: true } : {}),
-        }),
-      );
+          callWithTools: async (request: LlmToolRequest): Promise<LlmToolResponse> => {
+            try {
+              return await metered.callWithTools(request);
+            } finally {
+              end = input.now();
+            }
+          },
+        };
+        const bundleGatewayOf = new CallGateway({
+          client: timed,
+          budget,
+          rates: input.rates,
+          now: input.now,
+          deadline: input.deadline,
+          limits,
+          effort: input.effort,
+          ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
+          ...(callGate === undefined ? {} : { gate: callGate }),
+        });
+        runs[bundle] = { gateway: bundleGatewayOf, meter: bundleMeter, start, end: () => end };
+        return bundleGatewayOf;
+      };
+      const settle = (status: StageStatus, failureKind: FailureKind | null): void => {
+        for (const entry of runs) {
+          if (entry === undefined) continue;
+          stages.push(makeStageRecord("test-spec", status, entry.end() - entry.start, entry.meter.snapshot, entry.gateway.counts, failureKind));
+        }
+      };
+      let outcome: StageOutcome<TestSpecValue>;
+      try {
+        outcome = await run(bundleGateway, concurrency);
+      } catch (error) {
+        settle("failed", null);
+        throw error;
+      }
+      if (!outcome.ok) {
+        const attribution = stageFailureAttribution("test-spec", outcome.failure);
+        settle("failed", attribution.kind);
+        throw new RunStop(attribution);
+      }
+      settle("ok", null);
+      return outcome.value;
+    };
+    const runTestSpecStage = async (): Promise<FrozenTestSpec> => {
+      const testSpecInput = (): Parameters<typeof runTestSpec>[0] => ({
+        plan: input.plan,
+        list,
+        table,
+        carryOver: carry,
+        documents: input.documents,
+        gateway,
+        ...(judgeBudget === undefined ? {} : { judge: judgeBudget }),
+        onDropped: (dropped) => {
+          for (const entry of dropped) droppedTests.push(entry);
+        },
+        onRejected: rejectionSink("test-spec", 1),
+        ...withLedger,
+        // 旗 `v12.ids`：台帳の型だけで値が決まる試験をコードが作る（off は渡さない＝今のまま。Issue #595）
+        ...(flags.ids ? { ids: true } : {}),
+      });
+      const value: TestSpecValue = flags.ids
+        ? await runTestSpecBundled((bundleGateway, bundleConcurrency) =>
+            runTestSpec({ ...testSpecInput(), bundleGateway, bundleConcurrency }),
+          )
+        : await runStageOk("test-spec", () => runTestSpec(testSpecInput()));
       natureDiscrepancies = toBundleNatureDiscrepancies(value.discrepancies);
       materialStore.testSuite = await acceptSlot(value.suite, lastOkStageIndex("test-spec"));
       return value;

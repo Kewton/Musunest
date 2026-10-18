@@ -417,10 +417,11 @@ export function toCasePositions(
 /** 束の完全性の固定文（値を埋めない） */
 export const TEST_CASE_BUNDLE_MESSAGES = {
   unknown: "要件の一覧に無い要件 ID の分類である",
-  outside: "束に無い要件 ID の分類である",
+  outside: "別の束の要件 ID の分類である",
   duplicate: "同じ要件の分類が重なっている",
   missing: "束の要件の分類が無い",
-  caseOutside: "場合の要件 ID が束の要件でない",
+  caseOutside: "場合の要件 ID が別の束の要件である",
+  caseUnknown: "場合の要件 ID が要件の一覧に無い",
   unattributed: "問題を束に帰属できない",
 } as const;
 
@@ -433,17 +434,21 @@ export function bundleRequirementIds(ids: readonly string[], size: number): read
 }
 
 /**
- * 束の完全性（束の中で閉じる条件だけ）。分類がその束の要件にちょうど 1 件（欠落・重複・束に無い要件 ID・一覧に無い要件 ID）で、
- * 場合の要件 ID がその束の要件であること。位置はその束の応答の添字（`classifications[i]`・`cases[i]`・束の中の `requirements[i]`）
+ * 束の完全性（束の中で閉じる条件だけ）。分類がその束の要件にちょうど 1 件（欠落・重複・別の束の要件 ID・一覧に無い要件 ID）で、
+ * 場合の要件 ID が別の束の要件でも一覧に無い要件でもないこと。位置はその束の応答の添字（`classifications[i]`・`cases[i]`・束の中の
+ * `requirements[i]`）。`requestedIds` は全部の束の要件（要求の一覧）、`knownIds` は残る要件の一覧（要求の一覧を含む）。一覧にあるが
+ * どの束にも無い要件（コードの試験だけで確かめる要件）の分類・場合はここでは断らず、合併後の検査が今までどおりの固定文で断る
  */
 export function checkBundleCompleteness(
   output: TestCasesOutput,
   bundleIds: readonly string[],
-  allIds: readonly string[],
+  requestedIds: readonly string[],
+  knownIds: readonly string[],
 ): readonly Problem[] {
   const problems: Problem[] = [];
   const inBundle = new Set(bundleIds);
-  const known = new Set(allIds);
+  const requested = new Set(requestedIds);
+  const known = new Set([...knownIds, ...requestedIds]);
   const seen = new Set<string>();
   const classifications = Array.isArray(output.classifications) ? (output.classifications as readonly unknown[]) : [];
   classifications.forEach((entry, index) => {
@@ -454,7 +459,7 @@ export function checkBundleCompleteness(
       return;
     }
     if (!inBundle.has(id)) {
-      problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.outside });
+      if (requested.has(id)) problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.outside });
       return;
     }
     if (seen.has(id)) {
@@ -467,8 +472,10 @@ export function checkBundleCompleteness(
     if (!seen.has(id)) problems.push({ field: `requirements[${String(index)}]`, message: TEST_CASE_BUNDLE_MESSAGES.missing });
   });
   output.cases.forEach((entry, index) => {
-    if (!inBundle.has(entry.requirementId)) {
-      problems.push({ field: `cases[${String(index)}].requirementId`, message: TEST_CASE_BUNDLE_MESSAGES.caseOutside });
+    const field = `cases[${String(index)}].requirementId`;
+    if (!known.has(entry.requirementId)) problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.caseUnknown });
+    else if (!inBundle.has(entry.requirementId) && requested.has(entry.requirementId)) {
+      problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.caseOutside });
     }
   });
   return problems;

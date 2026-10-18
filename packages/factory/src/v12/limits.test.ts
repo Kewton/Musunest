@@ -97,7 +97,8 @@ describe("段ごとの論理の枠（§4.1 の列のまま）", () => {
       ["C1", "1/束ごと", "1/束ごと", null, null],
       ["C2", "1/束ごと", "1/束ごと", "1/束ごと", null],
       ["C3", "1/段全体", "1/段全体", "1/段全体", null],
-      ["C4", "1/束ごと", "1/束ごと", null, null],
+      // 手 3f（Issue #626）：C4 は束ごとに中身のやり直し 1（合併後の問題が帰属する束だけ）
+      ["C4", "1/束ごと", "1/束ごと", "1/束ごと", null],
       ["C6", "1/版ごと", "2/段全体", null, 6],
       ["loop", null, "1/往復ごと", "2/往復ごと", 6],
       ["rewrite", null, "1/段全体", "1/段全体", null],
@@ -197,5 +198,34 @@ describe("旗 v12.ids の T2 の束の定数（手 3f・Issue #626）", () => {
     expect(V12_T2_BUNDLE_DEFINITIONS.map((definition) => definition.key)).toEqual(Object.keys(V12_T2_BUNDLE));
     for (const definition of V12_T2_BUNDLE_DEFINITIONS) expect(definition.review.length).toBeGreaterThan(0);
     expect(Math.ceil(25 / V12_T2_BUNDLE.size)).toBeLessThanOrEqual(V12_T2_BUNDLE.concurrency);
+  });
+
+  it("T2 の写しは束 5（要件 25）・束ごとの総回数 3（初回 1・形 1・中身 1）で、§4.1 の C4 の行の枠を超えない。回数の定数は変えない", () => {
+    const testSpec = V12_IDS_FRAME_MAP.find((entry) => entry.stage === "test-spec");
+    expect(testSpec).toEqual({ stage: "test-spec", frame: "C4", rounds: TEST_SPEC_ROUNDS, shapeAttempts: STEP_ATTEMPTS, units: 5, maxLogical: 15 });
+    expect([TEST_SPEC_ROUNDS, STEP_ATTEMPTS]).toEqual([2, 2]);
+  });
+
+  it("論理の最大を要件 25（T2 の束 5）で数え直しても 72 の内側（上限は上げない）", () => {
+    const perUnit = (stage: string): number => {
+      const row = frame(stage);
+      return (row?.initial?.count ?? 0) + (row?.shape?.count ?? 0) + (row?.content?.count ?? 0);
+    };
+    const ids = Object.fromEntries(V12_IDS_FRAME_MAP.map((entry) => [entry.stage, entry.maxLogical]));
+    const maximum = {
+      C1: ids["vocabulary"] ?? Number.NaN,
+      C2: ids["mapping"] ?? Number.NaN,
+      C3: perUnit("C3"),
+      C4: ids["test-spec"] ?? Number.NaN,
+      // C5 は手 6 の段（§4.1 の表の区分 3・区分ごとに初回 1・形 1）
+      C5: 6,
+      C6: (frame("C6")?.maxUnits ?? Number.NaN) + (frame("C6")?.shape?.count ?? Number.NaN),
+      loop: perUnit("loop") * (frame("loop")?.maxUnits ?? Number.NaN),
+      rewrite: perUnit("rewrite"),
+    };
+    expect(maximum).toEqual({ C1: 6, C2: 3, C3: 3, C4: 15, C5: 6, C6: 8, loop: 18, rewrite: 2 });
+    const total = Object.values(maximum).reduce((sum, value) => sum + value, 0);
+    expect(total).toBe(61);
+    expect(total).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
   });
 });
