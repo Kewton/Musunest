@@ -84,7 +84,7 @@ import type { LedgerView } from "./v12/ledger.js";
 import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
 import { isGeneratedTestId } from "./v12/generated-tests.js";
 import { ruleTexts } from "./stages/prompt.js";
-import { TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf } from "./v11a/stages/test-spec.js";
+import { TEST_SPEC_DATA_NAMES, TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
 import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
 import { V12_CALL_LIMITS } from "./v12/limits.js";
 import type { NameTable } from "./v11a/names.js";
@@ -945,6 +945,18 @@ function v11aTestSpec(): Record<string, unknown> {
   };
 }
 
+/**
+ * 旗 v12.ids の走りの T2 の応答（手 3d・Issue #624：構造の要件 R2 は要求の一覧に無く、構造の検査はコードが作るので、R2 の試験と
+ * 分類を書かない）
+ */
+function v12TestSpec(): Record<string, unknown> {
+  const spec = v11aTestSpec() as { classifications: readonly { requirementId: string }[]; tests: readonly { target: { requirementId: string } }[] };
+  return {
+    classifications: spec.classifications.filter((entry) => entry.requirementId !== "R2"),
+    tests: spec.tests.filter((test) => test.target.requirementId !== "R2"),
+  };
+}
+
 /** T1''・B3' の判定（`rejects` の要件だけ拒否） */
 const v11aJudgments = (rejects: Readonly<Record<string, readonly [string, string]>> = {}) => ({
   judgments: V11A_IDS.map((requirementId) => {
@@ -984,7 +996,7 @@ const v12TableCalls = (ledger: LedgerView = ledgerModule.PROPERTY_LEDGER_VIEW): 
 const v12Head = (ledger?: LedgerView): RecordedCall[] => [
   ...v12TableCalls(ledger),
   structured(v11aJudgments()),
-  structured(v11aRenamed(v11aTestSpec())),
+  structured(v11aRenamed(v12TestSpec())),
   structured({ declaration: V11A_YAML }),
 ];
 
@@ -1260,6 +1272,50 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
       return request;
     });
   };
+  /**
+   * 旗 ids の手 3d（Issue #624）の差をそろえる：構造の要件 R2 は旗 ids の T2 の要求の一覧・確かめ方・所属に無く、組の分類にも無い
+   * （構造の検査はコードが作る）。両側の T2 のその 3 つの塊と B1 の「固定した試験」の分類から R2 を除き、`ledger` を渡した側
+   * （旗 ids の走り）の T2 の schema を旗 ids off の schema（operation に structure・assertion は写像か null）に戻す
+   */
+  const withoutStructuralRequirement = (requests: readonly unknown[], ledger?: LedgerView): unknown[] => {
+    const [, listName, , verificationName, ownershipName] = TEST_SPEC_DATA_NAMES;
+    const [, , testsName] = WRITE_V11A_DATA_NAMES;
+    const notR2 = (entry: { readonly id?: string; readonly requirementId?: string }) => (entry.requirementId ?? entry.id) !== "R2";
+    const rewrite = (input: string, name: string, edit: (parsed: unknown) => unknown) =>
+      input.replace(new RegExp(`(<data name="${name}">\\n)([\\s\\S]*?)(\\n</data>)`), (_all, head: string, body: string, tail: string) => {
+        const parsed = JSON.parse(body) as unknown;
+        expect(JSON.stringify(parsed, null, 2)).toBe(body);
+        return `${head}${JSON.stringify(edit(parsed), null, 2)}${tail}`;
+      });
+    return requests.map((value) => {
+      const request = value as LlmStructuredRequest;
+      if (request.schemaName === TEST_SPEC_SCHEMA_NAME) {
+        let input = rewrite(request.input, listName, (parsed) => {
+          const list = parsed as { readonly requirements: readonly { readonly id: string }[] };
+          return { ...list, requirements: list.requirements.filter(notR2) };
+        });
+        for (const name of [verificationName, ownershipName]) {
+          input = rewrite(input, name, (parsed) => (parsed as readonly { readonly requirementId: string }[]).filter(notR2));
+        }
+        return { ...request, input, ...(ledger === undefined ? {} : { schema: JSON.parse(JSON.stringify(testSpecSchemaOf(ledger))) as unknown }) };
+      }
+      if (request.schemaName === WRITE_V11A_SCHEMA_NAME) {
+        const input = rewrite(request.input, testsName, (parsed) => {
+          // R2 の構造の検査は旗 ids の走りではコードが作る（組の末尾。`withoutIdsGenerated` が除く）。両側の R2 の試験と分類を除く
+          const suite = parsed as {
+            readonly tests: readonly { readonly target: { readonly requirementId: string } }[];
+            readonly classifications?: readonly { readonly requirementId: string }[];
+          };
+          const tests = suite.tests.filter((test) => test.target.requirementId !== "R2");
+          return suite.classifications === undefined
+            ? { ...suite, tests }
+            : { ...suite, tests, classifications: suite.classifications.filter(notR2) };
+        });
+        return { ...request, input };
+      }
+      return request;
+    });
+  };
   const withoutTableStage = (diff: Readonly<Record<string, readonly string[]>>): Readonly<Record<string, readonly string[]>> =>
     Object.fromEntries(Object.entries(diff).filter(([name]) => name !== "name-table"));
 
@@ -1285,9 +1341,11 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     const withoutCheckTargets = (requests: readonly unknown[]): unknown[] =>
       requests.map((request) => JSON.parse(JSON.stringify(request).replace(targetsPattern, "")) as unknown);
     const onWithTargets = laterRequests(v12.recording.structured);
-    expect(onWithTargets.slice(0, 2).every((request) => JSON.stringify(request).match(targetsPattern) !== null)).toBe(true);
-    const onRequests = withoutCheckTargets(onWithTargets);
-    const offRequests = laterRequests(v11a.recording.structured);
+    // 手 3d（Issue #624）から構造の要件は T2 の要求に無いので、検査の対象の欄を持つのは C3 だけ
+    expect(JSON.stringify(onWithTargets[0]).match(targetsPattern) !== null).toBe(true);
+    expect(JSON.stringify(onWithTargets[1]).match(targetsPattern)).toBeNull();
+    const onRequests = withoutStructuralRequirement(withoutCheckTargets(onWithTargets), PROPERTY_LEDGER_VIEW);
+    const offRequests = withoutStructuralRequirement(laterRequests(v11a.recording.structured));
     expect(onRequests).toHaveLength(offRequests.length);
     const diffs = requestDiffsOf(onRequests, offRequests);
     const withInput = (paths: readonly string[]): readonly string[] => {
@@ -1308,8 +1366,13 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     const v12Before = await runV11aCli({ dir: `${directory}/v12-complete-2b`, calls: [...v12Head(LEDGER_VIEW_2B), structured(v11aJudgments())], pipeline: "v1.2" });
     spy.mockRestore();
     // 旗 ids on の差（Issue #595）：#548 の台帳でも R-tsp-16 は旗 ids の文（既定値・選択肢の集合の文）。空の集計の行が無いので
-    // コードの試験は作らない（B1 の塊は同じ）。R-tsp-16 だけを旗 off の文に戻して比べる
-    const beforeRequests = withoutIdsGenerated(withoutCheckTargets(laterRequests(v12Before.recording.structured)), LEDGER_VIEW_2B, false);
+    // 空の集計のコードの試験は作らない。手 3d（Issue #624）から構造の検査と画面の構造の確認はコードが作るので、B1 の塊の末尾にその
+    // 試験が並ぶ（除いて比べる）。R-tsp-16 は旗 off の文に戻して比べる
+    const beforeRequests = withoutIdsGenerated(
+      withoutStructuralRequirement(withoutCheckTargets(laterRequests(v12Before.recording.structured)), LEDGER_VIEW_2B),
+      LEDGER_VIEW_2B,
+      true,
+    );
     const beforeDiffs = requestDiffsOf(beforeRequests, offRequests);
     const enumDiff = withoutTableStage(ENUM_MEMBERSHIP_REQUEST_DIFF);
     for (const diff of beforeDiffs) expect(diff.paths, diff.schemaName).toEqual(enumDiff[diff.schemaName] ?? []);
@@ -1324,7 +1387,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     const spy2C = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2C : undefined));
     const v12Before2C = await runV11aCli({ dir: `${directory}/v12-complete-2c`, calls: [...v12Head(LEDGER_VIEW_2C), structured(v11aJudgments())], pipeline: "v1.2" });
     spy2C.mockRestore();
-    const before2CRequests = withoutCheckTargets(laterRequests(v12Before2C.recording.structured));
+    const before2CRequests = withoutStructuralRequirement(withoutCheckTargets(laterRequests(v12Before2C.recording.structured)), LEDGER_VIEW_2C);
     const diffs2C = requestDiffsOf(onRequests, before2CRequests);
     const when2C = withoutTableStage(WHEN_NON_REQUIREMENT_REQUEST_DIFF);
     for (const diff of diffs2C) expect(diff.paths, diff.schemaName).toEqual(when2C[diff.schemaName] ?? []);

@@ -75,6 +75,7 @@ import {
   checkGeneratedOverlap,
   generateTests,
   ledgerTargetsOf,
+  normalOnlyOwnershipRequirementIds,
   type AggregateTarget,
   type GeneratedTests,
   type LedgerTarget,
@@ -442,6 +443,27 @@ export function exemptLedgerProblems(
   return problems.filter((problem) => !(exempt.get(problem.field) ?? []).includes(problem.message));
 }
 
+/**
+ * 旗 `v12.ids`：v1 の `checkSuitePlan` の問題から、所属の行がすべて必須の kind が normal だけの試験の型の対象（画面・entity の行）
+ * である要件の、その型の必須に無い kind の不足（`abnormal の試験が無い`・`boundary の試験が無い`）だけを外す（#624。
+ * `exemptLedgerProblems` と同じ 3 条件：要件の位置と正確に一致・文が完全一致）。免除は台帳の型と所属で決め、作った試験の有無・
+ * 数では決めない。項目・計算・操作の行を所属に持つ要件は今までどおり 3 種類を求める。
+ */
+export function exemptOwnershipProblems(
+  problems: readonly Problem[],
+  list: RequirementList,
+  table: NameTable,
+  ledger: LedgerView,
+): readonly Problem[] {
+  const exemptIds = new Set(normalOnlyOwnershipRequirementIds(table, ledger, list));
+  if (exemptIds.size === 0) return problems;
+  const messages = new Set(ledger.ownershipRows.flatMap((row) => exemptKindMessagesOf(row.t2)));
+  const fields = new Set(
+    list.requirements.flatMap((requirement, index) => (exemptIds.has(requirement.id) ? [`requirements[${index}]`] : [])),
+  );
+  return problems.filter((problem) => !(fields.has(problem.field) && messages.has(problem.message)));
+}
+
 // ── 旗 on：集計の試験の期待の形の門（台帳の集計の試験の型。08 §5・Issue #549）──────────────────
 
 /** 見出しごとの 1 組が `{heading, value}` だけを持ち、value が `value` と等しいか */
@@ -743,11 +765,13 @@ export const TEST_SPEC_SCHEMA = {
 
 /**
  * T2 の JSON Schema（旗 on なら observes の enum を台帳の順にする。Issue #547）。省けば今の定数を返す。欄の並びは
- * 変えない（off の定数とバイト列で同じ JSON になる）。
+ * 変えない（off の定数とバイト列で同じ JSON になる）。`ids`（旗 `v12.ids`）が真なら、operation の enum から structure を外し、
+ * assertion を null だけを許す型にする（構造の検査はコードが作るので、構文で書けなくする。08 §6・Issue #624）。
  */
-export function testSpecSchemaOf(ledger?: LedgerView): typeof TEST_SPEC_SCHEMA {
+export function testSpecSchemaOf(ledger?: LedgerView, ids = false): typeof TEST_SPEC_SCHEMA {
   if (ledger === undefined) return TEST_SPEC_SCHEMA;
   const tests = TEST_SPEC_SCHEMA.properties.tests;
+  const properties = tests.items.properties;
   return {
     ...TEST_SPEC_SCHEMA,
     properties: {
@@ -757,8 +781,14 @@ export function testSpecSchemaOf(ledger?: LedgerView): typeof TEST_SPEC_SCHEMA {
         items: {
           ...tests.items,
           properties: {
-            ...tests.items.properties,
-            observes: { ...tests.items.properties.observes, enum: [...ledger.observes] },
+            ...properties,
+            ...(ids
+              ? {
+                  operation: { ...properties.operation, enum: properties.operation.enum.filter((operation) => operation !== "structure") },
+                  assertion: { type: "null", description: "構造の検査はコードが作るので、null にする" },
+                }
+              : {}),
+            observes: { ...properties.observes, enum: [...ledger.observes] },
           },
         },
       },
@@ -1137,6 +1167,10 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
   // 完全性から除く（表の行は除かない。Issue #595）。off は今のまま
   const ids = input.ids === true && ledger !== undefined;
   const generated = ids ? generateTests({ table: pruned.table, ledger, list }) : undefined;
+  // 構造の検査を作れない要件（対象の行が表に無い・種類が合わない）は、LLM を呼ばずに固定文で止める（近い行に結び付けない。#624）
+  if (generated !== undefined && generated.stopped.length > 0) {
+    return { ok: false, failure: { kind: "unmet", attempts: 0, problems: generated.stopped } };
+  }
   const generatedOnly = new Set(generated?.excludedRequirementIds ?? []);
   const requestList: RequirementList =
     generatedOnly.size === 0 ? list : { ...list, requirements: list.requirements.filter((requirement) => !generatedOnly.has(requirement.id)) };
@@ -1161,7 +1195,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
           return index === undefined ? problem : { ...problem, field: `requirements[${String(index)}]` };
         });
   const rules = ledger === undefined ? TEST_SPEC_RULES : ruleTexts(testSpecRuleDefinitionsOf(ledger, ids));
-  const schema = testSpecSchemaOf(ledger);
+  const schema = testSpecSchemaOf(ledger, ids);
   const check = (output: unknown): ShapeCheck<TestSpecOutput> => checkTestSpecOutput(output, ledger);
 
   let previous: readonly Problem[] = [];
@@ -1256,7 +1290,16 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
               ...checkDefaultValueTests(suite, observes, defaults, jsonStringExpectedIds(answer.output)),
             ]
           : [
-              ...toRequestPositions(exemptLedgerProblems(checkSuitePlan(list, suite, design, reconciled.natures), list, targets)),
+              ...toRequestPositions(
+                ids
+                  ? exemptOwnershipProblems(
+                      exemptLedgerProblems(checkSuitePlan(list, suite, design, reconciled.natures), list, targets),
+                      list,
+                      pruned.table,
+                      ledger,
+                    )
+                  : exemptLedgerProblems(checkSuitePlan(list, suite, design, reconciled.natures), list, targets),
+              ),
               ...checkEvaluabilityByLedger(suite, observes, pruned.table, ledger),
               ...checkLedgerTests(suite, observes, targets, quoted),
               ...checkAggregateTests(suite, observes, pruned.table, ledger),

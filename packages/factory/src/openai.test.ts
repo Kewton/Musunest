@@ -783,16 +783,16 @@ describe("識別子 v1.2 の client は、封筒に載る全段に同じ v1.2 �
   }
 
   /** 旗 on の T1・T2（台帳の schema）と、台帳の導出を持たない T1''・B1・B3'・B5' の要求の schema */
-  const v12Requests = (): readonly { readonly stage: string; readonly schema: unknown }[] => [
+  const v12Requests = (ids = false): readonly { readonly stage: string; readonly schema: unknown }[] => [
     { stage: NAME_TABLE_SCHEMA_NAME, schema: nameTableSchemaOf(PROPERTY_LEDGER_VIEW) },
-    { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW) },
+    { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW, ids) },
     ...STAGE_ENVELOPE_ENTRIES_V11A.filter(
       (entry) => entry.stage !== NAME_TABLE_SCHEMA_NAME && entry.stage !== TEST_SPEC_SCHEMA_NAME,
     ),
   ];
 
   it("旗 on の T1・T2 と T1''・B1・B3'・B5' の 6 段が、名前 stage-envelope-v12 の同じバイト列の封筒を送る", async () => {
-    const requests = v12Requests();
+    const requests = v12Requests(true);
     expect(requests).toHaveLength(6);
     const sent = new Set<string>();
     for (const request of requests) {

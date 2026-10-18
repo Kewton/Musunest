@@ -174,6 +174,7 @@ export const ENVELOPE_SCHEMA_NAME_V12 = "stage-envelope-v12";
  * T1・T2 の枝を台帳から導いた schema（`nameTableSchemaOf`・`testSpecSchemaOf`。段が渡すものと同じ導出）にする。
  * ほかの段は v1.1α と同じ枝。後の手の段は、その旗が on のときここで足す：旗 `v12.ids` が on なら、末尾に C1 の 3 束
  * （`vocabulary-*`）と C2（`mapping`）の枝を足す（schema は段が渡すものと同じ導出。Issue #593）。`ids` を省けば off。
+ * T2 の枝は旗 `ids` からも導く（on なら operation の enum に structure が無く assertion は null だけ。段が渡すものと同じ導出。#624）。
  */
 export function stageEnvelopeEntriesV12Of(flags: Pick<V12Flags, "ledger"> & Partial<Pick<V12Flags, "ids">>): readonly StageEnvelopeEntry[] {
   const ledger = ledgerViewOf(flags);
@@ -184,7 +185,7 @@ export function stageEnvelopeEntriesV12Of(flags: Pick<V12Flags, "ledger"> & Part
           entry.stage === NAME_TABLE_SCHEMA_NAME
             ? { stage: entry.stage, schema: nameTableSchemaOf(ledger) }
             : entry.stage === TEST_SPEC_SCHEMA_NAME
-              ? { stage: entry.stage, schema: testSpecSchemaOf(ledger) }
+              ? { stage: entry.stage, schema: testSpecSchemaOf(ledger, flags.ids === true) }
               : entry,
         );
   if (flags.ids !== true) return base;

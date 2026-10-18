@@ -13,6 +13,9 @@
 //      だけ（観測する性質は増えない・確かめ方の種類が 1 つ増える）。台帳の点検が受理で除く確かめ方の形を見ること
 //   9. 手 3c（#595）：期待の値の書き手が default-value・enum-membership で code、empty-aggregate はコードが作る範囲（アプリ全体と
 //      見出しごと × 選択肢）つき。旗 ids の T2 の文はコードが作る範囲だけを「作らない」に差し替え、ほかの行の文は今のまま
+//  10. 手 3d（#624）：view-structure・existence の行に C4 の試験の型（screen × screen・entity × screen・normal だけ・期待は ok の
+//      定数・入力は空の写像・参照データは空・書き手 code）があり、写しの行もそれを写す。旗 ids の T2 の文は構造の検査と screen 操作を
+//      「作らない」とし、off の文（t2 の並び）は変えない
 //
 // LLM を呼ばない。外部の API を呼ばない。受入の題材の言葉は使わない。
 import { describe, expect, it } from "vitest";
@@ -814,7 +817,14 @@ describe("期待の値の書き手：default-value・enum-membership は code、
       expect(row.t2?.referenceTargets, row.id).toEqual([]);
     }
     // 旗 ids の文があるのはコードが作る行だけ。ほかの行は null（今の文をそのまま使う）
-    expect(PROPERTY_LEDGER.filter((row) => row.rules.t2Ids !== null).map((row) => row.id)).toEqual(["default-value", "enum-membership", "empty-aggregate"]);
+    // 手 3d（#624）で、所属の行だけで決まる view-structure・existence の行にも旗 ids の文を足した
+    expect(PROPERTY_LEDGER.filter((row) => row.rules.t2Ids !== null).map((row) => row.id)).toEqual([
+      "view-structure",
+      "existence",
+      "default-value",
+      "enum-membership",
+      "empty-aggregate",
+    ]);
   });
 
   it("旗 ids の T2 の文：既定値・選択肢の集合は作らない文、空の集計はアプリ全体と見出しごと × 選択肢の境界・異常を作らない文の後ろに今の文（行ごと・月の見出しごとに使う）をそのまま続ける。題材の言葉は無い", () => {
@@ -830,14 +840,16 @@ describe("期待の値の書き手：default-value・enum-membership は code、
     for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(text).not.toContain(word);
   });
 
-  it("導出：旗 ids の T2 の文の並びは、台帳の T2 の文の並びの各行を旗 ids の文に差し替えたもの（行の数・順は同じ）。旗 ids の文を持たない台帳では同じ", () => {
+  it("導出：旗 ids の T2 の文の並びは、台帳の T2 の文の並びの各行を旗 ids の文に差し替え、T2 の文の無い行の旗 ids の文（view-structure・existence。#624）を台帳の順に足したもの。旗 ids の文を持たない台帳では同じ", () => {
     const view = PROPERTY_LEDGER_VIEW;
-    expect(view.t2IdsFormTexts).toHaveLength(view.t2FormTexts.length);
-    const evaluableWithText = PROPERTY_LEDGER.filter((row) => row.state !== "registered-unsupported" && row.rules.t2 !== null);
-    expect(view.t2IdsFormTexts).toEqual(evaluableWithText.map((row) => row.rules.t2Ids ?? row.rules.t2));
+    const evaluable = PROPERTY_LEDGER.filter((row) => row.state !== "registered-unsupported");
+    const evaluableWithText = evaluable.filter((row) => row.rules.t2 !== null);
+    expect(view.t2IdsFormTexts).toEqual(evaluable.flatMap((row) => { const text = row.rules.t2Ids ?? row.rules.t2; return text === null ? [] : [text]; }));
+    // T2 の文の無い行の旗 ids の文は view-structure・existence の 2 つだけ（off の並びは変えない）
+    expect(view.t2IdsFormTexts).toHaveLength(view.t2FormTexts.length + 2);
     expect(view.t2FormTexts).toEqual(evaluableWithText.map((row) => row.rules.t2));
     const withoutIds = deriveLedgerView(PROPERTY_LEDGER.map((row) => ({ ...row, rules: { ...row.rules, t2Ids: null } })).map((row) =>
-      row.t2 === null ? row : { ...row, t2: { ...row.t2, expectedWriter: "llm-written-code-checked" as const } },
+      row.t2 === null ? row : row.t1 === null ? { ...row, t2: null } : { ...row, t2: { ...row.t2, expectedWriter: "llm-written-code-checked" as const } },
     ).map((row) => (row.t2Aggregate === null ? row : { ...row, t2Aggregate: { ...row.t2Aggregate, codeRanges: [] } })));
     expect(withoutIds.t2IdsFormTexts).toEqual(withoutIds.t2FormTexts);
   });
@@ -874,5 +886,79 @@ describe("期待の値の書き手：default-value・enum-membership は code、
     const reverted = COPY_TEXT.replace("| code（アプリ全体・見出しごと × 選択肢）／llm-written-code-checked（行ごと・見出しごと × 月） |", "| llm-written-code-checked |");
     expect(reverted).not.toBe(COPY_TEXT);
     expect(copyDefects(reverted, PROPERTY_LEDGER)).toEqual(["写しの empty-aggregate の行がコードと違う"]);
+  });
+});
+
+// ── 10. 手 3d：view-structure・existence の C4 の試験の型（Issue #624）──────────────────
+
+describe("view-structure・existence の行：C4 の試験の型（screen × screen・entity × screen・normal だけ・期待は ok の定数・書き手 code。Issue #624）", () => {
+  const VIEW = PROPERTY_LEDGER.find((row) => row.id === "view-structure");
+  const EXISTENCE = PROPERTY_LEDGER.find((row) => row.id === "existence");
+  if (VIEW?.t2 == null || EXISTENCE?.t2 == null) throw new Error("前提が壊れた：view-structure・existence の試験の型が無い");
+
+  it("行の欄：view-structure は screen × screen（組ごとの対象の種類の列は screen）、existence は entity × screen。どちらも必須の kind は normal だけ・期待は ok の定数・入力は空の写像・参照データは空・1 本以上・書き手 code", () => {
+    expect([VIEW.t2?.targetKind, VIEW.t2?.targetKinds, VIEW.t2?.operation]).toEqual(["screen", ["screen"], "screen"]);
+    expect([EXISTENCE.t2?.targetKind, EXISTENCE.t2?.targetKinds, EXISTENCE.t2?.operation]).toEqual(["entity", ["entity"], "screen"]);
+    for (const row of [VIEW, EXISTENCE]) {
+      expect(row.t2?.requiredKinds, row.id).toEqual(["normal"]);
+      expect(row.t2?.expected, row.id).toEqual({ kind: "ok", valueType: "json-boolean", equals: "constant" });
+      expect(row.t2?.input, row.id).toBe("empty-record");
+      expect(row.t2?.referenceTargets, row.id).toEqual([]);
+      expect(row.t2?.minTests, row.id).toBe(1);
+      expect(row.t2?.expectedWriter, row.id).toBe("code");
+      // 確かめ方の種類には結び付かない（T1 の確かめ方・観測する性質・評価の方法の表の組は今のまま）
+      expect(row.t1, row.id).toBeNull();
+      expect(row.evaluation, row.id).toBe("v1-run-tests");
+      expect(row.rules.t2, row.id).toBeNull();
+    }
+    // 導出：所属の行だけで決まる行は台帳の順に view-structure・existence。確かめ方の種類と免除の種類は増えない
+    expect(PROPERTY_LEDGER_VIEW.ownershipRows.map((row) => row.id)).toEqual(["view-structure", "existence"]);
+    expect(PROPERTY_LEDGER_VIEW.t2ExemptKinds).toEqual(["default-value", "enum-membership"]);
+    expect(PROPERTY_LEDGER_VIEW.rowByVerificationKind.has("view-structure")).toBe(false);
+  });
+
+  it("旗 ids の T2 の文：view-structure は構造の検査と screen 操作だけを「作らない（コードが作る）」とし、existence は entity × screen を作らないとする。off の文（t2）は null のまま。題材の言葉は無い", () => {
+    expect(VIEW.rules.t2Ids).toContain("構造の検査（operation が structure の試験）と画面の試験（operation が screen の試験");
+    expect(VIEW.rules.t2Ids).toContain("作らない（コードが作る");
+    expect(EXISTENCE.rules.t2Ids).toContain("entity × screen の試験（observes は existence）は作らない（コードが作る）");
+    for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(`${VIEW.rules.t2Ids ?? ""}${EXISTENCE.rules.t2Ids ?? ""}`).not.toContain(word);
+  });
+
+  it("二点測定：組ごとの対象の種類が空・組に無い、必須の kind に abnormal を足す、書き手を llm にする、期待を定数でなくすと不備になる（今の台帳は通る）", () => {
+    const patched = (patch: (t2: NonNullable<PropertyRow["t2"]>) => NonNullable<PropertyRow["t2"]>) =>
+      ledgerRowDefects(PROPERTY_LEDGER.map((row) => (row.id === "existence" && row.t2 !== null ? { ...row, t2: patch(row.t2) } : row)));
+    expect(ledgerRowDefects(PROPERTY_LEDGER)).toEqual([]);
+    expect(patched((t2) => ({ ...t2, targetKinds: [] }))).toEqual([
+      "性質 existence の試験の型の組ごとの対象の種類が、空か重なっているか対象の種類を含まない",
+    ]);
+    expect(patched((t2) => ({ ...t2, targetKinds: ["entity", "field"] }))).toEqual(["性質 existence の試験の型の組が、評価の方法の表の組に無い"]);
+    const notNormalOnly = "性質 existence は確かめ方に結び付かない試験の型なのに、normal だけ・書き手 code・期待 ok の定数でない";
+    expect(patched((t2) => ({ ...t2, requiredKinds: ["normal", "abnormal"] }))).toEqual([notNormalOnly]);
+    expect(patched((t2) => ({ ...t2, expectedWriter: "llm-written-code-checked" }))).toEqual([notNormalOnly]);
+    expect(patched((t2) => ({ ...t2, expected: { ...t2.expected, equals: "target-options" } }))).toEqual([
+      "性質 existence の期待の型と値の型が食い違う（定数は真偽）",
+      notNormalOnly,
+    ]);
+  });
+
+  it("写し：view-structure・existence の行の T2 の形と書き手の列（screen × screen・entity × screen・code）。写しの行を戻すと落ちる", () => {
+    const cellsOf = (row: PropertyRow) => propertyCopyCells(row);
+    expect(cellsOf(VIEW)[PROPERTY_COPY_HEADER.indexOf("T2 の形")]).toBe(
+      "screen × screen・normal・期待 ok の json-boolean（定数 true）・入力 empty-record・参照データ 空・1 本以上",
+    );
+    expect(cellsOf(EXISTENCE)[PROPERTY_COPY_HEADER.indexOf("T2 の形")]).toBe(
+      "entity × screen・normal・期待 ok の json-boolean（定数 true）・入力 empty-record・参照データ 空・1 本以上",
+    );
+    expect(cellsOf(VIEW)[PROPERTY_COPY_HEADER.indexOf("期待の値の書き手")]).toBe("code");
+    expect(cellsOf(EXISTENCE)[PROPERTY_COPY_HEADER.indexOf("期待の値の書き手")]).toBe("code");
+    expect(copyDefects(COPY_TEXT, PROPERTY_LEDGER)).toEqual([]);
+    const reverted = COPY_TEXT.replace(
+      "| entity × screen・normal・期待 ok の json-boolean（定数 true）・入力 empty-record・参照データ 空・1 本以上 | code |",
+      "| 未定義（組：entity × screen） | — |",
+    );
+    expect(reverted).not.toBe(COPY_TEXT);
+    expect(copyDefects(reverted, PROPERTY_LEDGER)).toEqual(["写しの existence の行がコードと違う"]);
+    // 期待の値の書き手の節に、構造の検査（確かめ方 structural）の書き手の 1 行がある
+    expect(COPY_TEXT).toContain("構造の検査（確かめ方 structural）は性質の行ではなく確かめ方の種類に結び付く");
   });
 });

@@ -23,6 +23,13 @@
 // R1 は既定値（選択肢の項目 `k1` の既定値 a1）、R2 は選択肢の集合（選択肢の項目 `k2`）、R3 はアプリ全体の件数（計算 `total`）。
 // 組の試験の数は M のまま（R1・R2 は 1 件、R3 は正常・境界・異常の 3 件。余りはほかの値を縛る要件へ配る）。旗 `v12.ids` が on
 // なら、T2 の応答からコードが作る試験（R1・R2 の 1 件と R3 の境界・異常）を除く（応答は M − 4 件・組は M 件）。台帳 on が要る。
+//
+// 手 3d（Issue #624）：旗 `v12.ids` が on の走りは、構造の要件の構造の検査と、確かめ方が fixed-test の要件の画面・在ることの構造の
+// 確認もコードが作るので、T2 の応答からそれを除き、構造の要件の分類も書かない（組は M 件のまま）。台本 `codeWritten` の R3 は
+// 集計元の entity を所属させるので在ることの確認 1 件を組に持つ（ids off は LLM が書く。余りを 1 減らして組は M 件）。
+// 台本 `screens`（省けば今のまま）を渡すと、頭の値を縛る要件 1 件に画面の行を所属させ（画面の試験 1 件）、最初の構造の要件の
+// checks を 2 つ（view-shows・field-type）にする（構造の検査 2 件）。どちらも余りを減らして組は M 件のまま。
+// `generatedTestCount` は旗 ids の走りでコードが作る試験の数（ids off は 0）で、ids on の応答は M − これ件。
 import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-schema";
 import { AGENT_LIMITS } from "../../limits.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
@@ -42,6 +49,11 @@ type Kind = (typeof KINDS)[number];
 export interface SizedOptions {
   /** 値を縛る要件の頭の 3 件を、既定値・選択肢の集合・アプリ全体の件数の要件にする（台帳 on が要る） */
   readonly codeWritten?: boolean;
+  /**
+   * 画面の行を所属に持つ決まりの要件（頭の値を縛る要件に画面 1 行）と、checks 2 つ（view-shows・field-type）の構造の要件
+   * （最初の構造の要件）を入れる（Issue #624）
+   */
+  readonly screens?: boolean;
 }
 
 /** 台本 `codeWritten` の旗 `v12.ids` の走りでコードが作る試験の数（R1・R2 の 1 件ずつと R3 の境界・異常） */
@@ -58,6 +70,8 @@ export interface SizedMaterials {
   readonly flags: V12Flags;
   /** 構造で確かめる要件の数 */
   readonly structuralCount: number;
+  /** 旗 `v12.ids` の走りでコードが作る試験の数（ids off は 0。ids on の T2 の応答は M − これ件。Issue #595・#624） */
+  readonly generatedTestCount: number;
   /** 要件の ID（R1〜RN） */
   readonly ids: readonly string[];
   readonly source: string;
@@ -75,7 +89,14 @@ export interface SizedMaterials {
   /** T1'' と B3' の判定（`rejects` の要件だけ拒否。省けば全部受理） */
   readonly judgments: (rejects?: Readonly<Record<string, RejectionSpec>>) => { readonly judgments: readonly unknown[] };
   /** T2 の応答（正常・異常・境界を配って合計 M。`omitAbnormalOf` を指すと、その要件の異常の試験を外す） */
-  readonly testSpecResponse: (options?: { readonly omitAbnormalOf?: string }) => { readonly classifications: readonly unknown[]; readonly tests: readonly unknown[] };
+  readonly testSpecResponse: (options?: {
+    readonly omitAbnormalOf?: string;
+    /**
+     * 手 3c（#595）の旗 ids の走りの応答（既定値・選択肢の集合・コードが作る空の集計だけを除き、構造の検査・画面・在ることの
+     * 確認は LLM が書く）を組む。手 3d の応答の大きさを比べる元（Issue #624）
+     */
+    readonly asOf3c?: boolean;
+  }) => { readonly classifications: readonly unknown[]; readonly tests: readonly unknown[] };
   /** 宣言の YAML（`defectOf` の要件の検査を、正常の試験が落ちる式にする） */
   readonly declaration: (defectOf?: readonly string[]) => string;
   /** 要件の文（引用に使う） */
@@ -96,24 +117,32 @@ export function buildSized(
   const resolvedFlags = resolveV12Flags(flags);
   const ledger = ledgerViewOf(resolvedFlags);
   const codeWritten = options.codeWritten === true;
+  const screens = options.screens === true;
   if (!Number.isInteger(requirementCount) || requirementCount < 1) throw new RangeError("要件の数は 1 以上の整数であること");
   if (!Number.isInteger(testCount) || testCount < requirementCount) throw new RangeError("試験の数は要件の数以上であること");
   if (codeWritten && !resolvedFlags.ledger) throw new RangeError("台本 codeWritten は台帳 on の走りだけ");
   // 構造の要件の数：3 × (N − s) + s ≤ M を満たす最小の s（余りは正常の試験を足して配る）
-  const structuralCount = Math.max(0, Math.ceil((3 * requirementCount - testCount) / 2));
+  // 台本 screens は画面の試験 1 件と構造の検査 1 件を足すので、その 2 件の分も含めて満たす（Issue #624）
+  const structuralCount = Math.max(0, Math.ceil((3 * requirementCount - testCount + (options.screens === true ? 2 : 0)) / 2));
   const ruledCount = requirementCount - structuralCount;
   if (ruledCount < 1) throw new RangeError("値を縛る要件が 1 件も取れない（試験の数が少なすぎる）");
   // 台本 codeWritten の頭の 3 件（既定値・選択肢の集合・アプリ全体の件数）は余りを配らない
   const leading = codeWritten ? 3 : 0;
   if (ruledCount - leading < 1) throw new RangeError("台本 codeWritten に値を縛る要件が足りない");
-  const extraTests = testCount - (3 * ruledCount + structuralCount) + (codeWritten ? 4 : 0);
+  if (screens && (structuralCount < 1 || ruledCount - leading < 1)) throw new RangeError("台本 screens に構造の要件か値を縛る要件が足りない");
+  // 台本 codeWritten の R3 の在ることの確認 1 件・台本 screens の画面の試験 1 件と構造の検査 1 件の分だけ、余りを減らす
+  const extraTests = testCount - (3 * ruledCount + structuralCount) + (codeWritten ? 4 - 1 : 0) - (screens ? 2 : 0);
   const plainCount = ruledCount - leading;
   if ((3 * plainCount + extraTests) / plainCount > AGENT_LIMITS.testsPerRequirement) {
     throw new RangeError("試験の数が多すぎる（1 要件の上限を超える）");
   }
 
   const ids = Array.from({ length: requirementCount }, (_, index) => `R${index + 1}`);
+  const requirementIds = ids;
   const isStructural = (index: number): boolean => index >= ruledCount;
+  /** 台本 screens の、画面の行を所属に持つ決まりの要件（頭の値を縛る要件）と checks 2 つの構造の要件（最初の構造の要件） */
+  const screenRuledIndex = screens ? leading : -1;
+  const twoChecksIndex = screens ? ruledCount : -1;
   /** 台本 codeWritten の頭の 3 件の役（ほかは null） */
   const leadingOf = (index: number): "default" | "enum" | "aggregate" | null =>
     !codeWritten || index >= leading ? null : (["default", "enum", "aggregate"] as const)[index] ?? null;
@@ -182,6 +211,7 @@ export function buildSized(
       rows.push(row({ id: `s.view${n}`, kind: "screen", entity: "e.item", name: `view${n}`, type: { view: "table" }, from: id }));
     } else {
       rows.push(row({ id: `f.item.v${n}`, kind: "field", entity: "e.item", name: `v${n}`, type: "number", from: id }));
+      if (index === screenRuledIndex) rows.push(row({ id: `s.view${n}`, kind: "screen", entity: "e.item", name: `view${n}`, type: { view: "table" }, from: id }));
     }
   });
   const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
@@ -196,6 +226,8 @@ export function buildSized(
           ? ["c.total", "e.item"]
           : isStructural(index)
           ? [`f.item.w${index + 1}`, `s.view${index + 1}`]
+          : index === screenRuledIndex
+          ? [`f.item.v${index + 1}`, `s.view${index + 1}`]
           : [`f.item.v${index + 1}`];
       return { requirementId: id, roles: roles.map(stated) };
     }),
@@ -204,7 +236,12 @@ export function buildSized(
       if (lead === "default") return { requirementId: id, kind: "default-value" as const, value: "a1" };
       if (lead === "enum") return { requirementId: id, kind: "enum-membership" as const };
       return isStructural(index)
-        ? { requirementId: id, kind: "structural" as const, reason: "画面に出ることだけを求める", checks: ["view-shows" as const] }
+        ? {
+            requirementId: id,
+            kind: "structural" as const,
+            reason: "画面に出ることだけを求める",
+            checks: index === twoChecksIndex ? (["view-shows", "field-type"] as const) : (["view-shows"] as const),
+          }
         : { requirementId: id, kind: "fixed-test" as const };
     }),
     classification: ids.map((id, index) => ({
@@ -276,8 +313,39 @@ export function buildSized(
     });
   };
 
+  /** 構造の要件の field-type の検査（台本 screens の checks 2 つの構造の要件） */
+  const fieldTypeTest = (index: number): Record<string, unknown> => {
+    const n = index + 1;
+    return rawTest({
+      id: `t${n}-type`,
+      requirementId: `R${n}`,
+      targetKind: "field",
+      roleId: rid(`f.item.w${n}`),
+      kind: "normal",
+      operation: "structure",
+      observes: "existence",
+      input: {},
+      expected: { kind: "ok", value: "true", code: null },
+      assertion: { check: "field-type", expected: "string", refEntity: null, role: null },
+    });
+  };
+  /** 画面の構造の確認（screen × screen）・在ることの確認（entity × screen）の試験 */
+  const screenTest = (index: number, targetKind: "screen" | "entity", roleId: string, observes: string): Record<string, unknown> =>
+    rawTest({
+      id: `t${index + 1}-${targetKind}`,
+      requirementId: `R${index + 1}`,
+      targetKind,
+      roleId: rid(roleId),
+      kind: "normal",
+      operation: "screen",
+      observes,
+      input: {},
+      expected: { kind: "ok", value: "true", code: null },
+      assertion: null,
+    });
+
   /** 台本 codeWritten の頭の 3 件の試験（旗 `v12.ids` が on なら、コードが作る試験を除いた値の要る試験だけ） */
-  const leadingTests = (index: number, lead: "default" | "enum" | "aggregate"): Record<string, unknown>[] => {
+  const leadingTests = (index: number, lead: "default" | "enum" | "aggregate", ids: boolean, structureByCode: boolean): Record<string, unknown>[] => {
     const n = index + 1;
     const fieldTest = (observes: string, value: unknown) =>
       rawTest({
@@ -292,8 +360,8 @@ export function buildSized(
         expected: { kind: "ok", value: JSON.stringify(value), code: null },
         assertion: null,
       });
-    if (lead === "default") return resolvedFlags.ids ? [] : [fieldTest("default-value", "a1")];
-    if (lead === "enum") return resolvedFlags.ids ? [] : [fieldTest("enum-membership", ["a1", "a2"])];
+    if (lead === "default") return ids ? [] : [fieldTest("default-value", "a1")];
+    if (lead === "enum") return ids ? [] : [fieldTest("enum-membership", ["a1", "a2"])];
     const aggregateTest = (kind: Kind, observes: string, value: unknown, emptyEntities: readonly string[], referenceData: readonly Record<string, unknown>[]) =>
       rawTest({
         id: `t${n}-${kind}`,
@@ -316,37 +384,47 @@ export function buildSized(
     }));
     return [
       aggregateTest("normal", "value", 2, [], sourceRows),
-      ...(resolvedFlags.ids
+      ...(ids
         ? []
         : [aggregateTest("boundary", "empty-aggregate", 0, [rid("e.item")], []), aggregateTest("abnormal", "empty-aggregate", null, [], [])]),
+      // 集計元の entity を所属させるので、在ることの確認 1 件（手 3d の旗 ids の走りはコードが作る。Issue #624）
+      ...(structureByCode ? [] : [screenTest(index, "entity", "e.item", "existence")]),
     ];
   };
 
-  const testSpecResponse = (options: { readonly omitAbnormalOf?: string } = {}) => {
+  const testSpecResponse = (options: { readonly omitAbnormalOf?: string; readonly asOf3c?: boolean } = {}) => {
+    const ids = resolvedFlags.ids;
+    // 構造の検査・画面・在ることの確認をコードが作るのは旗 ids の走りの手 3d から（手 3c の応答は LLM が書く。Issue #624）
+    const structureByCode = ids && options.asOf3c !== true;
     const tests: Record<string, unknown>[] = [];
     for (let index = 0; index < requirementCount; index += 1) {
       const lead = leadingOf(index);
       if (lead !== null) {
-        tests.push(...leadingTests(index, lead));
+        tests.push(...leadingTests(index, lead, ids, structureByCode));
         continue;
       }
       if (isStructural(index)) {
-        tests.push(viewTest(index));
+        if (!structureByCode) {
+          tests.push(viewTest(index));
+          if (index === twoChecksIndex) tests.push(fieldTypeTest(index));
+        }
         continue;
       }
       for (const kind of KINDS) {
         if (kind === "abnormal" && options.omitAbnormalOf === `R${index + 1}`) continue;
         tests.push(validateTest(index, kind, ""));
       }
+      if (index === screenRuledIndex && !structureByCode) tests.push(screenTest(index, "screen", `s.view${index + 1}`, "view-structure"));
       // 余った試験は、値を縛る要件へ順に正常の試験を足して配る（同じ要件に 2 件以上のときは 2 周目以降）
       const share = Math.floor(extraTests / plainCount) + (index - leading < extraTests % plainCount ? 1 : 0);
       for (let extra = 1; extra <= share; extra += 1) tests.push(validateTest(index, "normal", `-${extra + 1}`));
     }
     return {
       // 旗 v12.ids の走りは、コードが試験を作る要件（既定値・選択肢の集合）を T2 の一覧から除くので、その分類も書かない
-      classifications: ids
-        .map((id, index) => ({ requirementId: id, nature: isStructural(index) ? "existence-only" : "ruled", lead: leadingOf(index) }))
-        .filter((entry) => !(resolvedFlags.ids && (entry.lead === "default" || entry.lead === "enum")))
+      // 手 3d（#624）からは構造の要件も T2 の一覧から除くので、その分類も書かない
+      classifications: requirementIds
+        .map((id, index) => ({ requirementId: id, nature: isStructural(index) ? "existence-only" : "ruled", lead: leadingOf(index), structural: isStructural(index) }))
+        .filter((entry) => !(ids && (entry.lead === "default" || entry.lead === "enum")) && !(structureByCode && entry.structural))
         .map(({ requirementId, nature }) => ({ requirementId, nature })),
       tests,
     };
@@ -381,6 +459,7 @@ export function buildSized(
     for (const index of views) {
       lines.push(`  - name: view${index + 1}`, "    type: table", "    entity: item", `    show: [w${index + 1}]`);
     }
+    if (screenRuledIndex >= 0) lines.push(`  - name: view${screenRuledIndex + 1}`, "    type: table", "    entity: item", `    show: [v${screenRuledIndex + 1}]`);
     if (codeWritten) lines.push("  - name: totals", "    type: dashboard", "    widgets:", "      - type: number", "        value: total");
     lines.push("actions: []");
     const checks = Array.from({ length: requirementCount }, (_, index) => index).filter((index) => !isStructural(index) && leadingOf(index) === null);
@@ -398,6 +477,8 @@ export function buildSized(
     testCount,
     flags: resolvedFlags,
     structuralCount,
+    // 旗 ids の走りでコードが作る試験：構造の検査（checks の数）・台本 codeWritten の 4 件と R3 の在ることの確認・台本 screens の画面 1 件
+    generatedTestCount: resolvedFlags.ids ? structuralCount + (screens ? 1 + 1 : 0) + (codeWritten ? 4 + 1 : 0) : 0,
     ids,
     source,
     plan,

@@ -1,6 +1,6 @@
 # 性質の台帳（写し）
 
-> 状態：**手 3c**（2026-10-18・Issue #595。期待の値の書き手の列。手 2d は 2026-10-18・Issue #550、手 2c は 2026-10-18・Issue #549、手 2b は 2026-10-18・Issue #548、手 2a は 2026-10-17・Issue #547）。**正本はコード**（`packages/factory/src/v12/ledger.ts` の `PROPERTY_LEDGER`）で、この表は人が読む写しである。列の意味は `../../08-architecture-v1.2.md` §5。
+> 状態：**手 3d**（2026-10-18・Issue #624。view-structure・existence の C4 の試験の型。手 3c は 2026-10-18・Issue #595。期待の値の書き手の列。手 2d は 2026-10-18・Issue #550、手 2c は 2026-10-18・Issue #549、手 2b は 2026-10-18・Issue #548、手 2a は 2026-10-17・Issue #547）。**正本はコード**（`packages/factory/src/v12/ledger.ts` の `PROPERTY_LEDGER`）で、この表は人が読む写しである。列の意味は `../../08-architecture-v1.2.md` §5。
 
 ## 1. 照らし方
 
@@ -15,6 +15,8 @@
 
 - `llm-written-code-checked` … 手 2 の段階。T2 の LLM が期待の値を書き、コードが台帳の行から導いた値と T2' で厳密に照らす（違えば拒否）
 - `code` … §5 の「値はコードだけで埋まる」。手 3c（Issue #595）で入れた。**旗 `v12.ids` が on の走りだけ**、コード（`packages/factory/src/v12/generated-tests.ts`）が表・台帳・持ち越しを除いた一覧から試験を作り、T2 の LLM には書かせない（T2 の規則の文は台帳の行の旗 ids の文に差し替わり、確かめ方がその種類の要件は T2 の要件の一覧・確かめ方・所属・分類の完全性から除く）。作った試験は T2' の形の検査のあと組の末尾に足し、観測する性質の写像・網羅の単位・組の SHA に含める。評価口は作り手を区別しない。旗 off の走り（全部 off・前の手の旗だけ on）は今までどおり LLM が書きコードが照らす
+- `view-structure`・`existence` は手 3d（Issue #624）で C4 の試験の型を置いた（screen × screen・entity × screen。必須の kind は normal だけ・期待は ok の定数 true〔評価器は screen 操作の試験で入力・参照データ・期待を読まず、宣言の構造だけを見る〕・入力は空の写像・参照データは空・書き手は `code`）。旗 `v12.ids` が on の走りだけ、確かめ方が fixed-test の要件の所属の画面の行ごとに screen × screen を 1 本、画面の行が無ければ所属の entity の行ごとに entity × screen を 1 本、コードが作る（要件の種類に依らない）。所属の行がすべてこの型の対象（画面・entity の行）の要件は、正常・異常・境界のそろいを求めない（免除は台帳の型と所属で決め、作った試験の有無・数では決めない）。組ごとの対象の種類は列に持つ（今は画面の組だけ。項目 × screen の組も同じ行に足せる）
+- 構造の検査（確かめ方 structural）は性質の行ではなく確かめ方の種類に結び付く：旗 `v12.ids` が on の走りだけ、書き手は `code`（checks の各項目に 1 本。assertion は表の行の型と view-shows の元の行 ID から導く。手 3d・Issue #624）。旗 off の走りは今までどおり T2 の LLM が書く
 - `empty-aggregate` は範囲ごとに書き手が違う：アプリ全体と見出しごと × 選択肢は `code`（集計元を空と明示した境界と集計元に触れない異常を、確かめ方が fixed-test で分類が ruled の要件の所属の行ごとにコードが作る）、行ごと（入力の行が要る）と見出しごと × 月（見出しの数が宣言の `last` で決まり表から導けない）は `llm-written-code-checked` のまま
 
 ## 3. 表（1 行 1 性質）
@@ -24,8 +26,8 @@
 | when | 有効（v1.1α から引き継ぎ・列の一部は未定義） | Issue #508（台帳への集約は #547・列の定義は #550） | fixed-test | operation × action（hasWhen が真の行）・normal・abnormal・boundary・期待 ok は真偽・error は条件が成り立たない・入力 record・参照データ any | llm-written-code-checked | v1-run-tests | advanceAction | 操作の条件（when）を、操作 × action の試験の真偽で確かめる（v1.1α の評価の方法の表。02 §1.3・07 §2.3） |
 | value | 有効（v1.1α から引き継ぎ・列の一部は未定義） | Issue #508（台帳への集約は #547） | — | 未定義（組：computation × compute・computation × aggregate） | — | v1-run-tests | 未定義 | 計算と集計の値を、計算 × compute・aggregate の試験で確かめる（v1.1α の評価の方法の表。02 §1.3・07 §2.3） |
 | validation | 有効（v1.1α から引き継ぎ・列の一部は未定義） | Issue #508（台帳への集約は #547） | — | 未定義（組：field × validate・entity × validate） | — | v1-run-tests | 未定義 | 項目と entity の検査を、validate の試験で確かめる（v1.1α の評価の方法の表。02 §1.3・07 §2.3） |
-| view-structure | 有効（v1.1α から引き継ぎ・列の一部は未定義） | Issue #508（台帳への集約は #547） | — | 未定義（組：screen × screen・field × screen） | — | v1-run-tests | 未定義 | 画面の構造を、画面・項目 × screen の試験で確かめる（v1.1α の評価の方法の表。02 §1.3・07 §2.3） |
-| existence | 有効（v1.1α から引き継ぎ・列の一部は未定義） | Issue #508（台帳への集約は #547） | — | 未定義（組：entity × screen） | — | v1-run-tests | 未定義 | entity が在ることを、entity × screen の試験で確かめる（v1.1α の評価の方法の表。02 §1.3・07 §2.3） |
+| view-structure | 有効（v1.1α から引き継ぎ・列の一部は未定義） | Issue #508（台帳への集約は #547・C4 の試験の型は #624） | — | screen × screen・normal・期待 ok の json-boolean（定数 true）・入力 empty-record・参照データ 空・1 本以上 | code | v1-run-tests | 未定義 | 画面の構造を、画面・項目 × screen の試験で確かめる（v1.1α の評価の方法の表。02 §1.3・07 §2.3） |
+| existence | 有効（v1.1α から引き継ぎ・列の一部は未定義） | Issue #508（台帳への集約は #547・C4 の試験の型は #624） | — | entity × screen・normal・期待 ok の json-boolean（定数 true）・入力 empty-record・参照データ 空・1 本以上 | code | v1-run-tests | 未定義 | entity が在ることを、entity × screen の試験で確かめる（v1.1α の評価の方法の表。02 §1.3・07 §2.3） |
 | state-after-set | 登録済み・未対応（v1.1α から引き継ぎ・列の一部は未定義） | Issue #508（台帳への集約は #547） | — | — | — | — | 未定義 | 操作に set を当てたあとの状態は評価の方法が無い（v1 は作ってから ⑤b で未解決にしていた。07 §2.3）。作れば T2' で落とす |
 | default-value | 有効 | Issue #533（台帳への集約は #547） | default-value | field × validate・normal・期待 ok の json-string・入力 empty-record・参照データ 空・1 本以上 | code | default-value | enumDefault | 選択肢の項目の既定値だけを決める要件を、評価できる試験の形を試験より前に表で確定して確かめる（方法論 03 §1 の H2・H1。台帳 F5） |
 | enum-membership | 有効 | Issue #548 | enum-membership | field × validate・normal・期待 ok の json-string-array・入力 empty-record・参照データ 空・1 本以上 | code | enum-membership | 外は見ない | 選択肢の項目の値が挙げた選択肢のどれかであることだけを決める要件を、表で確定した選択肢の集合と宣言の options の照合で確かめる（名前の一致に頼らない。08 §8.2 の (c)①・M-03） |

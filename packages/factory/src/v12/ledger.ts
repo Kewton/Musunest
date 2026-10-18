@@ -20,7 +20,9 @@
 // 旗の正本もここに置く。手 4a（#551）で旗 `v12.search-repair`（内部の鍵 `searchRepair`。B5 のループの旗で、部品は
 // `v12/search-repair.ts`）を足した。内部の鍵と公開の鍵の対応は `V12_FLAG_PUBLIC_NAMES` の 1 か所である。
 // 手 3p（#592）で旗 `v12.ids`（内部の鍵・公開の鍵とも `ids`）を足した。手 3 の仕組み（C1・C2 の束・導ける欄）と呼び出しの
-// 枠（`v12/limits.ts`）の旗で、手 3a〜3c は同じ旗の下で足す。
+// 枠（`v12/limits.ts`）の旗で、手 3a〜3d は同じ旗の下で足す。
+// 手 3d（#624）で、引き継いだ `view-structure`・`existence` の行に C4 の試験の型（screen × screen・entity × screen・normal だけ・
+// 期待は ok の定数・書き手 `code`）を置いた。旗 `v12.ids` の走りだけ、所属の画面・entity の行から `v12/generated-tests.ts` が作る。
 //
 // 台帳は LLM を呼ばず、評価口を import しない（B4 の照合は名前で持ち、評価口が名前 → 関数の表を持つ）。
 import type { AggregateKind } from "@musunest/appspec-schema";
@@ -158,21 +160,30 @@ export interface PropertyT1 {
 
 /**
  * 期待の型（#548 で `options の並び` を足した）。`verification-value` は確かめ方の欄の値を JSON の文字列で書いた
- * もの、`target-options` は対象の行の options のキーを表の順に並べた文字列の並び（decode 済みの値で、長さ・順まで照らす）
+ * もの、`target-options` は対象の行の options のキーを表の順に並べた文字列の並び（decode 済みの値で、長さ・順まで照らす）、
+ * `constant` は定数の真（評価器が期待の値を読まない試験。宣言の構造だけを見る。#624）
  */
-export const EXPECTED_VALUE_SOURCES = ["verification-value", "target-options"] as const;
+export const EXPECTED_VALUE_SOURCES = ["verification-value", "target-options", "constant"] as const;
 export type ExpectedValueSource = (typeof EXPECTED_VALUE_SOURCES)[number];
 
-/** T2 の試験の型（確かめ方の種類に結び付いた性質だけが持つ。ほかの性質は今の検査のまま＝未定義） */
+/**
+ * T2 の試験の型（確かめ方の種類に結び付いた性質と、所属の行だけで試験が決まる性質（view-structure・existence。#624）が持つ。
+ * ほかの性質は今の検査のまま＝未定義）
+ */
 export interface PropertyT2 {
   readonly targetKind: TestTargetKind;
+  /**
+   * 組ごとの対象の種類（評価の方法の表の組のうち、この型で作る組の対象の種類。`targetKind` を含む。項目 × screen のように
+   * 同じ行の別の組を足すときは、ここに足す。#624）
+   */
+  readonly targetKinds: readonly TestTargetKind[];
   readonly operation: Exclude<TestOperation, "structure">;
   /** 作ってよい（そろえる）kind。ここに無い kind の不足は v1 の網羅の検査から外す */
   readonly requiredKinds: readonly TestKind[];
   /** 期待の型（kind・値の型・何と等しいか） */
   readonly expected: {
     readonly kind: "ok";
-    readonly valueType: "json-string" | "json-string-array";
+    readonly valueType: "json-string" | "json-string-array" | "json-boolean";
     readonly equals: ExpectedValueSource;
   };
   /** データ状態ごとの値（自然文の状態 → 期待） */
@@ -353,6 +364,24 @@ export const OUTER_NOT_SCORED = "外は見ない" as const;
 const EMPTY_AGGREGATE_T2_RULE =
   "集計（計算の行の type の form が aggregate）の要件の境界（boundary）の試験は、集計元を空と明示し（入力の契約の emptyEntities にその行の type.aggregate.entity の id を入れ、参照データにその entity の行を置かない）、期待（expected）の value を集計の種類で決まる値にする：sum・count は 0（見出しごとは、enum の見出しなら options の全キーを順に heading と value 0 で並べ、月の見出しなら各見出しの value を 0 にする）、avg は null（見出しごとは各見出しの value を null にする）。異常（abnormal）の試験は集計元に触れず（emptyEntities に入れず、参照データにその entity の行も置かない）、期待の value を null にする。どちらも対象（target）はその計算の行、operation は aggregate、observes は empty-aggregate、期待の kind は ok・code は null にする。集計元の行を置かずに observes を value にした集計の試験も、期待は同じ値（空と明示すれば種類で決まる値、しなければ null）にする。正常の試験（observes は value）は今までどおり集計元の行を置いて作る。";
 
+/**
+ * 所属の行だけで試験が決まる性質（view-structure・existence）の C4 の試験の型の共通の欄（#624）。評価器は screen 操作の試験で
+ * 入力・参照データ・期待を読まず宣言の構造だけを見るので、期待は ok の定数・入力は空の写像・参照データは空で、書き手は `code`
+ */
+const OWNERSHIP_STRUCTURE_T2 = {
+  operation: "screen",
+  requiredKinds: ["normal"],
+  expected: { kind: "ok", valueType: "json-boolean", equals: "constant" },
+  referenceTargets: [],
+  input: "empty-record",
+  minTests: 1,
+  expectedWriter: "code",
+} as const;
+
+/** 旗 `v12.ids`：構造の検査と画面の試験（operation が structure・screen）を LLM が書いたときの固定文（#624） */
+export const OWNERSHIP_STRUCTURE_NOT_ALLOWED =
+  "構造の検査と画面の試験（operation が structure・screen の試験）はコードが作るので、書かないこと";
+
 /** v1.1α から引き継いだ行の共通の欄 */
 const INHERITED = {
   since: "Issue #508（台帳への集約は #547）",
@@ -431,17 +460,60 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
   {
     ...INHERITED,
     id: "view-structure",
+    since: "Issue #508（台帳への集約は #547・C4 の試験の型は #624）",
     why: "画面の構造を、画面・項目 × screen の試験で確かめる（v1.1α の評価の方法の表。02 §1.3・07 §2.3）",
     combinations: [
       { targetKind: "screen", operation: "screen" },
       { targetKind: "field", operation: "screen" },
     ],
+    t2: {
+      ...OWNERSHIP_STRUCTURE_T2,
+      targetKind: "screen",
+      targetKinds: ["screen"],
+      dataStates: [{ state: "所属の画面の宣言", value: "constant" }],
+      messages: {
+        notAllowed: OWNERSHIP_STRUCTURE_NOT_ALLOWED,
+        kind: "画面の構造の試験は、正常（normal）だけであること",
+        operation: "画面の構造の試験の操作は、画面（screen）であること",
+        target: "画面の構造の試験の対象は、要件の所属の画面（screen）の行であること",
+        observes: "画面の構造の試験の観測する性質は、view-structure であること",
+        expected: "画面の構造の試験の期待は、ok の定数（true）であること",
+        input: "画面の構造の試験の入力は、空の写像であること",
+        referenceData: "画面の構造の試験の参照データは、空の並びであること",
+      },
+    },
+    rules: {
+      ...INHERITED.rules,
+      t2Ids:
+        "構造の検査（operation が structure の試験）と画面の試験（operation が screen の試験。画面・項目 × screen の view-structure）は作らない（コードが作る。確かめ方が structural の要件は要件の一覧に無い）。どの試験も operation を structure・screen にせず、assertion は null にする。",
+    },
   },
   {
     ...INHERITED,
     id: "existence",
+    since: "Issue #508（台帳への集約は #547・C4 の試験の型は #624）",
     why: "entity が在ることを、entity × screen の試験で確かめる（v1.1α の評価の方法の表。02 §1.3・07 §2.3）",
     combinations: [{ targetKind: "entity", operation: "screen" }],
+    t2: {
+      ...OWNERSHIP_STRUCTURE_T2,
+      targetKind: "entity",
+      targetKinds: ["entity"],
+      dataStates: [{ state: "所属の entity の宣言", value: "constant" }],
+      messages: {
+        notAllowed: OWNERSHIP_STRUCTURE_NOT_ALLOWED,
+        kind: "在ることの試験は、正常（normal）だけであること",
+        operation: "在ることの試験の操作は、画面（screen）であること",
+        target: "在ることの試験の対象は、要件の所属の entity の行であること",
+        observes: "在ることの試験の観測する性質は、existence であること",
+        expected: "在ることの試験の期待は、ok の定数（true）であること",
+        input: "在ることの試験の入力は、空の写像であること",
+        referenceData: "在ることの試験の参照データは、空の並びであること",
+      },
+    },
+    rules: {
+      ...INHERITED.rules,
+      t2Ids: "entity × screen の試験（observes は existence）は作らない（コードが作る）。",
+    },
   },
   {
     ...INHERITED,
@@ -492,6 +564,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
     combinations: [{ targetKind: "field", operation: "validate" }],
     t2: {
       targetKind: "field",
+      targetKinds: ["field"],
       operation: "validate",
       requiredKinds: ["normal"],
       expected: { kind: "ok", valueType: "json-string", equals: "verification-value" },
@@ -560,6 +633,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
     combinations: [{ targetKind: "field", operation: "validate" }],
     t2: {
       targetKind: "field",
+      targetKinds: ["field"],
       operation: "validate",
       requiredKinds: ["normal"],
       expected: { kind: "ok", valueType: "json-string-array", equals: "target-options" },
@@ -749,6 +823,23 @@ export function ledgerRowDefects(rows: readonly PropertyRow[]): readonly string[
         defects.push(`${at} の期待は確かめ方の欄の値なのに、確かめ方に欄が無い`);
       }
     }
+    // 所属の行だけで決まる試験の型（確かめ方に結び付かない。#624）：組ごとの対象の種類が評価の方法の表の組にあり、必須の kind は
+    // normal だけ・書き手は code・期待は ok の定数
+    if (row.t1 === null && row.t2 !== null) {
+      const { targetKind, targetKinds, operation, expected } = row.t2;
+      if (targetKinds.length === 0 || !targetKinds.includes(targetKind) || new Set(targetKinds).size !== targetKinds.length) {
+        defects.push(`${at} の試験の型の組ごとの対象の種類が、空か重なっているか対象の種類を含まない`);
+      }
+      if (targetKinds.some((kind) => !row.combinations.some((entry) => entry.targetKind === kind && entry.operation === operation))) {
+        defects.push(`${at} の試験の型の組が、評価の方法の表の組に無い`);
+      }
+      if ((expected.equals === "constant") !== (expected.valueType === "json-boolean")) {
+        defects.push(`${at} の期待の型と値の型が食い違う（定数は真偽）`);
+      }
+      if ((!isOnlyNormal(row.t2.requiredKinds) || row.t2.expectedWriter !== "code" || expected.equals !== "constant")) {
+        defects.push(`${at} は確かめ方に結び付かない試験の型なのに、normal だけ・書き手 code・期待 ok の定数でない`);
+      }
+    }
     // コードが作る試験の型（#595）：入力は空の写像・参照データは空（コードが値を埋められる形）で、旗 `v12.ids` の文がある
     if (row.t2 !== null && row.t2.expectedWriter === "code") {
       if (row.t2.input !== "empty-record" || row.t2.referenceTargets.length > 0) {
@@ -839,6 +930,11 @@ export interface LedgerView {
   readonly excludedWhenAcceptedKinds: readonly string[];
   /** 条件の試験の型を持つ行（有効・削る候補の行。台帳の順。#550） */
   readonly conditionRows: readonly (PropertyRow & { readonly t2Condition: PropertyConditionT2 })[];
+  /**
+   * 所属の行だけで試験が決まる行（確かめ方に結び付かず、試験の型の書き手が code の行＝view-structure・existence。有効・削る候補
+   * の行。台帳の順。#624）。旗 `v12.ids` の走りで、所属の行の種類が `targetKinds` の行ごとにコードが試験を作る
+   */
+  readonly ownershipRows: readonly (PropertyRow & { readonly t2: PropertyT2 })[];
   /** 集計の試験の型を持つ行（有効・削る候補の行。台帳の順。#549） */
   readonly aggregateRows: readonly (PropertyRow & { readonly t2Aggregate: PropertyAggregateT2 })[];
   /**
@@ -884,6 +980,9 @@ export function deriveLedgerView(rows: readonly PropertyRow[]): LedgerView {
     excludedWhenAcceptedKinds: bound.filter((row) => row.t1.excludeWhenAccepted).map((row) => row.t1.kind),
     conditionRows: evaluable.filter(
       (row): row is PropertyRow & { readonly t2Condition: PropertyConditionT2 } => row.t2Condition !== null,
+    ),
+    ownershipRows: evaluable.filter(
+      (row): row is PropertyRow & { readonly t2: PropertyT2 } => row.t1 === null && row.t2 !== null && row.t2.expectedWriter === "code",
     ),
     aggregateRows,
     aggregateKinds: [...new Set(aggregateRows.flatMap((row) => row.t2Aggregate.values.map((entry) => entry.aggregate)))],
@@ -939,7 +1038,7 @@ export function propertyCopyCells(row: PropertyRow): readonly string[] {
       ? row.combinations.length === 0
         ? "—"
         : `未定義（組：${row.combinations.map((entry) => `${entry.targetKind} × ${entry.operation}`).join("・")}）`
-      : `${row.t2.targetKind} × ${row.t2.operation}・${row.t2.requiredKinds.join("・")}・期待 ${row.t2.expected.kind} の ${row.t2.expected.valueType}・入力 ${row.t2.input}・参照データ ${row.t2.referenceTargets.length === 0 ? "空" : row.t2.referenceTargets.join("・")}・${String(row.t2.minTests)} 本以上`;
+      : `${row.t2.targetKinds.map((kind) => `${kind} × ${row.t2?.operation ?? ""}`).join("・")}・${row.t2.requiredKinds.join("・")}・期待 ${row.t2.expected.kind} の ${row.t2.expected.valueType}${row.t2.expected.equals === "constant" ? "（定数 true）" : ""}・入力 ${row.t2.input}・参照データ ${row.t2.referenceTargets.length === 0 ? "空" : row.t2.referenceTargets.join("・")}・${String(row.t2.minTests)} 本以上`;
   // 集計の試験の型は、コードが作る範囲とその外の範囲で書き手を分けて書く（#595）
   const aggregateWriter =
     aggregate === null

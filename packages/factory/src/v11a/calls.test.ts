@@ -415,7 +415,10 @@ describe("大きさの生成器（要件 N・試験 M）", () => {
     expect(ids.table).toEqual(withCodeIds(off.table));
     expect(ids.tableResponses()).toHaveLength(4);
     expect(ids.declaration()).toBe(off.declaration());
-    expect(ids.testSpecResponse().tests).toHaveLength(off.testSpecResponse().tests.length);
+    // 手 3d（#624）：ids on の応答は構造の要件の構造の検査（コードが作る）を除いた分だけ少ない
+    expect(ids.generatedTestCount).toBe(ids.structuralCount);
+    expect(off.generatedTestCount).toBe(0);
+    expect(ids.testSpecResponse().tests).toHaveLength(off.testSpecResponse().tests.length - ids.generatedTestCount);
     const rowTypes = (response: Record<string, unknown>) => (response["rows"] as readonly { type: Record<string, unknown> }[]).map((entry) => entry.type);
     expect(rowTypes(on.nameTableResponse()).every((type) => "aggregate" in type)).toBe(true);
     expect(rowTypes(off.nameTableResponse()).some((type) => "aggregate" in type)).toBe(false);
@@ -1204,7 +1207,9 @@ describe("(7) 旗 v12.ids のコードが作る試験：既定値・選択肢の
       const on = buildSized(size.requirements, size.tests, ALL_ON, { codeWritten: true });
       expect(buildSized(size.requirements, size.tests, ALL_ON, { codeWritten: true }).testSpecResponse()).toEqual(on.testSpecResponse());
       expect(off.testSpecResponse().tests).toHaveLength(size.tests);
-      expect(on.testSpecResponse().tests).toHaveLength(size.tests - CODE_WRITTEN_TEST_COUNT);
+      // 手 3d（#624）から、構造の要件の構造の検査と R3 の在ることの確認もコードが作る
+      expect(on.generatedTestCount).toBe(CODE_WRITTEN_TEST_COUNT + 1 + on.structuralCount);
+      expect(on.testSpecResponse().tests).toHaveLength(size.tests - on.generatedTestCount);
       expect(off.table.verification.slice(0, 3).map((entry) => entry.kind)).toEqual(["default-value", "enum-membership", "fixed-test"]);
       expect(on.declaration()).toBe(off.declaration());
       // 台本を渡さない材料は今のまま
@@ -1226,15 +1231,91 @@ describe("(7) 旗 v12.ids のコードが作る試験：既定値・選択肢の
       expect(suiteOf(run).suite.tests).toHaveLength(size.tests);
       expectNoAcceptanceMaterial(run.requests);
     }
-    // ids on：作った試験は組の末尾の 4 つ（予約の接頭辞）。ids off の成果物に欄は無い
+    // ids on：作った試験は組の末尾（予約の接頭辞）。手 3d（#624）から構造の検査と在ることの確認を含む。ids off の成果物に欄は無い
     const generatedIds = suiteOf(onRun).generated_test_ids ?? [];
-    expect(generatedIds).toHaveLength(CODE_WRITTEN_TEST_COUNT);
-    expect(suiteOf(onRun).suite.tests.slice(-CODE_WRITTEN_TEST_COUNT).map((test) => test.id)).toEqual(generatedIds);
+    expect(generatedIds).toHaveLength(on.generatedTestCount);
+    expect(suiteOf(onRun).suite.tests.slice(-on.generatedTestCount).map((test) => test.id)).toEqual(generatedIds);
     expect(generatedIds.every(isGeneratedTestId)).toBe(true);
     expect(suiteOf(offRun)).not.toHaveProperty("generated_test_ids");
     // 論理の枠・門・枝の内側（全部 on）
     expect(onRun.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
     expect(onRun.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
     expect(onRun.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
+  });
+});
+
+// ── (8) 旗 v12.ids の構造の検査と画面・在ることの構造の確認（手 3d・Issue #624）──────────────────────────────
+
+describe("(8) 旗 v12.ids の構造の検査と画面・在ることの構造の確認：画面の行を所属に持つ決まりの要件と checks 2 つの構造の要件を含む台本で、T2 の論理要求は初回 1・形 1・中身 1 のまま、LLM に書かせる試験は M − コードが作る数、応答は手 3c の応答の (M − コードが作る数)／M 以下", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+  const PRIOR = { ledger: true, searchRepair: true } as const;
+  const OPTIONS = { codeWritten: true, screens: true } as const;
+  const t2RetryCalls = (materials: SizedMaterials): RecordedCall[] => [
+    ...materials.tableResponses().map(structured),
+    structured(materials.judgments()),
+    structured(negative({ classifications: "x", tests: "x" }, "classifications・tests が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
+    structured(materials.testSpecResponse({ omitAbnormalOf: "R4" })),
+    structured(materials.testSpecResponse()),
+    structured({ declaration: materials.declaration() }),
+    structured(materials.judgments()),
+  ];
+  const firstPassCalls = (materials: SizedMaterials): RecordedCall[] => [
+    ...materials.tableResponses().map(structured),
+    structured(materials.judgments()),
+    structured(materials.testSpecResponse()),
+    structured({ declaration: materials.declaration() }),
+    structured(materials.judgments()),
+  ];
+  const suiteOf = (run: Awaited<ReturnType<typeof observe>>) => {
+    const artifact = run.result.bundle?.artifacts.find((entry) => entry.path === "artifacts/test-spec.json");
+    if (artifact === undefined) throw new Error("前提が壊れた：T2 の成果物が無い");
+    return JSON.parse(artifact.text) as { readonly suite: { readonly tests: readonly { readonly id: string; readonly operation: string }[] }; readonly generated_test_ids?: readonly string[] };
+  };
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：LLM に書かせる試験の数は M − コードが作る数で、応答の JSON の文字数は手 3c の応答の (M − コードが作る数)／M 以下", (size) => {
+    // 台本 screens だけ（手 3c がコードで作る試験の無い台本。手 3c の応答は M 件）
+    const on = buildSized(size.requirements, size.tests, ALL_ON, { screens: true });
+    const off = buildSized(size.requirements, size.tests, PRIOR, { screens: true });
+    const generated = on.generatedTestCount;
+    // コードが作る数：構造の検査（構造の要件の checks の数＝構造の要件の数＋1）と画面 1
+    expect(generated).toBe(on.structuralCount + 1 + 1);
+    expect(off.testSpecResponse().tests).toHaveLength(size.tests);
+    expect(on.testSpecResponse({ asOf3c: true }).tests).toHaveLength(size.tests);
+    expect(on.testSpecResponse().tests).toHaveLength(size.tests - generated);
+    const now = JSON.stringify(on.testSpecResponse()).length;
+    const as3c = JSON.stringify(on.testSpecResponse({ asOf3c: true })).length;
+    expect(now).toBeLessThanOrEqual((as3c * (size.tests - generated)) / size.tests);
+    // 台本 codeWritten を足しても、LLM に書かせる試験の数は M − コードが作る数（手 3c の応答は 4 件少ない M − 4 件）
+    const both = buildSized(size.requirements, size.tests, ALL_ON, OPTIONS);
+    expect(both.generatedTestCount).toBe(on.structuralCount + 1 + 1 + CODE_WRITTEN_TEST_COUNT + 1);
+    expect(both.testSpecResponse().tests).toHaveLength(size.tests - both.generatedTestCount);
+    expect(both.testSpecResponse({ asOf3c: true }).tests).toHaveLength(size.tests - CODE_WRITTEN_TEST_COUNT);
+  });
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：ids on・ids off とも T2 の論理要求 3（初回 1・形 1・中身 1）で full。組の数は M で同じ、作った試験 ID に構造の検査と画面の確認がある。呼び出しの合計は論理 72・実試行 144・判定 80 以下", async (size) => {
+    const off = buildSized(size.requirements, size.tests, PRIOR, OPTIONS);
+    const on = buildSized(size.requirements, size.tests, ALL_ON, OPTIONS);
+    const offRun = await observe(off, t2RetryCalls(off), { flags: PRIOR });
+    const onRun = await observe(on, t2RetryCalls(on), { flags: ALL_ON });
+    for (const run of [offRun, onRun]) {
+      expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
+      expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      expect(run.logical["test-spec"]).toBe(3);
+      expect(run.stages["test-spec"].retries).toEqual({ communication: 0, shape: 1, content: 1 });
+      expect(suiteOf(run).suite.tests).toHaveLength(size.tests);
+      expectNoAcceptanceMaterial(run.requests);
+    }
+    const generatedIds = suiteOf(onRun).generated_test_ids ?? [];
+    expect(generatedIds).toHaveLength(on.generatedTestCount);
+    const generatedOps = suiteOf(onRun).suite.tests.filter((test) => generatedIds.includes(test.id)).map((test) => test.operation);
+    expect(generatedOps.filter((operation) => operation === "structure")).toHaveLength(on.structuralCount + 1);
+    expect(generatedOps.filter((operation) => operation === "screen")).toHaveLength(2);
+    expect(onRun.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+    expect(onRun.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
+    expect(onRun.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
+    // 初回で通る走りの T2 の論理要求は 1
+    const passed = await observe(on, firstPassCalls(on), { flags: ALL_ON });
+    expect(passed.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(passed.logical["test-spec"]).toBe(1);
   });
 });

@@ -99,7 +99,7 @@ import { DECL_CHECK_SCHEMA_NAME } from "./stages/decl-check.js";
 import { NAME_TABLE_PREVIOUS_DATA_NAMES, NAME_TABLE_SCHEMA_NAME } from "./stages/name-table.js";
 import * as semanticCheckStage from "./stages/semantic-check.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
-import { TEST_SPEC_DATA_NAMES, TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
+import { TEST_SPEC_DATA_NAMES, TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf, testSpecSchemaOf, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
 import {
   WRITE_V11A_DATA_NAMES,
   WRITE_V11A_REWRITE_DATA_NAME,
@@ -260,7 +260,11 @@ const rawOfFixed = (test: FixedTest, observes: string): Record<string, unknown> 
   inputContract: test.inputContract,
   referenceData: test.referenceData.map((row) => ({ ...row, values: JSON.stringify(row.values) })),
   expected: test.expected.kind === "ok" ? ok(JSON.stringify(test.expected.value)) : { kind: "error", value: null, code: test.expected.code },
-  assertion: null,
+  // 構造の検査（手 3d・#624 からコードが作る）は strict の形の assertion に戻す（欄は null で埋める）
+  assertion:
+    test.assertion === undefined
+      ? null
+      : { check: test.assertion.check, expected: test.assertion.expected ?? null, refEntity: test.assertion.refEntity ?? null, role: test.assertion.role ?? null },
   observes,
 });
 
@@ -404,11 +408,18 @@ const MAPPED_IDS: NameTable = withCheckTargets(TABLE_IDS);
 /** 値の中の題材の表の ID を、コードの形の ID に振り直す（T2 の応答など） */
 const renamed = <T,>(value: T): T => renameIds(value, CODE_RENAME);
 
+/**
+ * 旗 v12.ids の走りの T2 の応答（手 3d・Issue #624：構造の要件 R2 は要求の一覧に無く、構造の検査と画面の試験はコードが作るので、
+ * R2 の試験と分類を書かない）
+ */
+const idsT2Response = (tests: readonly Record<string, unknown>[] = [...r1Tests(), ...r3Tests(), ...r4Tests()], only: readonly string[] = IDS) =>
+  t2Response(tests, only.filter((id) => id !== "R2"));
+
 /** 旗 v12.ids（と台帳 on）の走りの C1 の 3 束・C2・T1''・T2・B1 の記録（既定は完走の道。Issue #593） */
 const idsHead = (options: { readonly t2?: unknown; readonly yaml?: string; readonly table?: NameTable } = {}): RecordedCall[] => [
   ...idsResponseList(idsResponsesOf(LIST, options.table ?? TABLE_IDS, PROPERTY_LEDGER_VIEW)).map((output) => structured(output)),
   structured(acceptAll()),
-  structured(renamed(options.t2 ?? t2Response())),
+  structured(renamed(options.t2 ?? idsT2Response())),
   structured({ declaration: options.yaml ?? RUN_YAML }),
 ];
 
@@ -655,12 +666,12 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const rows = dataBlockOf(t2?.input ?? "", TEST_SPEC_DATA_NAMES[2]) as readonly Record<string, unknown>[];
     expect(rows).toHaveLength(TABLE_IDS.rows.length);
     expect(rows.every((row) => row["source"] === null && !("name" in row))).toBe(true);
-    // T2 に見せる確かめ方の構造の検査に、C2 が書いた対象の ID が載る（Issue #594）
+    // 構造で確かめる要件は、手 3d（#624）から T2 の確かめ方に無い（C2 が書いた対象の ID からコードが構造の検査を作る）
     const verification = dataBlockOf(t2?.input ?? "", TEST_SPEC_DATA_NAMES[3]) as readonly Record<string, unknown>[];
     const structural = MAPPED_IDS.verification.filter((entry) => entry.kind === "structural");
     expect(structural.length).toBeGreaterThan(0);
     for (const entry of structural) {
-      expect(verification.find((item) => item["requirementId"] === entry.requirementId)?.["checkTargets"], entry.requirementId).toEqual(entry.targets);
+      expect(verification.some((item) => item["requirementId"] === entry.requirementId), entry.requirementId).toBe(false);
     }
     // 写しの欄（copy）と出典の引用の欄（requestQuote）が C1・C2 の要求に無い
     const tableRequests = recording.structured.filter((request) => request.schemaName.startsWith("vocabulary-") || request.schemaName === "mapping");
@@ -761,7 +772,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         structured(good.mapping),
         structured(rejectR3),
         structured(missing),
-        structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+        structured(renamed(idsT2Response([...r1Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
         structured({ declaration: RUN_YAML }),
         structured(acceptAll(["R1", "R2", "R4"])),
       ],
@@ -831,7 +842,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         structured(rejectR3),
         structured(good.mapping),
         structured(rejectR3),
-        structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+        structured(renamed(idsT2Response([...r1Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
         structured({ declaration: RUN_YAML }),
         structured(acceptAll(["R1", "R2", "R4"])),
       ],
@@ -871,7 +882,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         structured(good.mapping),
         structured(rejectR3),
         structured(missing),
-        structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+        structured(renamed(idsT2Response([...r1Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
         structured({ declaration: RUN_YAML }),
         structured(acceptAll(["R1", "R2", "R4"])),
       ],
@@ -3800,7 +3811,8 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     // 組・B1 の要求をそろえる（off は予約の接頭辞を見ない）
     const made = generateTests({ table: MAPPED_IDS, ledger: PROPERTY_LEDGER_VIEW, list: LIST });
     expect(made.tests.length).toBeGreaterThan(0);
-    const offT2 = renamed(t2Response());
+    // 手 3d（#624）：R2 の構造の検査もコードが作るので、off の応答の R2 の試験は作った試験だけにする（分類は off の一覧にあるので書く）
+    const offT2 = renamed(t2Response([...r1Tests(), ...r3Tests(), ...r4Tests()]));
     const offCalls = [
       structured(t1Of(LIST, offTable)),
       structured(acceptAll()),
@@ -3810,6 +3822,7 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     ];
     const off = await runScenario(offCalls, { flags: { ledger: true, searchRepair: true }, recordV12Flags: true });
     const on = await runScenario([...idsHead(), structured(acceptAll())], { flags: { ledger: true, searchRepair: true, ids: true }, recordV12Flags: true });
+    expect(off.result.stopped, JSON.stringify(off.result.stopped)).toBeNull();
     expect(off.result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(on.result.outcome).toEqual(off.result.outcome);
     expect(on.result.summary.exit_code).toBe(off.result.summary.exit_code);
@@ -3828,7 +3841,9 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     const offLater = later(off.recording.structured);
     const onLater = later(on.recording.structured);
     expect(onLater.map((request) => request.schemaName)).toEqual(["semantic-check", "test-spec", "declaration-v11a", "decl-check"]);
-    expect(onLater.slice(0, 2).every((request) => /\\"(?:targets|checkTargets)\\": \[/.test(JSON.stringify(request)))).toBe(true);
+    // 手 3d（#624）から構造の要件は T2 の要求に無いので、検査の対象の欄を持つのは C3 だけ
+    expect(/\\"targets\\": \[/.test(JSON.stringify(onLater[0]))).toBe(true);
+    expect(/\\"checkTargets\\": \[/.test(JSON.stringify(onLater[1]))).toBe(false);
     // ids on の T2 の R-tsp-16 は台帳の旗 ids の文（Issue #595）。その 1 文を ids off の文に戻して比べる
     const idsRules = ruleTexts(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true));
     const offRules = ruleTexts(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW));
@@ -3839,7 +3854,19 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     expect(onLater.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)?.rules).not.toEqual(
       offLater.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)?.rules,
     );
-    expect(onLater.map((request) => withoutTargets(JSON.stringify(withOffRules(request))))).toEqual(offLater.map((request) => withoutSource(JSON.stringify(request))));
+    // T2 の要求は、手 3d（#624）で要件の一覧・確かめ方・所属から構造の要件 R2 を除き、schema の operation・assertion を封じたので、
+    // T2 を除いた C3・B1・B3' を比べる（T2 の差は下で名指しで照らす）
+    const notT2 = (requests: readonly LlmStructuredRequest[]) => requests.filter((request) => request.schemaName !== TEST_SPEC_SCHEMA_NAME);
+    // B1 の固定した試験の分類には、T2 が分類しない構造の要件 R2 が無い（手 3d・#624。手 3c の除いた要件と同じ扱い）。off の R2 の 1 件を除いて比べる
+    const withoutR2Nature = (text: string) => text.replace('{\\n      \\"requirementId\\": \\"R2\\",\\n      \\"nature\\": \\"existence-only\\"\\n    },\\n    ', "");
+    expect(notT2(offLater).some((request) => withoutR2Nature(JSON.stringify(request)) !== JSON.stringify(request))).toBe(true);
+    expect(notT2(onLater).map((request) => withoutTargets(JSON.stringify(withOffRules(request))))).toEqual(notT2(offLater).map((request) => withoutR2Nature(withoutSource(JSON.stringify(request)))));
+    const t2Of = (requests: readonly LlmStructuredRequest[]) => requests.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)!;
+    const listedIds = (request: LlmStructuredRequest) => (dataBlockOf(request.input, TEST_SPEC_DATA_NAMES[1]) as { requirements: { id: string }[] }).requirements.map((entry) => entry.id);
+    expect(listedIds(t2Of(onLater))).toEqual(IDS.filter((id) => id !== "R2"));
+    expect(listedIds(t2Of(offLater))).toEqual([...IDS]);
+    expect(t2Of(onLater).schema).toEqual(testSpecSchemaOf(PROPERTY_LEDGER_VIEW, true));
+    expect(t2Of(offLater).schema).toEqual(testSpecSchemaOf(PROPERTY_LEDGER_VIEW));
     // 出典の欄の差だけがある（T2 の行に出典がある・無い）
     expect(offLater.map((request) => JSON.stringify(request))).not.toEqual(onLater.map((request) => JSON.stringify(request)));
     // 納品物の宣言・試験の結果が同じ
@@ -3914,7 +3941,7 @@ describe("旗 v12.ids：既定値・選択肢の集合・空の集計の要件�
   /** 区分の項目に default を足した宣言 */
   const G_YAML = replaced(RUN_YAML, "          beta: ベータ\n", "          beta: ベータ\n        default: alpha\n");
   /** T2 の応答（R6・R7 の試験も、R4 のアプリ全体・見出しごと × 選択肢の空の試験も書かない＝値の要る試験だけ） */
-  const gT2 = () => renameIds(t2Response(), G_RENAME);
+  const gT2 = () => renameIds(idsT2Response(), G_RENAME);
   const gHead = (yaml: string): RecordedCall[] => [
     ...idsResponseList(idsResponsesOf(G_LIST, G_MAPPED, PROPERTY_LEDGER_VIEW)).map((output) => structured(output)),
     structured(acceptAll(G_IDS)),
@@ -3955,15 +3982,25 @@ describe("旗 v12.ids：既定値・選択肢の集合・空の集計の要件�
     }
     const spec = artifactOf(result.bundle, "artifacts/test-spec.json") as { readonly suite: TestSuite; readonly observes: Record<string, string> };
     const generatedIds = generatedOf(result) ?? [];
-    expect(generatedIds.length).toBe(6);
+    // 手 3d（#624）：R2 の構造の検査と R4 の画面の構造の確認もコードが作る
+    expect(generatedIds.length).toBe(8);
     expect(generatedIds.every((id) => id.startsWith(GENERATED_TEST_ID_PREFIX))).toBe(true);
     expect(spec.suite.tests.map((test) => test.id).slice(-generatedIds.length)).toEqual(generatedIds);
     expect(spec.suite.tests.filter((test) => isGeneratedTestId(test.id)).map((test) => test.id)).toEqual(generatedIds);
-    expect(generatedIds.map((id) => spec.observes[id])).toEqual(["empty-aggregate", "empty-aggregate", "empty-aggregate", "empty-aggregate", "default-value", "enum-membership"]);
-    // T2 の要求の一覧に R6・R7 が無い。B1 には作った試験が渡る
+    expect(generatedIds.map((id) => spec.observes[id])).toEqual([
+      "view-structure",
+      "view-structure",
+      "empty-aggregate",
+      "empty-aggregate",
+      "empty-aggregate",
+      "empty-aggregate",
+      "default-value",
+      "enum-membership",
+    ]);
+    // T2 の要求の一覧に R6・R7（と手 3d から構造の要件 R2）が無い。B1 には作った試験が渡る
     const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)!;
     const listed = dataBlockOf(t2.input, TEST_SPEC_DATA_NAMES[1]) as { requirements: { id: string }[] };
-    expect(listed.requirements.map((requirement) => requirement.id)).toEqual([...IDS]);
+    expect(listed.requirements.map((requirement) => requirement.id)).toEqual(IDS.filter((id) => id !== "R2"));
     const write = recording.structured.find((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME)!;
     const shown = dataBlockOf(write.input, WRITE_V11A_DATA_NAMES[2]) as { tests: { id: string }[] };
     expect(shown.tests.map((test) => test.id).slice(-generatedIds.length)).toEqual(generatedIds);
@@ -3990,5 +4027,162 @@ describe("旗 v12.ids：既定値・選択肢の集合・空の集計の要件�
     const missed = reports[0]!.mismatches.filter((entry) => generatedIds.has(entry.testId) && spec.observes[entry.testId] === observes);
     expect(missed.length).toBeGreaterThan(0);
     if (detail !== undefined) expect(missed.map((entry) => entry.detail)).toContain(detail);
+  });
+});
+
+// ── 旗 v12.ids：構造の検査・画面と在ることの構造の確認をコードが作る走り（手 3d。Issue #624）──────────────────────────────
+
+describe("旗 v12.ids：構造・画面・在ることの要件を含む走りは、コードが作った試験で照らし、宣言が表どおりなら full・違えば full が出ない（Issue #624）", () => {
+  const flags: Partial<GenerationInputV11a> = { flags: { ledger: true, ids: true } };
+  const R6_TEXT = "札を持てる。";
+  const R7_TEXT = "項目の題名は文字列で、項目を登録できる。";
+  const D_LIST_BASE: RequirementList = {
+    ...BASE_LIST,
+    requirements: [
+      ...BASE_LIST.requirements,
+      { id: "R6", text: R6_TEXT, quote: R6_TEXT, position: { start: 0, end: R6_TEXT.length } },
+      { id: "R7", text: R7_TEXT, quote: R7_TEXT, position: { start: 0, end: R7_TEXT.length } },
+    ],
+  };
+  const D_PLAN = planOf(D_LIST_BASE);
+  const D_LIST = requirementsFromPlan(D_PLAN);
+  const D_SOURCE = D_LIST_BASE.requirements.map((requirement) => requirement.text).join("");
+  const D_IDS = [...IDS, "R6", "R7"] as const;
+  const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
+  /** 札の entity（e.tag）と項目（f.tag.label）。R6 だけが所属させる（画面の行は無い） */
+  const tagRow = (id: string, kind: "entity" | "field", entity: string | null, name: string, type: NameTable["rows"][number]["type"]) => ({
+    id,
+    kind,
+    entity,
+    name,
+    role: "要件 R6 が使う対象",
+    source: { requirementId: "R6", quote: "札" },
+    type,
+    options: null,
+    groupBy: null,
+    refEntity: null,
+  });
+  /** R6：画面が無く entity（札）を持つ在ることの要件。R7：checks 2 つ（field-type・action-kind）の構造の要件 */
+  const D_TABLE_ON: NameTable = {
+    ...TABLE_ON,
+    rows: [...TABLE_ON.rows, tagRow("e.tag", "entity", null, "tag", null), tagRow("f.tag.label", "field", "e.tag", "label", "string")],
+    ownership: [...TABLE_ON.ownership, { requirementId: "R6", roles: ["e.tag", "f.tag.label"].map(stated) }, { requirementId: "R7", roles: ["f.item.title", "o.addItem"].map(stated) }],
+    verification: [
+      ...TABLE_ON.verification,
+      { requirementId: "R6", kind: "fixed-test" },
+      { requirementId: "R7", kind: "structural", reason: "宣言の構造だけを求める", checks: ["field-type", "action-kind"] },
+    ],
+    classification: [...TABLE_ON.classification, { requirementId: "R6", nature: "existence-only" }, { requirementId: "R7", nature: "existence-only" }],
+  };
+  const D_RENAME = codeIdRenameOf(D_TABLE_ON);
+  const D_MAPPED: NameTable = withCheckTargets(withCodeIds(D_TABLE_ON));
+  /** T2 の応答（R2・R7 は要求に無い。R6 は entity だけなので試験は書かず分類だけ） */
+  const dT2 = () =>
+    renameIds(
+      {
+        classifications: [...NATURES.filter((entry) => entry.requirementId !== "R2"), { requirementId: "R6", nature: "existence-only" }],
+        tests: [...r1Tests(), ...r3Tests(), ...r4Tests()],
+      },
+      D_RENAME,
+    );
+  /** 札の entity を足した宣言（`shown` なら札の表の画面も足す＝一覧がある） */
+  const withTag = (yaml: string, shown: boolean) =>
+    replaced(
+      shown ? replaced(yaml, "actions:\n", "  - name: tags\n    type: table\n    entity: tag\n    show: [label]\nactions:\n") : yaml,
+      "  - name: item\n    fields:\n",
+      "  - name: tag\n    fields:\n      label:\n        type: string\n  - name: item\n    fields:\n",
+    );
+  const D_YAML = withTag(RUN_YAML, true);
+  const dHead = (yaml: string): RecordedCall[] => [
+    ...idsResponseList(idsResponsesOf(D_LIST, D_MAPPED, PROPERTY_LEDGER_VIEW)).map((output) => structured(output)),
+    structured(acceptAll(D_IDS)),
+    structured(dT2()),
+    structured({ declaration: yaml }),
+  ];
+  const runD = (calls: readonly RecordedCall[]) => runScenario(calls, { plan: D_PLAN, source: D_SOURCE, ...flags });
+  function spyReports() {
+    const reports: { readonly mismatches: readonly { readonly testId: string; readonly detail: string }[]; readonly unresolved: readonly { readonly testId: string }[] }[] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      const evaluator = original(input);
+      return {
+        ...evaluator,
+        runTests: (app, context, correspondence) => {
+          const report = evaluator.runTests(app, context, correspondence);
+          reports.push(report);
+          return report;
+        },
+      };
+    });
+    return reports;
+  }
+  const generatedOf = (result: Awaited<ReturnType<typeof runD>>["result"]) =>
+    (artifactOf(result.bundle, "artifacts/test-spec.json") as { readonly generated_test_ids?: readonly string[] }).generated_test_ids ?? [];
+
+  it("正例：宣言が表どおりなら不一致 0・今までの門で full。T2 の成果物のコードが作った試験 ID の並びに構造の検査（R2・R7）と画面（R4）・在ること（R6）がある", async () => {
+    const reports = spyReports();
+    const { result, recording } = await runD([...dHead(D_YAML), structured(acceptAll(D_IDS))]);
+    expect(result.stopped, JSON.stringify(result.stopped)).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(reports.length).toBeGreaterThan(0);
+    for (const report of reports) {
+      expect(report.mismatches).toEqual([]);
+      expect(report.unresolved).toEqual([]);
+    }
+    const spec = artifactOf(result.bundle, "artifacts/test-spec.json") as { readonly suite: TestSuite; readonly observes: Record<string, string> };
+    const generatedIds = generatedOf(result);
+    expect(spec.suite.tests.map((test) => test.id).slice(-generatedIds.length)).toEqual(generatedIds);
+    expect(
+      spec.suite.tests.filter((test) => generatedIds.includes(test.id)).map((test) => [test.target.requirementId, test.operation, spec.observes[test.id]]),
+    ).toEqual([
+      ["R2", "structure", "view-structure"],
+      ["R4", "screen", "view-structure"],
+      ["R4", "aggregate", "empty-aggregate"],
+      ["R4", "aggregate", "empty-aggregate"],
+      ["R6", "screen", "existence"],
+      ["R7", "structure", "existence"],
+      ["R7", "structure", "existence"],
+    ]);
+    const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)!;
+    const listed = dataBlockOf(t2.input, TEST_SPEC_DATA_NAMES[1]) as { requirements: { id: string }[] };
+    expect(listed.requirements.map((requirement) => requirement.id)).toEqual(["R1", "R3", "R4", "R6"]);
+    expectNoAcceptanceMaterial(recording.structured.map((request) => JSON.stringify(request)));
+  });
+
+  const negatives: readonly { readonly name: string; readonly yaml: string; readonly requirementId: string; readonly operation: string }[] = [
+    {
+      name: "宣言の項目の型が表と違う（題名を数にした）",
+      yaml: replaced(D_YAML, "  - name: item\n    fields:\n      title:\n        type: string\n", "  - name: item\n    fields:\n      title:\n        type: number\n"),
+      requirementId: "R7",
+      operation: "structure",
+    },
+    {
+      name: "画面が項目を見せない（担当者の表から名前を外した）",
+      yaml: replaced(D_YAML, "    show: [title, itemCount]", "    show: [itemCount]"),
+      requirementId: "R2",
+      operation: "structure",
+    },
+    {
+      name: "entity に create も一覧も無い（札の表を外した）",
+      yaml: withTag(RUN_YAML, false),
+      requirementId: "R6",
+      operation: "screen",
+    },
+  ];
+
+  it.each(negatives)("負例：$name 宣言は、コードが作った試験で不一致になり full が出ない（作り手で甘くならない）", async ({ yaml, requirementId, operation }) => {
+    const reports = spyReports();
+    const { result } = await runD([...dHead(yaml), repairDone(yaml)]);
+    console.log("NEG", JSON.stringify({ stopped: result.stopped, stages: stageIds(result), reports }).slice(0, 1500));
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.summary.verdict).not.toBe("full");
+    expect(reports.length).toBeGreaterThan(0);
+    if (result.bundle === null) throw new Error(JSON.stringify({ stopped: result.stopped, stages: stageIds(result) }));
+    const generatedIds = new Set(generatedOf(result));
+    const spec = artifactOf(result.bundle, "artifacts/test-spec.json") as { readonly suite: TestSuite };
+    const generatedTests = spec.suite.tests.filter((test) => generatedIds.has(test.id) && test.target.requirementId === requirementId && test.operation === operation);
+    expect(generatedTests.length).toBeGreaterThan(0);
+    const missed = reports[0]!.mismatches.filter((entry) => generatedTests.some((test) => test.id === entry.testId));
+    expect(missed.length, JSON.stringify(reports[0])).toBeGreaterThan(0);
   });
 });
