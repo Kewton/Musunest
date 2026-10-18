@@ -70,6 +70,10 @@
 //   PASS あたりの費用（cost_per_pass。予定した全部の本の費用の合計 ÷ 原文系 PASS。欠測 0 のときだけ値と P を単位にした bootstrap の区間、欠測があれば
 //   null と cost-missing と観測した費用だけの下限）・段ごとの時間と usage（stage_usage。時間は build-from の by_stage と同じ関数）・記録の無い本の内訳（unavailable）。
 //   --compare は群ごとに同じ欄と、PASS 対 費用（pass_vs_cost。PASS の差、両群とも欠測 0 のときだけ費用の差と向き）。標準出力の末尾に 1 行。段ごとの USD と単価は書かない
+// #633 で足したもの（通常の採点と --compare の群ごとの欄の末尾だけ。既存の欄・値・並びと採点の規則は変えない。README §10）：
+//   本ごとの last_passed_stage（status が ok の記録を持つ最後の段）と first_upstream_failure（記録の順で最初に 1 回目で通過でなかった段）、群ごとの遷移表（transitions。
+//   行＝最後に通った段、列＝stopValueOf の値）と最初の上流の落ちの内訳（first_upstream_failures）。既存の stops と項目別に照合できる。--anonymous は既知の段と停止の値の件数だけ。
+//   標準出力に遷移表の 1 行。判定・門には使わない
 // run-agent.mjs は、ここから指紋の関数と定義ファイルの読み込みを import して条件のファイルに書く（道具は 2 本で 1 組。入口として起動したときだけ採点する）
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -1535,6 +1539,7 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
   // 了承後系の対象（#426）：計測が Plan を通した（条件のファイルの params.plan）なら全本。そうでなければ Plan の記録（plan-record.json か plan.json）のある本だけ
   const planScope = cond?.params?.plan === true;
   const rows = [];
+  const chainsByRun = new Map(); // #633
   const tableInputs = []; // Plan の表と Build の表の入力（#493）
   for (const d of runDirs(outRoot)) {
     const p = patternOf(d), item = evalSet.byId.get(p), dir = join(outRoot, d);
@@ -1542,6 +1547,7 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
     const subject = item.subject;
     const sl = existsSync(join(dir, "summary.line.json")) ? readRecord(join(dir, "summary.line.json"), "summary") : null;
     const s = sl?.summary ?? null;
+    chainsByRun.set(d, stageChainOf(s)); // #633
     // 工場の判定の 4 値と unverified の内訳の件数（#538）。既存の行の鍵のあとに足す
     const verdict4 = { factory_verdict4: factoryVerdict4(s), unverified_details: unverifiedDetailsOf(readJsonSafe(join(dir, VERIFICATION_PATH)).value) };
     const spec = join(dir, "bundle/artifacts/app.spec.yaml");
@@ -1687,6 +1693,7 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
   fingerprints.frozen_matches_conditions = !isObj(cond?.frozen) ? null : isHex64(cond.frozen.sha256) ? frozenSha === cond.frozen.sha256 : false;
   // 入れ子の conditions.frozen は v4・v5 の条件のときだけ（v1〜v3 の旧版の形を変えない）
   if (fingerprints.conditions !== null && hasMode(cond.schema)) fingerprints.conditions.frozen = isObj(cond.frozen) && isHex64(cond.frozen.sha256) ? cond.frozen.sha256 : null; // 入力の文字列を通さない（指摘 5）
+  for (const r of rows) Object.assign(r, chainsByRun.get(r.run)); // #633
   // 予定した本ごとの記録（#498。分母は予定した本の全部。条件の予定を検証できなければ採点した本）。新しいファイルの読み込みは例外を外に出さない
   const absentRead = { status: "absent", value: null };
   const factIds = planned.length > 0 ? [...planned].sort((a, b) => a.localeCompare(b, "en", { numeric: true })) : runDirs(outRoot).filter((d) => evalSet.byId.has(patternOf(d)));
@@ -1741,6 +1748,9 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
   return { rubric: "v5", aggregation_versions: AGGREGATION_VERSIONS, scoring_systems: SCORING_SYSTEMS, set, metrics, metrics_accepted, metrics_script, fulfillment, completion, fingerprints, bySubject, rows, tables, evaluation, metrics_plan, metrics_build, funnel, pass_k, verdicts, unverified_details, agreement, test_findings,
     // PASS あたりの費用と段ごとの時間・usage（#632。README §9）：既存の欄のあとに足す。分母は予定した本（facts）。判定・門には使わない
     cost_per_pass: costPerPass(costItemsOf(facts)), stage_usage: stageUsageOf(facts.map((f) => (f.state === "executed" && isObj(f.sl?.summary) ? f.sl.summary : null)), facts.map((f) => f.state)),
+    // 最後に通った段 → 止まった値の遷移表と最初の上流の落ちの内訳（#633。README §10）：さらにそのあとに足す。分母は予定した本（facts）
+    transitions: transitionsOf(facts.map((f) => ({ state: f.state, summary: isObj(f.sl?.summary) ? f.sl.summary : null, exhausted: f.exhausted ?? null }))), // #633
+    first_upstream_failures: firstUpstreamFailuresOf(facts.map((f) => ({ state: f.state, summary: isObj(f.sl?.summary) ? f.sl.summary : null }))), // #633
   };
 }
 
@@ -1848,6 +1858,7 @@ export function anonymize(full) {
     ...anonymous539(full),
     // PASS あたりの費用と段ごとの時間・usage（#632）：件数・合計・中央値・区間だけ（P ごとの値は出さない）
     ...anonymous632(full),
+    ...anonymous633(full), // #633
   };
 }
 // #632 の匿名の欄：件数・合計・中央値・値・区間・下限・既知の理由だけ。段は既知の段の ID だけ（P の ID・本の ID・P ごとの値は出さない）
@@ -1860,6 +1871,28 @@ const anonStageUsage = (x) => (!isObj(x) ? null : {
   planned: intOrNull(x.planned), unavailable: intsOf(x.unavailable, UNAVAILABLE_KEYS),
   stages: Object.fromEntries(STAGE_USAGE_ORDER.filter((id) => isObj(x.stages?.[id])).map((id) => { const v = x.stages[id]; return [id, { ...intsOf(v, ["runs", "calls"]), duration_ms: anonStat(v.duration_ms), ...intsOf(v, STAGE_USAGE_TOKENS), retries: intsOf(v.retries, STAGE_USAGE_RETRIES), missing_usage_calls: intOrNull(v.missing_usage_calls) }]; })),
 });
+// #633 の匿名の欄：既知の段の ID と既知の停止の値の件数だけ（知らない値は unknown）。本の ID・P の ID は出さない
+const knownChainRow = (id) => (id === "none" || id === UNREADABLE_ROW || BUILD_STAGE_IDS.includes(id) ? id : "unknown");
+const anonChainRows = () => [...BUILD_STAGE_IDS, "none", UNREADABLE_ROW, "unknown"];
+const anonTransitions = (x) => {
+  if (!isObj(x)) return null;
+  const sums = new Map();
+  for (const c of Array.isArray(x.cells) ? x.cells : []) {
+    if (!isObj(c) || !Number.isInteger(c.runs)) continue;
+    const key = `${knownChainRow(c.last_passed)}\u0000${typeof c.stop === "string" && knownStopValue(c.stop) ? c.stop : "unknown"}`;
+    sums.set(key, (sums.get(key) ?? 0) + c.runs);
+  }
+  const cells = [...sums].map(([k, runs]) => { const [last_passed, stop] = k.split("\u0000"); return { last_passed, stop, runs }; })
+    .sort((a, b) => anonChainRows().indexOf(a.last_passed) - anonChainRows().indexOf(b.last_passed) || a.stop.localeCompare(b.stop, "en"));
+  return { ...intsOf(x, ["planned", "not_run", "missing"]), cells };
+};
+const anonFirstUpstreamFailures = (x) => {
+  if (!isObj(x)) return null;
+  const stages = {};
+  for (const [k, n] of Object.entries(isObj(x.stages) ? x.stages : {})) { const id = BUILD_STAGE_IDS.includes(k) ? k : "unknown"; stages[id] = (stages[id] ?? 0) + (Number.isInteger(n) ? n : 0); }
+  return { ...intsOf(x, ["planned", "none", "missing", "not_run"]), stages };
+};
+const anonymous633 = (x) => ({ ...("transitions" in x ? { transitions: anonTransitions(x.transitions) } : {}), ...("first_upstream_failures" in x ? { first_upstream_failures: anonFirstUpstreamFailures(x.first_upstream_failures) } : {}) });
 const anonymous632 = (x) => ({ ...("cost_per_pass" in x ? { cost_per_pass: anonCostPerPass(x.cost_per_pass) } : {}), ...("stage_usage" in x ? { stage_usage: anonStageUsage(x.stage_usage) } : {}) });
 // #538 の匿名の欄。率は数と区間の形の文字列か「今回未観測（0/予定）」だけを通す
 const UNOBSERVED = /^今回未観測（0\/\d+）$/;
@@ -2122,6 +2155,79 @@ export function reachOf(facts) {
     return [id, { reached, planned: n, label: reached === 0 ? `今回未観測（0/${n}）` : `${reached}/${n}` }];
   }));
 }
+// ── 最後に通った段 → 止まった値の遷移表と、本ごとの最初の上流の落ち（#633。README §10）。既存の記録から費用 0 で出す。判定・門には使わない
+const MISSING_CHAIN = "missing";
+/** 遷移表の行のうち、要約は読めるが段の記録が配列でない本の行 */
+export const UNREADABLE_ROW = "unreadable";
+/** 段の記録の 1 件が「1 回目で通過」でないか：status が ok でない・calls が 2 以上・retries の shape か content が 1 以上。calls 0（コードの段）は status だけで決める */
+const notFirstPassRecord = (r) => {
+  if (r.status !== "ok") return true;
+  if (r.calls === 0) return false;
+  if (Number.isInteger(r.calls) && r.calls >= 2) return true;
+  return isObj(r.retries) && ((Number.isInteger(r.retries.shape) && r.retries.shape >= 1) || (Number.isInteger(r.retries.content) && r.retries.content >= 1));
+};
+/**
+ * 本 1 つの要約から { last_passed_stage, first_upstream_failure }。段の記録（stages[]。実行の順）が配列でない・要約が無い本は両方 "missing"（欠測）。
+ * last_passed_stage ＝ status が ok の記録を持つ最後の段（無ければ null）。first_upstream_failure ＝ 記録の順で最初に 1 回目で通過でなかった段（全段が 1 回目で通れば null）。
+ * 段の最初の記録で決める（新しい段 vocabulary・mapping は束ごとの記録なので全記録。漏斗の first_pass と同じ）。段の値は記録のまま（文字列でなければ "unknown"）
+ */
+export function stageChainOf(summary) {
+  if (!isObj(summary) || !Array.isArray(summary.stages)) return { last_passed_stage: MISSING_CHAIN, first_upstream_failure: MISSING_CHAIN };
+  const nameOf = (r) => (typeof r.stage === "string" ? r.stage : "unknown");
+  let last = null, first = null;
+  const seen = new Set();
+  for (const r of summary.stages) {
+    if (!isObj(r)) continue;
+    const id = nameOf(r);
+    if (r.status === "ok") last = id;
+    if (first === null && (IDS_STAGE_IDS.includes(id) || !seen.has(id)) && notFirstPassRecord(r)) first = id;
+    seen.add(id);
+  }
+  return { last_passed_stage: last, first_upstream_failure: first };
+}
+/**
+ * 遷移表（群ごと）：行＝最後に通った段（rowStageIds の順＋none＋unreadable＋unknown）、列＝stopValueOf の値、値＝本の数。0 でない組だけを cells に並べる。
+ * 分母は予定本数。not_run ＝ 未実行＋途中、missing ＝ 実行したが要約の読めない本。要約は読めるが段の記録が配列でない本は unreadable の行に入れる（stops.values と列の合計を合わせるため）。
+ * facts ＝ 予定した本ごとの { state, summary, exhausted }
+ */
+export function transitionsOf(facts) {
+  const ran = facts.filter((f) => f.state === "executed");
+  const ids = rowStageIds(hasPendingStage(ran.map((f) => f.summary)));
+  const rows = [...ids, "none", UNREADABLE_ROW, "unknown"];
+  const matrix = Object.fromEntries(rows.map((r) => [r, {}]));
+  for (const f of ran) {
+    if (!isObj(f.summary)) continue;
+    const c = stageChainOf(f.summary), stop = stopValueOf(f.summary, f.exhausted ?? null);
+    const row = c.last_passed_stage === MISSING_CHAIN ? UNREADABLE_ROW : c.last_passed_stage === null ? "none" : ids.includes(c.last_passed_stage) ? c.last_passed_stage : "unknown";
+    matrix[row][stop] = (matrix[row][stop] ?? 0) + 1;
+  }
+  const cells = rows.flatMap((last) => Object.keys(matrix[last]).sort((a, b) => a.localeCompare(b, "en")).map((stop) => ({ last_passed: last, stop, runs: matrix[last][stop] })));
+  return {
+    planned: facts.length, rows, columns: [...new Set(cells.map((c) => c.stop))].sort((a, b) => a.localeCompare(b, "en")),
+    not_run: facts.filter((f) => f.state !== "executed").length, missing: ran.filter((f) => !isObj(f.summary)).length, matrix, cells,
+  };
+}
+/** 最初の上流の落ちの内訳（群ごと）：段ごとの本の数と none（全段が 1 回目で通った）・missing（要約か段の記録が読めない）・not_run（未実行・途中）。分母は予定本数 */
+export function firstUpstreamFailuresOf(facts) {
+  const ran = facts.filter((f) => f.state === "executed");
+  const ids = rowStageIds(hasPendingStage(ran.map((f) => f.summary)));
+  const stages = { ...zeros(ids), unknown: 0 };
+  let none = 0, missing = ran.filter((f) => !isObj(f.summary)).length;
+  for (const f of ran) {
+    if (!isObj(f.summary)) continue;
+    const v = stageChainOf(f.summary).first_upstream_failure;
+    if (v === MISSING_CHAIN) missing += 1;
+    else if (v === null) none += 1;
+    else stages[ids.includes(v) ? v : "unknown"] += 1;
+  }
+  return { planned: facts.length, stages, none, missing, not_run: facts.filter((f) => f.state !== "executed").length };
+}
+/** 標準出力の遷移表の 1 行（群ごと。0 でない組だけ。最後に通った段→止まった値 本の数） */
+export function transitionsText(g, t) {
+  const cells = (t.cells ?? []).map((c) => `${c.last_passed}→${c.stop} ${c.runs}`);
+  return `${g} 遷移表（最後に通った段→止まった値。判定には使わない記述）: ${cells.length === 0 ? "組なし" : cells.join("・")}（未実行・途中 ${t.not_run}・要約なし ${t.missing}・予定 ${t.planned}）`;
+}
+
 /**
  * 持ち越しの内訳（群ごと。v1 は null）：実行した本のうち carry-over の記録を読めた本・欠測（無い・読めない・形が違う。記録を書く前に止まった本も欠測）・
  * 持ち越しのある本の数と、出どころ 4 つの件数（要件ごとに、その要件の理由に現れた出どころを 1 回ずつ数える。知らない出どころは unknown）
@@ -2240,6 +2346,8 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
       ...(isObj(full.evaluation?.v12_flags) ? { v12_flags: full.evaluation.v12_flags } : {}),
       // PASS あたりの費用と段ごとの時間・usage（#632。群ごとの採点の出力の欄そのまま）
       cost_per_pass: full.cost_per_pass, stage_usage: full.stage_usage,
+      // 最後に通った段 → 止まった値の遷移表と最初の上流の落ちの内訳（#633。群ごとの採点の出力の欄そのまま）
+      transitions: full.transitions, first_upstream_failures: full.first_upstream_failures, // #633
     };
   }
   // 段の役割ごとの対の差（#539。README §5.10.3）：両側で指標が定義されている対だけを n に入れる。片側だけ・欠測・適用外は差 null で理由を残す
@@ -2333,6 +2441,7 @@ export function anonymizeCompare(full) {
       ...(isObj(x.v12_flags) ? { v12_flags: anonymousV12Flags(x.v12_flags) } : {}),
       // PASS あたりの費用と段ごとの時間・usage（#632）
       ...anonymous632(x),
+      ...anonymous633(x), // #633
     };
   }
   const interval = Array.isArray(p.interval) && p.interval.length === 2 && p.interval.every((v) => numOrNull(v) !== null) ? [p.interval[0], p.interval[1]] : null;
@@ -2849,7 +2958,7 @@ async function mainCompare(repo, outRoot, { label, anonymous, setPath }) {
   }
   // 既存の JSON の行は #539 の欄を除いて今までの形のまま
   const { pairs: { rows, by_pattern: byPattern, ...pairs }, stage_pairs, pattern_clusters, noise, pass_vs_cost, ...rest } = full;
-  const groups538 = Object.fromEntries(Object.entries(rest.groups).map(([g, { agreement: _a, test_findings: _t, cost_per_pass: _c, stage_usage: _s, ...x }]) => [g, x]));
+  const groups538 = Object.fromEntries(Object.entries(rest.groups).map(([g, { agreement: _a, test_findings: _t, cost_per_pass: _c, stage_usage: _s, transitions: _t3, first_upstream_failures: _u3, ...x }]) => [g, x]));
   console.log(JSON.stringify({ ...rest, groups: groups538, pairs }, null, 1));
   const GROUPS = Object.keys(rest.groups);
   for (const r of rows) console.log(["pair", r.run, `先行 ${r.first}`, ...GROUPS.map((g) => `${g} ${r.states[g]}${r.pass === null ? "" : ` PASS=${r.pass[g]}`}`), `差 ${r.diff === null ? "-" : r.diff > 0 ? `+${r.diff}` : r.diff}`].join("\t"));
@@ -2867,6 +2976,8 @@ async function mainCompare(repo, outRoot, { label, anonymous, setPath }) {
   console.log(noiseText(noise));
   // PASS 対 費用の 1 行（#632。末尾。JSON の行には足さない）
   console.log(passVsCostText(pass_vs_cost, Object.fromEntries(GROUPS.map((g) => [g, full.groups[g].stage_usage]))));
+  // 遷移表の 1 行（#633。さらに末尾。群ごとの 0 でない組だけ。JSON の行には足さない）
+  console.log(GROUPS.map((g) => transitionsText(g, full.groups[g].transitions)).join("／")); // #633
 }
 
 const isEntry = () => { if (process.argv[1] === undefined) return false; try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } };
