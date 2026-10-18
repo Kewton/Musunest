@@ -2752,7 +2752,8 @@ test("#593 用の足場：dist の一覧との照合の一覧は、dist に無�
 test("#513 (a) BUILD_STAGE_IDS が工場の dist の STAGE_IDS（＋工場が後で足す段のうち dist に無いもの）と同じ並びで 19 個＋α。出力の段・上限・持ち越しの出どころ・記録の場所も dist と同じ", async () => {
   const record = await distModule("record.js"), limits = await distModule("limits.js");
   assert.deepEqual(BUILD_STAGE_IDS, withPendingStages([...record.STAGE_IDS]));
-  assert.ok(record.STAGE_IDS.length >= 19);
+  assert.equal(record.STAGE_IDS.length, 19);
+  assert.equal(withPendingStages([...record.STAGE_IDS]).length, 21);
   assert.deepEqual([...V1_OUTPUT_STAGES, ...V11A_OUTPUT_STAGES], [...limits.OUTPUT_STAGES]);
   for (const effort of Object.keys(limits.STAGE_MAX_OUTPUT_TOKENS)) for (const k of V11A_OUTPUT_STAGES) assert.equal(limits.STAGE_MAX_OUTPUT_TOKENS[effort][k], V11A_APPROVED_LIMITS[k], `${effort} ${k}`);
   const carry = await distModule("v11a/carry-over.js"), bundle = await distModule("v11a/bundle-v11a.js");
