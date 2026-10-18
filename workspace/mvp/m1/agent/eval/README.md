@@ -642,7 +642,7 @@ v1（比較元の checkout。main `2cd1586f856fb1cdecf75ef035826cbffe539e69`）�
 
 - `--stage-start <段>`・`--stage-end <段>`・`--stage-from <凍結した上流の計測の出力先>`。**`--pipeline v1.1a` と `--build-from <組>` と組んでだけ受ける**（それ以外は `flags:conflict`）。段の名前・範囲の決め方・境界は工場の dist（`packages/factory/dist/v11a/bundle-v11a.js`）が公開する定数と関数を読む（道具の中に段の表を持たない）。片方だけ付ければ他方は経路の端（工場と同じ）
 - 開始が T1（`name-table`）なら `--stage-from` を付けられない。T2（`test-spec`）・B1（`write`）なら必須。表に無い段・開始が終了より後も `flags:conflict`
-- 区間 0（開始 T1・終了 T1''）の段の表に `vocabulary`・`mapping` を足した（`name-table`・`semantic-check`・`carry-over` はそのまま）。区間 1 以降の記録に出れば「段の履歴が範囲と合わない」。工場の dist との照合の試験は、dist に無い段のうち採点が先に足した定数（`FACTORY_PENDING_STAGE_IDS`）だけを許す（工場が足したら外す）
+- 区間 0（開始 T1・終了 T1''）の段の表に `vocabulary`・`mapping` を足した（`name-table`・`semantic-check`・`carry-over` はそのまま）。区間 1 以降の記録に出れば「段の履歴が範囲と合わない」。工場の dist との照合の試験は、採点の段の表と dist の段の表が深く等しいことを見る（採点が先に足した段を許す定数は手 3a で外した）
 - 対象の本は `--build-from` と同じ（採用した P × 回数。`--only` は採用した P の部分集合）
 - 子の引数の末尾に `--stage-start <開始> --stage-end <終了>` と、開始の段の直前の境界があれば `--stage-input <本のディレクトリ>/stage-input/stage-checkpoint-<境界>.json` を足す。上流の checkpoint と段の走りの記録は、照合を通ったバイト列のまま本のディレクトリの `stage-input/` に写す（工場は checkpoint の隣の記録を読む）
 - **予算と締切の単位は段の走り 1 本**：`--factory-budget-usd`・`--deadline-min` は今までどおり子ごとに `--budget`・`--deadline` で渡し、工場がその走りの始まりから当てる（前の走りの額と時間を引かない）。計測全体の目安の額（`--budget-usd`）の扱いは今と同じで、済みの額は段の走りの記録の `provider_cost_usd` から足す
@@ -908,3 +908,111 @@ node workspace/mvp/m1/agent/eval/agent-accept/score-agent.mjs <repo> <out> --ano
 - **本物の計測は流していない**（基準は方法論 `06` §1 の作業 3）。依頼文を工場に渡したときの Plan の問い・Build の結果は未観測
 - 保留用の題材との重なり（所有者が確かめる）。レビューの指摘を反映した版の再確認は済み（残件 1 件は §6.5 の限界として明記。直していない）
 - 正例の宣言が画面（host）で動くこと（静的チェックと spec-engine の評価だけで確かめた。開発用の `stage1-specs/` と同じ範囲）
+
+## 7. 表の採点（正解の表との照合）（#606。v1.2 表の採点 1。道具 `table/score-table.mjs`）
+
+手 3（T1 を C1・C2 に分ける）の前後で、工場の ②部品の一覧・③要件と部品の結び付けを、段の通過や外の採点の PASS ではなく**正解の表と直接比べて**測る。要件ごとに 3 問——(i) 必要な部品が全部在る（**欠け**）、(ii) 許す集合の外の所属が無い（**過剰**）、(iii) **確かめ方**が許す集合に入る——を 0／1 で出す。**計測の道具であって工場の門ではない**（工場の合否・門・検証の定義に入らない。工場の package を import せず、工場の側もこの道具を参照しない）。**費用 0**（LLM・判定・API・通信・時計を使わない。Jev も入れない）。
+
+> 節の番号：§5 の末尾（§5.13 の次）に置くと、既存の試験が固定している見出しの並び（§5.11〜§5.13 の次が §6）が変わるので、§7 として末尾に足した。§5 以前・§6 の文は変えていない。
+
+### 7.1 使い方と入力
+
+```bash
+node table/score-table.mjs <正解のディレクトリ> <計測の出力先> <出力先> [--compare] [--anonymous]
+```
+
+- **正解は非公開**で git の外に置く（採点担当が作る。所有者の決定 2026-10-18）。道具は場所を引数で受け取るだけで、**正解の場所に既定値を持たない**。正解の文（引用・意味・質問・理由・除外の文）は出力に写さない
+- 正解のディレクトリ：`*.json` だけを名前の順に読み（同じ場所の `schema.md`・`README.md` などは読まない）、1 ファイル＝1 P。形（版 `table-gold-v1`。欄の名前と型は現物に合わせた。#606 の窓口の確認）：
+  - 必須：`version`・`pattern`（`P<n>`）・`plan_set`（`id`・`version`・`manifest_sha256`）・`plan_sha256`・`counts`（件数。値は整数）・`components`（**配列。`symbol` で索引**。`kind`・`type`）・`requirements`（**配列。`requirement_id` で索引**。P をまたいで同じ ID が出るので P の中で一意として扱う。`variants`＝案の並び。案は `id`・`required`・`allowed`・`context`・`verification`＝**長さ 1 の配列**）・`needs_human`（保留の一覧。`requirement_id`・`reason_kind`・`candidates`）
+  - 部品の任意の欄：親 entity `entity`・参照先 `refEntity`・`groupBy`（`kind`・`field`＝記号）・`options`（配列。**数は配列の長さ**）・`semantics`（あれば意味の未照合の印）・`design_family`
+  - **任意の欄**（無ければ null と同じで、**無いだけで断らない**）：判定の状態 `adjudication_status`・`unexpressible`（`scope` は `"<設計族>-family-only"` の形だけ）・`verification_limit`・`scope`（除外の部分。読まない）・`related_requirement_ids`（保留の一覧にある。要件の側も読む）。案の任意の欄：設計族 `design_family`・禁止の部品 `forbidden_components`・方針 `entity_field_policy`・案の `unexpressible`
+  - 確かめ方（配列の 1 要素）：`kind` と、structural は `checks`・`assertions`（`check`・`target`＝記号・`expected`・`refEntity`）、fixed-test は `observations`（`target`＝記号・`target_kind`・`operation`）、unresolved は `reason_kind`
+  - 文の欄（`meaning_quote`・`rationale`・`review_evidence`・`question`・`text` など）と `provenance` などは読まない
+  - 必須の欄が欠ける・型が違う・確かめ方の配列の長さが 1 以外・`unexpressible.scope` の形が違う（`table-score:gold-shape`）・版が違う（`table-score:gold-version`）・読めない（`table-score:gold-unreadable`）・同じ P が 2 つ（`table-score:gold-duplicate`）正解は**何も数えず断る**
+- 計測の出力先：条件のファイル（`conditions.json`。予定 `child_args` と凍結した組 `frozen`＝`id`・`version`・`adopted[]` の `pattern`・`plan_sha256`）と本ごとのディレクトリ
+- **表の読取元**（**観測の単位は本。1 本に表 1 つ**）：(a) **受理済みの表**（納品物の成果物の名前の表 `bundle/artifacts/name-table.json`）、(b) 段の走りの **checkpoint** の `name_table`（境界 t1-t2。`bundle/stage-checkpoint-t1-t2.json`。形は (a) と同じ）。1 本に両方あれば (a) を採り (b) は件数（`checkpoint_also`）だけ。どちらも無い本は「表なし」（表なしの本の中に、T1 を通ったが納品物の無い本＝修復の上限や後の段で止まり受理済みの表がどこにも残らない本がある。直すのは工場の側）。`source` が null の表（旗 ids on の受理済みの表。手 3a の後も同じ形）も読む
+
+### 7.2 SHA の照合（fail-closed）
+
+- 正解の P ごとの `plan_sha256` と組の ID・版を、条件のファイルの凍結した組の値と、本ごとの記録（納品物の build の記録 `bundle/build-record.json`、または checkpoint）の `plan_sha256` と照らす。表のある本に `plan_sha256` の記録が無いときも合わないと数える
+- **1 つでも合わなければ何も数えず終了コード 3** と固定の符号（`table-score:frozen-set`・`table-score:plan-sha256-conditions`・`table-score:plan-sha256-run`）の 1 行で断り、**出力を書かない**。ほかの断り：`table-score:args`・`table-score:conditions`・`table-score:gold-missing`（予定の P の正解が無い）・`table-score:table-unreadable`・`table-score:compare-record`。断る文に値・パス・ID を入れない
+
+### 7.3 正規化と共有の採点の関数
+
+- 読取元は**正規化**してから共有の採点の関数（`scoreStructure`。export する）に渡す。渡すものは 2 つ：
+  - **採点の構造**（`normalizeTable`）：行＝種類・型の構造（field は型、computation は valueType・scope・form・aggregate の種類、operation は action と hasWhen、screen は view、entity は null）・options の数・groupBy の種類と、**親 entity・refEntity・groupBy の元・集計元を正規化後の行の添字へ結び直した参照**（無いなら null、指す行が無ければ**参照切れ** `broken`。区別する）。所属＝要件 ID → 行の添字の集合。確かめ方＝要件 ID → 種類・checks・value
+  - **読取元のメタデータ**：表の SHA（無ければ null）
+- id は結び直しのあと落とす（name・role・source も）。だから id・名前を全部置き換えた表、source が全部 null の表も同じ結果になる
+- 戻り＝要件 ID ごとの 5 値・3 問（0／1／null）・採った案・印、割り当て、割り当てられない行
+
+### 7.4 割り当て（表の行 → 正解の部品）
+
+- 鍵は凍結した要件 ID。行は **（種類・型の構造・groupBy の種類）＋所属の足跡**（その行を所属させる要件 ID の集合）で部品の記号の候補を持つ。足跡は、型の構造が合う記号のうち、足跡の要件の記号の全体（全案の required・allowed・context と、その親 entity・参照先の閉包）に入る要件の数が最も多いものに絞る（足跡で候補を 0 にしない。許す集合の外の所属を過剰として数えるため）
+- 親 entity・参照先・集計元・groupBy の元は、**正規化した参照をたどって割り当てどうしで整合**させる（**参照切れの行は割り当て不能**）。P 全体（本の表 1 つ）で一貫した割り当てを決定的に探す：単射で参照の整合する割り当てのうち、割り当てた行の数が最も多い解を全部集め、全ての解で同じ記号になる行だけを割り当てる。**探索の上限は定数**（節 `SEARCH_LIMIT`・最良の解 `SOLUTION_LIMIT`）で、超えた表は全要件を保留（`search-limit`）
+- **1 部品に 1 行**。2 行が同じ部品にしか当たらないときはどちらも割り当てず「**割り当てられない行**」に数える（別名の合併をしない）。どの部品にも当たらない行も同じ欄に数える。保留の一覧の candidates は案として使わない
+- 表に無い式・名前から意味を補わない。選択肢は数の一致だけ。選択肢の意味・既定値の選択肢・式の義務は照合できないので「**意味の未照合**」の印（`semantics-unverified`）と件数にし、0／1 は構造の 3 問で決める
+
+### 7.5 3 問（同じ 1 案の中で。別案どうしを合併しない）
+
+- (i) **欠け**：required は当該要件の所属で見る（親 entity は閉包）。行は在るが当該要件に所属していない required は欠け。required の選択肢の数が正解の数と違えば欠け。context と、required の部品と表に実在する allowed の部品の参照先・集計元・groupBy の元は、表全体に在ればよく所属は要らない。allowed は上限で、使っていない任意の部品とその参照先の実在は求めない
+- (ii) **過剰**：当該要件の所属の行が、同じ案の allowed（と required）の親 entity の閉包の内。所属の行の親として導かれる entity の所属は過剰にしない。参照先 entity と集計元は allowed に在るときだけ許す
+- (iii) **確かめ方**：種類が同じ案の verification と一致。structural は checks を順と重複を除いて完全一致し、assertions の束縛も照らす（target の行が当該要件の所属に在り、expected が行の型と、ref_entity が行の参照先の割り当てと合う。assertions の無い check は種類だけ）。fixed-test は observations を照らす——target の行が表に在り種類が target_kind と一致し、操作（試験の操作。記号ではない）が行の型に適合する（定数の表 `OBSERVATION_FIT`：validate は項目か entity、action は hasWhen が真の操作、screen は画面、aggregate は種別 aggregate の計算、compute は種別 expression の計算）。default-value・enum-membership・non-requirement は種類の一致。**未照合は表に無い意味だけ**
+- 3 問とも 1 の案が 1 つでもあれば「正答」。無ければ 1 の数が最も多い案（同数なら先頭＝基準）の 3 問を内訳に数える
+
+### 7.6 5 値・了承除外と unexpressible・保留
+
+- 要件の結果は **5 値**のどれか 1 つ：**正答**（`correct`）・**誤り**（`wrong`）・**正直な持ち越し**（`carry-over`）・**了承除外**（`accepted-removal`）・**保留**（`held`）。**二値（正答・誤り）の要件だけ**を率と差に使う。案の間の優先は 正答 → 了承除外 → 持ち越し → 誤り
+- 表の unresolved：同じ案の verification が unresolved なら reason_kind で分ける——`accepted-removal` は**了承除外**（持ち越しでも達成でもない）、`unsupported-observation`・`deployment-scope` は**正直な持ち越し**。案に無くても要件に `verification_limit` があれば持ち越し。どれでもなければ (iii) 0。要件 ID の形（alt）で免除しない
+- `unexpressible`：要件直下で scope が無ければ全案に、scope（設計族）があればその設計族の案にだけ、案の中に書かれていればその案にだけ効く。効く範囲で表が unresolved なら正直な持ち越し、それ以外を主張すれば**過大な主張**（誤りの内訳。印 `overclaim`）。効かない範囲は通常の 3 問
+- 保留：**ID で重複排除した集合**＝判定の状態が needs_human の要件 ∪ 保留の一覧の requirement_id（**静的な保留** `needs-human`。正解だけで決まる）。`related_requirement_ids` に載る要件は保留にせず「関連あり」の印（`related`）と件数。加えて**候補依存**の保留：割り当て不能の行を所属に持つ要件（`unassignable-row`）、全案が禁止の部品（案ごと）に割り当てた行を所属に持つ要件（禁止に当たる案は選ばない）と、3 問とも 1 の案が無く最良の案が同数で、その案どうしの設計族が違うか方針（`entity_field_policy`）のある案を含んで案が選べない要件（`alternative-unselectable`）、探索の上限（`search-limit`）
+
+### 7.7 集計・分母と静的な保留・P の区間
+
+- 主＝要件単位の正答率。内訳＝欠けの率・過剰の率・確かめ方の正答率（二値の要件の中で）。**読取元ごとに出し、混ぜない**（`by_source.accepted`・`by_source.checkpoint`。その読取元を採らなかった本は未観測に数える）
+- **分母を 2 つ並べる**：**分母 (a)**＝表のある本の二値の要件数。**分母 (b)**＝予定の本 ×（その P の要件数 − **静的な保留**の数）。(b) は観測に依らず、未観測（表なしの本）と候補依存の非二値は分母に残し分子に入れない（正答の下限）。要件数は要件の並びと保留の一覧の ID の和集合で数える
+- 未観測・候補依存の非二値・関連あり・意味の未照合・過大な主張・割り当てられない行は件数で別に出す（`counts`）。分母 0 は 0 と出し、率と区間は null に理由の符号 `denominator-zero`
+- 区間：**P を単位にする**。P ごとに二値の要件の 0／1 を平均し、既存の P のまとまりの関数（`score-agent.mjs` の `clusterStats`。import して使う）で **bootstrap** の区間と参考の t 区間を出す（m＝二値の要件のある P の数。2 未満なら null と理由）。**単独群では符号反転の p を出さない**。Wilson の 95% は「**参考（独立を仮定）**」で、P の区間の代用にしない
+
+### 7.8 比較（`--compare`）
+
+- 計測の出力先に比較の記録の出力先を渡す。`comparison.json` の `pairs.groups` の 0 番目を比較元（baseline）、1 番目を候補（candidate）とし、群のディレクトリをそれぞれ §7.2 と同じく照合して採点する
+- 同じ P・同じ回の本を対にして、要件ごとの差＝**after − before**（候補 − 比較元。−1・0・＋1）を**両側とも二値の要件だけ**で取り、本ごとに平均し P ごとに平均する。件数・n・平均・区間は既存の `pairStats`、P のまとまりの符号反転の p・bootstrap の区間は既存の `clusterStats` を import して使う（写さない）
+- 片側に表の無い対（`table-absent`）・片側でも非二値の要件（`non-binary`）は差 null で n から除き、理由ごとの件数に出す。読取元ごとに対を組む
+
+### 7.9 出力・匿名・指紋
+
+- 出力は JSON（schema `musunest-eval/table-score/v1`。比較は `musunest-eval/table-score-compare/v1`）の `table-score.json`（比較は `table-score-compare.json`）と、標準出力の要約（読取元ごとに正答率・内訳・分母・5 値・割り当てられない行・表なし・P の区間。比較は差の 1 行）。要件 ID と記号は行ごとの出力（`scoring.rows`）にだけ載せる。同じ入力からは同じ出力
+- `--anonymous` は `*.anonymous.json`（schema `musunest-eval/table-score-anonymous/v1`）だけを書き、件数・率・区間・m だけを出す（P の番号・本の ID・要件 ID・記号・パス・SHA を出さない）
+- **指紋**（道具のファイルの SHA-256。`fingerprint.tool_sha256`）は通常の出力にだけ、採点の欄（`scoring`）と別の欄で載せる
+
+### 7.10 範囲の外・限界
+
+- 正解の作成・版上げ・置き場（所有者）。Jev の較正。工場の表の形・段の変更。候補の凍結と計測（窓口）
+- 正解の欄の名前と型は、窓口が現物から欄の名前と型だけを抜いた一覧に合わせた（この道具の作り手は現物を読んでいない）。現物の形が変われば `table-score:gold-shape` で断る（数えない）。そのときは欄の名前を合わせる Issue を立てる
+- unresolved の reason_kind のうち `table-vocabulary-gap`・`empty-reference-list` は本文の規則に無いので、持ち越しにも了承除外にも数えない（`verification_limit` が無ければ (iii) 0）
+
+### 7.11 断った候補の下書きの採点（読取元 (c)。#607）
+
+T1' が断った候補の下書き（表になる前の応答）を、受理済みの表と同じ 3 問で採点する。断られた表がどれだけ正しかったかを見る。**計測の道具であって工場の門ではない**（費用 0）。
+
+- 読む場所：本ごとの診断の記録 `bundle/diagnostics/rejected-name-table.json` の `candidates[]`。候補ごとの応答 `response`（下書き。`rows` と、要件ごとの `roles`・`verification`・`nature` を一覧の順で持つ）と、候補に添えた点検の一覧 `inspection_list`
+- 下書きの行の type は欄を**平ら**に持つ写像（`fieldType`・`valueType`・`scope`・`form`・`aggregate`・`action`・`hasWhen`・`view`）なので、行の種類に合う欄だけを 1 本目の表の型に写してから、1 本目と同じ正規化（`normalizeTable`。親 entity・refEntity・groupBy の元・集計元の ID を行の**添字**へ結び直す。指す行が無ければ**参照切れ**で null と区別）と共有の採点の関数（`scoreStructure`）に渡す。関数を共有し、写さない
+- 要件 ID は**点検の一覧の順**で付ける。応答の要件の写し・行の**出典の写し**と引用は読まない（全部置き換えても同じ結果）。読取元のメタデータの**表の SHA は null**（C3 を結ばない）
+- **観測の単位は本。本ごとに最後の候補**（round・attempt・call が最大。記録の並びではなくこの順で決める。同じなら記録の後のもの）**1 つだけ**を採点する。**候補の数**は本ごとの件数（`draft_rows[].candidate_count`）と合計で出す。別の候補の行・所属を**合併しない**（先の候補にだけ在る部品は、後の採点では欠け）
+- **読めない候補**（`unreadable`）：一覧の無い候補（`no-list`）・応答が表の形でない候補＝**形の失敗**（`shape`。形の検査で断られた候補を含む）・一覧と要件の**数が合わない**候補（`count-mismatch`）・記録のファイルが読めないか形が違う本（`file`）。最後の候補が読めなければ採点せず、**古い候補に黙って戻らない**
+- **下書きだけの本**（断った候補の記録があり表の無い本）も、build の記録 `bundle/build-record.json` の `plan_sha256` を 1 本目と同じく照らす。記録が無い・合わなければ 1 本目と同じ符号 `table-score:plan-sha256-run` で**何も数えず終了コード 3** で断り、出力を書かない（fail-closed）
+- 分母は (c) 専用で、1 本目の (a)・(b) と混ぜない：**分母 (a')**＝下書きを採点した本の二値の要件数、**分母 (b')**＝予定の本 ×（その P の要件数 − **静的な保留**の数）。5 値・保留の集合・了承除外・unexpressible・意味の未照合・**P を単位**にした区間・分母 0 の契約（分母 0・率 null・理由の符号）は 1 本目の集計の関数をそのまま使う
+- 出力：`scoring.draft`（集計。`draft` の欄に候補の件数・採点した本・読めない候補の理由ごとの件数）と `scoring.draft_rows`（本ごと）。標準出力に `[draft]` の行
+- `--compare` の対に (c) は入れない（群ごとの集計だけ。`scoring.draft.baseline`・`scoring.draft.candidate`）。受理済みの表と下書きの両方がある本は、それぞれの読取元に **1 回ずつ**数える（混ざらない）
+- 範囲の外：v1.2 の旗 ids on の断った候補（語彙・写像の診断。形が違う）。読めば形の失敗に数える
+
+### 7.12 C3 の正誤表（見逃し・誤拒否。#607）
+
+C3（T1''）の判定を同じ正解と照らし、誤りの要件の受理（**見逃し**）と正しい要件の拒否（**誤拒否**）を数える。検査をすり抜けた誤りの直接の計測で、工場の門ではない。
+
+- 本ごとに、採点した表（1 本目の読取元 (a)・(b)）と**表の SHA** が一致する点検の記録の回を結ぶ：受理済みの表は成果物の `bundle/artifacts/semantic-check.json`（semantic-check の記録。回の並び `rounds[]`。合う回が 2 つ以上なら最後の回）、checkpoint は同じファイルの `semantic_check`。記録の無い本（`absent`）・読めないか形が違う本（`unreadable`）・SHA の合う回の無い本（`no-matching-round`）は「**点検の記録なし**」に数え、正誤表に入れない。**断った候補**は点検の前に落ちているので対象にしない
+- **二値（正答・誤り）の要件だけ**で、正解の判定（正答／誤り）× C3 の判定（accept／reject）の 2×2（`cells`）を数える。持ち越し・了承除外・保留は正誤表に入れず件数（`non_binary`）だけ。点検の対象（`targets`）に無い要件・判定の無い要件（同じ ID の判定が 2 つ以上ある要件を含む）は「**点検の対象外**」（`out_of_target`）
+- **見逃しの率**＝誤りの要件のうち受理された数 ÷ 誤りの要件（点検あり）。**誤拒否の率**＝正しい要件のうち拒否された数 ÷ 正しい要件（点検あり）。分母 0 は率 null と符号 `denominator-zero`。Wilson は「**参考（独立を仮定）**」。**P ごと**の 2×2（`by_pattern`）と P の数（`patterns`）を並べる
+- 読取元の種類ごとに出す（`scoring.c3.accepted`・`scoring.c3.checkpoint`。本ごとは `scoring.c3_rows`）。`--compare` では群ごとに同じ欄（`baseline`・`candidate`。対の差は取らない）。標準出力に `[c3:<読取元>]` の行
+- 点検の記録の**引用**（`quote`）と**拒否の理由**の文は読まず、出力に写さない。**拒否の種類**（`kind`）は既知の値（`unnecessary-ownership`・`missing-target`・`weak-verification`）の件数だけで、ほかの値は `unknown` に数える（値を写さない）
+- `--anonymous` に足す欄（`draft`・`c3`）も件数・率・P の数だけ（本の ID・要件 ID・P の番号を出さない。既存の匿名の欄は変えない）。1 本目の採点の欄の名前・意味・値は変えず、**指紋**（道具のファイルの SHA-256）だけがコードの変更で変わる
