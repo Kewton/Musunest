@@ -1062,6 +1062,44 @@ describe("(5'') 旗 v12.ids の C2 の束（手 3b・Issue #594）：束ごと�
     );
   });
 
+  it("C3 が束 1 と束 3 の要件を拒否し、束 1 の 2 回目だけが束の C2' に落ちると、束 3 の再点検が受理でも束 1 の拒否の要件は持ち越しに残り full にならない（PR #622 の R1）", async () => {
+    const reject = materials.judgments({
+      R1: ["unnecessary-ownership", materials.textOf("R1")],
+      [BUNDLE3_FIRST]: ["unnecessary-ownership", materials.textOf(BUNDLE3_FIRST)],
+    });
+    const remaining = materials.ids.filter((id) => id !== "R1");
+    const t2 = materials.testSpecResponse();
+    const run = await observe(
+      materials,
+      [
+        ...vocabulary(),
+        ...bundles.map(structured),
+        structured(reject),
+        // 束 1 の 2 回目は R1 を欠いて束の C2' に落ちる。束 3 の 2 回目は元の正常な応答
+        structured({ requirements: entriesOf(0).slice(1) }),
+        structured(bundles[2]),
+        // 2 回目の C3 と後続段は全件受理
+        structured(materials.judgments()),
+        structured({
+          classifications: (t2.classifications as readonly { requirementId: string }[]).filter((entry) => entry.requirementId !== "R1"),
+          tests: (t2.tests as readonly { target: { requirementId: string } }[]).filter((test) => test.target.requirementId !== "R1"),
+        }),
+        structured({ declaration: materials.declaration() }),
+        structured({ judgments: (materials.judgments().judgments as readonly { requirementId: string }[]).filter((entry) => remaining.includes(entry.requirementId)) }),
+      ],
+      { flags: ALL_ON },
+    );
+    expect(mappingRecordsOf(run).map((record) => record.status)).toEqual(["ok", "ok", "ok", "failed", "ok"]);
+    expect(run.logical["semantic-check"]).toBe(2);
+    // 束 1 の R1 は残る要件に戻らない（戻れば T2 の応答が R1 を欠くので止まる）。合否は partial（full を出さない）
+    expect(run.result.outcome.verdict).toBe("partial");
+    expect(run.result.stopped).toBeNull();
+    const carry = run.result.bundle?.artifacts.find((artifact) => artifact.path === "artifacts/carry-over.json");
+    expect(JSON.parse(carry?.text ?? "{}")).toEqual(
+      expect.objectContaining({ entries: [{ requirementId: "R1", reasons: [{ origin: "semantic-check", reason: "unnecessary-ownership" }] }] }),
+    );
+  });
+
   it("C3 の拒否後の束 3 の 2 回目が束の C2' を通っても、組み直した表が表全体の C2' に落ちれば 1 回目の表のまま（再点検なし）で拒否の要件を持ち越す", async () => {
     const reject = materials.judgments({ [BUNDLE3_FIRST]: ["unnecessary-ownership", materials.textOf(BUNDLE3_FIRST)] });
     const remaining = materials.ids.filter((id) => id !== BUNDLE3_FIRST);

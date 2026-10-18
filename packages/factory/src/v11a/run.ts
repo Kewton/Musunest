@@ -1103,6 +1103,8 @@ async function runV11a(
         // 2 回目の束が束の C2' に落ちれば、その束は前回の写像のまま（形の再試行は無い。08 §4.1）
         const redone = [...mapped];
         let changed = false;
+        // 2 回目が落ちた束の初回の拒否（その束は前回の写像のまま。再点検の結果で上書きせず、拒否の要件を持ち越す）
+        const kept = new Map<string, SemanticRejection>();
         for (const [index, bundle] of bundles.entries()) {
           const ids = new Set(bundle.requirements.map((requirement) => requirement.id));
           const rejections = firstChecked.rejections.filter((rejection) => ids.has(rejection.requirementId));
@@ -1111,7 +1113,10 @@ async function runV11a(
           const marks = firstChecked.marks.filter((entry) => ids.has(entry.requirementId));
           const { outcome, attribution } = await runBundle(bundle, { previous, rejections, marks });
           if (!outcome.ok) {
-            if (outcome.failure.kind === "unmet") continue;
+            if (outcome.failure.kind === "unmet") {
+              for (const rejection of rejections) kept.set(rejection.requirementId, rejection);
+              continue;
+            }
             keepLastRejection();
             throw new RunStop(attribution as FailureAttribution);
           }
@@ -1122,7 +1127,9 @@ async function runV11a(
         const second = changed ? await assemble(redone) : undefined;
         if (second?.ok === true) {
           const { semantic, advice } = await checkTableRound(2, second);
-          adopted = { table: second.table, tableSha256: second.tableSha256, semantic, advice };
+          // 落ちた束の要件は、再点検が受理でも初回の拒否のまま（前回の写像を直していないので拒否は解けていない）
+          const judgments = semantic.judgments.map((judgment) => kept.get(judgment.requirementId) ?? judgment);
+          adopted = { table: second.table, tableSha256: second.tableSha256, semantic: { ...semantic, judgments }, advice };
         }
       }
     } else {
