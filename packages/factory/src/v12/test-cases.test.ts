@@ -20,13 +20,15 @@ import {
   TEST_CASE_ID_PREFIX,
   TEST_CASE_SHAPE_MESSAGES,
   TEST_CASE_BUNDLE_MESSAGES,
-  attributeProblemsToBundles,
+  attributeProblemsToRequirements,
   bundleRequirementIds,
+  bundleRetryPlansOf,
   caseOperationOf,
   checkBundleCompleteness,
   mergeBundleCases,
   checkTestCasesOutput,
   expandTestCases,
+  retainedBundleOutput,
   testCasesSchemaOf,
   toCasePositions,
   type TestCase,
@@ -455,29 +457,148 @@ describe("T2 の束（手 3f・Issue #626。束の中で閉じる条件だけ）
     expect(perRequirement(2)).toEqual(one);
     expect(perRequirement(3)).toEqual(one);
   });
+});
 
-  it("帰属：要件・場合・分類の位置はその束の中の添字へ写し、帰属できない位置は推測せずに分ける", () => {
-    const bundles = bundleRequirementIds(ids(7), 5);
-    const merged = mergeBundleCases([outputOf(bundles[0] ?? [], ["R1", "R2"]), outputOf(bundles[1] ?? [], ["R6", "R7"])]);
-    const attributed = attributeProblemsToBundles(
-      [
-        { field: "requirements[6]", message: "a" },
-        { field: "cases[3].expected", message: "b" },
-        { field: "classifications[1].requirementId", message: "c" },
-        { field: "tests[9].id", message: "d" },
-        { field: "", message: "e" },
-        { field: "cases[99]", message: "f" },
+describe("T2 の中身のやり直しの単位（手 3g・Issue #651。要件へ帰属させ、問題の無い要件を保持する）", () => {
+  const ids = (count: number): readonly string[] => Array.from({ length: count }, (_, index) => `R${String(index + 1)}`);
+  /** 要件 ID と目印（期待の値）で見分けられる場合 */
+  const marked = (requirementId: string, mark: string): TestCase => caseOf({ requirementId, expected: { kind: "ok", value: JSON.stringify(mark) } }) as unknown as TestCase;
+  const outputOf = (classified: readonly string[], cased: readonly (readonly [string, string])[]): TestCasesOutput => ({
+    classifications: classified.map((requirementId) => ({ requirementId, nature: "ruled" })),
+    cases: cased.map(([requirementId, mark]) => marked(requirementId, mark)),
+  });
+  const marksOf = (output: TestCasesOutput) => output.cases.map((entry) => `${entry.requirementId}:${String(entry.expected["value"])}`);
+
+  it("合併の並び：要件の一覧の順に要件ごと、要件の中は応答の順（束の応答の順に依らない。一覧に無い要件 ID は末尾に束の順）", () => {
+    const order = ids(7);
+    const bundles = bundleRequirementIds(order, 5);
+    const first = outputOf(["R3", "R1", "R2", "R5", "R4"], [["R3", "a"], ["R1", "b"], ["R3", "c"], ["R9", "x"], ["R2", "d"]]);
+    const second = outputOf(["R7", "R6"], [["R7", "e"], ["R6", "f"], ["R7", "g"]]);
+    const merged = mergeBundleCases([first, second], order);
+    expect(marksOf(merged.output)).toEqual(["R1:\"b\"", "R2:\"d\"", "R3:\"a\"", "R3:\"c\"", "R6:\"f\"", "R7:\"e\"", "R7:\"g\"", "R9:\"x\""]);
+    expect((merged.output.classifications as readonly { readonly requirementId: string }[]).map((entry) => entry.requirementId)).toEqual(order);
+    // 出どころ（束と束の中の添字）は並べ替えに付いて動く
+    expect(merged.caseOrigin).toEqual([[0, 1], [0, 4], [0, 0], [0, 2], [1, 1], [1, 0], [1, 2], [0, 3]]);
+    // 同じ要件の場合を、どの束がどの順で返しても同じ並び（どの要件を書き直しても規則が変わらない）
+    expect(marksOf(mergeBundleCases([second, first], order).output)).toEqual(marksOf(merged.output));
+    expect(bundles).toHaveLength(2);
+    // 並びを渡さなければ今まで（束の順・束の中の順）
+    expect(marksOf(mergeBundleCases([first, second]).output)).toEqual([...marksOf(first), ...marksOf(second)]);
+  });
+
+  it("帰属（純粋）：要件・場合・分類の位置はその要件 ID に写り、同じ要件の問題がまとまる。コードの試験・空・添字の外の位置は帰属できない。同じ入力から同じ結果", () => {
+    const order = ids(7);
+    const merged = mergeBundleCases([outputOf(ids(5), [["R1", "a"], ["R2", "b"]]), outputOf(["R6", "R7"], [["R6", "c"], ["R7", "d"]])], order);
+    const problems = [
+      { field: "requirements[6]", message: "a" },
+      { field: "cases[2].expected", message: "b" },
+      { field: "classifications[1].requirementId", message: "c" },
+      { field: "tests[9].id", message: "d" },
+      { field: "", message: "e" },
+      { field: "cases[99]", message: "f" },
+      { field: "requirements[1].text", message: "g" },
+      { field: "cases[0]", message: "h" },
+      { field: "requirements[0]", message: "i" },
+    ];
+    const attributed = attributeProblemsToRequirements(problems, merged.output, order);
+    expect([...attributed.byRequirement.keys()]).toEqual(["R1", "R2", "R6", "R7"]);
+    expect(Object.fromEntries(attributed.byRequirement)).toEqual({
+      R1: [
+        { field: "cases[0]", message: "h" },
+        { field: "requirements[0]", message: "i" },
       ],
-      merged,
-      bundles,
-    );
-    expect(Object.fromEntries(attributed.byBundle)).toEqual({
-      0: [{ field: "classifications[1].requirementId", message: "c" }],
-      1: [
-        { field: "requirements[1]", message: "a" },
-        { field: "cases[1].expected", message: "b" },
-      ],
+      R2: [{ field: "classifications[1].requirementId", message: "c" }],
+      R6: [{ field: "cases[2].expected", message: "b" }],
+      R7: [{ field: "requirements[6]", message: "a" }],
     });
-    expect(attributed.unattributed.map((problem) => problem.message)).toEqual(["d", "e", "f"]);
+    expect(attributed.unattributed.map((problem) => problem.message)).toEqual(["d", "e", "f", "g"]);
+    expect(attributeProblemsToRequirements(problems, merged.output, order)).toEqual(attributed);
+  });
+
+  it("束の単位：帰属した要件を含む束だけ。束の中は書き直す要件と保持した要件に分け、前回の場合と問題の位置を書き直す要件の並びへ写す", () => {
+    const order = ids(10);
+    const bundles = bundleRequirementIds(order, 5);
+    const merged = mergeBundleCases(
+      [
+        outputOf(ids(5), [["R1", "a"], ["R2", "b"], ["R2", "c"], ["R3", "d"]]),
+        outputOf(order.slice(5), [["R6", "e"], ["R7", "f"], ["R8", "g"]]),
+      ],
+      order,
+    );
+    // R2 の 2 本目の場合（合併の 2）・R3 の分類（合併の 2）・R3 の要件の位置。束 2 は問題が無い
+    const attributed = attributeProblemsToRequirements(
+      [
+        { field: "cases[2].expected", message: "x" },
+        { field: "classifications[2].nature", message: "y" },
+        { field: "requirements[2]", message: "z" },
+      ],
+      merged.output,
+      order,
+    );
+    const plans = bundleRetryPlansOf(attributed.byRequirement, merged, bundles);
+    expect([...plans.keys()]).toEqual([0]);
+    const plan = plans.get(0);
+    expect(plan?.rewrite).toEqual(["R2", "R3"]);
+    expect(plan?.retained).toEqual(["R1", "R4", "R5"]);
+    expect(plan?.discard).toEqual(["R2", "R3"]);
+    expect(plan?.cases.map((entry) => `${entry.requirementId}:${String(entry.expected["value"])}`)).toEqual(["R2:\"b\"", "R2:\"c\"", "R3:\"d\""]);
+    expect(plan?.problems).toEqual([
+      { field: "cases[1].expected", message: "x" },
+      { field: "classifications[1].nature", message: "y" },
+      { field: "requirements[1]", message: "z" },
+    ]);
+    // 2 つの束にまたがれば両方の束
+    const both = attributeProblemsToRequirements([{ field: "requirements[0]", message: "p" }, { field: "requirements[9]", message: "q" }], merged.output, order);
+    const twoPlans = bundleRetryPlansOf(both.byRequirement, merged, bundles);
+    expect([...twoPlans.entries()].map(([bundle, entry]) => [bundle, entry.rewrite, entry.retained.length])).toEqual([
+      [0, ["R1"], 4],
+      [1, ["R10"], 4],
+    ]);
+  });
+
+  it("一覧に無い要件 ID（コードの試験だけで確かめる要件）の場合の問題は、それを書いた束へ渡し、その束の要求の一覧には足さない", () => {
+    const order = ["R1", "R2", "R6", "R7"];
+    const bundles = bundleRequirementIds(order, 2);
+    const merged = mergeBundleCases([outputOf(["R1", "R2"], [["R1", "a"], ["R9", "x"]]), outputOf(["R6", "R7"], [["R6", "b"], ["R9", "y"]])], order);
+    expect(marksOf(merged.output)).toEqual(["R1:\"a\"", "R6:\"b\"", "R9:\"x\"", "R9:\"y\""]);
+    const attributed = attributeProblemsToRequirements([{ field: "cases[3].observes", message: "w" }], merged.output, order);
+    const plans = bundleRetryPlansOf(attributed.byRequirement, merged, bundles);
+    expect([...plans.keys()]).toEqual([1]);
+    expect(plans.get(1)).toEqual({
+      rewrite: [],
+      retained: ["R6", "R7"],
+      discard: ["R9"],
+      cases: [marked("R9", "y")],
+      problems: [{ field: "cases[0].observes", message: "w" }],
+    });
+  });
+
+  it("束の出力：保持した要件の初回の分類と場合は値・順を変えず、捨てる要件の分類と場合だけを新しい応答に置き換える", () => {
+    const previous = outputOf(["R1", "R2", "R3"], [["R1", "a"], ["R2", "b"], ["R3", "c"], ["R1", "d"]]);
+    const answer = outputOf(["R2"], [["R2", "e"], ["R2", "f"]]);
+    const out = retainedBundleOutput(previous, ["R2"], answer);
+    expect(marksOf(out)).toEqual(["R1:\"a\"", "R3:\"c\"", "R1:\"d\"", "R2:\"e\"", "R2:\"f\""]);
+    expect(out.cases[0]).toBe(previous.cases[0]);
+    expect((out.classifications as readonly { readonly requirementId: string }[]).map((entry) => entry.requirementId)).toEqual(["R1", "R3", "R2"]);
+  });
+
+  it("束の完全性（やり直し）：保持した要件の分類・場合は、別の束の要件とは別の固定文で落とす。分類は書き直す要件にちょうど 1 件", () => {
+    const all = ids(10);
+    const rewrite = ["R7"];
+    const retained = ["R6", "R8", "R9", "R10"];
+    expect(checkBundleCompleteness(outputOf(["R7"], [["R7", "a"]]), rewrite, all, all, retained)).toEqual([]);
+    expect(checkBundleCompleteness(outputOf(["R7", "R8"], [["R7", "a"], ["R9", "b"], ["R1", "c"]]), rewrite, all, all, retained)).toEqual([
+      { field: "classifications[1].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.retained },
+      { field: "cases[1].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.caseRetained },
+      { field: "cases[2].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.caseOutside },
+    ]);
+    expect(checkBundleCompleteness(outputOf([], []), rewrite, all, all, retained)).toEqual([
+      { field: "requirements[0]", message: TEST_CASE_BUNDLE_MESSAGES.missing },
+    ]);
+    expect(TEST_CASE_BUNDLE_MESSAGES.retained).not.toBe(TEST_CASE_BUNDLE_MESSAGES.outside);
+    expect(TEST_CASE_BUNDLE_MESSAGES.caseRetained).not.toBe(TEST_CASE_BUNDLE_MESSAGES.caseOutside);
+    // 二点測定：保持を渡さなければ、同じ応答は別の束の要件として落ちる（今まで）
+    expect(checkBundleCompleteness(outputOf(["R7", "R8"], []), rewrite, all, all).map((problem) => problem.message)).toEqual([TEST_CASE_BUNDLE_MESSAGES.outside]);
+    expectNoAcceptanceMaterial([JSON.stringify(TEST_CASE_BUNDLE_MESSAGES)]);
   });
 });

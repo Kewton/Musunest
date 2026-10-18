@@ -39,7 +39,15 @@ import { DEFAULT_BUDGET_USD, DEFAULT_RATES } from "../cli.js";
 import { DIAGNOSTICS_REJECTED_TEST_SPEC_FILE } from "../bundle.js";
 import { USAGE, RATES } from "../__tests__/run.js";
 import { ARBITRATION_SCHEMA_NAME } from "../stages/arbitrate.js";
-import { FIXTURE_DOCUMENTS, bundledT2Client, negative, recordedStructured, withCodeIds } from "./__tests__/fixtures.js";
+import {
+  FIXTURE_DOCUMENTS,
+  bundledT2Client,
+  negative,
+  recordedStructured,
+  requestListedIds,
+  requestRetainedIds,
+  withCodeIds,
+} from "./__tests__/fixtures.js";
 import { expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
 import { buildSized, CODE_WRITTEN_TEST_COUNT, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
 import { isGeneratedTestId } from "../v12/generated-tests.js";
@@ -60,7 +68,7 @@ import {
 import { DECL_CHECK_SCHEMA_NAME } from "./stages/decl-check.js";
 import { NAME_TABLE_SCHEMA_NAME } from "./stages/name-table.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
-import { TEST_SPEC_SCHEMA_NAME } from "./stages/test-spec.js";
+import { TEST_SPEC_RETRY_DATA_NAMES, TEST_SPEC_SCHEMA_NAME } from "./stages/test-spec.js";
 import { WRITE_V11A_SCHEMA_NAME } from "./stages/write.js";
 
 // ── 偽物の口と観測 ─────────────────────────────────────────────────
@@ -1654,6 +1662,20 @@ describe("(10) 旗 v12.ids の T2 の束（手 3f・Issue #626）：束ごとの
         expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
         expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
         expect(run.logical["test-spec"]).toBe(3 * k);
+        // 中身のやり直しの要求の一覧は、書き直す要件（問題の帰属した束の先頭の要件 1 件）だけで、束の残りの要件は保持した要件の ID の
+        // 塊にある（一覧は 1〜5 件。一覧と保持の合計は束の要件の数。Issue #651）
+        const t2 = t2RequestsOf(run.requests);
+        const retried = t2.filter((request) => request.input.includes(`<data name="${TEST_SPEC_RETRY_DATA_NAMES[1]}">`));
+        expect(new Set(retried.map((request) => request.input)).size).toBe(k);
+        const firstOf = (head: string) => t2.find((request) => requestListedIds(request)[0] === head);
+        for (const request of retried) {
+          const listed = requestListedIds(request);
+          expect(listed).toHaveLength(1);
+          expect(heads.has(listed[0] ?? "")).toBe(true);
+          const bundle = requestListedIds(firstOf(listed[0] ?? "") ?? request);
+          expect(bundle.length).toBeLessThanOrEqual(V12_T2_BUNDLE.size);
+          expect(requestRetainedIds(request)).toEqual(bundle.filter((id) => !listed.includes(id)));
+        }
         const records = t2RecordsOf(run);
         expect(records.map((record) => [record.retries.shape, record.retries.content])).toEqual(Array.from({ length: k }, () => [1, 1]));
         for (const record of records) expect(record.attempts.started - record.retries.communication).toBeLessThanOrEqual(3);
@@ -1753,7 +1775,7 @@ describe("(10) 旗 v12.ids の T2 の束（手 3f・Issue #626）：束ごとの
     expect(t2RecordsOf(serial).map(({ duration_ms: _d, ...rest }) => rest)).toEqual(t2RecordsOf(concurrent).map(({ duration_ms: _d, ...rest }) => rest));
   });
 
-  it("診断：束の形で断った候補に束の添字（0 から）と束の要件の数を添える（要件 ID の値は書かない）", async () => {
+  it("診断：束の形で断った候補に束の添字（0 から）と束の要件の数、書き直した要件の数と保持した要件の数を添える（要件 ID の値は書かない）", async () => {
     const materials = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, ALL_ON);
     const bad = negative({ classifications: "x", cases: "x" }, "classifications・cases が並びでない応答。束の形の落ちの診断を観測する負例");
     const run = await observe(materials, [...materials.tableResponses().map(structured), structured(materials.judgments()), structured(bad), structured(bad)], { flags: ALL_ON });
@@ -1768,9 +1790,11 @@ describe("(10) 旗 v12.ids の T2 の束（手 3f・Issue #626）：束ごとの
     const requested = ((materials.t2Response().classifications ?? []) as readonly unknown[]).length;
     const sizes = Array.from({ length: t2Bundles(requested) }, (_, index) => Math.min(V12_T2_BUNDLE.size, requested - index * V12_T2_BUNDLE.size));
     for (const row of t2) {
-      const bundle = row.bundle as { readonly index: number; readonly requirements: number };
-      expect(Object.keys(bundle).sort()).toEqual(["index", "requirements"]);
+      const bundle = row.bundle as { readonly index: number; readonly requirements: number; readonly rewritten: number; readonly retained: number };
+      expect(Object.keys(bundle).sort()).toEqual(["index", "requirements", "retained", "rewritten"]);
       expect(bundle.requirements).toBe(sizes[bundle.index]);
+      // 初回の要求は束の要件の全部を書かせる（書き直した要件の数＝束の要件の数・保持 0。Issue #651）
+      expect([bundle.rewritten, bundle.retained]).toEqual([bundle.requirements, 0]);
     }
     expect(new Set(t2.map((row) => (row.bundle as { index: number }).index))).toEqual(new Set(sizes.map((_, index) => index)));
     expect(JSON.stringify(t2.map((row) => row.bundle))).not.toMatch(/R\d/);

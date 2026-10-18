@@ -27,7 +27,7 @@ import { STRUCTURAL_TARGET_KINDS, type StructuralAssertionKind } from "../../fix
 import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } from "../../v12/ledger.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
 import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
-import { TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
+import { TEST_SPEC_RETAINED_DATA_NAME, TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
 import { WRITE_V11A_SCHEMA_NAME } from "../stages/write.js";
 
 const requirement = (id: string, text: string): Requirement => ({
@@ -1139,25 +1139,70 @@ export function requestListedIds(request: LlmStructuredRequest): readonly string
   return ((JSON.parse(block) as { readonly requirements?: readonly { readonly id: string }[] }).requirements ?? []).map((requirement) => requirement.id);
 }
 
+/** 要求の「書き直さない要件」の塊の要件 ID（無ければ空。旗 `v12.ids` の T2 の中身のやり直し。Issue #651） */
+export function requestRetainedIds(request: LlmStructuredRequest): readonly string[] {
+  const block = request.input.split(`<data name="${TEST_SPEC_RETAINED_DATA_NAME}">\n`)[1]?.split("\n</data>")[0];
+  return block === undefined ? [] : (JSON.parse(block) as readonly string[]);
+}
+
+/**
+ * 旗 `v12.ids` の T2 の中身のやり直し（Issue #651）で、要求の「書き直さない要件」に従う偽物の口。台本の応答から、その塊の要件 ID
+ * の分類と場合だけを除いて返す（ほかは変えない。塊の無い要求・場合の形でない応答はそのまま）。T2 でない要求は `inner` へそのまま渡す
+ */
+export function retainingT2Client(inner: LlmClient): LlmClient {
+  return {
+    async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+      const response = await inner.callStructured<T>(request);
+      const retained = request.schemaName === TEST_SPEC_SCHEMA_NAME ? new Set(requestRetainedIds(request)) : new Set<string>();
+      const output = response.output as unknown;
+      if (retained.size === 0 || typeof output !== "object" || output === null || !Array.isArray((output as { cases?: unknown }).cases)) {
+        return response;
+      }
+      const keep = (item: unknown): boolean => {
+        const id = typeof item === "object" && item !== null ? (item as { requirementId?: unknown }).requirementId : undefined;
+        return typeof id !== "string" || !retained.has(id);
+      };
+      const raw = output as { readonly classifications?: unknown; readonly cases: readonly unknown[] };
+      return {
+        ...response,
+        output: {
+          ...raw,
+          classifications: Array.isArray(raw.classifications) ? raw.classifications.filter(keep) : raw.classifications,
+          cases: raw.cases.filter(keep),
+        } as T,
+      };
+    },
+    callWithTools: (request: LlmToolRequest) => inner.callWithTools(request),
+  };
+}
+
 /**
  * 旗 `v12.ids` の T2 の束（Issue #626）の偽物の口。記録した T2 の応答（全要件を書いた 1 本）を「回の台本」として持ち、束の要求
  * （「要件の一覧」の要件 ID の組で見分ける）ごとに独立の位置で読み、その束の要件の分類と場合だけに絞って返す（**順序に依らない**）。
  * 記録は束の位置の最大まで順に読む（同時の束が同じ記録を二重に読まない）。どの束の要件でもない分類・場合（持ち越しの要件など）は
  * 捨てる。ただし `home` に挙げた要件 ID の分類・場合は、その要件の前の要件を持つ束（無ければ最初の束）へ残す——`home` は
  * `[要件 ID, 残す束の先頭の要件 ID]` の組。場合の形でない応答（負例・ids off の応答）は絞らずにそのまま返す。T2 でない要求は
- * `inner` へそのまま渡す。
+ * `inner` へそのまま渡す。中身のやり直し（Issue #651）の要求の一覧は束の書き直す要件だけなので、位置は要件 ID の組が交わる前の
+ * 要求と同じ束として数える（束は互いに交わらない）
  */
 export function bundledT2Client(inner: LlmClient, home: readonly (readonly [string, string])[] = []): LlmClient {
   const script: { readonly output: unknown; readonly usage: LlmStructuredResponse<unknown>["usage"] }[] = [];
-  const cursors = new Map<string, number>();
+  const cursors: { readonly head: string; readonly ids: Set<string>; at: number }[] = [];
   let pulling: Promise<void> = Promise.resolve();
   return {
     async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
       if (request.schemaName !== TEST_SPEC_SCHEMA_NAME) return inner.callStructured<T>(request);
       const ids = requestListedIds(request);
-      const key = ids.join("\u0000");
-      const at = cursors.get(key) ?? 0;
-      cursors.set(key, at + 1);
+      const cursor =
+        cursors.find((entry) => (ids.length === 0 ? entry.ids.size === 0 : ids.some((id) => entry.ids.has(id)))) ??
+        (() => {
+          const made = { head: ids[0] ?? "", ids: new Set<string>(), at: 0 };
+          cursors.push(made);
+          return made;
+        })();
+      for (const id of ids) cursor.ids.add(id);
+      const at = cursor.at;
+      cursor.at += 1;
       const ready = pulling.then(async () => {
         while (script.length <= at) {
           const response = await inner.callStructured<unknown>(request);
@@ -1172,7 +1217,7 @@ export function bundledT2Client(inner: LlmClient, home: readonly (readonly [stri
       if (typeof output !== "object" || output === null || !Array.isArray((output as { cases?: unknown }).cases)) {
         return { output: output as T, usage: entry.usage };
       }
-      const homed = new Set(home.filter(([, first]) => ids[0] === first).map(([id]) => id));
+      const homed = new Set(home.filter(([, head]) => cursor.head === head).map(([id]) => id));
       const keep = (item: unknown): boolean => {
         const id = typeof item === "object" && item !== null ? (item as { requirementId?: unknown }).requirementId : undefined;
         return typeof id === "string" && (ids.includes(id) || homed.has(id));
