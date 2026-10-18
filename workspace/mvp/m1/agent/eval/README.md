@@ -922,13 +922,15 @@ node table/score-table.mjs <正解のディレクトリ> <計測の出力先> <�
 ```
 
 - **正解は非公開**で git の外に置く（採点担当が作る。所有者の決定 2026-10-18）。道具は場所を引数で受け取るだけで、**正解の場所に既定値を持たない**。正解の文（引用・意味・質問・理由・除外の文）は出力に写さない
-- 正解のディレクトリ：`*.json` を名前の順に読み、1 ファイル＝1 P。形（版 `table-gold-v1`）：
-  - 必須：`version`・`pattern`（`P<n>`）・`frozen_set`（`id`・`version`）・`plan_sha256`・`components`（**配列。`symbol` で索引**。`kind`・`type`・`parent_entity`・`ref_entity`・`group_by`（`kind`・`field`）・`options_count`）・`requirements`（**配列。`requirement_id` で索引**。`alternatives`＝案の並び。案は `required`・`allowed`・`context`・`verification` 1 件）・`needs_human`（保留の一覧。`requirement_id`・`reason_kind`・`candidates`）・`counts`（件数）
-  - **任意の欄**（無ければ null と同じで、**無いだけで断らない**）：判定の状態 `status`・`unexpressible`・`verification_limit`・`scope`・設計族 `design_family`（案）・禁止の部品 `forbidden_components`・方針 `policy`・案の `unexpressible`・関連 ID `related_requirement_ids`。部品の `parent_entity`・`ref_entity`・`group_by`・`options_count` も任意
-  - 確かめ方：`kind` と、structural は `checks`・`assertions`（`check`・`target`＝記号・`expected`・`ref_entity`）、fixed-test は `observations`（`target`＝記号・`target_kind`・`operation`）、unresolved は `reason_kind`
-  - 必須の欄が欠ける・型が違う（`table-score:gold-shape`）・版が違う（`table-score:gold-version`）・読めない（`table-score:gold-unreadable`）・同じ P が 2 つ（`table-score:gold-duplicate`）正解は**何も数えず断る**
+- 正解のディレクトリ：`*.json` だけを名前の順に読み（同じ場所の `schema.md`・`README.md` などは読まない）、1 ファイル＝1 P。形（版 `table-gold-v1`。欄の名前と型は現物に合わせた。#606 の窓口の確認）：
+  - 必須：`version`・`pattern`（`P<n>`）・`plan_set`（`id`・`version`・`manifest_sha256`）・`plan_sha256`・`counts`（件数。値は整数）・`components`（**配列。`symbol` で索引**。`kind`・`type`）・`requirements`（**配列。`requirement_id` で索引**。P をまたいで同じ ID が出るので P の中で一意として扱う。`variants`＝案の並び。案は `id`・`required`・`allowed`・`context`・`verification`＝**長さ 1 の配列**）・`needs_human`（保留の一覧。`requirement_id`・`reason_kind`・`candidates`）
+  - 部品の任意の欄：親 entity `entity`・参照先 `refEntity`・`groupBy`（`kind`・`field`＝記号）・`options`（配列。**数は配列の長さ**）・`semantics`（あれば意味の未照合の印）・`design_family`
+  - **任意の欄**（無ければ null と同じで、**無いだけで断らない**）：判定の状態 `adjudication_status`・`unexpressible`（`scope` は `"<設計族>-family-only"` の形だけ）・`verification_limit`・`scope`（除外の部分。読まない）・`related_requirement_ids`（保留の一覧にある。要件の側も読む）。案の任意の欄：設計族 `design_family`・禁止の部品 `forbidden_components`・方針 `entity_field_policy`・案の `unexpressible`
+  - 確かめ方（配列の 1 要素）：`kind` と、structural は `checks`・`assertions`（`check`・`target`＝記号・`expected`・`refEntity`）、fixed-test は `observations`（`target`＝記号・`target_kind`・`operation`）、unresolved は `reason_kind`
+  - 文の欄（`meaning_quote`・`rationale`・`review_evidence`・`question`・`text` など）と `provenance` などは読まない
+  - 必須の欄が欠ける・型が違う・確かめ方の配列の長さが 1 以外・`unexpressible.scope` の形が違う（`table-score:gold-shape`）・版が違う（`table-score:gold-version`）・読めない（`table-score:gold-unreadable`）・同じ P が 2 つ（`table-score:gold-duplicate`）正解は**何も数えず断る**
 - 計測の出力先：条件のファイル（`conditions.json`。予定 `child_args` と凍結した組 `frozen`＝`id`・`version`・`adopted[]` の `pattern`・`plan_sha256`）と本ごとのディレクトリ
-- **表の読取元**（**観測の単位は本。1 本に表 1 つ**）：(a) **受理済みの表**（納品物の成果物の名前の表 `bundle/artifacts/name-table.json`）、(b) 段の走りの **checkpoint** の `name_table`（境界 t1-t2。`bundle/stage-checkpoint-t1-t2.json`。形は (a) と同じ）。1 本に両方あれば (a) を採り (b) は件数（`checkpoint_also`）だけ。どちらも無い本は「表なし」。`source` が null の表（旗 ids on の受理済みの表。手 3a の後も同じ形）も読む
+- **表の読取元**（**観測の単位は本。1 本に表 1 つ**）：(a) **受理済みの表**（納品物の成果物の名前の表 `bundle/artifacts/name-table.json`）、(b) 段の走りの **checkpoint** の `name_table`（境界 t1-t2。`bundle/stage-checkpoint-t1-t2.json`。形は (a) と同じ）。1 本に両方あれば (a) を採り (b) は件数（`checkpoint_also`）だけ。どちらも無い本は「表なし」（表なしの本の中に、T1 を通ったが納品物の無い本＝修復の上限や後の段で止まり受理済みの表がどこにも残らない本がある。直すのは工場の側）。`source` が null の表（旗 ids on の受理済みの表。手 3a の後も同じ形）も読む
 
 ### 7.2 SHA の照合（fail-closed）
 
@@ -962,7 +964,7 @@ node table/score-table.mjs <正解のディレクトリ> <計測の出力先> <�
 - 要件の結果は **5 値**のどれか 1 つ：**正答**（`correct`）・**誤り**（`wrong`）・**正直な持ち越し**（`carry-over`）・**了承除外**（`accepted-removal`）・**保留**（`held`）。**二値（正答・誤り）の要件だけ**を率と差に使う。案の間の優先は 正答 → 了承除外 → 持ち越し → 誤り
 - 表の unresolved：同じ案の verification が unresolved なら reason_kind で分ける——`accepted-removal` は**了承除外**（持ち越しでも達成でもない）、`unsupported-observation`・`deployment-scope` は**正直な持ち越し**。案に無くても要件に `verification_limit` があれば持ち越し。どれでもなければ (iii) 0。要件 ID の形（alt）で免除しない
 - `unexpressible`：要件直下で scope が無ければ全案に、scope（設計族）があればその設計族の案にだけ、案の中に書かれていればその案にだけ効く。効く範囲で表が unresolved なら正直な持ち越し、それ以外を主張すれば**過大な主張**（誤りの内訳。印 `overclaim`）。効かない範囲は通常の 3 問
-- 保留：**ID で重複排除した集合**＝判定の状態が needs_human の要件 ∪ 保留の一覧の requirement_id（**静的な保留** `needs-human`。正解だけで決まる）。`related_requirement_ids` に載る要件は保留にせず「関連あり」の印（`related`）と件数。加えて**候補依存**の保留：割り当て不能の行を所属に持つ要件（`unassignable-row`）、禁止の部品に割り当てた行を所属に持つ要件と、3 問とも 1 の案が無く最良の案が同数で、その案どうしの設計族が違うか要件に方針があって案が選べない要件（`alternative-unselectable`）、探索の上限（`search-limit`）
+- 保留：**ID で重複排除した集合**＝判定の状態が needs_human の要件 ∪ 保留の一覧の requirement_id（**静的な保留** `needs-human`。正解だけで決まる）。`related_requirement_ids` に載る要件は保留にせず「関連あり」の印（`related`）と件数。加えて**候補依存**の保留：割り当て不能の行を所属に持つ要件（`unassignable-row`）、全案が禁止の部品（案ごと）に割り当てた行を所属に持つ要件（禁止に当たる案は選ばない）と、3 問とも 1 の案が無く最良の案が同数で、その案どうしの設計族が違うか方針（`entity_field_policy`）のある案を含んで案が選べない要件（`alternative-unselectable`）、探索の上限（`search-limit`）
 
 ### 7.7 集計・分母と静的な保留・P の区間
 
@@ -986,4 +988,5 @@ node table/score-table.mjs <正解のディレクトリ> <計測の出力先> <�
 ### 7.10 範囲の外・限界
 
 - 断った候補の下書きの採点と C3 の正誤表（2 本目）。正解の作成・版上げ・置き場（所有者）。Jev の較正。工場の表の形・段の変更。候補の凍結と計測（窓口）
-- 正解の欄の名前は Issue の本文の語から決めた（現物は非公開で、この道具の作り手は読んでいない）。現物と名前が違えば `table-score:gold-shape` で断る（数えない）。そのときは欄の名前を合わせる Issue を立てる
+- 正解の欄の名前と型は、窓口が現物から欄の名前と型だけを抜いた一覧に合わせた（この道具の作り手は現物を読んでいない）。現物の形が変われば `table-score:gold-shape` で断る（数えない）。そのときは欄の名前を合わせる Issue を立てる
+- unresolved の reason_kind のうち `table-vocabulary-gap`・`empty-reference-list` は本文の規則に無いので、持ち越しにも了承除外にも数えない（`verification_limit` が無ければ (iii) 0）

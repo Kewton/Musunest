@@ -98,46 +98,88 @@ const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 const PATTERN = /^P\d+$/;
 const RUN_ID = /^(P\d+)-r(\d+)$/;
 
-// ── 正解の検証（fail-closed。任意の欄は無ければ null と同じで、無いだけで断らない）
+// ── 正解の検証（fail-closed。任意の欄は無ければ null と同じで、無いだけで断らない）と、採点の内部の形への写し
+// 現物の形（table-gold-v1）：最上位 plan_set・components[]（entity・refEntity・groupBy・options の配列）・requirements[]（variants[]・
+// adjudication_status・unexpressible・verification_limit）・needs_human[]。文の欄（meaning_quote・rationale・question など）は読まない
 const OPTIONAL_STR = (x) => x === undefined || x === null || typeof x === "string";
 const OPTIONAL_STR_LIST = (x) => x === undefined || x === null || isStrList(x);
+const OPTIONAL_OBJ = (x) => x === undefined || x === null || isObj(x);
+const OPTIONAL_LIST = (x) => x === undefined || x === null || Array.isArray(x);
+/** unexpressible.scope の形（"<設計族>-family-only"）。この形以外は断る */
+export const UNEXPRESSIBLE_SCOPE = /^(.+)-family-only$/;
 function checkComponent(c) {
   if (!isObj(c) || !isStr(c.symbol) || !ROW_KINDS.includes(c.kind)) return false;
-  if (!("type" in c) || !OPTIONAL_STR(c.parent_entity) || !OPTIONAL_STR(c.ref_entity)) return false;
-  if (!(c.group_by === undefined || c.group_by === null || (isObj(c.group_by) && isStr(c.group_by.kind) && isStr(c.group_by.field)))) return false;
-  if (!(c.options_count === undefined || c.options_count === null || (Number.isInteger(c.options_count) && c.options_count >= 0))) return false;
-  return true;
+  if (!("type" in c) || !OPTIONAL_STR(c.entity) || !OPTIONAL_STR(c.refEntity)) return false;
+  if (!(c.groupBy === undefined || c.groupBy === null || (isObj(c.groupBy) && isStr(c.groupBy.kind) && isStr(c.groupBy.field)))) return false;
+  if (!(c.options === undefined || c.options === null || (Array.isArray(c.options) && c.options.every((o) => isObj(o) && isStr(o.symbol))))) return false;
+  return OPTIONAL_OBJ(c.semantics) && OPTIONAL_STR(c.design_family);
 }
-function checkVerification(v) {
+function checkVerificationItem(v) {
   if (!isObj(v) || !isStr(v.kind)) return false;
-  if (v.checks !== undefined && v.checks !== null && !isStrList(v.checks)) return false;
-  if (v.assertions !== undefined && v.assertions !== null && !(Array.isArray(v.assertions) && v.assertions.every((a) => isObj(a) && isStr(a.check) && isStr(a.target) && OPTIONAL_STR(a.expected) && OPTIONAL_STR(a.ref_entity)))) return false;
-  if (v.observations !== undefined && v.observations !== null && !(Array.isArray(v.observations) && v.observations.every((o) => isObj(o) && isStr(o.target) && ROW_KINDS.includes(o.target_kind) && isStr(o.operation)))) return false;
+  if (!OPTIONAL_STR_LIST(v.checks)) return false;
+  if (!(v.assertions === undefined || v.assertions === null || (Array.isArray(v.assertions) && v.assertions.every((a) => isObj(a) && isStr(a.check) && isStr(a.target) && OPTIONAL_STR(a.expected) && OPTIONAL_STR(a.refEntity))))) return false;
+  if (!(v.observations === undefined || v.observations === null || (Array.isArray(v.observations) && v.observations.every((o) => isObj(o) && isStr(o.target) && ROW_KINDS.includes(o.target_kind) && isStr(o.operation))))) return false;
   return OPTIONAL_STR(v.reason_kind);
 }
-function checkRequirement(r) {
-  if (!isObj(r) || !isStr(r.requirement_id) || !Array.isArray(r.alternatives) || r.alternatives.length === 0) return false;
-  for (const a of r.alternatives) {
-    if (!isObj(a) || !isStrList(a.required) || !isStrList(a.allowed) || !isStrList(a.context) || !checkVerification(a.verification)) return false;
-    if (!OPTIONAL_STR(a.design_family)) return false;
-  }
-  return OPTIONAL_STR(r.status) && OPTIONAL_STR(r.scope) && OPTIONAL_STR_LIST(r.forbidden_components) && OPTIONAL_STR_LIST(r.related_requirement_ids);
+function checkUnexpressible(u) {
+  if (u === undefined || u === null) return true;
+  if (!isObj(u)) return false;
+  return u.scope === undefined || u.scope === null || (typeof u.scope === "string" && UNEXPRESSIBLE_SCOPE.test(u.scope));
 }
-/** 正解の 1 P を検証する。版が違えば gold-version、必須の欄が欠ける・型が違えば gold-shape */
+function checkVariant(a) {
+  if (!isObj(a) || !isStr(a.id) || !isStrList(a.required) || !isStrList(a.allowed) || !isStrList(a.context)) return false;
+  // 確かめ方は長さ 1 の配列（長さ 1 以外は断る）
+  if (!Array.isArray(a.verification) || a.verification.length !== 1 || !checkVerificationItem(a.verification[0])) return false;
+  return OPTIONAL_STR(a.design_family) && OPTIONAL_STR_LIST(a.forbidden_components) && OPTIONAL_OBJ(a.entity_field_policy) && checkUnexpressible(a.unexpressible);
+}
+function checkRequirement(r) {
+  if (!isObj(r) || !isStr(r.requirement_id) || !Array.isArray(r.variants) || r.variants.length === 0 || !r.variants.every(checkVariant)) return false;
+  return OPTIONAL_STR(r.adjudication_status) && OPTIONAL_OBJ(r.scope) && checkUnexpressible(r.unexpressible) && OPTIONAL_OBJ(r.verification_limit) && OPTIONAL_STR_LIST(r.related_requirement_ids);
+}
+const checkNeedsHuman = (h) => isObj(h) && isStr(h.requirement_id) && OPTIONAL_STR(h.reason_kind) && OPTIONAL_LIST(h.candidates) && OPTIONAL_STR_LIST(h.related_requirement_ids);
+const familyOfScope = (u) => (isObj(u) && typeof u.scope === "string" ? UNEXPRESSIBLE_SCOPE.exec(u.scope)[1] : null);
+const componentOf = (c) => ({
+  symbol: c.symbol, kind: c.kind, type: c.type, parent_entity: opt(c.entity), ref_entity: opt(c.refEntity),
+  group_by: isObj(c.groupBy) ? { kind: c.groupBy.kind, field: c.groupBy.field } : null,
+  options_count: Array.isArray(c.options) ? c.options.length : null, semantics: present(c.semantics),
+});
+const verificationOf = (v) => ({
+  kind: v.kind, checks: v.checks ?? null, reason_kind: opt(v.reason_kind),
+  assertions: (v.assertions ?? []).map((a) => ({ check: a.check, target: a.target, expected: opt(a.expected), ref_entity: opt(a.refEntity) })),
+  observations: (v.observations ?? []).map((o) => ({ target: o.target, target_kind: o.target_kind, operation: o.operation })),
+});
+const variantOf = (a) => ({
+  id: a.id, required: [...a.required], allowed: [...a.allowed], context: [...a.context], verification: verificationOf(a.verification[0]),
+  design_family: opt(a.design_family), forbidden_components: [...(a.forbidden_components ?? [])], policy: present(a.entity_field_policy), unexpressible: present(a.unexpressible),
+});
+/**
+ * 正解の 1 P を検証し、採点の内部の形に写す。版が違えば gold-version、必須の欄が欠ける・型が違えば gold-shape。
+ * 内部の形：components（parent_entity・ref_entity・group_by・options_count・semantics）、requirements（alternatives＝案。
+ * held・unexpressible・unexpressible_family・verification_limit）、needs_human（requirement_id・related_requirement_ids）、plan_set
+ */
 export function validateGold(g) {
   if (!isObj(g)) refuse("table-score:gold-shape");
   if (g.version !== GOLD_VERSION) refuse("table-score:gold-version");
   if (typeof g.pattern !== "string" || !PATTERN.test(g.pattern)) refuse("table-score:gold-shape");
-  if (!isObj(g.frozen_set) || !isStr(g.frozen_set.id) || !Number.isInteger(g.frozen_set.version)) refuse("table-score:gold-shape");
-  if (!isHex64(g.plan_sha256) || !isObj(g.counts)) refuse("table-score:gold-shape");
+  if (!isObj(g.plan_set) || !isStr(g.plan_set.id) || !Number.isInteger(g.plan_set.version) || !isHex64(g.plan_set.manifest_sha256)) refuse("table-score:gold-shape");
+  if (!isHex64(g.plan_sha256) || !isObj(g.counts) || !Object.values(g.counts).every(Number.isInteger)) refuse("table-score:gold-shape");
   if (!Array.isArray(g.components) || !g.components.every(checkComponent)) refuse("table-score:gold-shape");
   if (!Array.isArray(g.requirements) || !g.requirements.every(checkRequirement)) refuse("table-score:gold-shape");
-  if (!Array.isArray(g.needs_human) || !g.needs_human.every((h) => isObj(h) && isStr(h.requirement_id) && OPTIONAL_STR(h.reason_kind) && (h.candidates === undefined || h.candidates === null || Array.isArray(h.candidates)) && OPTIONAL_STR_LIST(h.related_requirement_ids))) refuse("table-score:gold-shape");
+  if (!Array.isArray(g.needs_human) || !g.needs_human.every(checkNeedsHuman)) refuse("table-score:gold-shape");
   const syms = g.components.map((c) => c.symbol), ids = g.requirements.map((r) => r.requirement_id);
   if (new Set(syms).size !== syms.length || new Set(ids).size !== ids.length) refuse("table-score:gold-shape");
-  return g;
+  return {
+    pattern: g.pattern, plan_set: { id: g.plan_set.id, version: g.plan_set.version }, plan_sha256: g.plan_sha256,
+    components: g.components.map(componentOf),
+    requirements: g.requirements.map((r) => ({
+      requirement_id: r.requirement_id, alternatives: r.variants.map(variantOf), held: r.adjudication_status === "needs_human",
+      unexpressible: present(r.unexpressible), unexpressible_family: familyOfScope(r.unexpressible), verification_limit: present(r.verification_limit),
+      related_requirement_ids: [...(r.related_requirement_ids ?? [])],
+    })),
+    needs_human: g.needs_human.map((h) => ({ requirement_id: h.requirement_id, related_requirement_ids: [...(h.related_requirement_ids ?? [])] })),
+  };
 }
-/** 正解のディレクトリを読む（*.json を名前の順に。P → 正解） */
+/** 正解のディレクトリを読む（*.json だけを名前の順に。ほかのファイルは無視。P → 内部の形の正解） */
 export function loadGoldDir(dir) {
   let names;
   try { names = readdirSync(dir).filter((n) => n.endsWith(".json")).sort(); } catch { refuse("table-score:gold-unreadable"); }
@@ -146,22 +188,22 @@ export function loadGoldDir(dir) {
   for (const n of names) {
     let g;
     try { g = readJson(join(dir, n)); } catch { refuse("table-score:gold-unreadable"); }
-    validateGold(g);
-    if (out.has(g.pattern)) refuse("table-score:gold-duplicate");
-    out.set(g.pattern, g);
+    const v = validateGold(g);
+    if (out.has(v.pattern)) refuse("table-score:gold-duplicate");
+    out.set(v.pattern, v);
   }
   return out;
 }
 
-/** 正解の索引：部品（symbol）・要件（requirement_id）・静的な保留（ID で重複排除）・関連あり */
+/** 正解の索引（内部の形）：部品（symbol）・要件（requirement_id。P の中で一意）・静的な保留（ID で重複排除）・関連あり */
 export function indexGold(g) {
   const comp = new Map(g.components.map((c) => [c.symbol, c]));
   const reqs = new Map(g.requirements.map((r) => [r.requirement_id, r]));
   const held = new Set();
-  for (const r of g.requirements) if (r.status === "needs_human") held.add(r.requirement_id);
+  for (const r of g.requirements) if (r.held) held.add(r.requirement_id);
   for (const h of g.needs_human) held.add(h.requirement_id);
   const related = new Set();
-  for (const x of [...g.requirements, ...g.needs_human]) for (const id of x.related_requirement_ids ?? []) related.add(id);
+  for (const x of [...g.requirements, ...g.needs_human]) for (const id of x.related_requirement_ids) related.add(id);
   // 要件の全体＝要件の並び ∪ 保留の一覧の ID（ID で重複排除）
   const allIds = [...new Set([...reqs.keys(), ...g.needs_human.map((h) => h.requirement_id)])];
   return { comp, reqs, held, related, allIds };
@@ -355,7 +397,7 @@ const goldParentClosure = (syms, comp) => {
 };
 const rowTypeName = (row) => (typeof row.type === "string" ? row.type : isObj(row.type) ? (row.type.valueType ?? row.type.action ?? row.type.view ?? null) : null);
 /** unexpressible が効く案か：案の中 → その案だけ、要件直下で scope 無し → 全案、scope（設計族）あり → その設計族の案だけ */
-export const unexpressibleApplies = (req, alt) => present(alt.unexpressible) || (present(req.unexpressible) && (req.scope === undefined || req.scope === null || alt.design_family === req.scope));
+export const unexpressibleApplies = (req, alt) => alt.unexpressible || (req.unexpressible && (req.unexpressible_family === null || alt.design_family === req.unexpressible_family));
 
 /** 1 案の 3 問：{ missing, excess, verification（0／1）, kind（correct・carry-over・accepted-removal・overclaim・wrong）, marks } */
 export function evaluateAlternative(req, alt, ctx) {
@@ -369,6 +411,7 @@ export function evaluateAlternative(req, alt, ctx) {
     const r = rowOf.get(s), c = comp.get(s);
     if (r === undefined || !ownedClosure.has(r)) { missing = 0; continue; }
     if (c && Number.isInteger(c.options_count)) { if (rows[r].options_count !== c.options_count) missing = 0; else marks.add("semantics-unverified"); }
+    if (c && c.semantics) marks.add("semantics-unverified");
   }
   for (const s of alt.context) if (!rowOf.has(s)) missing = 0;
   for (const s of [...alt.required, ...alt.allowed.filter((x) => rowOf.has(x))]) {
@@ -397,7 +440,7 @@ export function evaluateAlternative(req, alt, ctx) {
   if (tv?.kind === "unresolved") {
     const by = gv.kind === "unresolved" ? UNRESOLVED_REASON_KINDS[gv.reason_kind] : undefined;
     if (by !== undefined) return { missing, excess, verification: null, kind: by, marks: [...marks].sort() };
-    if (present(req.verification_limit)) return { missing, excess, verification: null, kind: "carry-over", marks: [...marks].sort() };
+    if (req.verification_limit) return { missing, excess, verification: null, kind: "carry-over", marks: [...marks].sort() };
     return { missing, excess, verification: 0, kind: "wrong", marks: [...marks].sort() };
   }
   let ver = tv !== null && tv.kind === gv.kind ? 1 : 0;
@@ -434,27 +477,29 @@ export function scoreStructure(structure, meta, gold) {
   const unassigned = new Set(asg.unassigned);
   const ctx = { ...structure, rowOf, symOf, comp: ix.comp };
   const requirements = ix.allIds.map((id) => {
-    const base = { requirement_id: id, outcome: "held", hold: null, questions: { missing: null, excess: null, verification: null }, alternative: null, marks: ix.related.has(id) ? ["related"] : [] };
+    const base = { requirement_id: id, outcome: "held", hold: null, questions: { missing: null, excess: null, verification: null }, alternative: null, variant_id: null, marks: ix.related.has(id) ? ["related"] : [] };
     if (ix.held.has(id)) return { ...base, hold: "needs-human" };
     const req = ix.reqs.get(id);
     if (asg.limit) return { ...base, hold: "search-limit" };
     const owned = structure.ownership[id] ?? [];
     if (owned.some((i) => unassigned.has(i))) return { ...base, hold: "unassignable-row" };
-    if ((req.forbidden_components ?? []).some((s) => owned.some((i) => symOf.get(i) === s))) return { ...base, hold: "alternative-unselectable" };
-    const evaluated = req.alternatives.map((alt) => evaluateAlternative(req, alt, ctx));
+    // 禁止の部品（案ごと）：所属の行に禁止の部品を割り当てた案は選ばない。全案がそうなら案が選べない
+    const admissible = req.alternatives.map((alt) => !alt.forbidden_components.some((s) => owned.some((i) => symOf.get(i) === s)));
+    if (!admissible.some(Boolean)) return { ...base, hold: "alternative-unselectable" };
+    const evaluated = req.alternatives.map((alt, i) => (admissible[i] ? evaluateAlternative(req, alt, ctx) : { missing: 0, excess: 0, verification: 0, kind: "inadmissible", marks: [] }));
     const pick = (k) => evaluated.findIndex((j) => j.kind === k);
     const done = (outcome, at) => {
       const j = evaluated[at];
       const marks = [...new Set([...base.marks, ...j.marks])].sort();
-      return { ...base, outcome, questions: { missing: j.missing, excess: j.excess, verification: j.verification }, alternative: at, marks };
+      return { ...base, outcome, questions: { missing: j.missing, excess: j.excess, verification: j.verification }, alternative: at, variant_id: req.alternatives[at].id, marks };
     };
     if (pick("correct") >= 0) return done("correct", pick("correct"));
     if (pick("accepted-removal") >= 0) return done("accepted-removal", pick("accepted-removal"));
     if (pick("carry-over") >= 0) return done("carry-over", pick("carry-over"));
-    const ones = evaluated.map((j) => j.missing + j.excess + (j.verification ?? 0));
+    const ones = evaluated.map((j) => (j.kind === "inadmissible" ? -1 : j.missing + j.excess + (j.verification ?? 0)));
     const best = Math.max(...ones), tied = ones.map((x, i) => (x === best ? i : -1)).filter((i) => i >= 0);
     const families = new Set(tied.map((i) => req.alternatives[i].design_family ?? null));
-    if (tied.length >= 2 && (families.size >= 2 || present(req.policy))) return { ...base, hold: "alternative-unselectable" };
+    if (tied.length >= 2 && (families.size >= 2 || tied.some((i) => req.alternatives[i].policy))) return { ...base, hold: "alternative-unselectable" };
     return done("wrong", tied[0]);
   });
   return { table_sha256: meta?.table_sha256 ?? null, requirements, assignment: asg.assignment, unassigned_rows: asg.unassigned, search_limit: asg.limit };
@@ -496,7 +541,7 @@ export function scoreMeasurement(dir, golds) {
   for (const p of patterns) {
     const g = golds.get(p);
     if (g === undefined) refuse("table-score:gold-missing");
-    if (g.frozen_set.id !== frozen.id || g.frozen_set.version !== frozen.version) refuse("table-score:frozen-set");
+    if (g.plan_set.id !== frozen.id || g.plan_set.version !== frozen.version) refuse("table-score:frozen-set");
     const a = frozen.adopted.find((x) => x.pattern === p);
     if (a === undefined || a.plan_sha256 !== g.plan_sha256) refuse("table-score:plan-sha256-conditions");
   }

@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { clusterStats, pairStats } from "../agent-accept/score-agent.mjs";
 import {
   ANONYMOUS_SCHEMA, BROKEN, COMPARE_FILE, COMPARE_SCHEMA, EXIT_REFUSED, GOLD_VERSION, OUTCOMES, OUTPUT_FILE, OUTPUT_SCHEMA, SOURCE_PATHS, BUILD_RECORD_PATH, WILSON_NAME,
-  aggregate, anonymize, anonymousFileOf, assignRows, compareRows, main, normalizeTable, readSource, scoreStructure,
+  aggregate, anonymize, anonymousFileOf, assignRows, compareRows, main, normalizeTable, readSource, scoreStructure, validateGold,
 } from "./score-table.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -21,7 +21,9 @@ const PLAN_A = sha("plan-a"), PLAN_B = sha("plan-b"), PLAN_X = sha("plan-x");
 const TEXT = "GOLDTEXT"; // 正解の文の欄に入れる目印（出力に写っていないことを走査する）
 
 // ── 合成の正解（部品と要件は配列）
-const C = (symbol, kind, type, parent = null, extra = {}) => ({ symbol, kind, type, parent_entity: parent, ref_entity: null, group_by: null, options_count: null, ...extra });
+const C = (symbol, kind, type, parent = null, extra = {}) => ({ symbol, kind, type, entity: parent, refEntity: null, groupBy: null, options: null, meaning_quote: TEXT, ...extra });
+/** 選択肢の配列（現物は symbol と意味の文の組。数は配列の長さ） */
+const opts = (n) => Array.from({ length: n }, (_, k) => ({ symbol: `opt${k}`, meaning: TEXT }));
 const COMPONENTS = [
   C("E_a", "entity", null),
   C("E_b", "entity", null),
@@ -29,37 +31,38 @@ const COMPONENTS = [
   C("E_d", "entity", null),
   C("F_a1", "field", "string", "E_a"),
   C("F_a2", "field", "number", "E_a"),
-  C("F_ref", "field", "ref", "E_a", { ref_entity: "E_b" }),
-  C("F_enum", "field", "enum", "E_a", { options_count: 3 }),
-  C("F_enum2", "field", "enum", "E_a", { options_count: 2 }),
+  C("F_ref", "field", "ref", "E_a", { refEntity: "E_b" }),
+  C("F_enum", "field", "enum", "E_a", { options: opts(3), semantics: { note: "x" } }),
+  C("F_enum2", "field", "enum", "E_a", { options: opts(2) }),
   C("F_b1", "field", "string", "E_b"),
-  C("F_opt", "field", "ref", "E_b", { ref_entity: "E_d" }),
+  C("F_opt", "field", "ref", "E_b", { refEntity: "E_d" }),
   C("F_c1", "field", "date", "E_c"),
   C("C_sum", "computation", { valueType: "number", scope: "row", form: "aggregate", aggregate: { kind: "sum", entity: "E_a" } }, "E_b"),
   C("C_expr", "computation", { valueType: "number", scope: "row", form: "expression", aggregate: null }, "E_a"),
   C("O_add", "operation", { action: "add", hasWhen: true }, "E_a"),
   C("O_del", "operation", { action: "delete", hasWhen: false }, "E_a"),
-  C("S_board", "screen", { view: "board" }, "E_a", { group_by: { kind: "enum", field: "F_enum" } }),
+  C("S_board", "screen", { view: "board" }, "E_a", { groupBy: { kind: "enum", field: "F_enum" } }),
 ];
-const alt = (required, allowed, verification, context = [], extra = {}) => ({ required, allowed, context, verification, quote: TEXT, meaning: TEXT, ...extra });
+const alt = (required, allowed, verification, context = [], extra = {}) => ({ id: `v-${required.join("+") || "none"}`, required, allowed, context, verification: [verification], added_after_review: false, rationale: TEXT, review_evidence: [TEXT], ...extra });
+const UX = (scope) => ({ reason_kind: "k", expected_handling: "carry-over", blocked_components: [], rationale: TEXT, ...(scope === undefined ? {} : { scope }) });
 const ST = (checks, assertions) => ({ kind: "structural", checks, ...(assertions ? { assertions } : {}) });
 const FT = (observations) => ({ kind: "fixed-test", observations });
 const REQS = [
-  { requirement_id: "R1", alternatives: [alt(["F_a1"], ["F_a1", "E_a"], ST(["k-req", "k-uniq"], [{ check: "k-req", target: "F_a1", expected: "string" }]))], question: TEXT },
-  { requirement_id: "R2", alternatives: [alt(["F_a2"], ["F_a2", "F_a1"], FT([{ target: "F_a2", target_kind: "field", operation: "validate" }]), ["F_a1"])] },
-  { requirement_id: "R3", alternatives: [alt(["F_ref"], ["F_ref"], ST(["k-ref"], [{ check: "k-ref", target: "F_ref", ref_entity: "E_b" }]))] },
-  { requirement_id: "R4", alternatives: [alt(["F_b1"], ["F_b1", "F_opt"], { kind: "default-value" })] },
-  { requirement_id: "R5", alternatives: [alt(["F_enum"], ["F_enum"], { kind: "enum-membership" })] },
-  { requirement_id: "R6", alternatives: [alt(["C_sum"], ["C_sum"], FT([{ target: "C_sum", target_kind: "computation", operation: "aggregate" }]))] },
-  { requirement_id: "R7", alternatives: [alt(["O_add"], ["O_add"], FT([{ target: "O_add", target_kind: "operation", operation: "action" }]))] },
-  { requirement_id: "R8", alternatives: [alt(["S_board"], ["S_board"], ST(["k-group"]))] },
-  { requirement_id: "R9", alternatives: [alt(["O_del"], ["O_del"], FT([{ target: "O_del", target_kind: "operation", operation: "structure" }])), alt(["C_expr"], ["C_expr"], ST(["k-x"]))] },
-  { requirement_id: "R10", alternatives: [alt(["F_enum2"], ["F_enum2"], { kind: "enum-membership" })] },
-  { requirement_id: "R11", alternatives: [alt(["F_c1"], ["F_c1"], ST(["k-c"]))] },
+  { requirement_id: "R1", variants: [alt(["F_a1"], ["F_a1", "E_a"], ST(["k-req", "k-uniq"], [{ check: "k-req", target: "F_a1", expected: "string" }]))], question: TEXT },
+  { requirement_id: "R2", variants: [alt(["F_a2"], ["F_a2", "F_a1"], FT([{ target: "F_a2", target_kind: "field", operation: "validate" }]), ["F_a1"])] },
+  { requirement_id: "R3", variants: [alt(["F_ref"], ["F_ref"], ST(["k-ref"], [{ check: "k-ref", target: "F_ref", refEntity: "E_b" }]))] },
+  { requirement_id: "R4", variants: [alt(["F_b1"], ["F_b1", "F_opt"], { kind: "default-value" })] },
+  { requirement_id: "R5", variants: [alt(["F_enum"], ["F_enum"], { kind: "enum-membership" })] },
+  { requirement_id: "R6", variants: [alt(["C_sum"], ["C_sum"], FT([{ target: "C_sum", target_kind: "computation", operation: "aggregate" }]))] },
+  { requirement_id: "R7", variants: [alt(["O_add"], ["O_add"], FT([{ target: "O_add", target_kind: "operation", operation: "action" }]))] },
+  { requirement_id: "R8", variants: [alt(["S_board"], ["S_board"], ST(["k-group"]))] },
+  { requirement_id: "R9", variants: [alt(["O_del"], ["O_del"], FT([{ target: "O_del", target_kind: "operation", operation: "structure" }])), alt(["C_expr"], ["C_expr"], ST(["k-x"]))] },
+  { requirement_id: "R10", variants: [alt(["F_enum2"], ["F_enum2"], { kind: "enum-membership" })] },
+  { requirement_id: "R11", variants: [alt(["F_c1"], ["F_c1"], ST(["k-c"]))] },
 ];
 const goldOf = (over = {}) => ({
-  version: GOLD_VERSION, pattern: "P1", frozen_set: { id: "set-x", version: 1 }, plan_sha256: PLAN_A,
-  components: COMPONENTS, requirements: REQS, needs_human: [], counts: { requirements: REQS.length, components: COMPONENTS.length }, ...over,
+  version: GOLD_VERSION, pattern: "P1", plan_set: { id: "set-x", version: 1, manifest_sha256: sha("manifest") }, plan_sha256: PLAN_A,
+  components: COMPONENTS, requirements: REQS, needs_human: [], counts: { requirements: REQS.length, alternatives: 12, needs_human: 0, unexpressible: 0, after_review: 0, human_added_after_review: 0 }, provenance: { note: TEXT }, ...over,
 });
 
 // ── 合成の表（工場の名前の表の形）
@@ -77,10 +80,10 @@ function tableOf({ syms = SYMS_ALL, own = OWN, ver = VER, rowOver = {}, idOf = (
     const c = compOf.get(s);
     const type = c.kind === "computation" ? { ...c.type, aggregate: c.type.aggregate ? { kind: c.type.aggregate.kind, entity: idOf(c.type.aggregate.entity) } : null } : c.type;
     return {
-      id: idOf(s), kind: c.kind, entity: c.parent_entity === null ? null : idOf(c.parent_entity), ...naming(s, i), type,
-      options: c.options_count === null ? null : Array.from({ length: c.options_count }, (_, k) => `o${k}`),
-      groupBy: c.group_by === null ? null : { kind: c.group_by.kind, field: idOf(c.group_by.field) },
-      refEntity: c.ref_entity === null ? null : idOf(c.ref_entity),
+      id: idOf(s), kind: c.kind, entity: c.entity === null ? null : idOf(c.entity), ...naming(s, i), type,
+      options: c.options === null ? null : c.options.map((_, k) => `o${k}`),
+      groupBy: c.groupBy === null ? null : { kind: c.groupBy.kind, field: idOf(c.groupBy.field) },
+      refEntity: c.refEntity === null ? null : idOf(c.refEntity),
       ...(rowOver[s] ?? {}),
     };
   });
@@ -92,7 +95,7 @@ function tableOf({ syms = SYMS_ALL, own = OWN, ver = VER, rowOver = {}, idOf = (
     classification: [],
   };
 }
-const score = (table, gold = goldOf()) => { const s = readSource("accepted", table); return scoreStructure(s.structure, s.meta, gold); };
+const score = (table, gold = goldOf()) => { const s = readSource("accepted", table); return scoreStructure(s.structure, s.meta, validateGold(gold)); };
 const outcomeOf = (res, id) => res.requirements.find((q) => q.requirement_id === id);
 
 // ── 計測の出力先と正解のディレクトリ（一時ディレクトリ）
@@ -101,6 +104,9 @@ function world({ golds = [goldOf()], runs = { "P1-r1": { accepted: tableOf() } }
   const goldDir = join(base, "gold"), out = join(base, "out");
   mkdirSync(goldDir);
   golds.forEach((g, i) => writeFileSync(join(goldDir, `g${i}.json`), typeof g === "string" ? g : JSON.stringify(g)));
+  // 現物と同じく、正解のディレクトリには .json 以外の文書も置かれる（読まない）
+  writeFileSync(join(goldDir, "schema.md"), "{not json");
+  writeFileSync(join(goldDir, "README.md"), "{not json");
   const measure = join(base, "m");
   writeMeasure(measure, { golds, runs, frozen, extraConditions });
   return { base, goldDir, measure, out, cleanup: () => rmSync(base, { recursive: true, force: true }) };
@@ -125,10 +131,17 @@ test("断り：版が違う／必須の欄が欠ける／組の ID か版が違�
   const cases = [
     ["table-score:gold-version", { golds: [goldOf({ version: "table-gold-v0" })] }],
     ["table-score:gold-shape", { golds: [(({ components, ...g }) => g)(goldOf())] }],
-    ["table-score:gold-shape", { golds: [goldOf({ requirements: [{ requirement_id: "R1", alternatives: [{ required: ["F_a1"], allowed: [], verification: { kind: "fixed-test" } }] }] })] }],
+    ["table-score:gold-shape", { golds: [goldOf({ requirements: [{ requirement_id: "R1", variants: [{ id: "v", required: ["F_a1"], allowed: [], verification: [{ kind: "fixed-test" }] }] }] })] }],
+    // 現物の形が「断る」とした形：確かめ方の配列の長さが 1 以外・unexpressible.scope が「<設計族>-family-only」以外・plan_set の代わりに frozen_set・案が alternatives
+    ["table-score:gold-shape", { golds: [goldOf({ requirements: REQS.map((r) => (r.requirement_id === "R1" ? { ...r, variants: [{ ...r.variants[0], verification: [...r.variants[0].verification, { kind: "fixed-test" }] }] } : r)) })] }],
+    ["table-score:gold-shape", { golds: [goldOf({ requirements: REQS.map((r) => (r.requirement_id === "R1" ? { ...r, variants: [{ ...r.variants[0], verification: [] }] } : r)) })] }],
+    ["table-score:gold-shape", { golds: [goldOf({ requirements: REQS.map((r) => (r.requirement_id === "R1" ? { ...r, unexpressible: { reason_kind: "k", expected_handling: "carry-over", blocked_components: [], scope: "fam-a" } } : r)) })] }],
+    ["table-score:gold-shape", { golds: [(({ plan_set, ...g }) => ({ ...g, frozen_set: { id: "set-x", version: 1 } }))(goldOf())] }],
+    ["table-score:gold-shape", { golds: [goldOf({ requirements: REQS.map(({ variants, ...r }) => ({ ...r, alternatives: variants })) })] }],
+    ["table-score:gold-shape", { golds: [goldOf({ plan_set: { id: "set-x", version: 1 } })] }],
     ["table-score:gold-shape", { golds: [goldOf({ plan_sha256: "short" })] }],
-    ["table-score:frozen-set", { golds: [goldOf({ frozen_set: { id: "set-y", version: 1 } })] }],
-    ["table-score:frozen-set", { golds: [goldOf({ frozen_set: { id: "set-x", version: 2 } })] }],
+    ["table-score:frozen-set", { golds: [goldOf({ plan_set: { id: "set-y", version: 1, manifest_sha256: sha("manifest") } })] }],
+    ["table-score:frozen-set", { golds: [goldOf({ plan_set: { id: "set-x", version: 2, manifest_sha256: sha("manifest") } })] }],
     ["table-score:plan-sha256-conditions", { frozen: { id: "set-x", version: 1, adopted: [{ pattern: "P1", plan_sha256: PLAN_X }], missing: [] } }],
     ["table-score:plan-sha256-run", { runs: { "P1-r1": { accepted: tableOf(), recordPlan: PLAN_X } } }],
     ["table-score:plan-sha256-run", { runs: { "P1-r1": { checkpoint: tableOf(), checkpointPlan: PLAN_X } } }],
@@ -149,9 +162,9 @@ test("断り：版が違う／必須の欄が欠ける／組の ID か版が違�
 
 test("任意の欄が全部無い合成の正解（部品と要件は配列）を受理する", () => {
   const bare = {
-    version: GOLD_VERSION, pattern: "P1", frozen_set: { id: "set-x", version: 1 }, plan_sha256: PLAN_A, counts: {},
-    components: [{ symbol: "E_a", kind: "entity", type: null }, { symbol: "F_a1", kind: "field", type: "string", parent_entity: "E_a" }],
-    requirements: [{ requirement_id: "R1", alternatives: [{ required: ["F_a1"], allowed: ["F_a1"], context: [], verification: { kind: "fixed-test" } }] }],
+    version: GOLD_VERSION, pattern: "P1", plan_set: { id: "set-x", version: 1, manifest_sha256: sha("manifest") }, plan_sha256: PLAN_A, counts: {},
+    components: [{ symbol: "E_a", kind: "entity", type: null }, { symbol: "F_a1", kind: "field", type: "string", entity: "E_a" }],
+    requirements: [{ requirement_id: "R1", variants: [{ id: "v1", required: ["F_a1"], allowed: ["F_a1"], context: [], verification: [{ kind: "fixed-test" }] }] }],
     needs_human: [],
   };
   const w = world({ golds: [bare], runs: { "P1-r1": { accepted: tableOf({ syms: ["E_a", "F_a1"], own: { R1: ["F_a1"] }, ver: { R1: { kind: "fixed-test" } } }) } } });
@@ -210,7 +223,7 @@ test("(e) checks の順を替えた表は 1、1 つ足した表は 0。(e') 同�
   const moved = score(tableOf({ own: { ...OWN, R1: ["F_b1"] } }));
   assert.equal(outcomeOf(moved, "R1").questions.verification, 0);
   // assertions の expected が型と合わない（F_a1 の行の型を number にした表は割り当てが変わるので、正解の側の expected を替える）
-  const typed = score(tableOf(), goldOf({ requirements: REQS.map((r) => (r.requirement_id === "R1" ? { ...r, alternatives: [alt(["F_a1"], ["F_a1", "E_a"], ST(["k-req", "k-uniq"], [{ check: "k-req", target: "F_a1", expected: "number" }]))] } : r)) }));
+  const typed = score(tableOf(), goldOf({ requirements: REQS.map((r) => (r.requirement_id === "R1" ? { ...r, variants: [alt(["F_a1"], ["F_a1", "E_a"], ST(["k-req", "k-uniq"], [{ check: "k-req", target: "F_a1", expected: "number" }]))] } : r)) }));
   assert.equal(outcomeOf(typed, "R1").questions.verification, 0);
 });
 
@@ -221,7 +234,7 @@ test("(e'') fixed-test：観測の対象の行が無ければ 0、意味だけ�
   // 対象の行が無い（R7 の O_add を消す）
   const noTarget = outcomeOf(score(tableOf({ syms: SYMS_ALL.filter((s) => s !== "O_add"), own: { ...OWN, R7: [] } })), "R7");
   assert.equal(noTarget.questions.verification, 0);
-  const g = (id, obs) => goldOf({ requirements: REQS.map((r) => (r.requirement_id === id ? { ...r, alternatives: [{ ...r.alternatives[0], verification: FT(obs) }] } : r)) });
+  const g = (id, obs) => goldOf({ requirements: REQS.map((r) => (r.requirement_id === id ? { ...r, variants: [{ ...r.variants[0], verification: [FT(obs)] }] } : r)) });
   // entity を対象にした validation
   assert.equal(outcomeOf(score(tableOf(), g("R2", [{ target: "E_a", target_kind: "entity", operation: "validate" }])), "R2").questions.verification, 1);
   // compute を集計の計算に
@@ -252,11 +265,13 @@ test("(g) 同じ部品にしか当たらない 2 行はどちらも割り当て�
 });
 
 test("(h) 保留：状態欄だけ・一覧だけも保留。一覧 2 回と関連 ID に重なっても件数 1。関連 ID だけの要件は二値で判定し印。未採用の candidates と一致する表を正答にしない", () => {
+  // 保留の一覧の候補（現物の形）。表はこの候補と一致するが、候補は案として使わない
+  const CAND = { owned: ["F_c1"], rows: [{ symbol: "F_c1", kind: "field", entity: "E_c", type: "date", refEntity: null, groupBy: null, options_count: null }], verification: { kind: "structural", checks: ["k-c"] }, accepted: false };
   const g = goldOf({
-    requirements: REQS.map((r) => (r.requirement_id === "R10" ? { ...r, status: "needs_human" } : r)),
+    requirements: REQS.map((r) => (r.requirement_id === "R10" ? { ...r, adjudication_status: "needs_human" } : r)),
     needs_human: [
-      { requirement_id: "R11", reason_kind: "k1", candidates: [alt(["F_c1"], ["F_c1"], ST(["k-c"]))], reason: TEXT },
-      { requirement_id: "R11", reason_kind: "k2", candidates: [], related_requirement_ids: ["R11", "R8"] },
+      { requirement_id: "R11", reason_kind: "k1", source: "machine-review", related_requirement_ids: [], candidates: [CAND], question: TEXT, review_evidence: [TEXT] },
+      { requirement_id: "R11", reason_kind: "k2", source: "independent-review", candidates: [], related_requirement_ids: ["R11", "R8"], question: TEXT },
     ],
   });
   const res = score(tableOf(), g);
@@ -266,7 +281,7 @@ test("(h) 保留：状態欄だけ・一覧だけも保留。一覧 2 回と関�
   assert.equal(res.requirements.filter((q) => q.requirement_id === "R11").length, 1);
   assert.equal(outcomeOf(res, "R8").outcome, "correct");
   assert.ok(outcomeOf(res, "R8").marks.includes("related"));
-  const agg = aggregate([{ run: "P1-r1", pattern: "P1", source: "accepted", checkpoint_also: false, ...res }], new Map([["P1", g]]), "accepted");
+  const agg = aggregate([{ run: "P1-r1", pattern: "P1", source: "accepted", checkpoint_also: false, ...res }], new Map([["P1", validateGold(g)]]), "accepted");
   assert.equal(agg.holds.static, 2);
   assert.equal(agg.denominators.b, REQS.length - 2);
 });
@@ -276,10 +291,10 @@ test("(i) unresolved：accepted-removal は了承除外、unsupported-observatio
   const g = goldOf({
     requirements: [
       ...REQS,
-      { requirement_id: "U1", alternatives: [alt([], [], U("accepted-removal"))] },
-      { requirement_id: "U2", alternatives: [alt([], [], U("unsupported-observation"))] },
-      { requirement_id: "U3", alternatives: [alt([], [], FT([]))], verification_limit: { note: TEXT } },
-      { requirement_id: "U4-alt", alternatives: [alt([], [], FT([]))] },
+      { requirement_id: "U1", variants: [alt([], [], U("accepted-removal"))] },
+      { requirement_id: "U2", variants: [alt([], [], U("unsupported-observation"))] },
+      { requirement_id: "U3", variants: [alt([], [], FT([]))], verification_limit: { property: "state-after-set", expressible: false, supported_subproperties: [], expected_handling: TEXT } },
+      { requirement_id: "U4-alt", variants: [alt([], [], FT([]))] },
     ],
   });
   const unres = { kind: "unresolved", reason: "x", constraintIds: [] };
@@ -295,9 +310,9 @@ test("(i') unexpressible：scope 無しは全案で unresolved なら持ち越�
   const g = goldOf({
     requirements: [
       ...REQS,
-      { requirement_id: "X1", unexpressible: { why: TEXT }, alternatives: [alt([], [], FT([])), alt([], [], ST(["k"]))] },
-      { requirement_id: "X2", unexpressible: true, scope: "fam-a", alternatives: [alt(["C_expr"], ["C_expr"], FT([]), [], { design_family: "fam-a" }), alt(["C_expr"], ["C_expr"], FT([]), [], { design_family: "fam-b" })] },
-      { requirement_id: "X3", alternatives: [alt([], [], FT([]), [], { unexpressible: true }), alt(["C_expr"], ["C_expr"], ST(["k-y"]))] },
+      { requirement_id: "X1", unexpressible: UX(), variants: [alt([], [], FT([])), alt([], [], ST(["k"]))] },
+      { requirement_id: "X2", unexpressible: UX("fam-a-family-only"), scope: { excluded_parts: [{ id: "e1", disposition: "accepted_removal", text: TEXT }], alternatives: ["fam-a"] }, variants: [alt(["C_expr"], ["C_expr"], FT([]), [], { design_family: "fam-a" }), alt(["C_expr"], ["C_expr"], FT([]), [], { design_family: "fam-b" })] },
+      { requirement_id: "X3", variants: [alt([], [], FT([]), [], { unexpressible: UX() }), alt(["C_expr"], ["C_expr"], ST(["k-y"]))] },
     ],
   });
   const unres = { kind: "unresolved", reason: "x", constraintIds: [] };
@@ -312,6 +327,30 @@ test("(i') unexpressible：scope 無しは全案で unresolved なら持ち越�
   assert.equal(outcomeOf(b, "X1").outcome, "wrong");
   assert.ok(outcomeOf(b, "X1").marks.includes("overclaim"));
   assert.equal(outcomeOf(b, "X3").outcome, "correct");
+});
+
+test("禁止の部品（案ごと）と方針：禁止の部品を所属に割り当てた案は選ばず、全案がそうなら保留。同数の最良の案に方針があれば保留。採った案の ID を出す", () => {
+  const forb = goldOf({ requirements: REQS.map((r) => (r.requirement_id === "R3" ? { ...r, variants: [{ ...r.variants[0], forbidden_components: ["F_ref"] }] } : r)) });
+  const held = outcomeOf(score(tableOf(), forb), "R3");
+  assert.equal(held.outcome, "held");
+  assert.equal(held.hold, "alternative-unselectable");
+  // 案 0 は禁止に当たり、案 1 で正答
+  const two = goldOf({ requirements: REQS.map((r) => (r.requirement_id === "R3" ? { ...r, variants: [{ ...r.variants[0], id: "va", forbidden_components: ["F_ref"] }, { ...r.variants[0], id: "vb" }] } : r)) });
+  const ok = outcomeOf(score(tableOf(), two), "R3");
+  assert.equal(ok.outcome, "correct");
+  assert.equal(ok.variant_id, "vb");
+  // 最良が同数で方針のある案を含む → 保留。方針が無ければ基準（先頭）で誤り
+  const policy = { entity: "E_a", exact_fields: ["F_a1"], system_fields_excluded: true };
+  const tie = (p) => goldOf({ requirements: REQS.map((r) => (r.requirement_id === "R7" ? { ...r, variants: [{ ...r.variants[0], id: "v0", verification: [{ kind: "structural", checks: ["a"] }], ...(p ? { entity_field_policy: policy } : {}) }, { ...r.variants[0], id: "v1", verification: [{ kind: "structural", checks: ["b"] }] }] } : r)) });
+  assert.equal(outcomeOf(score(tableOf(), tie(true)), "R7").hold, "alternative-unselectable");
+  const base = outcomeOf(score(tableOf(), tie(false)), "R7");
+  assert.equal(base.outcome, "wrong");
+  assert.equal(base.variant_id, "v0");
+});
+
+test("部品の semantics（意味）がある required は意味の未照合の印", () => {
+  assert.ok(outcomeOf(score(tableOf()), "R5").marks.includes("semantics-unverified"));
+  assert.ok(!outcomeOf(score(tableOf()), "R3").marks.includes("semantics-unverified"));
 });
 
 test("(j) name・id・role・source を全部置き換えても同じ結果。(l) source が全部 null の表も同じ結果", () => {
@@ -341,19 +380,19 @@ test("(m) 型と所属が同じで参照先だけ違う 2 表は正しい接続�
   const i = SYMS_ALL.indexOf("F_ref");
   assert.equal(broken.rows[i].refs.ref_entity, BROKEN);
   assert.equal(none.rows[i].refs.ref_entity, null);
-  const res = scoreStructure(broken, { table_sha256: null }, goldOf());
+  const res = scoreStructure(broken, { table_sha256: null }, validateGold(goldOf()));
   assert.ok(res.unassigned_rows.includes(i));
   assert.equal(outcomeOf(res, "R3").hold, "unassignable-row");
 });
 
 // ── 集計
 const GA_REQS = [
-  { requirement_id: "A1", alternatives: [alt(["F_a1"], ["F_a1"], { kind: "fixed-test" })] },
-  { requirement_id: "A2", alternatives: [alt(["F_a2"], ["F_a2"], { kind: "fixed-test" })] },
-  { requirement_id: "A3", alternatives: [alt(["F_b1"], ["F_b1"], { kind: "fixed-test" })] },
-  { requirement_id: "A4", alternatives: [alt(["F_c1"], ["F_c1"], { kind: "fixed-test" })] },
-  { requirement_id: "A5", alternatives: [alt(["O_add"], ["O_add"], { kind: "fixed-test" }), alt([], [], { kind: "unresolved", reason_kind: "accepted-removal" })] },
-  { requirement_id: "A6", status: "needs_human", alternatives: [alt(["O_del"], ["O_del"], { kind: "fixed-test" })] },
+  { requirement_id: "A1", variants: [alt(["F_a1"], ["F_a1"], { kind: "fixed-test" })] },
+  { requirement_id: "A2", variants: [alt(["F_a2"], ["F_a2"], { kind: "fixed-test" })] },
+  { requirement_id: "A3", variants: [alt(["F_b1"], ["F_b1"], { kind: "fixed-test" })] },
+  { requirement_id: "A4", variants: [alt(["F_c1"], ["F_c1"], { kind: "fixed-test" })] },
+  { requirement_id: "A5", variants: [alt(["O_add"], ["O_add"], { kind: "fixed-test" }), alt([], [], { kind: "unresolved", reason_kind: "accepted-removal" })] },
+  { requirement_id: "A6", adjudication_status: "needs_human", variants: [alt(["O_del"], ["O_del"], { kind: "fixed-test" })] },
 ];
 const gaGold = (pattern = "P1", plan = PLAN_A) => goldOf({ pattern, plan_sha256: plan, requirements: GA_REQS });
 const GA_OWN = { A1: ["F_a1"], A2: ["F_a2"], A3: ["F_b1"], A4: ["F_c1"], A5: ["O_add"], A6: ["O_del"] };
@@ -392,7 +431,7 @@ test("集計：予定 4 本・表あり 3 本・要件 6（静的な保留 1・�
 test("集計：全要件が候補依存の非二値の本だけの組は分母 (a) 0・率 null と理由の符号", () => {
   const g = gaGold();
   const reqs = indexIds(g).map((id) => ({ requirement_id: id, outcome: id === "A6" ? "held" : "carry-over", hold: id === "A6" ? "needs-human" : null, questions: { missing: null, excess: null, verification: null }, marks: [] }));
-  const a = aggregate([{ run: "P1-r1", pattern: "P1", source: "accepted", checkpoint_also: false, requirements: reqs, unassigned_rows: [] }], new Map([["P1", g]]), "accepted");
+  const a = aggregate([{ run: "P1-r1", pattern: "P1", source: "accepted", checkpoint_also: false, requirements: reqs, unassigned_rows: [] }], new Map([["P1", validateGold(g)]]), "accepted");
   assert.equal(a.denominators.a, 0);
   assert.equal(a.correct.a.rate, null);
   assert.equal(a.correct.a.reason_code, "denominator-zero");
@@ -402,7 +441,7 @@ test("集計：全要件が候補依存の非二値の本だけの組は分母 (
 const indexIds = (g) => g.requirements.map((r) => r.requirement_id);
 
 test("集計：P ごとの 0／1 からの bootstrap の区間が既存の関数の出力と深く等しい", () => {
-  const golds = new Map([["P1", gaGold()], ["P2", gaGold("P2", PLAN_B)], ["P3", gaGold("P3", PLAN_X)]]);
+  const golds = new Map([["P1", gaGold()], ["P2", gaGold("P2", PLAN_B)], ["P3", gaGold("P3", PLAN_X)]].map(([p, g]) => [p, validateGold(g)]));
   const q = (id, ok) => ({ requirement_id: id, outcome: ok ? "correct" : "wrong", hold: null, questions: { missing: ok ? 1 : 0, excess: 1, verification: 1 }, marks: [] });
   const held = { requirement_id: "A6", outcome: "held", hold: "needs-human", questions: { missing: null, excess: null, verification: null }, marks: [] };
   const mk = (run, pattern, oks) => ({ run, pattern, source: "accepted", checkpoint_also: false, requirements: [...oks.map((ok, i) => q(`A${i + 1}`, ok)), held], unassigned_rows: [] });
@@ -424,7 +463,7 @@ test("読取元：受理済みの表と checkpoint の採点の構造が深く�
   assert.notEqual(acc.meta.table_sha256, null);
   const text = JSON.stringify(acc.structure);
   for (const w of ["id-F_a1", "role", "\"n0\"", "quote"]) assert.ok(!text.includes(w), w);
-  assert.deepEqual(scoreStructure(acc.structure, acc.meta, goldOf()), scoreStructure(cp.structure, cp.meta, goldOf()));
+  assert.deepEqual(scoreStructure(acc.structure, acc.meta, validateGold(goldOf())), scoreStructure(cp.structure, cp.meta, validateGold(goldOf())));
   const w = world({ runs: { "P1-r1": { accepted: tableOf(), checkpoint: tableOf({ ver: { ...VER, R1: { kind: "fixed-test" } } }) }, "P1-r2": { checkpoint: tableOf() }, "P1-r3": {} } });
   try {
     assert.equal(run(w).code, 0);
@@ -497,7 +536,7 @@ test("比較：比較の記録の群（baseline・candidate）を読み、同じ
 
 // ── 出力・指紋・匿名
 test("同じ入力で 2 回同じ出力。指紋は道具のファイルの SHA-256 で採点の欄と別。正解の文の欄が無い。匿名の口に P の番号・本の ID・要件 ID・記号・パス・SHA が無い", () => {
-  const golds = [goldOf({ needs_human: [{ requirement_id: "R10", reason_kind: "k", candidates: [], reason: TEXT, exclusion: TEXT }] })];
+  const golds = [goldOf({ needs_human: [{ requirement_id: "R10", reason_kind: "k", source: "machine-review", related_requirement_ids: [], candidates: [], question: TEXT, review_evidence: [TEXT] }] })];
   const w = world({ golds, runs: { "P1-r1": { accepted: tableOf() }, "P1-r2": { checkpoint: tableOf() } } });
   try {
     assert.equal(run(w).code, 0);
@@ -531,8 +570,8 @@ test("同じ入力で 2 回同じ出力。指紋は道具のファイルの SHA-
 
 test("割り当ての探索は決定的で、assignRows は P 全体で一貫する（同じ構造で同じ割り当て）", () => {
   const s = normalizeTable(tableOf());
-  assert.deepEqual(assignRows(s, goldOf()), assignRows(s, goldOf()));
-  assert.equal(assignRows(s, goldOf()).limit, false);
+  assert.deepEqual(assignRows(s, validateGold(goldOf())), assignRows(s, validateGold(goldOf())));
+  assert.equal(assignRows(s, validateGold(goldOf())).limit, false);
 });
 
 // ── 静的な走査・題材の言葉・README
