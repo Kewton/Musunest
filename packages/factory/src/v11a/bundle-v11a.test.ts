@@ -374,3 +374,24 @@ describe("T2 の成果物の generated_test_ids（旗 v12.ids の走りだけ。
     expect(empty["generated_test_ids"]).toEqual([]);
   });
 });
+
+describe("T2 の成果物の llm_case_count・llm_response_chars（旗 v12.ids の走りだけ。Issue #625）", () => {
+  it("渡さなければ欄を書かない（今の記録とバイト列で同じ）。渡せば末尾に場合の数と応答の文字数を書き、既存の欄（suite の形を含む）・ほかの記録は今のまま", () => {
+    const specText = (artifacts: ReturnType<typeof buildV11aArtifacts>) => artifacts.find((artifact) => artifact.path === V11A_ARTIFACT_NAMES.testSpec)!.text;
+    const base = input();
+    const plain = buildV11aArtifacts(base);
+    const plainKeys = Object.keys(JSON.parse(specText(plain)) as object);
+    expect(plainKeys).not.toContain("llm_case_count");
+    expect(plainKeys).not.toContain("llm_response_chars");
+    const withIds = buildV11aArtifacts({ ...base, testSpec: { ...base.testSpec, generatedTestIds: [], cases: { count: 12, responseChars: 3456 } } });
+    const parsed = JSON.parse(specText(withIds)) as Record<string, unknown>;
+    expect(Object.keys(parsed)).toEqual([...plainKeys, "generated_test_ids", "llm_case_count", "llm_response_chars"]);
+    expect(parsed["llm_case_count"]).toBe(12);
+    expect(parsed["llm_response_chars"]).toBe(3456);
+    const { generated_test_ids: _ids, llm_case_count: _count, llm_response_chars: _chars, ...rest } = parsed;
+    expect(rest).toEqual(JSON.parse(specText(plain)));
+    expect(withIds.filter((artifact) => artifact.path !== V11A_ARTIFACT_NAMES.testSpec)).toEqual(
+      plain.filter((artifact) => artifact.path !== V11A_ARTIFACT_NAMES.testSpec),
+    );
+  });
+});

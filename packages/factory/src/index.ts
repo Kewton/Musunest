@@ -98,3 +98,5 @@ export * from "./v12/stages/vocabulary.js";
 export * from "./v12/stages/mapping.js";
 // コードが作る試験（台帳の型だけで値が決まる試験。旗 `v12.ids`。手 3c・Issue #595）
 export * from "./v12/generated-tests.js";
+// T2 の場合の形と展開（値の要る試験の場合だけを LLM が書き、骨組みはコードが組む。旗 `v12.ids`。手 3e・Issue #625）
+export * from "./v12/test-cases.js";

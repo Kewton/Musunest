@@ -318,8 +318,8 @@ export interface PropertyRules {
   readonly t1Acceptance: string | null;
   readonly t2: string | null;
   /**
-   * 旗 `v12.ids` の走りの T2 の文（コードが試験を作る範囲を「作らない（コードが作る）」に差し替えた文。#595）。null なら
-   * `t2` の文をそのまま使う
+   * 旗 `v12.ids` の走りの T2 の文（コードが試験を作る範囲を「作らない（コードが作る）」に差し替えた文。#595。欄の名前は場合の形。
+   * #625）。null なら `t2` の文をそのまま使う
    */
   readonly t2Ids: string | null;
   readonly b1: string | null;
@@ -363,6 +363,13 @@ export const OUTER_NOT_SCORED = "外は見ない" as const;
 /** 空の集計の行の T2 の文（旗 off と、旗 `v12.ids` の走りの行ごと・見出しごと × 月の集計の文。#549・#595） */
 const EMPTY_AGGREGATE_T2_RULE =
   "集計（計算の行の type の form が aggregate）の要件の境界（boundary）の試験は、集計元を空と明示し（入力の契約の emptyEntities にその行の type.aggregate.entity の id を入れ、参照データにその entity の行を置かない）、期待（expected）の value を集計の種類で決まる値にする：sum・count は 0（見出しごとは、enum の見出しなら options の全キーを順に heading と value 0 で並べ、月の見出しなら各見出しの value を 0 にする）、avg は null（見出しごとは各見出しの value を null にする）。異常（abnormal）の試験は集計元に触れず（emptyEntities に入れず、参照データにその entity の行も置かない）、期待の value を null にする。どちらも対象（target）はその計算の行、operation は aggregate、observes は empty-aggregate、期待の kind は ok・code は null にする。集計元の行を置かずに observes を value にした集計の試験も、期待は同じ値（空と明示すれば種類で決まる値、しなければ null）にする。正常の試験（observes は value）は今までどおり集計元の行を置いて作る。";
+
+/**
+ * 空の集計の行の T2 の文の、旗 `v12.ids` の場合の形（行ごと・見出しごと × 月の集計。#625）。欄の名前を場合の形（targetId・rows・
+ * emptyEntities・expected）にした文で、期待の値の決まりは `EMPTY_AGGREGATE_T2_RULE` と同じ
+ */
+const EMPTY_AGGREGATE_T2_CASES_RULE =
+  "集計（計算の行の type の form が aggregate）の要件の境界（boundary）の場合は、集計元を空と明示し（emptyEntities にその行の type.aggregate.entity の id を入れ、参照の行（rows）にその entity の行を置かない）、期待（expected）の value を集計の種類で決まる値にする：sum・count は 0（見出しごとは、enum の見出しなら options の全キーを順に heading と value 0 で並べ、月の見出しなら各見出しの value を 0 にする）、avg は null（見出しごとは各見出しの value を null にする）。異常（abnormal）の場合は集計元に触れず（emptyEntities に入れず、rows にその entity の行も置かない）、期待の value を null にする。どちらも対象（targetId）はその計算の行、observes は empty-aggregate、期待の kind は ok にする。集計元の行を置かずに observes を value にした集計の場合も、期待は同じ値（空と明示すれば種類で決まる値、しなければ null）にする。正常の場合（observes は value）は今までどおり集計元の行を rows に置いて書く。";
 
 /**
  * 所属の行だけで試験が決まる性質（view-structure・existence）の C4 の試験の型の共通の欄（#624）。評価器は screen 操作の試験で
@@ -485,7 +492,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
     rules: {
       ...INHERITED.rules,
       t2Ids:
-        "構造の検査（operation が structure の試験）と画面の試験（operation が screen の試験。画面・項目 × screen の view-structure）は作らない（コードが作る。確かめ方が structural の要件は要件の一覧に無い）。どの試験も operation を structure・screen にせず、assertion は null にする。",
+        "構造の検査と画面の試験（画面・項目 × screen の view-structure）は作らない（コードが作る。確かめ方が structural の要件は要件の一覧に無い）。場合の対象（targetId）に画面の行を書かない。",
     },
   },
   {
@@ -512,7 +519,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
     },
     rules: {
       ...INHERITED.rules,
-      t2Ids: "entity × screen の試験（observes は existence）は作らない（コードが作る）。",
+      t2Ids: "entity が在ることの試験（observes は existence）は作らない（コードが作る）。どの場合にも observes を existence と書かない。",
     },
   },
   {
@@ -718,7 +725,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       t1Acceptance: null,
       t2: EMPTY_AGGREGATE_T2_RULE,
       t2Ids:
-        `集計（計算の行の type の form が aggregate）の行のうち、アプリ全体（type の scope が app）の行と、選択肢の見出しごと（groupBy の kind が enum）の行の、集計元を空と明示した境界（boundary）の試験と集計元に触れない異常（abnormal）の試験は作らない（コードが作る）。その行には、集計元の行を参照データに置いた正常の試験（observes は value）だけを作る。行ごと（type の scope が row）の集計と月の見出しごと（groupBy の kind が month）の集計の行は、次のとおり作る：${EMPTY_AGGREGATE_T2_RULE}`,
+        `集計（計算の行の type の form が aggregate）の行のうち、アプリ全体（type の scope が app）の行と、選択肢の見出しごと（groupBy の kind が enum）の行の、集計元を空と明示した境界（boundary）の試験と集計元に触れない異常（abnormal）の試験は作らない（コードが作る）。その行には、集計元の行を参照の行（rows）に置いた正常の場合（observes は value）だけを書く。行ごと（type の scope が row）の集計と月の見出しごと（groupBy の kind が month）の集計の行は、次のとおり書く：${EMPTY_AGGREGATE_T2_CASES_RULE}`,
       b1: "名前の表の計算の行の type に aggregate があれば、宣言のその計算の aggregate の種類（sum・count・avg）と集計元の entity を、その行の aggregate の種類と、集計元の entity の行の名前のとおりに書く。",
     },
   },

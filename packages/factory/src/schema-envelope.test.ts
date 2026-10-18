@@ -38,6 +38,7 @@ import {
 import { SURFACE_DIFF_SCHEMA_NAME } from "./plan/surface.js";
 import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./v11a/stages/name-table.js";
 import { TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
+import { testCasesSchemaOf } from "./v12/test-cases.js";
 import { PROPERTY_LEDGER_VIEW, V12_FLAGS_OFF, V12_PIPELINE_FLAGS, fromPublicV12Flags } from "./v12/ledger.js";
 import { VOCABULARY_BUNDLES } from "./v12/ids.js";
 import { MAPPING_SCHEMA_NAME, mappingSchemaOf } from "./v12/stages/mapping.js";
@@ -63,7 +64,8 @@ function strictProblems(schema: unknown): readonly string[] {
     }
     const type = node["type"];
     const types = Array.isArray(type) ? type : typeof type === "string" ? [type] : undefined;
-    if (types === undefined) problems.push(`${path}: type が無い`);
+    // type の無い節は、枝（anyOf）だけを持つときに限る（枝ごとに下で照らす。旗 v12.ids の T2 の期待。#625）
+    if (types === undefined && !Array.isArray(node["anyOf"])) problems.push(`${path}: type が無い`);
     if (types?.includes("object")) {
       if (node["additionalProperties"] !== false) {
         problems.push(`${path}: object の additionalProperties が false でない`);
@@ -501,12 +503,13 @@ describe("経路 v1.2 の封筒は 1 つ（旗の組から導き、全段で同�
             : STAGE_ENVELOPE_ENTRIES_V11A[index]?.schema;
       expect(entry.schema, entry.stage).toEqual(expected);
     }
-    // T2 の枝は旗 ids からも導く（operation の enum に structure が無く assertion は null だけ。#624）。ledger だけ on の一覧は今のまま
-    const t2Of = (entries: readonly StageEnvelopeEntry[]) => entries.find((entry) => entry.stage === TEST_SPEC_SCHEMA_NAME)?.schema as {
-      readonly properties: { readonly tests: { readonly items: { readonly properties: { readonly operation: { readonly enum: readonly string[] }; readonly assertion: unknown } } } };
-    };
-    expect(t2Of(STAGE_ENVELOPE_ENTRIES_V12).properties.tests.items.properties.operation.enum).not.toContain("structure");
-    expect(t2Of(STAGE_ENVELOPE_ENTRIES_V12).properties.tests.items.properties.assertion).toEqual({ type: "null", description: "構造の検査はコードが作るので、null にする" });
+    // T2 の枝は旗 ids からも導く（場合の schema。骨組みの欄〔id・operation・clock・assertion〕が無い。#624・#625）。ledger だけ on の一覧は今のまま
+    const t2Of = (entries: readonly StageEnvelopeEntry[]) => entries.find((entry) => entry.stage === TEST_SPEC_SCHEMA_NAME)?.schema;
+    expect(t2Of(STAGE_ENVELOPE_ENTRIES_V12)).toEqual(testCasesSchemaOf(PROPERTY_LEDGER_VIEW));
+    const caseItems = testCasesSchemaOf(PROPERTY_LEDGER_VIEW).properties.cases.items;
+    expect(caseItems.required).toEqual(["requirementId", "targetId", "kind", "observes", "input", "targetRowId", "rows", "expected", "emptyEntities"]);
+    for (const key of ["id", "operation", "clock", "assertion", "target", "inputContract", "referenceData"]) expect(Object.keys(caseItems.properties), key).not.toContain(key);
+    expect(strictProblems(buildStageBranch({ stage: TEST_SPEC_SCHEMA_NAME, schema: t2Of(STAGE_ENVELOPE_ENTRIES_V12) }))).toEqual([]);
     expect(t2Of(stageEnvelopeEntriesV12Of({ ledger: true, ids: false }))).toEqual(testSpecSchemaOf(PROPERTY_LEDGER_VIEW));
     // 旗 ledger が off なら v1.1α と同じ一覧（導出は旗の組だけで決まる）
     expect(stageEnvelopeEntriesV12Of(V12_FLAGS_OFF)).toEqual(STAGE_ENVELOPE_ENTRIES_V11A);
@@ -578,6 +581,22 @@ describe("経路 v1.2 の封筒は 1 つ（旗の組から導き、全段で同�
     const t1 = resolveStageEnvelope(NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf(PROPERTY_LEDGER_VIEW), "v1.1a");
     expect(t1?.name).toBe(ENVELOPE_SCHEMA_NAME_V11A);
     expect(t1?.schema).toBe(ENVELOPE_SCHEMA_V12_LEDGER);
+  });
+});
+
+describe("strict の照合：型の無い節は枝（anyOf）だけを持つときに限り、枝ごとに照らす（Issue #625）", () => {
+  const wrap = (node: unknown) => ({ type: "object", additionalProperties: false, required: ["x"], properties: { x: node } });
+  const strictBranch = { type: "object", additionalProperties: false, required: ["a"], properties: { a: { type: "string" } } };
+  it("正例：strict の枝だけの anyOf は通る", () => {
+    expect(strictProblems(wrap({ anyOf: [strictBranch, strictBranch] }))).toEqual([]);
+  });
+  it("負例：anyOf の枝が strict に反すれば落ちる（additionalProperties・required・型の無い枝）。型も anyOf も無い節は今までどおり落ちる", () => {
+    expect(strictProblems(wrap({ anyOf: [strictBranch, { ...strictBranch, additionalProperties: true }] }))).toEqual([
+      "#/properties/x/anyOf/1: object の additionalProperties が false でない",
+    ]);
+    expect(strictProblems(wrap({ anyOf: [{ ...strictBranch, required: [] }] }))).toEqual(["#/properties/x/anyOf/0: 欄 a が required に無い"]);
+    expect(strictProblems(wrap({ anyOf: [{ properties: {} }] }))).toEqual(["#/properties/x/anyOf/0: type が無い"]);
+    expect(strictProblems(wrap({ description: "型も枝も無い" }))).toEqual(["#/properties/x: type が無い"]);
   });
 });
 

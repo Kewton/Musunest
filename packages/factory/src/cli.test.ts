@@ -71,6 +71,7 @@ import {
   t1ResponseOf,
   withAggregates,
   codeIdRenameOf,
+  casesResponseOf,
   idsResponseList,
   idsResponsesOf,
   renameIds,
@@ -945,16 +946,20 @@ function v11aTestSpec(): Record<string, unknown> {
   };
 }
 
+/** 手 3e（#625）で旗 ids の走りだけ場合の形に差し替えた、欄の名前を指す T2 の規則 */
+const CASE_FORM_RULE_IDS: readonly string[] = ["R-tsp-07", "R-tsp-09", "R-tsp-11", "R-tsp-12", "R-tsp-13", "R-tsp-14"];
+
 /**
  * 旗 v12.ids の走りの T2 の応答（手 3d・Issue #624：構造の要件 R2 は要求の一覧に無く、構造の検査はコードが作るので、R2 の試験と
  * 分類を書かない）
  */
 function v12TestSpec(): Record<string, unknown> {
   const spec = v11aTestSpec() as { classifications: readonly { requirementId: string }[]; tests: readonly { target: { requirementId: string } }[] };
-  return {
+  // 手 3e（#625）：旗 ids の T2 の応答は同じ内容の場合の形（骨組みはコードが組む）
+  return casesResponseOf({
     classifications: spec.classifications.filter((entry) => entry.requirementId !== "R2"),
     tests: spec.tests.filter((test) => test.target.requirementId !== "R2"),
-  };
+  });
 }
 
 /** T1''・B3' の判定（`rejects` の要件だけ拒否） */
@@ -1297,7 +1302,18 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
         for (const name of [verificationName, ownershipName]) {
           input = rewrite(input, name, (parsed) => (parsed as readonly { readonly requirementId: string }[]).filter(notR2));
         }
-        return { ...request, input, ...(ledger === undefined ? {} : { schema: JSON.parse(JSON.stringify(testSpecSchemaOf(ledger))) as unknown }) };
+        // 旗 ids の走りの規則のうち、場合の形に差し替えた欄の名前の文（R-tsp-07・09・11・12・13・14。#625）は旗 ids off の文に戻す
+        // （R-tsp-16 は台帳の差として名指しで照らし、`withoutIdsGenerated` が戻す）
+        const idsDefinitions = ledger === undefined ? [] : testSpecRuleDefinitionsOf(ledger, true);
+        const offDefinitions = ledger === undefined ? [] : testSpecRuleDefinitionsOf(ledger);
+        const casesTexts = new Map(
+          idsDefinitions.flatMap((definition, index) => {
+            const off = offDefinitions[index];
+            return CASE_FORM_RULE_IDS.includes(definition.id) && off !== undefined ? [[ruleTexts([definition])[0] ?? "", ruleTexts([off])[0] ?? ""] as const] : [];
+          }),
+        );
+        const rules = (request.rules ?? []).map((text) => casesTexts.get(text) ?? text);
+        return { ...request, input, ...(ledger === undefined ? {} : { rules, schema: JSON.parse(JSON.stringify(testSpecSchemaOf(ledger))) as unknown }) };
       }
       if (request.schemaName === WRITE_V11A_SCHEMA_NAME) {
         const input = rewrite(request.input, testsName, (parsed) => {
@@ -1316,6 +1332,19 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
       return request;
     });
   };
+  /**
+   * 手 3e（#625）：旗 ids の走りの LLM の試験は場合から展開するので、試験 ID（case: と連番）と時計（定数）はコードが振る。B1 の
+   * 「固定した試験」の塊の試験 ID と時計を両側から除いて比べる（ほかの欄は触らない）
+   */
+  const withoutTestIdClock = (requests: unknown): unknown[] =>
+    (requests as readonly unknown[]).map(
+      (request) =>
+        JSON.parse(
+          JSON.stringify(request)
+            .replace(/\\"id\\": \\"[^\\]*\\",(\\n *)\\"target\\"/g, '\\"id\\": \\"-\\",$1\\"target\\"')
+            .replace(/\\"clock\\": \\"[^\\]*\\"/g, '\\"clock\\": \\"-\\"'),
+        ) as unknown,
+    );
   const withoutTableStage = (diff: Readonly<Record<string, readonly string[]>>): Readonly<Record<string, readonly string[]>> =>
     Object.fromEntries(Object.entries(diff).filter(([name]) => name !== "name-table"));
 
@@ -1347,7 +1376,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     const onRequests = withoutStructuralRequirement(withoutCheckTargets(onWithTargets), PROPERTY_LEDGER_VIEW);
     const offRequests = withoutStructuralRequirement(laterRequests(v11a.recording.structured));
     expect(onRequests).toHaveLength(offRequests.length);
-    const diffs = requestDiffsOf(onRequests, offRequests);
+    // 試験 ID と時計はコードが振る（#625）。両側から除いて差を見る
+    const diffs = requestDiffsOf(withoutTestIdClock(onRequests), withoutTestIdClock(offRequests));
     const withInput = (paths: readonly string[]): readonly string[] => {
       const at = paths.findIndex((path) => path.startsWith("$.schema"));
       return at < 0 ? [...paths, "$.input"] : [...paths.slice(0, at), "$.input", ...paths.slice(at)];
@@ -1360,7 +1390,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(diffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual([...Object.keys(ledgerDiff), "decl-check"]);
     // 旗 ids on の差（Issue #595）：T2 の R-tsp-16（$.rules[15]）が台帳の旗 ids の文になり、B1 の「固定した試験」（$.input）の末尾に
     // コードが作った試験が並ぶ。この 2 つだけを ids on 側から除いて（R-tsp-16 は旗 off の文に戻して）比べる
-    expect(JSON.stringify(withoutLedgerAdditions(withoutIdsGenerated(onRequests)))).toBe(JSON.stringify(offRequests));
+    expect(JSON.stringify(withoutTestIdClock(withoutLedgerAdditions(withoutIdsGenerated(onRequests))))).toBe(JSON.stringify(withoutTestIdClock(offRequests)));
     // #548 までの旗 on（台帳に empty-aggregate の行が無い）は、同じ応答で差が enum-membership の行の分だけ（今までの期待）
     const spy = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2B : undefined));
     const v12Before = await runV11aCli({ dir: `${directory}/v12-complete-2b`, calls: [...v12Head(LEDGER_VIEW_2B), structured(v11aJudgments())], pipeline: "v1.2" });
@@ -1373,11 +1403,11 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
       LEDGER_VIEW_2B,
       true,
     );
-    const beforeDiffs = requestDiffsOf(beforeRequests, offRequests);
+    const beforeDiffs = requestDiffsOf(withoutTestIdClock(beforeRequests), withoutTestIdClock(offRequests));
     const enumDiff = withoutTableStage(ENUM_MEMBERSHIP_REQUEST_DIFF);
     for (const diff of beforeDiffs) expect(diff.paths, diff.schemaName).toEqual(enumDiff[diff.schemaName] ?? []);
     expect(beforeDiffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(enumDiff));
-    expect(JSON.stringify(withoutEnumMembership(beforeRequests))).toBe(JSON.stringify(offRequests));
+    expect(JSON.stringify(withoutTestIdClock(withoutEnumMembership(beforeRequests)))).toBe(JSON.stringify(withoutTestIdClock(offRequests)));
     // 要約は、C1 の束 3 の参照の照合の数（#548 の台帳には集計の種類が無いので集計元の参照を数えない）のほかは同じ
     const withoutReferences = (summary: Record<string, unknown>) =>
       JSON.parse(JSON.stringify(summary, (key, value: unknown) => (key === "references" ? undefined : value))) as unknown;
@@ -1494,7 +1524,15 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
   // 段の検証と、モデルに届く形がずれる共通の原因を、送信の body で塞ぐ（旗 off・on・v1 の全段）。
   const v11aStages = STAGE_ENVELOPE_ENTRIES_V11A.map((entry) => entry.stage);
 
-  const v12ReturnToPlan = (): RecordedCall[] => [...v12Head(), ...v11aReturnToPlan().slice(4)];
+  // 旗 ids の走りの試験 ID はコードが場合の順に振る（case: と連番。#625）。B5 の主張と ⑥' の裁定が指す r4-normal を同じ試験の ID に引き直す
+  const v12ReturnToPlan = (): RecordedCall[] => {
+    const tests = (v11aTestSpec() as { readonly tests: readonly { readonly id: string; readonly target: { readonly requirementId: string } }[] }).tests.filter((test) => test.target.requirementId !== "R2");
+    const index = tests.findIndex((test) => test.id === "r4-normal");
+    // 見つからなければ落とす（case:0 などへ黙って化けない）
+    expect(index, "r4-normal が T2 の場合に無い").toBeGreaterThanOrEqual(0);
+    const caseId = `case:${String(index + 1)}`;
+    return [...v12Head(), ...(JSON.parse(JSON.stringify(v11aReturnToPlan().slice(4)).replaceAll('"r4-normal"', `"${caseId}"`)) as RecordedCall[])];
+  };
 
   /** 走りの段の要求を、入口が作った adapter の封筒で送り直した組（`--pipeline v1.2` は v1.2 の封筒。Issue #588） */
   async function exchangesOfRun(run: Awaited<ReturnType<typeof runV11aCli>>, pipeline: "v1.1a" | "v1.2" = "v1.1a"): Promise<WireExchange[]> {

@@ -80,6 +80,14 @@ import {
   type GeneratedTests,
   type LedgerTarget,
 } from "../../v12/generated-tests.js";
+import {
+  checkTestCasesOutput,
+  expandTestCases,
+  testCasesSchemaOf,
+  toCasePositions,
+  type TestCase,
+  type TestCasesOutput,
+} from "../../v12/test-cases.js";
 
 /** T2 の JSON Schema の名前 */
 export const TEST_SPEC_SCHEMA_NAME = "test-spec";
@@ -699,12 +707,35 @@ export const TEST_SPEC_RULES: readonly string[] = ruleTexts(TEST_SPEC_RULE_DEFIN
 const TEST_SPEC_LEDGER_FORM_HEAD =
   "試験ごとに、観測する性質（observes）を 1 つ書く。組は次のどれかに限る：計算 × compute・aggregate は value、項目・entity × validate は validation、操作 × action は when、画面 × screen は view-structure、項目 × screen は view-structure、entity × screen は existence、構造の検査（structure）は view-shows なら view-structure・ほかの中身なら existence。";
 
+/** R-tsp-16 の、台帳の文の前の旗 `v12.ids` の場合の形（操作はコードが対象の行から導く。#625） */
+const TEST_SPEC_CASES_FORM_HEAD =
+  "場合ごとに、観測する性質（observes）を 1 つ書く。組は次のどれかに限る：計算の行は value、項目・entity の行は validation、操作の行は when。期待（expected）は kind が ok なら value だけ、error なら code だけを書く。";
+
+/**
+ * 旗 `v12.ids` の T2 の規則のうち、欄の名前を指す文の場合の形（JSON の文字列の書き方・対象の指し方・入力の契約・値の鍵・時計・
+ * 要件 ID。#625）。ID・why は変えず、since に場合の形の履歴を足す。「名前を推測しない」「要件の文から独立に分類する」「異常の期待は
+ * 操作ごとの型」の文は変えない
+ */
+const TEST_SPEC_CASES_TEXTS: Readonly<Record<string, string>> = {
+  "R-tsp-07":
+    "入力の値（input.values）と参照の行の値（rows の values）と期待の値（expected.value）は、任意の JSON を表すので、**JSON の文字列**として書く（例: \"{\\\"f.example.amount\\\": 21}\"）。",
+  "R-tsp-09":
+    "場合の対象（targetId）は**表の id** で指し、その要件の所属にある id から選ぶ。操作と対象の種類はコードが対象の行から決める（計算の行は種別 aggregate なら aggregate・ほかは compute、項目と entity の行は validate、操作の行は action）。参照の行（rows）の entityId には、参照元の entity の表の id を書く。",
+  "R-tsp-11":
+    "入力（input）に固定の行 ID（rowId）と値（values。入力が無ければ空の写像 \"{}\"）を、評価の対象の行 ID（targetRowId）に入力か参照の行の rowId（行を評価しないときは null）を、空であることを明示する entity の表の id を emptyEntities に書く。同じ場合の中で行 ID を重ねない。参照の値（ref・list）に書く行 ID は、その行の rowId と同じにする。",
+  "R-tsp-12":
+    "入力の値（input.values）と参照の行の値（rows の values）の直下の鍵は、その entity（参照の行は entityId の entity）の項目（kind が field）の表の id だけにする。行の ID は input.rowId・rows の rowId に置き、値の鍵（id・rowId）にしない。値の無い参照の行も、値を空の写像（\"{}\"）にして entityId を書く。",
+  "R-tsp-13": "試験の ID・操作（operation）・時計（clock）・構造の検査の中身（assertion）はコードが決めるので、場合に書かない。",
+  "R-tsp-14":
+    "場合の要件 ID（requirementId）は要件の一覧のものだけを使う。一覧に無い要件 ID を作らない。確定した仕様にあっても一覧に無い要件（持ち越しの要件）の場合は書かない。",
+};
+
 /**
  * T2 の規則の定義（旗 on なら台帳から組む。Issue #547）。省けば今の定数を返す。渡せば R-tsp-02 の除外（structural と、
  * 試験の型の必須の kind が normal だけの確かめ方の種類。台帳の順）と、R-tsp-16 の形の位置（有効の行の文 → 未対応の行の
  * 文。台帳の順）を台帳から組み直す（ID・why・since は変えない）。手 2a では off の定数とバイト列で同じになる。
  * `ids`（旗 `v12.ids`）が真なら、R-tsp-16 の形の位置は行の旗 ids の文（コードが作る範囲を「作らない」に差し替えた文。無い行は
- * 今の文）にする（Issue #595）。
+ * 今の文）にする（Issue #595）。さらに欄の名前を指す文（`TEST_SPEC_CASES_TEXTS`）と R-tsp-16 の頭を場合の形にする（#625）。
  */
 export function testSpecRuleDefinitionsOf(ledger?: LedgerView, ids = false): readonly RuleDefinition[] {
   if (ledger === undefined) return TEST_SPEC_RULE_DEFINITIONS;
@@ -719,9 +750,12 @@ export function testSpecRuleDefinitionsOf(ledger?: LedgerView, ids = false): rea
     if (definition.id === "R-tsp-16") {
       return {
         ...definition,
-        text: `${TEST_SPEC_LEDGER_FORM_HEAD}${(ids ? ledger.t2IdsFormTexts : ledger.t2FormTexts).join("")}${ledger.t2UnsupportedTexts.join("")}`,
+        text: `${ids ? TEST_SPEC_CASES_FORM_HEAD : TEST_SPEC_LEDGER_FORM_HEAD}${(ids ? ledger.t2IdsFormTexts : ledger.t2FormTexts).join("")}${ledger.t2UnsupportedTexts.join("")}`,
+        ...(ids ? { since: `${definition.since}（旗 v12.ids の場合の形は #625）` } : {}),
       };
     }
+    const casesText = ids ? TEST_SPEC_CASES_TEXTS[definition.id] : undefined;
+    if (casesText !== undefined) return { ...definition, text: casesText, since: `${definition.since}（旗 v12.ids の場合の形は #625）` };
     return definition;
   });
 }
@@ -765,11 +799,14 @@ export const TEST_SPEC_SCHEMA = {
 
 /**
  * T2 の JSON Schema（旗 on なら observes の enum を台帳の順にする。Issue #547）。省けば今の定数を返す。欄の並びは
- * 変えない（off の定数とバイト列で同じ JSON になる）。`ids`（旗 `v12.ids`）が真なら、operation の enum から structure を外し、
- * assertion を null だけを許す型にする（構造の検査はコードが作るので、構文で書けなくする。08 §6・Issue #624）。
+ * 変えない（off の定数とバイト列で同じ JSON になる）。`ids`（旗 `v12.ids`）が真なら、場合の schema（`testCasesSchemaOf`。
+ * 骨組みはコードが組むので、値の要る欄だけを書かせる。構造の検査の欄も無い。08 §4・§6・Issue #624・#625）を返す。
  */
-export function testSpecSchemaOf(ledger?: LedgerView, ids = false): typeof TEST_SPEC_SCHEMA {
+export function testSpecSchemaOf(ledger?: LedgerView, ids?: false): typeof TEST_SPEC_SCHEMA;
+export function testSpecSchemaOf(ledger: LedgerView | undefined, ids: boolean): unknown;
+export function testSpecSchemaOf(ledger?: LedgerView, ids = false): unknown {
   if (ledger === undefined) return TEST_SPEC_SCHEMA;
+  if (ids) return testCasesSchemaOf(ledger);
   const tests = TEST_SPEC_SCHEMA.properties.tests;
   const properties = tests.items.properties;
   return {
@@ -782,12 +819,6 @@ export function testSpecSchemaOf(ledger?: LedgerView, ids = false): typeof TEST_
           ...tests.items,
           properties: {
             ...properties,
-            ...(ids
-              ? {
-                  operation: { ...properties.operation, enum: properties.operation.enum.filter((operation) => operation !== "structure") },
-                  assertion: { type: "null", description: "構造の検査はコードが作るので、null にする" },
-                }
-              : {}),
             observes: { ...properties.observes, enum: [...ledger.observes] },
           },
         },
@@ -991,6 +1022,11 @@ export interface TestSpecValue {
   readonly discrepancies: readonly NatureDiscrepancy[];
   /** 固定の前に外した試験（回ごとに数える） */
   readonly dropped: readonly DroppedNonstructuralTest[];
+  /**
+   * 旗 `v12.ids` の走りだけ：通った回の応答で LLM が書いた場合の数と、応答（場合の形の JSON を直列化したもの）の文字数
+   * （前後比較が読む。off の走りは欄が無い。#625）
+   */
+  readonly cases?: { readonly count: number; readonly responseChars: number };
 }
 
 /**
@@ -1196,7 +1232,9 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
         });
   const rules = ledger === undefined ? TEST_SPEC_RULES : ruleTexts(testSpecRuleDefinitionsOf(ledger, ids));
   const schema = testSpecSchemaOf(ledger, ids);
-  const check = (output: unknown): ShapeCheck<TestSpecOutput> => checkTestSpecOutput(output, ledger);
+  // 旗 `v12.ids`：応答は場合の形（形の検査は場合の型だけ）。展開と今の形の検査は中身の段で掛ける（#625）
+  const check = (output: unknown): ShapeCheck<TestSpecOutput | TestCasesOutput> =>
+    ids ? checkTestCasesOutput(output, ledger) : checkTestSpecOutput(output, ledger);
 
   let previous: readonly Problem[] = [];
   let previousTests: readonly unknown[] | undefined;
@@ -1226,7 +1264,43 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
           }),
     });
     if (!answer.ok) return answer;
-    const answered = answer.value.suite;
+    // 旗 `v12.ids`：場合を今の形へ展開し、展開した組に今の形の検査を掛ける。展開できない・形に合わない場合は中身の落ちとして
+    // 作り直させる（補わない。位置は場合の添字と欄名。回数は今のまま。#625）
+    let spec: TestSpecOutput;
+    let raw: unknown = answer.output;
+    let cases: readonly TestCase[] | undefined;
+    let caseIndexById: ReadonlyMap<string, number> = new Map();
+    if (ids) {
+      const casesOutput = answer.value as TestCasesOutput;
+      cases = casesOutput.cases;
+      // 展開は全部の表で引く（持ち越しの要件の試験も展開し、今までどおり v1 の検査が「一覧に無い要件 ID」として落とす）
+      const expanded = expandTestCases(casesOutput, input.table);
+      const checked = expanded.ok ? checkTestSpecOutput(expanded.output, ledger) : undefined;
+      if (!expanded.ok || checked === undefined || !checked.ok) {
+        const found = !expanded.ok
+          ? expanded.problems
+          : toCasePositions(checked?.ok === false ? checked.problems : [], expanded.output.tests as readonly { readonly id: string }[], expanded.caseIndexById);
+        onRejected?.({
+          kind: "content",
+          round,
+          attempt: shapeRejections + 1,
+          target: expanded.ok ? expanded.output : cases,
+          response: answer.output,
+          inspectionList: requestList,
+          problems: withReference(found, "response"),
+        });
+        previous = found;
+        previousTests = cases;
+        if (round < TEST_SPEC_ROUNDS) input.gateway.noteRetry("content");
+        continue;
+      }
+      spec = checked.value;
+      raw = expanded.output;
+      caseIndexById = expanded.caseIndexById;
+    } else {
+      spec = answer.value as TestSpecOutput;
+    }
+    const answered = spec.suite;
 
     // 構造で確かめる要件の、構造の検査でない試験を、照合と固定の前に外す（v1 の ②' と同じ）
     const dropResult = dropNonstructuralTests(design, answered, round);
@@ -1238,7 +1312,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
     // 分類の完全性を照合の前に確かめる。欠ければ判定に聞かず、中身の落ちとして作り直させる
     const classificationProblems = checkClassificationCompleteness(requestList, answered.classifications);
     let suite: TestSuite = dropResult.suite;
-    let observes = observesOf(suite.tests, answer.value.observes);
+    let observes = observesOf(suite.tests, spec.observes);
     let problems: readonly Problem[] = classificationProblems;
     // この回に足したコードの試験の数（組の末尾。前回の試験の塊には LLM の試験だけを返す。Issue #595）
     let added = 0;
@@ -1263,7 +1337,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
       const adopted = new Map<string, RequirementNature>();
       for (const entry of reconciled.discrepancies) adopted.set(entry.requirementId, entry.resolved);
       suite = withAdoptedNatures(dropResult.suite, adopted);
-      observes = observesOf(suite.tests, answer.value.observes);
+      observes = observesOf(suite.tests, spec.observes);
 
       // 旗 `v12.ids`：コードが作った試験を LLM の試験のあとに足し、検査・観測する性質・網羅の単位・SHA は足した組で測る
       // （評価口・v1 の検査は作り手を区別しない）。LLM の試験とコードの試験の重なりと予約の接頭辞は固定文で落とす（Issue #595）
@@ -1275,10 +1349,11 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
         suite = { ...suite, tests: [...suite.tests, ...kept.tests] };
         observes = new Map([...llmObserves, ...(kept.observes as ReadonlyMap<string, TestObserves>)]);
       }
+      // 期待の値が JSON の文字列か（旗 ids は展開した raw の組から見る。展開は場合の値の文字列をそのまま写すので、場合から見るのと同じ）
       const quoted =
         kept === undefined
-          ? jsonStringExpectedIds(answer.output)
-          : new Set([...jsonStringExpectedIds(answer.output), ...kept.tests.map((test) => test.id)]);
+          ? jsonStringExpectedIds(raw)
+          : new Set([...jsonStringExpectedIds(raw), ...kept.tests.map((test) => test.id)]);
 
       // v1 の検査（新契約）＋評価可能性。持ち越しの要件の試験は、除いた一覧で「一覧に無い要件 ID」として落ちる
       // v1 の検査は組全体と残る一覧で 1 回だけ呼び、既定値の要件の異常・境界の不足の 2 文だけを外す（Issue #533）
@@ -1287,7 +1362,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
           ? [
               ...exemptDefaultValueProblems(checkSuitePlan(list, suite, design, reconciled.natures), list, defaults),
               ...checkEvaluability(suite, observes, pruned.table),
-              ...checkDefaultValueTests(suite, observes, defaults, jsonStringExpectedIds(answer.output)),
+              ...checkDefaultValueTests(suite, observes, defaults, jsonStringExpectedIds(raw)),
             ]
           : [
               ...toRequestPositions(
@@ -1319,6 +1394,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
             natures: reconciled.natures,
             discrepancies: reconciled.discrepancies,
             dropped: droppedAll,
+            ...(cases === undefined ? {} : { cases: { count: cases.length, responseChars: JSON.stringify(answer.output).length } }),
           },
         };
       }
@@ -1332,10 +1408,11 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
       inspectionList: requestList,
       problems: withReference(problems, "target"),
     });
-    previous = problems;
-    previousTests = suite.tests
-      .slice(0, suite.tests.length - added)
-      .map((test) => ({ ...test, observes: observes.get(test.id) ?? null }));
+    // 旗 `v12.ids`：前回の試験は前回の場合（展開前）の形で返し、問題の位置を展開後の組の添字から場合の添字へ写す（#625）
+    previous = cases === undefined ? problems : toCasePositions(problems, suite.tests, caseIndexById);
+    previousTests =
+      cases ??
+      suite.tests.slice(0, suite.tests.length - added).map((test) => ({ ...test, observes: observes.get(test.id) ?? null }));
     if (round < TEST_SPEC_ROUNDS) input.gateway.noteRetry("content");
   }
   return { ok: false, failure: { kind: "unmet", attempts: TEST_SPEC_ROUNDS, problems: previous } };
