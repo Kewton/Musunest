@@ -2801,7 +2801,7 @@ test("#513 停止の台帳：failure-modes.md に N1〜N8 の 8 行があり、�
   const rows = text.split("\n").filter((l) => /^\| N\d+ \|/.test(l)).map((l) => l.split("|").slice(1, -1).map((c) => c.trim()));
   assert.deepEqual(rows.map((r) => r[0]), ["N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8"]);
   for (const r of rows) {
-    assert.equal(r.length, 9, `${r[0]} の列の数`);
+    assert.equal(r.length, 10, `${r[0]} の列の数（#633 で「最初の上流の落ち」の列を末尾に足した）`);
     assert.equal(r[6], "今回未観測（計測前）", r[0]);
     assert.match(r[5], /^未確定（設計の推定/, r[0]);
     assert.ok(!/R\d|P\d|role|\bf\.|\be\./.test(r.join("")), `${r[0]} に値（要件 ID・P・役割 ID）がある`);
@@ -2852,6 +2852,8 @@ const KEYS_538 = ["funnel", "pass_k", "verdicts", "unverified_details"];
 const KEYS_539 = ["agreement", "test_findings"];
 /** #632 が #539 の欄のあとに足す欄（PASS あたりの費用と段ごとの時間・usage） */
 const KEYS_632 = ["cost_per_pass", "stage_usage"];
+/** #633 が #632 の欄のあとに足す欄（遷移表と最初の上流の落ちの内訳） */
+const KEYS_633 = ["transitions", "first_upstream_failures"];
 
 test("#538 漏斗の規則 (a)〜(e)・(g)：1 回目で通過は最初の記録が ok・calls 1・retries 0（retries が無ければ ok と calls 1）。failed のあと ok は通過だが 1 回目ではない。calls 2 は 1 回目ではない。failed だけで failure.stage がその段なら停止。calls 0 の段は 1 回目が null。到達 0 の段は「今回未観測（0/予定）」", () => {
   // 純粋な規則
@@ -2910,7 +2912,7 @@ test("#538 漏斗の規則 (f)：未実行・途中の本は到達 0 で予定�
     conditions(out, ["P1-r1", "P1-r2", "P1-r3", "P1-r4"]);
     const r = scoreRun(out);
     const full = readScore(out);
-    assert.deepEqual(Object.keys(full), [...KEYS_BEFORE_538, ...KEYS_538, ...KEYS_539, ...KEYS_632], "既存の欄の並びはそのままで、新しい欄をあとに足す");
+    assert.deepEqual(Object.keys(full), [...KEYS_BEFORE_538, ...KEYS_538, ...KEYS_539, ...KEYS_632, ...KEYS_633], "既存の欄の並びはそのままで、新しい欄をあとに足す");
     const fu = full.funnel;
     assert.deepEqual([fu.planned, fu.executed], [4, 2], "(f) 予定 4 本（未実行・途中を含む）");
     assert.deepEqual([fu.stages.design.reached, fu.stages.design.first_pass, fu.stages.design.passed, fu.stages.design.reached_label], [2, 2, 2, "2/4"]);
@@ -3005,7 +3007,7 @@ test("#538 v11a-cmp2 と同じ形の fixture（30 本 × 2 群）で、設計書
     assert.deepEqual(c.groups[a].stops.values, c.groups[a].funnel.stops);
     assert.deepEqual(c.groups.v1.stops.values, c.groups.v1.funnel.stops);
     for (const g of ["v1", a]) for (const id of OLD_ROW_STAGES) assert.equal(c.groups[g].reach[id].reached, c.groups[g].funnel.stages[id].reached, `${g} ${id}`);
-    assert.deepEqual(Object.keys(c.groups[a]), ["role", "pipeline", "completion", "fingerprints", "pass_executed", "pass_planned", "factory_verdicts", "accepted", "stops", "reach", "carry_over", "funnel", "pass_k", "verdicts", ...KEYS_539, ...KEYS_632], "既存の群の欄のあとに足す");
+    assert.deepEqual(Object.keys(c.groups[a]), ["role", "pipeline", "completion", "fingerprints", "pass_executed", "pass_planned", "factory_verdicts", "accepted", "stops", "reach", "carry_over", "funnel", "pass_k", "verdicts", ...KEYS_539, ...KEYS_632, ...KEYS_633], "既存の群の欄のあとに足す");
     assert.match(r.stdout, /^v1\.1a 漏斗（予定 30 本・実行 30 本。.*: write 15／15／15／0・.*name-table 30／7／23／7・semantic-check 23／23／23／0・test-spec 23／11／15／8・decl-check 12／12／12／0（未観測 \d+ 段）・完走 11（不一致なし 3・あり 8・欠測 0）$/m);
     assert.match(r.stdout, /^v1\.1a pass\^3: 1\/10（.*P5 1,1,1・/m);
     assert.match(r.stdout, /^v1 pass\^3: 0\/10（/m);
@@ -3052,7 +3054,7 @@ test("#538 工場の判定の 4 値：正本は要約の verdict と assurance�
     // (g) 既存の欄は (a) でも partial のまま
     assert.equal(rowOf(full, "P1-r1").factory_verdict, "partial");
     assert.deepEqual(full.metrics.factory_verdicts, { partial: 5, full: 1, none: 2, [MARK538]: 1 }, "(g) 既存の factory_verdicts に unverified は出ない（要約の無い本は今までどおり none）");
-    assert.deepEqual(Object.keys(rowOf(full, "P1-r1")).slice(-2), ["factory_verdict4", "unverified_details"], "行の新しい鍵は既存の鍵のあと");
+    assert.deepEqual(Object.keys(rowOf(full, "P1-r1")).slice(-4), ["factory_verdict4", "unverified_details", "last_passed_stage", "first_upstream_failure"], "行の新しい鍵は既存の鍵のあと（#633 の 2 つはさらにそのあと）");
     // (h) 3 系統を別に数える。件数の分母は予定 10（未実行 1・途中 1 は not_run・absent）、率は実行 8・納品 6 の中
     const v = full.verdicts;
     assert.deepEqual([v.planned, v.executed, v.delivered], [10, 8, 6]);
@@ -3068,7 +3070,7 @@ test("#538 工場の判定の 4 値：正本は要約の verdict と assurance�
     assert.ok(!JSON.stringify({ funnel: full.funnel, verdicts: full.verdicts, v4: full.rows.map((x) => x.factory_verdict4) }).includes(MARK538), "知らない値をそのまま通さない");
     // 匿名の口：新しい欄は件数と率と段の ID・列挙の値だけ（本の ID・P の ID・目印・パスが無い）
     const anon = anonymize(full);
-    assert.deepEqual(Object.keys(anon), [...ANON_KEYS_BEFORE_538, ...KEYS_538, ...KEYS_539, ...KEYS_632]);
+    assert.deepEqual(Object.keys(anon), [...ANON_KEYS_BEFORE_538, ...KEYS_538, ...KEYS_539, ...KEYS_632, ...KEYS_633]);
     const text = JSON.stringify(KEYS_538.map((k) => anon[k]));
     assert.ok(!/P\d+/.test(text) && !text.includes(MARK538) && !text.includes(base), text.slice(0, 200));
     assert.deepEqual(anon.verdicts.factory.counts, v.factory.counts);
@@ -3333,7 +3335,7 @@ test("#539 内外の表・分類・段の役割ごとの対の差（v11a-cmp2 �
     // 標準出力：既存の行は変えず、群ごとの内外の表の 1 行と P のまとまりの 1 行を足す
     assert.match(r.stdout, /^v1 内外の表（予定 30 本・実行 30 本・未実行と途中 0 本。工場×外）: 原文系 partial×PASS 9・none×GEN_FAIL 21／了承後系 .*・試験の分類（読めた 9 本・欠測 21 本・45 件）: binding-defect 9・evaluator-coverage 18・test-defect 9・needs-human 9・unknown 0（食い違い 0）$/m);
     assert.match(r.stdout, /^v1\.1a 内外の表（.*原文系 partial×PASS 10・partial×FAIL 1・none×GEN_FAIL 19／/m);
-    assert.match(r.stdout.trimEnd().split("\n").at(-3), /^P のまとまり（m 10。.*）: PASS の差 平均 -?\d\.\d{3}・p \d\.\d{3}・bootstrap .*・通過の差 設計 平均 .*・判定 平均 /);
+    assert.match(r.stdout.trimEnd().split("\n").at(-4), /^P のまとまり（m 10。.*）: PASS の差 平均 -?\d\.\d{3}・p \d\.\d{3}・bootstrap .*・通過の差 設計 平均 .*・判定 平均 /);
     assert.ok(!/"stage_pairs"|"agreement"/.test(r.stdout), "既存の JSON の行に #539 の欄を足さない");
   });
 });
@@ -4469,8 +4471,8 @@ test("#631 比較（30 本 × 2 群）：noise が出力の末尾にあり、原
     }
     assert.equal(c.noise.stage_pairs.roles.design.passed.m, 10);
     const last = r.stdout.trimEnd().split("\n");
-    assert.match(last.at(-2), /^雑音の分解（判定には使わない目安）: 予測 \d\.\d{3}・データ \d\.\d{3}.*（(prediction|data|tie)）・検出できる差 K=3 \d\.\d{3}・K=6 \d\.\d{3}・下限 \d\.\d{3}（m 10・P 内の分散を出せた P \d+）$/);
-    assert.match(last.at(-3), /^P のまとまり（m 10。/, "既存の行の後ろ");
+    assert.match(last.at(-3), /^雑音の分解（判定には使わない目安）: 予測 \d\.\d{3}・データ \d\.\d{3}.*（(prediction|data|tie)）・検出できる差 K=3 \d\.\d{3}・K=6 \d\.\d{3}・下限 \d\.\d{3}（m 10・P 内の分散を出せた P \d+）$/);
+    assert.match(last.at(-4), /^P のまとまり（m 10。/, "既存の行の後ろ");
     assert.ok(!r.stdout.includes('"noise"'), "既存の JSON の行に noise を足さない");
     // 匿名
     const rc = scoreCompareRun(f.out, ["--anonymous"]);
@@ -4643,8 +4645,8 @@ test("#632 比較（30 本 × 2 群）：群ごとに cost_per_pass・stage_usag
     assert.deepEqual(Object.keys(c.groups.v1.stage_usage.stages), ["design", "test-suite", "write", "static-check", "correspondence", "run-tests", "repair", "judge"]);
     assert.deepEqual([c.pass_vs_cost.pass_diff, c.pass_vs_cost.cost_diff, c.pass_vs_cost.direction, c.pass_vs_cost.reason], [1, 0, "frontier", null]);
     const lines = r.stdout.trimEnd().split("\n");
-    assert.match(lines.at(-1), /^PASS 対 費用（判定には使わない記述）: v1 PASS 9\/30・費用 合計 1\.5 USD（読めた 30\/30・未実行 0・途中 0・要約なし 0）・PASS あたり 0\.166667 USD（区間 [\d.]+〜[\d.]+）／v1\.1a PASS 10\/30・.*／差（候補（v1\.1a）− 比較元（v1））PASS \+1・費用 0 USD・向き frontier（前線に乗る（PASS が増え費用が減る））・段の時間 上位 3: v1 .*／v1\.1a .*$/);
-    assert.match(lines.at(-2), /^雑音の分解/, "既存の行の後ろ");
+    assert.match(lines.at(-2), /^PASS 対 費用（判定には使わない記述）: v1 PASS 9\/30・費用 合計 1\.5 USD（読めた 30\/30・未実行 0・途中 0・要約なし 0）・PASS あたり 0\.166667 USD（区間 [\d.]+〜[\d.]+）／v1\.1a PASS 10\/30・.*／差（候補（v1\.1a）− 比較元（v1））PASS \+1・費用 0 USD・向き frontier（前線に乗る（PASS が増え費用が減る））・段の時間 上位 3: v1 .*／v1\.1a .*$/);
+    assert.match(lines.at(-3), /^雑音の分解/, "既存の行の後ろ");
     assert.ok(!/"pass_vs_cost"|"cost_per_pass"|"stage_usage"/.test(r.stdout), "既存の JSON の行に足さない");
     // 匿名
     const ra = scoreCompareRun(f.out, ["--anonymous"]);
@@ -4673,7 +4675,7 @@ test("#632 既存の欄を変えていない：#632 の欄を足す 3 行だけ�
     const src = readFileSync(scoreFile, "utf8"), line = /^ {4,6}(?:cost_per_pass|pass_vs_cost): .*\n/gm;
     assert.equal((src.match(line) ?? []).length, 3, "#632 の欄を足すのは採点・群・比較の 3 行だけ");
     const old = join(base, "before-632-score-agent.mjs");
-    writeFileSync(old, src.replace(line, ""));
+    writeFileSync(old, src.replace(line, "").replace(/^.*\/\/ #633$\n/gm, "")); // #633 の欄を足す行も除く（#633 の欄は #633 の試験が照らす）
     const oldFp = scoringFingerprint(ev, old, loadEvalSet(join(base, "set538/t-set.json")).definitions).fingerprint;
     for (const g of ["v1", "v1.1a"]) {
       const p = join(f.out, g, "conditions.json"), cond = JSON.parse(readFileSync(p, "utf8"));
@@ -4683,13 +4685,13 @@ test("#632 既存の欄を変えていない：#632 の欄を足す 3 行だけ�
     const mod = await import(pathToFileURL(old).href);
     const before = JSON.parse(JSON.stringify(await mod.scoreCompare(repo, f.out)));
     const { pass_vs_cost: _p, ...rest } = now;
-    for (const g of ["v1", "v1.1a"]) { const { cost_per_pass: _c, stage_usage: _s, ...x } = rest.groups[g]; rest.groups[g] = x; }
+    for (const g of ["v1", "v1.1a"]) { const { cost_per_pass: _c, stage_usage: _s, transitions: _t, first_upstream_failures: _u, ...x } = rest.groups[g]; rest.groups[g] = x; }
     assert.deepEqual(Object.keys(now), [...Object.keys(before), "pass_vs_cost"]);
     assert.deepEqual(rest, before);
     // 群の採点（通常の採点の出力）：指紋（採点のコード自身の SHA を含む）を除いて深く等しい
     const cur = await scoreOutput(repo, join(f.out, "v1")), prev = await mod.scoreOutput(repo, join(f.out, "v1"));
-    const strip = (x) => { const { fingerprints: _f, cost_per_pass: _c, stage_usage: _s, ...y } = JSON.parse(JSON.stringify(x)); return y; };
-    assert.deepEqual(Object.keys(cur), [...Object.keys(prev), "cost_per_pass", "stage_usage"]);
+    const strip = (x) => { const { fingerprints: _f, cost_per_pass: _c, stage_usage: _s, transitions: _t, first_upstream_failures: _u, ...y } = JSON.parse(JSON.stringify(x)); y.rows = y.rows.map(({ last_passed_stage: _l, first_upstream_failure: _fu, ...r }) => r); return y; };
+    assert.deepEqual(Object.keys(cur), [...Object.keys(prev), "cost_per_pass", "stage_usage", ...KEYS_633]);
     assert.deepEqual(strip(cur), strip(prev));
   });
 });
@@ -4700,4 +4702,227 @@ test("#632 README：§8 の後ろ（末尾）の新しい節 §9 に定義の語
   assert.ok(at > text.indexOf("\n## 8. ") && text.indexOf("\n### 8.5 ") < at, "§9 は §8 の後ろ");
   const sec = text.slice(at);
   for (const w of ["PASS あたりの費用", "P を単位", "読めた本", "下限", "cost-missing", "unavailable", "unexecuted", "incomplete", "no_summary", "段ごとの USD", "前線", "2504.13359", "2411.17501"]) assert.ok(sec.includes(w), w);
+});
+
+// ── #633 最後に通った段 → 止まった値の遷移表と、本ごとの最初の上流の落ち（README §10。v1.2 評価 c）
+import { firstUpstreamFailuresOf, stageChainOf, transitionsOf, transitionsText } from "./score-agent.mjs";
+
+/** 段の並びの書き方は stages538 と同じ。要約は納品した本（delivered538）か止まった本（stopped538） */
+const fact633 = (summary, over = {}) => ({ state: "executed", summary, exhausted: null, ...over });
+/** 欠測の混ざる合成の群：完走 1・停止 2・要約なし 1・未実行 1・途中 1（予定 6） */
+const group633 = () => [
+  fact633(delivered538("design:r test-suite:1 write:1 static-check:0 judge:0", "completed")), // やり直しの後に通った：last judge・first design
+  fact633(stopped538("design:1 test-suite:x", "test-suite", "unmet")), // 途中で止まった：last design・first test-suite
+  fact633(stopped538("design:1 test-suite:1 write:1 static-check:f", "static-check", "unmet")), // コードの段で落ちた：last write・first static-check
+  fact633(null), // 要約なし
+  { state: "unexecuted", summary: null, exhausted: null },
+  { state: "incomplete", summary: null, exhausted: null },
+];
+
+test("#633 本ごとの 2 つの値：最後に通った段は status が ok の記録を持つ最後の段、最初の上流の落ちは記録の順で最初に 1 回目で通過でなかった段（最初の記録が ok でない・calls 2 以上・retries の shape か content が 1 以上。calls 0 のコードの段は ok でない記録のときだけ）。要約が無い・段の記録が配列でない本は欠測", () => {
+  const of = (line, kind) => stageChainOf({ stages: stages538(line, kind) });
+  // やり直しの後に通った本
+  assert.deepEqual(of("design:r test-suite:1 write:1 static-check:0 judge:0"), { last_passed_stage: "judge", first_upstream_failure: "design" });
+  // 途中で止まった本（failed だけの段は ok の記録が無いので last は手前の段）
+  assert.deepEqual(of("design:1 test-suite:x"), { last_passed_stage: "design", first_upstream_failure: "test-suite" });
+  // 全段が 1 回目で通った本（コードの段 calls 0 の ok は 1 回目で通過）
+  assert.deepEqual(of("design:1 test-suite:1 static-check:0 judge:0"), { last_passed_stage: "judge", first_upstream_failure: null });
+  // コードの段で落ちた本
+  assert.deepEqual(of("design:1 test-suite:1 write:1 static-check:f"), { last_passed_stage: "write", first_upstream_failure: "static-check" });
+  // 1 つも通っていない本
+  assert.deepEqual(of("design:x"), { last_passed_stage: null, first_upstream_failure: "design" });
+  // calls 2 と retries の shape・content は 1 回目でない（ok でも）
+  assert.deepEqual(of("design:1 test-suite:c write:1"), { last_passed_stage: "write", first_upstream_failure: "test-suite" });
+  const retry = (retries) => stageChainOf({ stages: [rec538("design", "ok", 1), rec538("test-suite", "ok", 1, retries)] }).first_upstream_failure;
+  assert.equal(retry({ communication: 3, shape: 0, content: 0 }), null, "通信の再送は数えない");
+  assert.equal(retry({ communication: 0, shape: 1, content: 0 }), "test-suite");
+  assert.equal(retry({ communication: 0, shape: 0, content: 1 }), "test-suite");
+  // 段の最初の記録で決める：最初が ok なら後ろの記録の failed は数えない（既存の段）。新しい段は束ごとの記録なので全記録
+  assert.equal(stageChainOf({ stages: [rec538("design", "ok", 1), rec538("design", "failed", 1)] }).first_upstream_failure, null);
+  assert.equal(stageChainOf({ stages: [rec538("vocabulary", "ok", 1), rec538("vocabulary", "failed", 1)] }).first_upstream_failure, "vocabulary");
+  // 欠測
+  const MISSING = { last_passed_stage: "missing", first_upstream_failure: "missing" };
+  assert.deepEqual(stageChainOf(null), MISSING);
+  assert.deepEqual(stageChainOf({ stages: "design" }), MISSING);
+  assert.deepEqual(stageChainOf({}), MISSING);
+  // 記録でない要素は飛ばす。段が文字列でなければ unknown
+  assert.deepEqual(stageChainOf({ stages: [null, 3, { stage: 7, status: "ok", calls: 1 }] }), { last_passed_stage: "unknown", first_upstream_failure: null });
+});
+
+test("#633 遷移表と最初の上流の落ちの内訳（合成の群：完走 1・停止 2・要約なし 1・未実行 1・途中 1）：手計算と一致し、項目別の照合（各停止の列 ＝ stops.values、not_run ＝ unexecuted ＋ incomplete、missing ＝ no_summary、全セルの和 ＝ planned）が成り立つ", () => {
+  const facts = group633();
+  const t = transitionsOf(facts), s = stopsOf(facts);
+  assert.deepEqual(t.cells, [
+    { last_passed: "design", stop: "test-suite:unmet", runs: 1 },
+    { last_passed: "write", stop: "static-check:unmet", runs: 1 },
+    { last_passed: "judge", stop: "completed", runs: 1 },
+  ], "行は段の順。0 でない組だけ");
+  assert.deepEqual([t.planned, t.not_run, t.missing], [6, 2, 1]);
+  assert.deepEqual(t.rows.slice(-3), ["none", "unreadable", "unknown"]);
+  assert.deepEqual(t.columns, ["completed", "static-check:unmet", "test-suite:unmet"]);
+  // 項目別の照合
+  const colSum = (stop) => t.cells.filter((c) => c.stop === stop).reduce((n, c) => n + c.runs, 0);
+  for (const [k, n] of Object.entries(s.values)) assert.equal(colSum(k), n, `列 ${k} ＝ stops.values`);
+  assert.equal(t.cells.reduce((n, c) => n + c.runs, 0), Object.values(s.values).reduce((a, b) => a + b, 0));
+  assert.equal(t.not_run, s.unexecuted + s.incomplete);
+  assert.equal(t.missing, s.no_summary);
+  assert.equal(t.cells.reduce((n, c) => n + c.runs, 0) + t.not_run + t.missing, s.planned, "全セル（not_run・missing を含む）の和 ＝ planned");
+  // 最初の上流の落ち
+  const u = firstUpstreamFailuresOf(facts);
+  assert.deepEqual([u.planned, u.none, u.missing, u.not_run], [6, 0, 1, 2]);
+  assert.deepEqual(Object.entries(u.stages).filter(([, n]) => n > 0), [["design", 1], ["test-suite", 1], ["static-check", 1]]);
+  assert.equal(Object.values(u.stages).reduce((a, b) => a + b, 0) + u.none + u.missing + u.not_run, u.planned);
+  // 標準出力の 1 行（0 でない組だけ）
+  assert.equal(transitionsText("g", t), "g 遷移表（最後に通った段→止まった値。判定には使わない記述）: design→test-suite:unmet 1・write→static-check:unmet 1・judge→completed 1（未実行・途中 2・要約なし 1・予定 6）");
+});
+
+test("#633 遷移表：段の記録が配列でない要約は unreadable の行（列の合計を stops.values に合わせるため。missing には数えない）、全段が 1 回目で通れば none、1 つも通らない本は none の行。知らない段・知らない停止は unknown", () => {
+  const facts = [
+    fact633({ verdict: "none", stop_reason: "unmet", failure: null, stages: "x" }),
+    fact633(stopped538("design:x", "design", "unmet")),
+    fact633(delivered538("design:1 judge:0", "completed")),
+    fact633({ verdict: "none", stop_reason: "zzz", failure: { stage: "zzz", kind: "unmet" }, stages: [{ stage: "zzz", status: "ok", calls: 1, retries: RETRY0 }] }),
+  ];
+  const t = transitionsOf(facts), s = stopsOf(facts);
+  assert.deepEqual(t.cells, [
+    { last_passed: "judge", stop: "completed", runs: 1 },
+    { last_passed: "none", stop: "design:unmet", runs: 1 },
+    { last_passed: "unreadable", stop: "unmet", runs: 1 },
+    { last_passed: "unknown", stop: "unknown", runs: 1 },
+  ]);
+  assert.equal(t.missing, 0);
+  assert.equal(t.cells.reduce((n, c) => n + c.runs, 0), Object.values(s.values).reduce((a, b) => a + b, 0));
+  const u = firstUpstreamFailuresOf(facts);
+  assert.deepEqual([u.none, u.missing, u.stages.design, u.stages.unknown], [2, 1, 1, 0], "段の記録が配列でない本は欠測、全段が 1 回目の本（unknown の段の ok の 1 回目を含む）は none");
+});
+
+/** 合成の群を実際の出力（採点）に置く：6 つの本 */
+function put633(out) {
+  addRun538(out, "P1-r1", { summary: delivered538("design:r test-suite:1 write:1 static-check:0 judge:0", "completed"), spec: PASS_A });
+  addRun538(out, "P1-r2", { summary: stopped538("design:1 test-suite:x", "test-suite", "unmet") });
+  addRun538(out, "P1-r3", { summary: stopped538("design:1 test-suite:1 write:1 static-check:f", "static-check", "unmet") });
+  addRun538(out, "P1-r4", { summary: null }); // 途中（要約の記録が無い）
+  // P1-r5 は未実行
+  addRun538(out, "P1-r6", { summary: delivered538("design:1 static-check:0", "completed") });
+  conditions(out, ["P1-r1", "P1-r2", "P1-r3", "P1-r4", "P1-r5", "P1-r6"]);
+}
+
+test("#633 採点の出力：rows[] の末尾に last_passed_stage・first_upstream_failure、末尾の欄に transitions と first_upstream_failures。既存の stops と項目別に照合でき、標準出力の既存の行は変わらない。--anonymous は本の ID・P の ID・知らない値を出さない", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "out");
+    put633(out);
+    addRun538(out, "P1-r7", { summary: { ...stopped538("design:1", "design", "unmet"), failure: { stage: MARK538, kind: "unmet" }, stages: [{ stage: MARK538, status: "ok", calls: 1, retries: RETRY0 }] } });
+    conditions(out, ["P1-r1", "P1-r2", "P1-r3", "P1-r4", "P1-r5", "P1-r6", "P1-r7"]);
+    const r = scoreRun(out);
+    assert.equal(r.status, 0, r.stderr);
+    const full = readScore(out);
+    const row = (id) => full.rows.find((x) => x.run === id);
+    const two = (id) => [row(id).last_passed_stage, row(id).first_upstream_failure];
+    assert.deepEqual(two("P1-r1"), ["judge", "design"]);
+    assert.deepEqual(two("P1-r2"), ["design", "test-suite"]);
+    assert.deepEqual(two("P1-r3"), ["write", "static-check"]);
+    assert.deepEqual(two("P1-r4"), ["missing", "missing"]);
+    assert.deepEqual(two("P1-r6"), ["static-check", null]);
+    assert.deepEqual(Object.keys(row("P1-r1")).slice(-2), ["last_passed_stage", "first_upstream_failure"]);
+    // 項目別の照合（群の stops は funnel.stops と同じ数え方。--compare の stops と同じ値）
+    const t = full.transitions, u = full.first_upstream_failures;
+    assert.equal(t.planned, 7);
+    for (const [k, n] of Object.entries(full.funnel.stops)) assert.equal(t.cells.filter((c) => c.stop === k).reduce((a, c) => a + c.runs, 0), n, k);
+    assert.deepEqual([t.not_run, t.missing], [2, 0]);
+    assert.equal(t.cells.reduce((a, c) => a + c.runs, 0) + t.not_run + t.missing, t.planned);
+    assert.equal(Object.values(u.stages).reduce((a, b) => a + b, 0) + u.none + u.missing + u.not_run, u.planned);
+    assert.deepEqual([u.none, u.stages.design, u.stages["test-suite"], u.stages["static-check"], u.not_run], [2, 1, 1, 1, 2]);
+    // 標準出力は変えない（採点の標準出力に遷移表の行は足さない）
+    assert.ok(!r.stdout.includes("遷移表"));
+    // 匿名：件数だけ。知らない段は unknown、本の ID・P の ID・目印・パスが出ない
+    const ra = scoreRun(out, ["--anonymous"]);
+    assert.equal(ra.status, 0, ra.stderr);
+    const ta = readFileSync(join(out, "score.anonymous.json"), "utf8"), a = JSON.parse(ta);
+    assert.deepEqual(Object.keys(a).slice(-2), KEYS_633);
+    assert.ok(!/P\d+-r\d+|"P\d+"/.test(JSON.stringify(KEYS_633.map((k) => a[k]))) && !ta.includes(MARK538) && !ta.includes(base));
+    assert.deepEqual(a.transitions.cells.map((c) => [c.last_passed, c.stop, c.runs]), t.cells.map((c) => [c.last_passed, c.stop, c.runs]));
+    assert.ok(a.transitions.cells.some((c) => c.last_passed === "unknown" && c.stop === "unknown"), "知らない段・知らない停止は unknown");
+    assert.deepEqual(a.first_upstream_failures, u);
+    assert.ok(!("rows" in a));
+  });
+});
+
+test("#633 比較（30 本 × 2 群）：群ごとに transitions と first_upstream_failures（群ごとの採点の出力そのまま）、標準出力の末尾に遷移表の 1 行（JSON の行には足さない）。匿名の口に本の ID・P の ID が無い", async () => {
+  await withOut(async (base) => {
+    const f = cmp539(base, "cmp633");
+    const r = scoreCompareRun(f.out);
+    assert.equal(r.status, 0, r.stderr);
+    const c = readCompare(f.out);
+    assert.deepEqual(Object.keys(c).slice(-2), ["noise", "pass_vs_cost"], "トップレベルの欄は変えない");
+    for (const g of ["v1", "v1.1a"]) {
+      const x = c.groups[g];
+      assert.deepEqual(Object.keys(x).slice(-2), KEYS_633, g);
+      assert.equal(x.transitions.planned, 30);
+      for (const [k, n] of Object.entries(x.stops.values)) assert.equal(x.transitions.cells.filter((e) => e.stop === k).reduce((a, e) => a + e.runs, 0), n, `${g} ${k}`);
+      assert.equal(x.transitions.not_run, x.stops.unexecuted + x.stops.incomplete, g);
+      assert.equal(x.transitions.missing, x.stops.no_summary, g);
+      assert.equal(x.transitions.cells.reduce((a, e) => a + e.runs, 0) + x.transitions.not_run + x.transitions.missing, x.stops.planned, g);
+      const u = x.first_upstream_failures;
+      assert.equal(Object.values(u.stages).reduce((a, b) => a + b, 0) + u.none + u.missing + u.not_run, 30, g);
+    }
+    const lines = r.stdout.trimEnd().split("\n");
+    assert.match(lines.at(-1), /^v1 遷移表（最後に通った段→止まった値。判定には使わない記述）: .*→.* \d+.*（未実行・途中 0・要約なし 0・予定 30）／v1\.1a 遷移表（.*）: .*（未実行・途中 0・要約なし 0・予定 30）$/);
+    assert.match(lines.at(-2), /^PASS 対 費用/, "既存の行の後ろ");
+    assert.ok(!/"transitions"|"first_upstream_failures"/.test(r.stdout), "既存の JSON の行に足さない");
+    const ra = scoreCompareRun(f.out, ["--anonymous"]);
+    assert.equal(ra.status, 0, ra.stderr);
+    const ta = readFileSync(join(f.out, "score-compare.anonymous.json"), "utf8"), a = JSON.parse(ta);
+    for (const g of ["v1", "v1.1a"]) assert.deepEqual([a.groups[g].transitions.cells, a.groups[g].first_upstream_failures], [c.groups[g].transitions.cells, c.groups[g].first_upstream_failures]);
+    assert.ok(!/P\d+-r\d+|"P\d+"/.test(JSON.stringify([a.groups.v1.transitions, a.groups.v1.first_upstream_failures])) && !ta.includes(base));
+  });
+});
+
+test("#633 既存の欄を変えていない：#633 の欄を足す行を除いた採点器（直す前と同じ欄）の比較と群の採点の出力が、今の出力から新しい欄（と指紋）を除いたものと深く等しい", async () => {
+  await withOut(async (base) => {
+    const f = cmp539(base, "cmp633b");
+    assert.equal(scoreCompareRun(f.out).status, 0);
+    const now = readCompare(f.out);
+    const src = readFileSync(scoreFile, "utf8"), line = /^.*\/\/ #633$\n/gm;
+    assert.ok((src.match(line) ?? []).length >= 7, "#633 の欄を足す行は目印つき");
+    const old = join(base, "before-633-score-agent.mjs");
+    writeFileSync(old, src.replace(line, ""));
+    const oldFp = scoringFingerprint(ev, old, loadEvalSet(join(base, "set538/t-set.json")).definitions).fingerprint;
+    for (const g of ["v1", "v1.1a"]) {
+      const p = join(f.out, g, "conditions.json"), cond = JSON.parse(readFileSync(p, "utf8"));
+      cond.scoring = { fingerprint: oldFp };
+      writeFileSync(p, JSON.stringify(cond));
+    }
+    const mod = await import(pathToFileURL(old).href);
+    const before = JSON.parse(JSON.stringify(await mod.scoreCompare(repo, f.out)));
+    const rest = JSON.parse(JSON.stringify(now));
+    for (const g of ["v1", "v1.1a"]) { const { transitions: _t, first_upstream_failures: _u, ...x } = rest.groups[g]; rest.groups[g] = x; }
+    assert.deepEqual(Object.keys(rest), Object.keys(before));
+    assert.deepEqual(rest, before);
+    const cur = await scoreOutput(repo, join(f.out, "v1")), prev = await mod.scoreOutput(repo, join(f.out, "v1"));
+    const strip = (x) => { const { fingerprints: _f, transitions: _t, first_upstream_failures: _u, ...y } = JSON.parse(JSON.stringify(x)); y.rows = y.rows.map(({ last_passed_stage: _l, first_upstream_failure: _fu, ...r }) => r); return y; };
+    assert.deepEqual(Object.keys(cur), [...Object.keys(prev), ...KEYS_633]);
+    assert.deepEqual(strip(cur), strip(prev));
+    assert.ok(cur.rows.every((r) => "last_passed_stage" in r && "first_upstream_failure" in r) && prev.rows.every((r) => !("last_passed_stage" in r)));
+  });
+});
+
+test("#633 README と台帳：§9 の後ろ（末尾）の新しい節 §10 に定義の語があり、§7 の先頭より前と §7.11 の先頭より前のバイト列は表の採点の試験が SHA で照合する。02 §1 の表と台帳の 2 つの表の末尾に「最初の上流の落ち」の列があり、値（要件 ID・役割 ID・題材の言葉）を書かない", () => {
+  const text = readFileSync(join(ev, "README.md"), "utf8");
+  const at = text.indexOf("\n## 10. ");
+  assert.ok(at > text.indexOf("\n## 9. ") && text.indexOf("\n### 9.6 ") < at, "§10 は §9 の後ろ");
+  const sec = text.slice(at);
+  assert.equal(text.slice(at).indexOf("\n## ", 1), -1, "§10 が末尾");
+  for (const w of ["最後に通った段", "最初の上流の落ち", "遷移表", "連鎖", "unreadable", "限界"]) assert.ok(sec.includes(w), w);
+  const doc = readFileSync(join(repo, "workspace/mvp/m1/agent/methodology/02-failure-modes.md"), "utf8");
+  const defRow = doc.split("\n").find((l) => /^\| \*{0,2}最初の上流の落ち/.test(l));
+  assert.ok(defRow, "02 §1 の表の行");
+  assert.ok(doc.split("\n").findIndex((l) => l === defRow) > doc.split("\n").findIndex((l) => /^\| \*\*不要になる規則|^\| 不要になる規則/.test(l)), "表の末尾（不要になる規則の後ろ）");
+  const ledger = readFileSync(join(repo, "workspace/mvp/m1/agent/methodology/ledger/failure-modes.md"), "utf8");
+  const tables = ledger.split("\n").filter((l) => l.startsWith("|"));
+  const heads = tables.filter((l) => l.startsWith("| ID |"));
+  assert.equal(heads.length, 2, "M の表と N の表");
+  for (const h of heads) assert.ok(h.trimEnd().endsWith("| 最初の上流の落ち |"), "列は表の末尾");
+  const data = tables.filter((l) => /^\| [MN]-?\d/.test(l));
+  assert.ok(data.length >= 20);
+  for (const l of data) assert.ok(l.trimEnd().endsWith("| 未転記 |"), l.slice(0, 20));
 });
