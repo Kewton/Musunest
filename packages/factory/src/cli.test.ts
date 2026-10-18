@@ -1438,7 +1438,12 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     // 要約は prompt_version・v12_flags と、旗 v12.ids の門と枝の欄 v12_calls（Issue #592）のほかは v1.1a と同じ。門の数は
     // 生成 8（C1 3・C2 1・T1'' 1・T2 1・B1 1・B3' 1。Issue #593 で T1 の 1 が 4 になった）と判定 4
     const { prompt_version: _p1, v12_flags: _f1, v12_calls: v12Calls, ...summaryRest } = v12.summary;
-    expect(v12Calls).toEqual({ real_attempts: { limit: 144, used: 12 }, judge_branch: { limit: 80, used: 4 } });
+    // 既存の鍵の値はそのまま。T2 の束の数・同時数・段全体の計を test_spec に足す（要件が 5 件以下なので束 1。Issue #626）
+    expect(v12Calls).toEqual({
+      real_attempts: { limit: 144, used: 12 },
+      judge_branch: { limit: 80, used: 4 },
+      test_spec: { bundles: 1, concurrency: 1, total: t2TotalOf(v12.summary) },
+    });
     expect(v11a.summary).not.toHaveProperty("v12_calls");
     const { prompt_version: _p2, ...v11aSummaryRest } = v11a.summary;
     // 表を組む段が C1・C2（4 要求）になった分だけ、呼び出しの数で決まる欄（費用・予算の残り・段の記録・トークンの計）が違う。
@@ -1477,8 +1482,12 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(limits["logical_calls"]).toBe(V12_CALL_LIMITS.logicalCalls);
     expect(limits["real_attempts"]).toBe(V12_CALL_LIMITS.realAttempts);
     expect(limits["judge_branch"]).toBe(V12_CALL_LIMITS.judgeBranch);
-    // 要約の v12_calls は変えない
-    expect(run.summary["v12_calls"]).toEqual({ real_attempts: { limit: 144, used: 12 }, judge_branch: { limit: 80, used: 4 } });
+    // 要約の v12_calls の門と枝の値は変えない（T2 の束の欄 test_spec を足すだけ。Issue #626）
+    expect(run.summary["v12_calls"]).toEqual({
+      real_attempts: { limit: 144, used: 12 },
+      judge_branch: { limit: 80, used: 4 },
+      test_spec: { bundles: 1, concurrency: 1, total: t2TotalOf(run.summary) },
+    });
   });
 
   it("表を組む段（ids on は C1）で止まる走りでも要約と条件の記録に v12_flags がある（終了コード 1・納品物無し）", async () => {
@@ -2462,3 +2471,37 @@ describe("再開の入力の照合（exit 4・固定の符号・クライアン�
     await expectRejected("carry-rewrite", "test-spec", await tamper(sourceT2(), `${directory}/verify-carry-b`, "t1-t2", drop, true), "stage-input:carry-over");
   });
 });
+
+/**
+ * 要約の段の記録から、T2（test-spec）の束の記録の項目ごとの合計を組む（`v12_calls.test_spec.total` の期待。Issue #626）。
+ * 束 1 の走りでは、その 1 つの記録の計と同じ
+ */
+function t2TotalOf(summary: Record<string, unknown>): unknown {
+  type Row = {
+    readonly stage: string;
+    readonly calls: number;
+    readonly missing_usage_calls: number;
+    readonly input_tokens: number;
+    readonly cached_input_tokens: number;
+    readonly cache_write_tokens: number;
+    readonly output_tokens: number;
+    readonly reasoning_tokens: number;
+    readonly attempts: Record<string, unknown>;
+    readonly retries: Record<string, unknown>;
+  };
+  const rows = (summary["stages"] as readonly Row[]).filter((row) => row.stage === "test-spec");
+  expect(rows).toHaveLength(1);
+  const [row] = rows;
+  if (row === undefined) throw new Error("前提が壊れた：T2 の記録が無い");
+  return {
+    calls: row.calls,
+    missing_usage_calls: row.missing_usage_calls,
+    input_tokens: row.input_tokens,
+    cached_input_tokens: row.cached_input_tokens,
+    cache_write_tokens: row.cache_write_tokens,
+    output_tokens: row.output_tokens,
+    reasoning_tokens: row.reasoning_tokens,
+    attempts: row.attempts,
+    retries: row.retries,
+  };
+}

@@ -9,7 +9,7 @@
 // 受入の題材の言葉は使わない。
 import type { ConfirmedPlan, NormalizedAppSpec } from "@musunest/appspec-schema";
 import { normalizeSpec } from "@musunest/spec-engine";
-import type { LlmClient, LlmStructuredRequest, LlmToolRequest } from "../../llm.js";
+import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest } from "../../llm.js";
 import { createFakeLlmClient, uncheckedBecause, type RecordedCall, type RecordedStructuredCall } from "../../llm-fake.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
 import type { PromptDocument, RuleDefinition } from "../../stages/prompt.js";
@@ -1130,4 +1130,63 @@ export function casesResponseOf(output: { readonly classifications?: readonly un
 export function withoutIdAndClock<T extends { readonly id: string; readonly clock: string }>(test: T): Omit<T, "id" | "clock"> {
   const { id: _id, clock: _clock, ...rest } = test;
   return rest;
+}
+
+/** 要求のデータの塊「要件の一覧」の要件 ID（無ければ空） */
+export function requestListedIds(request: LlmStructuredRequest): readonly string[] {
+  const block = request.input.split('<data name="要件の一覧">\n')[1]?.split("\n</data>")[0];
+  if (block === undefined) return [];
+  return ((JSON.parse(block) as { readonly requirements?: readonly { readonly id: string }[] }).requirements ?? []).map((requirement) => requirement.id);
+}
+
+/**
+ * 旗 `v12.ids` の T2 の束（Issue #626）の偽物の口。記録した T2 の応答（全要件を書いた 1 本）を「回の台本」として持ち、束の要求
+ * （「要件の一覧」の要件 ID の組で見分ける）ごとに独立の位置で読み、その束の要件の分類と場合だけに絞って返す（**順序に依らない**）。
+ * 記録は束の位置の最大まで順に読む（同時の束が同じ記録を二重に読まない）。どの束の要件でもない分類・場合（持ち越しの要件など）は
+ * 捨てる。ただし `home` に挙げた要件 ID の分類・場合は、その要件の前の要件を持つ束（無ければ最初の束）へ残す——`home` は
+ * `[要件 ID, 残す束の先頭の要件 ID]` の組。場合の形でない応答（負例・ids off の応答）は絞らずにそのまま返す。T2 でない要求は
+ * `inner` へそのまま渡す。
+ */
+export function bundledT2Client(inner: LlmClient, home: readonly (readonly [string, string])[] = []): LlmClient {
+  const script: { readonly output: unknown; readonly usage: LlmStructuredResponse<unknown>["usage"] }[] = [];
+  const cursors = new Map<string, number>();
+  let pulling: Promise<void> = Promise.resolve();
+  return {
+    async callStructured<T>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<T>> {
+      if (request.schemaName !== TEST_SPEC_SCHEMA_NAME) return inner.callStructured<T>(request);
+      const ids = requestListedIds(request);
+      const key = ids.join("\u0000");
+      const at = cursors.get(key) ?? 0;
+      cursors.set(key, at + 1);
+      const ready = pulling.then(async () => {
+        while (script.length <= at) {
+          const response = await inner.callStructured<unknown>(request);
+          script.push({ output: response.output, usage: response.usage });
+        }
+      });
+      pulling = ready.catch(() => undefined);
+      await ready;
+      const entry = script[at];
+      if (entry === undefined) throw new Error("前提が壊れた：T2 の台本の位置");
+      const output = entry.output;
+      if (typeof output !== "object" || output === null || !Array.isArray((output as { cases?: unknown }).cases)) {
+        return { output: output as T, usage: entry.usage };
+      }
+      const homed = new Set(home.filter(([, first]) => ids[0] === first).map(([id]) => id));
+      const keep = (item: unknown): boolean => {
+        const id = typeof item === "object" && item !== null ? (item as { requirementId?: unknown }).requirementId : undefined;
+        return typeof id === "string" && (ids.includes(id) || homed.has(id));
+      };
+      const raw = output as { readonly classifications?: unknown; readonly cases: readonly unknown[] };
+      return {
+        output: {
+          ...raw,
+          classifications: Array.isArray(raw.classifications) ? raw.classifications.filter(keep) : raw.classifications,
+          cases: raw.cases.filter(keep),
+        } as T,
+        usage: entry.usage,
+      };
+    },
+    callWithTools: (request: LlmToolRequest) => inner.callWithTools(request),
+  };
 }

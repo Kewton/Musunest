@@ -45,6 +45,7 @@ import {
   type RejectedCandidate,
   type RuleDefinition,
   type ShapeCheck,
+  type StageFailure,
   type StageOutcome,
 } from "../../stages/prompt.js";
 import {
@@ -81,13 +82,19 @@ import {
   type LedgerTarget,
 } from "../../v12/generated-tests.js";
 import {
+  TEST_CASE_BUNDLE_MESSAGES,
+  attributeProblemsToBundles,
+  bundleRequirementIds,
+  checkBundleCompleteness,
   checkTestCasesOutput,
   expandTestCases,
+  mergeBundleCases,
   testCasesSchemaOf,
   toCasePositions,
   type TestCase,
   type TestCasesOutput,
 } from "../../v12/test-cases.js";
+import { V12_T2_BUNDLE } from "../../v12/limits.js";
 
 /** T2 の JSON Schema の名前 */
 export const TEST_SPEC_SCHEMA_NAME = "test-spec";
@@ -993,8 +1000,11 @@ export interface TestSpecInput {
   readonly judge?: Judge;
   /** 外した（構造で確かめる要件の、構造の検査でない）試験を、回ごとに受け取る口（v1 の ②' と同じ） */
   readonly onDropped?: (dropped: readonly DroppedNonstructuralTest[]) => void;
-  /** 断った候補（形と中身）を断った時点で受け取る観測用の口（#501 の作法。省けば何もしない） */
-  readonly onRejected?: (candidate: RejectedCandidate) => void;
+  /**
+   * 断った候補（形と中身）を断った時点で受け取る観測用の口（#501 の作法。省けば何もしない）。旗 `v12.ids` の束の形の候補だけ、
+   * 束の添字（0 から）と束の要件の数を添える（要件 ID の値は渡さない。合併した組の中身の候補には添えない。Issue #626）
+   */
+  readonly onRejected?: (candidate: RejectedCandidate, bundle?: TestSpecRejectedBundle) => void;
   /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけが渡す。省けば今の定数と関数。Issue #547） */
   readonly ledger?: LedgerView;
   /**
@@ -1002,6 +1012,37 @@ export interface TestSpecInput {
    * （`v12/generated-tests.ts`）、その試験だけで確かめる要件を T2 の要求から除く。省けば今のまま（Issue #595）
    */
   readonly ids?: boolean;
+  /**
+   * 旗 `v12.ids` の束ごとの口（束の添字 → 口。予算・門・締切・時計は呼ぶ側が共有させる）。省けば全部の束が `gateway` を使う。
+   * 束の数は残る要件を `V12_T2_BUNDLE.size` 件ごとに切った数（Issue #626）
+   */
+  readonly bundleGateway?: (bundle: number) => CallGateway;
+  /** 旗 `v12.ids` の束を同時に始める数の上限（省けば `V12_T2_BUNDLE.concurrency`。試験が 1 にして順序に依らないことを確かめる） */
+  readonly bundleConcurrency?: number;
+}
+
+/** 断った候補を出した束（添字と要件の数。Issue #626） */
+export interface TestSpecRejectedBundle {
+  readonly index: number;
+  readonly requirements: number;
+}
+
+/** 旗 `v12.ids` の束 1 つの取得の結果（形を通った場合の応答。落ちれば段の失敗） */
+type BundleAnswer = { readonly ok: true; readonly value: TestCasesOutput } | { readonly ok: false; readonly failure: StageFailure };
+
+/** 並びの各要素に `run` を掛ける。同時に走らせるのは `limit` 本まで（結果は並びの順） */
+async function mapConcurrently<T, R>(items: readonly T[], limit: number, run: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Map<number, R>();
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results.set(index, await run(items[index] as T, index));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
+  return items.map((_, index) => results.get(index) as R);
 }
 
 /** T2 の結果 */
@@ -1219,8 +1260,10 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
           verification: pruned.table.verification.filter((entry) => !generatedOnly.has(entry.requirementId)),
           classification: pruned.table.classification.filter((entry) => !generatedOnly.has(entry.requirementId)),
         };
-  // 一覧の位置（`requirements[添字]`）は要求の一覧で返す（v1 の検査は全部の一覧で呼ぶので、位置を要求の一覧の添字に写す）
+  // 一覧の位置（`requirements[添字]`）は要求の一覧で返す（v1 の検査は全部の一覧で呼ぶので、位置を要求の一覧の添字に写す）。
+  // 要求の一覧に写せなかった要件の位置（コードの試験だけで確かめる要件）は、束へ帰属させない（推測しない。Issue #626）
   const requestIndexOf = new Map(requestList.requirements.map((requirement, index) => [requirement.id, index] as const));
+  const unmappedRequirementProblems = new WeakSet<Problem>();
   const toRequestPositions = (found: readonly Problem[]): readonly Problem[] =>
     generatedOnly.size === 0
       ? found
@@ -1228,6 +1271,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
           const match = /^requirements\[(\d+)\]$/.exec(problem.field);
           const id = match === null ? undefined : list.requirements[Number(match[1])]?.id;
           const index = id === undefined ? undefined : requestIndexOf.get(id);
+          if (match !== null && index === undefined) unmappedRequirementProblems.add(problem);
           return index === undefined ? problem : { ...problem, field: `requirements[${String(index)}]` };
         });
   const rules = ledger === undefined ? TEST_SPEC_RULES : ruleTexts(testSpecRuleDefinitionsOf(ledger, ids));
@@ -1241,29 +1285,143 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
   const decided = new Map<string, DecidedNature>();
   const droppedAll: DroppedNonstructuralTest[] = [];
   const onRejected = input.onRejected;
-  for (let round = 1; round <= TEST_SPEC_ROUNDS; round += 1) {
+
+  // 旗 `v12.ids`：残る要件を一覧の順で束に切り、束ごとに 1 つの論理呼び出しにする（同時に始める）。束の中で閉じる条件（分類が束の
+  // 要件にちょうど 1 件・場合の要件 ID が束の要件）だけを束の形の検査に足し、合併した組の条件（展開・分類の照合・J2・検査）は
+  // 合併後に 1 回だけ掛ける。形のやり直しは束の全 round で通算 1、中身のやり直しは問題の帰属する束だけ 1（Issue #626）
+  const bundles = ids ? bundleRequirementIds(requestList.requirements.map((requirement) => requirement.id), V12_T2_BUNDLE.size) : [];
+  // 束の口は束を初めて呼ぶときに作る（呼ぶ側が束の開始の時刻をそこで取る）
+  const bundleGateways: (CallGateway | undefined)[] = bundles.map(() => undefined);
+  const gatewayOf = (bundle: number): CallGateway => {
+    const made = bundleGateways[bundle] ?? input.bundleGateway?.(bundle) ?? input.gateway;
+    bundleGateways[bundle] = made;
+    return made;
+  };
+  const bundleOutputs: (TestCasesOutput | undefined)[] = bundles.map(() => undefined);
+  const bundleShapeUsed = bundles.map(() => false);
+  let bundleProblems: ReadonlyMap<number, readonly Problem[]> = new Map();
+  const allIds = list.requirements.map((requirement) => requirement.id);
+  const requestedIds = requestList.requirements.map((requirement) => requirement.id);
+  const callBundle = async (bundle: number, round: number): Promise<BundleAnswer> => {
+    const gateway = gatewayOf(bundle);
+    const bundleIds = bundles[bundle] ?? [];
+    const inBundle = new Set(bundleIds);
+    const bundleList: RequirementList = { ...requestList, requirements: requestList.requirements.filter((requirement) => inBundle.has(requirement.id)) };
+    const bundleTable: NameTable = {
+      ...requestTable,
+      ownership: requestTable.ownership.filter((entry) => inBundle.has(entry.requirementId)),
+      verification: requestTable.verification.filter((entry) => inBundle.has(entry.requirementId)),
+      classification: requestTable.classification.filter((entry) => inBundle.has(entry.requirementId)),
+    };
+    const retried = round > 1;
     const request = buildStructuredRequest({
       rules,
       documents: input.documents,
-      data: buildData(input.plan, requestList, requestTable, previous, previousTests, judgedNatures(decided), ledger),
+      data: buildData(
+        input.plan,
+        bundleList,
+        bundleTable,
+        retried ? (bundleProblems.get(bundle) ?? []) : [],
+        retried ? bundleOutputs[bundle]?.cases : undefined,
+        judgedNatures(decided).filter((row) => inBundle.has(row.requirementId)),
+        ledger,
+      ),
       schemaName: TEST_SPEC_SCHEMA_NAME,
       schema,
-      maxOutputTokens: input.gateway.maxOutputTokens("test-spec"),
+      maxOutputTokens: gateway.maxOutputTokens("test-spec"),
     });
-    let shapeRejections = 0;
-    const answer = await callStructuredChecked(input.gateway, {
+    // 形のやり直しを使い切った束は、形に落ちた応答を再試行せずに断る（共通の形のやり直しの関数は変えず、ここで数える。R4）
+    const exhausted = bundleShapeUsed[bundle] === true;
+    let refused: { readonly output: unknown; readonly problems: readonly Problem[] } | undefined;
+    const answer = await callStructuredChecked(gateway, {
       request,
-      check: ledger === undefined ? checkTestSpecOutput : check,
-      ...(onRejected === undefined
-        ? {}
-        : {
-            onShapeRejected: (rejection) => {
-              shapeRejections += 1;
-              onRejected(shapeRejectedCandidate(round, rejection));
-            },
-          }),
+      check: (output: unknown): ShapeCheck<TestCasesOutput> => {
+        const checked = ledger === undefined ? undefined : checkTestCasesOutput(output, ledger);
+        if (checked === undefined) return { ok: false, problems: [] };
+        const found = checked.ok ? checkBundleCompleteness(checked.value, bundleIds, requestedIds, allIds) : checked.problems;
+        if (found.length === 0) return checked;
+        if (!exhausted) return { ok: false, problems: found };
+        refused = { output, problems: found };
+        return { ok: true, value: { classifications: [], cases: [] } };
+      },
+      onShapeRejected: (rejection) => {
+        bundleShapeUsed[bundle] = true;
+        onRejected?.(shapeRejectedCandidate(round, rejection), { index: bundle, requirements: bundleIds.length });
+      },
     });
     if (!answer.ok) return answer;
+    if (refused !== undefined) {
+      onRejected?.(shapeRejectedCandidate(round, { attempt: 1, output: refused.output, problems: refused.problems }), {
+        index: bundle,
+        requirements: bundleIds.length,
+      });
+      return { ok: false, failure: { kind: "unmet", attempts: round, problems: refused.problems } };
+    }
+    return { ok: true, value: answer.value };
+  };
+  /** 合併後の問題を束へ帰属させ、帰属した束だけを次の回で呼ぶ。帰属できない問題があれば束を推測せずに止める */
+  const attribute = (found: readonly Problem[], merged: ReturnType<typeof mergeBundleCases>, round: number): StageOutcome<never> | undefined => {
+    const unmapped = found.filter((problem) => unmappedRequirementProblems.has(problem));
+    const attributed = attributeProblemsToBundles(
+      found.filter((problem) => !unmappedRequirementProblems.has(problem)),
+      merged,
+      bundles,
+    );
+    if (attributed.unattributed.length > 0 || unmapped.length > 0) {
+      return {
+        ok: false,
+        failure: {
+          kind: "unmet",
+          attempts: round,
+          problems: [{ field: "", message: TEST_CASE_BUNDLE_MESSAGES.unattributed }, ...unmapped, ...attributed.unattributed],
+        },
+      };
+    }
+    bundleProblems = attributed.byBundle;
+    if (round < TEST_SPEC_ROUNDS) for (const bundle of attributed.byBundle.keys()) gatewayOf(bundle).noteRetry("content");
+    return undefined;
+  };
+
+  for (let round = 1; round <= TEST_SPEC_ROUNDS; round += 1) {
+    let shapeRejections = 0;
+    let answer: { readonly value: unknown; readonly output: unknown };
+    let merged: ReturnType<typeof mergeBundleCases> | undefined;
+    if (ids) {
+      const called = round === 1 ? bundles.map((_, bundle) => bundle) : [...bundleProblems.keys()];
+      const answers = await mapConcurrently(called, input.bundleConcurrency ?? V12_T2_BUNDLE.concurrency, (bundle) => callBundle(bundle, round));
+      // 一部の束だけで進まない（落ちた束があれば段の失敗。採用済みの束の応答は捨てずに持つ）
+      called.forEach((bundle, index) => {
+        const bundleAnswer = answers[index];
+        if (bundleAnswer?.ok === true) bundleOutputs[bundle] = bundleAnswer.value;
+      });
+      const failed = answers.find((bundleAnswer) => !bundleAnswer.ok);
+      if (failed !== undefined && !failed.ok) return { ok: false, failure: failed.failure };
+      merged = mergeBundleCases(bundleOutputs.map((output) => output ?? { classifications: [], cases: [] }));
+      answer = { value: merged.output, output: merged.output };
+    } else {
+      const request = buildStructuredRequest({
+        rules,
+        documents: input.documents,
+        data: buildData(input.plan, requestList, requestTable, previous, previousTests, judgedNatures(decided), ledger),
+        schemaName: TEST_SPEC_SCHEMA_NAME,
+        schema,
+        maxOutputTokens: input.gateway.maxOutputTokens("test-spec"),
+      });
+      const checkedAnswer = await callStructuredChecked(input.gateway, {
+        request,
+        check: ledger === undefined ? checkTestSpecOutput : check,
+        ...(onRejected === undefined
+          ? {}
+          : {
+              onShapeRejected: (rejection) => {
+                shapeRejections += 1;
+                onRejected(shapeRejectedCandidate(round, rejection));
+              },
+            }),
+      });
+      if (!checkedAnswer.ok) return checkedAnswer;
+      answer = checkedAnswer;
+    }
     // 旗 `v12.ids`：場合を今の形へ展開し、展開した組に今の形の検査を掛ける。展開できない・形に合わない場合は中身の落ちとして
     // 作り直させる（補わない。位置は場合の添字と欄名。回数は今のまま。#625）
     let spec: TestSpecOutput;
@@ -1291,6 +1449,11 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
         });
         previous = found;
         previousTests = cases;
+        if (merged !== undefined) {
+          const stopped = attribute(found, merged, round);
+          if (stopped !== undefined) return stopped;
+          continue;
+        }
         if (round < TEST_SPEC_ROUNDS) input.gateway.noteRetry("content");
         continue;
       }
@@ -1413,6 +1576,11 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
     previousTests =
       cases ??
       suite.tests.slice(0, suite.tests.length - added).map((test) => ({ ...test, observes: observes.get(test.id) ?? null }));
+    if (merged !== undefined) {
+      const stopped = attribute(previous, merged, round);
+      if (stopped !== undefined) return stopped;
+      continue;
+    }
     if (round < TEST_SPEC_ROUNDS) input.gateway.noteRetry("content");
   }
   return { ok: false, failure: { kind: "unmet", attempts: TEST_SPEC_ROUNDS, problems: previous } };

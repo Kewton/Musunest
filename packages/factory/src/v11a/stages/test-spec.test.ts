@@ -77,7 +77,16 @@ import {
   type LedgerTarget,
 } from "../../v12/generated-tests.js";
 import { createV11aEvaluator } from "../evaluate.js";
-import { TEST_CASE_EXPAND_MESSAGES, TEST_CASE_ID_PREFIX, testCasesSchemaOf } from "../../v12/test-cases.js";
+import { TEST_CASE_BUNDLE_MESSAGES, TEST_CASE_EXPAND_MESSAGES, TEST_CASE_ID_PREFIX, testCasesSchemaOf } from "../../v12/test-cases.js";
+import { CallGateway, createCallGate } from "../../call.js";
+import { createBudgetedJudge } from "../../judge-budget.js";
+import { JobBudget } from "../../budget.js";
+import type { LlmClient } from "../../llm.js";
+import { RATES, USAGE } from "../../__tests__/run.js";
+import { V12_T2_BUNDLE } from "../../v12/limits.js";
+import { fromPublicV12Flags, ledgerViewOf, V12_PIPELINE_FLAGS } from "../../v12/ledger.js";
+import { buildSized, type SizedMaterials } from "../__tests__/sizes.js";
+import { requestListedIds } from "../__tests__/fixtures.js";
 import { correspondenceFromTable } from "../bind-by-id.js";
 import { toV1 } from "../convert.js";
 import {
@@ -3239,5 +3248,476 @@ describe("旗 v12.ids：構造の検査と画面・在ることの構造の確�
     expect(off.outcome.value.suite.tests.some((test) => isGeneratedTestId(test.id))).toBe(false);
     expect(off.recording.structured[0]?.schema).toEqual(testSpecSchemaOf(ledger));
     expect((dataBlockOf(off.recording.structured[0]!.input, TEST_SPEC_DATA_NAMES[1]) as { requirements: { id: string }[] }).requirements.map((entry) => entry.id)).toEqual(["R1", "R2", "R3", "R4", "R6", "R7"]);
+  });
+});
+
+// ── 旗 v12.ids の T2 の束（手 3f・Issue #626）───────────────────────────────
+//
+// 束に渡す規則の区別（教訓 (1)・(2)。束の中で閉じる条件だけを束で見て、合併した組の条件は合併後に 1 回だけ掛ける）：
+//
+// | 規則 | 束の中で閉じる | 合併後に 1 回 |
+// |---|---|---|
+// | 分類が束の要件にちょうど 1 件（欠落・重複・別の束・一覧に無い） | ○ | |
+// | 場合の要件 ID が別の束・一覧に無い要件でない | ○ | |
+// | 場合の形（schema の型。`checkTestCasesOutput`） | ○ | |
+// | 展開（骨組み・行 ID） | | ○ |
+// | 分類の完全性（要求の一覧の全部）・分類の照合（T1 との食い違い）・J2 | | ○ |
+// | 網羅（正常・異常・境界）・要件ごとの総数（16）・所属・評価可能性・台帳の検査・集計・条件・コードの試験との重なり | | ○ |
+
+describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+  const LEDGER: LedgerView = (() => {
+    const view = ledgerViewOf(ALL_ON);
+    if (view === undefined) throw new Error("前提が壊れた：台帳が無い");
+    return view;
+  })();
+  type Output = { readonly classifications: readonly { readonly requirementId: string; readonly nature: string }[]; readonly cases: readonly Record<string, unknown>[] };
+  /** 構造の要件・コードの試験の無い台本（試験 3N。全要件が T2 の要求に残る） */
+  const sized = (requirements: number, options: { readonly codeWritten?: boolean } = {}): SizedMaterials =>
+    buildSized(requirements, 3 * requirements, ALL_ON, options);
+  const fullOf = (materials: SizedMaterials, omitAbnormalOf?: string): Output =>
+    materials.t2Response(omitAbnormalOf === undefined ? {} : { omitAbnormalOf }) as unknown as Output;
+  /** 全要件の応答を、束の要件の分類と場合に絞る */
+  const sliceOf = (output: Output, ids: readonly string[]): Output => ({
+    classifications: output.classifications.filter((entry) => ids.includes(entry.requirementId)),
+    cases: output.cases.filter((entry) => ids.includes(entry["requirementId"] as string)),
+  });
+  const carryOf = async (materials: SizedMaterials): Promise<CarryOver> =>
+    deriveCarryOver({
+      list: materials.list,
+      table: materials.table,
+      semanticCheck: {
+        tableSha256: await nameTableSha256(materials.table),
+        judgments: materials.table.verification
+          .filter((entry) => entry.kind !== "unresolved")
+          .map((entry) => ({ requirementId: entry.requirementId, verdict: "accept" as const })),
+      },
+    });
+
+  /**
+   * 束ごとの台本で答える偽物の口（束は「要件の一覧」の先頭の要件 ID で見分ける。束ごとの呼び出しの回を数える）。開始と終了の
+   * 順を記録し、偽物の時計で 1 回の応答に `stepMs` 掛ける（始まった時刻から数える。同時に始まった束は同じ時刻に終わる）
+   */
+  function scripted(script: (ids: readonly string[], call: number) => unknown, stepMs = 0, fail?: (ids: readonly string[], call: number) => boolean) {
+    let clock = 0;
+    const events: string[] = [];
+    const requests: { readonly ids: readonly string[]; readonly input: string }[] = [];
+    const calls = new Map<string, number>();
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest) {
+        const ids = requestListedIds(request);
+        const key = ids[0] ?? "";
+        const call = (calls.get(key) ?? 0) + 1;
+        calls.set(key, call);
+        requests.push({ ids, input: request.input });
+        events.push(`start:${key}`);
+        const startedAt = clock;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        clock = Math.max(clock, startedAt + stepMs);
+        events.push(`end:${key}`);
+        if (fail?.(ids, call) === true) throw Object.assign(new Error("fetch が失敗しました"), { kind: "network" });
+        return { output: script(ids, call) as T, usage: USAGE };
+      },
+      async callWithTools() {
+        throw new Error("前提が壊れた：T2 は道具を呼ばない");
+      },
+    };
+    return { client, events, requests, calls, now: () => clock };
+  }
+
+  async function runBundled(
+    materials: SizedMaterials,
+    script: (ids: readonly string[], call: number) => unknown,
+    options: { readonly judge?: Judge; readonly concurrency?: number; readonly stepMs?: number } = {},
+  ) {
+    const fake = scripted(script, options.stepMs);
+    const gateway = new CallGateway({ client: fake.client, budget: new JobBudget(10), rates: RATES, now: fake.now, deadline: 86_400_000 });
+    const rejected: { readonly candidate: RejectedCandidate; readonly bundle: unknown }[] = [];
+    const startedAt = fake.now();
+    const outcome = await runTestSpec({
+      plan: materials.plan,
+      list: materials.list,
+      table: materials.table,
+      carryOver: await carryOf(materials),
+      documents: FIXTURE_DOCUMENTS,
+      gateway,
+      ledger: LEDGER,
+      ids: true,
+      onRejected: (candidate, bundle) => rejected.push({ candidate, bundle }),
+      ...(options.judge === undefined ? {} : { judge: options.judge }),
+      ...(options.concurrency === undefined ? {} : { bundleConcurrency: options.concurrency }),
+    });
+    return { outcome, ...fake, gateway, rejected, wallMs: fake.now() - startedAt };
+  }
+  /** 束ごとの呼び出しの回数（束の先頭の要件 ID → 回数） */
+  const callsOf = (run: { readonly calls: ReadonlyMap<string, number> }) => Object.fromEntries(run.calls);
+  const requirementsOf = (input: string) =>
+    (dataBlockOf(input, TEST_SPEC_DATA_NAMES[1]) as { readonly requirements: readonly { readonly id: string }[] }).requirements.map((entry) => entry.id);
+
+  it("(1) 要件 15 で要求 3 本（各 5 件）、7 で 2 本（5＋2）、25 で 5 本。各要求の一覧・確かめ方・所属はその束の要件だけで、表は全行", async () => {
+    for (const [count, sizes] of [
+      [15, [5, 5, 5]],
+      [7, [5, 2]],
+      [25, [5, 5, 5, 5, 5]],
+    ] as const) {
+      const materials = sized(count);
+      const full = fullOf(materials);
+      const run = await runBundled(materials, (ids) => sliceOf(full, ids));
+      expect(run.outcome.ok, String(count)).toBe(true);
+      expect(run.requests.map((request) => request.ids.length)).toEqual([...sizes]);
+      expect(run.requests.flatMap((request) => request.ids)).toEqual(materials.list.requirements.map((requirement) => requirement.id));
+      for (const request of run.requests) {
+        expect(requirementsOf(request.input)).toEqual(request.ids);
+        expect((dataBlockOf(request.input, TEST_SPEC_DATA_NAMES[2]) as readonly unknown[]).length).toBe(materials.table.rows.length);
+        const verification = dataBlockOf(request.input, TEST_SPEC_DATA_NAMES[3]) as readonly { readonly requirementId: string }[];
+        expect(verification.map((entry) => entry.requirementId)).toEqual(request.ids);
+        const ownership = dataBlockOf(request.input, TEST_SPEC_DATA_NAMES[4]) as readonly { readonly requirementId: string }[];
+        expect(ownership.every((entry) => request.ids.includes(entry.requirementId))).toBe(true);
+      }
+      expectNoAcceptanceMaterial(run.requests.map((request) => request.input));
+    }
+  });
+
+  it("(教訓 3) 束の数が 1・2・3 と増えても、1 要件あたりの試験の数は増えない（runTestSpec を通した組で、同じ要件の組の試験の数が等しい）", async () => {
+    const perRequirement = async (count: number) => {
+      const materials = sized(count);
+      const full = fullOf(materials);
+      const run = await runBundled(materials, (ids) => sliceOf(full, ids));
+      if (!run.outcome.ok) throw new Error("通らない");
+      const counts: Record<string, number> = {};
+      for (const test of run.outcome.value.suite.tests) counts[test.target.requirementId] = (counts[test.target.requirementId] ?? 0) + 1;
+      // 組は応答の場合をちょうど 1 回ずつ展開したもの（束が重ねも落としもしない）
+      expect(run.outcome.value.suite.tests).toHaveLength(full.cases.length);
+      return { bundles: run.requests.length, counts };
+    };
+    const one = await perRequirement(5);
+    const two = await perRequirement(10);
+    const three = await perRequirement(15);
+    expect([one.bundles, two.bundles, three.bundles]).toEqual([1, 2, 3]);
+    const firstFive = (counts: Readonly<Record<string, number>>) => ["R1", "R2", "R3", "R4", "R5"].map((id) => counts[id]);
+    expect(firstFive(two.counts)).toEqual(firstFive(one.counts));
+    expect(firstFive(three.counts)).toEqual(firstFive(one.counts));
+    expect(Math.max(...Object.values(three.counts))).toBe(Math.max(...Object.values(one.counts)));
+  });
+
+  describe("(2) 束 2 の応答の欠落・重複・別の束の要件 ID・一覧に無い要件 ID は、それぞれ固定文で落ちて束 2 だけがやり直され、束 1・3 の要求は増えない", () => {
+    const materials = sized(15);
+    const full = fullOf(materials);
+    const bundle2 = ["R6", "R7", "R8", "R9", "R10"];
+    const good = sliceOf(full, bundle2);
+    const defects: readonly (readonly [string, Output, string])[] = [
+      ["欠落", { ...good, classifications: good.classifications.filter((entry) => entry.requirementId !== "R7") }, TEST_CASE_BUNDLE_MESSAGES.missing],
+      ["重複", { ...good, classifications: [...good.classifications, { requirementId: "R7", nature: "ruled" }] }, TEST_CASE_BUNDLE_MESSAGES.duplicate],
+      ["別の束の要件 ID", { ...good, classifications: [...good.classifications, { requirementId: "R1", nature: "ruled" }] }, TEST_CASE_BUNDLE_MESSAGES.outside],
+      ["一覧に無い要件 ID", { ...good, classifications: [...good.classifications, { requirementId: "R99", nature: "ruled" }] }, TEST_CASE_BUNDLE_MESSAGES.unknown],
+      ["場合の別の束の要件 ID", { ...good, cases: [...good.cases, { ...full.cases[0] }] }, TEST_CASE_BUNDLE_MESSAGES.caseOutside],
+      ["場合の一覧に無い要件 ID", { ...good, cases: [...good.cases, { ...full.cases[0], requirementId: "R99" }] }, TEST_CASE_BUNDLE_MESSAGES.caseUnknown],
+    ];
+    it.each(defects)("%s", async (_name, defect, message) => {
+      const run = await runBundled(materials, (ids, call) => (ids[0] === "R6" && call === 1 ? defect : sliceOf(full, ids)));
+      expect(run.outcome.ok).toBe(true);
+      expect(callsOf(run)).toEqual({ R1: 1, R6: 2, R11: 1 });
+      const [shape] = run.rejected;
+      expect(run.rejected).toHaveLength(1);
+      expect(shape?.candidate.kind).toBe("shape");
+      expect(shape?.bundle).toEqual({ index: 1, requirements: 5 });
+      expect(shape?.candidate.problems.map((problem) => problem.message)).toContain(message);
+      expect(run.gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
+    });
+  });
+
+  describe("(3)〜(5) 中身のやり直しは帰属する束だけ。形は束の全 round で通算 1・束の呼び出しは 3 以下", () => {
+    const materials = sized(15);
+    const full = fullOf(materials);
+    const omitted = fullOf(materials, "R12");
+    // R12 の分類を T1（ruled）と食い違わせ、判定（J2）で ruled に決める
+    const discrepant = (output: Output): Output => ({
+      ...output,
+      classifications: output.classifications.map((entry) => (entry.requirementId === "R12" ? { ...entry, nature: "existence-only" } : entry)),
+    });
+
+    it("(3) 束 3 の要件の異常の欠けで束 3 だけが 2 回目に呼ばれ（前回の束 3 の場合・その問題・判定で決めた種類）、J2 は合併後 1 回、2 回目が通れば問題 0", async () => {
+      const recorded = recordingJudge(createFakeJudge({ [natureQuestionName("R12")]: choice("ruled", 0.95) }));
+      const run = await runBundled(
+        materials,
+        (ids, call) => (ids[0] === "R11" ? discrepant(sliceOf(call === 1 ? omitted : full, ids)) : sliceOf(full, ids)),
+        { judge: recorded.judge },
+      );
+      if (!run.outcome.ok) throw new Error(JSON.stringify(run.outcome.failure));
+      expect(run.outcome.value.rounds).toBe(2);
+      expect(callsOf(run)).toEqual({ R1: 1, R6: 1, R11: 2 });
+      expect(recorded.requests).toHaveLength(1);
+      const second = run.requests.at(-1);
+      if (second === undefined) throw new Error("要求が無い");
+      expect(second.ids).toEqual(["R11", "R12", "R13", "R14", "R15"]);
+      expect(dataNamesOf(second.input)).toEqual([...TEST_SPEC_DATA_NAMES, ...TEST_SPEC_RETRY_DATA_NAMES, TEST_SPEC_DECIDED_NATURES_DATA_NAME]);
+      expect(dataBlockOf(second.input, TEST_SPEC_RETRY_DATA_NAMES[0])).toEqual(discrepant(sliceOf(omitted, second.ids)).cases);
+      expect(dataBlockOf(second.input, TEST_SPEC_RETRY_DATA_NAMES[1])).toEqual([{ field: "requirements[1]", message: "abnormal の試験が無い" }]);
+      expect(dataBlockOf(second.input, TEST_SPEC_DECIDED_NATURES_DATA_NAME)).toEqual([{ requirementId: "R12", nature: "ruled" }]);
+      expect(run.gateway.retryCounts).toEqual({ communication: 0, shape: 0, content: 1 });
+    });
+
+    it("(3) 2 回目も欠ければ unmet（束 3 の呼び出し 2・ほかの束は 1）", async () => {
+      const run = await runBundled(materials, (ids) => sliceOf(ids[0] === "R11" ? omitted : full, ids));
+      expect(run.outcome.ok).toBe(false);
+      if (run.outcome.ok) return;
+      expect(run.outcome.failure).toMatchObject({ kind: "unmet", attempts: TEST_SPEC_ROUNDS });
+      expect(callsOf(run)).toEqual({ R1: 1, R6: 1, R11: 2 });
+    });
+
+    it("(4) 帰属できない問題（組全体の位置）は束を推測せず固定文で unmet、追加の要求は無い", async () => {
+      const run = await runBundled(materials, (ids) => ({ ...sliceOf(full, ids), cases: [] }));
+      expect(run.outcome.ok).toBe(false);
+      if (run.outcome.ok) return;
+      expect(run.outcome.failure.kind).toBe("unmet");
+      if (run.outcome.failure.kind !== "unmet") return;
+      expect(run.outcome.failure.problems[0]).toEqual({ field: "", message: TEST_CASE_BUNDLE_MESSAGES.unattributed });
+      expect(run.outcome.failure.problems).toContainEqual({ field: "tests", message: "試験の集合が空である" });
+      expect(callsOf(run)).toEqual({ R1: 1, R6: 1, R11: 1 });
+      expect(run.gateway.retryCounts.content).toBe(0);
+    });
+
+    const shapeBad = negative({ classifications: "x", cases: "x" }, "classifications・cases が並びでない応答。束の形の落ちを観測する負例");
+    it("(5) 束 2 が初回で形に落ち → 形のやり直しで通り → 中身で落ち → 中身のやり直しの応答が形で落ちると、追加の要求は無く unmet（束 2 の呼び出し 3）", async () => {
+      const bundle2 = ["R6", "R7", "R8", "R9", "R10"];
+      const script = [shapeBad, sliceOf(fullOf(materials, "R7"), bundle2), shapeBad, sliceOf(full, bundle2)];
+      const run = await runBundled(materials, (ids, call) => (ids[0] === "R6" ? script[call - 1] : sliceOf(full, ids)));
+      expect(run.outcome.ok).toBe(false);
+      if (run.outcome.ok) return;
+      expect(run.outcome.failure.kind).toBe("unmet");
+      expect(callsOf(run)).toEqual({ R1: 1, R6: 3, R11: 1 });
+      expect(run.gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 1 });
+    });
+
+    it("(5) 初回で形を使わなかった束は、中身のやり直しの応答が形で落ちても 1 回やり直せる（呼び出し 3）", async () => {
+      const bundle2 = ["R6", "R7", "R8", "R9", "R10"];
+      const script = [sliceOf(fullOf(materials, "R7"), bundle2), shapeBad, sliceOf(full, bundle2)];
+      const run = await runBundled(materials, (ids, call) => (ids[0] === "R6" ? script[call - 1] : sliceOf(full, ids)));
+      if (!run.outcome.ok) throw new Error(JSON.stringify(run.outcome.failure));
+      expect(callsOf(run)).toEqual({ R1: 1, R6: 3, R11: 1 });
+      expect(run.gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 1 });
+    });
+  });
+
+  describe("門の式：T2 区間の共有の門の増分 ＝ Σ束（開始＋予算での未着手＋timeout を伸ばせない未着手）＋判定の枝の増分（R5）", () => {
+    /** 走らせる部分と同じ配線：束ごとに口を作り、門（と既定で予算）を共有する。判定は同じ門と枝を通す */
+    async function runGated(
+      materials: SizedMaterials,
+      script: (ids: readonly string[], call: number) => unknown,
+      options: {
+        readonly budgetUsd?: number;
+        readonly fail?: (ids: readonly string[], call: number) => boolean;
+        readonly perBundle?: (bundle: number) => { readonly callTimeoutMs?: number; readonly budget?: JobBudget };
+        readonly judge?: Judge;
+      } = {},
+    ) {
+      const fake = scripted(script, 0, options.fail);
+      const deadline = 60_000;
+      const gate = createCallGate({ now: fake.now, deadline, limit: 144 });
+      const budget = new JobBudget(options.budgetUsd ?? 10);
+      const judge =
+        options.judge === undefined ? undefined : createBudgetedJudge({ judge: options.judge, budget, rates: RATES, gate, judgeLimit: 80 });
+      const bundles: CallGateway[] = [];
+      const make = (bundle: number, extra: { readonly callTimeoutMs?: number; readonly budget?: JobBudget } = {}) =>
+        new CallGateway({
+          client: fake.client,
+          budget: extra.budget ?? budget,
+          rates: RATES,
+          now: fake.now,
+          deadline,
+          gate,
+          callTimeoutMs: extra.callTimeoutMs ?? 1_000,
+        });
+      const gateBefore = gate.attempts();
+      const outcome = await runTestSpec({
+        plan: materials.plan,
+        list: materials.list,
+        table: materials.table,
+        carryOver: await carryOf(materials),
+        documents: FIXTURE_DOCUMENTS,
+        gateway: make(-1),
+        ledger: LEDGER,
+        ids: true,
+        bundleGateway: (bundle) => {
+          const made = make(bundle, options.perBundle?.(bundle));
+          bundles[bundle] = made;
+          return made;
+        },
+        ...(judge === undefined ? {} : { judge }),
+      });
+      const counts = bundles.map((entry) => entry.counts);
+      const formula = counts.reduce((sum, item) => sum + item.attempts.started + item.attempts.not_started.budget + item.attempts.not_started.timeout, 0);
+      return { outcome, fake, counts, gateDelta: gate.attempts() - gateBefore, formula, branch: judge?.branch?.used ?? 0 };
+    }
+
+    it("(a) 予算 0 で 2 束を同時に呼ぶと両束が budget で止まり、共有の門 +2・束の開始 0・予算での未着手 2・口の呼び出し 0", async () => {
+      const materials = sized(7);
+      const full = fullOf(materials);
+      const run = await runGated(materials, (ids) => sliceOf(full, ids), { budgetUsd: 0 });
+      expect(run.outcome.ok).toBe(false);
+      if (run.outcome.ok) return;
+      expect(run.outcome.failure.kind).toBe("budget");
+      expect(run.counts.map((item) => [item.attempts.started, item.attempts.not_started.budget])).toEqual([
+        [0, 1],
+        [0, 1],
+      ]);
+      expect(run.fake.requests).toHaveLength(0);
+      expect(run.gateDelta).toBe(2);
+      expect(run.gateDelta).toBe(run.formula + run.branch);
+    });
+
+    it("(b) 2 束が通り、合併後に J2 を 1 回呼ぶ台本で、共有の門 +3・束の開始 2・判定の枝 +1。束の計に J2 は載らない", async () => {
+      const materials = sized(7);
+      const full = fullOf(materials);
+      const discrepant = (output: Output): Output => ({
+        ...output,
+        classifications: output.classifications.map((entry) => (entry.requirementId === "R6" ? { ...entry, nature: "existence-only" } : entry)),
+      });
+      const run = await runGated(materials, (ids) => discrepant(sliceOf(full, ids)), {
+        judge: createFakeJudge({ [natureQuestionName("R6")]: choice("ruled", 0.95) }),
+      });
+      if (!run.outcome.ok) throw new Error(JSON.stringify(run.outcome.failure));
+      expect(run.counts.map((item) => item.attempts.started)).toEqual([1, 1]);
+      expect(run.branch).toBe(1);
+      expect(run.gateDelta).toBe(3);
+      expect(run.gateDelta).toBe(run.formula + run.branch);
+    });
+
+    it("(c) 通信の再送 1・timeout を伸ばせない未着手 1・予算での未着手 1 が別の束で交錯しても、各項目はその束の計にだけ出て、式が成り立つ", async () => {
+      const materials = sized(15);
+      const full = fullOf(materials);
+      const run = await runGated(materials, (ids) => sliceOf(full, ids), {
+        // 束 1・2 は 1 回目の試行が通信の誤り。束 1 は timeout を伸ばせる、束 2 は締切の残りと同じ timeout で伸ばせない。束 3 は予算 0
+        fail: (ids, call) => (ids[0] === "R1" || ids[0] === "R6") && call === 1,
+        perBundle: (bundle) => (bundle === 1 ? { callTimeoutMs: 60_000 } : bundle === 2 ? { budget: new JobBudget(0) } : {}),
+      });
+      expect(run.outcome.ok).toBe(false);
+      const shape = run.counts.map((item) => ({
+        started: item.attempts.started,
+        communication: item.retries.communication,
+        timeout: item.attempts.not_started.timeout,
+        budget: item.attempts.not_started.budget,
+      }));
+      expect(shape).toEqual([
+        { started: 2, communication: 1, timeout: 0, budget: 0 },
+        { started: 1, communication: 0, timeout: 1, budget: 0 },
+        { started: 0, communication: 0, timeout: 0, budget: 1 },
+      ]);
+      expect(run.gateDelta).toBe(5);
+      expect(run.gateDelta).toBe(run.formula + run.branch);
+    });
+  });
+
+  it("(6) 束は同時に始まる：束 3 の開始がどの応答よりも前", async () => {
+    const materials = sized(15);
+    const full = fullOf(materials);
+    const run = await runBundled(materials, (ids) => sliceOf(full, ids));
+    const firstEnd = run.events.findIndex((event) => event.startsWith("end:"));
+    expect(run.events.indexOf("start:R11")).toBeGreaterThanOrEqual(0);
+    expect(run.events.indexOf("start:R11")).toBeLessThan(firstEnd);
+    expect(run.events.slice(0, 3)).toEqual(["start:R1", "start:R6", "start:R11"]);
+  });
+
+  it("(7) 各束の応答に 10 秒掛かるとき、T2 の壁の時間は 1 束分（10 秒）で束の数に比例しない。同時数 1 なら束の数 × 10 秒", async () => {
+    for (const count of [15, 25]) {
+      const materials = sized(count);
+      const full = fullOf(materials);
+      const concurrent = await runBundled(materials, (ids) => sliceOf(full, ids), { stepMs: 10_000 });
+      const serial = await runBundled(materials, (ids) => sliceOf(full, ids), { stepMs: 10_000, concurrency: 1 });
+      expect(concurrent.outcome.ok && serial.outcome.ok).toBe(true);
+      expect(concurrent.wallMs).toBe(10_000);
+      expect(serial.wallMs).toBe(10_000 * Math.ceil(count / V12_T2_BUNDLE.size));
+    }
+  });
+
+  it("(8) 同じ台本で同時数 1 の走りと同時の走りの展開後の組・組の SHA・成果物が深く等しい（順序に依らない）", async () => {
+    const materials = sized(15);
+    const full = fullOf(materials);
+    const script = (ids: readonly string[], call: number) => sliceOf(ids[0] === "R11" && call === 1 ? fullOf(materials, "R12") : full, ids);
+    const concurrent = await runBundled(materials, script);
+    const serial = await runBundled(materials, script, { concurrency: 1 });
+    if (!concurrent.outcome.ok || !serial.outcome.ok) throw new Error("通らない");
+    expect(serial.outcome.value).toEqual(concurrent.outcome.value);
+    expect(serial.outcome.value.sha256).toBe(concurrent.outcome.value.sha256);
+    expect(callsOf(serial)).toEqual(callsOf(concurrent));
+  });
+
+  describe("(10) 門：合併後の組の誤りは今までどおりの固定文で落ち、その要件を含む束だけがやり直される", () => {
+    const materials = sized(15);
+    const full = fullOf(materials);
+    const bundle3 = ["R11", "R12", "R13", "R14", "R15"];
+    const r12 = (patch: Readonly<Record<string, unknown>>) => {
+      const good = sliceOf(full, bundle3);
+      return { ...good, cases: good.cases.map((entry) => (entry["requirementId"] === "R12" && entry["kind"] === "normal" ? { ...entry, ...patch } : entry)) };
+    };
+    const cases: readonly (readonly [string, () => Output, string])[] = [
+      ["所属に無い対象", () => r12({ targetId: "E1.F1" }), "対象の役割 ID が、その要件の所属に無い"],
+      ["評価の方法の表に無い組", () => r12({ observes: "empty-aggregate" }), "（対象の種類・操作・観測する性質）の組が評価の方法の表に無い"],
+      [
+        "16 本超",
+        () => {
+          const good = sliceOf(full, bundle3);
+          const normal = good.cases.find((entry) => entry["requirementId"] === "R12");
+          return { ...good, cases: [...good.cases, ...Array.from({ length: 16 }, () => ({ ...normal }))] };
+        },
+        "要件の試験が上限 16 を超えている（19）",
+      ],
+    ];
+    it.each(cases)("%s", async (_name, bad, fragment) => {
+      const run = await runBundled(materials, (ids, call) => (ids[0] === "R11" && call === 1 ? bad() : sliceOf(full, ids)));
+      if (!run.outcome.ok) throw new Error(JSON.stringify(run.outcome.failure));
+      expect(callsOf(run)).toEqual({ R1: 1, R6: 1, R11: 2 });
+      const content = run.rejected.find((entry) => entry.candidate.kind === "content");
+      expect(content?.candidate.problems.length).toBeGreaterThan(0);
+      expect(content?.candidate.problems.map((problem) => problem.message)).toContain(fragment);
+    });
+
+    it("在ることだけの要件（判定で existence-only）に validate の試験があれば、その束だけがやり直され、再び落ちれば unmet", async () => {
+      const recorded = recordingJudge(createFakeJudge({ [natureQuestionName("R12")]: choice("existence-only", 0.95) }));
+      const run = await runBundled(
+        materials,
+        (ids) => {
+          const slice = sliceOf(full, ids);
+          return ids[0] === "R11"
+            ? { ...slice, classifications: slice.classifications.map((entry) => (entry.requirementId === "R12" ? { ...entry, nature: "existence-only" } : entry)) }
+            : slice;
+        },
+        { judge: recorded.judge },
+      );
+      expect(run.outcome.ok).toBe(false);
+      if (run.outcome.ok) return;
+      expect(run.outcome.failure.kind).toBe("unmet");
+      expect(callsOf(run)).toEqual({ R1: 1, R6: 1, R11: 2 });
+      expect(recorded.requests).toHaveLength(1);
+    });
+
+    it("集計の空の期待（コードが作る範囲）を束 1 が書けば、今までどおりの固定文で落ち、束 1 だけがやり直される", async () => {
+      const written = sized(15, { codeWritten: true });
+      const writtenFull = fullOf(written);
+      const aggregate = writtenFull.cases.find((entry) => entry["requirementId"] === "R3" && entry["targetId"] === "C1");
+      if (aggregate === undefined) throw new Error("前提が壊れた：集計の場合が無い");
+      const wrong = { ...aggregate, kind: "boundary", observes: "empty-aggregate", rows: [], emptyEntities: ["E1"], expected: { kind: "ok", value: "5" } };
+      const run = await runBundled(written, (ids, call) => {
+        const slice = sliceOf(writtenFull, ids);
+        return ids.includes("R3") && call === 1 ? { ...slice, cases: [...slice.cases, wrong] } : slice;
+      });
+      if (!run.outcome.ok) throw new Error(JSON.stringify(run.outcome.failure));
+      expect(callsOf(run)).toEqual({ R3: 2, R8: 1, R13: 1 });
+      const content = run.rejected.find((entry) => entry.candidate.kind === "content");
+      const notAllowed = PROPERTY_LEDGER.find((entry) => entry.id === "empty-aggregate")?.t2Aggregate?.messages.notAllowed;
+      expect(notAllowed).toBeDefined();
+      expect(content?.candidate.problems.map((problem) => problem.message)).toContain(notAllowed);
+    });
+
+    it("コードの試験（手 3c・3d）は合併後の組にあり、コードが作る範囲の試験を束が書けばその束だけがやり直される", async () => {
+      const written = sized(15, { codeWritten: true });
+      const writtenFull = fullOf(written);
+      const run = await runBundled(written, (ids) => sliceOf(writtenFull, ids));
+      if (!run.outcome.ok) throw new Error(JSON.stringify(run.outcome.failure));
+      expect(run.outcome.value.suite.tests.filter((test) => isGeneratedTestId(test.id)).length).toBe(written.generatedTestCount);
+      // コードの試験だけで確かめる要件（R1・R2）は束に入らない
+      expect(run.requests.flatMap((request) => request.ids)).not.toContain("R1");
+      expect(run.requests.map((request) => request.ids.length)).toEqual([5, 5, 3]);
+    });
   });
 });

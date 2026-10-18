@@ -408,3 +408,146 @@ export function toCasePositions(
     return { ...problem, field: `cases[${String(caseIndex)}]${caseFieldOf(rest)}` };
   });
 }
+
+// ── 束（手 3f・Issue #626）───────────────────────────────────────────
+//
+// 束の中で閉じる条件（束ごとに見る）は、分類がその束の要件にちょうど 1 件と、場合の要件 ID がその束の要件であることだけ。網羅・総数・
+// 重複・分類の照合・J2 などの合併した組の条件は、ここでは見ない（呼ぶ側が合併後に 1 回だけ掛ける）。
+
+/** 束の完全性の固定文（値を埋めない） */
+export const TEST_CASE_BUNDLE_MESSAGES = {
+  unknown: "要件の一覧に無い要件 ID の分類である",
+  outside: "別の束の要件 ID の分類である",
+  duplicate: "同じ要件の分類が重なっている",
+  missing: "束の要件の分類が無い",
+  caseOutside: "場合の要件 ID が別の束の要件である",
+  caseUnknown: "場合の要件 ID が要件の一覧に無い",
+  unattributed: "問題を束に帰属できない",
+} as const;
+
+/** 要件 ID の並びを、並びの順で `size` 件ごとの束に切る（最後の束は `size` 未満でよい。空の並びは束 0） */
+export function bundleRequirementIds(ids: readonly string[], size: number): readonly (readonly string[])[] {
+  if (!Number.isInteger(size) || size < 1) throw new RangeError("束の大きさは 1 以上の整数であること");
+  const bundles: string[][] = [];
+  for (let start = 0; start < ids.length; start += size) bundles.push(ids.slice(start, start + size));
+  return bundles;
+}
+
+/**
+ * 束の完全性（束の中で閉じる条件だけ）。分類がその束の要件にちょうど 1 件（欠落・重複・別の束の要件 ID・一覧に無い要件 ID）で、
+ * 場合の要件 ID が別の束の要件でも一覧に無い要件でもないこと。位置はその束の応答の添字（`classifications[i]`・`cases[i]`・束の中の
+ * `requirements[i]`）。`requestedIds` は全部の束の要件（要求の一覧）、`knownIds` は残る要件の一覧（要求の一覧を含む）。一覧にあるが
+ * どの束にも無い要件（コードの試験だけで確かめる要件）の分類・場合はここでは断らず、合併後の検査が今までどおりの固定文で断る
+ */
+export function checkBundleCompleteness(
+  output: TestCasesOutput,
+  bundleIds: readonly string[],
+  requestedIds: readonly string[],
+  knownIds: readonly string[],
+): readonly Problem[] {
+  const problems: Problem[] = [];
+  const inBundle = new Set(bundleIds);
+  const requested = new Set(requestedIds);
+  const known = new Set([...knownIds, ...requestedIds]);
+  const seen = new Set<string>();
+  const classifications = Array.isArray(output.classifications) ? (output.classifications as readonly unknown[]) : [];
+  classifications.forEach((entry, index) => {
+    const field = `classifications[${String(index)}].requirementId`;
+    const id = isRecord(entry) && typeof entry["requirementId"] === "string" ? entry["requirementId"] : undefined;
+    if (id === undefined || !known.has(id)) {
+      problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.unknown });
+      return;
+    }
+    if (!inBundle.has(id)) {
+      if (requested.has(id)) problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.outside });
+      return;
+    }
+    if (seen.has(id)) {
+      problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.duplicate });
+      return;
+    }
+    seen.add(id);
+  });
+  bundleIds.forEach((id, index) => {
+    if (!seen.has(id)) problems.push({ field: `requirements[${String(index)}]`, message: TEST_CASE_BUNDLE_MESSAGES.missing });
+  });
+  output.cases.forEach((entry, index) => {
+    const field = `cases[${String(index)}].requirementId`;
+    if (!known.has(entry.requirementId)) problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.caseUnknown });
+    else if (!inBundle.has(entry.requirementId) && requested.has(entry.requirementId)) {
+      problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.caseOutside });
+    }
+  });
+  return problems;
+}
+
+/** 合併した場合の応答と、合併の位置 → 束（束の添字と束の中の添字）の対応 */
+export interface MergedTestCases {
+  readonly output: TestCasesOutput;
+  /** 合併の場合の添字 → [束の添字, 束の中の添字] */
+  readonly caseOrigin: readonly (readonly [number, number])[];
+  /** 合併の分類の添字 → [束の添字, 束の中の添字] */
+  readonly classificationOrigin: readonly (readonly [number, number])[];
+}
+
+/** 束の応答を、束の順・束の中の順で 1 つの応答に合併する（並べ替えない・重ねを除かない。重ねは合併後の検査が落とす） */
+export function mergeBundleCases(outputs: readonly TestCasesOutput[]): MergedTestCases {
+  const cases: TestCase[] = [];
+  const classifications: unknown[] = [];
+  const caseOrigin: (readonly [number, number])[] = [];
+  const classificationOrigin: (readonly [number, number])[] = [];
+  outputs.forEach((output, bundle) => {
+    output.cases.forEach((entry, index) => {
+      cases.push(entry);
+      caseOrigin.push([bundle, index]);
+    });
+    (Array.isArray(output.classifications) ? (output.classifications as readonly unknown[]) : []).forEach((entry, index) => {
+      classifications.push(entry);
+      classificationOrigin.push([bundle, index]);
+    });
+  });
+  return { output: { classifications, cases }, caseOrigin, classificationOrigin };
+}
+
+/** 束へ帰属させた問題（束ごとの問題は位置をその束の応答の添字へ写したもの）と、帰属できない問題 */
+export interface AttributedProblems {
+  readonly byBundle: ReadonlyMap<number, readonly Problem[]>;
+  readonly unattributed: readonly Problem[];
+}
+
+/**
+ * 合併後の組の問題を束へ帰属させる（推測しない）。要件の位置（要求の一覧の `requirements[i]`。束は一覧の順で切ってあるので
+ * `i` を束の大きさで割る）・場合の位置（`cases[i]…`）・分類の位置（`classifications[i]…`）を持つ問題だけを、その束へ、その束の
+ * 中の添字に写して渡す。ほかの位置（コードが作った試験・応答全体など）は帰属できない問題として返す
+ */
+export function attributeProblemsToBundles(
+  problems: readonly Problem[],
+  merged: MergedTestCases,
+  bundles: readonly (readonly string[])[],
+): AttributedProblems {
+  const byBundle = new Map<number, Problem[]>();
+  const unattributed: Problem[] = [];
+  const push = (bundle: number, problem: Problem): void => {
+    const list = byBundle.get(bundle) ?? [];
+    list.push(problem);
+    byBundle.set(bundle, list);
+  };
+  const requirementOrigin: (readonly [number, number])[] = bundles.flatMap((ids, bundle) => ids.map((_, index) => [bundle, index] as const));
+  for (const problem of problems) {
+    const match = /^(requirements|cases|classifications)\[(\d+)\](.*)$/.exec(problem.field);
+    if (match === null) {
+      unattributed.push(problem);
+      continue;
+    }
+    const [, head = "", at = "", rest = ""] = match;
+    const origins = head === "requirements" ? requirementOrigin : head === "cases" ? merged.caseOrigin : merged.classificationOrigin;
+    const origin = origins[Number(at)];
+    if (origin === undefined || (head === "requirements" && rest !== "")) {
+      unattributed.push(problem);
+      continue;
+    }
+    const [bundle, local] = origin;
+    push(bundle, { ...problem, field: `${head}[${String(local)}]${rest}` });
+  }
+  return { byBundle, unattributed };
+}
