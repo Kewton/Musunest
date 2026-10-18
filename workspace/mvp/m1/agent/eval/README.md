@@ -642,7 +642,7 @@ v1（比較元の checkout。main `2cd1586f856fb1cdecf75ef035826cbffe539e69`）�
 
 - `--stage-start <段>`・`--stage-end <段>`・`--stage-from <凍結した上流の計測の出力先>`。**`--pipeline v1.1a` と `--build-from <組>` と組んでだけ受ける**（それ以外は `flags:conflict`）。段の名前・範囲の決め方・境界は工場の dist（`packages/factory/dist/v11a/bundle-v11a.js`）が公開する定数と関数を読む（道具の中に段の表を持たない）。片方だけ付ければ他方は経路の端（工場と同じ）
 - 開始が T1（`name-table`）なら `--stage-from` を付けられない。T2（`test-spec`）・B1（`write`）なら必須。表に無い段・開始が終了より後も `flags:conflict`
-- 区間 0（開始 T1・終了 T1''）の段の表に `vocabulary`・`mapping` を足した（`name-table`・`semantic-check`・`carry-over` はそのまま）。区間 1 以降の記録に出れば「段の履歴が範囲と合わない」。工場の dist との照合の試験は、dist に無い段のうち採点が先に足した定数（`FACTORY_PENDING_STAGE_IDS`）だけを許す（工場が足したら外す）
+- 区間 0（開始 T1・終了 T1''）の段の表に `vocabulary`・`mapping` を足した（`name-table`・`semantic-check`・`carry-over` はそのまま）。区間 1 以降の記録に出れば「段の履歴が範囲と合わない」。工場の dist との照合の試験は、採点の段の表と dist の段の表が深く等しいことを見る（採点が先に足した段を許す定数は手 3a で外した）
 - 対象の本は `--build-from` と同じ（採用した P × 回数。`--only` は採用した P の部分集合）
 - 子の引数の末尾に `--stage-start <開始> --stage-end <終了>` と、開始の段の直前の境界があれば `--stage-input <本のディレクトリ>/stage-input/stage-checkpoint-<境界>.json` を足す。上流の checkpoint と段の走りの記録は、照合を通ったバイト列のまま本のディレクトリの `stage-input/` に写す（工場は checkpoint の隣の記録を読む）
 - **予算と締切の単位は段の走り 1 本**：`--factory-budget-usd`・`--deadline-min` は今までどおり子ごとに `--budget`・`--deadline` で渡し、工場がその走りの始まりから当てる（前の走りの額と時間を引かない）。計測全体の目安の額（`--budget-usd`）の扱いは今と同じで、済みの額は段の走りの記録の `provider_cost_usd` から足す
@@ -987,7 +987,7 @@ node table/score-table.mjs <正解のディレクトリ> <計測の出力先> <�
 
 ### 7.10 範囲の外・限界
 
-- 断った候補の下書きの採点と C3 の正誤表（2 本目）。正解の作成・版上げ・置き場（所有者）。Jev の較正。工場の表の形・段の変更。候補の凍結と計測（窓口）
+- 正解の作成・版上げ・置き場（所有者）。Jev の較正。工場の表の形・段の変更。候補の凍結と計測（窓口）
 - 正解の欄の名前と型は、窓口が現物から欄の名前と型だけを抜いた一覧に合わせた（この道具の作り手は現物を読んでいない）。現物の形が変われば `table-score:gold-shape` で断る（数えない）。そのときは欄の名前を合わせる Issue を立てる
 - unresolved の reason_kind のうち `table-vocabulary-gap`・`empty-reference-list` は本文の規則に無いので、持ち越しにも了承除外にも数えない（`verification_limit` が無ければ (iii) 0）
 
