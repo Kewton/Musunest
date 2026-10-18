@@ -29,7 +29,9 @@ import {
   ENVELOPE_SCHEMA,
   ENVELOPE_SCHEMA_NAME,
   ENVELOPE_SCHEMA_NAME_V11A,
+  ENVELOPE_SCHEMA_NAME_V12,
   ENVELOPE_SCHEMA_V11A,
+  ENVELOPE_SCHEMA_V12,
   ENVELOPE_SCHEMA_V12_LEDGER,
   buildEnvelopeSchema,
   buildStageBranch,
@@ -763,6 +765,82 @@ describe("封筒の段の枝は、段が渡した schema で組む（旗 on の�
         ),
       ),
     );
+  });
+});
+
+// ── Issue #588：経路 v1.2 の封筒は 1 つ（識別子 v1.2 で全段が同じ実体を送る）──────────
+
+describe("識別子 v1.2 の client は、封筒に載る全段に同じ v1.2 の封筒を送る（Issue #588）", () => {
+  /** 送るだけ見る（応答は捨てる。形の誤りでも送った body は残る） */
+  async function sentFormat(envelope: "v1.1a" | "v1.2", schemaName: string, schema: unknown) {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify(enveloped(schemaName, {}))), USAGE_WIRE)),
+    );
+    await createOpenAiLlmClient({ apiKey: "test-key", fetch, envelope })
+      .callStructured(stageRequest(schemaName, schema))
+      .catch(() => undefined);
+    return formatOf(bodyOf(captured));
+  }
+
+  /** 旗 on の T1・T2（台帳の schema）と、台帳の導出を持たない T1''・B1・B3'・B5' の要求の schema */
+  const v12Requests = (): readonly { readonly stage: string; readonly schema: unknown }[] => [
+    { stage: NAME_TABLE_SCHEMA_NAME, schema: nameTableSchemaOf(PROPERTY_LEDGER_VIEW) },
+    { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW) },
+    ...STAGE_ENVELOPE_ENTRIES_V11A.filter(
+      (entry) => entry.stage !== NAME_TABLE_SCHEMA_NAME && entry.stage !== TEST_SPEC_SCHEMA_NAME,
+    ),
+  ];
+
+  it("旗 on の T1・T2 と T1''・B1・B3'・B5' の 6 段が、名前 stage-envelope-v12 の同じバイト列の封筒を送る", async () => {
+    const requests = v12Requests();
+    expect(requests).toHaveLength(6);
+    const sent = new Set<string>();
+    for (const request of requests) {
+      const format = await sentFormat("v1.2", request.stage, JSON.parse(JSON.stringify(request.schema)));
+      expect(format.name, request.stage).toBe(ENVELOPE_SCHEMA_NAME_V12);
+      expect(format.schema, request.stage).toEqual(ENVELOPE_SCHEMA_V12);
+      expect(format.strict, request.stage).toBe(true);
+      const branches = (((format.schema as Record<string, unknown>)["properties"] as Record<string, unknown>)["result"] as {
+        readonly anyOf: readonly unknown[];
+      }).anyOf;
+      expect(branches, request.stage).toContainEqual(buildStageBranch({ stage: request.stage, schema: request.schema }));
+      sent.add(JSON.stringify(format));
+    }
+    expect(sent.size).toBe(1);
+  });
+
+  it("同じ要求を識別子 v1.1a で送ると、今のまま 2 種類の封筒（旗 on の T1・T2 とほかの段で前置きが違う）", async () => {
+    const sent = new Set<string>();
+    for (const request of v12Requests()) {
+      const format = await sentFormat("v1.1a", request.stage, request.schema);
+      expect(format.name, request.stage).toBe(ENVELOPE_SCHEMA_NAME_V11A);
+      sent.add(JSON.stringify(format.schema));
+    }
+    expect(sent).toEqual(new Set([JSON.stringify(ENVELOPE_SCHEMA_V12_LEDGER), JSON.stringify(ENVELOPE_SCHEMA_V11A)]));
+  });
+
+  it("v1.2 の一覧に無い名前（判定の口・差分の洗い出し・v1 だけの段）は、その schema をそのまま送る", async () => {
+    for (const [name, schema] of [
+      ["judge-answers", SCHEMA],
+      [SURFACE_DIFF_SCHEMA_NAME, DIFF_SCHEMA],
+      [DESIGN_SCHEMA_NAME, DESIGN_SCHEMA],
+    ] as const) {
+      const format = await sentFormat("v1.2", name, schema);
+      expect(format.name, name).toBe(name);
+      expect(format.schema, name).toEqual(schema);
+    }
+  });
+
+  it("識別子 v1.2 の client も、応答の stage が違えば形の誤り（取り出しは緩めない）", async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify(enveloped(TEST_SPEC_SCHEMA_NAME, { rows: [], requirements: [] }))), USAGE_WIRE)),
+    );
+    const error = await captureError(() =>
+      createOpenAiLlmClient({ apiKey: "test-key", fetch, envelope: "v1.2" }).callStructured(
+        stageRequest(NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf(PROPERTY_LEDGER_VIEW)),
+      ),
+    );
+    expect(error.kind).toBe("malformed");
   });
 });
 
