@@ -6,6 +6,7 @@ import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-
 import { requirementsFromPlan } from "../pipeline.js";
 import { fixtureNonRequirementList, fixtureNonRequirementTable, fixtureTable } from "./__tests__/fixtures.js";
 import {
+  buildSearchRepairArtifact,
   buildStageCheckpoint,
   buildV11aArtifacts,
   stageJsonText,
@@ -13,9 +14,11 @@ import {
   verifyStageInput,
   STAGE_RUN_RECORD_SCHEMA,
   V11A_ARTIFACT_NAMES,
+  V12_SEARCH_REPAIR_ARTIFACT_NAME,
   type V11aRecordsInput,
 } from "./bundle-v11a.js";
 import { deriveCarryOver } from "./carry-over.js";
+import { countViolations, type SearchRepairRecord } from "../v12/search-repair.js";
 import { nameTableSha256 } from "./names.js";
 import { undeterminedJudgeAdvice } from "./run.js";
 import { JUDGE_ADVICE_THRESHOLDS } from "./stages/judge-advice.js";
@@ -147,6 +150,106 @@ describe("v1.1α の 7 つの記録", () => {
     expect(byPath.get(V11A_ARTIFACT_NAMES.declCheck).versions[0].remaining_checks).toBe(5);
     expect(byPath.get(V11A_ARTIFACT_NAMES.judgeAdvice).rounds[0].thresholds).toEqual(JUDGE_ADVICE_THRESHOLDS);
     expect(byPath.get(V11A_ARTIFACT_NAMES.verification).decl_check).toEqual({ exhausted: 0, malformed: 1, rejected: 0 });
+  });
+});
+
+// ── 探索の記録（旗 v12.search-repair。Issue #551）──────────────────────────────
+
+describe("探索の記録 search-repair.json（旗 v12.search-repair の走りだけ。Issue #551）", () => {
+  const sha = (char: string): string => char.repeat(64);
+  const record = (): SearchRepairRecord => ({
+    versions: [
+      {
+        origin: "write",
+        declarationSha256: sha("1"),
+        violations: countViolations({
+          declarationSha256: sha("1"),
+          staticCheckPassed: true,
+          correspondenceMisses: 0,
+          decl: { ran: true, rejections: 0, unmarked: 0 },
+          testMismatches: 2,
+          testUnresolved: 0,
+        }),
+        adopted: true,
+        discarded: null,
+      },
+      {
+        origin: "repair",
+        declarationSha256: sha("2"),
+        violations: countViolations({
+          declarationSha256: sha("2"),
+          staticCheckPassed: true,
+          correspondenceMisses: 1,
+          decl: { ran: false, reason: "name-check" },
+          testMismatches: 0,
+          testUnresolved: 0,
+        }),
+        adopted: false,
+        discarded: { unmarked: ["R4"], rejections: 0 },
+      },
+      {
+        origin: "rewrite",
+        declarationSha256: sha("3"),
+        violations: { kind: "static-check-failed", declarationSha256: sha("3") },
+        adopted: false,
+        discarded: { unmarked: [], rejections: 0 },
+      },
+    ],
+    recounts: [
+      {
+        cause: "coverage",
+        declarationSha256: sha("1"),
+        violations: countViolations({
+          declarationSha256: sha("1"),
+          staticCheckPassed: true,
+          correspondenceMisses: 0,
+          decl: { ran: true, rejections: 0, unmarked: 0 },
+          testMismatches: 0,
+          testUnresolved: 0,
+        }),
+      },
+    ],
+    bestDeclarationSha256: sha("1"),
+    rewritten: true,
+  });
+
+  it("渡さなければ 7 つの記録のまま（今の記録とバイト列で同じ）。渡せば末尾に 1 つだけ足し、ほかの 7 つはバイト列で同じ", () => {
+    const without = buildV11aArtifacts(input());
+    const withSearch = buildV11aArtifacts({ ...input(), searchRepair: record() });
+    expect(without.map((artifact) => artifact.path)).toEqual(Object.values(V11A_ARTIFACT_NAMES));
+    expect(withSearch.map((artifact) => artifact.path)).toEqual([...Object.values(V11A_ARTIFACT_NAMES), V12_SEARCH_REPAIR_ARTIFACT_NAME]);
+    expect(withSearch.slice(0, without.length)).toEqual(without);
+    expect(V12_SEARCH_REPAIR_ARTIFACT_NAME).toBe("artifacts/search-repair.json");
+    expect(Object.values(V11A_ARTIFACT_NAMES)).not.toContain(V12_SEARCH_REPAIR_ARTIFACT_NAME);
+  });
+
+  it("中身：版ごとの宣言の SHA-256・違反の数の内訳（不明は null と理由）・採否・捨てた候補の状態の要約・一番良い版・作り直しの有無。同じ入力で同じバイト列", () => {
+    const artifact = buildSearchRepairArtifact(record());
+    expect(buildSearchRepairArtifact(record())).toEqual(artifact);
+    expect(`${JSON.stringify(JSON.parse(artifact.text), null, 2)}\n`).toBe(artifact.text);
+    const json = JSON.parse(artifact.text) as Record<string, unknown>;
+    expect(Object.keys(json)).toEqual(["versions", "recounts", "best_declaration_sha256", "rewritten"]);
+    expect(json["best_declaration_sha256"]).toBe(sha("1"));
+    expect(json["rewritten"]).toBe(true);
+    const versions = json["versions"] as Record<string, unknown>[];
+    expect(versions.map((version) => [version["origin"], version["declaration_sha256"], version["adopted"]])).toEqual([
+      ["write", sha("1"), true],
+      ["repair", sha("2"), false],
+      ["rewrite", sha("3"), false],
+    ]);
+    expect(versions[0]?.["violations"]).toEqual({
+      kind: "counted",
+      declaration_sha256: sha("1"),
+      breakdown: { "correspondence-miss": 0, "decl-rejection": 0, "decl-unmarked": 0, "test-mismatch": 2, "test-unresolved": 0 },
+      known_total: 2,
+      unknown: null,
+    });
+    const unknownViolations = (versions[1]?.["violations"] ?? {}) as Record<string, unknown>;
+    expect(unknownViolations["unknown"]).toEqual({ reason: "name-check", declaration_sha256: sha("2") });
+    expect((unknownViolations["breakdown"] as Record<string, unknown>)["decl-rejection"]).toBeNull();
+    expect(versions[1]?.["discarded"]).toEqual({ unmarked: ["R4"], rejections: 0 });
+    expect(versions[2]?.["violations"]).toEqual({ kind: "static-check-failed", declaration_sha256: sha("3") });
+    expect((json["recounts"] as Record<string, unknown>[])[0]?.["cause"]).toBe("coverage");
   });
 });
 

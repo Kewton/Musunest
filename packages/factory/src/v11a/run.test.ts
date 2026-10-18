@@ -56,7 +56,7 @@ import {
   withoutEmptyAggregate,
   withoutWhenAndNonRequirement,
 } from "./__tests__/fixtures.js";
-import { V11A_ARTIFACT_NAMES } from "./bundle-v11a.js";
+import { V11A_ARTIFACT_NAMES, V12_SEARCH_REPAIR_ARTIFACT_NAME } from "./bundle-v11a.js";
 import * as evaluateModule from "./evaluate.js";
 import { DEFAULT_VALUE_DETAILS, UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
 import { COMPUTATION_AGGREGATE_MESSAGES, nameTableSha256, type NameTable } from "./names.js";
@@ -65,6 +65,7 @@ import {
   ALL_CARRIED_PROBLEM,
   runGenerationV11a,
   runStageRangeV11a,
+  staticCheckForRecount,
   v11aFailureSignature,
   type GenerationInputV11a,
 } from "./run.js";
@@ -74,12 +75,26 @@ import { NAME_TABLE_PREVIOUS_DATA_NAMES, NAME_TABLE_SCHEMA_NAME } from "./stages
 import * as semanticCheckStage from "./stages/semantic-check.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
 import { TEST_SPEC_SCHEMA_NAME, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
-import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./stages/write.js";
+import {
+  WRITE_V11A_DATA_NAMES,
+  WRITE_V11A_REWRITE_DATA_NAME,
+  WRITE_V11A_REWRITE_RULE_DEFINITIONS,
+  WRITE_V11A_SCHEMA_NAME,
+} from "./stages/write.js";
+import { NAMED_FAILURE_MESSAGES } from "../v12/search-repair.js";
 import { natureQuestionName } from "../stages/test-suite.js";
 import { captureBaselineV11a, type BaselineV11aCapture, type BaselineV11aScenarios } from "../__tests__/baseline-capture.js";
 import * as factoryModule from "../index.js";
 import { createFakeLlmClient } from "../llm-fake.js";
-import { PROPERTY_LEDGER, V12_PIPELINE_FLAGS, V12_FLAG_NAMES, resolveV12Flags } from "../v12/ledger.js";
+import {
+  PROPERTY_LEDGER,
+  V12_PIPELINE_FLAGS,
+  V12_FLAG_NAMES,
+  V12_FLAG_PUBLIC_NAMES,
+  V12_PUBLIC_FLAG_NAMES,
+  fromPublicV12Flags,
+  resolveV12Flags,
+} from "../v12/ledger.js";
 import * as ledgerModule from "../v12/ledger.js";
 import { buildSized, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
 
@@ -2193,7 +2208,13 @@ const moduleWith = (extra: Partial<GenerationInputV11a>): typeof factoryModule =
 
 describe("旗を省いた・off の走りは v1.1α の記録（手 2p の library 4 経路）とバイト列で同じ", () => {
   it("flags を省いた走りと flags.ledger を off にした走りが、4 経路とも記録と深く等しい", async () => {
-    for (const extra of [{}, { flags: {} }, { flags: { ledger: false } }] as const) {
+    for (const extra of [
+      {},
+      { flags: {} },
+      { flags: { ledger: false } },
+      { flags: { searchRepair: false } },
+      { flags: { ledger: false, searchRepair: false } },
+    ] as const) {
       const captures = await captureBaselineV11a(moduleWith(extra), BASELINE_DEFINITIONS);
       expect(captures, JSON.stringify(extra)).toEqual(BASELINE_LIBRARY.captures);
     }
@@ -2580,7 +2601,7 @@ describe("呼び出し数の回帰の契約試験（手 2p）の走りが、旗 
 
 describe("旗の組の契約（要約の v12_flags）", () => {
   it("recordV12Flags が真の走りは、完走でも T1 で止まる走りでも、要約に実効の旗の組 v12_flags がある（納品物の要約にも）", async () => {
-    const extra = { flags: V12_PIPELINE_FLAGS, recordV12Flags: true };
+    const extra = { flags: fromPublicV12Flags(V12_PIPELINE_FLAGS), recordV12Flags: true };
     const full = await runScenario([...head({ table: TABLE_ON }), structured(acceptAll())], extra);
     expect(full.result.outcome.verdict).toBe("full");
     expect((full.result.summary as unknown as Record<string, unknown>)["v12_flags"]).toEqual(V12_PIPELINE_FLAGS);
@@ -2601,11 +2622,455 @@ describe("旗の組の契約（要約の v12_flags）", () => {
   });
 
   it("正本の旗の組は旗の名前を全部持ち（merge 済みの手の旗は全部 on）、省いた名前は off に解く", () => {
-    expect(Object.keys(V12_PIPELINE_FLAGS)).toEqual([...V12_FLAG_NAMES]);
-    for (const name of V12_FLAG_NAMES) expect(V12_PIPELINE_FLAGS[name]).toBe(true);
-    expect(resolveV12Flags()).toEqual({ ledger: false });
-    expect(resolveV12Flags({})).toEqual({ ledger: false });
-    expect(resolveV12Flags(V12_PIPELINE_FLAGS)).toEqual(V12_PIPELINE_FLAGS);
+    expect(Object.keys(V12_PIPELINE_FLAGS)).toEqual([...V12_PUBLIC_FLAG_NAMES]);
+    for (const name of V12_FLAG_NAMES) expect(V12_PIPELINE_FLAGS[V12_FLAG_PUBLIC_NAMES[name]]).toBe(true);
+    expect(resolveV12Flags()).toEqual({ ledger: false, searchRepair: false });
+    expect(resolveV12Flags({})).toEqual({ ledger: false, searchRepair: false });
+    expect(resolveV12Flags(fromPublicV12Flags(V12_PIPELINE_FLAGS))).toEqual({ ledger: true, searchRepair: true });
     expect(factoryModule.V12_PIPELINE_FLAGS).toBe(V12_PIPELINE_FLAGS);
+  });
+});
+
+// ── 探索型の直し（旗 v12.search-repair。手 4a。Issue #551）──────────────────────────────
+//
+// 偽物の LLM の台本で版の違反の数を作る。R1 の検査（validate）の式を替えると、R1 の 3 本（正常 5・異常 -1・境界 1）のうち
+// 落ちる本数が決まる：`> 1` は境界だけ（1）、`> -5` は異常だけ（1）、`> 5`・`> 7` は正常と境界（2）、`< 0` は 3 本とも（3）。
+// B3' の拒否は R3・R4 だけを最後まで残す（R1・R2 を持ち越すと持ち越しの関数が断る。上の REJECT_R* の注記）。
+
+const SEARCH: Partial<GenerationInputV11a> = { flags: { searchRepair: true } };
+const validationAs = (expression: string): string => replaced(RUN_YAML, "expression: amount > 0", `expression: ${expression}`);
+/** 不一致 1（境界だけ） */
+const MIS1 = validationAs("amount > 1");
+/** 不一致 1（異常だけ。MIS1 と同数の別の版） */
+const MIS1B = validationAs("amount > -5");
+/** 不一致 2（正常と境界） */
+const MIS2 = validationAs("amount > 5");
+/** 不一致 2（MIS2 と同数の別の版） */
+const MIS2B = validationAs("amount > 7");
+/** 不一致 3 */
+const MIS3 = validationAs("amount < 0");
+
+/** データの塊の中身（JSON にしない原文） */
+function rawDataBlockOf(input: string, name: string): string {
+  const match = new RegExp(`<data name="${name}">\\n([\\s\\S]*?)\\n</data>`).exec(input);
+  if (match === null) throw new Error(`データの塊が無い: ${name}`);
+  return match[1] ?? "";
+}
+const repairDeclarations = (tools: readonly LlmToolRequest[]): readonly string[] =>
+  tools.map((request) => rawDataBlockOf(request.input, "宣言"));
+const writeRequests = (requests: readonly LlmStructuredRequest[]): readonly LlmStructuredRequest[] =>
+  requests.filter((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME);
+const declarationOf = (bundle: AssembledBundle | null): string =>
+  bundle?.artifacts.find((artifact) => artifact.path === DECLARATION_FILE)?.text ?? "";
+
+interface SearchVersionJson {
+  readonly origin: string;
+  readonly declaration_sha256: string;
+  readonly violations: { readonly kind: string; readonly known_total?: number; readonly breakdown?: Record<string, number | null> };
+  readonly adopted: boolean;
+  readonly discarded: { readonly unmarked: readonly string[]; readonly rejections: number } | null;
+}
+interface SearchJson {
+  readonly versions: readonly SearchVersionJson[];
+  readonly recounts: readonly { readonly cause: string; readonly declaration_sha256: string; readonly violations: SearchVersionJson["violations"] }[];
+  readonly best_declaration_sha256: string;
+  readonly rewritten: boolean;
+}
+const searchOf = (bundle: AssembledBundle | null): SearchJson =>
+  artifactOf(bundle, V12_SEARCH_REPAIR_ARTIFACT_NAME) as unknown as SearchJson;
+const shaOf = (source: string): Promise<string> => sha256Hex(source);
+
+describe("探索型の直し（旗 v12.search-repair）：一番良い版・厳密な減少・停滞での作り直し", () => {
+  it("(a) 不一致 2 → 1 の版を採り、次の直す段の入力がその版。0 の版で full", async () => {
+    const { result, recording } = await runScenario(
+      [
+        ...head({ yaml: MIS2 }),
+        structured(acceptAll()),
+        repairDone(MIS1),
+        structured(acceptAll()),
+        repairDone(RUN_YAML),
+        structured(acceptAll()),
+      ],
+      SEARCH,
+    );
+    expect(repairDeclarations(recording.tools)).toEqual([MIS2, MIS1]);
+    expect(result.outcome.verdict).toBe("full");
+    const search = searchOf(result.bundle);
+    expect(search.versions.map((version) => [version.origin, version.violations.known_total, version.adopted])).toEqual([
+      ["write", 2, true],
+      ["repair", 1, true],
+      ["repair", 0, true],
+    ]);
+    expect(search.best_declaration_sha256).toBe(await shaOf(RUN_YAML));
+    expect(search.rewritten).toBe(false);
+  });
+
+  it("(b)(c) 不一致 1 のあとの不一致 2 の版・同数の版は採らず、次の入力が不一致 1 の版。2 つ採れなければ B1 をもう 1 回呼び、作り直しのあと 2 つ採れなければ stagnation で止め、最終の版は一番良い版", async () => {
+    const { result, recording } = await runScenario(
+      [
+        ...head({ yaml: MIS2 }),
+        structured(acceptAll()),
+        repairDone(MIS1),
+        structured(acceptAll()),
+        repairDone(MIS2B),
+        structured(acceptAll()),
+        repairDone(MIS1B),
+        structured(acceptAll()),
+        // 作り直し（B1 の 2 回目）
+        structured({ declaration: MIS3 }),
+        structured(acceptAll()),
+        repairDone(MIS2),
+        structured(acceptAll()),
+      ],
+      SEARCH,
+    );
+    // 直す段の入力の宣言：不一致 2 の版のあとは、採った不一致 1 の版だけ（捨てた版を渡さない）
+    expect(repairDeclarations(recording.tools)).toEqual([MIS2, MIS1, MIS1, MIS1]);
+    const best = await shaOf(MIS1);
+    for (const request of recording.tools.slice(1)) {
+      expect(await shaOf(rawDataBlockOf(request.input, "宣言"))).toBe(best);
+    }
+    // 作り直しは 1 回だけ（B1 は 2 回）。そのあとの停滞で B1 を呼ばない
+    expect(writeRequests(recording.structured)).toHaveLength(2);
+    expect(countStage(result, "write")).toBe(2);
+    expect(result.summary.stop_reason).toBe("stagnation");
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.outcome.verdict).toBe("partial");
+    // 最終の版（納品物の宣言）は一番良い版で、最後に評価した版ではない
+    expect(declarationOf(result.bundle)).toBe(MIS1);
+    const verification = artifactOf(result.bundle, V11A_ARTIFACT_NAMES.verification);
+    expect(verification["declaration_sha256"]).toBe(best);
+    const search = searchOf(result.bundle);
+    expect(search.versions.map((version) => [version.origin, version.violations.known_total, version.adopted])).toEqual([
+      ["write", 2, true],
+      ["repair", 1, true],
+      ["repair", 2, false],
+      ["repair", 1, false],
+      ["rewrite", 3, false],
+      ["repair", 2, false],
+    ]);
+    expect(search.best_declaration_sha256).toBe(best);
+    expect(search.rewritten).toBe(true);
+    // 材料の状態の宣言の版も一番良い版（最後に静的チェックを通った版ではない）
+    const materials = artifactOf(result.bundle, VERIFICATION_FILE)["materials"] as readonly { material: string; version?: { sha256: string } }[];
+    expect(materials.find((entry) => entry.material === "declaration")?.version?.sha256).toBe(best);
+  });
+
+  it("(c) 作り直しの要求：前の版の宣言の原文・直す段の会話が無く、名前付きの失敗の一覧（試験 ID・要件 ID・種類・固定文）がある。最初の B1 の要求との差は末尾のデータと規則 1 つだけ", async () => {
+    const { result, recording } = await runScenario(
+      [
+        ...head({ yaml: MIS1 }),
+        structured(acceptAll()),
+        repairDone(MIS2),
+        structured(acceptAll()),
+        repairDone(MIS1B),
+        structured(acceptAll()),
+        structured({ declaration: RUN_YAML }),
+        structured(acceptAll()),
+      ],
+      SEARCH,
+    );
+    // 作り直した版は厳密に良ければ採り、full まで進めば full
+    expect(result.outcome.verdict).toBe("full");
+    expect(declarationOf(result.bundle)).toBe(RUN_YAML);
+    const [first, rewrite] = writeRequests(recording.structured);
+    if (first === undefined || rewrite === undefined) throw new Error("前提が壊れた：B1 が 2 回呼ばれていない");
+    expect(dataBlockOf(rewrite.input, WRITE_V11A_REWRITE_DATA_NAME)).toEqual([
+      { testId: "r1-boundary", requirementId: "R1", kind: "test-mismatch", message: NAMED_FAILURE_MESSAGES["test-mismatch"] },
+    ]);
+    for (const previous of [MIS1, MIS2, MIS1B]) expect(rewrite.input).not.toContain(previous.split("\n").find((line) => line.includes("expression: amount")) ?? "");
+    for (const name of ["宣言", "原文", "試験の結果", "対応表の落ち", repairStage.DECLARATION_REJECTIONS_DATA_NAME]) {
+      expect(rewrite.input).not.toContain(`<data name="${name}">`);
+    }
+    expect(JSON.stringify(rewrite)).not.toContain("disputes");
+    expect(rewrite.input.startsWith(first.input)).toBe(true);
+    expect(rewrite.rules).toEqual([...(first.rules ?? []), ...WRITE_V11A_REWRITE_RULE_DEFINITIONS.map((definition) => definition.text)]);
+    expect(rewrite.schema).toEqual(first.schema);
+    expect(rewrite.instructions).toBe(first.instructions);
+    expect(rewrite.documents).toEqual(first.documents);
+    // 試験は固定のまま（作り直しの B1 も固定した試験を変えない）
+    expect(dataBlockOf(rewrite.input, WRITE_V11A_DATA_NAMES[2])).toEqual(dataBlockOf(first.input, WRITE_V11A_DATA_NAMES[2]));
+    expectNoAcceptanceMaterial(recording.structured.map((request) => JSON.stringify(request)));
+    expectNoAcceptanceMaterial(recording.tools.map((request) => JSON.stringify(request)));
+  });
+
+  it("(d) 往復と点検の上限：点検 6 で limit（7 回目の点検も次の直す段も無い）、不一致が残った最終の版で full が出ない", async () => {
+    const calls: RecordedCall[] = [
+      ...head({ yaml: MIS3 }),
+      structured(judgments(IDS, { ...REJECT_R3, ...REJECT_R4 })), // 5
+      repairDone(MIS2),
+      structured(judgments(IDS, { ...REJECT_R3, ...REJECT_R4 })), // 4
+      repairDone(MIS2B),
+      structured(judgments(IDS, REJECT_R4)), // 3
+      repairDone(MIS1),
+      structured(judgments(IDS, REJECT_R4)), // 2
+      repairDone(MIS1B),
+      structured(acceptAll()), // 1
+      repairDone(MIS1),
+      structured(acceptAll()), // 1（同数。採らない）
+    ];
+    const { result, recording } = await runScenario(calls, SEARCH);
+    expect(countStage(result, "decl-check")).toBe(6);
+    expect(countStage(result, "repair")).toBe(5);
+    expect(recording.tools).toHaveLength(5);
+    expect(writeRequests(recording.structured)).toHaveLength(1);
+    expect(result.summary.stop_reason).toBe("limit");
+    // 不一致が残ったまま上限で止めた版は v1 と同じ門で失敗に倒す（full も partial も出ない。終了コード 1）
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.outcome).toEqual({ result: "failed", verdict: "none" });
+    expect(result.summary.exit_code).toBe(1);
+    expect(declarationOf(result.bundle)).toBe(MIS1B);
+    expect(artifactOf(result.bundle, V11A_ARTIFACT_NAMES.verification)["decl_check"]).toEqual({ exhausted: 1, malformed: 0, rejected: 6 });
+    // 旗 off の v1.1α でも、同じ台本は同じ上限で止まり、不一致が残る最終の版を同じ ⑦ で failed・none にする（門は旗で変わらない）
+    const off = await runScenario(calls);
+    expect(off.result.summary.stop_reason).toBe("limit");
+    expect(off.result.outcome).toEqual(result.outcome);
+    expect(off.result.summary.exit_code).toBe(1);
+    expect(artifactOf(off.result.bundle, VERIFICATION_FILE)["test_mismatches"]).toBeGreaterThan(0);
+  });
+
+  it("(d) 共通の口の呼び出しの上限は今までどおりの早期停止（旗 off と同じ段・種類で止まり、納品物を作らない）", async () => {
+    const calls = [...head({ yaml: MIS2 }), structured(acceptAll()), repairDone(MIS1), structured(acceptAll())];
+    const limits = { ...factoryModule.AGENT_LIMITS, callCount: 6 };
+    const on = await runScenario(calls, { ...SEARCH, limits });
+    const off = await runScenario(calls, { limits });
+    expect(on.result.stopped).toEqual(off.result.stopped);
+    expect(on.result.stopped?.kind).toBe("call-limit");
+    expect(on.result.bundle).toBeNull();
+    expect(on.result.outcome.verdict).toBe("none");
+    expect(on.result.summary.exit_code).toBe(1);
+  });
+
+  it("(e) 棄却（B6）で組が変わると、一番良い版の数がコードの検査だけで数え直され、判定・点検の呼び出しが旗 off と同じ数", async () => {
+    const r4Bad = replaced(RUN_YAML, "expression: base * 2", "expression: base * 3");
+    const r4Tests = ["r4-normal", "r4-abnormal", "r4-boundary"];
+    const calls = [
+      ...head({ yaml: r4Bad }),
+      structured(acceptAll()),
+      repairDone(RUN_YAML, r4Tests.map(dispute)),
+      arbitration(r4Tests.map((testId) => ({ testId, verdict: "overturn" }))),
+      structured(acceptAll(["R1", "R2", "R3"])),
+    ];
+    const on = await runScenario(calls, SEARCH);
+    const off = await runScenario(calls);
+    expect(on.recording.structured).toHaveLength(off.recording.structured.length);
+    expect(on.recording.tools).toHaveLength(off.recording.tools.length);
+    expect(countStage(on.result, "decl-check")).toBe(countStage(off.result, "decl-check"));
+    expect(countStage(on.result, "arbitration")).toBe(1);
+    // 数え直し（棄却のあとの網羅の直後）は B3・B4 だけ（静的チェック・B3' を呼ばない）
+    const stages = stageIds(on.result);
+    const at = stages.indexOf("coverage");
+    expect(stages.slice(at + 1, at + 4)).toEqual(["name-check", "run-tests", "static-check"]);
+    const search = searchOf(on.result.bundle);
+    expect(search.versions[0]?.violations.breakdown?.["test-mismatch"]).toBe(3);
+    expect(search.recounts).toEqual([
+      expect.objectContaining({ cause: "coverage", declaration_sha256: await shaOf(r4Bad) }),
+    ]);
+    expect(search.recounts[0]?.violations.breakdown?.["test-mismatch"]).toBe(0);
+    expect(search.recounts[0]?.violations.known_total).toBe(0);
+    // 持ち越しは今までどおり（R4 が網羅を失う）で、full が出ない
+    expect(carryEntriesOf(on.result.bundle)).toEqual(carryEntriesOf(off.result.bundle));
+    expect(on.result.outcome.verdict).toBe("partial");
+  });
+
+  it("(e') 数え直しの静的チェック：宣言のバイト列が同じ版だけ結果を引き継ぎ（流し直さない）、違えば流し直してその結果を使う", async () => {
+    const passed = await staticCheckStage.runStaticCheck({ source: RUN_YAML });
+    const rerun = vi.fn(async (declaration: { readonly source: string }) => staticCheckStage.runStaticCheck(declaration));
+    // 同じバイト列：引き継ぐ（同じ値の同じ物）・流し直さない
+    const same = await staticCheckForRecount(
+      { declaration: { source: RUN_YAML }, declarationSha256: await shaOf(RUN_YAML), staticCheck: passed },
+      rerun,
+    );
+    expect(same.rerun).toBe(false);
+    expect(same.staticCheck).toBe(passed);
+    expect(same.declarationSha256).toBe(await shaOf(RUN_YAML));
+    expect(rerun).not.toHaveBeenCalled();
+    // 違うバイト列（1 文字の差）：引き継がず流し直し、流し直した結果（落ちた結果）と原文の SHA-256 を返す
+    const broken = `${RUN_YAML}entities: [\n`;
+    const changed = await staticCheckForRecount(
+      { declaration: { source: broken }, declarationSha256: await shaOf(RUN_YAML), staticCheck: passed },
+      rerun,
+    );
+    expect(changed.rerun).toBe(true);
+    expect(rerun).toHaveBeenCalledTimes(1);
+    expect(rerun).toHaveBeenCalledWith({ source: broken });
+    expect(changed.staticCheck).not.toBe(passed);
+    expect(changed.staticCheck.passed).toBe(false);
+    expect(changed.declarationSha256).toBe(await shaOf(broken));
+  });
+
+  it("(e'') 走りの中の数え直し（棄却のあと）は、同じバイト列の一番良い版なので静的チェックを呼ばず結果を引き継ぐ", async () => {
+    const r4Bad = replaced(RUN_YAML, "expression: base * 2", "expression: base * 3");
+    const r4Tests = ["r4-normal", "r4-abnormal", "r4-boundary"];
+    const spy = vi.spyOn(staticCheckStage, "runStaticCheck");
+    const { result } = await runScenario(
+      [
+        ...head({ yaml: r4Bad }),
+        structured(acceptAll()),
+        repairDone(RUN_YAML, r4Tests.map(dispute)),
+        arbitration(r4Tests.map((testId) => ({ testId, verdict: "overturn" }))),
+        structured(acceptAll(["R1", "R2", "R3"])),
+      ],
+      SEARCH,
+    );
+    // 静的チェックは版の数（B1 の版と直した版の 2 つ）だけ。数え直しでは呼ばない
+    expect(spy.mock.calls.map(([declaration]) => declaration.source)).toEqual([r4Bad, RUN_YAML]);
+    expect(countStage(result, "static-check")).toBe(2);
+    expect(searchOf(result.bundle).recounts).toHaveLength(1);
+  });
+
+  it("(f) 探索の記録は同じ台本で 2 回同じ値（バイト列で同じ）", async () => {
+    const script = (): RecordedCall[] => [
+      ...head({ yaml: MIS2 }),
+      structured(acceptAll()),
+      repairDone(MIS1),
+      structured(acceptAll()),
+      repairDone(MIS2B),
+      structured(acceptAll()),
+      repairDone(RUN_YAML),
+      structured(acceptAll()),
+    ];
+    const first = await runScenario(script(), SEARCH);
+    const second = await runScenario(script(), SEARCH);
+    const textOf = (bundle: AssembledBundle | null): string | undefined =>
+      bundle?.artifacts.find((artifact) => artifact.path === V12_SEARCH_REPAIR_ARTIFACT_NAME)?.text;
+    expect(textOf(first.result.bundle)).toBeDefined();
+    expect(textOf(second.result.bundle)).toBe(textOf(first.result.bundle));
+    expect(first.result.outcome).toEqual(second.result.outcome);
+  });
+
+  it("旗 off・ledger だけ on の走りには探索の記録が無く、search-repair だけ on の走りにはある", async () => {
+    const off = await runScenario([...head(), structured(acceptAll())]);
+    const ledgerOnly = await runScenario([...head({ table: TABLE_ON }), structured(acceptAll())], { flags: { ledger: true, searchRepair: false } });
+    const on = await runScenario([...head(), structured(acceptAll())], SEARCH);
+    for (const result of [off.result, ledgerOnly.result]) {
+      expect(result.bundle?.artifacts.map((artifact) => artifact.path)).not.toContain(V12_SEARCH_REPAIR_ARTIFACT_NAME);
+    }
+    expect(on.result.bundle?.artifacts.map((artifact) => artifact.path)).toContain(V12_SEARCH_REPAIR_ARTIFACT_NAME);
+    // 1 版目で決着する台本は、旗の有無で判定・要求・記録の段が同じ
+    expect(on.result.outcome).toEqual(off.result.outcome);
+    expect(JSON.stringify(on.recording.structured)).toBe(JSON.stringify(off.recording.structured));
+    expect(stageIds(on.result)).toEqual(stageIds(off.result));
+  });
+});
+
+describe("候補の状態の負例（旗 v12.search-repair）：採らない候補は共有の持ち越し・一覧・組・除く行を変えない", () => {
+  /** 目印の行を足した宣言（B3' の偽物が R4 を unmarked にして返す版） */
+  const UNMARK_R4_WORSE = `${MIS2}# unmark-r4\n`;
+  const UNMARK_R4_BETTER = `${RUN_YAML}# unmark-r4\n`;
+  /** 目印の行を持つ宣言だけ、B3' が R4 を unmarked（文脈なし）で返す。ほかは本物の段 */
+  const unmarkR4 = (): void => {
+    const original = declCheckStage.runDeclCheck;
+    vi.spyOn(declCheckStage, "runDeclCheck").mockImplementation(async (input) => {
+      if (!input.declaration.source.includes("# unmark-r4")) return original(input);
+      const ids = input.list.requirements.map((requirement) => requirement.id);
+      return {
+        ok: true,
+        value: {
+          declarationSha256: await sha256Hex(input.declaration.source),
+          judgments: ids.map((requirementId) =>
+            requirementId === "R4"
+              ? { requirementId, verdict: "unmarked" as const }
+              : { requirementId, verdict: "accept" as const, kind: null, quote: null },
+          ),
+          targets: ids.filter((id) => id !== "R4"),
+          unmarked: ["R4"],
+        },
+      };
+    });
+  };
+
+  it("R4 を unmarked にし違反も多い候補は採られず、次の直す段の一覧・組・宣言が候補の前と深く等しく、R4 は持ち越しに無く、最終の判定と持ち越しの記録が候補の無い台本と同じ", async () => {
+    unmarkR4();
+    const withCandidate = await runScenario(
+      [
+        ...head({ yaml: MIS1 }),
+        structured(acceptAll()),
+        repairDone(UNMARK_R4_WORSE),
+        // 候補の B3' は偽物が返す（呼び出しなし）
+        repairDone(RUN_YAML),
+        structured(acceptAll()),
+      ],
+      SEARCH,
+    );
+    const withoutCandidate = await runScenario(
+      [...head({ yaml: MIS1 }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())],
+      SEARCH,
+    );
+    const [before, after] = withCandidate.recording.tools;
+    if (before === undefined || after === undefined) throw new Error("前提が壊れた：直す段が 2 回呼ばれていない");
+    // 共有の一覧・組と、直す段に渡る宣言は候補の前と同じ（R4 が一覧に残る）
+    for (const name of ["要件の一覧", "固定した試験"]) expect(dataBlockOf(after.input, name)).toEqual(dataBlockOf(before.input, name));
+    expect(rawDataBlockOf(after.input, "宣言")).toBe(rawDataBlockOf(before.input, "宣言"));
+    expect((dataBlockOf(after.input, "要件の一覧") as RequirementList).requirements.map((requirement) => requirement.id)).toContain("R4");
+    // 候補は採られず、捨てた候補の状態の要約に R4 の unmarked が残る
+    const search = searchOf(withCandidate.result.bundle);
+    expect(search.versions.map((version) => [version.violations.known_total, version.adopted])).toEqual([
+      [1, true],
+      [3, false],
+      [0, true],
+    ]);
+    expect(search.versions[1]?.discarded).toEqual({ unmarked: ["R4"], rejections: 0 });
+    expect(search.recounts).toEqual([]);
+    // 最終の判定・持ち越しの記録（持ち越し・除く行・残る要件）は候補の無い台本と同じで、R4 は持ち越しに無い
+    expect(withCandidate.result.outcome).toEqual(withoutCandidate.result.outcome);
+    expect(withCandidate.result.outcome.verdict).toBe("full");
+    const carryWith = artifactOf(withCandidate.result.bundle, V11A_ARTIFACT_NAMES.carryOver);
+    expect(carryWith).toEqual(artifactOf(withoutCandidate.result.bundle, V11A_ARTIFACT_NAMES.carryOver));
+    expect(carryEntriesOf(withCandidate.result.bundle).map((entry) => entry.requirementId)).not.toContain("R4");
+    expect(carryWith["remaining_requirement_ids"]).toContain("R4");
+  });
+
+  it("二点測定：R4 を unmarked にしたが違反が厳密に少ない候補は同じ文脈の数で比べて採られ、そのときだけ R4 が持ち越しに入る（一番良い版はコードの検査だけで数え直す）", async () => {
+    unmarkR4();
+    const { result, recording } = await runScenario(
+      [...head({ yaml: MIS2 }), structured(acceptAll()), repairDone(UNMARK_R4_BETTER)],
+      SEARCH,
+    );
+    const search = searchOf(result.bundle);
+    // 同じ確定の文脈（R4 の試験を含む組）で、候補は unmarked 1・不一致 0 ＝ 1 < 2
+    expect(search.versions.map((version) => [version.violations.known_total, version.adopted])).toEqual([
+      [2, true],
+      [1, true],
+    ]);
+    expect(search.versions[1]?.violations.breakdown?.["decl-unmarked"]).toBe(1);
+    expect(search.recounts).toEqual([expect.objectContaining({ cause: "adopted", declaration_sha256: await shaOf(UNMARK_R4_BETTER) })]);
+    expect(search.recounts[0]?.violations.known_total).toBe(0);
+    expect(carryEntriesOf(result.bundle)).toEqual([{ requirementId: "R4", reasons: [{ origin: "decl-check", reason: "unmarked" }] }]);
+    expect(result.outcome.verdict).toBe("partial");
+    expect(recording.tools).toHaveLength(1);
+  });
+
+  it("対照（旗 off）：同じ候補は評価したその場で R4 を共有の持ち越しへ入れ、次の直す段の一覧から R4 が消える", async () => {
+    unmarkR4();
+    const { result, recording } = await runScenario([
+      ...head({ yaml: MIS1 }),
+      structured(acceptAll()),
+      repairDone(UNMARK_R4_WORSE),
+      repairDone(RUN_YAML),
+      structured(acceptAll(["R1", "R2", "R3"])),
+    ]);
+    const after = recording.tools[1];
+    if (after === undefined) throw new Error("前提が壊れた：直す段が 2 回呼ばれていない");
+    expect((dataBlockOf(after.input, "要件の一覧") as RequirementList).requirements.map((requirement) => requirement.id)).not.toContain("R4");
+    expect(carryEntriesOf(result.bundle).map((entry) => entry.requirementId)).toContain("R4");
+  });
+});
+
+describe("題材の言葉の走査（Issue #551 で足した・直したファイル）", () => {
+  it("探索の部品・B1・記録・走らせる部分とその試験のソースに受入の題材の言葉が無い", () => {
+    const files = [
+      "../v12/search-repair.ts",
+      "../v12/search-repair.test.ts",
+      "../v12/ledger.ts",
+      "./stages/write.ts",
+      "./stages/write.test.ts",
+      "./bundle-v11a.ts",
+      "./bundle-v11a.test.ts",
+      "./run.ts",
+      "./run.test.ts",
+      "./__tests__/fixtures.ts",
+    ];
+    expectNoAcceptanceMaterial(files.map((file) => nodeFs.readFileSync(new URL(file, import.meta.url), "utf8")));
   });
 });

@@ -12,6 +12,10 @@
 //
 // 旗 `v12.ledger` が on の走り（`ledger` を渡したとき。Issue #548）は、性質の台帳の行の B1 の文を R-w11 の末尾に台帳の
 // 順で組む（default-value の R-w11-10 も台帳から組み、今の文とバイト列で同じ）。off は今の定数のまま。
+//
+// 空の文脈での作り直し（旗 `v12.search-repair` が on の走りで、停滞したとき 1 回。Issue #551）は、同じ段をもう 1 回呼ぶ。
+// `rewrite` を渡したときだけ、データの末尾に「残った失敗の一覧」（試験 ID・要件 ID・種類と固定文だけ）を足し、規則の末尾に
+// R-w11r-01 を足す。**前の版の宣言の原文・直す段の会話・主張は渡さない**（入力の型に口が無い）。省けば今の要求のまま。
 import type { CallGateway } from "../../call.js";
 import type { TestSuite } from "../../fixed-test.js";
 import { checkDeclarationBytes } from "../../limits.js";
@@ -36,6 +40,7 @@ import { sha256Hex } from "@musunest/spec-engine";
 import type { NameTable } from "../names.js";
 import type { TestObserves } from "./test-spec.js";
 import type { LedgerView } from "../../v12/ledger.js";
+import type { NamedFailure } from "../../v12/search-repair.js";
 
 /** B1 の JSON Schema の名前 */
 export const WRITE_V11A_SCHEMA_NAME = "declaration-v11a";
@@ -109,6 +114,19 @@ export const WRITE_V11A_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
 ];
 
+/** 作り直しのデータの名前（`rewrite` を渡したときだけ、データの末尾に足す。Issue #551） */
+export const WRITE_V11A_REWRITE_DATA_NAME = "残った失敗の一覧";
+
+/** 作り直しで規則の末尾に足す規則の定義（`rewrite` を渡したときだけ。Issue #551） */
+export const WRITE_V11A_REWRITE_RULE_DEFINITIONS: readonly RuleDefinition[] = [
+  {
+    id: "R-w11r-01",
+    text: "データ「残った失敗の一覧」は、同じ確定した仕様・名前の表・固定した試験から前に書いた宣言に残った失敗（試験 ID・要件 ID・種類）である。前の宣言は渡さない。一覧の失敗が起きない宣言を、はじめから 1 つ書く。固定した試験・要件・名前の表は変えない。",
+    why: "停滞したら空の文脈で作り直す（前回の失敗を積まない・前の答えに錨を下ろさない。08 §3 の 1 (c)・方法論 03 §1 の H5）。試験と表は固定のまま",
+    since: "Issue #551",
+  },
+];
+
 /** B1 に足す規則（共通の規則は buildStructuredRequest が先頭に付ける） */
 export const WRITE_V11A_RULES: readonly string[] = ruleTexts(WRITE_V11A_RULE_DEFINITIONS);
 
@@ -163,6 +181,11 @@ export interface WriteV11aInput {
   readonly onRejected?: (candidate: RejectedCandidate) => void;
   /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけが渡す。省けば今の定数。Issue #548） */
   readonly ledger?: LedgerView;
+  /**
+   * 空の文脈での作り直し（旗 `v12.search-repair` が on の走りで停滞したときだけ渡す。Issue #551）。一番良い版に残った名前付きの
+   * 失敗の一覧だけを持つ（前の版の原文・会話・主張の口は無い）。省けば今の要求のまま
+   */
+  readonly rewrite?: { readonly failures: readonly NamedFailure[] };
 }
 
 /** B1 の出力 */
@@ -217,7 +240,28 @@ function buildData(input: WriteV11aInput): readonly PromptData[] {
     { name: WRITE_V11A_DATA_NAMES[0], text: serializeJson(input.list) },
     { name: WRITE_V11A_DATA_NAMES[1], text: serializeJson(tableRowsForWriter(input.table)) },
     { name: WRITE_V11A_DATA_NAMES[2], text: serializeJson(suiteWithObserves(input.suite, input.observes)) },
+    ...(input.rewrite === undefined
+      ? []
+      : [
+          {
+            name: WRITE_V11A_REWRITE_DATA_NAME,
+            text: serializeJson(
+              input.rewrite.failures.map((failure) => ({
+                testId: failure.testId,
+                requirementId: failure.requirementId,
+                kind: failure.kind,
+                message: failure.message,
+              })),
+            ),
+          },
+        ]),
   ];
+}
+
+/** B1 の規則の文（台帳・作り直しの有無で組む。どちらも省けば今の定数） */
+function rulesOf(input: WriteV11aInput): readonly string[] {
+  const base = input.ledger === undefined ? WRITE_V11A_RULES : ruleTexts(writeV11aRuleDefinitionsOf(input.ledger));
+  return input.rewrite === undefined ? base : [...base, ...ruleTexts(WRITE_V11A_REWRITE_RULE_DEFINITIONS)];
 }
 
 /**
@@ -226,7 +270,7 @@ function buildData(input: WriteV11aInput): readonly PromptData[] {
  */
 export async function runWriteV11a(input: WriteV11aInput): Promise<StageOutcome<WrittenDeclarationV11a>> {
   const request = buildStructuredRequest({
-    rules: input.ledger === undefined ? WRITE_V11A_RULES : ruleTexts(writeV11aRuleDefinitionsOf(input.ledger)),
+    rules: rulesOf(input),
     documents: input.documents,
     data: buildData(input),
     schemaName: WRITE_V11A_SCHEMA_NAME,
