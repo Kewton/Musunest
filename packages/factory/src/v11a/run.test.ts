@@ -50,6 +50,8 @@ import {
   requestDiffsOf,
   withAggregateResponses,
   withAggregates,
+  fixtureDefaultValueList,
+  fixtureDefaultValueTable,
   codeIdRenameOf,
   idsResponseList,
   idsResponsesOf,
@@ -749,6 +751,45 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(carried.result.stopped).toBeNull();
     expect(diagnosticPaths(carried.result)).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
     expect(diagnosticPaths(carried.result)).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
+  });
+
+  it("既定値の value が options の外の要件（R6・束 2）を含む束だけが形のやり直しになり、束 1 の要求は増えない。直した束で表が組まれ C3 へ進む（Issue #594）", async () => {
+    const list = fixtureDefaultValueList();
+    const table = withCodeIds(withAggregates(fixtureDefaultValueTable()));
+    const good = idsResponsesOf(list, table, PROPERTY_LEDGER_VIEW);
+    expect(good.mappingBundles).toHaveLength(2);
+    const second = good.mappingBundles[1] as Record<string, unknown>;
+    const outside = {
+      requirements: (second["requirements"] as readonly Record<string, unknown>[]).map((entry) =>
+        entry["requirementId"] === "R6" ? { ...entry, verification: { ...(entry["verification"] as Record<string, unknown>), value: "gamma" } } : entry,
+      ),
+    };
+    const recording = createCheckedRecordingClient([
+      structured(good.entities),
+      structured(good.fields),
+      structured(good.behaviors),
+      structured(good.mappingBundles[0]),
+      structured(outside),
+      structured(second),
+      structured(acceptAll(["R1", "R2", "R3", "R4", "R6"])),
+    ]);
+    const outcome = await runStageRangeV11a({
+      ...inputOf(recording.client, { plan: planOf(list) }),
+      flags: IDS_FLAGS,
+      range: { start: "name-table", end: "semantic-check" },
+    });
+    expect(outcome.stopped).toBeNull();
+    const mappingRequests = recording.structured.filter((request) => request.schemaName === "mapping");
+    const listed = (request: LlmStructuredRequest) =>
+      ((dataBlockOf(request.input, "要件の一覧") as { requirements: readonly { id: string }[] }).requirements).map((requirement) => requirement.id);
+    expect(mappingRequests.map(listed)).toEqual([["R1", "R2", "R3", "R4", "R5"], ["R6"], ["R6"]]);
+    expect(mappingRequests[2]?.input).toContain("既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い");
+    const records = outcome.stages.filter((record) => record.stage === "mapping");
+    expect(records.map((record) => [record.status, record.retries.shape])).toEqual([
+      ["ok", 0],
+      ["ok", 1],
+    ]);
+    expect(schemaNames(recording.structured).at(-1)).toBe(SEMANTIC_CHECK_SCHEMA_NAME);
   });
 
   it("C2' の負例：要件の欠落が 2 回続けば段 mapping・unmet で止まる。C1 は 3 束 1 回ずつ", async () => {

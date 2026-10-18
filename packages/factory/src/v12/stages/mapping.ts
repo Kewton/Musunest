@@ -423,11 +423,13 @@ export async function assembleMappedTable(
 ): Promise<
   { readonly ok: true; readonly table: NameTable; readonly tableSha256: string } | { readonly ok: false; readonly problems: readonly Problem[] }
 > {
-  const byId = new Map(bundles.flatMap((bundle) => bundle.entries.map((entry) => [entry.requirementId, entry] as const)));
-  const entries = list.requirements.flatMap((requirement) => {
-    const entry = byId.get(requirement.id);
-    return entry === undefined ? [] : [entry];
-  });
+  // 一覧の順に並べる（重複・一覧に無い ID は捨てずに後ろへ残し、表全体の C2' が落とす。束の C2' を通った写像なら起きない）
+  const order = new Map(list.requirements.map((requirement, index) => [requirement.id, index] as const));
+  const entries = bundles
+    .flatMap((bundle) => bundle.entries)
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => (order.get(a.entry.requirementId) ?? list.requirements.length + a.index) - (order.get(b.entry.requirementId) ?? list.requirements.length + b.index) || a.index - b.index)
+    .map(({ entry }) => entry);
   const table = tableOf(rows, entries);
   const problems = checkMappedTable(list, table, documents, ledger === undefined ? {} : { ledger });
   return problems.length > 0 ? { ok: false, problems } : { ok: true, table, tableSha256: await nameTableSha256(table) };

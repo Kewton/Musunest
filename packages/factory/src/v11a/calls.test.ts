@@ -1053,8 +1053,45 @@ describe("(5'') 旗 v12.ids の C2 の束（手 3b・Issue #594）：束ごと�
       ["failed", "unmet"],
     ]);
     expect(run.result.stopped).toBeNull();
+    // 拒否された要件は受理に変わらず、手 3a の規則どおり持ち越し（出どころ semantic-check）。合否は partial（緩まない）
+    expect(run.result.outcome.verdict).toBe("partial");
     const carry = run.result.bundle?.artifacts.find((artifact) => artifact.path === "artifacts/carry-over.json");
-    expect(JSON.parse(carry?.text ?? "{}")).toMatchObject({ entries: [{ requirementId: BUNDLE3_FIRST }] });
+    expect(JSON.parse(carry?.text ?? "{}")).toEqual(
+      expect.objectContaining({ entries: [{ requirementId: BUNDLE3_FIRST, reasons: [{ origin: "semantic-check", reason: "unnecessary-ownership" }] }] }),
+    );
+  });
+
+  it("C3 の拒否後の束 3 の 2 回目が束の C2' を通っても、組み直した表が表全体の C2' に落ちれば 1 回目の表のまま（再点検なし）で拒否の要件を持ち越す", async () => {
+    const reject = materials.judgments({ [BUNDLE3_FIRST]: ["unnecessary-ownership", materials.textOf(BUNDLE3_FIRST)] });
+    const remaining = materials.ids.filter((id) => id !== BUNDLE3_FIRST);
+    const t2 = materials.testSpecResponse();
+    // 束 3 の R11 が R12 の項目を所属させ、R11 の項目がどの要件にも所属しない（束の C2' は通る・表全体で落ちる）
+    const third = entriesOf(2);
+    const orphan = { requirements: third.map((entry, index) => (index === 0 ? { ...entry, roles: third[1]?.["roles"] } : entry)) };
+    const run = await observe(
+      materials,
+      [
+        ...vocabulary(),
+        ...bundles.map(structured),
+        structured(reject),
+        structured(orphan),
+        structured({
+          classifications: (t2.classifications as readonly { requirementId: string }[]).filter((entry) => entry.requirementId !== BUNDLE3_FIRST),
+          tests: (t2.tests as readonly { target: { requirementId: string } }[]).filter((test) => test.target.requirementId !== BUNDLE3_FIRST),
+        }),
+        structured({ declaration: materials.declaration() }),
+        structured({ judgments: (materials.judgments().judgments as readonly { requirementId: string }[]).filter((entry) => remaining.includes(entry.requirementId)) }),
+      ],
+      { flags: ALL_ON },
+    );
+    expect(mappingRequestsOf(run)).toHaveLength(4);
+    expect(run.logical["semantic-check"]).toBe(1);
+    expect(run.result.stopped).toBeNull();
+    expect(run.result.outcome.verdict).toBe("partial");
+    const carry = run.result.bundle?.artifacts.find((artifact) => artifact.path === "artifacts/carry-over.json");
+    expect(JSON.parse(carry?.text ?? "{}")).toEqual(
+      expect.objectContaining({ entries: [{ requirementId: BUNDLE3_FIRST, reasons: [{ origin: "semantic-check", reason: "unnecessary-ownership" }] }] }),
+    );
   });
 
   it("どの要件にも所属しない行がある応答（束の C2' は通る）は、束を推測せず固定文で段 mapping・unmet で止まり、やり直しの要求が無い", async () => {

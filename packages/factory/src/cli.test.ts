@@ -1247,7 +1247,13 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     // 表を組む段の後の LLM への要求は、v1.2 の旗で台帳に登録した性質（enum-membership。Issue #548・empty-aggregate。Issue #549）の
     // 分を除けば v1.1a の走りとバイト列で同じ（ID と出典の欄をそろえたうえで）。差は名指しの場所（R-sc-02・R-tsp-02・R-tsp-16・
     // R-w11 の並び・schema の enum、表を載せるデータの計算の行の aggregate）だけで、空でない
-    const onRequests = laterRequests(v12.recording.structured);
+    // ids on の C3・T2 の確かめ方は構造の検査の対象の欄を持つ（C3 は表の targets、T2 は checkTargets。Issue #594）。その欄だけを除いて比べる
+    const targetsPattern = /,\\n *\\"(?:targets|checkTargets)\\": \[[^\]]*\]/g;
+    const withoutCheckTargets = (requests: readonly unknown[]): unknown[] =>
+      requests.map((request) => JSON.parse(JSON.stringify(request).replace(targetsPattern, "")) as unknown);
+    const onWithTargets = laterRequests(v12.recording.structured);
+    expect(onWithTargets.slice(0, 2).every((request) => JSON.stringify(request).match(targetsPattern) !== null)).toBe(true);
+    const onRequests = withoutCheckTargets(onWithTargets);
     const offRequests = laterRequests(v11a.recording.structured);
     expect(onRequests).toHaveLength(offRequests.length);
     const diffs = requestDiffsOf(onRequests, offRequests);
@@ -1266,7 +1272,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     const spy = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2B : undefined));
     const v12Before = await runV11aCli({ dir: `${directory}/v12-complete-2b`, calls: [...v12Head(LEDGER_VIEW_2B), structured(v11aJudgments())], pipeline: "v1.2" });
     spy.mockRestore();
-    const beforeRequests = laterRequests(v12Before.recording.structured);
+    const beforeRequests = withoutCheckTargets(laterRequests(v12Before.recording.structured));
     const beforeDiffs = requestDiffsOf(beforeRequests, offRequests);
     const enumDiff = withoutTableStage(ENUM_MEMBERSHIP_REQUEST_DIFF);
     for (const diff of beforeDiffs) expect(diff.paths, diff.schemaName).toEqual(enumDiff[diff.schemaName] ?? []);
@@ -1281,7 +1287,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     const spy2C = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2C : undefined));
     const v12Before2C = await runV11aCli({ dir: `${directory}/v12-complete-2c`, calls: [...v12Head(LEDGER_VIEW_2C), structured(v11aJudgments())], pipeline: "v1.2" });
     spy2C.mockRestore();
-    const before2CRequests = laterRequests(v12Before2C.recording.structured);
+    const before2CRequests = withoutCheckTargets(laterRequests(v12Before2C.recording.structured));
     const diffs2C = requestDiffsOf(onRequests, before2CRequests);
     const when2C = withoutTableStage(WHEN_NON_REQUIREMENT_REQUEST_DIFF);
     for (const diff of diffs2C) expect(diff.paths, diff.schemaName).toEqual(when2C[diff.schemaName] ?? []);

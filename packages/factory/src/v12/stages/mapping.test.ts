@@ -404,6 +404,22 @@ describe("表全体の C2'", () => {
   });
 });
 
+describe("表全体の C2'：束の C2' を通らない写像が渡っても通さない（fail-closed）", () => {
+  it("束をまたいだ同じ要件の重複・束の欠けた要件・一覧に無い要件 ID は、表全体の C2' で固定文の問題になる（黙って 1 つにしない）", async () => {
+    const { outcome } = await run([GOOD]);
+    if (!outcome.ok) throw new Error("前提が壊れた：束が通らない");
+    const entries = outcome.value.entries;
+    const failsWith = async (bundles: readonly (typeof outcome.value)[], message: string) => {
+      const assembled = await assembleMappedTable(LIST, TABLE.rows, bundles, FIXTURE_DOCUMENTS);
+      expect(assembled.ok, message).toBe(false);
+      if (!assembled.ok) expect(assembled.problems.map((problem) => problem.message)).toContain(message);
+    };
+    await failsWith([outcome.value, { entries: entries.slice(0, 1), response: null }], "同じ要件の項目が重なっている");
+    await failsWith([{ entries: entries.slice(1), response: null }], "要件の所属が無い");
+    await failsWith([outcome.value, { entries: [{ ...(entries[0] as (typeof entries)[number]), requirementId: "R99" }], response: null }], "一覧に無い要件 ID である");
+  });
+});
+
 describe("C3 の拒否のあとの 2 回目", () => {
   const previous: MappingPrevious = {
     response: GOOD,
