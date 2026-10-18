@@ -119,6 +119,8 @@ export interface V11aRecordsInput {
     readonly coverage: readonly CoverageUnit[];
     readonly overturnedTestIds: readonly string[];
     readonly coverageChecks: readonly CoverageCheckRecord[];
+    /** 旗 `v12.ids` の走りだけ：コードが作った試験 ID の並び（組の順。off の走りは渡さない＝欄が無い。Issue #595） */
+    readonly generatedTestIds?: readonly string[];
   };
   readonly declCheck: {
     /** 点検の上限（`declChecks`） */
@@ -216,6 +218,7 @@ export function buildV11aArtifacts(input: V11aRecordsInput): readonly BundleArti
           overturned_test_ids: check.overturnedTestIds,
           losses: check.losses,
         })),
+        ...(testSpec.generatedTestIds === undefined ? {} : { generated_test_ids: testSpec.generatedTestIds }),
       }),
     },
     {

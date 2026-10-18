@@ -81,6 +81,11 @@ import {
 } from "./v11a/__tests__/fixtures.js";
 import * as ledgerModule from "./v12/ledger.js";
 import type { LedgerView } from "./v12/ledger.js";
+import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
+import { isGeneratedTestId } from "./v12/generated-tests.js";
+import { ruleTexts } from "./stages/prompt.js";
+import { TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf } from "./v11a/stages/test-spec.js";
+import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
 import { V12_CALL_LIMITS } from "./v12/limits.js";
 import type { NameTable } from "./v11a/names.js";
 import {
@@ -1227,6 +1232,34 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
         }
         return JSON.parse(text) as unknown;
       });
+  /**
+   * 旗 ids on の要求から、コードが作る試験の分（Issue #595）を除く：T2 の R-tsp-16 を台帳の旗 ids の文から旗 ids off の文に戻し、
+   * B1 の「固定した試験」の塊からコードが作った試験（予約の接頭辞の ID）を除く。ほかの欄は触らない。`generated` は、B1 の塊に
+   * コードが作った試験があるはずか（台帳に空の集計の行が無い導出の走りは、この題材ではコードの試験を作らない）
+   */
+  const withoutIdsGenerated = (requests: readonly unknown[], ledger: LedgerView = PROPERTY_LEDGER_VIEW, generated = true): unknown[] => {
+    const idsRules = ruleTexts(testSpecRuleDefinitionsOf(ledger, true));
+    const offRules = ruleTexts(testSpecRuleDefinitionsOf(ledger));
+    const [, , testsName] = WRITE_V11A_DATA_NAMES;
+    const testsBlock = new RegExp(`(<data name="${testsName}">\\n)([\\s\\S]*?)(\\n</data>)`);
+    return requests.map((value) => {
+      const request = value as LlmStructuredRequest;
+      if (request.schemaName === TEST_SPEC_SCHEMA_NAME) {
+        return { ...request, rules: (request.rules ?? []).map((text) => { const at = idsRules.indexOf(text); return at < 0 ? text : (offRules[at] ?? text); }) };
+      }
+      if (request.schemaName === WRITE_V11A_SCHEMA_NAME) {
+        const input = request.input.replace(testsBlock, (_all, head: string, body: string, tail: string) => {
+          const parsed = JSON.parse(body) as { readonly tests: readonly { readonly id: string }[] };
+          // 書き直しの形が元と同じこと（塊の字下げ・欄の並びを変えない）を確かめてから除く
+          expect(JSON.stringify(parsed, null, 2)).toBe(body);
+          expect(parsed.tests.some((test) => isGeneratedTestId(test.id))).toBe(generated);
+          return `${head}${JSON.stringify({ ...parsed, tests: parsed.tests.filter((test) => !isGeneratedTestId(test.id)) }, null, 2)}${tail}`;
+        });
+        return { ...request, input };
+      }
+      return request;
+    });
+  };
   const withoutTableStage = (diff: Readonly<Record<string, readonly string[]>>): Readonly<Record<string, readonly string[]>> =>
     Object.fromEntries(Object.entries(diff).filter(([name]) => name !== "name-table"));
 
@@ -1267,12 +1300,16 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
       expect(diff.paths, diff.schemaName).toEqual(withInput(ledgerDiff[diff.schemaName] ?? []));
     }
     expect(diffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual([...Object.keys(ledgerDiff), "decl-check"]);
-    expect(JSON.stringify(withoutLedgerAdditions(onRequests))).toBe(JSON.stringify(offRequests));
+    // 旗 ids on の差（Issue #595）：T2 の R-tsp-16（$.rules[15]）が台帳の旗 ids の文になり、B1 の「固定した試験」（$.input）の末尾に
+    // コードが作った試験が並ぶ。この 2 つだけを ids on 側から除いて（R-tsp-16 は旗 off の文に戻して）比べる
+    expect(JSON.stringify(withoutLedgerAdditions(withoutIdsGenerated(onRequests)))).toBe(JSON.stringify(offRequests));
     // #548 までの旗 on（台帳に empty-aggregate の行が無い）は、同じ応答で差が enum-membership の行の分だけ（今までの期待）
     const spy = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2B : undefined));
     const v12Before = await runV11aCli({ dir: `${directory}/v12-complete-2b`, calls: [...v12Head(LEDGER_VIEW_2B), structured(v11aJudgments())], pipeline: "v1.2" });
     spy.mockRestore();
-    const beforeRequests = withoutCheckTargets(laterRequests(v12Before.recording.structured));
+    // 旗 ids on の差（Issue #595）：#548 の台帳でも R-tsp-16 は旗 ids の文（既定値・選択肢の集合の文）。空の集計の行が無いので
+    // コードの試験は作らない（B1 の塊は同じ）。R-tsp-16 だけを旗 off の文に戻して比べる
+    const beforeRequests = withoutIdsGenerated(withoutCheckTargets(laterRequests(v12Before.recording.structured)), LEDGER_VIEW_2B, false);
     const beforeDiffs = requestDiffsOf(beforeRequests, offRequests);
     const enumDiff = withoutTableStage(ENUM_MEMBERSHIP_REQUEST_DIFF);
     for (const diff of beforeDiffs) expect(diff.paths, diff.schemaName).toEqual(enumDiff[diff.schemaName] ?? []);

@@ -11,6 +11,8 @@
 //      集計の種類 × データ状態の表（一律の「空なら 0」でない）と、T1 の集計の種類の enum が表の順であること
 //   8. 手 2d（#550）：when の行の列を埋め、non-requirement の行を足した。#549 の台帳（`LEDGER_ROWS_2C`）との差はこの 2 行の分
 //      だけ（観測する性質は増えない・確かめ方の種類が 1 つ増える）。台帳の点検が受理で除く確かめ方の形を見ること
+//   9. 手 3c（#595）：期待の値の書き手が default-value・enum-membership で code、empty-aggregate はコードが作る範囲（アプリ全体と
+//      見出しごと × 選択肢）つき。旗 ids の T2 の文はコードが作る範囲だけを「作らない」に差し替え、ほかの行の文は今のまま
 //
 // LLM を呼ばない。外部の API を呼ばない。受入の題材の言葉は使わない。
 import { describe, expect, it } from "vitest";
@@ -48,6 +50,7 @@ import {
   toPublicV12Flags,
   V12_PIPELINE_FLAGS,
   AGGREGATE_DATA_STATES,
+  AGGREGATE_RANGES,
   aggregateStateValueOf,
   deriveLedgerView,
   exemptKindMessagesOf,
@@ -128,7 +131,9 @@ describe("台帳の行：全行に id・since・why・状態があり、id が�
       "性質 state-after-set は未対応なのに、照合の名前がある",
     ]);
     expect(ledgerRowDefects(patched("when", { evaluation: null }))).toEqual(["性質 when は有効なのに、照合の名前が無い"]);
+    // 期待の値をコードが書く試験の型を、旗 ids の文の無い行へ写すと、その不備も出る（Issue #595）
     expect(ledgerRowDefects(patched("when", { t1: DEFAULT_VALUE.t1, t2: DEFAULT_VALUE.t2 }))).toEqual([
+      "性質 when は期待の値をコードが書くのに、旗 ids の T2 の文が無い",
       "性質 default-value の確かめ方の種類 default-value が重なっている",
     ]);
   });
@@ -173,7 +178,8 @@ describe("台帳の行：全行に id・since・why・状態があり、id が�
     expect(ENUM_MEMBERSHIP.t2?.requiredKinds).toEqual(["normal"]);
     expect(ENUM_MEMBERSHIP.t2?.referenceTargets).toEqual([]);
     expect(ENUM_MEMBERSHIP.t2?.input).toBe("empty-record");
-    expect(ENUM_MEMBERSHIP.t2?.expectedWriter).toBe("llm-written-code-checked");
+    // 期待の値の書き手は code（旗 v12.ids の走りでコードが作る。Issue #595）
+    expect(ENUM_MEMBERSHIP.t2?.expectedWriter).toBe("code");
     expect(ENUM_MEMBERSHIP.combinations).toEqual([{ targetKind: "field", operation: "validate" }]);
     expect(ENUM_MEMBERSHIP.evaluation).toBe("enum-membership");
     expect(ENUM_MEMBERSHIP.outer).toBe(OUTER_NOT_SCORED);
@@ -757,6 +763,8 @@ describe("non-requirement の行：決まりも対象の項目も無い説明文
     expect(patched({ t2: DEFAULT_VALUE.t2 })).toEqual([
       "性質 non-requirement は受理で除くのに、試験の型か評価の方法の表の組がある",
       "性質 non-requirement の期待は確かめ方の欄の値なのに、確かめ方に欄が無い",
+      // 期待の値をコードが書く試験の型には旗 ids の文が要る（Issue #595）
+      "性質 non-requirement は期待の値をコードが書くのに、旗 ids の T2 の文が無い",
     ]);
     expect(patched({ combinations: [{ targetKind: "field", operation: "validate" }] })).toEqual([
       "性質 non-requirement は受理で除くのに、試験の型か評価の方法の表の組がある",
@@ -788,5 +796,83 @@ describe("non-requirement の行：決まりも対象の項目も無い説明文
       "写しの行の並びが台帳の順と違う",
     ]);
     expect(COPY_TEXT).toContain("**有効になるのは T1''（独立の点検）が受理したときだけ**");
+  });
+});
+
+// ── 9. 手 3c：期待の値の書き手（コードが作る試験。Issue #595）──────────────────
+
+describe("期待の値の書き手：default-value・enum-membership は code、empty-aggregate はコードが作る範囲つき（Issue #595）", () => {
+  it("行の欄：書き手が code の行は試験の型が空の写像・空の参照データで、旗 ids の T2 の文を持つ。empty-aggregate のコードが作る範囲はアプリ全体と見出しごと × 選択肢で、範囲の外は llm-written-code-checked のまま", () => {
+    expect(DEFAULT_VALUE.t2?.expectedWriter).toBe("code");
+    expect(ENUM_MEMBERSHIP.t2?.expectedWriter).toBe("code");
+    expect(EMPTY_AGGREGATE.t2Aggregate?.codeRanges).toEqual(["app", "groups-enum"]);
+    expect(EMPTY_AGGREGATE.t2Aggregate?.expectedWriter).toBe("llm-written-code-checked");
+    expect(WHEN.t2Condition?.expectedWriter).toBe("llm-written-code-checked");
+    expect(AGGREGATE_RANGES).toEqual(["row", "app", "groups-enum", "groups-month"]);
+    for (const row of [DEFAULT_VALUE, ENUM_MEMBERSHIP]) {
+      expect(row.t2?.input, row.id).toBe("empty-record");
+      expect(row.t2?.referenceTargets, row.id).toEqual([]);
+    }
+    // 旗 ids の文があるのはコードが作る行だけ。ほかの行は null（今の文をそのまま使う）
+    expect(PROPERTY_LEDGER.filter((row) => row.rules.t2Ids !== null).map((row) => row.id)).toEqual(["default-value", "enum-membership", "empty-aggregate"]);
+  });
+
+  it("旗 ids の T2 の文：既定値・選択肢の集合は作らない文、空の集計はアプリ全体と見出しごと × 選択肢の境界・異常を作らない文の後ろに今の文（行ごと・月の見出しごとに使う）をそのまま続ける。題材の言葉は無い", () => {
+    expect(DEFAULT_VALUE.rules.t2Ids).toContain("試験は作らない");
+    expect(DEFAULT_VALUE.rules.t2Ids).toContain("コードが作る");
+    expect(ENUM_MEMBERSHIP.rules.t2Ids).toContain("試験は作らない");
+    const ids = EMPTY_AGGREGATE.rules.t2Ids ?? "";
+    expect(ids).toContain("アプリ全体（type の scope が app）");
+    expect(ids).toContain("選択肢の見出しごと（groupBy の kind が enum）");
+    expect(ids).toContain("行ごと（type の scope が row）の集計と月の見出しごと（groupBy の kind が month）");
+    expect(ids.endsWith(EMPTY_AGGREGATE.rules.t2 ?? "（無い）")).toBe(true);
+    const text = JSON.stringify(PROPERTY_LEDGER.map((row) => row.rules.t2Ids));
+    for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(text).not.toContain(word);
+  });
+
+  it("導出：旗 ids の T2 の文の並びは、台帳の T2 の文の並びの各行を旗 ids の文に差し替えたもの（行の数・順は同じ）。旗 ids の文を持たない台帳では同じ", () => {
+    const view = PROPERTY_LEDGER_VIEW;
+    expect(view.t2IdsFormTexts).toHaveLength(view.t2FormTexts.length);
+    const evaluableWithText = PROPERTY_LEDGER.filter((row) => row.state !== "registered-unsupported" && row.rules.t2 !== null);
+    expect(view.t2IdsFormTexts).toEqual(evaluableWithText.map((row) => row.rules.t2Ids ?? row.rules.t2));
+    expect(view.t2FormTexts).toEqual(evaluableWithText.map((row) => row.rules.t2));
+    const withoutIds = deriveLedgerView(PROPERTY_LEDGER.map((row) => ({ ...row, rules: { ...row.rules, t2Ids: null } })).map((row) =>
+      row.t2 === null ? row : { ...row, t2: { ...row.t2, expectedWriter: "llm-written-code-checked" as const } },
+    ).map((row) => (row.t2Aggregate === null ? row : { ...row, t2Aggregate: { ...row.t2Aggregate, codeRanges: [] } })));
+    expect(withoutIds.t2IdsFormTexts).toEqual(withoutIds.t2FormTexts);
+  });
+
+  it("二点測定：書き手が code の行の旗 ids の文を消す・入力を空の写像でなくす・コードが作る範囲を重ねる／知らない値にする・範囲を持つのに文を消すと不備になる（今の台帳は通る）", () => {
+    const patched = (id: string, patch: (row: PropertyRow) => PropertyRow) => ledgerRowDefects(PROPERTY_LEDGER.map((row) => (row.id === id ? patch(row) : row)));
+    expect(ledgerRowDefects(PROPERTY_LEDGER)).toEqual([]);
+    expect(patched("default-value", (row) => ({ ...row, rules: { ...row.rules, t2Ids: null } }))).toEqual([
+      "性質 default-value は期待の値をコードが書くのに、旗 ids の T2 の文が無い",
+    ]);
+    expect(patched("enum-membership", (row) => (row.t2 === null ? row : { ...row, t2: { ...row.t2, referenceTargets: ["entity"] } }))).toEqual([
+      "性質 enum-membership は期待の値をコードが書くのに、入力か参照データが空でない",
+    ]);
+    const aggregate = EMPTY_AGGREGATE.t2Aggregate;
+    if (aggregate === null) throw new Error("前提が壊れた");
+    expect(patched("empty-aggregate", (row) => ({ ...row, t2Aggregate: { ...aggregate, codeRanges: ["app", "app"] } }))).toEqual([
+      "性質 empty-aggregate の集計の試験の型のコードが作る範囲が、知らない値か重なっている",
+    ]);
+    expect(patched("empty-aggregate", (row) => ({ ...row, t2Aggregate: { ...aggregate, codeRanges: ["scope" as never] } }))).toEqual([
+      "性質 empty-aggregate の集計の試験の型のコードが作る範囲が、知らない値か重なっている",
+    ]);
+    expect(patched("empty-aggregate", (row) => ({ ...row, rules: { ...row.rules, t2Ids: null } }))).toEqual([
+      "性質 empty-aggregate はコードが作る範囲を持つのに、旗 ids の T2 の文が無い",
+    ]);
+  });
+
+  it("写しの期待の値の書き手の列：default-value・enum-membership は code、empty-aggregate は範囲つき（code の範囲／llm-written-code-checked の範囲）。写しの欄を戻すと落ちる", () => {
+    const writerOf = (row: PropertyRow) => propertyCopyCells(row)[PROPERTY_COPY_HEADER.indexOf("期待の値の書き手")];
+    expect(writerOf(DEFAULT_VALUE)).toBe("code");
+    expect(writerOf(ENUM_MEMBERSHIP)).toBe("code");
+    expect(writerOf(EMPTY_AGGREGATE)).toBe("code（アプリ全体・見出しごと × 選択肢）／llm-written-code-checked（行ごと・見出しごと × 月）");
+    expect(writerOf(WHEN)).toBe("llm-written-code-checked");
+    expect(copyDefects(COPY_TEXT, PROPERTY_LEDGER)).toEqual([]);
+    const reverted = COPY_TEXT.replace("| code（アプリ全体・見出しごと × 選択肢）／llm-written-code-checked（行ごと・見出しごと × 月） |", "| llm-written-code-checked |");
+    expect(reverted).not.toBe(COPY_TEXT);
+    expect(copyDefects(reverted, PROPERTY_LEDGER)).toEqual(["写しの empty-aggregate の行がコードと違う"]);
   });
 });

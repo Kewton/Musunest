@@ -35,7 +35,8 @@ import { USAGE, RATES } from "../__tests__/run.js";
 import { ARBITRATION_SCHEMA_NAME } from "../stages/arbitrate.js";
 import { FIXTURE_DOCUMENTS, negative, recordedStructured, withCodeIds } from "./__tests__/fixtures.js";
 import { expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
-import { buildSized, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
+import { buildSized, CODE_WRITTEN_TEST_COUNT, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
+import { isGeneratedTestId } from "../v12/generated-tests.js";
 import { runGenerationV11a } from "./run.js";
 import { createFallbackJudge } from "../judge.js";
 import { FIELD_REPAIR_SCHEMA_NAME } from "../v12/stages/field-repair.js";
@@ -1240,5 +1241,67 @@ describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
       const tight = await observe(materials, cleanCalls(materials), { flags, limits: { callCount: 5 } });
       expect(tight.result.outcome).toEqual({ result: "pass", verdict: "full" });
     }
+  });
+});
+
+// ── (7) 旗 v12.ids のコードが作る試験（手 3c・Issue #595）──────────────────────────────
+
+describe("(7) 旗 v12.ids のコードが作る試験：既定値・選択肢の集合・空の集計の要件を含む台本で、T2 の論理要求は初回 1・形 1・中身 1 のまま、組の数が同じで応答の試験の数が作った分だけ少ない", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+  const PRIOR = { ledger: true, searchRepair: true } as const;
+  /** 表を組む段・T1''・T2（形の落ち → R4 の異常が欠けて中身の落ち → 通る）・B1・B3' */
+  const t2RetryCalls = (materials: SizedMaterials): RecordedCall[] => [
+    ...materials.tableResponses().map(structured),
+    structured(materials.judgments()),
+    structured(negative({ classifications: "x", tests: "x" }, "classifications・tests が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
+    structured(materials.testSpecResponse({ omitAbnormalOf: "R4" })),
+    structured(materials.testSpecResponse()),
+    structured({ declaration: materials.declaration() }),
+    structured(materials.judgments()),
+  ];
+  const suiteOf = (run: Awaited<ReturnType<typeof observe>>) => {
+    const artifact = run.result.bundle?.artifacts.find((entry) => entry.path === "artifacts/test-spec.json");
+    if (artifact === undefined) throw new Error("前提が壊れた：T2 の成果物が無い");
+    return JSON.parse(artifact.text) as { readonly suite: { readonly tests: readonly { readonly id: string }[] }; readonly generated_test_ids?: readonly string[] };
+  };
+
+  it("台本の生成器：同じ N・M から同じ値。組の試験の数は M（ids off の応答）で、ids on の応答はコードが作る分（4）だけ少ない。台帳 off には組めない", () => {
+    for (const size of [MEDIAN_SIZE, MAX_SIZE]) {
+      const off = buildSized(size.requirements, size.tests, PRIOR, { codeWritten: true });
+      const on = buildSized(size.requirements, size.tests, ALL_ON, { codeWritten: true });
+      expect(buildSized(size.requirements, size.tests, ALL_ON, { codeWritten: true }).testSpecResponse()).toEqual(on.testSpecResponse());
+      expect(off.testSpecResponse().tests).toHaveLength(size.tests);
+      expect(on.testSpecResponse().tests).toHaveLength(size.tests - CODE_WRITTEN_TEST_COUNT);
+      expect(off.table.verification.slice(0, 3).map((entry) => entry.kind)).toEqual(["default-value", "enum-membership", "fixed-test"]);
+      expect(on.declaration()).toBe(off.declaration());
+      // 台本を渡さない材料は今のまま
+      expect(buildSized(size.requirements, size.tests, PRIOR, {}).testSpecResponse()).toEqual(buildSized(size.requirements, size.tests, PRIOR).testSpecResponse());
+    }
+    expect(() => buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, {}, { codeWritten: true })).toThrow(RangeError);
+  });
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：ids on・ids off とも T2 の論理要求 3（初回 1・形 1・中身 1）・retries 形 1 中身 1 で full。組の数は M で同じ、ids on の応答は 4 少なく、作った試験 ID が 4 つ", async (size) => {
+    const off = buildSized(size.requirements, size.tests, PRIOR, { codeWritten: true });
+    const on = buildSized(size.requirements, size.tests, ALL_ON, { codeWritten: true });
+    const offRun = await observe(off, t2RetryCalls(off), { flags: PRIOR });
+    const onRun = await observe(on, t2RetryCalls(on), { flags: ALL_ON });
+    for (const run of [offRun, onRun]) {
+      expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
+      expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      expect(run.logical["test-spec"]).toBe(3);
+      expect(run.stages["test-spec"].retries).toEqual({ communication: 0, shape: 1, content: 1 });
+      expect(suiteOf(run).suite.tests).toHaveLength(size.tests);
+      expectNoAcceptanceMaterial(run.requests);
+    }
+    // ids on：作った試験は組の末尾の 4 つ（予約の接頭辞）。ids off の成果物に欄は無い
+    const generatedIds = suiteOf(onRun).generated_test_ids ?? [];
+    expect(generatedIds).toHaveLength(CODE_WRITTEN_TEST_COUNT);
+    expect(suiteOf(onRun).suite.tests.slice(-CODE_WRITTEN_TEST_COUNT).map((test) => test.id)).toEqual(generatedIds);
+    expect(generatedIds.every(isGeneratedTestId)).toBe(true);
+    expect(suiteOf(offRun)).not.toHaveProperty("generated_test_ids");
+    // 論理の枠・門・枝の内側（全部 on）
+    expect(onRun.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+    expect(onRun.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
+    expect(onRun.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
   });
 });

@@ -275,6 +275,54 @@ export function fixtureNonRequirementTable(id = "R6"): NameTable {
   };
 }
 
+/**
+ * コードが作る試験の題材の一覧（Issue #595）：題材の一覧に、既定値の要件 R6 と選択肢の集合の要件 R7 を末尾に足したもの
+ * （`fixtureList` の値は変えない）。
+ */
+export function fixtureGeneratedList(): RequirementList {
+  const base = fixtureList();
+  return {
+    ...base,
+    requirements: [...base.requirements, requirement("R6", DEFAULT_VALUE_REQUIREMENT_TEXT), requirement("R7", ENUM_MEMBERSHIP_REQUIREMENT_TEXT)],
+  };
+}
+
+/**
+ * コードが作る試験の題材の表（Issue #595）。題材の表の計算の行に集計の種類と集計元を足し（`withAggregates`）、宣言の補助の計算
+ * `base`（アプリ全体の合計）を R4 の所属の行として足し、既定値の要件 R6（区分の項目・alpha）と選択肢の集合の要件 R7（区分の
+ * 項目）を足したもの。R4 はアプリ全体（`c.base`）・見出しごと × 選択肢（`c.byKind`）・見出しごと × 月（`c.byMonth`）の集計を
+ * 所属させる（`fixtureTable` の値は変えない）。
+ */
+export function fixtureGeneratedTable(): NameTable {
+  const base = fixtureTable();
+  const appSum = row({
+    id: "c.base",
+    kind: "computation",
+    entity: null,
+    name: "base",
+    type: { valueType: "number", scope: "app", form: "aggregate" },
+    from: "R4",
+    quote: "全体の率",
+  });
+  return withAggregates(
+    {
+      rows: [...base.rows, appSum],
+      ownership: [
+        ...base.ownership.map((entry) => (entry.requirementId === "R4" ? { ...entry, roles: [...entry.roles, stated("c.base")] } : entry)),
+        { requirementId: "R6", roles: [stated("f.item.kind")] },
+        { requirementId: "R7", roles: [stated("f.item.kind")] },
+      ],
+      verification: [
+        ...base.verification,
+        { requirementId: "R6", kind: "default-value", value: "alpha" },
+        { requirementId: "R7", kind: "enum-membership" },
+      ],
+      classification: [...base.classification, { requirementId: "R6", nature: "ruled" }, { requirementId: "R7", nature: "ruled" }],
+    },
+    { "c.base": { kind: "sum", entity: "e.item" } },
+  );
+}
+
 /** 名前の表を T1 の応答の形（下書き。要件 ID を持たず、写しを添える）に戻す */
 export function draftOf(list: RequirementList, table: NameTable): NameTableDraft {
   const length = copyLengthFor(list);
@@ -446,7 +494,7 @@ if (NON_REQUIREMENT_ROW === undefined) throw new Error("前提が壊れた：台
 export const LEDGER_ROWS_2C: readonly PropertyRow[] = PROPERTY_LEDGER.filter((entry) => entry.id !== "non-requirement").map(
   (entry): PropertyRow =>
     entry.id === "when"
-      ? { ...entry, requirementRule: null, t2Condition: null, outer: null, rules: { t1: null, t1Acceptance: null, t2: null, b1: null } }
+      ? { ...entry, requirementRule: null, t2Condition: null, outer: null, rules: { t1: null, t1Acceptance: null, t2: null, t2Ids: null, b1: null } }
       : entry,
 );
 

@@ -61,24 +61,24 @@ import {
 import type { CarryOver } from "../carry-over.js";
 import { pruneForCarryOver } from "../carry-over.js";
 import { coverageUnitsOf, type CoverageUnit } from "../coverage.js";
-import {
-  canonicalJson,
-  deriveOwnership,
-  type ComputationAggregate,
-  type ComputationRowType,
-  type NameTable,
-  type OperationRowType,
-} from "../names.js";
+import { canonicalJson, deriveOwnership, type NameTable, type OperationRowType } from "../names.js";
 import {
   aggregateStateValueOf,
   exemptKindMessagesOf,
   type AggregateDataState,
   type LedgerView,
   type PropertyAggregateT2,
-  type PropertyRow,
-  type PropertyT1,
-  type PropertyT2,
 } from "../../v12/ledger.js";
+import {
+  aggregateDataStateOf,
+  aggregateTargetsOf,
+  checkGeneratedOverlap,
+  generateTests,
+  ledgerTargetsOf,
+  type AggregateTarget,
+  type GeneratedTests,
+  type LedgerTarget,
+} from "../../v12/generated-tests.js";
 
 /** T2 の JSON Schema の名前 */
 export const TEST_SPEC_SCHEMA_NAME = "test-spec";
@@ -319,46 +319,6 @@ export function exemptDefaultValueProblems(
 /** 台帳に無い観測する性質の試験の固定文（schema の enum を迂回しても、コードが落とす） */
 export const LEDGER_UNREGISTERED_OBSERVES_MESSAGE = "観測する性質が性質の台帳に無い";
 
-/** 確かめ方に結び付いた性質で確かめる要件の、対象の行と期待する値（表から引く。旗 on） */
-export interface LedgerTarget {
-  readonly row: PropertyRow & { readonly t1: PropertyT1; readonly t2: PropertyT2 };
-  readonly fieldId: string;
-  /** 確かめ方の欄の値（欄を持たない確かめ方は null。Issue #548） */
-  readonly value: string | null;
-  /** 対象の行の options（表の順。Issue #548） */
-  readonly options: readonly string[];
-}
-
-/**
- * 表の確かめ方が台帳の性質に結び付いた要件 → 対象の行の `id` と期待する値（`defaultValueTargetsOf` を台帳の行の
- * 記述子で引いたもの）。対象は所属の中の、記述子の種類・型の行がちょうど `count`（1）行のときだけ載せる（fail-closed）。
- * 欄を持つ確かめ方は欄が文字列のときだけ載せる。欄を持たない確かめ方（enum-membership）は欄を見ない（Issue #548）。
- */
-export function ledgerTargetsOf(table: NameTable, ledger: LedgerView): ReadonlyMap<string, LedgerTarget> {
-  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
-  const rolesById = new Map(table.ownership.map((entry) => [entry.requirementId, entry.roles] as const));
-  const targets = new Map<string, LedgerTarget>();
-  for (const entry of table.verification) {
-    const row = ledger.rowByVerificationKind.get(entry.kind);
-    if (row === undefined || row.t1 === null || row.t2 === null) continue;
-    const t1 = row.t1;
-    const want = t1.ownership.row;
-    if (want === null) continue;
-    const value = t1.valueField === null ? null : (entry as unknown as Record<string, unknown>)[t1.valueField];
-    if (t1.valueField !== null && typeof value !== "string") continue;
-    const fields = (rolesById.get(entry.requirementId) ?? []).filter((role) => {
-      const owned = rowById.get(role.id);
-      return owned !== undefined && owned.kind === want.kind && (owned.type as unknown) === want.type;
-    });
-    const [only] = fields;
-    if (fields.length === t1.ownership.count && only !== undefined) {
-      const options = rowById.get(only.id)?.options ?? [];
-      targets.set(entry.requirementId, { row: { ...row, t1, t2: row.t2 }, fieldId: only.id, value: value as string | null, options });
-    }
-  }
-  return targets;
-}
-
 /**
  * 評価可能性（旗 on）。`checkEvaluability` と同じ順で、未対応・表に無い組・構造の検査の中身に合わない性質・性質の
  * 引けない試験を落とし、**台帳に無い性質を固定文で落とす**。確かめ方に結び付いた性質の試験は、その確かめ方の要件の
@@ -484,42 +444,6 @@ export function exemptLedgerProblems(
 
 // ── 旗 on：集計の試験の期待の形の門（台帳の集計の試験の型。08 §5・Issue #549）──────────────────
 
-/** 集計の試験の型で期待を確かめる対象（表の計算の行のうち、種別 aggregate で集計の種類と集計元を持つ行） */
-export interface AggregateTarget {
-  readonly aggregate: ComputationAggregate;
-  /** 見出しごとの集計の見出し（enum は見出しの元の項目の options の順のキー、月は値だけ見る。行ごと・アプリ全体は null） */
-  readonly groups: { readonly kind: "enum"; readonly headings: readonly string[] } | { readonly kind: "month" } | null;
-}
-
-const isComputationRowType = (type: NameTable["rows"][number]["type"]): type is ComputationRowType =>
-  type !== null && typeof type === "object" && "valueType" in type;
-
-/**
- * 表の計算の行の `id` → 集計の試験の型で期待を確かめる対象。種別 aggregate で `aggregate` を持つ行だけを載せる（旗 on で台帳が
- * 集計の種類を持つ走りの表。T1' が形・集計元・見出しの元を確かめ済み）。見出しの元の項目が表に無い見出しごとの集計は載せない
- * （fail-closed。その行の空の集計の試験は対象の落ちになる）。
- */
-export function aggregateTargetsOf(table: NameTable): ReadonlyMap<string, AggregateTarget> {
-  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
-  const targets = new Map<string, AggregateTarget>();
-  for (const row of table.rows) {
-    if (row.kind !== "computation" || !isComputationRowType(row.type) || row.type.form !== "aggregate") continue;
-    const aggregate = row.type.aggregate;
-    if (aggregate === undefined || aggregate === null) continue;
-    if (row.groupBy === null) {
-      targets.set(row.id, { aggregate, groups: null });
-      continue;
-    }
-    if (row.groupBy.kind === "month") {
-      targets.set(row.id, { aggregate, groups: { kind: "month" } });
-      continue;
-    }
-    const options = rowById.get(row.groupBy.field)?.options;
-    if (options !== undefined && options !== null) targets.set(row.id, { aggregate, groups: { kind: "enum", headings: options } });
-  }
-  return targets;
-}
-
 /** 見出しごとの 1 組が `{heading, value}` だけを持ち、value が `value` と等しいか */
 const isHeadingEntry = (entry: unknown, value: 0 | null): entry is { readonly heading: string; readonly value: unknown } =>
   isRecord(entry) &&
@@ -587,7 +511,7 @@ export function checkAggregateTests(
       if (own !== undefined) problems.push({ field: `${at}.referenceData`, message: t2.messages.referenceData });
       return;
     }
-    const state: AggregateDataState = (test.inputContract?.emptyEntities ?? []).includes(source) ? "empty" : "unread";
+    const state: AggregateDataState = aggregateDataStateOf(test, target);
     if (own !== undefined && t2.states.find((entry) => entry.state === state)?.kind !== test.kind) {
       problems.push({ field: `${at}.kind`, message: t2.messages.kind });
     }
@@ -757,8 +681,10 @@ const TEST_SPEC_LEDGER_FORM_HEAD =
  * T2 の規則の定義（旗 on なら台帳から組む。Issue #547）。省けば今の定数を返す。渡せば R-tsp-02 の除外（structural と、
  * 試験の型の必須の kind が normal だけの確かめ方の種類。台帳の順）と、R-tsp-16 の形の位置（有効の行の文 → 未対応の行の
  * 文。台帳の順）を台帳から組み直す（ID・why・since は変えない）。手 2a では off の定数とバイト列で同じになる。
+ * `ids`（旗 `v12.ids`）が真なら、R-tsp-16 の形の位置は行の旗 ids の文（コードが作る範囲を「作らない」に差し替えた文。無い行は
+ * 今の文）にする（Issue #595）。
  */
-export function testSpecRuleDefinitionsOf(ledger?: LedgerView): readonly RuleDefinition[] {
+export function testSpecRuleDefinitionsOf(ledger?: LedgerView, ids = false): readonly RuleDefinition[] {
   if (ledger === undefined) return TEST_SPEC_RULE_DEFINITIONS;
   return TEST_SPEC_RULE_DEFINITIONS.map((definition) => {
     if (definition.id === "R-tsp-02") {
@@ -771,7 +697,7 @@ export function testSpecRuleDefinitionsOf(ledger?: LedgerView): readonly RuleDef
     if (definition.id === "R-tsp-16") {
       return {
         ...definition,
-        text: `${TEST_SPEC_LEDGER_FORM_HEAD}${ledger.t2FormTexts.join("")}${ledger.t2UnsupportedTexts.join("")}`,
+        text: `${TEST_SPEC_LEDGER_FORM_HEAD}${(ids ? ledger.t2IdsFormTexts : ledger.t2FormTexts).join("")}${ledger.t2UnsupportedTexts.join("")}`,
       };
     }
     return definition;
@@ -1010,6 +936,11 @@ export interface TestSpecInput {
   readonly onRejected?: (candidate: RejectedCandidate) => void;
   /** 性質の台帳の導出（旗 `v12.ledger` が on の走りだけが渡す。省けば今の定数と関数。Issue #547） */
   readonly ledger?: LedgerView;
+  /**
+   * 旗 `v12.ids` が on の走りだけ真（台帳を渡したときだけ効く）。台帳の型だけで値が決まる試験をコードが作り
+   * （`v12/generated-tests.ts`）、その試験だけで確かめる要件を T2 の要求から除く。省けば今のまま（Issue #595）
+   */
+  readonly ids?: boolean;
 }
 
 /** T2 の結果 */
@@ -1138,6 +1069,29 @@ function judgedNatures(decided: ReadonlyMap<string, DecidedNature>): readonly De
   return rows;
 }
 
+/**
+ * 採った種類で、コードが作った試験を絞る（Issue #595）。空の集計の試験（境界・異常）は、採った種類が在ることだけの要件には足さない
+ * （v1 の網羅の検査がその要件に境界・異常を許さない）。確かめ方の性質の試験はそのまま
+ */
+function keptGenerated(
+  generated: GeneratedTests,
+  natures: ReadonlyMap<string, RequirementNature>,
+  ledger: LedgerView,
+): GeneratedTests {
+  const aggregateIds = new Set(ledger.aggregateRows.map((row) => row.id));
+  const tests = generated.tests.filter(
+    (test) =>
+      !aggregateIds.has(generated.observes.get(test.id) ?? "") || natures.get(test.target.requirementId) !== "existence-only",
+  );
+  if (tests.length === generated.tests.length) return generated;
+  const kept = new Set(tests.map((test) => test.id));
+  return {
+    ...generated,
+    tests,
+    observes: new Map([...generated.observes].filter(([id]) => kept.has(id))),
+  };
+}
+
 /** 組の試験だけに絞った、試験 ID → 観測する性質 */
 function observesOf(tests: readonly FixedTest[], observes: ReadonlyMap<string, TestObserves>): ReadonlyMap<string, TestObserves> {
   const out = new Map<string, TestObserves>();
@@ -1179,7 +1133,34 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
   const ledger = input.ledger;
   const defaults = defaultValueTargetsOf(pruned.table);
   const targets = ledger === undefined ? undefined : ledgerTargetsOf(pruned.table, ledger);
-  const rules = ledger === undefined ? TEST_SPEC_RULES : ruleTexts(testSpecRuleDefinitionsOf(ledger));
+  // 旗 `v12.ids`：台帳の型だけで値が決まる試験をコードが作り、その試験だけで確かめる要件を要求の一覧・確かめ方・所属・分類の
+  // 完全性から除く（表の行は除かない。Issue #595）。off は今のまま
+  const ids = input.ids === true && ledger !== undefined;
+  const generated = ids ? generateTests({ table: pruned.table, ledger, list }) : undefined;
+  const generatedOnly = new Set(generated?.excludedRequirementIds ?? []);
+  const requestList: RequirementList =
+    generatedOnly.size === 0 ? list : { ...list, requirements: list.requirements.filter((requirement) => !generatedOnly.has(requirement.id)) };
+  const requestTable: NameTable =
+    generatedOnly.size === 0
+      ? pruned.table
+      : {
+          ...pruned.table,
+          ownership: pruned.table.ownership.filter((entry) => !generatedOnly.has(entry.requirementId)),
+          verification: pruned.table.verification.filter((entry) => !generatedOnly.has(entry.requirementId)),
+          classification: pruned.table.classification.filter((entry) => !generatedOnly.has(entry.requirementId)),
+        };
+  // 一覧の位置（`requirements[添字]`）は要求の一覧で返す（v1 の検査は全部の一覧で呼ぶので、位置を要求の一覧の添字に写す）
+  const requestIndexOf = new Map(requestList.requirements.map((requirement, index) => [requirement.id, index] as const));
+  const toRequestPositions = (found: readonly Problem[]): readonly Problem[] =>
+    generatedOnly.size === 0
+      ? found
+      : found.map((problem) => {
+          const match = /^requirements\[(\d+)\]$/.exec(problem.field);
+          const id = match === null ? undefined : list.requirements[Number(match[1])]?.id;
+          const index = id === undefined ? undefined : requestIndexOf.get(id);
+          return index === undefined ? problem : { ...problem, field: `requirements[${String(index)}]` };
+        });
+  const rules = ledger === undefined ? TEST_SPEC_RULES : ruleTexts(testSpecRuleDefinitionsOf(ledger, ids));
   const schema = testSpecSchemaOf(ledger);
   const check = (output: unknown): ShapeCheck<TestSpecOutput> => checkTestSpecOutput(output, ledger);
 
@@ -1192,7 +1173,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
     const request = buildStructuredRequest({
       rules,
       documents: input.documents,
-      data: buildData(input.plan, list, pruned.table, previous, previousTests, judgedNatures(decided), ledger),
+      data: buildData(input.plan, requestList, requestTable, previous, previousTests, judgedNatures(decided), ledger),
       schemaName: TEST_SPEC_SCHEMA_NAME,
       schema,
       maxOutputTokens: input.gateway.maxOutputTokens("test-spec"),
@@ -1211,23 +1192,25 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
           }),
     });
     if (!answer.ok) return answer;
-    const generated = answer.value.suite;
+    const answered = answer.value.suite;
 
     // 構造で確かめる要件の、構造の検査でない試験を、照合と固定の前に外す（v1 の ②' と同じ）
-    const dropResult = dropNonstructuralTests(design, generated, round);
+    const dropResult = dropNonstructuralTests(design, answered, round);
     if (dropResult.dropped.length > 0) {
       for (const entry of dropResult.dropped) droppedAll.push(entry);
       input.onDropped?.(dropResult.dropped);
     }
 
     // 分類の完全性を照合の前に確かめる。欠ければ判定に聞かず、中身の落ちとして作り直させる
-    const classificationProblems = checkClassificationCompleteness(list, generated.classifications);
+    const classificationProblems = checkClassificationCompleteness(requestList, answered.classifications);
     let suite: TestSuite = dropResult.suite;
     let observes = observesOf(suite.tests, answer.value.observes);
     let problems: readonly Problem[] = classificationProblems;
+    // この回に足したコードの試験の数（組の末尾。前回の試験の塊には LLM の試験だけを返す。Issue #595）
+    let added = 0;
     if (classificationProblems.length === 0) {
       // 食い違った要件のうち、まだ決めていないものを 1 回の呼び出しにまとめて判定に聞く（判定の口が無ければ fallback）
-      const fresh = reconcileNatures(design, generated.classifications).discrepancies.filter(
+      const fresh = reconcileNatures(design, answered.classifications).discrepancies.filter(
         (entry) => !decided.has(entry.requirementId),
       );
       if (fresh.length > 0) {
@@ -1242,11 +1225,26 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
           decided.set(entry.requirementId, { classified: entry.classified, decision: verdicts.get(entry.requirementId) ?? { kind: "fallback" } });
         }
       }
-      const reconciled = adoptNatures(design, generated.classifications, decided);
+      const reconciled = adoptNatures(design, answered.classifications, decided);
       const adopted = new Map<string, RequirementNature>();
       for (const entry of reconciled.discrepancies) adopted.set(entry.requirementId, entry.resolved);
       suite = withAdoptedNatures(dropResult.suite, adopted);
       observes = observesOf(suite.tests, answer.value.observes);
+
+      // 旗 `v12.ids`：コードが作った試験を LLM の試験のあとに足し、検査・観測する性質・網羅の単位・SHA は足した組で測る
+      // （評価口・v1 の検査は作り手を区別しない）。LLM の試験とコードの試験の重なりと予約の接頭辞は固定文で落とす（Issue #595）
+      const kept = generated === undefined || ledger === undefined ? undefined : keptGenerated(generated, reconciled.natures, ledger);
+      const llmSuite = suite;
+      const llmObserves = observes;
+      if (kept !== undefined) {
+        added = kept.tests.length;
+        suite = { ...suite, tests: [...suite.tests, ...kept.tests] };
+        observes = new Map([...llmObserves, ...(kept.observes as ReadonlyMap<string, TestObserves>)]);
+      }
+      const quoted =
+        kept === undefined
+          ? jsonStringExpectedIds(answer.output)
+          : new Set([...jsonStringExpectedIds(answer.output), ...kept.tests.map((test) => test.id)]);
 
       // v1 の検査（新契約）＋評価可能性。持ち越しの要件の試験は、除いた一覧で「一覧に無い要件 ID」として落ちる
       // v1 の検査は組全体と残る一覧で 1 回だけ呼び、既定値の要件の異常・境界の不足の 2 文だけを外す（Issue #533）
@@ -1258,11 +1256,12 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
               ...checkDefaultValueTests(suite, observes, defaults, jsonStringExpectedIds(answer.output)),
             ]
           : [
-              ...exemptLedgerProblems(checkSuitePlan(list, suite, design, reconciled.natures), list, targets),
+              ...toRequestPositions(exemptLedgerProblems(checkSuitePlan(list, suite, design, reconciled.natures), list, targets)),
               ...checkEvaluabilityByLedger(suite, observes, pruned.table, ledger),
-              ...checkLedgerTests(suite, observes, targets, jsonStringExpectedIds(answer.output)),
+              ...checkLedgerTests(suite, observes, targets, quoted),
               ...checkAggregateTests(suite, observes, pruned.table, ledger),
               ...checkConditionTests(suite, observes, pruned.table, ledger),
+              ...(kept === undefined ? [] : checkGeneratedOverlap(llmSuite, llmObserves, kept, pruned.table, ledger)),
             ];
       if (problems.length === 0) {
         const coverage = coverageUnitsOf({ suite, observes, natures: reconciled.natures });
@@ -1287,11 +1286,13 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
       attempt: shapeRejections + 1,
       target: suite,
       response: answer.output,
-      inspectionList: list,
+      inspectionList: requestList,
       problems: withReference(problems, "target"),
     });
     previous = problems;
-    previousTests = suite.tests.map((test) => ({ ...test, observes: observes.get(test.id) ?? null }));
+    previousTests = suite.tests
+      .slice(0, suite.tests.length - added)
+      .map((test) => ({ ...test, observes: observes.get(test.id) ?? null }));
     if (round < TEST_SPEC_ROUNDS) input.gateway.noteRetry("content");
   }
   return { ok: false, failure: { kind: "unmet", attempts: TEST_SPEC_ROUNDS, problems: previous } };

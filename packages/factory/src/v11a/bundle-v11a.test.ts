@@ -349,3 +349,28 @@ describe("持ち越しの記録の non_requirements（T1'' が受理した要件
     }
   });
 });
+
+// ── コードが作った試験 ID の並び（T2 の成果物の generated_test_ids。旗 v12.ids。Issue #595）──────────────────
+
+describe("T2 の成果物の generated_test_ids（旗 v12.ids の走りだけ。Issue #595）", () => {
+  it("渡さなければ欄を書かない（今の記録とバイト列で同じ）。渡せば末尾に並びを書き、既存の欄・ほかの記録は今のまま", () => {
+    const plain = buildV11aArtifacts(input());
+    const specText = (artifacts: ReturnType<typeof buildV11aArtifacts>) => artifacts.find((artifact) => artifact.path === V11A_ARTIFACT_NAMES.testSpec)!.text;
+    const plainKeys = Object.keys(JSON.parse(specText(plain)) as object);
+    expect(plainKeys).not.toContain("generated_test_ids");
+    const base = input();
+    const ids = ["gen:default-value:R6:f.item.kind:normal"];
+    const withIds = buildV11aArtifacts({ ...base, testSpec: { ...base.testSpec, generatedTestIds: ids } });
+    const parsed = JSON.parse(specText(withIds)) as Record<string, unknown>;
+    expect(Object.keys(parsed)).toEqual([...plainKeys, "generated_test_ids"]);
+    expect(parsed["generated_test_ids"]).toEqual(ids);
+    const { generated_test_ids: _omit, ...rest } = parsed;
+    expect(rest).toEqual(JSON.parse(specText(plain)));
+    expect(withIds.filter((artifact) => artifact.path !== V11A_ARTIFACT_NAMES.testSpec)).toEqual(
+      plain.filter((artifact) => artifact.path !== V11A_ARTIFACT_NAMES.testSpec),
+    );
+    // 空の並びも書く（ids on で作った試験が 0 の走り）
+    const empty = JSON.parse(specText(buildV11aArtifacts({ ...base, testSpec: { ...base.testSpec, generatedTestIds: [] } }))) as Record<string, unknown>;
+    expect(empty["generated_test_ids"]).toEqual([]);
+  });
+});
