@@ -257,6 +257,11 @@ export type NameTableVerification =
       readonly kind: "structural";
       readonly reason: string;
       readonly checks: readonly StructuralAssertionKind[];
+      /**
+       * 検査ごとの対象の行（旗 `v12.ids` の C2 が書いた表だけ。`checks` と同じ順・同じ数。off の表は持たない＝今の形のまま。
+       * Issue #594）
+       */
+      readonly targets?: readonly NameTableCheckTarget[];
     }
   | {
       readonly requirementId: string;
@@ -267,6 +272,16 @@ export type NameTableVerification =
   | { readonly requirementId: string; readonly kind: "default-value"; readonly value: string }
   | { readonly requirementId: string; readonly kind: "enum-membership" }
   | { readonly requirementId: string; readonly kind: "non-requirement" };
+
+/**
+ * 構造の検査 1 つの対象（旗 `v12.ids`。Issue #594）。`targetId` は検査が見る行（種類は `STRUCTURAL_TARGET_KINDS`）、
+ * `sourceId` は view-shows だけが持つ組の行（画面と同じ entity の項目か計算。ほかの検査は null）
+ */
+export interface NameTableCheckTarget {
+  readonly check: StructuralAssertionKind;
+  readonly targetId: string;
+  readonly sourceId: string | null;
+}
 
 /** 要件ごとの分類（T1 が要件の文から分類する。Plan の `kind` から導かない。T2 の分類と照らす元。§1.1） */
 export interface NameTableClassification {
@@ -1549,4 +1564,70 @@ export function shapeOfMappingEntry(
   const draft = shapeOfDraftRequirement({ ...value, copy: "-" }, field, problems, options.ledger);
   if (problems.length !== before || draft === undefined) return undefined;
   return { requirementId: requirementId as string, roles: draft.roles, verification: draft.verification, nature: draft.nature };
+}
+
+// ── 旗 `v12.ids` の構造の検査の対象（C2'。方法論 03 の F4・H1・H2。Issue #594）──────────────────
+//
+// C2 は構造の検査ごとに対象の行の ID（`targetId`）と、view-shows だけ組の行の ID（`sourceId`）を書く。コードが実在・種類・
+// view-shows の対（画面と同じ entity の項目か計算。entity を持たない画面は entity を持たない計算だけ＝`hasViewShowsPair` と同じ
+// 条件）を照らし、通った対象の行を所属に足す（basis dependency・reason に検査の種類）。所属に足すのは検査が名指しした行だけ。
+
+/** 検査の対象の照合の固定文 */
+export const CHECK_TARGET_MESSAGES = {
+  unknownTarget: "検査の対象の ID（targetId）が表の行に無い",
+  targetKind: "検査の対象の行の種類が検査に合わない",
+  sourceMissing: "view-shows の検査に、画面と同じ entity の項目か計算の ID（sourceId）が無い",
+  unknownSource: "view-shows の検査の組の ID（sourceId）が表の行に無い",
+  sourcePair: "view-shows の検査の組（sourceId）が、画面と同じ entity の項目か計算でない",
+  sourceExtra: "view-shows でない検査の sourceId は null であること",
+} as const;
+
+/** 検査の対象を行に照らす（純粋。`field` は確かめ方の位置。問題を足す） */
+export function checkCheckTargets(
+  rows: readonly NameTableRow[],
+  targets: readonly NameTableCheckTarget[],
+  field: string,
+  problems: Problem[],
+): void {
+  const rowById = new Map(rows.map((row) => [row.id, row] as const));
+  targets.forEach((target, index) => {
+    const at = `${field}.checks[${String(index)}]`;
+    const row = rowById.get(target.targetId);
+    if (row === undefined) problems.push({ field: `${at}.targetId`, message: CHECK_TARGET_MESSAGES.unknownTarget });
+    else if (row.kind !== STRUCTURAL_TARGET_KINDS[target.check]) {
+      problems.push({ field: `${at}.targetId`, message: CHECK_TARGET_MESSAGES.targetKind });
+    }
+    if (target.check !== "view-shows") {
+      if (target.sourceId !== null) problems.push({ field: `${at}.sourceId`, message: CHECK_TARGET_MESSAGES.sourceExtra });
+      return;
+    }
+    if (target.sourceId === null) {
+      problems.push({ field: `${at}.sourceId`, message: CHECK_TARGET_MESSAGES.sourceMissing });
+      return;
+    }
+    const source = rowById.get(target.sourceId);
+    if (source === undefined) {
+      problems.push({ field: `${at}.sourceId`, message: CHECK_TARGET_MESSAGES.unknownSource });
+      return;
+    }
+    if (row === undefined || row.kind !== "screen") return;
+    if (!hasViewShowsPair([row, source])) problems.push({ field: `${at}.sourceId`, message: CHECK_TARGET_MESSAGES.sourcePair });
+  });
+}
+
+/** 検査の対象の行を所属に足す（既にある行は足さない。足す行は basis dependency・reason に検査の種類。表の順は所属のあと） */
+export function ownershipWithCheckTargets(
+  roles: readonly NameTableRoleOwnership[],
+  targets: readonly NameTableCheckTarget[],
+): readonly NameTableRoleOwnership[] {
+  const owned = new Set(roles.map((role) => role.id));
+  const added: NameTableRoleOwnership[] = [];
+  for (const target of targets) {
+    for (const id of [target.targetId, target.sourceId]) {
+      if (id === null || owned.has(id)) continue;
+      owned.add(id);
+      added.push({ id, basis: "dependency", reason: target.check });
+    }
+  }
+  return added.length === 0 ? roles : [...roles, ...added];
 }

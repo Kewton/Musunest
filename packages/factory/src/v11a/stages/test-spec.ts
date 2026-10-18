@@ -956,6 +956,8 @@ function buildData(
           requirementId: entry.requirementId,
           verificationKind: entry.kind,
           checks: entry.kind === "structural" ? entry.checks : [],
+          // 旗 `v12.ids` の表（C2 が検査の対象を書いた表）だけ、検査ごとの対象の行の ID を添える（off の表は持たない＝今のまま。Issue #594）
+          ...(entry.kind === "structural" && entry.targets !== undefined ? { checkTargets: entry.targets } : {}),
           // 既定値の要件にだけ、期待するキーを添える（ほかの項目は今までどおり。Issue #533）。旗 on なら、確かめ方に
           // 結び付いた性質の欄（台帳の行の `valueField`）を添える（Issue #547）
           ...(ledger === undefined

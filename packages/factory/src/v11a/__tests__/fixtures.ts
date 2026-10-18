@@ -19,9 +19,11 @@ import {
   requirementCopy,
   type ComputationAggregate,
   type NameTable,
+  type NameTableCheckTarget,
   type NameTableDraft,
   type NameTableRow,
 } from "../names.js";
+import { STRUCTURAL_TARGET_KINDS, type StructuralAssertionKind } from "../../fixed-test.js";
 import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } from "../../v12/ledger.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
 import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
@@ -859,12 +861,49 @@ export function withCodeIds(table: NameTable, keepSource = false): NameTable {
   };
 }
 
+/**
+ * 構造の検査ごとの対象（旗 v12.ids の C2 が書く欄。Issue #594）を、表の所属から決める：検査の種類に合う所属の最初の行。view-shows は
+ * 所属の画面のうち、同じ entity の項目か計算を所属させた最初の画面と、その最初の項目か計算（entity を持たない画面は entity を
+ * 持たない計算）。合う行が無ければ対象を作れないので例外にする
+ */
+export function checkTargetsOf(table: NameTable, requirementId: string, checks: readonly StructuralAssertionKind[]): readonly NameTableCheckTarget[] {
+  const owned = (table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? []).flatMap((role) => {
+    const found = table.rows.find((entry) => entry.id === role.id);
+    return found === undefined ? [] : [found];
+  });
+  return checks.map((check) => {
+    if (check === "view-shows") {
+      for (const screen of owned.filter((entry) => entry.kind === "screen")) {
+        const source = owned.find((entry) => (entry.kind === "field" || entry.kind === "computation") && entry.entity === screen.entity);
+        if (source !== undefined) return { check, targetId: screen.id, sourceId: source.id };
+      }
+      throw new Error(`前提が壊れた：${requirementId} の view-shows の組が所属に無い`);
+    }
+    const target = owned.find((entry) => entry.kind === STRUCTURAL_TARGET_KINDS[check]);
+    if (target === undefined) throw new Error(`前提が壊れた：${requirementId} の ${check} の対象が所属に無い`);
+    return { check, targetId: target.id, sourceId: null };
+  });
+}
+
+/** 構造で確かめる要件の確かめ方に、検査ごとの対象（`checkTargetsOf`）を添えた表（旗 v12.ids の C2 が組む表の形。Issue #594） */
+export function withCheckTargets(table: NameTable): NameTable {
+  return {
+    ...table,
+    verification: table.verification.map((entry) =>
+      entry.kind === "structural" ? { ...entry, targets: entry.targets ?? checkTargetsOf(table, entry.requirementId, entry.checks) } : entry,
+    ),
+  };
+}
+
 /** C1 の 3 束と C2 の応答（表はコードの形の ID・C1 が組む順であること。`withCodeIds` の結果） */
 export interface IdsResponses {
   readonly entities: Record<string, unknown>;
   readonly fields: Record<string, unknown>;
   readonly behaviors: Record<string, unknown>;
+  /** C2 の応答を全要件で 1 つにしたもの（束に切る前。要件 5 件以下なら束 1 の応答と同じ） */
   readonly mapping: Record<string, unknown>;
+  /** C2 の束ごとの応答（一覧の順に 5 件ずつ。呼ばれる順。Issue #594） */
+  readonly mappingBundles: readonly Record<string, unknown>[];
 }
 
 /** 表（コードの形の ID）から、C1 の 3 束と C2 の応答を組む（台帳が集計の種類を持てば計算に `aggregate`） */
@@ -872,6 +911,25 @@ export function idsResponsesOf(list: RequirementList, table: NameTable, ledger?:
   const withAggregate = (ledger?.aggregateKinds.length ?? 0) > 0;
   const rowsOf = (kind: NameTableRow["kind"]) => table.rows.filter((entry) => entry.kind === kind);
   const computationType = (entry: NameTableRow) => entry.type as { valueType: string; scope: string; form: string; aggregate?: ComputationAggregate | null };
+  // C2 の応答の要件ごとの 1 件（一覧の順。構造の検査は検査ごとの対象の写像の並び。所属は表の所属のまま。Issue #594）
+  const mappingEntries = list.requirements.map((item) => {
+    const ownership = table.ownership.find((entry) => entry.requirementId === item.id);
+    const verification = table.verification.find((entry) => entry.requirementId === item.id);
+    const classification = table.classification.find((entry) => entry.requirementId === item.id);
+    if (ownership === undefined || verification === undefined || classification === undefined) {
+      throw new Error("前提が壊れた：要件の欄が欠けている");
+    }
+    const { requirementId: _omit, ...rest } = verification;
+    const checks =
+      verification.kind === "structural" ? (verification.targets ?? checkTargetsOf(table, item.id, verification.checks)) : [];
+    const { targets: _targets, ...withoutTargets } = rest as typeof rest & { readonly targets?: unknown };
+    return {
+      requirementId: item.id,
+      roles: ownership.roles,
+      verification: { value: null, reason: null, constraintIds: [], ...withoutTargets, checks },
+      nature: classification.nature,
+    };
+  });
   return {
     entities: { entities: rowsOf("entity").map((entry) => ({ name: entry.name, role: entry.role })) },
     fields: {
@@ -906,32 +964,19 @@ export function idsResponsesOf(list: RequirementList, table: NameTable, ledger?:
       })),
       screens: rowsOf("screen").map((entry) => ({ entity: entry.entity, name: entry.name, role: entry.role, view: (entry.type as { view: string }).view })),
     },
-    mapping: {
-      requirements: list.requirements.map((item) => {
-        const ownership = table.ownership.find((entry) => entry.requirementId === item.id);
-        const verification = table.verification.find((entry) => entry.requirementId === item.id);
-        const classification = table.classification.find((entry) => entry.requirementId === item.id);
-        if (ownership === undefined || verification === undefined || classification === undefined) {
-          throw new Error("前提が壊れた：要件の欄が欠けている");
-        }
-        const { requirementId: _omit, ...rest } = verification;
-        return {
-          requirementId: item.id,
-          roles: ownership.roles,
-          verification: { value: null, reason: null, checks: [], constraintIds: [], ...rest },
-          nature: classification.nature,
-        };
-      }),
-    },
+    mapping: { requirements: mappingEntries },
+    mappingBundles: Array.from({ length: Math.ceil(mappingEntries.length / 5) }, (_, index) => ({
+      requirements: mappingEntries.slice(index * 5, index * 5 + 5),
+    })),
   };
 }
 
-/** C1 の 3 束と C2 の応答を、呼ばれる順の並びにする */
+/** C1 の 3 束と C2 の束ごとの応答を、呼ばれる順の並びにする */
 export const idsResponseList = (responses: IdsResponses): readonly Record<string, unknown>[] => [
   responses.entities,
   responses.fields,
   responses.behaviors,
-  responses.mapping,
+  ...responses.mappingBundles,
 ];
 
 /** 確定した仕様（抽象的な題材。要件は一覧と同じ） */
