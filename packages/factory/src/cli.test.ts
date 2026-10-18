@@ -85,7 +85,13 @@ import type { LedgerView } from "./v12/ledger.js";
 import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
 import { isGeneratedTestId } from "./v12/generated-tests.js";
 import { ruleTexts } from "./stages/prompt.js";
-import { TEST_SPEC_DATA_NAMES, TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
+import {
+  TEST_SPEC_DATA_NAMES,
+  TEST_SPEC_FRAMES_DATA_NAME,
+  TEST_SPEC_SCHEMA_NAME,
+  testSpecRuleDefinitionsOf,
+  testSpecSchemaOf,
+} from "./v11a/stages/test-spec.js";
 import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
 import { V12_CALL_LIMITS } from "./v12/limits.js";
 import type { NameTable } from "./v11a/names.js";
@@ -950,6 +956,12 @@ function v11aTestSpec(): Record<string, unknown> {
 const CASE_FORM_RULE_IDS: readonly string[] = ["R-tsp-07", "R-tsp-09", "R-tsp-11", "R-tsp-12", "R-tsp-13", "R-tsp-14"];
 
 /**
+ * 手 3i（#653）で旗 ids の走りだけ必要な試験の枠に合わせた T2 の規則のうち、台帳の差の名指し（R-tsp-02・R-tsp-16）に無いもの
+ * （R-tsp-02・R-tsp-16 の旗 ids の文は `withoutIdsGenerated` が旗 off の文に戻す）
+ */
+const FRAME_RULE_IDS: readonly string[] = ["R-tsp-03"];
+
+/**
  * 旗 v12.ids の走りの T2 の応答（手 3d・Issue #624：構造の要件 R2 は要求の一覧に無く、構造の検査はコードが作るので、R2 の試験と
  * 分類を書かない）
  */
@@ -1280,7 +1292,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
   /**
    * 旗 ids の手 3d（Issue #624）の差をそろえる：構造の要件 R2 は旗 ids の T2 の要求の一覧・確かめ方・所属に無く、組の分類にも無い
    * （構造の検査はコードが作る）。両側の T2 のその 3 つの塊と B1 の「固定した試験」の分類から R2 を除き、`ledger` を渡した側
-   * （旗 ids の走り）の T2 の schema を旗 ids off の schema（operation に structure・assertion は写像か null）に戻す
+   * （旗 ids の走り）の T2 の schema を旗 ids off の schema（operation に structure・assertion は写像か null）に戻す。手 3i（#653）：
+   * `ledger` を渡した側の T2 の要求から、所属の後ろの必要な試験の枠の塊を除く（旗 ids の走りだけの塊）
    */
   const withoutStructuralRequirement = (requests: readonly unknown[], ledger?: LedgerView): unknown[] => {
     const [, listName, , verificationName, ownershipName] = TEST_SPEC_DATA_NAMES;
@@ -1302,14 +1315,22 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
         for (const name of [verificationName, ownershipName]) {
           input = rewrite(input, name, (parsed) => (parsed as readonly { readonly requirementId: string }[]).filter(notR2));
         }
-        // 旗 ids の走りの規則のうち、場合の形に差し替えた欄の名前の文（R-tsp-07・09・11・12・13・14。#625）は旗 ids off の文に戻す
+        if (ledger !== undefined) {
+          const framesBlock = new RegExp(`\\n<data name="${TEST_SPEC_FRAMES_DATA_NAME}">\\n[\\s\\S]*?\\n</data>`);
+          expect(framesBlock.test(input)).toBe(true);
+          input = input.replace(framesBlock, "");
+        }
+        // 旗 ids の走りの規則のうち、場合の形に差し替えた欄の名前の文（R-tsp-07・09・11・12・13・14。#625）と、必要な試験の枠の
+        // R-tsp-03（#653）は旗 ids off の文に戻す
         // （R-tsp-16 は台帳の差として名指しで照らし、`withoutIdsGenerated` が戻す）
         const idsDefinitions = ledger === undefined ? [] : testSpecRuleDefinitionsOf(ledger, true);
         const offDefinitions = ledger === undefined ? [] : testSpecRuleDefinitionsOf(ledger);
         const casesTexts = new Map(
           idsDefinitions.flatMap((definition, index) => {
             const off = offDefinitions[index];
-            return CASE_FORM_RULE_IDS.includes(definition.id) && off !== undefined ? [[ruleTexts([definition])[0] ?? "", ruleTexts([off])[0] ?? ""] as const] : [];
+            return (CASE_FORM_RULE_IDS.includes(definition.id) || FRAME_RULE_IDS.includes(definition.id)) && off !== undefined
+              ? [[ruleTexts([definition])[0] ?? "", ruleTexts([off])[0] ?? ""] as const]
+              : [];
           }),
         );
         const rules = (request.rules ?? []).map((text) => casesTexts.get(text) ?? text);

@@ -510,6 +510,8 @@ describe("経路 v1.2 の封筒は 1 つ（旗の組から導き、全段で同�
     expect(caseItems.required).toEqual(["requirementId", "targetId", "kind", "observes", "input", "targetRowId", "rows", "expected", "emptyEntities"]);
     for (const key of ["id", "operation", "clock", "assertion", "target", "inputContract", "referenceData"]) expect(Object.keys(caseItems.properties), key).not.toContain(key);
     expect(strictProblems(buildStageBranch({ stage: TEST_SPEC_SCHEMA_NAME, schema: t2Of(STAGE_ENVELOPE_ENTRIES_V12) }))).toEqual([]);
+    // 手 3i（#653）：場合の observes は計算の行の性質と null だけ（項目・entity・操作の行の性質はコードが台帳から埋める）
+    expect(caseItems.properties.observes).toMatchObject({ type: ["string", "null"], enum: ["value", "empty-aggregate", null] });
     expect(t2Of(stageEnvelopeEntriesV12Of({ ledger: true, ids: false }))).toEqual(testSpecSchemaOf(PROPERTY_LEDGER_VIEW));
     // 旗 ledger が off なら v1.1α と同じ一覧（導出は旗の組だけで決まる）
     expect(stageEnvelopeEntriesV12Of(V12_FLAGS_OFF)).toEqual(STAGE_ENVELOPE_ENTRIES_V11A);

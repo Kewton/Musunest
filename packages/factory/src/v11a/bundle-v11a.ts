@@ -126,6 +126,11 @@ export interface V11aRecordsInput {
      * 渡さない＝欄が無い。#625）
      */
     readonly cases?: { readonly count: number; readonly responseChars: number };
+    /**
+     * 旗 `v12.ids` の走りだけ：通った回の組の必要な試験の枠の要約（残る本数の合計とコードが作った分の数。扱いは `cases` と同じ。
+     * off の走り・再開した組は渡さない＝欄が無い。#653）
+     */
+    readonly frames?: { readonly remaining: number; readonly generated: number };
   };
   readonly declCheck: {
     /** 点検の上限（`declChecks`） */
@@ -227,6 +232,9 @@ export function buildV11aArtifacts(input: V11aRecordsInput): readonly BundleArti
         ...(testSpec.cases === undefined
           ? {}
           : { llm_case_count: testSpec.cases.count, llm_response_chars: testSpec.cases.responseChars }),
+        ...(testSpec.frames === undefined
+          ? {}
+          : { frame_remaining_total: testSpec.frames.remaining, frame_generated_count: testSpec.frames.generated }),
       }),
     },
     {
@@ -444,6 +452,8 @@ export interface FrozenTestSpec {
   readonly natures: ReadonlyMap<string, RequirementNature>;
   /** 旗 `v12.ids` の走りの T2 の場合の数と応答の文字数（段を回した走りだけ。checkpoint には載せない。#625） */
   readonly cases?: { readonly count: number; readonly responseChars: number };
+  /** 旗 `v12.ids` の走りの T2 の必要な試験の枠の要約（段を回した走りだけ。checkpoint には載せない。#653） */
+  readonly frames?: { readonly remaining: number; readonly generated: number };
 }
 
 /** 境界の材料（回す部分が境界で渡す。B の結果は入らない） */

@@ -1106,7 +1106,8 @@ export function renameIds<T>(value: T, rename: ReadonlyMap<string, string>): T {
 /**
  * v1 の形の T2 の応答（分類と raw の試験の並び）を、同じ内容の場合の形（旗 `v12.ids` の T2 の応答）に書き換える。試験 ID・操作・
  * 対象の種類・時計・assertion・参照データの対象の要件 ID と種類・期待の null の欄を落とし、値の欄（JSON の文字列）はそのまま写す。
- * 構造の検査（operation が structure）は場合で書けないので例外にする（試験の材料の誤り）
+ * 構造の検査（operation が structure）は場合で書けないので例外にする（試験の材料の誤り）。observes は計算の行（target.kind が
+ * computation）の場合だけ写し、ほかは null にする（項目・entity・操作の行の性質はコードが台帳から埋める。#653）
  */
 export function casesResponseOf(output: { readonly classifications?: readonly unknown[]; readonly tests: readonly unknown[] }): {
   readonly classifications: readonly unknown[];
@@ -1114,7 +1115,7 @@ export function casesResponseOf(output: { readonly classifications?: readonly un
 } {
   const cases = output.tests.map((raw) => {
     const test = raw as {
-      readonly target: { readonly requirementId: string; readonly roleId: string };
+      readonly target: { readonly requirementId: string; readonly kind?: string; readonly roleId: string };
       readonly kind: string;
       readonly operation: string;
       readonly observes: string;
@@ -1128,7 +1129,7 @@ export function casesResponseOf(output: { readonly classifications?: readonly un
       requirementId: test.target.requirementId,
       targetId: test.target.roleId,
       kind: test.kind,
-      observes: test.observes,
+      observes: test.target.kind === "computation" ? test.observes : null,
       input: { rowId: test.inputContract.rowId, values: test.input },
       targetRowId: test.inputContract.targetRowId,
       rows: test.referenceData.map((row) => ({ rowId: row.rowId, entityId: row.target.roleId, values: row.values })),
@@ -1137,6 +1138,21 @@ export function casesResponseOf(output: { readonly classifications?: readonly un
     };
   });
   return { classifications: output.classifications ?? [], cases };
+}
+
+/**
+ * 手 3e（#625）の場合の形（observes を全部の行の場合に写した旧形）。#653 で項目・entity・操作の行の場合の observes は null に
+ * なったので、旧形の負例（計算でない行に性質を書いた場合）を組むときだけ使う
+ */
+export function legacyCasesResponseOf(output: { readonly classifications?: readonly unknown[]; readonly tests: readonly unknown[] }): {
+  readonly classifications: readonly unknown[];
+  readonly cases: readonly Record<string, unknown>[];
+} {
+  const converted = casesResponseOf(output);
+  return {
+    classifications: converted.classifications,
+    cases: converted.cases.map((entry, index) => ({ ...entry, observes: (output.tests[index] as { readonly observes: string }).observes })),
+  };
 }
 
 /** 展開した試験から、試験 ID と時計を除く（二点測定で v1 の形の応答の組と比べる。#625） */

@@ -317,7 +317,6 @@ export function generateTests(input: GeneratedTestsInput): GeneratedTests {
   const verificationById = new Map(table.verification.map((entry) => [entry.requirementId, entry] as const));
   const natureById = new Map(table.classification.map((entry) => [entry.requirementId, entry.nature] as const));
   const rolesById = new Map(table.ownership.map((entry) => [entry.requirementId, entry.roles] as const));
-  const aggregateRows = ledger.aggregateRows.filter((row) => row.t2Aggregate.codeRanges.length > 0);
   const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
   const tests: FixedTest[] = [];
   const observes = new Map<string, string>();
@@ -388,23 +387,50 @@ export function generateTests(input: GeneratedTestsInput): GeneratedTests {
     }
     // 空の集計：確かめ方が fixed-test で分類が ruled の要件だけ（構造で確かめる要件・在ることだけの要件には境界・異常を作らない）
     if (natureById.get(requirement.id) !== "ruled") return;
-    for (const role of rolesById.get(requirement.id) ?? []) {
-      const aggregate = aggregateTargets.get(role.id);
-      if (aggregate === undefined) continue;
-      for (const row of aggregateRows) {
-        const t2 = row.t2Aggregate;
-        if (!t2.codeRanges.includes(aggregate.range)) continue;
-        for (const { state, kind } of t2.states) {
-          const value = aggregateExpectedValueOf(t2, aggregate, state);
-          if (value === undefined) continue;
-          const id = `${GENERATED_TEST_ID_PREFIX}${row.id}:${requirement.id}:${role.id}:${state}`;
-          const empty = state === "empty" ? [aggregate.aggregate.entity] : [];
-          push(generatedTest(id, requirement.id, t2.targetKind, role.id, kind, t2.operation, empty, value), row.id);
-        }
-      }
+    for (const { test, observed } of emptyAggregateCodeTestsOf(requirement.id, rolesById.get(requirement.id) ?? [], aggregateTargets, ledger)) {
+      push(test, observed);
     }
   });
   return { tests, observes, excludedRequirementIds: excluded, stopped };
+}
+
+/** コードが作る空の集計の試験 1 本（観測する性質は台帳の集計の行の id、データ状態は台帳の表の状態） */
+export interface EmptyAggregateCodeTest {
+  readonly test: FixedTest;
+  readonly observed: string;
+  readonly state: AggregateDataState;
+}
+
+/**
+ * 要件の所属の集計の行のうち、台帳の集計の試験の型の `codeRanges` に入る行に、コードが作る空の集計の試験（所属の順の集計の行ごとに
+ * データ状態の表の順。期待が台帳の表から導けない行は作らない）。**要件の分類を見ない**：`generateTests` は確かめ方が fixed-test で
+ * 表の分類が ruled の要件だけにこれを足し、T2 の必要な試験の枠（#653）は「表の分類が ruled のときだけコードが作る」範囲として同じ
+ * 関数で引く（作る条件と枠の文がずれない）
+ */
+export function emptyAggregateCodeTestsOf(
+  requirementId: string,
+  roles: readonly { readonly id: string }[],
+  aggregateTargets: ReadonlyMap<string, AggregateTarget>,
+  ledger: LedgerView,
+): readonly EmptyAggregateCodeTest[] {
+  const made: EmptyAggregateCodeTest[] = [];
+  const aggregateRows = ledger.aggregateRows.filter((row) => row.t2Aggregate.codeRanges.length > 0);
+  for (const role of roles) {
+    const aggregate = aggregateTargets.get(role.id);
+    if (aggregate === undefined) continue;
+    for (const row of aggregateRows) {
+      const t2 = row.t2Aggregate;
+      if (!t2.codeRanges.includes(aggregate.range)) continue;
+      for (const { state, kind } of t2.states) {
+        const value = aggregateExpectedValueOf(t2, aggregate, state);
+        if (value === undefined) continue;
+        const id = `${GENERATED_TEST_ID_PREFIX}${row.id}:${requirementId}:${role.id}:${state}`;
+        const empty = state === "empty" ? [aggregate.aggregate.entity] : [];
+        made.push({ test: generatedTest(id, requirementId, t2.targetKind, role.id, kind, t2.operation, empty, value), observed: row.id, state });
+      }
+    }
+  }
+  return made;
 }
 
 /**

@@ -746,8 +746,9 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       t1: "計算の行の type の aggregate には、種別（form）が aggregate の計算なら、集計の種類（kind：sum は合計・count は件数・avg は平均）と集計元の entity の行の id（entity）を書く。見出しごとの集計の集計元は、見出しの元の項目の所属 entity にする。種別が aggregate でない計算と、計算でない行の aggregate は null にする。",
       t1Acceptance: null,
       t2: EMPTY_AGGREGATE_T2_RULE,
+      // 旗 ids の文の「ただし、…枠に不足として挙がった行の境界・異常は書く」は #653（交差の要件のやり直し。行の since は写しの列なので変えない）
       t2Ids:
-        `集計（計算の行の type の form が aggregate）の行のうち、アプリ全体（type の scope が app）の行と、選択肢の見出しごと（groupBy の kind が enum）の行の、集計元を空と明示した境界（boundary）の試験と集計元に触れない異常（abnormal）の試験は作らない（コードが作る）。その行には、集計元の行を参照の行（rows）に置いた正常の場合（observes は value）だけを書く。行ごと（type の scope が row）の集計と月の見出しごと（groupBy の kind が month）の集計の行は、次のとおり書く：${EMPTY_AGGREGATE_T2_CASES_RULE}`,
+        `集計（計算の行の type の form が aggregate）の行のうち、アプリ全体（type の scope が app）の行と、選択肢の見出しごと（groupBy の kind が enum）の行の、集計元を空と明示した境界（boundary）の試験と集計元に触れない異常（abnormal）の試験は作らない（コードが作る）。ただし、中身のやり直しの必要な試験の枠に不足（missing の emptyAggregate）として挙がった行の境界・異常は、その行に書く（期待は集計の種類とデータ状態で決まる値）。挙がっていなければ書かない。その行には、集計元の行を参照の行（rows）に置いた正常の場合（observes は value）だけを書く。行ごと（type の scope が row）の集計と月の見出しごと（groupBy の kind が month）の集計の行は、次のとおり書く：${EMPTY_AGGREGATE_T2_CASES_RULE}`,
       b1: "名前の表の計算の行の type に aggregate があれば、宣言のその計算の aggregate の種類（sum・count・avg）と集計元の entity を、その行の aggregate の種類と、集計元の entity の行の名前のとおりに書く。",
     },
   },

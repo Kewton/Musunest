@@ -42,6 +42,7 @@ import {
   GENERATED_TEST_ROW_ID,
   aggregateTargetsOf,
   checkGeneratedOverlap,
+  emptyAggregateCodeTestsOf,
   generateTests,
   isGeneratedTestId,
   ledgerTargetsOf,
@@ -744,5 +745,29 @@ describe("手 3h：所属が項目の行だけの fixed-test の要件に 項目
     expect(checkGeneratedOverlap({ tests: [llm] }, new Map([["f1", "view-structure"]]), made, TABLE_H, ledger)).toEqual([
       { field: "tests[0].operation", message: OWNERSHIP_STRUCTURE_NOT_ALLOWED },
     ]);
+  });
+});
+
+describe("空の集計のコードの試験の計画（emptyAggregateCodeTestsOf。必要な試験の枠と生成が同じ関数で引く。Issue #653）", () => {
+  it("表の分類が ruled の要件では generateTests の空の集計の試験と同じ組・同じ順。分類を見ないので existence-only の要件でも同じ計画を返す（生成は作らない）", () => {
+    const made = generate();
+    const aggregateIds = new Set(ledger.aggregateRows.map((row) => row.id));
+    const roles = new Map(TABLE.ownership.map((entry) => [entry.requirementId, entry.roles] as const));
+    const planned = LIST.requirements.flatMap((requirement) =>
+      TABLE.verification.find((entry) => entry.requirementId === requirement.id)?.kind === "fixed-test" &&
+      TABLE.classification.find((entry) => entry.requirementId === requirement.id)?.nature === "ruled"
+        ? emptyAggregateCodeTestsOf(requirement.id, roles.get(requirement.id) ?? [], aggregateTargetsOf(TABLE), ledger)
+        : [],
+    );
+    expect(planned.length).toBeGreaterThan(0);
+    expect(planned.map((entry) => entry.test)).toEqual(made.tests.filter((test) => aggregateIds.has(made.observes.get(test.id) ?? "")));
+    expect(planned.map((entry) => entry.observed)).toEqual(planned.map(() => "empty-aggregate"));
+    expect(planned.map((entry) => [entry.test.kind, entry.state])).toEqual(planned.map((entry) => (entry.state === "empty" ? ["boundary", "empty"] : ["abnormal", "unread"])));
+    const existence: NameTable = { ...TABLE, classification: TABLE.classification.map((entry) => ({ ...entry, nature: "existence-only" as const })) };
+    const notMade = generate(existence);
+    expect(notMade.tests.some((test) => aggregateIds.has(notMade.observes.get(test.id) ?? ""))).toBe(false);
+    const [first] = planned;
+    if (first === undefined) throw new Error("前提が壊れた");
+    expect(emptyAggregateCodeTestsOf(first.test.target.requirementId, roles.get(first.test.target.requirementId) ?? [], aggregateTargetsOf(existence), ledger).length).toBeGreaterThan(0);
   });
 });

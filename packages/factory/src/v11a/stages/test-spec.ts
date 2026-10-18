@@ -88,9 +88,12 @@ import {
   bundleRetryPlansOf,
   checkBundleCompleteness,
   checkTestCasesOutput,
+  computationObservesOf,
   expandTestCases,
+  initialTestCaseFramesOf,
   mergeBundleCases,
   retainedBundleOutput,
+  retryTestCaseFramesOf,
   testCasesSchemaOf,
   toCasePositions,
   type BundleRetryPlan,
@@ -98,6 +101,7 @@ import {
   type TestCasesOutput,
 } from "../../v12/test-cases.js";
 import { V12_T2_BUNDLE } from "../../v12/limits.js";
+import { AGENT_LIMITS } from "../../limits.js";
 
 /** T2 の JSON Schema の名前 */
 export const TEST_SPEC_SCHEMA_NAME = "test-spec";
@@ -717,9 +721,12 @@ export const TEST_SPEC_RULES: readonly string[] = ruleTexts(TEST_SPEC_RULE_DEFIN
 const TEST_SPEC_LEDGER_FORM_HEAD =
   "試験ごとに、観測する性質（observes）を 1 つ書く。組は次のどれかに限る：計算 × compute・aggregate は value、項目・entity × validate は validation、操作 × action は when、画面 × screen は view-structure、項目 × screen は view-structure、entity × screen は existence、構造の検査（structure）は view-shows なら view-structure・ほかの中身なら existence。";
 
-/** R-tsp-16 の、台帳の文の前の旗 `v12.ids` の場合の形（操作はコードが対象の行から導く。#625） */
-const TEST_SPEC_CASES_FORM_HEAD =
-  "場合ごとに、観測する性質（observes）を 1 つ書く。組は次のどれかに限る：計算の行は value、項目・entity の行は validation、操作の行は when。期待（expected）は kind が ok なら value だけ、error なら code だけを書く。";
+/**
+ * R-tsp-16 の、台帳の文の前の旗 `v12.ids` の場合の形（操作はコードが対象の行から導く。#625）。observes は計算の行の場合だけ書き、
+ * ほかは null（コードが台帳から一意に埋める。#653）。計算の行の性質は台帳の順
+ */
+const testSpecCasesFormHeadOf = (ledger: LedgerView): string =>
+  `場合ごとに、観測する性質（observes）は計算の行の場合だけ書き（${computationObservesOf(ledger).join(" か ")}）、項目・entity・操作の行の場合は null にする（コードが台帳から決める：項目・entity の行は validation、操作の行は when）。期待（expected）は kind が ok なら value だけ、error なら code だけを書く。`;
 
 /**
  * 旗 `v12.ids` の T2 の規則のうち、欄の名前を指す文の場合の形（JSON の文字列の書き方・対象の指し方・入力の契約・値の鍵・時計・
@@ -730,7 +737,7 @@ const TEST_SPEC_CASES_TEXTS: Readonly<Record<string, string>> = {
   "R-tsp-07":
     "入力の値（input.values）と参照の行の値（rows の values）と期待の値（expected.value）は、任意の JSON を表すので、**JSON の文字列**として書く（例: \"{\\\"f.example.amount\\\": 21}\"）。",
   "R-tsp-09":
-    "場合の対象（targetId）は**表の id** で指し、その要件の所属にある id から選ぶ。操作と対象の種類はコードが対象の行から決める（計算の行は種別 aggregate なら aggregate・ほかは compute、項目と entity の行は validate、操作の行は action）。参照の行（rows）の entityId には、参照元の entity の表の id を書く。",
+    "場合の対象（targetId）は**表の id** で指し、その要件の所属にある id のうち、必要な試験の枠の値の対象の候補（valueTargets）から選ぶ。操作と対象の種類はコードが対象の行から決める（計算の行は種別 aggregate なら aggregate・ほかは compute、項目と entity の行は validate、操作の行は action）。参照の行（rows）の entityId には、参照元の entity の表の id を書く。",
   "R-tsp-11":
     "入力（input）に固定の行 ID（rowId）と値（values。入力が無ければ空の写像 \"{}\"）を、評価の対象の行 ID（targetRowId）に入力か参照の行の rowId（行を評価しないときは null）を、空であることを明示する entity の表の id を emptyEntities に書く。同じ場合の中で行 ID を重ねない。参照の値（ref・list）に書く行 ID は、その行の rowId と同じにする。",
   "R-tsp-12":
@@ -739,6 +746,16 @@ const TEST_SPEC_CASES_TEXTS: Readonly<Record<string, string>> = {
   "R-tsp-14":
     "場合の要件 ID（requirementId）は要件の一覧のものだけを使う。一覧に無い要件 ID を作らない。確定した仕様にあっても一覧に無い要件（持ち越しの要件）の場合は書かない。",
 };
+
+/**
+ * 旗 `v12.ids` の R-tsp-03 の文（必要な試験の枠に合わせた在ることだけの要件の書き方。#653）。R-tsp-02 は除外の種類を台帳から組む
+ * （`testSpecRuleDefinitionsOf`）
+ */
+const TEST_SPEC_FRAME_EXISTENCE_TEXT =
+  "existence-only と分類した要件は、コードが在ることの試験を作った対象に場合を書かない。コードの試験が無い計算・条件のある操作の対象には正常（normal）の場合だけ書いてよい。検査（validate）・異常・境界の場合は書かない。";
+
+/** 旗 `v12.ids` の枠の文の履歴（since の末尾に足す。#653） */
+const FRAME_SINCE = "（旗 v12.ids の必要な試験の枠は #653）";
 
 /**
  * T2 の規則の定義（旗 on なら台帳から組む。Issue #547）。省けば今の定数を返す。渡せば R-tsp-02 の除外（structural と、
@@ -752,20 +769,33 @@ export function testSpecRuleDefinitionsOf(ledger?: LedgerView, ids = false): rea
   return TEST_SPEC_RULE_DEFINITIONS.map((definition) => {
     if (definition.id === "R-tsp-02") {
       const excluded = ["structural", ...ledger.t2ExemptKinds].join("・");
+      if (ids) {
+        // 旗 ids：必要な試験の枠の値の対象ごとの三種と、コードの在ることの試験を数えないこと・免除の集合（#653）
+        return {
+          ...definition,
+          text: `確かめ方が ${excluded} の要件を除いて、ruled と分類した要件は、枠の値の対象のうち決まりの対象ごとに正常・異常・境界の場合を書く。コードが作る画面・entity・項目の在ることの試験は三種に数えない。所属が画面・entity の行だけの要件は三種を求めない（枠が空）。`,
+          since: `${definition.since}${FRAME_SINCE}`,
+        };
+      }
       return {
         ...definition,
         text: `確かめ方が ${excluded} の要件を除いて、決まりを含む要件は、決まりの対象ごとに、正常・異常・境界の 3 種類の試験を、入力と期待つきで作る。`,
       };
     }
+    if (ids && definition.id === "R-tsp-03") {
+      return { ...definition, text: TEST_SPEC_FRAME_EXISTENCE_TEXT, since: `${definition.since}${FRAME_SINCE}` };
+    }
     if (definition.id === "R-tsp-16") {
       return {
         ...definition,
-        text: `${ids ? TEST_SPEC_CASES_FORM_HEAD : TEST_SPEC_LEDGER_FORM_HEAD}${(ids ? ledger.t2IdsFormTexts : ledger.t2FormTexts).join("")}${ledger.t2UnsupportedTexts.join("")}`,
-        ...(ids ? { since: `${definition.since}（旗 v12.ids の場合の形は #625）` } : {}),
+        text: `${ids ? testSpecCasesFormHeadOf(ledger) : TEST_SPEC_LEDGER_FORM_HEAD}${(ids ? ledger.t2IdsFormTexts : ledger.t2FormTexts).join("")}${ledger.t2UnsupportedTexts.join("")}`,
+        ...(ids ? { since: `${definition.since}（旗 v12.ids の場合の形は #625）${FRAME_SINCE}` } : {}),
       };
     }
     const casesText = ids ? TEST_SPEC_CASES_TEXTS[definition.id] : undefined;
-    if (casesText !== undefined) return { ...definition, text: casesText, since: `${definition.since}（旗 v12.ids の場合の形は #625）` };
+    if (casesText !== undefined) {
+      return { ...definition, text: casesText, since: `${definition.since}（旗 v12.ids の場合の形は #625）${definition.id === "R-tsp-09" ? FRAME_SINCE : ""}` };
+    }
     return definition;
   });
 }
@@ -900,6 +930,12 @@ export const TEST_SPEC_DECIDED_NATURES_DATA_NAME = "判定で決めた種類";
  */
 export const TEST_SPEC_RETAINED_DATA_NAME = "書き直さない要件";
 
+/**
+ * 旗 `v12.ids` の T2 で「要件ごとの所属」の後ろに足す、要件ごとの必要な試験の枠の塊の名前（束にはその束の要件の分だけ。中身の
+ * やり直しは書き直す要件の分だけ。#653）
+ */
+export const TEST_SPEC_FRAMES_DATA_NAME = "必要な試験の枠";
+
 /** 判定で決めた種類の塊の 1 行（要件 ID・種類） */
 interface DecidedNatureRow {
   readonly requirementId: string;
@@ -947,6 +983,7 @@ function buildData(
   decidedNatures: readonly DecidedNatureRow[],
   ledger?: LedgerView,
   retainedIds: readonly string[] = [],
+  frames?: readonly unknown[],
 ): readonly PromptData[] {
   const [planName, listName, tableName, verificationName, ownershipName] = TEST_SPEC_DATA_NAMES;
   const data: PromptData[] = [
@@ -974,6 +1011,7 @@ function buildData(
     },
     { name: ownershipName, text: serializeJson(deriveOwnership(table)) },
   ];
+  if (frames !== undefined) data.push({ name: TEST_SPEC_FRAMES_DATA_NAME, text: serializeJson(frames) });
   if (previous.length > 0) {
     const [testsName, problemsName] = TEST_SPEC_RETRY_DATA_NAMES;
     if (previousTests !== undefined) data.push({ name: testsName, text: serializeJson(previousTests) });
@@ -1081,6 +1119,11 @@ export interface TestSpecValue {
    * （前後比較が読む。off の走りは欄が無い。#625）
    */
   readonly cases?: { readonly count: number; readonly responseChars: number };
+  /**
+   * 旗 `v12.ids` の走りだけ：通った回の組の、必要な試験の枠の要約（要求の一覧の要件ごとの 16 − 組のコードの試験の数の合計と、組の
+   * コードの試験の数。off の走りは欄が無い。#653）
+   */
+  readonly frames?: { readonly remaining: number; readonly generated: number };
 }
 
 /**
@@ -1318,6 +1361,9 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
   const bundleShapeUsed = bundles.map(() => false);
   // 中身のやり直しの単位（束 → 書き直す要件・保持した要件・前回の場合と問題）。保持の寿命はこの呼び出しの中だけ（R7。Issue #651）
   let retryPlans: ReadonlyMap<number, BundleRetryPlan> = new Map();
+  // 必要な試験の枠（#653）：初回は二枝、中身のやり直しは前の回が採用済み（分類の照合と J2 を経た）ならその回の採った種類と組へ足した
+  // コードの試験で書く。採用前（展開の不正・分類の不完全）なら初回の二枝のまま
+  let adoption: { readonly natures: ReadonlyMap<string, RequirementNature>; readonly kept: GeneratedTests } | undefined;
   const allIds = list.requirements.map((requirement) => requirement.id);
   const requestedIds = requestList.requirements.map((requirement) => requirement.id);
   const callBundle = async (bundle: number, round: number): Promise<BundleAnswer> => {
@@ -1336,6 +1382,12 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
       verification: requestTable.verification.filter((entry) => asked.has(entry.requirementId)),
       classification: requestTable.classification.filter((entry) => asked.has(entry.requirementId)),
     };
+    const frames =
+      ledger === undefined || generated === undefined
+        ? undefined
+        : plan !== undefined && adoption !== undefined
+          ? retryTestCaseFramesOf({ table: pruned.table, ledger, list: requestList, natures: adoption.natures, kept: adoption.kept }, askedIds, plan.problems)
+          : initialTestCaseFramesOf({ table: pruned.table, ledger, list: requestList, generated }, askedIds);
     const request = buildStructuredRequest({
       rules,
       documents: input.documents,
@@ -1348,6 +1400,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
         judgedNatures(decided).filter((row) => inBundle.has(row.requirementId)),
         ledger,
         retainedIds,
+        frames,
       ),
       schemaName: TEST_SPEC_SCHEMA_NAME,
       schema,
@@ -1481,7 +1534,8 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
       const casesOutput = answer.value as TestCasesOutput;
       cases = casesOutput.cases;
       // 展開は全部の表で引く（持ち越しの要件の試験も展開し、今までどおり v1 の検査が「一覧に無い要件 ID」として落とす）
-      const expanded = expandTestCases(casesOutput, input.table);
+      const expanded = ledger === undefined ? undefined : expandTestCases(casesOutput, input.table, ledger);
+      if (expanded === undefined) throw new Error("T2：旗 v12.ids の走りに台帳が無い");
       const checked = expanded.ok ? checkTestSpecOutput(expanded.output, ledger) : undefined;
       if (!expanded.ok || checked === undefined || !checked.ok) {
         const found = !expanded.ok
@@ -1528,6 +1582,8 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
     let problems: readonly Problem[] = classificationProblems;
     // この回に足したコードの試験の数（組の末尾。前回の試験の塊には LLM の試験だけを返す。Issue #595）
     let added = 0;
+    // この回が採用済みか（分類の照合と J2 を経た回だけ。次の回の必要な試験の枠に使う。#653）
+    adoption = undefined;
     if (classificationProblems.length === 0) {
       // 食い違った要件のうち、まだ決めていないものを 1 回の呼び出しにまとめて判定に聞く（判定の口が無ければ fallback）
       const fresh = reconcileNatures(design, answered.classifications).discrepancies.filter(
@@ -1557,6 +1613,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
       const llmSuite = suite;
       const llmObserves = observes;
       if (kept !== undefined) {
+        adoption = { natures: reconciled.natures, kept };
         added = kept.tests.length;
         suite = { ...suite, tests: [...suite.tests, ...kept.tests] };
         observes = new Map([...llmObserves, ...(kept.observes as ReadonlyMap<string, TestObserves>)]);
@@ -1607,6 +1664,17 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
             discrepancies: reconciled.discrepancies,
             dropped: droppedAll,
             ...(cases === undefined ? {} : { cases: { count: cases.length, responseChars: JSON.stringify(answer.output).length } }),
+            ...(cases === undefined || kept === undefined
+              ? {}
+              : {
+                  frames: {
+                    remaining: requestedIds.reduce(
+                      (sum, id) => sum + AGENT_LIMITS.testsPerRequirement - kept.tests.filter((test) => test.target.requirementId === id).length,
+                      0,
+                    ),
+                    generated: kept.tests.length,
+                  },
+                }),
           },
         };
       }

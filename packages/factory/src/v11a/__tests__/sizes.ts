@@ -37,6 +37,11 @@
 // `u<i>`。親 entity は表の外で導かれる）にする。ids off は LLM が 項目 × screen の正常 1 件を書き、ids on はコードが作って LLM は
 // 場合を書かない（分類は existence-only と書く）。余りを足して組は M 件のまま。宣言は `u<i>` を一覧の画面に出す
 // （`declaration` の `hideItemsOnly` で出さない宣言を組める）。
+//
+// 手 3i（Issue #653）：台本 `entityOnly`（省けば今のまま）を渡すと、値を縛る要件のうち台本 `itemsOnly` の前の 1 件を、所属が entity
+// の行だけの在ることだけの要件にする。ids off は LLM が entity × screen の正常 1 件を書き、ids on はコードが作って LLM は場合を書かない
+// （分類は existence-only と書く）。余りを足して組は M 件のまま。旗 `v12.ids` の T2 の要求の必要な試験の枠は段が組む（生成器は
+// 応答だけを組む。枠の大きさは走りの要求から測る）。応答の場合の形は、項目・操作の行の場合の observes を null にした形（#653）
 import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-schema";
 import { AGENT_LIMITS } from "../../limits.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
@@ -63,6 +68,8 @@ export interface SizedOptions {
   readonly screens?: boolean;
   /** 値を縛る要件の末尾 3 件を、所属が項目の行だけの在ることだけの要件にする（Issue #652） */
   readonly itemsOnly?: boolean;
+  /** 値を縛る要件のうち台本 itemsOnly の前の 1 件を、所属が entity の行だけの在ることだけの要件にする（Issue #653） */
+  readonly entityOnly?: boolean;
 }
 
 /** 台本 `itemsOnly` の要件の数（Issue #652） */
@@ -91,6 +98,8 @@ export interface SizedMaterials {
   readonly addedTestCount: number;
   /** 台本 `itemsOnly` の要件 ID（一覧の順。台本が無ければ空。Issue #652） */
   readonly itemsOnlyIds: readonly string[];
+  /** 台本 `entityOnly` の要件 ID（台本が無ければ空。Issue #653） */
+  readonly entityOnlyIds: readonly string[];
   /** 要件の ID（R1〜RN） */
   readonly ids: readonly string[];
   readonly source: string;
@@ -151,6 +160,7 @@ export function buildSized(
   const codeWritten = options.codeWritten === true;
   const screens = options.screens === true;
   const itemsOnlyCount = options.itemsOnly === true ? ITEMS_ONLY_COUNT : 0;
+  const entityOnlyCount = options.entityOnly === true ? 1 : 0;
   if (!Number.isInteger(requirementCount) || requirementCount < 1) throw new RangeError("要件の数は 1 以上の整数であること");
   if (!Number.isInteger(testCount) || testCount < requirementCount) throw new RangeError("試験の数は要件の数以上であること");
   if (codeWritten && !resolvedFlags.ledger) throw new RangeError("台本 codeWritten は台帳 on の走りだけ");
@@ -163,11 +173,12 @@ export function buildSized(
   const leading = codeWritten ? 3 : 0;
   if (ruledCount - leading < 1) throw new RangeError("台本 codeWritten に値を縛る要件が足りない");
   if (screens && (structuralCount < 1 || ruledCount - leading < 1)) throw new RangeError("台本 screens に構造の要件か値を縛る要件が足りない");
-  if (ruledCount - leading - itemsOnlyCount - (screens ? 1 : 0) < 1) throw new RangeError("台本 itemsOnly に値を縛る要件が足りない");
+  if (ruledCount - leading - itemsOnlyCount - entityOnlyCount - (screens ? 1 : 0) < 1) throw new RangeError("台本 itemsOnly に値を縛る要件が足りない");
   // 台本 codeWritten の R3 の在ることの確認 1 件・台本 screens の画面の試験 1 件と構造の検査 1 件の分だけ、余りを減らす。
-  // 台本 itemsOnly の要件は 1 件ずつ（3 件より 2 件少ない）なので、その分だけ余りを増やす
-  const extraTests = testCount - (3 * ruledCount + structuralCount) + (codeWritten ? 4 - 1 : 0) - (screens ? 2 : 0) + 2 * itemsOnlyCount;
-  const plainCount = ruledCount - leading - itemsOnlyCount;
+  // 台本 itemsOnly・entityOnly の要件は 1 件ずつ（3 件より 2 件少ない）なので、その分だけ余りを増やす
+  const extraTests =
+    testCount - (3 * ruledCount + structuralCount) + (codeWritten ? 4 - 1 : 0) - (screens ? 2 : 0) + 2 * (itemsOnlyCount + entityOnlyCount);
+  const plainCount = ruledCount - leading - itemsOnlyCount - entityOnlyCount;
   if ((3 * plainCount + extraTests) / plainCount > AGENT_LIMITS.testsPerRequirement) {
     throw new RangeError("試験の数が多すぎる（1 要件の上限を超える）");
   }
@@ -177,6 +188,8 @@ export function buildSized(
   const isStructural = (index: number): boolean => index >= ruledCount;
   /** 台本 itemsOnly の、所属が項目の行だけの在ることだけの要件（値を縛る要件の末尾。Issue #652） */
   const isItemsOnly = (index: number): boolean => index < ruledCount && index >= ruledCount - itemsOnlyCount;
+  /** 台本 entityOnly の、所属が entity の行だけの在ることだけの要件（台本 itemsOnly の前の 1 件。Issue #653） */
+  const isEntityOnly = (index: number): boolean => entityOnlyCount > 0 && index === ruledCount - itemsOnlyCount - 1;
   /** 台本 screens の、画面の行を所属に持つ決まりの要件（頭の値を縛る要件）と checks 2 つの構造の要件（最初の構造の要件） */
   const screenRuledIndex = screens ? leading : -1;
   const twoChecksIndex = screens ? ruledCount : -1;
@@ -188,6 +201,7 @@ export function buildSized(
     const lead = leadingOf(index);
     if (lead !== null) return LEADING_TEXTS[lead];
     if (isItemsOnly(index)) return `項目 u${index + 1} がある。`;
+    if (isEntityOnly(index)) return "記録の単位 item がある。";
     return isStructural(index) ? `画面 view${index + 1} に項目 w${index + 1} の値が出る。` : `項目 v${index + 1} の値は 0 より大きい。`;
   };
   const requirements = ids.map((id, index) => requirementOf(id, textOfIndex(index)));
@@ -246,6 +260,8 @@ export function buildSized(
       );
     } else if (isItemsOnly(index)) {
       rows.push(row({ id: `f.item.u${n}`, kind: "field", entity: "e.item", name: `u${n}`, type: "string", from: id }));
+    } else if (isEntityOnly(index)) {
+      // 所属は表の entity の行だけ（行は足さない）
     } else if (isStructural(index)) {
       rows.push(row({ id: `f.item.w${n}`, kind: "field", entity: "e.item", name: `w${n}`, type: "string", from: id }));
       rows.push(row({ id: `s.view${n}`, kind: "screen", entity: "e.item", name: `view${n}`, type: { view: "table" }, from: id }));
@@ -266,6 +282,8 @@ export function buildSized(
           ? ["c.total", "e.item"]
           : isItemsOnly(index)
           ? [`f.item.u${index + 1}`]
+          : isEntityOnly(index)
+          ? ["e.item"]
           : isStructural(index)
           ? [`f.item.w${index + 1}`, `s.view${index + 1}`]
           : index === screenRuledIndex
@@ -288,7 +306,7 @@ export function buildSized(
     }),
     classification: ids.map((id, index) => ({
       requirementId: id,
-      nature: isStructural(index) || isItemsOnly(index) ? ("existence-only" as const) : ("ruled" as const),
+      nature: isStructural(index) || isItemsOnly(index) || isEntityOnly(index) ? ("existence-only" as const) : ("ruled" as const),
     })),
   };
   // 旗 `v12.ids` の走りは、表の ID をコードの形（E1・E1.F2・V1…）にし、行を C1 が組む順に並べ、出典を持たない（Issue #593）。
@@ -450,6 +468,11 @@ export function buildSized(
         if (!structureByCode) tests.push(screenTest(index, "field", `f.item.u${index + 1}`, "view-structure"));
         continue;
       }
+      // 台本 entityOnly：entity × screen の正常 1 件（旗 ids の手 3d からはコードが作る。Issue #653）
+      if (isEntityOnly(index)) {
+        if (!structureByCode) tests.push(screenTest(index, "entity", "e.item", "existence"));
+        continue;
+      }
       if (isStructural(index)) {
         if (!structureByCode) {
           tests.push(viewTest(index));
@@ -470,7 +493,7 @@ export function buildSized(
       // 旗 v12.ids の走りは、コードが試験を作る要件（既定値・選択肢の集合）を T2 の一覧から除くので、その分類も書かない
       // 手 3d（#624）からは構造の要件も T2 の一覧から除くので、その分類も書かない
       classifications: requirementIds
-        .map((id, index) => ({ requirementId: id, nature: isStructural(index) || isItemsOnly(index) ? "existence-only" : "ruled", lead: leadingOf(index), structural: isStructural(index) }))
+        .map((id, index) => ({ requirementId: id, nature: isStructural(index) || isItemsOnly(index) || isEntityOnly(index) ? "existence-only" : "ruled", lead: leadingOf(index), structural: isStructural(index) }))
         .filter((entry) => !(ids && (entry.lead === "default" || entry.lead === "enum")) && !(structureByCode && entry.structural))
         .map(({ requirementId, nature }) => ({ requirementId, nature })),
       tests,
@@ -486,7 +509,7 @@ export function buildSized(
         lines.push(`      k${n}:`, "        type: enum", "        options:", "          a1: A1", "          a2: A2", ...(lead === "default" ? ["        default: a1"] : []));
         continue;
       }
-      if (lead === "aggregate") continue;
+      if (lead === "aggregate" || isEntityOnly(index)) continue;
       if (isItemsOnly(index)) {
         lines.push(`      u${n}:`, "        type: string");
         continue;
@@ -499,6 +522,7 @@ export function buildSized(
     const shownName = (index: number): string | null => {
       const lead = leadingOf(index);
       if (isItemsOnly(index)) return declarationOptions.hideItemsOnly === true ? null : `u${index + 1}`;
+      if (isEntityOnly(index)) return null;
       return lead === "aggregate" ? null : lead !== null ? `k${index + 1}` : `v${index + 1}`;
     };
     const shown = Array.from({ length: requirementCount }, (_, index) => index)
@@ -515,7 +539,7 @@ export function buildSized(
     if (codeWritten) lines.push("  - name: totals", "    type: dashboard", "    widgets:", "      - type: number", "        value: total");
     lines.push("actions: []");
     const checks = Array.from({ length: requirementCount }, (_, index) => index).filter(
-      (index) => !isStructural(index) && !isItemsOnly(index) && leadingOf(index) === null,
+      (index) => !isStructural(index) && !isItemsOnly(index) && !isEntityOnly(index) && leadingOf(index) === null,
     );
     lines.push("validations:");
     for (const index of checks) {
@@ -532,10 +556,11 @@ export function buildSized(
     flags: resolvedFlags,
     structuralCount,
     // 旗 ids の走りでコードが作る試験：構造の検査（checks の数）・台本 codeWritten の 4 件と R3 の在ることの確認・台本 screens の画面 1 件
-    generatedTestCount: resolvedFlags.ids ? structuralCount + (screens ? 1 + 1 : 0) + (codeWritten ? 4 + 1 : 0) + itemsOnlyCount : 0,
+    generatedTestCount: resolvedFlags.ids ? structuralCount + (screens ? 1 + 1 : 0) + (codeWritten ? 4 + 1 : 0) + itemsOnlyCount + entityOnlyCount : 0,
     // 値を縛る要件のうち所属が項目の行だけのもの（台本 screens の画面を所属に持つ要件を除く）の 項目 × screen（Issue #652）
     addedTestCount: resolvedFlags.ids ? plainCount - (screens ? 1 : 0) : 0,
     itemsOnlyIds: ids.filter((_, index) => isItemsOnly(index)),
+    entityOnlyIds: ids.filter((_, index) => isEntityOnly(index)),
     ids,
     source,
     plan,
