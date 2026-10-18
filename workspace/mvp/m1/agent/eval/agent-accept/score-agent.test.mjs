@@ -3913,6 +3913,23 @@ test("#545 直し 3：工場の dist の STAGE_STARTS・STAGE_ENDS に出る段�
   assert.ok(stagesInRange("write", "judge").includes("carry-over"), "B 区間に carry-over");
 });
 
+test("#587：工場の dist の区間の表（STAGE_SEGMENTS）の段が、採点の手の表の同じ区間にあり、開始・終了・境界が等しく、全組の範囲の結果で dist の段が手の結果に含まれる（手の表に余分な段があるのは許す）", async () => {
+  const lib = await distModule("v11a/bundle-v11a.js");
+  assert.equal(lib.STAGE_SEGMENTS.length, STAGE_SEGMENTS.length, "区間の数");
+  lib.STAGE_SEGMENTS.forEach((seg, i) => {
+    assert.equal(seg.start, STAGE_SEGMENTS[i].start, `区間 ${i} の開始`);
+    assert.equal(seg.end, STAGE_SEGMENTS[i].end, `区間 ${i} の終了`);
+    assert.equal(seg.boundary, i === 0 ? null : lib.STAGE_BOUNDARIES[i - 1], `区間 ${i} の境界`);
+    for (const st of seg.stages) assert.ok(STAGE_SEGMENTS[i].stages.includes(st), `区間 ${i} の手の表に無い dist の段: ${st}`);
+  });
+  for (const start of lib.STAGE_STARTS) for (const end of lib.STAGE_ENDS) {
+    const mine = stagesInRange(start, end), theirs = lib.stagesInRange(start, end);
+    assert.equal(mine.length === 0, theirs.length === 0, `${start}〜${end} の空の判定`);
+    for (const st of theirs) assert.ok(mine.includes(st), `${start}〜${end}：手の結果に無い dist の段: ${st}`);
+  }
+  assert.deepEqual(lib.stagesInRange("test-spec", "semantic-check"), []);
+});
+
 // ── #557：経路 v1.2 の条件（v7）・旗の組の照合・比較の群の組（--compare-pipelines）。README §5.13。題材の言葉を使わない（要件の文は cases/ の宣言だけ）
 import { COMPARE_PIPELINE_PAIRS, CONDITIONS_V7, V12_FLAG_STATUSES, V12_PIPELINE, comparePipelinesOf, compareProfileOf, compareRolesOf, diffDirectionOf, groupConditionsProblem, isFlagMap, sameFlags, v12FlagsStatus, v12ReportOf } from "./score-agent.mjs";
 
