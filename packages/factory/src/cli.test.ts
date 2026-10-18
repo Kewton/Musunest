@@ -70,11 +70,17 @@ import {
   requestDiffsOf,
   t1ResponseOf,
   withAggregates,
+  codeIdRenameOf,
+  idsResponseList,
+  idsResponsesOf,
+  renameIds,
+  withCodeIds,
   withoutEnumMembership,
   withoutLedgerAdditions,
   withoutWhenAndNonRequirement,
 } from "./v11a/__tests__/fixtures.js";
 import * as ledgerModule from "./v12/ledger.js";
+import type { LedgerView } from "./v12/ledger.js";
 import type { NameTable } from "./v11a/names.js";
 import {
   BUNDLE_MANIFEST_FILE,
@@ -955,13 +961,25 @@ const v11aHead = (): RecordedCall[] => [
   structured({ declaration: V11A_YAML }),
 ];
 
+/** 旗 v12.ids の走りの表（題材の表をコードの形の ID に振り直し、計算の行に集計の欄。出典なし。Issue #593） */
+const V11A_CODE_RENAME = codeIdRenameOf(V11A_TABLE);
+const V11A_TABLE_IDS: NameTable = withCodeIds(withAggregates(V11A_TABLE));
+/** 値の中の題材の表の ID をコードの形の ID に振り直す */
+const v11aRenamed = <T,>(value: T): T => renameIds(value, V11A_CODE_RENAME);
+
+/** v1.2 の走りの C1 の 3 束と C2 の記録（台帳を渡せば、その台帳の schema に合わせる。Issue #593） */
+const v12TableCalls = (ledger: LedgerView = ledgerModule.PROPERTY_LEDGER_VIEW): RecordedCall[] =>
+  idsResponseList(idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledger)).map((output) => structured(output));
+
 /**
- * v1.2（旗 on）の走りの頭。T1 の応答の計算の行に集計の種類と集計元を持つ（今の台帳の strict の schema で必須。Issue #549）。
- * ほかは `v11aHead` と同じ
+ * v1.2（旗 on）の走りの頭。旗 v12.ids が on なので、表は C1 の 3 束と C2 で組む（コードの形の ID。Issue #593）。T1'' の判定・
+ * B1 の宣言は `v11aHead` と同じで、T2 の応答は同じ試験を新しい ID で書く
  */
-const v12Head = (): RecordedCall[] => [
-  structured(v11aT1(true)),
-  ...v11aHead().slice(1),
+const v12Head = (ledger?: LedgerView): RecordedCall[] => [
+  ...v12TableCalls(ledger),
+  structured(v11aJudgments()),
+  structured(v11aRenamed(v11aTestSpec())),
+  structured({ declaration: V11A_YAML }),
 ];
 
 /** T1' に落ちる下書き（要件の写しを入れ替える） */
@@ -1003,7 +1021,11 @@ const v11aReturnToPlan = (): RecordedCall[] => [
 function v11aJudge() {
   const answers: Record<string, JudgeAnswer> = {};
   for (const entry of V11A_TABLE.ownership) {
-    for (const role of entry.roles) answers[`need:${entry.requirementId}:${role.id}`] = { kind: "noul", noul: 0.9 };
+    for (const role of entry.roles) {
+      answers[`need:${entry.requirementId}:${role.id}`] = { kind: "noul", noul: 0.9 };
+      // 旗 v12.ids の走りは同じ行をコードの形の ID で問う（Issue #593）
+      answers[`need:${entry.requirementId}:${V11A_CODE_RENAME.get(role.id) ?? role.id}`] = { kind: "noul", noul: 0.9 };
+    }
   }
   return createFakeJudge(answers);
 }
@@ -1187,7 +1209,27 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     vi.restoreAllMocks();
   });
 
-  it("完走で 0：v1.1α の経路で流れ、要求の差は台帳の enum-membership（#548）と empty-aggregate（#549）の行の分だけ（名指しの場所）。条件の記録の pipeline・prompt_version が v1.2、ほかの欄は v1.1a と同じ", async () => {
+  /** 表を組む段の schema の名前（v1.1a は T1、v1.2 は旗 v12.ids の C1 の 3 束と C2。Issue #593） */
+  const TABLE_STAGE_NAMES = new Set(["name-table", "vocabulary-entities", "vocabulary-fields", "vocabulary-behaviors", "mapping"]);
+  const backToFixtureIds = [...V11A_CODE_RENAME.entries()].sort((a, b) => b[1].length - a[1].length);
+  /**
+   * 表を組む段の後の要求を、v1.1a の走りと比べられる形にする（Issue #593）：表を組む段の要求を除き、コードの形の ID を題材の
+   * ID に戻し、T2 に見せる行の出典の欄（v1.1a は写像、v1.2 は null）を null にそろえる
+   */
+  const laterRequests = (requests: readonly LlmStructuredRequest[]): unknown[] =>
+    requests
+      .filter((request) => !TABLE_STAGE_NAMES.has(request.schemaName))
+      .map((request) => {
+        let text = JSON.stringify(request).replace(/\\"source\\": \{[^}]*\}/g, '\\"source\\": null');
+        for (const [original, code] of backToFixtureIds) {
+          text = text.replaceAll(`\\"${code}\\"`, `\\"${original}\\"`).replaceAll(`\\\\\\"${code}\\\\\\"`, `\\\\\\"${original}\\\\\\"`);
+        }
+        return JSON.parse(text) as unknown;
+      });
+  const withoutTableStage = (diff: Readonly<Record<string, readonly string[]>>): Readonly<Record<string, readonly string[]>> =>
+    Object.fromEntries(Object.entries(diff).filter(([name]) => name !== "name-table"));
+
+  it("完走で 0：v1.1α の経路で流れ、表を組む段（ids on は C1・C2）の後の要求の差は台帳の enum-membership（#548）と empty-aggregate（#549）の行の分だけ（名指しの場所）。条件の記録の pipeline・prompt_version が v1.2、ほかの欄は v1.1a と同じ", async () => {
     const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
     const v1Spy = vi.spyOn(runModule, "runGeneration");
     const calls = [...v11aHead(), structured(v11aJudgments())];
@@ -1198,43 +1240,51 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(v1Spy).not.toHaveBeenCalled();
     expect(v11aSpy).toHaveBeenCalledTimes(2);
     expect(v12.makeClient.mock.calls[0]).toEqual([{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.2" }]);
-    // LLM への要求は、v1.2 の旗で台帳に登録した性質（enum-membership。Issue #548・empty-aggregate。Issue #549）の分を除けば
-    // v1.1a の走りとバイト列で同じ。差は名指しの場所（R-nt-08・R-sc-02・R-tsp-02・R-tsp-16・R-w11 の並び・schema の enum・
-    // T1 の schema の行の型の aggregate、表を載せるデータの計算の行の aggregate）だけで、空でない
-    const onRequests = JSON.parse(JSON.stringify(v12.recording.structured)) as unknown[];
-    const offRequests = JSON.parse(JSON.stringify(v11a.recording.structured)) as unknown[];
+    // 表を組む段：v1.2 は C1 の 3 束と C2、v1.1a は T1（Issue #593）
+    expect(v12.recording.structured.slice(0, 4).map((request) => request.schemaName)).toEqual(["vocabulary-entities", "vocabulary-fields", "vocabulary-behaviors", "mapping"]);
+    expect(v11a.recording.structured[0]?.schemaName).toBe("name-table");
+    // 表を組む段の後の LLM への要求は、v1.2 の旗で台帳に登録した性質（enum-membership。Issue #548・empty-aggregate。Issue #549）の
+    // 分を除けば v1.1a の走りとバイト列で同じ（ID と出典の欄をそろえたうえで）。差は名指しの場所（R-sc-02・R-tsp-02・R-tsp-16・
+    // R-w11 の並び・schema の enum、表を載せるデータの計算の行の aggregate）だけで、空でない
+    const onRequests = laterRequests(v12.recording.structured);
+    const offRequests = laterRequests(v11a.recording.structured);
     expect(onRequests).toHaveLength(offRequests.length);
     const diffs = requestDiffsOf(onRequests, offRequests);
     const withInput = (paths: readonly string[]): readonly string[] => {
       const at = paths.findIndex((path) => path.startsWith("$.schema"));
       return at < 0 ? [...paths, "$.input"] : [...paths.slice(0, at), "$.input", ...paths.slice(at)];
     };
+    const ledgerDiff = withoutTableStage(LEDGER_REQUEST_DIFF);
     for (const diff of diffs) {
-      const named = LEDGER_REQUEST_DIFF[diff.schemaName] ?? [];
-      // T1''・T2・B1・B3' は名前の表（計算の行の aggregate）を載せるデータが違う。T1 の 1 回目は表を載せない
-      expect(diff.paths, diff.schemaName).toEqual(diff.schemaName === "name-table" ? named : withInput(named));
+      // T1''・T2・B1・B3' は名前の表（計算の行の aggregate）を載せるデータが違う
+      expect(diff.paths, diff.schemaName).toEqual(withInput(ledgerDiff[diff.schemaName] ?? []));
     }
-    expect(diffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual([...Object.keys(LEDGER_REQUEST_DIFF), "decl-check"]);
-    expect(JSON.stringify(withoutLedgerAdditions(onRequests))).toBe(JSON.stringify(v11a.recording.structured));
+    expect(diffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual([...Object.keys(ledgerDiff), "decl-check"]);
+    expect(JSON.stringify(withoutLedgerAdditions(onRequests))).toBe(JSON.stringify(offRequests));
     // #548 までの旗 on（台帳に empty-aggregate の行が無い）は、同じ応答で差が enum-membership の行の分だけ（今までの期待）
     const spy = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2B : undefined));
-    const v12Before = await runV11aCli({ dir: `${directory}/v12-complete-2b`, calls, pipeline: "v1.2" });
+    const v12Before = await runV11aCli({ dir: `${directory}/v12-complete-2b`, calls: [...v12Head(LEDGER_VIEW_2B), structured(v11aJudgments())], pipeline: "v1.2" });
     spy.mockRestore();
-    const beforeRequests = JSON.parse(JSON.stringify(v12Before.recording.structured)) as unknown[];
+    const beforeRequests = laterRequests(v12Before.recording.structured);
     const beforeDiffs = requestDiffsOf(beforeRequests, offRequests);
-    for (const diff of beforeDiffs) expect(diff.paths, diff.schemaName).toEqual(ENUM_MEMBERSHIP_REQUEST_DIFF[diff.schemaName] ?? []);
-    expect(beforeDiffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(ENUM_MEMBERSHIP_REQUEST_DIFF));
-    expect(JSON.stringify(withoutEnumMembership(beforeRequests))).toBe(JSON.stringify(v11a.recording.structured));
-    expect(v12Before.summary).toEqual(v12.summary);
+    const enumDiff = withoutTableStage(ENUM_MEMBERSHIP_REQUEST_DIFF);
+    for (const diff of beforeDiffs) expect(diff.paths, diff.schemaName).toEqual(enumDiff[diff.schemaName] ?? []);
+    expect(beforeDiffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(enumDiff));
+    expect(JSON.stringify(withoutEnumMembership(beforeRequests))).toBe(JSON.stringify(offRequests));
+    // 要約は、C1 の束 3 の参照の照合の数（#548 の台帳には集計の種類が無いので集計元の参照を数えない）のほかは同じ
+    const withoutReferences = (summary: Record<string, unknown>) =>
+      JSON.parse(JSON.stringify(summary, (key, value: unknown) => (key === "references" ? undefined : value))) as unknown;
+    expect(withoutReferences(v12Before.summary)).toEqual(withoutReferences(v12.summary));
     // #549 までの旗 on（台帳の when の列が未定義・non-requirement の行が無い。Issue #550）は、同じ応答で今の on との差が
-    // when・non-requirement の行の分（R-nt-08・R-sc-02・R-tsp-16・T1 の schema の確かめ方の種類の enum）だけ
+    // when・non-requirement の行の分（R-sc-02・R-tsp-16）だけ
     const spy2C = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2C : undefined));
-    const v12Before2C = await runV11aCli({ dir: `${directory}/v12-complete-2c`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    const v12Before2C = await runV11aCli({ dir: `${directory}/v12-complete-2c`, calls: [...v12Head(LEDGER_VIEW_2C), structured(v11aJudgments())], pipeline: "v1.2" });
     spy2C.mockRestore();
-    const before2CRequests = JSON.parse(JSON.stringify(v12Before2C.recording.structured)) as unknown[];
+    const before2CRequests = laterRequests(v12Before2C.recording.structured);
     const diffs2C = requestDiffsOf(onRequests, before2CRequests);
-    for (const diff of diffs2C) expect(diff.paths, diff.schemaName).toEqual(WHEN_NON_REQUIREMENT_REQUEST_DIFF[diff.schemaName] ?? []);
-    expect(diffs2C.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(WHEN_NON_REQUIREMENT_REQUEST_DIFF));
+    const when2C = withoutTableStage(WHEN_NON_REQUIREMENT_REQUEST_DIFF);
+    for (const diff of diffs2C) expect(diff.paths, diff.schemaName).toEqual(when2C[diff.schemaName] ?? []);
+    expect(diffs2C.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual(Object.keys(when2C));
     expect(JSON.stringify(withoutWhenAndNonRequirement(onRequests))).toBe(JSON.stringify(before2CRequests));
     expect(v12Before2C.code).toBe(v12.code);
     expect(v12Before2C.summary).toEqual(v12.summary);
@@ -1248,12 +1298,21 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     const { prompt_version: v11aPrompt, ...v11aRest } = v11a.record.conditions;
     expect(v11aPrompt).toBe("v1.1a");
     expect(v12Rest).toEqual(v11aRest);
-    // 要約は prompt_version・v12_flags と、旗 v12.ids の門と枝の欄 v12_calls（Issue #592）のほかは v1.1a と同じ
+    // 要約は prompt_version・v12_flags と、旗 v12.ids の門と枝の欄 v12_calls（Issue #592）のほかは v1.1a と同じ。門の数は
+    // 生成 8（C1 3・C2 1・T1'' 1・T2 1・B1 1・B3' 1。Issue #593 で T1 の 1 が 4 になった）と判定 4
     const { prompt_version: _p1, v12_flags: _f1, v12_calls: v12Calls, ...summaryRest } = v12.summary;
-    expect(v12Calls).toEqual({ real_attempts: { limit: 144, used: 9 }, judge_branch: { limit: 80, used: 4 } });
+    expect(v12Calls).toEqual({ real_attempts: { limit: 144, used: 12 }, judge_branch: { limit: 80, used: 4 } });
     expect(v11a.summary).not.toHaveProperty("v12_calls");
     const { prompt_version: _p2, ...v11aSummaryRest } = v11a.summary;
-    expect(summaryRest).toEqual(v11aSummaryRest);
+    // 表を組む段が C1・C2（4 要求）になった分だけ、呼び出しの数で決まる欄（費用・予算の残り・段の記録・トークンの計）が違う。
+    // 段の記録は表を組む段を除けば同じ（Issue #593）
+    const callDependent = ["budget_remaining_usd", "provider_cost_usd", "stages", "usage"];
+    const differing = Object.keys(v11aSummaryRest).filter((key) => JSON.stringify(summaryRest[key]) !== JSON.stringify(v11aSummaryRest[key]));
+    expect(differing.filter((key) => !callDependent.includes(key))).toEqual([]);
+    expect(Object.keys(summaryRest).sort()).toEqual(Object.keys(v11aSummaryRest).sort());
+    const laterStages = (summary: Record<string, unknown>) =>
+      (summary["stages"] as readonly { readonly stage: string }[]).filter((record) => !["name-table", "vocabulary", "mapping"].includes(record.stage));
+    expect(laterStages(summaryRest)).toEqual(laterStages(v11aSummaryRest));
   });
 
   it("旗の組の契約：export した V12_PIPELINE_FLAGS＝入口が渡した実効の旗＝要約の v12_flags＝条件の記録の v12_flags", async () => {
@@ -1273,10 +1332,11 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(run.record.conditions["v12_flags"]).toEqual({ ledger: true, "search-repair": true, ids: true });
   });
 
-  it("T1 で止まる走りでも要約と条件の記録に v12_flags がある（終了コード 1・納品物無し）", async () => {
+  it("表を組む段（ids on は C1）で止まる走りでも要約と条件の記録に v12_flags がある（終了コード 1・納品物無し）", async () => {
+    const broken = { entities: [{ name: "1member", role: "名前の規則に合わない行" }] };
     const run = await runV11aCli({
       dir: `${directory}/v12-early-stop`,
-      calls: [v11aBadDraftCall(), v11aBadDraftCall()],
+      calls: [structured(broken), structured(broken)],
       pipeline: "v1.2",
     });
     expect(run.code).toBe(EXIT_RUN_FAILED);
@@ -1314,7 +1374,7 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
   // 段の検証と、モデルに届く形がずれる共通の原因を、送信の body で塞ぐ（旗 off・on・v1 の全段）。
   const v11aStages = STAGE_ENVELOPE_ENTRIES_V11A.map((entry) => entry.stage);
 
-  const v12ReturnToPlan = (): RecordedCall[] => [structured(v11aT1(true)), ...v11aReturnToPlan().slice(1)];
+  const v12ReturnToPlan = (): RecordedCall[] => [...v12Head(), ...v11aReturnToPlan().slice(4)];
 
   /** 走りの段の要求を、入口が作った adapter の封筒で送り直した組（`--pipeline v1.2` は v1.2 の封筒。Issue #588） */
   async function exchangesOfRun(run: Awaited<ReturnType<typeof runV11aCli>>, pipeline: "v1.1a" | "v1.2" = "v1.1a"): Promise<WireExchange[]> {
@@ -1341,8 +1401,10 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
           seen.add(exchange.request.schemaName);
         }
       }
-      // 封筒に載る v1.1α の全段を照らした
-      expect([...seen].filter((stage) => v11aStages.includes(stage)).sort()).toEqual([...v11aStages].sort());
+      // 封筒に載る全段を照らした（v1.2 は旗 v12.ids で T1 を呼ばず、C1 の 3 束と C2 を呼ぶ。Issue #593）
+      const expected = pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage).filter((stage) => stage !== "name-table") : v11aStages;
+      const envelopeStages = pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage) : v11aStages;
+      expect([...seen].filter((stage) => envelopeStages.includes(stage)).sort()).toEqual([...expected].sort());
     });
   }
 
@@ -1384,7 +1446,7 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
     });
   }
 
-  it("v1.2：送信の body の T1 の枝の行の型に aggregate があり、v1.1a の T1 の枝には無い", async () => {
+  it("v1.2：送信の body の C1 の束 3 の枝の計算に aggregate があり（ids on は T1 を呼ばない。Issue #593）、v1.1a の T1 の枝には無い", async () => {
     const typeOf = (exchanges: readonly WireExchange[]) => {
       const exchange = exchanges.find((candidate) => candidate.request.schemaName === "name-table");
       expect(exchange).toBeDefined();
@@ -1394,9 +1456,15 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
       return branch.properties.rows.items.properties.type;
     };
     const on = await runV11aCli({ dir: `${directory}/wire-t1-on`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
-    const onType = typeOf(await exchangesOfRun(on, "v1.2"));
-    expect(onType.properties).toHaveProperty("aggregate");
-    expect(onType.required).toContain("aggregate");
+    const onExchanges = await exchangesOfRun(on, "v1.2");
+    expect(onExchanges.some((candidate) => candidate.request.schemaName === "name-table")).toBe(false);
+    const behaviors = onExchanges.find((candidate) => candidate.request.schemaName === "vocabulary-behaviors");
+    expect(behaviors).toBeDefined();
+    const computation = (sentBranchOf(behaviors as WireExchange) as {
+      readonly properties: { readonly computations: { readonly items: { readonly required: readonly string[]; readonly properties: Record<string, unknown> } } };
+    }).properties.computations.items;
+    expect(computation.properties).toHaveProperty("aggregate");
+    expect(computation.required).toContain("aggregate");
     const off = await runV11aCli({ dir: `${directory}/wire-t1-off`, calls: [...v11aHead(), structured(v11aJudgments())] });
     const offType = typeOf(await exchangesOfRun(off));
     expect(offType.properties).not.toHaveProperty("aggregate");
@@ -1434,9 +1502,11 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
   const formatOf = (exchange: WireExchange) =>
     (exchange.body["text"] as { readonly format: { readonly name: string; readonly schema: Record<string, unknown> } }).format;
 
-  it("v1.2：完走と差し戻しの道で、封筒に載る 6 段すべての送信の名前と schema のバイト列が同じで、名前が stage-envelope-v12（Issue #588）", async () => {
-    const v12Stages = STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage);
-    expect(v12Stages).toHaveLength(6);
+  it("v1.2：完走と差し戻しの道で、封筒に載る段（T1 を除く 9 段）すべての送信の名前と schema のバイト列が同じで、名前が stage-envelope-v12（Issue #588・#593）", async () => {
+    // v1.1α の 6 段に旗 v12.ids の C1 の 3 束と C2 を足した 10 段。ids on の走りは T1 を呼ばない
+    const v12Stages = STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage).filter((stage) => stage !== "name-table");
+    expect(STAGE_ENVELOPE_ENTRIES_V12).toHaveLength(10);
+    expect(v12Stages).toHaveLength(9);
     const seen = new Set<string>();
     const sent = new Set<string>();
     for (const route of routesOf("v1.2")) {
@@ -1445,7 +1515,7 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
       for (const exchange of exchanges) {
         expectSentSchemaIsStageSchema(exchange);
         const format = formatOf(exchange);
-        if (!v12Stages.includes(exchange.request.schemaName)) {
+        if (!STAGE_ENVELOPE_ENTRIES_V12.some((entry) => entry.stage === exchange.request.schemaName)) {
           // 封筒に載らない口（判定の口など）は、その schema をそのまま送る
           expect(format.name, exchange.request.schemaName).toBe(exchange.request.schemaName);
           continue;
@@ -1455,7 +1525,7 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
         seen.add(exchange.request.schemaName);
       }
     }
-    // 6 段を照らし、全段の送信が 1 種類の前置き（名前と schema のバイト列）
+    // 9 段を照らし、全段の送信が 1 種類の前置き（名前と schema のバイト列）
     expect([...seen].sort()).toEqual([...v12Stages].sort());
     expect(sent.size).toBe(1);
   });

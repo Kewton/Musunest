@@ -336,7 +336,8 @@ export interface StageSegment {
  * v1.2 の段を足す手は、この表に行を足す。
  */
 export const STAGE_SEGMENTS: readonly StageSegment[] = [
-  { start: "name-table", end: "semantic-check", boundary: null, stages: ["name-table", "semantic-check", "carry-over"] },
+  // 旗 `v12.ids` の走りは T1 の代わりに C1（vocabulary）・C2（mapping）が区間 0 に出る（末尾に足す。採点の写しと同じ順。Issue #593）
+  { start: "name-table", end: "semantic-check", boundary: null, stages: ["name-table", "semantic-check", "carry-over", "vocabulary", "mapping"] },
   { start: "test-spec", end: "test-spec", boundary: "t1-t2", stages: ["test-spec"] },
   {
     start: "write",

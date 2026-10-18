@@ -7,7 +7,7 @@
 //
 // 要件の一覧・名前の表・下書き（T1 の応答の形）・文書・宣言（YAML と正規化した JSON）を返す。
 // 受入の題材の言葉は使わない。
-import type { NormalizedAppSpec } from "@musunest/appspec-schema";
+import type { ConfirmedPlan, NormalizedAppSpec } from "@musunest/appspec-schema";
 import { normalizeSpec } from "@musunest/spec-engine";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest } from "../../llm.js";
 import { createFakeLlmClient, uncheckedBecause, type RecordedCall, type RecordedStructuredCall } from "../../llm-fake.js";
@@ -799,3 +799,204 @@ export function t1ResponseOf(draft: NameTableDraft, ledger?: LedgerView): Record
   };
 }
 
+
+// ── 旗 v12.ids の応答（C1 の 3 束と C2。strict の schema に合う形。Issue #593）───────────────
+
+/** 行を C1 が組む順（entity → 項目 → 計算 → 操作 → 画面。種類の中は元の順）に並べる */
+export function codeIdOrderOf(table: NameTable): readonly NameTableRow[] {
+  const kinds = ["entity", "field", "computation", "operation", "screen"] as const;
+  return kinds.flatMap((kind) => table.rows.filter((entry) => entry.kind === kind));
+}
+
+/** 表の ID → コードの形の ID（C1 が振る規則と同じ。`withCodeIds` が使う） */
+export function codeIdRenameOf(table: NameTable): ReadonlyMap<string, string> {
+  const rename = new Map<string, string>();
+  const perEntity = new Map<string, number>();
+  const counters = { computation: 0, operation: 0, screen: 0, entity: 0 };
+  for (const entry of codeIdOrderOf(table)) {
+    if (entry.kind === "entity") rename.set(entry.id, `E${String((counters.entity += 1))}`);
+    else if (entry.kind === "field") {
+      const entity = rename.get(entry.entity ?? "") ?? "";
+      const m = (perEntity.get(entity) ?? 0) + 1;
+      perEntity.set(entity, m);
+      rename.set(entry.id, `${entity}.F${String(m)}`);
+    } else if (entry.kind === "computation") rename.set(entry.id, `C${String((counters.computation += 1))}`);
+    else if (entry.kind === "operation") rename.set(entry.id, `OP${String((counters.operation += 1))}`);
+    else rename.set(entry.id, `V${String((counters.screen += 1))}`);
+  }
+  return rename;
+}
+
+/**
+ * 表の ID をコードの形（`E1`・`E1.F2`・`C1`・`OP1`・`V1`）に振り直し、行を C1 が組む順（entity → 項目 → 計算 → 操作 → 画面。
+ * 種類の中は元の順）に並べ、出典を null にする（`fixtureTable` の値は変えない。別の関数で作る）。所属・確かめ方・分類の
+ * 行の ID も振り直す。`keepSource` が真なら出典を残す（旗 off の T1 の応答に同じ ID を書かせる二点測定用）
+ */
+export function withCodeIds(table: NameTable, keepSource = false): NameTable {
+  const ordered = codeIdOrderOf(table);
+  const rename = codeIdRenameOf(table);
+  const to = (id: string): string => rename.get(id) ?? id;
+  const toNullable = (id: string | null): string | null => (id === null ? null : to(id));
+  return {
+    rows: ordered.map((entry) => {
+      const type =
+        entry.type !== null && typeof entry.type === "object" && "aggregate" in entry.type && entry.type.aggregate
+          ? { ...entry.type, aggregate: { ...entry.type.aggregate, entity: to(entry.type.aggregate.entity) } }
+          : entry.type;
+      return {
+        ...entry,
+        id: to(entry.id),
+        entity: toNullable(entry.entity),
+        source: keepSource ? entry.source : (null as unknown as NameTableRow["source"]),
+        type,
+        groupBy: entry.groupBy === null ? null : { ...entry.groupBy, field: to(entry.groupBy.field) },
+        refEntity: toNullable(entry.refEntity),
+      };
+    }),
+    ownership: table.ownership.map((entry) => ({ ...entry, roles: entry.roles.map((role) => ({ ...role, id: to(role.id) })) })),
+    verification: table.verification,
+    classification: table.classification,
+  };
+}
+
+/** C1 の 3 束と C2 の応答（表はコードの形の ID・C1 が組む順であること。`withCodeIds` の結果） */
+export interface IdsResponses {
+  readonly entities: Record<string, unknown>;
+  readonly fields: Record<string, unknown>;
+  readonly behaviors: Record<string, unknown>;
+  readonly mapping: Record<string, unknown>;
+}
+
+/** 表（コードの形の ID）から、C1 の 3 束と C2 の応答を組む（台帳が集計の種類を持てば計算に `aggregate`） */
+export function idsResponsesOf(list: RequirementList, table: NameTable, ledger?: LedgerView): IdsResponses {
+  const withAggregate = (ledger?.aggregateKinds.length ?? 0) > 0;
+  const rowsOf = (kind: NameTableRow["kind"]) => table.rows.filter((entry) => entry.kind === kind);
+  const computationType = (entry: NameTableRow) => entry.type as { valueType: string; scope: string; form: string; aggregate?: ComputationAggregate | null };
+  return {
+    entities: { entities: rowsOf("entity").map((entry) => ({ name: entry.name, role: entry.role })) },
+    fields: {
+      fields: rowsOf("field").map((entry) => ({
+        entity: entry.entity,
+        name: entry.name,
+        role: entry.role,
+        fieldType: entry.type,
+        options: entry.options,
+        refEntity: entry.refEntity,
+      })),
+    },
+    behaviors: {
+      computations: rowsOf("computation").map((entry) => {
+        const type = computationType(entry);
+        return {
+          entity: entry.entity,
+          name: entry.name,
+          role: entry.role,
+          valueType: type.valueType,
+          scope: type.scope,
+          form: type.form,
+          ...(withAggregate ? { aggregate: type.aggregate ?? null } : {}),
+          groupBy: entry.groupBy,
+        };
+      }),
+      operations: rowsOf("operation").map((entry) => ({
+        entity: entry.entity,
+        name: entry.name,
+        role: entry.role,
+        ...(entry.type as { action: string; hasWhen: boolean }),
+      })),
+      screens: rowsOf("screen").map((entry) => ({ entity: entry.entity, name: entry.name, role: entry.role, view: (entry.type as { view: string }).view })),
+    },
+    mapping: {
+      requirements: list.requirements.map((item) => {
+        const ownership = table.ownership.find((entry) => entry.requirementId === item.id);
+        const verification = table.verification.find((entry) => entry.requirementId === item.id);
+        const classification = table.classification.find((entry) => entry.requirementId === item.id);
+        if (ownership === undefined || verification === undefined || classification === undefined) {
+          throw new Error("前提が壊れた：要件の欄が欠けている");
+        }
+        const { requirementId: _omit, ...rest } = verification;
+        return {
+          requirementId: item.id,
+          roles: ownership.roles,
+          verification: { value: null, reason: null, checks: [], constraintIds: [], ...rest },
+          nature: classification.nature,
+        };
+      }),
+    },
+  };
+}
+
+/** C1 の 3 束と C2 の応答を、呼ばれる順の並びにする */
+export const idsResponseList = (responses: IdsResponses): readonly Record<string, unknown>[] => [
+  responses.entities,
+  responses.fields,
+  responses.behaviors,
+  responses.mapping,
+];
+
+/** 確定した仕様（抽象的な題材。要件は一覧と同じ） */
+export function planOf(list: RequirementList): ConfirmedPlan {
+  return {
+    schema_version: "1",
+    plan_id: "plan-1",
+    revision: 1,
+    vocabulary_version: "v1",
+    inputs: [{ id: "in-1", kind: "source", text: list.requirements.map((requirement) => requirement.text).join("") }],
+    requirements: list.requirements.map((requirement) => ({
+      id: requirement.id,
+      text: requirement.text,
+      kind: "constraining" as const,
+      origin: { input_id: "in-1", quote: requirement.quote },
+      parts: [],
+    })),
+    open_issues: [],
+    decisions: [],
+    accepted_unwritable: [],
+    confirmation: { sha256: "0".repeat(64), confirmed_at: "2026-10-18T00:00:00+09:00", confirmed_by: "tester" },
+  };
+}
+
+/** strict の規則（写像は additionalProperties: false で、全部の欄が required）の不備を挙げる */
+export function strictDefects(schema: unknown, path = "$"): readonly string[] {
+  if (schema === null || typeof schema !== "object") return [];
+  if (Array.isArray(schema)) return schema.flatMap((item, index) => strictDefects(item, `${path}[${String(index)}]`));
+  const record = schema as Record<string, unknown>;
+  const defects: string[] = [];
+  const types = Array.isArray(record["type"]) ? record["type"] : [record["type"]];
+  if (types.includes("object")) {
+    const properties = (record["properties"] ?? {}) as Record<string, unknown>;
+    if (record["additionalProperties"] !== false) defects.push(`${path}: additionalProperties`);
+    const required = (record["required"] ?? []) as readonly string[];
+    if ([...required].sort().join() !== Object.keys(properties).sort().join()) defects.push(`${path}: required`);
+  }
+  for (const [key, value] of Object.entries(record)) defects.push(...strictDefects(value, `${path}.${key}`));
+  return defects;
+}
+
+
+/**
+ * 値の中の表の ID を振り直す（文字列が ID と等しければ置き換え、写像の鍵も置き換え、JSON の文字列〔試験の入力など〕は読み直して
+ * 同じ規則で置き換えてから詰めて書き直す）。旗 v12.ids の走りの T2 の応答などを、コードの形の ID の表に合わせるのに使う
+ */
+export function renameIds<T>(value: T, rename: ReadonlyMap<string, string>): T {
+  const walk = (item: unknown): unknown => {
+    if (typeof item === "string") {
+      const direct = rename.get(item);
+      if (direct !== undefined) return direct;
+      if (item.startsWith("{") || item.startsWith("[")) {
+        try {
+          return JSON.stringify(walk(JSON.parse(item)));
+        } catch {
+          return item;
+        }
+      }
+      return item;
+    }
+    if (Array.isArray(item)) return item.map(walk);
+    if (item !== null && typeof item === "object") {
+      return Object.fromEntries(Object.entries(item).map(([key, entry]) => [rename.get(key) ?? key, walk(entry)]));
+    }
+    return item;
+  };
+  return walk(value) as T;
+}

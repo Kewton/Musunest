@@ -2341,9 +2341,9 @@ test("既存の行の問数・往復は、今まで値が出ていた入力で�
 });
 
 // ── #513：v1.1α の比較の採点（--compare）・条件の版 v5・停止段と到達数・持ち越し（README の v1.1α の節）
-import { FACTORY_PENDING_STAGE_IDS, BUILD_STAGE_IDS, CONDITIONS_V5, EXPECTED_STOPS, V11A_STAGE_IDS, conditionsSignature, pairStats, stopValueOf } from "./score-agent.mjs";
-// 新しい段（工場が後で足す段）の記録が無い入力で出す行の集合 ＝ 従来の 19 段（この Issue が変えないと決めた出力）
-const OLD_ROW_STAGES = BUILD_STAGE_IDS.filter((id) => !FACTORY_PENDING_STAGE_IDS.includes(id));
+import { IDS_STAGE_IDS, BUILD_STAGE_IDS, CONDITIONS_V5, EXPECTED_STOPS, V11A_STAGE_IDS, conditionsSignature, pairStats, stopValueOf } from "./score-agent.mjs";
+// 新しい段（旗 v12.ids の段）の記録が無い入力で出す行の集合 ＝ 従来の 19 段（この Issue が変えないと決めた出力）
+const OLD_ROW_STAGES = BUILD_STAGE_IDS.filter((id) => !IDS_STAGE_IDS.includes(id));
 
 const MARK513 = "leak-marker-513";
 const APPROVED513 = { "name-table": 32768, "semantic-check": 16384, "test-spec": 32768, "decl-check": 16384 };
@@ -2405,7 +2405,7 @@ function compareFixture(base, name, { pids = ["P1", "P2"], runs = 3, profile = "
 const scoreCompareRun = (out, extra = [], repoArg = repo) => spawnSync(process.execPath, [scoreFile, repoArg, out, "--compare", ...extra], { encoding: "utf8" });
 const readCompare = (out, name = "score-compare.json") => JSON.parse(readFileSync(join(out, name), "utf8"));
 
-test("#513 (a) BUILD_STAGE_IDS は v1 の 12 段のあとに v1.1α の 9 段（A1 の順。末尾 2 つは工場が後で足す vocabulary・mapping）で 21 個。run-agent.mjs は同じ一覧を記録の写像に使う（工場の dist の STAGE_IDS との一致の試験は #505 が入ってから足す）", () => {
+test("#513 (a) BUILD_STAGE_IDS は v1 の 12 段のあとに v1.1α の 9 段（A1 の順。末尾 2 つは旗 v12.ids の vocabulary・mapping）で 21 個。run-agent.mjs は同じ一覧を記録の写像に使う（工場の dist の STAGE_IDS との一致の試験は #505 が入ってから足す）", () => {
   assert.equal(BUILD_STAGE_IDS.length, 21);
   assert.deepEqual(BUILD_STAGE_IDS.slice(0, 12), ["requirements", "reverse-check", "design", "test-suite", "write", "static-check", "correspondence", "run-tests", "repair", "arbitration", "judge", "bundle"]);
   assert.deepEqual(V11A_STAGE_IDS, ["name-table", "semantic-check", "test-spec", "name-check", "decl-check", "coverage", "carry-over", "vocabulary", "mapping"]);
@@ -2736,24 +2736,10 @@ const factoryDist = join(repo, "packages/factory/dist");
 assert.ok(existsSync(join(factoryDist, "record.js")), "工場の dist が無い（pnpm build を先に）");
 const distModule = (rel) => import(pathToFileURL(join(factoryDist, rel)).href);
 
-// 工場の dist の段の一覧に、工場が後で足す段（FACTORY_PENDING_STAGE_IDS）のうち dist に無いものだけを末尾に定数の順で足した一覧（足す段が無ければ dist のまま）
-const withPendingStages = (distIds) => [...distIds, ...FACTORY_PENDING_STAGE_IDS.filter((id) => !distIds.includes(id))];
-test("#593 用の足場：dist の一覧との照合の一覧は、dist に無い定数の段だけを末尾に足す（余分な段は一致しない・dist に足せば重複せず元の等しさと同じ）", () => {
-  const base = BUILD_STAGE_IDS.slice(0, 19);
-  assert.deepEqual(withPendingStages(base), BUILD_STAGE_IDS);
-  // 負例 1：定数に無い段を採点の一覧に足すと一致しない
-  assert.notDeepEqual(withPendingStages(base), [...BUILD_STAGE_IDS, "extra-stage"]);
-  assert.notDeepEqual(withPendingStages(base), [...BUILD_STAGE_IDS.slice(0, 20), "extra-stage"]);
-  // 負例 2：定数の段を dist の一覧に足しても（重複せず）同じ結果
-  assert.deepEqual(withPendingStages([...base, "vocabulary"]), BUILD_STAGE_IDS);
-  assert.deepEqual(withPendingStages([...base, "vocabulary", "mapping"]), BUILD_STAGE_IDS);
-});
-
-test("#513 (a) BUILD_STAGE_IDS が工場の dist の STAGE_IDS（＋工場が後で足す段のうち dist に無いもの）と同じ並びで 19 個＋α。出力の段・上限・持ち越しの出どころ・記録の場所も dist と同じ", async () => {
+test("#513 (a) BUILD_STAGE_IDS が工場の dist の STAGE_IDS と同じ並びで 21 個（#593 で vocabulary・mapping が入った）。出力の段・上限・持ち越しの出どころ・記録の場所も dist と同じ", async () => {
   const record = await distModule("record.js"), limits = await distModule("limits.js");
-  assert.deepEqual(BUILD_STAGE_IDS, withPendingStages([...record.STAGE_IDS]));
-  assert.equal(record.STAGE_IDS.length, 19);
-  assert.equal(withPendingStages([...record.STAGE_IDS]).length, 21);
+  assert.deepEqual(BUILD_STAGE_IDS, [...record.STAGE_IDS]);
+  assert.equal(record.STAGE_IDS.length, 21);
   assert.deepEqual([...V1_OUTPUT_STAGES, ...V11A_OUTPUT_STAGES], [...limits.OUTPUT_STAGES]);
   for (const effort of Object.keys(limits.STAGE_MAX_OUTPUT_TOKENS)) for (const k of V11A_OUTPUT_STAGES) assert.equal(limits.STAGE_MAX_OUTPUT_TOKENS[effort][k], V11A_APPROVED_LIMITS[k], `${effort} ${k}`);
   const carry = await distModule("v11a/carry-over.js"), bundle = await distModule("v11a/bundle-v11a.js");
@@ -3925,7 +3911,7 @@ test("#545 直し 3：工場の dist の STAGE_STARTS・STAGE_ENDS に出る段�
     assert.equal(STAGE_SEGMENTS[i].start, after[0]);
     assert.equal(STAGE_SEGMENTS[i - 1].end, before);
   }
-  for (const x of STAGE_SEGMENTS) for (const st of x.stages) assert.ok(withPendingStages([...record.STAGE_IDS]).includes(st), `dist の STAGE_IDS（＋工場が後で足す段）に無い段: ${st}`);
+  for (const x of STAGE_SEGMENTS) for (const st of x.stages) assert.ok(record.STAGE_IDS.includes(st), `dist の STAGE_IDS に無い段: ${st}`);
   assert.ok(stagesInRange("write", "judge").includes("carry-over"), "B 区間に carry-over");
 });
 
@@ -4272,7 +4258,7 @@ test("#557 工場の dist（先に pnpm build）：package の入口の V12_PIPE
 });
 import { PIPELINES } from "./score-agent.mjs";
 
-// ── v1.2 手 3（#589）：新しい 2 段 vocabulary（C1）・mapping（C2）。工場が後で足す段（FACTORY_PENDING_STAGE_IDS）の採点
+// ── v1.2 手 3（#589）：新しい 2 段 vocabulary（C1）・mapping（C2）。旗 v12.ids の段（IDS_STAGE_IDS）の採点
 import { funnelText, stageRecordMismatches, stageValuesOf, stopsOf, reachOf } from "./score-agent.mjs";
 
 const OK1 = (stage) => rec538(stage, "ok", 1);
@@ -4285,8 +4271,8 @@ const bookB589 = sum589([OK1("vocabulary"), FAILED("mapping"), FAILED("mapping")
 
 test("#589 段の一覧：vocabulary・mapping は v1.1α の段の末尾 2 つで生成の段の一覧にもあり、停止の名前 vocabulary:unmet・mapping:unmet は既知", () => {
   assert.deepEqual(V11A_STAGE_IDS.slice(-2), ["vocabulary", "mapping"]);
-  assert.deepEqual(FACTORY_PENDING_STAGE_IDS, ["vocabulary", "mapping"]);
-  assert.ok(FACTORY_PENDING_STAGE_IDS.every((id) => BUILD_STAGE_IDS.includes(id)));
+  assert.deepEqual(IDS_STAGE_IDS, ["vocabulary", "mapping"]);
+  assert.ok(IDS_STAGE_IDS.every((id) => BUILD_STAGE_IDS.includes(id)));
   assert.equal(stopValueOf(bookB589, null), "mapping:unmet");
   assert.equal(stopValueOf(sum589([], { stage: "vocabulary", kind: "unmet" }), null), "vocabulary:unmet");
   assert.equal(stopValueOf(sum589([], { stage: "vocabulary-x", kind: "unmet" }), null), "unknown", "知らない段は今までどおり unknown");

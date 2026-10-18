@@ -47,6 +47,11 @@ import {
   requestDiffsOf,
   withAggregateResponses,
   withAggregates,
+  codeIdRenameOf,
+  idsResponseList,
+  idsResponsesOf,
+  renameIds,
+  withCodeIds,
   withoutEnumMembership,
   withoutLedgerAdditions,
   LEDGER_REQUEST_DIFF,
@@ -60,7 +65,16 @@ import {
   withoutEmptyAggregate,
   withoutWhenAndNonRequirement,
 } from "./__tests__/fixtures.js";
-import { V11A_ARTIFACT_NAMES, V12_SEARCH_REPAIR_ARTIFACT_NAME } from "./bundle-v11a.js";
+import {
+  STAGE_RUN_RECORD_SCHEMA,
+  V11A_ARTIFACT_NAMES,
+  V12_SEARCH_REPAIR_ARTIFACT_NAME,
+  buildStageCheckpoint,
+  stageJsonText,
+  stageOutputDigest,
+  stagesInRange,
+  verifyStageInput,
+} from "./bundle-v11a.js";
 import * as evaluateModule from "./evaluate.js";
 import { DEFAULT_VALUE_DETAILS, UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
 import { COMPUTATION_AGGREGATE_MESSAGES, nameTableSha256, type NameTable } from "./names.js";
@@ -78,7 +92,7 @@ import { DECL_CHECK_SCHEMA_NAME } from "./stages/decl-check.js";
 import { NAME_TABLE_PREVIOUS_DATA_NAMES, NAME_TABLE_SCHEMA_NAME } from "./stages/name-table.js";
 import * as semanticCheckStage from "./stages/semantic-check.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
-import { TEST_SPEC_SCHEMA_NAME, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
+import { TEST_SPEC_DATA_NAMES, TEST_SPEC_SCHEMA_NAME, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
 import {
   WRITE_V11A_DATA_NAMES,
   WRITE_V11A_REWRITE_DATA_NAME,
@@ -357,6 +371,20 @@ const head = (
   structured({ declaration: options.yaml ?? RUN_YAML }),
 ];
 
+/** 旗 v12.ids の走りの表（題材の表をコードの形の ID に振り直し、C1 が組む順・出典なし。Issue #593） */
+const CODE_RENAME = codeIdRenameOf(TABLE);
+const TABLE_IDS: NameTable = withCodeIds(TABLE_ON);
+/** 値の中の題材の表の ID を、コードの形の ID に振り直す（T2 の応答など） */
+const renamed = <T,>(value: T): T => renameIds(value, CODE_RENAME);
+
+/** 旗 v12.ids（と台帳 on）の走りの C1 の 3 束・C2・T1''・T2・B1 の記録（既定は完走の道。Issue #593） */
+const idsHead = (options: { readonly t2?: unknown; readonly yaml?: string; readonly table?: NameTable } = {}): RecordedCall[] => [
+  ...idsResponseList(idsResponsesOf(LIST, options.table ?? TABLE_IDS, PROPERTY_LEDGER_VIEW)).map((output) => structured(output)),
+  structured(acceptAll()),
+  structured(renamed(options.t2 ?? t2Response())),
+  structured({ declaration: options.yaml ?? RUN_YAML }),
+];
+
 /** ⑥ の最後の答え（直した宣言と主張） */
 const repairDone = (declaration: string, disputes: readonly { testId: string; quote: string }[] = []): RecordedCall => ({
   kind: "tools",
@@ -572,6 +600,142 @@ describe("(b) T1' に 2 回落ちる", () => {
       ["name-table", 1, 1],
       ["name-table", 2, 2],
     ]);
+  });
+});
+
+describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3（Issue #593）", () => {
+  const IDS_FLAGS = { ledger: true, searchRepair: true, ids: true };
+  const responses = () => idsResponsesOf(LIST, TABLE_IDS, PROPERTY_LEDGER_VIEW);
+  const referencesOf = (result: Awaited<ReturnType<typeof runScenario>>["result"], stage: string) =>
+    result.record.stages.filter((record) => record.stage === stage).map((record) => record.references);
+
+  it("初回で通る走り：記録は vocabulary 3・mapping 1 で name-table が無く、参照の照合の数は知らない ID・重複・別の束の ID が 0", async () => {
+    const { result, recording } = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_FLAGS });
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(countStage(result, "vocabulary")).toBe(3);
+    expect(countStage(result, "mapping")).toBe(1);
+    expect(countStage(result, "name-table")).toBe(0);
+    for (const references of [...referencesOf(result, "vocabulary"), ...referencesOf(result, "mapping")]) {
+      expect(references).toMatchObject({ unknown_ids: 0, duplicates: 0, cross_bundle_ids: 0 });
+    }
+    // 照らした参照の数は応答の参照の全部（C2：要件 ID と所属の ID）
+    const roles = TABLE_IDS.ownership.reduce((total, entry) => total + entry.roles.length, 0);
+    expect(referencesOf(result, "mapping")[0]?.checked).toBe(LIST.requirements.length + roles);
+    // T2 に見せる行の出典は null。C2・C3・T2 の要求に名前を見せない
+    const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME);
+    const rows = dataBlockOf(t2?.input ?? "", TEST_SPEC_DATA_NAMES[2]) as readonly Record<string, unknown>[];
+    expect(rows).toHaveLength(TABLE_IDS.rows.length);
+    expect(rows.every((row) => row["source"] === null && !("name" in row))).toBe(true);
+    // 写しの欄（copy）と出典の引用の欄（requestQuote）が C1・C2 の要求に無い
+    const tableRequests = recording.structured.filter((request) => request.schemaName.startsWith("vocabulary-") || request.schemaName === "mapping");
+    expect(tableRequests).toHaveLength(4);
+    for (const request of tableRequests) {
+      expect(JSON.stringify(request).includes('\\"copy\\"')).toBe(false);
+      expect(JSON.stringify(request).includes("requestQuote")).toBe(false);
+    }
+  });
+
+  it("C1' の負例：束 2 の知らない ID が 2 回続けば段 vocabulary・unmet で止まる（終了コード 1・納品物無し）。束 1 は 1 回だけ呼ぶ", async () => {
+    const good = responses();
+    const unknown = { fields: (good.fields["fields"] as readonly Record<string, unknown>[]).map((item, index) => (index === 0 ? { ...item, entity: "E9" } : item)) };
+    const { result, recording } = await runScenario([structured(good.entities), structured(unknown), structured(unknown)], { flags: IDS_FLAGS });
+    expect(result.stopped).toMatchObject({ stage: "vocabulary", kind: "unmet" });
+    expect(result.summary.exit_code).toBe(1);
+    expect(result.summary.stop_reason).toBe("unmet");
+    expect(result.bundle).toBeNull();
+    expect(schemaNames(recording.structured)).toEqual(["vocabulary-entities", "vocabulary-fields", "vocabulary-fields"]);
+    const [, fields] = referencesOf(result, "vocabulary");
+    expect(fields?.unknown_ids).toBeGreaterThanOrEqual(1);
+    const totalRefs = TABLE_IDS.rows.filter((row) => row.kind === "field").reduce((total, row) => total + 1 + (row.refEntity === null ? 0 : 1), 0);
+    expect(fields?.checked).toBe(2 * totalRefs);
+    expect(result.stopped?.problems?.map((problem) => problem.message)).toContain("知らない ID である（この表で振った ID に無い）");
+  });
+
+  it("C2' の負例：要件の欠落が 2 回続けば段 mapping・unmet で止まる。C1 は 3 束 1 回ずつ", async () => {
+    const good = responses();
+    const missing = { requirements: (good.mapping["requirements"] as readonly unknown[]).slice(1) };
+    const { result, recording } = await runScenario(
+      [structured(good.entities), structured(good.fields), structured(good.behaviors), structured(missing), structured(missing)],
+      { flags: IDS_FLAGS },
+    );
+    expect(result.stopped).toMatchObject({ stage: "mapping", kind: "unmet" });
+    expect(result.summary.exit_code).toBe(1);
+    expect(result.bundle).toBeNull();
+    expect(schemaNames(recording.structured)).toEqual(["vocabulary-entities", "vocabulary-fields", "vocabulary-behaviors", "mapping", "mapping"]);
+  });
+
+  it("C3 の拒否 → C2 の 2 回目（前回の写像・拒否・印をデータで。C1 は呼ばない）→ 残った拒否は持ち越し（出どころ semantic-check）", async () => {
+    const good = responses();
+    const rejectR3 = judgments(IDS, { R3: ["unnecessary-ownership", "締められる"] });
+    const { result, recording } = await runScenario(
+      [
+        structured(good.entities),
+        structured(good.fields),
+        structured(good.behaviors),
+        structured(good.mapping),
+        structured(rejectR3),
+        structured(good.mapping),
+        structured(rejectR3),
+        structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+        structured({ declaration: RUN_YAML }),
+        structured(acceptAll(["R1", "R2", "R4"])),
+      ],
+      { flags: IDS_FLAGS },
+    );
+    expect(schemaNames(recording.structured).slice(0, 7)).toEqual([
+      "vocabulary-entities",
+      "vocabulary-fields",
+      "vocabulary-behaviors",
+      "mapping",
+      SEMANTIC_CHECK_SCHEMA_NAME,
+      "mapping",
+      SEMANTIC_CHECK_SCHEMA_NAME,
+    ]);
+    const second = recording.structured[5];
+    const rejections = dataBlockOf(second?.input ?? "", "表の点検の拒否") as { requirementId: string; kind: string }[];
+    expect(rejections).toEqual([expect.objectContaining({ requirementId: "R3", kind: "unnecessary-ownership" })]);
+    expect(dataBlockOf(second?.input ?? "", "前回の写像")).toEqual(good.mapping);
+    expect(dataBlockOf(second?.input ?? "", "助言の印")).toBeDefined();
+    expect(result.stopped).toBeNull();
+    expect(result.outcome.verdict).toBe("partial");
+    expect(carryEntriesOf(result.bundle)).toEqual([{ requirementId: "R3", reasons: [{ origin: "semantic-check", reason: "unnecessary-ownership" }] }]);
+    expect(countStage(result, "mapping")).toBe(2);
+    const mappingRecords = result.record.stages.filter((record) => record.stage === "mapping");
+    expect(mappingRecords[1]?.retries.content).toBe(1);
+  });
+
+  it("C2 の 2 回目が C2' に落ちても形の再試行は無く、前回の写像のまま拒否の要件を持ち越す", async () => {
+    const good = responses();
+    const rejectR3 = judgments(IDS, { R3: ["unnecessary-ownership", "締められる"] });
+    const missing = { requirements: (good.mapping["requirements"] as readonly unknown[]).slice(1) };
+    const { result, recording } = await runScenario(
+      [
+        structured(good.entities),
+        structured(good.fields),
+        structured(good.behaviors),
+        structured(good.mapping),
+        structured(rejectR3),
+        structured(missing),
+        structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+        structured({ declaration: RUN_YAML }),
+        structured(acceptAll(["R1", "R2", "R4"])),
+      ],
+      { flags: IDS_FLAGS },
+    );
+    // C2 の 2 回目は 1 回だけ（形の再試行なし）。C3 の再点検は呼ばない（前回の点検の結果のまま）
+    expect(schemaNames(recording.structured).slice(0, 7)).toEqual([
+      "vocabulary-entities",
+      "vocabulary-fields",
+      "vocabulary-behaviors",
+      "mapping",
+      SEMANTIC_CHECK_SCHEMA_NAME,
+      "mapping",
+      TEST_SPEC_SCHEMA_NAME,
+    ]);
+    expect(result.stopped).toBeNull();
+    expect(carryEntriesOf(result.bundle)).toEqual([{ requirementId: "R3", reasons: [{ origin: "semantic-check", reason: "unnecessary-ownership" }] }]);
+    const table = artifactOf(result.bundle, "artifacts/name-table.json") as { readonly table_sha256: string };
+    expect(table.table_sha256).toBe(await nameTableSha256(TABLE_IDS));
   });
 });
 
@@ -2206,6 +2370,38 @@ describe("段単位の走り：範囲の外の段を呼ばず、納品物を組�
     expect(outcome).not.toHaveProperty("bundle");
   });
 
+  it("旗 v12.ids の終了 T1''：C1 の 3 束・C2・C3 だけを呼び、記録の段は範囲の段の内側。境界の checkpoint の形と照合は今と同じで、表の SHA は C2 が組んだ表に結ぶ（Issue #593）", async () => {
+    const recording = createCheckedRecordingClient(idsHead().slice(0, 5));
+    const flags = { ledger: true, searchRepair: true, ids: true };
+    const outcome = await runStageRangeV11a({ ...inputOf(recording.client), flags, range: { start: "name-table", end: "semantic-check" } });
+    expect(outcome.stopped).toBeNull();
+    expect(schemaNames(recording.structured)).toEqual(["vocabulary-entities", "vocabulary-fields", "vocabulary-behaviors", "mapping", SEMANTIC_CHECK_SCHEMA_NAME]);
+    expect(outcome.stages.map((record) => record.stage)).toEqual(["vocabulary", "vocabulary", "vocabulary", "mapping", "semantic-check"]);
+    for (const record of outcome.stages) expect(stagesInRange("name-table", "semantic-check")).toContain(record.stage);
+    const [boundary] = outcome.boundaries;
+    expect(outcome.boundaries.map((entry) => entry.boundary)).toEqual(["t1-t2"]);
+    if (boundary === undefined) return;
+    expect(boundary.table).toEqual(TABLE_IDS);
+    expect(boundary.tableSha256).toBe(await nameTableSha256(TABLE_IDS));
+    expect(boundary.semanticCheck.tableSha256).toBe(boundary.tableSha256);
+    // checkpoint は今と同じ形で組め、照合を通る（開始 T2 の入力として読める）
+    const versions = { vocabulary: "v1", contract: "v0.2", prompt: "v1.1a", factory: "0.0.0" };
+    const checkpoint = JSON.parse(stageJsonText(buildStageCheckpoint({ materials: boundary, versions, planSha256: "a".repeat(64), sourceSha256: "b".repeat(64) }))) as Record<string, unknown>;
+    const record = { schema_version: STAGE_RUN_RECORD_SCHEMA, checkpoints: [{ boundary: "t1-t2", path: "cp.json", output_digest: await stageOutputDigest(checkpoint) }] };
+    const verified = await verifyStageInput({
+      start: "test-spec",
+      checkpointText: stageJsonText(checkpoint),
+      recordText: JSON.stringify(record),
+      checkpointFile: "cp.json",
+      plan: PLAN,
+      planSha256: "a".repeat(64),
+      sourceSha256: "b".repeat(64),
+      vocabularyVersion: "v1",
+      contractVersion: "v0.2",
+    });
+    expect(verified).toMatchObject({ ok: true });
+  });
+
   it("通常の生成（範囲なし）は今までどおり納品物を組む", async () => {
     const { result } = await runScenario([...head(), structured(acceptAll())]);
     expect(result.bundle).not.toBeNull();
@@ -2633,17 +2829,17 @@ describe("呼び出し数の回帰の契約試験（手 2p）の走りが、旗 
 });
 
 describe("旗の組の契約（要約の v12_flags）", () => {
-  it("recordV12Flags が真の走りは、完走でも T1 で止まる走りでも、要約に実効の旗の組 v12_flags がある（納品物の要約にも）", async () => {
+  it("recordV12Flags が真の走りは、完走でも表を組む段（ids on は C1）で止まる走りでも、要約に実効の旗の組 v12_flags がある（納品物の要約にも）", async () => {
     const extra = { flags: fromPublicV12Flags(V12_PIPELINE_FLAGS), recordV12Flags: true };
-    const full = await runScenario([...head({ table: TABLE_ON }), structured(acceptAll())], extra);
+    // 旗の組は ids を含む（Issue #593 で表を組む段が C1・C2 になった）ので、C1・C2 の応答で流す
+    const full = await runScenario([...idsHead(), structured(acceptAll())], extra);
     expect(full.result.outcome.verdict).toBe("full");
     expect((full.result.summary as unknown as Record<string, unknown>)["v12_flags"]).toEqual(V12_PIPELINE_FLAGS);
     const summaryFile = full.result.bundle?.artifacts.find((artifact) => artifact.path === "artifacts/summary.json");
     expect((JSON.parse(summaryFile?.text ?? "{}") as Record<string, unknown>)["v12_flags"]).toEqual(V12_PIPELINE_FLAGS);
-    const bad = draftOf(LIST, TABLE);
-    const broken = t1ResponseOf({ ...bad, requirements: bad.requirements.map((entry, index) => (index === 0 ? { ...entry, copy: "目印の値の写し" } : entry)) }, PROPERTY_LEDGER_VIEW);
+    const broken = { entities: [{ name: "1member", role: "名前の規則に合わない行" }] };
     const stopped = await runScenario([structured(broken), structured(broken)], extra);
-    expect(stopped.result.stopped?.stage).toBe("name-table");
+    expect(stopped.result.stopped).toMatchObject({ stage: "vocabulary", kind: "unmet" });
     expect((stopped.result.summary as unknown as Record<string, unknown>)["v12_flags"]).toEqual(V12_PIPELINE_FLAGS);
   });
 
@@ -3408,14 +3604,6 @@ describe("題材の言葉の走査（Issue #551 で足した・直したファ�
 
 // ── 旗 v12.ids（手 3p。Issue #592）：ids off の走りはバイト列で同じ・on の走りだけ門と枝の欄 ─────────────────
 
-/** 納品物の、要約と manifest を除いた成果物（パス → 本文） */
-const otherArtifacts = (bundle: AssembledBundle | null): Record<string, string> =>
-  Object.fromEntries(
-    (bundle?.artifacts ?? [])
-      .filter((artifact) => artifact.path !== "artifacts/summary.json" && artifact.path !== "bundle-manifest.json")
-      .map((artifact) => [artifact.path, artifact.text]),
-  );
-
 describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と同じで、ids on の差は要約の旗の欄と門の欄だけ", () => {
   const SCENARIOS: readonly { readonly name: string; readonly calls: () => RecordedCall[]; readonly prior: Partial<V12Flags> }[] = [
     {
@@ -3430,10 +3618,9 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     },
   ];
 
-  it.each(SCENARIOS)("$name：ids off は門を作らず要約に門の欄が無い。ids を明示で off にしても同じ。ids on は要求・納品物・終了コードが同じ", async (scenario) => {
+  it.each(SCENARIOS)("$name：ids off は門を作らず要約に門の欄が無い。ids を明示で off にしても同じ", async (scenario) => {
     const prior = await runScenario(scenario.calls(), { flags: scenario.prior, recordV12Flags: true });
     const explicitOff = await runScenario(scenario.calls(), { flags: { ...scenario.prior, ids: false }, recordV12Flags: true });
-    const on = await runScenario(scenario.calls(), { flags: { ...scenario.prior, ids: true }, recordV12Flags: true });
     expect(prior.result.outcome.verdict).toBe("full");
     // ids off：要約の旗の組に ids が false で載り（旗の組の欄だけ増える）、門の欄が無い
     const priorSummary = prior.result.summary as unknown as Record<string, unknown>;
@@ -3441,29 +3628,70 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     expect((priorSummary["v12_flags"] as Record<string, unknown>)["ids"]).toBe(false);
     expect(priorSummary).not.toHaveProperty("v12_calls");
     expect(explicitOff.result).toEqual(prior.result);
-    // ids on：LLM への要求・納品物（要約と manifest のほか）・合否・終了コード・段の記録が同じ
-    expect(JSON.stringify(on.recording.structured)).toBe(JSON.stringify(prior.recording.structured));
-    expect(JSON.stringify(on.recording.tools)).toBe(JSON.stringify(prior.recording.tools));
-    expect(otherArtifacts(on.result.bundle)).toEqual(otherArtifacts(prior.result.bundle));
-    expect(on.result.outcome).toEqual(prior.result.outcome);
-    expect(on.result.record).toEqual(prior.result.record);
-    const { v12_flags: onFlags, v12_calls: onCalls, ...onRest } = on.result.summary as unknown as Record<string, unknown>;
-    const { v12_flags: priorFlags, ...priorRest } = priorSummary;
-    expect(onRest).toEqual(priorRest);
-    expect(onFlags).toEqual({ ...(priorFlags as Record<string, unknown>), ids: true });
-    // 判定の口が無い走りの枝は 0 本。門は生成の実開始だけ
-    const started = on.result.record.stages.reduce((sum, record) => sum + record.attempts.started, 0);
-    expect(onCalls).toEqual({ real_attempts: { limit: 144, used: started }, judge_branch: { limit: 80, used: 0 } });
-    // 納品物の要約にも同じ欄が載る
-    expect(artifactOf(on.result.bundle, "artifacts/summary.json")["v12_calls"]).toEqual(onCalls);
+    // ids off の走りは T1 を呼び、C1・C2 の段の記録が無い（Issue #593）
+    expect(stageIds(prior.result)).toContain("name-table");
+    expect(stageIds(prior.result).some((stage) => stage === "vocabulary" || stage === "mapping")).toBe(false);
     expect(artifactOf(prior.result.bundle, "artifacts/summary.json")).not.toHaveProperty("v12_calls");
   });
 
+  /**
+   * 二点測定（Issue #593）：両経路に同じコードの形の ID を持つ合成の表（`withCodeIds`）を用意し、旗 off の T1 の応答も同じ ID を
+   * 書く。旗 off の T1 で入れた走りと ids on の C1・C2 で入れた走りで、段が組んだ論理要求の C3 以降（T1''・T2・B1・B3'）が
+   * **行の出典の欄を除いて**バイト列で同じで、納品物の宣言・判定が同じ。表の SHA は両側で別に計算する
+   */
+  it("二点測定：T1 で入れた表と C1・C2 で入れた表で、C3 以降の論理要求が出典の欄を除いて同じ・判定と宣言が同じ・表の SHA はそれぞれの表に結ぶ", async () => {
+    const offTable = withCodeIds(TABLE_ON, true);
+    const offCalls = [structured(t1Of(LIST, offTable)), structured(acceptAll()), structured(renamed(t2Response())), structured({ declaration: RUN_YAML }), structured(acceptAll())];
+    const off = await runScenario(offCalls, { flags: { ledger: true, searchRepair: true }, recordV12Flags: true });
+    const on = await runScenario([...idsHead(), structured(acceptAll())], { flags: { ledger: true, searchRepair: true, ids: true }, recordV12Flags: true });
+    expect(off.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(on.result.outcome).toEqual(off.result.outcome);
+    expect(on.result.summary.exit_code).toBe(off.result.summary.exit_code);
+    // 段の記録：表を組む段だけが違う（off は name-table 1、on は vocabulary 3・mapping 1）。C3 以降の段の並びは同じ
+    const tableStages = new Set(["name-table", "vocabulary", "mapping"]);
+    expect(stageIds(on.result).filter((stage) => !tableStages.has(stage))).toEqual(stageIds(off.result).filter((stage) => !tableStages.has(stage)));
+    expect(countStage(on.result, "vocabulary")).toBe(3);
+    expect(countStage(on.result, "mapping")).toBe(1);
+    expect(countStage(on.result, "name-table")).toBe(0);
+    // 論理要求：表を組む段の要求を除くと、出典の欄（off は写像、on は null）を除いてバイト列で同じ
+    const tableSchemas = new Set(["name-table", "vocabulary-entities", "vocabulary-fields", "vocabulary-behaviors", "mapping"]);
+    const later = (requests: readonly LlmStructuredRequest[]) => requests.filter((request) => !tableSchemas.has(request.schemaName));
+    const withoutSource = (text: string) => text.replace(/\\"source\\": \{[^}]*\}/g, '\\"source\\": null');
+    const offLater = later(off.recording.structured);
+    const onLater = later(on.recording.structured);
+    expect(onLater.map((request) => request.schemaName)).toEqual(["semantic-check", "test-spec", "declaration-v11a", "decl-check"]);
+    expect(onLater.map((request) => JSON.stringify(request))).toEqual(offLater.map((request) => withoutSource(JSON.stringify(request))));
+    // 出典の欄の差だけがある（T2 の行に出典がある・無い）
+    expect(offLater.map((request) => JSON.stringify(request))).not.toEqual(onLater.map((request) => JSON.stringify(request)));
+    // 納品物の宣言・試験の結果が同じ
+    const declarationOf = (result: typeof on.result) => result.bundle?.artifacts.find((artifact) => artifact.path === "artifacts/app.spec.yaml")?.text;
+    expect(declarationOf(on.result)).toBeDefined();
+    expect(declarationOf(on.result)).toBe(declarationOf(off.result));
+    // 表の SHA は両側で別に計算し、それぞれの表に結ぶ（出典が違うので SHA は違う）
+    const onSha = await nameTableSha256(TABLE_IDS);
+    const offSha = await nameTableSha256(offTable);
+    expect(onSha).not.toBe(offSha);
+    const shaOf = (result: typeof on.result) => (artifactOf(result.bundle, "artifacts/name-table.json") as { readonly table_sha256?: string })["table_sha256"];
+    expect(shaOf(on.result)).toBe(onSha);
+    expect(shaOf(off.result)).toBe(offSha);
+    // C3 の点検の結果も、それぞれの表の SHA に結ぶ
+    const semanticShaOf = (result: typeof on.result) =>
+      (artifactOf(result.bundle, "artifacts/semantic-check.json") as { readonly rounds: readonly { readonly table_sha256: string }[] }).rounds.map((round) => round.table_sha256);
+    expect(semanticShaOf(on.result)).toEqual([onSha]);
+    expect(semanticShaOf(off.result)).toEqual([offSha]);
+    // 出典を除けば、表の行は同じ（on の行の出典は null）
+    const rowsOf = (result: typeof on.result) => (artifactOf(result.bundle, "artifacts/name-table.json") as { readonly rows: readonly Record<string, unknown>[] }).rows;
+    expect(rowsOf(on.result).every((row) => row["source"] === null)).toBe(true);
+    expect(rowsOf(on.result).map(({ source: _s, ...rest }) => rest)).toEqual(rowsOf(off.result).map(({ source: _s, ...rest }) => rest));
+  });
+
   it("ids on で門を差し替えて生成が尽きた走りは call-limit で止まり（終了コード 1・納品物無し）、早期停止の要約にも門の欄が載る", async () => {
-    const { result } = await runScenario([...head({ table: TABLE_ON }), structured(acceptAll())], {
+    const { result } = await runScenario([...idsHead(), structured(acceptAll())], {
       flags: { ledger: true, searchRepair: true, ids: true },
       v12CallLimits: { realAttempts: 2 },
     });
+    // 門 2 は C1 の束 1・束 2 で尽き、束 3 が未着手のまま止まる（Issue #593 で表を組む段が C1・C2 になった）
+    expect(result.stopped).toMatchObject({ stage: "vocabulary", kind: "call-limit" });
     expect(result.stopped).toMatchObject({ kind: "call-limit" });
     expect(result.summary.exit_code).toBe(1);
     expect(result.bundle).toBeNull();

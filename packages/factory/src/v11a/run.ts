@@ -141,7 +141,7 @@ import {
 import { identityMappings, toV1 } from "./convert.js";
 import { lostCoverage } from "./coverage.js";
 import { createV11aEvaluator, type V11aEvaluator } from "./evaluate.js";
-import { nameTableSha256, ownersByRowId, type NameTable } from "./names.js";
+import { nameTableSha256, ownersByRowId, type NameTable, type NameTableRow } from "./names.js";
 import { runDeclCheck, type DeclCheckOutput } from "./stages/decl-check.js";
 import {
   JUDGE_ADVICE_THRESHOLDS,
@@ -179,6 +179,9 @@ import {
 import { canRepairFields, locateFailures } from "../v12/locate.js";
 import { V12_CALL_LIMITS, type V12CallLimits } from "../v12/limits.js";
 import { mergeReplacements, runFieldRepair } from "../v12/stages/field-repair.js";
+import { VOCABULARY_BUNDLES, type ReferenceCounts } from "../v12/ids.js";
+import { runVocabularyBundle } from "../v12/stages/vocabulary.js";
+import { MAPPING_ROUNDS, runMapping, type MappingOutcome, type MappingPrevious } from "../v12/stages/mapping.js";
 
 /** v1.1α の入力（v1 の `GenerationInput` と同じ形で、確定した仕様を必須にしたもの） */
 export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
@@ -617,6 +620,9 @@ async function runV11a(
     staticChecks: new Map(),
   };
 
+  // 表を組む段（旗 `v12.ids` の走りは C2 の `mapping`、off は T1 の `name-table`。材料の版の段。Issue #593）
+  const tableStage: StageId = flags.ids ? "mapping" : "name-table";
+
   // 旗 `v12.search-repair` の一番良い版の宣言の SHA-256（材料の状態の宣言の版。off は null のまま＝今の選び方。Issue #551）
   let searchBestSha256: string | null = null;
 
@@ -656,9 +662,9 @@ async function runV11a(
     const best = searchBestSha256 === null ? undefined : materialStore.declarations.find((entry) => entry.sha256 === searchBestSha256);
     const declaration = best ?? passed.at(-1) ?? materialStore.declarations.at(-1);
     return [
-      slot("design", materialStore.design, "name-table"),
+      slot("design", materialStore.design, tableStage),
       slot("test_suite", materialStore.testSuite, "test-spec"),
-      slot("mappings", materialStore.mappings, "name-table"),
+      slot("mappings", materialStore.mappings, tableStage),
       {
         material: "declaration",
         state:
@@ -753,6 +759,7 @@ async function runV11a(
     before: { readonly usage: UsageSnapshot; readonly counts: CallCounts },
     start: number,
     failureKind: FailureKind | null,
+    references?: ReferenceCounts,
   ): void => {
     stages.push(
       makeStageRecord(
@@ -763,6 +770,14 @@ async function runV11a(
         callCountsDelta(before.counts, gateway.counts),
         failureKind,
         null,
+        references === undefined
+          ? undefined
+          : {
+              checked: references.checked,
+              unknown_ids: references.unknown,
+              duplicates: references.duplicate,
+              cross_bundle_ids: references.crossBundle,
+            },
       ),
     );
   };
@@ -913,43 +928,10 @@ async function runV11a(
       resume === undefined
         ? undefined
         : { table: resume.table, tableSha256: resume.tableSha256, semantic: resume.semanticCheck, advice: resume.judgeAdvice };
-    // 開始 T2・B1 は T1〜T1'' を呼ばない（凍結した表と点検結果から入る）
-    const nameTableRounds = resume === undefined ? NAME_TABLE_ROUNDS : 0;
-    for (let round = 1; round <= nameTableRounds; round += 1) {
-      const call = round;
-      const retry = previous;
-      const before = meterState();
-      const start = input.now();
-      let outcome: NameTableOutcome;
-      try {
-        // 中身のやり直し（T1 の 2 回目）を共通の口へ告げる（この段の記録の再試行に数える）
-        if (retry !== undefined) gateway.noteRetry("content");
-        outcome = await runNameTable({
-          plan: input.plan,
-          list,
-          documents: input.documents,
-          gateway,
-          ...(retry === undefined ? {} : { previous: retry }),
-          onRejected: rejectionSink("name-table", call),
-          ...withLedger,
-        });
-      } catch (error) {
-        pushRecord("name-table", "failed", before, start, null);
-        throw error;
-      }
-      if (!outcome.ok) {
-        const attribution = stageFailureAttribution("name-table", outcome.failure);
-        pushRecord("name-table", "failed", before, start, attribution.kind);
-        // T1' の落ち（中身）は 2 回目へ（前回の候補と作り直しの指示をデータで）。それ以外の失敗は止める
-        if (outcome.failure.kind === "unmet" && outcome.response !== undefined && round < NAME_TABLE_ROUNDS) {
-          previous = { response: outcome.response, problems: outcome.failure.problems, rejections: [], advice: [] };
-          continue;
-        }
-        throw new RunStop(attribution);
-      }
-      pushRecord("name-table", "ok", before, start, null);
-      const output = outcome.value;
-
+    /**
+     * J4 → T1''（C3）を 1 回回す（表を組む段が T1 でも C2 でも同じ関数。旗 `v12.ids` の走りの C3 の表の型は同じ。Issue #593）
+     */
+    const checkTableRound = async (round: number, output: { readonly table: NameTable; readonly tableSha256: string }) => {
       // J4（判定の口があるときだけ。予算の包みを渡す。助言であって門ではない。D5）
       const advice =
         judgeBudget === undefined
@@ -990,20 +972,130 @@ async function runV11a(
       const rejections = semantic.judgments.filter(
         (judgment): judgment is SemanticRejection => judgment.verdict === "reject",
       );
-      // 拒否が残れば、2 回目が未使用なら 2 回目（拒否と印をデータで）。使用済みなら持ち越し
-      if (rejections.length > 0 && round < NAME_TABLE_ROUNDS) {
-        previous = { response: output.response, problems: [], rejections, advice: marks };
-        continue;
+      return { semantic, advice, marks, rejections };
+    };
+
+    if (flags.ids && resume === undefined) {
+      // ── 旗 `v12.ids`：C1 語彙（3 束。束ごとに 1 記録）→ C2 要件の写像 → J4 → C3（08 §4。Issue #593）──────
+      let rows: readonly NameTableRow[] = [];
+      for (const bundle of VOCABULARY_BUNDLES) {
+        const before = meterState();
+        const start = input.now();
+        let outcome: Awaited<ReturnType<typeof runVocabularyBundle>>;
+        try {
+          outcome = await runVocabularyBundle({ bundle, plan: input.plan, list, documents: input.documents, gateway, rows, ...withLedger });
+        } catch (error) {
+          pushRecord("vocabulary", "failed", before, start, null);
+          throw error;
+        }
+        if (!outcome.ok) {
+          const attribution = stageFailureAttribution("vocabulary", outcome.failure);
+          pushRecord("vocabulary", "failed", before, start, attribution.kind, outcome.references);
+          throw new RunStop(attribution);
+        }
+        pushRecord("vocabulary", "ok", before, start, null, outcome.references);
+        rows = outcome.rows;
       }
-      adopted = { table: output.table, tableSha256: output.tableSha256, semantic, advice };
-      break;
+      let mappingPrevious: MappingPrevious | undefined;
+      let firstRound: typeof adopted;
+      for (let round = 1; round <= MAPPING_ROUNDS; round += 1) {
+        const retry = mappingPrevious;
+        const before = meterState();
+        const start = input.now();
+        let outcome: MappingOutcome;
+        try {
+          // C3 の拒否のあとの 2 回目（中身のやり直し）を共通の口へ告げる（この段の記録の再試行に数える）
+          if (retry !== undefined) gateway.noteRetry("content");
+          outcome = await runMapping({
+            plan: input.plan,
+            list,
+            documents: input.documents,
+            gateway,
+            rows,
+            ...(retry === undefined ? {} : { previous: retry }),
+            ...withLedger,
+          });
+        } catch (error) {
+          pushRecord("mapping", "failed", before, start, null);
+          throw error;
+        }
+        if (!outcome.ok) {
+          const attribution = stageFailureAttribution("mapping", outcome.failure);
+          pushRecord("mapping", "failed", before, start, attribution.kind, outcome.references);
+          // 2 回目が C2' に落ちても形の再試行は無く、前回の写像のまま拒否の要件を持ち越す（08 §4.1）
+          if (retry !== undefined && firstRound !== undefined && outcome.failure.kind === "unmet") {
+            adopted = firstRound;
+            break;
+          }
+          throw new RunStop(attribution);
+        }
+        pushRecord("mapping", "ok", before, start, null, outcome.references);
+        const output = outcome.value;
+        const { semantic, advice, marks, rejections } = await checkTableRound(round, output);
+        const checked = { table: output.table, tableSha256: output.tableSha256, semantic, advice };
+        // 拒否が残れば、2 回目が未使用なら C2 の 2 回目（前回の写像・拒否・印をデータで。C1 は呼ばない）。使用済みなら持ち越し
+        if (rejections.length > 0 && round < MAPPING_ROUNDS) {
+          firstRound = checked;
+          mappingPrevious = { response: output.response, rejections, advice: marks };
+          continue;
+        }
+        adopted = checked;
+        break;
+      }
+    } else {
+      // 開始 T2・B1 は T1〜T1'' を呼ばない（凍結した表と点検結果から入る）
+      const nameTableRounds = resume === undefined ? NAME_TABLE_ROUNDS : 0;
+      for (let round = 1; round <= nameTableRounds; round += 1) {
+        const call = round;
+        const retry = previous;
+        const before = meterState();
+        const start = input.now();
+        let outcome: NameTableOutcome;
+        try {
+          // 中身のやり直し（T1 の 2 回目）を共通の口へ告げる（この段の記録の再試行に数える）
+          if (retry !== undefined) gateway.noteRetry("content");
+          outcome = await runNameTable({
+            plan: input.plan,
+            list,
+            documents: input.documents,
+            gateway,
+            ...(retry === undefined ? {} : { previous: retry }),
+            onRejected: rejectionSink("name-table", call),
+            ...withLedger,
+          });
+        } catch (error) {
+          pushRecord("name-table", "failed", before, start, null);
+          throw error;
+        }
+        if (!outcome.ok) {
+          const attribution = stageFailureAttribution("name-table", outcome.failure);
+          pushRecord("name-table", "failed", before, start, attribution.kind);
+          // T1' の落ち（中身）は 2 回目へ（前回の候補と作り直しの指示をデータで）。それ以外の失敗は止める
+          if (outcome.failure.kind === "unmet" && outcome.response !== undefined && round < NAME_TABLE_ROUNDS) {
+            previous = { response: outcome.response, problems: outcome.failure.problems, rejections: [], advice: [] };
+            continue;
+          }
+          throw new RunStop(attribution);
+        }
+        pushRecord("name-table", "ok", before, start, null);
+        const output = outcome.value;
+
+        const { semantic, advice, marks, rejections } = await checkTableRound(round, output);
+        // 拒否が残れば、2 回目が未使用なら 2 回目（拒否と印をデータで）。使用済みなら持ち越し
+        if (rejections.length > 0 && round < NAME_TABLE_ROUNDS) {
+          previous = { response: output.response, problems: [], rejections, advice: marks };
+          continue;
+        }
+        adopted = { table: output.table, tableSha256: output.tableSha256, semantic, advice };
+        break;
+      }
     }
     if (adopted === undefined) throw new Error("名前の表：採用した表が無い（回す部分の前提が壊れた）");
     const table = adopted.table;
     const tableSha256 = adopted.tableSha256;
     const conversion = toV1(table);
-    materialStore.design = await acceptSlot(conversion.design, lastOkStageIndex("name-table"));
-    materialStore.mappings = await acceptSlot(conversion.mappings, lastOkStageIndex("name-table"));
+    materialStore.design = await acceptSlot(conversion.design, lastOkStageIndex(tableStage));
+    materialStore.mappings = await acceptSlot(conversion.mappings, lastOkStageIndex(tableStage));
 
     // ── 持ち越し（T1 の unresolved・T1'' の拒否。A1）。残る要件が 0 なら T2 を呼ばない（D15）────
     const baseCarry = await carryOverStep(() =>

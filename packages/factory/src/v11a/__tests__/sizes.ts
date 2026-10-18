@@ -22,7 +22,7 @@ import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-
 import { AGENT_LIMITS } from "../../limits.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
 import type { JudgeAnswer } from "../../judge.js";
-import { draftOf, t1ResponseOf } from "./fixtures.js";
+import { codeIdRenameOf, draftOf, idsResponseList, idsResponsesOf, t1ResponseOf, withCodeIds } from "./fixtures.js";
 import type { NameTable, NameTableRow } from "../names.js";
 import { ledgerViewOf, resolveV12Flags, type V12Flags } from "../../v12/ledger.js";
 
@@ -50,8 +50,12 @@ export interface SizedMaterials {
   readonly plan: ConfirmedPlan;
   readonly list: RequirementList;
   readonly table: NameTable;
-  /** T1 の応答（下書きの形。要件 ID を持たず写しを添える） */
+  /** T1 の応答（下書きの形。要件 ID を持たず写しを添える。旗 `v12.ids` が off の走りだけ） */
   readonly nameTableResponse: () => Record<string, unknown>;
+  /**
+   * 表を組む段の応答を呼ばれる順に（旗 `v12.ids` が on なら C1 の 3 束と C2 の 4 つ、off なら T1 の 1 つ。Issue #593）
+   */
+  readonly tableResponses: () => readonly Record<string, unknown>[];
   /** J4 の偽物の判定の答え（所属の組ごと。印なし＝値 0.9） */
   readonly adviceAnswers: () => Readonly<Record<string, JudgeAnswer>>;
   /** T1'' と B3' の判定（`rejects` の要件だけ拒否。省けば全部受理） */
@@ -135,7 +139,7 @@ export function buildSized(requirementCount: number, testCount: number, flags?: 
     }
   });
   const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
-  const table: NameTable = {
+  const baseTable: NameTable = {
     rows,
     ownership: ids.map((id, index) => ({
       requirementId: id,
@@ -151,6 +155,11 @@ export function buildSized(requirementCount: number, testCount: number, flags?: 
       nature: isStructural(index) ? ("existence-only" as const) : ("ruled" as const),
     })),
   };
+  // 旗 `v12.ids` の走りは、表の ID をコードの形（E1・E1.F2・V1…）にし、行を C1 が組む順に並べ、出典を持たない（Issue #593）。
+  // 試験の仕様の応答も同じ ID で対象を指す。off の走りの値は変えない
+  const rename = resolvedFlags.ids ? codeIdRenameOf(baseTable) : new Map<string, string>();
+  const rid = (id: string): string => rename.get(id) ?? id;
+  const table: NameTable = resolvedFlags.ids ? withCodeIds(baseTable) : baseTable;
 
   const rawTest = (options: {
     readonly id: string;
@@ -183,11 +192,11 @@ export function buildSized(requirementCount: number, testCount: number, flags?: 
       id: `t${n}-${kind}${suffix}`,
       requirementId: `R${n}`,
       targetKind: "field",
-      roleId: `f.item.v${n}`,
+      roleId: rid(`f.item.v${n}`),
       kind,
       operation: "validate",
       observes: "validation",
-      input: { [`f.item.v${n}`]: value },
+      input: { [rid(`f.item.v${n}`)]: value },
       expected: kind === "abnormal" ? { kind: "error", value: null, code: "E_INVALID" } : { kind: "ok", value: "true", code: null },
       assertion: null,
     });
@@ -198,13 +207,13 @@ export function buildSized(requirementCount: number, testCount: number, flags?: 
       id: `t${n}-shows`,
       requirementId: `R${n}`,
       targetKind: "screen",
-      roleId: `s.view${n}`,
+      roleId: rid(`s.view${n}`),
       kind: "normal",
       operation: "structure",
       observes: "view-structure",
       input: {},
       expected: { kind: "ok", value: "true", code: null },
-      assertion: { check: "view-shows", expected: null, refEntity: null, role: `f.item.w${n}` },
+      assertion: { check: "view-shows", expected: null, refEntity: null, role: rid(`f.item.w${n}`) },
     });
   };
 
@@ -265,6 +274,7 @@ export function buildSized(requirementCount: number, testCount: number, flags?: 
     list,
     table,
     nameTableResponse: () => t1ResponseOf(draftOf(list, table), ledger),
+    tableResponses: () => (resolvedFlags.ids ? idsResponseList(idsResponsesOf(list, table, ledger)) : [t1ResponseOf(draftOf(list, table), ledger)]),
     adviceAnswers: () => {
       const answers: Record<string, JudgeAnswer> = {};
       for (const entry of table.ownership) {
