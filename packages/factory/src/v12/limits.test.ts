@@ -19,7 +19,10 @@ import {
   V12_STAGE_FRAME_DEFINITIONS,
   V12_STAGE_FRAMES,
   V12_V11A_FRAME_MAP,
+  V12_IDS_FRAME_MAP,
 } from "./limits.js";
+import { VOCABULARY_BUNDLES } from "./ids.js";
+import { MAPPING_ROUNDS } from "./stages/mapping.js";
 import { SEARCH_REPAIR_BUDGET } from "./search-repair.js";
 
 interface NodeFileSystem {
@@ -164,5 +167,23 @@ describe("受入の題材の言葉が無い（表・手 3p の試験・fixture�
         ...("review" in definition ? [definition.review] : []),
       ]),
     );
+  });
+});
+
+describe("旗 v12.ids の段の枠（手 3a・Issue #593）", () => {
+  it("C1（vocabulary）・C2（mapping）の写しの値は段のコードの定数と同じで、§4.1 の C1・C2 の行の枠を超えない。上限の表の値は変えない", () => {
+    const vocabulary = V12_IDS_FRAME_MAP.find((entry) => entry.stage === "vocabulary");
+    const mapping = V12_IDS_FRAME_MAP.find((entry) => entry.stage === "mapping");
+    expect(vocabulary).toEqual({ stage: "vocabulary", frame: "C1", rounds: 1, shapeAttempts: STEP_ATTEMPTS, units: VOCABULARY_BUNDLES.length, maxLogical: VOCABULARY_BUNDLES.length * STEP_ATTEMPTS });
+    expect(mapping).toEqual({ stage: "mapping", frame: "C2", rounds: MAPPING_ROUNDS, shapeAttempts: STEP_ATTEMPTS, units: 1, maxLogical: STEP_ATTEMPTS + 1 });
+    for (const entry of V12_IDS_FRAME_MAP) {
+      const frame = V12_STAGE_FRAMES.find((candidate) => candidate.stage === entry.frame);
+      expect(frame, entry.frame).toBeDefined();
+      if (frame === undefined) continue;
+      const perUnit = (frame.initial?.count ?? 0) + (frame.shape?.count ?? 0) + (frame.content?.count ?? 0);
+      expect(entry.maxLogical, entry.stage).toBeLessThanOrEqual(perUnit * entry.units);
+    }
+    expect(V12_CALL_LIMITS).toEqual({ logicalCalls: 72, realAttempts: 144, judgeBranch: 80 });
+    expect(factory.V12_IDS_FRAME_MAP).toBe(V12_IDS_FRAME_MAP);
   });
 });

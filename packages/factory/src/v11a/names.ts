@@ -136,6 +136,15 @@ export interface NameTableSource {
   readonly quote: string;
 }
 
+/**
+ * 旗 `v12.ids` の行の出典（実行時の値は null。型は `NameTableSource` のまま渡す。Issue #593）。T2 に見せる行の出典は null に
+ * なり、T1' の口（`checkVocabularyRows`・`checkMappedTable`）だけが受ける
+ */
+export const IDS_NO_SOURCE = null as unknown as NameTableSource;
+
+/** 行の出典が無い（旗 `v12.ids` の行）か */
+export const hasNoSource = (row: Pick<NameTableRow, "source">): boolean => (row.source as NameTableSource | null) === null;
+
 /** 表の 1 行 */
 export interface NameTableRow {
   /** 表の ID（全体で一意。試験が対象を指す鍵。D1） */
@@ -147,6 +156,10 @@ export interface NameTableRow {
   readonly name: string;
   /** 要件に結んだ役割の説明（1 文） */
   readonly role: string;
+  /**
+   * 出典。旗 `v12.ids` が on の走り（C1 が組んだ表）は**実行時に null**（`IDS_NO_SOURCE`。出典・引用・位置の対応を持たない。
+   * 08 §6・Issue #593）。型は off の表の形のままにする（表を読む段・試験の型を変えない）。off の表は必ず持ち、null なら T1' が落とす
+   */
   readonly source: NameTableSource;
   readonly type: NameTableRowType;
   /** 選択肢のキーの並び（enum の項目だけ。ほかは null） */
@@ -825,6 +838,9 @@ export function sourcePositionOf(
 
 // ── (b)〜(g) 表の検査（T1'）────────────────────────────────────────────
 
+/** 出典が null の行を、出典を要る表（旗 off）で落とす固定文（Issue #593） */
+export const NULL_SOURCE_MESSAGE = "行に出典が無い";
+
 const isComputationType = (type: NameTableRowType): type is ComputationRowType =>
   type !== null && typeof type === "object" && "valueType" in type;
 const isScreenType = (type: NameTableRowType): type is ScreenRowType =>
@@ -932,6 +948,10 @@ interface TableCheckOptions {
   readonly rowIdsOwnedByDropped?: ReadonlySet<string>;
   /** 性質の台帳の導出（旗 on。Issue #547） */
   readonly ledger?: LedgerView;
+  /** 行の出典が null であることを受ける（旗 `v12.ids` の C1'・C2'。出典の検査は欄が無いので掛からない。Issue #593） */
+  readonly sourceless?: boolean;
+  /** 行の検査（(b)(c)(d)）だけを掛け、所属・確かめ方・分類（(e)(g)）と孤立した行を見ない（C1'。Issue #593） */
+  readonly rowsOnly?: boolean;
 }
 
 function checkNameTableWith(
@@ -1024,9 +1044,11 @@ function checkNameTableWith(
     checkRowType(row, field, problems, options.ledger);
     if ((options.ledger?.aggregateKinds.length ?? 0) > 0) checkComputationAggregate(row, field);
     if (row.role.trim() === "") problems.push({ field: `${field}.role`, message: "役割の説明が空である" });
-    const sourceRequirement = requirementById.get(row.source.requirementId);
+    const sourceRequirement = hasNoSource(row) ? undefined : requirementById.get(row.source.requirementId);
     if (skipSourceRows.has(index)) {
       // 写しの段で問題にした行。結び付けが仮なので、出典の検査は掛けない
+    } else if (hasNoSource(row)) {
+      if (options.sourceless !== true) problems.push({ field: `${field}.source`, message: NULL_SOURCE_MESSAGE });
     } else if (sourceRequirement === undefined) {
       problems.push({ field: `${field}.source.requirementId`, message: "出典の要件 ID が一覧に無い" });
     } else if (!isSourceQuoteOf(sourceRequirement, row.source.quote)) {
@@ -1084,6 +1106,8 @@ function checkNameTableWith(
       problems.push({ field: `${field}.refEntity`, message: "参照の項目に参照先が無い" });
     }
   });
+
+  if (options.rowsOnly === true) return problems;
 
   // (g) 要件ごとにちょうど 1 つ（所属・確かめ方・分類）
   const once = <T extends { readonly requirementId: string }>(entries: readonly T[], name: string, missing: string) => {
@@ -1464,4 +1488,65 @@ export function nameTableSha256(table: NameTable): Promise<string> {
       classification: table.classification,
     }),
   );
+}
+
+// ── 旗 `v12.ids` の検査の口（C1'・C2'。08 §4・§6。Issue #593）──────────────────────
+//
+// 表の行は C1 がコードで ID を振って組み、出典は null（写し・引用を持たない）。検査は T1' と同じ関数（`checkNameTableWith`）で
+// 掛け、出典の検査だけを外す（欄が無い）。C1' は行の検査 (b)(c)(d) だけ、C2' は所属・確かめ方・分類 (e)(g) まで全部。
+
+/** C1'：組み上げた行に (b)(c)(d) を掛ける（今の T1' と同じ固定文。出典は null を受ける） */
+export function checkVocabularyRows(
+  list: RequirementList,
+  rows: readonly NameTableRow[],
+  options: NameTableLedgerOptions = {},
+): readonly Problem[] {
+  return checkNameTableWith(
+    list,
+    { rows, ownership: [], verification: [], classification: [] },
+    [],
+    { sourceless: true, rowsOnly: true, ...(options.ledger === undefined ? {} : { ledger: options.ledger }) },
+  );
+}
+
+/** C2'：C1 の行と写像で組んだ表に (b)〜(g) を掛ける（出典は null を受ける。写し・引用・位置の検査は無い） */
+export function checkMappedTable(
+  list: RequirementList,
+  table: NameTable,
+  documents: readonly PromptDocument[],
+  options: NameTableLedgerOptions = {},
+): readonly Problem[] {
+  return checkNameTableWith(list, table, documents, {
+    sourceless: true,
+    ...(options.ledger === undefined ? {} : { ledger: options.ledger }),
+  });
+}
+
+/** C2 の応答の要件ごとの 1 件（要件 ID を応答が書く。写しは無い） */
+export interface MappingEntry {
+  readonly requirementId: string;
+  readonly roles: readonly NameTableRoleOwnership[];
+  readonly verification: NameTableDraftVerification;
+  readonly nature: RequirementNature;
+}
+
+/** C2 の応答の要件ごとの 1 件の形（所属・確かめ方・分類の形は T1 の下書きと同じ関数。合わなければ問題に足して undefined） */
+export function shapeOfMappingEntry(
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  options: NameTableLedgerOptions = {},
+): MappingEntry | undefined {
+  if (!isRecord(value)) {
+    problems.push({ field, message: "要件ごとの 1 件は写像（object）であること" });
+    return undefined;
+  }
+  const before = problems.length;
+  const requirementId = value["requirementId"];
+  if (!isNonEmptyString(requirementId)) {
+    problems.push({ field: `${field}.requirementId`, message: "要件 ID は空でない文字列であること" });
+  }
+  const draft = shapeOfDraftRequirement({ ...value, copy: "-" }, field, problems, options.ledger);
+  if (problems.length !== before || draft === undefined) return undefined;
+  return { requirementId: requirementId as string, roles: draft.roles, verification: draft.verification, nature: draft.nature };
 }

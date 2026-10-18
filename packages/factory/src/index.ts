@@ -92,3 +92,7 @@ export * from "./v12/locate.js";
 export * from "./v12/stages/field-repair.js";
 // v1.2 の呼び出しの上限の表（段ごとの論理の枠・実試行の門・判定の枝。旗 `v12.ids`。手 3p・Issue #592）
 export * from "./v12/limits.js";
+// ID はコードが振る（C1 語彙の 3 束・C2 要件の写像。旗 `v12.ids`。手 3a・Issue #593）
+export * from "./v12/ids.js";
+export * from "./v12/stages/vocabulary.js";
+export * from "./v12/stages/mapping.js";

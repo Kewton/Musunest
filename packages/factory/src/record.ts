@@ -52,6 +52,9 @@ export const STAGE_IDS = [
   "decl-check", // B3' 宣言の意味の点検
   "coverage", // B6 棄却のあとの網羅
   "carry-over", // 全件持ち越しの停止（D15）
+  // v1.2 の段（08-architecture-v1.2.md §4。Issue #593）。**末尾に足すだけ**で、上の並びは変えない。旗 `v12.ids` の走りだけが出す
+  "vocabulary", // C1 語彙（束ごとに 1 記録。C1' を含む）
+  "mapping", // C2 要件の写像（呼び出しごとに 1 記録。C2' を含む）
 ] as const;
 export type StageId = (typeof STAGE_IDS)[number];
 
@@ -204,7 +207,21 @@ export interface StageRecord {
    */
   readonly retries: RetryCounts;
   readonly failure_kind: FailureKind | null;
+  /**
+   * 参照の照合の数（`vocabulary`・`mapping` の記録だけが持つ。固定の鍵 `REFERENCE_COUNT_KEYS`。ID の値は持たない。Issue #593）。
+   * ほかの段の記録には欄が無い（記録の形は変えない）
+   */
+  readonly references?: StageReferenceCounts;
 }
+
+/** 参照の照合の数の鍵（照らした参照・知らない ID・重複・別の束の ID。Issue #593） */
+export const REFERENCE_COUNT_KEYS = ["checked", "unknown_ids", "duplicates", "cross_bundle_ids"] as const;
+
+/** 参照の照合の数（段の記録の欄） */
+export type StageReferenceCounts = { readonly [K in (typeof REFERENCE_COUNT_KEYS)[number]]: number };
+
+/** 参照の照合の数を持てる段（Issue #593） */
+export const REFERENCE_COUNT_STAGES: readonly StageId[] = ["vocabulary", "mapping"];
 
 /** 裁定の数（維持・棄却・裁定不能。§1.3） */
 export interface ArbitrationCounts {
@@ -324,7 +341,12 @@ export function makeStageRecord(
   counts: CallCounts,
   failureKind: FailureKind | null,
   operation: StageOperation | null = null,
+  references?: StageReferenceCounts,
 ): StageRecord {
+  const referencesField =
+    references === undefined || !REFERENCE_COUNT_STAGES.includes(stage)
+      ? {}
+      : { references: Object.fromEntries(REFERENCE_COUNT_KEYS.map((key) => [key, references[key]])) as StageReferenceCounts };
   return {
     stage,
     operation: pickStageOperation(operation),
@@ -340,6 +362,7 @@ export function makeStageRecord(
     attempts: pickAttempts(counts.attempts),
     retries: pickRetries(counts.retries),
     failure_kind: failureKind,
+    ...referencesField,
   };
 }
 
@@ -461,6 +484,7 @@ export function buildRunRecord(input: RunRecord): RunRecord {
         { attempts: stage.attempts, retries: stage.retries },
         stage.failure_kind,
         stage.operation,
+        stage.references,
       ),
     ),
     arbitration: {

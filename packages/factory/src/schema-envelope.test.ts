@@ -39,6 +39,12 @@ import { SURFACE_DIFF_SCHEMA_NAME } from "./plan/surface.js";
 import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./v11a/stages/name-table.js";
 import { TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
 import { PROPERTY_LEDGER_VIEW, V12_FLAGS_OFF, V12_PIPELINE_FLAGS, fromPublicV12Flags } from "./v12/ledger.js";
+import { VOCABULARY_BUNDLES } from "./v12/ids.js";
+import { MAPPING_SCHEMA_NAME, mappingSchemaOf } from "./v12/stages/mapping.js";
+import { VOCABULARY_SCHEMA_NAMES, vocabularySchemaOf } from "./v12/stages/vocabulary.js";
+
+/** 旗 v12.ids の段の枝の名前（Issue #593） */
+const IDS_STAGES = ["vocabulary-entities", "vocabulary-fields", "vocabulary-behaviors", "mapping"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -483,9 +489,10 @@ describe("経路 v1.2 の封筒は 1 つ（旗の組から導き、全段で同�
     expect(ENVELOPE_SCHEMA_V12).toEqual(buildEnvelopeSchema(STAGE_ENVELOPE_ENTRIES_V12));
     expect(envelopeOf("v1.2")).toEqual({ name: "stage-envelope-v12", schema: ENVELOPE_SCHEMA_V12, entries: STAGE_ENVELOPE_ENTRIES_V12 });
     expect(envelopeOf("v1.2").schema).toBe(ENVELOPE_SCHEMA_V12);
-    // 今の旗の組（ledger on）では、T1・T2 の枝だけが台帳から導いた schema で、ほかの枝は v1.1α と同じ
-    expect(STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage)).toEqual([...V11A_STAGES]);
-    for (const [index, entry] of STAGE_ENVELOPE_ENTRIES_V12.entries()) {
+    // 今の旗の組（ledger on）では、T1・T2 の枝だけが台帳から導いた schema で、ほかの枝は v1.1α と同じ。旗 ids が on なので
+    // 末尾に C1 の 3 束と C2 の枝がある（Issue #593。下の describe で照らす）
+    expect(STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage)).toEqual([...V11A_STAGES, ...IDS_STAGES]);
+    for (const [index, entry] of STAGE_ENVELOPE_ENTRIES_V12.slice(0, V11A_STAGES.length).entries()) {
       const expected =
         entry.stage === NAME_TABLE_SCHEMA_NAME
           ? nameTableSchemaOf(PROPERTY_LEDGER_VIEW)
@@ -563,5 +570,41 @@ describe("経路 v1.2 の封筒は 1 つ（旗の組から導き、全段で同�
     const t1 = resolveStageEnvelope(NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf(PROPERTY_LEDGER_VIEW), "v1.1a");
     expect(t1?.name).toBe(ENVELOPE_SCHEMA_NAME_V11A);
     expect(t1?.schema).toBe(ENVELOPE_SCHEMA_V12_LEDGER);
+  });
+});
+
+describe("旗 v12.ids の C1・C2 の枝は v1.2 の封筒にだけ載る（Issue #593）", () => {
+  it("v1.2 の封筒の末尾に C1 の 3 束と C2 の枝があり、schema は段が渡すものと同じ導出（strict）", () => {
+    const tail = STAGE_ENVELOPE_ENTRIES_V12.slice(V11A_STAGES.length);
+    expect(tail).toEqual([
+      ...VOCABULARY_BUNDLES.map((bundle) => ({ stage: VOCABULARY_SCHEMA_NAMES[bundle], schema: vocabularySchemaOf(bundle, PROPERTY_LEDGER_VIEW) })),
+      { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(PROPERTY_LEDGER_VIEW) },
+    ]);
+    for (const entry of tail) {
+      expect(strictProblems(buildStageBranch(entry)), entry.stage).toEqual([]);
+      const resolved = resolveStageEnvelope(entry.stage, JSON.parse(JSON.stringify(entry.schema)), "v1.2");
+      expect(resolved?.schema, entry.stage).toBe(ENVELOPE_SCHEMA_V12);
+    }
+  });
+
+  it("v1・v1.1α の封筒の JSON に C1・C2 の名前が無く、識別子 v1・v1.1a では引けない", () => {
+    for (const name of IDS_STAGES) {
+      for (const schema of [ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_V11A]) expect(JSON.stringify(schema).includes(`"${name}"`), name).toBe(false);
+      expect(envelopeStageFor(name, "v1"), name).toBeUndefined();
+      expect(envelopeStageFor(name, "v1.1a"), name).toBeUndefined();
+    }
+  });
+
+  it("別名（旗 ledger の封筒）は残し、ids を含まない組に固定する：#588 の一覧（ledger on・ids off の導出）と同じで C1・C2 の枝が無い", () => {
+    expect(STAGE_ENVELOPE_ENTRIES_V12_LEDGER).toEqual(stageEnvelopeEntriesV12Of({ ledger: true, ids: false }));
+    expect(STAGE_ENVELOPE_ENTRIES_V12_LEDGER).toEqual(stageEnvelopeEntriesV12Of({ ledger: true }));
+    expect(STAGE_ENVELOPE_ENTRIES_V12_LEDGER.map((entry) => entry.stage)).toEqual([...V11A_STAGES]);
+    for (const name of IDS_STAGES) expect(JSON.stringify(ENVELOPE_SCHEMA_V12_LEDGER).includes(`"${name}"`), name).toBe(false);
+    // 識別子 v1.1a の旗 on の library の呼び手は、今までどおり ids を含まない封筒を送る（入口の v1.2 はここを通らない）
+    const t1 = resolveStageEnvelope(NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf(PROPERTY_LEDGER_VIEW), "v1.1a");
+    expect(t1?.schema).toBe(ENVELOPE_SCHEMA_V12_LEDGER);
+    expect(t1?.schema).not.toEqual(ENVELOPE_SCHEMA_V12);
+    // 旗 off（全部 off）の v1.2 の導出は v1.1α と同じ一覧のまま
+    expect(stageEnvelopeEntriesV12Of({ ledger: false, ids: false })).toBe(STAGE_ENVELOPE_ENTRIES_V11A);
   });
 });

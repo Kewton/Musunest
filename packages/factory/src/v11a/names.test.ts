@@ -26,10 +26,16 @@ import {
   fixtureNonRequirementList,
   fixtureNonRequirementTable,
   withAggregates,
+  withCodeIds,
   withoutEnumMembership,
   withoutWhenAndNonRequirement,
 } from "./__tests__/fixtures.js";
 import {
+  NULL_SOURCE_MESSAGE,
+  checkMappedTable,
+  checkVocabularyRows,
+  hasNoSource,
+  shapeOfMappingEntry,
   MIN_COPY_LENGTH,
   checkNameTable,
   checkNameTable as checkNameTableOf,
@@ -1499,5 +1505,48 @@ describe("旗 on：要件でない文の確かめ方 non-requirement（所属 0 
         { field: "requirements[5]", message: "要件の分類が無い" },
       ]);
     }
+  });
+});
+
+// ── 旗 v12.ids の検査の口（C1'・C2'。Issue #593）────────────────────────────────
+
+describe("旗 v12.ids の検査の口（出典は null。写し・引用の検査は掛からない）", () => {
+  const list = fixtureList();
+  const table = withCodeIds(fixtureTable());
+
+  it("C1'（checkVocabularyRows）：コードの形の ID の行は問題 0。名前の規則・同じ場所・options の固定文は今の T1' と同じ", () => {
+    expect(checkVocabularyRows(list, table.rows)).toEqual([]);
+    const [first, ...rest] = table.rows;
+    if (first === undefined) return;
+    const messages = checkVocabularyRows(list, [{ ...first, name: "1bad" }, ...rest]).map((problem) => problem.message);
+    expect(messages).toContain("名前が規則（英字で始まる英数字）に合わない");
+    const duplicated = checkVocabularyRows(list, [...table.rows, { ...first, id: "E9" }]).map((problem) => problem.message);
+    expect(duplicated).toContain("同じ場所（種類・entity・名前）を指す ID が 2 つある（別名は書けない）");
+    // 所属・確かめ方・分類（(e)(g)）と孤立した行は見ない
+    expect(duplicated).not.toContain("どの要件にも所属しない行がある");
+  });
+
+  it("C2'（checkMappedTable）：表全体は問題 0。所属の欠落は今の (g) の固定文で落ちる", () => {
+    expect(checkMappedTable(list, table, FIXTURE_DOCUMENTS)).toEqual([]);
+    const missing = checkMappedTable(list, { ...table, ownership: table.ownership.slice(1) }, FIXTURE_DOCUMENTS).map((problem) => problem.message);
+    expect(missing).toContain("要件の所属が無い");
+  });
+
+  it("旗 off の表の検査（checkNameTable）は出典が null の行を固定文で落とす（出典を要る形のまま）", () => {
+    const messages = checkNameTable(list, table, FIXTURE_DOCUMENTS).map((problem) => problem.message);
+    expect(messages).toContain(NULL_SOURCE_MESSAGE);
+    expect(messages.filter((message) => message === NULL_SOURCE_MESSAGE)).toHaveLength(table.rows.length);
+    expect(hasNoSource(table.rows[0] ?? fixtureTable().rows[0]!)).toBe(true);
+    expect(hasNoSource(fixtureTable().rows[0]!)).toBe(false);
+  });
+
+  it("C2 の要件ごとの 1 件の形（shapeOfMappingEntry）：要件 ID が要り、写し（copy）の欄は見ない", () => {
+    const problems: Problem[] = [];
+    const entry = shapeOfMappingEntry({ requirementId: "R1", roles: [], verification: { kind: "fixed-test", value: null }, nature: "ruled" }, "requirements[0]", problems);
+    expect(problems).toEqual([]);
+    expect(entry).toEqual({ requirementId: "R1", roles: [], verification: { kind: "fixed-test" }, nature: "ruled" });
+    const bad: Problem[] = [];
+    expect(shapeOfMappingEntry({ requirementId: "", roles: [], verification: { kind: "fixed-test" }, nature: "ruled" }, "requirements[0]", bad)).toBeUndefined();
+    expect(bad.map((problem) => problem.message)).toEqual(["要件 ID は空でない文字列であること"]);
   });
 });
