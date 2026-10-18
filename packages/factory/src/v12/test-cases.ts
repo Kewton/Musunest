@@ -5,17 +5,27 @@
 // assertion・期待の null の欄）は**コードが導いて**今の試験の形（v1 の ②' の raw の形）へ展開する（LLM を呼ばない純粋な関数）。
 //
 //   - 行 ID は振り直さない（入力と参照の行の rowId・評価の対象の行・ref・list の値に書いた行 ID をそのまま保つ）
-//   - observes は場合の値をそのまま使う（対象の種類 × 操作からは 1 つに決まらない。網羅の鍵を保つ）。組の誤りは展開後の
-//     評価可能性の検査が今までどおり落とす
+//   - observes は計算の行の場合だけ場合の値をそのまま使う（計算 × aggregate は value と empty-aggregate の 2 つがあり 1 つに
+//     決まらない。網羅の鍵を保つ。#625 R3）。項目・entity・操作の行の場合は null と書かせ、台帳から一意に決まる性質（項目・
+//     entity → validation、操作 → when）を展開が埋める（#653。計算で null・計算以外で null でない旧形は固定文で落とし、補わない）。
+//     組の誤りは展開後の評価可能性の検査が今までどおり落とす
 //   - 展開できない場合は固定文で落とす（黙って補わない・近い行に結ばない）。位置は cases の添字と欄名
 //
 // 展開した組には、呼ぶ側（`v11a/stages/test-spec.ts`）が今の形の検査と中身の検査を 1 つも省かずに掛ける。
-import { TEST_KINDS, type TestKind, type TestOperation } from "../fixed-test.js";
+import { TEST_KINDS, type RequirementNature, type TestKind, type TestOperation, type TestTargetKind } from "../fixed-test.js";
+import { AGENT_LIMITS } from "../limits.js";
+import type { RequirementList } from "../pipeline.js";
 import { isRecord, type Problem, type ShapeCheck } from "../stages/prompt.js";
 import { TEST_SUITE_SCHEMA, checkTestSuiteOutput } from "../stages/test-suite.js";
 import type { ComputationRowType, NameTable, NameTableRow } from "../v11a/names.js";
-import { GENERATED_TEST_CLOCK } from "./generated-tests.js";
-import type { LedgerView } from "./ledger.js";
+import {
+  GENERATED_TEST_CLOCK,
+  aggregateTargetsOf,
+  emptyAggregateCodeTestsOf,
+  normalOnlyOwnershipRequirementIds,
+  type GeneratedTests,
+} from "./generated-tests.js";
+import type { AggregateDataState, LedgerView } from "./ledger.js";
 
 /** 展開した試験の ID の接頭辞（コードが cases の順に連番を振る。コードが作る試験の `gen:` とは別） */
 export const TEST_CASE_ID_PREFIX = "case:";
@@ -35,7 +45,8 @@ export interface TestCase {
   readonly requirementId: string;
   readonly targetId: string;
   readonly kind: TestKind;
-  readonly observes: string;
+  /** 計算の行の場合だけ性質を書き、ほかは null（展開が台帳から埋める。#653） */
+  readonly observes: string | null;
   readonly input: { readonly rowId: string; readonly values: string };
   readonly targetRowId: string | null;
   readonly rows: readonly TestCaseRow[];
@@ -52,8 +63,33 @@ export interface TestCasesOutput {
 // ── JSON Schema（旗 ids の T2 の応答）──────────────────────────────────
 
 /**
+ * 計算の行の場合が書く観測する性質（台帳の評価の方法の表で、対象の種類が計算の組の性質。台帳の順・重なりは 1 つ。#653）。
+ * 今の台帳では value・empty-aggregate
+ */
+export function computationObservesOf(ledger: LedgerView): readonly string[] {
+  return [...new Set(ledger.combinations.filter((entry) => entry.targetKind === "computation").map((entry) => entry.observes))];
+}
+
+/**
+ * 計算でない行の場合の観測する性質を、台帳から導く（#653）。対象の種類 × 操作の組の性質のうち、確かめ方に結び付かない行
+ * （確かめ方に結び付いた性質〔既定値・選択肢の集合〕はコードが作る試験だけの性質）がちょうど 1 つのときだけ返す。決まらなければ
+ * undefined（展開が固定文で落とす。推測しない）
+ */
+export function derivedObservesOf(ledger: LedgerView, targetKind: TestTargetKind, operation: TestOperation): string | undefined {
+  const found = [
+    ...new Set(
+      ledger.combinations
+        .filter((entry) => entry.targetKind === targetKind && entry.operation === operation)
+        .map((entry) => entry.observes)
+        .filter((observes) => ledger.rowByObserves.get(observes)?.t1 == null),
+    ),
+  ];
+  return found.length === 1 ? found[0] : undefined;
+}
+
+/**
  * 場合の schema（旗 `v12.ids` の T2。strict の規則：すべての欄を required・additionalProperties false）。分類は今のまま。
- * observes の enum は台帳の順。期待は kind ごとの形（ok は value・error は code）の anyOf。
+ * observes は計算の行の性質（台帳の順）か null（#653）。期待は kind ごとの形（ok は value・error は code）の anyOf。
  */
 export function testCasesSchemaOf(ledger: LedgerView) {
   return {
@@ -72,7 +108,11 @@ export function testCasesSchemaOf(ledger: LedgerView) {
             requirementId: { type: "string" },
             targetId: { type: "string", description: "対象の表の id（その要件の所属にある id）" },
             kind: { type: "string", enum: [...TEST_KINDS] },
-            observes: { type: "string", enum: [...ledger.observes], description: "試験が観測する性質（評価の方法の表の組に限る）" },
+            observes: {
+              type: ["string", "null"],
+              enum: [...computationObservesOf(ledger), null],
+              description: "観測する性質（計算の行の場合だけ書く。項目・entity・操作の行の場合は null。コードが台帳から決める）",
+            },
             input: {
               type: "object",
               additionalProperties: false,
@@ -173,7 +213,7 @@ export function checkTestCasesOutput(output: unknown, ledger: LedgerView): Shape
     problems.push({ field: "cases", message: TEST_CASE_SHAPE_MESSAGES.cases });
     return { ok: false, problems };
   }
-  const known: readonly string[] = ledger.observes;
+  const known: readonly string[] = computationObservesOf(ledger);
   const cases: TestCase[] = [];
   (rawCases as readonly unknown[]).forEach((raw, index) => {
     const at = `cases[${index}]`;
@@ -189,8 +229,8 @@ export function checkTestCasesOutput(output: unknown, ledger: LedgerView): Shape
       problems.push({ field: `${at}.kind`, message: TEST_CASE_SHAPE_MESSAGES.kind });
     }
     const observes = raw["observes"];
-    if (typeof observes !== "string" || !known.includes(observes)) {
-      problems.push({ field: `${at}.observes`, message: `観測する性質は ${known.join("・")} のいずれかであること` });
+    if (observes !== null && (typeof observes !== "string" || !known.includes(observes))) {
+      problems.push({ field: `${at}.observes`, message: `観測する性質は ${known.join("・")} のいずれか（計算の行の場合）か null であること` });
     }
     const input = raw["input"];
     if (!isRecord(input)) {
@@ -246,6 +286,12 @@ export const TEST_CASE_EXPAND_MESSAGES = {
   targetRowId: "評価の対象の行の ID が、その場合の入力か参照の行の ID でない",
   emptyEntity: "空と明示する entity が、表の entity の行でない",
   expected: "期待の kind と欄が合わない（ok は value だけ、error は空でない code だけを書く）",
+  /** 計算の行の場合に observes が null（#653。補わない） */
+  observesMissing: "計算の行の場合は、観測する性質（observes）を書くこと",
+  /** 計算でない行の場合に observes を書いた（旧形。#653。黙って上書きしない） */
+  observesLegacy: "項目・entity・操作の行の場合の観測する性質（observes）は null にすること（コードが台帳から決める）",
+  /** 計算でない行の対象の種類 × 操作から、台帳の性質が 1 つに決まらない（#653） */
+  observesUndetermined: "対象の行の種類から、観測する性質が台帳で 1 つに決まらない",
 } as const;
 
 /** 展開した結果（今の試験の形の raw の応答と、試験 ID → 場合の添字の対応表） */
@@ -299,12 +345,12 @@ function valueKeysOf(text: string): readonly string[] {
 }
 
 /**
- * 場合を今の試験の形へ展開する（純粋。同じ場合と表から同じ組）。試験 ID は `case:` と cases の順の連番、操作は対象の行の種類から、
- * 対象の種類は行の kind、時計は定数、入力の契約は場合の rowId・targetRowId・emptyEntities のまま、参照データは rows ごとに
+ * 場合を今の試験の形へ展開する（純粋。同じ場合と表と台帳から同じ組）。試験 ID は `case:` と cases の順の連番、操作は対象の行の種類から、
+ * 観測する性質は計算の行なら場合の値・ほかは台帳から一意に導いた値（#653）、対象の種類は行の kind、時計は定数、入力の契約は場合の rowId・targetRowId・emptyEntities のまま、参照データは rows ごとに
  * 場合の rowId・対象（要件 ID・kind entity・場合の entity の行 ID）・値のまま、assertion は null、期待は kind に応じて value か
  * code を null で補う。表と合わない場合は 1 つでもあれば全部の問題を固定文で返す（補わない）。
  */
-export function expandTestCases(output: TestCasesOutput, table: NameTable): TestCasesExpansion {
+export function expandTestCases(output: TestCasesOutput, table: NameTable, ledger: LedgerView): TestCasesExpansion {
   const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
   const isEntity = (id: string): boolean => rowById.get(id)?.kind === "entity";
   const problems: Problem[] = [];
@@ -338,7 +384,20 @@ export function expandTestCases(output: TestCasesOutput, table: NameTable): Test
     });
     const expected = expectedOf(entry.expected);
     if (expected === undefined) problems.push({ field: `${at}.expected`, message: TEST_CASE_EXPAND_MESSAGES.expected });
-    if (problems.length > before || row === undefined || expected === undefined) return;
+    // observes：計算の行は場合の値、ほかは null と書かせて台帳から一意に埋める（#653。旧形と欠けは補わない）
+    let observes: string | undefined;
+    if (row !== undefined) {
+      if (row.kind === "computation") {
+        if (entry.observes === null) problems.push({ field: `${at}.observes`, message: TEST_CASE_EXPAND_MESSAGES.observesMissing });
+        else observes = entry.observes;
+      } else if (entry.observes !== null) {
+        problems.push({ field: `${at}.observes`, message: TEST_CASE_EXPAND_MESSAGES.observesLegacy });
+      } else {
+        observes = derivedObservesOf(ledger, row.kind, caseOperationOf(row));
+        if (observes === undefined) problems.push({ field: `${at}.observes`, message: TEST_CASE_EXPAND_MESSAGES.observesUndetermined });
+      }
+    }
+    if (problems.length > before || row === undefined || expected === undefined || observes === undefined) return;
     const id = `${TEST_CASE_ID_PREFIX}${String(index + 1)}`;
     caseIndexById.set(id, index);
     tests.push({
@@ -356,7 +415,7 @@ export function expandTestCases(output: TestCasesOutput, table: NameTable): Test
       })),
       expected,
       assertion: null,
-      observes: entry.observes,
+      observes,
     });
   });
   if (problems.length > 0) return { ok: false, problems };
@@ -686,4 +745,249 @@ export function retainedBundleOutput(previous: TestCasesOutput, discard: readonl
     classifications: [...previousClassifications.filter((entry) => keep(classificationIdOf(entry))), ...answerClassifications],
     cases: [...previous.cases.filter((entry) => keep(entry.requirementId)), ...answer.cases],
   };
+}
+
+// ── 必要な試験の枠（手 3i・Issue #653）─────────────────────────────────────
+//
+// 要件ごとに「コードが作った分（実値）・値の対象の候補・分類ごとの書く場合・残る本数」をコードが組み、T2 の要求のデータに渡す
+// （LLM を呼ばない純粋な関数。規則と schema は静的）。初回の枠には表の分類（T1）・期待の合否・宣言・表の名前を入れない：分類に依る
+// 分は ruled／existence-only の二枝を同じ文で両方並べ、どちらかを示唆しない。中身のやり直しでは、分類の照合と J2 を経て採った種類
+// （採用済み）の要件だけ、その種類の枝を実値（実際に組へ足したコードの試験・門が報告した不足・残る本数）で書く。
+
+/** 枠のコードの試験 1 本（対象の行・種類・観測する性質） */
+export interface TestCaseFrameCodeTest {
+  readonly targetId: string;
+  readonly kind: TestKind;
+  readonly observes: string;
+}
+
+/** ruled の枝で、表の分類が ruled のときだけコードが作る空の集計の行（その行の種類。#595 の生成の条件のまま） */
+export interface TestCaseFrameConditional {
+  readonly targetId: string;
+  readonly kinds: readonly TestKind[];
+  readonly note: string;
+}
+
+/** 初回の枠の ruled の枝 */
+export interface TestCaseFrameRuledBranch {
+  /** 決まりの対象ごとに書く種類（免除の集合なら空） */
+  readonly kinds: readonly TestKind[];
+  /** 決まりの対象を選ぶ候補（免除の集合なら空。どれが決まりの対象かは LLM が要件の文から選ぶ） */
+  readonly caseTargets: readonly string[];
+  readonly note: string;
+  readonly codeIfTableRuled: readonly TestCaseFrameConditional[];
+  /** 16 − この枝でコードが必ず作る数（切り捨てない。超えれば門が落とす） */
+  readonly remaining: number;
+}
+
+/** 初回の枠の existence-only の枝（やり直しの枠の採った種類の枝も同じ形の欄を持つ） */
+export interface TestCaseFrameExistenceBranch {
+  readonly kinds: readonly TestKind[];
+  /** 正常を書いてよい対象（コードの試験の無い計算の行と、条件のある操作の行） */
+  readonly caseTargets: readonly string[];
+  readonly maxCases: number;
+  readonly note: string;
+  readonly remaining: number;
+}
+
+/** 初回の枠 1 つ（要件ごと） */
+export interface InitialTestCaseFrame {
+  readonly requirementId: string;
+  readonly codeTests: readonly TestCaseFrameCodeTest[];
+  readonly valueTargets: readonly string[];
+  readonly normalTargets: readonly string[];
+  readonly ifRuled: TestCaseFrameRuledBranch;
+  readonly ifExistenceOnly: TestCaseFrameExistenceBranch;
+}
+
+/** やり直しの枠の不足 1 つ（門が報告した種類と、交差の集計の行のデータ状態） */
+export interface TestCaseFrameMissing {
+  readonly kind: TestKind;
+  readonly emptyAggregate: readonly { readonly targetId: string; readonly state: AggregateDataState }[];
+}
+
+/** やり直しの枠 1 つ（採用済みの要件だけ。採った種類の枝を実値で書く） */
+export interface RetryTestCaseFrame {
+  readonly requirementId: string;
+  readonly adopted: RequirementNature;
+  readonly codeTests: readonly TestCaseFrameCodeTest[];
+  readonly valueTargets: readonly string[];
+  readonly normalTargets: readonly string[];
+  readonly kinds: readonly TestKind[];
+  readonly caseTargets: readonly string[];
+  readonly maxCases: number | null;
+  readonly note: string;
+  readonly missing: readonly TestCaseFrameMissing[];
+  /** 16 − 実際に組へ足したコードの試験の数 */
+  readonly remaining: number;
+}
+
+/** 枠の固定文（値を埋めない） */
+export const TEST_CASE_FRAME_TEXTS = {
+  ruled:
+    "valueTargets のうち決まりの対象（要件の文から選ぶ）ごとに、正常・異常・境界の場合を書く。codeTests（コードが作る在ることの試験）は三種に数えない。",
+  ruledExempt: "所属が画面・entity の行だけなので、三種の場合を求めない（枠は空）。",
+  conditional: "境界・異常は表の分類が ruled のときだけコードが作る。書かない。",
+  existence:
+    "codeTests の対象（コードが在ることの試験を作った対象）には場合を書かない。caseTargets の対象には正常（normal）の場合だけを書いてよい。検査（validate）・異常・境界の場合は書かない。",
+  unsupported: "未対応：コードの在ることの試験も、正常を書ける対象（計算の行・条件のある操作の行）も無い。",
+  retryMissing:
+    "missing は門が報告した不足の種類。emptyAggregate の行は、集計元を空と明示した境界（empty）か集計元に触れない異常（unread）の場合をその行に書く（期待は集計の種類とデータ状態で決まる値）。",
+} as const;
+
+/** 枠を組む入力（持ち越しを除いた表・台帳・初回のコードの試験） */
+export interface TestCaseFramesInput {
+  readonly table: NameTable;
+  readonly ledger: LedgerView;
+  /** 要求の一覧（免除の集合を引く。枠を組む要件はこの一覧の要件） */
+  readonly list: RequirementList;
+  /** 初回にコードが作った試験（分類で絞る前。`generateTests` の結果） */
+  readonly generated: GeneratedTests;
+}
+
+const FRAME_LIMIT = AGENT_LIMITS.testsPerRequirement;
+
+const isOperationWithWhen = (row: NameTableRow): boolean =>
+  row.kind === "operation" && row.type !== null && typeof row.type === "object" && "hasWhen" in row.type && row.type.hasWhen === true;
+
+/** 値の対象の候補（表の所属の項目・entity・操作・計算の行。導いた親 entity・画面の行・表に無い行は入れない）と合法な正常の対象 */
+function frameTargetsOf(table: NameTable, requirementId: string): { readonly valueTargets: readonly string[]; readonly normalTargets: readonly string[] } {
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const roles = table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? [];
+  const owned = roles.flatMap((role) => {
+    const row = rowById.get(role.id);
+    return row === undefined || row.kind === "screen" ? [] : [row];
+  });
+  return {
+    valueTargets: owned.map((row) => row.id),
+    normalTargets: owned.filter((row) => row.kind === "computation" || isOperationWithWhen(row)).map((row) => row.id),
+  };
+}
+
+/** コードの試験の写し（対象・種類・観測する性質。並びは組の順） */
+function codeTestsOf(tests: GeneratedTests["tests"], observes: ReadonlyMap<string, string>, requirementId: string, skip: ReadonlySet<string>): readonly TestCaseFrameCodeTest[] {
+  return tests
+    .filter((test) => test.target.requirementId === requirementId && !skip.has(observes.get(test.id) ?? ""))
+    .map((test) => ({ targetId: test.target.roleId ?? "", kind: test.kind, observes: observes.get(test.id) ?? "" }));
+}
+
+/** existence-only の枝（初回と採った種類が existence-only のやり直しで同じ） */
+function existenceBranchOf(codeTests: readonly TestCaseFrameCodeTest[], normalTargets: readonly string[]): TestCaseFrameExistenceBranch {
+  const writable = normalTargets.length > 0;
+  return {
+    kinds: writable ? ["normal"] : [],
+    caseTargets: normalTargets,
+    maxCases: writable ? 1 : 0,
+    note: codeTests.length === 0 && !writable ? TEST_CASE_FRAME_TEXTS.unsupported : TEST_CASE_FRAME_TEXTS.existence,
+    remaining: FRAME_LIMIT - codeTests.length,
+  };
+}
+
+/**
+ * 初回の枠（要件の並びの順。純粋。同じ入力から同じ枠）。コードが作った分の実値は分類に依らずコードが作る試験だけ（空の集計は表の
+ * 分類が ruled のときだけ作られるので入れず、ruled の枝の `codeIfTableRuled` に条件つきで書く）。表の分類は読まない
+ */
+export function initialTestCaseFramesOf(input: TestCaseFramesInput, requirementIds: readonly string[]): readonly InitialTestCaseFrame[] {
+  const { table, ledger, list, generated } = input;
+  const aggregateIds = new Set(ledger.aggregateRows.map((row) => row.id));
+  const exempt = new Set(
+    normalOnlyOwnershipRequirementIds(table, ledger, list),
+  );
+  const aggregateTargets = aggregateTargetsOf(table);
+  return requirementIds.map((requirementId) => {
+    const codeTests = codeTestsOf(generated.tests, generated.observes, requirementId, aggregateIds);
+    const { valueTargets, normalTargets } = frameTargetsOf(table, requirementId);
+    const roles = table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? [];
+    const conditional = new Map<string, TestKind[]>();
+    for (const { test } of emptyAggregateCodeTestsOf(requirementId, roles, aggregateTargets, ledger)) {
+      const roleId = test.target.roleId ?? "";
+      conditional.set(roleId, [...(conditional.get(roleId) ?? []), test.kind]);
+    }
+    const isExempt = exempt.has(requirementId);
+    return {
+      requirementId,
+      codeTests,
+      valueTargets,
+      normalTargets,
+      ifRuled: {
+        kinds: isExempt ? [] : [...TEST_KINDS],
+        caseTargets: isExempt ? [] : valueTargets,
+        note: isExempt ? TEST_CASE_FRAME_TEXTS.ruledExempt : TEST_CASE_FRAME_TEXTS.ruled,
+        codeIfTableRuled: [...conditional].map(([targetId, kinds]) => ({ targetId, kinds, note: TEST_CASE_FRAME_TEXTS.conditional })),
+        remaining: FRAME_LIMIT - codeTests.length,
+      },
+      ifExistenceOnly: existenceBranchOf(codeTests, normalTargets),
+    };
+  });
+}
+
+/** やり直しの枠を組む入力（採用済みの回の、採った種類と実際に組へ足したコードの試験） */
+export interface RetryTestCaseFramesInput {
+  readonly table: NameTable;
+  readonly ledger: LedgerView;
+  readonly list: RequirementList;
+  /** 採った種類（分類の照合と J2 を経たもの） */
+  readonly natures: ReadonlyMap<string, RequirementNature>;
+  /** 採った種類で絞って組へ足したコードの試験 */
+  readonly kept: Pick<GeneratedTests, "tests" | "observes">;
+}
+
+const MISSING_KIND = /^(normal|abnormal|boundary) の試験が無い$/;
+
+/**
+ * やり直しの枠（書き直す要件の並びの順。純粋）。採用済みの要件だけ、採った種類の枝を実値で書く：実際に組へ足したコードの試験
+ * （空の集計を含む）・門が報告した不足（`problems` の `requirements[書き直す要件の添字]` の「<種類> の試験が無い」）・残る本数
+ * （16 − 実際のコードの分）。採った種類が ruled で、表の分類が ruled なら作られるはずの空の集計の試験が組に無い行（交差）は、
+ * 不足の種類に合う行とデータ状態を `emptyAggregate` に挙げる
+ */
+export function retryTestCaseFramesOf(
+  input: RetryTestCaseFramesInput,
+  requirementIds: readonly string[],
+  problems: readonly Problem[],
+): readonly RetryTestCaseFrame[] {
+  const { table, ledger, list, natures, kept } = input;
+  const exempt = new Set(
+    normalOnlyOwnershipRequirementIds(table, ledger, list),
+  );
+  const aggregateTargets = aggregateTargetsOf(table);
+  const keptIds = new Set(kept.tests.map((test) => test.id));
+  return requirementIds.map((requirementId, index) => {
+    const adopted = natures.get(requirementId) ?? "ruled";
+    const codeTests = codeTestsOf(kept.tests, kept.observes, requirementId, new Set());
+    const { valueTargets, normalTargets } = frameTargetsOf(table, requirementId);
+    const roles = table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? [];
+    const absent =
+      adopted === "ruled" ? emptyAggregateCodeTestsOf(requirementId, roles, aggregateTargets, ledger).filter(({ test }) => !keptIds.has(test.id)) : [];
+    const missing = problems.flatMap((problem): TestCaseFrameMissing[] => {
+      if (problem.field !== `requirements[${String(index)}]`) return [];
+      const kind = MISSING_KIND.exec(problem.message)?.[1] as TestKind | undefined;
+      if (kind === undefined) return [];
+      return [
+        {
+          kind,
+          emptyAggregate: absent.filter(({ test }) => test.kind === kind).map(({ test, state }) => ({ targetId: test.target.roleId ?? "", state })),
+        },
+      ];
+    });
+    const isExempt = exempt.has(requirementId);
+    const branch =
+      adopted === "ruled"
+        ? {
+            kinds: isExempt ? [] : [...TEST_KINDS],
+            caseTargets: isExempt ? [] : valueTargets,
+            maxCases: null,
+            note: `${isExempt ? TEST_CASE_FRAME_TEXTS.ruledExempt : TEST_CASE_FRAME_TEXTS.ruled}${missing.length > 0 ? TEST_CASE_FRAME_TEXTS.retryMissing : ""}`,
+          }
+        : (({ kinds, caseTargets, maxCases, note }) => ({ kinds, caseTargets, maxCases, note }))(existenceBranchOf(codeTests, normalTargets));
+    return {
+      requirementId,
+      adopted,
+      codeTests,
+      valueTargets,
+      normalTargets,
+      ...branch,
+      missing,
+      remaining: FRAME_LIMIT - codeTests.length,
+    };
+  });
 }

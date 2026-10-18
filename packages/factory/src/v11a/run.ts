@@ -1941,6 +1941,8 @@ async function runV11a(
           ...(flags.ids ? { generatedTestIds: testSpec.suite.tests.map((test) => test.id).filter(isGeneratedTestId) } : {}),
           // 旗 `v12.ids` の走りだけ、LLM が書いた場合の数と応答の文字数（段を回した走りだけ。再開した組には無い。#625）
           ...(flags.ids && testSpec.cases !== undefined ? { cases: testSpec.cases } : {}),
+          // 旗 `v12.ids` の走りだけ、必要な試験の枠の要約（段を回した走りだけ。再開した組には無い。#653）
+          ...(flags.ids && testSpec.frames !== undefined ? { frames: testSpec.frames } : {}),
         },
         declCheck: { limit: limits.declChecks, versions: declVersions },
         carryOver: {

@@ -1026,3 +1026,19 @@ describe("view-structure の行：代わりの対象の種類（fallback。項�
     expect(copyDefects(COPY_TEXT, withoutCode)).toEqual(["写しの view-structure の行がコードと違う"]);
   });
 });
+
+describe("empty-aggregate の行：旗 ids の文に、やり直しの必要な試験の枠に不足として挙がった行の境界・異常は書く例外（Issue #653）", () => {
+  it("旗 ids の文だけに例外の 1 文があり、挙がっていなければ書かない。off の文・ほかの行の旗 ids の文・行の since・写しは変えない", () => {
+    const ids = EMPTY_AGGREGATE.rules.t2Ids ?? "";
+    const exception =
+      "ただし、中身のやり直しの必要な試験の枠に不足（missing の emptyAggregate）として挙がった行の境界・異常は、その行に書く（期待は集計の種類とデータ状態で決まる値）。挙がっていなければ書かない。";
+    expect(ids).toContain(`の試験は作らない（コードが作る）。${exception}その行には、`);
+    expect(EMPTY_AGGREGATE.rules.t2 ?? "").not.toContain("必要な試験の枠");
+    expect(EMPTY_AGGREGATE.since).toBe("Issue #549");
+    for (const row of PROPERTY_LEDGER.filter((entry) => entry.id !== "empty-aggregate")) {
+      expect(`${row.rules.t2Ids ?? ""}${row.rules.t2 ?? ""}`, row.id).not.toContain("必要な試験の枠");
+    }
+    expect(copyDefects(COPY_TEXT, PROPERTY_LEDGER)).toEqual([]);
+    for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(ids).not.toContain(word);
+  });
+});

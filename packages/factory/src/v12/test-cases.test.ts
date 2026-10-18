@@ -13,6 +13,7 @@ import { coverageUnitsOf } from "../v11a/coverage.js";
 import { createV11aEvaluator } from "../v11a/evaluate.js";
 import type { NameTable } from "../v11a/names.js";
 import { checkEvaluabilityByLedger, checkTestSpecOutput, type TestObserves } from "../v11a/stages/test-spec.js";
+import { generateTests } from "./generated-tests.js";
 import { PROPERTY_LEDGER_VIEW } from "./ledger.js";
 import {
   TEST_CASE_CLOCK,
@@ -20,7 +21,12 @@ import {
   TEST_CASE_ID_PREFIX,
   TEST_CASE_SHAPE_MESSAGES,
   TEST_CASE_BUNDLE_MESSAGES,
+  TEST_CASE_FRAME_TEXTS,
   attributeProblemsToRequirements,
+  computationObservesOf,
+  derivedObservesOf,
+  initialTestCaseFramesOf,
+  retryTestCaseFramesOf,
   bundleRequirementIds,
   bundleRetryPlansOf,
   caseOperationOf,
@@ -44,7 +50,8 @@ const caseOf = (patch: Readonly<Record<string, unknown>> = {}): Record<string, u
   requirementId: "R1",
   targetId: "f.item.amount",
   kind: "normal",
-  observes: "validation",
+  // 項目の行の場合は null（コードが台帳から validation を埋める。#653）
+  observes: null,
   input: { rowId: "row-1", values: JSON.stringify({ "f.item.amount": 5 }) },
   targetRowId: null,
   rows: [],
@@ -62,7 +69,7 @@ function shaped(cases: readonly unknown[], classifications: readonly unknown[] =
 
 /** 展開して今の形の検査を掛けた組（通らなければ前提が壊れた） */
 function expandedSuite(cases: readonly unknown[], table: NameTable = TABLE) {
-  const expanded = expandTestCases(shaped(cases), table);
+  const expanded = expandTestCases(shaped(cases), table, LEDGER);
   if (!expanded.ok) throw new Error(`前提が壊れた：展開に落ちた ${JSON.stringify(expanded.problems)}`);
   const checked = checkTestSpecOutput(expanded.output, LEDGER);
   if (!checked.ok) throw new Error(`前提が壊れた：今の形に落ちた ${JSON.stringify(checked.problems)}`);
@@ -93,7 +100,7 @@ const v1Test = (patch: Readonly<Record<string, unknown>>): Record<string, unknow
 });
 
 describe("場合の schema（旗 v12.ids の T2。Issue #625）", () => {
-  it("strict の規則を満たし、骨組みの欄（id・operation・clock・assertion・target・inputContract・referenceData）を持たない。observes の enum は台帳の順", () => {
+  it("strict の規則を満たし、骨組みの欄（id・operation・clock・assertion・target・inputContract・referenceData）を持たない。observes は計算の行の性質（台帳の順）と null だけ（#653）", () => {
     const schema = testCasesSchemaOf(LEDGER);
     expect(strictDefects(schema)).toEqual([]);
     expect(schema.required).toEqual(["classifications", "cases"]);
@@ -101,7 +108,8 @@ describe("場合の schema（旗 v12.ids の T2。Issue #625）", () => {
     expect(items.required).toEqual(["requirementId", "targetId", "kind", "observes", "input", "targetRowId", "rows", "expected", "emptyEntities"]);
     expect(Object.keys(items.properties)).toEqual(items.required);
     for (const key of ["id", "operation", "clock", "assertion", "target", "inputContract", "referenceData"]) expect(Object.keys(items.properties), key).not.toContain(key);
-    expect(items.properties.observes.enum).toEqual([...LEDGER.observes]);
+    expect(items.properties.observes.enum).toEqual(["value", "empty-aggregate", null]);
+    expect(items.properties.observes.type).toEqual(["string", "null"]);
     // 期待は kind ごとの形の anyOf（ok は value・error は code。null の欄が無い）
     expect(items.properties.expected.anyOf.map((branch) => branch.required)).toEqual([
       ["kind", "value"],
@@ -128,7 +136,7 @@ describe("場合の schema（旗 v12.ids の T2。Issue #625）", () => {
       { field: "cases[0].targetId", message: TEST_CASE_SHAPE_MESSAGES.targetId },
       { field: "cases[1].rows[0].values", message: TEST_CASE_SHAPE_MESSAGES.rowValues },
       { field: "cases[2].expected", message: TEST_CASE_SHAPE_MESSAGES.expected },
-      { field: "cases[3].observes", message: `観測する性質は ${LEDGER.observes.join("・")} のいずれかであること` },
+      { field: "cases[3].observes", message: "観測する性質は value・empty-aggregate のいずれか（計算の行の場合）か null であること" },
     ]);
     const notArray = checkTestCasesOutput({ classifications: [], tests: [] }, LEDGER);
     expect(notArray).toEqual({ ok: false, problems: [{ field: "cases", message: TEST_CASE_SHAPE_MESSAGES.cases }] });
@@ -150,8 +158,8 @@ describe("場合の schema（旗 v12.ids の T2。Issue #625）", () => {
 describe("展開（純粋。場合 → 今の試験の形。Issue #625）", () => {
   it("同じ場合から 2 回同じ組。試験 ID は case: と連番、時計は定数、assertion は null、期待の null の欄を補う", () => {
     const cases = [caseOf(), caseOf({ kind: "abnormal", expected: { kind: "error", code: "E_INVALID" } })];
-    const first = expandTestCases(shaped(cases), TABLE);
-    const second = expandTestCases(shaped(cases), TABLE);
+    const first = expandTestCases(shaped(cases), TABLE, LEDGER);
+    const second = expandTestCases(shaped(cases), TABLE, LEDGER);
     expect(first).toEqual(second);
     if (!first.ok) throw new Error("通るはず");
     expect(first.output.tests.map((test) => test["id"])).toEqual([`${TEST_CASE_ID_PREFIX}1`, `${TEST_CASE_ID_PREFIX}2`]);
@@ -182,7 +190,7 @@ describe("展開（純粋。場合 → 今の試験の形。Issue #625）", () =
     expect(operationOf("o.closeItem")).toBe("action");
     const { suite } = expandedSuite([
       caseOf({ requirementId: "R4", targetId: "c.rate", observes: "value", input: { rowId: "row-1", values: "{}" }, expected: { kind: "ok", value: "6" } }),
-      caseOf({ requirementId: "R3", targetId: "o.closeItem", observes: "when" }),
+      caseOf({ requirementId: "R3", targetId: "o.closeItem" }),
     ]);
     expect(suite.tests.map((test) => [test.target.kind, test.operation])).toEqual([
       ["computation", "compute"],
@@ -350,7 +358,7 @@ describe("負例：展開できない場合は場合の添字と欄名の固定�
     ["ok に value と code", caseOf({ expected: { kind: "ok", value: "1", code: "E_X" } }), "cases[1].expected", TEST_CASE_EXPAND_MESSAGES.expected],
   ];
   it.each(cases)("%s：固定文で落ち、組を返さない", (_name, bad, field, message) => {
-    const result = expandTestCases(shaped([caseOf(), bad]), TABLE);
+    const result = expandTestCases(shaped([caseOf(), bad]), TABLE, LEDGER);
     expect(result).toEqual({ ok: false, problems: [{ field, message }] });
   });
 
@@ -600,5 +608,199 @@ describe("T2 の中身のやり直しの単位（手 3g・Issue #651。要件へ
     // 二点測定：保持を渡さなければ、同じ応答は別の束の要件として落ちる（今まで）
     expect(checkBundleCompleteness(outputOf(["R7", "R8"], []), rewrite, all, all).map((problem) => problem.message)).toEqual([TEST_CASE_BUNDLE_MESSAGES.outside]);
     expectNoAcceptanceMaterial([JSON.stringify(TEST_CASE_BUNDLE_MESSAGES)]);
+  });
+});
+
+// ── 手 3i（Issue #653）：observes は計算の行だけ書き、ほかは台帳から一意に埋める ──────────────────────────
+
+describe("observes の埋め方（旗 v12.ids の場合の展開。Issue #653）", () => {
+  it("台帳から導く：計算の行の性質は value・empty-aggregate（台帳の順）、項目・entity × validate は validation、操作 × action は when、画面 × screen は view-structure。計算 × aggregate は 1 つに決まらない", () => {
+    expect(computationObservesOf(LEDGER)).toEqual(["value", "empty-aggregate"]);
+    expect(derivedObservesOf(LEDGER, "field", "validate")).toBe("validation");
+    expect(derivedObservesOf(LEDGER, "entity", "validate")).toBe("validation");
+    expect(derivedObservesOf(LEDGER, "operation", "action")).toBe("when");
+    expect(derivedObservesOf(LEDGER, "screen", "screen")).toBe("view-structure");
+    expect(derivedObservesOf(LEDGER, "computation", "aggregate")).toBeUndefined();
+    expect(derivedObservesOf(LEDGER, "operation", "validate")).toBeUndefined();
+  });
+
+  it("展開：項目・entity・操作の行の null は台帳の性質で埋まり、計算の行は場合の値のまま（value と empty-aggregate は網羅の単位が別）", () => {
+    const { suite, observes } = expandedSuite([
+      caseOf(),
+      caseOf({ requirementId: "R1", targetId: "e.item", input: { rowId: "row-1", values: "{}" } }),
+      caseOf({ requirementId: "R3", targetId: "o.closeItem" }),
+      caseOf({ requirementId: "R4", targetId: "c.rate", observes: "value", input: { rowId: "row-1", values: "{}" }, expected: { kind: "ok", value: "6" } }),
+    ]);
+    expect(suite.tests.map((test) => observes.get(test.id))).toEqual(["validation", "validation", "when", "value"]);
+  });
+
+  it("負例（補わない）：計算の行で null・項目の行で計算の性質（旧形）・操作の行で value（旧形）は展開の固定文で落ち、項目の行で validation・操作の行で existence（旧形）は形の検査で落ちる", () => {
+    const missing = expandTestCases(shaped([caseOf(), caseOf({ requirementId: "R4", targetId: "c.rate", observes: null, input: { rowId: "row-1", values: "{}" } })]), TABLE, LEDGER);
+    expect(missing).toEqual({ ok: false, problems: [{ field: "cases[1].observes", message: TEST_CASE_EXPAND_MESSAGES.observesMissing }] });
+    const legacy = expandTestCases(
+      shaped([caseOf({ observes: "empty-aggregate" }), caseOf({ requirementId: "R3", targetId: "o.closeItem", observes: "value" })]),
+      TABLE,
+      LEDGER,
+    );
+    expect(legacy).toEqual({
+      ok: false,
+      problems: [
+        { field: "cases[0].observes", message: TEST_CASE_EXPAND_MESSAGES.observesLegacy },
+        { field: "cases[1].observes", message: TEST_CASE_EXPAND_MESSAGES.observesLegacy },
+      ],
+    });
+    const shape = checkTestCasesOutput({ classifications: [], cases: [caseOf({ observes: "validation" }), caseOf({ requirementId: "R3", targetId: "o.closeItem", observes: "existence" })] }, LEDGER);
+    expect(shape).toEqual({
+      ok: false,
+      problems: [
+        { field: "cases[0].observes", message: "観測する性質は value・empty-aggregate のいずれか（計算の行の場合）か null であること" },
+        { field: "cases[1].observes", message: "観測する性質は value・empty-aggregate のいずれか（計算の行の場合）か null であること" },
+      ],
+    });
+    // schema でも書けない（strict の enum に計算でない性質は無い）
+    const schema = testCasesSchemaOf(LEDGER);
+    expect(validateSchema(schema, { classifications: [], cases: [caseOf()] })).toBeUndefined();
+    expect(validateSchema(schema, { classifications: [], cases: [caseOf({ observes: "validation" })] })).toBeDefined();
+    expect(validateSchema(schema, { classifications: [], cases: [caseOf({ observes: "when" })] })).toBeDefined();
+  });
+});
+
+// ── 手 3i（Issue #653）：必要な試験の枠（純粋）──────────────────────────────────────
+
+describe("必要な試験の枠（純粋。旗 v12.ids の T2。Issue #653）", () => {
+  const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
+  /** 要件 ID → 所属の行の表（行は題材の表の全行・確かめ方は fixed-test・分類は `nature`） */
+  const tableOf = (ownership: Readonly<Record<string, readonly string[]>>, nature: "ruled" | "existence-only" = "ruled"): NameTable => ({
+    rows: TABLE.rows,
+    ownership: Object.entries(ownership).map(([requirementId, roles]) => ({ requirementId, roles: roles.map(stated) })),
+    verification: Object.keys(ownership).map((requirementId) => ({ requirementId, kind: "fixed-test" as const })),
+    classification: Object.keys(ownership).map((requirementId) => ({ requirementId, nature })),
+  });
+  const listOf = (ids: readonly string[]): RequirementList => ({
+    requirements: ids.map((id) => ({ id, text: `要件 ${id}`, quote: `要件 ${id}`, position: { start: 0, end: 4 } })),
+    decisions: [],
+    unresolved: [],
+  });
+  const framesOf = (ownership: Readonly<Record<string, readonly string[]>>, nature: "ruled" | "existence-only" = "ruled") => {
+    const table = tableOf(ownership, nature);
+    const list = listOf(Object.keys(ownership));
+    const generated = generateTests({ table, ledger: LEDGER, list });
+    return initialTestCaseFramesOf({ table, ledger: LEDGER, list, generated }, Object.keys(ownership));
+  };
+  const only = (ownership: Readonly<Record<string, readonly string[]>>, nature?: "ruled" | "existence-only") => {
+    const [frame] = framesOf(ownership, nature);
+    if (frame === undefined) throw new Error("前提が壊れた：枠が無い");
+    return frame;
+  };
+
+  it("(1) 画面＋項目：実値は画面の normal 1、ruled の枝は項目 × 三種、existence-only の枝は場合 0、残る本数は両枝 15", () => {
+    const frame = only({ X1: ["s.items", "f.item.title"] });
+    expect(frame.codeTests).toEqual([{ targetId: "s.items", kind: "normal", observes: "view-structure" }]);
+    expect(frame.valueTargets).toEqual(["f.item.title"]);
+    expect(frame.ifRuled).toEqual({ kinds: ["normal", "abnormal", "boundary"], caseTargets: ["f.item.title"], note: TEST_CASE_FRAME_TEXTS.ruled, codeIfTableRuled: [], remaining: 15 });
+    expect(frame.ifExistenceOnly).toEqual({ kinds: [], caseTargets: [], maxCases: 0, note: TEST_CASE_FRAME_TEXTS.existence, remaining: 15 });
+  });
+
+  it("(2) entity だけ・画面だけ・画面＋entity：ruled の枝の三種の枠が空（免除の集合。今の免除と同じ）", () => {
+    for (const roles of [["e.item"], ["s.items"], ["s.items", "e.item"]]) {
+      const frame = only({ X1: roles });
+      expect(frame.ifRuled.kinds, roles.join("+")).toEqual([]);
+      expect(frame.ifRuled.caseTargets, roles.join("+")).toEqual([]);
+      expect(frame.ifRuled.note, roles.join("+")).toBe(TEST_CASE_FRAME_TEXTS.ruledExempt);
+      expect(frame.codeTests.length, roles.join("+")).toBeGreaterThan(0);
+    }
+  });
+
+  it("(3) entity＋項目：ruled の枝の候補は 2 行（どれが決まりの対象かは LLM が選ぶ。コードは推測しない）", () => {
+    const frame = only({ X1: ["e.item", "f.item.amount"] });
+    expect(frame.ifRuled.caseTargets).toEqual(["e.item", "f.item.amount"]);
+    expect(frame.ifRuled.kinds).toEqual(["normal", "abnormal", "boundary"]);
+  });
+
+  it("(4) 集計（選択肢の見出しごと）の行を持つ要件：ruled の枝に「表の分類が ruled のときだけコードが作る。書かない」があり、実値に空の集計が無い（表の分類に依らず同じ）", () => {
+    const ruled = only({ X1: ["c.byKind", "s.overview"] }, "ruled");
+    const existence = only({ X1: ["c.byKind", "s.overview"] }, "existence-only");
+    expect(ruled).toEqual(existence);
+    expect(ruled.codeTests.map((test) => test.observes)).not.toContain("empty-aggregate");
+    expect(ruled.ifRuled.codeIfTableRuled).toEqual([{ targetId: "c.byKind", kinds: ["boundary", "abnormal"], note: TEST_CASE_FRAME_TEXTS.conditional }]);
+    expect(TEST_CASE_FRAME_TEXTS.conditional).toBe("境界・異常は表の分類が ruled のときだけコードが作る。書かない。");
+    // 行ごと・月の見出しごとの集計はコードが作らないので条件つきの枠にも出ない
+    expect(only({ X1: ["c.itemCount", "c.byMonth"] }).ifRuled.codeIfTableRuled).toEqual([]);
+  });
+
+  it("(5) 導いた親 entity は候補に出ない（所属は元の表の行だけ。画面の行も候補に入れない）", () => {
+    const frame = only({ X1: ["f.item.title", "s.items"] });
+    expect(frame.valueTargets).toEqual(["f.item.title"]);
+    expect(only({ X1: ["f.item.amount"] }).valueTargets).toEqual(["f.item.amount"]);
+  });
+
+  it("(6) 計算だけ・項目＋条件のある操作：existence-only の枝に normal 1 本まで（計算／操作）。項目＋条件の無い操作：「未対応」の事実だけで分類を示唆する文が無い", () => {
+    const computation = only({ X1: ["c.rate"] });
+    expect(computation.ifExistenceOnly).toEqual({ kinds: ["normal"], caseTargets: ["c.rate"], maxCases: 1, note: TEST_CASE_FRAME_TEXTS.existence, remaining: 16 });
+    const withWhen = only({ X1: ["f.item.amount", "o.closeItem"] });
+    expect(withWhen.ifExistenceOnly).toEqual({ kinds: ["normal"], caseTargets: ["o.closeItem"], maxCases: 1, note: TEST_CASE_FRAME_TEXTS.existence, remaining: 16 });
+    const unsupported = only({ X1: ["f.item.amount", "o.addItem"] });
+    expect(unsupported.codeTests).toEqual([]);
+    expect(unsupported.normalTargets).toEqual([]);
+    expect(unsupported.ifExistenceOnly).toEqual({ kinds: [], caseTargets: [], maxCases: 0, note: TEST_CASE_FRAME_TEXTS.unsupported, remaining: 16 });
+    for (const word of ["ruled", "existence", "分類"]) expect(TEST_CASE_FRAME_TEXTS.unsupported).not.toContain(word);
+    // ruled の枝は同じ文で並ぶ（どちらの枝も示唆しない）
+    expect(unsupported.ifRuled.note).toBe(TEST_CASE_FRAME_TEXTS.ruled);
+  });
+
+  it("(7) 同じ入力から 2 回同じ。枠の鍵の集合は固定で、表の分類・期待・宣言・名前が無い", () => {
+    const ownership = { X1: ["s.items", "f.item.title"], X2: ["c.byKind", "s.overview"], X3: ["f.item.amount", "o.addItem"] };
+    expect(framesOf(ownership)).toEqual(framesOf(ownership));
+    const frames = framesOf(ownership);
+    for (const frame of frames) {
+      expect(Object.keys(frame)).toEqual(["requirementId", "codeTests", "valueTargets", "normalTargets", "ifRuled", "ifExistenceOnly"]);
+      expect(Object.keys(frame.ifRuled)).toEqual(["kinds", "caseTargets", "note", "codeIfTableRuled", "remaining"]);
+      expect(Object.keys(frame.ifExistenceOnly)).toEqual(["kinds", "caseTargets", "maxCases", "note", "remaining"]);
+      for (const test of frame.codeTests) expect(Object.keys(test)).toEqual(["targetId", "kind", "observes"]);
+    }
+    // 値の文字列に、表の名前・分類の値・期待の値が無い
+    const values: string[] = [];
+    const walk = (value: unknown): void => {
+      if (typeof value === "string") values.push(value);
+      else if (Array.isArray(value)) value.forEach(walk);
+      else if (value !== null && typeof value === "object") Object.values(value).forEach(walk);
+    };
+    walk(frames);
+    const names = new Set(TABLE.rows.map((row) => row.name));
+    expect(values.filter((value) => names.has(value))).toEqual([]);
+    expect(values.filter((value) => value === "ruled" || value === "existence-only")).toEqual([]);
+    expect(JSON.stringify(frames)).not.toContain("expected");
+    expectNoAcceptanceMaterial([JSON.stringify(frames), JSON.stringify(TEST_CASE_FRAME_TEXTS)]);
+  });
+
+  it("やり直しの枠：採った種類の枝を実値で書く。交差（表 existence-only・採用 ruled）は集計の行の境界〔空〕・異常〔未読〕の不足と、16 − 実際のコードの分", () => {
+    const ownership = { X1: ["c.byKind", "s.overview"] };
+    const list = listOf(["X1"]);
+    const problems = [
+      { field: "requirements[0]", message: "abnormal の試験が無い" },
+      { field: "requirements[0]", message: "boundary の試験が無い" },
+    ];
+    // 交差：表の分類は existence-only なのでコードは空の集計を作っていない（組にあるのは画面の 1 本）
+    const crossTable = tableOf(ownership, "existence-only");
+    const crossKept = generateTests({ table: crossTable, ledger: LEDGER, list });
+    const [cross] = retryTestCaseFramesOf({ table: crossTable, ledger: LEDGER, list, natures: new Map([["X1", "ruled" as const]]), kept: crossKept }, ["X1"], problems);
+    expect(cross?.adopted).toBe("ruled");
+    expect(cross?.codeTests).toEqual([{ targetId: "s.overview", kind: "normal", observes: "view-structure" }]);
+    expect(cross?.missing).toEqual([
+      { kind: "abnormal", emptyAggregate: [{ targetId: "c.byKind", state: "unread" }] },
+      { kind: "boundary", emptyAggregate: [{ targetId: "c.byKind", state: "empty" }] },
+    ]);
+    expect(cross?.remaining).toBe(15);
+    expect(cross?.note).toBe(`${TEST_CASE_FRAME_TEXTS.ruled}${TEST_CASE_FRAME_TEXTS.retryMissing}`);
+    // 表も採用も ruled：コードが空の集計を作った（実値に載る）ので不足に集計の行は出ない。残る本数はその分減る
+    const ruledTable = tableOf(ownership, "ruled");
+    const ruledKept = generateTests({ table: ruledTable, ledger: LEDGER, list });
+    const [same] = retryTestCaseFramesOf({ table: ruledTable, ledger: LEDGER, list, natures: new Map([["X1", "ruled" as const]]), kept: ruledKept }, ["X1"], problems);
+    expect(same?.codeTests.map((test) => test.observes)).toEqual(["view-structure", "empty-aggregate", "empty-aggregate"]);
+    expect(same?.missing.flatMap((entry) => entry.emptyAggregate)).toEqual([]);
+    expect(same?.remaining).toBe(13);
+    // 採った種類が existence-only なら existence-only の枝（不足の集計の行は挙げない）
+    const [existence] = retryTestCaseFramesOf({ table: crossTable, ledger: LEDGER, list, natures: new Map([["X1", "existence-only" as const]]), kept: crossKept }, ["X1"], []);
+    expect(existence).toMatchObject({ adopted: "existence-only", kinds: ["normal"], caseTargets: ["c.byKind"], maxCases: 1, missing: [], remaining: 15 });
   });
 });

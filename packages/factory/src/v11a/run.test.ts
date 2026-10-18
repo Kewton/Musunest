@@ -53,6 +53,7 @@ import {
   fixtureDefaultValueList,
   fixtureDefaultValueTable,
   casesResponseOf,
+  requestListedIds,
   codeIdRenameOf,
   idsResponseList,
   idsResponsesOf,
@@ -4245,6 +4246,27 @@ describe("旗 v12.ids：値の要る要件を含む走りは、場合から展�
     const spec = artifactOf(result.bundle, V11A_ARTIFACT_NAMES.testSpec);
     expect(spec).not.toHaveProperty("llm_case_count");
     expect(spec).not.toHaveProperty("llm_response_chars");
+    // 手 3i（#653）：必要な試験の枠の要約の欄も無い
+    expect(spec).not.toHaveProperty("frame_remaining_total");
+    expect(spec).not.toHaveProperty("frame_generated_count");
+  });
+
+  it("手 3i（#653）：ids on で段を回した走りの T2 の成果物に必要な試験の枠の要約の欄があり、値が組と一致する（コードの試験の数・要求の一覧の要件ごとの 16 − コードの試験の数の合計）", async () => {
+    const { result, recording } = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_FLAGS });
+    if (result.bundle === null) throw new Error(JSON.stringify(result.stopped));
+    const spec = artifactOf(result.bundle, V11A_ARTIFACT_NAMES.testSpec) as {
+      readonly suite: { readonly tests: readonly { readonly id: string; readonly target: { readonly requirementId: string } }[] };
+      readonly generated_test_ids: readonly string[];
+      readonly frame_remaining_total?: number;
+      readonly frame_generated_count?: number;
+    };
+    const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME);
+    if (t2 === undefined) throw new Error("T2 の要求が無い");
+    const requested = requestListedIds(t2);
+    const generated = spec.suite.tests.filter((test) => spec.generated_test_ids.includes(test.id));
+    expect(spec.frame_generated_count).toBe(generated.length);
+    expect(spec.frame_remaining_total).toBe(requested.reduce((sum, id) => sum + 16 - generated.filter((test) => test.target.requirementId === id).length, 0));
+    expect(Object.keys(spec).slice(-2)).toEqual(["frame_remaining_total", "frame_generated_count"]);
   });
 
   const negatives = [
