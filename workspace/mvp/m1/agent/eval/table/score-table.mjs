@@ -551,7 +551,8 @@ function readRun(dir, id, gold) {
   if (record.status === "ok" && isObj(record.value) && "plan_sha256" in record.value) shas.push(record.value.plan_sha256);
   if (checkpoint.status === "ok" && isObj(checkpoint.value)) shas.push(checkpoint.value.plan_sha256);
   const source = accepted.status === "ok" ? "accepted" : checkpoint.status === "ok" ? "checkpoint" : null;
-  if (source !== null && shas.length === 0) refuse("table-score:plan-sha256-run");
+  // 下書きだけの本（断った候補の記録があり表の無い本）も、build の記録の plan_sha256 を同じく照らす（記録が無ければ断る。#607）
+  if ((source !== null || existsSync(join(dir, id, DRAFT_PATH))) && shas.length === 0) refuse("table-score:plan-sha256-run");
   if (shas.some((s) => s !== gold.plan_sha256)) refuse("table-score:plan-sha256-run");
   if (source === null) return { source: null, both: false, read: null, semantic: null };
   const semantic = source === "accepted" ? readIf(join(dir, id, SEMANTIC_RECORD_PATHS.accepted)) : { status: "ok", value: isObj(checkpoint.value) ? opt(checkpoint.value.semantic_check) : null };

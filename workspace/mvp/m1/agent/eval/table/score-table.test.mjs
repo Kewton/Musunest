@@ -123,6 +123,7 @@ function writeMeasure(dir, { golds, runs, frozen = null, extraConditions = {} })
     if (r.accepted) { writeFileSync(join(dir, id, SOURCE_PATHS.accepted), JSON.stringify(r.accepted)); writeFileSync(join(dir, id, BUILD_RECORD_PATH), JSON.stringify({ plan_sha256: r.recordPlan ?? plan })); }
     if (r.checkpoint) writeFileSync(join(dir, id, SOURCE_PATHS.checkpoint), JSON.stringify({ schema_version: "cp", boundary: "t1-t2", plan_sha256: r.checkpointPlan ?? plan, name_table: r.checkpoint, ...(r.checkpointSemantic ? { semantic_check: r.checkpointSemantic } : {}) }));
     // 2 本目（#607）：断った候補の記録と、受理済みの表の点検の記録（無ければ書かない）
+    if (r.drafts !== undefined && !r.accepted && !r.noRecord) writeFileSync(join(dir, id, BUILD_RECORD_PATH), JSON.stringify({ plan_sha256: r.recordPlan ?? plan }));
     if (r.drafts !== undefined) { mkdirSync(join(dir, id, "bundle", "diagnostics"), { recursive: true }); writeFileSync(join(dir, id, DRAFT_PATH), typeof r.drafts === "string" ? r.drafts : JSON.stringify({ candidates: r.drafts })); }
     if (r.semantic !== undefined) writeFileSync(join(dir, id, SEMANTIC_RECORD_PATHS.accepted), typeof r.semantic === "string" ? r.semantic : JSON.stringify(r.semantic));
   }
@@ -961,4 +962,24 @@ test("README：下書きの採点と正誤表の小節があり、やること�
   const draft = text.slice(at, c3), table = text.slice(c3);
   for (const item of ["最後の候補", "round・attempt・call", "候補の数", "合併しない", "読めない候補", "古い候補", "一覧", "形の失敗", "数が合わない", "平ら", "添字", "参照切れ", "出典の写し", "表の SHA は null", "分母 (a')", "分母 (b')", "静的な保留", "P を単位", "--compare", "1 回ずつ", "rejected-name-table.json"]) assert.ok(draft.includes(item), item);
   for (const item of ["二値", "見逃し", "誤拒否", "点検の記録なし", "点検の対象外", "表の SHA", "semantic-check", "semantic_check", "持ち越し", "了承除外", "保留", "参考（独立を仮定）", "P ごと", "拒否の種類", "引用", "拒否の理由", "--compare", "--anonymous", "指紋", "断った候補"]) assert.ok(table.includes(item), item);
+});
+
+const DR_ONLY = () => drTable(["E_a", "F_a1"], { A1: ["F_a1"], A2: [], A3: [], A4: [] });
+/** 下書きだけの本（P1-r2）を含む組が、1 本目と同じ符号で何も数えず終了コード 3・出力無しで断られる */
+const assertDraftOnlyRefused = (r) => {
+  const w = world({ golds: [drGold()], runs: { "P1-r1": { accepted: DR_ONLY() }, "P1-r2": r } });
+  try {
+    const res = run(w);
+    assert.equal(res.code, EXIT_REFUSED);
+    assert.ok(res.text.includes("[table-score:plan-sha256-run]"), res.text);
+    assert.deepEqual(outFiles(w), []);
+  } finally { w.cleanup(); }
+};
+test("下書きだけの本：build の記録の plan_sha256 が正解と違えば、1 本目と同じ符号で何も数えず終了コード 3・出力無し（合えば数える）", () => {
+  assertDraftOnlyRefused({ drafts: [candidateOf(DR_ONLY())], recordPlan: PLAN_X });
+  const ok = world({ golds: [drGold()], runs: { "P1-r1": { drafts: [candidateOf(DR_ONLY())] } } });
+  try { assert.equal(run(ok).code, 0); } finally { ok.cleanup(); }
+});
+test("下書きだけの本：build の記録が無ければ、1 本目と同じ符号で何も数えず終了コード 3・出力無し", () => {
+  assertDraftOnlyRefused({ drafts: [candidateOf(DR_ONLY())], noRecord: true });
 });
