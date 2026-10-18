@@ -12,6 +12,7 @@ import { clusterStats, pairStats } from "../agent-accept/score-agent.mjs";
 import {
   ANONYMOUS_SCHEMA, BROKEN, COMPARE_FILE, COMPARE_SCHEMA, EXIT_REFUSED, GOLD_VERSION, OUTCOMES, OUTPUT_FILE, OUTPUT_SCHEMA, SOURCE_PATHS, BUILD_RECORD_PATH, WILSON_NAME,
   aggregate, anonymize, anonymousFileOf, assignRows, compareRows, main, normalizeTable, readSource, scoreStructure, validateGold,
+  DRAFT_PATH, SEMANTIC_RECORD_PATHS, draftStructure,
 } from "./score-table.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -120,7 +121,10 @@ function writeMeasure(dir, { golds, runs, frozen = null, extraConditions = {} })
     mkdirSync(join(dir, id, "bundle", "artifacts"), { recursive: true });
     const plan = r.plan ?? (id.startsWith("P2") ? PLAN_B : PLAN_A);
     if (r.accepted) { writeFileSync(join(dir, id, SOURCE_PATHS.accepted), JSON.stringify(r.accepted)); writeFileSync(join(dir, id, BUILD_RECORD_PATH), JSON.stringify({ plan_sha256: r.recordPlan ?? plan })); }
-    if (r.checkpoint) writeFileSync(join(dir, id, SOURCE_PATHS.checkpoint), JSON.stringify({ schema_version: "cp", boundary: "t1-t2", plan_sha256: r.checkpointPlan ?? plan, name_table: r.checkpoint }));
+    if (r.checkpoint) writeFileSync(join(dir, id, SOURCE_PATHS.checkpoint), JSON.stringify({ schema_version: "cp", boundary: "t1-t2", plan_sha256: r.checkpointPlan ?? plan, name_table: r.checkpoint, ...(r.checkpointSemantic ? { semantic_check: r.checkpointSemantic } : {}) }));
+    // 2 本目（#607）：断った候補の記録と、受理済みの表の点検の記録（無ければ書かない）
+    if (r.drafts !== undefined) { mkdirSync(join(dir, id, "bundle", "diagnostics"), { recursive: true }); writeFileSync(join(dir, id, DRAFT_PATH), typeof r.drafts === "string" ? r.drafts : JSON.stringify({ candidates: r.drafts })); }
+    if (r.semantic !== undefined) writeFileSync(join(dir, id, SEMANTIC_RECORD_PATHS.accepted), typeof r.semantic === "string" ? r.semantic : JSON.stringify(r.semantic));
   }
 }
 const run = (w, flags = []) => main([w.goldDir, w.measure, w.out, ...flags]);
@@ -614,4 +618,347 @@ test("README：表の採点の節があり、やることの項目が載る。�
     "正答", "誤り", "正直な持ち越し", "了承除外", "保留", "unexpressible", "accepted-removal", "分母 (a)", "分母 (b)", "静的な保留", "候補依存", "意味の未照合",
     "P を単位", "bootstrap", "参考（独立を仮定）", "--compare", "after − before", "--anonymous", "指紋", "門ではない", "非公開", "費用 0", "checkpoint", "受理済みの表",
   ]) assert.ok(sec.includes(item), item);
+});
+
+// ── 2 本目（#607）：1 本目の欄が変わらないこと
+/** 1 本目の採点の欄（読取元 (a)・(b) の集計と行ごとの出力）だけを抜いた値の SHA-256。正解の文・指紋は入らない */
+const firstFieldsSha = (full) => {
+  const { accepted, checkpoint } = full.scoring.by_source;
+  return sha(JSON.stringify({ by_source: { accepted, checkpoint }, rows: full.scoring.rows }));
+};
+const firstAnonSha = (anon) => sha(JSON.stringify({ schema: anon.schema, mode: anon.mode, by_source: anon.by_source }));
+function firstFixtureSingle() {
+  const golds = [goldOf({ needs_human: [{ requirement_id: "R10", reason_kind: "k", source: "machine-review", related_requirement_ids: [], candidates: [], question: TEXT, review_evidence: [TEXT] }] })];
+  return world({ golds, runs: { "P1-r1": { accepted: tableOf() }, "P1-r2": { checkpoint: tableOf({ own: { ...OWN, R3: ["F_ref", "F_a2"] } }) }, "P1-r3": {} } });
+}
+function firstFixtureCompare() {
+  const base = mkdtempSync(join(tmpdir(), "table-score-first-"));
+  const goldDir = join(base, "gold"), m = join(base, "m"), out = join(base, "out");
+  mkdirSync(goldDir);
+  writeFileSync(join(goldDir, "p1.json"), JSON.stringify(gaGold()));
+  mkdirSync(m);
+  writeFileSync(join(m, "comparison.json"), JSON.stringify({ schema: "x", pairs: { groups: ["before", "after"] } }));
+  writeMeasure(join(m, "before"), { golds: [gaGold()], runs: { "P1-r1": { accepted: gaTable({ ...GA_VER, A1: { kind: "structural", reason: "x", checks: [] } }) }, "P1-r2": {} } });
+  writeMeasure(join(m, "after"), { golds: [gaGold()], runs: { "P1-r1": { accepted: gaTable() }, "P1-r2": { checkpoint: gaTable() } } });
+  return { base, goldDir, measure: m, out, cleanup: () => rmSync(base, { recursive: true, force: true }) };
+}
+test("1 本目の fixture で、指紋を除いた 1 本目の採点の欄（と匿名の既存の欄）が 1 本目の道具の出力と深く等しい", () => {
+  for (const [mk, file, flag, expected, expectedAnon] of [
+    [firstFixtureSingle, OUTPUT_FILE, [], "5096d8491742f9d0f46c36ab47e60e657fce1fa189e03536b6ed3908595655c8", "4733577f91a622c147bbaf3cd52b8f8b82172b95e9b258026b55c7dcf2158d52"],
+    [firstFixtureCompare, COMPARE_FILE, ["--compare"], "d6dff12607eed6f77edfeae3eecba8acf27b473104d19717044c7eb37c429111", "781438c694e272742f3e6251c7dcc87787873856f8a44a11408aab3b0b87cdc7"],
+  ]) {
+    const w = mk();
+    try {
+      assert.equal(run(w, flag).code, 0);
+      const full = JSON.parse(readFileSync(join(w.out, file), "utf8"));
+      assert.equal(run(w, [...flag, "--anonymous"]).code, 0);
+      const anon = JSON.parse(readFileSync(join(w.out, anonymousFileOf(file)), "utf8"));
+      assert.equal(firstFieldsSha(full), expected);
+      assert.equal(firstAnonSha(anon), expectedAnon);
+    } finally { w.cleanup(); }
+  }
+});
+
+// ── 2 本目（#607）：断った候補の下書き (c)
+const QUOTE = "QUOTEMARK", REASON = "REASONMARK"; // 点検の引用・拒否の理由・出典の写しに入れる目印（出力に写っていないことを走査する）
+/** 表の行の型（1 本目の形）を、下書きの平らな写像にする */
+const flatType = (row) => {
+  const f = { fieldType: null, valueType: null, scope: null, form: null, action: null, hasWhen: null, view: null };
+  if (row.kind === "field") f.fieldType = row.type;
+  if (row.kind === "computation") Object.assign(f, { valueType: row.type.valueType, scope: row.type.scope, form: row.type.form, aggregate: row.type.aggregate });
+  if (row.kind === "operation") Object.assign(f, { action: row.type.action, hasWhen: row.type.hasWhen });
+  if (row.kind === "screen") f.view = row.type.view;
+  return f;
+};
+/** 合成の表から、同じ内容の下書き（応答）と点検の一覧を組む。要件の並びは確かめ方の並び（＝一覧の順） */
+function draftOf(table, { copy = (i) => `copy${i}`, source = () => ({ copy: QUOTE, quote: QUOTE }) } = {}) {
+  const ids = table.verification.map((v) => v.requirementId);
+  const response = {
+    rows: table.rows.map((r, i) => ({ id: r.id, kind: r.kind, entity: r.entity, name: r.name, role: r.role, source: source(i), type: flatType(r), options: r.options, groupBy: r.groupBy, refEntity: r.refEntity })),
+    requirements: ids.map((id, i) => {
+      const { requirementId: _x, ...v } = table.verification[i];
+      return { copy: copy(i), roles: table.ownership.find((o) => o.requirementId === id)?.roles ?? [], verification: v, nature: "ruled" };
+    }),
+  };
+  return { response, list: { requirements: ids.map((id) => ({ id, text: QUOTE, quote: QUOTE })) } };
+}
+const candidateOf = (table, { round = 1, attempt = 1, call = 1, kind = "content", list, opts: o } = {}) => {
+  const d = draftOf(table, o);
+  if (kind === "shape") return { stage: "name-table", operation: null, call, round, attempt, kind, response: d.response, response_sha256: sha("r"), problems: [{ field: "rows", message: REASON, reference: "response" }] };
+  return { stage: "name-table", operation: null, call, round, attempt, kind, target: d.response, target_sha256: sha("t"), response: d.response, response_sha256: sha("r"), ...(list === null ? {} : { inspection_list: list ?? d.list, inspection_list_sha256: sha("l") }), problems: [{ field: "rows", message: REASON, reference: "target" }] };
+};
+const DR_REQS = GA_REQS.slice(0, 4);
+const drGold = () => goldOf({ requirements: DR_REQS });
+const drVer = Object.fromEntries(DR_REQS.map((r) => [r.requirement_id, { kind: "fixed-test", reason: null, checks: [], constraintIds: [], value: null }]));
+const drTable = (syms, own) => tableOf({ syms, own, ver: drVer });
+const readOut = (w, file = OUTPUT_FILE) => JSON.parse(readFileSync(join(w.out, file), "utf8"));
+
+test("下書き：1 本に候補 2 つ（先が正答 3・後が正答 1 の要件 4）で、採点されるのは後だけ・率は 1 を超えず・候補の数 2。先にだけ在る部品は後の採点で欠け（合併しない）", () => {
+  const first = drTable(["E_a", "E_b", "E_c", "F_a1", "F_a2", "F_b1"], { A1: ["F_a1"], A2: ["F_a2"], A3: ["F_b1"], A4: [] });
+  const later = drTable(["E_a", "E_c", "F_a1"], { A1: ["F_a1"], A2: [], A3: [], A4: [] });
+  // 記録の並びは後の候補が先（並びではなく round・attempt・call で最後を選ぶ）
+  const w = world({ golds: [drGold()], runs: { "P1-r1": { drafts: [candidateOf(later, { round: 2, attempt: 1, call: 2 }), candidateOf(first, { round: 1, attempt: 1, call: 1 })] } } });
+  try {
+    assert.equal(run(w).code, 0);
+    const out = readOut(w);
+    const [d] = out.scoring.draft_rows;
+    assert.equal(d.candidate_count, 2);
+    assert.deepEqual(d.last, { round: 2, attempt: 1, call: 2 });
+    assert.equal(d.source, "draft");
+    assert.equal(d.table_sha256, null);
+    assert.deepEqual(d.requirements.map((q) => q.outcome), ["correct", "wrong", "wrong", "wrong"]);
+    assert.equal(outcomeOf(d, "A2").questions.missing, 0);
+    assert.equal(outcomeOf(d, "A3").questions.missing, 0);
+    const a = out.scoring.draft;
+    assert.equal(a.correct.a.k, 1);
+    assert.equal(a.denominators.a, 4);
+    assert.ok(a.correct.a.rate <= 1 && a.correct.b.rate <= 1);
+    assert.equal(a.draft.candidate_total, 2);
+    assert.equal(a.draft.scored_runs, 1);
+    // 1 本目の読取元には入らない
+    assert.equal(out.scoring.rows[0].source, null);
+    assert.equal(out.scoring.by_source.accepted.denominators.a, 0);
+  } finally { w.cleanup(); }
+});
+
+test("下書き：受理済みの表・checkpoint・下書き（平らな type）が同じ内容なら採点の構造と結果が深く等しく、表の SHA は受理済みと checkpoint が同じ非 null・下書きが null。正誤表はその SHA で点検の回に結ぶ", () => {
+  const t = tableOf();
+  const acc = readSource("accepted", t), cp = readSource("checkpoint", { plan_sha256: PLAN_A, name_table: t });
+  const d = draftOf(t), dr = draftStructure(d.response, d.list);
+  assert.deepEqual(dr.structure, acc.structure);
+  assert.deepEqual(cp.structure, acc.structure);
+  const g = validateGold(goldOf());
+  const { table_sha256: sa, ...ra } = scoreStructure(acc.structure, acc.meta, g);
+  const { table_sha256: sc, ...rc } = scoreStructure(cp.structure, cp.meta, g);
+  const { table_sha256: sd, ...rd } = scoreStructure(dr.structure, { table_sha256: null }, g);
+  assert.deepEqual(rd, ra);
+  assert.deepEqual(rc, ra);
+  assert.equal(sa, sha("table"));
+  assert.equal(sc, sa);
+  assert.equal(sd, null);
+  const sem = (s) => ({ table_sha256: s, targets: ["R1", "R2"], judgments: [{ requirementId: "R1", verdict: "accept", kind: null, quote: null }, { requirementId: "R2", verdict: "reject", kind: "missing-target", quote: QUOTE }] });
+  const w = world({ runs: { "P1-r1": { accepted: t, semantic: { rounds: [{ round: 1, ...sem(sha("table")), advice: [] }] } }, "P1-r2": { checkpoint: t, checkpointSemantic: sem(sha("table")) }, "P1-r3": { drafts: [candidateOf(t)] } } });
+  try {
+    assert.equal(run(w).code, 0);
+    const out = readOut(w);
+    const [r1, r2] = out.scoring.rows;
+    assert.equal(r1.table_sha256, sha("table"));
+    assert.equal(r2.table_sha256, sha("table"));
+    assert.equal(out.scoring.draft_rows[2].table_sha256, null);
+    assert.deepEqual(out.scoring.draft_rows[2].requirements, r1.requirements);
+    const [c1, c2, c3] = out.scoring.c3_rows;
+    assert.equal(c1.record, "matched");
+    assert.equal(c1.round, 1);
+    assert.equal(c2.record, "matched");
+    assert.equal(c3, null);
+    assert.deepEqual(c1.cells, { wrong_accept: 0, wrong_reject: 0, correct_accept: 1, correct_reject: 1 });
+    assert.deepEqual(c2.cells, c1.cells);
+    assert.equal(out.scoring.c3.accepted.runs.with_record, 1);
+    assert.equal(out.scoring.c3.checkpoint.runs.with_record, 1);
+  } finally { w.cleanup(); }
+});
+
+test("下書き：参照の ID を添字へ結び直し、参照先だけが違う 2 つの下書きで正しい接続だけが正答。出典の写し・引用・要件の写しを全部置き換えても同じ結果", () => {
+  const g = validateGold(goldOf());
+  const scoreDraft = (t, o) => { const d = draftOf(t, o); return scoreStructure(draftStructure(d.response, d.list).structure, { table_sha256: null }, g); };
+  assert.equal(outcomeOf(scoreDraft(tableOf()), "R3").outcome, "correct");
+  assert.notEqual(outcomeOf(scoreDraft(tableOf({ rowOver: { F_ref: { refEntity: "id-E_c" } } })), "R3").outcome, "correct");
+  // id を全部替えても同じ（結び直したあと id は落ちる）
+  assert.deepEqual(scoreDraft(tableOf({ idOf: (s) => `q-${s}-q` })), scoreDraft(tableOf()));
+  const base = scoreDraft(tableOf());
+  const other = scoreDraft(tableOf(), { copy: (i) => `other-copy-${i}`, source: (i) => ({ copy: `zz${i}`, quote: `yy${i}` }) });
+  assert.deepEqual(other, base);
+});
+
+test("下書き：最後の候補が読めない（一覧が無い・形の失敗・数が合わない）本は「読めない候補」1 で採点されず、古い候補を使わない", () => {
+  const good = tableOf();
+  const cases = [
+    ["no-list", candidateOf(good, { round: 2, list: null })],
+    ["shape", candidateOf(good, { round: 2, kind: "shape" })],
+    ["count-mismatch", candidateOf(good, { round: 2, list: { requirements: [...draftOf(good).list.requirements, { id: "R99", text: QUOTE, quote: QUOTE }] } })],
+    ["shape", { ...candidateOf(good, { round: 2 }), response: { rows: "x", requirements: [] } }],
+  ];
+  for (const [reason, last] of cases) {
+    const w = world({ runs: { "P1-r1": { drafts: [candidateOf(good, { round: 1 }), last] } } });
+    try {
+      assert.equal(run(w).code, 0, reason);
+      const out = readOut(w);
+      const [d] = out.scoring.draft_rows;
+      assert.equal(d.unreadable, reason);
+      assert.equal(d.source, null, reason);
+      assert.equal(d.requirements, null, reason);
+      assert.equal(d.candidate_count, 2);
+      assert.equal(out.scoring.draft.draft.unreadable[reason], 1, reason);
+      assert.equal(out.scoring.draft.draft.scored_runs, 0);
+      assert.equal(out.scoring.draft.denominators.a, 0);
+      assert.equal(out.scoring.draft.correct.a.rate, null);
+    } finally { w.cleanup(); }
+  }
+  // 記録のファイルが読めない本も読めない候補（断らない）
+  const w = world({ runs: { "P1-r1": { drafts: "{not json" } } });
+  try {
+    assert.equal(run(w).code, 0);
+    assert.equal(readOut(w).scoring.draft_rows[0].unreadable, "file");
+  } finally { w.cleanup(); }
+});
+
+test("下書き：受理済みの表と下書きの両方がある本は、それぞれの読取元に 1 回ずつ数え混ざらない。(c) の率は (a)・(b) の欄と別で、--compare の対に入らない", () => {
+  const solo = world({ golds: [gaGold()], runs: { "P1-r1": { accepted: gaTable() }, "P1-r2": {} } });
+  const both = world({ golds: [gaGold()], runs: { "P1-r1": { accepted: gaTable(), drafts: [candidateOf(gaTable({ ...GA_VER, A1: { kind: "structural", checks: [] } }))] }, "P1-r2": {} } });
+  try {
+    assert.equal(run(solo).code, 0);
+    assert.equal(run(both).code, 0);
+    const a = readOut(solo).scoring, b = readOut(both).scoring;
+    assert.deepEqual(b.by_source, a.by_source);
+    assert.deepEqual(b.rows, a.rows);
+    assert.equal(b.by_source.accepted.runs.with_table, 1);
+    assert.equal(b.draft.runs.with_table, 1);
+    assert.equal(b.draft.denominators.a, 5);
+    assert.equal(b.draft.correct.a.k, 4);
+    assert.equal(b.draft.denominators.b, 10);
+    assert.equal(b.by_source.accepted.correct.a.k, 5);
+  } finally { solo.cleanup(); both.cleanup(); }
+  // 比較：(c) と正誤表は群ごとの欄だけで、対の差の欄が無い。読取元の対は (a)・(b) だけ
+  const base = mkdtempSync(join(tmpdir(), "table-score-dcmp-"));
+  try {
+    const goldDir = join(base, "gold"), m = join(base, "m"), out = join(base, "out");
+    mkdirSync(goldDir);
+    writeFileSync(join(goldDir, "p1.json"), JSON.stringify(gaGold()));
+    mkdirSync(m);
+    writeFileSync(join(m, "comparison.json"), JSON.stringify({ schema: "x", pairs: { groups: ["before", "after"] } }));
+    writeMeasure(join(m, "before"), { golds: [gaGold()], runs: { "P1-r1": { drafts: [candidateOf(gaTable())] } } });
+    writeMeasure(join(m, "after"), { golds: [gaGold()], runs: { "P1-r1": { drafts: [candidateOf(gaTable({ ...GA_VER, A1: { kind: "structural", checks: [] } }))] } } });
+    const r = main([goldDir, m, out, "--compare"]);
+    assert.equal(r.code, 0, r.text);
+    const o = JSON.parse(readFileSync(join(out, COMPARE_FILE), "utf8"));
+    assert.deepEqual(Object.keys(o.scoring.by_source), ["accepted", "checkpoint"]);
+    assert.equal(o.scoring.by_source.accepted.compare.requirement_diffs.n, 0);
+    assert.equal(o.scoring.by_source.accepted.compare.excluded["table-absent"], 1);
+    assert.deepEqual(Object.keys(o.scoring.draft), ["baseline", "candidate"]);
+    assert.equal(o.scoring.draft.baseline.correct.a.k, 5);
+    assert.equal(o.scoring.draft.candidate.correct.a.k, 4);
+    for (const s of ["accepted", "checkpoint"]) assert.deepEqual(Object.keys(o.scoring.c3[s]), ["baseline", "candidate"]);
+    assert.ok(!JSON.stringify([o.scoring.draft, o.scoring.c3]).includes("requirement_diffs"));
+    assert.ok(r.text.includes("[draft] 比較元") && r.text.includes("[draft] 候補") && r.text.includes("[c3:accepted] 比較元"));
+    const ra = main([goldDir, m, out, "--compare", "--anonymous"]);
+    assert.equal(ra.code, 0);
+    const anon = JSON.parse(readFileSync(join(out, anonymousFileOf(COMPARE_FILE)), "utf8"));
+    assert.deepEqual(Object.keys(anon.draft), ["baseline", "candidate"]);
+    assert.deepEqual(Object.keys(anon.c3.accepted), ["baseline", "candidate"]);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+// ── 2 本目（#607）：C3 の正誤表
+const C3_REQS = [
+  { requirement_id: "C1", variants: [alt(["F_a1"], ["F_a1"], { kind: "fixed-test" })] },
+  { requirement_id: "C2", variants: [alt(["F_a2"], ["F_a2"], { kind: "fixed-test" })] },
+  { requirement_id: "C3", variants: [alt(["F_b1"], ["F_b1"], { kind: "fixed-test" })] },
+  { requirement_id: "T1", variants: [alt(["F_c1"], ["F_c1"], { kind: "fixed-test" })] },
+  { requirement_id: "W1", variants: [alt(["O_add"], ["O_add"], { kind: "fixed-test" })] },
+  { requirement_id: "W2", variants: [alt(["O_del"], ["O_del"], { kind: "fixed-test" })] },
+  { requirement_id: "K1", variants: [alt([], [], { kind: "unresolved", reason_kind: "unsupported-observation" })] },
+  { requirement_id: "X1", variants: [alt([], [], { kind: "unresolved", reason_kind: "accepted-removal" })] },
+  { requirement_id: "H1", adjudication_status: "needs_human", variants: [alt([], [], { kind: "fixed-test" })] },
+];
+const c3Gold = () => goldOf({ requirements: C3_REQS });
+const UNRES = { kind: "unresolved", reason: REASON, checks: [], constraintIds: [], value: null };
+const c3Table = () => tableOf({
+  syms: ["E_a", "E_b", "E_c", "F_a1", "F_a2", "F_b1", "F_c1", "O_add", "O_del"],
+  own: { C1: ["F_a1"], C2: ["F_a2"], C3: ["F_b1"], T1: ["F_c1"], W1: ["O_add"], W2: ["O_del"], K1: [], X1: [], H1: [] },
+  ver: { C1: { kind: "fixed-test" }, C2: { kind: "fixed-test" }, C3: { kind: "fixed-test" }, T1: { kind: "fixed-test" }, W1: { kind: "structural", checks: ["k"] }, W2: { kind: "structural", checks: ["k"] }, K1: UNRES, X1: UNRES, H1: { kind: "fixed-test" } },
+});
+const J = (requirementId, verdict, kind = null) => ({ requirementId, verdict, kind, quote: verdict === "reject" ? QUOTE : null, reason: REASON });
+const C3_JUDGMENTS = [J("C1", "accept"), J("C2", "accept"), J("C3", "reject", "weak-verification"), J("W1", "accept"), J("W2", "reject", "missing-target"), J("K1", "accept"), J("X1", "accept"), J("H1", "reject", "odd-kind")];
+const C3_TARGETS = ["C1", "C2", "C3", "W1", "W2", "K1", "X1", "H1"];
+const c3Round = (round, s) => ({ round, table_sha256: s, targets: C3_TARGETS, judgments: C3_JUDGMENTS, advice: [] });
+
+test("正誤表：誤り 2（受理 1・拒否 1）・正答 3（受理 2・拒否 1）・対象外 1・持ち越し 1・了承除外 1・保留 1 で、見逃し 1/2・誤拒否 1/3・対象外 1、非二値は種類ごとの件数。記録の無い本・SHA の合わない回しか無い本は点検の記録なし。断った候補だけの本は入らない", () => {
+  const runs = {
+    "P1-r1": { accepted: c3Table(), semantic: { rounds: [c3Round(1, sha("other")), c3Round(2, sha("table"))] } },
+    "P1-r2": { accepted: c3Table() },
+    "P1-r3": { accepted: c3Table(), semantic: { rounds: [c3Round(1, sha("other"))] } },
+    "P1-r4": { drafts: [candidateOf(c3Table())] },
+    "P1-r5": { checkpoint: c3Table(), checkpointSemantic: c3Round(1, sha("table")) },
+  };
+  const w = world({ golds: [c3Gold()], runs });
+  try {
+    const r = run(w);
+    assert.equal(r.code, 0, r.text);
+    const out = readOut(w);
+    const [b1] = out.scoring.rows;
+    assert.deepEqual(["C1", "C2", "C3", "T1", "W1", "W2", "K1", "X1", "H1"].map((id) => outcomeOf(b1, id).outcome), ["correct", "correct", "correct", "correct", "wrong", "wrong", "carry-over", "accepted-removal", "held"]);
+    const c = out.scoring.c3.accepted;
+    assert.deepEqual(c.cells, { wrong_accept: 1, wrong_reject: 1, correct_accept: 2, correct_reject: 1 });
+    assert.deepEqual([c.miss.k, c.miss.n, c.miss.rate], [1, 2, 0.5]);
+    assert.deepEqual([c.false_reject.k, c.false_reject.n, c.false_reject.rate], [1, 3, round(1 / 3)]);
+    assert.equal(c.miss.wilson95_reference.name, WILSON_NAME);
+    assert.equal(c.out_of_target, 1);
+    assert.deepEqual(c.non_binary, { "carry-over": 1, "accepted-removal": 1, held: 1 });
+    assert.deepEqual(c.reject_kinds, { "unnecessary-ownership": 0, "missing-target": 1, "weak-verification": 1, unknown: 1 });
+    assert.deepEqual(c.runs, { with_table: 3, with_record: 1, no_record: { absent: 1, unreadable: 0, "no-matching-round": 1 } });
+    assert.deepEqual(c.by_pattern, { P1: c.cells });
+    assert.equal(c.patterns, 1);
+    assert.equal(out.scoring.c3_rows[0].round, 2);
+    assert.equal(out.scoring.c3_rows[3], null);
+    assert.deepEqual(out.scoring.c3.checkpoint.cells, c.cells);
+    assert.equal(out.scoring.c3.checkpoint.runs.with_table, 1);
+    for (const w2 of ["[draft]", "[c3:accepted]", "[c3:checkpoint]", "見逃し", "誤拒否", "点検の対象外", "点検の記録なし"]) assert.ok(r.text.includes(w2), w2);
+  } finally { w.cleanup(); }
+});
+
+test("正誤表：全要件が非二値の本は分母 0・率 null と理由（1 本目と同じ契約）", () => {
+  const g = goldOf({ requirements: C3_REQS.slice(6) });
+  const t = tableOf({ syms: ["E_a"], own: { K1: [], X1: [], H1: [] }, ver: { K1: UNRES, X1: UNRES, H1: { kind: "fixed-test" } } });
+  const w = world({ golds: [g], runs: { "P1-r1": { accepted: t, semantic: { rounds: [c3Round(1, sha("table"))] } } } });
+  try {
+    assert.equal(run(w).code, 0);
+    const c = readOut(w).scoring.c3.accepted;
+    for (const rate of [c.miss, c.false_reject]) {
+      assert.equal(rate.n, 0);
+      assert.equal(rate.rate, null);
+      assert.equal(rate.wilson95_reference, null);
+      assert.equal(rate.reason_code, "denominator-zero");
+    }
+    assert.equal(c.runs.with_record, 1);
+  } finally { w.cleanup(); }
+});
+
+test("出力：点検の引用・拒否の理由・出典の写しの文が無い。匿名の口に本の ID・要件 ID・P の番号が無く件数と率だけ。同じ入力で 2 回同じ出力", () => {
+  const runs = {
+    "P1-r1": { accepted: c3Table(), semantic: { rounds: [c3Round(1, sha("table"))] }, drafts: [candidateOf(c3Table(), { round: 1 })] },
+    "P1-r2": { drafts: [candidateOf(c3Table())] },
+  };
+  const w = world({ golds: [c3Gold()], runs });
+  try {
+    const r1 = run(w);
+    assert.equal(r1.code, 0);
+    const first = readFileSync(join(w.out, OUTPUT_FILE), "utf8");
+    rmSync(w.out, { recursive: true });
+    const r2 = run(w);
+    assert.equal(readFileSync(join(w.out, OUTPUT_FILE), "utf8"), first);
+    assert.equal(r2.text, r1.text);
+    for (const t of [first, r1.text]) for (const mark of [QUOTE, REASON, TEXT]) assert.ok(!t.includes(mark), mark);
+    assert.ok(!first.includes('"quote"'));
+    const ra = run(w, ["--anonymous"]);
+    assert.equal(ra.code, 0);
+    const anonText = readFileSync(join(w.out, anonymousFileOf(OUTPUT_FILE)), "utf8");
+    const anon = JSON.parse(anonText);
+    assert.deepEqual(anon, anonymize(JSON.parse(first)));
+    assert.ok(anon.draft && anon.c3.accepted && anon.c3.checkpoint);
+    assert.doesNotMatch(anonText, /P\d+|-r\d|"[CTWKXHR]\d+"|[0-9a-f]{64}|by_pattern|fingerprint/);
+    for (const mark of [QUOTE, REASON, TEXT]) assert.ok(!anonText.includes(mark), mark);
+    assert.ok(!anonText.includes(w.base));
+  } finally { w.cleanup(); }
+});
+
+const SECTION_DRAFT = "### 7.11 断った候補の下書きの採点（読取元 (c)。#607）";
+const SECTION_C3 = "### 7.12 C3 の正誤表（見逃し・誤拒否。#607）";
+test("README：下書きの採点と正誤表の小節があり、やることの項目が載る。既存の節の文（#606 の README の全体）が変わらない", () => {
+  const text = readme();
+  const at = text.indexOf(SECTION_DRAFT), c3 = text.indexOf(SECTION_C3);
+  assert.ok(at > 0 && c3 > at);
+  assert.equal(sha(text.slice(0, at - 1)), "bcac1bac9c04e0c39807553cccb5c2e5795a2ce474c12ba378aaed567132b851");
+  const draft = text.slice(at, c3), table = text.slice(c3);
+  for (const item of ["最後の候補", "round・attempt・call", "候補の数", "合併しない", "読めない候補", "古い候補", "一覧", "形の失敗", "数が合わない", "平ら", "添字", "参照切れ", "出典の写し", "表の SHA は null", "分母 (a')", "分母 (b')", "静的な保留", "P を単位", "--compare", "1 回ずつ", "rejected-name-table.json"]) assert.ok(draft.includes(item), item);
+  for (const item of ["二値", "見逃し", "誤拒否", "点検の記録なし", "点検の対象外", "表の SHA", "semantic-check", "semantic_check", "持ち越し", "了承除外", "保留", "参考（独立を仮定）", "P ごと", "拒否の種類", "引用", "拒否の理由", "--compare", "--anonymous", "指紋", "断った候補"]) assert.ok(table.includes(item), item);
 });

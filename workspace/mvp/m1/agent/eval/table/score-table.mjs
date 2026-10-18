@@ -2,6 +2,8 @@
 // 正解の表（要件単位・別解つき。採点担当が作る。非公開で git の外）と照らし、要件ごとの 3 問（欠け・過剰・確かめ方）を 0／1 で出す。
 // 計測の道具であって工場の門ではない：工場の package を import せず、工場の段からも呼ばれない。LLM・判定・API・通信・時計を使わない（費用 0）。
 // P のまとまりの区間（bootstrap・t 区間）・符号反転の p・対の差の集計は、評価の下の既存の道具（score-agent.mjs）の関数を import して使う（写さない）。
+// 2 本目（#607）：T1' が断った候補の下書き（読取元 (c)。本ごとに最後の候補だけ）を同じ採点の関数で採点し、C3（T1''）の判定を同じ正解と照らした
+// 正誤表（見逃し・誤拒否。二値の要件だけ）を足す。1 本目の欄は変えず、出力の後ろに足す。
 //
 // 使い方: node score-table.mjs <正解のディレクトリ> <計測の出力先（--compare なら比較の記録の出力先）> <出力先> [--compare] [--anonymous]
 // 断る（終了コード 3・固定の符号の 1 行・出力を書かない）：引数・正解の版と形・凍結した組の ID と版・plan_sha256（条件のファイル・本の記録）・比較の記録
@@ -26,6 +28,22 @@ export const SOURCE_PATHS = { accepted: "bundle/artifacts/name-table.json", chec
 /** plan_sha256 を照らす本の記録（納品物の build の記録。checkpoint は読取元の (b) と同じファイル） */
 export const BUILD_RECORD_PATH = "bundle/build-record.json";
 export const CONDITIONS_FILE = "conditions.json";
+/** 読取元 (c)：T1' が断った候補の下書き（診断の記録。#607）。(a)・(b) と混ぜない */
+export const DRAFT_SOURCE = "draft";
+export const DRAFT_PATH = "bundle/diagnostics/rejected-name-table.json";
+/** 読めない候補の理由：記録のファイルが読めない・形が違う／一覧が無い／応答が表の形でない（形の失敗）／一覧と要件の数が合わない */
+export const DRAFT_UNREADABLE = ["file", "no-list", "shape", "count-mismatch"];
+/** 下書きの行の type（欄を平らに持つ写像）のうち、行の種類ごとに使う欄 */
+export const DRAFT_TYPE_KEYS = { entity: [], field: ["fieldType"], computation: ["valueType", "scope", "form", "aggregate"], operation: ["action", "hasWhen"], screen: ["view"] };
+/** C3 の点検の記録の場所（受理済みの表は成果物の semantic-check の記録、checkpoint は同じファイルの semantic_check） */
+export const SEMANTIC_RECORD_PATHS = { accepted: "bundle/artifacts/semantic-check.json", checkpoint: "bundle/stage-checkpoint-t1-t2.json" };
+export const C3_VERDICTS = ["accept", "reject"];
+/** 拒否の種類の既知の値（件数だけ出す。ほかの値は unknown に数える） */
+export const C3_REJECTION_KINDS = ["unnecessary-ownership", "missing-target", "weak-verification"];
+/** 正誤表に入れない非二値（件数だけ） */
+export const C3_NON_BINARY = ["carry-over", "accepted-removal", "held"];
+/** 点検の記録なしの理由：記録が無い／読めない・形が違う／表の SHA の合う回が無い */
+export const C3_NO_RECORD = ["absent", "unreadable", "no-matching-round"];
 export const COMPARISON_FILE = "comparison.json";
 
 /** 要件の結果の 5 値。二値（率と差に使う）は正答・誤りだけ */
@@ -81,6 +99,10 @@ export const DEFINITIONS = {
   interval_rule: "区間は P を単位にする（P ごとに二値の要件の 0／1 を平均し、bootstrap の区間と参考の t 区間。m < 2 は null と理由）。単独群では符号反転の p を出さない。Wilson の 95% は参考（独立を仮定）で、P の区間の代用にしない",
   source_rule: "読取元ごとに出し、混ぜない。1 本に両方あれば受理済みの表を採り、checkpoint は件数だけ",
   gate_note: "計測の道具であって工場の門ではない。費用 0（LLM・判定・API を呼ばない）。正解の文は写さない",
+  draft_rule: "読取元 (c)＝T1' が断った候補の下書き。本ごとに最後の候補（round・attempt・call が最大）1 つだけを採点し、別の候補を合併しない。最後の候補が読めなければ採点せず、古い候補に戻らない。表の SHA は null",
+  denominator_a_prime: "分母 (a')＝下書きを採点した本の二値の要件数（(a) と混ぜない）",
+  denominator_b_prime: "分母 (b')＝予定の本 ×（その P の要件数 − 静的な保留の数）（(b) と混ぜない）",
+  c3_rule: "C3 の正誤表は二値（正答・誤り）の要件だけ。表と表の SHA が一致する点検の回に結ぶ。見逃しの率＝誤りのうち受理 ÷ 誤り、誤拒否の率＝正答のうち拒否 ÷ 正答。持ち越し・了承除外・保留は件数だけ。点検の引用・拒否の理由の文は写さない。Wilson は参考（独立を仮定）。--compare では群ごとに出し、対の差は取らない",
 };
 export const WILSON_NAME = "参考（独立を仮定）";
 const ZERO_REASON = "denominator-zero";
@@ -531,11 +553,14 @@ function readRun(dir, id, gold) {
   const source = accepted.status === "ok" ? "accepted" : checkpoint.status === "ok" ? "checkpoint" : null;
   if (source !== null && shas.length === 0) refuse("table-score:plan-sha256-run");
   if (shas.some((s) => s !== gold.plan_sha256)) refuse("table-score:plan-sha256-run");
-  if (source === null) return { source: null, both: false, read: null };
-  return { source, both: accepted.status === "ok" && checkpoint.status === "ok", read: readSource(source, source === "accepted" ? accepted.value : checkpoint.value) };
+  if (source === null) return { source: null, both: false, read: null, semantic: null };
+  const semantic = source === "accepted" ? readIf(join(dir, id, SEMANTIC_RECORD_PATHS.accepted)) : { status: "ok", value: isObj(checkpoint.value) ? opt(checkpoint.value.semantic_check) : null };
+  return { source, both: accepted.status === "ok" && checkpoint.status === "ok", read: readSource(source, source === "accepted" ? accepted.value : checkpoint.value), semantic };
 }
-/** 1 つの計測の出力先を照合して採点する（照合が 1 つでも合わなければ何も数えずに断る） */
-export function scoreMeasurement(dir, golds) {
+/** 1 つの計測の出力先を照合して採点する（照合が 1 つでも合わなければ何も数えずに断る）。戻り：1 本目の行ごとの出力 */
+export const scoreMeasurement = (dir, golds) => measure(dir, golds).rows;
+/** 照合して採点し、1 本目の行・下書きの行 (c)・C3 の結び付けの行を返す */
+function measure(dir, golds) {
   const { runs, frozen } = loadConditions(dir);
   const patterns = [...new Set(runs.map((id) => RUN_ID.exec(id)[1]))];
   for (const p of patterns) {
@@ -547,10 +572,136 @@ export function scoreMeasurement(dir, golds) {
   }
   // 照合を全部済ませてから数える（途中で断っても何も数えない）
   const read = runs.map((id) => ({ id, pattern: RUN_ID.exec(id)[1], ...readRun(dir, id, golds.get(RUN_ID.exec(id)[1])) }));
-  return read.map((r) => ({
+  const rows = read.map((r) => ({
     run: r.id, pattern: r.pattern, source: r.source, checkpoint_also: r.both,
     ...(r.read === null ? { table_sha256: null, requirements: null, assignment: null, unassigned_rows: null, search_limit: null } : scoreStructure(r.read.structure, r.read.meta, golds.get(r.pattern))),
   }));
+  const draftRows = runs.map((id) => scoreDraftRun(dir, id, golds.get(RUN_ID.exec(id)[1])));
+  const c3Rows = rows.map((r, i) => linkC3(r, read[i].semantic));
+  return { rows, draftRows, c3Rows };
+}
+
+// ── 読取元 (c)：断った候補の下書き（#607）
+/** 下書きの行の type（平らな写像）を、行の種類に合う欄だけの 1 本目の表の型に写す（種類に合わない欄は読まない） */
+const draftType = (kind, t) => {
+  if (kind === "entity") return null;
+  if (kind === "field") return opt(t.fieldType);
+  const keys = DRAFT_TYPE_KEYS[kind];
+  return keys === undefined ? null : Object.fromEntries(keys.map((k) => [k, opt(t[k])]));
+};
+/**
+ * 下書き（応答）と候補に添えた点検の一覧から、1 本目の採点の構造を作る。要件 ID は一覧の順で付ける（応答の写し・行の出典は読まない）。
+ * 戻り：{ structure } か { unreadable: 理由 }（一覧が無い・表の形でない・数が合わない）
+ */
+export function draftStructure(response, list) {
+  if (!isObj(list) || !Array.isArray(list.requirements) || !list.requirements.every((q) => isObj(q) && isStr(q.id))) return { unreadable: "no-list" };
+  if (!isObj(response) || !Array.isArray(response.rows) || !Array.isArray(response.requirements)) return { unreadable: "shape" };
+  if (!response.rows.every((r) => isObj(r) && isObj(r.type))) return { unreadable: "shape" };
+  if (!response.requirements.every((q) => isObj(q) && Array.isArray(q.roles) && isObj(q.verification))) return { unreadable: "shape" };
+  if (response.requirements.length !== list.requirements.length) return { unreadable: "count-mismatch" };
+  const table = {
+    rows: response.rows.map((r) => ({ id: r.id, kind: r.kind, entity: opt(r.entity), type: draftType(r.kind, r.type), options: opt(r.options), groupBy: opt(r.groupBy), refEntity: opt(r.refEntity) })),
+    ownership: list.requirements.map((q, i) => ({ requirementId: q.id, roles: response.requirements[i].roles })),
+    verification: list.requirements.map((q, i) => { const v = response.requirements[i].verification; return { requirementId: q.id, kind: v.kind, checks: v.checks, value: v.value }; }),
+  };
+  try { return { structure: normalizeTable(table) }; } catch (e) { if (e instanceof TableScoreError) return { unreadable: "shape" }; throw e; }
+}
+const coordOf = (c) => [c.round, c.attempt, c.call];
+const coordCompare = (a, b) => { for (let k = 0; k < 3; k += 1) if (a[k] !== b[k]) return a[k] - b[k]; return 0; };
+/** 本の断った候補の記録を読み、最後の候補（round・attempt・call が最大。同じなら記録の後のもの）だけを採点する */
+function scoreDraftRun(dir, id, gold) {
+  const pattern = RUN_ID.exec(id)[1];
+  const none = { table_sha256: null, requirements: null, assignment: null, unassigned_rows: null, search_limit: null };
+  const base = { run: id, pattern, source: null, checkpoint_also: false, candidate_count: 0, last: null, unreadable: null };
+  const f = readIf(join(dir, id, DRAFT_PATH));
+  if (f.status === "absent") return { ...base, ...none };
+  const list = f.status === "ok" && isObj(f.value) && Array.isArray(f.value.candidates) ? f.value.candidates : null;
+  if (list === null || !list.every((c) => isObj(c) && coordOf(c).every(Number.isInteger))) return { ...base, candidate_count: list === null ? null : list.length, unreadable: "file", ...none };
+  if (list.length === 0) return { ...base, ...none };
+  let last = list[0];
+  for (const c of list) if (coordCompare(coordOf(c), coordOf(last)) >= 0) last = c;
+  const head = { ...base, candidate_count: list.length, last: { round: last.round, attempt: last.attempt, call: last.call } };
+  const d = last.kind === "content" ? draftStructure(last.response, last.inspection_list) : { unreadable: last.kind === "shape" ? "shape" : "no-list" };
+  if (d.unreadable !== undefined) return { ...head, unreadable: d.unreadable, ...none };
+  return { ...head, source: DRAFT_SOURCE, ...scoreStructure(d.structure, { table_sha256: null }, gold) };
+}
+/** 読取元 (c) の集計：1 本目の集計の関数をそのまま使い（分母 (a')・(b')）、候補の件数と読めない候補を足す */
+export function aggregateDraft(draftRows, golds) {
+  const unreadable = Object.fromEntries(DRAFT_UNREADABLE.map((k) => [k, 0]));
+  for (const r of draftRows) if (r.unreadable !== null) unreadable[r.unreadable] += 1;
+  return {
+    ...aggregate(draftRows, golds, DRAFT_SOURCE),
+    draft: {
+      runs_with_candidates: draftRows.filter((r) => r.candidate_count !== 0).length,
+      candidate_total: draftRows.reduce((s, r) => s + (r.candidate_count ?? 0), 0),
+      scored_runs: draftRows.filter((r) => r.source === DRAFT_SOURCE).length,
+      unreadable,
+    },
+  };
+}
+
+// ── C3 の正誤表（#607）
+/** 採点した表と表の SHA が一致する点検の回（受理済みの表は記録の回のうち最後のもの）。戻り：{ status, round, targets, judgments } */
+function matchSemantic(source, semantic, tableSha) {
+  if (semantic === null || semantic.status === "absent" || (semantic.status === "ok" && semantic.value === null)) return { status: "absent" };
+  if (semantic.status !== "ok") return { status: "unreadable" };
+  const v = semantic.value;
+  const rounds = source === "accepted" ? (isObj(v) && Array.isArray(v.rounds) ? v.rounds : null) : isObj(v) ? [v] : null;
+  if (rounds === null) return { status: "unreadable" };
+  const hit = rounds.filter((x) => isObj(x) && tableSha !== null && x.table_sha256 === tableSha).at(-1);
+  if (hit === undefined) return { status: "no-matching-round" };
+  if (!isStrList(hit.targets) || !Array.isArray(hit.judgments)) return { status: "unreadable" };
+  return { status: "matched", round: source === "accepted" && Number.isInteger(hit.round) ? hit.round : null, targets: hit.targets, judgments: hit.judgments };
+}
+const emptyCells = () => ({ wrong_accept: 0, wrong_reject: 0, correct_accept: 0, correct_reject: 0 });
+/** 本ごとに、採点した表を点検の回に結び、二値の要件の 2×2・非二値の件数・対象外・拒否の種類の件数を数える（引用・理由の文は読まない） */
+function linkC3(r, semantic) {
+  if (r.source === null) return null;
+  const m = matchSemantic(r.source, semantic, r.table_sha256);
+  const head = { run: r.run, pattern: r.pattern, source: r.source, record: m.status, round: m.round ?? null };
+  if (m.status !== "matched") return { ...head, cells: null, non_binary: null, out_of_target: null, reject_kinds: null };
+  // 判定は要件 ID ごとに 1 つ（既知の判定だけ。同じ ID が 2 つ以上なら判定の無い要件として扱う）
+  const seen = new Map();
+  for (const j of m.judgments) if (isObj(j) && isStr(j.requirementId)) seen.set(j.requirementId, seen.has(j.requirementId) ? null : j);
+  const verdictOf = (id) => { const j = seen.get(id); return j && C3_VERDICTS.includes(j.verdict) && m.targets.includes(id) ? j.verdict : null; };
+  const cells = emptyCells(), nonBinary = Object.fromEntries(C3_NON_BINARY.map((k) => [k, 0]));
+  let outOfTarget = 0;
+  for (const q of r.requirements) {
+    if (!BINARY_OUTCOMES.includes(q.outcome)) { nonBinary[q.outcome] += 1; continue; }
+    const v = verdictOf(q.requirement_id);
+    if (v === null) { outOfTarget += 1; continue; }
+    cells[`${q.outcome}_${v}`] += 1;
+  }
+  const rejectKinds = Object.fromEntries([...C3_REJECTION_KINDS, "unknown"].map((k) => [k, 0]));
+  for (const j of m.judgments) if (isObj(j) && j.verdict === "reject") rejectKinds[C3_REJECTION_KINDS.includes(j.kind) ? j.kind : "unknown"] += 1;
+  return { ...head, cells, non_binary: nonBinary, out_of_target: outOfTarget, reject_kinds: rejectKinds };
+}
+/** 読取元ごとの正誤表（見逃しの率・誤拒否の率・P ごとの 2×2・P の数） */
+export function aggregateC3(c3Rows, source) {
+  const cells = emptyCells(), nonBinary = Object.fromEntries(C3_NON_BINARY.map((k) => [k, 0])), noRecord = Object.fromEntries(C3_NO_RECORD.map((k) => [k, 0]));
+  const rejectKinds = Object.fromEntries([...C3_REJECTION_KINDS, "unknown"].map((k) => [k, 0]));
+  const byPattern = {};
+  let withTable = 0, withRecord = 0, outOfTarget = 0;
+  for (const r of c3Rows) {
+    if (r === null || r.source !== source) continue;
+    withTable += 1;
+    if (r.record !== "matched") { noRecord[r.record] += 1; continue; }
+    withRecord += 1;
+    outOfTarget += r.out_of_target;
+    const p = (byPattern[r.pattern] ??= emptyCells());
+    for (const k of Object.keys(cells)) { cells[k] += r.cells[k]; p[k] += r.cells[k]; }
+    for (const k of C3_NON_BINARY) nonBinary[k] += r.non_binary[k];
+    for (const k of Object.keys(rejectKinds)) rejectKinds[k] += r.reject_kinds[k];
+  }
+  const sorted = Object.fromEntries(Object.entries(byPattern).sort(([a], [b]) => Number(a.slice(1)) - Number(b.slice(1))));
+  return {
+    source,
+    runs: { with_table: withTable, with_record: withRecord, no_record: noRecord },
+    cells, non_binary: nonBinary, out_of_target: outOfTarget, reject_kinds: rejectKinds,
+    miss: makeRate(cells.wrong_accept, cells.wrong_accept + cells.wrong_reject),
+    false_reject: makeRate(cells.correct_reject, cells.correct_accept + cells.correct_reject),
+    by_pattern: sorted, patterns: Object.keys(sorted).length,
+  };
 }
 
 // ── 集計
@@ -645,20 +796,35 @@ function loadComparison(dir) {
 /** 道具のファイルの SHA-256（通常の出力にだけ。採点の欄と別の欄） */
 export const toolFingerprint = () => sha256(readFileSync(fileURLToPath(import.meta.url)));
 const perSource = (rows, golds) => Object.fromEntries(SOURCES.map((s) => [s, aggregate(rows, golds, s)]));
+const perC3 = (c3Rows) => Object.fromEntries(SOURCES.map((s) => [s, aggregateC3(c3Rows, s)]));
 /** 採点する（照合を通らなければ TableScoreError）。戻り：通常の出力（JSON の値） */
 export function scoreTables({ goldDir, measureDir, compare = false }) {
   const golds = loadGoldDir(goldDir);
   if (!compare) {
-    const rows = scoreMeasurement(measureDir, golds);
-    return { schema: OUTPUT_SCHEMA, definitions: DEFINITIONS, scoring: { by_source: perSource(rows, golds), rows }, fingerprint: { tool_sha256: toolFingerprint() } };
+    const { rows, draftRows, c3Rows } = measure(measureDir, golds);
+    return {
+      schema: OUTPUT_SCHEMA, definitions: DEFINITIONS,
+      scoring: { by_source: perSource(rows, golds), rows, draft: aggregateDraft(draftRows, golds), draft_rows: draftRows, c3: perC3(c3Rows), c3_rows: c3Rows },
+      fingerprint: { tool_sha256: toolFingerprint() },
+    };
   }
   const roles = loadComparison(measureDir);
-  const base = scoreMeasurement(join(measureDir, roles.baseline), golds), cand = scoreMeasurement(join(measureDir, roles.candidate), golds);
+  const mb = measure(join(measureDir, roles.baseline), golds), mc = measure(join(measureDir, roles.candidate), golds);
+  const base = mb.rows, cand = mc.rows;
   const bySource = Object.fromEntries(SOURCES.map((s) => {
     const pick = (rows) => rows.map((r) => (r.source === s ? r : { ...r, requirements: null }));
     return [s, { baseline: aggregate(base, golds, s), candidate: aggregate(cand, golds, s), compare: compareRows(pick(base), pick(cand)) }];
   }));
-  return { schema: COMPARE_SCHEMA, definitions: DEFINITIONS, groups: { baseline: roles.baseline, candidate: roles.candidate }, scoring: { by_source: bySource, rows: { baseline: base, candidate: cand } }, fingerprint: { tool_sha256: toolFingerprint() } };
+  // (c) と正誤表は群ごとの欄だけ（対に入れない・対の差を取らない）
+  return {
+    schema: COMPARE_SCHEMA, definitions: DEFINITIONS, groups: { baseline: roles.baseline, candidate: roles.candidate },
+    scoring: {
+      by_source: bySource, rows: { baseline: base, candidate: cand },
+      draft: { baseline: aggregateDraft(mb.draftRows, golds), candidate: aggregateDraft(mc.draftRows, golds) }, draft_rows: { baseline: mb.draftRows, candidate: mc.draftRows },
+      c3: Object.fromEntries(SOURCES.map((s) => [s, { baseline: aggregateC3(mb.c3Rows, s), candidate: aggregateC3(mc.c3Rows, s) }])), c3_rows: { baseline: mb.c3Rows, candidate: mc.c3Rows },
+    },
+    fingerprint: { tool_sha256: toolFingerprint() },
+  };
 }
 
 // 匿名の口：件数・率・区間・m だけ（P の番号・本の ID・要件 ID・記号・パス・SHA を出さない）
@@ -669,28 +835,46 @@ const anonAggregate = (a) => ({
   breakdown: { missing: anonRate(a.breakdown.missing), excess: anonRate(a.breakdown.excess), verification_correct: anonRate(a.breakdown.verification_correct) },
   outcomes: { ...a.outcomes }, holds: { static: a.holds.static, candidate: { ...a.holds.candidate } }, counts: { ...a.counts }, pattern_interval: anonInterval(a.pattern_interval),
 });
+const anonDraft = (a) => ({ ...anonAggregate(a), draft: { runs_with_candidates: a.draft.runs_with_candidates, candidate_total: a.draft.candidate_total, scored_runs: a.draft.scored_runs, unreadable: { ...a.draft.unreadable } } });
+const anonC3 = (c) => ({
+  runs: { with_table: c.runs.with_table, with_record: c.runs.with_record, no_record: { ...c.runs.no_record } }, cells: { ...c.cells }, non_binary: { ...c.non_binary }, out_of_target: c.out_of_target,
+  reject_kinds: { ...c.reject_kinds }, miss: anonRate(c.miss), false_reject: anonRate(c.false_reject), patterns: c.patterns,
+});
 export function anonymize(full) {
-  if (full.schema === OUTPUT_SCHEMA) return { schema: ANONYMOUS_SCHEMA, mode: "single", by_source: Object.fromEntries(SOURCES.map((s) => [s, anonAggregate(full.scoring.by_source[s])])) };
+  if (full.schema === OUTPUT_SCHEMA) {
+    return {
+      schema: ANONYMOUS_SCHEMA, mode: "single", by_source: Object.fromEntries(SOURCES.map((s) => [s, anonAggregate(full.scoring.by_source[s])])),
+      draft: anonDraft(full.scoring.draft), c3: Object.fromEntries(SOURCES.map((s) => [s, anonC3(full.scoring.c3[s])])),
+    };
+  }
   return {
     schema: ANONYMOUS_SCHEMA, mode: "compare",
     by_source: Object.fromEntries(SOURCES.map((s) => {
       const x = full.scoring.by_source[s], d = x.compare.requirement_diffs;
       return [s, { baseline: anonAggregate(x.baseline), candidate: anonAggregate(x.candidate), compare: { requirement_diffs: { n: d.n, counts: { ...d.counts }, mean: d.mean, sd: d.sd, interval: d.interval }, excluded: { ...x.compare.excluded }, pattern_clusters: anonInterval(x.compare.pattern_clusters) } }];
     })),
+    draft: { baseline: anonDraft(full.scoring.draft.baseline), candidate: anonDraft(full.scoring.draft.candidate) },
+    c3: Object.fromEntries(SOURCES.map((s) => [s, { baseline: anonC3(full.scoring.c3[s].baseline), candidate: anonC3(full.scoring.c3[s].candidate) }])),
   };
 }
 
 const pct = (r) => (r.rate === null ? `なし（${r.reason_code}）` : `${r.k}/${r.n}（${(r.rate * 100).toFixed(1)}%）`);
 const rangeOf = (x) => (x === null ? "-" : `${x[0].toFixed(3)}〜${x[1].toFixed(3)}`);
 const aggText = (a) => `正答 (a) ${pct(a.correct.a)}・(b) ${pct(a.correct.b)}・欠け ${pct(a.breakdown.missing)}・過剰 ${pct(a.breakdown.excess)}・確かめ方 ${pct(a.breakdown.verification_correct)}・分母 (a) ${a.denominators.a}／(b) ${a.denominators.b}・5 値 ${OUTCOMES.map((o) => `${o} ${a.outcomes[o]}`).join("・")}・割り当てられない行 ${a.counts.unassigned_rows}・表なし ${a.runs.no_table}・P の区間（m ${a.pattern_interval.m}）bootstrap ${rangeOf(a.pattern_interval.bootstrap.interval)}`;
-/** 標準出力の要約（読取元ごとに 1 行。比較は差の 1 行を足す） */
+const draftText = (a) => `${aggText(a)}・候補 ${a.draft.candidate_total}（候補のある本 ${a.draft.runs_with_candidates}・採点した本 ${a.draft.scored_runs}）・読めない候補 ${DRAFT_UNREADABLE.map((k) => `${k} ${a.draft.unreadable[k]}`).join("・")}`;
+const c3Text = (c) => `見逃し ${pct(c.miss)}・誤拒否 ${pct(c.false_reject)}・点検の対象外 ${c.out_of_target}・非二値 ${C3_NON_BINARY.map((k) => `${k} ${c.non_binary[k]}`).join("・")}・点検の記録あり ${c.runs.with_record}・点検の記録なし ${C3_NO_RECORD.map((k) => `${k} ${c.runs.no_record[k]}`).join("・")}・P の数 ${c.patterns}`;
+/** 標準出力の要約（読取元ごとに 1 行。比較は差の 1 行を足す。そのあとに下書き (c) の行と正誤表の行） */
 export function summaryText(full) {
   const src = full.scoring.by_source;
-  if (full.schema === OUTPUT_SCHEMA) return SOURCES.map((s) => `[${s}] ${aggText(src[s])}`).join("\n");
-  return SOURCES.map((s) => {
+  if (full.schema === OUTPUT_SCHEMA) {
+    return [...SOURCES.map((s) => `[${s}] ${aggText(src[s])}`), `[${DRAFT_SOURCE}] ${draftText(full.scoring.draft)}`, ...SOURCES.map((s) => `[c3:${s}] ${c3Text(full.scoring.c3[s])}`)].join("\n");
+  }
+  const groups = ["baseline", "candidate"], label = { baseline: "比較元", candidate: "候補" };
+  const tail = [...groups.map((g) => `[${DRAFT_SOURCE}] ${label[g]} ${draftText(full.scoring.draft[g])}`), ...SOURCES.flatMap((s) => groups.map((g) => `[c3:${s}] ${label[g]} ${c3Text(full.scoring.c3[s][g])}`))];
+  return [...SOURCES.map((s) => {
     const x = src[s], d = x.compare.requirement_diffs, c = x.compare.pattern_clusters;
     return `[${s}] 比較元 ${aggText(x.baseline)}\n[${s}] 候補 ${aggText(x.candidate)}\n[${s}] 差 n ${d.n}（+1 ${d.counts["+1"]}・0 ${d.counts[0]}・-1 ${d.counts["-1"]}）平均 ${d.mean ?? "-"}・P のまとまり（m ${c.m}）p ${c.sign_flip.p ?? "-"}・bootstrap ${rangeOf(c.bootstrap.interval)}・除いた ${PAIR_NULL_REASONS.map((k) => `${k} ${x.compare.excluded[k]}`).join("・")}`;
-  }).join("\n");
+  }), ...tail].join("\n");
 }
 
 /** 入口：引数を読み、採点して書く。断れば何も書かずに符号を返す */
