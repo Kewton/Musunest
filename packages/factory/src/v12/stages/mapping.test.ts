@@ -8,11 +8,14 @@ import {
   fixtureDefaultValueList,
   fixtureDefaultValueTable,
   fixtureList,
+  fixtureNonRequirementList,
+  fixtureNonRequirementTable,
   fixtureTable,
   idsResponsesOf,
   planOf,
   recordedStructured,
   strictDefects,
+  withAggregates,
   withCodeIds,
 } from "../../v11a/__tests__/fixtures.js";
 import { nameTableSha256, type NameTable } from "../../v11a/names.js";
@@ -148,6 +151,40 @@ describe("C2' の負例：固定文で落ち、形のやり直し 1 回のあと
     const outside = good.map((entry, index) => (index === 5 ? { ...entry, verification: { ...(entry["verification"] as Entry), value: "gamma" } } : entry));
     const first = await run([withEntries(outside), withEntries(outside)], { list, table });
     expect(messagesOf(first.outcome)).toContain("既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い");
+  });
+
+  it("要件でない文（non-requirement）に実在する行を所属させた応答は、台帳の固定文で 2 回落ちて unmet（要求 2 回）。所属 0 行に直せば通る（旗 ledger on）", async () => {
+    const list = fixtureNonRequirementList();
+    const table = withCodeIds(withAggregates(fixtureNonRequirementTable()));
+    const good = idsResponsesOf(list, table, PROPERTY_LEDGER_VIEW).mapping["requirements"] as Entry[];
+    const nonRequirement = good.find((entry) => entry["requirementId"] === "R6");
+    expect((nonRequirement?.["verification"] as Entry | undefined)?.["kind"]).toBe("non-requirement");
+    expect(nonRequirement?.["roles"]).toEqual([]);
+    const existing = table.rows[0]?.id;
+    expect(existing).toBeDefined();
+    const owned = good.map((entry) =>
+      entry["requirementId"] === "R6" ? { ...entry, roles: [{ id: existing, basis: "stated", reason: null }] } : entry,
+    );
+    const runWithLedger = async (outputs: readonly unknown[]) => {
+      const recording = createCheckedRecordingClient(outputs.map(recordedStructured));
+      const outcome = await runMapping({
+        plan: planOf(list),
+        list,
+        documents: FIXTURE_DOCUMENTS,
+        gateway: makeGateway(recording.client),
+        rows: table.rows,
+        ledger: PROPERTY_LEDGER_VIEW,
+      });
+      return { outcome, recording };
+    };
+    const failed = await runWithLedger([withEntries(owned), withEntries(owned)]);
+    expect(failed.recording.structured).toHaveLength(2);
+    expect(failed.outcome.ok).toBe(false);
+    if (!failed.outcome.ok) expect(failed.outcome.failure.kind).toBe("unmet");
+    expect(messagesOf(failed.outcome)).toContain("要件でない文（non-requirement）には行を所属させないこと");
+    const fixed = await runWithLedger([withEntries(owned), withEntries(good)]);
+    expect(fixed.outcome.ok).toBe(true);
+    expect(fixed.recording.structured).toHaveLength(2);
   });
 
   it("写し由来の固定文（長さ・一覧に無い写し・引用が原文に無い）は C2' の落ちに出ない", async () => {
