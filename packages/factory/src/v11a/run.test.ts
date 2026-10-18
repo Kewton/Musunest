@@ -100,6 +100,8 @@ import {
   V12_PUBLIC_FLAG_NAMES,
   fromPublicV12Flags,
   resolveV12Flags,
+  toPublicV12Flags,
+  type V12Flags,
 } from "../v12/ledger.js";
 import * as ledgerModule from "../v12/ledger.js";
 import { buildSized, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
@@ -2655,9 +2657,9 @@ describe("旗の組の契約（要約の v12_flags）", () => {
   it("正本の旗の組は旗の名前を全部持ち（merge 済みの手の旗は全部 on）、省いた名前は off に解く", () => {
     expect(Object.keys(V12_PIPELINE_FLAGS)).toEqual([...V12_PUBLIC_FLAG_NAMES]);
     for (const name of V12_FLAG_NAMES) expect(V12_PIPELINE_FLAGS[V12_FLAG_PUBLIC_NAMES[name]]).toBe(true);
-    expect(resolveV12Flags()).toEqual({ ledger: false, searchRepair: false });
-    expect(resolveV12Flags({})).toEqual({ ledger: false, searchRepair: false });
-    expect(resolveV12Flags(fromPublicV12Flags(V12_PIPELINE_FLAGS))).toEqual({ ledger: true, searchRepair: true });
+    expect(resolveV12Flags()).toEqual({ ledger: false, searchRepair: false, ids: false });
+    expect(resolveV12Flags({})).toEqual({ ledger: false, searchRepair: false, ids: false });
+    expect(resolveV12Flags(fromPublicV12Flags(V12_PIPELINE_FLAGS))).toEqual({ ledger: true, searchRepair: true, ids: true });
     expect(factoryModule.V12_PIPELINE_FLAGS).toBe(V12_PIPELINE_FLAGS);
   });
 });
@@ -3401,5 +3403,80 @@ describe("題材の言葉の走査（Issue #551 で足した・直したファ�
       "./__tests__/fixtures.ts",
     ];
     expectNoAcceptanceMaterial(files.map((file) => nodeFs.readFileSync(new URL(file, import.meta.url), "utf8")));
+  });
+});
+
+// ── 旗 v12.ids（手 3p。Issue #592）：ids off の走りはバイト列で同じ・on の走りだけ門と枝の欄 ─────────────────
+
+/** 納品物の、要約と manifest を除いた成果物（パス → 本文） */
+const otherArtifacts = (bundle: AssembledBundle | null): Record<string, string> =>
+  Object.fromEntries(
+    (bundle?.artifacts ?? [])
+      .filter((artifact) => artifact.path !== "artifacts/summary.json" && artifact.path !== "bundle-manifest.json")
+      .map((artifact) => [artifact.path, artifact.text]),
+  );
+
+describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と同じで、ids on の差は要約の旗の欄と門の欄だけ", () => {
+  const SCENARIOS: readonly { readonly name: string; readonly calls: () => RecordedCall[]; readonly prior: Partial<V12Flags> }[] = [
+    {
+      name: "台帳と探索型の直し（完走）",
+      calls: () => [...head({ table: TABLE_ON }), structured(acceptAll())],
+      prior: { ledger: true, searchRepair: true },
+    },
+    {
+      name: "探索型の直し（不一致 2 → 1 → 0。探索の記録あり）",
+      calls: () => [...searchHead({ yaml: MIS2 }), structured(acceptAll()), repairDone(MIS1), structured(acceptAll()), repairDone(SEARCH_YAML), structured(acceptAll())],
+      prior: { searchRepair: true },
+    },
+  ];
+
+  it.each(SCENARIOS)("$name：ids off は門を作らず要約に門の欄が無い。ids を明示で off にしても同じ。ids on は要求・納品物・終了コードが同じ", async (scenario) => {
+    const prior = await runScenario(scenario.calls(), { flags: scenario.prior, recordV12Flags: true });
+    const explicitOff = await runScenario(scenario.calls(), { flags: { ...scenario.prior, ids: false }, recordV12Flags: true });
+    const on = await runScenario(scenario.calls(), { flags: { ...scenario.prior, ids: true }, recordV12Flags: true });
+    expect(prior.result.outcome.verdict).toBe("full");
+    // ids off：要約の旗の組に ids が false で載り（旗の組の欄だけ増える）、門の欄が無い
+    const priorSummary = prior.result.summary as unknown as Record<string, unknown>;
+    expect(priorSummary["v12_flags"]).toEqual(toPublicV12Flags(resolveV12Flags(scenario.prior)));
+    expect((priorSummary["v12_flags"] as Record<string, unknown>)["ids"]).toBe(false);
+    expect(priorSummary).not.toHaveProperty("v12_calls");
+    expect(explicitOff.result).toEqual(prior.result);
+    // ids on：LLM への要求・納品物（要約と manifest のほか）・合否・終了コード・段の記録が同じ
+    expect(JSON.stringify(on.recording.structured)).toBe(JSON.stringify(prior.recording.structured));
+    expect(JSON.stringify(on.recording.tools)).toBe(JSON.stringify(prior.recording.tools));
+    expect(otherArtifacts(on.result.bundle)).toEqual(otherArtifacts(prior.result.bundle));
+    expect(on.result.outcome).toEqual(prior.result.outcome);
+    expect(on.result.record).toEqual(prior.result.record);
+    const { v12_flags: onFlags, v12_calls: onCalls, ...onRest } = on.result.summary as unknown as Record<string, unknown>;
+    const { v12_flags: priorFlags, ...priorRest } = priorSummary;
+    expect(onRest).toEqual(priorRest);
+    expect(onFlags).toEqual({ ...(priorFlags as Record<string, unknown>), ids: true });
+    // 判定の口が無い走りの枝は 0 本。門は生成の実開始だけ
+    const started = on.result.record.stages.reduce((sum, record) => sum + record.attempts.started, 0);
+    expect(onCalls).toEqual({ real_attempts: { limit: 144, used: started }, judge_branch: { limit: 80, used: 0 } });
+    // 納品物の要約にも同じ欄が載る
+    expect(artifactOf(on.result.bundle, "artifacts/summary.json")["v12_calls"]).toEqual(onCalls);
+    expect(artifactOf(prior.result.bundle, "artifacts/summary.json")).not.toHaveProperty("v12_calls");
+  });
+
+  it("ids on で門を差し替えて生成が尽きた走りは call-limit で止まり（終了コード 1・納品物無し）、早期停止の要約にも門の欄が載る", async () => {
+    const { result } = await runScenario([...head({ table: TABLE_ON }), structured(acceptAll())], {
+      flags: { ledger: true, searchRepair: true, ids: true },
+      v12CallLimits: { realAttempts: 2 },
+    });
+    expect(result.stopped).toMatchObject({ kind: "call-limit" });
+    expect(result.summary.exit_code).toBe(1);
+    expect(result.bundle).toBeNull();
+    expect((result.summary as unknown as Record<string, unknown>)["v12_calls"]).toEqual({
+      real_attempts: { limit: 2, used: 2 },
+      judge_branch: { limit: 80, used: 0 },
+    });
+  });
+
+  it("旗 off の走りは v12CallLimits を渡しても見ない（門を作らない・今の上限）", async () => {
+    const base = await runScenario([...head(), structured(acceptAll())]);
+    const ignored = await runScenario([...head(), structured(acceptAll())], { v12CallLimits: { realAttempts: 1, judgeBranch: 0 } });
+    expect(ignored.result).toEqual(base.result);
+    expect(base.result.summary).not.toHaveProperty("v12_calls");
   });
 });

@@ -286,15 +286,15 @@ describe("台帳から導いたものが今の定数と同じ（旗 on の載せ
     expect(ledgerViewOf(resolveV12Flags())).toBeUndefined();
     expect(resolveV12Flags()).toEqual(V12_FLAGS_OFF);
     expect(Object.keys(V12_PIPELINE_FLAGS)).toEqual(V12_FLAG_NAMES.map((name) => V12_FLAG_PUBLIC_NAMES[name]));
-    expect(V12_PIPELINE_FLAGS).toEqual({ ledger: true, "search-repair": true });
+    expect(V12_PIPELINE_FLAGS).toEqual({ ledger: true, "search-repair": true, ids: true });
   });
 
   it("内部の鍵と公開の鍵の対応（1 か所の定数）：全部の旗が両方向に写り、公開の鍵は小文字・数字・ハイフン・点の形で重ならない（Issue #551）", () => {
     // 計測の道具の照合の形（score-agent.mjs の isFlagMap の旗の名前の形）
     const FLAG_NAME = /^[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)*$/;
     expect(Object.keys(V12_FLAG_PUBLIC_NAMES)).toEqual([...V12_FLAG_NAMES]);
-    expect(V12_FLAG_PUBLIC_NAMES).toEqual({ ledger: "ledger", searchRepair: "search-repair" });
-    expect(V12_PUBLIC_FLAG_NAMES).toEqual(["ledger", "search-repair"]);
+    expect(V12_FLAG_PUBLIC_NAMES).toEqual({ ledger: "ledger", searchRepair: "search-repair", ids: "ids" });
+    expect(V12_PUBLIC_FLAG_NAMES).toEqual(["ledger", "search-repair", "ids"]);
     expect(new Set(V12_PUBLIC_FLAG_NAMES).size).toBe(V12_FLAG_NAMES.length);
     for (const name of V12_PUBLIC_FLAG_NAMES) expect(name).toMatch(FLAG_NAME);
     for (const name of Object.keys(V12_PIPELINE_FLAGS)) expect(name).toMatch(FLAG_NAME);
@@ -306,12 +306,13 @@ describe("台帳から導いたものが今の定数と同じ（旗 on の載せ
       expect(fromPublicV12Flags(published)).toEqual(only);
       expect(toPublicV12Flags(fromPublicV12Flags({ [V12_FLAG_PUBLIC_NAMES[name]]: true }))).toEqual(published);
     }
-    expect(toPublicV12Flags(V12_FLAGS_OFF)).toEqual({ ledger: false, "search-repair": false });
+    expect(toPublicV12Flags(V12_FLAGS_OFF)).toEqual({ ledger: false, "search-repair": false, ids: false });
     expect(fromPublicV12Flags({})).toEqual(V12_FLAGS_OFF);
-    expect(fromPublicV12Flags(V12_PIPELINE_FLAGS)).toEqual({ ledger: true, searchRepair: true });
+    expect(fromPublicV12Flags(V12_PIPELINE_FLAGS)).toEqual({ ledger: true, searchRepair: true, ids: true });
     expect(toPublicV12Flags(fromPublicV12Flags(V12_PIPELINE_FLAGS))).toEqual(V12_PIPELINE_FLAGS);
     // 公開の鍵はコードの内部の鍵としては読まない（resolveV12Flags は内部の鍵だけを読む）
-    expect(resolveV12Flags(V12_PIPELINE_FLAGS as unknown as Partial<V12Flags>)).toEqual({ ledger: true, searchRepair: false });
+    // ids は内部の鍵と公開の鍵が同じ名前なので、どちらで読んでも on（Issue #592）
+    expect(resolveV12Flags(V12_PIPELINE_FLAGS as unknown as Partial<V12Flags>)).toEqual({ ledger: true, searchRepair: false, ids: true });
   });
 });
 

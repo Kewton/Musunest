@@ -19,6 +19,8 @@
 //
 // 旗の正本もここに置く。手 4a（#551）で旗 `v12.search-repair`（内部の鍵 `searchRepair`。B5 のループの旗で、部品は
 // `v12/search-repair.ts`）を足した。内部の鍵と公開の鍵の対応は `V12_FLAG_PUBLIC_NAMES` の 1 か所である。
+// 手 3p（#592）で旗 `v12.ids`（内部の鍵・公開の鍵とも `ids`）を足した。手 3 の仕組み（C1・C2 の束・導ける欄）と呼び出しの
+// 枠（`v12/limits.ts`）の旗で、手 3a〜3c は同じ旗の下で足す。
 //
 // 台帳は LLM を呼ばず、評価口を import しない（B4 の照合は名前で持ち、評価口が名前 → 関数の表を持つ）。
 import type { AggregateKind } from "@musunest/appspec-schema";
@@ -32,10 +34,15 @@ export interface V12Flags {
   readonly ledger: boolean;
   /** B5 のループを探索型（一番良い版・厳密な減少・停滞での作り直し・候補の状態）にする（手 4a。既定 off。Issue #551） */
   readonly searchRepair: boolean;
+  /**
+   * 手 3 の仕組み（C1・C2 の束・導ける欄）と呼び出しの枠（段ごとの論理の枠・生成と判定で共有する実試行の門・判定の枝。
+   * `v12/limits.ts`）を使う（手 3p。既定 off。Issue #592）
+   */
+  readonly ids: boolean;
 }
 
 /** 旗の名前の並び（`V12Flags` の鍵と同じ順） */
-export const V12_FLAG_NAMES = ["ledger", "searchRepair"] as const satisfies readonly (keyof V12Flags)[];
+export const V12_FLAG_NAMES = ["ledger", "searchRepair", "ids"] as const satisfies readonly (keyof V12Flags)[];
 
 /**
  * 内部の鍵 → 公開の鍵（**この 1 か所の対応**。Issue #551）。公開の鍵は `V12_PIPELINE_FLAGS`・要約と条件の記録の `v12_flags`
@@ -44,6 +51,7 @@ export const V12_FLAG_NAMES = ["ledger", "searchRepair"] as const satisfies read
 export const V12_FLAG_PUBLIC_NAMES = {
   ledger: "ledger",
   searchRepair: "search-repair",
+  ids: "ids",
 } as const satisfies Readonly<Record<keyof V12Flags, string>>;
 
 /** 旗の公開の名前 */
@@ -56,18 +64,18 @@ export type V12PublicFlags = { readonly [K in V12PublicFlagName]: boolean };
 export const V12_PUBLIC_FLAG_NAMES: readonly V12PublicFlagName[] = V12_FLAG_NAMES.map((name) => V12_FLAG_PUBLIC_NAMES[name]);
 
 /** 全部 off の旗（`flags` を省いた走り＝今の v1.1α） */
-export const V12_FLAGS_OFF: Readonly<V12Flags> = { ledger: false, searchRepair: false };
+export const V12_FLAGS_OFF: Readonly<V12Flags> = { ledger: false, searchRepair: false, ids: false };
 
 /**
- * `--pipeline v1.2` が流す旗の組（**merge 済みの手の旗を全部 on**。今は ledger と search-repair）。**公開の鍵**で書く。計測の
+ * `--pipeline v1.2` が流す旗の組（**merge 済みの手の旗を全部 on**。今は ledger・search-repair・ids）。**公開の鍵**で書く。計測の
  * 道具が読む契約の正本で、手元の入口はこの値から旗を組む（`fromPublicV12Flags`。写しを別に作らない）。v1.2 の走りの要約と
  * 条件の記録の `v12_flags` は、実際に使ったこの組を写す。
  */
-export const V12_PIPELINE_FLAGS: Readonly<V12PublicFlags> = { ledger: true, "search-repair": true };
+export const V12_PIPELINE_FLAGS: Readonly<V12PublicFlags> = { ledger: true, "search-repair": true, ids: true };
 
 /** 渡された旗（省いた名前は off）から、全部の名前を持つ実効の旗を組む */
 export function resolveV12Flags(flags?: Partial<V12Flags>): V12Flags {
-  return { ledger: flags?.ledger === true, searchRepair: flags?.searchRepair === true };
+  return { ledger: flags?.ledger === true, searchRepair: flags?.searchRepair === true, ids: flags?.ids === true };
 }
 
 /** 実効の旗を公開の鍵の組にする（`V12_FLAG_NAMES` の順） */

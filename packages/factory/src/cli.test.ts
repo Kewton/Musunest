@@ -1248,8 +1248,10 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     const { prompt_version: v11aPrompt, ...v11aRest } = v11a.record.conditions;
     expect(v11aPrompt).toBe("v1.1a");
     expect(v12Rest).toEqual(v11aRest);
-    // 要約は prompt_version と v12_flags のほかは v1.1a と同じ
-    const { prompt_version: _p1, v12_flags: _f1, ...summaryRest } = v12.summary;
+    // 要約は prompt_version・v12_flags と、旗 v12.ids の門と枝の欄 v12_calls（Issue #592）のほかは v1.1a と同じ
+    const { prompt_version: _p1, v12_flags: _f1, v12_calls: v12Calls, ...summaryRest } = v12.summary;
+    expect(v12Calls).toEqual({ real_attempts: { limit: 144, used: 9 }, judge_branch: { limit: 80, used: 4 } });
+    expect(v11a.summary).not.toHaveProperty("v12_calls");
     const { prompt_version: _p2, ...v11aSummaryRest } = v11a.summary;
     expect(summaryRest).toEqual(v11aSummaryRest);
   });
@@ -1260,15 +1262,15 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(run.code).toBe(EXIT_OK);
     const passed = v11aSpy.mock.calls[0]?.[0];
     expect(passed?.flags).toEqual(factory.fromPublicV12Flags(factory.V12_PIPELINE_FLAGS));
-    expect(passed?.flags).toEqual({ ledger: true, searchRepair: true });
+    expect(passed?.flags).toEqual({ ledger: true, searchRepair: true, ids: true });
     expect(passed?.recordV12Flags).toBe(true);
     expect(run.summary["v12_flags"]).toEqual(factory.V12_PIPELINE_FLAGS);
     expect(run.record.conditions["v12_flags"]).toEqual(factory.V12_PIPELINE_FLAGS);
     expect(run.summary["v12_flags"]).toEqual(factory.toPublicV12Flags(factory.resolveV12Flags(passed?.flags)));
-    expect(factory.V12_PIPELINE_FLAGS).toEqual({ ledger: true, "search-repair": true });
-    // 要約・条件の記録の旗の組は公開の鍵で ledger と search-repair が on（Issue #551）
-    expect(run.summary["v12_flags"]).toEqual({ ledger: true, "search-repair": true });
-    expect(run.record.conditions["v12_flags"]).toEqual({ ledger: true, "search-repair": true });
+    expect(factory.V12_PIPELINE_FLAGS).toEqual({ ledger: true, "search-repair": true, ids: true });
+    // 要約・条件の記録の旗の組は公開の鍵で ledger と search-repair（Issue #551）と ids（Issue #592）が on
+    expect(run.summary["v12_flags"]).toEqual({ ledger: true, "search-repair": true, ids: true });
+    expect(run.record.conditions["v12_flags"]).toEqual({ ledger: true, "search-repair": true, ids: true });
   });
 
   it("T1 で止まる走りでも要約と条件の記録に v12_flags がある（終了コード 1・納品物無し）", async () => {
@@ -1289,6 +1291,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
     const run = await runV11aCli({ dir: `${directory}/v11a-no-flags`, calls: [...v11aHead(), structured(v11aJudgments())] });
     expect(run.summary).not.toHaveProperty("v12_flags");
+    expect(run.summary).not.toHaveProperty("v12_calls");
     expect(run.record.conditions).not.toHaveProperty("v12_flags");
     expect(run.record.conditions).not.toHaveProperty("pipeline");
     expect(v11aSpy.mock.calls[0]?.[0]).not.toHaveProperty("flags");
@@ -1491,6 +1494,7 @@ describe("--pipeline を省いた走りは v1 のまま（Issue #511）", () => 
     const summary = JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown>;
     expect(summary["prompt_version"]).toBe("v1");
     expect(summary).not.toHaveProperty("v12_flags");
+    expect(summary).not.toHaveProperty("v12_calls");
   });
 });
 

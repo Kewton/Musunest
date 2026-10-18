@@ -9,7 +9,13 @@
 //   5. **包みは、共有の門を要求へ載せて Jev の内部の再送へ届ける**（Issue #469）
 import { describe, expect, it } from "vitest";
 import { JEV_RATES, JobBudget, costOfUsageUsd, type TokenRates } from "./budget.js";
-import { JudgeBudgetExceededError, JudgeCallLimitExceededError, JudgeDeadlineExceededError, createBudgetedJudge } from "./judge-budget.js";
+import {
+  JudgeBudgetExceededError,
+  JudgeCallLimitExceededError,
+  JudgeDeadlineExceededError,
+  createBudgetedJudge,
+  createJudgeBranchGate,
+} from "./judge-budget.js";
 import { createCallGate, type CallGate } from "./call.js";
 import type { Judge, JudgeRequest, JudgeResponse, JudgeSource } from "./judge.js";
 import { createJevJudge, type JevFetch } from "./judge-jev.js";
@@ -786,5 +792,92 @@ describe("adapter ごとの実試行の内訳（05 §5・Issue #473）", () => {
     expect(second.attemptsByAdapter).toEqual({ jev: 2, llm: 1, fake: 0, unknown: 0 });
     // 先の包みの数は動かない
     expect(first.attemptsByAdapter).toEqual({ jev: 2, llm: 1, fake: 0, unknown: 0 });
+  });
+});
+
+describe("判定の枝（判定だけの上限。08 §4.1・Issue #592）", () => {
+  it("枝を通った判定の実試行を数え、上限に達したら共有の門を数えずに JudgeCallLimitExceededError で断る（口を呼ばない）", async () => {
+    const answering = fixedJudge(stubJudge("fake"), "fake");
+    const gate = createCallGate({ now: () => 0, deadline: 1_000, limit: 10 });
+    const budgeted = createBudgetedJudge({ judge: answering.judge, budget: new JobBudget(10), rates: RATES, gate, judgeLimit: 2 });
+    expect(budgeted.branch).toEqual({ limit: 2, used: 0 });
+    await budgeted.judge(REQUEST);
+    await budgeted.judge(REQUEST);
+    await expect(budgeted.judge(REQUEST)).rejects.toBeInstanceOf(JudgeCallLimitExceededError);
+    expect(answering.calls()).toBe(2);
+    expect(budgeted.branch).toEqual({ limit: 2, used: 2 });
+    // 断った回は共有の門にも、判定の台帳の試行にも、名乗りの内訳にも数えない
+    expect(gate.attempts()).toBe(2);
+    expect(budgeted.attempts).toBe(2);
+    expect(budgeted.attemptsByAdapter).toEqual({ jev: 0, llm: 0, fake: 2, unknown: 0 });
+  });
+
+  it("枝が尽きたら、合成した口（Jev → Luna）は落とし先へ切り替えない", async () => {
+    const jev = failingJudge(new Error("Jev が止まった"), "jev");
+    const luna = fixedJudge(stubJudge("llm"), "llm");
+    const composed: Judge = { judge: jev.judge.judge.bind(jev.judge), primary: jev.judge, fallback: luna.judge };
+    const gate = createCallGate({ now: () => 0, deadline: 1_000, limit: 10 });
+    // 枝 1：主の 1 試行で使い切る → 切り替えの落とし先は枝が断る
+    const budgeted = createBudgetedJudge({ judge: composed, budget: new JobBudget(10), rates: RATES, gate, judgeLimit: 1 });
+    await expect(budgeted.judge(REQUEST)).rejects.toBeInstanceOf(JudgeCallLimitExceededError);
+    expect(jev.calls()).toBe(1);
+    expect(luna.calls()).toBe(0);
+    expect(gate.attempts()).toBe(1);
+    expect(budgeted.branch).toEqual({ limit: 1, used: 1 });
+  });
+
+  it("切り替えと Jev の内部の再送・明示の再点検も、それぞれ 1 試行として枝と門に数える", async () => {
+    // Jev は初回＋合法な再送 1 の 2 回で失敗し、Luna が答える（＝ 3 試行）。そのあと再点検の口を 1 回呼ぶ
+    const jev = jevAdapter({ statuses: [429, 429], maxAttempts: 2 });
+    const luna = fixedJudge(stubJudge("llm"));
+    const recheck = fixedJudge(stubJudge("llm"));
+    const composed: Judge = { judge: jev.judge.judge.bind(jev.judge), primary: jev.judge, fallback: luna.judge };
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 10 });
+    const budgeted = createBudgetedJudge({ judge: composed, budget: new JobBudget(10), rates: RATES, gate, judgeLimit: 10, recheck: recheck.judge });
+    expect((await budgeted.judge(REQUEST)).answeredBy).toBe("llm");
+    await budgeted.fallback?.judge(REQUEST);
+    expect(budgeted.branch).toEqual({ limit: 10, used: 4 });
+    expect(gate.attempts()).toBe(4);
+    expect(budgeted.attempts).toBe(4);
+  });
+
+  it("枝が Jev の内部の再送を断ったら JudgeCallLimitExceededError（Luna 0）。共有の門は断った再送を数えない", async () => {
+    const jev = jevAdapter({ statuses: [429, 429], maxAttempts: 2 });
+    const luna = fixedJudge(stubJudge("llm"));
+    const composed: Judge = { judge: jev.judge.judge.bind(jev.judge), primary: jev.judge, fallback: luna.judge };
+    const gate = createCallGate({ now: () => 0, deadline: 100_000, limit: 10 });
+    const budgeted = createBudgetedJudge({ judge: composed, budget: new JobBudget(10), rates: RATES, gate, judgeLimit: 1 });
+    await expect(budgeted.judge(REQUEST)).rejects.toBeInstanceOf(JudgeCallLimitExceededError);
+    expect(jev.calls()).toBe(1);
+    expect(luna.calls()).toBe(0);
+    expect(gate.attempts()).toBe(1);
+  });
+
+  it("枝を渡さない包み・門の無い包みは枝を掛けない（branch は null。今までどおり）", async () => {
+    const answering = fixedJudge(stubJudge("fake"), "fake");
+    const gate = createCallGate({ now: () => 0, deadline: 1_000, limit: 10 });
+    const withGate = createBudgetedJudge({ judge: answering.judge, budget: new JobBudget(10), rates: RATES, gate });
+    for (let index = 0; index < 5; index += 1) await withGate.judge(REQUEST);
+    expect(withGate.branch).toBeNull();
+    expect(gate.attempts()).toBe(5);
+    const withoutGate = createBudgetedJudge({ judge: answering.judge, budget: new JobBudget(10), rates: RATES, judgeLimit: 0 });
+    await withoutGate.judge(REQUEST);
+    expect(withoutGate.branch).toBeNull();
+  });
+
+  it("枝の見え方は時計・締切・上限・数を共有の門のまま見せ、負や整数でない上限は作らない", () => {
+    const gate = createCallGate({ now: () => 5, deadline: 100, limit: 7 });
+    const branch = createJudgeBranchGate(gate, 1);
+    expect(branch.gate.deadline).toBe(100);
+    expect(branch.gate.limit).toBe(7);
+    expect(branch.gate.remainingMs()).toBe(95);
+    expect(branch.gate.begin()).toBe("ok");
+    expect(branch.gate.begin()).toBe("limit");
+    expect(branch.gate.attempts()).toBe(1);
+    expect(gate.begin()).toBe("ok");
+    expect(branch.gate.attempts()).toBe(2);
+    expect(branch.used()).toBe(1);
+    expect(() => createJudgeBranchGate(gate, -1)).toThrow(RangeError);
+    expect(() => createJudgeBranchGate(gate, 1.5)).toThrow(RangeError);
   });
 });

@@ -18,6 +18,11 @@
 //   - 判定 … 判定の口の呼び出し（偽物の判定が受けた要求の数。J4 は要件ごとに 1 要求・J2 は種類の食い違いの要件を
 //     まとめて 1 要求。**門（`callCount`）に数えない**）
 //
+// 手 3p（08 §4.1・Issue #592）で、同じ数え方を**旗の組ごと**（全部 off／前の手の旗だけ on〔ledger・search-repair。ids off〕／
+// 全部 on〔`--pipeline v1.2` と同じ組〕）に流す節と、旗 `v12.ids` の 3 層の枠（段ごとの論理の枠・生成と判定で共有する実試行の
+// 門・判定の枝）の契約試験を足した。期待の表は段 × 旗の組の 1 つの表（`FLAG_SET_TABLE`）で、手 3a〜3c がそこへ C1・C2・C4 の
+// 束の行を足す。旗 `v12.ids` の走りでは判定も門に数える（上の「判定」の行の「門に数えない」は旗 off の走りの話）。
+//
 // 外部の API は呼ばない。題材は抽象的なもので、受入の題材の言葉は使わない。
 import { describe, expect, it } from "vitest";
 import { createFakeJudge } from "../judge-fake.js";
@@ -29,8 +34,19 @@ import { AGENT_LIMITS } from "../limits.js";
 import { USAGE, RATES } from "../__tests__/run.js";
 import { ARBITRATION_SCHEMA_NAME } from "../stages/arbitrate.js";
 import { FIXTURE_DOCUMENTS, negative, recordedStructured } from "./__tests__/fixtures.js";
+import { expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
 import { buildSized, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
 import { runGenerationV11a } from "./run.js";
+import { createFallbackJudge } from "../judge.js";
+import { FIELD_REPAIR_SCHEMA_NAME } from "../v12/stages/field-repair.js";
+import { fromPublicV12Flags, V12_PIPELINE_FLAGS, type V12Flags } from "../v12/ledger.js";
+import {
+  V12_CALL_LIMITS,
+  V12_STAGE_FRAMES,
+  V12_V11A_FRAME_MAP,
+  type V12CallLimits,
+  type V12FrameStage,
+} from "../v12/limits.js";
 import { DECL_CHECK_SCHEMA_NAME } from "./stages/decl-check.js";
 import { NAME_TABLE_SCHEMA_NAME } from "./stages/name-table.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
@@ -50,6 +66,8 @@ const STAGE_BY_SCHEMA: Readonly<Record<string, StageKey>> = {
   [WRITE_V11A_SCHEMA_NAME]: "write",
   [DECL_CHECK_SCHEMA_NAME]: "decl-check",
   [ARBITRATION_SCHEMA_NAME]: "arbitration",
+  // 旗 v12.search-repair の欄だけの直し（構造化出力。段の ID は repair のまま。Issue #553）
+  [FIELD_REPAIR_SCHEMA_NAME]: "repair",
 };
 
 type StageCounts = Record<StageKey, number>;
@@ -75,6 +93,7 @@ function createMouth(recorded: readonly RecordedCall[], failFirst: boolean) {
   const inner = createFakeLlmClient(recorded, { validateAgainstSchema: true });
   const logical = zeroCounts();
   const started = zeroCounts();
+  const requests: string[] = [];
   let retrying = false;
   const enter = (stage: StageKey): void => {
     started[stage] += 1;
@@ -92,20 +111,26 @@ function createMouth(recorded: readonly RecordedCall[], failFirst: boolean) {
   };
   const client: LlmClient = {
     async callStructured(request) {
+      requests.push(JSON.stringify(request));
       enter(stageOf(request.schemaName));
       return inner.callStructured(request);
     },
     async callWithTools(request) {
+      requests.push(JSON.stringify(request));
       enter("repair");
       return inner.callWithTools(request);
     },
   };
-  return { client, logical, started };
+  return { client, logical, started, requests };
 }
 
-/** 偽物の判定を包み、受けた要求の数を J4（所属の組の問い）と J2（それ以外）に分けて数える */
-function createCountingJudge(answers: Readonly<Record<string, JudgeAnswer>>) {
-  const inner = createFakeJudge(answers);
+/**
+ * 偽物の判定を包み、受けた要求の数を J4（所属の組の問い）と J2（それ以外）に分けて数える。`wrap` を渡すと、偽物の判定を
+ * その口で包んだもの（切り替えの合成など）を数える
+ */
+function createCountingJudge(answers: Readonly<Record<string, JudgeAnswer>>, wrap?: (fake: Judge) => Judge) {
+  const fake = createFakeJudge(answers);
+  const inner = wrap === undefined ? fake : wrap(fake);
   const counts = { j4: 0, j2: 0 };
   const judge: Judge = {
     source: "fake",
@@ -115,6 +140,8 @@ function createCountingJudge(answers: Readonly<Record<string, JudgeAnswer>>) {
       else counts.j2 += 1;
       return inner.judge(request);
     },
+    ...(inner.primary === undefined ? {} : { primary: inner.primary }),
+    ...(inner.fallback === undefined ? {} : { fallback: inner.fallback }),
   };
   return { judge, counts };
 }
@@ -154,14 +181,18 @@ const repairDone = (declaration: string, disputes: readonly { testId: string; qu
 
 interface RunOptions {
   readonly failFirst?: boolean;
+  readonly flags?: Partial<V12Flags>;
+  readonly v12CallLimits?: Partial<V12CallLimits>;
   /** 上限の一部の上書き（`AGENT_LIMITS` に重ねる） */
   readonly limits?: Readonly<Partial<Record<keyof typeof AGENT_LIMITS, number>>>;
+  /** 判定の口を包む（切り替えの合成など。省けば偽物の判定そのもの） */
+  readonly wrapJudge?: (fake: Judge) => Judge;
 }
 
 /** 材料と記録した応答で流し、観測を返す（時計は 0・締切は通信の再送で timeout を伸ばせる長さ・予算は十分） */
 async function observe(materials: SizedMaterials, recorded: readonly RecordedCall[], options: RunOptions = {}) {
   const mouth = createMouth(recorded, options.failFirst ?? false);
-  const judge = createCountingJudge(materials.adviceAnswers());
+  const judge = createCountingJudge(materials.adviceAnswers(), options.wrapJudge);
   const result = await runGenerationV11a({
     source: materials.source,
     documents: FIXTURE_DOCUMENTS,
@@ -182,6 +213,8 @@ async function observe(materials: SizedMaterials, recorded: readonly RecordedCal
     factoryVersion: "0.0.0",
     plan: materials.plan,
     ...(options.limits === undefined ? {} : { limits: { ...AGENT_LIMITS, ...options.limits } }),
+    ...(options.flags === undefined ? {} : { flags: options.flags }),
+    ...(options.v12CallLimits === undefined ? {} : { v12CallLimits: options.v12CallLimits }),
   });
   const stages = Object.fromEntries(STAGES.map((stage) => [stage, totalsOf(result.record.stages, stage)])) as Record<StageKey, StageTotals>;
   const sumOf = (pick: (totals: StageTotals) => number): number => STAGES.reduce((total, stage) => total + pick(stages[stage]), 0);
@@ -189,6 +222,7 @@ async function observe(materials: SizedMaterials, recorded: readonly RecordedCal
     result,
     logical: mouth.logical,
     startedByMouth: mouth.started,
+    requests: mouth.requests,
     stages,
     judge: judge.counts,
     totalLogical: STAGES.reduce((total, stage) => total + mouth.logical[stage], 0),
@@ -196,7 +230,15 @@ async function observe(materials: SizedMaterials, recorded: readonly RecordedCal
     totalResponses: sumOf((totals) => totals.responses),
     totalCommunicationRetries: sumOf((totals) => totals.retries.communication),
     totalErrors: sumOf((totals) => totals.errors),
+    /** 旗 v12.ids の走りの門と枝（要約の `v12_calls`。旗 off の走りは undefined） */
+    calls: (result.summary as unknown as { readonly v12_calls?: V12CallsSummary }).v12_calls,
   };
+}
+
+/** 要約の門と枝の欄（旗 v12.ids の走りだけ。Issue #592） */
+interface V12CallsSummary {
+  readonly real_attempts: { readonly limit: number; readonly used: number };
+  readonly judge_branch: { readonly limit: number; readonly used: number };
 }
 
 /** 初回で全段が通る走りの記録（T1・T1''・T2・B1・B3' を 1 回ずつ） */
@@ -207,6 +249,18 @@ const cleanCalls = (materials: SizedMaterials): RecordedCall[] => [
   structured({ declaration: materials.declaration() }),
   structured(materials.judgments()),
 ];
+
+/** 値を縛る要件の検査の本文（欄だけの直しが置き換える要素。`v<i> > bound`） */
+const validationElement = (requirementId: string, bound: number): string => {
+  const n = requirementId.slice(1);
+  return [`- name: v${n}`, "  entity: item", `  expression: v${n} > ${String(bound)}`].join("\n");
+};
+/** 欄だけの直しの応答（旗 v12.search-repair の往復。R の検査の式を替える） */
+const fieldRepairCall = (requirementId: string, bound: number, disputes: readonly { testId: string; quote: string }[] = []): RecordedCall =>
+  structured({
+    replacements: [{ location: `validation:item.v${requirementId.slice(1)}`, element: validationElement(requirementId, bound) }],
+    disputes,
+  });
 
 /**
  * やり直しを含む走りの記録（要件 R1・R2 は値を縛る要件）。段ごとの論理要求は次の表のとおり（合計 17）：
@@ -229,6 +283,11 @@ function retryCalls(materials: SizedMaterials): RecordedCall[] {
   const incomplete = { judgments: materials.judgments().judgments.slice(0, -1) };
   const rejectR1 = materials.judgments({ R1: ["unnecessary-ownership", materials.textOf("R1")] });
   const dispute = { testId: "t5-normal", quote: materials.textOf("R5") };
+  // 旗 v12.search-repair の走りは、失敗が全部場所（R1 の検査）に写るので B5 は欄だけの直しになる。版 2 は R1 の検査を
+  // 境界だけが落ちる式にして違反の数を厳密に減らし（採る）、版 3 で誤りなし。往復・裁定・B3' の版の数は旗 off と同じ
+  const search = materials.flags.searchRepair;
+  const repair1 = search ? fieldRepairCall("R1", 1, [dispute]) : repairDone(materials.declaration(["R2"]), [dispute]);
+  const repair2 = search ? fieldRepairCall("R1", 0) : repairDone(materials.declaration());
   return [
     structured(negative({ rows: "x", requirements: "x" }, "rows・requirements が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
     structured(materials.nameTableResponse()),
@@ -242,10 +301,10 @@ function retryCalls(materials: SizedMaterials): RecordedCall[] {
     structured({ declaration: materials.declaration(["R1"]) }),
     structured(incomplete),
     structured(materials.judgments()),
-    repairDone(materials.declaration(["R2"]), [dispute]),
+    repair1,
     structured({ decisions: [{ testId: dispute.testId, verdict: "uphold", reason: "", quote: "" }] }),
     structured(materials.judgments()),
-    repairDone(materials.declaration()),
+    repair2,
     structured(materials.judgments()),
   ];
 }
@@ -280,6 +339,31 @@ describe("大きさの生成器（要件 N・試験 M）", () => {
       const kinds = new Set(tests.filter((test) => test.target.requirementId === id).map((test) => test.kind));
       expect([...kinds].sort(), id).toEqual(["abnormal", "boundary", "normal"]);
     }
+  });
+
+  it("旗の組を渡しても同じ N・M・旗の組から同じ値を返す。台帳 on の T1 の応答は台帳の schema の形（行の型に aggregate）で、ほかの材料は旗によらず同じ", () => {
+    const allOn = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+    for (const flags of [{}, { ledger: true, searchRepair: true }, allOn]) {
+      for (const size of [MEDIAN_SIZE, MAX_SIZE]) {
+        const first = buildSized(size.requirements, size.tests, flags);
+        const second = buildSized(size.requirements, size.tests, flags);
+        expect(second.flags).toEqual(first.flags);
+        expect(second.nameTableResponse()).toEqual(first.nameTableResponse());
+        expect(second.testSpecResponse()).toEqual(first.testSpecResponse());
+        expect(second.judgments()).toEqual(first.judgments());
+        expect(second.adviceAnswers()).toEqual(first.adviceAnswers());
+        expect(second.declaration(["R1"])).toBe(first.declaration(["R1"]));
+      }
+    }
+    const off = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests);
+    const on = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, allOn);
+    expect(on.flags).toEqual({ ledger: true, searchRepair: true, ids: true });
+    const rowTypes = (response: Record<string, unknown>) => (response["rows"] as readonly { type: Record<string, unknown> }[]).map((entry) => entry.type);
+    expect(rowTypes(on.nameTableResponse()).every((type) => "aggregate" in type)).toBe(true);
+    expect(rowTypes(off.nameTableResponse()).some((type) => "aggregate" in type)).toBe(false);
+    expect(on.table).toEqual(off.table);
+    expect(on.testSpecResponse()).toEqual(off.testSpecResponse());
+    expect(on.declaration()).toBe(off.declaration());
   });
 
   it("中央値と最大で構造の要件の数が決まり、足りない大きさは例外にする", () => {
@@ -490,5 +574,317 @@ describe("(4) 大きさで呼び出し数が変わらない：中央値と最大
     const maxRun = await observe(max, retryCalls(max));
     expect(maxRun.logical).toEqual(medianRun.logical);
     expect(maxRun.stages).toEqual(medianRun.stages);
+  });
+});
+
+// ── (5) 旗の組ごとの論理の枠（手 3p。08 §4.1・Issue #592）────────────────────────────
+
+/** 旗の組（全部 off／前の手の旗だけ on〔ids off〕／全部 on〔`--pipeline v1.2` と同じ組〕） */
+const FLAG_SETS = [
+  { name: "全部 off", flags: {} },
+  { name: "前の手の旗だけ on（ledger・search-repair。ids off）", flags: { ledger: true, searchRepair: true } },
+  { name: "全部 on（--pipeline v1.2 と同じ組）", flags: fromPublicV12Flags(V12_PIPELINE_FLAGS) },
+] as const satisfies readonly { readonly name: string; readonly flags: Partial<V12Flags> }[];
+type FlagSetName = (typeof FLAG_SETS)[number]["name"];
+
+/** 段 × 走りの期待（論理要求・応答・実開始・再送）。再送を全部使う走りは止まり方も持つ */
+interface StageRow {
+  readonly logical: number;
+  readonly responses: number;
+  readonly started: number;
+  readonly communication: number;
+}
+type RunTable = Readonly<Record<StageKey, StageRow>>;
+const row = (logical: number, responses = logical, started = logical, communication = 0): StageRow => ({
+  logical,
+  responses,
+  started,
+  communication,
+});
+
+/** 初回で通る走り（旗の組によらず同じ） */
+const CLEAN_TABLE: RunTable = {
+  "name-table": row(1),
+  "semantic-check": row(1),
+  "test-spec": row(1),
+  write: row(1),
+  "decl-check": row(1),
+  repair: row(0),
+  arbitration: row(0),
+};
+/** やり直しを含む走り（旗の組によらず同じ。旗 v12.search-repair の B5 は欄だけの直しで往復の数は同じ） */
+const RETRY_TABLE: RunTable = {
+  "name-table": row(3),
+  "semantic-check": row(3),
+  "test-spec": row(3),
+  write: row(1),
+  "decl-check": row(4),
+  repair: row(2),
+  arbitration: row(1),
+};
+/** 再送を全部使う初回で通る走り（実開始＝論理要求の 2 倍・再送＝論理要求） */
+const CLEAN_FAIL_TABLE: RunTable = Object.fromEntries(
+  STAGES.map((stage) => [stage, row(CLEAN_TABLE[stage].logical, CLEAN_TABLE[stage].logical, 2 * CLEAN_TABLE[stage].logical, CLEAN_TABLE[stage].logical)]),
+) as unknown as RunTable;
+/** 再送を全部使うやり直しを含む走り・旗 v12.ids on（門 144 の内側で完走） */
+const RETRY_FAIL_IDS_TABLE: RunTable = Object.fromEntries(
+  STAGES.map((stage) => [stage, row(RETRY_TABLE[stage].logical, RETRY_TABLE[stage].logical, 2 * RETRY_TABLE[stage].logical, RETRY_TABLE[stage].logical)]),
+) as unknown as RunTable;
+/** 再送を全部使うやり直しを含む走り・旗 v12.ids off（v1・v1.1α の門 24 で B5 の最初の要求が未着手のまま call-limit） */
+const RETRY_FAIL_GATE24_TABLE: RunTable = {
+  "name-table": row(3, 3, 6, 3),
+  "semantic-check": row(3, 3, 6, 3),
+  "test-spec": row(3, 3, 6, 3),
+  write: row(1, 1, 2, 1),
+  "decl-check": row(2, 2, 4, 2),
+  repair: row(0),
+  arbitration: row(0),
+};
+
+/**
+ * 段 × 旗の組の期待の表（§4.1 の列で書く。手 3a〜3c が C1・C2・C4 の束の行を足す）。値は論理要求（応答・実開始・再送は各表）。
+ *
+ * | v1.1α の段 | §4.1 の行（単位） | 初回で通る | やり直しを含む（初回＋形＋中身） | 再送を全部使う（初回で通る：実開始） | 再送を全部使う（やり直し）：off・前の手 | 同：全部 on |
+ * |---|---|---|---|---|---|---|
+ * | name-table（T1） | C1・C2（段全体＝束 1） | 1 | 3（1＋形 1＋中身 1） | 2 | 3（実開始 6） | 3（実開始 6） |
+ * | semantic-check（T1''） | C3（段全体） | 1 | 3（1＋形 1＋拒否後 1） | 2 | 3（6） | 3（6） |
+ * | test-spec（T2） | C4（段全体＝束 1） | 1 | 3（1＋形 1＋中身 1） | 2 | 3（6） | 3（6） |
+ * | write（B1） | （C5。手 6） | 1 | 1 | 2 | 1（2） | 1（2） |
+ * | decl-check（B3'） | C6（版ごと 1・形は段全体） | 1 | 4（3 版＋形 1） | 2 | 2（4） | 4（8） |
+ * | repair（B5） | ループ（往復ごと） | 0 | 2（往復 2） | 0 | 0（未着手 1） | 2（4） |
+ * | arbitration（B5'） | ループ（往復ごと 0〜1） | 0 | 1 | 0 | 0 | 1（2） |
+ * | 合計 | | 5 | 17 | 10 | 12（24・call-limit） | 17（34・完走） |
+ *
+ * 判定：J4 は T1 のたびに要件ごとに 1 要求（初回で通る N・やり直し 2N）、J2 は 0。全部 on では判定も実試行の門に数える。
+ */
+const FLAG_SET_TABLE: Readonly<Record<FlagSetName, { readonly clean: RunTable; readonly retry: RunTable; readonly cleanFail: RunTable; readonly retryFail: RunTable }>> = {
+  "全部 off": { clean: CLEAN_TABLE, retry: RETRY_TABLE, cleanFail: CLEAN_FAIL_TABLE, retryFail: RETRY_FAIL_GATE24_TABLE },
+  "前の手の旗だけ on（ledger・search-repair。ids off）": {
+    clean: CLEAN_TABLE,
+    retry: RETRY_TABLE,
+    cleanFail: CLEAN_FAIL_TABLE,
+    retryFail: RETRY_FAIL_GATE24_TABLE,
+  },
+  "全部 on（--pipeline v1.2 と同じ組）": { clean: CLEAN_TABLE, retry: RETRY_TABLE, cleanFail: CLEAN_FAIL_TABLE, retryFail: RETRY_FAIL_IDS_TABLE },
+};
+
+/** 走りの段ごとの数が表どおりか */
+function expectTable(run: Awaited<ReturnType<typeof observe>>, table: RunTable, label: string): void {
+  for (const stage of STAGES) {
+    const expected = table[stage];
+    expect(run.logical[stage], `${label} ${stage} の論理要求`).toBe(expected.logical);
+    expect(run.stages[stage].responses, `${label} ${stage} の応答`).toBe(expected.responses);
+    expect(run.stages[stage].started, `${label} ${stage} の実開始`).toBe(expected.started);
+    expect(run.stages[stage].retries.communication, `${label} ${stage} の再送`).toBe(expected.communication);
+    expect(run.startedByMouth[stage], `${label} ${stage} の口の実開始`).toBe(run.stages[stage].started);
+  }
+}
+const totalOf = (table: RunTable, pick: (row: StageRow) => number): number => STAGES.reduce((sum, stage) => sum + pick(table[stage]), 0);
+
+describe("(5) 旗の組ごとの論理の枠：段 × 旗の組の期待の表（全部 off／前の手の旗だけ on／全部 on）", () => {
+  for (const set of FLAG_SETS) {
+    const expected = FLAG_SET_TABLE[set.name];
+    const ids = resolveIds(set.flags);
+    it.each([MEDIAN_SIZE, MAX_SIZE])(`${set.name}：要件 $requirements・試験 $tests の初回で通る走り・やり直しを含む走り・再送を全部使う走り`, async (size) => {
+      const materials = buildSized(size.requirements, size.tests, set.flags);
+      const clean = await observe(materials, cleanCalls(materials), { flags: set.flags });
+      const retry = await observe(materials, retryCalls(materials), { flags: set.flags });
+      const cleanFail = await observe(materials, cleanCalls(materials), { flags: set.flags, failFirst: true });
+      const retryFail = await observe(materials, retryCalls(materials), { flags: set.flags, failFirst: true });
+      expectTable(clean, expected.clean, "初回");
+      expectTable(retry, expected.retry, "やり直し");
+      expectTable(cleanFail, expected.cleanFail, "再送（初回）");
+      expectTable(retryFail, expected.retryFail, "再送（やり直し）");
+      for (const run of [clean, retry, cleanFail]) {
+        expect(run.result.stopped).toBeNull();
+        expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      }
+      // 判定：J4 は T1 のたびに要件ごとに 1 要求、J2 は 0（再送の影響を受けない）
+      expect(clean.judge).toEqual({ j4: size.requirements, j2: 0 });
+      expect(retry.judge).toEqual({ j4: 2 * size.requirements, j2: 0 });
+      expect(cleanFail.judge).toEqual({ j4: size.requirements, j2: 0 });
+      expect(retryFail.judge).toEqual({ j4: 2 * size.requirements, j2: 0 });
+      expect(retry.totalLogical).toBe(totalOf(expected.retry, (entry) => entry.logical));
+      // 要求に受入の題材の言葉が無い
+      for (const run of [clean, retry]) expectNoAcceptanceMaterial(run.requests);
+      if (ids) {
+        // 全部 on：再送を全部使うやり直しの走りも門 144 の内側で完走。論理 72・実試行 144・判定 80 の内側
+        expect(retryFail.result.outcome).toEqual({ result: "pass", verdict: "full" });
+        for (const run of [clean, retry, cleanFail, retryFail]) {
+          const judged = run.judge.j4 + run.judge.j2;
+          expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+          // 門の数＝生成の実開始＋判定の実試行（偽物の判定は内部の再送を持たないので、要求の数＝実試行）
+          expect(run.calls).toEqual({
+            real_attempts: { limit: V12_CALL_LIMITS.realAttempts, used: run.totalStarted + judged },
+            judge_branch: { limit: V12_CALL_LIMITS.judgeBranch, used: judged },
+          });
+          expect(run.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
+          expect(judged).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
+        }
+      } else {
+        // ids off：門を作らず要約に門の欄が無い。再送を全部使うやり直しの走りは今の門 24 で B5 の最初の要求が未着手のまま止まる
+        for (const run of [clean, retry, cleanFail, retryFail]) expect(run.result.summary).not.toHaveProperty("v12_calls");
+        expect(retryFail.totalStarted).toBe(AGENT_LIMITS.callCount);
+        expect(retryFail.stages.repair.notStartedLimit).toBe(1);
+        expect(retryFail.result.stopped).toMatchObject({ stage: "repair", kind: "call-limit" });
+        expect(retryFail.result.summary.exit_code).toBe(1);
+        expect(retryFail.result.bundle).toBeNull();
+      }
+    });
+  }
+
+  it("中央値と最大で段ごとの数が同じ（J4 だけ要件の数に比例）。旗の組の間でも段ごとの論理要求は同じ", async () => {
+    const logicalBySet: unknown[] = [];
+    for (const set of FLAG_SETS) {
+      const median = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, set.flags);
+      const max = buildSized(MAX_SIZE.requirements, MAX_SIZE.tests, set.flags);
+      for (const make of [cleanCalls, retryCalls]) {
+        const medianRun = await observe(median, make(median), { flags: set.flags });
+        const maxRun = await observe(max, make(max), { flags: set.flags });
+        expect(maxRun.logical, set.name).toEqual(medianRun.logical);
+        expect(maxRun.stages, set.name).toEqual(medianRun.stages);
+        expect(maxRun.judge.j2).toBe(medianRun.judge.j2);
+        expect(maxRun.judge.j4 / MAX_SIZE.requirements).toBe(medianRun.judge.j4 / MEDIAN_SIZE.requirements);
+        logicalBySet.push(medianRun.logical);
+      }
+    }
+    expect(logicalBySet.slice(2)).toEqual([...logicalBySet.slice(0, 2), ...logicalBySet.slice(0, 2)]);
+  });
+
+  it("段 × 旗の組の表の段は、上限の表の v1.1α の写し（V12_V11A_FRAME_MAP）の段と同じ。§4.1 の列の枠を超えない", () => {
+    expect(new Set(V12_V11A_FRAME_MAP.map((entry) => entry.v11a))).toEqual(new Set(STAGES));
+    expect(V12_V11A_FRAME_MAP).toHaveLength(STAGES.length);
+    const frameOf = (stage: V12FrameStage) => V12_STAGE_FRAMES.find((frame) => frame.stage === stage);
+    for (const entry of V12_V11A_FRAME_MAP) {
+      const logical = RETRY_TABLE[entry.v11a as StageKey].logical;
+      // やり直しを含む走りの段の論理要求は、v1.1α の回数（回 × 形の試行 × 版・往復）の内側
+      expect(logical, entry.v11a).toBeLessThanOrEqual(entry.rounds * entry.shapeAttempts * (entry.units ?? 1));
+      for (const frame of entry.frames) expect(frameOf(frame), frame).toBeDefined();
+    }
+  });
+});
+
+/** 旗の組の ids が on か */
+function resolveIds(flags: Partial<V12Flags>): boolean {
+  return flags.ids === true;
+}
+
+// ── (6) 旗 v12.ids の門と枝（手 3p。Issue #592）──────────────────────────────────────
+
+describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+
+  it("(1) 全部 on の初回で通る走り：門の数＝生成の実開始＋判定の実試行、枝の数＝J4 の要件の数。再送を全部使うと門は再送の分だけ増える", async () => {
+    for (const size of [MEDIAN_SIZE, MAX_SIZE]) {
+      const materials = buildSized(size.requirements, size.tests, ALL_ON);
+      const clean = await observe(materials, cleanCalls(materials), { flags: ALL_ON });
+      expect(clean.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      expect(clean.calls).toEqual({
+        real_attempts: { limit: 144, used: clean.totalStarted + size.requirements },
+        judge_branch: { limit: 80, used: size.requirements },
+      });
+      const failed = await observe(materials, cleanCalls(materials), { flags: ALL_ON, failFirst: true });
+      expect(failed.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      expect(failed.totalCommunicationRetries).toBe(5);
+      expect(failed.calls?.real_attempts.used).toBe((clean.calls?.real_attempts.used ?? 0) + failed.totalCommunicationRetries);
+      expect(failed.calls?.judge_branch.used).toBe(size.requirements);
+    }
+  });
+
+  it("(1') Jev→LLM の切り替え：主が落ちて落とし先が答えると、切り替えの 2 試行とも門と枝に数える", async () => {
+    const materials = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, ALL_ON);
+    const failing: Judge = {
+      source: "jev",
+      async judge() {
+        throw new Error("主の判定が落ちた");
+      },
+    };
+    const run = await observe(materials, cleanCalls(materials), {
+      flags: ALL_ON,
+      wrapJudge: (fake) => createFallbackJudge({ primary: failing, fallback: fake }),
+    });
+    expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(run.calls).toEqual({
+      real_attempts: { limit: 144, used: 5 + 2 * MEDIAN_SIZE.requirements },
+      judge_branch: { limit: 80, used: 2 * MEDIAN_SIZE.requirements },
+    });
+  });
+
+  it("(2) 門を要件 15 の初回の合計より 1 小さくすると、生成の call-limit で止まり（B3'・終了コード 1・納品物無し）、判定の呼び出しはそれ以上増えない", async () => {
+    const materials = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, ALL_ON);
+    const firstTotal = 5 + MEDIAN_SIZE.requirements;
+    const run = await observe(materials, cleanCalls(materials), { flags: ALL_ON, v12CallLimits: { realAttempts: firstTotal - 1 } });
+    expect(run.result.stopped).toMatchObject({ stage: "decl-check", kind: "call-limit" });
+    expect(run.result.summary.stop_reason).toBe("call-limit");
+    expect(run.result.outcome.verdict).toBe("none");
+    expect(run.result.summary.exit_code).toBe(1);
+    expect(run.result.bundle).toBeNull();
+    expect(run.stages["decl-check"]).toMatchObject({ started: 0, notStartedLimit: 1 });
+    expect(run.judge).toEqual({ j4: MEDIAN_SIZE.requirements, j2: 0 });
+    expect(run.calls).toEqual({
+      real_attempts: { limit: firstTotal - 1, used: firstTotal - 1 },
+      judge_branch: { limit: 80, used: MEDIAN_SIZE.requirements },
+    });
+  });
+
+  it("(2') 門が J4 の途中で尽きると、残りの J4 は未判定（gate）で判定を呼ばず、次の生成（T1''）が call-limit で止まる", async () => {
+    const materials = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, ALL_ON);
+    const run = await observe(materials, cleanCalls(materials), { flags: ALL_ON, v12CallLimits: { realAttempts: 10 } });
+    expect(run.judge).toEqual({ j4: 9, j2: 0 });
+    expect(run.result.stopped).toMatchObject({ stage: "semantic-check", kind: "call-limit" });
+    expect(run.result.summary.exit_code).toBe(1);
+    expect(run.result.bundle).toBeNull();
+    expect(run.calls?.real_attempts.used).toBe(10);
+  });
+
+  it("(3) 判定の枝を J4 の要件の数より 1 小さくすると、最後の要件の J4 が未判定（gate）、J2 は ruled、本は止まらず、門に判定の失敗を数えない", async () => {
+    const materials = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, ALL_ON);
+    // T2 の分類で R1 を existence-only にして、T1 の分類（ruled）と食い違わせる（J2 を呼ぶ道）
+    const t2 = materials.testSpecResponse();
+    const discrepant = {
+      ...t2,
+      classifications: (t2.classifications as readonly { requirementId: string; nature: string }[]).map((entry) =>
+        entry.requirementId === "R1" ? { ...entry, nature: "existence-only" } : entry,
+      ),
+    };
+    const calls = cleanCalls(materials);
+    calls[2] = structured(discrepant);
+    const branch = MEDIAN_SIZE.requirements - 1;
+    const run = await observe(materials, calls, { flags: ALL_ON, v12CallLimits: { judgeBranch: branch } });
+    expect(run.result.stopped).toBeNull();
+    expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    // 枝が断った J4（最後の要件）と J2 は、判定の口に届かない
+    expect(run.judge).toEqual({ j4: branch, j2: 0 });
+    const advice = JSON.parse(run.result.bundle?.artifacts.find((artifact) => artifact.path === "artifacts/judge-advice.json")?.text ?? "{}") as {
+      readonly rounds: readonly { readonly requests: readonly { readonly requirementId: string; readonly adapter: string | null; readonly questions: readonly { readonly undetermined: string | null }[] }[] }[];
+    };
+    const requests = advice.rounds[0]?.requests ?? [];
+    const last = requests.at(-1);
+    expect(last?.requirementId).toBe(`R${String(MEDIAN_SIZE.requirements)}`);
+    expect(last?.adapter).toBeNull();
+    expect(last?.questions.every((question) => question.undetermined === "gate")).toBe(true);
+    expect(requests.slice(0, -1).every((request) => request.questions.every((question) => question.undetermined === null))).toBe(true);
+    // J2 は既定 ruled（判定に聞かず落とし先にも切り替えない。受理で埋めない）
+    expect(run.result.summary.nature_discrepancies).toEqual([
+      { requirement_id: "R1", design: "ruled", classified: "existence-only", resolved: "ruled", resolution: "fallback" },
+    ]);
+    // 門の数は生成の実開始＋枝を通った判定だけ（断った判定を数えない）
+    expect(run.calls).toEqual({
+      real_attempts: { limit: 144, used: run.totalStarted + branch },
+      judge_branch: { limit: branch, used: branch },
+    });
+  });
+
+  it("(4) 旗 off（全部 off・前の手の旗だけ on）の走りは判定を門に数えない（実開始は生成だけ・今と同じ数・要約に門の欄が無い）", async () => {
+    for (const flags of [{}, { ledger: true, searchRepair: true }]) {
+      const materials = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, flags);
+      const run = await observe(materials, cleanCalls(materials), { flags });
+      expect(run.totalStarted).toBe(5);
+      expect(run.judge).toEqual({ j4: MEDIAN_SIZE.requirements, j2: 0 });
+      expect(run.result.summary).not.toHaveProperty("v12_calls");
+      // 門 24 を 5 に下げても、判定（15）は数えられず完走する
+      const tight = await observe(materials, cleanCalls(materials), { flags, limits: { callCount: 5 } });
+      expect(tight.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    }
   });
 });
