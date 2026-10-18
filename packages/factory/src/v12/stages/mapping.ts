@@ -1,31 +1,29 @@
-// C2 要件の写像（08-architecture-v1.2.md §4 の C2・C2'・§4.1・§6・§9 の手 3a・3b。Issue #593・#594）。
+// C2 要件の写像（08-architecture-v1.2.md §4 の C2・C2'・§6・§9 の手 3a・3b。Issue #593・#594・#627）。
 //
-// 旗 `v12.ids` が on の走りだけ、T1 の要件ごとの部分（所属・確かめ方・分類）を、要件の一覧を一覧の順に **5 件ごとに切った束**
-// （最後の束は 5 未満でよい）ごとに 1 回ずつ書かせる。応答は要件ごとに `{requirementId, roles, verification, nature}` で、
-// **要件 ID と行の ID を書かせ、コードが照らす**（方法論 03 の H2。写し・出典・引用は無い。08 §6）。
+// 旗 `v12.ids` が on の走りだけ、T1 の要件ごとの部分（所属・確かめ方・分類）を **1 回の呼び出し**で書かせる。応答は要件ごとに
+// `{requirementId, roles, verification, nature}` で、**要件 ID と行の ID を書かせ、コードが照らす**（方法論 03 の H2。写し・
+// 出典・引用は無い。08 §6）。手 3b（#594）は要件 5 件ごとの束に分けたが、束が表全体の規則（どの要件にも所属しない行を残さない）
+// を各束で満たそうとして全行を抱え込み、所属が膨らんで時間も束の数だけ足し算になったので、束だけを戻した（08 §9 の手 3 の戻す
+// 条件。Issue #627）。
 //
-//   - データ：確定した仕様（要件の種類を外し、要件はその束の分だけ）・その束の要件（要件 ID・文・引用）・C1 の全行（**名前は
-//     見せない**）・文書の名前と制約 ID。規則と schema は束で変わらない（静的。v1.2 の封筒のまま）
-//   - 束の C2'（`inspectMappingBundle`）：束の完全性（その束の要件にちょうど 1 件。欠落・重複・一覧に無い ID・別の束の要件 ID）・
-//     構造の検査の対象（`checkCheckTargets`）・所属の ID が行にある・今の T1' の (e)(g) を**その束の要件に**掛ける（要件ごとの
-//     検査は要件の外を見ないので、表全体に掛けたときと同じ問題が出る）。落ちれば共通の窓口の形のやり直しで**その束だけ** 1 回
-//     （前回の応答と問題をデータで。束ごとの回数は共有しない）。2 回続けば `unmet`
-//   - 表全体の C2'（`assembleMappedTable`）：全束がそろったら一覧の順に 1 つの表に組み、C2' を 1 回掛ける。ここで残るのは要件に
-//     帰属しない問題（どの要件にも所属しない行）だけで、束を推測せず固定文で止める（呼ぶ側が `mapping`・`unmet` にする）
-//   - C3 の拒否のあとの 2 回目（呼ぶ側が `previous` を渡す）：拒否された要件を含む束だけを、前回のその束の応答・その束の拒否・
-//     印をデータで足して **1 回だけ**呼ぶ。束の C2' に落ちても形の再試行は無い（08 §4.1）——`unmet`（`attempts` 1）を返し、
-//     呼ぶ側はその束を前回の写像のまま、拒否の要件を持ち越す
+//   - データ：確定した仕様（要件の種類を外す）・要件の一覧（要件 ID・文・引用）・C1 の行（**名前は見せない**）・文書の名前と制約 ID
+//   - C2'（`inspectMapping`）：構造の検査の対象（`checkCheckTargets`）・要件ごとにちょうど 1 件（欠落・重複・一覧に無い ID）・
+//     所属の ID が行にある・今の T1' の (e)(g)。落ちれば共通の窓口の形のやり直しで 1 回（前回の応答と問題をデータで）。2 回続けば
+//     `unmet`
+//   - C3 の拒否のあとの 2 回目（呼ぶ側が `previous` を渡す）：前回の写像・拒否・印をデータで足し、**1 回だけ**呼んで表の全体を
+//     作り直す。C2' に落ちても形の再試行は無い（08 §4.1）——`unmet`（`attempts` 1）を返し、呼ぶ側は前回の写像のまま拒否の要件を
+//     持ち越す
 //
 // 構造の検査の対象の欄（Issue #594。方法論 03 の F4・H1・H2）：`verification.checks` は `[{check, targetId, sourceId}]` の並び。
 // コードが対象の実在・種類・view-shows の対を照らし、対象の行を所属に足す（basis dependency・reason に検査の種類）。
 //
-// 参照の照合の数（`ReferenceCounts`。束ごとの記録に載せる）：照らした参照＝応答の要件 ID・所属の ID・検査の対象の ID の全部、
-// 知らない ID＝一覧に無い要件 ID・行に無い所属や対象の ID、重複＝同じ要件 2 件・同じ要件の中の同じ行、別の束の ID＝一覧にあるが
-// この束に無い要件 ID・要件 ID の欄に行の ID の形・所属や対象の欄に一覧の要件 ID。
+// 参照の照合の数（`ReferenceCounts`）：照らした参照＝応答の要件 ID・所属の ID・検査の対象の ID の全部、知らない ID＝一覧に無い
+// 要件 ID・行に無い所属や対象の ID、重複＝同じ要件 2 件・同じ要件の中の同じ行、別の束の ID＝要件 ID の欄に行の ID の形・所属や
+// 対象の欄に一覧の要件 ID。
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import type { CallGateway } from "../../call.js";
 import { REQUIREMENT_NATURES, STRUCTURAL_ASSERTIONS, isStructuralAssertionKind } from "../../fixed-test.js";
-import { ROLE_OWNERSHIP_BASES, type Requirement, type RequirementList } from "../../pipeline.js";
+import { ROLE_OWNERSHIP_BASES, type RequirementList } from "../../pipeline.js";
 import {
   buildStructuredRequest,
   callStructuredChecked,
@@ -62,11 +60,8 @@ import type { LedgerView } from "../ledger.js";
 /** C2 の JSON Schema の名前 */
 export const MAPPING_SCHEMA_NAME = "mapping";
 
-/** C2 の中身の回数（C3 の拒否で、拒否された要件を含む束だけ 1 回作り直す。回すのは呼ぶ側） */
+/** C2 の中身の回数（C3 の拒否で 1 回だけ表の全体を作り直す。回すのは呼ぶ側） */
 export const MAPPING_ROUNDS = 2;
-
-/** C2 の束の大きさ（要件の一覧を一覧の順にこの件数ごとに切る。最後の束は少なくてよい。08 §4.1） */
-export const MAPPING_BUNDLE_SIZE = 5;
 
 /** データの塊の名前 */
 export const MAPPING_DATA_NAMES = {
@@ -79,12 +74,8 @@ export const MAPPING_DATA_NAMES = {
   advice: "助言の印",
 } as const;
 
-/** 束の完全性の固定文（欠落・重複・一覧に無い ID は表の検査と同じ文。別の束の要件 ID は束の文） */
-export const MAPPING_BUNDLE_MESSAGES = {
-  missing: "要件の所属が無い",
-  duplicate: "同じ要件の項目が重なっている",
-  unknown: "一覧に無い要件 ID である",
-  crossBundle: "別の束の要件 ID である（この束の要件ではない）",
+/** C2 の固定文（構造の検査の対象の欄の形。要件の欠落・重複・一覧に無い ID は表の検査 `checkMappedTable` の文） */
+export const MAPPING_MESSAGES = {
   checksShape: `checks は検査ごとの写像（check は ${STRUCTURAL_ASSERTIONS.join("・")} のいずれか、targetId は空でない文字列、sourceId は文字列か null）の並びであること`,
 } as const;
 
@@ -97,8 +88,8 @@ export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   {
     id: "R-map-01",
     text: "要件の一覧の要件ごとに 1 件ずつ、requirementId に一覧の要件 ID をそのまま書く。一覧に無い要件 ID を書かない。同じ要件を 2 件書かない。",
-    why: "要件を ID で指させ、欠落・重複・一覧に無い ID・別の束の ID をコードが照らす（方法論 03 の H2。07 の D10 の写しを廃止する。08 §6）。一覧は束の要件だけを渡す（08 §4.1）",
-    since: "Issue #593（束ごとの一覧は Issue #594）",
+    why: "要件を ID で指させ、欠落・重複・一覧に無い ID をコードが照らす（方法論 03 の H2。07 の D10 の写しを廃止する。08 §6）。一覧は全要件を 1 回で渡す（束に切ると各束が表全体の所属の規則を抱えて所属が膨らんだ。08 §9 の手 3 の戻す条件）",
+    since: "Issue #593（束ごとの一覧は Issue #594 で足し、Issue #627 で 1 回の写像に戻した）",
   },
   {
     id: "R-map-02",
@@ -194,34 +185,18 @@ export function mappingSchemaOf(ledger?: LedgerView): Record<string, unknown> {
   };
 }
 
-/** C2 の束 1 つ（添字は 1 から。要件は一覧の順） */
-export interface MappingBundle {
-  readonly index: number;
-  readonly requirements: readonly Requirement[];
-}
-
-/** 要件の一覧を一覧の順に `MAPPING_BUNDLE_SIZE` 件ごとの束に切る（要件 0 件なら束 0） */
-export function mappingBundlesOf(list: RequirementList): readonly MappingBundle[] {
-  const bundles: MappingBundle[] = [];
-  for (let start = 0; start < list.requirements.length; start += MAPPING_BUNDLE_SIZE) {
-    bundles.push({ index: bundles.length + 1, requirements: list.requirements.slice(start, start + MAPPING_BUNDLE_SIZE) });
-  }
-  return bundles;
-}
-
-/** C3 の拒否のあとの 2 回目の材料（その束の分だけ） */
+/** C3 の拒否のあとの 2 回目の材料 */
 export interface MappingPrevious {
-  /** 前回のその束の写像（raw の応答） */
+  /** 前回の写像（raw の応答） */
   readonly response: unknown;
   readonly rejections: readonly SemanticRejection[];
   readonly advice: readonly JudgeAdviceMarkEntry[];
 }
 
-/** C2 の束 1 つが受け取るもの */
-export interface MappingBundleInput {
+/** C2 が受け取るもの */
+export interface MappingInput {
   readonly plan: ConfirmedPlan;
   readonly list: RequirementList;
-  readonly bundle: MappingBundle;
   readonly documents: readonly PromptDocument[];
   readonly gateway: CallGateway;
   /** C1 が組んだ行（出典は null） */
@@ -231,16 +206,13 @@ export interface MappingBundleInput {
   readonly onRejected?: (candidate: RejectedCandidate) => void;
 }
 
-/** 束の写像（その束の要件ごとの 1 件。所属に検査の対象の行を足した後。束の要件の順） */
-export interface MappedBundle {
-  readonly entries: readonly MappingEntry[];
-  /** raw の応答（2 回目の「前回の写像」に渡す） */
-  readonly response: unknown;
-}
-
-/** C2 の束 1 つの結果。参照の照合の数は成否によらず返す */
-export type MappingBundleOutcome =
-  | { readonly ok: true; readonly value: MappedBundle; readonly references: ReferenceCounts }
+/** C2 の結果（表・表の SHA-256・raw の応答）。参照の照合の数は成否によらず返す */
+export type MappingOutcome =
+  | {
+      readonly ok: true;
+      readonly value: { readonly table: NameTable; readonly tableSha256: string; readonly response: unknown };
+      readonly references: ReferenceCounts;
+    }
   | { readonly ok: false; readonly failure: StageFailure; readonly references: ReferenceCounts };
 
 /** 骨組み（写像・`requirements` が写像の並び） */
@@ -256,17 +228,10 @@ const checksOf = (entry: Record<string, unknown>): readonly unknown[] => {
   return isRecord(verification) && Array.isArray(verification["checks"]) ? (verification["checks"] as readonly unknown[]) : [];
 };
 
-/** 束の応答の参照を数える（純粋。ID の値は数に入れない） */
-export function countMappingReferences(
-  list: RequirementList,
-  bundle: MappingBundle,
-  rows: readonly NameTableRow[],
-  output: unknown,
-  tally: ReferenceTally,
-): void {
+/** 応答の参照を数える（純粋。ID の値は数に入れない） */
+export function countMappingReferences(list: RequirementList, rows: readonly NameTableRow[], output: unknown, tally: ReferenceTally): void {
   if (!isRecord(output) || !Array.isArray(output["requirements"])) return;
   const requirementIds = new Set(list.requirements.map((requirement) => requirement.id));
-  const bundleIds = new Set(bundle.requirements.map((requirement) => requirement.id));
   const rowIds = new Set(rows.map((row) => row.id));
   const seenRequirements = new Set<string>();
   /** 行を指す欄の ID（所属・検査の対象）を数える。`seen` を渡せば重複を数える */
@@ -284,8 +249,8 @@ export function countMappingReferences(
     const requirementId = entry["requirementId"];
     if (typeof requirementId === "string") {
       tally.checked += 1;
-      if (!bundleIds.has(requirementId)) {
-        if (requirementIds.has(requirementId) || idKindOf(requirementId) !== null) tally.crossBundle += 1;
+      if (!requirementIds.has(requirementId)) {
+        if (idKindOf(requirementId) !== null) tally.crossBundle += 1;
         else tally.unknown += 1;
       } else if (seenRequirements.has(requirementId)) tally.duplicate += 1;
       seenRequirements.add(requirementId);
@@ -305,7 +270,7 @@ export function countMappingReferences(
  * 応答の要件ごとの 1 件の形（検査の対象の欄を読んで検査の種類の並びに写し、所属・確かめ方・分類の形は T1 の下書きと同じ関数）。
  * 構造で確かめる要件は確かめ方に対象を持たせる。合わなければ問題に足して undefined
  */
-function shapeOfBundleEntry(
+function shapeOfEntry(
   value: unknown,
   field: string,
   problems: Problem[],
@@ -326,7 +291,7 @@ function shapeOfBundleEntry(
         : undefined,
     );
     if (read.some((target) => target === undefined)) {
-      problems.push({ field: `${field}.verification.checks`, message: MAPPING_BUNDLE_MESSAGES.checksShape });
+      problems.push({ field: `${field}.verification.checks`, message: MAPPING_MESSAGES.checksShape });
       return undefined;
     }
     targets = read as NameTableCheckTarget[];
@@ -337,124 +302,55 @@ function shapeOfBundleEntry(
   return { ...entry, verification: { ...entry.verification, targets: targets ?? [] } };
 }
 
-const indexedField = /^(ownership|verification|classification)\[(\d+)\](.*)$/;
-
 /**
- * 束の応答（骨組みは通った）に束の C2' を掛ける（純粋）。束の完全性・検査の対象・その束の要件に掛けた C2'。通れば束の要件の順の
- * 写像（所属に検査の対象の行を足した後）を返す。問題の位置は応答の `requirements[j]` に写す
+ * 応答（骨組みは通った）から表を組み、C2' を掛ける（純粋）。構造の検査の対象を照らして通った対象の行を所属に足し（対象の問題の
+ * 位置は応答の `requirements[j]`）、一覧の順に並べた表に C2' を掛ける（表の問題の位置は表の欄。手 3a と同じ）
  */
-export function inspectMappingBundle(
+export function inspectMapping(
   list: RequirementList,
-  bundle: MappingBundle,
   rows: readonly NameTableRow[],
   output: Record<string, unknown>,
   documents: readonly PromptDocument[],
   ledger?: LedgerView,
-): { readonly ok: true; readonly entries: readonly MappingEntry[] } | { readonly ok: false; readonly problems: readonly Problem[] } {
+): { readonly ok: true; readonly table: NameTable } | { readonly ok: false; readonly problems: readonly Problem[] } {
   const problems: Problem[] = [];
-  const items = output["requirements"] as readonly unknown[];
-  const shaped = items.map((item, index) => shapeOfBundleEntry(item, `requirements[${String(index)}]`, problems, ledger));
+  const shaped = (output["requirements"] as readonly unknown[]).map((item, index) => shapeOfEntry(item, `requirements[${String(index)}]`, problems, ledger));
   if (problems.length > 0) return { ok: false, problems };
-  const entries = shaped as readonly MappingEntry[];
-
-  // 束の完全性（その束の要件にちょうど 1 件）
-  const listIds = new Set(list.requirements.map((requirement) => requirement.id));
-  const bundleOrder = new Map(bundle.requirements.map((requirement, index) => [requirement.id, index] as const));
-  const firstAt = new Map<string, number>();
-  entries.forEach((entry, index) => {
-    const field = `requirements[${String(index)}].requirementId`;
-    if (!bundleOrder.has(entry.requirementId)) {
-      problems.push({ field, message: listIds.has(entry.requirementId) ? MAPPING_BUNDLE_MESSAGES.crossBundle : MAPPING_BUNDLE_MESSAGES.unknown });
-    } else if (firstAt.has(entry.requirementId)) {
-      problems.push({ field, message: MAPPING_BUNDLE_MESSAGES.duplicate });
-    } else {
-      firstAt.set(entry.requirementId, index);
-    }
-  });
-  bundle.requirements.forEach((requirement) => {
-    if (!firstAt.has(requirement.id)) problems.push({ field: "requirements", message: MAPPING_BUNDLE_MESSAGES.missing });
-  });
-
-  // 束の要件の順に並べ、検査の対象を照らして所属に足す（対象に問題がある要件は足さない。落ちる応答は採用しない）
-  const present = bundle.requirements.filter((requirement) => firstAt.has(requirement.id));
-  const responseIndex = present.map((requirement) => firstAt.get(requirement.id) as number);
-  const ordered = responseIndex.map((index) => {
-    const entry = entries[index] as MappingEntry;
+  // 検査の対象を照らして所属に足す（対象に問題がある要件は足さない。落ちる応答は採用しない）
+  const entries = (shaped as readonly MappingEntry[]).map((entry, index) => {
     if (entry.verification.kind !== "structural" || entry.verification.targets === undefined) return entry;
     const before = problems.length;
     checkCheckTargets(rows, entry.verification.targets, `requirements[${String(index)}].verification`, problems);
     return problems.length !== before ? entry : { ...entry, roles: ownershipWithCheckTargets(entry.roles, entry.verification.targets) };
   });
-
-  // その束の要件に C2' を掛ける（行の検査と孤立した行は表全体で見る。位置は応答の要件ごとの 1 件へ写す）
-  const table = tableOf(rows, ordered);
-  const tableProblems = checkMappedTable({ ...list, requirements: present }, table, documents, ledger === undefined ? {} : { ledger });
-  for (const problem of tableProblems) {
-    const match = indexedField.exec(problem.field);
-    if (match === null) continue;
-    const [, name, at, rest] = match;
-    const index = responseIndex[Number(at)];
-    const suffix = name === "ownership" ? "" : name === "verification" ? ".verification" : ".nature";
-    const tail = name === "classification" ? (rest ?? "").replace(/^\.nature/, "") : (rest ?? "");
-    problems.push({ ...problem, field: `requirements[${String(index)}]${suffix}${tail}` });
-  }
-  return problems.length > 0 ? { ok: false, problems } : { ok: true, entries: ordered };
-}
-
-function tableOf(rows: readonly NameTableRow[], entries: readonly MappingEntry[]): NameTable {
-  return {
-    rows,
-    ownership: entries.map((entry) => ({ requirementId: entry.requirementId, roles: entry.roles })),
-    verification: entries.map((entry) => ({ ...entry.verification, requirementId: entry.requirementId })),
-    classification: entries.map((entry) => ({ requirementId: entry.requirementId, nature: entry.nature })),
-  };
-}
-
-/**
- * 全束の写像を一覧の順に 1 つの表に組み、表全体の C2' を 1 回掛ける（純粋）。束の C2' を通った写像なら、残るのは要件に帰属しない
- * 問題（どの要件にも所属しない行）だけである。問題があれば束を推測せずそのまま返す
- */
-export async function assembleMappedTable(
-  list: RequirementList,
-  rows: readonly NameTableRow[],
-  bundles: readonly MappedBundle[],
-  documents: readonly PromptDocument[],
-  ledger?: LedgerView,
-): Promise<
-  { readonly ok: true; readonly table: NameTable; readonly tableSha256: string } | { readonly ok: false; readonly problems: readonly Problem[] }
-> {
-  // 一覧の順に並べる（重複・一覧に無い ID は捨てずに後ろへ残し、表全体の C2' が落とす。束の C2' を通った写像なら起きない）
+  // 一覧の順に並べる（応答の順は表の SHA に効かせない。重複・一覧に無い ID は応答の順のまま後ろに置き、C2' が落とす）
   const order = new Map(list.requirements.map((requirement, index) => [requirement.id, index] as const));
-  const entries = bundles
-    .flatMap((bundle) => bundle.entries)
+  const sorted = entries
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) => (order.get(a.entry.requirementId) ?? list.requirements.length + a.index) - (order.get(b.entry.requirementId) ?? list.requirements.length + b.index) || a.index - b.index)
     .map(({ entry }) => entry);
-  const table = tableOf(rows, entries);
-  const problems = checkMappedTable(list, table, documents, ledger === undefined ? {} : { ledger });
-  return problems.length > 0 ? { ok: false, problems } : { ok: true, table, tableSha256: await nameTableSha256(table) };
+  const table: NameTable = {
+    rows,
+    ownership: sorted.map((entry) => ({ requirementId: entry.requirementId, roles: entry.roles })),
+    verification: sorted.map((entry) => ({ ...entry.verification, requirementId: entry.requirementId })),
+    classification: sorted.map((entry) => ({ requirementId: entry.requirementId, nature: entry.nature })),
+  };
+  problems.push(...checkMappedTable(list, table, documents, ledger === undefined ? {} : { ledger }));
+  return problems.length > 0 ? { ok: false, problems } : { ok: true, table };
 }
 
 function rawResponseText(output: unknown): string {
   return serializeJson(output).replaceAll("<", "\\u003c");
 }
 
-/** 確定した仕様から要件の種類を外し、要件をその束の分だけにする */
-function bundlePlan(plan: ConfirmedPlan, bundle: MappingBundle): unknown {
-  const ids = new Set(bundle.requirements.map((requirement) => requirement.id));
-  const visible = planWithoutRequirementKinds(plan) as Record<string, unknown>;
-  const requirements = visible["requirements"] as readonly { readonly id: string }[];
-  return { ...visible, requirements: requirements.filter((requirement) => ids.has(requirement.id)) };
-}
-
-/** C2 の束の要求のデータ（`previous` があればこの順で 3 塊を足す） */
-function buildData(input: MappingBundleInput): readonly PromptData[] {
+/** C2 の要求のデータ（`previous` があればこの順で 3 塊を足す） */
+function buildData(input: MappingInput): readonly PromptData[] {
   const data: PromptData[] = [
-    { name: MAPPING_DATA_NAMES.plan, text: serializeJson(bundlePlan(input.plan, input.bundle)) },
+    { name: MAPPING_DATA_NAMES.plan, text: serializeJson(planWithoutRequirementKinds(input.plan)) },
     {
       name: MAPPING_DATA_NAMES.list,
       text: serializeJson({
-        requirements: input.bundle.requirements.map((requirement) => ({ id: requirement.id, text: requirement.text, quote: requirement.quote })),
+        requirements: input.list.requirements.map((requirement) => ({ id: requirement.id, text: requirement.text, quote: requirement.quote })),
       }),
     },
     {
@@ -494,21 +390,21 @@ function buildData(input: MappingBundleInput): readonly PromptData[] {
 }
 
 /**
- * C2 の束を 1 回回す。初回は束の C2' に落ちれば共通の窓口が**その束だけ** 1 回作り直させ、2 回続けば `unmet`（骨組みの形が
- * 続けば `malformed`）。`previous` を渡した 2 回目は 1 回だけ呼び、束の C2' に落ちれば `unmet`（`attempts` 1）。
+ * C2 を 1 回回す。初回は C2' に落ちれば共通の窓口が 1 回だけ作り直させ、2 回続けば `unmet`（骨組みの形が続けば `malformed`）。
+ * `previous` を渡した 2 回目は 1 回だけ呼び、C2' に落ちれば `unmet`（`attempts` 1）。
  */
-export async function runMappingBundle(input: MappingBundleInput): Promise<MappingBundleOutcome> {
+export async function runMapping(input: MappingInput): Promise<MappingOutcome> {
   const { ledger } = input;
   const tally = new ReferenceTally();
   const round = input.previous === undefined ? 1 : 2;
   let lastWasSkeleton = false;
-  const inspect = (output: unknown): ShapeCheck<readonly MappingEntry[]> => {
+  const inspect = (output: unknown): ShapeCheck<NameTable> => {
     const skeleton = skeletonProblems(output);
     lastWasSkeleton = skeleton.length > 0;
     if (skeleton.length > 0) return { ok: false, problems: skeleton };
-    countMappingReferences(input.list, input.bundle, input.rows, output, tally);
-    const inspected = inspectMappingBundle(input.list, input.bundle, input.rows, output as Record<string, unknown>, input.documents, ledger);
-    return inspected.ok ? { ok: true, value: inspected.entries } : inspected;
+    countMappingReferences(input.list, input.rows, output, tally);
+    const inspected = inspectMapping(input.list, input.rows, output as Record<string, unknown>, input.documents, ledger);
+    return inspected.ok ? { ok: true, value: inspected.table } : inspected;
   };
   const request = buildStructuredRequest({
     rules: ruleTexts(mappingRuleDefinitionsOf(ledger)),
@@ -522,8 +418,8 @@ export async function runMappingBundle(input: MappingBundleInput): Promise<Mappi
   const onShapeRejected =
     onRejected === undefined ? {} : { onShapeRejected: (rejection: Parameters<typeof shapeRejectedCandidate>[1]) => onRejected(shapeRejectedCandidate(round, rejection)) };
   if (round === 2) {
-    // 2 回目は形の再試行を持たない（08 §4.1）：窓口には骨組みだけを掛けさせ、束の C2' は 1 回だけ掛ける
-    let inspected: ShapeCheck<readonly MappingEntry[]> | undefined;
+    // 2 回目は形の再試行を持たない（08 §4.1）：窓口には骨組みだけを掛けさせ、C2' は 1 回だけ掛ける
+    let inspected: ShapeCheck<NameTable> | undefined;
     const answer = await callStructuredChecked(input.gateway, {
       request,
       check: (output) => {
@@ -532,15 +428,17 @@ export async function runMappingBundle(input: MappingBundleInput): Promise<Mappi
       },
     });
     if (!answer.ok) return { ok: false, failure: answer.failure, references: tally.counts };
-    const result = inspected as ShapeCheck<readonly MappingEntry[]>;
+    const result = inspected as ShapeCheck<NameTable>;
     if (!result.ok) {
       onRejected?.({ kind: "shape", round, attempt: 1, response: answer.output, problems: result.problems.map((problem) => ({ ...problem, reference: "response" })) });
       return { ok: false, failure: { kind: "unmet", attempts: 1, problems: result.problems }, references: tally.counts };
     }
-    return { ok: true, value: { entries: result.value, response: answer.output }, references: tally.counts };
+    return { ok: true, value: { table: result.value, tableSha256: await nameTableSha256(result.value), response: answer.output }, references: tally.counts };
   }
   const answer = await callStructuredChecked(input.gateway, { request, check: inspect, ...onShapeRejected });
-  if (answer.ok) return { ok: true, value: { entries: answer.value, response: answer.output }, references: tally.counts };
+  if (answer.ok) {
+    return { ok: true, value: { table: answer.value, tableSha256: await nameTableSha256(answer.value), response: answer.output }, references: tally.counts };
+  }
   const failure: StageFailure =
     answer.failure.kind === "malformed" && !lastWasSkeleton
       ? { kind: "unmet", attempts: answer.failure.attempts, problems: answer.failure.problems }
