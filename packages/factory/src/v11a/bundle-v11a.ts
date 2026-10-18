@@ -26,7 +26,7 @@ import { ARTIFACTS_DIR, type BundleArtifact } from "../bundle.js";
 import type { RequirementNature, TestSuite } from "../fixed-test.js";
 import type { Verdict } from "../outcome.js";
 import { requirementsFromPlan } from "../pipeline.js";
-import type { FailureAttribution, StageRecord } from "../record.js";
+import type { FailureAttribution, StageId, StageRecord } from "../record.js";
 import type { DeclarationElement, DeclarationMark } from "./bind-by-id.js";
 import {
   deriveCarryOver,
@@ -319,6 +319,38 @@ export function boundaryBefore(start: StageStart): StageBoundary | null {
   if (start === "test-spec") return "t1-t2";
   if (start === "write") return "t2-b1";
   return null;
+}
+
+/** 区間の表の 1 行（開始・終了・直前の境界・区間の中で段の記録に出てよい段の並び） */
+export interface StageSegment {
+  readonly start: StageStart;
+  readonly end: StageEnd;
+  readonly boundary: StageBoundary | null;
+  readonly stages: readonly StageId[];
+}
+
+/**
+ * 段単位の走りの区間の表（段の名前の正本）。i 番目の行が `STAGE_STARTS[i]`・`STAGE_ENDS[i]` の区間で、`boundary` は
+ * その開始の直前の境界（`boundaryBefore`）。`stages` は区間の中で段の走りの記録に出てよい段（`持ち越しの停止`
+ * `carry-over` は区間 0 と 2 に出る）。採点の道具は工場を import せず手で写して持ち、試験で照らす。
+ * v1.2 の段を足す手は、この表に行を足す。
+ */
+export const STAGE_SEGMENTS: readonly StageSegment[] = [
+  { start: "name-table", end: "semantic-check", boundary: null, stages: ["name-table", "semantic-check", "carry-over"] },
+  { start: "test-spec", end: "test-spec", boundary: "t1-t2", stages: ["test-spec"] },
+  {
+    start: "write",
+    end: "judge",
+    boundary: "t2-b1",
+    stages: ["write", "static-check", "name-check", "decl-check", "run-tests", "repair", "arbitration", "coverage", "carry-over", "judge"],
+  },
+];
+
+/** 範囲（開始 i・終了 k）の記録に出てよい段の並び（区間 i〜k をつなぐ。開始が終了より後・表に無い名前は空） */
+export function stagesInRange(start: string, end: string): readonly StageId[] {
+  const i = STAGE_SEGMENTS.findIndex((segment) => segment.start === start);
+  const k = STAGE_SEGMENTS.findIndex((segment) => segment.end === end);
+  return i < 0 || k < i ? [] : STAGE_SEGMENTS.slice(i, k + 1).flatMap((segment) => segment.stages);
 }
 
 /** 段の範囲 */
