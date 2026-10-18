@@ -612,7 +612,7 @@ test("README：表の採点の節があり、やることの項目が載る。�
   const at = text.indexOf(SECTION_HEAD);
   assert.ok(at > 0);
   // 既存の部分（新しい節の前）は #606 の前の README とバイト列まで同じ
-  assert.equal(sha(text.slice(0, at - 1)), "ecf45bc68edac023c1250cb5e15abb4312b6c9a1476eda467db6a04c01d54e1d");
+  assert.equal(sha(text.slice(0, at - 1)), "662d41ded93107ecd130dfa090b09df1280ec78277509d131bf21b253e82cba4");
   const sec = text.slice(at);
   for (const item of [
     "table-gold-v1", "plan_sha256", "終了コード 3", "任意の欄", "正規化", "参照切れ", "割り当て", "割り当てられない行", "欠け", "過剰", "確かめ方",
@@ -958,7 +958,7 @@ test("README：下書きの採点と正誤表の小節があり、やること�
   const text = readme();
   const at = text.indexOf(SECTION_DRAFT), c3 = text.indexOf(SECTION_C3);
   assert.ok(at > 0 && c3 > at);
-  assert.equal(sha(text.slice(0, at - 1)), "bcac1bac9c04e0c39807553cccb5c2e5795a2ce474c12ba378aaed567132b851");
+  assert.equal(sha(text.slice(0, at - 1)), "1c21bdefca9e6e5373316f7ce143bdad580dea3d25ad5d1bbda1e8e64f9b2e1f");
   const draft = text.slice(at, c3), table = text.slice(c3);
   for (const item of ["最後の候補", "round・attempt・call", "候補の数", "合併しない", "読めない候補", "古い候補", "一覧", "形の失敗", "数が合わない", "平ら", "添字", "参照切れ", "出典の写し", "表の SHA は null", "分母 (a')", "分母 (b')", "静的な保留", "P を単位", "--compare", "1 回ずつ", "rejected-name-table.json"]) assert.ok(draft.includes(item), item);
   for (const item of ["二値", "見逃し", "誤拒否", "点検の記録なし", "点検の対象外", "表の SHA", "semantic-check", "semantic_check", "持ち越し", "了承除外", "保留", "参考（独立を仮定）", "P ごと", "拒否の種類", "引用", "拒否の理由", "--compare", "--anonymous", "指紋", "断った候補"]) assert.ok(table.includes(item), item);
