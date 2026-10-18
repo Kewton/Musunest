@@ -908,3 +908,82 @@ node workspace/mvp/m1/agent/eval/agent-accept/score-agent.mjs <repo> <out> --ano
 - **本物の計測は流していない**（基準は方法論 `06` §1 の作業 3）。依頼文を工場に渡したときの Plan の問い・Build の結果は未観測
 - 保留用の題材との重なり（所有者が確かめる）。レビューの指摘を反映した版の再確認は済み（残件 1 件は §6.5 の限界として明記。直していない）
 - 正例の宣言が画面（host）で動くこと（静的チェックと spec-engine の評価だけで確かめた。開発用の `stage1-specs/` と同じ範囲）
+
+## 7. 表の採点（正解の表との照合）（#606。v1.2 表の採点 1。道具 `table/score-table.mjs`）
+
+手 3（T1 を C1・C2 に分ける）の前後で、工場の ②部品の一覧・③要件と部品の結び付けを、段の通過や外の採点の PASS ではなく**正解の表と直接比べて**測る。要件ごとに 3 問——(i) 必要な部品が全部在る（**欠け**）、(ii) 許す集合の外の所属が無い（**過剰**）、(iii) **確かめ方**が許す集合に入る——を 0／1 で出す。**計測の道具であって工場の門ではない**（工場の合否・門・検証の定義に入らない。工場の package を import せず、工場の側もこの道具を参照しない）。**費用 0**（LLM・判定・API・通信・時計を使わない。Jev も入れない）。
+
+> 節の番号：§5 の末尾（§5.13 の次）に置くと、既存の試験が固定している見出しの並び（§5.11〜§5.13 の次が §6）が変わるので、§7 として末尾に足した。§5 以前・§6 の文は変えていない。
+
+### 7.1 使い方と入力
+
+```bash
+node table/score-table.mjs <正解のディレクトリ> <計測の出力先> <出力先> [--compare] [--anonymous]
+```
+
+- **正解は非公開**で git の外に置く（採点担当が作る。所有者の決定 2026-10-18）。道具は場所を引数で受け取るだけで、**正解の場所に既定値を持たない**。正解の文（引用・意味・質問・理由・除外の文）は出力に写さない
+- 正解のディレクトリ：`*.json` を名前の順に読み、1 ファイル＝1 P。形（版 `table-gold-v1`）：
+  - 必須：`version`・`pattern`（`P<n>`）・`frozen_set`（`id`・`version`）・`plan_sha256`・`components`（**配列。`symbol` で索引**。`kind`・`type`・`parent_entity`・`ref_entity`・`group_by`（`kind`・`field`）・`options_count`）・`requirements`（**配列。`requirement_id` で索引**。`alternatives`＝案の並び。案は `required`・`allowed`・`context`・`verification` 1 件）・`needs_human`（保留の一覧。`requirement_id`・`reason_kind`・`candidates`）・`counts`（件数）
+  - **任意の欄**（無ければ null と同じで、**無いだけで断らない**）：判定の状態 `status`・`unexpressible`・`verification_limit`・`scope`・設計族 `design_family`（案）・禁止の部品 `forbidden_components`・方針 `policy`・案の `unexpressible`・関連 ID `related_requirement_ids`。部品の `parent_entity`・`ref_entity`・`group_by`・`options_count` も任意
+  - 確かめ方：`kind` と、structural は `checks`・`assertions`（`check`・`target`＝記号・`expected`・`ref_entity`）、fixed-test は `observations`（`target`＝記号・`target_kind`・`operation`）、unresolved は `reason_kind`
+  - 必須の欄が欠ける・型が違う（`table-score:gold-shape`）・版が違う（`table-score:gold-version`）・読めない（`table-score:gold-unreadable`）・同じ P が 2 つ（`table-score:gold-duplicate`）正解は**何も数えず断る**
+- 計測の出力先：条件のファイル（`conditions.json`。予定 `child_args` と凍結した組 `frozen`＝`id`・`version`・`adopted[]` の `pattern`・`plan_sha256`）と本ごとのディレクトリ
+- **表の読取元**（**観測の単位は本。1 本に表 1 つ**）：(a) **受理済みの表**（納品物の成果物の名前の表 `bundle/artifacts/name-table.json`）、(b) 段の走りの **checkpoint** の `name_table`（境界 t1-t2。`bundle/stage-checkpoint-t1-t2.json`。形は (a) と同じ）。1 本に両方あれば (a) を採り (b) は件数（`checkpoint_also`）だけ。どちらも無い本は「表なし」。`source` が null の表（旗 ids on の受理済みの表。手 3a の後も同じ形）も読む
+
+### 7.2 SHA の照合（fail-closed）
+
+- 正解の P ごとの `plan_sha256` と組の ID・版を、条件のファイルの凍結した組の値と、本ごとの記録（納品物の build の記録 `bundle/build-record.json`、または checkpoint）の `plan_sha256` と照らす。表のある本に `plan_sha256` の記録が無いときも合わないと数える
+- **1 つでも合わなければ何も数えず終了コード 3** と固定の符号（`table-score:frozen-set`・`table-score:plan-sha256-conditions`・`table-score:plan-sha256-run`）の 1 行で断り、**出力を書かない**。ほかの断り：`table-score:args`・`table-score:conditions`・`table-score:gold-missing`（予定の P の正解が無い）・`table-score:table-unreadable`・`table-score:compare-record`。断る文に値・パス・ID を入れない
+
+### 7.3 正規化と共有の採点の関数
+
+- 読取元は**正規化**してから共有の採点の関数（`scoreStructure`。export する）に渡す。渡すものは 2 つ：
+  - **採点の構造**（`normalizeTable`）：行＝種類・型の構造（field は型、computation は valueType・scope・form・aggregate の種類、operation は action と hasWhen、screen は view、entity は null）・options の数・groupBy の種類と、**親 entity・refEntity・groupBy の元・集計元を正規化後の行の添字へ結び直した参照**（無いなら null、指す行が無ければ**参照切れ** `broken`。区別する）。所属＝要件 ID → 行の添字の集合。確かめ方＝要件 ID → 種類・checks・value
+  - **読取元のメタデータ**：表の SHA（無ければ null）
+- id は結び直しのあと落とす（name・role・source も）。だから id・名前を全部置き換えた表、source が全部 null の表も同じ結果になる
+- 戻り＝要件 ID ごとの 5 値・3 問（0／1／null）・採った案・印、割り当て、割り当てられない行
+
+### 7.4 割り当て（表の行 → 正解の部品）
+
+- 鍵は凍結した要件 ID。行は **（種類・型の構造・groupBy の種類）＋所属の足跡**（その行を所属させる要件 ID の集合）で部品の記号の候補を持つ。足跡は、型の構造が合う記号のうち、足跡の要件の記号の全体（全案の required・allowed・context と、その親 entity・参照先の閉包）に入る要件の数が最も多いものに絞る（足跡で候補を 0 にしない。許す集合の外の所属を過剰として数えるため）
+- 親 entity・参照先・集計元・groupBy の元は、**正規化した参照をたどって割り当てどうしで整合**させる（**参照切れの行は割り当て不能**）。P 全体（本の表 1 つ）で一貫した割り当てを決定的に探す：単射で参照の整合する割り当てのうち、割り当てた行の数が最も多い解を全部集め、全ての解で同じ記号になる行だけを割り当てる。**探索の上限は定数**（節 `SEARCH_LIMIT`・最良の解 `SOLUTION_LIMIT`）で、超えた表は全要件を保留（`search-limit`）
+- **1 部品に 1 行**。2 行が同じ部品にしか当たらないときはどちらも割り当てず「**割り当てられない行**」に数える（別名の合併をしない）。どの部品にも当たらない行も同じ欄に数える。保留の一覧の candidates は案として使わない
+- 表に無い式・名前から意味を補わない。選択肢は数の一致だけ。選択肢の意味・既定値の選択肢・式の義務は照合できないので「**意味の未照合**」の印（`semantics-unverified`）と件数にし、0／1 は構造の 3 問で決める
+
+### 7.5 3 問（同じ 1 案の中で。別案どうしを合併しない）
+
+- (i) **欠け**：required は当該要件の所属で見る（親 entity は閉包）。行は在るが当該要件に所属していない required は欠け。required の選択肢の数が正解の数と違えば欠け。context と、required の部品と表に実在する allowed の部品の参照先・集計元・groupBy の元は、表全体に在ればよく所属は要らない。allowed は上限で、使っていない任意の部品とその参照先の実在は求めない
+- (ii) **過剰**：当該要件の所属の行が、同じ案の allowed（と required）の親 entity の閉包の内。所属の行の親として導かれる entity の所属は過剰にしない。参照先 entity と集計元は allowed に在るときだけ許す
+- (iii) **確かめ方**：種類が同じ案の verification と一致。structural は checks を順と重複を除いて完全一致し、assertions の束縛も照らす（target の行が当該要件の所属に在り、expected が行の型と、ref_entity が行の参照先の割り当てと合う。assertions の無い check は種類だけ）。fixed-test は observations を照らす——target の行が表に在り種類が target_kind と一致し、操作（試験の操作。記号ではない）が行の型に適合する（定数の表 `OBSERVATION_FIT`：validate は項目か entity、action は hasWhen が真の操作、screen は画面、aggregate は種別 aggregate の計算、compute は種別 expression の計算）。default-value・enum-membership・non-requirement は種類の一致。**未照合は表に無い意味だけ**
+- 3 問とも 1 の案が 1 つでもあれば「正答」。無ければ 1 の数が最も多い案（同数なら先頭＝基準）の 3 問を内訳に数える
+
+### 7.6 5 値・了承除外と unexpressible・保留
+
+- 要件の結果は **5 値**のどれか 1 つ：**正答**（`correct`）・**誤り**（`wrong`）・**正直な持ち越し**（`carry-over`）・**了承除外**（`accepted-removal`）・**保留**（`held`）。**二値（正答・誤り）の要件だけ**を率と差に使う。案の間の優先は 正答 → 了承除外 → 持ち越し → 誤り
+- 表の unresolved：同じ案の verification が unresolved なら reason_kind で分ける——`accepted-removal` は**了承除外**（持ち越しでも達成でもない）、`unsupported-observation`・`deployment-scope` は**正直な持ち越し**。案に無くても要件に `verification_limit` があれば持ち越し。どれでもなければ (iii) 0。要件 ID の形（alt）で免除しない
+- `unexpressible`：要件直下で scope が無ければ全案に、scope（設計族）があればその設計族の案にだけ、案の中に書かれていればその案にだけ効く。効く範囲で表が unresolved なら正直な持ち越し、それ以外を主張すれば**過大な主張**（誤りの内訳。印 `overclaim`）。効かない範囲は通常の 3 問
+- 保留：**ID で重複排除した集合**＝判定の状態が needs_human の要件 ∪ 保留の一覧の requirement_id（**静的な保留** `needs-human`。正解だけで決まる）。`related_requirement_ids` に載る要件は保留にせず「関連あり」の印（`related`）と件数。加えて**候補依存**の保留：割り当て不能の行を所属に持つ要件（`unassignable-row`）、禁止の部品に割り当てた行を所属に持つ要件と、3 問とも 1 の案が無く最良の案が同数で、その案どうしの設計族が違うか要件に方針があって案が選べない要件（`alternative-unselectable`）、探索の上限（`search-limit`）
+
+### 7.7 集計・分母と静的な保留・P の区間
+
+- 主＝要件単位の正答率。内訳＝欠けの率・過剰の率・確かめ方の正答率（二値の要件の中で）。**読取元ごとに出し、混ぜない**（`by_source.accepted`・`by_source.checkpoint`。その読取元を採らなかった本は未観測に数える）
+- **分母を 2 つ並べる**：**分母 (a)**＝表のある本の二値の要件数。**分母 (b)**＝予定の本 ×（その P の要件数 − **静的な保留**の数）。(b) は観測に依らず、未観測（表なしの本）と候補依存の非二値は分母に残し分子に入れない（正答の下限）。要件数は要件の並びと保留の一覧の ID の和集合で数える
+- 未観測・候補依存の非二値・関連あり・意味の未照合・過大な主張・割り当てられない行は件数で別に出す（`counts`）。分母 0 は 0 と出し、率と区間は null に理由の符号 `denominator-zero`
+- 区間：**P を単位にする**。P ごとに二値の要件の 0／1 を平均し、既存の P のまとまりの関数（`score-agent.mjs` の `clusterStats`。import して使う）で **bootstrap** の区間と参考の t 区間を出す（m＝二値の要件のある P の数。2 未満なら null と理由）。**単独群では符号反転の p を出さない**。Wilson の 95% は「**参考（独立を仮定）**」で、P の区間の代用にしない
+
+### 7.8 比較（`--compare`）
+
+- 計測の出力先に比較の記録の出力先を渡す。`comparison.json` の `pairs.groups` の 0 番目を比較元（baseline）、1 番目を候補（candidate）とし、群のディレクトリをそれぞれ §7.2 と同じく照合して採点する
+- 同じ P・同じ回の本を対にして、要件ごとの差＝**after − before**（候補 − 比較元。−1・0・＋1）を**両側とも二値の要件だけ**で取り、本ごとに平均し P ごとに平均する。件数・n・平均・区間は既存の `pairStats`、P のまとまりの符号反転の p・bootstrap の区間は既存の `clusterStats` を import して使う（写さない）
+- 片側に表の無い対（`table-absent`）・片側でも非二値の要件（`non-binary`）は差 null で n から除き、理由ごとの件数に出す。読取元ごとに対を組む
+
+### 7.9 出力・匿名・指紋
+
+- 出力は JSON（schema `musunest-eval/table-score/v1`。比較は `musunest-eval/table-score-compare/v1`）の `table-score.json`（比較は `table-score-compare.json`）と、標準出力の要約（読取元ごとに正答率・内訳・分母・5 値・割り当てられない行・表なし・P の区間。比較は差の 1 行）。要件 ID と記号は行ごとの出力（`scoring.rows`）にだけ載せる。同じ入力からは同じ出力
+- `--anonymous` は `*.anonymous.json`（schema `musunest-eval/table-score-anonymous/v1`）だけを書き、件数・率・区間・m だけを出す（P の番号・本の ID・要件 ID・記号・パス・SHA を出さない）
+- **指紋**（道具のファイルの SHA-256。`fingerprint.tool_sha256`）は通常の出力にだけ、採点の欄（`scoring`）と別の欄で載せる
+
+### 7.10 範囲の外・限界
+
+- 断った候補の下書きの採点と C3 の正誤表（2 本目）。正解の作成・版上げ・置き場（所有者）。Jev の較正。工場の表の形・段の変更。候補の凍結と計測（窓口）
+- 正解の欄の名前は Issue の本文の語から決めた（現物は非公開で、この道具の作り手は読んでいない）。現物と名前が違えば `table-score:gold-shape` で断る（数えない）。そのときは欄の名前を合わせる Issue を立てる
