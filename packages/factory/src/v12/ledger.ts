@@ -23,6 +23,8 @@
 // 枠（`v12/limits.ts`）の旗で、手 3a〜3d は同じ旗の下で足す。
 // 手 3d（#624）で、引き継いだ `view-structure`・`existence` の行に C4 の試験の型（screen × screen・entity × screen・normal だけ・
 // 期待は ok の定数・書き手 `code`）を置いた。旗 `v12.ids` の走りだけ、所属の画面・entity の行から `v12/generated-tests.ts` が作る。
+// 手 3h（#652）で、view-structure の試験の型に代わりの対象の種類（`fallback`。項目）を置いた。所属に画面・entity の行が無く、所属が
+// すべて項目の行の要件にだけ、項目 × screen をコードが作る（免除の種類は画面・entity のまま）。
 //
 // 台帳は LLM を呼ばず、評価口を import しない（B4 の照合は名前で持ち、評価口が名前 → 関数の表を持つ）。
 import type { AggregateKind } from "@musunest/appspec-schema";
@@ -177,6 +179,11 @@ export interface PropertyT2 {
    * 同じ行の別の組を足すときは、ここに足す。#624）
    */
   readonly targetKinds: readonly TestTargetKind[];
+  /**
+   * 所属に組ごとの対象の種類の行が無いときだけ使う、代わりの対象の種類（所属の行が**すべて**この種類の行の要件に、その行ごとに
+   * 作る。評価の方法の表のこの行の組にあり、`targetKinds` と重ならない。免除の種類には入れない。#652）。無ければ null
+   */
+  readonly fallback: PropertyT2Fallback | null;
   readonly operation: Exclude<TestOperation, "structure">;
   /** 作ってよい（そろえる）kind。ここに無い kind の不足は v1 の網羅の検査から外す */
   readonly requiredKinds: readonly TestKind[];
@@ -207,6 +214,13 @@ export interface PropertyT2 {
     readonly input: string;
     readonly referenceData: string;
   };
+}
+
+/** T2 の試験の型の代わりの対象の種類（`PropertyT2.fallback`。#652） */
+export interface PropertyT2Fallback {
+  readonly targetKinds: readonly TestTargetKind[];
+  readonly why: string;
+  readonly since: string;
 }
 
 /** 集計のデータ状態（`empty` … 集計元を空と明示し行も置かない／`unread` … 空と明示せず行も置かない＝未読。#549） */
@@ -383,6 +397,7 @@ const OWNERSHIP_STRUCTURE_T2 = {
   input: "empty-record",
   minTests: 1,
   expectedWriter: "code",
+  fallback: null,
 } as const;
 
 /** 旗 `v12.ids`：構造の検査と画面の試験（operation が structure・screen）を LLM が書いたときの固定文（#624） */
@@ -477,12 +492,17 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       ...OWNERSHIP_STRUCTURE_T2,
       targetKind: "screen",
       targetKinds: ["screen"],
+      fallback: {
+        targetKinds: ["field"],
+        why: "所属が項目の行だけの要件は、画面・entity の試験が無く、在ることだけなら検査（validate）も作れないので、項目が画面から辿れることを項目 × screen で確かめる（評価の方法の表の組。親 entity の在ることで代用しない）",
+        since: "Issue #652",
+      },
       dataStates: [{ state: "所属の画面の宣言", value: "constant" }],
       messages: {
         notAllowed: OWNERSHIP_STRUCTURE_NOT_ALLOWED,
         kind: "画面の構造の試験は、正常（normal）だけであること",
         operation: "画面の構造の試験の操作は、画面（screen）であること",
-        target: "画面の構造の試験の対象は、要件の所属の画面（screen）の行であること",
+        target: "画面の構造の試験の対象は、要件の所属の画面（screen）の行（所属に画面・entity の行が無く、所属がすべて項目の行なら、その項目（field）の行）であること",
         observes: "画面の構造の試験の観測する性質は、view-structure であること",
         expected: "画面の構造の試験の期待は、ok の定数（true）であること",
         input: "画面の構造の試験の入力は、空の写像であること",
@@ -572,6 +592,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
     t2: {
       targetKind: "field",
       targetKinds: ["field"],
+      fallback: null,
       operation: "validate",
       requiredKinds: ["normal"],
       expected: { kind: "ok", valueType: "json-string", equals: "verification-value" },
@@ -641,6 +662,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
     t2: {
       targetKind: "field",
       targetKinds: ["field"],
+      fallback: null,
       operation: "validate",
       requiredKinds: ["normal"],
       expected: { kind: "ok", valueType: "json-string-array", equals: "target-options" },
@@ -847,6 +869,25 @@ export function ledgerRowDefects(rows: readonly PropertyRow[]): readonly string[
         defects.push(`${at} は確かめ方に結び付かない試験の型なのに、normal だけ・書き手 code・期待 ok の定数でない`);
       }
     }
+    // 代わりの対象の種類（#652）：確かめ方に結び付かない試験の型だけが持ち、種類は空でなく重ならず、評価の方法の表のこの行の組にあり、
+    // 組ごとの対象の種類（免除に使う種類）と重ならない。why・since がある
+    const fallback = row.t2?.fallback ?? null;
+    if (row.t2 !== null && fallback !== null) {
+      const { targetKinds, operation } = row.t2;
+      if (row.t1 !== null) defects.push(`${at} は確かめ方に結び付く試験の型なのに、代わりの対象の種類がある`);
+      if (fallback.targetKinds.length === 0 || new Set(fallback.targetKinds).size !== fallback.targetKinds.length) {
+        defects.push(`${at} の試験の型の代わりの対象の種類が、空か重なっている`);
+      }
+      if (fallback.targetKinds.some((kind) => !row.combinations.some((entry) => entry.targetKind === kind && entry.operation === operation))) {
+        defects.push(`${at} の試験の型の代わりの対象の種類の組が、評価の方法の表の組に無い`);
+      }
+      if (fallback.targetKinds.some((kind) => targetKinds.includes(kind))) {
+        defects.push(`${at} の試験の型の代わりの対象の種類が、組ごとの対象の種類と重なっている`);
+      }
+      if (fallback.why.trim() === "" || fallback.since.trim() === "") {
+        defects.push(`${at} の試験の型の代わりの対象の種類に、why か since が無い`);
+      }
+    }
     // コードが作る試験の型（#595）：入力は空の写像・参照データは空（コードが値を埋められる形）で、旗 `v12.ids` の文がある
     if (row.t2 !== null && row.t2.expectedWriter === "code") {
       if (row.t2.input !== "empty-record" || row.t2.referenceTargets.length > 0) {
@@ -1027,7 +1068,18 @@ export function aggregateStateValueOf(
 // ── 人が読む写し（methodology/ledger/properties.md の表）─────────────
 
 /** 写しの表の見出し（1 行 1 性質） */
-export const PROPERTY_COPY_HEADER = ["id", "状態", "since", "T1 の kind", "T2 の形", "期待の値の書き手", "B4", "外の対応", "why"] as const;
+export const PROPERTY_COPY_HEADER = [
+  "id",
+  "状態",
+  "since",
+  "T1 の kind",
+  "T2 の形",
+  "fallback の対象",
+  "期待の値の書き手",
+  "B4",
+  "外の対応",
+  "why",
+] as const;
 
 /** 写しの表の 1 行（コードの台帳の 1 行から組む。欄の中の `|` は書かない） */
 export function propertyCopyCells(row: PropertyRow): readonly string[] {
@@ -1055,12 +1107,19 @@ export function propertyCopyCells(row: PropertyRow): readonly string[] {
       : `code（${aggregate.codeRanges.map((range) => AGGREGATE_RANGE_LABELS[range]).join("・")}）／${aggregate.expectedWriter}（${AGGREGATE_RANGES.filter((range) => !aggregate.codeRanges.includes(range))
           .map((range) => AGGREGATE_RANGE_LABELS[range])
           .join("・")}）`;
+  // 代わりの対象の種類（#652）：組・使う条件・since・why
+  const fallback = row.t2?.fallback ?? null;
+  const fallbackCell =
+    row.t2 === null || fallback === null
+      ? "—"
+      : `${fallback.targetKinds.map((kind) => `${kind} × ${row.t2?.operation ?? ""}`).join("・")}（所属に組ごとの対象の種類の行が無く、所属がすべてこの種類の行の要件だけ・その行ごとに 1 本・免除に入れない。${fallback.since}）：${fallback.why}`;
   return [
     row.id,
     state,
     row.since,
     row.t1?.kind ?? condition?.t1Kind ?? "—",
     shape,
+    fallbackCell,
     row.t2?.expectedWriter ?? aggregateWriter ?? condition?.expectedWriter ?? "—",
     row.evaluation ?? "—",
     row.outer ?? "未定義",

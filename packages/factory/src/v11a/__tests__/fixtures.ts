@@ -498,6 +498,19 @@ export const LEDGER_ROWS_2C: readonly PropertyRow[] = PROPERTY_LEDGER.filter((en
       : entry,
 );
 
+// ── 手 3h の前の台帳（Issue #652）──────────────────────────────────
+
+/**
+ * 手 3h（#652）の前の台帳の行＝今の台帳の view-structure の試験の型から代わりの対象の種類（項目）を外したもの（#651 までの台帳。
+ * 所属が項目の行だけの要件にコードが試験を作らない）。二点測定の「前」の側に使う
+ */
+export const LEDGER_ROWS_3G: readonly PropertyRow[] = PROPERTY_LEDGER.map(
+  (entry): PropertyRow => (entry.t2 === null || entry.t2.fallback === null ? entry : { ...entry, t2: { ...entry.t2, fallback: null } }),
+);
+
+/** #651 までの台帳の導出（Issue #652 の二点測定の「前」） */
+export const LEDGER_VIEW_3G: LedgerView = deriveLedgerView(LEDGER_ROWS_3G);
+
 // ── 旗 on の要求の差の範囲（Issue #548）──────────────────────────────
 
 const ENUM_MEMBERSHIP_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "enum-membership");

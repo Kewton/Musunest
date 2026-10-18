@@ -61,6 +61,7 @@ import {
   requestDiffsOf,
   strictDefects as strictDefectsOf,
   withoutEnumMembership,
+  LEDGER_VIEW_3G,
 } from "../__tests__/fixtures.js";
 import { deriveCarryOver, pruneForCarryOver, type CarryOver } from "../carry-over.js";
 import { coverageUnitsOf } from "../coverage.js";
@@ -74,6 +75,7 @@ import {
   generateTests,
   isGeneratedTestId,
   ledgerTargetsOf,
+  normalOnlyOwnershipRequirementIds,
   type LedgerTarget,
 } from "../../v12/generated-tests.js";
 import { createV11aEvaluator } from "../evaluate.js";
@@ -86,7 +88,7 @@ import { RATES, USAGE } from "../../__tests__/run.js";
 import { V12_T2_BUNDLE } from "../../v12/limits.js";
 import { fromPublicV12Flags, ledgerViewOf, V12_PIPELINE_FLAGS } from "../../v12/ledger.js";
 import { buildSized, type SizedMaterials } from "../__tests__/sizes.js";
-import { requestListedIds, requestRetainedIds, retainingT2Client } from "../__tests__/fixtures.js";
+import { bundledT2Client, requestListedIds, requestRetainedIds, retainingT2Client } from "../__tests__/fixtures.js";
 import { correspondenceFromTable } from "../bind-by-id.js";
 import { toV1 } from "../convert.js";
 import {
@@ -3381,6 +3383,211 @@ describe("旗 v12.ids：構造の検査と画面・在ることの構造の確�
   });
 });
 
+// ── 旗 v12.ids の手 3h（Issue #652）：所属が項目の行だけの fixed-test の要件に、項目 × screen をコードが作る ──────────
+
+describe("旗 v12.ids：所属が項目の行だけの fixed-test の要件に、項目 × screen の正常の試験をコードが作る（親 entity で代用しない。Issue #652）", () => {
+  const ledger = PROPERTY_LEDGER_VIEW;
+  const requirementOf = (id: string, text: string) => ({ id, text, quote: text, position: { start: 0, end: text.length } });
+  const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
+  /** R6・R7・R8：所属が項目の行だけの在ることだけの要件（項目の所属 entity は表の所属に無く、表の外で導かれる。原因 3 の台本） */
+  const ITEMS = [
+    ["R6", "f.item.title", "項目に題名がある。"],
+    ["R7", "f.item.amount", "項目に金額がある。"],
+    ["R8", "f.item.day", "項目に日付がある。"],
+  ] as const;
+  const HLIST: RequirementList = {
+    ...fixtureList(),
+    requirements: [...fixtureList().requirements, ...ITEMS.map(([id, , text]) => requirementOf(id, text))],
+  };
+  const baseTable = withCheckTargets(fixtureTable());
+  const HTABLE: NameTable = {
+    ...baseTable,
+    ownership: [...baseTable.ownership, ...ITEMS.map(([id, role]) => ({ requirementId: id, roles: [stated(role)] }))],
+    verification: [...baseTable.verification, ...ITEMS.map(([id]) => ({ requirementId: id, kind: "fixed-test" as const }))],
+    classification: [...baseTable.classification, ...ITEMS.map(([id]) => ({ requirementId: id, nature: "existence-only" as const }))],
+  };
+  /** 表に 1 つの要件を足す（一覧・所属・確かめ方・分類。行を足すなら `rows`） */
+  const withRequirement = (
+    base: { readonly list: RequirementList; readonly table: NameTable },
+    id: string,
+    text: string,
+    roles: readonly string[],
+    nature: "ruled" | "existence-only",
+    rows: NameTable["rows"] = [],
+  ) => ({
+    list: { ...base.list, requirements: [...base.list.requirements, requirementOf(id, text)] },
+    table: {
+      ...base.table,
+      rows: [...base.table.rows, ...rows],
+      ownership: [...base.table.ownership, { requirementId: id, roles: roles.map(stated) }],
+      verification: [...base.table.verification, { requirementId: id, kind: "fixed-test" as const }],
+      classification: [...base.table.classification, { requirementId: id, nature }],
+    },
+  });
+  async function carryH(list: RequirementList, table: NameTable): Promise<CarryOver> {
+    const tableSha256 = await nameTableSha256(table);
+    const targets = table.verification.filter((entry) => entry.kind !== "unresolved").map((entry) => entry.requirementId);
+    return deriveCarryOver({ list, table, semanticCheck: { tableSha256, judgments: targets.map((requirementId) => ({ requirementId, verdict: "accept" as const })) } });
+  }
+  const runH = async (
+    outputs: readonly unknown[],
+    options: { readonly list?: RequirementList; readonly table?: NameTable; readonly ledger?: LedgerView; readonly judge?: Judge } = {},
+  ) => {
+    const list = options.list ?? HLIST;
+    const table = options.table ?? HTABLE;
+    // 要件が 5 件を超えると束が 2 つになるので、記録した応答（全要件を書いた 1 本）を束ごとに絞る口で答える（Issue #626）
+    const inner = createCheckedRecordingClient(asCases(outputs).map(structured));
+    const bundled = bundledT2Client(inner.client);
+    // 束ごとの要求を記録する（記録した応答は束の間で共有するので、内側の記録は束の数より少ない）
+    const recording = { structured: [] as LlmStructuredRequest[] };
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest) {
+        recording.structured.push(request);
+        return bundled.callStructured<T>(request);
+      },
+      callWithTools: (request) => bundled.callWithTools(request),
+    };
+    const gateway = makeGateway(client, { maxAttempts: 1 });
+    const outcome = await runTestSpec({
+      plan: fixturePlan(list),
+      list,
+      documents: FIXTURE_DOCUMENTS,
+      table,
+      carryOver: await carryH(list, table),
+      gateway,
+      ledger: options.ledger ?? ledger,
+      ids: true,
+      ...(options.judge === undefined ? {} : { judge: options.judge }),
+    });
+    return { outcome, recording };
+  };
+  const NATURES_H: readonly NatureRow[] = [
+    { requirementId: "R1", nature: "ruled" },
+    { requirementId: "R3", nature: "ruled" },
+    { requirementId: "R4", nature: "ruled" },
+    ...ITEMS.map(([id]) => ({ requirementId: id, nature: "existence-only" as const })),
+  ];
+  /** 原因 3 の台本：項目だけの 3 件を existence-only と書き、場合はゼロ */
+  const zeroCases = (natures: readonly NatureRow[] = NATURES_H, extra: readonly Record<string, unknown>[] = []) =>
+    response([...r1Validate(), ...r3When(), ...r4Compute(), ...extra], natures);
+  const LLM_COUNT = 9;
+  const itemId = (requirementId: string, roleId: string) => `${GENERATED_TEST_ID_PREFIX}view-structure:${requirementId}:${roleId}:normal`;
+  /** 要求の一覧の位置（持ち越しの R5 と、試験を全部コードが作る構造の R2 を除いた一覧） */
+  const indexOf = (list: RequirementList, id: string) =>
+    list.requirements.filter((requirement) => requirement.id !== "R5" && requirement.id !== "R2").findIndex((requirement) => requirement.id === id);
+
+  it("二点測定（原因 3 の台本）：項目だけの 3 件を existence-only・場合ゼロと書く応答は、#651 までの台帳（bfe1801 と同じ生成）では「要件の試験が無い」で unmet、今の台帳ではコードの 項目 × screen が組にあって 1 回で通る", async () => {
+    const before = await runH([zeroCases(), zeroCases()], { ledger: LEDGER_VIEW_3G });
+    if (before.outcome.ok || before.outcome.failure.kind !== "unmet") throw new Error(`unmet でない：${JSON.stringify(before.outcome)}`);
+    expect(before.outcome.failure.problems).toEqual(
+      ITEMS.map(([id]) => ({ field: `requirements[${String(indexOf(HLIST, id))}]`, message: "要件の試験が無い" })),
+    );
+    const after = await runH([zeroCases()]);
+    if (!after.outcome.ok) throw new Error(`通るはず：${JSON.stringify(after.outcome.failure)}`);
+    // 束 2 つ（5＋1）の初回の要求だけ（やり直しは無い）
+    expect(after.recording.structured).toHaveLength(2);
+    const generated = after.outcome.value.suite.tests.slice(LLM_COUNT);
+    // 一覧の順：構造の R2・画面の R4（今まで）のあとに、項目だけの 3 件の 項目 × screen
+    expect(generated.map((test) => test.target.requirementId)).toEqual(["R2", "R4", "R6", "R7", "R8"]);
+    expect(generated.slice(1).map((test) => test.id)).toEqual([itemId("R4", "s.overview"), ...ITEMS.map(([id, role]) => itemId(id, role))]);
+    for (const test of generated.slice(2)) {
+      expect([test.target.kind, test.operation, test.kind, after.outcome.value.observes.get(test.id), test.expected]).toEqual([
+        "field",
+        "screen",
+        "normal",
+        "view-structure",
+        { kind: "ok", value: true },
+      ]);
+      expect(test.input).toEqual({});
+      expect(test.referenceData).toEqual([]);
+    }
+    // 導いた親 entity（e.item）の在ることの試験は無い（親 entity で代用しない）
+    expect(after.outcome.value.suite.tests.some((test) => test.target.kind === "entity" && ITEMS.some(([id]) => id === test.target.requirementId))).toBe(false);
+    // 要件は要求の一覧に残る（分類は LLM が独立に書く）
+    const listName = TEST_SPEC_DATA_NAMES[1];
+    expect(after.recording.structured.flatMap((request) => (dataBlockOf(request.input, listName) as { requirements: { id: string }[] }).requirements.map((entry) => entry.id))).toEqual([
+      "R1",
+      "R3",
+      "R4",
+      "R6",
+      "R7",
+      "R8",
+    ]);
+    expectNoAcceptanceMaterial(after.recording.structured.map(requestText));
+  });
+
+  it("採った種類に依らない：J2 が ruled と決めた項目だけの要件も、項目の試験は採った種類で絞る段を通って残る（ruled なので異常・境界の不足は今までどおり落ちる）", async () => {
+    const judge = createFakeJudge({ [natureQuestionName("R6")]: choice("ruled", 0.95) });
+    const discrepant = NATURES_H.map((entry) => (entry.requirementId === "R6" ? { ...entry, nature: "ruled" as const } : entry));
+    const { outcome } = await runH([zeroCases(discrepant), zeroCases(discrepant)], { judge });
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    // R6 は ruled に採られ、コードの正常 1 本があるので「要件の試験が無い」ではなく異常・境界の不足
+    expect(outcome.failure.problems).toEqual([
+      { field: `requirements[${String(indexOf(HLIST, "R6"))}]`, message: "abnormal の試験が無い" },
+      { field: `requirements[${String(indexOf(HLIST, "R6"))}]`, message: "boundary の試験が無い" },
+    ]);
+  });
+
+  it("負例 (a)：項目だけの所属の ruled の要件に validate の normal だけを書いた応答は、今までどおり「abnormal の試験が無い」「boundary の試験が無い」で落ちる（免除の関数が返さない）", async () => {
+    const { list, table } = withRequirement({ list: HLIST, table: HTABLE }, "R9", "項目の種類は決まった値だけをとる。", ["f.item.kind"], "ruled");
+    expect(normalOnlyOwnershipRequirementIds(table, ledger, list)).not.toContain("R9");
+    const natures = [...NATURES_H, { requirementId: "R9", nature: "ruled" as const }];
+    const normalOnly = zeroCases(natures, [rawTest({ id: "r9-normal", requirementId: "R9", targetKind: "field", roleId: "f.item.kind", operation: "validate", observes: "validation" })]);
+    const { outcome } = await runH([normalOnly, normalOnly], { list, table });
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(outcome.failure.problems).toEqual([
+      { field: `requirements[${String(indexOf(list, "R9"))}]`, message: "abnormal の試験が無い" },
+      { field: `requirements[${String(indexOf(list, "R9"))}]`, message: "boundary の試験が無い" },
+    ]);
+  });
+
+  it("負例 (b)・(c)：在ることだけの項目だけの要件に validate を書けば固定文で落ち、項目を対象に view-structure を書けば（validate に展開され）評価の方法の表の固定文で落ちる", async () => {
+    const validate = zeroCases(NATURES_H, [rawTest({ id: "r6-validate", requirementId: "R6", targetKind: "field", roleId: "f.item.title", operation: "validate", observes: "validation" })]);
+    const failed1 = await runH([validate, validate]);
+    if (failed1.outcome.ok || failed1.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    const order = requestListedIds(failed1.recording.structured[0]!);
+    expect(failed1.outcome.failure.problems).toContainEqual({ field: `cases[${String(mergedIndexAt(validate, order, LLM_COUNT))}]`, message: "在ることだけの要件なので、検査（validate）の試験を作らない" });
+    const fieldScreen = zeroCases(NATURES_H, [rawTest({ id: "r6-screen", requirementId: "R6", targetKind: "field", roleId: "f.item.title", operation: "screen", observes: "view-structure" })]);
+    const failed2 = await runH([fieldScreen, fieldScreen]);
+    if (failed2.outcome.ok || failed2.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(failed2.outcome.failure.problems).toContainEqual({
+      field: `cases[${String(mergedIndexAt(fieldScreen, requestListedIds(failed2.recording.structured[0]!), LLM_COUNT))}].observes`,
+      message: "（対象の種類・操作・観測する性質）の組が評価の方法の表に無い",
+    });
+  });
+
+  it("負例 (e)：項目 16 行だけの要件に LLM が 1 本書いた組（コードの 16 本と合わせて 17 本）は、今までどおり「要件の試験が上限 16 を超えている」で落ちる（切り捨てない）", async () => {
+    const title = HTABLE.rows.find((row) => row.id === "f.item.title");
+    if (title === undefined) throw new Error("前提が壊れた");
+    const extraRows = Array.from({ length: 16 }, (_, index) => ({ ...title, id: `f.item.x${String(index + 1)}`, name: `x${String(index + 1)}` }));
+    const { list, table } = withRequirement(
+      { list: HLIST, table: HTABLE },
+      "R9",
+      "項目に 16 の欄がある。",
+      extraRows.map((row) => row.id),
+      "ruled",
+      extraRows,
+    );
+    const natures = [...NATURES_H, { requirementId: "R9", nature: "ruled" as const }];
+    const one = zeroCases(natures, [rawTest({ id: "r9-normal", requirementId: "R9", targetKind: "field", roleId: "f.item.x1", operation: "validate", observes: "validation" })]);
+    const { outcome } = await runH([one, one], { list, table });
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(outcome.failure.problems).toContainEqual({ field: `requirements[${String(indexOf(list, "R9"))}]`, message: "要件の試験が上限 16 を超えている（17）" });
+  });
+
+  it("負例 (f)・(g)：項目＋操作の所属（画面・entity 無し）と、操作だけの所属の要件は、場合ゼロ・生成ゼロなら今までどおり「要件の試験が無い」で落ちる（この Issue では塞がない）", async () => {
+    const mixed = withRequirement({ list: HLIST, table: HTABLE }, "R9", "項目の担当者を締められる。", ["f.item.owner", "o.closeItem"], "existence-only");
+    const both = withRequirement(mixed, "R10", "項目を足せる。", ["o.addItem"], "existence-only");
+    const natures = [...NATURES_H, { requirementId: "R9", nature: "existence-only" as const }, { requirementId: "R10", nature: "existence-only" as const }];
+    const { outcome } = await runH([zeroCases(natures), zeroCases(natures)], both);
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(outcome.failure.problems).toEqual([
+      { field: `requirements[${String(indexOf(both.list, "R9"))}]`, message: "要件の試験が無い" },
+      { field: `requirements[${String(indexOf(both.list, "R10"))}]`, message: "要件の試験が無い" },
+    ]);
+  });
+});
+
 // ── 旗 v12.ids の T2 の束（手 3f・Issue #626）───────────────────────────────
 //
 // 束に渡す規則の区別（教訓 (1)・(2)。束の中で閉じる条件だけを束で見て、合併した組の条件は合併後に 1 回だけ掛ける）：
@@ -3469,7 +3676,7 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
   async function runBundled(
     materials: SizedMaterials,
     script: (ids: readonly string[], call: number, head: string) => unknown,
-    options: { readonly judge?: Judge; readonly concurrency?: number; readonly stepMs?: number } = {},
+    options: { readonly judge?: Judge; readonly concurrency?: number; readonly stepMs?: number; readonly ledger?: LedgerView } = {},
   ) {
     const fake = scripted(script, options.stepMs);
     const gateway = new CallGateway({ client: fake.client, budget: new JobBudget(10), rates: RATES, now: fake.now, deadline: 86_400_000 });
@@ -3482,7 +3689,7 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
       carryOver: await carryOf(materials),
       documents: FIXTURE_DOCUMENTS,
       gateway,
-      ledger: LEDGER,
+      ledger: options.ledger ?? LEDGER,
       ids: true,
       onRejected: (candidate, bundle) => rejected.push({ candidate, bundle }),
       ...(options.judge === undefined ? {} : { judge: options.judge }),
@@ -3527,8 +3734,9 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
       if (!run.outcome.ok) throw new Error("通らない");
       const counts: Record<string, number> = {};
       for (const test of run.outcome.value.suite.tests) counts[test.target.requirementId] = (counts[test.target.requirementId] ?? 0) + 1;
-      // 組は応答の場合をちょうど 1 回ずつ展開したもの（束が重ねも落としもしない）
-      expect(run.outcome.value.suite.tests).toHaveLength(full.cases.length);
+      // 組は応答の場合をちょうど 1 回ずつ展開したもの（束が重ねも落としもしない）に、コードが作った試験（手 3h〔#652〕から項目だけの
+      // 要件の 項目 × screen。束の数に依らない）を足したもの
+      expect(run.outcome.value.suite.tests).toHaveLength(full.cases.length + materials.addedTestCount);
       return { bundles: run.requests.length, counts };
     };
     const one = await perRequirement(5);
@@ -3614,7 +3822,9 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
     });
 
     it("(4) 帰属できない問題（組全体の位置）は束を推測せず固定文で unmet、追加の要求は無い", async () => {
-      const run = await runBundled(materials, (ids) => ({ ...sliceOf(full, ids), cases: [] }));
+      // 組全体が空になるのは、コードが試験を作らない台帳（#651 まで。所属が項目だけの要件に 項目 × screen を作らない）の走り。
+      // 今の台帳ではコードの 項目 × screen が組にあるので組は空にならない（下の 2 つ目の走り。Issue #652）
+      const run = await runBundled(materials, (ids) => ({ ...sliceOf(full, ids), cases: [] }), { ledger: LEDGER_VIEW_3G });
       expect(run.outcome.ok).toBe(false);
       if (run.outcome.ok) return;
       expect(run.outcome.failure.kind).toBe("unmet");
@@ -3623,6 +3833,12 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
       expect(run.outcome.failure.problems).toContainEqual({ field: "tests", message: "試験の集合が空である" });
       expect(callsOf(run)).toEqual({ R1: 1, R6: 1, R11: 1 });
       expect(run.gateway.retryCounts.content).toBe(0);
+      // 今の台帳：組にコードの 項目 × screen があり、問題は要件へ帰属する（異常・境界の欠け）。2 回目も場合が無ければ unmet
+      const now = await runBundled(materials, (ids) => ({ ...sliceOf(full, ids), cases: [] }));
+      expect(now.outcome.ok).toBe(false);
+      if (now.outcome.ok || now.outcome.failure.kind !== "unmet") throw new Error("前提が壊れた");
+      expect(now.outcome.failure.problems.map((problem) => problem.message)).toContain("abnormal の試験が無い");
+      expect(now.outcome.failure.problems.map((problem) => problem.message)).not.toContain("試験の集合が空である");
     });
 
     const shapeBad = negative({ classifications: "x", cases: "x" }, "classifications・cases が並びでない応答。束の形の落ちを観測する負例");
@@ -3808,7 +4024,8 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
           const normal = good.cases.find((entry) => entry["requirementId"] === "R12");
           return { ...good, cases: [...good.cases, ...Array.from({ length: 16 }, () => ({ ...normal }))] };
         },
-        "要件の試験が上限 16 を超えている（19）",
+        // 応答の 3＋16 本に、コードが作る 項目 × screen の 1 本（手 3h・#652）を足した 20 本（切り捨てない）
+        "要件の試験が上限 16 を超えている（20）",
       ],
     ];
     it.each(cases)("%s", async (_name, bad, fragment) => {
@@ -3862,7 +4079,7 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
       const writtenFull = fullOf(written);
       const run = await runBundled(written, (ids) => sliceOf(writtenFull, ids));
       if (!run.outcome.ok) throw new Error(JSON.stringify(run.outcome.failure));
-      expect(run.outcome.value.suite.tests.filter((test) => isGeneratedTestId(test.id)).length).toBe(written.generatedTestCount);
+      expect(run.outcome.value.suite.tests.filter((test) => isGeneratedTestId(test.id)).length).toBe(written.generatedTestCount + written.addedTestCount);
       // コードの試験だけで確かめる要件（R1・R2）は束に入らない
       expect(run.requests.flatMap((request) => request.ids)).not.toContain("R1");
       expect(run.requests.map((request) => request.ids.length)).toEqual([5, 5, 3]);
@@ -3913,7 +4130,12 @@ describe("旗 v12.ids の T2 の束（手 3f・Issue #626）", () => {
       const withoutRetention = await runBundled(materials, (ids, call, head) => (head === "R6" ? (call === 1 ? lost : sliceOf(full, ids)) : sliceOf(full, ids)));
       expect(withoutRetention.outcome.ok).toBe(true);
       const content = withoutRetention.rejected.find((entry) => entry.candidate.kind === "content");
-      expect(content?.candidate.problems.map((problem) => problem.message)).toContain("要件の試験が無い");
+      // 手 3h（#652）から、項目だけの要件にはコードの 項目 × screen（正常）が残るので、消えた要件は異常・境界の欠けで落ちる
+      expect(content?.candidate.problems.map((problem) => problem.message)).toContain("abnormal の試験が無い");
+      expect(content?.candidate.problems.map((problem) => problem.message)).toContain("boundary の試験が無い");
+      // #651 までの台帳（コードの試験が無い）では「要件の試験が無い」で落ちる（元の二点測定）
+      const before = await runBundled(materials, (ids, call, head) => (head === "R6" ? (call === 1 ? lost : sliceOf(full, ids)) : sliceOf(full, ids)), { ledger: LEDGER_VIEW_3G });
+      expect(before.rejected.find((entry) => entry.candidate.kind === "content")?.candidate.problems.map((problem) => problem.message)).toContain("要件の試験が無い");
     });
 
     it("(2) 増える validate：2 回目の応答に保持した要件 Z（R8）の場合があれば保持した要件の固定文で落ち、束 2 の形のやり直しを使う。やり直しで通れば Z の初回の場合は採用済みのまま", async () => {

@@ -10,6 +10,8 @@
 //   6. 手 3d（#624）：構造の検査（checks の各項目に 1 本。assertion は表の行の型と元の行 ID）と、fixed-test の要件の画面・在ることの
 //      構造の確認（所属の画面の行ごと／画面が無ければ entity の行ごと）。作る対象は確かめ方の種類の優先の順で 1 つの枝だけ。対象の
 //      行が無い checks は固定文で止まり近い行に結ばない。混在の回帰（R1）と負例（既定値の要件に entity × screen を足すと落ちる）
+//   7. 手 3h（#652）：画面も entity も無く所属の行がすべて項目の行の fixed-test の要件に、項目の行ごとに 項目 × screen を 1 本（要件の
+//      種類に依らない。導いた親 entity・操作や計算の混じる要件・持ち越しの要件には作らない。免除は広げない）
 //
 // 偽物も含めて LLM を呼ばない。外部の API を呼ばない。受入の題材の言葉は使わない。
 import { describe, expect, it } from "vitest";
@@ -45,7 +47,7 @@ import {
   ledgerTargetsOf,
   normalOnlyOwnershipRequirementIds,
 } from "./generated-tests.js";
-import { OWNERSHIP_STRUCTURE_NOT_ALLOWED, PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW } from "./ledger.js";
+import { OWNERSHIP_STRUCTURE_NOT_ALLOWED, PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, deriveLedgerView } from "./ledger.js";
 
 const LIST = fixtureGeneratedList();
 const TABLE = fixtureGeneratedTable();
@@ -569,6 +571,178 @@ describe("手 3d：構造の検査・画面と在ることの構造の確認を�
       { field: "tests[0].operation", message: OWNERSHIP_STRUCTURE_NOT_ALLOWED },
       { field: "tests[1].operation", message: OWNERSHIP_STRUCTURE_NOT_ALLOWED },
       { field: "tests[2].operation", message: OWNERSHIP_STRUCTURE_NOT_ALLOWED },
+    ]);
+  });
+});
+
+describe("手 3h：所属が項目の行だけの fixed-test の要件に 項目 × screen をコードが作る（台帳の view-structure の代わりの対象の種類。Issue #652）", () => {
+  const text = (id: string, body: string) => ({ id, text: body, quote: body, position: { start: 0, end: body.length } });
+  const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
+  /**
+   * R9：項目 2 行だけ（在ることだけ）、R10：項目と画面、R11：項目と entity、R12：項目と操作、R13：項目と計算、R14：項目 1 行だけ（ruled）。
+   * 項目の所属 entity（e.item）は表の所属に無い（導いた親 entity）
+   */
+  const ADDED = [
+    ["R9", "項目に題名と金額がある。", ["f.item.title", "f.item.amount"], "existence-only"],
+    ["R10", "項目の一覧に題名がある。", ["f.item.title", "s.items"], "existence-only"],
+    ["R11", "項目に日付がある。", ["f.item.day", "e.item"], "existence-only"],
+    ["R12", "項目の担当者を締められる。", ["f.item.owner", "o.closeItem"], "existence-only"],
+    ["R13", "項目の金額から率を見られる。", ["f.item.amount", "c.rate"], "existence-only"],
+    ["R14", "項目の種類は決まった値だけをとる。", ["f.item.kind"], "ruled"],
+  ] as const;
+  const LIST_H = { ...LIST, requirements: [...LIST.requirements, ...ADDED.map(([id, body]) => text(id, body))] };
+  const TABLE_H: NameTable = withCheckTargets({
+    ...TABLE,
+    ownership: [...TABLE.ownership, ...ADDED.map(([id, , roles]) => ({ requirementId: id, roles: roles.map(stated) }))],
+    verification: [...TABLE.verification, ...ADDED.map(([id]) => ({ requirementId: id, kind: "fixed-test" as const }))],
+    classification: [...TABLE.classification, ...ADDED.map(([id, , , nature]) => ({ requirementId: id, nature }))],
+  });
+  const generateH = (table: NameTable = TABLE_H, list = LIST_H) => generateTests({ table, ledger, list });
+  const shapeOf = (made: ReturnType<typeof generateH>, requirementId: string) =>
+    made.tests
+      .filter((test) => test.target.requirementId === requirementId)
+      .map((test) => [test.target.kind, test.target.roleId, test.operation, test.kind, made.observes.get(test.id)]);
+
+  it("台帳：view-structure の代わりの対象の種類は項目（why・since つき）で、組ごとの対象の種類・免除の種類（画面・entity）は変わらない。existence には無い", () => {
+    const view = rowOf("view-structure").t2;
+    expect(view?.targetKinds).toEqual(["screen"]);
+    expect(view?.fallback?.targetKinds).toEqual(["field"]);
+    expect(view?.fallback?.since).toBe("Issue #652");
+    expect(view?.fallback?.why).toContain("親 entity の在ることで代用しない");
+    expect(rowOf("existence").t2?.fallback).toBeNull();
+    expect(rowOf("default-value").t2?.fallback).toBeNull();
+    expect(rowOf("enum-membership").t2?.fallback).toBeNull();
+  });
+
+  it("(1) 項目 2 行だけの fixed-test の要件に 項目 × screen 2 本：observes view-structure・normal・期待 ok の定数・入力空・参照空・時計と固定の行 ID は定数・ID は接頭辞で一意", () => {
+    const made = generateH();
+    expect(shapeOf(made, "R9")).toEqual([
+      ["field", "f.item.title", "screen", "normal", "view-structure"],
+      ["field", "f.item.amount", "screen", "normal", "view-structure"],
+    ]);
+    const tests = made.tests.filter((test) => test.target.requirementId === "R9");
+    expect(tests.map((test) => test.id)).toEqual([
+      `${GENERATED_TEST_ID_PREFIX}view-structure:R9:f.item.title:normal`,
+      `${GENERATED_TEST_ID_PREFIX}view-structure:R9:f.item.amount:normal`,
+    ]);
+    for (const test of tests) {
+      expect(test.expected).toEqual({ kind: "ok", value: true });
+      expect(test.input).toEqual({});
+      expect(test.referenceData).toEqual([]);
+      expect(test.clock).toBe(GENERATED_TEST_CLOCK);
+      expect(test.inputContract).toEqual({ rowId: GENERATED_TEST_ROW_ID, targetRowId: null, emptyEntities: [] });
+      expect(test.assertion).toBeUndefined();
+    }
+    expect(new Set(made.tests.map((test) => test.id)).size).toBe(made.tests.length);
+    // fixed-test の要件は除かない（分類は LLM が独立に書く）
+    expect(made.excludedRequirementIds).not.toContain("R9");
+    expect(made.stopped).toEqual([]);
+  });
+
+  it("(2) 項目＋画面は画面の 1 本だけ、項目＋entity は entity の 1 本だけ、項目＋操作・項目＋計算は項目の分を作らない（今までどおり）", () => {
+    const made = generateH();
+    expect(shapeOf(made, "R10")).toEqual([["screen", "s.items", "screen", "normal", "view-structure"]]);
+    expect(shapeOf(made, "R11")).toEqual([["entity", "e.item", "screen", "normal", "existence"]]);
+    expect(shapeOf(made, "R12")).toEqual([]);
+    expect(shapeOf(made, "R13")).toEqual([]);
+  });
+
+  it("(3) 表の所属に entity の行が無い要件には entity × screen が出ない（導いた親 entity を対象にしない）", () => {
+    const made = generateH();
+    for (const id of ["R9", "R14"]) {
+      expect(made.tests.some((test) => test.target.requirementId === id && test.target.kind === "entity"), id).toBe(false);
+    }
+  });
+
+  it("(4) 要件の種類（ruled・existence-only）に依らず同じ組（R14 は ruled の項目 1 行だけ。分類を入れ替えても同じ）", () => {
+    const made = generateH();
+    expect(shapeOf(made, "R14")).toEqual([["field", "f.item.kind", "screen", "normal", "view-structure"]]);
+    const flipped: NameTable = {
+      ...TABLE_H,
+      classification: TABLE_H.classification.map((entry) =>
+        entry.requirementId === "R9" || entry.requirementId === "R14"
+          ? { ...entry, nature: entry.nature === "ruled" ? ("existence-only" as const) : ("ruled" as const) }
+          : entry,
+      ),
+    };
+    const again = generateH(flipped);
+    for (const id of ["R9", "R14"]) expect(shapeOf(again, id), id).toEqual(shapeOf(made, id));
+  });
+
+  it("(5) 持ち越しの要件（一覧と表から除いた要件）には作らない。同じ入力から 2 回同じ組", () => {
+    const list = { ...LIST_H, requirements: LIST_H.requirements.filter((requirement) => requirement.id !== "R9") };
+    expect(generateH(TABLE_H, list).tests.some((test) => test.target.requirementId === "R9")).toBe(false);
+    const first = generateH();
+    const second = generateH();
+    expect(second.tests).toEqual(first.tests);
+    expect([...second.observes]).toEqual([...first.observes]);
+    expect(second.excludedRequirementIds).toEqual(first.excludedRequirementIds);
+  });
+
+  it("所属の行に表に無い行が混じる要件には作らない（すべてが項目の行であることを求める＝fail-closed）", () => {
+    const table: NameTable = {
+      ...TABLE_H,
+      ownership: TABLE_H.ownership.map((entry) => (entry.requirementId === "R14" ? { ...entry, roles: [...entry.roles, stated("f.item.nosuch")] } : entry)),
+    };
+    expect(shapeOf(generateH(table), "R14")).toEqual([]);
+  });
+
+  it("免除は広がらない：項目だけの要件（R9・R14）は免除の対象でない（台帳の型の組ごとの対象の種類＝画面・entity のまま）", () => {
+    const exempt = normalOnlyOwnershipRequirementIds(TABLE_H, ledger, LIST_H);
+    expect(exempt).not.toContain("R9");
+    expect(exempt).not.toContain("R14");
+  });
+
+  it("二点測定：代わりの対象の種類を外した台帳（#651 まで）では、項目だけの要件に何も作らない", () => {
+    const before = deriveLedgerView(PROPERTY_LEDGER.map((row) => (row.t2?.fallback == null ? row : { ...row, t2: { ...row.t2, fallback: null } })));
+    const made = generateTests({ table: TABLE_H, ledger: before, list: LIST_H });
+    expect(shapeOf(made, "R9")).toEqual([]);
+    expect(shapeOf(made, "R14")).toEqual([]);
+    // ほかの要件の組は変わらない
+    const now = generateH();
+    for (const id of ["R10", "R11", "R12", "R13", "R4", "R6", "R7"]) expect(shapeOf(made, id), id).toEqual(shapeOf(now, id));
+  });
+
+  it("混在の回帰（#624 R1）：既定値・選択肢の集合・構造・画面・項目だけ・集計の要件を 1 表に入れると、要件ごとの作る試験が優先の順どおりで、合併した組に台帳の型の全試験の検査・集計・評価可能性・重なりの検査を掛けて問題 0", () => {
+    const table = TABLE_H;
+    const made = generateH(table);
+    const operationsOf = (requirementId: string) =>
+      made.tests.filter((test) => test.target.requirementId === requirementId).map((test) => `${test.target.kind}:${test.operation}:${made.observes.get(test.id) ?? ""}`);
+    // 既定値・選択肢の集合：専用の 1 本だけ（項目の在ることは足さない）
+    expect(operationsOf("R6")).toEqual(["field:validate:default-value"]);
+    expect(operationsOf("R7")).toEqual(["field:validate:enum-membership"]);
+    // 構造：構造の検査だけ（所属の項目の分は足さない）
+    expect(operationsOf("R2")).toEqual(["screen:structure:view-structure"]);
+    // 画面を持つ集計の要件：画面と空の集計
+    expect(operationsOf("R4")[0]).toBe("screen:screen:view-structure");
+    expect(operationsOf("R4").slice(1).every((entry) => entry === "computation:aggregate:empty-aggregate")).toBe(true);
+    // 項目だけ：項目 × screen
+    expect(operationsOf("R9")).toEqual(["field:screen:view-structure", "field:screen:view-structure"]);
+    expect(operationsOf("R14")).toEqual(["field:screen:view-structure"]);
+    const suite = { tests: made.tests };
+    const observes = made.observes as ReadonlyMap<string, TestObserves>;
+    const quoted = new Set(made.tests.map((test) => test.id));
+    expect(checkLedgerTests(suite, observes, ledgerTargetsOf(table, ledger), quoted)).toEqual([]);
+    expect(checkAggregateTests(suite, observes, table, ledger)).toEqual([]);
+    expect(checkEvaluabilityByLedger(suite, observes, table, ledger)).toEqual([]);
+    expect(checkGeneratedOverlap({ tests: [] }, new Map(), made, table, ledger)).toEqual([]);
+  });
+
+  it("負例 (c)：LLM の組に 項目 × screen の試験があれば固定文で落ちる（構造の検査と画面の試験はコードが作る）", () => {
+    const made = generateH();
+    const llm: FixedTest = {
+      id: "f1",
+      target: { requirementId: "R9", kind: "field", roleId: "f.item.title" },
+      kind: "normal",
+      operation: "screen",
+      clock: "2026-09-16T12:00:00+09:00",
+      input: {},
+      inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: [] },
+      referenceData: [],
+      expected: { kind: "ok", value: true },
+    };
+    expect(checkGeneratedOverlap({ tests: [llm] }, new Map([["f1", "view-structure"]]), made, TABLE_H, ledger)).toEqual([
+      { field: "tests[0].operation", message: OWNERSHIP_STRUCTURE_NOT_ALLOWED },
     ]);
   });
 });
