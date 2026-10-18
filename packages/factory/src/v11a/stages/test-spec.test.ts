@@ -2973,7 +2973,7 @@ describe("旗 v12.ids：構造の検査と画面・在ることの構造の確�
     const failed = await runD([fieldScreen, fieldScreen]);
     if (failed.outcome.ok || failed.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
     expect(failed.outcome.failure.problems).toContainEqual({ field: `cases[${String(LLM_COUNT)}].observes`, message: "（対象の種類・操作・観測する性質）の組が評価の方法の表に無い" });
-    // 手 3d の structure の負例の置き換え（#625）：場合の形で構造の検査を書こうとした場合も、LLM の structure・screen の試験として
+    // #624 (2) の structure の負例の置き換え（手 3e・#625）：場合の形で構造の検査を書こうとした場合も、LLM の structure・screen の試験として
     // 落ちる。view-shows の検査の代わりに画面の行を対象にした場合 → #624 の固定文、field-type の検査の代わりに項目に existence を
     // 書いた場合（validate × existence）→ 評価の方法の表の固定文
     const showsLike = idsOk([rawTest({ id: "r7-shows-like", requirementId: "R7", targetKind: "screen", roleId: "s.items", operation: "screen", observes: "view-structure", expected: { kind: "ok", value: "true", code: null } })]);

@@ -1527,7 +1527,10 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
   // 旗 ids の走りの試験 ID はコードが場合の順に振る（case: と連番。#625）。B5 の主張と ⑥' の裁定が指す r4-normal を同じ試験の ID に引き直す
   const v12ReturnToPlan = (): RecordedCall[] => {
     const tests = (v11aTestSpec() as { readonly tests: readonly { readonly id: string; readonly target: { readonly requirementId: string } }[] }).tests.filter((test) => test.target.requirementId !== "R2");
-    const caseId = `case:${String(tests.findIndex((test) => test.id === "r4-normal") + 1)}`;
+    const index = tests.findIndex((test) => test.id === "r4-normal");
+    // 見つからなければ落とす（case:0 などへ黙って化けない）
+    expect(index, "r4-normal が T2 の場合に無い").toBeGreaterThanOrEqual(0);
+    const caseId = `case:${String(index + 1)}`;
     return [...v12Head(), ...(JSON.parse(JSON.stringify(v11aReturnToPlan().slice(4)).replaceAll('"r4-normal"', `"${caseId}"`)) as RecordedCall[])];
   };
 

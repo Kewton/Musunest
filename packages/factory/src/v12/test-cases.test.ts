@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import type { TestSuite } from "../fixed-test.js";
 import type { RequirementList } from "../pipeline.js";
+import { validateSchema } from "../schema-check.js";
 import { expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
 import { FIXTURE_YAML, casesResponseOf, fixtureList, fixtureTable, strictDefects, withAggregates, withoutIdAndClock } from "../v11a/__tests__/fixtures.js";
 import { buildSized, MEDIAN_SIZE } from "../v11a/__tests__/sizes.js";
@@ -123,6 +124,18 @@ describe("場合の schema（旗 v12.ids の T2。Issue #625）", () => {
     ]);
     const notArray = checkTestCasesOutput({ classifications: [], tests: [] }, LEDGER);
     expect(notArray).toEqual({ ok: false, problems: [{ field: "cases", message: TEST_CASE_SHAPE_MESSAGES.cases }] });
+  });
+
+  it("負例（#624 (2) の structure の負例の置き換え）：場合の形の応答に structure を書いたら schema の照合で落ちる（操作・assertion の欄が無く、observes に structure は無い）", () => {
+    const schema = testCasesSchemaOf(LEDGER);
+    expect(validateSchema(schema, { classifications: [], cases: [caseOf()] })).toBeUndefined();
+    const withOperation = { classifications: [], cases: [{ ...caseOf(), operation: "structure" }] };
+    expect(validateSchema(schema, withOperation)).toBeDefined();
+    const withAssertion = { classifications: [], cases: [{ ...caseOf(), assertion: { check: "view-shows" } }] };
+    expect(validateSchema(schema, withAssertion)).toBeDefined();
+    const structureObserves = { classifications: [], cases: [caseOf({ observes: "structure" })] };
+    expect(LEDGER.observes as readonly string[]).not.toContain("structure");
+    expect(validateSchema(schema, structureObserves)).toBeDefined();
   });
 });
 
