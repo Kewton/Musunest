@@ -63,6 +63,9 @@
 //   一致しなければ照合は未照合（completion.unverified に v12-flags）。未起動の本は今の未実行・途中のまま。
 //   --compare は比較の記録の群の組（v1,v1.1a・v1.1a,v1.2・v1,v1.2）を読み、v1.2 を含む組は群の条件を版ごとに検証してから共通の形で照らす。
 //   差の向きの文は「候補（<候補>）− 比較元（<比較元>）」。段の役割の表は v1.2 を v1.1α の段の名前で引く。profile の違いの理由 pipelines を残す
+// #631 で足したもの（--compare の出力の末尾の noise だけ。既存の欄・値・並びと採点の規則は変えない。README §8）：
+//   対の差の P ごとの並び（原文系 PASS と、段の役割ごとの通過）から、予測の雑音（P 内の反復のぶれ）とデータの雑音（P の違い）・勝つ側・反復 K′ ごとに
+//   検出できる差の目安を出す。判定・門には使わない。匿名の口は m・使った P の数・分散・勝つ側・δ の表だけ。標準出力に 1 行
 // run-agent.mjs は、ここから指紋の関数と定義ファイルの読み込みを import して条件のファイルに書く（道具は 2 本で 1 組。入口として起動したときだけ採点する）
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -1314,6 +1317,73 @@ export function clusterText(sp, pc) {
 /** P のまとまりの読み方（出力に添える文） */
 export const CLUSTER_NOTE = "主は P を単位にした符号反転の両側 p と bootstrap の区間。t 区間は参考（前提：P 間の独立・P 平均の正規近似。まとまりが少ないと近似が粗い）。符号反転は帰無仮説の下で P 平均の符号が交換可能であることを前提にする。非有意は「差が無い」ではなく「検出されず」";
 
+// ── 雑音の分解（#631。README §8。v1.2 評価 a）：対の差の雑音を予測の雑音（同じ P の反復のぶれ）とデータの雑音（P の違い）に分け、反復 K′ ごとに検出できる差の目安を出す。
+// 判定・門・merge の可否には使わない（数を出すだけ。K を上げる判断は人）。出典：Miller 2024 arXiv 2411.00640 §3.1・§5／Wang 2025 arXiv 2512.21326
+/** 検出できる差の係数（両側 5%・検出力 80% の正規近似：z0.975 ＋ z0.80） */
+export const NOISE_Z = 2.8016;
+/** 検出できる差の表の反復 K′（1〜10） */
+export const NOISE_K_VALUES = Array.from({ length: 10 }, (_, i) => i + 1);
+/** 勝つ側の値と、決めない・δ を出さない理由の符号 */
+export const NOISE_WINNERS = ["prediction", "data", "tie", "undetermined"];
+export const NOISE_REASONS = ["few-patterns", "few-within-patterns", "variance-unestimable"];
+/** 雑音の分解の読み方（出力に添える文） */
+export const NOISE_NOTE = "判定・門には使わない（数を出すだけ）。δ(K′) は P 平均の正規近似による検出できる差の目安で、m が少ないと粗い。主の読み方は P 単位の符号反転と bootstrap のまま。非有意は「差が無い」ではない。対の差の P 内分散は両群の反復のぶれの和に相当する（対にしても予測の雑音は減らない）";
+const NOISE_TIE_EPS = 1e-12;
+const r6OrNull = (x) => (x === null ? null : round6(x));
+/**
+ * 雑音の分解（README §8）。byPattern ＝ P → 対の差の並び（null は無効な対）、runs ＝ 条件の runs（いまの K）。
+ * K_p ＝ P ごとの有効な対の数、m ＝ K_p ≥ 1 の P の数（K_p＝0 の P は excluded_patterns に数える）、d̄ ＝ P 平均の単純平均（clusterStats の mean と同じ）。
+ * σ̂²_w ＝ K_p ≥ 2 の P の不偏分散の平均、s²_b ＝ P 平均の不偏分散、v̂_pred ＝ mean_p(σ̂²_w ÷ K_p)、ω̂² ＝ max(0, s²_b − v̂_pred)。
+ * δ(K′) ＝ NOISE_Z × √((ω̂² ＋ σ̂²_w ÷ K′) ÷ m)、δ_∞ ＝ NOISE_Z × √(ω̂² ÷ m)。丸めずに計算し、出すときに 6 桁に丸める
+ */
+export function noiseStats(byPattern, runs = null) {
+  const pats = [];
+  let excluded = 0;
+  for (const [pid, diffs] of Object.entries(byPattern)) {
+    const xs = diffs.filter((d) => d !== null);
+    if (xs.length === 0) { excluded += 1; continue; }
+    const mean = xs.reduce((s, d) => s + d, 0) / xs.length;
+    pats.push({ pid, k: xs.length, mean, variance: xs.length < 2 ? null : xs.reduce((s, d) => s + (d - mean) ** 2, 0) / (xs.length - 1) });
+  }
+  const m = pats.length, within = pats.filter((p) => p.variance !== null);
+  const mean = m === 0 ? null : pats.reduce((s, p) => s + p.mean, 0) / m;
+  const sw = within.length === 0 ? null : within.reduce((s, p) => s + p.variance, 0) / within.length;
+  const sb = m < 2 ? null : pats.reduce((s, p) => s + (p.mean - mean) ** 2, 0) / (m - 1);
+  const pred = sw === null ? null : pats.reduce((s, p) => s + sw / p.k, 0) / m;
+  const raw = sb === null || pred === null ? null : sb - pred, omega = raw === null ? null : Math.max(0, raw);
+  const winnerReason = m < 3 ? "few-patterns" : within.length < 2 ? "few-within-patterns" : null;
+  const winner = winnerReason !== null ? "undetermined" : Math.abs(pred - omega) <= NOISE_TIE_EPS ? "tie" : pred > omega ? "prediction" : "data";
+  const estimable = sw !== null && sb !== null;
+  const delta = (k) => (estimable ? NOISE_Z * Math.sqrt((omega + sw / k) / m) : null);
+  const current = Number.isInteger(runs) && runs >= 1 ? runs : null;
+  return {
+    unit: "P", m, excluded_patterns: excluded, mean: r6OrNull(mean),
+    within: { variance: r6OrNull(sw), patterns: within.length },
+    between: { variance: r6OrNull(sb) },
+    prediction: r6OrNull(pred),
+    data: { raw: r6OrNull(raw), variance: r6OrNull(omega), clipped: raw === null ? null : raw < 0 },
+    winner, reason: winnerReason,
+    detectable: {
+      z: NOISE_Z, by_k: Object.fromEntries(NOISE_K_VALUES.map((k) => [String(k), r6OrNull(delta(k))])), infinity: estimable ? round6(NOISE_Z * Math.sqrt(omega / m)) : null,
+      current: { k: current, delta: current === null ? null : r6OrNull(delta(current)) }, reason: estimable ? null : "variance-unestimable",
+    },
+    by_pattern: Object.fromEntries(pats.map((p) => [p.pid, { k: p.k, mean: round6(p.mean), variance: r6OrNull(p.variance) }])),
+  };
+}
+/** 比較の雑音の分解：原文系 PASS の対の差と、段の役割ごとの「通過」の対の差（runs ＝ 条件の runs） */
+export function compareNoise(passByPattern, passedByRole, runs) {
+  return {
+    note: NOISE_NOTE, runs: Number.isInteger(runs) ? runs : null,
+    pass: noiseStats(passByPattern, runs),
+    stage_pairs: { roles: Object.fromEntries(Object.entries(STAGE_ROLES).map(([role, def]) => [role, { label: def.label, passed: noiseStats(passedByRole[role] ?? {}, runs) }])) },
+  };
+}
+/** 標準出力の雑音の分解の 1 行（原文系 PASS の差） */
+export function noiseText(nz) {
+  const p = nz.pass, d = p.detectable;
+  return `雑音の分解（判定には使わない目安）: 予測 ${fixed3(p.prediction)}・データ ${fixed3(p.data.variance)}${p.data.clipped ? "（データの雑音は検出されず）" : ""}（${p.winner}${p.reason === null ? "" : `: ${p.reason}`}）・検出できる差 K=3 ${fixed3(d.by_k["3"])}・K=6 ${fixed3(d.by_k["6"])}・下限 ${fixed3(d.infinity)}${d.reason === null ? "" : `（${d.reason}）`}（m ${p.m}・P 内の分散を出せた P ${p.within.patterns}）`;
+}
+
 /** 採点せずに断る誤り（入口が「断りました」と exit 3 にする）。文は opts.anonymous のときパス・本の ID・組の ID を含めない */
 const refusal = (message) => Object.assign(new Error(message), { refused: true });
 /**
@@ -2107,6 +2177,8 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
     pairs: { planned: rows.length, both: finished.length, one_side: oneSide, none: rows.length - finished.length - oneSide, ...pairStats(finished.map((r) => r.diff)), by_pattern: byPattern, rows },
     groups: groupOut, scoring_cost_usd: SCORING_COST_USD,
     stage_pairs, pattern_clusters,
+    // 雑音の分解（#631。README §8）：既存の欄のあとに足す。判定・門には使わない
+    noise: compareNoise(Object.fromEntries(Object.entries(byPattern).map(([pid, v]) => [pid, v.diffs])), Object.fromEntries(Object.keys(STAGE_ROLES).map((role) => [role, byPatternOf((x) => x.diffs[role].passed)])), groups[baseGroup].cond.params?.runs),
   };
 }
 /** 比較の採点の匿名の口：件数・率（数と区間の形の文字列）・区間の数・既知の値だけ。本の ID・P の ID・パス・落ちた判定の鍵は出さない */
@@ -2148,10 +2220,17 @@ export function anonymizeCompare(full) {
     // 段の役割ごとの対の差と P のまとまり（#539）：件数・n・平均・区間・p だけ（本の ID・P の ID・P ごとの平均は出さない）
     stage_pairs: !isObj(full.stage_pairs) ? null : { roles: Object.fromEntries(Object.keys(STAGE_ROLES).map((role) => [role, { metrics: Object.fromEntries(STAGE_METRICS.map((k) => { const x = full.stage_pairs.roles?.[role]?.metrics?.[k]; return [k, { ...anonPairStats(x), excluded: intsOf(x?.excluded, PAIR_NULL_REASONS), clusters: anonCluster(x?.clusters) }]; })) }])) },
     pattern_clusters: !isObj(full.pattern_clusters) ? null : { discordant: intsOf(full.pattern_clusters.discordant, ["improved", "regressed"]), pass: anonCluster(full.pattern_clusters.pass) },
+    // 雑音の分解（#631）：m・使った P の数・分散・勝つ側・δ の表だけ（P の ID・P ごとの値・平均は出さない）
+    ...("noise" in full ? { noise: !isObj(full.noise) ? null : { runs: intOrNull(full.noise.runs), pass: anonNoise(full.noise.pass), stage_pairs: { roles: Object.fromEntries(Object.keys(STAGE_ROLES).map((role) => [role, { passed: anonNoise(full.noise.stage_pairs?.roles?.[role]?.passed) }])) } } } : {}),
   };
 }
 const numPair = (x) => (Array.isArray(x) && x.length === 2 && x.every((v) => numOrNull(v) !== null) ? [x[0], x[1]] : null);
 const anonPairStats = (x) => ({ n: intOrNull(x?.n), counts: intsOf(x?.counts, ["+1", "0", "-1"]), mean: numOrNull(x?.mean), sd: numOrNull(x?.sd), interval: numPair(x?.interval) });
+const anonNoise = (x) => (!isObj(x) ? null : {
+  m: intOrNull(x.m), within: { variance: numOrNull(x.within?.variance), patterns: intOrNull(x.within?.patterns) }, between: { variance: numOrNull(x.between?.variance) }, prediction: numOrNull(x.prediction),
+  data: { raw: numOrNull(x.data?.raw), variance: numOrNull(x.data?.variance), clipped: boolOrNull(x.data?.clipped) }, winner: enumOrUnknown(NOISE_WINNERS, x.winner ?? null), reason: enumOrUnknown(NOISE_REASONS, x.reason ?? null),
+  detectable: { z: numOrNull(x.detectable?.z), by_k: Object.fromEntries(NOISE_K_VALUES.map((k) => [String(k), numOrNull(x.detectable?.by_k?.[String(k)])])), infinity: numOrNull(x.detectable?.infinity), current: { k: intOrNull(x.detectable?.current?.k), delta: numOrNull(x.detectable?.current?.delta) }, reason: enumOrUnknown(NOISE_REASONS, x.detectable?.reason ?? null) },
+});
 const anonCluster = (c) => (!isObj(c) ? null : {
   m: intOrNull(c.m), mean: numOrNull(c.mean), sign_flip: { p: numOrNull(c.sign_flip?.p), permutations: intOrNull(c.sign_flip?.permutations) },
   bootstrap: { interval: numPair(c.bootstrap?.interval), resamples: intOrNull(c.bootstrap?.resamples), seed: intOrNull(c.bootstrap?.seed) },
@@ -2635,7 +2714,7 @@ async function mainCompare(repo, outRoot, { label, anonymous, setPath }) {
     return;
   }
   // 既存の JSON の行は #539 の欄を除いて今までの形のまま
-  const { pairs: { rows, by_pattern: byPattern, ...pairs }, stage_pairs, pattern_clusters, ...rest } = full;
+  const { pairs: { rows, by_pattern: byPattern, ...pairs }, stage_pairs, pattern_clusters, noise, ...rest } = full;
   const groups538 = Object.fromEntries(Object.entries(rest.groups).map(([g, { agreement: _a, test_findings: _t, ...x }]) => [g, x]));
   console.log(JSON.stringify({ ...rest, groups: groups538, pairs }, null, 1));
   const GROUPS = Object.keys(rest.groups);
@@ -2650,6 +2729,8 @@ async function mainCompare(repo, outRoot, { label, anonymous, setPath }) {
   // 経路 v1.2 の群の旗の組の照合（#557。v1.2 の群だけ）
   for (const g of GROUPS) if (isObj(full.groups[g].v12_flags)) console.log(`${g} ${v12FlagsText(full.groups[g].v12_flags)}`);
   console.log(clusterText(stage_pairs, pattern_clusters));
+  // 雑音の分解の 1 行（#631。既存の行の後ろ）
+  console.log(noiseText(noise));
 }
 
 const isEntry = () => { if (process.argv[1] === undefined) return false; try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } };

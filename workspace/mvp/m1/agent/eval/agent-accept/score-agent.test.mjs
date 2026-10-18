@@ -3331,7 +3331,7 @@ test("#539 内外の表・分類・段の役割ごとの対の差（v11a-cmp2 �
     // 標準出力：既存の行は変えず、群ごとの内外の表の 1 行と P のまとまりの 1 行を足す
     assert.match(r.stdout, /^v1 内外の表（予定 30 本・実行 30 本・未実行と途中 0 本。工場×外）: 原文系 partial×PASS 9・none×GEN_FAIL 21／了承後系 .*・試験の分類（読めた 9 本・欠測 21 本・45 件）: binding-defect 9・evaluator-coverage 18・test-defect 9・needs-human 9・unknown 0（食い違い 0）$/m);
     assert.match(r.stdout, /^v1\.1a 内外の表（.*原文系 partial×PASS 10・partial×FAIL 1・none×GEN_FAIL 19／/m);
-    assert.match(r.stdout.trimEnd().split("\n").at(-1), /^P のまとまり（m 10。.*）: PASS の差 平均 -?\d\.\d{3}・p \d\.\d{3}・bootstrap .*・通過の差 設計 平均 .*・判定 平均 /);
+    assert.match(r.stdout.trimEnd().split("\n").at(-2), /^P のまとまり（m 10。.*）: PASS の差 平均 -?\d\.\d{3}・p \d\.\d{3}・bootstrap .*・通過の差 設計 平均 .*・判定 平均 /);
     assert.ok(!/"stage_pairs"|"agreement"/.test(r.stdout), "既存の JSON の行に #539 の欄を足さない");
   });
 });
@@ -4370,4 +4370,157 @@ test("#589 段単位の走り：区間 0 に vocabulary・mapping があり、�
   assert.ok(!stageRecordMismatches(r0, "P1-r1", cond("name-table", "semantic-check"), ".").includes("stages"));
   const r1 = record({ start: "test-spec", end: "test-spec" }, [OK1("mapping"), OK1("test-spec")], "test-spec");
   assert.ok(stageRecordMismatches(r1, "P1-r1", cond("test-spec", "test-spec"), ".").includes("stages"));
+});
+
+// ── #631 雑音の分解（予測の雑音とデータの雑音・反復 K′ ごとに検出できる差の目安。README §8。v1.2 評価 a）
+import { NOISE_K_VALUES, NOISE_Z, compareNoise, noiseStats } from "./score-agent.mjs";
+
+const near631 = (actual, expected, what) => assert.ok(actual !== null && Math.abs(actual - expected) <= 1e-6, `${what}: ${actual} ≠ ${expected}`);
+const deltas631 = (omega, sw, m) => Object.fromEntries(NOISE_K_VALUES.map((k) => [k, NOISE_Z * Math.sqrt((omega + sw / k) / m)]));
+const assertDeltas631 = (n, omega, sw, m, runs) => {
+  const want = deltas631(omega, sw, m);
+  for (const k of NOISE_K_VALUES) near631(n.detectable.by_k[String(k)], want[k], `δ(${k})`);
+  near631(n.detectable.infinity, NOISE_Z * Math.sqrt(omega / m), "δ_∞");
+  assert.equal(n.detectable.current.k, runs);
+  near631(n.detectable.current.delta, NOISE_Z * Math.sqrt((omega + sw / runs) / m), "δ(いまの K)");
+  assert.equal(n.detectable.reason, null);
+};
+
+test("#631 雑音の分解：P 4 × K 3（3 回とも同じ値の P・K_p＝1 の P・全対が null の P を含む）で m・d̄・σ̂²_w・s²_b・v̂_pred・ω̂²（生と切った値）・勝つ側・δ(1)〜δ(10)・δ_∞ が手計算と 1e−6 で一致する。ω̂² が負なら 0 に切って印", () => {
+  // K_p＝(3,3,1)・P 平均 (1,0,−1)：m＝3・d̄＝0・s²_b＝1。P 内の分散は P1 が 0（3 回とも同じ値）・P2 が 1 → σ̂²_w＝0.5（使った P 2）
+  // v̂_pred ＝ (0.5/3 ＋ 0.5/3 ＋ 0.5/1) ÷ 3 ＝ 5/18、ω̂² ＝ 1 − 5/18 ＝ 13/18 → データの雑音が勝つ
+  const xs = { P1: [1, 1, 1], P2: [1, 0, -1], P3: [-1, null, null], P4: [null, null, null] };
+  const n = noiseStats(xs, 3);
+  assert.deepEqual([n.unit, n.m, n.excluded_patterns, n.within.patterns], ["P", 3, 1, 2]);
+  near631(n.mean, 0, "d̄");
+  assert.equal(n.mean, clusterStats(xs).mean, "d̄ は P のまとまりの平均と同じ（有効な P 平均の単純平均）");
+  near631(n.within.variance, 0.5, "σ̂²_w");
+  near631(n.between.variance, 1, "s²_b");
+  near631(n.prediction, 5 / 18, "v̂_pred");
+  near631(n.data.raw, 13 / 18, "ω̂² の生の値");
+  near631(n.data.variance, 13 / 18, "ω̂²");
+  assert.equal(n.data.clipped, false);
+  assert.deepEqual([n.winner, n.reason], ["data", null]);
+  assertDeltas631(n, 13 / 18, 0.5, 3, 3);
+  assert.deepEqual(n.by_pattern, { P1: { k: 3, mean: 1, variance: 0 }, P2: { k: 3, mean: 0, variance: 1 }, P3: { k: 1, mean: -1, variance: null } }, "K_p＝0 の P は by_pattern に出さず excluded_patterns に数える");
+  // P 平均が揃い反復のぶれだけがある：σ̂²_w＝1/3・s²_b＝0・v̂_pred＝1/9・ω̂² の生の値 −1/9 → 0 に切って印、予測の雑音が勝つ
+  const c = noiseStats({ P1: [1, 0, 0], P2: [0, 1, 0], P3: [0, 0, 1] }, 3);
+  near631(c.within.variance, 1 / 3, "σ̂²_w");
+  near631(c.between.variance, 0, "s²_b");
+  near631(c.prediction, 1 / 9, "v̂_pred");
+  near631(c.data.raw, -1 / 9, "ω̂² の生の値（負）");
+  assert.deepEqual([c.data.variance, c.data.clipped, c.winner], [0, true, "prediction"]);
+  assertDeltas631(c, 0, 1 / 3, 3, 3);
+  assert.equal(c.detectable.infinity, 0, "データの雑音が 0 なら K′ → ∞ の下限は 0");
+});
+
+test("#631 雑音の分解：全差 0 は tie で δ が全部 0（null ではない）。σ̂²_w か s²_b を推定できない（全 P が K_p＝1／m＝1）なら δ は null と理由。m＜3 は undetermined（δ は推定できれば出す）", () => {
+  const z = noiseStats({ P1: [0, 0, 0], P2: [0, 0, 0], P3: [0, 0, 0] }, 3);
+  assert.deepEqual([z.winner, z.reason, z.prediction, z.data.variance, z.data.clipped], ["tie", null, 0, 0, false]);
+  assert.deepEqual(Object.values(z.detectable.by_k), NOISE_K_VALUES.map(() => 0));
+  assert.deepEqual([z.detectable.infinity, z.detectable.current.delta, z.detectable.reason], [0, 0, null]);
+  // 全 P が K_p＝1：σ̂²_w を推定できない
+  const w = noiseStats({ P1: [1, null], P2: [0, null], P3: [-1, null] }, 2);
+  assert.deepEqual([w.m, w.within.variance, w.within.patterns, w.prediction, w.data.raw, w.data.variance, w.data.clipped], [3, null, 0, null, null, null, null]);
+  near631(w.between.variance, 1, "s²_b");
+  assert.deepEqual([w.winner, w.reason], ["undetermined", "few-within-patterns"]);
+  assert.deepEqual([Object.values(w.detectable.by_k).every((x) => x === null), w.detectable.infinity, w.detectable.current, w.detectable.reason], [true, null, { k: 2, delta: null }, "variance-unestimable"]);
+  // m＝1：s²_b を推定できない
+  const one = noiseStats({ P1: [1, 0, 1], P2: [null, null, null] }, 3);
+  assert.deepEqual([one.m, one.excluded_patterns, one.between.variance, one.winner, one.reason, one.detectable.reason, one.detectable.infinity], [1, 1, null, "undetermined", "few-patterns", "variance-unestimable", null]);
+  near631(one.within.variance, 1 / 3, "σ̂²_w");
+  // m＝2（K_p ≥ 2 の P は 2）：勝つ側は決めないが、δ は出す。P 平均 (1/3, 2/3)：s²_b＝1/18・σ̂²_w＝1/3・v̂_pred＝1/9・ω̂² の生の値 −1/18 → 0
+  const two = noiseStats({ P1: [1, 0, 0], P2: [1, 1, 0] }, 3);
+  assert.deepEqual([two.m, two.winner, two.reason, two.data.clipped], [2, "undetermined", "few-patterns", true]);
+  near631(two.between.variance, 1 / 18, "s²_b");
+  near631(two.data.raw, -1 / 18, "ω̂² の生の値");
+  assertDeltas631(two, 0, 1 / 3, 2, 3);
+  // m≥3 でも K_p ≥ 2 の P が 1 つだけなら undetermined
+  assert.deepEqual([noiseStats({ P1: [1, 0], P2: [1], P3: [0] }, 2)].map((x) => [x.winner, x.reason, x.within.patterns]), [["undetermined", "few-within-patterns", 1]]);
+  // 有効な対が無い・いまの K が無い
+  const none = noiseStats({ P1: [null] }, null);
+  assert.deepEqual([none.m, none.excluded_patterns, none.mean, none.winner, none.reason, none.detectable.current, none.detectable.reason], [0, 1, null, "undetermined", "few-patterns", { k: null, delta: null }, "variance-unestimable"]);
+  // 比較の口の形：原文系 PASS と、段の役割ごとの通過（無い役割は空の入力）
+  const cn = compareNoise({ P1: [0] }, { design: { P1: [1, 0] } }, 3);
+  assert.deepEqual(Object.keys(cn), ["note", "runs", "pass", "stage_pairs"]);
+  assert.deepEqual(Object.keys(cn.stage_pairs.roles), Object.keys(STAGE_ROLES));
+  assert.deepEqual(cn.stage_pairs.roles.design.passed, noiseStats({ P1: [1, 0] }, 3));
+  assert.equal(cn.stage_pairs.roles.judge.passed.m, 0);
+});
+
+test("#631 比較（30 本 × 2 群）：noise が出力の末尾にあり、原文系 PASS の対の差と、段の役割ごとの「通過」の対の差に同じ欄が出る。標準出力は既存の行の後ろに 1 行で、JSON の行には足さない。匿名の口は m・使った P の数・分散・勝つ側・δ の表だけ", async () => {
+  await withOut(async (base) => {
+    const f = cmp539(base, "cmp631");
+    const r = scoreCompareRun(f.out);
+    assert.equal(r.status, 0, r.stderr);
+    const c = readCompare(f.out);
+    assert.equal(Object.keys(c).at(-1), "noise", "新しい欄は末尾");
+    assert.equal(c.noise.runs, 3);
+    assert.deepEqual(c.noise.pass, noiseStats(Object.fromEntries(Object.entries(c.pairs.by_pattern).map(([p, v]) => [p, v.diffs])), 3));
+    assert.equal(c.noise.pass.m, 10);
+    assert.equal(c.noise.pass.mean, c.pattern_clusters.pass.mean);
+    for (const role of Object.keys(STAGE_ROLES)) {
+      const byP = {};
+      for (const x of c.stage_pairs.rows) (byP[x.pid] ??= []).push(x.diffs[role].passed.diff);
+      assert.deepEqual(c.noise.stage_pairs.roles[role].passed, noiseStats(byP, 3), role);
+      assert.equal(c.noise.stage_pairs.roles[role].passed.mean, c.stage_pairs.roles[role].metrics.passed.clusters.mean, role);
+    }
+    assert.equal(c.noise.stage_pairs.roles.design.passed.m, 10);
+    const last = r.stdout.trimEnd().split("\n");
+    assert.match(last.at(-1), /^雑音の分解（判定には使わない目安）: 予測 \d\.\d{3}・データ \d\.\d{3}.*（(prediction|data|tie)）・検出できる差 K=3 \d\.\d{3}・K=6 \d\.\d{3}・下限 \d\.\d{3}（m 10・P 内の分散を出せた P \d+）$/);
+    assert.match(last.at(-2), /^P のまとまり（m 10。/, "既存の行の後ろ");
+    assert.ok(!r.stdout.includes('"noise"'), "既存の JSON の行に noise を足さない");
+    // 匿名
+    const rc = scoreCompareRun(f.out, ["--anonymous"]);
+    assert.equal(rc.status, 0, rc.stderr);
+    const tc = readFileSync(join(f.out, "score-compare.anonymous.json"), "utf8");
+    const ac = JSON.parse(tc);
+    assert.deepEqual(ac.noise, anonymizeCompare(c).noise);
+    assert.deepEqual(Object.keys(ac.noise.pass), ["m", "within", "between", "prediction", "data", "winner", "detectable"].flatMap((k) => (k === "winner" ? ["winner", "reason"] : [k])));
+    assert.equal(ac.noise.pass.m, 10);
+    assert.equal(ac.noise.pass.within.patterns, c.noise.pass.within.patterns);
+    assert.deepEqual(ac.noise.pass.detectable.by_k, c.noise.pass.detectable.by_k);
+    assert.equal(ac.noise.stage_pairs.roles.test.passed.winner, c.noise.stage_pairs.roles.test.passed.winner);
+    const noiseText631 = JSON.stringify(ac.noise);
+    for (const [what, bad] of [["P の ID", /P\d+/.test(noiseText631)], ["P ごとの値", noiseText631.includes("by_pattern")], ["平均・除いた P", noiseText631.includes('"mean"') || noiseText631.includes("excluded_patterns")]]) assert.ok(!bad, `${what}が出ない`);
+    const allc = rc.stdout + rc.stderr + tc;
+    assert.ok(!/P\d+-r\d+|"P\d+"/.test(allc) && !allc.includes(base), "本の ID・P の ID・パスが出ない");
+  });
+});
+
+test("#631 既存の欄を変えていない：同じ比較の出力先を、noise を足す 1 行だけを除いた採点器（直す前と同じ欄）で採点した出力と、今の出力から noise を除いたものが深く等しい（採点のコード自身の指紋は条件に合わせ直す）", async () => {
+  await withOut(async (base) => {
+    const f = cmp539(base, "cmp631b");
+    assert.equal(scoreCompareRun(f.out).status, 0);
+    const now = readCompare(f.out);
+    // 直す前の採点器：比較の出力に noise を足す 1 行を除く（ほかの行は今のまま）
+    const src = readFileSync(scoreFile, "utf8"), line = /^ {4}noise: compareNoise\(.*\n/gm;
+    assert.equal((src.match(line) ?? []).length, 1, "noise を足すのは比較の出力の 1 行だけ");
+    const old = join(base, "before-631-score-agent.mjs");
+    writeFileSync(old, src.replace(line, ""));
+    // 群の条件の採点の指紋を直す前の採点器のものに合わせ直す（条件の署名は scoring を含まない）
+    const oldFp = scoringFingerprint(ev, old, loadEvalSet(join(base, "set538/t-set.json")).definitions).fingerprint;
+    for (const g of ["v1", "v1.1a"]) {
+      const p = join(f.out, g, "conditions.json"), cond = JSON.parse(readFileSync(p, "utf8"));
+      cond.scoring = { fingerprint: oldFp };
+      assert.equal(conditionsSignature(cond), cond.signature);
+      writeFileSync(p, JSON.stringify(cond));
+    }
+    // 採点の関数を直接呼ぶ（入口の標準出力の行は対象の外）。書き出す JSON と同じ形にそろえる
+    const before = JSON.parse(JSON.stringify(await (await import(pathToFileURL(old).href)).scoreCompare(repo, f.out)));
+    assert.ok(!("noise" in before));
+    const { noise: _n, ...rest } = now;
+    assert.deepEqual(Object.keys(now), [...Object.keys(before), "noise"], "既存の欄の並びは同じで、noise は末尾");
+    for (const g of ["v1", "v1.1a"]) assert.ok(Object.values(before.groups[g].fingerprints).every((x) => x === true) && Object.values(now.groups[g].fingerprints).every((x) => x === true), "指紋の照合はどちらも一致");
+    assert.deepEqual(rest, before);
+    assert.equal(now.completion.status, "complete");
+  });
+});
+
+test("#631 README：§7 の後ろ（末尾）の新しい節 §8 に、雑音の分解の語と出典がある", () => {
+  const text = readFileSync(join(ev, "README.md"), "utf8");
+  const at = text.indexOf("\n## 8. ");
+  assert.ok(at > text.indexOf("\n## 7. ") && text.indexOf("\n### 7.12 ") < at, "§8 は §7 の後ろ");
+  const sec = text.slice(at);
+  for (const w of ["予測の雑音", "データの雑音", "検出できる差", "目安", "2411.00640", "2512.21326"]) assert.ok(sec.includes(w), w);
 });
