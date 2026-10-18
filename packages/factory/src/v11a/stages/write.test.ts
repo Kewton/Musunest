@@ -31,6 +31,8 @@ import {
   DECLARATION_V11A_SCHEMA,
   WRITE_V11A_DATA_NAMES,
   WRITE_V11A_RULE_DEFINITIONS,
+  WRITE_V11A_REWRITE_DATA_NAME,
+  WRITE_V11A_REWRITE_RULE_DEFINITIONS,
   WRITE_V11A_RULES,
   WRITE_V11A_SCHEMA_NAME,
   checkWriteV11aOutput,
@@ -39,6 +41,7 @@ import {
   type WriteV11aInput,
 } from "./write.js";
 import type { TestObserves } from "./test-spec.js";
+import { NAMED_FAILURE_MESSAGES, type NamedFailure } from "../../v12/search-repair.js";
 
 const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
 
@@ -373,5 +376,63 @@ describe("旗 on：今の台帳の B1 の規則は、#548 の台帳の末尾に 
     const shown = JSON.parse(now.structured[0]!.input.split(`<data name="${WRITE_V11A_DATA_NAMES[1]}">`)[1]?.split("</data>")[0] ?? "null") as unknown;
     expect(JSON.stringify(shown)).toContain('"aggregate":{"kind":"count","entity":"e.item"}');
     expectNoAcceptanceMaterial([now.structured[0]!.input, ...(now.structured[0]!.rules ?? [])]);
+  });
+});
+
+describe("空の文脈での作り直し（旗 v12.search-repair。Issue #551）：rewrite を渡したときだけ失敗の一覧と規則 1 つを末尾に足す", () => {
+  const FAILURES: readonly NamedFailure[] = [
+    { testId: "t1", requirementId: "R1", kind: "test-mismatch", message: NAMED_FAILURE_MESSAGES["test-mismatch"] },
+    { testId: null, requirementId: "R2", kind: "decl-rejection", message: NAMED_FAILURE_MESSAGES["decl-rejection"] },
+  ];
+
+  it("作り直しの規則の定義に不備が無く、ID は R-w11r-nn。固定した試験・要件・表を変えないことを述べる", () => {
+    expect(ruleDefinitionDefects(WRITE_V11A_REWRITE_RULE_DEFINITIONS)).toEqual([]);
+    expect(ruleDefinitionDefects([...WRITE_V11A_RULE_DEFINITIONS, ...WRITE_V11A_REWRITE_RULE_DEFINITIONS])).toEqual([]);
+    expect(WRITE_V11A_REWRITE_RULE_DEFINITIONS.every((rule) => /^R-w11r-\d\d$/.test(rule.id))).toBe(true);
+    const text = WRITE_V11A_REWRITE_RULE_DEFINITIONS.map((rule) => rule.text).join("\n");
+    expect(text).toContain("前の宣言は渡さない");
+    expect(text).toContain("固定した試験・要件・名前の表は変えない");
+  });
+
+  it("要求の差は末尾のデータ「残った失敗の一覧」と規則 1 つだけで、一覧は試験 ID・要件 ID・種類・固定文だけ。省けば今の要求とバイト列で同じ", async () => {
+    const plain = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    await runWriteV11a(inputWith(plain.client));
+    const again = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    await runWriteV11a(inputWith(again.client, {}));
+    const rewrite = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const outcome = await runWriteV11a(inputWith(rewrite.client, { rewrite: { failures: FAILURES } }));
+    expect(outcome.ok).toBe(true);
+    const [base] = plain.structured;
+    const [same] = again.structured;
+    const [rewritten] = rewrite.structured;
+    if (base === undefined || same === undefined || rewritten === undefined) throw new Error("前提が壊れた");
+    expect(JSON.stringify(same)).toBe(JSON.stringify(base));
+    expect(base.rules).toEqual(WRITE_V11A_RULES);
+    expect(rewritten.rules).toEqual([...WRITE_V11A_RULES, ...WRITE_V11A_REWRITE_RULE_DEFINITIONS.map((rule) => rule.text)]);
+    const names = [...rewritten.input.matchAll(/<data name="([^"]+)">/g)].map((match) => match[1]);
+    expect(names).toEqual([...WRITE_V11A_DATA_NAMES, WRITE_V11A_REWRITE_DATA_NAME]);
+    expect(rewritten.input.startsWith(base.input)).toBe(true);
+    const block = rewritten.input.split(`<data name="${WRITE_V11A_REWRITE_DATA_NAME}">`)[1]?.split("</data>")[0] ?? "";
+    expect(JSON.parse(block)).toEqual(FAILURES.map((failure) => ({ ...failure })));
+    for (const entry of JSON.parse(block) as Record<string, unknown>[]) {
+      expect(Object.keys(entry)).toEqual(["testId", "requirementId", "kind", "message"]);
+    }
+    expect(rewritten.schema).toBe(base.schema);
+    expect(rewritten.instructions).toBe(base.instructions);
+    expect(rewritten.documents).toEqual(base.documents);
+    expectNoAcceptanceMaterial([rewritten.instructions, rewritten.input, ...rewritten.documents, ...(rewritten.rules ?? [])]);
+  });
+
+  it("旗 on の台帳と組んでも、作り直しの規則は台帳の規則の後ろに足すだけ", async () => {
+    const ledger = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    await runWriteV11a(inputWith(ledger.client, { ledger: PROPERTY_LEDGER_VIEW, table: withAggregates(fixtureTable()) }));
+    const both = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    await runWriteV11a(
+      inputWith(both.client, { ledger: PROPERTY_LEDGER_VIEW, table: withAggregates(fixtureTable()), rewrite: { failures: FAILURES } }),
+    );
+    expect(both.structured[0]?.rules).toEqual([
+      ...(ledger.structured[0]?.rules ?? []),
+      ...WRITE_V11A_REWRITE_RULE_DEFINITIONS.map((rule) => rule.text),
+    ]);
   });
 });
