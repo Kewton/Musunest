@@ -4603,6 +4603,33 @@ describe("旗 v12.ids：要件ごとの必要な試験の枠をコードが組�
     });
   });
 
+  it("旧形の observes が形で落ちる負例：束の形のやり直し（全 round で通算 1）を初回に使い切った束は、中身のやり直しの応答が形で落ちると追加の要求なしに unmet になる（窓口の条件 (ii)）", async () => {
+    // 初回：形で落ちる（旧形）→ 形のやり直しで通るが R1 の異常・境界が欠けて中身で落ちる → 2 回目：また旧形で形に落ちる
+    const legacy = negative(
+      legacyLastOf(response([...baseTests(), rawTest({ id: "r1-legacy", requirementId: "R1", targetKind: "field", roleId: "f.item.title", operation: "validate", observes: "validation" })], BASE_NATURES)),
+      "旧形の observes（計算でない行に性質）。strict の schema では出ないが、形のやり直しを使い切る負例として要る",
+    );
+    const rejected: RejectedCandidate[] = [];
+    const { outcome, recording } = await run(asCases([legacy, baseOk(validate("R1", "f.item.title", ["normal"])), legacy]), {
+      plan: base.plan,
+      list: base.list,
+      table: base.table,
+      carryOver: await carryOf(base.list, base.table),
+      ledger,
+      ids: true,
+      onRejected: (candidate) => rejected.push(candidate),
+    });
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error(`unmet でない：${JSON.stringify(outcome)}`);
+    expect(recording.structured).toHaveLength(3);
+    expect(outcome.failure.attempts).toBe(TEST_SPEC_ROUNDS);
+    expect(outcome.failure.problems.map((problem) => problem.message)).toContain(CASE_OBSERVES_SHAPE_MESSAGE);
+    expect(rejected.map((candidate) => candidate.kind)).toEqual(["shape", "content", "shape"]);
+    // 対照：形のやり直しを使っていなければ、同じ 2 回目の形の落ちは malformed（その回の中で 1 回やり直して 2 回とも落ちた）
+    const fresh = await runS(base, [legacy, legacy]);
+    if (fresh.outcome.ok) throw new Error("落ちるはず");
+    expect(fresh.outcome.failure.kind).toBe("malformed");
+  });
+
   it("記録：段の値に枠の要約（要求の一覧の要件ごとの 16 − 組のコードの試験の数の合計と、組のコードの試験の数）があり、組と一致する", async () => {
     const { outcome } = await runS(base, [baseOk()]);
     if (!outcome.ok) throw new Error("通るはず");

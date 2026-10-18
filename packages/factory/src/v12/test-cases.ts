@@ -932,11 +932,20 @@ export interface RetryTestCaseFramesInput {
   readonly kept: Pick<GeneratedTests, "tests" | "observes">;
 }
 
-const MISSING_KIND = /^(normal|abnormal|boundary) の試験が無い$/;
+/**
+ * やり直しの枠の不足として読む、v1 の網羅の検査（`checkSuitePlan`）の種類のそろいの不足の固定文（種類 → 文。要件の位置の問題の
+ * 文と完全一致で引く。v1 の文と同じであることは試験が固定する）。どれにも一致しない問題は枠に載せない（推測しない）
+ */
+export const TEST_CASE_FRAME_MISSING_MESSAGES: Readonly<Record<TestKind, string>> = {
+  normal: "normal の試験が無い",
+  abnormal: "abnormal の試験が無い",
+  boundary: "boundary の試験が無い",
+};
 
 /**
  * やり直しの枠（書き直す要件の並びの順。純粋）。採用済みの要件だけ、採った種類の枝を実値で書く：実際に組へ足したコードの試験
- * （空の集計を含む）・門が報告した不足（`problems` の `requirements[書き直す要件の添字]` の「<種類> の試験が無い」）・残る本数
+ * （空の集計を含む）・門が報告した不足（`problems` のうち、位置が `requirements[書き直す要件の添字]` と一致し、文が
+ * `TEST_CASE_FRAME_MISSING_MESSAGES` の固定文と完全一致するもの。ほかの問題は枠に載せず、問題のまま返る）・残る本数
  * （16 − 実際のコードの分）。採った種類が ruled で、表の分類が ruled なら作られるはずの空の集計の試験が組に無い行（交差）は、
  * 不足の種類に合う行とデータ状態を `emptyAggregate` に挙げる
  */
@@ -960,7 +969,7 @@ export function retryTestCaseFramesOf(
       adopted === "ruled" ? emptyAggregateCodeTestsOf(requirementId, roles, aggregateTargets, ledger).filter(({ test }) => !keptIds.has(test.id)) : [];
     const missing = problems.flatMap((problem): TestCaseFrameMissing[] => {
       if (problem.field !== `requirements[${String(index)}]`) return [];
-      const kind = MISSING_KIND.exec(problem.message)?.[1] as TestKind | undefined;
+      const kind = TEST_KINDS.find((candidate) => TEST_CASE_FRAME_MISSING_MESSAGES[candidate] === problem.message);
       if (kind === undefined) return [];
       return [
         {

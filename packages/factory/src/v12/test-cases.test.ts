@@ -8,6 +8,7 @@ import { expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
 import { FIXTURE_YAML, casesResponseOf, fixtureList, fixtureTable, strictDefects, withAggregates, withoutIdAndClock } from "../v11a/__tests__/fixtures.js";
 import { buildSized, MEDIAN_SIZE } from "../v11a/__tests__/sizes.js";
 import { correspondenceFromTable } from "../v11a/bind-by-id.js";
+import { checkSuitePlan } from "../stages/test-suite.js";
 import { toV1 } from "../v11a/convert.js";
 import { coverageUnitsOf } from "../v11a/coverage.js";
 import { createV11aEvaluator } from "../v11a/evaluate.js";
@@ -21,6 +22,7 @@ import {
   TEST_CASE_ID_PREFIX,
   TEST_CASE_SHAPE_MESSAGES,
   TEST_CASE_BUNDLE_MESSAGES,
+  TEST_CASE_FRAME_MISSING_MESSAGES,
   TEST_CASE_FRAME_TEXTS,
   attributeProblemsToRequirements,
   computationObservesOf,
@@ -802,5 +804,60 @@ describe("必要な試験の枠（純粋。旗 v12.ids の T2。Issue #653）", 
     // 採った種類が existence-only なら existence-only の枝（不足の集計の行は挙げない）
     const [existence] = retryTestCaseFramesOf({ table: crossTable, ledger: LEDGER, list, natures: new Map([["X1", "existence-only" as const]]), kept: crossKept }, ["X1"], []);
     expect(existence).toMatchObject({ adopted: "existence-only", kinds: ["normal"], caseTargets: ["c.byKind"], maxCases: 1, missing: [], remaining: 15 });
+  });
+});
+
+describe("やり直しの枠の不足の読み取り（固定文の定数と要件の位置で引く。窓口の条件 (i)。Issue #653）", () => {
+  const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
+  const table: NameTable = {
+    rows: TABLE.rows,
+    ownership: [{ requirementId: "X1", roles: [stated("c.byKind"), stated("s.overview")] }],
+    verification: [{ requirementId: "X1", kind: "fixed-test" }],
+    classification: [{ requirementId: "X1", nature: "existence-only" }],
+  };
+  const list: RequirementList = { requirements: [{ id: "X1", text: "要件 X1", quote: "要件 X1", position: { start: 0, end: 5 } }], decisions: [], unresolved: [] };
+  const missingOf = (problems: readonly { readonly field: string; readonly message: string }[]) =>
+    retryTestCaseFramesOf({ table, ledger: LEDGER, list, natures: new Map([["X1", "ruled" as const]]), kept: generateTests({ table, ledger: LEDGER, list }) }, ["X1"], problems)[0]?.missing;
+
+  it("定数は v1 の網羅の検査（checkSuitePlan）が出す種類のそろいの不足の文と完全一致する（v1 の文か定数の文を変えればこの試験が落ちる）", () => {
+    const suite: TestSuite = {
+      classifications: [{ requirementId: "R1", nature: "ruled" }],
+      tests: [
+        {
+          id: "only",
+          target: { requirementId: "R1", kind: "field", roleId: "f.item.amount" },
+          kind: "boundary",
+          operation: "validate",
+          clock: TEST_CASE_CLOCK,
+          input: {},
+          referenceData: [],
+          expected: { kind: "ok", value: true },
+        },
+      ],
+    };
+    const one: RequirementList = { ...fixtureList(), requirements: fixtureList().requirements.slice(0, 1) };
+    const design = toV1(fixtureTable()).design;
+    const messages = checkSuitePlan(one, suite, { ...design, designs: design.designs.filter((entry) => entry.requirementId === "R1") }, new Map([["R1", "ruled"]])).map(
+      (problem) => problem.message,
+    );
+    expect(messages).toEqual(expect.arrayContaining([TEST_CASE_FRAME_MISSING_MESSAGES.normal, TEST_CASE_FRAME_MISSING_MESSAGES.abnormal]));
+    expect(TEST_CASE_FRAME_MISSING_MESSAGES).toEqual({ normal: "normal の試験が無い", abnormal: "abnormal の試験が無い", boundary: "boundary の試験が無い" });
+  });
+
+  it("位置が要件の添字と一致し、文が定数と完全一致する問題だけを不足に読む。どれにも当てはまらない問題（別の文・部分一致・別の位置・場合の位置）は枠に載せない", () => {
+    expect(missingOf([{ field: "requirements[0]", message: TEST_CASE_FRAME_MISSING_MESSAGES.boundary }])).toEqual([
+      { kind: "boundary", emptyAggregate: [{ targetId: "c.byKind", state: "empty" }] },
+    ]);
+    expect(
+      missingOf([
+        { field: "requirements[0]", message: "要件の試験が無い" },
+        { field: "requirements[0]", message: "要件の試験が上限 16 を超えている（17）" },
+        { field: "requirements[0]", message: `${TEST_CASE_FRAME_MISSING_MESSAGES.boundary}（追記）` },
+        { field: "requirements[0]", message: `前置き ${TEST_CASE_FRAME_MISSING_MESSAGES.abnormal}` },
+        { field: "requirements[1]", message: TEST_CASE_FRAME_MISSING_MESSAGES.abnormal },
+        { field: "requirements[0].x", message: TEST_CASE_FRAME_MISSING_MESSAGES.abnormal },
+        { field: "cases[0]", message: TEST_CASE_FRAME_MISSING_MESSAGES.abnormal },
+      ]),
+    ).toEqual([]);
   });
 });
