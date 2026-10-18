@@ -18,8 +18,8 @@ import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-
 import { AGENT_LIMITS } from "../../limits.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
 import type { JudgeAnswer } from "../../judge.js";
-import { draftOf } from "./fixtures.js";
-import type { NameTable, NameTableDraft, NameTableRow } from "../names.js";
+import { draftOf, t1ResponseOf } from "./fixtures.js";
+import type { NameTable, NameTableRow } from "../names.js";
 
 /** 中央値（要件 15・試験 39）と観測した最大（要件 25・試験 68）。Issue #546 */
 export const MEDIAN_SIZE = { requirements: 15, tests: 39 } as const;
@@ -44,7 +44,7 @@ export interface SizedMaterials {
   readonly list: RequirementList;
   readonly table: NameTable;
   /** T1 の応答（下書きの形。要件 ID を持たず写しを添える） */
-  readonly nameTableResponse: () => NameTableDraft;
+  readonly nameTableResponse: () => Record<string, unknown>;
   /** J4 の偽物の判定の答え（所属の組ごと。印なし＝値 0.9） */
   readonly adviceAnswers: () => Readonly<Record<string, JudgeAnswer>>;
   /** T1'' と B3' の判定（`rejects` の要件だけ拒否。省けば全部受理） */
@@ -254,7 +254,7 @@ export function buildSized(requirementCount: number, testCount: number): SizedMa
     plan,
     list,
     table,
-    nameTableResponse: () => draftOf(list, table),
+    nameTableResponse: () => t1ResponseOf(draftOf(list, table)),
     adviceAnswers: () => {
       const answers: Record<string, JudgeAnswer> = {};
       for (const entry of table.ownership) {

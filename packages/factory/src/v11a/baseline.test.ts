@@ -17,8 +17,46 @@ import {
   type BaselineV11aScenarios,
 } from "../__tests__/baseline-capture.js";
 import { BUNDLE_MANIFEST_FILE } from "../bundle.js";
-import * as factoryModule from "../index.js";
+import * as candidateModule from "../index.js";
 import { ACCEPTANCE_MATERIAL_WORDS } from "../stages/__tests__/prompt.js";
+
+/**
+ * 照合を外す記録（経路の名前 → 記録の添字 → 理由）。比較元の記録の fixture は手で直さない（SHA を固定した凍結の記録）
+ * ので、strict の schema に合わない記録はここで添字と理由を挙げて照合を外す。T1 の応答は A1 の形（`type` が
+ * 欄を並べた写像でない）で、strict の schema（欄を並べた写像）とは形が違う。手元の入口の経路は本物の adapter が
+ * 応答を要求の schema に照らすので、ここには挙げない。
+ */
+const T1_UNCHECKED_REASON =
+  "比較元の記録（凍結）の T1 の応答は A1 の形（type が欄を並べた写像でない・集計の欄の有無）で、strict の schema の形ではない。記録は手で直さない";
+const UNCHECKED_RECORDS: Readonly<Record<string, Readonly<Record<number, string>>>> = {
+  full: { 0: T1_UNCHECKED_REASON },
+  "name-table-stop": { 0: T1_UNCHECKED_REASON, 1: T1_UNCHECKED_REASON },
+  "carry-over-stagnation": { 0: T1_UNCHECKED_REASON, 2: T1_UNCHECKED_REASON },
+  "repair-full": { 0: T1_UNCHECKED_REASON },
+};
+
+/**
+ * 候補の module。偽物の LLM を**照合あり**にする（記録した応答を要求の schema に照らす。Issue #590）。
+ * 経路の記録（`recorded`）は定義の配列そのものが渡るので、配列の参照から経路の名前を引いて、`UNCHECKED_RECORDS` の
+ * 記録だけに照合を外す印（理由つき）を付ける。
+ */
+function checkedModule(
+  scenarios: readonly { readonly name: string; readonly recorded: readonly unknown[] }[],
+): typeof candidateModule {
+  const nameOf = new Map(scenarios.map((scenario) => [scenario.recorded, scenario.name]));
+  return {
+    ...candidateModule,
+    createFakeLlmClient: (recorded, options) => {
+      const unchecked = UNCHECKED_RECORDS[nameOf.get(recorded) ?? ""] ?? {};
+      const marked = recorded.map((call, index) =>
+        unchecked[index] === undefined || call.kind !== "structured"
+          ? call
+          : { ...call, unchecked: candidateModule.uncheckedBecause(unchecked[index]) },
+      );
+      return candidateModule.createFakeLlmClient(marked, { validateAgainstSchema: true, ...options });
+    },
+  };
+}
 
 interface NodeFileSystem {
   readFileSync(path: URL, encoding: "utf8"): string;
@@ -167,7 +205,7 @@ describe("v1.1α の比較元のバイトの記録（library）", () => {
   });
 
   it("候補の src の module に同じ道具を当てると、4 経路すべてで記録と深く等しい", async () => {
-    const captures = await captureBaselineV11a(factoryModule, definitions);
+    const captures = await captureBaselineV11a(checkedModule(definitions.scenarios), definitions);
     expect(captures).toHaveLength(library.captures.length);
     captures.forEach((capture, index) => {
       expect(capture, capture.name).toEqual(library.captures[index]);
@@ -175,7 +213,7 @@ describe("v1.1α の比較元のバイトの記録（library）", () => {
   });
 
   it("記録と 1 バイトでも違えば落ちる（要求の 1 文字・ファイルの SHA-256 の 1 文字）", async () => {
-    const captures = await captureBaselineV11a(factoryModule, definitions);
+    const captures = await captureBaselineV11a(checkedModule(definitions.scenarios), definitions);
     const first = captures[0];
     if (first === undefined) throw new Error("前提が壊れた");
     const request = first.requests[0] as { request: { input: string } };
@@ -219,7 +257,7 @@ describe("v1.1α の比較元のバイトの記録（手元の入口）", () => 
   });
 
   it("候補の src の module に同じ道具を当てると、body・全ファイルの SHA-256 と manifest・要約・終了コードが記録と深く等しい", async () => {
-    const captures = await captureCliBaseline(factoryModule, cliRecord.definitions);
+    const captures = await captureCliBaseline(candidateModule, cliRecord.definitions);
     expect(captures).toHaveLength(cliRecord.captures.length);
     for (const [index, capture] of captures.entries()) {
       const expected = cliRecord.captures[index]!;

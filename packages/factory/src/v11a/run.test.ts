@@ -20,23 +20,27 @@ import {
 import type { Judge, JudgeAnswer } from "../judge.js";
 import { createFakeJudge } from "../judge-fake.js";
 import type { RecordedCall } from "../llm-fake.js";
-import type { LlmStructuredRequest, LlmToolRequest } from "../llm.js";
+import type { LlmStructuredRequest, LlmToolRequest, LlmUsage } from "../llm.js";
 import { requirementsFromPlan, type RequirementList, type TestSuite } from "../pipeline.js";
 import * as bindModule from "../stages/bind.js";
 import * as correspondenceStage from "../stages/correspondence.js";
-import { createRecordingClient, expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
+import { expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
 import * as repairStage from "../stages/repair.js";
 import * as runTestsStage from "../stages/run-tests.js";
 import * as staticCheckStage from "../stages/static-check.js";
 import * as triageStage from "../stages/unwritable-triage.js";
-import { makeRunInput, structured } from "../__tests__/run.js";
+import { makeRunInput, structured as plainStructured } from "../__tests__/run.js";
 import {
+  createCheckedRecordingClient,
   DEFAULT_VALUE_REQUIREMENT_TEXT,
   ENUM_MEMBERSHIP_REQUEST_DIFF,
   ENUM_MEMBERSHIP_REQUIREMENT_TEXT,
   FIXTURE_DOCUMENTS,
   FIXTURE_YAML,
   draftOf,
+  NegativeOutput,
+  negative,
+  t1ResponseOf,
   fixtureList,
   fixtureTable,
   jsonDiffPaths,
@@ -86,9 +90,10 @@ import { FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "../v12/stages/field-re
 import { natureQuestionName } from "../stages/test-suite.js";
 import { captureBaselineV11a, type BaselineV11aCapture, type BaselineV11aScenarios } from "../__tests__/baseline-capture.js";
 import * as factoryModule from "../index.js";
-import { createFakeLlmClient } from "../llm-fake.js";
+import { createFakeLlmClient, uncheckedBecause } from "../llm-fake.js";
 import {
   PROPERTY_LEDGER,
+  PROPERTY_LEDGER_VIEW,
   V12_PIPELINE_FLAGS,
   V12_FLAG_NAMES,
   V12_FLAG_PUBLIC_NAMES,
@@ -319,11 +324,32 @@ const REJECT_R2 = { R2: ["mismatch", "担当者の名前"] as const };
 const REJECT_R3 = { R3: ["mismatch", "金額が 0 より大きい項目だけ"] as const };
 const REJECT_R4 = { R4: ["mismatch", "全体の率"] as const };
 
+/** 構造化出力の記録（負例の応答には `unchecked` と理由が付く。照合ありの偽物がその記録だけ schema に照らさない） */
+function structured(output: unknown, usage?: LlmUsage): RecordedCall {
+  if (output instanceof NegativeOutput) {
+    return { ...plainStructured(output.output, usage), unchecked: uncheckedBecause(output.reason) } as RecordedCall;
+  }
+  return plainStructured(output, usage);
+}
+
+/**
+ * 表から T1 の応答（strict の schema に合う形）を作る。表の計算の行が集計の種類と集計元（`withAggregates`）を持てば、
+ * 台帳が集計の種類を持つ走り（旗 on）の schema に合わせ、持たなければ旗 off の schema に合わせる。表が集計の欄を持たない
+ * まま旗 on で流す記録は、`ledgerOn` に true を渡す（全部の行の型に aggregate が要る）。
+ */
+const t1Of = (list: RequirementList, table: NameTable, ledgerOn?: boolean) =>
+  t1ResponseOf(
+    draftOf(list, table),
+    (ledgerOn ?? table.rows.some((row) => row.type !== null && typeof row.type === "object" && "aggregate" in row.type))
+      ? PROPERTY_LEDGER_VIEW
+      : undefined,
+  );
+
 /** T1・T1''・T2・B1 の記録（既定は完走の道） */
 const head = (
   options: { readonly t2?: unknown; readonly yaml?: string; readonly table?: NameTable } = {},
 ): RecordedCall[] => [
-  structured(draftOf(LIST, options.table ?? TABLE)),
+  structured(t1Of(LIST, options.table ?? TABLE)),
   structured(acceptAll()),
   structured(options.t2 ?? t2Response()),
   structured({ declaration: options.yaml ?? RUN_YAML }),
@@ -359,7 +385,7 @@ function inputOf(client: GenerationInputV11a["client"], overrides: Partial<Gener
 }
 
 async function runScenario(calls: readonly RecordedCall[], overrides: Partial<GenerationInputV11a> = {}) {
-  const recording = createRecordingClient(calls);
+  const recording = createCheckedRecordingClient(calls);
   const result = await runGenerationV11a(inputOf(recording.client, overrides));
   return { result, recording };
 }
@@ -510,10 +536,10 @@ describe("(a) 完走：v1 と同じ門で full。v1 の成果物と 7 つの記�
 /** T1' に落ちる下書き（要件の写しを入れ替える） */
 function badDraft(marker = "目印の値の写し") {
   const draft = draftOf(LIST, TABLE);
-  return {
+  return t1ResponseOf({
     ...draft,
     requirements: draft.requirements.map((entry, index) => (index === 0 ? { ...entry, copy: marker } : entry)),
-  };
+  });
 }
 
 describe("(b) T1' に 2 回落ちる", () => {
@@ -552,9 +578,9 @@ describe("(c) T1'' の拒否 → T1 の 2 回目 → 残った拒否は持ち越
     const rejectR3 = judgments(IDS, { R3: ["unnecessary-ownership", "締められる"] });
     const { result, recording } = await runScenario(
       [
-        structured(draftOf(LIST, TABLE)),
+        structured(t1Of(LIST, TABLE)),
         structured(rejectR3),
-        structured(draftOf(LIST, TABLE)),
+        structured(t1Of(LIST, TABLE)),
         structured(rejectR3),
         structured(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"])),
         structured({ declaration: RUN_YAML }),
@@ -588,7 +614,7 @@ describe("(c) T1'' の拒否 → T1 の 2 回目 → 残った拒否は持ち越
 describe("(d) T1'' の不完全な結果が 2 回", () => {
   it("段 semantic-check・malformed・exit_code 1", async () => {
     const incomplete = { judgments: ["R1", "R2", "R3"].map(accept) };
-    const { result } = await runScenario([structured(draftOf(LIST, TABLE)), structured(incomplete), structured(incomplete)]);
+    const { result } = await runScenario([structured(t1Of(LIST, TABLE)), structured(incomplete), structured(incomplete)]);
     expect(result.stopped?.stage).toBe("semantic-check");
     expect(result.stopped?.kind).toBe("malformed");
     expect(result.summary.exit_code).toBe(1);
@@ -605,9 +631,9 @@ describe("(e) 全件持ち越し（D15）", () => {
       R4: ["weak-verification", "まとめの画面"],
     });
     const { result, recording } = await runScenario([
-      structured(draftOf(LIST, TABLE)),
+      structured(t1Of(LIST, TABLE)),
       structured(rejectAll),
-      structured(draftOf(LIST, TABLE)),
+      structured(t1Of(LIST, TABLE)),
       structured(rejectAll),
     ]);
     expect(result.stopped).toEqual({ stage: "carry-over", kind: "unmet", problems: [ALL_CARRIED_PROBLEM] });
@@ -1073,7 +1099,7 @@ describe("(l) T1・T2 の断った候補", () => {
     const t2Bad = t2Response([...r1Tests(), ...r2Tests(), ...r4Tests(), { ...r3Tests()[0]!, id: "目印の試験-5823" }]);
     const { result } = await runScenario([
       structured(badDraft(marker)),
-      structured(draftOf(LIST, TABLE)),
+      structured(t1Of(LIST, TABLE)),
       structured(acceptAll()),
       structured(t2Bad),
       structured(t2Response()),
@@ -1136,9 +1162,9 @@ describe("持ち越しの関数（A1）が断ったとき", () => {
     // R2 を T1'' の拒否で持ち越すと e.member が除かれ、残る行の参照先が除いた行を指す
     const rejectR2 = judgments(IDS, { R2: ["unnecessary-ownership", "担当者の名前"] });
     const { result } = await runScenario([
-      structured(draftOf(LIST, TABLE)),
+      structured(t1Of(LIST, TABLE)),
       structured(rejectR2),
-      structured(draftOf(LIST, TABLE)),
+      structured(t1Of(LIST, TABLE)),
       structured(rejectR2),
     ]);
     expect(result.stopped?.stage).toBe("carry-over");
@@ -1153,7 +1179,7 @@ describe("持ち越しの関数（A1）が断ったとき", () => {
 // ── (o) T2 の分類の完全性と J2 の判断の保持（レビュー #521 の指摘 1・2）─────────────────
 
 describe("(o) T2 の分類の完全性と J2 の判断の保持：どちらも full にならない", () => {
-  const ahead = (table: NameTable = TABLE): RecordedCall[] => [structured(draftOf(LIST, table)), structured(acceptAll())];
+  const ahead = (table: NameTable = TABLE): RecordedCall[] => [structured(t1Of(LIST, table)), structured(acceptAll())];
 
   it("分類が空配列・1 件欠落・重複・対象外の T2 が 2 回 → 段 test-spec・unmet で止まり、full にならない", async () => {
     const cases: readonly (readonly NatureRow[])[] = [
@@ -1361,7 +1387,7 @@ describe.each(FLAG_CASES)("(q) 既定値の要件：宣言の default が合え�
     tests: [...r1Tests(), ...r2Tests(), ...r3Tests(), ...r4Tests(), ...(withR6 ? [r6Test()] : [])],
   });
   const dHead = (yaml: string): RecordedCall[] => [
-    structured(draftOf(D_LIST, D_TABLE)),
+    structured(t1Of(D_LIST, D_TABLE)),
     structured(acceptAll(D_IDS)),
     structured(t2D()),
     structured({ declaration: yaml }),
@@ -1451,9 +1477,9 @@ describe.each(FLAG_CASES)("(q) 既定値の要件：宣言の default が合え�
   it("(2) 拒否の配線：T1'' が default-value の要件を weak-verification で 2 回とも拒否すれば持ち越し、T2 の一覧と確かめ方に無く、full が出ない", async () => {
     const rejectR6 = judgments(D_IDS, { R6: ["weak-verification", "未入力なら保存の時点で alpha になる"] });
     const { result, recording } = await runD([
-      structured(draftOf(D_LIST, D_TABLE)),
+      structured(t1Of(D_LIST, D_TABLE)),
       structured(rejectR6),
-      structured(draftOf(D_LIST, D_TABLE)),
+      structured(t1Of(D_LIST, D_TABLE)),
       structured(rejectR6),
       structured(t2D(false)),
       structured({ declaration: dYaml("alpha") }),
@@ -1478,9 +1504,9 @@ describe.each(FLAG_CASES)("(q) 既定値の要件：宣言の default が合え�
       Object.fromEntries(D_IDS.map((id) => [id, ["weak-verification", "項目"] as const])),
     );
     const { result, recording } = await runD([
-      structured(draftOf(D_LIST, D_TABLE)),
+      structured(t1Of(D_LIST, D_TABLE)),
       structured(rejectAll),
-      structured(draftOf(D_LIST, D_TABLE)),
+      structured(t1Of(D_LIST, D_TABLE)),
       structured(rejectAll),
     ]);
     expect(result.stopped?.stage).toBe("carry-over");
@@ -1536,7 +1562,7 @@ describe("(r) 選択肢の集合の要件：enum-membership で確かめる走�
     tests: [...r1Tests(), ...r2Tests(), ...r3Tests(), ...r4Tests(), ...(withR6 ? [r6Test()] : [])],
   });
   const eHead = (yaml: string): RecordedCall[] => [
-    structured(draftOf(E_LIST, E_TABLE)),
+    structured(t1Of(E_LIST, E_TABLE)),
     structured(acceptAll(E_IDS)),
     structured(t2E()),
     structured({ declaration: yaml }),
@@ -1570,7 +1596,8 @@ describe("(r) 選択肢の集合の要件：enum-membership で確かめる走�
   });
 
   it("旗 off では同じ表は T1' の形で落ち（台帳に無い種類）、full が出ない（未登録の拒否）", async () => {
-    const { result } = await runScenario([structured(draftOf(E_LIST, E_TABLE_PLAIN)), structured(draftOf(E_LIST, E_TABLE_PLAIN))], {
+    const unregistered = negative(t1Of(E_LIST, E_TABLE_PLAIN), "旗 off の schema の確かめ方の kind の enum に enum-membership が無い。段の未登録の拒否を観測する負例");
+    const { result } = await runScenario([structured(unregistered), structured(unregistered)], {
       plan: E_PLAN,
       source: E_SOURCE,
     });
@@ -1635,7 +1662,7 @@ describe("(r) 選択肢の集合の要件：enum-membership で確かめる走�
       });
     const t2 = { classifications: E_NATURES, tests: [...r1Tests(), ...r2Tests(), ...r3Tests(), ...r4Tests(), ...KINDS.map(validationTest)] };
     const { result } = await runE([
-      structured(draftOf(E_LIST, table)),
+      structured(t1Of(E_LIST, table)),
       structured(acceptAll(E_IDS)),
       structured(t2),
       structured({ declaration: RUN_YAML }),
@@ -1657,9 +1684,9 @@ describe("(r) 選択肢の集合の要件：enum-membership で確かめる走�
   it("拒否の配線：T1'' が enum-membership の要件を weak-verification で 2 回とも拒否すれば持ち越し、T2 の一覧と確かめ方に無く、full が出ない", async () => {
     const rejectR6 = judgments(E_IDS, { R6: ["weak-verification", "alpha・beta のどれかである"] });
     const { result, recording } = await runE([
-      structured(draftOf(E_LIST, E_TABLE)),
+      structured(t1Of(E_LIST, E_TABLE)),
       structured(rejectR6),
-      structured(draftOf(E_LIST, E_TABLE)),
+      structured(t1Of(E_LIST, E_TABLE)),
       structured(rejectR6),
       structured(t2E(false)),
       structured({ declaration: RUN_YAML }),
@@ -1738,7 +1765,7 @@ describe("(s) 空の集計の要件：空の境界・未読の異常を empty-ag
   ];
   const t2S = (extra = emptyAggregateTests()) => t2Response([...r1Tests(), ...r2Tests(), ...r3Tests(), ...r4Tests(), ...extra]);
   const sHead = (yaml: string, table: NameTable = S_TABLE, t2: unknown = t2S()): RecordedCall[] => [
-    structured(draftOf(LIST, table)),
+    structured(t1Of(LIST, table)),
     structured(acceptAll()),
     structured(t2),
     structured({ declaration: yaml }),
@@ -1804,7 +1831,7 @@ describe("(s) 空の集計の要件：空の境界・未読の異常を empty-ag
     const aOne = aggTest("r4-empty-null", "c.base", "boundary", ["e.item"], null, "value");
     const t2 = t2S([aOne]);
     // 旗 on：T2' が 2 回とも落とし、段 test-spec で止まる（B4 へ進まない）
-    const on = await runScenario([structured(draftOf(LIST, S_TABLE)), structured(acceptAll()), structured(t2), structured(t2)], flags);
+    const on = await runScenario([structured(t1Of(LIST, S_TABLE)), structured(acceptAll()), structured(t2), structured(t2)], flags);
     expect(on.result.stopped?.stage).toBe("test-spec");
     expect(on.result.outcome.verdict).not.toBe("full");
     expect(stageIds(on.result)).not.toContain("run-tests");
@@ -1825,7 +1852,8 @@ describe("(s) 空の集計の要件：空の境界・未読の異常を empty-ag
   });
 
   it("(a) 旗 on の実際の経路：計算の行の aggregate の欄が欠けた T1 の応答は形（schema の必須の欄）で落ち、T1' の集計の検査に届かない。2 回とも欠ければ T1 で止まり full が出ない", async () => {
-    const { result, recording } = await runScenario([structured(draftOf(LIST, S_TABLE_PLAIN)), structured(draftOf(LIST, S_TABLE_PLAIN))], flags);
+    const omitted = negative(t1Of(LIST, S_TABLE_PLAIN), "計算の行の型に aggregate の欄が無い応答。旗 on の schema は必須にするので strict では出ないが、段の形の検査の落ちを観測する負例");
+    const { result, recording } = await runScenario([structured(omitted), structured(omitted)], flags);
     expect(result.stopped?.stage).toBe("name-table");
     expect(result.outcome.verdict).not.toBe("full");
     expect(schemaNames(recording.structured)).toEqual([NAME_TABLE_SCHEMA_NAME, NAME_TABLE_SCHEMA_NAME]);
@@ -1853,7 +1881,7 @@ describe("(s) 空の集計の要件：空の境界・未読の異常を empty-ag
   it("(b) 集計の検査の省略は門の免除にならない：LLM を経ずにコードが組んだ表（計算の行に aggregate の欄が無い）から再開した旗 on の走りで、empty-aggregate の試験は T2' で 2 回とも落ちて B4 へ進まず、value の観測で空に null を期待した試験は T2' を通っても B4 の不一致で full が出ない", async () => {
     // 境界 T1''／T2 の材料を、欄の無い表（旗 off の走り＝コードが組む表と同じ形）から取る
     const first = await runStageRangeV11a({
-      ...inputOf(createRecordingClient([structured(draftOf(LIST, S_TABLE_PLAIN)), structured(acceptAll())]).client),
+      ...inputOf(createCheckedRecordingClient([structured(t1Of(LIST, S_TABLE_PLAIN)), structured(acceptAll())]).client),
       range: { start: "name-table", end: "semantic-check" },
     });
     expect(first.stopped).toBeNull();
@@ -1863,7 +1891,7 @@ describe("(s) 空の集計の要件：空の境界・未読の異常を empty-ag
     expect(resume.table).toEqual(S_TABLE_PLAIN);
     // empty-aggregate の試験（形は正しい：空の合計に 0・未読に null）でも、表に集計の種類と集計元が無いので対象の落ち
     const t2 = t2S(emptyAggregateTests().slice(0, 2));
-    const rejectedRecording = createRecordingClient([structured(t2), structured(t2)]);
+    const rejectedRecording = createCheckedRecordingClient([structured(t2), structured(t2)]);
     const rejected = await runStageRangeV11a({ ...inputOf(rejectedRecording.client), ...flags, range: { start: "test-spec", end: "judge" }, resume });
     expect(rejected.stopped?.stage).toBe("test-spec");
     expect(rejected.stages.map((record) => record.stage)).not.toContain("run-tests");
@@ -1877,7 +1905,7 @@ describe("(s) 空の集計の要件：空の境界・未読の異常を empty-ag
     const { reports } = spyRuns();
     const aOne = aggTest("r4-empty-null", "c.base", "boundary", ["e.item"], null, "value");
     const passed = await runStageRangeV11a({
-      ...inputOf(createRecordingClient([structured(t2S([aOne])), structured({ declaration: S_YAML }), structured(acceptAll()), repairDone(S_YAML), structured(acceptAll())]).client),
+      ...inputOf(createCheckedRecordingClient([structured(t2S([aOne])), structured({ declaration: S_YAML }), structured(acceptAll()), repairDone(S_YAML), structured(acceptAll())]).client),
       ...flags,
       range: { start: "test-spec", end: "judge" },
       resume,
@@ -1888,7 +1916,8 @@ describe("(s) 空の集計の要件：空の境界・未読の異常を empty-ag
   });
 
   it("旗 off では同じ表（計算の行に aggregate を持つ）は T1' の形で落ち（未登録の拒否）、full が出ない", async () => {
-    const { result } = await runScenario([structured(draftOf(LIST, S_TABLE)), structured(draftOf(LIST, S_TABLE))]);
+    const unregistered = negative(t1Of(LIST, S_TABLE), "旗 off の schema は行の型に aggregate の欄を持たない。段の未登録の拒否を観測する負例");
+    const { result } = await runScenario([structured(unregistered), structured(unregistered)]);
     expect(result.stopped?.stage).toBe("name-table");
     expect(result.outcome.verdict).not.toBe("full");
   });
@@ -1950,7 +1979,7 @@ describe("(t) 操作の条件（when）の試験：期待が ok なら真偽・�
   for (const entry of negatives) {
     it(`(2) 負例：${entry.name}の走りは、旗 on では T2' で 2 回とも落ちて B4 へ進まず full が出ない。旗 off は今までどおり B4 まで流れ「期待は真偽」の不一致`, async () => {
       const t2 = t2With(entry.expected);
-      const on = await runScenario([structured(draftOf(LIST, TABLE_ON)), structured(acceptAll()), structured(t2), structured(t2)], flags);
+      const on = await runScenario([structured(t1Of(LIST, TABLE_ON)), structured(acceptAll()), structured(t2), structured(t2)], flags);
       expect(on.result.stopped?.stage).toBe("test-spec");
       expect(on.result.outcome.verdict).not.toBe("full");
       expect(stageIds(on.result)).not.toContain("run-tests");
@@ -1974,7 +2003,7 @@ describe("(t) 操作の条件（when）の試験：期待が ok なら真偽・�
       expected: ok("true"),
     });
     const t2 = t2Response([...r1Tests(), noWhen, ...r2Tests(), ...r3Tests(), ...r4Tests()]);
-    const on = await runScenario([structured(draftOf(LIST, TABLE_ON)), structured(acceptAll()), structured(t2), structured(t2)], flags);
+    const on = await runScenario([structured(t1Of(LIST, TABLE_ON)), structured(acceptAll()), structured(t2), structured(t2)], flags);
     expect(on.result.stopped?.stage).toBe("test-spec");
     expect(stageIds(on.result)).not.toContain("run-tests");
     expect(JSON.stringify(diagnosticOf(on.result.diagnostics, DIAGNOSTICS_REJECTED_TEST_SPEC_FILE))).toContain(WHEN_T2.messages.target);
@@ -2009,7 +2038,7 @@ describe("(u) 要件でない文：T1'' が受理した non-requirement の要�
   it("(1) 正例：前置き 1 件を non-requirement にし T1'' が受理、ほかの要件が通る走りは今までの門で full。T2 の要求の一覧・確かめ方にその要件が無く、持ち越しの記録の non_requirements にある", async () => {
     const m = materialsOf("R6", NON_REQUIREMENT_TEXT);
     const { result, recording } = await runScenario(
-      [structured(draftOf(m.list, m.table)), structured(acceptAll(m.ids)), structured(t2Response()), structured({ declaration: RUN_YAML }), structured(acceptAll())],
+      [structured(t1Of(m.list, m.table)), structured(acceptAll(m.ids)), structured(t2Response()), structured({ declaration: RUN_YAML }), structured(acceptAll())],
       { ...flags, plan: m.plan, source: m.source },
     );
     expect(result.stopped).toBeNull();
@@ -2047,7 +2076,7 @@ describe("(u) 要件でない文：T1'' が受理した non-requirement の要�
       };
     });
     const { result, recording } = await runScenario(
-      [structured(draftOf(m.list, m.table)), structured(acceptAll(m.ids)), structured(t2Response()), structured({ declaration: RUN_YAML }), structured(acceptAll())],
+      [structured(t1Of(m.list, m.table)), structured(acceptAll(m.ids)), structured(t2Response()), structured({ declaration: RUN_YAML }), structured(acceptAll())],
       { ...flags, plan: m.plan, source: m.source },
     );
     expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
@@ -2079,9 +2108,9 @@ describe("(u) 要件でない文：T1'' が受理した non-requirement の要�
       const rejectIt = judgments(m.ids, { [id]: ["weak-verification", RULED_AS_NON_REQUIREMENT_QUOTE] });
       const { result, recording } = await runScenario(
         [
-          structured(draftOf(m.list, m.table)),
+          structured(t1Of(m.list, m.table)),
           structured(rejectIt),
-          structured(draftOf(m.list, m.table)),
+          structured(t1Of(m.list, m.table)),
           structured(rejectIt),
           structured(t2Response()),
           structured({ declaration: RUN_YAML }),
@@ -2105,7 +2134,7 @@ describe("(u) 要件でない文：T1'' が受理した non-requirement の要�
   it("(4) 負例：了承した代替先の欠落（確定した仕様に R:alt: の要件があるのに、T1 の応答の確かめ方・所属・分類のどれからもその ID ごと抜けた）が 2 回続く走りは、T1' の完全性の検査で落ち、段 name-table・unmet で止まって full が出ない", async () => {
     const m = materialsOf("R:alt:x1", RULED_AS_NON_REQUIREMENT_TEXT);
     const draft = draftOf(m.list, m.table);
-    const dropped = { ...draft, requirements: draft.requirements.slice(0, -1) };
+    const dropped = t1ResponseOf({ ...draft, requirements: draft.requirements.slice(0, -1) }, PROPERTY_LEDGER_VIEW);
     const { result, recording } = await runScenario([structured(dropped), structured(dropped)], { ...flags, plan: m.plan, source: m.source });
     expect(result.stopped?.stage).toBe("name-table");
     expect(result.stopped?.kind).toBe("unmet");
@@ -2120,7 +2149,7 @@ describe("(u) 要件でない文：T1'' が受理した non-requirement の要�
     const m = materialsOf("R6", NON_REQUIREMENT_TEXT);
     const t2 = t2Response([...r1Tests(), ...r2Tests(), ...r3Tests(), ...r4Tests(), rawTest({ id: "r6-x", requirementId: "R6", targetKind: "entity", roleId: "e.item", operation: "screen", observes: "existence", expected: ok("true") })]);
     const { result } = await runScenario(
-      [structured(draftOf(m.list, m.table)), structured(acceptAll(m.ids)), structured(t2), structured(t2)],
+      [structured(t1Of(m.list, m.table)), structured(acceptAll(m.ids)), structured(t2), structured(t2)],
       { ...flags, plan: m.plan, source: m.source },
     );
     expect(result.stopped?.stage).toBe("test-spec");
@@ -2131,7 +2160,7 @@ describe("(u) 要件でない文：T1'' が受理した non-requirement の要�
     const m = materialsOf("R6", NON_REQUIREMENT_TEXT);
     const rejectOthers = judgments(m.ids, Object.fromEntries(IDS.map((id) => [id, ["weak-verification", "項目"] as const])));
     const { result, recording } = await runScenario(
-      [structured(draftOf(m.list, m.table)), structured(rejectOthers), structured(draftOf(m.list, m.table)), structured(rejectOthers)],
+      [structured(t1Of(m.list, m.table)), structured(rejectOthers), structured(t1Of(m.list, m.table)), structured(rejectOthers)],
       { ...flags, plan: m.plan, source: m.source },
     );
     expect(result.stopped).toEqual({ stage: "carry-over", kind: "unmet", problems: [ALL_CARRIED_OR_NON_REQUIREMENT_PROBLEM] });
@@ -2144,7 +2173,8 @@ describe("(u) 要件でない文：T1'' が受理した non-requirement の要�
   it("旗 off では同じ表（non-requirement を持つ）は T1' で落ち（未登録の拒否）、full が出ない", async () => {
     const m = materialsOf("R6", NON_REQUIREMENT_TEXT);
     const plainTable: NameTable = { ...m.table, rows: TABLE.rows };
-    const { result } = await runScenario([structured(draftOf(m.list, plainTable)), structured(draftOf(m.list, plainTable))], { plan: m.plan, source: m.source });
+    const unregistered = negative(t1Of(m.list, plainTable), "旗 off の schema の確かめ方の kind の enum に non-requirement が無い。段の未登録の拒否を観測する負例");
+    const { result } = await runScenario([structured(unregistered), structured(unregistered)], { plan: m.plan, source: m.source });
     expect(result.stopped?.stage).toBe("name-table");
     expect(result.outcome.verdict).toBe("none");
   });
@@ -2152,7 +2182,7 @@ describe("(u) 要件でない文：T1'' が受理した non-requirement の要�
 
 describe("段単位の走り：範囲の外の段を呼ばず、納品物を組まず、境界の材料に B の結果を入れない", () => {
   it("終了 T1''：T2 以降を呼ばず、T1''／T2 の境界だけを返す", async () => {
-    const recording = createRecordingClient(head().slice(0, 2));
+    const recording = createCheckedRecordingClient(head().slice(0, 2));
     const outcome = await runStageRangeV11a({ ...inputOf(recording.client), range: { start: "name-table", end: "semantic-check" } });
     expect(outcome.stopped).toBeNull();
     expect(schemaNames(recording.structured)).toEqual([NAME_TABLE_SCHEMA_NAME, SEMANTIC_CHECK_SCHEMA_NAME]);
@@ -2162,7 +2192,7 @@ describe("段単位の走り：範囲の外の段を呼ばず、納品物を組�
   });
 
   it("終了 ⑦：⑧（bundle）を呼ばず、⑦ の判定を別に返す。境界の持ち越しは B3' で増えた分を含まない", async () => {
-    const recording = createRecordingClient([...head(), structured(judgments(IDS, REJECT_R3)), repairDone(RUN_YAML), structured(judgments(IDS, REJECT_R3))]);
+    const recording = createCheckedRecordingClient([...head(), structured(judgments(IDS, REJECT_R3)), repairDone(RUN_YAML), structured(judgments(IDS, REJECT_R3))]);
     const outcome = await runStageRangeV11a({ ...inputOf(recording.client), range: { start: "name-table", end: "judge" } });
     expect(outcome.stopped).toBeNull();
     expect(outcome.stages.map((record) => record.stage)).not.toContain("bundle");
@@ -2181,7 +2211,7 @@ describe("段単位の走り：範囲の外の段を呼ばず、納品物を組�
   });
 
   it("開始 T2・B1 に再開の材料が無ければ、呼ばずに断る（呼ぶ側の誤り）", async () => {
-    const recording = createRecordingClient([]);
+    const recording = createCheckedRecordingClient([]);
     await expect(runStageRangeV11a({ ...inputOf(recording.client), range: { start: "test-spec", end: "judge" } })).rejects.toThrow();
     await expect(runStageRangeV11a({ ...inputOf(recording.client), range: { start: "write", end: "judge" } })).rejects.toThrow();
     expect(recording.structured).toHaveLength(0);
@@ -2609,7 +2639,7 @@ describe("旗の組の契約（要約の v12_flags）", () => {
     const summaryFile = full.result.bundle?.artifacts.find((artifact) => artifact.path === "artifacts/summary.json");
     expect((JSON.parse(summaryFile?.text ?? "{}") as Record<string, unknown>)["v12_flags"]).toEqual(V12_PIPELINE_FLAGS);
     const bad = draftOf(LIST, TABLE);
-    const broken = { ...bad, requirements: bad.requirements.map((entry, index) => (index === 0 ? { ...entry, copy: "目印の値の写し" } : entry)) };
+    const broken = t1ResponseOf({ ...bad, requirements: bad.requirements.map((entry, index) => (index === 0 ? { ...entry, copy: "目印の値の写し" } : entry)) }, PROPERTY_LEDGER_VIEW);
     const stopped = await runScenario([structured(broken), structured(broken)], extra);
     expect(stopped.result.stopped?.stage).toBe("name-table");
     expect((stopped.result.summary as unknown as Record<string, unknown>)["v12_flags"]).toEqual(V12_PIPELINE_FLAGS);

@@ -9,8 +9,11 @@ import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { describe, expect, it } from "vitest";
 import type { RequirementList } from "../../pipeline.js";
 import { ruleDefinitionDefects } from "../../stages/prompt.js";
-import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
+import { expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
+  createCheckedRecordingClient,
+  negative,
+  recordedStructured,
   FIXTURE_DOCUMENTS,
   fixtureDefaultValueList,
   fixtureDefaultValueTable,
@@ -47,7 +50,7 @@ import {
   semanticCheckTargets,
 } from "./semantic-check.js";
 
-const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
+const structured = recordedStructured;
 
 function planOf(list: RequirementList): ConfirmedPlan {
   return {
@@ -84,7 +87,7 @@ const reject = (requirementId: string, kind: string, quote: string) => ({ requir
 const acceptAll = (except: string) => TARGETS.filter((id) => id !== except).map(accept);
 
 async function run(table: NameTable, outputs: readonly unknown[], advice?: readonly JudgeAdviceMarkEntry[]) {
-  const recording = createRecordingClient(outputs.map(structured));
+  const recording = createCheckedRecordingClient(outputs.map(structured));
   const outcome = await runSemanticCheck({
     plan: PLAN,
     list: LIST,
@@ -248,7 +251,7 @@ describe("T1'' の完全性（形の落ち）", () => {
     ],
     [
       "未知の拒否の種類",
-      { judgments: [...acceptAll("R1"), reject("R1", "other", "題名")] },
+      negative({ judgments: [...acceptAll("R1"), reject("R1", "other", "題名")] }, "拒否の種類が enum の外の応答。strict の schema では出ないが、形の検査の固定文を観測する負例"),
       { field: "judgments[3].kind", message: "拒否の種類は unnecessary-ownership・missing-target・weak-verification のいずれかであること" },
     ],
   ];
@@ -281,7 +284,7 @@ describe("T1'' の default-value の受理の条件（拒否の配線の検証�
   const DEFAULT_TARGETS = [...TARGETS, "R6"];
 
   async function runDefault(list: RequirementList, table: NameTable, outputs: readonly unknown[]) {
-    const recording = createRecordingClient(outputs.map(structured));
+    const recording = createCheckedRecordingClient(outputs.map(structured));
     const outcome = await runSemanticCheck({
       plan: planOf(list),
       list,
@@ -388,7 +391,7 @@ describe("旗 on：R-sc-02 の末尾に台帳の受理条件の文を台帳の�
     const list = fixtureDefaultValueList();
     const table = fixtureDefaultValueTable();
     const runWith = async (ledger?: LedgerView) => {
-      const recording = createRecordingClient([structured({ judgments: [...TARGETS, "R6"].map(accept) })]);
+      const recording = createCheckedRecordingClient([structured({ judgments: [...TARGETS, "R6"].map(accept) })]);
       const outcome = await runSemanticCheck({
         plan: planOf(list),
         list,
@@ -426,7 +429,7 @@ describe("T1'' の enum-membership の受理の条件（旗 on。拒否の配線
   const ledger = PROPERTY_LEDGER_VIEW;
 
   async function runEnum(list: RequirementList, table: NameTable, outputs: readonly unknown[]) {
-    const recording = createRecordingClient(outputs.map(structured));
+    const recording = createCheckedRecordingClient(outputs.map(structured));
     const outcome = await runSemanticCheck({
       plan: planOf(list),
       list,
@@ -502,7 +505,7 @@ describe("T1'' の non-requirement の点検（旗 on。配線の検証。モデ
   const NON_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "non-requirement");
 
   async function runNon(list: RequirementList, table: NameTable, outputs: readonly unknown[]) {
-    const recording = createRecordingClient(outputs.map(structured));
+    const recording = createCheckedRecordingClient(outputs.map(structured));
     const outcome = await runSemanticCheck({
       plan: planOf(list),
       list,
