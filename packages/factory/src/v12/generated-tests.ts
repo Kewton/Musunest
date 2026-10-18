@@ -9,14 +9,31 @@
 //   - empty-aggregate（集計の試験の型の `codeRanges`。アプリ全体と見出しごと × 選択肢）：確かめ方が fixed-test で分類が ruled の
 //     要件が所属させた集計の行ごとに、集計元を空と明示した境界と集計元に触れない異常（期待は台帳の表の値）。行ごとと見出しごと
 //     × 月の集計は作らない（入力の行が要る／見出しの数が宣言の `last` で決まる。今までどおり LLM が書き T2' が照らす）
+//   - 構造の検査（手 3d・Issue #624）：確かめ方が structural の要件ごとに、確かめ方の checks の各項目（手 3b の表が持つ check・対象の
+//     行 ID・view-shows の元の行 ID）に 1 本。assertion の値は表の行の型（項目の種類・参照先・操作の種類）と元の行 ID から導く
+//   - 画面と在ることの構造の確認（手 3d・Issue #624。台帳の view-structure・existence の C4 の試験の型）：確かめ方が fixed-test の
+//     要件の所属の画面の行ごとに screen × screen を 1 本、画面の行が無ければ所属の entity の行ごとに entity × screen を 1 本
+//
+// 作る対象は確かめ方の種類で分ける（要件ごとに 1 つの枝だけ）：structural は構造の検査だけ、台帳の書き手が `code` の確かめ方
+// （default-value・enum-membership）は専用の 1 本だけ、fixed-test は画面・在ることと空の集計。対象の行が表に無い・種類の合わない
+// checks は作らず、その要件を固定文で止める（`stopped`。近い行に結び付けない＝fail-closed）。
 //
 // 試験 ID はコードが振る（予約の接頭辞 `GENERATED_TEST_ID_PREFIX`。LLM の試験 ID に使えば T2' が固定文で落とす）。期待の値を
 // 書くのはここだけで、評価口は作り手を区別しない（B4 の照合は今までどおり。期待と宣言が違えば不一致）。
-import type { FixedTest, TestKind } from "../fixed-test.js";
+import {
+  STRUCTURAL_FIELD_KINDS,
+  STRUCTURAL_TARGET_KINDS,
+  type FixedTest,
+  type StructuralAssertion,
+  type StructuralAssertionKind,
+  type TestKind,
+  type TestTargetKind,
+} from "../fixed-test.js";
 import type { RequirementList } from "../pipeline.js";
 import type { Problem } from "../stages/prompt.js";
-import type { ComputationAggregate, ComputationRowType, NameTable } from "../v11a/names.js";
+import type { ComputationAggregate, ComputationRowType, NameTable, NameTableRow, OperationRowType } from "../v11a/names.js";
 import {
+  OWNERSHIP_STRUCTURE_NOT_ALLOWED,
   aggregateStateValueOf,
   type AggregateDataState,
   type AggregateRange,
@@ -159,6 +176,11 @@ export interface GeneratedTests {
    * 1 本以上ある（作れない要件は載せない＝fail-closed）
    */
   readonly excludedRequirementIds: readonly string[];
+  /**
+   * 作れずに止めた要件の問題（構造の検査の対象の行が表に無い・種類が合わない。位置は一覧の `requirements[添字]`、文は固定文。
+   * #624）。空でなければ、呼ぶ側はその要件を固定文で止める（試験を作らず、近い行に結び付けない）
+   */
+  readonly stopped: readonly Problem[];
 }
 
 /** 作る試験を組む入力（持ち越しを除いた表と一覧。台帳は旗 on の導出） */
@@ -184,6 +206,7 @@ function generatedTest(
   operation: FixedTest["operation"],
   emptyEntities: readonly string[],
   value: unknown,
+  assertion?: StructuralAssertion,
 ): FixedTest {
   return {
     id,
@@ -195,7 +218,90 @@ function generatedTest(
     inputContract: { rowId: GENERATED_TEST_ROW_ID, targetRowId: null, emptyEntities },
     referenceData: [],
     expected: { kind: "ok", value },
+    ...(assertion === undefined ? {} : { assertion }),
   };
+}
+
+// ── 構造の検査（手 3d・#624）──────────────────────────────────────
+
+/** 構造の検査の、検査の中身ごとの観測する性質（view-shows は画面の構造、ほかは宣言に在ることの確認。T2' の対応表と同じ） */
+export const GENERATED_STRUCTURE_OBSERVES: Readonly<Record<StructuralAssertionKind, string>> = {
+  "field-type": "existence",
+  "action-kind": "existence",
+  "action-unconditioned": "existence",
+  "view-shows": "view-structure",
+  "aggregate-no-period": "existence",
+  "write-anonymous": "existence",
+};
+
+/** 構造の検査を作れずに要件を止めるときの固定文（値を埋めない。#624） */
+export const GENERATED_STRUCTURE_STOP_MESSAGES = {
+  /** 確かめ方に検査ごとの対象が無い・checks と数か順が合わない */
+  targets: "構造で確かめる要件の確かめ方に、checks ごとの対象の行が無いので、構造の検査を作れない",
+  /** 対象の行（view-shows の元の行を含む）が表に無い */
+  unknownRow: "構造の検査の対象の行が表に無いので、構造の検査を作れない",
+  /** 対象の行の種類・型が検査の中身に合わない */
+  rowKind: "構造の検査の対象の行の種類か型が、検査の中身に合わないので、構造の検査を作れない",
+} as const;
+
+const isOperationRowType = (type: NameTableRow["type"]): type is OperationRowType =>
+  type !== null && typeof type === "object" && "action" in type;
+
+/**
+ * 構造の検査 1 つの assertion を表の行から導く（純粋）。field-type は行の項目の種類と参照先 entity の行 ID、action-kind は操作の
+ * 行の種類、view-shows は元の行 ID、ほかは中身だけ。導けなければ止める文を返す（近い行に結び付けない）。
+ */
+function structureAssertionOf(
+  check: StructuralAssertionKind,
+  row: NameTableRow,
+  source: NameTableRow | null,
+): StructuralAssertion | string {
+  if (row.kind !== STRUCTURAL_TARGET_KINDS[check]) return GENERATED_STRUCTURE_STOP_MESSAGES.rowKind;
+  switch (check) {
+    case "field-type": {
+      const type = row.type;
+      if (typeof type !== "string" || !(STRUCTURAL_FIELD_KINDS as readonly string[]).includes(type)) {
+        return GENERATED_STRUCTURE_STOP_MESSAGES.rowKind;
+      }
+      if (type === "ref" && row.refEntity === null) return GENERATED_STRUCTURE_STOP_MESSAGES.rowKind;
+      const refEntity = type === "ref" || type === "list" ? row.refEntity : null;
+      return { check, expected: type, ...(refEntity === null ? {} : { refEntity }) };
+    }
+    case "action-kind":
+      return isOperationRowType(row.type) ? { check, expected: row.type.action } : GENERATED_STRUCTURE_STOP_MESSAGES.rowKind;
+    case "view-shows":
+      if (source === null) return GENERATED_STRUCTURE_STOP_MESSAGES.unknownRow;
+      if (source.kind !== "field" && source.kind !== "computation") return GENERATED_STRUCTURE_STOP_MESSAGES.rowKind;
+      return { check, role: source.id };
+    default:
+      return { check };
+  }
+}
+
+/** 試験を作る行の種類か（要件の所属の行の種類が、台帳の行の組ごとの対象の種類にあるか） */
+const ownedOfKind = (owned: readonly NameTableRow[], kinds: readonly TestTargetKind[]): readonly NameTableRow[] =>
+  owned.filter((row) => kinds.includes(row.kind));
+
+/**
+ * 所属の行がすべて、必須の kind が normal だけの試験の型の対象（台帳の `ownershipRows` の組ごとの対象の種類＝画面・entity の行）
+ * である要件 ID（一覧の順。#624）。正常・異常・境界のそろいの不足の免除に使う。**免除は台帳の型と所属だけで決め、作った試験の
+ * 有無・数では決めない**。所属が 0 行の要件は載せない
+ */
+export function normalOnlyOwnershipRequirementIds(table: NameTable, ledger: LedgerView, list: RequirementList): readonly string[] {
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const rolesById = new Map(table.ownership.map((entry) => [entry.requirementId, entry.roles] as const));
+  const kinds = new Set(
+    ledger.ownershipRows.filter((row) => row.t2.requiredKinds.every((kind) => kind === "normal")).flatMap((row) => row.t2.targetKinds),
+  );
+  return list.requirements
+    .filter((requirement) => {
+      const roles = rolesById.get(requirement.id) ?? [];
+      return roles.length > 0 && roles.every((role) => {
+        const owned = rowById.get(role.id);
+        return owned !== undefined && kinds.has(owned.kind);
+      });
+    })
+    .map((requirement) => requirement.id);
 }
 
 /**
@@ -210,30 +316,62 @@ export function generateTests(input: GeneratedTestsInput): GeneratedTests {
   const natureById = new Map(table.classification.map((entry) => [entry.requirementId, entry.nature] as const));
   const rolesById = new Map(table.ownership.map((entry) => [entry.requirementId, entry.roles] as const));
   const aggregateRows = ledger.aggregateRows.filter((row) => row.t2Aggregate.codeRanges.length > 0);
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
   const tests: FixedTest[] = [];
   const observes = new Map<string, string>();
   const excluded: string[] = [];
+  const stopped: Problem[] = [];
   const push = (test: FixedTest, observed: string): void => {
     tests.push(test);
     observes.set(test.id, observed);
   };
-  for (const requirement of list.requirements) {
+  list.requirements.forEach((requirement, index) => {
+    const verification = verificationById.get(requirement.id);
+    // (a) structural：構造の検査だけ（画面・在ることは作らない。#624）。作れない checks があれば要件ごと止める
+    if (verification?.kind === "structural") {
+      const made = structureTestsOf(requirement.id, verification, rowById);
+      if (typeof made === "string") {
+        stopped.push({ field: `requirements[${String(index)}]`, message: made });
+        return;
+      }
+      for (const { test, observed } of made) push(test, observed);
+      excluded.push(requirement.id);
+      return;
+    }
     const target = ledgerTargets.get(requirement.id);
     if (target !== undefined) {
       const { row } = target;
-      if (row.t2.expectedWriter !== "code") continue;
+      if (row.t2.expectedWriter !== "code") return;
       const value = row.t2.expected.equals === "target-options" ? [...target.options] : target.value;
       // 作れない（必須の kind が無い）要件は除かない（fail-closed。T2 の LLM の一覧に残り、今までどおり照らす）
-      if (row.t2.requiredKinds.length === 0) continue;
+      if (row.t2.requiredKinds.length === 0) return;
       for (const kind of row.t2.requiredKinds) {
         const id = `${GENERATED_TEST_ID_PREFIX}${row.id}:${requirement.id}:${target.fieldId}:${kind}`;
         push(generatedTest(id, requirement.id, row.t2.targetKind, target.fieldId, kind, row.t2.operation, [], value), row.id);
       }
       excluded.push(requirement.id);
-      continue;
+      return;
+    }
+    // (b) 台帳の書き手が code の確かめ方で対象を引けない要件は、画面・在ることを足さない（専用の検査がその要件の全試験を照らす）。
+    // (c) unresolved・non-requirement は一覧に無い。(d) fixed-test だけ：画面・在ることの構造の確認と空の集計
+    if (verification?.kind !== "fixed-test") return;
+    const owned = (rolesById.get(requirement.id) ?? []).flatMap((role) => {
+      const found = rowById.get(role.id);
+      return found === undefined ? [] : [found];
+    });
+    // 画面・在ること（#624）：台帳の順に、所属に組ごとの対象の種類の行がある最初の行の型で、その行ごとに 1 本（種類に依らない）
+    const ownershipRow = ledger.ownershipRows.find((row) => ownedOfKind(owned, row.t2.targetKinds).length > 0);
+    if (ownershipRow !== undefined) {
+      const t2 = ownershipRow.t2;
+      for (const ownedRow of ownedOfKind(owned, t2.targetKinds)) {
+        for (const kind of t2.requiredKinds) {
+          const id = `${GENERATED_TEST_ID_PREFIX}${ownershipRow.id}:${requirement.id}:${ownedRow.id}:${kind}`;
+          push(generatedTest(id, requirement.id, ownedRow.kind, ownedRow.id, kind, t2.operation, [], true), ownershipRow.id);
+        }
+      }
     }
     // 空の集計：確かめ方が fixed-test で分類が ruled の要件だけ（構造で確かめる要件・在ることだけの要件には境界・異常を作らない）
-    if (verificationById.get(requirement.id)?.kind !== "fixed-test" || natureById.get(requirement.id) !== "ruled") continue;
+    if (natureById.get(requirement.id) !== "ruled") return;
     for (const role of rolesById.get(requirement.id) ?? []) {
       const aggregate = aggregateTargets.get(role.id);
       if (aggregate === undefined) continue;
@@ -249,8 +387,47 @@ export function generateTests(input: GeneratedTestsInput): GeneratedTests {
         }
       }
     }
+  });
+  return { tests, observes, excludedRequirementIds: excluded, stopped };
+}
+
+/**
+ * 構造で確かめる要件の構造の検査（checks の各項目に 1 本。並びは checks の順）。確かめ方が検査ごとの対象を持たない・数か中身の
+ * 順が checks と合わない・対象の行が表に無い・種類が合わないときは、止める固定文を返す（1 本も作らない）。
+ */
+function structureTestsOf(
+  requirementId: string,
+  verification: Extract<NameTable["verification"][number], { readonly kind: "structural" }>,
+  rowById: ReadonlyMap<string, NameTableRow>,
+): readonly { readonly test: FixedTest; readonly observed: string }[] | string {
+  const targets = verification.targets;
+  if (
+    targets === undefined ||
+    targets.length === 0 ||
+    targets.length !== verification.checks.length ||
+    targets.some((target, index) => target.check !== verification.checks[index])
+  ) {
+    return GENERATED_STRUCTURE_STOP_MESSAGES.targets;
   }
-  return { tests, observes, excludedRequirementIds: excluded };
+  const made: { readonly test: FixedTest; readonly observed: string }[] = [];
+  for (const target of targets) {
+    const row = rowById.get(target.targetId);
+    if (row === undefined) return GENERATED_STRUCTURE_STOP_MESSAGES.unknownRow;
+    let source: NameTableRow | null = null;
+    if (target.sourceId !== null) {
+      const found = rowById.get(target.sourceId);
+      if (found === undefined) return GENERATED_STRUCTURE_STOP_MESSAGES.unknownRow;
+      source = found;
+    }
+    const assertion = structureAssertionOf(target.check, row, source);
+    if (typeof assertion === "string") return assertion;
+    const id = `${GENERATED_TEST_ID_PREFIX}structure:${requirementId}:${target.check}:${row.id}:normal`;
+    made.push({
+      test: generatedTest(id, requirementId, row.kind, row.id, "normal", "structure", [], true, assertion),
+      observed: GENERATED_STRUCTURE_OBSERVES[target.check],
+    });
+  }
+  return made;
 }
 
 /**
@@ -281,6 +458,12 @@ export function checkGeneratedOverlap(
   suite.tests.forEach((test, index) => {
     if (isGeneratedTestId(test.id)) {
       problems.push({ field: `tests[${index}].id`, message: GENERATED_TEST_ID_MESSAGE });
+      return;
+    }
+    // 構造の検査と画面の試験はコードが作る（手 3c の「同じ組」の口。#624）。LLM の組に operation が structure・screen の試験があれば
+    // 固定文で落とす（台帳に所属の行だけで決まる行が無い台帳では落とさない＝今のまま）
+    if (ledger.ownershipRows.length > 0 && (test.operation === "structure" || test.operation === "screen")) {
+      problems.push({ field: `tests[${index}].operation`, message: OWNERSHIP_STRUCTURE_NOT_ALLOWED });
       return;
     }
     const observed = observes.get(test.id);

@@ -497,10 +497,17 @@ describe("経路 v1.2 の封筒は 1 つ（旗の組から導き、全段で同�
         entry.stage === NAME_TABLE_SCHEMA_NAME
           ? nameTableSchemaOf(PROPERTY_LEDGER_VIEW)
           : entry.stage === TEST_SPEC_SCHEMA_NAME
-            ? testSpecSchemaOf(PROPERTY_LEDGER_VIEW)
+            ? testSpecSchemaOf(PROPERTY_LEDGER_VIEW, true)
             : STAGE_ENVELOPE_ENTRIES_V11A[index]?.schema;
       expect(entry.schema, entry.stage).toEqual(expected);
     }
+    // T2 の枝は旗 ids からも導く（operation の enum に structure が無く assertion は null だけ。#624）。ledger だけ on の一覧は今のまま
+    const t2Of = (entries: readonly StageEnvelopeEntry[]) => entries.find((entry) => entry.stage === TEST_SPEC_SCHEMA_NAME)?.schema as {
+      readonly properties: { readonly tests: { readonly items: { readonly properties: { readonly operation: { readonly enum: readonly string[] }; readonly assertion: unknown } } } };
+    };
+    expect(t2Of(STAGE_ENVELOPE_ENTRIES_V12).properties.tests.items.properties.operation.enum).not.toContain("structure");
+    expect(t2Of(STAGE_ENVELOPE_ENTRIES_V12).properties.tests.items.properties.assertion).toEqual({ type: "null", description: "構造の検査はコードが作るので、null にする" });
+    expect(t2Of(stageEnvelopeEntriesV12Of({ ledger: true, ids: false }))).toEqual(testSpecSchemaOf(PROPERTY_LEDGER_VIEW));
     // 旗 ledger が off なら v1.1α と同じ一覧（導出は旗の組だけで決まる）
     expect(stageEnvelopeEntriesV12Of(V12_FLAGS_OFF)).toEqual(STAGE_ENVELOPE_ENTRIES_V11A);
   });
@@ -523,7 +530,8 @@ describe("経路 v1.2 の封筒は 1 つ（旗の組から導き、全段で同�
   it("識別子 v1.2 では、旗 on の T1・T2 と T1''・B1・B3'・B5' が同じ実体の封筒（名前 stage-envelope-v12）を送る", () => {
     const requests = [
       { stage: NAME_TABLE_SCHEMA_NAME, schema: nameTableSchemaOf(PROPERTY_LEDGER_VIEW) },
-      { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW) },
+      // 旗 ids の走りの T2 は ids の schema を渡す（#624）
+      { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW, true) },
       ...STAGE_ENVELOPE_ENTRIES_V11A.filter((entry) => !ledgerStages.includes(entry.stage)),
     ];
     expect(requests).toHaveLength(6);

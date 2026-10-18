@@ -56,13 +56,15 @@ import {
   withCheckTargets,
   jsonDiffPaths,
   requestDiffsOf,
+  strictDefects as strictDefectsOf,
   withoutEnumMembership,
 } from "../__tests__/fixtures.js";
 import { deriveCarryOver, pruneForCarryOver, type CarryOver } from "../carry-over.js";
 import { coverageUnitsOf } from "../coverage.js";
 import { canonicalJson, nameTableSha256, type NameTable } from "../names.js";
-import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
+import { OWNERSHIP_STRUCTURE_NOT_ALLOWED, PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
 import {
+  GENERATED_STRUCTURE_STOP_MESSAGES,
   GENERATED_TEST_ID_MESSAGE,
   GENERATED_TEST_ID_PREFIX,
   generateTests,
@@ -2450,7 +2452,8 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
     ...base,
     requirements: [...base.requirements, { id: "R8", text: R8_TEXT, quote: R8_TEXT, position: { start: 0, end: R8_TEXT.length } }],
   };
-  const baseTable = fixtureGeneratedTable();
+  // 旗 ids の表は C2 が構造の検査の対象を書く（手 3b）。構造の検査はコードが作るので、検査ごとの対象を添えた表で回す（#624）
+  const baseTable = withCheckTargets(fixtureGeneratedTable());
   const GTABLE: NameTable = {
     ...baseTable,
     ownership: [...baseTable.ownership, { requirementId: "R8", roles: ["c.itemCount", "c.byMonth"].map((id) => ({ id, basis: "stated" as const, reason: null })) }],
@@ -2510,11 +2513,17 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
       aggTest({ id: "r8-count-unread", roleId: "c.itemCount", kind: "abnormal", observes: "empty-aggregate", value: null }),
       aggTest({ id: "r8-month-empty", roleId: "c.byMonth", kind: "boundary", observes: "empty-aggregate", empty: ["e.item"], value: options.months ?? MONTHS_3 }),
     ].filter((test) => test["kind"] !== options.omit);
-  /** ids on の通る応答（R6・R7 の試験も、R4 のアプリ全体・見出しごと × 選択肢の空の試験も書かない） */
+  /**
+   * ids on の通る応答（R6・R7 の試験も、R4 のアプリ全体・見出しごと × 選択肢の空の試験も書かない。手 3d（#624）で、構造の要件 R2 は
+   * 要求の一覧に無く、構造の検査と画面の試験はコードが作るので書かない）
+   */
   const idsResponse = (extra: readonly Record<string, unknown>[] = [], r8: readonly Record<string, unknown>[] = r8Tests()) =>
+    response([...r1Validate(), ...r3When(), ...r4Compute(), ...r8, ...extra], NATURES.filter((entry) => entry.requirementId !== "R2"));
+  /** ids off の同じ応答（構造の要件 R2 の構造の検査と分類を LLM が書く） */
+  const offResponse = (extra: readonly Record<string, unknown>[] = [], r8: readonly Record<string, unknown>[] = r8Tests()) =>
     response([...r1Validate(), ...r2Structure(), ...r3When(), ...r4Compute(), ...r8, ...extra], NATURES);
-  /** 応答の試験の数（R1 3・R2 1・R3 3・R4 3・R8 4） */
-  const LLM_TESTS = 14;
+  /** 応答の試験の数（R1 3・R3 3・R4 3・R8 4。手 3d（#624）で R2 の構造の検査 1 本をコードが作るようになった） */
+  const LLM_TESTS = 13;
   const generated = async () => {
     const carry = await carryFor();
     const pruned = pruneForCarryOver(GLIST, GTABLE, carry);
@@ -2542,7 +2551,7 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
 
   it("(1) 要求：要件の一覧・確かめ方・所属に既定値と選択肢の集合の要件（R6・R7）が無く、集計の要件（R4・R8）はある。表の行は除かない。ids off との差は R-tsp-16 の文とこの 3 つの塊だけ。題材の言葉は無い", async () => {
     const on = await runG([idsResponse()]);
-    const off = await runG([idsResponse()], false);
+    const off = await runG([offResponse()], false);
     const onRequest = on.recording.structured[0]!;
     const offRequest = off.recording.structured[0]!;
     const [, listName, tableName, verificationName, ownershipName] = TEST_SPEC_DATA_NAMES;
@@ -2552,14 +2561,22 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
         : (dataBlockOf(input, name) as { requirementId: string }[]).map((entry) => ({ id: entry.requirementId }))
       ).map((entry) => entry.id);
     for (const name of [listName, verificationName, ownershipName]) {
-      expect(idsOf(onRequest.input, name), name).toEqual(["R1", "R2", "R3", "R4", "R8"]);
+      // 手 3d（#624）：構造の要件 R2 も要求に無い
+      expect(idsOf(onRequest.input, name), name).toEqual(["R1", "R3", "R4", "R8"]);
       expect(idsOf(offRequest.input, name), name).toEqual(["R1", "R2", "R3", "R4", "R6", "R7", "R8"]);
     }
     expect(dataBlockOf(onRequest.input, tableName)).toEqual(dataBlockOf(offRequest.input, tableName));
     expect(dataNamesOf(onRequest.input)).toEqual(dataNamesOf(offRequest.input));
-    for (const field of ["instructions", "documents", "schemaName", "schema", "maxOutputTokens"] as const) {
+    for (const field of ["instructions", "documents", "schemaName", "maxOutputTokens"] as const) {
       expect(onRequest[field]).toEqual(offRequest[field]);
     }
+    // schema の差は operation の enum（structure が無い）と assertion（null だけ）だけ（手 3d・#624）
+    expect(jsonDiffPaths(offRequest.schema, onRequest.schema).map((path) => path.split(".").slice(0, 6).join("."))).toEqual(
+      expect.arrayContaining(["$.properties.tests.items.properties.assertion", "$.properties.tests.items.properties.operation"]),
+    );
+    expect(
+      new Set(jsonDiffPaths(offRequest.schema, onRequest.schema).map((path) => path.split(".").slice(0, 6).join("."))),
+    ).toEqual(new Set(["$.properties.tests.items.properties.assertion", "$.properties.tests.items.properties.operation"]));
     const ruleDiff = (onRequest.rules ?? []).map((text, index) => (text === offRequest.rules?.[index] ? null : index)).filter((index) => index !== null);
     expect(ruleDiff).toEqual([(onRequest.rules ?? []).findIndex((text) => text.startsWith("R-tsp-16") || text.includes("観測する性質（observes）を 1 つ書く"))]);
     expectNoAcceptanceMaterial([requestText(onRequest)]);
@@ -2596,7 +2613,8 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
       const bad = idsResponse([], r8);
       const { outcome } = await runG([bad, bad]);
       if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
-      expect(outcome.failure.problems, omit).toEqual([{ field: "requirements[4]", message: `${omit} の試験が無い` }]);
+      // 位置は要求の一覧の R8（手 3d（#624）で R2 が要求に無いので 3）
+      expect(outcome.failure.problems, omit).toEqual([{ field: "requirements[3]", message: `${omit} の試験が無い` }]);
     }
   });
 
@@ -2639,12 +2657,13 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
       aggTest({ id: "r4-kind-unread", requirementId: "R4", roleId: "c.byKind", kind: "abnormal", observes: "empty-aggregate", value: [{ heading: "alpha", value: 0 }, { heading: "beta", value: 0 }] }),
     ];
     // ids off は R6・R7 も要求の一覧にあるので、分類と試験を LLM が書く
-    const offBad = response([...idsResponse([...r6r7, ...wrong]).tests], [...NATURES, { requirementId: "R6", nature: "ruled" }, { requirementId: "R7", nature: "ruled" }]);
+    const offBad = response([...offResponse([...r6r7, ...wrong]).tests], [...NATURES, { requirementId: "R6", nature: "ruled" }, { requirementId: "R7", nature: "ruled" }]);
     const before = await runG([offBad, offBad], false);
     if (before.outcome.ok || before.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    // ids off の応答は R2 の構造の検査 1 本を含む（位置は LLM_TESTS + 1 から）
     expect(before.outcome.failure.problems).toEqual([
-      { field: `tests[${String(LLM_TESTS + 2)}].expected`, message: AGG.messages.expected },
-      { field: `tests[${String(LLM_TESTS + 3)}].expected`, message: AGG.messages.expected },
+      { field: `tests[${String(LLM_TESTS + 1 + 2)}].expected`, message: AGG.messages.expected },
+      { field: `tests[${String(LLM_TESTS + 1 + 3)}].expected`, message: AGG.messages.expected },
     ]);
     // ids on：同じ要件の空の試験を LLM は書かない。コードの試験（空を明示した 0・触れない null）が組にある
     const after = await runG([idsResponse()]);
@@ -2734,32 +2753,40 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
     }
     // R7 が選択肢の項目を所属させない表（確かめ方の対象が引けない）
     const unresolvable: NameTable = { ...GTABLE, ownership: GTABLE.ownership.map((entry) => (entry.requirementId === "R7" ? { ...entry, roles: [] } : entry)) };
-    const bad = response(idsResponse().tests, [...NATURES, { requirementId: "R7", nature: "ruled" }]);
+    const bad = response(idsResponse().tests, [...NATURES.filter((entry) => entry.requirementId !== "R2"), { requirementId: "R7", nature: "ruled" }]);
     const { outcome: failed, recording } = await runG([bad, bad], true, unresolvable);
     const listed = dataBlockOf(recording.structured[0]!.input, TEST_SPEC_DATA_NAMES[1]) as { requirements: { id: string }[] };
-    expect(listed.requirements.map((requirement) => requirement.id)).toEqual(["R1", "R2", "R3", "R4", "R7", "R8"]);
+    expect(listed.requirements.map((requirement) => requirement.id)).toEqual(["R1", "R3", "R4", "R7", "R8"]);
     if (failed.ok || failed.failure.kind !== "unmet") throw new Error("unmet でない");
-    expect(failed.failure.problems).toEqual([{ field: "requirements[4]", message: "要件の試験が無い" }]);
+    expect(failed.failure.problems).toEqual([{ field: "requirements[3]", message: "要件の試験が無い" }]);
   });
 
   it("(6) コードが作らない空の集計の要件：J2 が existence-only と決めた R4 にはコードの試験を足さず、R4 は T2 の一覧に残り、LLM の試験は今までどおり照らす（境界を書けば v1 の検査で落ちる）", async () => {
     const judge = createFakeJudge({ [natureQuestionName("R4")]: choice("existence-only", 0.9) });
     const natures = NATURES.map((entry) => (entry.requirementId === "R4" ? { ...entry, nature: "existence-only" as const } : entry));
     const r4Normal = rawTest({ id: "r4-normal", requirementId: "R4", targetKind: "computation", roleId: "c.rate", operation: "compute", observes: "value" });
-    const base = [...r1Validate(), ...r2Structure(), ...r3When(), r4Normal, ...r8Tests()];
+    const base = [...r1Validate(), ...r3When(), r4Normal, ...r8Tests()];
     const runJ = async (outputs: readonly unknown[]) =>
       run(outputs, { plan: GPLAN, list: GLIST, table: GTABLE, carryOver: await carryFor(), ledger, ids: true, judge });
-    const { outcome, recording } = await runJ([response(base, natures)]);
+    const withoutR2 = natures.filter((entry) => entry.requirementId !== "R2");
+    const { outcome, recording } = await runJ([response(base, withoutR2)]);
     if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
     expect(outcome.value.natures.get("R4")).toBe("existence-only");
-    expect(outcome.value.suite.tests.some((test) => isGeneratedTestId(test.id) && test.target.requirementId === "R4")).toBe(false);
-    // R6・R7 のコードの試験はある
-    expect(outcome.value.suite.tests.filter((test) => isGeneratedTestId(test.id)).map((test) => test.target.requirementId)).toEqual(["R6", "R7"]);
+    const aggregateOfR4 = (tests: readonly FixedTest[]) =>
+      tests.some((test) => isGeneratedTestId(test.id) && test.target.requirementId === "R4" && test.operation === "aggregate");
+    expect(aggregateOfR4(outcome.value.suite.tests)).toBe(false);
+    // R6・R7 のコードの試験はある（手 3d（#624）で R2 の構造の検査と R4 の画面の構造の確認もコードが作る。画面は種類に依らない）
+    expect(outcome.value.suite.tests.filter((test) => isGeneratedTestId(test.id)).map((test) => [test.target.requirementId, test.operation])).toEqual([
+      ["R2", "structure"],
+      ["R4", "screen"],
+      ["R6", "validate"],
+      ["R7", "validate"],
+    ]);
     const listed = dataBlockOf(recording.structured[0]!.input, TEST_SPEC_DATA_NAMES[1]) as { requirements: { id: string }[] };
     expect(listed.requirements.map((requirement) => requirement.id)).toContain("R4");
     // LLM が R4 の空の境界を書けば、在ることだけの要件として v1 の検査で落ちる（免除されない）
     const boundary = aggTest({ id: "r4-base-empty", requirementId: "R4", roleId: "c.base", kind: "boundary", observes: "empty-aggregate", empty: ["e.item"], value: 0 });
-    const bad = response([...base, boundary], natures);
+    const bad = response([...base, boundary], withoutR2);
     const { outcome: failed } = await runJ([bad, bad]);
     if (failed.ok || failed.failure.kind !== "unmet") throw new Error("unmet でない");
     expect(failed.failure.problems).toContainEqual({ field: `tests[${String(LLM_TESTS - 2)}]`, message: "在ることだけの要件なので、boundary の試験を作らない" });
@@ -2775,7 +2802,7 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
     const { outcome } = await runG([idsResponse([empty(0)])], true, table);
     if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
     expect(outcome.value.natures.get("R4")).toBe("ruled");
-    expect(outcome.value.suite.tests.some((test) => isGeneratedTestId(test.id) && test.target.requirementId === "R4")).toBe(false);
+    expect(outcome.value.suite.tests.some((test) => isGeneratedTestId(test.id) && test.target.requirementId === "R4" && test.operation === "aggregate")).toBe(false);
     expect(outcome.value.suite.tests.some((test) => test.id === "r4-base-empty")).toBe(true);
   });
 
@@ -2784,5 +2811,210 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
     const off = await run([passing()]);
     expect(plain.outcome).toEqual(off.outcome);
     expect(JSON.stringify(plain.recording.structured)).toBe(JSON.stringify(off.recording.structured));
+  });
+});
+
+// ── 旗 v12.ids：構造の検査と画面・在ることの構造の確認はコードが作る（手 3d。Issue #624）──────────────────────
+
+describe("旗 v12.ids：構造の検査と画面・在ることの構造の確認はコードが作り、T2 には値の要る試験だけを書かせる（Issue #624）", () => {
+  const ledger = PROPERTY_LEDGER_VIEW;
+  const VIEW_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "view-structure");
+  const EXISTENCE_ROW = PROPERTY_LEDGER.find((entry) => entry.id === "existence");
+  if (VIEW_ROW?.rules.t2Ids == null || EXISTENCE_ROW?.rules.t2Ids == null) throw new Error("前提が壊れた：台帳の旗 ids の文が無い");
+  const requirementOf = (id: string, text: string) => ({ id, text, quote: text, position: { start: 0, end: text.length } });
+  const stated = (id: string) => ({ id, basis: "stated" as const, reason: null });
+  /** R6：画面だけを所属させる決まりの要件（fixed-test・ruled）。R7：画面と項目を所属させる決まりの要件 */
+  const DLIST: RequirementList = {
+    ...fixtureList(),
+    requirements: [
+      ...fixtureList().requirements,
+      requirementOf("R6", "担当者の一覧と項目の一覧の画面は、決まった並びで出す。"),
+      requirementOf("R7", "項目の一覧で題名を見られ、題名は空にできない。"),
+    ],
+  };
+  const baseTable = withCheckTargets(fixtureTable());
+  const DTABLE: NameTable = {
+    ...baseTable,
+    ownership: [...baseTable.ownership, { requirementId: "R6", roles: ["s.members", "s.items"].map(stated) }, { requirementId: "R7", roles: ["s.items", "f.item.title"].map(stated) }],
+    verification: [...baseTable.verification, { requirementId: "R6", kind: "fixed-test" }, { requirementId: "R7", kind: "fixed-test" }],
+    classification: [...baseTable.classification, { requirementId: "R6", nature: "ruled" }, { requirementId: "R7", nature: "ruled" }],
+  };
+  const DPLAN = fixturePlan(DLIST);
+  async function carryD(table: NameTable = DTABLE): Promise<CarryOver> {
+    const tableSha256 = await nameTableSha256(table);
+    const targets = table.verification.filter((entry) => entry.kind !== "unresolved").map((entry) => entry.requirementId);
+    return deriveCarryOver({ list: DLIST, table, semanticCheck: { tableSha256, judgments: targets.map((requirementId) => ({ requirementId, verdict: "accept" as const })) } });
+  }
+  const runD = async (outputs: readonly unknown[], ids = true, table: NameTable = DTABLE) =>
+    run(outputs, { plan: DPLAN, list: DLIST, table, carryOver: await carryD(table), ledger, ...(ids ? { ids: true } : {}) });
+  const NATURES_D: readonly NatureRow[] = [
+    { requirementId: "R1", nature: "ruled" },
+    { requirementId: "R3", nature: "ruled" },
+    { requirementId: "R4", nature: "ruled" },
+    { requirementId: "R6", nature: "ruled" },
+    { requirementId: "R7", nature: "ruled" },
+  ];
+  /** R7 の項目（題名）の検査の正常・異常・境界（`omit` で欠けを作る） */
+  const r7Validate = (omit?: "abnormal") =>
+    KINDS.filter((kind) => kind !== omit).map((kind) =>
+      rawTest({ id: `r7-${kind}`, requirementId: "R7", targetKind: "field", roleId: "f.item.title", kind, operation: "validate", observes: "validation" }),
+    );
+  /** ids on の通る応答（R2 は要求に無い。R6 は画面だけなので LLM は書かない。R7 は項目の 3 種類だけ） */
+  const idsTests = () => [...r1Validate(), ...r3When(), ...r4Compute(), ...r7Validate()];
+  const idsOk = (extra: readonly Record<string, unknown>[] = [], natures: readonly NatureRow[] = NATURES_D) => response([...idsTests(), ...extra], natures);
+  const LLM_COUNT = 12;
+
+  it("(1) 要求：要件の一覧・確かめ方・所属に構造の要件 R2 が無く、画面の要件 R6・R7 はある。規則の文の「作らない」は構造の検査と screen 操作だけ。schema の operation の enum に structure が無く assertion は null だけ。題材の言葉は無い", async () => {
+    const { outcome, recording } = await runD([idsOk()]);
+    expect(outcome.ok).toBe(true);
+    const request = recording.structured[0]!;
+    const [, listName, , verificationName, ownershipName] = TEST_SPEC_DATA_NAMES;
+    expect((dataBlockOf(request.input, listName) as { requirements: { id: string }[] }).requirements.map((entry) => entry.id)).toEqual(["R1", "R3", "R4", "R6", "R7"]);
+    for (const name of [verificationName, ownershipName]) {
+      expect((dataBlockOf(request.input, name) as { requirementId: string }[]).map((entry) => entry.requirementId), name).toEqual(["R1", "R3", "R4", "R6", "R7"]);
+    }
+    const r16 = (request.rules ?? []).find((text) => text.includes("観測する性質（observes）を 1 つ書く")) ?? "";
+    expect(r16).toContain(VIEW_ROW.rules.t2Ids ?? "");
+    expect(r16).toContain(EXISTENCE_ROW.rules.t2Ids ?? "");
+    // 新しい文の「作らない」の対象は、構造の検査（operation structure）と screen 操作の試験だけ
+    expect(VIEW_ROW.rules.t2Ids).toMatch(/^構造の検査（operation が structure の試験）と画面の試験（operation が screen の試験。/);
+    expect(EXISTENCE_ROW.rules.t2Ids).toMatch(/^entity × screen の試験（observes は existence）は作らない/);
+    const items = (request.schema as typeof TEST_SPEC_SCHEMA).properties.tests.items.properties;
+    expect(items.operation.enum).toEqual(TEST_OPERATIONS.filter((operation) => operation !== "structure"));
+    expect(items.assertion).toEqual({ type: "null", description: "構造の検査はコードが作るので、null にする" });
+    expect(strictDefectsOf(request.schema)).toEqual([]);
+    // ids off（前の手の旗だけ on）の schema は今のまま（structure があり assertion は写像か null）
+    expect(testSpecSchemaOf(ledger)).toEqual(testSpecSchemaOf(ledger, false));
+    expect(testSpecSchemaOf(ledger).properties.tests.items.properties.operation.enum).toEqual([...TEST_OPERATIONS]);
+    expect(testSpecSchemaOf(undefined, true)).toBe(TEST_SPEC_SCHEMA);
+    expectNoAcceptanceMaterial([requestText(request)]);
+  });
+
+  it("(1) 正例：1 回で通り、組は LLM の試験のあとに構造の検査（R2）・画面の構造の確認（R4 の s.overview・R6 の 2 画面・R7 の s.items）が並ぶ。R6 の abnormal・boundary の不足は台帳の型と所属で免除される", async () => {
+    const { outcome, recording } = await runD([idsOk()]);
+    if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
+    expect(recording.structured).toHaveLength(1);
+    const generatedOnes = outcome.value.suite.tests.slice(LLM_COUNT);
+    expect(generatedOnes.every((test) => isGeneratedTestId(test.id))).toBe(true);
+    expect(generatedOnes.map((test) => [test.target.requirementId, test.target.roleId, test.operation, outcome.value.observes.get(test.id)])).toEqual([
+      ["R2", "s.members", "structure", "view-structure"],
+      ["R4", "s.overview", "screen", "view-structure"],
+      ["R6", "s.members", "screen", "view-structure"],
+      ["R6", "s.items", "screen", "view-structure"],
+      ["R7", "s.items", "screen", "view-structure"],
+    ]);
+    // (5) 組の SHA・網羅の単位・観測する性質の写像はコードの試験を含む
+    const { suite, observes } = outcome.value;
+    expect(outcome.value.sha256).toBe(await testSuiteSha256(suite, observes));
+    expect(outcome.value.coverage).toEqual(coverageUnitsOf({ suite, observes, natures: outcome.value.natures }));
+    const keys = outcome.value.coverage.map((unit) => JSON.parse(unit.key) as Record<string, unknown>);
+    expect(keys.some((unit) => unit["requirementId"] === "R2" && unit["targetId"] === "s.members")).toBe(true);
+    expect(keys.some((unit) => unit["requirementId"] === "R6" && unit["targetId"] === "s.items" && unit["observes"] === "view-structure")).toBe(true);
+    for (const test of generatedOnes) expect(observes.has(test.id)).toBe(true);
+  });
+
+  it("(2) LLM の応答に operation が structure か screen の試験があれば固定文で落ちる（同じ応答から除けば通る）", async () => {
+    const screen = rawTest({ id: "r7-screen", requirementId: "R7", targetKind: "screen", roleId: "s.items", operation: "screen", observes: "view-structure" });
+    const fieldScreen = rawTest({ id: "r7-field-screen", requirementId: "R7", targetKind: "field", roleId: "f.item.title", operation: "screen", observes: "view-structure" });
+    const entityScreen = rawTest({ id: "r1-exist", requirementId: "R4", targetKind: "screen", roleId: "s.overview", operation: "screen", observes: "view-structure" });
+    const structure = rawTest({ id: "r7-shows", requirementId: "R7", targetKind: "screen", roleId: "s.items", operation: "structure", observes: "view-structure", assertion: { check: "view-shows", expected: null, refEntity: null, role: "f.item.title" } });
+    for (const extra of [screen, fieldScreen, entityScreen, structure]) {
+      // structure と写像の assertion は ids の schema では書けない（strict の偽物が照らさない負例として渡す）
+      const bad =
+        extra === structure
+          ? negative(idsOk([extra]), "旗 ids の schema は operation に structure を持たず assertion は null だけなので strict では出ないが、コードの口の負例として要る")
+          : idsOk([extra]);
+      const { outcome } = await runD([bad, bad]);
+      if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error(`unmet でない：${String(extra["id"])} ${JSON.stringify(outcome)}`);
+      expect(outcome.failure.problems, String(extra["id"])).toContainEqual({ field: `tests[${String(LLM_COUNT)}].operation`, message: OWNERSHIP_STRUCTURE_NOT_ALLOWED });
+    }
+  });
+
+  it("(3) 二点測定：「structure に assertion 無し」の応答は ids off（前の手の旗だけ on）で形で落ちるが、ids on では schema で書けず（応答に構造の検査が無い）、コードの試験が組にあって 1 回で通る", async () => {
+    const noAssertion = { ...rawTest({ id: "r2-shows", requirementId: "R2", targetKind: "screen", roleId: "s.members", operation: "structure", observes: "view-structure" }), assertion: null };
+    const offBad = response([...r1Validate(), noAssertion, ...r3When(), ...r4Compute(), ...r7Validate(), rawTest({ id: "r6-a", requirementId: "R6", targetKind: "screen", roleId: "s.items", operation: "screen", observes: "view-structure" }), rawTest({ id: "r6-b", requirementId: "R6", targetKind: "screen", roleId: "s.items", kind: "abnormal", operation: "screen", observes: "view-structure" }), rawTest({ id: "r6-c", requirementId: "R6", targetKind: "screen", roleId: "s.items", kind: "boundary", operation: "screen", observes: "view-structure" })], [...NATURES_D, { requirementId: "R2", nature: "existence-only" }]);
+    const before = await runD([offBad, offBad], false);
+    if (before.outcome.ok) throw new Error("落ちるはず");
+    expect(before.outcome.failure.kind).toBe("malformed");
+    if (before.outcome.failure.kind !== "malformed") throw new Error("malformed でない");
+    expect(before.outcome.failure.problems).toContainEqual({ field: "tests[3].assertion", message: "操作が structure なら、構造の検査の中身（assertion）が要る" });
+    const after = await runD([idsOk()]);
+    if (!after.outcome.ok) throw new Error(`通るはず：${JSON.stringify(after.outcome.failure)}`);
+    expect(after.recording.structured).toHaveLength(1);
+    expect(after.outcome.value.suite.tests.filter((test) => test.target.requirementId === "R2").map((test) => [test.operation, test.assertion])).toEqual([
+      ["structure", { check: "view-shows", role: "f.member.title" }],
+    ]);
+  });
+
+  it("(3) 二点測定：画面だけの決まりの要件に normal 1 本だけの応答は ids off で「abnormal・boundary の試験が無い」で落ちるが、ids on ではコードが画面の試験を作り、免除が台帳の型と所属で効いて 1 回で通る", async () => {
+    const r6Normal = rawTest({ id: "r6-normal", requirementId: "R6", targetKind: "screen", roleId: "s.items", operation: "screen", observes: "view-structure" });
+    const offOnlyNormal = response([...r1Validate(), ...r2Structure(), ...r3When(), ...r4Compute(), ...r7Validate(), r6Normal], [...NATURES_D, { requirementId: "R2", nature: "existence-only" }]);
+    const before = await runD([offOnlyNormal, offOnlyNormal], false);
+    if (before.outcome.ok || before.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    // 位置は持ち越し（R5）を除いた一覧の R6
+    const r6Index = DLIST.requirements.filter((requirement) => requirement.id !== "R5").findIndex((requirement) => requirement.id === "R6");
+    expect(before.outcome.failure.problems).toEqual([
+      { field: `requirements[${String(r6Index)}]`, message: "abnormal の試験が無い" },
+      { field: `requirements[${String(r6Index)}]`, message: "boundary の試験が無い" },
+    ]);
+    const after = await runD([idsOk()]);
+    expect(after.outcome.ok).toBe(true);
+    expect(after.recording.structured).toHaveLength(1);
+  });
+
+  it("(4) 負例（免除が広がらない）：画面と項目を所属に持つ決まりの要件 R7 で項目の abnormal を省いた応答は今までどおり「abnormal の試験が無い」で落ちる（位置は要求の一覧の R7）", async () => {
+    const bad = response([...r1Validate(), ...r3When(), ...r4Compute(), ...r7Validate("abnormal")], NATURES_D);
+    const { outcome } = await runD([bad, bad]);
+    if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(outcome.failure.problems).toEqual([{ field: "requirements[4]", message: "abnormal の試験が無い" }]);
+  });
+
+  it("(4) 負例：在ることだけの要件に validate・所属に無い対象・評価の方法の表に無い組・16 本超は、コードの試験を足した組でも今までどおり固定文で落ちる", async () => {
+    const existenceOnly = NATURES_D.map((entry) => (entry.requirementId === "R7" ? { ...entry, nature: "existence-only" as const } : entry));
+    const table = { ...DTABLE, classification: DTABLE.classification.map((entry) => (entry.requirementId === "R7" ? { ...entry, nature: "existence-only" as const } : entry)) };
+    const validateOnExistence = response([...r1Validate(), ...r3When(), ...r4Compute(), r7Validate()[0]!], existenceOnly);
+    const failed1 = await runD([validateOnExistence, validateOnExistence], true, table);
+    if (failed1.outcome.ok || failed1.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(failed1.outcome.failure.problems).toContainEqual({ field: "tests[9]", message: "在ることだけの要件なので、検査（validate）の試験を作らない" });
+
+    const notOwned = idsOk([rawTest({ id: "r1-other", requirementId: "R1", targetKind: "field", roleId: "f.member.title", operation: "validate", observes: "validation" })]);
+    const failed2 = await runD([notOwned, notOwned]);
+    if (failed2.outcome.ok || failed2.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(failed2.outcome.failure.problems).toContainEqual({ field: `tests[${String(LLM_COUNT)}].target.roleId`, message: "対象の役割 ID が、その要件の所属に無い" });
+
+    const unlisted = idsOk([rawTest({ id: "r3-value", requirementId: "R3", targetKind: "operation", roleId: "o.closeItem", operation: "action", observes: "value" })]);
+    const failed3 = await runD([unlisted, unlisted]);
+    if (failed3.outcome.ok || failed3.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(failed3.outcome.failure.problems).toContainEqual({ field: `tests[${String(LLM_COUNT)}].observes`, message: "（対象の種類・操作・観測する性質）の組が評価の方法の表に無い" });
+
+    // R4 はコードが画面の試験を 1 本作るので、LLM の 16 本で組は 17 本になり上限で落ちる（コードの試験も数える）
+    const many = Array.from({ length: 16 }, (_, index) =>
+      rawTest({ id: `r4-many-${String(index)}`, requirementId: "R4", targetKind: "computation", roleId: "c.rate", kind: KINDS[index % 3]!, operation: "compute", observes: "value" }),
+    );
+    const over = response([...r1Validate(), ...r3When(), ...many, ...r7Validate()], NATURES_D);
+    const failed4 = await runD([over, over]);
+    if (failed4.outcome.ok || failed4.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(failed4.outcome.failure.problems.some((problem) => problem.field === "requirements[2]" && problem.message.startsWith("要件の試験が上限 16 を超えている"))).toBe(true);
+  });
+
+  it("fail-closed：構造の検査の対象の行が表に無い表は、LLM を呼ばずに固定文で止まる（近い行に結ばない。attempts 0）", async () => {
+    const broken: NameTable = {
+      ...DTABLE,
+      verification: DTABLE.verification.map((entry) =>
+        entry.kind === "structural" ? { ...entry, targets: [{ check: "view-shows" as const, targetId: "s.membersx", sourceId: "f.member.title" }] } : entry,
+      ),
+    };
+    const { outcome, recording } = await runD([idsOk()], true, broken);
+    expect(recording.structured).toHaveLength(0);
+    expect(outcome).toEqual({ ok: false, failure: { kind: "unmet", attempts: 0, problems: [{ field: "requirements[1]", message: GENERATED_STRUCTURE_STOP_MESSAGES.unknownRow }] } });
+  });
+
+  it("ids off（前の手の旗だけ on）の要求・schema・結果は今のまま（構造の要件は一覧にあり、画面の試験は作らない）", async () => {
+    const offOk = response([...r1Validate(), ...r2Structure(), ...r3When(), ...r4Compute(), ...r7Validate(), ...KINDS.map((kind) => rawTest({ id: `r6-${kind}`, requirementId: "R6", targetKind: "screen", roleId: "s.items", kind, operation: "screen", observes: "view-structure" }))], [...NATURES_D, { requirementId: "R2", nature: "existence-only" }]);
+    const off = await runD([offOk], false);
+    if (!off.outcome.ok) throw new Error(`通るはず：${JSON.stringify(off.outcome.failure)}`);
+    expect(off.outcome.value.suite.tests.some((test) => isGeneratedTestId(test.id))).toBe(false);
+    expect(off.recording.structured[0]?.schema).toEqual(testSpecSchemaOf(ledger));
+    expect((dataBlockOf(off.recording.structured[0]!.input, TEST_SPEC_DATA_NAMES[1]) as { requirements: { id: string }[] }).requirements.map((entry) => entry.id)).toEqual(["R1", "R2", "R3", "R4", "R6", "R7"]);
   });
 });
