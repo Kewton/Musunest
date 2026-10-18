@@ -289,6 +289,48 @@ async function observe(materials: SizedMaterials, recorded: readonly RecordedCal
 interface V12CallsSummary {
   readonly real_attempts: { readonly limit: number; readonly used: number };
   readonly judge_branch: { readonly limit: number; readonly used: number };
+  /** T2 の束の数・同時数・段全体の計（T2 を呼んだ走りだけ。Issue #626） */
+  readonly test_spec?: unknown;
+}
+
+/**
+ * 要約の `v12_calls.test_spec` の期待（Issue #626）：束の数（T2 の記録の数）・同時数（既定の上限と束の数の小さいほう）・段全体の計
+ * （T2 の束の記録の項目ごとの合計。全体の計量の前後差と束の合計が等しいことも、ここで固定する）
+ */
+function t2SummaryOf(run: { readonly result: { readonly record: { readonly stages: readonly StageRecord[] } } }, concurrency: number = V12_T2_BUNDLE.concurrency) {
+  const records = run.result.record.stages.filter((record) => record.stage === "test-spec");
+  const sum = (pick: (record: StageRecord) => number): number => records.reduce((total, record) => total + pick(record), 0);
+  return {
+    bundles: records.length,
+    concurrency: Math.min(concurrency, records.length),
+    total: {
+      calls: sum((record) => record.calls),
+      missing_usage_calls: sum((record) => record.missing_usage_calls),
+      input_tokens: sum((record) => record.input_tokens),
+      cached_input_tokens: sum((record) => record.cached_input_tokens),
+      cache_write_tokens: sum((record) => record.cache_write_tokens),
+      output_tokens: sum((record) => record.output_tokens),
+      reasoning_tokens: sum((record) => record.reasoning_tokens),
+      attempts: {
+        started: sum((record) => record.attempts.started),
+        responded: sum((record) => record.attempts.responded),
+        errors: sum((record) => record.attempts.errors),
+        cancelled_deadline: sum((record) => record.attempts.cancelled_deadline),
+        cancelled_timeout: sum((record) => record.attempts.cancelled_timeout),
+        not_started: {
+          deadline: sum((record) => record.attempts.not_started.deadline),
+          budget: sum((record) => record.attempts.not_started.budget),
+          limit: sum((record) => record.attempts.not_started.limit),
+          timeout: sum((record) => record.attempts.not_started.timeout),
+        },
+      },
+      retries: {
+        communication: sum((record) => record.retries.communication),
+        shape: sum((record) => record.retries.shape),
+        content: sum((record) => record.retries.content),
+      },
+    },
+  };
 }
 
 /** 初回で全段が通る走りの記録（T1〔旗 v12.ids の走りは C1 の 3 束と C2〕・T1''・T2・B1・B3' を 1 回ずつ） */
@@ -729,6 +771,14 @@ const RETRY_TABLE: RunTable = {
 };
 /** 旗 v12.ids の T2 の束の数（要件 5 件ごと。台本の要件は全部 T2 の要求に残る。Issue #626） */
 const t2Bundles = (requirements: number): number => Math.ceil(requirements / V12_T2_BUNDLE.size);
+/**
+ * 全部 on の初回で通る走りの生成の論理要求（C1 3・C2 1・T1'' 1・T2 束 k・B1 1・B3' 1。手 3a で T1 の 1 が C1・C2 の 4 になった。
+ * Issue #593。手 3f で T2 の 1 が束 k〔要件 5 件ごと〕になった。Issue #626）
+ */
+const cleanGeneration = (requirements: number): number => 7 + t2Bundles(requirements);
+/** 走りの T2 の記録（束ごとに 1 つ。Issue #626） */
+const t2RecordsOfRun = (run: { readonly result: { readonly record: { readonly stages: readonly StageRecord[] } } }): readonly StageRecord[] =>
+  run.result.record.stages.filter((record) => record.stage === "test-spec");
 /** 旗 v12.ids の台本の T2 の束の数（その台本の T2 の応答が分類する要件＝T2 の要求の一覧の数から。Issue #626） */
 const t2BundlesOf = (materials: SizedMaterials): number => t2Bundles(((materials.t2Response().classifications ?? []) as readonly unknown[]).length);
 /**
@@ -838,6 +888,7 @@ describe("(5) 旗の組ごとの論理の枠：段 × 旗の組の期待の表�
           expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
           // 門の数＝生成の実開始＋判定の実試行（偽物の判定は内部の再送を持たないので、要求の数＝実試行）
           expect(run.calls).toEqual({
+            test_spec: t2SummaryOf(run),
             real_attempts: { limit: V12_CALL_LIMITS.realAttempts, used: run.totalStarted + judged },
             judge_branch: { limit: V12_CALL_LIMITS.judgeBranch, used: judged },
           });
@@ -900,6 +951,33 @@ describe("(5) 旗の組ごとの論理の枠：段 × 旗の組の期待の表�
     expect(logicalBySet.slice(4).map((counts) => (counts as StageCounts)["test-spec"])).toEqual([3, 7]);
     expect(logicalBySet.slice(0, 2).map((counts) => (counts as StageCounts)["test-spec"])).toEqual([1, 3]);
     expect(logicalBySet.slice(4).map((counts) => (counts as StageCounts)["name-table"])).toEqual([0, 0]);
+  });
+
+  it("束 1（要件 5 件以下）では、全部 on の T2 の期待の式が手 3e までの値（初回 1・やり直し 3・再送 2・6・生成の論理要求 8）に一致し、走りもその値になる", async () => {
+    expect(t2Bundles(5)).toBe(1);
+    const tables = FLAG_SET_TABLE["全部 on（--pipeline v1.2 と同じ組）"](5);
+    expect(tables.clean["test-spec"]).toEqual(row(1));
+    expect(tables.retry["test-spec"]).toEqual(row(3));
+    expect(tables.cleanFail["test-spec"]).toEqual(row(1, 1, 2, 1));
+    expect(tables.retryFail["test-spec"]).toEqual(row(3, 3, 6, 3));
+    // 手 3e までの全部 on の表（T2 は段全体＝束 1）と、T2 の行を含めて全部の段で等しい
+    expect(tables.clean).toEqual({ ...CLEAN_TABLE, "name-table": row(0), vocabulary: row(3), mapping: row(1) });
+    expect(tables.retry).toEqual({ ...RETRY_TABLE, "name-table": row(0), vocabulary: row(4), mapping: row(3) });
+    expect(cleanGeneration(5)).toBe(8);
+    // 走り：要件 5・試験 15 の全部 on で、T2 の論理要求が初回 1・やり直し 3、再送を全部使うと実開始 2・6
+    const set = FLAG_SETS[2];
+    const materials = buildSized(5, 15, set.flags);
+    expect(t2BundlesOf(materials)).toBe(1);
+    const clean = await observe(materials, cleanCalls(materials), { flags: set.flags });
+    const retry = await observe(materials, retryCalls(materials), { flags: set.flags });
+    const cleanFail = await observe(materials, cleanCalls(materials), { flags: set.flags, failFirst: true });
+    const retryFail = await observe(materials, retryCalls(materials), { flags: set.flags, failFirst: true });
+    expectTable(clean, tables.clean, "束 1 初回");
+    expectTable(retry, tables.retry, "束 1 やり直し");
+    expectTable(cleanFail, tables.cleanFail, "束 1 再送（初回）");
+    expectTable(retryFail, tables.retryFail, "束 1 再送（やり直し）");
+    expect(clean.totalLogical).toBe(8);
+    expect(t2RecordsOfRun(retry)).toHaveLength(1);
   });
 
   it("段 × 旗の組の表の段は、上限の表の v1.1α の写し（V12_V11A_FRAME_MAP）の段と同じ。§4.1 の列の枠を超えない", () => {
@@ -1115,6 +1193,11 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
     // から、一覧に無い要件 ID は束の形の検査が同じ固定文で断るので、2 回続けば形の落ち（malformed）で止まる
     expect(run.result.stopped).toMatchObject({ stage: "test-spec", kind: "malformed" });
     expect(run.result.stopped?.problems?.map((problem) => problem.message)).toContain("要件の一覧に無い要件 ID の分類である");
+    // 診断の断った候補にも同じ固定文が残る（Issue #626 の窓口の条件）
+    const rejected = JSON.parse(run.result.diagnostics.find((artifact) => artifact.path === DIAGNOSTICS_REJECTED_TEST_SPEC_FILE)?.text ?? "null") as {
+      readonly candidates: readonly { readonly problems: readonly { readonly message: string }[] }[];
+    } | null;
+    expect(rejected?.candidates.flatMap((candidate) => candidate.problems.map((problem) => problem.message))).toContain("要件の一覧に無い要件 ID の分類である");
     expect(run.result.outcome).toEqual({ result: "failed", verdict: "none" });
     expect(run.result.summary.exit_code).toBe(1);
     expect(run.result.bundle).toBeNull();
@@ -1130,11 +1213,6 @@ function resolveIds(flags: Partial<V12Flags>): boolean {
 
 describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
   const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
-  /**
-   * 全部 on の初回で通る走りの生成の論理要求（C1 3・C2 1・T1'' 1・T2 束 k・B1 1・B3' 1。手 3a で T1 の 1 が C1・C2 の 4 になった。
-   * Issue #593。手 3f で T2 の 1 が束 k〔要件 5 件ごと〕になった。Issue #626）
-   */
-  const cleanGeneration = (requirements: number): number => 7 + t2Bundles(requirements);
   /** 表を組む段（C1・C2）の要求の数（J4 より前の生成） */
   const TABLE_GENERATION = 4;
 
@@ -1144,6 +1222,7 @@ describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
       const clean = await observe(materials, cleanCalls(materials), { flags: ALL_ON });
       expect(clean.result.outcome).toEqual({ result: "pass", verdict: "full" });
       expect(clean.calls).toEqual({
+            test_spec: t2SummaryOf(clean),
         real_attempts: { limit: 144, used: clean.totalStarted + size.requirements },
         judge_branch: { limit: 80, used: size.requirements },
       });
@@ -1169,6 +1248,7 @@ describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
     });
     expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(run.calls).toEqual({
+            test_spec: t2SummaryOf(run),
       real_attempts: { limit: 144, used: cleanGeneration(MEDIAN_SIZE.requirements) + 2 * MEDIAN_SIZE.requirements },
       judge_branch: { limit: 80, used: 2 * MEDIAN_SIZE.requirements },
     });
@@ -1186,6 +1266,7 @@ describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
     expect(run.stages["decl-check"]).toMatchObject({ started: 0, notStartedLimit: 1 });
     expect(run.judge).toEqual({ j4: MEDIAN_SIZE.requirements, j2: 0 });
     expect(run.calls).toEqual({
+            test_spec: t2SummaryOf(run),
       real_attempts: { limit: firstTotal - 1, used: firstTotal - 1 },
       judge_branch: { limit: 80, used: MEDIAN_SIZE.requirements },
     });
@@ -1236,6 +1317,7 @@ describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
     ]);
     // 門の数は生成の実開始＋枝を通った判定だけ（断った判定を数えない）
     expect(run.calls).toEqual({
+            test_spec: t2SummaryOf(run),
       real_attempts: { limit: 144, used: run.totalStarted + branch },
       judge_branch: { limit: branch, used: branch },
     });
@@ -1606,6 +1688,26 @@ describe("(10) 旗 v12.ids の T2 の束（手 3f・Issue #626）：束ごとの
       ["failed", "budget"],
     ]);
     expect(sumRecords(records)).toMatchObject({ started: 0, budget: 2, calls: 0 });
+  });
+
+  it("要約の v12_calls：既存の鍵（real_attempts・judge_branch）は今の値のまま、test_spec に束の数・同時数・段全体の計を足す", async () => {
+    for (const size of [MEDIAN_SIZE, MAX_SIZE]) {
+      const materials = buildSized(size.requirements, size.tests, ALL_ON);
+      const k = t2BundlesOf(materials);
+      for (const concurrency of [undefined, 1]) {
+        const run = await observe(materials, retryCalls(materials), { flags: ALL_ON, ...(concurrency === undefined ? {} : { v12T2Concurrency: concurrency }) });
+        const v12Calls = (run.result.summary as unknown as Record<string, unknown>)["v12_calls"] as Record<string, unknown>;
+        expect(Object.keys(v12Calls)).toEqual(["real_attempts", "judge_branch", "test_spec"]);
+        const judged = run.judge.j4 + run.judge.j2;
+        expect(v12Calls["real_attempts"]).toEqual({ limit: V12_CALL_LIMITS.realAttempts, used: run.totalStarted + judged });
+        expect(v12Calls["judge_branch"]).toEqual({ limit: V12_CALL_LIMITS.judgeBranch, used: judged });
+        const t2 = v12Calls["test_spec"] as { readonly bundles: number; readonly concurrency: number; readonly total: Record<string, unknown> };
+        expect([t2.bundles, t2.concurrency]).toEqual([k, concurrency ?? Math.min(V12_T2_BUNDLE.concurrency, k)]);
+        // 段全体の計（全体の計量の前後差と、束別の計の合計）は、束の記録の項目ごとの合計と等しい
+        expect(t2).toEqual(t2SummaryOf(run, concurrency));
+        expect(t2.total).toMatchObject({ calls: 2 * k + 1, attempts: { started: 2 * k + 1, responded: 2 * k + 1 }, retries: { shape: k, content: 1 } });
+      }
+    }
   });
 
   it("束の計量は全体の計量の内側に重ねる：usage の欠けた T2 の応答は、束の記録と全体の記録（usage の欠けた呼び出しの数）の両方に数える", async () => {

@@ -207,6 +207,55 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
   readonly v12T2Concurrency?: number;
 }
 
+/**
+ * 旗 `v12.ids` の T2 の束の要約（`v12_calls.test_spec`。T2 を呼んだ走りだけ。Issue #626）。束の数・同時に始めた数（上限と束の数の
+ * 小さいほう）と段全体の計。段全体の usage は全体の計量の前後差、試行・再試行・未着手は束別の計の項目ごとの合計から組む（親の口の
+ * 前後差は束の呼び出しで増えないので使わない）
+ */
+export interface TestSpecBundlesSummary {
+  readonly bundles: number;
+  readonly concurrency: number;
+  readonly total: UsageSnapshot & CallCounts;
+}
+
+/** 呼び出しの計の項目ごとの合計（束別の計を段全体へ足す。Issue #626） */
+function sumCallCounts(counts: readonly CallCounts[]): CallCounts {
+  const zero: CallCounts = {
+    attempts: {
+      started: 0,
+      responded: 0,
+      errors: 0,
+      cancelled_deadline: 0,
+      cancelled_timeout: 0,
+      not_started: { deadline: 0, budget: 0, limit: 0, timeout: 0 },
+    },
+    retries: { communication: 0, shape: 0, content: 0 },
+  };
+  return counts.reduce<CallCounts>(
+    (sum, item) => ({
+      attempts: {
+        started: sum.attempts.started + item.attempts.started,
+        responded: sum.attempts.responded + item.attempts.responded,
+        errors: sum.attempts.errors + item.attempts.errors,
+        cancelled_deadline: sum.attempts.cancelled_deadline + item.attempts.cancelled_deadline,
+        cancelled_timeout: sum.attempts.cancelled_timeout + item.attempts.cancelled_timeout,
+        not_started: {
+          deadline: sum.attempts.not_started.deadline + item.attempts.not_started.deadline,
+          budget: sum.attempts.not_started.budget + item.attempts.not_started.budget,
+          limit: sum.attempts.not_started.limit + item.attempts.not_started.limit,
+          timeout: sum.attempts.not_started.timeout + item.attempts.not_started.timeout,
+        },
+      },
+      retries: {
+        communication: sum.retries.communication + item.retries.communication,
+        shape: sum.retries.shape + item.retries.shape,
+        content: sum.retries.content + item.retries.content,
+      },
+    }),
+    zero,
+  );
+}
+
 /** 全件持ち越しの停止の問題（固定文。値を埋めない） */
 export const ALL_CARRIED_PROBLEM: Problem = {
   field: "requirements",
@@ -604,8 +653,12 @@ async function runV11a(
           v12_calls: {
             real_attempts: { limit: callGate.limit, used: callGate.attempts() },
             judge_branch: { limit: callLimits.judgeBranch, used: judgeBudget?.branch?.used ?? 0 },
+            // T2 の束の数・同時数・段全体の計（T2 を呼んだ走りだけ。既存の欄は変えずに足す。Issue #626）
+            ...(testSpecBundles === undefined ? {} : { test_spec: testSpecBundles }),
           },
         };
+  // 旗 `v12.ids` の T2 の束の要約（T2 を呼ぶまで無い。Issue #626）
+  let testSpecBundles: TestSpecBundlesSummary | undefined;
   const startedAt = input.now();
   const stages: StageRecord[] = [];
   const upheld: string[] = [];
@@ -1179,6 +1232,7 @@ async function runV11a(
       run: (bundleGateway: (bundle: number) => CallGateway, concurrency: number) => Promise<StageOutcome<TestSpecValue>>,
     ): Promise<TestSpecValue> => {
       const concurrency = input.v12T2Concurrency ?? V12_T2_BUNDLE.concurrency;
+      const usageBefore = meter.snapshot;
       const runs: { readonly gateway: CallGateway; readonly meter: UsageMeter; readonly start: number; readonly end: () => number }[] = [];
       const bundleGateway = (bundle: number): CallGateway => {
         const bundleMeter = new UsageMeter();
@@ -1221,6 +1275,12 @@ async function runV11a(
           if (entry === undefined) continue;
           stages.push(makeStageRecord("test-spec", status, entry.end() - entry.start, entry.meter.snapshot, entry.gateway.counts, failureKind));
         }
+        const made = runs.filter((entry): entry is (typeof runs)[number] => entry !== undefined);
+        testSpecBundles = {
+          bundles: made.length,
+          concurrency: Math.min(concurrency, made.length),
+          total: { ...usageDelta(usageBefore, meter.snapshot), ...sumCallCounts(made.map((entry) => entry.gateway.counts)) },
+        };
       };
       let outcome: StageOutcome<TestSpecValue>;
       try {
