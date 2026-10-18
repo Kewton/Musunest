@@ -70,6 +70,7 @@ import {
   WHEN_NON_REQUIREMENT_REQUEST_DIFF,
   withoutEmptyAggregate,
   withoutWhenAndNonRequirement,
+  fixtureGeneratedTable,
 } from "./__tests__/fixtures.js";
 import {
   STAGE_RUN_RECORD_SCHEMA,
@@ -82,7 +83,7 @@ import {
   verifyStageInput,
 } from "./bundle-v11a.js";
 import * as evaluateModule from "./evaluate.js";
-import { DEFAULT_VALUE_DETAILS, UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
+import { DEFAULT_VALUE_DETAILS, ENUM_MEMBERSHIP_DETAILS, UNMAPPED_OBSERVES_DETAIL, type V11aEvaluatorInput } from "./evaluate.js";
 import { COMPUTATION_AGGREGATE_MESSAGES, nameTableSha256, type NameTable } from "./names.js";
 import {
   ALL_CARRIED_OR_NON_REQUIREMENT_PROBLEM,
@@ -98,7 +99,7 @@ import { DECL_CHECK_SCHEMA_NAME } from "./stages/decl-check.js";
 import { NAME_TABLE_PREVIOUS_DATA_NAMES, NAME_TABLE_SCHEMA_NAME } from "./stages/name-table.js";
 import * as semanticCheckStage from "./stages/semantic-check.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
-import { TEST_SPEC_DATA_NAMES, TEST_SPEC_SCHEMA_NAME, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
+import { TEST_SPEC_DATA_NAMES, TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
 import {
   WRITE_V11A_DATA_NAMES,
   WRITE_V11A_REWRITE_DATA_NAME,
@@ -106,6 +107,9 @@ import {
   WRITE_V11A_SCHEMA_NAME,
 } from "./stages/write.js";
 import { NAMED_FAILURE_MESSAGES } from "../v12/search-repair.js";
+import { GENERATED_TEST_ID_PREFIX, generateTests, isGeneratedTestId } from "../v12/generated-tests.js";
+import type { FixedTest } from "../fixed-test.js";
+import { ruleTexts } from "../stages/prompt.js";
 import { FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "../v12/stages/field-repair.js";
 import { natureQuestionName } from "../stages/test-suite.js";
 import { captureBaselineV11a, type BaselineV11aCapture, type BaselineV11aScenarios } from "../__tests__/baseline-capture.js";
@@ -244,6 +248,21 @@ function rawTest(options: RawTestOptions): Record<string, unknown> {
 }
 
 const ok = (value: string) => ({ kind: "ok" as const, value, code: null });
+
+/** 固定した試験（decode 済み）を strict の schema の形に戻す（コードが作った試験を LLM の応答に書いたことにする比べ方。Issue #595） */
+const rawOfFixed = (test: FixedTest, observes: string): Record<string, unknown> => ({
+  id: test.id,
+  target: test.target,
+  kind: test.kind,
+  operation: test.operation,
+  clock: test.clock,
+  input: JSON.stringify(test.input),
+  inputContract: test.inputContract,
+  referenceData: test.referenceData.map((row) => ({ ...row, values: JSON.stringify(row.values) })),
+  expected: test.expected.kind === "ok" ? ok(JSON.stringify(test.expected.value)) : { kind: "error", value: null, code: test.expected.code },
+  assertion: null,
+  observes,
+});
 
 /** 項目の行 3 つ（金額 1 ずつ。合計 3・件数 3） */
 const ITEM_ROWS = [1, 2, 3].map((index) => ({
@@ -3782,7 +3801,18 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
    */
   it("二点測定：T1 で入れた表と C1・C2 で入れた表で、C3 以降の論理要求が出典の欄を除いて同じ・判定と宣言が同じ・表の SHA はそれぞれの表に結ぶ", async () => {
     const offTable = withCodeIds(TABLE_ON, true);
-    const offCalls = [structured(t1Of(LIST, offTable)), structured(acceptAll()), structured(renamed(t2Response())), structured({ declaration: RUN_YAML }), structured(acceptAll())];
+    // ids on の T2 はコードが作る試験を組に足す（Issue #595）。off の T2 の応答には同じ試験（同じ ID）を LLM が書いたことにして、
+    // 組・B1 の要求をそろえる（off は予約の接頭辞を見ない）
+    const made = generateTests({ table: MAPPED_IDS, ledger: PROPERTY_LEDGER_VIEW, list: LIST });
+    expect(made.tests.length).toBeGreaterThan(0);
+    const offT2 = renamed(t2Response());
+    const offCalls = [
+      structured(t1Of(LIST, offTable)),
+      structured(acceptAll()),
+      structured({ ...offT2, tests: [...offT2.tests, ...made.tests.map((test) => rawOfFixed(test, made.observes.get(test.id) ?? ""))] }),
+      structured({ declaration: RUN_YAML }),
+      structured(acceptAll()),
+    ];
     const off = await runScenario(offCalls, { flags: { ledger: true, searchRepair: true }, recordV12Flags: true });
     const on = await runScenario([...idsHead(), structured(acceptAll())], { flags: { ledger: true, searchRepair: true, ids: true }, recordV12Flags: true });
     expect(off.result.outcome).toEqual({ result: "pass", verdict: "full" });
@@ -3804,7 +3834,17 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     const onLater = later(on.recording.structured);
     expect(onLater.map((request) => request.schemaName)).toEqual(["semantic-check", "test-spec", "declaration-v11a", "decl-check"]);
     expect(onLater.slice(0, 2).every((request) => /\\"(?:targets|checkTargets)\\": \[/.test(JSON.stringify(request)))).toBe(true);
-    expect(onLater.map((request) => withoutTargets(JSON.stringify(request)))).toEqual(offLater.map((request) => withoutSource(JSON.stringify(request))));
+    // ids on の T2 の R-tsp-16 は台帳の旗 ids の文（Issue #595）。その 1 文を ids off の文に戻して比べる
+    const idsRules = ruleTexts(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW, true));
+    const offRules = ruleTexts(testSpecRuleDefinitionsOf(PROPERTY_LEDGER_VIEW));
+    const withOffRules = (request: LlmStructuredRequest): LlmStructuredRequest =>
+      request.schemaName !== TEST_SPEC_SCHEMA_NAME
+        ? request
+        : { ...request, rules: (request.rules ?? []).map((text) => { const at = idsRules.indexOf(text); return at < 0 ? text : (offRules[at] ?? text); }) };
+    expect(onLater.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)?.rules).not.toEqual(
+      offLater.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)?.rules,
+    );
+    expect(onLater.map((request) => withoutTargets(JSON.stringify(withOffRules(request))))).toEqual(offLater.map((request) => withoutSource(JSON.stringify(request))));
     // 出典の欄の差だけがある（T2 の行に出典がある・無い）
     expect(offLater.map((request) => JSON.stringify(request))).not.toEqual(onLater.map((request) => JSON.stringify(request)));
     // 納品物の宣言・試験の結果が同じ
@@ -3850,5 +3890,110 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     const ignored = await runScenario([...head(), structured(acceptAll())], { v12CallLimits: { realAttempts: 1, judgeBranch: 0 } });
     expect(ignored.result).toEqual(base.result);
     expect(base.result.summary).not.toHaveProperty("v12_calls");
+  });
+});
+
+// ── 旗 v12.ids：コードが作る試験の走り（手 3c。Issue #595）──────────────────────────────
+
+describe("旗 v12.ids：既定値・選択肢の集合・空の集計の要件を含む走りは、コードが作った試験で照らし、宣言が表どおりなら full・違えば full が出ない（Issue #595）", () => {
+  const flags: Partial<GenerationInputV11a> = { flags: { ledger: true, ids: true } };
+  const G_LIST_BASE: RequirementList = {
+    ...BASE_LIST,
+    requirements: [
+      ...BASE_LIST.requirements,
+      { id: "R6", text: DEFAULT_VALUE_REQUIREMENT_TEXT, quote: DEFAULT_VALUE_REQUIREMENT_TEXT, position: { start: 0, end: DEFAULT_VALUE_REQUIREMENT_TEXT.length } },
+      { id: "R7", text: ENUM_MEMBERSHIP_REQUIREMENT_TEXT, quote: ENUM_MEMBERSHIP_REQUIREMENT_TEXT, position: { start: 0, end: ENUM_MEMBERSHIP_REQUIREMENT_TEXT.length } },
+    ],
+  };
+  const G_PLAN = planOf(G_LIST_BASE);
+  const G_LIST = requirementsFromPlan(G_PLAN);
+  const G_SOURCE = G_LIST_BASE.requirements.map((requirement) => requirement.text).join("");
+  const G_IDS = [...IDS, "R6", "R7"] as const;
+  /** 題材の表（R5 を除く）に、アプリ全体の合計 c.base（宣言の base）と既定値の R6・選択肢の集合の R7 を足した表（コードの形の ID） */
+  const G_TABLE_ON: NameTable = (() => {
+    const table = fixtureGeneratedTable();
+    return { rows: table.rows, ownership: without5(table.ownership), verification: without5(table.verification), classification: without5(table.classification) };
+  })();
+  const G_RENAME = codeIdRenameOf(G_TABLE_ON);
+  const G_MAPPED: NameTable = withCheckTargets(withCodeIds(G_TABLE_ON));
+  /** 区分の項目に default を足した宣言 */
+  const G_YAML = replaced(RUN_YAML, "          beta: ベータ\n", "          beta: ベータ\n        default: alpha\n");
+  /** T2 の応答（R6・R7 の試験も、R4 のアプリ全体・見出しごと × 選択肢の空の試験も書かない＝値の要る試験だけ） */
+  const gT2 = () => renameIds(t2Response(), G_RENAME);
+  const gHead = (yaml: string): RecordedCall[] => [
+    ...idsResponseList(idsResponsesOf(G_LIST, G_MAPPED, PROPERTY_LEDGER_VIEW)).map((output) => structured(output)),
+    structured(acceptAll(G_IDS)),
+    structured(gT2()),
+    structured({ declaration: yaml }),
+  ];
+  const runG = (calls: readonly RecordedCall[]) => runScenario(calls, { plan: G_PLAN, source: G_SOURCE, ...flags });
+  /** 評価口の B4 の結果を記録する（評価口はそのまま） */
+  function spyReports() {
+    const reports: { readonly mismatches: readonly { readonly testId: string; readonly detail: string }[]; readonly unresolved: readonly { readonly testId: string }[] }[] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      const evaluator = original(input);
+      return {
+        ...evaluator,
+        runTests: (app, context, correspondence) => {
+          const report = evaluator.runTests(app, context, correspondence);
+          reports.push(report);
+          return report;
+        },
+      };
+    });
+    return reports;
+  }
+  const generatedOf = (result: Awaited<ReturnType<typeof runG>>["result"]) =>
+    (artifactOf(result.bundle, "artifacts/test-spec.json") as { readonly generated_test_ids?: readonly string[] }).generated_test_ids;
+
+  it("正例：宣言が表どおりなら v1 の評価器と台帳の照合で不一致 0・今までの門で full。T2 の成果物にコードが作った試験 ID の並び（組の末尾・予約の接頭辞）がある", async () => {
+    const reports = spyReports();
+    const { result, recording } = await runG([...gHead(G_YAML), structured(acceptAll(G_IDS))]);
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(result.summary.exit_code).toBe(0);
+    expect(reports.length).toBeGreaterThan(0);
+    for (const report of reports) {
+      expect(report.mismatches).toEqual([]);
+      expect(report.unresolved).toEqual([]);
+    }
+    const spec = artifactOf(result.bundle, "artifacts/test-spec.json") as { readonly suite: TestSuite; readonly observes: Record<string, string> };
+    const generatedIds = generatedOf(result) ?? [];
+    expect(generatedIds.length).toBe(6);
+    expect(generatedIds.every((id) => id.startsWith(GENERATED_TEST_ID_PREFIX))).toBe(true);
+    expect(spec.suite.tests.map((test) => test.id).slice(-generatedIds.length)).toEqual(generatedIds);
+    expect(spec.suite.tests.filter((test) => isGeneratedTestId(test.id)).map((test) => test.id)).toEqual(generatedIds);
+    expect(generatedIds.map((id) => spec.observes[id])).toEqual(["empty-aggregate", "empty-aggregate", "empty-aggregate", "empty-aggregate", "default-value", "enum-membership"]);
+    // T2 の要求の一覧に R6・R7 が無い。B1 には作った試験が渡る
+    const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME)!;
+    const listed = dataBlockOf(t2.input, TEST_SPEC_DATA_NAMES[1]) as { requirements: { id: string }[] };
+    expect(listed.requirements.map((requirement) => requirement.id)).toEqual([...IDS]);
+    const write = recording.structured.find((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME)!;
+    const shown = dataBlockOf(write.input, WRITE_V11A_DATA_NAMES[2]) as { tests: { id: string }[] };
+    expect(shown.tests.map((test) => test.id).slice(-generatedIds.length)).toEqual(generatedIds);
+    expectNoAcceptanceMaterial(recording.structured.map((request) => JSON.stringify(request)));
+  });
+
+  // decl-check は B3・B4 の落ちが無い版にだけ掛かる（default の違いは B3 で落ちない・options の集合と集計の種類の違いは B3 でも落ちる）
+  const negatives: readonly { readonly name: string; readonly yaml: string; readonly observes: string; readonly detail?: string; readonly declChecked: boolean }[] = [
+    { name: "宣言の default が違う", yaml: replaced(G_YAML, "        default: alpha\n", "        default: beta\n"), observes: "default-value", detail: DEFAULT_VALUE_DETAILS.defaultDiffers, declChecked: true },
+    { name: "options の集合が違う", yaml: replaced(G_YAML, "          beta: ベータ\n", "          beta: ベータ\n          gamma: ガンマ\n"), observes: "enum-membership", detail: ENUM_MEMBERSHIP_DETAILS.optionsDiffer, declChecked: false },
+    { name: "空の集計が 0 でない（アプリ全体の合計を平均にした）", yaml: replaced(G_YAML, "      sum: item.amount\n    type: number\n  - name: rate", "      avg: item.amount\n    type: number\n  - name: rate"), observes: "empty-aggregate", declChecked: false },
+  ];
+
+  it.each(negatives)("負例：$name 宣言は、コードが作った試験で不一致になり full が出ない（作り手で甘くならない）", async ({ yaml, observes, detail, declChecked }) => {
+    const reports = spyReports();
+    const accepted = declChecked ? [structured(acceptAll(G_IDS))] : [];
+    const { result } = await runG([...gHead(yaml), ...accepted, repairDone(yaml), ...accepted]);
+    expect(result.outcome.verdict).not.toBe("full");
+    expect(result.summary.verdict).not.toBe("full");
+    expect(reports.length).toBeGreaterThan(0);
+    if (result.bundle === null) throw new Error(JSON.stringify({ stopped: result.stopped, stages: stageIds(result) }));
+    const generatedIds = new Set(generatedOf(result) ?? []);
+    const spec = artifactOf(result.bundle, "artifacts/test-spec.json") as { readonly observes: Record<string, string> };
+    const missed = reports[0]!.mismatches.filter((entry) => generatedIds.has(entry.testId) && spec.observes[entry.testId] === observes);
+    expect(missed.length).toBeGreaterThan(0);
+    if (detail !== undefined) expect(missed.map((entry) => entry.detail)).toContain(detail);
   });
 });

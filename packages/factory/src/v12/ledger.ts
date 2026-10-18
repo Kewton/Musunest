@@ -103,7 +103,8 @@ export const PROPERTY_STATE_LABELS: Readonly<Record<PropertyState, string>> = {
 
 /**
  * 期待の値の書き手（§5 との段階の差）。手 2 は T2 の LLM が期待の値を書き、コードが台帳の行から導いた値と T2' で厳密に
- * 照らす（違えば拒否）。§5 の「値はコードだけで埋まる」（`code`）は手 3 で入れる
+ * 照らす（違えば拒否）。§5 の「値はコードだけで埋まる」（`code`）は手 3c（#595）で入れた：旗 `v12.ids` の走りだけ、
+ * `code` の試験の型の試験は `v12/generated-tests.ts` が作り、T2 の LLM には書かせない（旗 off の走りは今までどおり LLM が書く）
  */
 export const EXPECTED_VALUE_WRITERS = ["llm-written-code-checked", "code"] as const;
 export type ExpectedValueWriter = (typeof EXPECTED_VALUE_WRITERS)[number];
@@ -201,6 +202,21 @@ export interface PropertyT2 {
 export const AGGREGATE_DATA_STATES = ["empty", "unread"] as const;
 export type AggregateDataState = (typeof AGGREGATE_DATA_STATES)[number];
 
+/**
+ * 集計の範囲（#595）。`row` … 行ごと（type の scope が row）、`app` … アプリ全体、`groups-enum` … 見出しごと × 選択肢
+ * （groupBy の kind が enum）、`groups-month` … 見出しごと × 月（groupBy の kind が month）
+ */
+export const AGGREGATE_RANGES = ["row", "app", "groups-enum", "groups-month"] as const;
+export type AggregateRange = (typeof AGGREGATE_RANGES)[number];
+
+/** 集計の範囲の人が読む名前（写しの表の欄） */
+export const AGGREGATE_RANGE_LABELS: Readonly<Record<AggregateRange, string>> = {
+  row: "行ごと",
+  app: "アプリ全体",
+  "groups-enum": "見出しごと × 選択肢",
+  "groups-month": "見出しごと × 月",
+};
+
 /** データ状態ごとの値（`zero` … 0。見出しごとは見出しごとに 0／`null` … null。見出しごとは見出しごとに null） */
 export const AGGREGATE_STATE_VALUES = ["zero", "null"] as const;
 export type AggregateStateValue = (typeof AGGREGATE_STATE_VALUES)[number];
@@ -232,9 +248,18 @@ export interface PropertyAggregateT2 {
    */
   readonly alsoObserves: readonly string[];
   readonly minTests: number;
+  /** `codeRanges` の外の範囲の期待の値の書き手 */
   readonly expectedWriter: ExpectedValueWriter;
+  /**
+   * コードが作る範囲（期待の値の書き手が `code`。#595）。旗 `v12.ids` の走りだけ、この範囲の集計の行の空・未読の試験は
+   * `v12/generated-tests.ts` が作り、T2 の LLM には書かせない。範囲の外（行ごとは入力の行が要り、見出しごと × 月は見出しの数が
+   * 宣言の `last` で決まり表から導けない）は `expectedWriter` のまま（LLM が書き T2' が照らす）
+   */
+  readonly codeRanges: readonly AggregateRange[];
   /** T2' の固定文（値を埋めない） */
   readonly messages: {
+    /** 旗 `v12.ids`：コードが作る試験と同じ（要件・対象・性質・データ状態）の試験を LLM が書いた（#595） */
+    readonly notAllowed: string;
     /** 対象が、集計の種類と集計元を持つ種別 aggregate の計算の行でない */
     readonly target: string;
     /** 参照データに集計元の entity の行がある */
@@ -281,6 +306,11 @@ export interface PropertyRules {
   readonly t1: string | null;
   readonly t1Acceptance: string | null;
   readonly t2: string | null;
+  /**
+   * 旗 `v12.ids` の走りの T2 の文（コードが試験を作る範囲を「作らない（コードが作る）」に差し替えた文。#595）。null なら
+   * `t2` の文をそのまま使う
+   */
+  readonly t2Ids: string | null;
   readonly b1: string | null;
 }
 
@@ -319,6 +349,10 @@ export interface PropertyRow {
 /** 外の採点がこの性質を見ないことの印 */
 export const OUTER_NOT_SCORED = "外は見ない" as const;
 
+/** 空の集計の行の T2 の文（旗 off と、旗 `v12.ids` の走りの行ごと・見出しごと × 月の集計の文。#549・#595） */
+const EMPTY_AGGREGATE_T2_RULE =
+  "集計（計算の行の type の form が aggregate）の要件の境界（boundary）の試験は、集計元を空と明示し（入力の契約の emptyEntities にその行の type.aggregate.entity の id を入れ、参照データにその entity の行を置かない）、期待（expected）の value を集計の種類で決まる値にする：sum・count は 0（見出しごとは、enum の見出しなら options の全キーを順に heading と value 0 で並べ、月の見出しなら各見出しの value を 0 にする）、avg は null（見出しごとは各見出しの value を null にする）。異常（abnormal）の試験は集計元に触れず（emptyEntities に入れず、参照データにその entity の行も置かない）、期待の value を null にする。どちらも対象（target）はその計算の行、operation は aggregate、observes は empty-aggregate、期待の kind は ok・code は null にする。集計元の行を置かずに observes を value にした集計の試験も、期待は同じ値（空と明示すれば種類で決まる値、しなければ null）にする。正常の試験（observes は value）は今までどおり集計元の行を置いて作る。";
+
 /** v1.1α から引き継いだ行の共通の欄 */
 const INHERITED = {
   since: "Issue #508（台帳への集約は #547）",
@@ -334,7 +368,7 @@ const INHERITED = {
   evaluation: "v1-run-tests",
   outer: null,
   unsupportedMessage: null,
-  rules: { t1: null, t1Acceptance: null, t2: null, b1: null },
+  rules: { t1: null, t1Acceptance: null, t2: null, t2Ids: null, b1: null },
 } as const;
 
 /**
@@ -372,6 +406,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       t1: null,
       t1Acceptance: null,
       t2: "操作 × action の試験（observes は when）の期待（expected）は、操作の条件（when）が成り立つなら kind を ok・value を true、成り立たないなら kind を ok・value を false（か kind を error）にする。操作後の状態（写像・文字列・数）を期待に書かない。条件（when）の無い操作（表の type の hasWhen が false の行）に action の試験を作らない（その要件は構造の検査か別の対象で確かめる）。",
+      t2Ids: null,
       b1: null,
     },
   },
@@ -420,6 +455,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       t1: null,
       t1Acceptance: null,
       t2: "操作に set を当てたあとの状態（state-after-set）は評価できないので、その試験は作らない。",
+      t2Ids: null,
       b1: null,
     },
   },
@@ -463,7 +499,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       referenceTargets: [],
       input: "empty-record",
       minTests: 1,
-      expectedWriter: "llm-written-code-checked",
+      expectedWriter: "code",
       messages: {
         notAllowed: "項目の既定値（default-value）の試験は、確かめ方が default-value の要件の、その選択肢の項目だけを対象にできる",
         kind: "既定値で確かめる要件の試験は、正常（normal）だけであること",
@@ -486,6 +522,8 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       t1Acceptance:
         "確かめ方が default-value の要件は、要件の決まりが選択肢の項目の既定値 1 つだけで、value が要件の文の値と合うときだけ受理する。既定値のほかの決まり（入力の制約など）を含む要件や、value が要件の文の値と違う要件は受理せず、weak-verification で拒否する。",
       t2: "項目の既定値（default-value）の試験は、確かめ方が default-value の要件にだけ、次の形で 1 本以上作る：対象（target）はその要件の所属の選択肢の項目（target.kind は field）、kind は normal、operation は validate、observes は default-value、入力（input）は空の写像（\"{}\"）、参照データ（referenceData）は空の並び、期待（expected）は kind を ok・value を確かめ方の value のキーの JSON の文字列（例: キーが k1 なら \"\\\"k1\\\"\"）・code を null。その要件には異常・境界の試験を作らない。ほかの要件に default-value を書かない。",
+      t2Ids:
+        "項目の既定値（default-value）の試験は作らない（確かめ方が default-value の要件は要件の一覧に無く、その試験はコードが作る）。どの要件の試験にも observes を default-value と書かない。",
       b1: "固定した試験のうち observes が default-value の試験は、対象の選択肢の項目の default に、その試験の期待（expected.value）のキーを書くことを求める。",
     },
   },
@@ -529,7 +567,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       referenceTargets: [],
       input: "empty-record",
       minTests: 1,
-      expectedWriter: "llm-written-code-checked",
+      expectedWriter: "code",
       messages: {
         notAllowed: "選択肢の集合（enum-membership）の試験は、確かめ方が enum-membership の要件の、その選択肢の項目だけを対象にできる",
         kind: "選択肢の集合で確かめる要件の試験は、正常（normal）だけであること",
@@ -552,6 +590,8 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       t1Acceptance:
         "確かめ方が enum-membership の要件は、要件の決まりが選択肢の集合だけで、所属させた選択肢の項目の options が要件の文の選択肢と過不足なく合うときだけ受理する。選択肢のほかの決まり（入力の制約など）を含む要件や、options が要件の文の選択肢と合わない要件は受理せず、weak-verification で拒否する。",
       t2: "選択肢の集合（enum-membership）の試験は、確かめ方が enum-membership の要件にだけ、次の形で 1 本以上作る：対象（target）はその要件の所属の選択肢の項目（target.kind は field）、kind は normal、operation は validate、observes は enum-membership、入力（input）は空の写像（\"{}\"）、参照データ（referenceData）は空の並び、期待（expected）は kind を ok・value をその項目の表の options のキーを表の順に並べた並びの JSON の文字列（例: キーが k1・k2 なら \"[\\\"k1\\\",\\\"k2\\\"]\"）・code を null。その要件には異常・境界の試験を作らない。ほかの要件に enum-membership を書かない。",
+      t2Ids:
+        "選択肢の集合（enum-membership）の試験は作らない（確かめ方が enum-membership の要件は要件の一覧に無く、その試験はコードが作る）。どの要件の試験にも observes を enum-membership と書かない。",
       b1: "固定した試験のうち observes が enum-membership の試験は、対象の選択肢の項目の options を、名前の表の行の options のキーの順で書くことを求める。",
     },
   },
@@ -583,7 +623,10 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       alsoObserves: ["value"],
       minTests: 1,
       expectedWriter: "llm-written-code-checked",
+      codeRanges: ["app", "groups-enum"],
       messages: {
+        notAllowed:
+          "アプリ全体と選択肢の見出しごとの集計の、集計元が空・未読の試験はコードが作るので、同じ要件・対象・データ状態の試験を書かないこと",
         target: "空の集計（empty-aggregate）の試験の対象は、集計の種類と集計元を持つ種別 aggregate の計算の行であること",
         referenceData: "空の集計（empty-aggregate）の試験の参照データに、集計元の entity の行を置かないこと",
         kind: "空の集計（empty-aggregate）の試験の kind は、集計元を空と明示するなら boundary、集計元に触れないなら abnormal であること",
@@ -599,7 +642,9 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
     rules: {
       t1: "計算の行の type の aggregate には、種別（form）が aggregate の計算なら、集計の種類（kind：sum は合計・count は件数・avg は平均）と集計元の entity の行の id（entity）を書く。見出しごとの集計の集計元は、見出しの元の項目の所属 entity にする。種別が aggregate でない計算と、計算でない行の aggregate は null にする。",
       t1Acceptance: null,
-      t2: "集計（計算の行の type の form が aggregate）の要件の境界（boundary）の試験は、集計元を空と明示し（入力の契約の emptyEntities にその行の type.aggregate.entity の id を入れ、参照データにその entity の行を置かない）、期待（expected）の value を集計の種類で決まる値にする：sum・count は 0（見出しごとは、enum の見出しなら options の全キーを順に heading と value 0 で並べ、月の見出しなら各見出しの value を 0 にする）、avg は null（見出しごとは各見出しの value を null にする）。異常（abnormal）の試験は集計元に触れず（emptyEntities に入れず、参照データにその entity の行も置かない）、期待の value を null にする。どちらも対象（target）はその計算の行、operation は aggregate、observes は empty-aggregate、期待の kind は ok・code は null にする。集計元の行を置かずに observes を value にした集計の試験も、期待は同じ値（空と明示すれば種類で決まる値、しなければ null）にする。正常の試験（observes は value）は今までどおり集計元の行を置いて作る。",
+      t2: EMPTY_AGGREGATE_T2_RULE,
+      t2Ids:
+        `集計（計算の行の type の form が aggregate）の行のうち、アプリ全体（type の scope が app）の行と、選択肢の見出しごと（groupBy の kind が enum）の行の、集計元を空と明示した境界（boundary）の試験と集計元に触れない異常（abnormal）の試験は作らない（コードが作る）。その行には、集計元の行を参照データに置いた正常の試験（observes は value）だけを作る。行ごと（type の scope が row）の集計と月の見出しごと（groupBy の kind が month）の集計の行は、次のとおり作る：${EMPTY_AGGREGATE_T2_RULE}`,
       b1: "名前の表の計算の行の type に aggregate があれば、宣言のその計算の aggregate の種類（sum・count・avg）と集計元の entity を、その行の aggregate の種類と、集計元の entity の行の名前のとおりに書く。",
     },
   },
@@ -646,6 +691,7 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
       t1Acceptance:
         "確かめ方が non-requirement の要件は、要件の文に決まりも対象（項目・計算・集計・操作・画面）も無いときだけ受理する。決まりか対象を含む要件は受理せず、weak-verification で拒否する。要件の出どころや要件 ID の形を受理の理由にしない。",
       t2: null,
+      t2Ids: null,
       b1: null,
     },
   },
@@ -703,6 +749,13 @@ export function ledgerRowDefects(rows: readonly PropertyRow[]): readonly string[
         defects.push(`${at} の期待は確かめ方の欄の値なのに、確かめ方に欄が無い`);
       }
     }
+    // コードが作る試験の型（#595）：入力は空の写像・参照データは空（コードが値を埋められる形）で、旗 `v12.ids` の文がある
+    if (row.t2 !== null && row.t2.expectedWriter === "code") {
+      if (row.t2.input !== "empty-record" || row.t2.referenceTargets.length > 0) {
+        defects.push(`${at} は期待の値をコードが書くのに、入力か参照データが空でない`);
+      }
+      if (row.rules.t2Ids === null) defects.push(`${at} は期待の値をコードが書くのに、旗 ids の T2 の文が無い`);
+    }
     if (row.t2Aggregate !== null) {
       const { states, values, targetKind, operation } = row.t2Aggregate;
       const stateNames = states.map((entry) => entry.state);
@@ -715,6 +768,16 @@ export function ledgerRowDefects(rows: readonly PropertyRow[]): readonly string[
       }
       if (!row.combinations.some((entry) => entry.targetKind === targetKind && entry.operation === operation)) {
         defects.push(`${at} の集計の試験の型の組が、評価の方法の表の組に無い`);
+      }
+      const { codeRanges } = row.t2Aggregate;
+      if (
+        new Set(codeRanges).size !== codeRanges.length ||
+        codeRanges.some((range) => !(AGGREGATE_RANGES as readonly string[]).includes(range))
+      ) {
+        defects.push(`${at} の集計の試験の型のコードが作る範囲が、知らない値か重なっている`);
+      }
+      if (codeRanges.length > 0 && row.rules.t2Ids === null) {
+        defects.push(`${at} はコードが作る範囲を持つのに、旗 ids の T2 の文が無い`);
       }
     }
     if (row.t2Condition !== null) {
@@ -759,6 +822,11 @@ export interface LedgerView {
   readonly b1RuleTexts: readonly string[];
   /** T2 の規則の形の位置に差し込む文（有効・削る候補の行。台帳の順） */
   readonly t2FormTexts: readonly string[];
+  /**
+   * 旗 `v12.ids` の走りの T2 の規則の形の位置に差し込む文（`t2FormTexts` の各行の文を、旗 ids の文があればそれに差し替えたもの。
+   * 台帳の順。#595）
+   */
+  readonly t2IdsFormTexts: readonly string[];
   /** T2 の規則の末尾に差し込む、未対応の性質の試験を作らせない文（台帳の順） */
   readonly t2UnsupportedTexts: readonly string[];
   /** 正常・異常・境界のそろいを求めない確かめ方の種類（試験の型の必須の kind が normal だけの行。台帳の順） */
@@ -803,6 +871,10 @@ export function deriveLedgerView(rows: readonly PropertyRow[]): LedgerView {
     t1AcceptanceTexts: rows.flatMap((row) => (row.rules.t1Acceptance === null ? [] : [row.rules.t1Acceptance])),
     b1RuleTexts: evaluable.flatMap((row) => (row.rules.b1 === null ? [] : [row.rules.b1])),
     t2FormTexts: evaluable.flatMap((row) => (row.rules.t2 === null ? [] : [row.rules.t2])),
+    t2IdsFormTexts: evaluable.flatMap((row) => {
+      const text = row.rules.t2Ids ?? row.rules.t2;
+      return text === null ? [] : [text];
+    }),
     t2UnsupportedTexts: rows
       .filter((row) => row.state === "registered-unsupported")
       .flatMap((row) => (row.rules.t2 === null ? [] : [row.rules.t2])),
@@ -868,13 +940,22 @@ export function propertyCopyCells(row: PropertyRow): readonly string[] {
         ? "—"
         : `未定義（組：${row.combinations.map((entry) => `${entry.targetKind} × ${entry.operation}`).join("・")}）`
       : `${row.t2.targetKind} × ${row.t2.operation}・${row.t2.requiredKinds.join("・")}・期待 ${row.t2.expected.kind} の ${row.t2.expected.valueType}・入力 ${row.t2.input}・参照データ ${row.t2.referenceTargets.length === 0 ? "空" : row.t2.referenceTargets.join("・")}・${String(row.t2.minTests)} 本以上`;
+  // 集計の試験の型は、コードが作る範囲とその外の範囲で書き手を分けて書く（#595）
+  const aggregateWriter =
+    aggregate === null
+      ? undefined
+      : aggregate.codeRanges.length === 0
+      ? aggregate.expectedWriter
+      : `code（${aggregate.codeRanges.map((range) => AGGREGATE_RANGE_LABELS[range]).join("・")}）／${aggregate.expectedWriter}（${AGGREGATE_RANGES.filter((range) => !aggregate.codeRanges.includes(range))
+          .map((range) => AGGREGATE_RANGE_LABELS[range])
+          .join("・")}）`;
   return [
     row.id,
     state,
     row.since,
     row.t1?.kind ?? condition?.t1Kind ?? "—",
     shape,
-    row.t2?.expectedWriter ?? aggregate?.expectedWriter ?? condition?.expectedWriter ?? "—",
+    row.t2?.expectedWriter ?? aggregateWriter ?? condition?.expectedWriter ?? "—",
     row.evaluation ?? "—",
     row.outer ?? "未定義",
     row.why,

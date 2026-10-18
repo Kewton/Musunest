@@ -96,3 +96,5 @@ export * from "./v12/limits.js";
 export * from "./v12/ids.js";
 export * from "./v12/stages/vocabulary.js";
 export * from "./v12/stages/mapping.js";
+// コードが作る試験（台帳の型だけで値が決まる試験。旗 `v12.ids`。手 3c・Issue #595）
+export * from "./v12/generated-tests.js";

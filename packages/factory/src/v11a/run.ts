@@ -44,6 +44,8 @@
 // 止まる。判定の包みには判定の枝（上限 80）を足し、尽きれば判定を呼ばない（J4 は未判定 `gate`・J2 は `ruled`。本は止めない）。
 // 要約には門と枝の上限と使った数を `v12_calls` で書く。off なら門を作らず、今の配線（共通の口の `#calls` を `callCount` に
 // 照らす・判定は門に数えない）をそのまま通る。
+// 手 3c（Issue #595）から、on の走りの T2 は台帳の型だけで値が決まる試験（既定値・選択肢の集合・アプリ全体と見出しごと × 選択肢の
+// 空の集計）をコードが作り（`v12/generated-tests.ts`）、T2 の成果物にその試験 ID の並び（`generated_test_ids`）を足す。
 //
 // 持ち越し（§1.2）の出どころは 4 つ。T1 の unresolved と T1'' の拒否は A1 の `deriveCarryOver` で導く。
 // B3' の文脈なし・点検が尽きるか停滞したあとに残った拒否と、B6 の網羅の落ちは、版の輪の途中で足していく
@@ -181,6 +183,7 @@ import { canRepairFields, locateFailures } from "../v12/locate.js";
 import { V12_CALL_LIMITS, type V12CallLimits } from "../v12/limits.js";
 import { mergeReplacements, runFieldRepair } from "../v12/stages/field-repair.js";
 import { VOCABULARY_BUNDLES, ZERO_REFERENCE_COUNTS, type ReferenceCounts } from "../v12/ids.js";
+import { isGeneratedTestId } from "../v12/generated-tests.js";
 import { runVocabularyBundle } from "../v12/stages/vocabulary.js";
 import {
   assembleMappedTable,
@@ -1225,6 +1228,8 @@ async function runV11a(
           },
           onRejected: rejectionSink("test-spec", 1),
           ...withLedger,
+          // 旗 `v12.ids`：台帳の型だけで値が決まる試験をコードが作る（off は渡さない＝今のまま。Issue #595）
+          ...(flags.ids ? { ids: true } : {}),
         }),
       );
       natureDiscrepancies = toBundleNatureDiscrepancies(value.discrepancies);
@@ -1835,6 +1840,8 @@ async function runV11a(
           coverage: testSpec.coverage,
           overturnedTestIds: overturned.map((entry) => entry.testId),
           coverageChecks,
+          // 旗 `v12.ids` の走りだけ、コードが作った試験 ID（予約の接頭辞の試験。再開した組でも同じに引ける。Issue #595）
+          ...(flags.ids ? { generatedTestIds: testSpec.suite.tests.map((test) => test.id).filter(isGeneratedTestId) } : {}),
         },
         declCheck: { limit: limits.declChecks, versions: declVersions },
         carryOver: {
