@@ -30,7 +30,7 @@ import { BUILD_CLI_RECORD_FILE, PLAN_ONLY_RESULT_SCHEMA } from "./cli-plan.js";
 import * as factory from "./index.js";
 import { createFakeJudge } from "./judge-fake.js";
 import type { JudgeAnswer } from "./judge.js";
-import { uncheckedBecause, type RecordedCall } from "./llm-fake.js";
+import { FakeLlmSchemaMismatchError, uncheckedBecause, type RecordedCall } from "./llm-fake.js";
 import { createOpenAiLlmClient } from "./openai.js";
 import { FIELD_REPAIR_SCHEMA_NAME } from "./v12/stages/field-repair.js";
 import {
@@ -1358,7 +1358,16 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
 
   /** 観測した名前のうち、封筒の一覧にも許可の一覧にも無いもの */
   const unlistedNames = (observed: Iterable<string>, envelopeStages: readonly string[]): string[] =>
-    [...new Set(observed)].filter((name) => !envelopeStages.includes(name) && !(name in OUTSIDE_ENVELOPE_STAGES)).sort();
+    [...new Set(observed)].filter((name) => !envelopeStages.includes(name) && !Object.hasOwn(OUTSIDE_ENVELOPE_STAGES, name)).sort();
+
+  it("許可の一覧が認めるのは、一覧に書いた 2 名だけ（継承したプロパティの名前は許可しない。Issue #590 の直し）", () => {
+    expect(Object.keys(OUTSIDE_ENVELOPE_STAGES).sort()).toEqual(["judge-answers", FIELD_REPAIR_SCHEMA_NAME].sort());
+    expect(unlistedNames(["judge-answers", FIELD_REPAIR_SCHEMA_NAME], [])).toEqual([]);
+    // `in` なら原型の鎖から通ってしまう名前を、未許可として検出する
+    expect(unlistedNames(["toString", "constructor", "__proto__", "hasOwnProperty"], [])).toEqual(
+      ["__proto__", "constructor", "hasOwnProperty", "toString"],
+    );
+  });
 
   for (const pipeline of ["v1.1a", "v1.2"] as const) {
     it(`${pipeline}：完走と差し戻しの走りで観測した構造化出力の名前は、封筒の一覧か許可の一覧にある。許可に無い名前を足した段は落ちる`, async () => {
@@ -1603,22 +1612,36 @@ const requestText = (request: object): string => {
   return JSON.stringify(rest);
 };
 
-/** 旗を省いた `--pipeline v1.1a --plan-file` を 1 経路流し、観測した値を返す（ファイルは手元の写像で閉じる） */
+/** 照合ありの偽物が投げた誤りを残してから投げ直す（入口は誤りを終了コードに畳むので、照合で落ちたことを外から見る） */
+async function keepingErrors<T>(errors: unknown[], call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    errors.push(error);
+    throw error;
+  }
+}
+
+/**
+ * 旗を省いた `--pipeline v1.1a --plan-file` を 1 経路流し、観測した値を返す（ファイルは手元の写像で閉じる）。
+ * 偽物は記録を要求の schema に照らす（Issue #590）。偽物が投げた誤りは `clientErrors` に残す（記録との比較には入れない）
+ */
 async function captureV11aCli(
   entry: typeof runCli,
   scenario: (typeof V11A_BEFORE_SCENARIOS)[number],
+  clientErrors: unknown[] = [],
 ): Promise<V11aBeforeCapture> {
   const planText = JSON.stringify(await v11aEnvelope());
-  const recording = createRecordingClient(scenario.calls());
+  const recording = createCheckedRecordingClient(scenario.calls());
   const order: { readonly kind: "structured" | "tools"; readonly request: object }[] = [];
   const client: LlmClient = {
     async callStructured<T>(request: LlmStructuredRequest) {
       order.push({ kind: "structured", request });
-      return recording.client.callStructured<T>(request);
+      return keepingErrors(clientErrors, () => recording.client.callStructured<T>(request));
     },
     async callWithTools(request) {
       order.push({ kind: "tools", request });
-      return recording.client.callWithTools(request);
+      return keepingErrors(clientErrors, () => recording.client.callWithTools(request));
     },
   };
   const clientOptions: unknown[] = [];
@@ -1688,8 +1711,11 @@ describe("旗を省いた v1.1α の走りは、直す前（fb9e122）の記録�
 
   it("4 経路を候補の入口に流すと、要求の列・全ファイルの SHA-256・出した行・終了コードが記録と深く等しく、checkpoint を書かない", async () => {
     for (const [index, scenario] of V11A_BEFORE_SCENARIOS.entries()) {
-      const capture = await captureV11aCli(runCli, scenario);
+      const clientErrors: unknown[] = [];
+      const capture = await captureV11aCli(runCli, scenario, clientErrors);
       const expected = v11aBefore.captures[index]!;
+      // 記録は要求の schema に照らして通る（照らさないのは理由つきの unchecked だけ。Issue #590）
+      expect(clientErrors, scenario.name).toEqual([]);
       expect(capture.clientOptions, scenario.name).toEqual(expected.clientOptions);
       expect(capture.requests, scenario.name).toEqual(expected.requests);
       expect(capture.files, scenario.name).toEqual(expected.files);
@@ -1698,6 +1724,19 @@ describe("旗を省いた v1.1α の走りは、直す前（fb9e122）の記録�
       expect(capture, scenario.name).toEqual(expected);
       for (const file of capture.files) expect(file.path, scenario.name).not.toMatch(/stage-/);
     }
+  });
+
+  it("照合ありの偽物を通る：schema に合わない応答（T1 に schema に無い欄）を流すと FakeLlmSchemaMismatchError で落ちる（Issue #590 の直し）", async () => {
+    const clientErrors: unknown[] = [];
+    const capture = await captureV11aCli(
+      runCli,
+      { name: "schema-mismatch", calls: () => [structured({ ...v11aT1(), unexpected: true }), ...v11aHead().slice(1), structured(v11aJudgments())] },
+      clientErrors,
+    );
+    expect(clientErrors).toHaveLength(1);
+    expect(clientErrors[0]).toBeInstanceOf(FakeLlmSchemaMismatchError);
+    expect(clientErrors[0]).toMatchObject({ recordIndex: 0, schemaName: "name-table" });
+    expect(capture.exitCode).not.toBe(EXIT_OK);
   });
 
   it("記録の JSON に鍵の値・題材の言葉が無い", async () => {
@@ -1713,7 +1752,10 @@ describe("旗を省いた v1.1α の走りは、直す前（fb9e122）の記録�
 
 // ── 段単位の実行口（`--stage-start`・`--stage-end`・`--stage-input`。08 §8.3・Issue #544）──────────────
 
-/** 段の走りを 1 回流す（偽物の LLM・判定・時計で閉じる。`--out` と前の走りの出力だけ本物のファイル） */
+/**
+ * 段の走りを 1 回流す（偽物の LLM・判定・時計で閉じる。`--out` と前の走りの出力だけ本物のファイル）。
+ * 偽物は記録を要求の schema に照らす（Issue #590）。偽物が投げた誤りは `clientErrors` に残す
+ */
 async function runStageCli(input: {
   readonly dir: string;
   readonly args: readonly string[];
@@ -1723,16 +1765,17 @@ async function runStageCli(input: {
 }) {
   const planPath = `${input.dir}-plan.json`;
   const planText = JSON.stringify(input.envelope ?? (await v11aEnvelope()));
-  const recording = createRecordingClient(input.calls);
+  const recording = createCheckedRecordingClient(input.calls);
   const order: string[] = [];
+  const clientErrors: unknown[] = [];
   const client: LlmClient = {
     async callStructured<T>(request: LlmStructuredRequest) {
       order.push(requestText(request));
-      return recording.client.callStructured<T>(request);
+      return keepingErrors(clientErrors, () => recording.client.callStructured<T>(request));
     },
     async callWithTools(request) {
       order.push(requestText(request));
-      return recording.client.callWithTools(request);
+      return keepingErrors(clientErrors, () => recording.client.callWithTools(request));
     },
   };
   const makeClient = vi.fn((_options: { readonly envelope?: EnvelopeId }) => client);
@@ -1763,7 +1806,7 @@ async function runStageCli(input: {
     log: (line) => lines.push(line),
     logError: (line) => errors.push(line),
   });
-  return { code, lines, errors, written, directories, makeClient, requests: order };
+  return { code, lines, errors, written, directories, makeClient, requests: order, clientErrors };
 }
 
 /** 段の走りの記録を読む */
@@ -1942,6 +1985,18 @@ describe("B の結果を上流へ戻さない", () => {
 });
 
 describe("段の走りの記録・納品物・終了コード", () => {
+  it("照合ありの偽物を通る：schema に合わない応答（T1 に schema に無い欄）を流すと FakeLlmSchemaMismatchError で落ちる（Issue #590 の直し）", async () => {
+    const run = await runStageCli({
+      dir: `${directory}/stage-schema-mismatch`,
+      args: ["--stage-end", "test-spec"],
+      calls: [structured({ ...v11aT1(), unexpected: true }), ...v11aHead().slice(1, 3)],
+    });
+    expect(run.clientErrors).toHaveLength(1);
+    expect(run.clientErrors[0]).toBeInstanceOf(FakeLlmSchemaMismatchError);
+    expect(run.clientErrors[0]).toMatchObject({ recordIndex: 0, schemaName: "name-table" });
+    expect(run.code).not.toBe(EXIT_OK);
+  });
+
   it("段の通過 0：記録に stage_pass・budget_scope・出力ダイジェストがあり、verdict・pass の名前の欄が無く、納品物を書かない", async () => {
     const dir = `${directory}/stage-record`;
     const run = await runStageCli({ dir, args: ["--stage-end", "judge"], calls: [...v11aHead(), structured(v11aJudgments())] });
