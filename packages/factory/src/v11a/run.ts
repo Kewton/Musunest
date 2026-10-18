@@ -351,6 +351,19 @@ export function v11aFailureSignature(
 }
 
 /**
+ * 一番良い版を数え直すときの静的チェック（旗 `v12.search-repair`。Issue #551）。宣言の原文の SHA-256 が、静的チェックを
+ * 掛けた版の SHA-256 と**バイト列で同じときだけ**結果を引き継ぐ。違えば `rerun` で静的チェックを流し直す（引き継がない）。
+ */
+export async function staticCheckForRecount(
+  report: Pick<VersionReport, "declaration" | "declarationSha256" | "staticCheck">,
+  rerun: (declaration: Declaration) => Promise<StaticCheckResult>,
+): Promise<{ readonly declarationSha256: string; readonly staticCheck: StaticCheckResult; readonly rerun: boolean }> {
+  const declarationSha256 = await sha256Hex(report.declaration.source);
+  if (declarationSha256 === report.declarationSha256) return { declarationSha256, staticCheck: report.staticCheck, rerun: false };
+  return { declarationSha256, staticCheck: await rerun(report.declaration), rerun: true };
+}
+
+/**
  * 持ち越しに、版の輪の途中で足す出どころ（B3' の文脈なし・残った拒否、B6 の網羅の落ち）を重ねる（§1.2）。
  * 除く行は A1 と同じ規則（所属させた要件が全部持ち越しの行。共有する行は残す）で導き、残る行の参照が
  * 除いた行を指せば例外で断る（A1 の固定文）。要件の並びは一覧の順、理由は基の理由のあとに足した順。基の要件でない文
@@ -1316,20 +1329,39 @@ async function runV11a(
       const violationsOf = (state: VersionState) => countViolations(factsOf(state));
       /** 一番良い版の違反の数を、確定した文脈でコードの検査（B3・B4）だけで数え直す（判定・点検を呼ばない） */
       const recount = async (state: VersionState, cause: SearchRecountRecord["cause"]): Promise<VersionState> => {
-        const app = state.report.staticCheck.app;
-        let next = state;
-        if (state.report.staticCheck.passed && app !== null) {
+        // 静的チェックの結果は、宣言のバイト列が同じときだけ引き継ぐ（違えば流し直す）
+        const checked = await staticCheckForRecount(state.report, (declaration) =>
+          runStage("static-check", async () => runStaticCheck(declaration)),
+        );
+        const app = checked.staticCheck.app;
+        let next: VersionState = checked.rerun
+          ? {
+              report: {
+                ...state.report,
+                declarationSha256: checked.declarationSha256,
+                staticCheck: checked.staticCheck,
+                correspondence: null,
+                testRun: null,
+                routes: [],
+              },
+              decl: { ran: false, reason: "static-check" },
+              rejections: [],
+              unmarked: [],
+            }
+          : state;
+        if (checked.staticCheck.passed && app !== null) {
           const context = contextNow();
           const named = await runStage("name-check", async () => evaluator.nameCheck(app, context));
           const correspondence = { entries: named.entries, misses: named.misses };
           const testRun = await runStage("run-tests", async () => evaluator.runTests(app, context, correspondence));
           const carried = carriedIds();
           next = {
-            report: { ...state.report, correspondence, testRun, routes: testRun.routes },
-            decl: state.decl,
+            report: { ...next.report, correspondence, testRun, routes: testRun.routes },
+            // 流し直した版は B3' を流していない（不明。fail-closed）
+            decl: checked.rerun ? { ran: false, reason: "name-check" } : state.decl,
             // B3' の拒否は、持ち越しになった要件の分を除いて引き継ぐ（呼び出しを足さない）
-            rejections: state.rejections.filter((rejection) => !carried.has(rejection.requirementId)),
-            unmarked: state.unmarked.filter((requirementId) => !carried.has(requirementId)),
+            rejections: checked.rerun ? [] : state.rejections.filter((rejection) => !carried.has(rejection.requirementId)),
+            unmarked: checked.rerun ? [] : state.unmarked.filter((requirementId) => !carried.has(requirementId)),
           };
         }
         recounts.push({ cause, declarationSha256: next.report.declarationSha256, violations: violationsOf(next) });

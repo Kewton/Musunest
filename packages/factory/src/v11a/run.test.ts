@@ -65,6 +65,7 @@ import {
   ALL_CARRIED_PROBLEM,
   runGenerationV11a,
   runStageRangeV11a,
+  staticCheckForRecount,
   v11aFailureSignature,
   type GenerationInputV11a,
 } from "./run.js";
@@ -2820,6 +2821,12 @@ describe("探索型の直し（旗 v12.search-repair）：一番良い版・厳�
     expect(result.summary.exit_code).toBe(1);
     expect(declarationOf(result.bundle)).toBe(MIS1B);
     expect(artifactOf(result.bundle, V11A_ARTIFACT_NAMES.verification)["decl_check"]).toEqual({ exhausted: 1, malformed: 0, rejected: 6 });
+    // 旗 off の v1.1α でも、同じ台本は同じ上限で止まり、不一致が残る最終の版を同じ ⑦ で failed・none にする（門は旗で変わらない）
+    const off = await runScenario(calls);
+    expect(off.result.summary.stop_reason).toBe("limit");
+    expect(off.result.outcome).toEqual(result.outcome);
+    expect(off.result.summary.exit_code).toBe(1);
+    expect(artifactOf(off.result.bundle, VERIFICATION_FILE)["test_mismatches"]).toBeGreaterThan(0);
   });
 
   it("(d) 共通の口の呼び出しの上限は今までどおりの早期停止（旗 off と同じ段・種類で止まり、納品物を作らない）", async () => {
@@ -2864,6 +2871,52 @@ describe("探索型の直し（旗 v12.search-repair）：一番良い版・厳�
     // 持ち越しは今までどおり（R4 が網羅を失う）で、full が出ない
     expect(carryEntriesOf(on.result.bundle)).toEqual(carryEntriesOf(off.result.bundle));
     expect(on.result.outcome.verdict).toBe("partial");
+  });
+
+  it("(e') 数え直しの静的チェック：宣言のバイト列が同じ版だけ結果を引き継ぎ（流し直さない）、違えば流し直してその結果を使う", async () => {
+    const passed = await staticCheckStage.runStaticCheck({ source: RUN_YAML });
+    const rerun = vi.fn(async (declaration: { readonly source: string }) => staticCheckStage.runStaticCheck(declaration));
+    // 同じバイト列：引き継ぐ（同じ値の同じ物）・流し直さない
+    const same = await staticCheckForRecount(
+      { declaration: { source: RUN_YAML }, declarationSha256: await shaOf(RUN_YAML), staticCheck: passed },
+      rerun,
+    );
+    expect(same.rerun).toBe(false);
+    expect(same.staticCheck).toBe(passed);
+    expect(same.declarationSha256).toBe(await shaOf(RUN_YAML));
+    expect(rerun).not.toHaveBeenCalled();
+    // 違うバイト列（1 文字の差）：引き継がず流し直し、流し直した結果（落ちた結果）と原文の SHA-256 を返す
+    const broken = `${RUN_YAML}entities: [\n`;
+    const changed = await staticCheckForRecount(
+      { declaration: { source: broken }, declarationSha256: await shaOf(RUN_YAML), staticCheck: passed },
+      rerun,
+    );
+    expect(changed.rerun).toBe(true);
+    expect(rerun).toHaveBeenCalledTimes(1);
+    expect(rerun).toHaveBeenCalledWith({ source: broken });
+    expect(changed.staticCheck).not.toBe(passed);
+    expect(changed.staticCheck.passed).toBe(false);
+    expect(changed.declarationSha256).toBe(await shaOf(broken));
+  });
+
+  it("(e'') 走りの中の数え直し（棄却のあと）は、同じバイト列の一番良い版なので静的チェックを呼ばず結果を引き継ぐ", async () => {
+    const r4Bad = replaced(RUN_YAML, "expression: base * 2", "expression: base * 3");
+    const r4Tests = ["r4-normal", "r4-abnormal", "r4-boundary"];
+    const spy = vi.spyOn(staticCheckStage, "runStaticCheck");
+    const { result } = await runScenario(
+      [
+        ...head({ yaml: r4Bad }),
+        structured(acceptAll()),
+        repairDone(RUN_YAML, r4Tests.map(dispute)),
+        arbitration(r4Tests.map((testId) => ({ testId, verdict: "overturn" }))),
+        structured(acceptAll(["R1", "R2", "R3"])),
+      ],
+      SEARCH,
+    );
+    // 静的チェックは版の数（B1 の版と直した版の 2 つ）だけ。数え直しでは呼ばない
+    expect(spy.mock.calls.map(([declaration]) => declaration.source)).toEqual([r4Bad, RUN_YAML]);
+    expect(countStage(result, "static-check")).toBe(2);
+    expect(searchOf(result.bundle).recounts).toHaveLength(1);
   });
 
   it("(f) 探索の記録は同じ台本で 2 回同じ値（バイト列で同じ）", async () => {
