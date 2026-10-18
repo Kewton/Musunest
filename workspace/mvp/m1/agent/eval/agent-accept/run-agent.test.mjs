@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { DEFAULT_SET_PATH, EVAL_SET_SCHEMA, PLAN_SCRIPT_SCHEMA, loadEvalSet, reconcile, scoringFingerprint, scriptsFingerprint } from "./score-agent.mjs";
 import { OFFICIAL_COMPARE, compareProfile, launchAllowed } from "./score-agent.mjs";
+import { conditionsSignature } from "./score-agent.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const runAgentFile = join(here, "run-agent.mjs");
@@ -2240,5 +2241,58 @@ test("#557 (g) 組めない指定：v1.2,v1.1a・v1.2,v1.2・v1,v1.3・3 つ以�
       assertNothingWritten(o, label);
     }
     assert.ok(!existsSync(join(base, "x.json")) && !existsSync(join(base, "y.json")), "対を書いた");
+  });
+});
+
+// ── #618：経路 v1.2 の条件に呼び出しの上限（params.v12_call_limits）を書き、署名に入れる。再開は上限の違いを断る
+const LIMITS618 = { logicalCalls: 7, realAttempts: 11, judgeBranch: 5 };
+const v12IndexWithLimits = (flags, limits) => `${v12Index(flags)}export const V12_CALL_LIMITS = ${JSON.stringify(limits)};\n`;
+const rewriteConditions618 = (out, edit) => {
+  const p = join(out, "conditions.json"), c = readJson(p);
+  edit(c);
+  c.signature = conditionsSignature(c);
+  writeFileSync(p, JSON.stringify(c, null, 1));
+};
+
+test("#618 (a) v1.2 の条件の params.v12_call_limits の 3 つの値は dist の V12_CALL_LIMITS と欄ごとに等しい。v1・v1.1a の条件には欄が無く、dist に上限が無い v1.2 にも欄を足さない", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "a"), { index: v12IndexWithLimits(FLAGS557, LIMITS618) }), fz = frozen557(base, repo);
+    const run = (name, extra) => {
+      const out = join(base, name);
+      const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--build-from", fz, ...extra]);
+      assert.equal(r.status, 0, r.stderr);
+      return readJson(join(out, "conditions.json"));
+    };
+    const v12 = run("o12", ["--pipeline", "v1.2"]);
+    assert.deepEqual(v12.params.v12_call_limits, { logical_calls: 7, real_attempts: 11, judge_branch: 5 });
+    assert.equal(v12.signature, conditionsSignature(v12));
+    for (const [name, extra] of [["o1", []], ["o11", ["--pipeline", "v1.1a"]]]) assert.ok(!("v12_call_limits" in run(name, extra).params), name);
+    // 上限の無い dist（前の版）
+    const repo2 = makeV12Repo(join(base, "a2")), fz2 = frozen557(base, repo2, "fz-618-2"), out2 = join(base, "o12-none");
+    assert.equal(runAgent(repo2, out2, ["--only", "P1", "--runs", "1", "--build-from", fz2, "--pipeline", "v1.2"]).status, 0);
+    assert.ok(!("v12_call_limits" in readJson(join(out2, "conditions.json")).params));
+  });
+});
+
+test("#618 (b) 再開：同じ上限は通り、記録の上限が今の dist の上限と違うと resume:signature で断る（子 0・出力先は変わらない）。上限の欄の無い前の版の条件は今までどおり通る", async () => {
+  await withRepo(async (base) => {
+    const repo = makeV12Repo(join(base, "b"), { index: v12IndexWithLimits(FLAGS557, LIMITS618) }), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const args = ["--only", "P1", "--runs", "2", "--concurrency", "1", "--build-from", fz, "--pipeline", "v1.2"];
+    const fresh = (name) => { const o = join(base, name); assert.equal(runAgent(repo, o, args, { FAKE_SPAWN_LOG: log }).status, 0); rmSync(join(o, "P1-r2"), { recursive: true, force: true }); return o; };
+    // 同じ上限
+    const same = fresh("same");
+    assert.equal(runAgent(repo, same, [...args, "--resume"], { FAKE_SPAWN_LOG: log }).status, 0);
+    // 記録の上限が違う（署名は中身から計算し直してある）
+    for (const field of ["logical_calls", "real_attempts", "judge_branch"]) {
+      const o = fresh(`diff-${field}`);
+      rewriteConditions618(o, (c) => { c.params.v12_call_limits[field] += 1; });
+      const before = treeOf(o), n0 = spawnCount(log);
+      assertRefused(runAgent(repo, o, [...args, "--resume"], { FAKE_SPAWN_LOG: log }), "resume:signature", log, n0, field);
+      assert.deepEqual(treeOf(o), before);
+    }
+    // 前の版（欄なし）
+    const legacy = fresh("legacy");
+    rewriteConditions618(legacy, (c) => { delete c.params.v12_call_limits; });
+    assert.equal(runAgent(repo, legacy, [...args, "--resume"], { FAKE_SPAWN_LOG: log }).status, 0, "欄の無い前の版の条件は今までどおり");
   });
 });

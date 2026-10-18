@@ -207,12 +207,15 @@ if (makePairsOut !== null && !stageMode) {
 // 経路 v1.2（#557）：旗の組の正本を工場の dist の package の入口から読む（候補 ＝ <repo> の dist。旗の名前を手書きしない）。
 // 無い・旗の名前 → 真偽の写像でなければ、子を 1 本も起こさずに断る
 const usesV12 = pipeline === V12_PIPELINE || (compare && compareGroups.includes(V12_PIPELINE));
-let v12Flags = null;
+let v12Flags = null, v12CallLimits = null;
 if (usesV12) {
   let entry = null;
   try { entry = await import(pathToFileURL(join(distDir, "index.js")).href); } catch { entry = null; }
   if (!isFlagMap(entry?.V12_PIPELINE_FLAGS)) refuseCode("pipeline:v1.2-unavailable");
   v12Flags = JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS));
+  // 呼び出しの上限（#618）：dist の V12_CALL_LIMITS から読む（写して固定しない）。3 つの欄がそろった有限の数でなければ読まない（上限の欄を書かない前の版と同じ扱い）
+  const lim = entry.V12_CALL_LIMITS, ok = (x) => typeof x === "number" && Number.isFinite(x);
+  if (lim !== null && typeof lim === "object" && ok(lim.logicalCalls) && ok(lim.realAttempts) && ok(lim.judgeBranch)) v12CallLimits = { logical_calls: lim.logicalCalls, real_attempts: lim.realAttempts, judge_branch: lim.judgeBranch };
 }
 
 // --compare（#513）：比較元の checkout を同じ形で読む（読めなければ断る。パスは出さない）
@@ -451,6 +454,8 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId })
       pipeline: pl, stage_output_limits_v11a: outputLimits.v11a,
       // #557：経路 v1.2 のときだけ。工場の dist の V12_PIPELINE_FLAGS の写し（署名に入る。旗の組が変われば再開を断る）
       ...(pl === V12_PIPELINE ? { v12_flags: v12Flags } : {}),
+      // #618：経路 v1.2 の単独の計測だけ（署名に入る。上限が変われば再開を断る）。比較の群には足さない（採点側の比較が params の同一を見るため）
+      ...(pl === V12_PIPELINE && comparison === null && v12CallLimits !== null ? { v12_call_limits: v12CallLimits } : {}),
       // #545：段単位の走りのときだけ。範囲・予算と締切の適用の単位（工場の dist の値）・上流の計測の条件の指紋（開始 T1 は null）・本ごとの上流の入力の SHA
       ...(stageMode ? { stage_start: stageRange.start, stage_end: stageRange.end, budget_scope: stageLib.STAGE_BUDGET_SCOPE, stage_from: stageFrom, stage_inputs: stageInputRecords } : {}),
     },
@@ -476,7 +481,10 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId })
   const { scoring: _scoring, scripts: _scripts, ...generationConditions } = measured;
   const { budget_usd: _budget, ...paramsForSignature } = measured.params;
   const signature = sha256(JSON.stringify(script ? { ...generationConditions, params: paramsForSignature, scripts: measured.scripts } : { ...generationConditions, params: paramsForSignature }));
-  return { measured, signature };
+  // 上限の欄を足す前の版の署名（欄の無い前の条件のファイルを今までどおり照らす。#618）
+  const { v12_call_limits: _vl, ...paramsLegacy } = paramsForSignature;
+  const signatureLegacy = sha256(JSON.stringify(script ? { ...generationConditions, params: paramsLegacy, scripts: measured.scripts } : { ...generationConditions, params: paramsLegacy }));
+  return { measured, signature, signatureLegacy };
 }
 
 const costOfDir = (dir) => { try { const sl = JSON.parse(readFileSync(join(dir, "summary.line.json"), "utf8")); return sl.plan_cost?.total_usd ?? sl.summary?.provider_cost_usd ?? sl.stage_run?.provider_cost_usd ?? 0; } catch { return 0; } };
@@ -619,7 +627,7 @@ else await runSingle();
 
 /** 比較でない計測（今までの流れ。#400〜#497） */
 async function runSingle() {
-  const { measured, signature } = conditionsFor(main, { jobs, argvOf: childArgsFor, pl: pipeline, comparison: null, measurementId: basename(outRoot) });
+  const { measured, signature, signatureLegacy } = conditionsFor(main, { jobs, argvOf: childArgsFor, pl: pipeline, comparison: null, measurementId: basename(outRoot) });
   mkdirSync(outRoot, { recursive: true });
   const conditionsPath = join(outRoot, "conditions.json");
   const priorDirs = readdirSync(outRoot).filter((n) => /^P\d+-r\d+$/.test(n));
@@ -628,7 +636,9 @@ async function runSingle() {
     if (!resume) refuse("出力先に前の計測の結果があります。続きから流すなら --resume を、新しい計測なら別の出力先を使ってください", "resume:prior-output");
     if (!existsSync(conditionsPath)) refuse("条件のファイルの無い出力先です（新しい出力先を使ってください）", "resume:no-conditions");
     let saved = null; try { saved = JSON.parse(readFileSync(conditionsPath, "utf8")); } catch { refuse("条件のファイルを読めません", "resume:unreadable"); }
-    if (saved?.signature !== signature) refuse("保存した条件と今の条件が一致しません", "resume:signature");
+    // 上限の欄の無い前の版の条件（params に v12_call_limits が無い）は、その欄を除いた署名で今までどおり照らす（#618）。欄があれば上限も署名で照らす
+    const savedLegacy = pipeline === V12_PIPELINE && saved?.params && typeof saved.params === "object" && !("v12_call_limits" in saved.params);
+    if (saved?.signature !== (savedLegacy ? signatureLegacy : signature)) refuse("保存した条件と今の条件が一致しません", "resume:signature");
     // 経路 v1.2（#557）：保存した条件を既知の版（v7）として検証し、署名を中身から計算し直して照らす（知らない版・書き換えた条件では再開しない）
     if (pipeline === V12_PIPELINE && (saved.schema !== CONDITIONS_V7 || conditionsSignature(saved) !== saved.signature)) refuse("保存した条件と今の条件が一致しません", "resume:signature");
     initialBudget = typeof saved.params?.budget_usd === "number" ? saved.params.budget_usd : null;
