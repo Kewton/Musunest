@@ -1143,3 +1143,4 @@ C3（T1''）の判定を同じ正解と照らし、誤りの要件の受理（**
 
 - 経路 v1.2 の単独の計測（`--pipeline v1.2`）は、条件のファイルの `params.v12_call_limits`（`logical_calls`・`real_attempts`・`judge_branch`）に、工場の dist の `V12_CALL_LIMITS` の値を書く（道具に値を写さない）。署名に入る。v1・v1.1a だけの計測と、dist が上限を出さないときは欄を足さず、条件のファイルと署名は変わらない。比較の群（`--compare-pipelines`）の条件には足さない（採点側の群の params の照合が欄の差を見るため。足すときは採点側と一緒に直す）
 - `--resume` は記録の上限と今の dist の上限が違えば、今の条件の不一致と同じ `[resume:signature]` で断る。`v12_call_limits` の欄の無い前の版の条件のファイルは、その欄を除いた署名で今までどおり照らして再開できる（上限が記録されていないので、混ざったかどうかはこの照合では分からない）
+- 旗 `ids` が on の dist が `V12_CALL_LIMITS` を出さない・3 つが有限の数でないときは、**exit 3・`pipeline:v1.2-limits-unavailable`** で子を 1 本も起こさない（黙って欄を省かない）。`ids` が off か、旗に `ids` の無い dist（手 3p より前）だけ欄を足さずに通す

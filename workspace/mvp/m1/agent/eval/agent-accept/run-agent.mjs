@@ -213,9 +213,12 @@ if (usesV12) {
   try { entry = await import(pathToFileURL(join(distDir, "index.js")).href); } catch { entry = null; }
   if (!isFlagMap(entry?.V12_PIPELINE_FLAGS)) refuseCode("pipeline:v1.2-unavailable");
   v12Flags = JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS));
-  // 呼び出しの上限（#618）：dist の V12_CALL_LIMITS から読む（写して固定しない）。3 つの欄がそろった有限の数でなければ読まない（上限の欄を書かない前の版と同じ扱い）
+  // 呼び出しの上限（#618）：dist の V12_CALL_LIMITS から読む（写して固定しない）。旗 ids が on なのに無い・3 つが有限の数でないときは断る（黙って欄を省かない）。
+  // ids が off か、旗に ids の無い dist（手 3p より前）だけ欄を足さずに通す
   const lim = entry.V12_CALL_LIMITS, ok = (x) => typeof x === "number" && Number.isFinite(x);
-  if (lim !== null && typeof lim === "object" && ok(lim.logicalCalls) && ok(lim.realAttempts) && ok(lim.judgeBranch)) v12CallLimits = { logical_calls: lim.logicalCalls, real_attempts: lim.realAttempts, judge_branch: lim.judgeBranch };
+  const limOk = lim !== null && typeof lim === "object" && ok(lim.logicalCalls) && ok(lim.realAttempts) && ok(lim.judgeBranch);
+  if (v12Flags.ids === true && !limOk) refuseCode("pipeline:v1.2-limits-unavailable");
+  if (limOk && v12Flags.ids === true) v12CallLimits = { logical_calls: lim.logicalCalls, real_attempts: lim.realAttempts, judge_branch: lim.judgeBranch };
 }
 
 // --compare（#513）：比較元の checkout を同じ形で読む（読めなければ断る。パスは出さない）

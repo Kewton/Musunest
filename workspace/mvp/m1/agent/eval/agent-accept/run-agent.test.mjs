@@ -2246,6 +2246,7 @@ test("#557 (g) 組めない指定：v1.2,v1.1a・v1.2,v1.2・v1,v1.3・3 つ以�
 
 // ── #618：経路 v1.2 の条件に呼び出しの上限（params.v12_call_limits）を書き、署名に入れる。再開は上限の違いを断る
 const LIMITS618 = { logicalCalls: 7, realAttempts: 11, judgeBranch: 5 };
+const FLAGS618 = { ledger: true, ids: true };
 const v12IndexWithLimits = (flags, limits) => `${v12Index(flags)}export const V12_CALL_LIMITS = ${JSON.stringify(limits)};\n`;
 const rewriteConditions618 = (out, edit) => {
   const p = join(out, "conditions.json"), c = readJson(p);
@@ -2256,7 +2257,7 @@ const rewriteConditions618 = (out, edit) => {
 
 test("#618 (a) v1.2 の条件の params.v12_call_limits の 3 つの値は dist の V12_CALL_LIMITS と欄ごとに等しい。v1・v1.1a の条件には欄が無く、dist に上限が無い v1.2 にも欄を足さない", async () => {
   await withRepo(async (base) => {
-    const repo = makeV12Repo(join(base, "a"), { index: v12IndexWithLimits(FLAGS557, LIMITS618) }), fz = frozen557(base, repo);
+    const repo = makeV12Repo(join(base, "a"), { index: v12IndexWithLimits(FLAGS618, LIMITS618) }), fz = frozen557(base, repo);
     const run = (name, extra) => {
       const out = join(base, name);
       const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--build-from", fz, ...extra]);
@@ -2276,7 +2277,7 @@ test("#618 (a) v1.2 の条件の params.v12_call_limits の 3 つの値は dist 
 
 test("#618 (b) 再開：同じ上限は通り、記録の上限が今の dist の上限と違うと resume:signature で断る（子 0・出力先は変わらない）。上限の欄の無い前の版の条件は今までどおり通る", async () => {
   await withRepo(async (base) => {
-    const repo = makeV12Repo(join(base, "b"), { index: v12IndexWithLimits(FLAGS557, LIMITS618) }), fz = frozen557(base, repo), log = join(base, "spawn.log");
+    const repo = makeV12Repo(join(base, "b"), { index: v12IndexWithLimits(FLAGS618, LIMITS618) }), fz = frozen557(base, repo), log = join(base, "spawn.log");
     const args = ["--only", "P1", "--runs", "2", "--concurrency", "1", "--build-from", fz, "--pipeline", "v1.2"];
     const fresh = (name) => { const o = join(base, name); assert.equal(runAgent(repo, o, args, { FAKE_SPAWN_LOG: log }).status, 0); rmSync(join(o, "P1-r2"), { recursive: true, force: true }); return o; };
     // 同じ上限
@@ -2294,5 +2295,22 @@ test("#618 (b) 再開：同じ上限は通り、記録の上限が今の dist �
     const legacy = fresh("legacy");
     rewriteConditions618(legacy, (c) => { delete c.params.v12_call_limits; });
     assert.equal(runAgent(repo, legacy, [...args, "--resume"], { FAKE_SPAWN_LOG: log }).status, 0, "欄の無い前の版の条件は今までどおり");
+  });
+});
+
+test("#618 (c) fail-closed：旗 ids が on なのに V12_CALL_LIMITS が無い・欄が欠ける・有限の数でない dist は pipeline:v1.2-limits-unavailable（exit 3）で子 0・何も書かない。ids が off か旗に ids の無い dist は欄を足さずに通る", async () => {
+  await withRepo(async (base) => {
+    const log = join(base, "spawn.log");
+    const bad = [["absent", v12Index(FLAGS618)], ["missing-field", v12IndexWithLimits(FLAGS618, { logicalCalls: 7, realAttempts: 11 })], ["nan", v12IndexWithLimits(FLAGS618, { logicalCalls: 7, realAttempts: "11", judgeBranch: 5 })], ["null", `${v12Index(FLAGS618)}export const V12_CALL_LIMITS = null;\n`], ["infinity", `${v12Index(FLAGS618)}export const V12_CALL_LIMITS = { logicalCalls: 7, realAttempts: Infinity, judgeBranch: 5 };\n`]];
+    for (const [label, index] of bad) {
+      const repo = makeV12Repo(join(base, label), { index }), fz = frozen557(join(base, label), repo), o = join(base, `out-${label}`);
+      assertRefused(runAgent(repo, o, ["--runs", "1", "--build-from", fz, "--pipeline", "v1.2"], { FAKE_SPAWN_LOG: log }), "pipeline:v1.2-limits-unavailable", log, 0, label);
+      assertNothingWritten(o, label);
+    }
+    for (const [label, index] of [["ids-off", v12IndexWithLimits({ ledger: true, ids: false }, LIMITS618)], ["ids-off-no-limits", v12Index({ ledger: true, ids: false })], ["no-ids-flag", v12Index(FLAGS557)]]) {
+      const repo = makeV12Repo(join(base, label), { index }), fz = frozen557(join(base, label), repo), o = join(base, `out-${label}`);
+      assert.equal(runAgent(repo, o, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2"]).status, 0, label);
+      assert.ok(!("v12_call_limits" in readJson(join(o, "conditions.json")).params), label);
+    }
   });
 });
