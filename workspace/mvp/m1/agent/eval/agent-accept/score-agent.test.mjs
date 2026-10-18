@@ -2850,6 +2850,8 @@ const ANON_KEYS_BEFORE_538 = ["rubric", "anonymous", "aggregation_versions", "sc
 const KEYS_538 = ["funnel", "pass_k", "verdicts", "unverified_details"];
 /** #539 が #538 の欄のあとに足す欄（#538 の欄の並びと値は変えない） */
 const KEYS_539 = ["agreement", "test_findings"];
+/** #632 が #539 の欄のあとに足す欄（PASS あたりの費用と段ごとの時間・usage） */
+const KEYS_632 = ["cost_per_pass", "stage_usage"];
 
 test("#538 漏斗の規則 (a)〜(e)・(g)：1 回目で通過は最初の記録が ok・calls 1・retries 0（retries が無ければ ok と calls 1）。failed のあと ok は通過だが 1 回目ではない。calls 2 は 1 回目ではない。failed だけで failure.stage がその段なら停止。calls 0 の段は 1 回目が null。到達 0 の段は「今回未観測（0/予定）」", () => {
   // 純粋な規則
@@ -2908,7 +2910,7 @@ test("#538 漏斗の規則 (f)：未実行・途中の本は到達 0 で予定�
     conditions(out, ["P1-r1", "P1-r2", "P1-r3", "P1-r4"]);
     const r = scoreRun(out);
     const full = readScore(out);
-    assert.deepEqual(Object.keys(full), [...KEYS_BEFORE_538, ...KEYS_538, ...KEYS_539], "既存の欄の並びはそのままで、新しい欄をあとに足す");
+    assert.deepEqual(Object.keys(full), [...KEYS_BEFORE_538, ...KEYS_538, ...KEYS_539, ...KEYS_632], "既存の欄の並びはそのままで、新しい欄をあとに足す");
     const fu = full.funnel;
     assert.deepEqual([fu.planned, fu.executed], [4, 2], "(f) 予定 4 本（未実行・途中を含む）");
     assert.deepEqual([fu.stages.design.reached, fu.stages.design.first_pass, fu.stages.design.passed, fu.stages.design.reached_label], [2, 2, 2, "2/4"]);
@@ -3003,7 +3005,7 @@ test("#538 v11a-cmp2 と同じ形の fixture（30 本 × 2 群）で、設計書
     assert.deepEqual(c.groups[a].stops.values, c.groups[a].funnel.stops);
     assert.deepEqual(c.groups.v1.stops.values, c.groups.v1.funnel.stops);
     for (const g of ["v1", a]) for (const id of OLD_ROW_STAGES) assert.equal(c.groups[g].reach[id].reached, c.groups[g].funnel.stages[id].reached, `${g} ${id}`);
-    assert.deepEqual(Object.keys(c.groups[a]), ["role", "pipeline", "completion", "fingerprints", "pass_executed", "pass_planned", "factory_verdicts", "accepted", "stops", "reach", "carry_over", "funnel", "pass_k", "verdicts", ...KEYS_539], "既存の群の欄のあとに足す");
+    assert.deepEqual(Object.keys(c.groups[a]), ["role", "pipeline", "completion", "fingerprints", "pass_executed", "pass_planned", "factory_verdicts", "accepted", "stops", "reach", "carry_over", "funnel", "pass_k", "verdicts", ...KEYS_539, ...KEYS_632], "既存の群の欄のあとに足す");
     assert.match(r.stdout, /^v1\.1a 漏斗（予定 30 本・実行 30 本。.*: write 15／15／15／0・.*name-table 30／7／23／7・semantic-check 23／23／23／0・test-spec 23／11／15／8・decl-check 12／12／12／0（未観測 \d+ 段）・完走 11（不一致なし 3・あり 8・欠測 0）$/m);
     assert.match(r.stdout, /^v1\.1a pass\^3: 1\/10（.*P5 1,1,1・/m);
     assert.match(r.stdout, /^v1 pass\^3: 0\/10（/m);
@@ -3066,7 +3068,7 @@ test("#538 工場の判定の 4 値：正本は要約の verdict と assurance�
     assert.ok(!JSON.stringify({ funnel: full.funnel, verdicts: full.verdicts, v4: full.rows.map((x) => x.factory_verdict4) }).includes(MARK538), "知らない値をそのまま通さない");
     // 匿名の口：新しい欄は件数と率と段の ID・列挙の値だけ（本の ID・P の ID・目印・パスが無い）
     const anon = anonymize(full);
-    assert.deepEqual(Object.keys(anon), [...ANON_KEYS_BEFORE_538, ...KEYS_538, ...KEYS_539]);
+    assert.deepEqual(Object.keys(anon), [...ANON_KEYS_BEFORE_538, ...KEYS_538, ...KEYS_539, ...KEYS_632]);
     const text = JSON.stringify(KEYS_538.map((k) => anon[k]));
     assert.ok(!/P\d+/.test(text) && !text.includes(MARK538) && !text.includes(base), text.slice(0, 200));
     assert.deepEqual(anon.verdicts.factory.counts, v.factory.counts);
@@ -3331,7 +3333,7 @@ test("#539 内外の表・分類・段の役割ごとの対の差（v11a-cmp2 �
     // 標準出力：既存の行は変えず、群ごとの内外の表の 1 行と P のまとまりの 1 行を足す
     assert.match(r.stdout, /^v1 内外の表（予定 30 本・実行 30 本・未実行と途中 0 本。工場×外）: 原文系 partial×PASS 9・none×GEN_FAIL 21／了承後系 .*・試験の分類（読めた 9 本・欠測 21 本・45 件）: binding-defect 9・evaluator-coverage 18・test-defect 9・needs-human 9・unknown 0（食い違い 0）$/m);
     assert.match(r.stdout, /^v1\.1a 内外の表（.*原文系 partial×PASS 10・partial×FAIL 1・none×GEN_FAIL 19／/m);
-    assert.match(r.stdout.trimEnd().split("\n").at(-2), /^P のまとまり（m 10。.*）: PASS の差 平均 -?\d\.\d{3}・p \d\.\d{3}・bootstrap .*・通過の差 設計 平均 .*・判定 平均 /);
+    assert.match(r.stdout.trimEnd().split("\n").at(-3), /^P のまとまり（m 10。.*）: PASS の差 平均 -?\d\.\d{3}・p \d\.\d{3}・bootstrap .*・通過の差 設計 平均 .*・判定 平均 /);
     assert.ok(!/"stage_pairs"|"agreement"/.test(r.stdout), "既存の JSON の行に #539 の欄を足さない");
   });
 });
@@ -4454,7 +4456,7 @@ test("#631 比較（30 本 × 2 群）：noise が出力の末尾にあり、原
     const r = scoreCompareRun(f.out);
     assert.equal(r.status, 0, r.stderr);
     const c = readCompare(f.out);
-    assert.equal(Object.keys(c).at(-1), "noise", "新しい欄は末尾");
+    assert.deepEqual(Object.keys(c).slice(-2), ["noise", "pass_vs_cost"], "新しい欄は末尾（#632 の pass_vs_cost はそのあと）");
     assert.equal(c.noise.runs, 3);
     assert.deepEqual(c.noise.pass, noiseStats(Object.fromEntries(Object.entries(c.pairs.by_pattern).map(([p, v]) => [p, v.diffs])), 3));
     assert.equal(c.noise.pass.m, 10);
@@ -4467,8 +4469,8 @@ test("#631 比較（30 本 × 2 群）：noise が出力の末尾にあり、原
     }
     assert.equal(c.noise.stage_pairs.roles.design.passed.m, 10);
     const last = r.stdout.trimEnd().split("\n");
-    assert.match(last.at(-1), /^雑音の分解（判定には使わない目安）: 予測 \d\.\d{3}・データ \d\.\d{3}.*（(prediction|data|tie)）・検出できる差 K=3 \d\.\d{3}・K=6 \d\.\d{3}・下限 \d\.\d{3}（m 10・P 内の分散を出せた P \d+）$/);
-    assert.match(last.at(-2), /^P のまとまり（m 10。/, "既存の行の後ろ");
+    assert.match(last.at(-2), /^雑音の分解（判定には使わない目安）: 予測 \d\.\d{3}・データ \d\.\d{3}.*（(prediction|data|tie)）・検出できる差 K=3 \d\.\d{3}・K=6 \d\.\d{3}・下限 \d\.\d{3}（m 10・P 内の分散を出せた P \d+）$/);
+    assert.match(last.at(-3), /^P のまとまり（m 10。/, "既存の行の後ろ");
     assert.ok(!r.stdout.includes('"noise"'), "既存の JSON の行に noise を足さない");
     // 匿名
     const rc = scoreCompareRun(f.out, ["--anonymous"]);
@@ -4510,7 +4512,8 @@ test("#631 既存の欄を変えていない：同じ比較の出力先を、noi
     const before = JSON.parse(JSON.stringify(await (await import(pathToFileURL(old).href)).scoreCompare(repo, f.out)));
     assert.ok(!("noise" in before));
     const { noise: _n, ...rest } = now;
-    assert.deepEqual(Object.keys(now), [...Object.keys(before), "noise"], "既存の欄の並びは同じで、noise は末尾");
+    // #632 の pass_vs_cost は noise のあと（直す前の採点器にも同じ行があるので、noise を除いた並びと値は同じ）
+    assert.deepEqual(Object.keys(now), [...Object.keys(before).filter((k) => k !== "pass_vs_cost"), "noise", "pass_vs_cost"], "既存の欄の並びは同じで、noise は末尾");
     for (const g of ["v1", "v1.1a"]) assert.ok(Object.values(before.groups[g].fingerprints).every((x) => x === true) && Object.values(now.groups[g].fingerprints).every((x) => x === true), "指紋の照合はどちらも一致");
     assert.deepEqual(rest, before);
     assert.equal(now.completion.status, "complete");
@@ -4523,4 +4526,173 @@ test("#631 README：§7 の後ろ（末尾）の新しい節 §8 に、雑音の
   assert.ok(at > text.indexOf("\n## 7. ") && text.indexOf("\n### 7.12 ") < at, "§8 は §7 の後ろ");
   const sec = text.slice(at);
   for (const w of ["予測の雑音", "データの雑音", "検出できる差", "目安", "2411.00640", "2512.21326"]) assert.ok(sec.includes(w), w);
+});
+
+// ── #632 PASS あたりの費用・段ごとの時間と usage・PASS 対 費用（README §9。v1.2 評価 b）
+import { COST_REASONS, FRONTIER_DIRECTIONS, STAGE_USAGE_ORDER, buildMetrics, costPerPass, passVsCost, runCostOf, scoreOutput, stageUsageOf } from "./score-agent.mjs";
+
+/** 採点器と同じ乱数（mulberry32）と百分位（R の type 7）を試験の側で書き直したもの（区間の再現に使う） */
+const rand632 = (seed) => { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; };
+const q632 = (xs, q) => { const h = (xs.length - 1) * q, i = Math.floor(h); return i + 1 < xs.length ? xs[i] + (h - i) * (xs[i + 1] - xs[i]) : xs[i]; };
+const r6_632 = (x) => Math.round(x * 1e6) / 1e6;
+/** 手で書いた P ごとの (費用の合計, PASS の数) から、P を単位にした bootstrap の区間と除いた抽出の数 */
+function boot632(ps) {
+  const rand = rand632(BOOTSTRAP.seed), m = ps.length, out = [];
+  let excluded = 0;
+  for (let b = 0; b < BOOTSTRAP.resamples; b++) { let c = 0, k = 0; for (let i = 0; i < m; i++) { const p = ps[Math.floor(rand() * m)]; c += p[0]; k += p[1]; } if (k === 0) excluded += 1; else out.push(c / k); }
+  out.sort((a, b) => a - b);
+  return { interval: [r6_632(q632(out, 0.025)), r6_632(q632(out, 0.975))], excluded };
+}
+const item632 = (pattern, cost, pass, summary = true) => ({ pattern, cost, pass, summary });
+// P 3 × K 2（P3 は PASS 0）。費用：P1 0.1・0.2、P2 0.3・0.4、P3 0.5・0.6。PASS：P1-r1・P2-r1・P2-r2
+const full632 = () => [item632("P1", 0.1, true), item632("P1", 0.2, false), item632("P2", 0.3, true), item632("P2", 0.4, true), item632("P3", 0.5, false), item632("P3", 0.6, false)];
+
+test("#632 PASS あたりの費用（欠測 0・P 3 × K 2・PASS 0 の P を含む）：値 ＝ 2.1 ÷ 3、P ごとの費用の合計・PASS・欠測、P を単位にした bootstrap の区間（既存の乱数で再現）と PASS の合計が 0 で除いた抽出の数が手計算と一致する", () => {
+  const c = costPerPass(full632());
+  assert.deepEqual([c.planned, c.passes, c.cost, c.no_summary], [6, 3, { observed: 6, missing: 0, total: 2.1 }, 0]);
+  assert.equal(c.value, r6_632(2.1 / 3));
+  assert.equal(c.reason, null);
+  assert.equal(c.lower_bound, null, "欠測 0 なら下限は出さない（値がある）");
+  assert.deepEqual(c.by_pattern, { P1: { runs: 2, passes: 1, missing: 0, cost: 0.3 }, P2: { runs: 2, passes: 2, missing: 0, cost: 0.7 }, P3: { runs: 2, passes: 0, missing: 0, cost: 1.1 } });
+  const want = boot632([[0.1 + 0.2, 1], [0.3 + 0.4, 2], [0.5 + 0.6, 0]]);
+  assert.deepEqual(c.interval, want.interval);
+  assert.ok(want.excluded > 0, "P3 だけの抽出がある");
+  assert.deepEqual(c.bootstrap, { resamples: BOOTSTRAP.resamples, seed: BOOTSTRAP.seed, patterns: 3, excluded: want.excluded, reason: null });
+  assert.ok(c.interval[0] <= c.value && c.value <= c.interval[1]);
+  // P が 1 つなら区間は null（値は出す）
+  const one = costPerPass([item632("P1", 0.1, true), item632("P1", 0.3, false)]);
+  assert.deepEqual([one.value, one.interval, one.bootstrap.reason], [0.4, null, "few-patterns"]);
+});
+
+test("#632 PASS あたりの費用（欠測あり）：費用の読めない本 1・要約の無い本 1 で値と区間は null と cost-missing、下限 ＝ 読めた本の費用の合計 ÷ PASS、欠測の数と no_summary が手計算と一致。全費用が欠測なら下限も null と all-missing。PASS 0 なら no-pass", () => {
+  const xs = full632();
+  xs[1] = item632("P1", null, false); // 要約はあるが費用の欄が無い
+  xs[4] = item632("P3", null, false, false); // 要約が無い（途中・未実行）
+  const c = costPerPass(xs);
+  assert.deepEqual([c.value, c.interval, c.reason], [null, null, "cost-missing"]);
+  assert.deepEqual(c.cost, { observed: 4, missing: 2, total: 1.4 });
+  assert.equal(c.lower_bound, r6_632(1.4 / 3));
+  assert.equal(c.no_summary, 1);
+  assert.equal(c.passes, 3, "PASS の分母は予定本数のまま");
+  assert.deepEqual([c.by_pattern.P1.missing, c.by_pattern.P3.missing, c.by_pattern.P1.cost], [1, 1, 0.1]);
+  const all = costPerPass(full632().map((x) => ({ ...x, cost: null })));
+  assert.deepEqual([all.value, all.interval, all.lower_bound, all.reason, all.cost.total, all.cost.missing], [null, null, null, "all-missing", null, 6]);
+  const none = costPerPass(full632().map((x) => ({ ...x, pass: false })));
+  assert.deepEqual([none.value, none.interval, none.lower_bound, none.reason, none.cost.total], [null, null, null, "no-pass", 2.1]);
+  assert.deepEqual(COST_REASONS, ["no-pass", "all-missing", "cost-missing"]);
+  // 本 1 本の費用：要約のある本だけ。plan_cost.total_usd ＞ provider_cost_usd。読めない値・負の値・要約なしは null（0 と推測しない）
+  assert.equal(runCostOf({ plan_cost: { total_usd: 0.2 }, summary: { provider_cost_usd: 0.05 } }), 0.2);
+  assert.equal(runCostOf({ plan_cost: null, summary: { provider_cost_usd: 0 } }), 0, "実測の 0 は読めた本");
+  assert.deepEqual([runCostOf({ summary: {} }), runCostOf({ summary: { provider_cost_usd: -1 } }), runCostOf({ plan_cost: { total_usd: 0.2 } }), runCostOf(null)], [null, null, null, null]);
+});
+
+test("#632 段ごとの時間と usage：時間は Build だけの集計の by_stage と同じ値、呼び出し・トークン・再試行・usage の無い呼び出しの合計が手計算と一致し、v1.2 の段が既存の段の順で並ぶ（知らない段は unknown で末尾）", () => {
+  const st = (stage, duration_ms, calls, usage = {}) => ({ stage, status: "ok", duration_ms, calls, missing_usage_calls: 0, input_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, output_tokens: 0, reasoning_tokens: 0, retries: { communication: 0, shape: 0, content: 0 }, ...usage });
+  const summaries = [
+    { stages: [st("vocabulary", 100, 1, { input_tokens: 10, cached_input_tokens: 2, cache_write_tokens: 1, output_tokens: 5, reasoning_tokens: 3, retries: { communication: 1, shape: 0, content: 0 } }), st("mapping", 200, 2, { input_tokens: 20 }), st("write", 50, 1), st("vocabulary", 30, 1, { input_tokens: 4, retries: { communication: 0, shape: 1, content: 0 } })] },
+    { stages: [st("semantic-check", 70, 1), st("write", 20, 1, { output_tokens: 7, missing_usage_calls: 1, retries: { communication: 0, shape: 0, content: 2 } }), st("decl-check", 10, 1), st("zzz", 5, 0)] },
+    null,
+    { stages: [] },
+    { stages: [st("repair", -1, 1, { input_tokens: 9 })] },
+  ];
+  const u = stageUsageOf(summaries);
+  assert.deepEqual([u.planned, u.no_summary], [5, 1]);
+  assert.deepEqual(Object.keys(u.stages), ["write", "repair", "semantic-check", "decl-check", "vocabulary", "mapping", "unknown"]);
+  assert.deepEqual(Object.keys(u.stages), STAGE_USAGE_ORDER.filter((id) => id in u.stages), "既存の段の順");
+  assert.deepEqual(u.stages.vocabulary, { runs: 1, calls: 2, duration_ms: { observed: 3, missing: 2, total: 130, median: 0 }, input_tokens: 14, cached_input_tokens: 2, cache_write_tokens: 1, output_tokens: 5, reasoning_tokens: 3, retries: { communication: 1, shape: 1, content: 0 }, missing_usage_calls: 0 });
+  assert.deepEqual(u.stages.write, { runs: 2, calls: 2, duration_ms: { observed: 3, missing: 2, total: 70, median: 20 }, input_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, output_tokens: 7, reasoning_tokens: 0, retries: { communication: 0, shape: 0, content: 2 }, missing_usage_calls: 1 });
+  assert.deepEqual([u.stages.repair.runs, u.stages.repair.calls, u.stages.repair.input_tokens, u.stages.repair.duration_ms.total], [1, 1, 9, 0], "時間の読めない本は時間だけ欠測（呼び出しとトークンは数える）");
+  // 既存の Build だけの集計の by_stage（同じ要約を予定した本に置く）と時間が同じ値
+  const facts = summaries.map((summary, i) => ({ run: `P${i + 1}-r1`, state: summary === null ? "incomplete" : "executed", sl: summary === null ? null : { summary }, br: null, brStatus: "absent", lines: [], row: null }));
+  const mb = buildMetrics(facts, { adopted: [], missing: [] });
+  assert.deepEqual(Object.keys(mb.by_stage).sort(), Object.keys(u.stages).sort());
+  for (const [id, v] of Object.entries(mb.by_stage)) assert.deepEqual(u.stages[id].duration_ms, v, id);
+});
+
+test("#632 PASS 対 費用：PASS の差はいつも出し、費用の差と 4 つの向き（差 0 の「同じ」を含む）は両群とも欠測 0 のときだけ。片群に欠測があれば費用の差 null・向き undetermined・理由 cost-missing", () => {
+  const g = (passes, total, missing = 0) => ({ planned: 6, passes, cost: { observed: 6 - missing, missing, total }, no_summary: 0, value: null, interval: null, lower_bound: null, reason: null });
+  const pc = (b, c) => passVsCost({ v1: b, "v1.1a": c }, ["v1", "v1.1a"]);
+  const cases = [[g(2, 1), g(3, 0.8), "frontier"], [g(2, 1), g(3, 1.2), "buy-pass"], [g(3, 1), g(2, 0.8), "save-cost"], [g(3, 1), g(2, 1.2), "worse"], [g(2, 1), g(2, 1), "same"]];
+  for (const [b, c, want] of cases) {
+    const x = pc(b, c);
+    assert.deepEqual([x.direction, x.reason, x.pass_diff, x.cost_diff], [want, null, c.passes - b.passes, r6_632(c.cost.total - b.cost.total)], want);
+  }
+  const miss = pc(g(2, 1), g(3, 0.5, 1));
+  assert.deepEqual([miss.pass_diff, miss.cost_diff, miss.direction, miss.reason], [1, null, "undetermined", "cost-missing"]);
+  assert.deepEqual(FRONTIER_DIRECTIONS, ["frontier", "buy-pass", "save-cost", "worse", "same", "undetermined"]);
+});
+
+test("#632 比較（30 本 × 2 群）：群ごとに cost_per_pass・stage_usage、末尾に pass_vs_cost。標準出力の末尾に PASS 対 費用の 1 行（JSON の行には足さない）。片群に欠測（費用の欄の無い本 1・途中の本 1）があれば費用の差 null・undetermined。匿名の口に本の ID・P の ID・P ごとの値が無い", async () => {
+  await withOut(async (base) => {
+    const f = cmp539(base, "cmp632");
+    const r = scoreCompareRun(f.out);
+    assert.equal(r.status, 0, r.stderr);
+    const c = readCompare(f.out);
+    assert.equal(Object.keys(c).at(-1), "pass_vs_cost");
+    for (const g of ["v1", "v1.1a"]) {
+      const x = c.groups[g].cost_per_pass;
+      assert.deepEqual([x.planned, x.cost, x.no_summary, x.reason], [30, { observed: 30, missing: 0, total: 1.5 }, 0, null], g);
+      assert.equal(x.passes, Number(c.groups[g].pass_planned.split("/")[0]), "PASS は予定本数の中の原文系 PASS");
+      assert.equal(x.value, r6_632(1.5 / x.passes));
+      assert.equal(Object.keys(x.by_pattern).length, 10);
+      assert.equal(c.groups[g].stage_usage.planned, 30);
+    }
+    assert.deepEqual(Object.keys(c.groups.v1.stage_usage.stages), ["design", "test-suite", "write", "static-check", "correspondence", "run-tests", "repair", "judge"]);
+    assert.deepEqual([c.pass_vs_cost.pass_diff, c.pass_vs_cost.cost_diff, c.pass_vs_cost.direction, c.pass_vs_cost.reason], [1, 0, "frontier", null]);
+    const lines = r.stdout.trimEnd().split("\n");
+    assert.match(lines.at(-1), /^PASS 対 費用（判定には使わない記述）: v1 PASS 9\/30・費用 合計 1\.5 USD（読めた 30\/30・要約なし 0）・PASS あたり 0\.166667 USD（区間 [\d.]+〜[\d.]+）／v1\.1a PASS 10\/30・.*／差（候補（v1\.1a）− 比較元（v1））PASS \+1・費用 0 USD・向き frontier（前線に乗る（PASS が増え費用が減る））・段の時間 上位 3: v1 .*／v1\.1a .*$/);
+    assert.match(lines.at(-2), /^雑音の分解/, "既存の行の後ろ");
+    assert.ok(!/"pass_vs_cost"|"cost_per_pass"|"stage_usage"/.test(r.stdout), "既存の JSON の行に足さない");
+    // 匿名
+    const ra = scoreCompareRun(f.out, ["--anonymous"]);
+    assert.equal(ra.status, 0, ra.stderr);
+    const ta = readFileSync(join(f.out, "score-compare.anonymous.json"), "utf8"), a = JSON.parse(ta);
+    assert.deepEqual([a.pass_vs_cost.direction, a.pass_vs_cost.pass_diff, a.groups.v1.cost_per_pass.value], ["frontier", 1, c.groups.v1.cost_per_pass.value]);
+    assert.ok(!("by_pattern" in a.groups.v1.cost_per_pass));
+    assert.ok(!/P\d+-r\d+|"P\d+"/.test(ta + ra.stdout + ra.stderr) && !ta.includes(base), "本の ID・P の ID・パスが出ない");
+    // 片群に欠測：v1.1a の 1 本は費用の欄が無く、1 本は途中
+    const g = cmp539(base, "cmp632m", { runOf: (grp, id) => { const x = plan539()[grp].get(id); return grp !== "v1.1a" ? x : id === "P1-r1" ? { ...x, summary: { ...x.summary, provider_cost_usd: null } } : id === "P2-r1" ? { state: "incomplete" } : x; } });
+    assert.equal(scoreCompareRun(g.out).status, 0);
+    const m = readCompare(g.out), x = m.groups["v1.1a"].cost_per_pass;
+    assert.deepEqual([x.value, x.interval, x.reason, x.cost.observed, x.cost.missing, x.no_summary], [null, null, "cost-missing", 28, 2, 1]);
+    assert.equal(x.lower_bound, r6_632((28 * 0.05) / x.passes));
+    assert.deepEqual([m.pass_vs_cost.cost_diff, m.pass_vs_cost.direction, m.pass_vs_cost.reason, typeof m.pass_vs_cost.pass_diff], [null, "undetermined", "cost-missing", "number"]);
+  });
+});
+
+test("#632 既存の欄を変えていない：#632 の欄を足す 3 行だけを除いた採点器（直す前と同じ欄）の比較と群の採点の出力が、今の出力から新しい欄（と指紋）を除いたものと深く等しい", async () => {
+  await withOut(async (base) => {
+    const f = cmp539(base, "cmp632b");
+    assert.equal(scoreCompareRun(f.out).status, 0);
+    const now = readCompare(f.out);
+    const src = readFileSync(scoreFile, "utf8"), line = /^ {4,6}(?:cost_per_pass|pass_vs_cost): .*\n/gm;
+    assert.equal((src.match(line) ?? []).length, 3, "#632 の欄を足すのは採点・群・比較の 3 行だけ");
+    const old = join(base, "before-632-score-agent.mjs");
+    writeFileSync(old, src.replace(line, ""));
+    const oldFp = scoringFingerprint(ev, old, loadEvalSet(join(base, "set538/t-set.json")).definitions).fingerprint;
+    for (const g of ["v1", "v1.1a"]) {
+      const p = join(f.out, g, "conditions.json"), cond = JSON.parse(readFileSync(p, "utf8"));
+      cond.scoring = { fingerprint: oldFp };
+      writeFileSync(p, JSON.stringify(cond));
+    }
+    const mod = await import(pathToFileURL(old).href);
+    const before = JSON.parse(JSON.stringify(await mod.scoreCompare(repo, f.out)));
+    const { pass_vs_cost: _p, ...rest } = now;
+    for (const g of ["v1", "v1.1a"]) { const { cost_per_pass: _c, stage_usage: _s, ...x } = rest.groups[g]; rest.groups[g] = x; }
+    assert.deepEqual(Object.keys(now), [...Object.keys(before), "pass_vs_cost"]);
+    assert.deepEqual(rest, before);
+    // 群の採点（通常の採点の出力）：指紋（採点のコード自身の SHA を含む）を除いて深く等しい
+    const cur = await scoreOutput(repo, join(f.out, "v1")), prev = await mod.scoreOutput(repo, join(f.out, "v1"));
+    const strip = (x) => { const { fingerprints: _f, cost_per_pass: _c, stage_usage: _s, ...y } = JSON.parse(JSON.stringify(x)); return y; };
+    assert.deepEqual(Object.keys(cur), [...Object.keys(prev), "cost_per_pass", "stage_usage"]);
+    assert.deepEqual(strip(cur), strip(prev));
+  });
+});
+
+test("#632 README：§8 の後ろ（末尾）の新しい節 §9 に定義の語がある（§7 の先頭より前のバイト列は表の採点の試験が SHA で照合する）", () => {
+  const text = readFileSync(join(ev, "README.md"), "utf8");
+  const at = text.indexOf("\n## 9. ");
+  assert.ok(at > text.indexOf("\n## 8. ") && text.indexOf("\n### 8.5 ") < at, "§9 は §8 の後ろ");
+  const sec = text.slice(at);
+  for (const w of ["PASS あたりの費用", "P を単位", "読めた本", "下限", "cost-missing", "no_summary", "段ごとの USD", "前線", "2504.13359", "2411.17501"]) assert.ok(sec.includes(w), w);
 });

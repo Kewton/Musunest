@@ -66,6 +66,10 @@
 // #631 で足したもの（--compare の出力の末尾の noise だけ。既存の欄・値・並びと採点の規則は変えない。README §8）：
 //   対の差の P ごとの並び（原文系 PASS と、段の役割ごとの通過）から、予測の雑音（P 内の反復のぶれ）とデータの雑音（P の違い）・勝つ側・反復 K′ ごとに
 //   検出できる差の目安を出す。判定・門には使わない。匿名の口は m・使った P の数・分散・勝つ側・δ の表だけ。標準出力に 1 行
+// #632 で足したもの（通常の採点と --compare の出力の末尾の欄だけ。既存の欄・値・並びと採点の規則は変えない。README §9）：
+//   PASS あたりの費用（cost_per_pass。予定した全部の本の費用の合計 ÷ 原文系 PASS。欠測 0 のときだけ値と P を単位にした bootstrap の区間、欠測があれば
+//   null と cost-missing と観測した費用だけの下限）・段ごとの時間と usage（stage_usage。時間は build-from の by_stage と同じ関数）・要約の無い本の数（no_summary）。
+//   --compare は群ごとに同じ欄と、PASS 対 費用（pass_vs_cost。PASS の差、両群とも欠測 0 のときだけ費用の差と向き）。標準出力の末尾に 1 行。段ごとの USD と単価は書かない
 // run-agent.mjs は、ここから指紋の関数と定義ファイルの読み込みを import して条件のファイルに書く（道具は 2 本で 1 組。入口として起動したときだけ採点する）
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -816,6 +820,8 @@ export function stat4(values) {
 }
 /** 段の記録の時間の合計（ms）。配列でないか、有限で 0 以上でない値が 1 つでもあれば読めない（null）。空の配列は実測の 0 */
 const stagesTotal = (stages) => (Array.isArray(stages) && stages.every((st) => isObj(st) && finite(st.duration_ms) !== null && st.duration_ms >= 0) ? stages.reduce((s, st) => s + st.duration_ms, 0) : null);
+/** 段 1 つの時間の集計（本ごとに同じ段の記録を足し、本をまたいで stat4）。段の記録を読めた本では、出てこない段は実測の 0。要約の無い本・読めない本は欠測（#498。#632 で共有） */
+const stageDurationOf = (summaries, id) => stat4(summaries.map((s) => { const st = s?.stages; return stagesTotal(st) === null ? null : sum(st.filter((x) => stageIdOf(x.stage) === id), (x) => x.duration_ms); }));
 const mean = (total, n) => (n === 0 ? null : Math.round((total / n) * 1000) / 1000);
 const zeros = (keys) => Object.fromEntries(keys.map((k) => [k, 0]));
 
@@ -965,7 +971,7 @@ export function buildMetrics(facts, frozen) {
   const summaryOf = (f) => (f.state === "executed" && isObj(f.sl?.summary) ? f.sl.summary : null);
   // 段ごとの時間：段の記録を読めた本では、出てこない段は実測の 0。読めない本は欠測
   const stageIds = [...new Set(facts.flatMap((f) => (Array.isArray(summaryOf(f)?.stages) ? summaryOf(f).stages.map((st) => stageIdOf(st?.stage)) : [])))];
-  const byStage = Object.fromEntries(stageIds.map((id) => [id, stat4(facts.map((f) => { const st = summaryOf(f)?.stages; return stagesTotal(st) === null ? null : sum(st.filter((x) => stageIdOf(x.stage) === id), (x) => x.duration_ms); }))]));
+  const byStage = Object.fromEntries(stageIds.map((id) => [id, stageDurationOf(facts.map(summaryOf), id)]));
   const missingP = frozen.missing.length;
   return {
     runs: n, frozen_missing: missingP, denominator: `凍結した組の本 ${n} 本（予定した本の全部。組が外した P ${missingP} 個は含まない）`,
@@ -1384,6 +1390,102 @@ export function noiseText(nz) {
   return `雑音の分解（判定には使わない目安）: 予測 ${fixed3(p.prediction)}・データ ${fixed3(p.data.variance)}${p.data.clipped ? "（データの雑音は検出されず）" : ""}（${p.winner}${p.reason === null ? "" : `: ${p.reason}`}）・検出できる差 K=3 ${fixed3(d.by_k["3"])}・K=6 ${fixed3(d.by_k["6"])}・下限 ${fixed3(d.infinity)}${d.reason === null ? "" : `（${d.reason}）`}（m ${p.m}・P 内の分散を出せた P ${p.within.patterns}）`;
 }
 
+// ── PASS あたりの費用・段ごとの時間と usage・PASS 対 費用（#632。README §9。v1.2 評価 b）
+// 既存の記録（起動の記録の費用と要約の段の記録）から費用 0 で出す。門・判定・merge の可否には使わない（線は置かない）。段ごとの USD は記録に無いので出さない
+/** 段ごとの usage のトークンの欄（工場の段の記録の名前のまま） */
+export const STAGE_USAGE_TOKENS = ["input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens", "reasoning_tokens"];
+/** 段ごとの再試行の 3 種（通信・形・中身） */
+export const STAGE_USAGE_RETRIES = ["communication", "shape", "content"];
+/** 段ごとの集計の並び：既存の段の順（Plan の段 → Build の段 → v1.1α の段 → v1.2 の語彙・写像）。知らない段は unknown で末尾 */
+export const STAGE_USAGE_ORDER = [...STAGE_ID_LIST, "unknown"];
+/** PASS あたりの費用の値を出さない理由 */
+export const COST_REASONS = ["no-pass", "all-missing", "cost-missing"];
+/** PASS 対 費用の向き（記述。線は置かない）。費用の欠測があれば undetermined */
+export const FRONTIER_DIRECTIONS = ["frontier", "buy-pass", "save-cost", "worse", "same", "undetermined"];
+const FRONTIER_LABELS = { frontier: "前線に乗る（PASS が増え費用が減る）", "buy-pass": "費用を払って PASS を買う", "save-cost": "PASS を減らして費用を減らす", worse: "どちらも悪い", same: "同じ", undetermined: "判定不能（費用の欠測）" };
+export const COST_NOTE = "判定・門には使わない（数を出すだけ。費用の線は置かない）。PASS あたりの費用 ＝ 予定した全部の本の費用の合計 ÷ 原文系 PASS の数（期待費用の推定）。費用の読めない本は 0 と推測せず欠測に数え、欠測が 1 本でもあれば値と区間は null で、観測した費用だけの下限を出す。区間は P を単位にした bootstrap";
+/** 本 1 本の費用（USD）：要約のある本だけ、起動の記録の plan_cost.total_usd（無ければ要約の provider_cost_usd）。有限で 0 以上でなければ読めない（null。0 と推測しない） */
+export function runCostOf(sl) {
+  if (!isObj(sl?.summary)) return null;
+  const x = finite(sl.plan_cost?.total_usd) ?? finite(sl.summary.provider_cost_usd);
+  return x !== null && x >= 0 ? x : null;
+}
+/**
+ * 段ごとの時間と usage。summaries ＝ 予定した本ごとの要約（無ければ null）。段は記録に現れたものを STAGE_USAGE_ORDER の順で並べる。
+ * 時間は既存の Build だけの集計の by_stage と同じ関数（stageDurationOf）。呼び出し・トークン・再試行・usage の無い呼び出しは全部の本の同じ段の記録の合計
+ */
+export function stageUsageOf(summaries) {
+  const recs = summaries.map((s) => (isObj(s) && Array.isArray(s.stages) ? s.stages : null));
+  const seen = new Set(recs.flatMap((st) => (st ?? []).map((x) => stageIdOf(x?.stage))));
+  return {
+    planned: summaries.length, no_summary: summaries.filter((s) => !isObj(s)).length,
+    stages: Object.fromEntries(STAGE_USAGE_ORDER.filter((id) => seen.has(id)).map((id) => {
+      const xs = recs.flatMap((st) => (st ?? []).filter((x) => stageIdOf(x?.stage) === id));
+      return [id, {
+        runs: recs.filter((st) => st !== null && st.some((x) => stageIdOf(x?.stage) === id)).length, calls: sum(xs, (x) => nonNegative(x?.calls)), duration_ms: stageDurationOf(summaries, id),
+        ...Object.fromEntries(STAGE_USAGE_TOKENS.map((k) => [k, sum(xs, (x) => nonNegative(x?.[k]))])),
+        retries: Object.fromEntries(STAGE_USAGE_RETRIES.map((k) => [k, sum(xs, (x) => nonNegative(x?.retries?.[k]))])), missing_usage_calls: sum(xs, (x) => nonNegative(x?.missing_usage_calls)),
+      }];
+    })),
+  };
+}
+/**
+ * PASS あたりの費用（群ごと）。items ＝ 予定した本ごとの [{ pattern, cost（USD か null）, pass（原文系 PASS）, summary（要約があるか） }]。
+ * 値と区間は欠測 0 のときだけ。区間は P を復元抽出し、抽出した P の費用の合計 ÷ PASS の合計の 2.5・97.5 百分位（BOOTSTRAP の回数と種。PASS の合計が 0 の抽出は除いて数える。P が 2 未満なら null）
+ */
+export function costPerPass(items) {
+  const n = items.length, passes = items.filter((x) => x.pass).length;
+  const costs = items.map((x) => x.cost).filter((x) => x !== null), observed = costs.length, missing = n - observed, total = sum(costs, (x) => x);
+  const raw = {};
+  for (const x of items) { const p = (raw[x.pattern] ??= { runs: 0, passes: 0, missing: 0, cost: 0 }); p.runs += 1; if (x.pass) p.passes += 1; if (x.cost === null) p.missing += 1; else p.cost += x.cost; }
+  const ps = Object.values(raw), m = ps.length;
+  const head = { note: COST_NOTE, planned: n, passes, cost: { observed, missing, total: observed === 0 ? null : round6(total) }, no_summary: items.filter((x) => !x.summary).length };
+  const by_pattern = Object.fromEntries(Object.entries(raw).map(([p, v]) => [p, { ...v, cost: round6(v.cost) }]));
+  const boot = { resamples: BOOTSTRAP.resamples, seed: BOOTSTRAP.seed, patterns: m, excluded: null, reason: null };
+  const empty = (reason, lower = null) => ({ ...head, value: null, interval: null, bootstrap: boot, lower_bound: lower, reason, by_pattern });
+  if (passes === 0) return empty("no-pass");
+  if (observed === 0) return empty("all-missing");
+  if (missing > 0) return empty("cost-missing", round6(total / passes));
+  const value = round6(total / passes);
+  if (m < 2) return { ...head, value, interval: null, bootstrap: { ...boot, reason: "few-patterns" }, lower_bound: null, reason: null, by_pattern };
+  const rand = mulberry32(BOOTSTRAP.seed), ratios = [];
+  let excluded = 0;
+  for (let b = 0; b < BOOTSTRAP.resamples; b++) {
+    let c = 0, k = 0;
+    for (let i = 0; i < m; i++) { const p = ps[Math.floor(rand() * m)]; c += p.cost; k += p.passes; }
+    if (k === 0) excluded += 1; else ratios.push(c / k);
+  }
+  ratios.sort((a, b) => a - b);
+  const interval = ratios.length === 0 ? null : [round6(quantile7(ratios, 0.025)), round6(quantile7(ratios, 0.975))];
+  return { ...head, value, interval, bootstrap: { ...boot, excluded, reason: interval === null ? "no-pass" : null }, lower_bound: null, reason: null, by_pattern };
+}
+/** 群の採点の facts（予定した本ごと）から PASS あたりの費用の入力を作る */
+const costItemsOf = (facts) => facts.map((f) => { const executed = f.state === "executed"; return { pattern: patternOf(f.run), cost: executed ? runCostOf(f.sl) : null, pass: executed && isObj(f.row) && pass(f.row), summary: executed && isObj(f.sl?.summary) }; });
+/**
+ * PASS 対 費用（--compare）。groups ＝ { 群: cost_per_pass }。PASS の差はいつも出す。費用の差と向きは両群とも費用の欠測が 0 のときだけ
+ * （どちらかに欠測があれば費用の差は null・向きは undetermined・理由 cost-missing。部分の合計の差で向きを決めない）。向きは記述で線は置かない
+ */
+export function passVsCost(groups, GROUPS) {
+  const [b, c] = GROUPS, gb = groups[b], gc = groups[c];
+  const known = gb.cost.missing === 0 && gc.cost.missing === 0;
+  const pass_diff = gc.passes - gb.passes, cost_diff = known ? round6((gc.cost.total ?? 0) - (gb.cost.total ?? 0)) : null;
+  const direction = !known ? "undetermined" : pass_diff === 0 && cost_diff === 0 ? "same" : pass_diff >= 0 && cost_diff <= 0 ? "frontier" : pass_diff <= 0 && cost_diff >= 0 ? "worse" : pass_diff > 0 ? "buy-pass" : "save-cost";
+  return {
+    note: COST_NOTE, diff_direction: diffDirectionOf(GROUPS),
+    groups: Object.fromEntries(GROUPS.map((g) => { const x = groups[g]; return [g, { planned: x.planned, passes: x.passes, cost: x.cost, no_summary: x.no_summary, value: x.value, interval: x.interval, lower_bound: x.lower_bound, reason: x.reason }]; })),
+    pass_diff, cost_diff, direction, direction_label: FRONTIER_LABELS[direction], reason: known ? null : "cost-missing",
+  };
+}
+const usdText = (x) => (x === null ? "-" : `${x} USD`);
+/** 段の時間の上位 3 段（合計の多い順。同じなら段の順） */
+const topStagesText = (su) => Object.entries(su?.stages ?? {}).filter(([, v]) => v.duration_ms.total !== null).sort((a, b) => b[1].duration_ms.total - a[1].duration_ms.total).slice(0, 3).map(([id, v]) => `${id} ${(v.duration_ms.total / 1000).toFixed(1)}s`).join("・") || "-";
+/** 標準出力の PASS 対 費用の 1 行（--compare の末尾） */
+export function passVsCostText(pc, stageUsage) {
+  const gs = Object.entries(pc.groups).map(([g, x]) => `${g} PASS ${x.passes}/${x.planned}・費用 合計 ${usdText(x.cost.total)}（読めた ${x.cost.observed}/${x.planned}・要約なし ${x.no_summary}）・PASS あたり ${x.value !== null ? `${x.value} USD（区間 ${x.interval === null ? "-" : `${x.interval[0]}〜${x.interval[1]}`}）` : `-（${x.reason}${x.lower_bound === null ? "" : `・下限 ${x.lower_bound} USD`}${x.cost.missing > 0 ? `・欠測 ${x.cost.missing} 本` : ""}）`}`);
+  const sign = (d) => (d > 0 ? `+${d}` : `${d}`);
+  return `PASS 対 費用（判定には使わない記述）: ${gs.join("／")}／差（${pc.diff_direction}）PASS ${sign(pc.pass_diff)}・費用 ${pc.cost_diff === null ? `-（${pc.reason}）` : `${sign(pc.cost_diff)} USD`}・向き ${pc.direction}（${pc.direction_label}）・段の時間 上位 3: ${Object.entries(stageUsage).map(([g, su]) => `${g} ${topStagesText(su)}`).join("／")}`;
+}
+
 /** 採点せずに断る誤り（入口が「断りました」と exit 3 にする）。文は opts.anonymous のときパス・本の ID・組の ID を含めない */
 const refusal = (message) => Object.assign(new Error(message), { refused: true });
 /**
@@ -1632,7 +1734,10 @@ export async function scoreOutput(repo, outRoot, opts = {}) {
   const agreement = agreementOf(facts), test_findings = testFindingsSummary(facts);
   // 段単位の走り（#545）：段の通過率と範囲の中の漏斗だけを出す。原文系・了承後系の PASS と納品の欄は計算しない（null と理由 stage-run）
   if (mode === STAGE_RUN_MODE) return stageOutputOf({ outRoot, cond, planned, stageAbsent, set, evaluation, completion, fingerprints });
-  return { rubric: "v5", aggregation_versions: AGGREGATION_VERSIONS, scoring_systems: SCORING_SYSTEMS, set, metrics, metrics_accepted, metrics_script, fulfillment, completion, fingerprints, bySubject, rows, tables, evaluation, metrics_plan, metrics_build, funnel, pass_k, verdicts, unverified_details, agreement, test_findings };
+  return { rubric: "v5", aggregation_versions: AGGREGATION_VERSIONS, scoring_systems: SCORING_SYSTEMS, set, metrics, metrics_accepted, metrics_script, fulfillment, completion, fingerprints, bySubject, rows, tables, evaluation, metrics_plan, metrics_build, funnel, pass_k, verdicts, unverified_details, agreement, test_findings,
+    // PASS あたりの費用と段ごとの時間・usage（#632。README §9）：既存の欄のあとに足す。分母は予定した本（facts）。判定・門には使わない
+    cost_per_pass: costPerPass(costItemsOf(facts)), stage_usage: stageUsageOf(facts.map((f) => (f.state === "executed" && isObj(f.sl?.summary) ? f.sl.summary : null))),
+  };
 }
 
 // ── 匿名の集計（回帰用・保留用の組）：許可した欄だけを組み立てる。入力の文字列をそのまま通さない
@@ -1737,8 +1842,21 @@ export function anonymize(full) {
     ...anonymous538(full),
     // 内外の表と試験の分類（#539）：件数だけ。本の ID・試験 ID・detail は出さない
     ...anonymous539(full),
+    // PASS あたりの費用と段ごとの時間・usage（#632）：件数・合計・中央値・区間だけ（P ごとの値は出さない）
+    ...anonymous632(full),
   };
 }
+// #632 の匿名の欄：件数・合計・中央値・値・区間・下限・既知の理由だけ。段は既知の段の ID だけ（P の ID・本の ID・P ごとの値は出さない）
+const anonCostPerPass = (x) => (!isObj(x) ? null : {
+  ...intsOf(x, ["planned", "passes"]), cost: { ...intsOf(x.cost, ["observed", "missing"]), total: numOrNull(x.cost?.total) }, no_summary: intOrNull(x.no_summary),
+  value: numOrNull(x.value), interval: numPair(x.interval), bootstrap: { ...intsOf(x.bootstrap, ["resamples", "seed", "patterns", "excluded"]), reason: enumOrUnknown(["few-patterns", "no-pass"], x.bootstrap?.reason ?? null) },
+  lower_bound: numOrNull(x.lower_bound), reason: enumOrUnknown(COST_REASONS, x.reason ?? null),
+});
+const anonStageUsage = (x) => (!isObj(x) ? null : {
+  ...intsOf(x, ["planned", "no_summary"]),
+  stages: Object.fromEntries(STAGE_USAGE_ORDER.filter((id) => isObj(x.stages?.[id])).map((id) => { const v = x.stages[id]; return [id, { ...intsOf(v, ["runs", "calls"]), duration_ms: anonStat(v.duration_ms), ...intsOf(v, STAGE_USAGE_TOKENS), retries: intsOf(v.retries, STAGE_USAGE_RETRIES), missing_usage_calls: intOrNull(v.missing_usage_calls) }]; })),
+});
+const anonymous632 = (x) => ({ ...("cost_per_pass" in x ? { cost_per_pass: anonCostPerPass(x.cost_per_pass) } : {}), ...("stage_usage" in x ? { stage_usage: anonStageUsage(x.stage_usage) } : {}) });
 // #538 の匿名の欄。率は数と区間の形の文字列か「今回未観測（0/予定）」だけを通す
 const UNOBSERVED = /^今回未観測（0\/\d+）$/;
 const rateOrLabel = (x) => rateOrNull(x) ?? (typeof x === "string" && UNOBSERVED.test(x) ? x : null);
@@ -2116,6 +2234,8 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
       agreement: full.agreement, test_findings: full.test_findings,
       // 経路 v1.2 の群（#557）：旗の組の照合（群の採点の evaluation.v12_flags）
       ...(isObj(full.evaluation?.v12_flags) ? { v12_flags: full.evaluation.v12_flags } : {}),
+      // PASS あたりの費用と段ごとの時間・usage（#632。群ごとの採点の出力の欄そのまま）
+      cost_per_pass: full.cost_per_pass, stage_usage: full.stage_usage,
     };
   }
   // 段の役割ごとの対の差（#539。README §5.10.3）：両側で指標が定義されている対だけを n に入れる。片側だけ・欠測・適用外は差 null で理由を残す
@@ -2179,6 +2299,8 @@ export async function scoreCompare(repo, outRoot, opts = {}) {
     stage_pairs, pattern_clusters,
     // 雑音の分解（#631。README §8）：既存の欄のあとに足す。判定・門には使わない
     noise: compareNoise(Object.fromEntries(Object.entries(byPattern).map(([pid, v]) => [pid, v.diffs])), Object.fromEntries(Object.keys(STAGE_ROLES).map((role) => [role, byPatternOf((x) => x.diffs[role].passed)])), groups[baseGroup].cond.params?.runs),
+    // PASS 対 費用（#632。README §9）：noise のあとに足す。記述で線は置かない
+    pass_vs_cost: passVsCost(Object.fromEntries(GROUPS.map((g) => [g, groupOut[g].cost_per_pass])), GROUPS),
   };
 }
 /** 比較の採点の匿名の口：件数・率（数と区間の形の文字列）・区間の数・既知の値だけ。本の ID・P の ID・パス・落ちた判定の鍵は出さない */
@@ -2205,6 +2327,8 @@ export function anonymizeCompare(full) {
       ...anonymous539(x),
       // 経路 v1.2 の群（#557）：照合を通った旗の名前と真偽と件数だけ
       ...(isObj(x.v12_flags) ? { v12_flags: anonymousV12Flags(x.v12_flags) } : {}),
+      // PASS あたりの費用と段ごとの時間・usage（#632）
+      ...anonymous632(x),
     };
   }
   const interval = Array.isArray(p.interval) && p.interval.length === 2 && p.interval.every((v) => numOrNull(v) !== null) ? [p.interval[0], p.interval[1]] : null;
@@ -2222,6 +2346,8 @@ export function anonymizeCompare(full) {
     pattern_clusters: !isObj(full.pattern_clusters) ? null : { discordant: intsOf(full.pattern_clusters.discordant, ["improved", "regressed"]), pass: anonCluster(full.pattern_clusters.pass) },
     // 雑音の分解（#631）：m・使った P の数・分散・勝つ側・δ の表だけ（P の ID・P ごとの値・平均は出さない）
     ...("noise" in full ? { noise: !isObj(full.noise) ? null : { runs: intOrNull(full.noise.runs), pass: anonNoise(full.noise.pass), stage_pairs: { roles: Object.fromEntries(Object.keys(STAGE_ROLES).map((role) => [role, { passed: anonNoise(full.noise.stage_pairs?.roles?.[role]?.passed) }])) } } } : {}),
+    // PASS 対 費用（#632）：群ごとの件数・合計・値・区間・下限・理由と、差・向きだけ
+    ...("pass_vs_cost" in full ? { pass_vs_cost: anonPassVsCost(full.pass_vs_cost, GROUPS) } : {}),
   };
 }
 const numPair = (x) => (Array.isArray(x) && x.length === 2 && x.every((v) => numOrNull(v) !== null) ? [x[0], x[1]] : null);
@@ -2230,6 +2356,10 @@ const anonNoise = (x) => (!isObj(x) ? null : {
   m: intOrNull(x.m), within: { variance: numOrNull(x.within?.variance), patterns: intOrNull(x.within?.patterns) }, between: { variance: numOrNull(x.between?.variance) }, prediction: numOrNull(x.prediction),
   data: { raw: numOrNull(x.data?.raw), variance: numOrNull(x.data?.variance), clipped: boolOrNull(x.data?.clipped) }, winner: enumOrUnknown(NOISE_WINNERS, x.winner ?? null), reason: enumOrUnknown(NOISE_REASONS, x.reason ?? null),
   detectable: { z: numOrNull(x.detectable?.z), by_k: Object.fromEntries(NOISE_K_VALUES.map((k) => [String(k), numOrNull(x.detectable?.by_k?.[String(k)])])), infinity: numOrNull(x.detectable?.infinity), current: { k: intOrNull(x.detectable?.current?.k), delta: numOrNull(x.detectable?.current?.delta) }, reason: enumOrUnknown(NOISE_REASONS, x.detectable?.reason ?? null) },
+});
+const anonPassVsCost = (x, GROUPS) => (!isObj(x) ? null : {
+  groups: Object.fromEntries(GROUPS.map((g) => { const y = x.groups?.[g]; return [g, !isObj(y) ? null : { ...intsOf(y, ["planned", "passes", "no_summary"]), cost: { ...intsOf(y.cost, ["observed", "missing"]), total: numOrNull(y.cost?.total) }, value: numOrNull(y.value), interval: numPair(y.interval), lower_bound: numOrNull(y.lower_bound), reason: enumOrUnknown(COST_REASONS, y.reason ?? null) }]; })),
+  pass_diff: intOrNull(x.pass_diff), cost_diff: numOrNull(x.cost_diff), direction: enumOrUnknown(FRONTIER_DIRECTIONS, x.direction ?? null), reason: enumOrUnknown(["cost-missing"], x.reason ?? null),
 });
 const anonCluster = (c) => (!isObj(c) ? null : {
   m: intOrNull(c.m), mean: numOrNull(c.mean), sign_flip: { p: numOrNull(c.sign_flip?.p), permutations: intOrNull(c.sign_flip?.permutations) },
@@ -2714,8 +2844,8 @@ async function mainCompare(repo, outRoot, { label, anonymous, setPath }) {
     return;
   }
   // 既存の JSON の行は #539 の欄を除いて今までの形のまま
-  const { pairs: { rows, by_pattern: byPattern, ...pairs }, stage_pairs, pattern_clusters, noise, ...rest } = full;
-  const groups538 = Object.fromEntries(Object.entries(rest.groups).map(([g, { agreement: _a, test_findings: _t, ...x }]) => [g, x]));
+  const { pairs: { rows, by_pattern: byPattern, ...pairs }, stage_pairs, pattern_clusters, noise, pass_vs_cost, ...rest } = full;
+  const groups538 = Object.fromEntries(Object.entries(rest.groups).map(([g, { agreement: _a, test_findings: _t, cost_per_pass: _c, stage_usage: _s, ...x }]) => [g, x]));
   console.log(JSON.stringify({ ...rest, groups: groups538, pairs }, null, 1));
   const GROUPS = Object.keys(rest.groups);
   for (const r of rows) console.log(["pair", r.run, `先行 ${r.first}`, ...GROUPS.map((g) => `${g} ${r.states[g]}${r.pass === null ? "" : ` PASS=${r.pass[g]}`}`), `差 ${r.diff === null ? "-" : r.diff > 0 ? `+${r.diff}` : r.diff}`].join("\t"));
@@ -2731,6 +2861,8 @@ async function mainCompare(repo, outRoot, { label, anonymous, setPath }) {
   console.log(clusterText(stage_pairs, pattern_clusters));
   // 雑音の分解の 1 行（#631。既存の行の後ろ）
   console.log(noiseText(noise));
+  // PASS 対 費用の 1 行（#632。末尾。JSON の行には足さない）
+  console.log(passVsCostText(pass_vs_cost, Object.fromEntries(GROUPS.map((g) => [g, full.groups[g].stage_usage]))));
 }
 
 const isEntry = () => { if (process.argv[1] === undefined) return false; try { return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { return false; } };
