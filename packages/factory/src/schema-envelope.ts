@@ -35,6 +35,9 @@ import { SEMANTIC_CHECK_SCHEMA, SEMANTIC_CHECK_SCHEMA_NAME } from "./v11a/stages
 import { TEST_SPEC_SCHEMA, TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
 import { DECLARATION_V11A_SCHEMA, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
 import { fromPublicV12Flags, ledgerViewOf, V12_PIPELINE_FLAGS, type V12Flags } from "./v12/ledger.js";
+import { VOCABULARY_BUNDLES } from "./v12/ids.js";
+import { MAPPING_SCHEMA_NAME, mappingSchemaOf } from "./v12/stages/mapping.js";
+import { VOCABULARY_SCHEMA_NAMES, vocabularySchemaOf } from "./v12/stages/vocabulary.js";
 
 /** 封筒の識別子（adapter が選ぶ。既定は v1） */
 export const ENVELOPE_IDS = ["v1", "v1.1a", "v1.2"] as const;
@@ -169,18 +172,27 @@ export const ENVELOPE_SCHEMA_NAME_V12 = "stage-envelope-v12";
 /**
  * 旗の組から v1.2 の封筒の段の一覧を導く（純粋。Issue #588）。段の並びは v1.1α と同じで、旗 `v12.ledger` が on なら
  * T1・T2 の枝を台帳から導いた schema（`nameTableSchemaOf`・`testSpecSchemaOf`。段が渡すものと同じ導出）にする。
- * ほかの段は v1.1α と同じ枝。後の手の段は、その旗が on のときここで足す。
+ * ほかの段は v1.1α と同じ枝。後の手の段は、その旗が on のときここで足す：旗 `v12.ids` が on なら、末尾に C1 の 3 束
+ * （`vocabulary-*`）と C2（`mapping`）の枝を足す（schema は段が渡すものと同じ導出。Issue #593）。`ids` を省けば off。
  */
-export function stageEnvelopeEntriesV12Of(flags: Pick<V12Flags, "ledger">): readonly StageEnvelopeEntry[] {
+export function stageEnvelopeEntriesV12Of(flags: Pick<V12Flags, "ledger"> & Partial<Pick<V12Flags, "ids">>): readonly StageEnvelopeEntry[] {
   const ledger = ledgerViewOf(flags);
-  if (ledger === undefined) return STAGE_ENVELOPE_ENTRIES_V11A;
-  return STAGE_ENVELOPE_ENTRIES_V11A.map((entry) =>
-    entry.stage === NAME_TABLE_SCHEMA_NAME
-      ? { stage: entry.stage, schema: nameTableSchemaOf(ledger) }
-      : entry.stage === TEST_SPEC_SCHEMA_NAME
-        ? { stage: entry.stage, schema: testSpecSchemaOf(ledger) }
-        : entry,
-  );
+  const base =
+    ledger === undefined
+      ? STAGE_ENVELOPE_ENTRIES_V11A
+      : STAGE_ENVELOPE_ENTRIES_V11A.map((entry) =>
+          entry.stage === NAME_TABLE_SCHEMA_NAME
+            ? { stage: entry.stage, schema: nameTableSchemaOf(ledger) }
+            : entry.stage === TEST_SPEC_SCHEMA_NAME
+              ? { stage: entry.stage, schema: testSpecSchemaOf(ledger) }
+              : entry,
+        );
+  if (flags.ids !== true) return base;
+  return [
+    ...base,
+    ...VOCABULARY_BUNDLES.map((bundle) => ({ stage: VOCABULARY_SCHEMA_NAMES[bundle], schema: vocabularySchemaOf(bundle, ledger) })),
+    { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(ledger) },
+  ];
 }
 
 /** v1.2 の封筒に入れる段の一覧（`--pipeline v1.2` の旗の組 `V12_PIPELINE_FLAGS` から導く。Issue #588） */
@@ -209,14 +221,17 @@ export function envelopeStageFor(schemaName: string, envelope: EnvelopeId = "v1"
 }
 
 /**
- * 旗 `v12.ledger` が on の走りの封筒の段の一覧（Issue #549 の直し）。Issue #588 からは v1.2 の封筒の一覧
- * （`STAGE_ENVELOPE_ENTRIES_V12`）そのもの。識別子 `v1.1a` の要求で、段の schema が旗 on の枝と等しいときに使う
- * （library の呼び手が `v1.1a` を渡したときの振る舞い。名前は v1.1α の封筒と同じ）。
+ * 旗 `v12.ledger` が on の走りの封筒の段の一覧（Issue #549 の直し）。識別子 `v1.1a` の要求で、段の schema が旗 on の枝と
+ * 等しいときに使う（library の呼び手が `v1.1a` を渡したときの振る舞い。名前は v1.1α の封筒と同じ）。
+ *
+ * Issue #588 では v1.2 の封筒の一覧の別名だった。Issue #593 で v1.2 の封筒に C1・C2 の枝（旗 `v12.ids`）を足したので、
+ * **別名は残し、旗 `ids` を含まない組（ledger だけ on）の一覧に固定する**——識別子 `v1.1a` の旗 on の library の呼び手が送る
+ * 封筒のバイト列は #588 のまま変わらない（C1・C2 の段を呼ばない走りに、その枝を足さない）。入口（CLI）はここを通らない。
  */
-export const STAGE_ENVELOPE_ENTRIES_V12_LEDGER: readonly StageEnvelopeEntry[] = STAGE_ENVELOPE_ENTRIES_V12;
+export const STAGE_ENVELOPE_ENTRIES_V12_LEDGER: readonly StageEnvelopeEntry[] = stageEnvelopeEntriesV12Of({ ledger: true, ids: false });
 
-/** 旗 `v12.ledger` が on の走りで送る封筒の schema（v1.2 の封筒と同じ実体。Issue #588） */
-export const ENVELOPE_SCHEMA_V12_LEDGER: Record<string, unknown> = ENVELOPE_SCHEMA_V12;
+/** 旗 `v12.ledger` が on の走りで送る封筒の schema（ids を含まない一覧から組む。Issue #588・#593） */
+export const ENVELOPE_SCHEMA_V12_LEDGER: Record<string, unknown> = buildEnvelopeSchema(STAGE_ENVELOPE_ENTRIES_V12_LEDGER);
 
 /** 1 つの要求について送る封筒（その段の枝と、封筒の名前・schema） */
 export interface ResolvedStageEnvelope {

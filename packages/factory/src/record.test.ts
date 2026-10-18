@@ -26,6 +26,9 @@ import {
   usageDelta,
   type RunRecord,
   type StageRecord,
+  REFERENCE_COUNT_KEYS,
+  REFERENCE_COUNT_STAGES,
+  type StageReferenceCounts,
 } from "./record.js";
 import type { CallCounts } from "./call.js";
 
@@ -468,7 +471,7 @@ describe("段の識別子は v1 の並びを保ち、v1.1α の段を末尾に�
       "judge",
       "bundle",
     ]);
-    expect(STAGE_IDS.slice(12)).toEqual([
+    expect(STAGE_IDS.slice(12, 19)).toEqual([
       "name-table",
       "semantic-check",
       "test-spec",
@@ -477,7 +480,28 @@ describe("段の識別子は v1 の並びを保ち、v1.1α の段を末尾に�
       "coverage",
       "carry-over",
     ]);
+    // v1.2 の段（Issue #593）は v1.1α の 7 個のさらに後ろ（上の並びは変えない）
+    expect(STAGE_IDS.slice(19)).toEqual(["vocabulary", "mapping"]);
     expect(new Set(STAGE_IDS).size).toBe(STAGE_IDS.length);
+  });
+
+  it("参照の照合の数は vocabulary・mapping の記録だけが固定の鍵で持ち、ほかの段の記録には欄が無い（Issue #593）", () => {
+    const usage = { calls: 1, missing_usage_calls: 0, input_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, output_tokens: 0, reasoning_tokens: 0 };
+    const counts: CallCounts = {
+      attempts: { started: 1, responses: 1, errors: 0, aborted: 0, not_started: { deadline: 0, budget: 0, limit: 0, timeout: 0 } },
+      retries: { communication: 0, shape: 0, content: 0 },
+    } as unknown as CallCounts;
+    const references = { checked: 3, unknown_ids: 1, duplicates: 1, cross_bundle_ids: 1, extra: 9 } as unknown as StageReferenceCounts;
+    for (const stage of REFERENCE_COUNT_STAGES) {
+      const record = makeStageRecord(stage, "ok", 0, usage, counts, null, null, references);
+      expect(record.references).toEqual({ checked: 3, unknown_ids: 1, duplicates: 1, cross_bundle_ids: 1 });
+      expect(Object.keys(record.references ?? {})).toEqual([...REFERENCE_COUNT_KEYS]);
+    }
+    expect(REFERENCE_COUNT_STAGES).toEqual(["vocabulary", "mapping"]);
+    const other = makeStageRecord("name-table", "ok", 0, usage, counts, null, null, references);
+    expect(other).not.toHaveProperty("references");
+    expect(Object.keys(other).sort()).toEqual([...STAGE_RECORD_KEYS].sort());
+    expect(makeStageRecord("vocabulary", "ok", 0, usage, counts, null)).not.toHaveProperty("references");
   });
 
   it("FAILURE_KINDS・STAGE_OPERATIONS の並びは変わらない", () => {

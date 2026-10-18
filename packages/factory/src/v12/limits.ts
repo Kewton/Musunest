@@ -214,3 +214,21 @@ export const V12_V11A_FRAME_MAP: readonly {
   // B1 の初回は C5（手 6）の段でこの表の外。B1 の空の文脈での作り直し（旗 v12.search-repair）がこの行に写る
   { v11a: "write", frames: ["rewrite"], rounds: 1, shapeAttempts: 2, units: null },
 ];
+
+/**
+ * 旗 `v12.ids` の段（手 3a。Issue #593）が、枠のどの行に写るか。C1 は束 3 つ（`units`）で、束ごとに初回 1・形のやり直し 1
+ * （`shapeAttempts` 2）。C2 は束 1 つ（束に分けるのは手 3b）で、初回の形のやり直し 1・C3 の拒否のあとの 2 回目 1（`rounds` 2。
+ * 2 回目は形の再試行を持たない）。値は段のコードの定数と同じで、試験が照らす（ここで値を変えない）。
+ */
+export const V12_IDS_FRAME_MAP: readonly {
+  readonly stage: StageId;
+  readonly frame: V12FrameStage;
+  readonly rounds: number;
+  readonly shapeAttempts: number;
+  readonly units: number;
+  /** 段の論理要求の最大（初回・形のやり直し・中身のやり直しの合計） */
+  readonly maxLogical: number;
+}[] = [
+  { stage: "vocabulary", frame: "C1", rounds: 1, shapeAttempts: 2, units: 3, maxLogical: 6 },
+  { stage: "mapping", frame: "C2", rounds: 2, shapeAttempts: 2, units: 1, maxLogical: 3 },
+];
