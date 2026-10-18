@@ -23,9 +23,11 @@ import {
   DIAGNOSTICS_LISTING_FILE,
   DIAGNOSTICS_MAPPINGS_FILE,
   DIAGNOSTICS_REJECTED_DESIGN_FILE,
+  DIAGNOSTICS_REJECTED_MAPPING_FILE,
   DIAGNOSTICS_REJECTED_NAME_TABLE_FILE,
   DIAGNOSTICS_REJECTED_TEST_SPEC_FILE,
   DIAGNOSTICS_REJECTED_TEST_SUITE_FILE,
+  DIAGNOSTICS_REJECTED_VOCABULARY_FILE,
   DIAGNOSTICS_STATIC_CHECK_FILE,
   DIAGNOSTICS_TEST_SUITE_FILE,
   MAPPINGS_FILE,
@@ -866,6 +868,42 @@ describe("v1.1α の段の断った候補（name-table・test-spec。Issue #506�
     // 新しい段の候補が無ければ、新しいファイルは作らない
     expect(v1Listing.map((artifact) => artifact.path)).not.toContain(DIAGNOSTICS_REJECTED_NAME_TABLE_FILE);
     expect(v1Listing.map((artifact) => artifact.path)).not.toContain(DIAGNOSTICS_REJECTED_TEST_SPEC_FILE);
+  });
+});
+
+describe("旗 v12.ids の段の断った候補（vocabulary・mapping。Issue #608）", () => {
+  const candidate = (stage: BundleRejectedCandidate["stage"], call: number): BundleRejectedCandidate => ({
+    stage,
+    operation: null,
+    call,
+    round: 1,
+    attempt: 2,
+    kind: "shape",
+    response: { value: `${stage}-${call}` },
+    response_sha256: `${stage}-sha`,
+    problems: [{ field: "rows", message: "並び（array）であること", reference: "response", reference_sha256: `${stage}-sha` }],
+  });
+  const before = [candidate("design", 1), candidate("test-suite", 1), candidate("name-table", 1), candidate("test-spec", 1)];
+
+  it("段 vocabulary・mapping の候補は 2 つの新しいファイルに分かれ（今の 4 段のあと）、今の 4 段のファイルは今までどおり", () => {
+    expect(DIAGNOSTICS_REJECTED_VOCABULARY_FILE).toBe("diagnostics/rejected-vocabulary.json");
+    expect(DIAGNOSTICS_REJECTED_MAPPING_FILE).toBe("diagnostics/rejected-mapping.json");
+    const files = buildRejectedCandidateFiles([candidate("mapping", 1), ...before, candidate("vocabulary", 2)]);
+    expect(files.map((artifact) => artifact.path)).toEqual([
+      DIAGNOSTICS_REJECTED_DESIGN_FILE,
+      DIAGNOSTICS_REJECTED_TEST_SUITE_FILE,
+      DIAGNOSTICS_REJECTED_NAME_TABLE_FILE,
+      DIAGNOSTICS_REJECTED_TEST_SPEC_FILE,
+      DIAGNOSTICS_REJECTED_VOCABULARY_FILE,
+      DIAGNOSTICS_REJECTED_MAPPING_FILE,
+    ]);
+    expect(files.slice(0, 4)).toEqual(buildRejectedCandidateFiles(before));
+    expect(JSON.parse(findText(files, DIAGNOSTICS_REJECTED_VOCABULARY_FILE))).toEqual({ candidates: [candidate("vocabulary", 2)] });
+    expect(JSON.parse(findText(files, DIAGNOSTICS_REJECTED_MAPPING_FILE))).toEqual({ candidates: [candidate("mapping", 1)] });
+    // 新しい段の候補が無ければ、新しいファイルは作らない
+    const paths = buildRejectedCandidateFiles(before).map((artifact) => artifact.path);
+    expect(paths).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
+    expect(paths).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
   });
 });
 

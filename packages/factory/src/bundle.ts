@@ -211,9 +211,13 @@ export const DIAGNOSTICS_REJECTED_TEST_SUITE_FILE = `${DIAGNOSTICS_DIR}/rejected
 export const DIAGNOSTICS_REJECTED_NAME_TABLE_FILE = `${DIAGNOSTICS_DIR}/rejected-name-table.json` as const;
 /** 診断に出す、v1.1α の試験の仕様（T2）が断った候補の置き場所（`07-architecture-v1.1a.md` §1） */
 export const DIAGNOSTICS_REJECTED_TEST_SPEC_FILE = `${DIAGNOSTICS_DIR}/rejected-test-spec.json` as const;
+/** 診断に出す、旗 `v12.ids` の C1（語彙の束）が最後に断った候補の置き場所（Issue #608） */
+export const DIAGNOSTICS_REJECTED_VOCABULARY_FILE = `${DIAGNOSTICS_DIR}/rejected-vocabulary.json` as const;
+/** 診断に出す、旗 `v12.ids` の C2（要件の写像）が最後に断った候補の置き場所（Issue #608） */
+export const DIAGNOSTICS_REJECTED_MAPPING_FILE = `${DIAGNOSTICS_DIR}/rejected-mapping.json` as const;
 
-/** 断った候補を出す段（Issue #501。`name-table`・`test-spec` は v1.1α の段） */
-export type RejectedCandidateStage = "design" | "test-suite" | "name-table" | "test-spec";
+/** 断った候補を出す段（Issue #501。`name-table`・`test-spec` は v1.1α の段、`vocabulary`・`mapping` は旗 `v12.ids` の段。Issue #608） */
+export type RejectedCandidateStage = "design" | "test-suite" | "name-table" | "test-spec" | "vocabulary" | "mapping";
 
 /** 断った候補の段ごとのファイル（並びは書く順。v1 の 2 段が先） */
 const REJECTED_CANDIDATE_FILES: readonly { readonly stage: RejectedCandidateStage; readonly path: string }[] = [
@@ -221,6 +225,8 @@ const REJECTED_CANDIDATE_FILES: readonly { readonly stage: RejectedCandidateStag
   { stage: "test-suite", path: DIAGNOSTICS_REJECTED_TEST_SUITE_FILE },
   { stage: "name-table", path: DIAGNOSTICS_REJECTED_NAME_TABLE_FILE },
   { stage: "test-spec", path: DIAGNOSTICS_REJECTED_TEST_SPEC_FILE },
+  { stage: "vocabulary", path: DIAGNOSTICS_REJECTED_VOCABULARY_FILE },
+  { stage: "mapping", path: DIAGNOSTICS_REJECTED_MAPPING_FILE },
 ];
 
 /** 断った候補の問題 1 つ（参照元と、その参照元の JSON の SHA-256 を結ぶ。Issue #501） */
@@ -303,7 +309,7 @@ export function summarizeRejectedCandidates(
 
 /**
  * 断った候補のファイルを組む（Issue #501）。**段ごとに別のファイル**にし（設計・試験の組、v1.1α の
- * 名前の表・試験の仕様）、候補が無い段のファイルは作らない。名前はコードの定数である。**manifest は組まない。**
+ * 名前の表・試験の仕様、旗 `v12.ids` の語彙の束・要件の写像）、候補が無い段のファイルは作らない。名前はコードの定数である。**manifest は組まない。**
  */
 export function buildRejectedCandidateFiles(candidates: readonly BundleRejectedCandidate[]): readonly BundleArtifact[] {
   const artifacts: BundleArtifact[] = [];

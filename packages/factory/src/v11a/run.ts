@@ -635,6 +635,20 @@ async function runV11a(
     };
   const rejectedCandidateRows = (): Promise<readonly BundleRejectedCandidate[]> =>
     Promise.all(rejectedCandidates.map(toBundleRejectedCandidate));
+  /**
+   * 旗 `v12.ids` の C1・C2 が断った候補（Issue #608）。段の呼び出しごとに最後の 1 つだけを持ち、**その段で止まったときだけ**
+   * 診断へ積む（`keepLastRejection`）。通番は C1 が束の番号（1 から）、C2 が呼び出しの回。段の判定・回数は変えない
+   */
+  let lastIdsRejection: RejectedCandidateSlot | null = null;
+  const idsRejectionSink =
+    (stage: "vocabulary" | "mapping", call: number) =>
+    (candidate: RejectedCandidate): void => {
+      lastIdsRejection = { stage, operation: null, call, candidate };
+    };
+  const keepLastRejection = (): void => {
+    if (lastIdsRejection !== null) rejectedCandidates.push(lastIdsRejection);
+    lastIdsRejection = null;
+  };
 
   const acceptSlot = async <T>(value: T, stageIndex: number): Promise<MaterialSlot<T>> => ({
     value,
@@ -978,12 +992,22 @@ async function runV11a(
     if (flags.ids && resume === undefined) {
       // ── 旗 `v12.ids`：C1 語彙（3 束。束ごとに 1 記録）→ C2 要件の写像 → J4 → C3（08 §4。Issue #593）──────
       let rows: readonly NameTableRow[] = [];
-      for (const bundle of VOCABULARY_BUNDLES) {
+      for (const [index, bundle] of VOCABULARY_BUNDLES.entries()) {
         const before = meterState();
         const start = input.now();
         let outcome: Awaited<ReturnType<typeof runVocabularyBundle>>;
+        lastIdsRejection = null;
         try {
-          outcome = await runVocabularyBundle({ bundle, plan: input.plan, list, documents: input.documents, gateway, rows, ...withLedger });
+          outcome = await runVocabularyBundle({
+            bundle,
+            plan: input.plan,
+            list,
+            documents: input.documents,
+            gateway,
+            rows,
+            onRejected: idsRejectionSink("vocabulary", index + 1),
+            ...withLedger,
+          });
         } catch (error) {
           pushRecord("vocabulary", "failed", before, start, null);
           throw error;
@@ -991,6 +1015,7 @@ async function runV11a(
         if (!outcome.ok) {
           const attribution = stageFailureAttribution("vocabulary", outcome.failure);
           pushRecord("vocabulary", "failed", before, start, attribution.kind, outcome.references);
+          keepLastRejection();
           throw new RunStop(attribution);
         }
         pushRecord("vocabulary", "ok", before, start, null, outcome.references);
@@ -1006,6 +1031,7 @@ async function runV11a(
         try {
           // C3 の拒否のあとの 2 回目（中身のやり直し）を共通の口へ告げる（この段の記録の再試行に数える）
           if (retry !== undefined) gateway.noteRetry("content");
+          lastIdsRejection = null;
           outcome = await runMapping({
             plan: input.plan,
             list,
@@ -1013,6 +1039,7 @@ async function runV11a(
             gateway,
             rows,
             ...(retry === undefined ? {} : { previous: retry }),
+            onRejected: idsRejectionSink("mapping", round),
             ...withLedger,
           });
         } catch (error) {
@@ -1027,6 +1054,7 @@ async function runV11a(
             adopted = firstRound;
             break;
           }
+          keepLastRejection();
           throw new RunStop(attribution);
         }
         pushRecord("mapping", "ok", before, start, null, outcome.references);
