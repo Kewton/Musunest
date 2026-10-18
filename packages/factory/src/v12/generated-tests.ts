@@ -12,7 +12,9 @@
 //   - 構造の検査（手 3d・Issue #624）：確かめ方が structural の要件ごとに、確かめ方の checks の各項目（手 3b の表が持つ check・対象の
 //     行 ID・view-shows の元の行 ID）に 1 本。assertion の値は表の行の型（項目の種類・参照先・操作の種類）と元の行 ID から導く
 //   - 画面と在ることの構造の確認（手 3d・Issue #624。台帳の view-structure・existence の C4 の試験の型）：確かめ方が fixed-test の
-//     要件の所属の画面の行ごとに screen × screen を 1 本、画面の行が無ければ所属の entity の行ごとに entity × screen を 1 本
+//     要件の所属の画面の行ごとに screen × screen を 1 本、画面の行が無ければ所属の entity の行ごとに entity × screen を 1 本、
+//     画面も entity も無く所属の行がすべて項目の行なら、項目の行ごとに 項目 × screen を 1 本（台帳の view-structure の代わりの対象の
+//     種類。手 3h・Issue #652）。対象は元の表の所属の行だけで、コードが導いた親 entity の所属（`deriveOwnership`）は対象にしない
 //
 // 作る対象は確かめ方の種類で分ける（要件ごとに 1 つの枝だけ）：structural は構造の検査だけ、台帳の書き手が `code` の確かめ方
 // （default-value・enum-membership）は専用の 1 本だけ、fixed-test は画面・在ることと空の集計。対象の行が表に無い・種類の合わない
@@ -359,11 +361,25 @@ export function generateTests(input: GeneratedTestsInput): GeneratedTests {
       const found = rowById.get(role.id);
       return found === undefined ? [] : [found];
     });
-    // 画面・在ること（#624）：台帳の順に、所属に組ごとの対象の種類の行がある最初の行の型で、その行ごとに 1 本（種類に依らない）
-    const ownershipRow = ledger.ownershipRows.find((row) => ownedOfKind(owned, row.t2.targetKinds).length > 0);
+    // 画面・在ること（#624）：台帳の順に、所属に組ごとの対象の種類の行がある最初の行の型で、その行ごとに 1 本（種類に依らない）。
+    // どの行の組ごとの対象の種類も所属に無ければ、台帳の順に、所属の行がすべて代わりの対象の種類の行である最初の行の型で、その行
+    // ごとに 1 本（項目だけの所属。#652）。所属は元の表の行だけ（導いた親 entity で代用しない）。操作・計算の行が混じれば作らない。
+    // 順：ここ（LLM を呼ぶ前・種類に依らない）→ 分類は LLM が独立に書く → 分類の照合・J2 の採用 → 採った種類で絞るのは空の集計の
+    // 試験だけ（項目の在ることの試験は種類に依らず残す）→ 検査を全部（中身のやり直しの合併後も同じ順）
+    const roles = rolesById.get(requirement.id) ?? [];
+    const primary = ledger.ownershipRows.find((row) => ownedOfKind(owned, row.t2.targetKinds).length > 0);
+    const fallbackRow =
+      primary !== undefined || owned.length === 0 || owned.length !== roles.length
+        ? undefined
+        : ledger.ownershipRows.find((row) => {
+            const kinds = row.t2.fallback?.targetKinds ?? [];
+            return kinds.length > 0 && ownedOfKind(owned, kinds).length === owned.length;
+          });
+    const ownershipRow = primary ?? fallbackRow;
     if (ownershipRow !== undefined) {
       const t2 = ownershipRow.t2;
-      for (const ownedRow of ownedOfKind(owned, t2.targetKinds)) {
+      const kinds = primary !== undefined ? t2.targetKinds : (t2.fallback?.targetKinds ?? []);
+      for (const ownedRow of ownedOfKind(owned, kinds)) {
         for (const kind of t2.requiredKinds) {
           const id = `${GENERATED_TEST_ID_PREFIX}${ownershipRow.id}:${requirement.id}:${ownedRow.id}:${kind}`;
           push(generatedTest(id, requirement.id, ownedRow.kind, ownedRow.id, kind, t2.operation, [], true), ownershipRow.id);

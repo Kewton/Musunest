@@ -1395,13 +1395,17 @@ describe("(7) 旗 v12.ids のコードが作る試験：既定値・選択肢の
       const k = run === onRun ? t2BundlesOf(on) : 1;
       expect(run.logical["test-spec"]).toBe(2 * k + 1);
       expect(run.stages["test-spec"].retries).toEqual({ communication: 0, shape: k, content: 1 });
-      expect(suiteOf(run).suite.tests).toHaveLength(size.tests);
+      // 手 3h（#652）：ids on の組は、値を縛る項目だけの要件の 項目 × screen（コードが作る）の分だけ M より多い
+      expect(suiteOf(run).suite.tests).toHaveLength(size.tests + (run === onRun ? on.addedTestCount : 0));
       expectNoAcceptanceMaterial(run.requests);
     }
+    expect(on.addedTestCount).toBeGreaterThan(0);
+    expect(off.addedTestCount).toBe(0);
     // ids on：作った試験は組の末尾（予約の接頭辞）。手 3d（#624）から構造の検査と在ることの確認を含む。ids off の成果物に欄は無い
+    // 手 3h（#652）から項目だけの要件の 項目 × screen を含む
     const generatedIds = suiteOf(onRun).generated_test_ids ?? [];
-    expect(generatedIds).toHaveLength(on.generatedTestCount);
-    expect(suiteOf(onRun).suite.tests.slice(-on.generatedTestCount).map((test) => test.id)).toEqual(generatedIds);
+    expect(generatedIds).toHaveLength(on.generatedTestCount + on.addedTestCount);
+    expect(suiteOf(onRun).suite.tests.slice(-(on.generatedTestCount + on.addedTestCount)).map((test) => test.id)).toEqual(generatedIds);
     expect(generatedIds.every(isGeneratedTestId)).toBe(true);
     expect(suiteOf(offRun)).not.toHaveProperty("generated_test_ids");
     // 論理の枠・門・枝の内側（全部 on）
@@ -1471,14 +1475,15 @@ describe("(8) 旗 v12.ids の構造の検査と画面・在ることの構造の
       const k = run === onRun ? t2BundlesOf(on) : 1;
       expect(run.logical["test-spec"]).toBe(2 * k + 1);
       expect(run.stages["test-spec"].retries).toEqual({ communication: 0, shape: k, content: 1 });
-      expect(suiteOf(run).suite.tests).toHaveLength(size.tests);
+      // 手 3h（#652）：ids on の組は、値を縛る項目だけの要件の 項目 × screen（コードが作る）の分だけ M より多い
+      expect(suiteOf(run).suite.tests).toHaveLength(size.tests + (run === onRun ? on.addedTestCount : 0));
       expectNoAcceptanceMaterial(run.requests);
     }
     const generatedIds = suiteOf(onRun).generated_test_ids ?? [];
-    expect(generatedIds).toHaveLength(on.generatedTestCount);
+    expect(generatedIds).toHaveLength(on.generatedTestCount + on.addedTestCount);
     const generatedOps = suiteOf(onRun).suite.tests.filter((test) => generatedIds.includes(test.id)).map((test) => test.operation);
     expect(generatedOps.filter((operation) => operation === "structure")).toHaveLength(on.structuralCount + 1);
-    expect(generatedOps.filter((operation) => operation === "screen")).toHaveLength(2);
+    expect(generatedOps.filter((operation) => operation === "screen")).toHaveLength(2 + on.addedTestCount);
     expect(onRun.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
     expect(onRun.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
     expect(onRun.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
@@ -1533,7 +1538,8 @@ describe("(9) 旗 v12.ids の場合の形の T2：T2 の論理要求は初回 1�
     const k = t2BundlesOf(on);
     expect(retried.logical["test-spec"]).toBe(2 * k + 1);
     expect(retried.stages["test-spec"].retries).toEqual({ communication: 0, shape: k, content: 1 });
-    expect(suiteOf(retried).suite.tests).toHaveLength(size.tests);
+    // 手 3h（#652）：組は、値を縛る項目だけの要件の 項目 × screen（コードが作る）の分だけ M より多い
+    expect(suiteOf(retried).suite.tests).toHaveLength(size.tests + on.addedTestCount);
     expect(suiteOf(retried).llm_case_count).toBe(on.testSpecCasesResponse().cases.length);
     expect(retried.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
     expect(retried.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
@@ -1542,7 +1548,96 @@ describe("(9) 旗 v12.ids の場合の形の T2：T2 の論理要求は初回 1�
     const passed = await observe(on, cleanCalls(on), { flags: ALL_ON });
     expect(passed.result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(passed.logical["test-spec"]).toBe(k);
-    expect(suiteOf(passed).suite.tests).toHaveLength(size.tests);
+    expect(suiteOf(passed).suite.tests).toHaveLength(size.tests + on.addedTestCount);
+  });
+});
+
+// ── (9b) 旗 v12.ids の手 3h：項目だけの fixed-test の要件（Issue #652）──────────────────────────────
+
+describe("(9b) 旗 v12.ids の手 3h：所属が項目の行だけの在ることだけの要件を含む台本で、T2 の論理要求は束ごと初回 1・形 1・中身 1 のまま、LLM に書かせる試験は M − コードが作る数で、合計は論理 72・実試行 144・判定 80 以下（Issue #652）", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+  const PRIOR = { ledger: true, searchRepair: true } as const;
+  const OPTIONS = { itemsOnly: true } as const;
+  const t2RetryCalls = (materials: SizedMaterials): RecordedCall[] => [
+    ...materials.tableResponses().map(structured),
+    structured(materials.judgments()),
+    structured(negative({ classifications: "x", cases: "x" }, "classifications・cases が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
+    structured(materials.t2Response({ omitAbnormalOf: "R1" })),
+    structured(materials.t2Response()),
+    structured({ declaration: materials.declaration() }),
+    structured(materials.judgments()),
+  ];
+  const suiteOf = (run: Awaited<ReturnType<typeof observe>>) => {
+    const artifact = run.result.bundle?.artifacts.find((entry) => entry.path === "artifacts/test-spec.json");
+    if (artifact === undefined) throw new Error("前提が壊れた：T2 の成果物が無い");
+    return JSON.parse(artifact.text) as {
+      readonly suite: { readonly tests: readonly { readonly id: string; readonly operation: string; readonly target: { readonly requirementId: string; readonly kind: string } }[] };
+      readonly generated_test_ids?: readonly string[];
+    };
+  };
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：台本の生成器。ids off の応答は M（項目 × screen を LLM が書く）、ids on の応答は M − コードが作る数（項目だけの 3 件は場合ゼロ）。台本を渡さない材料は今のまま", (size) => {
+    const off = buildSized(size.requirements, size.tests, PRIOR, OPTIONS);
+    const on = buildSized(size.requirements, size.tests, ALL_ON, OPTIONS);
+    expect(on.itemsOnlyIds).toHaveLength(3);
+    expect(off.testSpecResponse().tests).toHaveLength(size.tests);
+    expect(on.generatedTestCount).toBe(on.structuralCount + 3);
+    expect(on.testSpecResponse().tests).toHaveLength(size.tests - on.generatedTestCount);
+    const cases = on.testSpecCasesResponse();
+    expect(cases.cases.some((entry) => on.itemsOnlyIds.includes(entry["requirementId"] as string))).toBe(false);
+    expect(cases.classifications).toEqual(expect.arrayContaining(on.itemsOnlyIds.map((requirementId) => ({ requirementId, nature: "existence-only" }))));
+    expect(buildSized(size.requirements, size.tests, ALL_ON, {}).testSpecResponse()).toEqual(buildSized(size.requirements, size.tests, ALL_ON).testSpecResponse());
+    expect(buildSized(size.requirements, size.tests, ALL_ON, OPTIONS).testSpecResponse()).toEqual(on.testSpecResponse());
+  });
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：ids on・ids off とも full。ids on の T2 の論理要求は束 k で 2k＋1（初回 k・形 k・中身 1）、成果物のコードが作った試験 ID に項目だけの 3 件の 項目 × screen がある。初回で通る走りは k", async (size) => {
+    const off = buildSized(size.requirements, size.tests, PRIOR, OPTIONS);
+    const on = buildSized(size.requirements, size.tests, ALL_ON, OPTIONS);
+    const offRun = await observe(off, t2RetryCalls(off), { flags: PRIOR });
+    const onRun = await observe(on, t2RetryCalls(on), { flags: ALL_ON });
+    for (const run of [offRun, onRun]) {
+      expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
+      expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      const k = run === onRun ? t2BundlesOf(on) : 1;
+      expect(run.logical["test-spec"]).toBe(2 * k + 1);
+      expect(run.stages["test-spec"].retries).toEqual({ communication: 0, shape: k, content: 1 });
+      expect(suiteOf(run).suite.tests).toHaveLength(size.tests + (run === onRun ? on.addedTestCount : 0));
+      expectNoAcceptanceMaterial(run.requests);
+    }
+    const generatedIds = suiteOf(onRun).generated_test_ids ?? [];
+    expect(generatedIds).toHaveLength(on.generatedTestCount + on.addedTestCount);
+    const items = suiteOf(onRun).suite.tests.filter((test) => on.itemsOnlyIds.includes(test.target.requirementId));
+    expect(items.map((test) => [test.target.kind, test.operation])).toEqual(on.itemsOnlyIds.map(() => ["field", "screen"]));
+    for (const test of items) expect(generatedIds).toContain(test.id);
+    expect(onRun.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+    expect(onRun.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
+    expect(onRun.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
+    const passed = await observe(on, cleanCalls(on), { flags: ALL_ON });
+    expect(passed.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(passed.logical["test-spec"]).toBe(t2BundlesOf(on));
+  });
+
+  it("走らせる部分（ids on）：宣言が項目だけの要件の項目をどの画面にも出さなければ、コードが作った 項目 × screen が不一致になり full が出ない（作り手で甘くならない）", async () => {
+    const on = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, ALL_ON, OPTIONS);
+    const hidden = on.declaration([], { hideItemsOnly: true });
+    expect(hidden).not.toBe(on.declaration());
+    const calls: RecordedCall[] = [
+      ...on.tableResponses().map(structured),
+      structured(on.judgments()),
+      structured(on.t2Response()),
+      structured({ declaration: hidden }),
+      structured(on.judgments()),
+    ];
+    const run = await observe(on, calls, { flags: ALL_ON });
+    expect(run.result.outcome).not.toEqual({ result: "pass", verdict: "full" });
+    // B4 の評価：不一致は項目だけの 3 件のコードの 項目 × screen（宣言から辿れない）。直す段へ回る（台本はそこで尽きる）
+    const materials = run.result.diagnostics?.find((entry) => entry.path === "diagnostics/materials.json");
+    if (materials === undefined) throw new Error("前提が壊れた：診断の材料が無い");
+    const [evaluation] = (JSON.parse(materials.text) as { readonly evaluations: readonly { readonly test_mismatches: number }[] }).evaluations;
+    expect(evaluation?.test_mismatches).toBe(on.itemsOnlyIds.length);
+    // 宣言が項目を出していれば同じ台本で full（上の走り）。違いは項目の画面の有無だけ
+    const shown = await observe(on, cleanCalls(on), { flags: ALL_ON });
+    expect(shown.result.outcome).toEqual({ result: "pass", verdict: "full" });
   });
 });
 

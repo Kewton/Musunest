@@ -960,12 +960,69 @@ describe("view-structure・existence の行：C4 の試験の型（screen × scr
     expect(cellsOf(EXISTENCE)[PROPERTY_COPY_HEADER.indexOf("期待の値の書き手")]).toBe("code");
     expect(copyDefects(COPY_TEXT, PROPERTY_LEDGER)).toEqual([]);
     const reverted = COPY_TEXT.replace(
-      "| entity × screen・normal・期待 ok の json-boolean（定数 true）・入力 empty-record・参照データ 空・1 本以上 | code |",
-      "| 未定義（組：entity × screen） | — |",
+      "| entity × screen・normal・期待 ok の json-boolean（定数 true）・入力 empty-record・参照データ 空・1 本以上 | — | code |",
+      "| 未定義（組：entity × screen） | — | — |",
     );
     expect(reverted).not.toBe(COPY_TEXT);
     expect(copyDefects(reverted, PROPERTY_LEDGER)).toEqual(["写しの existence の行がコードと違う"]);
     // 期待の値の書き手の節に、構造の検査（確かめ方 structural）の書き手の 1 行がある
     expect(COPY_TEXT).toContain("構造の検査（確かめ方 structural）は性質の行ではなく確かめ方の種類に結び付く");
+  });
+});
+
+// ── 11. 手 3h：view-structure の試験の型の代わりの対象の種類（Issue #652）──────────────────
+
+describe("view-structure の行：代わりの対象の種類（fallback。項目）。所属に画面・entity の行が無いときだけ項目の行で作る（Issue #652）", () => {
+  const VIEW = PROPERTY_LEDGER.find((row) => row.id === "view-structure");
+  if (VIEW?.t2 == null) throw new Error("前提が壊れた：view-structure の試験の型が無い");
+  const FALLBACK = VIEW.t2.fallback;
+  if (FALLBACK === null) throw new Error("前提が壊れた：view-structure に代わりの対象の種類が無い");
+
+  it("行の欄：代わりの対象の種類は項目だけ（why・since つき）。組ごとの対象の種類（免除に使う種類）は画面のまま。ほかの行は持たない", () => {
+    expect(FALLBACK.targetKinds).toEqual(["field"]);
+    expect(FALLBACK.since).toBe("Issue #652");
+    expect(FALLBACK.why.trim()).not.toBe("");
+    expect(VIEW.t2?.targetKinds).toEqual(["screen"]);
+    // 評価の方法の表のこの行の組（項目 × screen）にある
+    expect(VIEW.combinations).toContainEqual({ targetKind: "field", operation: "screen" });
+    for (const row of PROPERTY_LEDGER) if (row.id !== "view-structure") expect(row.t2?.fallback ?? null, row.id).toBeNull();
+    // 導出：所属の行だけで決まる行・免除の種類は変わらない
+    expect(PROPERTY_LEDGER_VIEW.ownershipRows.map((row) => row.id)).toEqual(["view-structure", "existence"]);
+    expect(PROPERTY_LEDGER_VIEW.t2ExemptKinds).toEqual(["default-value", "enum-membership"]);
+    // 固定文：対象の文に項目の行の分がある
+    expect(VIEW.t2?.messages.target).toContain("項目（field）の行");
+    for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(`${FALLBACK.why}${VIEW.t2?.messages.target ?? ""}`).not.toContain(word);
+  });
+
+  it("二点測定：代わりの対象の種類が空・重なる・評価の方法の表の組に無い・組ごとの対象の種類と重なる・why か since が無い・確かめ方に結び付く行にある、と不備になる（今の台帳は通る）", () => {
+    const patched = (id: string, fallback: NonNullable<PropertyRow["t2"]>["fallback"]) =>
+      ledgerRowDefects(PROPERTY_LEDGER.map((row) => (row.id === id && row.t2 !== null ? { ...row, t2: { ...row.t2, fallback } } : row)));
+    expect(ledgerRowDefects(PROPERTY_LEDGER)).toEqual([]);
+    expect(patched("view-structure", { ...FALLBACK, targetKinds: [] })).toEqual(["性質 view-structure の試験の型の代わりの対象の種類が、空か重なっている"]);
+    expect(patched("view-structure", { ...FALLBACK, targetKinds: ["field", "field"] })).toEqual(["性質 view-structure の試験の型の代わりの対象の種類が、空か重なっている"]);
+    expect(patched("view-structure", { ...FALLBACK, targetKinds: ["entity"] })).toEqual(["性質 view-structure の試験の型の代わりの対象の種類の組が、評価の方法の表の組に無い"]);
+    expect(patched("view-structure", { ...FALLBACK, targetKinds: ["screen"] })).toEqual(["性質 view-structure の試験の型の代わりの対象の種類が、組ごとの対象の種類と重なっている"]);
+    expect(patched("view-structure", { ...FALLBACK, why: " " })).toEqual(["性質 view-structure の試験の型の代わりの対象の種類に、why か since が無い"]);
+    expect(patched("view-structure", { ...FALLBACK, since: "" })).toEqual(["性質 view-structure の試験の型の代わりの対象の種類に、why か since が無い"]);
+    expect(patched("default-value", FALLBACK)).toEqual([
+      "性質 default-value は確かめ方に結び付く試験の型なのに、代わりの対象の種類がある",
+      "性質 default-value の試験の型の代わりの対象の種類が、組ごとの対象の種類と重なっている",
+    ]);
+  });
+
+  it("写し：view-structure の行に fallback の列（項目 × screen・使う条件・since・why）があり、ほかの行は「—」。写しの欄を消すと落ち、コードの欄を外しても落ちる", () => {
+    const at = PROPERTY_COPY_HEADER.indexOf("fallback の対象");
+    expect(at).toBe(PROPERTY_COPY_HEADER.indexOf("T2 の形") + 1);
+    const cell = propertyCopyCells(VIEW)[at] ?? "";
+    expect(cell.startsWith("field × screen（")).toBe(true);
+    expect(cell).toContain("Issue #652");
+    expect(cell).toContain(FALLBACK.why);
+    for (const row of PROPERTY_LEDGER) if (row.id !== "view-structure") expect(propertyCopyCells(row)[at], row.id).toBe("—");
+    expect(copyDefects(COPY_TEXT, PROPERTY_LEDGER)).toEqual([]);
+    const removed = COPY_TEXT.replace(`| ${cell} |`, "| — |");
+    expect(removed).not.toBe(COPY_TEXT);
+    expect(copyDefects(removed, PROPERTY_LEDGER)).toEqual(["写しの view-structure の行がコードと違う"]);
+    const withoutCode = PROPERTY_LEDGER.map((row) => (row.id === "view-structure" && row.t2 !== null ? { ...row, t2: { ...row.t2, fallback: null } } : row));
+    expect(copyDefects(COPY_TEXT, withoutCode)).toEqual(["写しの view-structure の行がコードと違う"]);
   });
 });
