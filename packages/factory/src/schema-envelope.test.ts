@@ -584,6 +584,22 @@ describe("経路 v1.2 の封筒は 1 つ（旗の組から導き、全段で同�
   });
 });
 
+describe("strict の照合：型の無い節は枝（anyOf）だけを持つときに限り、枝ごとに照らす（Issue #625）", () => {
+  const wrap = (node: unknown) => ({ type: "object", additionalProperties: false, required: ["x"], properties: { x: node } });
+  const strictBranch = { type: "object", additionalProperties: false, required: ["a"], properties: { a: { type: "string" } } };
+  it("正例：strict の枝だけの anyOf は通る", () => {
+    expect(strictProblems(wrap({ anyOf: [strictBranch, strictBranch] }))).toEqual([]);
+  });
+  it("負例：anyOf の枝が strict に反すれば落ちる（additionalProperties・required・型の無い枝）。型も anyOf も無い節は今までどおり落ちる", () => {
+    expect(strictProblems(wrap({ anyOf: [strictBranch, { ...strictBranch, additionalProperties: true }] }))).toEqual([
+      "#/properties/x/anyOf/1: object の additionalProperties が false でない",
+    ]);
+    expect(strictProblems(wrap({ anyOf: [{ ...strictBranch, required: [] }] }))).toEqual(["#/properties/x/anyOf/0: 欄 a が required に無い"]);
+    expect(strictProblems(wrap({ anyOf: [{ properties: {} }] }))).toEqual(["#/properties/x/anyOf/0: type が無い"]);
+    expect(strictProblems(wrap({ description: "型も枝も無い" }))).toEqual(["#/properties/x: type が無い"]);
+  });
+});
+
 describe("旗 v12.ids の C1・C2 の枝は v1.2 の封筒にだけ載る（Issue #593）", () => {
   it("v1.2 の封筒の末尾に C1 の 3 束と C2 の枝があり、schema は段が渡すものと同じ導出（strict）", () => {
     const tail = STAGE_ENVELOPE_ENTRIES_V12.slice(V11A_STAGES.length);
