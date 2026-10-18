@@ -82,6 +82,7 @@ import {
   WRITE_V11A_SCHEMA_NAME,
 } from "./stages/write.js";
 import { NAMED_FAILURE_MESSAGES } from "../v12/search-repair.js";
+import { FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "../v12/stages/field-repair.js";
 import { natureQuestionName } from "../stages/test-suite.js";
 import { captureBaselineV11a, type BaselineV11aCapture, type BaselineV11aScenarios } from "../__tests__/baseline-capture.js";
 import * as factoryModule from "../index.js";
@@ -2638,7 +2639,36 @@ describe("旗の組の契約（要約の v12_flags）", () => {
 // B3' の拒否は R3・R4 だけを最後まで残す（R1・R2 を持ち越すと持ち越しの関数が断る。上の REJECT_R* の注記）。
 
 const SEARCH: Partial<GenerationInputV11a> = { flags: { searchRepair: true } };
-const validationAs = (expression: string): string => replaced(RUN_YAML, "expression: amount > 0", `expression: ${expression}`);
+
+// 手 4a の台本の失敗は、場所に写らない種類にする（手 4b。Issue #553）。旗 on の往復は、一番良い版の失敗が全部宣言の要素の場所に
+// 写せると欄だけの直し（構造化出力）を呼ぶので、手 4a の直す手（道具付き）の筋を固定するこの節の台本は、どの往復にも場所なしの
+// 失敗を 1 件以上残す：
+//   - R1 の検査の試験の対象を、項目の行（f.item.amount）から entity の行（e.item）に替える（entity の行は置き換えの単位でない＝
+//     場所なし `no-element`）。結び付けは entity の行の名前と同じ名前の検査を探すので、宣言の検査の名前を item にする
+//   - (e)・(e'') の R4 の筋は、R4 が entity の行（e.item）も所属させる表にし、1 版目の B3' で R4 を拒否する（拒否は要件が所属させた
+//     行から写すので場所なし）。R4 は棄却のあとの網羅で持ち越しになり、数え直しで拒否は外れる
+// この節の `RUN_YAML` は、検査の名前を item にした宣言（各 describe の先頭で同じ名前に置く）。期待は手 4a のまま変えない。
+// 場所に写る同じ筋は、下の「欄だけの直し（旗 v12.search-repair・手 4b）」で固定する。
+const SEARCH_YAML = replaced(RUN_YAML, "  - name: amount\n    entity: item\n", "  - name: item\n    entity: item\n");
+/** R1 の検査の試験の対象を entity の行にした T2 の応答（ほかの試験は既定のまま） */
+const searchT2 = () =>
+  t2Response([
+    ...r1Tests().map((test) => ({ ...test, target: { requirementId: "R1", kind: "entity", roleId: "e.item" } })),
+    ...r2Tests(),
+    ...r3Tests(),
+    ...r4Tests(),
+  ]);
+/** この節の T1・T1''・T2・B1 の記録 */
+const searchHead = (options: { readonly yaml?: string; readonly table?: NameTable } = {}): RecordedCall[] =>
+  head({ yaml: SEARCH_YAML, ...options, t2: searchT2() });
+/** R4 が entity の行（e.item）も所属させる表（R4 の拒否を場所なしにする） */
+const TABLE_R4_ENTITY: NameTable = {
+  ...TABLE,
+  ownership: TABLE.ownership.map((entry) =>
+    entry.requirementId === "R4" ? { ...entry, roles: [...entry.roles, { id: "e.item", basis: "stated" as const, reason: null }] } : entry,
+  ),
+};
+const validationAs = (expression: string): string => replaced(SEARCH_YAML, "expression: amount > 0", `expression: ${expression}`);
 /** 不一致 1（境界だけ） */
 const MIS1 = validationAs("amount > 1");
 /** 不一致 1（異常だけ。MIS1 と同数の別の版） */
@@ -2681,10 +2711,11 @@ const searchOf = (bundle: AssembledBundle | null): SearchJson =>
 const shaOf = (source: string): Promise<string> => sha256Hex(source);
 
 describe("探索型の直し（旗 v12.search-repair）：一番良い版・厳密な減少・停滞での作り直し", () => {
+  const RUN_YAML = SEARCH_YAML;
   it("(a) 不一致 2 → 1 の版を採り、次の直す段の入力がその版。0 の版で full", async () => {
     const { result, recording } = await runScenario(
       [
-        ...head({ yaml: MIS2 }),
+        ...searchHead({ yaml: MIS2 }),
         structured(acceptAll()),
         repairDone(MIS1),
         structured(acceptAll()),
@@ -2708,7 +2739,7 @@ describe("探索型の直し（旗 v12.search-repair）：一番良い版・厳�
   it("(b)(c) 不一致 1 のあとの不一致 2 の版・同数の版は採らず、次の入力が不一致 1 の版。2 つ採れなければ B1 をもう 1 回呼び、作り直しのあと 2 つ採れなければ stagnation で止め、最終の版は一番良い版", async () => {
     const { result, recording } = await runScenario(
       [
-        ...head({ yaml: MIS2 }),
+        ...searchHead({ yaml: MIS2 }),
         structured(acceptAll()),
         repairDone(MIS1),
         structured(acceptAll()),
@@ -2759,7 +2790,7 @@ describe("探索型の直し（旗 v12.search-repair）：一番良い版・厳�
   it("(c) 作り直しの要求：前の版の宣言の原文・直す段の会話が無く、名前付きの失敗の一覧（試験 ID・要件 ID・種類・固定文）がある。最初の B1 の要求との差は末尾のデータと規則 1 つだけ", async () => {
     const { result, recording } = await runScenario(
       [
-        ...head({ yaml: MIS1 }),
+        ...searchHead({ yaml: MIS1 }),
         structured(acceptAll()),
         repairDone(MIS2),
         structured(acceptAll()),
@@ -2796,7 +2827,7 @@ describe("探索型の直し（旗 v12.search-repair）：一番良い版・厳�
 
   it("(d) 往復と点検の上限：点検 6 で limit（7 回目の点検も次の直す段も無い）、不一致が残った最終の版で full が出ない", async () => {
     const calls: RecordedCall[] = [
-      ...head({ yaml: MIS3 }),
+      ...searchHead({ yaml: MIS3 }),
       structured(judgments(IDS, { ...REJECT_R3, ...REJECT_R4 })), // 5
       repairDone(MIS2),
       structured(judgments(IDS, { ...REJECT_R3, ...REJECT_R4 })), // 4
@@ -2830,7 +2861,7 @@ describe("探索型の直し（旗 v12.search-repair）：一番良い版・厳�
   });
 
   it("(d) 共通の口の呼び出しの上限は今までどおりの早期停止（旗 off と同じ段・種類で止まり、納品物を作らない）", async () => {
-    const calls = [...head({ yaml: MIS2 }), structured(acceptAll()), repairDone(MIS1), structured(acceptAll())];
+    const calls = [...searchHead({ yaml: MIS2 }), structured(acceptAll()), repairDone(MIS1), structured(acceptAll())];
     const limits = { ...factoryModule.AGENT_LIMITS, callCount: 6 };
     const on = await runScenario(calls, { ...SEARCH, limits });
     const off = await runScenario(calls, { limits });
@@ -2845,8 +2876,8 @@ describe("探索型の直し（旗 v12.search-repair）：一番良い版・厳�
     const r4Bad = replaced(RUN_YAML, "expression: base * 2", "expression: base * 3");
     const r4Tests = ["r4-normal", "r4-abnormal", "r4-boundary"];
     const calls = [
-      ...head({ yaml: r4Bad }),
-      structured(acceptAll()),
+      ...searchHead({ yaml: r4Bad, table: TABLE_R4_ENTITY }),
+      structured(judgments(IDS, REJECT_R4)),
       repairDone(RUN_YAML, r4Tests.map(dispute)),
       arbitration(r4Tests.map((testId) => ({ testId, verdict: "overturn" }))),
       structured(acceptAll(["R1", "R2", "R3"])),
@@ -2905,8 +2936,8 @@ describe("探索型の直し（旗 v12.search-repair）：一番良い版・厳�
     const spy = vi.spyOn(staticCheckStage, "runStaticCheck");
     const { result } = await runScenario(
       [
-        ...head({ yaml: r4Bad }),
-        structured(acceptAll()),
+        ...searchHead({ yaml: r4Bad, table: TABLE_R4_ENTITY }),
+        structured(judgments(IDS, REJECT_R4)),
         repairDone(RUN_YAML, r4Tests.map(dispute)),
         arbitration(r4Tests.map((testId) => ({ testId, verdict: "overturn" }))),
         structured(acceptAll(["R1", "R2", "R3"])),
@@ -2921,7 +2952,7 @@ describe("探索型の直し（旗 v12.search-repair）：一番良い版・厳�
 
   it("(f) 探索の記録は同じ台本で 2 回同じ値（バイト列で同じ）", async () => {
     const script = (): RecordedCall[] => [
-      ...head({ yaml: MIS2 }),
+      ...searchHead({ yaml: MIS2 }),
       structured(acceptAll()),
       repairDone(MIS1),
       structured(acceptAll()),
@@ -2955,6 +2986,7 @@ describe("探索型の直し（旗 v12.search-repair）：一番良い版・厳�
 });
 
 describe("候補の状態の負例（旗 v12.search-repair）：採らない候補は共有の持ち越し・一覧・組・除く行を変えない", () => {
+  const RUN_YAML = SEARCH_YAML;
   /** 目印の行を足した宣言（B3' の偽物が R4 を unmarked にして返す版） */
   const UNMARK_R4_WORSE = `${MIS2}# unmark-r4\n`;
   const UNMARK_R4_BETTER = `${RUN_YAML}# unmark-r4\n`;
@@ -2984,7 +3016,7 @@ describe("候補の状態の負例（旗 v12.search-repair）：採らない候�
     unmarkR4();
     const withCandidate = await runScenario(
       [
-        ...head({ yaml: MIS1 }),
+        ...searchHead({ yaml: MIS1 }),
         structured(acceptAll()),
         repairDone(UNMARK_R4_WORSE),
         // 候補の B3' は偽物が返す（呼び出しなし）
@@ -2994,7 +3026,7 @@ describe("候補の状態の負例（旗 v12.search-repair）：採らない候�
       SEARCH,
     );
     const withoutCandidate = await runScenario(
-      [...head({ yaml: MIS1 }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())],
+      [...searchHead({ yaml: MIS1 }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())],
       SEARCH,
     );
     const [before, after] = withCandidate.recording.tools;
@@ -3024,7 +3056,7 @@ describe("候補の状態の負例（旗 v12.search-repair）：採らない候�
   it("二点測定：R4 を unmarked にしたが違反が厳密に少ない候補は同じ文脈の数で比べて採られ、そのときだけ R4 が持ち越しに入る（一番良い版はコードの検査だけで数え直す）", async () => {
     unmarkR4();
     const { result, recording } = await runScenario(
-      [...head({ yaml: MIS2 }), structured(acceptAll()), repairDone(UNMARK_R4_BETTER)],
+      [...searchHead({ yaml: MIS2 }), structured(acceptAll()), repairDone(UNMARK_R4_BETTER)],
       SEARCH,
     );
     const search = searchOf(result.bundle);
@@ -3044,7 +3076,7 @@ describe("候補の状態の負例（旗 v12.search-repair）：採らない候�
   it("対照（旗 off）：同じ候補は評価したその場で R4 を共有の持ち越しへ入れ、次の直す段の一覧から R4 が消える", async () => {
     unmarkR4();
     const { result, recording } = await runScenario([
-      ...head({ yaml: MIS1 }),
+      ...searchHead({ yaml: MIS1 }),
       structured(acceptAll()),
       repairDone(UNMARK_R4_WORSE),
       repairDone(RUN_YAML),
@@ -3054,6 +3086,273 @@ describe("候補の状態の負例（旗 v12.search-repair）：採らない候�
     if (after === undefined) throw new Error("前提が壊れた：直す段が 2 回呼ばれていない");
     expect((dataBlockOf(after.input, "要件の一覧") as RequirementList).requirements.map((requirement) => requirement.id)).not.toContain("R4");
     expect(carryEntriesOf(result.bundle).map((entry) => entry.requirementId)).toContain("R4");
+  });
+});
+
+// ── 欄だけの直し（旗 v12.search-repair・手 4b。Issue #553）──────────────────────────────
+//
+// 場所に写る筋：R3 の操作 closeItem の条件（when）の式を替えると、R3 の 3 本（正常 3 は true・異常 -1 は false・境界 1 は true）の
+// うち落ちる本数が決まる：`> 1` は境界だけ（1）、`> -5` は異常だけ（1）、`> 5`・`> 7` は正常と境界（2）、`< 0` は 3 本とも（3）。
+// 失敗は試験の対象の行（o.closeItem）から操作 `action:item.closeItem` に写るので、旗 on の往復は欄だけの直し（構造化出力）を呼ぶ。
+// 手 4a の節と同じ筋（採る・採らない・停滞・作り直し・limit・呼び出しの上限・棄却・候補の状態）を、欄だけの直しで固定する。
+
+const whenAs = (expression: string): string => replaced(RUN_YAML, "when: amount > 0", `when: ${expression}`);
+/** 不一致 1（境界だけ） */
+const W1 = whenAs("amount > 1");
+/** 不一致 2（正常と境界） */
+const W2 = whenAs("amount > 5");
+/** 不一致 3 */
+const W3 = whenAs("amount < 0");
+const CLOSE = "action:item.closeItem";
+/** 操作 closeItem の本文（条件の式だけを替える。`extra` は末尾に足す行） */
+const closeItemBody = (expression: string, extra: readonly string[] = []): string =>
+  ["- name: closeItem", "  entity: item", "  kind: update", "  set:", "    kind: beta", `  when: ${expression}`, ...extra].join("\n");
+/** 欄だけの直しの応答（closeItem の条件の式を替える） */
+const fieldRepair = (expression: string, disputes: readonly { testId: string; quote: string }[] = [], extra: readonly string[] = []): RecordedCall =>
+  structured({ replacements: [{ location: CLOSE, element: closeItemBody(expression, extra) }], disputes });
+const fieldRequests = (requests: readonly LlmStructuredRequest[]): readonly LlmStructuredRequest[] =>
+  requests.filter((request) => request.schemaName === FIELD_REPAIR_SCHEMA_NAME);
+const fieldDeclarations = (requests: readonly LlmStructuredRequest[]): readonly string[] =>
+  fieldRequests(requests).map((request) => rawDataBlockOf(request.input, "宣言"));
+const locationEnumOf = (request: LlmStructuredRequest): unknown =>
+  (request.schema as { properties: { replacements: { items: { properties: { location: { enum: unknown } } } } } }).properties.replacements.items
+    .properties.location.enum;
+interface RoundJson {
+  readonly hand: string;
+  readonly locations: number;
+  readonly unlocated: number;
+  readonly refused: string | null;
+}
+const roundsOf = (bundle: AssembledBundle | null): readonly RoundJson[] =>
+  (artifactOf(bundle, V12_SEARCH_REPAIR_ARTIFACT_NAME)["rounds"] ?? []) as readonly RoundJson[];
+const totalsOf = (bundle: AssembledBundle | null): readonly unknown[] =>
+  searchOf(bundle).versions.map((version) => [version.origin, version.violations.known_total ?? version.violations.kind, version.adopted]);
+const R3_TEST_IDS = ["r3-normal", "r3-abnormal", "r3-boundary"];
+
+describe("欄だけの直し（旗 v12.search-repair・手 4b）：失敗が全部場所に写せる往復は、その要素だけを置き換える", () => {
+  it("(a) B4 の不一致の版で欄だけの直しが呼ばれ、不一致 2 → 1 → 0 の版を採り、関係の無い要素の値が変わらない（要求の場所の enum はその往復の失敗の場所）", async () => {
+    const { result, recording } = await runScenario(
+      [...head({ yaml: W2 }), structured(acceptAll()), fieldRepair("amount > 1"), structured(acceptAll()), fieldRepair("amount > 0"), structured(acceptAll())],
+      SEARCH,
+    );
+    // 道具付きの直す段を呼ばない。欄だけの直しは 2 回で、2 回目の入力は採った版（マージした版）
+    expect(recording.tools).toEqual([]);
+    expect(fieldDeclarations(recording.structured)).toEqual([W2, W1]);
+    for (const request of fieldRequests(recording.structured)) expect(locationEnumOf(request)).toEqual([CLOSE]);
+    expect(result.outcome.verdict).toBe("full");
+    expect(totalsOf(result.bundle)).toEqual([
+      ["write", 2, true],
+      ["repair", 1, true],
+      ["repair", 0, true],
+    ]);
+    // 置き換えたのは closeItem の行だけ：最終の版は正しい宣言とバイト列で同じ（関係の無い要素は一番良い版のまま）
+    expect(declarationOf(result.bundle)).toBe(RUN_YAML);
+    // (f) 探索の記録に往復ごとの直す手の種類・場所の数・場所なしの数
+    expect(roundsOf(result.bundle)).toEqual([
+      { hand: "field-repair", locations: 1, unlocated: 0, refused: null },
+      { hand: "field-repair", locations: 1, unlocated: 0, refused: null },
+    ]);
+    expect(countStage(result, "repair")).toBe(2);
+  });
+
+  it("(a) 二点測定：手 4a の直す手（宣言の全文を書き直す）だけだと、同じ筋の台本で関係の無い要素（見出しごとの集計の last）が動く", async () => {
+    const moved = (source: string): string => replaced(source, "      last: 6", "      last: 12");
+    const { result, recording } = await runScenario([
+      ...head({ yaml: W2 }),
+      structured(acceptAll()),
+      repairDone(moved(W1)),
+      structured(acceptAll()),
+      repairDone(moved(RUN_YAML)),
+      structured(acceptAll()),
+    ]);
+    expect(recording.tools).toHaveLength(2);
+    expect(result.outcome.verdict).toBe("full");
+    expect(declarationOf(result.bundle)).toBe(moved(RUN_YAML));
+    expect(declarationOf(result.bundle)).not.toBe(RUN_YAML);
+  });
+
+  it("(b) 場所なしが 1 件ある往復（R4 の拒否。R4 が entity の行も所属させる）では手 4a の直す手が呼ばれ、欄だけの直しの要求が無い", async () => {
+    const { result, recording } = await runScenario(
+      [...head({ yaml: W1, table: TABLE_R4_ENTITY }), structured(judgments(IDS, REJECT_R4)), repairDone(RUN_YAML), structured(acceptAll())],
+      SEARCH,
+    );
+    expect(recording.tools).toHaveLength(1);
+    expect(fieldRequests(recording.structured)).toEqual([]);
+    expect(roundsOf(result.bundle)).toEqual([{ hand: "repair", locations: 1, unlocated: 1, refused: null }]);
+    expect(result.outcome.verdict).toBe("full");
+  });
+
+  it("(c) 静的チェックに落ちた版は採られず、次の往復の入力が一番良い版", async () => {
+    const { result, recording } = await runScenario(
+      [...head({ yaml: W1 }), structured(acceptAll()), fieldRepair("missing > 0"), fieldRepair("amount > 0"), structured(acceptAll())],
+      SEARCH,
+    );
+    expect(fieldDeclarations(recording.structured)).toEqual([W1, W1]);
+    expect(totalsOf(result.bundle)).toEqual([
+      ["write", 1, true],
+      ["repair", "static-check-failed", false],
+      ["repair", 0, true],
+    ]);
+    expect(result.outcome.verdict).toBe("full");
+    expect(declarationOf(result.bundle)).toBe(RUN_YAML);
+  });
+
+  it("(c) マージが断った往復（大きさの上限を超える）は版を作らず採れない版に数え、次の往復の入力が一番良い版。記録に断った固定文", async () => {
+    const huge = [`  # ${"x".repeat(factoryModule.AGENT_LIMITS.declarationBytes)}`];
+    const { result, recording } = await runScenario(
+      [...head({ yaml: W1 }), structured(acceptAll()), fieldRepair("amount > 0", [], huge), fieldRepair("amount > 0"), structured(acceptAll())],
+      SEARCH,
+    );
+    expect(fieldDeclarations(recording.structured)).toEqual([W1, W1]);
+    expect(totalsOf(result.bundle)).toEqual([
+      ["write", 1, true],
+      ["repair", 0, true],
+    ]);
+    expect(roundsOf(result.bundle)).toEqual([
+      { hand: "field-repair", locations: 1, unlocated: 0, refused: MERGE_REFUSALS.bytes },
+      { hand: "field-repair", locations: 1, unlocated: 0, refused: null },
+    ]);
+    // 断った版は静的チェックにも点検にも掛けない（版の数は 2）
+    expect(countStage(result, "static-check")).toBe(2);
+    expect(countStage(result, "decl-check")).toBe(2);
+    expect(result.outcome.verdict).toBe("full");
+  });
+
+  it("(d) 主張は B5' に渡り、棄却で B6（網羅の持ち越し・一番良い版の数え直し）が手 4a の直す手の台本と同じに効く", async () => {
+    const claims = R3_TEST_IDS.map(dispute);
+    const tail = [arbitration(R3_TEST_IDS.map((testId) => ({ testId, verdict: "overturn" }))), structured(acceptAll(["R1", "R2", "R4"]))];
+    const on = await runScenario([...head({ yaml: W3 }), structured(acceptAll()), structured({ replacements: [], disputes: claims }), ...tail], SEARCH);
+    const off = await runScenario([...head({ yaml: W3 }), structured(acceptAll()), repairDone(W3, claims), ...tail]);
+    expect(on.recording.tools).toEqual([]);
+    expect(countStage(on.result, "arbitration")).toBe(1);
+    expect(countStage(on.result, "coverage")).toBe(1);
+    expect(carryEntriesOf(on.result.bundle)).toEqual(carryEntriesOf(off.result.bundle));
+    expect(carryEntriesOf(on.result.bundle).map((entry) => entry.requirementId)).toEqual(["R3"]);
+    expect(searchOf(on.result.bundle).recounts).toEqual([expect.objectContaining({ cause: "coverage", declaration_sha256: await shaOf(W3) })]);
+    expect(on.result.outcome).toEqual(off.result.outcome);
+    expect(on.result.outcome.verdict).toBe("partial");
+    expect(countStage(on.result, "decl-check")).toBe(countStage(off.result, "decl-check"));
+  });
+
+  it("(e) 採らない・停滞・作り直しの数え方は手 4a と同じ：不一致 1 のあとの 2・同数は採らず、2 つ採れなければ B1 を 1 回だけ作り直し、作り直しのあと 2 つ採れなければ stagnation", async () => {
+    const { result, recording } = await runScenario(
+      [
+        ...head({ yaml: W2 }),
+        structured(acceptAll()),
+        fieldRepair("amount > 1"),
+        structured(acceptAll()),
+        fieldRepair("amount > 7"),
+        structured(acceptAll()),
+        fieldRepair("amount > -5"),
+        structured(acceptAll()),
+        structured({ declaration: W3 }),
+        structured(acceptAll()),
+        fieldRepair("amount > 5"),
+        structured(acceptAll()),
+      ],
+      SEARCH,
+    );
+    expect(recording.tools).toEqual([]);
+    expect(fieldDeclarations(recording.structured)).toEqual([W2, W1, W1, W1]);
+    expect(writeRequests(recording.structured)).toHaveLength(2);
+    expect(totalsOf(result.bundle)).toEqual([
+      ["write", 2, true],
+      ["repair", 1, true],
+      ["repair", 2, false],
+      ["repair", 1, false],
+      ["rewrite", 3, false],
+      ["repair", 2, false],
+    ]);
+    expect(result.summary.stop_reason).toBe("stagnation");
+    expect(result.outcome.verdict).toBe("partial");
+    expect(declarationOf(result.bundle)).toBe(W1);
+    expect(searchOf(result.bundle).rewritten).toBe(true);
+  });
+
+  it("(e) 往復と点検の上限は手 4a と同じ：点検 6 で limit（7 回目の点検も次の直しも無い）、不一致が残った最終の版で full が出ない", async () => {
+    const { result, recording } = await runScenario(
+      [
+        ...head({ yaml: W3 }),
+        structured(acceptAll()),
+        fieldRepair("amount > 5"),
+        structured(acceptAll()),
+        fieldRepair("amount > 7"),
+        structured(acceptAll()),
+        fieldRepair("amount > 1"),
+        structured(acceptAll()),
+        fieldRepair("amount > -5"),
+        structured(acceptAll()),
+        fieldRepair("amount > 1"),
+        structured(acceptAll()),
+      ],
+      SEARCH,
+    );
+    expect(countStage(result, "decl-check")).toBe(6);
+    expect(countStage(result, "repair")).toBe(5);
+    expect(fieldRequests(recording.structured)).toHaveLength(5);
+    expect(writeRequests(recording.structured)).toHaveLength(1);
+    expect(result.summary.stop_reason).toBe("limit");
+    expect(result.outcome).toEqual({ result: "failed", verdict: "none" });
+    expect(result.summary.exit_code).toBe(1);
+    expect(declarationOf(result.bundle)).toBe(W1);
+  });
+
+  it("(e) 共通の口の呼び出しの上限は今までどおりの早期停止（手 4a の直す手の台本と同じ段・種類で止まり、納品物を作らない）", async () => {
+    const limits = { ...factoryModule.AGENT_LIMITS, callCount: 6 };
+    const on = await runScenario([...head({ yaml: W2 }), structured(acceptAll()), fieldRepair("amount > 1"), structured(acceptAll())], { ...SEARCH, limits });
+    const off = await runScenario([...head({ yaml: W2 }), structured(acceptAll()), repairDone(W1), structured(acceptAll())], { limits });
+    expect(on.result.stopped).toEqual(off.result.stopped);
+    expect(on.result.stopped?.kind).toBe("call-limit");
+    expect(on.result.bundle).toBeNull();
+    expect(on.result.summary.exit_code).toBe(1);
+  });
+
+  it("(f) 探索の記録は同じ台本で 2 回同じ値（バイト列で同じ）", async () => {
+    const script = (): RecordedCall[] => [...head({ yaml: W2 }), structured(acceptAll()), fieldRepair("amount > 1"), structured(acceptAll()), fieldRepair("amount > 0"), structured(acceptAll())];
+    const textOf = (bundle: AssembledBundle | null): string | undefined =>
+      bundle?.artifacts.find((artifact) => artifact.path === V12_SEARCH_REPAIR_ARTIFACT_NAME)?.text;
+    const first = await runScenario(script(), SEARCH);
+    const second = await runScenario(script(), SEARCH);
+    expect(textOf(first.result.bundle)).toBeDefined();
+    expect(textOf(second.result.bundle)).toBe(textOf(first.result.bundle));
+  });
+
+  it("候補の状態の負例：R4 を unmarked にし違反も多い欄の置き換えは採られず、次の要求の一覧・組・宣言が候補の前と同じで、R4 は持ち越しに無い", async () => {
+    const original = declCheckStage.runDeclCheck;
+    vi.spyOn(declCheckStage, "runDeclCheck").mockImplementation(async (value) => {
+      if (!value.declaration.source.includes("# unmark-r4")) return original(value);
+      const ids = value.list.requirements.map((requirement) => requirement.id);
+      return {
+        ok: true,
+        value: {
+          declarationSha256: await sha256Hex(value.declaration.source),
+          judgments: ids.map((requirementId) =>
+            requirementId === "R4"
+              ? { requirementId, verdict: "unmarked" as const }
+              : { requirementId, verdict: "accept" as const, kind: null, quote: null },
+          ),
+          targets: ids.filter((id) => id !== "R4"),
+          unmarked: ["R4"],
+        },
+      };
+    });
+    const { result, recording } = await runScenario(
+      [...head({ yaml: W1 }), structured(acceptAll()), fieldRepair("amount > 5", [], ["  # unmark-r4"]), fieldRepair("amount > 0"), structured(acceptAll())],
+      SEARCH,
+    );
+    const [before, after] = fieldRequests(recording.structured);
+    if (before === undefined || after === undefined) throw new Error("前提が壊れた：欄だけの直しが 2 回呼ばれていない");
+    for (const name of ["要件の一覧", "固定した試験", "宣言"]) expect(rawDataBlockOf(after.input, name)).toBe(rawDataBlockOf(before.input, name));
+    expect((dataBlockOf(after.input, "要件の一覧") as RequirementList).requirements.map((requirement) => requirement.id)).toContain("R4");
+    const search = searchOf(result.bundle);
+    expect(search.versions.map((version) => [version.violations.known_total, version.adopted])).toEqual([
+      [1, true],
+      [3, false],
+      [0, true],
+    ]);
+    expect(search.versions[1]?.discarded).toEqual({ unmarked: ["R4"], rejections: 0 });
+    expect(carryEntriesOf(result.bundle).map((entry) => entry.requirementId)).not.toContain("R4");
+    expect(result.outcome.verdict).toBe("full");
   });
 });
 

@@ -86,3 +86,6 @@ export * from "./v11a/bundle-v11a.js";
 export * from "./v12/ledger.js";
 // 探索型の直しの部品（旗 `v12.search-repair`。手 4a・Issue #551）
 export * from "./v12/search-repair.js";
+// 失敗の場所と欄だけの直し（旗 `v12.search-repair` の直す手。手 4b・Issue #553）
+export * from "./v12/locate.js";
+export * from "./v12/stages/field-repair.js";
