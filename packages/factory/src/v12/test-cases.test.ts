@@ -19,11 +19,17 @@ import {
   TEST_CASE_EXPAND_MESSAGES,
   TEST_CASE_ID_PREFIX,
   TEST_CASE_SHAPE_MESSAGES,
+  TEST_CASE_BUNDLE_MESSAGES,
+  attributeProblemsToBundles,
+  bundleRequirementIds,
   caseOperationOf,
+  checkBundleCompleteness,
+  mergeBundleCases,
   checkTestCasesOutput,
   expandTestCases,
   testCasesSchemaOf,
   toCasePositions,
+  type TestCase,
   type TestCasesOutput,
 } from "./test-cases.js";
 
@@ -379,5 +385,85 @@ describe("負例：展開できない場合は場合の添字と欄名の固定�
       "requirements[1]",
       "cases[2].targetId",
     ]);
+  });
+});
+
+describe("T2 の束（手 3f・Issue #626。束の中で閉じる条件だけ）", () => {
+  const ids = (count: number): readonly string[] => Array.from({ length: count }, (_, index) => `R${String(index + 1)}`);
+  const bundleCase = (requirementId: string): TestCase => caseOf({ requirementId }) as unknown as TestCase;
+  const outputOf = (classified: readonly string[], cased: readonly string[]): TestCasesOutput => ({
+    classifications: classified.map((requirementId) => ({ requirementId, nature: "ruled" })),
+    cases: cased.map(bundleCase),
+  });
+
+  it("一覧の順で 5 件ごとに切る（15 → 3、7 → 5＋2、25 → 5。最後の束は 5 未満でよい）", () => {
+    expect(bundleRequirementIds(ids(15), 5).map((bundle) => bundle.length)).toEqual([5, 5, 5]);
+    expect(bundleRequirementIds(ids(7), 5)).toEqual([ids(5), ["R6", "R7"]]);
+    expect(bundleRequirementIds(ids(25), 5)).toHaveLength(5);
+    expect(bundleRequirementIds([], 5)).toEqual([]);
+    expect(() => bundleRequirementIds(ids(3), 0)).toThrow(RangeError);
+  });
+
+  it("束の完全性：欠落・重複・束に無い要件 ID・一覧に無い要件 ID・場合の要件 ID を、それぞれ固定文で落とす", () => {
+    const all = ids(10);
+    const bundle = all.slice(5, 10);
+    expect(checkBundleCompleteness(outputOf(bundle, ["R6", "R10"]), bundle, all)).toEqual([]);
+    expect(checkBundleCompleteness(outputOf(["R6", "R7", "R8", "R9"], []), bundle, all)).toEqual([
+      { field: "requirements[4]", message: TEST_CASE_BUNDLE_MESSAGES.missing },
+    ]);
+    expect(checkBundleCompleteness(outputOf([...bundle, "R6"], []), bundle, all)).toEqual([
+      { field: "classifications[5].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.duplicate },
+    ]);
+    expect(checkBundleCompleteness(outputOf([...bundle, "R1"], []), bundle, all)).toEqual([
+      { field: "classifications[5].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.outside },
+    ]);
+    expect(checkBundleCompleteness(outputOf([...bundle, "R99"], []), bundle, all)).toEqual([
+      { field: "classifications[5].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.unknown },
+    ]);
+    expect(checkBundleCompleteness(outputOf(bundle, ["R6", "R2"]), bundle, all)).toEqual([
+      { field: "cases[1].requirementId", message: TEST_CASE_BUNDLE_MESSAGES.caseOutside },
+    ]);
+  });
+
+  it("合併は束の順・束の中の順で、場合を足しも除きもしない（束の数が増えても 1 要件あたりの場合の数は同じ）", () => {
+    const cased = ["R1", "R1", "R2", "R3", "R3", "R3", "R4", "R5", "R6", "R7"];
+    const perRequirement = (bundleCount: number): Readonly<Record<string, number>> => {
+      const bundles = bundleRequirementIds(ids(7), Math.ceil(7 / bundleCount));
+      const merged = mergeBundleCases(
+        bundles.map((bundle) => outputOf(bundle, cased.filter((requirementId) => bundle.includes(requirementId)))),
+      );
+      expect(merged.output.cases.map((entry) => entry.requirementId)).toEqual(cased);
+      const counts: Record<string, number> = {};
+      for (const entry of merged.output.cases) counts[entry.requirementId] = (counts[entry.requirementId] ?? 0) + 1;
+      return counts;
+    };
+    const one = perRequirement(1);
+    expect(perRequirement(2)).toEqual(one);
+    expect(perRequirement(3)).toEqual(one);
+  });
+
+  it("帰属：要件・場合・分類の位置はその束の中の添字へ写し、帰属できない位置は推測せずに分ける", () => {
+    const bundles = bundleRequirementIds(ids(7), 5);
+    const merged = mergeBundleCases([outputOf(bundles[0] ?? [], ["R1", "R2"]), outputOf(bundles[1] ?? [], ["R6", "R7"])]);
+    const attributed = attributeProblemsToBundles(
+      [
+        { field: "requirements[6]", message: "a" },
+        { field: "cases[3].expected", message: "b" },
+        { field: "classifications[1].requirementId", message: "c" },
+        { field: "tests[9].id", message: "d" },
+        { field: "", message: "e" },
+        { field: "cases[99]", message: "f" },
+      ],
+      merged,
+      bundles,
+    );
+    expect(Object.fromEntries(attributed.byBundle)).toEqual({
+      0: [{ field: "classifications[1].requirementId", message: "c" }],
+      1: [
+        { field: "requirements[1]", message: "a" },
+        { field: "cases[1].expected", message: "b" },
+      ],
+    });
+    expect(attributed.unattributed.map((problem) => problem.message)).toEqual(["d", "e", "f"]);
   });
 });

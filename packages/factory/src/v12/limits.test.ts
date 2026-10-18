@@ -20,6 +20,8 @@ import {
   V12_STAGE_FRAMES,
   V12_V11A_FRAME_MAP,
   V12_IDS_FRAME_MAP,
+  V12_T2_BUNDLE,
+  V12_T2_BUNDLE_DEFINITIONS,
 } from "./limits.js";
 import { VOCABULARY_BUNDLES } from "./ids.js";
 import { MAPPING_ROUNDS } from "./stages/mapping.js";
@@ -161,7 +163,7 @@ describe("受入の題材の言葉が無い（表・手 3p の試験・fixture�
 
   it("上限の表の文（定義の text・why・review）に言葉が無い", () => {
     expectNoAcceptanceMaterial(
-      [...V12_CALL_LIMIT_DEFINITIONS, ...V12_STAGE_FRAME_DEFINITIONS].flatMap((definition) => [
+      [...V12_CALL_LIMIT_DEFINITIONS, ...V12_STAGE_FRAME_DEFINITIONS, ...V12_T2_BUNDLE_DEFINITIONS].flatMap((definition) => [
         definition.text,
         definition.why,
         ...("review" in definition ? [definition.review] : []),
@@ -185,5 +187,15 @@ describe("旗 v12.ids の段の枠（手 3a・Issue #593）", () => {
     }
     expect(V12_CALL_LIMITS).toEqual({ logicalCalls: 72, realAttempts: 144, judgeBranch: 80 });
     expect(factory.V12_IDS_FRAME_MAP).toBe(V12_IDS_FRAME_MAP);
+  });
+});
+
+describe("旗 v12.ids の T2 の束の定数（手 3f・Issue #626）", () => {
+  it("束 5・同時 5 で、定義の不備 0・見直す条件を持つ。要件 25 は束 5 で同時数に収まる", () => {
+    expect(V12_T2_BUNDLE).toEqual({ size: 5, concurrency: 5 });
+    expect(ruleDefinitionDefects(V12_T2_BUNDLE_DEFINITIONS)).toEqual([]);
+    expect(V12_T2_BUNDLE_DEFINITIONS.map((definition) => definition.key)).toEqual(Object.keys(V12_T2_BUNDLE));
+    for (const definition of V12_T2_BUNDLE_DEFINITIONS) expect(definition.review.length).toBeGreaterThan(0);
+    expect(Math.ceil(25 / V12_T2_BUNDLE.size)).toBeLessThanOrEqual(V12_T2_BUNDLE.concurrency);
   });
 });
