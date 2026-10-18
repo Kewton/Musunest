@@ -17,7 +17,8 @@
 //   * **構造化出力は、全段で同じ「封筒」の schema を送る**（`schema-envelope.ts`・#353）。出力の schema は
 //     入力より前に置かれるので、段ごとに違うと前置きが別物になり、段をまたいでキャッシュが当たらない。
 //     封筒の枝は `stage` の判別子で選び、応答の `result` を取り出して段へ渡す（`stage` が違えば形の誤り）。
-//     封筒は options の `envelope` で選ぶ（既定 v1。v1.1α の段は別の封筒 `stage-envelope-v11a`。Issue #511）。
+//     封筒は options の `envelope` で選ぶ（既定 v1。v1.1α の段は別の封筒 `stage-envelope-v11a`。Issue #511。
+//     経路 v1.2 の走りは旗の組から導いた封筒 `stage-envelope-v12` を全段で送る。Issue #588）。
 //   * usage を共通の契約の形に直す。無い・壊れている（数でない・負・内訳が合計を超える）ときは
 //     「usage なし」として返し、共通の口に予約を残させる（§1.5・R-6）。
 //   * 誤りは型付きで分類する（`OpenAiAdapterError` の `kind`）。
@@ -148,7 +149,8 @@ export interface OpenAiAdapterOptions {
    */
   readonly timeoutMs?: number;
   /**
-   * 構造化出力で送る封筒（`schema-envelope.ts`。既定 v1）。v1.1α の走りでは `"v1.1a"` を渡す（Issue #511）。
+   * 構造化出力で送る封筒（`schema-envelope.ts`。既定 v1）。v1.1α の走りでは `"v1.1a"`、v1.2 の走りでは
+   * `"v1.2"` を渡す（Issue #511・#588）。
    * 選んだ封筒に載っていない schema（判定の口・差分専用の schema）は、今までどおりそのまま送る。
    */
   readonly envelope?: EnvelopeId;

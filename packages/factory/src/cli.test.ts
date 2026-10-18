@@ -35,8 +35,11 @@ import { createOpenAiLlmClient } from "./openai.js";
 import {
   ENVELOPE_SCHEMA,
   ENVELOPE_SCHEMA_NAME,
+  ENVELOPE_SCHEMA_NAME_V11A,
+  ENVELOPE_SCHEMA_V11A,
   STAGE_ENVELOPE_ENTRIES,
   STAGE_ENVELOPE_ENTRIES_V11A,
+  STAGE_ENVELOPE_ENTRIES_V12,
   buildStageBranch,
   type EnvelopeId,
 } from "./schema-envelope.js";
@@ -1176,7 +1179,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(v12.code).toBe(EXIT_OK);
     expect(v1Spy).not.toHaveBeenCalled();
     expect(v11aSpy).toHaveBeenCalledTimes(2);
-    expect(v12.makeClient.mock.calls[0]).toEqual([{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.1a" }]);
+    expect(v12.makeClient.mock.calls[0]).toEqual([{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.2" }]);
     // LLM への要求は、v1.2 の旗で台帳に登録した性質（enum-membership。Issue #548・empty-aggregate。Issue #549）の分を除けば
     // v1.1a の走りとバイト列で同じ。差は名指しの場所（R-nt-08・R-sc-02・R-tsp-02・R-tsp-16・R-w11 の並び・schema の enum・
     // T1 の schema の行の型の aggregate、表を載せるデータの計算の行の aggregate）だけで、空でない
@@ -1292,23 +1295,25 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
 
   const v12ReturnToPlan = (): RecordedCall[] => [structured(draftOf(V11A_LIST, withAggregates(V11A_TABLE))), ...v11aReturnToPlan().slice(1)];
 
-  /** 走りの段の要求を、入口が作った adapter の封筒で送り直した組 */
-  async function exchangesOfRun(run: Awaited<ReturnType<typeof runV11aCli>>): Promise<WireExchange[]> {
+  /** 走りの段の要求を、入口が作った adapter の封筒で送り直した組（`--pipeline v1.2` は v1.2 の封筒。Issue #588） */
+  async function exchangesOfRun(run: Awaited<ReturnType<typeof runV11aCli>>, pipeline: "v1.1a" | "v1.2" = "v1.1a"): Promise<WireExchange[]> {
     const options = run.makeClient.mock.calls[0]?.[0];
-    expect(options).toMatchObject({ envelope: "v1.1a" });
+    expect(options).toMatchObject({ envelope: pipeline });
     return sentExchangesOf(run.recording.structured, options?.envelope);
   }
 
+  /** 完走と差し戻しの道（`--pipeline` ごとの応答の列） */
+  const routesOf = (pipeline: "v1.1a" | "v1.2") => [
+    { name: "complete", calls: [...(pipeline === "v1.2" ? v12Head() : v11aHead()), structured(v11aJudgments())] },
+    { name: "return", calls: pipeline === "v1.2" ? v12ReturnToPlan() : v11aReturnToPlan() },
+  ];
+
   for (const pipeline of ["v1.1a", "v1.2"] as const) {
     it(`${pipeline}：完走と差し戻しの道で、封筒に載る全段の送信の枝が段の schema と等しい`, async () => {
-      const routes = [
-        { name: "complete", calls: [...(pipeline === "v1.2" ? v12Head() : v11aHead()), structured(v11aJudgments())] },
-        { name: "return", calls: pipeline === "v1.2" ? v12ReturnToPlan() : v11aReturnToPlan() },
-      ];
       const seen = new Set<string>();
-      for (const route of routes) {
+      for (const route of routesOf(pipeline)) {
         const run = await runV11aCli({ dir: `${directory}/wire-${pipeline}-${route.name}`, calls: route.calls, pipeline });
-        const exchanges = await exchangesOfRun(run);
+        const exchanges = await exchangesOfRun(run, pipeline);
         expect(exchanges.length, route.name).toBeGreaterThan(0);
         for (const exchange of exchanges) {
           expectSentSchemaIsStageSchema(exchange);
@@ -1330,7 +1335,7 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
       return branch.properties.rows.items.properties.type;
     };
     const on = await runV11aCli({ dir: `${directory}/wire-t1-on`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
-    const onType = typeOf(await exchangesOfRun(on));
+    const onType = typeOf(await exchangesOfRun(on, "v1.2"));
     expect(onType.properties).toHaveProperty("aggregate");
     expect(onType.required).toContain("aggregate");
     const off = await runV11aCli({ dir: `${directory}/wire-t1-off`, calls: [...v11aHead(), structured(v11aJudgments())] });
@@ -1364,6 +1369,52 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
         strict: true,
       });
     }
+  });
+
+  /** 送った body の `text.format`（名前と schema） */
+  const formatOf = (exchange: WireExchange) =>
+    (exchange.body["text"] as { readonly format: { readonly name: string; readonly schema: Record<string, unknown> } }).format;
+
+  it("v1.2：完走と差し戻しの道で、封筒に載る 6 段すべての送信の名前と schema のバイト列が同じで、名前が stage-envelope-v12（Issue #588）", async () => {
+    const v12Stages = STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage);
+    expect(v12Stages).toHaveLength(6);
+    const seen = new Set<string>();
+    const sent = new Set<string>();
+    for (const route of routesOf("v1.2")) {
+      const run = await runV11aCli({ dir: `${directory}/wire-one-v12-${route.name}`, calls: route.calls, pipeline: "v1.2" });
+      const exchanges = await exchangesOfRun(run, "v1.2");
+      for (const exchange of exchanges) {
+        expectSentSchemaIsStageSchema(exchange);
+        const format = formatOf(exchange);
+        if (!v12Stages.includes(exchange.request.schemaName)) {
+          // 封筒に載らない口（判定の口など）は、その schema をそのまま送る
+          expect(format.name, exchange.request.schemaName).toBe(exchange.request.schemaName);
+          continue;
+        }
+        expect(format.name, exchange.request.schemaName).toBe("stage-envelope-v12");
+        sent.add(JSON.stringify({ name: format.name, schema: format.schema }));
+        seen.add(exchange.request.schemaName);
+      }
+    }
+    // 6 段を照らし、全段の送信が 1 種類の前置き（名前と schema のバイト列）
+    expect([...seen].sort()).toEqual([...v12Stages].sort());
+    expect(sent.size).toBe(1);
+  });
+
+  it("v1.1a：同じ道の送信の封筒は直す前と同じ（名前 stage-envelope-v11a・schema が v1.1α の封筒の定数。Issue #588）", async () => {
+    const seen = new Set<string>();
+    for (const route of routesOf("v1.1a")) {
+      const run = await runV11aCli({ dir: `${directory}/wire-same-v11a-${route.name}`, calls: route.calls });
+      for (const exchange of await exchangesOfRun(run, "v1.1a")) {
+        if (!v11aStages.includes(exchange.request.schemaName)) continue;
+        expect(exchange.body["text"], exchange.request.schemaName).toEqual({
+          format: { type: "json_schema", name: ENVELOPE_SCHEMA_NAME_V11A, schema: ENVELOPE_SCHEMA_V11A, strict: true },
+        });
+        expect(JSON.stringify(formatOf(exchange).schema)).toBe(JSON.stringify(ENVELOPE_SCHEMA_V11A));
+        seen.add(exchange.request.schemaName);
+      }
+    }
+    expect([...seen].sort()).toEqual([...v11aStages].sort());
   });
 });
 
@@ -1633,7 +1684,7 @@ async function runStageCli(input: {
       return recording.client.callWithTools(request);
     },
   };
-  const makeClient = vi.fn(() => client);
+  const makeClient = vi.fn((_options: { readonly envelope?: EnvelopeId }) => client);
   const lines: string[] = [];
   const errors: string[] = [];
   const written: string[] = [];
@@ -1844,6 +1895,8 @@ describe("段の走りの記録・納品物・終了コード", () => {
     const dir = `${directory}/stage-record`;
     const run = await runStageCli({ dir, args: ["--stage-end", "judge"], calls: [...v11aHead(), structured(v11aJudgments())] });
     expect(run.code).toBe(EXIT_OK);
+    // 段の走り（今は v1.1a だけ）は v1.1α の封筒を選ぶ（Issue #588）
+    expect(run.makeClient.mock.calls).toEqual([[{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.1a" }]]);
     const record = await stageRecordOf(dir);
     expect(record["stage_pass"]).toBe(true);
     expect(record["budget_scope"]).toBe("stage-run");
