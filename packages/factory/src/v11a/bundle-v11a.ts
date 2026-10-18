@@ -121,6 +121,11 @@ export interface V11aRecordsInput {
     readonly coverageChecks: readonly CoverageCheckRecord[];
     /** 旗 `v12.ids` の走りだけ：コードが作った試験 ID の並び（組の順。off の走りは渡さない＝欄が無い。Issue #595） */
     readonly generatedTestIds?: readonly string[];
+    /**
+     * 旗 `v12.ids` の走りだけ：通った回の応答で LLM が書いた場合の数と応答の文字数（前後比較が読む。off の走り・再開した組は
+     * 渡さない＝欄が無い。#625）
+     */
+    readonly cases?: { readonly count: number; readonly responseChars: number };
   };
   readonly declCheck: {
     /** 点検の上限（`declChecks`） */
@@ -219,6 +224,9 @@ export function buildV11aArtifacts(input: V11aRecordsInput): readonly BundleArti
           losses: check.losses,
         })),
         ...(testSpec.generatedTestIds === undefined ? {} : { generated_test_ids: testSpec.generatedTestIds }),
+        ...(testSpec.cases === undefined
+          ? {}
+          : { llm_case_count: testSpec.cases.count, llm_response_chars: testSpec.cases.responseChars }),
       }),
     },
     {
@@ -434,6 +442,8 @@ export interface FrozenTestSpec {
   readonly observes: ReadonlyMap<string, TestObserves>;
   readonly coverage: readonly CoverageUnit[];
   readonly natures: ReadonlyMap<string, RequirementNature>;
+  /** 旗 `v12.ids` の走りの T2 の場合の数と応答の文字数（段を回した走りだけ。checkpoint には載せない。#625） */
+  readonly cases?: { readonly count: number; readonly responseChars: number };
 }
 
 /** 境界の材料（回す部分が境界で渡す。B の結果は入らない） */

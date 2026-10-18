@@ -1087,3 +1087,47 @@ export function renameIds<T>(value: T, rename: ReadonlyMap<string, string>): T {
   };
   return walk(value) as T;
 }
+
+// ── 旗 v12.ids の T2 の場合の形の応答（Issue #625）──────────────────────────
+
+/**
+ * v1 の形の T2 の応答（分類と raw の試験の並び）を、同じ内容の場合の形（旗 `v12.ids` の T2 の応答）に書き換える。試験 ID・操作・
+ * 対象の種類・時計・assertion・参照データの対象の要件 ID と種類・期待の null の欄を落とし、値の欄（JSON の文字列）はそのまま写す。
+ * 構造の検査（operation が structure）は場合で書けないので例外にする（試験の材料の誤り）
+ */
+export function casesResponseOf(output: { readonly classifications?: readonly unknown[]; readonly tests: readonly unknown[] }): {
+  readonly classifications: readonly unknown[];
+  readonly cases: readonly Record<string, unknown>[];
+} {
+  const cases = output.tests.map((raw) => {
+    const test = raw as {
+      readonly target: { readonly requirementId: string; readonly roleId: string };
+      readonly kind: string;
+      readonly operation: string;
+      readonly observes: string;
+      readonly input: string;
+      readonly inputContract: { readonly rowId: string; readonly targetRowId: string | null; readonly emptyEntities: readonly string[] };
+      readonly referenceData: readonly { readonly rowId: string; readonly target: { readonly roleId: string }; readonly values: string }[];
+      readonly expected: { readonly kind: "ok" | "error"; readonly value: string | null; readonly code: string | null };
+    };
+    if (test.operation === "structure") throw new Error("構造の検査は場合の形で書けない（試験の材料の誤り）");
+    return {
+      requirementId: test.target.requirementId,
+      targetId: test.target.roleId,
+      kind: test.kind,
+      observes: test.observes,
+      input: { rowId: test.inputContract.rowId, values: test.input },
+      targetRowId: test.inputContract.targetRowId,
+      rows: test.referenceData.map((row) => ({ rowId: row.rowId, entityId: row.target.roleId, values: row.values })),
+      expected: test.expected.kind === "ok" ? { kind: "ok", value: test.expected.value } : { kind: "error", code: test.expected.code },
+      emptyEntities: test.inputContract.emptyEntities,
+    };
+  });
+  return { classifications: output.classifications ?? [], cases };
+}
+
+/** 展開した試験から、試験 ID と時計を除く（二点測定で v1 の形の応答の組と比べる。#625） */
+export function withoutIdAndClock<T extends { readonly id: string; readonly clock: string }>(test: T): Omit<T, "id" | "clock"> {
+  const { id: _id, clock: _clock, ...rest } = test;
+  return rest;
+}

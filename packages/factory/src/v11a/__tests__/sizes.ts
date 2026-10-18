@@ -34,7 +34,7 @@ import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-
 import { AGENT_LIMITS } from "../../limits.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
 import type { JudgeAnswer } from "../../judge.js";
-import { codeIdRenameOf, draftOf, idsResponseList, idsResponsesOf, t1ResponseOf, withCodeIds } from "./fixtures.js";
+import { casesResponseOf, codeIdRenameOf, draftOf, idsResponseList, idsResponsesOf, t1ResponseOf, withCodeIds } from "./fixtures.js";
 import type { NameTable, NameTableRow } from "../names.js";
 import { ledgerViewOf, resolveV12Flags, type V12Flags } from "../../v12/ledger.js";
 
@@ -97,6 +97,16 @@ export interface SizedMaterials {
      */
     readonly asOf3c?: boolean;
   }) => { readonly classifications: readonly unknown[]; readonly tests: readonly unknown[] };
+  /**
+   * 手 3e（#625）：`testSpecResponse` と同じ内容を、旗 `v12.ids` の T2 の場合の形（`casesResponseOf`）で書いた応答。骨組み（試験 ID・
+   * 操作・対象の種類・時計・assertion・参照データの対象の要件 ID と種類・期待の null の欄）を書かない。手 3d の応答と大きさを比べる
+   */
+  readonly testSpecCasesResponse: (options?: { readonly omitAbnormalOf?: string }) => {
+    readonly classifications: readonly unknown[];
+    readonly cases: readonly Record<string, unknown>[];
+  };
+  /** その走りの T2 の schema に合う応答（旗 `v12.ids` が on なら場合の形、off なら `testSpecResponse`。#625） */
+  readonly t2Response: (options?: { readonly omitAbnormalOf?: string }) => Record<string, unknown>;
   /** 宣言の YAML（`defectOf` の要件の検査を、正常の試験が落ちる式にする） */
   readonly declaration: (defectOf?: readonly string[]) => string;
   /** 要件の文（引用に使う） */
@@ -502,6 +512,8 @@ export function buildSized(
       }),
     }),
     testSpecResponse,
+    testSpecCasesResponse: (options = {}) => casesResponseOf(testSpecResponse(options)),
+    t2Response: (options = {}) => (resolvedFlags.ids ? casesResponseOf(testSpecResponse(options)) : testSpecResponse(options)),
     declaration,
     textOf: (requirementId) => requirements.find((requirement) => requirement.id === requirementId)?.text ?? "",
   };

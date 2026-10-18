@@ -24,6 +24,7 @@
 // 束の行を足す。旗 `v12.ids` の走りでは判定も門に数える（上の「判定」の行の「門に数えない」は旗 off の走りの話）。
 //
 // 外部の API は呼ばない。題材は抽象的なもので、受入の題材の言葉は使わない。
+import { TEST_CASE_ID_PREFIX } from "../v12/test-cases.js";
 import { describe, expect, it } from "vitest";
 import { createFakeJudge } from "../judge-fake.js";
 import type { Judge, JudgeAnswer } from "../judge.js";
@@ -263,7 +264,7 @@ interface V12CallsSummary {
 const cleanCalls = (materials: SizedMaterials): RecordedCall[] => [
   ...materials.tableResponses().map(structured),
   structured(materials.judgments()),
-  structured(materials.testSpecResponse()),
+  structured(materials.t2Response()),
   structured({ declaration: materials.declaration() }),
   structured(materials.judgments()),
 ];
@@ -331,7 +332,9 @@ function idsRetryHead(materials: SizedMaterials, incomplete: unknown, rejectR1: 
 function retryCalls(materials: SizedMaterials): RecordedCall[] {
   const incomplete = { judgments: materials.judgments().judgments.slice(0, -1) };
   const rejectR1 = materials.judgments({ R1: ["unnecessary-ownership", materials.textOf("R1")] });
-  const dispute = { testId: "t5-normal", quote: materials.textOf("R5") };
+  // 旗 v12.ids の走りの試験 ID はコードが場合の順に振る（case: と連番。#625）。同じ試験（R5 の正常）の ID を引く
+  const t5Index = (materials.testSpecResponse().tests as readonly { readonly id: string }[]).findIndex((test) => test.id === "t5-normal");
+  const dispute = { testId: materials.flags.ids ? `${TEST_CASE_ID_PREFIX}${String(t5Index + 1)}` : "t5-normal", quote: materials.textOf("R5") };
   // 旗 v12.search-repair の走りは、失敗が全部場所（R1 の検査）に写るので B5 は欄だけの直しになる。版 2 は R1 の検査を
   // 境界だけが落ちる式にして違反の数を厳密に減らし（採る）、版 3 で誤りなし。往復・裁定・B3' の版の数は旗 off と同じ
   const search = materials.flags.searchRepair;
@@ -347,8 +350,8 @@ function retryCalls(materials: SizedMaterials): RecordedCall[] {
       structured(materials.judgments()),
     ]),
     structured(negative({ classifications: "x", tests: "x" }, "classifications・tests が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
-    structured(materials.testSpecResponse({ omitAbnormalOf: "R1" })),
-    structured(materials.testSpecResponse()),
+    structured(materials.t2Response({ omitAbnormalOf: "R1" })),
+    structured(materials.t2Response()),
     structured({ declaration: materials.declaration(["R1"]) }),
     structured(incomplete),
     structured(materials.judgments()),
@@ -902,11 +905,12 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
     JSON.parse(run.result.bundle?.artifacts.find((artifact) => artifact.path === "artifacts/carry-over.json")?.text ?? "{}") as Record<string, unknown>;
   /** C3 が拒否した要件を除いた T2・B1・B3' の応答（持ち越しの要件は T2 に見せない） */
   const tailWithout = (excluded: readonly string[]) => {
-    const t2 = materials.testSpecResponse();
+    const t2 = materials.testSpecCasesResponse();
     return [
       structured({
         classifications: (t2.classifications as readonly { requirementId: string }[]).filter((entry) => !excluded.includes(entry.requirementId)),
-        tests: (t2.tests as readonly { target: { requirementId: string } }[]).filter((test) => !excluded.includes(test.target.requirementId)),
+        // 旗 v12.ids の走りの T2 は場合の形（#625）
+        cases: t2.cases.filter((entry) => !excluded.includes(String(entry["requirementId"]))),
       }),
       structured({ declaration: materials.declaration() }),
       structured({ judgments: (materials.judgments().judgments as readonly { requirementId: string }[]).filter((entry) => !excluded.includes(entry.requirementId)) }),
@@ -996,7 +1000,7 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
       ...Object.fromEntries(Object.values(VOCABULARY_SCHEMA_NAMES).map((name, index) => [name, [structured([entities, fields, behaviors][index])]])),
       [MAPPING_SCHEMA_NAME]: [structured(mapping), structured({ requirements: entries().slice(1) })],
       [SEMANTIC_CHECK_SCHEMA_NAME]: [structured(reject), structured(materials.judgments())],
-      [TEST_SPEC_SCHEMA_NAME]: [1, 2, 3].map(() => structured(materials.testSpecResponse())),
+      [TEST_SPEC_SCHEMA_NAME]: [1, 2, 3].map(() => structured(materials.t2Response())),
       [WRITE_V11A_SCHEMA_NAME]: [structured({ declaration: materials.declaration() })],
       [DECL_CHECK_SCHEMA_NAME]: [structured(materials.judgments())],
     });
@@ -1131,7 +1135,7 @@ describe("(6) 旗 v12.ids の実試行の門と判定の枝", () => {
   it("(3) 判定の枝を J4 の要件の数より 1 小さくすると、最後の要件の J4 が未判定（gate）、J2 は ruled、本は止まらず、門に判定の失敗を数えない", async () => {
     const materials = buildSized(MEDIAN_SIZE.requirements, MEDIAN_SIZE.tests, ALL_ON);
     // T2 の分類で R1 を existence-only にして、T1 の分類（ruled）と食い違わせる（J2 を呼ぶ道）
-    const t2 = materials.testSpecResponse();
+    const t2 = materials.t2Response();
     const discrepant = {
       ...t2,
       classifications: (t2.classifications as readonly { requirementId: string; nature: string }[]).map((entry) =>
@@ -1190,8 +1194,8 @@ describe("(7) 旗 v12.ids のコードが作る試験：既定値・選択肢の
     ...materials.tableResponses().map(structured),
     structured(materials.judgments()),
     structured(negative({ classifications: "x", tests: "x" }, "classifications・tests が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
-    structured(materials.testSpecResponse({ omitAbnormalOf: "R4" })),
-    structured(materials.testSpecResponse()),
+    structured(materials.t2Response({ omitAbnormalOf: "R4" })),
+    structured(materials.t2Response()),
     structured({ declaration: materials.declaration() }),
     structured(materials.judgments()),
   ];
@@ -1254,15 +1258,15 @@ describe("(8) 旗 v12.ids の構造の検査と画面・在ることの構造の
     ...materials.tableResponses().map(structured),
     structured(materials.judgments()),
     structured(negative({ classifications: "x", tests: "x" }, "classifications・tests が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
-    structured(materials.testSpecResponse({ omitAbnormalOf: "R4" })),
-    structured(materials.testSpecResponse()),
+    structured(materials.t2Response({ omitAbnormalOf: "R4" })),
+    structured(materials.t2Response()),
     structured({ declaration: materials.declaration() }),
     structured(materials.judgments()),
   ];
   const firstPassCalls = (materials: SizedMaterials): RecordedCall[] => [
     ...materials.tableResponses().map(structured),
     structured(materials.judgments()),
-    structured(materials.testSpecResponse()),
+    structured(materials.t2Response()),
     structured({ declaration: materials.declaration() }),
     structured(materials.judgments()),
   ];
@@ -1317,5 +1321,60 @@ describe("(8) 旗 v12.ids の構造の検査と画面・在ることの構造の
     const passed = await observe(on, firstPassCalls(on), { flags: ALL_ON });
     expect(passed.result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(passed.logical["test-spec"]).toBe(1);
+  });
+});
+
+// ── (9) 旗 v12.ids の場合の形の T2（手 3e・Issue #625）──────────────────────────────
+
+describe("(9) 旗 v12.ids の場合の形の T2：T2 の論理要求は初回 1・形 1・中身 1 のまま、応答の文字数は同じ N・M の手 3d の応答の 0.65 倍以下で、組の数は M", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+  /** 表を組む段・T1''・T2（形の落ち → R1 の異常が欠けて中身の落ち → 通る）・B1・B3' */
+  const t2RetryCalls = (materials: SizedMaterials): RecordedCall[] => [
+    ...materials.tableResponses().map(structured),
+    structured(materials.judgments()),
+    structured(negative({ classifications: "x", cases: "x" }, "classifications・cases が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
+    structured(materials.t2Response({ omitAbnormalOf: "R1" })),
+    structured(materials.t2Response()),
+    structured({ declaration: materials.declaration() }),
+    structured(materials.judgments()),
+  ];
+  const suiteOf = (run: Awaited<ReturnType<typeof observe>>) => {
+    const artifact = run.result.bundle?.artifacts.find((entry) => entry.path === "artifacts/test-spec.json");
+    if (artifact === undefined) throw new Error("前提が壊れた：T2 の成果物が無い");
+    return JSON.parse(artifact.text) as { readonly suite: { readonly tests: readonly unknown[] }; readonly llm_case_count?: number; readonly llm_response_chars?: number };
+  };
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：場合の形の応答の JSON の文字数が手 3d の応答（同じ内容・同じ直列化）の 0.65 倍以下で、場合の数は手 3d の試験の数と同じ", (size) => {
+    for (const options of [{}, { codeWritten: true, screens: true }] as const) {
+      const on = buildSized(size.requirements, size.tests, ALL_ON, options);
+      const as3d = on.testSpecResponse();
+      const cases = on.testSpecCasesResponse();
+      expect(cases.cases).toHaveLength(as3d.tests.length);
+      expect(on.t2Response()).toEqual(cases);
+      expect(JSON.stringify(cases).length).toBeLessThanOrEqual(JSON.stringify(as3d).length * 0.65);
+      // 旗 ids off の走りの応答は今の形のまま
+      expect(buildSized(size.requirements, size.tests, { ledger: true, searchRepair: true }, options).t2Response()).toEqual(
+        buildSized(size.requirements, size.tests, { ledger: true, searchRepair: true }, options).testSpecResponse(),
+      );
+    }
+  });
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements・試験 $tests：T2 の論理要求 3（初回 1・形 1・中身 1）で full、組の数は M。初回で通る走りは 1。呼び出しの合計は論理 72・実試行 144・判定 80 以下", async (size) => {
+    const on = buildSized(size.requirements, size.tests, ALL_ON);
+    const retried = await observe(on, t2RetryCalls(on), { flags: ALL_ON });
+    expect(retried.result.stopped, JSON.stringify(retried.result.stopped)).toBeNull();
+    expect(retried.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(retried.logical["test-spec"]).toBe(3);
+    expect(retried.stages["test-spec"].retries).toEqual({ communication: 0, shape: 1, content: 1 });
+    expect(suiteOf(retried).suite.tests).toHaveLength(size.tests);
+    expect(suiteOf(retried).llm_case_count).toBe(on.testSpecCasesResponse().cases.length);
+    expect(retried.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+    expect(retried.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
+    expect(retried.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
+    expectNoAcceptanceMaterial(retried.requests);
+    const passed = await observe(on, cleanCalls(on), { flags: ALL_ON });
+    expect(passed.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(passed.logical["test-spec"]).toBe(1);
+    expect(suiteOf(passed).suite.tests).toHaveLength(size.tests);
   });
 });

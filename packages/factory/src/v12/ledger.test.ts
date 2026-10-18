@@ -835,7 +835,12 @@ describe("期待の値の書き手：default-value・enum-membership は code、
     expect(ids).toContain("アプリ全体（type の scope が app）");
     expect(ids).toContain("選択肢の見出しごと（groupBy の kind が enum）");
     expect(ids).toContain("行ごと（type の scope が row）の集計と月の見出しごと（groupBy の kind が month）");
-    expect(ids.endsWith(EMPTY_AGGREGATE.rules.t2 ?? "（無い）")).toBe(true);
+    // 手 3e（#625）：行ごと・月の見出しごとに使う文は、今の文の欄の名前を場合の形（rows・targetId・emptyEntities）にしたもの。
+    // 今の文（off）はそのまま
+    expect(ids.includes(EMPTY_AGGREGATE.rules.t2 ?? "（無い）")).toBe(false);
+    expect(ids).toContain("emptyEntities にその行の type.aggregate.entity の id を入れ、参照の行（rows）にその entity の行を置かない");
+    expect(ids).toContain("どちらも対象（targetId）はその計算の行、observes は empty-aggregate、期待の kind は ok にする。");
+    for (const field of ["referenceData", "inputContract", "operation", "code を null"]) expect(ids, field).not.toContain(field);
     const text = JSON.stringify(PROPERTY_LEDGER.map((row) => row.rules.t2Ids));
     for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(text).not.toContain(word);
   });
@@ -918,9 +923,11 @@ describe("view-structure・existence の行：C4 の試験の型（screen × scr
   });
 
   it("旗 ids の T2 の文：view-structure は構造の検査と screen 操作だけを「作らない（コードが作る）」とし、existence は entity × screen を作らないとする。off の文（t2）は null のまま。題材の言葉は無い", () => {
-    expect(VIEW.rules.t2Ids).toContain("構造の検査（operation が structure の試験）と画面の試験（operation が screen の試験");
-    expect(VIEW.rules.t2Ids).toContain("作らない（コードが作る");
-    expect(EXISTENCE.rules.t2Ids).toContain("entity × screen の試験（observes は existence）は作らない（コードが作る）");
+    // 手 3e（#625）：欄の名前は場合の形（operation・assertion を書かせない。対象は targetId）
+    expect(VIEW.rules.t2Ids).toContain("構造の検査と画面の試験（画面・項目 × screen の view-structure）は作らない（コードが作る");
+    expect(VIEW.rules.t2Ids).toContain("場合の対象（targetId）に画面の行を書かない");
+    expect(EXISTENCE.rules.t2Ids).toContain("entity が在ることの試験（observes は existence）は作らない（コードが作る）");
+    for (const field of ["operation", "assertion"]) expect(`${VIEW.rules.t2Ids ?? ""}${EXISTENCE.rules.t2Ids ?? ""}`, field).not.toContain(field);
     for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(`${VIEW.rules.t2Ids ?? ""}${EXISTENCE.rules.t2Ids ?? ""}`).not.toContain(word);
   });
 

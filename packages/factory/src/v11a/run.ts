@@ -1790,6 +1790,8 @@ async function runV11a(
           coverageChecks,
           // 旗 `v12.ids` の走りだけ、コードが作った試験 ID（予約の接頭辞の試験。再開した組でも同じに引ける。Issue #595）
           ...(flags.ids ? { generatedTestIds: testSpec.suite.tests.map((test) => test.id).filter(isGeneratedTestId) } : {}),
+          // 旗 `v12.ids` の走りだけ、LLM が書いた場合の数と応答の文字数（段を回した走りだけ。再開した組には無い。#625）
+          ...(flags.ids && testSpec.cases !== undefined ? { cases: testSpec.cases } : {}),
         },
         declCheck: { limit: limits.declChecks, versions: declVersions },
         carryOver: {
