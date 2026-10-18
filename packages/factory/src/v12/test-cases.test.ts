@@ -20,7 +20,6 @@ import {
   TEST_CASE_ID_PREFIX,
   TEST_CASE_SHAPE_MESSAGES,
   TEST_CASE_BUNDLE_MESSAGES,
-  attributeProblemsToBundles,
   attributeProblemsToRequirements,
   bundleRequirementIds,
   bundleRetryPlansOf,
@@ -457,31 +456,6 @@ describe("T2 の束（手 3f・Issue #626。束の中で閉じる条件だけ）
     const one = perRequirement(1);
     expect(perRequirement(2)).toEqual(one);
     expect(perRequirement(3)).toEqual(one);
-  });
-
-  it("帰属：要件・場合・分類の位置はその束の中の添字へ写し、帰属できない位置は推測せずに分ける", () => {
-    const bundles = bundleRequirementIds(ids(7), 5);
-    const merged = mergeBundleCases([outputOf(bundles[0] ?? [], ["R1", "R2"]), outputOf(bundles[1] ?? [], ["R6", "R7"])]);
-    const attributed = attributeProblemsToBundles(
-      [
-        { field: "requirements[6]", message: "a" },
-        { field: "cases[3].expected", message: "b" },
-        { field: "classifications[1].requirementId", message: "c" },
-        { field: "tests[9].id", message: "d" },
-        { field: "", message: "e" },
-        { field: "cases[99]", message: "f" },
-      ],
-      merged,
-      bundles,
-    );
-    expect(Object.fromEntries(attributed.byBundle)).toEqual({
-      0: [{ field: "classifications[1].requirementId", message: "c" }],
-      1: [
-        { field: "requirements[1]", message: "a" },
-        { field: "cases[1].expected", message: "b" },
-      ],
-    });
-    expect(attributed.unattributed.map((problem) => problem.message)).toEqual(["d", "e", "f"]);
   });
 });
 

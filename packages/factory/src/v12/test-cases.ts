@@ -542,49 +542,6 @@ export function mergeBundleCases(outputs: readonly TestCasesOutput[], order?: re
   };
 }
 
-/** 束へ帰属させた問題（束ごとの問題は位置をその束の応答の添字へ写したもの）と、帰属できない問題 */
-export interface AttributedProblems {
-  readonly byBundle: ReadonlyMap<number, readonly Problem[]>;
-  readonly unattributed: readonly Problem[];
-}
-
-/**
- * 合併後の組の問題を束へ帰属させる（推測しない）。要件の位置（要求の一覧の `requirements[i]`。束は一覧の順で切ってあるので
- * `i` を束の大きさで割る）・場合の位置（`cases[i]…`）・分類の位置（`classifications[i]…`）を持つ問題だけを、その束へ、その束の
- * 中の添字に写して渡す。ほかの位置（コードが作った試験・応答全体など）は帰属できない問題として返す
- */
-export function attributeProblemsToBundles(
-  problems: readonly Problem[],
-  merged: MergedTestCases,
-  bundles: readonly (readonly string[])[],
-): AttributedProblems {
-  const byBundle = new Map<number, Problem[]>();
-  const unattributed: Problem[] = [];
-  const push = (bundle: number, problem: Problem): void => {
-    const list = byBundle.get(bundle) ?? [];
-    list.push(problem);
-    byBundle.set(bundle, list);
-  };
-  const requirementOrigin: (readonly [number, number])[] = bundles.flatMap((ids, bundle) => ids.map((_, index) => [bundle, index] as const));
-  for (const problem of problems) {
-    const match = /^(requirements|cases|classifications)\[(\d+)\](.*)$/.exec(problem.field);
-    if (match === null) {
-      unattributed.push(problem);
-      continue;
-    }
-    const [, head = "", at = "", rest = ""] = match;
-    const origins = head === "requirements" ? requirementOrigin : head === "cases" ? merged.caseOrigin : merged.classificationOrigin;
-    const origin = origins[Number(at)];
-    if (origin === undefined || (head === "requirements" && rest !== "")) {
-      unattributed.push(problem);
-      continue;
-    }
-    const [bundle, local] = origin;
-    push(bundle, { ...problem, field: `${head}[${String(local)}]${rest}` });
-  }
-  return { byBundle, unattributed };
-}
-
 // ── 要件への帰属と中身のやり直しの単位（手 3g・Issue #651）──────────────────
 //
 // 中身のやり直しは、問題の帰属した要件だけを書き直させる（同じ束の問題の無かった要件の分類と場合は初回のまま保持する）。束は

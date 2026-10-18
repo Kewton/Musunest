@@ -2915,6 +2915,46 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
     expect(outcome.value.suite.tests.filter((test) => test.target.requirementId === "R4" && !isGeneratedTestId(test.id)).map((test) => test.target.roleId)).toEqual(["c.rate"]);
   });
 
+  describe("(手 3g・#651 申告 1) 一覧に無い要件（コードの試験だけの R6）の場合は、束の 2 回目の呼び出しを実際にした回だけ捨てて書き直させる", () => {
+    const r6Default = {
+      ...rawTest({ id: "r6-default", requirementId: "R6", targetKind: "field", roleId: "f.item.kind", operation: "validate", observes: "default-value", input: {} }),
+      expected: { kind: "ok", value: JSON.stringify("alpha"), code: null },
+    };
+    const bad = idsResponse([r6Default]);
+    const caseOfR6 = (output: unknown) => ((output as { readonly cases?: readonly Record<string, unknown>[] }).cases ?? []).filter((entry) => entry["requirementId"] === "R6");
+
+    it("2 回目の応答にまた書いていれば今までどおり固定文で断り unmet（2 回目の要求の一覧に R6 は無く、ほかの要件は保持）", async () => {
+      const { outcome, recording } = await runG([bad, bad]);
+      if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error("unmet でない");
+      expect(recording.structured).toHaveLength(2);
+      const order = requestListedIds(recording.structured[0]!);
+      expect(order).not.toContain("R6");
+      expect(requestListedIds(recording.structured[1]!)).toEqual([]);
+      expect(requestRetainedIds(recording.structured[1]!)).toEqual(order);
+      // 前回の場合は捨てて書き直させる R6 の場合だけ
+      const previousCases = dataBlockOf(recording.structured[1]!.input, TEST_SPEC_RETRY_DATA_NAMES[0]) as readonly Record<string, unknown>[];
+      expect(previousCases.map((entry) => entry["requirementId"])).toEqual(["R6"]);
+      const at = mergedCaseIndexOf(bad, order, "r6-default");
+      expect(outcome.failure.attempts).toBe(TEST_SPEC_ROUNDS);
+      expect(outcome.failure.problems).toEqual([{ field: `cases[${String(at)}].observes`, message: DEFAULT_ROW.t2?.messages.notAllowed }]);
+      // 二点測定：2 回目に R6 を書かなければ、R6 の場合は捨てられて通る
+      const fixed = await runG([bad, idsResponse()]);
+      expect(fixed.outcome.ok).toBe(true);
+    });
+
+    it("2 回目の呼び出しが形を使い切って断られれば、何も捨てずに今までどおり unmet で、追加の要求は無く、候補には初回の応答（R6 の場合）が残る", async () => {
+      const shapeBad = negative({ classifications: "x", cases: "x" }, "classifications・cases が並びでない応答。束の形のやり直しを使い切る負例");
+      const rejected: RejectedCandidate[] = [];
+      const outputs = asCases([shapeBad, bad, shapeBad, idsResponse()]);
+      const { outcome, recording } = await run(outputs, { plan: GPLAN, list: GLIST, table: GTABLE, carryOver: await carryFor(), ledger, ids: true, onRejected: (candidate) => rejected.push(candidate) });
+      if (outcome.ok || outcome.failure.kind !== "unmet") throw new Error(`unmet でない：${JSON.stringify(outcome)}`);
+      expect(recording.structured).toHaveLength(3);
+      const content = rejected.filter((candidate) => candidate.kind === "content");
+      expect(content).toHaveLength(1);
+      expect(caseOfR6(content[0]?.response)).toHaveLength(1);
+    });
+  });
+
   it("(6) コードが作らない空の集計の要件：T1 の分類が existence-only の R4（T2 は ruled・判定なしで ruled に倒す）にはコードの試験を作らず、LLM が書いた空の試験を台帳の表で照らす（違えば落ち、合えば通る）", async () => {
     const table: NameTable = { ...GTABLE, classification: GTABLE.classification.map((entry) => (entry.requirementId === "R4" ? { ...entry, nature: "existence-only" as const } : entry)) };
     const empty = (value: unknown) => aggTest({ id: "r4-base-empty", requirementId: "R4", roleId: "c.base", kind: "boundary", observes: "empty-aggregate", empty: ["e.item"], value });

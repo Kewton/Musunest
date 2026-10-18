@@ -1405,6 +1405,9 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
         },
       };
     }
+    // 中身のやり直しを使い切った回は、やり直しの単位を作らない（束の出力から何も捨てず、今までどおり unmet。捨てるのは束の
+    // 2 回目の呼び出しを実際にした回だけ）
+    if (round >= TEST_SPEC_ROUNDS) return undefined;
     const plans = bundleRetryPlansOf(attributed.byRequirement, merged, bundles);
     // どの束の単位にも入らない要件の問題は、束を推測せずに止める（束の出どころの無い一覧に無い要件 ID など）
     const covered = new Set([...plans.values()].flatMap((plan) => plan.discard));
@@ -1416,7 +1419,7 @@ export async function runTestSpec(input: TestSpecInput): Promise<StageOutcome<Te
       };
     }
     retryPlans = plans;
-    if (round < TEST_SPEC_ROUNDS) for (const bundle of retryPlans.keys()) gatewayOf(bundle).noteRetry("content");
+    for (const bundle of retryPlans.keys()) gatewayOf(bundle).noteRetry("content");
     return undefined;
   };
 
