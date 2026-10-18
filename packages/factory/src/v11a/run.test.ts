@@ -739,8 +739,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ stage: "mapping", operation: null, call: 1, round: 1, attempt: 2, response: missingLast });
-    // C2 の束の候補は束の添字と束の要件 ID を持つ（要件 5 件で束 1 つ。Issue #594）
-    expect(candidates[0]).toMatchObject({ bundle: { index: 1, requirement_ids: LIST.requirements.map((requirement) => requirement.id) } });
+    // C2 は束に切らないので、候補に束の欄は無い（Issue #627）
+    expect(candidates[0]).not.toHaveProperty("bundle");
     expect(candidates[0]?.problems.length).toBeGreaterThan(0);
     expect(candidates[0]?.problems.every((problem) => typeof problem.message === "string" && problem.message !== "")).toBe(true);
   });
@@ -772,14 +772,12 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(diagnosticPaths(carried.result)).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
   });
 
-  it("既定値の value が options の外の要件（R6・束 2）を含む束だけが形のやり直しになり、束 1 の要求は増えない。直した束で表が組まれ C3 へ進む（Issue #594）", async () => {
+  it("既定値の value が options の外の要件（R6）は、C2 の形のやり直し 1 回（要求 2 本はどちらも全要件）で直り、表が組まれ C3 へ進む（Issue #594・#627）", async () => {
     const list = fixtureDefaultValueList();
     const table = withCodeIds(withAggregates(fixtureDefaultValueTable()));
     const good = idsResponsesOf(list, table, PROPERTY_LEDGER_VIEW);
-    expect(good.mappingBundles).toHaveLength(2);
-    const second = good.mappingBundles[1] as Record<string, unknown>;
     const outside = {
-      requirements: (second["requirements"] as readonly Record<string, unknown>[]).map((entry) =>
+      requirements: (good.mapping["requirements"] as readonly Record<string, unknown>[]).map((entry) =>
         entry["requirementId"] === "R6" ? { ...entry, verification: { ...(entry["verification"] as Record<string, unknown>), value: "gamma" } } : entry,
       ),
     };
@@ -787,9 +785,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       structured(good.entities),
       structured(good.fields),
       structured(good.behaviors),
-      structured(good.mappingBundles[0]),
       structured(outside),
-      structured(second),
+      structured(good.mapping),
       structured(acceptAll(["R1", "R2", "R3", "R4", "R6"])),
     ]);
     const outcome = await runStageRangeV11a({
@@ -801,13 +798,11 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const mappingRequests = recording.structured.filter((request) => request.schemaName === "mapping");
     const listed = (request: LlmStructuredRequest) =>
       ((dataBlockOf(request.input, "要件の一覧") as { requirements: readonly { id: string }[] }).requirements).map((requirement) => requirement.id);
-    expect(mappingRequests.map(listed)).toEqual([["R1", "R2", "R3", "R4", "R5"], ["R6"], ["R6"]]);
-    expect(mappingRequests[2]?.input).toContain("既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い");
+    const all = ["R1", "R2", "R3", "R4", "R5", "R6"];
+    expect(mappingRequests.map(listed)).toEqual([all, all]);
+    expect(mappingRequests[1]?.input).toContain("既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い");
     const records = outcome.stages.filter((record) => record.stage === "mapping");
-    expect(records.map((record) => [record.status, record.retries.shape])).toEqual([
-      ["ok", 0],
-      ["ok", 1],
-    ]);
+    expect(records.map((record) => [record.status, record.retries.shape])).toEqual([["ok", 1]]);
     expect(schemaNames(recording.structured).at(-1)).toBe(SEMANTIC_CHECK_SCHEMA_NAME);
   });
 

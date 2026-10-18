@@ -948,10 +948,7 @@ export interface IdsResponses {
   readonly entities: Record<string, unknown>;
   readonly fields: Record<string, unknown>;
   readonly behaviors: Record<string, unknown>;
-  /** C2 の応答を全要件で 1 つにしたもの（束に切る前。要件 5 件以下なら束 1 の応答と同じ） */
   readonly mapping: Record<string, unknown>;
-  /** C2 の束ごとの応答（一覧の順に 5 件ずつ。呼ばれる順。Issue #594） */
-  readonly mappingBundles: readonly Record<string, unknown>[];
 }
 
 /** 表（コードの形の ID）から、C1 の 3 束と C2 の応答を組む（台帳が集計の種類を持てば計算に `aggregate`） */
@@ -1013,18 +1010,15 @@ export function idsResponsesOf(list: RequirementList, table: NameTable, ledger?:
       screens: rowsOf("screen").map((entry) => ({ entity: entry.entity, name: entry.name, role: entry.role, view: (entry.type as { view: string }).view })),
     },
     mapping: { requirements: mappingEntries },
-    mappingBundles: Array.from({ length: Math.ceil(mappingEntries.length / 5) }, (_, index) => ({
-      requirements: mappingEntries.slice(index * 5, index * 5 + 5),
-    })),
   };
 }
 
-/** C1 の 3 束と C2 の束ごとの応答を、呼ばれる順の並びにする */
+/** C1 の 3 束と C2 の応答を、呼ばれる順の並びにする */
 export const idsResponseList = (responses: IdsResponses): readonly Record<string, unknown>[] => [
   responses.entities,
   responses.fields,
   responses.behaviors,
-  ...responses.mappingBundles,
+  responses.mapping,
 ];
 
 /** 確定した仕様（抽象的な題材。要件は一覧と同じ） */

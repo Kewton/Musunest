@@ -150,7 +150,6 @@ import {
   judgeAdviceMarks,
   judgeAdviceQuestionId,
   runJudgeAdvice,
-  type JudgeAdviceMarkEntry,
   type JudgeAdviceRecord,
 } from "./stages/judge-advice.js";
 import {
@@ -182,17 +181,10 @@ import {
 import { canRepairFields, locateFailures } from "../v12/locate.js";
 import { V12_CALL_LIMITS, type V12CallLimits } from "../v12/limits.js";
 import { mergeReplacements, runFieldRepair } from "../v12/stages/field-repair.js";
-import { VOCABULARY_BUNDLES, ZERO_REFERENCE_COUNTS, type ReferenceCounts } from "../v12/ids.js";
+import { VOCABULARY_BUNDLES, type ReferenceCounts } from "../v12/ids.js";
 import { isGeneratedTestId } from "../v12/generated-tests.js";
 import { runVocabularyBundle } from "../v12/stages/vocabulary.js";
-import {
-  assembleMappedTable,
-  mappingBundlesOf,
-  runMappingBundle,
-  type MappedBundle,
-  type MappingBundle,
-  type MappingBundleOutcome,
-} from "../v12/stages/mapping.js";
+import { MAPPING_ROUNDS, runMapping, type MappingOutcome, type MappingPrevious } from "../v12/stages/mapping.js";
 
 /** v1.1α の入力（v1 の `GenerationInput` と同じ形で、確定した仕様を必須にしたもの） */
 export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
@@ -328,8 +320,6 @@ interface RejectedCandidateSlot {
   readonly operation: StageOperation | null;
   readonly call: number;
   readonly candidate: RejectedCandidate;
-  /** 旗 `v12.ids` の C2 の束（束の添字と束の要件 ID。C2 の候補だけ。Issue #594） */
-  readonly bundle?: MappingBundle;
 }
 
 /** 断った候補に、対象・raw・一覧の SHA-256 と、問題ごとの参照元の SHA-256 を付ける（v1 と同じ形） */
@@ -344,10 +334,6 @@ async function toBundleRejectedCandidate(slot: RejectedCandidateSlot): Promise<B
     round: candidate.round,
     attempt: candidate.attempt,
     kind: candidate.kind,
-    // C2 の束の候補だけ、束の添字と束の要件 ID を添える（ほかの段の候補の形は今のまま。Issue #594）
-    ...(slot.bundle === undefined
-      ? {}
-      : { bundle: { index: slot.bundle.index, requirement_ids: slot.bundle.requirements.map((requirement) => requirement.id) } }),
   };
   if (candidate.kind === "shape") {
     return {
@@ -658,9 +644,9 @@ async function runV11a(
    */
   let lastIdsRejection: RejectedCandidateSlot | null = null;
   const idsRejectionSink =
-    (stage: "vocabulary" | "mapping", call: number, bundle?: MappingBundle) =>
+    (stage: "vocabulary" | "mapping", call: number) =>
     (candidate: RejectedCandidate): void => {
-      lastIdsRejection = { stage, operation: null, call, candidate, ...(bundle === undefined ? {} : { bundle }) };
+      lastIdsRejection = { stage, operation: null, call, candidate };
     };
   const keepLastRejection = (): void => {
     if (lastIdsRejection !== null) rejectedCandidates.push(lastIdsRejection);
@@ -1038,30 +1024,25 @@ async function runV11a(
         pushRecord("vocabulary", "ok", before, start, null, outcome.references);
         rows = outcome.rows;
       }
-      // C2 は要件 5 件ごとの束（束ごとに 1 記録。通番は呼んだ順）。全束がそろったら 1 つの表に組み、表全体の C2' を掛ける
-      // （08 §4.1。Issue #594）
-      const bundles = mappingBundlesOf(list);
-      let mappingCall = 0;
-      const runBundle = async (bundle: MappingBundle, retry?: { readonly previous: MappedBundle; readonly rejections: readonly SemanticRejection[]; readonly marks: readonly JudgeAdviceMarkEntry[] }) => {
-        mappingCall += 1;
+      let mappingPrevious: MappingPrevious | undefined;
+      let firstRound: typeof adopted;
+      for (let round = 1; round <= MAPPING_ROUNDS; round += 1) {
+        const retry = mappingPrevious;
         const before = meterState();
         const start = input.now();
-        let outcome: MappingBundleOutcome;
+        let outcome: MappingOutcome;
         try {
-          // C3 の拒否のあとの 2 回目（中身のやり直し）を共通の口へ告げる（この束の記録の再試行に数える）
+          // C3 の拒否のあとの 2 回目（中身のやり直し）を共通の口へ告げる（この段の記録の再試行に数える）
           if (retry !== undefined) gateway.noteRetry("content");
           lastIdsRejection = null;
-          outcome = await runMappingBundle({
+          outcome = await runMapping({
             plan: input.plan,
             list,
-            bundle,
             documents: input.documents,
             gateway,
             rows,
-            ...(retry === undefined
-              ? {}
-              : { previous: { response: retry.previous.response, rejections: retry.rejections, advice: retry.marks } }),
-            onRejected: idsRejectionSink("mapping", mappingCall, bundle),
+            ...(retry === undefined ? {} : { previous: retry }),
+            onRejected: idsRejectionSink("mapping", round),
             ...withLedger,
           });
         } catch (error) {
@@ -1071,66 +1052,26 @@ async function runV11a(
         if (!outcome.ok) {
           const attribution = stageFailureAttribution("mapping", outcome.failure);
           pushRecord("mapping", "failed", before, start, attribution.kind, outcome.references);
-          return { outcome, attribution };
+          // 2 回目が C2' に落ちても形の再試行は無く、前回の写像のまま拒否の要件を持ち越す（08 §4.1）
+          if (retry !== undefined && firstRound !== undefined && outcome.failure.kind === "unmet") {
+            adopted = firstRound;
+            break;
+          }
+          keepLastRejection();
+          throw new RunStop(attribution);
         }
         pushRecord("mapping", "ok", before, start, null, outcome.references);
-        return { outcome, attribution: null };
-      };
-      /** 表全体の C2'（要件に帰属しない問題は束を推測せず、固定文で `mapping`・`unmet` として止める） */
-      const assemble = (mapped: readonly MappedBundle[]) => assembleMappedTable(list, rows, mapped, input.documents, ledger);
-      const stopAtMapping = (problems: readonly Problem[]): never => {
-        pushRecord("mapping", "failed", meterState(), input.now(), "unmet", ZERO_REFERENCE_COUNTS);
-        throw new RunStop(stageFailureAttribution("mapping", { kind: "unmet", attempts: 1, problems }));
-      };
-
-      const mapped: MappedBundle[] = [];
-      for (const bundle of bundles) {
-        const { outcome, attribution } = await runBundle(bundle);
-        if (!outcome.ok) {
-          keepLastRejection();
-          throw new RunStop(attribution as FailureAttribution);
+        const output = outcome.value;
+        const { semantic, advice, marks, rejections } = await checkTableRound(round, output);
+        const checked = { table: output.table, tableSha256: output.tableSha256, semantic, advice };
+        // 拒否が残れば、2 回目が未使用なら C2 の 2 回目（前回の写像・拒否・印をデータで。C1 は呼ばない）。使用済みなら持ち越し
+        if (rejections.length > 0 && round < MAPPING_ROUNDS) {
+          firstRound = checked;
+          mappingPrevious = { response: output.response, rejections, advice: marks };
+          continue;
         }
-        mapped.push(outcome.value);
-      }
-      const first = await assemble(mapped);
-      if (!first.ok) stopAtMapping(first.problems);
-      const firstOutput = first as Extract<typeof first, { readonly ok: true }>;
-      const firstChecked = await checkTableRound(1, firstOutput);
-      const firstRound = { table: firstOutput.table, tableSha256: firstOutput.tableSha256, semantic: firstChecked.semantic, advice: firstChecked.advice };
-      adopted = firstRound;
-      if (firstChecked.rejections.length > 0) {
-        // 拒否が残れば、拒否された要件を含む束だけを 2 回目へ（前回のその束の応答・その束の拒否・印をデータで。C1 は呼ばない）。
-        // 2 回目の束が束の C2' に落ちれば、その束は前回の写像のまま（形の再試行は無い。08 §4.1）
-        const redone = [...mapped];
-        let changed = false;
-        // 2 回目が落ちた束の初回の拒否（その束は前回の写像のまま。再点検の結果で上書きせず、拒否の要件を持ち越す）
-        const kept = new Map<string, SemanticRejection>();
-        for (const [index, bundle] of bundles.entries()) {
-          const ids = new Set(bundle.requirements.map((requirement) => requirement.id));
-          const rejections = firstChecked.rejections.filter((rejection) => ids.has(rejection.requirementId));
-          if (rejections.length === 0) continue;
-          const previous = mapped[index] as MappedBundle;
-          const marks = firstChecked.marks.filter((entry) => ids.has(entry.requirementId));
-          const { outcome, attribution } = await runBundle(bundle, { previous, rejections, marks });
-          if (!outcome.ok) {
-            if (outcome.failure.kind === "unmet") {
-              for (const rejection of rejections) kept.set(rejection.requirementId, rejection);
-              continue;
-            }
-            keepLastRejection();
-            throw new RunStop(attribution as FailureAttribution);
-          }
-          redone[index] = outcome.value;
-          changed = true;
-        }
-        // 組み直した表が表全体の C2' に落ちれば（要件に帰属しない問題）、前回の表のまま拒否の要件を持ち越す
-        const second = changed ? await assemble(redone) : undefined;
-        if (second?.ok === true) {
-          const { semantic, advice } = await checkTableRound(2, second);
-          // 落ちた束の要件は、再点検が受理でも初回の拒否のまま（前回の写像を直していないので拒否は解けていない）
-          const judgments = semantic.judgments.map((judgment) => kept.get(judgment.requirementId) ?? judgment);
-          adopted = { table: second.table, tableSha256: second.tableSha256, semantic: { ...semantic, judgments }, advice };
-        }
+        adopted = checked;
+        break;
       }
     } else {
       // 開始 T2・B1 は T1〜T1'' を呼ばない（凍結した表と点検結果から入る）

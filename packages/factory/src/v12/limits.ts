@@ -216,29 +216,20 @@ export const V12_V11A_FRAME_MAP: readonly {
 ];
 
 /**
- * 旗 `v12.ids` の段（手 3a・3b。Issue #593・#594）が、枠のどの行に写るか。C1 は束 3 つ（`units`）で、束ごとに初回 1・形のやり直し 1
- * （`shapeAttempts` 2）。C2 は要件 5 件ごとの束（`bundleRequirements`。束の数は要件の数で決まるので `units` は null）で、束ごとに
- * 初回 1・形のやり直し 1・C3 の拒否のあとの 2 回目 1（`rounds` 2。2 回目は形の再試行を持たない）。`maxLogicalPerUnit` は束 1 つの
- * 論理要求の最大（初回・形のやり直し・中身のやり直しの合計）。値は段のコードの定数と同じで、試験が照らす（ここで値を変えない）。
+ * 旗 `v12.ids` の段（手 3a。Issue #593）が、枠のどの行に写るか。C1 は束 3 つ（`units`）で、束ごとに初回 1・形のやり直し 1
+ * （`shapeAttempts` 2）。C2 は束 1 つ（全要件を 1 回で写す。手 3b の要件 5 件ごとの束は Issue #627 で戻した）で、初回の形の
+ * やり直し 1・C3 の拒否のあとの 2 回目 1（`rounds` 2。2 回目は形の再試行を持たない）。値は段のコードの定数と同じで、試験が照らす
+ * （ここで値を変えない）。
  */
 export const V12_IDS_FRAME_MAP: readonly {
   readonly stage: StageId;
   readonly frame: V12FrameStage;
   readonly rounds: number;
   readonly shapeAttempts: number;
-  /** 束の数（段で固定のとき。要件の数で決まる段は null） */
-  readonly units: number | null;
-  /** 束 1 つの要件の数（要件の一覧をこの件数ごとに切る段だけ。ほかは null） */
-  readonly bundleRequirements: number | null;
-  /** 束 1 つの論理要求の最大（初回・形のやり直し・中身のやり直しの合計） */
-  readonly maxLogicalPerUnit: number;
+  readonly units: number;
+  /** 段の論理要求の最大（初回・形のやり直し・中身のやり直しの合計） */
+  readonly maxLogical: number;
 }[] = [
-  { stage: "vocabulary", frame: "C1", rounds: 1, shapeAttempts: 2, units: 3, bundleRequirements: null, maxLogicalPerUnit: 2 },
-  { stage: "mapping", frame: "C2", rounds: 2, shapeAttempts: 2, units: null, bundleRequirements: 5, maxLogicalPerUnit: 3 },
+  { stage: "vocabulary", frame: "C1", rounds: 1, shapeAttempts: 2, units: 3, maxLogical: 6 },
+  { stage: "mapping", frame: "C2", rounds: 2, shapeAttempts: 2, units: 1, maxLogical: 3 },
 ];
-
-/** 旗 `v12.ids` の段の束の数（要件の数 `requirementCount` の本で。束の大きさで切る段は切り上げ） */
-export function v12IdsUnitsOf(entry: (typeof V12_IDS_FRAME_MAP)[number], requirementCount: number): number {
-  if (entry.units !== null) return entry.units;
-  return entry.bundleRequirements === null ? 1 : Math.ceil(requirementCount / entry.bundleRequirements);
-}
