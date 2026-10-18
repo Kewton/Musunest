@@ -1,0 +1,38 @@
+{
+  "rounds": [
+    {
+      "round": 1,
+      "table_sha256": "5bba946ee5e0ca72bebb775f3757ddc8dc21fd07f5a7813e61238ef018ae8ccf",
+      "targets": [
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4",
+        "Q5"
+      ],
+      "judgments": [
+        {
+          "requirementId": "Q1",
+          "verdict": "reject",
+          "kind": "weak-verification"
+        },
+        {
+          "requirementId": "Q2",
+          "verdict": "accept"
+        },
+        {
+          "requirementId": "Q3",
+          "verdict": "accept"
+        },
+        {
+          "requirementId": "Q4",
+          "verdict": "accept"
+        },
+        {
+          "requirementId": "Q5",
+          "verdict": "accept"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,165 @@
+{
+  "table_sha256": "8b7e6da4dfa7e623903d7815bee6ca272aff72d2891b815c909fd47464bc8b2b",
+  "rows": [
+    {
+      "id": "r_E_a",
+      "kind": "entity",
+      "entity": null,
+      "type": null,
+      "options": null,
+      "groupBy": null,
+      "refEntity": null
+    },
+    {
+      "id": "r_E_b",
+      "kind": "entity",
+      "entity": null,
+      "type": null,
+      "options": null,
+      "groupBy": null,
+      "refEntity": null
+    },
+    {
+      "id": "r_F_a1",
+      "kind": "field",
+      "entity": "r_E_a",
+      "type": "string",
+      "options": null,
+      "groupBy": null,
+      "refEntity": null
+    },
+    {
+      "id": "r_F_a2",
+      "kind": "field",
+      "entity": "r_E_a",
+      "type": "number",
+      "options": null,
+      "groupBy": null,
+      "refEntity": null
+    },
+    {
+      "id": "r_F_b1",
+      "kind": "field",
+      "entity": "r_E_b",
+      "type": "boolean",
+      "options": null,
+      "groupBy": null,
+      "refEntity": null
+    },
+    {
+      "id": "r_C_a1",
+      "kind": "computation",
+      "entity": "r_E_a",
+      "type": {
+        "valueType": "number",
+        "scope": "row",
+        "form": "expression",
+        "aggregate": null
+      },
+      "options": null,
+      "groupBy": null,
+      "refEntity": null
+    },
+    {
+      "id": "r_S_a1",
+      "kind": "screen",
+      "entity": "r_E_a",
+      "type": {
+        "view": "list"
+      },
+      "options": null,
+      "groupBy": null,
+      "refEntity": null
+    }
+  ],
+  "ownership": [
+    {
+      "requirementId": "Q1",
+      "roles": [
+        {
+          "id": "r_F_a2"
+        }
+      ]
+    },
+    {
+      "requirementId": "Q2",
+      "roles": [
+        {
+          "id": "r_F_a1"
+        }
+      ]
+    },
+    {
+      "requirementId": "Q3",
+      "roles": [
+        {
+          "id": "r_C_a1"
+        }
+      ]
+    },
+    {
+      "requirementId": "Q4",
+      "roles": [
+        {
+          "id": "r_S_a1"
+        }
+      ]
+    },
+    {
+      "requirementId": "Q5",
+      "roles": [
+        {
+          "id": "r_F_b1"
+        }
+      ]
+    },
+    {
+      "requirementId": "Q6",
+      "roles": []
+    }
+  ],
+  "verification": [
+    {
+      "requirementId": "Q1",
+      "kind": "structural",
+      "checks": [
+        "ck_1"
+      ],
+      "value": null
+    },
+    {
+      "requirementId": "Q2",
+      "kind": "fixed-test",
+      "checks": [],
+      "value": null
+    },
+    {
+      "requirementId": "Q3",
+      "kind": "fixed-test",
+      "checks": [],
+      "value": null
+    },
+    {
+      "requirementId": "Q4",
+      "kind": "structural",
+      "checks": [
+        "ck_4"
+      ],
+      "value": null
+    },
+    {
+      "requirementId": "Q5",
+      "kind": "structural",
+      "checks": [
+        "ck_5"
+      ],
+      "value": null
+    },
+    {
+      "requirementId": "Q6",
+      "kind": "fixed-test",
+      "checks": [],
+      "value": null
+    }
+  ]
+}
