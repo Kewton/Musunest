@@ -17,6 +17,9 @@
 //   3. **答えた adapter ごとの呼び出しの数と、判定の費用（USD）を数える**（§5・Issue #359）。生成の
 //      側は、これを要約に写す——段の費用（`provider_cost_usd`）とは別の欄に残す。
 //
+// 門と一緒に**判定の枝**の上限（`judgeLimit`。08-architecture-v1.2.md §4.1・Issue #592）を渡すと、判定の実試行は共有の門より
+// 先に枝に照らす。枝が尽きれば判定を呼ばず、共有の門も数えない（判定は助言。受理で埋めない）。
+//
 // **呼び出しが失敗しても、予約は精算する**（`JobBudget.release`。Issue #359）。usage が分からない
 // 失敗で予約を残すと、残高が戻らない。判定は助言なので、失敗は呼ぶ側（run.ts）が握って申告を
 // そのまま残す（§4・§6）。
@@ -96,6 +99,13 @@ export interface BudgetedJudgeOptions {
   readonly recheck?: Judge;
   /** 締切と総呼び出し数の門（生成と共有。Issue #432）。渡さなければ門を掛けない */
   readonly gate?: CallGate;
+  /**
+   * **判定の枝**の上限（判定だけの実試行の上限。08-architecture-v1.2.md §4.1・Issue #592）。`gate` と一緒に渡すと、判定の
+   * 実試行（最初の 1 回・内部の再送・切り替え・再点検）は、共有の門より**先に**この枝に照らす。枝が尽きれば共有の門を
+   * 数えずに `JudgeCallLimitExceededError` で断る（判定を呼ばない・落とし先へ切り替えない）。渡さなければ枝を掛けない
+   * （今までどおり）。
+   */
+  readonly judgeLimit?: number;
 }
 
 /** 予算に結び付けた判定。`Judge` に、判定の費用と、答えた adapter ごとの呼び出しの数を足したもの */
@@ -121,6 +131,11 @@ export interface BudgetedJudge extends Judge {
    * 照らすのに使う。台帳（ここ）と共有の門（`CallGate`）を食い違わせない。
    */
   readonly attempts: number;
+  /**
+   * 判定の枝（`judgeLimit`）の上限と、枝を通った判定の実試行の数（Issue #592）。枝を掛けない包みは null。
+   * 枝が断った回は数えない。
+   */
+  readonly branch: { readonly limit: number; readonly used: number } | null;
 }
 
 /** 主と落とし先で**共有する**、判定の費用・呼び出しの数・試行の数の台帳（Issue #432・#473）。 */
@@ -148,14 +163,18 @@ export function createBudgetedJudge(options: BudgetedJudgeOptions): BudgetedJudg
     attemptsByAdapter: { jev: 0, llm: 0, fake: 0, unknown: 0 },
   };
   const judge = options.judge;
+  // 判定の枝（門と一緒に渡されたときだけ）。包みと adapter（Jev の内部の再送）には、枝を先に照らす門の見え方を渡す
+  const branch = options.gate === undefined || options.judgeLimit === undefined ? undefined : createJudgeBranchGate(options.gate, options.judgeLimit);
+  const wrapOptions: BudgetedJudgeOptions = branch === undefined ? options : { ...options, gate: branch.gate };
+  const branchOf = (): BudgetedJudge["branch"] => (branch === undefined ? null : { limit: branch.limit, used: branch.used() });
   if (judge.primary !== undefined && judge.fallback !== undefined) {
-    const primary = wrapBudgetedJudge(judge.primary, options, account, undefined);
-    const switchFallback = wrapBudgetedJudge(judge.fallback, options, account, undefined);
+    const primary = wrapBudgetedJudge(judge.primary, wrapOptions, account, undefined, branchOf);
+    const switchFallback = wrapBudgetedJudge(judge.fallback, wrapOptions, account, undefined, branchOf);
     // 再点検の宛先は、明示の `recheck` が落とし先と違うときだけ別に包む（同じなら切り替えと同じ包み）
     const exposedFallback =
       options.recheck === undefined || options.recheck === judge.fallback
         ? switchFallback
-        : wrapBudgetedJudge(options.recheck, options, account, undefined);
+        : wrapBudgetedJudge(options.recheck, wrapOptions, account, undefined, branchOf);
     return {
       get spentUsd(): number {
         return account.spentUsd;
@@ -168,6 +187,9 @@ export function createBudgetedJudge(options: BudgetedJudgeOptions): BudgetedJudg
       },
       get attempts(): number {
         return account.attempts;
+      },
+      get branch(): BudgetedJudge["branch"] {
+        return branchOf();
       },
       async judge(request: JudgeRequest): Promise<JudgeResponse> {
         try {
@@ -182,7 +204,43 @@ export function createBudgetedJudge(options: BudgetedJudgeOptions): BudgetedJudg
     };
   }
   const fallback = options.recheck ?? judge.fallback;
-  return wrapBudgetedJudge(judge, options, account, fallback === undefined ? undefined : wrapBudgetedJudge(fallback, options, account, undefined));
+  return wrapBudgetedJudge(
+    judge,
+    wrapOptions,
+    account,
+    fallback === undefined ? undefined : wrapBudgetedJudge(fallback, wrapOptions, account, undefined, branchOf),
+    branchOf,
+  );
+}
+
+/**
+ * 判定の枝（Issue #592）。共有の門の**見え方**を作る：`begin` は、枝を通った判定の実試行が上限に達していれば共有の門を
+ * 数えずに `"limit"` を返し、そうでなければ共有の門に照らして、通った回だけ枝を 1 つ数える。時計・締切・上限・数は
+ * 共有の門のものをそのまま見せる（包みの台帳の差分と、締切の打ち切りは今までと同じに働く）。
+ */
+export function createJudgeBranchGate(
+  gate: CallGate,
+  limit: number,
+): { readonly gate: CallGate; readonly limit: number; used(): number } {
+  if (!Number.isInteger(limit) || limit < 0) throw new RangeError("判定の枝の上限は 0 以上の整数であること");
+  let used = 0;
+  return {
+    limit,
+    used: () => used,
+    gate: {
+      now: gate.now,
+      deadline: gate.deadline,
+      limit: gate.limit,
+      attempts: () => gate.attempts(),
+      remainingMs: () => gate.remainingMs(),
+      begin: () => {
+        if (used >= limit) return "limit";
+        const begun = gate.begin();
+        if (begun === "ok") used += 1;
+        return begun;
+      },
+    },
+  };
 }
 
 /** 門・予算で止まった誤りか（切り替えの判断に使う。Issue #432） */
@@ -200,6 +258,7 @@ function wrapBudgetedJudge(
   options: BudgetedJudgeOptions,
   account: JudgeAccount,
   fallback: BudgetedJudge | undefined,
+  branchOf: () => BudgetedJudge["branch"],
 ): BudgetedJudge {
   const rates = options.rates;
   const jevRates = options.jevRates ?? JEV_RATES;
@@ -219,6 +278,9 @@ function wrapBudgetedJudge(
     },
     get attempts(): number {
       return account.attempts;
+    },
+    get branch(): BudgetedJudge["branch"] {
+      return branchOf();
     },
     async judge(request: JudgeRequest): Promise<JudgeResponse> {
       // 実試行の**直前**に、生成と共有する門を照らす（締切・総呼び出し数。Issue #432）。失敗した試行も数える
