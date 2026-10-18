@@ -9,8 +9,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DECLARATION_FILE,
   DESIGN_FILE,
+  DIAGNOSTICS_LISTING_FILE,
+  DIAGNOSTICS_REJECTED_MAPPING_FILE,
   DIAGNOSTICS_REJECTED_NAME_TABLE_FILE,
   DIAGNOSTICS_REJECTED_TEST_SPEC_FILE,
+  DIAGNOSTICS_REJECTED_VOCABULARY_FILE,
   MAPPINGS_FILE,
   TEST_SUITE_FILE,
   TESTS_FILE,
@@ -649,6 +652,89 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const totalRefs = TABLE_IDS.rows.filter((row) => row.kind === "field").reduce((total, row) => total + 1 + (row.refEntity === null ? 0 : 1), 0);
     expect(fields?.checked).toBe(2 * totalRefs);
     expect(result.stopped?.problems?.map((problem) => problem.message)).toContain("知らない ID である（この表で振った ID に無い）");
+  });
+
+  /** 診断の断った候補のファイル 1 本の候補（Issue #608） */
+  type IdsRejected = { stage: string; operation: null; call: number; round: number; attempt: number; kind: string; response: unknown; problems: { message: string }[] };
+  const rejectedOf = (result: Awaited<ReturnType<typeof runScenario>>["result"], path: string) =>
+    diagnosticOf(result.diagnostics, path)["candidates"] as readonly IdsRejected[];
+  const diagnosticPaths = (result: Awaited<ReturnType<typeof runScenario>>["result"]) => result.diagnostics.map((artifact) => artifact.path);
+
+  it("C1 の束 2 が 2 回断られる走り：診断に rejected-vocabulary が 1 本あり、束の番号 2・断った固定文・最後の候補だけが入る（Issue #608）", async () => {
+    const good = responses();
+    const fieldsOf = (entity: string) => ({
+      fields: (good.fields["fields"] as readonly Record<string, unknown>[]).map((item, index) => (index === 0 ? { ...item, entity } : item)),
+    });
+    const first = fieldsOf("E8");
+    const last = fieldsOf("E9");
+    const { result, recording } = await runScenario([structured(good.entities), structured(first), structured(last)], { flags: IDS_FLAGS });
+    // 段の判定・呼び出しの数・終了コードは #593 のまま
+    expect(result.stopped).toMatchObject({ stage: "vocabulary", kind: "unmet" });
+    expect(result.summary.exit_code).toBe(1);
+    expect(result.bundle).toBeNull();
+    expect(schemaNames(recording.structured)).toEqual(["vocabulary-entities", "vocabulary-fields", "vocabulary-fields"]);
+    const paths = diagnosticPaths(result);
+    expect(paths.filter((path) => path === DIAGNOSTICS_REJECTED_VOCABULARY_FILE)).toHaveLength(1);
+    expect(paths).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
+    expect(paths).not.toContain(DIAGNOSTICS_REJECTED_NAME_TABLE_FILE);
+    const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ stage: "vocabulary", operation: null, call: 2, round: 1, attempt: 2, response: last });
+    expect(candidates[0]?.problems.map((problem) => problem.message)).toContain("知らない ID である（この表で振った ID に無い）");
+    // 断った候補は納品物にも要約にも入らない（一覧の要約は値なし）
+    const listing = diagnosticOf(result.diagnostics, DIAGNOSTICS_LISTING_FILE)["rejected"] as readonly { stage: string; call: number; messages: { message: string }[] }[];
+    expect(listing.map((entry) => [entry.stage, entry.call])).toEqual([["vocabulary", 2]]);
+    expect(JSON.stringify(result.summary) + JSON.stringify(result.record)).not.toContain('"E9"');
+  });
+
+  it("C2 が 2 回断られる走り：rejected-mapping が 1 本あり、呼び出しの回・断った固定文・最後の候補が入る。rejected-vocabulary は無い（Issue #608）", async () => {
+    const good = responses();
+    const requirements = good.mapping["requirements"] as readonly unknown[];
+    const missingFirst = { requirements: requirements.slice(1) };
+    const missingLast = { requirements: requirements.slice(0, -1) };
+    const { result, recording } = await runScenario(
+      [structured(good.entities), structured(good.fields), structured(good.behaviors), structured(missingFirst), structured(missingLast)],
+      { flags: IDS_FLAGS },
+    );
+    expect(result.stopped).toMatchObject({ stage: "mapping", kind: "unmet" });
+    expect(result.summary.exit_code).toBe(1);
+    expect(schemaNames(recording.structured)).toEqual(["vocabulary-entities", "vocabulary-fields", "vocabulary-behaviors", "mapping", "mapping"]);
+    const paths = diagnosticPaths(result);
+    expect(paths.filter((path) => path === DIAGNOSTICS_REJECTED_MAPPING_FILE)).toHaveLength(1);
+    expect(paths).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
+    expect(paths).not.toContain(DIAGNOSTICS_REJECTED_NAME_TABLE_FILE);
+    const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ stage: "mapping", operation: null, call: 1, round: 1, attempt: 2, response: missingLast });
+    expect(candidates[0]?.problems.length).toBeGreaterThan(0);
+    expect(candidates[0]?.problems.every((problem) => typeof problem.message === "string" && problem.message !== "")).toBe(true);
+  });
+
+  it("通る走り・C2 の 2 回目が C2' に落ちて持ち越す走りには rejected-vocabulary・rejected-mapping が無い（Issue #608）", async () => {
+    const passed = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_FLAGS });
+    expect(passed.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
+    expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
+    const good = responses();
+    const rejectR3 = judgments(IDS, { R3: ["unnecessary-ownership", "締められる"] });
+    const missing = { requirements: (good.mapping["requirements"] as readonly unknown[]).slice(1) };
+    const carried = await runScenario(
+      [
+        structured(good.entities),
+        structured(good.fields),
+        structured(good.behaviors),
+        structured(good.mapping),
+        structured(rejectR3),
+        structured(missing),
+        structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+        structured({ declaration: RUN_YAML }),
+        structured(acceptAll(["R1", "R2", "R4"])),
+      ],
+      { flags: IDS_FLAGS },
+    );
+    expect(carried.result.stopped).toBeNull();
+    expect(diagnosticPaths(carried.result)).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
+    expect(diagnosticPaths(carried.result)).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
   });
 
   it("C2' の負例：要件の欠落が 2 回続けば段 mapping・unmet で止まる。C1 は 3 束 1 回ずつ", async () => {
