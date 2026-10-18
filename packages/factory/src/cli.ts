@@ -86,6 +86,7 @@ import {
 } from "./v11a/bundle-v11a.js";
 import { runGenerationV11a, runStageRangeV11a } from "./v11a/run.js";
 import { fromPublicV12Flags, V12_PIPELINE_FLAGS, type V12PublicFlags } from "./v12/ledger.js";
+import { V12_CALL_LIMITS } from "./v12/limits.js";
 import type { PromptDocument } from "./stages/prompt.js";
 
 /** 工場の識別（要約の `builder`。S-5） */
@@ -1107,7 +1108,15 @@ export async function runCli(deps: CliDeps): Promise<number> {
   };
   // v1.2 の走りだけ、条件の記録に経路と実効の旗の組を足す（v1・v1.1α の記録には新しい欄を出さない。Issue #547）
   const v12Flags = v12FlagsOf(parsed.pipeline);
-  const v12Conditions = v12Flags === undefined ? undefined : { pipeline: "v1.2", v12_flags: v12Flags };
+  // 呼び出しの上限は旗 `ids` が on の走りでだけ効くので、そのときだけ定数を参照して記録に足す（Issue #616）
+  const v12Conditions =
+    v12Flags === undefined
+      ? undefined
+      : {
+          pipeline: "v1.2",
+          v12_flags: v12Flags,
+          ...(v12Flags.ids ? { v12_call_limits: { ...V12_CALL_LIMITS } } : {}),
+        };
   const recordConditions: PlanCliConditions = v12Conditions === undefined ? conditions : { ...conditions, ...v12Conditions };
 
   // `--plan-file`：包みを検査してから client を作る（検査で断れば API を呼ばない。Issue #495）

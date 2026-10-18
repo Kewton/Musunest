@@ -81,6 +81,7 @@ import {
 } from "./v11a/__tests__/fixtures.js";
 import * as ledgerModule from "./v12/ledger.js";
 import type { LedgerView } from "./v12/ledger.js";
+import { V12_CALL_LIMITS } from "./v12/limits.js";
 import type { NameTable } from "./v11a/names.js";
 import {
   BUNDLE_MANIFEST_FILE,
@@ -1294,7 +1295,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(v12.summary["prompt_version"]).toBe("v1.2");
     expect(v12.record.conditions["pipeline"]).toBe("v1.2");
     expect(v12.record.conditions["prompt_version"]).toBe("v1.2");
-    const { pipeline: _pipeline, prompt_version: _v12Prompt, v12_flags: _flags, ...v12Rest } = v12.record.conditions;
+    const { pipeline: _pipeline, prompt_version: _v12Prompt, v12_flags: _flags, v12_call_limits: _limits, ...v12Rest } = v12.record.conditions;
     const { prompt_version: v11aPrompt, ...v11aRest } = v11a.record.conditions;
     expect(v11aPrompt).toBe("v1.1a");
     expect(v12Rest).toEqual(v11aRest);
@@ -1332,6 +1333,15 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(run.record.conditions["v12_flags"]).toEqual({ ledger: true, "search-repair": true, ids: true });
   });
 
+  it("ids on の v1.2 の走りの条件の記録の v12_call_limits は V12_CALL_LIMITS と深く等しい（Issue #616）", async () => {
+    const run = await runV11aCli({ dir: `${directory}/v12-call-limits`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    expect(run.code).toBe(EXIT_OK);
+    expect(run.record.conditions["v12_call_limits"]).toEqual(V12_CALL_LIMITS);
+    expect(run.record.conditions["v12_call_limits"]).toEqual({ logicalCalls: 72, realAttempts: 144, judgeBranch: 80 });
+    // 要約の v12_calls は変えない
+    expect(run.summary["v12_calls"]).toEqual({ real_attempts: { limit: 144, used: 12 }, judge_branch: { limit: 80, used: 4 } });
+  });
+
   it("表を組む段（ids on は C1）で止まる走りでも要約と条件の記録に v12_flags がある（終了コード 1・納品物無し）", async () => {
     const broken = { entities: [{ name: "1member", role: "名前の規則に合わない行" }] };
     const run = await runV11aCli({
@@ -1353,6 +1363,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(run.summary).not.toHaveProperty("v12_flags");
     expect(run.summary).not.toHaveProperty("v12_calls");
     expect(run.record.conditions).not.toHaveProperty("v12_flags");
+    expect(run.record.conditions).not.toHaveProperty("v12_call_limits");
     expect(run.record.conditions).not.toHaveProperty("pipeline");
     expect(v11aSpy.mock.calls[0]?.[0]).not.toHaveProperty("flags");
     expect(v11aSpy.mock.calls[0]?.[0]).not.toHaveProperty("recordV12Flags");
