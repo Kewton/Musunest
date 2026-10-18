@@ -9,8 +9,11 @@
 // 受入の題材の言葉は使わない。
 import type { NormalizedAppSpec } from "@musunest/appspec-schema";
 import { normalizeSpec } from "@musunest/spec-engine";
+import type { LlmClient, LlmStructuredRequest, LlmToolRequest } from "../../llm.js";
+import { createFakeLlmClient, uncheckedBecause, type RecordedCall, type RecordedStructuredCall } from "../../llm-fake.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
 import type { PromptDocument, RuleDefinition } from "../../stages/prompt.js";
+import type { RecordingClient } from "../../stages/__tests__/prompt.js";
 import {
   copyLengthFor,
   requirementCopy,
@@ -723,3 +726,76 @@ export const WHEN_NON_REQUIREMENT_REQUEST_DIFF: Readonly<Record<string, readonly
   [SEMANTIC_CHECK_SCHEMA_NAME]: [ruleAt(SEMANTIC_CHECK_RULE_DEFINITIONS, "R-sc-02")],
   [TEST_SPEC_SCHEMA_NAME]: [ruleAt(TEST_SPEC_RULE_DEFINITIONS, "R-tsp-16")],
 };
+
+// ── 照合ありの偽物（Issue #590）──────────────────────────────────────────
+
+/**
+ * `createRecordingClient`（`stages/__tests__/prompt.ts`）と同じ形で、**記録した構造化出力を要求の schema に照らす**
+ * 偽物を作る。段の形の検査と schema を組む関数のずれが、手で書いた記録で隠れないようにする。
+ * 負例の記録は、`unchecked`（`uncheckedBecause` で理由を付ける）で照合を外す。
+ */
+export function createCheckedRecordingClient(recorded: readonly RecordedCall[]): RecordingClient {
+  const inner = createFakeLlmClient(recorded, { validateAgainstSchema: true });
+  const structured: LlmStructuredRequest[] = [];
+  const tools: LlmToolRequest[] = [];
+  const client: LlmClient = {
+    async callStructured<T>(request: LlmStructuredRequest) {
+      structured.push(request);
+      return inner.callStructured<T>(request);
+    },
+    async callWithTools(request: LlmToolRequest) {
+      tools.push(request);
+      return inner.callWithTools(request);
+    },
+  };
+  return { client, structured, tools };
+}
+
+/** 負例の応答（わざと schema に合わない。照合ありの偽物が照らさない。理由が要る） */
+export class NegativeOutput {
+  constructor(
+    readonly output: unknown,
+    readonly reason: string,
+  ) {}
+}
+
+/** 負例の応答を作る（理由は、その応答が strict の schema では出ないが段の形の検査の負例として必要な訳） */
+export const negative = (output: unknown, reason: string): NegativeOutput => new NegativeOutput(output, reason);
+
+/** 構造化出力の記録を作る（負例の応答には `unchecked` と理由を付ける） */
+export function recordedStructured(output: unknown): RecordedStructuredCall {
+  if (output instanceof NegativeOutput) {
+    return { kind: "structured", output: output.output, usage: undefined, unchecked: uncheckedBecause(output.reason) };
+  }
+  return { kind: "structured", output, usage: undefined };
+}
+
+// ── T1 の応答（strict の schema に合う形。Issue #590）──────────────────────────
+
+const T1_TYPE_KEYS = ["fieldType", "valueType", "scope", "form", "action", "hasWhen", "view"] as const;
+
+/** A1 の下書きを、T1 の応答の形（`type` を欄を並べた写像にしたもの）にする */
+export function t1ResponseOf(draft: NameTableDraft, ledger?: LedgerView): Record<string, unknown> {
+  // 台帳が集計の種類を持つ走りの schema は、全部の行の型に `aggregate` を必須にする（strict）
+  const withAggregate = (ledger?.aggregateKinds.length ?? 0) > 0;
+  return {
+    rows: draft.rows.map((row) => {
+      const type: Record<string, unknown> = Object.fromEntries(T1_TYPE_KEYS.map((key) => [key, null]));
+      if (withAggregate) type["aggregate"] = null;
+      if (typeof row.type === "string") type["fieldType"] = row.type;
+      else if (row.type !== null) Object.assign(type, row.type);
+      return { ...row, type };
+    }),
+    requirements: draft.requirements.map((entry) => ({
+      ...entry,
+      verification: {
+        reason: null,
+        checks: [],
+        constraintIds: [],
+        value: null,
+        ...entry.verification,
+      },
+    })),
+  };
+}
+

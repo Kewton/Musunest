@@ -7,12 +7,14 @@ import { AGENT_LIMITS } from "../../limits.js";
 import { ruleDefinitionDefects, type RejectedCandidate } from "../../stages/prompt.js";
 import { utf8ByteLength } from "../../stages/write.js";
 import {
-  createRecordingClient,
   expectNoAcceptanceMaterial,
   makeGateway,
   SAMPLE_DOCUMENTS,
 } from "../../stages/__tests__/prompt.js";
 import {
+  createCheckedRecordingClient,
+  negative,
+  recordedStructured,
   EMPTY_AGGREGATE_REQUEST_DIFF,
   ENUM_MEMBERSHIP_REQUEST_DIFF,
   FIXTURE_YAML,
@@ -43,7 +45,7 @@ import {
 import type { TestObserves } from "./test-spec.js";
 import { NAMED_FAILURE_MESSAGES, type NamedFailure } from "../../v12/search-repair.js";
 
-const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
+const structured = recordedStructured;
 
 const SUITE = {
   tests: [
@@ -61,7 +63,7 @@ const SUITE = {
 } as unknown as WriteV11aInput["suite"];
 
 const inputWith = (
-  client: ReturnType<typeof createRecordingClient>["client"],
+  client: ReturnType<typeof createCheckedRecordingClient>["client"],
   extra: Partial<WriteV11aInput> = {},
 ): WriteV11aInput => ({
   list: fixtureList(),
@@ -82,7 +84,7 @@ describe("B1 が送る要求を観測する", () => {
   });
 
   it("データは仕様・名前の表・試験の順で、文書は共通の口で渡る。表の塊に name と持ち越しで除いた行がある", async () => {
-    const recording = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const recording = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
     const table = fixtureTable();
     const outcome = await runWriteV11a(inputWith(recording.client, { table }));
     expect(outcome.ok).toBe(true);
@@ -123,8 +125,8 @@ describe("B1 が送る要求を観測する", () => {
 describe("B1 は書いた直後に宣言の大きさを確かめる（③ と同じ値）", () => {
   const run = (declaration: string) =>
     runWriteV11a(
-      inputWith(createRecordingClient([structured({ declaration })]).client, {
-        gateway: makeGateway(createRecordingClient([structured({ declaration })]).client, { maxAttempts: 1 }),
+      inputWith(createCheckedRecordingClient([structured({ declaration })]).client, {
+        gateway: makeGateway(createCheckedRecordingClient([structured({ declaration })]).client, { maxAttempts: 1 }),
       }),
     );
 
@@ -150,7 +152,7 @@ describe("B1 は書いた直後に宣言の大きさを確かめる（③ と同
 
 describe("B1 の形の落ちは共通の窓口が 1 回やり直す", () => {
   it("形に 1 回落ちて通る：calls 2・口が 1 回", async () => {
-    const recording = createRecordingClient([structured({ declaration: "" }), structured({ declaration: FIXTURE_YAML })]);
+    const recording = createCheckedRecordingClient([structured({ declaration: "" }), structured({ declaration: FIXTURE_YAML })]);
     const candidates: RejectedCandidate[] = [];
     const input = inputWith(recording.client);
     const outcome = await runWriteV11a({ ...input, onRejected: (candidate) => candidates.push(candidate) });
@@ -162,7 +164,10 @@ describe("B1 の形の落ちは共通の窓口が 1 回やり直す", () => {
   });
 
   it("2 回落ちれば malformed・calls 2・口が 2 回", async () => {
-    const recording = createRecordingClient([structured({}), structured({ declaration: 1 })]);
+    const recording = createCheckedRecordingClient([
+      structured(negative({}, "declaration が無い応答。strict の schema では出ないが、形の落ちとやり直しを観測する負例")),
+      structured(negative({ declaration: 1 }, "declaration が文字列でない応答。strict の schema では出ないが、形の落ちとやり直しを観測する負例")),
+    ]);
     const candidates: RejectedCandidate[] = [];
     const input = inputWith(recording.client);
     const outcome = await runWriteV11a({ ...input, onRejected: (candidate) => candidates.push(candidate) });
@@ -175,8 +180,8 @@ describe("B1 の形の落ちは共通の窓口が 1 回やり直す", () => {
 
   it("口の有無で、偽物が受け取った要求が同じ", async () => {
     const answers = () => [structured({ declaration: "" }), structured({ declaration: FIXTURE_YAML })];
-    const without = createRecordingClient(answers());
-    const withHook = createRecordingClient(answers());
+    const without = createCheckedRecordingClient(answers());
+    const withHook = createCheckedRecordingClient(answers());
     await runWriteV11a(inputWith(without.client));
     await runWriteV11a({ ...inputWith(withHook.client), onRejected: () => undefined });
     expect(JSON.stringify(withHook.structured)).toBe(JSON.stringify(without.structured));
@@ -193,7 +198,7 @@ describe("B1 の形の落ちは共通の窓口が 1 回やり直す", () => {
 
 describe("B1 の戻り値と、追加の要素の一覧を持たないこと", () => {
   it("戻り値は {declaration, byteLength, declarationSha256} で、SHA は sha256Hex(source) と等しい", async () => {
-    const recording = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const recording = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
     const outcome = await runWriteV11a(inputWith(recording.client));
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
@@ -235,7 +240,7 @@ describe("B1 のデータ「固定した試験」に試験ごとの observes を
     JSON.parse(input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "null");
 
   it("各試験に observes があり、observes を除いた組は固定した組と同じ", async () => {
-    const recording = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const recording = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
     const outcome = await runWriteV11a(inputWith(recording.client, { suite: DEFAULT_SUITE, observes: OBSERVES }));
     expect(outcome.ok).toBe(true);
     const request = recording.structured[0];
@@ -260,8 +265,8 @@ describe("B1 のデータ「固定した試験」に試験ごとの observes を
     );
     expect(DECLARATION_V11A_SCHEMA.required).toEqual(["declaration"]);
     // 同じ組で observes だけを変えても、データの「固定した試験」の塊のほかは変わらない
-    const a = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
-    const b = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const a = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const b = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
     await runWriteV11a(inputWith(a.client, { suite: DEFAULT_SUITE, observes: OBSERVES }));
     await runWriteV11a(inputWith(b.client, { suite: DEFAULT_SUITE, observes: new Map([["t1", "validation"]]) }));
     const [ra, rb] = [a.structured[0], b.structured[0]];
@@ -323,9 +328,9 @@ describe("旗 on：B1 の規則の末尾に台帳の B1 の文を台帳の順で
   });
 
   it("旗 on の要求：規則に enum-membership の 1 文があり、固定した試験に observes が渡る。off は今の文で、差は規則の並びだけ", async () => {
-    const on = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
-    const off = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
-    const twoA = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const on = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const off = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const twoA = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
     expect((await runWriteV11a(inputWith(on.client, { suite: ENUM_SUITE, observes: OBSERVES, ledger: LEDGER_VIEW_2B }))).ok).toBe(true);
     expect((await runWriteV11a(inputWith(off.client, { suite: ENUM_SUITE, observes: OBSERVES }))).ok).toBe(true);
     expect((await runWriteV11a(inputWith(twoA.client, { suite: ENUM_SUITE, observes: OBSERVES, ledger: LEDGER_VIEW_2A }))).ok).toBe(true);
@@ -362,8 +367,8 @@ describe("旗 on：今の台帳の B1 の規則は、#548 の台帳の末尾に 
   });
 
   it("要求：今の台帳と #548 の台帳の差は規則の並び（と、名前の表の計算の行の aggregate の欄）だけ。schema は変えない", async () => {
-    const now = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
-    const before = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const now = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const before = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
     expect((await runWriteV11a(inputWith(now.client, { table: withAggregates(fixtureTable()), ledger: PROPERTY_LEDGER_VIEW }))).ok).toBe(true);
     expect((await runWriteV11a(inputWith(before.client, { ledger: LEDGER_VIEW_2B }))).ok).toBe(true);
     const nowRequests = JSON.parse(JSON.stringify(now.structured)) as unknown[];
@@ -395,11 +400,11 @@ describe("空の文脈での作り直し（旗 v12.search-repair。Issue #551）
   });
 
   it("要求の差は末尾のデータ「残った失敗の一覧」と規則 1 つだけで、一覧は試験 ID・要件 ID・種類・固定文だけ。省けば今の要求とバイト列で同じ", async () => {
-    const plain = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const plain = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
     await runWriteV11a(inputWith(plain.client));
-    const again = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const again = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
     await runWriteV11a(inputWith(again.client, {}));
-    const rewrite = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const rewrite = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
     const outcome = await runWriteV11a(inputWith(rewrite.client, { rewrite: { failures: FAILURES } }));
     expect(outcome.ok).toBe(true);
     const [base] = plain.structured;
@@ -424,9 +429,9 @@ describe("空の文脈での作り直し（旗 v12.search-repair。Issue #551）
   });
 
   it("旗 on の台帳と組んでも、作り直しの規則は台帳の規則の後ろに足すだけ", async () => {
-    const ledger = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const ledger = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
     await runWriteV11a(inputWith(ledger.client, { ledger: PROPERTY_LEDGER_VIEW, table: withAggregates(fixtureTable()) }));
-    const both = createRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const both = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
     await runWriteV11a(
       inputWith(both.client, { ledger: PROPERTY_LEDGER_VIEW, table: withAggregates(fixtureTable()), rewrite: { failures: FAILURES } }),
     );

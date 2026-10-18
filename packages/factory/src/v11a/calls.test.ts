@@ -28,7 +28,7 @@ import { createFakeLlmClient, type RecordedCall } from "../llm-fake.js";
 import { AGENT_LIMITS } from "../limits.js";
 import { USAGE, RATES } from "../__tests__/run.js";
 import { ARBITRATION_SCHEMA_NAME } from "../stages/arbitrate.js";
-import { FIXTURE_DOCUMENTS } from "./__tests__/fixtures.js";
+import { FIXTURE_DOCUMENTS, negative, recordedStructured } from "./__tests__/fixtures.js";
 import { buildSized, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
 import { runGenerationV11a } from "./run.js";
 import { DECL_CHECK_SCHEMA_NAME } from "./stages/decl-check.js";
@@ -72,7 +72,7 @@ const networkError = (): Error => Object.assign(new Error("fetch が失敗しま
  * （失敗した試行は記録の応答を使わない）。再送かどうかは「直前の試行が失敗したか」で決める。
  */
 function createMouth(recorded: readonly RecordedCall[], failFirst: boolean) {
-  const inner = createFakeLlmClient(recorded);
+  const inner = createFakeLlmClient(recorded, { validateAgainstSchema: true });
   const logical = zeroCounts();
   const started = zeroCounts();
   let retrying = false;
@@ -146,7 +146,7 @@ function totalsOf(stages: readonly { readonly stage: string }[], stage: StageKey
   };
 }
 
-const structured = (output: unknown): RecordedCall => ({ kind: "structured", output, usage: USAGE });
+const structured = (output: unknown): RecordedCall => ({ ...recordedStructured(output), usage: USAGE });
 const repairDone = (declaration: string, disputes: readonly { testId: string; quote: string }[] = []): RecordedCall => ({
   kind: "tools",
   response: { kind: "done", declaration: { declaration, disputes }, usage: USAGE },
@@ -230,13 +230,13 @@ function retryCalls(materials: SizedMaterials): RecordedCall[] {
   const rejectR1 = materials.judgments({ R1: ["unnecessary-ownership", materials.textOf("R1")] });
   const dispute = { testId: "t5-normal", quote: materials.textOf("R5") };
   return [
-    structured({ rows: "x", requirements: "x" }),
+    structured(negative({ rows: "x", requirements: "x" }, "rows・requirements が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
     structured(materials.nameTableResponse()),
     structured(incomplete),
     structured(rejectR1),
     structured(materials.nameTableResponse()),
     structured(materials.judgments()),
-    structured({ classifications: "x", tests: "x" }),
+    structured(negative({ classifications: "x", tests: "x" }, "classifications・tests が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
     structured(materials.testSpecResponse({ omitAbnormalOf: "R1" })),
     structured(materials.testSpecResponse()),
     structured({ declaration: materials.declaration(["R1"]) }),

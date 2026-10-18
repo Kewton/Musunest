@@ -23,6 +23,7 @@ export * from "./limits.js";
 
 // ── adapter（Issue #284。`fetch` だけを使う。`openai.ts` は外部の入口を持つ唯一の library の file）──
 export * from "./openai.js";
+export * from "./schema-check.js";
 
 // ── 判定の口（Issue #330。Jev の adapter・LLM の adapter・偽物。`judge-jev.ts` が Jev の入口を持つ）──
 export * from "./judge.js";

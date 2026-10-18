@@ -12,8 +12,8 @@ import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import type { RequirementList } from "../../pipeline.js";
 import { ruleDefinitionDefects } from "../../stages/prompt.js";
-import { createRecordingClient, expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
-import { FIXTURE_DOCUMENTS, FIXTURE_YAML, fixtureList, fixtureTable, fixtureYaml, normalizedFixture } from "../__tests__/fixtures.js";
+import { expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
+import { createCheckedRecordingClient, recordedStructured, FIXTURE_DOCUMENTS, FIXTURE_YAML, fixtureList, fixtureTable, fixtureYaml, normalizedFixture } from "../__tests__/fixtures.js";
 import { extraElementsOf, markRows, type DeclarationMark } from "../bind-by-id.js";
 import {
   DECL_CHECK_RULE_DEFINITIONS,
@@ -24,7 +24,7 @@ import {
   runDeclCheck,
 } from "./decl-check.js";
 
-const structured = (output: unknown) => ({ kind: "structured" as const, output, usage: undefined });
+const structured = recordedStructured;
 
 function planOf(list: RequirementList): ConfirmedPlan {
   return {
@@ -73,7 +73,7 @@ const withRealRate = (source: string): string =>
 
 async function run(source: string, outputs: readonly unknown[], list: RequirementList = LIST) {
   const app = await normalizedFixture(source);
-  const recording = createRecordingClient(outputs.map(structured));
+  const recording = createCheckedRecordingClient(outputs.map(structured));
   const outcome = await runDeclCheck({
     plan: PLAN,
     list,

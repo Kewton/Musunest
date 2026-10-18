@@ -11,9 +11,15 @@ import type { LlmStructuredRequest, LlmToolRequest, LlmTurn, LlmUsage } from "./
 import {
   FakeLlmExhaustedError,
   FakeLlmOrderError,
+  FakeLlmSchemaMismatchError,
   createFakeLlmClient,
+  uncheckedBecause,
   type RecordedCall,
 } from "./llm-fake.js";
+import { ENVELOPE_RESULT_KEY, ENVELOPE_STAGE_KEY } from "./schema-envelope.js";
+import { draftOf, fixtureList, fixtureTable, t1ResponseOf, withAggregates } from "./v11a/__tests__/fixtures.js";
+import { NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./v11a/stages/name-table.js";
+import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
 
 const STRUCTURED_REQUEST: LlmStructuredRequest = {
   instructions: "規則",
@@ -174,5 +180,96 @@ describe("偽物の LlmClient（02 §2.1・R-2）", () => {
       usage: undefined,
     }));
     expect(() => createFakeLlmClient(tooMany)).toThrow(RangeError);
+  });
+});
+
+// ── 記録した応答を要求の schema に照らす（Issue #590）──────────────────────────
+
+describe("偽物の LlmClient：記録を要求の schema に照らす選択肢（Issue #590）", () => {
+  const SCHEMA = {
+    type: "object",
+    additionalProperties: false,
+    required: ["kind", "count"],
+    properties: {
+      kind: { type: "string", enum: ["alpha", "beta"] },
+      count: { type: "integer", minimum: 0 },
+    },
+  } as const;
+  const REQUEST: LlmStructuredRequest = { ...STRUCTURED_REQUEST, schemaName: "sample", schema: SCHEMA };
+  /** 応答の中身が誤りの文に写らないことを見るための、目印の値 */
+  const MARK = "目印の値の文字列";
+  const checked = (recorded: readonly RecordedCall[]) => createFakeLlmClient(recorded, { validateAgainstSchema: true });
+  const structured = (output: unknown, extra: Partial<RecordedCall> = {}): RecordedCall =>
+    ({ kind: "structured", output, usage: undefined, ...extra }) as RecordedCall;
+
+  const mismatch = async (recorded: readonly RecordedCall[], request: LlmStructuredRequest = REQUEST) => {
+    const error = await checked(recorded).callStructured(request).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(FakeLlmSchemaMismatchError);
+    return error as FakeLlmSchemaMismatchError;
+  };
+
+  it("(1) 余計な欄・enum の外の値・required の欠けた記録は、専用の誤りで止まる（添字・名前・箇所があり、応答の中身は無い）", async () => {
+    const extra = await mismatch([structured({ kind: "alpha", count: 1, extra: MARK })]);
+    expect(extra).toMatchObject({ recordIndex: 0, schemaName: "sample" });
+    expect(extra.detail).toBe("余分な欄があります（extra）");
+    const outside = await mismatch([structured({ kind: MARK, count: 1 })]);
+    expect(outside.detail).toBe("kind: enum のどれでもありません");
+    const missing = await mismatch([structured({ kind: "alpha" })]);
+    expect(missing.detail).toBe("必須の欄がありません（count）");
+    // 2 件目の記録の添字（1 件目は通る）
+    const client = checked([structured({ kind: "alpha", count: 1 }), structured({ kind: "beta" })]);
+    await client.callStructured(REQUEST);
+    const second = (await client.callStructured(REQUEST).catch((caught: unknown) => caught)) as FakeLlmSchemaMismatchError;
+    expect(second).toBeInstanceOf(FakeLlmSchemaMismatchError);
+    expect(second.recordIndex).toBe(1);
+    for (const error of [extra, outside, missing, second]) {
+      expect(error.message).not.toContain(MARK);
+      expect(error.message).toContain("sample");
+    }
+  });
+
+  it("合う記録は通り、中身は今までどおり返る", async () => {
+    const response = await checked([structured({ kind: "beta", count: 3 })]).callStructured(REQUEST);
+    expect(response.output).toEqual({ kind: "beta", count: 3 });
+  });
+
+  it("(2) 旗 off の T1 の schema に aggregate を持つ記録を渡すと止まる。旗 on の schema なら通る（v12-cmp2 の型のずれを偽物の層で再現）", async () => {
+    const list = fixtureList();
+    const record = t1ResponseOf(draftOf(list, withAggregates(fixtureTable())), PROPERTY_LEDGER_VIEW);
+    const request = (schema: unknown): LlmStructuredRequest => ({ ...STRUCTURED_REQUEST, schemaName: NAME_TABLE_SCHEMA_NAME, schema });
+    const off = await mismatch([structured(record)], request(nameTableSchemaOf()));
+    expect(off.detail).toContain("aggregate");
+    const on = await checked([structured(record)]).callStructured(request(nameTableSchemaOf(PROPERTY_LEDGER_VIEW)));
+    expect(on.output).toEqual(record);
+  });
+
+  it("(3) 封筒の形の記録で stage が要求の schema の名前と違えば止まる。合えば result を取り出し stage を落として照らす", async () => {
+    const envelope = (stage: string) => structured({ [ENVELOPE_RESULT_KEY]: { [ENVELOPE_STAGE_KEY]: stage, kind: "alpha", count: 2 } });
+    const wrong = await mismatch([envelope("other")]);
+    expect(wrong.detail).toContain("stage");
+    const right = await checked([envelope("sample")]).callStructured(REQUEST);
+    expect(right.output).toEqual({ kind: "alpha", count: 2 });
+    // 取り出した中身も schema に照らす
+    const bad = await mismatch([structured({ [ENVELOPE_RESULT_KEY]: { [ENVELOPE_STAGE_KEY]: "sample", kind: "gamma", count: 2 } })]);
+    expect(bad.detail).toContain("enum");
+  });
+
+  it("(4) unchecked と理由のある記録は照合を通らず返る。理由の無い unchecked は作れない（型でも実行でも）", async () => {
+    const response = await checked([
+      structured({ kind: MARK }, { unchecked: uncheckedBecause("負例：enum の外の値を段の形の検査に渡す") }),
+    ]).callStructured(REQUEST);
+    expect(response.output).toEqual({ kind: MARK });
+    expect(() => uncheckedBecause("")).toThrow(RangeError);
+    expect(() => uncheckedBecause("  ")).toThrow(RangeError);
+    // @ts-expect-error 理由の印（uncheckedBecause が作る値）が無い unchecked は型で作れない
+    const withoutReason: RecordedCall = { kind: "structured", output: {}, usage: undefined, unchecked: { reason: "手で書いた理由" } };
+    expect(withoutReason.kind).toBe("structured");
+  });
+
+  it("(5) 既定（照合なし）の偽物は、schema に合わない記録もそのまま返す", async () => {
+    const response = await createFakeLlmClient([structured({ kind: MARK })]).callStructured(REQUEST);
+    expect(response.output).toEqual({ kind: MARK });
+    const explicitOff = await createFakeLlmClient([structured({ kind: MARK })], { validateAgainstSchema: false }).callStructured(REQUEST);
+    expect(explicitOff.output).toEqual({ kind: MARK });
   });
 });
