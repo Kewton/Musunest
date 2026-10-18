@@ -422,6 +422,8 @@ export const TEST_CASE_BUNDLE_MESSAGES = {
   missing: "束の要件の分類が無い",
   caseOutside: "場合の要件 ID が別の束の要件である",
   caseUnknown: "場合の要件 ID が要件の一覧に無い",
+  retained: "書き直さない（保持した）要件の分類である",
+  caseRetained: "場合の要件 ID が書き直さない（保持した）要件である",
   unattributed: "問題を束に帰属できない",
 } as const;
 
@@ -437,16 +439,20 @@ export function bundleRequirementIds(ids: readonly string[], size: number): read
  * 束の完全性（束の中で閉じる条件だけ）。分類がその束の要件にちょうど 1 件（欠落・重複・別の束の要件 ID・一覧に無い要件 ID）で、
  * 場合の要件 ID が別の束の要件でも一覧に無い要件でもないこと。位置はその束の応答の添字（`classifications[i]`・`cases[i]`・束の中の
  * `requirements[i]`）。`requestedIds` は全部の束の要件（要求の一覧）、`knownIds` は残る要件の一覧（要求の一覧を含む）。一覧にあるが
- * どの束にも無い要件（コードの試験だけで確かめる要件）の分類・場合はここでは断らず、合併後の検査が今までどおりの固定文で断る
+ * どの束にも無い要件（コードの試験だけで確かめる要件）の分類・場合はここでは断らず、合併後の検査が今までどおりの固定文で断る。
+ * 中身のやり直し（手 3g・Issue #651）では `bundleIds` は書き直す要件だけで、`retainedIds`（同じ束の保持した要件）の分類・場合が
+ * 応答にあれば、別の束の要件とは別の固定文で断る
  */
 export function checkBundleCompleteness(
   output: TestCasesOutput,
   bundleIds: readonly string[],
   requestedIds: readonly string[],
   knownIds: readonly string[],
+  retainedIds: readonly string[] = [],
 ): readonly Problem[] {
   const problems: Problem[] = [];
   const inBundle = new Set(bundleIds);
+  const retained = new Set(retainedIds);
   const requested = new Set(requestedIds);
   const known = new Set([...knownIds, ...requestedIds]);
   const seen = new Set<string>();
@@ -456,6 +462,10 @@ export function checkBundleCompleteness(
     const id = isRecord(entry) && typeof entry["requirementId"] === "string" ? entry["requirementId"] : undefined;
     if (id === undefined || !known.has(id)) {
       problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.unknown });
+      return;
+    }
+    if (retained.has(id)) {
+      problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.retained });
       return;
     }
     if (!inBundle.has(id)) {
@@ -474,6 +484,7 @@ export function checkBundleCompleteness(
   output.cases.forEach((entry, index) => {
     const field = `cases[${String(index)}].requirementId`;
     if (!known.has(entry.requirementId)) problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.caseUnknown });
+    else if (retained.has(entry.requirementId)) problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.caseRetained });
     else if (!inBundle.has(entry.requirementId) && requested.has(entry.requirementId)) {
       problems.push({ field, message: TEST_CASE_BUNDLE_MESSAGES.caseOutside });
     }
@@ -490,8 +501,16 @@ export interface MergedTestCases {
   readonly classificationOrigin: readonly (readonly [number, number])[];
 }
 
-/** 束の応答を、束の順・束の中の順で 1 つの応答に合併する（並べ替えない・重ねを除かない。重ねは合併後の検査が落とす） */
-export function mergeBundleCases(outputs: readonly TestCasesOutput[]): MergedTestCases {
+/** 分類の要件 ID（写像で文字列のときだけ） */
+const classificationIdOf = (entry: unknown): string | undefined =>
+  isRecord(entry) && typeof entry["requirementId"] === "string" ? entry["requirementId"] : undefined;
+
+/**
+ * 束の応答を 1 つの応答に合併する（重ねを除かない。重ねは合併後の検査が落とす）。`order`（要求の一覧の要件 ID の順）を渡せば、
+ * **要件の一覧の順に要件ごと、要件の中は応答の順**に並べる（初回もやり直しも同じ規則。どの要件を書き直しても並びの規則は
+ * 変わらない。一覧に無い要件 ID の分類・場合は末尾に束の順・束の中の順で置く。Issue #651）。省けば束の順・束の中の順
+ */
+export function mergeBundleCases(outputs: readonly TestCasesOutput[], order?: readonly string[]): MergedTestCases {
   const cases: TestCase[] = [];
   const classifications: unknown[] = [];
   const caseOrigin: (readonly [number, number])[] = [];
@@ -506,7 +525,21 @@ export function mergeBundleCases(outputs: readonly TestCasesOutput[]): MergedTes
       classificationOrigin.push([bundle, index]);
     });
   });
-  return { output: { classifications, cases }, caseOrigin, classificationOrigin };
+  if (order === undefined) return { output: { classifications, cases }, caseOrigin, classificationOrigin };
+  const rank = new Map(order.map((id, index) => [id, index] as const));
+  const rankOf = (id: string | undefined): number => (id === undefined ? order.length : (rank.get(id) ?? order.length));
+  // 安定な並べ替え（同じ要件の中は束の順・応答の順のまま）
+  const sorted = <T>(entries: readonly T[], origins: readonly (readonly [number, number])[], idOf: (entry: T) => string | undefined) =>
+    entries
+      .map((entry, index) => ({ entry, origin: origins[index] as readonly [number, number], rank: rankOf(idOf(entry)), index }))
+      .sort((left, right) => left.rank - right.rank || left.index - right.index);
+  const sortedCases = sorted(cases, caseOrigin, (entry) => entry.requirementId);
+  const sortedClassifications = sorted(classifications, classificationOrigin, classificationIdOf);
+  return {
+    output: { classifications: sortedClassifications.map((item) => item.entry), cases: sortedCases.map((item) => item.entry) },
+    caseOrigin: sortedCases.map((item) => item.origin),
+    classificationOrigin: sortedClassifications.map((item) => item.origin),
+  };
 }
 
 /** 束へ帰属させた問題（束ごとの問題は位置をその束の応答の添字へ写したもの）と、帰属できない問題 */
@@ -550,4 +583,150 @@ export function attributeProblemsToBundles(
     push(bundle, { ...problem, field: `${head}[${String(local)}]${rest}` });
   }
   return { byBundle, unattributed };
+}
+
+// ── 要件への帰属と中身のやり直しの単位（手 3g・Issue #651）──────────────────
+//
+// 中身のやり直しは、問題の帰属した要件だけを書き直させる（同じ束の問題の無かった要件の分類と場合は初回のまま保持する）。束は
+// 「帰属した要件を含む束」。保持の寿命は 1 回の T2 の呼び出しの中だけ（呼ぶ側が呼び出しの外に出さない）。
+
+/** 要件へ帰属させた問題（位置は合併した応答の位置のまま）と、帰属できない問題 */
+export interface RequirementAttributedProblems {
+  /** 要件 ID → その要件の問題（入力の順）。鍵は要求の一覧の順、そのあとに一覧に無い要件 ID を初めて現れた順 */
+  readonly byRequirement: ReadonlyMap<string, readonly Problem[]>;
+  readonly unattributed: readonly Problem[];
+}
+
+const POSITION = /^(requirements|cases|classifications)\[(\d+)\](.*)$/;
+
+/**
+ * 合併後の組の問題を要件へ帰属させる（純粋。推測しない）。要件の位置（要求の一覧の `requirements[i]`）はその要件、場合の位置
+ * （`cases[i]…`）はその場合の要件 ID、分類の位置（`classifications[i]…`）はその分類の要件 ID。ほかの位置（コードが作った試験・
+ * 応答全体・添字の外・要件 ID の無い分類など）は帰属できない問題として返す
+ */
+export function attributeProblemsToRequirements(
+  problems: readonly Problem[],
+  output: TestCasesOutput,
+  requestedIds: readonly string[],
+): RequirementAttributedProblems {
+  const grouped = new Map<string, Problem[]>();
+  const unattributed: Problem[] = [];
+  const classifications = Array.isArray(output.classifications) ? (output.classifications as readonly unknown[]) : [];
+  for (const problem of problems) {
+    const match = POSITION.exec(problem.field);
+    const [, head = "", at = "", rest = ""] = match ?? [];
+    const index = Number(at);
+    const id =
+      match === null
+        ? undefined
+        : head === "requirements"
+          ? rest === ""
+            ? requestedIds[index]
+            : undefined
+          : head === "cases"
+            ? output.cases[index]?.requirementId
+            : classificationIdOf(classifications[index]);
+    if (id === undefined) {
+      unattributed.push(problem);
+      continue;
+    }
+    const list = grouped.get(id) ?? [];
+    list.push(problem);
+    grouped.set(id, list);
+  }
+  const byRequirement = new Map<string, readonly Problem[]>();
+  for (const id of requestedIds) {
+    const list = grouped.get(id);
+    if (list !== undefined) byRequirement.set(id, list);
+  }
+  for (const [id, list] of grouped) if (!byRequirement.has(id)) byRequirement.set(id, list);
+  return { byRequirement, unattributed };
+}
+
+/** 束 1 つの中身のやり直しの単位（書き直す要件・保持した要件・その要件の前回の場合と問題。位置は書き直す要件の並びへ写す） */
+export interface BundleRetryPlan {
+  /** 書き直す要件（問題の帰属した、この束の要件。束の中の順。要求の一覧・確かめ方・所属・分類の完全性の対象） */
+  readonly rewrite: readonly string[];
+  /** 保持した要件（束の残り。束の中の順） */
+  readonly retained: readonly string[];
+  /**
+   * 前回の出力から捨てて書き直させる要件 ID（書き直す要件と、この束が書いた一覧に無い要件〔コードの試験だけで確かめる要件〕の
+   * うち問題の帰属したもの）
+   */
+  readonly discard: readonly string[];
+  /** 捨てる要件の前回の場合（展開前の形。合併の順） */
+  readonly cases: readonly TestCase[];
+  /** 捨てる要件の問題（位置は `requirements[書き直す要件の添字]`・`cases[前回の場合の添字]`・`classifications[捨てる分類の添字]`） */
+  readonly problems: readonly Problem[];
+}
+
+/**
+ * 要件へ帰属させた問題から、束ごとの中身のやり直しの単位を作る（純粋）。束は帰属した要件を含む束だけ。要求の一覧に無い要件 ID
+ * （束の形の検査が断らない、コードの試験だけで確かめる要件）の場合・分類の問題は、それを書いた束（合併の出どころ）へ渡す。
+ * 問題は捨てる要件の順・要件の中は入力の順で、位置を書き直す要件の並び（要件・前回の場合・前回の分類）の添字へ写す
+ */
+export function bundleRetryPlansOf(
+  attributed: ReadonlyMap<string, readonly Problem[]>,
+  merged: MergedTestCases,
+  bundles: readonly (readonly string[])[],
+): ReadonlyMap<number, BundleRetryPlan> {
+  const classifications = Array.isArray(merged.output.classifications) ? (merged.output.classifications as readonly unknown[]) : [];
+  const bundled = new Set(bundles.flat());
+  const plans = new Map<number, BundleRetryPlan>();
+  bundles.forEach((ids, bundle) => {
+    const rewrite = ids.filter((id) => attributed.has(id));
+    // 一覧に無い要件 ID は、その問題の位置（場合・分類）をこの束が書いたときだけ、この束で捨てて書き直させる
+    const foreign = new Set<string>();
+    for (const [id, list] of attributed) {
+      if (bundled.has(id)) continue;
+      for (const problem of list) {
+        const [, head = "", at = ""] = POSITION.exec(problem.field) ?? [];
+        const origin = head === "cases" ? merged.caseOrigin[Number(at)] : head === "classifications" ? merged.classificationOrigin[Number(at)] : undefined;
+        if (origin?.[0] === bundle) foreign.add(id);
+      }
+    }
+    const discard = [...rewrite, ...[...attributed.keys()].filter((id) => foreign.has(id))];
+    if (discard.length === 0) return;
+    const discarded = new Set(discard);
+    const caseAt = new Map<number, number>();
+    const cases: TestCase[] = [];
+    merged.output.cases.forEach((entry, index) => {
+      if (!discarded.has(entry.requirementId) || merged.caseOrigin[index]?.[0] !== bundle) return;
+      caseAt.set(index, cases.length);
+      cases.push(entry);
+    });
+    const classificationAt = new Map<number, number>();
+    classifications.forEach((entry, index) => {
+      const id = classificationIdOf(entry);
+      if (id !== undefined && discarded.has(id) && merged.classificationOrigin[index]?.[0] === bundle) {
+        classificationAt.set(index, classificationAt.size);
+      }
+    });
+    const problems = discard.flatMap((id) =>
+      (attributed.get(id) ?? []).flatMap((problem) => {
+        const [, head = "", at = "", rest = ""] = POSITION.exec(problem.field) ?? [];
+        if (head === "requirements") return [{ ...problem, field: `requirements[${String(rewrite.indexOf(id))}]` }];
+        const local = head === "cases" ? caseAt.get(Number(at)) : classificationAt.get(Number(at));
+        // 一覧に無い要件 ID の問題は、それを書いた束にだけ渡す（ほかの束が書いた同じ要件 ID の位置は渡さない）
+        return local === undefined ? [] : [{ ...problem, field: `${head}[${String(local)}]${rest}` }];
+      }),
+    );
+    plans.set(bundle, { rewrite, retained: ids.filter((id) => !discarded.has(id)), discard, cases, problems });
+  });
+  return plans;
+}
+
+/**
+ * 保持した要件の前回の分類と場合（値・observes・参照の行・順を変えない）に、書き直した要件の新しい応答を重ねた束の出力。
+ * 前回の分類と場合のうち捨てる要件（`discard`）のものだけを除き、新しい応答はそのまま足す（並べ替えは合併が要件の一覧の順で行う）
+ */
+export function retainedBundleOutput(previous: TestCasesOutput, discard: readonly string[], answer: TestCasesOutput): TestCasesOutput {
+  const discarded = new Set(discard);
+  const keep = (id: string | undefined): boolean => id === undefined || !discarded.has(id);
+  const previousClassifications = Array.isArray(previous.classifications) ? (previous.classifications as readonly unknown[]) : [];
+  const answerClassifications = Array.isArray(answer.classifications) ? (answer.classifications as readonly unknown[]) : [];
+  return {
+    classifications: [...previousClassifications.filter((entry) => keep(classificationIdOf(entry))), ...answerClassifications],
+    cases: [...previous.cases.filter((entry) => keep(entry.requirementId)), ...answer.cases],
+  };
 }

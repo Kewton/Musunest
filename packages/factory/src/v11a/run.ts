@@ -375,7 +375,10 @@ interface RejectedCandidateSlot {
   readonly operation: StageOperation | null;
   readonly call: number;
   readonly candidate: RejectedCandidate;
-  /** 旗 `v12.ids` の T2 の束の形の候補だけ：束の添字（0 から）と束の要件の数（ID の値は持たない。Issue #626） */
+  /**
+   * 旗 `v12.ids` の T2 の束の形の候補だけ：束の添字（0 から）と束の要件の数（Issue #626）、その要求で書き直した要件の数と保持した
+   * 要件の数（Issue #651）。ID の値は持たない
+   */
   readonly bundle?: TestSpecRejectedBundle;
 }
 
@@ -391,7 +394,14 @@ async function toBundleRejectedCandidate(slot: RejectedCandidateSlot): Promise<B
     round: candidate.round,
     attempt: candidate.attempt,
     kind: candidate.kind,
-    ...(slot.bundle === undefined ? {} : { bundle: { index: slot.bundle.index, requirements: slot.bundle.requirements } }),
+    ...(slot.bundle === undefined ? {} : {
+          bundle: {
+            index: slot.bundle.index,
+            requirements: slot.bundle.requirements,
+            rewritten: slot.bundle.rewritten,
+            retained: slot.bundle.retained,
+          },
+        }),
   };
   if (candidate.kind === "shape") {
     return {
