@@ -2724,6 +2724,61 @@ describe("旗 v12.ids：既定値・選択肢の集合・アプリ全体と見�
     expect(await mismatchesOf(MONTHS_3, 6)).toBe(1);
   });
 
+  it("(fail-closed) 除いた要件ごとにコードの試験が 1 本以上ある。コードの試験を作れない要件（選択肢の項目を引けない R7）は除かず、T2 の一覧に残って試験が無ければ「要件の試験が無い」で落ちる（免除しない）", async () => {
+    const made = await generated();
+    for (const id of made.excludedRequirementIds) expect(made.tests.filter((test) => test.target.requirementId === id).length, id).toBeGreaterThanOrEqual(1);
+    const { outcome } = await runG([idsResponse()]);
+    if (!outcome.ok) throw new Error("通るはず");
+    for (const id of made.excludedRequirementIds) {
+      expect(outcome.value.suite.tests.filter((test) => test.target.requirementId === id && isGeneratedTestId(test.id)).length, id).toBeGreaterThanOrEqual(1);
+    }
+    // R7 が選択肢の項目を所属させない表（確かめ方の対象が引けない）
+    const unresolvable: NameTable = { ...GTABLE, ownership: GTABLE.ownership.map((entry) => (entry.requirementId === "R7" ? { ...entry, roles: [] } : entry)) };
+    const bad = response(idsResponse().tests, [...NATURES, { requirementId: "R7", nature: "ruled" }]);
+    const { outcome: failed, recording } = await runG([bad, bad], true, unresolvable);
+    const listed = dataBlockOf(recording.structured[0]!.input, TEST_SPEC_DATA_NAMES[1]) as { requirements: { id: string }[] };
+    expect(listed.requirements.map((requirement) => requirement.id)).toEqual(["R1", "R2", "R3", "R4", "R7", "R8"]);
+    if (failed.ok || failed.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(failed.failure.problems).toEqual([{ field: "requirements[4]", message: "要件の試験が無い" }]);
+  });
+
+  it("(6) コードが作らない空の集計の要件：J2 が existence-only と決めた R4 にはコードの試験を足さず、R4 は T2 の一覧に残り、LLM の試験は今までどおり照らす（境界を書けば v1 の検査で落ちる）", async () => {
+    const judge = createFakeJudge({ [natureQuestionName("R4")]: choice("existence-only", 0.9) });
+    const natures = NATURES.map((entry) => (entry.requirementId === "R4" ? { ...entry, nature: "existence-only" as const } : entry));
+    const r4Normal = rawTest({ id: "r4-normal", requirementId: "R4", targetKind: "computation", roleId: "c.rate", operation: "compute", observes: "value" });
+    const base = [...r1Validate(), ...r2Structure(), ...r3When(), r4Normal, ...r8Tests()];
+    const runJ = async (outputs: readonly unknown[]) =>
+      run(outputs, { plan: GPLAN, list: GLIST, table: GTABLE, carryOver: await carryFor(), ledger, ids: true, judge });
+    const { outcome, recording } = await runJ([response(base, natures)]);
+    if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
+    expect(outcome.value.natures.get("R4")).toBe("existence-only");
+    expect(outcome.value.suite.tests.some((test) => isGeneratedTestId(test.id) && test.target.requirementId === "R4")).toBe(false);
+    // R6・R7 のコードの試験はある
+    expect(outcome.value.suite.tests.filter((test) => isGeneratedTestId(test.id)).map((test) => test.target.requirementId)).toEqual(["R6", "R7"]);
+    const listed = dataBlockOf(recording.structured[0]!.input, TEST_SPEC_DATA_NAMES[1]) as { requirements: { id: string }[] };
+    expect(listed.requirements.map((requirement) => requirement.id)).toContain("R4");
+    // LLM が R4 の空の境界を書けば、在ることだけの要件として v1 の検査で落ちる（免除されない）
+    const boundary = aggTest({ id: "r4-base-empty", requirementId: "R4", roleId: "c.base", kind: "boundary", observes: "empty-aggregate", empty: ["e.item"], value: 0 });
+    const bad = response([...base, boundary], natures);
+    const { outcome: failed } = await runJ([bad, bad]);
+    if (failed.ok || failed.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(failed.failure.problems).toContainEqual({ field: `tests[${String(LLM_TESTS - 2)}]`, message: "在ることだけの要件なので、boundary の試験を作らない" });
+  });
+
+  it("(6) コードが作らない空の集計の要件：T1 の分類が existence-only の R4（T2 は ruled・判定なしで ruled に倒す）にはコードの試験を作らず、LLM が書いた空の試験を台帳の表で照らす（違えば落ち、合えば通る）", async () => {
+    const table: NameTable = { ...GTABLE, classification: GTABLE.classification.map((entry) => (entry.requirementId === "R4" ? { ...entry, nature: "existence-only" as const } : entry)) };
+    const empty = (value: unknown) => aggTest({ id: "r4-base-empty", requirementId: "R4", roleId: "c.base", kind: "boundary", observes: "empty-aggregate", empty: ["e.item"], value });
+    const wrong = idsResponse([empty(null)]);
+    const { outcome: failed } = await runG([wrong, wrong], true, table);
+    if (failed.ok || failed.failure.kind !== "unmet") throw new Error("unmet でない");
+    expect(failed.failure.problems).toEqual([{ field: `tests[${String(LLM_TESTS)}].expected`, message: AGG.messages.expected }]);
+    const { outcome } = await runG([idsResponse([empty(0)])], true, table);
+    if (!outcome.ok) throw new Error(`通るはず：${JSON.stringify(outcome.failure)}`);
+    expect(outcome.value.natures.get("R4")).toBe("ruled");
+    expect(outcome.value.suite.tests.some((test) => isGeneratedTestId(test.id) && test.target.requirementId === "R4")).toBe(false);
+    expect(outcome.value.suite.tests.some((test) => test.id === "r4-base-empty")).toBe(true);
+  });
+
   it("旗 ids でも台帳を渡さない走りは今のまま（コードの試験を作らない）", async () => {
     const plain = await run([passing()], { ids: true });
     const off = await run([passing()]);

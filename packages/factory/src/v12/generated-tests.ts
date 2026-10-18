@@ -154,7 +154,10 @@ export interface GeneratedTests {
   readonly tests: readonly FixedTest[];
   /** 試験 ID → 観測する性質（作った試験だけ） */
   readonly observes: ReadonlyMap<string, string>;
-  /** 試験を全部コードが作る要件（T2 の要件の一覧・確かめ方・所属・分類の完全性から除く。一覧の順） */
+  /**
+   * 試験を全部コードが作る要件（T2 の要件の一覧・確かめ方・所属・分類の完全性から除く。一覧の順）。どの要件にもコードの試験が
+   * 1 本以上ある（作れない要件は載せない＝fail-closed）
+   */
   readonly excludedRequirementIds: readonly string[];
 }
 
@@ -220,6 +223,8 @@ export function generateTests(input: GeneratedTestsInput): GeneratedTests {
       const { row } = target;
       if (row.t2.expectedWriter !== "code") continue;
       const value = row.t2.expected.equals === "target-options" ? [...target.options] : target.value;
+      // 作れない（必須の kind が無い）要件は除かない（fail-closed。T2 の LLM の一覧に残り、今までどおり照らす）
+      if (row.t2.requiredKinds.length === 0) continue;
       for (const kind of row.t2.requiredKinds) {
         const id = `${GENERATED_TEST_ID_PREFIX}${row.id}:${requirement.id}:${target.fieldId}:${kind}`;
         push(generatedTest(id, requirement.id, row.t2.targetKind, target.fieldId, kind, row.t2.operation, [], value), row.id);

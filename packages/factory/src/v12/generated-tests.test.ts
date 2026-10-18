@@ -280,3 +280,35 @@ describe("重なりの検査：コードが作る試験と同じ組の LLM の�
     expect(GENERATED_TEST_ID_MESSAGE).not.toContain("R4");
   });
 });
+
+describe("除く要件の fail-closed：除いた要件ごとにコードの試験が 1 本以上あり、作れない要件は除かない（Issue #595）", () => {
+  const everyExcludedHasTests = (made: ReturnType<typeof generate>) =>
+    made.excludedRequirementIds.every((id) => made.tests.filter((test) => test.target.requirementId === id).length >= 1);
+
+  it("今の表・台帳：除いた R6・R7 にそれぞれ 1 本以上", () => {
+    const made = generate();
+    expect(made.excludedRequirementIds).toEqual(["R6", "R7"]);
+    expect(everyExcludedHasTests(made)).toBe(true);
+  });
+
+  it("対象が引けない（確かめ方の値が文字列でない・選択肢の項目を所属させない）要件は作らず、除かない", () => {
+    const noField: NameTable = { ...TABLE, ownership: TABLE.ownership.map((entry) => (entry.requirementId === "R7" ? { ...entry, roles: [] } : entry)) };
+    const made = generate(noField);
+    expect(made.excludedRequirementIds).toEqual(["R6"]);
+    expect(made.tests.some((test) => test.target.requirementId === "R7")).toBe(false);
+    expect(everyExcludedHasTests(made)).toBe(true);
+  });
+
+  it("必須の kind が無い試験の型（作れない型）の台帳なら、その要件は除かない", () => {
+    const noKinds = {
+      ...ledger,
+      rowByVerificationKind: new Map(
+        [...ledger.rowByVerificationKind].map(([kind, row]) => [kind, row.t2 === null || kind !== "default-value" ? row : { ...row, t2: { ...row.t2, requiredKinds: [] } }] as const),
+      ),
+    };
+    const made = generateTests({ table: TABLE, ledger: noKinds, list: LIST });
+    expect(made.excludedRequirementIds).toEqual(["R7"]);
+    expect(made.tests.some((test) => test.target.requirementId === "R6")).toBe(false);
+    expect(everyExcludedHasTests(made)).toBe(true);
+  });
+});
