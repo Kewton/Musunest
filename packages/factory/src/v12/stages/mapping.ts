@@ -1,20 +1,28 @@
-// C2 要件の写像（08-architecture-v1.2.md §4 の C2・C2'・§6・§9 の手 3a。Issue #593）。
+// C2 要件の写像（08-architecture-v1.2.md §4 の C2・C2'・§6・§9 の手 3a・3b。Issue #593・#594・#627）。
 //
-// 旗 `v12.ids` が on の走りだけ、T1 の要件ごとの部分（所属・確かめ方・分類）を **1 回の呼び出し**で書かせる（束に分けるのは
-// 手 3b）。応答は要件ごとに `{requirementId, roles, verification, nature}` で、**要件 ID と行の ID を書かせ、コードが照らす**
-// （方法論 03 の H2。写し・出典・引用は無い。08 §6）。
+// 旗 `v12.ids` が on の走りだけ、T1 の要件ごとの部分（所属・確かめ方・分類）を **1 回の呼び出し**で書かせる。応答は要件ごとに
+// `{requirementId, roles, verification, nature}` で、**要件 ID と行の ID を書かせ、コードが照らす**（方法論 03 の H2。写し・
+// 出典・引用は無い。08 §6）。手 3b（#594）は要件 5 件ごとの束に分けたが、束が表全体の規則（どの要件にも所属しない行を残さない）
+// を各束で満たそうとして全行を抱え込み、所属が膨らんで時間も束の数だけ足し算になったので、束だけを戻した（08 §9 の手 3 の戻す
+// 条件。Issue #627）。
 //
 //   - データ：確定した仕様（要件の種類を外す）・要件の一覧（要件 ID・文・引用）・C1 の行（**名前は見せない**）・文書の名前と制約 ID
-//   - C2'（`checkMappedTable`）：要件ごとにちょうど 1 件（欠落・重複・一覧に無い ID）・所属の ID が行にある・今の T1' の (e)(g)。
-//     落ちれば共通の窓口の形のやり直しで 1 回（前回の応答と問題をデータで）。2 回続けば `unmet`
-//   - C3 の拒否のあとの 2 回目（呼ぶ側が `previous` を渡す）：前回の写像・拒否・印をデータで足し、**1 回だけ**呼ぶ。C2' に落ちても
-//     形の再試行は無い（08 §4.1）——`unmet`（`attempts` 1）を返し、呼ぶ側は前回の写像のまま拒否の要件を持ち越す
+//   - C2'（`inspectMapping`）：構造の検査の対象（`checkCheckTargets`）・要件ごとにちょうど 1 件（欠落・重複・一覧に無い ID）・
+//     所属の ID が行にある・今の T1' の (e)(g)。落ちれば共通の窓口の形のやり直しで 1 回（前回の応答と問題をデータで）。2 回続けば
+//     `unmet`
+//   - C3 の拒否のあとの 2 回目（呼ぶ側が `previous` を渡す）：前回の写像・拒否・印をデータで足し、**1 回だけ**呼んで表の全体を
+//     作り直す。C2' に落ちても形の再試行は無い（08 §4.1）——`unmet`（`attempts` 1）を返し、呼ぶ側は前回の写像のまま拒否の要件を
+//     持ち越す
 //
-// 参照の照合の数（`ReferenceCounts`）：照らした参照＝応答の要件 ID と所属の ID の全部、知らない ID＝一覧に無い要件 ID・行に無い
-// 所属の ID、重複＝同じ要件 2 件・同じ要件の中の同じ行、別の束の ID＝要件 ID の欄に行の ID の形・所属の欄に一覧の要件 ID。
+// 構造の検査の対象の欄（Issue #594。方法論 03 の F4・H1・H2）：`verification.checks` は `[{check, targetId, sourceId}]` の並び。
+// コードが対象の実在・種類・view-shows の対を照らし、対象の行を所属に足す（basis dependency・reason に検査の種類）。
+//
+// 参照の照合の数（`ReferenceCounts`）：照らした参照＝応答の要件 ID・所属の ID・検査の対象の ID の全部、知らない ID＝一覧に無い
+// 要件 ID・行に無い所属や対象の ID、重複＝同じ要件 2 件・同じ要件の中の同じ行、別の束の ID＝要件 ID の欄に行の ID の形・所属や
+// 対象の欄に一覧の要件 ID。
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import type { CallGateway } from "../../call.js";
-import { REQUIREMENT_NATURES, STRUCTURAL_ASSERTIONS } from "../../fixed-test.js";
+import { REQUIREMENT_NATURES, STRUCTURAL_ASSERTIONS, isStructuralAssertionKind } from "../../fixed-test.js";
 import { ROLE_OWNERSHIP_BASES, type RequirementList } from "../../pipeline.js";
 import {
   buildStructuredRequest,
@@ -34,11 +42,14 @@ import {
 } from "../../stages/prompt.js";
 import {
   NAME_TABLE_VERIFICATION_KINDS,
+  checkCheckTargets,
   checkMappedTable,
   nameTableSha256,
+  ownershipWithCheckTargets,
   shapeOfMappingEntry,
   type MappingEntry,
   type NameTable,
+  type NameTableCheckTarget,
   type NameTableRow,
 } from "../../v11a/names.js";
 import { planWithoutRequirementKinds, type SemanticRejection } from "../../v11a/stages/name-table.js";
@@ -49,7 +60,7 @@ import type { LedgerView } from "../ledger.js";
 /** C2 の JSON Schema の名前 */
 export const MAPPING_SCHEMA_NAME = "mapping";
 
-/** C2 の中身の回数（C3 の拒否で 1 回だけ作り直す。回すのは呼ぶ側） */
+/** C2 の中身の回数（C3 の拒否で 1 回だけ表の全体を作り直す。回すのは呼ぶ側） */
 export const MAPPING_ROUNDS = 2;
 
 /** データの塊の名前 */
@@ -63,13 +74,22 @@ export const MAPPING_DATA_NAMES = {
   advice: "助言の印",
 } as const;
 
+/** C2 の固定文（構造の検査の対象の欄の形。要件の欠落・重複・一覧に無い ID は表の検査 `checkMappedTable` の文） */
+export const MAPPING_MESSAGES = {
+  checksShape: `checks は検査ごとの写像（check は ${STRUCTURAL_ASSERTIONS.join("・")} のいずれか、targetId は空でない文字列、sourceId は文字列か null）の並びであること`,
+} as const;
+
+/** 構造の検査の書き方（R-map-03 と台帳の文の頭で同じ文） */
+const STRUCTURAL_RULE_TEXT =
+  "構造で確かめるなら kind を structural にし、reason に理由、checks に構造の検査を 1 件ずつ並べる。検査ごとに check に検査の種類、targetId に検査が見る行の ID（field-type は項目、action-kind・action-unconditioned・write-anonymous は操作、view-shows は画面、aggregate-no-period は計算）、sourceId に view-shows なら画面と同じ entity の項目か計算の行の ID（entity を持たない画面は entity を持たない計算の ID）、ほかの検査は null を書く。検査の対象の行はコードが所属に足す。";
+
 /** C2 の規則の定義（ID は `R-map-nn`） */
 export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   {
     id: "R-map-01",
     text: "要件の一覧の要件ごとに 1 件ずつ、requirementId に一覧の要件 ID をそのまま書く。一覧に無い要件 ID を書かない。同じ要件を 2 件書かない。",
-    why: "要件を ID で指させ、欠落・重複・一覧に無い ID をコードが照らす（方法論 03 の H2。07 の D10 の写しを廃止する。08 §6）",
-    since: "Issue #593",
+    why: "要件を ID で指させ、欠落・重複・一覧に無い ID をコードが照らす（方法論 03 の H2。07 の D10 の写しを廃止する。08 §6）。一覧は全要件を 1 回で渡す（束に切ると各束が表全体の所属の規則を抱えて所属が膨らんだ。08 §9 の手 3 の戻す条件）",
+    since: "Issue #593（束ごとの一覧は Issue #594 で足し、Issue #627 で 1 回の写像に戻した）",
   },
   {
     id: "R-map-02",
@@ -79,9 +99,9 @@ export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
   {
     id: "R-map-03",
-    text: "verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。構造で確かめるなら kind を structural にし、reason に理由、checks に構造の検査を並べ、検査ごとに合う種類の行を所属させる。宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に根拠にした文書の制約 ID（文書の制約 ID の一覧にあるものだけ）を書く。要件の決まりが選択肢の項目の既定値だけなら kind を default-value にし、value にそのキー（その項目の options のキー）を書き、その項目だけを所属させる。使わない欄は null か空の並びにする。",
-    why: "確かめ方を所属と組で固定し、書けない要件は理由と制約 ID つきで持ち越す（T1 の R-nt-08）",
-    since: "Issue #593",
+    text: `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT}宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に根拠にした文書の制約 ID（文書の制約 ID の一覧にあるものだけ）を書く。要件の決まりが選択肢の項目の既定値だけなら kind を default-value にし、value にそのキー（その項目の options のキー）を書き、その項目だけを所属させる。使わない欄は null か空の並びにする。`,
+    why: "確かめ方を所属と組で固定し、書けない要件は理由と制約 ID つきで持ち越す（T1 の R-nt-08）。構造の検査の対象は規則の文で所属を求めず、応答の欄で行の ID を書かせて対と所属をコードが導く（方法論 03 の F4・H1・H2）",
+    since: "Issue #593（構造の検査の対象の欄は Issue #594）",
   },
   {
     id: "R-map-04",
@@ -92,8 +112,7 @@ export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
 ];
 
 /** 性質の台帳の文を差し込む規則（R-map-03。T1 の R-nt-08 と同じ作法） */
-const MAPPING_LEDGER_RULE_HEAD =
-  "verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。構造で確かめるなら kind を structural にし、reason に理由、checks に構造の検査を並べ、検査ごとに合う種類の行を所属させる。宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に根拠にした文書の制約 ID（文書の制約 ID の一覧にあるものだけ）を書く。";
+const MAPPING_LEDGER_RULE_HEAD = `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT}宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に根拠にした文書の制約 ID（文書の制約 ID の一覧にあるものだけ）を書く。`;
 const MAPPING_LEDGER_RULE_TAIL = "使わない欄は null か空の並びにする。";
 
 /** C2 の規則の定義（旗 `v12.ledger` が on なら R-map-03 を台帳の文で組み直す） */
@@ -142,7 +161,19 @@ export function mappingSchemaOf(ledger?: LedgerView): Record<string, unknown> {
                 kind: { type: "string", enum: [...(ledger?.verificationKinds ?? NAME_TABLE_VERIFICATION_KINDS)] },
                 value: { type: ["string", "null"], description: "確かめ方の値（選択肢のキー。ほかの種類は null）" },
                 reason: { type: ["string", "null"] },
-                checks: { type: "array", items: { type: "string", enum: [...STRUCTURAL_ASSERTIONS] } },
+                checks: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["check", "targetId", "sourceId"],
+                    properties: {
+                      check: { type: "string", enum: [...STRUCTURAL_ASSERTIONS] },
+                      targetId: { type: "string", description: "検査が見る行の ID" },
+                      sourceId: { type: ["string", "null"], description: "view-shows の組の行の ID（ほかの検査は null）" },
+                    },
+                  },
+                },
                 constraintIds: { type: "array", items: { type: "string" } },
               },
             },
@@ -192,12 +223,27 @@ function skeletonProblems(output: unknown): readonly Problem[] {
   return items.flatMap((item, index) => (isRecord(item) ? [] : [{ field: `requirements[${String(index)}]`, message: "写像（object）であること" }]));
 }
 
+const checksOf = (entry: Record<string, unknown>): readonly unknown[] => {
+  const verification = entry["verification"];
+  return isRecord(verification) && Array.isArray(verification["checks"]) ? (verification["checks"] as readonly unknown[]) : [];
+};
+
 /** 応答の参照を数える（純粋。ID の値は数に入れない） */
 export function countMappingReferences(list: RequirementList, rows: readonly NameTableRow[], output: unknown, tally: ReferenceTally): void {
   if (!isRecord(output) || !Array.isArray(output["requirements"])) return;
   const requirementIds = new Set(list.requirements.map((requirement) => requirement.id));
   const rowIds = new Set(rows.map((row) => row.id));
   const seenRequirements = new Set<string>();
+  /** 行を指す欄の ID（所属・検査の対象）を数える。`seen` を渡せば重複を数える */
+  const countRowId = (id: unknown, seen?: Set<string>): void => {
+    if (typeof id !== "string") return;
+    tally.checked += 1;
+    if (!rowIds.has(id)) {
+      if (requirementIds.has(id)) tally.crossBundle += 1;
+      else tally.unknown += 1;
+    } else if (seen?.has(id) === true) tally.duplicate += 1;
+    seen?.add(id);
+  };
   for (const entry of output["requirements"] as readonly unknown[]) {
     if (!isRecord(entry)) continue;
     const requirementId = entry["requirementId"];
@@ -211,20 +257,55 @@ export function countMappingReferences(list: RequirementList, rows: readonly Nam
     }
     const roles = Array.isArray(entry["roles"]) ? (entry["roles"] as readonly unknown[]) : [];
     const seenRoles = new Set<string>();
-    for (const role of roles) {
-      const id = isRecord(role) ? role["id"] : undefined;
-      if (typeof id !== "string") continue;
-      tally.checked += 1;
-      if (!rowIds.has(id)) {
-        if (requirementIds.has(id)) tally.crossBundle += 1;
-        else tally.unknown += 1;
-      } else if (seenRoles.has(id)) tally.duplicate += 1;
-      seenRoles.add(id);
+    for (const role of roles) countRowId(isRecord(role) ? role["id"] : undefined, seenRoles);
+    for (const check of checksOf(entry)) {
+      if (!isRecord(check)) continue;
+      countRowId(check["targetId"]);
+      countRowId(check["sourceId"]);
     }
   }
 }
 
-/** 応答（骨組みは通った）から表を組み、C2' を掛ける（純粋） */
+/**
+ * 応答の要件ごとの 1 件の形（検査の対象の欄を読んで検査の種類の並びに写し、所属・確かめ方・分類の形は T1 の下書きと同じ関数）。
+ * 構造で確かめる要件は確かめ方に対象を持たせる。合わなければ問題に足して undefined
+ */
+function shapeOfEntry(
+  value: unknown,
+  field: string,
+  problems: Problem[],
+  ledger?: LedgerView,
+): MappingEntry | undefined {
+  let targets: NameTableCheckTarget[] | undefined;
+  let item = value;
+  if (isRecord(value) && isRecord(value["verification"]) && Array.isArray(value["verification"]["checks"])) {
+    const verification = value["verification"];
+    const raw = verification["checks"] as readonly unknown[];
+    const read = raw.map((check): NameTableCheckTarget | undefined =>
+      isRecord(check) &&
+      isStructuralAssertionKind(check["check"]) &&
+      typeof check["targetId"] === "string" &&
+      check["targetId"].trim() !== "" &&
+      (check["sourceId"] === null || typeof check["sourceId"] === "string")
+        ? { check: check["check"], targetId: check["targetId"], sourceId: check["sourceId"] }
+        : undefined,
+    );
+    if (read.some((target) => target === undefined)) {
+      problems.push({ field: `${field}.verification.checks`, message: MAPPING_MESSAGES.checksShape });
+      return undefined;
+    }
+    targets = read as NameTableCheckTarget[];
+    item = { ...value, verification: { ...verification, checks: targets.map((target) => target.check) } };
+  }
+  const entry = shapeOfMappingEntry(item, field, problems, ledger === undefined ? {} : { ledger });
+  if (entry === undefined || entry.verification.kind !== "structural") return entry;
+  return { ...entry, verification: { ...entry.verification, targets: targets ?? [] } };
+}
+
+/**
+ * 応答（骨組みは通った）から表を組み、C2' を掛ける（純粋）。構造の検査の対象を照らして通った対象の行を所属に足し（対象の問題の
+ * 位置は応答の `requirements[j]`）、一覧の順に並べた表に C2' を掛ける（表の問題の位置は表の欄。手 3a と同じ）
+ */
 export function inspectMapping(
   list: RequirementList,
   rows: readonly NameTableRow[],
@@ -233,14 +314,18 @@ export function inspectMapping(
   ledger?: LedgerView,
 ): { readonly ok: true; readonly table: NameTable } | { readonly ok: false; readonly problems: readonly Problem[] } {
   const problems: Problem[] = [];
-  const entries = (output["requirements"] as readonly unknown[]).map((item, index) =>
-    shapeOfMappingEntry(item, `requirements[${String(index)}]`, problems, ledger === undefined ? {} : { ledger }),
-  );
+  const shaped = (output["requirements"] as readonly unknown[]).map((item, index) => shapeOfEntry(item, `requirements[${String(index)}]`, problems, ledger));
   if (problems.length > 0) return { ok: false, problems };
-  const shaped = entries as readonly MappingEntry[];
+  // 検査の対象を照らして所属に足す（対象に問題がある要件は足さない。落ちる応答は採用しない）
+  const entries = (shaped as readonly MappingEntry[]).map((entry, index) => {
+    if (entry.verification.kind !== "structural" || entry.verification.targets === undefined) return entry;
+    const before = problems.length;
+    checkCheckTargets(rows, entry.verification.targets, `requirements[${String(index)}].verification`, problems);
+    return problems.length !== before ? entry : { ...entry, roles: ownershipWithCheckTargets(entry.roles, entry.verification.targets) };
+  });
   // 一覧の順に並べる（応答の順は表の SHA に効かせない。重複・一覧に無い ID は応答の順のまま後ろに置き、C2' が落とす）
   const order = new Map(list.requirements.map((requirement, index) => [requirement.id, index] as const));
-  const sorted = shaped
+  const sorted = entries
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) => (order.get(a.entry.requirementId) ?? list.requirements.length + a.index) - (order.get(b.entry.requirementId) ?? list.requirements.length + b.index) || a.index - b.index)
     .map(({ entry }) => entry);
@@ -250,8 +335,8 @@ export function inspectMapping(
     verification: sorted.map((entry) => ({ ...entry.verification, requirementId: entry.requirementId })),
     classification: sorted.map((entry) => ({ requirementId: entry.requirementId, nature: entry.nature })),
   };
-  const tableProblems = checkMappedTable(list, table, documents, ledger === undefined ? {} : { ledger });
-  return tableProblems.length > 0 ? { ok: false, problems: tableProblems } : { ok: true, table };
+  problems.push(...checkMappedTable(list, table, documents, ledger === undefined ? {} : { ledger }));
+  return problems.length > 0 ? { ok: false, problems } : { ok: true, table };
 }
 
 function rawResponseText(output: unknown): string {

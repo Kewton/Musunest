@@ -217,8 +217,9 @@ export const V12_V11A_FRAME_MAP: readonly {
 
 /**
  * 旗 `v12.ids` の段（手 3a。Issue #593）が、枠のどの行に写るか。C1 は束 3 つ（`units`）で、束ごとに初回 1・形のやり直し 1
- * （`shapeAttempts` 2）。C2 は束 1 つ（束に分けるのは手 3b）で、初回の形のやり直し 1・C3 の拒否のあとの 2 回目 1（`rounds` 2。
- * 2 回目は形の再試行を持たない）。値は段のコードの定数と同じで、試験が照らす（ここで値を変えない）。
+ * （`shapeAttempts` 2）。C2 は束 1 つ（全要件を 1 回で写す。手 3b の要件 5 件ごとの束は Issue #627 で戻した）で、初回の形の
+ * やり直し 1・C3 の拒否のあとの 2 回目 1（`rounds` 2。2 回目は形の再試行を持たない）。値は段のコードの定数と同じで、試験が照らす
+ * （ここで値を変えない）。
  */
 export const V12_IDS_FRAME_MAP: readonly {
   readonly stage: StageId;

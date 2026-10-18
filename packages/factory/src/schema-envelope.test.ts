@@ -587,6 +587,16 @@ describe("旗 v12.ids の C1・C2 の枝は v1.2 の封筒にだけ載る（Issu
     }
   });
 
+  it("C2 の枝の checks は検査ごとの対象（check・targetId・sourceId）の写像の並びで、v1.2 の封筒の JSON にその欄がある。v1・v1.1α の封筒には無い（Issue #594）", () => {
+    const branch = STAGE_ENVELOPE_ENTRIES_V12.find((entry) => entry.stage === MAPPING_SCHEMA_NAME);
+    expect(branch?.schema).toEqual(mappingSchemaOf(PROPERTY_LEDGER_VIEW));
+    const text = JSON.stringify(ENVELOPE_SCHEMA_V12);
+    for (const key of ['"targetId"', '"sourceId"']) {
+      expect(text.includes(key), key).toBe(true);
+      for (const schema of [ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_V11A, ENVELOPE_SCHEMA_V12_LEDGER]) expect(JSON.stringify(schema).includes(key), key).toBe(false);
+    }
+  });
+
   it("v1・v1.1α の封筒の JSON に C1・C2 の名前が無く、識別子 v1・v1.1a では引けない", () => {
     for (const name of IDS_STAGES) {
       for (const schema of [ENVELOPE_SCHEMA, ENVELOPE_SCHEMA_V11A]) expect(JSON.stringify(schema).includes(`"${name}"`), name).toBe(false);

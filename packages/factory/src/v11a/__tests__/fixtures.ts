@@ -19,9 +19,11 @@ import {
   requirementCopy,
   type ComputationAggregate,
   type NameTable,
+  type NameTableCheckTarget,
   type NameTableDraft,
   type NameTableRow,
 } from "../names.js";
+import { STRUCTURAL_TARGET_KINDS, type StructuralAssertionKind } from "../../fixed-test.js";
 import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } from "../../v12/ledger.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
 import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
@@ -273,6 +275,54 @@ export function fixtureNonRequirementTable(id = "R6"): NameTable {
   };
 }
 
+/**
+ * コードが作る試験の題材の一覧（Issue #595）：題材の一覧に、既定値の要件 R6 と選択肢の集合の要件 R7 を末尾に足したもの
+ * （`fixtureList` の値は変えない）。
+ */
+export function fixtureGeneratedList(): RequirementList {
+  const base = fixtureList();
+  return {
+    ...base,
+    requirements: [...base.requirements, requirement("R6", DEFAULT_VALUE_REQUIREMENT_TEXT), requirement("R7", ENUM_MEMBERSHIP_REQUIREMENT_TEXT)],
+  };
+}
+
+/**
+ * コードが作る試験の題材の表（Issue #595）。題材の表の計算の行に集計の種類と集計元を足し（`withAggregates`）、宣言の補助の計算
+ * `base`（アプリ全体の合計）を R4 の所属の行として足し、既定値の要件 R6（区分の項目・alpha）と選択肢の集合の要件 R7（区分の
+ * 項目）を足したもの。R4 はアプリ全体（`c.base`）・見出しごと × 選択肢（`c.byKind`）・見出しごと × 月（`c.byMonth`）の集計を
+ * 所属させる（`fixtureTable` の値は変えない）。
+ */
+export function fixtureGeneratedTable(): NameTable {
+  const base = fixtureTable();
+  const appSum = row({
+    id: "c.base",
+    kind: "computation",
+    entity: null,
+    name: "base",
+    type: { valueType: "number", scope: "app", form: "aggregate" },
+    from: "R4",
+    quote: "全体の率",
+  });
+  return withAggregates(
+    {
+      rows: [...base.rows, appSum],
+      ownership: [
+        ...base.ownership.map((entry) => (entry.requirementId === "R4" ? { ...entry, roles: [...entry.roles, stated("c.base")] } : entry)),
+        { requirementId: "R6", roles: [stated("f.item.kind")] },
+        { requirementId: "R7", roles: [stated("f.item.kind")] },
+      ],
+      verification: [
+        ...base.verification,
+        { requirementId: "R6", kind: "default-value", value: "alpha" },
+        { requirementId: "R7", kind: "enum-membership" },
+      ],
+      classification: [...base.classification, { requirementId: "R6", nature: "ruled" }, { requirementId: "R7", nature: "ruled" }],
+    },
+    { "c.base": { kind: "sum", entity: "e.item" } },
+  );
+}
+
 /** 名前の表を T1 の応答の形（下書き。要件 ID を持たず、写しを添える）に戻す */
 export function draftOf(list: RequirementList, table: NameTable): NameTableDraft {
   const length = copyLengthFor(list);
@@ -444,7 +494,7 @@ if (NON_REQUIREMENT_ROW === undefined) throw new Error("前提が壊れた：台
 export const LEDGER_ROWS_2C: readonly PropertyRow[] = PROPERTY_LEDGER.filter((entry) => entry.id !== "non-requirement").map(
   (entry): PropertyRow =>
     entry.id === "when"
-      ? { ...entry, requirementRule: null, t2Condition: null, outer: null, rules: { t1: null, t1Acceptance: null, t2: null, b1: null } }
+      ? { ...entry, requirementRule: null, t2Condition: null, outer: null, rules: { t1: null, t1Acceptance: null, t2: null, t2Ids: null, b1: null } }
       : entry,
 );
 
@@ -859,6 +909,40 @@ export function withCodeIds(table: NameTable, keepSource = false): NameTable {
   };
 }
 
+/**
+ * 構造の検査ごとの対象（旗 v12.ids の C2 が書く欄。Issue #594）を、表の所属から決める：検査の種類に合う所属の最初の行。view-shows は
+ * 所属の画面のうち、同じ entity の項目か計算を所属させた最初の画面と、その最初の項目か計算（entity を持たない画面は entity を
+ * 持たない計算）。合う行が無ければ対象を作れないので例外にする
+ */
+export function checkTargetsOf(table: NameTable, requirementId: string, checks: readonly StructuralAssertionKind[]): readonly NameTableCheckTarget[] {
+  const owned = (table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? []).flatMap((role) => {
+    const found = table.rows.find((entry) => entry.id === role.id);
+    return found === undefined ? [] : [found];
+  });
+  return checks.map((check) => {
+    if (check === "view-shows") {
+      for (const screen of owned.filter((entry) => entry.kind === "screen")) {
+        const source = owned.find((entry) => (entry.kind === "field" || entry.kind === "computation") && entry.entity === screen.entity);
+        if (source !== undefined) return { check, targetId: screen.id, sourceId: source.id };
+      }
+      throw new Error(`前提が壊れた：${requirementId} の view-shows の組が所属に無い`);
+    }
+    const target = owned.find((entry) => entry.kind === STRUCTURAL_TARGET_KINDS[check]);
+    if (target === undefined) throw new Error(`前提が壊れた：${requirementId} の ${check} の対象が所属に無い`);
+    return { check, targetId: target.id, sourceId: null };
+  });
+}
+
+/** 構造で確かめる要件の確かめ方に、検査ごとの対象（`checkTargetsOf`）を添えた表（旗 v12.ids の C2 が組む表の形。Issue #594） */
+export function withCheckTargets(table: NameTable): NameTable {
+  return {
+    ...table,
+    verification: table.verification.map((entry) =>
+      entry.kind === "structural" ? { ...entry, targets: entry.targets ?? checkTargetsOf(table, entry.requirementId, entry.checks) } : entry,
+    ),
+  };
+}
+
 /** C1 の 3 束と C2 の応答（表はコードの形の ID・C1 が組む順であること。`withCodeIds` の結果） */
 export interface IdsResponses {
   readonly entities: Record<string, unknown>;
@@ -872,6 +956,25 @@ export function idsResponsesOf(list: RequirementList, table: NameTable, ledger?:
   const withAggregate = (ledger?.aggregateKinds.length ?? 0) > 0;
   const rowsOf = (kind: NameTableRow["kind"]) => table.rows.filter((entry) => entry.kind === kind);
   const computationType = (entry: NameTableRow) => entry.type as { valueType: string; scope: string; form: string; aggregate?: ComputationAggregate | null };
+  // C2 の応答の要件ごとの 1 件（一覧の順。構造の検査は検査ごとの対象の写像の並び。所属は表の所属のまま。Issue #594）
+  const mappingEntries = list.requirements.map((item) => {
+    const ownership = table.ownership.find((entry) => entry.requirementId === item.id);
+    const verification = table.verification.find((entry) => entry.requirementId === item.id);
+    const classification = table.classification.find((entry) => entry.requirementId === item.id);
+    if (ownership === undefined || verification === undefined || classification === undefined) {
+      throw new Error("前提が壊れた：要件の欄が欠けている");
+    }
+    const { requirementId: _omit, ...rest } = verification;
+    const checks =
+      verification.kind === "structural" ? (verification.targets ?? checkTargetsOf(table, item.id, verification.checks)) : [];
+    const { targets: _targets, ...withoutTargets } = rest as typeof rest & { readonly targets?: unknown };
+    return {
+      requirementId: item.id,
+      roles: ownership.roles,
+      verification: { value: null, reason: null, constraintIds: [], ...withoutTargets, checks },
+      nature: classification.nature,
+    };
+  });
   return {
     entities: { entities: rowsOf("entity").map((entry) => ({ name: entry.name, role: entry.role })) },
     fields: {
@@ -906,23 +1009,7 @@ export function idsResponsesOf(list: RequirementList, table: NameTable, ledger?:
       })),
       screens: rowsOf("screen").map((entry) => ({ entity: entry.entity, name: entry.name, role: entry.role, view: (entry.type as { view: string }).view })),
     },
-    mapping: {
-      requirements: list.requirements.map((item) => {
-        const ownership = table.ownership.find((entry) => entry.requirementId === item.id);
-        const verification = table.verification.find((entry) => entry.requirementId === item.id);
-        const classification = table.classification.find((entry) => entry.requirementId === item.id);
-        if (ownership === undefined || verification === undefined || classification === undefined) {
-          throw new Error("前提が壊れた：要件の欄が欠けている");
-        }
-        const { requirementId: _omit, ...rest } = verification;
-        return {
-          requirementId: item.id,
-          roles: ownership.roles,
-          verification: { value: null, reason: null, checks: [], constraintIds: [], ...rest },
-          nature: classification.nature,
-        };
-      }),
-    },
+    mapping: { requirements: mappingEntries },
   };
 }
 

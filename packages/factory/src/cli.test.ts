@@ -81,6 +81,12 @@ import {
 } from "./v11a/__tests__/fixtures.js";
 import * as ledgerModule from "./v12/ledger.js";
 import type { LedgerView } from "./v12/ledger.js";
+import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
+import { isGeneratedTestId } from "./v12/generated-tests.js";
+import { ruleTexts } from "./stages/prompt.js";
+import { TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf } from "./v11a/stages/test-spec.js";
+import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
+import { V12_CALL_LIMITS } from "./v12/limits.js";
 import type { NameTable } from "./v11a/names.js";
 import {
   BUNDLE_MANIFEST_FILE,
@@ -1226,6 +1232,34 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
         }
         return JSON.parse(text) as unknown;
       });
+  /**
+   * 旗 ids on の要求から、コードが作る試験の分（Issue #595）を除く：T2 の R-tsp-16 を台帳の旗 ids の文から旗 ids off の文に戻し、
+   * B1 の「固定した試験」の塊からコードが作った試験（予約の接頭辞の ID）を除く。ほかの欄は触らない。`generated` は、B1 の塊に
+   * コードが作った試験があるはずか（台帳に空の集計の行が無い導出の走りは、この題材ではコードの試験を作らない）
+   */
+  const withoutIdsGenerated = (requests: readonly unknown[], ledger: LedgerView = PROPERTY_LEDGER_VIEW, generated = true): unknown[] => {
+    const idsRules = ruleTexts(testSpecRuleDefinitionsOf(ledger, true));
+    const offRules = ruleTexts(testSpecRuleDefinitionsOf(ledger));
+    const [, , testsName] = WRITE_V11A_DATA_NAMES;
+    const testsBlock = new RegExp(`(<data name="${testsName}">\\n)([\\s\\S]*?)(\\n</data>)`);
+    return requests.map((value) => {
+      const request = value as LlmStructuredRequest;
+      if (request.schemaName === TEST_SPEC_SCHEMA_NAME) {
+        return { ...request, rules: (request.rules ?? []).map((text) => { const at = idsRules.indexOf(text); return at < 0 ? text : (offRules[at] ?? text); }) };
+      }
+      if (request.schemaName === WRITE_V11A_SCHEMA_NAME) {
+        const input = request.input.replace(testsBlock, (_all, head: string, body: string, tail: string) => {
+          const parsed = JSON.parse(body) as { readonly tests: readonly { readonly id: string }[] };
+          // 書き直しの形が元と同じこと（塊の字下げ・欄の並びを変えない）を確かめてから除く
+          expect(JSON.stringify(parsed, null, 2)).toBe(body);
+          expect(parsed.tests.some((test) => isGeneratedTestId(test.id))).toBe(generated);
+          return `${head}${JSON.stringify({ ...parsed, tests: parsed.tests.filter((test) => !isGeneratedTestId(test.id)) }, null, 2)}${tail}`;
+        });
+        return { ...request, input };
+      }
+      return request;
+    });
+  };
   const withoutTableStage = (diff: Readonly<Record<string, readonly string[]>>): Readonly<Record<string, readonly string[]>> =>
     Object.fromEntries(Object.entries(diff).filter(([name]) => name !== "name-table"));
 
@@ -1246,7 +1280,13 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     // 表を組む段の後の LLM への要求は、v1.2 の旗で台帳に登録した性質（enum-membership。Issue #548・empty-aggregate。Issue #549）の
     // 分を除けば v1.1a の走りとバイト列で同じ（ID と出典の欄をそろえたうえで）。差は名指しの場所（R-sc-02・R-tsp-02・R-tsp-16・
     // R-w11 の並び・schema の enum、表を載せるデータの計算の行の aggregate）だけで、空でない
-    const onRequests = laterRequests(v12.recording.structured);
+    // ids on の C3・T2 の確かめ方は構造の検査の対象の欄を持つ（C3 は表の targets、T2 は checkTargets。Issue #594）。その欄だけを除いて比べる
+    const targetsPattern = /,\\n *\\"(?:targets|checkTargets)\\": \[[^\]]*\]/g;
+    const withoutCheckTargets = (requests: readonly unknown[]): unknown[] =>
+      requests.map((request) => JSON.parse(JSON.stringify(request).replace(targetsPattern, "")) as unknown);
+    const onWithTargets = laterRequests(v12.recording.structured);
+    expect(onWithTargets.slice(0, 2).every((request) => JSON.stringify(request).match(targetsPattern) !== null)).toBe(true);
+    const onRequests = withoutCheckTargets(onWithTargets);
     const offRequests = laterRequests(v11a.recording.structured);
     expect(onRequests).toHaveLength(offRequests.length);
     const diffs = requestDiffsOf(onRequests, offRequests);
@@ -1260,12 +1300,16 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
       expect(diff.paths, diff.schemaName).toEqual(withInput(ledgerDiff[diff.schemaName] ?? []));
     }
     expect(diffs.filter((diff) => diff.paths.length > 0).map((diff) => diff.schemaName)).toEqual([...Object.keys(ledgerDiff), "decl-check"]);
-    expect(JSON.stringify(withoutLedgerAdditions(onRequests))).toBe(JSON.stringify(offRequests));
+    // 旗 ids on の差（Issue #595）：T2 の R-tsp-16（$.rules[15]）が台帳の旗 ids の文になり、B1 の「固定した試験」（$.input）の末尾に
+    // コードが作った試験が並ぶ。この 2 つだけを ids on 側から除いて（R-tsp-16 は旗 off の文に戻して）比べる
+    expect(JSON.stringify(withoutLedgerAdditions(withoutIdsGenerated(onRequests)))).toBe(JSON.stringify(offRequests));
     // #548 までの旗 on（台帳に empty-aggregate の行が無い）は、同じ応答で差が enum-membership の行の分だけ（今までの期待）
     const spy = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2B : undefined));
     const v12Before = await runV11aCli({ dir: `${directory}/v12-complete-2b`, calls: [...v12Head(LEDGER_VIEW_2B), structured(v11aJudgments())], pipeline: "v1.2" });
     spy.mockRestore();
-    const beforeRequests = laterRequests(v12Before.recording.structured);
+    // 旗 ids on の差（Issue #595）：#548 の台帳でも R-tsp-16 は旗 ids の文（既定値・選択肢の集合の文）。空の集計の行が無いので
+    // コードの試験は作らない（B1 の塊は同じ）。R-tsp-16 だけを旗 off の文に戻して比べる
+    const beforeRequests = withoutIdsGenerated(withoutCheckTargets(laterRequests(v12Before.recording.structured)), LEDGER_VIEW_2B, false);
     const beforeDiffs = requestDiffsOf(beforeRequests, offRequests);
     const enumDiff = withoutTableStage(ENUM_MEMBERSHIP_REQUEST_DIFF);
     for (const diff of beforeDiffs) expect(diff.paths, diff.schemaName).toEqual(enumDiff[diff.schemaName] ?? []);
@@ -1280,7 +1324,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     const spy2C = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2C : undefined));
     const v12Before2C = await runV11aCli({ dir: `${directory}/v12-complete-2c`, calls: [...v12Head(LEDGER_VIEW_2C), structured(v11aJudgments())], pipeline: "v1.2" });
     spy2C.mockRestore();
-    const before2CRequests = laterRequests(v12Before2C.recording.structured);
+    const before2CRequests = withoutCheckTargets(laterRequests(v12Before2C.recording.structured));
     const diffs2C = requestDiffsOf(onRequests, before2CRequests);
     const when2C = withoutTableStage(WHEN_NON_REQUIREMENT_REQUEST_DIFF);
     for (const diff of diffs2C) expect(diff.paths, diff.schemaName).toEqual(when2C[diff.schemaName] ?? []);
@@ -1294,7 +1338,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(v12.summary["prompt_version"]).toBe("v1.2");
     expect(v12.record.conditions["pipeline"]).toBe("v1.2");
     expect(v12.record.conditions["prompt_version"]).toBe("v1.2");
-    const { pipeline: _pipeline, prompt_version: _v12Prompt, v12_flags: _flags, ...v12Rest } = v12.record.conditions;
+    const { pipeline: _pipeline, prompt_version: _v12Prompt, v12_flags: _flags, v12_call_limits: _limits, ...v12Rest } = v12.record.conditions;
     const { prompt_version: v11aPrompt, ...v11aRest } = v11a.record.conditions;
     expect(v11aPrompt).toBe("v1.1a");
     expect(v12Rest).toEqual(v11aRest);
@@ -1332,6 +1376,18 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(run.record.conditions["v12_flags"]).toEqual({ ledger: true, "search-repair": true, ids: true });
   });
 
+  it("ids on の v1.2 の走りの条件の記録の v12_call_limits の 3 つの値は V12_CALL_LIMITS の値と欄ごとに等しい（Issue #616）", async () => {
+    const run = await runV11aCli({ dir: `${directory}/v12-call-limits`, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+    expect(run.code).toBe(EXIT_OK);
+    const limits = run.record.conditions["v12_call_limits"] as Record<string, unknown>;
+    expect(Object.keys(limits).sort()).toEqual(["judge_branch", "logical_calls", "real_attempts"]);
+    expect(limits["logical_calls"]).toBe(V12_CALL_LIMITS.logicalCalls);
+    expect(limits["real_attempts"]).toBe(V12_CALL_LIMITS.realAttempts);
+    expect(limits["judge_branch"]).toBe(V12_CALL_LIMITS.judgeBranch);
+    // 要約の v12_calls は変えない
+    expect(run.summary["v12_calls"]).toEqual({ real_attempts: { limit: 144, used: 12 }, judge_branch: { limit: 80, used: 4 } });
+  });
+
   it("表を組む段（ids on は C1）で止まる走りでも要約と条件の記録に v12_flags がある（終了コード 1・納品物無し）", async () => {
     const broken = { entities: [{ name: "1member", role: "名前の規則に合わない行" }] };
     const run = await runV11aCli({
@@ -1353,6 +1409,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(run.summary).not.toHaveProperty("v12_flags");
     expect(run.summary).not.toHaveProperty("v12_calls");
     expect(run.record.conditions).not.toHaveProperty("v12_flags");
+    expect(run.record.conditions).not.toHaveProperty("v12_call_limits");
     expect(run.record.conditions).not.toHaveProperty("pipeline");
     expect(v11aSpy.mock.calls[0]?.[0]).not.toHaveProperty("flags");
     expect(v11aSpy.mock.calls[0]?.[0]).not.toHaveProperty("recordV12Flags");

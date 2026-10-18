@@ -12,6 +12,7 @@ import {
   fixtureNonRequirementTable,
   fixtureTable,
   withAggregates,
+  withCheckTargets,
 } from "./__tests__/fixtures.js";
 import { UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE, identityMappings, toRoleEntries, toV1 } from "./convert.js";
 import type { NameTable } from "./names.js";
@@ -163,5 +164,16 @@ describe("要件でない文（non-requirement。旗 on。Issue #550）の v1 �
   it("二点測定：#549 の台帳（non-requirement が無い）では写さず固定文の例外で落ちる", () => {
     expect(() => toV1(fixtureNonRequirementTable(), LEDGER_VIEW_2C)).toThrow(UNCONVERTIBLE_VERIFICATION_KIND_MESSAGE);
     expect(() => toV1(fixtureNonRequirementTable(), PROPERTY_LEDGER_VIEW)).not.toThrow();
+  });
+});
+
+describe("旗 v12.ids の構造の検査の対象（Issue #594）", () => {
+  it("v1 の型への写しは検査の種類の並びだけを写し（v1 の checks の形は変えない）、対象の無い表と同じ v1 の値になる", () => {
+    const table = fixtureTable();
+    const withTargets = withCheckTargets(table);
+    expect(withTargets.verification.find((entry) => entry.requirementId === "R2")).toMatchObject({ targets: [{ check: "view-shows" }] });
+    const converted = toV1(withTargets);
+    expect(converted.design.designs.find((entry) => entry.requirementId === "R2")?.checks).toEqual(["view-shows"]);
+    expect(converted).toEqual(toV1(table));
   });
 });
