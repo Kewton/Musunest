@@ -53,7 +53,7 @@ export interface SizedMaterials {
   /** T1 の応答（下書きの形。要件 ID を持たず写しを添える。旗 `v12.ids` が off の走りだけ） */
   readonly nameTableResponse: () => Record<string, unknown>;
   /**
-   * 表を組む段の応答を呼ばれる順に（旗 `v12.ids` が on なら C1 の 3 束と C2 の 4 つ、off なら T1 の 1 つ。Issue #593）
+   * 表を組む段の応答を呼ばれる順に（旗 `v12.ids` が on なら C1 の 3 束と C2 の束〔要件 5 件ごと〕、off なら T1 の 1 つ。Issue #593・#594）
    */
   readonly tableResponses: () => readonly Record<string, unknown>[];
   /** J4 の偽物の判定の答え（所属の組ごと。印なし＝値 0.9） */

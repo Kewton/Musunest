@@ -20,9 +20,10 @@ import {
   V12_STAGE_FRAMES,
   V12_V11A_FRAME_MAP,
   V12_IDS_FRAME_MAP,
+  v12IdsUnitsOf,
 } from "./limits.js";
 import { VOCABULARY_BUNDLES } from "./ids.js";
-import { MAPPING_ROUNDS } from "./stages/mapping.js";
+import { MAPPING_BUNDLE_SIZE, MAPPING_ROUNDS } from "./stages/mapping.js";
 import { SEARCH_REPAIR_BUDGET } from "./search-repair.js";
 
 interface NodeFileSystem {
@@ -170,20 +171,34 @@ describe("受入の題材の言葉が無い（表・手 3p の試験・fixture�
   });
 });
 
-describe("旗 v12.ids の段の枠（手 3a・Issue #593）", () => {
+describe("旗 v12.ids の段の枠（手 3a・3b・Issue #593・#594）", () => {
   it("C1（vocabulary）・C2（mapping）の写しの値は段のコードの定数と同じで、§4.1 の C1・C2 の行の枠を超えない。上限の表の値は変えない", () => {
     const vocabulary = V12_IDS_FRAME_MAP.find((entry) => entry.stage === "vocabulary");
     const mapping = V12_IDS_FRAME_MAP.find((entry) => entry.stage === "mapping");
-    expect(vocabulary).toEqual({ stage: "vocabulary", frame: "C1", rounds: 1, shapeAttempts: STEP_ATTEMPTS, units: VOCABULARY_BUNDLES.length, maxLogical: VOCABULARY_BUNDLES.length * STEP_ATTEMPTS });
-    expect(mapping).toEqual({ stage: "mapping", frame: "C2", rounds: MAPPING_ROUNDS, shapeAttempts: STEP_ATTEMPTS, units: 1, maxLogical: STEP_ATTEMPTS + 1 });
+    expect(vocabulary).toEqual({ stage: "vocabulary", frame: "C1", rounds: 1, shapeAttempts: STEP_ATTEMPTS, units: VOCABULARY_BUNDLES.length, bundleRequirements: null, maxLogicalPerUnit: STEP_ATTEMPTS });
+    expect(mapping).toEqual({ stage: "mapping", frame: "C2", rounds: MAPPING_ROUNDS, shapeAttempts: STEP_ATTEMPTS, units: null, bundleRequirements: MAPPING_BUNDLE_SIZE, maxLogicalPerUnit: STEP_ATTEMPTS + 1 });
     for (const entry of V12_IDS_FRAME_MAP) {
       const frame = V12_STAGE_FRAMES.find((candidate) => candidate.stage === entry.frame);
       expect(frame, entry.frame).toBeDefined();
       if (frame === undefined) continue;
+      // 束ごとの枠（§4.1 の行の単位は束ごと）。束 1 つの論理要求の最大は行の初回・形・中身の和を超えない
+      for (const column of [frame.initial, frame.shape, frame.content]) if (column !== null) expect(column.unit, entry.frame).toBe("bundle");
       const perUnit = (frame.initial?.count ?? 0) + (frame.shape?.count ?? 0) + (frame.content?.count ?? 0);
-      expect(entry.maxLogical, entry.stage).toBeLessThanOrEqual(perUnit * entry.units);
+      expect(entry.maxLogicalPerUnit, entry.stage).toBeLessThanOrEqual(perUnit);
     }
     expect(V12_CALL_LIMITS).toEqual({ logicalCalls: 72, realAttempts: 144, judgeBranch: 80 });
     expect(factory.V12_IDS_FRAME_MAP).toBe(V12_IDS_FRAME_MAP);
+  });
+
+  it("C2 の束の数は要件 5 件ごと（要件 15 で 3・25 で 5・7 で 2）。C1 は要件の数によらず 3", () => {
+    const mapping = V12_IDS_FRAME_MAP.find((entry) => entry.stage === "mapping");
+    const vocabulary = V12_IDS_FRAME_MAP.find((entry) => entry.stage === "vocabulary");
+    if (mapping === undefined || vocabulary === undefined) throw new Error("前提が壊れた：C1・C2 の行が無い");
+    expect([15, 25, 7, 5, 1].map((count) => v12IdsUnitsOf(mapping, count))).toEqual([3, 5, 2, 1, 1]);
+    expect([15, 25].map((count) => v12IdsUnitsOf(vocabulary, count))).toEqual([3, 3]);
+    // 観測した最大の要件 25 で、C1・C2 の論理要求の最大（6＋15）は本全体の論理の上限の内側（L-v12-01 の +6 の分を含む）
+    const tableMax = V12_IDS_FRAME_MAP.reduce((total, entry) => total + entry.maxLogicalPerUnit * v12IdsUnitsOf(entry, 25), 0);
+    expect(tableMax).toBe(21);
+    expect(tableMax).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
   });
 });

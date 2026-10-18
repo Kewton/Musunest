@@ -54,6 +54,7 @@ import {
   idsResponseList,
   idsResponsesOf,
   renameIds,
+  withCheckTargets,
   withCodeIds,
   withoutEnumMembership,
   withoutLedgerAdditions,
@@ -377,6 +378,8 @@ const head = (
 /** 旗 v12.ids の走りの表（題材の表をコードの形の ID に振り直し、C1 が組む順・出典なし。Issue #593） */
 const CODE_RENAME = codeIdRenameOf(TABLE);
 const TABLE_IDS: NameTable = withCodeIds(TABLE_ON);
+/** 旗 v12.ids の C2 が組む表（構造の検査の確かめ方に検査ごとの対象を持つ。所属は fixture のまま。Issue #594） */
+const MAPPED_IDS: NameTable = withCheckTargets(TABLE_IDS);
 /** 値の中の題材の表の ID を、コードの形の ID に振り直す（T2 の応答など） */
 const renamed = <T,>(value: T): T => renameIds(value, CODE_RENAME);
 
@@ -621,14 +624,23 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     for (const references of [...referencesOf(result, "vocabulary"), ...referencesOf(result, "mapping")]) {
       expect(references).toMatchObject({ unknown_ids: 0, duplicates: 0, cross_bundle_ids: 0 });
     }
-    // 照らした参照の数は応答の参照の全部（C2：要件 ID と所属の ID）
+    // 照らした参照の数は応答の参照の全部（C2：要件 ID・所属の ID・構造の検査の対象の ID〔Issue #594〕）
     const roles = TABLE_IDS.ownership.reduce((total, entry) => total + entry.roles.length, 0);
-    expect(referencesOf(result, "mapping")[0]?.checked).toBe(LIST.requirements.length + roles);
+    const targets = MAPPED_IDS.verification.reduce((total, entry) => total + (entry.kind === "structural" ? (entry.targets ?? []).reduce((sum, target) => sum + 1 + (target.sourceId === null ? 0 : 1), 0) : 0), 0);
+    expect(targets).toBeGreaterThan(0);
+    expect(referencesOf(result, "mapping")[0]?.checked).toBe(LIST.requirements.length + roles + targets);
     // T2 に見せる行の出典は null。C2・C3・T2 の要求に名前を見せない
     const t2 = recording.structured.find((request) => request.schemaName === TEST_SPEC_SCHEMA_NAME);
     const rows = dataBlockOf(t2?.input ?? "", TEST_SPEC_DATA_NAMES[2]) as readonly Record<string, unknown>[];
     expect(rows).toHaveLength(TABLE_IDS.rows.length);
     expect(rows.every((row) => row["source"] === null && !("name" in row))).toBe(true);
+    // T2 に見せる確かめ方の構造の検査に、C2 が書いた対象の ID が載る（Issue #594）
+    const verification = dataBlockOf(t2?.input ?? "", TEST_SPEC_DATA_NAMES[3]) as readonly Record<string, unknown>[];
+    const structural = MAPPED_IDS.verification.filter((entry) => entry.kind === "structural");
+    expect(structural.length).toBeGreaterThan(0);
+    for (const entry of structural) {
+      expect(verification.find((item) => item["requirementId"] === entry.requirementId)?.["checkTargets"], entry.requirementId).toEqual(entry.targets);
+    }
     // 写しの欄（copy）と出典の引用の欄（requestQuote）が C1・C2 の要求に無い
     const tableRequests = recording.structured.filter((request) => request.schemaName.startsWith("vocabulary-") || request.schemaName === "mapping");
     expect(tableRequests).toHaveLength(4);
@@ -706,6 +718,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ stage: "mapping", operation: null, call: 1, round: 1, attempt: 2, response: missingLast });
+    // C2 の束の候補は束の添字と束の要件 ID を持つ（要件 5 件で束 1 つ。Issue #594）
+    expect(candidates[0]).toMatchObject({ bundle: { index: 1, requirement_ids: LIST.requirements.map((requirement) => requirement.id) } });
     expect(candidates[0]?.problems.length).toBeGreaterThan(0);
     expect(candidates[0]?.problems.every((problem) => typeof problem.message === "string" && problem.message !== "")).toBe(true);
   });
@@ -821,7 +835,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(result.stopped).toBeNull();
     expect(carryEntriesOf(result.bundle)).toEqual([{ requirementId: "R3", reasons: [{ origin: "semantic-check", reason: "unnecessary-ownership" }] }]);
     const table = artifactOf(result.bundle, "artifacts/name-table.json") as { readonly table_sha256: string };
-    expect(table.table_sha256).toBe(await nameTableSha256(TABLE_IDS));
+    expect(table.table_sha256).toBe(await nameTableSha256(MAPPED_IDS));
   });
 });
 
@@ -2467,8 +2481,8 @@ describe("段単位の走り：範囲の外の段を呼ばず、納品物を組�
     const [boundary] = outcome.boundaries;
     expect(outcome.boundaries.map((entry) => entry.boundary)).toEqual(["t1-t2"]);
     if (boundary === undefined) return;
-    expect(boundary.table).toEqual(TABLE_IDS);
-    expect(boundary.tableSha256).toBe(await nameTableSha256(TABLE_IDS));
+    expect(boundary.table).toEqual(MAPPED_IDS);
+    expect(boundary.tableSha256).toBe(await nameTableSha256(MAPPED_IDS));
     expect(boundary.semanticCheck.tableSha256).toBe(boundary.tableSha256);
     // checkpoint は今と同じ形で組め、照合を通る（開始 T2 の入力として読める）
     const versions = { vocabulary: "v1", contract: "v0.2", prompt: "v1.1a", factory: "0.0.0" };
@@ -3743,10 +3757,13 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     const tableSchemas = new Set(["name-table", "vocabulary-entities", "vocabulary-fields", "vocabulary-behaviors", "mapping"]);
     const later = (requests: readonly LlmStructuredRequest[]) => requests.filter((request) => !tableSchemas.has(request.schemaName));
     const withoutSource = (text: string) => text.replace(/\\"source\\": \{[^}]*\}/g, '\\"source\\": null');
+    // ids on の C3・T2 の確かめ方は構造の検査の対象の欄を持つ（C3 は表の targets、T2 は checkTargets。Issue #594）。その欄を除いて比べる
+    const withoutTargets = (text: string) => text.replace(/,\\n *\\"(?:targets|checkTargets)\\": \[[^\]]*\]/g, "");
     const offLater = later(off.recording.structured);
     const onLater = later(on.recording.structured);
     expect(onLater.map((request) => request.schemaName)).toEqual(["semantic-check", "test-spec", "declaration-v11a", "decl-check"]);
-    expect(onLater.map((request) => JSON.stringify(request))).toEqual(offLater.map((request) => withoutSource(JSON.stringify(request))));
+    expect(onLater.slice(0, 2).every((request) => /\\"(?:targets|checkTargets)\\": \[/.test(JSON.stringify(request)))).toBe(true);
+    expect(onLater.map((request) => withoutTargets(JSON.stringify(request)))).toEqual(offLater.map((request) => withoutSource(JSON.stringify(request))));
     // 出典の欄の差だけがある（T2 の行に出典がある・無い）
     expect(offLater.map((request) => JSON.stringify(request))).not.toEqual(onLater.map((request) => JSON.stringify(request)));
     // 納品物の宣言・試験の結果が同じ
@@ -3754,7 +3771,7 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     expect(declarationOf(on.result)).toBeDefined();
     expect(declarationOf(on.result)).toBe(declarationOf(off.result));
     // 表の SHA は両側で別に計算し、それぞれの表に結ぶ（出典が違うので SHA は違う）
-    const onSha = await nameTableSha256(TABLE_IDS);
+    const onSha = await nameTableSha256(MAPPED_IDS);
     const offSha = await nameTableSha256(offTable);
     expect(onSha).not.toBe(offSha);
     const shaOf = (result: typeof on.result) => (artifactOf(result.bundle, "artifacts/name-table.json") as { readonly table_sha256?: string })["table_sha256"];

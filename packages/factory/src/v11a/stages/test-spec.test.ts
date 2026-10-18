@@ -50,6 +50,7 @@ import {
   fixtureEnumMembershipTable,
   fixtureList,
   fixtureTable,
+  withCheckTargets,
   jsonDiffPaths,
   requestDiffsOf,
   withoutEnumMembership,
@@ -2393,5 +2394,32 @@ describe("旗 on：T1'' が受理した non-requirement の要件は、T2 の要
     const extra = await runNon([classified, classified]);
     if (extra.outcome.ok || extra.outcome.failure.kind !== "unmet") throw new Error("unmet でない");
     expect(extra.outcome.failure.problems.map((problem) => problem.message)).toEqual(["要件の一覧に無い要件 ID の分類である"]);
+  });
+});
+
+// ── 旗 v12.ids の構造の検査の対象（Issue #594）──────────────────────────────────
+
+describe("T2 の「要件ごとの確かめ方」に構造の検査の対象の ID（旗 v12.ids の表だけ）", () => {
+  it("C2 が検査の対象を書いた表なら構造で確かめる要件に checkTargets が載り、ほかの欄・ほかの要件・前置き・規則は対象の無い表と同じ。T2' の構造の検査はそのまま通る", async () => {
+    const withTargets = withCheckTargets(fixtureTable());
+    const on = await run([passing()], { table: withTargets });
+    const off = await run([passing()]);
+    expect(on.outcome.ok).toBe(true);
+    const onRequest = on.recording.structured[0]!;
+    const offRequest = off.recording.structured[0]!;
+    const onData = dataBlockOf(onRequest.input, "要件ごとの確かめ方") as readonly Record<string, unknown>[];
+    const offData = dataBlockOf(offRequest.input, "要件ごとの確かめ方") as readonly Record<string, unknown>[];
+    expect(onData.find((entry) => entry["requirementId"] === "R2")).toEqual({
+      requirementId: "R2",
+      verificationKind: "structural",
+      checks: ["view-shows"],
+      checkTargets: [{ check: "view-shows", targetId: "s.members", sourceId: "f.member.title" }],
+    });
+    expect(onData.map(({ checkTargets: _targets, ...rest }) => rest)).toEqual(offData);
+    // 対象の無い表（旗 off・ids off の表）のデータに checkTargets の欄は無い（今と同じ）
+    expect(offData.some((entry) => "checkTargets" in entry)).toBe(false);
+    for (const field of ["instructions", "rules", "documents", "schemaName", "schema", "maxOutputTokens"] as const) {
+      expect(onRequest[field]).toEqual(offRequest[field]);
+    }
   });
 });

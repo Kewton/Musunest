@@ -31,6 +31,9 @@ import {
   withoutWhenAndNonRequirement,
 } from "./__tests__/fixtures.js";
 import {
+  CHECK_TARGET_MESSAGES,
+  checkCheckTargets,
+  ownershipWithCheckTargets,
   NULL_SOURCE_MESSAGE,
   checkMappedTable,
   checkVocabularyRows,
@@ -1548,5 +1551,46 @@ describe("旗 v12.ids の検査の口（出典は null。写し・引用の検�
     const bad: Problem[] = [];
     expect(shapeOfMappingEntry({ requirementId: "", roles: [], verification: { kind: "fixed-test" }, nature: "ruled" }, "requirements[0]", bad)).toBeUndefined();
     expect(bad.map((problem) => problem.message)).toEqual(["要件 ID は空でない文字列であること"]);
+  });
+});
+
+// ── 旗 v12.ids の構造の検査の対象（C2'。Issue #594）────────────────────────────
+
+describe("構造の検査の対象の照合と所属への足し込み（旗 v12.ids）", () => {
+  const rows = fixtureTable().rows;
+  const messages = (targets: Parameters<typeof checkCheckTargets>[1]) => {
+    const problems: Problem[] = [];
+    checkCheckTargets(rows, targets, "verification", problems);
+    return problems.map((problem) => problem.message);
+  };
+
+  it("種類の合う対象・画面と同じ entity の項目か計算の組は問題 0。entity を持たない画面は entity を持たない計算と組める", () => {
+    expect(messages([{ check: "view-shows", targetId: "s.members", sourceId: "f.member.title" }])).toEqual([]);
+    expect(messages([{ check: "view-shows", targetId: "s.members", sourceId: "c.itemCount" }])).toEqual([]);
+    expect(messages([{ check: "view-shows", targetId: "s.overview", sourceId: "c.rate" }])).toEqual([]);
+    expect(messages([{ check: "field-type", targetId: "f.item.title", sourceId: null }])).toEqual([]);
+    expect(messages([{ check: "action-kind", targetId: "o.addItem", sourceId: null }])).toEqual([]);
+  });
+
+  it("負例は固定文で落ちる（対象が無い・種類が違う・組が無い・組が行に無い・組の entity が違う・dashboard に entity を持つ行・view-shows でない検査の組）", () => {
+    expect(messages([{ check: "view-shows", targetId: "s.none", sourceId: "f.item.title" }])).toContain(CHECK_TARGET_MESSAGES.unknownTarget);
+    expect(messages([{ check: "field-type", targetId: "o.addItem", sourceId: null }])).toEqual([CHECK_TARGET_MESSAGES.targetKind]);
+    expect(messages([{ check: "view-shows", targetId: "s.items", sourceId: null }])).toEqual([CHECK_TARGET_MESSAGES.sourceMissing]);
+    expect(messages([{ check: "view-shows", targetId: "s.items", sourceId: "f.none" }])).toEqual([CHECK_TARGET_MESSAGES.unknownSource]);
+    expect(messages([{ check: "view-shows", targetId: "s.items", sourceId: "f.member.title" }])).toEqual([CHECK_TARGET_MESSAGES.sourcePair]);
+    expect(messages([{ check: "view-shows", targetId: "s.overview", sourceId: "f.item.title" }])).toEqual([CHECK_TARGET_MESSAGES.sourcePair]);
+    expect(messages([{ check: "view-shows", targetId: "s.overview", sourceId: "c.itemCount" }])).toEqual([CHECK_TARGET_MESSAGES.sourcePair]);
+    expect(messages([{ check: "action-kind", targetId: "o.addItem", sourceId: "o.addItem" }])).toEqual([CHECK_TARGET_MESSAGES.sourceExtra]);
+  });
+
+  it("所属に無い対象の行だけを basis dependency・reason に検査の種類で足す（既にある行・重なる行は足さない）", () => {
+    const roles = [{ id: "s.items", basis: "stated" as const, reason: null }];
+    expect(
+      ownershipWithCheckTargets(roles, [
+        { check: "view-shows", targetId: "s.items", sourceId: "f.item.title" },
+        { check: "field-type", targetId: "f.item.title", sourceId: null },
+      ]),
+    ).toEqual([...roles, { id: "f.item.title", basis: "dependency", reason: "view-shows" }]);
+    expect(ownershipWithCheckTargets(roles, [])).toBe(roles);
   });
 });
