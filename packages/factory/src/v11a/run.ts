@@ -121,6 +121,7 @@ import {
   type StageBoundary,
   type StageRange,
   type StageRunOutcome,
+  V12_SEARCH_REPAIR_ARTIFACT_NAME,
 } from "./bundle-v11a.js";
 import {
   danglingRowReferences,
@@ -165,8 +166,12 @@ import {
   type SearchRepairRecord,
   type SearchVersionOrigin,
   type SearchVersionRecord,
+  type SearchRoundRecord,
   type VersionFacts,
+  withSearchRounds,
 } from "../v12/search-repair.js";
+import { canRepairFields, locateFailures } from "../v12/locate.js";
+import { mergeReplacements, runFieldRepair } from "../v12/stages/field-repair.js";
 
 /** v1.1α の入力（v1 の `GenerationInput` と同じ形で、確定した仕様を必須にしたもの） */
 export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
@@ -1313,6 +1318,7 @@ async function runV11a(
       // ── 探索型の直し（旗 `v12.search-repair`。Issue #551）─────────────────────────
       const versions: SearchVersionRecord[] = [];
       const recounts: SearchRecountRecord[] = [];
+      const roundRecords: SearchRoundRecord[] = [];
       const carriedIds = (): ReadonlySet<string> => new Set(carry.entries.map((entry) => entry.requirementId));
       const requirementOfTest = (testId: string): string | null =>
         testSpec.suite.tests.find((test) => test.id === testId)?.target.requirementId ?? null;
@@ -1455,6 +1461,89 @@ async function runV11a(
         }
         rounds += 1;
         const context = contextNow();
+        /** 主張を B5' へ渡し、棄却なら B6（今までどおり）。確定した仕様と食い違えば Plan に戻して止める（真を返す） */
+        const arbitrate = async (stepDisputes: readonly Dispute[], declaration: Declaration): Promise<boolean> => {
+          if (stepDisputes.length === 0) return false;
+          const overturnedBefore = overturned.length;
+          const arbitration = await runStageOk("arbitration", () =>
+            runArbitration({
+              source: input.source,
+              list: context.list,
+              suite: context.suite,
+              declaration,
+              disputes: stepDisputes,
+              documents: input.documents,
+              gateway,
+              plan: input.plan,
+            }),
+          );
+          collectArbitration(arbitration, upheld, overturned, unresolved);
+          if (arbitration.returnToPlan !== undefined && arbitration.returnToPlan.length > 0) {
+            returnToPlan = true;
+            for (const testId of arbitration.returnToPlan) if (!returnedToPlan.includes(testId)) returnedToPlan.push(testId);
+            stopReason = "unresolved";
+            return true;
+          }
+          // B5' の棄却と B6 の網羅の持ち越しは今までどおり（候補の採否に依らず確定）。文脈が変われば一番良い版を数え直す
+          if (overturned.length > overturnedBefore) {
+            const losses = await runStage("coverage", async () =>
+              lostCoverage(testSpec.coverage, {
+                suite: withoutOverturned(),
+                observes: testSpec.observes,
+                natures: testSpec.natures,
+              }),
+            );
+            coverageChecks.push({ overturnedTestIds: overturned.map((entry) => entry.testId), losses });
+            for (const loss of losses) addCarry(loss.requirementId, { origin: "coverage", reason: "lost-coverage-units" });
+            await refreshCarry();
+            best = await recount(best, "coverage");
+          }
+          return false;
+        };
+        // 一番良い版の失敗を宣言の要素の場所に写す（手 4b。Issue #553）。全部写せれば欄だけの直し、場所なしが 1 件でもあれば手 4a の直す手
+        const located = locateFailures({
+          source: best.report.declaration.source,
+          table,
+          suite: context.suite,
+          staticCheckPassed: best.report.staticCheck.passed,
+          diagnostics: best.report.staticCheck.diagnostics,
+          correspondenceMisses: best.report.correspondence?.misses ?? [],
+          rejections: best.rejections,
+          unmarked: best.unmarked,
+          mismatches: best.report.testRun?.mismatches ?? [],
+          unresolved: best.report.testRun?.unresolved ?? [],
+        });
+        if (canRepairFields(located)) {
+          const answer = await runStageOk("repair", () =>
+            runFieldRepair({
+              source: input.source,
+              list: context.list,
+              suite: context.suite,
+              declaration: best.report.declaration.source,
+              failures: located,
+              documents: input.documents,
+              gateway,
+            }),
+          );
+          for (const dispute of answer.disputes) disputes.push(dispute);
+          for (const item of answer.rejected) rejected.push(item);
+          const merged = mergeReplacements(best.report.declaration.source, answer.replacements, located.spans);
+          roundRecords.push({
+            hand: "field-repair",
+            locations: located.locations.length,
+            unlocated: 0,
+            refused: merged.ok ? null : merged.refusal,
+          });
+          if (await arbitrate(answer.disputes, merged.ok ? { source: merged.source } : best.report.declaration)) break;
+          if (merged.ok) {
+            await consider("repair", await evaluateVersion({ source: merged.source }, true));
+          } else {
+            // 断ったマージは採れない版に数える（版を作らない）
+            notAdopted = notAdoptedAfter(notAdopted, false);
+          }
+          continue;
+        }
+        roundRecords.push({ hand: "repair", locations: located.locations.length, unlocated: located.unlocated.length, refused: null });
         // 直す段の入力の宣言・結果・B3' の拒否は一番良い版のもの
         const step = await runStageOk("repair", () =>
           runRepairStep({
@@ -1472,47 +1561,12 @@ async function runV11a(
         );
         for (const dispute of step.disputes) disputes.push(dispute);
         for (const item of step.rejected) rejected.push(item);
-        if (step.disputes.length > 0) {
-          const overturnedBefore = overturned.length;
-          const arbitration = await runStageOk("arbitration", () =>
-            runArbitration({
-              source: input.source,
-              list: context.list,
-              suite: context.suite,
-              declaration: step.declaration,
-              disputes: step.disputes,
-              documents: input.documents,
-              gateway,
-              plan: input.plan,
-            }),
-          );
-          collectArbitration(arbitration, upheld, overturned, unresolved);
-          if (arbitration.returnToPlan !== undefined && arbitration.returnToPlan.length > 0) {
-            returnToPlan = true;
-            for (const testId of arbitration.returnToPlan) if (!returnedToPlan.includes(testId)) returnedToPlan.push(testId);
-            stopReason = "unresolved";
-            break;
-          }
-          // B5' の棄却と B6 の網羅の持ち越しは今までどおり（候補の採否に依らず確定）。文脈が変われば一番良い版を数え直す
-          if (overturned.length > overturnedBefore) {
-            const losses = await runStage("coverage", async () =>
-              lostCoverage(testSpec.coverage, {
-                suite: withoutOverturned(),
-                observes: testSpec.observes,
-                natures: testSpec.natures,
-              }),
-            );
-            coverageChecks.push({ overturnedTestIds: overturned.map((entry) => entry.testId), losses });
-            for (const loss of losses) addCarry(loss.requirementId, { origin: "coverage", reason: "lost-coverage-units" });
-            await refreshCarry();
-            best = await recount(best, "coverage");
-          }
-        }
+        if (await arbitrate(step.disputes, step.declaration)) break;
         await consider("repair", await evaluateVersion(step.declaration, true));
       }
       final = best;
       stalledFrom = best;
-      searchRecord = { versions, recounts, bestDeclarationSha256: best.report.declarationSha256, rewritten };
+      searchRecord = { versions, recounts, bestDeclarationSha256: best.report.declarationSha256, rewritten, rounds: roundRecords };
     }
 
     // 停滞で止めたら、残った不一致を未解決に数える（v1 と同じ）
@@ -1596,7 +1650,12 @@ async function runV11a(
           },
         },
         ...(searchRecord === undefined ? {} : { searchRepair: searchRecord }),
-      }),
+      }).map((artifact) =>
+        // 探索の記録に往復ごとの直す手を足す（旗 on の走りだけ。Issue #553）
+        artifact.path === V12_SEARCH_REPAIR_ARTIFACT_NAME && searchRecord?.rounds !== undefined
+          ? { ...artifact, text: withSearchRounds(artifact.text, searchRecord.rounds) }
+          : artifact,
+      ),
     );
 
     const record = buildRecord(failure);

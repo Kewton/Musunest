@@ -17,6 +17,7 @@ import {
   namedFailuresOf,
   notAdoptedAfter,
   stagnationAction,
+  withSearchRounds,
   type VersionFacts,
 } from "./search-repair.js";
 
@@ -204,5 +205,20 @@ describe("作り直しに渡す名前付きの失敗の一覧", () => {
       }),
     ).toEqual([{ testId: null, requirementId: null, kind: "static-check", message: NAMED_FAILURE_MESSAGES["static-check"] }]);
     expect(Object.keys(NAMED_FAILURE_MESSAGES)).toEqual([...NAMED_FAILURE_KINDS]);
+  });
+});
+
+describe("探索の記録の往復ごとの直す手（手 4b。Issue #553）", () => {
+  it("記録の JSON の末尾に rounds を足し、ほかの欄の値と順・字下げ・末尾の改行は変えない", () => {
+    const text = `${JSON.stringify({ versions: [], recounts: [], best_declaration_sha256: "a", rewritten: false }, null, 2)}\n`;
+    const rounds = [
+      { hand: "field-repair" as const, locations: 2, unlocated: 0, refused: null },
+      { hand: "repair" as const, locations: 1, unlocated: 1, refused: null },
+    ];
+    const extended = withSearchRounds(text, rounds);
+    expect(extended.endsWith("}\n")).toBe(true);
+    expect(Object.keys(JSON.parse(extended) as object)).toEqual(["versions", "recounts", "best_declaration_sha256", "rewritten", "rounds"]);
+    expect((JSON.parse(extended) as { rounds: unknown }).rounds).toEqual(rounds);
+    expect(extended.startsWith(text.slice(0, text.lastIndexOf("\n}")))).toBe(true);
   });
 });

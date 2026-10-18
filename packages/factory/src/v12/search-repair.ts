@@ -323,6 +323,20 @@ export interface SearchRecountRecord {
   readonly violations: VersionViolations;
 }
 
+/** 往復の直す手（手 4a の宣言の全文を直す段・手 4b の欄だけの直し。Issue #553） */
+export type SearchRepairHand = "repair" | "field-repair";
+
+/** 探索の記録の 1 往復（直す手の種類・場所の数・場所なしの数。欄だけの直しのマージを断ったら、その固定文） */
+export interface SearchRoundRecord {
+  readonly hand: SearchRepairHand;
+  /** 場所に写した失敗の場所の数（重複なし） */
+  readonly locations: number;
+  /** 場所なしの失敗の数 */
+  readonly unlocated: number;
+  /** 欄だけの直しのマージを断った固定文（断らなかった・手 4a の往復は null） */
+  readonly refused: string | null;
+}
+
 /** 探索の記録（旗 on の走りだけ。版の順） */
 export interface SearchRepairRecord {
   readonly versions: readonly SearchVersionRecord[];
@@ -331,4 +345,15 @@ export interface SearchRepairRecord {
   readonly bestDeclarationSha256: string;
   /** 作り直しをしたか */
   readonly rewritten: boolean;
+  /** 往復ごとの直す手（往復の順。走らせる部分が組む。Issue #553） */
+  readonly rounds?: readonly SearchRoundRecord[];
+}
+
+/**
+ * 探索の記録の JSON（`search-repair.json` の本文）の末尾に、往復ごとの直す手の欄 `rounds` を足す（純粋。Issue #553）。ほかの欄の
+ * 値と順は変えない（同じ字下げ・末尾の改行 1 つ）。
+ */
+export function withSearchRounds(text: string, rounds: readonly SearchRoundRecord[]): string {
+  const parsed = JSON.parse(text) as Record<string, unknown>;
+  return `${JSON.stringify({ ...parsed, rounds }, null, 2)}\n`;
 }
