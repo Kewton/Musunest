@@ -1,0 +1,335 @@
+{
+  "candidates": [
+    {
+      "stage": "name-table",
+      "operation": null,
+      "call": 1,
+      "round": 1,
+      "attempt": 1,
+      "kind": "content",
+      "response": {
+        "rows": [],
+        "requirements": [
+          {
+            "roles": [],
+            "verification": {
+              "kind": "structural",
+              "checks": [],
+              "value": null
+            }
+          },
+          {
+            "roles": [],
+            "verification": {
+              "kind": "structural",
+              "checks": [],
+              "value": null
+            }
+          },
+          {
+            "roles": [],
+            "verification": {
+              "kind": "structural",
+              "checks": [],
+              "value": null
+            }
+          },
+          {
+            "roles": [],
+            "verification": {
+              "kind": "structural",
+              "checks": [],
+              "value": null
+            }
+          },
+          {
+            "roles": [],
+            "verification": {
+              "kind": "structural",
+              "checks": [],
+              "value": null
+            }
+          },
+          {
+            "roles": [],
+            "verification": {
+              "kind": "structural",
+              "checks": [],
+              "value": null
+            }
+          }
+        ]
+      },
+      "inspection_list": {
+        "requirements": [
+          {
+            "id": "Q1",
+            "text": "MARK_TEXT"
+          },
+          {
+            "id": "Q2",
+            "text": "MARK_TEXT"
+          },
+          {
+            "id": "Q3",
+            "text": "MARK_TEXT"
+          },
+          {
+            "id": "Q4",
+            "text": "MARK_TEXT"
+          },
+          {
+            "id": "Q5",
+            "text": "MARK_TEXT"
+          },
+          {
+            "id": "Q6",
+            "text": "MARK_TEXT"
+          }
+        ]
+      }
+    },
+    {
+      "stage": "name-table",
+      "operation": null,
+      "call": 1,
+      "round": 2,
+      "attempt": 1,
+      "kind": "content",
+      "response": {
+        "rows": [
+          {
+            "id": "r_E_a",
+            "kind": "entity",
+            "entity": null,
+            "type": {
+              "fieldType": null,
+              "valueType": null,
+              "scope": null,
+              "form": null,
+              "aggregate": null,
+              "action": null,
+              "hasWhen": null,
+              "view": null
+            },
+            "options": null,
+            "groupBy": null,
+            "refEntity": null
+          },
+          {
+            "id": "r_E_b",
+            "kind": "entity",
+            "entity": null,
+            "type": {
+              "fieldType": null,
+              "valueType": null,
+              "scope": null,
+              "form": null,
+              "aggregate": null,
+              "action": null,
+              "hasWhen": null,
+              "view": null
+            },
+            "options": null,
+            "groupBy": null,
+            "refEntity": null
+          },
+          {
+            "id": "r_F_a1",
+            "kind": "field",
+            "entity": "r_E_a",
+            "type": {
+              "fieldType": "string",
+              "valueType": null,
+              "scope": null,
+              "form": null,
+              "aggregate": null,
+              "action": null,
+              "hasWhen": null,
+              "view": null
+            },
+            "options": null,
+            "groupBy": null,
+            "refEntity": null
+          },
+          {
+            "id": "r_F_a2",
+            "kind": "field",
+            "entity": "r_E_a",
+            "type": {
+              "fieldType": "number",
+              "valueType": null,
+              "scope": null,
+              "form": null,
+              "aggregate": null,
+              "action": null,
+              "hasWhen": null,
+              "view": null
+            },
+            "options": null,
+            "groupBy": null,
+            "refEntity": null
+          },
+          {
+            "id": "r_F_b1",
+            "kind": "field",
+            "entity": "r_E_b",
+            "type": {
+              "fieldType": "boolean",
+              "valueType": null,
+              "scope": null,
+              "form": null,
+              "aggregate": null,
+              "action": null,
+              "hasWhen": null,
+              "view": null
+            },
+            "options": null,
+            "groupBy": null,
+            "refEntity": null
+          },
+          {
+            "id": "r_C_a1",
+            "kind": "computation",
+            "entity": "r_E_a",
+            "type": {
+              "fieldType": null,
+              "valueType": "number",
+              "scope": "row",
+              "form": "expression",
+              "aggregate": null,
+              "action": null,
+              "hasWhen": null,
+              "view": null
+            },
+            "options": null,
+            "groupBy": null,
+            "refEntity": null
+          },
+          {
+            "id": "r_S_a1",
+            "kind": "screen",
+            "entity": "r_E_a",
+            "type": {
+              "fieldType": null,
+              "valueType": null,
+              "scope": null,
+              "form": null,
+              "aggregate": null,
+              "action": null,
+              "hasWhen": null,
+              "view": "list"
+            },
+            "options": null,
+            "groupBy": null,
+            "refEntity": null
+          }
+        ],
+        "requirements": [
+          {
+            "roles": [
+              {
+                "id": "r_F_a1"
+              }
+            ],
+            "verification": {
+              "kind": "structural",
+              "checks": [
+                "ck_1"
+              ],
+              "value": null
+            }
+          },
+          {
+            "roles": [
+              {
+                "id": "r_F_a2"
+              }
+            ],
+            "verification": {
+              "kind": "fixed-test",
+              "checks": [],
+              "value": null
+            }
+          },
+          {
+            "roles": [
+              {
+                "id": "r_C_a1"
+              }
+            ],
+            "verification": {
+              "kind": "fixed-test",
+              "checks": [],
+              "value": null
+            }
+          },
+          {
+            "roles": [
+              {
+                "id": "r_S_a1"
+              }
+            ],
+            "verification": {
+              "kind": "structural",
+              "checks": [
+                "ck_4"
+              ],
+              "value": null
+            }
+          },
+          {
+            "roles": [
+              {
+                "id": "r_F_b1"
+              }
+            ],
+            "verification": {
+              "kind": "structural",
+              "checks": [
+                "ck_5"
+              ],
+              "value": null
+            }
+          },
+          {
+            "roles": [],
+            "verification": {
+              "kind": "fixed-test",
+              "checks": [],
+              "value": null
+            }
+          }
+        ]
+      },
+      "inspection_list": {
+        "requirements": [
+          {
+            "id": "Q1",
+            "text": "MARK_TEXT"
+          },
+          {
+            "id": "Q2",
+            "text": "MARK_TEXT"
+          },
+          {
+            "id": "Q3",
+            "text": "MARK_TEXT"
+          },
+          {
+            "id": "Q4",
+            "text": "MARK_TEXT"
+          },
+          {
+            "id": "Q5",
+            "text": "MARK_TEXT"
+          },
+          {
+            "id": "Q6",
+            "text": "MARK_TEXT"
+          }
+        ]
+      }
+    }
+  ]
+}

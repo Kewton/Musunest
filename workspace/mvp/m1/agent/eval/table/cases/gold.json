@@ -1,0 +1,312 @@
+{
+  "version": "table-gold-v1",
+  "pattern": "P1",
+  "plan_set": {
+    "id": "set-x",
+    "version": 1,
+    "manifest_sha256": "05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f"
+  },
+  "plan_sha256": "f1080ca40d37e0adc56b2d6b37508f3ae6ac1597e706414fd12a5b18d0cfc0e9",
+  "components": [
+    {
+      "symbol": "E_a",
+      "kind": "entity",
+      "type": null,
+      "entity": null,
+      "refEntity": null,
+      "groupBy": null,
+      "options": null,
+      "meaning_quote": "MARK_TEXT"
+    },
+    {
+      "symbol": "E_b",
+      "kind": "entity",
+      "type": null,
+      "entity": null,
+      "refEntity": null,
+      "groupBy": null,
+      "options": null
+    },
+    {
+      "symbol": "F_a1",
+      "kind": "field",
+      "type": "string",
+      "entity": "E_a",
+      "refEntity": null,
+      "groupBy": null,
+      "options": null,
+      "semantics": {
+        "tag": "MARK_TEXT"
+      },
+      "meaning_quote": "MARK_TEXT"
+    },
+    {
+      "symbol": "F_a2",
+      "kind": "field",
+      "type": "number",
+      "entity": "E_a",
+      "refEntity": null,
+      "groupBy": null,
+      "options": null
+    },
+    {
+      "symbol": "F_b1",
+      "kind": "field",
+      "type": "boolean",
+      "entity": "E_b",
+      "refEntity": null,
+      "groupBy": null,
+      "options": null
+    },
+    {
+      "symbol": "C_a1",
+      "kind": "computation",
+      "type": {
+        "valueType": "number",
+        "scope": "row",
+        "form": "expression",
+        "aggregate": null
+      },
+      "entity": "E_a",
+      "refEntity": null,
+      "groupBy": null,
+      "options": null
+    },
+    {
+      "symbol": "O_a1",
+      "kind": "operation",
+      "type": {
+        "action": "add",
+        "hasWhen": true
+      },
+      "entity": "E_a",
+      "refEntity": null,
+      "groupBy": null,
+      "options": null
+    },
+    {
+      "symbol": "S_a1",
+      "kind": "screen",
+      "type": {
+        "view": "list"
+      },
+      "entity": "E_a",
+      "refEntity": null,
+      "groupBy": null,
+      "options": null
+    }
+  ],
+  "requirements": [
+    {
+      "requirement_id": "Q1",
+      "variants": [
+        {
+          "id": "V_q1",
+          "required": [
+            "F_a1"
+          ],
+          "allowed": [
+            "F_a1"
+          ],
+          "context": [],
+          "verification": [
+            {
+              "kind": "structural",
+              "checks": [
+                "ck_1"
+              ],
+              "assertions": [
+                {
+                  "check": "ck_1",
+                  "target": "F_a1",
+                  "expected": "string"
+                }
+              ]
+            }
+          ],
+          "rationale": "MARK_TEXT",
+          "review_evidence": [
+            "MARK_TEXT"
+          ]
+        }
+      ]
+    },
+    {
+      "requirement_id": "Q2",
+      "variants": [
+        {
+          "id": "V_q2",
+          "required": [
+            "F_a2"
+          ],
+          "allowed": [
+            "F_a2"
+          ],
+          "context": [],
+          "verification": [
+            {
+              "kind": "fixed-test",
+              "observations": [
+                {
+                  "target": "F_a2",
+                  "target_kind": "field",
+                  "operation": "validate"
+                }
+              ]
+            }
+          ],
+          "rationale": "MARK_TEXT",
+          "review_evidence": [
+            "MARK_TEXT"
+          ]
+        }
+      ]
+    },
+    {
+      "requirement_id": "Q3",
+      "variants": [
+        {
+          "id": "V_q3a",
+          "required": [
+            "C_a1"
+          ],
+          "allowed": [
+            "C_a1"
+          ],
+          "context": [],
+          "verification": [
+            {
+              "kind": "fixed-test",
+              "observations": [
+                {
+                  "target": "C_a1",
+                  "target_kind": "computation",
+                  "operation": "compute"
+                }
+              ]
+            }
+          ],
+          "rationale": "MARK_TEXT",
+          "review_evidence": [
+            "MARK_TEXT"
+          ]
+        },
+        {
+          "id": "V_q3b",
+          "required": [
+            "O_a1"
+          ],
+          "allowed": [
+            "O_a1"
+          ],
+          "context": [],
+          "verification": [
+            {
+              "kind": "fixed-test",
+              "observations": [
+                {
+                  "target": "O_a1",
+                  "target_kind": "operation",
+                  "operation": "action"
+                }
+              ]
+            }
+          ],
+          "rationale": "MARK_TEXT",
+          "review_evidence": [
+            "MARK_TEXT"
+          ]
+        }
+      ]
+    },
+    {
+      "requirement_id": "Q4",
+      "variants": [
+        {
+          "id": "V_q4",
+          "required": [
+            "S_a1"
+          ],
+          "allowed": [
+            "S_a1"
+          ],
+          "context": [],
+          "verification": [
+            {
+              "kind": "structural",
+              "checks": [
+                "ck_4"
+              ]
+            }
+          ],
+          "rationale": "MARK_TEXT",
+          "review_evidence": [
+            "MARK_TEXT"
+          ]
+        }
+      ]
+    },
+    {
+      "requirement_id": "Q5",
+      "variants": [
+        {
+          "id": "V_q5",
+          "required": [
+            "F_b1"
+          ],
+          "allowed": [
+            "F_b1"
+          ],
+          "context": [],
+          "verification": [
+            {
+              "kind": "structural",
+              "checks": [
+                "ck_5"
+              ]
+            }
+          ],
+          "rationale": "MARK_TEXT",
+          "review_evidence": [
+            "MARK_TEXT"
+          ]
+        }
+      ]
+    },
+    {
+      "requirement_id": "Q6",
+      "adjudication_status": "needs_human",
+      "variants": [
+        {
+          "id": "V_q6",
+          "required": [],
+          "allowed": [],
+          "context": [],
+          "verification": [
+            {
+              "kind": "fixed-test"
+            }
+          ],
+          "rationale": "MARK_TEXT",
+          "review_evidence": [
+            "MARK_TEXT"
+          ]
+        }
+      ]
+    }
+  ],
+  "needs_human": [
+    {
+      "requirement_id": "Q6",
+      "reason_kind": "k",
+      "question": "MARK_TEXT",
+      "candidates": [],
+      "related_requirement_ids": []
+    }
+  ],
+  "counts": {
+    "requirements": 6,
+    "alternatives": 7,
+    "needs_human": 1
+  }
+}

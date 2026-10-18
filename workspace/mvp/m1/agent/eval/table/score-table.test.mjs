@@ -598,12 +598,14 @@ test("静的な走査：道具に工場の package の import・通信・LLM・�
 });
 
 const readme = () => readFileSync(join(here, "../README.md"), "utf8");
+const CASES_DIR = join(here, "cases");
+const caseFiles = () => readdirSync(CASES_DIR).filter((n) => n.endsWith(".json")).sort();
 const SECTION_HEAD = "## 7. 表の採点（正解の表との照合）";
 test("題材の言葉：試験・fixture・README の新しい節・試験のファイル自身に無い", () => {
   // 語は符号の列で持つ（この試験のファイル自身に書かない）
   const words = [[0x6301, 0x3061, 0x5bc4, 0x308a], [0x5f53, 0x756a, 0x8868], [0x4f1a, 0x8cbb], [0x51fa, 0x6b20], [0x8cb8, 0x3057, 0x51fa, 0x3057]].map((cs) => String.fromCodePoint(...cs));
   const text = readme();
-  const texts = [readFileSync(fileURLToPath(import.meta.url), "utf8"), readFileSync(join(here, "score-table.mjs"), "utf8"), text.slice(text.indexOf(SECTION_HEAD)), JSON.stringify([goldOf(), tableOf(), gaGold(), gaTable()])];
+  const texts = [readFileSync(fileURLToPath(import.meta.url), "utf8"), readFileSync(join(here, "score-table.mjs"), "utf8"), text.slice(text.indexOf(SECTION_HEAD)), JSON.stringify([goldOf(), tableOf(), gaGold(), gaTable()]), ...caseFiles().map((f) => readFileSync(join(CASES_DIR, f), "utf8"))];
   for (const t of texts) for (const word of words) assert.ok(!t.includes(word), word);
 });
 
@@ -982,4 +984,80 @@ test("下書きだけの本：build の記録の plan_sha256 が正解と違え�
 });
 test("下書きだけの本：build の記録が無ければ、1 本目と同じ符号で何も数えず終了コード 3・出力無し", () => {
   assertDraftOnlyRefused({ drafts: [candidateOf(DR_ONLY())], noRecord: true });
+});
+
+// ── 症例（cases/）：架空の小さな表で、採点器の挙動をデータで固定する（#630）。正解の表の現物は使わない
+const readCase = (name) => JSON.parse(readFileSync(join(CASES_DIR, name), "utf8"));
+const caseIndex = () => readCase("cases.json").cases;
+const CASE_TEXT_KEYS = ["meaning_quote", "rationale", "review_evidence", "question", "text"];
+const CASE_MARK = "MARK_TEXT";
+
+test("症例：索引と症例のファイルが 1 対 1（索引に無いファイル・ファイルの無い索引の行があれば落ちる）。id は一意、正 3 以上・負 7 以上・12 件以上、候補依存の保留の症例を含む", () => {
+  const rows = caseIndex();
+  const referenced = new Set(["cases.json"]);
+  for (const r of rows) {
+    for (const k of ["gold", "table", "record"]) if (r[k] !== undefined) { assert.ok(existsSync(join(CASES_DIR, r[k])), `${r.id}: ${r[k]}`); referenced.add(r[k]); }
+    assert.ok(["pos", "neg"].includes(r.polarity) && ["accepted", "checkpoint", "draft"].includes(r.source) && r.expect && r.note, r.id);
+  }
+  assert.equal(new Set(rows.map((r) => r.id)).size, rows.length);
+  assert.deepEqual(caseFiles().filter((n) => !referenced.has(n)), []);
+  // 表のファイルと点検の記録のファイルは 1 つの症例にだけ属する
+  const own = rows.flatMap((r) => [r.table, r.record].filter(Boolean));
+  assert.equal(new Set(own).size, own.length);
+  assert.ok(rows.length >= 12 && rows.filter((r) => r.polarity === "pos").length >= 3 && rows.filter((r) => r.polarity === "neg").length >= 7);
+  assert.ok(rows.some((r) => Object.values(r.expect.requirements ?? {}).some((q) => q.hold === "unassignable-row")));
+  assert.deepEqual([...new Set(rows.map((r) => r.source))].sort(), ["accepted", "checkpoint", "draft"]);
+});
+
+test("症例：文の欄（meaning_quote・rationale・review_evidence・question・text）の値は目印の文字列だけ", () => {
+  const walk = (v, path) => {
+    if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${path}[${i}]`));
+    else if (v !== null && typeof v === "object") for (const [k, x] of Object.entries(v)) {
+      if (CASE_TEXT_KEYS.includes(k)) assert.ok(x === CASE_MARK || (Array.isArray(x) && x.every((y) => y === CASE_MARK)), `${path}.${k}`);
+      else walk(x, `${path}.${k}`);
+    }
+  };
+  for (const f of caseFiles()) if (f !== "cases.json") walk(readCase(f), f);
+});
+
+/** 期待に在る欄だけを実際の値から取り出す（期待に無い欄・順序・指紋は比べない） */
+const pickLike = (actual, want) => {
+  if (want === null || typeof want !== "object" || Array.isArray(want)) return actual;
+  if (actual === null || typeof actual !== "object") return actual;
+  return Object.fromEntries(Object.keys(want).map((k) => [k, pickLike(actual[k], want[k])]));
+};
+
+/** 症例を組んで道具を流し、期待と同じ形の見え方（要件 ID ごとの結果・割り当てられない行・集計・正誤表）にする */
+function runCaseRow(r) {
+  const gold = readCase(r.gold), body = readCase(r.table);
+  const spec = r.source === "draft" ? { drafts: body.candidates } : { [r.source]: body };
+  if (r.record !== undefined) spec.semantic = readCase(r.record);
+  const w = world({ golds: [gold], runs: { "P1-r1": spec } });
+  try {
+    const res = run(w);
+    assert.equal(res.code, 0, `${r.id}: ${res.text}`);
+    const sc = readOut(w).scoring;
+    const row = r.source === "draft" ? sc.draft_rows[0] : sc.rows[0];
+    const block = r.source === "draft" ? sc.draft : sc.by_source[r.source];
+    return {
+      requirements: row.requirements === null ? null : Object.fromEntries(row.requirements.map((q) => [q.requirement_id, { outcome: q.outcome, hold: q.hold, questions: q.questions, marks: q.marks, variant_id: q.variant_id }])),
+      unassigned_rows: row.unassigned_rows === null ? [] : row.unassigned_rows,
+      aggregate: block, draft: block.draft, c3: sc.c3[r.source],
+    };
+  } finally { w.cleanup(); }
+}
+
+test("症例：各症例の 5 値・3 問・印・保留の種類・割り当てられない行・分母・正誤表が期待と深く等しい（症例ごとに失敗が分かる）", async (t) => {
+  for (const r of caseIndex()) {
+    await t.test(`${r.polarity} ${r.id}`, () => {
+      const got = runCaseRow(r);
+      assert.deepEqual(pickLike(got, r.expect), r.expect);
+      // 静的な保留は全症例で held／needs-human・3 問 null で、二値の分母に入らない
+      if (r.expect.requirements !== null) {
+        assert.deepEqual(got.requirements.Q6, { outcome: "held", hold: "needs-human", questions: { missing: null, excess: null, verification: null }, marks: [], variant_id: null });
+        assert.equal(got.aggregate.denominators.a, Object.values(got.requirements).filter((q) => ["correct", "wrong"].includes(q.outcome)).length);
+        assert.equal(got.aggregate.denominators.b, 5);
+      }
+    });
+  }
 });

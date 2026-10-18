@@ -1,0 +1,1906 @@
+{
+  "schema": "musunest-eval/table-cases/v1",
+  "note": "架空の小さな表だけで組んだ症例。部品は記号だけ。文の欄は目印の文字列",
+  "cases": [
+    {
+      "id": "c01-empty-table",
+      "polarity": "neg",
+      "gold": "gold.json",
+      "table": "c01-empty-table.json",
+      "source": "accepted",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 1,
+              "verification": 0
+            },
+            "marks": []
+          },
+          "Q2": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 1,
+              "verification": 0
+            },
+            "marks": []
+          },
+          "Q3": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 1,
+              "verification": 0
+            },
+            "marks": [],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 1,
+              "verification": 0
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 1,
+              "verification": 0
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 0,
+            "wrong": 5,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 0
+          }
+        }
+      },
+      "note": "行 0・所属 0。静的な保留を除く全要件が誤り。表はあるので分母 (a) に二値の要件数が入る"
+    },
+    {
+      "id": "c02-gold-copy",
+      "polarity": "pos",
+      "gold": "gold.json",
+      "table": "c02-gold-copy.json",
+      "source": "checkpoint",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q2": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 5,
+            "wrong": 0,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 3
+          }
+        }
+      },
+      "note": "案 1 の写し（checkpoint）。意味の部品を含む要件は未照合の印"
+    },
+    {
+      "id": "c03-alternative-route",
+      "polarity": "pos",
+      "gold": "gold.json",
+      "table": "c03-alternative-route.json",
+      "source": "accepted",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q2": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3b"
+          },
+          "Q4": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 5,
+            "wrong": 0,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 3
+          }
+        }
+      },
+      "note": "別解の部品で組んだ表は正答（採った案は 2 つ目）"
+    },
+    {
+      "id": "c04-union-of-alternatives",
+      "polarity": "neg",
+      "gold": "gold.json",
+      "table": "c04-union-of-alternatives.json",
+      "source": "accepted",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q2": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 0,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 4,
+            "wrong": 1,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 3
+          }
+        }
+      },
+      "note": "別解の部品を全部所属させても、合併で通る要件を正答にしない（過剰 0）"
+    },
+    {
+      "id": "c05-missing-part",
+      "polarity": "neg",
+      "gold": "gold.json",
+      "table": "c05-missing-part.json",
+      "source": "accepted",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q2": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 4,
+            "wrong": 1,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 3
+          }
+        }
+      },
+      "note": "required の行を 1 つ消した表。その要件だけ欠け 0"
+    },
+    {
+      "id": "c06-ownership-removed",
+      "polarity": "neg",
+      "gold": "gold.json",
+      "table": "c06-ownership-removed.json",
+      "source": "accepted",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q2": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 4,
+            "wrong": 1,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 3
+          }
+        }
+      },
+      "note": "行はあるが所属を外した表。欠け 0"
+    },
+    {
+      "id": "c07-swapped-ownership",
+      "polarity": "neg",
+      "gold": "gold.json",
+      "table": "c07-swapped-ownership.json",
+      "source": "accepted",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 0,
+              "verification": 0
+            },
+            "marks": []
+          },
+          "Q2": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 0,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 3,
+            "wrong": 2,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 2
+          }
+        }
+      },
+      "note": "2 要件の所属を入れ替えた表。両方とも誤り"
+    },
+    {
+      "id": "c08-verification-replaced",
+      "polarity": "neg",
+      "gold": "gold.json",
+      "table": "c08-verification-replaced.json",
+      "source": "accepted",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q2": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 0
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 0
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 3,
+            "wrong": 2,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 3
+          }
+        }
+      },
+      "note": "確かめ方の種類を替えた要件と checks を替えた要件。確かめ方 0"
+    },
+    {
+      "id": "c09-stray-row",
+      "polarity": "pos",
+      "gold": "gold.json",
+      "table": "c09-stray-row.json",
+      "source": "accepted",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q2": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [
+          7
+        ],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 5,
+            "wrong": 0,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 1,
+            "semantics_unverified": 3
+          }
+        }
+      },
+      "note": "どの部品にも当たらない行を所属させずに追加。割り当てられない行 1・要件は正答のまま"
+    },
+    {
+      "id": "c10-owned-unassignable-row",
+      "polarity": "neg",
+      "gold": "gold.json",
+      "table": "c10-owned-unassignable-row.json",
+      "source": "accepted",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q2": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "held",
+            "hold": "unassignable-row",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [
+          7
+        ],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 4,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 4,
+            "wrong": 0,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 2
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 1,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 1,
+            "unassigned_rows": 1,
+            "semantics_unverified": 3
+          }
+        }
+      },
+      "note": "割り当て不能の行を所属させた要件は候補依存の保留（過剰の判定より先）"
+    },
+    {
+      "id": "c11-owned-foreign-part",
+      "polarity": "neg",
+      "gold": "gold.json",
+      "table": "c11-owned-foreign-part.json",
+      "source": "accepted",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q2": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 0,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 4,
+            "wrong": 1,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 3
+          }
+        }
+      },
+      "note": "別の要件の required の部品を足した要件。過剰 0"
+    },
+    {
+      "id": "c12-draft-last-empty",
+      "polarity": "neg",
+      "gold": "gold.json",
+      "table": "c12-draft-last-empty.json",
+      "source": "draft",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 1,
+              "verification": 0
+            },
+            "marks": []
+          },
+          "Q2": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 1,
+              "verification": 0
+            },
+            "marks": []
+          },
+          "Q3": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 1,
+              "verification": 0
+            },
+            "marks": [],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 1,
+              "verification": 0
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 1,
+              "verification": 0
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 0,
+            "wrong": 5,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 0
+          }
+        }
+      },
+      "note": "最後の候補が空の表。先の写しには戻らない"
+    },
+    {
+      "id": "c13-draft-last-copy",
+      "polarity": "pos",
+      "gold": "gold.json",
+      "table": "c13-draft-last-copy.json",
+      "source": "draft",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q2": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 5,
+            "wrong": 0,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 3
+          }
+        }
+      },
+      "note": "最後の候補が正解の写し。表の SHA は null"
+    },
+    {
+      "id": "c14-draft-no-candidates",
+      "polarity": "neg",
+      "gold": "gold.json",
+      "table": "c14-draft-no-candidates.json",
+      "source": "draft",
+      "expect": {
+        "requirements": null,
+        "aggregate": {
+          "runs": {
+            "with_table": 0,
+            "no_table": 1
+          },
+          "denominators": {
+            "a": 0,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 0,
+            "wrong": 0,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 0
+          },
+          "holds": {
+            "static": 0
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0
+          }
+        },
+        "draft": {
+          "candidate_total": 0,
+          "scored_runs": 0
+        }
+      },
+      "note": "候補 0 件の本：採点されず分母 (a) に入らない（今の挙動）"
+    },
+    {
+      "id": "c15-c3-accept-copy",
+      "polarity": "pos",
+      "gold": "gold.json",
+      "table": "c15-c3-accept-copy.json",
+      "record": "c15-c3-accept-copy.record.json",
+      "source": "accepted",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q2": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 5,
+            "wrong": 0,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 3
+          }
+        },
+        "c3": {
+          "runs": {
+            "with_table": 1,
+            "with_record": 1
+          },
+          "cells": {
+            "wrong_accept": 0,
+            "wrong_reject": 0,
+            "correct_accept": 5,
+            "correct_reject": 0
+          },
+          "non_binary": {
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "out_of_target": 0,
+          "reject_kinds": {
+            "unnecessary-ownership": 0,
+            "missing-target": 0,
+            "weak-verification": 0,
+            "unknown": 0
+          },
+          "miss": {
+            "k": 0,
+            "n": 0,
+            "rate": null,
+            "reason_code": "denominator-zero"
+          },
+          "false_reject": {
+            "k": 0,
+            "n": 5,
+            "rate": 0,
+            "reason_code": null
+          }
+        }
+      },
+      "note": "正解の写しに全要件 accept。見逃し 0/0（分母 0）・誤拒否 0/5。静的な保留は非二値の件数に 1"
+    },
+    {
+      "id": "c16-c3-accept-missing",
+      "polarity": "neg",
+      "gold": "gold.json",
+      "table": "c16-c3-accept-missing.json",
+      "record": "c16-c3-accept-missing.record.json",
+      "source": "accepted",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q2": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "wrong",
+            "hold": null,
+            "questions": {
+              "missing": 0,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 4,
+            "wrong": 1,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 3
+          }
+        },
+        "c3": {
+          "runs": {
+            "with_table": 1,
+            "with_record": 1
+          },
+          "cells": {
+            "wrong_accept": 1,
+            "wrong_reject": 0,
+            "correct_accept": 4,
+            "correct_reject": 0
+          },
+          "non_binary": {
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "out_of_target": 0,
+          "reject_kinds": {
+            "unnecessary-ownership": 0,
+            "missing-target": 0,
+            "weak-verification": 0,
+            "unknown": 0
+          },
+          "miss": {
+            "k": 1,
+            "n": 1,
+            "rate": 1,
+            "reason_code": null
+          },
+          "false_reject": {
+            "k": 0,
+            "n": 4,
+            "rate": 0,
+            "reason_code": null
+          }
+        }
+      },
+      "note": "1 部品の欠けの要件を accept：見逃し 1/1"
+    },
+    {
+      "id": "c17-c3-reject-correct",
+      "polarity": "neg",
+      "gold": "gold.json",
+      "table": "c17-c3-reject-correct.json",
+      "record": "c17-c3-reject-correct.record.json",
+      "source": "accepted",
+      "expect": {
+        "requirements": {
+          "Q1": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q2": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ]
+          },
+          "Q3": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": [
+              "semantics-unverified"
+            ],
+            "variant_id": "V_q3a"
+          },
+          "Q4": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q5": {
+            "outcome": "correct",
+            "hold": null,
+            "questions": {
+              "missing": 1,
+              "excess": 1,
+              "verification": 1
+            },
+            "marks": []
+          },
+          "Q6": {
+            "outcome": "held",
+            "hold": "needs-human",
+            "questions": {
+              "missing": null,
+              "excess": null,
+              "verification": null
+            },
+            "marks": []
+          }
+        },
+        "unassigned_rows": [],
+        "aggregate": {
+          "runs": {
+            "with_table": 1,
+            "no_table": 0
+          },
+          "denominators": {
+            "a": 5,
+            "b": 5
+          },
+          "outcomes": {
+            "correct": 5,
+            "wrong": 0,
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "holds": {
+            "static": 1,
+            "candidate": {
+              "unassignable-row": 0,
+              "alternative-unselectable": 0,
+              "search-limit": 0
+            }
+          },
+          "counts": {
+            "candidate_dependent": 0,
+            "unassigned_rows": 0,
+            "semantics_unverified": 3
+          }
+        },
+        "c3": {
+          "runs": {
+            "with_table": 1,
+            "with_record": 1
+          },
+          "cells": {
+            "wrong_accept": 0,
+            "wrong_reject": 0,
+            "correct_accept": 4,
+            "correct_reject": 1
+          },
+          "non_binary": {
+            "carry-over": 0,
+            "accepted-removal": 0,
+            "held": 1
+          },
+          "out_of_target": 0,
+          "reject_kinds": {
+            "unnecessary-ownership": 0,
+            "missing-target": 0,
+            "weak-verification": 1,
+            "unknown": 0
+          },
+          "miss": {
+            "k": 0,
+            "n": 0,
+            "rate": null,
+            "reason_code": "denominator-zero"
+          },
+          "false_reject": {
+            "k": 1,
+            "n": 5,
+            "rate": 0.2,
+            "reason_code": null
+          }
+        }
+      },
+      "note": "正答の要件を reject：誤拒否 1/5"
+    }
+  ]
+}
