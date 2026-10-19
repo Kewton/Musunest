@@ -8,10 +8,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { clusterStats, pairStats } from "../agent-accept/score-agent.mjs";
+import { CONDITIONS_V6, CONDITIONS_V8, clusterStats, pairStats } from "../agent-accept/score-agent.mjs";
 import {
   ANONYMOUS_SCHEMA, BROKEN, COMPARE_FILE, COMPARE_SCHEMA, EXIT_REFUSED, GOLD_VERSION, OUTCOMES, OUTPUT_FILE, OUTPUT_SCHEMA, SOURCE_PATHS, BUILD_RECORD_PATH, WILSON_NAME,
-  aggregate, anonymize, anonymousFileOf, assignRows, compareRows, main, normalizeTable, readSource, scoreStructure, validateGold,
+  aggregate, runSources, anonymize, anonymousFileOf, assignRows, compareRows, main, normalizeTable, readSource, scoreStructure, validateGold,
   DRAFT_PATH, SEMANTIC_RECORD_PATHS, draftStructure,
 } from "./score-table.mjs";
 
@@ -1060,4 +1060,148 @@ test("症例：各症例の 5 値・3 問・印・保留の種類・割り当て
       }
     });
   }
+});
+
+// ── 段の走りと段の比較（#639）：条件 v8・読取元 checkpoint・入力なし・表なし
+const stageConditions = (absent, over = {}) => ({ schema: CONDITIONS_V8, measurement_id: "m-stage", params: { mode: "stage-run", pipeline: "v1.2" }, stage_input_absent: { count: absent.length, ids: absent }, ...over });
+/** 段単位の計測を書く。入力なしの本は本のディレクトリを作らない（起こさない） */
+function writeStage(dir, golds, runs, absent, over = {}) {
+  writeMeasure(dir, { golds, runs: Object.fromEntries(Object.entries(runs).map(([id, r]) => [id, { plan: PLAN_A, ...r }])), extraConditions: stageConditions(absent, over) });
+  for (const id of absent) rmSync(join(dir, id), { recursive: true, force: true });
+}
+const stageWorld = (build) => {
+  const base = mkdtempSync(join(tmpdir(), "table-score-stage-"));
+  const goldDir = join(base, "gold"), m = join(base, "m"), out = join(base, "out");
+  mkdirSync(goldDir);
+  for (const p of ["P1", "P2", "P3"]) writeFileSync(join(goldDir, `${p}.json`), JSON.stringify(gaGold(p)));
+  build(m);
+  return { base, goldDir, measure: m, out, cleanup: () => rmSync(base, { recursive: true, force: true }) };
+};
+const STAGE_GOLDS = ["P1", "P2", "P3"].map((p) => gaGold(p));
+const A1_WRONG = { ...GA_VER, A1: { kind: "structural", reason: "x", checks: [] } };
+const gaRound = (targets, verdicts) => ({ table_sha256: sha("table"), targets, judgments: targets.map((t, i) => ({ requirementId: t, verdict: verdicts[i], kind: verdicts[i] === "reject" ? "missing-target" : null })), advice: [] });
+
+test("段の走り：条件 v8・P 3 × 回 2（checkpoint 3・段の途中で止まった 1・入力なし 2）で正答率・分母・表なしと入力なしの件数・読取元の件数・C3 の正誤表が手計算と一致する", () => {
+  const w = stageWorld((m) => {
+    writeStage(m, STAGE_GOLDS, {
+      "P1-r1": { checkpoint: gaTable(), checkpointSemantic: gaRound(["A1", "A2", "A5"], ["accept", "reject", "accept"]) },
+      "P1-r2": { checkpoint: gaTable(A1_WRONG), checkpointSemantic: gaRound(["A1", "A2"], ["reject", "accept"]) },
+      "P2-r1": {}, "P2-r2": {},
+      "P3-r1": { checkpoint: gaTable() }, "P3-r2": {},
+    }, ["P2-r2", "P3-r2"]);
+    // 段の途中で止まった本：段の走りの記録だけで checkpoint が無い
+    writeFileSync(join(m, "P2-r1", "bundle", "stage-run.json"), JSON.stringify({ stage_pass: false }));
+  });
+  try {
+    const r = run(w);
+    assert.equal(r.code, 0, r.text);
+    const out = readOut(w);
+    const c = out.scoring.by_source.checkpoint;
+    // 分母 (a)：表のある 3 本 × 二値 5、(b)：予定 6 本 × (6 − 静的な保留 1)
+    assert.deepEqual(c.denominators, { a: 15, b: 30 });
+    assert.deepEqual([c.correct.a.k, c.correct.a.n], [14, 15]);
+    assert.deepEqual([c.correct.b.k, c.correct.b.n, c.correct.b.rate], [14, 30, round(14 / 30)]);
+    assert.deepEqual(c.runs, { planned: 6, with_table: 3, no_table: 1, other_source: 0, checkpoint_also: 0, input_absent: 2 });
+    assert.equal(c.counts.unobserved, 15);
+    assert.equal(c.pattern_interval.m, 2);
+    assert.deepEqual(out.scoring.run_sources, { accepted_only: 0, checkpoint_only: 3, both: 0, no_table: 1, input_absent: 2 });
+    assert.deepEqual(runSources(out.scoring.rows), out.scoring.run_sources);
+    assert.deepEqual(out.scoring.rows.map((x) => x.input_absent), [false, false, false, true, false, true]);
+    // C3：P1-r1（正答 A1・A2・A5 の受理 2・拒否 1）、P1-r2（誤り A1 の拒否 1・正答 A2 の受理 1）。P3-r1 は点検の記録なし
+    const c3 = out.scoring.c3.checkpoint;
+    assert.deepEqual(c3.cells, { wrong_accept: 0, wrong_reject: 1, correct_accept: 3, correct_reject: 1 });
+    assert.deepEqual([c3.miss.k, c3.miss.n], [0, 1]);
+    assert.deepEqual([c3.false_reject.k, c3.false_reject.n], [1, 4]);
+    assert.deepEqual(c3.runs, { with_table: 3, with_record: 2, no_record: { absent: 1, unreadable: 0, "no-matching-round": 0 } });
+    assert.ok(out.scoring.c3_rows[3] === null && out.scoring.c3_rows[5] === null);
+    for (const t of ["[本の読取元]", "入力なし 2", "表なし 1", "checkpoint のみ 3"]) assert.ok(r.text.includes(t), t);
+    // 出どころの契約：条件のファイルの SHA-256・計測の ID・本ごとの読取元と表の SHA
+    assert.equal(out.fingerprint.conditions_sha256, sha(readFileSync(join(w.measure, "conditions.json"))));
+    assert.equal(out.fingerprint.measurement_id, "m-stage");
+    assert.equal(out.fingerprint.tool_sha256, sha(readFileSync(join(here, "score-table.mjs"))));
+    assert.deepEqual([out.scoring.rows[0].source, out.scoring.rows[0].table_sha256], ["checkpoint", sha("table")]);
+    assert.equal(out.scoring.rows[3].table_sha256, null);
+    // 匿名の口：指紋・SHA・本の ID が無く、読取元の件数だけある
+    assert.equal(run(w, ["--anonymous"]).code, 0);
+    const anonText = readFileSync(join(w.out, anonymousFileOf(OUTPUT_FILE)), "utf8");
+    assert.doesNotMatch(anonText, /conditions_sha256|measurement_id|m-stage|[0-9a-f]{64}|fingerprint|P\d+|-r\d/);
+    assert.deepEqual(JSON.parse(anonText).run_sources, out.scoring.run_sources);
+    assert.equal(JSON.parse(anonText).by_source.checkpoint.runs.input_absent, 2);
+  } finally { w.cleanup(); }
+});
+
+test("段の走り：段単位でない条件には欄を足さない（run_sources・input_absent・条件の SHA 以外の指紋）。v6 も受ける。入力なしの一覧・経路が合わない条件は断る", () => {
+  const w = world({ golds: [gaGold()], runs: { "P1-r1": { checkpoint: gaTable() } } });
+  try {
+    assert.equal(run(w).code, 0);
+    const out = readOut(w);
+    assert.equal(out.scoring.run_sources, undefined);
+    assert.equal("input_absent" in out.scoring.rows[0], false);
+    assert.equal("input_absent" in out.scoring.by_source.checkpoint.runs, false);
+    assert.equal(out.fingerprint.conditions_sha256, sha(readFileSync(join(w.measure, "conditions.json"))));
+    assert.equal(out.fingerprint.measurement_id, null);
+  } finally { w.cleanup(); }
+  const v6 = stageWorld((m) => writeStage(m, STAGE_GOLDS, { "P1-r1": { checkpoint: gaTable() } }, [], { schema: CONDITIONS_V6, params: { mode: "stage-run", pipeline: "v1.1a" } }));
+  try { assert.equal(run(v6).code, 0); } finally { v6.cleanup(); }
+  for (const over of [
+    { stage_input_absent: { count: 1, ids: ["P9-r1"] } }, { stage_input_absent: { count: 2, ids: ["P1-r1"] } }, { stage_input_absent: undefined },
+    { params: { mode: "stage-run", pipeline: "v1.1a" } }, { schema: CONDITIONS_V6, params: { mode: "stage-run", pipeline: "v1.2" } },
+  ]) {
+    const bad = stageWorld((m) => writeStage(m, STAGE_GOLDS, { "P1-r1": { checkpoint: gaTable() } }, [], over));
+    try {
+      const r = run(bad);
+      assert.equal(r.code, EXIT_REFUSED);
+      assert.ok(r.text.includes("[table-score:conditions]"), r.text);
+      assert.deepEqual(outFiles(bad), []);
+    } finally { bad.cleanup(); }
+  }
+});
+
+test("段の比較：記録（stage-compare-record/v1。before・after）で同じ P・同じ回を対にし、対の差・table-absent・入力なしの件数・P のまとまりの区間・群ごとの C3 が出る", () => {
+  const w = stageWorld((m) => {
+    mkdirSync(m, { recursive: true });
+    writeFileSync(join(m, "comparison.json"), JSON.stringify({ schema: "musunest-eval/stage-compare-record/v1", pairs: { groups: ["before", "after"] } }));
+    const absent = ["P2-r2", "P3-r2"];
+    writeStage(join(m, "before"), STAGE_GOLDS, { "P1-r1": { checkpoint: gaTable(A1_WRONG) }, "P1-r2": { checkpoint: gaTable() }, "P2-r1": {}, "P2-r2": {}, "P3-r1": { checkpoint: gaTable() }, "P3-r2": {} }, absent);
+    writeStage(join(m, "after"), STAGE_GOLDS, {
+      "P1-r1": { checkpoint: gaTable(), checkpointSemantic: gaRound(["A1"], ["accept"]) }, "P1-r2": { checkpoint: gaTable() },
+      "P2-r1": { checkpoint: gaTable() }, "P2-r2": {}, "P3-r1": { checkpoint: gaTable() }, "P3-r2": {},
+    }, absent);
+  });
+  try {
+    const r = run(w, ["--compare"]);
+    assert.equal(r.code, 0, r.text);
+    const o = readOut(w, COMPARE_FILE);
+    const x = o.scoring.by_source.checkpoint, cmp = x.compare;
+    // 対（静的な保留 A6 が 3 対で非二値）：P1-r1 [+1,0,0,0,0]、P1-r2・P3-r1 は全部 0、P2-r1 は比較元に表が無く table-absent、入力なしの 2 本は対に入らない
+    assert.deepEqual(cmp.requirement_diffs, pairStats([1, ...Array(14).fill(0)]));
+    assert.deepEqual(cmp.excluded, { "table-absent": 1, "non-binary": 3, "input-absent": 2 });
+    assert.deepEqual(cmp.pairs.map((p) => [p.run, p.mean, p.n]), [["P1-r1", 0.2, 5], ["P1-r2", 0, 5], ["P2-r1", null, 0], ["P3-r1", 0, 5]]);
+    assert.deepEqual(cmp.pattern_clusters, clusterStats({ P1: [0.2, 0], P3: [0] }));
+    assert.deepEqual(x.baseline.runs, { planned: 6, with_table: 3, no_table: 1, other_source: 0, checkpoint_also: 0, input_absent: 2 });
+    assert.equal(x.candidate.runs.no_table, 0);
+    // 群ごとの正誤表（対の差は取らない）
+    assert.equal(o.scoring.c3.checkpoint.baseline.runs.with_record, 0);
+    assert.deepEqual(o.scoring.c3.checkpoint.candidate.cells, { wrong_accept: 0, wrong_reject: 0, correct_accept: 1, correct_reject: 0 });
+    assert.deepEqual(o.scoring.run_sources.baseline, { accepted_only: 0, checkpoint_only: 3, both: 0, no_table: 1, input_absent: 2 });
+    assert.deepEqual(o.scoring.run_sources.candidate, { accepted_only: 0, checkpoint_only: 4, both: 0, no_table: 0, input_absent: 2 });
+    assert.equal(o.fingerprint.conditions_sha256.baseline, sha(readFileSync(join(w.measure, "before", "conditions.json"))));
+    assert.equal(o.fingerprint.conditions_sha256.candidate, sha(readFileSync(join(w.measure, "after", "conditions.json"))));
+    assert.deepEqual(o.fingerprint.measurement_id, { baseline: "m-stage", candidate: "m-stage" });
+    assert.ok(r.text.includes("input-absent 2") && r.text.includes("[本の読取元] 比較元"));
+    assert.equal(run(w, ["--compare", "--anonymous"]).code, 0);
+    const anonText = readFileSync(join(w.out, anonymousFileOf(COMPARE_FILE)), "utf8");
+    assert.doesNotMatch(anonText, /conditions_sha256|[0-9a-f]{64}|fingerprint|P\d+|-r\d|before|after/);
+    assert.deepEqual(JSON.parse(anonText), anonymize(o));
+    assert.equal(JSON.parse(anonText).by_source.checkpoint.compare.excluded["input-absent"], 2);
+  } finally { w.cleanup(); }
+});
+
+test("README §7.13：段の走り・入力なし・表なし・分母 (b)・納品の成功ではない。§7.12 の後ろにあり、§7.11 の前のバイト列は変わらない", () => {
+  const text = readme();
+  const at = text.indexOf("### 7.13 "), c3 = text.indexOf(SECTION_C3), next = text.indexOf("\n## 8. ");
+  assert.ok(c3 > 0 && at > c3 && next > at);
+  const sec = text.slice(at, next);
+  for (const item of ["段の走り", "入力なし", "表なし", "分母 (b)", "納品の成功ではない", "checkpoint", "conditions_sha256", "table-absent", "input-absent", "stage-compare-record/v1"]) assert.ok(sec.includes(item), item);
+  assert.equal(text.indexOf("### 7.13 ", at + 1), -1);
 });

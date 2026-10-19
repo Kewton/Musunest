@@ -5,13 +5,16 @@
 // 2 本目（#607）：T1' が断った候補の下書き（読取元 (c)。本ごとに最後の候補だけ）を同じ採点の関数で採点し、C3（T1''）の判定を同じ正解と照らした
 // 正誤表（見逃し・誤拒否。二値の要件だけ）を足す。1 本目の欄は変えず、出力の後ろに足す。
 //
+// 段単位の走り（#639。条件 v6・v8 で params.mode が stage-run）：予定の本は child_args、凍結した組は frozen のまま読む。入力なしの本（stage_input_absent）は表なしと分けて数え（分母 (b) には残す）、
+//   読取元ごとの本の数・条件のファイルの SHA-256（fingerprint.conditions_sha256）を足す。段単位でない計測の出力は変えない。
+//
 // 使い方: node score-table.mjs <正解のディレクトリ> <計測の出力先（--compare なら比較の記録の出力先）> <出力先> [--compare] [--anonymous]
 // 断る（終了コード 3・固定の符号の 1 行・出力を書かない）：引数・正解の版と形・凍結した組の ID と版・plan_sha256（条件のファイル・本の記録）・比較の記録
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { clusterStats, pairStats } from "../agent-accept/score-agent.mjs";
+import { clusterStats, isStageConditions, pairStats, stageAbsentOf, stagePipelineOf } from "../agent-accept/score-agent.mjs";
 
 export const GOLD_VERSION = "table-gold-v1";
 export const OUTPUT_SCHEMA = "musunest-eval/table-score/v1";
@@ -78,7 +81,7 @@ export const REFUSALS = {
   "table-score:gold-shape": "正解の必須の欄が欠けるか型が違う",
   "table-score:gold-duplicate": "同じ P の正解が 2 つある",
   "table-score:gold-missing": "予定の P の正解が無い",
-  "table-score:conditions": "計測の条件のファイルが無い・読めない・予定と凍結した組の形が違う",
+  "table-score:conditions": "計測の条件のファイルが無い・読めない・予定と凍結した組の形が違う、または段単位の条件の入力なしの本・経路が読めない",
   "table-score:frozen-set": "正解の凍結した組の ID か版が条件のファイルと違う",
   "table-score:plan-sha256-conditions": "正解の plan_sha256 が条件のファイルの凍結した組の値と違う",
   "table-score:plan-sha256-run": "本の記録の plan_sha256 が正解と違う、または表のある本に plan_sha256 の記録が無い",
@@ -529,13 +532,20 @@ export function scoreStructure(structure, meta, gold) {
 
 // ── 計測の出力の読取りと照合
 function loadConditions(dir) {
-  let c;
-  try { c = readJson(join(dir, CONDITIONS_FILE)); } catch { refuse("table-score:conditions"); }
+  let c, bytes;
+  try { bytes = readFileSync(join(dir, CONDITIONS_FILE)); c = JSON.parse(bytes.toString("utf8")); } catch { refuse("table-score:conditions"); }
   if (!isObj(c) || !Array.isArray(c.child_args) || !isObj(c.frozen) || !isStr(c.frozen.id) || !Number.isInteger(c.frozen.version) || !Array.isArray(c.frozen.adopted)) refuse("table-score:conditions");
   const runs = c.child_args.map((a) => a?.id);
   if (!runs.every((id) => typeof id === "string" && RUN_ID.test(id)) || new Set(runs).size !== runs.length || runs.length === 0) refuse("table-score:conditions");
   if (!c.frozen.adopted.every((a) => isObj(a) && typeof a.pattern === "string" && isHex64(a.plan_sha256))) refuse("table-score:conditions");
-  return { runs, frozen: c.frozen };
+  // 段単位の走り（v6・v8 で params.mode が stage-run）：入力なしの本は予定の部分集合で、経路（v6 は v1.1a・v8 は v1.2）が版と合うことだけを見る
+  const stage = isStageConditions(c);
+  let absent = [];
+  if (stage) {
+    absent = stageAbsentOf(c, runs);
+    if (absent === null || stagePipelineOf(c) === null) refuse("table-score:conditions");
+  }
+  return { runs, frozen: c.frozen, stage, absent, conditions_sha256: sha256(bytes), measurement_id: isStr(c.measurement_id) ? c.measurement_id : null };
 }
 const readIf = (path) => {
   if (!existsSync(path)) return { status: "absent", value: null };
@@ -562,7 +572,7 @@ function readRun(dir, id, gold) {
 export const scoreMeasurement = (dir, golds) => measure(dir, golds).rows;
 /** 照合して採点し、1 本目の行・下書きの行 (c)・C3 の結び付けの行を返す */
 function measure(dir, golds) {
-  const { runs, frozen } = loadConditions(dir);
+  const { runs, frozen, stage, absent, conditions_sha256, measurement_id } = loadConditions(dir);
   const patterns = [...new Set(runs.map((id) => RUN_ID.exec(id)[1]))];
   for (const p of patterns) {
     const g = golds.get(p);
@@ -572,14 +582,27 @@ function measure(dir, golds) {
     if (a === undefined || a.plan_sha256 !== g.plan_sha256) refuse("table-score:plan-sha256-conditions");
   }
   // 照合を全部済ませてから数える（途中で断っても何も数えない）
-  const read = runs.map((id) => ({ id, pattern: RUN_ID.exec(id)[1], ...readRun(dir, id, golds.get(RUN_ID.exec(id)[1])) }));
+  // 入力なしの本は起こしていないので本のディレクトリを読まない
+  const read = runs.map((id) => ({ id, pattern: RUN_ID.exec(id)[1], ...(absent.includes(id) ? { source: null, both: false, read: null, semantic: null } : readRun(dir, id, golds.get(RUN_ID.exec(id)[1]))) }));
   const rows = read.map((r) => ({
-    run: r.id, pattern: r.pattern, source: r.source, checkpoint_also: r.both,
+    run: r.id, pattern: r.pattern, source: r.source, checkpoint_also: r.both, ...(stage ? { input_absent: absent.includes(r.id) } : {}),
     ...(r.read === null ? { table_sha256: null, requirements: null, assignment: null, unassigned_rows: null, search_limit: null } : scoreStructure(r.read.structure, r.read.meta, golds.get(r.pattern))),
   }));
-  const draftRows = runs.map((id) => scoreDraftRun(dir, id, golds.get(RUN_ID.exec(id)[1])));
+  const draftRows = runs.map((id) => (absent.includes(id) ? { run: id, pattern: RUN_ID.exec(id)[1], source: null, checkpoint_also: false, candidate_count: 0, last: null, unreadable: null, table_sha256: null, requirements: null, assignment: null, unassigned_rows: null, search_limit: null } : scoreDraftRun(dir, id, golds.get(RUN_ID.exec(id)[1]))));
   const c3Rows = rows.map((r, i) => linkC3(r, read[i].semantic));
-  return { rows, draftRows, c3Rows };
+  return { rows, draftRows, c3Rows, stage, conditions_sha256, measurement_id };
+}
+/** 読取元ごとの本の数（段単位の走りだけ。互いに重ならない）：受理済みのみ・checkpoint のみ・両方・表なし（段の途中で止まるなどで読める表が無い）・入力なし */
+export function runSources(rows) {
+  const out = { accepted_only: 0, checkpoint_only: 0, both: 0, no_table: 0, input_absent: 0 };
+  for (const r of rows) {
+    if (r.input_absent === true) out.input_absent += 1;
+    else if (r.source === null) out.no_table += 1;
+    else if (r.checkpoint_also) out.both += 1;
+    else if (r.source === "accepted") out.accepted_only += 1;
+    else out.checkpoint_only += 1;
+  }
+  return out;
 }
 
 // ── 読取元 (c)：断った候補の下書き（#607）
@@ -723,13 +746,13 @@ export function aggregate(rows, golds, source) {
   const outcomes = Object.fromEntries(OUTCOMES.map((o) => [o, 0]));
   const holds = { static: 0, candidate: Object.fromEntries(HOLD_REASONS.candidate.map((h) => [h, 0])) };
   const marks = Object.fromEntries(MARKS.map((m) => [m, 0]));
-  let binary = 0, correct = 0, missing0 = 0, excess0 = 0, ver1 = 0, unobserved = 0, candidateDependent = 0, unassignedRows = 0, tableRuns = 0, noTable = 0, otherSource = 0, checkpointAlso = 0, denomB = 0;
+  let binary = 0, correct = 0, missing0 = 0, excess0 = 0, ver1 = 0, unobserved = 0, candidateDependent = 0, unassignedRows = 0, tableRuns = 0, noTable = 0, inputAbsent = 0, otherSource = 0, checkpointAlso = 0, denomB = 0;
   const byPattern = {};
   for (const r of rows) {
     const g = golds.get(r.pattern), ix = indexGold(g);
     const nonStatic = ix.allIds.filter((id) => !ix.held.has(id)).length;
     denomB += nonStatic;
-    if (r.source !== source) { unobserved += nonStatic; if (r.source === null) noTable += 1; else otherSource += 1; continue; }
+    if (r.source !== source) { unobserved += nonStatic; if (r.source === null) { if (r.input_absent === true) inputAbsent += 1; else noTable += 1; } else otherSource += 1; continue; }
     tableRuns += 1;
     if (r.checkpoint_also) checkpointAlso += 1;
     unassignedRows += r.unassigned_rows.length;
@@ -751,7 +774,7 @@ export function aggregate(rows, golds, source) {
   const denomA = binary;
   return {
     source,
-    runs: { planned: rows.length, with_table: tableRuns, no_table: noTable, other_source: otherSource, checkpoint_also: checkpointAlso },
+    runs: { planned: rows.length, with_table: tableRuns, no_table: noTable, other_source: otherSource, checkpoint_also: checkpointAlso, ...(rows.some((r) => "input_absent" in r) ? { input_absent: inputAbsent } : {}) },
     denominators: { a: denomA, b: denomB },
     correct: { a: makeRate(correct, denomA), b: makeRate(correct, denomB) },
     breakdown: { missing: makeRate(missing0, denomA), excess: makeRate(excess0, denomA), verification_correct: makeRate(ver1, denomA) },
@@ -766,9 +789,12 @@ export const PAIR_NULL_REASONS = ["table-absent", "non-binary"];
 export function compareRows(baseRows, candRows) {
   const candOf = new Map(candRows.map((r) => [r.run, r]));
   const diffs = [], excluded = Object.fromEntries(PAIR_NULL_REASONS.map((k) => [k, 0])), byPattern = {}, pairs = [];
+  // 段単位の走り：入力なしの本は対に入らず、件数だけ別に出す（段単位でない計測には欄を足さない）
+  if (baseRows.some((r) => "input_absent" in r) || candRows.some((r) => "input_absent" in r)) excluded["input-absent"] = 0;
   for (const b of baseRows) {
     const c = candOf.get(b.run);
     if (c === undefined) continue;
+    if (b.input_absent === true || c.input_absent === true) { excluded["input-absent"] += 1; continue; }
     if (b.requirements === null || c.requirements === null) { excluded["table-absent"] += 1; pairs.push({ run: b.run, pattern: b.pattern, mean: null, n: 0 }); continue; }
     const cq = new Map(c.requirements.map((q) => [q.requirement_id, q]));
     const ds = [];
@@ -802,11 +828,11 @@ const perC3 = (c3Rows) => Object.fromEntries(SOURCES.map((s) => [s, aggregateC3(
 export function scoreTables({ goldDir, measureDir, compare = false }) {
   const golds = loadGoldDir(goldDir);
   if (!compare) {
-    const { rows, draftRows, c3Rows } = measure(measureDir, golds);
+    const { rows, draftRows, c3Rows, stage, conditions_sha256, measurement_id } = measure(measureDir, golds);
     return {
       schema: OUTPUT_SCHEMA, definitions: DEFINITIONS,
-      scoring: { by_source: perSource(rows, golds), rows, draft: aggregateDraft(draftRows, golds), draft_rows: draftRows, c3: perC3(c3Rows), c3_rows: c3Rows },
-      fingerprint: { tool_sha256: toolFingerprint() },
+      scoring: { by_source: perSource(rows, golds), rows, draft: aggregateDraft(draftRows, golds), draft_rows: draftRows, c3: perC3(c3Rows), c3_rows: c3Rows, ...(stage ? { run_sources: runSources(rows) } : {}) },
+      fingerprint: { tool_sha256: toolFingerprint(), conditions_sha256, measurement_id },
     };
   }
   const roles = loadComparison(measureDir);
@@ -823,8 +849,9 @@ export function scoreTables({ goldDir, measureDir, compare = false }) {
       by_source: bySource, rows: { baseline: base, candidate: cand },
       draft: { baseline: aggregateDraft(mb.draftRows, golds), candidate: aggregateDraft(mc.draftRows, golds) }, draft_rows: { baseline: mb.draftRows, candidate: mc.draftRows },
       c3: Object.fromEntries(SOURCES.map((s) => [s, { baseline: aggregateC3(mb.c3Rows, s), candidate: aggregateC3(mc.c3Rows, s) }])), c3_rows: { baseline: mb.c3Rows, candidate: mc.c3Rows },
+      ...(mb.stage || mc.stage ? { run_sources: { baseline: runSources(base), candidate: runSources(cand) } } : {}),
     },
-    fingerprint: { tool_sha256: toolFingerprint() },
+    fingerprint: { tool_sha256: toolFingerprint(), conditions_sha256: { baseline: mb.conditions_sha256, candidate: mc.conditions_sha256 }, measurement_id: { baseline: mb.measurement_id, candidate: mc.measurement_id } },
   };
 }
 
@@ -846,6 +873,7 @@ export function anonymize(full) {
     return {
       schema: ANONYMOUS_SCHEMA, mode: "single", by_source: Object.fromEntries(SOURCES.map((s) => [s, anonAggregate(full.scoring.by_source[s])])),
       draft: anonDraft(full.scoring.draft), c3: Object.fromEntries(SOURCES.map((s) => [s, anonC3(full.scoring.c3[s])])),
+      ...(full.scoring.run_sources ? { run_sources: { ...full.scoring.run_sources } } : {}),
     };
   }
   return {
@@ -856,6 +884,7 @@ export function anonymize(full) {
     })),
     draft: { baseline: anonDraft(full.scoring.draft.baseline), candidate: anonDraft(full.scoring.draft.candidate) },
     c3: Object.fromEntries(SOURCES.map((s) => [s, { baseline: anonC3(full.scoring.c3[s].baseline), candidate: anonC3(full.scoring.c3[s].candidate) }])),
+    ...(full.scoring.run_sources ? { run_sources: { baseline: { ...full.scoring.run_sources.baseline }, candidate: { ...full.scoring.run_sources.candidate } } } : {}),
   };
 }
 
@@ -863,19 +892,21 @@ const pct = (r) => (r.rate === null ? `なし（${r.reason_code}）` : `${r.k}/$
 const rangeOf = (x) => (x === null ? "-" : `${x[0].toFixed(3)}〜${x[1].toFixed(3)}`);
 const aggText = (a) => `正答 (a) ${pct(a.correct.a)}・(b) ${pct(a.correct.b)}・欠け ${pct(a.breakdown.missing)}・過剰 ${pct(a.breakdown.excess)}・確かめ方 ${pct(a.breakdown.verification_correct)}・分母 (a) ${a.denominators.a}／(b) ${a.denominators.b}・5 値 ${OUTCOMES.map((o) => `${o} ${a.outcomes[o]}`).join("・")}・割り当てられない行 ${a.counts.unassigned_rows}・表なし ${a.runs.no_table}・P の区間（m ${a.pattern_interval.m}）bootstrap ${rangeOf(a.pattern_interval.bootstrap.interval)}`;
 const draftText = (a) => `${aggText(a)}・候補 ${a.draft.candidate_total}（候補のある本 ${a.draft.runs_with_candidates}・採点した本 ${a.draft.scored_runs}）・読めない候補 ${DRAFT_UNREADABLE.map((k) => `${k} ${a.draft.unreadable[k]}`).join("・")}`;
+const sourcesText = (x) => `受理済みのみ ${x.accepted_only}・checkpoint のみ ${x.checkpoint_only}・両方 ${x.both}・表なし ${x.no_table}・入力なし ${x.input_absent}`;
 const c3Text = (c) => `見逃し ${pct(c.miss)}・誤拒否 ${pct(c.false_reject)}・点検の対象外 ${c.out_of_target}・非二値 ${C3_NON_BINARY.map((k) => `${k} ${c.non_binary[k]}`).join("・")}・点検の記録あり ${c.runs.with_record}・点検の記録なし ${C3_NO_RECORD.map((k) => `${k} ${c.runs.no_record[k]}`).join("・")}・P の数 ${c.patterns}`;
 /** 標準出力の要約（読取元ごとに 1 行。比較は差の 1 行を足す。そのあとに下書き (c) の行と正誤表の行） */
 export function summaryText(full) {
   const src = full.scoring.by_source;
   if (full.schema === OUTPUT_SCHEMA) {
-    return [...SOURCES.map((s) => `[${s}] ${aggText(src[s])}`), `[${DRAFT_SOURCE}] ${draftText(full.scoring.draft)}`, ...SOURCES.map((s) => `[c3:${s}] ${c3Text(full.scoring.c3[s])}`)].join("\n");
+    return [...SOURCES.map((s) => `[${s}] ${aggText(src[s])}`), `[${DRAFT_SOURCE}] ${draftText(full.scoring.draft)}`, ...SOURCES.map((s) => `[c3:${s}] ${c3Text(full.scoring.c3[s])}`), ...(full.scoring.run_sources ? [`[本の読取元] ${sourcesText(full.scoring.run_sources)}`] : [])].join("\n");
   }
   const groups = ["baseline", "candidate"], label = { baseline: "比較元", candidate: "候補" };
   const tail = [...groups.map((g) => `[${DRAFT_SOURCE}] ${label[g]} ${draftText(full.scoring.draft[g])}`), ...SOURCES.flatMap((s) => groups.map((g) => `[c3:${s}] ${label[g]} ${c3Text(full.scoring.c3[s][g])}`))];
+  const stageTail = full.scoring.run_sources ? groups.map((g) => `[本の読取元] ${label[g]} ${sourcesText(full.scoring.run_sources[g])}`) : [];
   return [...SOURCES.map((s) => {
     const x = src[s], d = x.compare.requirement_diffs, c = x.compare.pattern_clusters;
-    return `[${s}] 比較元 ${aggText(x.baseline)}\n[${s}] 候補 ${aggText(x.candidate)}\n[${s}] 差 n ${d.n}（+1 ${d.counts["+1"]}・0 ${d.counts[0]}・-1 ${d.counts["-1"]}）平均 ${d.mean ?? "-"}・P のまとまり（m ${c.m}）p ${c.sign_flip.p ?? "-"}・bootstrap ${rangeOf(c.bootstrap.interval)}・除いた ${PAIR_NULL_REASONS.map((k) => `${k} ${x.compare.excluded[k]}`).join("・")}`;
-  }), ...tail].join("\n");
+    return `[${s}] 比較元 ${aggText(x.baseline)}\n[${s}] 候補 ${aggText(x.candidate)}\n[${s}] 差 n ${d.n}（+1 ${d.counts["+1"]}・0 ${d.counts[0]}・-1 ${d.counts["-1"]}）平均 ${d.mean ?? "-"}・P のまとまり（m ${c.m}）p ${c.sign_flip.p ?? "-"}・bootstrap ${rangeOf(c.bootstrap.interval)}・除いた ${[...PAIR_NULL_REASONS, ...("input-absent" in x.compare.excluded ? ["input-absent"] : [])].map((k) => `${k} ${x.compare.excluded[k]}`).join("・")}`;
+  }), ...tail, ...stageTail].join("\n");
 }
 
 /** 入口：引数を読み、採点して書く。断れば何も書かずに符号を返す */
