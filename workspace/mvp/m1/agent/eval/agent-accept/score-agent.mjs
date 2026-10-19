@@ -2498,6 +2498,12 @@ export const STAGE_RUN_MODE = "stage-run";
 export const STAGE_RUN_PATH = "bundle/stage-run.json";
 /** 本のディレクトリの中の、上流の入力の写しの置き場所（run-agent.mjs が checkpoint と段の走りの記録をここに写す。工場は checkpoint の隣の記録を読む） */
 export const STAGE_INPUT_DIR = "stage-input";
+/**
+ * 条件の params.stage_from が凍結した上流の組（#640。freeze-stage-input.mjs の組のディレクトリ）のときの種類。本ごとの入力の照合は組の宣言
+ * （stage_inputs の出力ダイジェスト・SHA）と照らし、記録の写しは組に写した名前（段の走りの記録か Build だけの記録）で読む
+ */
+export const STAGE_FROM_SET_KIND = "frozen-stage-input-set";
+const STAGE_SET_RECORD_FILES = [basename(STAGE_RUN_PATH), basename(BUILD_RECORD_PATH)];
 /** 段の走りの記録と条件の食い違いの理由（range ＝ 範囲、plan-source ＝ 確定した仕様と依頼文の SHA、input ＝ 入力の対応） */
 export const STAGE_RECORD_MISMATCHES = ["range", "plan-source", "input", "stages"];
 /**
@@ -2569,7 +2575,10 @@ export function stageRecordMismatches(record, run, cond, dir) {
     const inp = record.input;
     if (p.stage_from === null || p.stage_from === undefined) return inp === null && entry === undefined;
     if (!isObj(entry) || entry.absent === true || !isObj(inp) || typeof inp.checkpoint !== "string" || !/^stage-checkpoint-[a-z0-9-]+\.json$/.test(inp.checkpoint) || typeof inp.boundary !== "string") return false;
-    const cp = readBytesOrNull(join(dir, STAGE_INPUT_DIR, inp.checkpoint)), rec = readBytesOrNull(join(dir, STAGE_INPUT_DIR, basename(STAGE_RUN_PATH)));
+    // 凍結した上流の組（#640）：記録の写しは組に写した名前で読み、記録の入力の出力ダイジェストを組の宣言（stage_inputs の output_digest）とも照らす
+    const fromSet = isObj(p.stage_from) && p.stage_from.kind === STAGE_FROM_SET_KIND;
+    if (fromSet && (!STAGE_SET_RECORD_FILES.includes(entry.record_file) || entry.output_digest !== inp.output_digest)) return false;
+    const cp = readBytesOrNull(join(dir, STAGE_INPUT_DIR, inp.checkpoint)), rec = readBytesOrNull(join(dir, STAGE_INPUT_DIR, fromSet ? entry.record_file : basename(STAGE_RUN_PATH)));
     if (cp === null || rec === null || sha256(cp) !== entry.checkpoint_sha256 || sha256(rec) !== entry.record_sha256) return false;
     // checkpoint の境界が記録の入力の境界と同じで、記録の入力の出力ダイジェストが、写した上流の記録のその checkpoint の宣言（境界とファイル名）の値と同じ
     try {
@@ -2746,7 +2755,7 @@ function stageOutputOf({ outRoot, cond, planned, stageAbsent, set, evaluation, c
   const sf = cond.params?.stage_from;
   return {
     rubric: "v5", set, evaluation,
-    stage_run: { range, budget_scope: knownOr([STAGE_RUN_MODE], cond.params?.budget_scope), stage_from: isObj(sf) ? { conditions_sha256: isHex64(sf.conditions_sha256) ? sf.conditions_sha256 : null } : null },
+    stage_run: { range, budget_scope: knownOr([STAGE_RUN_MODE], cond.params?.budget_scope), stage_from: stageFromOf(sf) },
     not_computed: { reason: STAGE_RUN_MODE, label: "段単位の計測は納品物を作らないので、原文系・了承後系の PASS と納品の欄を計算しない", fields: [...STAGE_NOT_COMPUTED] },
     ...Object.fromEntries(STAGE_NOT_COMPUTED.map((k) => [k, null])),
     completion, fingerprints,
@@ -2756,6 +2765,10 @@ function stageOutputOf({ outRoot, cond, planned, stageAbsent, set, evaluation, c
     ...(v8 ? { next_stage: nextStageOf(facts, range) } : {}),
   };
 }
+/** 採点の出力の stage_run.stage_from：上流の計測は条件の SHA だけ（今の形）。凍結した上流の組（#640）は組の種類・id・版・SHA を足す */
+const stageFromOf = (sf) => (!isObj(sf) ? null : sf.kind === STAGE_FROM_SET_KIND
+  ? { conditions_sha256: null, kind: STAGE_FROM_SET_KIND, id: typeof sf.id === "string" ? sf.id : null, version: intOrNull(sf.version), sha256: hashOrNull(sf.sha256) }
+  : { conditions_sha256: isHex64(sf.conditions_sha256) ? sf.conditions_sha256 : null });
 /** 匿名の段の通過率：件数・率・区間・既知の値だけ（本の ID・P の ID・上流の SHA は出さない） */
 const anonymousStagePassRate = (s) => (!isObj(s) ? null : {
   range: { start: enumOrUnknown(BUILD_STAGE_IDS, s.range?.start ?? null), end: enumOrUnknown(BUILD_STAGE_IDS, s.range?.end ?? null) },
@@ -2778,7 +2791,11 @@ export function anonymizeStage(full) {
     rubric: "v5", anonymous: true, runs: Array.isArray(full.rows) ? full.rows.length : null,
     set: { version: intOrNull(full.set?.version), role: enumOrUnknown(EVAL_SET_ROLES, full.set?.role ?? null), sha256: hashOrNull(full.set?.sha256) },
     evaluation: { mode: enumOrUnknown(EVALUATION_MODES, full.evaluation?.mode ?? null), build_applicable: boolOrNull(full.evaluation?.build_applicable), pipeline: enumOrUnknown(PIPELINES, full.evaluation?.pipeline ?? null), ...(v8 ? { v12_flags: anonymousV12Flags(full.evaluation?.v12_flags) } : {}) },
-    stage_run: { range: { start: enumOrUnknown(BUILD_STAGE_IDS, sr.range?.start ?? null), end: enumOrUnknown(BUILD_STAGE_IDS, sr.range?.end ?? null) }, budget_scope: enumOrUnknown([STAGE_RUN_MODE], sr.budget_scope ?? null) },
+    stage_run: {
+      range: { start: enumOrUnknown(BUILD_STAGE_IDS, sr.range?.start ?? null), end: enumOrUnknown(BUILD_STAGE_IDS, sr.range?.end ?? null) }, budget_scope: enumOrUnknown([STAGE_RUN_MODE], sr.budget_scope ?? null),
+      // 凍結した上流の組（#640）：組の id・版と入力なしの件数だけ（本の ID・P の ID・SHA は出さない）。上流の計測のときは欄を置かない（今の形）
+      ...(sr.stage_from?.kind === STAGE_FROM_SET_KIND ? { stage_from: { kind: STAGE_FROM_SET_KIND, id: typeof sr.stage_from.id === "string" ? sr.stage_from.id : null, version: intOrNull(sr.stage_from.version), input_absent: intOrNull(full.stage_pass_rate?.input_absent) } } : {}),
+    },
     not_computed: { reason: STAGE_RUN_MODE, fields: [...STAGE_NOT_COMPUTED] },
     completion: anonymousCompletion(full.completion), fingerprints: anonymousFingerprints(full.fingerprints, [...CONDITIONS_SCHEMAS, CONDITIONS_V6, ...(v8 ? [CONDITIONS_V8] : [])]),
     stage_pass_rate: anonymousStagePassRate(full.stage_pass_rate),

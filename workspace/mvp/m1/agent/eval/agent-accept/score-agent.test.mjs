@@ -5160,3 +5160,64 @@ test("#638 README：§10.7 の後ろ（末尾）の新しい節 §10.8 に定義
   const sec = text.slice(at);
   for (const w of ["v8", "v12_flags", "1 段先", "T2' の通過", "落とした試験", "納品の成功ではない", "stage-from:conditions-pipeline", "compare:flags-mismatch", "not_reached", "missing", "range-excludes-test-spec"]) assert.ok(sec.includes(w), w);
 });
+
+// ── #640：条件の stage_from が凍結した上流の組のときの採点（本ごとの入力の照合は組の宣言と照らす・匿名の口は組の id・版・入力なしの件数だけ）。README §10.8.1
+/** 段単位の計測の出力先（#545 の固定の記録）を、組のディレクトリから流した形に書き換える。recordFileOf(本) ＝ 写しの記録の名前、digestOf(本) ＝ 組の出力ダイジェスト */
+function stageSetFixture640(out, frozenPath, { absent = IDS545.slice(0, 15), recordFileOf = () => "stage-run.json", digestOf = DIG545 } = {}) {
+  const cond = stageFixture545(out, { absent, frozenPath });
+  cond.params.stage_from = { kind: "frozen-stage-input-set", id: "stage-set-640", version: 1, sha256: SET640 };
+  cond.params.stage_inputs = cond.params.stage_inputs.map((x) => (x.absent ? { id: x.id, absent: true } : { ...x, output_digest: digestOf(x.id), record_file: recordFileOf(x.id) }));
+  cond.signature = conditionsSignature(cond);
+  writeFileSync(join(out, "conditions.json"), JSON.stringify(cond));
+  for (const id of IDS545.filter((x) => !absent.includes(x))) {
+    const name = recordFileOf(id);
+    if (name !== "stage-run.json") { cpSync(join(out, id, "stage-input", "stage-run.json"), join(out, id, "stage-input", name)); rmSync(join(out, id, "stage-input", "stage-run.json")); }
+  }
+  return cond;
+}
+const SET640 = sha256("stage-set-640");
+
+test("#640 採点：stage_from が組のとき、本ごとの入力は組の宣言（出力ダイジェスト・写しの SHA・記録の写しの名前）と照らし、合う本は観測・合わない本は入力の食い違い。出力の stage_run.stage_from に組の種類・id・版・SHA。上流の計測の形の出力は今と同じ", async () => {
+  await withOut(async (base) => {
+    const fzp = frozenFile545(base), out = join(base, "set");
+    // 写しの記録の名前は段の走りの記録か Build だけの記録（工場が前の走りの記録として読む名前）
+    stageSetFixture640(out, fzp, { recordFileOf: (id) => (id.startsWith("P6-") ? "build-record.json" : "stage-run.json") });
+    scoreRun(out);
+    const full = readScore(out);
+    assert.equal(full.completion.status, "complete", full.completion.reasons.join("、"));
+    assert.deepEqual([full.stage_pass_rate.observed, full.stage_pass_rate.input_absent, full.stage_pass_rate.missing_breakdown.mismatched], [15, 15, 0]);
+    assert.deepEqual(full.stage_run.stage_from, { conditions_sha256: null, kind: "frozen-stage-input-set", id: "stage-set-640", version: 1, sha256: SET640 });
+    // 組の宣言の出力ダイジェストと記録の入力が違う本・知らない名前の記録の写しは、入力の食い違い
+    const bad = join(base, "set-bad");
+    stageSetFixture640(bad, fzp, { digestOf: (id) => (id === "P7-r1" ? sha256("another-digest") : DIG545(id)), recordFileOf: (id) => (id === "P8-r2" ? "other-record.json" : "stage-run.json") });
+    scoreRun(bad);
+    const fb = readScore(bad);
+    assert.equal(fb.stage_pass_rate.missing_breakdown.mismatched, 2);
+    for (const id of ["P7-r1", "P8-r2"]) assert.deepEqual(rowOf(fb, id).mismatches, ["input"], id);
+    assert.equal(fb.completion.status, "unverified");
+    // 上流の計測の形（#545）：stage_run.stage_from は条件の SHA だけ
+    const plain = join(base, "plain");
+    stageFixture545(plain, { absent: IDS545.slice(0, 15), frozenPath: fzp });
+    scoreRun(plain);
+    assert.deepEqual(readScore(plain).stage_run.stage_from, { conditions_sha256: UP545 });
+  });
+});
+
+test("#640 匿名の口：stage_from が組のとき --anonymous に組の id・版・入力なしの件数だけを足し、本の ID・P の ID・SHA が無い。上流の計測の形の匿名の出力に欄を足さない", async () => {
+  await withOut(async (base) => {
+    const fzp = frozenFile545(base), out = join(base, "anon");
+    stageSetFixture640(out, fzp);
+    const r = scoreRun(out, ["--anonymous"]);
+    const text = readFileSync(join(out, "score.anonymous.json"), "utf8"), anon = JSON.parse(text);
+    assert.deepEqual(anon.stage_run.stage_from, { kind: "frozen-stage-input-set", id: "stage-set-640", version: 1, input_absent: 15 });
+    assert.equal(anon.stage_pass_rate.input_absent, 15);
+    for (const t of [text, r.stdout, r.stderr]) {
+      assert.ok(!/P\d+(-r\d+)?/.test(t), "本の ID・P の ID が出ない");
+      for (const sha of [SET640, UP545, ...IDS545.map(CP545), ...IDS545.map(REC545), ...IDS545.map(DIG545)]) assert.ok(!t.includes(sha), "SHA が出ない");
+    }
+    const plain = join(base, "plain");
+    stageFixture545(plain, { absent: IDS545.slice(0, 15), frozenPath: fzp });
+    scoreRun(plain, ["--anonymous"]);
+    assert.deepEqual(Object.keys(readScore(plain, "score.anonymous.json").stage_run), ["range", "budget_scope"]);
+  });
+});
