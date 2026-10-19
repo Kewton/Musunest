@@ -18,6 +18,7 @@ import {
   TEST_SUITE_FILE,
   TESTS_FILE,
   VERIFICATION_FILE,
+  bundleFiles,
   type AssembledBundle,
 } from "../bundle.js";
 import type { Judge, JudgeAnswer } from "../judge.js";
@@ -935,6 +936,98 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
     expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
     expect(diagnosticPaths(passed.result)).toEqual([]);
+  });
+
+  /**
+   * (1)〜(5) の台本（上の試験と同じ応答の列）。直す前と同じであることを、段の記録・要約・LLM への要求（構造化・道具）・終了コード・
+   * 納品物のファイルの一覧と各ファイル（`bundleFiles`。診断は納品物に入らない）の SHA-256 で照らす（Issue #657）
+   */
+  const beforeScripts = (): readonly { readonly name: string; readonly calls: readonly RecordedCall[] }[] => {
+    const requirements = good().mapping["requirements"] as readonly unknown[];
+    const missingFirst = { requirements: requirements.slice(1) };
+    const missingLast = { requirements: requirements.slice(0, -1) };
+    const vocabulary = () => [structured(good().entities), structured(good().fields), structured(good().behaviors)];
+    return [
+      { name: "(1) C1 の束 2 の初回が形で落ちてやり直しで通る", calls: passingWith({ fields: [fieldsWithEntity("E8")] }) },
+      { name: "(2) C2 の試行 1 が形で落ちて試行 2 で通る", calls: passingWith({ mapping: [missingFirst] }) },
+      {
+        name: "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す",
+        calls: [
+          ...vocabulary(),
+          structured(good().mapping),
+          structured(judgments(IDS, { R3: ["unnecessary-ownership", "締められる"] })),
+          structured(missingFirst),
+          structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+          structured({ declaration: RUN_YAML }),
+          structured(acceptAll(["R1", "R2", "R4"])),
+        ],
+      },
+      { name: "(4) C2 が 2 回落ちて止まる", calls: [...vocabulary(), structured(missingFirst), structured(missingLast)] },
+      { name: "(4) C1 の束 2 が 2 回落ちて止まる", calls: [structured(good().entities), structured(fieldsWithEntity("E8")), structured(fieldsWithEntity("E9"))] },
+      { name: "(5) 形で 1 度も落ちない", calls: [...idsHead(), structured(acceptAll())] },
+    ];
+  };
+  /**
+   * 直す前の値：main の a61f2ce（直す前の run.ts・bundle.ts）で上の台本を流して測った SHA-256（記録・要約・要求・終了コード・納品物の順。
+   * 各値は `JSON.stringify` した値の SHA-256。新しい run.ts の出力から作っていない。Issue #657）
+   */
+  const BEFORE_DIGESTS: Readonly<Record<string, readonly string[]>> = {
+    "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": [
+      "865511262ad4b1eec243d96a87d5716fa5dac5794bcc0967769bd9fda0974edc",
+      "e43bf01d37bdb469dae6dd6190e30e489618ada887c17db2fe2c1eab98c9f680",
+      "a0093fffd46e0316db7a39788e7bc23cdbd879e9440dc900394944b4634643e3",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "d3d46bd0bae1ed1bce66a419612e4d05b1d6d0cefa9b95072d2af39c8137d700",
+    ],
+    "(2) C2 の試行 1 が形で落ちて試行 2 で通る": [
+      "771d2acf15b3903ea4b81cd6e6fb4cd6d4600944a807484c985dacbb6128e7e6",
+      "b00502771c9776d7ca5699650d826e5e619f6d2f9688d728ba3adcec07d2d536",
+      "6c3f9e9cf8c384b59958beb5300a3fc50847416fbfd411fb63f2c876e239a18d",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "c479ec4fc3ac733a9b470499f5d8fc631583a94ca9e4169834ae571ea7499645",
+    ],
+    "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": [
+      "c2a1c208a549dd9320f05ca078149cff2c691f163c9de1ef9a53da25426de89c",
+      "dfc45b40f4d4f5e04af357295a853c5d69847dc2aa260f2af52e0b08713eab11",
+      "6af97b9e827e24b9d14505ee677d3b15af2f3e3615d6f448b90f818b8d8e061b",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "2f032bbaf50ff8e7c6c0fbe9708107eb043cca23ae2bc5b6b25680e7c2f4151a",
+    ],
+    "(4) C2 が 2 回落ちて止まる": [
+      "14927cf4ff8e5b827eb9f11391b5c422f6b789ccb1ff6878608c6cc351fa25c1",
+      "62a0d8984a6a06d59674e2a3daf142cbf34425567d43c37c53461d94613f8a8e",
+      "0ed4f413a0be74f4140a5d04d48728660796a4de535442589ae78af2b53120ff",
+      "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    ],
+    "(4) C1 の束 2 が 2 回落ちて止まる": [
+      "191c0f74c9fc3a2b07234379b3c6f2e9f99e36f7300804c0325cd1f126763e58",
+      "e56ba79e38dfcd5bfdde73a5eb04a9477d643dbba57c5cffc1d6194da3d8944d",
+      "882bb500255319f88365477cde3e9958000907bcc6577af6a79d528473dc0f95",
+      "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    ],
+    "(5) 形で 1 度も落ちない": [
+      "8a7be5d0b40243e22114d434e400f45dc55ff41add9d357888593eaa4d460aea",
+      "88b91fbfc4f9030c40c8d0052d630afe65b86255f8242dbae174a000086e0e56",
+      "5b4777c8abe5dcdfa274689e1ff8083e1c610a80180c54792f668d1dda010e1c",
+      "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "d762715a3037b44cbc202848f40b5fa2cd1551bba549bd418f56fefc0e9def0e",
+    ],
+  };
+
+  it("(1)〜(5) の台本の段の記録・要約・LLM への要求・終了コード・納品物は、直す前（a61f2ce で測った SHA-256）と同じ（Issue #657）", async () => {
+    const measured: Record<string, readonly string[]> = {};
+    for (const script of beforeScripts()) {
+      const { result, recording } = await runScenario(script.calls, { flags: IDS_FLAGS });
+      const files = result.bundle === null ? [] : bundleFiles(result.bundle).map((file) => ({ path: file.path, text: file.text }));
+      measured[script.name] = await Promise.all(
+        [result.record, result.summary, { structured: recording.structured, tools: recording.tools }, result.summary.exit_code, files].map((value) =>
+          sha256Hex(JSON.stringify(value)),
+        ),
+      );
+    }
+    expect(measured).toEqual(BEFORE_DIGESTS);
   });
 
   it("既定値の value が options の外の要件（R6）は、C2 の形のやり直し 1 回（要求 2 本はどちらも全要件）で直り、表が組まれ C3 へ進む（Issue #594・#627）", async () => {
