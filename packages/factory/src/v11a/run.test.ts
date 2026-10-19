@@ -128,6 +128,7 @@ import {
   type V12Flags,
 } from "../v12/ledger.js";
 import * as ledgerModule from "../v12/ledger.js";
+import { V12_CALL_LIMITS } from "../v12/limits.js";
 import { buildSized, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
 
 afterEach(() => {
@@ -2568,6 +2569,74 @@ describe("段単位の走り：範囲の外の段を呼ばず、納品物を組�
     await expect(runStageRangeV11a({ ...inputOf(recording.client), range: { start: "test-spec", end: "judge" } })).rejects.toThrow();
     await expect(runStageRangeV11a({ ...inputOf(recording.client), range: { start: "write", end: "judge" } })).rejects.toThrow();
     expect(recording.structured).toHaveLength(0);
+  });
+});
+
+describe("範囲の無い走りの境界の材料（collectBoundaries。`--pipeline v1.2` の checkpoint のため。Issue #636）", () => {
+  const IDS_FLAGS = { ledger: true, searchRepair: true, ids: true };
+  const fullCalls = (): RecordedCall[] => [...idsHead(), structured(acceptAll())];
+  /** 境界の材料を JSON の値にそろえる（Map を並びに） */
+  const plainOf = (value: unknown): unknown =>
+    JSON.parse(JSON.stringify(value, (_key, inner: unknown) => (inner instanceof Map ? [...inner] : inner)));
+
+  it("省けば結果に boundaries の欄が無い（v1.1α・旗 ids on のどちらも。結果は今のまま）", async () => {
+    const plain = await runScenario([...head(), structured(acceptAll())]);
+    expect(plain.result).not.toHaveProperty("boundaries");
+    const ids = await runScenario(fullCalls(), { flags: IDS_FLAGS, recordV12Flags: true });
+    expect(ids.result).not.toHaveProperty("boundaries");
+  });
+
+  it("完走：2 つの境界を通った順に返し、材料は段の走り（T1〜⑦）の境界と同じ。合否・要約・記録・納品物・診断は集めない走りと同じ", async () => {
+    const without = await runScenario(fullCalls(), { flags: IDS_FLAGS, recordV12Flags: true });
+    const withBoundaries = await runScenario(fullCalls(), { flags: IDS_FLAGS, recordV12Flags: true, collectBoundaries: true });
+    expect(withBoundaries.result.outcome.verdict).toBe("full");
+    const { boundaries, ...rest } = withBoundaries.result;
+    expect(rest).toEqual(without.result);
+    expect(boundaries?.map((entry) => entry.boundary)).toEqual(["t1-t2", "t2-b1"]);
+    expect(boundaries?.[0]).not.toHaveProperty("testSpec");
+    expect(boundaries?.[1]?.testSpec?.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(withBoundaries.recording.structured.map((request) => JSON.stringify(request))).toEqual(
+      without.recording.structured.map((request) => JSON.stringify(request)),
+    );
+    const recording = createCheckedRecordingClient(fullCalls());
+    const stage = await runStageRangeV11a({ ...inputOf(recording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "judge" } });
+    expect(plainOf(boundaries)).toEqual(plainOf(stage.boundaries));
+  });
+
+  it("表を組む段（C1）で止まった走りは空、T2 で止まった走りは T1''／T2 の境界だけ", async () => {
+    const broken = { entities: [{ name: "1member", role: "名前の規則に合わない行" }] };
+    const atTable = await runScenario([structured(broken), structured(broken)], { flags: IDS_FLAGS, collectBoundaries: true });
+    expect(atTable.result.stopped).toMatchObject({ stage: "vocabulary" });
+    expect(atTable.result.boundaries).toEqual([]);
+    const badT2 = idsHead({ t2: t2Response([], []) }).slice(0, 6);
+    const atT2 = await runScenario([...badT2, badT2[5]!], { flags: IDS_FLAGS, collectBoundaries: true });
+    expect(atT2.result.stopped).toMatchObject({ stage: "test-spec" });
+    expect(atT2.result.bundle).toBeNull();
+    expect(atT2.result.boundaries?.map((entry) => entry.boundary)).toEqual(["t1-t2"]);
+  });
+});
+
+describe("段の走りの結果の v12Calls・testSpec（`--pipeline v1.2` の段の走りの記録の材料。Issue #637）", () => {
+  const IDS_FLAGS = { ledger: true, searchRepair: true, ids: true };
+
+  it("旗 ids の段の走りは門と枝の数を返し、T2 を回して T2' を通れば組の試験・外した試験・網羅の単位の数を返す（t2-b1 の組と一致）", async () => {
+    const recording = createCheckedRecordingClient(idsHead().slice(0, 6));
+    const outcome = await runStageRangeV11a({ ...inputOf(recording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "test-spec" } });
+    expect(outcome.stopped).toBeNull();
+    expect(outcome.v12Calls).toMatchObject({ real_attempts: { limit: V12_CALL_LIMITS.realAttempts }, judge_branch: { limit: V12_CALL_LIMITS.judgeBranch } });
+    const frozen = outcome.boundaries.find((entry) => entry.boundary === "t2-b1")?.testSpec;
+    expect(outcome.testSpec).toEqual({ tests: frozen?.suite.tests.length, dropped_tests: 0, coverage_units: frozen?.coverage.length });
+  });
+
+  it("T2 に届かない（区間 0 で終わる）走りは testSpec を持たず、旗 off（v1.1a）の段の走りは v12Calls を持たない", async () => {
+    const idsRecording = createCheckedRecordingClient(idsHead().slice(0, 5));
+    const segment0 = await runStageRangeV11a({ ...inputOf(idsRecording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "semantic-check" } });
+    expect(segment0).toHaveProperty("v12Calls");
+    expect(segment0).not.toHaveProperty("testSpec");
+    const plainRecording = createCheckedRecordingClient(head().slice(0, 3));
+    const plain = await runStageRangeV11a({ ...inputOf(plainRecording.client), range: { start: "name-table", end: "test-spec" } });
+    expect(plain).not.toHaveProperty("v12Calls");
+    expect(plain.testSpec?.dropped_tests).toBe(0);
   });
 });
 

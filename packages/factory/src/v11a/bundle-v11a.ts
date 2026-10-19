@@ -23,6 +23,7 @@
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import { ARTIFACTS_DIR, type BundleArtifact } from "../bundle.js";
+import { BUILD_CLI_RECORD_SCHEMA } from "../cli-plan.js";
 import type { RequirementNature, TestSuite } from "../fixed-test.js";
 import type { Verdict } from "../outcome.js";
 import { requirementsFromPlan } from "../pipeline.js";
@@ -40,6 +41,7 @@ import { canonicalJson, nameTableSha256, type NameTable } from "./names.js";
 import type { JudgeAdviceMarkEntry, JudgeAdviceRecord } from "./stages/judge-advice.js";
 import { semanticCheckTargets } from "./stages/semantic-check.js";
 import { testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
+import type { V12PublicFlags } from "../v12/ledger.js";
 import type { SearchRepairRecord, VersionViolations } from "../v12/search-repair.js";
 
 /** v1.1α の記録の置き場所（成果物の置き場所の下。v1 の成果物と重ならない） */
@@ -389,6 +391,12 @@ export const STAGE_INPUT_CODES = [
 ] as const;
 export type StageInputCode = (typeof STAGE_INPUT_CODES)[number];
 
+/**
+ * 開始の段の別名（`--pipeline v1.2` の段の走りだけが受ける。区間 0 の C1 語彙を区間の正本の名前に正規化する。段の表は変えない。
+ * Issue #637）
+ */
+export const STAGE_START_ALIASES_V12: Readonly<Record<string, StageStart>> = { vocabulary: "name-table" };
+
 const isStart = (value: string): value is StageStart => (STAGE_STARTS as readonly string[]).includes(value);
 const isEnd = (value: string): value is StageEnd => (STAGE_ENDS as readonly string[]).includes(value);
 
@@ -417,6 +425,11 @@ export function resolveStageRange(input: {
 export const STAGE_CHECKPOINT_SCHEMA = "musunest.factory.v11a-stage-checkpoint/v1" as const;
 /** 段の走りの記録の形の版 */
 export const STAGE_RUN_RECORD_SCHEMA = "musunest.factory.v11a-stage-run/v1" as const;
+/**
+ * 再開の入力の照合が「前の走りの記録」として受ける形の版：段の走りの記録と、Build だけの記録（`--pipeline v1.2` の走りが
+ * `checkpoints` を同じ形で宣言する。Issue #636）
+ */
+export const STAGE_PREVIOUS_RECORD_SCHEMAS: readonly string[] = [STAGE_RUN_RECORD_SCHEMA, BUILD_CLI_RECORD_SCHEMA];
 /** 段の走りの記録の置き場所（`--out` の直下） */
 export const STAGE_RUN_RECORD_FILE = "stage-run.json" as const;
 /** 予算と締切の適用の単位（段の走り 1 本） */
@@ -458,12 +471,32 @@ export interface BoundaryMaterials {
 /** 再開の材料（照合を通った checkpoint から読む。開始の段の前の境界のもの） */
 export type ResumeMaterials = Omit<BoundaryMaterials, "boundary">;
 
-/** checkpoint に残す版（語彙・契約は照合し、prompt・工場は記録だけ） */
+/** 呼び出しの上限の組（checkpoint の版の欄 `call_limits`・条件の記録の `v12_call_limits` の形。Issue #637） */
+export interface StageCallLimits {
+  readonly logical_calls: number;
+  readonly real_attempts: number;
+  readonly judge_branch: number;
+}
+
+/**
+ * checkpoint に残す版（語彙・契約は照合し、prompt・工場は記録だけ）。`--pipeline v1.2` の走り（段の走り・一気通貫の走り）だけ、
+ * 性質の台帳の指紋 `ledger`・実効の旗の組の公開の形 `flags`（v1.2 の照合で今の走りと同じことを求める）と、呼び出しの上限
+ * `call_limits`（旗 ids が off なら null。記録だけ）を足す。v1.1α の checkpoint は 4 欄のまま（Issue #637）
+ */
 export interface StageVersions {
   readonly vocabulary: string;
   readonly contract: string;
   readonly prompt: string;
   readonly factory: string;
+  readonly ledger?: string;
+  readonly flags?: V12PublicFlags;
+  readonly call_limits?: StageCallLimits | null;
+}
+
+/** v1.2 の段の入力の照合が今の走りと同じことを求める版（台帳の指紋と実効の旗の組。Issue #637） */
+export interface StageV12Versions {
+  readonly ledger: string;
+  readonly flags: V12PublicFlags;
 }
 
 /** checkpoint（JSON の値） */
@@ -591,6 +624,20 @@ export interface StageRunConditions {
   readonly budget_usd: number;
   readonly deadline_ms: number;
   readonly timeout_ms: number | null;
+  /** `--pipeline v1.2` の段の走りだけ：経路・実効の旗の組・呼び出しの上限（旗 ids が on のときだけ。Issue #637） */
+  readonly pipeline?: "v1.2";
+  readonly v12_flags?: V12PublicFlags;
+  readonly v12_call_limits?: StageCallLimits;
+}
+
+/** T2' を通った組の数（`test_spec`。Issue #637） */
+export interface StageTestSpecCounts {
+  /** T2' を通った組の試験の数 */
+  readonly tests: number;
+  /** T2' の検査で組から外した試験の数（回す部分が `onDropped` で受けた件数） */
+  readonly dropped_tests: number;
+  /** 網羅の単位の数 */
+  readonly coverage_units: number;
 }
 
 /** 回す部分が返す、段の走りの結果 */
@@ -607,6 +654,10 @@ export interface StageRunOutcome {
   readonly returnToPlan: boolean;
   readonly costUsd: number;
   readonly durationSecs: number;
+  /** 旗 `v12.ids` の走りの門と枝の上限と使った数（要約の `v12_calls` と同じ形。旗 off は欄を持たない。Issue #637） */
+  readonly v12Calls?: unknown;
+  /** この走りで T2 を回し T2' を通ったときだけ、その組の数（再開の材料から入った走り・T2 に届かない走りは持たない。Issue #637） */
+  readonly testSpec?: StageTestSpecCounts;
 }
 
 /** 段の通過：範囲の中に早期停止が無く、終了の段の最後の記録が ok */
@@ -626,8 +677,14 @@ export function buildStageRunRecord(input: {
   readonly conditions: StageRunConditions;
   readonly outcome: StageRunOutcome;
   readonly exitCode: number;
+  /**
+   * `--pipeline v1.2` の段の走りだけ：`v12_calls`（旗 ids の走りの使った数）と、範囲が `test-spec` を含むときの `test_spec`
+   * （T2 に届かなければ null）を末尾に足す（v1.1α の記録は欄を持たない。Issue #637）
+   */
+  readonly v12?: { readonly testSpecInRange: boolean };
 }): Record<string, unknown> {
   const { outcome } = input;
+  const v12 = input.v12;
   return toJsonValue({
     schema_version: STAGE_RUN_RECORD_SCHEMA,
     range: { start: input.range.start, end: input.range.end },
@@ -647,6 +704,8 @@ export function buildStageRunRecord(input: {
     ...(outcome.finalCarryOver === null ? {} : { final_carry_over: outcome.finalCarryOver }),
     return_to_plan: outcome.returnToPlan,
     exit_code: input.exitCode,
+    ...(v12 === undefined || outcome.v12Calls === undefined ? {} : { v12_calls: outcome.v12Calls }),
+    ...(v12 === undefined || !v12.testSpecInRange ? {} : { test_spec: outcome.testSpec ?? null }),
   });
 }
 
@@ -680,7 +739,7 @@ const fail = (code: StageInputCode): StageInputVerification => ({ ok: false, cod
 
 /**
  * 再開の入力を照合する（1 つでも合わなければ固定の符号で断る）。読むのは開始の段の直前の境界の checkpoint と、
- * 前の段の走りの記録だけ。**呼ぶ側はクライアントを作る前に呼ぶ**（断ったら API を呼ばない・何も書かない）。
+ * 前の走りの記録（段の走りの記録か、`--pipeline v1.2` の Build だけの記録。Issue #636）だけ。**呼ぶ側はクライアントを作る前に呼ぶ**（断ったら API を呼ばない・何も書かない）。
  *
  * 照合の順：読める → 境界 → 版 → 出力ダイジェスト → 確定した仕様・依頼文の SHA → 表の SHA → 点検結果の表の SHA →
  * 点検の対象 → 持ち越し →（開始 B1）試験の組。
@@ -691,13 +750,18 @@ export async function verifyStageInput(input: {
   readonly checkpointText: string | null;
   /** checkpoint のファイルの名前（記録が宣言する `path` と照らす） */
   readonly checkpointFile: string;
-  /** 前の段の走りの記録の中身（読めなければ null） */
+  /** 前の走りの記録（段の走りの記録か Build だけの記録）の中身（読めなければ null） */
   readonly recordText: string | null;
   readonly plan: ConfirmedPlan;
   readonly planSha256: string;
   readonly sourceSha256: string;
   readonly vocabularyVersion: string;
   readonly contractVersion: string;
+  /**
+   * `--pipeline v1.2` の段の走りだけ：checkpoint の版の `ledger`・`flags` がこの値と同じことを求める（欄が無ければ断る）。省けば
+   * 見ない（v1.1α の照合は今までどおり。Issue #637）
+   */
+  readonly v12?: StageV12Versions;
 }): Promise<StageInputVerification> {
   const needed = boundaryBefore(input.start);
   if (needed === null) return fail("stage-input:boundary");
@@ -715,14 +779,24 @@ export async function verifyStageInput(input: {
     : undefined;
   if (!isObject(declared) || typeof declared["output_digest"] !== "string") return fail("stage-input:boundary");
 
-  // 版：checkpoint と記録の形の版・語彙の版・契約の版（prompt と工場の版は記録するが断らない）
+  // 版：checkpoint と記録の形の版・語彙の版・契約の版（prompt と工場の版は記録するが断らない）。記録は段の走りの記録か
+  // Build だけの記録（Issue #636）
   const versions = checkpoint["versions"];
   if (
     checkpoint["schema_version"] !== STAGE_CHECKPOINT_SCHEMA ||
-    record["schema_version"] !== STAGE_RUN_RECORD_SCHEMA ||
+    typeof record["schema_version"] !== "string" ||
+    !STAGE_PREVIOUS_RECORD_SCHEMAS.includes(record["schema_version"]) ||
     !isObject(versions) ||
     versions["vocabulary"] !== input.vocabularyVersion ||
     versions["contract"] !== input.contractVersion
+  ) {
+    return fail("stage-input:version");
+  }
+  // v1.2 の段の走り：台帳の指紋と実効の旗の組が今の走りと同じ（欄の無い checkpoint・旗の違う上流を混ぜない。上限は照合しない。
+  // Issue #637）
+  if (
+    input.v12 !== undefined &&
+    (versions["ledger"] !== input.v12.ledger || !isObject(versions["flags"]) || !sameJson(versions["flags"], input.v12.flags))
   ) {
     return fail("stage-input:version");
   }

@@ -1,6 +1,7 @@
 // 納品物に足す v1.1α の記録（v11a/bundle-v11a.ts）の試験（07-architecture-v1.1a.md §1.4。Issue #510）。
 import { describe, expect, it } from "vitest";
 import * as bundleModule from "../bundle.js";
+import { BUILD_CLI_RECORD_SCHEMA } from "../cli-plan.js";
 import { ARTIFACTS_DIR } from "../bundle.js";
 import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-schema";
 import { requirementsFromPlan } from "../pipeline.js";
@@ -12,6 +13,7 @@ import {
   stageJsonText,
   stageOutputDigest,
   verifyStageInput,
+  STAGE_PREVIOUS_RECORD_SCHEMAS,
   STAGE_RUN_RECORD_SCHEMA,
   V11A_ARTIFACT_NAMES,
   V12_SEARCH_REPAIR_ARTIFACT_NAME,
@@ -346,6 +348,86 @@ describe("持ち越しの記録の non_requirements（T1'' が受理した要件
     ]) {
       const texts = await written((checkpoint) => change(checkpoint["carry_over"] as Record<string, unknown>));
       expect(await verify(texts)).toEqual({ ok: false, code: "stage-input:carry-over" });
+    }
+  });
+
+  /** 前の走りの記録の形の版だけを差し替える（`checkpoints` の宣言は同じ） */
+  const withRecordSchema = (texts: { checkpointText: string; recordText: string }, schema: unknown) => ({
+    ...texts,
+    recordText: JSON.stringify({ ...(JSON.parse(texts.recordText) as Record<string, unknown>), schema_version: schema }),
+  });
+
+  it("前の走りの記録として Build だけの記録（build-cli-record）も受け、段の走りの記録と同じ再開の材料を返す（Issue #636）", async () => {
+    expect(STAGE_PREVIOUS_RECORD_SCHEMAS).toEqual([STAGE_RUN_RECORD_SCHEMA, BUILD_CLI_RECORD_SCHEMA]);
+    const texts = await written();
+    const fromStage = await verify(texts);
+    const fromBuild = await verify(withRecordSchema(texts, BUILD_CLI_RECORD_SCHEMA));
+    expect(fromBuild).toMatchObject({ ok: true });
+    expect(fromBuild).toEqual(fromStage);
+  });
+
+  it("二点測定：ほかの形の版・形の版の無い記録は今までどおり version で断り、Build だけの記録でも壊した組は今までの符号で断る（Issue #636）", async () => {
+    const texts = await written();
+    for (const schema of ["musunest-factory/plan-only-result/v1", "musunest-factory/build-cli-record/v2", undefined, 1]) {
+      expect(await verify(withRecordSchema(texts, schema)), String(schema)).toEqual({ ok: false, code: "stage-input:version" });
+    }
+    const tampered = await written((checkpoint) => delete (checkpoint["carry_over"] as Record<string, unknown>)["non_requirements"]);
+    expect(await verify(withRecordSchema(tampered, BUILD_CLI_RECORD_SCHEMA))).toEqual({ ok: false, code: "stage-input:carry-over" });
+    const otherDigest = JSON.parse(texts.recordText) as { checkpoints: { output_digest: string }[] };
+    otherDigest.checkpoints[0]!.output_digest = "0".repeat(64);
+    expect(await verify(withRecordSchema({ ...texts, recordText: JSON.stringify(otherDigest) }, BUILD_CLI_RECORD_SCHEMA))).toEqual({
+      ok: false,
+      code: "stage-input:digest",
+    });
+  });
+
+  /** v1.2 の版の欄を足した checkpoint（Issue #637） */
+  const V12_VERSIONS = { ledger: "c".repeat(64), flags: { ledger: true, "search-repair": true, ids: true } };
+  const withV12Versions = (extra: Record<string, unknown> = {}) => (checkpoint: Record<string, unknown>) => {
+    checkpoint["versions"] = { ...(checkpoint["versions"] as object), ...V12_VERSIONS, call_limits: null, ...extra };
+  };
+  const verifyV12 = (texts: { checkpointText: string; recordText: string }) =>
+    verifyStageInput({
+      start: "test-spec",
+      ...texts,
+      checkpointFile: "cp.json",
+      plan: PLAN,
+      planSha256: "a".repeat(64),
+      sourceSha256: "b".repeat(64),
+      vocabularyVersion: "v1",
+      contractVersion: "v0.2",
+      v12: V12_VERSIONS,
+    });
+
+  it("v1.2 の照合（Issue #637）：ledger・flags が今の走りと同じなら通り、v1.1a の照合と同じ再開の材料を返す。call_limits は照合しない", async () => {
+    const texts = await written(withV12Versions());
+    /** 再開の材料（入力の記録の出力ダイジェストは checkpoint ごとに違うので除く） */
+    const resumeOf = async (verifying: ReturnType<typeof verifyStageInput>) => {
+      const verified = await verifying;
+      if (!verified.ok) throw new Error(`通るはず：${verified.code}`);
+      return verified.resume;
+    };
+    const plain = await resumeOf(verify(await written()));
+    expect(await resumeOf(verifyV12(texts))).toEqual(plain);
+    // 欄の並びが違っても旗の組は同じ値として受ける（正規化して比べる）
+    const reordered = await written(withV12Versions({ flags: { ids: true, "search-repair": true, ledger: true } }));
+    expect(await resumeOf(verifyV12(reordered))).toEqual(plain);
+    const otherLimits = await written(withV12Versions({ call_limits: { logical_calls: 1, real_attempts: 2, judge_branch: 3 } }));
+    expect(await resumeOf(verifyV12(otherLimits))).toEqual(plain);
+    // v1.1a の照合は flags・ledger を見ない（今の挙動の保持）
+    expect(await resumeOf(verify(texts))).toEqual(plain);
+  });
+
+  it("二点測定：v1.2 の照合は ledger・flags の違い・欄の無い checkpoint を stage-input:version で断る（出力ダイジェストは書き直してある）", async () => {
+    const cases: readonly [string, (checkpoint: Record<string, unknown>) => void][] = [
+      ["ledger", withV12Versions({ ledger: "d".repeat(64) })],
+      ["flags-ids", withV12Versions({ flags: { ledger: true, "search-repair": true, ids: false } })],
+      ["flags-extra", withV12Versions({ flags: { ...V12_VERSIONS.flags, other: true } })],
+      ["flags-not-object", withV12Versions({ flags: "ids" })],
+      ["no-fields", () => {}],
+    ];
+    for (const [name, edit] of cases) {
+      expect(await verifyV12(await written(edit)), name).toEqual({ ok: false, code: "stage-input:version" });
     }
   });
 });

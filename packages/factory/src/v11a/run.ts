@@ -27,6 +27,10 @@
 // 終了の段で切って流す。開始 T2・B1 は凍結した境界の材料（照合済みの checkpoint）から入り、範囲の外の段は呼ばず、
 // 終了の段のあとで止まる。境界（T1''／T2・T2／B1）を通るたびにその時点の材料を返し、**B の結果は入れない**。
 // ⑦ まで流しても ⑧（納品物）は組まない。範囲を省いた `runGenerationV11a` は今までと同じに振る舞う。
+// 範囲を省いた走りでも `collectBoundaries` を渡せば、同じ境界で同じ材料を集めて結果の `boundaries` に返す（`--pipeline v1.2` の
+// 走りが checkpoint を書くため。Issue #636）。省けば集めず、結果に欄を置かない。
+// 段の走りの結果には、旗 `v12.ids` の走りだけ門と枝の数（`v12Calls`。要約の `v12_calls` と同じ形）を、この走りで T2 を回して
+// T2' を通ったときだけ組の数（`testSpec`）を足す。記録に載せるかは呼ぶ側（`--pipeline v1.2` の段の走り）が決める（Issue #637）。
 //
 // 旗（`flags`。08-architecture-v1.2.md §9・Issue #547）：省けば全部 off で、今の v1.1α とバイト列で同じに流れる。
 // `flags.ledger` が on なら、性質の台帳の導出（`v12/ledger.ts`）を T1（T1' を含む）・T2（T2' を含む）・評価口（B4・
@@ -129,6 +133,7 @@ import {
   type StageBoundary,
   type StageRange,
   type StageRunOutcome,
+  type StageTestSpecCounts,
   V12_SEARCH_REPAIR_ARTIFACT_NAME,
 } from "./bundle-v11a.js";
 import {
@@ -199,6 +204,17 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
    * 見ない。Issue #592）
    */
   readonly v12CallLimits?: Partial<V12CallLimits>;
+  /**
+   * 真なら、段の範囲が無い走りでも境界（T1''／T2・T2／B1）を通った時点の材料を集め、結果の `boundaries` に返す（`--pipeline v1.2`
+   * の走りが checkpoint を書くため。省けば集めず、結果に欄を置かない。Issue #636）
+   */
+  readonly collectBoundaries?: boolean;
+}
+
+/** v1.1α の 1 回の生成の結果（v1 の結果に、境界の材料を任意の欄で足したもの。Issue #636） */
+export interface GenerationResultV11a extends GenerationResult {
+  /** 通った境界の材料（通った順。`collectBoundaries` が真の走りだけ。早期停止で境界に届かなければ空） */
+  readonly boundaries?: readonly BoundaryMaterials[];
 }
 
 /** 全件持ち越しの停止の問題（固定文。値を埋めない） */
@@ -517,14 +533,14 @@ export interface StageRunInputV11a extends GenerationInputV11a {
 
 /** 回す部分の結果（通常の生成か、段の走りか） */
 type CoreResult =
-  | { readonly kind: "generation"; readonly result: GenerationResult }
+  | { readonly kind: "generation"; readonly result: GenerationResultV11a }
   | { readonly kind: "stage"; readonly result: StageRunOutcome };
 
 /**
  * v1.1α の 1 回の生成を流す（§1）。早期停止では `bundle` を返さない。完走では、合否・記録・要約・
  * 納品物（v1 の成果物＋v1.1α の 7 つの記録）を返す。**合否はコード（`decideOutcome`）が決める。**
  */
-export async function runGenerationV11a(input: GenerationInputV11a): Promise<GenerationResult> {
+export async function runGenerationV11a(input: GenerationInputV11a): Promise<GenerationResultV11a> {
   const core = await runV11a(input, undefined);
   if (core.kind !== "generation") throw new Error("v1.1α：通常の生成が段の走りの結果を返した（回す部分の前提が壊れた）");
   return core.result;
@@ -906,6 +922,8 @@ async function runV11a(
 
   // 段の走り：通った境界の材料（通った順）と、段の走りの結果
   const boundaries: BoundaryMaterials[] = [];
+  // この走りで T2 を回し T2' を通った組の数（段の走りの記録の `test_spec`。再開の材料から入った走りは持たない。Issue #637）
+  let testSpecCounts: StageTestSpecCounts | undefined;
   const stageOutcome = (
     stopped: FailureAttribution | null,
     extra: { readonly judgeVerdict?: StageRunOutcome["judgeVerdict"]; readonly finalCarryOver?: StageRunOutcome["finalCarryOver"] } = {},
@@ -920,12 +938,27 @@ async function runV11a(
       returnToPlan,
       costUsd: budget.spentUsd,
       durationSecs: (input.now() - startedAt) / 1000,
+      // 旗 `v12.ids` の走りの門と枝の数（要約と同じ形）と T2' を通った組の数（記録に載せるかは呼ぶ側が決める。Issue #637）
+      ...(() => {
+        const calls = callsRecord().v12_calls;
+        return calls === undefined ? {} : { v12Calls: calls };
+      })(),
+      ...(testSpecCounts === undefined ? {} : { testSpec: testSpecCounts }),
     },
   });
-  /** 範囲の中で境界を通ったか（開始の段の直前の境界は入力であって、この走りでは通らない） */
+  /**
+   * 範囲の中で境界を通ったか（開始の段の直前の境界は入力であって、この走りでは通らない）。段の範囲が無い走りは、境界の材料を
+   * 集めるとき（`collectBoundaries`）だけ両方の境界を通る（Issue #636）
+   */
   const crosses = (boundary: StageBoundary): boolean =>
-    stageControl !== undefined &&
-    (boundary === "t1-t2" ? stageControl.range.start === "name-table" : stageControl.range.start !== "write");
+    stageControl === undefined
+      ? input.collectBoundaries === true
+      : boundary === "t1-t2"
+        ? stageControl.range.start === "name-table"
+        : stageControl.range.start !== "write";
+  /** 通常の生成の結果に、集めた境界の材料を足す（集めない走りは結果をそのまま返す。Issue #636） */
+  const withBoundaries = (result: GenerationResult): GenerationResultV11a =>
+    input.collectBoundaries === true ? { ...result, boundaries: boundaries.slice() } : result;
 
   try {
     const list = requirementsFromPlan(input.plan);
@@ -1182,6 +1215,7 @@ async function runV11a(
       );
       natureDiscrepancies = toBundleNatureDiscrepancies(value.discrepancies);
       materialStore.testSuite = await acceptSlot(value.suite, lastOkStageIndex("test-spec"));
+      testSpecCounts = { tests: value.suite.tests.length, dropped_tests: droppedTests.length, coverage_units: value.coverage.length };
       return value;
     };
     const testSpec: FrozenTestSpec =
@@ -1879,7 +1913,7 @@ async function runV11a(
     const diagnostics = buildRejectedCandidateFiles(await rejectedCandidateRows());
     return {
       kind: "generation",
-      result: {
+      result: withBoundaries({
         outcome,
         record,
         summary,
@@ -1887,12 +1921,12 @@ async function runV11a(
         stopped: failure,
         diagnostics,
         ...(returnToPlan ? { returnToPlan: true } : {}),
-      },
+      }),
     };
   } catch (error) {
     if (error instanceof RunStop) {
       return stageControl === undefined
-        ? { kind: "generation", result: await stopResult(error.attribution) }
+        ? { kind: "generation", result: withBoundaries(await stopResult(error.attribution)) }
         : stageOutcome(error.attribution);
     }
     throw error;

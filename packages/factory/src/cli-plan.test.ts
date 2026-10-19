@@ -38,6 +38,7 @@ import {
   PLAN_FILE_ERROR_SCHEMA,
   PLAN_FILE_REJECT_SCHEMA,
   RECOMMENDED_INPUT,
+  buildBuildCliRecord,
   createAnswersFilePlanResponder,
   createInteractivePlanResponder,
   createPlanTranscript,
@@ -4352,5 +4353,56 @@ describe("既存の道の固定（Issue #495）", () => {
     expect(call?.deadline).toBe(10 * 60 * 1000);
     await expect(fs.readFile(`${dir}/${PLAN_ONLY_RESULT_FILE}`, "utf8")).rejects.toThrow();
     await expect(fs.readFile(`${dir}/${BUILD_CLI_RECORD_FILE}`, "utf8")).rejects.toThrow();
+  });
+});
+
+describe("Build だけの記録の checkpoints（`--pipeline v1.2` の走りだけ。Issue #636）", () => {
+  const base = {
+    conditions: {
+      model: "gpt-x",
+      effort: "high",
+      budget_usd: 0.3,
+      deadline_ms: 600_000,
+      timeout_ms: null,
+      vocabulary_version: "v1",
+      prompt_version: "v1",
+      contract_version: "v0.2",
+      factory_version: "0.0.0",
+      spec_engine_version: "0.0.0",
+    },
+    planSha256: "a".repeat(64),
+    sourceSha256: "b".repeat(64),
+    returnToPlan: false,
+  };
+
+  it("checkpoints を渡さなければ欄を置かない（今の記録とバイト列で同じ）。渡せば末尾に同じ値で置き、ほかの欄は今のまま", () => {
+    const plain = buildBuildCliRecord(base);
+    expect(Object.keys(plain)).toEqual(["schema_version", "conditions", "plan_sha256", "source_sha256", "return_to_plan"]);
+    const checkpoints = [{ boundary: "t1-t2", path: "stage-checkpoint-t1-t2.json", output_digest: "c".repeat(64) }];
+    const withCheckpoints = buildBuildCliRecord({ ...base, checkpoints });
+    expect(Object.keys(withCheckpoints)).toEqual([...Object.keys(plain), "checkpoints"]);
+    expect(withCheckpoints.checkpoints).toEqual(checkpoints);
+    const { checkpoints: _omit, ...rest } = withCheckpoints;
+    expect(JSON.stringify(rest)).toBe(JSON.stringify(plain));
+    // 境界に届かなかった走りは空の並びを置く
+    expect(buildBuildCliRecord({ ...base, checkpoints: [] }).checkpoints).toEqual([]);
+  });
+
+  it("v1 の `--plan-file` の走り（--pipeline 省略）の記録に checkpoints が無く、checkpoint を書かない", async () => {
+    const dir = `${directory}/plan-file-no-checkpoints`;
+    const planPath = `${dir}-plan.json`;
+    const envelope = await envelopeOf(await confirmedPlan());
+    const run = await runPlanFile({
+      dir,
+      planPath,
+      planText: JSON.stringify(envelope),
+      recording: createRecordingClient(recordedRunFromPlan()).client,
+    });
+    expect(run.code).toBe(EXIT_OK);
+    const record = (await readBuildRecord(dir)) as unknown as Record<string, unknown>;
+    expect(Object.keys(record)).toEqual(["schema_version", "conditions", "plan_sha256", "source_sha256", "return_to_plan"]);
+    for (const boundary of ["t1-t2", "t2-b1"]) {
+      await expect(fs.readFile(`${dir}/stage-checkpoint-${boundary}.json`, "utf8")).rejects.toThrow();
+    }
   });
 });
