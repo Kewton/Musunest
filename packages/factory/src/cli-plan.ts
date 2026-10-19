@@ -1141,6 +1141,18 @@ export interface BuildCliRecord {
   readonly source_sha256: string;
   /** 差し戻し（`returnToPlan`）が立ったか */
   readonly return_to_plan: boolean;
+  /**
+   * 書いた境界の checkpoint（境界・ファイル名・出力ダイジェスト。段の走りの記録の `checkpoints` と同じ形）。`--pipeline v1.2`
+   * の走りだけが持つ（境界に届かなければ空）。ほかの経路は欄を置かない（Issue #636）
+   */
+  readonly checkpoints?: readonly BuildCliCheckpoint[];
+}
+
+/** Build だけの記録が宣言する checkpoint の 1 件（段の走りの記録の `checkpoints` の 1 件と同じ形。Issue #636） */
+export interface BuildCliCheckpoint {
+  readonly boundary: string;
+  readonly path: string;
+  readonly output_digest: string;
 }
 
 /** Build だけの記録を組む（`--out` に書く。値は写さない。Issue #495） */
@@ -1149,6 +1161,8 @@ export function buildBuildCliRecord(input: {
   readonly planSha256: string;
   readonly sourceSha256: string;
   readonly returnToPlan: boolean;
+  /** 書いた境界の checkpoint（`--pipeline v1.2` の走りだけ渡す。省けば欄を置かない。Issue #636） */
+  readonly checkpoints?: readonly BuildCliCheckpoint[];
 }): BuildCliRecord {
   return {
     schema_version: BUILD_CLI_RECORD_SCHEMA,
@@ -1156,6 +1170,7 @@ export function buildBuildCliRecord(input: {
     plan_sha256: input.planSha256,
     source_sha256: input.sourceSha256,
     return_to_plan: input.returnToPlan,
+    ...(input.checkpoints === undefined ? {} : { checkpoints: input.checkpoints }),
   };
 }
 
