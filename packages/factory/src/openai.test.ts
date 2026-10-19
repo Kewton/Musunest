@@ -32,6 +32,7 @@ import {
   ENVELOPE_SCHEMA_NAME_V12,
   ENVELOPE_SCHEMA_V11A,
   ENVELOPE_SCHEMA_V12,
+  ENVELOPE_SCHEMA_V12_IDS,
   ENVELOPE_SCHEMA_V12_LEDGER,
   buildEnvelopeSchema,
   buildStageBranch,
@@ -42,6 +43,9 @@ import { DESIGN_SCHEMA, DESIGN_SCHEMA_NAME } from "./stages/design.js";
 import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./v11a/stages/name-table.js";
 import { TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
 import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
+import { VOCABULARY_BUNDLES } from "./v12/ids.js";
+import { MAPPING_SCHEMA_NAME, mappingSchemaOf } from "./v12/stages/mapping.js";
+import { VOCABULARY_SCHEMA_NAMES, vocabularySchemaOf } from "./v12/stages/vocabulary.js";
 import { SURFACE_DIFF_SCHEMA_NAME, SURFACE_SCHEMA, SURFACE_SCHEMA_NAME, buildSurfaceDiffSchema } from "./plan/surface.js";
 import { REQUIREMENT_LIST_SCHEMA, REQUIREMENTS_SCHEMA_NAME } from "./stages/requirements.js";
 import { REVERSE_CHECK_SCHEMA, REVERSE_CHECK_SCHEMA_NAME } from "./stages/reverse-check.js";
@@ -841,6 +845,91 @@ describe("識別子 v1.2 の client は、封筒に載る全段に同じ v1.2 �
       ),
     );
     expect(error.kind).toBe("malformed");
+  });
+});
+
+// ── Issue #682：旗 ids on の v1.2 は識別子 v1.2-ids の封筒（C2 の枝が検査の種類ごとの欄）を全段で送る ──────────
+
+describe("識別子 v1.2-ids の client は、C1・C2 と T1''〜B5' の全段に同じ封筒を送り、C2 の応答は欄の写像の形で照らす（Issue #682）", () => {
+  async function sentFormat(envelope: "v1.2" | "v1.2-ids", schemaName: string, schema: unknown) {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify(enveloped(schemaName, {}))), USAGE_WIRE)),
+    );
+    await createOpenAiLlmClient({ apiKey: "test-key", fetch, envelope })
+      .callStructured(stageRequest(schemaName, schema))
+      .catch(() => undefined);
+    return formatOf(bodyOf(captured));
+  }
+
+  /** ids on の v1.2 の走りの全段の要求の schema（T1 は呼ばないが、封筒の枝としては載る） */
+  const idsRequests = (): readonly { readonly stage: string; readonly schema: unknown }[] => [
+    { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW) },
+    ...STAGE_ENVELOPE_ENTRIES_V11A.filter((entry) => entry.stage !== NAME_TABLE_SCHEMA_NAME && entry.stage !== TEST_SPEC_SCHEMA_NAME),
+    ...VOCABULARY_BUNDLES.map((bundle) => ({ stage: VOCABULARY_SCHEMA_NAMES[bundle], schema: vocabularySchemaOf(bundle, PROPERTY_LEDGER_VIEW) })),
+    { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(PROPERTY_LEDGER_VIEW) },
+  ];
+
+  it("C1・C2 と T1''・T2・B1・B3'・B5' の 9 段が、名前 stage-envelope-v12 の 1 種類のバイト列（識別子 v1.2-ids の封筒）を送る", async () => {
+    const requests = idsRequests();
+    expect(requests).toHaveLength(9);
+    const sent = new Set<string>();
+    for (const request of requests) {
+      const format = await sentFormat("v1.2-ids", request.stage, JSON.parse(JSON.stringify(request.schema)));
+      expect(format.name, request.stage).toBe(ENVELOPE_SCHEMA_NAME_V12);
+      expect(format.schema, request.stage).toEqual(ENVELOPE_SCHEMA_V12_IDS);
+      expect(format.strict, request.stage).toBe(true);
+      sent.add(JSON.stringify(format));
+    }
+    expect(sent.size).toBe(1);
+  });
+
+  it("識別子 v1.2（ids off）の C2 以外の段は、今までどおり識別子 v1.2 の封筒を送る（ids on の封筒と別のバイト列）", async () => {
+    for (const request of idsRequests().filter((entry) => entry.stage !== MAPPING_SCHEMA_NAME)) {
+      const format = await sentFormat("v1.2", request.stage, request.schema);
+      expect(format.name, request.stage).toBe(ENVELOPE_SCHEMA_NAME_V12);
+      expect(format.schema, request.stage).toEqual(ENVELOPE_SCHEMA_V12);
+      expect(format.schema, request.stage).not.toEqual(ENVELOPE_SCHEMA_V12_IDS);
+    }
+  });
+
+  /** C2 の応答（要件 1 件。checks だけを差し替える） */
+  const mappingOutput = (checks: unknown) => ({
+    requirements: [
+      {
+        requirementId: "R1",
+        roles: [{ id: "V1", basis: "stated", reason: null }],
+        verification: { kind: "structural", value: null, reason: "画面に出ることだけ", checks, constraintIds: [] },
+        nature: "existence-only",
+      },
+    ],
+  });
+  const fields = (set: Record<string, unknown>) =>
+    Object.fromEntries(
+      ["field-type", "action-kind", "action-unconditioned", "view-shows", "aggregate-no-period", "write-anonymous"].map((check) => [check, set[check] ?? null]),
+    );
+  const callMapping = (output: unknown) => {
+    const { fetch } = recordingFetch(() => jsonResponse(completed(outputText(JSON.stringify(enveloped(MAPPING_SCHEMA_NAME, output as Record<string, unknown>))), USAGE_WIRE)));
+    return createOpenAiLlmClient({ apiKey: "test-key", fetch, envelope: "v1.2-ids" }).callStructured<Record<string, unknown>>(
+      stageRequest(MAPPING_SCHEMA_NAME, mappingSchemaOf(PROPERTY_LEDGER_VIEW)),
+    );
+  };
+
+  it("欄の写像の C2 の応答（view-shows だけ sourceId・ほかの欄は null）は受け、そのまま段へ渡す", async () => {
+    const output = mappingOutput(fields({ "view-shows": { targetId: "V1", sourceId: "E1.F1" } }));
+    expect((await callMapping(output)).output).toEqual(output);
+    expect((await callMapping(mappingOutput(null))).output).toEqual(mappingOutput(null));
+  });
+
+  it("負例 (6)：view-shows でない欄に sourceId を持つ応答・配列の形の checks・欄の欠けた checks は、adapter の schema の検査で形の誤り", async () => {
+    for (const checks of [
+      fields({ "field-type": { targetId: "E1.F1", sourceId: "E1.F1" } }),
+      [{ check: "view-shows", targetId: "V1", sourceId: "E1.F1" }],
+      { "view-shows": { targetId: "V1", sourceId: "E1.F1" } },
+      fields({ "view-shows": { targetId: "V1", sourceId: null } }),
+    ]) {
+      const error = await captureError(() => callMapping(mappingOutput(checks)));
+      expect(error.kind, JSON.stringify(checks)).toBe("malformed");
+    }
   });
 });
 
