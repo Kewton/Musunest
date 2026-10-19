@@ -57,6 +57,10 @@
 //   --stage-from：上流の条件は v6 か v8 で、経路が今の経路と同じこと（違えば stage-from:conditions-pipeline）。v1.2 の照合では工場の dist の照合の関数に、
 //          dist の package の入口が公開する旗の組（V12_PIPELINE_FLAGS）と台帳の指紋（propertyLedgerSha256）を渡す
 //   --compare と段の旗 × v1.2：両群とも v1.2 の経路。両群の dist の旗の組が同じでなければ compare:flags-mismatch で子を起こさない
+// #640（凍結した上流の組。README §10.8.1）：
+//   --stage-from <組のディレクトリ>：組のファイル（freeze-stage-input.mjs の出力。人の採否を反映した組だけ）があるディレクトリも受ける。組の署名・写しの SHA・境界（開始の段の直前の境界）・
+//          (b)（--build-from の組と同じ）・経路と旗の組（今の計測と同じ）・review を確かめ（違えば exit 4・stage-from:set-*。子 0 本）、P ごとの 1 本をその P の全反復に
+//          同じバイト列で渡す。組が外した P は入力なし（stage_input_absent）。条件の params.stage_from は組の種類・id・版・SHA（上流の計測の出力先を渡す形は今のまま）
 // 採点は: node score-agent.mjs <repo> <out> [--label high]（リポジトリ・出力先の順で渡す）。比較は score-agent.mjs <repo> <out> --compare
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
@@ -68,6 +72,7 @@ import { BUILD_STAGE_IDS, COMPARE_GROUPS, COMPARE_PAIRS_COPY, COMPARE_RUN_PREFIX
 import { CONDITIONS_V8, sameFlags } from "./score-agent.mjs";
 import { CONDITIONS_V6, FAILURE_KINDS as RECORD_FAILURE_KINDS, STAGE_INPUT_DIR, STAGE_COMPARE_GROUPS, STAGE_COMPARE_ROLES, STAGE_COMPARISON_SCHEMA, STAGE_PAIRS_SCHEMA, STAGE_RUN_MODE, conditionsSignature, loadConditions, makeStagePairs, pairsShapeProblem, stagePairsProblem } from "./score-agent.mjs";
 import { PLAN_FILE_CHECKS, PLAN_FILE_ERROR_SCHEMA, PLAN_FILE_REJECT_SCHEMA, checkEnvelope, loadFrozenSet, loadPlanFileChecks, refusalLine } from "./freeze-plan-set.mjs";
+import { FROZEN_STAGE_SET_FILE, FROZEN_STAGE_SET_KIND, loadFrozenStageSet } from "./freeze-stage-input.mjs";
 
 const args = process.argv.slice(2);
 const [repo, outRoot] = args;
@@ -318,8 +323,66 @@ for (const item of evalSet.items) { const pid = item.id; if (targets !== null ? 
 const stageInputs = new Map(); // 本の ID → { checkpointFile, checkpointBytes, recordBytes }（照合を通った上流の入力。子のディレクトリに写す）
 const stageAbsent = []; // 入力なしの本（上流が範囲の中の早期停止で境界に届かなかった本）
 const stageInputRecords = []; // 条件の params.stage_inputs（本ごとの上流の入力の SHA）
-let stageFrom = null; // 条件の params.stage_from（上流の計測の条件の指紋と範囲）
-if (stageMode && stageBoundary !== null) {
+let stageFrom = null; // 条件の params.stage_from（上流の計測の条件の指紋と範囲。組のディレクトリなら組の種類・id・版・SHA。#640）
+// 照合の関数に渡す確定した仕様（包みの検査の関数で読み直す。--build-from の事前の検査を通った写し）
+const planOf = async (checks, pid) => { const parsed = checks.parsePlanFile(Buffer.from(envelopeBytes.get(pid)).toString("utf8")); const v = await checks.validatePlanFile({ envelope: parsed.envelope, source: reqOf(pid) + "\n", vocabularyVersion: checks.vocabularyVersion }); return v?.plan; };
+const codeOf = (lib, code) => (Array.isArray(lib.STAGE_INPUT_CODES) && lib.STAGE_INPUT_CODES.includes(code) ? code : "stage-input:unknown");
+// v1.2（#638）：照合の関数に渡す旗の組と台帳の指紋は、checkout ごとの dist の package の入口が公開する値（V12_PIPELINE_FLAGS・propertyLedgerSha256）
+const v12Of = async (entry) => {
+  if (typeof entry?.propertyLedgerSha256 !== "function") refuseCode("stage:dist-unreadable");
+  let ledger = null;
+  try { ledger = await entry.propertyLedgerSha256(); } catch { ledger = null; }
+  if (typeof ledger !== "string") refuseCode("stage:dist-unreadable");
+  return { ledger, flags: JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS)) };
+};
+// #640：組のディレクトリ（凍結した上流の組。組のファイルがある）。組の署名・写しの SHA・境界・(b)・経路と旗の組・人の採否を照らし、採用した P の 1 本を
+// その P の全反復に同じバイト列で渡す（写しにも工場の dist の照合の関数を当て直す）。組が外した P は入力なし。断れば exit 4・stage-from:set-* で子 0 本
+if (stageMode && stageBoundary !== null && existsSync(join(resolve(stageFromArg), FROZEN_STAGE_SET_FILE))) {
+  const root = resolve(stageFromArg);
+  const ctxs = [main, ...(baseline === null ? [] : [baseline])];
+  const libs = [stageLib, ...(baseline === null ? [] : [await loadStageLib(baseline.distDir)])];
+  const loaded = loadFrozenStageSet(root);
+  if (loaded.status !== "ok") refuseStage(`stage-from:set-${loaded.status}`, { ids: loaded.ids ?? null });
+  const set = loaded.set;
+  if (set.boundary !== stageBoundary) refuseStage("stage-from:set-boundary");
+  if (set.plan_set.sha256 !== frozen.sha256 || set.plan_set.id !== frozen.id || set.plan_set.version !== frozen.version) refuseStage("stage-from:set-plan-set");
+  if (set.source.pipeline !== pipeline || !sameFlags(set.source.v12_flags, v12Flags)) refuseStage("stage-from:set-pipeline");
+  if (!("review" in set)) refuseStage("stage-from:set-review");
+  // 写しの名前：checkpoint は開始の段の直前の境界の名前、記録は工場の dist が前の走りの記録として読む名前（段の走りの記録か Build だけの記録）
+  let buildRecordFile = null;
+  try { buildRecordFile = (await import(pathToFileURL(join(distDir, "cli-plan.js")).href)).BUILD_CLI_RECORD_FILE ?? null; } catch { buildRecordFile = null; }
+  const recordNames = [stageLib.STAGE_RUN_RECORD_FILE, ...(typeof buildRecordFile === "string" ? [buildRecordFile] : [])];
+  for (const [pid, input] of loaded.inputs) if (input.checkpointFile !== stageLib.stageCheckpointFile(stageBoundary) || !recordNames.includes(input.recordFile)) refuseStage("stage-from:set-invalid", { ids: [pid] });
+  const uncovered = [...new Set(jobs.map((j) => j.pid))].filter((pid) => !set.adopted.some((a) => a.pattern === pid) && !set.missing.some((m) => m.pattern === pid));
+  if (uncovered.length > 0) refuseStage("stage-from:set-pattern", { ids: uncovered });
+  const v12s = pipeline === V12_PIPELINE ? [await v12Of(v12Entry), ...(baseline === null ? [] : [await v12Of(baselineEntry)])] : null;
+  const verifiedPatterns = new Set();
+  for (const job of jobs) {
+    const id = idOf(job), input = loaded.inputs.get(job.pid);
+    if (input === undefined) { stageAbsent.push(id); stageInputRecords.push({ id, absent: true }); continue; }
+    if (!verifiedPatterns.has(job.pid)) {
+      // 記録が宣言する境界の出力ダイジェストが組の宣言と同じ（照合の関数は記録の宣言と checkpoint を照らす）
+      let record = null;
+      try { record = JSON.parse(input.recordBytes.toString("utf8")); } catch { record = null; }
+      const declared = isRec(record) && Array.isArray(record.checkpoints) ? record.checkpoints.find((c) => isRec(c) && c.boundary === stageBoundary) : undefined;
+      if (declared?.output_digest !== input.outputDigest) refuseStage("stage-from:set-digest", { ids: [job.pid] });
+      const entry = frozen.adopted.find((a) => a.pattern === job.pid);
+      for (let i = 0; i < libs.length; i++) {
+        const verified = await libs[i].verifyStageInput({
+          start: stageRange.start, checkpointText: input.checkpointBytes.toString("utf8"), checkpointFile: input.checkpointFile, recordText: input.recordBytes.toString("utf8"),
+          plan: await planOf(checksList[i], job.pid), planSha256: entry.plan_sha256, sourceSha256: entry.source_sha256,
+          vocabularyVersion: ctxs[i].factory.VOCABULARY_VERSION, contractVersion: ctxs[i].factory.CONTRACT_VERSION,
+          ...(v12s === null ? {} : { v12: v12s[i] }),
+        });
+        if (verified?.ok !== true) refuseStage(`stage-from:${codeOf(libs[i], verified?.code)}`, { ids: [job.pid] });
+      }
+      verifiedPatterns.add(job.pid);
+    }
+    stageInputs.set(id, { checkpointFile: input.checkpointFile, checkpointBytes: input.checkpointBytes, recordBytes: input.recordBytes, recordFile: input.recordFile });
+    stageInputRecords.push({ id, checkpoint_sha256: sha256(input.checkpointBytes), record_sha256: sha256(input.recordBytes), output_digest: input.outputDigest, record_file: input.recordFile });
+  }
+  stageFrom = { kind: FROZEN_STAGE_SET_KIND, id: set.id, version: set.version, sha256: loaded.sha256 };
+} else if (stageMode && stageBoundary !== null) {
   const root = resolve(stageFromArg);
   const ctxs = [main, ...(baseline === null ? [] : [baseline])];
   const libs = [stageLib, ...(baseline === null ? [] : [await loadStageLib(baseline.distDir)])];
@@ -337,17 +400,6 @@ if (stageMode && stageBoundary !== null) {
   if (!passesBoundary(stageLib, upRange, stageBoundary)) refuseStage("stage-from:range");
   stageFrom = { conditions_sha256: sha256(readFileSync(join(root, "conditions.json"))), signature: upCond.signature, range: upRange };
   const checkpointFile = stageLib.stageCheckpointFile(stageBoundary);
-  // 照合の関数に渡す確定した仕様（包みの検査の関数で読み直す。--build-from の事前の検査を通った写し）
-  const planOf = async (checks, pid) => { const parsed = checks.parsePlanFile(Buffer.from(envelopeBytes.get(pid)).toString("utf8")); const v = await checks.validatePlanFile({ envelope: parsed.envelope, source: reqOf(pid) + "\n", vocabularyVersion: checks.vocabularyVersion }); return v?.plan; };
-  const codeOf = (lib, code) => (Array.isArray(lib.STAGE_INPUT_CODES) && lib.STAGE_INPUT_CODES.includes(code) ? code : "stage-input:unknown");
-  // v1.2（#638）：照合の関数に渡す旗の組と台帳の指紋は、checkout ごとの dist の package の入口が公開する値（V12_PIPELINE_FLAGS・propertyLedgerSha256）
-  const v12Of = async (entry) => {
-    if (typeof entry?.propertyLedgerSha256 !== "function") refuseCode("stage:dist-unreadable");
-    let ledger = null;
-    try { ledger = await entry.propertyLedgerSha256(); } catch { ledger = null; }
-    if (typeof ledger !== "string") refuseCode("stage:dist-unreadable");
-    return { ledger, flags: JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS)) };
-  };
   const v12s = pipeline === V12_PIPELINE ? [await v12Of(v12Entry), ...(baseline === null ? [] : [await v12Of(baselineEntry)])] : null;
   for (const job of jobs) {
     const id = idOf(job), upDir = join(root, id, "bundle"), entry = frozen.adopted.find((a) => a.pattern === job.pid);
@@ -387,7 +439,9 @@ if (stageMode && stageBoundary !== null) {
 /** 起こす本（入力なしの本を除く。段単位でない計測では予定した本の全部） */
 const launchJobs = jobs.filter((j) => !stageAbsent.includes(idOf(j)));
 /** 段だけの対の比較の対のファイルが結ぶ範囲と上流の条件の指紋（#545） */
-const stagePairsStage = stageMode ? { start: stageRange.start, end: stageRange.end, stage_from_sha256: stageFrom?.conditions_sha256 ?? null } : null;
+/** 上流の指紋（上流の計測なら条件のファイルの SHA、組のディレクトリなら組のファイルの SHA。#640） */
+const stageFromSha256 = stageFrom === null ? null : stageFrom.kind === FROZEN_STAGE_SET_KIND ? stageFrom.sha256 : stageFrom.conditions_sha256 ?? null;
+const stagePairsStage = stageMode ? { start: stageRange.start, end: stageRange.end, stage_from_sha256: stageFromSha256 } : null;
 if (compare && stageMode) {
   const problem = stagePairsProblem(pairsValue, { frozenSha256: fzLoaded.sha256, expected: launchJobs.map(idOf), stage: stagePairsStage });
   if (problem !== null) refuseCode(problem);
@@ -597,7 +651,8 @@ const runOne = (job) => new Promise((resolve) => {
   if (si !== undefined) {
     mkdirSync(join(dir, STAGE_INPUT_DIR), { recursive: true });
     writeFileSync(join(dir, STAGE_INPUT_DIR, si.checkpointFile), si.checkpointBytes);
-    writeFileSync(join(dir, STAGE_INPUT_DIR, stageLib.STAGE_RUN_RECORD_FILE), si.recordBytes);
+    // 組のディレクトリから渡す記録は、組に写した名前のまま（段の走りの記録か Build だけの記録。#640）
+    writeFileSync(join(dir, STAGE_INPUT_DIR, si.recordFile ?? stageLib.STAGE_RUN_RECORD_FILE), si.recordBytes);
   }
   const cliArgs = group === null ? childArgsFor(job) : argvFor(group.ctx.cliFile, dir, runPipeline);
   const t0 = Date.now();
@@ -797,7 +852,7 @@ async function runCompare() {
   const record = {
     schema: stageMode ? STAGE_COMPARISON_SCHEMA : COMPARISON_SCHEMA, measurement_id: basename(outRoot), started_at: startedAt,
     // 段だけの対の比較（#545）：範囲・上流の計測の条件の指紋・入力なしの本の件数（本の ID は群の条件に）
-    ...(stageMode ? { stage: { start: stageRange.start, end: stageRange.end, stage_from_sha256: stageFrom?.conditions_sha256 ?? null, input_absent: stageAbsent.length } } : {}),
+    ...(stageMode ? { stage: { start: stageRange.start, end: stageRange.end, stage_from_sha256: stageFromSha256, input_absent: stageAbsent.length } } : {}),
     pairs: { sha256: pairsSha, count: pairsValue.pairs.length, runs: RUNS, groups: [...GROUPS] },
     groups: Object.fromEntries(GROUPS.map((g) => [g, groupRecord(g)])),
     shared: {

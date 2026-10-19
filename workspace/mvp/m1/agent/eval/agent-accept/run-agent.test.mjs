@@ -2479,3 +2479,121 @@ test("#638 (c) 段だけの対の比較 × v1.2：--make-pairs は上流の入�
     assertNothingWritten(bad, "flags-mismatch");
   });
 });
+
+// ── #640：--stage-from に凍結した上流の組（組のディレクトリ）を渡す口。組は v1.2 の上流（開始 T1・終了 T2'）の出力の写しから、凍結の道具の公開の関数で合成する
+// （凍結の規則そのものは freeze-stage-input.test.mjs）。P ごとの 1 本を全反復に同じバイト列で渡し、組の不一致は exit 4・stage-from:set-* で子 0 本
+import { FROZEN_STAGE_SET_FILE, applyReview, stageSetBytes } from "./freeze-stage-input.mjs";
+
+/**
+ * 組のディレクトリを作る。採用した P は上流の pick(P) の本の checkpoint と記録の写し、missing は外した P。review が null なら人の採否を反映しない。
+ * edit(組) で署名の前に組を書き換える
+ */
+function makeStageSet640(dir, up, fzPath, { boundary = "t2-b1", pick = (pid) => `${pid}-r2`, adopted = PIDS545.slice(5), missing = PIDS545.slice(0, 5), exclude = ["P7"], review = true, edit = null } = {}) {
+  mkdirSync(dir, { recursive: true });
+  const cpName = `stage-checkpoint-${boundary}.json`;
+  const entries = adopted.map((pid) => {
+    const run = pick(pid), src = join(up, run, "bundle");
+    const cp = readFileSync(join(src, cpName)), rec = readFileSync(join(src, "stage-run.json"));
+    mkdirSync(join(dir, "inputs", run), { recursive: true });
+    writeFileSync(join(dir, "inputs", run, cpName), cp);
+    writeFileSync(join(dir, "inputs", run, "stage-run.json"), rec);
+    const digest = JSON.parse(rec.toString("utf8")).checkpoints.find((c) => c.boundary === boundary).output_digest;
+    return { pattern: pid, run, started_at: "2026-10-19T00:00:00.000Z", checkpoint: { path: `inputs/${run}/${cpName}`, sha256: sha256(cp), output_digest: digest }, record: { path: `inputs/${run}/stage-run.json`, sha256: sha256(rec) }, table_sha256: sha256(`table-${run}`), score: { correct: 1, denominator: 2 } };
+  });
+  let set = {
+    schema: "musunest-eval/frozen-stage-input-set/v1", id: "stage-set-640", version: 1, boundary, rule: { name: "best-scored-complete", version: 1 },
+    plan_set: { id: "fz-t", version: 1, sha256: sha256(readFileSync(fzPath)) },
+    source: { conditions_sha256: sha256(readFileSync(join(up, "conditions.json"))), measurement_id: null, pipeline: "v1.2", v12_flags: FLAGS638, score_sha256: sha256("score-640") },
+    adopted: entries, missing: missing.map((pattern) => ({ pattern, reason: "no-checkpoint" })),
+  };
+  if (review) {
+    const decisions = adopted.map((pattern) => (exclude.includes(pattern) ? { pattern, decision: "exclude", reason: "human-check" } : { pattern, decision: "adopt" }));
+    const r = applyReview(set, Buffer.from(JSON.stringify({ schema: "musunest-eval/frozen-stage-input-review/v1", set: { id: set.id, version: set.version }, author: "scorer", date: "2026-10-19", decisions })));
+    assert.equal(r.code, undefined, r.code);
+    set = r.set;
+  }
+  if (edit !== null) edit(set);
+  writeFileSync(join(dir, FROZEN_STAGE_SET_FILE), stageSetBytes(set));
+  return dir;
+}
+
+test("#640 (a) --stage-from <組のディレクトリ>：P ごとの 1 本をその P の全反復に同じバイト列で渡し、組が外した P（人が除外した P を含む）は入力なしに数える。条件の stage_from は組の種類・id・版・SHA、stage_inputs に組の出力ダイジェスト。--make-pairs の stage_from_sha256 は組の SHA", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo638(base), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = runUpstream638(repo, join(base, "up"), fz, log);
+    const setDir = makeStageSet640(join(base, "set"), up, fz);
+    const setSha = sha256(readFileSync(join(setDir, FROZEN_STAGE_SET_FILE)));
+    const out = join(base, "b1"), n0 = spawnCount(log), vlog = join(base, "v12.log");
+    const r = runAgent(repo, out, stageArgs638(fz, ["--stage-start", "write", "--stage-from", setDir]), { FAKE_SPAWN_LOG: log, FAKE_VERIFY_V12_LOG: vlog });
+    assert.equal(r.status, 0, r.stderr);
+    const launched = ["P6", "P8", "P9", "P10"];
+    assert.equal(spawnCount(log) - n0, 12, "採用 4 P × 3 回");
+    assert.equal(readFileSync(vlog, "utf8").trim().split("\n").length, 4, "照合の関数は P ごとに 1 回（写しは P ごとに 1 本）");
+    const cond = readJson(join(out, "conditions.json"));
+    assert.equal(cond.schema, V8);
+    assert.deepEqual(cond.params.stage_from, { kind: "frozen-stage-input-set", id: "stage-set-640", version: 1, sha256: setSha });
+    const absent = IDS545.filter((id) => !launched.includes(id.split("-")[0]));
+    assert.deepEqual(cond.stage_input_absent, { count: 18, ids: absent }, "P1〜P5（組の missing）と人が除外した P7");
+    assert.deepEqual(cond.child_args.filter((a) => a.argv === null).map((a) => a.id), absent);
+    for (const pid of launched) {
+      const cpCopy = readFileSync(join(setDir, "inputs", `${pid}-r2`, "stage-checkpoint-t2-b1.json")), recCopy = readFileSync(join(setDir, "inputs", `${pid}-r2`, "stage-run.json"));
+      const digest = JSON.parse(recCopy.toString("utf8")).checkpoints.find((c) => c.boundary === "t2-b1").output_digest;
+      for (const rr of [1, 2, 3]) {
+        const id = `${pid}-r${rr}`, dir = join(out, id);
+        assert.deepEqual(readFileSync(join(dir, "stage-input", "stage-checkpoint-t2-b1.json")), cpCopy, `${id}: 全反復に同じ checkpoint`);
+        assert.deepEqual(readFileSync(join(dir, "stage-input", "stage-run.json")), recCopy, `${id}: 全反復に同じ記録`);
+        assert.deepEqual(readJson(join(dir, "received-argv.json")).slice(-2), ["--stage-input", join(dir, "stage-input", "stage-checkpoint-t2-b1.json")]);
+        assert.deepEqual(cond.params.stage_inputs.find((x) => x.id === id), { id, checkpoint_sha256: sha256(cpCopy), record_sha256: sha256(recCopy), output_digest: digest, record_file: "stage-run.json" });
+      }
+    }
+    for (const id of absent) assert.deepEqual(cond.params.stage_inputs.find((x) => x.id === id), { id, absent: true });
+    assert.equal(cond.signature, conditionsSignature(cond));
+    // 同じ組の再開は通り、組の SHA が条件の署名に入る
+    rmSync(join(out, "P6-r1"), { recursive: true, force: true });
+    const rr = runAgent(repo, out, [...stageArgs638(fz, ["--stage-start", "write", "--stage-from", setDir]), "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(rr.status, 0, rr.stderr);
+    // --make-pairs：入力のある本だけの対と、組の SHA
+    const pairsPath = join(base, "pairs.json");
+    const mp = runAgent(repo, join(base, "unused"), ["--make-pairs", pairsPath, "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "write", "--stage-from", setDir, "--runs", "3"]);
+    assert.equal(mp.status, 0, mp.stderr);
+    const pv = readJson(pairsPath);
+    assert.equal(pv.pairs.length, 12);
+    assert.deepEqual(pv.stage, { start: "write", end: "judge", stage_from_sha256: setSha });
+    // 上流の計測の出力先を渡す今の形はそのまま（条件の stage_from は上流の条件の SHA・署名・範囲）
+    const o2 = join(base, "b1-up");
+    const r2 = runAgent(repo, o2, stageArgs638(fz, ["--stage-start", "write", "--stage-from", up]), { FAKE_SPAWN_LOG: log });
+    assert.equal(r2.status, 0, r2.stderr);
+    assert.deepEqual(Object.keys(readJson(join(o2, "conditions.json")).params.stage_from), ["conditions_sha256", "signature", "range"]);
+  });
+});
+
+test("#640 (b) 組の照合：人の採否が未反映（review なし）・署名の不一致・写しの SHA の不一致・境界の違い・(b) の違い・経路の違い・旗の組の違い・対象の P が組に無い・写しが今の dist の照合に落ちる組は、exit 4 と固定の符号で子 0 本・何も書かない", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo638(base), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = runUpstream638(repo, join(base, "up"), fz, log);
+    const n0 = spawnCount(log);
+    const refused = (label, setDir, code, ids = null, pl = "v1.2") => {
+      const o = join(base, `out-${label}`);
+      assertStageRefused(runAgent(repo, o, stageArgs638(fz, ["--stage-start", "write", "--stage-from", setDir], pl), { FAKE_SPAWN_LOG: log }), code, ids, log, n0, o, label);
+    };
+    refused("review", makeStageSet640(join(base, "s-review"), up, fz, { review: false }), "stage-from:set-review");
+    const sig = makeStageSet640(join(base, "s-sig"), up, fz);
+    const t = readJson(join(sig, FROZEN_STAGE_SET_FILE));
+    t.version = 2;
+    writeFileSync(join(sig, FROZEN_STAGE_SET_FILE), JSON.stringify(t, null, 1));
+    refused("signature", sig, "stage-from:set-signature");
+    const copy = makeStageSet640(join(base, "s-copy"), up, fz);
+    appendFileSync(join(copy, "inputs", "P8-r2", "stage-checkpoint-t2-b1.json"), " ");
+    refused("sha256", copy, "stage-from:set-sha256", ["P8"]);
+    refused("boundary", makeStageSet640(join(base, "s-boundary"), up, fz, { boundary: "t1-t2" }), "stage-from:set-boundary");
+    refused("plan-set", makeStageSet640(join(base, "s-plan"), up, fz, { edit: (s) => { s.plan_set.sha256 = sha256("another-plan-set"); } }), "stage-from:set-plan-set");
+    const good = makeStageSet640(join(base, "s-good"), up, fz);
+    refused("pipeline", good, "stage-from:set-pipeline", null, "v1.1a");
+    refused("flags", makeStageSet640(join(base, "s-flags"), up, fz, { edit: (s) => { s.source.v12_flags = { ledger: true, ids: false }; } }), "stage-from:set-pipeline");
+    refused("pattern", makeStageSet640(join(base, "s-pattern"), up, fz, { adopted: PIDS545.slice(5, 9), exclude: [] }), "stage-from:set-pattern", ["P10"]);
+    refused("digest", makeStageSet640(join(base, "s-digest"), up, fz, { edit: (s) => { s.adopted[0].checkpoint.output_digest = sha256("x"); } }), "stage-from:set-digest", ["P6"]);
+    // 今の dist の旗の組が写しの checkpoint の版と違う（組の source も同じ旗にそろえて、照合の関数で落ちることを見る）
+    writeFileSync(join(repo, "packages/factory/dist/index.js"), v12Index638({ ledger: "ledger-b" }));
+    refused("verify", good, "stage-from:stage-input:version", ["P6"]);
+  });
+});
