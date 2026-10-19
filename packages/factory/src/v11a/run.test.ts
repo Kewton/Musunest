@@ -128,6 +128,7 @@ import {
   type V12Flags,
 } from "../v12/ledger.js";
 import * as ledgerModule from "../v12/ledger.js";
+import { V12_CALL_LIMITS } from "../v12/limits.js";
 import { buildSized, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
 
 afterEach(() => {
@@ -2612,6 +2613,30 @@ describe("範囲の無い走りの境界の材料（collectBoundaries。`--pipel
     expect(atT2.result.stopped).toMatchObject({ stage: "test-spec" });
     expect(atT2.result.bundle).toBeNull();
     expect(atT2.result.boundaries?.map((entry) => entry.boundary)).toEqual(["t1-t2"]);
+  });
+});
+
+describe("段の走りの結果の v12Calls・testSpec（`--pipeline v1.2` の段の走りの記録の材料。Issue #637）", () => {
+  const IDS_FLAGS = { ledger: true, searchRepair: true, ids: true };
+
+  it("旗 ids の段の走りは門と枝の数を返し、T2 を回して T2' を通れば組の試験・外した試験・網羅の単位の数を返す（t2-b1 の組と一致）", async () => {
+    const recording = createCheckedRecordingClient(idsHead().slice(0, 6));
+    const outcome = await runStageRangeV11a({ ...inputOf(recording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "test-spec" } });
+    expect(outcome.stopped).toBeNull();
+    expect(outcome.v12Calls).toMatchObject({ real_attempts: { limit: V12_CALL_LIMITS.realAttempts }, judge_branch: { limit: V12_CALL_LIMITS.judgeBranch } });
+    const frozen = outcome.boundaries.find((entry) => entry.boundary === "t2-b1")?.testSpec;
+    expect(outcome.testSpec).toEqual({ tests: frozen?.suite.tests.length, dropped_tests: 0, coverage_units: frozen?.coverage.length });
+  });
+
+  it("T2 に届かない（区間 0 で終わる）走りは testSpec を持たず、旗 off（v1.1a）の段の走りは v12Calls を持たない", async () => {
+    const idsRecording = createCheckedRecordingClient(idsHead().slice(0, 5));
+    const segment0 = await runStageRangeV11a({ ...inputOf(idsRecording.client), flags: IDS_FLAGS, range: { start: "name-table", end: "semantic-check" } });
+    expect(segment0).toHaveProperty("v12Calls");
+    expect(segment0).not.toHaveProperty("testSpec");
+    const plainRecording = createCheckedRecordingClient(head().slice(0, 3));
+    const plain = await runStageRangeV11a({ ...inputOf(plainRecording.client), range: { start: "name-table", end: "test-spec" } });
+    expect(plain).not.toHaveProperty("v12Calls");
+    expect(plain.testSpec?.dropped_tests).toBe(0);
   });
 });
 
