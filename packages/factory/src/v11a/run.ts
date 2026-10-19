@@ -124,7 +124,7 @@ import {
 import { runStaticCheck } from "../stages/static-check.js";
 import type { DroppedNonstructuralTest } from "../stages/test-suite.js";
 import type { EvaluationContext } from "../stages/tools.js";
-import { correspondenceFromTable, extraElementsOf, markRows } from "./bind-by-id.js";
+import { correspondenceFromTable, extraElementsOf, markRows, requiredValidationsOf, type RequiredValidation } from "./bind-by-id.js";
 import {
   buildV11aArtifacts,
   type BoundaryMaterials,
@@ -1415,6 +1415,14 @@ async function runV11a(
       nonRequirementIds.size === 0
         ? list
         : { ...list, requirements: list.requirements.filter((requirement) => !nonRequirementIds.has(requirement.id)) };
+    /**
+     * 旗 `v12.ids` の走りだけ、要る検査の骨組み（その時点の有効な組＝棄却・持ち越しで外した後の組から導く。off は渡さない＝
+     * 今の要求。Issue #666）
+     */
+    const requiredValidationsFor = (suite: TestSuite): { readonly requiredValidations?: readonly RequiredValidation[] } =>
+      flags.ids ? { requiredValidations: requiredValidationsOf(table, suite, testSpec.observes) } : {};
+    // 初回の B1 の時点の有効な組（残る要件の試験。棄却はまだ無い）
+    const remainingNow = new Set(carry.remainingRequirementIds);
     const written = await runStageOk("write", () =>
       runWriteV11a({
         list: writeList,
@@ -1424,6 +1432,7 @@ async function runV11a(
         documents: input.documents,
         gateway,
         ...withLedger,
+        ...requiredValidationsFor({ tests: testSpec.suite.tests.filter((test) => remainingNow.has(test.target.requirementId)) }),
       }),
     );
 
@@ -1646,6 +1655,7 @@ async function runV11a(
             evaluate: evaluator.evaluate,
             ...(current.rejections.length === 0 ? {} : { declRejections: current.rejections }),
             ...repairStepIds(),
+            ...requiredValidationsFor(context.suite),
           }),
         );
         for (const dispute of step.disputes) disputes.push(dispute);
@@ -1828,6 +1838,7 @@ async function runV11a(
               gateway,
               ...withLedger,
               rewrite: { failures },
+              ...requiredValidationsFor(contextNow().suite),
             }),
           );
           await consider("rewrite", await evaluateVersion({ source: rewrite.declaration }, true));
@@ -1937,6 +1948,7 @@ async function runV11a(
             evaluate: evaluator.evaluate,
             ...(best.rejections.length === 0 ? {} : { declRejections: best.rejections }),
             ...repairStepIds(),
+            ...requiredValidationsFor(context.suite),
           }),
         );
         for (const dispute of step.disputes) disputes.push(dispute);

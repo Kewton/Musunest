@@ -79,6 +79,8 @@ import {
   withoutEnumMembership,
   withoutLedgerAdditions,
   withoutWhenAndNonRequirement,
+  REQUIRED_VALIDATIONS_BLOCK,
+  withoutRequiredValidations,
 } from "./v11a/__tests__/fixtures.js";
 import * as ledgerModule from "./v12/ledger.js";
 import type { LedgerView } from "./v12/ledger.js";
@@ -1264,7 +1266,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
   /**
    * 旗 ids on の要求から、コードが作る試験の分（Issue #595）を除く：T2 の R-tsp-16 を台帳の旗 ids の文から旗 ids off の文に戻し、
    * B1 の「固定した試験」の塊からコードが作った試験（予約の接頭辞の ID）を除く。ほかの欄は触らない。`generated` は、B1 の塊に
-   * コードが作った試験があるはずか（台帳に空の集計の行が無い導出の走りは、この題材ではコードの試験を作らない）
+   * コードが作った試験があるはずか（台帳に空の集計の行が無い導出の走りは、この題材ではコードの試験を作らない）。手 4d（#666）：B1 の
+   * 「要る検査の骨組み」の塊を外し、R-w11-07 を旗 ids off の文に戻す（塊が在ることを確かめてから）
    */
   const withoutIdsGenerated = (requests: readonly unknown[], ledger: LedgerView = PROPERTY_LEDGER_VIEW, generated = true): unknown[] => {
     const idsRules = ruleTexts(testSpecRuleDefinitionsOf(ledger, true));
@@ -1277,14 +1280,17 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
         return { ...request, rules: (request.rules ?? []).map((text) => { const at = idsRules.indexOf(text); return at < 0 ? text : (offRules[at] ?? text); }) };
       }
       if (request.schemaName === WRITE_V11A_SCHEMA_NAME) {
-        const input = request.input.replace(testsBlock, (_all, head: string, body: string, tail: string) => {
+        // 手 4d（#666）：旗 ids の B1 は「要る検査の骨組み」の塊と R-w11-07 の旗 ids の文を持つ。塊が在ることを確かめてから元に戻す
+        expect(REQUIRED_VALIDATIONS_BLOCK.test(request.input)).toBe(true);
+        const restored = withoutRequiredValidations(request);
+        const input = restored.input.replace(testsBlock, (_all, head: string, body: string, tail: string) => {
           const parsed = JSON.parse(body) as { readonly tests: readonly { readonly id: string }[] };
           // 書き直しの形が元と同じこと（塊の字下げ・欄の並びを変えない）を確かめてから除く
           expect(JSON.stringify(parsed, null, 2)).toBe(body);
           expect(parsed.tests.some((test) => isGeneratedTestId(test.id))).toBe(generated);
           return `${head}${JSON.stringify({ ...parsed, tests: parsed.tests.filter((test) => !isGeneratedTestId(test.id)) }, null, 2)}${tail}`;
         });
-        return { ...request, input };
+        return { ...restored, input };
       }
       return request;
     });

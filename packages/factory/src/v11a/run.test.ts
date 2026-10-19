@@ -73,6 +73,8 @@ import {
   withoutEmptyAggregate,
   withoutWhenAndNonRequirement,
   fixtureGeneratedTable,
+  REQUIRED_VALIDATIONS_BLOCK,
+  withoutRequiredValidations,
 } from "./__tests__/fixtures.js";
 import {
   STAGE_RUN_RECORD_SCHEMA,
@@ -105,6 +107,9 @@ import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
 import { TEST_SPEC_DATA_NAMES, TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf, testSpecSchemaOf, testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
 import {
   WRITE_V11A_DATA_NAMES,
+  WRITE_V11A_IDS_R07_DEFINITION,
+  WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME,
+  WRITE_V11A_RULE_DEFINITIONS,
   WRITE_V11A_REWRITE_DATA_NAME,
   WRITE_V11A_REWRITE_RULE_DEFINITIONS,
   WRITE_V11A_SCHEMA_NAME,
@@ -3843,7 +3848,9 @@ describe("旗 v12.ids：ids off（前の手の旗だけ on）の走りは今と�
     // ids on の C3・T2 の確かめ方は構造の検査の対象の欄を持つ（C3 は表の targets、T2 は checkTargets。Issue #594）。その欄を除いて比べる
     const withoutTargets = (text: string) => text.replace(/,\\n *\\"(?:targets|checkTargets)\\": \[[^\]]*\]/g, "");
     const offLater = later(off.recording.structured);
-    const onLater = later(on.recording.structured);
+    // 手 4d（#666）：ids on の B1 は「要る検査の骨組み」の塊と R-w11-07 の旗 ids の文を持つ（ids の走りだけ）。その分を戻して比べる
+    expect(later(on.recording.structured).filter((request) => REQUIRED_VALIDATIONS_BLOCK.test(request.input)).map((request) => request.schemaName)).toEqual([WRITE_V11A_SCHEMA_NAME]);
+    const onLater = later(on.recording.structured).map(withoutRequiredValidations);
     expect(onLater.map((request) => request.schemaName)).toEqual(["semantic-check", "test-spec", "declaration-v11a", "decl-check"]);
     // 手 3d（#624）から構造の要件は T2 の要求に無いので、検査の対象の欄を持つのは C3 だけ
     expect(/\\"targets\\": \[/.test(JSON.stringify(onLater[0]))).toBe(true);
@@ -4342,7 +4349,12 @@ describe("旗 v12.ids：直す段の上限の停止に上限の名前と数を�
       });
       expect(request.input).toBe(recording.tools[0]?.input);
       expect(request.input.endsWith("</data>")).toBe(true);
-      expect(request.input.lastIndexOf("<data name=")).toBe(request.input.indexOf(`<data name="${repairStage.REPAIR_STEP_LIMITS_DATA_NAME}">`));
+      // 手 4d（#666）：ids on の直す段は、上限の塊の後ろの末尾に「要る検査の骨組み」の塊を足す。それを外すと上限の塊が末尾
+      expect(REQUIRED_VALIDATIONS_BLOCK.test(request.input)).toBe(true);
+      expect(request.input.lastIndexOf("<data name=")).toBe(request.input.indexOf(`<data name="${repairStage.REPAIR_REQUIRED_VALIDATIONS_DATA_NAME}">`));
+      const withoutSkeleton = withoutRequiredValidations(request).input;
+      expect(withoutSkeleton.endsWith("</data>")).toBe(true);
+      expect(withoutSkeleton.lastIndexOf("<data name=")).toBe(withoutSkeleton.indexOf(`<data name="${repairStage.REPAIR_STEP_LIMITS_DATA_NAME}">`));
     }
     expectNoAcceptanceMaterial(recording.tools.map((request) => request.input));
   });
@@ -4547,5 +4559,143 @@ describe("窓口の条件（Issue #665）：ids off の要約・診断・stage-r
     // 再開の材料にも limit が無い
     expect(JSON.stringify(withLimit)).not.toContain('"limit":');
     expect(JSON.stringify(withLimit)).not.toContain("repairStepTurns");
+  });
+});
+
+// ── 旗 v12.ids：B1 と直す段に要る検査の骨組みを渡す（手 4d。Issue #666）──────────────────────────────
+
+describe("旗 v12.ids：B1（初回・作り直し）と直す段に、その時点の有効な組から導いた要る検査の骨組みを渡す（Issue #666）", () => {
+  const IDS_ONLY = { ledger: true, ids: true };
+  /** 検査の名前だけを表の項目の名前と別にした宣言（同じ式。結び付けは名前で結ぶので結ばない） */
+  const RENAMED_YAML = replaced(RUN_YAML, "  - name: amount\n    entity: item", "  - name: positive\n    entity: item");
+  const R07 = WRITE_V11A_RULE_DEFINITIONS.find((definition) => definition.id === "R-w11-07");
+  const writeOf = (requests: readonly LlmStructuredRequest[]) => requests.filter((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME);
+  type Entry = { readonly entity: string | null; readonly name: string; readonly rowId: string; readonly rowKind: string; readonly testIds: readonly string[]; readonly conflict: boolean };
+  /** 納品物の試験の組（T2 で固定した組）の validate の試験 */
+  /** B4 の結果（不一致・未解決の試験 ID）を版ごとに記録する（評価口はそのまま） */
+  function spyRunTests() {
+    const reports: { readonly mismatches: readonly string[]; readonly unresolved: readonly string[] }[] = [];
+    const original = evaluateModule.createV11aEvaluator;
+    vi.spyOn(evaluateModule, "createV11aEvaluator").mockImplementation((input) => {
+      const evaluator = original(input);
+      return {
+        ...evaluator,
+        runTests: (app, context, correspondence) => {
+          const report = evaluator.runTests(app, context, correspondence);
+          reports.push({ mismatches: report.mismatches.map((entry) => entry.testId), unresolved: report.unresolved.map((entry) => entry.testId) });
+          return report;
+        },
+      };
+    });
+    return reports;
+  }
+  const validateTestsOf = (bundle: AssembledBundle | null) =>
+    (artifactOf(bundle, V11A_ARTIFACT_NAMES.testSpec) as { readonly suite: { readonly tests: readonly FixedTest[] } }).suite.tests.filter(
+      (test) => test.operation === "validate",
+    );
+
+  it("書く台本：B1 の要求の「固定した試験」の後に骨組みがあり（項目 amount の validate 試験だけ・競合なし）、R-w11-07 は旗 ids の文。B1 が骨組みどおりの検査を書けば初版の B4 の validate は結び付き、不一致 0・今までの門で full", async () => {
+    const reports = spyRunTests();
+    const { result, recording } = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_ONLY });
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    const [write] = writeOf(recording.structured);
+    if (write === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+    const names = [...write.input.matchAll(/<data name="([^"]+)">/g)].map((match) => match[1]);
+    expect(names).toEqual([...WRITE_V11A_DATA_NAMES, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME]);
+    const skeleton = dataBlockOf(write.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME) as readonly Entry[];
+    const amountRow = MAPPED_IDS.rows.find((row) => row.kind === "field" && row.name === "amount");
+    const validated = validateTestsOf(result.bundle).filter((test) => test.target.roleId === amountRow?.id);
+    expect(validated.length).toBeGreaterThan(0);
+    expect(skeleton).toEqual([{ entity: "item", name: "amount", rowId: amountRow?.id, rowKind: "field", testIds: validated.map((test) => test.id), conflict: false }]);
+    expect(write.rules).toContain(WRITE_V11A_IDS_R07_DEFINITION.text);
+    expect(write.rules).not.toContain(R07?.text);
+    // 初版の B4：validate の試験は不一致・未解決に無い
+    expect(reports[0]?.mismatches.filter((id) => skeleton[0]?.testIds.includes(id))).toEqual([]);
+    expect(reports[0]?.unresolved.filter((id) => skeleton[0]?.testIds.includes(id))).toEqual([]);
+    expectNoAcceptanceMaterial([write.input, ...(write.rules ?? [])]);
+  });
+
+  it("書かない台本（検査の名前だけ別）：初版は今までどおり不一致になり（結び直さない）、直す段の入力の末尾に B1 と同じ骨組みが載る。直した版が骨組みどおりなら full", async () => {
+    const reports = spyRunTests();
+    const { result, recording } = await runScenario([...idsHead({ yaml: RENAMED_YAML }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())], {
+      flags: IDS_ONLY,
+    });
+    const [write] = writeOf(recording.structured);
+    if (write === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+    const skeleton = dataBlockOf(write.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME) as readonly Entry[];
+    const testIds = skeleton.flatMap((entry) => entry.testIds);
+    expect(testIds.length).toBeGreaterThan(0);
+    expect(reports[0]?.mismatches).toEqual(expect.arrayContaining(testIds));
+    expect(recording.tools.length).toBeGreaterThan(0);
+    for (const request of recording.tools) {
+      expect(dataBlockOf(request.input, repairStage.REPAIR_REQUIRED_VALIDATIONS_DATA_NAME)).toEqual(skeleton);
+      expect(request.input.lastIndexOf("<data name=")).toBe(request.input.indexOf(`<data name="${repairStage.REPAIR_REQUIRED_VALIDATIONS_DATA_NAME}">`));
+      expect(request.rules).toEqual(repairStage.REPAIR_RULES);
+    }
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+
+  it("書かない台本のまま直しても名前が別なら不一致が残り、full は出ない（骨組みを渡しても結び付かない版は今までどおり不一致）", async () => {
+    const { result } = await runScenario([...idsHead({ yaml: RENAMED_YAML }), structured(acceptAll()), repairDone(RENAMED_YAML), structured(acceptAll())], { flags: IDS_ONLY });
+    expect(result.outcome.verdict).not.toBe("full");
+  });
+
+  it("off（旗を省いた走り・ledger だけ on）：同じ台本で B1・直す段に骨組みの塊が無く、R-w11-07 は元の文", async () => {
+    const offRuns = [
+      await runScenario([...head({ yaml: RENAMED_YAML }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())]),
+      await runScenario([...head({ yaml: RENAMED_YAML, table: TABLE_ON }), structured(acceptAll()), repairDone(RUN_YAML), structured(acceptAll())], { flags: { ledger: true } }),
+    ];
+    for (const { recording } of offRuns) {
+      const writes = writeOf(recording.structured);
+      expect(writes.length).toBeGreaterThan(0);
+      for (const request of writes) {
+        expect(request.input).not.toContain(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME);
+        expect(request.rules).toContain(R07?.text);
+        expect(request.rules).not.toContain(WRITE_V11A_IDS_R07_DEFINITION.text);
+      }
+      expect(recording.tools.length).toBeGreaterThan(0);
+      for (const request of recording.tools) expect(request.input).not.toContain(repairStage.REPAIR_REQUIRED_VALIDATIONS_DATA_NAME);
+    }
+  });
+
+  it("作り直し（旗 search-repair と ids）：作り直しの B1 の要求も「固定した試験」の後に同じ骨組みを持ち、R-w11-07 は旗 ids の文", async () => {
+    const { result, recording } = await runScenario(
+      [
+        ...idsHead({ yaml: RENAMED_YAML }),
+        structured(acceptAll()),
+        repairDone(RENAMED_YAML),
+        structured(acceptAll()),
+        repairDone(RENAMED_YAML),
+        structured(acceptAll()),
+        structured({ declaration: RUN_YAML }),
+        structured(acceptAll()),
+      ],
+      { flags: { ledger: true, searchRepair: true, ids: true } },
+    );
+    const writes = writeOf(recording.structured);
+    expect(writes).toHaveLength(2);
+    const [first, rewrite] = writes;
+    if (first === undefined || rewrite === undefined) throw new Error("前提が壊れた");
+    const names = [...rewrite.input.matchAll(/<data name="([^"]+)">/g)].map((match) => match[1]);
+    expect(names).toEqual([...WRITE_V11A_DATA_NAMES, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, WRITE_V11A_REWRITE_DATA_NAME]);
+    expect(dataBlockOf(rewrite.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME)).toEqual(dataBlockOf(first.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME));
+    expect(rewrite.rules).toContain(WRITE_V11A_IDS_R07_DEFINITION.text);
+    expect(rewrite.rules).not.toContain(R07?.text);
+    // 探索型の直しの直す段（一番良い版を直す）にも同じ骨組みが載る
+    expect(recording.tools.length).toBeGreaterThan(0);
+    for (const request of recording.tools) {
+      expect(dataBlockOf(request.input, repairStage.REPAIR_REQUIRED_VALIDATIONS_DATA_NAME)).toEqual(dataBlockOf(first.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME));
+    }
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+  });
+
+  it("同じ台本で 2 回同じ要求（骨組みは決定的）。段の記録・要約・納品物は骨組みの塊の有無で変わらない（記録を足さない）", async () => {
+    const first = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_ONLY });
+    const second = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_ONLY });
+    expect(JSON.stringify(second.recording.structured.map(({ signal: _signal, ...rest }) => rest))).toBe(
+      JSON.stringify(first.recording.structured.map(({ signal: _signal, ...rest }) => rest)),
+    );
+    for (const value of [first.result.record, first.result.summary]) expect(JSON.stringify(value)).not.toContain(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME);
+    expect(first.result.bundle?.artifacts.some((artifact) => artifact.text.includes(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME))).toBe(false);
   });
 });
