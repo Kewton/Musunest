@@ -23,7 +23,7 @@ import {
   type NameTableDraft,
   type NameTableRow,
 } from "../names.js";
-import { STRUCTURAL_TARGET_KINDS, type StructuralAssertionKind } from "../../fixed-test.js";
+import { STRUCTURAL_ASSERTIONS, STRUCTURAL_TARGET_KINDS, type StructuralAssertionKind } from "../../fixed-test.js";
 import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } from "../../v12/ledger.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
 import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
@@ -943,6 +943,22 @@ export function withCheckTargets(table: NameTable): NameTable {
   };
 }
 
+/**
+ * 検査ごとの対象を、C2 の応答の checks（検査の種類ごとの欄。種類の固定の順で、使わない種類は null。view-shows だけ sourceId を
+ * 持つ。Issue #682）にする。同じ種類が 2 件ある対象は欄に書けないので例外にする
+ */
+export function checkFieldsResponseOf(targets: readonly NameTableCheckTarget[]): Record<string, unknown> {
+  return Object.fromEntries(
+    STRUCTURAL_ASSERTIONS.map((check) => {
+      const found = targets.filter((target) => target.check === check);
+      if (found.length > 1) throw new Error(`前提が壊れた：${check} の対象が 2 件以上ある`);
+      const target = found[0];
+      if (target === undefined) return [check, null];
+      return [check, check === "view-shows" ? { targetId: target.targetId, sourceId: target.sourceId } : { targetId: target.targetId }];
+    }),
+  );
+}
+
 /** C1 の 3 束と C2 の応答（表はコードの形の ID・C1 が組む順であること。`withCodeIds` の結果） */
 export interface IdsResponses {
   readonly entities: Record<string, unknown>;
@@ -956,7 +972,8 @@ export function idsResponsesOf(list: RequirementList, table: NameTable, ledger?:
   const withAggregate = (ledger?.aggregateKinds.length ?? 0) > 0;
   const rowsOf = (kind: NameTableRow["kind"]) => table.rows.filter((entry) => entry.kind === kind);
   const computationType = (entry: NameTableRow) => entry.type as { valueType: string; scope: string; form: string; aggregate?: ComputationAggregate | null };
-  // C2 の応答の要件ごとの 1 件（一覧の順。構造の検査は検査ごとの対象の写像の並び。所属は表の所属のまま。Issue #594）
+  // C2 の応答の要件ごとの 1 件（一覧の順。構造の検査は検査の種類ごとの欄、ほかの確かめ方の checks は null。所属は表の所属のまま。
+  // Issue #594・#682）
   const mappingEntries = list.requirements.map((item) => {
     const ownership = table.ownership.find((entry) => entry.requirementId === item.id);
     const verification = table.verification.find((entry) => entry.requirementId === item.id);
@@ -966,7 +983,9 @@ export function idsResponsesOf(list: RequirementList, table: NameTable, ledger?:
     }
     const { requirementId: _omit, ...rest } = verification;
     const checks =
-      verification.kind === "structural" ? (verification.targets ?? checkTargetsOf(table, item.id, verification.checks)) : [];
+      verification.kind === "structural"
+        ? checkFieldsResponseOf(verification.targets ?? checkTargetsOf(table, item.id, verification.checks))
+        : null;
     const { targets: _targets, ...withoutTargets } = rest as typeof rest & { readonly targets?: unknown };
     return {
       requirementId: item.id,

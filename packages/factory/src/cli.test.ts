@@ -40,9 +40,10 @@ import {
   ENVELOPE_SCHEMA_NAME,
   ENVELOPE_SCHEMA_NAME_V11A,
   ENVELOPE_SCHEMA_V11A,
+  ENVELOPE_SCHEMA_V12_IDS,
   STAGE_ENVELOPE_ENTRIES,
   STAGE_ENVELOPE_ENTRIES_V11A,
-  STAGE_ENVELOPE_ENTRIES_V12,
+  STAGE_ENVELOPE_ENTRIES_V12_IDS,
   buildStageBranch,
   type EnvelopeId,
 } from "./schema-envelope.js";
@@ -1277,7 +1278,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(v12.code).toBe(EXIT_OK);
     expect(v1Spy).not.toHaveBeenCalled();
     expect(v11aSpy).toHaveBeenCalledTimes(2);
-    expect(v12.makeClient.mock.calls[0]).toEqual([{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.2" }]);
+    // 旗 ids が on の v1.2 は、C2 の枝を検査の種類ごとの欄にした識別子 v1.2-ids の封筒（Issue #682）
+    expect(v12.makeClient.mock.calls[0]).toEqual([{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.2-ids" }]);
     // 表を組む段：v1.2 は C1 の 3 束と C2、v1.1a は T1（Issue #593）
     expect(v12.recording.structured.slice(0, 4).map((request) => request.schemaName)).toEqual(["vocabulary-entities", "vocabulary-fields", "vocabulary-behaviors", "mapping"]);
     expect(v11a.recording.structured[0]?.schemaName).toBe("name-table");
@@ -1627,7 +1629,7 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     const run = await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: segment0(), pipeline: "v1.2" });
     expect(run.code).toBe(EXIT_OK);
     // 一気通貫の v1.2 と同じ封筒を選ぶ
-    expect(run.makeClient.mock.calls).toEqual([[{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.2" }]]);
+    expect(run.makeClient.mock.calls).toEqual([[{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.2-ids" }]]);
     expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE]);
     const record = await stageRecordOf(dir);
     expect(new Set(stagesOf(record))).toEqual(new Set(["vocabulary", "mapping", "semantic-check"]));
@@ -1842,10 +1844,13 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
 
   const v12ReturnToPlan = (): RecordedCall[] => [...v12Head(), ...v11aReturnToPlan().slice(4)];
 
-  /** 走りの段の要求を、入口が作った adapter の封筒で送り直した組（`--pipeline v1.2` は v1.2 の封筒。Issue #588） */
+  /**
+   * 走りの段の要求を、入口が作った adapter の封筒で送り直した組（`--pipeline v1.2` は v1.2 の封筒。Issue #588。旗 ids が on の
+   * v1.2 は識別子 v1.2-ids。Issue #682）
+   */
   async function exchangesOfRun(run: Awaited<ReturnType<typeof runV11aCli>>, pipeline: "v1.1a" | "v1.2" = "v1.1a"): Promise<WireExchange[]> {
     const options = run.makeClient.mock.calls[0]?.[0];
-    expect(options).toMatchObject({ envelope: pipeline });
+    expect(options).toMatchObject({ envelope: pipeline === "v1.2" ? "v1.2-ids" : pipeline });
     return sentExchangesOf(run.recording.structured, options?.envelope);
   }
 
@@ -1868,8 +1873,8 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
         }
       }
       // 封筒に載る全段を照らした（v1.2 は旗 v12.ids で T1 を呼ばず、C1 の 3 束と C2 を呼ぶ。Issue #593）
-      const expected = pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage).filter((stage) => stage !== "name-table") : v11aStages;
-      const envelopeStages = pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage) : v11aStages;
+      const expected = pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12_IDS.map((entry) => entry.stage).filter((stage) => stage !== "name-table") : v11aStages;
+      const envelopeStages = pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12_IDS.map((entry) => entry.stage) : v11aStages;
       expect([...seen].filter((stage) => envelopeStages.includes(stage)).sort()).toEqual([...expected].sort());
     });
   }
@@ -1899,7 +1904,7 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
 
   for (const pipeline of ["v1.1a", "v1.2"] as const) {
     it(`${pipeline}：完走と差し戻しの走りで観測した構造化出力の名前は、封筒の一覧か許可の一覧にある。許可に無い名前を足した段は落ちる`, async () => {
-      const envelopeStages = (pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12 : STAGE_ENVELOPE_ENTRIES_V11A).map((entry) => entry.stage);
+      const envelopeStages = (pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12_IDS : STAGE_ENVELOPE_ENTRIES_V11A).map((entry) => entry.stage);
       const observed = new Set<string>();
       for (const route of routesOf(pipeline)) {
         const run = await runV11aCli({ dir: `${directory}/names-${pipeline}-${route.name}`, calls: route.calls, pipeline });
@@ -1968,10 +1973,10 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
   const formatOf = (exchange: WireExchange) =>
     (exchange.body["text"] as { readonly format: { readonly name: string; readonly schema: Record<string, unknown> } }).format;
 
-  it("v1.2：完走と差し戻しの道で、封筒に載る段（T1 を除く 9 段）すべての送信の名前と schema のバイト列が同じで、名前が stage-envelope-v12（Issue #588・#593）", async () => {
+  it("v1.2：完走と差し戻しの道で、封筒に載る段（T1 を除く 9 段）すべての送信の名前と schema のバイト列が同じで、名前が stage-envelope-v12・schema が識別子 v1.2-ids の封筒（Issue #588・#593・#682）", async () => {
     // v1.1α の 6 段に旗 v12.ids の C1 の 3 束と C2 を足した 10 段。ids on の走りは T1 を呼ばない
-    const v12Stages = STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage).filter((stage) => stage !== "name-table");
-    expect(STAGE_ENVELOPE_ENTRIES_V12).toHaveLength(10);
+    const v12Stages = STAGE_ENVELOPE_ENTRIES_V12_IDS.map((entry) => entry.stage).filter((stage) => stage !== "name-table");
+    expect(STAGE_ENVELOPE_ENTRIES_V12_IDS).toHaveLength(10);
     expect(v12Stages).toHaveLength(9);
     const seen = new Set<string>();
     const sent = new Set<string>();
@@ -1981,12 +1986,13 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
       for (const exchange of exchanges) {
         expectSentSchemaIsStageSchema(exchange);
         const format = formatOf(exchange);
-        if (!STAGE_ENVELOPE_ENTRIES_V12.some((entry) => entry.stage === exchange.request.schemaName)) {
+        if (!STAGE_ENVELOPE_ENTRIES_V12_IDS.some((entry) => entry.stage === exchange.request.schemaName)) {
           // 封筒に載らない口（判定の口など）は、その schema をそのまま送る
           expect(format.name, exchange.request.schemaName).toBe(exchange.request.schemaName);
           continue;
         }
         expect(format.name, exchange.request.schemaName).toBe("stage-envelope-v12");
+        expect(format.schema, exchange.request.schemaName).toEqual(ENVELOPE_SCHEMA_V12_IDS);
         sent.add(JSON.stringify({ name: format.name, schema: format.schema }));
         seen.add(exchange.request.schemaName);
       }

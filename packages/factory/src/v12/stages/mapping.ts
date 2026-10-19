@@ -14,15 +14,21 @@
 //     作り直す。C2' に落ちても形の再試行は無い（08 §4.1）——`unmet`（`attempts` 1）を返し、呼ぶ側は前回の写像のまま拒否の要件を
 //     持ち越す
 //
-// 構造の検査の対象の欄（Issue #594。方法論 03 の F4・H1・H2）：`verification.checks` は `[{check, targetId, sourceId}]` の並び。
-// コードが対象の実在・種類・view-shows の対を照らし、対象の行を所属に足す（basis dependency・reason に検査の種類）。
+// 構造の検査の対象の欄（Issue #594。方法論 03 の F4・H1・H2）：コードが対象の実在・種類・view-shows の対を照らし、対象の行を所属に
+// 足す（basis dependency・reason に検査の種類）。
+//
+// 検査の種類ごとの欄（Issue #682。方法論 03 の H3）：表の契約は「checks は検査の種類の集合」（表の検査が種類の重なりを断る）だが、
+// 並びの schema は重なりを許し、初回の形の落ちの多くが重なりだった。`verification.checks` を検査の種類ごとの欄（全部 required・
+// 各欄は null か `{targetId}`、view-shows だけ `{targetId, sourceId}`）を持つ写像（structural 以外は null）にして、重なりを**出せない
+// 形**にする。復号は欄を種類の固定の順（`STRUCTURAL_ASSERTIONS`）で `[{check, targetId, sourceId}]` に写してから、今の照合と
+// 表の検査（重なり・checks 無し・孤立行・制約 ID）を全部そのまま掛ける（重なりの検査は手で組んだ表・偽物の LLM に効く）。
 //
 // 参照の照合の数（`ReferenceCounts`）：照らした参照＝応答の要件 ID・所属の ID・検査の対象の ID の全部、知らない ID＝一覧に無い
 // 要件 ID・行に無い所属や対象の ID、重複＝同じ要件 2 件・同じ要件の中の同じ行、別の束の ID＝要件 ID の欄に行の ID の形・所属や
 // 対象の欄に一覧の要件 ID。
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import type { CallGateway } from "../../call.js";
-import { REQUIREMENT_NATURES, STRUCTURAL_ASSERTIONS, isStructuralAssertionKind } from "../../fixed-test.js";
+import { REQUIREMENT_NATURES, STRUCTURAL_ASSERTIONS } from "../../fixed-test.js";
 import { ROLE_OWNERSHIP_BASES, type RequirementList } from "../../pipeline.js";
 import {
   buildStructuredRequest,
@@ -76,12 +82,16 @@ export const MAPPING_DATA_NAMES = {
 
 /** C2 の固定文（構造の検査の対象の欄の形。要件の欠落・重複・一覧に無い ID は表の検査 `checkMappedTable` の文） */
 export const MAPPING_MESSAGES = {
-  checksShape: `checks は検査ごとの写像（check は ${STRUCTURAL_ASSERTIONS.join("・")} のいずれか、targetId は空でない文字列、sourceId は文字列か null）の並びであること`,
+  checksShape: `checks は検査の種類（${STRUCTURAL_ASSERTIONS.join("・")}）ごとの欄を全部持つ写像か null で、各欄は null か対象の写像（targetId は空でない文字列。view-shows だけ sourceId も空でない文字列で持ち、ほかの欄は sourceId を持たない）であること`,
 } as const;
 
 /** 構造の検査の書き方（R-map-03 と台帳の文の頭で同じ文） */
 const STRUCTURAL_RULE_TEXT =
-  "構造で確かめるなら kind を structural にし、reason に理由、checks に構造の検査を 1 件ずつ並べる。検査ごとに check に検査の種類、targetId に検査が見る行の ID（field-type は項目、action-kind・action-unconditioned・write-anonymous は操作、view-shows は画面、aggregate-no-period は計算）、sourceId に view-shows なら画面と同じ entity の項目か計算の行の ID（entity を持たない画面は entity を持たない計算の ID）、ほかの検査は null を書く。検査の対象の行はコードが所属に足す。";
+  "構造で確かめるなら kind を structural にし、reason に理由を書く。checks は検査の種類ごとの欄で、同じ種類の検査は要件ごとに 1 件である。使う種類の欄に targetId で検査が見る行の ID（field-type は項目、action-kind・action-unconditioned・write-anonymous は操作、view-shows は画面、aggregate-no-period は計算）を書き、view-shows の欄は sourceId に画面と同じ entity の項目か計算の行の ID（entity を持たない画面は entity を持たない計算の ID）も書き、使わない種類の欄は null にする。同じ種類の検査を 2 つ以上の行に掛けなければ確かめられない要件（複数の操作・複数の項目・1 つの画面と複数の項目）は structural にせず、kind を fixed-test にしてそれらの行を所属させる。検査の対象の行はコードが所属に足す。";
+
+/** 書けない要件の書き方（R-map-03 と台帳の文の頭で同じ文。制約 ID の 1 件以上は Issue #682） */
+const UNRESOLVED_RULE_TEXT =
+  "宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に書けない根拠となる文書の制約 ID を 1 件以上（文書の制約 ID の一覧にあるものだけ）書く。根拠となる制約 ID を一覧から挙げられない要件は unresolved にしない。";
 
 /** C2 の規則の定義（ID は `R-map-nn`） */
 export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
@@ -99,9 +109,10 @@ export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
   {
     id: "R-map-03",
-    text: `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT}宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に根拠にした文書の制約 ID（文書の制約 ID の一覧にあるものだけ）を書く。要件の決まりが選択肢の項目の既定値だけなら kind を default-value にし、value にそのキー（その項目の options のキー）を書き、その項目だけを所属させる。使わない欄は null か空の並びにする。`,
+    text: `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT}${UNRESOLVED_RULE_TEXT}要件の決まりが選択肢の項目の既定値だけなら kind を default-value にし、value にそのキー（その項目の options のキー）を書き、その項目だけを所属させる。使わない欄は null か空の並びにする。`,
     why: "確かめ方を所属と組で固定し、書けない要件は理由と制約 ID つきで持ち越す（T1 の R-nt-08）。構造の検査の対象は規則の文で所属を求めず、応答の欄で行の ID を書かせて対と所属をコードが導く（方法論 03 の F4・H1・H2）",
-    since: "Issue #593（構造の検査の対象の欄は Issue #594）",
+    since:
+      "Issue #593（構造の検査の対象の欄は Issue #594。検査の種類ごとの欄・同じ種類の検査を 2 つ以上の行に掛ける要件の fixed-test への選び方・未解決の制約 ID の 1 件以上は Issue #682）",
   },
   {
     id: "R-map-04",
@@ -112,7 +123,7 @@ export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
 ];
 
 /** 性質の台帳の文を差し込む規則（R-map-03。T1 の R-nt-08 と同じ作法） */
-const MAPPING_LEDGER_RULE_HEAD = `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT}宣言で書けない要件は kind を unresolved にし、reason に理由、constraintIds に根拠にした文書の制約 ID（文書の制約 ID の一覧にあるものだけ）を書く。`;
+const MAPPING_LEDGER_RULE_HEAD = `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT}${UNRESOLVED_RULE_TEXT}`;
 const MAPPING_LEDGER_RULE_TAIL = "使わない欄は null か空の並びにする。";
 
 /** C2 の規則の定義（旗 `v12.ledger` が on なら R-map-03 を台帳の文で組み直す） */
@@ -125,8 +136,64 @@ export function mappingRuleDefinitionsOf(ledger?: LedgerView): readonly RuleDefi
   );
 }
 
+/**
+ * 検査の種類ごとの欄の schema（Issue #682）。欄は null か対象の写像（view-shows だけ `{targetId, sourceId}`）。nullable は type に
+ * object と null の並びで表す（strict の走査は全節に type を求めるので anyOf を使わない）
+ */
+function checkFieldSchemaOf(check: (typeof STRUCTURAL_ASSERTIONS)[number]): Record<string, unknown> {
+  const paired = check === "view-shows";
+  return {
+    type: ["object", "null"],
+    additionalProperties: false,
+    required: paired ? ["targetId", "sourceId"] : ["targetId"],
+    properties: {
+      targetId: { type: "string", description: "検査が見る行の ID" },
+      ...(paired ? { sourceId: { type: "string", description: "画面と組にする行の ID（画面と同じ entity の項目か計算）" } } : {}),
+    },
+  };
+}
+
+/** 確かめ方の checks の schema：検査の種類ごとの欄（全部 required・固定の順）を持つ写像か null（Issue #682） */
+const CHECK_FIELDS_SCHEMA: Record<string, unknown> = {
+  type: ["object", "null"],
+  additionalProperties: false,
+  required: [...STRUCTURAL_ASSERTIONS],
+  properties: Object.fromEntries(STRUCTURAL_ASSERTIONS.map((check) => [check, checkFieldSchemaOf(check)])),
+};
+
+/**
+ * 旧の checks の schema（検査ごとの対象の写像の並び。Issue #594）。**段の要求には使わない。** 識別子 `v1.2` の封筒（旗 ids off の
+ * v1.2 の走りが送る封筒）のバイト列を保つためだけに残す（Issue #682 で段の要求は検査の種類ごとの欄に替えた。旧の枝は封筒の
+ * C2 の枝としてだけ残り、ids on の走りは識別子 `v1.2-ids` の封筒で新しい枝を送る）
+ */
+const LEGACY_CHECKS_SCHEMA: Record<string, unknown> = {
+  type: "array",
+  items: {
+    type: "object",
+    additionalProperties: false,
+    required: ["check", "targetId", "sourceId"],
+    properties: {
+      check: { type: "string", enum: [...STRUCTURAL_ASSERTIONS] },
+      targetId: { type: "string", description: "検査が見る行の ID" },
+      sourceId: { type: ["string", "null"], description: "view-shows の組の行の ID（ほかの検査は null）" },
+    },
+  },
+};
+
 /** C2 の JSON Schema（静的。確かめ方の kind の enum は台帳の種類の並び。strict の規則に合わせる） */
 export function mappingSchemaOf(ledger?: LedgerView): Record<string, unknown> {
+  return mappingSchemaWith(CHECK_FIELDS_SCHEMA, ledger);
+}
+
+/**
+ * 旧の C2 の JSON Schema（checks が並びの形。Issue #594 の形）。**段の要求には使わない**——識別子 `v1.2` の封筒の C2 の枝を
+ * Issue #682 の前とバイト列で同じに保つためだけに使う（`LEGACY_CHECKS_SCHEMA`）
+ */
+export function legacyMappingSchemaOf(ledger?: LedgerView): Record<string, unknown> {
+  return mappingSchemaWith(LEGACY_CHECKS_SCHEMA, ledger);
+}
+
+function mappingSchemaWith(checks: Record<string, unknown>, ledger?: LedgerView): Record<string, unknown> {
   return {
     type: "object",
     additionalProperties: false,
@@ -161,19 +228,7 @@ export function mappingSchemaOf(ledger?: LedgerView): Record<string, unknown> {
                 kind: { type: "string", enum: [...(ledger?.verificationKinds ?? NAME_TABLE_VERIFICATION_KINDS)] },
                 value: { type: ["string", "null"], description: "確かめ方の値（選択肢のキー。ほかの種類は null）" },
                 reason: { type: ["string", "null"] },
-                checks: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    additionalProperties: false,
-                    required: ["check", "targetId", "sourceId"],
-                    properties: {
-                      check: { type: "string", enum: [...STRUCTURAL_ASSERTIONS] },
-                      targetId: { type: "string", description: "検査が見る行の ID" },
-                      sourceId: { type: ["string", "null"], description: "view-shows の組の行の ID（ほかの検査は null）" },
-                    },
-                  },
-                },
+                checks,
                 constraintIds: { type: "array", items: { type: "string" } },
               },
             },
@@ -223,10 +278,39 @@ function skeletonProblems(output: unknown): readonly Problem[] {
   return items.flatMap((item, index) => (isRecord(item) ? [] : [{ field: `requirements[${String(index)}]`, message: "写像（object）であること" }]));
 }
 
-const checksOf = (entry: Record<string, unknown>): readonly unknown[] => {
+/** 応答の確かめ方の検査の種類ごとの欄のうち、写像の欄（種類の固定の順。写像でない checks は無し） */
+const checkFieldsOf = (entry: Record<string, unknown>): readonly Record<string, unknown>[] => {
   const verification = entry["verification"];
-  return isRecord(verification) && Array.isArray(verification["checks"]) ? (verification["checks"] as readonly unknown[]) : [];
+  if (!isRecord(verification)) return [];
+  const checks = verification["checks"];
+  return isRecord(checks) ? STRUCTURAL_ASSERTIONS.flatMap((check) => (isRecord(checks[check]) ? [checks[check]] : [])) : [];
 };
+
+const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
+  Object.keys(value).length === keys.length && keys.every((key) => key in value);
+
+const isNonEmptyString = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
+
+/**
+ * checks（検査の種類ごとの欄）を、種類の固定の順（`STRUCTURAL_ASSERTIONS`）の検査の対象の並びに写す（Issue #682）。null は空の
+ * 並び。欄が欠ける・余る、欄が null でも対象の写像でもない、targetId・view-shows の sourceId が空でない文字列でない、view-shows
+ * でない欄が sourceId を持つ、のどれかなら形が合わない（undefined）。重なりは落とさない（欄の写像からは出ない）
+ */
+function readCheckFields(checks: unknown): readonly NameTableCheckTarget[] | undefined {
+  if (checks === null) return [];
+  if (!isRecord(checks) || !hasExactKeys(checks, STRUCTURAL_ASSERTIONS)) return undefined;
+  const targets: NameTableCheckTarget[] = [];
+  for (const check of STRUCTURAL_ASSERTIONS) {
+    const field = checks[check];
+    if (field === null) continue;
+    if (!isRecord(field)) return undefined;
+    const paired = check === "view-shows";
+    if (!hasExactKeys(field, paired ? ["targetId", "sourceId"] : ["targetId"]) || !isNonEmptyString(field["targetId"])) return undefined;
+    if (paired && !isNonEmptyString(field["sourceId"])) return undefined;
+    targets.push({ check, targetId: field["targetId"], sourceId: paired ? (field["sourceId"] as string) : null });
+  }
+  return targets;
+}
 
 /** 応答の参照を数える（純粋。ID の値は数に入れない） */
 export function countMappingReferences(list: RequirementList, rows: readonly NameTableRow[], output: unknown, tally: ReferenceTally): void {
@@ -258,17 +342,16 @@ export function countMappingReferences(list: RequirementList, rows: readonly Nam
     const roles = Array.isArray(entry["roles"]) ? (entry["roles"] as readonly unknown[]) : [];
     const seenRoles = new Set<string>();
     for (const role of roles) countRowId(isRecord(role) ? role["id"] : undefined, seenRoles);
-    for (const check of checksOf(entry)) {
-      if (!isRecord(check)) continue;
-      countRowId(check["targetId"]);
-      countRowId(check["sourceId"]);
+    for (const field of checkFieldsOf(entry)) {
+      countRowId(field["targetId"]);
+      countRowId(field["sourceId"]);
     }
   }
 }
 
 /**
- * 応答の要件ごとの 1 件の形（検査の対象の欄を読んで検査の種類の並びに写し、所属・確かめ方・分類の形は T1 の下書きと同じ関数）。
- * 構造で確かめる要件は確かめ方に対象を持たせる。合わなければ問題に足して undefined
+ * 応答の要件ごとの 1 件の形（検査の種類ごとの欄を読んで種類の固定の順の並びに写し、所属・確かめ方・分類の形は T1 の下書きと同じ
+ * 関数）。構造で確かめる要件は確かめ方に対象を持たせる。合わなければ問題に足して undefined
  */
 function shapeOfEntry(
   value: unknown,
@@ -276,26 +359,17 @@ function shapeOfEntry(
   problems: Problem[],
   ledger?: LedgerView,
 ): MappingEntry | undefined {
-  let targets: NameTableCheckTarget[] | undefined;
+  let targets: readonly NameTableCheckTarget[] | undefined;
   let item = value;
-  if (isRecord(value) && isRecord(value["verification"]) && Array.isArray(value["verification"]["checks"])) {
+  if (isRecord(value) && isRecord(value["verification"])) {
     const verification = value["verification"];
-    const raw = verification["checks"] as readonly unknown[];
-    const read = raw.map((check): NameTableCheckTarget | undefined =>
-      isRecord(check) &&
-      isStructuralAssertionKind(check["check"]) &&
-      typeof check["targetId"] === "string" &&
-      check["targetId"].trim() !== "" &&
-      (check["sourceId"] === null || typeof check["sourceId"] === "string")
-        ? { check: check["check"], targetId: check["targetId"], sourceId: check["sourceId"] }
-        : undefined,
-    );
-    if (read.some((target) => target === undefined)) {
+    const read = readCheckFields(verification["checks"]);
+    if (read === undefined) {
       problems.push({ field: `${field}.verification.checks`, message: MAPPING_MESSAGES.checksShape });
       return undefined;
     }
-    targets = read as NameTableCheckTarget[];
-    item = { ...value, verification: { ...verification, checks: targets.map((target) => target.check) } };
+    targets = read;
+    item = { ...value, verification: { ...verification, checks: read.map((target) => target.check) } };
   }
   const entry = shapeOfMappingEntry(item, field, problems, ledger === undefined ? {} : { ledger });
   if (entry === undefined || entry.verification.kind !== "structural") return entry;
