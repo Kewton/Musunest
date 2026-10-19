@@ -931,9 +931,11 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
     expect(mappingRecordsOf(run).map((record) => [record.status, record.retries.shape])).toEqual([["failed", 1]]);
     const file = run.result.diagnostics.find((artifact) => artifact.path === "diagnostics/rejected-mapping.json");
     const candidates = (JSON.parse(file?.text ?? "{}") as { readonly candidates?: readonly Record<string, unknown>[] }).candidates ?? [];
-    expect(candidates).toHaveLength(1);
-    expect(candidates[0]).toMatchObject({ stage: "mapping", call: 1, attempt: 2 });
-    expect(candidates[0]).not.toHaveProperty("bundle");
+    // 形の試行ごとに断った時点で全部積む（Issue #657。今までは最後の 1 件だけ）
+    expect(candidates).toHaveLength(2);
+    expect(candidates[0]).toMatchObject({ stage: "mapping", call: 1, attempt: 1 });
+    expect(candidates[1]).toMatchObject({ stage: "mapping", call: 1, attempt: 2 });
+    for (const candidate of candidates) expect(candidate).not.toHaveProperty("bundle");
   });
 
   it("どの要件にも所属しない行がある応答は、C2' の固定文で形のやり直し 1 回のあと段 mapping・unmet で止まる（C3 を呼ばない）", async () => {

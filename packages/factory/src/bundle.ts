@@ -211,9 +211,9 @@ export const DIAGNOSTICS_REJECTED_TEST_SUITE_FILE = `${DIAGNOSTICS_DIR}/rejected
 export const DIAGNOSTICS_REJECTED_NAME_TABLE_FILE = `${DIAGNOSTICS_DIR}/rejected-name-table.json` as const;
 /** 診断に出す、v1.1α の試験の仕様（T2）が断った候補の置き場所（`07-architecture-v1.1a.md` §1） */
 export const DIAGNOSTICS_REJECTED_TEST_SPEC_FILE = `${DIAGNOSTICS_DIR}/rejected-test-spec.json` as const;
-/** 診断に出す、旗 `v12.ids` の C1（語彙の束）が最後に断った候補の置き場所（Issue #608） */
+/** 診断に出す、旗 `v12.ids` の C1（語彙の束）が断った候補の全部の置き場所（Issue #608・#657） */
 export const DIAGNOSTICS_REJECTED_VOCABULARY_FILE = `${DIAGNOSTICS_DIR}/rejected-vocabulary.json` as const;
-/** 診断に出す、旗 `v12.ids` の C2（要件の写像）が最後に断った候補の置き場所（Issue #608） */
+/** 診断に出す、旗 `v12.ids` の C2（要件の写像）が断った候補の全部の置き場所（Issue #608・#657） */
 export const DIAGNOSTICS_REJECTED_MAPPING_FILE = `${DIAGNOSTICS_DIR}/rejected-mapping.json` as const;
 
 /** 断った候補を出す段（Issue #501。`name-table`・`test-spec` は v1.1α の段、`vocabulary`・`mapping` は旗 `v12.ids` の段。Issue #608） */

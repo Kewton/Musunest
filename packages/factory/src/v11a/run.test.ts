@@ -109,7 +109,7 @@ import {
 import { NAMED_FAILURE_MESSAGES } from "../v12/search-repair.js";
 import { GENERATED_TEST_ID_PREFIX, generateTests, isGeneratedTestId } from "../v12/generated-tests.js";
 import type { FixedTest } from "../fixed-test.js";
-import { ruleTexts } from "../stages/prompt.js";
+import { ruleTexts, SHAPE_PROBLEMS_DATA_NAME } from "../stages/prompt.js";
 import { FIELD_REPAIR_SCHEMA_NAME, MERGE_REFUSALS } from "../v12/stages/field-repair.js";
 import { natureQuestionName } from "../stages/test-suite.js";
 import { captureBaselineV11a, type BaselineV11aCapture, type BaselineV11aScenarios } from "../__tests__/baseline-capture.js";
@@ -689,19 +689,118 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
   });
 
   /** 診断の断った候補のファイル 1 本の候補（Issue #608） */
-  type IdsRejected = { stage: string; operation: null; call: number; round: number; attempt: number; kind: string; response: unknown; problems: { message: string }[] };
+  type IdsRejected = {
+    stage: string;
+    operation: null;
+    call: number;
+    round: number;
+    attempt: number;
+    kind: string;
+    response: unknown;
+    response_sha256: string;
+    problems: { field: string; code?: string; message: string; reference: string; reference_sha256: string }[];
+  };
   const rejectedOf = (result: Awaited<ReturnType<typeof runScenario>>["result"], path: string) =>
     diagnosticOf(result.diagnostics, path)["candidates"] as readonly IdsRejected[];
   const diagnosticPaths = (result: Awaited<ReturnType<typeof runScenario>>["result"]) => result.diagnostics.map((artifact) => artifact.path);
+  /** 候補の問題を、段が返した問題の形（欄の位置・分類・固定文）にする（並びはそのまま） */
+  const problemsOf = (candidate: IdsRejected | undefined) =>
+    (candidate?.problems ?? []).map((problem) => ({ field: problem.field, ...(problem.code === undefined ? {} : { code: problem.code }), message: problem.message }));
+  /** 段が返した問題（停止の問題・やり直しの要求の「前回の形の問題」）を、同じ形にする */
+  const stageProblemsOf = (problems: readonly { field: string; code?: string; message: string }[] | undefined) =>
+    (problems ?? []).map((problem) => ({ field: problem.field, ...(problem.code === undefined ? {} : { code: problem.code }), message: problem.message }));
+  /** 形のやり直しの要求に載った、前回の形の問題（その回に C1'・C2' が返した問題の全部） */
+  const retryProblemsOf = (request: LlmStructuredRequest | undefined) =>
+    stageProblemsOf(dataBlockOf(request?.input ?? "", SHAPE_PROBLEMS_DATA_NAME) as readonly { field: string; code?: string; message: string }[]);
+  const requestsOf = (recording: Awaited<ReturnType<typeof runScenario>>["recording"], schemaName: string) =>
+    recording.structured.filter((request) => request.schemaName === schemaName);
+  /**
+   * 候補の raw・SHA-256 は無加工（SHA-256 は raw から計算し直した値と一致し、問題の参照元の SHA-256 も同じ）。複写した欄は段・回・試行の
+   * 値だけで、要件の文・要件 ID・行の ID・題材の言葉を持たない（Issue #657）
+   */
+  const expectRawAndMetadata = async (candidate: IdsRejected | undefined, raw: unknown) => {
+    expect(candidate?.response).toEqual(raw);
+    const sha = await sha256Hex(JSON.stringify(raw));
+    expect(candidate?.response_sha256).toBe(sha);
+    expect(candidate?.problems.every((problem) => problem.reference === "response" && problem.reference_sha256 === sha)).toBe(true);
+    const { response: _response, response_sha256: _sha, problems: _problems, ...metadata } = candidate as IdsRejected;
+    expect(Object.keys(metadata).sort()).toEqual(["attempt", "call", "kind", "operation", "round", "stage"]);
+    const text = JSON.stringify(metadata);
+    for (const value of [...LIST.requirements.map((item) => item.text), ...LIST.requirements.map((item) => item.id), ...TABLE_IDS.rows.map((row) => row.id)]) {
+      expect(text.includes(`"${value}"`), value).toBe(false);
+    }
+    expectNoAcceptanceMaterial([text]);
+  };
+  const good = () => responses();
+  /** 束 2（項目）の最初の行の entity を、表で振っていない ID にした応答（C1' が断る） */
+  const fieldsWithEntity = (entity: string) => ({
+    fields: (good().fields["fields"] as readonly Record<string, unknown>[]).map((item, index) => (index === 0 ? { ...item, entity } : item)),
+  });
+  /** 初回で通る走りの C1 の 3 束・C2・T1''・T2・B1 と B3' の応答（C1・C2 の応答だけを差し替える） */
+  const passingWith = (options: { readonly fields?: readonly unknown[]; readonly mapping?: readonly unknown[] } = {}) => {
+    const [entities, fields, behaviors, mapping, ...rest] = idsHead();
+    return [
+      entities!,
+      ...(options.fields ?? []).map((output) => structured(output)),
+      fields!,
+      behaviors!,
+      ...(options.mapping ?? []).map((output) => structured(output)),
+      mapping!,
+      ...rest,
+      structured(acceptAll()),
+    ];
+  };
 
-  it("C1 の束 2 が 2 回断られる走り：診断に rejected-vocabulary が 1 本あり、束の番号 2・断った固定文・最後の候補だけが入る（Issue #608）", async () => {
-    const good = responses();
-    const fieldsOf = (entity: string) => ({
-      fields: (good.fields["fields"] as readonly Record<string, unknown>[]).map((item, index) => (index === 0 ? { ...item, entity } : item)),
-    });
-    const first = fieldsOf("E8");
-    const last = fieldsOf("E9");
-    const { result, recording } = await runScenario([structured(good.entities), structured(first), structured(last)], { flags: IDS_FLAGS });
+  it("C1 の束 2 の初回が形で落ちてやり直しで通る走り：走りは通り、rejected-vocabulary に候補 1 件（束 2・試行 1・その回の問題の全部）。診断はその 1 本だけ（Issue #657）", async () => {
+    const bad = fieldsWithEntity("E8");
+    const clean = await runScenario(passingWith(), { flags: IDS_FLAGS });
+    const { result, recording } = await runScenario(passingWith({ fields: [bad] }), { flags: IDS_FLAGS });
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual(clean.result.outcome);
+    expect(result.summary.exit_code).toBe(0);
+    expect(result.bundle).not.toBeNull();
+    // 段の記録は束 2 の形のやり直し 1 回を数えるだけ（段の判定・持ち越しに候補を使わない）
+    expect(result.record.stages.filter((record) => record.stage === "vocabulary").map((record) => [record.status, record.retries.shape])).toEqual([
+      ["ok", 0],
+      ["ok", 1],
+      ["ok", 0],
+    ]);
+    // 通る走りの診断は候補の 1 本だけ（候補が無い段のファイルは作らない）
+    expect(diagnosticPaths(clean.result)).toEqual([]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_VOCABULARY_FILE]);
+    const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ stage: "vocabulary", operation: null, call: 2, round: 1, attempt: 1, kind: "shape" });
+    // 問題はその回に C1' が返した問題の全部（やり直しの要求の「前回の形の問題」と、欄の位置・固定文・並びまで同じ）
+    const fieldsRequests = requestsOf(recording, "vocabulary-fields");
+    expect(fieldsRequests).toHaveLength(2);
+    expect(problemsOf(candidates[0])).toEqual(retryProblemsOf(fieldsRequests[1]));
+    expect(problemsOf(candidates[0]).map((problem) => problem.message)).toContain("知らない ID である（この表で振った ID に無い）");
+    await expectRawAndMetadata(candidates[0], bad);
+    // 送った要求と診断に、受入の題材の言葉が無い
+    expectNoAcceptanceMaterial([...recording.structured.map((request) => JSON.stringify(request)), ...result.diagnostics.map((artifact) => artifact.text)]);
+  });
+
+  it("C2 の初回の試行 1 が形で落ちて試行 2 で通る走り：rejected-mapping に候補 1 件（回 1・試行 1・その回の問題の全部）（Issue #657）", async () => {
+    const missingFirst = { requirements: (good().mapping["requirements"] as readonly unknown[]).slice(1) };
+    const { result, recording } = await runScenario(passingWith({ mapping: [missingFirst] }), { flags: IDS_FLAGS });
+    expect(result.stopped).toBeNull();
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(result.record.stages.filter((record) => record.stage === "mapping").map((record) => [record.status, record.retries.shape])).toEqual([["ok", 1]]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE]);
+    const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ stage: "mapping", operation: null, call: 1, round: 1, attempt: 1, kind: "shape" });
+    expect(candidates[0]).not.toHaveProperty("bundle");
+    expect(problemsOf(candidates[0])).toEqual(retryProblemsOf(requestsOf(recording, "mapping")[1]));
+    expect(candidates[0]?.problems.length).toBeGreaterThan(0);
+    await expectRawAndMetadata(candidates[0], missingFirst);
+  });
+
+  it("C1 の束 2 が 2 回断られる走り：rejected-vocabulary に候補 2 件（束 2・試行 1・2。それぞれその回の問題の全部）（Issue #608・#657）", async () => {
+    const first = fieldsWithEntity("E8");
+    const last = fieldsWithEntity("E9");
+    const { result, recording } = await runScenario([structured(good().entities), structured(first), structured(last)], { flags: IDS_FLAGS });
     // 段の判定・呼び出しの数・終了コードは #593 のまま
     expect(result.stopped).toMatchObject({ stage: "vocabulary", kind: "unmet" });
     expect(result.summary.exit_code).toBe(1);
@@ -712,22 +811,31 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(paths).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
     expect(paths).not.toContain(DIAGNOSTICS_REJECTED_NAME_TABLE_FILE);
     const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
-    expect(candidates).toHaveLength(1);
-    expect(candidates[0]).toMatchObject({ stage: "vocabulary", operation: null, call: 2, round: 1, attempt: 2, response: last });
-    expect(candidates[0]?.problems.map((problem) => problem.message)).toContain("知らない ID である（この表で振った ID に無い）");
+    expect(candidates.map((candidate) => [candidate.stage, candidate.call, candidate.round, candidate.attempt])).toEqual([
+      ["vocabulary", 2, 1, 1],
+      ["vocabulary", 2, 1, 2],
+    ]);
+    expect(problemsOf(candidates[0])).toEqual(retryProblemsOf(requestsOf(recording, "vocabulary-fields")[1]));
+    expect(problemsOf(candidates[1])).toEqual(stageProblemsOf(result.stopped?.problems));
+    expect(candidates[1]?.problems.map((problem) => problem.message)).toContain("知らない ID である（この表で振った ID に無い）");
+    await expectRawAndMetadata(candidates[0], first);
+    await expectRawAndMetadata(candidates[1], last);
     // 断った候補は納品物にも要約にも入らない（一覧の要約は値なし）
-    const listing = diagnosticOf(result.diagnostics, DIAGNOSTICS_LISTING_FILE)["rejected"] as readonly { stage: string; call: number; messages: { message: string }[] }[];
-    expect(listing.map((entry) => [entry.stage, entry.call])).toEqual([["vocabulary", 2]]);
+    const listing = diagnosticOf(result.diagnostics, DIAGNOSTICS_LISTING_FILE)["rejected"] as readonly { stage: string; call: number; attempt: number }[];
+    expect(listing.map((entry) => [entry.stage, entry.call, entry.attempt])).toEqual([
+      ["vocabulary", 2, 1],
+      ["vocabulary", 2, 2],
+    ]);
     expect(JSON.stringify(result.summary) + JSON.stringify(result.record)).not.toContain('"E9"');
+    expect(JSON.stringify(result.summary) + JSON.stringify(result.record)).not.toContain('"E8"');
   });
 
-  it("C2 が 2 回断られる走り：rejected-mapping が 1 本あり、呼び出しの回・断った固定文・最後の候補が入る。rejected-vocabulary は無い（Issue #608）", async () => {
-    const good = responses();
-    const requirements = good.mapping["requirements"] as readonly unknown[];
+  it("C2 が 2 回断られる走り：rejected-mapping に候補 2 件（回 1・試行 1・2）。rejected-vocabulary は無い（Issue #608・#657）", async () => {
+    const requirements = good().mapping["requirements"] as readonly unknown[];
     const missingFirst = { requirements: requirements.slice(1) };
     const missingLast = { requirements: requirements.slice(0, -1) };
     const { result, recording } = await runScenario(
-      [structured(good.entities), structured(good.fields), structured(good.behaviors), structured(missingFirst), structured(missingLast)],
+      [structured(good().entities), structured(good().fields), structured(good().behaviors), structured(missingFirst), structured(missingLast)],
       { flags: IDS_FLAGS },
     );
     expect(result.stopped).toMatchObject({ stage: "mapping", kind: "unmet" });
@@ -738,28 +846,59 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(paths).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
     expect(paths).not.toContain(DIAGNOSTICS_REJECTED_NAME_TABLE_FILE);
     const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
-    expect(candidates).toHaveLength(1);
-    expect(candidates[0]).toMatchObject({ stage: "mapping", operation: null, call: 1, round: 1, attempt: 2, response: missingLast });
+    expect(candidates.map((candidate) => [candidate.stage, candidate.call, candidate.round, candidate.attempt])).toEqual([
+      ["mapping", 1, 1, 1],
+      ["mapping", 1, 1, 2],
+    ]);
     // C2 は束に切らないので、候補に束の欄は無い（Issue #627）
-    expect(candidates[0]).not.toHaveProperty("bundle");
-    expect(candidates[0]?.problems.length).toBeGreaterThan(0);
-    expect(candidates[0]?.problems.every((problem) => typeof problem.message === "string" && problem.message !== "")).toBe(true);
+    for (const candidate of candidates) expect(candidate).not.toHaveProperty("bundle");
+    expect(problemsOf(candidates[0])).toEqual(retryProblemsOf(requestsOf(recording, "mapping")[1]));
+    expect(problemsOf(candidates[1])).toEqual(stageProblemsOf(result.stopped?.problems));
+    await expectRawAndMetadata(candidates[0], missingFirst);
+    await expectRawAndMetadata(candidates[1], missingLast);
   });
 
-  it("通る走り・C2 の 2 回目が C2' に落ちて持ち越す走りには rejected-vocabulary・rejected-mapping が無い（Issue #608）", async () => {
-    const passed = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_FLAGS });
-    expect(passed.result.outcome).toEqual({ result: "pass", verdict: "full" });
-    expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
-    expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
-    const good = responses();
+  it("負例（R7）：一覧に無い要件 ID・表に無い行の ID を含むから断られた候補も、raw・SHA-256・問題がそのまま残る（Issue #657）", async () => {
+    const requirements = good().mapping["requirements"] as readonly Record<string, unknown>[];
+    const outside = {
+      requirements: requirements.map((entry, index) =>
+        index === 0
+          ? { ...entry, requirementId: "R9" }
+          : index === 1
+            ? { ...entry, roles: (entry["roles"] as readonly Record<string, unknown>[]).map((role, at) => (at === 0 ? { ...role, id: "X99" } : role)) }
+            : entry,
+      ),
+    };
+    const { result, recording } = await runScenario(
+      [structured(good().entities), structured(good().fields), structured(good().behaviors), structured(outside), structured(outside)],
+      { flags: IDS_FLAGS },
+    );
+    expect(result.stopped).toMatchObject({ stage: "mapping", kind: "unmet" });
+    const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
+    expect(candidates.map((candidate) => [candidate.call, candidate.round, candidate.attempt])).toEqual([
+      [1, 1, 1],
+      [1, 1, 2],
+    ]);
+    // 一覧に無い ID・表に無い ID を含む raw も消さず書き換えず残す（SHA-256 は raw から計算し直した値と一致する）
+    for (const candidate of candidates) {
+      expect(JSON.stringify(candidate.response)).toContain('"R9"');
+      expect(JSON.stringify(candidate.response)).toContain('"X99"');
+      await expectRawAndMetadata(candidate, outside);
+    }
+    expect(problemsOf(candidates[0])).toEqual(retryProblemsOf(requestsOf(recording, "mapping")[1]));
+    expect(problemsOf(candidates[1])).toEqual(stageProblemsOf(result.stopped?.problems));
+    expect(candidates[1]?.problems.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("C2 の 2 回目が C2' に落ちて初回の表で持ち越す走り：rejected-mapping に round 2 の候補（問題の一覧つき）があり、持ち越し・採用した表・C3 の結果・停止しないことは変わらない（Issue #657）", async () => {
     const rejectR3 = judgments(IDS, { R3: ["unnecessary-ownership", "締められる"] });
-    const missing = { requirements: (good.mapping["requirements"] as readonly unknown[]).slice(1) };
+    const missing = { requirements: (good().mapping["requirements"] as readonly unknown[]).slice(1) };
     const carried = await runScenario(
       [
-        structured(good.entities),
-        structured(good.fields),
-        structured(good.behaviors),
-        structured(good.mapping),
+        structured(good().entities),
+        structured(good().fields),
+        structured(good().behaviors),
+        structured(good().mapping),
         structured(rejectR3),
         structured(missing),
         structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
@@ -769,8 +908,33 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       { flags: IDS_FLAGS },
     );
     expect(carried.result.stopped).toBeNull();
-    expect(diagnosticPaths(carried.result)).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
-    expect(diagnosticPaths(carried.result)).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
+    expect(carried.result.record.stages.filter((record) => record.stage === "mapping").map((record) => [record.status, record.failure_kind])).toEqual([
+      ["ok", null],
+      ["failed", "unmet"],
+    ]);
+    expect(countStage(carried.result, "semantic-check")).toBe(1);
+    expect(carryEntriesOf(carried.result.bundle).map((entry) => entry.requirementId)).toEqual(["R3"]);
+    expect(diagnosticPaths(carried.result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE]);
+    const candidates = rejectedOf(carried.result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ stage: "mapping", operation: null, call: 2, round: 2, attempt: 1, kind: "shape" });
+    await expectRawAndMetadata(candidates[0], missing);
+    // 問題は 2 回目の C2' が返した問題の全部（同じ応答を初回に断らせて止めた走りの C2' の問題と同じ）
+    const stopped = await runScenario(
+      [structured(good().entities), structured(good().fields), structured(good().behaviors), structured(missing), structured(missing)],
+      { flags: IDS_FLAGS },
+    );
+    expect(stopped.result.stopped).toMatchObject({ stage: "mapping", kind: "unmet" });
+    expect(problemsOf(candidates[0])).toEqual(stageProblemsOf(stopped.result.stopped?.problems));
+    expect(candidates[0]?.problems.length).toBeGreaterThan(0);
+  });
+
+  it("形で 1 度も落ちない走り：rejected-vocabulary・rejected-mapping が無く、診断のファイルは無い（Issue #608・#657）", async () => {
+    const passed = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_FLAGS });
+    expect(passed.result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
+    expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
+    expect(diagnosticPaths(passed.result)).toEqual([]);
   });
 
   it("既定値の value が options の外の要件（R6）は、C2 の形のやり直し 1 回（要求 2 本はどちらも全要件）で直り、表が組まれ C3 へ進む（Issue #594・#627）", async () => {
