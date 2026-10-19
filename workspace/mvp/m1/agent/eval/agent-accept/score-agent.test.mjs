@@ -4926,3 +4926,237 @@ test("#633 README と台帳：§9 の後ろ（末尾）の新しい節 §10 に�
   assert.ok(data.length >= 20);
   for (const l of data) assert.ok(l.trimEnd().endsWith("| 未転記 |"), l.slice(0, 20));
 });
+
+// ── #638：v1.2 の段の走りの採点（条件 v8・旗の組の照合・1 段先の副指標・段だけの対の比較の v1.2 の群・匿名の口）。README §10.8
+// 合成の記録（条件 v8・段の走りの記録 stage-run.json・起動の記録）を一時の出力先に置いて採点する（計測は流さない。工場の dist は使わない）
+import { CONDITIONS_V8, NEXT_STAGE_NOT_IN_RANGE, nextStageOf, stagePipelineOf } from "./score-agent.mjs";
+const FLAGS638 = { ledger: true, ids: true };
+/**
+ * 段の走りの記録（開始 T1。範囲 name-table..end）。kind：t2-pass（T2' まで通る。dropped は test_spec.dropped_tests、null なら test_spec の欄なし）・
+ * t2-fail（T2 で止まる。test_spec null）・c2-stop（C2 で止まり T2 に届かない）。flags は記録の conditions.v12_flags（"__absent__" は欄なし）
+ */
+const stageRecord638 = (id, { kind = "t2-pass", dropped = 0, end = "test-spec", flags = FLAGS638 } = {}) => {
+  const p = id.split("-")[0];
+  const c1 = [{ stage: "vocabulary", status: "ok", calls: 1, duration_ms: 1 }];
+  const u1 = [...c1, { stage: "mapping", status: "ok", calls: 1, duration_ms: 1 }, { stage: "name-table", status: "ok", calls: 0, duration_ms: 1 }, { stage: "semantic-check", status: "ok", calls: 1, duration_ms: 1 }];
+  const stages = kind === "c2-stop" ? [...c1, { stage: "mapping", status: "failed", calls: 1, duration_ms: 1 }] : end === "semantic-check" ? u1 : [...u1, { stage: "test-spec", status: kind === "t2-pass" ? "ok" : "failed", calls: 1, duration_ms: 1 }];
+  const stopped = kind === "c2-stop" ? { stage: "mapping", kind: "unmet" } : kind === "t2-fail" ? { stage: "test-spec", kind: "unmet" } : null;
+  return JSON.stringify({
+    schema_version: STAGE_RUN_RECORD_SCHEMA, range: { start: "name-table", end }, input: null, plan_sha256: PSHA513(p), source_sha256: SSHA513(p), checkpoints: [],
+    reached_stage: stages.at(-1).stage, conditions: flags === "__absent__" ? {} : { pipeline: "v1.2", v12_flags: flags }, budget_scope: "stage-run", provider_cost_usd: 0.01, duration_secs: 1,
+    stages, stopped, stage_pass: stopped === null, return_to_plan: false, exit_code: stopped === null ? 0 : 1,
+    ...(end === "test-spec" ? { test_spec: kind === "t2-pass" && dropped !== null ? { tests: 4, dropped_tests: dropped, coverage_units: 2 } : null } : {}),
+  });
+};
+/** 段単位の v1.2 の計測の出力先（条件 v8・開始 T1・終了 end）。runOf(id) ＝ 記録の文字列｜"missing"（読めない記録）｜"unlaunched" */
+function stageFixture638(out, { ids = IDS545, end = "test-spec", runOf, frozenPath, group = null, pairsSha = null, factoryFp = sha256("factory-638"), flags = FLAGS638, pending = [] }) {
+  mkdirSync(out, { recursive: true });
+  const set = loadEvalSet(join(repo, DEFAULT_SET_PATH)), evDir = join(repo, "workspace/mvp/m1/agent/eval");
+  const pids = [...new Set(ids.map((id) => id.split("-")[0]))];
+  const cond = {
+    schema: CONDITIONS_V8, measurement_id: "m638", source: { commit: null, dirty: null }, factory: { fingerprint: factoryFp }, spec_engine: { fingerprint: fingerprintDir(join(repo, "packages/spec-engine/dist")).fingerprint },
+    set: { path: DEFAULT_SET_PATH, sha256: set.sha256 }, scripts: { mode: "post-hoc", fingerprint: scriptsFingerprint(set.scripts).fingerprint }, scoring: { fingerprint: scoringFingerprint(evDir, scoreFile, set.definitions).fingerprint }, judge: { configuration: "llm-only" },
+    params: {
+      ...paramsFor(ids), mode: STAGE_RUN_MODE, plan: false, effort: "high", pipeline: "v1.2", stage_output_limits_v11a: APPROVED513, v12_flags: flags,
+      ...(group === null ? { v12_call_limits: { logical_calls: 7, real_attempts: 11, judge_branch: 5 } } : {}),
+      stage_start: "name-table", stage_end: end, budget_scope: "stage-run", stage_from: null, stage_inputs: [],
+    },
+    child_args: ids.map((id) => ({ id, argv: ["cli.js", id] })),
+    frozen: { path: frozenPath, sha256: sha256(readFileSync(frozenPath)), id: "t", version: 1, origin: "frozen-plan", author: null, adopted: pids.map((p) => ({ pattern: p, plan_sha256: PSHA513(p), source_sha256: SSHA513(p), envelope_sha256: sha256(p) })), missing: [] },
+    comparison: group === null ? null : { pairs_sha256: pairsSha, group, role: group === "before" ? "baseline" : "candidate", profile: null },
+    stage_input_absent: { count: 0, ids: [] },
+  };
+  cond.signature = conditionsSignature(cond);
+  writeFileSync(join(out, "conditions.json"), JSON.stringify(cond));
+  const executed = [];
+  for (const id of ids) {
+    const v = runOf(id);
+    if (v === "unlaunched") continue;
+    const dir = join(out, id);
+    mkdirSync(join(dir, "bundle"), { recursive: true });
+    executed.push(id);
+    writeFileSync(join(dir, "summary.line.json"), JSON.stringify({ exit: 0, wall_s: 1, started_at: "2026-10-19T00:00:00.000Z", exit_class: "ok", summary: null, plan_cost: null, stderr_tail: { bytes: 0, known_lines: 0 }, stdout_tail: { bytes: 0, known_lines: 0 }, resumed: false, stage_run: null }));
+    writeFileSync(join(dir, "stdout.log"), ""); writeFileSync(join(dir, "stderr.log"), "");
+    writeFileSync(join(dir, STAGE_RUN_PATH), v === "missing" ? "{" : v);
+  }
+  writeFileSync(join(out, "run-1.json"), JSON.stringify({ finished_at: "2026-10-19T00:00:00.000Z", mode: "fresh", executed, pending, stop: pending.length === 0 ? null : "予算 1 USD に達した", stop_code: pending.length === 0 ? null : "budget", budget_usd: 1, initial_budget_usd: 1, budget_changed: false, spent_usd: 0, exit_classes: {} }));
+  return cond;
+}
+/** 手計算の組（30 本）：P1〜P4 は T2' まで通る（落とした試験 0,1,2／3,0,0／1,1,4／2,0,5）・P5〜P6 は T2 で止まる・P7〜P8 は C2 で止まる・P9 は記録が読めない・
+ * P10-r1 は T2' まで通るが test_spec の欄が無い・P10-r2 は起こさない（予算）・P10-r3 は通り落とした試験 0 */
+const DROPPED638 = { "P1-r1": 0, "P1-r2": 1, "P1-r3": 2, "P2-r1": 3, "P2-r2": 0, "P2-r3": 0, "P3-r1": 1, "P3-r2": 1, "P3-r3": 4, "P4-r1": 2, "P4-r2": 0, "P4-r3": 5, "P10-r3": 0 };
+const runOf638 = (end = "test-spec", over = {}) => (id) => {
+  const p = id.split("-")[0];
+  if (id === "P10-r2") return "unlaunched";
+  if (p === "P9") return "missing";
+  const opt = { end, ...(over[id] ?? {}) };
+  if (id === "P10-r1") return stageRecord638(id, { ...opt, dropped: null });
+  if (id in DROPPED638) return stageRecord638(id, { ...opt, dropped: DROPPED638[id] });
+  return stageRecord638(id, { ...opt, kind: ["P5", "P6"].includes(p) ? "t2-fail" : "c2-stop" });
+};
+
+test("#638 1 段先の副指標：合成の段の走りの記録（T2' まで通った本・T2 で止まった本・C2 で止まった本・記録の読めない本・起こさなかった本）から、T2' の通過 14／予定 30（届かない 6・記録なし 4・T2 で止まった 6）、Wilson は同じ分母、落とした試験は合計 19・中央値 1（値あり 13・値なし 17・T2 に届いた 20）が手計算と一致する。条件 v8 を段単位として読み、経路は v1.2", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "u1");
+    stageFixture638(out, { runOf: runOf638(), frozenPath: frozenFile545(base), pending: ["P10-r2"] });
+    const r = scoreRun(out);
+    assert.equal(r.status, 0, r.stderr);
+    const full = readScore(out);
+    assert.deepEqual([full.evaluation.mode, full.evaluation.pipeline, full.evaluation.build_applicable], ["stage-run", "v1.2", false]);
+    assert.equal(full.fingerprints.conditions.schema, CONDITIONS_V8);
+    const ns = full.next_stage;
+    assert.equal(ns.applicable, true);
+    assert.deepEqual([ns.t2_pass.passed, ns.t2_pass.denominator, ns.t2_pass.not_reached, ns.t2_pass.missing, ns.t2_pass.failed], [14, 30, 6, 4, 6]);
+    assert.equal(ns.t2_pass.rate, Math.round((14 / 30) * 1e6) / 1e6);
+    assert.deepEqual(ns.t2_pass.interval, wilson545(14, 30));
+    const values = Object.values(DROPPED638).sort((a, b) => a - b);
+    assert.deepEqual([values.length, values.reduce((s, x) => s + x, 0), values[(values.length - 1) / 2]], [13, 19, 1], "手計算の確かめ");
+    assert.deepEqual(ns.dropped_tests, { reached: 20, observed: 13, missing: 17, total: 19, median: 1 });
+    // 既存の段の通過率は今の定義のまま（1 段先の副指標で代用しない）
+    const sp = full.stage_pass_rate;
+    assert.deepEqual([sp.planned, sp.observed, sp.passed, sp.denominator], [30, 26, 14, 30]);
+    // 記録の読めない 3 本は旗の組も確かめられない（欠測）ので照合は未照合（v7 の要約の無い本と同じ扱い）
+    assert.equal(full.evaluation.v12_flags.status, "unverified");
+    assert.deepEqual([full.evaluation.v12_flags.launched, full.evaluation.v12_flags.counts], [29, { match: 26, mismatch: 0, missing: 3, malformed: 0, inconsistent: 0 }]);
+    assert.equal(full.completion.status, "unverified");
+    assert.deepEqual(full.completion.unverified, ["v12-flags"]);
+    assert.ok(r.stdout.includes("1 段先（T2' の通過・T2 が落とした試験。納品の成功ではない）: T2' の通過 14／予定 30（届かない 6・記録なし 4・T2 で止まった 6）"), r.stdout);
+    assert.ok(r.stdout.includes("落とした試験 合計 19・中央値 1（T2 に届いた 20・値あり 13・値なし 17）"), r.stdout);
+    assert.match(r.stdout, /^旗の組（v1\.2）: /m);
+  });
+});
+
+test("#638 旗の組の照合：段の走りの記録の conditions.v12_flags が条件の組と同じなら照合は完了。1 本でも違う・欄が無い・形が違えば未照合（v12-flags）で、段の通過と 1 段先の副指標の数は変えない", async () => {
+  await withOut(async (base) => {
+    const fzp = frozenFile545(base), all = (over = {}) => (id) => stageRecord638(id, { kind: id.startsWith("P5") ? "t2-fail" : "t2-pass", dropped: 1, ...(over[id] ?? {}) });
+    const ok = join(base, "ok");
+    stageFixture638(ok, { runOf: all(), frozenPath: fzp });
+    scoreRun(ok);
+    const fo = readScore(ok);
+    assert.equal(fo.completion.status, "complete", fo.completion.reasons.join("、"));
+    assert.deepEqual(fo.completion.unverified, []);
+    assert.deepEqual([fo.evaluation.v12_flags.status, fo.evaluation.v12_flags.flags, fo.evaluation.v12_flags.counts.match], ["verified", FLAGS638, 30]);
+    assert.deepEqual([fo.next_stage.t2_pass.passed, fo.next_stage.t2_pass.failed, fo.next_stage.dropped_tests.total], [27, 3, 27]);
+    for (const [label, over, status] of [["mismatch", { flags: { ledger: true, ids: false } }, "mismatch"], ["absent", { flags: "__absent__" }, "missing"], ["malformed", { flags: [true] }, "malformed"]]) {
+      const out = join(base, label);
+      stageFixture638(out, { runOf: all({ "P2-r2": over }), frozenPath: fzp });
+      const r = scoreRun(out);
+      const f = readScore(out);
+      assert.equal(f.completion.status, "unverified", label);
+      assert.deepEqual(f.completion.unverified, ["v12-flags"], label);
+      assert.equal(f.evaluation.v12_flags.counts[status], 1, label);
+      assert.deepEqual(f.evaluation.v12_flags.unverified_runs, [{ run: "P2-r2", status }], label);
+      assert.deepEqual([f.stage_pass_rate.passed, f.next_stage.t2_pass.passed], [fo.stage_pass_rate.passed, fo.next_stage.t2_pass.passed], `${label}: 数は変えない`);
+      assert.match(r.stdout, /^旗の組（v1\.2）: 未照合（v12-flags）/m, label);
+    }
+  });
+});
+
+test("#638 範囲が test-spec を含まない v1.2 の段の走り（name-table..semantic-check）では 1 段先の副指標が null と理由。v1.1α の段単位（v6）の採点には next_stage・evaluation.v12_flags が無い。版と経路の対応（stagePipelineOf）", async () => {
+  await withOut(async (base) => {
+    const fzp = frozenFile545(base), out = join(base, "u1-only");
+    stageFixture638(out, { end: "semantic-check", runOf: (id) => stageRecord638(id, { end: "semantic-check" }), frozenPath: fzp });
+    const r = scoreRun(out);
+    const ns = readScore(out).next_stage;
+    assert.deepEqual([ns.applicable, ns.reason, ns.t2_pass, ns.dropped_tests], [false, NEXT_STAGE_NOT_IN_RANGE, null, null]);
+    assert.equal(readScore(out).completion.status, "complete", readScore(out).completion.reasons.join("、"));
+    assert.ok(r.stdout.includes(`1 段先（T2' の通過・T2 が落とした試験。納品の成功ではない）: -（${NEXT_STAGE_NOT_IN_RANGE}）`), r.stdout);
+    assert.deepEqual(nextStageOf([], { start: "write", end: "judge" }).t2_pass, null);
+    const v6 = join(base, "v6");
+    stageFixture545(v6, { absent: IDS545.slice(0, 15), frozenPath: fzp });
+    const r6 = scoreRun(v6);
+    const f6 = readScore(v6);
+    assert.ok(!("next_stage" in f6) && !("v12_flags" in f6.evaluation) && !("unverified" in f6.completion));
+    assert.ok(!r6.stdout.includes("1 段先") && !r6.stdout.includes("旗の組"), "v6 の標準出力は今のまま");
+    assert.equal(stagePipelineOf({ schema: CONDITIONS_V6, params: { mode: "stage-run", pipeline: "v1.1a" } }), "v1.1a");
+    assert.equal(stagePipelineOf({ schema: CONDITIONS_V8, params: { mode: "stage-run", pipeline: "v1.2" } }), "v1.2");
+    assert.equal(stagePipelineOf({ schema: CONDITIONS_V8, params: { mode: "stage-run", pipeline: "v1.1a" } }), null);
+    assert.equal(stagePipelineOf({ schema: CONDITIONS_V6, params: { mode: "stage-run", pipeline: "v1.2" } }), null);
+  });
+});
+
+test("#638 匿名の口：v8 の段単位の採点の --anonymous に経路・旗の照合の状態・1 段先の副指標の件数があり、本の ID・P の ID・確定した仕様と依頼文の SHA・旗の名前の外の自由な文字列が無い", async () => {
+  await withOut(async (base) => {
+    const out = join(base, "anon");
+    stageFixture638(out, { runOf: runOf638(), frozenPath: frozenFile545(base), pending: ["P10-r2"] });
+    const r = scoreRun(out, ["--anonymous"]);
+    assert.equal(r.status, 0, r.stderr);
+    const text = readFileSync(join(out, "score.anonymous.json"), "utf8"), anon = JSON.parse(text);
+    assert.ok(!existsSync(join(out, "score.json")));
+    assert.equal(anon.evaluation.pipeline, "v1.2");
+    assert.deepEqual([anon.evaluation.v12_flags.status, anon.evaluation.v12_flags.launched, anon.evaluation.v12_flags.counts.missing], ["unverified", 29, 3]);
+    assert.deepEqual(anon.next_stage.t2_pass, { passed: 14, failed: 6, not_reached: 6, missing: 4, denominator: 30, rate: Math.round((14 / 30) * 1e6) / 1e6, interval: wilson545(14, 30), text: anon.next_stage.t2_pass.text });
+    assert.ok(anon.next_stage.t2_pass.text.startsWith("14/30（46.7%"), anon.next_stage.t2_pass.text);
+    assert.deepEqual(anon.next_stage.dropped_tests, { reached: 20, observed: 13, missing: 17, total: 19, median: 1 });
+    assert.equal(anon.fingerprints.conditions.schema, CONDITIONS_V8);
+    assert.ok(!("unverified_runs" in anon.evaluation.v12_flags), "一致しない本の ID を出さない");
+    for (const t of [text, r.stdout, r.stderr]) {
+      assert.ok(!/P\d+(-r\d+)?/.test(t), "本の ID・P の ID が出ない");
+      for (const sha of [...PIDS545.map(PSHA513), ...PIDS545.map(SSHA513)]) assert.ok(!t.includes(sha), "確定した仕様と依頼文の SHA が出ない");
+    }
+    assert.deepEqual(anonymizeStage(readScoreFromFull(out)), anon, "匿名の口は通常の出力から許可した欄だけを組み立てたもの");
+  });
+});
+
+/** 段だけの対の比較（v1.2 の群）の出力先：両群とも条件 v8・開始 T1・終了 T2'。passOf(群, 本) ＝ 真なら T2' まで通る */
+function stageCompareFixture638(base, name, { passOf, flagsOf = () => FLAGS638 }) {
+  const out = join(base, name), fzp = frozenFile545(base);
+  mkdirSync(out, { recursive: true });
+  const stage = { start: "name-table", end: "test-spec", stage_from_sha256: null };
+  const pairsText = JSON.stringify({ schema: "musunest-eval/stage-compare-pairs/v1", frozen_sha256: sha256(readFileSync(fzp)), groups: ["before", "after"], runs: 3, stage, pairs: IDS545.map((id, i) => ({ pid: id.split("-")[0], r: Number(id.split("-r")[1]), first: i % 2 === 0 ? "before" : "after" })) }, null, 1) + "\n";
+  writeFileSync(join(out, "pairs.json"), pairsText);
+  const pairsSha = sha256(pairsText), groups = {};
+  for (const g of ["before", "after"]) {
+    const cond = stageFixture638(join(out, g), { runOf: (id) => stageRecord638(id, { kind: passOf(g, id) ? "t2-pass" : "t2-fail", dropped: 2, flags: flagsOf(g) }), group: g, pairsSha, frozenPath: fzp, factoryFp: sha256(`factory-638-${g}`), flags: flagsOf(g) });
+    groups[g] = { role: g === "before" ? "baseline" : "candidate", pipeline: "v1.2", factory: { fingerprint: cond.factory.fingerprint }, conditions_signature: cond.signature };
+  }
+  writeFileSync(join(out, "comparison.json"), JSON.stringify({ schema: "musunest-eval/stage-compare-record/v1", stage: { ...stage, input_absent: 0 }, pairs: { sha256: pairsSha }, groups, scoring_cost_usd: 0 }));
+  return out;
+}
+
+test("#638 段だけの対の比較（v1.2 の群）：before・after とも条件 v8 で、対の差（after − before）の件数 ＋1 6・0 21・−1 3 と n・平均・区間が今の関数の値と一致し、群ごとに旗の照合と 1 段先の副指標が出る。旗の組の違う群は群の params の食い違いで断る。匿名の口に本の ID が無い", async () => {
+  await withOut(async (base) => {
+    const diffOf = (id) => (["P1", "P2"].includes(id.split("-")[0]) ? 1 : id.startsWith("P3-") ? -1 : 0);
+    const passOf = (g, id) => { const d = diffOf(id); return d === 1 ? g === "after" : d === -1 ? g === "before" : !id.startsWith("P10-"); };
+    const out = stageCompareFixture638(base, "cmp", { passOf });
+    const r = spawnSync(process.execPath, [scoreFile, repo, out, "--compare"], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    const full = readCompare(out);
+    assert.equal(full.schema, STAGE_SCORE_COMPARE_SCHEMA);
+    assert.equal(full.pipeline, "v1.2");
+    const expected = pairStats(IDS545.map(diffOf));
+    assert.deepEqual(full.pairs.counts, { "+1": 6, 0: 21, "-1": 3 });
+    assert.deepEqual([full.pairs.n, full.pairs.mean, full.pairs.sd, full.pairs.interval], [expected.n, expected.mean, expected.sd, expected.interval]);
+    assert.equal(full.completion.status, "complete", JSON.stringify(full.completion));
+    for (const g of ["before", "after"]) {
+      assert.equal(full.groups[g].v12_flags.status, "verified", g);
+      assert.equal(full.groups[g].next_stage.t2_pass.passed, full.groups[g].stage_pass_rate.passed, `${g}: 範囲の終わりが T2' なので段の通過と同じ本`);
+    }
+    assert.deepEqual([full.groups.before.next_stage.t2_pass.passed, full.groups.after.next_stage.t2_pass.passed], [21, 24], "before は P3 と P4〜P9、after は P1・P2 と P4〜P9");
+    assert.match(r.stdout, /^before 1 段先（T2' の通過/m);
+    assert.match(r.stdout, /^after 旗の組（v1\.2）: 照合 一致/m);
+    // 旗の組の違う群（計測は compare:flags-mismatch で断るが、書き換えた出力先も採点で断る）
+    const bad = stageCompareFixture638(base, "cmp-flags", { passOf, flagsOf: (g) => (g === "before" ? { ledger: true, ids: false } : FLAGS638) });
+    const rb = spawnSync(process.execPath, [scoreFile, repo, bad, "--compare"], { encoding: "utf8" });
+    assert.equal(rb.status, 3, rb.stderr);
+    assert.ok(rb.stderr.includes("群の params") && rb.stderr.includes("[compare:scoring-mismatch]"), rb.stderr);
+    // 匿名の口
+    const ra = spawnSync(process.execPath, [scoreFile, repo, out, "--compare", "--anonymous"], { encoding: "utf8" });
+    assert.equal(ra.status, 0, ra.stderr);
+    const text = readFileSync(join(out, "score-compare.anonymous.json"), "utf8"), anon = JSON.parse(text);
+    assert.deepEqual(anon, anonymizeStageCompare(full));
+    assert.equal(anon.pipeline, "v1.2");
+    assert.equal(anon.groups.after.next_stage.t2_pass.passed, full.groups.after.next_stage.t2_pass.passed);
+    for (const t of [text, ra.stdout, ra.stderr]) assert.ok(!/P\d+(-r\d+)?/.test(t), "本の ID・P の ID が出ない");
+  });
+});
+
+test("#638 README：§10.7 の後ろ（末尾）の新しい節 §10.8 に定義の語がある（§7 の先頭より前と §7.11 の先頭より前のバイト列は表の採点の試験が SHA で照合する）", () => {
+  const text = readFileSync(join(ev, "README.md"), "utf8");
+  const at = text.indexOf("\n### 10.8 ");
+  assert.ok(at > text.indexOf("\n### 10.7 ") && text.indexOf("\n### 10.7 ") > 0, "§10.8 は §10.7 の後ろ");
+  assert.equal(text.slice(at).indexOf("\n## ", 1), -1, "§10 が末尾のまま");
+  assert.equal(text.slice(at).indexOf("\n### ", 1), -1, "§10.8 が末尾");
+  const sec = text.slice(at);
+  for (const w of ["v8", "v12_flags", "1 段先", "T2' の通過", "落とした試験", "納品の成功ではない", "stage-from:conditions-pipeline", "compare:flags-mismatch", "not_reached", "missing", "range-excludes-test-spec"]) assert.ok(sec.includes(w), w);
+});

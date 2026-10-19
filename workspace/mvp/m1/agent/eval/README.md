@@ -1144,3 +1144,19 @@ C3（T1''）の判定を同じ正解と照らし、誤りの要件の受理（**
 - 経路 v1.2 の単独の計測（`--pipeline v1.2`）は、条件のファイルの `params.v12_call_limits`（`logical_calls`・`real_attempts`・`judge_branch`）に、工場の dist の `V12_CALL_LIMITS` の値を書く（道具に値を写さない）。署名に入る。v1・v1.1a だけの計測と、dist が上限を出さないときは欄を足さず、条件のファイルと署名は変わらない。比較の群（`--compare-pipelines`）の条件には足さない（採点側の群の params の照合が欄の差を見るため。足すときは採点側と一緒に直す）
 - `--resume` は記録の上限と今の dist の上限が違えば、今の条件の不一致と同じ `[resume:signature]` で断る。`v12_call_limits` の欄の無い前の版の条件のファイルは、その欄を除いた署名で今までどおり照らして再開できる（上限が記録されていないので、混ざったかどうかはこの照合では分からない）
 - 旗 `ids` が on の dist が `V12_CALL_LIMITS` を出さない・3 つが有限の数でないときは、**exit 3・`pipeline:v1.2-limits-unavailable`** で子を 1 本も起こさない（黙って欄を省かない）。`ids` が off か、旗に `ids` の無い dist（手 3p より前）だけ欄を足さずに通す
+
+### 10.8 v1.2 の段の走りの計測と採点（条件 v8・旗の照合・1 段先の副指標。#638。道具 `agent-accept/run-agent.mjs`・`agent-accept/score-agent.mjs`）
+
+工程ごとの評価の単位 U1（C1 語彙 → C2 写像 → C3 意味の点検）を、段の旗（§5.11）で v1.2 の経路のまま流して採点する。工場の段の走りの口（`--pipeline v1.2 --plan-file` と段の旗）に合わせて計測・採点を接続したもので、費用は 0（API を呼ぶのは計測のときだけ）。
+
+- **計測**：段の旗（`--stage-start`・`--stage-end`・`--stage-from`）は `--pipeline v1.2 --build-from` とも組める。子の引数の末尾は `--pipeline v1.2` のあとに段の旗。条件の版は **v8**（v6 の段の欄に、v7 の `params.pipeline`（`v1.2`）・`params.v12_flags`（工場の dist の `V12_PIPELINE_FLAGS` の写し）と §10.7 の `params.v12_call_limits` を足した形。署名に入る）。v1.1α の段単位の走りは v6 のままで、条件・子の引数・出力は変わらない
+- **開始の別名**：`--stage-start` の別名（C1 語彙の名前）は、工場の dist（`v11a/bundle-v11a.js`）が公開する別名の表で区間の正本の名前（`name-table`）に正規化してから範囲を決める。道具に別名を書かない。v1.1α の経路は別名を受けない（`flags:conflict`）
+- **上流の照合（`--stage-from`）**：上流の条件は v6 か v8 で、経路が今の経路と同じこと（違えば **exit 4・`stage-from:conditions-pipeline`**。版と経路の合わない条件は `stage-from:conditions-invalid`）。v1.2 の照合では、工場の dist の照合の関数に、dist の package の入口が公開する旗の組と台帳の指紋（`propertyLedgerSha256`）を渡す。旗の組か台帳の指紋が上流の checkpoint の版と違えば工場の符号 `stage-input:version` で断る（`stage-from:stage-input:version`）
+- **段だけの対の比較（`--make-pairs`・`--compare`）**：群は before・after で、両群とも v1.2。対のファイルは範囲と上流の条件の SHA を結ぶ今の形。両群の dist の旗の組が名前 → 真偽の集合として同じでなければ **exit 3・`compare:flags-mismatch`** で子を 1 本も起こさない。比較の群の条件には §10.7 と同じく上限の欄を足さない
+- **採点の照合**：段単位の条件として v8 も読む（段の履歴の照合は今の区間の表のまま。区間 0 に `vocabulary`・`mapping`）。本ごとの段の走りの記録（`bundle/stage-run.json`）の `conditions.v12_flags` を条件の `params.v12_flags` と照らし（`evaluation.v12_flags`。結果の名前は §5.13 と同じ）、起こした本の 1 本でも一致しない・欄が無い・記録が読めなければ照合は未照合（`completion.unverified` に `v12-flags`）。段の通過率と下の副指標の数は変えない
+- **1 段先の副指標（`next_stage`。v8 のときだけ。群ごと）**：U1 の同じ出力を T2 まで流した走り（範囲 `vocabulary`..`test-spec`）の記録から出す。終了した単位自身の集計（持ち越しの数・試験の数）で代用しない
+  - **T2' の通過**（`t2_pass`）＝ `test-spec` の最後の記録が ok の本の数 ÷ 予定本数。Wilson の区間は参考。T2 に届かず止まった本（入力なしの本を含む）は 0 に数えて `not_reached` に、記録の読めない本・条件と食い違う本・起こさなかった本は `missing` に件数を出し、どちらも分母から消さない。T2 で止まった本は `failed`
+  - **T2 が落とした試験の数**（`dropped_tests`）＝ 記録の `test_spec.dropped_tests`。T2 に届いた本だけで合計と中央値を出し、届かない本・値の無い本は null で、`observed`・`missing` と T2 に届いた本の数 `reached` を出す
+  - 範囲が `test-spec` を含まない走りでは、両方を null にし理由 `range-excludes-test-spec` を添える。U2 の 1 段先（U3 の停滞率・C7 の不一致）は宣言の保存の Issue の後
+- **読み方**：単位の評価の主指標（U1 の表の正誤）は表の採点の道具（§7）が出す。ここの段の通過と 1 段先の副指標は、その単位の出力が次の段で使えるかの副指標であり、**段の通過は納品の成功ではない**。判定・門・merge の可否に使わない
+- **匿名の口**：`--anonymous` には経路・旗の照合の状態（照合を通った旗の名前と真偽・件数）・1 段先の副指標の件数と率と区間だけを足す（本の ID・P の ID・上流と確定した仕様の SHA・一致しない本の一覧は出さない）。標準出力は段単位の採点の既存の行の後ろに、旗の組の 1 行と `1 段先（T2' の通過・T2 が落とした試験。納品の成功ではない）: …` の 1 行（`--compare` は群ごと）
