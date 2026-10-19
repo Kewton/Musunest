@@ -1902,7 +1902,13 @@ async function runV11a(
           unmarked: best.unmarked,
           mismatches: best.report.testRun?.mismatches ?? [],
           unresolved: best.report.testRun?.unresolved ?? [],
+          // 旗 `v12.ids` の走りだけ、観測する性質の写像と、この文脈の組から導いた要る検査の骨組み（追加の場所を作る。Issue #667）
+          ...(flags.ids
+            ? { ids: { observes: testSpec.observes, requiredValidations: requiredValidationsOf(table, context.suite, testSpec.observes) } }
+            : {}),
         });
+        /** 往復の記録の追加の場所の数（旗 `v12.ids` の走りだけ欄を持つ。Issue #667） */
+        const additionsField = located.additions === undefined ? {} : { additions: located.additions.length };
         if (canRepairFields(located)) {
           const answer = await runStageOk("repair", () =>
             runFieldRepair({
@@ -1917,12 +1923,13 @@ async function runV11a(
           );
           for (const dispute of answer.disputes) disputes.push(dispute);
           for (const item of answer.rejected) rejected.push(item);
-          const merged = mergeReplacements(best.report.declaration.source, answer.replacements, located.spans);
+          const merged = mergeReplacements(best.report.declaration.source, answer.replacements, located.spans, located.additions);
           roundRecords.push({
             hand: "field-repair",
             locations: located.locations.length,
             unlocated: 0,
             refused: merged.ok ? null : merged.refusal,
+            ...additionsField,
           });
           if (await arbitrate(answer.disputes, merged.ok ? { source: merged.source } : best.report.declaration)) break;
           if (merged.ok) {
@@ -1933,7 +1940,13 @@ async function runV11a(
           }
           continue;
         }
-        roundRecords.push({ hand: "repair", locations: located.locations.length, unlocated: located.unlocated.length, refused: null });
+        roundRecords.push({
+          hand: "repair",
+          locations: located.locations.length,
+          unlocated: located.unlocated.length,
+          refused: null,
+          ...additionsField,
+        });
         // 直す段の入力の宣言・結果・B3' の拒否は一番良い版のもの
         const step = await runStageOk("repair", () =>
           runRepairStep({
