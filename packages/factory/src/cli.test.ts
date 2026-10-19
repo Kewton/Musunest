@@ -1651,6 +1651,62 @@ describe("v1.2 の一気通貫の走りの checkpoint（`--pipeline v1.2 --plan-
     expect(declared[0]?.output_digest).toBe(await stageOutputDigest(checkpoint));
   });
 
+  /** 旗 v12.ids だけ off にした v1.2 の走り（入口の旗の組は全部 on なので、実効の旗の組を差し替える） */
+  const runV12IdsOff = async (dir: string) => {
+    vi.spyOn(ledgerModule, "fromPublicV12Flags").mockImplementation(() => ({ ledger: true, searchRepair: true, ids: false }));
+    const calls = [structured(v11aT1(true)), structured(v11aJudgments()), structured(v11aTestSpec()), structured({ declaration: V11A_YAML }), structured(v11aJudgments())];
+    return runV11aCli({ dir, calls, pipeline: "v1.2" });
+  };
+  const BUILD_RECORD_KEYS = ["schema_version", "conditions", "plan_sha256", "source_sha256", "return_to_plan"];
+
+  it("ids off の v1.2 の走りは境界の材料を集めさせず、checkpoint を書かず、Build だけの記録に checkpoints が無い（直す前と同じ欄・同じファイル）", async () => {
+    const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
+    const run = await runV12IdsOff(`${directory}/v12-ids-off-no-checkpoints`);
+    expect(run.code).toBe(EXIT_OK);
+    const passed = v11aSpy.mock.calls[0]?.[0];
+    expect(passed?.flags).toEqual({ ledger: true, searchRepair: true, ids: false });
+    expect(passed?.recordV12Flags).toBe(true);
+    expect(passed).not.toHaveProperty("collectBoundaries");
+    expect(run.summary["v12_flags"]).toEqual({ ledger: true, "search-repair": true, ids: false });
+    expect(Object.keys(run.record)).toEqual(BUILD_RECORD_KEYS);
+    expect(run.written.filter((path) => path.startsWith("stage-checkpoint-"))).toEqual([]);
+    expect(run.written.at(-1)).toBe(BUILD_CLI_RECORD_FILE);
+  });
+
+  it("--stage-input の符号：v1.1a・ids off の v1.2・境界に届かなかった v1.2 の出力の場所は直す前と同じ unreadable、変わるのは ids on の v1.2 が checkpoint を書いた場所だけ", async () => {
+    const v11aDir = `${directory}/stage-input-from-v11a`;
+    await runV11aCli({ dir: v11aDir, calls: [...v11aHead(), structured(v11aJudgments())] });
+    const idsOffDir = `${directory}/stage-input-from-v12-ids-off`;
+    await runV12IdsOff(idsOffDir);
+    vi.restoreAllMocks();
+    const c1Dir = `${directory}/stage-input-from-v12-c1`;
+    const broken = { entities: [{ name: "1member", role: "名前の規則に合わない行" }] };
+    await runV11aCli({ dir: c1Dir, calls: [structured(broken), structured(broken)], pipeline: "v1.2" });
+    const idsOnDir = `${directory}/stage-input-from-v12-ids-on`;
+    await runV11aCli({ dir: idsOnDir, calls: [...v12Head(), structured(v11aJudgments())], pipeline: "v1.2" });
+
+    const resume = async (name: string, start: "test-spec" | "write", input: string) => {
+      const run = await runStageCli({ dir: `${directory}/stage-input-out-${name}`, args: ["--stage-start", start, "--stage-input", input], calls: [] });
+      expect(run.makeClient, name).not.toHaveBeenCalled();
+      expect(run.written, name).toEqual([]);
+      return { code: run.code, errors: run.errors };
+    };
+    const unreadable = { code: EXIT_STAGE_INPUT, errors: ["stage-input:unreadable"] };
+    // 直す前と同じ：前の走りの記録（stage-run.json）が無い場所は、何を渡しても unreadable
+    for (const [label, dir] of [["v11a", v11aDir], ["ids-off", idsOffDir]] as const) {
+      expect(await resume(`${label}-t2b1`, "write", `${dir}/${stageCheckpointFile("t2-b1")}`), label).toEqual(unreadable);
+      expect(await resume(`${label}-t1t2`, "test-spec", `${dir}/${stageCheckpointFile("t1-t2")}`), label).toEqual(unreadable);
+      expect(await resume(`${label}-manifest`, "write", `${dir}/${BUNDLE_MANIFEST_FILE}`), label).toEqual(unreadable);
+      expect(await resume(`${label}-record`, "write", `${dir}/${BUILD_CLI_RECORD_FILE}`), label).toEqual(unreadable);
+    }
+    // 境界に届かなかった ids on の v1.2（checkpoints が空）も同じ
+    expect(declaredOf(JSON.parse(await fs.readFile(`${c1Dir}/${BUILD_CLI_RECORD_FILE}`, "utf8")))).toEqual([]);
+    expect(await resume("c1-record", "write", `${c1Dir}/${BUILD_CLI_RECORD_FILE}`)).toEqual(unreadable);
+    // 変わるのは ids on の v1.2 が checkpoint を書いた場所だけ：Build だけの記録を前の走りの記録として読み、境界で照合する
+    expect(await resume("ids-on-record", "write", `${idsOnDir}/${BUILD_CLI_RECORD_FILE}`)).toEqual({ code: EXIT_STAGE_INPUT, errors: ["stage-input:boundary"] });
+    expect(await resume("ids-on-t1t2-as-b1", "write", `${idsOnDir}/${stageCheckpointFile("t1-t2")}`)).toEqual({ code: EXIT_STAGE_INPUT, errors: ["stage-input:boundary"] });
+  });
+
   it("--pipeline v1.1a の走りは境界の材料を集めさせず、checkpoint を書かず、記録に checkpoints が無い", async () => {
     const v11aSpy = vi.spyOn(v11aRunModule, "runGenerationV11a");
     const run = await runV11aCli({ dir: `${directory}/v11a-no-checkpoints`, calls: [...v11aHead(), structured(v11aJudgments())] });

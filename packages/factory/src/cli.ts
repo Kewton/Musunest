@@ -25,9 +25,10 @@
 // と固定の符号 1 行（標準エラー）で終わる。段の走りは納品物を書かず、境界の checkpoint と段の走りの記録だけを
 // 書く。旗を省けば今までの走りとバイト列で同じである（checkpoint も書かない）。
 //
-// `--pipeline v1.2` の一気通貫の走りも、通った境界（T1''／T2・T2／B1）の checkpoint を段の走りと同じ関数・同じ名前で `--out`
-// の直下に書き（納品物の manifest には載せない）、Build だけの記録に `checkpoints` で宣言する。段の入力の照合は、前の走りの
-// 記録として段の走りの記録が無ければ Build だけの記録を読む（Issue #636）。`v1`・`v1.1a` の走りは何も足さない。
+// `--pipeline v1.2` の一気通貫の走りのうち旗 v12.ids が on の走りは、通った境界（T1''／T2・T2／B1）の checkpoint を段の走りと
+// 同じ関数・同じ名前で `--out` の直下に書き（納品物の manifest には載せない）、Build だけの記録に `checkpoints` で宣言する。
+// 段の入力の照合は、前の走りの記録として段の走りの記録が無ければ、checkpoint を 1 つ以上宣言した Build だけの記録を読む
+// （Issue #636）。`v1`・`v1.1a`・ids off の v1.2 の走りは何も足さない。
 //
 // `node:fs` は**動的**に読む（Worker が根（index.ts）から import しても、この経路は呼ばれない限り動かない。
 // appspec-schema の contract.ts と同じやり方）。
@@ -553,17 +554,19 @@ async function runBuild(
   readonly boundaries?: readonly BoundaryMaterials[];
 }> {
   // v1.1α は確定した仕様と組んでだけ流れる（引数の読み取りが `--plan-file` を要る。Issue #511）。v1.2 は同じ経路に
-  // 旗の組を渡し、要約に旗の組を書かせる（Issue #547）。v1.2 は境界の材料も集めさせる（checkpoint を書くため。Issue #636）
+  // 旗の組を渡し、要約に旗の組を書かせる（Issue #547）。旗 v12.ids が on の走りだけ、境界の材料も集めさせる（checkpoint を書く
+  // ため。ids off の走りは集めず、直す前とバイト列で同じ。Issue #636）
   const v11aPlan = isV11aPath(job.pipeline) ? job.plan : undefined;
   const input = generationInputOf(deps, job, v11aPlan === undefined ? PROMPT_VERSION : promptVersionOf(job.pipeline));
-  const flags = v12FlagsOf(job.pipeline);
+  const publicFlags = v12FlagsOf(job.pipeline);
+  const flags = publicFlags === undefined ? undefined : fromPublicV12Flags(publicFlags);
   const run: GenerationResultV11a =
     v11aPlan === undefined
       ? await runGeneration({ ...input, ...(job.plan === undefined ? {} : { plan: job.plan }) })
       : await runGenerationV11a({
           ...input,
           plan: v11aPlan,
-          ...(flags === undefined ? {} : { flags: fromPublicV12Flags(flags), recordV12Flags: true, collectBoundaries: true }),
+          ...(flags === undefined ? {} : { flags, recordV12Flags: true, ...(flags.ids ? { collectBoundaries: true } : {}) }),
         });
   const written = await writeBuildRun(deps, job, run, log);
   return run.boundaries === undefined ? written : { ...written, boundaries: run.boundaries };
@@ -965,14 +968,22 @@ async function writeStageCheckpoints(
 }
 
 /**
- * 前の走りの記録を読む（段の走りの記録。無ければ Build だけの記録。`--pipeline v1.2` の走りの checkpoint を受けるため。
- * どちらも読めなければ null。Issue #636）
+ * 前の走りの記録を読む（段の走りの記録。無ければ、checkpoint を 1 つ以上宣言した Build だけの記録＝旗 v12.ids の走りが
+ * checkpoint を書いた場所。Issue #636）。どちらでもなければ null（v1・v1.1a・ids off の v1.2・境界に届かなかった走りの場所は
+ * 直す前と同じに読めない扱い）
  */
 async function readPreviousRecord(deps: CliDeps, directory: string): Promise<string | null> {
-  return (
-    (await readOrNull(deps, joinPath(directory, STAGE_RUN_RECORD_FILE))) ??
-    (await readOrNull(deps, joinPath(directory, BUILD_CLI_RECORD_FILE)))
-  );
+  const stageRecord = await readOrNull(deps, joinPath(directory, STAGE_RUN_RECORD_FILE));
+  if (stageRecord !== null) return stageRecord;
+  const buildRecord = await readOrNull(deps, joinPath(directory, BUILD_CLI_RECORD_FILE));
+  if (buildRecord === null) return null;
+  try {
+    const value: unknown = JSON.parse(buildRecord);
+    const checkpoints = typeof value === "object" && value !== null ? (value as Record<string, unknown>)["checkpoints"] : undefined;
+    return Array.isArray(checkpoints) && checkpoints.length > 0 ? buildRecord : null;
+  } catch {
+    return null;
+  }
 }
 
 /** 読めなければ null（段の入力の照合は、読めないことを固定の符号にする） */
