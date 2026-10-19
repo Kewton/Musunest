@@ -24,6 +24,7 @@ import {
   verifyStageInput,
   STAGE_CHECKPOINT_SCHEMA,
   STAGE_RUN_RECORD_SCHEMA,
+  STAGE_START_ALIASES_V12,
   type BoundaryMaterials,
   type StageRunOutcome,
 } from "./bundle-v11a.js";
@@ -343,5 +344,73 @@ describe("区間の表（STAGE_SEGMENTS）と範囲の段", () => {
     const recorded = (record["stages"] as readonly { stage: string }[]).map((x) => x.stage);
     expect(recorded).toEqual([...ran]);
     for (const stage of recorded) expect(allowed as readonly string[]).toContain(stage);
+  });
+});
+
+// ── v1.2 の段の走り（Issue #637）──────────────────────────────────────
+
+describe("v1.2 の段の走りの別名と記録の欄（Issue #637）", () => {
+  const CONDITIONS = {
+    model: "m",
+    effort: "high",
+    documents: [],
+    judge: { primary: "llm", fallback: null },
+    prompt_version: "v1.1a",
+    vocabulary_version: "v1",
+    contract_version: "v0.2",
+    factory_version: "0.0.0",
+    spec_engine_version: "0.0.0",
+    budget_usd: 0.3,
+    deadline_ms: 600_000,
+    timeout_ms: null,
+  } as const;
+  const recordOf = (outcome: StageRunOutcome, range: { start: "name-table" | "test-spec" | "write"; end: "semantic-check" | "test-spec" | "judge" }, v12?: { testSpecInRange: boolean }) =>
+    buildStageRunRecord({
+      range,
+      input: null,
+      planSha256: PLAN_SHA,
+      sourceSha256: SOURCE_SHA,
+      checkpoints: [],
+      conditions: CONDITIONS,
+      outcome,
+      exitCode: 0,
+      ...(v12 === undefined ? {} : { v12 }),
+    });
+
+  it("別名は区間 0 の C1 語彙だけで、正本の開始の名前に写る（段の表は変えない。別名そのものは表の外）", () => {
+    expect(STAGE_START_ALIASES_V12).toEqual({ vocabulary: "name-table" });
+    for (const [alias, start] of Object.entries(STAGE_START_ALIASES_V12)) {
+      expect(STAGE_STARTS as readonly string[]).not.toContain(alias);
+      expect(STAGE_SEGMENTS.find((segment) => segment.start === start)?.stages).toContain(alias);
+      expect(resolveStageRange({ start: alias, hasInput: false })).toEqual({ code: "stage-range:unknown" });
+    }
+  });
+
+  it("v12 を渡さない記録（v1.1a）は、回す部分が数を返しても v12_calls・test_spec を持たず、渡さない記録とバイト列で同じ", () => {
+    const plain = recordOf(outcomeOf(), { start: "name-table", end: "test-spec" });
+    const withCounts = recordOf(
+      outcomeOf({ v12Calls: { real_attempts: { limit: 1, used: 1 } }, testSpec: { tests: 1, dropped_tests: 0, coverage_units: 1 } }),
+      { start: "name-table", end: "test-spec" },
+    );
+    expect(stageJsonText(withCounts)).toBe(stageJsonText(plain));
+    expect(Object.keys(plain)).not.toContain("v12_calls");
+    expect(Object.keys(plain)).not.toContain("test_spec");
+  });
+
+  it("v12 を渡す記録は末尾に v12_calls と（範囲が T2 を含むとき）test_spec を足し、T2 に届かなければ test_spec は null", () => {
+    const counts = { tests: 7, dropped_tests: 2, coverage_units: 5 };
+    const calls = { real_attempts: { limit: 144, used: 9 } };
+    const plainKeys = Object.keys(recordOf(outcomeOf(), { start: "name-table", end: "test-spec" }));
+    const reached = recordOf(outcomeOf({ v12Calls: calls, testSpec: counts }), { start: "name-table", end: "test-spec" }, { testSpecInRange: true });
+    expect(Object.keys(reached)).toEqual([...plainKeys, "v12_calls", "test_spec"]);
+    expect(reached["test_spec"]).toEqual(counts);
+    expect(reached["v12_calls"]).toEqual(calls);
+    const notReached = recordOf(outcomeOf({ v12Calls: calls }), { start: "name-table", end: "test-spec" }, { testSpecInRange: true });
+    expect(notReached["test_spec"]).toBeNull();
+    // 範囲が T2 を含まない・旗 ids が off（数が無い）なら欄を持たない
+    const outside = recordOf(outcomeOf({ v12Calls: calls }), { start: "name-table", end: "semantic-check" }, { testSpecInRange: false });
+    expect(Object.keys(outside)).toEqual([...plainKeys, "v12_calls"]);
+    const idsOff = recordOf(outcomeOf(), { start: "name-table", end: "semantic-check" }, { testSpecInRange: false });
+    expect(Object.keys(idsOff)).toEqual(plainKeys);
   });
 });

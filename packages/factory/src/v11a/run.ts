@@ -29,6 +29,8 @@
 // ⑦ まで流しても ⑧（納品物）は組まない。範囲を省いた `runGenerationV11a` は今までと同じに振る舞う。
 // 範囲を省いた走りでも `collectBoundaries` を渡せば、同じ境界で同じ材料を集めて結果の `boundaries` に返す（`--pipeline v1.2` の
 // 走りが checkpoint を書くため。Issue #636）。省けば集めず、結果に欄を置かない。
+// 段の走りの結果には、旗 `v12.ids` の走りだけ門と枝の数（`v12Calls`。要約の `v12_calls` と同じ形）を、この走りで T2 を回して
+// T2' を通ったときだけ組の数（`testSpec`）を足す。記録に載せるかは呼ぶ側（`--pipeline v1.2` の段の走り）が決める（Issue #637）。
 //
 // 旗（`flags`。08-architecture-v1.2.md §9・Issue #547）：省けば全部 off で、今の v1.1α とバイト列で同じに流れる。
 // `flags.ledger` が on なら、性質の台帳の導出（`v12/ledger.ts`）を T1（T1' を含む）・T2（T2' を含む）・評価口（B4・
@@ -131,6 +133,7 @@ import {
   type StageBoundary,
   type StageRange,
   type StageRunOutcome,
+  type StageTestSpecCounts,
   V12_SEARCH_REPAIR_ARTIFACT_NAME,
 } from "./bundle-v11a.js";
 import {
@@ -919,6 +922,8 @@ async function runV11a(
 
   // 段の走り：通った境界の材料（通った順）と、段の走りの結果
   const boundaries: BoundaryMaterials[] = [];
+  // この走りで T2 を回し T2' を通った組の数（段の走りの記録の `test_spec`。再開の材料から入った走りは持たない。Issue #637）
+  let testSpecCounts: StageTestSpecCounts | undefined;
   const stageOutcome = (
     stopped: FailureAttribution | null,
     extra: { readonly judgeVerdict?: StageRunOutcome["judgeVerdict"]; readonly finalCarryOver?: StageRunOutcome["finalCarryOver"] } = {},
@@ -933,6 +938,12 @@ async function runV11a(
       returnToPlan,
       costUsd: budget.spentUsd,
       durationSecs: (input.now() - startedAt) / 1000,
+      // 旗 `v12.ids` の走りの門と枝の数（要約と同じ形）と T2' を通った組の数（記録に載せるかは呼ぶ側が決める。Issue #637）
+      ...(() => {
+        const calls = callsRecord().v12_calls;
+        return calls === undefined ? {} : { v12Calls: calls };
+      })(),
+      ...(testSpecCounts === undefined ? {} : { testSpec: testSpecCounts }),
     },
   });
   /**
@@ -1204,6 +1215,7 @@ async function runV11a(
       );
       natureDiscrepancies = toBundleNatureDiscrepancies(value.discrepancies);
       materialStore.testSuite = await acceptSlot(value.suite, lastOkStageIndex("test-spec"));
+      testSpecCounts = { tests: value.suite.tests.length, dropped_tests: droppedTests.length, coverage_units: value.coverage.length };
       return value;
     };
     const testSpec: FrozenTestSpec =

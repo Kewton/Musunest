@@ -24,6 +24,7 @@
 //
 // 台帳は LLM を呼ばず、評価口を import しない（B4 の照合は名前で持ち、評価口が名前 → 関数の表を持つ）。
 import type { AggregateKind } from "@musunest/appspec-schema";
+import { sha256Hex } from "@musunest/spec-engine";
 import { TEST_KINDS, type TestKind, type TestOperation, type TestTargetKind } from "../fixed-test.js";
 
 // ── 旗（v1.2 の旗の正本）──────────────────────────────────────────
@@ -696,6 +697,23 @@ export const PROPERTY_LEDGER: readonly PropertyRow[] = [
     },
   },
 ];
+
+/** キーを並べ替えた JSON（配列の順は保つ。`undefined` の欄は落とす。台帳の指紋の正規の形） */
+function sortedJson(value: unknown): string {
+  return JSON.stringify(value, (_key, inner: unknown) =>
+    inner === null || typeof inner !== "object" || Array.isArray(inner)
+      ? inner
+      : Object.fromEntries(Object.entries(inner as Record<string, unknown>).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))),
+  );
+}
+
+/**
+ * 性質の台帳の定義の指紋（台帳の一覧を正規化した JSON の SHA-256。段の走りの checkpoint の版の欄 `ledger`。Issue #637）。
+ * 行・列・並びのどれかを変えれば値が変わり、台帳を変えた後の旧い checkpoint を段の入力の照合が断れる
+ */
+export function propertyLedgerSha256(rows: readonly PropertyRow[] = PROPERTY_LEDGER): Promise<string> {
+  return sha256Hex(sortedJson(rows));
+}
 
 // ── 台帳の点検 ───────────────────────────────────────────────────
 
