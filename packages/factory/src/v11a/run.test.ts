@@ -79,6 +79,7 @@ import {
   V11A_ARTIFACT_NAMES,
   V12_SEARCH_REPAIR_ARTIFACT_NAME,
   buildStageCheckpoint,
+  buildStageRunRecord,
   stageJsonText,
   stageOutputDigest,
   stagesInRange,
@@ -4381,5 +4382,170 @@ describe("旗 v12.ids：直す段の上限の停止に上限の名前と数を�
     const calls = (result.summary as unknown as Record<string, Record<string, unknown>>)["v12_calls"];
     expect(calls).toBeDefined();
     expect(calls).not.toHaveProperty("repair");
+  });
+});
+
+// ── 窓口の条件（Issue #665 の申告 ④ の了承の条件 (i)(ii) と、ids off の search-repair の走り）──────────────────────────────
+//
+// 比較元のダイジェストは、**この Issue の直す前のコード**（統合の branch `integration/v12-h3d` の ed1ecd0）で同じ台本を流して取った値である。
+// 直したあとも ids off の走り（旗を省いた v1.1α・ledger だけ on・ledger と search-repair が on）の記録・要約・診断・要求・
+// stage-run.json と checkpoint はバイト列で同じであること（足すのは ids on の欄だけ）を固定する。
+
+/** 要求から締切の合図を外す（値の比較に入れない） */
+const requestBytes = (requests: readonly (LlmStructuredRequest | LlmToolRequest)[]): string =>
+  JSON.stringify(requests.map(({ signal: _signal, ...rest }) => rest));
+
+/** 段の走りの条件（固定の値。鍵は書かない） */
+const STAGE_CONDITIONS = {
+  model: "m",
+  effort: "high",
+  documents: [],
+  judge: { primary: "llm", fallback: null },
+  prompt_version: "v1.1a",
+  vocabulary_version: "v1",
+  contract_version: "v0.2",
+  factory_version: "0.0.0",
+  spec_engine_version: "0.0.0",
+  budget_usd: 0.3,
+  deadline_ms: 600_000,
+  timeout_ms: null,
+} as const;
+const STAGE_VERSIONS = { vocabulary: "v1", contract: "v0.2", prompt: "v1.1a", factory: "0.0.0" } as const;
+
+/** 段の走りの結果から、checkpoint の JSON の文字列と stage-run.json の文字列を組む（cli と同じ関数） */
+async function stageRunFiles(outcome: Awaited<ReturnType<typeof runStageRangeV11a>>, range: { start: "name-table"; end: "judge" }) {
+  const checkpoints = outcome.boundaries.map((materials) =>
+    buildStageCheckpoint({ materials, versions: STAGE_VERSIONS, planSha256: "a".repeat(64), sourceSha256: "b".repeat(64) }),
+  );
+  const listed = await Promise.all(
+    checkpoints.map(async (checkpoint, index) => ({
+      boundary: outcome.boundaries[index]!.boundary,
+      path: `cp-${String(index)}.json`,
+      output_digest: await stageOutputDigest(checkpoint),
+    })),
+  );
+  const record = buildStageRunRecord({
+    range,
+    input: null,
+    planSha256: "a".repeat(64),
+    sourceSha256: "b".repeat(64),
+    checkpoints: listed,
+    conditions: STAGE_CONDITIONS,
+    outcome,
+    exitCode: outcome.stopped === null ? 0 : 1,
+  });
+  return { checkpointTexts: checkpoints.map(stageJsonText), listed, recordText: stageJsonText(record), record };
+}
+
+describe("窓口の条件（Issue #665）：ids off の要約・診断・stage-run.json はバイト列で不変、再開の照合と checkpoint は limit を読まない・書かない", () => {
+  const WRONG_YAML = replaced(RUN_YAML, "    expression: base * 2", "    expression: base * 3");
+  const repairBundles = (): RecordedCall[] =>
+    Array.from({ length: 8 }, (_, index) => repairToolCall(`rt${String(index)}`, "static-check", WRONG_YAML));
+  const RANGE = { start: "name-table", end: "judge" } as const;
+
+  /** 比較元（ed1ecd0）で同じ台本を流して取ったダイジェスト */
+  const BEFORE = {
+    v11aStop: "5cd420e515ce58a7c2e3345fec20a70350e653cd946085bedb19c6a003fcfdea",
+    ledgerStop: "fa1933e340a873a9e19eed42eb7166e705296cac3533062ef89387f47da5f9fb",
+    searchRepairDone: "6d90268e43a278eb6d0f46a278dc3a989850d6b45c85724efc07f2dadeafacb2",
+    searchRepairStop: "9f7878877188b7147c613c5235c07e8d9131ff4a96d866643e3af313e33de8ca",
+    stageRunOff: "8b653f6dd51a142b9753c3cc3d6a02770c939258c400a0eadacaa0199cc4e849",
+  } as const;
+
+  const digestOf = async (scenario: Awaited<ReturnType<typeof runScenario>>): Promise<string> =>
+    sha256Hex(
+      JSON.stringify({
+        result: scenario.result,
+        structured: requestBytes(scenario.recording.structured),
+        tools: requestBytes(scenario.recording.tools),
+      }),
+    );
+
+  it("(i) 旗を省いた v1.1α の走り：直す段の上限で止まる台本の結果（記録・要約・診断）と要求が直す前とバイト列で同じ", async () => {
+    const run = await runScenario([...head({ yaml: WRONG_YAML }), structured(acceptAll()), ...repairBundles()]);
+    expect(run.result.stopped).toEqual({ stage: "repair", kind: "call-limit" });
+    expect(await digestOf(run)).toBe(BEFORE.v11aStop);
+  });
+
+  it("(i) ids off（ledger だけ on）の走り：同じ台本の結果と要求が直す前とバイト列で同じ", async () => {
+    const run = await runScenario([...head({ yaml: WRONG_YAML, table: TABLE_ON }), structured(acceptAll()), ...repairBundles()], {
+      flags: { ledger: true },
+      recordV12Flags: true,
+    });
+    expect(run.result.stopped).toEqual({ stage: "repair", kind: "call-limit" });
+    expect(await digestOf(run)).toBe(BEFORE.ledgerStop);
+  });
+
+  it("ids off で search-repair だけ on（と ledger）の走り：道具付きの直す段を通って完走する台本と、止まる台本の結果と要求が直す前とバイト列で同じ", async () => {
+    const done = await runScenario(
+      [...searchHead({ yaml: MIS2 }), structured(acceptAll()), repairDone(MIS1), structured(acceptAll()), repairDone(SEARCH_YAML), structured(acceptAll())],
+      { flags: { searchRepair: true }, recordV12Flags: true },
+    );
+    expect(done.result.outcome.verdict).toBe("full");
+    expect(done.recording.tools.length).toBeGreaterThan(0);
+    expect(await digestOf(done)).toBe(BEFORE.searchRepairDone);
+    const stop = await runScenario([...head({ yaml: WRONG_YAML, table: TABLE_ON }), structured(acceptAll()), ...repairBundles()], {
+      flags: { ledger: true, searchRepair: true },
+      recordV12Flags: true,
+    });
+    expect(stop.result.stopped).not.toBeNull();
+    expect(await digestOf(stop)).toBe(BEFORE.searchRepairStop);
+  });
+
+  it("(i) 旗を省いた段の走り（T1 → ⑦）：直す段の上限で止まる台本の stage-run.json と checkpoint の文字列が直す前とバイト列で同じ", async () => {
+    const recording = createCheckedRecordingClient([...head({ yaml: WRONG_YAML }), structured(acceptAll()), ...repairBundles()]);
+    const outcome = await runStageRangeV11a({ ...inputOf(recording.client), range: RANGE });
+    expect(outcome.stopped).toEqual({ stage: "repair", kind: "call-limit" });
+    const files = await stageRunFiles(outcome, RANGE);
+    const digest = await sha256Hex(JSON.stringify({ record: files.recordText, checkpoints: files.checkpointTexts }));
+    expect(digest).toBe(BEFORE.stageRunOff);
+    expect((files.record as Record<string, unknown>)["stopped"]).toEqual({ stage: "repair", kind: "call-limit" });
+  });
+
+  it("(ii) ids on の段の走り：stopped にだけ limit が足され、checkpoint は直す段の結果に依らず同じで limit を持たず、再開の照合は limit を読まない（stopped を差し替えても同じ結果）", async () => {
+    const flags = { flags: { ledger: true, ids: true } } as const;
+    const stopRecording = createCheckedRecordingClient([...idsHead({ yaml: WRONG_YAML }), structured(acceptAll()), ...repairBundles()]);
+    const stopped = await runStageRangeV11a({ ...inputOf(stopRecording.client, flags), range: RANGE });
+    expect(stopped.stopped).toEqual({ stage: "repair", kind: "call-limit", limit: { name: "repairStepTurns", max: 8, actual: 9 } });
+    // 対照：同じ境界までの台本で、直す段が done を返して最後まで流れる走り
+    const doneRecording = createCheckedRecordingClient([...idsHead({ yaml: WRONG_YAML }), structured(acceptAll()), repairDone(WRONG_YAML), structured(acceptAll())]);
+    const passed = await runStageRangeV11a({ ...inputOf(doneRecording.client, flags), range: RANGE });
+    expect(passed.stopped).toBeNull();
+
+    const stopFiles = await stageRunFiles(stopped, RANGE);
+    const doneFiles = await stageRunFiles(passed, RANGE);
+    // checkpoint：境界は T1''／T2・T2／B1 の 2 つで、直す段の止まり方に依らずバイト列で同じ。limit も上限の名前も書かない
+    expect(stopFiles.checkpointTexts).toHaveLength(2);
+    expect(stopFiles.checkpointTexts).toEqual(doneFiles.checkpointTexts);
+    for (const text of stopFiles.checkpointTexts) {
+      expect(text).not.toContain('"limit":');
+      expect(text).not.toContain("repairStepTurns");
+    }
+    // stage-run.json：ids on の stopped にだけ limit が載る
+    expect((stopFiles.record as Record<string, unknown>)["stopped"]).toEqual(stopped.stopped);
+
+    // 再開の照合：stopped の limit を外した記録・stopped を null にした記録と、照合の結果が同じ（limit を読まない）
+    const strippedRecord = { ...stopFiles.record, stopped: { stage: "repair", kind: "call-limit" } };
+    const nullRecord = { ...stopFiles.record, stopped: null };
+    const boundaryIndex = stopped.boundaries.findIndex((entry) => entry.boundary === "t1-t2");
+    const verifyWith = (recordText: string) =>
+      verifyStageInput({
+        start: "test-spec",
+        checkpointText: stopFiles.checkpointTexts[boundaryIndex] ?? null,
+        checkpointFile: `cp-${String(boundaryIndex)}.json`,
+        recordText,
+        plan: PLAN,
+        planSha256: "a".repeat(64),
+        sourceSha256: "b".repeat(64),
+        vocabularyVersion: "v1",
+        contractVersion: "v0.2",
+      });
+    const withLimit = await verifyWith(stopFiles.recordText);
+    if (!withLimit.ok) throw new Error(`通るはず：${withLimit.code}`);
+    expect(await verifyWith(stageJsonText(strippedRecord))).toEqual(withLimit);
+    expect(await verifyWith(stageJsonText(nullRecord))).toEqual(withLimit);
+    // 再開の材料にも limit が無い
+    expect(JSON.stringify(withLimit)).not.toContain('"limit":');
+    expect(JSON.stringify(withLimit)).not.toContain("repairStepTurns");
   });
 });
