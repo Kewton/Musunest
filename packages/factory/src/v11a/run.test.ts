@@ -1016,11 +1016,29 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     ],
   };
 
+  /**
+   * 直す前の値：(4) の止まる 2 台本の diagnostics/materials.json から rejected の鍵だけを外した残りの SHA-256（main の a61f2ce の
+   * run.ts・bundle.ts で測った値。ほかの台本は materials.json を出さない。新しい run.ts の出力から作っていない。Issue #657）
+   */
+  const BEFORE_MATERIALS_DIGESTS: Readonly<Record<string, string>> = {
+    "(4) C2 が 2 回落ちて止まる": "a1c6f1158b66a23deb3a2fefe0b0ea6a0c315529a826a9d67b5fad4d8960cf27",
+    "(4) C1 の束 2 が 2 回落ちて止まる": "2c99823924cadb18d40b4ee932938aa9349c60dbc058806d3d9fb1258b8a61c6",
+  };
+
   it("(1)〜(5) の台本の段の記録・要約・LLM への要求・終了コード・納品物は、直す前（a61f2ce で測った SHA-256）と同じ（Issue #657）", async () => {
     const measured: Record<string, readonly string[]> = {};
+    const measuredMaterials: Record<string, string> = {};
+    const rejectedSummaries: Record<string, readonly { attempt: number; problem_count: number; messages: readonly { message: string; count: number }[] }[]> = {};
     for (const script of beforeScripts()) {
       const { result, recording } = await runScenario(script.calls, { flags: IDS_FLAGS });
       const files = result.bundle === null ? [] : bundleFiles(result.bundle).map((file) => ({ path: file.path, text: file.text }));
+      // 止まる走りの診断の一覧（materials.json）は、断った候補の要約（rejected）の鍵を外した残りを照らす。rejected は下で期待を固定する
+      const listing = result.diagnostics.find((artifact) => artifact.path === DIAGNOSTICS_LISTING_FILE);
+      if (listing !== undefined) {
+        const { rejected, ...rest } = JSON.parse(listing.text) as { readonly rejected?: readonly { attempt: number; problem_count: number; messages: readonly { message: string; count: number }[] }[] };
+        measuredMaterials[script.name] = await sha256Hex(JSON.stringify(rest));
+        rejectedSummaries[script.name] = rejected ?? [];
+      }
       measured[script.name] = await Promise.all(
         [result.record, result.summary, { structured: recording.structured, tools: recording.tools }, result.summary.exit_code, files].map((value) =>
           sha256Hex(JSON.stringify(value)),
@@ -1028,6 +1046,18 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       );
     }
     expect(measured).toEqual(BEFORE_DIGESTS);
+    expect(measuredMaterials).toEqual(BEFORE_MATERIALS_DIGESTS);
+    // rejected は、形の試行ごとの候補 2 件（attempt 1・2 の順）で、それぞれ問題の一覧（problem_count と固定文）を持つ
+    expect(Object.keys(rejectedSummaries)).toEqual(Object.keys(BEFORE_MATERIALS_DIGESTS));
+    for (const [name, rejected] of Object.entries(rejectedSummaries)) {
+      expect(rejected.map((entry) => entry.attempt), name).toEqual([1, 2]);
+      for (const entry of rejected) {
+        expect(entry.problem_count, name).toBeGreaterThan(0);
+        expect(entry.messages.length, name).toBeGreaterThan(0);
+        expect(entry.messages.every((item) => item.message !== "" && item.count > 0), name).toBe(true);
+        expect(entry.messages.reduce((total, item) => total + item.count, 0), name).toBe(entry.problem_count);
+      }
+    }
   });
 
   it("既定値の value が options の外の要件（R6）は、C2 の形のやり直し 1 回（要求 2 本はどちらも全要件）で直り、表が組まれ C3 へ進む（Issue #594・#627）", async () => {
