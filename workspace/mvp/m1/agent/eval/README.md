@@ -1017,6 +1017,16 @@ C3（T1''）の判定を同じ正解と照らし、誤りの要件の受理（**
 - 点検の記録の**引用**（`quote`）と**拒否の理由**の文は読まず、出力に写さない。**拒否の種類**（`kind`）は既知の値（`unnecessary-ownership`・`missing-target`・`weak-verification`）の件数だけで、ほかの値は `unknown` に数える（値を写さない）
 - `--anonymous` に足す欄（`draft`・`c3`）も件数・率・P の数だけ（本の ID・要件 ID・P の番号を出さない。既存の匿名の欄は変えない）。1 本目の採点の欄の名前・意味・値は変えず、**指紋**（道具のファイルの SHA-256）だけがコードの変更で変わる
 
+### 7.13 段の走りと段の比較の読み方（読取元 checkpoint・入力なし・表なし。#639）
+
+条件の版 v6・v8（`params.mode` が `stage-run`）の計測と、段だけの対の比較の記録（版 `musunest-eval/stage-compare-record/v1`。`pairs.groups` が before・after）を、同じ道具で読む。段単位でない計測の出力は変えない（下の欄は段単位のときだけ足す）。
+
+- **段の走り**の本は Build の記録（`bundle/build-record.json`）を持たないことがあり、表は読取元 checkpoint（境界 t1-t2）から読む。本の `plan_sha256` は checkpoint の値で凍結した組と照らす（記録と checkpoint の両方があれば両方照らす）。U1 の主指標（要件単位の正答率）はこの道具の checkpoint の値で、C3 の正誤表は checkpoint の `semantic_check` を表の SHA の一致で結ぶ（§7.12）。**段の通過は納品の成功ではない**：ここで出すのは表の正答率だけで、PASS・納品の欄ではない
+- **入力なし**：条件の `stage_input_absent` の本（上流が境界に届かず起こしていない本）は本のディレクトリを読まず、`runs.input_absent`（本ごとは `input_absent`）に数える。**表なし**（`runs.no_table`）は起こしたのに読める表が無い本（段の途中で止まった本など）で、入力なしとは分けて数える。どちらも**分母 (b)** には残し、分子と分母 (a) に入れない（正答の下限）。条件の入力なしの一覧が予定の部分集合でない・経路（v6 は v1.1a、v8 は v1.2）が版と合わない条件は断る（`table-score:conditions`）
+- **読取元の本の数**：段単位のときだけ `scoring.run_sources`（`accepted_only`・`checkpoint_only`・`both`・`no_table`・`input_absent`。互いに重ならない）を出し、標準出力に `[本の読取元]` の行を足す。`--compare` では群ごと
+- **段の比較**（`--compare`）：記録の `pairs.groups` の 0 番目を比較元・1 番目を候補とし、同じ P・同じ回の本を対にする。両群で表の無い対は `table-absent` で除く。**入力なしの本は対に入らず**、`excluded.input-absent` に件数を出す。P のまとまりの区間は §7.8 と同じ
+- **出どころの契約**：通常の出力の `fingerprint` に、採点した計測の条件のファイルの SHA-256（`conditions_sha256`）と計測の ID（`measurement_id`。条件に無ければ null）を足す（`--compare` では群ごと）。本ごとの行（`scoring.rows`）の `source`（受理済み・checkpoint）と `table_sha256` は従来どおり。`--anonymous` には指紋・SHA を出さず、`run_sources` の件数だけを足す
+
 ## 8. 比較の雑音の分解と検出できる差の目安（#631。v1.2 評価 a。道具 `agent-accept/score-agent.mjs --compare`）
 
 30 対（10 P × 3 回）の前後比較で差が「検出されず」になったとき、本数（P）を増やすか反復（K）を増やすかは、どちらの雑音が勝つかで決まる。`--compare` の出力の末尾に欄 `noise` を足し、既存の対の差の P ごとの並びから**費用 0**（集計のコードだけ。API を呼ばない）で雑音の内訳を出す。**判定・門・merge の可否には使わない**（数を出すだけ。K を上げる判断と確認の計測は人。方法論 `01` §4・§5）。既存の欄の名前・意味・並び・値と、採点の規則（判定・PASS・分母・区間の算出）は変えない。値が変わってよいのは §5.9.6 と同じ例外（採点のコード自身の指紋と、それに由来する照合）だけ。
