@@ -2022,11 +2022,18 @@ test("#557 (a) --pipeline v1.2：子の引数の末尾が --pipeline v1.2・条�
       ["unknown", ["--runs", "1", "--build-from", fz, "--pipeline", "v1.3"]],
       ["empty", ["--runs", "1", "--build-from", fz, "--pipeline"]],
       ["flag-value", ["--runs", "1", "--pipeline", "--build-from", fz]],
+    ]) {
+      const o = join(base, `out-c-${label}`);
+      assertRefused(runAgent(repo, o, extra, { FAKE_SPAWN_LOG: log }), "flags:conflict", log, spawned, label);
+      assertNothingWritten(o, label);
+    }
+    // 段の旗との組（#638 で受けるようにした）：段の表の無いこの偽物の dist では stage:dist-unreadable で断る（子 0・何も書かない。受ける側は #638 の試験）
+    for (const [label, extra] of [
       ["stage", ["--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "name-table"]],
       ["stage-end", ["--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--stage-end", "judge"]],
     ]) {
       const o = join(base, `out-c-${label}`);
-      assertRefused(runAgent(repo, o, extra, { FAKE_SPAWN_LOG: log }), "flags:conflict", log, spawned, label);
+      assertRefused(runAgent(repo, o, extra, { FAKE_SPAWN_LOG: log }), "stage:dist-unreadable", log, spawned, label);
       assertNothingWritten(o, label);
     }
   });
@@ -2312,5 +2319,163 @@ test("#618 (c) fail-closed：旗 ids が on なのに V12_CALL_LIMITS が無い�
       assert.equal(runAgent(repo, o, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2"]).status, 0, label);
       assert.ok(!("v12_call_limits" in readJson(join(o, "conditions.json")).params), label);
     }
+  });
+});
+
+// ── #638：v1.2 の段の走り（段の旗 × --pipeline v1.2 --build-from。条件 v8）・上流の経路の照合・段だけの対の比較の v1.2 の群。README §10.8
+// 偽物の工場の dist：#545 の段の表と照合の関数に、開始の別名の表（合成の名前）と v1.2 の照合（checkpoint の版の ledger・flags が渡した値と同じ）を足す。
+// package の入口（index.js）は旗の組・呼び出しの上限・台帳の指紋の関数を出す。入口（cli.js）は --pipeline v1.2 のとき checkpoint の版に ledger・flags・call_limits を、
+// 段の走りの記録に conditions（pipeline・v12_flags）を書く。--pipeline v1.1a の出力は #545 の偽物と同じ
+const fakeStageLib638 = fakeStageLib
+  .replace('export const STAGE_BUDGET_SCOPE = "stage-run";', 'export const STAGE_BUDGET_SCOPE = "stage-run";\nexport const STAGE_START_ALIASES_V12 = { "c1-alias": "name-table" };')
+  .replace("  if (h(JSON.stringify(cp)) !== declared.output_digest)", '  if (process.env.FAKE_VERIFY_V12_LOG) appendFileSync(process.env.FAKE_VERIFY_V12_LOG, JSON.stringify(input.v12 ?? null) + "\\n");\n  if (input.v12 !== undefined && (cp.versions?.ledger !== input.v12.ledger || JSON.stringify(cp.versions?.flags) !== JSON.stringify(input.v12.flags))) return fail("stage-input:version");\n  if (h(JSON.stringify(cp)) !== declared.output_digest)');
+const fakeStageCli638 = fakeStageCli
+  .replace('import { fileURLToPath } from "node:url";', 'import { fileURLToPath, pathToFileURL } from "node:url";')
+  .replace("if (isEntry()) {", 'const pl = val("--pipeline");\nconst idx = pl === "v1.2" ? await import(pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "index.js")).href) : null;\nconst v12 = idx === null ? null : { ledger: await idx.propertyLedgerSha256(), flags: idx.V12_PIPELINE_FLAGS };\nif (isEntry()) {')
+  .replace('versions: { vocabulary: "v1", contract: "v0.2", prompt: "v1.1a", factory: "0.0.0" }', 'versions: { vocabulary: "v1", contract: "v0.2", prompt: "v1.1a", factory: "0.0.0", ...(v12 === null ? {} : { ledger: v12.ledger, flags: v12.flags, call_limits: null }) }')
+  .replace("return_to_plan: false, exit_code: stop ? 1 : 0 };", "return_to_plan: false, exit_code: stop ? 1 : 0, ...(v12 === null ? {} : { conditions: { pipeline: \"v1.2\", v12_flags: v12.flags } }) };");
+assert.ok(fakeStageLib638 !== fakeStageLib && fakeStageCli638.includes("call_limits") && fakeStageCli638.includes("v12_flags: v12.flags"), "偽物の差し替えが当たらない");
+const FLAGS638 = { ledger: true, ids: true };
+const LIMITS638 = { logicalCalls: 7, realAttempts: 11, judgeBranch: 5 };
+const v12Index638 = ({ flags = FLAGS638, ledger = "ledger-a" } = {}) => `export const V12_PIPELINE_FLAGS = ${JSON.stringify(flags)};\nexport const V12_CALL_LIMITS = ${JSON.stringify(LIMITS638)};\nexport async function propertyLedgerSha256() { return ${JSON.stringify(ledger)}; }\n`;
+function makeStageRepo638(base, name = "stage638", index = {}) {
+  const repo = makeStageRepo(base, name);
+  writeFileSync(join(repo, "packages/factory/dist/v11a/bundle-v11a.js"), fakeStageLib638);
+  writeFileSync(join(repo, "packages/factory/dist/cli.js"), fakeStageCli638);
+  writeFileSync(join(repo, "packages/factory/dist/index.js"), v12Index638(index));
+  return repo;
+}
+const stageArgs638 = (fz, extra, pl = "v1.2") => ["--runs", "3", "--concurrency", "4", "--build-from", fz, "--pipeline", pl, ...extra];
+const V8 = "musunest-factory/agent-accept-conditions/v8", V6 = "musunest-factory/agent-accept-conditions/v6";
+/** v6 の params の鍵（#545 の段単位の走り。v1.1α の段単位はこの鍵だけで、#638 の欄を持たない） */
+const V6_PARAM_KEYS = ["effort", "model", "plan", "answers_mode", "mode", "patterns", "runs", "concurrency", "budget_usd", "factory_budget_usd", "factory_deadline_min", "stage_output_limits", "pipeline", "stage_output_limits_v11a", "stage_start", "stage_end", "budget_scope", "stage_from", "stage_inputs"];
+/** 上流（開始 T1・終了 T2'）を v1.2 で流す。STOPPED545 の本は早期停止 */
+function runUpstream638(repo, out, fz, log, pl = "v1.2") {
+  const r = runAgent(repo, out, stageArgs638(fz, ["--stage-start", "name-table", "--stage-end", "test-spec"], pl), { FAKE_SPAWN_LOG: log, FAKE_STAGE: JSON.stringify(Object.fromEntries(STOPPED545.map((id) => [id, "stop"]))) });
+  assert.equal(r.status, 0, r.stderr);
+  return out;
+}
+
+test("#638 (a) 段の旗 × --pipeline v1.2 --build-from：条件は v8（v6 の段の欄＋pipeline v1.2・v12_flags・v12_call_limits。dist の値と深く等しい）、子の引数の末尾は --pipeline v1.2 と段の旗。開始の別名は dist の表で正本の名前に正規化され params が同じ。v1.1α の段単位は v6 の鍵だけで、別名を受けない", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo638(base), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const run = (name, extra, pl = "v1.2") => { const out = join(base, name); const r = runAgent(repo, out, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", pl, ...extra], { FAKE_SPAWN_LOG: log }); assert.equal(r.status, 0, `${name}: ${r.stderr}`); return { out, r, cond: readJson(join(out, "conditions.json")), argv: readJson(join(out, "P1-r1", "received-argv.json")) }; };
+    const v12 = run("o12", ["--stage-start", "name-table", "--stage-end", "test-spec"]);
+    assert.equal(v12.cond.schema, V8);
+    const dist = await import(pathToFileURL(join(repo, "packages/factory/dist/index.js")).href);
+    assert.deepEqual([v12.cond.params.mode, v12.cond.params.pipeline, v12.cond.params.stage_start, v12.cond.params.stage_end, v12.cond.params.budget_scope, v12.cond.params.stage_from], ["stage-run", "v1.2", "name-table", "test-spec", "stage-run", null]);
+    assert.deepEqual(v12.cond.params.v12_flags, dist.V12_PIPELINE_FLAGS);
+    assert.deepEqual(v12.cond.params.v12_call_limits, { logical_calls: 7, real_attempts: 11, judge_branch: 5 });
+    assert.deepEqual(Object.keys(v12.cond.params), [...V6_PARAM_KEYS.slice(0, 14), "v12_flags", "v12_call_limits", ...V6_PARAM_KEYS.slice(14)], "v6 の段の欄に v12_flags・v12_call_limits を足した形");
+    assert.equal(v12.cond.signature, conditionsSignature(v12.cond));
+    assert.deepEqual(v12.argv.slice(-6), ["--pipeline", "v1.2", "--stage-start", "name-table", "--stage-end", "test-spec"]);
+    assert.match(v12.r.stdout, /^P1-r1 effort=high build-from pipeline=v1\.2 stage=name-table\.\.test-spec exit=0 stage_pass=true /m);
+    assert.ok(!("v12_flags" in readJson(join(v12.out, "P1-r1", "summary.line.json"))), "段の走りの本の記録に一気通貫の報告を写さない");
+    // 開始の別名（合成の名前。道具に書かない）
+    const alias = run("o12-alias", ["--stage-start", "c1-alias", "--stage-end", "test-spec"]);
+    assert.deepEqual(alias.cond.params, v12.cond.params, "別名と正本の名前で params が同じ");
+    assert.deepEqual(alias.argv.slice(-6), v12.argv.slice(-6), "子には正本の名前を渡す");
+    assert.ok(!readFileSync(runAgentFile, "utf8").includes("c1-alias") && !readFileSync(runAgentFile, "utf8").includes('"vocabulary"'), "道具に別名を書かない");
+    // v1.1α の段単位：v6・#545 の鍵だけ・経路 v1.1a
+    const v11 = run("o11", ["--stage-start", "name-table", "--stage-end", "test-spec"], "v1.1a");
+    assert.equal(v11.cond.schema, V6);
+    assert.deepEqual(Object.keys(v11.cond.params), V6_PARAM_KEYS);
+    assert.equal(v11.cond.params.pipeline, "v1.1a");
+    assert.deepEqual(v11.argv.slice(-6), ["--pipeline", "v1.1a", "--stage-start", "name-table", "--stage-end", "test-spec"]);
+    const cp11 = readJson(join(v11.out, "P1-r1", "bundle", "stage-checkpoint-t1-t2.json"));
+    assert.deepEqual(Object.keys(cp11.versions), ["vocabulary", "contract", "prompt", "factory"], "偽物の v1.1α の出力も #545 と同じ");
+    const spawned = spawnCount(log), o = join(base, "o11-alias");
+    assertRefused(runAgent(repo, o, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.1a", "--stage-start", "c1-alias"], { FAKE_SPAWN_LOG: log }), "flags:conflict", log, spawned, "v1.1a は別名を受けない");
+    assertNothingWritten(o, "v1.1a の別名");
+    // v1.2 でも凍結した組が無ければ組めない
+    assertRefused(runAgent(repo, join(base, "o12-nofz"), ["--only", "P1", "--runs", "1", "--pipeline", "v1.2", "--stage-start", "name-table"], { FAKE_SPAWN_LOG: log }), "flags:conflict", log, spawned, "no-build-from");
+    // 再開：同じ範囲は残りだけ、条件の版を v6 に書き換えた出力先は断る
+    rmSync(join(v12.out, "P1-r1"), { recursive: true, force: true });
+    const rr = runAgent(repo, v12.out, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "name-table", "--stage-end", "test-spec", "--resume"], { FAKE_SPAWN_LOG: log });
+    assert.equal(rr.status, 0, rr.stderr);
+    assert.equal(spawnCount(log), spawned + 1);
+    rmSync(join(v12.out, "P1-r1"), { recursive: true, force: true });
+    const p = join(v12.out, "conditions.json"), c = readJson(p);
+    c.schema = V6; c.signature = conditionsSignature(c);
+    writeFileSync(p, JSON.stringify(c, null, 1));
+    const before = treeOf(v12.out);
+    assertResumeRefused(runAgent(repo, v12.out, ["--only", "P1", "--runs", "1", "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "name-table", "--stage-end", "test-spec", "--resume"], { FAKE_SPAWN_LOG: log }), "resume:signature", v12.out, before, "版を書き換えた再開");
+  });
+});
+
+test("#638 (b) 上流の照合：v8 の上流から開始 B1 を v1.2 で流すと、照合の関数に dist の旗の組と台帳の指紋を渡し、入力のある 15 本だけを起こす。経路の違う上流（v6 → v1.2・v8 → v1.1a）は stage-from:conditions-pipeline、台帳の指紋か旗の組を変えた dist は stage-from:stage-input:version で、どれも exit 4・子 0 本・何も書かない", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo638(base), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up12 = runUpstream638(repo, join(base, "up12"), fz, log);
+    assert.equal(readJson(join(up12, "conditions.json")).schema, V8);
+    const out = join(base, "b1"), vlog = join(base, "v12.log");
+    const r = runAgent(repo, out, stageArgs638(fz, ["--stage-start", "write", "--stage-from", up12]), { FAKE_SPAWN_LOG: log, FAKE_VERIFY_V12_LOG: vlog });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(spawnCount(log), 45);
+    const seen = readFileSync(vlog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(seen.length, 15);
+    for (const v of seen) assert.deepEqual(v, { ledger: "ledger-a", flags: FLAGS638 }, "dist の公開の値を渡す");
+    const cond = readJson(join(out, "conditions.json"));
+    assert.equal(cond.schema, V8);
+    assert.deepEqual([cond.params.stage_start, cond.params.stage_end, cond.params.pipeline, cond.stage_input_absent.count], ["write", "judge", "v1.2", 15]);
+    assert.equal(cond.params.stage_from.conditions_sha256, sha256(readFileSync(join(up12, "conditions.json"))));
+    // 経路の違う上流
+    const up11 = runUpstream638(repo, join(base, "up11"), fz, log, "v1.1a");
+    assert.equal(readJson(join(up11, "conditions.json")).schema, V6);
+    const n0 = spawnCount(log);
+    for (const [label, upDir, pl] of [["v6-to-v12", up11, "v1.2"], ["v8-to-v11", up12, "v1.1a"]]) {
+      const o = join(base, `out-${label}`);
+      assertStageRefused(runAgent(repo, o, stageArgs638(fz, ["--stage-start", "write", "--stage-from", upDir], pl), { FAKE_SPAWN_LOG: log }), "stage-from:conditions-pipeline", null, log, n0, o, label);
+    }
+    // 版と経路の合わない上流の条件（署名は中身から計算し直す）は壊れた条件
+    const broken = join(base, "up-broken");
+    cpSync(up12, broken, { recursive: true });
+    const bc = readJson(join(broken, "conditions.json"));
+    bc.params.pipeline = "v1.1a"; bc.signature = conditionsSignature(bc);
+    writeFileSync(join(broken, "conditions.json"), JSON.stringify(bc, null, 1));
+    assertStageRefused(runAgent(repo, join(base, "out-broken"), stageArgs638(fz, ["--stage-start", "write", "--stage-from", broken], "v1.1a"), { FAKE_SPAWN_LOG: log }), "stage-from:conditions-invalid", null, log, n0, join(base, "out-broken"), "broken");
+    // 台帳の指紋・旗の組を変えた dist（上流の checkpoint の版と違う）
+    for (const [label, index] of [["ledger", { ledger: "ledger-b" }], ["flags", { flags: { ledger: true, ids: false } }]]) {
+      writeFileSync(join(repo, "packages/factory/dist/index.js"), v12Index638(index));
+      const o = join(base, `out-${label}`);
+      const rr = runAgent(repo, o, stageArgs638(fz, ["--stage-start", "write", "--stage-from", up12]), { FAKE_SPAWN_LOG: log });
+      assertStageRefused(rr, "stage-from:stage-input:version", [IDS545[15]], log, n0, o, label);
+    }
+  });
+});
+
+test("#638 (c) 段だけの対の比較 × v1.2：--make-pairs は上流の入力のある 15 本で対を書き、--compare の群 before・after は両群とも v1.2（子の引数に --pipeline v1.2・条件 v8・比較の記録の経路と旗の組）。比較元の dist の旗の組が違えば compare:flags-mismatch（exit 3・子 0 本・何も書かない）", async () => {
+  await withRepo(async (base) => {
+    const repo = makeStageRepo638(base, "cand"), baseline = makeStageRepo638(base, "base"), fz = frozen545(base, repo), log = join(base, "spawn.log");
+    const up = runUpstream638(repo, join(base, "up"), fz, log);
+    const pairsPath = join(base, "pairs.json");
+    const mp = runAgent(repo, join(base, "unused"), ["--make-pairs", pairsPath, "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "write", "--stage-from", up, "--runs", "3"]);
+    assert.equal(mp.status, 0, mp.stderr);
+    const pv = readJson(pairsPath);
+    assert.deepEqual([pv.schema, pv.groups, pv.pairs.length], ["musunest-eval/stage-compare-pairs/v1", ["before", "after"], 15]);
+    assert.deepEqual(pv.stage, { start: "write", end: "judge", stage_from_sha256: sha256(readFileSync(join(up, "conditions.json"))) });
+    const cmpArgs = (bl, extra = []) => ["--compare", "--baseline", bl, "--pairs", pairsPath, "--build-from", fz, "--pipeline", "v1.2", "--stage-start", "write", "--stage-from", up, "--budget-usd", "10", "--concurrency", "4", ...extra];
+    const out = join(base, "cmp"), n0 = spawnCount(log);
+    const r = runAgent(repo, out, cmpArgs(baseline), { FAKE_SPAWN_LOG: log });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(spawnCount(log) - n0, 30);
+    const rec = readJson(join(out, "comparison.json"));
+    assert.equal(rec.schema, "musunest-eval/stage-compare-record/v1");
+    assert.deepEqual([rec.groups.before.pipeline, rec.groups.after.pipeline], ["v1.2", "v1.2"]);
+    assert.deepEqual([rec.groups.before.v12_flags, rec.groups.after.v12_flags], [FLAGS638, FLAGS638]);
+    for (const g of ["before", "after"]) {
+      const c = readJson(join(out, g, "conditions.json"));
+      assert.equal(c.schema, V8, g);
+      assert.deepEqual([c.params.pipeline, c.params.v12_flags], ["v1.2", FLAGS638], g);
+      assert.ok(!("v12_call_limits" in c.params), `${g}: 比較の群には上限を足さない（#618 と同じ）`);
+      const id = `${pv.pairs[0].pid}-r${pv.pairs[0].r}`;
+      assert.deepEqual(readJson(join(out, g, id, "received-argv.json")).slice(-8, -6), ["--pipeline", "v1.2"], g);
+    }
+    // 比較元の dist の旗の組が違う
+    const other = makeStageRepo638(base, "other", { flags: { ledger: true, ids: false } }), n1 = spawnCount(log), bad = join(base, "cmp-bad");
+    const rb = runAgent(repo, bad, cmpArgs(other), { FAKE_SPAWN_LOG: log });
+    assertRefused(rb, "compare:flags-mismatch", log, n1, "flags-mismatch");
+    oneLine(rb, "flags-mismatch");
+    assertNothingWritten(bad, "flags-mismatch");
   });
 });

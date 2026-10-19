@@ -50,6 +50,13 @@
 //          名前 → 真偽の集合として照らして、本ごとの記録（summary.line.json の v12_flags）に報告と結果を残す。起動の記録には全部の本の記録からの集計を残す
 //   --compare-pipelines <比較元>,<候補>：v1,v1.1a（省略と同じ）・v1.1a,v1.2・v1,v1.2 だけ。--compare か --make-pairs と一緒にだけ受け、段の旗とは組めない。
 //          群は群の経路の名前（<out>/<経路>）で、比較元 ＝ --baseline の checkout（<repo> と同じでよい）、候補 ＝ <repo>。v1.1a,v1.2 は profile を diagnostic（pipelines）にする
+// #638（v1.2 の段の走り。README §10.8。設計書 08 の工程ごとの評価の U1）：
+//   段の旗は --pipeline v1.2 --build-from とも組める（子の引数の末尾は --pipeline v1.2 のあとに段の旗）。条件の schema は v8（v6 の段の欄に params.pipeline・
+//          v12_flags と #618 の v12_call_limits を足した。v1.1α の段単位は v6 のまま）。開始の別名（--stage-start vocabulary など）は工場の dist の
+//          STAGE_START_ALIASES_V12 で区間の正本の名前に正規化してから範囲を決める（別名をこの道具に書かない）
+//   --stage-from：上流の条件は v6 か v8 で、経路が今の経路と同じこと（違えば stage-from:conditions-pipeline）。v1.2 の照合では工場の dist の照合の関数に、
+//          dist の package の入口が公開する旗の組（V12_PIPELINE_FLAGS）と台帳の指紋（propertyLedgerSha256）を渡す
+//   --compare と段の旗 × v1.2：両群とも v1.2 の経路。両群の dist の旗の組が同じでなければ compare:flags-mismatch で子を起こさない
 // 採点は: node score-agent.mjs <repo> <out> [--label high]（リポジトリ・出力先の順で渡す）。比較は score-agent.mjs <repo> <out> --compare
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
@@ -58,6 +65,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { BUILD_RECORD_PATH, CONDITIONS_V7, V12_PIPELINE, comparableParams, comparePipelinesOf, compareProfileOf, compareRolesOf, groupConditionsProblem, isFlagMap, v12FlagsStatus, v12ReportOf, v12RunStatusOf, V12_FLAG_STATUSES } from "./score-agent.mjs";
 import { DEFAULT_SET_PATH, FACTORY_VERDICTS, SCRIPT_MODE, fingerprintDir, loadEvalSet, scoringFingerprint, scriptsFingerprint, sha256 } from "./score-agent.mjs";
 import { BUILD_STAGE_IDS, COMPARE_GROUPS, COMPARE_PAIRS_COPY, COMPARE_RUN_PREFIX, COMPARE_RUN_SCHEMA, COMPARISON_FILE, COMPARISON_SCHEMA, PIPELINES, SCORING_COST_USD, launchAllowed, limitsApproved, makePairs, outputLimitsOf, pairsProblem } from "./score-agent.mjs";
+import { CONDITIONS_V8, sameFlags } from "./score-agent.mjs";
 import { CONDITIONS_V6, FAILURE_KINDS as RECORD_FAILURE_KINDS, STAGE_INPUT_DIR, STAGE_COMPARE_GROUPS, STAGE_COMPARE_ROLES, STAGE_COMPARISON_SCHEMA, STAGE_PAIRS_SCHEMA, STAGE_RUN_MODE, conditionsSignature, loadConditions, makeStagePairs, pairsShapeProblem, stagePairsProblem } from "./score-agent.mjs";
 import { PLAN_FILE_CHECKS, PLAN_FILE_ERROR_SCHEMA, PLAN_FILE_REJECT_SCHEMA, checkEnvelope, loadFrozenSet, loadPlanFileChecks, refusalLine } from "./freeze-plan-set.mjs";
 
@@ -108,8 +116,9 @@ const compare = args.includes("--compare"), makePairsOut = valueOf("--make-pairs
 const stageStartArg = valueOf("--stage-start"), stageEndArg = valueOf("--stage-end"), stageFromArg = valueOf("--stage-from");
 const stageMode = stageStartArg !== null || stageEndArg !== null || stageFromArg !== null;
 if ([stageStartArg, stageEndArg, stageFromArg].includes("")) refuseCode("flags:conflict");
-if (stageMode && (pipelineArg !== "v1.1a" || buildFrom === null)) refuseCode("flags:conflict");
-// v1.1a と v1.2（#557）は凍結した組の旗と一緒にだけ受ける（v1.2 と段の旗は上で断る）
+// 段の旗は v1.1a か v1.2（#638）の経路と凍結した組の旗と一緒にだけ受ける
+if (stageMode && ((pipelineArg !== "v1.1a" && pipelineArg !== V12_PIPELINE) || buildFrom === null)) refuseCode("flags:conflict");
+// v1.1a と v1.2（#557）は凍結した組の旗と一緒にだけ受ける
 if (!PIPELINES.includes(pipeline) || (pipeline !== "v1" && buildFrom === null)) refuseCode("flags:conflict");
 if ([makePairsOut, baselineArg, pairsArg].includes("")) refuseCode("flags:conflict");
 if (makePairsOut !== null && (compare || buildFrom === null || only || resume || (pipelineArg !== null && !stageMode) || baselineArg !== null || pairsArg !== null)) refuseCode("flags:conflict");
@@ -172,7 +181,11 @@ function absentRecordConsistent(lib, record, range, boundary) {
 let stageLib = null, stageRange = null, stageBoundary = null;
 if (stageMode) {
   stageLib = await loadStageLib(distDir);
-  const resolved = stageLib.resolveStageRange({ ...(stageStartArg === null ? {} : { start: stageStartArg }), ...(stageEndArg === null ? {} : { end: stageEndArg }), hasInput: stageFromArg !== null });
+  // v1.2（#638）：開始の別名を工場の dist の表で区間の正本の名前に正規化する（表の無い dist は別名を受けない。表に無い段は下で断る）
+  const aliasTable = stageLib.STAGE_START_ALIASES_V12;
+  const aliases = pipeline === V12_PIPELINE && aliasTable !== null && typeof aliasTable === "object" && !Array.isArray(aliasTable) ? aliasTable : {};
+  const stageStart = stageStartArg !== null && Object.hasOwn(aliases, stageStartArg) && typeof aliases[stageStartArg] === "string" ? aliases[stageStartArg] : stageStartArg;
+  const resolved = stageLib.resolveStageRange({ ...(stageStart === null ? {} : { start: stageStart }), ...(stageEndArg === null ? {} : { end: stageEndArg }), hasInput: stageFromArg !== null });
   // 表に無い段・開始が終了より後・開始 T1 に --stage-from・開始 T2／B1 に --stage-from が無い（工場の符号は使い方の誤り。計測では組めない指定）
   if ("code" in resolved) refuseCode("flags:conflict");
   stageRange = { start: resolved.start, end: resolved.end };
@@ -207,11 +220,13 @@ if (makePairsOut !== null && !stageMode) {
 // 経路 v1.2（#557）：旗の組の正本を工場の dist の package の入口から読む（候補 ＝ <repo> の dist。旗の名前を手書きしない）。
 // 無い・旗の名前 → 真偽の写像でなければ、子を 1 本も起こさずに断る
 const usesV12 = pipeline === V12_PIPELINE || (compare && compareGroups.includes(V12_PIPELINE));
-let v12Flags = null, v12CallLimits = null;
+let v12Flags = null, v12CallLimits = null, v12Entry = null;
+/** 工場の dist の package の入口（読めなければ null。#557・#638 で比較元の checkout も同じ形で読む） */
+const loadEntry = async (dir) => { try { return await import(pathToFileURL(join(dir, "index.js")).href); } catch { return null; } };
 if (usesV12) {
-  let entry = null;
-  try { entry = await import(pathToFileURL(join(distDir, "index.js")).href); } catch { entry = null; }
+  const entry = await loadEntry(distDir);
   if (!isFlagMap(entry?.V12_PIPELINE_FLAGS)) refuseCode("pipeline:v1.2-unavailable");
+  v12Entry = entry;
   v12Flags = JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS));
   // 呼び出しの上限（#618）：dist の V12_CALL_LIMITS から読む（写して固定しない）。旗 ids が on なのに無い・3 つが有限の数でないときは断る（黙って欄を省かない）。
   // ids が off か、旗に ids の無い dist（手 3p より前）だけ欄を足さずに通す
@@ -225,6 +240,13 @@ if (usesV12) {
 let baseline = null;
 if (compare) {
   try { baseline = await loadCheckout(resolve(baselineArg)); } catch { refuseCode("compare:baseline-unreadable"); }
+}
+// 段だけの対の比較 × v1.2（#638）：両群とも v1.2 の経路なので、比較元の dist の旗の組も読み、候補の組と名前 → 真偽の集合として同じことを確かめる（子を起こす前）
+let baselineEntry = null;
+if (compare && stageMode && pipeline === V12_PIPELINE) {
+  baselineEntry = await loadEntry(baseline.distDir);
+  if (!isFlagMap(baselineEntry?.V12_PIPELINE_FLAGS)) refuseCode("pipeline:v1.2-unavailable");
+  if (!sameFlags(baselineEntry.V12_PIPELINE_FLAGS, v12Flags)) refuseCode("compare:flags-mismatch");
 }
 
 // --build-from（#497）：組を読み、対象の本（採用した P。--only はその部分集合だけ）を決め、子を起こす前に包みを検査する（組に保存した検査の結果は信頼しない）
@@ -306,7 +328,10 @@ if (stageMode && stageBoundary !== null) {
   if (up.status === "missing") refuseStage("stage-from:conditions-missing");
   if (up.status !== "ok") refuseStage("stage-from:conditions-unreadable");
   const upCond = up.cond;
-  if (upCond.schema !== CONDITIONS_V6 || upCond.params?.mode !== STAGE_RUN_MODE || typeof upCond.signature !== "string" || upCond.signature !== conditionsSignature(upCond)) refuseStage("stage-from:conditions-invalid");
+  if ((upCond.schema !== CONDITIONS_V6 && upCond.schema !== CONDITIONS_V8) || upCond.params?.mode !== STAGE_RUN_MODE || typeof upCond.signature !== "string" || upCond.signature !== conditionsSignature(upCond)) refuseStage("stage-from:conditions-invalid");
+  // 上流の経路（#638）：v6 は v1.1a、v8 は v1.2 の経路を書く。版と経路が合わない条件は壊れた条件、今の経路と違う上流は混ぜない
+  if ((upCond.schema === CONDITIONS_V8) !== (upCond.params.pipeline === V12_PIPELINE)) refuseStage("stage-from:conditions-invalid");
+  if (upCond.params.pipeline !== pipeline) refuseStage("stage-from:conditions-pipeline");
   if (upCond.set?.sha256 !== evalSet.sha256 || upCond.frozen?.sha256 !== frozen.sha256) refuseStage("stage-from:conditions-frozen");
   const upRange = { start: upCond.params.stage_start, end: upCond.params.stage_end };
   if (!passesBoundary(stageLib, upRange, stageBoundary)) refuseStage("stage-from:range");
@@ -315,6 +340,15 @@ if (stageMode && stageBoundary !== null) {
   // 照合の関数に渡す確定した仕様（包みの検査の関数で読み直す。--build-from の事前の検査を通った写し）
   const planOf = async (checks, pid) => { const parsed = checks.parsePlanFile(Buffer.from(envelopeBytes.get(pid)).toString("utf8")); const v = await checks.validatePlanFile({ envelope: parsed.envelope, source: reqOf(pid) + "\n", vocabularyVersion: checks.vocabularyVersion }); return v?.plan; };
   const codeOf = (lib, code) => (Array.isArray(lib.STAGE_INPUT_CODES) && lib.STAGE_INPUT_CODES.includes(code) ? code : "stage-input:unknown");
+  // v1.2（#638）：照合の関数に渡す旗の組と台帳の指紋は、checkout ごとの dist の package の入口が公開する値（V12_PIPELINE_FLAGS・propertyLedgerSha256）
+  const v12Of = async (entry) => {
+    if (typeof entry?.propertyLedgerSha256 !== "function") refuseCode("stage:dist-unreadable");
+    let ledger = null;
+    try { ledger = await entry.propertyLedgerSha256(); } catch { ledger = null; }
+    if (typeof ledger !== "string") refuseCode("stage:dist-unreadable");
+    return { ledger, flags: JSON.parse(JSON.stringify(entry.V12_PIPELINE_FLAGS)) };
+  };
+  const v12s = pipeline === V12_PIPELINE ? [await v12Of(v12Entry), ...(baseline === null ? [] : [await v12Of(baselineEntry)])] : null;
   for (const job of jobs) {
     const id = idOf(job), upDir = join(root, id, "bundle"), entry = frozen.adopted.find((a) => a.pattern === job.pid);
     // 上流の段の走りの記録：読める・形の版・範囲が上流の条件と同じ・確定した仕様と依頼文の SHA が凍結した組の値と同じ（読めない・壊れた記録は入力なしにしない）
@@ -342,6 +376,7 @@ if (stageMode && stageBoundary !== null) {
         start: stageRange.start, checkpointText: checkpointBytes === null ? null : checkpointBytes.toString("utf8"), checkpointFile, recordText: recordBytes.toString("utf8"),
         plan: await planOf(checksList[i], job.pid), planSha256: entry.plan_sha256, sourceSha256: entry.source_sha256,
         vocabularyVersion: ctxs[i].factory.VOCABULARY_VERSION, contractVersion: ctxs[i].factory.CONTRACT_VERSION,
+        ...(v12s === null ? {} : { v12: v12s[i] }),
       });
       if (verified?.ok !== true) refuseStage(`stage-from:${codeOf(libs[i], verified?.code)}`, { ids: [id] });
     }
@@ -431,8 +466,8 @@ function conditionsFor(ctx, { jobs: js, argvOf, pl, comparison, measurementId })
   const limitTable = ctx.limits.STAGE_MAX_OUTPUT_TOKENS[effort] ?? ctx.limits.STAGE_MAX_OUTPUT_TOKENS[ctx.limits.DEFAULT_REASONING_EFFORT];
   const outputLimits = outputLimitsOf(limitTable);
   const measured = {
-    // 段単位の走り（#545）のときだけ v6、経路 v1.2（#557）のときだけ v7。旗を省いた計測は今までどおり v5
-    schema: stageMode ? CONDITIONS_V6 : pl === V12_PIPELINE ? CONDITIONS_V7 : "musunest-factory/agent-accept-conditions/v5",
+    // 段単位の走り（#545）のときだけ v6（v1.2 の段単位の走りは v8。#638）、経路 v1.2（#557）のときだけ v7。旗を省いた計測は今までどおり v5
+    schema: stageMode ? (pl === V12_PIPELINE ? CONDITIONS_V8 : CONDITIONS_V6) : pl === V12_PIPELINE ? CONDITIONS_V7 : "musunest-factory/agent-accept-conditions/v5",
     measurement_id: measurementId,
     source: { commit: head === null ? null : head.trim(), dirty: status === null ? null : status.trim().length > 0 },
     factory: { dist_dir: relative(ctx.checkout, ctx.distDir), fingerprint: distInfo.fingerprint, rebuilt: distInfo.mtime_ms !== null && (srcInfo.mtime_ms === null || distInfo.mtime_ms >= srcInfo.mtime_ms) },
@@ -590,7 +625,8 @@ const runOne = (job) => new Promise((resolve) => {
     // 要約と費用の行は列挙した欄と型だけ（summaryOf・planCostOf）
     const summary = s === null ? null : summaryOf(s);
     // 経路 v1.2（#557）：要約と条件の記録が報告した旗の組を読み（推定しない）、条件の組と照らした結果と一緒に本ごとの記録に残す
-    const v12 = runPipeline === V12_PIPELINE ? v12ReportsOf(s, join(dir, BUILD_RECORD_PATH)) : null;
+    // 段の走り（#638）は要約の行と条件の記録を書かないので報告を写さない（旗の組は採点が段の走りの記録から照らす）
+    const v12 = runPipeline === V12_PIPELINE && !stageMode ? v12ReportsOf(s, join(dir, BUILD_RECORD_PATH)) : null;
     writeFileSync(join(dir, "summary.line.json"), JSON.stringify({ exit: code, wall_s: (Date.now() - t0) / 1000, started_at: startedAt, exit_class: exitClass, summary, plan_cost: planCostOf(planCost), stderr_tail: tailOf(errBuf), stdout_tail: s === null ? tailOf(outBuf) : undefined, resumed: job.resumed === true, ...(stageMode ? { stage_run: stageRun } : {}), ...(v12 === null ? {} : { v12_flags: v12 }) }, null, 1));
     spent += cost;
     if (group !== null) group.spent += cost;
@@ -643,7 +679,7 @@ async function runSingle() {
     const savedLegacy = pipeline === V12_PIPELINE && saved?.params && typeof saved.params === "object" && !("v12_call_limits" in saved.params);
     if (saved?.signature !== (savedLegacy ? signatureLegacy : signature)) refuse("保存した条件と今の条件が一致しません", "resume:signature");
     // 経路 v1.2（#557）：保存した条件を既知の版（v7）として検証し、署名を中身から計算し直して照らす（知らない版・書き換えた条件では再開しない）
-    if (pipeline === V12_PIPELINE && (saved.schema !== CONDITIONS_V7 || conditionsSignature(saved) !== saved.signature)) refuse("保存した条件と今の条件が一致しません", "resume:signature");
+    if (pipeline === V12_PIPELINE && (saved.schema !== (stageMode ? CONDITIONS_V8 : CONDITIONS_V7) || conditionsSignature(saved) !== saved.signature)) refuse("保存した条件と今の条件が一致しません", "resume:signature");
     initialBudget = typeof saved.params?.budget_usd === "number" ? saved.params.budget_usd : null;
     for (const job of jobs) {
       const dir = dirOf(job);
@@ -683,7 +719,7 @@ async function runSingle() {
   // 1 回の起動の記録：流した本・残りの本・止まった理由（文とコード。予算で止まった計測を採点の道具が「未完了」と照合するための根拠。#425）と、
   // この起動で有効だった計測全体の目安の額（budget_usd）・初回の条件の額（initial_budget_usd。条件のファイルは初回の値のまま上書きしない）・
   // 変えたかどうか（budget_changed）・済みの額（spent_usd）・この起動で流した本の終了の分類ごとの件数（exit_classes。#497）。完走した再開でも残すので、署名が同じでも管理の条件の変更履歴を読める
-  writeFileSync(join(outRoot, `run-${Date.now()}.json`), JSON.stringify({ finished_at: new Date().toISOString(), mode: resume ? "resume" : "fresh", executed, pending, stop, stop_code: stopCode, budget_usd: budget, initial_budget_usd: initialBudget, budget_changed: initialBudget === null ? null : initialBudget !== budget, spent_usd: spent, exit_classes: exitClasses, ...(pipeline === V12_PIPELINE ? { v12_flags: v12Tally(outRoot, launchJobs.map(idOf)) } : {}) }, null, 1));
+  writeFileSync(join(outRoot, `run-${Date.now()}.json`), JSON.stringify({ finished_at: new Date().toISOString(), mode: resume ? "resume" : "fresh", executed, pending, stop, stop_code: stopCode, budget_usd: budget, initial_budget_usd: initialBudget, budget_changed: initialBudget === null ? null : initialBudget !== budget, spent_usd: spent, exit_classes: exitClasses, ...(pipeline === V12_PIPELINE && !stageMode ? { v12_flags: v12Tally(outRoot, launchJobs.map(idOf)) } : {}) }, null, 1));
   console.log("done", stop ?? "", "spent", spent.toFixed(4));
 }
 
@@ -695,10 +731,10 @@ async function runCompare() {
   // 出力先は新しい場所だけ（比較は再開しない）
   if (existsSync(outRoot) && readdirSync(outRoot).length > 0) refuseCode("compare:prior-output");
   const pairsSha = sha256(pairsBytes);
-  // 群（#545）：段だけの対の比較は before（比較元）・after（候補）で、両群とも v1.1α の経路。それ以外は選んだ群の組（#557。省略は v1・v1.1a）
+  // 群（#545）：段だけの対の比較は before（比較元）・after（候補）で、両群とも段の旗と組んだ経路（v1.1a か v1.2。#638）。それ以外は選んだ群の組（#557。省略は v1・v1.1a）
   const GROUPS = stageMode ? STAGE_COMPARE_GROUPS : compareGroups, ROLES = stageMode ? STAGE_COMPARE_ROLES : compareRolesOf(compareGroups);
   const [baseGroup, candGroup] = GROUPS;
-  const pipelineOf = (g) => (stageMode ? "v1.1a" : g);
+  const pipelineOf = (g) => (stageMode ? pipeline : g);
   const ctxOf = { [baseGroup]: baseline, [candGroup]: main };
   // 工場の既定（子に渡す値の出どころ。片方だけ違えば、同じ引数でも条件の意味が揃わない）
   const defaultsOf = (ctx) => ({
@@ -796,7 +832,7 @@ async function runCompare() {
   for (const g of GROUPS) {
     const gc = groupCtx[g];
     const pending = launchJobs.map(idOf).filter((id) => !gc.executed.includes(id));
-    writeFileSync(join(gc.dir, `run-${now}.json`), JSON.stringify({ finished_at: new Date().toISOString(), mode: "fresh", executed: gc.executed, pending, stop, stop_code: stopCode, budget_usd: budget, initial_budget_usd: budget, budget_changed: false, spent_usd: gc.spent, exit_classes: gc.exitClasses, ...(gc.pipeline === V12_PIPELINE ? { v12_flags: v12Tally(gc.dir, launchJobs.map(idOf)) } : {}) }, null, 1));
+    writeFileSync(join(gc.dir, `run-${now}.json`), JSON.stringify({ finished_at: new Date().toISOString(), mode: "fresh", executed: gc.executed, pending, stop, stop_code: stopCode, budget_usd: budget, initial_budget_usd: budget, budget_changed: false, spent_usd: gc.spent, exit_classes: gc.exitClasses, ...(gc.pipeline === V12_PIPELINE && !stageMode ? { v12_flags: v12Tally(gc.dir, launchJobs.map(idOf)) } : {}) }, null, 1));
   }
   // 比較の起動の記録：対ごとの状態（両方・先行だけ・未起動）・起こさなかった本・止まった理由と符号・済みの額・止めたときに走っていた本の数
   const pairStates = pairsValue.pairs.map((p) => {

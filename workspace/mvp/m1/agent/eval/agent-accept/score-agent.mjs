@@ -74,6 +74,10 @@
 //   本ごとの last_passed_stage（status が ok の記録を持つ最後の段）と first_upstream_failure（記録の順で最初に 1 回目で通過でなかった段）、群ごとの遷移表（transitions。
 //   行＝最後に通った段、列＝stopValueOf の値）と最初の上流の落ちの内訳（first_upstream_failures）。既存の stops と項目別に照合できる。--anonymous は既知の段と停止の値の件数だけ。
 //   標準出力に遷移表の 1 行。判定・門には使わない
+// #638 で足したもの（v1.2 の段単位の条件の採点だけ。v1・v1.1α・v1.2 の一気通貫と v1.1α の段単位（v6）の欄・値・標準出力は変えない。README §10.8）：
+//   条件の版 v8（v6 の段の欄に params.pipeline v1.2・v12_flags・v12_call_limits を足した）。段の走りの記録（bundle/stage-run.json）の conditions.v12_flags を
+//   条件の組と照らし、1 本でも合わなければ照合は未照合（v12-flags）。next_stage … 1 段先の副指標（範囲が test-spec を含む走りの T2' の通過と、T2 が落とした
+//   試験の数 test_spec.dropped_tests の合計と中央値。範囲が test-spec を含まなければ null と理由）。--compare は v1.2 の段だけの対の比較も受け、群ごとに同じ欄を出す
 // run-agent.mjs は、ここから指紋の関数と定義ファイルの読み込みを import して条件のファイルに書く（道具は 2 本で 1 組。入口として起動したときだけ採点する）
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
@@ -164,7 +168,7 @@ export const readConditions = (outRoot) => loadConditions(outRoot).cond;
  */
 export function validatePlanned(cond) {
   const reasons = [];
-  if (!CONDITIONS_SCHEMAS.includes(cond?.schema) && cond?.schema !== CONDITIONS_V6 && cond?.schema !== CONDITIONS_V7) reasons.push("schema が未知");
+  if (!CONDITIONS_SCHEMAS.includes(cond?.schema) && cond?.schema !== CONDITIONS_V6 && cond?.schema !== CONDITIONS_V7 && cond?.schema !== CONDITIONS_V8) reasons.push("schema が未知");
   const list = cond?.child_args;
   const isList = Array.isArray(list);
   if (!isList) reasons.push("予定の一覧（child_args）が無いか配列でない");
@@ -757,8 +761,8 @@ export const EVALUATION_MODES = ["build", "e2e", "plan-only", "build-from", "sta
 const CONDITIONS_V4 = CONDITIONS_SCHEMAS[3];
 /** 条件の版 v5（#513）。params.mode の読み方は v4 と同じで、params.pipeline を足した */
 export const CONDITIONS_V5 = CONDITIONS_SCHEMAS[4];
-/** params.mode と frozen を持つ版（v4・v5 と、段単位の走りの v6。#545。経路 v1.2 の v7。#557） */
-const hasMode = (schema) => schema === CONDITIONS_V4 || schema === CONDITIONS_V5 || schema === CONDITIONS_V6 || schema === CONDITIONS_V7;
+/** params.mode と frozen を持つ版（v4・v5 と、段単位の走りの v6。#545。経路 v1.2 の v7。#557。v1.2 の段単位の走りの v8。#638） */
+const hasMode = (schema) => schema === CONDITIONS_V4 || schema === CONDITIONS_V5 || schema === CONDITIONS_V6 || schema === CONDITIONS_V7 || schema === CONDITIONS_V8;
 /** 台本の当て方（post-hoc ＝ 採点で事後に当てる。live ＝ 実行中に当てた。v4 の scripts.mode） */
 export const SCRIPT_MODES = [SCRIPT_MODE, "live"];
 /** 実行中の台本の照合の状態（packages/factory の SCRIPT_MATCH_STATES）。それ以外は unknown-state */
@@ -788,7 +792,7 @@ export function evaluationOf(cond) {
   const mode = !isObj(cond) ? null : hasMode(cond.schema) ? knownOr(EVALUATION_MODES, cond.params?.mode) : CONDITIONS_SCHEMAS.includes(cond.schema) ? (cond.params?.plan === true ? "e2e" : "build") : "unknown";
   // 段単位の走り（#545）は納品物を作らないので build_applicable は偽
   const out = { mode, build_applicable: mode !== "plan-only" && mode !== STAGE_RUN_MODE };
-  if (isObj(cond) && (cond.schema === CONDITIONS_V5 || cond.schema === CONDITIONS_V6 || cond.schema === CONDITIONS_V7)) out.pipeline = knownOr(PIPELINES, cond.params?.pipeline);
+  if (isObj(cond) && (cond.schema === CONDITIONS_V5 || cond.schema === CONDITIONS_V6 || cond.schema === CONDITIONS_V7 || cond.schema === CONDITIONS_V8)) out.pipeline = knownOr(PIPELINES, cond.params?.pipeline);
   else Object.defineProperty(out, "pipeline", { value: null, enumerable: false });
   return out;
 }
@@ -2091,7 +2095,7 @@ const anonymousV12Flags = (x) => {
  */
 export function groupConditionsProblem(cond, group) {
   if (!isObj(cond) || !isObj(cond.params)) return "compare:conditions-version";
-  if (cond.schema === CONDITIONS_V6 || cond.params.mode === STAGE_RUN_MODE) return "compare:conditions-stage";
+  if (cond.schema === CONDITIONS_V6 || cond.schema === CONDITIONS_V8 || cond.params.mode === STAGE_RUN_MODE) return "compare:conditions-stage";
   if (group === V12_PIPELINE) return cond.schema === CONDITIONS_V7 && cond.params.mode === "build-from" && cond.params.pipeline === group && isFlagMap(cond.params.v12_flags) ? null : "compare:conditions-version";
   return cond.schema === CONDITIONS_V5 && cond.params.pipeline === group && !("v12_flags" in cond.params) ? null : "compare:conditions-version";
 }
@@ -2486,6 +2490,8 @@ const anonCluster = (c) => (!isObj(c) ? null : {
 // 段の通過は納品の成功ではない：原文系・了承後系の PASS と納品の欄は計算せず、段の通過を PASS・納品の成功・verdict の名前で出さない
 /** 段単位の走りの条件の版（v5 に params.stage_start・stage_end・budget_scope・stage_from・stage_inputs と stage_input_absent を足した。段単位の走りのときだけ書く） */
 export const CONDITIONS_V6 = "musunest-factory/agent-accept-conditions/v6";
+/** v1.2 の段単位の走りの条件の版（#638。v6 の段の欄に、v7 の params.pipeline（v1.2）・v12_flags と #618 の v12_call_limits を足した。v1.1α の段単位は v6 のまま） */
+export const CONDITIONS_V8 = "musunest-factory/agent-accept-conditions/v8";
 /** 段単位の走りの params.mode。予算と締切の適用の単位（params.budget_scope。packages/factory の STAGE_BUDGET_SCOPE）も同じ値 */
 export const STAGE_RUN_MODE = "stage-run";
 /** 工場の段の走りの記録の、本のディレクトリからの場所（packages/factory の STAGE_RUN_RECORD_FILE を --out の下に）と記録の形の版（STAGE_RUN_RECORD_SCHEMA） */
@@ -2527,8 +2533,10 @@ export const STAGE_SCORE_COMPARE_SCHEMA = "musunest-eval/score-stage-compare/v1"
 export const STAGE_RUN_STATES = ["absent", "unlaunched", "missing", "mismatch", "observed"];
 /** 段だけの対の差が null の理由（未起動 ＝ どちらかの群で起こさなかった、欠測 ＝ 起こしたが記録が読めないか条件と食い違う） */
 export const STAGE_PAIR_NULL_REASONS = ["unlaunched", "missing"];
-/** 段単位の走りの条件（v6 で params.mode が stage-run） */
-export const isStageConditions = (cond) => isObj(cond) && cond.schema === CONDITIONS_V6 && cond.params?.mode === STAGE_RUN_MODE;
+/** 段単位の走りの条件（v6 か v8 で params.mode が stage-run） */
+export const isStageConditions = (cond) => isObj(cond) && (cond.schema === CONDITIONS_V6 || cond.schema === CONDITIONS_V8) && cond.params?.mode === STAGE_RUN_MODE;
+/** 段単位の走りの条件の経路（v6 は v1.1a、v8 は v1.2。版と params.pipeline が合わなければ null） */
+export const stagePipelineOf = (cond) => (!isStageConditions(cond) ? null : cond.schema === CONDITIONS_V6 ? (cond.params.pipeline === "v1.1a" ? "v1.1a" : null) : cond.params.pipeline === V12_PIPELINE ? V12_PIPELINE : null);
 /** 条件に固定した入力なしの本（stage_input_absent）：予定の部分集合で、重複が無く、件数が一覧の長さと一致するときだけ一覧を返す（それ以外は null） */
 export function stageAbsentOf(cond, planned) {
   const a = cond?.stage_input_absent;
@@ -2643,6 +2651,63 @@ export function stageFunnelOf(facts, range) {
     stages: Object.fromEntries(BUILD_STAGE_IDS.filter((id) => seen.has(id) && stagesInRange(range?.start, range?.end).includes(id)).map((id) => [id, fu.stages[id]])),
   };
 }
+/**
+ * v1.2 の段の走り（条件 v8。#638）の旗の組の照合：起こした本（記録の読めない本・条件と食い違う本を含む）の段の走りの記録の conditions.v12_flags を、
+ * 条件の params.v12_flags と名前 → 真偽の集合として照らす（v7 の v12FlagsOf と同じ形と結果の名前。報告は 1 つなので inconsistent は出ない）。記録が読めない・欄が無ければ欠測
+ */
+export function stageV12FlagsOf(cond, facts, outRoot) {
+  const expected = cond?.params?.v12_flags;
+  const launched = facts.filter((f) => f.state !== "absent" && f.state !== "unlaunched");
+  const counts = zeros(V12_FLAG_STATUSES), unverified = [];
+  for (const f of launched) {
+    const rec = stageRecordOf(readJsonSafe(join(outRoot, f.run, STAGE_RUN_PATH)).value);
+    const report = v12ReportOf(isObj(rec?.conditions) ? rec.conditions.v12_flags : undefined);
+    const st = v12FlagsStatus(expected, report, report);
+    counts[st] += 1;
+    if (st !== "match") unverified.push({ run: f.run, status: st });
+  }
+  return { flags: isFlagMap(expected) ? expected : null, status: isFlagMap(expected) && unverified.length === 0 ? "verified" : "unverified", launched: launched.length, counts, unverified_runs: unverified };
+}
+/** 1 段先の副指標が見る段（T2。範囲がこの段を含む v1.2 の段の走りだけで計算する） */
+export const NEXT_STAGE = "test-spec";
+/** 1 段先の副指標を計算しない理由（範囲が T2 を含まない） */
+export const NEXT_STAGE_NOT_IN_RANGE = "range-excludes-test-spec";
+/**
+ * 1 段先の副指標（v1.2 の段の走り。#638。設計書 08 の U1 の 1 段先）：U1 の同じ出力を T2 まで流した走り（範囲が test-spec を含む）の記録から、
+ * T2' の通過（test-spec の最後の記録が ok の本 ÷ 予定本数。Wilson は参考。T2 に届かず止まった本・入力なしの本は 0 に数えて not_reached、
+ * 記録の読めない本・条件と食い違う本・起こさなかった本は missing に件数。分母から消さない）と、T2 が落とした試験の数（記録の test_spec.dropped_tests。
+ * T2 に届かない本・値の無い本は null で、合計と中央値は値のある本だけ）。範囲が test-spec を含まなければ両方 null と理由。終了した単位自身の集計で代用しない
+ */
+export function nextStageOf(facts, range) {
+  const label = "1 段先の副指標（U1 の同じ出力を T2 まで流した走りの T2' の通過と T2 が落とした試験の数。単位の主指標ではなく、段の通過は納品の成功ではない）";
+  if (!stagesInRange(range?.start, range?.end).includes(NEXT_STAGE)) return { label, applicable: false, reason: NEXT_STAGE_NOT_IN_RANGE, t2_pass: null, dropped_tests: null };
+  let passed = 0, failed = 0, notReached = 0, missing = 0;
+  const dropped = [];
+  for (const f of facts) {
+    if (f.state === "absent") { notReached += 1; dropped.push(null); continue; }
+    if (f.state !== "observed") { missing += 1; dropped.push(null); continue; }
+    const t2 = Array.isArray(f.record.stages) ? f.record.stages.filter((x) => isObj(x) && x.stage === NEXT_STAGE) : [];
+    if (t2.length === 0) { notReached += 1; dropped.push(null); continue; }
+    if (t2.at(-1).status === "ok") passed += 1; else failed += 1;
+    const ts = f.record.test_spec;
+    dropped.push(isObj(ts) && Number.isInteger(ts.dropped_tests) && ts.dropped_tests >= 0 ? ts.dropped_tests : null);
+  }
+  const denominator = facts.length, [lo, hi] = wilson(passed, denominator);
+  return {
+    label, applicable: true, reason: null,
+    t2_pass: {
+      passed, failed, not_reached: notReached, missing, denominator, denominator_label: `予定 ${denominator}（T2 に届かない本は 0・記録の読めない本も分母に残す）`,
+      rate: denominator === 0 ? null : round6(passed / denominator), interval: denominator === 0 ? null : [round6(lo), round6(hi)], text: denominator === 0 ? null : fmt(passed, denominator),
+    },
+    dropped_tests: { reached: passed + failed, ...stat4(dropped) },
+  };
+}
+/** 標準出力の 1 段先の副指標の 1 行 */
+export function nextStageText(ns) {
+  if (!ns.applicable) return `1 段先（T2' の通過・T2 が落とした試験。納品の成功ではない）: -（${ns.reason}）`;
+  const t = ns.t2_pass, d = ns.dropped_tests;
+  return `1 段先（T2' の通過・T2 が落とした試験。納品の成功ではない）: T2' の通過 ${t.passed}／予定 ${t.denominator}（届かない ${t.not_reached}・記録なし ${t.missing}・T2 で止まった ${t.failed}）・率 ${t.text ?? "-（分母 0）"}（Wilson は参考）・落とした試験 ${d.observed === 0 ? "-" : `合計 ${d.total}・中央値 ${d.median}`}（T2 に届いた ${d.reached}・値あり ${d.observed}・値なし ${d.missing}）`;
+}
 /** 段単位の採点の行（本ごと。段の通過・到達した段・停止・⑦ の判定・費用） */
 const stageRowOf = (f) => {
   const rec = f.state === "observed" ? f.record : null;
@@ -2668,6 +2733,14 @@ function stageOutputOf({ outRoot, cond, planned, stageAbsent, set, evaluation, c
     const kinds = STAGE_RECORD_MISMATCHES.filter((k) => mismatched.some((f) => f.mismatches.includes(k)));
     completion = { ...completion, status: "unverified", label: COMPLETION_LABELS.unverified, reasons: [...completion.reasons, `段の走りの記録が条件と食い違う ${mismatched.length} 本（${kinds.join("・")}）`] };
   }
+  // v1.2 の段の走り（v8。#638）：記録の旗の組を条件の組と照らし、1 本でも合わなければ照合を未照合（v7 と同じ符号 v12-flags）
+  const v8 = cond.schema === CONDITIONS_V8;
+  if (v8) {
+    const v12 = stageV12FlagsOf(cond, facts, outRoot);
+    evaluation.v12_flags = v12;
+    completion = v12.status === "verified" ? { ...completion, unverified: [] }
+      : { ...completion, status: "unverified", label: COMPLETION_LABELS.unverified, reasons: [...completion.reasons, `旗の組の照合が通らない ${v12.launched - v12.counts.match} 本（v12-flags）`], unverified: [V12_UNVERIFIED_CHECK] };
+  }
   const last = completion.latest_record;
   const budgetPending = last?.stop_code === "budget" && Array.isArray(last.pending) ? last.pending : [];
   const sf = cond.params?.stage_from;
@@ -2679,6 +2752,8 @@ function stageOutputOf({ outRoot, cond, planned, stageAbsent, set, evaluation, c
     completion, fingerprints,
     stage_pass_rate: stagePassRateOf(facts, { range, budgetPending }), funnel: stageFunnelOf(facts, range),
     rows: facts.map(stageRowOf),
+    // 1 段先の副指標（v8 のときだけ。#638）：既存の欄のあとに足す
+    ...(v8 ? { next_stage: nextStageOf(facts, range) } : {}),
   };
 }
 /** 匿名の段の通過率：件数・率・区間・既知の値だけ（本の ID・P の ID・上流の SHA は出さない） */
@@ -2689,18 +2764,26 @@ const anonymousStagePassRate = (s) => (!isObj(s) ? null : {
   stops: (() => { const vals = {}; for (const [k, n] of Object.entries(isObj(s.stops) ? s.stops : {})) { const key = knownStopValue(k) ? k : "unknown"; vals[key] = (vals[key] ?? 0) + (Number.isInteger(n) ? n : 0); } return vals; })(),
   stage_judge_verdicts: isObj(s.stage_judge_verdicts) ? intsOf(s.stage_judge_verdicts, [...FACTORY_VERDICTS, "unknown", "absent"]) : null,
 });
-/** 段単位の採点の匿名の口：照合・指紋・評価の種類・計算しない欄の理由・段の通過率・範囲の中の漏斗だけ */
+/** 匿名の 1 段先の副指標（件数・率・区間・合計と中央値と既知の理由だけ。本の ID・P の ID・SHA は出さない。#638） */
+const anonymousNextStage = (x) => (!isObj(x) ? null : {
+  applicable: boolOrNull(x.applicable), reason: enumOrUnknown([NEXT_STAGE_NOT_IN_RANGE], x.reason ?? null),
+  t2_pass: !isObj(x.t2_pass) ? null : { ...intsOf(x.t2_pass, ["passed", "failed", "not_reached", "missing", "denominator"]), rate: numOrNull(x.t2_pass.rate), interval: numPair(x.t2_pass.interval), text: rateOrNull(x.t2_pass.text) },
+  dropped_tests: !isObj(x.dropped_tests) ? null : { reached: intOrNull(x.dropped_tests.reached), ...anonStat(x.dropped_tests) },
+});
+/** 段単位の採点の匿名の口：照合・指紋・評価の種類・計算しない欄の理由・段の通過率・範囲の中の漏斗だけ（v8 は旗の照合の状態と 1 段先の副指標の件数も。#638） */
 export function anonymizeStage(full) {
   const sr = full.stage_run ?? {};
+  const v8 = full.fingerprints?.conditions?.schema === CONDITIONS_V8;
   return {
     rubric: "v5", anonymous: true, runs: Array.isArray(full.rows) ? full.rows.length : null,
     set: { version: intOrNull(full.set?.version), role: enumOrUnknown(EVAL_SET_ROLES, full.set?.role ?? null), sha256: hashOrNull(full.set?.sha256) },
-    evaluation: { mode: enumOrUnknown(EVALUATION_MODES, full.evaluation?.mode ?? null), build_applicable: boolOrNull(full.evaluation?.build_applicable), pipeline: enumOrUnknown(PIPELINES, full.evaluation?.pipeline ?? null) },
+    evaluation: { mode: enumOrUnknown(EVALUATION_MODES, full.evaluation?.mode ?? null), build_applicable: boolOrNull(full.evaluation?.build_applicable), pipeline: enumOrUnknown(PIPELINES, full.evaluation?.pipeline ?? null), ...(v8 ? { v12_flags: anonymousV12Flags(full.evaluation?.v12_flags) } : {}) },
     stage_run: { range: { start: enumOrUnknown(BUILD_STAGE_IDS, sr.range?.start ?? null), end: enumOrUnknown(BUILD_STAGE_IDS, sr.range?.end ?? null) }, budget_scope: enumOrUnknown([STAGE_RUN_MODE], sr.budget_scope ?? null) },
     not_computed: { reason: STAGE_RUN_MODE, fields: [...STAGE_NOT_COMPUTED] },
-    completion: anonymousCompletion(full.completion), fingerprints: anonymousFingerprints(full.fingerprints, [...CONDITIONS_SCHEMAS, CONDITIONS_V6]),
+    completion: anonymousCompletion(full.completion), fingerprints: anonymousFingerprints(full.fingerprints, [...CONDITIONS_SCHEMAS, CONDITIONS_V6, ...(v8 ? [CONDITIONS_V8] : [])]),
     stage_pass_rate: anonymousStagePassRate(full.stage_pass_rate),
     funnel: anonymousFunnel(full.funnel, BUILD_STAGE_IDS.filter((id) => isObj(full.funnel?.stages?.[id]))),
+    ...(v8 ? { next_stage: anonymousNextStage(full.next_stage) } : {}),
   };
 }
 /** 段だけの対の比較の対のファイル（--make-pairs と段の旗）：上流の入力のある本（採用した P の順 × 回数）だけを、今の比較と同じ交互の順で並べる */
@@ -2738,7 +2821,8 @@ async function scoreStageCompare(repo, outRoot, comparison, opts) {
     if (!existsSync(dir)) throw refusal("群のディレクトリが無い [compare:record-missing]");
     const cond = loadConditions(dir).cond;
     if (!isStageConditions(cond) || cond.comparison?.pairs_sha256 !== pairsSha) throw mismatch("対のファイルと群の条件");
-    if (cond.comparison?.group !== g || cond.comparison?.role !== STAGE_COMPARE_ROLES[g] || cond.params?.pipeline !== "v1.1a") throw mismatch("群と条件の群・役割・経路");
+    // 経路：v6 は v1.1a、v8 は v1.2（#638。両群の経路が同じことは下の params の照合が見る）
+    if (cond.comparison?.group !== g || cond.comparison?.role !== STAGE_COMPARE_ROLES[g] || stagePipelineOf(cond) === null) throw mismatch("群と条件の群・役割・経路");
     const recorded = comparison.groups?.[g];
     if (!isHex64(cond.signature) || conditionsSignature(cond) !== cond.signature) throw mismatch("群の条件の署名が中身と合わない");
     if (!isObj(recorded) || recorded.role !== STAGE_COMPARE_ROLES[g] || recorded.conditions_signature !== cond.signature || !isHex64(recorded.factory?.fingerprint) || recorded.factory.fingerprint !== cond.factory?.fingerprint) throw mismatch("群の条件と比較の記録");
@@ -2746,6 +2830,7 @@ async function scoreStageCompare(repo, outRoot, comparison, opts) {
   }
   const [before, after] = STAGE_COMPARE_GROUPS;
   if (groups[before].cond.signature === groups[after].cond.signature) throw mismatch("両群の条件の署名が同じ");
+  if (groups[before].cond.schema !== groups[after].cond.schema) throw mismatch("群の条件の版");
   // 両群の params（範囲・上流の条件の指紋・本ごとの上流の入力の SHA を含む）と入力なしの本が同じ（上流を固定して効果を局所化する前提）
   const core = (p) => { if (!isObj(p)) return null; const { stage_output_limits_v11a: _l, ...rest } = p; return JSON.stringify(rest); };
   if (core(groups[before].cond.params) === null || core(groups[before].cond.params) !== core(groups[after].cond.params)) throw mismatch("群の params");
@@ -2772,6 +2857,8 @@ async function scoreStageCompare(repo, outRoot, comparison, opts) {
       completion: { status: c.status, label: c.label, planned: c.planned, executed: c.executed, unexecuted: c.unexecuted?.length ?? null, incomplete: c.incomplete.length, stage_input_absent: c.stage_input_absent ?? null, stop_code: c.latest_record?.stop_code ?? null },
       fingerprints: Object.fromEntries(COMPARE_FINGERPRINT_CHECKS.map((k) => [k, full.fingerprints[k] ?? null])),
       stage_pass_rate: full.stage_pass_rate, funnel: full.funnel,
+      // v1.2 の段の走りの群（v8。#638）：旗の組の照合と 1 段先の副指標
+      ...(isObj(full.evaluation?.v12_flags) ? { v12_flags: full.evaluation.v12_flags } : {}), ...(isObj(full.next_stage) ? { next_stage: full.next_stage } : {}),
     }];
   }));
   // 照合：(i) 未照合（群の照合・指紋）＞ (ii) 完了（全対が両方観測・両群が完了・予算の停止の記録なし）＞ (iii) 未完了
@@ -2791,6 +2878,8 @@ async function scoreStageCompare(repo, outRoot, comparison, opts) {
   return {
     schema: STAGE_SCORE_COMPARE_SCHEMA, diff_direction: "今の候補（after）− 凍結した前の候補（before）。対ごとに段の通過を 0／1 にして差を取る（納品の成功・PASS の差ではない）",
     range: stageRangeOf(groups[after].cond),
+    // 経路 v1.2 の段の走りの比較だけ（#638。v1.1α の段だけの対の比較の出力は今のまま）
+    ...(stagePipelineOf(groups[after].cond) === V12_PIPELINE ? { pipeline: V12_PIPELINE } : {}),
     completion: { status, label: COMPARE_LABELS[status], reference_only: status !== "complete", reasons: status === "unverified" ? [] : reasons, unverified, budget_stop: budgetStop },
     pairs: {
       planned: rows.length, both: diffs.length, input_absent: absent, excluded: Object.fromEntries(STAGE_PAIR_NULL_REASONS.map((why) => [why, rows.filter((r) => r.reason === why).length])),
@@ -2807,6 +2896,7 @@ export function anonymizeStageCompare(full) {
   return {
     schema: STAGE_SCORE_COMPARE_SCHEMA, anonymous: true,
     range: { start: enumOrUnknown(BUILD_STAGE_IDS, full.range?.start ?? null), end: enumOrUnknown(BUILD_STAGE_IDS, full.range?.end ?? null) },
+    ...("pipeline" in full ? { pipeline: enumOrUnknown(PIPELINES, full.pipeline) } : {}),
     completion: {
       status, label: COMPARE_LABELS[status] ?? "unknown", reference_only: status !== "complete", budget_stop: boolOrNull(c.budget_stop),
       unverified: (Array.isArray(c.unverified) ? c.unverified : []).filter((u) => STAGE_COMPARE_GROUPS.includes(u?.group) && (u.check === "reconcile" || COMPARE_FINGERPRINT_CHECKS.includes(u.check))).map((u) => ({ group: u.group, check: u.check, value: u.check === "reconcile" ? "unverified" : u.value === false ? false : null })),
@@ -2820,6 +2910,7 @@ export function anonymizeStageCompare(full) {
         completion: { status: enumOrUnknown(Object.keys(COMPARE_LABELS), x.completion?.status ?? null), ...intsOf(x.completion, ["planned", "executed", "unexecuted", "incomplete", "stage_input_absent"]), stop_code: enumOrUnknown(STOP_CODES, x.completion?.stop_code ?? null) },
         fingerprints: Object.fromEntries(COMPARE_FINGERPRINT_CHECKS.map((k) => [k, boolOrNull(x.fingerprints?.[k])])),
         stage_pass_rate: anonymousStagePassRate(x.stage_pass_rate),
+        ...(isObj(x.v12_flags) ? { v12_flags: anonymousV12Flags(x.v12_flags) } : {}), ...(isObj(x.next_stage) ? { next_stage: anonymousNextStage(x.next_stage) } : {}),
       }];
     })),
     scoring_cost_usd: SCORING_COST_USD,
@@ -2925,6 +3016,9 @@ function printStage(full) {
   console.log(stagePassText(full.stage_pass_rate));
   console.log(funnelText(full.funnel));
   console.log(fingerprintText(full.fingerprints, set));
+  // v1.2 の段の走り（v8。#638）：旗の組の照合と 1 段先の副指標の行（既存の行の後ろ）
+  if (isObj(evaluation?.v12_flags)) console.log(v12FlagsText(evaluation.v12_flags));
+  if (isObj(full.next_stage)) console.log(nextStageText(full.next_stage));
 }
 
 /** --compare の入口：score-compare[-label].json（匿名なら .anonymous.json だけ）と標準出力。通常の採点と同じく断りは exit 3、記録を読めなければ exit 1 */
@@ -2954,6 +3048,8 @@ async function mainCompare(repo, outRoot, { label, anonymous, setPath }) {
     for (const r of pairRows) console.log(["pair", r.run, `先行 ${r.first}`, ...STAGE_COMPARE_GROUPS.map((g) => `${g} ${r.states[g]}${r.stage_pass === null ? "" : ` stage_pass=${r.stage_pass[g]}`}`), `差 ${r.diff === null ? `-（${r.reason}）` : r.diff > 0 ? `+${r.diff}` : r.diff}`].join("\t"));
     for (const g of STAGE_COMPARE_GROUPS) console.log(`${g} ${stagePassText(stageGroups[g].stage_pass_rate)}`);
     console.log(stageCompareText(full));
+    // v1.2 の段の走りの群（v8。#638）：群ごとの旗の組の照合と 1 段先の副指標（既存の行の後ろ）
+    for (const g of STAGE_COMPARE_GROUPS) { if (isObj(stageGroups[g].v12_flags)) console.log(`${g} ${v12FlagsText(stageGroups[g].v12_flags)}`); if (isObj(stageGroups[g].next_stage)) console.log(`${g} ${nextStageText(stageGroups[g].next_stage)}`); }
     return;
   }
   // 既存の JSON の行は #539 の欄を除いて今までの形のまま
