@@ -44,6 +44,7 @@ import {
   PROPERTY_LEDGER,
   PROPERTY_LEDGER_VIEW,
   PROPERTY_STATES,
+  propertyLedgerSha256,
   OUTER_NOT_SCORED,
   V12_FLAGS_OFF,
   V12_FLAG_NAMES,
@@ -1040,5 +1041,28 @@ describe("empty-aggregate の行：旗 ids の文に、やり直しの必要な�
     }
     expect(copyDefects(COPY_TEXT, PROPERTY_LEDGER)).toEqual([]);
     for (const word of ACCEPTANCE_MATERIAL_WORDS) expect(ids).not.toContain(word);
+  });
+});
+
+describe("性質の台帳の定義の指紋（段の走りの checkpoint の版の `ledger`。Issue #637）", () => {
+  it("台帳の一覧から決定的に決まる SHA-256 で、既定は PROPERTY_LEDGER。行の鍵の並びには依らない", async () => {
+    const fingerprint = await propertyLedgerSha256();
+    expect(fingerprint).toMatch(/^[0-9a-f]{64}$/u);
+    expect(await propertyLedgerSha256()).toBe(fingerprint);
+    expect(await propertyLedgerSha256(PROPERTY_LEDGER)).toBe(fingerprint);
+    const reordered = PROPERTY_LEDGER.map((row) => Object.fromEntries(Object.entries(row).reverse()) as unknown as typeof row);
+    expect(await propertyLedgerSha256(reordered)).toBe(fingerprint);
+  });
+
+  it("二点測定：行を 1 つ除く・行の並びを入れ替える・1 つの列の値を変えると指紋が変わる（台帳を変えた後の旧い checkpoint を断れる）", async () => {
+    const fingerprint = await propertyLedgerSha256();
+    const [first, second, ...rest] = PROPERTY_LEDGER;
+    if (first === undefined || second === undefined) throw new Error("前提が壊れた：台帳の行が 2 つ未満");
+    const changed = [
+      PROPERTY_LEDGER.slice(1),
+      [second, first, ...rest],
+      [{ ...first, why: `${first.why}。目印の追記` }, second, ...rest],
+    ];
+    for (const rows of changed) expect(await propertyLedgerSha256(rows)).not.toBe(fingerprint);
   });
 });
