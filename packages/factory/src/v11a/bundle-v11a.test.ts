@@ -1,6 +1,7 @@
 // 納品物に足す v1.1α の記録（v11a/bundle-v11a.ts）の試験（07-architecture-v1.1a.md §1.4。Issue #510）。
 import { describe, expect, it } from "vitest";
 import * as bundleModule from "../bundle.js";
+import { BUILD_CLI_RECORD_SCHEMA } from "../cli-plan.js";
 import { ARTIFACTS_DIR } from "../bundle.js";
 import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-schema";
 import { requirementsFromPlan } from "../pipeline.js";
@@ -12,6 +13,7 @@ import {
   stageJsonText,
   stageOutputDigest,
   verifyStageInput,
+  STAGE_PREVIOUS_RECORD_SCHEMAS,
   STAGE_RUN_RECORD_SCHEMA,
   V11A_ARTIFACT_NAMES,
   V12_SEARCH_REPAIR_ARTIFACT_NAME,
@@ -347,6 +349,36 @@ describe("持ち越しの記録の non_requirements（T1'' が受理した要件
       const texts = await written((checkpoint) => change(checkpoint["carry_over"] as Record<string, unknown>));
       expect(await verify(texts)).toEqual({ ok: false, code: "stage-input:carry-over" });
     }
+  });
+
+  /** 前の走りの記録の形の版だけを差し替える（`checkpoints` の宣言は同じ） */
+  const withRecordSchema = (texts: { checkpointText: string; recordText: string }, schema: unknown) => ({
+    ...texts,
+    recordText: JSON.stringify({ ...(JSON.parse(texts.recordText) as Record<string, unknown>), schema_version: schema }),
+  });
+
+  it("前の走りの記録として Build だけの記録（build-cli-record）も受け、段の走りの記録と同じ再開の材料を返す（Issue #636）", async () => {
+    expect(STAGE_PREVIOUS_RECORD_SCHEMAS).toEqual([STAGE_RUN_RECORD_SCHEMA, BUILD_CLI_RECORD_SCHEMA]);
+    const texts = await written();
+    const fromStage = await verify(texts);
+    const fromBuild = await verify(withRecordSchema(texts, BUILD_CLI_RECORD_SCHEMA));
+    expect(fromBuild).toMatchObject({ ok: true });
+    expect(fromBuild).toEqual(fromStage);
+  });
+
+  it("二点測定：ほかの形の版・形の版の無い記録は今までどおり version で断り、Build だけの記録でも壊した組は今までの符号で断る（Issue #636）", async () => {
+    const texts = await written();
+    for (const schema of ["musunest-factory/plan-only-result/v1", "musunest-factory/build-cli-record/v2", undefined, 1]) {
+      expect(await verify(withRecordSchema(texts, schema)), String(schema)).toEqual({ ok: false, code: "stage-input:version" });
+    }
+    const tampered = await written((checkpoint) => delete (checkpoint["carry_over"] as Record<string, unknown>)["non_requirements"]);
+    expect(await verify(withRecordSchema(tampered, BUILD_CLI_RECORD_SCHEMA))).toEqual({ ok: false, code: "stage-input:carry-over" });
+    const otherDigest = JSON.parse(texts.recordText) as { checkpoints: { output_digest: string }[] };
+    otherDigest.checkpoints[0]!.output_digest = "0".repeat(64);
+    expect(await verify(withRecordSchema({ ...texts, recordText: JSON.stringify(otherDigest) }, BUILD_CLI_RECORD_SCHEMA))).toEqual({
+      ok: false,
+      code: "stage-input:digest",
+    });
   });
 });
 
