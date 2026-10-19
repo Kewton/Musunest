@@ -143,8 +143,8 @@ export function requiredValidationLocation(table: NameTable, test: FixedTest): D
 /**
  * 要る検査の骨組み 1 件（B1・直す段にデータで渡す）。所属 entity の名前・検査の名前・対象の行の id と種類・要求する試験 ID の
  * 並び・競合の印だけを持つ（式・期待・分類・宣言・表の名前の写しは持たない。R2-1）。
- * `conflict` が真の件は、別の entity に同じ名前の件がある（検査の名前は宣言全体で一意なので、名前で結ぶ契約の上では両方を
- * 実現できない）。書く要求にしない（どちらかを選ばない・改名しない）。
+ * `conflict` が真の件は、ほかの件に同じ名前がある（別の entity の同名の行、または同じ（entity・名前）を要求する別の行。検査の
+ * 名前は宣言全体で一意なので、名前で結ぶ契約の上では両方を実現できない）。書く要求にしない（どちらかを選ばない・改名しない）。
  */
 export interface RequiredValidation {
   readonly entity: string | null;
@@ -157,8 +157,9 @@ export interface RequiredValidation {
 
 /**
  * 固定した組と表から、要る検査の骨組みを導く（純粋。宣言に依らない）。観測する性質が `validation` の validate の試験だけ
- * （既定値・選択肢の集合の試験は専用の照合で検査を要求しないので除く）。同じ（entity・名前）は 1 件にまとめ、並びは表の行の順
- * （試験 ID は組の順）。呼ぶ側は評価の文脈と同じ組（棄却・持ち越しで外した後の組）を渡す。
+ * （既定値・選択肢の集合の試験は専用の照合で検査を要求しないので除く）。同じ行の試験は 1 件にまとめ、並びは表の行の順
+ * （試験 ID は組の順）。同じ名前を 2 つ以上の行が要求すれば（別 entity の同名・同じ（entity・名前）を要求する entity の行と項目の
+ * 行）、その全件に競合の印を付ける（並びで選ばない）。呼ぶ側は評価の文脈と同じ組（棄却・持ち越しで外した後の組）を渡す。
  */
 export function requiredValidationsOf(
   table: NameTable,
@@ -172,14 +173,9 @@ export function requiredValidationsOf(
     const location = requiredValidationLocation(table, test);
     const row = table.rows.find((candidate) => candidate.id === test.target.roleId);
     if (location === undefined || row === undefined) continue;
-    const found = entries.get(locationKey(location));
-    if (found === undefined) {
-      entries.set(locationKey(location), { row, location, testIds: [test.id] });
-      continue;
-    }
-    // 別の行が同じ場所を要求するとき（entity の行と、同じ名前の自分の項目）は表で先の行を対象の行にする
-    if ((rowIndex.get(row.id) ?? 0) < (rowIndex.get(found.row.id) ?? 0)) found.row = row;
-    found.testIds.push(test.id);
+    const found = entries.get(row.id);
+    if (found === undefined) entries.set(row.id, { row, location, testIds: [test.id] });
+    else found.testIds.push(test.id);
   }
   const ordered = [...entries.values()].sort((a, b) => (rowIndex.get(a.row.id) ?? 0) - (rowIndex.get(b.row.id) ?? 0));
   return ordered.map((entry) => ({

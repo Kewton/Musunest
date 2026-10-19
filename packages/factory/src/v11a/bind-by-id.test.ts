@@ -385,6 +385,35 @@ describe("要る検査の骨組み（純粋。Issue #666）", () => {
     expect(requiredValidationsOf(table, same, observesOf(same)).map((entry) => entry.conflict)).toEqual([false]);
   });
 
+  it("負例：entity の行と同名の項目の行が同じ（entity・名前）を要求する組は、(a) 骨組みの書く要求に載らず (b) 両方の行に競合の印が付き（並びで選ばない）(c) 結び付けの結果は直す前と同じ", async () => {
+    const amount = table.rows.find((row) => row.id === "f.item.amount");
+    if (amount === undefined) throw new Error("前提が壊れた：項目 amount の行が無い");
+    // entity item の中に、entity と同じ名前の項目 item の行を足した表
+    const same: NameTable = { ...table, rows: [...table.rows, { ...amount, id: "f.item.item", name: "item" }] };
+    const suite = suiteOf(
+      validateTest("ef", "normal", "f.item.item"),
+      validateTest("ee", "normal", "e.item", "R1", "entity"),
+      validateTest("ee2", "abnormal", "e.item", "R1", "entity"),
+    );
+    expect(requiredValidationLocation(same, suite.tests[0]!)).toEqual(requiredValidationLocation(same, suite.tests[1]!));
+    const skeleton = requiredValidationsOf(same, suite, observesOf(suite));
+    // (a) 書く要求（競合なし）の件は無い
+    expect(skeleton.filter((entry) => !entry.conflict)).toEqual([]);
+    // (b) 行ごとに 1 件ずつ、両方に競合の印（表の行の順。どちらも選ばない）
+    expect(skeleton).toEqual([
+      { entity: "item", name: "item", rowId: "e.item", rowKind: "entity", testIds: ["ee", "ee2"], conflict: true },
+      { entity: "item", name: "item", rowId: "f.item.item", rowKind: "field", testIds: ["ef"], conflict: true },
+    ]);
+    // 片方の行の試験だけなら競合にならない
+    const entityOnly = suiteOf(...suite.tests.filter((test) => test.target.roleId === "e.item"));
+    expect(requiredValidationsOf(same, entityOnly, observesOf(entityOnly)).map((entry) => entry.conflict)).toEqual([false]);
+    // (c) 結び付けの結果は直す前と同じ（検査 item が在る版・無い版）
+    for (const source of [withValidations(["item", "item", "amount > 0"]), withValidations()]) {
+      const app = await normalizedFixture(source);
+      expect([...bindTestsById(app, same, suite).bindings]).toEqual([...bindTestsByIdBefore(app, same, suite)]);
+    }
+  });
+
   it("(5) 棄却で外れた試験の分は入らない（呼ぶ側が評価の文脈と同じ組を渡す）。並びは表の行の順", () => {
     const suite = suiteOf(validateTest("x", "abnormal"), validateTest("t", "normal", "f.item.title", "R1"), validateTest("n", "normal"));
     const all = requiredValidationsOf(table, suite, observesOf(suite));
