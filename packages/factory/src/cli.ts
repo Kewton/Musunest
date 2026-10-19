@@ -25,6 +25,10 @@
 // と固定の符号 1 行（標準エラー）で終わる。段の走りは納品物を書かず、境界の checkpoint と段の走りの記録だけを
 // 書く。旗を省けば今までの走りとバイト列で同じである（checkpoint も書かない）。
 //
+// `--pipeline v1.2` の一気通貫の走りも、通った境界（T1''／T2・T2／B1）の checkpoint を段の走りと同じ関数・同じ名前で `--out`
+// の直下に書き（納品物の manifest には載せない）、Build だけの記録に `checkpoints` で宣言する。段の入力の照合は、前の走りの
+// 記録として段の走りの記録が無ければ Build だけの記録を読む（Issue #636）。`v1`・`v1.1a` の走りは何も足さない。
+//
 // `node:fs` は**動的**に読む（Worker が根（index.ts）から import しても、この経路は呼ばれない限り動かない。
 // appspec-schema の contract.ts と同じやり方）。
 import { planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
@@ -80,11 +84,13 @@ import {
   verifyStageInput,
   STAGE_BUDGET_SCOPE,
   STAGE_RUN_RECORD_FILE,
+  type BoundaryMaterials,
   type StageBoundary,
   type StageRange,
   type StageRunConditions,
+  type StageVersions,
 } from "./v11a/bundle-v11a.js";
-import { runGenerationV11a, runStageRangeV11a } from "./v11a/run.js";
+import { runGenerationV11a, runStageRangeV11a, type GenerationResultV11a } from "./v11a/run.js";
 import { fromPublicV12Flags, V12_PIPELINE_FLAGS, type V12PublicFlags } from "./v12/ledger.js";
 import { V12_CALL_LIMITS } from "./v12/limits.js";
 import type { PromptDocument } from "./stages/prompt.js";
@@ -539,21 +545,28 @@ async function runBuild(
   deps: CliDeps,
   job: BuildJob & { readonly plan?: ConfirmedPlan },
   log: (line: string) => void,
-): Promise<{ readonly code: number; readonly costUsd: number; readonly returnToPlan: boolean }> {
+): Promise<{
+  readonly code: number;
+  readonly costUsd: number;
+  readonly returnToPlan: boolean;
+  /** 通った境界の材料（`--pipeline v1.2` の走りだけ。Issue #636） */
+  readonly boundaries?: readonly BoundaryMaterials[];
+}> {
   // v1.1α は確定した仕様と組んでだけ流れる（引数の読み取りが `--plan-file` を要る。Issue #511）。v1.2 は同じ経路に
-  // 旗の組を渡し、要約に旗の組を書かせる（Issue #547）
+  // 旗の組を渡し、要約に旗の組を書かせる（Issue #547）。v1.2 は境界の材料も集めさせる（checkpoint を書くため。Issue #636）
   const v11aPlan = isV11aPath(job.pipeline) ? job.plan : undefined;
   const input = generationInputOf(deps, job, v11aPlan === undefined ? PROMPT_VERSION : promptVersionOf(job.pipeline));
   const flags = v12FlagsOf(job.pipeline);
-  const run =
+  const run: GenerationResultV11a =
     v11aPlan === undefined
       ? await runGeneration({ ...input, ...(job.plan === undefined ? {} : { plan: job.plan }) })
       : await runGenerationV11a({
           ...input,
           plan: v11aPlan,
-          ...(flags === undefined ? {} : { flags: fromPublicV12Flags(flags), recordV12Flags: true }),
+          ...(flags === undefined ? {} : { flags: fromPublicV12Flags(flags), recordV12Flags: true, collectBoundaries: true }),
         });
-  return writeBuildRun(deps, job, run, log);
+  const written = await writeBuildRun(deps, job, run, log);
+  return run.boundaries === undefined ? written : { ...written, boundaries: run.boundaries };
 }
 
 /** 生成の入力のうち、経路に依らない部分（v1・v1.1α・段の走りで同じ） */
@@ -890,6 +903,16 @@ async function runBuildFromPlanFile(
   };
   const build = await runBuild(deps, { ...job, plan: validation.plan }, log);
   await deps.makeDirectory(job.outDir);
+  // `--pipeline v1.2` の走りだけ、通った境界の checkpoint を段の走りと同じ関数・同じ名前で `--out` の直下に書き、Build だけの
+  // 記録に宣言する（納品物の manifest には載せない。ほかの経路は何も足さない。Issue #636）
+  const checkpoints =
+    build.boundaries === undefined
+      ? undefined
+      : await writeStageCheckpoints(deps, job.outDir, build.boundaries, {
+          versions: stageVersionsOf(promptVersionOf(job.pipeline)),
+          planSha256: validation.planSha256,
+          sourceSha256: validation.sourceSha256,
+        });
   await deps.writeFile(
     joinPath(job.outDir, BUILD_CLI_RECORD_FILE),
     JSON.stringify(
@@ -898,6 +921,7 @@ async function runBuildFromPlanFile(
         planSha256: validation.planSha256,
         sourceSha256: validation.sourceSha256,
         returnToPlan: build.returnToPlan,
+        ...(checkpoints === undefined ? {} : { checkpoints }),
       }),
     ),
   );
@@ -913,6 +937,42 @@ function directoryOf(path: string): string {
 /** パスの最後の名前 */
 function baseNameOf(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/** checkpoint に残す版（語彙・契約・prompt・工場。段の走りと `--pipeline v1.2` の走りで同じ形。Issue #636） */
+function stageVersionsOf(promptVersion: string): StageVersions {
+  return { vocabulary: VOCABULARY_VERSION, contract: CONTRACT_VERSION, prompt: promptVersion, factory: FACTORY_VERSION };
+}
+
+/**
+ * 通った境界の材料から checkpoint を組み、境界ごとの名前で `outDir` の直下に書く（段の走りと `--pipeline v1.2` の走りが
+ * 共有する。Issue #636）。返すのは記録の `checkpoints`（境界・ファイル名・出力ダイジェスト。通った順）
+ */
+async function writeStageCheckpoints(
+  deps: CliDeps,
+  outDir: string,
+  boundaries: readonly BoundaryMaterials[],
+  options: { readonly versions: StageVersions; readonly planSha256: string; readonly sourceSha256: string },
+): Promise<{ boundary: StageBoundary; path: string; output_digest: string }[]> {
+  const checkpoints: { boundary: StageBoundary; path: string; output_digest: string }[] = [];
+  for (const materials of boundaries) {
+    const checkpoint = buildStageCheckpoint({ materials, ...options });
+    const path = stageCheckpointFile(materials.boundary);
+    await deps.writeFile(joinPath(outDir, path), stageJsonText(checkpoint));
+    checkpoints.push({ boundary: materials.boundary, path, output_digest: await stageOutputDigest(checkpoint) });
+  }
+  return checkpoints;
+}
+
+/**
+ * 前の走りの記録を読む（段の走りの記録。無ければ Build だけの記録。`--pipeline v1.2` の走りの checkpoint を受けるため。
+ * どちらも読めなければ null。Issue #636）
+ */
+async function readPreviousRecord(deps: CliDeps, directory: string): Promise<string | null> {
+  return (
+    (await readOrNull(deps, joinPath(directory, STAGE_RUN_RECORD_FILE))) ??
+    (await readOrNull(deps, joinPath(directory, BUILD_CLI_RECORD_FILE)))
+  );
 }
 
 /** 読めなければ null（段の入力の照合は、読めないことを固定の符号にする） */
@@ -957,7 +1017,7 @@ async function runStageFromPlanFile(
       start: range.start,
       checkpointText: await readOrNull(deps, checkpointPath),
       checkpointFile: baseNameOf(checkpointPath),
-      recordText: await readOrNull(deps, joinPath(directoryOf(checkpointPath), STAGE_RUN_RECORD_FILE)),
+      recordText: await readPreviousRecord(deps, directoryOf(checkpointPath)),
       plan: validation.plan,
       planSha256: validation.planSha256,
       sourceSha256: validation.sourceSha256,
@@ -1011,23 +1071,11 @@ async function runStageFromPlanFile(
   });
 
   await deps.makeDirectory(job.outDir);
-  const checkpoints: { boundary: StageBoundary; path: string; output_digest: string }[] = [];
-  for (const materials of outcome.boundaries) {
-    const checkpoint = buildStageCheckpoint({
-      materials,
-      versions: {
-        vocabulary: VOCABULARY_VERSION,
-        contract: CONTRACT_VERSION,
-        prompt: PROMPT_VERSION_V11A,
-        factory: FACTORY_VERSION,
-      },
-      planSha256: validation.planSha256,
-      sourceSha256: validation.sourceSha256,
-    });
-    const path = stageCheckpointFile(materials.boundary);
-    await deps.writeFile(joinPath(job.outDir, path), stageJsonText(checkpoint));
-    checkpoints.push({ boundary: materials.boundary, path, output_digest: await stageOutputDigest(checkpoint) });
-  }
+  const checkpoints = await writeStageCheckpoints(deps, job.outDir, outcome.boundaries, {
+    versions: stageVersionsOf(PROMPT_VERSION_V11A),
+    planSha256: validation.planSha256,
+    sourceSha256: validation.sourceSha256,
+  });
   const code =
     outcome.stopped !== null
       ? EXIT_RUN_FAILED

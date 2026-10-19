@@ -23,6 +23,7 @@
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
 import { ARTIFACTS_DIR, type BundleArtifact } from "../bundle.js";
+import { BUILD_CLI_RECORD_SCHEMA } from "../cli-plan.js";
 import type { RequirementNature, TestSuite } from "../fixed-test.js";
 import type { Verdict } from "../outcome.js";
 import { requirementsFromPlan } from "../pipeline.js";
@@ -433,6 +434,11 @@ export function resolveStageRange(input: {
 export const STAGE_CHECKPOINT_SCHEMA = "musunest.factory.v11a-stage-checkpoint/v1" as const;
 /** 段の走りの記録の形の版 */
 export const STAGE_RUN_RECORD_SCHEMA = "musunest.factory.v11a-stage-run/v1" as const;
+/**
+ * 再開の入力の照合が「前の走りの記録」として受ける形の版：段の走りの記録と、Build だけの記録（`--pipeline v1.2` の走りが
+ * `checkpoints` を同じ形で宣言する。Issue #636）
+ */
+export const STAGE_PREVIOUS_RECORD_SCHEMAS: readonly string[] = [STAGE_RUN_RECORD_SCHEMA, BUILD_CLI_RECORD_SCHEMA];
 /** 段の走りの記録の置き場所（`--out` の直下） */
 export const STAGE_RUN_RECORD_FILE = "stage-run.json" as const;
 /** 予算と締切の適用の単位（段の走り 1 本） */
@@ -700,7 +706,7 @@ const fail = (code: StageInputCode): StageInputVerification => ({ ok: false, cod
 
 /**
  * 再開の入力を照合する（1 つでも合わなければ固定の符号で断る）。読むのは開始の段の直前の境界の checkpoint と、
- * 前の段の走りの記録だけ。**呼ぶ側はクライアントを作る前に呼ぶ**（断ったら API を呼ばない・何も書かない）。
+ * 前の走りの記録（段の走りの記録か、`--pipeline v1.2` の Build だけの記録。Issue #636）だけ。**呼ぶ側はクライアントを作る前に呼ぶ**（断ったら API を呼ばない・何も書かない）。
  *
  * 照合の順：読める → 境界 → 版 → 出力ダイジェスト → 確定した仕様・依頼文の SHA → 表の SHA → 点検結果の表の SHA →
  * 点検の対象 → 持ち越し →（開始 B1）試験の組。
@@ -711,7 +717,7 @@ export async function verifyStageInput(input: {
   readonly checkpointText: string | null;
   /** checkpoint のファイルの名前（記録が宣言する `path` と照らす） */
   readonly checkpointFile: string;
-  /** 前の段の走りの記録の中身（読めなければ null） */
+  /** 前の走りの記録（段の走りの記録か Build だけの記録）の中身（読めなければ null） */
   readonly recordText: string | null;
   readonly plan: ConfirmedPlan;
   readonly planSha256: string;
@@ -735,11 +741,13 @@ export async function verifyStageInput(input: {
     : undefined;
   if (!isObject(declared) || typeof declared["output_digest"] !== "string") return fail("stage-input:boundary");
 
-  // 版：checkpoint と記録の形の版・語彙の版・契約の版（prompt と工場の版は記録するが断らない）
+  // 版：checkpoint と記録の形の版・語彙の版・契約の版（prompt と工場の版は記録するが断らない）。記録は段の走りの記録か
+  // Build だけの記録（Issue #636）
   const versions = checkpoint["versions"];
   if (
     checkpoint["schema_version"] !== STAGE_CHECKPOINT_SCHEMA ||
-    record["schema_version"] !== STAGE_RUN_RECORD_SCHEMA ||
+    typeof record["schema_version"] !== "string" ||
+    !STAGE_PREVIOUS_RECORD_SCHEMAS.includes(record["schema_version"]) ||
     !isObject(versions) ||
     versions["vocabulary"] !== input.vocabularyVersion ||
     versions["contract"] !== input.contractVersion
