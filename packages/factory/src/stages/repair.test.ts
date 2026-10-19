@@ -40,6 +40,7 @@ import type { TestRunReport } from "./run-tests.js";
 import type { DeclarationEvaluator, EvaluationContext } from "./tools.js";
 import {
   DECLARATION_REJECTIONS_DATA_NAME,
+  REPAIR_REQUIRED_VALIDATIONS_DATA_NAME,
   REPAIR_STEP_LIMITS_DATA_NAME,
   checkDeclarationVersion,
   checkRepairAnswer,
@@ -47,6 +48,7 @@ import {
   isStagnant,
   REPAIR_ANSWER_SCHEMA,
   REPAIR_ANSWER_SCHEMA_NAME,
+  REPAIR_RULES,
   runRepairLoop,
   runRepairStep,
   type RepairStepCounts,
@@ -1696,5 +1698,62 @@ describe("直す段の数の口と上限の塊（旗 v12.ids・Issue #665）", (
     const fs = (await import(/* @vite-ignore */ "node:fs")) as { readFileSync(path: URL, encoding: "utf8"): string };
     const files = ["./repair.ts", "./repair.test.ts", "../record.ts", "../record.test.ts", "../v11a/run.ts", "../v11a/run.test.ts"];
     expectNoAcceptanceMaterial(files.map((file) => fs.readFileSync(new URL(file, import.meta.url), "utf8")));
+  });
+});
+
+// ── 要る検査の骨組み（旗 v12.ids・Issue #666）──────────────────────────────────────
+
+describe("直す段のデータの末尾に要る検査の骨組みを足す（旗 v12.ids・Issue #666）", () => {
+  /** 骨組み（v1.1α の requiredValidationsOf が導く形。値はそのまま JSON で渡る） */
+  const SKELETON = [{ entity: "item", name: "amount", rowId: "f.item.amount", rowKind: "field", testIds: ["t1", "t2"], conflict: false }] as const;
+  const stepRequests = async (extra: Partial<RepairStepInput>) => {
+    const initial = await version(V1);
+    const recording = createRecordingClient([toolCalls([staticCheckCall("c1", V1)]), done(V2)]);
+    const outcome = await runRepairStep({
+      source: SOURCE,
+      list: LIST,
+      suite: SUITE,
+      current: initial,
+      correspondences: CORRESPONDENCES,
+      documents: SAMPLE_DOCUMENTS,
+      gateway: makeGateway(recording.client, { maxAttempts: 1 }),
+      ...extra,
+    });
+    return { outcome, requests: recording.tools };
+  };
+  const block = `<data name="${REPAIR_REQUIRED_VALIDATIONS_DATA_NAME}">\n${JSON.stringify(SKELETON, null, 2)}\n</data>`;
+
+  it("省けば要求はバイト列で同じ。渡すと入力の末尾に 1 つだけ増え、規則・道具・schema・往復は同じ。結果も同じ", async () => {
+    const plain = await stepRequests({});
+    const withSkeleton = await stepRequests({ requiredValidations: SKELETON });
+    for (const request of plain.requests) expect(request.input).not.toContain(REPAIR_REQUIRED_VALIDATIONS_DATA_NAME);
+    expect(withSkeleton.outcome).toEqual(plain.outcome);
+    expect(withSkeleton.requests).toHaveLength(plain.requests.length);
+    for (const [index, request] of withSkeleton.requests.entries()) {
+      const base = plain.requests[index];
+      if (base === undefined) throw new Error("要求が無い");
+      expect(request.input).toBe(`${base.input}\n${block}`);
+      expect(request.instructions).toBe(base.instructions);
+      expect(request.rules).toEqual(base.rules);
+      expect(request.documents).toEqual(base.documents);
+      expect(request.tools).toEqual(base.tools);
+      expect(request.schemaName).toBe(base.schemaName);
+      expect(request.schema).toEqual(base.schema);
+      expect(request.turns).toEqual(base.turns);
+    }
+    expect(REPAIR_RULES.join("\n")).not.toContain(REPAIR_REQUIRED_VALIDATIONS_DATA_NAME);
+  });
+
+  it("拒否の塊・上限の塊と併せたときは、骨組みの塊が末尾（両方のあと）に来る。上限の塊の値は同じ", async () => {
+    const { requests } = await stepRequests({
+      declRejections: [{ requirementId: "R-1", kind: "expression", quote: "件数を合計する" }],
+      stepLimitsData: true,
+      requiredValidations: SKELETON,
+    });
+    const input = requests[0]?.input ?? "";
+    expect(input.indexOf(REPAIR_STEP_LIMITS_DATA_NAME)).toBeGreaterThan(input.indexOf(DECLARATION_REJECTIONS_DATA_NAME));
+    expect(input.indexOf(REPAIR_REQUIRED_VALIDATIONS_DATA_NAME)).toBeGreaterThan(input.indexOf(REPAIR_STEP_LIMITS_DATA_NAME));
+    expect(input.endsWith(block)).toBe(true);
+    expect(blockOf(input).value).toEqual(limitsBlock(0));
   });
 });

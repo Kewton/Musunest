@@ -1,17 +1,27 @@
 // 表の `id` による結び付け・印・追加の要素（v11a/bind-by-id.ts）の unit テスト
 // （07-architecture-v1.1a.md §1.1・§2.1・D4・D11。Issue #505）。
+import { normalizeSpec } from "@musunest/spec-engine";
+import type { NormalizedAppSpec } from "@musunest/appspec-schema";
 import { describe, expect, it } from "vitest";
 import type { FixedTest, TestOperation, TestSuite, TestTargetKind } from "../fixed-test.js";
-import { bindTests } from "../stages/bind.js";
-import { fixtureTable, fixtureYaml, normalizedFixture } from "./__tests__/fixtures.js";
+import type { DeclarationLocation } from "../pipeline.js";
+import { bindTests, type BindResult } from "../stages/bind.js";
+import { declarationHasLocation, declarationKindOfRole } from "../stages/correspondence.js";
+import { expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
+import { FIXTURE_YAML, fixtureList, fixtureTable, fixtureYaml, normalizedFixture } from "./__tests__/fixtures.js";
 import {
   bindTestsById,
   correspondenceFromTable,
   extraElementsOf,
   markRows,
+  requiredValidationLocation,
+  requiredValidationsOf,
   type MarkReference,
 } from "./bind-by-id.js";
-import { identityMappings } from "./convert.js";
+import { identityMappings, toV1 } from "./convert.js";
+import { createV11aEvaluator } from "./evaluate.js";
+import type { NameTable } from "./names.js";
+import type { TestObserves } from "./stages/test-spec.js";
 
 const fixed = (
   id: string,
@@ -218,5 +228,280 @@ describe("表に無い追加の要素の一覧（D4）", () => {
     const extras = extraElementsOf(app, fixtureTable());
     expect(extras).toEqual([{ kind: "validation", entity: "item", name: "amount", path: "spec.validations[0]" }]);
     expect(extras.some((element) => element.name === "title")).toBe(false);
+  });
+});
+
+// ── validate の試験が要求する検査の場所と、要る検査の骨組み（Issue #666）──────────────────────────
+
+/** 直す前（69e7b0c）の `bindTestsById`（validate の場所を関数の中で決めていた形）。置き換えが結果を変えないことの照らし合わせ用 */
+function bindTestsByIdBefore(app: NormalizedAppSpec, table: NameTable, suite: TestSuite): ReadonlyMap<string, BindResult> {
+  const rowById = new Map(table.rows.map((row) => [row.id, row] as const));
+  const locationOfRow = (row: NameTable["rows"][number]): DeclarationLocation | undefined => {
+    let entity: string | null = null;
+    if (row.entity !== null) {
+      const owner = table.rows.find((candidate) => candidate.id === row.entity && candidate.kind === "entity");
+      if (owner === undefined) return undefined;
+      entity = owner.name;
+    }
+    return { kind: declarationKindOfRole(row.kind), entity, name: row.name };
+  };
+  const bindings = new Map<string, BindResult>();
+  for (const test of suite.tests) {
+    const roleId = test.target.roleId;
+    const row = roleId === undefined ? undefined : rowById.get(roleId);
+    if (row === undefined) {
+      bindings.set(test.id, { kind: "unbound", testId: test.id, cause: "no-mapping", detail: "試験の対象の ID が名前の表に無い" });
+      continue;
+    }
+    const base = row.kind === test.target.kind ? locationOfRow(row) : undefined;
+    let location: DeclarationLocation | undefined = base;
+    if (base !== undefined && test.operation === "validate") {
+      const entity = row.kind === "entity" ? row.name : base.entity;
+      location = { kind: "validation", entity, name: row.name };
+    }
+    if (location === undefined || !declarationHasLocation(app, location)) {
+      bindings.set(test.id, { kind: "unbound", testId: test.id, cause: "no-candidate", detail: "表の ID が指す場所が宣言に無い" });
+      continue;
+    }
+    bindings.set(test.id, { kind: "bound", testId: test.id, location });
+  }
+  return bindings;
+}
+
+const FIXTURE_VALIDATIONS = ["validations:", "  - name: amount", "    entity: item", "    expression: amount > 0"].join("\n");
+
+/** 宣言の検査の欄だけを差し替えた YAML（項目・計算・画面は fixture のまま） */
+const withValidations = (...entries: readonly (readonly [name: string, entity: string, expression: string])[]): string => {
+  if (FIXTURE_YAML.split(FIXTURE_VALIDATIONS).length !== 2) throw new Error("前提が壊れた：検査の欄が 1 か所でない");
+  const section =
+    entries.length === 0
+      ? "validations: []"
+      : ["validations:", ...entries.flatMap(([name, entity, expression]) => [`  - name: ${name}`, `    entity: ${entity}`, `    expression: ${expression}`])].join("\n");
+  return FIXTURE_YAML.replace(FIXTURE_VALIDATIONS, section);
+};
+
+const CLOCK = "2026-09-16T12:00:00+09:00";
+
+/** 項目 F（f.item.amount）の validate の試験（正常は 5 で通る・異常は -1 で落ちる） */
+const validateTest = (id: string, kind: "normal" | "abnormal", roleId = "f.item.amount", requirementId = "R1", targetKind: TestTargetKind = "field"): FixedTest => ({
+  id,
+  target: { requirementId, kind: targetKind, roleId },
+  kind,
+  operation: "validate",
+  clock: CLOCK,
+  input: roleId === "f.item.amount" ? { "f.item.amount": kind === "abnormal" ? -1 : 5 } : {},
+  inputContract: { rowId: "row-1", targetRowId: null, emptyEntities: [] },
+  referenceData: [],
+  expected: kind === "abnormal" ? { kind: "error", code: "E_INVALID" } : { kind: "ok", value: true },
+});
+
+const observesOf = (suite: TestSuite, overrides: Readonly<Record<string, TestObserves>> = {}): ReadonlyMap<string, TestObserves> =>
+  new Map(suite.tests.map((test) => [test.id, overrides[test.id] ?? (test.operation === "validate" ? "validation" : "when")] as const));
+
+/** 鍵の集合（骨組みの 1 件が持つ欄。式・期待・分類・宣言・表の型の写しを持たない） */
+const SKELETON_KEYS = ["conflict", "entity", "name", "rowId", "rowKind", "testIds"];
+
+describe("validate の試験が要求する検査の場所（結び付けの契約。Issue #666）", () => {
+  it("項目の行 → 所属 entity の名前・項目の名前。entity の行 → entity の名前・entity の名前。表に無い id・種類違い・所属 entity が引けない・validate でない → undefined", () => {
+    const table = fixtureTable();
+    expect(requiredValidationLocation(table, validateTest("a", "normal"))).toEqual({ kind: "validation", entity: "item", name: "amount" });
+    expect(requiredValidationLocation(table, validateTest("e", "normal", "e.item", "R1", "entity"))).toEqual({ kind: "validation", entity: "item", name: "item" });
+    expect(requiredValidationLocation(table, validateTest("u", "normal", "f.item.nowhere"))).toBeUndefined();
+    expect(requiredValidationLocation(table, validateTest("k", "normal", "f.item.amount", "R1", "entity"))).toBeUndefined();
+    const orphan: NameTable = { ...table, rows: table.rows.filter((row) => row.id !== "e.item") };
+    expect(requiredValidationLocation(orphan, validateTest("o", "normal"))).toBeUndefined();
+    expect(requiredValidationLocation(table, { ...validateTest("c", "normal"), operation: "compute" })).toBeUndefined();
+  });
+
+  it("契約試験：新しい関数経由の結び付けは、直す前の結び付けと結果（bound／unbound・cause・location）が深く等しい（別 entity の同名の項目・entity の validate・既定値・種類違い・表に無い id・ほかの操作を含む）", async () => {
+    const table = fixtureTable();
+    const orphanTable: NameTable = { ...table, rows: table.rows.filter((row) => row.id !== "e.member") };
+    const suite = suiteOf(
+      validateTest("v-amount", "normal"),
+      validateTest("v-amount-bad", "abnormal"),
+      validateTest("v-day", "normal", "f.item.day"),
+      validateTest("v-member-title", "normal", "f.member.title", "R2"),
+      validateTest("v-item-title", "normal", "f.item.title", "R2"),
+      validateTest("v-entity", "normal", "e.item", "R1", "entity"),
+      validateTest("v-default", "normal", "f.item.kind"),
+      validateTest("v-kind-mismatch", "normal", "f.item.amount", "R1", "entity"),
+      validateTest("v-unknown", "normal", "f.item.nowhere"),
+      fixed("a-close", "R3", "operation", "o.closeItem", "action"),
+      fixed("s-items", "R2", "screen", "s.items", "screen"),
+      fixed("c-rate", "R4", "computation", "c.rate", "compute"),
+    );
+    const sources = [
+      FIXTURE_YAML,
+      withValidations(),
+      withValidations(["item", "item", "amount > 0"], ["title", "item", "amount > 0"]),
+      withValidations(["title", "member", "1 > 0"], ["day", "item", "amount > 0"], ["kind", "item", "amount > 0"]),
+      withValidations(["positive", "item", "amount > 0"]),
+    ];
+    let bound = 0;
+    for (const source of sources) {
+      const app = await normalizedFixture(source);
+      for (const candidate of [table, orphanTable]) {
+        const after = bindTestsById(app, candidate, suite).bindings;
+        expect([...after]).toEqual([...bindTestsByIdBefore(app, candidate, suite)]);
+        bound += [...after.values()].filter((entry) => entry.kind === "bound" && entry.location.kind === "validation").length;
+      }
+    }
+    // 照らし合わせに validate の bound と unbound の両方が入っている（空の照合で通らない）
+    expect(bound).toBeGreaterThan(0);
+  });
+});
+
+describe("要る検査の骨組み（純粋。Issue #666）", () => {
+  const table = fixtureTable();
+
+  it("(1) 同じ項目の validate 試験 2 件 → 1 件（entity・項目名・試験 ID 2）。(2) entity の行の validate → entity 名・entity 名", () => {
+    const suite = suiteOf(validateTest("n", "normal"), validateTest("x", "abnormal"), validateTest("e", "normal", "e.item", "R1", "entity"));
+    expect(requiredValidationsOf(table, suite, observesOf(suite))).toEqual([
+      { entity: "item", name: "item", rowId: "e.item", rowKind: "entity", testIds: ["e"], conflict: false },
+      { entity: "item", name: "amount", rowId: "f.item.amount", rowKind: "field", testIds: ["n", "x"], conflict: false },
+    ]);
+  });
+
+  it("(3) 既定値・選択肢の集合の validate 試験 → 入らない（観測する性質が validation の試験だけ）。ほかの操作も入らない", () => {
+    const suite = suiteOf(
+      validateTest("d", "normal", "f.item.kind"),
+      validateTest("m", "normal", "f.item.kind"),
+      fixed("a", "R3", "operation", "o.closeItem", "action"),
+      validateTest("n", "normal"),
+    );
+    const observes = observesOf(suite, { d: "default-value", m: "enum-membership" as TestObserves });
+    expect(requiredValidationsOf(table, suite, observes).map((entry) => entry.testIds)).toEqual([["n"]]);
+    // 写像に無い試験も入らない
+    expect(requiredValidationsOf(table, suite, new Map())).toEqual([]);
+  });
+
+  it("(4) 別 entity の同名の項目 → 2 件とも競合の印（entity で区別）。同じ entity の 2 試験なら競合にならない", () => {
+    const suite = suiteOf(validateTest("mt", "normal", "f.member.title", "R2"), validateTest("it", "normal", "f.item.title", "R2"), validateTest("it2", "abnormal", "f.item.title", "R2"));
+    expect(requiredValidationsOf(table, suite, observesOf(suite))).toEqual([
+      { entity: "member", name: "title", rowId: "f.member.title", rowKind: "field", testIds: ["mt"], conflict: true },
+      { entity: "item", name: "title", rowId: "f.item.title", rowKind: "field", testIds: ["it", "it2"], conflict: true },
+    ]);
+    const same = suiteOf(validateTest("it", "normal", "f.item.title", "R2"), validateTest("it2", "abnormal", "f.item.title", "R2"));
+    expect(requiredValidationsOf(table, same, observesOf(same)).map((entry) => entry.conflict)).toEqual([false]);
+  });
+
+  it("(5) 棄却で外れた試験の分は入らない（呼ぶ側が評価の文脈と同じ組を渡す）。並びは表の行の順", () => {
+    const suite = suiteOf(validateTest("x", "abnormal"), validateTest("t", "normal", "f.item.title", "R1"), validateTest("n", "normal"));
+    const all = requiredValidationsOf(table, suite, observesOf(suite));
+    expect(all.map((entry) => entry.name)).toEqual(["title", "amount"]);
+    const afterOverturn = suiteOf(...suite.tests.filter((test) => test.id !== "t"));
+    expect(requiredValidationsOf(table, afterOverturn, observesOf(suite))).toEqual([
+      { entity: "item", name: "amount", rowId: "f.item.amount", rowKind: "field", testIds: ["x", "n"], conflict: false },
+    ]);
+  });
+
+  it("(6) 同じ入力から 2 回同じ。鍵の集合は固定で、期待・式・分類・宣言・表の型の鍵が無い（g：型の制約は混ざらない）", () => {
+    const suite = suiteOf(validateTest("n", "normal"), validateTest("x", "abnormal"), validateTest("o", "normal", "f.item.owner"), validateTest("k", "normal", "f.item.kind"));
+    const first = requiredValidationsOf(table, suite, observesOf(suite));
+    expect(requiredValidationsOf(table, suite, observesOf(suite))).toEqual(first);
+    for (const entry of first) expect(Object.keys(entry).sort()).toEqual(SKELETON_KEYS);
+    const text = JSON.stringify(first);
+    for (const word of ["expected", "expression", "nature", "classification", "type", "options", "refEntity", "declaration", "E_INVALID", "alpha", "member"]) {
+      expect(text).not.toContain(word);
+    }
+  });
+
+  it("(h) 宣言に依らない：骨組みは組と表だけで決まり（宣言を受け取らない）、項目が既に在る版の結び付けの場所と同じ場所を指す。検査の無い版でも骨組みは同じ", async () => {
+    const suite = suiteOf(validateTest("n", "normal"), validateTest("x", "abnormal"));
+    expect(requiredValidationsOf.length).toBe(3);
+    const skeleton = requiredValidationsOf(table, suite, observesOf(suite));
+    const [entry] = skeleton;
+    const withCheck = bindTestsById(await normalizedFixture(FIXTURE_YAML), table, suite).bindings;
+    expect(withCheck.get("n")).toEqual({ kind: "bound", testId: "n", location: { kind: "validation", entity: entry?.entity, name: entry?.name } });
+    const withoutCheck = bindTestsById(await normalizedFixture(withValidations()), table, suite).bindings;
+    expect(withoutCheck.get("n")).toMatchObject({ kind: "unbound", cause: "no-candidate" });
+    expect(requiredValidationsOf(table, suite, observesOf(suite))).toEqual(skeleton);
+  });
+});
+
+describe("二点測定（原因 1 の台本）：骨組みの検査の場所と名前で書けば結び付き、名前が違えば今までどおり不一致（結び直さない。Issue #666）", () => {
+  const table = fixtureTable();
+  const suite = suiteOf(validateTest("f-normal", "normal"), validateTest("f-abnormal", "abnormal"));
+  const observes = observesOf(suite);
+  const list = { ...fixtureList(), requirements: fixtureList().requirements.filter((requirement) => requirement.id === "R1") };
+
+  /** 宣言を B4（評価口の runTests）に掛け、試験ごとの結び付けと不一致を返す */
+  async function evaluate(source: string) {
+    const app = await normalizedFixture(source);
+    const r1Table = { ...table, ownership: table.ownership.filter((entry) => entry.requirementId === "R1") };
+    const context = { list, suite, correspondences: correspondenceFromTable(r1Table), ownership: toV1(r1Table).ownership };
+    const evaluator = createV11aEvaluator({ table, observes });
+    const checked = evaluator.nameCheck(app, context);
+    const report = evaluator.runTests(app, context, { entries: checked.entries, misses: checked.misses });
+    const bindings = bindTestsById(app, table, suite).bindings;
+    return { bindings, mismatches: report.mismatches.map((entry) => entry.testId), unresolved: report.unresolved.map((entry) => entry.testId) };
+  }
+
+  it("骨組みは 1 件（item・amount・試験 2 件・競合なし）", () => {
+    expect(requiredValidationsOf(table, suite, observes)).toEqual([
+      { entity: "item", name: "amount", rowId: "f.item.amount", rowKind: "field", testIds: ["f-normal", "f-abnormal"], conflict: false },
+    ]);
+  });
+
+  it("(a) 宣言の検査の名前が F で同じ entity → bound、B4 が式を評価し、式が期待どおりなら不一致 0", async () => {
+    const result = await evaluate(withValidations(["amount", "item", "amount > 0"]));
+    for (const id of ["f-normal", "f-abnormal"]) {
+      expect(result.bindings.get(id)).toEqual({ kind: "bound", testId: id, location: { kind: "validation", entity: "item", name: "amount" } });
+    }
+    expect(result.mismatches).toEqual([]);
+    expect(result.unresolved).toEqual([]);
+  });
+
+  it("(i) 骨組みの検査を書いても式が逆（正常を落とす）なら B4 で不一致", async () => {
+    const result = await evaluate(withValidations(["amount", "item", "amount <= 0"]));
+    expect(result.bindings.get("f-normal")?.kind).toBe("bound");
+    expect(result.mismatches).toEqual(["f-normal", "f-abnormal"]);
+  });
+
+  const unboundCases = [
+    { name: "(b) 同じ式で名前だけ別", source: () => withValidations(["positive", "item", "amount > 0"]) },
+    { name: "(c) 検査 0", source: () => withValidations() },
+    { name: "(d)(f) 骨組みの名前を持つが別 entity に書いた検査", source: () => withValidations(["amount", "member", "1 > 0"]) },
+    { name: "(e) 同じ項目を参照する別名の 2 検査", source: () => withValidations(["positive", "item", "amount > 0"], ["nonzero", "item", "amount != 0"]) },
+  ];
+  it.each(unboundCases)("$name → 今までどおり no-candidate の不一致（直す前も後も同じ。結び直さない）。骨組みは 1 件のまま", async ({ source }) => {
+    const text = source();
+    const result = await evaluate(text);
+    const app = await normalizedFixture(text);
+    for (const id of ["f-normal", "f-abnormal"]) {
+      expect(result.bindings.get(id)).toMatchObject({ kind: "unbound", cause: "no-candidate" });
+      expect(bindTestsByIdBefore(app, table, suite).get(id)).toEqual(result.bindings.get(id));
+    }
+    expect(result.mismatches).toEqual(["f-normal", "f-abnormal"]);
+    expect(requiredValidationsOf(table, suite, observes)).toHaveLength(1);
+  });
+
+  it("(k) 競合の 2 件を両方書いた宣言は静的チェックの同名の重複で落ちる。片方だけ書けばその 1 件が結び付き、もう片方は不一致のまま（自動で選ばない）", async () => {
+    const titles = suiteOf(validateTest("mt", "normal", "f.member.title", "R2"), validateTest("it", "normal", "f.item.title", "R2"));
+    expect(requiredValidationsOf(table, titles, observesOf(titles)).map((entry) => entry.conflict)).toEqual([true, true]);
+    const both = await normalizeSpec(withValidations(["title", "member", "1 > 0"], ["title", "item", "amount > 0"]));
+    expect(both.ok).toBe(false);
+    if (both.ok) return;
+    expect(both.diagnostics.map((diagnostic) => diagnostic.code)).toContain("LOGIC_VALIDATION_DUPLICATE_NAME");
+    const one = bindTestsById(await normalizedFixture(withValidations(["title", "item", "amount > 0"])), table, titles).bindings;
+    expect(one.get("it")).toEqual({ kind: "bound", testId: "it", location: { kind: "validation", entity: "item", name: "title" } });
+    expect(one.get("mt")).toMatchObject({ kind: "unbound", cause: "no-candidate" });
+  });
+
+  it("この手で直したファイル（結び付けの契約・B1・直す段・走らせる部分・呼び出し数の契約・fixture とその試験。cli.test.ts は走査の語の並びを持つので除く）に受入の題材の言葉が無い（走査）", async () => {
+    const fs = (await import(/* @vite-ignore */ "node:fs")) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const files = [
+      "./bind-by-id.ts",
+      "./bind-by-id.test.ts",
+      "./stages/write.ts",
+      "./stages/write.test.ts",
+      "../stages/repair.ts",
+      "../stages/repair.test.ts",
+      "./run.ts",
+      "./run.test.ts",
+      "./calls.test.ts",
+      "./__tests__/fixtures.ts",
+    ];
+    expectNoAcceptanceMaterial(files.map((file) => fs.readFileSync(new URL(file, import.meta.url), "utf8")));
   });
 });

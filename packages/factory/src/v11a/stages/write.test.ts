@@ -4,7 +4,7 @@
 import { sha256Hex } from "@musunest/spec-engine";
 import { describe, expect, it } from "vitest";
 import { AGENT_LIMITS } from "../../limits.js";
-import { ruleDefinitionDefects, type RejectedCandidate } from "../../stages/prompt.js";
+import { ruleDefinitionDefects, ruleTexts, type RejectedCandidate } from "../../stages/prompt.js";
 import { utf8ByteLength } from "../../stages/write.js";
 import {
   expectNoAcceptanceMaterial,
@@ -32,6 +32,8 @@ import * as writeModule from "./write.js";
 import {
   DECLARATION_V11A_SCHEMA,
   WRITE_V11A_DATA_NAMES,
+  WRITE_V11A_IDS_R07_DEFINITION,
+  WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME,
   WRITE_V11A_RULE_DEFINITIONS,
   WRITE_V11A_REWRITE_DATA_NAME,
   WRITE_V11A_REWRITE_RULE_DEFINITIONS,
@@ -39,9 +41,11 @@ import {
   WRITE_V11A_SCHEMA_NAME,
   checkWriteV11aOutput,
   runWriteV11a,
+  withIdsValidationRule,
   writeV11aRuleDefinitionsOf,
   type WriteV11aInput,
 } from "./write.js";
+import { requiredValidationsOf, type RequiredValidation } from "../bind-by-id.js";
 import type { TestObserves } from "./test-spec.js";
 import { NAMED_FAILURE_MESSAGES, type NamedFailure } from "../../v12/search-repair.js";
 
@@ -439,5 +443,90 @@ describe("空の文脈での作り直し（旗 v12.search-repair。Issue #551）
       ...(ledger.structured[0]?.rules ?? []),
       ...WRITE_V11A_REWRITE_RULE_DEFINITIONS.map((rule) => rule.text),
     ]);
+  });
+});
+
+describe("旗 v12.ids：要る検査の骨組みを渡したときだけ、「固定した試験」の後に塊を足し、R-w11-07 を旗 ids の文にする（Issue #666）", () => {
+  const SKELETON: readonly RequiredValidation[] = requiredValidationsOf(fixtureTable(), SUITE, new Map([["t1", "validation"]]));
+  const original = WRITE_V11A_RULE_DEFINITIONS.find((definition) => definition.id === "R-w11-07");
+  const blockOf = (input: string, name: string): unknown =>
+    JSON.parse(input.split(`<data name="${name}">`)[1]?.split("</data>")[0] ?? "null");
+
+  it("骨組みは固定した試験から導いた 1 件（item・amount）", () => {
+    expect(SKELETON).toEqual([{ entity: "item", name: "amount", rowId: "f.item.amount", rowKind: "field", testIds: ["t1"], conflict: false }]);
+  });
+
+  it("R-w11-07 の旗 ids の文：ID・why は同じで since に履歴。元の禁止の文をそのまま含み、例外は骨組みに競合なしで列挙された検査だけ（j：骨組みに無い要素に表の名前を許す文が無い）。規則の不備は 0", () => {
+    if (original === undefined) throw new Error("前提が壊れた：R-w11-07 が無い");
+    expect(WRITE_V11A_IDS_R07_DEFINITION.id).toBe(original.id);
+    expect(WRITE_V11A_IDS_R07_DEFINITION.why).toBe(original.why);
+    expect(WRITE_V11A_IDS_R07_DEFINITION.since).toContain(original.since);
+    expect(WRITE_V11A_IDS_R07_DEFINITION.since).toContain("Issue #666");
+    const text = WRITE_V11A_IDS_R07_DEFINITION.text;
+    expect(text.startsWith(original.text)).toBe(true);
+    const added = text.slice(original.text.length);
+    // 例外の文は 1 つで、骨組みに競合なしで列挙された検査だけを指す
+    expect(added.match(/例外/g)).toHaveLength(1);
+    expect(added).toContain("この禁止の唯一の例外は、データ「要る検査の骨組み」に競合なしで列挙された検査で、その entity と名前で validations に 1 つずつ書く");
+    expect(added).toContain("競合の印の付いた件は書かない。");
+    expect(added).toContain("骨組みに無い補助の要素には表の名前を使わない。");
+    expect(added).not.toMatch(/計算.*例外|例外.*計算/);
+    expect(added).not.toMatch(/使ってよい|奪ってよい/);
+    // ほかの規則の文・順は同じ（台帳 on・off のどちらの組み立てにも同じに効く）
+    for (const definitions of [WRITE_V11A_RULE_DEFINITIONS, writeV11aRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)]) {
+      const ids = withIdsValidationRule(definitions);
+      expect(ids.map((definition) => definition.id)).toEqual(definitions.map((definition) => definition.id));
+      ids.forEach((definition, index) => {
+        expect(definition).toEqual(definition.id === "R-w11-07" ? WRITE_V11A_IDS_R07_DEFINITION : definitions[index]);
+      });
+      expect(ruleDefinitionDefects(ids)).toEqual([]);
+      expect(ruleDefinitionDefects([...ids, ...WRITE_V11A_REWRITE_RULE_DEFINITIONS])).toEqual([]);
+    }
+    // off の文は不変
+    expect(WRITE_V11A_RULES).toContain(original.text);
+    expect(WRITE_V11A_RULES).not.toContain(text);
+  });
+
+  it("要求の差は「固定した試験」の後の塊 1 つと R-w11-07 の文だけ。塊は骨組みの JSON のまま。省けば今の要求とバイト列で同じ", async () => {
+    const plain = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    const ids = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    await runWriteV11a(inputWith(plain.client));
+    expect((await runWriteV11a(inputWith(ids.client, { requiredValidations: SKELETON }))).ok).toBe(true);
+    const [base, request] = [plain.structured[0], ids.structured[0]];
+    if (base === undefined || request === undefined) throw new Error("要求が無い");
+    expect(base.rules).toEqual(WRITE_V11A_RULES);
+    const names = [...request.input.matchAll(/<data name="([^"]+)">/g)].map((match) => match[1]);
+    expect(names).toEqual([...WRITE_V11A_DATA_NAMES, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME]);
+    expect(request.input).toBe(`${base.input}\n<data name="${WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME}">\n${JSON.stringify(SKELETON, null, 2)}\n</data>`);
+    expect(blockOf(request.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME)).toEqual(SKELETON);
+    expect(request.rules).toEqual(ruleTexts(withIdsValidationRule(WRITE_V11A_RULE_DEFINITIONS)));
+    expect(request.rules?.filter((text, index) => text !== base.rules?.[index])).toEqual([WRITE_V11A_IDS_R07_DEFINITION.text]);
+    expect(request.instructions).toBe(base.instructions);
+    expect(request.documents).toEqual(base.documents);
+    expect(request.schema).toBe(base.schema);
+    // 空の骨組みも渡せば塊（空の並び）として載る
+    const empty = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    await runWriteV11a(inputWith(empty.client, { requiredValidations: [] }));
+    expect(blockOf(empty.structured[0]?.input ?? "", WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME)).toEqual([]);
+    expectNoAcceptanceMaterial([request.input, ...(request.rules ?? [])]);
+  });
+
+  it("空の文脈での作り直しも同じ塊を持つ（固定した試験の後・残った失敗の一覧の前）。台帳と組んでも R-w11-07 だけが差し替わる", async () => {
+    const failures: readonly NamedFailure[] = [
+      { testId: "t1", requirementId: "R1", kind: "test-mismatch", message: NAMED_FAILURE_MESSAGES["test-mismatch"] },
+    ];
+    const ledgerOnly = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    await runWriteV11a(inputWith(ledgerOnly.client, { ledger: PROPERTY_LEDGER_VIEW, table: withAggregates(fixtureTable()), rewrite: { failures } }));
+    const both = createCheckedRecordingClient([structured({ declaration: FIXTURE_YAML })]);
+    await runWriteV11a(
+      inputWith(both.client, { ledger: PROPERTY_LEDGER_VIEW, table: withAggregates(fixtureTable()), rewrite: { failures }, requiredValidations: SKELETON }),
+    );
+    const [base, request] = [ledgerOnly.structured[0], both.structured[0]];
+    if (base === undefined || request === undefined) throw new Error("要求が無い");
+    const names = [...request.input.matchAll(/<data name="([^"]+)">/g)].map((match) => match[1]);
+    expect(names).toEqual([...WRITE_V11A_DATA_NAMES, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, WRITE_V11A_REWRITE_DATA_NAME]);
+    expect(blockOf(request.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME)).toEqual(SKELETON);
+    expect(request.rules).toEqual((base.rules ?? []).map((text) => (text === original?.text ? WRITE_V11A_IDS_R07_DEFINITION.text : text)));
+    expect(request.rules?.slice(-1)).toEqual(ruleTexts(WRITE_V11A_REWRITE_RULE_DEFINITIONS));
   });
 });

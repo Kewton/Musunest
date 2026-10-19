@@ -28,7 +28,12 @@ import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } 
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
 import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
 import { TEST_SPEC_RETAINED_DATA_NAME, TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
-import { WRITE_V11A_SCHEMA_NAME } from "../stages/write.js";
+import {
+  WRITE_V11A_IDS_R07_DEFINITION,
+  WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME,
+  WRITE_V11A_RULE_DEFINITIONS,
+  WRITE_V11A_SCHEMA_NAME,
+} from "../stages/write.js";
 
 const requirement = (id: string, text: string): Requirement => ({
   id,
@@ -538,6 +543,24 @@ export function withoutEnumMembership(value: unknown): unknown {
     return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, withoutEnumMembership(entry)]));
   }
   return value;
+}
+
+/** 入力の塊「要る検査の骨組み」（B1・直す段で同じ名前。旗 ids の走りだけ。Issue #666） */
+export const REQUIRED_VALIDATIONS_BLOCK = new RegExp(`\\n<data name="${WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME}">\\n[\\s\\S]*?\\n</data>`);
+
+/**
+ * 旗 ids の要求から、要る検査の骨組みの分（Issue #666）を除く：入力の塊「要る検査の骨組み」を外し、B1 の R-w11-07 を旗 ids の文から
+ * 元の文に戻す。ほかの欄は触らない（B1・直す段のどちらの要求にも使える）
+ */
+export function withoutRequiredValidations<T extends { readonly input: string; readonly rules?: readonly string[] }>(request: T): T {
+  const original = WRITE_V11A_RULE_DEFINITIONS.find((definition) => definition.id === WRITE_V11A_IDS_R07_DEFINITION.id)?.text ?? "";
+  return {
+    ...request,
+    input: request.input.replace(REQUIRED_VALIDATIONS_BLOCK, ""),
+    ...(request.rules === undefined
+      ? {}
+      : { rules: request.rules.map((text) => (text === WRITE_V11A_IDS_R07_DEFINITION.text ? original : text)) }),
+  };
 }
 
 /** 2 つの JSON の値の違う場所（葉の位置。並びの長さが違えばその並びの位置）を、見つけた順に返す */

@@ -16,6 +16,10 @@
 // 空の文脈での作り直し（旗 `v12.search-repair` が on の走りで、停滞したとき 1 回。Issue #551）は、同じ段をもう 1 回呼ぶ。
 // `rewrite` を渡したときだけ、データの末尾に「残った失敗の一覧」（試験 ID・要件 ID・種類と固定文だけ）を足し、規則の末尾に
 // R-w11r-01 を足す。**前の版の宣言の原文・直す段の会話・主張は渡さない**（入力の型に口が無い）。省けば今の要求のまま。
+//
+// 旗 `v12.ids` の走り（`requiredValidations` を渡したとき。Issue #666）は、データ「固定した試験」の後に「要る検査の骨組み」
+// （A1 の `requiredValidationsOf` が表の id の結び付けと同じ関数から導いた、validate の試験が要求する検査の場所）を足し、
+// R-w11-07 の文を旗 ids の文に差し替える（元の禁止の文はそのまま残し、例外は骨組みに競合なしで列挙された検査だけ）。
 import type { CallGateway } from "../../call.js";
 import type { TestSuite } from "../../fixed-test.js";
 import { checkDeclarationBytes } from "../../limits.js";
@@ -38,6 +42,7 @@ import {
 import { utf8ByteLength } from "../../stages/write.js";
 import { sha256Hex } from "@musunest/spec-engine";
 import type { NameTable } from "../names.js";
+import type { RequiredValidation } from "../bind-by-id.js";
 import type { TestObserves } from "./test-spec.js";
 import type { LedgerView } from "../../v12/ledger.js";
 import type { NamedFailure } from "../../v12/search-repair.js";
@@ -114,6 +119,20 @@ export const WRITE_V11A_RULE_DEFINITIONS: readonly RuleDefinition[] = [
   },
 ];
 
+/** 要る検査の骨組みのデータの名前（`requiredValidations` を渡したときだけ、「固定した試験」の後に足す。旗 `v12.ids`。Issue #666） */
+export const WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME = "要る検査の骨組み";
+
+/**
+ * R-w11-07 の旗 ids の文（`requiredValidations` を渡した走りだけ差し替える。ID・why は変えず since に履歴。Issue #666）。
+ * 元の禁止の文をそのまま先頭に残し、例外は骨組みに競合なしで列挙された検査だけ。
+ */
+export const WRITE_V11A_IDS_R07_DEFINITION: RuleDefinition = {
+  id: "R-w11-07",
+  text: "表に無い補助の要素（計算・検査など）は、要件に要るときだけ足してよい。ただし表の名前を奪わない（表にある名前を別の要素に使わない）。この禁止の唯一の例外は、データ「要る検査の骨組み」に競合なしで列挙された検査で、その entity と名前で validations に 1 つずつ書く（式は要件と固定した試験から書く）。競合の印の付いた件は書かない。骨組みに無い補助の要素には表の名前を使わない。",
+  why: "補助の要素を許しつつ、表の名前の取り違えを防ぐ（D4。一覧は A1 の関数が作る）",
+  since: "Issue #509・旗 v12.ids の文は Issue #666（結び付けが要求する検査の場所と名前を、骨組みに列挙した検査だけ例外にする）",
+};
+
 /** 作り直しのデータの名前（`rewrite` を渡したときだけ、データの末尾に足す。Issue #551） */
 export const WRITE_V11A_REWRITE_DATA_NAME = "残った失敗の一覧";
 
@@ -186,6 +205,11 @@ export interface WriteV11aInput {
    * 失敗の一覧だけを持つ（前の版の原文・会話・主張の口は無い）。省けば今の要求のまま
    */
   readonly rewrite?: { readonly failures: readonly NamedFailure[] };
+  /**
+   * 要る検査の骨組み（旗 `v12.ids` の走りだけが渡す。Issue #666）。渡したときだけ、データ「固定した試験」の後に塊を足し、
+   * R-w11-07 を旗 ids の文にする。省けば今の要求のまま
+   */
+  readonly requiredValidations?: readonly RequiredValidation[];
 }
 
 /** B1 の出力 */
@@ -240,6 +264,9 @@ function buildData(input: WriteV11aInput): readonly PromptData[] {
     { name: WRITE_V11A_DATA_NAMES[0], text: serializeJson(input.list) },
     { name: WRITE_V11A_DATA_NAMES[1], text: serializeJson(tableRowsForWriter(input.table)) },
     { name: WRITE_V11A_DATA_NAMES[2], text: serializeJson(suiteWithObserves(input.suite, input.observes)) },
+    ...(input.requiredValidations === undefined
+      ? []
+      : [{ name: WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, text: serializeJson(input.requiredValidations) }]),
     ...(input.rewrite === undefined
       ? []
       : [
@@ -258,9 +285,22 @@ function buildData(input: WriteV11aInput): readonly PromptData[] {
   ];
 }
 
-/** B1 の規則の文（台帳・作り直しの有無で組む。どちらも省けば今の定数） */
+/**
+ * R-w11-07 を旗 ids の文に差し替えた規則の定義（Issue #666）。ほかの規則の文・順は変えない。
+ */
+export function withIdsValidationRule(definitions: readonly RuleDefinition[]): readonly RuleDefinition[] {
+  return definitions.map((definition) => (definition.id === WRITE_V11A_IDS_R07_DEFINITION.id ? WRITE_V11A_IDS_R07_DEFINITION : definition));
+}
+
+/** B1 の規則の文（台帳・骨組み・作り直しの有無で組む。どれも省けば今の定数） */
 function rulesOf(input: WriteV11aInput): readonly string[] {
-  const base = input.ledger === undefined ? WRITE_V11A_RULES : ruleTexts(writeV11aRuleDefinitionsOf(input.ledger));
+  const definitions = writeV11aRuleDefinitionsOf(input.ledger);
+  const base =
+    input.requiredValidations !== undefined
+      ? ruleTexts(withIdsValidationRule(definitions))
+      : input.ledger === undefined
+        ? WRITE_V11A_RULES
+        : ruleTexts(definitions);
   return input.rewrite === undefined ? base : [...base, ...ruleTexts(WRITE_V11A_REWRITE_RULE_DEFINITIONS)];
 }
 

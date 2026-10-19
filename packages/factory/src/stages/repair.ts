@@ -73,6 +73,7 @@ import {
   type RepairToolContext,
 } from "./tools.js";
 import { checkRoleNameMappings, utf8ByteLength } from "./write.js";
+import type { RequiredValidation } from "../v11a/bind-by-id.js";
 
 /** ⑥ に足す規則（共通の規則は先頭に付ける。§1.3・§2.2） */
 export const REPAIR_RULES: readonly string[] = [
@@ -235,6 +236,12 @@ export const DECLARATION_REJECTIONS_DATA_NAME = "宣言の意味の点検の拒�
 export const REPAIR_STEP_LIMITS_DATA_NAME = "直す段の上限" as const;
 
 /**
+ * 要る検査の骨組みを置くデータの塊の名前（入力の末尾に足す。旗 `v12.ids`。Issue #666）。B1 の塊と同じ名前・同じ値
+ * （v1.1α の `requiredValidationsOf` が導く）
+ */
+export const REPAIR_REQUIRED_VALIDATIONS_DATA_NAME = "要る検査の骨組み" as const;
+
+/**
  * 直す段 1 回の終わりに、段内の数を返す任意の口の値（旗 `v12.ids`。Issue #665）。**数と上限の名前だけ**を持つ
  * （宣言の原文・会話・道具の引数・応答の本文は持たない。S-8）。
  *
@@ -306,6 +313,11 @@ export interface RepairStepInput {
    * **省けば何もしない**——要求・回数・結果に効かない
    */
   readonly onCounts?: (counts: RepairStepCounts) => void;
+  /**
+   * 要る検査の骨組み（旗 `v12.ids` の走りだけが渡す。Issue #666）。渡したときだけ、データの塊「要る検査の骨組み」を入力の
+   * 末尾に足す（意味の点検の拒否と同じ扱い。規則・道具の定義・schema は変えない）。省けば今の要求のまま
+   */
+  readonly requiredValidations?: readonly RequiredValidation[];
 }
 
 /** ⑥ のデータ（その段に渡すと決めた文脈だけ。§2.2） */
@@ -345,6 +357,10 @@ function buildRepairData(input: RepairStepInput, toolCallsAtStart: number): read
         toolCalls: { max: AGENT_LIMITS.toolCalls, usedAtStart: toolCallsAtStart },
       }),
     });
+  }
+  // 要る検査の骨組みは、渡されたときだけ末尾に足す（旗 `v12.ids`。省けば今の要求のバイト列のまま。Issue #666）
+  if (input.requiredValidations !== undefined) {
+    data.push({ name: REPAIR_REQUIRED_VALIDATIONS_DATA_NAME, text: serializeJson(input.requiredValidations) });
   }
   return data;
 }

@@ -69,7 +69,7 @@ import { DECL_CHECK_SCHEMA_NAME } from "./stages/decl-check.js";
 import { NAME_TABLE_SCHEMA_NAME } from "./stages/name-table.js";
 import { SEMANTIC_CHECK_SCHEMA_NAME } from "./stages/semantic-check.js";
 import { TEST_SPEC_FRAMES_DATA_NAME, TEST_SPEC_RETRY_DATA_NAMES, TEST_SPEC_SCHEMA_NAME } from "./stages/test-spec.js";
-import { WRITE_V11A_SCHEMA_NAME } from "./stages/write.js";
+import { WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME, WRITE_V11A_SCHEMA_NAME } from "./stages/write.js";
 
 // ── 偽物の口と観測 ─────────────────────────────────────────────────
 
@@ -1999,5 +1999,48 @@ describe("(10) 旗 v12.ids の T2 の束（手 3f・Issue #626）：束ごとの
     }
     expect(new Set(t2.map((row) => (row.bundle as { index: number }).index))).toEqual(new Set(sizes.map((_, index) => index)));
     expect(JSON.stringify(t2.map((row) => row.bundle))).not.toMatch(/R\d/);
+  });
+});
+
+// ── (11) 旗 v12.ids の手 4d：要る検査の骨組み（Issue #666）──────────────────────────────────
+
+describe("(11) 旗 v12.ids の手 4d：B1・直す段に要る検査の骨組みを足しても論理要求は不変。骨組みの文字数は validate の試験の数に線形で、合計は論理 72・実試行 144・判定 80 以下（Issue #666）", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+  /** B1 の要求の骨組みの塊（文字列）と、その試験 ID の数 */
+  const skeletonsOf = (requests: readonly string[]) =>
+    requests
+      .map((text) => JSON.parse(text) as LlmStructuredRequest)
+      .filter((request) => request.schemaName === WRITE_V11A_SCHEMA_NAME)
+      .map((request) => {
+        const block = new RegExp(`<data name="${WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME}">\\n([\\s\\S]*?)\\n</data>`).exec(request.input)?.[1];
+        if (block === undefined) throw new Error("前提が壊れた：骨組みの塊が無い");
+        return { text: block, entries: JSON.parse(block) as readonly { readonly testIds: readonly string[]; readonly conflict: boolean }[] };
+      });
+
+  it("要件 15・25：B1 の論理要求は 1（旗 ids off の走りと同じ）で full。骨組みの 1 件の文字数は試験 ID の数に線形で、1 試験あたりの文字数が大きさに依らない。合計は上限の内側", async () => {
+    const perTest: number[] = [];
+    for (const size of [MEDIAN_SIZE, MAX_SIZE]) {
+      const on = buildSized(size.requirements, size.tests, ALL_ON);
+      const run = await observe(on, cleanCalls(on), { flags: ALL_ON });
+      expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      const prior = buildSized(size.requirements, size.tests, { ...ALL_ON, ids: false });
+      const off = await observe(prior, cleanCalls(prior), { flags: { ...ALL_ON, ids: false } });
+      expect(run.logical.write).toBe(1);
+      expect(run.logical.write).toBe(off.logical.write);
+      expect(run.logical.repair).toBe(off.logical.repair);
+      expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+      expect(run.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
+      expect(run.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
+      const [skeleton] = skeletonsOf(run.requests);
+      if (skeleton === undefined) throw new Error("前提が壊れた：B1 の要求が無い");
+      const testIds = skeleton.entries.flatMap((entry) => entry.testIds);
+      expect(testIds.length).toBeGreaterThan(0);
+      // 1 件の文字数は、固定の欄と試験 ID の並びだけ（試験 ID 1 つあたりの上限の内側。要件の数に依らない）
+      for (const entry of skeleton.entries) expect(JSON.stringify(entry, null, 2).length).toBeLessThanOrEqual(200 + 40 * entry.testIds.length);
+      perTest.push(skeleton.text.length / testIds.length);
+      expectNoAcceptanceMaterial([skeleton.text]);
+    }
+    const [median = 0, max = 0] = perTest;
+    expect(Math.abs(median - max) / median).toBeLessThan(0.15);
   });
 });
