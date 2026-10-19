@@ -20,10 +20,16 @@
 // `v12_flags` を書く。`v1.1a` は旗を全部 off で流し、新しい欄を出さない。
 //
 // `--stage-start <段>`・`--stage-end <段>`・`--stage-input <checkpoint>` を付けると、v1.1α の経路を段の範囲だけ
-// 流す（段単位の実行口。`08-architecture-v1.2.md` §8.3・Issue #544）。`--pipeline v1.1a --plan-file` と組んで
-// だけ受ける。再開の入力は**クライアントを作る前に**照合し、合わなければ API を呼ばず、何も書かずに終了コード 4
+// 流す（段単位の実行口。`08-architecture-v1.2.md` §8.3・Issue #544）。`--pipeline v1.1a --plan-file` か
+// `--pipeline v1.2 --plan-file` と組んでだけ受ける（v1.2 は Issue #637）。再開の入力は**クライアントを作る前に**照合し、合わなければ API を呼ばず、何も書かずに終了コード 4
 // と固定の符号 1 行（標準エラー）で終わる。段の走りは納品物を書かず、境界の checkpoint と段の走りの記録だけを
 // 書く。旗を省けば今までの走りとバイト列で同じである（checkpoint も書かない）。
+//
+// `--pipeline v1.2` の段の走りは、一気通貫と同じ旗の組・封筒・プロンプトの版で流し（旗 ids の走りは呼び出しの上限も置く）、
+// `--stage-start vocabulary` を区間 0 の別名として受けて範囲と記録を正本の名前 `name-table` に正規化する。checkpoint の版に
+// 台帳の指紋 `ledger`・実効の旗の組 `flags`・呼び出しの上限 `call_limits` を足し（一気通貫の走りの checkpoint も同じ）、段の入力の
+// 照合は `flags`・`ledger` が今の走りと同じことを求める。段の走りの記録の条件に `pipeline`・`v12_flags`・`v12_call_limits`、記録に
+// `v12_calls` と（範囲が `test-spec` を含むとき）`test_spec` を足す。v1.1a の段の走りは何も変えない（Issue #637）。
 //
 // `--pipeline v1.2` の一気通貫の走りのうち旗 v12.ids が on の走りは、通った境界（T1''／T2・T2／B1）の checkpoint を段の走りと
 // 同じ関数・同じ名前で `--out` の直下に書き（納品物の manifest には載せない）、Build だけの記録に `checkpoints` で宣言する。
@@ -82,17 +88,27 @@ import {
   stageJsonText,
   stageOutputDigest,
   stagePassOf,
+  stagesInRange,
   verifyStageInput,
   STAGE_BUDGET_SCOPE,
   STAGE_RUN_RECORD_FILE,
+  STAGE_START_ALIASES_V12,
   type BoundaryMaterials,
   type StageBoundary,
+  type StageCallLimits,
   type StageRange,
   type StageRunConditions,
   type StageVersions,
 } from "./v11a/bundle-v11a.js";
 import { runGenerationV11a, runStageRangeV11a, type GenerationResultV11a } from "./v11a/run.js";
-import { fromPublicV12Flags, V12_PIPELINE_FLAGS, type V12PublicFlags } from "./v12/ledger.js";
+import {
+  fromPublicV12Flags,
+  propertyLedgerSha256,
+  toPublicV12Flags,
+  V12_PIPELINE_FLAGS,
+  type V12Flags,
+  type V12PublicFlags,
+} from "./v12/ledger.js";
 import { V12_CALL_LIMITS } from "./v12/limits.js";
 import type { PromptDocument } from "./stages/prompt.js";
 
@@ -162,7 +178,7 @@ export const USAGE =
 
 /** 段単位の実行口の使い方（段の旗の誤りのときだけ、`USAGE` のあとに出す。Issue #544） */
 export const STAGE_USAGE =
-  "段の走り: factory:run -- <依頼文のファイル> --out <ディレクトリ> --pipeline v1.1a --plan-file <ファイル> [--stage-start name-table|test-spec|write] [--stage-end semantic-check|test-spec|judge] [--stage-input <前の段の走りの checkpoint>]";
+  "段の走り: factory:run -- <依頼文のファイル> --out <ディレクトリ> --pipeline v1.1a|v1.2 --plan-file <ファイル> [--stage-start name-table|test-spec|write（v1.2 は vocabulary も。name-table の別名）] [--stage-end semantic-check|test-spec|judge] [--stage-input <前の段の走りの checkpoint>]";
 
 /** 手元の入口が受け取る引数 */
 export interface CliArguments {
@@ -205,7 +221,8 @@ export interface CliArguments {
   readonly pipeline?: Pipeline;
   /**
    * 段の範囲（`--stage-start`・`--stage-end`・`--stage-input` のどれかを付けたときだけ持つ。Issue #544）。
-   * `--pipeline v1.1a --plan-file` と組んでだけ受ける。片方だけなら他方は経路の端
+   * `--pipeline v1.1a --plan-file` か `--pipeline v1.2 --plan-file` と組んでだけ受ける（v1.2 は Issue #637）。片方だけなら他方は
+   * 経路の端。開始の別名（v1.2 の `vocabulary`）は正本の名前（`name-table`）に正規化して持つ
    */
   readonly stageRange?: StageRange;
   /** 再開の入力（前の段の走りが書いた、開始の段の直前の境界の checkpoint のファイル） */
@@ -234,6 +251,15 @@ function promptVersionOf(pipeline: Pipeline | undefined): string {
 /** 経路の旗の公開の組（`v1.2` だけが持つ。正本 `V12_PIPELINE_FLAGS` をそのまま使う。Issue #547・#551） */
 function v12FlagsOf(pipeline: Pipeline | undefined): Readonly<V12PublicFlags> | undefined {
   return pipeline === "v1.2" ? V12_PIPELINE_FLAGS : undefined;
+}
+
+/** 呼び出しの上限の組（条件の記録の `v12_call_limits`・checkpoint の版の `call_limits` の形。旗 ids の走りでだけ効く。Issue #616・#637） */
+function v12CallLimitsRecord(): StageCallLimits {
+  return {
+    logical_calls: V12_CALL_LIMITS.logicalCalls,
+    real_attempts: V12_CALL_LIMITS.realAttempts,
+    judge_branch: V12_CALL_LIMITS.judgeBranch,
+  };
 }
 
 /** 引数を読む。誤りは `error` に人の読む文を入れて返す（例外にしない） */
@@ -401,11 +427,13 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
   }
   let stageRange: StageRange | undefined;
   if (stageFlag) {
-    if (pipeline !== "v1.1a" || planFile === undefined) {
-      return { error: "stage-range:pipeline（段の旗は --pipeline v1.1a --plan-file と一緒に指定してください）" };
+    if (!isV11aPath(pipeline) || planFile === undefined) {
+      return { error: `stage-range:pipeline（${STAGE_RANGE_USAGE_MESSAGES["stage-range:pipeline"]}）` };
     }
+    // v1.2 だけ、開始の別名（区間 0 の `vocabulary`）を区間の正本の名前に正規化する（v1.1a は今までどおり別名を受けない。Issue #637）
+    const start = pipeline === "v1.2" && stageStart !== undefined ? (STAGE_START_ALIASES_V12[stageStart] ?? stageStart) : stageStart;
     const resolved = resolveStageRange({
-      ...(stageStart === undefined ? {} : { start: stageStart }),
+      ...(start === undefined ? {} : { start }),
       ...(stageEnd === undefined ? {} : { end: stageEnd }),
       hasInput: stageInput !== undefined,
     });
@@ -433,9 +461,10 @@ export function parseCliArguments(argv: readonly string[]): CliArguments | { rea
 
 /** 段の旗の使い方の誤りの説明（符号のあとに添える） */
 const STAGE_RANGE_USAGE_MESSAGES = {
-  "stage-range:pipeline": "段の旗は --pipeline v1.1a --plan-file と一緒に指定してください",
+  "stage-range:pipeline": "段の旗は --pipeline v1.1a か v1.2 と --plan-file と一緒に指定してください",
   "stage-range:order": "開始の段が終了の段より後です",
-  "stage-range:unknown": "開始は name-table・test-spec・write、終了は semantic-check・test-spec・judge から選んでください",
+  "stage-range:unknown":
+    "開始は name-table・test-spec・write（v1.2 は name-table の別名 vocabulary も）、終了は semantic-check・test-spec・judge から選んでください",
   "stage-input:not-needed": "開始 name-table には --stage-input を付けられません",
   "stage-input:missing": "開始 test-spec・write には --stage-input（前の段の走りの checkpoint）が要ります",
 } as const;
@@ -552,6 +581,8 @@ async function runBuild(
   readonly returnToPlan: boolean;
   /** 通った境界の材料（`--pipeline v1.2` の走りだけ。Issue #636） */
   readonly boundaries?: readonly BoundaryMaterials[];
+  /** 境界の材料を集めた走りの実効の旗（checkpoint の版の `flags`・`call_limits`。Issue #637） */
+  readonly flags?: V12Flags;
 }> {
   // v1.1α は確定した仕様と組んでだけ流れる（引数の読み取りが `--plan-file` を要る。Issue #511）。v1.2 は同じ経路に
   // 旗の組を渡し、要約に旗の組を書かせる（Issue #547）。旗 v12.ids が on の走りだけ、境界の材料も集めさせる（checkpoint を書く
@@ -569,7 +600,7 @@ async function runBuild(
           ...(flags === undefined ? {} : { flags, recordV12Flags: true, ...(flags.ids ? { collectBoundaries: true } : {}) }),
         });
   const written = await writeBuildRun(deps, job, run, log);
-  return run.boundaries === undefined ? written : { ...written, boundaries: run.boundaries };
+  return run.boundaries === undefined || flags === undefined ? written : { ...written, boundaries: run.boundaries, flags };
 }
 
 /** 生成の入力のうち、経路に依らない部分（v1・v1.1α・段の走りで同じ） */
@@ -912,7 +943,7 @@ async function runBuildFromPlanFile(
     build.boundaries === undefined
       ? undefined
       : await writeStageCheckpoints(deps, job.outDir, build.boundaries, {
-          versions: stageVersionsOf(promptVersionOf(job.pipeline)),
+          versions: await stageVersionsOf(promptVersionOf(job.pipeline), build.flags),
           planSha256: validation.planSha256,
           sourceSha256: validation.sourceSha256,
         });
@@ -942,9 +973,19 @@ function baseNameOf(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
-/** checkpoint に残す版（語彙・契約・prompt・工場。段の走りと `--pipeline v1.2` の走りで同じ形。Issue #636） */
-function stageVersionsOf(promptVersion: string): StageVersions {
-  return { vocabulary: VOCABULARY_VERSION, contract: CONTRACT_VERSION, prompt: promptVersion, factory: FACTORY_VERSION };
+/**
+ * checkpoint に残す版（語彙・契約・prompt・工場。段の走りと `--pipeline v1.2` の走りで同じ形。Issue #636）。v1.2 の走り（実効の旗を
+ * 渡す）だけ、台帳の指紋・実効の旗の組の公開の形・呼び出しの上限（旗 ids が off なら null）を足す（v1.1a は 4 欄のまま。Issue #637）
+ */
+async function stageVersionsOf(promptVersion: string, flags?: V12Flags): Promise<StageVersions> {
+  const versions = { vocabulary: VOCABULARY_VERSION, contract: CONTRACT_VERSION, prompt: promptVersion, factory: FACTORY_VERSION };
+  if (flags === undefined) return versions;
+  return {
+    ...versions,
+    ledger: await propertyLedgerSha256(),
+    flags: toPublicV12Flags(flags),
+    call_limits: flags.ids ? v12CallLimitsRecord() : null,
+  };
 }
 
 /**
@@ -1019,6 +1060,11 @@ async function runStageFromPlanFile(
   logError: (line: string) => void,
 ): Promise<number> {
   const { validation } = ctx;
+  // v1.2 の段の走りは一気通貫と同じ旗の組・封筒・プロンプトの版で流す（v1.1a は旗を渡さない＝今のまま。Issue #637）
+  const pipeline = parsed.pipeline === "v1.2" ? "v1.2" : "v1.1a";
+  const publicFlags = v12FlagsOf(pipeline);
+  const flags = publicFlags === undefined ? undefined : fromPublicV12Flags(publicFlags);
+  const versions = await stageVersionsOf(promptVersionOf(pipeline), flags);
   let resume: Parameters<typeof runStageRangeV11a>[0]["resume"];
   let inputRecord: { readonly checkpoint: string; readonly boundary: StageBoundary; readonly output_digest: string } | null =
     null;
@@ -1034,6 +1080,9 @@ async function runStageFromPlanFile(
       sourceSha256: validation.sourceSha256,
       vocabularyVersion: VOCABULARY_VERSION,
       contractVersion: CONTRACT_VERSION,
+      ...(versions.ledger === undefined || versions.flags === undefined
+        ? {}
+        : { v12: { ledger: versions.ledger, flags: versions.flags } }),
     });
     if (!verified.ok) {
       logError(verified.code);
@@ -1050,7 +1099,7 @@ async function runStageFromPlanFile(
     return EXIT_USAGE;
   }
   const documents = await deps.loadDocuments();
-  const client = deps.makeClient({ apiKey, model: parsed.model, effort: parsed.effort, envelope: "v1.1a" });
+  const client = deps.makeClient({ apiKey, model: parsed.model, effort: parsed.effort, envelope: envelopeIdOf(pipeline) ?? "v1.1a" });
   const { judge, recheckJudge } = assembleJudge({
     env: deps.env,
     model: parsed.model,
@@ -1072,18 +1121,19 @@ async function runStageFromPlanFile(
     deadline: ctx.now() + ctx.deadlineMs,
     now: ctx.now,
     ...(parsed.timeoutMs === undefined ? {} : { timeoutMs: parsed.timeoutMs }),
-    pipeline: "v1.1a",
+    pipeline,
   };
   const outcome = await runStageRangeV11a({
-    ...generationInputOf(deps, job, PROMPT_VERSION_V11A),
+    ...generationInputOf(deps, job, promptVersionOf(pipeline)),
     plan: validation.plan,
     range,
     ...(resume === undefined ? {} : { resume }),
+    ...(flags === undefined ? {} : { flags }),
   });
 
   await deps.makeDirectory(job.outDir);
   const checkpoints = await writeStageCheckpoints(deps, job.outDir, outcome.boundaries, {
-    versions: stageVersionsOf(PROMPT_VERSION_V11A),
+    versions,
     planSha256: validation.planSha256,
     sourceSha256: validation.sourceSha256,
   });
@@ -1104,7 +1154,7 @@ async function runStageFromPlanFile(
     ),
     judge:
       jevApiKey !== undefined && jevApiKey !== "" ? { primary: "jev", fallback: "llm" } : { primary: "llm", fallback: null },
-    prompt_version: PROMPT_VERSION_V11A,
+    prompt_version: promptVersionOf(pipeline),
     vocabulary_version: VOCABULARY_VERSION,
     contract_version: CONTRACT_VERSION,
     factory_version: FACTORY_VERSION,
@@ -1112,6 +1162,10 @@ async function runStageFromPlanFile(
     budget_usd: ctx.budgetUsd,
     deadline_ms: ctx.deadlineMs,
     timeout_ms: parsed.timeoutMs ?? null,
+    // v1.2 の段の走りだけ：経路・実効の旗の組・呼び出しの上限（旗 ids が on のときだけ。Issue #637）
+    ...(flags === undefined
+      ? {}
+      : { pipeline: "v1.2", v12_flags: toPublicV12Flags(flags), ...(flags.ids ? { v12_call_limits: v12CallLimitsRecord() } : {}) }),
   };
   const record = buildStageRunRecord({
     range,
@@ -1122,6 +1176,8 @@ async function runStageFromPlanFile(
     conditions,
     outcome,
     exitCode: code,
+    // v1.2 の段の走りだけ、`v12_calls` と（範囲が T2 を含むとき）`test_spec` を足す（Issue #637）
+    ...(flags === undefined ? {} : { v12: { testSpecInRange: stagesInRange(range.start, range.end).includes("test-spec") } }),
   });
   await deps.writeFile(joinPath(job.outDir, STAGE_RUN_RECORD_FILE), stageJsonText(record));
   log(
@@ -1174,15 +1230,7 @@ export async function runCli(deps: CliDeps): Promise<number> {
       : {
           pipeline: "v1.2",
           v12_flags: v12Flags,
-          ...(v12Flags.ids
-            ? {
-                v12_call_limits: {
-                  logical_calls: V12_CALL_LIMITS.logicalCalls,
-                  real_attempts: V12_CALL_LIMITS.realAttempts,
-                  judge_branch: V12_CALL_LIMITS.judgeBranch,
-                },
-              }
-            : {}),
+          ...(v12Flags.ids ? { v12_call_limits: v12CallLimitsRecord() } : {}),
         };
   const recordConditions: PlanCliConditions = v12Conditions === undefined ? conditions : { ...conditions, ...v12Conditions };
 

@@ -380,6 +380,56 @@ describe("持ち越しの記録の non_requirements（T1'' が受理した要件
       code: "stage-input:digest",
     });
   });
+
+  /** v1.2 の版の欄を足した checkpoint（Issue #637） */
+  const V12_VERSIONS = { ledger: "c".repeat(64), flags: { ledger: true, "search-repair": true, ids: true } };
+  const withV12Versions = (extra: Record<string, unknown> = {}) => (checkpoint: Record<string, unknown>) => {
+    checkpoint["versions"] = { ...(checkpoint["versions"] as object), ...V12_VERSIONS, call_limits: null, ...extra };
+  };
+  const verifyV12 = (texts: { checkpointText: string; recordText: string }) =>
+    verifyStageInput({
+      start: "test-spec",
+      ...texts,
+      checkpointFile: "cp.json",
+      plan: PLAN,
+      planSha256: "a".repeat(64),
+      sourceSha256: "b".repeat(64),
+      vocabularyVersion: "v1",
+      contractVersion: "v0.2",
+      v12: V12_VERSIONS,
+    });
+
+  it("v1.2 の照合（Issue #637）：ledger・flags が今の走りと同じなら通り、v1.1a の照合と同じ再開の材料を返す。call_limits は照合しない", async () => {
+    const texts = await written(withV12Versions());
+    /** 再開の材料（入力の記録の出力ダイジェストは checkpoint ごとに違うので除く） */
+    const resumeOf = async (verifying: ReturnType<typeof verifyStageInput>) => {
+      const verified = await verifying;
+      if (!verified.ok) throw new Error(`通るはず：${verified.code}`);
+      return verified.resume;
+    };
+    const plain = await resumeOf(verify(await written()));
+    expect(await resumeOf(verifyV12(texts))).toEqual(plain);
+    // 欄の並びが違っても旗の組は同じ値として受ける（正規化して比べる）
+    const reordered = await written(withV12Versions({ flags: { ids: true, "search-repair": true, ledger: true } }));
+    expect(await resumeOf(verifyV12(reordered))).toEqual(plain);
+    const otherLimits = await written(withV12Versions({ call_limits: { logical_calls: 1, real_attempts: 2, judge_branch: 3 } }));
+    expect(await resumeOf(verifyV12(otherLimits))).toEqual(plain);
+    // v1.1a の照合は flags・ledger を見ない（今の挙動の保持）
+    expect(await resumeOf(verify(texts))).toEqual(plain);
+  });
+
+  it("二点測定：v1.2 の照合は ledger・flags の違い・欄の無い checkpoint を stage-input:version で断る（出力ダイジェストは書き直してある）", async () => {
+    const cases: readonly [string, (checkpoint: Record<string, unknown>) => void][] = [
+      ["ledger", withV12Versions({ ledger: "d".repeat(64) })],
+      ["flags-ids", withV12Versions({ flags: { ledger: true, "search-repair": true, ids: false } })],
+      ["flags-extra", withV12Versions({ flags: { ...V12_VERSIONS.flags, other: true } })],
+      ["flags-not-object", withV12Versions({ flags: "ids" })],
+      ["no-fields", () => {}],
+    ];
+    for (const [name, edit] of cases) {
+      expect(await verifyV12(await written(edit)), name).toEqual({ ok: false, code: "stage-input:version" });
+    }
+  });
 });
 
 // ── コードが作った試験 ID の並び（T2 の成果物の generated_test_ids。旗 v12.ids。Issue #595）──────────────────
