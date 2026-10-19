@@ -4287,3 +4287,99 @@ describe("旗 v12.ids：値の要る要件を含む走りは、場合から展�
     expect(reports[0]?.some((testId) => caseTests.has(testId))).toBe(true);
   });
 });
+
+// ── 旗 v12.ids：直す段の上限の停止を識別できる記録と、上限の塊（手 4c。Issue #665）──────────────────────────────
+
+describe("旗 v12.ids：直す段の上限の停止に上限の名前と数を残し、直す段の入力に上限の塊を足す（Issue #665）", () => {
+  // 直す段に入る宣言（R4 の計算の式が違う）。8 応答が全部道具の束（各 1 個）で、段内の上限に当たる
+  const WRONG_YAML = replaced(RUN_YAML, "    expression: base * 2", "    expression: base * 3");
+  const repairBundles = (): RecordedCall[] =>
+    Array.from({ length: 8 }, (_, index) => repairToolCall(`rt${String(index)}`, "static-check", WRONG_YAML));
+  const idsStop = () =>
+    runScenario([...idsHead({ yaml: WRONG_YAML }), structured(acceptAll()), ...repairBundles()], { flags: { ledger: true, ids: true } });
+  const LIMIT = { name: "repairStepTurns", max: 8, actual: 9 };
+
+  it("ids on：失敗の帰属に limit があり、要約の v12_calls.repair に段ごとの数と合計がある。終了コード・stop_reason・診断の形は今のまま", async () => {
+    const { result, recording } = await idsStop();
+    expect(result.stopped).toEqual({ stage: "repair", kind: "call-limit", limit: LIMIT });
+    expect(result.record.failure).toEqual({ stage: "repair", kind: "call-limit", limit: LIMIT });
+    expect(result.summary.failure).toEqual({ stage: "repair", kind: "call-limit", limit: LIMIT });
+    expect(result.summary.exit_code).toBe(1);
+    expect(result.summary.stop_reason).toBe("call-limit");
+    expect(result.summary.stop_class).toBe("call-limit");
+    expect(result.outcome).toEqual({ result: "failed", verdict: "none" });
+    expect(result.bundle).toBeNull();
+    // 診断の一覧の止めた段と分類は段と種類だけ（形は今のまま）
+    expect(diagnosticOf(result.diagnostics, DIAGNOSTICS_LISTING_FILE)["stopped"]).toEqual({ stage: "repair", kind: "call-limit" });
+    const calls = (result.summary as unknown as Record<string, Record<string, unknown>>)["v12_calls"];
+    if (calls === undefined) throw new Error("v12_calls が無い");
+    // 既存の鍵はそのままの順で、repair は末尾に足すだけ
+    expect(Object.keys(calls)).toEqual(["real_attempts", "judge_branch", "test_spec", "repair"]);
+    expect(calls["real_attempts"]).toEqual({ limit: 144, used: recording.structured.length + recording.tools.length });
+    expect(calls["judge_branch"]).toEqual({ limit: 80, used: 0 });
+    expect(calls["repair"]).toEqual({
+      steps: [
+        {
+          responses: 8,
+          tool_bundles: 8,
+          tools_executed: 8,
+          tool_calls_at_start: 0,
+          tool_calls_at_end: 8,
+          shape_retries: 0,
+          limit: LIMIT,
+          end: "call-limit",
+        },
+      ],
+      total: { responses: 8, tools_executed: 8 },
+    });
+    // 直す段の要求：上限の塊が入力の末尾にあり、値は上限の表の定数と段の始めの累計。全往復で同じ
+    expect(recording.tools).toHaveLength(8);
+    for (const request of recording.tools) {
+      expect(dataBlockOf(request.input, repairStage.REPAIR_STEP_LIMITS_DATA_NAME)).toEqual({
+        repairStepTurns: { max: 8, received: 0 },
+        toolCalls: { max: 24, usedAtStart: 0 },
+      });
+      expect(request.input).toBe(recording.tools[0]?.input);
+      expect(request.input.endsWith("</data>")).toBe(true);
+      expect(request.input.lastIndexOf("<data name=")).toBe(request.input.indexOf(`<data name="${repairStage.REPAIR_STEP_LIMITS_DATA_NAME}">`));
+    }
+    expectNoAcceptanceMaterial(recording.tools.map((request) => request.input));
+  });
+
+  it("ids on：記録と要約のどこにも会話・道具の引数・宣言の本文が無く、同じ台本で 2 回同じ値", async () => {
+    const first = await idsStop();
+    const second = await idsStop();
+    for (const value of [first.result.record, first.result.summary]) {
+      const text = JSON.stringify(value);
+      expect(text).not.toContain("base * 3");
+      expect(text).not.toContain("rt0");
+      expect(text).not.toContain("toolCalls\":[");
+      expect(text).not.toContain("entities:");
+    }
+    expect(second.result.record).toEqual(first.result.record);
+    expect(second.result.summary).toEqual(first.result.summary);
+    expect(second.result.diagnostics).toEqual(first.result.diagnostics);
+  });
+
+  it("ids off（旗を省いた走り・ledger だけ on）：同じ台本で段内の上限に当たっても、limit の欄・repair の欄・上限の塊が無い", async () => {
+    const offRuns = [
+      await runScenario([...head({ yaml: WRONG_YAML }), structured(acceptAll()), ...repairBundles()]),
+      await runScenario([...head({ yaml: WRONG_YAML, table: TABLE_ON }), structured(acceptAll()), ...repairBundles()], { flags: { ledger: true } }),
+    ];
+    for (const { result, recording } of offRuns) {
+      expect(result.stopped).toEqual({ stage: "repair", kind: "call-limit" });
+      expect(result.record.failure).toEqual({ stage: "repair", kind: "call-limit" });
+      expect(result.summary.exit_code).toBe(1);
+      expect(result.summary).not.toHaveProperty("v12_calls");
+      expect(recording.tools.length).toBeGreaterThan(0);
+      for (const request of recording.tools) expect(request.input).not.toContain(repairStage.REPAIR_STEP_LIMITS_DATA_NAME);
+    }
+  });
+
+  it("ids on で直す段の上限に触れない走り（初回で通る）には repair の欄が無い（直す段を呼んだ走りだけ）", async () => {
+    const { result } = await runScenario([...idsHead(), structured(acceptAll())], { flags: { ledger: true, ids: true } });
+    const calls = (result.summary as unknown as Record<string, Record<string, unknown>>)["v12_calls"];
+    expect(calls).toBeDefined();
+    expect(calls).not.toHaveProperty("repair");
+  });
+});

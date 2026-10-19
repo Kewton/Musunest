@@ -113,7 +113,14 @@ import {
 import { countUnresolvedTests, type GenerationInput, type GenerationResult } from "../run.js";
 import { runArbitration } from "../stages/arbitrate.js";
 import type { Problem, RejectedCandidate, StageFailure, StageOutcome } from "../stages/prompt.js";
-import { failureSignature, isStagnant, runRepairStep, type DeclarationRejection, type VersionReport } from "../stages/repair.js";
+import {
+  failureSignature,
+  isStagnant,
+  runRepairStep,
+  type DeclarationRejection,
+  type RepairStepCounts,
+  type VersionReport,
+} from "../stages/repair.js";
 import { runStaticCheck } from "../stages/static-check.js";
 import type { DroppedNonstructuralTest } from "../stages/test-suite.js";
 import type { EvaluationContext } from "../stages/tools.js";
@@ -218,6 +225,41 @@ export interface TestSpecBundlesSummary {
   readonly total: UsageSnapshot & CallCounts;
 }
 
+/**
+ * 旗 `v12.ids` の直す段（道具付き）の 1 回の数（`v12_calls.repair.steps` の 1 行。Issue #665）。数と上限の名前だけ
+ * （会話・引数・本文は持たない）。`end` は `done` か記録の失敗の分類
+ */
+export interface RepairStepSummary {
+  readonly responses: number;
+  readonly tool_bundles: number;
+  readonly tools_executed: number;
+  readonly tool_calls_at_start: number;
+  readonly tool_calls_at_end: number;
+  readonly shape_retries: number;
+  readonly limit: { readonly name: string; readonly max: number; readonly actual: number } | null;
+  readonly end: "done" | FailureKind;
+}
+
+/** 旗 `v12.ids` の直す段の要約（`v12_calls.repair`。直す段を呼んだ走りだけ。欄だけの直しは含めない。Issue #665） */
+export interface RepairStepsSummary {
+  readonly steps: readonly RepairStepSummary[];
+  readonly total: { readonly responses: number; readonly tools_executed: number };
+}
+
+/** 直す段の口の値を、要約の 1 行に写す（列挙した欄だけ。Issue #665） */
+function toRepairStepSummary(counts: RepairStepCounts): RepairStepSummary {
+  return {
+    responses: counts.responses,
+    tool_bundles: counts.toolBundles,
+    tools_executed: counts.toolsExecuted,
+    tool_calls_at_start: counts.toolCallsAtStart,
+    tool_calls_at_end: counts.toolCallsAtEnd,
+    shape_retries: counts.shapeRetries,
+    limit: counts.limit === null ? null : { name: counts.limit.name, max: counts.limit.max, actual: counts.limit.actual },
+    end: counts.end === "done" ? "done" : stageFailureToKind({ kind: counts.end }),
+  };
+}
+
 /** 呼び出しの計の項目ごとの合計（束別の計を段全体へ足す。Issue #626） */
 function sumCallCounts(counts: readonly CallCounts[]): CallCounts {
   const zero: CallCounts = {
@@ -286,7 +328,7 @@ class RunStop extends Error {
 }
 
 /** 段の失敗を、記録の失敗の分類に写す（v1 と同じ写し） */
-function stageFailureToKind(failure: StageFailure): FailureKind {
+function stageFailureToKind(failure: { readonly kind: StageFailure["kind"] }): FailureKind {
   switch (failure.kind) {
     case "limit":
       return "limit";
@@ -321,9 +363,15 @@ function stageFailureToKind(failure: StageFailure): FailureKind {
   }
 }
 
-/** 段の失敗を、記録の失敗の帰属に写す（v1 と同じ。値の中身は残さない） */
-function stageFailureAttribution(stage: StageId, failure: StageFailure): FailureAttribution {
+/**
+ * 段の失敗を、記録の失敗の帰属に写す（v1 と同じ。値の中身は残さない）。`withLimit` が真（旗 `v12.ids` の走り）のときだけ、
+ * `callLimit` に上限の名前・上限値・実際の値（`limit`）を足す（偽なら今の形のまま。Issue #665）
+ */
+function stageFailureAttribution(stage: StageId, failure: StageFailure, withLimit = false): FailureAttribution {
   const kind = stageFailureToKind(failure);
+  if (withLimit && failure.kind === "callLimit") {
+    return { stage, kind, limit: { name: failure.limit, max: failure.max, actual: failure.actual } };
+  }
   if (failure.kind === "invalidRequest") return { stage, kind, code: failure.code };
   if ((failure.kind === "malformed" || failure.kind === "unmet") && failure.problems.length > 0) {
     return {
@@ -665,10 +713,30 @@ async function runV11a(
             judge_branch: { limit: callLimits.judgeBranch, used: judgeBudget?.branch?.used ?? 0 },
             // T2 の束の数・同時数・段全体の計（T2 を呼んだ走りだけ。既存の欄は変えずに足す。Issue #626）
             ...(testSpecBundles === undefined ? {} : { test_spec: testSpecBundles }),
+            // 直す段（道具付き）の段ごとの数と合計（直す段を呼んだ走りだけ。既存の欄は変えずに足す。Issue #665）
+            ...(repairSteps.length === 0
+              ? {}
+              : {
+                  repair: {
+                    steps: repairSteps,
+                    total: {
+                      responses: repairSteps.reduce((sum, step) => sum + step.responses, 0),
+                      tools_executed: repairSteps.reduce((sum, step) => sum + step.tools_executed, 0),
+                    },
+                  } satisfies RepairStepsSummary,
+                }),
           },
         };
   // 旗 `v12.ids` の T2 の束の要約（T2 を呼ぶまで無い。Issue #626）
   let testSpecBundles: TestSpecBundlesSummary | undefined;
+  // 旗 `v12.ids` の直す段の数（呼んだ順。off は積まない。Issue #665）
+  const repairSteps: RepairStepSummary[] = [];
+  /** 直す段に足す、旗 `v12.ids` の上限の塊と数の口（off は空＝今の要求と結果。Issue #665） */
+  const repairStepIds = (): { readonly stepLimitsData?: true; readonly onCounts?: (counts: RepairStepCounts) => void } =>
+    flags.ids ? { stepLimitsData: true, onCounts: (counts) => repairSteps.push(toRepairStepSummary(counts)) } : {};
+  /** 段の失敗を記録の失敗の帰属に写す（旗 `v12.ids` の走りだけ上限の名前と数を足す。Issue #665） */
+  const attributionOf = (stage: StageId, failure: StageFailure): FailureAttribution =>
+    stageFailureAttribution(stage, failure, flags.ids);
   const startedAt = input.now();
   const stages: StageRecord[] = [];
   const upheld: string[] = [];
@@ -892,7 +960,7 @@ async function runV11a(
     let value: T;
     try {
       const outcome = await fn();
-      if (!outcome.ok) throw new RunStop(stageFailureAttribution(stage, outcome.failure));
+      if (!outcome.ok) throw new RunStop(attributionOf(stage, outcome.failure));
       value = outcome.value;
     } catch (error) {
       pushRecord(stage, "failed", before, start, error instanceof RunStop ? error.attribution.kind : null);
@@ -1088,7 +1156,7 @@ async function runV11a(
           throw error;
         }
         if (!outcome.ok) {
-          const attribution = stageFailureAttribution("vocabulary", outcome.failure);
+          const attribution = attributionOf("vocabulary", outcome.failure);
           pushRecord("vocabulary", "failed", before, start, attribution.kind, outcome.references);
           keepLastRejection();
           throw new RunStop(attribution);
@@ -1122,7 +1190,7 @@ async function runV11a(
           throw error;
         }
         if (!outcome.ok) {
-          const attribution = stageFailureAttribution("mapping", outcome.failure);
+          const attribution = attributionOf("mapping", outcome.failure);
           pushRecord("mapping", "failed", before, start, attribution.kind, outcome.references);
           // 2 回目が C2' に落ちても形の再試行は無く、前回の写像のまま拒否の要件を持ち越す（08 §4.1）
           if (retry !== undefined && firstRound !== undefined && outcome.failure.kind === "unmet") {
@@ -1171,7 +1239,7 @@ async function runV11a(
           throw error;
         }
         if (!outcome.ok) {
-          const attribution = stageFailureAttribution("name-table", outcome.failure);
+          const attribution = attributionOf("name-table", outcome.failure);
           pushRecord("name-table", "failed", before, start, attribution.kind);
           // T1' の落ち（中身）は 2 回目へ（前回の候補と作り直しの指示をデータで）。それ以外の失敗は止める
           if (outcome.failure.kind === "unmet" && outcome.response !== undefined && round < NAME_TABLE_ROUNDS) {
@@ -1300,7 +1368,7 @@ async function runV11a(
         throw error;
       }
       if (!outcome.ok) {
-        const attribution = stageFailureAttribution("test-spec", outcome.failure);
+        const attribution = attributionOf("test-spec", outcome.failure);
         settle("failed", attribution.kind);
         throw new RunStop(attribution);
       }
@@ -1577,6 +1645,7 @@ async function runV11a(
             // 道具と版の再検査は、評価口から v1.1α の結び付けと B3 を使う（その時点の文脈で。D11）
             evaluate: evaluator.evaluate,
             ...(current.rejections.length === 0 ? {} : { declRejections: current.rejections }),
+            ...repairStepIds(),
           }),
         );
         for (const dispute of step.disputes) disputes.push(dispute);
@@ -1867,6 +1936,7 @@ async function runV11a(
             gateway,
             evaluate: evaluator.evaluate,
             ...(best.rejections.length === 0 ? {} : { declRejections: best.rejections }),
+            ...repairStepIds(),
           }),
         );
         for (const dispute of step.disputes) disputes.push(dispute);

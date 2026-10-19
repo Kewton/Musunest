@@ -18,7 +18,7 @@
 //   - 往復の上限に触れたら、最後に静的チェックを通った版と、その版の流し直しの結果を返す（§1.5）
 import { sha256Hex } from "@musunest/spec-engine";
 import type { CallGateway, CallResult } from "../call.js";
-import { checkDeclarationBytes, checkLimit, type AgentLimits } from "../limits.js";
+import { AGENT_LIMITS, checkDeclarationBytes, checkLimit, type AgentLimits, type LimitName } from "../limits.js";
 import type { LlmToolRequest, LlmToolResponse, LlmToolResult, LlmTurn } from "../llm.js";
 import type {
   ArbitrationResult,
@@ -231,6 +231,32 @@ export interface DeclarationRejection {
 /** 宣言の意味の点検の拒否を置くデータの塊の名前（入力の末尾に足す。v1.1α） */
 export const DECLARATION_REJECTIONS_DATA_NAME = "宣言の意味の点検の拒否" as const;
 
+/** 直す段の上限（段内の応答と道具の累計）を置くデータの塊の名前（入力の末尾に足す。旗 `v12.ids`。Issue #665） */
+export const REPAIR_STEP_LIMITS_DATA_NAME = "直す段の上限" as const;
+
+/**
+ * 直す段 1 回の終わりに、段内の数を返す任意の口の値（旗 `v12.ids`。Issue #665）。**数と上限の名前だけ**を持つ
+ * （宣言の原文・会話・道具の引数・応答の本文は持たない。S-8）。
+ *
+ *   - `responses` … 共通の口から成功して受け取った応答の数（通信の再送は数えない。`repairStepTurns` に照らす数）
+ *   - `toolBundles` … 受け取った応答のうち道具の束の数（実行する前に断った束も数える）
+ *   - `toolsExecuted` … 段内で実行した道具の数
+ *   - `toolCallsAtStart`・`toolCallsAtEnd` … 段の始めと終わりの共通の口の道具の累計（`toolCalls` の getter）
+ *   - `shapeRetries` … 最後の答えの形のやり直しの数
+ *   - `limit` … 当たった上限（名前・上限値・実際の値）。当たらなければ `null`
+ *   - `end` … 終わり方（`done` か、段の失敗の種類）
+ */
+export interface RepairStepCounts {
+  readonly responses: number;
+  readonly toolBundles: number;
+  readonly toolsExecuted: number;
+  readonly toolCallsAtStart: number;
+  readonly toolCallsAtEnd: number;
+  readonly shapeRetries: number;
+  readonly limit: { readonly name: LimitName; readonly max: number; readonly actual: number } | null;
+  readonly end: "done" | StageFailure["kind"];
+}
+
 /** ⑥ の応答（done）を、共通の口を通して取るための計画 */
 type ToolPlan = Omit<LlmToolRequest, "turns">;
 
@@ -269,10 +295,21 @@ export interface RepairStepInput {
    * 入力の末尾に足す（前置き・規則・道具の定義・schema は変えない）。省くか空なら v1 の要求のまま。
    */
   readonly declRejections?: readonly DeclarationRejection[];
+  /**
+   * 真なら（旗 `v12.ids`。Issue #665）、データの塊「直す段の上限」を入力の末尾に足す：段内の応答の上限・この段で受け取った
+   * 応答の数（0）・道具の累計の上限・段の始めの累計。**値は段の始めに 1 回決め、往復の途中で更新しない**。規則・道具の定義・
+   * schema は変えない。省けば今の要求のまま。上限の値と照らし方は変えない
+   */
+  readonly stepLimitsData?: boolean;
+  /**
+   * 段の終わり（成功・失敗のどちらでも）に段内の数を 1 回受け取る任意の口（#501 の作法。旗 `v12.ids`。Issue #665）。
+   * **省けば何もしない**——要求・回数・結果に効かない
+   */
+  readonly onCounts?: (counts: RepairStepCounts) => void;
 }
 
 /** ⑥ のデータ（その段に渡すと決めた文脈だけ。§2.2） */
-function buildRepairData(input: RepairStepInput): readonly PromptData[] {
+function buildRepairData(input: RepairStepInput, toolCallsAtStart: number): readonly PromptData[] {
   const data: PromptData[] = [
     { name: "原文", text: input.source },
     { name: "要件の一覧", text: serializeJson(input.list) },
@@ -298,6 +335,16 @@ function buildRepairData(input: RepairStepInput): readonly PromptData[] {
   // 宣言の意味の点検の拒否は、空でないときだけ末尾に足す（v1.1α。省けば v1 の要求のバイト列のまま）
   if (input.declRejections !== undefined && input.declRejections.length > 0) {
     data.push({ name: DECLARATION_REJECTIONS_DATA_NAME, text: serializeJson(input.declRejections) });
+  }
+  // 直す段の上限は、渡されたときだけ末尾に足す（旗 `v12.ids`。数だけ。省けば今の要求のバイト列のまま。Issue #665）
+  if (input.stepLimitsData === true) {
+    data.push({
+      name: REPAIR_STEP_LIMITS_DATA_NAME,
+      text: serializeJson({
+        repairStepTurns: { max: AGENT_LIMITS.repairStepTurns, received: 0 },
+        toolCalls: { max: AGENT_LIMITS.toolCalls, usedAtStart: toolCallsAtStart },
+      }),
+    });
   }
   return data;
 }
@@ -347,11 +394,12 @@ function shapeProblemInput(base: string, problems: readonly Problem[]): string {
  */
 export async function runRepairStep(input: RepairStepInput): Promise<StageOutcome<RepairResult>> {
   const testIds = new Set(input.suite.tests.map((test) => test.id));
+  const toolCallsAtStart = input.gateway.toolCalls;
   const plan: ToolPlan = {
     instructions: COMMON_RULES.join("\n"),
     documents: input.documents.map((document) => `${document.name}\n${document.text}`),
     rules: REPAIR_RULES,
-    input: buildRepairData(input).map(wrapData).join("\n"),
+    input: buildRepairData(input, toolCallsAtStart).map(wrapData).join("\n"),
     tools: REPAIR_TOOLS,
     schemaName: REPAIR_ANSWER_SCHEMA_NAME,
     schema: REPAIR_ANSWER_SCHEMA,
@@ -373,34 +421,59 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
   let responses = 0;
   let answerFailures = 0;
   let answerInput = plan.input;
+  // 段内の数（任意の口へ返すだけ。要求・回数・結果に効かない。Issue #665）
+  let toolBundles = 0;
+  let toolsExecuted = 0;
+  let shapeRetries = 0;
+  const finish = (outcome: StageOutcome<RepairResult>): StageOutcome<RepairResult> => {
+    if (input.onCounts !== undefined) {
+      const failure = outcome.ok ? undefined : outcome.failure;
+      input.onCounts({
+        responses,
+        toolBundles,
+        toolsExecuted,
+        toolCallsAtStart,
+        toolCallsAtEnd: input.gateway.toolCalls,
+        shapeRetries,
+        limit:
+          failure !== undefined && failure.kind === "callLimit"
+            ? { name: failure.limit, max: failure.max, actual: failure.actual }
+            : null,
+        end: failure === undefined ? "done" : failure.kind,
+      });
+    }
+    return outcome;
+  };
   while (true) {
     // 1 回の直す段の応答の往復の上限（§1.5・Issue #429）。**受け取った応答が上限に達したら、次の応答は
     // 求めない**——上限ちょうどの応答が形の合う `done` なら、下の分岐で受け付けて返っている。上限に
     // 照らすのは、これから求める応答の番号（`responses + 1`）。
     const turnLimit = checkLimit("repairStepTurns", responses + 1);
     if (turnLimit !== undefined) {
-      return {
+      return finish({
         ok: false,
         failure: { kind: "callLimit", limit: turnLimit.limit, max: turnLimit.max, actual: turnLimit.actual },
-      };
+      });
     }
     const result = await input.gateway.callWithTools({ ...plan, input: answerInput, turns });
-    if (result.kind !== "ok") return { ok: false, failure: mapGatewayFailure(result) };
+    if (result.kind !== "ok") return finish({ ok: false, failure: mapGatewayFailure(result) });
     const response = result.value;
     responses += 1;
     if (response.kind === "done") {
       const checked = checkRepairAnswer(response.declaration, input.source, testIds);
-      if (checked.ok) return { ok: true, value: checked.value };
+      if (checked.ok) return finish({ ok: true, value: checked.value });
       answerFailures += 1;
       if (answerFailures >= STEP_ATTEMPTS) {
-        return { ok: false, failure: { kind: "malformed", attempts: answerFailures, problems: checked.problems } };
+        return finish({ ok: false, failure: { kind: "malformed", attempts: answerFailures, problems: checked.problems } });
       }
       // 1 回だけ、問題を返して直させる（予算・回数・締切の上限は、呼ぶたびに共通の口が当てる）。
       // 最後の答えの形の誤りで**やり直す**ことを、共通の口へ告げる（Issue #446）。
       input.gateway.noteRetry("shape");
+      shapeRetries += 1;
       answerInput = shapeProblemInput(plan.input, checked.problems);
       continue;
     }
+    toolBundles += 1;
 
     // 実行する**前**に、**共通の口の累計そのもの**（この応答の束を含む）を上限に照らす（§1.5・Issue #429）。
     // 超えていれば 1 つも実行せず、累計の上限として段を終える。累計は**応答の後**に読む——timeout で
@@ -408,15 +481,16 @@ export async function runRepairStep(input: RepairStepInput): Promise<StageOutcom
     // 値へ今回の束を足すと、打ち切り後に遅れて数えられた分が抜け、実行を許してしまう）。
     const budget = checkToolCallBudget(input.gateway.toolCalls);
     if (budget !== undefined) {
-      return { ok: false, failure: { kind: "callLimit", limit: budget.limit, max: budget.max, actual: budget.actual } };
+      return finish({ ok: false, failure: { kind: "callLimit", limit: budget.limit, max: budget.max, actual: budget.actual } });
     }
     const results: LlmToolResult[] = [];
     for (const toolCall of response.toolCalls) {
       const checked = checkToolArguments(toolCall.name, toolCall.arguments);
       if (!checked.ok) {
-        return { ok: false, failure: { kind: "unmet", attempts: 1, problems: checked.problems } };
+        return finish({ ok: false, failure: { kind: "unmet", attempts: 1, problems: checked.problems } });
       }
       const output = await executeRepairTool(checked.call, context);
+      toolsExecuted += 1;
       results.push({ toolCallId: toolCall.id, name: toolCall.name, output });
     }
     turns = [...turns, { role: "assistant", toolCalls: response.toolCalls }, { role: "tool", results }];
