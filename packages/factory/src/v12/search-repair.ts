@@ -328,7 +328,7 @@ export interface SearchRecountRecord {
 /** 往復の直す手（手 4a の宣言の全文を直す段・手 4b の欄だけの直し。Issue #553） */
 export type SearchRepairHand = "repair" | "field-repair";
 
-/** 探索の記録の 1 往復（直す手の種類・場所の数・場所なしの数。欄だけの直しのマージを断ったら、その固定文） */
+/** 探索の記録の 1 往復（直す手の種類・場所の数・場所なしの数。欄だけの直しのマージを断ったら、その固定文。旗 ids の走りは追加の場所の数） */
 export interface SearchRoundRecord {
   readonly hand: SearchRepairHand;
   /** 場所に写した失敗の場所の数（重複なし） */
@@ -337,6 +337,8 @@ export interface SearchRoundRecord {
   readonly unlocated: number;
   /** 欄だけの直しのマージを断った固定文（断らなかった・手 4a の往復は null） */
   readonly refused: string | null;
+  /** 追加の場所の数（旗 `v12.ids` の走りだけ欄を持つ。off の記録は今のまま。Issue #667） */
+  readonly additions?: number;
 }
 
 /** 探索の記録（旗 on の走りだけ。版の順） */

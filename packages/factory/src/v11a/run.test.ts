@@ -4663,9 +4663,11 @@ describe("旗 v12.ids：B1（初回・作り直し）と直す段に、その時
       [
         ...idsHead({ yaml: RENAMED_YAML }),
         structured(acceptAll()),
-        repairDone(RENAMED_YAML),
+        // 手 4e（#667）：要求する検査（item.amount）が宣言に無く entity が在るので、往復は追加の場所への欄だけの直しになる。
+        // 何も返さない直し（同じ版）を 2 回で停滞させ、作り直しへ進める
+        structured({ replacements: [], disputes: [] }),
         structured(acceptAll()),
-        repairDone(RENAMED_YAML),
+        structured({ replacements: [], disputes: [] }),
         structured(acceptAll()),
         structured({ declaration: RUN_YAML }),
         structured(acceptAll()),
@@ -4681,11 +4683,12 @@ describe("旗 v12.ids：B1（初回・作り直し）と直す段に、その時
     expect(dataBlockOf(rewrite.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME)).toEqual(dataBlockOf(first.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME));
     expect(rewrite.rules).toContain(WRITE_V11A_IDS_R07_DEFINITION.text);
     expect(rewrite.rules).not.toContain(R07?.text);
-    // 探索型の直しの直す段（一番良い版を直す）にも同じ骨組みが載る
-    expect(recording.tools.length).toBeGreaterThan(0);
-    for (const request of recording.tools) {
-      expect(dataBlockOf(request.input, repairStage.REPAIR_REQUIRED_VALIDATIONS_DATA_NAME)).toEqual(dataBlockOf(first.input, WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME));
-    }
+    // 手 4e（#667）：往復は追加の場所への欄だけの直し（道具付きの直す段を呼ばない）。欄だけの直しの入力に骨組みの塊は載せない
+    // （失敗の一覧の追加の場所が同じ事実を持つ）。道具付きの直す段に骨組みが載ることは「書かない台本」の試験が固定する
+    expect(recording.tools).toEqual([]);
+    const fields = recording.structured.filter((request) => request.schemaName === FIELD_REPAIR_SCHEMA_NAME);
+    expect(fields).toHaveLength(2);
+    for (const request of fields) expect(request.input).not.toContain(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME);
     expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
   });
 
@@ -4697,5 +4700,149 @@ describe("旗 v12.ids：B1（初回・作り直し）と直す段に、その時
     );
     for (const value of [first.result.record, first.result.summary]) expect(JSON.stringify(value)).not.toContain(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME);
     expect(first.result.bundle?.artifacts.some((artifact) => artifact.text.includes(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME))).toBe(false);
+  });
+});
+
+// ── 旗 v12.ids：要求する検査が無い失敗を追加の場所として欄だけの直しに渡す（手 4e。Issue #667）──────────────────────────────
+//
+// 原因 2 の台本の合成：初版は検査 0（`validations: []`）で、名前の異なる 2 項目（R1 の金額と題名）の validate の試験が結び付かない
+// （金額は正常・異常・境界の 3 件＝T2 の門が ruled の要件に境界を要るので 3 件、題名は正常 1 件の、計 4 件）。
+// 旗 ids の走りは、要る検査の場所（結び付けと同じ関数）が宣言に無く entity が在るので追加の場所 2 つに写し、欄だけの直し（構造化
+// 出力）1 回で本文を受け、コードが validations の末尾に挿し込み、静的チェック・B3・B3'・B4 を全部掛け直す。
+
+describe("旗 v12.ids：要求する検査が宣言に無い失敗を追加の場所に写し、欄だけの直しの本文をコードが挿し込んで門を全部掛け直す（Issue #667）", () => {
+  const IDS_SEARCH = { flags: { ledger: true, searchRepair: true, ids: true } };
+  /** 初版：検査 0 */
+  const NOVAL_YAML = replaced(RUN_YAML, "validations:\n  - name: amount\n    entity: item\n    expression: amount > 0\n", "validations: []\n");
+  /** 正しい版：金額と題名の検査 */
+  const FIXED_YAML = replaced(RUN_YAML, "    expression: amount > 0\n", "    expression: amount > 0\n  - name: title\n    entity: item\n    expression: title != \"\"\n");
+  const AMOUNT = "validation:item.amount";
+  const TITLE = "validation:item.title";
+  const body = (name: string, expression: string): string => [`- name: ${name}`, "  entity: item", `  expression: ${expression}`].join("\n");
+  const add = (amount: string, title: string | null = "title != \"\""): RecordedCall =>
+    structured({
+      replacements: [{ location: AMOUNT, element: body("amount", amount) }, ...(title === null ? [] : [{ location: TITLE, element: body("title", title) }])],
+      disputes: [],
+    });
+  /** R1 の validate の試験 4 件（金額の正常・異常・境界と、題名の正常） */
+  const titleTest = () =>
+    rawTest({
+      id: "r1-title",
+      requirementId: "R1",
+      targetKind: "field",
+      roleId: "f.item.title",
+      operation: "validate",
+      observes: "validation",
+      input: { "f.item.title": "a" },
+      expected: ok("true"),
+    });
+  const r1Four = () => [...r1Tests(), titleTest()];
+  const idsT2 = () => idsT2Response([...r1Four(), ...r3Tests(), ...r4Tests()]);
+  const head667 = (yaml: string = NOVAL_YAML) => idsHead({ yaml, t2: idsT2() });
+
+  it("二点測定（後）：追加の場所 2 → 欄だけの直し 1 回 → 挿し込み → B4 で結び付き不一致 0 で採って full。全文の直しの段は呼ばれない（往復 1・段の呼び出し 1・道具 0）", async () => {
+    const { result, recording } = await runScenario([...head667(), structured(acceptAll()), add("amount > 0"), structured(acceptAll())], IDS_SEARCH);
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    expect(recording.tools).toEqual([]);
+    const fields = fieldRequests(recording.structured);
+    expect(fields).toHaveLength(1);
+    const [request] = fields;
+    if (request === undefined) throw new Error("前提が壊れた");
+    expect(locationEnumOf(request)).toEqual([AMOUNT, TITLE]);
+    expect(countStage(result, "repair")).toBe(1);
+    // 欄だけの直しは 1 往復に論理 1（形のやり直しなし）
+    expect(result.record.stages.filter((stage) => stage.stage === "repair").map((stage) => stage.calls)).toEqual([1]);
+    expect(totalsOf(result.bundle)).toEqual([
+      ["write", 4, true],
+      ["repair", 0, true],
+    ]);
+    expect(declarationOf(result.bundle)).toBe(FIXED_YAML);
+    expect(roundsOf(result.bundle)).toEqual([{ hand: "field-repair", locations: 2, unlocated: 0, refused: null, additions: 2 }]);
+    expect(request.input).not.toContain(WRITE_V11A_REQUIRED_VALIDATIONS_DATA_NAME);
+    expectNoAcceptanceMaterial([request.input, ...(request.rules ?? [])]);
+  });
+
+  it("二点測定（前）：ids off（search-repair だけ on）の同じ初版は場所なし 4 で全文の直しの段（道具付き）へ流れる。記録に追加の欄が無い", async () => {
+    const { result, recording } = await runScenario(
+      [...head({ yaml: NOVAL_YAML, t2: t2Response([...r1Four(), ...r2Tests(), ...r3Tests(), ...r4Tests()]) }), structured(acceptAll()), repairDone(FIXED_YAML), structured(acceptAll())],
+      SEARCH,
+    );
+    expect(recording.tools).toHaveLength(1);
+    expect(fieldRequests(recording.structured)).toEqual([]);
+    const rounds = roundsOf(result.bundle);
+    expect(rounds).toEqual([{ hand: "repair", locations: 0, unlocated: 4, refused: null }]);
+    for (const round of rounds) expect("additions" in round).toBe(false);
+    expect(result.outcome.verdict).toBe("full");
+  });
+
+  it("負例 (a)：追加した検査の式が正常／異常を逆にし、題名の式も誤れば B4 の不一致が減らず採らない（門）。次の往復の入力は一番良い版のまま", async () => {
+    const { result, recording } = await runScenario(
+      [...head667(), structured(acceptAll()), add("amount < 0", "title == \"\""), structured(acceptAll()), add("amount > 0"), structured(acceptAll())],
+      IDS_SEARCH,
+    );
+    expect(fieldDeclarations(recording.structured)).toEqual([NOVAL_YAML, NOVAL_YAML]);
+    expect(totalsOf(result.bundle)).toEqual([
+      ["write", 4, true],
+      ["repair", 4, false],
+      ["repair", 0, true],
+    ]);
+    expect(result.outcome.verdict).toBe("full");
+    expect(recording.tools).toEqual([]);
+  });
+
+  it("負例 (b)：2 回目の往復で同じ（entity・名前）は既に在るので置換の場所になり、追加が重複しない。記録に往復ごとの追加の場所の数", async () => {
+    const { result, recording } = await runScenario(
+      [
+        ...head667(),
+        structured(acceptAll()),
+        add("amount > 0", "title == \"\""),
+        structured(acceptAll()),
+        structured({ replacements: [{ location: TITLE, element: body("title", "title != \"\"") }], disputes: [] }),
+        structured(acceptAll()),
+      ],
+      IDS_SEARCH,
+    );
+    const fields = fieldRequests(recording.structured);
+    expect(fields.map(locationEnumOf)).toEqual([[AMOUNT, TITLE], [TITLE]]);
+    expect(roundsOf(result.bundle)).toEqual([
+      { hand: "field-repair", locations: 2, unlocated: 0, refused: null, additions: 2 },
+      { hand: "field-repair", locations: 1, unlocated: 0, refused: null, additions: 0 },
+    ]);
+    expect(totalsOf(result.bundle)).toEqual([
+      ["write", 4, true],
+      ["repair", 1, true],
+      ["repair", 0, true],
+    ]);
+    expect(declarationOf(result.bundle)).toBe(FIXED_YAML);
+    expect(result.outcome.verdict).toBe("full");
+  });
+
+  it("負例 (d)：存在しない entity の名前を書いた追加は形で落ち、1 回だけ直させる（続けば malformed で段が止まる）", async () => {
+    const wrong = structured({ replacements: [{ location: AMOUNT, element: body("amount", "amount > 0").replace("entity: item", "entity: nowhere") }], disputes: [] });
+    const { result } = await runScenario([...head667(), structured(acceptAll()), wrong, add("amount > 0"), structured(acceptAll())], IDS_SEARCH);
+    expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
+    // 1 往復に論理 1（形 1 を含めて応答 2）のまま
+    expect(result.record.stages.filter((stage) => stage.stage === "repair").map((stage) => [stage.calls, stage.retries.shape])).toEqual([[2, 1]]);
+    const stopped = await runScenario([...head667(), structured(acceptAll()), wrong, wrong], IDS_SEARCH);
+    expect(stopped.result.outcome.verdict).not.toBe("full");
+    expect(stopped.recording.tools).toEqual([]);
+  });
+
+  it("同じ台本で 2 回同じ値（要求・記録・納品物）", async () => {
+    const script = () => [
+      ...head667(),
+      structured(acceptAll()),
+      add("amount > 0", "title == \"\""),
+      structured(acceptAll()),
+      structured({ replacements: [{ location: TITLE, element: body("title", "title != \"\"") }], disputes: [] }),
+      structured(acceptAll()),
+    ];
+    const first = await runScenario(script(), IDS_SEARCH);
+    const second = await runScenario(script(), IDS_SEARCH);
+    expect(JSON.stringify(second.recording.structured.map(({ signal: _signal, ...rest }) => rest))).toBe(
+      JSON.stringify(first.recording.structured.map(({ signal: _signal, ...rest }) => rest)),
+    );
+    expect(roundsOf(second.result.bundle)).toEqual(roundsOf(first.result.bundle));
+    expect(second.result.bundle?.artifacts).toEqual(first.result.bundle?.artifacts);
   });
 });

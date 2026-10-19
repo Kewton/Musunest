@@ -12,11 +12,16 @@ import { envelopeStageFor } from "../../schema-envelope.js";
 import { createRecordingClient, makeGateway } from "../../stages/__tests__/prompt.js";
 import { ruleDefinitionDefects, SHAPE_PROBLEMS_DATA_NAME } from "../../stages/prompt.js";
 import { strictSchemaProblems } from "../../stages/schema-strict.test.js";
-import { FIXTURE_DOCUMENTS, FIXTURE_YAML, fixtureList, fixtureTable } from "../../v11a/__tests__/fixtures.js";
+import { FIXTURE_DOCUMENTS, FIXTURE_YAML, fixtureList, fixtureTable, fixtureYaml } from "../../v11a/__tests__/fixtures.js";
+import { requiredValidationsOf } from "../../v11a/bind-by-id.js";
 import { canonicalJson } from "../../v11a/names.js";
+import type { TestObserves } from "../../v11a/stages/test-spec.js";
+import { expectNoAcceptanceMaterial } from "../../stages/__tests__/prompt.js";
 import { declarationSpans, locateFailures, type LocateInput } from "../locate.js";
 import {
   FIELD_REPAIR_DATA_NAMES,
+  FIELD_REPAIR_IDS_R07_DEFINITION,
+  FIELD_REPAIR_IDS_RULE_DEFINITIONS,
   FIELD_REPAIR_PROBLEMS,
   FIELD_REPAIR_RULE_DEFINITIONS,
   FIELD_REPAIR_SCHEMA_NAME,
@@ -279,5 +284,194 @@ describe("マージ（コード）：置き換えた要素だけが変わり、�
   it("同じ置き換えは同じ原文になる（決定的）", () => {
     const replacements = [{ location: RATE, element: "- name: rate\n  scope: app\n  expression: base * 3\n  type: number" }];
     expect(mergeReplacements(FIXTURE_YAML, replacements, spans)).toEqual(mergeReplacements(FIXTURE_YAML, replacements, spans));
+  });
+});
+
+// ── 旗 v12.ids：追加の場所（手 4e。Issue #667）──────────────────────────────────────
+
+describe("旗 v12.ids の欄だけの直し：追加の場所を enum とデータに載せ、形を照らし、コードが validations の末尾に挿し込む（Issue #667）", () => {
+  /** 検査の節を空にした宣言（`validations: []`） */
+  const EMPTY_YAML = fixtureYaml({ validation: false });
+  /** 検査の節そのものが無い宣言 */
+  const NO_SECTION_YAML = EMPTY_YAML.replace("validations: []\n", "");
+  const AMOUNT = "validation:item.amount";
+  const ITEM = "validation:item.item";
+  const validationBody = (name: string, expression: string, extra: readonly string[] = []): string =>
+    [`- name: ${name}`, "  entity: item", `  expression: ${expression}`, ...extra].join("\n");
+  const vtest = (id: string, roleId: string, kind = "field", testKind = "normal"): FixedTest =>
+    ({ ...test(id, "R1", kind, roleId, "validate"), kind: testKind }) as FixedTest;
+  const IDS_SUITE: TestSuite = {
+    tests: [vtest("v-normal", "f.item.amount"), vtest("v-abnormal", "f.item.amount", "field", "abnormal"), vtest("v-entity", "e.item", "entity"), ...SUITE.tests],
+  };
+  const OBSERVES = new Map<string, TestObserves>([
+    ["v-normal", "validation"],
+    ["v-abnormal", "validation"],
+    ["v-entity", "validation"],
+    ["r3-when", "when"],
+    ["r4-rate", "value"],
+  ]);
+  const idsLocate = (source: string, mismatches: readonly string[]) =>
+    locateFailures({
+      ...locateInput(mismatches),
+      source,
+      suite: IDS_SUITE,
+      ids: { observes: OBSERVES, requiredValidations: requiredValidationsOf(TABLE, IDS_SUITE, OBSERVES) },
+    });
+  const runIds = async (calls: readonly RecordedCall[], source: string, mismatches: readonly string[]) => {
+    const recording = createRecordingClient(calls);
+    const failures = idsLocate(source, mismatches);
+    const outcome = await runFieldRepair({
+      source: SOURCE,
+      list: LIST,
+      suite: IDS_SUITE,
+      declaration: source,
+      failures,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(recording.client),
+    });
+    return { outcome, recording, failures };
+  };
+
+  it("schema の enum に追加の場所があり、データの各場所に種類（replace・add）。規則は off の 6 つの後ろに R-fr-07（why・since。不備 0）", async () => {
+    const answer = {
+      replacements: [
+        { location: AMOUNT, element: validationBody("amount", "amount > 0") },
+        { location: CLOSE, element: closeItem("amount > 0") },
+      ],
+      disputes: [],
+    };
+    const { outcome, recording, failures } = await runIds([structured(answer)], EMPTY_YAML, ["v-normal", "v-abnormal", "r3-when"]);
+    expect(outcome).toEqual({ ok: true, value: { replacements: answer.replacements, disputes: [], rejected: [] } });
+    expect(failures.additions).toEqual([{ key: AMOUNT, entity: "item", name: "amount" }]);
+    const [request] = recording.structured;
+    if (request === undefined) throw new Error("前提が壊れた：要求が無い");
+    expect(enumOf(request.schema)).toEqual([AMOUNT, CLOSE]);
+    expect(request.schema).toEqual(fieldRepairSchemaOf([AMOUNT, CLOSE]));
+    expect(dataNamesOf(request.input)).toEqual([...FIELD_REPAIR_DATA_NAMES]);
+    expect(JSON.parse(dataBlockOf(request.input, "失敗の一覧"))).toEqual([
+      { testId: "v-normal", requirementId: "R1", kind: "test-mismatch", message: "固定した試験の期待と宣言の振る舞いが一致しない", locations: [{ location: AMOUNT, kind: "add" }] },
+      { testId: "v-abnormal", requirementId: "R1", kind: "test-mismatch", message: "固定した試験の期待と宣言の振る舞いが一致しない", locations: [{ location: AMOUNT, kind: "add" }] },
+      { testId: "r3-when", requirementId: "R3", kind: "test-mismatch", message: "固定した試験の期待と宣言の振る舞いが一致しない", locations: [{ location: CLOSE, kind: "replace" }] },
+    ]);
+    expect(request.rules).toEqual(FIELD_REPAIR_IDS_RULE_DEFINITIONS.map((definition) => definition.text));
+    expect(FIELD_REPAIR_IDS_RULE_DEFINITIONS).toEqual([...FIELD_REPAIR_RULE_DEFINITIONS, FIELD_REPAIR_IDS_R07_DEFINITION]);
+    expect(FIELD_REPAIR_IDS_R07_DEFINITION.text).toBe(
+      "追加の場所には、その entity と名前の検査 1 つの本文を `-` で始まる行から書く。名前と entity は変えない。式は要件と固定した試験から書く。別の要素を書かない。",
+    );
+    expect(ruleDefinitionDefects(FIELD_REPAIR_IDS_RULE_DEFINITIONS)).toEqual([]);
+    expect(FIELD_REPAIR_RULE_DEFINITIONS.map((definition) => definition.id)).toEqual(["R-fr-01", "R-fr-02", "R-fr-03", "R-fr-04", "R-fr-05", "R-fr-06"]);
+    // 欄だけの直しの入力に要る検査の骨組みの塊は載せない（失敗の一覧の追加の場所が同じ事実を持つ）
+    expect(request.input).not.toContain("要る検査の骨組み");
+    expectNoAcceptanceMaterial([request.input, ...(request.rules ?? [])]);
+  });
+
+  const good = { replacements: [{ location: AMOUNT, element: validationBody("amount", "amount > 0") }], disputes: [] };
+  const badShapes: readonly (readonly [string, string, string, string])[] = [
+    ["名前が場所と違う追加", AMOUNT, validationBody("positive", "amount > 0"), FIELD_REPAIR_PROBLEMS.wrongName],
+    ["存在しない entity の名前を書いた追加", AMOUNT, validationBody("amount", "amount > 0").replace("entity: item", "entity: nowhere"), FIELD_REPAIR_PROBLEMS.wrongName],
+    ["検査 2 つの追加", AMOUNT, `${validationBody("amount", "amount > 0")}\n${validationBody("other", "amount > 1")}`, FIELD_REPAIR_PROBLEMS.wrongKind],
+    ["検査以外の要素（計算の欄）の追加", AMOUNT, validationBody("amount", "amount > 0", ["  type: number"]), FIELD_REPAIR_PROBLEMS.notValidation],
+    ["項目の形の追加", AMOUNT, "amount:\n  type: number", FIELD_REPAIR_PROBLEMS.wrongKind],
+  ];
+
+  it.each(badShapes)("形の検査：%s は固定文で落ち、2 回目の要求に問題が足され、直れば受ける。続けば malformed", async (_name, location, element, message) => {
+    const response = { replacements: [{ location, element }], disputes: [] };
+    const fixed = await runIds([structured(response), structured(good)], EMPTY_YAML, ["v-normal"]);
+    expect(fixed.outcome.ok).toBe(true);
+    const [first, second] = fixed.recording.structured;
+    if (first === undefined || second === undefined) throw new Error("前提が壊れた：要求が 2 つ無い");
+    expect(JSON.parse(dataBlockOf(second.input, SHAPE_PROBLEMS_DATA_NAME))).toContainEqual({ field: "replacements[0].element", message });
+    expect(second.schema).toEqual(first.schema);
+    const twice = await runIds([structured(response), structured(response), structured(good)], EMPTY_YAML, ["v-normal"]);
+    expect(twice.outcome.ok).toBe(false);
+    if (!twice.outcome.ok) expect(twice.outcome.failure.kind).toBe("malformed");
+    expect(twice.recording.structured).toHaveLength(2);
+  });
+
+  it("形の検査：旗 ids の走りの置換の場所（検査）に検査以外の要素 → 固定文で落とす。off の置換の場所は今のまま（検査の欄を照らさない）", async () => {
+    const replaceGood = { replacements: [{ location: AMOUNT, element: validationBody("amount", "amount > 1") }], disputes: [] };
+    const notValidation = { replacements: [{ location: AMOUNT, element: validationBody("amount", "amount > 1", ["  type: number"]) }], disputes: [] };
+    const on = await runIds([structured(notValidation), structured(replaceGood)], FIXTURE_YAML, ["v-normal"]);
+    expect(on.failures.additions).toEqual([]);
+    const [, second] = on.recording.structured;
+    if (second === undefined) throw new Error("前提が壊れた");
+    expect(JSON.parse(dataBlockOf(second.input, SHAPE_PROBLEMS_DATA_NAME))).toEqual([{ field: "replacements[0].element", message: FIELD_REPAIR_PROBLEMS.notValidation }]);
+    // off（additions が無い文脈）は今の形の検査のまま
+    const read = declarationSpans(FIXTURE_YAML);
+    if (!read.ok) throw new Error("前提が壊れた");
+    expect(checkFieldRepairAnswer(notValidation, { locations: [AMOUNT], spans: read.spans, source: SOURCE, testIds: new Set() }).ok).toBe(true);
+  });
+
+  it("マージ：validations: [] の宣言は並びの形に直して末尾に挿し込み、外の値が深く等しく、検査の数が +1", () => {
+    const failures = idsLocate(EMPTY_YAML, ["v-normal"]);
+    const merged = mergeReplacements(EMPTY_YAML, [{ location: AMOUNT, element: validationBody("amount", "amount > 0") }], failures.spans, failures.additions);
+    if (!merged.ok) throw new Error(`断られた: ${merged.refusal}`);
+    expect(merged.source).toBe(EMPTY_YAML.replace("validations: []\n", "validations:\n  - name: amount\n    entity: item\n    expression: amount > 0\n"));
+    expect(merged.source).toBe(FIXTURE_YAML);
+    const before = valuesOf(EMPTY_YAML);
+    const after = valuesOf(merged.source);
+    expect(after["validations"]).toEqual([{ name: "amount", entity: "item", expression: "amount > 0" }]);
+    expect(canonicalJson({ ...after, validations: [] })).toBe(canonicalJson(before));
+    // (b) 2 回目の往復：同じ（entity・名前）は既に在るので置換の場所になり、追加が重複しない
+    const second = idsLocate(merged.source, ["v-normal"]);
+    expect(second.locations).toEqual([AMOUNT]);
+    expect(second.additions).toEqual([]);
+  });
+
+  it("マージ：並びのある宣言は末尾に挿し込み、既存の検査と外の値が深く等しく、検査の数が +1。追加と置換の混在が 1 回で通る", () => {
+    const failures = idsLocate(FIXTURE_YAML, ["v-entity", "v-normal", "r3-when"]);
+    expect(failures.additions).toEqual([{ key: ITEM, entity: "item", name: "item" }]);
+    expect(failures.locations).toEqual([ITEM, AMOUNT, CLOSE]);
+    const merged = mergeReplacements(
+      FIXTURE_YAML,
+      [
+        { location: ITEM, element: validationBody("item", "amount < 100") },
+        { location: AMOUNT, element: validationBody("amount", "amount > 1") },
+        { location: CLOSE, element: closeItem("amount > 1") },
+      ],
+      failures.spans,
+      failures.additions,
+    );
+    if (!merged.ok) throw new Error(`断られた: ${merged.refusal}`);
+    expect(merged.source).toBe(
+      FIXTURE_YAML.replace("    when: amount > 0", "    when: amount > 1").replace(
+        "    expression: amount > 0\n",
+        "    expression: amount > 1\n  - name: item\n    entity: item\n    expression: amount < 100\n",
+      ),
+    );
+    const after = valuesOf(merged.source);
+    expect(after["validations"]).toEqual([
+      { name: "amount", entity: "item", expression: "amount > 1" },
+      { name: "item", entity: "item", expression: "amount < 100" },
+    ]);
+    const before = valuesOf(FIXTURE_YAML);
+    for (const key of ["entities", "computed", "views", "permissions"]) expect(canonicalJson(after[key])).toBe(canonicalJson(before[key]));
+  });
+
+  it("負例（マージ）：節の無い宣言は固定文で断る。追加の本文が検査を増やす・別の要素の値を変える版は断る", () => {
+    const none = idsLocate(NO_SECTION_YAML, ["v-normal"]);
+    expect(none.additions).toEqual([{ key: AMOUNT, entity: "item", name: "amount" }]);
+    expect(mergeReplacements(NO_SECTION_YAML, [{ location: AMOUNT, element: validationBody("amount", "amount > 0") }], none.spans, none.additions)).toEqual({
+      ok: false,
+      refusal: MERGE_REFUSALS.noSection,
+    });
+    const empty = idsLocate(EMPTY_YAML, ["v-normal"]);
+    // (c) 追加の本文に別の要素（2 つ目の検査）を含む → 検査の数が追加の数と合わず断る
+    const two = `${validationBody("amount", "amount > 0")}\n${validationBody("other", "amount > 1")}`;
+    expect(mergeReplacements(EMPTY_YAML, [{ location: AMOUNT, element: two }], empty.spans, empty.additions)).toEqual({ ok: false, refusal: MERGE_REFUSALS.added });
+    // (c) 追加の本文が節の外（次の節の欄）まで書く → 外の値が違うので断る
+    const spill = `${validationBody("amount", "amount > 0")}\npermissions: []`;
+    const spilled = mergeReplacements(EMPTY_YAML, [{ location: AMOUNT, element: spill }], empty.spans, empty.additions);
+    expect(spilled.ok).toBe(false);
+    // 追加の場所に別の名前の検査を書いた本文（形の検査を経ずに渡した場合）も、その位置に無いので断る
+    expect(mergeReplacements(EMPTY_YAML, [{ location: AMOUNT, element: validationBody("positive", "amount > 0") }], empty.spans, empty.additions)).toEqual({
+      ok: false,
+      refusal: MERGE_REFUSALS.added,
+    });
+    // off（additions を渡さない）は追加の場所を知らないので、今までどおり場所の無い置き換えとして断る
+    expect(mergeReplacements(EMPTY_YAML, [{ location: AMOUNT, element: validationBody("amount", "amount > 0") }], empty.spans)).toEqual({
+      ok: false,
+      refusal: MERGE_REFUSALS.unknownLocation,
+    });
   });
 });

@@ -11,14 +11,19 @@
 //     引いた場所）から、B3' の拒否は要件が所属させた行（導いた entity の所属を含む）から、名前の表の行の場所の関数（`rowLocation`）で引く。検査（validate）の
 //     試験は、結び付け（`bindTestsById`）と同じく所属 entity の行の名前と同じ名前の検査に写す。静的チェックの問題は、その位置を
 //     含む要素に写す
+//   - 旗 `v12.ids` の走り（入力に観測する性質の写像と要る検査の骨組みを渡したとき。Issue #667）は、validate の試験の場所を
+//     結び付けと同じ関数（`requiredValidationLocation`）で決める（entity の行の validate も、その entity の名前の検査に写す）。
+//     要求する検査が宣言に無い失敗は、骨組みに競合なしで載り・その entity が宣言に在り・同じ名前の検査が宣言のどこにも無く・
+//     同じ名前の追加の候補がほかに無いときだけ「追加の場所」（`validation:<entity>.<名前>`）に写す。ほかは今までどおり場所なし
 //   - 写せない失敗は「場所なし」として理由つきで別に返す：行の場所が無い（`no-row-location`）・要素が宣言に無い（entity の行の
 //     ような置き換えの単位でない場所を含む。`no-element`）・位置が要素の外（`outside-element`）。**推測で近い要素に写さない**
 //   - 並びは決定的（失敗の並びの順・場所は最初に現れた順・重複なし）
 import { readSpecDocument } from "@musunest/spec-engine";
 import type { TestSuite } from "../fixed-test.js";
 import type { CorrespondenceMiss, DeclarationLocation } from "../pipeline.js";
-import { rowLocation } from "../v11a/bind-by-id.js";
+import { requiredValidationLocation, rowLocation, type RequiredValidation } from "../v11a/bind-by-id.js";
 import { deriveOwnership, type NameTable } from "../v11a/names.js";
+import type { TestObserves } from "../v11a/stages/test-spec.js";
 import { NAMED_FAILURE_MESSAGES, type NamedFailure, type NamedFailureKind } from "./search-repair.js";
 
 // ── 宣言の要素の行の範囲 ─────────────────────────────────────────────
@@ -274,6 +279,16 @@ export interface UnlocatedFailure extends NamedFailure {
   readonly reason: UnlocatedReason;
 }
 
+/**
+ * 追加の場所 1 つ（旗 `v12.ids` の走りだけ。Issue #667）。validate の試験が要求する（entity・名前）の検査が宣言に無く、コードが
+ * 欄だけの直しの本文を validations の節の末尾に挿し込む場所。`key` は `validation:<entity>.<name>`
+ */
+export interface ValidationAddition {
+  readonly key: string;
+  readonly entity: string;
+  readonly name: string;
+}
+
 /** 失敗の場所の結果 */
 export interface FailureLocations {
   /** 場所に写した失敗（失敗の並びの順） */
@@ -284,6 +299,11 @@ export interface FailureLocations {
   readonly locations: readonly string[];
   /** 一番良い版の要素の範囲（読めない宣言は空） */
   readonly spans: readonly DeclarationSpan[];
+  /**
+   * 追加の場所（`locations` に入った場所のうち、宣言に無い検査を足す場所。最初に現れた順・重複なし）。旗 `v12.ids` の走り
+   * （入力に `ids` を渡したとき）だけ持つ（off の結果は今のまま。Issue #667）
+   */
+  readonly additions?: readonly ValidationAddition[];
 }
 
 /** 一番良い版に残った失敗（`namedFailuresOf` の入力に、場所を引くための材料を足したもの） */
@@ -302,6 +322,14 @@ export interface LocateInput {
   readonly unmarked: readonly string[];
   readonly mismatches: readonly { readonly testId: string }[];
   readonly unresolved: readonly { readonly testId: string }[];
+  /**
+   * 旗 `v12.ids` の走りだけ：観測する性質の写像（T2）と、要る検査の骨組み（`requiredValidationsOf`。評価の文脈と同じ組から導いた
+   * もの）。渡せば validate の試験の場所を結び付けと同じ関数で決め、追加の場所を作る（Issue #667）
+   */
+  readonly ids?: {
+    readonly observes: ReadonlyMap<string, TestObserves>;
+    readonly requiredValidations: readonly RequiredValidation[];
+  };
 }
 
 type Resolution = { readonly ok: true; readonly keys: readonly string[] } | { readonly ok: false; readonly reason: UnlocatedReason };
@@ -342,7 +370,8 @@ export function locateFailures(input: LocateInput): FailureLocations {
       const span = containing.length === 1 ? containing[0] : undefined;
       push("static-check", null, null, span === undefined ? { ok: false, reason: "outside-element" } : { ok: true, keys: [span.key] });
     }
-    return finish(located, unlocated, spans);
+    // 旗 ids の走りは追加の場所の欄を持つ（静的チェックに落ちた版は追加を作らない）
+    return input.ids === undefined ? finish(located, unlocated, spans) : { ...finish(located, unlocated, spans), additions: [] };
   }
 
   for (const miss of input.correspondenceMisses) {
@@ -361,11 +390,25 @@ export function locateFailures(input: LocateInput): FailureLocations {
     push("decl-rejection", null, rejection.requirementId, resolution);
   }
   for (const requirementId of input.unmarked) push("decl-unmarked", null, requirementId, { ok: false, reason: "no-element" });
+  const additionOf = additionCandidates(input, read.ok ? read.document : null, spans);
+  const additions: ValidationAddition[] = [];
   const testResolution = (testId: string): Resolution => {
     const test = input.suite.tests.find((candidate) => candidate.id === testId);
     const roleId = test?.target.roleId;
     const base = roleId === undefined ? undefined : rowLocation(input.table, roleId);
     if (test === undefined || base === undefined) return { ok: false, reason: "no-row-location" };
+    if (input.ids !== undefined && test.operation === "validate") {
+      // 旗 ids：要求する検査の場所は結び付けと同じ関数で決める（entity の行は、その entity の名前の検査）。在れば置換の場所、
+      // 無ければ追加の候補（条件を満たすものだけ）、どちらでもなければ場所なし（推測しない）
+      const required = requiredValidationLocation(input.table, test);
+      if (required === undefined) return { ok: false, reason: "no-element" };
+      const replace = resolveLocation(spans, required);
+      if (replace.ok) return replace;
+      const addition = additionOf.get(test.id);
+      if (addition === undefined) return { ok: false, reason: "no-element" };
+      if (!additions.some((entry) => entry.key === addition.key)) additions.push(addition);
+      return { ok: true, keys: [addition.key] };
+    }
     if (base.kind === "entity") return { ok: false, reason: "no-element" };
     // 検査（validate）の試験は、結び付けと同じく所属 entity の行の名前と同じ名前の検査に写す（M-03）
     const location: DeclarationLocation = test.operation === "validate" ? { kind: "validation", entity: base.entity, name: base.name } : base;
@@ -377,7 +420,56 @@ export function locateFailures(input: LocateInput): FailureLocations {
   for (const entry of input.unresolved) {
     push("test-unresolved", entry.testId, requirementOfTest(entry.testId), testResolution(entry.testId));
   }
-  return finish(located, unlocated, spans);
+  const result = finish(located, unlocated, spans);
+  return input.ids === undefined ? result : { ...result, additions };
+}
+
+/**
+ * 追加の候補（試験 ID → 追加の場所。旗 ids の走りだけ。純粋）。B4 の不一致・未解決の validate の試験のうち、次を全部満たすもの：
+ *   (i) 観測する性質が validation で、骨組みに競合なしで載る（同じ（entity・名前）・同じ試験 ID）
+ *   (ii)(iv) 同じ名前の検査が宣言のどの entity にも無い（検査の名前は宣言全体で一意）
+ *   (iii) その entity が宣言に在る
+ *   (v) 同じ名前の追加の候補がほかの（entity）に無い（衝突する候補は全部外す。どちらも選ばない）
+ * 静的チェックに落ちた版・読めない宣言には作らない。
+ */
+function additionCandidates(
+  input: LocateInput,
+  document: Record<string, unknown> | null,
+  spans: readonly DeclarationSpan[],
+): ReadonlyMap<string, ValidationAddition> {
+  const candidates = new Map<string, ValidationAddition>();
+  const ids = input.ids;
+  if (ids === undefined || document === null || !input.staticCheckPassed) return candidates;
+  const namesOf = (section: string): readonly string[] => {
+    const values = document[section];
+    if (!Array.isArray(values)) return [];
+    return values.flatMap((value: unknown) => (isRecord(value) && typeof value["name"] === "string" ? [value["name"]] : []));
+  };
+  const validationNames = new Set(namesOf("validations"));
+  const entityNames = new Set(namesOf("entities"));
+  const testIds = [...input.mismatches, ...input.unresolved].map((entry) => entry.testId);
+  for (const testId of testIds) {
+    if (candidates.has(testId)) continue;
+    const test = input.suite.tests.find((candidate) => candidate.id === testId);
+    if (test === undefined || test.operation !== "validate" || ids.observes.get(testId) !== "validation") continue;
+    const required = requiredValidationLocation(input.table, test);
+    if (required === undefined || required.entity === null) continue;
+    const entry = ids.requiredValidations.find(
+      (candidate) => candidate.entity === required.entity && candidate.name === required.name && candidate.testIds.includes(testId),
+    );
+    if (entry === undefined || entry.conflict) continue;
+    if (spanOf(spans, required) !== undefined) continue;
+    if (validationNames.has(required.name) || !entityNames.has(required.entity)) continue;
+    candidates.set(testId, { key: spanKey("validation", required.entity, required.name), entity: required.entity, name: required.name });
+  }
+  // (v) 同じ名前で（entity）の違う候補は全部外す
+  const entitiesByName = new Map<string, Set<string>>();
+  for (const candidate of candidates.values()) {
+    const entities = entitiesByName.get(candidate.name) ?? new Set<string>();
+    entities.add(candidate.entity);
+    entitiesByName.set(candidate.name, entities);
+  }
+  return new Map([...candidates].filter(([, candidate]) => (entitiesByName.get(candidate.name)?.size ?? 0) <= 1));
 }
 
 function finish(
@@ -390,7 +482,7 @@ function finish(
   return { located, unlocated, locations, spans };
 }
 
-/** 欄だけの直しを使えるか（場所に写した失敗が 1 つ以上あり、場所なしが 0） */
+/** 欄だけの直しを使えるか（場所に写した失敗が 1 つ以上あり、場所なしが 0。追加の場所は場所に写した側に数える） */
 export function canRepairFields(locations: FailureLocations): boolean {
   return locations.located.length > 0 && locations.unlocated.length === 0 && locations.locations.length > 0;
 }
