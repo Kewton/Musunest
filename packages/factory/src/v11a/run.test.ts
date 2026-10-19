@@ -4828,6 +4828,24 @@ describe("旗 v12.ids：要求する検査が宣言に無い失敗を追加の�
     expect(stopped.recording.tools).toEqual([]);
   });
 
+  it("中身のある流れの書き方の検査の節（validations: [ … ]）の初版は追加の場所を作らず、K3 の前（ids off）と同じ経路をとる（欄だけの直しを呼ばず、道具付きの直す段へ流れる。止まり方も off と同じ）", async () => {
+    // spec-engine の読み取りは `{ }` の写像を読めないので、読める中身のある流れの書き方は名前だけの並びで、静的チェックに落ちる。
+    // 静的チェックに落ちた版は追加の場所を作らない（場所の純粋な試験は locate.test.ts）。挿し込みを断って往復を消費する経路は無い
+    const flow = replaced(NOVAL_YAML, "validations: []\n", "validations: [amount]\n");
+    const on = await runScenario([...head667(flow), structured(acceptAll()), repairDone(FIXED_YAML), structured(acceptAll())], IDS_SEARCH);
+    const off = await runScenario(
+      [...head({ yaml: flow, t2: t2Response([...r1Four(), ...r2Tests(), ...r3Tests(), ...r4Tests()]) }), structured(acceptAll()), repairDone(FIXED_YAML), structured(acceptAll())],
+      SEARCH,
+    );
+    for (const run of [on, off]) {
+      expect(fieldRequests(run.recording.structured)).toEqual([]);
+      expect(run.recording.tools).toHaveLength(1);
+    }
+    expect(on.result.outcome).toEqual(off.result.outcome);
+    expect(on.result.stopped).toEqual(off.result.stopped);
+    expect(stageIds(on.result).slice(-2)).toEqual(stageIds(off.result).slice(-2));
+  });
+
   it("同じ台本で 2 回同じ値（要求・記録・納品物）", async () => {
     const script = () => [
       ...head667(),

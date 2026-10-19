@@ -386,6 +386,23 @@ describe("旗 v12.ids の場所（純粋）：validate の試験は結び付け�
     expect(result.unlocated.map((failure) => failure.reason)).toEqual(["no-element", "no-element"]);
   });
 
+  it("中身のある流れの書き方の検査の節（validations: [ … ]）には追加の場所を作らず、場所なしのまま今までの経路（全文の直し）へ戻す", () => {
+    // spec-engine の読み取りは `{ }` の写像を読めないので、読める中身のある流れの書き方は名前だけの並び（純粋な入力として渡す）
+    const source = FIXTURE_YAML.replace("validations:\n  - name: amount\n    entity: item\n    expression: amount > 0\n", "validations: [positive]\n");
+    expect(source).not.toBe(FIXTURE_YAML);
+    const suite: TestSuite = { tests: [vtest("v-amount", "f.item.amount")] };
+    const result = locateFailures(idsInput(suite, { source, mismatches: [{ testId: "v-amount" }] }));
+    expect(result.additions).toEqual([]);
+    expect(result.located).toEqual([]);
+    expect(result.unlocated.map((failure) => [failure.testId, failure.reason])).toEqual([["v-amount", "no-element"]]);
+    expect(canRepairFields(result)).toBe(false);
+    // 同じ検査を並びの書き方にすれば追加の場所になる（対照）
+    const block = withValidations(["  - name: positive", "    entity: item", "    expression: amount > 0"]);
+    expect(locateFailures(idsInput(suite, { source: block, mismatches: [{ testId: "v-amount" }] })).additions).toEqual([
+      { key: "validation:item.amount", entity: "item", name: "amount" },
+    ]);
+  });
+
   it("(5) entity が宣言に無い → 場所なし", () => {
     const source = NO_VALIDATION_YAML.replace("  - name: member\n    fields:", "  - name: person\n    fields:");
     const suite: TestSuite = { tests: [vtest("v-member-title", "f.member.title")] };

@@ -445,6 +445,14 @@ function additionCandidates(
     if (!Array.isArray(values)) return [];
     return values.flatMap((value: unknown) => (isRecord(value) && typeof value["name"] === "string" ? [value["name"]] : []));
   };
+  // 中身のある流れの書き方の検査の節（`validations: [ … ]`）には挿し込めないので、追加の場所を作らない（場所なしのまま
+  // 今までの経路へ戻す。走りを止めない）。候補にするのは並びの節と `validations: []` だけ（節が無い宣言・中身のある流れの
+  // 書き方は静的チェックに落ちるので、走りの中ではここへ来ない。純粋な入力でも挿し込みの断りで往復を消費させない）
+  const validationsValue = document["validations"];
+  const blockHeader = input.source.split("\n").some((line) => /^validations:\s*(#.*)?$/.test(line));
+  const emptyFlow = input.source.split("\n").some((line) => /^validations:\s*\[\s*\]\s*(#.*)?$/.test(line));
+  if (!blockHeader && !emptyFlow) return candidates;
+  if (Array.isArray(validationsValue) && validationsValue.length > 0 && !blockHeader) return candidates;
   const validationNames = new Set(namesOf("validations"));
   const entityNames = new Set(namesOf("entities"));
   const testIds = [...input.mismatches, ...input.unresolved].map((entry) => entry.testId);

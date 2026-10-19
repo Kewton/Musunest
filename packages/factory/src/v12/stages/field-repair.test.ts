@@ -449,9 +449,12 @@ describe("旗 v12.ids の欄だけの直し：追加の場所を enum とデー�
   });
 
   it("負例（マージ）：節の無い宣言は固定文で断る。追加の本文が検査を増やす・別の要素の値を変える版は断る", () => {
+    // 節の無い宣言には場所の段で追加の場所を作らない（場所なしのまま今までの経路へ。往復を消費しない）。それでも追加を渡せばマージが断る
     const none = idsLocate(NO_SECTION_YAML, ["v-normal"]);
-    expect(none.additions).toEqual([{ key: AMOUNT, entity: "item", name: "amount" }]);
-    expect(mergeReplacements(NO_SECTION_YAML, [{ location: AMOUNT, element: validationBody("amount", "amount > 0") }], none.spans, none.additions)).toEqual({
+    expect(none.additions).toEqual([]);
+    expect(none.unlocated.map((failure) => failure.reason)).toEqual(["no-element"]);
+    const addition = { key: AMOUNT, entity: "item", name: "amount" };
+    expect(mergeReplacements(NO_SECTION_YAML, [{ location: AMOUNT, element: validationBody("amount", "amount > 0") }], none.spans, [addition])).toEqual({
       ok: false,
       refusal: MERGE_REFUSALS.noSection,
     });
