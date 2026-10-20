@@ -129,6 +129,23 @@ describe("段ごとの論理の枠（§4.1 の列のまま）", () => {
     );
   });
 
+  it("C2 の行の文は、中身のやり直しが C3 の拒否した要件だけの書き直しであることを履歴つきで書く。回数の値（形 1・中身 1）と定義の不備 0 は変えない（Issue #661）", () => {
+    const c2 = V12_STAGE_FRAME_DEFINITIONS.find((definition) => definition.id === "F-v12-c2");
+    expect(c2?.text.startsWith("C2（要件の写像）は束ごとに初回 1・形のやり直し 1・中身のやり直し 1（C3 の拒否で該当の束だけ）。")).toBe(true);
+    expect(c2?.text).toContain("中身のやり直しは C3 が拒否した要件だけの書き直し");
+    expect(c2?.text).toContain("C3 はその表から導いた全対象に掛ける");
+    expect(c2?.text).toContain("初回の表と初回の拒否で持ち越す");
+    // I3（Issue #660）の文はそのまま残す
+    expect(c2?.text).toContain("帰属できなければ全体の作り直しで、どちらも 1 回。");
+    expect(c2?.why).toContain("書き直す単位を拒否された要件にした");
+    expect(c2?.since).toContain("#592");
+    expect(c2?.since).toContain("#660");
+    expect(c2?.since).toContain("#661");
+    expect(ruleDefinitionDefects(V12_STAGE_FRAME_DEFINITIONS)).toEqual([]);
+    expect(frame("C2")?.content).toEqual({ count: 1, unit: "bundle" });
+    expect(frame("C2")?.shape).toEqual({ count: 1, unit: "bundle" });
+  });
+
   it("ループと作り直しの行は探索型の直しの予算の行（手 4a）と同じ値、C6 の版は v1.1α の declChecks と同じ値", () => {
     expect(frame("loop")?.maxUnits).toBe(SEARCH_REPAIR_BUDGET.repairRoundTrips);
     expect(frame("rewrite")?.content?.count).toBe(SEARCH_REPAIR_BUDGET.rewrites);

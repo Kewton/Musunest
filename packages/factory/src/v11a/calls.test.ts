@@ -306,7 +306,7 @@ const listedIds = (request: string): readonly string[] => {
 
 /**
  * 旗 v12.ids の走りのやり直しを含む走りの頭（表を組む段と T1''。Issue #593）。C1 は束 2 が知らない ID で落ちて形のやり直し
- * 1 回（束 1・3 は 1 回ずつ。計 4）、C2 は要件の欠落で落ちて形のやり直し 1 回・T1'' の拒否のあとの 2 回目 1 回（計 3）、
+ * 1 回（束 1・3 は 1 回ずつ。計 4）、C2 は要件の欠落で落ちて形のやり直し 1 回・T1'' の拒否のあとの 2 回目（拒否された R1 だけの書き直し。Issue #661）1 回（計 3）、
  * T1'' は旗 off と同じ 3 回（形の落ち → 形のやり直しで R1 を拒否／2 回目で全部受理）
  */
 function idsRetryHead(materials: SizedMaterials, incomplete: unknown, rejectR1: unknown): RecordedCall[] {
@@ -323,7 +323,8 @@ function idsRetryHead(materials: SizedMaterials, incomplete: unknown, rejectR1: 
     structured(mapping),
     structured(incomplete),
     structured(rejectR1),
-    structured(mapping),
+    // 2 回目は拒否された R1 だけの書き直し（Issue #661）
+    structured({ requirements: (mapping["requirements"] ?? []).filter((entry) => entry["requirementId"] === "R1") }),
     structured(materials.judgments()),
   ];
 }
@@ -948,12 +949,14 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
     expect(run.logical["semantic-check"]).toBe(0);
   });
 
-  it("C3 の拒否のあとの 2 回目の要求は 1 本（全要件・前回の写像・拒否・印）で、C3 の再点検は 1 回。再び拒否なら持ち越し（partial）", async () => {
+  it("C3 の拒否のあとの 2 回目の要求は 1 本（全要件の一覧・前回の写像・拒否・印・書き直す要件。Issue #661）で、C3 の再点検は 1 回。再び拒否なら持ち越し（partial）", async () => {
     const reject = materials.judgments({ [LAST]: ["unnecessary-ownership", materials.textOf(LAST)] });
-    const run = await observe(materials, [...vocabulary(), structured(mapping), structured(reject), structured(mapping), structured(reject), ...tailWithout([LAST])], { flags: ALL_ON });
+    const lastOnly = { requirements: entries().filter((entry) => entry["requirementId"] === LAST) };
+    const run = await observe(materials, [...vocabulary(), structured(mapping), structured(reject), structured(lastOnly), structured(reject), ...tailWithout([LAST])], { flags: ALL_ON });
     const requests = mappingRequestsOf(run);
     expect(requests.map(listedIds)).toEqual([materials.ids, materials.ids]);
-    for (const name of ["前回の写像", "表の点検の拒否", "助言の印"]) expect(requests[1]).toContain(`<data name=\\"${name}\\">`);
+    for (const name of ["前回の写像", "表の点検の拒否", "助言の印", "書き直す要件"]) expect(requests[1]).toContain(`<data name=\\"${name}\\">`);
+    expect(requests[1]).toContain(`<data name=\\"書き直す要件\\">\\n[\\n  \\"${LAST}\\"\\n]`);
     expect(requests[1]).toContain(LAST);
     expect(run.logical["semantic-check"]).toBe(2);
     expect(mappingRecordsOf(run).map((record) => [record.status, record.retries.content])).toEqual([
@@ -1249,7 +1252,7 @@ describe("(5''') 旗 v12.ids の C2 の初回の形のやり直しを落ちた�
     const [entities, fields, behaviors, mapping] = materials.tableResponses() as readonly Record<string, readonly Record<string, unknown>[]>[];
     if (entities === undefined || fields === undefined || behaviors === undefined || mapping === undefined) throw new Error("前提が壊れた：C1・C2 の応答が 4 つでない");
     const target = materials.ids[Math.floor(materials.ids.length / 2)] as string;
-    // 要件 target の所属に行に無い ID を足す（問題は target に帰属する）→ target だけの書き直し → C3 の拒否 → 2 回目（全要件）
+    // 要件 target の所属に行に無い ID を足す（問題は target に帰属する）→ target だけの書き直し → C3 の拒否 → 2 回目（拒否された R1 だけ。Issue #661）
     const bad = {
       requirements: (mapping["requirements"] ?? []).map((entry) =>
         entry["requirementId"] === target ? { ...entry, roles: [...(entry["roles"] as readonly unknown[]), { id: "E1.F99", basis: "stated", reason: null }] } : entry,
@@ -1263,7 +1266,7 @@ describe("(5''') 旗 v12.ids の C2 の初回の形のやり直しを落ちた�
       structured(bad),
       structured(rewritten),
       structured(materials.judgments({ R1: ["unnecessary-ownership", materials.textOf("R1")] })),
-      structured(mapping),
+      structured({ requirements: (mapping["requirements"] ?? []).filter((entry) => entry["requirementId"] === "R1") }),
       structured(materials.judgments()),
       structured(materials.testSpecResponse()),
       structured({ declaration: materials.declaration() }),
@@ -1277,8 +1280,64 @@ describe("(5''') 旗 v12.ids の C2 の初回の形のやり直しを落ちた�
       expect(run.stages.mapping.retries).toEqual({ communication: failFirst ? 3 : 0, shape: 1, content: 1 });
       const mappingRequests = run.requests.filter((request) => request.includes(`"schemaName":"${MAPPING_SCHEMA_NAME}"`));
       expect(mappingRequests).toHaveLength(failFirst ? 6 : 3);
-      expect(mappingRequests.filter((request) => request.includes('<data name=\\"書き直す要件\\">'))).toHaveLength(failFirst ? 2 : 1);
+      // 書き直す要件の塊は初回の形のやり直し（target）と C3 の拒否のあとの 2 回目（R1）の 2 本に載る（Issue #661）
+      expect(mappingRequests.filter((request) => request.includes('<data name=\\"書き直す要件\\">'))).toHaveLength(failFirst ? 4 : 2);
       expect(run.judge).toEqual({ j4: 2 * size.requirements, j2: 0 });
+      expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+      expect(run.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
+      expect(run.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
+      expectNoAcceptanceMaterial(run.requests);
+    }
+  });
+});
+
+describe("(5'''') 旗 v12.ids の C3 の拒否のあとの C2 の 2 回目を拒否された要件だけの書き直しにしても、論理要求の枠と門は同じ（Issue #661）", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+  /** C3 の要求の対象（「要件の文と引用」の要件 ID） */
+  const semanticTargetsOf = (request: string): readonly string[] => {
+    const parsed = JSON.parse(request) as { readonly input: string };
+    const block = parsed.input.split('<data name="要件の文と引用">\n')[1]?.split("\n</data>")[0] ?? "[]";
+    return (JSON.parse(block) as readonly { readonly requirementId: string }[]).map((entry) => entry.requirementId);
+  };
+  const dataOf = (request: string, name: string): unknown => {
+    const parsed = JSON.parse(request) as { readonly input: string };
+    const block = parsed.input.split(`<data name="${name}">\n`)[1]?.split("\n</data>")[0];
+    return block === undefined ? null : (JSON.parse(block) as unknown);
+  };
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements：C3 が 2 件を拒否した走りの C2 は初回 1・中身 1（書き直す要件は 2 件）、C3 は初回 1・再点検 1 で、再点検は合併した表から導いた全対象。再送を全部使っても合計 72・実試行 144・判定 80 の内側で full", async (size) => {
+    const materials = buildSized(size.requirements, size.tests, ALL_ON);
+    const [entities, fields, behaviors, mapping] = materials.tableResponses() as readonly Record<string, readonly Record<string, unknown>[]>[];
+    if (entities === undefined || fields === undefined || behaviors === undefined || mapping === undefined) throw new Error("前提が壊れた：C1・C2 の応答が 4 つでない");
+    const X = materials.ids[Math.floor(materials.ids.length / 2)] as string;
+    const Y = materials.ids.at(-1) as string;
+    const calls = [
+      structured(entities),
+      structured(fields),
+      structured(behaviors),
+      structured(mapping),
+      structured(materials.judgments({ [Y]: ["missing-target", materials.textOf(Y)], [X]: ["weak-verification", materials.textOf(X)] })),
+      structured({ requirements: (mapping["requirements"] ?? []).filter((entry) => entry["requirementId"] === X || entry["requirementId"] === Y) }),
+      structured(materials.judgments()),
+      structured(materials.testSpecResponse()),
+      structured({ declaration: materials.declaration() }),
+      structured(materials.judgments()),
+    ];
+    for (const failFirst of [false, true]) {
+      const run = await observe(materials, calls, { flags: ALL_ON, failFirst });
+      expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
+      expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      expect(run.logical.mapping).toBe(2);
+      expect(run.logical["semantic-check"]).toBe(2);
+      expect(run.stages.mapping.retries).toEqual({ communication: failFirst ? 2 : 0, shape: 0, content: 1 });
+      const mappingRequests = run.requests.filter((request) => request.includes(`"schemaName":"${MAPPING_SCHEMA_NAME}"`));
+      expect(mappingRequests).toHaveLength(failFirst ? 4 : 2);
+      const second = mappingRequests.at(-1) as string;
+      expect(dataOf(second, "書き直す要件")).toEqual(materials.ids.filter((id) => id === X || id === Y));
+      expect(dataOf(second, "前回の写像")).toEqual(mapping);
+      // C3 の再点検の対象は合併した表から導いた全対象（全要件が fixed-test か structural なので要件の数と同じ）
+      const semanticRequests = run.requests.filter((request) => request.includes(`"schemaName":"${SEMANTIC_CHECK_SCHEMA_NAME}"`));
+      expect(semanticTargetsOf(semanticRequests.at(-1) as string)).toEqual(materials.ids);
       expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
       expect(run.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
       expect(run.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
