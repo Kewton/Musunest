@@ -1571,6 +1571,8 @@ describe("(8) 旗 v12.ids の C3 を要件 6 件ごとの束で同時に呼ぶ�
   describe("(10) 組合せ全体の呼び出し数の契約試験（やり直しを全部使う台本。数字は限度の表と束の定数から計算する）", () => {
     /** C5（宣言のコンパイル。手 6）の紙上の論理の最大（08 §4.1 の表の C5 の行。この表にはまだ行が無い） */
     const PAPER_C5 = 6;
+    /** 組合せ全体の論理の最大（C5 の 6 を含む。T2 は束なし）。T2 を要件 5 件ごとの束（手 3f）で数えると 59／62／69 */
+    const EXPECTED_TOTAL: Readonly<Record<number, number>> = { 15: 54, 17: 54, 25: 58 };
     const frameOf = (stage: string) => {
       const found = V12_STAGE_FRAMES.find((entry) => entry.stage === stage);
       if (found === undefined) throw new Error(`前提が壊れた：枠の行 ${stage} が無い`);
@@ -1664,6 +1666,8 @@ describe("(8) 旗 v12.ids の C3 を要件 6 件ごとの束で同時に呼ぶ�
       for (const [stage, value] of Object.entries(expected)) expect(mouth.logical[stage as StageKey], stage).toBe(value);
       const observed = Object.values(expected).reduce((sum, value) => sum + value, 0);
       const total = observed + paperMax() + PAPER_C5;
+      // 完了条件 (10)（管理の判断で改めた）：今の main（T2 は束なし）で計算した合計は要件 15／17／25 で 54／54／58
+      expect(total).toBe(EXPECTED_TOTAL[requirements]);
       expect(total).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
       // 実試行：論理 × 通信の試行 2 が門の内側。判定：J4 は要件ごとに 1 × 点検 2 回
       expect(2 * total).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
