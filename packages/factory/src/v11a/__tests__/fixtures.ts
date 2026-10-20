@@ -12,7 +12,7 @@ import { normalizeSpec } from "@musunest/spec-engine";
 import type { LlmClient, LlmStructuredRequest, LlmToolRequest } from "../../llm.js";
 import { createFakeLlmClient, uncheckedBecause, type RecordedCall, type RecordedStructuredCall } from "../../llm-fake.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
-import type { PromptDocument, RuleDefinition } from "../../stages/prompt.js";
+import { serializeJson, type PromptDocument, type RuleDefinition } from "../../stages/prompt.js";
 import type { RecordingClient } from "../../stages/__tests__/prompt.js";
 import {
   copyLengthFor,
@@ -26,7 +26,16 @@ import {
 import { STRUCTURAL_ASSERTIONS, STRUCTURAL_TARGET_KINDS, type StructuralAssertionKind } from "../../fixed-test.js";
 import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } from "../../v12/ledger.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
-import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
+import {
+  SEMANTIC_CHECK_IDS_RULE_ID,
+  SEMANTIC_CHECK_IDS_RULE_TEXT,
+  SEMANTIC_CHECK_IDS_SCHEMA,
+  SEMANTIC_CHECK_RULE_DEFINITIONS,
+  SEMANTIC_CHECK_SCHEMA,
+  SEMANTIC_CHECK_SCHEMA_NAME,
+  semanticCheckTargets,
+  semanticSentencesOf,
+} from "../stages/semantic-check.js";
 import { TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
 import { WRITE_V11A_SCHEMA_NAME } from "../stages/write.js";
 
@@ -1039,6 +1048,117 @@ export const idsResponseList = (responses: IdsResponses): readonly Record<string
   responses.behaviors,
   responses.mapping,
 ];
+
+// ── 旗 v12.ids の C3 の応答（観点ごとの根拠の形。Issue #700・#706）──────────────────────────
+
+/** C3 の拒否の指定（拒否の種類と、その観点の根拠の文の番号。番号を省けばその要件の最初の文 `<要件 ID>:t1`） */
+export type SemanticEvidenceRejection = readonly [kind: string, quoteId?: string];
+
+/** 要件の文の番号つきの文の引き表（コードの `semanticSentencesOf` で振る。fixture は番号を手で書かない） */
+const sentencesOf = (list: RequirementList): ReadonlyMap<string, string> =>
+  new Map(semanticSentencesOf(list, list.requirements.map((item) => item.id)).flatMap((entry) => [...entry.text, ...entry.quote].map((sentence) => [sentence.id, sentence.text] as const)));
+
+/** 拒否の指定の番号（省けばその要件の最初の文） */
+const rejectionQuoteIdOf = (requirementId: string, rejection: SemanticEvidenceRejection): string => rejection[1] ?? `${requirementId}:t1`;
+
+/**
+ * 旗 v12.ids の C3 の応答（観点ごとの根拠の形。strict の schema に合う。Issue #700・#706）を、C3 が見る表から組む。要件ごとに、所属は
+ * examined＝その要件の所属の行の全部・不要 0 件、対象は present（所属の行。要件でない文は 0 件）、確かめ方は sufficient で、根拠の
+ * 番号はその要件の最初の文（`<要件 ID>:t1`）。`rejects` の要件は、種類の観点だけを問題ありに変え、その観点の番号を渡した番号にする
+ * （unnecessary-ownership は所属の先頭の行を不要に、missing-target は missing、weak-verification は weak）。`ids` は判定を書く要件
+ * （省けば表の点検の対象の全部）
+ */
+export function semanticEvidenceResponseOf(
+  list: RequirementList,
+  table: NameTable,
+  rejects: Readonly<Record<string, SemanticEvidenceRejection>> = {},
+  ids: readonly string[] = semanticCheckTargets(list, table),
+): { readonly judgments: readonly Record<string, unknown>[] } {
+  const sentences = sentencesOf(list);
+  return {
+    judgments: ids.map((requirementId) => {
+      const first = `${requirementId}:t1`;
+      if (!sentences.has(first)) throw new Error(`前提が壊れた：一覧に ${requirementId} の文が無い`);
+      const owned = (table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? []).map((role) => role.id);
+      const found = rejects[requirementId];
+      const kind = found?.[0];
+      const quoteId = found === undefined ? first : rejectionQuoteIdOf(requirementId, found);
+      if (kind === "unnecessary-ownership" && owned.length === 0) throw new Error(`前提が壊れた：${requirementId} は所属の行を持たない`);
+      return {
+        requirementId,
+        ownership: {
+          examinedRowIds: owned,
+          unnecessaryRowIds: kind === "unnecessary-ownership" ? owned.slice(0, 1) : [],
+          quoteId: kind === "unnecessary-ownership" ? quoteId : first,
+        },
+        target: { verdict: kind === "missing-target" ? "missing" : "present", presentRowIds: owned, quoteId: kind === "missing-target" ? quoteId : first },
+        verification: { verdict: kind === "weak-verification" ? "weak" : "sufficient", quoteId: kind === "weak-verification" ? quoteId : first },
+      };
+    }),
+  };
+}
+
+/**
+ * `semanticEvidenceResponseOf` の拒否の指定から、コードが導く拒否の種類と引用（番号から引いた文）を組む（期待の値。Issue #706）。
+ * 番号がデータに無ければ前提が壊れたとして投げる
+ */
+export function semanticEvidenceRejectQuotesOf(
+  list: RequirementList,
+  rejects: Readonly<Record<string, SemanticEvidenceRejection>>,
+): Readonly<Record<string, readonly [string, string]>> {
+  const sentences = sentencesOf(list);
+  return Object.fromEntries(
+    Object.entries(rejects).map(([requirementId, rejection]) => {
+      const quoteId = rejectionQuoteIdOf(requirementId, rejection);
+      const text = sentences.get(quoteId);
+      if (text === undefined) throw new Error(`前提が壊れた：文の番号 ${quoteId} がデータに無い`);
+      return [requirementId, [rejection[0], text] as const];
+    }),
+  );
+}
+
+/** C3 のデータ「要件の文と引用」の塊（`<data name="…">` の中身） */
+const SEMANTIC_SENTENCES_BLOCK = /<data name="要件の文と引用">\n([\s\S]*?)\n<\/data>/;
+
+/** 空白を除いた文字列（文の番号の照合で、分けた文をつなぐと元の文に戻ることを見る） */
+const withoutSpaces = (text: string): string => text.replace(/\s/g, "");
+
+/**
+ * 旗 v12.ids の C3 の要求を、旗 ids off の契約（R-sc-04 の文・schema・データ「要件の文と引用」の形）に戻す（on と off を比べる試験が
+ * 使う。Issue #706）。戻す前に、要求が ids on の R-sc-04 の文と schema を持ち、「要件の文と引用」が正しい番号の辞書（要件ごとに
+ * `<要件 ID>:t<n>`・`<要件 ID>:q<n>` が 1 から連番で、文は元の文の部分文字列・つなぐと空白を除いて元の文に戻る）であることを
+ * コードの導出とは別に確かめ、違えば投げる。ほかの欄・ほかのデータの塊は触らない
+ */
+export function semanticRequestAsIdsOff(request: LlmStructuredRequest, list: RequirementList): LlmStructuredRequest {
+  if (request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME) throw new Error(`前提が壊れた：C3 の要求でない（${request.schemaName}）`);
+  if (!(request.rules ?? []).includes(SEMANTIC_CHECK_IDS_RULE_TEXT)) throw new Error("ids on の C3 の要求が R-sc-04 の ids on の文を持たない");
+  if (JSON.stringify(request.schema) !== JSON.stringify(SEMANTIC_CHECK_IDS_SCHEMA)) throw new Error("ids on の C3 の要求が観点ごとの根拠の schema でない");
+  const match = SEMANTIC_SENTENCES_BLOCK.exec(request.input);
+  if (match === null) throw new Error("C3 の要求に「要件の文と引用」の塊が無い");
+  const numbered = JSON.parse(match[1] ?? "null") as readonly { requirementId: string; text: readonly { id: string; text: string }[]; quote: readonly { id: string; text: string }[] }[];
+  const offEntries = numbered.map((entry) => {
+    const requirement = list.requirements.find((item) => item.id === entry.requirementId);
+    if (requirement === undefined) throw new Error(`番号の辞書に一覧に無い要件がある：${entry.requirementId}`);
+    for (const [mark, sentences, original] of [
+      ["t", entry.text, requirement.text],
+      ["q", entry.quote, requirement.quote],
+    ] as const) {
+      sentences.forEach((sentence, index) => {
+        if (sentence.id !== `${entry.requirementId}:${mark}${String(index + 1)}`) throw new Error(`番号が連番でない：${sentence.id}`);
+        if (sentence.text === "" || !original.includes(sentence.text)) throw new Error(`番号の文が元の文に無い：${sentence.id}`);
+      });
+      if (withoutSpaces(sentences.map((sentence) => sentence.text).join("")) !== withoutSpaces(original)) throw new Error(`番号の文をつないでも元の文に戻らない：${entry.requirementId}`);
+    }
+    return { requirementId: requirement.id, text: requirement.text, quote: requirement.quote };
+  });
+  const offText = SEMANTIC_CHECK_RULE_DEFINITIONS.find((definition) => definition.id === SEMANTIC_CHECK_IDS_RULE_ID)?.text as string;
+  return {
+    ...request,
+    schema: SEMANTIC_CHECK_SCHEMA,
+    rules: (request.rules ?? []).map((text) => (text === SEMANTIC_CHECK_IDS_RULE_TEXT ? offText : text)),
+    input: request.input.replace(SEMANTIC_SENTENCES_BLOCK, () => `<data name="要件の文と引用">\n${serializeJson(offEntries)}\n</data>`),
+  };
+}
 
 /** 確定した仕様（抽象的な題材。要件は一覧と同じ） */
 export function planOf(list: RequirementList): ConfirmedPlan {
