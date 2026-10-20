@@ -23,6 +23,9 @@
 // R1 は既定値（選択肢の項目 `k1` の既定値 a1）、R2 は選択肢の集合（選択肢の項目 `k2`）、R3 はアプリ全体の件数（計算 `total`）。
 // 組の試験の数は M のまま（R1・R2 は 1 件、R3 は正常・境界・異常の 3 件。余りはほかの値を縛る要件へ配る）。旗 `v12.ids` が on
 // なら、T2 の応答からコードが作る試験（R1・R2 の 1 件と R3 の境界・異常）を除く（応答は M − 4 件・組は M 件）。台帳 on が要る。
+//
+// 旗 `v12.ids` が on の走りの T1''（C3）は、点検の対象（どの要件も確かめ方が unresolved でないので全要件）を一覧の順で 6 件ごとの
+// 束に切って呼ぶ（Issue #662）。その応答は `c3Responses`（束ごとに、束の要件の判定だけ）で組む。off の走りは `judgments` の 1 つ。
 import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-schema";
 import { AGENT_LIMITS } from "../../limits.js";
 import type { Requirement, RequirementList } from "../../pipeline.js";
@@ -30,6 +33,7 @@ import type { JudgeAnswer } from "../../judge.js";
 import { codeIdRenameOf, draftOf, idsResponseList, idsResponsesOf, t1ResponseOf, withCodeIds } from "./fixtures.js";
 import type { NameTable, NameTableRow } from "../names.js";
 import { ledgerViewOf, resolveV12Flags, type V12Flags } from "../../v12/ledger.js";
+import { V12_C3_BUNDLE } from "../../v12/limits.js";
 
 /** 中央値（要件 15・試験 39）と観測した最大（要件 25・試験 68）。Issue #546 */
 export const MEDIAN_SIZE = { requirements: 15, tests: 39 } as const;
@@ -74,6 +78,13 @@ export interface SizedMaterials {
   readonly adviceAnswers: () => Readonly<Record<string, JudgeAnswer>>;
   /** T1'' と B3' の判定（`rejects` の要件だけ拒否。省けば全部受理） */
   readonly judgments: (rejects?: Readonly<Record<string, RejectionSpec>>) => { readonly judgments: readonly unknown[] };
+  /**
+   * T1''（C3）の応答を呼ばれる順に（旗 `v12.ids` が on なら要件 6 件ごとの束ごとに、その束の要件の判定だけ。off なら `judgments`
+   * の 1 つ。`rejects` の要件だけ拒否。Issue #662）
+   */
+  readonly c3Responses: (rejects?: Readonly<Record<string, RejectionSpec>>) => readonly { readonly judgments: readonly unknown[] }[];
+  /** C3 の束（旗 `v12.ids` が on なら要件 6 件ごと。off なら全要件の 1 つ） */
+  readonly c3Bundles: readonly (readonly string[])[];
   /** T2 の応答（正常・異常・境界を配って合計 M。`omitAbnormalOf` を指すと、その要件の異常の試験を外す） */
   readonly testSpecResponse: (options?: { readonly omitAbnormalOf?: string }) => { readonly classifications: readonly unknown[]; readonly tests: readonly unknown[] };
   /** 宣言の YAML（`defectOf` の要件の検査を、正常の試験が落ちる式にする） */
@@ -393,6 +404,18 @@ export function buildSized(
     return lines.join("\n");
   };
 
+  const judgmentsOf = (rejects: Readonly<Record<string, RejectionSpec>> = {}) => ({
+    judgments: ids.map((id) => {
+      const found = rejects[id];
+      return found === undefined
+        ? { requirementId: id, verdict: "accept", kind: null, quote: null }
+        : { requirementId: id, verdict: "reject", kind: found[0], quote: found[1] };
+    }),
+  });
+  const c3Bundles: (readonly string[])[] = [];
+  if (resolvedFlags.ids) for (let start = 0; start < ids.length; start += V12_C3_BUNDLE.size) c3Bundles.push(ids.slice(start, start + V12_C3_BUNDLE.size));
+  else c3Bundles.push(ids);
+
   return {
     requirementCount,
     testCount,
@@ -412,14 +435,12 @@ export function buildSized(
       }
       return answers;
     },
-    judgments: (rejects = {}) => ({
-      judgments: ids.map((id) => {
-        const found = rejects[id];
-        return found === undefined
-          ? { requirementId: id, verdict: "accept", kind: null, quote: null }
-          : { requirementId: id, verdict: "reject", kind: found[0], quote: found[1] };
-      }),
-    }),
+    judgments: judgmentsOf,
+    c3Responses: (rejects = {}) =>
+      c3Bundles.map((bundle) => ({
+        judgments: (judgmentsOf(rejects).judgments as readonly { readonly requirementId: string }[]).filter((entry) => bundle.includes(entry.requirementId)),
+      })),
+    c3Bundles,
     testSpecResponse,
     declaration,
     textOf: (requirementId) => requirements.find((requirement) => requirement.id === requirementId)?.text ?? "",

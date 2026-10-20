@@ -73,6 +73,54 @@ export const V12_CALL_LIMIT_DEFINITIONS: readonly V12LimitDefinition[] = [
   },
 ];
 
+// ── 旗 `v12.ids` の C3 の束（Issue #662）────────────────────────────────
+
+/**
+ * C3（表の意味の点検）の束の大きさと同時数。点検の対象の要件（確かめ方が unresolved でない要件）を一覧の順で `size` 件ごとに切り
+ * （最後の束は `size` 未満でよい）、束の呼び出しを `concurrency` 本まで同時に始める（超えた分は待つ）。束ごとのデータは束の要件の
+ * 文と引用・所属・確かめ方・印と**表の全行**である。値ごとの理由と見直す条件は `V12_C3_BUNDLE_DEFINITIONS`
+ */
+export const V12_C3_BUNDLE = {
+  /** 1 束の要件の数 */
+  size: 6,
+  /** 同時に始める束の数の上限（観測した最大の要件 25 で束 5 ≤ 同時数） */
+  concurrency: 5,
+} as const;
+
+/** C3 の束の定数の定義（値ごとに `why`・`since`・見直す条件） */
+export const V12_C3_BUNDLE_DEFINITIONS: readonly (RuleDefinition & {
+  readonly key: keyof typeof V12_C3_BUNDLE;
+  readonly review: string;
+})[] = [
+  {
+    id: "B-v12-c3-size",
+    key: "size",
+    text: `C3 は点検の対象の要件を一覧の順で ${String(V12_C3_BUNDLE.size)} 件ごとの束に切り、束ごとに 1 つの論理呼び出しにする。表の行は束で削らず全行を見せる。`,
+    why: "C3 の判定は要件ごとに独立（R-sc-02）で、1 回に要件 15〜25 件の判定を書かせると 1 回が長く壁の時間が要件の数に乗る。束の条件は自分の要件の判定の形だけで、合併後の条件（全対象にちょうど 1 判定・表の SHA の一致）はコードが掛ける（方法論 03 の H5）",
+    since: "Issue #662",
+    review: "束ごとの推論の固定分で出力トークンが直す前の 1.3 倍を超えれば束を大きくする。C3 の正誤表（見逃し・誤拒否）が直す前より悪くなれば束を大きくするか戻す",
+  },
+  {
+    id: "B-v12-c3-concurrency",
+    key: "concurrency",
+    text: `C3 の束の呼び出しは ${String(V12_C3_BUNDLE.concurrency)} 本まで同時に始め、超えた束は先の束の終わりを待つ。`,
+    why: "観測した最大の要件 25 で束 5 を 1 度に始め、C3 の壁の時間を 1 束分に近づける（逐次の合計にしない）",
+    since: "Issue #662",
+    review: "計測で提供側の同時数の制限による待ち・再送が出れば、この値を下げる（再送の口は変えない）",
+  },
+];
+
+/** C3 の束の数（対象の要件の数から。0 件なら 0） */
+export function c3BundleCount(targets: number): number {
+  return Math.ceil(targets / V12_C3_BUNDLE.size);
+}
+
+/** C3 の論理要求の最大（初回 束ごと 1 ＋ 形のやり直し 段全体で通算 1 ＋ 再点検 束ごと 1 ＝ 2B＋1。対象 0 件なら 0） */
+export function c3MaxLogical(targets: number): number {
+  const bundles = c3BundleCount(targets);
+  return bundles === 0 ? 0 : 2 * bundles + 1;
+}
+
 // ── 段ごとの論理の枠（§4.1 の列）─────────────────────────────────────
 
 /** 枠の単位（束ごと／段全体／版ごと／往復ごと） */
@@ -122,9 +170,9 @@ export const V12_STAGE_FRAMES: readonly V12StageFrame[] = [
   },
   {
     stage: "C3",
-    initial: { count: 1, unit: "stage" },
+    initial: { count: 1, unit: "bundle" },
     shape: { count: 1, unit: "stage" },
-    content: { count: 1, unit: "stage" },
+    content: { count: 1, unit: "bundle" },
     maxUnits: null,
   },
   { stage: "C4", initial: { count: 1, unit: "bundle" }, shape: { count: 1, unit: "bundle" }, content: null, maxUnits: null },
@@ -165,9 +213,9 @@ export const V12_STAGE_FRAME_DEFINITIONS: readonly (RuleDefinition & { readonly 
   {
     id: "F-v12-c3",
     stage: "C3",
-    text: "C3（表の意味の点検）は段全体で初回 1・形のやり直し 1・拒否後の再点検 1。",
-    why: "08 §4.1 の C3 の行（T1'' と同じ）",
-    since: "Issue #592",
+    text: "C3（表の意味の点検）は束ごとに初回 1・形のやり直しは段全体で通算 1（初回と再点検をまたいで）・拒否後の再点検は束ごとに 1（段全体で 1 回。その回の表から導いた全対象を同じ束の切り方で）。束は同時に呼ぶ。",
+    why: "08 §4.1 の C3 の行を、要件 6 件ごとの束（同時に呼ぶ）に合わせた。形のやり直しを束ごとに配り直すと段の再試行の枠が束の数だけ増えるので、段全体で通算 1 に保つ（論理の最大 3 → 2B＋1）",
+    since: "Issue #592（束・形のやり直しの段全体の通算・同時は Issue #662）",
   },
   { id: "F-v12-c4", stage: "C4", text: "C4（試験）は束ごとに初回 1・形のやり直し 1。", why: "08 §4.1 の C4 の行（値が要る試験 13 件ごとの束）", since: "Issue #592" },
   {
@@ -218,8 +266,9 @@ export const V12_V11A_FRAME_MAP: readonly {
 /**
  * 旗 `v12.ids` の段（手 3a。Issue #593）が、枠のどの行に写るか。C1 は束 3 つ（`units`）で、束ごとに初回 1・形のやり直し 1
  * （`shapeAttempts` 2）。C2 は束 1 つ（全要件を 1 回で写す。手 3b の要件 5 件ごとの束は Issue #627 で戻した）で、初回の形の
- * やり直し 1・C3 の拒否のあとの 2 回目 1（`rounds` 2。2 回目は形の再試行を持たない）。値は段のコードの定数と同じで、試験が照らす
- * （ここで値を変えない）。
+ * やり直し 1・C3 の拒否のあとの 2 回目 1（`rounds` 2。2 回目は形の再試行を持たない）。C3 は要件 6 件ごとの束（観測した最大の
+ * 要件 25 で束 5。Issue #662）で、束ごとに初回 1・再点検 1、形のやり直しは段全体で通算 1（論理の最大 2B＋1）。値は段のコードの
+ * 定数と同じで、試験が照らす（ここで値を変えない）。
  */
 export const V12_IDS_FRAME_MAP: readonly {
   readonly stage: StageId;
@@ -232,4 +281,14 @@ export const V12_IDS_FRAME_MAP: readonly {
 }[] = [
   { stage: "vocabulary", frame: "C1", rounds: 1, shapeAttempts: 2, units: 3, maxLogical: 6 },
   { stage: "mapping", frame: "C2", rounds: 2, shapeAttempts: 2, units: 1, maxLogical: 3 },
+  // C3（Issue #662）：要件 6 件ごとの束（観測した最大の要件 25 で束 5）。束ごとに初回 1・再点検 1、形のやり直しは段全体で通算 1。
+  // 論理の最大は 2B＋1
+  {
+    stage: "semantic-check",
+    frame: "C3",
+    rounds: 2,
+    shapeAttempts: 2,
+    units: c3BundleCount(25),
+    maxLogical: c3MaxLogical(25),
+  },
 ];

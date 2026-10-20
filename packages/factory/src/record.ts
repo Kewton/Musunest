@@ -379,6 +379,60 @@ export function usageDelta(before: UsageSnapshot, after: UsageSnapshot): UsageSn
   };
 }
 
+/** トークン数の項目ごとの合計（束ごとの計量を段全体へ足す。旗 `v12.ids` の C3 の束。Issue #662） */
+export function usageSum(snapshots: readonly UsageSnapshot[]): UsageSnapshot {
+  return snapshots.reduce<UsageSnapshot>(
+    (sum, item) => ({
+      calls: sum.calls + item.calls,
+      missing_usage_calls: sum.missing_usage_calls + item.missing_usage_calls,
+      input_tokens: sum.input_tokens + item.input_tokens,
+      cached_input_tokens: sum.cached_input_tokens + item.cached_input_tokens,
+      cache_write_tokens: sum.cache_write_tokens + item.cache_write_tokens,
+      output_tokens: sum.output_tokens + item.output_tokens,
+      reasoning_tokens: sum.reasoning_tokens + item.reasoning_tokens,
+    }),
+    { calls: 0, missing_usage_calls: 0, input_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, output_tokens: 0, reasoning_tokens: 0 },
+  );
+}
+
+/** 呼び出しの計の項目ごとの合計（束ごとの口の計を段全体へ足す。旗 `v12.ids` の C3 の束。Issue #662） */
+export function callCountsSum(counts: readonly CallCounts[]): CallCounts {
+  const zero: CallCounts = {
+    attempts: {
+      started: 0,
+      responded: 0,
+      errors: 0,
+      cancelled_deadline: 0,
+      cancelled_timeout: 0,
+      not_started: { deadline: 0, budget: 0, limit: 0, timeout: 0 },
+    },
+    retries: { communication: 0, shape: 0, content: 0 },
+  };
+  return counts.reduce<CallCounts>(
+    (sum, item) => ({
+      attempts: {
+        started: sum.attempts.started + item.attempts.started,
+        responded: sum.attempts.responded + item.attempts.responded,
+        errors: sum.attempts.errors + item.attempts.errors,
+        cancelled_deadline: sum.attempts.cancelled_deadline + item.attempts.cancelled_deadline,
+        cancelled_timeout: sum.attempts.cancelled_timeout + item.attempts.cancelled_timeout,
+        not_started: {
+          deadline: sum.attempts.not_started.deadline + item.attempts.not_started.deadline,
+          budget: sum.attempts.not_started.budget + item.attempts.not_started.budget,
+          limit: sum.attempts.not_started.limit + item.attempts.not_started.limit,
+          timeout: sum.attempts.not_started.timeout + item.attempts.not_started.timeout,
+        },
+      },
+      retries: {
+        communication: sum.retries.communication + item.retries.communication,
+        shape: sum.retries.shape + item.retries.shape,
+        content: sum.retries.content + item.retries.content,
+      },
+    }),
+    zero,
+  );
+}
+
 /**
  * すべての LLM 呼び出しを通して、呼び出しの数と使用トークンを数える（§1.5）。
  * usage が返らない呼び出しも数える（「usage が欠けた呼び出しの数」）。

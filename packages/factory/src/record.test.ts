@@ -24,6 +24,8 @@ import {
   buildSummary,
   makeStageRecord,
   usageDelta,
+  usageSum,
+  callCountsSum,
   type RunRecord,
   type StageRecord,
   REFERENCE_COUNT_KEYS,
@@ -523,5 +525,62 @@ describe("段の識別子は v1 の並びを保ち、v1.1α の段を末尾に�
       "unknown",
     ]);
     expect(STAGE_OPERATIONS).toEqual(["redo-design"]);
+  });
+});
+
+describe("束ごとの計を段全体へ足す（旗 v12.ids の C3 の束。Issue #662）", () => {
+  const counts = (n: number): CallCounts => ({
+    attempts: {
+      started: n,
+      responded: n + 1,
+      errors: n + 2,
+      cancelled_deadline: n + 3,
+      cancelled_timeout: n + 4,
+      not_started: { deadline: n + 5, budget: n + 6, limit: n + 7, timeout: n + 8 },
+    },
+    retries: { communication: n + 9, shape: n + 10, content: n + 11 },
+  });
+  const usage = (n: number) => ({
+    calls: n,
+    missing_usage_calls: n + 1,
+    input_tokens: n + 2,
+    cached_input_tokens: n + 3,
+    cache_write_tokens: n + 4,
+    output_tokens: n + 5,
+    reasoning_tokens: n + 6,
+  });
+
+  it("項目ごとに足し、空なら 0。段の記録の欄の集合と同じ鍵を持つ", () => {
+    expect(usageSum([usage(1), usage(10)])).toEqual({
+      calls: 11,
+      missing_usage_calls: 13,
+      input_tokens: 15,
+      cached_input_tokens: 17,
+      cache_write_tokens: 19,
+      output_tokens: 21,
+      reasoning_tokens: 23,
+    });
+    expect(usageSum([])).toEqual({ calls: 0, missing_usage_calls: 0, input_tokens: 0, cached_input_tokens: 0, cache_write_tokens: 0, output_tokens: 0, reasoning_tokens: 0 });
+    const summed = callCountsSum([counts(1), counts(100)]);
+    expect(summed).toEqual({
+      attempts: {
+        started: 101,
+        responded: 103,
+        errors: 105,
+        cancelled_deadline: 107,
+        cancelled_timeout: 109,
+        not_started: { deadline: 111, budget: 113, limit: 115, timeout: 117 },
+      },
+      retries: { communication: 119, shape: 121, content: 123 },
+    });
+    expect(callCountsSum([counts(0)])).toEqual(counts(0));
+    expect(Object.keys(summed.attempts)).toEqual([...ATTEMPT_KEYS]);
+    expect(Object.keys(summed.attempts.not_started)).toEqual([...NOT_STARTED_KEYS]);
+    expect(Object.keys(summed.retries)).toEqual([...RETRY_KEYS]);
+    // 段の記録に写すと、束ごとの記録の和と同じ値になる
+    const record = makeStageRecord("semantic-check", "ok", 0, usageSum([usage(1), usage(2)]), callCountsSum([counts(1), counts(2)]), null);
+    const parts = [makeStageRecord("semantic-check", "ok", 0, usage(1), counts(1), null), makeStageRecord("semantic-check", "ok", 0, usage(2), counts(2), null)];
+    expect(record.input_tokens).toBe(parts.reduce((total, part) => total + part.input_tokens, 0));
+    expect(record.attempts.started).toBe(parts.reduce((total, part) => total + part.attempts.started, 0));
   });
 });
