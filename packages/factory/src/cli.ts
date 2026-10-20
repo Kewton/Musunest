@@ -41,7 +41,7 @@
 // appspec-schema の contract.ts と同じやり方）。
 import { planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
 import type { TokenRates } from "./budget.js";
-import { bundleFiles } from "./bundle.js";
+import { buildRejectedCandidateFiles, bundleFiles } from "./bundle.js";
 import {
   buildBuildCliRecord,
   buildPlanCliRecord,
@@ -1186,6 +1186,15 @@ async function runStageFromPlanFile(
     ...(flags === undefined ? {} : { v12: { testSpecInRange: stagesInRange(range.start, range.end).includes("test-spec") } }),
   });
   await deps.writeFile(joinPath(job.outDir, STAGE_RUN_RECORD_FILE), stageJsonText(record));
+  // `--pipeline v1.2` の段の走りだけ、断った候補を一気通貫と同じ関数・同じ名前で `--out` の下の診断の置き場所に書く
+  // （候補が無ければ何も書かず、置き場所も作らない。記録・checkpoint・要約・終了コードは変えない。Issue #683）
+  if (pipeline === "v1.2" && outcome.rejected !== undefined && outcome.rejected.length > 0) {
+    for (const file of buildRejectedCandidateFiles(outcome.rejected)) {
+      const parent = parentOf(file.path);
+      if (parent !== "") await deps.makeDirectory(joinPath(job.outDir, parent));
+      await deps.writeFile(joinPath(job.outDir, file.path), file.text);
+    }
+  }
   log(
     JSON.stringify({
       stage_pass: record["stage_pass"],

@@ -22,7 +22,7 @@
 // **純粋な関数**で、同じ入力からは同じバイト列になる（決まった字下げの JSON。末尾に改行 1 つ）。
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
-import { ARTIFACTS_DIR, type BundleArtifact } from "../bundle.js";
+import { ARTIFACTS_DIR, type BundleArtifact, type BundleRejectedCandidate } from "../bundle.js";
 import { BUILD_CLI_RECORD_SCHEMA } from "../cli-plan.js";
 import type { RequirementNature, TestSuite } from "../fixed-test.js";
 import type { Verdict } from "../outcome.js";
@@ -658,6 +658,11 @@ export interface StageRunOutcome {
   readonly v12Calls?: unknown;
   /** この走りで T2 を回し T2' を通ったときだけ、その組の数（再開の材料から入った走り・T2 に届かない走りは持たない。Issue #637） */
   readonly testSpec?: StageTestSpecCounts;
+  /**
+   * T1・T2（旗 `v12.ids` の走りは C1・C2）が断った候補（一気通貫の診断と同じ形・同じ順。候補が無ければ欄を持たない。
+   * 段の判定・持ち越し・回数には使わない。Issue #683）
+   */
+  readonly rejected?: readonly BundleRejectedCandidate[];
 }
 
 /** 段の通過：範囲の中に早期停止が無く、終了の段の最後の記録が ok */
