@@ -2000,6 +2000,33 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     expect(await digestsOf(dir, [STAGE_RUN_RECORD_FILE, stageCheckpointFile("t1-t2"), stageCheckpointFile("t2-b1")])).toEqual(V11A_STAGE_RUN_DIGESTS);
     expectNoAcceptanceMaterial(run.requests);
   });
+
+  it("(6b) v1.1a の段の走りで T1 が形で 1 度落ちてやり直しで通る：結果に rejected が入っても、記録・checkpoint・要約・書いたファイルの一覧は直す前と同じ（診断を書かない）", async () => {
+    const dir = `${directory}/v11a-stage-diag-t1`;
+    const spy = vi.spyOn(v11aRunModule, "runStageRangeV11a");
+    // T1 の初回が形で落ちて（`v11aBadDraftCall`）2 回目で通る台本。終了 T1'' なので T2 以降は呼ばない
+    const run = await runStageCli({ dir, args: ["--stage-end", "semantic-check"], calls: [v11aBadDraftCall(), ...v11aHead()] });
+    expect(run.code).toBe(EXIT_OK);
+    // 直す前（fa21c65）のコードで測った値（記録と t1-t2 の checkpoint。v1.1a は診断を書かないのでバイト列は変わらない。手で直さない）
+    expect(await digestsOf(dir, [STAGE_RUN_RECORD_FILE, stageCheckpointFile("t1-t2")])).toEqual(V11A_STAGE_T1_RETRY_DIGESTS);
+    // 段の走りの結果には断った候補が入る（cli の試験で結果を読む）
+    expect(spy).toHaveBeenCalledTimes(1);
+    const outcome = await (spy.mock.results[0]?.value as Promise<Awaited<ReturnType<typeof v11aRunModule.runStageRangeV11a>>>);
+    expect(outcome.rejected?.length).toBeGreaterThanOrEqual(1);
+    // v1.1a の T1 の初回の落ちは、段が `content` として積む（`v11aBadDraftCall` の応答）
+    expect(outcome.rejected?.[0]).toMatchObject({ stage: "name-table", operation: null, call: 1, round: 1, attempt: 1, kind: "content" });
+    // 入口は v1.1a の段の走りで診断を書かない（置き場所も作らない）
+    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE]);
+    expect(run.directories).not.toContain(`${dir}/diagnostics`);
+    const recordText = await fs.readFile(`${dir}/${STAGE_RUN_RECORD_FILE}`, "utf8");
+    expect(recordText).not.toContain("rejected");
+    expect(recordText).not.toContain("diagnostics");
+    // 要約の 1 行は直す前と同じ
+    expect(run.lines.at(-1)).toBe(
+      JSON.stringify({ stage_pass: true, reached_stage: "semantic-check", budget_scope: "stage-run", exit_code: EXIT_OK }),
+    );
+    expectNoAcceptanceMaterial(run.requests);
+  });
 });
 
 /** fa21c65（直す前）の段の走り：C1 の束 2 が形で落ちてやり直しで通る走りの記録と t1-t2 の checkpoint の SHA-256（Issue #683） */
@@ -2010,6 +2037,12 @@ const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
 
 /** fa21c65（直す前）の段の走り：C2 が 2 回落ちて止まる走りの記録の SHA-256（Issue #683） */
 const V12_STAGE_C2_STOP_DIGESTS: readonly string[] = ["00443168d1b3bc21efa0d78604fe89bcea391c54e545a67db4e1d68f61eb7367"];
+
+/** fa21c65（直す前）の v1.1a の段の走り：T1 が形で 1 度落ちてやり直しで通る走りの記録と t1-t2 の checkpoint の SHA-256（Issue #683） */
+const V11A_STAGE_T1_RETRY_DIGESTS: readonly string[] = [
+  "08aad2c4e1a7d947379fab165e80a5f6d40fac50b4c9f7e9d78a1e45ea9214be",
+  "50dde03644297779f6259db18fe73422c80f2aaa48439be189ea472bfb93ec33",
+];
 
 /** v1.1a の段の走り（T1〜⑦）の記録・t1-t2・t2-b1 の checkpoint の SHA-256（直す前 bf68da8（#636 を載せ直した main）のコードで測った値。Issue #637） */
 const V11A_STAGE_RUN_DIGESTS: readonly string[] = [
