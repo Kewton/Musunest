@@ -120,6 +120,7 @@ describe("C2 の規則と schema", () => {
     expect(r3?.text).not.toContain("検査ごとに合う種類の行を所属させる");
     expect(r3?.since).toContain("#594");
     expect(r3?.since).toContain("#682");
+    expect(r3?.since).toContain("#690");
     // 一覧は全要件を 1 回で渡す（束は Issue #627 で戻した）
     const r1 = MAPPING_RULE_DEFINITIONS.find((definition) => definition.id === "R-map-01");
     expect(r1?.why).not.toContain("別の束の ID");
@@ -563,7 +564,7 @@ describe("検査の種類ごとの欄（Issue #682）", () => {
     expect(outcome.references).toEqual({ checked: LIST.requirements.length + roles + 3, unknown: 0, duplicate: 0, crossBundle: 0 });
   });
 
-  it("要求：R-map-03 の新しい文（種類ごと 1 件・fixed-test への選び方・制約 ID 1 件以上）があり、ほかの規則の文・順・データの塊の名前は直す前と同じ", () => {
+  it("要求：R-map-03 の新しい文（種類ごと 1 件・fixed-test への選び方・当たる種類が無い要件の選び方・制約 ID 1 件以上）があり、ほかの規則の文・順・データの塊の名前は直す前と同じ", () => {
     for (const definitions of [MAPPING_RULE_DEFINITIONS, mappingRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)]) {
       expect(definitions.map((definition) => definition.id)).toEqual(["R-map-01", "R-map-02", "R-map-03", "R-map-04"]);
       const r3 = definitions.find((definition) => definition.id === "R-map-03")?.text ?? "";
@@ -571,6 +572,10 @@ describe("検査の種類ごとの欄（Issue #682）", () => {
         "checks は検査の種類ごとの欄で、同じ種類の検査は要件ごとに 1 件である。",
         "view-shows の欄は sourceId に画面と同じ entity の項目か計算の行の ID",
         "使わない種類の欄は null にする。",
+        "structural は、検査の種類のうち 1 つ以上で確かめられる要件だけである。",
+        "確かめ方の種類を選ぶ既存の条件（default-value など、専用の種類を指定する文）は今までどおり先に当てる。",
+        "そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。",
+        "欄が全部 null の structural は表の検査で断られる。",
         "同じ種類の検査を 2 つ以上の行に掛けなければ確かめられない要件（複数の操作・複数の項目・1 つの画面と複数の項目）は structural にせず、kind を fixed-test にしてそれらの行を所属させる。",
         "constraintIds に書けない根拠となる文書の制約 ID を 1 件以上（文書の制約 ID の一覧にあるものだけ）書く。",
         "根拠となる制約 ID を一覧から挙げられない要件は unresolved にしない。",
