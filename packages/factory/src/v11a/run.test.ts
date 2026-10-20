@@ -14,6 +14,7 @@ import {
   DIAGNOSTICS_REJECTED_NAME_TABLE_FILE,
   DIAGNOSTICS_REJECTED_TEST_SPEC_FILE,
   DIAGNOSTICS_REJECTED_VOCABULARY_FILE,
+  DIAGNOSTICS_TABLE_ROUNDS_FILE,
   MAPPINGS_FILE,
   TEST_SUITE_FILE,
   TESTS_FILE,
@@ -753,7 +754,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     ];
   };
 
-  it("C1 の束 2 の初回が形で落ちてやり直しで通る走り：走りは通り、rejected-vocabulary に候補 1 件（束 2・試行 1・その回の問題の全部）。診断はその 1 本だけ（Issue #657）", async () => {
+  it("C1 の束 2 の初回が形で落ちてやり直しで通る走り：走りは通り、rejected-vocabulary に候補 1 件（束 2・試行 1・その回の問題の全部）。診断は候補の 1 本と回ごとの行の 1 本（Issue #657・#699）", async () => {
     const bad = fieldsWithEntity("E8");
     const clean = await runScenario(passingWith(), { flags: IDS_FLAGS });
     const { result, recording } = await runScenario(passingWith({ fields: [bad] }), { flags: IDS_FLAGS });
@@ -767,9 +768,9 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
       ["ok", 1],
       ["ok", 0],
     ]);
-    // 通る走りの診断は候補の 1 本だけ（候補が無い段のファイルは作らない）
-    expect(diagnosticPaths(clean.result)).toEqual([]);
-    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_VOCABULARY_FILE]);
+    // 通る走りの診断は回ごとの行の 1 本だけ（候補が無い段のファイルは作らない。Issue #699）
+    expect(diagnosticPaths(clean.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_VOCABULARY_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
     const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ stage: "vocabulary", operation: null, call: 2, round: 1, attempt: 1, kind: "shape" });
@@ -789,7 +790,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(result.stopped).toBeNull();
     expect(result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(result.record.stages.filter((record) => record.stage === "mapping").map((record) => [record.status, record.retries.shape])).toEqual([["ok", 1]]);
-    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
     const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({ stage: "mapping", operation: null, call: 1, round: 1, attempt: 1, kind: "shape" });
@@ -916,7 +917,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     ]);
     expect(countStage(carried.result, "semantic-check")).toBe(1);
     expect(carryEntriesOf(carried.result.bundle).map((entry) => entry.requirementId)).toEqual(["R3"]);
-    expect(diagnosticPaths(carried.result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE]);
+    expect(diagnosticPaths(carried.result)).toEqual([DIAGNOSTICS_REJECTED_MAPPING_FILE, DIAGNOSTICS_TABLE_ROUNDS_FILE]);
     const candidates = rejectedOf(carried.result, DIAGNOSTICS_REJECTED_MAPPING_FILE);
     expect(candidates).toHaveLength(1);
     // 2 回目は拒否された R3 だけの書き直しなので、候補は書き直した要件 1・保持した要件 3 の数を持つ（ID の値は持たない。Issue #661）
@@ -930,12 +931,12 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(candidates[0]?.problems.length).toBeGreaterThan(0);
   });
 
-  it("形で 1 度も落ちない走り：rejected-vocabulary・rejected-mapping が無く、診断のファイルは無い（Issue #608・#657）", async () => {
+  it("形で 1 度も落ちない走り：rejected-vocabulary・rejected-mapping が無く、診断のファイルは回ごとの行の 1 本だけ（Issue #608・#657・#699）", async () => {
     const passed = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_FLAGS });
     expect(passed.result.outcome).toEqual({ result: "pass", verdict: "full" });
     expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
     expect(diagnosticPaths(passed.result)).not.toContain(DIAGNOSTICS_REJECTED_MAPPING_FILE);
-    expect(diagnosticPaths(passed.result)).toEqual([]);
+    expect(diagnosticPaths(passed.result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
   });
 
   /**
@@ -1473,7 +1474,159 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const r3 = MAPPED_IDS.verification.find((entry) => entry.requirementId === "R3");
     const r3Targets = r3?.kind === "structural" ? (r3.targets ?? []).reduce((sum, target) => sum + 1 + (target.sourceId === null ? 0 : 1), 0) : 0;
     expect(records[1]?.references).toEqual({ checked: 1 + r3Roles + r3Targets, unknown_ids: 0, duplicates: 0, cross_bundle_ids: 0 });
-    expect(diagnosticPaths(result)).toEqual([]);
+    expect(diagnosticPaths(result)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+  });
+
+  // ── 回ごとの行（`diagnostics/table-rounds.json`。Issue #699）────────────────────────
+  //
+  // 一気通貫と段の走りの両方で、C2 の 1 回ごとの表・C3 の判定・書き直した要件の ID・採用した回を同じ関数・
+  // 同じ名前で診断に残す。段の判定・持ち越し・採用した回の選び方は今までどおり（行は読まない）。
+
+  /** 回ごとの行（診断のファイル。Issue #699） */
+  type TableRound = {
+    readonly round: number;
+    readonly ok: "ok" | "unmet" | "failed";
+    readonly table: { readonly table_sha256: string } | null;
+    readonly rewrite: { readonly requirement_ids: readonly string[]; readonly rewritten: number; readonly kept: number } | null;
+    readonly semantic_check: Record<string, unknown> | null;
+    readonly adopted: boolean;
+  };
+  const tableRoundsOf = (result: { readonly diagnostics: readonly { readonly path: string; readonly text: string }[] }): readonly TableRound[] =>
+    diagnosticOf(result.diagnostics, DIAGNOSTICS_TABLE_ROUNDS_FILE)["rounds"] as readonly TableRound[];
+  /** 2 回目の部分の表の SHA を初回と変える印：所属の並びを逆にする（C2' は通る） */
+  const reversedRoles = (id: string) => {
+    const entry = mappingEntries().find((item) => item["requirementId"] === id) as Record<string, unknown>;
+    return { ...entry, roles: [...(entry["roles"] as readonly unknown[])].reverse() };
+  };
+
+  it("(1) 初回の C3 が R3・R4 を拒否し、2 回目が通って全部受理する走り：行 2 つ。回 1 は ok・表と SHA・拒否の判定・rewrite null・adopted false、回 2 は rewrite（R3・R4）・2 件・表と SHA・全部受理・adopted true。回 2 の表と C3 は checkpoint の name_table・semantic_check と深く等しく、回 1 の表の SHA は採用した表と違う（Issue #699）", async () => {
+    const firstJudgments = judgments(IDS, REJECT_R3_R4);
+    const { result } = await runScenario(
+      [
+        ...vocabularyCalls(),
+        structured(good().mapping),
+        structured(firstJudgments),
+        structured({ requirements: [reversedRoles("R3"), flipped("R4")] }),
+        structured(acceptAll()),
+        ...tailFor(IDS),
+      ],
+      { flags: IDS_FLAGS, collectBoundaries: true },
+    );
+    expect(result.stopped).toBeNull();
+    const rounds = tableRoundsOf(result);
+    expect(rounds.map((round) => [round.round, round.ok, round.rewrite, round.adopted])).toEqual([
+      [1, "ok", null, false],
+      [2, "ok", { requirement_ids: ["R3", "R4"], rewritten: 2, kept: 2 }, true],
+    ]);
+    // 回 1 は C3 の拒否を残し、表は初回のもの。回 2 の表の SHA と違う（採用したのは回 2）
+    expect(rounds[0]?.table?.table_sha256).toBe(await nameTableSha256(MAPPED_IDS));
+    expect(rounds[1]?.table?.table_sha256).not.toBe(rounds[0]?.table?.table_sha256);
+    const recordedJudgments = rounds[0]?.semantic_check?.["judgments"] as readonly { requirementId: string; verdict: string }[] | undefined;
+    expect((recordedJudgments ?? []).map((judgment) => [judgment.requirementId, judgment.verdict])).toEqual(
+      firstJudgments.judgments.map((judgment) => [judgment.requirementId, judgment.verdict]),
+    );
+    // 回 2 の表と C3 の結果は、境界（採用した表）と一気通貫の C3 の記録の 2 回目と深く等しい
+    const boundary = result.boundaries?.find((entry) => entry.boundary === "t1-t2");
+    expect(rounds[1]?.table).toEqual({
+      table_sha256: boundary?.tableSha256,
+      rows: boundary?.table.rows,
+      ownership: boundary?.table.ownership,
+      verification: boundary?.table.verification,
+      classification: boundary?.table.classification,
+    });
+    expect(rounds[1]?.table?.table_sha256).toBe(await nameTableSha256(boundary!.table));
+    const c3Rounds = artifactOf(result.bundle, V11A_ARTIFACT_NAMES.semanticCheck)["rounds"] as readonly Record<string, unknown>[];
+    const { round: _round, ...secondC3 } = c3Rounds[1] as Record<string, unknown>;
+    expect(rounds[1]?.semantic_check).toEqual(secondC3);
+    expect((secondC3["judgments"] as readonly { requirementId: string; verdict: string }[]).map((judgment) => [judgment.requirementId, judgment.verdict])).toEqual(
+      acceptAll().judgments.map((judgment) => [judgment.requirementId, judgment.verdict]),
+    );
+    expectNoAcceptanceMaterial(result.diagnostics.map((artifact) => artifact.text));
+  });
+
+  it("(2) 2 回目が C2' に落ちて unmet の走り：回 2 は unmet・表 null・rewrite の ID と数・C3 null、回 1 が adopted true。checkpoint の表は回 1。rewrite の数は rejected-mapping の 2 回目の候補の数と同じ（Issue #699）", async () => {
+    const missing = { requirements: (good().mapping["requirements"] as readonly unknown[]).slice(1) };
+    const { result } = await runScenario(
+      [
+        ...vocabularyCalls(),
+        structured(good().mapping),
+        structured(judgments(IDS, { R3: REJECT_R3_R4.R3 })),
+        structured(missing),
+        structured(renamed(t2Response([...r1Tests(), ...r2Tests(), ...r4Tests()], ["R1", "R2", "R4"]))),
+        structured({ declaration: RUN_YAML }),
+        structured(acceptAll(["R1", "R2", "R4"])),
+      ],
+      { flags: IDS_FLAGS, collectBoundaries: true },
+    );
+    expect(result.stopped).toBeNull();
+    const rounds = tableRoundsOf(result);
+    expect(rounds.map((round) => [round.round, round.ok, round.table, round.semantic_check, round.rewrite, round.adopted])).toEqual([
+      [1, "ok", expect.objectContaining({ table_sha256: expect.any(String) }), expect.anything(), null, true],
+      [2, "unmet", null, null, { requirement_ids: ["R3"], rewritten: 1, kept: 3 }, false],
+    ]);
+    // 回 2 の書き直した要件の数は、C2 の段が断った候補（2 回目）の数と同じ（二重に定義しない）
+    const candidates = rejectedOf(result, DIAGNOSTICS_REJECTED_MAPPING_FILE) as readonly (IdsRejected & {
+      readonly rewritten_requirements?: number;
+      readonly kept_requirements?: number;
+    })[];
+    expect(rounds[1]?.rewrite?.rewritten).toBe(candidates[0]?.rewritten_requirements);
+    expect(rounds[1]?.rewrite?.kept).toBe(candidates[0]?.kept_requirements);
+    // 採用した表は回 1（checkpoint の name_table と同じ）
+    const boundary = result.boundaries?.find((entry) => entry.boundary === "t1-t2");
+    expect(rounds[0]?.table?.table_sha256).toBe(boundary?.tableSha256);
+    expect(artifactOf(result.bundle, "artifacts/name-table.json")["table_sha256"]).toBe(boundary?.tableSha256);
+  });
+
+  it("(3) 初回で全部受理：行は 1 つで adopted true（Issue #699）", async () => {
+    const { result } = await runScenario([...idsHead(), structured(acceptAll())], { flags: IDS_FLAGS });
+    const rounds = tableRoundsOf(result);
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0]).toMatchObject({ round: 1, ok: "ok", rewrite: null, adopted: true });
+    expect(rounds[0]?.table?.table_sha256).toBe(await nameTableSha256(MAPPED_IDS));
+  });
+
+  it("(4) 2 回目の C3 が形で 2 回落ちて malformed で止まる走り（終了コード 1）：回 1・回 2 とも書かれ、回 2 は表あり・C3 null、adopted は全部 false。止まっても書く（Issue #699）", async () => {
+    const incomplete = { judgments: IDS.slice(0, 3).map(accept) };
+    const { result } = await runScenario(
+      [
+        ...vocabularyCalls(),
+        structured(good().mapping),
+        structured(judgments(IDS, REJECT_R3_R4)),
+        structured(onlyEntries("R3", "R4")),
+        structured(incomplete),
+        structured(incomplete),
+      ],
+      { flags: IDS_FLAGS },
+    );
+    expect(result.stopped).toMatchObject({ stage: "semantic-check", kind: "malformed" });
+    expect(result.summary.exit_code).toBe(1);
+    expect(result.bundle).toBeNull();
+    const rounds = tableRoundsOf(result);
+    expect(rounds.map((round) => [round.round, round.ok, round.table !== null, round.semantic_check !== null, round.adopted])).toEqual([
+      [1, "ok", true, true, false],
+      [2, "ok", true, false, false],
+    ]);
+    expect(rounds[1]?.rewrite).toEqual({ requirement_ids: ["R3", "R4"], rewritten: 2, kept: 2 });
+  });
+
+  it("(5) 同じ台本の段の走り（ids on・name-table..semantic-check）の tableRounds は、一気通貫の同じ名前の診断と深く等しい。一気通貫の納品物・記録・要約・要求・終了コードは (1)〜(5) の固定の SHA の試験が照らす（Issue #699）", async () => {
+    const calls = [
+      ...vocabularyCalls(),
+      structured(good().mapping),
+      structured(judgments(IDS, REJECT_R3_R4)),
+      structured(onlyEntries("R3", "R4")),
+      structured(acceptAll()),
+    ];
+    const stageRecording = createCheckedRecordingClient(calls);
+    const stage = await runStageRangeV11a({
+      ...inputOf(stageRecording.client),
+      flags: IDS_FLAGS,
+      range: { start: "name-table", end: "semantic-check" },
+    });
+    const { result } = await runScenario([...calls, ...tailFor(IDS)], { flags: IDS_FLAGS });
+    expect(stage.tableRounds).toEqual(tableRoundsOf(result));
+    expect(stage.tableRounds).toHaveLength(2);
+    expectNoAcceptanceMaterial([...stageRecording.structured.map((request) => JSON.stringify(request)), ...result.diagnostics.map((artifact) => artifact.text)]);
   });
 });
 

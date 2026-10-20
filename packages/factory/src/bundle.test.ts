@@ -29,6 +29,7 @@ import {
   DIAGNOSTICS_REJECTED_TEST_SUITE_FILE,
   DIAGNOSTICS_REJECTED_VOCABULARY_FILE,
   DIAGNOSTICS_STATIC_CHECK_FILE,
+  DIAGNOSTICS_TABLE_ROUNDS_FILE,
   DIAGNOSTICS_TEST_SUITE_FILE,
   MAPPINGS_FILE,
   MATERIAL_KINDS,
@@ -753,6 +754,14 @@ describe("②・②' が断った候補の診断（Issue #501）", () => {
       DIAGNOSTICS_REJECTED_TEST_SUITE_FILE,
     ]);
     expect(summarizeRejectedCandidates([])).toEqual([]);
+  });
+
+  it("回ごとの行の診断の置き場所は候補のファイルと同じ診断の置き場所で、一覧にも納品物にも入らない（Issue #699）", async () => {
+    expect(DIAGNOSTICS_TABLE_ROUNDS_FILE).toBe("diagnostics/table-rounds.json");
+    // 回ごとの行は buildDiagnostics（早期停止の一覧）が組む材料ではない（入口が同じ関数で書く）
+    expect(buildDiagnostics(base).map((artifact) => artifact.path)).not.toContain(DIAGNOSTICS_TABLE_ROUNDS_FILE);
+    const bundle = await assembleBundle(input());
+    expect(bundleFiles(bundle).map((artifact) => artifact.path)).not.toContain(DIAGNOSTICS_TABLE_ROUNDS_FILE);
   });
 
   it("納品物の bundleFiles の集合は変わらず、要約の wire は今までどおり受け付ける", async () => {
