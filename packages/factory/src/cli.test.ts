@@ -2071,6 +2071,8 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     expectNoAcceptanceMaterial([stageText]);
   });
 });
+
+/** fa21c65（直す前）の段の走り：C1 の束 2 が形で落ちてやり直しで通る走りの記録と t1-t2 の checkpoint の SHA-256（Issue #683） */
 const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
   "70fa16375b25456ffd357636934df2e702a1e1cd1ec472ad26724414a71acfc0",
   "985a79f34387d6a673ea80594421610a3552c05d35ebef2436abbd57bc14d9ee",
