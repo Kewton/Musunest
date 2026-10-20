@@ -896,14 +896,19 @@ async function runV11a(
   const tableRounds: MutableTableRound[] = [];
   // 採用した回（C3 の拒否のあとの 2 回目が C2' に落ちた走りは初回）。止まった走りは null
   let adoptedTableRound: number | null = null;
-  const tableRoundRows = (): readonly TableRoundRecord[] =>
+  /**
+   * 回ごとの行（診断への投影）。**止まった走りでは、採用した回が決まっていても全行を `adopted: false` にする**
+   * （表を採用した後に T2 などで止まった走りも「止まった走りは全部 false」。一気通貫と段の走りが同じ規則）。
+   * 表の採用そのもの・判定・持ち越し・checkpoint は変えない（Issue #699）
+   */
+  const tableRoundRows = (stopped: boolean): readonly TableRoundRecord[] =>
     tableRounds.map((row) => ({
       round: row.round,
       ok: row.ok,
       table: row.table,
       rewrite: row.rewrite,
       semantic_check: row.semantic_check,
-      adopted: row.round === adoptedTableRound,
+      adopted: !stopped && row.round === adoptedTableRound,
     }));
 
   const stopResult = async (attribution: FailureAttribution): Promise<GenerationResult> => {
@@ -933,7 +938,7 @@ async function runV11a(
       summary,
       bundle: null,
       stopped: attribution,
-      diagnostics: [...diagnosticsFor(attribution, record, await rejectedCandidateRows()), ...buildTableRoundsFile(tableRoundRows())],
+      diagnostics: [...diagnosticsFor(attribution, record, await rejectedCandidateRows()), ...buildTableRoundsFile(tableRoundRows(true))],
     };
   };
 
@@ -965,9 +970,9 @@ async function runV11a(
         })(),
         ...(testSpecCounts === undefined ? {} : { testSpec: testSpecCounts }),
         ...(rejectedRows.length === 0 ? {} : { rejected: rejectedRows }),
-        // 旗 `v12.ids` の C2 の回ごとの行（入口が診断に書く。行が無ければ欄を持たない。Issue #699）
+        // 旗 `v12.ids` の C2 の回ごとの行（入口が診断に書く。行が無ければ欄を持たない。止まった走りは adopted が全部 false。Issue #699）
         ...(() => {
-          const rounds = tableRoundRows();
+          const rounds = tableRoundRows(stopped !== null);
           return rounds.length === 0 ? {} : { tableRounds: rounds };
         })(),
       },
@@ -1969,7 +1974,7 @@ async function runV11a(
       extraArtifacts,
     });
     // 診断（断った候補と、旗 `v12.ids` の C2 の回ごとの行）。どちらも納品物・記録・要約に入れない（Issue #501・#699）
-    const diagnostics = [...buildRejectedCandidateFiles(await rejectedCandidateRows()), ...buildTableRoundsFile(tableRoundRows())];
+    const diagnostics = [...buildRejectedCandidateFiles(await rejectedCandidateRows()), ...buildTableRoundsFile(tableRoundRows(false))];
     return {
       kind: "generation",
       result: withBoundaries({

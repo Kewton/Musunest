@@ -1628,6 +1628,43 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     expect(stage.tableRounds).toHaveLength(2);
     expectNoAcceptanceMaterial([...stageRecording.structured.map((request) => JSON.stringify(request)), ...result.diagnostics.map((artifact) => artifact.text)]);
   });
+
+  /**
+   * C1 → C2 → C3 が全件受理したあと、T2 の骨組み（`tests` の並び）が 2 回とも不正で test-spec に止まる台本（Issue #699）。
+   * 骨組みが無い応答は strict の schema では出ないので、照合を外した負例として渡す
+   */
+  const t2SkeletonTwice = (): RecordedCall[] => {
+    const badT2 = structured(
+      negative({}, "T2 の骨組み（tests の並び）が無い応答。strict の schema では出ないが、段の形の検査の負例として必要"),
+    );
+    return [
+      ...idsResponseList(idsResponsesOf(LIST, TABLE_IDS, PROPERTY_LEDGER_VIEW)).map((output) => structured(output)),
+      structured(acceptAll()),
+      badT2,
+      badT2,
+    ];
+  };
+
+  it("(6) C3 を通って表を採用したあとに T2 の骨組みが 2 回不正で test-spec・malformed で止まる走り：table-rounds の adopted は全部 false（一気通貫。Issue #699）", async () => {
+    const { result } = await runScenario(t2SkeletonTwice(), { flags: IDS_FLAGS });
+    expect(result.stopped).toMatchObject({ stage: "test-spec", kind: "malformed" });
+    expect(result.summary.exit_code).toBe(1);
+    expect(result.bundle).toBeNull();
+    const rounds = tableRoundsOf(result);
+    expect(rounds.map((round) => [round.round, round.ok, round.adopted])).toEqual([[1, "ok", false]]);
+  });
+
+  it("(7) 同じ台本の段の走り（ids on・name-table..test-spec）でも tableRounds の adopted は全部 false（Issue #699）", async () => {
+    const recording = createCheckedRecordingClient(t2SkeletonTwice());
+    const stage = await runStageRangeV11a({
+      ...inputOf(recording.client),
+      flags: IDS_FLAGS,
+      range: { start: "name-table", end: "test-spec" },
+    });
+    expect(stage.stopped).toMatchObject({ stage: "test-spec", kind: "malformed" });
+    expect(stage.tableRounds).toHaveLength(1);
+    expect(stage.tableRounds?.map((round) => round.adopted)).toEqual([false]);
+  });
 });
 
 describe("(c) T1'' の拒否 → T1 の 2 回目 → 残った拒否は持ち越し", () => {
