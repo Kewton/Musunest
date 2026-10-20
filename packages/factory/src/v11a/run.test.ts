@@ -971,41 +971,42 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
    * 直す前の値：main の a61f2ce（直す前の run.ts・bundle.ts）で上の台本を流して測った SHA-256（記録・要約・要求・終了コード・納品物の順。
    * 各値は `JSON.stringify` した値の SHA-256。新しい run.ts の出力から作っていない。Issue #657）。
    *
-   * **LLM への要求の SHA-256（3 番目）だけ、Issue #682 で取り直した**（base d38e132 に #682 の変更を重ねた作業木で上の台本を流して
-   * 測った値。旧の値は各行の注に残す）。理由：C2 の規則 R-map-03 の文と C2 の schema（checks を検査の種類ごとの欄にした）と、
-   * 台本の C2 の応答（fixture が新しい形で組む）が要求に載るため。C2 を呼ばない (4) C1 の束 2 が 2 回落ちて止まる台本は取り直して
-   * いない。記録・要約・終了コード・納品物の SHA-256 は直す前の値のまま照らす
+   * **LLM への要求の SHA-256（3 番目）だけ、Issue #682・#690 で取り直した**（#682 は base d38e132 に #682 の変更を重ねた作業木、
+   * #690 は base 9557d25 に #690 の変更を重ねた作業木で上の台本を流して測った値。旧の値は各行の注に残す）。理由：#690 は C2 の
+   * 規則 R-map-03 の文に「当たる種類が無い要件を structural にしない」を足したため（#682 は R-map-03 の文と C2 の schema の変更の
+   * ため）。C2 を呼ばない (4) C1 の束 2 が 2 回落ちて止まる台本は取り直していない。記録・要約・終了コード・納品物の SHA-256 は
+   * 直す前の値のまま照らす
    */
   const BEFORE_DIGESTS: Readonly<Record<string, readonly string[]>> = {
     "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": [
       "865511262ad4b1eec243d96a87d5716fa5dac5794bcc0967769bd9fda0974edc",
       "e43bf01d37bdb469dae6dd6190e30e489618ada887c17db2fe2c1eab98c9f680",
-      // 要求の SHA-256 は Issue #682 で取り直した（旧 a0093fffd46e0316db7a39788e7bc23cdbd879e9440dc900394944b4634643e3）
-      "752a0c66bd0921ddef70aae2a4b6a1c70b012d6003a14dccbd94bd006493e24e",
+      // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 752a0c66bd0921ddef70aae2a4b6a1c70b012d6003a14dccbd94bd006493e24e、#682 の前 a0093fffd46e0316db7a39788e7bc23cdbd879e9440dc900394944b4634643e3）
+      "aa61d49da041316d61a2363ad590036a1486361eba20d106a56b7a821b1e83b5",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       "d3d46bd0bae1ed1bce66a419612e4d05b1d6d0cefa9b95072d2af39c8137d700",
     ],
     "(2) C2 の試行 1 が形で落ちて試行 2 で通る": [
       "771d2acf15b3903ea4b81cd6e6fb4cd6d4600944a807484c985dacbb6128e7e6",
       "b00502771c9776d7ca5699650d826e5e619f6d2f9688d728ba3adcec07d2d536",
-      // 要求の SHA-256 は Issue #682 で取り直した（旧 6c3f9e9cf8c384b59958beb5300a3fc50847416fbfd411fb63f2c876e239a18d）
-      "8921cc36209615b5948b4830e79f7b8ed1cab4c38fe1751b1825b28ff2d149e1",
+      // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 8921cc36209615b5948b4830e79f7b8ed1cab4c38fe1751b1825b28ff2d149e1、#682 の前 6c3f9e9cf8c384b59958beb5300a3fc50847416fbfd411fb63f2c876e239a18d）
+      "2c75ec3f7e097736f78a181425c7360fab93d01e3571468dbcb793f2b8c60e0a",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       "c479ec4fc3ac733a9b470499f5d8fc631583a94ca9e4169834ae571ea7499645",
     ],
     "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": [
       "c2a1c208a549dd9320f05ca078149cff2c691f163c9de1ef9a53da25426de89c",
       "dfc45b40f4d4f5e04af357295a853c5d69847dc2aa260f2af52e0b08713eab11",
-      // 要求の SHA-256 は Issue #682 で取り直した（旧 6af97b9e827e24b9d14505ee677d3b15af2f3e3615d6f448b90f818b8d8e061b）
-      "f2f3aa9dc28f4b4fc536c18ea4dfae4e38cda3bfdf07d26524b8526c91674c2d",
+      // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 f2f3aa9dc28f4b4fc536c18ea4dfae4e38cda3bfdf07d26524b8526c91674c2d、#682 の前 6af97b9e827e24b9d14505ee677d3b15af2f3e3615d6f448b90f818b8d8e061b）
+      "cc1e636756802ca79ef535edbff41302442ab15d70561042106c644d88cf75ce",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       "2f032bbaf50ff8e7c6c0fbe9708107eb043cca23ae2bc5b6b25680e7c2f4151a",
     ],
     "(4) C2 が 2 回落ちて止まる": [
       "14927cf4ff8e5b827eb9f11391b5c422f6b789ccb1ff6878608c6cc351fa25c1",
       "62a0d8984a6a06d59674e2a3daf142cbf34425567d43c37c53461d94613f8a8e",
-      // 要求の SHA-256 は Issue #682 で取り直した（旧 0ed4f413a0be74f4140a5d04d48728660796a4de535442589ae78af2b53120ff）
-      "efcc74edb8bc0ab3a4c540f0d6fe4074f5299cd5cb144f5576c54621df7863a2",
+      // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 efcc74edb8bc0ab3a4c540f0d6fe4074f5299cd5cb144f5576c54621df7863a2、#682 の前 0ed4f413a0be74f4140a5d04d48728660796a4de535442589ae78af2b53120ff）
+      "2c5b83f0e36a0e8c094b261f4b27b11de51a3ff4b7b97c9e1eac0eccfc65bd9f",
       "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
       "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     ],
@@ -1019,8 +1020,8 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     "(5) 形で 1 度も落ちない": [
       "8a7be5d0b40243e22114d434e400f45dc55ff41add9d357888593eaa4d460aea",
       "88b91fbfc4f9030c40c8d0052d630afe65b86255f8242dbae174a000086e0e56",
-      // 要求の SHA-256 は Issue #682 で取り直した（旧 5b4777c8abe5dcdfa274689e1ff8083e1c610a80180c54792f668d1dda010e1c）
-      "46f31a920a94f54c37b32fedb8e771028ecfa6e6a6b7789133d3c11101c04deb",
+      // 要求の SHA-256 は Issue #682・#690 で取り直した（旧 #682 46f31a920a94f54c37b32fedb8e771028ecfa6e6a6b7789133d3c11101c04deb、#682 の前 5b4777c8abe5dcdfa274689e1ff8083e1c610a80180c54792f668d1dda010e1c）
+      "b05e55ebd15b607f7c856b6fa50c7ff31d54ae87005478ad294c825c14bab561",
       "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
       "d762715a3037b44cbc202848f40b5fa2cd1551bba549bd418f56fefc0e9def0e",
     ],

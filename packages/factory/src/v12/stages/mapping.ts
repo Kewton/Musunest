@@ -87,7 +87,7 @@ export const MAPPING_MESSAGES = {
 
 /** 構造の検査の書き方（R-map-03 と台帳の文の頭で同じ文） */
 const STRUCTURAL_RULE_TEXT =
-  "構造で確かめるなら kind を structural にし、reason に理由を書く。checks は検査の種類ごとの欄で、同じ種類の検査は要件ごとに 1 件である。使う種類の欄に targetId で検査が見る行の ID（field-type は項目、action-kind・action-unconditioned・write-anonymous は操作、view-shows は画面、aggregate-no-period は計算）を書き、view-shows の欄は sourceId に画面と同じ entity の項目か計算の行の ID（entity を持たない画面は entity を持たない計算の ID）も書き、使わない種類の欄は null にする。同じ種類の検査を 2 つ以上の行に掛けなければ確かめられない要件（複数の操作・複数の項目・1 つの画面と複数の項目）は structural にせず、kind を fixed-test にしてそれらの行を所属させる。検査の対象の行はコードが所属に足す。";
+  "構造で確かめるなら kind を structural にし、reason に理由を書く。checks は検査の種類ごとの欄で、同じ種類の検査は要件ごとに 1 件である。使う種類の欄に targetId で検査が見る行の ID（field-type は項目、action-kind・action-unconditioned・write-anonymous は操作、view-shows は画面、aggregate-no-period は計算）を書き、view-shows の欄は sourceId に画面と同じ entity の項目か計算の行の ID（entity を持たない画面は entity を持たない計算の ID）も書き、使わない種類の欄は null にする。structural は、検査の種類のうち 1 つ以上で確かめられる要件だけである。確かめ方の種類を選ぶ既存の条件（default-value など、専用の種類を指定する文）は今までどおり先に当てる。そのうえで structural にしようとした要件に当たる種類が 1 つも無いなら（行が在ることだけを求める要件など）structural にせず、固定した試験で確かめられるなら fixed-test、宣言で書けず根拠となる文書の制約 ID を一覧から 1 件以上挙げられるなら unresolved にする。欄が全部 null の structural は表の検査で断られる。同じ種類の検査を 2 つ以上の行に掛けなければ確かめられない要件（複数の操作・複数の項目・1 つの画面と複数の項目）は structural にせず、kind を fixed-test にしてそれらの行を所属させる。検査の対象の行はコードが所属に足す。";
 
 /** 書けない要件の書き方（R-map-03 と台帳の文の頭で同じ文。制約 ID の 1 件以上は Issue #682） */
 const UNRESOLVED_RULE_TEXT =
@@ -112,7 +112,7 @@ export const MAPPING_RULE_DEFINITIONS: readonly RuleDefinition[] = [
     text: `verification は要件の確かめ方である。固定した試験で確かめるなら kind を fixed-test にする。${STRUCTURAL_RULE_TEXT}${UNRESOLVED_RULE_TEXT}要件の決まりが選択肢の項目の既定値だけなら kind を default-value にし、value にそのキー（その項目の options のキー）を書き、その項目だけを所属させる。使わない欄は null か空の並びにする。`,
     why: "確かめ方を所属と組で固定し、書けない要件は理由と制約 ID つきで持ち越す（T1 の R-nt-08）。構造の検査の対象は規則の文で所属を求めず、応答の欄で行の ID を書かせて対と所属をコードが導く（方法論 03 の F4・H1・H2）",
     since:
-      "Issue #593（構造の検査の対象の欄は Issue #594。検査の種類ごとの欄・同じ種類の検査を 2 つ以上の行に掛ける要件の fixed-test への選び方・未解決の制約 ID の 1 件以上は Issue #682）",
+      "Issue #593（構造の検査の対象の欄は Issue #594。検査の種類ごとの欄・同じ種類の検査を 2 つ以上の行に掛ける要件の fixed-test への選び方・未解決の制約 ID の 1 件以上は Issue #682。当たる種類が無い要件を structural にせず fixed-test か unresolved にする選び方は Issue #690）",
   },
   {
     id: "R-map-04",
