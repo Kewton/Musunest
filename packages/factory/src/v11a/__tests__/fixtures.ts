@@ -26,7 +26,7 @@ import {
 import { STRUCTURAL_ASSERTIONS, STRUCTURAL_TARGET_KINDS, type StructuralAssertionKind } from "../../fixed-test.js";
 import { PROPERTY_LEDGER, deriveLedgerView, type LedgerView, type PropertyRow } from "../../v12/ledger.js";
 import { NAME_TABLE_RULE_DEFINITIONS, NAME_TABLE_SCHEMA_NAME } from "../stages/name-table.js";
-import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME, semanticCheckTargets } from "../stages/semantic-check.js";
+import { SEMANTIC_CHECK_RULE_DEFINITIONS, SEMANTIC_CHECK_SCHEMA_NAME } from "../stages/semantic-check.js";
 import { TEST_SPEC_RULE_DEFINITIONS, TEST_SPEC_SCHEMA_NAME } from "../stages/test-spec.js";
 import { WRITE_V11A_SCHEMA_NAME } from "../stages/write.js";
 
@@ -1039,46 +1039,6 @@ export const idsResponseList = (responses: IdsResponses): readonly Record<string
   responses.behaviors,
   responses.mapping,
 ];
-
-// ── 旗 v12.ids の C3 の応答（観点ごとの根拠の形。Issue #700）──────────────────────────
-
-/** C3 の拒否の指定（拒否の種類と、その観点の引用） */
-export type SemanticEvidenceRejection = readonly [kind: string, quote: string];
-
-/**
- * 旗 v12.ids の C3 の応答（観点ごとの根拠の形。strict の schema に合う。Issue #700）を、C3 が見る表から組む。要件ごとに、所属は
- * examined＝その要件の所属の行の全部・不要 0 件、対象は present（所属の行。要件でない文は 0 件）、確かめ方は sufficient で、引用は
- * 要件の文。`rejects` の要件は、種類の観点だけを問題ありに変え、その観点の引用を渡した文にする（unnecessary-ownership は所属の
- * 先頭の行を不要に、missing-target は missing、weak-verification は weak）。`ids` は判定を書く要件（省けば表の点検の対象の全部）
- */
-export function semanticEvidenceResponseOf(
-  list: RequirementList,
-  table: NameTable,
-  rejects: Readonly<Record<string, SemanticEvidenceRejection>> = {},
-  ids: readonly string[] = semanticCheckTargets(list, table),
-): { readonly judgments: readonly Record<string, unknown>[] } {
-  return {
-    judgments: ids.map((requirementId) => {
-      const text = list.requirements.find((item) => item.id === requirementId)?.text;
-      if (text === undefined) throw new Error(`前提が壊れた：一覧に ${requirementId} が無い`);
-      const owned = (table.ownership.find((entry) => entry.requirementId === requirementId)?.roles ?? []).map((role) => role.id);
-      const found = rejects[requirementId];
-      const kind = found?.[0];
-      const quote = found?.[1] ?? text;
-      if (kind === "unnecessary-ownership" && owned.length === 0) throw new Error(`前提が壊れた：${requirementId} は所属の行を持たない`);
-      return {
-        requirementId,
-        ownership: {
-          examinedRowIds: owned,
-          unnecessaryRowIds: kind === "unnecessary-ownership" ? owned.slice(0, 1) : [],
-          quote: kind === "unnecessary-ownership" ? quote : text,
-        },
-        target: { verdict: kind === "missing-target" ? "missing" : "present", presentRowIds: owned, quote: kind === "missing-target" ? quote : text },
-        verification: { verdict: kind === "weak-verification" ? "weak" : "sufficient", quote: kind === "weak-verification" ? quote : text },
-      };
-    }),
-  };
-}
 
 /** 確定した仕様（抽象的な題材。要件は一覧と同じ） */
 export function planOf(list: RequirementList): ConfirmedPlan {
