@@ -77,7 +77,6 @@ import {
   codeIdRenameOf,
   idsResponseList,
   idsResponsesOf,
-  semanticEvidenceResponseOf,
   renameIds,
   withCodeIds,
   withoutEnumMembership,
@@ -89,14 +88,6 @@ import type { LedgerView } from "./v12/ledger.js";
 import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
 import { isGeneratedTestId } from "./v12/generated-tests.js";
 import { ruleTexts } from "./stages/prompt.js";
-import {
-  SEMANTIC_CHECK_IDS_RULE_ID,
-  SEMANTIC_CHECK_IDS_RULE_TEXT,
-  SEMANTIC_CHECK_IDS_SCHEMA,
-  SEMANTIC_CHECK_RULE_DEFINITIONS,
-  SEMANTIC_CHECK_SCHEMA,
-  SEMANTIC_CHECK_SCHEMA_NAME,
-} from "./v11a/stages/semantic-check.js";
 import { TEST_SPEC_SCHEMA_NAME, testSpecRuleDefinitionsOf } from "./v11a/stages/test-spec.js";
 import * as testSpecModule from "./v11a/stages/test-spec.js";
 import { WRITE_V11A_DATA_NAMES, WRITE_V11A_SCHEMA_NAME } from "./v11a/stages/write.js";
@@ -995,16 +986,13 @@ const v11aRenamed = <T,>(value: T): T => renameIds(value, V11A_CODE_RENAME);
 const v12TableCalls = (ledger: LedgerView = ledgerModule.PROPERTY_LEDGER_VIEW): RecordedCall[] =>
   idsResponseList(idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledger)).map((output) => structured(output));
 
-/** v1.2（旗 ids on）の走りの C3 の判定（観点ごとの根拠の形。導かれる判定は `v11aJudgments(rejects)` と同じ。Issue #700） */
-const v12C3 = (rejects: Readonly<Record<string, readonly [string, string]>> = {}) => semanticEvidenceResponseOf(V11A_LIST, V11A_TABLE_IDS, rejects, V11A_IDS);
-
 /**
  * v1.2（旗 on）の走りの頭。旗 v12.ids が on なので、表は C1 の 3 束と C2 で組む（コードの形の ID。Issue #593）。T1'' の判定・
  * B1 の宣言は `v11aHead` と同じで、T2 の応答は同じ試験を新しい ID で書く
  */
 const v12Head = (ledger?: LedgerView): RecordedCall[] => [
   ...v12TableCalls(ledger),
-  structured(v12C3()),
+  structured(v11aJudgments()),
   structured(v11aRenamed(v11aTestSpec())),
   structured({ declaration: V11A_YAML }),
 ];
@@ -1254,19 +1242,6 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
         return JSON.parse(text) as unknown;
       });
   /**
-   * 旗 ids on の要求の C3 を、観点ごとの根拠の契約（R-sc-04 の文と schema。Issue #700）から旗 ids off の契約に戻した形にする
-   * （ほかの段・ほかの欄は触らない）。戻す前の C3 の要求が ids on の文と schema を持つことを確かめてから戻す
-   */
-  const laterIdsRequests = (requests: readonly LlmStructuredRequest[]): unknown[] =>
-    laterRequests(requests).map((value) => {
-      const request = value as LlmStructuredRequest;
-      if (request.schemaName !== SEMANTIC_CHECK_SCHEMA_NAME) return request;
-      expect(request.rules).toContain(SEMANTIC_CHECK_IDS_RULE_TEXT);
-      expect(request.schema).toEqual(SEMANTIC_CHECK_IDS_SCHEMA);
-      const offText = SEMANTIC_CHECK_RULE_DEFINITIONS.find((definition) => definition.id === SEMANTIC_CHECK_IDS_RULE_ID)?.text;
-      return { ...request, schema: SEMANTIC_CHECK_SCHEMA, rules: (request.rules ?? []).map((text) => (text === SEMANTIC_CHECK_IDS_RULE_TEXT ? offText : text)) };
-    });
-  /**
    * 旗 ids on の要求から、コードが作る試験の分（Issue #595）を除く：T2 の R-tsp-16 を台帳の旗 ids の文から旗 ids off の文に戻し、
    * B1 の「固定した試験」の塊からコードが作った試験（予約の接頭辞の ID）を除く。ほかの欄は触らない。`generated` は、B1 の塊に
    * コードが作った試験があるはずか（台帳に空の集計の行が無い導出の走りは、この題材ではコードの試験を作らない）
@@ -1319,8 +1294,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     const targetsPattern = /,\\n *\\"(?:targets|checkTargets)\\": \[[^\]]*\]/g;
     const withoutCheckTargets = (requests: readonly unknown[]): unknown[] =>
       requests.map((request) => JSON.parse(JSON.stringify(request).replace(targetsPattern, "")) as unknown);
-    // ids on の C3 の観点ごとの根拠の契約（Issue #700）は、ids off の契約に戻して比べる（`laterIdsRequests`）
-    const onWithTargets = laterIdsRequests(v12.recording.structured);
+    const onWithTargets = laterRequests(v12.recording.structured);
     expect(onWithTargets.slice(0, 2).every((request) => JSON.stringify(request).match(targetsPattern) !== null)).toBe(true);
     const onRequests = withoutCheckTargets(onWithTargets);
     const offRequests = laterRequests(v11a.recording.structured);
@@ -1345,7 +1319,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     spy.mockRestore();
     // 旗 ids on の差（Issue #595）：#548 の台帳でも R-tsp-16 は旗 ids の文（既定値・選択肢の集合の文）。空の集計の行が無いので
     // コードの試験は作らない（B1 の塊は同じ）。R-tsp-16 だけを旗 off の文に戻して比べる
-    const beforeRequests = withoutIdsGenerated(withoutCheckTargets(laterIdsRequests(v12Before.recording.structured)), LEDGER_VIEW_2B, false);
+    const beforeRequests = withoutIdsGenerated(withoutCheckTargets(laterRequests(v12Before.recording.structured)), LEDGER_VIEW_2B, false);
     const beforeDiffs = requestDiffsOf(beforeRequests, offRequests);
     const enumDiff = withoutTableStage(ENUM_MEMBERSHIP_REQUEST_DIFF);
     for (const diff of beforeDiffs) expect(diff.paths, diff.schemaName).toEqual(enumDiff[diff.schemaName] ?? []);
@@ -1360,7 +1334,7 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     const spy2C = vi.spyOn(ledgerModule, "ledgerViewOf").mockImplementation((flags) => (flags.ledger ? LEDGER_VIEW_2C : undefined));
     const v12Before2C = await runV11aCli({ dir: `${directory}/v12-complete-2c`, calls: [...v12Head(LEDGER_VIEW_2C), structured(v11aJudgments())], pipeline: "v1.2" });
     spy2C.mockRestore();
-    const before2CRequests = withoutCheckTargets(laterIdsRequests(v12Before2C.recording.structured));
+    const before2CRequests = withoutCheckTargets(laterRequests(v12Before2C.recording.structured));
     const diffs2C = requestDiffsOf(onRequests, before2CRequests);
     const when2C = withoutTableStage(WHEN_NON_REQUIREMENT_REQUEST_DIFF);
     for (const diff of diffs2C) expect(diff.paths, diff.schemaName).toEqual(when2C[diff.schemaName] ?? []);
@@ -1877,7 +1851,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     structured(raw()[1]),
     structured(raw()[2]),
     structured(raw()[3]),
-    structured(v12C3()),
+    structured(v11aJudgments()),
   ];
   /** 区間 0 の C1 の束 2 が形で落ちてやり直しで通る応答 */
   const c1Retry = (): RecordedCall[] => [
@@ -1886,7 +1860,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     structured(raw()[1]),
     structured(raw()[2]),
     structured(raw()[3]),
-    structured(v12C3()),
+    structured(v11aJudgments()),
   ];
   /** 区間 0 の C2 の初回が形で落ちて試行 2 で通る応答 */
   const c2Retry = (): RecordedCall[] => [
@@ -1895,7 +1869,7 @@ describe("v1.2 の段の走りが断った候補を診断に書く（一気通�
     structured(raw()[2]),
     structured(missingFirst()),
     structured(raw()[3]),
-    structured(v12C3()),
+    structured(v11aJudgments()),
   ];
   /** 同じ台本の一気通貫（C2 のあと T2・B1・B3' まで） */
   const c2RetryWhole = (): RecordedCall[] => [

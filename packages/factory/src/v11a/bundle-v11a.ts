@@ -44,7 +44,7 @@ import {
 import { coverageUnitsOf, type CoverageLoss, type CoverageUnit } from "./coverage.js";
 import { canonicalJson, nameTableSha256, type NameTable } from "./names.js";
 import type { JudgeAdviceMarkEntry, JudgeAdviceRecord } from "./stages/judge-advice.js";
-import { semanticCheckTargets, type SemanticEvidence } from "./stages/semantic-check.js";
+import { semanticCheckTargets } from "./stages/semantic-check.js";
 import { testSuiteSha256, type TestObserves } from "./stages/test-spec.js";
 import type { V12PublicFlags } from "../v12/ledger.js";
 import type { SearchRepairRecord, VersionViolations } from "../v12/search-repair.js";
@@ -321,8 +321,6 @@ export interface TableRoundSemanticCheck {
   readonly targets: readonly string[];
   readonly judgments: readonly SemanticJudgment[];
   readonly advice: readonly JudgeAdviceMarkEntry[];
-  /** 旗 `v12.ids` の C3 の要件ごとの観点の根拠（対象の順。この診断にだけ書く。Issue #700） */
-  readonly evidence?: readonly SemanticEvidence[];
 }
 
 /** C2 の 1 回（1 行）。C3 が形で止まった回・C2 が落ちた回は欄を持たない（null） */
