@@ -15,7 +15,8 @@
 // `--pipeline v1.2` は、v1.1α の経路に merge 済みの手の旗を全部 on（`V12_PIPELINE_FLAGS`。今は性質の台帳と探索型の直し。
 // 公開の鍵で書いた組を `fromPublicV12Flags` で実効の旗にして渡す。Issue #551）で流す
 // （`08-architecture-v1.2.md` §9・Issue #547）。受け方は `v1.1a` と同じ（`--plan-file` と組んでだけ）で、封筒は v1.2 の封筒
-// （`stage-envelope-v12`。旗の組から導き、全段で同じ。Issue #588）、
+// （`stage-envelope-v12`。旗の組から導き、全段で同じ。Issue #588。旗 ids が on なら識別子 `v1.2-ids`＝名前は同じで C2 の枝が
+// 検査の種類ごとの欄の封筒。Issue #682）、
 // 要約と条件の記録の `prompt_version` は `v1.2`、条件の記録には `pipeline` と実効の旗の組 `v12_flags` を足し、要約にも
 // `v12_flags` を書く。`v1.1a` は旗を全部 off で流し、新しい欄を出さない。
 //
@@ -40,7 +41,7 @@
 // appspec-schema の contract.ts と同じやり方）。
 import { planDigest, type ConfirmedPlan } from "@musunest/appspec-schema";
 import type { TokenRates } from "./budget.js";
-import { bundleFiles } from "./bundle.js";
+import { buildRejectedCandidateFiles, bundleFiles } from "./bundle.js";
 import {
   buildBuildCliRecord,
   buildPlanCliRecord,
@@ -238,9 +239,14 @@ function isV11aPath(pipeline: Pipeline | undefined): pipeline is "v1.1a" | "v1.2
   return pipeline === "v1.1a" || pipeline === "v1.2";
 }
 
-/** 経路の封筒の識別子（v1 は欄を置かないので `undefined`。Issue #588） */
+/**
+ * 経路の封筒の識別子（v1 は欄を置かないので `undefined`。Issue #588）。v1.2 は実効の旗で選ぶ：旗 ids が on なら C2 の枝を検査の
+ * 種類ごとの欄にした `v1.2-ids`、off なら今の `v1.2`（Issue #682）
+ */
 function envelopeIdOf(pipeline: Pipeline | undefined): EnvelopeId | undefined {
-  return pipeline === "v1.2" ? "v1.2" : pipeline === "v1.1a" ? "v1.1a" : undefined;
+  const flags = v12FlagsOf(pipeline);
+  if (flags !== undefined) return fromPublicV12Flags(flags).ids ? "v1.2-ids" : "v1.2";
+  return pipeline === "v1.1a" ? "v1.1a" : undefined;
 }
 
 /** 経路のプロンプトの版 */
@@ -1180,6 +1186,15 @@ async function runStageFromPlanFile(
     ...(flags === undefined ? {} : { v12: { testSpecInRange: stagesInRange(range.start, range.end).includes("test-spec") } }),
   });
   await deps.writeFile(joinPath(job.outDir, STAGE_RUN_RECORD_FILE), stageJsonText(record));
+  // `--pipeline v1.2` の段の走りだけ、断った候補を一気通貫と同じ関数・同じ名前で `--out` の下の診断の置き場所に書く
+  // （候補が無ければ何も書かず、置き場所も作らない。記録・checkpoint・要約・終了コードは変えない。Issue #683）
+  if (pipeline === "v1.2" && outcome.rejected !== undefined && outcome.rejected.length > 0) {
+    for (const file of buildRejectedCandidateFiles(outcome.rejected)) {
+      const parent = parentOf(file.path);
+      if (parent !== "") await deps.makeDirectory(joinPath(job.outDir, parent));
+      await deps.writeFile(joinPath(job.outDir, file.path), file.text);
+    }
+  }
   log(
     JSON.stringify({
       stage_pass: record["stage_pass"],

@@ -40,9 +40,10 @@ import {
   ENVELOPE_SCHEMA_NAME,
   ENVELOPE_SCHEMA_NAME_V11A,
   ENVELOPE_SCHEMA_V11A,
+  ENVELOPE_SCHEMA_V12_IDS,
   STAGE_ENVELOPE_ENTRIES,
   STAGE_ENVELOPE_ENTRIES_V11A,
-  STAGE_ENVELOPE_ENTRIES_V12,
+  STAGE_ENVELOPE_ENTRIES_V12_IDS,
   buildStageBranch,
   type EnvelopeId,
 } from "./schema-envelope.js";
@@ -97,13 +98,16 @@ import {
   DESIGN_FILE,
   DIAGNOSTICS_LISTING_FILE,
   DIAGNOSTICS_REJECTED_DESIGN_FILE,
+  DIAGNOSTICS_REJECTED_MAPPING_FILE,
+  DIAGNOSTICS_REJECTED_TEST_SPEC_FILE,
+  DIAGNOSTICS_REJECTED_VOCABULARY_FILE,
   MAPPINGS_FILE,
   TEST_SUITE_FILE,
 } from "./bundle.js";
 import * as runModule from "./run.js";
 import type { Judge, JudgeRequest } from "./judge.js";
 import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolResponse } from "./llm.js";
-import { createRecordingClient } from "./stages/__tests__/prompt.js";
+import { createRecordingClient, expectNoAcceptanceMaterial } from "./stages/__tests__/prompt.js";
 import { ATTEMPT_KEYS, RETRY_KEYS } from "./record.js";
 import { DESIGN_OUTPUT_MAPPED, SOURCE_TEXT, recordedRun, structured } from "./__tests__/run.js";
 
@@ -1277,7 +1281,8 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(v12.code).toBe(EXIT_OK);
     expect(v1Spy).not.toHaveBeenCalled();
     expect(v11aSpy).toHaveBeenCalledTimes(2);
-    expect(v12.makeClient.mock.calls[0]).toEqual([{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.2" }]);
+    // 旗 ids が on の v1.2 は、C2 の枝を検査の種類ごとの欄にした識別子 v1.2-ids の封筒（Issue #682）
+    expect(v12.makeClient.mock.calls[0]).toEqual([{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.2-ids" }]);
     // 表を組む段：v1.2 は C1 の 3 束と C2、v1.1a は T1（Issue #593）
     expect(v12.recording.structured.slice(0, 4).map((request) => request.schemaName)).toEqual(["vocabulary-entities", "vocabulary-fields", "vocabulary-behaviors", "mapping"]);
     expect(v11a.recording.structured[0]?.schemaName).toBe("name-table");
@@ -1627,7 +1632,7 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     const run = await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: segment0(), pipeline: "v1.2" });
     expect(run.code).toBe(EXIT_OK);
     // 一気通貫の v1.2 と同じ封筒を選ぶ
-    expect(run.makeClient.mock.calls).toEqual([[{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.2" }]]);
+    expect(run.makeClient.mock.calls).toEqual([[{ apiKey: "sk-FAKE", model: "gpt-6-luna", effort: "high", envelope: "v1.2-ids" }]]);
     expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE]);
     const record = await stageRecordOf(dir);
     expect(new Set(stagesOf(record))).toEqual(new Set(["vocabulary", "mapping", "semantic-check"]));
@@ -1795,7 +1800,8 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
     const dir = `${directory}/v12-stage-one-ahead-c2`;
     const run = await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"], calls: c2Broken(), pipeline: "v1.2" });
     expect(run.code).toBe(EXIT_RUN_FAILED);
-    expect(run.written).toEqual([STAGE_RUN_RECORD_FILE]);
+    // 形で落ちた段の走りは、記録に加えて断った候補の診断を書く（Issue #683）
+    expect(run.written).toEqual([STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_MAPPING_FILE]);
     const record = await stageRecordOf(dir);
     expect(record["stopped"]).toMatchObject({ stage: "mapping", kind: "unmet" });
     expect(record).toHaveProperty("test_spec", null);
@@ -1824,6 +1830,220 @@ describe("v1.2 の段の走り（`--pipeline v1.2 --plan-file` の段の旗。Is
   });
 });
 
+describe("v1.2 の段の走りが断った候補を診断に書く（一気通貫と同じ関数・同じ名前。Issue #683）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const outputs = () => idsResponsesOf(V11A_LIST, V11A_TABLE_IDS, ledgerModule.PROPERTY_LEDGER_VIEW);
+  const raw = (): readonly Record<string, unknown>[] => idsResponseList(outputs());
+  const rawFields = (): { readonly fields: readonly Record<string, unknown>[] } => raw()[1] as { readonly fields: readonly Record<string, unknown>[] };
+  const fieldsWithEntity = (entity: string) => ({
+    fields: rawFields().fields.map((item, index) => (index === 0 ? { ...item, entity } : item)),
+  });
+  const mappingRequirements = (): readonly unknown[] => (outputs().mapping as { readonly requirements: readonly unknown[] }).requirements;
+  const missingFirst = () => ({ requirements: mappingRequirements().slice(1) });
+  const missingLast = () => ({ requirements: mappingRequirements().slice(0, -1) });
+  /** 区間 0（C1 語彙 → C2 写像 → C3 意味の点検）の偽物の応答 */
+  const segment0 = (): RecordedCall[] => [
+    structured(raw()[0]),
+    structured(raw()[1]),
+    structured(raw()[2]),
+    structured(raw()[3]),
+    structured(v11aJudgments()),
+  ];
+  /** 区間 0 の C1 の束 2 が形で落ちてやり直しで通る応答 */
+  const c1Retry = (): RecordedCall[] => [
+    structured(raw()[0]),
+    structured(fieldsWithEntity("E8")),
+    structured(raw()[1]),
+    structured(raw()[2]),
+    structured(raw()[3]),
+    structured(v11aJudgments()),
+  ];
+  /** 区間 0 の C2 の初回が形で落ちて試行 2 で通る応答 */
+  const c2Retry = (): RecordedCall[] => [
+    structured(raw()[0]),
+    structured(raw()[1]),
+    structured(raw()[2]),
+    structured(missingFirst()),
+    structured(raw()[3]),
+    structured(v11aJudgments()),
+  ];
+  /** 同じ台本の一気通貫（C2 のあと T2・B1・B3' まで） */
+  const c2RetryWhole = (): RecordedCall[] => [
+    ...c2Retry(),
+    structured(v11aRenamed(v11aTestSpec())),
+    structured({ declaration: V11A_YAML }),
+    structured(v11aJudgments()),
+  ];
+  /** 1 段先の範囲（vocabulary..test-spec）で T2 が 1 回断ってやり直しで通る応答（一覧に無い要件 ID の試験） */
+  const t2Retry = (): RecordedCall[] => {
+    const spec = v11aTestSpec();
+    const bad = {
+      ...spec,
+      tests: [
+        ...(spec["tests"] as readonly unknown[]),
+        v11aTest({
+          id: "r9-extra",
+          requirementId: "R9",
+          targetKind: "field",
+          roleId: "f.item.amount",
+          kind: "normal",
+          operation: "validate",
+          observes: "validation",
+          input: { "f.item.amount": 5 },
+          expected: okValue("true"),
+        }),
+      ],
+    };
+    return [...segment0(), structured(v11aRenamed(bad)), structured(v11aRenamed(v11aTestSpec()))];
+  };
+  const candidatesOf = async (dir: string, path: string): Promise<readonly Record<string, unknown>[]> =>
+    (JSON.parse(await fs.readFile(`${dir}/${path}`, "utf8")) as { readonly candidates: readonly Record<string, unknown>[] }).candidates;
+  const digestsOf = async (dir: string, names: readonly string[]): Promise<readonly string[]> =>
+    Promise.all(names.map(async (name) => sha256Hex(await fs.readFile(`${dir}/${name}`, "utf8"))));
+
+  it("(1) C1 の束 2 の初回が形で落ちてやり直しで通る段の走り：rejected-vocabulary に候補 1 件、記録・checkpoint・1 行の要約・終了コードは直す前とバイト列で同じ", async () => {
+    const dir = `${directory}/v12-stage-diag-c1`;
+    const run = await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: c1Retry(), pipeline: "v1.2" });
+    // 直す前（fa21c65）のコードで測った値（記録と t1-t2 の checkpoint。診断を足してもバイト列は変えない。手で直さない）
+    expect(await digestsOf(dir, [STAGE_RUN_RECORD_FILE, stageCheckpointFile("t1-t2")])).toEqual(V12_STAGE_C1_RETRY_DIGESTS);
+    expect(run.code).toBe(EXIT_OK);
+    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_VOCABULARY_FILE]);
+    expect(run.lines.at(-1)).toBe(
+      JSON.stringify({ stage_pass: true, reached_stage: "semantic-check", budget_scope: "stage-run", exit_code: EXIT_OK }),
+    );
+    // 記録は診断を宣言しない（一気通貫の Build だけの記録と同じ）
+    expect(JSON.stringify(await stageRecordOf(dir))).not.toContain("diagnostics");
+    const candidates = await candidatesOf(dir, DIAGNOSTICS_REJECTED_VOCABULARY_FILE);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ stage: "vocabulary", operation: null, call: 2, round: 1, attempt: 1, kind: "shape" });
+    // raw と SHA-256 は無加工
+    const bad = fieldsWithEntity("E8");
+    expect(candidates[0]?.["response"]).toEqual(bad);
+    expect(candidates[0]?.["response_sha256"]).toBe(await sha256Hex(JSON.stringify(bad)));
+    expectNoAcceptanceMaterial([...run.requests, ...candidates.map((candidate) => JSON.stringify(candidate))]);
+  });
+
+  it("(2) C2 の初回が形で落ちる段の走り：rejected-mapping の候補の一覧が、同じ台本の一気通貫の同じ名前の診断と深く等しい", async () => {
+    const stageDir = `${directory}/v12-stage-diag-c2-stage`;
+    const wholeDir = `${directory}/v12-stage-diag-c2-whole`;
+    const stageRun = await runStageCli({ dir: stageDir, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: c2Retry(), pipeline: "v1.2" });
+    await runV11aCli({ dir: wholeDir, calls: c2RetryWhole(), pipeline: "v1.2" });
+    const stageText = await fs.readFile(`${stageDir}/${DIAGNOSTICS_REJECTED_MAPPING_FILE}`, "utf8");
+    const wholeText = await fs.readFile(`${wholeDir}/${DIAGNOSTICS_REJECTED_MAPPING_FILE}`, "utf8");
+    // 同じ関数が組むので、ファイルのバイト列まで同じ
+    expect(stageText).toBe(wholeText);
+    const candidates = (JSON.parse(stageText) as { readonly candidates: readonly Record<string, unknown>[] }).candidates;
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ stage: "mapping", operation: null, call: 1, round: 1, attempt: 1, kind: "shape" });
+    expectNoAcceptanceMaterial([...stageRun.requests, stageText]);
+  });
+
+  it("(3) C2 が 2 回落ちて止まる段の走り（終了コード 1）：候補 2 件が書かれ、記録の停止は直す前と同じ", async () => {
+    const dir = `${directory}/v12-stage-diag-c2-stop`;
+    const run = await runStageCli({
+      dir,
+      args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"],
+      calls: [structured(raw()[0]), structured(raw()[1]), structured(raw()[2]), structured(missingFirst()), structured(missingLast())],
+      pipeline: "v1.2",
+    });
+    expect(run.code).toBe(EXIT_RUN_FAILED);
+    // 直す前（fa21c65）のコードで測った値（記録。境界に届かないので checkpoint は無い。手で直さない）
+    expect(await digestsOf(dir, [STAGE_RUN_RECORD_FILE])).toEqual(V12_STAGE_C2_STOP_DIGESTS);
+    expect(run.written).toEqual([STAGE_RUN_RECORD_FILE, DIAGNOSTICS_REJECTED_MAPPING_FILE]);
+    const record = await stageRecordOf(dir);
+    expect(record["stopped"]).toMatchObject({ stage: "mapping", kind: "unmet" });
+    const candidates = await candidatesOf(dir, DIAGNOSTICS_REJECTED_MAPPING_FILE);
+    expect(candidates.map((candidate) => [candidate["stage"], candidate["call"], candidate["round"], candidate["attempt"]])).toEqual([
+      ["mapping", 1, 1, 1],
+      ["mapping", 1, 1, 2],
+    ]);
+    expect(candidates[0]?.["response"]).toEqual(missingFirst());
+    expect(candidates[1]?.["response"]).toEqual(missingLast());
+    expectNoAcceptanceMaterial([...run.requests, ...candidates.map((candidate) => JSON.stringify(candidate))]);
+  });
+
+  it("(4) 1 段先の範囲（vocabulary..test-spec）で T2 が断った候補は rejected-test-spec に書かれる", async () => {
+    const dir = `${directory}/v12-stage-diag-t2`;
+    const run = await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "test-spec"], calls: t2Retry(), pipeline: "v1.2" });
+    expect(run.code).toBe(EXIT_OK);
+    expect(run.written).toEqual([
+      stageCheckpointFile("t1-t2"),
+      stageCheckpointFile("t2-b1"),
+      STAGE_RUN_RECORD_FILE,
+      DIAGNOSTICS_REJECTED_TEST_SPEC_FILE,
+    ]);
+    const candidates = await candidatesOf(dir, DIAGNOSTICS_REJECTED_TEST_SPEC_FILE);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ stage: "test-spec", operation: null, call: 1, round: 1, attempt: 1, kind: "content" });
+    expect(JSON.stringify(candidates[0]?.["problems"])).toContain("一覧に無い要件 ID");
+    expectNoAcceptanceMaterial([...run.requests, ...candidates.map((candidate) => JSON.stringify(candidate))]);
+  });
+
+  it("(5) 形で 1 度も落ちない走り：診断の置き場所が無く、書いたファイルの一覧が直す前と同じ", async () => {
+    const dir = `${directory}/v12-stage-diag-none`;
+    const run = await runStageCli({ dir, args: ["--stage-start", "vocabulary", "--stage-end", "semantic-check"], calls: segment0(), pipeline: "v1.2" });
+    expect(run.code).toBe(EXIT_OK);
+    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE]);
+    expect(run.directories).not.toContain(`${dir}/diagnostics`);
+    expectNoAcceptanceMaterial(run.requests);
+  });
+
+  it("(6) v1.1a の段の走り：書いたファイルの一覧とバイト列が直す前と同じ（診断を書かない）", async () => {
+    const dir = `${directory}/v11a-stage-diag-none`;
+    const run = await runStageCli({ dir, args: ["--stage-end", "judge"], calls: [...v11aHead(), structured(v11aJudgments())] });
+    expect(run.code).toBe(EXIT_OK);
+    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), stageCheckpointFile("t2-b1"), STAGE_RUN_RECORD_FILE]);
+    expect(run.directories).not.toContain(`${dir}/diagnostics`);
+    expect(await digestsOf(dir, [STAGE_RUN_RECORD_FILE, stageCheckpointFile("t1-t2"), stageCheckpointFile("t2-b1")])).toEqual(V11A_STAGE_RUN_DIGESTS);
+    expectNoAcceptanceMaterial(run.requests);
+  });
+
+  it("(6b) v1.1a の段の走りで T1 が形で 1 度落ちてやり直しで通る：結果に rejected が入っても、記録・checkpoint・要約・書いたファイルの一覧は直す前と同じ（診断を書かない）", async () => {
+    const dir = `${directory}/v11a-stage-diag-t1`;
+    const spy = vi.spyOn(v11aRunModule, "runStageRangeV11a");
+    // T1 の初回が形で落ちて（`v11aBadDraftCall`）2 回目で通る台本。終了 T1'' なので T2 以降は呼ばない
+    const run = await runStageCli({ dir, args: ["--stage-end", "semantic-check"], calls: [v11aBadDraftCall(), ...v11aHead()] });
+    expect(run.code).toBe(EXIT_OK);
+    // 直す前（fa21c65）のコードで測った値（記録と t1-t2 の checkpoint。v1.1a は診断を書かないのでバイト列は変わらない。手で直さない）
+    expect(await digestsOf(dir, [STAGE_RUN_RECORD_FILE, stageCheckpointFile("t1-t2")])).toEqual(V11A_STAGE_T1_RETRY_DIGESTS);
+    // 段の走りの結果には断った候補が入る（cli の試験で結果を読む）
+    expect(spy).toHaveBeenCalledTimes(1);
+    const outcome = await (spy.mock.results[0]?.value as Promise<Awaited<ReturnType<typeof v11aRunModule.runStageRangeV11a>>>);
+    expect(outcome.rejected?.length).toBeGreaterThanOrEqual(1);
+    // v1.1a の T1 の初回の落ちは、段が `content` として積む（`v11aBadDraftCall` の応答）
+    expect(outcome.rejected?.[0]).toMatchObject({ stage: "name-table", operation: null, call: 1, round: 1, attempt: 1, kind: "content" });
+    // 入口は v1.1a の段の走りで診断を書かない（置き場所も作らない）
+    expect(run.written).toEqual([stageCheckpointFile("t1-t2"), STAGE_RUN_RECORD_FILE]);
+    expect(run.directories).not.toContain(`${dir}/diagnostics`);
+    const recordText = await fs.readFile(`${dir}/${STAGE_RUN_RECORD_FILE}`, "utf8");
+    expect(recordText).not.toContain("rejected");
+    expect(recordText).not.toContain("diagnostics");
+    // 要約の 1 行は直す前と同じ
+    expect(run.lines.at(-1)).toBe(
+      JSON.stringify({ stage_pass: true, reached_stage: "semantic-check", budget_scope: "stage-run", exit_code: EXIT_OK }),
+    );
+    expectNoAcceptanceMaterial(run.requests);
+  });
+});
+
+/** fa21c65（直す前）の段の走り：C1 の束 2 が形で落ちてやり直しで通る走りの記録と t1-t2 の checkpoint の SHA-256（Issue #683） */
+const V12_STAGE_C1_RETRY_DIGESTS: readonly string[] = [
+  "70fa16375b25456ffd357636934df2e702a1e1cd1ec472ad26724414a71acfc0",
+  "985a79f34387d6a673ea80594421610a3552c05d35ebef2436abbd57bc14d9ee",
+];
+
+/** fa21c65（直す前）の段の走り：C2 が 2 回落ちて止まる走りの記録の SHA-256（Issue #683） */
+const V12_STAGE_C2_STOP_DIGESTS: readonly string[] = ["00443168d1b3bc21efa0d78604fe89bcea391c54e545a67db4e1d68f61eb7367"];
+
+/** fa21c65（直す前）の v1.1a の段の走り：T1 が形で 1 度落ちてやり直しで通る走りの記録と t1-t2 の checkpoint の SHA-256（Issue #683） */
+const V11A_STAGE_T1_RETRY_DIGESTS: readonly string[] = [
+  "08aad2c4e1a7d947379fab165e80a5f6d40fac50b4c9f7e9d78a1e45ea9214be",
+  "50dde03644297779f6259db18fe73422c80f2aaa48439be189ea472bfb93ec33",
+];
+
 /** v1.1a の段の走り（T1〜⑦）の記録・t1-t2・t2-b1 の checkpoint の SHA-256（直す前 bf68da8（#636 を載せ直した main）のコードで測った値。Issue #637） */
 const V11A_STAGE_RUN_DIGESTS: readonly string[] = [
   "b3c10421fc24524bc0aa9ff8fa3655faf100ce6aa87a233be03a4ea6bb2fd141",
@@ -1842,10 +2062,13 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
 
   const v12ReturnToPlan = (): RecordedCall[] => [...v12Head(), ...v11aReturnToPlan().slice(4)];
 
-  /** 走りの段の要求を、入口が作った adapter の封筒で送り直した組（`--pipeline v1.2` は v1.2 の封筒。Issue #588） */
+  /**
+   * 走りの段の要求を、入口が作った adapter の封筒で送り直した組（`--pipeline v1.2` は v1.2 の封筒。Issue #588。旗 ids が on の
+   * v1.2 は識別子 v1.2-ids。Issue #682）
+   */
   async function exchangesOfRun(run: Awaited<ReturnType<typeof runV11aCli>>, pipeline: "v1.1a" | "v1.2" = "v1.1a"): Promise<WireExchange[]> {
     const options = run.makeClient.mock.calls[0]?.[0];
-    expect(options).toMatchObject({ envelope: pipeline });
+    expect(options).toMatchObject({ envelope: pipeline === "v1.2" ? "v1.2-ids" : pipeline });
     return sentExchangesOf(run.recording.structured, options?.envelope);
   }
 
@@ -1868,8 +2091,8 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
         }
       }
       // 封筒に載る全段を照らした（v1.2 は旗 v12.ids で T1 を呼ばず、C1 の 3 束と C2 を呼ぶ。Issue #593）
-      const expected = pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage).filter((stage) => stage !== "name-table") : v11aStages;
-      const envelopeStages = pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage) : v11aStages;
+      const expected = pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12_IDS.map((entry) => entry.stage).filter((stage) => stage !== "name-table") : v11aStages;
+      const envelopeStages = pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12_IDS.map((entry) => entry.stage) : v11aStages;
       expect([...seen].filter((stage) => envelopeStages.includes(stage)).sort()).toEqual([...expected].sort());
     });
   }
@@ -1899,7 +2122,7 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
 
   for (const pipeline of ["v1.1a", "v1.2"] as const) {
     it(`${pipeline}：完走と差し戻しの走りで観測した構造化出力の名前は、封筒の一覧か許可の一覧にある。許可に無い名前を足した段は落ちる`, async () => {
-      const envelopeStages = (pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12 : STAGE_ENVELOPE_ENTRIES_V11A).map((entry) => entry.stage);
+      const envelopeStages = (pipeline === "v1.2" ? STAGE_ENVELOPE_ENTRIES_V12_IDS : STAGE_ENVELOPE_ENTRIES_V11A).map((entry) => entry.stage);
       const observed = new Set<string>();
       for (const route of routesOf(pipeline)) {
         const run = await runV11aCli({ dir: `${directory}/names-${pipeline}-${route.name}`, calls: route.calls, pipeline });
@@ -1968,10 +2191,10 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
   const formatOf = (exchange: WireExchange) =>
     (exchange.body["text"] as { readonly format: { readonly name: string; readonly schema: Record<string, unknown> } }).format;
 
-  it("v1.2：完走と差し戻しの道で、封筒に載る段（T1 を除く 9 段）すべての送信の名前と schema のバイト列が同じで、名前が stage-envelope-v12（Issue #588・#593）", async () => {
+  it("v1.2：完走と差し戻しの道で、封筒に載る段（T1 を除く 9 段）すべての送信の名前と schema のバイト列が同じで、名前が stage-envelope-v12・schema が識別子 v1.2-ids の封筒（Issue #588・#593・#682）", async () => {
     // v1.1α の 6 段に旗 v12.ids の C1 の 3 束と C2 を足した 10 段。ids on の走りは T1 を呼ばない
-    const v12Stages = STAGE_ENVELOPE_ENTRIES_V12.map((entry) => entry.stage).filter((stage) => stage !== "name-table");
-    expect(STAGE_ENVELOPE_ENTRIES_V12).toHaveLength(10);
+    const v12Stages = STAGE_ENVELOPE_ENTRIES_V12_IDS.map((entry) => entry.stage).filter((stage) => stage !== "name-table");
+    expect(STAGE_ENVELOPE_ENTRIES_V12_IDS).toHaveLength(10);
     expect(v12Stages).toHaveLength(9);
     const seen = new Set<string>();
     const sent = new Set<string>();
@@ -1981,12 +2204,13 @@ describe("封筒の枝は段が渡した schema と深く等しい（実 adapter
       for (const exchange of exchanges) {
         expectSentSchemaIsStageSchema(exchange);
         const format = formatOf(exchange);
-        if (!STAGE_ENVELOPE_ENTRIES_V12.some((entry) => entry.stage === exchange.request.schemaName)) {
+        if (!STAGE_ENVELOPE_ENTRIES_V12_IDS.some((entry) => entry.stage === exchange.request.schemaName)) {
           // 封筒に載らない口（判定の口など）は、その schema をそのまま送る
           expect(format.name, exchange.request.schemaName).toBe(exchange.request.schemaName);
           continue;
         }
         expect(format.name, exchange.request.schemaName).toBe("stage-envelope-v12");
+        expect(format.schema, exchange.request.schemaName).toEqual(ENVELOPE_SCHEMA_V12_IDS);
         sent.add(JSON.stringify({ name: format.name, schema: format.schema }));
         seen.add(exchange.request.schemaName);
       }
