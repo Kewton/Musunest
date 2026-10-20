@@ -8,7 +8,7 @@
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { describe, expect, it } from "vitest";
 import type { RequirementList } from "../../pipeline.js";
-import { ruleDefinitionDefects } from "../../stages/prompt.js";
+import { ruleDefinitionDefects, ruleTexts } from "../../stages/prompt.js";
 import { expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
   createCheckedRecordingClient,
@@ -31,6 +31,7 @@ import {
   fixtureNonRequirementList,
   fixtureNonRequirementTable,
   requestDiffsOf,
+  semanticEvidenceResponseOf,
   withoutEnumMembership,
   withoutWhenAndNonRequirement,
 } from "../__tests__/fixtures.js";
@@ -39,15 +40,23 @@ import { checkNameTable, nameTableSha256, type NameTable } from "../names.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
 import {
+  SEMANTIC_CHECK_IDS_RULE_ID,
+  SEMANTIC_CHECK_IDS_RULE_TEXT,
+  SEMANTIC_CHECK_IDS_SCHEMA,
   SEMANTIC_CHECK_LEDGER_RULE_ID,
   SEMANTIC_CHECK_RULE_DEFINITIONS,
   SEMANTIC_CHECK_RULES,
   SEMANTIC_CHECK_SCHEMA,
   SEMANTIC_CHECK_SCHEMA_NAME,
+  SEMANTIC_EVIDENCE_MESSAGES,
   SEMANTIC_REJECTION_KINDS,
+  checkJudgmentsShape,
+  deriveSemanticJudgment,
+  quoteSources,
   runSemanticCheck,
   semanticCheckRuleDefinitionsOf,
   semanticCheckTargets,
+  type SemanticEvidence,
 } from "./semantic-check.js";
 
 const structured = recordedStructured;
@@ -590,5 +599,296 @@ describe("T1'' の non-requirement の点検（旗 on。配線の検証。モデ
     expect(SEMANTIC_REJECTION_KINDS).toHaveLength(3);
     expect(JSON.stringify(requests[0]?.schema)).toBe(JSON.stringify(SEMANTIC_CHECK_SCHEMA));
     expect(requests[0]?.schemaName).toBe(SEMANTIC_CHECK_SCHEMA_NAME);
+  });
+});
+
+// ── 旗 v12.ids の観点ごとの根拠の契約（Issue #700）────────────────────────────────────
+//
+// 受理・拒否とも 3 観点（所属・対象・確かめ方）の判定・引用・行 ID を返させ、コードが完全性・引用の実在・行 ID の実在・所属の行の
+// 集合との一致を照らしてから、受理／拒否と種類を導く。偽物の LLM で閉じる（配線の検証。モデルの判定の精度の実証ではない）。
+
+describe("旗 v12.ids の C3：観点ごとの根拠の契約（Issue #700）", () => {
+  const ledger = PROPERTY_LEDGER_VIEW;
+  type Evidence = Record<string, Record<string, unknown> | string>;
+
+  async function runIds(outputs: readonly unknown[], options: { readonly list?: RequirementList; readonly table?: NameTable; readonly advice?: readonly JudgeAdviceMarkEntry[] } = {}) {
+    const list = options.list ?? LIST;
+    const table = options.table ?? fixtureTable();
+    const recording = createCheckedRecordingClient(outputs.map(structured));
+    const outcome = await runSemanticCheck({
+      plan: planOf(list),
+      list,
+      table,
+      ...(options.advice === undefined ? {} : { advice: options.advice }),
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(recording.client),
+      ledger,
+      ids: true,
+    });
+    return { outcome, requests: recording.structured };
+  }
+  /** 根拠つきの全件受理（examined＝所属の行の全部・present は所属の行・引用は要件の文） */
+  const good = (rejects: Readonly<Record<string, readonly [string, string]>> = {}) => semanticEvidenceResponseOf(LIST, fixtureTable(), rejects);
+  /** 要件 `id` の判定だけを差し替えた応答 */
+  const withJudgment = (id: string, change: (item: Evidence) => Evidence) => ({
+    judgments: good().judgments.map((item) => (item["requirementId"] === id ? change(item as Evidence) : item)),
+  });
+  const perspective = (item: Evidence, key: string) => item[key] as Record<string, unknown>;
+  /** 要件 R2 の所属の行（fixture の表のまま） */
+  const R2_OWNED = fixtureTable().ownership.find((entry) => entry.requirementId === "R2")!.roles.map((role) => role.id);
+
+  it("規則：ids on の並びは R-sc-04 だけが観点ごとの根拠の文（受理にも根拠・総合の判定を書かない）で、ほかの規則の文と順は直す前と同じ。不備 0（台帳で組み直しても）。off は今の定数", () => {
+    const on = semanticCheckRuleDefinitionsOf(ledger, true);
+    const ledgerOnly = semanticCheckRuleDefinitionsOf(ledger);
+    expect(ruleDefinitionDefects(on)).toEqual([]);
+    expect(ruleDefinitionDefects(semanticCheckRuleDefinitionsOf(undefined, true))).toEqual([]);
+    expect(on.map((definition) => definition.id)).toEqual(SEMANTIC_CHECK_RULE_DEFINITIONS.map((definition) => definition.id));
+    for (const [index, definition] of on.entries()) {
+      const before = ledgerOnly[index]!;
+      if (definition.id === SEMANTIC_CHECK_IDS_RULE_ID) {
+        expect(definition.text).toBe(SEMANTIC_CHECK_IDS_RULE_TEXT);
+        expect(definition.why).toBe(before.why);
+        expect(definition.since.startsWith(before.since)).toBe(true);
+        expect(definition.since).toContain("#700");
+      } else {
+        expect(definition).toEqual(before);
+      }
+    }
+    // 意味：観点ごとの根拠・受理にも根拠・所属は全部・対象は行の ID か missing・確かめ方は決まりの引用か weak・総合の判定を書かない
+    for (const phrase of ["受理にも根拠が要る", "examinedRowIds", "unnecessaryRowIds", "presentRowIds", "missing", "weak", "総合の判定と拒否の種類は書かない"]) {
+      expect(SEMANTIC_CHECK_IDS_RULE_TEXT, phrase).toContain(phrase);
+    }
+    expect(SEMANTIC_CHECK_IDS_RULE_TEXT).not.toMatch(/P\d/);
+    // 台帳の文で組み直す版の R-sc-02 の頭は同じ。台帳を省いた ids on は R-sc-04 だけが違う
+    expect(on.find((definition) => definition.id === SEMANTIC_CHECK_LEDGER_RULE_ID)).toEqual(ledgerOnly.find((definition) => definition.id === SEMANTIC_CHECK_LEDGER_RULE_ID));
+    const plainIds = semanticCheckRuleDefinitionsOf(undefined, true);
+    expect(plainIds.filter((definition, index) => JSON.stringify(definition) !== JSON.stringify(SEMANTIC_CHECK_RULE_DEFINITIONS[index])).map((definition) => definition.id)).toEqual([SEMANTIC_CHECK_IDS_RULE_ID]);
+    // off（旗 ids を渡さない）は今の定数のまま
+    expect(semanticCheckRuleDefinitionsOf()).toBe(SEMANTIC_CHECK_RULE_DEFINITIONS);
+    expect(semanticCheckRuleDefinitionsOf(undefined, false)).toBe(SEMANTIC_CHECK_RULE_DEFINITIONS);
+    expectNoAcceptanceMaterial(ruleTexts(on));
+  });
+
+  it("要求：schema は観点ごとの根拠の schema で、データの塊の名前・中身・順と、R-sc-04 を除く規則は ids off の要求と同じ", async () => {
+    const recording = createCheckedRecordingClient([structured({ judgments: TARGETS.map(accept) })]);
+    await runSemanticCheck({ plan: PLAN, list: LIST, table: fixtureTable(), advice: ADVICE, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(recording.client), ledger });
+    const off = recording.structured[0]!;
+    const { requests } = await runIds([good()], { advice: ADVICE });
+    const on = requests[0]!;
+    expect(on.schemaName).toBe(SEMANTIC_CHECK_SCHEMA_NAME);
+    expect(on.schema).toBe(SEMANTIC_CHECK_IDS_SCHEMA);
+    expect(off.schema).toBe(SEMANTIC_CHECK_SCHEMA);
+    expect(on.input).toBe(off.input);
+    expect(on.documents).toEqual(off.documents);
+    expect(on.instructions).toBe(off.instructions);
+    expect(on.maxOutputTokens).toBe(off.maxOutputTokens);
+    const at = SEMANTIC_CHECK_RULE_DEFINITIONS.findIndex((definition) => definition.id === SEMANTIC_CHECK_IDS_RULE_ID);
+    expect(on.rules?.[at]).toBe(SEMANTIC_CHECK_IDS_RULE_TEXT);
+    expect(on.rules?.filter((_, index) => index !== at)).toEqual(off.rules?.filter((_, index) => index !== at));
+    expect(on.rules).toHaveLength(off.rules?.length ?? -1);
+    // 名前の欄を見せない（今と同じ）。送るものに受入の題材の言葉が無い
+    for (const block of dataBlocks(on.input)) expect(hasKey(JSON.parse(block.text), "name")).toBe(false);
+    expectNoAcceptanceMaterial([on.instructions, ...(on.rules ?? []), ...on.documents, on.input]);
+  });
+
+  it("(1) 全要件に根拠つきの受理：判定は全部受理（今の形）・持ち越し 0・evidence に要件ごと 3 観点", async () => {
+    const { outcome, requests } = await runIds([good()]);
+    expect(requests).toHaveLength(1);
+    if (!outcome.ok) throw new Error("通るはず");
+    expect(outcome.value.targets).toEqual(TARGETS);
+    expect(outcome.value.judgments).toEqual(TARGETS.map((requirementId) => ({ requirementId, verdict: "accept" })));
+    expect(outcome.value.evidence?.map((entry) => entry.requirementId)).toEqual(TARGETS);
+    for (const entry of outcome.value.evidence ?? []) expect(Object.keys(entry)).toEqual(["requirementId", "ownership", "target", "verification"]);
+    expect(outcome.value.evidence).toEqual(good().judgments);
+    // 持ち越しは unresolved の R5 だけ（出どころ semantic-check の持ち越しは 0）
+    const carry = await deriveCarryOver({ list: LIST, table: fixtureTable(), semanticCheck: { tableSha256: outcome.value.tableSha256, judgments: outcome.value.judgments }, ledger });
+    expect(carry.entries.map((entry) => entry.requirementId)).toEqual(["R5"]);
+    expect(carry.entries.flatMap((entry) => entry.reasons).filter((reason) => reason.origin === "semantic-check")).toEqual([]);
+  });
+
+  it("(2) R3 の unnecessaryRowIds に所属の行 1 つ：R3 は拒否・kind unnecessary-ownership・quote はその観点の引用。持ち越しの理由は今と同じ形", async () => {
+    const quote = "締められる";
+    const { outcome } = await runIds([good({ R3: ["unnecessary-ownership", quote] })]);
+    if (!outcome.ok) throw new Error("通るはず");
+    expect(outcome.value.judgments.find((judgment) => judgment.requirementId === "R3")).toEqual({ requirementId: "R3", verdict: "reject", kind: "unnecessary-ownership", quote });
+    expect(outcome.value.judgments.filter((judgment) => judgment.verdict === "accept").map((judgment) => judgment.requirementId)).toEqual(["R1", "R2", "R4"]);
+    const r3Owned = fixtureTable().ownership.find((entry) => entry.requirementId === "R3")!.roles.map((role) => role.id);
+    expect(outcome.value.evidence?.find((entry) => entry.requirementId === "R3")?.ownership.unnecessaryRowIds).toEqual(r3Owned.slice(0, 1));
+    const carry = await deriveCarryOver({ list: LIST, table: fixtureTable(), semanticCheck: { tableSha256: outcome.value.tableSha256, judgments: outcome.value.judgments }, ledger });
+    expect(carry.entries.find((entry) => entry.requirementId === "R3")).toEqual({ requirementId: "R3", reasons: [{ origin: "semantic-check", reason: "unnecessary-ownership" }] });
+  });
+
+  it("(3) R4 で missing と weak の両方：kind は missing-target（固定の順）・quote は対象の観点の引用。evidence に両方", async () => {
+    const output = withJudgment("R4", (item) => ({
+      ...item,
+      target: { ...perspective(item, "target"), verdict: "missing", quote: "区分ごとの件数" },
+      verification: { ...perspective(item, "verification"), verdict: "weak", quote: "全体の率" },
+    }));
+    const { outcome } = await runIds([output]);
+    if (!outcome.ok) throw new Error("通るはず");
+    expect(outcome.value.judgments.find((judgment) => judgment.requirementId === "R4")).toEqual({ requirementId: "R4", verdict: "reject", kind: "missing-target", quote: "区分ごとの件数" });
+    const r4 = outcome.value.evidence?.find((entry) => entry.requirementId === "R4");
+    expect(r4?.target.verdict).toBe("missing");
+    expect(r4?.verification.verdict).toBe("weak");
+  });
+
+  // (4) 旧の形の受理・観点の欠落は schema 違反で、adapter が段の検査の前に断る（openai.test.ts で偽物の fetch に固定）
+
+  /** schema は通る負例（偽の根拠・不完全な点検） */
+  const shapeCases: readonly { readonly name: string; readonly output: () => unknown; readonly problem: { readonly field: string; readonly message: string } }[] = [
+    ...(["ownership", "target", "verification"] as const).flatMap((key) => [
+      {
+        name: `(5) ${key} の引用が空`,
+        output: () => withJudgment("R1", (item) => ({ ...item, [key]: { ...perspective(item, key), quote: " " } })),
+        problem: { field: `judgments[0].${key}.quote`, message: SEMANTIC_EVIDENCE_MESSAGES.quoteEmpty },
+      },
+      {
+        name: `(5) ${key} の引用が確定した仕様にも要件の文にも無い`,
+        output: () => withJudgment("R1", (item) => ({ ...item, [key]: { ...perspective(item, key), quote: "どこにも無い文" } })),
+        problem: { field: `judgments[0].${key}.quote`, message: SEMANTIC_EVIDENCE_MESSAGES.quoteMissing },
+      },
+    ]),
+    {
+      name: "(6) examinedRowIds が所属の行より 1 件少ない",
+      output: () => withJudgment("R2", (item) => ({ ...item, ownership: { ...perspective(item, "ownership"), examinedRowIds: R2_OWNED.slice(1) } })),
+      problem: { field: "judgments[1].ownership.examinedRowIds", message: SEMANTIC_EVIDENCE_MESSAGES.examinedMissing },
+    },
+    {
+      name: "(6) examinedRowIds に所属の外の行（表には在る）がある",
+      output: () => withJudgment("R2", (item) => ({ ...item, ownership: { ...perspective(item, "ownership"), examinedRowIds: [...R2_OWNED, "o.addItem"] } })),
+      problem: { field: "judgments[1].ownership.examinedRowIds", message: SEMANTIC_EVIDENCE_MESSAGES.examinedExtra },
+    },
+    {
+      name: "(6) examinedRowIds が重なっている",
+      output: () => withJudgment("R2", (item) => ({ ...item, ownership: { ...perspective(item, "ownership"), examinedRowIds: [...R2_OWNED, R2_OWNED[0]] } })),
+      problem: { field: "judgments[1].ownership.examinedRowIds", message: SEMANTIC_EVIDENCE_MESSAGES.examinedDuplicate },
+    },
+    {
+      name: "(6) unnecessaryRowIds が点検した行の外",
+      output: () => withJudgment("R2", (item) => ({ ...item, ownership: { ...perspective(item, "ownership"), unnecessaryRowIds: ["o.addItem"] } })),
+      problem: { field: "judgments[1].ownership.unnecessaryRowIds", message: SEMANTIC_EVIDENCE_MESSAGES.unnecessaryOutside },
+    },
+    {
+      name: "(6) unnecessaryRowIds が重なっている",
+      output: () => withJudgment("R2", (item) => ({ ...item, ownership: { ...perspective(item, "ownership"), unnecessaryRowIds: [R2_OWNED[0], R2_OWNED[0]] } })),
+      problem: { field: "judgments[1].ownership.unnecessaryRowIds", message: SEMANTIC_EVIDENCE_MESSAGES.unnecessaryDuplicate },
+    },
+    {
+      name: "(7) presentRowIds に表に無い ID",
+      output: () => withJudgment("R3", (item) => ({ ...item, target: { ...perspective(item, "target"), presentRowIds: ["x.none"] } })),
+      problem: { field: "judgments[2].target.presentRowIds", message: SEMANTIC_EVIDENCE_MESSAGES.presentUnknown },
+    },
+    {
+      name: "(7) presentRowIds が重なっている",
+      output: () => withJudgment("R3", (item) => ({ ...item, target: { ...perspective(item, "target"), presentRowIds: ["o.closeItem", "o.closeItem"] } })),
+      problem: { field: "judgments[2].target.presentRowIds", message: SEMANTIC_EVIDENCE_MESSAGES.presentDuplicate },
+    },
+    {
+      name: "(8) present で 0 件",
+      output: () => withJudgment("R3", (item) => ({ ...item, target: { ...perspective(item, "target"), presentRowIds: [] } })),
+      problem: { field: "judgments[2].target.presentRowIds", message: SEMANTIC_EVIDENCE_MESSAGES.presentEmpty },
+    },
+    {
+      name: "(9) 判定が欠けた要件",
+      output: () => ({ judgments: good().judgments.slice(1) }),
+      problem: { field: "requirements[0]", message: "判定が無い要件がある" },
+    },
+    {
+      name: "(9) 判定が重なっている",
+      output: () => ({ judgments: [...good().judgments, good().judgments[1]] }),
+      problem: { field: "judgments[4].requirementId", message: "同じ要件の判定が重なっている" },
+    },
+    {
+      name: "(9) 対象の外の要件 ID（unresolved の要件）",
+      output: () => ({ judgments: [...good().judgments, { ...(good().judgments[0] as Evidence), requirementId: "R5" }] }),
+      problem: { field: "judgments[4].requirementId", message: "要件 ID が点検の対象に無い" },
+    },
+  ];
+
+  it.each(shapeCases)("$name：schema は通り、段の検査の固定文で落ち、共通の口が 1 回やり直す（要求 2）", async ({ output, problem }) => {
+    const passed = await runIds([output(), good()]);
+    expect(passed.requests).toHaveLength(2);
+    expect(passed.outcome.ok).toBe(true);
+    // やり直しの要求に、前回の形の問題として同じ固定文が載る
+    expect(passed.requests[1]?.input).toContain(problem.message);
+    // (10) 2 回とも落ちれば malformed（attempts 2）で止まる。受理にならない
+    const failed = await runIds([output(), output()]);
+    expect(failed.requests).toHaveLength(2);
+    expect(failed.outcome).toEqual({ ok: false, failure: { kind: "malformed", attempts: 2, problems: [problem] } });
+  });
+
+  it("負例：合わない欄を全部挙げる（値は埋めない）。1 判定の 3 観点の問題が全部並ぶ", async () => {
+    const output = withJudgment("R2", (item) => ({
+      ...item,
+      ownership: { ...perspective(item, "ownership"), examinedRowIds: [], quote: "" },
+      target: { ...perspective(item, "target"), presentRowIds: ["x.none"] },
+      verification: { ...perspective(item, "verification"), quote: "どこにも無い文" },
+    }));
+    const { outcome } = await runIds([output, output]);
+    if (outcome.ok || outcome.failure.kind !== "malformed") throw new Error("malformed でない");
+    expect(outcome.failure.problems).toEqual([
+      { field: "judgments[1].ownership.examinedRowIds", message: SEMANTIC_EVIDENCE_MESSAGES.examinedMissing },
+      { field: "judgments[1].ownership.quote", message: SEMANTIC_EVIDENCE_MESSAGES.quoteEmpty },
+      { field: "judgments[1].target.presentRowIds", message: SEMANTIC_EVIDENCE_MESSAGES.presentUnknown },
+      { field: "judgments[1].verification.quote", message: SEMANTIC_EVIDENCE_MESSAGES.quoteMissing },
+    ]);
+    expect(JSON.stringify(outcome.failure.problems)).not.toContain("x.none");
+  });
+
+  it("(8) 確かめ方が要件でない文（受理で除く性質）の要件は、所属 0 行・present で 0 件でも通り、受理になる", async () => {
+    const list = fixtureNonRequirementList();
+    const table = fixtureNonRequirementTable();
+    const response = semanticEvidenceResponseOf(list, table);
+    const r6 = response.judgments.find((item) => item["requirementId"] === "R6") as Evidence;
+    expect(perspective(r6, "target")).toMatchObject({ verdict: "present", presentRowIds: [] });
+    expect(perspective(r6, "ownership")).toMatchObject({ examinedRowIds: [] });
+    const { outcome, requests } = await runIds([response], { list, table });
+    expect(requests).toHaveLength(1);
+    if (!outcome.ok) throw new Error("通るはず");
+    expect(outcome.value.judgments.find((judgment) => judgment.requirementId === "R6")).toEqual({ requirementId: "R6", verdict: "accept" });
+  });
+
+  it("(11) 導出の二点：観点に問題の無い根拠は必ず受理、1 観点を変えると拒否（種類は変えた観点）。固定の順は unnecessary-ownership → missing-target → weak-verification", () => {
+    const clean: SemanticEvidence = {
+      requirementId: "R1",
+      ownership: { examinedRowIds: ["f.item.title"], unnecessaryRowIds: [], quote: "題名" },
+      target: { verdict: "present", presentRowIds: ["f.item.title"], quote: "題名" },
+      verification: { verdict: "sufficient", quote: "登録できる" },
+    };
+    expect(deriveSemanticJudgment(clean)).toEqual({ requirementId: "R1", verdict: "accept" });
+    const unnecessary = { ...clean, ownership: { ...clean.ownership, unnecessaryRowIds: ["f.item.title"], quote: "金額" } };
+    const missing = { ...clean, target: { ...clean.target, verdict: "missing" as const, quote: "日付" } };
+    const weak = { ...clean, verification: { verdict: "weak" as const, quote: "区分" } };
+    expect(deriveSemanticJudgment(unnecessary)).toEqual({ requirementId: "R1", verdict: "reject", kind: "unnecessary-ownership", quote: "金額" });
+    expect(deriveSemanticJudgment(missing)).toEqual({ requirementId: "R1", verdict: "reject", kind: "missing-target", quote: "日付" });
+    expect(deriveSemanticJudgment(weak)).toEqual({ requirementId: "R1", verdict: "reject", kind: "weak-verification", quote: "区分" });
+    // 2 つ以上の観点に問題があれば、固定の順で最初に当たった観点
+    expect(deriveSemanticJudgment({ ...unnecessary, target: missing.target, verification: weak.verification })).toMatchObject({ kind: "unnecessary-ownership", quote: "金額" });
+    expect(deriveSemanticJudgment({ ...missing, verification: weak.verification })).toMatchObject({ kind: "missing-target", quote: "日付" });
+    // 拒否の種類の集合は 3 のまま
+    expect([unnecessary, missing, weak].map((entry) => (deriveSemanticJudgment(entry) as { kind: string }).kind)).toEqual([...SEMANTIC_REJECTION_KINDS]);
+  });
+
+  it("(12) J4 の印の有無で結果が同じ", async () => {
+    const withAdvice = await runIds([good()], { advice: ADVICE });
+    const without = await runIds([good()]);
+    expect(withAdvice.outcome).toEqual(without.outcome);
+  });
+
+  it("B3' と共有する判定の schema と形の検査の関数は、同じ入力で今と同じ結果（ids on の C3 は別の関数）", () => {
+    const output = { judgments: [...acceptAll("R1"), reject("R1", "unnecessary-ownership", "題名")] };
+    expect(checkJudgmentsShape(output, TARGETS, SEMANTIC_REJECTION_KINDS, quoteSources(PLAN, LIST))).toEqual({
+      ok: true,
+      value: [{ requirementId: "R1", verdict: "reject", kind: "unnecessary-ownership", quote: "題名" }, ...TARGETS.slice(1).map((requirementId) => ({ requirementId, verdict: "accept" }))],
+    });
+    expect(SEMANTIC_CHECK_SCHEMA.properties.judgments.items.required).toEqual(["requirementId", "verdict", "kind", "quote"]);
+    expect(SEMANTIC_CHECK_IDS_SCHEMA).not.toBe(SEMANTIC_CHECK_SCHEMA);
+  });
+
+  it("試験と fixture の固定文に受入の題材の言葉が無い（このファイルと共通の題材の走査）", async () => {
+    const fsModule = (await import(/* @vite-ignore */ "node:fs")) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const texts = ["./semantic-check.test.ts", "./semantic-check.ts", "../__tests__/fixtures.ts"].map((path) => fsModule.readFileSync(new URL(path, import.meta.url), "utf8"));
+    // 走査の言葉の一覧そのものは prompt.ts（試験の道具）にだけある
+    expectNoAcceptanceMaterial(texts);
   });
 });

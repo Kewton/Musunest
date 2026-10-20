@@ -41,7 +41,16 @@ import {
 } from "./schema-envelope.js";
 import { DESIGN_SCHEMA, DESIGN_SCHEMA_NAME } from "./stages/design.js";
 import { NAME_TABLE_SCHEMA, NAME_TABLE_SCHEMA_NAME, nameTableSchemaOf } from "./v11a/stages/name-table.js";
+import {
+  SEMANTIC_CHECK_IDS_SCHEMA,
+  SEMANTIC_CHECK_SCHEMA,
+  SEMANTIC_CHECK_SCHEMA_NAME,
+  runSemanticCheck,
+  type SemanticCheckInput,
+} from "./v11a/stages/semantic-check.js";
 import { TEST_SPEC_SCHEMA_NAME, testSpecSchemaOf } from "./v11a/stages/test-spec.js";
+import { FIXTURE_DOCUMENTS, fixtureList, fixtureTable, planOf, semanticEvidenceResponseOf } from "./v11a/__tests__/fixtures.js";
+import { makeGateway } from "./stages/__tests__/prompt.js";
 import { PROPERTY_LEDGER_VIEW } from "./v12/ledger.js";
 import { VOCABULARY_BUNDLES } from "./v12/ids.js";
 import { MAPPING_SCHEMA_NAME, mappingSchemaOf } from "./v12/stages/mapping.js";
@@ -861,10 +870,12 @@ describe("識別子 v1.2-ids の client は、C1・C2 と T1''〜B5' の全段�
     return formatOf(bodyOf(captured));
   }
 
-  /** ids on の v1.2 の走りの全段の要求の schema（T1 は呼ばないが、封筒の枝としては載る） */
+  /** ids on の v1.2 の走りの全段の要求の schema（T1 は呼ばないが、封筒の枝としては載る。C3 は観点ごとの根拠の schema。Issue #700） */
   const idsRequests = (): readonly { readonly stage: string; readonly schema: unknown }[] => [
     { stage: TEST_SPEC_SCHEMA_NAME, schema: testSpecSchemaOf(PROPERTY_LEDGER_VIEW) },
-    ...STAGE_ENVELOPE_ENTRIES_V11A.filter((entry) => entry.stage !== NAME_TABLE_SCHEMA_NAME && entry.stage !== TEST_SPEC_SCHEMA_NAME),
+    ...STAGE_ENVELOPE_ENTRIES_V11A.filter((entry) => entry.stage !== NAME_TABLE_SCHEMA_NAME && entry.stage !== TEST_SPEC_SCHEMA_NAME).map((entry) =>
+      entry.stage === SEMANTIC_CHECK_SCHEMA_NAME ? { stage: entry.stage, schema: SEMANTIC_CHECK_IDS_SCHEMA } : entry,
+    ),
     ...VOCABULARY_BUNDLES.map((bundle) => ({ stage: VOCABULARY_SCHEMA_NAMES[bundle], schema: vocabularySchemaOf(bundle, PROPERTY_LEDGER_VIEW) })),
     { stage: MAPPING_SCHEMA_NAME, schema: mappingSchemaOf(PROPERTY_LEDGER_VIEW) },
   ];
@@ -883,8 +894,11 @@ describe("識別子 v1.2-ids の client は、C1・C2 と T1''〜B5' の全段�
     expect(sent.size).toBe(1);
   });
 
-  it("識別子 v1.2（ids off）の C2 以外の段は、今までどおり識別子 v1.2 の封筒を送る（ids on の封筒と別のバイト列）", async () => {
-    for (const request of idsRequests().filter((entry) => entry.stage !== MAPPING_SCHEMA_NAME)) {
+  it("識別子 v1.2（ids off）の C2 以外の段は、今までどおり識別子 v1.2 の封筒を送る（ids on の封筒と別のバイト列。C3 は旧の schema で要求する。Issue #700）", async () => {
+    const offRequests = idsRequests()
+      .filter((entry) => entry.stage !== MAPPING_SCHEMA_NAME)
+      .map((entry) => (entry.stage === SEMANTIC_CHECK_SCHEMA_NAME ? { stage: entry.stage, schema: SEMANTIC_CHECK_SCHEMA } : entry));
+    for (const request of offRequests) {
       const format = await sentFormat("v1.2", request.stage, request.schema);
       expect(format.name, request.stage).toBe(ENVELOPE_SCHEMA_NAME_V12);
       expect(format.schema, request.stage).toEqual(ENVELOPE_SCHEMA_V12);
@@ -930,6 +944,44 @@ describe("識別子 v1.2-ids の client は、C1・C2 と T1''〜B5' の全段�
       const error = await captureError(() => callMapping(mappingOutput(checks)));
       expect(error.kind, JSON.stringify(checks)).toBe("malformed");
     }
+  });
+});
+
+// ── Issue #700：旗 ids on の C3 の schema 違反は、adapter が段の検査の前に断る（要求 1・attempts 1・形の再試行 0）──────────
+
+describe("識別子 v1.2-ids の C3 の応答の schema 違反（旧の形・観点の欠落・enum の外）は adapter の形の誤りで、段は要求 1・attempts 1 の malformed（Issue #700）", () => {
+  const list = fixtureList();
+  const table = fixtureTable();
+  const good = semanticEvidenceResponseOf(list, table);
+  /** C3 を、実 adapter（偽物の fetch）と共通の口で 1 回回す */
+  async function runC3(output: unknown) {
+    const { fetch, captured } = recordingFetch(() =>
+      jsonResponse(completed(outputText(JSON.stringify(enveloped(SEMANTIC_CHECK_SCHEMA_NAME, output as Record<string, unknown>))), USAGE_WIRE)),
+    );
+    const client = createOpenAiLlmClient({ apiKey: "test-key", fetch, envelope: "v1.2-ids" });
+    const input: SemanticCheckInput = { plan: planOf(list), list, table, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(client), ledger: PROPERTY_LEDGER_VIEW, ids: true };
+    return { outcome: await runSemanticCheck(input), captured };
+  }
+
+  it("根拠つきの応答は adapter を通り、段が受理を導く（要求 1。封筒は v1.2-ids の実体）", async () => {
+    const { outcome, captured } = await runC3(good);
+    expect(captured).toHaveLength(1);
+    expect(formatOf(bodyOf(captured)).schema).toEqual(ENVELOPE_SCHEMA_V12_IDS);
+    expect(outcome.ok).toBe(true);
+  });
+
+  const first = good.judgments[0] as Record<string, unknown>;
+  const withFirst = (item: unknown) => ({ judgments: [item, ...good.judgments.slice(1)] });
+  const { ownership: _ownership, ...withoutOwnership } = first;
+  it.each([
+    { name: "旧の形の受理（kind・quote が null・観点なし）", output: { judgments: good.judgments.map((item) => ({ requirementId: item["requirementId"], verdict: "accept", kind: null, quote: null })) } },
+    { name: "観点の欠落（ownership が無い）", output: withFirst(withoutOwnership) },
+    { name: "enum の外（target.verdict が unknown）", output: withFirst({ ...first, target: { ...(first["target"] as Record<string, unknown>), verdict: "unknown" } }) },
+    { name: "観点の中の欄の欠落（verification.quote が無い）", output: withFirst({ ...first, verification: { verdict: "sufficient" } }) },
+  ])("$name：段は malformed（attempts 1）で止まり、要求は 1 本（形の再試行 0）。受理にならない", async ({ output }) => {
+    const { outcome, captured } = await runC3(output);
+    expect(captured).toHaveLength(1);
+    expect(outcome).toEqual({ ok: false, failure: { kind: "malformed", attempts: 1, problems: [] } });
   });
 });
 
