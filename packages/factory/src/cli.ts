@@ -84,6 +84,7 @@ import {
   boundaryBefore,
   buildStageCheckpoint,
   buildStageRunRecord,
+  buildTableRoundsFile,
   resolveStageRange,
   stageCheckpointFile,
   stageJsonText,
@@ -1190,6 +1191,15 @@ async function runStageFromPlanFile(
   // （候補が無ければ何も書かず、置き場所も作らない。記録・checkpoint・要約・終了コードは変えない。Issue #683）
   if (pipeline === "v1.2" && outcome.rejected !== undefined && outcome.rejected.length > 0) {
     for (const file of buildRejectedCandidateFiles(outcome.rejected)) {
+      const parent = parentOf(file.path);
+      if (parent !== "") await deps.makeDirectory(joinPath(job.outDir, parent));
+      await deps.writeFile(joinPath(job.outDir, file.path), file.text);
+    }
+  }
+  // `--pipeline v1.2` の段の走りだけ、旗 `v12.ids` の C2 の回ごとの行を一気通貫と同じ関数・同じ名前で診断に書く
+  // （行が無ければ何も書かず、置き場所も作らない。記録・checkpoint・要約・終了コードは変えない。Issue #699）
+  if (pipeline === "v1.2" && outcome.tableRounds !== undefined && outcome.tableRounds.length > 0) {
+    for (const file of buildTableRoundsFile(outcome.tableRounds)) {
       const parent = parentOf(file.path);
       if (parent !== "") await deps.makeDirectory(joinPath(job.outDir, parent));
       await deps.writeFile(joinPath(job.outDir, file.path), file.text);

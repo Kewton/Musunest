@@ -31,6 +31,8 @@
 // 走りが checkpoint を書くため。Issue #636）。省けば集めず、結果に欄を置かない。
 // 段の走りの結果には、旗 `v12.ids` の走りだけ門と枝の数（`v12Calls`。要約の `v12_calls` と同じ形）を、この走りで T2 を回して
 // T2' を通ったときだけ組の数（`testSpec`）を足す。記録に載せるかは呼ぶ側（`--pipeline v1.2` の段の走り）が決める（Issue #637）。
+// 同じく旗 `v12.ids` の走りだけ、C2 の回ごとの行（C2 の表・C3 の判定・書き直した要件・採用した回）を `tableRounds` に積み、
+// 一気通貫では診断に、段の走りでは入口が `--out` の下の診断に書く（`table-rounds`。行が無ければ欄を持たない。Issue #699）。
 //
 // 旗（`flags`。08-architecture-v1.2.md §9・Issue #547）：省けば全部 off で、今の v1.1α とバイト列で同じに流れる。
 // `flags.ledger` が on なら、性質の台帳の導出（`v12/ledger.ts`）を T1（T1' を含む）・T2（T2' を含む）・評価口（B4・
@@ -122,6 +124,7 @@ import type { DroppedNonstructuralTest } from "../stages/test-suite.js";
 import type { EvaluationContext } from "../stages/tools.js";
 import { correspondenceFromTable, extraElementsOf, markRows } from "./bind-by-id.js";
 import {
+  buildTableRoundsFile,
   buildV11aArtifacts,
   type BoundaryMaterials,
   type CoverageCheckRecord,
@@ -134,6 +137,8 @@ import {
   type StageRange,
   type StageRunOutcome,
   type StageTestSpecCounts,
+  type TableRoundRecord,
+  type TableRoundRewrite,
   V12_SEARCH_REPAIR_ARTIFACT_NAME,
 } from "./bundle-v11a.js";
 import {
@@ -189,7 +194,7 @@ import { mergeReplacements, runFieldRepair } from "../v12/stages/field-repair.js
 import { VOCABULARY_BUNDLES, type ReferenceCounts } from "../v12/ids.js";
 import { isGeneratedTestId } from "../v12/generated-tests.js";
 import { runVocabularyBundle } from "../v12/stages/vocabulary.js";
-import { MAPPING_ROUNDS, runMapping, type MappingOutcome, type MappingPrevious, type MappingRejectedCandidate } from "../v12/stages/mapping.js";
+import { MAPPING_ROUNDS, rejectedRequirementIds, runMapping, type MappingOutcome, type MappingPrevious, type MappingRejectedCandidate } from "../v12/stages/mapping.js";
 
 /** v1.1α の入力（v1 の `GenerationInput` と同じ形で、確定した仕様を必須にしたもの） */
 export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
@@ -510,6 +515,15 @@ interface MaterialSlot<T> {
   readonly value: T;
   readonly stageIndex: number;
   readonly sha256: string;
+}
+
+/** 旗 `v12.ids` の C2 の回ごとの行（組み立てる間は可変。診断にだけ写す。Issue #699） */
+interface MutableTableRound {
+  readonly round: number;
+  ok: TableRoundRecord["ok"];
+  table: TableRoundRecord["table"];
+  readonly rewrite: TableRoundRewrite | null;
+  semantic_check: TableRoundRecord["semantic_check"];
 }
 
 /** 版の B3' の状態 */
@@ -878,6 +892,19 @@ async function runV11a(
 
   let natureDiscrepancies: readonly BundleNatureDiscrepancy[] = [];
   const droppedTests: DroppedNonstructuralTest[] = [];
+  // 旗 `v12.ids` の C2 の回ごとの行（診断にだけ書く。段の判定・持ち越し・採用した回の選び方には使わない。Issue #699）
+  const tableRounds: MutableTableRound[] = [];
+  // 採用した回（C3 の拒否のあとの 2 回目が C2' に落ちた走りは初回）。止まった走りは null
+  let adoptedTableRound: number | null = null;
+  const tableRoundRows = (): readonly TableRoundRecord[] =>
+    tableRounds.map((row) => ({
+      round: row.round,
+      ok: row.ok,
+      table: row.table,
+      rewrite: row.rewrite,
+      semantic_check: row.semantic_check,
+      adopted: row.round === adoptedTableRound,
+    }));
 
   const stopResult = async (attribution: FailureAttribution): Promise<GenerationResult> => {
     const outcome: Outcome = { result: "failed", verdict: "none" };
@@ -906,7 +933,7 @@ async function runV11a(
       summary,
       bundle: null,
       stopped: attribution,
-      diagnostics: diagnosticsFor(attribution, record, await rejectedCandidateRows()),
+      diagnostics: [...diagnosticsFor(attribution, record, await rejectedCandidateRows()), ...buildTableRoundsFile(tableRoundRows())],
     };
   };
 
@@ -938,6 +965,11 @@ async function runV11a(
         })(),
         ...(testSpecCounts === undefined ? {} : { testSpec: testSpecCounts }),
         ...(rejectedRows.length === 0 ? {} : { rejected: rejectedRows }),
+        // 旗 `v12.ids` の C2 の回ごとの行（入口が診断に書く。行が無ければ欄を持たない。Issue #699）
+        ...(() => {
+          const rounds = tableRoundRows();
+          return rounds.length === 0 ? {} : { tableRounds: rounds };
+        })(),
       },
     };
   };
@@ -1054,6 +1086,24 @@ async function runV11a(
       let firstRound: typeof adopted;
       for (let round = 1; round <= MAPPING_ROUNDS; round += 1) {
         const retry = mappingPrevious;
+        // C2 の 1 回＝1 行（診断にだけ写す。段の判定・持ち越し・採用した回の選び方には使わない。Issue #699）。2 回目は
+        // C2 が書き直す要件を、段と同じ公開の関数（`rejectedRequirementIds`）で導く
+        const rewrittenIds = retry === undefined ? null : rejectedRequirementIds(list, retry.rejections);
+        const tableRound: MutableTableRound = {
+          round,
+          ok: "failed",
+          table: null,
+          rewrite:
+            rewrittenIds === null
+              ? null
+              : {
+                  requirement_ids: rewrittenIds,
+                  rewritten: rewrittenIds.length,
+                  kept: list.requirements.length - rewrittenIds.length,
+                },
+          semantic_check: null,
+        };
+        tableRounds.push(tableRound);
         const before = meterState();
         const start = input.now();
         let outcome: MappingOutcome;
@@ -1075,18 +1125,34 @@ async function runV11a(
           throw error;
         }
         if (!outcome.ok) {
+          tableRound.ok = outcome.failure.kind === "unmet" ? "unmet" : "failed";
           const attribution = stageFailureAttribution("mapping", outcome.failure);
           pushRecord("mapping", "failed", before, start, attribution.kind, outcome.references);
           // 2 回目が C2' に落ちても形の再試行は無く、前回の写像のまま拒否の要件を持ち越す（08 §4.1）
           if (retry !== undefined && firstRound !== undefined && outcome.failure.kind === "unmet") {
             adopted = firstRound;
+            adoptedTableRound = round - 1;
             break;
           }
           throw new RunStop(attribution);
         }
         pushRecord("mapping", "ok", before, start, null, outcome.references);
         const output = outcome.value;
+        tableRound.ok = "ok";
+        tableRound.table = {
+          table_sha256: output.tableSha256,
+          rows: output.table.rows,
+          ownership: output.table.ownership,
+          verification: output.table.verification,
+          classification: output.table.classification,
+        };
         const { semantic, advice, marks, rejections } = await checkTableRound(round, output);
+        tableRound.semantic_check = {
+          table_sha256: semantic.tableSha256,
+          targets: semantic.targets,
+          judgments: semantic.judgments,
+          advice: marks,
+        };
         const checked = { table: output.table, tableSha256: output.tableSha256, semantic, advice };
         // 拒否が残れば、2 回目が未使用なら C2 の 2 回目（前回の写像・拒否・印をデータで。C1 は呼ばない）。使用済みなら持ち越し
         if (rejections.length > 0 && round < MAPPING_ROUNDS) {
@@ -1095,6 +1161,7 @@ async function runV11a(
           continue;
         }
         adopted = checked;
+        adoptedTableRound = round;
         break;
       }
     } else {
@@ -1901,7 +1968,8 @@ async function runV11a(
       evaluations: [...materialStore.evaluations.values()],
       extraArtifacts,
     });
-    const diagnostics = buildRejectedCandidateFiles(await rejectedCandidateRows());
+    // 診断（断った候補と、旗 `v12.ids` の C2 の回ごとの行）。どちらも納品物・記録・要約に入れない（Issue #501・#699）
+    const diagnostics = [...buildRejectedCandidateFiles(await rejectedCandidateRows()), ...buildTableRoundsFile(tableRoundRows())];
     return {
       kind: "generation",
       result: withBoundaries({

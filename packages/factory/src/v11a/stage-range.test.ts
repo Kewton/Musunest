@@ -5,12 +5,14 @@
 // 受入の題材の言葉は使わない。手元の入口から流す試験（分けても同じ・照合の負例・終了コード）は `cli.test.ts`。
 import { PLAN_SPEC_SCHEMA_VERSION, type ConfirmedPlan } from "@musunest/appspec-schema";
 import { describe, expect, it } from "vitest";
+import { DIAGNOSTICS_TABLE_ROUNDS_FILE } from "../bundle.js";
 import { requirementsFromPlan } from "../pipeline.js";
 import { STAGE_IDS, type StageRecord } from "../record.js";
 import { fixtureList, fixtureTable } from "./__tests__/fixtures.js";
 import {
   buildStageCheckpoint,
   buildStageRunRecord,
+  buildTableRoundsFile,
   resolveStageRange,
   stageJsonText,
   boundaryBefore,
@@ -27,6 +29,7 @@ import {
   STAGE_START_ALIASES_V12,
   type BoundaryMaterials,
   type StageRunOutcome,
+  type TableRoundRecord,
 } from "./bundle-v11a.js";
 import { deriveCarryOver } from "./carry-over.js";
 import { nameTableSha256 } from "./names.js";
@@ -412,5 +415,80 @@ describe("v1.2 の段の走りの別名と記録の欄（Issue #637）", () => {
     expect(Object.keys(outside)).toEqual([...plainKeys, "v12_calls"]);
     const idsOff = recordOf(outcomeOf(), { start: "name-table", end: "semantic-check" }, { testSpecInRange: false });
     expect(Object.keys(idsOff)).toEqual(plainKeys);
+  });
+});
+
+// ── 回ごとの行（旗 `v12.ids` の C2・C3。Issue #699）────────────────────────
+
+describe("回ごとの行の診断のファイル（Issue #699）", () => {
+  const recordOf = (outcome: StageRunOutcome) =>
+    buildStageRunRecord({
+      range: { start: "name-table", end: "semantic-check" },
+      input: null,
+      planSha256: PLAN_SHA,
+      sourceSha256: SOURCE_SHA,
+      checkpoints: [],
+      conditions: {
+        model: "m",
+        effort: "high",
+        documents: [],
+        judge: { primary: "llm", fallback: null },
+        prompt_version: "v1.1a",
+        vocabulary_version: "v1",
+        contract_version: "v0.2",
+        factory_version: "0.0.0",
+        spec_engine_version: "0.0.0",
+        budget_usd: 0.3,
+        deadline_ms: 600_000,
+        timeout_ms: null,
+      },
+      outcome,
+      exitCode: 0,
+    });
+  const roundsOf = async (): Promise<readonly TableRoundRecord[]> => {
+    const tableSha256 = await nameTableSha256(TABLE);
+    return [
+      {
+        round: 1,
+        ok: "ok",
+        table: {
+          table_sha256: tableSha256,
+          rows: TABLE.rows,
+          ownership: TABLE.ownership,
+          verification: TABLE.verification,
+          classification: TABLE.classification,
+        },
+        rewrite: null,
+        semantic_check: { table_sha256: tableSha256, targets: ["R1", "R2"], judgments: JUDGMENTS.slice(0, 2), advice: [] },
+        adopted: false,
+      },
+      {
+        round: 2,
+        ok: "unmet",
+        table: null,
+        rewrite: { requirement_ids: ["R3"], rewritten: 1, kept: 4 },
+        semantic_check: null,
+        adopted: false,
+      },
+    ];
+  };
+
+  it("行が無ければファイルを作らず、行があれば diagnostics/table-rounds.json に rounds として並べる（同じ入力から同じバイト列）", async () => {
+    expect(buildTableRoundsFile([])).toEqual([]);
+    const rounds = await roundsOf();
+    const files = buildTableRoundsFile(rounds);
+    expect(files.map((file) => file.path)).toEqual([DIAGNOSTICS_TABLE_ROUNDS_FILE]);
+    expect(DIAGNOSTICS_TABLE_ROUNDS_FILE).toBe("diagnostics/table-rounds.json");
+    expect(files[0]?.text).toBe(`${JSON.stringify({ rounds }, null, 2)}\n`);
+    expect(JSON.parse(files[0]?.text ?? "{}")).toEqual({ rounds });
+  });
+
+  it("段の走りの記録は回ごとの行を載せない（結果の欄だけ。段の走りの記録はバイト列で同じ）", async () => {
+    const rounds = await roundsOf();
+    const plain = recordOf(outcomeOf());
+    const withRounds = recordOf(outcomeOf({ tableRounds: rounds }));
+    expect(stageJsonText(withRounds)).toBe(stageJsonText(plain));
+    expect(Object.keys(plain)).not.toContain("table_rounds");
+    expect(Object.keys(plain)).not.toContain("tableRounds");
   });
 });
