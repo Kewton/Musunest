@@ -1240,3 +1240,49 @@ describe("(7) 旗 v12.ids のコードが作る試験：既定値・選択肢の
     expect(onRun.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
   });
 });
+
+describe("(5''') 旗 v12.ids の C2 の初回の形のやり直しを落ちた要件だけの書き直しにしても、論理要求の枠と門は同じ（Issue #660）", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements：C2 は初回 1・形（書き直し）1・中身 1 の論理要求 3、retries 形 1 中身 1。再送を全部使っても合計 72・実試行 144・判定 80 の内側で full", async (size) => {
+    const materials = buildSized(size.requirements, size.tests, ALL_ON);
+    const [entities, fields, behaviors, mapping] = materials.tableResponses() as readonly Record<string, readonly Record<string, unknown>[]>[];
+    if (entities === undefined || fields === undefined || behaviors === undefined || mapping === undefined) throw new Error("前提が壊れた：C1・C2 の応答が 4 つでない");
+    const target = materials.ids[Math.floor(materials.ids.length / 2)] as string;
+    // 要件 target の所属に行に無い ID を足す（問題は target に帰属する）→ target だけの書き直し → C3 の拒否 → 2 回目（全要件）
+    const bad = {
+      requirements: (mapping["requirements"] ?? []).map((entry) =>
+        entry["requirementId"] === target ? { ...entry, roles: [...(entry["roles"] as readonly unknown[]), { id: "E1.F99", basis: "stated", reason: null }] } : entry,
+      ),
+    };
+    const rewritten = { requirements: (mapping["requirements"] ?? []).filter((entry) => entry["requirementId"] === target) };
+    const calls = [
+      structured(entities),
+      structured(fields),
+      structured(behaviors),
+      structured(bad),
+      structured(rewritten),
+      structured(materials.judgments({ R1: ["unnecessary-ownership", materials.textOf("R1")] })),
+      structured(mapping),
+      structured(materials.judgments()),
+      structured(materials.testSpecResponse()),
+      structured({ declaration: materials.declaration() }),
+      structured(materials.judgments()),
+    ];
+    for (const failFirst of [false, true]) {
+      const run = await observe(materials, calls, { flags: ALL_ON, failFirst });
+      expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
+      expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      expect(run.logical.mapping).toBe(3);
+      expect(run.stages.mapping.retries).toEqual({ communication: failFirst ? 3 : 0, shape: 1, content: 1 });
+      const mappingRequests = run.requests.filter((request) => request.includes(`"schemaName":"${MAPPING_SCHEMA_NAME}"`));
+      expect(mappingRequests).toHaveLength(failFirst ? 6 : 3);
+      expect(mappingRequests.filter((request) => request.includes('<data name=\\"書き直す要件\\">'))).toHaveLength(failFirst ? 2 : 1);
+      expect(run.judge).toEqual({ j4: 2 * size.requirements, j2: 0 });
+      expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+      expect(run.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
+      expect(run.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
+      expectNoAcceptanceMaterial(run.requests);
+    }
+  });
+});

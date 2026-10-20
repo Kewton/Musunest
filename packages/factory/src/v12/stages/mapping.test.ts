@@ -1,8 +1,8 @@
-// C2 要件の写像の試験（Issue #593・#594・#627・#682）。偽物の LLM（照合ありの記録）と固定の時計で回す。受入の題材の言葉は使わない。
+// C2 要件の写像の試験（Issue #593・#594・#627・#682・#660）。偽物の LLM（照合ありの記録）と固定の時計で回す。受入の題材の言葉は使わない。
 import { describe, expect, it } from "vitest";
 import { STRUCTURAL_ASSERTIONS, type StructuralAssertionKind } from "../../fixed-test.js";
 import { validateSchema } from "../../schema-check.js";
-import { ruleDefinitionDefects } from "../../stages/prompt.js";
+import { PREVIOUS_RESPONSE_DATA_NAME, SHAPE_PROBLEMS_DATA_NAME, ruleDefinitionDefects, ruleTexts } from "../../stages/prompt.js";
 import { expectNoAcceptanceMaterial, makeGateway } from "../../stages/__tests__/prompt.js";
 import {
   FIXTURE_DOCUMENTS,
@@ -14,6 +14,7 @@ import {
   fixtureNonRequirementList,
   fixtureNonRequirementTable,
   fixtureTable,
+  NegativeOutput,
   idsResponsesOf,
   negative,
   planOf,
@@ -32,13 +33,20 @@ import {
   MAPPING_DATA_NAMES,
   MAPPING_MESSAGES,
   MAPPING_RULE_DEFINITIONS,
+  MAPPING_REWRITE_DATA_NAMES,
+  MAPPING_REWRITE_MESSAGES,
   MAPPING_SCHEMA_NAME,
+  attributeMappingProblems,
   inspectMapping,
+  inspectMappingSourced,
+  mappingRewriteRuleDefinitionsOf,
   legacyMappingSchemaOf,
   mappingRuleDefinitionsOf,
   mappingSchemaOf,
   runMapping,
+  type MappingInspector,
   type MappingPrevious,
+  type MappingRejectedCandidate,
 } from "./mapping.js";
 
 const LIST = fixtureList();
@@ -76,6 +84,20 @@ const fields = (set: Partial<Record<StructuralAssertionKind, unknown>> = {}): En
 /** 要件 index の確かめ方の checks だけを差し替えた応答 */
 const withChecksAt = (at: number, checks: unknown) =>
   withEntries(entries().map((entry, index) => (index === at ? { ...entry, verification: { ...(entry["verification"] as Entry), checks } } : entry)));
+/**
+ * 書き直しの応答（Issue #660）：応答から書き直す要件の entry だけを残したもの（負例の応答は理由ごと保つ）。`rewrite` が undefined なら
+ * 全体の作り直しなので応答のまま
+ */
+const rewriteOf = (output: unknown, rewrite: readonly string[] | undefined): unknown => {
+  if (rewrite === undefined) return output;
+  if (output instanceof NegativeOutput) return negative(rewriteOf(output.output, rewrite), output.reason);
+  return withEntries(((output as Entry)["requirements"] as Entry[]).filter((entry) => rewrite.includes(entry["requirementId"] as string)));
+};
+/** 要求のデータの塊（無ければ null） */
+const blockOf = (input: string | undefined, name: string): unknown => {
+  const text = (input ?? "").split(`<data name="${name}">\n`)[1]?.split("\n</data>")[0];
+  return text === undefined ? null : (JSON.parse(text) as unknown);
+};
 
 describe("C2 の規則と schema", () => {
   it("規則の定義に why・since があり不備 0（台帳の文で組み直しても）。schema は strict で写し・出典の欄が無く、checks は検査の種類ごとの欄（Issue #682）", () => {
@@ -183,7 +205,14 @@ describe("C2' の負例：固定文で落ち、形のやり直し 1 回のあと
   const rowOf = (index: number) => entries()[index] as Entry;
   const r2Checks = (checks: unknown) => withChecksAt(1, checks);
   const viewShows = (targetId: string, sourceId: string) => fields({ "view-shows": { targetId, sourceId } });
-  const cases: readonly { readonly label: string; readonly bad: () => unknown; readonly message: string; readonly count?: keyof ReferenceCounts }[] = [
+  // rewrite：初回の問題が全部帰属できるときに書き直す要件（Issue #660）。undefined は帰属できない問題があり全体の作り直し
+  const cases: readonly {
+    readonly label: string;
+    readonly bad: () => unknown;
+    readonly message: string;
+    readonly count?: keyof ReferenceCounts;
+    readonly rewrite?: readonly string[];
+  }[] = [
     { label: "要件の欠落", bad: () => withEntries(entries().slice(1)), message: "要件の所属が無い" },
     { label: "同じ要件 2 件（重複）", bad: () => withEntries([...entries(), rowOf(0)]), message: "同じ要件の項目が重なっている", count: "duplicate" },
     { label: "一覧に無い要件 ID（知らない ID）", bad: () => withEntries([...entries(), { ...rowOf(0), requirementId: "R99" }]), message: "一覧に無い要件 ID である", count: "unknown" },
@@ -192,46 +221,52 @@ describe("C2' の負例：固定文で落ち、形のやり直し 1 回のあと
       bad: () => withEntries(entries().map((entry, index) => (index === 0 ? { ...entry, roles: [...(entry["roles"] as unknown[]), { id: "E1.F99", basis: "stated", reason: null }] } : entry))),
       message: "所属の表の ID が表に無い",
       count: "unknown",
+      rewrite: ["R1"],
     },
     {
       label: "同じ要件の中で同じ行を 2 回所属（重複）",
       bad: () => withEntries(entries().map((entry, index) => (index === 0 ? { ...entry, roles: [...(entry["roles"] as unknown[]), (entry["roles"] as unknown[])[0]] } : entry))),
       message: "同じ要件の中で所属が重なっている",
       count: "duplicate",
+      rewrite: ["R1"],
     },
     {
       label: "所属の欄に要件 ID（別の束の ID）",
       bad: () => withEntries(entries().map((entry, index) => (index === 0 ? { ...entry, roles: [...(entry["roles"] as unknown[]), { id: "R2", basis: "stated", reason: null }] } : entry))),
       message: "所属の表の ID が表に無い",
       count: "crossBundle",
+      rewrite: ["R1"],
     },
     // checks の 6 欄が全部 null の structural（と checks が null の structural）は、表の検査の今の固定文で落ちる（Issue #682 の (5)）
-    { label: "structural で checks の 6 欄が全部 null", bad: () => r2Checks(fields()), message: "構造で確かめる要件に checks が無い" },
-    { label: "structural で checks が null", bad: () => r2Checks(null), message: "構造で確かめる要件に checks が無い" },
+    { label: "structural で checks の 6 欄が全部 null", bad: () => r2Checks(fields()), message: "構造で確かめる要件に checks が無い", rewrite: ["R2"] },
+    { label: "structural で checks が null", bad: () => r2Checks(null), message: "構造で確かめる要件に checks が無い", rewrite: ["R2"] },
     // 構造の検査の対象（Issue #594。欄の写像は Issue #682）。R2 は画面 V2（entity E1）・V1（E2）、項目 E1.F1・E2.F1、計算 C1（E1）を所属させる
-    { label: "検査の対象の種類が違う（view-shows に項目）", bad: () => r2Checks(viewShows("E1.F1", "E1.F1")), message: CHECK_TARGET_MESSAGES.targetKind },
-    { label: "検査の対象の種類が違う（field-type に画面）", bad: () => r2Checks(fields({ "field-type": { targetId: "V2" } })), message: CHECK_TARGET_MESSAGES.targetKind },
-    { label: "view-shows の対の entity が違う", bad: () => r2Checks(viewShows("V2", "E2.F1")), message: CHECK_TARGET_MESSAGES.sourcePair },
-    { label: "dashboard の画面に entity を持つ項目を組にした", bad: () => r2Checks(viewShows("V3", "E2.F1")), message: CHECK_TARGET_MESSAGES.sourcePair },
-    { label: "dashboard の画面に entity を持つ計算を組にした", bad: () => r2Checks(viewShows("V3", "C1")), message: CHECK_TARGET_MESSAGES.sourcePair },
-    { label: "view-shows の組に画面を書いた", bad: () => r2Checks(viewShows("V2", "V1")), message: CHECK_TARGET_MESSAGES.sourcePair },
-    { label: "検査の対象の ID が行に無い", bad: () => r2Checks(viewShows("V9", "E1.F1")), message: CHECK_TARGET_MESSAGES.unknownTarget, count: "unknown" },
-    { label: "view-shows の組の ID が行に無い", bad: () => r2Checks(viewShows("V2", "E1.F9")), message: CHECK_TARGET_MESSAGES.unknownSource, count: "unknown" },
+    { label: "検査の対象の種類が違う（view-shows に項目）", bad: () => r2Checks(viewShows("E1.F1", "E1.F1")), message: CHECK_TARGET_MESSAGES.targetKind, rewrite: ["R2"] },
+    { label: "検査の対象の種類が違う（field-type に画面）", bad: () => r2Checks(fields({ "field-type": { targetId: "V2" } })), message: CHECK_TARGET_MESSAGES.targetKind, rewrite: ["R2"] },
+    { label: "view-shows の対の entity が違う", bad: () => r2Checks(viewShows("V2", "E2.F1")), message: CHECK_TARGET_MESSAGES.sourcePair, rewrite: ["R2"] },
+    { label: "dashboard の画面に entity を持つ項目を組にした", bad: () => r2Checks(viewShows("V3", "E2.F1")), message: CHECK_TARGET_MESSAGES.sourcePair, rewrite: ["R2"] },
+    { label: "dashboard の画面に entity を持つ計算を組にした", bad: () => r2Checks(viewShows("V3", "C1")), message: CHECK_TARGET_MESSAGES.sourcePair, rewrite: ["R2"] },
+    { label: "view-shows の組に画面を書いた", bad: () => r2Checks(viewShows("V2", "V1")), message: CHECK_TARGET_MESSAGES.sourcePair, rewrite: ["R2"] },
+    { label: "検査の対象の ID が行に無い", bad: () => r2Checks(viewShows("V9", "E1.F1")), message: CHECK_TARGET_MESSAGES.unknownTarget, count: "unknown", rewrite: ["R2"] },
+    { label: "view-shows の組の ID が行に無い", bad: () => r2Checks(viewShows("V2", "E1.F9")), message: CHECK_TARGET_MESSAGES.unknownSource, count: "unknown", rewrite: ["R2"] },
     // 欄の写像では書けない形（strict の schema では出ない。照合を外して流すと形の固定文で落ちる。Issue #682 の (6)）
     {
       label: "view-shows の sourceId が null（schema では出ない）",
       bad: () => negative(r2Checks(fields({ "view-shows": { targetId: "V2", sourceId: null } })), "view-shows の sourceId は schema では文字列"),
       message: MAPPING_MESSAGES.checksShape,
+      rewrite: ["R2"],
     },
     {
       label: "view-shows でない欄に sourceId（schema では出ない）",
       bad: () => negative(r2Checks(fields({ "field-type": { targetId: "E1.F1", sourceId: "E1.F1" } })), "view-shows でない欄は schema で sourceId を持たない"),
       message: MAPPING_MESSAGES.checksShape,
+      rewrite: ["R2"],
     },
     {
       label: "配列の形の checks（schema では出ない）",
       bad: () => negative(r2Checks([{ check: "view-shows", targetId: "V2", sourceId: "E1.F1" }]), "checks は schema で欄の写像か null"),
       message: MAPPING_MESSAGES.checksShape,
+      rewrite: ["R2"],
     },
     {
       label: "欄が欠けた checks（schema では出ない）",
@@ -240,29 +275,34 @@ describe("C2' の負例：固定文で落ち、形のやり直し 1 回のあと
         return negative(r2Checks(rest), "checks の 6 欄は schema で全部 required");
       },
       message: MAPPING_MESSAGES.checksShape,
+      rewrite: ["R2"],
     },
     {
       label: "targetId が空の欄（構造の形）",
       bad: () => r2Checks(viewShows("", "E1.F1")),
       message: MAPPING_MESSAGES.checksShape,
+      rewrite: ["R2"],
     },
     // 未解決の要件の制約 ID が空（規則の文だけを直し、検査は今のまま。Issue #682 の (3)）
     {
       label: "unresolved の constraintIds が空",
       bad: () => withEntries(entries().map((entry, index) => (index === 4 ? { ...entry, verification: { ...(entry["verification"] as Entry), constraintIds: [] } } : entry))),
       message: "未解決の要件に制約 ID が無い",
+      rewrite: ["R5"],
     },
   ];
 
-  it.each(cases)("$label", async ({ bad, message, count }) => {
-    const { outcome, recording } = await run([bad(), bad()]);
+  it.each(cases)("$label", async ({ bad, message, count, rewrite }) => {
+    // 2 回目の応答は、帰属できれば書き直す要件だけ（合併すると初回と同じ写像）、帰属できなければ全体（Issue #660）
+    const { outcome, recording } = await run([bad(), rewriteOf(bad(), rewrite)]);
     expect(recording.structured).toHaveLength(2);
+    expect(blockOf(recording.structured[1]?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual(rewrite ?? null);
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
     expect(outcome.failure.kind).toBe("unmet");
     expect(messagesOf(outcome)).toContain(message);
     if (count !== undefined) expect(outcome.references[count]).toBeGreaterThanOrEqual(1);
-    const fixed = await run([bad(), GOOD]);
+    const fixed = await run([bad(), rewriteOf(GOOD, rewrite)]);
     expect(fixed.outcome.ok).toBe(true);
   });
 
@@ -284,8 +324,9 @@ describe("C2' の負例：固定文で落ち、形のやり直し 1 回のあと
     const table = withCodeIds(fixtureDefaultValueTable());
     const good = idsResponsesOf(list, table).mapping["requirements"] as Entry[];
     const outside = good.map((entry) => (entry["requirementId"] === "R6" ? { ...entry, verification: { ...(entry["verification"] as Entry), value: "gamma" } } : entry));
-    const first = await run([withEntries(outside), withEntries(outside)], { list, table });
+    const first = await run([withEntries(outside), rewriteOf(withEntries(outside), ["R6"])], { list, table });
     expect(first.recording.structured).toHaveLength(2);
+    expect(blockOf(first.recording.structured[1]?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual(["R6"]);
     expect(messagesOf(first.outcome)).toContain("既定値で確かめる要件の value が、所属させた選択肢の項目の options に無い");
   });
 
@@ -300,12 +341,13 @@ describe("C2' の負例：固定文で落ち、形のやり直し 1 回のあと
     expect(existing).toBeDefined();
     const owned = good.map((entry) => (entry["requirementId"] === "R6" ? { ...entry, roles: [{ id: existing, basis: "stated", reason: null }] } : entry));
     const options = { list, table, ledger: PROPERTY_LEDGER_VIEW };
-    const failed = await run([withEntries(owned), withEntries(owned)], options);
+    const failed = await run([withEntries(owned), rewriteOf(withEntries(owned), ["R6"])], options);
     expect(failed.recording.structured).toHaveLength(2);
+    expect(blockOf(failed.recording.structured[1]?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual(["R6"]);
     expect(failed.outcome.ok).toBe(false);
     if (!failed.outcome.ok) expect(failed.outcome.failure.kind).toBe("unmet");
     expect(messagesOf(failed.outcome)).toContain("要件でない文（non-requirement）には行を所属させないこと");
-    const fixed = await run([withEntries(owned), withEntries(good)], options);
+    const fixed = await run([withEntries(owned), rewriteOf(withEntries(good), ["R6"])], options);
     expect(fixed.outcome.ok).toBe(true);
     expect(fixed.recording.structured).toHaveLength(2);
   });
@@ -316,8 +358,8 @@ describe("C2' の負例：固定文で落ち、形のやり直し 1 回のあと
       "出典の要件の文の写しが一覧のどの要件とも合わない",
       "出典の引用が、写しが指す要件の原文に無い",
     ];
-    for (const { bad } of cases) {
-      const { outcome } = await run([bad(), bad()]);
+    for (const { bad, rewrite } of cases) {
+      const { outcome } = await run([bad(), rewriteOf(bad(), rewrite)]);
       for (const message of messagesOf(outcome)) expect(copyMessages).not.toContain(message);
     }
   });
@@ -510,7 +552,8 @@ describe("検査の種類ごとの欄（Issue #682）", () => {
     expect(((r5["verification"] as Entry)["constraintIds"] as unknown[]).length).toBeGreaterThanOrEqual(1);
     expect((await run([GOOD])).outcome.ok).toBe(true);
     const empty = withEntries(entries().map((entry, index) => (index === 4 ? { ...entry, verification: { ...(entry["verification"] as Entry), constraintIds: [] } } : entry)));
-    const { outcome } = await run([empty, empty]);
+    // 問題は R5 に帰属するので、2 回目は R5 だけの書き直し（Issue #660）
+    const { outcome } = await run([empty, rewriteOf(empty, ["R5"])]);
     expect(outcome.ok).toBe(false);
     expect(messagesOf(outcome)).toContain("未解決の要件に制約 ID が無い");
   });
@@ -640,5 +683,312 @@ describe("C3 の拒否のあとの 2 回目", () => {
     expect(failed.recording.structured).toHaveLength(1);
     expect(failed.outcome.ok).toBe(false);
     if (!failed.outcome.ok) expect(failed.outcome.failure).toMatchObject({ kind: "unmet", attempts: 1 });
+  });
+});
+
+describe("初回の形のやり直しを落ちた要件だけの書き直しにする（Issue #660）", () => {
+  /** 要件 at の所属に、行に無い ID を足した entry の並び */
+  const withUnknownRoleAt = (list: readonly Entry[], ats: readonly number[]): Entry[] =>
+    list.map((entry, index) => (ats.includes(index) ? { ...entry, roles: [...(entry["roles"] as Entry[]), { id: "E1.F99", basis: "stated", reason: null }] } : entry));
+  const sourcedOf = (output: Entry, list: RequirementList = LIST, table: NameTable = TABLE) => {
+    const inspected = inspectMappingSourced(list, table.rows, output, FIXTURE_DOCUMENTS);
+    if (inspected.ok) throw new Error("前提が壊れた：落ちる応答であること");
+    return inspected;
+  };
+  const attributionOf = (output: Entry, list: RequirementList = LIST, table: NameTable = TABLE) =>
+    attributeMappingProblems(list, output, sourcedOf(output, list, table));
+  /** 偽物の LLM と、形の再試行の数を読める口で 1 回回す */
+  const runCounted = async (outputs: readonly unknown[], options: { list?: RequirementList; table?: NameTable; inspect?: MappingInspector } = {}) => {
+    const list = options.list ?? LIST;
+    const recording = createCheckedRecordingClient(outputs.map(recordedStructured));
+    const gateway = makeGateway(recording.client);
+    const rejected: MappingRejectedCandidate[] = [];
+    const outcome = await runMapping({
+      plan: planOf(list),
+      list,
+      documents: FIXTURE_DOCUMENTS,
+      gateway,
+      rows: (options.table ?? TABLE).rows,
+      onRejected: (candidate) => rejected.push(candidate),
+      ...(options.inspect === undefined ? {} : { inspect: options.inspect }),
+    });
+    return { outcome, recording, gateway, rejected };
+  };
+  const only = (output: Entry, ids: readonly string[]) => rewriteOf(output, ids) as Entry;
+
+  describe("帰属（純粋）", () => {
+    it("応答の位置・表の位置・一覧の欠落がそれぞれ要件 ID に写り、同じ要件の問題がまとまる。同じ入力から 2 回同じ", () => {
+      // 応答の位置：応答の順を逆にし、R2 の checks の形を崩す（応答の 3 番目＝R2。一覧の添字 1 ではない）
+      const reversed = entries().reverse();
+      const responseBad = withEntries(reversed.map((entry) => (entry["requirementId"] === "R2" ? { ...entry, verification: { ...(entry["verification"] as Entry), checks: ["view-shows"] } } : entry)));
+      const byResponse = attributionOf(responseBad);
+      expect(sourcedOf(responseBad).problems.map((problem) => problem.field)).toEqual(["requirements[3].verification.checks"]);
+      expect(byResponse.requirementIds).toEqual(["R2"]);
+      // 表の位置：R1 の所属に行に無い ID を 2 つ足すと、問題 2 件が R1 にまとまる
+      const twice = withEntries(entries().map((entry, index) => (index === 0 ? { ...entry, roles: [...(entry["roles"] as Entry[]), { id: "E1.F98", basis: "stated", reason: null }, { id: "E1.F99", basis: "stated", reason: null }] } : entry)));
+      const byTable = attributionOf(twice);
+      expect(byTable.requirementIds).toEqual(["R1", "R1"]);
+      expect(byTable.groups?.map((group) => [group.requirementId, group.problems.length])).toEqual([["R1", 2]]);
+      // 一覧の欠落：所属 0 行の R5 が無い応答は、一覧の 4 番目（R5）の 3 件（所属・確かめ方・分類）
+      const missingLast = withEntries(entries().slice(0, -1));
+      const byList = attributionOf(missingLast);
+      expect(sourcedOf(missingLast).problems.map((problem) => problem.field)).toEqual(["requirements[4]", "requirements[4]", "requirements[4]"]);
+      expect(byList.groups).toEqual([{ requirementId: "R5", problems: sourcedOf(missingLast).problems }]);
+      // 2 件の要件が落ちれば一覧の順に 2 組
+      const two = withEntries(withUnknownRoleAt(entries(), [3, 0]));
+      expect(attributionOf(two).groups?.map((group) => group.requirementId)).toEqual(["R1", "R4"]);
+      for (const output of [responseBad, twice, missingLast, two]) expect(attributionOf(output)).toEqual(attributionOf(output));
+    });
+
+    it("帰属できない問題：孤立行・要件 ID の重複・一覧に無い要件 ID は帰属できず、組は無い（推測しない）", () => {
+      const orphan = withEntries(entries().map((entry, index) => (index === 3 ? { ...entry, roles: (entry["roles"] as Entry[]).filter((role) => role["id"] !== "C2") } : entry)));
+      const duplicate = withEntries([...entries(), entries()[0] as Entry]);
+      const unknown = withEntries([...entries(), { ...(entries()[0] as Entry), requirementId: "R99" }]);
+      for (const [label, output, message] of [
+        ["孤立行", orphan, "どの要件にも所属しない行がある"],
+        ["要件 ID の重複", duplicate, "同じ要件の項目が重なっている"],
+        ["一覧に無い要件 ID", unknown, "一覧に無い要件 ID である"],
+      ] as const) {
+        const attribution = attributionOf(output);
+        const problems = sourcedOf(output).problems;
+        expect(attribution.groups, label).toBeNull();
+        problems.forEach((problem, index) => {
+          if (problem.message === message) expect(attribution.requirementIds[index], label).toBeNull();
+        });
+      }
+      // 孤立行と帰属できる問題（R1 の所属の不正）が混ざっても、組は無い
+      const mixed = withEntries(withUnknownRoleAt((orphan["requirements"] as Entry[]).map((entry) => ({ ...entry })), [0]));
+      expect(attributionOf(mixed).requirementIds).toContain("R1");
+      expect(attributionOf(mixed).groups).toBeNull();
+    });
+
+    it("負例（R1）：先頭の要件が欠落し、別の要件の所属の ID が表に無い応答で、欠落は先頭の要件 ID、所属の不正は表の entry の要件 ID（R2）に帰属し、先頭の要件へ寄らない", () => {
+      const output = withEntries(withUnknownRoleAt(entries(), [1]).slice(1));
+      const sourced = sourcedOf(output);
+      const attribution = attributeMappingProblems(LIST, output, sourced);
+      const at = (field: string) => attribution.requirementIds[sourced.problems.findIndex((problem) => problem.field === field)];
+      // 表の 0 番は R1 が欠落しているので R2 になる
+      expect(sourced.tableRequirementIds?.[0]).toBe("R2");
+      expect(sourced.problems.find((problem) => problem.message === "所属の表の ID が表に無い")?.field).toMatch(/^ownership\[0\]\.roles\[\d+\]\.id$/);
+      expect(attribution.requirementIds[sourced.problems.findIndex((problem) => problem.message === "所属の表の ID が表に無い")]).toBe("R2");
+      expect(at("requirements[0]")).toBe("R1");
+    });
+  });
+
+  describe("二点測定（ids on・要件 15）", () => {
+    const sized = buildSized(15, 45, { ledger: true, searchRepair: true, ids: true });
+    const sizedGood = sized.tableResponses().slice(3)[0] as Entry;
+    const sizedEntries = (): Entry[] => (sizedGood["requirements"] as Entry[]).map((entry) => ({ ...entry }));
+    const X = "R7";
+    const Y = "R12";
+    const indexOf = (id: string) => sized.ids.indexOf(id);
+    /** 台帳 on の要件 15 の走り（`buildSized` の ids on の表は台帳の形） */
+    const ledgerRun = async (outputs: readonly unknown[]) => {
+      const recording = createCheckedRecordingClient(outputs.map(recordedStructured));
+      const gateway = makeGateway(recording.client);
+      const rejected: MappingRejectedCandidate[] = [];
+      const outcome = await runMapping({
+        plan: planOf(sized.list),
+        list: sized.list,
+        documents: FIXTURE_DOCUMENTS,
+        gateway,
+        rows: sized.table.rows,
+        ledger: PROPERTY_LEDGER_VIEW,
+        onRejected: (candidate) => rejected.push(candidate),
+      });
+      return { outcome, recording, gateway, rejected };
+    };
+
+    it("(1) 要件 X の所属の ID が表に無い応答：2 本目は X だけの書き直しの要求（前回の写像・X・X の問題）。X 以外の 14 件はバイト列で同じまま合併され、採用した表は X を直した応答から組んだ表と深く等しい。要求は 2", async () => {
+      expect(sized.table.rows.some((row) => row.id === "E1.F99")).toBe(false);
+      const bad = withEntries(withUnknownRoleAt(sizedEntries(), [indexOf(X)]));
+      const { outcome, recording, gateway, rejected } = await ledgerRun([bad, only(sizedGood, [X])]);
+      expect(recording.structured).toHaveLength(2);
+      expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
+      const [first, second] = recording.structured;
+      // 書き直しの要求：前置き・文書・schema・出力の上限は初回と同じ。規則は部分専用、データは初回のデータの後ろに 3 塊
+      expect(second?.instructions).toBe(first?.instructions);
+      expect(second?.documents).toEqual(first?.documents);
+      expect(second?.schema).toEqual(first?.schema);
+      expect(second?.schemaName).toBe(first?.schemaName);
+      expect(second?.maxOutputTokens).toBe(first?.maxOutputTokens);
+      expect(second?.rules).toEqual(ruleTexts(mappingRewriteRuleDefinitionsOf(PROPERTY_LEDGER_VIEW)));
+      expect(second?.input.startsWith(`${first?.input ?? ""}\n<data name="${MAPPING_DATA_NAMES.response}">`)).toBe(true);
+      expect(blockOf(second?.input, MAPPING_DATA_NAMES.response)).toEqual(bad);
+      expect(blockOf(second?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual([X]);
+      const problems = blockOf(second?.input, MAPPING_REWRITE_DATA_NAMES.problems) as { requirementId: string; problems: { field: string; message: string }[] }[];
+      expect(problems.map((group) => group.requirementId)).toEqual([X]);
+      expect(problems[0]?.problems.map((problem) => problem.message)).toEqual(["所属の表の ID が表に無い"]);
+      // 全体の作り直しの塊（前回の応答・前回の形の問題）は無い
+      expect(second?.input.includes(`<data name="${PREVIOUS_RESPONSE_DATA_NAME}">`)).toBe(false);
+      expect(second?.input.includes(`<data name="${SHAPE_PROBLEMS_DATA_NAME}">`)).toBe(false);
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      // X 以外はバイト列で同じ、X は書き直しの entry。並びは一覧の順
+      const merged = (outcome.value.response as Entry)["requirements"] as Entry[];
+      expect(merged.map((entry) => entry["requirementId"])).toEqual(sized.ids);
+      merged.forEach((entry, index) => {
+        const want = entry["requirementId"] === X ? (sizedGood["requirements"] as Entry[])[index] : (bad["requirements"] as Entry[])[index];
+        expect(JSON.stringify(entry), String(entry["requirementId"])).toBe(JSON.stringify(want));
+      });
+      const direct = await ledgerRun([sizedGood]);
+      expect(direct.outcome.ok).toBe(true);
+      if (direct.outcome.ok) {
+        expect(outcome.value.table).toEqual(direct.outcome.value.table);
+        expect(outcome.value.tableSha256).toBe(direct.outcome.value.tableSha256);
+      }
+      // 断った候補は初回の 1 件で、書き直した要件 1・保持した要件 14（ID の値は持たない）
+      expect(rejected.map((candidate) => [candidate.round, candidate.attempt, candidate.rewrite])).toEqual([[1, 1, { rewritten: 1, kept: 14 }]]);
+    });
+
+    it("(2) X と Y の 2 件が落ちれば、書き直す要件は一覧の順に X・Y", async () => {
+      const bad = withEntries(withUnknownRoleAt(sizedEntries(), [indexOf(Y), indexOf(X)]));
+      const { outcome, recording, rejected } = await ledgerRun([bad, only(sizedGood, [Y, X])]);
+      expect(blockOf(recording.structured[1]?.input, MAPPING_REWRITE_DATA_NAMES.requirements)).toEqual([X, Y]);
+      expect(outcome.ok).toBe(true);
+      expect(rejected[0]?.rewrite).toEqual({ rewritten: 2, kept: 13 });
+    });
+
+    it("(3) 孤立行が 1 つでも混ざる応答は、今までどおり全体の作り直しの要求（前回の応答・前回の形の問題を初回の要求の末尾に足す。規則は初回と同じ）", async () => {
+      const owned = sizedEntries();
+      const xRoles = owned[indexOf(X)]?.["roles"] as Entry[];
+      // X が使う行のうち、X だけが所属させた行を X から外すと孤立行になる
+      const solo = xRoles.find((role) => owned.filter((entry) => (entry["roles"] as Entry[]).some((other) => other["id"] === role["id"])).length === 1);
+      expect(solo).toBeDefined();
+      const orphaned = owned.map((entry, index) => (index === indexOf(X) ? { ...entry, roles: xRoles.filter((role) => role !== solo) } : entry));
+      const bad = withEntries(withUnknownRoleAt(orphaned, [indexOf(Y)]));
+      const { outcome, recording, gateway, rejected } = await ledgerRun([bad, sizedGood]);
+      expect(outcome.ok).toBe(true);
+      expect(recording.structured).toHaveLength(2);
+      expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
+      const [first, second] = recording.structured;
+      expect(second?.rules).toEqual(first?.rules);
+      expect(second?.input.startsWith(`${first?.input ?? ""}\n<data name="${PREVIOUS_RESPONSE_DATA_NAME}">`)).toBe(true);
+      expect(blockOf(second?.input, PREVIOUS_RESPONSE_DATA_NAME)).toEqual(bad);
+      expect(second?.input).toContain(`<data name="${SHAPE_PROBLEMS_DATA_NAME}">`);
+      expect(second?.input.includes(`<data name="${MAPPING_REWRITE_DATA_NAMES.requirements}">`)).toBe(false);
+      expect(second?.instructions).toBe(first?.instructions);
+      expect(second?.documents).toEqual(first?.documents);
+      expect(second?.schema).toEqual(first?.schema);
+      // 全体の作り直しの候補は今の形のまま（書き直しの数を持たない）
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0]).not.toHaveProperty("rewrite");
+    });
+  });
+
+  describe("負例（R5）と合併後の C2'", () => {
+    const bad = () => withEntries(withUnknownRoleAt(entries(), [0]));
+    it.each([
+      { label: "(4) 書き直しの応答に R1 以外の要件がある", second: () => only(GOOD, ["R1", "R3"]), message: MAPPING_REWRITE_MESSAGES.extra },
+      { label: "(5) R1 が無い", second: () => withEntries([]), message: MAPPING_REWRITE_MESSAGES.missing },
+      { label: "(5) R1 が 2 回ある", second: () => withEntries([...(only(GOOD, ["R1"])["requirements"] as Entry[]), ...(only(GOOD, ["R1"])["requirements"] as Entry[])]), message: MAPPING_REWRITE_MESSAGES.duplicate },
+    ])("$label：固定文で unmet、追加の要求なし。段の形の再試行は 1", async ({ second, message }) => {
+      const { outcome, recording, gateway, rejected } = await runCounted([bad(), second(), GOOD]);
+      expect(recording.structured).toHaveLength(2);
+      expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) return;
+      expect(outcome.failure).toMatchObject({ kind: "unmet", attempts: 2 });
+      expect(messagesOf(outcome)).toEqual([message]);
+      expect(rejected.map((candidate) => [candidate.attempt, candidate.rewrite])).toEqual([
+        [1, { rewritten: 1, kept: 4 }],
+        [2, { rewritten: 1, kept: 4 }],
+      ]);
+      expect(rejected[1]?.response).toEqual(second());
+      expectNoAcceptanceMaterial([...Object.values(MAPPING_REWRITE_MESSAGES), JSON.stringify(outcome.failure)]);
+    });
+
+    it("(6) 合併後の表の孤立行は C2' が今までどおり落とす（部分の規則に書かない）。合併後に掛ける検査は初回と同じ検査（偽物の検査で数える）", async () => {
+      const calls: { readonly list: RequirementList; readonly rows: readonly unknown[]; readonly output: Entry; readonly documents: unknown; readonly ledger: unknown }[] = [];
+      const counting: MappingInspector = (list, rows, output, documents, ledger) => {
+        calls.push({ list, rows, output, documents, ledger });
+        return inspectMappingSourced(list, rows, output, documents, ledger);
+      };
+      // R4 を書き直させ、R4 だけが所属させた行（C2）を外した応答を返すと、合併した表に孤立行が残る
+      const r4bad = withEntries(withUnknownRoleAt(entries(), [3]));
+      const r4 = only(GOOD, ["R4"]);
+      const orphaned = withEntries((r4["requirements"] as Entry[]).map((entry) => ({ ...entry, roles: (entry["roles"] as Entry[]).filter((role) => role["id"] !== "C2") })));
+      const { outcome, recording, rejected } = await runCounted([r4bad, orphaned, GOOD], { inspect: counting });
+      expect(recording.structured).toHaveLength(2);
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) expect(outcome.failure).toMatchObject({ kind: "unmet", attempts: 2 });
+      expect(messagesOf(outcome)).toEqual(["どの要件にも所属しない行がある"]);
+      // 検査は 2 回（初回の応答・合併した写像）、同じ一覧・行・文書・台帳。2 回目は合併した写像（一覧の順の全要件）
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.list).toBe(calls[0]?.list);
+      expect(calls[1]?.rows).toBe(calls[0]?.rows);
+      expect(calls[1]?.documents).toBe(calls[0]?.documents);
+      expect(calls[1]?.ledger).toBe(calls[0]?.ledger);
+      expect(calls[0]?.output).toEqual(r4bad);
+      expect(((calls[1]?.output["requirements"] ?? []) as Entry[]).map((entry) => entry["requirementId"])).toEqual(LIST.requirements.map((requirement) => requirement.id));
+      // 断った 2 件目の候補は、C2' に掛けた合併した写像と、その問題の全部
+      expect(rejected[1]?.response).toEqual(calls[1]?.output);
+      expect(rejected[1]?.problems.map((problem) => problem.message)).toEqual(["どの要件にも所属しない行がある"]);
+      // 同じ写像を初回に渡せば、初回の検査も同じ固定文で落とす（検査は同じもの）
+      const direct = inspectMapping(LIST, TABLE.rows, calls[1]?.output as Entry, FIXTURE_DOCUMENTS);
+      expect(direct.ok ? [] : direct.problems.map((problem) => problem.message)).toEqual(messagesOf(outcome));
+    });
+
+    it("(7) 書き直しが C2' に 2 回目も落ちれば unmet で止まり、段の形の再試行は 1（中身の再試行は無い）", async () => {
+      const { outcome, recording, gateway } = await runCounted([bad(), only(bad(), ["R1"]), GOOD]);
+      expect(recording.structured).toHaveLength(2);
+      expect(gateway.retryCounts).toEqual({ communication: 0, shape: 1, content: 0 });
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) expect(outcome.failure).toMatchObject({ kind: "unmet", attempts: 2 });
+      expect(messagesOf(outcome)).toEqual(["所属の表の ID が表に無い"]);
+    });
+
+    it("書き直しの応答の骨組みが崩れていれば malformed（追加の要求なし）", async () => {
+      const { outcome, recording } = await runCounted([bad(), negative({ requirements: "x" }, "requirements が並びでない応答。strict の schema では出ないが、骨組みの負例"), GOOD]);
+      expect(recording.structured).toHaveLength(2);
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) expect(outcome.failure).toMatchObject({ kind: "malformed", attempts: 2 });
+    });
+  });
+
+  describe("記録と要求（R2・R6）", () => {
+    it("参照の照合の数は、初回の応答の参照＋書き直しの応答（k 件）の参照（保持した要件を新たな応答として数えない）", async () => {
+      const roles = TABLE.ownership.reduce((total, entry) => total + entry.roles.length, 0);
+      const r1Roles = TABLE.ownership.find((entry) => entry.requirementId === "R1")?.roles.length ?? 0;
+      const bad = withEntries(withUnknownRoleAt(entries(), [0]));
+      const { outcome } = await runCounted([bad, only(GOOD, ["R1"])]);
+      expect(outcome.ok).toBe(true);
+      // 初回：要件 ID 5・所属（＋行に無い 1）・R2 の view-shows の対象 2。書き直し：要件 ID 1・R1 の所属（R1 は検査の対象を持たない）
+      expect(outcome.references).toEqual({
+        checked: LIST.requirements.length + roles + 1 + 2 + (1 + r1Roles),
+        unknown: 1,
+        duplicate: 0,
+        crossBundle: 0,
+      });
+    });
+
+    it("要求（R2）：部分の規則は全件を求める文と全行の所属を求める文を含まず、書き直す要件だけを求める文と所属しない行は合併後にコードが見る文を含む。ほかの規則の文は同じ。初回の規則は直す前のまま", () => {
+      for (const ledger of [undefined, PROPERTY_LEDGER_VIEW]) {
+        const full = mappingRuleDefinitionsOf(ledger);
+        const partial = mappingRewriteRuleDefinitionsOf(ledger);
+        expect(ruleDefinitionDefects(partial)).toEqual([]);
+        expect(partial.map((definition) => definition.id)).toEqual(["R-map-01r", "R-map-02r", "R-map-03", "R-map-04"]);
+        const texts = partial.map((definition) => definition.text).join("\n");
+        expect(texts.includes("要件の一覧の要件ごとに 1 件")).toBe(false);
+        expect(texts.includes("どの要件にも所属しない行を残さない")).toBe(false);
+        expect(texts).toContain("書き直す要件ごとに 1 件ずつ、requirementId にその要件 ID をそのまま書く。書き直す要件のほかの要件を書かない。");
+        expect(texts).toContain("どの要件にも所属しない行の条件は、合併した表でコードが見る。");
+        expect(partial.slice(2)).toEqual(full.slice(2));
+        // R-map-02 の所属の文は、全行の所属の文を差し替えただけ
+        const r2 = full.find((definition) => definition.id === "R-map-02")?.text ?? "";
+        expect(partial[1]?.text).toBe(r2.replace("どの要件にも所属しない行を残さない。", "どの要件にも所属しない行の条件は、合併した表でコードが見る。"));
+        for (const definition of partial.slice(0, 2)) expect(definition.since).toContain("#660");
+        expectNoAcceptanceMaterial([...partial.map((definition) => JSON.stringify(definition)), ...Object.values(MAPPING_REWRITE_DATA_NAMES)]);
+      }
+      // 初回（と全体の作り直し）の規則は直す前の定義のまま
+      expect(MAPPING_RULE_DEFINITIONS.map((definition) => definition.id)).toEqual(["R-map-01", "R-map-02", "R-map-03", "R-map-04"]);
+    });
+
+    it("初回の要求は、書き直しの有無によらずバイト列で同じ（初回で通る走りと、書き直しに入る走りの 1 本目）", async () => {
+      const clean = await runCounted([GOOD]);
+      const rewritten = await runCounted([withEntries(withUnknownRoleAt(entries(), [0])), only(GOOD, ["R1"])]);
+      expect(JSON.stringify(rewritten.recording.structured[0])).toBe(JSON.stringify(clean.recording.structured[0]));
+      expectNoAcceptanceMaterial([JSON.stringify(rewritten.recording.structured)]);
+    });
   });
 });

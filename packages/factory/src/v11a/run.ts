@@ -189,7 +189,7 @@ import { mergeReplacements, runFieldRepair } from "../v12/stages/field-repair.js
 import { VOCABULARY_BUNDLES, type ReferenceCounts } from "../v12/ids.js";
 import { isGeneratedTestId } from "../v12/generated-tests.js";
 import { runVocabularyBundle } from "../v12/stages/vocabulary.js";
-import { MAPPING_ROUNDS, runMapping, type MappingOutcome, type MappingPrevious } from "../v12/stages/mapping.js";
+import { MAPPING_ROUNDS, runMapping, type MappingOutcome, type MappingPrevious, type MappingRejectedCandidate } from "../v12/stages/mapping.js";
 
 /** v1.1α の入力（v1 の `GenerationInput` と同じ形で、確定した仕様を必須にしたもの） */
 export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
@@ -352,8 +352,11 @@ async function toBundleRejectedCandidate(slot: RejectedCandidateSlot): Promise<B
     kind: candidate.kind,
   };
   if (candidate.kind === "shape") {
+    // C2 の初回の形のやり直しを落ちた要件だけの書き直しにした回は、書き直した要件と保持した要件の数を足す（ID の値は書かない。Issue #660）
+    const rewrite = (candidate as MappingRejectedCandidate).rewrite;
     return {
       ...head,
+      ...(rewrite === undefined ? {} : { rewritten_requirements: rewrite.rewritten, kept_requirements: rewrite.kept }),
       response,
       response_sha256: responseSha256,
       problems: candidate.problems.map((problem) => ({ ...problem, reference_sha256: responseSha256 })),
