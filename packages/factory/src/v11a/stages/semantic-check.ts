@@ -548,19 +548,26 @@ export function checkSemanticEvidenceShape(output: unknown, context: SemanticEvi
  */
 export function deriveSemanticJudgment(evidence: SemanticEvidence, sentences: SentenceIndex): SemanticJudgment {
   const { requirementId } = evidence;
-  const quoteOf = (quoteId: string): string => {
+  const quoteOf = (quoteId: string, perspective: string): string => {
     const sentence = sentences.get(quoteId);
-    if (sentence === undefined) throw new Error(`照らしていない文の番号から判定を導こうとした：${quoteId}`);
+    if (sentence === undefined) throw new Error(`照らしていない文の番号から判定を導こうとした：${perspective}.quoteId=${quoteId}`);
+    if (sentence.requirementId !== requirementId) throw new Error(`他の要件の文の番号から判定を導こうとした：${perspective}.quoteId=${quoteId}`);
     return sentence.text;
   };
+  // 受理・拒否の分岐の前に、3 観点すべての番号の実在と所属を照らす（使わない観点も含む。Issue #706）
+  const quotes = {
+    ownership: quoteOf(evidence.ownership.quoteId, "ownership"),
+    target: quoteOf(evidence.target.quoteId, "target"),
+    verification: quoteOf(evidence.verification.quoteId, "verification"),
+  };
   if (evidence.ownership.unnecessaryRowIds.length > 0) {
-    return { requirementId, verdict: "reject", kind: "unnecessary-ownership", quote: quoteOf(evidence.ownership.quoteId) };
+    return { requirementId, verdict: "reject", kind: "unnecessary-ownership", quote: quotes.ownership };
   }
   if (evidence.target.verdict === "missing") {
-    return { requirementId, verdict: "reject", kind: "missing-target", quote: quoteOf(evidence.target.quoteId) };
+    return { requirementId, verdict: "reject", kind: "missing-target", quote: quotes.target };
   }
   if (evidence.verification.verdict === "weak") {
-    return { requirementId, verdict: "reject", kind: "weak-verification", quote: quoteOf(evidence.verification.quoteId) };
+    return { requirementId, verdict: "reject", kind: "weak-verification", quote: quotes.verification };
   }
   return { requirementId, verdict: "accept" };
 }

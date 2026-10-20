@@ -998,6 +998,30 @@ describe("旗 v12.ids の C3：観点ごとの根拠の契約（Issue #700・#70
     expect(() => deriveSemanticJudgment({ ...weak, verification: { verdict: "weak", quoteId: "R1:t9" } }, sentences)).toThrow();
   });
 
+  it("(11') 導出は受理・拒否の分岐の前に 3 観点すべての番号の実在と所属を照らす（外れたら投げる）", () => {
+    const sentences: SentenceIndex = new Map([
+      ["R1:t1", { requirementId: "R1", text: "題名を登録できる。" }],
+      ["R2:t1", { requirementId: "R2", text: "日付を登録できる。" }],
+    ]);
+    const clean: SemanticEvidence = {
+      requirementId: "R1",
+      ownership: { examinedRowIds: ["f.item.title"], unnecessaryRowIds: [], quoteId: "R1:t1" },
+      target: { verdict: "present", presentRowIds: ["f.item.title"], quoteId: "R1:t1" },
+      verification: { verdict: "sufficient", quoteId: "R1:t1" },
+    };
+    // (a) 受理に導かれる根拠でも、使わない観点の無い番号は拒む
+    expect(() => deriveSemanticJudgment({ ...clean, verification: { verdict: "sufficient", quoteId: "R1:t99" } }, sentences)).toThrow();
+    // (b) 拒否に導かれる根拠でも、他の要件の番号は拒む
+    expect(() => deriveSemanticJudgment({ ...clean, target: { ...clean.target, verdict: "missing" as const, quoteId: "R2:t1" } }, sentences)).toThrow();
+    // (c) 別の観点で拒否するときも、使わない観点の無い番号は拒む
+    expect(() =>
+      deriveSemanticJudgment(
+        { ...clean, ownership: { ...clean.ownership, unnecessaryRowIds: ["f.item.title"] }, verification: { verdict: "sufficient", quoteId: "R1:t99" } },
+        sentences,
+      ),
+    ).toThrow();
+  });
+
   it("(12) J4 の印の有無で結果が同じ", async () => {
     const withAdvice = await runIds([good()], { advice: ADVICE });
     const without = await runIds([good()]);
