@@ -48,6 +48,9 @@
 // 止まる。判定の包みには判定の枝（上限 80）を足し、尽きれば判定を呼ばない（J4 は未判定 `gate`・J2 は `ruled`。本は止めない）。
 // 要約には門と枝の上限と使った数を `v12_calls` で書く。off なら門を作らず、今の配線（共通の口の `#calls` を `callCount` に
 // 照らす・判定は門に数えない）をそのまま通る。
+// on の走りの T1''（C3）は要件 6 件ごとの束で同時に呼び（束ごとに口と計量を作り、段の記録を束ごとに 1 つ積む）、合併後に全対象に
+// ちょうど 1 判定と各束の表の SHA の一致を照らす。形のやり直しは段全体で通算 1。要約の `v12_calls` に C3 の束の数・同時数・段全体の
+// 計（`semantic_check`）を足す（段の走りの記録の `v12_calls` には足さない。Issue #662）。
 // 手 3c（Issue #595）から、on の走りの T2 は台帳の型だけで値が決まる試験（既定値・選択肢の集合・アプリ全体と見出しごと × 選択肢の
 // 空の集計）をコードが作り（`v12/generated-tests.ts`）、T2 の成果物にその試験 ID の並び（`generated_test_ids`）を足す。
 //
@@ -60,6 +63,7 @@
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex, type Diagnostic } from "@musunest/spec-engine";
 import { JobBudget } from "../budget.js";
+import type { LlmClient, LlmStructuredRequest, LlmStructuredResponse, LlmToolRequest, LlmToolResponse } from "../llm.js";
 import {
   assembleBundle,
   buildDiagnostics,
@@ -100,8 +104,10 @@ import {
 import {
   buildRunRecord,
   buildSummary,
+  callCountsSum,
   makeStageRecord,
   usageDelta,
+  usageSum,
   UsageMeter,
   type FailureAttribution,
   type FailureKind,
@@ -164,7 +170,13 @@ import {
   type NameTablePrevious,
   type SemanticRejection,
 } from "./stages/name-table.js";
-import { runSemanticCheck, semanticCheckTargets, type SemanticCheckOutput } from "./stages/semantic-check.js";
+import {
+  runSemanticCheck,
+  runSemanticCheckBundled,
+  semanticCheckTargets,
+  type SemanticCheckOutput,
+  type SemanticCheckShapeFrame,
+} from "./stages/semantic-check.js";
 import { runTestSpec, type TestSpecValue } from "./stages/test-spec.js";
 import { runWriteV11a } from "./stages/write.js";
 import { ledgerViewOf, resolveV12Flags, toPublicV12Flags, type V12Flags } from "../v12/ledger.js";
@@ -184,7 +196,7 @@ import {
   withSearchRounds,
 } from "../v12/search-repair.js";
 import { canRepairFields, locateFailures } from "../v12/locate.js";
-import { V12_CALL_LIMITS, type V12CallLimits } from "../v12/limits.js";
+import { V12_C3_BUNDLE, V12_CALL_LIMITS, type V12CallLimits } from "../v12/limits.js";
 import { mergeReplacements, runFieldRepair } from "../v12/stages/field-repair.js";
 import { VOCABULARY_BUNDLES, type ReferenceCounts } from "../v12/ids.js";
 import { isGeneratedTestId } from "../v12/generated-tests.js";
@@ -209,6 +221,21 @@ export interface GenerationInputV11a extends Omit<GenerationInput, "plan"> {
    * の走りが checkpoint を書くため。省けば集めず、結果に欄を置かない。Issue #636）
    */
   readonly collectBoundaries?: boolean;
+  /**
+   * 旗 `v12.ids` の C3 の束を同時に始める数の上限（省けば `V12_C3_BUNDLE.concurrency`。試験が 1 にして順序に依らないことを
+   * 確かめるときだけ渡す。旗 off の走りは見ない。Issue #662）
+   */
+  readonly v12C3Concurrency?: number;
+}
+
+/**
+ * 束で同時に呼ぶ段の要約（`v12_calls.semantic_check`。C3 を回した走りだけ。Issue #662）。束の記録の数（回をまたいだ合計）・
+ * 同時に始めた数（回ごとの上限と束の数の小さいほうの最大）と段全体の計（束ごとの計量と口の計の項目ごとの合計）
+ */
+export interface BundledStageSummary {
+  readonly bundles: number;
+  readonly concurrency: number;
+  readonly total: UsageSnapshot & CallCounts;
 }
 
 /** v1.1α の 1 回の生成の結果（v1 の結果に、境界の材料を任意の欄で足したもの。Issue #636） */
@@ -604,15 +631,20 @@ async function runV11a(
           ...(callGate === undefined || callLimits === undefined ? {} : { gate: callGate, judgeLimit: callLimits.judgeBranch }),
         });
   // 要約の門と枝の欄（旗 `v12.ids` の走りだけ。判定の口が無い走りの枝は 0 本使った）
-  const callsRecord = (): { readonly v12_calls?: unknown } =>
+  // 段の走りの記録の門と枝（`withBundles` 偽）は C3 の束の欄を持たない（段の走りの記録のバイト列は変えない。Issue #662）
+  const callsRecord = (withBundles = true): { readonly v12_calls?: unknown } =>
     callGate === undefined || callLimits === undefined
       ? {}
       : {
           v12_calls: {
             real_attempts: { limit: callGate.limit, used: callGate.attempts() },
             judge_branch: { limit: callLimits.judgeBranch, used: judgeBudget?.branch?.used ?? 0 },
+            // C3 の束の数・同時数・段全体の計（C3 を回した走りだけ。既存の欄は変えずに足す。Issue #662）
+            ...(semanticBundles === undefined || !withBundles ? {} : { semantic_check: semanticBundles }),
           },
         };
+  // 旗 `v12.ids` の C3 の束の要約（C3 を回すまで無い。回をまたいで足す。Issue #662）
+  let semanticBundles: BundledStageSummary | undefined;
   const startedAt = input.now();
   const stages: StageRecord[] = [];
   const upheld: string[] = [];
@@ -833,6 +865,100 @@ async function runV11a(
     return value;
   };
 
+  /**
+   * 束を同時に呼ぶ段を回す（旗 `v12.ids` の C3。Issue #662）。束ごとに、予算・門・締切・時計・単価・effort・timeout を共有した口と、
+   * 全体の計量の内側に重ねた束の計量を作り、段の記録を束ごとに 1 つ積む（値はその束の口の計・束の計量・束の開始と終了から組む。
+   * 同時に走ると全体の計量と親の口の前後差が混ざるので使わない）。束を 1 つも呼ばなかった回（対象 0 件）は今までと同じく段の
+   * 記録を 1 つ積む。段の名前を受けるので、ほかの段の束にも使える
+   */
+  const runBundledStage = async <T>(
+    stage: StageId,
+    concurrency: number,
+    run: (bundleGateway: (bundle: number) => CallGateway, concurrency: number) => Promise<StageOutcome<T>>,
+    onSettled: (summary: BundledStageSummary) => void,
+  ): Promise<T> => {
+    const before = meterState();
+    const stageStart = input.now();
+    const runs: { readonly gateway: CallGateway; readonly meter: UsageMeter; readonly start: number; readonly end: () => number }[] = [];
+    const bundleGateway = (bundle: number): CallGateway => {
+      const bundleMeter = new UsageMeter();
+      const start = input.now();
+      // 束の終了＝その束の最後の呼び出しが返った時刻（呼ばなければ開始と同じ）
+      let end = start;
+      const metered = bundleMeter.wrap(meter.wrap(input.client));
+      const timed: LlmClient = {
+        callStructured: async <R>(request: LlmStructuredRequest): Promise<LlmStructuredResponse<R>> => {
+          try {
+            return await metered.callStructured<R>(request);
+          } finally {
+            end = input.now();
+          }
+        },
+        callWithTools: async (request: LlmToolRequest): Promise<LlmToolResponse> => {
+          try {
+            return await metered.callWithTools(request);
+          } finally {
+            end = input.now();
+          }
+        },
+      };
+      const made = new CallGateway({
+        client: timed,
+        budget,
+        rates: input.rates,
+        now: input.now,
+        deadline: input.deadline,
+        limits,
+        effort: input.effort,
+        ...(input.callTimeoutMs === undefined ? {} : { callTimeoutMs: input.callTimeoutMs }),
+        ...(callGate === undefined ? {} : { gate: callGate }),
+      });
+      runs[bundle] = { gateway: made, meter: bundleMeter, start, end: () => end };
+      return made;
+    };
+    const settle = (status: StageStatus, failureKind: FailureKind | null): void => {
+      const made = runs.filter((entry): entry is (typeof runs)[number] => entry !== undefined);
+      if (made.length === 0) pushRecord(stage, status, before, stageStart, failureKind);
+      for (const entry of made) {
+        stages.push(makeStageRecord(stage, status, entry.end() - entry.start, entry.meter.snapshot, entry.gateway.counts, failureKind));
+      }
+      onSettled({
+        bundles: made.length,
+        concurrency: Math.min(concurrency, made.length),
+        total: { ...usageSum(made.map((entry) => entry.meter.snapshot)), ...callCountsSum(made.map((entry) => entry.gateway.counts)) },
+      });
+    };
+    let outcome: StageOutcome<T>;
+    try {
+      outcome = await run(bundleGateway, concurrency);
+    } catch (error) {
+      settle("failed", error instanceof RunStop ? error.attribution.kind : null);
+      throw error;
+    }
+    if (!outcome.ok) {
+      const attribution = stageFailureAttribution(stage, outcome.failure);
+      settle("failed", attribution.kind);
+      throw new RunStop(attribution);
+    }
+    settle("ok", null);
+    return outcome.value;
+  };
+  /** C3 の束の要約を回ごとに足す（束の数と計は足し、同時数は回ごとの最大。Issue #662） */
+  const addSemanticBundles = (summary: BundledStageSummary): void => {
+    const previous = semanticBundles;
+    if (previous === undefined) {
+      semanticBundles = summary;
+      return;
+    }
+    semanticBundles = {
+      bundles: previous.bundles + summary.bundles,
+      concurrency: Math.max(previous.concurrency, summary.concurrency),
+      total: { ...usageSum([previous.total, summary.total]), ...callCountsSum([previous.total, summary.total]) },
+    };
+  };
+  // 旗 `v12.ids` の C3 の形のやり直しの枠（段全体で通算 1。初回と再点検をまたぐ。Issue #662）
+  const semanticShapeFrame: SemanticCheckShapeFrame = { used: false };
+
   /** 持ち越しの段で止める（全件持ち越し・持ち越しの関数が断った）。記録を足して合図を投げる */
   const stopAtCarryOver = (problem: Problem): never => {
     pushRecord("carry-over", "failed", meterState(), input.now(), "unmet");
@@ -930,7 +1056,7 @@ async function runV11a(
         durationSecs: (input.now() - startedAt) / 1000,
         // 旗 `v12.ids` の走りの門と枝の数（要約と同じ形）と T2' を通った組の数（記録に載せるかは呼ぶ側が決める。Issue #637）
         ...(() => {
-          const calls = callsRecord().v12_calls;
+          const calls = callsRecord(false).v12_calls;
           return calls === undefined ? {} : { v12Calls: calls };
         })(),
         ...(testSpecCounts === undefined ? {} : { testSpec: testSpecCounts }),
@@ -984,7 +1110,45 @@ async function runV11a(
 
       // T1''（完全な結果だけを受ける。表の SHA の合わない結果・判定の欠落は形の落ちとして止める）
       const targets = semanticCheckTargets(list, output.table);
-      const semantic = await runStageOk("semantic-check", async (): Promise<StageOutcome<SemanticCheckOutput>> => {
+      // 旗 `v12.ids`：C3 を要件 6 件ごとの束で同時に呼ぶ。対象はこの回の表から今の導き方で導き（初回の集合を固定しない）、合併後に
+      // 全対象にちょうど 1 判定と、各束に見せた表の SHA が採用した表と一致することを照らす（Issue #662）
+      const semantic = flags.ids
+        ? await runBundledStage(
+            "semantic-check",
+            input.v12C3Concurrency ?? V12_C3_BUNDLE.concurrency,
+            async (bundleGateway, bundleConcurrency): Promise<StageOutcome<SemanticCheckOutput>> => {
+              const checked = await runSemanticCheckBundled({
+                plan: input.plan,
+                list,
+                table: output.table,
+                advice: marks,
+                documents: input.documents,
+                gateway,
+                bundleGateway,
+                bundleConcurrency,
+                shapeFrame: semanticShapeFrame,
+                ...withLedger,
+              });
+              if (!checked.ok) return checked;
+              const problems: Problem[] = [];
+              if (
+                checked.value.tableSha256 !== output.tableSha256 ||
+                checked.value.bundleTableSha256s.some((sha256) => sha256 !== output.tableSha256)
+              ) {
+                problems.push({ field: "tableSha256", message: "表の意味の点検の結果が、採用した表の SHA-256 と合わない" });
+              }
+              if (!coversExactly(checked.value.judgments, targets)) {
+                problems.push({ field: "judgments", message: "表の意味の点検の判定が、対象の要件にちょうど 1 つずつでない" });
+              }
+              if (problems.length > 0) return { ok: false, failure: { kind: "malformed", attempts: 1, problems } };
+              return {
+                ok: true,
+                value: { tableSha256: checked.value.tableSha256, judgments: checked.value.judgments, targets: checked.value.targets },
+              };
+            },
+            addSemanticBundles,
+          )
+        : await runStageOk("semantic-check", async (): Promise<StageOutcome<SemanticCheckOutput>> => {
         const checked = await runSemanticCheck({
           plan: input.plan,
           list,

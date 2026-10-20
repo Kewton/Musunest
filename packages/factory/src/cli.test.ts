@@ -1354,7 +1354,10 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     // 要約は prompt_version・v12_flags と、旗 v12.ids の門と枝の欄 v12_calls（Issue #592）のほかは v1.1a と同じ。門の数は
     // 生成 8（C1 3・C2 1・T1'' 1・T2 1・B1 1・B3' 1。Issue #593 で T1 の 1 が 4 になった）と判定 4
     const { prompt_version: _p1, v12_flags: _f1, v12_calls: v12Calls, ...summaryRest } = v12.summary;
-    expect(v12Calls).toEqual({ real_attempts: { limit: 144, used: 12 }, judge_branch: { limit: 80, used: 4 } });
+    // 既存の欄（門と枝）は変えず、C3 の束の欄（semantic_check。要件 6 件以下なので束 1。Issue #662）を足す
+    const { semantic_check: semanticBundles, ...v12CallsBefore } = v12Calls as Record<string, unknown>;
+    expect(v12CallsBefore).toEqual({ real_attempts: { limit: 144, used: 12 }, judge_branch: { limit: 80, used: 4 } });
+    expect(semanticBundles).toMatchObject({ bundles: 1, concurrency: 1, total: { calls: 1, attempts: { started: 1 }, retries: { shape: 0 } } });
     expect(v11a.summary).not.toHaveProperty("v12_calls");
     const { prompt_version: _p2, ...v11aSummaryRest } = v11a.summary;
     // 表を組む段が C1・C2（4 要求）になった分だけ、呼び出しの数で決まる欄（費用・予算の残り・段の記録・トークンの計）が違う。
@@ -1393,8 +1396,10 @@ describe("v1.2 の走り（`--pipeline v1.2 --plan-file`。Issue #547）", () =>
     expect(limits["logical_calls"]).toBe(V12_CALL_LIMITS.logicalCalls);
     expect(limits["real_attempts"]).toBe(V12_CALL_LIMITS.realAttempts);
     expect(limits["judge_branch"]).toBe(V12_CALL_LIMITS.judgeBranch);
-    // 要約の v12_calls は変えない
-    expect(run.summary["v12_calls"]).toEqual({ real_attempts: { limit: 144, used: 12 }, judge_branch: { limit: 80, used: 4 } });
+    // 要約の v12_calls の既存の欄は変えない（C3 の束の欄 semantic_check を足すだけ。Issue #662）
+    const { semantic_check: semanticBundles, ...callsBefore } = run.summary["v12_calls"] as Record<string, unknown>;
+    expect(callsBefore).toEqual({ real_attempts: { limit: 144, used: 12 }, judge_branch: { limit: 80, used: 4 } });
+    expect(semanticBundles).toMatchObject({ bundles: 1, concurrency: 1 });
   });
 
   it("表を組む段（ids on は C1）で止まる走りでも要約と条件の記録に v12_flags がある（終了コード 1・納品物無し）", async () => {

@@ -14,7 +14,9 @@ import {
   DIAGNOSTICS_REJECTED_NAME_TABLE_FILE,
   DIAGNOSTICS_REJECTED_TEST_SPEC_FILE,
   DIAGNOSTICS_REJECTED_VOCABULARY_FILE,
+  BUNDLE_MANIFEST_FILE,
   MAPPINGS_FILE,
+  SUMMARY_FILE,
   TEST_SUITE_FILE,
   TESTS_FILE,
   VERIFICATION_FILE,
@@ -438,6 +440,19 @@ const arbitration = (decisions: readonly { testId: string; verdict: string }[]) 
       quote: decision.verdict === "overturn" ? QUOTE : "",
     })),
   });
+
+/**
+ * 要約から、旗 `v12.ids` の C3 の束の欄（`v12_calls.semantic_check`。Issue #662）だけを外した値と、外した欄（無ければ undefined）。
+ * 直す前の値と照らす試験が、Issue が列挙した要約の欄の追加だけを外して比べるのに使う
+ */
+function withoutSemanticBundles<T extends object>(
+  summary: T,
+): { readonly summary: T; readonly semanticCheck: { readonly bundles: number; readonly concurrency: number } | undefined } {
+  const calls = (summary as { readonly v12_calls?: Record<string, unknown> }).v12_calls;
+  if (calls === undefined || !("semantic_check" in calls)) return { summary, semanticCheck: undefined };
+  const { semantic_check: semanticCheck, ...rest } = calls;
+  return { summary: { ...summary, v12_calls: rest }, semanticCheck: semanticCheck as { readonly bundles: number; readonly concurrency: number } };
+}
 
 function inputOf(client: GenerationInputV11a["client"], overrides: Partial<GenerationInputV11a> = {}): GenerationInputV11a {
   return { ...makeRunInput(client), source: SOURCE, documents: FIXTURE_DOCUMENTS, plan: PLAN, ...overrides };
@@ -1040,6 +1055,7 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
     const measured: Record<string, readonly string[]> = {};
     const measuredMaterials: Record<string, string> = {};
     const rejectedSummaries: Record<string, readonly { attempt: number; problem_count: number; messages: readonly { message: string; count: number }[] }[]> = {};
+    const semanticBundleSummaries: Record<string, { readonly bundles: number; readonly concurrency: number }> = {};
     for (const script of beforeScripts()) {
       const { result, recording } = await runScenario(script.calls, { flags: IDS_FLAGS });
       const files = result.bundle === null ? [] : bundleFiles(result.bundle).map((file) => ({ path: file.path, text: file.text }));
@@ -1050,14 +1066,42 @@ describe("旗 v12.ids：C1 語彙（3 束）→ C2 要件の写像 → J4 → C3
         measuredMaterials[script.name] = await sha256Hex(JSON.stringify(rest));
         rejectedSummaries[script.name] = rejected ?? [];
       }
+      // 要約の v12_calls に足した C3 の束の欄（semantic_check。Issue #662 が列挙した要約の欄）だけを外して直す前の値と照らし、
+      // 欄の値は下で照らす（直す前の SHA-256 は書き換えない）
+      const { summary: summaryBefore, semanticCheck } = withoutSemanticBundles(result.summary);
+      if (semanticCheck !== undefined) semanticBundleSummaries[script.name] = semanticCheck;
+      // 納品物の要約のファイルも同じ欄だけを外し、manifest のその行（SHA-256・大きさ）を外した本文から数え直す
+      const summaryText = (text: string): string => `${JSON.stringify(withoutSemanticBundles(JSON.parse(text) as Record<string, unknown>).summary, null, 2)}\n`;
+      const strippedSummary = files.find((file) => file.path === SUMMARY_FILE);
+      const summaryBeforeText = strippedSummary === undefined ? undefined : summaryText(strippedSummary.text);
+      const filesBefore = await Promise.all(
+        files.map(async (file) => {
+          if (file.path === SUMMARY_FILE && summaryBeforeText !== undefined) return { path: file.path, text: summaryBeforeText };
+          if (file.path !== BUNDLE_MANIFEST_FILE || summaryBeforeText === undefined) return file;
+          const manifest = JSON.parse(file.text) as { readonly files: readonly { readonly path: string }[] };
+          const rows = await Promise.all(
+            manifest.files.map(async (row) =>
+              row.path === SUMMARY_FILE ? { ...row, sha256: await sha256Hex(summaryBeforeText), size_bytes: new TextEncoder().encode(summaryBeforeText).length } : row,
+            ),
+          );
+          return { path: file.path, text: `${JSON.stringify({ ...manifest, files: rows }, null, 2)}\n` };
+        }),
+      );
       measured[script.name] = await Promise.all(
-        [result.record, result.summary, { structured: recording.structured, tools: recording.tools }, result.summary.exit_code, files].map((value) =>
+        [result.record, summaryBefore, { structured: recording.structured, tools: recording.tools }, result.summary.exit_code, filesBefore].map((value) =>
           sha256Hex(JSON.stringify(value)),
         ),
       );
     }
     expect(measured).toEqual(BEFORE_DIGESTS);
     expect(measuredMaterials).toEqual(BEFORE_MATERIALS_DIGESTS);
+    // C3 を回した台本だけ、要約に C3 の束の欄がある（要件 6 件以下なので束 1。(3) は初回と再点検で 2 回。Issue #662）
+    expect(Object.fromEntries(Object.entries(semanticBundleSummaries).map(([name, value]) => [name, [value.bundles, value.concurrency]]))).toEqual({
+      "(1) C1 の束 2 の初回が形で落ちてやり直しで通る": [1, 1],
+      "(2) C2 の試行 1 が形で落ちて試行 2 で通る": [1, 1],
+      "(3) C2 の 2 回目が C2' に落ちて初回の表で持ち越す": [1, 1],
+      "(5) 形で 1 度も落ちない": [1, 1],
+    });
     // rejected は、形の試行ごとの候補 2 件（attempt 1・2 の順）で、それぞれ問題の一覧（problem_count と固定文）を持つ
     expect(Object.keys(rejectedSummaries)).toEqual(Object.keys(BEFORE_MATERIALS_DIGESTS));
     for (const [name, rejected] of Object.entries(rejectedSummaries)) {

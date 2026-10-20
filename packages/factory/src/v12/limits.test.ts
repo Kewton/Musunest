@@ -20,6 +20,10 @@ import {
   V12_STAGE_FRAMES,
   V12_V11A_FRAME_MAP,
   V12_IDS_FRAME_MAP,
+  V12_C3_BUNDLE,
+  V12_C3_BUNDLE_DEFINITIONS,
+  c3BundleCount,
+  c3MaxLogical,
 } from "./limits.js";
 import { VOCABULARY_BUNDLES } from "./ids.js";
 import { MAPPING_ROUNDS } from "./stages/mapping.js";
@@ -94,7 +98,8 @@ describe("段ごとの論理の枠（§4.1 の列のまま）", () => {
     expect(columns).toEqual([
       ["C1", "1/束ごと", "1/束ごと", null, null],
       ["C2", "1/束ごと", "1/束ごと", "1/束ごと", null],
-      ["C3", "1/段全体", "1/段全体", "1/段全体", null],
+      // C3 は束ごとに初回 1・形のやり直し 段全体で通算 1・再点検 束ごとに 1（段全体で 1 回。Issue #662）
+      ["C3", "1/束ごと", "1/段全体", "1/束ごと", null],
       ["C4", "1/束ごと", "1/束ごと", null, null],
       ["C6", "1/版ごと", "2/段全体", null, 6],
       ["loop", null, "1/往復ごと", "2/往復ごと", 6],
@@ -147,6 +152,12 @@ describe("受入の題材の言葉が無い（表・手 3p の試験・fixture�
     "../v11a/calls.test.ts",
     "../v11a/__tests__/sizes.ts",
     "../v11a/__tests__/fixtures.ts",
+    // C3 の束（Issue #662）の段・走らせる部分・試験
+    "../v11a/stages/semantic-check.ts",
+    "../v11a/stages/semantic-check.test.ts",
+    "../v11a/run.ts",
+    "../record.ts",
+    "../record.test.ts",
   ];
   it.each(files)("%s", (file) => {
     const text = fs.readFileSync(new URL(file, import.meta.url), "utf8");
@@ -161,7 +172,7 @@ describe("受入の題材の言葉が無い（表・手 3p の試験・fixture�
 
   it("上限の表の文（定義の text・why・review）に言葉が無い", () => {
     expectNoAcceptanceMaterial(
-      [...V12_CALL_LIMIT_DEFINITIONS, ...V12_STAGE_FRAME_DEFINITIONS].flatMap((definition) => [
+      [...V12_CALL_LIMIT_DEFINITIONS, ...V12_STAGE_FRAME_DEFINITIONS, ...V12_C3_BUNDLE_DEFINITIONS].flatMap((definition) => [
         definition.text,
         definition.why,
         ...("review" in definition ? [definition.review] : []),
@@ -185,5 +196,46 @@ describe("旗 v12.ids の段の枠（手 3a・Issue #593）", () => {
     }
     expect(V12_CALL_LIMITS).toEqual({ logicalCalls: 72, realAttempts: 144, judgeBranch: 80 });
     expect(factory.V12_IDS_FRAME_MAP).toBe(V12_IDS_FRAME_MAP);
+  });
+});
+
+describe("旗 v12.ids の C3 の束（Issue #662）", () => {
+  it("束の大きさ 6・同時数 5。値ごとの定義（why・since・見直す条件）が不備 0 で、観測した最大の要件 25 の束の数が同時数の内側", () => {
+    expect(V12_C3_BUNDLE).toEqual({ size: 6, concurrency: 5 });
+    expect(ruleDefinitionDefects(V12_C3_BUNDLE_DEFINITIONS)).toEqual([]);
+    expect(V12_C3_BUNDLE_DEFINITIONS.map((definition) => definition.key)).toEqual(Object.keys(V12_C3_BUNDLE));
+    for (const definition of V12_C3_BUNDLE_DEFINITIONS) {
+      expect(definition.review.trim(), definition.id).not.toBe("");
+      expect(definition.text, definition.id).toContain(String(V12_C3_BUNDLE[definition.key]));
+      expect(definition.since, definition.id).toContain("Issue #662");
+    }
+    expect(c3BundleCount(25)).toBeLessThanOrEqual(V12_C3_BUNDLE.concurrency);
+    expect(factory.V12_C3_BUNDLE).toBe(V12_C3_BUNDLE);
+  });
+
+  it("束の数は ceil(対象の数 ÷ 6)、論理の最大は 2B＋1（要件 15・17 で 7、25 で 11、6 以下で 3、0 件で 0）", () => {
+    expect([0, 1, 6, 7, 12, 13, 15, 17, 25].map(c3BundleCount)).toEqual([0, 1, 1, 2, 2, 3, 3, 3, 5]);
+    expect([0, 6, 15, 17, 25].map(c3MaxLogical)).toEqual([0, 3, 7, 7, 11]);
+  });
+
+  it("C3 の行と対応の行：why・since が Issue #662 を名指しし、対応の行は束 ceil(25÷6)・論理の最大 2B＋1。段全体の枠の内側", () => {
+    const definition = V12_STAGE_FRAME_DEFINITIONS.find((entry) => entry.stage === "C3");
+    expect(definition?.since).toContain("Issue #662");
+    expect(definition?.text).toContain("形のやり直しは段全体で通算 1");
+    const semantic = V12_IDS_FRAME_MAP.find((entry) => entry.stage === "semantic-check");
+    expect(semantic).toEqual({
+      stage: "semantic-check",
+      frame: "C3",
+      rounds: NAME_TABLE_ROUNDS,
+      shapeAttempts: STEP_ATTEMPTS,
+      units: Math.ceil(25 / V12_C3_BUNDLE.size),
+      maxLogical: 2 * Math.ceil(25 / V12_C3_BUNDLE.size) + 1,
+    });
+    // 枠の列から計算した値（初回 束ごと × B ＋ 形 段全体 ＋ 再点検 束ごと × B）と同じ
+    const c3 = frame("C3");
+    const units = semantic?.units ?? 0;
+    expect(semantic?.maxLogical).toBe((c3?.initial?.count ?? 0) * units + (c3?.shape?.count ?? 0) + (c3?.content?.count ?? 0) * units);
+    // 呼び出しの上限は変えない
+    expect(V12_CALL_LIMITS).toEqual({ logicalCalls: 72, realAttempts: 144, judgeBranch: 80 });
   });
 });

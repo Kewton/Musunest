@@ -5,6 +5,8 @@
 //   2. データのどの塊の JSON にも `name` の鍵が無く、試験・期待・合否の塊が無い。J4 の印を渡す
 //   3. 判定の欠落・重複・未知の要件 ID・見つからない引用・引用の無い拒否は形の落ちで、2 回続けば `malformed`・calls 2
 //   4. `unresolved` の要件は対象にも応答の必須にも無い
+//   5. 旗 v12.ids の束（Issue #662）：要件 6 件ごとの束のデータ・束ごとの形の検査の固定文・段全体で通算 1 の形のやり直し・
+//      2 束の落ちと枠の使い切りの malformed・合併の順と表の SHA・同時の開始・予算の落ちで一部だけ進まない
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { describe, expect, it } from "vitest";
 import type { RequirementList } from "../../pipeline.js";
@@ -38,7 +40,18 @@ import { deriveCarryOver } from "../carry-over.js";
 import { checkNameTable, nameTableSha256, type NameTable } from "../names.js";
 import type { JudgeAdviceMarkEntry } from "./judge-advice.js";
 import { PROPERTY_LEDGER, PROPERTY_LEDGER_VIEW, type LedgerView } from "../../v12/ledger.js";
+import { buildSized } from "../__tests__/sizes.js";
+import { JobBudget } from "../../budget.js";
+import { CallGateway } from "../../call.js";
+import type { LlmClient, LlmStructuredRequest } from "../../llm.js";
+import { PREVIOUS_RESPONSE_DATA_NAME, SHAPE_PROBLEMS_DATA_NAME } from "../../stages/prompt.js";
+import { V12_C3_BUNDLE } from "../../v12/limits.js";
 import {
+  SEMANTIC_CHECK_BUNDLE_MESSAGES,
+  mapConcurrently,
+  runSemanticCheckBundled,
+  semanticCheckBundles,
+  type SemanticCheckShapeFrame,
   SEMANTIC_CHECK_LEDGER_RULE_ID,
   SEMANTIC_CHECK_RULE_DEFINITIONS,
   SEMANTIC_CHECK_RULES,
@@ -590,5 +603,291 @@ describe("T1'' の non-requirement の点検（旗 on。配線の検証。モデ
     expect(SEMANTIC_REJECTION_KINDS).toHaveLength(3);
     expect(JSON.stringify(requests[0]?.schema)).toBe(JSON.stringify(SEMANTIC_CHECK_SCHEMA));
     expect(requests[0]?.schemaName).toBe(SEMANTIC_CHECK_SCHEMA_NAME);
+  });
+});
+
+// ── 旗 v12.ids の C3 の束（Issue #662）──────────────────────────────────────
+
+describe("旗 v12.ids の C3 の束：要件 6 件ごとに同時に呼び、束ごとに自分の要件の判定の形だけを照らす（Issue #662）", () => {
+  /** 要件 N 件（全部が点検の対象）の材料 */
+  const sized = (count: number) => buildSized(count, 3 * count);
+  /** 要求の「要件の文と引用」の要件 ID */
+  const idsOf = (request: LlmStructuredRequest): readonly string[] =>
+    (JSON.parse(dataBlocks(request.input).find((block) => block.name === "要件の文と引用")?.text ?? "[]") as readonly { requirementId: string }[]).map(
+      (entry) => entry.requirementId,
+    );
+  /** 束ごとの要求の数（束の頭の要件 ID で引く） */
+  const countsOf = (requests: readonly LlmStructuredRequest[]): Record<string, number> => {
+    const counts: Record<string, number> = {};
+    for (const request of requests) {
+      const head = idsOf(request)[0] ?? "";
+      counts[head] = (counts[head] ?? 0) + 1;
+    }
+    return counts;
+  };
+  /**
+   * 束の要件で答える偽物の口（呼ばれた順に関わらず、要求のデータの要件 ID から答えを決める。`call` は同じ束の何回目か）。
+   * 開始と応答の順を記録し、応答の前に 1 度タスクを譲る（ほかの束が始まれる）
+   */
+  function bundleClient(answer: (ids: readonly string[], call: number) => unknown) {
+    const requests: LlmStructuredRequest[] = [];
+    const events: string[] = [];
+    const calls = new Map<string, number>();
+    const client: LlmClient = {
+      async callStructured<T>(request: LlmStructuredRequest) {
+        requests.push(request);
+        const ids = idsOf(request);
+        const key = ids.join(",");
+        const call = (calls.get(key) ?? 0) + 1;
+        calls.set(key, call);
+        events.push(`start:${ids[0] ?? ""}`);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        events.push(`end:${ids[0] ?? ""}`);
+        return { output: answer(ids, call) as T, usage: undefined };
+      },
+      async callWithTools() {
+        throw new Error("前提が壊れた：C3 は道具を呼ばない");
+      },
+    };
+    return { client, requests, events };
+  }
+  const acceptOf = (ids: readonly string[]) => ({ judgments: ids.map(accept) });
+  async function runBundled(
+    materials: ReturnType<typeof sized>,
+    answer: (ids: readonly string[], call: number) => unknown,
+    options: { readonly frame?: SemanticCheckShapeFrame; readonly advice?: readonly JudgeAdviceMarkEntry[]; readonly concurrency?: number } = {},
+  ) {
+    const fake = bundleClient(answer);
+    const frame = options.frame ?? { used: false };
+    const gateways: CallGateway[] = [];
+    const outcome = await runSemanticCheckBundled({
+      plan: materials.plan,
+      list: materials.list,
+      table: materials.table,
+      ...(options.advice === undefined ? {} : { advice: options.advice }),
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(fake.client),
+      bundleGateway: (bundle) => {
+        const made = makeGateway(fake.client);
+        gateways[bundle] = made;
+        return made;
+      },
+      ...(options.concurrency === undefined ? {} : { bundleConcurrency: options.concurrency }),
+      shapeFrame: frame,
+    });
+    return { outcome, ...fake, frame, gateways };
+  }
+
+  it.each([
+    [15, 3],
+    [17, 3],
+    [25, 5],
+    [13, 3],
+    [6, 1],
+    [4, 1],
+  ])("(1) 要件 %i：初回の要求は %i 本。各要求のデータは束の要件（6 件以下）の文・所属・確かめ方・印だけで、表は全行", async (count, bundles) => {
+    const materials = sized(count);
+    const advice: readonly JudgeAdviceMarkEntry[] = materials.ids.map((requirementId) => ({ requirementId, id: `row-${requirementId}`, mark: "undetermined" as const }));
+    const { outcome, requests } = await runBundled(materials, acceptOf, { advice });
+    expect(outcome.ok).toBe(true);
+    expect(requests).toHaveLength(bundles);
+    expect(bundles).toBe(Math.ceil(count / V12_C3_BUNDLE.size));
+    const expected = semanticCheckBundles(materials.ids);
+    expect(requests.map(idsOf)).toEqual(expected);
+    const rows = materials.table.rows.map((row) => row.id);
+    requests.forEach((request, index) => {
+      const ids = expected[index] ?? [];
+      expect(ids.length).toBeLessThanOrEqual(V12_C3_BUNDLE.size);
+      const block = (name: string) => JSON.parse(dataBlocks(request.input).find((entry) => entry.name === name)?.text ?? "null") as readonly Record<string, unknown>[];
+      expect(block("表の行").map((row) => row["id"])).toEqual(rows);
+      for (const name of ["要件ごとの所属", "確かめ方", "助言の印"]) expect(block(name).map((entry) => entry["requirementId"]), name).toEqual(ids);
+      // 規則・schema・文書は静的（束によらず同じ）
+      expect(request.rules).toEqual(requests[0]?.rules);
+      expect(request.schema).toEqual(SEMANTIC_CHECK_SCHEMA);
+    });
+    expectNoAcceptanceMaterial(requests.map((request) => request.input));
+  });
+
+  it("(1') 要件 6 件以下（束 1）の要求とデータは今の runSemanticCheck とバイト列で同じ。形のやり直しの要求も共通の窓口の要求と同じ", async () => {
+    const recording = createCheckedRecordingClient([structured({ judgments: TARGETS.slice(1).map(accept) }), structured({ judgments: TARGETS.map(accept) })]);
+    const before = await runSemanticCheck({ plan: PLAN, list: LIST, table: fixtureTable(), advice: ADVICE, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(recording.client) });
+    const bundled = createCheckedRecordingClient([structured({ judgments: TARGETS.slice(1).map(accept) }), structured({ judgments: TARGETS.map(accept) })]);
+    const frame: SemanticCheckShapeFrame = { used: false };
+    const after = await runSemanticCheckBundled({
+      plan: PLAN,
+      list: LIST,
+      table: fixtureTable(),
+      advice: ADVICE,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(bundled.client),
+      shapeFrame: frame,
+    });
+    expect(bundled.structured).toHaveLength(2);
+    expect(JSON.stringify(bundled.structured)).toBe(JSON.stringify(recording.structured));
+    if (!before.ok || !after.ok) throw new Error("通るはず");
+    expect({ tableSha256: after.value.tableSha256, judgments: after.value.judgments, targets: after.value.targets }).toEqual(before.value);
+    expect(after.value.bundleTableSha256s).toEqual([before.value.tableSha256]);
+    expect(frame.used).toBe(true);
+  });
+
+  const BUNDLE_DEFECTS: readonly [string, (ids: readonly string[], others: readonly string[]) => unknown, string][] = [
+    ["欠落", (ids) => ({ judgments: ids.slice(1).map(accept) }), "判定が無い要件がある"],
+    ["重複", (ids) => ({ judgments: [...ids.map(accept), accept(ids[0] ?? "")] }), "同じ要件の判定が重なっている"],
+    ["別の束の要件 ID", (ids, others) => ({ judgments: [...ids.map(accept), accept(others[0] ?? "")] }), SEMANTIC_CHECK_BUNDLE_MESSAGES.crossBundle],
+    ["一覧に無い ID", (ids) => ({ judgments: [...ids.map(accept), accept("R99")] }), "要件 ID が点検の対象に無い"],
+    [
+      "引用の無い拒否",
+      (ids) => ({ judgments: ids.map((id, index) => (index === 0 ? { requirementId: id, verdict: "reject", kind: "missing-target", quote: null } : accept(id))) }),
+      "拒否には引用が要る",
+    ],
+  ];
+
+  it.each(BUNDLE_DEFECTS)("(2) 束 2 の応答の%s は固定文で束 2 だけがやり直され、束 1・3 の要求は増えない", async (_label, defect, message) => {
+    const materials = sized(15);
+    const bundles = semanticCheckBundles(materials.ids);
+    const second = bundles[1] ?? [];
+    const others = materials.ids.filter((id) => !second.includes(id));
+    const { outcome, requests, frame, gateways } = await runBundled(materials, (ids, call) => (ids[0] === second[0] && call === 1 ? defect(ids, others) : acceptOf(ids)));
+    expect(outcome.ok).toBe(true);
+    expect(countsOf(requests)).toEqual({ [bundles[0]?.[0] ?? ""]: 1, [second[0] ?? ""]: 2, [bundles[2]?.[0] ?? ""]: 1 });
+    // やり直しの要求は束 2 の要件だけで、前回の応答と前回の形の問題（固定文）をデータに持つ
+    const retry = requests.at(-1);
+    if (retry === undefined) throw new Error("前提が壊れた：やり直しの要求が無い");
+    expect(idsOf(retry)).toEqual(second);
+    const problems = JSON.parse(dataBlocks(retry.input).find((block) => block.name === SHAPE_PROBLEMS_DATA_NAME)?.text ?? "[]") as readonly { message: string }[];
+    expect(problems.map((problem) => problem.message)).toContain(message);
+    expect(dataBlocks(retry.input).some((block) => block.name === PREVIOUS_RESPONSE_DATA_NAME)).toBe(true);
+    // 形のやり直しを段全体の枠で使い、束 2 の口へ形の再試行として告げた
+    expect(frame.used).toBe(true);
+    expect(gateways.map((gateway) => gateway.counts.retries.shape)).toEqual([0, 1, 0]);
+  });
+
+  it("(3) 2 束が同じ回で形に落ちれば、追加の要求なく malformed（束の位置つきの固定文）", async () => {
+    const materials = sized(15);
+    const bundles = semanticCheckBundles(materials.ids);
+    const broken = new Set([bundles[1]?.[0], bundles[2]?.[0]]);
+    const { outcome, requests, frame } = await runBundled(materials, (ids) => (broken.has(ids[0]) ? { judgments: ids.slice(1).map(accept) } : acceptOf(ids)));
+    expect(requests).toHaveLength(3);
+    expect(frame.used).toBe(false);
+    expect(outcome).toEqual({
+      ok: false,
+      failure: {
+        kind: "malformed",
+        attempts: 1,
+        problems: [
+          { field: "bundles[1].requirements[0]", message: "判定が無い要件がある" },
+          { field: "bundles[2].requirements[0]", message: "判定が無い要件がある" },
+        ],
+      },
+    });
+  });
+
+  it("(3') 枠を使った走り（初回で形のやり直しを使った）で再点検の束が形に落ちれば、追加の要求なく malformed", async () => {
+    const materials = sized(15);
+    const bundles = semanticCheckBundles(materials.ids);
+    const { outcome, requests } = await runBundled(materials, (ids) => (ids[0] === bundles[0]?.[0] ? { judgments: ids.slice(1).map(accept) } : acceptOf(ids)), {
+      frame: { used: true },
+    });
+    expect(requests).toHaveLength(3);
+    expect(outcome).toMatchObject({ ok: false, failure: { kind: "malformed", attempts: 1 } });
+  });
+
+  it("(3'') やり直した束がまた形に落ちれば、追加の要求なく malformed（試行 2）", async () => {
+    const materials = sized(15);
+    const bundles = semanticCheckBundles(materials.ids);
+    const { outcome, requests } = await runBundled(materials, (ids) => (ids[0] === bundles[1]?.[0] ? { judgments: ids.slice(1).map(accept) } : acceptOf(ids)));
+    expect(requests).toHaveLength(4);
+    expect(outcome).toEqual({
+      ok: false,
+      failure: { kind: "malformed", attempts: 2, problems: [{ field: "bundles[1].requirements[0]", message: "判定が無い要件がある" }] },
+    });
+  });
+
+  it("(4) 合併した判定は全対象にちょうど 1 つずつ・一覧の順で、束ごとの表の SHA は表の SHA。1 束の判定を落とし続ければ受理で埋めず malformed", async () => {
+    const materials = sized(25);
+    const quote = materials.textOf("R8");
+    const { outcome, events } = await runBundled(materials, (ids) => ({
+      // 束の中では逆順に返しても、合併は一覧の順
+      judgments: [...ids].reverse().map((id) => (id === "R8" ? reject(id, "missing-target", quote) : accept(id))),
+    }));
+    if (!outcome.ok) throw new Error("通るはず");
+    expect(outcome.value.judgments.map((judgment) => judgment.requirementId)).toEqual(materials.ids);
+    expect(outcome.value.targets).toEqual(materials.ids);
+    expect(outcome.value.judgments.filter((judgment) => judgment.verdict === "reject")).toEqual([{ requirementId: "R8", verdict: "reject", kind: "missing-target", quote }]);
+    const sha = await nameTableSha256(materials.table);
+    expect(outcome.value.tableSha256).toBe(sha);
+    expect(outcome.value.bundleTableSha256s).toEqual(Array.from({ length: 5 }, () => sha));
+    // (5) 偽物の口が記録した開始の順：束 5 の開始がどの応答よりも前（同時に始めた）
+    const lastStart = events.lastIndexOf(`start:R25`);
+    expect(lastStart).toBe(4);
+    expect(events.findIndex((event) => event.startsWith("end:"))).toBeGreaterThan(lastStart);
+
+    const dropped = await runBundled(materials, (ids) => (ids.includes("R8") ? { judgments: ids.filter((id) => id !== "R8").map(accept) } : acceptOf(ids)));
+    expect(dropped.outcome.ok).toBe(false);
+    expect(dropped.outcome).toMatchObject({ ok: false, failure: { kind: "malformed" } });
+  });
+
+  it("(5') 同時数 1 では束を 1 つずつ（前の束の応答のあとに次の束を）始め、判定は同時の走りと深く等しい", async () => {
+    const materials = sized(15);
+    const together = await runBundled(materials, acceptOf);
+    const serial = await runBundled(materials, acceptOf, { concurrency: 1 });
+    expect(serial.events).toEqual(["start:R1", "end:R1", "start:R7", "end:R7", "start:R13", "end:R13"]);
+    expect(together.events.slice(0, 3)).toEqual(["start:R1", "start:R7", "start:R13"]);
+    expect(serial.outcome).toEqual(together.outcome);
+  });
+
+  it("(8) 1 束だけ予算で始められなくても、残りの束の判定を採用して進まない（段の失敗は budget）。予算 0 なら全束が budget で始まらない", async () => {
+    const materials = sized(15);
+    const fake = bundleClient(acceptOf);
+    const zero = (budgetUsd: number) => makeGateway(fake.client, { budgetUsd });
+    const partly = await runSemanticCheckBundled({
+      plan: materials.plan,
+      list: materials.list,
+      table: materials.table,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: zero(10),
+      bundleGateway: (bundle) => zero(bundle === 1 ? 0 : 10),
+      shapeFrame: { used: false },
+    });
+    expect(partly).toMatchObject({ ok: false, failure: { kind: "budget" } });
+    expect(fake.requests).toHaveLength(2);
+
+    const none = bundleClient(acceptOf);
+    const gateways: CallGateway[] = [];
+    const shared = new JobBudget(0);
+    const all = await runSemanticCheckBundled({
+      plan: materials.plan,
+      list: materials.list,
+      table: materials.table,
+      documents: FIXTURE_DOCUMENTS,
+      gateway: makeGateway(none.client),
+      bundleGateway: (bundle) => {
+        gateways[bundle] = new CallGateway({ client: none.client, budget: shared, rates: { inputPerToken: 0.000001, cachedInputPerToken: 0.0000005, outputPerToken: 0.000002 }, now: () => 0, deadline: 60_000 });
+        return gateways[bundle] as CallGateway;
+      },
+      shapeFrame: { used: false },
+    });
+    expect(all).toMatchObject({ ok: false, failure: { kind: "budget" } });
+    expect(none.requests).toHaveLength(0);
+    expect(gateways.map((gateway) => gateway.counts.attempts.not_started.budget)).toEqual([1, 1, 1]);
+  });
+
+  it("対象 0 件（全件が unresolved）なら呼ばずに空の結果（今と同じ）", async () => {
+    const table = fixtureTable();
+    const allUnresolved: NameTable = {
+      ...table,
+      verification: table.verification.map((entry) => ({ requirementId: entry.requirementId, kind: "unresolved" as const, reason: "宣言で書けない", constraintIds: ["外部への通知"] })),
+    };
+    const fake = bundleClient(acceptOf);
+    const outcome = await runSemanticCheckBundled({ plan: PLAN, list: LIST, table: allUnresolved, documents: FIXTURE_DOCUMENTS, gateway: makeGateway(fake.client), shapeFrame: { used: false } });
+    expect(fake.requests).toHaveLength(0);
+    expect(outcome).toEqual({ ok: true, value: { tableSha256: await nameTableSha256(allUnresolved), judgments: [], targets: [], bundleTableSha256s: [] } });
+  });
+
+  it("束に切る部品：一覧の順で 6 件ごと（最後は 6 未満）。大きさは 1 以上の整数。同時に走らせる部品は結果を並びの順で返す", async () => {
+    expect(semanticCheckBundles(["a", "b", "c"], 2)).toEqual([["a", "b"], ["c"]]);
+    expect(semanticCheckBundles([])).toEqual([]);
+    expect(() => semanticCheckBundles(["a"], 0)).toThrow(RangeError);
+    expect(await mapConcurrently([3, 1, 2], 2, async (value) => value * 10)).toEqual([30, 10, 20]);
   });
 });
