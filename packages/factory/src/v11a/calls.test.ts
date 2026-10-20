@@ -33,9 +33,9 @@ import { createFakeLlmClient, type RecordedCall } from "../llm-fake.js";
 import { AGENT_LIMITS } from "../limits.js";
 import { USAGE, RATES } from "../__tests__/run.js";
 import { ARBITRATION_SCHEMA_NAME } from "../stages/arbitrate.js";
-import { FIXTURE_DOCUMENTS, negative, recordedStructured, withCodeIds } from "./__tests__/fixtures.js";
+import { FIXTURE_DOCUMENTS, negative, recordedStructured, semanticEvidenceResponseOf, withCodeIds } from "./__tests__/fixtures.js";
 import { expectNoAcceptanceMaterial } from "../stages/__tests__/prompt.js";
-import { buildSized, CODE_WRITTEN_TEST_COUNT, MAX_SIZE, MEDIAN_SIZE, type SizedMaterials } from "./__tests__/sizes.js";
+import { buildSized, CODE_WRITTEN_TEST_COUNT, MAX_SIZE, MEDIAN_SIZE, type RejectionSpec, type SizedMaterials } from "./__tests__/sizes.js";
 import { isGeneratedTestId } from "../v12/generated-tests.js";
 import { runGenerationV11a, runStageRangeV11a } from "./run.js";
 import { createFallbackJudge } from "../judge.js";
@@ -259,10 +259,17 @@ interface V12CallsSummary {
   readonly judge_branch: { readonly limit: number; readonly used: number };
 }
 
+/**
+ * T1''（C3）の判定（`rejects` の要件だけ拒否）。旗 v12.ids の走りは観点ごとの根拠の形で、導かれる判定は `materials.judgments` と同じ。
+ * off の走りは今の形のまま（Issue #700）
+ */
+const c3Judgments = (materials: SizedMaterials, rejects: Readonly<Record<string, RejectionSpec>> = {}): { readonly judgments: readonly unknown[] } =>
+  materials.flags.ids ? semanticEvidenceResponseOf(materials.list, materials.table, rejects, materials.ids) : materials.judgments(rejects);
+
 /** 初回で全段が通る走りの記録（T1〔旗 v12.ids の走りは C1 の 3 束と C2〕・T1''・T2・B1・B3' を 1 回ずつ） */
 const cleanCalls = (materials: SizedMaterials): RecordedCall[] => [
   ...materials.tableResponses().map(structured),
-  structured(materials.judgments()),
+  structured(c3Judgments(materials)),
   structured(materials.testSpecResponse()),
   structured({ declaration: materials.declaration() }),
   structured(materials.judgments()),
@@ -325,7 +332,7 @@ function idsRetryHead(materials: SizedMaterials, incomplete: unknown, rejectR1: 
     structured(rejectR1),
     // 2 回目は拒否された R1 だけの書き直し（Issue #661）
     structured({ requirements: (mapping["requirements"] ?? []).filter((entry) => entry["requirementId"] === "R1") }),
-    structured(materials.judgments()),
+    structured(c3Judgments(materials)),
   ];
 }
 
@@ -339,7 +346,9 @@ function retryCalls(materials: SizedMaterials): RecordedCall[] {
   const repair1 = search ? fieldRepairCall("R1", 1, [dispute]) : repairDone(materials.declaration(["R2"]), [dispute]);
   const repair2 = search ? fieldRepairCall("R1", 0) : repairDone(materials.declaration());
   return [
-    ...(materials.flags.ids ? idsRetryHead(materials, incomplete, rejectR1) : [
+    ...(materials.flags.ids
+      ? idsRetryHead(materials, { judgments: c3Judgments(materials).judgments.slice(0, -1) }, c3Judgments(materials, { R1: ["unnecessary-ownership", materials.textOf("R1")] }))
+      : [
       structured(negative({ rows: "x", requirements: "x" }, "rows・requirements が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
       structured(materials.nameTableResponse()),
       structured(incomplete),
@@ -950,7 +959,7 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
   });
 
   it("C3 の拒否のあとの 2 回目の要求は 1 本（全要件の一覧・前回の写像・拒否・印・書き直す要件。Issue #661）で、C3 の再点検は 1 回。再び拒否なら持ち越し（partial）", async () => {
-    const reject = materials.judgments({ [LAST]: ["unnecessary-ownership", materials.textOf(LAST)] });
+    const reject = c3Judgments(materials, { [LAST]: ["unnecessary-ownership", materials.textOf(LAST)] });
     const lastOnly = { requirements: entries().filter((entry) => entry["requirementId"] === LAST) };
     const run = await observe(materials, [...vocabulary(), structured(mapping), structured(reject), structured(lastOnly), structured(reject), ...tailWithout([LAST])], { flags: ALL_ON });
     const requests = mappingRequestsOf(run);
@@ -968,7 +977,7 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
   });
 
   it("C3 が要件 2 件を拒否し、2 回目の応答が C2' に落ちると、形の再試行も C3 の再点検も無く、2 件とも持ち越しに残り full にならない（#623 の性質）", async () => {
-    const reject = materials.judgments({
+    const reject = c3Judgments(materials, {
       R1: ["unnecessary-ownership", materials.textOf("R1")],
       [LAST]: ["unnecessary-ownership", materials.textOf(LAST)],
     });
@@ -990,14 +999,14 @@ describe("(5'') 旗 v12.ids の C2 は全要件を 1 回で写す（手 3b の�
   });
 
   it("同じ走りで T2 の応答に拒否の 2 件を含め、後続の段を全件受理にしても、full にならず 2 件は持ち越し（出どころ semantic-check）に残る（#623 の再現の単回の形）", async () => {
-    const reject = materials.judgments({
+    const reject = c3Judgments(materials, {
       R1: ["unnecessary-ownership", materials.textOf("R1")],
       [LAST]: ["unnecessary-ownership", materials.textOf(LAST)],
     });
     const bySchema = (): Readonly<Record<string, readonly RecordedCall[]>> => ({
       ...Object.fromEntries(Object.values(VOCABULARY_SCHEMA_NAMES).map((name, index) => [name, [structured([entities, fields, behaviors][index])]])),
       [MAPPING_SCHEMA_NAME]: [structured(mapping), structured({ requirements: entries().slice(1) })],
-      [SEMANTIC_CHECK_SCHEMA_NAME]: [structured(reject), structured(materials.judgments())],
+      [SEMANTIC_CHECK_SCHEMA_NAME]: [structured(reject), structured(c3Judgments(materials))],
       [TEST_SPEC_SCHEMA_NAME]: [1, 2, 3].map(() => structured(materials.testSpecResponse())),
       [WRITE_V11A_SCHEMA_NAME]: [structured({ declaration: materials.declaration() })],
       [DECL_CHECK_SCHEMA_NAME]: [structured(materials.judgments())],
@@ -1190,7 +1199,7 @@ describe("(7) 旗 v12.ids のコードが作る試験：既定値・選択肢の
   /** 表を組む段・T1''・T2（形の落ち → R4 の異常が欠けて中身の落ち → 通る）・B1・B3' */
   const t2RetryCalls = (materials: SizedMaterials): RecordedCall[] => [
     ...materials.tableResponses().map(structured),
-    structured(materials.judgments()),
+    structured(c3Judgments(materials)),
     structured(negative({ classifications: "x", tests: "x" }, "classifications・tests が並びでない応答。strict の schema では出ないが、形のやり直しの数を観測する負例")),
     structured(materials.testSpecResponse({ omitAbnormalOf: "R4" })),
     structured(materials.testSpecResponse()),
@@ -1265,9 +1274,9 @@ describe("(5''') 旗 v12.ids の C2 の初回の形のやり直しを落ちた�
       structured(behaviors),
       structured(bad),
       structured(rewritten),
-      structured(materials.judgments({ R1: ["unnecessary-ownership", materials.textOf("R1")] })),
+      structured(c3Judgments(materials, { R1: ["unnecessary-ownership", materials.textOf("R1")] })),
       structured({ requirements: (mapping["requirements"] ?? []).filter((entry) => entry["requirementId"] === "R1") }),
-      structured(materials.judgments()),
+      structured(c3Judgments(materials)),
       structured(materials.testSpecResponse()),
       structured({ declaration: materials.declaration() }),
       structured(materials.judgments()),
@@ -1316,9 +1325,9 @@ describe("(5'''') 旗 v12.ids の C3 の拒否のあとの C2 の 2 回目を拒
       structured(fields),
       structured(behaviors),
       structured(mapping),
-      structured(materials.judgments({ [Y]: ["missing-target", materials.textOf(Y)], [X]: ["weak-verification", materials.textOf(X)] })),
+      structured(c3Judgments(materials, { [Y]: ["missing-target", materials.textOf(Y)], [X]: ["weak-verification", materials.textOf(X)] })),
       structured({ requirements: (mapping["requirements"] ?? []).filter((entry) => entry["requirementId"] === X || entry["requirementId"] === Y) }),
-      structured(materials.judgments()),
+      structured(c3Judgments(materials)),
       structured(materials.testSpecResponse()),
       structured({ declaration: materials.declaration() }),
       structured(materials.judgments()),
@@ -1338,6 +1347,62 @@ describe("(5'''') 旗 v12.ids の C3 の拒否のあとの C2 の 2 回目を拒
       // C3 の再点検の対象は合併した表から導いた全対象（全要件が fixed-test か structural なので要件の数と同じ）
       const semanticRequests = run.requests.filter((request) => request.includes(`"schemaName":"${SEMANTIC_CHECK_SCHEMA_NAME}"`));
       expect(semanticTargetsOf(semanticRequests.at(-1) as string)).toEqual(materials.ids);
+      expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
+      expect(run.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
+      expect(run.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
+      expectNoAcceptanceMaterial(run.requests);
+    }
+  });
+});
+
+describe("(8) 旗 v12.ids の C3 を観点ごとの根拠の契約にしても、C3 の論理要求の枠は初回 1・再点検 1・形のやり直しは各回 1（段全体で最大 4）のまま（Issue #700）", () => {
+  const ALL_ON = fromPublicV12Flags(V12_PIPELINE_FLAGS);
+  type Judgment = Record<string, Record<string, unknown> | string>;
+
+  it.each([MEDIAN_SIZE, MAX_SIZE])("要件 $requirements：両回で根拠の照合違反の形のやり直しが 1 回ずつ起きる台本（初回 落ち → やり直しで R1 を拒否 → C2 の 2 回目 → 再点検 落ち → やり直しで受理）は、C3 の要求 4・両回の段の記録の retries.shape が 1。再送を全部使っても合計 72・実試行 144・判定 80 の内側で full", async (size) => {
+    const materials = buildSized(size.requirements, size.tests, ALL_ON);
+    const [entities, fields, behaviors, mapping] = materials.tableResponses() as readonly Record<string, readonly Record<string, unknown>[]>[];
+    if (entities === undefined || fields === undefined || behaviors === undefined || mapping === undefined) throw new Error("前提が壊れた：C1・C2 の応答が 4 つでない");
+    const accepted = c3Judgments(materials);
+    const rejectR1 = c3Judgments(materials, { R1: ["unnecessary-ownership", materials.textOf("R1")] });
+    // 初回の落ち：R1 の点検した所属の行が 1 件少ない（schema は通る）。再点検の落ち：末尾の要件の確かめ方の引用が引用の元に無い
+    const examinedShort = {
+      judgments: (accepted.judgments as readonly Judgment[]).map((item) => {
+        if (item["requirementId"] !== "R1") return item;
+        const ownership = item["ownership"] as Record<string, unknown>;
+        return { ...item, ownership: { ...ownership, examinedRowIds: (ownership["examinedRowIds"] as readonly string[]).slice(1) } };
+      }),
+    };
+    const quoteMissing = {
+      judgments: (accepted.judgments as readonly Judgment[]).map((item, index, all) =>
+        index === all.length - 1 ? { ...item, verification: { ...(item["verification"] as Record<string, unknown>), quote: "どこにも無い文" } } : item,
+      ),
+    };
+    const calls = [
+      structured(entities),
+      structured(fields),
+      structured(behaviors),
+      structured(mapping),
+      structured(examinedShort),
+      structured(rejectR1),
+      structured({ requirements: (mapping["requirements"] ?? []).filter((entry) => entry["requirementId"] === "R1") }),
+      structured(quoteMissing),
+      structured(accepted),
+      structured(materials.testSpecResponse()),
+      structured({ declaration: materials.declaration() }),
+      structured(materials.judgments()),
+    ];
+    for (const failFirst of [false, true]) {
+      const run = await observe(materials, calls, { flags: ALL_ON, failFirst });
+      expect(run.result.stopped, JSON.stringify(run.result.stopped)).toBeNull();
+      expect(run.result.outcome).toEqual({ result: "pass", verdict: "full" });
+      expect(run.logical["semantic-check"]).toBe(4);
+      const records = run.result.record.stages.filter((record) => record.stage === "semantic-check");
+      expect(records.map((record) => [record.status, record.retries.shape])).toEqual([
+        ["ok", 1],
+        ["ok", 1],
+      ]);
+      expect(run.logical.mapping).toBe(2);
       expect(run.totalLogical).toBeLessThanOrEqual(V12_CALL_LIMITS.logicalCalls);
       expect(run.calls?.real_attempts.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.realAttempts);
       expect(run.calls?.judge_branch.used ?? Infinity).toBeLessThanOrEqual(V12_CALL_LIMITS.judgeBranch);
