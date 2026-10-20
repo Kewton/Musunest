@@ -1033,6 +1033,8 @@ async function runV11a(
           documents: input.documents,
           gateway,
           ...withLedger,
+          // 旗 `v12.ids`：観点ごとの根拠の契約で要求し、判定はコードが導く（off は渡さない＝今の契約。Issue #700）
+          ...(flags.ids ? { ids: true } : {}),
         });
         if (!checked.ok) return checked;
         const problems: Problem[] = [];
@@ -1157,6 +1159,8 @@ async function runV11a(
           targets: semantic.targets,
           judgments: semantic.judgments,
           advice: marks,
+          // 観点ごとの根拠は回ごとの診断の C3 の欄にだけ書く（納品物・checkpoint・要約に入れない。Issue #700）
+          ...(semantic.evidence === undefined ? {} : { evidence: semantic.evidence }),
         };
         const checked = { table: output.table, tableSha256: output.tableSha256, semantic, advice };
         // 拒否が残れば、2 回目が未使用なら C2 の 2 回目（前回の写像・拒否・印をデータで。C1 は呼ばない）。使用済みなら持ち越し
