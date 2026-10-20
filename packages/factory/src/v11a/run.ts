@@ -911,28 +911,33 @@ async function runV11a(
   const boundaries: BoundaryMaterials[] = [];
   // この走りで T2 を回し T2' を通った組の数（段の走りの記録の `test_spec`。再開の材料から入った走りは持たない。Issue #637）
   let testSpecCounts: StageTestSpecCounts | undefined;
-  const stageOutcome = (
+  const stageOutcome = async (
     stopped: FailureAttribution | null,
     extra: { readonly judgeVerdict?: StageRunOutcome["judgeVerdict"]; readonly finalCarryOver?: StageRunOutcome["finalCarryOver"] } = {},
-  ): CoreResult => ({
-    kind: "stage",
-    result: {
-      stages: buildRecord(stopped).stages,
-      stopped,
-      boundaries: boundaries.slice(),
-      judgeVerdict: extra.judgeVerdict ?? null,
-      finalCarryOver: extra.finalCarryOver ?? null,
-      returnToPlan,
-      costUsd: budget.spentUsd,
-      durationSecs: (input.now() - startedAt) / 1000,
-      // 旗 `v12.ids` の走りの門と枝の数（要約と同じ形）と T2' を通った組の数（記録に載せるかは呼ぶ側が決める。Issue #637）
-      ...(() => {
-        const calls = callsRecord().v12_calls;
-        return calls === undefined ? {} : { v12Calls: calls };
-      })(),
-      ...(testSpecCounts === undefined ? {} : { testSpec: testSpecCounts }),
-    },
-  });
+  ): Promise<CoreResult> => {
+    // 断った候補は、一気通貫の診断と同じ形・同じ順で結果に足す（候補が無ければ欄を持たない。Issue #683）
+    const rejectedRows = await rejectedCandidateRows();
+    return {
+      kind: "stage",
+      result: {
+        stages: buildRecord(stopped).stages,
+        stopped,
+        boundaries: boundaries.slice(),
+        judgeVerdict: extra.judgeVerdict ?? null,
+        finalCarryOver: extra.finalCarryOver ?? null,
+        returnToPlan,
+        costUsd: budget.spentUsd,
+        durationSecs: (input.now() - startedAt) / 1000,
+        // 旗 `v12.ids` の走りの門と枝の数（要約と同じ形）と T2' を通った組の数（記録に載せるかは呼ぶ側が決める。Issue #637）
+        ...(() => {
+          const calls = callsRecord().v12_calls;
+          return calls === undefined ? {} : { v12Calls: calls };
+        })(),
+        ...(testSpecCounts === undefined ? {} : { testSpec: testSpecCounts }),
+        ...(rejectedRows.length === 0 ? {} : { rejected: rejectedRows }),
+      },
+    };
+  };
   /**
    * 範囲の中で境界を通ったか（開始の段の直前の境界は入力であって、この走りでは通らない）。段の範囲が無い走りは、境界の材料を
    * 集めるとき（`collectBoundaries`）だけ両方の境界を通る（Issue #636）

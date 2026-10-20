@@ -2808,6 +2808,37 @@ describe("段単位の走り：範囲の外の段を呼ばず、納品物を組�
     expect(outcome.boundaries.map((boundary) => boundary.boundary)).toEqual(["t1-t2"]);
     expect(outcome.stages.map((record) => record.stage)).toEqual(["name-table", "semantic-check"]);
     expect(outcome.judgeVerdict).toBeNull();
+    // 形で 1 度も落ちない走りは、断った候補の欄を持たない（Issue #683）
+    expect(outcome).not.toHaveProperty("rejected");
+  });
+
+  it("段の走りの結果の断った候補は、一気通貫の診断と同じ形・同じ順。候補が無ければ欄を持たない（Issue #683）", async () => {
+    const flags = { ledger: true, searchRepair: true, ids: true };
+    const outputs = idsResponsesOf(LIST, TABLE_IDS, PROPERTY_LEDGER_VIEW);
+    const raw = idsResponseList(outputs);
+    const mapping = outputs.mapping as { readonly requirements: readonly unknown[] };
+    const missingFirst = { requirements: mapping.requirements.slice(1) };
+    const calls = [
+      structured(raw[0]!),
+      structured(raw[1]!),
+      structured(raw[2]!),
+      structured(missingFirst),
+      structured(raw[3]!),
+      structured(acceptAll()),
+    ];
+    const recording = createCheckedRecordingClient(calls);
+    const stage = await runStageRangeV11a({ ...inputOf(recording.client), flags, range: { start: "name-table", end: "semantic-check" } });
+    expect(stage.rejected).toHaveLength(1);
+    expect(stage.rejected?.[0]).toMatchObject({ stage: "mapping", operation: null, call: 1, round: 1, attempt: 1, kind: "shape" });
+    // 同じ台本の一気通貫の診断（同じ関数が組む候補の一覧）と深く等しい
+    const { result } = await runScenario(
+      [...calls, structured(renamed(t2Response())), structured({ declaration: RUN_YAML }), structured(acceptAll())],
+      { flags },
+    );
+    expect(stage.rejected).toEqual(diagnosticOf(result.diagnostics, DIAGNOSTICS_REJECTED_MAPPING_FILE)["candidates"]);
+    // 候補を段の判定・持ち越しに使わない（判定は今までどおり通る）
+    expect(stage.stopped).toBeNull();
+    expect(stage.stages.map((record) => record.stage)).toEqual(["vocabulary", "vocabulary", "vocabulary", "mapping", "semantic-check"]);
   });
 
   it("終了 ⑦：⑧（bundle）を呼ばず、⑦ の判定を別に返す。境界の持ち越しは B3' で増えた分を含まない", async () => {
