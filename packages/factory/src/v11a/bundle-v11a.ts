@@ -22,7 +22,12 @@
 // **純粋な関数**で、同じ入力からは同じバイト列になる（決まった字下げの JSON。末尾に改行 1 つ）。
 import type { ConfirmedPlan } from "@musunest/appspec-schema";
 import { sha256Hex } from "@musunest/spec-engine";
-import { ARTIFACTS_DIR, type BundleArtifact, type BundleRejectedCandidate } from "../bundle.js";
+import {
+  ARTIFACTS_DIR,
+  DIAGNOSTICS_TABLE_ROUNDS_FILE,
+  type BundleArtifact,
+  type BundleRejectedCandidate,
+} from "../bundle.js";
 import { BUILD_CLI_RECORD_SCHEMA } from "../cli-plan.js";
 import type { RequirementNature, TestSuite } from "../fixed-test.js";
 import type { Verdict } from "../outcome.js";
@@ -281,6 +286,59 @@ export function buildV11aArtifacts(input: V11aRecordsInput): readonly BundleArti
     },
     ...(input.searchRepair === undefined ? [] : [buildSearchRepairArtifact(input.searchRepair)]),
   ];
+}
+
+// ── 回ごとの行（旗 `v12.ids` の C2・C3。Issue #699）────────────────────────────────
+//
+// 旗 `v12.ids` の走りは C2（要件の写像）と C3（表の意味の点検）を最大 2 回回すが、段の走りの記録・checkpoint・
+// 納品物は採用した回の表と判定しか残さない。初回の誤った受理が書き直しの対象から外れる（原因 3）かを記録から
+// 照らすため、C2 の 1 回ごとの表・C3 の判定・書き直した要件の ID・採用した回を、**診断にだけ** 1 本のファイル
+// （`diagnostics/table-rounds.json`）に残す。段の判定・持ち越し・採用した回の選び方には使わない。
+//
+// 表の欄は checkpoint の `name_table`、C3 の欄は一気通貫の C3 の記録の `rounds` と**同じ形**である（二重に
+// 定義しない）。行が 1 つも無ければファイルを作らない（v1.1a・ids off の v1.2 は行を持たない）。
+
+/** 回ごとの行の、C2 が組んだ表（checkpoint の `name_table` と同じ形） */
+export interface TableRoundTable {
+  readonly table_sha256: string;
+  readonly rows: NameTable["rows"];
+  readonly ownership: NameTable["ownership"];
+  readonly verification: NameTable["verification"];
+  readonly classification: NameTable["classification"];
+}
+
+/** 回ごとの行の、C2 が書き直した要件（2 回目だけ。初回は null） */
+export interface TableRoundRewrite {
+  /** 書き直した要件 ID の並び（一覧の順） */
+  readonly requirement_ids: readonly string[];
+  readonly rewritten: number;
+  readonly kept: number;
+}
+
+/** 回ごとの行の、C3 の判定（一気通貫の C3 の記録の `rounds` と同じ形） */
+export interface TableRoundSemanticCheck {
+  readonly table_sha256: string;
+  readonly targets: readonly string[];
+  readonly judgments: readonly SemanticJudgment[];
+  readonly advice: readonly JudgeAdviceMarkEntry[];
+}
+
+/** C2 の 1 回（1 行）。C3 が形で止まった回・C2 が落ちた回は欄を持たない（null） */
+export interface TableRoundRecord {
+  /** C2 の回（1 から） */
+  readonly round: number;
+  /** C2 の成否（`ok`・`unmet`・`failed`。2 回目が C2' に落ちた回は表を持たない） */
+  readonly ok: "ok" | "unmet" | "failed";
+  readonly table: TableRoundTable | null;
+  readonly rewrite: TableRoundRewrite | null;
+  readonly semantic_check: TableRoundSemanticCheck | null;
+  /** その回の表を採用したか（止まった走りは全部 false） */
+  readonly adopted: boolean;
+}
+
+/** 回ごとの行を 1 本の診断のファイルに組む（純粋。行が無ければファイルを作らない。Issue #699） */
+export function buildTableRoundsFile(rounds: readonly TableRoundRecord[]): readonly BundleArtifact[] {
+  return rounds.length === 0 ? [] : [{ path: DIAGNOSTICS_TABLE_ROUNDS_FILE, text: toJson({ rounds }) }];
 }
 
 // ── 段単位の実行口の記録（08-architecture-v1.2.md §8.3。Issue #544）────────────────────────
@@ -663,6 +721,11 @@ export interface StageRunOutcome {
    * 段の判定・持ち越し・回数には使わない。Issue #683）
    */
   readonly rejected?: readonly BundleRejectedCandidate[];
+  /**
+   * 旗 `v12.ids` の C2 の回ごとの行（C2 の表・C3 の判定・書き直した要件・採用した回。行が無ければ欄を持たない。
+   * 段の判定・持ち越し・採用した回の選び方には使わない。Issue #699）
+   */
+  readonly tableRounds?: readonly TableRoundRecord[];
 }
 
 /** 段の通過：範囲の中に早期停止が無く、終了の段の最後の記録が ok */

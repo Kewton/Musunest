@@ -215,6 +215,8 @@ export const DIAGNOSTICS_REJECTED_TEST_SPEC_FILE = `${DIAGNOSTICS_DIR}/rejected-
 export const DIAGNOSTICS_REJECTED_VOCABULARY_FILE = `${DIAGNOSTICS_DIR}/rejected-vocabulary.json` as const;
 /** 診断に出す、旗 `v12.ids` の C2（要件の写像）が断った候補の全部の置き場所（Issue #608・#657） */
 export const DIAGNOSTICS_REJECTED_MAPPING_FILE = `${DIAGNOSTICS_DIR}/rejected-mapping.json` as const;
+/** 診断に出す、旗 `v12.ids` の C2 の回ごとの行（C2 の表・C3 の判定・書き直した要件・採用した回。Issue #699）の置き場所 */
+export const DIAGNOSTICS_TABLE_ROUNDS_FILE = `${DIAGNOSTICS_DIR}/table-rounds.json` as const;
 
 /** 断った候補を出す段（Issue #501。`name-table`・`test-spec` は v1.1α の段、`vocabulary`・`mapping` は旗 `v12.ids` の段。Issue #608） */
 export type RejectedCandidateStage = "design" | "test-suite" | "name-table" | "test-spec" | "vocabulary" | "mapping";
